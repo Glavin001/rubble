@@ -122,7 +122,7 @@ class ImpactOutcomeModel(nn.Module):
         self.edge_conv = WeightedEdgeConv()
         self.unpool = Unpool()
         nt = cfg.n_time_bins
-        self.bond_head = _mlp(4 * w + w, 3 + nt, w, hl, norm=False)
+        self.bond_head = _mlp(4 * w + w, 4 + nt, w, hl, norm=False)
         self.chunk_head = _mlp(2 * w, NODE_OUT, w, hl, norm=False)
         self.imp_head = _mlp(2 * w, NODE_OUT + 1, w, hl, norm=False)
         self.energy_head = _mlp(w, 4, w, hl, norm=False)
@@ -237,7 +237,8 @@ class ImpactOutcomeModel(nn.Module):
         return {
             "bond_log_r": log_r,
             "bond_break_logit": out[:, 1],
-            "bond_time_logits": out[:, 3:3 + nt],
+            "bond_log_q": out[:, 3],  # failure margin: the break decision (q ≥ 1)
+            "bond_time_logits": out[:, 4:4 + nt],
             "bond_ddamage": F.softplus(out[:, 2]),
             "chunk_out": c_out,
             "imp_out": i_out,

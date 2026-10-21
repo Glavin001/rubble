@@ -1,4 +1,4 @@
-"""`learned-impact-outcome/1`: the recorder ↔ trainer contract (mirror of OUTCOME_CALLS_SCHEMA.md).
+"""`learned-impact-outcome/2`: the recorder ↔ trainer contract (mirror of OUTCOME_CALLS_SCHEMA.md).
 
 One record is one routed impact island at one engine frame (a *call*). The recorder writes
 every model input; this module only names, loads, validates and (for synthetic data and the
@@ -14,7 +14,7 @@ from typing import Any
 
 import numpy as np
 
-SCHEMA_VERSION = "learned-impact-outcome/1"
+SCHEMA_VERSION = "learned-impact-outcome/2"
 N_TIME_BINS = 8
 PHASES = ("pre_contact", "contact", "blast", "separation", "secondary", "settling", "quiet")
 REGIMES = {"arrest": 0, "perforate": 1, "rebound": 2, "deflect": 3}
@@ -50,13 +50,14 @@ IMPACTOR_FEAT_COLUMNS: tuple[str, ...] = tuple(
      "crushable", *_v("gravity_body"), *_v("v_rel_body"), "speed_over_c", "in_contact_any"]
 )
 GLOBAL_FEAT_COLUMNS: tuple[str, ...] = (
-    "log_energy_ratio", "log_energy_ratio_plug", "dt_c_over_L", "dt_v_over_L", "n_impactors",
+    "log_energy_ratio", "log_energy_ratio_plug", "log_dt_c_over_L", "dt_v_over_L", "n_impactors",
     "log_n_chunks", "gravity_mag", "anchored", "blast_log_tnt", "blast_z", "blast_impulse",
     "v_over_c",
 )
 BOND_FEAT_COLUMNS: tuple[str, ...] = tuple(
     ["log_area", *_v("offset"), *_v("log_stiffness", 6), *_v("log_strength"), *_v("log_ga"),
-     "weibull", "damage", "crush", "utilization", "peak_util_prev", "rebar",
+     "weibull", "damage", "crush", "fail_margin", "log1p_utilization", "log1p_peak_util_prev",
+     "rebar",
      "log_qs_hertz_util", "punch_plug_bond", "log_punch_capacity_ratio", *_v("v_rel_edge"),
      *_ROT]
 )
@@ -98,7 +99,7 @@ FEATURE_COLUMNS: dict[str, tuple[str, ...]] = {
 CARRIED_COLUMNS: dict[str, tuple[str, ...]] = {
     "chunk_feat": (*_v("v_rel_body"), *_v("w_body")),
     "impactor_feat": (*_v("v_rel_body"), "speed_over_c"),
-    "bond_feat": ("damage", "peak_util_prev", *_v("v_rel_edge")),
+    "bond_feat": ("damage", "fail_margin", "log1p_peak_util_prev", *_v("v_rel_edge")),
     "cracked_feat": tuple(_v("v_rel_edge")),
     "impactor_contact_feat": ("v_n", "v_t_0", "v_t_1", "v_n_over_c", *_v("spin")),
     "structure_contact_feat": ("v_n", "v_t_0", "v_t_1", "v_n_over_c"),
@@ -162,6 +163,7 @@ CALL_ARRAYS: dict[str, ArraySpec] = {
     "bond_qs_feat": _feat("bond_qs_feat", "2E"),
     # targets: bonds
     "y_bond_peak_util": ArraySpec("f32", ("E",)),
+    "y_bond_fail_margin": ArraySpec("f32", ("E",)),
     "y_bond_broke": ArraySpec("i32", ("E",)),
     "y_bond_break_bin": ArraySpec("i32", ("E",)),
     "y_bond_fail_mode": ArraySpec("i32", ("E",)),

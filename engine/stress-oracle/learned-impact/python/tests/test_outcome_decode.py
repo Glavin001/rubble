@@ -97,9 +97,12 @@ def test_threshold_and_hash_sampling():
     calls, st = make_calls(range(3))
     b = batch_of(calls, st)
     o = _outputs(b)
-    o["bond_log_r"] = torch.linspace(-1, 1, o["bond_log_r"].shape[0])
+    o["bond_log_q"] = torch.linspace(-1, 1, o["bond_log_q"].shape[0])
+    o["bond_log_r"] = torch.linspace(1, -1, o["bond_log_r"].shape[0])
     br = D.breaks(o, b, D.DecodeConfig(tau=1.0))
-    assert torch.equal(br, o["bond_log_r"] >= 0)
+    assert torch.equal(br, o["bond_log_q"] >= 0)  # the failure margin decides
+    bu = D.breaks(o, b, D.DecodeConfig(tau=1.0, break_mode="utilization"))
+    assert torch.equal(bu, o["bond_log_r"] >= 0)  # plan v1's test, kept as a mode
     o["bond_break_logit"] = torch.zeros_like(o["bond_log_r"])
     s1 = D.breaks(o, b, D.DecodeConfig(break_mode="sample", sample_seed=7))
     s2 = D.breaks(o, b, D.DecodeConfig(break_mode="sample", sample_seed=7))

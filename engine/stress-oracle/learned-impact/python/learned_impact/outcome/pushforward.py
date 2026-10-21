@@ -87,7 +87,10 @@ def rewrite_carried(c: S.Call, pred: dict[str, dict[int, np.ndarray]]) -> S.Call
             if key in pred.get("bond_damage", {}):
                 f[2 * k:2 * k + 2, S.col("bond_feat", "damage")] = pred["bond_damage"][key]
             if key in pred.get("bond_peak", {}):
-                f[2 * k:2 * k + 2, S.col("bond_feat", "peak_util_prev")] = pred["bond_peak"][key]
+                f[2 * k:2 * k + 2, S.col("bond_feat", "log1p_peak_util_prev")] = np.log1p(
+                    pred["bond_peak"][key])
+            if key in pred.get("bond_margin", {}):
+                f[2 * k:2 * k + 2, S.col("bond_feat", "fail_margin")] = pred["bond_margin"][key]
 
     def contact_edges(t: str, spin: bool):
         if not len(a[f"{t}_src"]):
@@ -127,6 +130,8 @@ def prediction_from_targets(c: S.Call) -> dict[str, dict[int, np.ndarray]]:
                                 (a["bond_feat"][0::2, S.col("bond_feat", "damage")]
                                  + a["y_bond_ddamage"]).astype(np.float64))),
         "bond_peak": dict(zip(a["bond_key"].tolist(), a["y_bond_peak_util"].astype(np.float64))),
+        "bond_margin": dict(zip(a["bond_key"].tolist(),
+                                a["y_bond_fail_margin"].astype(np.float64))),
     }
 
 
@@ -208,11 +213,16 @@ def apply_topology(parent: S.Call, succ: S.Call, model_broke: set[int]) -> S.Cal
         p_idx = {k: i for i, k in enumerate(p_keys)}
         rows = np.array([p_idx[k] for k in add_back])
         rows_dir = np.stack([2 * rows, 2 * rows + 1], 1).reshape(-1)
-        p_node_key = np.concatenate([pa["chunk_key"], pa["impactor_key"]]).tolist()
-        s_node = {k: i for i, k in enumerate(np.concatenate([sa["chunk_key"],
-                                                             sa["impactor_key"]]).tolist())}
-        remap = np.array([s_node.get(k, -1) for k in p_node_key])
-        src, dst = remap[pa["bond_src"][rows_dir]], remap[pa["bond_dst"][rows_dir]]
+        # bonds join chunks only; chunk and impactor keys are separate namespaces (impactor
+        # 0 and chunk (0 << 32) | 0 are both key 0), so map through chunk keys alone
+        p_nc = parent.counts["chunks"]
+        s_chunk = {k: i for i, k in enumerate(sa["chunk_key"].tolist())}
+        remap = np.array([s_chunk.get(k, -1) for k in pa["chunk_key"].tolist()]
+                         + [-1] * parent.counts["impactors"])
+        ps, pd = pa["bond_src"][rows_dir], pa["bond_dst"][rows_dir]
+        if np.any(ps >= p_nc) or np.any(pd >= p_nc):
+            raise S.SchemaError("a bond endpoint is not a chunk")
+        src, dst = remap[ps], remap[pd]
         ok_dir = (src >= 0) & (dst >= 0)
         ok = ok_dir[0::2] & ok_dir[1::2]  # both ends must still be in the island
         rows, rows_dir = rows[ok], rows_dir[np.repeat(ok, 2)]
@@ -224,6 +234,8 @@ def apply_topology(parent: S.Call, succ: S.Call, model_broke: set[int]) -> S.Cal
             "bond_frame": pa["bond_frame"][rows],
             "bond_qs_feat": np.zeros((2 * n_add, len(S.BOND_QS_FEAT_COLUMNS)), np.float32),
             "y_bond_peak_util": np.maximum(pa["y_bond_peak_util"][rows], 1.0).astype(np.float32),
+            "y_bond_fail_margin": np.maximum(pa["y_bond_fail_margin"][rows], 1.0
+                                             ).astype(np.float32),
             "y_bond_broke": np.ones(n_add, np.int32),
             "y_bond_break_bin": np.ones(n_add, np.int32),
             "y_bond_fail_mode": pa["y_bond_fail_mode"][rows],

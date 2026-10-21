@@ -1,4 +1,4 @@
-"""Synthetic `learned-impact-outcome/1` events for tests and trainer development.
+"""Synthetic `learned-impact-outcome/2` events for tests and trainer development.
 
 A toy, *not* the oracle: a free (or bottom-anchored) one-chunk-thick wall struck by one ram.
 Bond demand falls off with hops from the struck chunk and scales with the energy ratio;
@@ -152,7 +152,10 @@ def make_event(seed: int, *, nx: int | None = None, nz: int | None = None,
     bond_hop = np.minimum(hop[ends[:, 0]], hop[ends[:, 1]])
     r = 0.08 * ratio ** 0.5 * np.exp(-bond_hop / 1.5) / (strength * weib)
     broke = r >= 1.0
-    r_rec = np.where(broke, np.maximum(r, 1.0), r).astype(np.float32)
+    r_rec = np.where(broke, np.maximum(r, 1.0), r).astype(np.float32)  # failure margin q
+    # Peak utilisation, as in the oracle: softening starts at r_util = 1 well before failure
+    # (q = 1), so bonds with 1 ≤ r_util and q < 1 survive.
+    util_rec = np.where(broke, np.maximum(1.6 * r, 1.0), 1.6 * r).astype(np.float32)
     frag = _components(nc, ends, ~broke)
     plug = frag == frag[struck]
     if anchored and np.any(is_anchor & plug):
@@ -322,7 +325,8 @@ def make_event(seed: int, *, nx: int | None = None, nz: int | None = None,
         return vd - vs
 
     def bond_arrays(live: np.ndarray, vv: np.ndarray, ww: np.ndarray, damage: np.ndarray,
-                    util: np.ndarray, peak_prev: np.ndarray, qs_log_util: np.ndarray):
+                    util: np.ndarray, peak_prev: np.ndarray, margin_prev: np.ndarray,
+                    qs_log_util: np.ndarray):
         idx = np.nonzero(live)[0]
         rows, frames, src, dst = [], [], [], []
         col = lambda n_: S.col("bond_feat", n_)  # noqa: E731
@@ -338,8 +342,9 @@ def make_event(seed: int, *, nx: int | None = None, nz: int | None = None,
                 f[[col(f"log_ga_{j}") for j in range(3)]] = np.log(ga[k] / GA0)
                 f[col("weibull")] = weib[k]
                 f[col("damage")] = damage[k]
-                f[col("utilization")] = util[k]
-                f[col("peak_util_prev")] = peak_prev[k]
+                f[col("fail_margin")] = margin_prev[k]
+                f[col("log1p_utilization")] = np.log1p(util[k])
+                f[col("log1p_peak_util_prev")] = np.log1p(peak_prev[k])
                 f[col("log_qs_hertz_util")] = qs_log_util[k]
                 f[col("punch_plug_bond")] = float(bond_hop[k] == 0)
                 f[col("log_punch_capacity_ratio")] = (np.log(ratio) if bond_hop[k] == 0
@@ -416,7 +421,7 @@ def make_event(seed: int, *, nx: int | None = None, nz: int | None = None,
         ke_i = 0.5 * m_imp * float(vv[nc] @ vv[nc])
         g[0, col("log_energy_ratio")] = np.log(max(ke_i, 1e-9) / ga.sum())
         g[0, col("log_energy_ratio_plug")] = np.log(max(ke_i, 1e-9) / ga[bond_hop == 0].sum())
-        g[0, col("dt_c_over_L")] = dt * c / L / 1000.0
+        g[0, col("log_dt_c_over_L")] = np.log(dt * c / L)
         g[0, col("dt_v_over_L")] = dt * v_ref / L
         g[0, col("n_impactors")] = 0.25
         g[0, col("log_n_chunks")] = np.log(nc) / 10
@@ -431,7 +436,7 @@ def make_event(seed: int, *, nx: int | None = None, nz: int | None = None,
     zeros_b = np.zeros(nb, np.float32)
     qs_log = (np.log(np.maximum(r, 1e-6)) + rng.normal(0, 0.3, nb)).astype(np.float32)
     bs, bd, bf, bfr, bidx = bond_arrays(live0, v_start, w_start, zeros_b,
-                                        0.05 * np.minimum(r, 1), zeros_b, qs_log)
+                                        0.05 * np.minimum(r, 1), zeros_b, zeros_b, qs_log)
     cs, cd, cf, cfr = contact_arrays(v_start, w_start, 0.3)
     arrays0 = {
         "chunk_key": chunk_key, "chunk_feat": chunk_features(live0, v_start, w_start, zeros_b,
@@ -450,7 +455,8 @@ def make_event(seed: int, *, nx: int | None = None, nz: int | None = None,
         **empty("cracked", len(S.CRACKED_FEAT_COLUMNS)),
         **empty("structure_contact", len(S.STRUCTURE_CONTACT_FEAT_COLUMNS)),
         **raw(v_start, w_start),
-        "y_bond_peak_util": r_rec, "y_bond_broke": broke.astype(np.int32),
+        "y_bond_peak_util": util_rec, "y_bond_fail_margin": r_rec,
+        "y_bond_broke": broke.astype(np.int32),
         "y_bond_break_bin": np.where(broke, np.clip(1 + bond_hop, 1, S.N_TIME_BINS), 0
                                      ).astype(np.int32),
         "y_bond_fail_mode": np.where(broke, 1, 0).astype(np.int32),
@@ -480,7 +486,7 @@ def make_event(seed: int, *, nx: int | None = None, nz: int | None = None,
     live1 = ~broke
     damage1 = ddamage
     bs, bd, bf, bfr, bidx = bond_arrays(live1, v_end, w_end, damage1, 0.02 * np.ones(nb),
-                                        r_rec, np.full(nb, -3.0, np.float32))
+                                        util_rec, r_rec, np.full(nb, -3.0, np.float32))
     crk = np.nonzero(broke)[0]
     crows, csrc, cdst, cfrs = [], [], [], []
     for k in crk:
@@ -537,6 +543,7 @@ def make_event(seed: int, *, nx: int | None = None, nz: int | None = None,
         **empty("structure_contact", len(S.STRUCTURE_CONTACT_FEAT_COLUMNS)),
         **raw(v_end, w_end),
         "y_bond_peak_util": np.full(nb1, 0.02, np.float32),
+        "y_bond_fail_margin": r_rec[live1],  # κ is a history maximum: the margin stays
         "y_bond_broke": np.zeros(nb1, np.int32), "y_bond_break_bin": np.zeros(nb1, np.int32),
         "y_bond_fail_mode": np.zeros(nb1, np.int32), "y_bond_ddamage": np.zeros(nb1, np.float32),
         "y_bond_dissipated": d1,
@@ -563,7 +570,9 @@ def make_event(seed: int, *, nx: int | None = None, nz: int | None = None,
         prev = calls[-1]
         arr = dict(prev.arrays)
         bf = arr["bond_feat"].copy()  # carried: last frame's peak demand and damage
-        bf[:, S.col("bond_feat", "peak_util_prev")] = np.repeat(prev.arrays["y_bond_peak_util"], 2)
+        bf[:, S.col("bond_feat", "log1p_peak_util_prev")] = np.repeat(
+            np.log1p(prev.arrays["y_bond_peak_util"]), 2)
+        bf[:, S.col("bond_feat", "fail_margin")] = np.repeat(prev.arrays["y_bond_fail_margin"], 2)
         bf[:, S.col("bond_feat", "damage")] += np.repeat(prev.arrays["y_bond_ddamage"], 2)
         arr["bond_feat"] = bf
         calls.append(S.Call(**{**prev.__dict__, "call_index": prev.call_index + 1,

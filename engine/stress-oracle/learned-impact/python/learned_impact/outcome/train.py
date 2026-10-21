@@ -284,6 +284,7 @@ def _predictions(b: Batch, dec: dict) -> list[dict[str, dict[int, np.ndarray]]]:
     dmg = dec["bond_damage_end"].detach().cpu().numpy()
     peak = np.exp(dec["_log_r"].detach().cpu().numpy())
     broke = dec["bond_broke"].cpu().numpy()
+    margin = np.exp(dec["_log_q"].detach().cpu().numpy())
     out = []
     for g, c in enumerate(b.calls):
         a = c.arrays
@@ -295,6 +296,7 @@ def _predictions(b: Batch, dec: dict) -> list[dict[str, dict[int, np.ndarray]]]:
             "imp_w": dict(zip(a["impactor_key"].tolist(), iw[s_i])),
             "bond_damage": dict(zip(a["bond_key"].tolist(), dmg[s_b])),
             "bond_peak": dict(zip(a["bond_key"].tolist(), peak[s_b])),
+            "bond_margin": dict(zip(a["bond_key"].tolist(), margin[s_b])),
             "broke": {int(k) for k, x in zip(a["bond_key"].tolist(), broke[s_b]) if x},
         })
     return out
@@ -400,6 +402,7 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
                     oc = {k: v.detach().cpu() for k, v in chain_o.items()}
                     dec = D.decode(oc, bc, cfg.decode)
                     dec["_log_r"] = oc["bond_log_r"]
+                    dec["_log_q"] = oc["bond_log_q"]
                     preds = _predictions(bc, dec)
                 succ = [P.push(chain_calls[i], s_, preds[i],
                                preds[i]["broke"] if cfg.pushforward_topology else None)

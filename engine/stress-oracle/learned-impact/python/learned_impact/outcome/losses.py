@@ -2,7 +2,13 @@
 
 Each term is divided by its value under the zero predictor on the training set
 (`zero_baselines`), so every term starts near 1 (the V34 lesson). Weights λ start at 1, with
-motion, impactor and demand at 2, and change only on validation metrics.
+motion, impactor and the break margin at 2, and change only on validation metrics.
+
+Change from the plan (evidence: the output-side ceiling on P1's smoke calls): the plan's
+break test, peak utilisation r ≥ 1, is the *onset of softening* in this oracle, not failure
+(8,338 surviving val bonds reached r ≥ 1, up to 116, against 4,595 breaks). The break
+decision is the failure margin q = κ / κ_fail, which is ≥ 1 exactly when a bond fails; r
+stays as an auxiliary dense target (`demand`, λ = 1).
 
 `L_energy` uses kinetic-energy changes (exact) and per-bond dissipation, never the booked
 contact dissipation: P0 found the penalty contact books its dashpot quadrature rather than
@@ -27,13 +33,14 @@ from . import schema as S
 from .batch import SCALE_INDEX, Batch
 from .geometry import world_inertia
 
-TERMS = ("demand", "break", "time", "motion", "pose", "impactor", "energy", "damage", "regime")
+TERMS = ("margin", "demand", "break", "time", "motion", "pose", "impactor", "energy", "damage",
+         "regime")
 
 
 @dataclass
 class LossConfig:
     weights: dict[str, float] = field(default_factory=lambda: {
-        "demand": 2.0, "break": 1.0, "time": 1.0, "motion": 2.0, "pose": 1.0,
+        "margin": 2.0, "demand": 1.0, "break": 1.0, "time": 1.0, "motion": 2.0, "pose": 1.0,
         "impactor": 2.0, "energy": 1.0, "damage": 1.0, "regime": 1.0})
     huber_delta: float = 1.0
     label_smoothing: float = 0.02  # single-run hard break labels
@@ -98,7 +105,7 @@ def zero_outputs(b: Batch, n_time_bins: int = S.N_TIME_BINS) -> dict[str, Tensor
     nb = t["y_bond_broke"].shape[0]
     z = lambda *s: torch.zeros(*s, device=dev)  # noqa: E731
     G = b.n_calls
-    return {"bond_log_r": z(nb), "bond_break_logit": z(nb), "bond_time_logits": z(nb, n_time_bins),
+    return {"bond_log_r": z(nb), "bond_log_q": z(nb), "bond_break_logit": z(nb), "bond_time_logits": z(nb, n_time_bins),
             "bond_ddamage": z(nb), "chunk_out": z(t["chunk_x"].shape[0], 12),
             "imp_out": z(t["imp_x"].shape[0], 12), "imp_perf_logit": z(t["imp_x"].shape[0]),
             "energy_d_bond": z(G), "energy_frac_joint": z(G) + 0.5, "energy_e_elastic": z(G),
@@ -123,6 +130,13 @@ def loss_terms(out: dict[str, Tensor], b: Batch, cfg: LossConfig,
     log_r = torch.log(t["y_bond_peak_util"].clamp(min=cfg.log_r_floor))
     err = torch.where(broke, torch.relu(-out["bond_log_r"]), out["bond_log_r"] - log_r)
     terms["demand"] = (w_b * _huber(err, cfg.huber_delta)).sum() / w_b.sum().clamp(min=1)
+
+    # margin (the break decision): q = κ / κ_fail reaches 1 exactly when the oracle's bond
+    # fails, so the same censored treatment is exact here: Huber on log q for survivors,
+    # the hinge "q̂ ≥ 1" for broken bonds (q saturates at failure)
+    log_q = torch.log(t["y_bond_fail_margin"].clamp(min=cfg.log_r_floor))
+    err_q = torch.where(broke, torch.relu(-out["bond_log_q"]), out["bond_log_q"] - log_q)
+    terms["margin"] = (w_b * _huber(err_q, cfg.huber_delta)).sum() / w_b.sum().clamp(min=1)
 
     # break: proper log-loss against the ensemble frequency (or a smoothed hard label)
     eps = cfg.label_smoothing

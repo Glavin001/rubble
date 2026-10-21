@@ -85,3 +85,16 @@ def test_chained_parity_over_settling_frames():
         r = P.push(a, b, P.prediction_from_targets(a), _oracle_breaks(a))
         for arr in S.CARRIED_COLUMNS:
             np.testing.assert_allclose(r.arrays[arr], b.arrays[arr], atol=2e-6, err_msg=arr)
+
+
+def test_topology_with_colliding_chunk_and_impactor_keys():
+    """Impactor key 0 equals chunk key (0 << 32) | 0: the remap must not mix namespaces."""
+    _, (c0, c1), _ = make_event(3)
+    for c in (c0, c1):
+        c.arrays = dict(c.arrays, impactor_key=np.array([0], np.int64))
+    ob = _oracle_breaks(c0)
+    out = P.apply_topology(c0, c1, set())  # the model keeps every oracle break's bond
+    S.validate_call(out)
+    assert ob <= set(out.arrays["bond_key"].tolist())
+    nc = out.counts["chunks"]
+    assert out.arrays["bond_src"].max() < nc and out.arrays["bond_dst"].max() < nc

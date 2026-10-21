@@ -1,4 +1,4 @@
-# Learned impact-outcome calls (`learned-impact-outcome/1`)
+# Learned impact-outcome calls (`learned-impact-outcome/2`)
 
 **Two layers, two owners** (agreed with P1 on 2026-10-21; P1's reply is in the shared notes,
 `p1-data-contract-reply.md`):
@@ -6,7 +6,7 @@
 | Layer | Version | What | Owner |
 |---|---|---|---|
 | frame record | `learned-impact-frames/1` (`FRAMES_SCHEMA.md`, P1 branch `claude/learned-impact-p1-data-aa822c`) | one scenario's whole life cycle, lossless, frame by frame: state at every frame boundary, the routing's causal inputs, the oracle's outcome, per-bond energies, the energy ledger, QS and punch baselines, keys, splits, ensemble id/member | P1 recorder / generator |
-| **calls** (this document) | `learned-impact-outcome/1` | the model's view: one record per routed island per frame, a typed graph of nondimensional, invariant features plus targets | the Rust call builder `stress-learned/src/outcome_calls.rs` (the single feature builder P3 ports; proposed as its own session, not yet started); its output must pass `schema.py`'s validator. Its feature code takes a *frame-start state* (keys → pose, v, ω, joint state, live bonds): a recorded frame is one source, a model-decoded state (pushforward, DAgger, closed loop) another |
+| **calls** (this document) | `learned-impact-outcome/2` | the model's view: one record per routed island per frame, a typed graph of nondimensional, invariant features plus targets | the Rust call builder `stress-learned/src/outcome_calls.rs` (the single feature builder P3 ports; proposed as its own session, not yet started); its output must pass `schema.py`'s validator. Its feature code takes a *frame-start state* (keys → pose, v, ω, joint state, live bonds): a recorded frame is one source, a model-decoded state (pushforward, DAgger, closed loop) another |
 | decoded state | `learned-impact-decoded-state/1` (`DECODED_STATE.md`) | the model's decoded outcome of one call, keyed by stable keys: what DAgger restarts and the closed-loop harness apply | P2 writes (`outcome/state_io.py`), P1 (DAgger) and the rollout harness read |
 
 The trainer reads only this layer; the frame record stays the archival truth, so a feature
@@ -87,7 +87,7 @@ manageable (one `.bin` per array would be ~10⁷ files).
 
 | Field | Type | Notes |
 |---|---|---|
-| `schema_version` | string | exactly `"learned-impact-outcome/1"` |
+| `schema_version` | string | exactly `"learned-impact-outcome/2"` |
 | `event_id` | string | directory basename |
 | `recipe_id` | string | generator recipe (replayable) |
 | `family` | string | e.g. `free_wall`, `wall_row`, `wall_opening` |
@@ -249,7 +249,7 @@ Carried: 11–14.
 |---|---|---|
 | 0 | `log_energy_ratio` | ln(Σ impactor KE ÷ Σ_island G_f·A) |
 | 1 | `log_energy_ratio_plug` | ln(Σ impactor KE ÷ Σ_plug G_f·A); 0 if no punch |
-| 2 | `dt_c_over_L` | dt·c ÷ L (wave transits per frame) |
+| 2 | `log_dt_c_over_L` | ln(dt·c ÷ L) (wave transits per frame; ≈ 500–700 raw on walls) |
 | 3 | `dt_v_over_L` | dt·v ÷ L |
 | 4 | `n_impactors` | ÷ 4 |
 | 5 | `log_n_chunks` | ln(Nc) ÷ 10 |
@@ -294,7 +294,7 @@ Each type `T ∈ {bond, cracked, impactor_contact, structure_contact}` has:
 (the 6-D rotation representation), so the network can carry vectors between body frames
 without seeing a world frame.
 
-### `bond_feat` (`[2E, 40]`), live bonds (intact or damaged)
+### `bond_feat` (`[2E, 41]`), live bonds (intact or damaged)
 
 | # | name | definition |
 |---|---|---|
@@ -306,16 +306,26 @@ without seeing a world frame.
 | 16 | `weibull` | strength factor |
 | 17 | `damage` | |
 | 18 | `crush` | |
-| 19 | `utilization` | current failure index |
-| 20 | `peak_util_prev` | peak over the previous frame (0 on the first call) |
-| 21 | `rebar` | 0/1 |
-| 22 | `log_qs_hertz_util` | ln(QS utilization with the impact as a Hertz-peak load), converged `solve_static_all`; 0 if `available.qs_hertz` false |
-| 23 | `punch_plug_bond` | 0/1: holds the punch's plug |
-| 24 | `log_punch_capacity_ratio` | ln(m_eff·v/τ ÷ plug capacity); 0 off-plug |
-| 25–27 | `v_rel_edge_0..2` | (v_dst − v_src at the bond point) in edge frame ÷ v |
-| 28–39 | `rot_src_0..5`, `rot_dst_0..5` | |
+| 19 | `fail_margin` | failure margin at frame start, q = max over the families of κ ÷ κ_fail (below); < 1 for a live bond |
+| 20 | `log1p_utilization` | ln(1 + current `JointState.utilization`); the undamaged-stress failure index, which exceeds 1 once softening starts (up to ≈ 200 raw) |
+| 21 | `log1p_peak_util_prev` | ln(1 + peak utilisation over the previous frame); 0 on the first call |
+| 22 | `rebar` | 0/1 |
+| 23 | `log_qs_hertz_util` | ln(QS utilization with the impact as a Hertz-peak load), converged `solve_static_all`; 0 if `available.qs_hertz` false |
+| 24 | `punch_plug_bond` | 0/1: holds the punch's plug |
+| 25 | `log_punch_capacity_ratio` | ln(m_eff·v/τ ÷ plug capacity); 0 off-plug |
+| 26–28 | `v_rel_edge_0..2` | (v_dst − v_src at the bond point) in edge frame ÷ v |
+| 29–40 | `rot_src_0..5`, `rot_dst_0..5` | |
 
-Carried: 17, 20, 25–27. **Variant B group** `bond_qs_feat` `[2E, 3]`:
+**Failure margin** (`fail_margin`, `y_bond_fail_margin`), from `stress_ref::joint`: per family
+(tension/shear with `kappa`, `ductility`; compression/buckling with `kappa_c`,
+`ductility_c`), κ_fail = max(r, 1) for a brittle law with softening (D = 1 iff κ ≥ r; r ≤ 1
+snaps at κ > 1), κ_fail = (r + 1)/2 for a ductile law, κ_fail = 1 with softening off; the
+family's q = κ ÷ κ_fail, and the bond's q is the larger of the two. With rebar the bond
+disconnects only when the rebar also ruptures, so its q = min(q_concrete,
+rebar_work ÷ rupture_work). q ≥ 1 exactly when the bond fails, which makes the censored
+threshold τ = 1 exact (the plan's peak-utilisation test is not: see "Changes in /2").
+
+Carried: 17, 19, 21, 26–28. **Variant B group** `bond_qs_feat` `[2E, 3]`:
 `log_qs_frame_peak_util`, `qs_frame_broke` (0/1), `qs_frame_break_time` (bin ÷ 8, 0 if none).
 
 ### `cracked_feat` (`[2Ec, 22]`): broken bonds whose faces are still unilateral contacts
@@ -361,7 +371,8 @@ structure), `rot_src_0..5`, `rot_dst_0..5`. Carried: 0–3.
 
 | name | dtype | notes |
 |---|---|---|
-| `y_bond_peak_util` | f32 | peak `JointState.utilization` over the frame (`record_peak_utilization`); for broken bonds the value at failure (censored, ≥ 1) |
+| `y_bond_fail_margin` | f32 | peak failure margin q over the frame (running max over the substep evaluations); ≥ 1 exactly for bonds that broke (censored there). **The break target** |
+| `y_bond_peak_util` | f32 | peak `JointState.utilization` over the frame (`record_peak_utilization`); auxiliary: ≥ 1 is the onset of softening, not failure |
 | `y_bond_broke` | i32 | 0/1 |
 | `y_bond_break_bin` | i32 | 0 none, 1..8 time bin of the break |
 | `y_bond_fail_mode` | i32 | 0 none, 1 tension, 2 shear, 3 compression, 4 buckling, 5 rebar |
@@ -422,9 +433,24 @@ afCRPS. Unaligned calls omit them. Either the recorder or the Python tool
 `learned_impact.outcome.ensemble` (which writes the same arrays in place) may produce them;
 the arrays are identical either way.
 
+## Changes in `/2` (2026-10-21)
+
+Found by the output-side ceiling (`ceiling.py`) on P1's smoke calls: pushing the oracle's own
+outcome through the deployed decode, τ = 1 on peak utilisation misclassified 8,338 val
+bonds against 4,595 real breaks. Utilisation is the failure index of the *undamaged* stress,
+so ≥ 1 marks the onset of softening; a bond fails when κ reaches κ_fail. Every other
+stage (encoding, momentum projection, the 5% KE bound) reproduced the oracle exactly.
+- added `fail_margin` (bond feature 19, carried) and `y_bond_fail_margin` (the break target);
+- `utilization` → `log1p_utilization`, `peak_util_prev` → `log1p_peak_util_prev`, and
+  global `dt_c_over_L` → `log_dt_c_over_L` (raw values up to ≈ 200 and ≈ 720 on the smoke
+  calls);
+- the reference speed `v` for a call without an impactor is the routing speed, 5 m/s, as
+  `/1` already specified (the smoke converter floored it at 0.05 m/s, which put
+  `v_rel_body` up to ≈ 90).
+
 ## Versioning
 
-`learned-impact-outcome/1`. Any change of meaning, order or shape bumps the version; the
+`learned-impact-outcome/2`. Any change of meaning, order or shape bumps the version; the
 loader accepts exactly one version. Additive optional arrays may be added within a version
 only if old readers ignore them and they appear in this document.
 

@@ -22,12 +22,12 @@ def test_decode_ceiling_is_exact_on_consistent_targets(kw):
 
 def test_verdict_flags_a_threshold_mismatch():
     calls, st = make_calls(range(10), anchored=False)
-    for c in calls:  # a broken bond whose recorded peak demand is below τ
+    for c in calls:  # a broken bond whose recorded failure margin is below τ
         a = c.arrays
         if a["y_bond_broke"].any():
             k = int(np.nonzero(a["y_bond_broke"])[0][0])
-            a["y_bond_peak_util"] = a["y_bond_peak_util"].copy()
-            a["y_bond_peak_util"][k] = 0.9
+            a["y_bond_fail_margin"] = a["y_bond_fail_margin"].copy()
+            a["y_bond_fail_margin"][k] = 0.9
             break
     probs = C.verdict(C.run_ceiling([batch_of(calls, st)]))
     assert any("τ = 1" in p for p in probs)

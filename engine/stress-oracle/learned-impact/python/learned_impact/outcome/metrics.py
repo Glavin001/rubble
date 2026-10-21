@@ -289,9 +289,18 @@ def _summarise(rows, bond_p, bond_y, imp_p, imp_y, bound_active, bound_total) ->
     groups: dict[tuple, list[dict]] = defaultdict(list)
     for r in rows:
         c = r["call"]
-        key = (c.ensemble_id, c.call_index) if c.ensemble_id else (c.event_id, c.call_index)
+        if c.ensemble_id:
+            # members are compared per call only when aligned: the same island chunks (in
+            # the same order after sorting by key), else each is scored as a single run
+            ck = c.arrays["chunk_key"]
+            order = np.argsort(ck, kind="stable")
+            r = dict(r, mass=r["mass"][order], pred=r["pred"][order], true=r["true"][order])
+            key = (c.ensemble_id, c.call_index, hash(ck[order].tobytes()))
+        else:
+            key = (c.event_id, c.call_index, 0)
         groups[key].append(r)
     per = defaultdict(lambda: defaultdict(list))
+    n_ens_groups = sum(1 for k, rs in groups.items() if len(rs) >= 3)
     for _key, rs in groups.items():
         fam = rs[0]["call"].family
         x = rs[0]
@@ -350,6 +359,7 @@ def _summarise(rows, bond_p, bond_y, imp_p, imp_y, bound_active, bound_total) ->
                         for d in res.per_family.values()), default=0.0)
     res.score = float(np.nanmean([x for x in parts if x is not None]) + 0.25 * worst_family)
     m["score"] = res.score
+    m["ensemble_aligned_groups"] = float(n_ens_groups)
     return res
 
 

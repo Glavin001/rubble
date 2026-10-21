@@ -16,7 +16,7 @@ def test_decoded_states_roundtrip_and_partition(tmp_path):
     m = ImpactOutcomeModel()
     with torch.no_grad():
         out = m(b)
-        out["bond_log_r"] = torch.linspace(-1, 1, out["bond_log_r"].shape[0])  # some breaks
+        out["bond_log_q"] = torch.linspace(-1, 1, out["bond_log_q"].shape[0])  # some breaks
         dec = D.decode(out, b)
     docs = IO.decoded_states(b, out, dec, {"checkpoint": "test"})
     assert len(docs) == len(calls)

@@ -123,7 +123,8 @@ def collate(calls: list[S.Call], structures: dict[str, dict[int, dict[str, np.nd
         if "ens_impactor_v_end" in a:
             ens_rows.append((imp_off, a["ens_impactor_v_end"]))
         nb = c.counts["bond"]
-        for k in ("peak_util", "broke", "break_bin", "fail_mode", "ddamage", "dissipated"):
+        for k in ("peak_util", "fail_margin", "broke", "break_bin", "fail_mode", "ddamage",
+                  "dissipated"):
             add(f"y_bond_{k}", a[f"y_bond_{k}"])
         add("y_bond_support_path", a.get("y_bond_support_path", np.zeros(nb)))
         has_bf = "y_bond_break_freq" in a

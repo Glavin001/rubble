@@ -34,6 +34,19 @@ def test_censored_demand():
         assert float(Lo.loss_terms(o, b, cfg)["demand"]) > 0
 
 
+def test_censored_margin():
+    b, _, _ = _batch()
+    cfg = Lo.LossConfig(alpha_cut=0, beta_support=0)
+    z = Lo.zero_outputs(b)
+    broke = b.t["y_bond_broke"] > 0
+    y = torch.log(b.t["y_bond_fail_margin"].clamp(min=cfg.log_r_floor))
+    o = dict(z)
+    o["bond_log_q"] = torch.where(broke, y + 5.0, y)
+    assert float(Lo.loss_terms(o, b, cfg)["margin"]) < 1e-10
+    o["bond_log_q"] = torch.where(broke, torch.full_like(y, -0.5), y)
+    assert float(Lo.loss_terms(o, b, cfg)["margin"]) > 0
+
+
 def test_normalised_terms_start_near_one():
     b, _, _ = _batch()
     cfg = Lo.LossConfig()

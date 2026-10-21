@@ -30,7 +30,11 @@ from .geometry import quat_rotate, rotvec_to_matrix, world_inertia
 @dataclass
 class DecodeConfig:
     tau: float = 1.0
-    break_mode: str = "threshold"  # "threshold" | "sample"
+    # "threshold": the failure margin q̂ ≥ τ (q = κ / κ_fail, ≥ 1 exactly when the oracle's
+    # bond fails); "utilization": peak utilisation r̂ ≥ τ (plan v1; the output-side ceiling
+    # on P1's smoke calls showed it is the onset of softening, not failure); "sample":
+    # hash-seeded sampling on p_b.
+    break_mode: str = "threshold"
     sample_seed: int = 0
     project_momentum: bool = True
     energy_bound: bool = True
@@ -223,6 +227,8 @@ def hash_uniform(keys: Tensor, seed: int) -> Tensor:
 def breaks(out: dict[str, Tensor], b: Batch, cfg: DecodeConfig,
            logit_shift: Tensor | None = None) -> Tensor:
     if cfg.break_mode == "threshold":
+        return out["bond_log_q"] >= float(np.log(cfg.tau))
+    if cfg.break_mode == "utilization":
         return out["bond_log_r"] >= float(np.log(cfg.tau))
     if cfg.break_mode == "sample":
         logit = out["bond_break_logit"]

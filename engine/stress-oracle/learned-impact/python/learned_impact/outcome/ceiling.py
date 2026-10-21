@@ -75,6 +75,7 @@ def targets_to_outputs(b: Batch, n_time_bins: int = S.N_TIME_BINS) -> dict[str, 
     reg = t["y_imp_regime"]
     return {
         "bond_log_r": torch.log(t["y_bond_peak_util"].to(f).clamp(min=1e-12)),
+        "bond_log_q": torch.log(t["y_bond_fail_margin"].to(f).clamp(min=1e-12)),
         "bond_break_logit": torch.where(broke, BIG, -BIG).to(f),
         "bond_time_logits": time_logits,
         "bond_ddamage": t["y_bond_ddamage"].to(f),
@@ -144,13 +145,16 @@ def stage_errors(b: Batch, tolerances=(0.0, 0.02, 0.05, 0.1)) -> list[dict]:
         ph = d["_phys"]
         bound[tol] = (d["energy_bound_active"],
                       _ke_err(ph, ph["v_end"], ph["w_end"], yv, yw, G) / e_in)
-    # threshold with the oracle's own peak demand
+    # threshold with the oracle's own failure margin (the decision), and, as a diagnostic,
+    # with its peak utilisation (plan v1's test)
     broke_t = t["y_bond_broke"] > 0
     broke_hat = D.breaks(out, b, D.DecodeConfig())
     wrong = broke_t != broke_hat
+    wrong_u = broke_t != D.breaks(out, b, D.DecodeConfig(break_mode="utilization"))
     bc = t["bond_call"]
     n_wrong = torch.zeros(G, dtype=torch.long).scatter_add(0, bc, wrong.long())
     n_broke = torch.zeros(G, dtype=torch.long).scatter_add(0, bc, broke_t.long())
+    n_wrong_u = torch.zeros(G, dtype=torch.long).scatter_add(0, bc, wrong_u.long())
     for g in range(G):
         c = b.calls[g]
         rows[g] = {
@@ -164,6 +168,7 @@ def stage_errors(b: Batch, tolerances=(0.0, 0.02, 0.05, 0.1)) -> list[dict]:
             "bound": {str(tol): {"active": bool(a[g]), "ke_err": float(k[g])}
                       for tol, (a, k) in bound.items()},
             "threshold_wrong": int(n_wrong[g]), "breaks": int(n_broke[g]),
+            "utilization_threshold_wrong": int(n_wrong_u[g]),
         }
     return rows
 
@@ -203,6 +208,8 @@ def run_ceiling(batches: list[Batch], tolerance: float = 0.05) -> dict:
                                   for tol in rs[0]["bound"]},
             "bound_ke_err": {tol: q("bound", tol) for tol in rs[0]["bound"]},
             "threshold_wrong_bonds": int(sum(r["threshold_wrong"] for r in rs)),
+            "utilization_threshold_wrong_bonds": int(sum(r["utilization_threshold_wrong"]
+                                                         for r in rs)),
             "breaks": int(sum(r["breaks"] for r in rs)),
         }
     return {"families": fam, "metrics_through_decode": summary.metrics,
@@ -228,7 +235,7 @@ def verdict(rep: dict, ke_tol: float = 1e-3, dv_tol: float = 1e-3) -> list[str]:
                 probs.append(f"{f}: the KE bound at tolerance 0.05 clips {rate:.1%} of "
                              f"oracle outcomes (KE err max {d['bound_ke_err'][tol]['max']:.2e})")
         if d["threshold_wrong_bonds"]:
-            probs.append(f"{f}: τ = 1 on the oracle's own peak demand misclassifies "
+            probs.append(f"{f}: τ = 1 on the oracle's own failure margin misclassifies "
                          f"{d['threshold_wrong_bonds']} of the bonds ({d['breaks']} breaks)")
     m = rep["metrics_through_decode"]
     for k, bar in (("one_minus_ari", 1e-6), ("w1_log_mass", 1e-6), ("ram_err_rel", 1e-3)):
@@ -283,6 +290,7 @@ def call_with_decoded_targets(c: S.Call, doc: dict) -> S.Call:
     a["y_bond_broke"] = np.array([k in broken for k in bk], np.int32)
     a["y_bond_break_bin"] = np.array([broken.get(k, 0) for k in bk], np.int32)
     a["y_bond_peak_util"] = np.where(a["y_bond_broke"] > 0, np.e, 1 / np.e).astype(np.float32)
+    a["y_bond_fail_margin"] = a["y_bond_peak_util"].copy()
     a["y_bond_ddamage"] = np.array([max(dmg.get(k, d) - d, 0.0) for k, d in zip(bk, d0)],
                                    np.float32)
     a["y_impactor_regime"] = np.array([1 if by_i[k].get("p_perforate", 0) > 0.5 else 0
