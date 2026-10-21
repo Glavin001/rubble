@@ -87,6 +87,7 @@ def skill(pred, members: list, dist, floor: float = 1e-12) -> float:
 
 
 LITERAL_BAR = 1.25
+ACTIVE_PHASES = ("contact", "secondary", "blast")
 
 
 # Physical tolerances per metric (the floor of the member spread is tolerance ÷ literal bar):
@@ -305,6 +306,13 @@ def _summarise(rows, bond_p, bond_y, imp_p, imp_y, bound_active, bound_total) ->
     for _key, rs in groups.items():
         fam = rs[0]["call"].family
         x = rs[0]
+        # Active calls carry the gates: an impact or secondary contact, or a break in any
+        # member. Quiet calls (most frames are settling) are reported apart with "_quiet":
+        # pooled, "predict nothing" passes them and would hide a model that never breaks.
+        active = (any(r["call"].phase in ACTIVE_PHASES for r in rs)
+                  or any(r["broke"].any() for r in rs))
+        sfx = "" if active else "_quiet"
+        per[fam]["n_active" if active else "n_quiet"].append(1.0)
         if len(rs) >= 3:  # ensemble: the model's prediction is scored against the members
             pm = x["pred"]
             mass = x["mass"]
@@ -321,30 +329,31 @@ def _summarise(rows, bond_p, bond_y, imp_p, imp_y, bound_active, bound_total) ->
                 gates["ram"] = calibrated_gate(float(x["imp_speed_hat"][0]), speeds,
                                                lambda a, b_: abs(a - b_),
                                                tolerance=TOLERANCE["ram"] * x["v_ref"])
-                per[fam]["crps_ram"].append(crps_ensemble(float(x["imp_speed_hat"][0]), speeds)
+                per[fam]["crps_ram" + sfx].append(crps_ensemble(float(x["imp_speed_hat"][0]), speeds)
                                             / x["v_ref"])
             for name, gt in gates.items():
-                per[fam][f"skill_{name}"].append(gt["skill"])
-                per[fam][f"skill_bar_{name}"].append(gt["bar"])
-                per[fam][f"skill_over_bar_{name}"].append(gt["skill"] / gt["bar"])
-                per[fam][f"pass_{name}"].append(float(gt["pass"]))
-                per[fam][f"pass_literal_{name}"].append(float(gt["pass_literal"]))
+                per[fam][f"skill_{name}" + sfx].append(gt["skill"])
+                per[fam][f"skill_bar_{name}" + sfx].append(gt["bar"])
+                per[fam][f"skill_over_bar_{name}" + sfx].append(gt["skill"] / gt["bar"])
+                per[fam][f"pass_{name}" + sfx].append(float(gt["pass"]))
+                per[fam][f"pass_literal_{name}" + sfx].append(float(gt["pass_literal"]))
             n_frag = [len(np.unique(r["true"])) for r in rs]
             nf_hat = len(np.unique(pm))
-            per[fam]["fragments_in_range"].append(float(min(n_frag) <= nf_hat <= max(n_frag)))
+            per[fam]["fragments_in_range" + sfx].append(float(min(n_frag) <= nf_hat <= max(n_frag)))
         for r in rs:
-            per[fam]["one_minus_ari"].append(1 - weighted_ari(r["pred"], r["true"], r["mass"]))
-            per[fam]["w1_log_mass"].append(wasserstein_log_mass(
+            per[fam]["one_minus_ari" + sfx].append(1 - weighted_ari(r["pred"], r["true"], r["mass"]))
+            per[fam]["w1_log_mass" + sfx].append(wasserstein_log_mass(
                 fragment_masses(r["pred"], r["mass"]), fragment_masses(r["true"], r["mass"])))
             if len(r["imp_speed"]):
-                per[fam]["ram_err_rel"].append(float(np.mean(np.abs(r["imp_speed_hat"]
+                per[fam]["ram_err_rel" + sfx].append(float(np.mean(np.abs(r["imp_speed_hat"]
                                                                     - r["imp_speed"])))
                                                / r["v_ref"])
             nf_hat = len(np.unique(r["pred"]))
             nf = len(np.unique(r["true"]))
-            per[fam]["fragment_count_ratio"].append(nf_hat / max(nf, 1))
+            per[fam]["fragment_count_ratio" + sfx].append(nf_hat / max(nf, 1))
     for fam, d in per.items():
-        res.per_family[fam] = {k: float(np.nanmean(v)) for k, v in d.items() if len(v)}
+        res.per_family[fam] = {k: (float(np.sum(v)) if k in ("n_active", "n_quiet")
+                                   else float(np.nanmean(v))) for k, v in d.items() if len(v)}
     keys = sorted({k for d in res.per_family.values() for k in d})
     for k in keys:
         m[k] = float(np.nanmean([d[k] for d in res.per_family.values() if k in d]))
@@ -358,7 +367,8 @@ def _summarise(rows, bond_p, bond_y, imp_p, imp_y, bound_active, bound_total) ->
     worst_family = max((np.nanmean([d.get("ram_err_rel", 0) / 0.05,
                                     d.get("one_minus_ari", 0) * 4])
                         for d in res.per_family.values()), default=0.0)
-    res.score = float(np.nanmean([x for x in parts if x is not None]) + 0.25 * worst_family)
+    parts = [x for x in parts if x is not None and np.isfinite(x)]
+    res.score = float((np.mean(parts) if parts else float("inf")) + 0.25 * worst_family)
     m["score"] = res.score
     m["ensemble_aligned_groups"] = float(n_ens_groups)
     return res

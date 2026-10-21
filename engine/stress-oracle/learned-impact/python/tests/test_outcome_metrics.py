@@ -119,3 +119,28 @@ def test_three_way_report(tmp_path):
     fam = rep["families"]["synthetic_wall"]
     assert set(fam["model"]) == set(M.PRIMARY_SINGLE) and "qs" in fam
     assert isinstance(fam["superiority"], bool)
+
+
+def test_quiet_calls_are_scored_apart(tmp_path):
+    """A model that predicts no breaks must not pass on the strength of quiet frames."""
+    import torch
+
+    from learned_impact.outcome import schema as S
+    from learned_impact.outcome.batch import HierarchyCache, collate_events
+    from learned_impact.outcome.model import ImpactOutcomeModel
+    from learned_impact.outcome.synthetic import make_event
+
+    for k in range(4):
+        m, cs, st = make_event(3, split="val", ensemble=("e3", k, 4), settle_calls=3)
+        S.write_event(tmp_path / m["event_id"], m, cs, st)
+    from learned_impact.outcome.ensemble import aggregate_dataset
+    aggregate_dataset(tmp_path)
+    evs = [S.load_event(p) for p in S.find_events(tmp_path)]
+    b = collate_events(evs, HierarchyCache(2))
+    torch.manual_seed(0)
+    res = M.evaluate(ImpactOutcomeModel(), [b])  # near-zero init: predicts no breaks
+    fam = res.per_family["synthetic_wall"]
+    assert fam["n_active"] >= 1 and fam["n_quiet"] >= 1
+    assert "skill_over_bar_partition" in fam and "skill_over_bar_partition_quiet" in fam
+    # active calls carry the breaks: missing them all cannot pass there
+    assert fam["skill_over_bar_partition"] > fam["skill_over_bar_partition_quiet"]

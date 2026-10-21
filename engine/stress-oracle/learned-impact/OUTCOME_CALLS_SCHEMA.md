@@ -1,4 +1,4 @@
-# Learned impact-outcome calls (`learned-impact-outcome/2`)
+# Learned impact-outcome calls (`learned-impact-outcome/3`)
 
 **Two layers, two owners** (agreed with P1 on 2026-10-21; P1's reply is in the shared notes,
 `p1-data-contract-reply.md`):
@@ -6,7 +6,7 @@
 | Layer | Version | What | Owner |
 |---|---|---|---|
 | frame record | `learned-impact-frames/1` (`FRAMES_SCHEMA.md`, P1 branch `claude/learned-impact-p1-data-aa822c`) | one scenario's whole life cycle, lossless, frame by frame: state at every frame boundary, the routing's causal inputs, the oracle's outcome, per-bond energies, the energy ledger, QS and punch baselines, keys, splits, ensemble id/member | P1 recorder / generator |
-| **calls** (this document) | `learned-impact-outcome/2` | the model's view: one record per routed island per frame, a typed graph of nondimensional, invariant features plus targets | the Rust call builder `stress-learned/src/outcome_calls.rs` (the single feature builder P3 ports; proposed as its own session, not yet started); its output must pass `schema.py`'s validator. Its feature code takes a *frame-start state* (keys → pose, v, ω, joint state, live bonds): a recorded frame is one source, a model-decoded state (pushforward, DAgger, closed loop) another |
+| **calls** (this document) | `learned-impact-outcome/3` | the model's view: one record per routed island per frame, a typed graph of nondimensional, invariant features plus targets | the Rust call builder `stress-learned/src/outcome_calls.rs` (the single feature builder P3 ports; proposed as its own session, not yet started); its output must pass `schema.py`'s validator. Its feature code takes a *frame-start state* (keys → pose, v, ω, joint state, live bonds): a recorded frame is one source, a model-decoded state (pushforward, DAgger, closed loop) another |
 | decoded state | `learned-impact-decoded-state/1` (`DECODED_STATE.md`) | the model's decoded outcome of one call, keyed by stable keys: what DAgger restarts and the closed-loop harness apply | P2 writes (`outcome/state_io.py`), P1 (DAgger) and the rollout harness read |
 
 The trainer reads only this layer; the frame record stays the archival truth, so a feature
@@ -87,7 +87,7 @@ manageable (one `.bin` per array would be ~10⁷ files).
 
 | Field | Type | Notes |
 |---|---|---|
-| `schema_version` | string | exactly `"learned-impact-outcome/2"` |
+| `schema_version` | string | exactly `"learned-impact-outcome/3"` |
 | `event_id` | string | directory basename |
 | `recipe_id` | string | generator recipe (replayable) |
 | `family` | string | e.g. `free_wall`, `wall_row`, `wall_opening` |
@@ -158,7 +158,7 @@ shared by the call builder and the recorder's `--restart`, defines them.
 |---|---|
 | `L` | median chunk size (m): cube root of median chunk volume |
 | `m` | median chunk mass (kg) |
-| `v` | max impactor approach speed in the frame; the routing speed (5 m/s) if no impactor |
+| `v` | max(5 m/s routing speed, the predicted contacts' closing speeds, every island chunk's and impactor's \|v_i − v_com\| and \|ω_i\|·R_i with R_i = \|half extents\|) (from `/3`) |
 | `c` | P-wave speed `sqrt(E/ρ)` of the island's dominant material (m/s) |
 | `f_t` | median bond tensile strength (Pa) |
 | `E` | median modulus (Pa) |
@@ -330,6 +330,8 @@ Carried: 17, 19, 21, 26–28. **Variant B group** `bond_qs_feat` `[2E, 3]`:
 
 ### `cracked_feat` (`[2Ec, 22]`): broken bonds whose faces are still unilateral contacts
 
+A broken bond is a cracked edge only while its gap along the bond normal is ≤ `CONTACT_MARGIN` = 0.25 L (the structure-contact margin) **and** the two chunks overlap across the face along both t1 and t2 (from `/3`).
+
 `log_area`, `offset_0..2`, `gap` (÷ L, signed, negative = overlap), `friction`,
 `v_rel_edge_0..2` (÷ v), `frames_since_broken` (÷ 8, cap 1), `rot_src_0..5`, `rot_dst_0..5`.
 Carried: 6–8 (`v_rel_edge`).
@@ -448,9 +450,14 @@ stage (encoding, momentum projection, the 5% KE bound) reproduced the oracle exa
   `/1` already specified (the smoke converter floored it at 0.05 m/s, which put
   `v_rel_body` up to ≈ 90).
 
+## Changes in `/3` (2026-10-21)
+
+- **Reference speed:** `v` now also covers the island's own motion: 5 m/s at least, plus every body's speed relative to the island centre of mass. Before, it was the predicted contacts' closing speed alone: 0.03–0.06 m/s in 10% of calls while debris moved at 40–80 m/s, so some features reached about 600. Now `v` has median 5 and max 76 m/s. Chunk `v_rel_body` ≤ 1.0 and cracked `v_rel_edge` ≤ 1.7. Amplitude still reaches the model through the `/c` features.
+- **Cracked edges:** a face must be within the contact margin and overlap laterally to count (it was gap < 0.5 L along the normal only).
+
 ## Versioning
 
-`learned-impact-outcome/2`. Any change of meaning, order or shape bumps the version; the
+`learned-impact-outcome/3`. Any change of meaning, order or shape bumps the version; the
 loader accepts exactly one version. Additive optional arrays may be added within a version
 only if old readers ignore them and they appear in this document.
 

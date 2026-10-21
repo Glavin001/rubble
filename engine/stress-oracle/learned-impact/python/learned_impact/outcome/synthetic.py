@@ -1,4 +1,4 @@
-"""Synthetic `learned-impact-outcome/2` events for tests and trainer development.
+"""Synthetic `learned-impact-outcome/3` events for tests and trainer development.
 
 A toy, *not* the oracle: a free (or bottom-anchored) one-chunk-thick wall struck by one ram.
 Bond demand falls off with hops from the struck chunk and scales with the energy ratio;

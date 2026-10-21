@@ -15,7 +15,7 @@ as round-trip f64 decimals.
 ```json
 {
   "schema_version": "learned-impact-decoded-state/1",
-  "calls_schema": "learned-impact-outcome/2",
+  "calls_schema": "learned-impact-outcome/3",
   "event_id": "…", "call_index": 3, "frame": 12, "island": 0,
   "meta": {"checkpoint": "…", "sha256": "…", "decode": {…}},
   "flags": {"free": true, "energy_bound_active": false, "energy_bound_infeasible": false},
