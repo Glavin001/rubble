@@ -85,15 +85,46 @@ pub fn write_i32(root: &Path, rel: &str, shape: &[usize], data: &[i32]) -> Resul
     Ok(())
 }
 
+/// Write raw little-endian bytes as one zstd frame (`<rel>` should end in `.zst`).
+pub fn write_zstd(root: &Path, rel: &str, bytes: &[u8]) -> Result<(), String> {
+    let path = root.join(rel);
+    if let Some(p) = path.parent() {
+        fs::create_dir_all(p).map_err(|e| e.to_string())?;
+    }
+    let z = zstd::bulk::compress(bytes, 9).map_err(|e| format!("{rel}: zstd {e}"))?;
+    fs::write(&path, z).map_err(|e| format!("{rel}: {e}"))
+}
+
+pub fn f32_bytes(data: &[f32]) -> Vec<u8> {
+    data.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
+pub fn i32_bytes(data: &[i32]) -> Vec<u8> {
+    data.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
+/// An array's raw bytes, decompressing a `.zst` file (one zstd frame of the same bytes).
+pub fn read_bytes(root: &Path, entry: &ArrayEntry) -> Result<Vec<u8>, String> {
+    let n = numel(&entry.shape) * 4;
+    let path = root.join(&entry.path);
+    let buf = if entry.path.ends_with(".zst") {
+        zstd::decode_all(File::open(&path).map_err(|e| format!("{}: {e}", entry.path))?).map_err(|e| format!("{}: {e}", entry.path))?
+    } else {
+        let mut buf = vec![0u8; n];
+        File::open(&path).and_then(|mut f| f.read_exact(&mut buf)).map_err(|e| format!("{}: {e}", entry.path))?;
+        buf
+    };
+    if buf.len() != n {
+        return Err(format!("{}: {} bytes, shape {:?} needs {n}", entry.path, buf.len(), entry.shape));
+    }
+    Ok(buf)
+}
+
 pub fn read_f32(root: &Path, entry: &ArrayEntry) -> Result<Vec<f32>, String> {
     if entry.dtype != "f32" {
         return Err(format!("{}: expected f32, got {}", entry.path, entry.dtype));
     }
-    let n = numel(&entry.shape);
-    let mut buf = vec![0u8; n * 4];
-    File::open(root.join(&entry.path))
-        .and_then(|mut f| f.read_exact(&mut buf))
-        .map_err(|e| format!("{}: {e}", entry.path))?;
+    let buf = read_bytes(root, entry)?;
     Ok(buf.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect())
 }
 
@@ -101,11 +132,7 @@ pub fn read_i32(root: &Path, entry: &ArrayEntry) -> Result<Vec<i32>, String> {
     if entry.dtype != "i32" {
         return Err(format!("{}: expected i32, got {}", entry.path, entry.dtype));
     }
-    let n = numel(&entry.shape);
-    let mut buf = vec![0u8; n * 4];
-    File::open(root.join(&entry.path))
-        .and_then(|mut f| f.read_exact(&mut buf))
-        .map_err(|e| format!("{}: {e}", entry.path))?;
+    let buf = read_bytes(root, entry)?;
     Ok(buf.chunks_exact(4).map(|c| i32::from_le_bytes(c.try_into().unwrap())).collect())
 }
 

@@ -3,6 +3,7 @@
 //!   learned_impact_outcome_record --recipes RECIPES.json --event ID --out DIR [--oracle NAME] [--no-baselines]
 //!   learned_impact_outcome_record --m5 m5_free_wall|m5_wall_row --out DIR
 //!   learned_impact_outcome_record --replay EVENT_DIR
+//!   learned_impact_outcome_record --regenerate EVENT_DIR --out DIR
 //!
 //! `--replay` re-runs the event's recipe under the oracle configuration its `context.json`
 //! recorded and fails unless the end fingerprint matches `replay.json`.
@@ -15,6 +16,12 @@ use stress_learned::procedural::m5_recipes;
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
     let val = |s: &str| a.windows(2).find(|v| v[0] == s).map(|v| v[1].clone());
+    if let Some(ev) = val("--regenerate") {
+        let out = PathBuf::from(val("--out").expect("--out DIR"));
+        let r = stress_learned::outcome::regenerate(&PathBuf::from(ev), &out).unwrap_or_else(|e| panic!("regenerate: {e}"));
+        println!("{}", serde_json::to_string_pretty(&r).unwrap());
+        return;
+    }
     if let Some(ev) = val("--replay") {
         let ev = PathBuf::from(ev);
         let replay: serde_json::Value = serde_json::from_slice(&std::fs::read(ev.join("replay.json")).expect("replay.json")).unwrap();

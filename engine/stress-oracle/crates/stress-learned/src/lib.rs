@@ -1,3 +1,4 @@
+#![recursion_limit = "512"]
 //! Learned-impact dataset schema, on-disk IO, and a smoke recorder.
 //!
 //! See `engine/stress-oracle/learned-impact/SCHEMA.md`. Bulk generation and

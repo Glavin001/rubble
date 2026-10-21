@@ -40,7 +40,12 @@ class OutcomeEvent:
         if name not in self._cache:
             e = self.catalog[name]
             dtype = {"f32": "<f4", "i32": "<i4"}[e["dtype"]]
-            data = np.fromfile(self.path / e["path"], dtype=dtype)
+            if e["path"].endswith(".zst"):
+                import zstandard
+                raw = zstandard.ZstdDecompressor().decompress((self.path / e["path"]).read_bytes(), max_output_size=1 << 34)
+                data = np.frombuffer(raw, dtype=dtype)
+            else:
+                data = np.fromfile(self.path / e["path"], dtype=dtype)
             n = int(np.prod(e["shape"])) if e["shape"] else 1
             if data.size != n:
                 raise ValueError(f"{self.path.name}/{name}: {data.size} values, catalog says {e['shape']}")
@@ -50,6 +55,16 @@ class OutcomeEvent:
     @property
     def n_frames(self) -> int:
         return len(self.frames)
+
+    @property
+    def kept_frames(self) -> list[int]:
+        """Frames whose arrays are stored (all, unless a thinned training event)."""
+        k = (self.context.get("storage") or {}).get("kept_frames")
+        return list(range(self.n_frames)) if k is None else list(k)
+
+    def state_rows(self) -> dict[int, int]:
+        r = (self.context.get("storage") or {}).get("state_rows")
+        return {f: f for f in range(self.n_frames + 1)} if r is None else {f: i for i, f in enumerate(r)}
 
 
 def load_event(path: Path) -> OutcomeEvent:
@@ -68,20 +83,24 @@ def event_dirs(run: Path) -> list[Path]:
 
 
 def check_event(ev: OutcomeEvent) -> list[str]:
-    """Integrity problems of one event (empty: none)."""
+    """Integrity problems of one event (empty: none). Thinned training events are checked on
+    the frames they keep; frames.json (always whole) carries the per-frame counts."""
     bad = []
     F, N, E = ev.n_frames, ev.context["n_chunks"], ev.context["n_bonds"]
     I = ev.context["n_impactors"]
+    kept = ev.kept_frames
+    srow = ev.state_rows()
+    K, S = len(kept), len(srow)
     want = {
-        "state_chunk_pos": (F + 1, N, 3), "state_bond_connected": (F + 1, E), "state_impactor": (F + 1, I, 13),
-        "frame_bond_break_bin": (F, E), "frame_bond_peak_util": (F, E), "frame_bond_qs_prior_util": (F, E),
-        "frame_chunk_routed": (F, N), "frame_phase": (F,), "frame_impactor_contact": (F, I, 4),
+        "state_chunk_pos": (S, N, 3), "state_bond_connected": (S, E), "state_impactor": (S, I, 13),
+        "frame_bond_break_bin": (K, E), "frame_bond_peak_util": (K, E), "frame_bond_qs_prior_util": (K, E),
+        "frame_chunk_routed": (K, N), "frame_phase": (K,), "frame_impactor_contact": (K, I, 4),
         "static_chunk_mass": (1, N), "static_bond_endpoints": (1, E, 2),
     }
     if "state_bond_energy" in ev.catalog:
-        want.update({"state_bond_energy": (F + 1, E, 3), "state_bond_mode": (F + 1, E), "state_chunk_q_world": (F + 1, N, 4)})
+        want.update({"state_bond_energy": (S, E, 3), "state_bond_mode": (S, E), "state_chunk_q_world": (S, N, 4)})
     if "qs_bond_broken" in ev.catalog:
-        want.update({"qs_bond_broken": (F, E), "qs_chunk_vel": (F, N, 3), "qs_impactor": (F, I, 13)})
+        want.update({"qs_bond_broken": (K, E), "qs_chunk_vel": (K, N, 3), "qs_impactor": (K, I, 13)})
     for name, shape in want.items():
         if name not in ev.catalog:
             bad.append(f"missing {name}")
@@ -91,44 +110,54 @@ def check_event(ev: OutcomeEvent) -> list[str]:
         return bad
     conn = ev.array("state_bond_connected")
     bins = ev.array("frame_bond_break_bin")
+    margin = ev.array("state_bond_fail_margin") if "state_bond_fail_margin" in ev.catalog else None
+    before = np.stack([conn[srow[f]] for f in kept])
+    after = np.stack([conn[srow[f + 1]] for f in kept])
     broke = bins >= 0
     # A bond breaks in a frame only if it was connected at the frame's start, and is then
     # disconnected at its end; every disconnection is a recorded break.
-    if np.any(broke & (conn[:-1] == 0)):
+    if np.any(broke & (before == 0)):
         bad.append("a break recorded on a bond already disconnected at the frame start")
-    lost = (conn[:-1] == 1) & (conn[1:] == 0)
+    lost = (before == 1) & (after == 0)
     if not np.array_equal(lost, broke):
         bad.append(f"breaks ({int(broke.sum())}) != disconnections ({int(lost.sum())})")
+    if margin is not None and not np.array_equal(margin >= 1.0, conn == 0):
+        bad.append("failure margin >= 1 does not match disconnection")
     if np.any((bins >= 8) | (bins < -1)):
         bad.append("break bin out of range")
-    if int(broke.sum()) != ev.outcome["broken_bonds"]:
+    breaks_json = np.array([fr["breaks"] for fr in ev.frames])
+    if int(breaks_json.sum()) != ev.outcome["broken_bonds"]:
         bad.append("outcome broken_bonds != frame breaks")
+    if not np.array_equal(broke.sum(1), breaks_json[kept]):
+        bad.append("kept frames' breaks differ from frames.json")
+    if set(np.nonzero(breaks_json)[0]) - set(kept):
+        bad.append("a frame with breaks was not kept")
     phase = ev.array("frame_phase")
-    if [PHASES[p] for p in phase] != [f["phase"] for f in ev.frames]:
+    if [PHASES[p] for p in phase] != [ev.frames[f]["phase"] for f in kept]:
         bad.append("frame_phase != frames.json phases")
-    if "qs_bond_broken" in ev.catalog and np.any((ev.array("qs_bond_broken") == 1) & (conn[:-1] == 0)):
+    if "qs_bond_broken" in ev.catalog and np.any((ev.array("qs_bond_broken") == 1) & (before == 0)):
         bad.append("QS branch breaks a bond disconnected at the frame start")
     prior = ev.array("frame_bond_qs_prior_util")
-    if np.any((prior >= 0) & (conn[:-1] == 0)):
+    if np.any((prior >= 0) & (before == 0)):
         bad.append("QS prior on a disconnected bond")
     if not ev.outcome["truncated"]:
         quiet = ev.context["stop_rule"]["quiet_frames"]
-        if broke[-quiet:].any():
+        if breaks_json[-quiet:].any():
             bad.append(f"breaks within the last {quiet} frames of a finished event")
-    if "state_bond_energy" in ev.catalog:
+    for name, e in ev.catalog.items():
+        if e["dtype"] == "f32" and not np.all(np.isfinite(ev.array(name))):
+            bad.append(f"{name}: nonfinite")
+    if "state_bond_energy" in ev.catalog and (ev.context.get("storage") or {}).get("kept_frames") is None:
         en = ev.array("state_bond_energy")
         # Dissipation only accumulates (f32 round-off allowed).
         if np.any(np.diff(en[:, :, :2], axis=0) < -1e-6 * np.maximum(1.0, np.abs(en[1:, :, :2]))):
             bad.append("per-bond dissipation decreased")
     if "frame_bond_dissipated" in ev.catalog:
         fd = ev.array("frame_bond_dissipated")
-        if fd.shape != (F, E, 2):
+        if fd.shape != (K, E, 2):
             bad.append(f"frame_bond_dissipated shape {list(fd.shape)}")
         elif np.any(fd < -1e-6 * max(1.0, float(np.abs(fd).max()))):
             bad.append("negative per-bond frame dissipation")
-    for name, e in ev.catalog.items():
-        if e["dtype"] == "f32" and not np.all(np.isfinite(ev.array(name))):
-            bad.append(f"{name}: nonfinite")
     return bad
 
 
@@ -184,6 +213,13 @@ def audit(runs: list[Path]) -> dict:
             "bytes_per_event": size / len(evs),
             "frames_per_phase": dict(Counter(f["phase"] for ev in evs for f in ev.frames)),
         }
+    storage = {"thinned_events": 0, "frames_total": 0, "frames_kept": 0, "bytes": 0}
+    for ev in events:
+        st = ev.context.get("storage") or {}
+        storage["frames_total"] += ev.n_frames
+        storage["frames_kept"] += len(ev.kept_frames)
+        storage["thinned_events"] += int(st.get("kept_frames") is not None)
+        storage["bytes"] += sum(f.stat().st_size for f in ev.path.rglob("*") if f.is_file())
     splits = Counter(str(ev.context.get("split")) for ev in events)
     ens = defaultdict(list)
     for ev in events:
@@ -205,6 +241,7 @@ def audit(runs: list[Path]) -> dict:
         "truncated_share": len(truncated) / max(len(events), 1),
         "families": fam,
         "splits": dict(splits),
+        "storage": storage,
         "ensembles": {"groups": len(ens), "complete": complete, "members": sum(len(v) for v in ens.values())},
     }
 
@@ -217,7 +254,8 @@ def markdown(r: dict) -> str:
           f"| Events still breaking in their last 0.5 s | {len(r['still_breaking_last_half_second'])} ({100 * r['still_breaking_share']:.1f}%) | must be 0 |",
           f"| Truncated at the cap | {len(r['truncated'])} ({100 * r['truncated_share']:.1f}%) | excluded from outcome metrics |",
           f"| Ensembles (complete / groups, members) | {r['ensembles']['complete']} / {r['ensembles']['groups']}, {r['ensembles']['members']} | all members recorded |",
-          f"| Events per split | {', '.join(f'{k} {v}' for k, v in sorted(r['splits'].items()))} | layout groups held out whole |", "",
+          f"| Events per split | {', '.join(f'{k} {v}' for k, v in sorted(r['splits'].items()))} | layout groups held out whole |",
+          f"| Storage | {r['storage']['bytes'] / 1e9:.2f} GB; {r['storage']['thinned_events']} thinned training events keep {r['storage']['frames_kept']} of {r['storage']['frames_total']} frames | dropped frames regenerate bit-identically (`--regenerate`) |", "",
           "## Event durations (simulated s)", "", "| Range | Events |", "|---|---|"]
     for b in r["duration_histogram_s"]:
         if b["count"]:

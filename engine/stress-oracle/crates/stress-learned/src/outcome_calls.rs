@@ -30,7 +30,7 @@ use crate::outcome::{capture_inputs, capture_state, capture_static, Arrays, Inde
 
 pub const CALLS_SCHEMA: &str = "learned-impact-outcome/3";
 /// Bumped whenever the features or targets this builder writes change.
-pub const BUILDER_REVISION: u32 = 2;
+pub const BUILDER_REVISION: u32 = 3;
 pub const N_TIME_BINS: usize = 8;
 const G0: f64 = 9.81;
 const TINY: f64 = 1e-6;
@@ -91,6 +91,10 @@ pub struct Record {
     pub frames: Vec<Value>,
     f: HashMap<String, (Vec<usize>, Vec<f32>)>,
     i: HashMap<String, (Vec<usize>, Vec<i32>)>,
+    /// A thinned training event (`context.storage.kept_frames`): frame and boundary index
+    /// to stored row.
+    frame_row: Option<HashMap<usize, usize>>,
+    state_row: Option<HashMap<usize, usize>>,
 }
 
 impl Record {
@@ -119,7 +123,9 @@ impl Record {
         let frames = read("frames.json")?.as_array().cloned().unwrap_or_default();
         let outcome = read("outcome.json").ok();
         let name = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        Ok(Record { name, scene, ctx, outcome, frames, f, i })
+        let index = |k: &str| ctx["storage"][k].as_array().map(|v| v.iter().enumerate().map(|(r, x)| (x.as_u64().unwrap_or(0) as usize, r)).collect::<HashMap<_, _>>());
+        let (frame_row, state_row) = (index("kept_frames"), index("state_rows"));
+        Ok(Record { name, scene, ctx, outcome, frames, f, i, frame_row, state_row })
     }
 
     fn from_arrays(name: String, scene: Scene, ctx: Value, a: Arrays) -> Record {
@@ -131,7 +137,7 @@ impl Record {
         for (k, (tail, data, rows)) in a.i32s {
             i.insert(k, (std::iter::once(rows).chain(tail).collect(), data));
         }
-        Record { name, scene, ctx, outcome: None, frames: Vec::new(), f, i }
+        Record { name, scene, ctx, outcome: None, frames: Vec::new(), f, i, frame_row: None, state_row: None }
     }
 
     pub fn revision(&self) -> u64 {
@@ -150,14 +156,44 @@ impl Record {
         self.i.get(n).ok_or_else(|| format!("{}: array {n} missing", self.name))
     }
 
+    /// The stored row of frame (or frame boundary) `r` of array `n` in a thinned event;
+    /// `r` itself otherwise and for arrays kept whole.
+    fn row(&self, n: &str, r: usize) -> Result<usize, String> {
+        let map = if n.starts_with("state_") {
+            &self.state_row
+        } else if n.starts_with("frame_") || n.starts_with("qs_") {
+            &self.frame_row
+        } else {
+            &None
+        };
+        match map {
+            Some(m) => m.get(&r).copied().ok_or_else(|| format!("{}: frame {r} of {n} was not kept (learned_impact_outcome_record --regenerate)", self.name)),
+            None => Ok(r),
+        }
+    }
+
+    /// The frames whose arrays the record holds.
+    pub fn frames_held(&self) -> Vec<usize> {
+        match &self.frame_row {
+            Some(m) => {
+                let mut v: Vec<usize> = m.keys().copied().collect();
+                v.sort_unstable();
+                v
+            }
+            None => (0..self.rows("frame_phase")).collect(),
+        }
+    }
+
     /// Row `r` of an f32 array (all trailing dimensions).
     fn rf(&self, n: &str, r: usize) -> Result<&[f32], String> {
+        let r = self.row(n, r)?;
         let (shape, d) = self.fa(n)?;
         let w: usize = shape[1..].iter().product();
         d.get(r * w..(r + 1) * w).ok_or_else(|| format!("{}: {n} row {r} past {}", self.name, shape[0]))
     }
 
     fn ri(&self, n: &str, r: usize) -> Result<&[i32], String> {
+        let r = self.row(n, r)?;
         let (shape, d) = self.ia(n)?;
         let w: usize = shape[1..].iter().product();
         d.get(r * w..(r + 1) * w).ok_or_else(|| format!("{}: {n} row {r} past {}", self.name, shape[0]))
@@ -820,7 +856,15 @@ fn build_call(r: &Record, st: &Statics, f: usize, prev_call: Option<usize>, hist
     ];
     // bond edges
     // The previous frame's peak utilization: the record's row f - 1, or a live record's own.
-    let peak_prev = if r.has("live_bond_peak_prev") { Some(r.rf("live_bond_peak_prev", 0)?) } else if f > 0 { Some(r.rf("frame_bond_peak_util", f - 1)?) } else { None };
+    let peak_prev = if r.has("live_bond_peak_prev") {
+        Some(r.rf("live_bond_peak_prev", 0)?)
+    } else if r.has("frame_bond_peak_util_prev") {
+        Some(r.rf("frame_bond_peak_util_prev", f)?)
+    } else if f > 0 {
+        Some(r.rf("frame_bond_peak_util", f - 1)?)
+    } else {
+        None
+    };
     let mut be = EdgeSet::default();
     for &k in &live {
         let (a, b) = st.ends[k];
@@ -908,7 +952,7 @@ fn build_call(r: &Record, st: &Statics, f: usize, prev_call: Option<usize>, hist
         put(&format!("{t}_frame"), Arr::F32(vec![k, 3, 3], es.frames.iter().flatten().copied().collect()));
     }
     // variant-B groups and baselines
-    let has_qs = r.has("qs_bond_broken") && r.rows("qs_bond_broken") > f;
+    let has_qs = r.has("qs_bond_broken") && r.row("qs_bond_broken", f).is_ok_and(|row| row < r.rows("qs_bond_broken"));
     let (mut cqs, mut iqs, mut bqs) = (vec![0.0; nc * 6], vec![0.0; ni * 6], vec![0.0; 2 * nb * 3]);
     if has_qs {
         let (qv, qw_, qi_, qb, qp) = (r.rf("qs_chunk_vel", f)?, r.rf("qs_chunk_angvel", f)?, r.rf("qs_impactor", f)?, r.ri("qs_bond_broken", f)?, r.rf("qs_bond_peak_util", f)?);
@@ -1065,10 +1109,11 @@ struct History {
 
 impl History {
     fn of(r: &Record, e: usize) -> Result<History, String> {
-        let nf = r.rows("frame_bond_break_bin");
         let mut broke_in = vec![None; e];
         let mut first_break_frame = None;
-        for f in 0..nf {
+        // Thinned events keep every frame with a break; a live record has no outcome rows.
+        let held = if r.has("frame_bond_break_bin") { r.frames_held() } else { Vec::new() };
+        for f in held {
             let b = r.ri("frame_bond_break_bin", f)?;
             for k in 0..e {
                 if b[k] >= 0 && broke_in[k].is_none() {
@@ -1079,7 +1124,12 @@ impl History {
         }
         // A live one-frame record carries, per broken bond, the frames since it broke.
         let since_live = if r.has("live_bond_frames_since_broken") { Some(r.ri("live_bond_frames_since_broken", 0)?.to_vec()) } else { None };
-        let phase = (0..r.rows("frame_phase")).map(|f| r.ri("frame_phase", f).map(|p| p[0])).collect::<Result<Vec<_>, _>>()?;
+        // Every frame's phase: frames.json (always whole), else the array (a live record).
+        let phase = if r.frames.is_empty() {
+            (0..r.rows("frame_phase")).map(|f| r.ri("frame_phase", f).map(|p| p[0])).collect::<Result<Vec<_>, _>>()?
+        } else {
+            r.frames.iter().map(|x| PHASES.iter().position(|p| Some(*p) == x["phase"].as_str()).unwrap_or(0) as i32).collect()
+        };
         let punch_frames = (0..r.rows("punch_frame")).map(|f| r.ri("punch_frame", f).map(|p| p[0])).collect::<Result<Vec<_>, _>>()?;
         let regime = |s: &str| match s {
             "arrest" => 0,
@@ -1182,10 +1232,9 @@ pub fn build_event(dir: &Path) -> Result<CallEvent, String> {
     }
     let st = Statics::of(&r)?;
     let hist = History::of(&r, st.e)?;
-    let nf = r.rows("frame_phase");
     let mut calls: Vec<Call> = Vec::new();
     let mut last: Option<(usize, usize)> = None;
-    for f in 0..nf {
+    for f in r.frames_held() {
         let prev = last.filter(|&(lf, _)| lf + 1 == f).map(|(_, i)| i);
         if let Some(c) = build_call(&r, &st, f, prev, &hist, &BuildOptions { targets: true })? {
             last = Some((f, calls.len()));

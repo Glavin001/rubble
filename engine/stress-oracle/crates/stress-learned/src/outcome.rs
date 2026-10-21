@@ -41,7 +41,7 @@ use crate::oracle_config::{qs_template, OracleConfig, QS_BASELINE};
 
 pub const OUTCOME_SCHEMA: &str = "learned-impact-frames/1";
 /// Bumped whenever what the recorder writes, or how, changes.
-pub const RECORDER_REVISION: u32 = 6;
+pub const RECORDER_REVISION: u32 = 7;
 /// Break-time bins within a frame.
 pub const TIME_BINS: usize = 8;
 /// Floats per predicted contact (`contact_f32`).
@@ -92,6 +92,7 @@ impl Default for StopRule {
 #[derive(Clone, Debug)]
 pub struct RecordOptions {
     pub oracle: OracleConfig,
+    pub storage: Storage,
     pub stop: StopRule,
     /// Record the QS and punch baselines (on by default; off only for cost measurement).
     pub baselines: bool,
@@ -102,7 +103,7 @@ pub struct RecordOptions {
 
 impl RecordOptions {
     pub fn new(oracle: OracleConfig) -> RecordOptions {
-        RecordOptions { oracle, stop: StopRule::default(), baselines: true, energy_blowup: 10.0 }
+        RecordOptions { oracle, storage: Storage::default(), stop: StopRule::default(), baselines: true, energy_blowup: 10.0 }
     }
 }
 
@@ -191,22 +192,118 @@ impl Arrays {
         self.i32s.entry(name.into()).or_insert_with(|| (tail.to_vec(), Vec::new(), 0));
     }
 
-    fn write(&self, root: &Path) -> Result<Catalog, String> {
+    /// Write every array (`compress`: one zstd frame per file, `.zst`), keeping only the
+    /// rows of `sel`'s frames when given: per-frame arrays (`frame_*`, `qs_*`) their kept
+    /// frames, `state_*` the frame boundaries those frames need (f and f + 1), the punch
+    /// branch and the contact and pair tables the rows of kept frames. Static arrays and the
+    /// trajectory sidecar (`traj_*`) are always whole.
+    fn write(&self, root: &Path, sel: Option<&Selection>, compress: bool) -> Result<Catalog, String> {
+        let frame_col = |name: &str| -> Option<Vec<i32>> {
+            let (_, d, rows) = self.i32s.get(name)?;
+            let w = d.len() / (*rows).max(1);
+            Some((0..*rows).map(|r| d[r * w]).collect())
+        };
+        let contact_frames = frame_col("contact_i32");
+        let pair_frames = frame_col("pair_i32");
+        let punch_frames = frame_col("punch_frame");
+        let keep_rows = |name: &str, rows: usize| -> Option<Vec<usize>> {
+            let sel = sel?;
+            let kept = |frames: &Option<Vec<i32>>| frames.as_ref().map(|v| (0..rows).filter(|&r| sel.keeps(v[r] as usize)).collect());
+            if name.starts_with("static_") || name.starts_with("traj_") {
+                None
+            } else if name.starts_with("state_") {
+                Some(sel.state_rows.clone())
+            } else if name.starts_with("frame_") || name.starts_with("qs_") {
+                Some(sel.frames.clone())
+            } else if name.starts_with("punch_") {
+                kept(&punch_frames)
+            } else if name.starts_with("contact_") {
+                kept(&contact_frames)
+            } else if name.starts_with("pair_") {
+                kept(&pair_frames)
+            } else {
+                None
+            }
+        };
         let mut cat = Catalog::new();
+        let mut put = |name: &str, dtype: &str, tail: &[usize], rows: usize, bytes: Vec<u8>, width: usize| -> Result<(), String> {
+            let (bytes, rows) = match keep_rows(name, rows) {
+                Some(keep) => (keep.iter().flat_map(|&r| bytes[r * width..(r + 1) * width].to_vec()).collect(), keep.len()),
+                None => (bytes, rows),
+            };
+            let shape: Vec<usize> = std::iter::once(rows).chain(tail.iter().copied()).collect();
+            let rel = format!("arrays/{name}.{dtype}{}", if compress { ".zst" } else { "" });
+            if compress {
+                catalog::write_zstd(root, &rel, &bytes)?;
+            } else {
+                std::fs::create_dir_all(root.join("arrays")).map_err(|e| e.to_string())?;
+                std::fs::write(root.join(&rel), &bytes).map_err(|e| format!("{rel}: {e}"))?;
+            }
+            cat.insert(name, dtype, &shape, &rel);
+            Ok(())
+        };
         for (name, (tail, data, rows)) in &self.f32s {
-            let shape: Vec<usize> = std::iter::once(*rows).chain(tail.iter().copied()).collect();
-            let rel = format!("arrays/{name}.f32");
-            catalog::write_f32(root, &rel, &shape, data)?;
-            cat.insert(name, "f32", &shape, &rel);
+            put(name, "f32", tail, *rows, catalog::f32_bytes(data), 4 * tail.iter().product::<usize>())?;
         }
         for (name, (tail, data, rows)) in &self.i32s {
-            let shape: Vec<usize> = std::iter::once(*rows).chain(tail.iter().copied()).collect();
-            let rel = format!("arrays/{name}.i32");
-            catalog::write_i32(root, &rel, &shape, data)?;
-            cat.insert(name, "i32", &shape, &rel);
+            put(name, "i32", tail, *rows, catalog::i32_bytes(data), 4 * tail.iter().product::<usize>())?;
         }
         Ok(cat)
     }
+}
+
+/// The frames a training event keeps (the rest regenerate from its recipe, bit for bit).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Selection {
+    pub frames: Vec<usize>,
+    /// Frame boundaries kept for those frames: f and f + 1.
+    pub state_rows: Vec<usize>,
+}
+
+impl Selection {
+    pub fn keeps(&self, f: usize) -> bool {
+        self.frames.binary_search(&f).is_ok()
+    }
+}
+
+/// Storage of a recording (the user's 20 GB budget; planning decision of 2026-10-21).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Storage {
+    /// One zstd frame per array file.
+    pub compress: bool,
+    /// Training events that are not ensemble members keep only the frames training uses
+    /// (`select_frames`); validation, test, sealed and ensemble events keep every frame.
+    pub select_training_frames: bool,
+    /// Of the settling frames, keep one in this many.
+    pub settling_stride: usize,
+}
+
+impl Default for Storage {
+    fn default() -> Self {
+        Storage { compress: true, select_training_frames: true, settling_stride: 8 }
+    }
+}
+
+/// The frames a training event keeps: every pre-contact, contact, secondary and separation
+/// frame, every frame with a break or a change of phase (and the frame before it), the last
+/// frame, and one settling frame in `stride`: the phases the trainer's quotas draw from, and
+/// every transition. What is dropped is settling, regenerable from the recipe.
+pub fn select_frames(phases: &[&str], breaks: &[usize], stride: usize) -> Selection {
+    let n = phases.len();
+    let mut keep = vec![false; n];
+    for f in 0..n {
+        let transition = (f > 0 && phases[f] != phases[f - 1]) || breaks[f] > 0;
+        if phases[f] != "settling" || transition || f + 1 == n || (f % stride.max(1)) == 0 {
+            keep[f] = true;
+            if transition && f > 0 {
+                keep[f - 1] = true;
+            }
+        }
+    }
+    let frames: Vec<usize> = (0..n).filter(|&f| keep[f]).collect();
+    let mut state_rows: Vec<usize> = frames.iter().flat_map(|&f| [f, f + 1]).collect();
+    state_rows.dedup();
+    Selection { frames, state_rows }
 }
 
 /// Flat chunk and bond numbering over the structures.
@@ -553,6 +650,21 @@ pub(crate) fn capture_state(w: &World, ix: &Index, a: &mut Arrays) -> Result<(),
     Ok(())
 }
 
+/// The compact trajectory at a frame boundary (`traj_*`, never thinned): every cluster's
+/// chunk count, mass, centre of mass, velocity and angular velocity, and every impactor's
+/// state, so whole-life-cycle trajectory metrics work on any event.
+fn capture_traj(w: &World, boundary: usize, a: &mut Arrays) -> Result<(), String> {
+    for (ci, cl) in w.solver.clusters.iter().enumerate() {
+        a.i("traj_cluster_i32", &[3], &[boundary as i32, ci as i32, cl.chunks.len() as i32])?;
+        let mut row = vec![cl.mass as f32];
+        row.extend(v3(cl.com_world()));
+        row.extend(v3(cl.velocity));
+        row.extend(v3(cl.angular_velocity));
+        a.f("traj_cluster_f32", &[10], &row)?;
+    }
+    a.f("traj_impactor", &[w.impactors.len(), IMPACTOR_STATE], &impactor_state(w))
+}
+
 /// The static arrays of the event (`static_*`, one row).
 pub(crate) fn capture_static(w: &World, ix: &Index, a: &mut Arrays) -> Result<(), String> {
     let (n, e) = (ix.n, ix.e);
@@ -877,6 +989,8 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
     a.declare_i("punch_frame", &[]);
     a.declare_i("pair_i32", &[3]);
     capture_state(&world, &ix, &mut a)?;
+    capture_traj(&world, 0, &mut a)?;
+    let mut peak_prev = vec![0f32; ix.e];
 
     let mut frames: Vec<Value> = Vec::new();
     let mut cost: BTreeMap<String, f64> = ["oracle", "qs_branch", "punch_branch", "qs_prior", "overhead"].iter().map(|k| (k.to_string(), 0.0)).collect();
@@ -945,6 +1059,9 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
         a.i("frame_bond_break_bin", &[ix.e], &break_bin)?;
         let peak: Vec<f32> = world.solver.bonds.iter().flatten().map(|b| b.peak_utilization as f32).collect();
         a.f("frame_bond_peak_util", &[ix.e], &peak)?;
+        // The previous frame's peak, per frame, so a kept frame never needs a dropped one.
+        a.f("frame_bond_peak_util_prev", &[ix.e], &peak_prev)?;
+        peak_prev = peak;
         // Per-bond dissipation over the frame (J): joint (fracture, friction, rebar) and
         // dashpot, differenced in f64 (the f32 running totals lose digits).
         let dissipated: Vec<f32> = world.solver.bonds.iter().flatten().zip(&start_energy).flat_map(|(b, &(j, d))| [(b.joint.dissipated - j) as f32, (b.damped - d) as f32]).collect();
@@ -957,6 +1074,7 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
         }
         a.f("frame_impactor_contact", &[world.impactors.len(), IMPACTOR_CONTACT], &contact_summary)?;
         capture_state(&world, &ix, &mut a)?;
+        capture_traj(&world, f + 1, &mut a)?;
 
         // Phase.
         let touched: HashSet<usize> = watch.structures.iter().flatten().copied().collect();
@@ -1108,8 +1226,16 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
 
     // Files.
     let write_json = |name: &str, v: &Value| -> Result<(), String> { fs::write(dir.join(name), serde_json::to_vec_pretty(v).map_err(|e| e.to_string())?).map_err(|e| format!("{name}: {e}")) };
-    let mut cat = statics.write(&dir)?;
-    let frame_cat = a.write(&dir)?;
+    // Storage: training events that are not ensemble members keep only the frames training uses.
+    let split = recipe.parameters.get("split").and_then(|x| x.as_str()).unwrap_or("");
+    let member = recipe.parameters.get("ensemble").and_then(|e| e.get("id")).is_some_and(|x| !x.is_null());
+    let selection = (opts.storage.select_training_frames && split == "train" && !member).then(|| {
+        let phases: Vec<&str> = frames.iter().map(|x| x["phase"].as_str().unwrap_or("")).collect();
+        let breaks: Vec<usize> = frames.iter().map(|x| x["breaks"].as_u64().unwrap_or(0) as usize).collect();
+        select_frames(&phases, &breaks, opts.storage.settling_stride)
+    });
+    let mut cat = statics.write(&dir, None, opts.storage.compress)?;
+    let frame_cat = a.write(&dir, selection.as_ref(), opts.storage.compress)?;
     cat.arrays.extend(frame_cat.arrays);
     cat.save(&dir.join("catalog.json"))?;
     write_json("scene.json", &serde_json::to_value(&scene).map_err(|e| e.to_string())?)?;
@@ -1128,6 +1254,8 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
         "contact_f32_columns": ["time","point_x","point_y","point_z","dir_x","dir_y","dir_z","speed","reduced_mass","modulus","face_radius","hertz_duration","peak_force","punch_ratio","plug_mass","punch_breaks","cluster_chunks"],
         "contact_i32_columns": ["frame","impactor","structure","entry_chunk","cluster_index"],
         "pair_i32_columns": ["frame","chunk_a","chunk_b"],
+        "traj_cluster_i32_columns": ["boundary","cluster_index","n_chunks"],
+        "traj_cluster_f32_columns": ["mass","com_x","com_y","com_z","v_x","v_y","v_z","w_x","w_y","w_z"],
         "impactor_contact_columns": ["contact_substep_fraction","first_bin","last_bin","structure_mask"],
         "bond_joint_columns": ["damage","crush","fatigue","utilization"],
         "bond_energy_columns": ["dissipated_joint","dissipated_damping","stored"],
@@ -1135,6 +1263,11 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
         "bond_mode_values": ["none","tension","shear","compression","buckling"],
         "ensemble": recipe.parameters.get("ensemble").cloned().unwrap_or(Value::Null),
         "split": recipe.parameters.get("split").cloned().unwrap_or(Value::Null),
+        "storage": {"compress": opts.storage.compress, "select_training_frames": opts.storage.select_training_frames,
+            "settling_stride": opts.storage.settling_stride, "frames": frames.len(),
+            "kept_frames": selection.as_ref().map(|x| x.frames.clone()), "state_rows": selection.as_ref().map(|x| x.state_rows.clone()),
+            "dropped_frames": selection.as_ref().map_or(0, |x| frames.len() - x.frames.len()),
+            "regenerate": "learned_impact_outcome_record --regenerate <event dir> --out <dir> (bit-identical replay of the recipe)"},
         "energy_notes": "Under the penalty contact (layer_contact off) the booked contact dissipation (contact_dissipated) is the dashpot quadrature, not its work: the ledger does not close (+0.3% to +4.7% of E0, P0). Use kinetic energies (exact) and per-bond energies as labels; contact_dissipated is a diagnostic only.",
         "bond_geometry_columns": ["centroid_x","centroid_y","centroid_z","normal_x","normal_y","normal_z","t1_x","t1_y","t1_z","area","width_0","width_1","length"],
         "bond_stiffness_columns": ["kn","ks","kb_t1","kb_t2","kt"],
@@ -1178,4 +1311,93 @@ pub fn finished_events(out: &Path) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = fs::read_dir(out).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.join("outcome.json").exists()).collect();
     v.sort();
     v
+}
+
+/// What `regenerate` restored and checked.
+#[derive(Clone, Debug, Serialize)]
+pub struct Regenerated {
+    pub event: PathBuf,
+    pub frames: usize,
+    pub kept_frames: usize,
+    pub arrays_checked: usize,
+    pub rows_checked: usize,
+}
+
+/// Re-record a (possibly thinned) event from its recipe with every frame kept, into
+/// `out/<event_id>`, and check that every row the stored event holds is byte-identical in
+/// the regenerated one (the oracle is deterministic; scenes round-trip exactly). Errors on
+/// the first difference.
+pub fn regenerate(event: &Path, out: &Path) -> Result<Regenerated, String> {
+    let read = |n: &str| -> Result<Value, String> { serde_json::from_slice(&fs::read(event.join(n)).map_err(|e| format!("{n}: {e}"))?).map_err(|e| format!("{n}: {e}")) };
+    let ctx = read("context.json")?;
+    let replay = read("replay.json")?;
+    let recipe: OutcomeRecipe = serde_json::from_value(replay["recipe"].clone()).map_err(|e| e.to_string())?;
+    let mut opts = RecordOptions::new(serde_json::from_value(ctx["oracle_config"].clone()).map_err(|e| e.to_string())?);
+    opts.stop = serde_json::from_value(ctx["stop_rule"].clone()).map_err(|e| e.to_string())?;
+    opts.baselines = !ctx["qs_baseline"].is_null();
+    opts.storage = Storage { compress: ctx["storage"]["compress"].as_bool().unwrap_or(false), select_training_frames: false, settling_stride: 1 };
+    fs::create_dir_all(out).map_err(|e| e.to_string())?;
+    let summary = record_outcome_event(&recipe, out, &opts, &|_| {})?;
+    let fresh = out.join(&recipe.event_id);
+    let fp = |dir: &Path| -> Result<String, String> { Ok(serde_json::from_slice::<Value>(&fs::read(dir.join("outcome.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?["fingerprint"].as_str().unwrap_or("").to_string()) };
+    if fp(event)? != summary.fingerprint {
+        return Err(format!("regenerated end fingerprint {} differs from the stored {}", summary.fingerprint, fp(event)?));
+    }
+    let (old_cat, new_cat) = (Catalog::load(&event.join("catalog.json"))?, Catalog::load(&fresh.join("catalog.json"))?);
+    let rows_of = |k: &str| ctx["storage"][k].as_array().map(|v| v.iter().map(|x| x.as_u64().unwrap_or(0) as usize).collect::<Vec<_>>());
+    let (kept, state_rows) = (rows_of("kept_frames"), rows_of("state_rows"));
+    let new_bytes = |n: &str| -> Result<(Vec<u8>, usize), String> {
+        let e = new_cat.arrays.get(n).ok_or_else(|| format!("regenerated event lacks {n}"))?;
+        let b = catalog::read_bytes(&fresh, e)?;
+        let w = b.len() / e.shape[0].max(1);
+        Ok((b, w))
+    };
+    let frame_col = |n: &str| -> Result<Option<Vec<i32>>, String> {
+        match new_cat.arrays.get(n) {
+            Some(e) => {
+                let d = catalog::read_i32(&fresh, e)?;
+                let w = d.len() / e.shape[0].max(1);
+                Ok(Some((0..e.shape[0]).map(|r| d[r * w]).collect()))
+            }
+            None => Ok(None),
+        }
+    };
+    let (contact_f, pair_f, punch_f) = (frame_col("contact_i32")?, frame_col("pair_i32")?, frame_col("punch_frame")?);
+    let (mut arrays_checked, mut rows_checked) = (0, 0);
+    for (name, e) in &old_cat.arrays {
+        let stored = catalog::read_bytes(event, e)?;
+        let (fresh_bytes, w) = new_bytes(name)?;
+        let pick = |rows: Vec<usize>| -> Vec<u8> { rows.iter().flat_map(|&r| fresh_bytes[r * w..(r + 1) * w].to_vec()).collect() };
+        let by_frame = |col: &Option<Vec<i32>>| -> Vec<usize> {
+            match (col, &kept) {
+                (Some(c), Some(k)) => (0..c.len()).filter(|&r| k.binary_search(&(c[r] as usize)).is_ok()).collect(),
+                (Some(c), None) => (0..c.len()).collect(),
+                _ => Vec::new(),
+            }
+        };
+        let expect = match (&kept, &state_rows) {
+            (Some(k), Some(srows)) if !name.starts_with("static_") && !name.starts_with("traj_") => {
+                if name.starts_with("state_") {
+                    pick(srows.clone())
+                } else if name.starts_with("frame_") || name.starts_with("qs_") {
+                    pick(k.clone())
+                } else if name.starts_with("punch_") {
+                    pick(by_frame(&punch_f))
+                } else if name.starts_with("contact_") {
+                    pick(by_frame(&contact_f))
+                } else if name.starts_with("pair_") {
+                    pick(by_frame(&pair_f))
+                } else {
+                    fresh_bytes.clone()
+                }
+            }
+            _ => fresh_bytes.clone(),
+        };
+        if expect != stored {
+            return Err(format!("{name}: the regenerated rows differ from the stored ones"));
+        }
+        arrays_checked += 1;
+        rows_checked += e.shape.first().copied().unwrap_or(0);
+    }
+    Ok(Regenerated { event: fresh, frames: summary.frames, kept_frames: kept.map_or(summary.frames, |k| k.len()), arrays_checked, rows_checked })
 }

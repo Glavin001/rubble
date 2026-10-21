@@ -5,6 +5,14 @@
 //!       [--oracle a12_realtime] [--jobs N] [--limit N] [--plan-only] [--no-baselines]
 //!       [--max-seconds S] [--max-failure-fraction F] [--pause-file PATH]
 //!       [--members M] [--ensemble-train-share F] [--no-ensembles]
+//!       [--budget-gb G] [--min-free-gb F] [--no-thinning]
+//!
+//! Storage (default): arrays compressed with zstd, and training events that are not
+//! ensemble members keep only the frames training uses (dropped frames regenerate
+//! bit-identically with `learned_impact_outcome_record --regenerate`). `--budget-gb` caps
+//! the whole `--runs` tree (default 19) and `--min-free-gb` the disk's free space (default
+//! 100): when the next events could cross either, no new event starts, and the job ends
+//! with state "budget" and a clear message.
 //!
 //! Every recipe gets a split (train/val/test by a seeded hash of its layout group; the
 //! `m5_reference` family is sealed). Every val/test/sealed configuration, and a share of the
@@ -79,8 +87,13 @@ fn main() {
     if let Some(s) = val("--max-seconds") {
         opts.stop.max_seconds = s.parse().expect("--max-seconds");
     }
+    if flag("--no-thinning") {
+        opts.storage.select_training_frames = false;
+    }
+    let budget = (val("--budget-gb").map_or(19.0, |x| x.parse::<f64>().expect("--budget-gb")) * 1e9) as u64;
+    let min_free = (val("--min-free-gb").map_or(100.0, |x| x.parse::<f64>().expect("--min-free-gb")) * 1e9) as u64;
     fs::create_dir_all(&dir).unwrap();
-    let plan_json = json!({"job": job, "catalog": catalog, "seed": seed, "oracle_config": oracle, "baselines": opts.baselines, "stop_rule": opts.stop, "recipes": recipes});
+    let plan_json = json!({"job": job, "catalog": catalog, "seed": seed, "oracle_config": oracle, "baselines": opts.baselines, "stop_rule": opts.stop, "storage": opts.storage, "recipes": recipes});
     let bytes = serde_json::to_vec_pretty(&plan_json).unwrap();
     let path = dir.join("recipes.json");
     if path.exists() {
@@ -101,16 +114,32 @@ fn main() {
     let max_fail: f64 = val("--max-failure-fraction").map_or(0.05, |x| x.parse().expect("--max-failure-fraction"));
     let pause = val("--pause-file").map(PathBuf::from);
     progress.line(&format!("[gen] start {job}: {total} events, {threads} threads, oracle {} (provisional {}), baselines {}", oracle.name, oracle.provisional, opts.baselines));
+    let used = std::sync::atomic::AtomicU64::new(dir_bytes(&runs));
+    let over = std::sync::atomic::AtomicBool::new(false);
+    progress.line(&format!("[gen] budget: {:.2} GB used of {:.2} GB under {}, at least {:.0} GB free kept", used.load(Ordering::SeqCst) as f64 / 1e9, budget as f64 / 1e9, runs.display(), min_free as f64 / 1e9));
     let finished = AtomicUsize::new(0);
     let failures = AtomicUsize::new(0);
     let fail_log = Mutex::new(fs::OpenOptions::new().create(true).append(true).open(dir.join("failures.jsonl")).unwrap());
     let summaries = Mutex::new(fs::OpenOptions::new().create(true).append(true).open(dir.join("summaries.jsonl")).unwrap());
+    let largest_event = std::sync::atomic::AtomicU64::new(0);
     let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
     pool.install(|| {
         recipes.par_iter().for_each(|r| {
             if events.join(&r.event_id).join("outcome.json").exists() {
                 progress.update(|s| s.skipped += 1);
                 return;
+            }
+            // The budget: the next `threads` events at the largest size seen so far must fit.
+            {
+                let largest = largest_event.load(Ordering::SeqCst).max(5_000_000);
+                let need = used.load(Ordering::SeqCst) + largest * threads as u64;
+                let free = free_bytes(&runs);
+                if need > budget || free < min_free + largest * threads as u64 {
+                    if !over.swap(true, Ordering::SeqCst) {
+                        progress.line(&format!("[gen] STOP (budget): {:.2} GB used + {:.2} GB reserve > {:.2} GB budget, or {:.0} GB free < {:.0} GB minimum; no new events start", used.load(Ordering::SeqCst) as f64 / 1e9, (largest * threads as u64) as f64 / 1e9, budget as f64 / 1e9, free as f64 / 1e9, min_free as f64 / 1e9));
+                    }
+                    return;
+                }
             }
             if let Some(p) = &pause {
                 let mut said = false;
@@ -129,6 +158,9 @@ fn main() {
             progress.finish_event(&r.event_id);
             match result {
                 Ok(s) => {
+                    let bytes = dir_bytes(&events.join(&s.event_id));
+                    used.fetch_add(bytes, Ordering::SeqCst);
+                    largest_event.fetch_max(bytes, Ordering::SeqCst);
                     let k = finished.fetch_add(1, Ordering::SeqCst) + 1;
                     progress.update(|st| st.done += 1);
                     let el = progress.elapsed();
@@ -159,9 +191,38 @@ fn main() {
     let fails = failures.load(Ordering::SeqCst);
     let failed = fails as f64 > max_fail * total as f64;
     progress.line(&format!("[gen] end {job}: {} recorded, {fails} failures, {:.0} s", finished.load(Ordering::SeqCst), progress.elapsed()));
-    progress.close(if failed { "failed" } else { "done" });
+    progress.update(|st| st.extra = json!({"bytes_used": used.load(Ordering::SeqCst), "budget_bytes": budget, "stopped_by_budget": over.load(Ordering::SeqCst)}));
+    progress.close(if failed { "failed" } else if over.load(Ordering::SeqCst) { "budget" } else { "done" });
     if failed {
         eprintln!("failures {fails}/{total} exceed {max_fail}");
         std::process::exit(1);
     }
+}
+
+/// Bytes of every file under `p`.
+fn dir_bytes(p: &std::path::Path) -> u64 {
+    let mut total = 0;
+    let mut stack = vec![p.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in fs::read_dir(&d).into_iter().flatten().flatten() {
+            match e.metadata() {
+                Ok(m) if m.is_dir() => stack.push(e.path()),
+                Ok(m) => total += m.len(),
+                Err(_) => {}
+            }
+        }
+    }
+    total
+}
+
+/// Free bytes on the volume holding `p` (`df -k`), or u64::MAX if unknown.
+fn free_bytes(p: &std::path::Path) -> u64 {
+    std::process::Command::new("df")
+        .arg("-k")
+        .arg(p)
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|t| t.lines().nth(1).and_then(|l| l.split_whitespace().nth(3)).and_then(|x| x.parse::<u64>().ok()))
+        .map_or(u64::MAX, |k| k * 1024)
 }
