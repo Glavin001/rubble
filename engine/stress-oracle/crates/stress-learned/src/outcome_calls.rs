@@ -1,5 +1,5 @@
 //! The call builder: P1's `learned-impact-frames/1` frame records → P2's per-call
-//! `learned-impact-outcome/2` records (P2's `OUTCOME_CALLS_SCHEMA.md` and `schema.py` are
+//! `learned-impact-outcome/3` records (P2's `OUTCOME_CALLS_SCHEMA.md` and `schema.py` are
 //! normative). The single source of every model feature: P3 ports this code to the engine.
 //!
 //! One call per frame whose routing put chunks in an island: every routed chunk and
@@ -28,12 +28,15 @@ use stress_ref::world::{tiered_impact_speed, World};
 use crate::catalog::{self, Catalog};
 use crate::outcome::{capture_inputs, capture_state, capture_static, Arrays, Index, PHASES};
 
-pub const CALLS_SCHEMA: &str = "learned-impact-outcome/2";
+pub const CALLS_SCHEMA: &str = "learned-impact-outcome/3";
 /// Bumped whenever the features or targets this builder writes change.
-pub const BUILDER_REVISION: u32 = 1;
+pub const BUILDER_REVISION: u32 = 2;
 pub const N_TIME_BINS: usize = 8;
 const G0: f64 = 9.81;
 const TINY: f64 = 1e-6;
+/// A cracked face or a structure contact is an edge while its gap is within this many chunk
+/// sizes `L`.
+const CONTACT_MARGIN: f64 = 0.25;
 
 fn v(name: &str, n: usize) -> Vec<String> {
     (0..n).map(|i| format!("{name}_{i}")).collect()
@@ -557,7 +560,19 @@ fn build_call(r: &Record, st: &Statics, f: usize, prev_call: Option<usize>, hist
     // scales
     let l = median(isl.iter().map(|&c| 8.0 * st.half[c].x * st.half[c].y * st.half[c].z).collect()).cbrt();
     let m = median(mc.clone());
-    let v = if crow.is_empty() { tiered_impact_speed() } else { crow.iter().map(|&q| cf(q)[7] as f64).fold(0.0, f64::max).max(TINY) };
+    // The reference speed (calls /3): the largest of the routing speed, any predicted
+    // contact's closing speed, and every island body's speed relative to the island's centre
+    // of mass and its rim speed (|w| x half-diagonal), so every velocity feature is O(1).
+    let mut v = tiered_impact_speed();
+    for &q in &crow {
+        v = v.max(cf(q)[7] as f64);
+    }
+    for j in 0..nc {
+        v = v.max((vc[j] - vcom).norm()).max(wc[j].norm() * st.half[isl[j]].norm());
+    }
+    for j in 0..ni {
+        v = v.max((vi[j] - vcom).norm()).max(wi[j].norm() * st.imp_half[iimp[j]].norm());
+    }
     let dom = {
         // The island's dominant material: the most massive chunk's.
         let j = (0..nc).max_by(|&a, &b| mc[a].total_cmp(&mc[b])).unwrap();
@@ -688,8 +703,13 @@ fn build_call(r: &Record, st: &Statics, f: usize, prev_call: Option<usize>, hist
             nrm = -nrm;
             t1 = -t1;
         }
-        let gap = (xc[jb] - xc[ja]).dot(nrm) - support(&rb[ja], st.half[a], nrm) - support(&rb[jb], st.half[b], nrm);
-        if gap >= 0.5 * l {
+        // Kept only while the faces are still in or near contact: the same margin as a
+        // structure contact along the normal, and overlapping across it.
+        let d = xc[jb] - xc[ja];
+        let gap = d.dot(nrm) - support(&rb[ja], st.half[a], nrm) - support(&rb[jb], st.half[b], nrm);
+        let t2 = nrm.cross(t1);
+        let across = |t: Vec3| d.dot(t).abs() <= support(&rb[ja], st.half[a], t) + support(&rb[jb], st.half[b], t);
+        if gap > CONTACT_MARGIN * l || !across(t1) || !across(t2) {
             continue;
         }
         cracked_pairs.insert((a.min(b), a.max(b)));
@@ -723,7 +743,7 @@ fn build_call(r: &Record, st: &Statics, f: usize, prev_call: Option<usize>, hist
         }
         let nrm = d.normalized();
         let gap = d.norm() - support(&rb[ja], st.half[a], nrm) - support(&rb[jb], st.half[b], nrm);
-        if gap > 0.25 * l {
+        if gap > CONTACT_MARGIN * l {
             continue;
         }
         let fr = Frame3::of(tangent(nrm, &rb[ja]), nrm);
