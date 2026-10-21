@@ -61,3 +61,33 @@ def test_trainer_end_to_end(tmp_path, device):
     from learned_impact.outcome.train import load_model
     model, ck = load_model(run / "last.pt")
     assert ck["schema_version"] == "learned-impact-outcome/1"
+
+
+def test_batches_pack_to_a_budget_without_dropping():
+    from learned_impact.outcome.train import _batches, call_size, take_batch
+
+    calls, _ = make_calls(range(10))
+    sizes = [call_size(c) for c in calls]
+    bs = _batches(calls, budget=3 * max(sizes), max_calls=64)
+    assert sum(len(b) for b in bs) == len(calls)
+    assert all(sum(call_size(c) for c in b) <= 3 * max(sizes) for b in bs)
+    one, rest = take_batch(calls, budget=1, max_calls=64)  # oversized call: alone, not dropped
+    assert len(one) == 1 and len(rest) == len(calls) - 1
+
+
+def test_trainer_chained_topology_pushforward(tmp_path):
+    from learned_impact.outcome import schema as S
+    from learned_impact.outcome.synthetic import make_event
+
+    for i in range(6):
+        m, cs, st = make_event(40 + i, settle_calls=2, split="val" if i == 0 else "train")
+        S.write_event(tmp_path / "data" / m["event_id"], m, cs, st)
+    cfg = TrainConfig(dataset=str(tmp_path / "data"), out=str(tmp_path / "run"), steps=6,
+                      batch_calls=4, eval_every=6, device="cpu", pushforward_prob=1.0,
+                      pushforward_steps=3, warmup=1, loss=Lo.LossConfig(balance="uncertainty"))
+    train(cfg)
+    log = (tmp_path / "run" / "progress.log").read_text()
+    depths = [float(x.split("pushforward_depth=")[1].split()[0]) for x in log.splitlines()
+              if "pushforward_depth=" in x]
+    assert depths and max(depths) > 1.0, "chains should go deeper than one frame"
+    assert "λeff" in log

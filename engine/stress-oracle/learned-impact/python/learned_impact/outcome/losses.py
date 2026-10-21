@@ -44,6 +44,14 @@ class LossConfig:
     beta_support: float = 1.0  # consequence weight: bond on a support load path
     energy_tolerance: float = 0.05
     log_r_floor: float = 1e-4
+    # "fixed": λ·L/L_zero (the plan's default; λ changes only on validation metrics).
+    # "uncertainty": Kendall, Gal & Cipolla (CVPR 2018) homoscedastic weighting on top of
+    # the fixed normalisation, an ablation that must beat "fixed" on validation metrics.
+    balance: str = "fixed"
+    # V34 detector: warn when one term carries more than this share of the summed per-term
+    # gradient norms for `dominance_patience` consecutive measurements.
+    dominance_warn: float = 0.6
+    dominance_patience: int = 3
 
 
 def bond_family(b: Batch) -> list[str]:
@@ -244,6 +252,47 @@ def total(terms: dict[str, Tensor], norms: dict[str, float], cfg: LossConfig
     normed = {k: terms[k] / max(norms.get(k, 1.0), 1e-12) for k in terms}
     loss = sum(cfg.weights.get(k, 1.0) * v for k, v in normed.items())
     return loss, normed
+
+
+class UncertaintyWeights(torch.nn.Module):
+    """`L = Σ λ_k (½ e^{−s_k} L_k + ½ s_k)` with learned s_k = log σ_k² (init 0, so it starts
+    exactly at the fixed weighting)."""
+
+    def __init__(self, terms=TERMS):
+        super().__init__()
+        self.terms = tuple(terms)
+        self.log_var = torch.nn.Parameter(torch.zeros(len(self.terms)))
+
+    def forward(self, normed: dict[str, Tensor], weights: dict[str, float]) -> Tensor:
+        out = 0.0
+        for i, k in enumerate(self.terms):
+            if k in normed:
+                s = self.log_var[i]
+                out = out + weights.get(k, 1.0) * (0.5 * torch.exp(-s) * normed[k] + 0.5 * s)
+        return out
+
+    def effective(self, weights: dict[str, float]) -> dict[str, float]:
+        return {k: weights.get(k, 1.0) * float(0.5 * torch.exp(-self.log_var[i]))
+                for i, k in enumerate(self.terms)}
+
+
+class DominanceMonitor:
+    """Flags a term whose gradient share stays above `share` (the V34 failure: one field was
+    >99% of the loss)."""
+
+    def __init__(self, share: float, patience: int):
+        self.share, self.patience = share, patience
+        self.streak: dict[str, int] = {}
+
+    def update(self, gnorms: dict[str, float]) -> tuple[dict[str, float], list[str]]:
+        tot = sum(gnorms.values()) or 1.0
+        shares = {k: v / tot for k, v in gnorms.items()}
+        flagged = []
+        for k, sh in shares.items():
+            self.streak[k] = self.streak.get(k, 0) + 1 if sh > self.share else 0
+            if self.streak[k] >= self.patience:
+                flagged.append(k)
+        return shares, flagged
 
 
 @torch.no_grad()

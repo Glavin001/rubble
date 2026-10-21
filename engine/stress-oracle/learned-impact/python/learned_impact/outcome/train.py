@@ -45,7 +45,11 @@ class TrainConfig:
     dataset: str = ""
     out: str = "runs/outcome"
     steps: int = 1000
-    batch_calls: int = 8
+    batch_calls: int = 64  # upper bound on calls per batch
+    # Batches are packed to a node + undirected-edge budget, not a fixed call count: the
+    # step is launch-latency bound on MPS, so filling it is nearly free (measured: 8 calls of
+    # 220 chunks = 37 ms/step). One call over the budget still forms its own batch.
+    batch_budget: int = 20000
     lr: float = 1e-3
     min_lr: float = 1e-6
     warmup: int = 50
@@ -57,6 +61,8 @@ class TrainConfig:
     include_unrouted: bool = False  # variant C's non-impact frames; A and B ignore them
     noise_sigma: float = 0.0  # GNS noise on carried columns (σ tuned on validation)
     pushforward_prob: float = 0.0
+    pushforward_steps: int = 2  # frames chained per pushforward (plan: 2–4)
+    pushforward_topology: bool = True  # successors take the model's breaks, not the oracle's
     eval_every: int = 200
     log_every_s: float = 30.0
     log_every_steps: int = 25
@@ -163,8 +169,95 @@ class PhaseQuotaSampler:
         return out
 
 
-def _batches(calls: list[S.Call], n: int) -> list[list[S.Call]]:
-    return [calls[i:i + n] for i in range(0, len(calls), n)]
+def call_size(c: S.Call) -> int:
+    k = c.counts
+    return (k["chunks"] + k["impactors"] + k["bond"] + k["cracked"] + k["impactor_contact"]
+            + k["structure_contact"])
+
+
+def take_batch(queue: list[S.Call], budget: int, max_calls: int
+               ) -> tuple[list[S.Call], list[S.Call]]:
+    """Greedy packing in queue order (the sampler already shuffled): never drops or splits
+    a call; one oversized call forms its own batch."""
+    used, n = 0, 0
+    for c in queue:
+        sz = call_size(c)
+        if n and (used + sz > budget or n >= max_calls):
+            break
+        used += sz
+        n += 1
+    return queue[:n], queue[n:]
+
+
+def _batches(calls: list[S.Call], budget: int, max_calls: int) -> list[list[S.Call]]:
+    out, rest = [], list(calls)
+    while rest:
+        b, rest = take_batch(rest, budget, max_calls)
+        out.append(b)
+    return out
+
+
+def _produce(sampler: "PhaseQuotaSampler", cfg: "TrainConfig", coll, nrng):
+    """Sampling, noise and collation, in order (deterministic for a seed)."""
+    queue: list[S.Call] = []
+    epoch = 0
+    while True:
+        counts = None
+        if sum(call_size(c) for c in queue) < cfg.batch_budget:
+            queue.extend(sampler.epoch())
+            epoch += 1
+            counts = dict(sampler.epoch_counts)
+        calls, queue = take_batch(queue, cfg.batch_budget, cfg.batch_calls)
+        if cfg.noise_sigma > 0:
+            calls = [P.add_noise(c, cfg.noise_sigma, nrng) for c in calls]
+        yield calls, coll(calls), epoch, counts
+
+
+class Prefetch:
+    """Runs a generator in one background thread, `depth` items ahead (collation is numpy
+    and overlaps the GPU step). Errors re-raise in the caller."""
+
+    def __init__(self, make_gen, depth: int = 2):
+        import queue
+        import threading
+
+        self.q: "queue.Queue" = queue.Queue(maxsize=depth)
+        self.stop = threading.Event()
+
+        def run():
+            try:
+                for item in make_gen():
+                    while not self.stop.is_set():
+                        try:
+                            self.q.put(("ok", item), timeout=0.5)
+                            break
+                        except queue.Full:
+                            continue
+                    if self.stop.is_set():
+                        return
+            except BaseException as e:  # noqa: BLE001
+                self.q.put(("err", e))
+
+        self.t = threading.Thread(target=run, daemon=True)
+        self.t.start()
+
+    def next(self):
+        kind, item = self.q.get()
+        if kind == "err":
+            raise item
+        return item
+
+    def close(self):
+        self.stop.set()
+
+
+def make_optimizer(params, cfg: "TrainConfig", dev: torch.device):
+    """Fused AdamW where the backend has it (one kernel for all parameters instead of
+    several per tensor: the optimiser was about a third of an MPS step), else foreach."""
+    try:
+        return torch.optim.AdamW(params, lr=cfg.lr, weight_decay=cfg.weight_decay, fused=True)
+    except (RuntimeError, TypeError, ValueError):
+        return torch.optim.AdamW(params, lr=cfg.lr, weight_decay=cfg.weight_decay, foreach=True)
 
 
 def _lr(step: int, cfg: TrainConfig) -> float:
@@ -190,6 +283,7 @@ def _predictions(b: Batch, dec: dict) -> list[dict[str, dict[int, np.ndarray]]]:
     iv, iw = dec["imp_v_end"].cpu().numpy(), dec["imp_w_end"].cpu().numpy()
     dmg = dec["bond_damage_end"].detach().cpu().numpy()
     peak = np.exp(dec["_log_r"].detach().cpu().numpy())
+    broke = dec["bond_broke"].cpu().numpy()
     out = []
     for g, c in enumerate(b.calls):
         a = c.arrays
@@ -201,6 +295,7 @@ def _predictions(b: Batch, dec: dict) -> list[dict[str, dict[int, np.ndarray]]]:
             "imp_w": dict(zip(a["impactor_key"].tolist(), iw[s_i])),
             "bond_damage": dict(zip(a["bond_key"].tolist(), dmg[s_b])),
             "bond_peak": dict(zip(a["bond_key"].tolist(), peak[s_b])),
+            "broke": {int(k) for k, x in zip(a["bond_key"].tolist(), broke[s_b]) if x},
         })
     return out
 
@@ -251,61 +346,90 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
     cache = HierarchyCache(cfg.model.levels)
     model = ImpactOutcomeModel(cfg.model).to(dev)
     params = [p for p in model.parameters()]
-    opt = torch.optim.AdamW(params, lr=cfg.lr, weight_decay=cfg.weight_decay)
+    balancer = None
+    if cfg.loss.balance == "uncertainty":
+        balancer = Lo.UncertaintyWeights().to(dev)
+    elif cfg.loss.balance != "fixed":
+        raise ValueError(f"loss.balance {cfg.loss.balance!r}")
+    opt = make_optimizer(params + (list(balancer.parameters()) if balancer else []), cfg, dev)
+    monitor = Lo.DominanceMonitor(cfg.loss.dominance_warn, cfg.loss.dominance_patience)
     sampler = PhaseQuotaSampler(data.train, cfg.phase_quotas, cfg.seed)
     nrng = np.random.default_rng(cfg.seed)
     prog.line(f"device={dev} params={count_parameters(model)} train_calls={len(data.train)} "
               f"val_calls={len(data.val)} variant={cfg.model.variant} width={cfg.model.width} "
               f"rounds={cfg.model.rounds} priors={ {k: round(v, 4) for k, v in data.priors.items()} }")
     coll = lambda calls: collate(calls, data.structures, cache)  # noqa: E731
-    norm_batches = [coll(bc) for bc in _batches(data.train, cfg.batch_calls)[:64]]
+    norm_batches = [coll(bc) for bc in
+                    _batches(data.train, cfg.batch_budget, cfg.batch_calls)[:64]]
     norms = Lo.zero_baselines(norm_batches, cfg.loss, data.priors)
     prog.line("zero-predictor baselines: " + " ".join(f"{k}={v:.4g}" for k, v in norms.items()))
-    val_batches = [coll(bc) for bc in _batches(data.val, cfg.batch_calls)]
+    val_batches = [coll(bc) for bc in _batches(data.val, cfg.batch_budget, cfg.batch_calls)]
     best = {"score": float("inf"), "step": None, "metrics": None}
-    queue: list[S.Call] = []
     last_log = time.time()
     acc: dict[str, list[float]] = defaultdict(list)
     epoch = 0
     gnorm_last: dict[str, float] = {}
     prog.update(force=True, state="running")
+    batches = Prefetch(lambda: _produce(sampler, cfg, coll, nrng), depth=2)
     for step in range(cfg.steps):
-        if len(queue) < cfg.batch_calls:
-            queue.extend(sampler.epoch())
-            epoch += 1
-            prog.line(f"epoch {epoch}: phase counts {dict(sampler.epoch_counts)}")
-        calls, queue = queue[:cfg.batch_calls], queue[cfg.batch_calls:]
-        if cfg.noise_sigma > 0:
-            calls = [P.add_noise(c, cfg.noise_sigma, nrng) for c in calls]
+        calls, b, epoch, epoch_counts = batches.next()
+        if epoch_counts is not None:
+            prog.line(f"epoch {epoch}: phase counts {epoch_counts}")
         for g_ in opt.param_groups:
             g_["lr"] = _lr(step, cfg)
-        b = coll(calls).to(dev)
+        b = b.to(dev)
         o = model(b)
         terms = Lo.loss_terms(o, b, cfg.loss, data.priors, cfg.decode)
         loss, normed = Lo.total(terms, norms, cfg.loss)
+        if balancer is not None:
+            loss = balancer(normed, cfg.loss.weights)
         if cfg.pushforward_prob > 0 and random.random() < cfg.pushforward_prob:
-            succ_pairs = [(i, data.successor[(c.event_id, c.call_index)]) for i, c in
-                          enumerate(calls) if (c.event_id, c.call_index) in data.successor]
-            if succ_pairs:
+            # Pushforward over up to `pushforward_steps` frames: each step's input is the
+            # model's own decoded outcome of the previous frame (stopped gradient between
+            # steps, Brandstetter et al. 2022), its targets are the oracle's.
+            chain_calls, chain_b, chain_o = calls, b, o
+            pf_losses = []
+            for _k in range(cfg.pushforward_steps):
+                pairs = [(i, data.successor[(c.event_id, c.call_index)])
+                         for i, c in enumerate(chain_calls)
+                         if (c.event_id, c.call_index) in data.successor]
+                if not pairs:
+                    break
                 with torch.no_grad():
-                    bc = b if dev.type == "cpu" else b.to("cpu")
-                    oc = {k: v.detach().cpu() for k, v in o.items()}
+                    bc = chain_b if dev.type == "cpu" else chain_b.to("cpu")
+                    oc = {k: v.detach().cpu() for k, v in chain_o.items()}
                     dec = D.decode(oc, bc, cfg.decode)
                     dec["_log_r"] = oc["bond_log_r"]
                     preds = _predictions(bc, dec)
-                succ = [P.rewrite_carried(s, preds[i]) for i, s in succ_pairs]
+                succ = [P.push(chain_calls[i], s_, preds[i],
+                               preds[i]["broke"] if cfg.pushforward_topology else None)
+                        for i, s_ in pairs]
                 bs = coll(succ).to(dev)
-                ts = Lo.loss_terms(model(bs), bs, cfg.loss, data.priors, cfg.decode)
-                ls, _ = Lo.total(ts, norms, cfg.loss)
+                os_ = model(bs)
+                ts = Lo.loss_terms(os_, bs, cfg.loss, data.priors, cfg.decode)
+                ls, ns = Lo.total(ts, norms, cfg.loss)
+                if balancer is not None:
+                    ls = balancer(ns, cfg.loss.weights)
+                pf_losses.append(ls)
+                chain_calls, chain_b, chain_o = succ, bs, os_
+            if pf_losses:
+                ls = sum(pf_losses) / len(pf_losses)
                 loss = loss + ls
                 acc["pushforward"].append(float(ls.detach()))
+                acc["pushforward_depth"].append(float(len(pf_losses)))
         if not torch.isfinite(loss):
             raise FloatingPointError(f"non-finite loss at step {step}: "
                                      f"{ {k: float(v) for k, v in terms.items()} }")
         opt.zero_grad(set_to_none=True)
         if cfg.grad_norm_every and step % cfg.grad_norm_every == 0:
-            gnorm_last = grad_norms({k: cfg.loss.weights.get(k, 1.0) * v
-                                     for k, v in normed.items()}, params)
+            eff = balancer.effective(cfg.loss.weights) if balancer else cfg.loss.weights
+            gnorm_last = grad_norms({k: eff.get(k, 1.0) * v for k, v in normed.items()}, params)
+            shares, flagged = monitor.update(gnorm_last)
+            if flagged:
+                prog.line(f"WARNING gradient dominance: {flagged} carry "
+                          f"{ {k: round(shares[k], 3) for k in flagged} } of the summed "
+                          f"per-term gradient norm (V34 failure mode); check the targets and λ")
+                prog.update(force=True, dominance_warning={k: shares[k] for k in flagged})
         loss.backward()
         total_norm = float(torch.nn.utils.clip_grad_norm_(params, cfg.grad_clip))
         opt.step()
@@ -320,9 +444,13 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
             eta = (cfg.steps - step - 1) / max(rate, 1e-9)
             terms_s = " ".join(f"{k}={np.mean(v):.3f}" for k, v in acc.items()
                                if k not in ("loss", "grad_norm"))
-            gn = " ".join(f"{k}={v:.2e}" for k, v in gnorm_last.items())
+            tot_g = sum(gnorm_last.values()) or 1.0
+            gn = " ".join(f"{k}={v / tot_g:.2f}" for k, v in gnorm_last.items())
+            if balancer is not None:
+                gn += " λeff[" + " ".join(f"{k}={v:.2f}" for k, v in
+                                         balancer.effective(cfg.loss.weights).items()) + "]"
             prog.line(f"step {step + 1}/{cfg.steps} ep {epoch} loss={np.mean(acc['loss']):.4f} "
-                      f"[{terms_s}] |g|={np.mean(acc['grad_norm']):.3g} gnorm[{gn}] "
+                      f"[{terms_s}] |g|={np.mean(acc['grad_norm']):.3g} gshare[{gn}] "
                       f"lr={_lr(step, cfg):.2e} {rate:.2f} steps/s ETA {eta / 60:.1f} min")
             acc.clear()
             last_log = now
@@ -337,6 +465,7 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
             prog.line(f"val @ {step + 1}: {msg} {'(best)' if improved else ''} "
                       f"best={best['score']:.3f}@{best['step']}")
             prog.update(force=True, best_score=best["score"], best_step=best["step"])
+    batches.close()
     # validation-only temperature for p_b, stored with the last checkpoint
     temperature = 1.0
     if val_batches:
@@ -363,7 +492,9 @@ def main(argv=None) -> None:
                     help="generate N synthetic events into <out>/data first (no accuracy claims)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--steps", type=int, default=1000)
-    ap.add_argument("--batch-calls", type=int, default=8)
+    ap.add_argument("--batch-calls", type=int, default=64, help="max calls per batch")
+    ap.add_argument("--batch-budget", type=int, default=20000,
+                    help="nodes + undirected edges per batch")
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--width", type=int, default=32)
     ap.add_argument("--rounds", default="2,1,2,1,2")
@@ -373,10 +504,14 @@ def main(argv=None) -> None:
     ap.add_argument("--seeds", default="0")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--noise", type=float, default=0.0)
-    ap.add_argument("--pushforward", type=float, default=0.0)
+    ap.add_argument("--pushforward", type=float, default=0.0, help="probability per step")
+    ap.add_argument("--pushforward-steps", type=int, default=2)
+    ap.add_argument("--pushforward-oracle-topology", action="store_true",
+                    help="keep the oracle's live bonds in successors (the old behaviour)")
     ap.add_argument("--eval-every", type=int, default=200)
     ap.add_argument("--energy-tolerance", type=float, default=0.05)
     ap.add_argument("--break-mode", default="threshold", choices=["threshold", "sample"])
+    ap.add_argument("--balance", default="fixed", choices=["fixed", "uncertainty"])
     a = ap.parse_args(argv)
     dataset = a.dataset
     if a.synthetic:
@@ -395,12 +530,15 @@ def main(argv=None) -> None:
     for s in seeds:
         out = Path(a.out) / (f"seed{s}" if len(seeds) > 1 else "")
         cfg = TrainConfig(dataset=dataset, out=str(out), steps=a.steps,
-                          batch_calls=a.batch_calls, lr=a.lr, seed=s, device=a.device,
+                          batch_calls=a.batch_calls, batch_budget=a.batch_budget, lr=a.lr, seed=s, device=a.device,
                           noise_sigma=a.noise, pushforward_prob=a.pushforward,
+                          pushforward_steps=a.pushforward_steps,
+                          pushforward_topology=not a.pushforward_oracle_topology,
                           eval_every=a.eval_every, model=dataclasses.replace(mc),
                           decode=D.DecodeConfig(energy_tolerance=a.energy_tolerance,
                                                 break_mode=a.break_mode))
         cfg.loss.energy_tolerance = a.energy_tolerance
+        cfg.loss.balance = a.balance
         r = train(cfg, data)
         print(json.dumps({"seed": s, "best_score": r["best"]["score"],
                           "best_step": r["best"]["step"]}))

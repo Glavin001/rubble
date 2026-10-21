@@ -40,3 +40,48 @@ def test_noise_touches_only_carried_columns():
             same = np.array_equal(n.arrays[arr][:, j], c0.arrays[arr][:, j])
             if j not in carried:
                 assert same, (arr, cols[j])
+
+
+def _oracle_breaks(c):
+    return {k for k, b in zip(c.arrays["bond_key"].tolist(), c.arrays["y_bond_broke"].tolist())
+            if b}
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_topology_with_oracle_breaks_is_identity(seed):
+    _, (c0, c1), _ = make_event(seed)
+    out = P.apply_topology(c0, c1, _oracle_breaks(c0))
+    assert set(out.arrays) == set(c1.arrays)
+    for k, v in c1.arrays.items():
+        np.testing.assert_allclose(out.arrays[k].astype(float), v.astype(float), atol=1e-6,
+                                   err_msg=k)
+
+
+@pytest.mark.parametrize("seed", [3, 4, 8])
+def test_topology_follows_the_model(seed):
+    _, (c0, c1), _ = make_event(seed)
+    ob = _oracle_breaks(c0)
+    assert ob, "seed must break something"
+    keys = c0.arrays["bond_key"].tolist()
+    extra = [k for k in keys if k not in ob][:2]
+    out = P.apply_topology(c0, c1, set(extra))  # misses every oracle break, adds two
+    S.validate_call(out)
+    live = set(out.arrays["bond_key"].tolist())
+    assert ob <= live and not (set(extra) & live)
+    assert not (ob & set(out.arrays["cracked_key"].tolist()))
+    sel = np.isin(out.arrays["bond_key"], list(ob))
+    assert np.all(out.arrays["y_bond_broke"][sel] == 1)
+    assert np.all(out.arrays["y_bond_peak_util"][sel] >= 1)  # censored "already failed"
+    # chunk live-bond counts follow the new bond list
+    nc = out.counts["chunks"]
+    live_deg = np.bincount(out.arrays["bond_src"], minlength=nc)[:nc] / 6
+    np.testing.assert_allclose(out.arrays["chunk_feat"][:, S.col("chunk_feat", "n_live_bonds")],
+                               live_deg, atol=1e-6)
+
+
+def test_chained_parity_over_settling_frames():
+    _, cs, _ = make_event(3, settle_calls=2)
+    for a, b in zip(cs[:-1], cs[1:]):
+        r = P.push(a, b, P.prediction_from_targets(a), _oracle_breaks(a))
+        for arr in S.CARRIED_COLUMNS:
+            np.testing.assert_allclose(r.arrays[arr], b.arrays[arr], atol=2e-6, err_msg=arr)

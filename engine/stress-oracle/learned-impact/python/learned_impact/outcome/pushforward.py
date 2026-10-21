@@ -148,3 +148,136 @@ def add_noise(c: S.Call, sigma: float, rng: np.random.Generator) -> S.Call:
             f[1::2, d] = f[0::2, d]
         a[arr] = f
     return S.Call(**{**c.__dict__, "arrays": a})
+
+
+def _hops(nc: int, src: np.ndarray, dst: np.ndarray, seeds: list[int]) -> np.ndarray:
+    """Bond-graph hops from `seeds` (directed twin rows, chunks only); 10⁶ if unreachable."""
+    from collections import deque
+
+    adj: list[list[int]] = [[] for _ in range(nc)]
+    for a, b in zip(src.tolist(), dst.tolist()):
+        if a < nc and b < nc:
+            adj[a].append(b)
+    d = np.full(nc, 10**6, dtype=np.int64)
+    q = deque()
+    for s in seeds:
+        d[s] = 0
+        q.append(s)
+    while q:
+        a = q.popleft()
+        for b in adj[a]:
+            if d[b] > d[a] + 1:
+                d[b] = d[a] + 1
+                q.append(b)
+    return d
+
+
+def apply_topology(parent: S.Call, succ: S.Call, model_broke: set[int]) -> S.Call:
+    """Give `succ` (the oracle's next call) the live bond set the *model's* breaks imply.
+
+    - bonds the oracle broke in `parent` but the model kept are added back, with their
+      parent rows (static columns are time-invariant; carried columns are then re-derived by
+      `rewrite_carried`) and the censored target "already failed" (broke = 1, r ≥ 1, first
+      bin), and removed from `succ`'s cracked edges;
+    - bonds the model broke but the oracle kept are dropped with their targets;
+    - chunk columns that follow from topology are recomputed: damage mean/max,
+      live/broken counts, hops to contact and to anchors.
+
+    Approximations, until the Rust call builder can rebuild a call from a given state (asked
+    of P1): model-broken bonds do not become cracked-face edges; added-back bonds keep the
+    parent's frames and zero variant-B QS columns; wave arrival, geometry and predicted
+    contacts stay the oracle's. DAgger (oracle restarts from the decoded state) removes all
+    of these.
+    """
+    pa, sa = parent.arrays, {k: np.array(v) for k, v in succ.arrays.items()}
+    nc = succ.counts["chunks"]
+    p_keys = pa["bond_key"].tolist()
+    oracle_broke = {k for k, b in zip(p_keys, pa["y_bond_broke"].tolist()) if b}
+    add_back = sorted(oracle_broke - set(model_broke))
+    s_keys = sa["bond_key"].tolist()
+    remove = set(model_broke) - oracle_broke
+    keep = np.array([k not in remove for k in s_keys], dtype=bool)
+    keep_dir = np.repeat(keep, 2)
+    und = [n for n in sa if n.startswith("y_bond_") or n.startswith("base_") and "_bond_" in n]
+    d_removed = float(sa["y_bond_dissipated"][~keep].astype(np.float64).sum())
+    for n in ("bond_src", "bond_dst", "bond_feat", "bond_qs_feat"):
+        sa[n] = sa[n][keep_dir]
+    for n in ("bond_key", "bond_frame", *und):
+        sa[n] = sa[n][keep]
+    if add_back:
+        p_idx = {k: i for i, k in enumerate(p_keys)}
+        rows = np.array([p_idx[k] for k in add_back])
+        rows_dir = np.stack([2 * rows, 2 * rows + 1], 1).reshape(-1)
+        p_node_key = np.concatenate([pa["chunk_key"], pa["impactor_key"]]).tolist()
+        s_node = {k: i for i, k in enumerate(np.concatenate([sa["chunk_key"],
+                                                             sa["impactor_key"]]).tolist())}
+        remap = np.array([s_node.get(k, -1) for k in p_node_key])
+        src, dst = remap[pa["bond_src"][rows_dir]], remap[pa["bond_dst"][rows_dir]]
+        ok_dir = (src >= 0) & (dst >= 0)
+        ok = ok_dir[0::2] & ok_dir[1::2]  # both ends must still be in the island
+        rows, rows_dir = rows[ok], rows_dir[np.repeat(ok, 2)]
+        src, dst = src[np.repeat(ok, 2)], dst[np.repeat(ok, 2)]
+        n_add = len(rows)
+        add = {
+            "bond_src": src.astype(np.int32), "bond_dst": dst.astype(np.int32),
+            "bond_feat": pa["bond_feat"][rows_dir], "bond_key": pa["bond_key"][rows],
+            "bond_frame": pa["bond_frame"][rows],
+            "bond_qs_feat": np.zeros((2 * n_add, len(S.BOND_QS_FEAT_COLUMNS)), np.float32),
+            "y_bond_peak_util": np.maximum(pa["y_bond_peak_util"][rows], 1.0).astype(np.float32),
+            "y_bond_broke": np.ones(n_add, np.int32),
+            "y_bond_break_bin": np.ones(n_add, np.int32),
+            "y_bond_fail_mode": pa["y_bond_fail_mode"][rows],
+            "y_bond_ddamage": np.zeros(n_add, np.float32),
+            "y_bond_dissipated": np.zeros(n_add, np.float32),
+            "y_bond_support_path": np.zeros(n_add, np.int32),
+            "y_bond_break_freq": np.ones(n_add, np.float32),
+            "base_qs_bond_broke": np.ones(n_add, np.int32),
+            "base_punch_bond_broke": np.ones(n_add, np.int32),
+            "base_qs_bond_peak_util": np.ones(n_add, np.float32),
+            "base_punch_bond_peak_util": np.ones(n_add, np.float32),
+        }
+        for n, v in add.items():
+            if n in sa:
+                sa[n] = np.concatenate([sa[n], v.astype(sa[n].dtype)])
+        added = set(pa["bond_key"][rows].tolist())
+        ck = sa["cracked_key"].tolist()
+        ckeep = np.array([k not in added for k in ck], dtype=bool)
+        for n in ("cracked_src", "cracked_dst", "cracked_feat"):
+            sa[n] = sa[n][np.repeat(ckeep, 2)]
+        for n in ("cracked_key", "cracked_frame"):
+            sa[n] = sa[n][ckeep]
+    # chunk columns that follow from topology
+    cf = sa["chunk_feat"].copy()
+    c = lambda n: S.col("chunk_feat", n)  # noqa: E731
+    total = cf[:, c("n_live_bonds")] + cf[:, c("n_broken_bonds")]
+    src, dst = sa["bond_src"].astype(np.int64), sa["bond_dst"].astype(np.int64)
+    dmg = sa["bond_feat"][:, S.col("bond_feat", "damage")]
+    live = np.bincount(src[src < nc], minlength=nc).astype(np.float32)
+    cf[:, c("n_live_bonds")] = live / 6
+    cf[:, c("n_broken_bonds")] = total - live / 6
+    dsum = np.bincount(src, weights=dmg, minlength=nc)[:nc]
+    cf[:, c("bond_damage_mean")] = dsum / np.maximum(live, 1)
+    dmax = np.zeros(nc)
+    np.maximum.at(dmax, src, dmg)
+    cf[:, c("bond_damage_max")] = dmax
+    ic_s, ic_d = sa["impactor_contact_src"], sa["impactor_contact_dst"]
+    contact = sorted({int(d) for s_, d in zip(ic_s, ic_d) if s_ >= nc and d < nc})
+    h = _hops(nc, src, dst, contact)
+    cf[:, c("hops_to_contact")] = np.minimum(h / 16, 4)
+    anchors = list(np.nonzero(sa["chunk_anchored"])[0])
+    ha = _hops(nc, src, dst, anchors) if anchors else np.full(nc, 10**6)
+    cf[:, c("hops_to_anchor")] = np.minimum(ha / 16, 4)
+    sa["chunk_feat"] = cf.astype(np.float32)
+    energy = dict(succ.energy)
+    energy["D_bond"] = float(sa["y_bond_dissipated"].astype(np.float64).sum())
+    if d_removed and "D_bond_joint" in energy:
+        energy["D_bond_joint"] = max(energy["D_bond_joint"] - d_removed, 0.0)
+        energy["D_bond_damping"] = energy["D_bond"] - energy["D_bond_joint"]
+    counts = dict(succ.counts, bond=len(sa["bond_key"]), cracked=len(sa["cracked_key"]))
+    return S.Call(**{**succ.__dict__, "arrays": sa, "counts": counts, "energy": energy})
+
+
+def push(parent: S.Call, succ: S.Call, pred: dict, model_broke: set[int] | None) -> S.Call:
+    """One pushforward step: the model's topology (if given), then its carried state."""
+    s = apply_topology(parent, succ, model_broke) if model_broke is not None else succ
+    return rewrite_carried(s, pred)

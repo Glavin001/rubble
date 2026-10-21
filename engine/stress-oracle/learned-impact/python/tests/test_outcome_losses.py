@@ -72,3 +72,24 @@ def test_per_term_gradients_reach_parameters():
     _, normed = Lo.total(Lo.loss_terms(m(b), b, cfg), norms, cfg)
     g = grad_norms(normed, list(m.parameters()))
     assert all(v > 0 for v in g.values()), g
+
+
+def test_dominance_monitor_flags_a_persistent_term():
+    mon = Lo.DominanceMonitor(0.6, 3)
+    for i in range(2):
+        _, f = mon.update({"demand": 10.0, "motion": 1.0, "break": 1.0})
+        assert f == []
+    _, f = mon.update({"demand": 10.0, "motion": 1.0, "break": 1.0})
+    assert f == ["demand"]
+    _, f = mon.update({"demand": 1.0, "motion": 1.0, "break": 1.0})
+    assert f == []
+
+
+def test_uncertainty_weights_start_at_the_fixed_weighting():
+    uw = Lo.UncertaintyWeights()
+    normed = {k: torch.tensor(float(i + 2)) for i, k in enumerate(Lo.TERMS)}  # L≠1: s-grad ≠ 0
+    w = Lo.LossConfig().weights
+    fixed = sum(w[k] * v for k, v in normed.items())
+    torch.testing.assert_close(uw(normed, w), 0.5 * fixed)
+    uw(normed, w).backward()
+    assert uw.log_var.grad is not None and torch.all(uw.log_var.grad != 0)

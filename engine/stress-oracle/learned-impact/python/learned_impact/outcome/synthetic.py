@@ -104,7 +104,8 @@ def _project_momentum_np(m, inertia_w, pos, v, w, p_target, l_target):
 def make_event(seed: int, *, nx: int | None = None, nz: int | None = None,
                anchored: bool | None = None, split: str = "train", family: str = "synthetic_wall",
                speed: float | None = None, ensemble: tuple[str, int, int] | None = None,
-               gravity: bool = False) -> tuple[dict, list[S.Call], dict]:
+               gravity: bool = False, settle_calls: int = 0
+               ) -> tuple[dict, list[S.Call], dict]:
     rng = np.random.default_rng(seed)
     nx = nx or int(rng.integers(4, 9))
     nz = nz or int(rng.integers(4, 8))
@@ -534,6 +535,20 @@ def make_event(seed: int, *, nx: int | None = None, nz: int | None = None,
     calls.append(S.Call(event_id="", call_index=1, frame=11, island=0, prev_call=0,
                         phase="separation", transition=True, routed=True, anchored=anchored,
                         counts=counts1, scales=scales1, energy=energy1, arrays=arrays1))
+
+    # extra ballistic settling calls (exact continuations only without gravity)
+    if settle_calls and gravity:
+        raise ValueError("settle_calls needs gravity=False (the toy copies the ballistic call)")
+    for k in range(settle_calls):
+        prev = calls[-1]
+        arr = dict(prev.arrays)
+        bf = arr["bond_feat"].copy()  # carried: last frame's peak demand and damage
+        bf[:, S.col("bond_feat", "peak_util_prev")] = np.repeat(prev.arrays["y_bond_peak_util"], 2)
+        bf[:, S.col("bond_feat", "damage")] += np.repeat(prev.arrays["y_bond_ddamage"], 2)
+        arr["bond_feat"] = bf
+        calls.append(S.Call(**{**prev.__dict__, "call_index": prev.call_index + 1,
+                               "frame": prev.frame + 1, "prev_call": prev.call_index,
+                               "phase": "settling", "transition": False, "arrays": arr}))
 
     eid = f"syn_{seed:06d}" + (f"_m{ensemble[1]}" if ensemble else "")
     for cl in calls:
