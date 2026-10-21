@@ -289,7 +289,7 @@ def validate_manifest(m: dict[str, Any]) -> None:
             raise SchemaError(f"manifest.{k} missing")
 
 
-def validate_call(c: Call) -> None:
+def validate_call(c: Call, require_targets: bool = True) -> None:
     if c.phase not in PHASES:
         raise SchemaError(f"{c.event_id}#{c.call_index}: phase {c.phase!r}")
     sym = {COUNT_SYMBOL[k]: int(v) for k, v in c.counts.items()}
@@ -299,12 +299,12 @@ def validate_call(c: Call) -> None:
         v = c.scales.get(k)
         if v is None or not np.isfinite(v) or v <= 0:
             raise SchemaError(f"{c.event_id}#{c.call_index}: scale {k}={v}")
-    for k in ENERGY_TARGET_KEYS:
+    for k in ENERGY_TARGET_KEYS if require_targets else ():
         if k not in c.energy or not np.isfinite(c.energy[k]):
             raise SchemaError(f"{c.event_id}#{c.call_index}: energy {k}")
     for name, spec in CALL_ARRAYS.items():
         if name not in c.arrays:
-            if spec.required:
+            if spec.required and (require_targets or not _is_target(name)):
                 raise SchemaError(f"{c.event_id}#{c.call_index}: {name} missing")
             continue
         a = c.arrays[name]
@@ -325,6 +325,8 @@ def validate_call(c: Call) -> None:
             raise SchemaError(f"{t}: endpoint out of range")
         if s.size and not (np.array_equal(s[0::2], d[1::2]) and np.array_equal(s[1::2], d[0::2])):
             raise SchemaError(f"{t}: rows 2k/2k+1 are not reverse twins")
+    if not require_targets and "y_bond_broke" not in c.arrays:
+        return
     if np.any(c.arrays["y_bond_ddamage"] < 0):
         raise SchemaError("y_bond_ddamage < 0")
     bins = c.arrays["y_bond_break_bin"]
@@ -337,7 +339,26 @@ def validate_call(c: Call) -> None:
         raise SchemaError("energy.D_bond != sum(y_bond_dissipated)")
 
 
-def load_event(path: Path | str, validate: bool = True) -> Event:
+def _is_target(name: str) -> bool:
+    return name.startswith("y_") or name.startswith("ens_") or name.startswith("base_")
+
+
+def with_dummy_targets(c: Call) -> Call:
+    """A closed-loop call (no oracle outcome) with zero targets, so it collates; inference
+    never reads them."""
+    a = dict(c.arrays)
+    sym = {COUNT_SYMBOL[k]: int(v) for k, v in c.counts.items()}
+    for name, spec in CALL_ARRAYS.items():
+        if spec.required and _is_target(name) and name not in a:
+            a[name] = np.zeros(_resolve(spec.shape, sym), dtype=DTYPES[spec.dtype])
+    if "y_chunk_fragment" in a and not np.any(a["y_chunk_fragment"]):
+        a["y_chunk_fragment"] = np.arange(sym["Nc"], dtype=np.int32)
+    energy = {k: 0.0 for k in ENERGY_TARGET_KEYS}
+    energy.update(c.energy)
+    return Call(**{**c.__dict__, "arrays": a, "energy": energy})
+
+
+def load_event(path: Path | str, validate: bool = True, require_targets: bool = True) -> Event:
     root = Path(path)
     manifest = json.loads((root / "manifest.json").read_text())
     if validate:
@@ -366,7 +387,7 @@ def load_event(path: Path | str, validate: bool = True) -> Event:
             gravity=tuple(float(x) for x in manifest.get("gravity", (0.0, 0.0, 0.0))),
         )
         if validate:
-            validate_call(c)
+            validate_call(c, require_targets)
         calls.append(c)
     if validate and len(calls) != int(manifest["n_calls"]):
         raise SchemaError(f"n_calls {manifest['n_calls']} != {len(calls)}")

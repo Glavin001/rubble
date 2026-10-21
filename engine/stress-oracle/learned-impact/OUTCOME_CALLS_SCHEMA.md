@@ -218,7 +218,7 @@ training; `CARRIED_COLUMNS` in `schema.py`): 19–24. Everything else in a succe
 
 | name | dtype | shape | notes |
 |---|---|---|---|
-| `impactor_key` | i64 | `[Ni]` | engine body id |
+| `impactor_key` | i64 | `[Ni]` | the impactor's index in the scene's impactor list (stable across members, branches and restarts; the same key function as chunks and bonds) |
 | `impactor_feat` | f32 | `[Ni, 16]` | columns below |
 | `impactor_qs_feat` | f32 | `[Ni, 6]` | variant B: QS-frame Δv, Δω (as chunks) |
 | raw `impactor_mass`, `impactor_inertia_body`, `impactor_q_world`, `impactor_pos`, `impactor_v`, `impactor_w` | f32 | as chunks | |
@@ -425,3 +425,14 @@ the arrays are identical either way.
 `learned-impact-outcome/1`. Any change of meaning, order or shape bumps the version; the
 loader accepts exactly one version. Additive optional arrays may be added within a version
 only if old readers ignore them and they appear in this document.
+
+## A call inside a closed-loop provider request
+
+P0's harness (`learned_p0 ceiling --variant provider --provider files`,
+`PROVIDER_PROTOCOL.md` on P0's branch) writes `D/req/<f:06>_<i>/request.json`. Once the call
+builder exists, it also writes the call there as an ordinary single-call event directory in
+this format: `manifest.json` (with the structures' pristine graphs), `calls.json` with one
+entry, and `arrays.bin`. `request.json` then sets `call_record` to that directory's path,
+relative to the request directory, e.g. `"call"`. Targets are absent in closed loop (no
+oracle runs), so the provider loads such records with the validator's `require_targets=False`.
+The provider is `python -m learned_impact.outcome.provider`.
