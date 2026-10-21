@@ -215,19 +215,20 @@ pub struct DecodedDamage {
 
 pub const DECODED_STATE_VERSION: &str = "learned-impact-decoded-state/1";
 
-/// The stable key of chunk or bond `index` of structure `s`.
+/// The stable key of chunk or bond `index` of structure `s` (`crate::keys`, the one
+/// definition every learned-impact consumer shares).
 pub fn stable_key(s: usize, index: usize) -> i64 {
-    ((s as i64) << 32) | index as i64
+    crate::keys::chunk_key(s, index)
 }
 
 fn unkey(k: i64) -> (usize, usize) {
-    ((k >> 32) as usize, (k & 0xffff_ffff) as usize)
+    crate::keys::split_key(k)
 }
 
 impl World {
     /// The stable key of runtime bond `bi` of structure `s` (its scene bond, `source`).
     pub fn bond_key(&self, s: usize, bi: usize) -> i64 {
-        stable_key(s, self.solver.bonds[s][bi].source)
+        crate::keys::bond_key(s, self.solver.bonds[s][bi].source)
     }
 
     /// The live runtime bond a stable bond key names (the alive one with that source).
@@ -256,7 +257,7 @@ impl World {
             k.chunks.extend(cl.chunks.iter().map(|&c| stable_key(s, c)));
             k.bonds.extend(cl.bonds.iter().filter(|&&b| self.solver.bonds[s][b].connected()).map(|&b| self.bond_key(s, b)));
         }
-        k.impactors.extend(self.impactors.iter().enumerate().filter(|(_, i)| !i.driven).map(|(i, _)| i as i64));
+        k.impactors.extend(self.impactors.iter().enumerate().filter(|(_, i)| !i.driven).map(|(i, _)| crate::keys::impactor_key(i)));
         k.chunks.sort_unstable();
         k.bonds.sort_unstable();
         k

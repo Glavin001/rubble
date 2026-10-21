@@ -404,6 +404,9 @@ fn run_provider(s: &Scene, o: &ProviderOpts, tag: &str) -> Value {
     }
     for f in 0..n {
         let t = Instant::now();
+        // As the recorder does: each frame's peak utilisation starts afresh (the call
+        // builder's `log1p_peak_util_prev` reads the previous frame's).
+        w.solver.reset_peak_utilizations();
         let mut islands = 0;
         if o.kind == "punch" {
             islands = w.predict_islands(fdt, &HashSet::new());
