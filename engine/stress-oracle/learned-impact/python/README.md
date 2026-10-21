@@ -58,3 +58,21 @@ masking across cracks, rotation-stable seeds). `tests/test_mgn_parity.py` checks
 in a throwaway venv (the only code that imports `inspiration/`; not run in tests or CI).
 `outcome/`: `schema`, `synthetic`, `batch` (collation + per-call hierarchy masks), `model`,
 `decode` (momentum projection, energy bound, breaks), `losses`, `metrics`, `pushforward`, `train`.
+
+### Videos: oracle vs learned model (stress-viz)
+
+```sh
+cd engine/stress-oracle
+CARGO_TARGET_DIR=target-p2 cargo build --release -p stress-viz --features learned
+# oracle | learned model (closed loop) | perfect-model ceiling, same scene and camera
+target-p2/release/stress-viz compare m5_free_wall \
+  --variant "oracle:" --variant "learned:engine learned" --variant "ceiling:engine ceiling" \
+  --checkpoint learned-impact/runs/<job>/best.pt --duration 0.4 --views fragments \
+  --plot broken --fps 15 -o learned-impact/runs/videos/m5_free_wall.mp4
+```
+
+`engine learned` runs rubble's engine with every routed island's 1/60 s frame from the model
+(`stress_learned::provider_client` spawns `learned_impact.outcome.provider`); `engine ceiling`
+uses the oracle through the same handoff. Scenes: any scene JSON (P1 saves one per event) or
+`m5_free_wall` / `m5_wall_row` (set `STRESS_DEBRIS_ROUTING=1` for the wall row). The energy
+plot does not book the model's dissipation, so use `--plot broken`.
