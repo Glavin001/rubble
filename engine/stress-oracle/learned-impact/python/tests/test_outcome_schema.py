@@ -70,3 +70,15 @@ def test_ensemble_aggregation(tmp_path):
     # the separation call differs in live bonds across members → not aligned
     assert all("y_bond_break_freq" not in e.calls[1].arrays for e in evs
                ) or len({len(e.calls[1].arrays["bond_key"]) for e in evs}) == 1
+
+
+def test_zstd_arrays_load_identically(tmp_path):
+    m, calls, st = make_event(4)
+    a = S.load_event(S.write_event(tmp_path / "raw", m, calls, st))
+    z = S.load_event(S.write_event(tmp_path / "zst", m, calls, st, compress=True))
+    assert (tmp_path / "zst" / "arrays.bin.zst").exists()
+    assert not (tmp_path / "zst" / "arrays.bin").exists()
+    for ca, cz in zip(a.calls, z.calls):
+        assert set(ca.arrays) == set(cz.arrays)
+        for k in ca.arrays:
+            np.testing.assert_array_equal(ca.arrays[k], cz.arrays[k])

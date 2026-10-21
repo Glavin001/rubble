@@ -76,6 +76,8 @@ one of them; the version string changes whenever either changes meaning.**
   arrays.bin      # every array of every call (and the pristine graph), concatenated
 ```
 
+`arrays.bin` may instead be stored as `arrays.bin.zst`: one zstd frame of exactly the same
+bytes (lossless; offsets refer to the decompressed bytes). Exactly one of the two exists.
 `arrays.bin` is little-endian, row-major, no headers; each array starts at an 8-byte-aligned
 offset. A catalog entry is `{"dtype": "f32"|"i32"|"i64", "shape": [...], "offset": bytes}`.
 Python reads it with `np.memmap`. Three files per event keep 30k events × ~10 calls

@@ -339,6 +339,23 @@ def validate_call(c: Call, require_targets: bool = True) -> None:
         raise SchemaError("energy.D_bond != sum(y_bond_dissipated)")
 
 
+def _open_blob(root: Path) -> np.ndarray:
+    """`arrays.bin` (memory-mapped) or `arrays.bin.zst` (one zstd frame of the same bytes,
+    lossless, decompressed into memory). Exactly one must exist."""
+    raw, zst = root / "arrays.bin", root / "arrays.bin.zst"
+    if raw.exists() and zst.exists():
+        raise SchemaError(f"{root}: both arrays.bin and arrays.bin.zst")
+    if raw.exists():
+        return np.memmap(raw, dtype=np.uint8, mode="r")
+    if zst.exists():
+        import zstandard
+
+        with open(zst, "rb") as f:
+            data = zstandard.ZstdDecompressor().stream_reader(f).read()
+        return np.frombuffer(data, dtype=np.uint8)
+    raise SchemaError(f"{root}: no arrays.bin or arrays.bin.zst")
+
+
 def _is_target(name: str) -> bool:
     return name.startswith("y_") or name.startswith("ens_") or name.startswith("base_")
 
@@ -364,7 +381,7 @@ def load_event(path: Path | str, validate: bool = True, require_targets: bool = 
     if validate:
         validate_manifest(manifest)
     entries = json.loads((root / "calls.json").read_text())
-    blob = np.memmap(root / "arrays.bin", dtype=np.uint8, mode="r")
+    blob = _open_blob(root)
     structures: dict[int, dict[str, np.ndarray]] = {}
     for s in manifest.get("structures", []):
         sid = int(s["structure_id"])
@@ -411,7 +428,7 @@ class _BlobWriter:
 
 
 def write_event(root: Path | str, manifest: dict[str, Any], calls: list[Call],
-                structures: dict[int, dict[str, np.ndarray]]) -> Path:
+                structures: dict[int, dict[str, np.ndarray]], compress: bool = False) -> Path:
     """Write an event in the exact on-disk format (synthetic data, tests, ensemble tool)."""
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
@@ -438,7 +455,13 @@ def write_event(root: Path | str, manifest: dict[str, Any], calls: list[Call],
         })
     (root / "manifest.json").write_text(json.dumps(m, indent=1))
     (root / "calls.json").write_text(json.dumps(entries))
-    (root / "arrays.bin").write_bytes(b"".join(w.parts))
+    blob = b"".join(w.parts)
+    if compress:
+        import zstandard
+
+        (root / "arrays.bin.zst").write_bytes(zstandard.ZstdCompressor(level=3).compress(blob))
+    else:
+        (root / "arrays.bin").write_bytes(blob)
     return root
 
 
