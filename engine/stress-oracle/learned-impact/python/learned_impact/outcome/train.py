@@ -31,7 +31,7 @@ from . import losses as Lo
 from . import metrics as M
 from . import pushforward as P
 from . import schema as S
-from .batch import Batch, HierarchyCache, collate
+from .batch import Batch, HierarchyCache, collate, pad_batch
 from .model import ImpactOutcomeModel, ModelConfig, count_parameters
 
 DEFAULT_QUOTAS = {"contact": 0.35, "secondary": 0.20, "separation": 0.25, "quiet": 0.20}
@@ -50,6 +50,8 @@ class TrainConfig:
     # step is launch-latency bound on MPS, so filling it is nearly free (measured: 8 calls of
     # 220 chunks = 37 ms/step). One call over the budget still forms its own batch.
     batch_budget: int = 20000
+    # Pad every batch to bucketed shapes (exact; MPS recompiles per shape: ~1 s a new one)
+    pad_shapes: bool = True
     lr: float = 1e-3
     min_lr: float = 1e-6
     warmup: int = 50
@@ -360,7 +362,9 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
     prog.line(f"device={dev} params={count_parameters(model)} train_calls={len(data.train)} "
               f"val_calls={len(data.val)} variant={cfg.model.variant} width={cfg.model.width} "
               f"rounds={cfg.model.rounds} priors={ {k: round(v, 4) for k, v in data.priors.items()} }")
-    coll = lambda calls: collate(calls, data.structures, cache)  # noqa: E731
+    def coll(calls):
+        b = collate(calls, data.structures, cache)
+        return pad_batch(b) if cfg.pad_shapes else b
     norm_batches = [coll(bc) for bc in
                     _batches(data.train, cfg.batch_budget, cfg.batch_calls)[:64]]
     norms = Lo.zero_baselines(norm_batches, cfg.loss, data.priors)

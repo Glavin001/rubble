@@ -253,14 +253,15 @@ def evaluate(model, batches, decode_cfg: D.DecodeConfig | None = None,
         bc = bd if dev.type != "mps" else bd.to("cpu")
         out = {k: v.cpu() for k, v in out.items()} if dev.type == "mps" else out
         dec = D.decode(out, bc, dcfg)
-        bound_active += int(dec["energy_bound_active"].sum())
-        bound_total += bc.n_calls
+        bound_active += int(dec["energy_bound_active"][:len(bc.calls)].sum())
+        bound_total += len(bc.calls)
         rows.extend(_per_call_outcomes(bc, dec))
         shift = prior_logit_shift(bc, priors)
         logit = out["bond_break_logit"] + (shift if shift is not None else 0)
-        bond_p.append(torch.sigmoid(logit / dcfg.temperature).cpu().numpy())
+        bv = bc.t["bond_valid"].numpy()
+        bond_p.append(torch.sigmoid(logit / dcfg.temperature).cpu().numpy()[bv])
         bond_y.append(np.where(bc.t["y_bond_has_freq"].numpy(), bc.t["y_bond_freq"].numpy(),
-                               (bc.t["y_bond_broke"].numpy() > 0).astype(float)))
+                               (bc.t["y_bond_broke"].numpy() > 0).astype(float))[bv])
         reg = bc.t["y_imp_regime"].numpy()
         valid = reg != S.REGIME_UNDECIDED
         imp_p.append(torch.sigmoid(out["imp_perf_logit"]).cpu().numpy()[valid])
@@ -408,23 +409,24 @@ def three_way(model, batches, decode_cfg: D.DecodeConfig | None = None,
         bc = bd if dev.type != "mps" else bd.to("cpu")
         out = {k: v.cpu() for k, v in out.items()}
         dec = D.decode(out, bc, dcfg)
-        bounds[0] += int(dec["energy_bound_active"].sum())
-        bounds[1] += bc.n_calls
+        bounds[0] += int(dec["energy_bound_active"][:len(bc.calls)].sum())
+        bounds[1] += len(bc.calls)
         m_rows = _per_call_outcomes(bc, dec)
         rows["model"].extend(m_rows)
         y = np.where(bc.t["y_bond_has_freq"].numpy(), bc.t["y_bond_freq"].numpy(),
                      (bc.t["y_bond_broke"].numpy() > 0).astype(float))
         sh = prior_logit_shift(bc, priors)
         lg = out["bond_break_logit"] + (sh if sh is not None else 0)
-        probs["model"][0].append(torch.sigmoid(lg / dcfg.temperature).numpy())
-        probs["model"][1].append(y)
+        bv = bc.t["bond_valid"].numpy()
+        probs["model"][0].append(torch.sigmoid(lg / dcfg.temperature).numpy()[bv])
+        probs["model"][1].append(y[bv])
         for n in BASELINES:
             br = _baseline_rows(bc, n)
             if br is None:
                 continue
             rows[n].extend(br)
-            probs[n][0].append(bc.t[f"base_{n}_bond_broke"].numpy().astype(float))
-            probs[n][1].append(y)
+            probs[n][0].append(bc.t[f"base_{n}_bond_broke"].numpy().astype(float)[bv])
+            probs[n][1].append(y[bv])
     report: dict = {"families": {}, "worse_than_qs": [], "available": []}
     summaries = {}
     for k, rs in rows.items():

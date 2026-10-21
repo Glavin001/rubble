@@ -72,7 +72,8 @@ def prior_logit_shift(b: Batch, priors: dict[str, float] | None) -> Tensor | Non
         return None
     fam = bond_family(b)
     per_call = torch.tensor([np.log(max(priors.get(f, 0.5), 1e-6) / max(1 - priors.get(f, 0.5),
-                                                                        1e-6)) for f in fam])
+                                                                        1e-6)) for f in fam]
+                            + [0.0] * (b.n_calls - len(fam)))  # padding calls
     return per_call[b.t["bond_call"]].to(b.t["y_bond_broke"].device)
 
 
@@ -90,7 +91,8 @@ def consequence_weights(b: Batch, cfg: LossConfig) -> Tensor:
     fs = t["y_chunk_fragment"][node_to_chunk[be["src"][0::2]]]
     fd = t["y_chunk_fragment"][node_to_chunk[be["dst"][0::2]]]
     on_cut = ((t["y_bond_broke"] > 0) & (fs != fd)).float()
-    return 1.0 + cfg.alpha_cut * on_cut + cfg.beta_support * t["y_bond_support_path"].float()
+    w = 1.0 + cfg.alpha_cut * on_cut + cfg.beta_support * t["y_bond_support_path"].float()
+    return w * t["bond_valid"].to(w.device).float()  # padding bonds weigh nothing
 
 
 def _per_call_mean(x: Tensor, call: Tensor, G: int) -> Tensor:
@@ -151,7 +153,8 @@ def loss_terms(out: dict[str, Tensor], b: Batch, cfg: LossConfig,
     else:
         per = F.binary_cross_entropy_with_logits(logit, target, reduction="none")
         if cfg.break_reweight == "prior" and priors:
-            pi = torch.tensor([priors.get(c.family, 0.5) for c in b.calls], device=dev)[bcall]
+            pi = torch.tensor([priors.get(c.family, 0.5) for c in b.calls]
+                              + [0.5] * (b.n_calls - len(b.calls)), device=dev)[bcall]
             wp = (0.5 / pi.clamp(min=1e-6)).clamp(max=cfg.reweight_cap)
             wn = (0.5 / (1 - pi).clamp(min=1e-6)).clamp(max=cfg.reweight_cap)
             per = per * (target * wp + (1 - target) * wn)
@@ -165,8 +168,9 @@ def loss_terms(out: dict[str, Tensor], b: Batch, cfg: LossConfig,
         terms["time"] = out["bond_time_logits"].sum() * 0.0
 
     # damage: Huber on Δdamage for unbroken bonds
-    if (~broke).any():
-        terms["damage"] = _huber(out["bond_ddamage"][~broke] - t["y_bond_ddamage"][~broke],
+    keep = (~broke) & t["bond_valid"].to(dev)
+    if keep.any():
+        terms["damage"] = _huber(out["bond_ddamage"][keep] - t["y_bond_ddamage"][keep],
                                  cfg.huber_delta * 0.1).mean() / (0.1 ** 2)
     else:
         terms["damage"] = out["bond_ddamage"].sum() * 0.0
@@ -205,9 +209,11 @@ def loss_terms(out: dict[str, Tensor], b: Batch, cfg: LossConfig,
     fcall = torch.zeros(nf, dtype=torch.long, device=dev).scatter(0, frag, t["chunk_call"])
     frag_err = mf.squeeze(-1) * ((vf_hat - vf) ** 2).sum(-1)
     motion = motion + scatter_sum(frag_err, fcall, G) / e_in
-    terms["motion"] = motion.mean()
+    cv = t["call_valid"].to(dev, dtype)
+    vmean = lambda x: (x * cv).sum() / cv.sum().clamp(min=1)  # noqa: E731 (padding calls out)
+    terms["motion"] = vmean(motion)
     pose_err = ke_norm(ph["dx"] - ydx, ph["drot"] - ydr)
-    terms["pose"] = (scatter_sum(pose_err, call, G) / (e_in * dt * dt)).mean()
+    terms["pose"] = vmean(scatter_sum(pose_err, call, G) / (e_in * dt * dt))
 
     # impactor: (Δv̂ − Δv)² / v0², plus the ensemble energy score when members exist
     if t["imp_x"].shape[0]:
@@ -224,12 +230,13 @@ def loss_terms(out: dict[str, Tensor], b: Batch, cfg: LossConfig,
                       * mk.unsqueeze(1) * mk.unsqueeze(2)).sum((1, 2)) / (nm * nm) / v0.squeeze(-1)
             es = (d1 * mk).sum(1) / nm - 0.5 * spread
             imp = imp + torch.where(mask.any(1), es, torch.zeros_like(es))
-        terms["impactor"] = imp.mean()
+        iv_ok = t["imp_valid"].to(dev, imp.dtype)
+        terms["impactor"] = (imp * iv_ok).sum() / iv_ok.sum().clamp(min=1)
         # regime: log-loss of P(perforate) vs the ensemble frequency or geometric label
         reg = t["y_imp_regime"]
         lab = (reg == S.REGIMES["perforate"]).float()
         tgt = torch.where(t["y_imp_has_freq"], t["y_imp_perf_freq"].float(), lab)
-        valid = (reg != S.REGIME_UNDECIDED) | t["y_imp_has_freq"]
+        valid = ((reg != S.REGIME_UNDECIDED) | t["y_imp_has_freq"]) & t["imp_valid"].to(dev)
         bce = F.binary_cross_entropy_with_logits(out["imp_perf_logit"], tgt, reduction="none")
         terms["regime"] = (bce * valid).sum() / valid.sum().clamp(min=1)
     else:
@@ -257,7 +264,7 @@ def loss_terms(out: dict[str, Tensor], b: Batch, cfg: LossConfig,
     e = e + _huber(out["energy_ke_loss"].to(dtype) - implied, hd)
     bound = ke_in + w_g_hat + w_x + cfg.energy_tolerance * e_in
     e = e + torch.relu(ke_hat - bound) / e_in
-    terms["energy"] = e.mean() / (hd ** 2)
+    terms["energy"] = vmean(e) / (hd ** 2)
     return {k: v.float() for k, v in terms.items()}
 
 

@@ -223,7 +223,7 @@ def collate(calls: list[S.Call], structures: dict[str, dict[int, dict[str, np.nd
         _i(np.concatenate(x)) if x else torch.zeros(0, dtype=torch.long) for x in h_ids[1:]]
     b.h_chunk = [torch.arange(chunk_off)] + [
         _i(np.concatenate(x)) if x else torch.zeros(0, dtype=torch.long) for x in h_chunk[1:]]
-    return b
+    return add_valid_masks(b)
 
 
 def collate_events(events: list[S.Event], cache: HierarchyCache,
@@ -231,3 +231,130 @@ def collate_events(events: list[S.Event], cache: HierarchyCache,
     st = {e.manifest["event_id"]: e.structures for e in events}
     return collate(calls if calls is not None else [c for e in events for c in e.calls], st,
                    cache)
+
+
+# ---- shape bucketing -------------------------------------------------------------------
+# MPS compiles a kernel graph per op and per tensor shape: every new batch shape costs about
+# 1 s (measured on P1's calls: 1,167 ms/step with new shapes against 132–158 ms with
+# repeated ones). `pad_batch` rounds every dimension up to a geometric bucket so a few
+# shapes repeat. Padding lives in extra calls (index ≥ len(b.calls)) that are anchored and
+# masked out of every loss (`*_valid`); metrics only iterate `b.calls`, so they never see it.
+PAD_SCALES = {"L": 1.0, "m": 1.0, "v": 1.0, "c": 1.0, "f_t": 1.0, "E": 1.0, "GA": 1.0,
+              "dt": 1.0 / 60.0, "E_in": 1.0}
+
+
+def bucket(n: int, growth: float = 1.25, minimum: int = 64) -> int:
+    """Smallest `ceil(minimum · growth^k)` ≥ n."""
+    size = float(minimum)
+    while int(np.ceil(size)) < n:
+        size *= growth
+    return int(np.ceil(size))
+
+
+def _pad_rows(x: Tensor, n: int, value=0) -> Tensor:
+    if n <= 0:
+        return x
+    pad = torch.full((n,) + tuple(x.shape[1:]), value, dtype=x.dtype, device=x.device)
+    return torch.cat([x, pad], 0)
+
+
+def add_valid_masks(b: Batch) -> Batch:
+    t = b.t
+    if "chunk_valid" not in t:
+        t["chunk_valid"] = torch.ones(t["chunk_node"].shape[0], dtype=torch.bool)
+        t["imp_valid"] = torch.ones(t["imp_node"].shape[0], dtype=torch.bool)
+        t["bond_valid"] = torch.ones(t["bond_call"].shape[0], dtype=torch.bool)
+        t["call_valid"] = torch.ones(b.n_calls, dtype=torch.bool)
+    return b
+
+
+def pad_batch(b: Batch, growth: float = 1.25, call_multiple: int = 8) -> Batch:
+    """Pad a collated batch (in place) to bucketed sizes. Exact: real entries are
+    untouched, and every loss and metric ignores the padding."""
+    add_valid_masks(b)
+    t = b.t
+    G, Nc, Ni = b.n_calls, t["chunk_node"].shape[0], t["imp_node"].shape[0]
+    N = int(t["n_nodes"])
+    Eb = t["bond_call"].shape[0]
+    G2 = int(np.ceil((G + 1) / call_multiple) * call_multiple)
+    pc = bucket(Nc + 2, growth) - Nc
+    pi = (bucket(Ni, growth, 16) - Ni) if Ni else 16
+    pb = bucket(Eb, growth) - Eb
+    pg, pcall = G2 - G, G  # padding calls; the first one holds every padding entity
+    # ---- calls
+    t["glob_x"] = _pad_rows(t["glob_x"], pg)
+    sc = torch.tensor([[PAD_SCALES[k] for k in S.SCALE_KEYS]], dtype=t["scales"].dtype)
+    t["scales"] = torch.cat([t["scales"], sc.expand(pg, -1)], 0)
+    t["energy"] = _pad_rows(t["energy"], pg)
+    t["gravity"] = _pad_rows(t["gravity"], pg)
+    t["energy_has_split"] = _pad_rows(t["energy_has_split"], pg, False)
+    t["call_anchored"] = _pad_rows(t["call_anchored"], pg, True)
+    t["call_valid"] = _pad_rows(t["call_valid"], pg, False)
+    # ---- nodes: padding chunks then padding impactors, after every real node
+    c_nodes = torch.arange(N, N + pc)
+    i_nodes = torch.arange(N + pc, N + pc + pi)
+    t["node_call"] = torch.cat([t["node_call"], torch.full((pc + pi,), pcall, dtype=torch.long)])
+    t["n_nodes"] = torch.tensor(N + pc + pi)
+    ident = torch.tensor([1.0, 0.0, 0.0, 0.0])
+    for pre, n, nodes in (("chunk", pc, c_nodes), ("imp", pi, i_nodes)):
+        t[f"{pre}_node"] = torch.cat([t[f"{pre}_node"], nodes])
+        t[f"{pre}_call"] = _pad_rows(t[f"{pre}_call"], n, pcall)
+        t[f"{pre}_valid"] = _pad_rows(t[f"{pre}_valid"], n, False)
+        t[f"{pre}_x"] = _pad_rows(t[f"{pre}_x"], n)
+        t[f"{pre}_qs"] = _pad_rows(t[f"{pre}_qs"], n)
+        t[f"{pre}_mass"] = _pad_rows(t[f"{pre}_mass"], n, 1.0)
+        t[f"{pre}_inertia_body"] = _pad_rows(t[f"{pre}_inertia_body"], n, 1.0)
+        t[f"{pre}_q_world"] = torch.cat([t[f"{pre}_q_world"], ident.expand(n, 4)], 0)
+        for k in ("pos", "v", "w"):
+            t[f"{pre}_{k}"] = _pad_rows(t[f"{pre}_{k}"], n)
+        for k in ("v_end", "w_end", "dx", "drot"):
+            t[f"y_{pre}_{k}"] = _pad_rows(t[f"y_{pre}_{k}"], n)
+    t["chunk_anchored"] = _pad_rows(t["chunk_anchored"], pc, True)
+    f0 = int(t["y_chunk_fragment"].max().item()) + 1 if Nc else 0
+    t["y_chunk_fragment"] = torch.cat([t["y_chunk_fragment"], torch.arange(f0, f0 + pc)])
+    t["y_imp_regime"] = _pad_rows(t["y_imp_regime"], pi, S.REGIME_UNDECIDED)
+    t["y_imp_perf_freq"] = _pad_rows(t["y_imp_perf_freq"], pi)
+    t["y_imp_has_freq"] = _pad_rows(t["y_imp_has_freq"], pi, False)
+    t["ens_imp_v_end"] = _pad_rows(t["ens_imp_v_end"], pi)
+    t["ens_imp_mask"] = _pad_rows(t["ens_imp_mask"], pi, False)
+    for k in [k for k in t if k.startswith("base_")]:
+        n = pc if "_chunk_" in k else pi if "_impactor_" in k else pb
+        t[k] = _pad_rows(t[k], n)
+    # ---- bonds (undirected targets and directed twins): padding chunk 0 ↔ padding chunk 1
+    a, c_ = int(c_nodes[0]), int(c_nodes[1])
+    for k in [k for k in t if k.startswith("y_bond_")]:
+        t[k] = _pad_rows(t[k], pb)
+    t["bond_call"] = _pad_rows(t["bond_call"], pb, pcall)
+    t["bond_key"] = _pad_rows(t["bond_key"], pb, -1)
+    t["bond_valid"] = _pad_rows(t["bond_valid"], pb, False)
+    t["bond_qs"] = _pad_rows(t["bond_qs"], 2 * pb)
+    for et, d in b.edges.items():
+        n_und = pb if et == "bond" else (bucket(d["src"].shape[0] // 2, growth, 16)
+                                        - d["src"].shape[0] // 2)
+        twin_s = torch.tensor([a, c_] * n_und, dtype=torch.long)
+        twin_d = torch.tensor([c_, a] * n_und, dtype=torch.long)
+        d["src"] = torch.cat([d["src"], twin_s])
+        d["dst"] = torch.cat([d["dst"], twin_d])
+        d["x"] = _pad_rows(d["x"], 2 * n_und)
+        d["call"] = _pad_rows(d["call"], 2 * n_und, pcall)
+        d["frame"] = torch.cat([d["frame"], torch.eye(3).expand(n_und, 3, 3)], 0)
+    # ---- hierarchy: level 0 is chunk-indexed; deeper levels pad onto padding nodes above
+    pad_prev = torch.arange(Nc, Nc + pc)  # level-0 compact ids of the padding chunks
+    for li in range(len(b.h_edges)):
+        e = b.h_edges[li]
+        if li > 0:
+            n_real = b.h_ids[li].shape[0]
+            n_pad = bucket(n_real + 2, growth) - n_real
+            reps = pad_prev[torch.arange(n_pad) % len(pad_prev)]
+            b.h_ids[li] = torch.cat([b.h_ids[li], reps])
+            b.h_chunk[li] = torch.cat([b.h_chunk[li], torch.full((n_pad,), Nc, dtype=torch.long)])
+            pad_prev = torch.arange(n_real, n_real + n_pad)
+        else:
+            b.h_chunk[0] = torch.arange(Nc + pc)
+        p0, p1 = int(pad_prev[0]), int(pad_prev[1])
+        n_e = bucket(e.shape[1] + 2, growth) - e.shape[1]
+        pad_e = torch.tensor([[p0, p1] * (n_e // 2) + [p0] * (n_e % 2),
+                              [p1, p0] * (n_e // 2) + [p1] * (n_e % 2)], dtype=torch.long)
+        b.h_edges[li] = torch.cat([e, pad_e], 1)
+    b.n_calls = G2
+    return b
