@@ -123,9 +123,18 @@ class Provider:
         IO.validate(doc, c)
         return doc
 
+    def describe(self) -> dict:
+        """What the model needs from the host, written once to `D/model.json`: variant B
+        reads the QS-frame features, variant A does not (the host can skip building them)."""
+        if self.model is None:
+            return {"mode": self.mode, "needs_qs": True}
+        return {"mode": self.mode, "variant": self.model.cfg.variant,
+                "needs_qs": self.model.cfg.variant == "B", "meta": self.meta}
+
     def run(self, poll_s: float = 0.002, idle_timeout_s: float | None = None) -> int:
         req_root, resp_root = self.root / "req", self.root / "resp"
         resp_root.mkdir(parents=True, exist_ok=True)
+        IO.write(self.root / "model.json", self.describe())
         last_beat = last_work = time.time()
         while True:
             pending = sorted(p.parent for p in req_root.glob("*/ready")

@@ -27,8 +27,10 @@ pub struct ModelSpec {
     pub device: String,
     /// Seconds to wait for one response (the first includes loading the model).
     pub timeout: f64,
-    /// Variant-B QS-frame features in the call record (`live_call`'s `qs`).
-    pub qs: bool,
+    /// Variant-B QS-frame features in the call record (`live_call`'s `qs`): `None` asks the
+    /// provider (`model.json`'s `needs_qs`, true only for variant B). Building them re-runs
+    /// the frame's contact substeps under `blast_parity`, most of a call's host cost.
+    pub qs: Option<bool>,
 }
 
 impl ModelSpec {
@@ -40,7 +42,7 @@ impl ModelSpec {
             python_dir: here.join("../../learned-impact/python"),
             device: "cpu".into(),
             timeout: 120.0,
-            qs: true,
+            qs: None,
         }
     }
 }
@@ -51,6 +53,8 @@ pub struct ModelProvider {
     dir: PathBuf,
     scene: String,
     child: Child,
+    /// Whether call records carry the QS-frame features (resolved at spawn).
+    qs: bool,
     /// Wall-clock milliseconds of every call (request written → response read).
     pub call_ms: Vec<f64>,
 }
@@ -79,7 +83,32 @@ impl ModelProvider {
             .stderr(Stdio::from(log))
             .spawn()
             .map_err(|e| format!("starting {}: {e}", py.display()))?;
-        Ok(ModelProvider { spec: spec.clone(), dir: dir.to_path_buf(), scene: scene.to_string(), child, call_ms: Vec::new() })
+        let mut p = ModelProvider { spec: spec.clone(), dir: dir.to_path_buf(), scene: scene.to_string(), child, qs: true, call_ms: Vec::new() };
+        p.qs = match spec.qs {
+            Some(q) => q,
+            None => p.read_needs_qs()?,
+        };
+        Ok(p)
+    }
+
+    /// Wait for the provider's `model.json` (written once the model is loaded).
+    fn read_needs_qs(&mut self) -> Result<bool, String> {
+        let path = self.dir.join("model.json");
+        let t = Instant::now();
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+                return Ok(v.get("needs_qs").and_then(|x| x.as_bool()).unwrap_or(true));
+            }
+            if let Ok(Some(status)) = self.child.try_wait() {
+                let log = std::fs::read_to_string(self.dir.join("provider.log")).unwrap_or_default();
+                return Err(format!("model provider exited ({status}) while loading:\n{log}"));
+            }
+            if t.elapsed().as_secs_f64() > self.spec.timeout {
+                return Err(format!("no {} within {} s", path.display(), self.spec.timeout));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     /// The model's outcome of the routed island `keys` from the frame-start state `view`.
@@ -89,7 +118,7 @@ impl ModelProvider {
         let req = self.dir.join("req").join(&name);
         std::fs::create_dir_all(&req).map_err(|e| e.to_string())?;
         let mut standalone = view.standalone_copy();
-        let ev = outcome_calls::live_call(&mut standalone, &self.scene, &json!({}), &keys.chunks, &keys.impactors, frame as usize, self.spec.qs)?;
+        let ev = outcome_calls::live_call(&mut standalone, &self.scene, &json!({}), &keys.chunks, &keys.impactors, frame as usize, self.qs)?;
         outcome_calls::write_event(&req.join("call"), &ev, true)?;
         let request = json!({"schema_version": "learned-impact-provider-request/0", "event_id": self.scene, "frame": frame, "island": 0,
             "time": view.solver.time, "frame_dt": view.scene.sim.frame_dt, "keys": keys, "state": {}, "call_record": "call"});
