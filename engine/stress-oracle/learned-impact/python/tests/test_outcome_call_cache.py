@@ -85,3 +85,19 @@ def test_chunked_cache_stays_bounded_and_loads_into_memory(tmp_path):
     ref = S.load_event(built / events[0].manifest["event_id"])
     for k, v in ref.calls[0].arrays.items():
         np.testing.assert_array_equal(events[0].calls[0].arrays[k], v)
+
+
+def test_incomplete_ensembles_are_left_out(tmp_path):
+    from learned_impact.outcome.train import complete_ensembles
+
+    for k in range(4):  # complete: 4 of 4
+        m, cs, st = make_event(700, split="val", ensemble=("ens_full", k, 4))
+        S.write_event(tmp_path / m["event_id"], m, cs, st)
+    for k in range(2):  # 2 of 4 on disk
+        m, cs, st = make_event(701, split="val", ensemble=("ens_short", k, 4))
+        S.write_event(tmp_path / m["event_id"], m, cs, st)
+    m, cs, st = make_event(702, split="val")
+    S.write_event(tmp_path / m["event_id"], m, cs, st)
+    kept = complete_ensembles(list(S.find_events(tmp_path)))
+    ens = [S.load_event(p).manifest.get("ensemble_id") for p in kept]
+    assert ens.count("ens_full") == 4 and "ens_short" not in ens and len(kept) == 5

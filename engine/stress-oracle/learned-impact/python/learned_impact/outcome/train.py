@@ -181,10 +181,23 @@ def _split_of(path) -> str:
     return json.loads((Path(path) / "manifest.json").read_text()).get("split", "")
 
 
+def complete_ensembles(paths: list) -> list:
+    """`paths` without the members of an incomplete ensemble (fewer members on disk than its
+    `ensemble_size`): its frequencies would be estimated from too few members."""
+    man = {p: json.loads((Path(p) / "manifest.json").read_text()) for p in paths}
+    have: Counter = Counter(m["ensemble_id"] for m in man.values() if m.get("ensemble_id"))
+    short = {e for e, n in have.items()
+             if any(m.get("ensemble_id") == e and n < int(m.get("ensemble_size", n)) for m in man.values())}
+    if short:
+        print(f"[data] {len(short)} incomplete ensembles left out: {sorted(short)}", flush=True)
+    return [p for p in paths if man[p].get("ensemble_id") not in short]
+
+
 def _load_events(dataset: str, splits: set[str] | None = None) -> tuple[list[S.Event], int]:
     """Events under `dataset`, only those of `splits` when given: the manifest is read
     first, so other splits (the sealed set above all) are never loaded."""
     paths = [p for p in S.find_events(dataset) if splits is None or _split_of(p) in splits]
+    paths = complete_ensembles(paths)
     events = [S.load_event(p) for p in paths]
     if not events:
         raise S.SchemaError(f"no events under {dataset}")
