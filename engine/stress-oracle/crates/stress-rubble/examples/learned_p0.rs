@@ -832,6 +832,21 @@ fn run_event(dir: &std::path::Path, variant: &str, o: &ProviderOpts, samples: Ve
             let fp = stress_learned::outcome::fingerprint(&w);
             (track.finish(&w, stop_speed), json!({"fingerprint": fp, "recorded_fingerprint": outcome["fingerprint"]}))
         }
+        "coupled" => {
+            // The oracle's own coupled frame (impact islands simulated through the frame,
+            // rubble stepping every other body): no call boundary at all, the coupling alone.
+            let mut w = World::with_engine(&scene, engine(&scene));
+            let mut track = EventTrack::new(&w, e0, samples);
+            track.frame(&w, 0);
+            for f in 0..n {
+                w.step_frame();
+                track.frame(&w, f + 1);
+                if (f + 1) % 30 == 0 {
+                    eprintln!("[event {tag} coupled] frame {}/{n} island frames {}", f + 1, w.island_frames);
+                }
+            }
+            (track.finish(&w, stop_speed), json!({"island_frames": w.island_frames}))
+        }
         "provider" => {
             let w = if o.standalone { World::new(&scene) } else { World::with_engine(&scene, engine(&scene)) };
             let mut track = Some(EventTrack::new(&w, e0, samples));

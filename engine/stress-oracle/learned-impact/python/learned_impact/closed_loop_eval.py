@@ -11,6 +11,8 @@ until it settles, through P0's coupled harness (`learned_p0 event`), under each 
            body's rigid fit (`STRESS_DECODED_DEFORMATION=1`) instead of the rigid fit alone:
            the elastic deformation of a still-bonded (anchored, prestressed) wall survives
            the call, from the decoded state alone
+  coupled  (diagnostic) the oracle's own coupled frame, no call boundary: what the coupling
+           with rubble alone costs
   qs       CPU `blast_parity` (P1's QS baseline), standalone
   punch    the host's predictive punch, the engine taking each frame with its contacts
   model    P2's checkpoint (`--checkpoint`), through `stress_learned::provider_client`
@@ -168,6 +170,9 @@ def candidate_args(name: str, a, out: Path, event: str) -> tuple[list[str], dict
         return ["--variant", "provider", "--provider", "oracle"], {**deb, "STRESS_DECODED_DEFORMATION": "1", "STRESS_DECODED_RESET_JOINTS": "1"}
     if name == "qs":
         return ["--variant", "qs"], {}
+    if name == "coupled":
+        # Diagnostic: the oracle's own coupled frame, no call boundary (the coupling alone).
+        return ["--variant", "coupled"], deb
     if name == "punch":
         return ["--variant", "provider", "--provider", "punch"], deb
     if name in ("model", "model_def"):
