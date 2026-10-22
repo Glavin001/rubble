@@ -377,7 +377,7 @@ def evaluate(model, batches, decode_cfg: D.DecodeConfig | None = None,
         dec = D.decode(out, bc, dcfg)
         bound_active += int(dec["energy_bound_active"][:len(bc.calls)].sum())
         bound_total += len(bc.calls)
-        rows.extend(_per_call_outcomes(bc, dec))
+        rows.extend(_with_clamps(_per_call_outcomes(bc, dec), dec))
         shift = prior_logit_shift(bc, priors)
         logit = out["bond_break_logit"] + (shift if shift is not None else 0)
         bv = bc.t["bond_valid"].numpy()
@@ -392,6 +392,14 @@ def evaluate(model, batches, decode_cfg: D.DecodeConfig | None = None,
     res = _summarise(rows, bond_p, bond_y, imp_p, imp_y, bound_active, bound_total, acceptance)
     model.train()
     return res
+
+
+def _with_clamps(rows: list[dict], dec: dict) -> list[dict]:
+    """Each call's admissibility clamps (node axes clamped into the kinematic envelope)."""
+    n = dec["admissibility_clamps"].cpu().numpy()
+    for i, r in enumerate(rows):
+        r["clamps"] = int(n[i])
+    return rows
 
 
 def _summarise(rows, bond_p, bond_y, imp_p, imp_y, bound_active, bound_total,
@@ -410,7 +418,11 @@ def _summarise(rows, bond_p, bond_y, imp_p, imp_y, bound_active, bound_total,
              bond_ece=ece(bp, by), regime_brier=brier(ip, iy), regime_ece=ece(ip, iy),
              false_break_rate=float(np.mean(np.concatenate([r["broke_hat"] for r in nobreak])))
              if nobreak else 0.0,
-             energy_bound_rate=bound_active / max(bound_total, 1))
+             energy_bound_rate=bound_active / max(bound_total, 1),
+             # calls with ≥ 1 node axis clamped into the kinematic envelope, and clamped axes
+             # per call (kinematic checkpoints: at the envelope's edge)
+             admissibility_clamp_rate=float(np.mean([r.get("clamps", 0) > 0 for r in rows])),
+             admissibility_clamps_per_call=float(np.mean([r.get("clamps", 0) for r in rows])))
     # group ensemble members
     groups: dict[tuple, list[dict]] = defaultdict(list)
     for r in rows:
@@ -569,7 +581,7 @@ def three_way(model, batches, decode_cfg: D.DecodeConfig | None = None,
         dec = D.decode(out, bc, dcfg)
         bounds[0] += int(dec["energy_bound_active"][:len(bc.calls)].sum())
         bounds[1] += len(bc.calls)
-        m_rows = _per_call_outcomes(bc, dec)
+        m_rows = _with_clamps(_per_call_outcomes(bc, dec), dec)
         rows["model"].extend(m_rows)
         y = np.where(bc.t["y_bond_has_freq"].numpy(), bc.t["y_bond_freq"].numpy(),
                      (bc.t["y_bond_broke"].numpy() > 0).astype(float))

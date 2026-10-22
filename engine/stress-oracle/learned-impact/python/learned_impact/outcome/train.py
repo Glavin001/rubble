@@ -960,6 +960,9 @@ def main(argv=None) -> None:
                     help="a continuous break time per bond (the decode's break order)")
     ap.add_argument("--hidden-head", action="store_true",
                     help="the chunks' frame-end hidden state (u, theta, v, w) as a head")
+    ap.add_argument("--kinematic", action="store_true",
+                    help="displacements as the velocity trapezoid plus a correction bounded by the "
+                         "kinematic envelope (decode.KIN_TOL)")
     ap.add_argument("--init-checkpoint", default="",
                     help="start from these weights and input statistics (fine-tuning, DAgger)")
     ap.add_argument("--drop-features", default="",
@@ -1000,6 +1003,7 @@ def main(argv=None) -> None:
     mc.full_state = a.full_state
     mc.break_time_head = a.break_time_head
     mc.hidden_head = a.hidden_head
+    mc.kinematic = a.kinematic
     mc.__post_init__()
     seeds = [int(s) for s in a.seeds.split(",")]
     cc = {"module": a.call_cache_module, "root": a.call_cache, "builder": a.call_builder,

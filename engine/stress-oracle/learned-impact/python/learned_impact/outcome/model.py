@@ -66,10 +66,19 @@ class ModelConfig:
     # the chunks' frame-end hidden state (u, θ, v, ω; the body derivation's input, `/4`+)
     break_time_head: bool = False
     hidden_head: bool = False
+    # Kinematic consistency (planning, 2026-10-22): a node's frame displacement is the
+    # trapezoid dt·(v_in + v_end)/2 plus a learned correction h·tanh(c), with h per axis of
+    # the node's frame-start frame = dt·|Δv|/2 + tol·dt·v_ref (rotation: Δω, dt·v_ref/L).
+    # A decoded body or impactor can then never sit where its velocities cannot take it.
+    # False for checkpoints that predate it (the decode then clamps to the same envelope).
+    kinematic: bool = False
+    # (chunk dx, impactor dx, chunk drot, impactor drot) tolerances: KIN_TOL, see decode.py
+    kin_tol: tuple[float, ...] = (0.25, 0.02, 2.5, 2.5)
 
     def __post_init__(self):
         self.rounds = tuple(self.rounds)
         self.drop_features = tuple(self.drop_features)
+        self.kin_tol = tuple(float(x) for x in self.kin_tol)
         for f in self.drop_features:
             arr, _, col = f.partition(":")
             if arr not in S.FEATURE_COLUMNS or col not in S.FEATURE_COLUMNS[arr]:
@@ -381,6 +390,8 @@ class ImpactOutcomeModel(nn.Module):
             "energy_e_elastic": F.softplus(en[:, 2]),
             "energy_ke_loss": en[:, 3],
             "latent_global": g,
+            **({"kin_tol": torch.tensor(self.cfg.kin_tol, dtype=c_out.dtype, device=c_out.device)}
+               if self.cfg.kinematic else {}),
         }
 
 
