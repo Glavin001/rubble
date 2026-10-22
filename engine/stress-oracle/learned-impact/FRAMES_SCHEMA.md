@@ -66,7 +66,7 @@ possible work) fails the event loudly.
 | `frames.json` | per frame: time, phase, breaks, substeps, routed chunks and impactors, predicted contacts, punch bonds, QS-prior convergence, impactor contact, struck structures, the energy ledger (kinetic split, mechanical, dissipated and its parts, contact terms, elastic) |
 | `outcome.json` | the whole run: stop reason, `truncated`, broken bonds, fragments, largest fraction, last break time, breaks in the last 0.5 s, input energy, each impactor's exit velocity and regime (perforate / arrest / rebound / deflect, geometric), frames per phase, wall-clock cost by part, oracle substeps, fingerprint |
 | `catalog.json`, `arrays/*` | little-endian raw arrays (`catalog.rs`; dtypes `f32`, `i32`, `f64`), below |
-| `snapshots/<boundary>.msgpack.zst` | recorder revision 8 on: exact restart points, the whole `World` (`World::save_state`, rmp-serde with named fields, one zstd frame; between every 10th boundary each is compressed with the previous snapshot as its zstd dictionary, `delta_of`, and `outcome::load_snapshot` decodes the chain) at boundary 0, every boundary whose frame routes an island, and every 10th; `World::restore_state(scene.json, bytes)` resumes the oracle bit for bit (contact cohorts, clock and energy ledger included). Listed in `context.json` `snapshots.boundaries` |
+| `full_state/<boundary>.fs.zst` | recorder revision 9 on: the oracle's complete state at every frame boundary (row f = frame f's start, F + 1 boundaries): every field `World` serializes, one typed column per field path (`stress_learned::full_state`, schema `learned-impact-full-state/1`); every 10th boundary self-contained, the others zstd deltas of the previous one (`delta_of`); `full_state::load_frame` decodes, `full_state::restore(scene, frame)` rebuilds the World and one `oracle_frame` reproduces the next boundary bit for bit. `solver.step_bounds` (a pure cache) is recorded empty. Listed in `context.json` `full_state.boundaries` |
 
 ## Arrays
 
@@ -136,16 +136,18 @@ exact, then one frame):
   broken first, as `STRESS_IMPACT_PUNCH` does before the engine steps. On other frames the
   punch's outcome is the QS one.
 
-**Exact extras** (recorder revision 8 on; the dataset is the ground truth and only grows,
-user decision 2026-10-22, so every frame is kept: `storage.select_training_frames` is off):
-- `<name>_f64` beside `state_chunk_pos/vel/angvel`, `state_chunk_cluster_quat`,
-  `state_chunk_q_world`, `state_chunk_hidden`, `state_bond_joint`, `state_bond_energy`,
-  `state_bond_fail_margin` (unrounded) and `state_impactor`: the exact f64 values (the f32
-  array is their rounding);
-- `break_i32 [B,2]` (frame, bond) and `break_f64 [B]`: each break's exact solver time (s);
-- `frame_impactor_impulse [F,I,3]` (f64, N s): the contact impulse on each impactor over
-  the frame, its momentum change less gravity's, summed per substep;
-  `frame_impactor_peak_force [F,I]` (f64, N): its largest substep-mean contact force.
+**Direct labels** (recorder revision 9 on; the data retention spec; every frame kept):
+- `break_i32 [B,4]` (frame, bond, order, failure mode 1-4) and `break_f64 [B]` (exact solver time, s);
+- `peak_i32 [P,2]` (frame, bond) and `peak_f64 [P,9]` (time of peak, peak failure index, observed peak index, generalised force at it: shear t1, shear t2, axial, bending t1, bending t2, torsion): bonds whose peak index over the frame exceeds 0.2 or that broke;
+- `frame_impactor_impulse [F,I,3]` (contact impulse, N s), `frame_impactor_peak_force [F,I]` (N), `frame_impactor_subframe [F,I,8,14]` (time, position, wxyz, velocity, angular velocity at the first substep end at or past k/8 of the frame);
+- `mid_frame [M]`, `mid_time [M]`, `mid_chunk_pos [M,N,3]`, `mid_chunk_vel [M,N,3]` (f64): contact, secondary and separation frames, at mid-frame;
+- `frame_cost_i32 [F,2]` (substeps, contact-limited substeps), `frame_cost_f64 [F,2]` (dt min, max), `frame_oracle_seconds [F]` (wall-clock, not reproducible);
+- `frame_structure_load_impulse [F,S,6]` and `frame_structure_support_impulse [F,S,6]` (linear; angular about the world origin): external-load impulse and the supports' reaction (momentum change less it);
+- `frame_energy [F,14]` (cumulative ledger, `context.json` `energy_columns`);
+- `static_chunk_inertia [1,N,6]` (body-frame inertia xx, yy, zz, xy, xz, yz; `static_chunk_inertia_diag` is its diagonal);
+- `context.json` `provenance` (source commit, binary hash, revisions).
+
+Revision 8 events carry `snapshots/` and `_f64` copies instead (superseded).
 
 These are CPU mirrors of the baselines' *stress models* under the oracle's own contact; the
 GPU baselines additionally run rubble's rigid engine for contact (4 iterations, 1 step a

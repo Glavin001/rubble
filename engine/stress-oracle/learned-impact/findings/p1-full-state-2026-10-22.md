@@ -1,0 +1,178 @@
+# P1: the full-state recorder, its completeness gate, sizes and the viability dataset plan (2026-10-22)
+
+## The contract (recorder revision 9)
+
+The state contract is mechanical. It is every field that `stress_ref::world::World`
+serializes (serde derives on the world, its solver and every state type), shredded into one
+typed column per field path:
+
+- `solver.bonds[][].joint.kappa` is a list element's struct field;
+- `sticks{k}` / `sticks{v}` are the persistent contact table, keyed by pair and sorted by key;
+- every occurrence's kind is kept, so options and enums round-trip.
+
+The columns are written at every 1/60 s boundary to `full_state/<boundary>.fs.zst`.
+Every 10th boundary is self-contained; the others are zstd deltas of the previous one. The
+code is `stress_learned::full_state`, and FRAMES_SCHEMA.md documents the layout.
+
+What is left out:
+
+- the static data: the scene, and the structures rebuilt from it;
+- the engine coupling (none in the standalone oracle);
+- one pure cache, `solver.step_bounds`: the stable-step bound keyed by cluster contents.
+  The routing prediction fills it between boundaries.
+
+**The completeness gate passes.** A World rebuilt from boundary f (plus `scene.json`) and
+stepped one oracle frame equals boundary f + 1 bit for bit, in every column, with f64
+compared by bits. It was checked:
+
+- through the impact on the M5 free wall (20 frames) and the M5 wall row (20 frames);
+- on an anchored wall under gravity with several impactors (30 frames);
+- on a free wall with several impactors (30 frames);
+- on a settling anchored wall (40 frames);
+- on every boundary of a recorded event (`tests/outcome.rs`), and through a nine-delta
+  chain (`tests/outcome_calls.rs`).
+
+## Field classification (P2's request)
+
+`learned_impact_full_state_classify` takes each of the 508 paths at five mid-impact or
+later boundaries (the two M5 walls, anchored t2 at contact and 12 frames later, free t2 at
+contact). It zeroes that field (0, false, empty), rebuilds the world, steps one frame and
+compares the result with the untouched step:
+
+- **state (244 paths):** another field's next value changes, or the rebuild or step fails;
+- **derived (156 paths):** nothing changes;
+- **diagnostic (108 paths):** only the field's own next value changes.
+
+The table is `runs/dev/full-state-classify/classification.{json,md}`. Two caveats:
+
+- **"Derived" means "had no effect in one frame on these five trials".** It includes the
+  config switches of features these scenes don't exercise (rebar, implicit, multirate,
+  blast).
+- **"Diagnostic" can hide state that only matters later.** Examples are running maxima
+  such as `joint.kappa_c` and `joint.ductility`. Resetting them changed nothing within the
+  frame, but they would change a later compression failure.
+
+So the recorded contract stays the whole serialization. The classification is a guide for
+choosing model inputs and outputs, not a licence to drop fields. A multi-frame
+classification (reset, then step 10 frames) would separate delayed state from diagnostics;
+that is a follow-up.
+
+Fields that are state for certain:
+
+- chunks: u, θ, v, w, active, cluster;
+- clusters: pose, velocity, activity and timers;
+- bonds: `joint.kappa`, `damage`, `crush`, `plastic`, `mode`, `alive` and the multirate
+  state;
+- contacts: `sticks`, `pair_offsets`, `ground_offsets`;
+- impactors: pose, velocity, angular velocity;
+- time, `next_cluster_id`, `pending_split`, `unchanged`, `true_steps`, `mass_damping`.
+
+Not state, as the classification found: per-bond `force`, `elastic` and `measures`
+(recomputed every substep), the energy ledgers, `events`, `neighbours` (rebuilt),
+`initial_positions` and `step_start`.
+
+## The retention spec: what each item is stored as
+
+| Spec item | Stored | Notes |
+|---|---|---|
+| Every frame, full state | `full_state/` + the f32 `state_*` arrays | The arrays are a convenience copy the call builder reads (about 30% of the arrays' size) |
+| Per break: time, order, mode | `break_i32` (frame, bond, order, mode) and `break_f64` (time) | |
+| Peaks > 0.2 or broken: stress components and time of peak | `peak_i32` / `peak_f64` | Generalised force (shear t1/t2, axial, bending t1/t2, torsion) at the substep end with the largest failure index seen |
+| Energy split per frame | `frame_energy` (14 cumulative terms) | |
+| Energy split per island | fracture and damping from `frame_bond_dissipated` | **Gap:** contact and friction work per island needs per-pair work instrumentation in stress-ref, which doesn't exist yet |
+| Impactor impulse, peak force, 8 sub-frame states | `frame_impactor_impulse`, `_peak_force`, `_subframe` [F,I,8,14] | |
+| Support reaction per anchored structure | `frame_structure_support_impulse` [F,S,6] | Momentum change of the structure's chunks less its external-load impulse (`frame_structure_load_impulse`, from a stress-ref accumulator: off by default, no physics change). About 0 for a free wall (tested) |
+| Mid-frame chunk position and velocity (contact, secondary and separation frames) | `mid_frame`, `mid_time`, `mid_chunk_pos`, `mid_chunk_vel` (f64) | |
+| Cost per frame | `frame_cost_i32` (substeps, contact-limited substeps), `frame_cost_f64` (dt range), `frame_oracle_seconds` | Wall-clock, not CPU seconds; not reproducible, so `regenerate` skips it |
+| Provenance | `context.json` `provenance` | Source commit (`git describe --dirty` at build), binary FNV-64, revisions; seeds and perturbations in the recipe |
+| Blast face loads | – | No blast events yet |
+
+## Sizes (pilot `runs/size-r9/`: 8 training events per family, bulk-like pilot ranges)
+
+MB per event, compressed:
+
+| family | frames | non-settling frames | chunks | arrays + JSON | + full state | full state on non-settling frames + every 10th only | wall s at 8 parallel (overhead) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| free_wall t1 | 78 | 9 | 131 | 2.02 | **6.49** | 3.31 | 22 (5) |
+| anchored_wall t1 | 100 | 77 | 140 | 4.22 | **15.1** | 13.7 | 58 (10) |
+| free_wall t2 | 54 | 12 | 132 | 1.66 | **4.65** | 2.86 | 25 (4) |
+| anchored_wall t2 | 105 | 99 | 131 | 2.62 | **6.17** | 6.02 | 73 (9) |
+| ballistic bracket (102 events) | | | | 1.8 | **5.1** | | |
+
+- **The full state roughly triples an event.** A frame is about 100 KB compressed for a
+  130-chunk wall, from about 0.5 MB raw.
+- **This is close to the lossless floor.** XOR against the previous frame plus byte-shuffle
+  saves only 3% more: the dynamic f64 content (about 45 values per bond) is near
+  incompressible.
+- **Anchored walls don't settle quickly.** Ground contact keeps them in "secondary" and
+  "contact" phases, so thinning full state to active frames saves little there.
+
+## Ballistic-limit sweeps
+
+There are six families in the `p1-ballistic` catalog:
+
+- training: `bl_free_thin`, `bl_anchored_base`, `bl_standing`, `bl_coarse_heavy`;
+- validation: `bl_free_thick`;
+- test: `bl_anchored_sides`.
+
+A bracket pilot (`runs/bl-bracket/`, 0.02–8× each family's punch threshold) found the
+penetration transition far below the punch model's threshold in every family. The oracle's
+walls give way at 0.1–0.7× the punch speed.
+
+| family | punch threshold | transition (rebound/arrest → perforate) |
+|---|---:|---|
+| bl_free_thin | 12.5 m/s | 1.9–2.7 m/s |
+| bl_anchored_base | 14.0 | 1.5–2.1 (an arrest at 3.0: noisy) |
+| bl_standing | 12.3 | 1.9–2.6 |
+| bl_coarse_heavy | 12.5 | 6.3–8.9 |
+| bl_free_thick (val) | 20.0 | 3.0–6.0 |
+| bl_anchored_sides (test) | 21.3 | 7.5–10.6 |
+
+Planned sweep: 12 log-spaced speeds per family over 0.5–2× the bracket's midpoint, each an
+8-member ensemble. That is 6 × 96 = 576 events, about 2.9 GB. Command per family:
+`--catalog p1-ballistic --family F --speeds-abs LO:HI:12`.
+
+## The viability dataset plan, and the budget conflict
+
+Disk now: `runs/` holds **32 GB**, above the 30 GB budget.
+
+- **Calls: 15.8 GB.** `calls-v4-eval` 8.4, `calls-v4-train` 3.3, and `calls-v3-eval` 4.1,
+  which P2 still holds for its /3 gate.
+- **Recorded data: 16 GB.** This includes the 2.3 GB revision-8 pilot and the 0.6 GB
+  bracket.
+
+The full plan, all revision 9 with full state, standalone CPU oracle:
+
+| set | events | MB/event | GB |
+|---|---:|---:|---:|
+| train singles, distinct configurations: free t1 1,000; free t2 500; anchored t1 700; anchored t2 500; standing t1 600; standing t2 300 | 3,600 | about 7.5 | 27 |
+| ballistic sweeps (6 families × 12 speeds × 8) | 576 | 5 | 2.9 |
+| standing-wall val and test ensembles (10 + 10 configurations × 8) | 160 | 10 | 1.6 |
+| **total new** | **4,336** | | **about 32** |
+
+That takes about 6–8 h at 8 threads.
+
+Options:
+
+- **(A) Raise the budget to about 70 GB (recommended).** Disk has 474 GB free. The full
+  plan fits, and the calls can be rebuilt freely.
+- **(B) Keep 30 GB; full state on evaluation, ensembles and ballistic events only.** After
+  evicting the calls (13.8 GB free), training singles are arrays only, at about 2.6 MB:
+  - 3,500 training singles: 9.1 GB;
+  - ballistic sweeps and standing evaluation: 4.5 GB.
+
+  Training events stay exactly regenerable from their recipes, and a regenerated event
+  carries its full state.
+- **(C) Keep 30 GB with full state everywhere.** After evicting the calls: ballistic and
+  evaluation as planned, plus about 1,200 training singles.
+
+## Not done yet
+
+- **An offline re-derivation tool.** It would rebuild the World from a recorded boundary and
+  recompute routing, contacts, pairs, QS prior and baselines under a given routing config.
+  The builder's tiered routing needs it, and the full state makes it possible without
+  re-simulation.
+- **GPU-parity derived inputs:** deferred by planning.
+- **Irregular-chunk and materials pilots:** pilot-only, after viability.
+- **Regenerating the 828 thinned bulk events, and the evalplus queue:** both paused. The
+  queue sits at test anchored t2 56/120, and the PAUSE file is in place.

@@ -15,6 +15,27 @@
 - compute is the **M3 Max only**;
 - the first acceptance is on **rams and walls** (free wall, wall row, procedural walls), then houses. Vibe-town comes last, because it waits on the Shardwright re-export.
 
+## Data retention spec (2026-10-22, revised with the user)
+
+**Principle.** Generation runs once. Training and architecture then iterate on that data, never sent back to generation because a signal is missing. Samples are short, so the restart is the initial conditions (recipe plus seeds), not oracle snapshots. Anything plausibly useful as a training target or an evaluation metric is recorded directly and compactly. Derived files (calls, features) are rebuilt freely. Disk budget: 30 GB.
+
+| Recorded | Training or evaluation use |
+|---|---|
+| Every frame, settling included: full state (poses, velocities, hidden deformation, bond joint history, damage), predicted contacts, near pairs, QS prior, QS and punch baselines, peak failure index, per-bond dissipation, phase | Inputs, frame-end targets, whole-event trajectory metrics |
+| Per break: exact f64 time, order, failure mode | Break timing and order, cascade and mode heads |
+| Bonds with peak failure index > 0.2 or broken: peak stress components and time of peak (sparse) | Force-based targets, alternative break rules |
+| Per frame and per island: energy split (fracture, damping, contact, friction, external) | Energy head and losses, energy metrics |
+| Per impactor per frame: realised contact impulse and peak force; impactor state at 8 sub-frame times | Impactor Δv decomposition, impact-timing and sub-frame supervision, routing-miss checks |
+| Per anchored structure per frame: support reaction impulse (linear and angular) | Momentum accounting and projection on anchored islands, support metrics |
+| Contact, secondary and separation frames: every chunk's position and velocity at mid-frame | 1/120 cadence or intermediate supervision without re-simulating |
+| Per frame: substeps, dt, contact-limited flag, oracle CPU time | Cost claims, cost-aware routing |
+| Provenance: recipe, seeds, perturbations, oracle configuration, scene hash, git commit, binary hash, recorder revision | Exact regeneration, split hygiene |
+| Blast face loads per frame (once blasts start) | Blast inputs |
+
+**Generation design** (so nothing is missing for acceptance): dense ballistic-limit sweeps on at least 6 wall families (v0 swept across the penetration transition, 8-member ensembles at each speed), alongside the ensembles, the sealed set and the extrapolation splits.
+
+**Not recorded:** oracle restart snapshots and per-substep states.
+
 ## What I verified, and what was wrong
 
 ### Code facts (audited on main and on 5a2f5e4f)
