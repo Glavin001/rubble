@@ -492,7 +492,12 @@ The recorder has u and θ (`state_chunk_hidden [n,6]`). The rates follow from
   copies go in carried arrays `chunk_def` (f32 `[Nc,12]`), for pushforward.
 - **No new targets or outputs.** The per-chunk `y_chunk_v_end` / `w_end` / `dx` / `drot`
   (unreduced) and the chunk head's 12 outputs already determine all four at frame end; the
-  host derives them from the fit. Decoded state stays `/1`.
+  host derives them from the fit. Decoded state stays `/1`. For the loss only, the builder
+  adds `y_chunk_def_end` (f32 `[Nc,12]`, from the frame-end boundary's hidden state): an
+  exact target, since a fit from f32 world arrays would lose µm-scale u.
+- **Input scale u_c:** the mean over the chunk's live bonds of f_t·A ÷ k_n (failure force
+  over normal stiffness), floored at 1e-9 m; a chunk with no live bonds takes the island
+  median. Also carried as `chunk_def_uc` (f32 `[Nc]`).
 - **Decode:** it must not fold a body to rigid; it doesn't today. The per-island momentum
   projection stays.
 - **Bond prestress:** not boundary state. A bond's force follows from both ends' (u, θ) and
