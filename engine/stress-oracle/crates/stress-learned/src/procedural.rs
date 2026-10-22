@@ -486,6 +486,14 @@ pub fn ballistic_specs() -> Vec<BallisticSpec> {
         b("bl_coarse_heavy", [8, 1, 8], 0.2, "base", true, false, 0.15, 1000.0, "train"),
         b("bl_ground_thick", [10, 2, 10], 0.1, "free", true, false, 0.1, 200.0, "val"),
         b("bl_anchored_sides", [12, 2, 10], 0.1, "base_sides", true, false, 0.08, 150.0, "test"),
+        // Two chunks deep, for training (planning, 2026-10-22: the held-out families are two
+        // deep, the first training families one deep); none is a val or test layout.
+        b("bl2_free_8x8_s", [8, 2, 8], 0.1, "free", true, true, 0.08, 100.0, "train"),
+        b("bl2_free_12x8_b", [12, 2, 8], 0.15, "free", true, false, 0.12, 400.0, "train"),
+        b("bl2_base_10x8_s", [10, 2, 8], 0.1, "base", true, true, 0.1, 250.0, "train"),
+        b("bl2_base_8x10_b", [8, 2, 10], 0.15, "base", true, false, 0.15, 800.0, "train"),
+        b("bl2_free_14x10_s", [14, 2, 10], 0.1, "free", true, true, 0.12, 300.0, "train"),
+        b("bl2_base_12x12_b", [12, 2, 12], 0.1, "base", true, false, 0.1, 300.0, "train"),
     ]
 }
 

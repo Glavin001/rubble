@@ -475,3 +475,31 @@ families.
 **Rebuilt.** All 604 resident events in `calls-v5` (40,713 calls; 35,817 with nonzero
 contact energy), 24 min at 4 threads. Restoring two boundaries per call roughly doubles the
 build time. Training calls get the fields on demand through P2's cache.
+
+## Two-deep ballistic training families (planning, 2026-10-22)
+
+**Why.** P2 found that the ballistic failure is layout coverage. Every training ballistic
+family is one chunk deep, while the held-out families (`bl_ground_thick` val,
+`bl_anchored_sides` test) are two deep, so the model treats two-deep walls as thin.
+
+**What.** Six two-deep training families were added to `p1-ballistic`, all under gravity
+and none a val or test layout:
+- `bl2_free_8x8_s`: 8×2×8, 0.1 m, sphere 0.08 m / 100 kg;
+- `bl2_free_12x8_b`: 12×2×8, 0.15 m, box 0.12 m / 400 kg;
+- `bl2_base_10x8_s`: 10×2×8, 0.1 m, sphere 0.1 m / 250 kg;
+- `bl2_base_8x10_b`: 8×2×10, 0.15 m, box 0.15 m / 800 kg;
+- `bl2_free_14x10_s`: 14×2×10, 0.1 m, sphere 0.12 m / 300 kg;
+- `bl2_base_12x12_b`: 12×2×12, 0.1 m, box 0.1 m / 300 kg.
+
+Each family is bracketed first (9 single runs, 0.05–1× its punch threshold), then recorded
+as 5 speeds at 0.5–2× the bracket's transition midpoint, × 8 members.
+
+**Brackets without full state (planning-approved).** The brackets are placement pilots:
+they only locate the transition, and they regenerate from their recipes. They are recorded
+with `--no-full-state` (`runs/bl2-bracket/`), at about 4 MB per event against about
+12 MB with full state.
+
+**Family 1, `bl2_free_8x8_s`.** It rebounds up to 3.43 m/s and perforates from 4.99 m/s
+(midpoint about 4.15). Its ensembles are 2.1–8.3 m/s × 5 × 8, under a 26.09 GB tree guard:
+29 − 0.91 (P0's refs) − 0.5 (P2's DAgger cap) − 1.5 (P2's cache cap). Families 2–6 wait
+for the user's approval of the bulk-v1 val/test deletion (about 4.5 GB).

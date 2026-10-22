@@ -4,7 +4,7 @@
 //!       [--family free_wall|anchored_wall] [--tier 1|2] [--n N] [--seed S] [--ranges pilot|bulk]
 //!       [--oracle a12_realtime] [--jobs N] [--limit N] [--plan-only] [--no-baselines]
 //!       [--max-seconds S] [--max-failure-fraction F] [--pause-file PATH]
-//!       [--members M] [--ensemble-train-share F] [--no-ensembles] [--fractions T,V,S] [--split-seed S] [--only-split S]
+//!       [--members M] [--ensemble-train-share F] [--no-ensembles] [--fractions T,V,S] [--split-seed S] [--only-split S] [--no-full-state]
 //!       [--budget-gb G] [--min-free-gb F] [--thin]
 //!       [--split sealed|train|val|test] [--extrapolation speed|mass|size|loads] [--corner-share F]
 //!
@@ -140,6 +140,10 @@ fn main() {
     opts.baselines = !flag("--no-baselines");
     if let Some(s) = val("--max-seconds") {
         opts.stop.max_seconds = s.parse().expect("--max-seconds");
+    }
+    if flag("--no-full-state") {
+        // Placement pilots (brackets): their outcomes only; regenerable from their recipes.
+        opts.storage.full_state = false;
     }
     if flag("--thin") {
         opts.storage.select_training_frames = true;
