@@ -52,6 +52,9 @@ class ModelConfig:
     # "bond_feat:log_qs_hertz_util"): an input ablation that training, evaluation, the
     # provider and the export all apply the same way, since it lives in the config.
     drop_features: tuple[str, ...] = ()
+    # The break margin as frame-start margin × a non-negative increment (see `_heads`);
+    # False only for checkpoints that predate it.
+    monotone_margin: bool = True
 
     def __post_init__(self):
         self.rounds = tuple(self.rounds)
@@ -283,6 +286,16 @@ class ImpactOutcomeModel(nn.Module):
         log_r = out[:, 0]
         if self.cfg.variant == "B":
             log_r = log_r + t["bond_qs"][0::2, 0]
+        if self.cfg.monotone_margin:
+            # q = κ / κ_fail with κ a running maximum: a surviving bond's frame peak is never
+            # below its frame-start margin (bulk v1: 0 of 8,987), and in quiet frames it stays
+            # put. So q̂ = q_start · e^softplus(·): "unchanged" is representable to any
+            # precision, where a free regression of log q sat ±5% around near-critical damaged
+            # bonds and crossed τ = 1 (the real-data overfit's false breaks).
+            q0 = be["x"][0::2, S.col("bond_feat", "fail_margin")].clamp(min=1e-4)
+            log_q = torch.log(q0) + F.softplus(out[:, 3] - 2.0)
+        else:
+            log_q = out[:, 3]
         chunk_h = h[t["chunk_node"]]
         imp_h = h[t["imp_node"]]
         c_out = self.chunk_head(torch.cat([chunk_h, g[t["chunk_call"]]], -1))
@@ -297,7 +310,7 @@ class ImpactOutcomeModel(nn.Module):
         return {
             "bond_log_r": log_r,
             "bond_break_logit": out[:, 1],
-            "bond_log_q": out[:, 3],  # failure margin: the break decision (q ≥ 1)
+            "bond_log_q": log_q,  # failure margin: the break decision (q ≥ 1)
             "bond_time_logits": out[:, 4:4 + nt],
             "bond_ddamage": F.softplus(out[:, 2]),
             "chunk_out": c_out,

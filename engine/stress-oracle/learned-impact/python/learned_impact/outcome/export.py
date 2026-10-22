@@ -55,7 +55,9 @@ LAYERS = {
     "CoarseRound": "m = gmp.mlp_edge([fibre, h[i], h[j]]), fibre = (R_bodyᵀ(p_i − p_j)/L, |·|); "
                    "h' = h + gmp.mlp_node([h, Σ_j m, g[call]]); g' = g + glob.mlp([g, mean h'])",
     "heads": "bond: ½(bond_head([e_fwd, e_rev, h_s, h_d, g]) + bond_head([e_rev, e_fwd, h_d, h_s, g])) "
-             "→ [log r, break logit, softplus→Δdamage, log q, time logits×8] (variant B adds "
+             "→ [log r, break logit, softplus→Δdamage, log q, time logits×8]; with "
+             "model_config.monotone_margin, log q = ln(max(fail_margin, 1e-4)) + softplus(raw − 2) "
+             "(fail_margin: the raw bond_feat column) (variant B adds "
              "bond_qs col 0 to log r); chunk/imp: *_head([h, g]) → 12 body-frame outputs (+ "
              "perforation logit for impactors; B adds *_qs to the first 6); energy_head(g)",
 }

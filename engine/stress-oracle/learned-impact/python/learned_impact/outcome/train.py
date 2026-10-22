@@ -484,7 +484,9 @@ def decode_config(ck: dict) -> D.DecodeConfig:
 
 def load_model(path: str | Path, device="cpu") -> tuple[ImpactOutcomeModel, dict]:
     ck = torch.load(path, map_location=device, weights_only=False)
-    m = ImpactOutcomeModel(ModelConfig(**ck["model_config"]))
+    mc = dict(ck["model_config"])
+    mc.setdefault("monotone_margin", False)  # checkpoints before the monotone margin head
+    m = ImpactOutcomeModel(ModelConfig(**mc))
     m.load_state_dict(ck["model"])
     return m.to(device), ck
 

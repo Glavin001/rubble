@@ -50,3 +50,20 @@ def test_drop_features_makes_the_column_invisible():
         ModelConfig(variant="A", drop_features=("bond_qs_feat:qs_frame_broke",))
     with pytest.raises(ValueError):
         dataclasses.replace(ModelConfig(), drop_features=("bond_feat:nope",))
+
+
+def test_monotone_margin_never_below_the_frame_start_margin():
+    import torch
+
+    from learned_impact.outcome import schema as S
+    from learned_impact.outcome.batch import HierarchyCache, collate
+    from learned_impact.outcome.model import ImpactOutcomeModel, ModelConfig
+    from learned_impact.outcome.synthetic import make_event
+
+    m, calls, st = make_event(4)
+    b = collate(calls, {calls[0].event_id: st}, HierarchyCache(2))
+    q0 = b.edges["bond"]["x"][0::2, S.col("bond_feat", "fail_margin")].clamp(min=1e-4)
+    torch.manual_seed(0)
+    with torch.no_grad():
+        out = ImpactOutcomeModel(ModelConfig(monotone_margin=True))(b)
+    assert (out["bond_log_q"] >= torch.log(q0) - 1e-6).all()
