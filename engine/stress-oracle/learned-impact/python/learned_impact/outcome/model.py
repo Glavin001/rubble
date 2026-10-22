@@ -41,6 +41,10 @@ class ModelConfig:
     variant: str = "B"  # "B" residual over the QS frame outcome (default since the P0 step-5 pilot), "A" impact-only
     n_time_bins: int = S.N_TIME_BINS
     use_global: bool = True
+    # Fixed per-column standardisation of every input array, from training-set statistics
+    # stored in the checkpoint (a global affine map, not per-graph normalisation; the GPU
+    # port folds it into the first layer).
+    input_norm: bool = False
     edge_types: tuple[str, ...] = S.EDGE_TYPES
 
     def __post_init__(self):
@@ -120,6 +124,11 @@ class ImpactOutcomeModel(nn.Module):
             nn.ModuleList(CoarseRound(cfg) for _ in range(r[cfg.levels + 1 + i]))
             for i in range(cfg.levels - 1))
         self.edge_conv = WeightedEdgeConv()
+        dims = {"chunk": nfc, "imp": nfi, "glob": len(S.GLOBAL_FEAT_COLUMNS),
+                **{f"edge_{t}": d for t, d in edims.items()}}
+        for k, d in dims.items():  # identity until set_input_stats (kept in the state dict)
+            self.register_buffer(f"in_mean_{k}", torch.zeros(d))
+            self.register_buffer(f"in_std_{k}", torch.ones(d))
         self.unpool = Unpool()
         nt = cfg.n_time_bins
         self.bond_head = _mlp(4 * w + w, 4 + nt, w, hl, norm=False)
@@ -137,6 +146,18 @@ class ImpactOutcomeModel(nn.Module):
             self.energy_head.model[-1].bias[0] = -6.0  # D_bond / E_in
             self.energy_head.model[-1].bias[2] = -6.0  # E_elastic / E_in
 
+    def _norm(self, key: str, x: Tensor) -> Tensor:
+        if not self.cfg.input_norm:
+            return x
+        return (x - getattr(self, f"in_mean_{key}")) / getattr(self, f"in_std_{key}")
+
+    @torch.no_grad()
+    def set_input_stats(self, stats: dict[str, tuple[Tensor, Tensor]]) -> None:
+        """`stats[key] = (mean, std)`; a column with (near-)zero spread keeps std 1."""
+        for k, (m, sd) in stats.items():
+            getattr(self, f"in_mean_{k}").copy_(m)
+            getattr(self, f"in_std_{k}").copy_(torch.where(sd > 1e-6, sd, torch.ones_like(sd)))
+
     # ------------------------------------------------------------------------------
     def _fiber(self, pos: Tensor, chunk_idx: Tensor, edges: Tensor, b: Batch) -> Tensor:
         q = b.t["chunk_q_world"][chunk_idx]
@@ -153,17 +174,18 @@ class ImpactOutcomeModel(nn.Module):
         if cfg.variant == "B":
             cx = torch.cat([cx, t["chunk_qs"]], -1)
             ix = torch.cat([ix, t["imp_qs"]], -1)
+        cx, ix = self._norm("chunk", cx), self._norm("imp", ix)
         n = int(t["n_nodes"])
         h = cx.new_zeros((n, cfg.width))
         h = h.index_copy(0, t["chunk_node"], self.enc_chunk(cx))
         h = h.index_copy(0, t["imp_node"], self.enc_imp(ix))
-        g = self.enc_glob(t["glob_x"])
+        g = self.enc_glob(self._norm("glob", t["glob_x"]))
         e = {}
         for et in cfg.edge_types:
             x = b.edges[et]["x"]
             if et == "bond" and cfg.variant == "B":
                 x = torch.cat([x, t["bond_qs"]], -1)
-            e[et] = self.enc_edge[et](x)
+            e[et] = self.enc_edge[et](self._norm(f"edge_{et}", x))
 
         for rnd in self.fine_pre:
             h, e, g = rnd(h, e, g, b)

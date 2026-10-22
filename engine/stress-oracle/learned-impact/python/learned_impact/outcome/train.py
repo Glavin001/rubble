@@ -267,6 +267,24 @@ class Prefetch:
         self.stop.set()
 
 
+def input_stats(calls: list[S.Call], variant: str) -> dict:
+    """Per-column mean and std of every input array over the training calls (float64)."""
+    def cat(name, extra=None):
+        xs = [c.arrays[name] if extra is None else np.concatenate([c.arrays[name], c.arrays[extra]], 1)
+              for c in calls if len(c.arrays[name])]
+        x = np.concatenate(xs).astype(np.float64)
+        return torch.tensor(x.mean(0), dtype=torch.float32), torch.tensor(x.std(0), dtype=torch.float32)
+
+    b = variant == "B"
+    out = {"chunk": cat("chunk_feat", "chunk_qs_feat" if b else None),
+           "imp": cat("impactor_feat", "impactor_qs_feat" if b else None),
+           "glob": cat("global_feat")}
+    for t in S.EDGE_TYPES:
+        if any(len(c.arrays[f"{t}_feat"]) for c in calls):
+            out[f"edge_{t}"] = cat(f"{t}_feat", "bond_qs_feat" if (t == "bond" and b) else None)
+    return out
+
+
 def make_optimizer(params, cfg: "TrainConfig", dev: torch.device):
     """Fused AdamW where the backend has it (one kernel for all parameters instead of
     several per tensor: the optimiser was about a third of an MPS step), else foreach."""
@@ -362,7 +380,10 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
     data = data or Data(cfg.dataset, cfg.include_unrouted)
     (out / "config.json").write_text(json.dumps(cfg.to_dict(), indent=1))
     cache = HierarchyCache(cfg.model.levels)
-    model = ImpactOutcomeModel(cfg.model).to(dev)
+    model = ImpactOutcomeModel(cfg.model)
+    if cfg.model.input_norm:
+        model.set_input_stats(input_stats(data.train, cfg.model.variant))
+    model = model.to(dev)
     params = [p for p in model.parameters()]
     balancer = None
     if cfg.loss.balance == "uncertainty":
@@ -538,6 +559,11 @@ def main(argv=None) -> None:
     ap.add_argument("--energy-tolerance", type=float, default=0.05)
     ap.add_argument("--break-mode", default="threshold", choices=["threshold", "sample"])
     ap.add_argument("--balance", default="fixed", choices=["fixed", "uncertainty"])
+    ap.add_argument("--input-norm", action="store_true",
+                    help="fixed per-column input standardisation from the training set")
+    ap.add_argument("--w-break", type=float, default=None, help="λ for break and margin")
+    ap.add_argument("--reweight", default=None, choices=["prior", "none", "focal"],
+                    help="break-loss class reweighting")
     ap.add_argument("--break-margin", type=float, default=0.2,
                     help="broken bonds must reach log q̂ ≥ this (0 = the plain censored hinge)")
     a = ap.parse_args(argv)
@@ -568,6 +594,12 @@ def main(argv=None) -> None:
         cfg.loss.energy_tolerance = a.energy_tolerance
         cfg.loss.balance = a.balance
         cfg.loss.break_margin = a.break_margin
+        cfg.model.input_norm = a.input_norm
+        if a.w_break is not None:
+            cfg.loss.weights["break"] = a.w_break
+            cfg.loss.weights["margin"] = a.w_break
+        if a.reweight is not None:
+            cfg.loss.break_reweight = a.reweight
         r = train(cfg, data)
         print(json.dumps({"seed": s, "best_score": r["best"]["score"],
                           "best_step": r["best"]["step"]}))
