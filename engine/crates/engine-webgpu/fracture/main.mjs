@@ -272,10 +272,13 @@ function stressTick(now,elapsedMs){
  frame=(async()=>{try{
   const before=stress.stats.frames??0;await stress.frame(elapsedMs);const st=stress.stats;
   stressHud.frames+=(st.frames??0)-before;stressHud.renders++;
-  if(now-stressHud.t>=1000){const s=(now-stressHud.t)/1000;$('tps').textContent=(stressHud.frames/s).toFixed(0);$('fps').textContent=(stressHud.renders/s).toFixed(0);$('sim-speed').textContent=`${(stressHud.frames/s/st.frameHz).toFixed(2)}×`;stressHud={t:now,frames:0,renders:0}}
-  $('step-ms').textContent=st.stepMs?`${st.stepMs.toFixed(1)} ms/frame (stress + rubble)`:`target ${Math.round(st.frameHz)} frames/s`;
+  if(now-stressHud.t>=1000){const s=(now-stressHud.t)/1000;$('tps').textContent=(stressHud.frames/s).toFixed(0);$('fps').textContent=(stressHud.renders/s).toFixed(0);$('sim-speed').textContent=`${(stressHud.frames/s/st.frameHz).toFixed(2)}×`;stressHud={t:now,frames:0,renders:0,stepMs:stressHud.stepMs}}
+  // A display frame that stepped no physics frame (a 120 Hz display, a 60 Hz simulation)
+  // reports no step time: the last measured one stays, so the label does not flip.
+  if(st.stepMs)stressHud.stepMs=st.stepMs;
+  $('step-ms').textContent=stressHud.stepMs?`${stressHud.stepMs.toFixed(1)} ms/frame (stress + rubble)`:`target ${Math.round(st.frameHz)} frames/s`;
   $('frame-ms').textContent='frames / second';
-  $('awake').textContent=st.moving;
+  $('awake').textContent=st.moving??st.awake??'—';
   if(stress.running||st.shots){$('release').textContent=stress.running?'Pause':'Resume';setStatus(`${st.shots}/16 shots · ${st.frames} frames · ${st.fragments} fragments · ${st.bodies??'—'} bodies · ${st.brokenBonds} bonds broken · ${st.simSeconds.toFixed(1)} s${stressWarning(st)}`)}
  }catch(e){fail(e)}})();
  frame.finally(()=>requestAnimationFrame(tick));
