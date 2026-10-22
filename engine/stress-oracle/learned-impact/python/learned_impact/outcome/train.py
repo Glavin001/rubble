@@ -204,11 +204,12 @@ class Data:
         if train_events:
             # Training calls built on demand from P1's recordings (CallCache: the same Rust
             # builder, byte-identical calls; built once, cached persistently, LRU-bounded);
-            # `dataset` then contributes only its val split.
+            # `dataset` adds its resident events (validation, test and resident training
+            # ensembles); an event in both raises (duplicate ids).
             self.events, self.ensemble_aligned_calls = _cached_train_events(train_events, call_cache or {})
             specs = [(p, w) for p, w in specs]
         for path, weight in specs:
-            evs, n = _load_events(path, {"val", "test"} if train_events else None)
+            evs, n = _load_events(path)  # all splits: resident training ensembles too
             ids = {e.manifest["event_id"] for e in self.events}
             dup = ids & {e.manifest["event_id"] for e in evs}
             if dup:
