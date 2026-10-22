@@ -496,7 +496,7 @@ The recorder has u and θ (`state_chunk_hidden [n,6]`). The rates follow from
   adds `y_chunk_def_end` (f32 `[Nc,12]`, from the frame-end boundary's hidden state): an
   exact target, since a fit from f32 world arrays would lose µm-scale u.
 - **Body per chunk:** `chunk_body` (i32 `[Nc]`, the frame-start cluster index, local to
-  the call) and `chunk_body_q` (f32 `[Nc,4]`, that body's world rotation, xyzw). Pushforward
+  the call) and `chunk_body_q` (f32 `[Nc,4]`, that body's world rotation, w-first like `chunk_q_world`). Pushforward
   needs them to re-derive v_def / ω_def from predicted velocities in the body frame.
 - **Input scale u_c:** the mean over the chunk's live bonds of f_t·A ÷ k_n (failure force
   over normal stiffness), floored at 1e-9 m; a chunk with no live bonds takes the island

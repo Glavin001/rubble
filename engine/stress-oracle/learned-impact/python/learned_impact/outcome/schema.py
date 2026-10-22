@@ -155,8 +155,8 @@ CALL_ARRAYS: dict[str, ArraySpec] = {
     "chunk_def": ArraySpec("f32", ("Nc", 12), raw=True),
     "chunk_def_uc": ArraySpec("f32", ("Nc",), raw=True),
     # /4: frame-start body (cluster) per chunk and its world rotation, for pushforward
-    "chunk_body": ArraySpec("i32", ("Nc",), required=False, raw=True),
-    "chunk_body_q": ArraySpec("f32", ("Nc", 4), required=False, raw=True),
+    "chunk_body": ArraySpec("i32", ("Nc",), raw=True),
+    "chunk_body_q": ArraySpec("f32", ("Nc", 4), raw=True),
     # impactors
     "impactor_key": ArraySpec("i64", ("Ni",)),
     "impactor_feat": _feat("impactor_feat", "Ni"),

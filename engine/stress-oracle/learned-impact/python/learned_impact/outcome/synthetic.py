@@ -411,6 +411,8 @@ def make_event(seed: int, *, nx: int | None = None, nz: int | None = None,
             # the toy's chunks are rigid in their bodies: no hidden deformation (/4)
             "chunk_def": np.zeros((nc, 12), np.float32),
             "chunk_def_uc": np.full(nc, 1e-5, np.float32),
+            "chunk_body": np.zeros(nc, np.int32),  # one body (the toy's island is rigid)
+            "chunk_body_q": np.tile(np.array([1, 0, 0, 0], np.float32), (nc, 1)),
             "impactor_mass": np.array([m_imp], np.float32),
             "impactor_inertia_body": inert_i[None].astype(np.float32),
             "impactor_q_world": q_imp[None].astype(np.float32),
@@ -479,6 +481,7 @@ def make_event(seed: int, *, nx: int | None = None, nz: int | None = None,
         "base_qs_chunk_w_end": np.zeros((nc, 3), np.float32),
         "base_qs_impactor_v_end": v_start[nc:].astype(np.float32) * 0.2,
     }
+    _fill_deformation(arrays0, np.zeros(nc, np.int64), frag, scales)
     counts0 = {"chunks": nc, "impactors": 1, "bond": nb, "cracked": 0, "impactor_contact": 1,
                "structure_contact": 0}
     calls.append(S.Call(event_id="", call_index=0, frame=10, island=0, prev_call=None,
@@ -560,6 +563,7 @@ def make_event(seed: int, *, nx: int | None = None, nz: int | None = None,
         "y_impactor_drot": drot1[nc:].astype(np.float32),
         "y_impactor_regime": np.array([regime], np.int32),
     }
+    _fill_deformation(arrays1, frag, frag, scales1)
     counts1 = {"chunks": nc, "impactors": 1, "bond": nb1, "cracked": len(crk),
                "impactor_contact": 0, "structure_contact": 0}
     calls.append(S.Call(event_id="", call_index=1, frame=11, island=0, prev_call=0,
@@ -614,6 +618,44 @@ def make_event(seed: int, *, nx: int | None = None, nz: int | None = None,
                       "bond_ends": ends.astype(np.int32),
                       "chunk_rest_pos": (grid @ rs.T + shift).astype(np.float32)}}
     return manifest, calls, structures
+
+
+def _fill_deformation(a: dict, body0: np.ndarray, body1: np.ndarray, scales: dict) -> None:
+    """The toy's chunks keep their rest poses in their bodies (u = θ = 0), but once bonds
+    break a body's chunks no longer share one rigid motion. So the hidden rates follow P0's
+    definition: velocities about each body's momentum-exact fit (the body rotation is the
+    identity; the toy's chunk orientations are)."""
+    from .geometry import quat_to_matrix_np
+    from .pushforward import body_relative_rates_np
+
+    nc = len(a["chunk_key"])
+    rb = quat_to_matrix_np(a["chunk_q_world"].astype(np.float64))
+    iw = np.einsum("nij,nj,nkj->nik", rb, a["chunk_inertia_body"].astype(np.float64), rb)
+    m = a["chunk_mass"].astype(np.float64)
+    R = np.linalg.norm(a["chunk_feat"][:, [S.col("chunk_feat", f"half_extent_{i}")
+                                         for i in range(3)]].astype(np.float64)
+                       * scales["L"], axis=1)
+
+    def rates(v, w, x, body):
+        body = np.unique(body, return_inverse=True)[1]
+        return body_relative_rates_np(v.astype(np.float64), w.astype(np.float64), x, m, iw,
+                                      body, int(body.max()) + 1)
+    x0 = a["chunk_pos"].astype(np.float64)
+    dv, dw = rates(a["chunk_v"], a["chunk_w"], x0, body0)
+    d = np.zeros((nc, 12))
+    d[:, 6:9], d[:, 9:12] = dv, dw
+    a["chunk_def"] = d.astype(np.float32)
+    a["chunk_body"] = np.unique(body0, return_inverse=True)[1].astype(np.int32)
+    cf = a["chunk_feat"].copy()
+    for i in range(3):
+        cf[:, S.col("chunk_feat", f"def_v_body_{i}")] = dv[:, i] / scales["v"]
+        cf[:, S.col("chunk_feat", f"def_w_body_{i}")] = dw[:, i] * R / scales["v"]
+    a["chunk_feat"] = cf.astype(np.float32)
+    dv1, dw1 = rates(a["y_chunk_v_end"], a["y_chunk_w_end"],
+                     x0 + a["y_chunk_dx"].astype(np.float64), body1)
+    y = np.zeros((nc, 12))
+    y[:, 6:9], y[:, 9:12] = dv1, dw1
+    a["y_chunk_def_end"] = y.astype(np.float32)
 
 
 def write_dataset(root: Path | str, n_events: int, seed: int = 0, val_fraction: float = 0.2,
