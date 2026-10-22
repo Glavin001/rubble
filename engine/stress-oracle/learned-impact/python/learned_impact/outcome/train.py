@@ -191,7 +191,7 @@ class Data:
 
     def __init__(self, dataset: str, include_unrouted: bool = False,
                  val_dataset: str | None = None, train_events: list | None = None,
-                 call_cache: dict | None = None):
+                 call_cache: dict | None = None, extra_train: str = ""):
         # `dataset` may list several roots, `path[@weight],…`: their training calls are
         # mixed by `MixedSampler` with the given shares of every epoch (default: in
         # proportion to their sizes, i.e. plain concatenation).
@@ -235,6 +235,27 @@ class Data:
         self.train = [c for e in train_events for c in e.calls if keep(c)]
         self.val = [c for e in val_events if e.manifest["split"] == "val"
                     for c in e.calls if keep(c)]
+        if extra_train:
+            # DAgger relabels (P0's oracle island step from the model's own states): training
+            # only, admitted by the oracle's energy balance, mixed in as source "dagger" with
+            # the given share of each epoch (the rest stays the recorded data's)
+            from .dagger import load_relabelled
+            share = 0.25
+            for spec_ in extra_train.split(","):
+                path_, _, w_ = spec_.partition("@")
+                share = float(w_) if w_ else share
+                calls_, st_, n_ = load_relabelled(path_)
+                held = {e.manifest["split_group"] for e in self.events if e.manifest["split"] != "train"}
+                leak = {c.split_group for c in calls_} & held
+                if leak:  # relabels of validation/test rollouts would train on held-out layouts
+                    raise S.SchemaError(f"DAgger calls from held-out split groups: {sorted(leak)[:5]}")
+                for c in calls_:
+                    c.source = "dagger"
+                self.train += calls_
+                self.structures.update(st_)
+                print(f"[data] + {n_['admitted']} of {n_['relabelled']} relabelled calls from {path_}", flush=True)
+            others = {c.source for c in self.train if c.source != "dagger"}
+            self.source_weights = {"dagger": share, **{o: (1 - share) / max(len(others), 1) for o in others}}
         g_train = {e.manifest["split_group"] for e in train_events}
         g_other = {e.manifest["split_group"] for e in self.events
                    if e.manifest["split"] != "train" or id(e) in from_val}
@@ -907,6 +928,7 @@ def main(argv=None) -> None:
     ap.add_argument("--full-state", action="store_true",
                     help="/5: the oracle's full dynamic bond and chunk state as inputs and heads")
     ap.add_argument("--train-events", default="", help="file of P1 recording dirs: training calls via CallCache")
+    ap.add_argument("--extra-train", default="", help="DAgger relabel dirs, dir[@share],… (training only)")
     ap.add_argument("--call-cache-module", default="", help="P1's outcome_calls_cache.py")
     ap.add_argument("--call-cache", default="", help="cache root")
     ap.add_argument("--call-builder", default="", help="P1's learned_impact_outcome_calls")
@@ -960,7 +982,8 @@ def main(argv=None) -> None:
     cc = {"module": a.call_cache_module, "root": a.call_cache, "builder": a.call_builder,
           "max_gb": a.cache_gb} if a.train_events else {}
     data = Data(dataset, val_dataset=a.val_dataset or None,
-                train_events=_read_list(a.train_events) if a.train_events else None, call_cache=cc)
+                train_events=_read_list(a.train_events) if a.train_events else None, call_cache=cc,
+                extra_train=a.extra_train)
     for s in seeds:
         out = Path(a.out) / (f"seed{s}" if len(seeds) > 1 else "")
         cfg = TrainConfig(dataset=dataset, val_dataset=a.val_dataset, out=str(out), steps=a.steps,
