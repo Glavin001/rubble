@@ -143,7 +143,10 @@ def candidate_args(name: str, a, out: Path, event: str) -> tuple[list[str], dict
         if "--dir" in args:
             args[args.index("--dir") + 1] = str(out / "provider" / name / event)
         return args, {**env, "STRESS_HANDBACK_FRAMES": m.group(2)}
-    deb = {"STRESS_DEBRIS_ROUTING": "1"}
+    # Debris-reach routing, and the engine's resting ground overlap handed to the oracle's
+    # contact as an offset (`World::handed_ground_overlaps`; without it a body the engine
+    # rested in the ground is launched when routed, up to 1000 E0).
+    deb = {"STRESS_DEBRIS_ROUTING": "1", "STRESS_HANDED_INDENTS": "1"}
     if name == "ceiling":
         return ["--variant", "provider", "--provider", "oracle"], deb
     if name == "ceiling_full":
@@ -237,7 +240,7 @@ def loo_gates(D: np.ndarray, tol: float) -> tuple[float, float]:
         bar = max(SKILL_MAX, float(np.mean(h))) if h else SKILL_MAX
         passes.append(s_ <= bar)
         sob.append(s_ / bar)
-    return float(np.mean(passes)), float(np.mean(sob))
+    return float(np.mean(passes)), float(np.mean(sob)), [[bool(p), float(r)] for p, r in zip(passes, sob)]
 
 
 def ensemble_scores(truth: list[dict], cands: dict[str, list[dict | None]], mass: np.ndarray, samples: list[list[int]], anchored_family: bool, v0: float) -> dict:
@@ -259,7 +262,7 @@ def ensemble_scores(truth: list[dict], cands: dict[str, list[dict | None]], mass
                     x[i, j] = 0.5 * (dmat[i][j][m] + dmat[j][i][m])
         D[m] = x
     out: dict = {"metrics": metrics, "members": n, "v0": v0, "tolerance": {m: tol[m] for m in metrics}}
-    out["oracle_member"] = {m: dict(zip(("pass_rate", "skill_over_bar"), loo_gates(D[m], tol[m]))) for m in metrics}
+    out["oracle_member"] = {m: dict(zip(("pass_rate", "skill_over_bar", "units"), loo_gates(D[m], tol[m]))) for m in metrics}
     everyone = list(range(n))
     bars, floors = {}, {}
     for m in metrics:
@@ -308,6 +311,34 @@ def ensemble_scores(truth: list[dict], cands: dict[str, list[dict | None]], mass
     return out
 
 
+V11_PASS_MARGIN = 0.05  # pass-rate shortfall, absolute
+V11_SOB_MARGIN = 0.05  # mean skill / bar, relative to the held-out members'
+
+
+def gate_v11(per: list, n_boot: int = 2000, seed: int = 0) -> dict:
+    """gates-v1.1 (pre-registered by the planning session, 2026-10-21): a family metric is
+    accepted when the one-sided 95% bootstrap bound (resampling whole ensembles) of
+    (held-out member pass rate - candidate pass rate) is <= 5 percentage points AND that of
+    (candidate mean skill/bar - member mean skill/bar) / member mean skill/bar is <= 5%.
+    `per`: per ensemble, (candidate units [[pass, skill/bar], ...], member stats)."""
+    per = [(np.array([u[0] for u in us], float), np.array([u[1] for u in us], float), ms) for us, ms in per if len(us)]
+    if not per:
+        return {}
+    rng = np.random.default_rng(seed)
+    d = []
+    for _ in range(n_boot):
+        pick = [per[k] for k in rng.integers(0, len(per), len(per))]
+        cp = np.mean(np.concatenate([x[0] for x in pick]))
+        cs = np.mean(np.concatenate([x[1] for x in pick]))
+        mp = np.mean([x[2]["pass_rate"] for x in pick])
+        msb = np.mean([x[2]["skill_over_bar"] for x in pick])
+        d.append((mp - cp, (cs - msb) / max(msb, 1e-12)))
+    d = np.array(d)
+    d[~np.isfinite(d)] = np.inf  # a non-finite run is infinitely worse
+    hi = np.quantile(d, 0.95, axis=0, method="higher")
+    return {"pass_shortfall_ub95": float(hi[0]), "sob_excess_ub95": float(hi[1]), "accept": bool(hi[0] <= V11_PASS_MARGIN and hi[1] <= V11_SOB_MARGIN)}
+
+
 def aggregate(per_ensemble: dict, families: dict[str, str], candidates: list[str]) -> dict:
     """Per family and metric (P2's family acceptance): accept <=> the candidate's pass rate >=
     the held-out members' AND its mean skill / bar <= theirs, over the family's units (a
@@ -320,14 +351,21 @@ def aggregate(per_ensemble: dict, families: dict[str, str], candidates: list[str
         metrics = [m for m in METRICS if all(m in e["metrics"] for e in ens)]
         member = {m: {k: float(np.mean([e["oracle_member"][m][k] for e in ens])) for k in ("pass_rate", "skill_over_bar")} for m in metrics}
         row = {"ensembles": len(ens), "oracle_member": member}
+        # Validation of the aggregate: one held-out member per ensemble (its first) scored as
+        # a candidate would be; a sound rule accepts it.
+        e0 = {m: gate_v11([([e["oracle_member"][m]["units"][0]], e["oracle_member"][m]) for e in ens]) for m in metrics}
+        row["member_e0_v11"] = {"ci": e0, "accept_v11": {m: e0[m]["accept"] for m in metrics}, "accept_all_v11": all(e0[m]["accept"] for m in metrics)}
         for c in candidates:
             got = [e[c] for e in ens if c in e and e[c]["runs"]]
             if not got:
                 continue
             units = {m: [u for g in got for u in g["units"].get(m, [])] for m in metrics}
+            ens_c = [e for e in ens if c in e and e[c]["runs"]]
+            ci = {m: gate_v11([(e[c]["units"].get(m, []), e["oracle_member"][m]) for e in ens_c]) for m in metrics}
             pr = {m: float(np.mean([p for p, _ in units[m]])) if units[m] else float("nan") for m in metrics}
             sob = {m: float(np.mean([r for _, r in units[m]])) if units[m] else float("nan") for m in metrics}
             acc = {m: bool(pr[m] >= member[m]["pass_rate"] and sob[m] <= member[m]["skill_over_bar"]) for m in metrics}
+            acc11 = {m: ci[m]["accept"] for m in metrics if ci.get(m)}
             ra = [g["regime_agreement"] for g in got if g["regime_agreement"] is not None]
             row[c] = {
                 "runs": int(sum(g["runs"] for g in got)),
@@ -335,6 +373,9 @@ def aggregate(per_ensemble: dict, families: dict[str, str], candidates: list[str
                 "skill_over_bar": sob,
                 "accept": acc,
                 "accept_all": all(acc.values()),
+                "ci": ci,
+                "accept_v11": acc11,
+                "accept_all_v11": bool(acc11) and all(acc11.values()),
                 "regime_agreement": float(np.mean(ra)) if ra else None,
                 "fragments_in_range": float(np.mean([g["fragments_in_range"] for g in got])),
                 "physics": {k: float(np.mean([g["physics"][k] for g in got])) for k in ("ke_ok", "momentum_ok", "damage_monotone", "finite")},
@@ -353,24 +394,26 @@ def markdown(agg: dict, meta: dict) -> str:
     for fam, row in agg.items():
         lines.append(f"## {fam} ({row['ensembles']} ensembles)")
         lines.append("")
-        if "ceiling" in row and not row["ceiling"]["accept_all"]:
-            bad = ", ".join(m for m, ok in row["ceiling"]["accept"].items() if not ok)
+        if "ceiling" in row and not row["ceiling"]["accept_all_v11"]:
+            bad = ", ".join(m for m, ok in row["ceiling"]["accept_v11"].items() if not ok)
             lines.append(f"**Boundary problem: the ceiling (the oracle through the call boundary) fails the gate on {bad}.** A model cannot be accepted where the perfect model is not; fix the boundary before training on this family.")
             lines.append("")
         metrics = list(row["oracle_member"])
-        lines.append("| Candidate | runs | accepted | " + " | ".join(metrics) + " | regime agree | fragments in range | KE ok | momentum ok | damage monotone | finite | fallbacks |")
-        lines.append("|---|---|---|" + "---|" * len(metrics) + "---|---|---|---|---|---|---|")
+        lines.append("| Candidate | runs | accepted v1 | accepted v1.1 | " + " | ".join(metrics) + " | regime agree | fragments in range | KE ok | momentum ok | damage monotone | finite | fallbacks |")
+        lines.append("|---|---|---|---|" + "---|" * len(metrics) + "---|---|---|---|---|---|---|")
         om = row["oracle_member"]
-        lines.append("| *held-out oracle member* | | | " + " | ".join(f"{om[m]['pass_rate']:.0%} / {om[m]['skill_over_bar']:.2f}" for m in metrics) + " | | | | | | | |")
+        lines.append("| *held-out oracle member (reference)* | | | | " + " | ".join(f"{om[m]['pass_rate']:.0%} / {om[m]['skill_over_bar']:.2f}" for m in metrics) + " | | | | | | | |")
+        e0 = row["member_e0_v11"]
+        lines.append(f"| *one held-out member as a candidate (rule check)* | | | {'yes' if e0['accept_all_v11'] else 'no'} | " + " | ".join(f"ub {e0['ci'][m]['pass_shortfall_ub95']:+.0%} / {e0['ci'][m]['sob_excess_ub95']:+.0%}{'' if e0['accept_v11'][m] else ' ✗'}" for m in metrics) + " | | | | | | | |")
         for c, r in row.items():
-            if c in ("ensembles", "oracle_member"):
+            if c in ("ensembles", "oracle_member", "member_e0_v11"):
                 continue
-            cell = lambda m: f"{r['pass_rate'][m]:.0%} / {r['skill_over_bar'][m]:.2f}{'' if r['accept'][m] else ' ✗'}"
+            cell = lambda m: f"{r['pass_rate'][m]:.0%} / {r['skill_over_bar'][m]:.2f}{'' if r['accept'][m] else ' ✗'}{'' if r['accept_v11'].get(m, False) else ' ✗¹'}"
             ra = "-" if r["regime_agreement"] is None else f"{r['regime_agreement']:.0%}"
             p = r["physics"]
-            lines.append(f"| {c} | {r['runs']} | {'yes' if r['accept_all'] else 'no'} | " + " | ".join(cell(m) for m in metrics) + f" | {ra} | {r['fragments_in_range']:.0%} | {p['ke_ok']:.0%} | {p['momentum_ok']:.0%} | {p['damage_monotone']:.0%} | {p['finite']:.0%} | {r['fallbacks']} |")
+            lines.append(f"| {c} | {r['runs']} | {'yes' if r['accept_all'] else 'no'} | {'yes' if r['accept_all_v11'] else 'no'} | " + " | ".join(cell(m) for m in metrics) + f" | {ra} | {r['fragments_in_range']:.0%} | {p['ke_ok']:.0%} | {p['momentum_ok']:.0%} | {p['damage_monotone']:.0%} | {p['finite']:.0%} | {r['fallbacks']} |")
         lines.append("")
-    lines.append("Cells: pass rate / mean skill ÷ bar (P2's gates-v1 rule). Skill = a run's mean distance to the ensemble's members over the members' typical distance, floored at tolerance / 1.25; it passes at skill <= max(1.25, the mean held-out member skill). A metric is accepted (no ✗) when the pass rate is at least the held-out members' and the mean skill ÷ bar at most theirs. Tolerances: ram 0.05 v0, partition (1 - ARI) 0.05, sizes (W1, mass-weighted ln mass) 0.1, fragment velocities 0.05 v0, positions 0.05 v0 × 0.5 s, anchored mass fraction 0.05.")
+    lines.append("Cells: pass rate / mean skill ÷ bar (P2's gates-v1 rule). Skill = a run's mean distance to the ensemble's members over the members' typical distance, floored at tolerance / 1.25; it passes at skill <= max(1.25, the mean held-out member skill). A metric is accepted (no ✗) when the pass rate is at least the held-out members' and the mean skill ÷ bar at most theirs. ✗¹: fails gates-v1.1 (the one-sided 95% bootstrap bound, resampling ensembles, of the pass-rate shortfall against the held-out members exceeds 5 points, or of the mean skill ÷ bar excess 5%). The rule-check row scores one held-out member per ensemble as a candidate (upper bounds shown); a sound rule accepts it. Tolerances: ram 0.05 v0, partition (1 - ARI) 0.05, sizes (W1, mass-weighted ln mass) 0.1, fragment velocities 0.05 v0, positions 0.05 v0 × 0.5 s, anchored mass fraction 0.05.")
     return "\n".join(lines) + "\n"
 
 
@@ -462,7 +505,7 @@ def main(argv=None):
         per_ensemble[eid] = ensemble_scores(truth, cruns, mass, smp, fam == "anchored_wall", v0)
     agg = aggregate(per_ensemble, families, cands)
     meta = {"generated": time.strftime("%Y-%m-%d %H:%M"), "runs": [str(r) for r in a.runs], "split": a.split, "candidates": cands, "checkpoint": str(a.checkpoint) if a.checkpoint else None,
-            "max_ensembles": a.max_ensembles, "failures": failed, "note": a.note or f"Split {a.split}; candidates {', '.join(cands)}; debris-reach routing on for the coupled candidates."}
+            "max_ensembles": a.max_ensembles, "failures": failed, "note": a.note or f"Split {a.split}; candidates {', '.join(cands)}; debris-reach routing and the handed ground overlaps on for the coupled candidates."}
     a.out.mkdir(parents=True, exist_ok=True)
     (a.out / "report.json").write_text(json.dumps({"meta": meta, "families": agg, "ensembles": per_ensemble}, indent=1, default=float))
     (a.out / "report.md").write_text(markdown(agg, meta))

@@ -576,6 +576,11 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
         hook(&w, f + 1);
         series.push(frame_line(&w, ms, islands));
         eprintln!("[provider {tag}] frame {}/{n} islands {islands} ram vy {:.3} fragments {} broken {} ({ms:.0} ms)", f + 1, w.impactors[0].velocity.y, w.solver.clusters.len(), w.solver.broken_bond_count());
+        if std::env::var("STRESS_P0_WATCH_RAM").is_ok_and(|v| v == "1") {
+            let imp = &w.impactors[0];
+            let gz = w.scene.ground.as_ref().map(|g| g.height).unwrap_or(f64::NEG_INFINITY);
+            eprintln!("  ram v {:?} position {:?} ground {gz}", imp.velocity.to_array(), imp.pose.position.to_array());
+        }
     }
     if o.kind == "files" {
         let _ = std::fs::write(o.dir.join("done"), b"");

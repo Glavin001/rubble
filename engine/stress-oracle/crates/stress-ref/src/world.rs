@@ -236,6 +236,10 @@ pub struct World {
     /// Pre-existing overlap per sample point of chunk pairs in contact (NaN = point not
     /// in contact); dropped when the pair separates.
     pair_offsets: std::collections::HashMap<ChunkPair, Vec<(f64, Vec3)>>,
+    /// `handed_ground_overlaps`: the ground contact's pre-existing overlap per sample point
+    /// of each chunk (`(0, s, c)`) and impactor (`(1, i, 0)`) touching it (NaN = point not
+    /// in contact), as `pair_offsets` holds a chunk pair's; dropped when it leaves the ground.
+    ground_offsets: HashMap<(u8, usize, usize), Vec<f64>>,
     /// Elastic-layer contact: the friction state (shear-layer slip and twist) of every
     /// contact in touch, carried from substep to substep; dropped when it separates.
     sticks: HashMap<ContactKey, Stick>,
@@ -279,6 +283,12 @@ pub struct World {
     /// `apply_decoded` keeps each chunk's decoded departure from its cluster's rigid fit as
     /// hidden state (`STRESS_DECODED_DEFORMATION=1`, off by default: the reduced state).
     pub decoded_keeps_deformation: bool,
+    /// The ground contact treats a point born deeper than one substep of approach could
+    /// carry as already overlapping (an offset that only ratchets down), as the pair
+    /// contact does (`STRESS_HANDED_INDENTS=1`, off by default). It is what a body handed
+    /// over from the engine needs: rubble rests a 393 kg ram 7.5 mm into the ground, and
+    /// that overlap fired by this stiffer contact launched it at 13 m/s.
+    pub handed_ground_overlaps: bool,
     /// Hand-back (`STRESS_HANDBACK_FRAMES=N`, off by default): once a routed island has gone
     /// `N` frames with no decoded break and no impactor closing on its clusters faster than
     /// the tiered impact speed, its clusters leave the routing (`handed_back`) and take the
@@ -518,6 +528,7 @@ impl World {
             implicit_worst_residual: 0.0,
             contact_hits,
             pair_offsets: Default::default(),
+            ground_offsets: HashMap::new(),
             sticks: Default::default(),
             neighbours: Default::default(),
             applied: Vec::new(),
@@ -532,6 +543,7 @@ impl World {
             tiered_fast_joins: std::env::var("STRESS_TIERED_JOIN").is_ok_and(|v| v == "fast"),
             debris_reach_routing: std::env::var("STRESS_DEBRIS_ROUTING").is_ok_and(|v| v == "1"),
             decoded_keeps_deformation: std::env::var("STRESS_DECODED_DEFORMATION").is_ok_and(|v| v == "1"),
+            handed_ground_overlaps: std::env::var("STRESS_HANDED_INDENTS").is_ok_and(|v| v == "1"),
             hand_back_after: std::env::var("STRESS_HANDBACK_FRAMES").ok().and_then(|v| v.parse().ok()),
             handed_back: HashSet::new(),
             quiet_frames: HashMap::new(),
@@ -1231,6 +1243,7 @@ impl World {
         drop(t_imp);
         let t_ground = crate::profile::time(crate::profile::Stage::ContactGround);
         // Ground.
+        let mut previous_ground = std::mem::take(&mut self.ground_offsets);
         if let Some(g) = self.scene.ground.clone() {
             let gm = self.scene.material(&g.material).clone();
             for (k, &(s, c)) in active.iter().enumerate() {
@@ -1246,6 +1259,37 @@ impl World {
                 // A face resting flat engages 5 points (4 corners and its centre).
                 let kc = contact_stiffness(&gm, b, self.chunk_material(s, c), b, Vec3::Z, scale);
                 let m = self.solver.structures[s].chunks[c].mass;
+                if self.handed_ground_overlaps {
+                    let pts: Vec<Vec3> = b.sample_points().into_iter().collect();
+                    let n = pts.iter().filter(|p| p.z < g.height).count();
+                    let key = (0u8, s, c);
+                    let mut entry = previous_ground.remove(&key).unwrap_or_else(|| vec![f64::NAN; pts.len()]);
+                    let mu = self.scene.sim.contact_friction.unwrap_or(g.friction);
+                    let center = self.solver.chunk_position(s, c);
+                    for (i, p) in pts.into_iter().enumerate() {
+                        if p.z >= g.height {
+                            entry[i] = f64::NAN;
+                            continue;
+                        }
+                        let depth = g.height - p.z;
+                        let v = self.solver.point_velocity(s, c, p);
+                        if entry[i].is_nan() {
+                            let reach = 2.0 * v.z.abs() * dt + 1e-9;
+                            entry[i] = if depth > reach { depth } else { 0.0 };
+                        }
+                        entry[i] = entry[i].min(depth);
+                        let eff = depth - entry[i];
+                        if eff <= 0.0 {
+                            continue;
+                        }
+                        let f = self.contact_force(kc / n.max(5) as f64, m, self.scene.sim.contact_restitution, mu, eff, Vec3::Z, v, dt, n);
+                        self.loads.add_at(s, c, f, p, center);
+                    }
+                    if entry.iter().any(|e| !e.is_nan()) {
+                        self.ground_offsets.insert(key, entry);
+                    }
+                    continue;
+                }
                 let below: Vec<Vec3> = b.sample_points().into_iter().filter(|p| p.z < g.height).collect();
                 let n = below.len();
                 if let Some(limit) = contact_trace() {
@@ -1277,8 +1321,23 @@ impl World {
                 };
                 let kp = kc / pts.len().min(5) as f64;
                 let n = pts.iter().filter(|p| p.z < g.height).count();
-                for p in pts {
-                    let depth = g.height - p.z;
+                let key = (1u8, ii, 0);
+                let mut entry = if self.handed_ground_overlaps { Some(previous_ground.remove(&key).unwrap_or_else(|| vec![f64::NAN; pts.len()])) } else { None };
+                for (pi, p) in pts.into_iter().enumerate() {
+                    let mut depth = g.height - p.z;
+                    if let Some(e) = entry.as_mut() {
+                        if depth <= 0.0 {
+                            e[pi] = f64::NAN;
+                            continue;
+                        }
+                        let vz = (imp.velocity + imp.angular_velocity.cross(p - imp.pose.position)).z;
+                        if e[pi].is_nan() {
+                            let reach = 2.0 * vz.abs() * dt + 1e-9;
+                            e[pi] = if depth > reach { depth } else { 0.0 };
+                        }
+                        e[pi] = e[pi].min(depth);
+                        depth -= e[pi];
+                    }
                     if depth <= 0.0 {
                         continue;
                     }
@@ -1287,6 +1346,11 @@ impl World {
                     let f = self.contact_force(kp, imp.mass, self.scene.sim.contact_restitution, mu, depth, Vec3::Z, v, dt, n);
                     imp_loads[ii].0 += f;
                     imp_loads[ii].1 += (p - imp.pose.position).cross(f);
+                }
+                if let Some(e) = entry {
+                    if e.iter().any(|x| !x.is_nan()) {
+                        self.ground_offsets.insert(key, e);
+                    }
                 }
             }
         }
