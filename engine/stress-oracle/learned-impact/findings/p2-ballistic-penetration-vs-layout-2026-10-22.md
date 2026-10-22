@@ -115,7 +115,14 @@ were incomplete or not aligned at the impact call.
 - **Remaining uncertainty:** whether it would also fail an unseen speed of a seen one-deep
   layout. Answering that needs the held-out test below.
 
-## The in-distribution held-out test (proposal)
+## Protocol note: the test family was looked at
+
+`bl_anchored_sides` is a **test** family. It was scored teacher-forced here (seed 0) for
+diagnosis only, at planning's request to separate penetration from layout. It was not used,
+and must never be used, to select a checkpoint, τ, temperature, data or hyperparameter.
+The test verdict stays the pre-registered one, at the frozen τ.
+
+## The in-distribution held-out test (approved; queued after v7: runs/v7-holdout.sh)
 
 All of P1's training ballistic ensembles (4 families × 5 transition speeds × 8) were in v7's
 training set, so no held-out in-distribution ballistic data exist for seeds 0 and 1.
