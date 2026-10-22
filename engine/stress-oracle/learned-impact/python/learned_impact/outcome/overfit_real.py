@@ -85,6 +85,11 @@ def select(root: Path, n: int, seed: int = 0) -> list[Path]:
                     regimes.add("arrest")
             if len(out) == n:
                 break
+        for p, _fam, _t2 in metas:  # top up when the coverage rules leave fewer than n
+            if len(out) == n:
+                break
+            if p not in out:
+                out.append(p)
         return out
     by_fam = defaultdict(list)
     for p, fam, _t2 in metas:

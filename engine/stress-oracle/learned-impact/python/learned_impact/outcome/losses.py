@@ -58,6 +58,8 @@ class LossConfig:
     # with δ = 0 the censored hinge stops at q̂ = 1⁺ and leaves every broken bond on the
     # decision boundary, where a small error turns it into a miss.
     break_margin: float = 0.2
+    # Survivors' side of the decision: q̂ ≤ e^−δ_s (see `margin` in `loss_terms`).
+    survive_margin: float = 0.05
     # "fixed": λ·L/L_zero (the plan's default; λ changes only on validation metrics).
     # "uncertainty": Kendall, Gal & Cipolla (CVPR 2018) homoscedastic weighting on top of
     # the fixed normalisation, an ablation that must beat "fixed" on validation metrics.
@@ -146,7 +148,13 @@ def loss_terms(out: dict[str, Tensor], b: Batch, cfg: LossConfig,
     log_q = torch.log(t["y_bond_fail_margin"].clamp(min=cfg.log_r_floor))
     err_q = torch.where(broke, torch.relu(cfg.break_margin - out["bond_log_q"]),
                         out["bond_log_q"] - log_q)
-    terms["margin"] = (w_b * _huber(err_q, cfg.huber_delta)).sum() / w_b.sum().clamp(min=1)
+    # Survivors must also clear the threshold, from below (q̂ ≤ e^−δ_s): the regression
+    # alone costs ~(0.02)² for a survivor at q = 0.99 predicted at 1.01, yet that flips the
+    # break decision (the real-data overfit: recall 1.0, but 96 false breaks on 10 events).
+    hinge_s = torch.where(broke, torch.zeros_like(err_q),
+                          torch.relu(out["bond_log_q"] + cfg.survive_margin))
+    terms["margin"] = (w_b * (_huber(err_q, cfg.huber_delta) + _huber(hinge_s, cfg.huber_delta))
+                       ).sum() / w_b.sum().clamp(min=1)
 
     # break: proper log-loss against the ensemble frequency (or a smoothed hard label)
     eps = cfg.label_smoothing
