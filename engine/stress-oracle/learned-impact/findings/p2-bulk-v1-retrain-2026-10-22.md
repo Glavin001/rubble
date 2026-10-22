@@ -31,6 +31,14 @@ Re-scored with the fix (same checkpoint, val; `report-val-aligned.json`):
 | | partition | 0.38 | 0.91 | 4.77 | 0.47 |
 | | sizes | 0.40 | 0.91 | 2.89 | 0.41 |
 
+Test split (frozen τ = 1.0, confirmation only; `report-test-aligned.json`): also rejected.
+- Anchored, 13 ensembles: pass ram / partition / sizes 0.85 / 0.54 / 0.54 against the members'
+  0.99 / 0.94 / 0.95; skill/bar 0.56 / 3.63 / 2.49 against 0.19 / 0.38 / 0.34.
+- Free, 64 ensembles: 0.83 / 0.39 / 0.44 against 1.00 / 0.92 / 0.91; skill/bar 0.52 / 4.56 /
+  3.04 against 0.09 / 0.47 / 0.39.
+- The informational τ sweep would have picked 0.9 on test (regret 0.09).
+- 200 calls are worse than QS.
+
 On genuinely equal inputs the oracle members agree far more tightly: member skill/bar
 0.08–0.47, against 0.21–0.73 before. The model is much further from them than the first
 table showed, worst on free-wall partition (pass 0.38 against 0.91). The tables below are
