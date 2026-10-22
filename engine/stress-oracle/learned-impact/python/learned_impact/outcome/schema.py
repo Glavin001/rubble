@@ -389,13 +389,16 @@ def validate_call(c: Call, require_targets: bool = True) -> None:
         raise SchemaError("energy.D_bond != sum(y_bond_dissipated)")
 
 
-def _open_blob(root: Path) -> np.ndarray:
-    """`arrays.bin` (memory-mapped) or `arrays.bin.zst` (one zstd frame of the same bytes,
-    lossless, decompressed into memory). Exactly one must exist."""
+def _open_blob(root: Path, in_memory: bool = False) -> np.ndarray:
+    """`arrays.bin` (memory-mapped, or read into memory with `in_memory`: the directory may
+    then be deleted, and its disk space is freed) or `arrays.bin.zst` (one zstd frame of the
+    same bytes, lossless, decompressed into memory). Exactly one must exist."""
     raw, zst = root / "arrays.bin", root / "arrays.bin.zst"
     if raw.exists() and zst.exists():
         raise SchemaError(f"{root}: both arrays.bin and arrays.bin.zst")
     if raw.exists():
+        if in_memory:
+            return np.fromfile(raw, dtype=np.uint8)
         return np.memmap(raw, dtype=np.uint8, mode="r")
     if zst.exists():
         import zstandard
@@ -467,7 +470,8 @@ def _upgrade_v3_arrays(a: dict[str, np.ndarray], nc: int) -> dict[str, np.ndarra
     return a
 
 
-def load_event(path: Path | str, validate: bool = True, require_targets: bool = True) -> Event:
+def load_event(path: Path | str, validate: bool = True, require_targets: bool = True,
+               in_memory: bool = False) -> Event:
     root = Path(path)
     manifest = json.loads((root / "manifest.json").read_text())
     upgrade = manifest.get("schema_version") == V3 and accept_v3()
@@ -476,7 +480,7 @@ def load_event(path: Path | str, validate: bool = True, require_targets: bool = 
     if validate:
         validate_manifest(manifest)
     entries = json.loads((root / "calls.json").read_text())
-    blob = _open_blob(root)
+    blob = _open_blob(root, in_memory)
     structures: dict[int, dict[str, np.ndarray]] = {}
     for s in manifest.get("structures", []):
         sid = int(s["structure_id"])

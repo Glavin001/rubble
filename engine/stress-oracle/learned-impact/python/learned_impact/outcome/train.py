@@ -46,7 +46,7 @@ class TrainConfig:
     dataset: str = ""
     val_dataset: str = ""  # validation from this dataset's val split instead (eval ensembles)
     train_events: str = ""  # a file listing P1 recording dirs: training calls via CallCache
-    call_cache: dict = field(default_factory=dict)  # {module, root, builder, max_gb, jobs}
+    call_cache: dict = field(default_factory=dict)  # {module, root, builder, max_gb, jobs, chunk}
     out: str = "runs/outcome"
     steps: int = 1000
     batch_calls: int = 64  # upper bound on calls per batch
@@ -131,21 +131,32 @@ def _read_list(path: str) -> list[str]:
 
 def _cached_train_events(event_dirs: list, cfg: dict) -> tuple[list[S.Event], int]:
     """P1's recorded training events → their calls through P1's CallCache (module imported
-    from `cfg["module"]`, P1's learned_impact/outcome_calls_cache.py), prefetched in one
-    parallel builder run, then loaded like any calls directory."""
+    from `cfg["module"]`, P1's learned_impact/outcome_calls_cache.py), built in chunks of
+    `chunk` events (one parallel builder run each) and read into memory, so the cache's disk
+    use stays within `max_gb` (GB, everything included: the LRU holds `max_gb` less one
+    chunk's headroom, the builder's staging dir the chunk) even when one pass is larger;
+    events still cached are reused."""
     import importlib.util
 
     spec = importlib.util.spec_from_file_location("outcome_calls_cache", cfg["module"])
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    cache = mod.CallCache(cfg["root"], max_gb=float(cfg.get("max_gb", 4.0)), builder=cfg["builder"],
-                          jobs=int(cfg.get("jobs", 8)))
     evs = [Path(e) for e in event_dirs]
-    t0 = time.time()
-    cache.prefetch(evs)
+    chunk = int(cfg.get("chunk", 32))
+    total_gb = float(cfg.get("max_gb", 2.5))
+    headroom_gb = float(cfg.get("headroom_gb", 0.25))  # one chunk (32 events ≈ 0.16 GB) staged
+    if total_gb <= headroom_gb:
+        raise ValueError(f"call cache max_gb {total_gb} must exceed the {headroom_gb} GB chunk headroom")
+    cache = mod.CallCache(cfg["root"], max_gb=total_gb - headroom_gb, builder=cfg["builder"],
+                          jobs=int(cfg.get("jobs", 8)))
+    t0, events, peak = time.time(), [], 0
+    for i in range(0, len(evs), chunk):
+        part = evs[i:i + chunk]
+        cache.prefetch(part)
+        events += [S.load_event(cache.path(e), in_memory=True) for e in part]
+        peak = max(peak, cache.bytes())
     print(f"[data] {len(evs)} training events' calls ready in {time.time() - t0:.0f} s "
-          f"(cache {cache.bytes() / 1e9:.2f} GB)", flush=True)
-    events = [S.load_event(cache.path(e)) for e in evs]
+          f"(cache peak {peak / 1e9:.2f} GB of {total_gb} GB)", flush=True)
     from .ensemble import aggregate
     groups: dict[str, list[S.Event]] = defaultdict(list)
     for e in events:
@@ -933,7 +944,8 @@ def main(argv=None) -> None:
     ap.add_argument("--call-cache-module", default="", help="P1's outcome_calls_cache.py")
     ap.add_argument("--call-cache", default="", help="cache root")
     ap.add_argument("--call-builder", default="", help="P1's learned_impact_outcome_calls")
-    ap.add_argument("--cache-gb", type=float, default=4.0)
+    ap.add_argument("--cache-gb", type=float, default=1.5,
+                    help="total disk bound of the call cache (counts toward P1's 30 GB budget)")
     ap.add_argument("--break-time-head", action="store_true",
                     help="a continuous break time per bond (the decode's break order)")
     ap.add_argument("--hidden-head", action="store_true",
