@@ -32,15 +32,20 @@ from . import decode as D
 from . import schema as S
 from .batch import SCALE_INDEX, Batch
 
+from . import fullstate as _FS
+
+# `/5`: one term per carried bond field (each normalised by its own persistence loss, so
+# a field that rarely changes still has to beat "unchanged"), the mode and the reactions
+FS_BOND_TERMS = tuple(f"fs_{name}" for name, _, _ in _FS.BOND_FIELDS)
 TERMS = ("margin", "demand", "break", "time", "motion", "def_motion", "pose", "impactor",
-         "energy", "damage", "regime", "fs_bond", "fs_mode", "fs_chunk")
+         "energy", "damage", "regime", *FS_BOND_TERMS, "fs_mode", "fs_chunk")
 
 
 @dataclass
 class LossConfig:
     weights: dict[str, float] = field(default_factory=lambda: {
         "margin": 5.0, "demand": 1.0, "break": 5.0, "time": 1.0, "motion": 2.0,
-        "def_motion": 2.0, "pose": 1.0, "fs_bond": 1.0, "fs_mode": 1.0, "fs_chunk": 1.0,
+        "def_motion": 2.0, "pose": 1.0, "fs_mode": 1.0, "fs_chunk": 1.0,
         "impactor": 2.0, "energy": 1.0, "damage": 1.0, "regime": 1.0})
     huber_delta: float = 1.0
     label_smoothing: float = 0.02  # single-run hard break labels
@@ -248,8 +253,10 @@ def loss_terms(out: dict[str, Tensor], b: Batch, cfg: LossConfig,
     # weights), the failure mode (cross-entropy) and the chunks' support reactions
     if "bond_fs" in out:
         bvd = t["bond_valid"].to(dev, dtype)
-        e = _huber(out["bond_fs"].to(dtype) - t["y_bond_fs"].to(dev, dtype), cfg.huber_delta).mean(-1)
-        terms["fs_bond"] = (w_b * bvd * e).sum() / (w_b * bvd).sum().clamp(min=1)
+        e = _huber(out["bond_fs"].to(dtype) - t["y_bond_fs"].to(dev, dtype), cfg.huber_delta)
+        den = (w_b * bvd).sum().clamp(min=1)
+        for i, name in enumerate(FS_BOND_TERMS):
+            terms[name] = (w_b * bvd * e[:, i]).sum() / den
         ce = F.cross_entropy(out["bond_fs_mode_logits"].float(), t["y_bond_fs_mode"].to(dev),
                              reduction="none")
         terms["fs_mode"] = (ce * bvd).sum() / bvd.sum().clamp(min=1)
@@ -393,4 +400,7 @@ def zero_baselines(batches, cfg: LossConfig, priors=None) -> dict[str, float]:
         for k, v in loss_terms(z, b, cfg, priors).items():
             sums[k] = sums.get(k, 0.0) + float(v)
         n += 1
-    return {k: (v / max(n, 1)) if v > 0 else 1.0 for k, v in sums.items()}
+    # full-state fields (encodings of order 1) that barely change in these batches would get
+    # a near-zero persistence baseline and dominate the gradient: floor it
+    return {k: max(v / max(n, 1), 1e-4) if k.startswith("fs_") else ((v / max(n, 1)) if v > 0 else 1.0)
+            for k, v in sums.items()}
