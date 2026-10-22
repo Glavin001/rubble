@@ -251,3 +251,24 @@ oracle state at the frame's start and end:
 About 3.8 MB per anchored t2 event (86 calls). The `/5` calls of chunk A go to
 `runs/calls-v5/` as soon as it is recorded; the rest are built as recorded, within the
 bounded cache.
+
+### Overnight log (2026-10-22)
+
+**The budget.** Planning confirmed the user's limit is 30 GB for the whole `runs` tree,
+derived caches included. Changes:
+- **The queue was restarted** (`runs/viability-v1b.sh`, resuming; finished events
+  skipped) with every job under a whole-tree guard of 29 GB. It had started at 45.8 GB.
+- **Deleted, each when its readers released it:**
+  - `size-r8` (findings committed in 03194672);
+  - the sealed and test splits of `calls-v4-eval` (P2's 32 test members were rebuilt for
+    its overfit, then released);
+  - `calls-v3-eval`;
+  - then all of `calls-v4-*`, once P2 moved viability to `/5`.
+- **Recorded frames:** none touched. The tree went from 33 to 17.1 GB.
+
+**Extra validation for chunk A.** Chunk A's own hash split gave 2 val configurations.
+`--only-split val` keeps the recipes the same split hash (seed 777) sends to val, so no
+layout leaves its split. It adds 5 configurations × 8 members for each of anchored t1,
+anchored t2, standing t1 and standing t2 (`viability-v1-*-val`, 160 events).
+`calls-v5/.complete` is touched once chunk A's calls and these are built: P2's overnight
+chain waits on it.
