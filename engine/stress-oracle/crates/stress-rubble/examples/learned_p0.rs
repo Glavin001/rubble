@@ -448,6 +448,13 @@ struct ProviderOpts {
     /// `World::step_frame_with_provider_standalone`, diagnostic only: no contact outside the
     /// island in routed frames); default `engine` (rubble).
     standalone: bool,
+    /// `--host a`: harness A, the standalone oracle with each routed island's frame through
+    /// `World::step_frame_island_provider` (the island's full state across the boundary; the
+    /// rest the oracle's native step). Provider `oracle`: the oracle's island step itself
+    /// (the standalone oracle bit for bit); `oracle_decoded`: the oracle's outcome through the
+    /// decoded state (the /3 boundary in harness A); `model`/`files`: their decoded state,
+    /// applied to the island on a copy of the frame-start world.
+    harness_a: bool,
     /// The call record's variant-B (QS frame) features (`live_call`'s `qs`): `--qs` / `--no-qs`
     /// force them. Unset, `files` builds them (as P1 records them) and `model` asks the
     /// provider (`model.json`'s `needs_qs`).
@@ -582,7 +589,7 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
             let mut provider = |view: &World, keys: &stress_ref::world::IslandKeys| -> Result<stress_ref::world::DecodedState, String> {
                 let tc = Instant::now();
                 let d = match o.kind.as_str() {
-                    "oracle" => Ok(oracle_outcome(view, keys, frame)),
+                    "oracle" | "oracle_decoded" => Ok(oracle_outcome(view, keys, frame)),
                     "files" => file_outcome(o, view, keys, frame, &s.name),
                     "model" => model.as_mut().expect("model provider").outcome(view, keys, frame),
                     other => Err(format!("unknown --provider {other}")),
@@ -591,7 +598,38 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
                 flags = d.flags.clone();
                 Ok(d)
             };
-            let stepped = if o.standalone { w.step_frame_with_provider_standalone(&mut provider) } else { w.step_frame_with_provider(&mut provider) };
+            let stepped = if o.harness_a {
+                let exact = o.kind == "oracle";
+                let mut a_provider = |start: &World, m: &stress_ref::world::IslandMembers| -> Result<stress_ref::world::IslandState, String> {
+                    if exact {
+                        return stress_ref::world::oracle_island_step(start, m);
+                    }
+                    // A decoded state: applied to the island on a copy of the frame-start world
+                    // (the island's other state carried as it was), the island's state taken.
+                    let mut view = start.clone();
+                    let island: HashSet<u64> = view.solver.clusters.iter().filter(|c| c.chunks.first().is_some_and(|&k| m.chunks.contains(&(c.structure, k)))).map(|c| c.id).collect();
+                    for cl in &mut view.solver.clusters {
+                        cl.driven = !island.contains(&cl.id);
+                    }
+                    for (i, imp) in view.impactors.iter_mut().enumerate() {
+                        imp.driven = !m.impactors.contains(&i);
+                    }
+                    let keys = view.routed_island_keys();
+                    let d = provider(&view, &keys)?;
+                    let mut x = start.clone();
+                    x.apply_decoded(&d)?;
+                    Ok(x.extract_island(m))
+                };
+                w.step_frame_island_provider(&mut a_provider).map(|m| {
+                    let mut chunks: Vec<i64> = m.chunks.iter().map(|&(s, c)| stress_ref::world::stable_key(s, c)).collect();
+                    chunks.sort_unstable();
+                    stress_ref::world::IslandKeys { chunks, impactors: m.impactors.iter().map(|&i| i as i64).collect(), ..Default::default() }
+                })
+            } else if o.standalone {
+                w.step_frame_with_provider_standalone(&mut provider)
+            } else {
+                w.step_frame_with_provider(&mut provider)
+            };
             match stepped {
                 Ok(keys) => {
                     islands = keys.chunks.len() + keys.impactors.len();
@@ -909,7 +947,7 @@ fn main() {
     let mut samples: Vec<usize> = Vec::new();
     let (mut name, mut member, mut mode, mut seconds, mut fdt, mut variant) = (String::from("free_wall"), None::<u64>, String::from("kin"), SECONDS, None::<f64>, String::from("coupled"));
     let mut poses: Option<String> = None;
-    let mut provider = ProviderOpts { kind: "oracle".into(), dir: "provider".into(), timeout: 60.0, echo_oracle: false, qs: None, checkpoint: None, device: "cpu".into(), python_dir: None, standalone: false };
+    let mut provider = ProviderOpts { kind: "oracle".into(), dir: "provider".into(), timeout: 60.0, echo_oracle: false, qs: None, checkpoint: None, device: "cpu".into(), python_dir: None, standalone: false, harness_a: false };
     while let Some(a) = args.next() {
         match a.as_str() {
             "--scene" => name = args.next().expect("--scene NAME"),
@@ -927,7 +965,12 @@ fn main() {
             "--checkpoint" => provider.checkpoint = Some(args.next().expect("--checkpoint PT").into()),
             "--device" => provider.device = args.next().expect("--device cpu|mps"),
             "--python-dir" => provider.python_dir = Some(args.next().expect("--python-dir DIR").into()),
-            "--host" => provider.standalone = match args.next().as_deref() { Some("standalone") => true, Some("engine") => false, other => panic!("--host standalone|engine, not {other:?}") },
+            "--host" => match args.next().as_deref() {
+                Some("standalone") => provider.standalone = true,
+                Some("engine") => provider.standalone = false,
+                Some("a") => (provider.standalone, provider.harness_a) = (true, true),
+                other => panic!("--host standalone|engine|a, not {other:?}"),
+            },
             "--poses" => poses = Some(args.next().expect("--poses FILE")),
             "--event-dir" => event_dir = Some(args.next().expect("--event-dir DIR")),
             "--samples" => samples = args.next().expect("--samples f,f").split(',').filter(|x| !x.is_empty()).map(|x| x.parse().expect("frame")).collect(),

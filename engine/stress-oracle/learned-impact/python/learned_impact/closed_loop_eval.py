@@ -11,6 +11,12 @@ until it settles, through P0's coupled harness (`learned_p0 event`), under each 
            body's rigid fit (`STRESS_DECODED_DEFORMATION=1`) instead of the rigid fit alone:
            the elastic deformation of a still-bonded (anchored, prestressed) wall survives
            the call, from the decoded state alone
+  a_ceiling  harness A: the standalone oracle with routed islands through the provider, the
+           oracle's island step (bit for bit the oracle; the sanity column)
+  a_ceiling_decoded / a_ceiling_def  harness A with the oracle's outcome through the /3
+           decoded state (reduced / with deformation): the /3 boundary's own ceiling
+  a_model / a_model_def  harness A with the checkpoint (/3 decoded state; `_def` keeps the
+           decoded deformation)
   coupled  (diagnostic) the oracle's own coupled frame, no call boundary: what the coupling
            with rubble alone costs
   qs       CPU `blast_parity` (P1's QS baseline), standalone
@@ -175,6 +181,23 @@ def candidate_args(name: str, a, out: Path, event: str) -> tuple[list[str], dict
         return ["--variant", "provider", "--provider", "oracle"], {**deb, "STRESS_DECODED_DEFORMATION": "1", "STRESS_DECODED_RESET_JOINTS": "1"}
     if name == "qs":
         return ["--variant", "qs"], {}
+    # Harness A (the standalone oracle, routed islands through the provider; no rubble):
+    if name.startswith("a_"):
+        base = {"STRESS_DEBRIS_ROUTING": "1"}
+        if name == "a_ceiling":
+            # the oracle's island step: the standalone oracle bit for bit (sanity)
+            return ["--variant", "provider", "--provider", "oracle", "--host", "a"], base
+        if name in ("a_ceiling_decoded", "a_ceiling_def"):
+            # the oracle's outcome through the /3 decoded state (reduced, or with deformation)
+            env = {**base, "STRESS_DECODED_DEFORMATION": "1"} if name == "a_ceiling_def" else base
+            return ["--variant", "provider", "--provider", "oracle_decoded", "--host", "a"], env
+        if name in ("a_model", "a_model_def"):
+            d = out / "provider" / name / event
+            args = ["--variant", "provider", "--provider", "model", "--host", "a", "--checkpoint", str(a.checkpoint), "--dir", str(d), "--timeout", str(a.timeout), "--device", a.device]
+            if a.python_dir:
+                args += ["--python-dir", str(a.python_dir)]
+            env = {**base, "STRESS_DECODED_DEFORMATION": "1"} if name == "a_model_def" else base
+            return args, env
     if name == "coupled":
         # Diagnostic: the oracle's own coupled frame, no call boundary (the coupling alone).
         return ["--variant", "coupled"], deb
