@@ -245,7 +245,8 @@ fn the_monotone_margin_head_is_applied_alike_by_the_reference_and_the_program() 
     let w = Weights::load(&fixture()).unwrap();
     let mut model = Model::new(&w, Options { node_projection: true, tiled_mlp: false, fused_sums: false }).unwrap();
     model.config.monotone_margin = true;
-    let plain = Model::new(&w, Options { node_projection: true, tiled_mlp: false, fused_sums: false }).unwrap();
+    let mut plain = Model::new(&w, Options { node_projection: true, tiled_mlp: false, fused_sums: false }).unwrap();
+    plain.config.monotone_margin = false;
     for dir in parity_dirs().into_iter().filter(|d| !torch_outputs(d).1).take(4) {
         let ev = read_event(&dir.join("call")).unwrap();
         let hier = structure_hierarchies(&ev, model.config.levels);
