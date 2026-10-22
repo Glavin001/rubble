@@ -873,6 +873,13 @@ impl World {
         self.contact_dt
     }
 
+    /// The two substep limits now: the stress solve's stable step and the contact step
+    /// (`substep_dt` combines them). Learned-impact cost labels.
+    pub fn step_limits(&self) -> (f64, f64) {
+        let stress_dt = if self.scene.sim.solve_mode == SolveMode::Implicit { self.implicit_stress_dt() } else { self.solver.stable_dt() };
+        (stress_dt, self.contact_dt)
+    }
+
     pub fn substep_dt(&self) -> f64 {
         // The implicit stress step is unconditionally stable: only contacts limit the substep.
         let stress_dt = if self.scene.sim.solve_mode == SolveMode::Implicit {

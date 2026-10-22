@@ -487,6 +487,15 @@ pub struct ReferenceSolver {
     multirate: MultirateWindow,
     /// Bond evaluations so far (diagnostics: the work that `multirate` saves).
     pub bond_evaluations: u64,
+    /// Learned-impact recorder (off by default; no effect on the dynamics): each
+    /// structure's external-load impulse since `reset_load_impulses`, summed over its
+    /// clusters every explicit substep: (force, torque about the world origin) x dt,
+    /// gravity, contact and scripted loads included. With the change of the structure's
+    /// momentum it gives the supports' reaction impulse.
+    #[serde(default)]
+    pub record_load_impulse: bool,
+    #[serde(default)]
+    pub load_impulse: Vec<[f64; 6]>,
 }
 
 /// `stable_dt`'s per-cluster cache: (bonds, chunks, inertia-scale bits, bound) by cluster id.
@@ -563,6 +572,8 @@ impl ReferenceSolver {
             step_bounds: StepBounds::default(),
             multirate: MultirateWindow::default(),
             bond_evaluations: 0,
+            record_load_impulse: false,
+            load_impulse: Vec::new(),
             structures,
         };
         for si in 0..solver.structures.len() {
@@ -1500,6 +1511,9 @@ impl ReferenceSolver {
     /// Advance every cluster by one explicit substep under the given external loads.
     pub fn substep(&mut self, dt: f64, loads: &ChunkLoads) {
         let t_mid = self.time + dt;
+        if self.record_load_impulse {
+            self.accumulate_load_impulse(dt, loads);
+        }
         // Clusters integrated explicitly this substep. Their bond responses and chunk
         // loads depend only on the state at the start of the substep, so all of them
         // (across every cluster) are evaluated in parallel; the results are then applied
@@ -2354,6 +2368,25 @@ impl ReferenceSolver {
     }
 
     /// Clear per-bond peak utilization (call at the start of each recorded frame).
+    /// Zero `load_impulse` (one row per structure).
+    pub fn reset_load_impulses(&mut self) {
+        self.load_impulse = vec![[0.0; 6]; self.structures.len()];
+    }
+
+    fn accumulate_load_impulse(&mut self, dt: f64, loads: &ChunkLoads) {
+        if self.load_impulse.len() != self.structures.len() {
+            self.reset_load_impulses();
+        }
+        for ci in 0..self.clusters.len() {
+            let (f, t) = self.net_load(ci, loads);
+            let t0 = t + self.clusters[ci].com_world().cross(f);
+            let row = &mut self.load_impulse[self.clusters[ci].structure];
+            for (k, x) in [f.x, f.y, f.z, t0.x, t0.y, t0.z].into_iter().enumerate() {
+                row[k] += x * dt;
+            }
+        }
+    }
+
     pub fn reset_peak_utilizations(&mut self) {
         for bonds in &mut self.bonds {
             for b in bonds {

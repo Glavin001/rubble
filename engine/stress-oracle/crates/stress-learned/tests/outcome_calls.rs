@@ -151,7 +151,8 @@ fn a_thinned_training_event_regenerates_byte_identically_and_builds_the_same_cal
     let mut recipe = OutcomeRecipe { event_id: "thin".into(), family: "test".into(), tier: 1, split_group: "thin".into(), layout_group: "L".into(), parameters: json!({"split": "train"}), scene: scene() };
     recipe.scene.name = "thin".into();
     let out = tmp("thin");
-    let opts = RecordOptions::new(OracleConfig::named("a12_realtime").unwrap());
+    let mut opts = RecordOptions::new(OracleConfig::named("a12_realtime").unwrap());
+    opts.storage.select_training_frames = true; // off by default since revision 8; old events are thinned
     let sum = record_outcome_event(&recipe, &out, &opts, &|_| {}).unwrap();
     let ev = out.join("thin");
     let ctx: serde_json::Value = serde_json::from_slice(&std::fs::read(ev.join("context.json")).unwrap()).unwrap();
@@ -217,4 +218,21 @@ fn the_calls_hidden_state_is_the_solvers() {
         }
     }
     assert!(worst_v <= 1e-3 * scale_v.max(1e-6) + 1e-5, "the fitted rates are the solver's hidden rates");
+}
+
+/// A full-state boundary stored as a delta (of the previous one) decodes through its chain
+/// and is the oracle's next state from the boundary before it, bit for bit.
+#[test]
+fn a_delta_full_state_boundary_is_the_next_state_bit_for_bit() {
+    let (ev, _) = record("fullstate");
+    let ctx: serde_json::Value = serde_json::from_slice(&std::fs::read(ev.join("context.json")).unwrap()).unwrap();
+    let list = ctx["full_state"]["boundaries"].as_array().unwrap();
+    assert!(list.iter().any(|s| !s["delta_of"].is_null()));
+    let scene: Scene = serde_json::from_slice(&std::fs::read(ev.join("scene.json")).unwrap()).unwrap();
+    let b = 9; // a delta, the end of a nine-delta chain
+    assert_eq!(list[b]["delta_of"].as_u64(), Some(8));
+    let mut w = stress_learned::full_state::restore(&scene, &stress_learned::full_state::load_frame(&ev, b - 1).unwrap()).unwrap();
+    stress_learned::full_state::oracle_frame(&mut w, |_| {}).unwrap();
+    let diff = stress_learned::full_state::differing_paths(&stress_learned::full_state::shred_world(&w).unwrap(), &stress_learned::full_state::load_frame(&ev, b).unwrap(), |_| false);
+    assert!(diff.is_empty(), "{diff:?}");
 }
