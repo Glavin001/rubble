@@ -29,11 +29,13 @@ use crate::catalog::{self, Catalog};
 use crate::outcome::{capture_inputs, capture_state, capture_static, Arrays, Index, PHASES};
 
 pub const CALLS_SCHEMA: &str = "learned-impact-outcome/4";
+/// The recorder's f64 tables a call reads: each break's exact solver time.
+const F64_TABLES: &[&str] = &["break_f64"];
 /// `/4` plus the island's complete oracle state at the frame's start and end
 /// (`full_state_calls`), for events recorded with the full state (recorder revision 9 on).
 pub const CALLS_SCHEMA_FULL: &str = "learned-impact-outcome/5";
 /// Bumped whenever the features or targets this builder writes change.
-pub const BUILDER_REVISION: u32 = 7;
+pub const BUILDER_REVISION: u32 = 8;
 pub const N_TIME_BINS: usize = 8;
 const G0: f64 = 9.81;
 const TINY: f64 = 1e-6;
@@ -94,6 +96,9 @@ pub struct Record {
     pub frames: Vec<Value>,
     f: HashMap<String, (Vec<usize>, Vec<f32>)>,
     i: HashMap<String, (Vec<usize>, Vec<i32>)>,
+    /// The f64 tables the calls use (`F64_TABLES`); the other f64 arrays are labels and
+    /// state copies the calls do not read.
+    d: HashMap<String, (Vec<usize>, Vec<f64>)>,
     /// A thinned training event (`context.storage.kept_frames`): frame and boundary index
     /// to stored row.
     frame_row: Option<HashMap<usize, usize>>,
@@ -111,7 +116,7 @@ impl Record {
         }
         let scene: Scene = serde_json::from_value(read("scene.json")?).map_err(|e| format!("scene.json: {e}"))?;
         let cat = Catalog::load(&dir.join("catalog.json"))?;
-        let (mut f, mut i) = (HashMap::new(), HashMap::new());
+        let (mut f, mut i, mut d) = (HashMap::new(), HashMap::new(), HashMap::new());
         for (name, e) in &cat.arrays {
             match e.dtype.as_str() {
                 "f32" => {
@@ -120,8 +125,10 @@ impl Record {
                 "i32" => {
                     i.insert(name.clone(), (e.shape.clone(), catalog::read_i32(dir, e)?));
                 }
-                // Exact f64 copies of state, break times and impactor impulses: labels and
-                // restart data, not features.
+                "f64" if F64_TABLES.contains(&name.as_str()) => {
+                    d.insert(name.clone(), (e.shape.clone(), catalog::read_f64(dir, e)?));
+                }
+                // Other f64 arrays: labels and state the calls do not read.
                 "f64" => {}
                 d => return Err(format!("{name}: dtype {d}")),
             }
@@ -131,7 +138,7 @@ impl Record {
         let name = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let index = |k: &str| ctx["storage"][k].as_array().map(|v| v.iter().enumerate().map(|(r, x)| (x.as_u64().unwrap_or(0) as usize, r)).collect::<HashMap<_, _>>());
         let (frame_row, state_row) = (index("kept_frames"), index("state_rows"));
-        Ok(Record { name, scene, ctx, outcome, frames, f, i, frame_row, state_row })
+        Ok(Record { name, scene, ctx, outcome, frames, f, i, d, frame_row, state_row })
     }
 
     fn from_arrays(name: String, scene: Scene, ctx: Value, a: Arrays) -> Record {
@@ -143,7 +150,8 @@ impl Record {
         for (k, (tail, data, rows)) in a.i32s {
             i.insert(k, (std::iter::once(rows).chain(tail).collect(), data));
         }
-        Record { name, scene, ctx, outcome: None, frames: Vec::new(), f, i, frame_row: None, state_row: None }
+        let d = a.f64s.into_iter().filter(|(k, _)| F64_TABLES.contains(&k.as_str())).map(|(k, (tail, data, rows))| (k, (std::iter::once(rows).chain(tail).collect(), data))).collect();
+        Record { name, scene, ctx, outcome: None, frames: Vec::new(), f, i, d, frame_row: None, state_row: None }
     }
 
     pub fn revision(&self) -> u64 {
@@ -1160,6 +1168,20 @@ fn build_call(r: &Record, st: &Statics, f: usize, prev_call: Option<usize>, hist
         put("y_bond_fail_margin", f32a(&[nb], live.iter().map(|&k| margin1[k] as f64).collect()));
         put("y_bond_broke", Arr::I32(vec![nb], broke.iter().map(|&b| i32::from(b)).collect()));
         put("y_bond_break_bin", Arr::I32(vec![nb], live.iter().map(|&k| if bins[k] >= 0 { bins[k] + 1 } else { 0 }).collect()));
+        // The exact break time within the frame (s from its start; NaN: no break), from the
+        // recorder's break table (revision 9 on).
+        if let (Some((_, times)), Some((_, rows))) = (r.d.get("break_f64"), r.i.get("break_i32")) {
+            let w = rows.len() / times.len().max(1);
+            let t0 = r.frames.get(f).and_then(|x| x["time"].as_f64()).ok_or_else(|| format!("{} frame {f}: no start time", r.name))?;
+            let at: HashMap<usize, f64> = (0..times.len()).filter(|&j| rows[j * w] as usize == f).map(|j| (rows[j * w + 1] as usize, times[j] - t0)).collect();
+            let y: Vec<f64> = live.iter().map(|&k| at.get(&k).copied().unwrap_or(f64::NAN)).collect();
+            for (&k, &t) in live.iter().zip(&y) {
+                if t.is_nan() == (bins[k] >= 0) {
+                    return Err(format!("{} frame {f} bond {}: break time {t} against break bin {}", r.name, st.bkey[k], bins[k]));
+                }
+            }
+            put("y_bond_break_time", Arr::F64(vec![nb], y));
+        }
         put("y_bond_fail_mode", Arr::I32(vec![nb], live.iter().zip(&broke).map(|(&k, &b)| if b { mode1[k] } else { 0 }).collect()));
         put("y_bond_ddamage", f32a(&[nb], live.iter().zip(&broke).map(|(&k, &b)| if b { 0.0 } else { (joint1[4 * k] as f64 - joint[4 * k] as f64).max(0.0) }).collect()));
         let ydis: Vec<f32> = live.iter().map(|&k| (dis[k][0] + dis[k][1]) as f32).collect();
