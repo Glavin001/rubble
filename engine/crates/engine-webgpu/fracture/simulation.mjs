@@ -294,6 +294,9 @@ return {
  setParams(partial){plan.setParams(partial)},
  // The mass (kg) of the projectiles fired from now on.
  setProjectileMass(kg){plan.setProjectileMass(kg)},
+ // Shot speed: a multiple of the scene's (shotSpeed m/s), for the shots fired from now on.
+ setProjectileSpeedScale(k){plan.setProjectileSpeedScale(k)},
+ get shotSpeed(){return plan.shotSpeed()},
  launch(origin,direction,{speed,arc}={}){
    const {id,bytes,offsets}=plan.launch(Float64Array.from(origin),Float64Array.from(direction),speed,arc),data=Uint8Array.from(bytes);
    for(const o of offsets)device.queue.writeBuffer(bufs[0],o,data);

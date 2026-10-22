@@ -187,6 +187,13 @@ through WebAssembly JavaScript Promise Integration (JSPI, `gpu-wait.mjs`): Chrom
 137 or later. In a browser without it (Safari) the Bonds menu marks them, and choosing one
 says why instead of failing; the other modes are unaffected.
 
+**Balls.** **Ball mass**, **Ball speed** and **Ball radius** are power-of-two multiples of
+the scene's ball, in every mode. Mass and speed apply to the next shots. Radius reloads the
+level, because the ball colliders and the broadphase grid are sized when it loads; the mass
+stays as Ball mass sets it. The default speed is the scene's own, else three scene extents a
+second within 5–18 m/s (`plan::default_shot_speed`). rubble has no swept collision, so a
+very fast, small ball can pass through thin pieces.
+
 **View.** The **View** menu picks what the pieces are coloured by: **Materials** (the
 default), **Sleep state** (awake orange, asleep blue, static grey) or **Bodies** (one colour
 per rigid body). In rubble's modes every piece is its own body, so Bodies gives each piece a

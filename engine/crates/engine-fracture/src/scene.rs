@@ -584,6 +584,27 @@ impl Scene {
         self.body_of.iter().find(|(f, _)| *f == id).map(|(_, b)| *b)
     }
 
+    /// The projectiles' radius times `scale` (the lab's ball radius option; the mass
+    /// stays): their sphere colliders and render mesh, and the broadphase's base cell
+    /// (the planner sizes its grid levels from the colliders, so they cover the new size).
+    pub fn scale_projectile_radius(mut self, scale: f64) -> anyhow::Result<Self> {
+        anyhow::ensure!(scale.is_finite() && scale > 0.0, "Ball radius scale must be positive");
+        let r = self.projectile_radius * scale;
+        let slots = self.projectile_start..self.projectile_start + self.projectile_count;
+        for c in self.colliders.iter_mut().filter(|c| slots.contains(&c.body)) {
+            anyhow::ensure!(c.shape == SHAPE_SPHERE, "projectile {} is not a sphere", c.body);
+            c.params[0] = r;
+        }
+        for v in self.projectile_vertices.chunks_exact_mut(10) {
+            for x in &mut v[..3] {
+                *x = (*x as f64 * scale) as f32;
+            }
+        }
+        self.projectile_radius = r;
+        self.grid_cell_size = grid_config(&self.colliders).0;
+        Ok(self)
+    }
+
     /// Every bond's break capacities times `scale` (the lab's bond strength option; the
     /// springs stay).
     pub fn scale_bond_strength(mut self, scale: f64) -> Self {

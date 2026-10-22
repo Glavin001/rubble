@@ -1,4 +1,4 @@
-import {parseFractureGlb,buildScene,buildCuboidHouse,buildPackScene,layoutScene,withoutJoints,withBondStrength,withParams,SAMPLES} from './wasm.mjs';
+import {parseFractureGlb,buildScene,buildCuboidHouse,buildPackScene,layoutScene,withoutJoints,withBondStrength,withProjectileRadius,withParams,SAMPLES} from './wasm.mjs';
 import {createSimulation} from './simulation.mjs';
 import {preloadBonds} from './bonds.mjs';
 import {createRenderer} from './render.mjs';
@@ -58,6 +58,11 @@ const viewMode=()=>Number($('view-mode').value);
 function applyView(){if(stressOn)stress?.setView($('show-bonds').checked,viewMode())}
 // Ball mass: a power-of-two multiple of the scene's default ball, applied to the next shots.
 const massScale=()=>2**Number($('ball-mass').value);
+// Ball speed: a power-of-two multiple of the scene's launch speed, applied to the next shots.
+const speedScale=()=>2**Number($('ball-speed').value);
+// Ball radius: a power-of-two multiple of the scene's ball (the mass stays), applied when
+// the level loads.
+const radiusScale=()=>2**Number($('ball-radius').value);
 // Bond strength: a power-of-two multiple of every bond's break strength (D6 joints and
 // the stress solver), applied when the level loads.
 const strengthScale=()=>2**Number($('bond-strength').value);
@@ -65,6 +70,15 @@ const strengthScale=()=>2**Number($('bond-strength').value);
 // simulated time, applied when the level loads.
 const physicsHz=()=>Number($('physics-hz').value);
 const scaleLabel=k=>`×${k>=1?k:`1/${1/k}`}`;
+function applyBallSpeed(){
+ const k=speedScale(),ms=(stressOn?stress?.stats.ballSpeed:sim?.shotSpeed)*k;
+ $('ball-speed-value').textContent=`${scaleLabel(k)}${ms?` · ${ms.toFixed(ms<10?1:0)} m/s`:''}`;
+ if(stressOn)stress?.setShotSpeedScale(k);else sim?.setProjectileSpeedScale(k);
+}
+function showBallRadius(){
+ const r=stressOn?stress?.stats.ballRadius:scene?.projectileRadius;
+ $('ball-radius-value').textContent=`${scaleLabel(radiusScale())}${r?` · ${r.toFixed(2)} m`:''}`;
+}
 function applyBallMass(){
  const k=massScale(),kg=(stressOn?stress?.stats.ballMass:scene?.projectileMass)*k;
  $('ball-mass-value').textContent=`×${k>=1?k:`1/${1/k}`}${kg?` · ${Math.round(kg).toLocaleString()} kg`:''}`;
@@ -118,10 +132,11 @@ async function loadLevel(level){
   // Learned mode: rubble stays unbonded (same as none); the MGN-T forward is timed separately.
   const one=bondMode()==='d6'?await preloadBonds(device,strengthScale()===1?built:withBondStrength(built,strengthScale())):withoutJoints(built);
   // Copies laid out as the sample says (procedural houses get a larger contact budget).
-  next=layoutScene(one,layout,!!procedural)}catch(e){if(scene)$('level').value=String(scene.level??0);throw e}
+  const laid=layoutScene(one,layout,!!procedural);
+  next=radiusScale()===1?laid:withProjectileRadius(laid,radiusScale())}catch(e){if(scene)$('level').value=String(scene.level??0);throw e}
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;accumulator=0;
  scene=next;sim=await createSimulation(device,scene,setStatus);renderer=await createRenderer(device,$('view'),sim,scene,shoot);
- renderer.colorMode=viewMode();applyBallMass();
+ renderer.colorMode=viewMode();applyBallMass();applyBallSpeed();showBallRadius();
  if(bondMode()==='learned'){
   setStatus('Loading learned-impact kernels (Slang→WGSL)…');
   const {createLearnedImpact}=await import('./learned-impact.mjs');
@@ -155,9 +170,9 @@ async function loadStress(level){
  catch(e){$('view').hidden=false;$('stress-view').hidden=true;throw new Error(`Stress-solver mode unavailable: ${e.message}. Rebuild it (README, Bond modes).`)}
  stressOn=true;
  const profile=STRESS_PROFILES[bondMode()];
- stress.setProfile(profile);stress.setPhysicsHz(physicsHz());stress.setBondStrengthScale(strengthScale());applyView();
+ stress.setProfile(profile);stress.setPhysicsHz(physicsHz());stress.setBondStrengthScale(strengthScale());stress.setShotRadiusScale(radiusScale());applyView();
  if(cuboid)await stress.loadCuboid(layout);else if(pack)await stress.loadPack(packBytes);else await stress.load(assetBytes,level);
- await stress.frame(0);applyBallMass();
+ await stress.frame(0);applyBallMass();applyBallSpeed();showBallRadius();
  const st=stress.stats;stressHud={t:performance.now(),frames:0,renders:0};
  $('fragments').textContent=st.chunks;$('bonds').textContent=st.bonds;$('hulls').textContent=st.hulls;$('awake').textContent='0';$('contacts').textContent='—';
  $('release').textContent='Start simulation';$('fire').hidden=true;
@@ -217,6 +232,9 @@ $('level').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('view-mode').onchange=()=>{if(renderer)renderer.colorMode=viewMode();applyView()};
 $('show-bonds').onchange=applyView;
 $('ball-mass').oninput=applyBallMass;
+$('ball-speed').oninput=applyBallSpeed;
+$('ball-radius').oninput=()=>{$('ball-radius-value').textContent=scaleLabel(radiusScale())};
+$('ball-radius').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('bond-strength').oninput=()=>{$('bond-strength-value').textContent=scaleLabel(strengthScale())};
 $('bond-strength').onchange=()=>{if(bondMode()!=='none')serializeLoad(()=>loadLevel(Number($('level').value)))};
 $('bond-mode').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));

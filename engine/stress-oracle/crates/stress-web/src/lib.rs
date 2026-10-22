@@ -76,6 +76,10 @@ thread_local! {
     static FIRED: Cell<usize> = const { Cell::new(0) };
     /// The shots' mass as a multiple of the lab's default ball (`stress_set_shot_mass_scale`).
     static MASS_SCALE: Cell<f64> = const { Cell::new(1.0) };
+    /// The shots' speed as a multiple of the lab's (`stress_set_shot_speed_scale`).
+    static SPEED_SCALE: Cell<f64> = const { Cell::new(1.0) };
+    /// The next load's ball radius as a multiple of the lab's (`stress_set_shot_radius_scale`).
+    static RADIUS_SCALE: Cell<f64> = const { Cell::new(1.0) };
     /// The bonds' strengths as a multiple of the asset's (`stress_set_bond_strength_scale`).
     static STRENGTH_SCALE: Cell<f64> = const { Cell::new(1.0) };
     /// The view (`stress_set_view`): bond graph, colour mode.
@@ -212,6 +216,24 @@ pub fn stress_set_shot_mass_scale(scale: f64) {
     }
 }
 
+/// The speed of the shots fired from now on, as a multiple of the lab's
+/// (`plan::default_shot_speed`).
+#[wasm_bindgen]
+pub fn stress_set_shot_speed_scale(scale: f64) {
+    if scale.is_finite() && scale > 0.0 {
+        SPEED_SCALE.set(scale);
+    }
+}
+
+/// The balls' radius from the next load on, as a multiple of the lab's (the mass stays):
+/// the renderer's shot meshes are made at load.
+#[wasm_bindgen]
+pub fn stress_set_shot_radius_scale(scale: f64) {
+    if scale.is_finite() && scale > 0.0 {
+        RADIUS_SCALE.set(scale);
+    }
+}
+
 /// The strength of every bond of the next `stress_load`, as a multiple of the asset's: the
 /// tensile, compressive and shear strengths of the bonds' materials (their fracture
 /// energies and stiffness stay).
@@ -280,7 +302,8 @@ pub fn stress_shoot(u: f64, v: f64) -> bool {
     }
     let (w, h) = SIZE.get();
     let Some(ray) = CAMERA.with_borrow(|c| c.as_ref().map(|c| c.aim(u, v, w as f64 / h as f64, s.radius))) else { return false };
-    let vel = engine_fracture::plan::shot_velocity(s.center, s.extent, s.radius, ray.origin, ray.direction, s.speed, s.arc);
+    let speed = engine_fracture::plan::default_shot_speed(s.extent, s.speed) * SPEED_SCALE.get();
+    let vel = engine_fracture::plan::shot_velocity(s.center, s.extent, s.radius, ray.origin, ray.direction, Some(speed), s.arc);
     let k = FIRED.get();
     FIRED.set(k + 1);
     PENDING.with_borrow_mut(|p| {
@@ -346,7 +369,7 @@ fn load(level: u8) -> Result<(), String> {
     })?;
     WARNINGS.set(warnings);
     CAMERA.set(Some(Orbit::new(&lab)));
-    SHOOTING.set(Some(Shooting { center: lab.center, extent: lab.extent, radius: lab.projectile_radius, mass: lab.projectile_mass, speed: lab.projectile_speed, arc: lab.projectile_arc, placement: lab.placement }));
+    SHOOTING.set(Some(Shooting { center: lab.center, extent: lab.extent, radius: lab.projectile_radius * RADIUS_SCALE.get(), mass: lab.projectile_mass, speed: lab.projectile_speed, arc: lab.projectile_arc, placement: lab.placement }));
     FIRED.set(0);
     RUNNING.set(false);
     STATS.set("{}".into());
@@ -497,6 +520,8 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
                         "gpuWaits": engine_gpu_wait::WAITS.load(std::sync::atomic::Ordering::Relaxed),
                         "gpuYields": engine_gpu_wait::YIELDS.load(std::sync::atomic::Ordering::Relaxed),
                         "ballMass": SHOOTING.get().map_or(0.0, |s| s.mass),
+                        "ballRadius": SHOOTING.get().map_or(0.0, |s| s.radius),
+                        "ballSpeed": SHOOTING.get().map_or(0.0, |s| engine_fracture::plan::default_shot_speed(s.extent, s.speed)),
                         "lastShot": imps.last().map(|i| serde_json::json!({"position": i.pose.position.to_array(), "velocity": i.velocity.to_array()})),
                         "frameHz": 1.0 / dt,
                         "profile": PROFILE.get().name(),
