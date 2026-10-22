@@ -5,7 +5,7 @@
 
 use std::ops::{Add, AddAssign, Div, Index, IndexMut, Mul, MulAssign, Neg, Sub, SubAssign};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Vec3 {
     pub x: f64,
     pub y: f64,
@@ -160,7 +160,7 @@ impl IndexMut<usize> for Vec3 {
 }
 
 /// Row-major 3x3 matrix.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Mat3 {
     pub m: [[f64; 3]; 3],
 }
@@ -297,7 +297,7 @@ impl AddAssign for Mat3 {
 }
 
 /// Unit quaternion `w + xi + yj + zk` representing a rotation.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Quat {
     pub w: f64,
     pub x: f64,
@@ -403,7 +403,7 @@ impl Mul for Quat {
 }
 
 /// Rigid pose: `world = position + rotation * local`.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Pose {
     pub position: Vec3,
     pub rotation: Quat,

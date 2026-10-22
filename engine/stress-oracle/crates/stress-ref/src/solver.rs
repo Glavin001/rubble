@@ -127,7 +127,7 @@ impl SolverConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Activity {
     /// Explicit dynamic substeps.
     Active,
@@ -136,7 +136,7 @@ pub enum Activity {
 }
 
 /// A rigid cluster of chunks.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Cluster {
     /// Unique, never reused.
     pub id: u64,
@@ -187,7 +187,7 @@ impl Cluster {
 }
 
 /// Hidden deformation state of a chunk (body frame of its cluster).
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ChunkState {
     pub u: Vec3,
     pub th: Vec3,
@@ -211,7 +211,7 @@ pub struct ChunkState {
 }
 
 /// A bond as simulated: a static bond, possibly re-attached to coarser chunks.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RtBond {
     /// Static bond in the structure this was created from.
     pub source: usize,
@@ -2613,7 +2613,7 @@ mod tests {
 /// per-cluster field of the island's chunks, bonds and clusters, verbatim, and the cluster
 /// records with their places in the cluster list (`hint`, from a world stepped natively;
 /// a model's state may leave them `None`).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SolverIsland {
     pub chunks: Vec<((usize, usize), ChunkState)>,
     pub chunk_bonds: Vec<((usize, usize), Vec<usize>)>,

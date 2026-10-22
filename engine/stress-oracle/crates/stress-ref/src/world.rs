@@ -56,7 +56,7 @@ pub(crate) const MAX_SET_VISCOSITY: f64 = 1.0;
 /// more never exceeds its face-pair values (the stable-substep assumption).
 pub(crate) const FACE_PAIR_POINTS: usize = 10;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Impactor {
     pub name: String,
     pub shape: ImpactorShape,
@@ -2758,7 +2758,7 @@ pub(crate) fn penalty_force(
 }
 
 /// A contact of the elastic-layer method, by the bodies it joins.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 enum ContactKey {
     Ground(usize, usize),
     ImpactorGround(usize),
@@ -2768,7 +2768,7 @@ enum ContactKey {
 
 /// Friction state of an elastic-layer contact: its shear layer (world vectors, in the
 /// contact plane of `normal`) and its torsion about the normal.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct Stick {
     shear: Layer<Vec3>,
     torque: Layer<f64>,
@@ -2795,7 +2795,7 @@ struct Stick {
 /// adds unstrained layer, real shrinking releases what the leaving layer held. Slip
 /// (the whole patch sliding) leaves the strain uniform: one cohort. The stored energy
 /// `sum k_i |d - d_i|^2 / 2` never grows without work.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct Layer<V> {
     d: V,
     cohorts: Vec<(f64, V)>,

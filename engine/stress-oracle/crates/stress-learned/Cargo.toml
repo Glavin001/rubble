@@ -13,7 +13,14 @@ rayon = "1"
 serde_json = { version = "1", features = ["float_roundtrip"] }
 # Lossless compression of call records (`arrays.bin.zst`, P2's loader reads it).
 zstd = "0.13"
+# The island state's exact binary form (harness A relabelling): MessagePack, self-describing,
+# every f64 bit and infinity kept, and readable from Python (`msgpack`).
+rmp-serde = "1"
 stress-ref = { path = "../stress-ref" }
+
+[[bin]]
+name = "learned_impact_relabel"
+path = "src/bin/learned_impact_relabel.rs"
 
 [[bin]]
 name = "learned_impact_smoke"
@@ -38,3 +45,6 @@ path = "src/bin/learned_impact_outcome_generate.rs"
 [[bin]]
 name = "learned_impact_outcome_calls"
 path = "src/bin/learned_impact_outcome_calls.rs"
+
+[dev-dependencies]
+rmp-serde = "1"

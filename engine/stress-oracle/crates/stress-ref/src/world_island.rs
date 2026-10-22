@@ -18,7 +18,7 @@ use super::*;
 use crate::solver::SolverIsland;
 
 /// The island's full state at a frame's end.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct IslandState {
     pub solver: SolverIsland,
     pub impactors: Vec<(usize, Impactor)>,
@@ -30,10 +30,17 @@ pub struct IslandState {
 }
 
 /// An island: its chunks (by `(structure, chunk)`) and impactors (by index).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct IslandMembers {
     pub chunks: HashSet<(usize, usize)>,
     pub impactors: HashSet<usize>,
+}
+
+impl IslandState {
+    /// The island this state is of: its chunks and impactors.
+    pub fn members(&self) -> IslandMembers {
+        IslandMembers { chunks: self.solver.chunks.iter().map(|(k, _)| *k).collect(), impactors: self.impactors.iter().map(|(i, _)| *i).collect() }
+    }
 }
 
 impl IslandMembers {
