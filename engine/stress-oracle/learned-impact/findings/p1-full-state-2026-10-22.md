@@ -450,3 +450,25 @@ members, about 4.5 GB) was blocked by this session's permission checker. P0's ve
 references replace them for harness A (aac22d01), and P2 confirms nothing reads them. If
 approved, the space would go first to completing the four ensembles, then to chunk B's
 standing walls and chunk C.
+
+## Contact energy in the calls (builder revision 9, planning 2026-10-22)
+
+**What.** Each recorded call's `energy` now carries `E_contact_start` and `E_contact_end`:
+the island's penalty contact energy (the oracle's `k δ²/2` per point, net of pair offsets)
+at the frame's start and end. It is computed from the recorded full state, with no
+re-simulation:
+- restore the World at the boundary;
+- take `World::island_contact_energy_of` over the call's chunks and impactors.
+
+The code is P0's `island_contacts` (08bb117f), ported. The probe hunks in
+`apply_contacts` are inert unless `probe_start` is called, so the goldens are unchanged.
+P0's `handed_ground_overlaps` hunk is not ported: this branch's World has no handed overlaps.
+
+**Verified.** In `recorded_contact_energy_equals_the_live_worlds`, at every call boundary
+the recorded values equal the live stepping World's, bit for bit, nonzero cases included.
+P0 is cross-checking against its own implementation, because its fixture
+(`contact_bounds_v1.jsonl`) names no event.
+
+**Rebuilt.** All 604 resident events in `calls-v5` (40,713 calls; 35,817 with nonzero
+contact energy), 24 min at 4 threads. Restoring two boundaries per call roughly doubles the
+build time. Training calls get the fields on demand through P2's cache.
