@@ -44,7 +44,7 @@ class ModelConfig:
     # Fixed per-column standardisation of every input array, from training-set statistics
     # stored in the checkpoint (a global affine map, not per-graph normalisation; the GPU
     # port folds it into the first layer).
-    input_norm: bool = False
+    input_norm: bool = True
     edge_types: tuple[str, ...] = S.EDGE_TYPES
 
     def __post_init__(self):

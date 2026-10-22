@@ -50,6 +50,7 @@ class TrainConfig:
     # step is launch-latency bound on MPS, so filling it is nearly free (measured: 8 calls of
     # 220 chunks = 37 ms/step). One call over the budget still forms its own batch.
     batch_budget: int = 20000
+    select_tau: bool = True  # choose the break threshold on validation at the end
     # Pad every batch to bucketed shapes (exact; MPS recompiles per shape: ~1 s a new one)
     pad_shapes: bool = True
     lr: float = 1e-3
@@ -347,11 +348,32 @@ def grad_norms(terms: dict[str, torch.Tensor], params: list[torch.nn.Parameter])
     return out
 
 
-def save(path: Path, model, cfg: TrainConfig, norms, priors, step, metrics, temperature=1.0):
+def save(path: Path, model, cfg: TrainConfig, norms, priors, step, metrics, temperature=1.0,
+         tau: float | None = None):
+    """`priors` is stored only when training used the prior reweighting (the inference-time
+    logit correction is valid only then); `tau` is the validation-chosen break threshold."""
     torch.save({"model": model.state_dict(), "model_config": cfg.model.to_dict(),
-                "train_config": cfg.to_dict(), "norms": norms, "priors": priors, "step": step,
+                "train_config": cfg.to_dict(), "norms": norms,
+                "priors": priors if cfg.loss.break_reweight == "prior" else None, "step": step,
                 "metrics": metrics, "temperature": temperature,
+                "tau": cfg.decode.tau if tau is None else tau,
                 "schema_version": S.SCHEMA_VERSION}, path)
+
+
+TAU_GRID = (0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
+
+
+def select_tau(model, val_batches, cfg: "TrainConfig", priors, prog=None) -> tuple[float, dict]:
+    """The break threshold τ (on the failure margin q̂) with the best validation selection
+    score: a validation-only operating point, as the plan allows for τ."""
+    scores = {}
+    for tau in TAU_GRID:
+        dc = dataclasses.replace(cfg.decode, tau=tau)
+        scores[tau] = M.evaluate(model, val_batches, dc, priors).score
+        if prog:
+            prog.line(f"tau {tau}: validation score {scores[tau]:.3f}")
+    best = min(scores, key=scores.get)
+    return best, scores
 
 
 def load_model(path: str | Path, device="cpu") -> tuple[ImpactOutcomeModel, dict]:
@@ -503,7 +525,8 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
             last_log = now
         prog.update(step=step + 1, epoch=epoch)
         if val_batches and ((step + 1) % cfg.eval_every == 0 or step == cfg.steps - 1):
-            res = M.evaluate(model, val_batches, cfg.decode, data.priors)
+            res = M.evaluate(model, val_batches, cfg.decode,
+                             data.priors if cfg.loss.break_reweight == "prior" else None)
             msg = " ".join(f"{k}={v:.3f}" for k, v in sorted(res.metrics.items()))
             improved = res.score < best["score"]
             if improved:
@@ -514,13 +537,14 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
             prog.update(force=True, best_score=best["score"], best_step=best["step"])
     batches.close()
     # validation-only temperature for p_b, stored with the last checkpoint
+    shift_priors = data.priors if cfg.loss.break_reweight == "prior" else None
     temperature = 1.0
     if val_batches:
         logits, tg = [], []
         with torch.no_grad():
             for vb in val_batches:
                 o = model(vb.to(dev))
-                sh = Lo.prior_logit_shift(vb, data.priors)
+                sh = Lo.prior_logit_shift(vb, shift_priors)
                 lg = o["bond_break_logit"].cpu() + (sh.cpu() if sh is not None else 0)
                 logits.append(lg.numpy())
                 tg.append(np.where(vb.t["y_bond_has_freq"].numpy(), vb.t["y_bond_freq"].numpy(),
@@ -528,8 +552,16 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
         temperature = M.fit_temperature(np.concatenate(logits), np.concatenate(tg))
         prog.line(f"temperature (validation) = {temperature:.3f}")
     save(out / "last.pt", model, cfg, norms, data.priors, cfg.steps, best["metrics"], temperature)
+    tau = cfg.decode.tau
+    if val_batches and best["step"] is not None and cfg.select_tau:
+        ck = torch.load(out / "best.pt", map_location=dev, weights_only=False)
+        model.load_state_dict(ck["model"])
+        tau, scores = select_tau(model, val_batches, cfg, shift_priors, prog)
+        prog.line(f"tau (validation) = {tau} (scores {scores})")
+        save(out / "best.pt", model, cfg, norms, data.priors, ck["step"], ck["metrics"],
+             temperature, tau)
     prog.update(force=True, state="done", step=cfg.steps)
-    return {"best": best, "norms": norms, "temperature": temperature}
+    return {"best": best, "norms": norms, "temperature": temperature, "tau": tau}
 
 
 def main(argv=None) -> None:
@@ -559,8 +591,8 @@ def main(argv=None) -> None:
     ap.add_argument("--energy-tolerance", type=float, default=0.05)
     ap.add_argument("--break-mode", default="threshold", choices=["threshold", "sample"])
     ap.add_argument("--balance", default="fixed", choices=["fixed", "uncertainty"])
-    ap.add_argument("--input-norm", action="store_true",
-                    help="fixed per-column input standardisation from the training set")
+    ap.add_argument("--no-input-norm", action="store_true",
+                    help="disable the fixed per-column input standardisation")
     ap.add_argument("--w-break", type=float, default=None, help="λ for break and margin")
     ap.add_argument("--reweight", default=None, choices=["prior", "none", "focal"],
                     help="break-loss class reweighting")
@@ -594,7 +626,7 @@ def main(argv=None) -> None:
         cfg.loss.energy_tolerance = a.energy_tolerance
         cfg.loss.balance = a.balance
         cfg.loss.break_margin = a.break_margin
-        cfg.model.input_norm = a.input_norm
+        cfg.model.input_norm = not a.no_input_norm
         if a.w_break is not None:
             cfg.loss.weights["break"] = a.w_break
             cfg.loss.weights["margin"] = a.w_break

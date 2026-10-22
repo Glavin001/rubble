@@ -58,7 +58,7 @@ class Provider:
             tc = ck["train_config"]
             self.dcfg = D.DecodeConfig(temperature=ck.get("temperature", 1.0),
                                        energy_tolerance=tc["decode"]["energy_tolerance"],
-                                       tau=tc["decode"].get("tau", 1.0),
+                                       tau=ck.get("tau", tc["decode"].get("tau", 1.0)),
                                        break_mode=tc["decode"].get("break_mode", "threshold"))
             self.cache = HierarchyCache(self.model.cfg.levels)
             sha = hashlib.sha256(Path(checkpoint).read_bytes()).hexdigest()

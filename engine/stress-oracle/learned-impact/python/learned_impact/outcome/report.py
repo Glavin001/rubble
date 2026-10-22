@@ -42,7 +42,7 @@ def main(argv=None) -> None:
     tc = ck["train_config"]
     batches = [collate(bc, st, cache) for bc in
                _batches(calls, tc.get("batch_budget", 20000), tc.get("batch_calls", 64))]
-    dcfg = D.DecodeConfig(temperature=ck.get("temperature", 1.0),
+    dcfg = D.DecodeConfig(temperature=ck.get("temperature", 1.0), tau=ck.get("tau", 1.0),
                           energy_tolerance=tc["decode"]["energy_tolerance"])
     rep = M.three_way(model, batches, dcfg, ck.get("priors"))
     rep["checkpoint"] = str(a.checkpoint)

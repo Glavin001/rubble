@@ -40,11 +40,14 @@ TERMS = ("margin", "demand", "break", "time", "motion", "pose", "impactor", "ene
 @dataclass
 class LossConfig:
     weights: dict[str, float] = field(default_factory=lambda: {
-        "margin": 2.0, "demand": 1.0, "break": 1.0, "time": 1.0, "motion": 2.0, "pose": 1.0,
+        "margin": 5.0, "demand": 1.0, "break": 5.0, "time": 1.0, "motion": 2.0, "pose": 1.0,
         "impactor": 2.0, "energy": 1.0, "damage": 1.0, "regime": 1.0})
     huber_delta: float = 1.0
     label_smoothing: float = 0.02  # single-run hard break labels
-    break_reweight: str = "prior"  # "prior" (balanced with a known prior correction) | "none" | "focal" (ablation)
+    # "none": proper log-loss on the soft labels (default: the P2 sweep found the capped
+    # prior reweighting miscalibrated p_b); "prior" (balanced, with the prior correction at
+    # inference) and "focal" are ablations.
+    break_reweight: str = "none"
     reweight_cap: float = 50.0
     focal_gamma: float = 2.0
     alpha_cut: float = 1.0  # consequence weight: bond on the separating cut
