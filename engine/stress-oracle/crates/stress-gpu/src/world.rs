@@ -475,6 +475,12 @@ impl GpuWorld {
         Ok(())
     }
 
+    /// The routing's debris reach (`World::debris_reach_routing`, as `STRESS_DEBRIS_ROUTING`
+    /// sets it), before the first routed frame (the learned routing reads it once).
+    pub fn set_debris_reach_routing(&mut self, on: bool) {
+        self.shell.debris_reach_routing = on;
+    }
+
     /// Whether the world is coupled to an engine.
     pub fn coupled(&self) -> bool {
         self.shell.engine_name().is_some()

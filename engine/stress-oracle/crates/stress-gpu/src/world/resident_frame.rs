@@ -173,6 +173,8 @@ impl GpuWorld {
                 let cap = (self.solver.routing_inputs().bond_dyn.size() / std::mem::size_of::<crate::solver::BondDyn>() as u64) as u32;
                 let world = self.with_shell(|w| w.standalone_copy());
                 l.set_features(gpu, &world, map, cap)?;
+                let cfg = self.with_shell(|w| crate::learned_route::RouteConfig::of(w))?;
+                l.set_routing(gpu, &world, cfg)?;
                 self.learned = Some(l);
             }
             let cap = self.solver.island_cap().max(self.solver.mirror.clusters.len()) as u32 + 1;
@@ -184,6 +186,10 @@ impl GpuWorld {
             if !l.pending {
                 l.ensure(gpu, cap, chunks);
             }
+        }
+        let learned_exact = self.learned.as_ref().is_some_and(|l| l.routes_exactly());
+        if let Some(p) = self.punch.as_mut() {
+            p.fallbacks_only = learned_exact;
         }
         Ok(())
     }
@@ -645,7 +651,9 @@ impl GpuWorld {
             // split pass), the routing check, the new batch and the punch for its fallen-back
             // calls after it (`post_split`, with the split pass once more).
             let learned_apply = learned.is_some_and(|l| l.pending) && frame_mode;
-            let learned_batch = learned.is_some() && frame_mode && self.route_next;
+            // (the CPU's routing: every resident frame, its kernels gated by this frame's check;
+            // the sweep: when last frame's check flagged)
+            let learned_batch = learned.is_some_and(|l| self.route_next || l.routes_exactly()) && frame_mode;
             let punch = if self.tiered && frame_mode && self.route_next { self.punch.as_ref() } else { None };
             self.solver.punch_split = if learned.is_some() { learned_apply } else { punch.is_some() };
             let gravity = self.solver.mirror.config.gravity;
@@ -674,6 +682,7 @@ impl GpuWorld {
                             counters: &s.gpu_pass.as_ref().expect("gpu pass").counters,
                             route: &routing.expect("routing").route,
                             island_args: ri.island_args,
+                            materials: Some(ri.materials),
                             s: scalars,
                         };
                         l.encode_apply(gpu, enc, &t);
@@ -709,6 +718,7 @@ impl GpuWorld {
                     counters: &s.gpu_pass.as_ref().expect("gpu pass").counters,
                     route: &rt.route,
                     island_args: ri.island_args,
+                    materials: Some(ri.materials),
                     s: scalars,
                 };
                 l.encode_batch(gpu, enc, &t, learned_batch, None);

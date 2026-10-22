@@ -26,7 +26,7 @@ struct PunchParams
     uint island_count;   // dispatch bound
     uint impactor_count;
     uint engine_base;    // ctab: per island 3 float4 (resident.slang)
-    uint pad0;
+    uint fallbacks_only; // 1: only islands of learned calls that fell back (FALLBACK_BIT)
     float dt;            // the next frame
     float speed;         // the tiered impact speed
     float pad1;
@@ -75,6 +75,8 @@ static const uint ST_DISCONNECTED = 1;
 static const uint ST_ISLANDS = 16;
 static const uint DISCONNECTED_BIT = 8;
 static const uint LEARNED_BIT = 4096;
+// learned.slang `FALLBACK_BIT`: the island's learned call fell back to the punch this frame.
+static const uint FALLBACK_BIT = 8192;
 static const uint MAX_CHUNKS = 4096;
 static const uint G = 256;
 
@@ -111,7 +113,7 @@ void punch_islands(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     }
     // A learned impact call took the island this frame (`STRESS_IMPACT_PUNCH=learned`,
     // learned.slang `LEARNED_BIT`): not punched. Never set otherwise.
-    if (group_uniform(status[ST_ISLANDS + i] & LEARNED_BIT, t) != 0)
+    if (group_uniform((status[ST_ISLANDS + i] & LEARNED_BIT) != 0 || (params.fallbacks_only != 0 && (status[ST_ISLANDS + i] & FALLBACK_BIT) == 0) ? 1u : 0u, t) != 0)
     {
         if (t == 0)
             status[ST_ISLANDS + i] &= ~DISCONNECTED_BIT;

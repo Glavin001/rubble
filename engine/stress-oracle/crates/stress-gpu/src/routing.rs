@@ -177,6 +177,10 @@ pub struct Punch {
     impactors: wgpu::Buffer,
     /// Per impactor: engine body, bounding radius, face radius, mass, plane-strain modulus.
     list: Vec<[f32; 8]>,
+    /// The learned path's fallback only (`STRESS_IMPACT_PUNCH=learned` with the CPU's
+    /// routing): only islands of calls that fell back are punched (the others are the
+    /// engine's, as in the CPU's routing). Off: every island (the punch mode).
+    pub fallbacks_only: bool,
 }
 
 impl Punch {
@@ -185,7 +189,10 @@ impl Punch {
             kernel: gpu.compute(&shaders::PUNCH, "punch_islands", &PUNCH_BINDINGS),
             fast_kernel: gpu.compute(&shaders::PUNCH, "punch_fast", &PUNCH_BINDINGS),
             fast: gpu.storage("punch fast islands", &vec![[0f32; 4]; 1 + 3 * 128]),
-            impactors: gpu.storage("punch impactors", &[[0f32; 4]; 2]), list: Vec::new() }
+            impactors: gpu.storage("punch impactors", &[[0f32; 4]; 2]),
+            list: Vec::new(),
+            fallbacks_only: false,
+        }
     }
 
     /// (engine body, bounding radius, face radius, mass, plane-strain modulus) per impactor.
@@ -206,7 +213,7 @@ impl Punch {
         }
         let params = gpu.uniform(
             "punch params",
-            &PunchParams { island_count: inputs.island_count, impactor_count: self.list.len() as u32, engine_base, pad0: 0, dt: dt as f32, speed: speed as f32, pad1: 0.0, pad2: 0.0 },
+            &PunchParams { island_count: inputs.island_count, impactor_count: self.list.len() as u32, engine_base, pad0: self.fallbacks_only as u32, dt: dt as f32, speed: speed as f32, pad1: 0.0, pad2: 0.0 },
         );
         let buffers: [&wgpu::Buffer; 13] = [&params, inputs.islands, inputs.chunks, inputs.state, ctab, bodies, &self.impactors, inputs.bonds, inputs.bond_dyn, inputs.materials, status, &self.fast, &route.route];
         let group = gpu.bind(&self.kernel.group, &buffers);

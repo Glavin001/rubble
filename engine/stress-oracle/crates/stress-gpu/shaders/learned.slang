@@ -112,12 +112,16 @@ static const uint CTL_FB_RANGE = 16;
 static const uint CTL_ROUTED = 17;    // islands routed into calls this frame
 static const uint CTL_PHASE = 18;
 static const uint CTL_JOINED = 19;   // islands joined to a call by their approach (`learned_debris`)     // 1: between a batch's window end and the next batch (`learned_place` acts)
+static const uint CTL_ROUTE = 20;   // learned_route.slang: bits 1 edges past capacity, 2 labels not converged
+static const uint CTL_ROUTE_EDGES = 21;
 static const uint CTL_WORDS = 32;
 
 static const uint ST_DISCONNECTED = 1;
 static const uint ST_ISLANDS = 16;
 static const uint DISCONNECTED_BIT = 8;
 static const uint LEARNED_BIT = 4096; // the island is a learned call's this frame (the punch skips it)
+static const uint FALLBACK_BIT = 8192; // its call fell back to the punch this frame (the punch, fallbacks only, takes it)
+static const uint ROUTED_BIT = 1u << 31; // learned_route.slang's routed island
 
 struct LearnedParams
 {
@@ -143,6 +147,10 @@ struct LearnedParams
     // and of bond_time_logits [E,8].
     uint4 out_bases;
     uint4 out_bases2;
+    // x: 1 the CPU's routing (`learned_route.slang`: one call holding every routed body,
+    // as P1's call builder); 0 the punch's sweep, calls per impactor group (legacy);
+    // y: 1 that routing is not gated by the routing check's flag (untiered)
+    uint4 modes;
 };
 
 // One table for every kernel of this module (each entry point binds at most 10 storage
@@ -927,6 +935,13 @@ groupshared uint g_cnt_bond[64];
 groupshared uint g_cnt_imp[64];
 groupshared uint g_mask_of[64];
 
+// Whether this frame may route (the routing check's flag; the untiered CPU routing is not
+// gated by it).
+bool routed_frame()
+{
+    return (params.modes.x != 0 && params.modes.y != 0) || route[0] != 0;
+}
+
 uint lowest_bit(uint m)
 {
     return firstbitlow(m);
@@ -944,7 +959,7 @@ void learned_compact(uint3 thread: SV_GroupThreadID)
     uint live = group_uniform(counters[0], t);
     uint nimp = min(params.impactor_count, 32u);
     for (uint i = t; i < live; i += G)
-        status[ST_ISLANDS + i] &= ~LEARNED_BIT;
+        status[ST_ISLANDS + i] &= ~(LEARNED_BIT | FALLBACK_BIT);
     if (t < 32)
         g_label[t] = t;
     if (t == 0)
@@ -970,11 +985,34 @@ void learned_compact(uint3 thread: SV_GroupThreadID)
         largs[2] = uint4(0, 1, 1, 0);
     }
     GroupMemoryBarrierWithGroupSync();
-    if (group_uniform(route[0], t) == 0)
+    if (group_uniform(routed_frame() ? 1u : 0u, t) == 0)
         return;
+    bool exact = params.modes.x != 0;
+    // exact routing: one call, every routed island and the routed impactors (their mask on
+    // every routed island's entry, ROUTED_BIT set)
+    if (t == 0 && exact)
+    {
+        uint used = 0, any = 0;
+        for (uint i = 0; i < live; i++)
+        {
+            uint m = isl[ISL_U4 * i].x;
+            if (m != 0)
+            {
+                used |= m & ~ROUTED_BIT;
+                any = 1;
+            }
+        }
+        g_used = used;
+        g_mask_of[0] = used;
+        g_cnt_isl[0] = 0;
+        g_cnt_chunk[0] = 0;
+        g_cnt_bond[0] = 0;
+        g_cnt_imp[0] = countbits(used);
+        ctl[CTL_CALLS] = any;
+    }
     // labels: the minimum over each island's impactors, to a fixed point (one thread: few
     // islands are struck by more than one impactor)
-    if (t == 0)
+    if (t == 0 && !exact)
     {
         uint used = 0;
         for (uint i = 0; i < live; i++)
@@ -1007,7 +1045,7 @@ void learned_compact(uint3 thread: SV_GroupThreadID)
     }
     GroupMemoryBarrierWithGroupSync();
     // calls: the roots with a used impactor in their component, ascending
-    if (t == 0)
+    if (t == 0 && !exact)
     {
         uint used = g_used;
         uint calls_n = 0;
@@ -1044,7 +1082,7 @@ void learned_compact(uint3 thread: SV_GroupThreadID)
         {
             uint4 e = isl[ISL_U4 * i];
             if (e.x != 0)
-                isl[ISL_U4 * i] = uint4(e.x, g_call_of[g_label[lowest_bit(e.x)]], e.z, e.w);
+                isl[ISL_U4 * i] = uint4(e.x, exact ? 0u : g_call_of[g_label[lowest_bit(e.x)]], e.z, e.w);
         }
     }
     if (t != 0)
@@ -1052,6 +1090,8 @@ void learned_compact(uint3 thread: SV_GroupThreadID)
     uint over = 0;
     if (ncalls > min(params.max_calls, 64u))
         over |= 1;
+    if (exact && ctl[CTL_ROUTE] != 0)
+        over |= 128;
     uint routed = 0, joined = 0;
     for (uint i = 0; i < live; i++)
     {
@@ -1158,7 +1198,7 @@ void learned_count_bonds(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID
     if (i >= live)
         return;
     uint4 e = isl[ISL_U4 * i];
-    if (group_uniform(route[0] == 0 || e.x == 0 ? 1u : 0u, t) != 0)
+    if (group_uniform(!routed_frame() || e.x == 0 ? 1u : 0u, t) != 0)
         return;
     Island rec = islands[i];
     uint nb = 0;
@@ -1665,6 +1705,11 @@ void learned_gate(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         for (uint e = e0 + t; e < e0 + ne; e += 64)
             status[ST_ISLANDS + cisl[CISL_U4 * e].x] |= LEARNED_BIT;
     }
+    if (fb != 0 && fb != FB_DRY)
+    {
+        for (uint e = e0 + t; e < e0 + ne; e += 64)
+            status[ST_ISLANDS + cisl[CISL_U4 * e].x] |= FALLBACK_BIT;
+    }
     if (fb != 0)
     {
         uint first = asuint(calls[CALL_F4 * g + 2].z);
@@ -1929,6 +1974,33 @@ void place_body(uint body, Fit f, float4 held_mass, float4 held_inertia)
     bodies[at + 4] = float4(to_yup(f.w), bodies[at + 4].w);
 }
 
+// One thread per call island of the batch whose window end this frame applied, after the
+// frame's split pass: an island released for a split (`learned_apply_bodies`) whose body
+// the pass kept (it did not split: one component, no children for `learned_place`) placed
+// by its fit, as an unsplit island is.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void learned_unsplit(uint3 id: SV_DispatchThreadID)
+{
+    uint e = id.x;
+    if (ctl[CTL_PHASE] == 0 || e >= ctl[CTL_CISL])
+        return;
+    float4 h0 = frozen[4 * e];
+    uint body = asuint(h0.x);
+    if (body == NONE || h0.z != 1.0)
+        return;
+    frozen[4 * e] = float4(h0.x, h0.y, 0.0, h0.w);
+    uint4 c0 = cisl[CISL_U4 * e];
+    if (asuint(calls[CALL_F4 * c0.w + 4].w) != 0)
+        return;
+    // the island at its index still has the body: the pass kept it (children get new bodies)
+    uint island = chunks[asuint(nodes[NODE_F4 * c0.y + 12].x)].info.y;
+    if (asuint(ctab[params.engine_base + 3 * island].x) != body)
+        return;
+    Fit f = fit_nodes(c0.y, c0.z, false, 0, 0);
+    place_body(body, f, h0, frozen[4 * e + 1]);
+}
+
 // One thread per call island (pending): its body released; a call that stood places an
 // unsplit, unanchored island by its fit (a split one stays at its frame-start pose: the
 // split takes it, and `learned_place` places its children).
@@ -1968,6 +2040,8 @@ void learned_apply_bodies(uint3 id: SV_DispatchThreadID)
         bodies[at] = float4(bodies[at].xyz, h0.y);
         bodies[at + 2] = frozen[4 * e + 1];
         bodies[at + 3] = float4(0.0, 0.0, 0.0, 0.0);
+        // (if it does not split after all, `learned_unsplit` places it)
+        frozen[4 * e] = float4(h0.x, h0.y, 1.0, h0.w);
         return;
     }
     Fit f = fit_nodes(c0.y, c0.z, false, 0, 0);

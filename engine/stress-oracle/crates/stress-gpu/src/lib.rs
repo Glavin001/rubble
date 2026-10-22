@@ -55,6 +55,7 @@ pub mod gnn_probe;
 pub mod learned;
 pub mod learned_feat;
 pub mod learned_timing;
+pub mod learned_route;
 
 /// What `build.rs` reflects from the generated WGSL: how many storage buffers each module's
 /// group 0 declares, and which group-0 bindings each entry point uses.
@@ -251,15 +252,34 @@ pub mod shaders {
             ("learned_apply_bodies", (64, 1, 1)),
             ("learned_apply_impactors", (32, 1, 1)),
             ("learned_place", (64, 1, 1)),
+            ("learned_unsplit", (64, 1, 1)),
             ("learned_tally_apply", (1, 1, 1)),
             ("learned_tally", (1, 1, 1)),
             ("learned_adopt", (64, 1, 1)),
+        ]
+    );
+    /// The learned impact path's routing (`learned_route.slang`: `select_islands` on the GPU).
+    pub const LEARNED_ROUTE: ShaderSet = shader_set!(
+        "learned_route",
+        [
+            ("lr_islands", (64, 1, 1)),
+            ("lr_impactors", (64, 1, 1)),
+            ("lr_debris", (64, 1, 1)),
+            ("lr_keys", (64, 1, 1)),
+            ("lr_bitonic", (64, 1, 1)),
+            ("lr_sweep", (64, 1, 1)),
+            ("lr_hook", (64, 1, 1)),
+            ("lr_jump", (64, 1, 1)),
+            ("lr_roots", (64, 1, 1)),
+            ("lr_finish", (64, 1, 1)),
+            ("lr_mark", (64, 1, 1)),
         ]
     );
     /// The learned impact model's input features (`learned_feat.slang`).
     pub const LEARNED_FEAT: ShaderSet = shader_set!(
         "learned_feat",
         [
+            ("feat_unmap", (64, 1, 1)),
             ("feat_map", (64, 1, 1)),
             ("feat_keys", (64, 1, 1)),
             ("feat_brow", (64, 1, 1)),
@@ -287,7 +307,7 @@ pub mod shaders {
     /// Every set (each Slang file with entry points).
     pub const ALL: &[ShaderSet] = &[
         WORLD_IC, SMOKE, STRESS_STEP, JOINT_TEST, WORLD, STRESS_RENDER, DESTRUCTION_RENDER, COUPLING, RESIDENT, CASCADE, PLAN, LAYOUT, SPAWN, COLLIDERS, PASS, PASSLOG, ROUTING, PUNCH, SPLIT,
-        HUD_OVERLAY, THRESHOLD, GNN_PROBE, GNN_PROBE_F16, LEARNED, LEARNED_FEAT,
+        HUD_OVERLAY, THRESHOLD, GNN_PROBE, GNN_PROBE_F16, LEARNED, LEARNED_FEAT, LEARNED_ROUTE,
     ];
 }
 

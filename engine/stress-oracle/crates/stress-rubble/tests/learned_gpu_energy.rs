@@ -45,7 +45,8 @@ fn window_end_injects_no_energy() {
     let r = recipes.iter().filter(|r| r.parameters["split"] != "train").find(fast).expect("an evaluation recipe");
     let gpu = Gpu::new().expect("GPU");
     let p = Profile::BlastParityRouted;
-    let mut scene = realtime(later(r.scene.clone(), 2), 0.5);
+    // (its strike moved into the resident frames: the first are coupled ones)
+    let mut scene = realtime(later(r.scene.clone(), 4), 0.5);
     p.apply_scene(&mut scene);
     let e0: f64 = scene.impactors.iter().map(|i| 0.5 * i.mass * Vec3::from_array(i.velocity).norm2()).sum();
     let mut eng = RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), stress_rubble::capacity_for(&scene)).expect("rubble engine");

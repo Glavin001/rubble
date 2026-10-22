@@ -113,7 +113,7 @@ struct PunchParams_0
     uint island_count_0;
     uint impactor_count_0;
     uint engine_base_0;
-    uint pad0_0;
+    uint fallbacks_only_0;
     float dt_0;
     float speed_0;
     float pad1_0;
@@ -325,7 +325,32 @@ struct BondDyn_0
         return;
     }
     uint _S3 = 16U + i_0;
-    if((group_uniform_0((*((&kernelContext_0)->status_0+_S3)) & 4096U, t_1)) != 0U)
+    bool out_0;
+    if(((*((&kernelContext_0)->status_0+_S3)) & 4096U) != 0U)
+    {
+        out_0 = true;
+    }
+    else
+    {
+        if(((&kernelContext_0)->params_0->fallbacks_only_0) != 0U)
+        {
+            out_0 = ((*((&kernelContext_0)->status_0+_S3)) & 8192U) == 0U;
+        }
+        else
+        {
+            out_0 = false;
+        }
+    }
+    uint c_0;
+    if(out_0)
+    {
+        c_0 = 1U;
+    }
+    else
+    {
+        c_0 = 0U;
+    }
+    if((group_uniform_0(c_0, t_1)) != 0U)
     {
         if(t_1 == 0U)
         {
@@ -340,7 +365,6 @@ struct BondDyn_0
     uint n_1 = group_uniform_0(_S6.y - _S7, t_1);
     uint _S8 = _S6.z;
     uint _S9 = _S6.w;
-    bool out_0;
     if(_S8 >= _S9)
     {
         out_0 = true;
@@ -357,7 +381,6 @@ struct BondDyn_0
     {
         out_0 = ((&kernelContext_0)->params_0->impactor_count_0) == 0U;
     }
-    uint c_0;
     if(out_0)
     {
         c_0 = 1U;

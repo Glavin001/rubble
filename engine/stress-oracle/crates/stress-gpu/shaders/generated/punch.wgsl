@@ -3,7 +3,7 @@ struct PunchParams_std140_0
     @align(16) island_count_0 : u32,
     @align(4) impactor_count_0 : u32,
     @align(8) engine_base_0 : u32,
-    @align(4) pad0_0 : u32,
+    @align(4) fallbacks_only_0 : u32,
     @align(16) dt_0 : f32,
     @align(4) speed_0 : f32,
     @align(8) pad1_0 : f32,
@@ -366,7 +366,32 @@ fn punch_islands(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
         return;
     }
     var _S9 : u32 = u32(16) + i_0;
-    var _S10 : u32 = group_uniform_0((status_0[_S9] & (u32(4096))), t_1);
+    var out_0 : bool;
+    if(((status_0[_S9] & (u32(4096)))) != u32(0))
+    {
+        out_0 = true;
+    }
+    else
+    {
+        if((params_0.fallbacks_only_0) != u32(0))
+        {
+            out_0 = ((status_0[_S9] & (u32(8192)))) == u32(0);
+        }
+        else
+        {
+            out_0 = false;
+        }
+    }
+    var c_0 : u32;
+    if(out_0)
+    {
+        c_0 = u32(1);
+    }
+    else
+    {
+        c_0 = u32(0);
+    }
+    var _S10 : u32 = group_uniform_0(c_0, t_1);
     if(_S10 != u32(0))
     {
         if(t_1 == u32(0))
@@ -379,7 +404,6 @@ fn punch_islands(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
     var n_1 : u32 = group_uniform_0(islands_0[i_0].range_0.y - _S11, t_1);
     var _S12 : u32 = islands_0[i_0].range_0.z;
     var _S13 : u32 = islands_0[i_0].range_0.w;
-    var out_0 : bool;
     if(_S12 >= _S13)
     {
         out_0 = true;
@@ -396,7 +420,6 @@ fn punch_islands(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invo
     {
         out_0 = (params_0.impactor_count_0) == u32(0);
     }
-    var c_0 : u32;
     if(out_0)
     {
         c_0 = u32(1);

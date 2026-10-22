@@ -245,7 +245,7 @@ struct FeatParams {
     pad1: u32,
 }
 
-const BINDINGS: [Binding; 28] = [
+const BINDINGS: [Binding; 29] = [
     Binding::Uniform,   // 0 params
     Binding::Storage,   // 1 ctl
     Binding::StorageRw, // 2 calls
@@ -274,9 +274,11 @@ const BINDINGS: [Binding; 28] = [
     Binding::Storage,   // 25 ctab
     Binding::Storage,   // 26 engine bodies
     Binding::StorageRw, // 27 chunk state
+    Binding::Storage,   // 28 the split pass's counters
 ];
 
 struct Kernels {
+    unmap: Kernel,
     map: Kernel,
     keys: Kernel,
     brow: Kernel,
@@ -366,6 +368,9 @@ pub struct BatchBuffers<'a> {
     pub ctab: &'a wgpu::Buffer,
     pub bodies: &'a wgpu::Buffer,
     pub state: &'a wgpu::Buffer,
+    /// The split pass's counters (`[0]` live islands) and the island capacity.
+    pub counters: &'a wgpu::Buffer,
+    pub island_cap: u32,
     pub engine_base: u32,
     pub chunk_count: u32,
     /// The frame of the batch `feat_deform` applies.
@@ -384,6 +389,7 @@ impl Features {
     pub fn new(gpu: &Gpu, statics: Statics, scene: FeatScene, map: ColumnMap, max_nodes: u32, max_bonds: u32, max_cisl: u32, max_calls: u32, layout_cap: u32) -> Features {
         let k = |e: &str| gpu.compute(&shaders::LEARNED_FEAT, e, &BINDINGS);
         let kernels = Kernels {
+            unmap: k("feat_unmap"),
             map: k("feat_map"),
             keys: k("feat_keys"),
             brow: k("feat_brow"),
@@ -478,8 +484,8 @@ impl Features {
         )
     }
 
-    fn bufs<'a>(&'a self, params: &'a wgpu::Buffer, b: &'a BatchBuffers) -> [&'a wgpu::Buffer; 28] {
-        [params, b.ctl, b.calls, b.nodes, b.bonds, b.cisl, b.cislf, &self.sc, &self.sb, &self.sinc, &self.slook, &self.bmap, &self.key_node, b.chunks, b.bond_static, b.bond_dyn, b.imps, &self.contacts, &self.work, &self.feat, &self.edges, &self.cols, &self.bedge, &self.fctl, b.islands, b.ctab, b.bodies, b.state]
+    fn bufs<'a>(&'a self, params: &'a wgpu::Buffer, b: &'a BatchBuffers) -> [&'a wgpu::Buffer; 29] {
+        [params, b.ctl, b.calls, b.nodes, b.bonds, b.cisl, b.cislf, &self.sc, &self.sb, &self.sinc, &self.slook, &self.bmap, &self.key_node, b.chunks, b.bond_static, b.bond_dyn, b.imps, &self.contacts, &self.work, &self.feat, &self.edges, &self.cols, &self.bedge, &self.fctl, b.islands, b.ctab, b.bodies, b.state, b.counters]
     }
 
     /// Before `learned_finish` (positions still absolute): the bond map, the key map, the
@@ -499,7 +505,8 @@ impl Features {
                 None => pass.dispatch_workgroups_indirect(calls_args.0, calls_args.1),
             }
         };
-        run(enc, &self.k.map, Some(self.layout_cap.div_ceil(64)));
+        run(enc, &self.k.unmap, Some((self.statics.rows as u32).div_ceil(64)));
+        run(enc, &self.k.map, Some(b.island_cap));
         run(enc, &self.k.keys, Some(self.max_nodes.div_ceil(64)));
         run(enc, &self.k.brow, Some(max_bonds.div_ceil(64)));
         run(enc, &self.k.contacts, None);

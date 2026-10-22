@@ -63,7 +63,16 @@ fn window_end_keeps_each_chunks_decoded_position() {
                 worst
             });
             // each unanchored body all of whose chunks were decoded: P0's momentum fit
-            let (fitted, worst_v, worst_w) = w.with_shell(|s| {
+            // (this frame's batch, made after the window end, held its bodies: their motion
+            // given back from what the hold took)
+            let held = w.learned.as_ref().map(|l| l.held_motion(&gpu)).unwrap_or_default();
+            let mut shell = w.with_shell(|s| s.standalone_copy());
+            let zup = |v: [f32; 3]| Vec3::new(v[0] as f64, -v[2] as f64, v[1] as f64);
+            for &(i, v, om) in &held.0 {
+                let cl = &mut shell.solver.clusters[i as usize];
+                (cl.velocity, cl.angular_velocity) = (zup(v), zup(om));
+            }
+            let (fitted, worst_v, worst_w) = (|s: &stress_ref::world::World| {
                 let (mut fitted, mut worst_v, mut worst_w) = (0, 0.0f64, 0.0f64);
                 for cl in &s.solver.clusters {
                     let st = cl.structure;
@@ -93,7 +102,7 @@ fn window_end_keeps_each_chunks_decoded_position() {
                     fitted += 1;
                 }
                 (fitted, worst_v, worst_w)
-            });
+            })(&shell);
             eprintln!("window end: {fitted} bodies fitted, worst relative v {worst_v:.3e}, ω {worst_w:.3e}");
             assert!(worst_v < 1e-5 && worst_w < 1e-5, "a body's motion is not P0's fit (v {worst_v:.3e}, ω {worst_w:.3e})");
             fits += fitted;

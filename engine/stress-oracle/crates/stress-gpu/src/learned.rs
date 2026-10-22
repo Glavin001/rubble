@@ -13,8 +13,12 @@
 //! - `STRESS_LEARNED_ENERGY_TOL` (0.05): the KE bound's tolerance, a fraction of E_in;
 //! - `STRESS_LEARNED_MAX_CALLS` (64), `_MAX_NODES` (65536), `_MAX_BONDS` (262144),
 //!   `_MAX_CALL_ISLANDS` (2048), `_MAX_CALL_CHUNKS` (4096: the scales' group sort);
-//! - `STRESS_DEBRIS_ROUTING=1`: islands the launched debris reaches join the call
-//!   (as the host's routing, `World::debris_reach_routing`).
+//! - routing (`learned_route.rs`): the CPU's `select_islands` on the GPU, every routed body
+//!   in one call (P1's call builder); `STRESS_LEARNED_ROUTE=world|recorder` whose routing
+//!   (the coupled world's, tiered, the default; or a standalone world's), the other switches the world's
+//!   (`STRESS_DEBRIS_ROUTING=1` among them);
+//!   `STRESS_LEARNED_ROUTING=sweep` the earlier rule instead (the punch's sweep, calls per
+//!   impactor group, islands approaching a struck one joined: no CPU counterpart).
 
 use crate::gpu::{Binding, Gpu, Kernel};
 use crate::shaders;
@@ -54,6 +58,8 @@ pub mod ctl {
     pub const FB_RANGE: usize = 16;
     pub const ROUTED: usize = 17;
     pub const JOINED: usize = 19;
+    pub const ROUTE: usize = 20;
+    pub const ROUTE_EDGES: usize = 21;
     pub const WORDS: usize = 32;
 }
 
@@ -79,6 +85,7 @@ struct Params {
     speed_ref: f32,
     out_bases: [u32; 4],
     out_bases2: [u32; 4],
+    modes: [u32; 4],
 }
 
 /// Where the network's outputs sit in its buffer (float offsets; P2's outputs.npz shapes in
@@ -219,6 +226,8 @@ pub struct Tables<'a> {
     pub route: &'a wgpu::Buffer,
     /// Indirect arguments over the live islands (one group each), if any.
     pub island_args: Option<&'a wgpu::Buffer>,
+    /// The joint materials (the routing's bond capacities).
+    pub materials: Option<&'a wgpu::Buffer>,
     pub s: Scalars,
 }
 
@@ -253,11 +262,14 @@ struct Kernels {
     apply_impactors: Kernel,
     tally_apply: Kernel,
     place: Kernel,
+    unsplit: Kernel,
 }
 
 /// Running totals over the run (logged; tests read them).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Totals {
+    /// Resident frames the path followed (a batch could be made).
+    pub resident_frames: u64,
     pub batches: u64,
     pub calls: u64,
     pub fallbacks: u64,
@@ -321,6 +333,8 @@ pub struct Learned {
     pub totals: Totals,
     /// `STRESS_LEARNED_TIMING=1`: GPU time per stage (`learned_timing.rs`).
     pub timer: Option<std::rc::Rc<crate::learned_timing::StageTimer>>,
+    /// The CPU's routing on the GPU (`set_routing`); None: the earlier sweep.
+    route: Option<crate::learned_route::Route>,
 }
 
 fn rw(gpu: &Gpu, label: &str, bytes: u64, indirect: bool) -> wgpu::Buffer {
@@ -357,6 +371,7 @@ impl Learned {
             apply_impactors: k("learned_apply_impactors"),
             tally_apply: k("learned_tally_apply"),
             place: k("learned_place"),
+            unsplit: k("learned_unsplit"),
         };
         let max_calls = env_u32("STRESS_LEARNED_MAX_CALLS", 64).min(64);
         let max_nodes = env_u32("STRESS_LEARNED_MAX_NODES", 65536);
@@ -398,6 +413,7 @@ impl Learned {
             pending: false,
             totals: Totals::default(),
             timer: crate::learned_timing::StageTimer::new(gpu).map(std::rc::Rc::new),
+            route: None,
         }
     }
 
@@ -409,6 +425,30 @@ impl Learned {
         let scene = crate::learned_feat::FeatScene { restitution: world.scene.sim.contact_restitution as f32, contact_friction: world.scene.sim.contact_friction.map(|f| f as f32) };
         self.feat = Some(crate::learned_feat::Features::new(gpu, statics, scene, map, self.max_nodes, self.max_bonds, self.max_cisl, self.max_calls, layout_cap));
         Ok(())
+    }
+
+    /// The CPU's routing for `world`'s chunks with `cfg`'s switches (the coupled world's:
+    /// `RouteConfig::of`), unless `STRESS_LEARNED_ROUTING=sweep`.
+    pub fn set_routing(&mut self, gpu: &Gpu, world: &stress_ref::world::World, cfg: crate::learned_route::RouteConfig) -> Result<(), String> {
+        match std::env::var("STRESS_LEARNED_ROUTING").ok().as_deref() {
+            Some("sweep") => self.route = None,
+            None | Some("cpu") => {
+                if world.impactors.len() > 31 {
+                    return Err(format!("the learned routing takes at most 31 impactors ({} given)", world.impactors.len()));
+                }
+                let mut r = crate::learned_route::Route::new(gpu, world);
+                r.cfg = cfg;
+                self.route = Some(r);
+            }
+            Some(o) => return Err(format!("STRESS_LEARNED_ROUTING={o}: cpu (default) or sweep")),
+        }
+        Ok(())
+    }
+
+    /// The CPU's routing (`set_routing`): a batch is encoded every resident frame, its
+    /// kernels gated by this frame's routing check (untiered: not gated).
+    pub fn routes_exactly(&self) -> bool {
+        self.route.is_some()
     }
 
     /// The network's output buffer (P0's kernel writes it; `learned_adopt` reads it).
@@ -435,6 +475,9 @@ impl Learned {
     /// Room for the tables' islands and chunks (the per-island and per-chunk buffers).
     /// Growing the chunk map drops a pending batch's map: only between batches.
     pub fn ensure(&mut self, gpu: &Gpu, island_cap: u32, chunk_count: u32) {
+        if let Some(r) = self.route.as_mut() {
+            r.ensure(gpu, island_cap);
+        }
         if island_cap > self.island_cap {
             self.isl = rw(gpu, "learned islands", 16 * 5 * island_cap as u64, false);
             self.island_cap = island_cap;
@@ -470,6 +513,7 @@ impl Learned {
                 speed_ref: t.speed as f32,
                 out_bases: [self.out.1.chunk_out, self.out.1.imp_out, self.out.1.bond_log_q, self.out.1.bond_ddamage],
                 out_bases2: [self.out.1.bond_time_logits, 0, 0, 0],
+                modes: [self.route.is_some() as u32, self.route.as_ref().is_some_and(|r| r.always()) as u32, 0, 0],
             },
         )
     }
@@ -516,7 +560,7 @@ impl Learned {
     pub fn place_bind(&self, gpu: &Gpu, sc: &Scalars, bodies: &wgpu::Buffer, pass: &crate::gpu_pass::GpuPass) -> wgpu::BindGroup {
         let params = self.params(gpu, sc);
         let d = &self.dummy;
-        let t = Tables { islands: d, chunks: d, state: d, ctab: d, bodies, bond_static: d, bond_dyn: &self.dummy_rw[0], status: &self.dummy_rw[1], counters: &pass.counters, route: d, island_args: None, s: *sc };
+        let t = Tables { islands: d, chunks: d, state: d, ctab: d, bodies, bond_static: d, bond_dyn: &self.dummy_rw[0], status: &self.dummy_rw[1], counters: &pass.counters, route: d, island_args: None, materials: None, s: *sc };
         let bufs = self.buffers(&params, &t, [&pass.parents, &pass.work, &pass.slots, &pass.control, &pass.firsts, &pass.out]);
         gpu.bind(&self.k.place.group, &bufs)
     }
@@ -560,6 +604,8 @@ impl Learned {
         ctab: t.ctab,
         bodies: t.bodies,
         state: t.state,
+        counters: t.counters,
+        island_cap: t.s.island_cap,
         engine_base: t.s.engine_base,
         chunk_count: self.chunk_count,
         prev_frame: self.last_batch_frame,
@@ -602,6 +648,8 @@ impl Learned {
             }
         };
         if self.pending {
+            // (before the deformation is kept: it is measured from the bodies' placed frames)
+            run(enc, &self.k.unsplit, D::Indirect(32));
             if self.keep_deformation {
                 if let Some(f) = &self.feat {
                     f.encode_deform(gpu, enc, &self.batch_buffers(t), self.timer.as_deref());
@@ -612,9 +660,30 @@ impl Learned {
         if !batch {
             return;
         }
-        run(enc, &self.k.select, D::Islands);
-        // (debris reach, and the islands approaching a struck one: always)
-        run(enc, &self.k.debris, D::Threads(t.s.island_cap));
+        match &self.route {
+            Some(r) => {
+                let rt = crate::learned_route::RouteTables {
+                    islands: t.islands,
+                    chunks: t.chunks,
+                    state: t.state,
+                    ctab: t.ctab,
+                    bodies: t.bodies,
+                    bond_static: t.bond_static,
+                    materials: t.materials.expect("the joint materials (learned routing)"),
+                    counters: t.counters,
+                    route: t.route,
+                    imps: &self.imps,
+                    isl: &self.isl,
+                    ctl: &self.ctl,
+                };
+                r.encode(gpu, enc, &rt, t.s.island_cap, t.s.engine_base, self.imp_list.len() as u32, t.s.dt, t.s.speed, self.timer.as_deref());
+            }
+            None => {
+                run(enc, &self.k.select, D::Islands);
+                // (debris reach, and the islands approaching a struck one: always)
+                run(enc, &self.k.debris, D::Threads(t.s.island_cap));
+            }
+        }
         run(enc, &self.k.count_bonds, D::Islands);
         run(enc, &self.k.compact, D::One);
         run(enc, &self.k.gather_chunks, D::Indirect(16));
@@ -653,6 +722,7 @@ impl Learned {
     /// The frame's read of the control words: `applied` / `batched` say what this frame
     /// recorded. Every fallback is logged; a batch over a capacity is an error.
     pub fn follow(&mut self, parts: &[Vec<u8>], frame: u64, applied: bool, batched: bool) -> Result<(), String> {
+        self.totals.resident_frames += 1;
         let bytes = &parts[0];
         let w: &[u32] = bytemuck::cast_slice(&bytes[..4 * ctl::WORDS]);
         if batched && w[ctl::CALLS] > 0 {
@@ -676,6 +746,14 @@ impl Learned {
             }
         }
         if batched {
+            if w[ctl::OVERFLOW] & 128 != 0 {
+                let r = w[ctl::ROUTE];
+                return Err(format!(
+                    "learned impact frame {frame}: the routing {} ({} joining pairs; STRESS_LEARNED_MAX_ROUTE_PAIRS per island slot)",
+                    if r & 1 != 0 { "found more joining pairs than its capacity" } else { "did not converge its components" },
+                    w[ctl::ROUTE_EDGES]
+                ));
+            }
             if w[ctl::OVERFLOW] != 0 {
                 let o = w[ctl::OVERFLOW];
                 let what: Vec<&str> = [(1, "calls (STRESS_LEARNED_MAX_CALLS)"), (2, "nodes (STRESS_LEARNED_MAX_NODES)"), (4, "bonds (STRESS_LEARNED_MAX_BONDS)"), (8, "call islands (STRESS_LEARNED_MAX_CALL_ISLANDS)"), (16, "chunks in one call (STRESS_LEARNED_MAX_CALL_CHUNKS)"), (64, "bonds in one call (131072)")]
@@ -912,6 +990,48 @@ pub const IMPACTOR_KEY_BIT: i64 = 1 << 62;
 
 impl Learned {
     /// The last batch's features, read back (several reads: not for the frame's loop).
+    /// The last routing's parts (`learned_route.rs`; diagnostics).
+    pub fn route_parts(&self, gpu: &Gpu, n: usize) -> Vec<[f32; 4]> {
+        self.route.as_ref().map(|r| r.parts(gpu, n)).unwrap_or_default()
+    }
+
+    /// The last routing's seeds, labels and control words (`learned_route.rs`; diagnostics).
+    pub fn route_seeds(&self, gpu: &Gpu, n: usize) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
+        self.route.as_ref().map(|r| r.seeds(gpu, n)).unwrap_or_default()
+    }
+
+    /// The motion the last batch's hold took from its bodies (a test's view of the state the
+    /// batch routed from): per held call island (island, velocity, angular velocity) and per
+    /// held impactor (index, velocity, angular velocity); the engine's Y-up frame.
+    pub fn held_motion(&self, gpu: &Gpu) -> (Vec<(u32, [f32; 3], [f32; 3])>, Vec<(u32, [f32; 3], [f32; 3])>) {
+        let ctl: Vec<u32> = gpu.read_range(&self.ctl, 0, ctl::WORDS);
+        let (ncalls, ncisl) = (ctl[ctl::CALLS] as usize, ctl[ctl::CISL] as usize);
+        if ncalls == 0 {
+            return (Vec::new(), Vec::new());
+        }
+        let calls: Vec<[f32; 4]> = gpu.read_range(&self.calls, 0, CALL_F4 * ncalls);
+        let cisl: Vec<[u32; 4]> = gpu.read_range(&self.cisl, 0, CISL_U4 * ncisl.max(1));
+        let frozen: Vec<[f32; 4]> = gpu.read_range(&self.frozen, 0, 4 * (self.max_cisl as usize + 32));
+        let v3 = |w: [f32; 4]| [w[0], w[1], w[2]];
+        let mut islands = Vec::new();
+        for e in 0..ncisl {
+            let g = cisl[CISL_U4 * e][3] as usize;
+            if calls[CALL_F4 * g + 4][3].to_bits() != 0 || frozen[4 * e][0].to_bits() == u32::MAX {
+                continue;
+            }
+            islands.push((cisl[CISL_U4 * e][0], v3(frozen[4 * e + 2]), v3(frozen[4 * e + 3])));
+        }
+        let mut imps = Vec::new();
+        let mask = (0..ncalls).filter(|&g| calls[CALL_F4 * g + 4][3].to_bits() == 0).fold(0u32, |m, g| m | calls[CALL_F4 * g + 5][3].to_bits());
+        for k in 0..self.imp_list.len().min(32) {
+            if mask & (1 << k) != 0 {
+                let e = self.max_cisl as usize + k;
+                imps.push((k as u32, v3(frozen[4 * e + 2]), v3(frozen[4 * e + 3])));
+            }
+        }
+        (islands, imps)
+    }
+
     pub fn export(&self, gpu: &Gpu) -> Vec<ExportCall> {
         let Some(f) = &self.feat else { return Vec::new() };
         let ctlw: Vec<u32> = gpu.read(&self.ctl);

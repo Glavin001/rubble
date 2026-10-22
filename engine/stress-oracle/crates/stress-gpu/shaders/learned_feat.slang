@@ -155,6 +155,8 @@ struct FeatParams
 [[vk::binding(25, 0)]] StructuredBuffer<float4> ctab;
 [[vk::binding(26, 0)]] StructuredBuffer<float4> bodies;
 [[vk::binding(27, 0)]] RWStructuredBuffer<float4> state;
+// the split pass's counters ([0] live islands)
+[[vk::binding(28, 0)]] StructuredBuffer<uint> counters;
 
 // ------------------------------------------------------------------ helpers
 
@@ -427,25 +429,40 @@ uint group_total()
 
 // ------------------------------------------------------------------ feat_map
 
-// One thread per layout bond: its static row (by its chunks' stable rows), the row's layout
-// bond, and the frame it was first seen disconnected.
+// One thread per stable bond row: its layout bond cleared (before `feat_map`).
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void feat_map(uint3 id: SV_DispatchThreadID)
+void feat_unmap(uint3 id: SV_DispatchThreadID)
 {
-    uint l = id.x;
-    if (l >= params.layout_bonds)
+    if (id.x < params.rows)
+        bmap[params.layout_cap + id.x] = NONE;
+}
+
+// One group per live island, over its bond range (the layout's live records: a stale record
+// past them may repeat a row): each bond's static row (by its chunks' stable rows), the
+// row's layout bond (rows without one this batch: cleared by `feat_unmap`, their bonds cut
+// by a split), and the frame it was first seen disconnected.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void feat_map(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    uint i = group.x;
+    if (i >= counters[0])
         return;
-    JointBond law = bond_static[l].law;
-    uint row = bond_row_lookup(chunk_row_of(law.ids.y), chunk_row_of(law.ids.z));
-    bmap[l] = row;
-    if (row == NONE)
-        return;
-    bmap[params.layout_cap + row] = l;
-    bool live = connected(bond_dyn[l].js, law.stiff1.w != 0.0);
-    uint at = params.layout_cap + params.rows + row;
-    if (!live && bmap[at] == NONE)
-        bmap[at] = params.frame;
+    uint4 range = islands[i].range;
+    for (uint l = range.z + thread.x; l < range.w; l += G)
+    {
+        JointBond law = bond_static[l].law;
+        uint row = bond_row_lookup(chunk_row_of(law.ids.y), chunk_row_of(law.ids.z));
+        bmap[l] = row;
+        if (row == NONE)
+            continue;
+        bmap[params.layout_cap + row] = l;
+        bool live = connected(bond_dyn[l].js, law.stiff1.w != 0.0);
+        uint at = params.layout_cap + params.rows + row;
+        if (!live && bmap[at] == NONE)
+            bmap[at] = params.frame;
+    }
 }
 
 // ------------------------------------------------------------------ feat_keys
@@ -889,9 +906,10 @@ void feat_summ(uint3 id: SV_DispatchThreadID)
     {
         uint br = sinc[off + N + 1 + i];
         uint l = bmap[params.layout_cap + br];
-        BondDyn dyn = bond_dyn[l];
-        if (connected(dyn.js, bond_static[l].law.stiff1.w != 0.0))
+        // (a row without a layout record: its bond was cut by a split, disconnected)
+        if (l != NONE && connected(bond_dyn[l].js, bond_static[l].law.stiff1.w != 0.0))
         {
+            BondDyn dyn = bond_dyn[l];
             nlive += 1.0;
             dsum += dyn.js.damage;
             dmax = max(dmax, dyn.js.damage);
@@ -1163,7 +1181,8 @@ void feat_cracked_find(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
             if (nb == NONE || nb < first || nb >= first + nc)
                 continue;
             uint l = bmap[params.layout_cap + br];
-            if (connected(bond_dyn[l].js, bond_static[l].law.stiff1.w != 0.0))
+            // (no layout record: cut by a split, broken)
+            if (l != NONE && connected(bond_dyn[l].js, bond_static[l].law.stiff1.w != 0.0))
                 continue;
             if (count < cap)
                 bedge[slots + 1 + count] = uint4(br, na, nb, bmap[params.layout_cap + params.rows + br]);
