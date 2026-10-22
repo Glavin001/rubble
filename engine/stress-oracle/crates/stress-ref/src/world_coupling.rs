@@ -512,6 +512,24 @@ impl World {
             }
         }
 
+        // Hand-back: which clusters an impactor closes on fast; a handed-back cluster with
+        // such a contact is routed again, the others stay out of every island.
+        let mut out_of_routing = vec![false; parts.len()];
+        if self.hand_back_after.is_some() {
+            let clusters = self.solver.clusters.len();
+            self.fast_contact.clear();
+            for c in 0..clusters {
+                let fast = (clusters..clusters + self.impactors.len()).any(|k| overlaps(&parts[k], &parts[c]) && closing_speed(&parts[k], &parts[c]) > tiered_impact_speed());
+                let id = self.solver.clusters[c].id;
+                if fast {
+                    self.fast_contact.insert(id);
+                    self.handed_back.remove(&id);
+                    self.quiet_frames.remove(&id);
+                }
+                out_of_routing[c] = self.handed_back.contains(&id);
+            }
+        }
+
         // Owned pairs seed islands; any overlap of swept bounds joins bodies (the ground
         // and pairs of immovable bodies never do: they cannot exchange motion).
         let n = parts.len();
@@ -534,6 +552,7 @@ impl World {
             }
         }
         pairs.sort_unstable();
+        pairs.retain(|&(i, j)| !out_of_routing[i] && !out_of_routing[j]);
         for (i, j) in pairs {
             {
                 // Tiered: only an impactor's contact is an impact (debris and resting

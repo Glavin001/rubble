@@ -15,10 +15,11 @@ until it settles, through P0's coupled harness (`learned_p0 event`), under each 
   punch    the host's predictive punch, the engine taking each frame with its contacts
   model    P2's checkpoint (`--checkpoint`), through `stress_learned::provider_client`
   model_def  the same with `STRESS_DECODED_DEFORMATION=1`
+  <any>_hbN  with the hand-back after N quiet routed frames (`STRESS_HANDBACK_FRAMES=N`)
 
 and scored against the event's oracle ensemble (P1's recorded members) with the acceptance
 metrics: impactor exit speed and regime, partition (1 - ARI), fragment sizes (W1 of mass-
-weighted log10 mass), fragment count and largest fraction in the ensemble's range, fragment
+weighted ln mass), fragment count and largest fraction in the ensemble's range, fragment
 motion (mass-weighted RMS chunk velocity and position differences 0.1 s and 0.5 s after the
 first contact, and at the end), support survival (anchored mass retained), and the physics
 checks (KE <= E_in + W_g + 5% E0, momentum where it is conserved, damage monotone, finite
@@ -38,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import math
 import os
 import subprocess
@@ -132,6 +134,15 @@ def candidate_state(run: dict, samples: list[int]) -> dict:
 
 
 def candidate_args(name: str, a, out: Path, event: str) -> tuple[list[str], dict]:
+    # `<base>_hbN`: the hand-back (`STRESS_HANDBACK_FRAMES=N`): an island quiet for N
+    # routed frames (no decoded break, no fast impactor contact) leaves the routing for the
+    # quasi-static path until a fast contact routes it again.
+    m = re.fullmatch(r"(.+)_hb(\d+)", name)
+    if m:
+        args, env = candidate_args(m.group(1), a, out, event)
+        if "--dir" in args:
+            args[args.index("--dir") + 1] = str(out / "provider" / name / event)
+        return args, {**env, "STRESS_HANDBACK_FRAMES": m.group(2)}
     deb = {"STRESS_DEBRIS_ROUTING": "1"}
     if name == "ceiling":
         return ["--variant", "provider", "--provider", "oracle"], deb
@@ -173,7 +184,7 @@ def w1_log_mass(a: np.ndarray, b: np.ndarray, mass: np.ndarray) -> float:
         return np.array(out)
 
     ma, mb = masses(a), masses(b)
-    return float(wasserstein_distance(np.log10(ma), np.log10(mb), u_weights=ma, v_weights=mb))
+    return float(wasserstein_distance(np.log(ma), np.log(mb), u_weights=ma, v_weights=mb))
 
 
 def rms(a: np.ndarray, b: np.ndarray, mass: np.ndarray) -> float:
@@ -198,37 +209,70 @@ def distance(x: dict, y: dict, mass: np.ndarray, samples: list[int], anchored_fa
     return d
 
 
-def ensemble_scores(truth: list[dict], cands: dict[str, list[dict | None]], mass: np.ndarray, samples: list[list[int]], anchored_family: bool) -> dict:
-    """Skill per metric for each candidate and for a held-out oracle member (calibration)."""
+def tolerances(v0: float) -> dict:
+    """Physical tolerance per metric: the floor of the member spread is tolerance / 1.25
+    (P2's pre-registered gates-v1: ram 0.05 v0, partition 0.05, sizes 0.1 on ln mass; ours in
+    the same spirit: fragment velocities 0.05 v0, positions 0.05 v0 over the 0.5 s since first
+    contact, anchored mass fraction 0.05)."""
+    return {"ram": 0.05 * v0, "partition": 0.05, "sizes": 0.1, "motion_v_0.1": 0.05 * v0, "motion_v_0.5": 0.05 * v0,
+            "motion_x_0.5": 0.05 * v0 * 0.5, "support": 0.05}
+
+
+def _skill_in(D: np.ndarray, d_c: float, pool: list[int], floor: float) -> float:
+    """A unit at mean distance `d_c` from the members `pool`, over their own typical spread."""
+    d_m = np.mean([D[j, [k for k in pool if k != j]].mean() for j in pool])
+    return float(d_c / max(d_m, floor))
+
+
+def loo_gates(D: np.ndarray, tol: float) -> tuple[float, float]:
+    """Each oracle member held out and scored against the others by the identical rule (P2's
+    `metrics._loo_gates`): mean pass and mean skill / bar."""
+    m = len(D)
+    floor = max(tol / SKILL_MAX, 1e-12)
+    passes, sob = [], []
+    for i in range(m):
+        others = [k for k in range(m) if k != i]
+        s_ = _skill_in(D, D[i, others].mean(), others, floor)
+        h = [_skill_in(D, D[j, [k for k in others if k != j]].mean(), [k for k in others if k != j], floor) for j in others] if len(others) >= 3 else []
+        bar = max(SKILL_MAX, float(np.mean(h))) if h else SKILL_MAX
+        passes.append(s_ <= bar)
+        sob.append(s_ / bar)
+    return float(np.mean(passes)), float(np.mean(sob))
+
+
+def ensemble_scores(truth: list[dict], cands: dict[str, list[dict | None]], mass: np.ndarray, samples: list[list[int]], anchored_family: bool, v0: float) -> dict:
+    """P2's gate (gates-v1) per metric: each candidate run (started from member i) scored
+    against every member, skill = mean distance / max(the members' typical distance,
+    tolerance / 1.25), passing at skill <= max(1.25, the mean held-out member skill); the
+    held-out members' own pass rate and skill / bar by the identical rule."""
     n = len(truth)
     # Every pair of members (each member's own sample frames apply to both).
     dmat = [[distance(truth[i], truth[j], mass, samples[i], anchored_family) if i != j else None for j in range(n)] for i in range(n)]
     metrics = [m for m in METRICS if all(m in dmat[0][j] for j in range(1, n))]
-
-    def typical(members: list[int], m: str) -> float:
-        vals = [np.mean([dmat[i][j][m] for j in members if j != i]) for i in members]
-        return float(np.median(vals))
-
-    out: dict = {"metrics": metrics, "members": n}
-    loo = {}
+    tol = tolerances(v0)
+    D = {}
     for m in metrics:
-        ratios = []
+        x = np.zeros((n, n))
         for i in range(n):
-            rest = [j for j in range(n) if j != i]
-            t = typical(rest, m)
-            dm = np.mean([dmat[i][j][m] for j in rest])
-            ratios.append(dm / t if t > 0 else (0.0 if dm == 0 else math.inf))
-        loo[m] = float(np.mean(ratios))
-    out["oracle_member"] = loo
-    t_all = {m: typical(list(range(n)), m) for m in metrics}
-    out["typical"] = t_all
+            for j in range(n):
+                if i != j:
+                    x[i, j] = 0.5 * (dmat[i][j][m] + dmat[j][i][m])
+        D[m] = x
+    out: dict = {"metrics": metrics, "members": n, "v0": v0, "tolerance": {m: tol[m] for m in metrics}}
+    out["oracle_member"] = {m: dict(zip(("pass_rate", "skill_over_bar"), loo_gates(D[m], tol[m]))) for m in metrics}
+    everyone = list(range(n))
+    bars, floors = {}, {}
+    for m in metrics:
+        floors[m] = max(tol[m] / SKILL_MAX, 1e-12)
+        h = [_skill_in(D[m], D[m][j, [k for k in everyone if k != j]].mean(), [k for k in everyone if k != j], floors[m]) for j in everyone] if n >= 3 else []
+        bars[m] = max(SKILL_MAX, float(np.mean(h))) if h else SKILL_MAX
+    out["bar"] = bars
     frag = [t["fragments"] for t in truth]
-    largest = [t["largest"] for t in truth]
     regimes = Counter(r for t in truth for r in t["regime"][:1])
     majority, share = regimes.most_common(1)[0]
     out["regime_majority"] = majority if share / n >= 0.8 else None
     for name, runs in cands.items():
-        per = defaultdict(list)
+        units = defaultdict(list)
         regime_hits, in_range, physics = [], [], []
         for i, c in enumerate(runs):
             if c is None:
@@ -236,7 +280,8 @@ def ensemble_scores(truth: list[dict], cands: dict[str, list[dict | None]], mass
             ds = [distance(c, truth[j], mass, samples[i], anchored_family) for j in range(n)]
             for m in metrics:
                 if all(m in x for x in ds):
-                    per[m].append(np.mean([x[m] for x in ds]))
+                    sk = _skill_in(D[m], float(np.mean([x[m] for x in ds])), everyone, floors[m])
+                    units[m].append((sk <= bars[m], sk / bars[m]))
             if out["regime_majority"]:
                 regime_hits.append(c["regime"][0] == out["regime_majority"])
             in_range.append(min(frag) <= c["fragments"] <= max(frag))
@@ -249,11 +294,11 @@ def ensemble_scores(truth: list[dict], cands: dict[str, list[dict | None]], mass
                 "fallbacks": c["extra"].get("fallbacks", 0),
                 "energy_bound_active": c["extra"].get("energy_bound_active", 0),
             })
-        skill = {m: (float(np.mean(per[m])) / t_all[m] if t_all[m] > 0 else (0.0 if np.mean(per[m]) == 0 else math.inf)) for m in metrics if per[m]}
         out[name] = {
             "runs": sum(c is not None for c in runs),
-            "skill": skill,
-            "pass_calibrated": {m: skill[m] <= max(SKILL_MAX, loo[m]) for m in skill},
+            "units": {m: [[bool(p), float(r)] for p, r in u] for m, u in units.items()},
+            "pass_rate": {m: float(np.mean([p for p, _ in u])) for m, u in units.items()},
+            "skill_over_bar": {m: float(np.mean([r for _, r in u])) for m, u in units.items()},
             "regime_agreement": float(np.mean(regime_hits)) if regime_hits else None,
             "fragments_in_range": float(np.mean(in_range)) if in_range else None,
             "physics": {k: (float(np.mean([p[k] for p in physics])) if physics else None) for k in ("ke_ok", "momentum_ok", "damage_monotone", "finite")},
@@ -263,30 +308,33 @@ def ensemble_scores(truth: list[dict], cands: dict[str, list[dict | None]], mass
     return out
 
 
-# ------------------------------------------------------------------ report
-
-
 def aggregate(per_ensemble: dict, families: dict[str, str], candidates: list[str]) -> dict:
-    """Per family: mean skill per metric (over ensembles), the calibration, pass shares."""
+    """Per family and metric (P2's family acceptance): accept <=> the candidate's pass rate >=
+    the held-out members' AND its mean skill / bar <= theirs, over the family's units (a
+    candidate run each; the members by ensemble)."""
     agg: dict = {}
     for fam in sorted(set(families.values())):
         ens = [e for eid, e in per_ensemble.items() if families[eid] == fam]
         if not ens:
             continue
         metrics = [m for m in METRICS if all(m in e["metrics"] for e in ens)]
-        row = {"ensembles": len(ens), "oracle_member": {m: float(np.mean([e["oracle_member"][m] for e in ens])) for m in metrics}}
+        member = {m: {k: float(np.mean([e["oracle_member"][m][k] for e in ens])) for k in ("pass_rate", "skill_over_bar")} for m in metrics}
+        row = {"ensembles": len(ens), "oracle_member": member}
         for c in candidates:
             got = [e[c] for e in ens if c in e and e[c]["runs"]]
             if not got:
                 continue
-            skill = {m: float(np.mean([g["skill"][m] for g in got if m in g["skill"]])) for m in metrics}
-            bar = {m: max(SKILL_MAX, row["oracle_member"][m]) for m in metrics}
+            units = {m: [u for g in got for u in g["units"].get(m, [])] for m in metrics}
+            pr = {m: float(np.mean([p for p, _ in units[m]])) if units[m] else float("nan") for m in metrics}
+            sob = {m: float(np.mean([r for _, r in units[m]])) if units[m] else float("nan") for m in metrics}
+            acc = {m: bool(pr[m] >= member[m]["pass_rate"] and sob[m] <= member[m]["skill_over_bar"]) for m in metrics}
             ra = [g["regime_agreement"] for g in got if g["regime_agreement"] is not None]
             row[c] = {
                 "runs": int(sum(g["runs"] for g in got)),
-                "skill": skill,
-                "bar": bar,
-                "pass": {m: skill[m] <= bar[m] for m in metrics},
+                "pass_rate": pr,
+                "skill_over_bar": sob,
+                "accept": acc,
+                "accept_all": all(acc.values()),
                 "regime_agreement": float(np.mean(ra)) if ra else None,
                 "fragments_in_range": float(np.mean([g["fragments_in_range"] for g in got])),
                 "physics": {k: float(np.mean([g["physics"][k] for g in got])) for k in ("ke_ok", "momentum_ok", "damage_monotone", "finite")},
@@ -297,24 +345,28 @@ def aggregate(per_ensemble: dict, families: dict[str, str], candidates: list[str
     return agg
 
 
+# ------------------------------------------------------------------ report
+
+
 def markdown(agg: dict, meta: dict) -> str:
     lines = ["# Closed-loop full-event evaluation", "", f"Generated {meta['generated']}. {meta['note']}", ""]
     for fam, row in agg.items():
         lines.append(f"## {fam} ({row['ensembles']} ensembles)")
         lines.append("")
         metrics = list(row["oracle_member"])
-        lines.append("| Candidate | runs | " + " | ".join(metrics) + " | regime agree | fragments in range | KE ok | momentum ok | damage monotone | finite | fallbacks |")
-        lines.append("|---|---|" + "---|" * len(metrics) + "---|---|---|---|---|---|---|")
-        lines.append("| *held-out oracle member (bar = max(1.25, this))* | | " + " | ".join(f"{row['oracle_member'][m]:.2f}" for m in metrics) + " | | | | | | | |")
+        lines.append("| Candidate | runs | accepted | " + " | ".join(metrics) + " | regime agree | fragments in range | KE ok | momentum ok | damage monotone | finite | fallbacks |")
+        lines.append("|---|---|---|" + "---|" * len(metrics) + "---|---|---|---|---|---|---|")
+        om = row["oracle_member"]
+        lines.append("| *held-out oracle member* | | | " + " | ".join(f"{om[m]['pass_rate']:.0%} / {om[m]['skill_over_bar']:.2f}" for m in metrics) + " | | | | | | | |")
         for c, r in row.items():
             if c in ("ensembles", "oracle_member"):
                 continue
-            cell = lambda m: f"{r['skill'][m]:.2f}{'' if r['pass'][m] else ' ✗'}"
+            cell = lambda m: f"{r['pass_rate'][m]:.0%} / {r['skill_over_bar'][m]:.2f}{'' if r['accept'][m] else ' ✗'}"
             ra = "-" if r["regime_agreement"] is None else f"{r['regime_agreement']:.0%}"
             p = r["physics"]
-            lines.append(f"| {c} | {r['runs']} | " + " | ".join(cell(m) for m in metrics) + f" | {ra} | {r['fragments_in_range']:.0%} | {p['ke_ok']:.0%} | {p['momentum_ok']:.0%} | {p['damage_monotone']:.0%} | {p['finite']:.0%} | {r['fallbacks']} |")
+            lines.append(f"| {c} | {r['runs']} | {'yes' if r['accept_all'] else 'no'} | " + " | ".join(cell(m) for m in metrics) + f" | {ra} | {r['fragments_in_range']:.0%} | {p['ke_ok']:.0%} | {p['momentum_ok']:.0%} | {p['damage_monotone']:.0%} | {p['finite']:.0%} | {r['fallbacks']} |")
         lines.append("")
-    lines.append("Skill = mean distance to the ensemble's members over a typical member's (lower is better; ✗ = above the calibrated bar).")
+    lines.append("Cells: pass rate / mean skill ÷ bar (P2's gates-v1 rule). Skill = a run's mean distance to the ensemble's members over the members' typical distance, floored at tolerance / 1.25; it passes at skill <= max(1.25, the mean held-out member skill). A metric is accepted (no ✗) when the pass rate is at least the held-out members' and the mean skill ÷ bar at most theirs. Tolerances: ram 0.05 v0, partition (1 - ARI) 0.05, sizes (W1, mass-weighted ln mass) 0.1, fragment velocities 0.05 v0, positions 0.05 v0 × 0.5 s, anchored mass fraction 0.05.")
     return "\n".join(lines) + "\n"
 
 
@@ -397,7 +449,9 @@ def main(argv=None):
                 f = a.out / "runs" / c / f"{m.name}.json"
                 lst.append(candidate_state(json.loads(f.read_text()), s) if f.exists() else None)
             cruns[c] = lst
-        per_ensemble[eid] = ensemble_scores(truth, cruns, mass, smp, fam == "anchored_wall")
+        scene = json.loads((evs[0].path / "scene.json").read_text())
+        v0 = max(float(np.linalg.norm(i["velocity"])) for i in scene["impactors"])
+        per_ensemble[eid] = ensemble_scores(truth, cruns, mass, smp, fam == "anchored_wall", v0)
     agg = aggregate(per_ensemble, families, cands)
     meta = {"generated": time.strftime("%Y-%m-%d %H:%M"), "runs": [str(r) for r in a.runs], "split": a.split, "candidates": cands, "checkpoint": str(a.checkpoint) if a.checkpoint else None,
             "max_ensembles": a.max_ensembles, "failures": failed, "note": a.note or f"Split {a.split}; candidates {', '.join(cands)}; debris-reach routing on for the coupled candidates."}

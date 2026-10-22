@@ -11,7 +11,7 @@
 //! solver and no edge-edge contact. Production runs couple the stress solver to PhysX
 //! through `api.rs`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::api::{hertz_duration, ContactImpulse, ContactLoadFilter};
 use crate::blast::FaceBlast;
@@ -279,6 +279,17 @@ pub struct World {
     /// `apply_decoded` keeps each chunk's decoded departure from its cluster's rigid fit as
     /// hidden state (`STRESS_DECODED_DEFORMATION=1`, off by default: the reduced state).
     pub decoded_keeps_deformation: bool,
+    /// Hand-back (`STRESS_HANDBACK_FRAMES=N`, off by default): once a routed island has gone
+    /// `N` frames with no decoded break and no impactor closing on its clusters faster than
+    /// the tiered impact speed, its clusters leave the routing (`handed_back`) and take the
+    /// non-island path (the engine's motion, the quasi-static stress) with their state as
+    /// it is; a new fast impactor contact routes them again.
+    pub hand_back_after: Option<usize>,
+    pub handed_back: HashSet<u64>,
+    pub quiet_frames: HashMap<u64, usize>,
+    /// Clusters an impactor closed on faster than the tiered impact speed in the last
+    /// `select_islands`.
+    pub fast_contact: HashSet<u64>,
     /// `implicit_failure_windows`: chunks whose clusters take this frame in a window
     /// (a bond of theirs started to fail in an implicit step of an earlier attempt),
     /// and those found failing in this attempt.
@@ -521,6 +532,10 @@ impl World {
             tiered_fast_joins: std::env::var("STRESS_TIERED_JOIN").is_ok_and(|v| v == "fast"),
             debris_reach_routing: std::env::var("STRESS_DEBRIS_ROUTING").is_ok_and(|v| v == "1"),
             decoded_keeps_deformation: std::env::var("STRESS_DECODED_DEFORMATION").is_ok_and(|v| v == "1"),
+            hand_back_after: std::env::var("STRESS_HANDBACK_FRAMES").ok().and_then(|v| v.parse().ok()),
+            handed_back: HashSet::new(),
+            quiet_frames: HashMap::new(),
+            fast_contact: HashSet::new(),
             window_forced: Vec::new(),
             implicit_failures: Vec::new(),
             implicit_contact_seen: 0.0,

@@ -507,6 +507,19 @@ impl World {
             imp.driven = now.driven;
         }
         let d = provider(&view, &keys)?;
+        if let Some(n) = self.hand_back_after {
+            // A frame is quiet for the island when the call breaks nothing and no impactor
+            // closes fast on any of its clusters.
+            let routed: Vec<u64> = self.solver.clusters.iter().filter(|c| !c.driven).map(|c| c.id).collect();
+            let quiet = d.bonds_broken.is_empty() && routed.iter().all(|id| !self.fast_contact.contains(id));
+            for id in routed {
+                let q = self.quiet_frames.entry(id).or_insert(0);
+                *q = if quiet { *q + 1 } else { 0 };
+                if *q >= n {
+                    self.handed_back.insert(id);
+                }
+            }
+        }
         self.set_driven_motion(1.0);
         self.apply_decoded(&d)?;
         self.solver.time += fdt;
