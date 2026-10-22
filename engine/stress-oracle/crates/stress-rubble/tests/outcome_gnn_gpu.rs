@@ -13,7 +13,7 @@ use stress_learned::outcome_model::{read_event, structure_hierarchies, Model, Op
 use stress_learned::outcome_program::compile;
 
 fn fixture() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../stress-learned/tests/fixtures/p3-model")
+    std::env::var("LEARNED_IMPACT_P3_FIXTURE").map(PathBuf::from).unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("../stress-learned/tests/fixtures/p3-model"))
 }
 
 #[test]

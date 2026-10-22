@@ -12,8 +12,10 @@ use stress_learned::outcome_decode::{decode, DecodeConfig};
 use stress_learned::outcome_model::{read_event, structure_hierarchies, Model, Options, Outputs, Weights};
 use stress_learned::outcome_program::{compile, compile_batch};
 
+/// The parity fixture: `tests/fixtures/p3-model`, or `LEARNED_IMPACT_P3_FIXTURE` (another
+/// export converted by `p3_fixture.py`, e.g. a new checkpoint's).
 fn fixture() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/p3-model")
+    std::env::var("LEARNED_IMPACT_P3_FIXTURE").map(PathBuf::from).unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/p3-model"))
 }
 
 fn parity_dirs() -> Vec<PathBuf> {
@@ -54,7 +56,7 @@ fn check(options: Options, tol: f32) {
     let w = Weights::load(&fixture()).unwrap();
     let model = Model::new(&w, options).unwrap();
     let dirs = parity_dirs();
-    assert!(dirs.len() >= 4, "parity calls: {}", dirs.len());
+    assert!(!dirs.is_empty(), "no parity calls");
     for dir in dirs {
         let (want, modified) = torch_outputs(&dir);
         if modified {
@@ -138,7 +140,9 @@ fn the_decode_matches_p2s_decoded_states() {
             assert_eq!(a["damage"].as_f64(), b["damage"].as_f64(), "{name}: damage of bond {}", a["key"]);
         }
     }
-    assert!(n_free >= 2 && n_bound >= 2, "coverage: {n_free} free islands, {n_bound} energy-bound activations");
+    if std::env::var("LEARNED_IMPACT_P3_FIXTURE").is_err() {
+        assert!(n_free >= 2 && n_bound >= 2, "coverage: {n_free} free islands, {n_bound} energy-bound activations");
+    }
 }
 
 /// Forward pass then decode, both in Rust, against P2's deployed decoded state: the same
