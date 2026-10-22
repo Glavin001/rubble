@@ -38,6 +38,19 @@ trusted, whether a checkpoint is good. That needs four things:
     difference's CI to exclude the failing side. It is reported, not required: with about
     10² ensembles per family the CIs are wide, and requiring it would reject an
     oracle-equivalent model about half the time.
+- **gates-v1.1 (2026-10-21, the current gate; adopts P0's aggregate rule).** Same unit,
+  reference and bootstrap as v1, but a non-inferiority margin replaces the point comparison.
+  Per family and metric, accept ⇔ both of these hold:
+  - the one-sided 95% upper bootstrap bound of (held-out member pass rate − model pass
+    rate) is ≤ 5 points;
+  - the one-sided 95% upper bootstrap bound of (model mean skill ÷ bar ÷ member mean − 1)
+    is ≤ 5%.
+  - Family and checkpoint acceptance are as in v1. `accept` is v1.1; v1's verdict stays
+    reported as `accept_v1`.
+  - Reason: v1 compared point estimates, so a model equivalent to the oracle failed about
+    half the time on sampling noise. The bound puts the burden of proof on the candidate
+    and allows a stated, small margin (P0's closed-loop rule, so the per-call and full-event
+    gates agree).
 - **Selection is on dense metrics, not on the gate.**
   - Checkpoints, τ and the temperature are chosen on the validation selection score
     (`EvalResult.score`).

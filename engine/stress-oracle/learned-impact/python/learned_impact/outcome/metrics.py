@@ -246,14 +246,24 @@ def _acceptance_row(rs: list[dict], gates: dict, pm, mass) -> dict:
     return row
 
 
+# gates-v1.1 (EVALUATION.md §1): non-inferiority margins against the held-out member
+NONINF_PASS_POINTS = 0.05  # pass rate: at most 5 points below the held-out member
+NONINF_SKILL_RATIO = 0.05  # mean skill ÷ bar: at most 5% above the held-out member's
+
+
 def family_acceptance(rows: list[dict], n_boot: int = 2000, seed: int = 0,
                       alpha: float = 0.05) -> dict:
-    """The pre-registered ensemble gate (EVALUATION.md §1), per family and metric:
-    accept ⇔ model pass rate ≥ held-out member pass rate AND model mean skill ÷ bar ≤ held-out
-    member mean, both over the family's active ensemble calls. Bootstrap CIs (percentile,
-    resampling whole ensembles, since calls of one ensemble are correlated) are reported for
-    each rate and for the paired differences; `confident` adds that the CI of each difference
-    excludes the failing side."""
+    """The pre-registered ensemble gate (EVALUATION.md §1), per family and metric, over the
+    family's active ensemble calls, against the held-out oracle member scored by the
+    identical rule. Bootstraps resample whole ensembles (calls of one ensemble are
+    correlated).
+
+    gates-v1.1 (`accept`, the current gate): the one-sided (1 − alpha) upper bootstrap bound
+    of (member pass rate − model pass rate) ≤ 5 points, and of (model mean skill÷bar ÷
+    member mean − 1) ≤ 5%.
+    gates-v1 (`accept_v1`, kept reported): point estimates, model pass rate ≥ member's and
+    model mean skill÷bar ≤ member's; `confident` adds that the two-sided CI of each
+    difference excludes the failing side."""
     rng = np.random.default_rng(seed)
     out: dict = {}
     for fam in sorted({r["family"] for r in rows}):
@@ -265,22 +275,24 @@ def family_acceptance(rows: list[dict], n_boot: int = 2000, seed: int = 0,
             sel = [i for i, r in enumerate(fr) if name in r["model"]]
             if not sel:
                 continue
-            a = np.array([[*fr[i]["model"][name], *fr[i]["member"][name]] for i in range(len(fr))
-                          if name in fr[i]["model"]])
+            a = np.array([[*fr[i]["model"][name], *fr[i]["member"][name]] for i in sel])
             pos = {i: k for k, i in enumerate(sel)}
             groups = [[pos[i] for i in idx[e] if i in pos] for e in ens]
             groups = [g for g in groups if g]
 
             def stats(x):
                 mp, ms, hp, hs = x.mean(0)
-                return np.array([mp, hp, mp - hp, ms, hs, ms - hs])
+                return np.array([mp, hp, mp - hp, ms, hs, ms - hs, hp - mp,
+                                 ms / max(hs, 1e-12) - 1])
             point = stats(a)
             boot = np.array([stats(a[np.concatenate([groups[j] for j in
                                                      rng.integers(0, len(groups), len(groups))])])
                              for _ in range(n_boot)])
             lo, hi = np.quantile(boot, [alpha / 2, 1 - alpha / 2], axis=0)
+            upper = np.quantile(boot, 1 - alpha, axis=0)  # one-sided bound
             ci = lambda k: [float(lo[k]), float(hi[k])]  # noqa: E731
-            accept = bool(point[2] >= 0 and point[5] <= 0)
+            accept_v1 = bool(point[2] >= 0 and point[5] <= 0)
+            accept = bool(upper[6] <= NONINF_PASS_POINTS and upper[7] <= NONINF_SKILL_RATIO)
             fam_out[name] = {
                 "model_pass_rate": float(point[0]), "model_pass_rate_ci": ci(0),
                 "member_pass_rate": float(point[1]), "member_pass_rate_ci": ci(1),
@@ -288,9 +300,13 @@ def family_acceptance(rows: list[dict], n_boot: int = 2000, seed: int = 0,
                 "model_mean_skill_over_bar": float(point[3]), "model_mean_skill_over_bar_ci": ci(3),
                 "member_mean_skill_over_bar": float(point[4]),
                 "member_mean_skill_over_bar_ci": ci(4), "skill_over_bar_diff_ci": ci(5),
-                "accept": accept, "confident": bool(accept and lo[2] >= 0 and hi[5] <= 0)}
+                "pass_shortfall_upper": float(upper[6]),
+                "skill_ratio_excess_upper": float(upper[7]),
+                "accept": accept, "accept_v1": accept_v1,
+                "confident": bool(accept_v1 and lo[2] >= 0 and hi[5] <= 0)}
         metric_entries = [fam_out[k] for k in GATE_METRICS if k in fam_out]
         fam_out["accept"] = bool(metric_entries) and all(e["accept"] for e in metric_entries)
+        fam_out["accept_v1"] = bool(metric_entries) and all(e["accept_v1"] for e in metric_entries)
         out[fam] = fam_out
     return out
 

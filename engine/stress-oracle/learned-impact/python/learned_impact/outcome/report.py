@@ -72,7 +72,8 @@ def main(argv=None) -> None:
                  f" pass, s/bar {acc[k]['model_mean_skill_over_bar']:.2f} vs "
                  f"{acc[k]['member_mean_skill_over_bar']:.2f}" for k in M.GATE_METRICS if k in acc]
         print(f"[report] acceptance {fam} ({acc['n_ensembles']} ensembles): "
-              f"{'ACCEPT' if acc['accept'] else 'reject'}; " + "; ".join(cells))
+              f"gates-v1.1 {'ACCEPT' if acc['accept'] else 'reject'} "
+              f"(v1 {'accept' if acc['accept_v1'] else 'reject'}); " + "; ".join(cells))
     if "tau_sweep" in rep:
         ts = rep["tau_sweep"]
         print(f"[report] frozen tau {rep['tau_frozen']}; best on {a.split} {ts['best_on_this_split']} "

@@ -189,9 +189,15 @@ def test_family_acceptance_member_like_passes_outlier_fails():
         assert lo <= e["model_pass_rate"] - e["member_pass_rate"] <= hi
         # a member-like model is statistically indistinguishable from a held-out member
         assert lo < 0.15 and hi > -0.15
+    # gates-v1.1: the one-sided bounds are reported and decide `accept`
+    for k in ("ram", "partition", "sizes"):
+        e = acc[k]
+        assert e["accept"] == (e["pass_shortfall_upper"] <= 0.05
+                               and e["skill_ratio_excess_upper"] <= 0.05)
     bad = _summ(_ens_rows(np.random.default_rng(0), 40, 8, 10.0))
     b = bad.acceptance["free_wall"]
     assert not b["accept"] and not b["ram"]["accept"] and not b["partition"]["accept"]
+    assert not b["accept_v1"] and b["ram"]["pass_shortfall_upper"] > 0.05
     assert b["ram"]["skill_over_bar_diff_ci"][0] > 0
     # the dense selection score ranks the outlier worse
     assert bad.score > good.score
