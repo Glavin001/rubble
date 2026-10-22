@@ -51,9 +51,11 @@ const NO_JSPI='The stress-solver modes need WebAssembly JavaScript Promise Integ
 if(!JSPI)for(const o of $('bond-mode').options)if(o.value in STRESS_PROFILES){o.text+=' · needs Chrome 137+';o.title=NO_JSPI}
 let stress=null,stressOn=false,stressHud={t:0,frames:0,renders:0};
 let learned=null,learnedMs=0,learnedBusy=false;
-// The bond-graph and sleep-colour views: this page's renderer reads the boxes as it draws;
-// the stress modes draw with their own (Rust, stress-web), told here.
-function applyView(){if(stressOn)stress?.setView($('show-bonds').checked,$('show-sleep').checked)}
+// The bond graph and the View menu (0 materials, 1 sleep state, 2 bodies): this page's
+// renderer reads them as it draws; the stress modes draw with their own (Rust, stress-web),
+// told here.
+const viewMode=()=>Number($('view-mode').value);
+function applyView(){if(stressOn)stress?.setView($('show-bonds').checked,viewMode())}
 // Ball mass: a power-of-two multiple of the scene's default ball, applied to the next shots.
 const massScale=()=>2**Number($('ball-mass').value);
 // Bond strength: a power-of-two multiple of every bond's break strength (D6 joints and
@@ -119,7 +121,7 @@ async function loadLevel(level){
   next=layoutScene(one,layout,!!procedural)}catch(e){if(scene)$('level').value=String(scene.level??0);throw e}
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;accumulator=0;
  scene=next;sim=await createSimulation(device,scene,setStatus);renderer=await createRenderer(device,$('view'),sim,scene,shoot);
- renderer.colorMode=$('show-sleep').checked?1:0;applyBallMass();
+ renderer.colorMode=viewMode();applyBallMass();
  if(bondMode()==='learned'){
   setStatus('Loading learned-impact kernels (Slang→WGSL)…');
   const {createLearnedImpact}=await import('./learned-impact.mjs');
@@ -212,7 +214,7 @@ $('fire').onclick=()=>scene?.rowShot&&shoot(scene.rowShot);
 $('scene').onchange=()=>sample($('scene').value);
 $('file').onchange=()=>{const f=$('file').files[0];if(f)serializeLoad(async()=>importBytes(await f.arrayBuffer(),f.name))};
 $('level').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
-$('show-sleep').onchange=()=>{if(renderer)renderer.colorMode=$('show-sleep').checked?1:0;applyView()};
+$('view-mode').onchange=()=>{if(renderer)renderer.colorMode=viewMode();applyView()};
 $('show-bonds').onchange=applyView;
 $('ball-mass').oninput=applyBallMass;
 $('bond-strength').oninput=()=>{$('bond-strength-value').textContent=scaleLabel(strengthScale())};

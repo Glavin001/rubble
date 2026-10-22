@@ -11,7 +11,7 @@
 //! 1-9 scenes (the lab's Scene menu, in its order) · [ ] level · drop a .glb onto the window ·
 //! click to shoot · F fire the wrecking ball (rows, grids, suburbs) · drag to
 //! orbit · scroll to zoom · Space start/pause · R reset · B bond graph ·
-//! K breakable bonds (experimental) · C colour by sleep state · Esc quit.
+//! K breakable bonds (experimental) · C colours (materials, sleep state, bodies) · Esc quit.
 
 // objc 0.2 `msg_send!` expands a cfg the current compiler does not know.
 #![allow(unexpected_cfgs)]
@@ -497,7 +497,7 @@ impl App {
             "b" => self.show_bonds = !self.show_bonds,
             "c" => {
                 if let Some(l) = &mut self.loaded {
-                    l.renderer.color_mode ^= 1;
+                    l.renderer.color_mode = (l.renderer.color_mode + 1) % 3;
                 }
             }
             "k" => {
@@ -680,7 +680,7 @@ fn main() -> anyhow::Result<()> {
     for (i, s) in SAMPLES.iter().enumerate() {
         println!("  {} · {}", i + 1, s.menu);
     }
-    println!("  [ ] level · drop a .glb · click shoot · F wrecking ball · Space run · R reset · B bond graph · K breakable bonds · C sleep colours");
+    println!("  [ ] level · drop a .glb · click shoot · F wrecking ball · Space run · R reset · B bond graph · K breakable bonds · C colours: materials, sleep, bodies");
     let queue = device.new_command_queue();
     let event_loop = EventLoop::new()?;
     let mut app = App {

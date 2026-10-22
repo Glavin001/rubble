@@ -33,8 +33,9 @@ export async function createStressMode(canvas){
   setProfile(name){stress_set_profile(name)},
   // The physics frame rate of the next load (Hz; 0 keeps the scene's).
   setPhysicsHz(hz){stress_set_physics_hz(hz)},
-  // The lab's view boxes: the bond graph, and colour by body state.
-  setView(bonds,sleep){stress_set_view(bonds,sleep)},
+  // The lab's view: the bond graph, and the colour mode (0 materials, 1 body state,
+  // 2 one colour per body, kept as it breaks).
+  setView(bonds,colorMode){stress_set_view(bonds,colorMode)},
   get running(){return stress_running()},set running(on){stress_set_running(on)},
   dispose(){canvas.removeEventListener('pointerdown',down);canvas.removeEventListener('pointermove',move);canvas.removeEventListener('pointerup',up);canvas.removeEventListener('pointercancel',cancel);canvas.removeEventListener('wheel',wheel)}};
 }

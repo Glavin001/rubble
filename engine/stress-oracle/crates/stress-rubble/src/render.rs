@@ -11,14 +11,17 @@
 //! support; once its cluster is free (debris, a toppled piece) the colour is mixed with a
 //! palette colour hashed from the cluster id, so each fragment reads as one piece.
 //!
-//! Views (the fracture lab's toggles): `sleep_colors` colours each chunk by its body's
-//! state instead, as the lab's own renderer does (moving orange, at rest blue, static grey;
-//! the coupled engine keeps every body awake, so "at rest" is a body slower than
-//! `REST_SPEED`); `bond_graph` draws each intact bond as a line between its chunks' centres,
-//! over the geometry, gone once the bond breaks.
+//! Views (the fracture lab's): `colors` picks what a chunk is painted by ([`ColorMode`]):
+//! the material (above), its body's state as the lab's own renderer does (moving orange, at
+//! rest blue, static grey; the coupled engine keeps every body awake, so "at rest" is a body
+//! slower than `REST_SPEED`), or its body, one colour each, kept across splits so a
+//! structure is seen breaking up. `bond_graph` draws each intact bond as a line between its
+//! chunks' centres, over the geometry, gone once the bond breaks.
 //!
 //! Nothing here touches the simulation: it reads the host mirror after a frame.
 
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::process::{Child, Command, Stdio};
 
@@ -128,11 +131,143 @@ fn line_fs(in: LineOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// The colours of `Renderer::sleep_colors` (the fracture lab's: `fracture_draw.slang`).
+/// What [`Renderer::colors`] paints a chunk by (the fracture lab's View menu; the same
+/// numbering as `fracture_draw.slang`'s colour mode).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ColorMode {
+    /// The material's colour; a free fragment's mixed with a colour of its cluster.
+    #[default]
+    Material,
+    /// The body's state: moving, at rest, static.
+    Sleep,
+    /// One colour per body (cluster), kept as it breaks ([`BodyColors`]).
+    Bodies,
+}
+
+impl ColorMode {
+    /// 0 material, 1 sleep state, 2 bodies; anything else is material.
+    pub fn from_index(i: u32) -> Self {
+        match i {
+            1 => Self::Sleep,
+            2 => Self::Bodies,
+            _ => Self::Material,
+        }
+    }
+}
+
+/// [`ColorMode::Bodies`]: a colour slot per cluster id. A split retires its parent and gives
+/// every child a new id; the child with most of the parent's chunks keeps the parent's slot
+/// and the others take new ones, so a body keeps its colour while pieces break off it.
+#[derive(Default)]
+pub struct BodyColors {
+    slot: HashMap<u64, u32>,
+    next: u32,
+}
+
+impl BodyColors {
+    /// Follow the solver's clusters since the last call. O(clusters) when nothing split.
+    pub fn update(&mut self, solver: &ReferenceSolver) {
+        self.follow(solver.clusters.iter().map(|c| (c.id, c.parent, c.chunks.len())));
+    }
+
+    /// [`Self::update`] from each cluster's (id, parent id, chunk count).
+    pub fn follow(&mut self, clusters: impl Iterator<Item = (u64, Option<u64>, usize)> + Clone) {
+        let mut fresh: Vec<(u64, Option<u64>, usize)> = clusters.clone().filter(|(id, ..)| !self.slot.contains_key(id)).collect();
+        if fresh.is_empty() {
+            return;
+        }
+        let present: HashSet<u64> = clusters.map(|(id, ..)| id).collect();
+        // Heirs: per retired parent, its largest child (ties: the lower id).
+        fresh.sort_unstable_by_key(|&(id, ..)| id);
+        let mut heir: HashMap<u64, (usize, u64)> = HashMap::new();
+        for &(id, parent, n) in &fresh {
+            if let Some(p) = parent.filter(|p| self.slot.contains_key(p) && !present.contains(p)) {
+                let e = heir.entry(p).or_insert((n, id));
+                if n > e.0 {
+                    *e = (n, id);
+                }
+            }
+        }
+        let inherited: HashMap<u64, u32> = heir.iter().map(|(p, &(_, id))| (id, self.slot[p])).collect();
+        for &(id, ..) in &fresh {
+            let slot = inherited.get(&id).copied().unwrap_or_else(|| {
+                self.next += 1;
+                self.next - 1
+            });
+            self.slot.insert(id, slot);
+        }
+        self.slot.retain(|id, _| present.contains(id));
+    }
+
+    /// The colour of cluster `id` (after [`Self::update`]).
+    pub fn color(&self, id: u64) -> [f32; 3] {
+        slot_color(self.slot.get(&id).copied().unwrap_or(0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A body keeps its colour as pieces break off it; each piece takes a new one, and a
+    /// piece's own pieces follow the same rule.
+    #[test]
+    fn body_colors_survive_splits() {
+        let mut b = BodyColors::default();
+        b.follow([(0, None, 100), (1, None, 40)].into_iter());
+        let (c0, c1) = (b.color(0), b.color(1));
+        assert_ne!(c0, c1);
+        // Body 0 splits into 2 (90 chunks), 3 (6) and 4 (4); body 1 is untouched.
+        b.follow([(1, None, 40), (2, Some(0), 90), (3, Some(0), 6), (4, Some(0), 4)].into_iter());
+        assert_eq!(b.color(2), c0, "the largest piece keeps the body's colour");
+        assert_eq!(b.color(1), c1);
+        let (c3, c4) = (b.color(3), b.color(4));
+        for c in [c3, c4] {
+            assert!(c != c0 && c != c1);
+        }
+        assert_ne!(c3, c4);
+        // Nothing new: nothing changes.
+        b.follow([(1, None, 40), (2, Some(0), 90), (3, Some(0), 6), (4, Some(0), 4)].into_iter());
+        assert_eq!([b.color(1), b.color(2), b.color(3), b.color(4)], [c1, c0, c3, c4]);
+        // Body 2 splits evenly: the lower id keeps it.
+        b.follow([(1, None, 40), (3, Some(0), 6), (4, Some(0), 4), (5, Some(2), 45), (6, Some(2), 45)].into_iter());
+        assert_eq!(b.color(5), c0);
+        assert!(![c0, c1, c3, c4].contains(&b.color(6)));
+    }
+
+    #[test]
+    fn slot_colors_are_distinct() {
+        let colors: Vec<[f32; 3]> = (0..64).map(slot_color).collect();
+        for (i, a) in colors.iter().enumerate() {
+            for b in &colors[..i] {
+                assert!(a.iter().zip(b).map(|(x, y)| (x - y).abs()).sum::<f32>() > 1e-3);
+            }
+        }
+    }
+}
+
+/// A distinct colour per slot: hues a golden-ratio step apart.
+pub fn slot_color(slot: u32) -> [f32; 3] {
+    let h = (slot as f64 * 0.618_033_988_749_895).fract() * 6.0;
+    let (s, v) = (0.62, 0.92);
+    let f = h.fract();
+    let (p, q, t) = (v * (1.0 - s), v * (1.0 - s * f), v * (1.0 - s * (1.0 - f)));
+    let rgb = match h as u32 {
+        0 => [v, t, p],
+        1 => [q, v, p],
+        2 => [p, v, t],
+        3 => [p, q, v],
+        4 => [t, p, v],
+        _ => [v, p, q],
+    };
+    rgb.map(|x| x as f32)
+}
+
+/// The colours of `ColorMode::Sleep` (the fracture lab's: `fracture_draw.slang`).
 const MOVING: [f32; 3] = [1.0, 0.45, 0.12];
 const AT_REST: [f32; 3] = [0.25, 0.45, 0.85];
 const STATIC: [f32; 3] = [0.45, 0.45, 0.48];
-/// A body slower than this (m/s, and rad/s) shows as at rest in `sleep_colors`.
+/// A body slower than this (m/s, and rad/s) shows as at rest in `ColorMode::Sleep`.
 pub const REST_SPEED: f64 = 0.05;
 /// A bond's line in `bond_graph`.
 const BOND_LINE: [f32; 4] = [1.0, 0.86, 0.25, 1.0];
@@ -358,8 +493,9 @@ pub struct Renderer {
     pub background: [f64; 3],
     /// Draw the ground plane (off for a scene without ground).
     pub ground: bool,
-    /// Colour chunks by their body's state (moving, at rest, static) instead of material.
-    pub sleep_colors: bool,
+    /// What a chunk is painted by.
+    pub colors: ColorMode,
+    body_colors: RefCell<BodyColors>,
     /// Draw the intact bonds as lines between their chunks' centres.
     pub bond_graph: bool,
     line_pipeline: wgpu::RenderPipeline,
@@ -567,7 +703,8 @@ impl Renderer {
             fade: 120.0,
             background: [0.70, 0.76, 0.84],
             ground: true,
-            sleep_colors: false,
+            colors: ColorMode::Material,
+            body_colors: RefCell::default(),
             bond_graph: false,
             line_pipeline,
             line_bind,
@@ -615,6 +752,10 @@ impl Renderer {
         if !self.ground {
             objs[0] = Object { rows: [[0.0; 4]; 3], color: [0.0; 4] };
         }
+        let mut body_colors = self.body_colors.borrow_mut();
+        if self.colors == ColorMode::Bodies {
+            body_colors.update(solver);
+        }
         for (s, st) in solver.structures.iter().enumerate() {
             for (c, ch) in st.chunks.iter().enumerate() {
                 let state = &solver.chunks[s][c];
@@ -627,19 +768,16 @@ impl Renderer {
                 let hidden = Quat::from_axis_angle(state.th, state.th.norm()).to_mat3();
                 let r = cl.rotation() * hidden * ch.rotation;
                 let base = material_color(&ch.material);
-                let color = if self.sleep_colors {
-                    if cl.anchored {
-                        STATIC
-                    } else if cl.velocity.norm() > REST_SPEED || cl.angular_velocity.norm() > REST_SPEED {
-                        MOVING
-                    } else {
-                        AT_REST
+                let color = match self.colors {
+                    ColorMode::Sleep if cl.anchored => STATIC,
+                    ColorMode::Sleep if cl.velocity.norm() > REST_SPEED || cl.angular_velocity.norm() > REST_SPEED => MOVING,
+                    ColorMode::Sleep => AT_REST,
+                    ColorMode::Bodies => body_colors.color(cl.id),
+                    ColorMode::Material if cl.anchored => base,
+                    ColorMode::Material => {
+                        let f = fragment_color(cl.id);
+                        std::array::from_fn(|i| 0.45 * base[i] + 0.55 * f[i])
                     }
-                } else if cl.anchored {
-                    base
-                } else {
-                    let f = fragment_color(cl.id);
-                    std::array::from_fn(|i| 0.45 * base[i] + 0.55 * f[i])
                 };
                 objs[k] = Object { rows: rows(r, solver.chunk_position(s, c)), color: [color[0], color[1], color[2], 1.0] };
             }

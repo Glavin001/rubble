@@ -5,7 +5,8 @@
 // bodies id + k * instance stride (body 0, the static ground, is shared).
 struct BodyPose { float4 p; float4 q; float4 invI; float4 v; float4 w; float4 ip; float4 iq; };
 // Column-major view-projection; mode.x = instance stride, mode.y = colour mode
-// (0 materials, 1 sleep state: awake orange, asleep blue, static grey), mode.z = joints
+// (0 materials, 1 sleep state: awake orange, asleep blue, static grey, 2 bodies: one
+// colour per body, hues a golden-ratio step apart), mode.z = joints
 // per copy (0: the scene runs without joints).
 struct View { float4 c0; float4 c1; float4 c2; float4 c3; uint4 mode; };
 
@@ -27,6 +28,17 @@ struct VsOut
 };
 
 float3 rotate(float4 q, float3 v) { return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v); }
+
+// Colour `slot` of the bodies view (as stress-rubble render.rs `slot_color`).
+float3 slotColor(uint slot)
+{
+    float h = frac(float(slot) * 0.6180339887) * 6.0;
+    float s = 0.62, v = 0.92, f = frac(h);
+    float p = v * (1.0 - s), q = v * (1.0 - s * f), t = v * (1.0 - s * (1.0 - f));
+    uint k = uint(h);
+    return k == 0u ? float3(v, t, p) : k == 1u ? float3(q, v, p) : k == 2u ? float3(p, v, t)
+         : k == 3u ? float3(p, q, v) : k == 4u ? float3(t, p, v) : float3(v, p, q);
+}
 
 [shader("vertex")]
 VsOut vs(uint vid : SV_VertexID, uint copy : SV_InstanceID)
@@ -74,6 +86,8 @@ VsOut vs(uint vid : SV_VertexID, uint copy : SV_InstanceID)
         bool asleep = (flags & 4u) != 0u;
         r.color = (flags & 1u) != 0u && !asleep ? float3(1.0, 0.45, 0.12) : asleep ? float3(0.25, 0.45, 0.85) : float3(0.45, 0.45, 0.48);
     }
+    else if (gView.mode.y == 2u && index != 0u)
+        r.color = slotColor(index - 1u);
     r.world = world;
     return r;
 }

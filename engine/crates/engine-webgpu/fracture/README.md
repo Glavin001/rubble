@@ -187,6 +187,11 @@ through WebAssembly JavaScript Promise Integration (JSPI, `gpu-wait.mjs`): Chrom
 137 or later. In a browser without it (Safari) the Bonds menu marks them, and choosing one
 says why instead of failing; the other modes are unaffected.
 
+**View.** The **View** menu picks what the pieces are coloured by: **Materials** (the
+default), **Sleep state** (awake orange, asleep blue, static grey) or **Bodies** (one colour
+per rigid body). In rubble's modes every piece is its own body, so Bodies gives each piece a
+colour. The stress modes' Bodies view follows splits (see Stress solver, View options).
+
 **Bond graph.** "Inspect bond graph" draws each bond as a line, hidden once the bond breaks.
 In **Breakable D6 joints** line k is the engine's joint k (every builder emits them in the
 same order, `engine-fracture` `tests/bond_lines.rs`), and the draw reads that joint's broken
@@ -325,7 +330,7 @@ its own weight before it settles in the stress modes.
     `group_uniform4`, `group_uniform_island`, and uniform reductions in `group_sum2`);
   - storage access read from the shader's declarations (`gpu.rs` `wgsl_access`).
   Metal's values are unchanged (guard).
-- **View options.** Both stress modes draw "Inspect bond graph" and "Color by sleep state"
+- **View options.** Both stress modes draw "Inspect bond graph" and the **View** menu
   with their own renderer (`stress-rubble` `render.rs`, set by `stress_set_view`):
   - **Bond graph:** each intact bond is a line between its chunks' centres, drawn over the
     geometry and gone once the bond breaks.
@@ -333,6 +338,11 @@ its own weight before it settles in the stress modes.
     a sleeping body's support loads would leave the stress solve. So here "asleep" (blue)
     means at rest, slower than 0.05 m/s and 0.05 rad/s; moving bodies are orange and
     static ones grey.
+  - **Bodies:** one colour per body (cluster). A structure starts as one body, so one
+    colour. A split retires the body and gives each piece a new cluster id. The piece with
+    most of the old body's chunks keeps its colour, and the others take new ones
+    (`BodyColors`), so a body keeps its colour from frame to frame and you can watch it
+    break up.
 
 ### Breakable D6 joints (experimental)
 

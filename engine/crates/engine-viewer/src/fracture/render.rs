@@ -41,7 +41,8 @@ pub struct Renderer {
     joints_per_copy: u32,
     depth: Option<Texture>,
     size: (u64, u64),
-    /// 0: materials; 1: sleep state (awake orange, asleep blue, static grey).
+    /// 0: materials; 1: sleep state (awake orange, asleep blue, static grey); 2: bodies
+    /// (one colour per body).
     pub color_mode: u32,
 }
 
