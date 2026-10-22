@@ -59,6 +59,8 @@ pub struct ModelProvider {
     pub call_ms: Vec<f64>,
     /// `<dir>.lock`, holding this process's id while the provider runs.
     lock: PathBuf,
+    /// The provider reads `learned-impact-outcome/3` records.
+    v3: bool,
 }
 
 impl ModelProvider {
@@ -102,7 +104,11 @@ impl ModelProvider {
             .stderr(Stdio::from(log))
             .spawn()
             .map_err(|e| format!("starting {}: {e}", py.display()))?;
-        let mut p = ModelProvider { spec: spec.clone(), dir: dir.to_path_buf(), scene: scene.to_string(), child, qs: true, call_ms: Vec::new(), lock };
+        // The calls schema the provider validates against (its `schema.py`): a `/3` package
+        // (models trained on `/3`) gets each record downgraded (`downgrade_to_v3`, exact).
+        let schema_py = std::fs::read_to_string(spec.python_dir.join("learned_impact/outcome/schema.py")).unwrap_or_default();
+        let v3 = schema_py.lines().any(|l| l.trim_start().starts_with("SCHEMA_VERSION") && l.contains("\"learned-impact-outcome/3\""));
+        let mut p = ModelProvider { spec: spec.clone(), dir: dir.to_path_buf(), scene: scene.to_string(), child, qs: true, call_ms: Vec::new(), lock, v3 };
         p.qs = match spec.qs {
             Some(q) => q,
             None => p.read_needs_qs()?,
@@ -137,7 +143,10 @@ impl ModelProvider {
         let req = self.dir.join("req").join(&name);
         std::fs::create_dir_all(&req).map_err(|e| e.to_string())?;
         let mut standalone = view.standalone_copy();
-        let ev = outcome_calls::live_call(&mut standalone, &self.scene, &json!({}), &keys.chunks, &keys.impactors, frame as usize, self.qs)?;
+        let mut ev = outcome_calls::live_call(&mut standalone, &self.scene, &json!({}), &keys.chunks, &keys.impactors, frame as usize, self.qs)?;
+        if self.v3 {
+            outcome_calls::downgrade_to_v3(&mut ev)?;
+        }
         outcome_calls::write_event(&req.join("call"), &ev, true)?;
         let request = json!({"schema_version": "learned-impact-provider-request/0", "event_id": self.scene, "frame": frame, "island": 0,
             "time": view.solver.time, "frame_dt": view.scene.sim.frame_dt, "keys": keys, "state": {}, "call_record": "call"});

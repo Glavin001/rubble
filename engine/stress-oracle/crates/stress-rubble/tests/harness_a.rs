@@ -32,12 +32,16 @@ fn the_oracle_island_step_through_the_provider_is_the_standalone_oracle() {
         let mut routed = 0;
         let mut chunks_routed = 0;
         for frame in 0..frames(&scene) {
+            native.solver.reset_peak_utilizations();
             native.step_frame();
             let m = harness.step_frame_island_provider(&mut |w: &World, m: &IslandMembers| oracle_island_step(w, m)).unwrap();
             routed += usize::from(!m.chunks.is_empty() || !m.impactors.is_empty());
             chunks_routed += m.chunks.len();
             assert_eq!(stress_learned::outcome::fingerprint(&native), stress_learned::outcome::fingerprint(&harness), "{}: frame {frame} differs", scene.name);
             assert_eq!(native.solver.clusters.len(), harness.solver.clusters.len(), "{}: frame {frame}: clusters", scene.name);
+            // each frame's peak utilisation as the recorder's (the next call's input)
+            let peaks = |w: &World| w.solver.bonds.iter().flatten().map(|b| b.peak_utilization.to_bits()).collect::<Vec<_>>();
+            assert_eq!(peaks(&native), peaks(&harness), "{}: frame {frame}: peak utilisation", scene.name);
         }
         eprintln!("{}: {} frames identical; {routed} routed, {chunks_routed} chunk-frames in islands", scene.name, frames(&scene));
     }
@@ -50,6 +54,7 @@ fn a_different_island_changes_the_island_alone() {
         let mut differed = 0;
         for frame in 0..frames(&scene).min(20) {
             let mut native = w.clone();
+            native.solver.reset_peak_utilizations();
             native.step_frame();
             // the provider's island: the oracle's step from a start with the impactors 1% faster
             let mut provider = |start: &World, m: &IslandMembers| -> Result<IslandState, String> {

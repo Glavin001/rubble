@@ -617,6 +617,10 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
                     let keys = view.routed_island_keys();
                     let d = provider(&view, &keys)?;
                     let mut x = start.clone();
+                    // The frame's peak utilisation afresh, as the host's (the decoded state
+                    // carries none: the island's bonds read 0 at the next call, as in the
+                    // coupled closed loop).
+                    x.solver.reset_peak_utilizations();
                     x.apply_decoded(&d)?;
                     Ok(x.extract_island(m))
                 };

@@ -2,12 +2,18 @@
 //!
 //!   learned_impact_relabel --jobs JOBS.json --out DIR [--no-calls] [--threads N]
 //!
-//! JOBS.json: `[{"event": EVENT_DIR, "frame": F, "state": STATE.bin | null}, …]` (`state`: a
-//! MessagePack `IslandState`, e.g. a model's prediction; null: the oracle's own state of the
-//! routing's island at F). Per job `i` writes `DIR/<i>_start.bin` and `DIR/<i>_end.bin`
-//! (the oracle's frame-end island state: the label), `DIR/<i>_call/` (the call's inputs,
-//! `learned-impact-outcome/3`), and one JSON line on stdout. Events run in parallel; each
-//! event's jobs share one replay.
+//! JOBS.json: `[{"event": EVENT_DIR, "frame": F, "decoded": D.json | "state": S.msgpack | neither,
+//! "parent_call": any, "split_group": G}, …]`:
+//! - `decoded`: a model's `learned-impact-decoded-state/1` outcome of frame F, taken as
+//!   harness A takes it; the relabelled call is frame F + 1's;
+//! - `state`: a MessagePack `IslandState` imposed at frame F's start (exact);
+//! - neither: the oracle's own state of the routing's island at F.
+//!
+//! Per job `i`: `DIR/<i>_start.msgpack`, `DIR/<i>_end.msgpack` (the oracle's frame-end island
+//! state: the label), `DIR/<i>_call/` (one `learned-impact-outcome/4` call, inputs from that
+//! start, targets the oracle's frame; manifest `source` "dagger", `dagger` the provenance,
+//! `split_group` the job's or the event's), and one JSON line on stdout. Events run in
+//! parallel; each event's jobs share one replay of its native oracle.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -15,7 +21,8 @@ use std::path::PathBuf;
 use rayon::prelude::*;
 use serde_json::{json, Value};
 use stress_learned::outcome_calls::write_event;
-use stress_learned::relabel::{read_state, relabel_event, write_state};
+use stress_ref::world::DecodedState;
+use stress_learned::relabel::{read_state, relabel_event, write_state, Provided};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -42,26 +49,42 @@ fn main() {
     let results: Vec<Result<Vec<Value>, String>> = by_event
         .par_iter()
         .map(|(event, idx)| -> Result<Vec<Value>, String> {
-            let js: Vec<(usize, Option<stress_ref::world::IslandState>)> = idx
+            let t = std::time::Instant::now();
+            let js: Vec<(usize, Provided)> = idx
                 .iter()
                 .map(|&i| -> Result<_, String> {
-                    let f = list[i]["frame"].as_u64().ok_or("frame")? as usize;
-                    let st = match list[i]["state"].as_str() {
-                        Some(p) => Some(read_state(std::path::Path::new(p))?),
-                        None => None,
+                    let j = &list[i];
+                    let f = j["frame"].as_u64().ok_or("frame")? as usize;
+                    let p = if let Some(p) = j["decoded"].as_str() {
+                        let d: DecodedState = serde_json::from_slice(&std::fs::read(p).map_err(|e| format!("{p}: {e}"))?).map_err(|e| format!("{p}: {e}"))?;
+                        Provided::Decoded(d)
+                    } else if let Some(p) = j["state"].as_str() {
+                        Provided::Start(read_state(std::path::Path::new(p))?)
+                    } else {
+                        Provided::Own
                     };
-                    Ok((f, st))
+                    Ok((f, p))
                 })
                 .collect::<Result<_, _>>()?;
             let done = relabel_event(std::path::Path::new(event), &js, calls)?;
+            let secs = t.elapsed().as_secs_f64();
             let mut lines = Vec::new();
-            for (&i, r) in idx.iter().zip(&done) {
-                write_state(&out.join(format!("{i}_start.bin")), &r.start)?;
-                write_state(&out.join(format!("{i}_end.bin")), &r.end)?;
-                if let Some(c) = &r.call {
+            for (&i, mut r) in idx.iter().zip(done) {
+                let j = &list[i];
+                write_state(&out.join(format!("{i}_start.msgpack")), &r.start)?;
+                write_state(&out.join(format!("{i}_end.msgpack")), &r.end)?;
+                if let Some(c) = r.call.as_mut() {
+                    let provided = if j["decoded"].is_string() { "decoded" } else if j["state"].is_string() { "state" } else { "oracle" };
+                    c.manifest["source"] = json!("dagger");
+                    c.manifest["dagger"] = json!({"parent_event": event, "parent_frame": j["frame"], "parent_call": j["parent_call"], "provided": provided,
+                        "decoded": j["decoded"], "state": j["state"], "call_frame": r.frame,
+                        "decoded_keeps_deformation": std::env::var("STRESS_DECODED_DEFORMATION").is_ok_and(|v| v == "1")});
+                    if !j["split_group"].is_null() {
+                        c.manifest["split_group"] = j["split_group"].clone();
+                    }
                     write_event(&out.join(format!("{i}_call")), c, true)?;
                 }
-                lines.push(json!({"job": i, "event": event, "frame": r.frame, "chunks": r.members.chunks.len(), "impactors": r.members.impactors.len()}));
+                lines.push(json!({"job": i, "event": event, "frame": r.frame, "chunks": r.members.chunks.len(), "impactors": r.members.impactors.len(), "event_seconds": secs, "event_jobs": idx.len()}));
             }
             Ok(lines)
         })

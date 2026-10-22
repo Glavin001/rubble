@@ -1358,6 +1358,14 @@ pub fn build_event(dir: &Path) -> Result<CallEvent, String> {
 /// groups come from the `blast_parity` QS frame of the same state (as recorded); without,
 /// they are zero and `available.qs_frame` is false.
 pub fn live_call(world: &mut World, name: &str, ctx_from: &Value, chunk_keys: &[i64], impactor_keys: &[i64], frame: usize, qs: bool) -> Result<CallEvent, String> {
+    live_call_labelled(world, name, ctx_from, chunk_keys, impactor_keys, frame, qs, false)
+}
+
+/// `live_call`, and with `targets` the oracle's frame from that state as its targets: the
+/// world is stepped one frame (`outcome::oracle_frame`, exactly as the recorder steps and
+/// records a frame) and left at the frame's end. DAgger relabelling (`relabel`).
+#[allow(clippy::too_many_arguments)]
+pub fn live_call_labelled(world: &mut World, name: &str, ctx_from: &Value, chunk_keys: &[i64], impactor_keys: &[i64], frame: usize, qs: bool, targets: bool) -> Result<CallEvent, String> {
     let ix = Index::new(world);
     let (mut statics, mut a) = (Arrays::default(), Arrays::default());
     capture_static(world, &ix, &mut statics)?;
@@ -1403,6 +1411,10 @@ pub fn live_call(world: &mut World, name: &str, ctx_from: &Value, chunk_keys: &[
     }
     a.i("live_bond_frames_since_broken", &[ix.e], &since)?;
     a.i("frame_phase", &[], &[0])?;
+    if targets {
+        let mut peak_prev: Vec<f32> = world.solver.bonds.iter().flatten().map(|b| b.peak_utilization as f32).collect();
+        crate::outcome::oracle_frame(world, &ix, 0, &mut peak_prev, &mut a)?;
+    }
     for (k, x) in statics.f32s {
         a.f32s.insert(k, x);
     }
@@ -1422,11 +1434,43 @@ pub fn live_call(world: &mut World, name: &str, ctx_from: &Value, chunk_keys: &[
     let r = Record::from_arrays(name.to_string(), world.scene.clone(), ctx, a);
     let st = Statics::of(&r)?;
     let hist = History::of(&r, st.e)?;
-    let mut call = build_call(&r, &st, 0, None, &hist, &BuildOptions { targets: false })?.ok_or("live_call: empty island")?;
+    let mut call = build_call(&r, &st, 0, None, &hist, &BuildOptions { targets })?.ok_or("live_call: empty island")?;
     call.frame = frame;
     let calls = vec![call];
     let manifest = manifest_of(&r, &st, &calls, false);
     Ok(CallEvent { manifest, calls, structures: structures_of(&st, &r) })
+}
+
+/// The `learned-impact-outcome/3` record of a `/4` event, for models trained on `/3`: `/4`
+/// only added to `/3` (the hidden deformation: chunk_feat's last 12 columns, `chunk_def`,
+/// `chunk_def_uc`, `y_chunk_def_end`; the bodies: `chunk_body`, `chunk_body_q`), so dropping
+/// the additions is the `/3` record exactly.
+pub fn downgrade_to_v3(ev: &mut CallEvent) -> Result<(), String> {
+    const V3_CHUNK_FEAT: usize = 33;
+    if ev.manifest["schema_version"] != CALLS_SCHEMA {
+        return Err(format!("downgrade_to_v3: schema {} is not {CALLS_SCHEMA}", ev.manifest["schema_version"]));
+    }
+    for call in &mut ev.calls {
+        call.arrays.retain(|(k, _)| !matches!(k.as_str(), "chunk_def" | "chunk_def_uc" | "y_chunk_def_end" | "chunk_body" | "chunk_body_q"));
+        for (k, a) in &mut call.arrays {
+            if k == "chunk_feat" {
+                let Arr::F32(shape, d) = a else { return Err("chunk_feat is not f32".into()) };
+                let (n, w) = (shape[0], shape[1]);
+                if w != V3_CHUNK_FEAT + 12 {
+                    return Err(format!("chunk_feat width {w}, not {}", V3_CHUNK_FEAT + 12));
+                }
+                *d = (0..n).flat_map(|r| d[r * w..r * w + V3_CHUNK_FEAT].to_vec()).collect();
+                shape[1] = V3_CHUNK_FEAT;
+            }
+        }
+    }
+    ev.manifest["schema_version"] = json!("learned-impact-outcome/3");
+    ev.manifest["builder_revision"] = json!(3);
+    ev.manifest["downgraded_from"] = json!(CALLS_SCHEMA);
+    if let Some(cols) = ev.manifest["columns"]["chunk_feat"].as_array_mut() {
+        cols.truncate(V3_CHUNK_FEAT);
+    }
+    Ok(())
 }
 
 /// Write an event in P2's on-disk format: `manifest.json`, `calls.json` and the arrays,

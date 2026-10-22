@@ -12,7 +12,7 @@
 //! field of `World` and `ReferenceSolver` has an explicit policy: a new field cannot cross
 //! (or fail to cross) the boundary unnoticed.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use super::*;
 use crate::solver::SolverIsland;
@@ -272,10 +272,16 @@ impl World {
         }
         let m = self.island_members();
         if m.chunks.is_empty() && m.impactors.is_empty() {
+            self.solver.reset_peak_utilizations();
             self.step_frame();
             return Ok(m);
         }
         let st = provider(self, &m)?;
+        // Each frame's peak utilisation starts afresh after the frame-start state the
+        // provider reads (whose `peak_utilization` is the previous frame's: the recorder's
+        // order, which the call builder's `log1p_peak_util_prev` reads). Diagnostic only: no
+        // physics reads it.
+        self.solver.reset_peak_utilizations();
         self.step_frame();
         // The host's own island (stepped natively, then replaced): where the provider's
         // topology differs from it, the host's structure-level caches were derived from the
@@ -299,6 +305,7 @@ impl World {
 /// the island's state taken from it (harness A's reference and ceiling).
 pub fn oracle_island_step(start: &World, m: &IslandMembers) -> Result<IslandState, String> {
     let mut w = start.clone();
+    w.solver.reset_peak_utilizations();
     w.step_frame();
     Ok(w.extract_island(m))
 }

@@ -115,6 +115,9 @@ pub struct RecordOptions {
     pub label: String,
     /// Rigid-body engine.
     pub engine: Engine,
+    /// `Engine::Learned`: the model's checkpoint and device (`cpu` | `mps`).
+    pub checkpoint: Option<std::path::PathBuf>,
+    pub model_device: String,
 }
 
 /// Which rigid-body engine moves the bodies: the standalone world's own (the oracle) or
@@ -124,6 +127,18 @@ pub enum Engine {
     #[default]
     Standalone,
     Rubble,
+    /// rubble's engine, every routed island's frame from the learned model (closed loop).
+    Learned,
+    /// The same handoff with the oracle as the model (P0's boundary ceiling, the "perfect
+    /// model"): what the learned model would give if it were exact.
+    Ceiling,
+}
+
+impl Engine {
+    /// The routed islands' frames come from a provider at the 1/60 s call boundary.
+    pub fn model_coupled(self) -> bool {
+        matches!(self, Engine::Learned | Engine::Ceiling)
+    }
 }
 
 impl std::str::FromStr for Engine {
@@ -133,7 +148,10 @@ impl std::str::FromStr for Engine {
             "standalone" | "oracle" | "reference" => Ok(Engine::Standalone),
             "rubble" if cfg!(feature = "rubble") => Ok(Engine::Rubble),
             "rubble" => Err("engine rubble: build stress-viz with --features rubble".into()),
-            other => Err(format!("unknown engine '{other}' (standalone | rubble)")),
+            "learned" | "model" if cfg!(feature = "learned") => Ok(Engine::Learned),
+            "ceiling" if cfg!(feature = "learned") => Ok(Engine::Ceiling),
+            "learned" | "model" | "ceiling" => Err(format!("engine {s}: build stress-viz with --features learned")),
+            other => Err(format!("unknown engine '{other}' (standalone | rubble | learned | ceiling)")),
         }
     }
 }
@@ -158,6 +176,7 @@ pub fn try_new_world(scene: &Scene, engine: Engine) -> Result<World, String> {
         }
         #[cfg(not(feature = "rubble"))]
         Engine::Rubble => Err("engine rubble: build stress-viz with --features rubble".into()),
+        Engine::Learned | Engine::Ceiling => try_new_world(scene, Engine::Rubble),
     }
 }
 
@@ -289,6 +308,67 @@ impl Recorder {
 }
 
 /// Simulates `scene` and records the frames to render.
+/// Steps one frame with the run's engine: the world's own step, or (learned, ceiling) the
+/// closed loop where each routed island's frame comes from a provider.
+struct FrameStepper {
+    engine: Engine,
+    #[cfg(feature = "learned")]
+    model: Option<stress_learned::provider_client::ModelProvider>,
+    calls: usize,
+    call_ms: f64,
+}
+
+impl FrameStepper {
+    fn new(scene: &Scene, opts: &RecordOptions) -> FrameStepper {
+        #[cfg(feature = "learned")]
+        let model = (opts.engine == Engine::Learned).then(|| {
+            let ckpt = opts.checkpoint.clone().expect("engine learned needs --checkpoint");
+            let mut spec = stress_learned::provider_client::ModelSpec::new(ckpt);
+            spec.device = opts.model_device.clone();
+            let dir = std::env::temp_dir().join(format!("stress-viz-model-{}-{}", std::process::id(), opts.label.replace(['/', ' ', ':'], "_")));
+            stress_learned::provider_client::ModelProvider::spawn(&spec, &dir, &scene.name).unwrap_or_else(|e| panic!("model provider: {e}"))
+        });
+        #[cfg(not(feature = "learned"))]
+        let _ = scene;
+        FrameStepper {
+            engine: opts.engine,
+            #[cfg(feature = "learned")]
+            model,
+            calls: 0,
+            call_ms: 0.0,
+        }
+    }
+
+    fn step(&mut self, world: &mut World) {
+        if !self.engine.model_coupled() {
+            world.step_frame();
+            return;
+        }
+        #[cfg(feature = "learned")]
+        {
+            let frame = world.frame as i64;
+            let t = Instant::now();
+            let engine = self.engine;
+            let model = &mut self.model;
+            let mut provider = |view: &World, keys: &stress_ref::world::IslandKeys| -> Result<stress_ref::world::DecodedState, String> {
+                match engine {
+                    Engine::Ceiling => {
+                        let mut oracle = view.standalone_copy();
+                        oracle.step_frame();
+                        Ok(view.decoded_from_oracle(&oracle, keys, frame, 0))
+                    }
+                    _ => model.as_mut().expect("model").outcome(view, keys, frame),
+                }
+            };
+            let keys = world.step_frame_with_provider(&mut provider).unwrap_or_else(|e| panic!("frame {frame}: {e}"));
+            if !keys.chunks.is_empty() || !keys.impactors.is_empty() {
+                self.calls += 1;
+                self.call_ms += t.elapsed().as_secs_f64() * 1e3;
+            }
+        }
+    }
+}
+
 pub fn record(scene: &Scene, opts: &RecordOptions) -> Recording {
     let start = Instant::now();
     let mut world = new_world(scene, opts.engine);
@@ -299,9 +379,10 @@ pub fn record(scene: &Scene, opts: &RecordOptions) -> Recording {
     let every = opts.every.max(1) as u64;
     let mut frames = vec![first];
     let mut last_report = Instant::now();
+    let mut stepper = FrameStepper::new(scene, opts);
     // Stop on simulated time: a frame never advances less than one substep.
     while world.solver.time < opts.duration - 0.5 * frame_dt {
-        world.step_frame();
+        stepper.step(&mut world);
         let done = world.solver.time >= opts.duration - 0.5 * frame_dt;
         if world.frame.is_multiple_of(every) || done {
             frames.push(recorder.capture(&world));
@@ -317,6 +398,10 @@ pub fn record(scene: &Scene, opts: &RecordOptions) -> Recording {
                 start.elapsed().as_secs_f64()
             );
         }
+    }
+    if stepper.engine.model_coupled() && !opts.label.is_empty() {
+        eprintln!("{}: {} model calls, {:.0} ms per frame with a call (call record + model + apply)",
+                  opts.label, stepper.calls, stepper.call_ms / stepper.calls.max(1) as f64);
     }
     let obs = world.observation();
     let probes = scene

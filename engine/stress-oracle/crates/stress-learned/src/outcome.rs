@@ -814,7 +814,7 @@ pub fn scene_hash(scene: &Scene) -> String {
 
 /// Per-impactor contact within the frame, read after each substep: how many substeps the
 /// impactor took a contact impulse in, the first and last, and the structures it touched.
-struct ContactWatch {
+pub(crate) struct ContactWatch {
     prev: Vec<Vec3>,
     substeps: usize,
     count: Vec<usize>,
@@ -947,6 +947,67 @@ pub(crate) fn capture_inputs(world: &mut World, ix: &Index, f: usize, routing: O
 
 /// Record one event into `out/<event_id>` (written to `<event_id>.partial` and renamed
 /// when complete).
+/// One recorded oracle frame: the step (peak utilisations reset at its start, the contact
+/// watched) and its rows (`frame_bond_break_bin`, peak utilisations, dissipation, impactor
+/// contact, then the frame-end state and trajectory). Shared by the recorder and the
+/// relabelled call (`outcome_calls::live_call_labelled`), so a label is recorded exactly as
+/// a recorded frame is.
+pub(crate) struct OracleFrame {
+    pub n_breaks: usize,
+    pub substeps: u64,
+    pub watch: ContactWatch,
+    pub break_times: Vec<f64>,
+}
+
+pub(crate) fn oracle_frame(world: &mut World, ix: &Index, f: usize, peak_prev: &mut Vec<f32>, a: &mut Arrays) -> Result<OracleFrame, String> {
+    let frame_dt = world.scene.sim.frame_dt;
+    let t0 = world.solver.time;
+    let start_energy: Vec<(f64, f64)> = world.solver.bonds.iter().flatten().map(|b| (b.joint.dissipated, b.damped)).collect();
+    world.solver.reset_peak_utilizations();
+    let events_before = world.solver.events.len();
+    let substeps_before = world.solver.substeps;
+    let mut watch = ContactWatch::new(world);
+    let dt_sub = world.substep_dt();
+    world.step_frame_watched(|w| watch.observe(w, dt_sub))?;
+    ix.check(world)?;
+    let substeps = world.solver.substeps - substeps_before;
+
+    let mut break_bin = vec![-1i32; ix.e];
+    let mut n_breaks = 0usize;
+    let mut break_times = Vec::new();
+    for ev in &world.solver.events[events_before..] {
+        if let SolverEvent::Broken { time, structure, bond, .. } = ev {
+            let bin = (((time - t0) / frame_dt) * TIME_BINS as f64).floor().clamp(0.0, (TIME_BINS - 1) as f64) as i32;
+            let g = ix.bond0[*structure] + bond;
+            if break_bin[g] < 0 {
+                break_bin[g] = bin;
+                n_breaks += 1;
+                break_times.push(*time);
+            }
+        }
+    }
+    a.i("frame_bond_break_bin", &[ix.e], &break_bin)?;
+    let peak: Vec<f32> = world.solver.bonds.iter().flatten().map(|b| b.peak_utilization as f32).collect();
+    a.f("frame_bond_peak_util", &[ix.e], &peak)?;
+    // The previous frame's peak, per frame, so a kept frame never needs a dropped one.
+    a.f("frame_bond_peak_util_prev", &[ix.e], peak_prev)?;
+    *peak_prev = peak;
+    // Per-bond dissipation over the frame (J): joint (fracture, friction, rebar) and
+    // dashpot, differenced in f64 (the f32 running totals lose digits).
+    let dissipated: Vec<f32> = world.solver.bonds.iter().flatten().zip(&start_energy).flat_map(|(b, &(j, d))| [(b.joint.dissipated - j) as f32, (b.damped - d) as f32]).collect();
+    a.f("frame_bond_dissipated", &[ix.e, 2], &dissipated)?;
+    let mut contact_summary = Vec::with_capacity(world.impactors.len() * IMPACTOR_CONTACT);
+    let n_sub = watch.substeps.max(1) as f64;
+    for k in 0..world.impactors.len() {
+        let bin = |i: Option<usize>| i.map_or(-1.0, |i| ((i as f64 / n_sub) * TIME_BINS as f64).floor());
+        contact_summary.extend([watch.count[k] as f32 / n_sub as f32, bin(watch.first[k]) as f32, bin(watch.last[k]) as f32, watch.structures[k].iter().map(|&s| 1u32 << s.min(30)).sum::<u32>() as f32]);
+    }
+    a.f("frame_impactor_contact", &[world.impactors.len(), IMPACTOR_CONTACT], &contact_summary)?;
+    capture_state(world, ix, a)?;
+    capture_traj(world, f + 1, a)?;
+    Ok(OracleFrame { n_breaks, substeps, watch, break_times })
+}
+
 pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOptions, beat: &dyn Fn(&Beat)) -> Result<OutcomeSummary, String> {
     let t_event = Instant::now();
     let final_dir = out.join(&recipe.event_id);
@@ -1012,7 +1073,6 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
             (inputs.chunk_routed, inputs.impactor_routed, inputs.pairs, inputs.contacts, inputs.punch_breaks, inputs.prior_converged);
         *cost.get_mut("qs_prior").unwrap() += inputs.prior_seconds;
         let start_connected = bond_connected(&world);
-        let start_energy: Vec<(f64, f64)> = world.solver.bonds.iter().flatten().map(|b| (b.joint.dissipated, b.damped)).collect();
         *cost.get_mut("overhead").unwrap() += t_over.elapsed().as_secs_f64() - inputs.prior_seconds;
 
         if let Some(t) = &template {
@@ -1031,50 +1091,11 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
 
         // The oracle's frame.
         let t_oracle = Instant::now();
-        world.solver.reset_peak_utilizations();
-        let events_before = world.solver.events.len();
-        let substeps_before = world.solver.substeps;
-        let mut watch = ContactWatch::new(&world);
-        let dt_sub = world.substep_dt();
-        world.step_frame_watched(|w| watch.observe(w, dt_sub))?;
+        let OracleFrame { n_breaks, substeps, watch, break_times: bt } = oracle_frame(&mut world, &ix, f, &mut peak_prev, &mut a)?;
         *cost.get_mut("oracle").unwrap() += t_oracle.elapsed().as_secs_f64();
         let t_over = Instant::now();
-        ix.check(&world)?;
-        let substeps = world.solver.substeps - substeps_before;
         substeps_total += substeps;
-
-        let mut break_bin = vec![-1i32; ix.e];
-        let mut n_breaks = 0usize;
-        for ev in &world.solver.events[events_before..] {
-            if let SolverEvent::Broken { time, structure, bond, .. } = ev {
-                let bin = (((time - t0) / frame_dt) * TIME_BINS as f64).floor().clamp(0.0, (TIME_BINS - 1) as f64) as i32;
-                let g = ix.bond0[*structure] + bond;
-                if break_bin[g] < 0 {
-                    break_bin[g] = bin;
-                    n_breaks += 1;
-                    break_times.push(*time);
-                }
-            }
-        }
-        a.i("frame_bond_break_bin", &[ix.e], &break_bin)?;
-        let peak: Vec<f32> = world.solver.bonds.iter().flatten().map(|b| b.peak_utilization as f32).collect();
-        a.f("frame_bond_peak_util", &[ix.e], &peak)?;
-        // The previous frame's peak, per frame, so a kept frame never needs a dropped one.
-        a.f("frame_bond_peak_util_prev", &[ix.e], &peak_prev)?;
-        peak_prev = peak;
-        // Per-bond dissipation over the frame (J): joint (fracture, friction, rebar) and
-        // dashpot, differenced in f64 (the f32 running totals lose digits).
-        let dissipated: Vec<f32> = world.solver.bonds.iter().flatten().zip(&start_energy).flat_map(|(b, &(j, d))| [(b.joint.dissipated - j) as f32, (b.damped - d) as f32]).collect();
-        a.f("frame_bond_dissipated", &[ix.e, 2], &dissipated)?;
-        let mut contact_summary = Vec::with_capacity(world.impactors.len() * IMPACTOR_CONTACT);
-        let n_sub = watch.substeps.max(1) as f64;
-        for k in 0..world.impactors.len() {
-            let bin = |i: Option<usize>| i.map_or(-1.0, |i| ((i as f64 / n_sub) * TIME_BINS as f64).floor());
-            contact_summary.extend([watch.count[k] as f32 / n_sub as f32, bin(watch.first[k]) as f32, bin(watch.last[k]) as f32, watch.structures[k].iter().map(|&s| 1u32 << s.min(30)).sum::<u32>() as f32]);
-        }
-        a.f("frame_impactor_contact", &[world.impactors.len(), IMPACTOR_CONTACT], &contact_summary)?;
-        capture_state(&world, &ix, &mut a)?;
-        capture_traj(&world, f + 1, &mut a)?;
+        break_times.extend(bt);
 
         // Phase.
         let touched: HashSet<usize> = watch.structures.iter().flatten().copied().collect();

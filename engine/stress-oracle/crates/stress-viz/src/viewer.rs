@@ -63,6 +63,8 @@ fn engine_label(e: Engine) -> &'static str {
     match e {
         Engine::Standalone => "standalone (the oracle's rigid bodies and contact)",
         Engine::Rubble => "rubble AVBD GPU (stress solve owns impact islands)",
+        Engine::Learned => "learned impact-outcome model (closed loop)",
+        Engine::Ceiling => "oracle through the model's handoff (ceiling)",
     }
 }
 
