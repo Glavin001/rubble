@@ -214,24 +214,30 @@ def candidate_args(name: str, a, out: Path, event: str) -> tuple[list[str], dict
             if a.python_dir:
                 args += ["--python-dir", str(a.python_dir)]
             env = {**base, "STRESS_DECODED_DEFORMATION": "1"} if name == "a_model_def" else base
+            # a /5 model's own decode: its bodies' ids from its decode (STRESS_FULL_IDS=decode:
+            # the oracle's are not the model's to read, and a model's split numbered as the
+            # oracle's can give one id twice) and its bodies derived from its predicted hidden
+            # state (STRESS_FULL_BODIES=derive, P2's contract) unless a column says otherwise
+            if name != "a_model_def":
+                env = {**env, "STRESS_FULL_IDS": "decode", "STRESS_FULL_BODIES": "derive"}
             if name == "a_model_rigid":
                 # a /5 model through decoded state /2 with rigid bodies (no fit residual kept
                 # as hidden deformation: a model's world-state noise would be strain)
-                env = {**base, "STRESS_FULL_DEFORMATION": "0"}
+                env = {**env, "STRESS_FULL_DEFORMATION": "0"}
             if name == "a_model_bound":
                 # with the host's energy bound (STRESS_FULL_ENERGY_BOUND: the island's KE +
                 # stored + gravity potential at most its start's plus 5%)
-                env = {**base, "STRESS_FULL_ENERGY_BOUND": "0.05"}
+                env = {**env, "STRESS_FULL_ENERGY_BOUND": "0.05"}
             if name == "a_model_bounds":
-                env = {**base, "STRESS_FULL_ENERGY_BUDGET": "1", "STRESS_FULL_CONTACT_BOUNDS": "1"}
+                env = {**env, "STRESS_FULL_ENERGY_BUDGET": "1", "STRESS_FULL_CONTACT_BOUNDS": "1"}
             if name == "a_model_table":
                 # a /5 model's body table applied (its cluster head) even where its hidden
                 # state could derive the bodies
-                env = {**base, "STRESS_FULL_BODIES": "table"}
+                env = {**env, "STRESS_FULL_BODIES": "table"}
             if name == "a_model_start":
                 # a /5 model through decoded state /2 with the unpredicted fields from the frame
                 # start (no oracle information); a_model takes them from STRESS_FULL_BASE
-                env = {**base, "STRESS_FULL_BASE": "start"}
+                env = {**env, "STRESS_FULL_BASE": "start"}
             return args, env
     if name == "coupled":
         # Diagnostic: the oracle's own coupled frame, no call boundary (the coupling alone).

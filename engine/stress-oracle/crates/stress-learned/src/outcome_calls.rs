@@ -35,7 +35,7 @@ const F64_TABLES: &[&str] = &["break_f64"];
 /// (`full_state_calls`), for events recorded with the full state (recorder revision 9 on).
 pub const CALLS_SCHEMA_FULL: &str = "learned-impact-outcome/5";
 /// Bumped whenever the features or targets this builder writes change.
-pub const BUILDER_REVISION: u32 = 8;
+pub const BUILDER_REVISION: u32 = 9;
 pub const N_TIME_BINS: usize = 8;
 const G0: f64 = 9.81;
 const TINY: f64 = 1e-6;
@@ -1413,6 +1413,10 @@ pub fn build_event(dir: &Path) -> Result<CallEvent, String> {
     }
     let truncated = r.outcome.as_ref().and_then(|o| o["truncated"].as_bool()).unwrap_or(false);
     let full = crate::full_state_calls::augment(dir, &r.ctx, &mut calls)?;
+    // Revision 9 (P1, 11460bd7): the island's contact energy at both boundaries, /5 events.
+    if full.is_some() {
+        crate::full_state_calls::add_contact_energy(dir, &r.scene, &mut calls)?;
+    }
     let mut manifest = manifest_of(&r, &st, &calls, truncated);
     let mut event_arrays = Vec::new();
     if let Some((cols, statics)) = full {
@@ -1529,6 +1533,15 @@ pub fn live_call_full(world: &mut World, name: &str, ctx_from: &Value, chunk_key
     let mut ctx = ctx_from.clone();
     ctx["bond_keys"] = json!(bond_keys);
     let (cols, statics) = crate::full_state_calls::augment_live(&start, targets.then_some(&*world), &ctx, &mut ev.calls, columns)?;
+    // Revision 9: the island's contact energy at the frame's start (an input) and, with
+    // targets, at its end, as a recorded /5 call carries them (`add_contact_energy`).
+    let m = crate::full_state_calls::members_of(chunk_keys, impactor_keys);
+    for c in &mut ev.calls {
+        c.energy.insert("E_contact_start".into(), start.island_contact_energy(&m));
+        if targets {
+            c.energy.insert("E_contact_end".into(), world.island_contact_energy(&m));
+        }
+    }
     ev.manifest["schema_version"] = json!(CALLS_SCHEMA_FULL);
     ev.manifest["full_state_columns"] = cols;
     ev.event_arrays = statics;
