@@ -268,14 +268,17 @@ fn main() {
 }
 
 /// Bytes of every file under `p`.
+/// Disk space the tree takes (allocated blocks, as `du` counts: the many small files of a
+/// recording take about 8% more than their lengths).
 fn dir_bytes(p: &std::path::Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
     let mut total = 0;
     let mut stack = vec![p.to_path_buf()];
     while let Some(d) = stack.pop() {
         for e in fs::read_dir(&d).into_iter().flatten().flatten() {
             match e.metadata() {
                 Ok(m) if m.is_dir() => stack.push(e.path()),
-                Ok(m) => total += m.len(),
+                Ok(m) => total += m.blocks() * 512,
                 Err(_) => {}
             }
         }
