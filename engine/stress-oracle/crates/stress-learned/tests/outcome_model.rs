@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use stress_learned::outcome_decode::{decode, DecodeConfig};
 use stress_learned::outcome_model::{read_event, structure_hierarchies, Model, Options, Outputs, Weights};
+use stress_learned::outcome_program::compile;
 
 fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/p3-model")
@@ -171,5 +172,32 @@ fn rust_forward_and_decode_reproduce_p2s_decoded_states() {
             }
         }
         assert!(worst < 1e-5, "{name}: motion differs by {worst:.2e} of its largest value");
+    }
+}
+
+/// The GPU program (`outcome_program`), interpreted on the CPU, computes the reference's
+/// forward pass: every op of the Slang kernels' arithmetic, with and without the
+/// node-projection lever.
+#[test]
+fn the_gpu_program_interpreted_on_the_cpu_matches_the_reference() {
+    let w = Weights::load(&fixture()).unwrap();
+    for lever in [false, true] {
+        let model = Model::new(&w, Options { node_projection: lever }).unwrap();
+        for dir in parity_dirs() {
+            if torch_outputs(&dir).1 {
+                continue;
+            }
+            let name = dir.file_name().unwrap().to_string_lossy().to_string();
+            let ev = read_event(&dir.join("call")).unwrap();
+            let hier = structure_hierarchies(&ev, model.config.levels);
+            let want = model.forward(&ev, &hier, 0).unwrap();
+            let prog = compile(&model, &ev, &hier, 0).unwrap();
+            let got = prog.outputs(&prog.run_cpu());
+            for ((k, _, a), (_, _, b)) in got.named().into_iter().zip(want.named()) {
+                assert_eq!(a.len(), b.len(), "{name}: {k}");
+                let e = worst(&a, &b);
+                assert!(e < 1e-5, "{name} (lever {lever}): {k} differs by {e:.2e} ({} ops)", prog.ops.len());
+            }
+        }
     }
 }

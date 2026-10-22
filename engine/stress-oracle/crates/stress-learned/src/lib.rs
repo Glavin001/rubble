@@ -16,6 +16,7 @@ pub mod provider_client;
 pub mod outcome_calls;
 pub mod outcome_decode;
 pub mod outcome_model;
+pub mod outcome_program;
 pub mod outcome;
 pub mod oracle_config;
 pub mod peak;

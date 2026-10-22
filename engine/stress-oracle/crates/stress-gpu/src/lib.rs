@@ -52,6 +52,7 @@ pub mod loads;
 pub mod methods;
 pub mod micro;
 pub mod gnn_probe;
+pub mod outcome_gnn;
 
 /// What `build.rs` reflects from the generated WGSL: how many storage buffers each module's
 /// group 0 declares, and which group-0 bindings each entry point uses.
@@ -233,11 +234,14 @@ pub mod shaders {
     /// The learned impact-outcome plan's P0 cost probe (`gnn_probe`), f32 and f16.
     pub const GNN_PROBE: ShaderSet = shader_set!("gnn_probe", [("gnn_round", (128, 1, 1)), ("gnn_mlp_tiled", (128, 1, 1)), ("gnn_csr_sum", (128, 1, 1))]);
     pub const GNN_PROBE_F16: ShaderSet = shader_set!("gnn_probe_f16", [("gnn_round", (128, 1, 1)), ("gnn_mlp_tiled", (128, 1, 1)), ("gnn_csr_sum", (128, 1, 1))]);
+    /// P3: P2's trained impact-outcome model (`outcome_gnn`), the op list of
+    /// `stress_learned::outcome_program`.
+    pub const OUTCOME_GNN: ShaderSet = shader_set!("outcome_gnn", [("gnn_mlp", (128, 1, 1)), ("gnn_csr", (128, 1, 1)), ("gnn_fibre", (128, 1, 1))]);
 
     /// Every set (each Slang file with entry points).
     pub const ALL: &[ShaderSet] = &[
         WORLD_IC, SMOKE, STRESS_STEP, JOINT_TEST, WORLD, STRESS_RENDER, DESTRUCTION_RENDER, COUPLING, RESIDENT, CASCADE, PLAN, LAYOUT, SPAWN, COLLIDERS, PASS, PASSLOG, ROUTING, PUNCH, SPLIT,
-        HUD_OVERLAY, THRESHOLD, GNN_PROBE, GNN_PROBE_F16,
+        HUD_OVERLAY, THRESHOLD, GNN_PROBE, GNN_PROBE_F16, OUTCOME_GNN,
     ];
 }
 

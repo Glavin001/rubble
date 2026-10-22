@@ -175,7 +175,7 @@ impl Mat {
     }
 }
 
-fn mat_of(a: &Arr) -> Result<Mat, String> {
+pub(crate) fn mat_of(a: &Arr) -> Result<Mat, String> {
     match a {
         Arr::F32(s, d) => {
             let rows = s.first().copied().unwrap_or(0);
@@ -186,7 +186,7 @@ fn mat_of(a: &Arr) -> Result<Mat, String> {
     }
 }
 
-fn idx_of(a: &Arr) -> Result<Vec<usize>, String> {
+pub(crate) fn idx_of(a: &Arr) -> Result<Vec<usize>, String> {
     match a {
         Arr::I32(_, d) => Ok(d.iter().map(|&x| x as usize).collect()),
         Arr::I64(_, d) => Ok(d.iter().map(|&x| x as usize).collect()),
@@ -207,19 +207,19 @@ pub fn softplus(x: f32) -> f32 {
     }
 }
 
-fn sigmoid(x: f32) -> f32 {
+pub(crate) fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
 }
 
 // ------------------------------------------------------------------ layers
 
 #[derive(Clone, Debug)]
-struct Linear {
-    inp: usize,
-    out: usize,
+pub(crate) struct Linear {
+    pub(crate) inp: usize,
+    pub(crate) out: usize,
     /// `out × inp`, PyTorch's layout.
-    w: Vec<f32>,
-    b: Vec<f32>,
+    pub(crate) w: Vec<f32>,
+    pub(crate) b: Vec<f32>,
 }
 
 impl Linear {
@@ -251,9 +251,9 @@ impl Linear {
 
 /// `MeshGraphMLP`: Linear · SiLU · [Linear · SiLU]×(h−1) · Linear · [LayerNorm].
 #[derive(Clone, Debug)]
-struct Mlp {
-    layers: Vec<Linear>,
-    ln: Option<(Vec<f32>, Vec<f32>)>,
+pub(crate) struct Mlp {
+    pub(crate) layers: Vec<Linear>,
+    pub(crate) ln: Option<(Vec<f32>, Vec<f32>)>,
 }
 
 impl Mlp {
@@ -668,40 +668,40 @@ pub struct Options {
     pub node_projection: bool,
 }
 
-struct FineRound {
-    edge: Vec<Mlp>,
-    node: Mlp,
-    glob: Option<Mlp>,
+pub(crate) struct FineRound {
+    pub(crate) edge: Vec<Mlp>,
+    pub(crate) node: Mlp,
+    pub(crate) glob: Option<Mlp>,
 }
 
-struct CoarseRound {
-    mlp_edge: Mlp,
-    mlp_node: Mlp,
-    glob: Option<Mlp>,
+pub(crate) struct CoarseRound {
+    pub(crate) mlp_edge: Mlp,
+    pub(crate) mlp_node: Mlp,
+    pub(crate) glob: Option<Mlp>,
 }
 
-struct Norm {
-    mean: Vec<f32>,
-    std: Vec<f32>,
+pub(crate) struct Norm {
+    pub(crate) mean: Vec<f32>,
+    pub(crate) std: Vec<f32>,
 }
 
 /// P2's `ImpactOutcomeModel` with its weights.
 pub struct Model {
     pub config: ModelConfig,
     pub options: Options,
-    enc_chunk: Mlp,
-    enc_imp: Mlp,
-    enc_glob: Mlp,
-    enc_edge: Vec<Mlp>,
-    norm: HashMap<String, Norm>,
-    fine_pre: Vec<FineRound>,
-    fine_post: Vec<FineRound>,
-    down: Vec<Vec<CoarseRound>>,
-    up: Vec<Vec<CoarseRound>>,
-    bond_head: Mlp,
-    chunk_head: Mlp,
-    imp_head: Mlp,
-    energy_head: Mlp,
+    pub(crate) enc_chunk: Mlp,
+    pub(crate) enc_imp: Mlp,
+    pub(crate) enc_glob: Mlp,
+    pub(crate) enc_edge: Vec<Mlp>,
+    pub(crate) norm: HashMap<String, Norm>,
+    pub(crate) fine_pre: Vec<FineRound>,
+    pub(crate) fine_post: Vec<FineRound>,
+    pub(crate) down: Vec<Vec<CoarseRound>>,
+    pub(crate) up: Vec<Vec<CoarseRound>>,
+    pub(crate) bond_head: Mlp,
+    pub(crate) chunk_head: Mlp,
+    pub(crate) imp_head: Mlp,
+    pub(crate) energy_head: Mlp,
 }
 
 /// Every head output of one call (`ImpactOutcomeModel._heads`), PyTorch's names.
@@ -792,7 +792,7 @@ fn quat_rotate_inv(q: &[f32], v: [f32; 3]) -> [f32; 3] {
 }
 
 /// `WeightedEdgeConv.cal_ew`: per-edge pooling weights and the next level's node weights.
-fn cal_ew(w: &[f32], edges: &[(usize, usize)]) -> (Vec<f32>, Vec<f32>) {
+pub(crate) fn cal_ew(w: &[f32], edges: &[(usize, usize)]) -> (Vec<f32>, Vec<f32>) {
     let n = w.len();
     let mut deg = vec![0.0f32; n];
     for &(i, _) in edges {
