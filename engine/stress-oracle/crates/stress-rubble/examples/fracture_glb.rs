@@ -3,10 +3,15 @@
 //!
 //!   cargo run --release -p stress-rubble --example fracture_glb -- [GLB] [LEVEL] [FRAMES]
 //!
+//! A scene pack (`.json`, engine/scenes/vibe-city's export, e.g. fracturedTower) runs as the
+//! lab's stress modes run it: `stress_ref::scene_pack` under the profile's import options,
+//! shots with the pack's ball.
 //! `STRESS_PROFILE=threshold`: the v0 stress mode (`Profile::Threshold`) instead of `blast_parity`.
 //! `STRESS_SHOTS=N`: N shots of the lab's ball (its mass, radius and speed for a cuboid
 //! sample), one every 30 frames from frame 5, each at another chunk from the -x side; the
 //! frame times' median, p95 and worst over the frames after the first shot.
+//! `STRESS_HZ=120`: the physics frame rate (the lab's Physics menu; default the scene's).
+//! `STRESS_SHOT_MASS=16`: the shots' mass times this (the lab's Ball mass).
 //! `STRESS_VIEW=1`: also take the browser's view (`GpuWorld::view_with`) after every frame,
 //! timed apart.
 use stress_gpu::gpu::Gpu;
@@ -23,6 +28,15 @@ fn main() {
     // A procedural sample key (`cuboid`, `cuboidGrid`, `cuboids`, ...): the lab's cuboid
     // houses in that layout (`engine_fracture::samples::cuboid_stress_scene`); else a GLB.
     let mut ball = (1400.0, 0.35, 60.0);
+    // `STRESS_PROFILE=threshold`: another capability profile (default `blast_parity`).
+    let p = std::env::var("STRESS_PROFILE").ok().map(|v| Profile::parse(&v).unwrap_or_else(|| panic!("STRESS_PROFILE={v}: no such profile"))).unwrap_or(Profile::BlastParity);
+    let scene = if file.ends_with(".json") {
+        let bytes = std::fs::read(&file).expect("scene pack");
+        let (lab, info) = engine_fracture::pack::build_pack_scene(&bytes).expect("scene pack");
+        ball = (lab.projectile_mass, lab.projectile_radius, engine_fracture::plan::default_shot_speed(lab.extent, lab.projectile_speed));
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("scene pack JSON");
+        stress_ref::scene_pack::import_value_with(&json, &info.key, "structure", &info.key, p.import_options()).expect("pack import").0
+    } else {
     let (json, name) = match engine_fracture::samples::sample(&file).ok().filter(|s| s.procedural()) {
         Some(s) => {
             let (lab, json) = engine_fracture::samples::cuboid_stress_scene(s.layout).expect("cuboid houses");
@@ -35,7 +49,14 @@ fn main() {
             (engine_fracture::stress_export::shardwright_stress_json(&asset, level), asset.physics.name.clone())
         }
     };
-    let scene = stress_ref::shardwright::import_value_with(&json, &name, true).expect("stress import");
+    stress_ref::shardwright::import_value_with(&json, &name, true).expect("stress import")
+    };
+    let name = file.rsplit('/').next().unwrap_or(&file).to_string();
+    let mut scene = scene;
+    // Before `with_derived`, as stress-web sets the lab's Physics rate.
+    if let Some(hz) = std::env::var("STRESS_HZ").ok().map(|v| v.parse::<f64>().expect("STRESS_HZ")) {
+        scene.sim.frame_dt = 1.0 / hz;
+    }
     scene.validate().expect("valid");
     let mut scene = scene.with_derived();
     // The GPU's methods (the bench and the suites run `STRESS_METHODS=established`).
@@ -43,9 +64,10 @@ fn main() {
     let chunks: usize = scene.bodies.iter().map(|b| b.chunks.len()).sum();
     let parts: usize = scene.bodies.iter().flat_map(|b| &b.chunks).map(|c| c.compound.as_ref().map_or(1, |p| p.len())).sum();
     println!("{}: level {level}, {chunks} chunks, {parts} hulls, {} bonds, unsupported: {:?}", name, scene.bodies.iter().map(|b| b.bonds.len()).sum::<usize>(), stress_gpu::world::unsupported(&scene));
-    // `STRESS_PROFILE=threshold`: another capability profile (default `blast_parity`).
-    let p = std::env::var("STRESS_PROFILE").ok().map(|v| Profile::parse(&v).unwrap_or_else(|| panic!("STRESS_PROFILE={v}: no such profile"))).unwrap_or(Profile::BlastParity);
     p.apply_scene(&mut scene);
+    if let Some(k) = std::env::var("STRESS_SHOT_MASS").ok().map(|v| v.parse::<f64>().expect("STRESS_SHOT_MASS")) {
+        ball.0 *= k;
+    }
     scene.sim.duration = frames as f64 * scene.sim.frame_dt;
     scene.materials.entry("projectile".into()).or_insert_with(stress_ref::builders::elastic_steel);
     let gpu = Gpu::new().expect("GPU");
