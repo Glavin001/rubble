@@ -18,6 +18,8 @@
 //! Per job `i`: `DIR/<i>_start.msgpack`, `DIR/<i>_end.msgpack` (the oracle's frame-end island
 //! state: the label), `DIR/<i>_call/` (one `learned-impact-outcome/4` call, inputs from that
 //! start, targets the oracle's frame; manifest `source` "dagger", `dagger` the provenance,
+//! (a job the oracle or the call builder rejects, e.g. a blown-up model state, is a line with
+//! `error`, listed in `DIR/failures.jsonl`, and skipped: the others go on),
 //! `split_group` the job's or the event's), and one JSON line on stdout. Events run in
 //! parallel; each event's jobs share one replay of its native oracle.
 
@@ -28,7 +30,7 @@ use rayon::prelude::*;
 use serde_json::{json, Value};
 use stress_learned::outcome_calls::write_event;
 use stress_ref::world::DecodedState;
-use stress_learned::relabel::{read_state, relabel_event_with, write_state, Provided};
+use stress_learned::relabel::{read_state, relabel_event_jobs, write_state, Provided};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -90,10 +92,19 @@ fn main() {
                     Ok((f, p))
                 })
                 .collect::<Result<_, _>>()?;
-            let done = relabel_event_with(std::path::Path::new(event), &js, calls, fs_columns.as_ref())?;
+            let done = relabel_event_jobs(std::path::Path::new(event), &js, calls, fs_columns.as_ref())?;
             let secs = t.elapsed().as_secs_f64();
             let mut lines = Vec::new();
-            for (&i, mut r) in idx.iter().zip(done) {
+            for (&i, r) in idx.iter().zip(done) {
+                // A job the oracle or the call builder rejects is reported and skipped (not
+                // admissible); the batch goes on.
+                let mut r = match r {
+                    Ok(r) => r,
+                    Err(e) => {
+                        lines.push(json!({"job": i, "event": event, "frame": list[i]["frame"], "error": e}));
+                        continue;
+                    }
+                };
                 let j = &list[i];
                 write_state(&out.join(format!("{i}_start.msgpack")), &r.start)?;
                 write_state(&out.join(format!("{i}_end.msgpack")), &r.end)?;
@@ -121,15 +132,27 @@ fn main() {
             Ok(lines)
         })
         .collect();
-    let mut failed = 0;
+    let (mut failed, mut rejected) = (0, Vec::new());
     for r in results {
         match r {
-            Ok(ls) => ls.iter().for_each(|l| println!("{l}")),
+            Ok(ls) => {
+                for l in ls {
+                    if l.get("error").is_some() {
+                        rejected.push(l.to_string());
+                    }
+                    println!("{l}");
+                }
+            }
             Err(e) => {
                 failed += 1;
                 eprintln!("relabel failed: {e}");
             }
         }
+    }
+    // Rejected jobs (not admissible) are listed in DIR/failures.jsonl; they do not fail the run.
+    if !rejected.is_empty() {
+        std::fs::write(out.join("failures.jsonl"), rejected.join("\n") + "\n").expect("failures.jsonl");
+        eprintln!("relabel: {} job(s) rejected (not admissible), listed in {}", rejected.len(), out.join("failures.jsonl").display());
     }
     std::process::exit(i32::from(failed > 0));
 }

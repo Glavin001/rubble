@@ -214,3 +214,20 @@ fn an_own_state_full_state_relabel_is_the_recorded_call() {
     assert!(checked > 0);
     let _ = std::fs::remove_dir_all(&out);
 }
+
+/// A job whose state the oracle or the call builder rejects (here an infinite velocity, as a
+/// blown-up model state carries) is that job's error; the other jobs of the event go on.
+#[test]
+fn a_rejected_job_does_not_stop_the_others() {
+    let dir = event_dir();
+    let own = relabel_event(&dir, &[(3, Provided::Own)], false).unwrap();
+    let mut bad = own[0].start.clone();
+    for (_, ch) in &mut bad.solver.chunks {
+        ch.v = stress_ref::math::Vec3::new(f64::INFINITY, 0.0, 0.0);
+    }
+    let r = stress_learned::relabel::relabel_event_jobs(&dir, &[(2, Provided::Own), (3, Provided::Start(bad)), (4, Provided::Own)], true, None).unwrap();
+    assert!(r[0].is_ok() && r[2].is_ok(), "the others are relabelled");
+    assert!(r[1].is_err(), "the blown-up state is rejected");
+    eprintln!("rejected: {}", r[1].as_ref().err().unwrap());
+    std::fs::remove_dir_all(&dir).ok();
+}

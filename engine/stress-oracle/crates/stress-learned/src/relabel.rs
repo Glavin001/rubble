@@ -95,12 +95,18 @@ pub fn relabel_event(dir: &Path, jobs: &[(usize, Provided)], with_calls: bool) -
 /// (`outcome_calls::live_call_full`): `Some(columns)` a training manifest's
 /// `full_state_columns`, `Some(Null)` the call's own split.
 pub fn relabel_event_with(dir: &Path, jobs: &[(usize, Provided)], with_calls: bool, full_state: Option<&Value>) -> Result<Vec<Relabelled>, String> {
+    relabel_event_jobs(dir, jobs, with_calls, full_state)?.into_iter().collect()
+}
+
+/// `relabel_event_with`, each job's result on its own: a job that fails (a state the oracle or
+/// the call builder rejects, e.g. a blown-up model state) is its error, and the others go on.
+pub fn relabel_event_jobs(dir: &Path, jobs: &[(usize, Provided)], with_calls: bool, full_state: Option<&Value>) -> Result<Vec<Result<Relabelled, String>>, String> {
     let scene = event_scene(dir)?;
     let ctx = event_context(dir);
     let name = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| scene.name.clone());
     let mut order: Vec<usize> = (0..jobs.len()).collect();
     order.sort_by_key(|&k| jobs[k].0);
-    let mut out: Vec<Option<Relabelled>> = (0..jobs.len()).map(|_| None).collect();
+    let mut out: Vec<Option<Result<Relabelled, String>>> = (0..jobs.len()).map(|_| None).collect();
     let mut w = World::new(&scene);
     let mut at = 0usize;
     for k in order {
@@ -110,42 +116,47 @@ pub fn relabel_event_with(dir: &Path, jobs: &[(usize, Provided)], with_calls: bo
             w.step_frame();
             at += 1;
         }
-        let mut x = w.clone();
-        let mut call_frame = *frame;
-        if let Provided::Decoded(d) = provided {
-            decoded_frame(&mut x, d)?;
-            call_frame += 1;
-        }
-        // (The frame-start peak utilisation is the previous frame's, as recorded: the call
-        // reads it; the oracle's frame resets it at its start.)
-        let members = match provided {
-            Provided::Start(s) => s.members(),
-            _ => x.island_members(),
-        };
-        if let Provided::Start(s) = provided {
-            x = World::merge_island(&x, s, &members);
-        }
-        let start = x.extract_island(&members);
-        let end = oracle_island_step(&x, &members)?;
-        let call = if with_calls && !members.chunks.is_empty() {
-            let mut ck: Vec<i64> = members.chunks.iter().map(|&(s, c)| stress_ref::world::stable_key(s, c)).collect();
-            ck.sort_unstable();
-            let mut ik: Vec<i64> = members.impactors.iter().map(|&i| stress_ref::keys::impactor_key(i)).collect();
-            ik.sort_unstable();
-            let mut stepped = x.clone();
-            let ev = match full_state {
-                None => live_call_labelled(&mut stepped, &name, &ctx, &ck, &ik, call_frame, true, true)?,
-                Some(cols) => live_call_full(&mut stepped, &name, &ctx, &ck, &ik, call_frame, true, true, (!cols.is_null()).then_some(cols))?,
-            };
-            // The recorder's frame is the oracle's island step, bit for bit.
-            if state_bytes(&stepped.extract_island(&members))? != state_bytes(&end)? {
-                return Err(format!("{name} frame {call_frame}: the recorded frame differs from the oracle's island step"));
-            }
-            Some(ev)
-        } else {
-            None
-        };
-        out[k] = Some(Relabelled { frame: call_frame, members, start, end, call });
+        out[k] = Some(relabel_one(&w, *frame, provided, with_calls, full_state, &name, &ctx).map_err(|e| format!("{name} frame {frame}: {e}")));
     }
     Ok(out.into_iter().map(|r| r.expect("every job relabelled")).collect())
+}
+
+/// One job on the replayed world `w` at its frame.
+fn relabel_one(w: &World, frame: usize, provided: &Provided, with_calls: bool, full_state: Option<&Value>, name: &str, ctx: &Value) -> Result<Relabelled, String> {
+    let mut x = w.clone();
+    let mut call_frame = frame;
+    if let Provided::Decoded(d) = provided {
+        decoded_frame(&mut x, d)?;
+        call_frame += 1;
+    }
+    // (The frame-start peak utilisation is the previous frame's, as recorded: the call
+    // reads it; the oracle's frame resets it at its start.)
+    let members = match provided {
+        Provided::Start(s) => s.members(),
+        _ => x.island_members(),
+    };
+    if let Provided::Start(s) = provided {
+        x = World::merge_island(&x, s, &members);
+    }
+    let start = x.extract_island(&members);
+    let end = oracle_island_step(&x, &members)?;
+    let call = if with_calls && !members.chunks.is_empty() {
+        let mut ck: Vec<i64> = members.chunks.iter().map(|&(s, c)| stress_ref::world::stable_key(s, c)).collect();
+        ck.sort_unstable();
+        let mut ik: Vec<i64> = members.impactors.iter().map(|&i| stress_ref::keys::impactor_key(i)).collect();
+        ik.sort_unstable();
+        let mut stepped = x.clone();
+        let ev = match full_state {
+            None => live_call_labelled(&mut stepped, name, ctx, &ck, &ik, call_frame, true, true)?,
+            Some(cols) => live_call_full(&mut stepped, name, ctx, &ck, &ik, call_frame, true, true, (!cols.is_null()).then_some(cols))?,
+        };
+        // The recorder's frame is the oracle's island step, bit for bit.
+        if state_bytes(&stepped.extract_island(&members))? != state_bytes(&end)? {
+            return Err("the recorded frame differs from the oracle's island step".into());
+        }
+        Some(ev)
+    } else {
+        None
+    };
+    Ok(Relabelled { frame: call_frame, members, start, end, call })
 }
