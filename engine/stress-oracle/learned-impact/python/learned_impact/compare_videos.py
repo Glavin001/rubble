@@ -86,7 +86,12 @@ def main() -> int:
     p.add_argument("--only", default="")
     p.add_argument("--max-seconds", type=float, default=2.0)
     p.add_argument("--fps", type=int, default=15)
+    p.add_argument("--index-only", action="store_true", help="rewrite index.md from results.json")
+    p.add_argument("--notes", type=Path, help="markdown appended to index.md (a reading of the results)")
     a = p.parse_args()
+    if a.index_only:
+        write_index(a, json.loads((a.out / "results.json").read_text())["results"])
+        return 0
     a.out.mkdir(parents=True, exist_ok=True)
     only = {x for x in a.only.split(",") if x}
     env = {**os.environ, "STRESS_DEBRIS_ROUTING": "1"}
@@ -162,7 +167,18 @@ def write_index(a, results) -> None:
         cell = lambda k: f"{s.get(k, {}).get('pieces', '?')} / {s.get(k, {}).get('broken_bonds', '?')}"
         sp = lambda k: ", ".join(f"{v:.2f}" for v in s.get(k, {}).get("impactor_speeds", []))
         L.append(f"| [{r['name']}]({r['name']}.mp4) | {r['event'].split('/')[-1]} | {r['split'] or 'reference'} | {cell('oracle')} | {cell('model')} | {cell('qs')} | {sp('oracle')} / {sp('model')} |")
-    L += [""]
+    # The oracle panel must be the recorded event (P1's record of the same scene).
+    ok = []
+    for r in results:
+        if "failed" in r or "oracle" not in r["summaries"]:
+            continue
+        o, rec = r["summaries"]["oracle"], r["recorded"]
+        same = o["pieces"] == rec["fragments"] and all(abs(x - i["speed"]) < 1e-3 for x, i in zip(o["impactor_speeds"], rec["impactors"]))
+        ok.append((r["name"], same))
+    L += ["", f"Check: the oracle panel reproduces P1's recorded outcome (pieces and every impactor's exit speed to 1e-3 m/s) "
+          f"in {sum(x for _, x in ok)}/{len(ok)} scenarios" + ("" if all(x for _, x in ok) else f"; differs: {[n for n, x in ok if not x]}") + ".", ""]
+    if getattr(a, "notes", None) and a.notes.exists():
+        L += [a.notes.read_text().rstrip(), ""]
     for r in results:
         L += [f"## {r['name']}", "", r["what"], "", f"Event: `{r['event']}`."]
         if "failed" not in r:
