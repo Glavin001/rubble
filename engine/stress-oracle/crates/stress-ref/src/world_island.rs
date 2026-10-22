@@ -320,7 +320,9 @@ impl World {
         };
         let changed = topology(&own) != topology(&st);
         *self = World::merge_island(self, &st, &m);
-        if changed {
+        // ids the provider's splits share with the host's own splits elsewhere this frame
+        let renumbered = self.solver.renumber_duplicate_island_ids(&m.chunks);
+        if changed || renumbered > 0 {
             self.topology_version += 1;
             self.solver.unchanged.clear();
             self.solver.refresh_true_steps();

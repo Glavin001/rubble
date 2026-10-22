@@ -295,7 +295,8 @@ pub struct World {
     pub decoded_keeps_deformation: bool,
     /// The ground contact treats a point born deeper than one substep of approach could
     /// carry as already overlapping (an offset that only ratchets down), as the pair
-    /// contact does (`STRESS_HANDED_INDENTS=1`, off by default). It is what a body handed
+    /// contact does (`STRESS_HANDED_INDENTS=1`, off by default). (The penalty impactor-chunk
+    /// contact's equivalent is `STRESS_HANDED_IMPACTOR_INDENTS=1`, one offset per pair.) It is what a body handed
     /// over from the engine needs: rubble rests a 393 kg ram 7.5 mm into the ground, and
     /// that overlap fired by this stiffer contact launched it at 13 m/s.
     pub handed_ground_overlaps: bool,
@@ -1194,6 +1195,22 @@ impl World {
         // Only bodies in an impact island take contact here (all of them in the
         // standalone world); an external engine handles the others.
         let in_island = |solver: &ReferenceSolver, s: usize, c: usize| !solver.clusters[solver.chunks[s][c].cluster].driven;
+        // `STRESS_HANDED_IMPACTOR_INDENTS=1` (off by default): an impactor-chunk pair born deeper than one substep of
+        // approach could carry keeps that excess as an offset (`ground_offsets` key
+        // `(2, impactor, structure << 32 | chunk)`, one value per pair) that only ratchets
+        // down and is dropped when the pair separates: a state handed over (a decoded
+        // impactor) is not launched by its overlap.
+        static HANDED_IMPACTOR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let handed = *HANDED_IMPACTOR.get_or_init(|| std::env::var("STRESS_HANDED_IMPACTOR_INDENTS").is_ok_and(|v| v == "1"));
+        let mut previous_imp: HashMap<(u8, usize, usize), Vec<f64>> = HashMap::new();
+        if handed {
+            let keys: Vec<(u8, usize, usize)> = self.ground_offsets.keys().filter(|k| k.0 == 2).copied().collect();
+            for k in keys {
+                if let Some(v) = self.ground_offsets.remove(&k) {
+                    previous_imp.insert(k, v);
+                }
+            }
+        }
         for ii in 0..self.impactors.len() {
             if self.impactors[ii].driven {
                 continue;
@@ -1226,6 +1243,34 @@ impl World {
                         }
                     }
                 }
+            }
+            if handed && !contacts.is_empty() {
+                let mut deepest: HashMap<(usize, usize), (f64, Vec3)> = HashMap::new();
+                for &(s, c, _, point, _, depth, _) in &contacts {
+                    let e = deepest.entry((s, c)).or_insert((0.0, point));
+                    if depth > e.0 {
+                        *e = (depth, point);
+                    }
+                }
+                let mut offset_of: HashMap<(usize, usize), f64> = HashMap::new();
+                for (&(s, c), &(depth, point)) in &deepest {
+                    let key = (2u8, ii, (s << 32) | c);
+                    let approach = (imp.velocity + imp.angular_velocity.cross(point - imp.pose.position) - self.solver.point_velocity(s, c, point)).norm() * dt;
+                    let offset = match previous_imp.remove(&key) {
+                        Some(v) => v[0].min(depth),
+                        None => (depth - approach).max(0.0),
+                    };
+                    if offset > 0.0 {
+                        self.ground_offsets.insert(key, vec![offset]);
+                        offset_of.insert((s, c), offset);
+                    }
+                }
+                for x in &mut contacts {
+                    if let Some(&o) = offset_of.get(&(x.0, x.1)) {
+                        x.5 = (x.5 - o).max(0.0);
+                    }
+                }
+                contacts.retain(|x| x.5 > 0.0);
             }
             if contacts.is_empty() {
                 continue;
@@ -1272,6 +1317,13 @@ impl World {
         let t_ground = crate::profile::time(crate::profile::Stage::ContactGround);
         // Ground.
         let mut previous_ground = std::mem::take(&mut self.ground_offsets);
+        // (the impactor-chunk pairs' offsets, kept above, are not the ground's)
+        let pair_keys: Vec<(u8, usize, usize)> = previous_ground.keys().filter(|k| k.0 == 2).copied().collect();
+        for k in pair_keys {
+            if let Some(v) = previous_ground.remove(&k) {
+                self.ground_offsets.insert(k, v);
+            }
+        }
         if let Some(g) = self.scene.ground.clone() {
             let gm = self.scene.material(&g.material).clone();
             for (k, &(s, c)) in active.iter().enumerate() {

@@ -2688,6 +2688,30 @@ pub struct SolverIsland {
     pub next_cluster_id: u64,
 }
 
+impl ReferenceSolver {
+    /// Give a fresh id (`next_cluster_id`) to every body of the island (`chunks`) whose id is
+    /// also another body's: a provider's island numbered its own splits from the frame's
+    /// start counter while the host's native step split bodies outside the island from the
+    /// same counter. Returns how many were renumbered (none for the oracle's own island step).
+    pub fn renumber_duplicate_island_ids(&mut self, chunks: &std::collections::HashSet<(usize, usize)>) -> usize {
+        let in_island = |cl: &Cluster| cl.chunks.first().is_some_and(|&c| chunks.contains(&(cl.structure, c)));
+        let mut seen: std::collections::HashSet<u64> = self.clusters.iter().filter(|c| !in_island(c)).map(|c| c.id).collect();
+        let mut n = 0;
+        for ci in 0..self.clusters.len() {
+            if !in_island(&self.clusters[ci]) {
+                continue;
+            }
+            if !seen.insert(self.clusters[ci].id) {
+                self.clusters[ci].id = self.next_cluster_id;
+                self.next_cluster_id += 1;
+                seen.insert(self.clusters[ci].id);
+                n += 1;
+            }
+        }
+        n
+    }
+}
+
 impl SolverIsland {
     /// Empty the pure caches (`step_bounds`).
     pub fn clear_caches(&mut self) {
