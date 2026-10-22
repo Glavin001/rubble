@@ -49,4 +49,5 @@ name = "learned_impact_outcome_calls"
 path = "src/bin/learned_impact_outcome_calls.rs"
 
 [dev-dependencies]
+rmpv = "1"
 rmp-serde = "1"

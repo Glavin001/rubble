@@ -29,6 +29,20 @@ pub struct IslandState {
     ground_offsets: Vec<((u8, usize, usize), Vec<f64>)>,
 }
 
+impl IslandState {
+    /// The island's world-side fields a full-state model does not predict (decoded state
+    /// `/2`) from `base`: the per-chunk loads and arrays, the solver's per-chunk scratch and
+    /// the contact history (sticks, pair and ground offsets).
+    pub fn take_unpredicted(&mut self, base: &IslandState) {
+        self.loads = base.loads.clone();
+        self.per_chunk = base.per_chunk.clone();
+        self.solver.take_scratch(&base.solver);
+        self.sticks = base.sticks.clone();
+        self.pair_offsets = base.pair_offsets.clone();
+        self.ground_offsets = base.ground_offsets.clone();
+    }
+}
+
 /// An island: its chunks (by `(structure, chunk)`) and impactors (by index).
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct IslandMembers {

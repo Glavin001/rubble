@@ -2673,6 +2673,15 @@ pub struct SolverIsland {
     pub next_cluster_id: u64,
 }
 
+impl SolverIsland {
+    /// The solver's per-chunk scratch (`f_int`, `turns`) from `base`: fields a full-state
+    /// model does not predict (decoded state `/2`).
+    pub fn take_scratch(&mut self, base: &SolverIsland) {
+        self.f_int = base.f_int.clone();
+        self.turns = base.turns.clone();
+    }
+}
+
 impl ReferenceSolver {
     fn cluster_in(&self, cl: &Cluster, set: &std::collections::HashSet<(usize, usize)>) -> bool {
         cl.chunks.first().is_some_and(|&c| set.contains(&(cl.structure, c)))
