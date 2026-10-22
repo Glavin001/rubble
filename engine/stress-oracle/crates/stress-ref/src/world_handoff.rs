@@ -391,6 +391,13 @@ impl World {
             // a survivor's damage stays below 1, or the bond would disconnect with a margin
             // below 1 and break the joint law's rule (margin >= 1 <=> disconnected).
             b.joint.damage = b.joint.damage.max(x.damage.min(SURVIVOR_DAMAGE_MAX));
+            if self.decoded_resets_joints {
+                // Diagnostic (`STRESS_DECODED_RESET_JOINTS=1`): the bond keeps only what a call
+                // carries, its damage; the joint law's other history (kappa, crushing, ductility,
+                // fatigue, plastic offsets, rebar, strain rate) starts afresh.
+                let (damage, dissipated, mode) = (b.joint.damage, b.joint.dissipated, b.joint.mode);
+                b.joint = crate::joint::JointState { damage, dissipated, mode, ..crate::joint::JointState::new() };
+            }
         }
         // Every cluster holding a decoded chunk.
         let mut clusters: Vec<usize> = target.keys().map(|&(s, c)| self.solver.chunks[s][c].cluster).collect();

@@ -154,6 +154,10 @@ def candidate_args(name: str, a, out: Path, event: str) -> tuple[list[str], dict
         return ["--variant", "provider", "--provider", "oracle_full"], deb
     if name == "ceiling_def":
         return ["--variant", "provider", "--provider", "oracle"], {**deb, "STRESS_DECODED_DEFORMATION": "1"}
+    if name == "ceiling_def_nojoint":
+        # Diagnostic: kept deformation, but each surviving bond's joint history reset at the
+        # call boundary (only its damage carried).
+        return ["--variant", "provider", "--provider", "oracle"], {**deb, "STRESS_DECODED_DEFORMATION": "1", "STRESS_DECODED_RESET_JOINTS": "1"}
     if name == "qs":
         return ["--variant", "qs"], {}
     if name == "punch":
