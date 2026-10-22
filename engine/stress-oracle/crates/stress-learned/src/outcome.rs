@@ -444,7 +444,8 @@ fn chunk_ke(w: &World, s: usize, c: usize) -> f64 {
     let (v, om) = w.solver.chunk_velocity(s, c);
     let ch = &w.solver.structures[s].chunks[c];
     let cl = &w.solver.clusters[w.solver.chunks[s][c].cluster];
-    let r = cl.rotation() * ch.rotation;
+    // ChunkData.inertia is in the structure's body frame: it turns with the cluster alone.
+    let r = cl.rotation();
     let iw = r * ch.inertia * r.transpose();
     0.5 * ch.mass * v.norm2() + 0.5 * om.dot(iw * om)
 }
@@ -720,11 +721,14 @@ fn capture_traj(w: &World, boundary: usize, a: &mut Arrays) -> Result<(), String
 /// The static arrays of the event (`static_*`, one row).
 pub(crate) fn capture_static(w: &World, ix: &Index, a: &mut Arrays) -> Result<(), String> {
     let (n, e) = (ix.n, ix.e);
+    let mut inertia_full = Vec::new();
     let (mut mass, mut inertia, mut half, mut center, mut support, mut structure) = (vec![], vec![], vec![], vec![], vec![], vec![]);
     for (s, st) in w.solver.structures.iter().enumerate() {
         for ch in &st.chunks {
             mass.push(ch.mass as f32);
             inertia.extend([ch.inertia.col(0).x as f32, ch.inertia.col(1).y as f32, ch.inertia.col(2).z as f32]);
+            let m = &ch.inertia.m;
+            inertia_full.extend([m[0][0], m[1][1], m[2][2], m[0][1], m[0][2], m[1][2]].map(|x| x as f32));
             half.extend(v3(ch.half_extents));
             center.extend(v3(ch.center));
             support.push(i32::from(ch.support != stress_ref::scene::Support::None));
@@ -733,6 +737,9 @@ pub(crate) fn capture_static(w: &World, ix: &Index, a: &mut Arrays) -> Result<()
     }
     a.f("static_chunk_mass", &[n], &mass)?;
     a.f("static_chunk_inertia_diag", &[n, 3], &inertia)?;
+    // The full body-frame inertia (xx, yy, zz, xy, xz, yz); the diagonal above is not
+    // principal for a chunk with a rest rotation.
+    a.f("static_chunk_inertia", &[n, 6], &inertia_full)?;
     a.f("static_chunk_half_extents", &[n, 3], &half)?;
     a.f("static_chunk_center_local", &[n, 3], &center)?;
     a.i("static_chunk_support", &[n], &support)?;

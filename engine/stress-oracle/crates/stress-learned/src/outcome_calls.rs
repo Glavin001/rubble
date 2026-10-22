@@ -30,7 +30,7 @@ use crate::outcome::{capture_inputs, capture_state, capture_static, Arrays, Inde
 
 pub const CALLS_SCHEMA: &str = "learned-impact-outcome/4";
 /// Bumped whenever the features or targets this builder writes change.
-pub const BUILDER_REVISION: u32 = 5;
+pub const BUILDER_REVISION: u32 = 6;
 pub const N_TIME_BINS: usize = 8;
 const G0: f64 = 9.81;
 const TINY: f64 = 1e-6;
@@ -207,6 +207,12 @@ impl Record {
     }
 }
 
+/// A symmetric matrix from (xx, yy, zz, xy, xz, yz).
+fn sym6(x: &[f32]) -> Mat3 {
+    let x: Vec<f64> = x.iter().map(|&v| v as f64).collect();
+    Mat3 { m: [[x[0], x[3], x[4]], [x[3], x[1], x[5]], [x[4], x[5], x[2]]] }
+}
+
 fn v3(s: &[f32], k: usize) -> Vec3 {
     Vec3::new(s[3 * k] as f64, s[3 * k + 1] as f64, s[3 * k + 2] as f64)
 }
@@ -335,7 +341,9 @@ struct Statics {
     e: usize,
     ni: usize,
     mass: Vec<f64>,
-    inertia: Vec<Vec3>,
+    /// Each chunk's inertia about its centre in its structure's body frame (`ChunkData.inertia`):
+    /// the solver's world inertia is R_body I R_body^T with R_body its cluster's rotation.
+    inertia: Vec<Mat3>,
     half: Vec<Vec3>,
     center: Vec<Vec3>,
     rest: Vec<Mat3>,
@@ -377,7 +385,18 @@ impl Statics {
         let ni = r.ctx["n_impactors"].as_u64().ok_or("n_impactors")? as usize;
         let scale = sc.sim.stiffness_scale;
         let m = r.rf("static_chunk_mass", 0)?;
-        let inr = r.rf("static_chunk_inertia_diag", 0)?;
+        // The full matrix from recorder revision 9; earlier records hold its diagonal (exact
+        // for every chunk they hold: all rest rotations are the identity).
+        let inertia: Vec<Mat3> = match r.f.get("static_chunk_inertia") {
+            Some(_) => {
+                let x = r.rf("static_chunk_inertia", 0)?;
+                (0..n).map(|k| sym6(&x[6 * k..6 * k + 6])).collect()
+            }
+            None => {
+                let d = r.rf("static_chunk_inertia_diag", 0)?;
+                (0..n).map(|k| Mat3::diag(v3(d, k))).collect()
+            }
+        };
         let hf = r.rf("static_chunk_half_extents", 0)?;
         let cl = r.rf("static_chunk_center_local", 0)?;
         let st = r.ri("static_chunk_structure", 0)?;
@@ -425,7 +444,7 @@ impl Statics {
             e,
             ni,
             mass: m.iter().map(|&x| x as f64).collect(),
-            inertia: (0..n).map(|k| v3(inr, k)).collect(),
+            inertia,
             half: (0..n).map(|k| v3(hf, k)).collect(),
             center: (0..n).map(|k| v3(cl, k)).collect(),
             rest: chunk_desc.iter().map(|c| Quat::from_wxyz(c.orientation).to_mat3()).collect(),
@@ -537,7 +556,6 @@ fn hidden_state(r: &Record, st: &Statics, b: usize, isl: &[usize]) -> Result<Vec
     let pos = r.rf("state_chunk_pos", b)?;
     let vel = r.rf("state_chunk_vel", b)?;
     let ang = r.rf("state_chunk_angvel", b)?;
-    let qw = r.rf("state_chunk_q_world", b)?;
     let qc = r.rf("state_chunk_cluster_quat", b)?;
     let hid = r.rf("state_chunk_hidden", b)?;
     let cl = r.ri("state_chunk_cluster", b)?;
@@ -565,8 +583,8 @@ fn hidden_state(r: &Record, st: &Statics, b: usize, isl: &[usize]) -> Result<Vec
         let (mut iw, mut l) = (Mat3::diag(Vec3::ZERO), Vec3::ZERO);
         for &c in members {
             let rc = v3(pos, c) - x;
-            let rot = quat(qw, c).to_mat3();
-            let ic = rot * Mat3::diag(st.inertia[c]) * rot.transpose();
+            let rot = quat(qc, c).to_mat3();
+            let ic = rot * st.inertia[c] * rot.transpose();
             iw = iw + ic + (Mat3::diag(Vec3::splat(rc.norm2())) - Mat3::outer(rc, rc)) * st.mass[c];
             l += rc.cross(v3(vel, c) * st.mass[c]) + ic * v3(ang, c);
         }
@@ -641,6 +659,9 @@ fn build_call(r: &Record, st: &Statics, f: usize, prev_call: Option<usize>, hist
     let wc: Vec<Vec3> = isl.iter().map(|&c| v3(ang, c)).collect();
     let qc: Vec<Quat> = isl.iter().map(|&c| quat(qw, c)).collect();
     let rb: Vec<Mat3> = qc.iter().map(|q| q.to_mat3()).collect();
+    // Each chunk's body (cluster) rotation: what its structure-frame inertia turns with.
+    let qcl = r.rf("state_chunk_cluster_quat", f)?;
+    let rcl: Vec<Mat3> = isl.iter().map(|&c| quat(qcl, c).to_mat3()).collect();
     // A chunk's world rotation without its rest rotation: what maps structure-local vectors.
     let rs: Vec<Mat3> = isl.iter().zip(&rb).map(|(&c, m)| *m * st.rest[c].transpose()).collect();
     let imp = |k: usize, o: usize| Vec3::new(impst[13 * k + o] as f64, impst[13 * k + o + 1] as f64, impst[13 * k + o + 2] as f64);
@@ -704,12 +725,12 @@ fn build_call(r: &Record, st: &Statics, f: usize, prev_call: Option<usize>, hist
     let e_med = median(isl.iter().map(|&c| st.e_mod[c]).collect());
     let ga_b = |k: usize| st.strength[k][5] * st.geom[k][9];
     let ga = if live.is_empty() { st.gf_t[dom] * l * l } else { median(live.iter().map(|&k| ga_b(k)).collect()) };
-    let ke = |mass: f64, inertia: Vec3, rot: &Mat3, v: Vec3, w: Vec3| {
-        let iw = *rot * Mat3::diag(inertia) * rot.transpose();
+    let ke = |mass: f64, inertia: Mat3, rot: &Mat3, v: Vec3, w: Vec3| {
+        let iw = *rot * inertia * rot.transpose();
         0.5 * mass * v.norm2() + 0.5 * w.dot(iw * w)
     };
-    let ke_in: f64 = (0..nc).map(|j| ke(mc[j], st.inertia[isl[j]], &rb[j], vc[j], wc[j])).sum::<f64>() + (0..ni).map(|j| ke(mi[j], st.imp_inertia[iimp[j]], &ri[j], vi[j], wi[j])).sum::<f64>();
-    let ke_imp: f64 = (0..ni).map(|j| ke(mi[j], st.imp_inertia[iimp[j]], &ri[j], vi[j], wi[j])).sum();
+    let ke_in: f64 = (0..nc).map(|j| ke(mc[j], st.inertia[isl[j]], &rcl[j], vc[j], wc[j])).sum::<f64>() + (0..ni).map(|j| ke(mi[j], Mat3::diag(st.imp_inertia[iimp[j]]), &ri[j], vi[j], wi[j])).sum::<f64>();
+    let ke_imp: f64 = (0..ni).map(|j| ke(mi[j], Mat3::diag(st.imp_inertia[iimp[j]]), &ri[j], vi[j], wi[j])).sum();
     // E_in as a scale is causal: gravity's work estimated ballistically.
     let wg_est: f64 = (0..nc).map(|j| mc[j] * (vc[j] * dt + g * (0.5 * dt * dt)).dot(g)).sum::<f64>() + (0..ni).map(|j| mi[j] * (vi[j] * dt + g * (0.5 * dt * dt)).dot(g)).sum::<f64>();
     let e_in = (ke_in + wg_est).max(0.5 * m * v * v);
@@ -892,6 +913,8 @@ fn build_call(r: &Record, st: &Statics, f: usize, prev_call: Option<usize>, hist
     let def = hidden_state(r, st, f, &isl)?;
     let uc = deformation_scale(st, conn, &isl);
     // chunk features
+    // Principal moments, descending: invariant to the chunk's rest rotation.
+    let pm: HashMap<usize, [f64; 3]> = isl.iter().map(|&c| (c, stress_ref::snapshot::symmetric_eigenvalues(&st.inertia[c]))).collect();
     let mut chunk_feat = Vec::with_capacity(nc * 45);
     for j in 0..nc {
         let c = isl[j];
@@ -901,7 +924,7 @@ fn build_call(r: &Record, st: &Statics, f: usize, prev_call: Option<usize>, hist
         let wb = bt * wc[j] * (l / v);
         let row = [
             ln_ratio(mc[j], m),
-            st.inertia[c].x / (mc[j] * l * l), st.inertia[c].y / (mc[j] * l * l), st.inertia[c].z / (mc[j] * l * l),
+            pm[&c][0] / (mc[j] * l * l), pm[&c][1] / (mc[j] * l * l), pm[&c][2] / (mc[j] * l * l),
             st.half[c].x / l, st.half[c].y / l, st.half[c].z / l,
             f64::from(u8::from(st.fixed[c])), f64::from(u8::from(st.pinned[c])),
             if nlive[j] > 0.0 { dsum[j] / nlive[j] } else { 0.0 }, dmax[j], nlive[j] / 6.0, nbroken[j] / 6.0,
@@ -1029,7 +1052,11 @@ fn build_call(r: &Record, st: &Statics, f: usize, prev_call: Option<usize>, hist
         put("chunk_body_q", f32a(&[nc, 4], isl.iter().flat_map(|&c| quat(q0, c).to_wxyz()).collect()));
     }
     put("chunk_mass", f32a(&[nc], mc.clone()));
-    put("chunk_inertia_body", f32a(&[nc, 3], flat(&isl.iter().map(|&c| st.inertia[c]).collect::<Vec<_>>())));
+    // The diagonal of the body-frame inertia (not principal for a chunk with a rest rotation),
+    // kept for old readers; chunk_inertia_struct is the full matrix (xx, yy, zz, xy, xz, yz)
+    // in the structure's body frame: I_world = R_body I R_body^T with chunk_body_q.
+    put("chunk_inertia_body", f32a(&[nc, 3], isl.iter().flat_map(|&c| { let m = &st.inertia[c].m; [m[0][0], m[1][1], m[2][2]] }).collect()));
+    put("chunk_inertia_struct", f32a(&[nc, 6], isl.iter().flat_map(|&c| { let m = &st.inertia[c].m; [m[0][0], m[1][1], m[2][2], m[0][1], m[0][2], m[1][2]] }).collect()));
     put("chunk_q_world", f32a(&[nc, 4], qc.iter().flat_map(|q| q.to_wxyz()).collect()));
     put("chunk_pos", f32a(&[nc, 3], pos_rel(&xc)));
     put("chunk_v", f32a(&[nc, 3], flat(&vc)));
@@ -1158,9 +1185,9 @@ fn build_call(r: &Record, st: &Statics, f: usize, prev_call: Option<usize>, hist
         put("y_impactor_drot", f32a(&[ni, 3], iimp.iter().enumerate().flat_map(|(j, &k)| rotvec_between(qi[j], q1(k)).to_array()).collect()));
         put("y_impactor_regime", Arr::I32(vec![ni], iimp.iter().map(|&k| history.regime(k)).collect()));
         // energy over the frame, island bodies
-        let rb1: Vec<Mat3> = isl.iter().map(|&c| quat(qw1, c).to_mat3()).collect();
-        let ke_out: f64 = (0..nc).map(|j| ke(mc[j], st.inertia[isl[j]], &rb1[j], v3(vel1, isl[j]), v3(ang1, isl[j]))).sum::<f64>()
-            + (0..ni).map(|j| ke(mi[j], st.imp_inertia[iimp[j]], &q1(iimp[j]).to_mat3(), i1(iimp[j], 7), i1(iimp[j], 10))).sum::<f64>();
+        let qcl1 = r.rf("state_chunk_cluster_quat", f + 1)?;
+        let ke_out: f64 = (0..nc).map(|j| ke(mc[j], st.inertia[isl[j]], &quat(qcl1, isl[j]).to_mat3(), v3(vel1, isl[j]), v3(ang1, isl[j]))).sum::<f64>()
+            + (0..ni).map(|j| ke(mi[j], Mat3::diag(st.imp_inertia[iimp[j]]), &q1(iimp[j]).to_mat3(), i1(iimp[j], 7), i1(iimp[j], 10))).sum::<f64>();
         let w_g: f64 = (0..nc).map(|j| mc[j] * (v3(pos1, isl[j]) - xc[j]).dot(g)).sum::<f64>() + (0..ni).map(|j| mi[j] * (i1(iimp[j], 0) - xi[j]).dot(g)).sum::<f64>();
         let el0: f64 = live.iter().map(|&k| en0[3 * k + 2] as f64).sum();
         let el1: f64 = live.iter().map(|&k| en1[3 * k + 2] as f64).sum();
@@ -1324,6 +1351,7 @@ fn manifest_of(r: &Record, st: &Statics, calls: &[Call], truncated: bool) -> Val
         "perturbation": ens["perturbation"], "seed": r.scene.sim.seed,
         "oracle": {"config": ctx["oracle_config"]["name"], "methods": ctx["oracle_config"]["methods"], "contact": if r.scene.sim.methods.layer_contact { "layer" } else { "penalty" }, "hash": ctx["scene_hash"]},
         "scene_hash": ctx["scene_hash"], "recorder_revision": format!("p1-rev{}", r.revision()), "builder_revision": BUILDER_REVISION,
+        "routing": {"name": "untiered", "source": "the recorder's frame_chunk_routed / frame_impactor_routed (World::predict_island_members, select_islands with the oracle configuration's defaults: routing_tiered off)"},
         "frame_dt": st.dt, "gravity": st.gravity.to_array(), "truncated": truncated, "n_calls": calls.len(),
         "available": {"qs_hertz": true, "punch": true, "qs_frame": r.has("qs_bond_broken"), "punch_frame": r.rows("punch_frame") > 0, "blast": false,
             "cracked_edges": true, "structure_contacts": true, "bond_energy_split": true},
