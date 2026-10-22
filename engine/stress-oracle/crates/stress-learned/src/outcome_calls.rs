@@ -1476,41 +1476,56 @@ pub fn live_call(world: &mut World, name: &str, ctx_from: &Value, chunk_keys: &[
 
 /// Write an event in P2's on-disk format: `manifest.json`, `calls.json` and the arrays,
 /// 8-byte aligned, as `arrays.bin.zst` (one zstd frame of exactly the `arrays.bin` bytes)
-/// or plain `arrays.bin`.
+/// or plain `arrays.bin`; identical arrays share their bytes (two entries, one offset).
 pub fn write_event(dir: &Path, ev: &CallEvent, compress: bool) -> Result<PathBuf, String> {
     fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let mut blob: Vec<u8> = Vec::new();
+    // Identical arrays are stored once and share an offset (lossless; readers address every
+    // array by its own dtype, shape and offset): a call's frame-start state is mostly the
+    // previous call's frame-end state.
+    let mut stored: HashMap<(&'static str, Vec<u8>), usize> = HashMap::new();
     let mut add = |a: &Arr| -> Value {
-        let off = blob.len();
+        let mut bytes: Vec<u8> = Vec::new();
         let (dtype, shape) = match a {
             Arr::F32(s, d) => {
                 for x in d {
-                    blob.extend_from_slice(&x.to_le_bytes());
+                    bytes.extend_from_slice(&x.to_le_bytes());
                 }
                 ("f32", s)
             }
             Arr::I32(s, d) => {
                 for x in d {
-                    blob.extend_from_slice(&x.to_le_bytes());
+                    bytes.extend_from_slice(&x.to_le_bytes());
                 }
                 ("i32", s)
             }
             Arr::I64(s, d) => {
                 for x in d {
-                    blob.extend_from_slice(&x.to_le_bytes());
+                    bytes.extend_from_slice(&x.to_le_bytes());
                 }
                 ("i64", s)
             }
             Arr::F64(s, d) => {
                 for x in d {
-                    blob.extend_from_slice(&x.to_le_bytes());
+                    bytes.extend_from_slice(&x.to_le_bytes());
                 }
                 ("f64", s)
             }
         };
-        while blob.len() % 8 != 0 {
-            blob.push(0);
-        }
+        let off = match (bytes.is_empty(), stored.get(&(dtype, bytes.clone()))) {
+            (false, Some(&off)) => off,
+            _ => {
+                let off = blob.len();
+                blob.extend_from_slice(&bytes);
+                while blob.len() % 8 != 0 {
+                    blob.push(0);
+                }
+                if !bytes.is_empty() {
+                    stored.insert((dtype, bytes), off);
+                }
+                off
+            }
+        };
         json!({"dtype": dtype, "shape": shape, "offset": off})
     };
     let structures: Vec<Value> = ev
