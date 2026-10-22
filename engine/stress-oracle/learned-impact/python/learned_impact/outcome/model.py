@@ -57,6 +57,9 @@ class ModelConfig:
     monotone_margin: bool = True
     # `/5`: the oracle's full dynamic bond and chunk state as inputs and heads (fullstate.py)
     full_state: bool = False
+    # `/5`: frame-end body records (pose, velocity, activity) as a head; False for full-state
+    # checkpoints that predate it (the host then fits bodies from the chunks)
+    cluster_head: bool = True
 
     def __post_init__(self):
         self.rounds = tuple(self.rounds)
@@ -180,7 +183,7 @@ class ImpactOutcomeModel(nn.Module):
         fs_c = FS.N_CHUNK_OUT if cfg.full_state else 0
         self.bond_head = _mlp(4 * w + w, 4 + nt + fs_b, w, hl, norm=False)
         self.chunk_head = _mlp(2 * w, NODE_OUT + fs_c, w, hl, norm=False)
-        if cfg.full_state:  # frame-end bodies: pooled chunk states + global + start record
+        if cfg.full_state and cfg.cluster_head:  # frame-end bodies: pooled chunk states + global + start record
             self.cluster_head = _mlp(2 * w + FS.N_CL_START, FS.N_CL_OUT, w, hl, norm=False)
         self.imp_head = _mlp(2 * w, NODE_OUT + 1, w, hl, norm=False)
         self.energy_head = _mlp(w, 4, w, hl, norm=False)
@@ -346,7 +349,7 @@ class ImpactOutcomeModel(nn.Module):
             extra["chunk_fs"] = t["chunk_fs_in"].to(c_out.dtype) + c_out[:, NODE_OUT:]
             extra["_chunk_h"] = chunk_h
             extra["_glob"] = g
-            if "clu_of_chunk" in t:
+            if "clu_of_chunk" in t and self.cfg.cluster_head:
                 extra["clu_out"] = self.cluster_out(chunk_h, g, t["clu_of_chunk"], t["clu_call"],
                                                     t["clu_x"])
         return {**extra, 

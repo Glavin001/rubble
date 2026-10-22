@@ -113,7 +113,9 @@ def collate(calls: list[S.Call], structures: dict[str, dict[int, dict[str, np.nd
             ci, co = FS.chunk_arrays(c, c.fs["cols"], float(np.linalg.norm(c.gravity)))
             add("chunk_fs_in", ci)
             add("y_chunk_fs", co)
-            # frame-end bodies, grouped as the oracle's clusters (training targets)
+        if full_state and "fs_chunk_cluster_out" in a and "fs_cluster_out" in a:
+            # frame-end bodies, grouped as the oracle's clusters (training targets; a live
+            # call has none: inference groups by the decoded fragments in state_io)
             cg = FS.cluster_groups(c, a["fs_chunk_cluster_out"])
             cy, cact = FS.cluster_targets(c, cg)
             add("clu_of_chunk", cg["of_chunk"].astype(np.int64) + clu_off)

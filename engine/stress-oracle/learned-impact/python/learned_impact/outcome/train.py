@@ -559,6 +559,7 @@ def load_model(path: str | Path, device="cpu") -> tuple[ImpactOutcomeModel, dict
     ck = torch.load(path, map_location=device, weights_only=False)
     mc = dict(ck["model_config"])
     mc.setdefault("monotone_margin", False)  # checkpoints before the monotone margin head
+    mc.setdefault("cluster_head", False)  # full-state checkpoints before the cluster head
     m = ImpactOutcomeModel(ModelConfig(**mc))
     m.load_state_dict(ck["model"])
     return m.to(device), ck

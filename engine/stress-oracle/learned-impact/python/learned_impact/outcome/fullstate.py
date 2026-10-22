@@ -100,6 +100,9 @@ def bond_arrays(c, cols: dict, static_scale: dict[int, np.ndarray], scale_names:
     x_in = np.stack([_enc(take("fs_bond_in", f), how, sc, dt) for f, how, _ in BOND_FIELDS]
                     + [np.nan_to_num(take("fs_bond_in", m)) for m in BOND_MODE], 1) \
         if len(keys) else np.zeros((0, N_BOND_IN))
+    if "fs_bond_out" not in a:  # a live (inference) call: inputs only, targets unused
+        return x_in.astype(np.float32), np.zeros((len(keys), len(BOND_FIELDS)), np.float32), \
+            np.zeros(len(keys), np.int64)
     y = np.stack([_enc(take("fs_bond_out", f), how, sc, dt) for f, how, _ in BOND_FIELDS], 1) \
         if len(keys) else np.zeros((0, len(BOND_FIELDS)))
     t_, c_ = np.nan_to_num(take("fs_bond_out", BOND_MODE[0])), np.nan_to_num(take("fs_bond_out", BOND_MODE[1]))
@@ -120,7 +123,8 @@ def chunk_arrays(c, cols: dict, gravity: float) -> tuple[np.ndarray, np.ndarray]
     def block(arr):
         return np.stack([np.nan_to_num(a[arr][:, names.index(f)]) if f in names else np.zeros(len(m))
                          for f in CHUNK_FIELDS], 1) / np.maximum(sc, 1e-12)
-    return block("fs_chunk_in").astype(np.float32), block("fs_chunk_out").astype(np.float32)
+    ci = block("fs_chunk_in").astype(np.float32)
+    return ci, (block("fs_chunk_out").astype(np.float32) if "fs_chunk_out" in a else np.zeros_like(ci))
 
 
 def decode_raw(enc: np.ndarray, how: str, sc: dict[str, np.ndarray], dt: float) -> np.ndarray:
