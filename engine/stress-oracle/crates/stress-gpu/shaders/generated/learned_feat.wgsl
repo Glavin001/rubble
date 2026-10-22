@@ -16,6 +16,10 @@ struct FeatParams_std140_0
     @align(4) max_nodes_0 : u32,
     @align(8) layout_cap_0 : u32,
     @align(4) max_bonds_cap_0 : u32,
+    @align(16) prev_frame_0 : u32,
+    @align(4) engine_base_0 : u32,
+    @align(8) chunk_count_0 : u32,
+    @align(4) pad1_0 : u32,
 };
 
 @binding(0) @group(0) var<uniform> params_0 : FeatParams_std140_0;
@@ -142,6 +146,46 @@ struct BondDyn_std430_0
 @binding(21) @group(0) var<storage, read> cols_0 : array<u32>;
 
 @binding(19) @group(0) var<storage, read_write> feat_0 : array<f32>;
+
+struct Island_std430_0
+{
+    @align(16) range_0 : vec4<u32>,
+    @align(16) info_1 : vec4<u32>,
+    @align(16) com_0 : vec4<f32>,
+    @align(16) inertia0_1 : vec4<f32>,
+    @align(16) inertia1_1 : vec4<f32>,
+    @align(16) inertia2_1 : vec4<f32>,
+    @align(16) inv0_1 : vec4<f32>,
+    @align(16) inv1_1 : vec4<f32>,
+    @align(16) inv2_1 : vec4<f32>,
+    @align(16) wcom_0 : vec4<f32>,
+    @align(16) winv0_0 : vec4<f32>,
+    @align(16) winv1_0 : vec4<f32>,
+    @align(16) winv2_0 : vec4<f32>,
+    @align(16) rotation_0 : vec4<f32>,
+    @align(16) position_0 : vec4<f32>,
+    @align(16) position_err_0 : vec4<f32>,
+    @align(16) velocity_0 : vec4<f32>,
+    @align(16) velocity_err_0 : vec4<f32>,
+    @align(16) angular_velocity_0 : vec4<f32>,
+    @align(16) done_0 : u32,
+    @align(4) coverage_0 : u32,
+    @align(8) wide_groups_0 : u32,
+    @align(4) done_pad_0 : u32,
+    @align(16) probes_0 : vec4<u32>,
+    @align(16) energy_0 : vec4<f32>,
+    @align(16) rotation_err_0 : vec4<f32>,
+    @align(16) momentum_0 : vec4<f32>,
+    @align(16) momentum_err_0 : vec4<f32>,
+};
+
+@binding(24) @group(0) var<storage, read> islands_0 : array<Island_std430_0>;
+
+@binding(25) @group(0) var<storage, read> ctab_0 : array<vec4<f32>>;
+
+@binding(26) @group(0) var<storage, read> bodies_0 : array<vec4<f32>>;
+
+@binding(27) @group(0) var<storage, read_write> state_0 : array<vec4<f32>>;
 
 fn chunk_row_of_0( layout_chunk_0 : u32) -> u32
 {
@@ -3489,6 +3533,198 @@ fn feat_bonds(@builtin(global_invocation_id) id_4 : vec3<u32>)
         put_0(_S316, u32(3), r_8, u32(43), 0.0f);
         side_4 = side_4 + u32(1);
     }
+    return;
+}
+
+struct Quat_0
+{
+     w_4 : f32,
+     x_2 : f32,
+     y_1 : f32,
+     z_1 : f32,
+};
+
+fn quat_of_0( q_7 : vec4<f32>) -> Quat_0
+{
+    var r_9 : Quat_0;
+    r_9.x_2 = q_7.x;
+    r_9.y_1 = q_7.y;
+    r_9.z_1 = q_7.z;
+    r_9.w_4 = q_7.w;
+    return r_9;
+}
+
+fn quat_mul_0( a_13 : Quat_0,  o_0 : Quat_0) -> Quat_0
+{
+    var r_10 : Quat_0;
+    r_10.w_4 = a_13.w_4 * o_0.w_4 - a_13.x_2 * o_0.x_2 - a_13.y_1 * o_0.y_1 - a_13.z_1 * o_0.z_1;
+    r_10.x_2 = a_13.w_4 * o_0.x_2 + a_13.x_2 * o_0.w_4 + a_13.y_1 * o_0.z_1 - a_13.z_1 * o_0.y_1;
+    r_10.y_1 = a_13.w_4 * o_0.y_1 - a_13.x_2 * o_0.z_1 + a_13.y_1 * o_0.w_4 + a_13.z_1 * o_0.x_2;
+    r_10.z_1 = a_13.w_4 * o_0.z_1 + a_13.x_2 * o_0.y_1 - a_13.y_1 * o_0.x_2 + a_13.z_1 * o_0.w_4;
+    return r_10;
+}
+
+fn quat_vec_0( q_8 : Quat_0) -> vec4<f32>
+{
+    return vec4<f32>(q_8.x_2, q_8.y_1, q_8.z_1, q_8.w_4);
+}
+
+fn qmulf_0( a_14 : vec4<f32>,  b_10 : vec4<f32>) -> vec4<f32>
+{
+    return quat_vec_0(quat_mul_0(quat_of_0(a_14), quat_of_0(b_10)));
+}
+
+fn to_zup_f_0( v_6 : vec3<f32>) -> vec3<f32>
+{
+    return vec3<f32>(v_6.x, - v_6.z, v_6.y);
+}
+
+fn rotate_0( q_9 : Quat_0,  v_7 : vec3<f32>) -> vec3<f32>
+{
+    var qv_0 : vec3<f32> = vec3<f32>(q_9.x_2, q_9.y_1, q_9.z_1);
+    var t_15 : vec3<f32> = cross(qv_0, v_7) * vec3<f32>(2.0f);
+    return v_7 + t_15 * vec3<f32>(q_9.w_4) + cross(qv_0, t_15);
+}
+
+fn inverse_rotate_0( q_10 : Quat_0,  v_8 : vec3<f32>) -> vec3<f32>
+{
+    var c_5 : Quat_0;
+    c_5.w_4 = q_10.w_4;
+    c_5.x_2 = - q_10.x_2;
+    c_5.y_1 = - q_10.y_1;
+    c_5.z_1 = - q_10.z_1;
+    return rotate_0(c_5, v_8);
+}
+
+fn rotvec_quat_f_0( r_11 : vec3<f32>) -> vec4<f32>
+{
+    var th_0 : f32 = length(r_11);
+    if(th_0 < 9.999999960041972e-13f)
+    {
+        return normalize(vec4<f32>(vec3<f32>(0.5f) * r_11, 1.0f));
+    }
+    var _S322 : f32 = 0.5f * th_0;
+    return vec4<f32>(r_11 / vec3<f32>(th_0) * vec3<f32>(sin(_S322)), cos(_S322));
+}
+
+fn qconj_0( q_11 : vec4<f32>) -> vec4<f32>
+{
+    return vec4<f32>((vec3<f32>(0) - q_11.xyz), q_11.w);
+}
+
+fn quat_rotvec_0( q_12 : vec4<f32>) -> vec3<f32>
+{
+    var p_2 : vec4<f32>;
+    if((q_12.w) < 0.0f)
+    {
+        p_2 = (vec4<f32>(0) - q_12);
+    }
+    else
+    {
+        p_2 = q_12;
+    }
+    var _S323 : vec3<f32> = p_2.xyz;
+    var s_6 : f32 = length(_S323);
+    if(s_6 < 9.999999960041972e-13f)
+    {
+        return vec3<f32>(2.0f) * _S323;
+    }
+    return _S323 / vec3<f32>(s_6) * vec3<f32>((2.0f * atan2(s_6, p_2.w)));
+}
+
+@compute
+@workgroup_size(64, 1, 1)
+fn feat_deform(@builtin(global_invocation_id) id_5 : vec3<u32>)
+{
+    var k_11 : u32 = id_5.x;
+    if(k_11 >= (params_0.chunk_count_0))
+    {
+        return;
+    }
+    var info_2 : vec4<u32> = chunks_0[k_11].info_0;
+    var kn_0 : vec2<u32> = key_node_0[sinc_0[u32(2) + chunks_0[k_11].info_0.z] + chunks_0[k_11].info_0.w];
+    var _S324 : u32 = key_node_0[sinc_0[u32(2) + chunks_0[k_11].info_0.z] + chunks_0[k_11].info_0.w].x;
+    var _S325 : bool;
+    if(_S324 == u32(0))
+    {
+        _S325 = true;
+    }
+    else
+    {
+        _S325 = (kn_0.y) != (params_0.prev_frame_0);
+    }
+    if(_S325)
+    {
+        return;
+    }
+    var n_10 : u32 = _S324 - u32(1);
+    if((bitcast<u32>((calls_0[u32(10) * (bitcast<u32>((node_0(n_10, u32(3)).w))) + u32(4)].w))) != u32(0))
+    {
+        return;
+    }
+    var i_3 : u32 = info_2.y;
+    var anchored_1 : bool = (((islands_0[i_3].info_1.x) & (u32(1)))) != u32(0);
+    var q_13 : vec4<f32> = islands_0[i_3].rotation_0;
+    var _S326 : vec3<f32> = vec3<f32>(0.0f);
+    var _S327 : u32 = u32(3) * i_3;
+    var body_2 : u32 = (bitcast<u32>((ctab_0[params_0.engine_base_0 + _S327].x)));
+    var com_w_0 : vec3<f32>;
+    var wb_1 : vec3<f32>;
+    var vb_0 : vec3<f32>;
+    var q_14 : vec4<f32>;
+    if(body_2 != u32(4294967295))
+    {
+        var _S328 : u32 = u32(7) * body_2;
+        var _S329 : vec4<f32> = normalize(qmulf_0(qmulf_0(vec4<f32>(0.70710676908493042f, 0.0f, 0.0f, 0.70710676908493042f), bodies_0[_S328 + u32(1)]), ctab_0[params_0.engine_base_0 + _S327 + u32(1)]));
+        var _S330 : vec3<f32> = to_zup_f_0(bodies_0[_S328 + u32(3)].xyz);
+        var _S331 : vec3<f32> = to_zup_f_0(bodies_0[_S328 + u32(4)].xyz);
+        com_w_0 = to_zup_f_0(bodies_0[_S328].xyz);
+        q_14 = _S329;
+        wb_1 = _S331;
+        vb_0 = _S330;
+    }
+    else
+    {
+        com_w_0 = islands_0[i_3].position_0.xyz + rotate_0(quat_of_0(q_13), islands_0[i_3].com_0.xyz);
+        q_14 = q_13;
+        wb_1 = _S326;
+        vb_0 = _S326;
+    }
+    var _S332 : Quat_0 = quat_of_0(q_14);
+    var _S333 : vec3<f32> = islands_0[i_3].com_0.xyz;
+    var center_1 : vec3<f32> = chunks_0[k_11].center_0.xyz;
+    var u_1 : vec3<f32> = inverse_rotate_0(_S332, node_0(n_10, u32(13)).xyz + node_0(n_10, u32(10)).xyz - (com_w_0 - rotate_0(_S332, _S333))) - center_1;
+    var _S334 : u32 = u32(24) * n_10 + u32(17);
+    var th_1 : vec3<f32> = quat_rotvec_0(normalize(qmulf_0(qconj_0(q_14), normalize(qmulf_0(rotvec_quat_f_0(node_0(n_10, u32(11)).xyz), qmulf_0(node_0(n_10, u32(1)), qconj_0(vec4<f32>(work_0[_S334], work_0[_S334 + u32(1)], work_0[_S334 + u32(2)], work_0[_S334 + u32(3)]))))))));
+    var r_12 : vec3<f32> = rotate_0(_S332, center_1 + u_1 - _S333);
+    var v1_0 : vec3<f32> = node_0(n_10, u32(8)).xyz;
+    var w1_0 : vec3<f32> = node_0(n_10, u32(9)).xyz;
+    var vh_0 : vec3<f32>;
+    if(anchored_1)
+    {
+        vh_0 = inverse_rotate_0(_S332, v1_0 - cross(wb_1, r_12));
+    }
+    else
+    {
+        vh_0 = inverse_rotate_0(_S332, v1_0 - vb_0 - cross(wb_1, r_12));
+    }
+    var wh_0 : vec3<f32>;
+    if(anchored_1)
+    {
+        wh_0 = inverse_rotate_0(_S332, w1_0);
+    }
+    else
+    {
+        wh_0 = inverse_rotate_0(_S332, w1_0 - wb_1);
+    }
+    var _S335 : u32 = u32(4) * k_11;
+    state_0[_S335] = vec4<f32>(u_1, state_0[_S335].w);
+    var _S336 : u32 = _S335 + u32(1);
+    state_0[_S336] = vec4<f32>(th_1, state_0[_S336].w);
+    var _S337 : u32 = _S335 + u32(2);
+    state_0[_S337] = vec4<f32>(vh_0, state_0[_S337].w);
+    var _S338 : u32 = _S335 + u32(3);
+    state_0[_S338] = vec4<f32>(wh_0, state_0[_S338].w);
     return;
 }
 

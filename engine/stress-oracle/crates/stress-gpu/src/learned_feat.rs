@@ -238,9 +238,13 @@ struct FeatParams {
     max_nodes: u32,
     layout_cap: u32,
     max_bonds_cap: u32,
+    prev_frame: u32,
+    engine_base: u32,
+    chunk_count: u32,
+    pad1: u32,
 }
 
-const BINDINGS: [Binding; 24] = [
+const BINDINGS: [Binding; 28] = [
     Binding::Uniform,   // 0 params
     Binding::Storage,   // 1 ctl
     Binding::StorageRw, // 2 calls
@@ -265,6 +269,10 @@ const BINDINGS: [Binding; 24] = [
     Binding::Storage,   // 21 cols
     Binding::StorageRw, // 22 bedge
     Binding::StorageRw, // 23 fctl
+    Binding::Storage,   // 24 islands
+    Binding::Storage,   // 25 ctab
+    Binding::Storage,   // 26 engine bodies
+    Binding::StorageRw, // 27 chunk state
 ];
 
 struct Kernels {
@@ -282,6 +290,7 @@ struct Kernels {
     prefix: Kernel,
     nodes: Kernel,
     bonds: Kernel,
+    deform: Kernel,
 }
 
 /// The feature buffer's layout (float offsets) and the edge capacities (undirected).
@@ -352,6 +361,14 @@ pub struct BatchBuffers<'a> {
     pub chunks: &'a wgpu::Buffer,
     pub bond_static: &'a wgpu::Buffer,
     pub bond_dyn: &'a wgpu::Buffer,
+    pub islands: &'a wgpu::Buffer,
+    pub ctab: &'a wgpu::Buffer,
+    pub bodies: &'a wgpu::Buffer,
+    pub state: &'a wgpu::Buffer,
+    pub engine_base: u32,
+    pub chunk_count: u32,
+    /// The frame of the batch `feat_deform` applies.
+    pub prev_frame: u32,
     pub impactor_count: u32,
     pub frame: u32,
     pub dt: f64,
@@ -380,6 +397,7 @@ impl Features {
             prefix: k("feat_prefix"),
             nodes: k("feat_nodes"),
             bonds: k("feat_bonds"),
+            deform: k("feat_deform"),
         };
         let st = &map.strides;
         let (cap_cracked, cap_ic, cap_sc) = (max_bonds, 32 * max_cisl, 4 * max_nodes);
@@ -451,12 +469,16 @@ impl Features {
                 max_nodes: self.max_nodes,
                 layout_cap: self.layout_cap,
                 max_bonds_cap: self.max_bonds,
+                prev_frame: b.prev_frame,
+                engine_base: b.engine_base,
+                chunk_count: b.chunk_count,
+                pad1: 0,
             },
         )
     }
 
-    fn bufs<'a>(&'a self, params: &'a wgpu::Buffer, b: &'a BatchBuffers) -> [&'a wgpu::Buffer; 24] {
-        [params, b.ctl, b.calls, b.nodes, b.bonds, b.cisl, b.cislf, &self.sc, &self.sb, &self.sinc, &self.slook, &self.bmap, &self.key_node, b.chunks, b.bond_static, b.bond_dyn, b.imps, &self.contacts, &self.work, &self.feat, &self.edges, &self.cols, &self.bedge, &self.fctl]
+    fn bufs<'a>(&'a self, params: &'a wgpu::Buffer, b: &'a BatchBuffers) -> [&'a wgpu::Buffer; 28] {
+        [params, b.ctl, b.calls, b.nodes, b.bonds, b.cisl, b.cislf, &self.sc, &self.sb, &self.sinc, &self.slook, &self.bmap, &self.key_node, b.chunks, b.bond_static, b.bond_dyn, b.imps, &self.contacts, &self.work, &self.feat, &self.edges, &self.cols, &self.bedge, &self.fctl, b.islands, b.ctab, b.bodies, b.state]
     }
 
     /// Before `learned_finish` (positions still absolute): the bond map, the key map, the
@@ -512,6 +534,19 @@ impl Features {
         }
         run(enc, &self.k.nodes, None, false);
         run(enc, &self.k.bonds, Some(max_bonds.div_ceil(64)), false);
+    }
+
+    /// After the split pass of a frame whose batch was applied: each chunk of a call that
+    /// stood keeps its decoded departure from its body's fit as its hidden state
+    /// (`STRESS_DECODED_DEFORMATION=1`, P0's kept-deformation boundary).
+    pub fn encode_deform(&self, gpu: &Gpu, enc: &mut wgpu::CommandEncoder, b: &BatchBuffers) {
+        let params = self.params(gpu, b, false);
+        let bufs = self.bufs(&params, b);
+        let group = gpu.bind(&self.k.deform.group, &bufs);
+        let mut pass = enc.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&self.k.deform.pipeline);
+        pass.set_bind_group(0, &group, &[]);
+        pass.dispatch_workgroups(b.chunk_count.div_ceil(64).max(1), 1, 1);
     }
 
     /// The feature control words' range (edge totals, overflow bits) for the frame's read.

@@ -159,6 +159,9 @@ pub enum Stub {
     Punch = 2,
     /// NaN outputs: every call falls back to the punch (a test of the gate).
     NonFinite = 3,
+    /// The punch's outcome plus a fixed per-chunk pattern: pieces that do not move rigidly
+    /// (a test of the kept-deformation boundary).
+    PunchWobble = 4,
 }
 
 impl Stub {
@@ -169,7 +172,8 @@ impl Stub {
             Ok("zero") => Ok(Some(Stub::Zero)),
             Ok("punch") => Ok(Some(Stub::Punch)),
             Ok("nonfinite") => Ok(Some(Stub::NonFinite)),
-            Ok(other) => Err(format!("STRESS_LEARNED_STUB={other}: expected zero, punch or nonfinite")),
+            Ok("punch-wobble") => Ok(Some(Stub::PunchWobble)),
+            Ok(other) => Err(format!("STRESS_LEARNED_STUB={other}: expected zero, punch, punch-wobble or nonfinite")),
         }
     }
 }
@@ -303,6 +307,11 @@ pub struct Learned {
     pub dry: bool,
     /// The frame the batch is made in (the features' broken-bond stamps).
     pub frame: u32,
+    /// The frame the last batch was made in (its key map's stamp).
+    pub last_batch_frame: u32,
+    /// `STRESS_DECODED_DEFORMATION=1`: a call's chunks keep their decoded departure from
+    /// their body's fit as hidden state at the window end (P0's boundary choice).
+    pub keep_deformation: bool,
     /// A batch stood at the last read: its window end is due this frame.
     pub pending: bool,
     pub totals: Totals,
@@ -378,6 +387,8 @@ impl Learned {
             feat: None,
             dry: std::env::var("STRESS_LEARNED_DRY").is_ok_and(|v| v == "1"),
             frame: 0,
+            last_batch_frame: u32::MAX,
+            keep_deformation: std::env::var("STRESS_DECODED_DEFORMATION").is_ok_and(|v| v == "1"),
             pending: false,
             totals: Totals::default(),
         }
@@ -503,6 +514,33 @@ impl Learned {
         gpu.bind(&self.k.place.group, &bufs)
     }
 
+    fn batch_buffers<'a>(&'a self, t: &'a Tables) -> crate::learned_feat::BatchBuffers<'a> {
+    crate::learned_feat::BatchBuffers {
+        ctl: &self.ctl,
+        calls: &self.calls,
+        nodes: &self.nodes,
+        bonds: &self.bonds,
+        cisl: &self.cisl,
+        cislf: &self.cislf,
+        imps: &self.imps,
+        chunks: t.chunks,
+        bond_static: t.bond_static,
+        bond_dyn: t.bond_dyn,
+        islands: t.islands,
+        ctab: t.ctab,
+        bodies: t.bodies,
+        state: t.state,
+        engine_base: t.s.engine_base,
+        chunk_count: self.chunk_count,
+        prev_frame: self.last_batch_frame,
+        impactor_count: self.imp_list.len() as u32,
+        frame: self.frame,
+        dt: t.s.dt,
+        speed: t.s.speed,
+        gravity: t.s.gravity,
+    }
+    }
+
     /// After the split pass, in the same submission: the last batch's map cleared (if one
     /// was pending), then with `batch` a new batch: select, compact, gather, the network
     /// (`network`, or the stub), decode, gate and tally. The routing check runs before it.
@@ -533,6 +571,11 @@ impl Learned {
             }
         };
         if self.pending {
+            if self.keep_deformation {
+                if let Some(f) = &self.feat {
+                    f.encode_deform(gpu, enc, &self.batch_buffers(t));
+                }
+            }
             run(enc, &self.k.clear, D::One);
         }
         if !batch {
@@ -546,23 +589,7 @@ impl Learned {
         run(enc, &self.k.gather_chunks, D::Indirect(16));
         run(enc, &self.k.gather_bonds, D::Indirect(16));
         run(enc, &self.k.gather_impactors, D::Indirect(0));
-        let fb = crate::learned_feat::BatchBuffers {
-            ctl: &self.ctl,
-            calls: &self.calls,
-            nodes: &self.nodes,
-            bonds: &self.bonds,
-            cisl: &self.cisl,
-            cislf: &self.cislf,
-            imps: &self.imps,
-            chunks: t.chunks,
-            bond_static: t.bond_static,
-            bond_dyn: t.bond_dyn,
-            impactor_count: self.imp_list.len() as u32,
-            frame: self.frame,
-            dt: t.s.dt,
-            speed: t.s.speed,
-            gravity: t.s.gravity,
-        };
+        let fb = self.batch_buffers(t);
         if let Some(f) = &self.feat {
             f.encode_pre(gpu, enc, &fb, (&self.largs, 0), self.max_bonds);
         }
@@ -647,6 +674,7 @@ impl Learned {
                 );
             }
             self.pending = w[ctl::PENDING] != 0;
+            self.last_batch_frame = frame as u32;
         } else if applied {
             self.pending = false;
         }
@@ -842,6 +870,8 @@ pub struct ExportCall {
     pub contacts: Vec<[[f32; 4]; 6]>,
     /// Per chunk node: its world position at frame start.
     pub chunk_pos: Vec<[f32; 3]>,
+    /// Per chunk node: its decoded frame-end displacement (after the decode; zero before).
+    pub chunk_dx: Vec<[f32; 3]>,
     /// Per chunk node: the feature kernels' scratch words (`learned_feat.slang` W_*).
     pub work: Vec<[f32; crate::learned_feat::WORK_F]>,
 }
@@ -956,6 +986,7 @@ impl Learned {
             }
             let wk: Vec<f32> = gpu.read_range(&f.work, crate::learned_feat::WORK_F * first, crate::learned_feat::WORK_F * nc.max(1));
             e.work = (0..nc).map(|j| std::array::from_fn(|k| wk[crate::learned_feat::WORK_F * j + k])).collect();
+            e.chunk_dx = (0..nc).map(|j| { let w = nodes[NODE_F4 * (first + j) + 10]; [w[0], w[1], w[2]] }).collect();
             e.chunk_pos = (0..nc).map(|j| { let w = nodes[NODE_F4 * (first + j) + 13]; [w[0], w[1], w[2]] }).collect();
             out.push(e);
         }

@@ -96,6 +96,10 @@ struct FeatParams
     uint max_nodes;
     uint layout_cap;       // `bmap`'s layout part
     uint max_bonds_cap;    // `bedge`'s bond part (cracked candidates after it)
+    uint prev_frame;       // the batch `feat_deform` applies (its key map's frame)
+    uint engine_base;      // ctab: per island 3 float4
+    uint chunk_count;      // layout chunks
+    uint pad1;
 };
 
 [[vk::binding(0, 0)]] ConstantBuffer<FeatParams> params;
@@ -146,6 +150,11 @@ struct FeatParams
 // Feature control: [0..4) edge totals (cracked, ic, sc, bonds) directed rows, [8..] per-call
 // (cracked, ic, sc) counts and bases.
 [[vk::binding(23, 0)]] RWStructuredBuffer<uint> fctl;
+// The solver's tables and the engine's bodies (`feat_deform`).
+[[vk::binding(24, 0)]] StructuredBuffer<Island> islands;
+[[vk::binding(25, 0)]] StructuredBuffer<float4> ctab;
+[[vk::binding(26, 0)]] StructuredBuffer<float4> bodies;
+[[vk::binding(27, 0)]] RWStructuredBuffer<float4> state;
 
 // ------------------------------------------------------------------ helpers
 
@@ -1665,4 +1674,100 @@ void feat_bonds(uint3 id: SV_DispatchThreadID)
         put(fb, S_BOND, r, 42, 0.0);
         put(fb, S_BOND, r, 43, 0.0);
     }
+}
+
+// ------------------------------------------------------------------ feat_deform
+
+float4 qmulf(float4 a, float4 b)
+{
+    return quat_vec(quat_mul(quat_of(a), quat_of(b)));
+}
+
+float4 qconj(float4 q)
+{
+    return float4(-q.xyz, q.w);
+}
+
+float4 rotvec_quat_f(float3 r)
+{
+    float th = length(r);
+    if (th < 1e-12)
+        return normalize(float4(0.5 * r, 1.0));
+    return float4(r / th * sin(0.5 * th), cos(0.5 * th));
+}
+
+float3 quat_rotvec(float4 q)
+{
+    float4 p = q.w < 0.0 ? -q : q;
+    float s = length(p.xyz);
+    if (s < 1e-12)
+        return 2.0 * p.xyz;
+    return p.xyz / s * (2.0 * atan2(s, p.w));
+}
+
+float3 to_zup_f(float3 v)
+{
+    return float3(v.x, -v.z, v.y);
+}
+
+// One thread per layout chunk, after the split pass of a frame whose batch was applied
+// (`STRESS_DECODED_DEFORMATION=1`): each chunk of a call that stood keeps its decoded
+// departure from its body's fitted rigid motion as its hidden state (stress-ref
+// `apply_decoded_with(keep_deformation)`): displacement and rotation in the body's frame,
+// velocity and spin against the body's (an anchored body's: against its spin only).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void feat_deform(uint3 id: SV_DispatchThreadID)
+{
+    uint k = id.x;
+    if (k >= params.chunk_count)
+        return;
+    uint4 info = chunks[k].info;
+    uint row = sinc[2 + info.z] + info.w;
+    uint2 kn = key_node[row];
+    if (kn.x == 0 || kn.y != params.prev_frame)
+        return;
+    uint n = kn.x - 1;
+    uint g = asuint(node(n, 3).w);
+    if (asuint(calls[CALL_F4 * g + 4].w) != 0)
+        return;
+    uint i = info.y;
+    Island isl = islands[i];
+    bool anchored = (isl.info.x & 1u) != 0;
+    // the body's frame now (placed by the window end)
+    float4 q = isl.rotation;
+    float3 com_w;
+    float3 com_b = isl.com.xyz;
+    float3 vb = float3(0.0), wb = float3(0.0);
+    uint body = asuint(ctab[params.engine_base + 3 * i].x);
+    if (body != NONE)
+    {
+        float4 p_inv = ctab[params.engine_base + 3 * i + 1];
+        float h = 0.70710678118;
+        q = normalize(qmulf(qmulf(float4(h, 0.0, 0.0, h), bodies[7 * body + 1]), p_inv));
+        com_w = to_zup_f(bodies[7 * body].xyz);
+        com_b = ctab[params.engine_base + 3 * i + 2].xyz;
+        vb = to_zup_f(bodies[7 * body + 3].xyz);
+        wb = to_zup_f(bodies[7 * body + 4].xyz);
+    }
+    else
+    {
+        com_w = isl.position.xyz + rotate(quat_of(q), com_b);
+    }
+    float3 origin = com_w - rotate(quat_of(q), com_b);
+    float3 center = chunks[k].center.xyz;
+    float3 x1 = node(n, 13).xyz + node(n, 10).xyz;
+    float3 u = inverse_rotate(quat_of(q), x1 - origin) - center;
+    // the chunk's end orientation without its rest rotation: exp(drot) · (q_node · rest⁻¹)
+    float4 rest = float4(work[WORK_F * n + W_REST], work[WORK_F * n + W_REST + 1], work[WORK_F * n + W_REST + 2], work[WORK_F * n + W_REST + 3]);
+    float4 q1 = normalize(qmulf(rotvec_quat_f(node(n, 11).xyz), qmulf(node(n, 1), qconj(rest))));
+    float3 th = quat_rotvec(normalize(qmulf(qconj(q), q1)));
+    float3 r = rotate(quat_of(q), center + u - com_b);
+    float3 v1 = node(n, 8).xyz, w1 = node(n, 9).xyz;
+    float3 vh = anchored ? inverse_rotate(quat_of(q), v1 - cross(wb, r)) : inverse_rotate(quat_of(q), v1 - vb - cross(wb, r));
+    float3 wh = anchored ? inverse_rotate(quat_of(q), w1) : inverse_rotate(quat_of(q), w1 - wb);
+    state[4 * k] = float4(u, state[4 * k].w);
+    state[4 * k + 1] = float4(th, state[4 * k + 1].w);
+    state[4 * k + 2] = float4(vh, state[4 * k + 2].w);
+    state[4 * k + 3] = float4(wh, state[4 * k + 3].w);
 }

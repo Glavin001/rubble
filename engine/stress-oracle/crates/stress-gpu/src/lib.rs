@@ -273,6 +273,7 @@ pub mod shaders {
             ("feat_prefix", (1, 1, 1)),
             ("feat_nodes", (64, 1, 1)),
             ("feat_bonds", (64, 1, 1)),
+            ("feat_deform", (64, 1, 1)),
         ]
     );
     pub const SPLIT: ShaderSet = shader_set!("split", [("split_components", (256, 1, 1)), ("split_children", (64, 1, 1)), ("split_frames", (64, 1, 1)), ("split_children_group", (64, 1, 1))]);

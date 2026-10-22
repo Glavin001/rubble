@@ -1203,14 +1203,17 @@ void learned_gather_chunks(uint3 group: SV_GroupID, uint3 thread: SV_GroupThread
         // the chunk's frame: its rotation rows map chunk axes into the structure's
         float3x3 rest = transpose(cr);
         float3x3 ic = mul(mul(transpose(rest), inr), rest);
-        float4 q = normalize(qmul(f.q, matrix_quat(rest)));
-        float3 v = f.v + cross(f.w, x - f.com);
+        // the chunk's own orientation and exact velocity (cluster × hidden × rest, the rigid
+        // motion plus the hidden velocity: the builder's `state_chunk_q_world` / `_vel`)
+        float4 q = normalize(qmul(qmul(f.q, rotvec_quat(state[4 * k + 1].xyz)), matrix_quat(rest)));
+        float3 v = f.v + cross(f.w, x - f.com) + rotate(quat_of(f.q), state[4 * k + 2].xyz);
+        float3 w_c = f.w + rotate(quat_of(f.q), state[4 * k + 3].xyz);
         bool anchored = ch.info.x != SUPPORT_NONE;
         nodes[NODE_F4 * n] = float4(x, ch.center.w);
         nodes[NODE_F4 * n + 1] = q;
         nodes[NODE_F4 * n + 2] = float4(ic[0][0], ic[1][1], ic[2][2], anchored ? 1.0 : 0.0);
         nodes[NODE_F4 * n + 3] = float4(v, asfloat(c0.w));
-        nodes[NODE_F4 * n + 4] = float4(f.w, asfloat(0u));
+        nodes[NODE_F4 * n + 4] = float4(w_c, asfloat(0u));
         nodes[NODE_F4 * n + 12] = float4(asfloat(k), asfloat(c1.x), asfloat(ch.info.z), asfloat(ch.info.w));
         chunk_node[k] = n + 1;
     }
@@ -1446,6 +1449,7 @@ void learned_finish(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 // The network's place before its weights exist (`STRESS_LEARNED_STUB`):
 //   1 zero: every output 0 (ballistic motion, no break);
 //   3 nonfinite: NaN outputs (a test of the fallback gate);
+//   4 punch-wobble: the punch's outcome plus a fixed per-chunk pattern (non-rigid pieces);
 //   2 punch: the punch's idea as an outcome: per impactor, the chunks within its face
 //     radius of its path from the struck depth on are a plug; the bonds holding the plug
 //     break; the plug and the impactor leave at their common (inelastic) velocity.
@@ -1485,7 +1489,8 @@ void learned_stub(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
             nodes[NODE_F4 * (first + j) + 5] = float4(nan);
         return;
     }
-    if (group_uniform((params.stub & 0xffu) == 2 ? 1u : 0u, t) == 0)
+    uint mode = params.stub & 0xffu;
+    if (group_uniform(mode == 2 || mode == 4 ? 1u : 0u, t) == 0)
         return;
     // the plug of the call's first impactor (the call's nodes after its chunks)
     uint ki = first + nc;
@@ -1586,6 +1591,22 @@ void learned_stub(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     {
         uint k = first + j;
         nodes[NODE_F4 * k + 4] = float4(node(k, 4).xyz, asfloat(0u));
+    }
+    // 4 punch-wobble (a test of the kept-deformation boundary): the punch's outcome plus a
+    // small fixed pattern on every chunk's outputs, so the chunks of a piece no longer move
+    // rigidly
+    if (mode == 4)
+    {
+        DeviceMemoryBarrierWithGroupSync();
+        for (uint j = t; j < nc; j += G)
+        {
+            uint k = first + j;
+            float a = float(j);
+            float3 wob = 2e-3 * float3(sin(1.3 * a), cos(0.7 * a), sin(0.9 * a + 1.0));
+            nodes[NODE_F4 * k + 5] = node(k, 5) + float4(wob, 0.0);
+            nodes[NODE_F4 * k + 6] = node(k, 6) + float4(0.0, 0.0, wob.x, wob.y);
+            nodes[NODE_F4 * k + 7] = node(k, 7) + float4(wob.z, 0.0, 0.0, 0.0);
+        }
     }
 }
 

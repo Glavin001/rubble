@@ -20,6 +20,10 @@ struct FeatParams_0
     uint max_nodes_0;
     uint layout_cap_0;
     uint max_bonds_cap_0;
+    uint prev_frame_0;
+    uint engine_base_0;
+    uint chunk_count_0;
+    uint pad1_0;
 };
 
 struct JointBond_natural_0
@@ -100,6 +104,38 @@ struct BondDyn_natural_0
     packed_uint4 events_0;
 };
 
+struct Island_natural_0
+{
+    packed_uint4 range_0;
+    packed_uint4 info_1;
+    packed_float4 com_0;
+    packed_float4 inertia0_1;
+    packed_float4 inertia1_1;
+    packed_float4 inertia2_1;
+    packed_float4 inv0_1;
+    packed_float4 inv1_1;
+    packed_float4 inv2_1;
+    packed_float4 wcom_0;
+    packed_float4 winv0_0;
+    packed_float4 winv1_0;
+    packed_float4 winv2_0;
+    packed_float4 rotation_0;
+    packed_float4 position_0;
+    packed_float4 position_err_0;
+    packed_float4 velocity_0;
+    packed_float4 velocity_err_0;
+    packed_float4 angular_velocity_0;
+    uint done_0;
+    uint coverage_0;
+    uint wide_groups_0;
+    uint done_pad_0;
+    packed_uint4 probes_0;
+    packed_float4 energy_0;
+    packed_float4 rotation_err_0;
+    packed_float4 momentum_0;
+    packed_float4 momentum_err_0;
+};
+
 struct KernelContext_0
 {
     FeatParams_0 constant* params_0;
@@ -126,6 +162,10 @@ struct KernelContext_0
     uint device* edges_0;
     uint device* cols_0;
     float device* feat_0;
+    Island_natural_0 device* islands_0;
+    packed_float4 device* ctab_0;
+    packed_float4 device* bodies_0;
+    packed_float4 device* state_0;
     array<array<float4, int(64)>, int(2)> threadgroup* g_red_0;
     array<float, int(64)> threadgroup* g_mv_0;
     array<uint, int(64)> threadgroup* g_mi_0;
@@ -229,7 +269,7 @@ bool connected_0(const JointState_0 thread* st_0, bool has_rebar_0)
     return _S8;
 }
 
-[[kernel]] void feat_map(uint3 id_0 [[thread_position_in_grid]], FeatParams_0 constant* params_1 [[buffer(0)]], BondStatic_natural_0 device* bond_static_1 [[buffer(14)]], ChunkStatic_natural_0 device* chunks_1 [[buffer(13)]], uint device* sinc_1 [[buffer(9)]], packed_uint4 device* slook_1 [[buffer(10)]], uint device* bmap_1 [[buffer(11)]], BondDyn_natural_0 device* bond_dyn_1 [[buffer(15)]], uint device* ctl_1 [[buffer(1)]], float device* work_1 [[buffer(18)]], packed_float4 device* nodes_1 [[buffer(3)]], packed_uint2 device* key_node_1 [[buffer(12)]], packed_float4 device* sc_1 [[buffer(7)]], packed_float4 device* bonds_1 [[buffer(4)]], packed_float4 device* sb_1 [[buffer(8)]], packed_uint4 device* bedge_1 [[buffer(22)]], packed_float4 device* calls_1 [[buffer(2)]], packed_float4 device* imps_1 [[buffer(16)]], packed_uint4 device* cisl_1 [[buffer(5)]], packed_float4 device* cislf_1 [[buffer(6)]], packed_float4 device* contacts_1 [[buffer(17)]], uint device* fctl_1 [[buffer(23)]], uint device* edges_1 [[buffer(20)]], uint device* cols_1 [[buffer(21)]], float device* feat_1 [[buffer(19)]])
+[[kernel]] void feat_map(uint3 id_0 [[thread_position_in_grid]], FeatParams_0 constant* params_1 [[buffer(0)]], BondStatic_natural_0 device* bond_static_1 [[buffer(14)]], ChunkStatic_natural_0 device* chunks_1 [[buffer(13)]], uint device* sinc_1 [[buffer(9)]], packed_uint4 device* slook_1 [[buffer(10)]], uint device* bmap_1 [[buffer(11)]], BondDyn_natural_0 device* bond_dyn_1 [[buffer(15)]], uint device* ctl_1 [[buffer(1)]], float device* work_1 [[buffer(18)]], packed_float4 device* nodes_1 [[buffer(3)]], packed_uint2 device* key_node_1 [[buffer(12)]], packed_float4 device* sc_1 [[buffer(7)]], packed_float4 device* bonds_1 [[buffer(4)]], packed_float4 device* sb_1 [[buffer(8)]], packed_uint4 device* bedge_1 [[buffer(22)]], packed_float4 device* calls_1 [[buffer(2)]], packed_float4 device* imps_1 [[buffer(16)]], packed_uint4 device* cisl_1 [[buffer(5)]], packed_float4 device* cislf_1 [[buffer(6)]], packed_float4 device* contacts_1 [[buffer(17)]], uint device* fctl_1 [[buffer(23)]], uint device* edges_1 [[buffer(20)]], uint device* cols_1 [[buffer(21)]], float device* feat_1 [[buffer(19)]], Island_natural_0 device* islands_1 [[buffer(24)]], packed_float4 device* ctab_1 [[buffer(25)]], packed_float4 device* bodies_1 [[buffer(26)]], packed_float4 device* state_1 [[buffer(27)]])
 {
     thread KernelContext_0 kernelContext_2;
     (&kernelContext_2)->params_0 = params_1;
@@ -256,6 +296,10 @@ bool connected_0(const JointState_0 thread* st_0, bool has_rebar_0)
     (&kernelContext_2)->edges_0 = edges_1;
     (&kernelContext_2)->cols_0 = cols_1;
     (&kernelContext_2)->feat_0 = feat_1;
+    (&kernelContext_2)->islands_0 = islands_1;
+    (&kernelContext_2)->ctab_0 = ctab_1;
+    (&kernelContext_2)->bodies_0 = bodies_1;
+    (&kernelContext_2)->state_0 = state_1;
     threadgroup array<array<float4, int(64)>, int(2)> g_red_1;
     (&kernelContext_2)->g_red_0 = &g_red_1;
     threadgroup array<float, int(64)> g_mv_1;
@@ -311,7 +355,7 @@ float4 node_0(uint n_0, uint k_0, KernelContext_0 thread* kernelContext_3)
     return float4(*(kernelContext_3->nodes_0+(14U * n_0 + k_0))) ;
 }
 
-[[kernel]] void feat_keys(uint3 id_1 [[thread_position_in_grid]], FeatParams_0 constant* params_2 [[buffer(0)]], BondStatic_natural_0 device* bond_static_2 [[buffer(14)]], ChunkStatic_natural_0 device* chunks_2 [[buffer(13)]], uint device* sinc_2 [[buffer(9)]], packed_uint4 device* slook_2 [[buffer(10)]], uint device* bmap_2 [[buffer(11)]], BondDyn_natural_0 device* bond_dyn_2 [[buffer(15)]], uint device* ctl_2 [[buffer(1)]], float device* work_2 [[buffer(18)]], packed_float4 device* nodes_2 [[buffer(3)]], packed_uint2 device* key_node_2 [[buffer(12)]], packed_float4 device* sc_2 [[buffer(7)]], packed_float4 device* bonds_2 [[buffer(4)]], packed_float4 device* sb_2 [[buffer(8)]], packed_uint4 device* bedge_2 [[buffer(22)]], packed_float4 device* calls_2 [[buffer(2)]], packed_float4 device* imps_2 [[buffer(16)]], packed_uint4 device* cisl_2 [[buffer(5)]], packed_float4 device* cislf_2 [[buffer(6)]], packed_float4 device* contacts_2 [[buffer(17)]], uint device* fctl_2 [[buffer(23)]], uint device* edges_2 [[buffer(20)]], uint device* cols_2 [[buffer(21)]], float device* feat_2 [[buffer(19)]])
+[[kernel]] void feat_keys(uint3 id_1 [[thread_position_in_grid]], FeatParams_0 constant* params_2 [[buffer(0)]], BondStatic_natural_0 device* bond_static_2 [[buffer(14)]], ChunkStatic_natural_0 device* chunks_2 [[buffer(13)]], uint device* sinc_2 [[buffer(9)]], packed_uint4 device* slook_2 [[buffer(10)]], uint device* bmap_2 [[buffer(11)]], BondDyn_natural_0 device* bond_dyn_2 [[buffer(15)]], uint device* ctl_2 [[buffer(1)]], float device* work_2 [[buffer(18)]], packed_float4 device* nodes_2 [[buffer(3)]], packed_uint2 device* key_node_2 [[buffer(12)]], packed_float4 device* sc_2 [[buffer(7)]], packed_float4 device* bonds_2 [[buffer(4)]], packed_float4 device* sb_2 [[buffer(8)]], packed_uint4 device* bedge_2 [[buffer(22)]], packed_float4 device* calls_2 [[buffer(2)]], packed_float4 device* imps_2 [[buffer(16)]], packed_uint4 device* cisl_2 [[buffer(5)]], packed_float4 device* cislf_2 [[buffer(6)]], packed_float4 device* contacts_2 [[buffer(17)]], uint device* fctl_2 [[buffer(23)]], uint device* edges_2 [[buffer(20)]], uint device* cols_2 [[buffer(21)]], float device* feat_2 [[buffer(19)]], Island_natural_0 device* islands_2 [[buffer(24)]], packed_float4 device* ctab_2 [[buffer(25)]], packed_float4 device* bodies_2 [[buffer(26)]], packed_float4 device* state_2 [[buffer(27)]])
 {
     thread KernelContext_0 kernelContext_4;
     (&kernelContext_4)->params_0 = params_2;
@@ -338,6 +382,10 @@ float4 node_0(uint n_0, uint k_0, KernelContext_0 thread* kernelContext_3)
     (&kernelContext_4)->edges_0 = edges_2;
     (&kernelContext_4)->cols_0 = cols_2;
     (&kernelContext_4)->feat_0 = feat_2;
+    (&kernelContext_4)->islands_0 = islands_2;
+    (&kernelContext_4)->ctab_0 = ctab_2;
+    (&kernelContext_4)->bodies_0 = bodies_2;
+    (&kernelContext_4)->state_0 = state_2;
     threadgroup array<array<float4, int(64)>, int(2)> g_red_2;
     (&kernelContext_4)->g_red_0 = &g_red_2;
     threadgroup array<float, int(64)> g_mv_2;
@@ -472,7 +520,7 @@ uint node_of_key_0(uint row_1, KernelContext_0 thread* kernelContext_5)
     return _S37;
 }
 
-[[kernel]] void feat_brow(uint3 id_2 [[thread_position_in_grid]], FeatParams_0 constant* params_3 [[buffer(0)]], BondStatic_natural_0 device* bond_static_3 [[buffer(14)]], ChunkStatic_natural_0 device* chunks_3 [[buffer(13)]], uint device* sinc_3 [[buffer(9)]], packed_uint4 device* slook_3 [[buffer(10)]], uint device* bmap_3 [[buffer(11)]], BondDyn_natural_0 device* bond_dyn_3 [[buffer(15)]], uint device* ctl_3 [[buffer(1)]], float device* work_3 [[buffer(18)]], packed_float4 device* nodes_3 [[buffer(3)]], packed_uint2 device* key_node_3 [[buffer(12)]], packed_float4 device* sc_3 [[buffer(7)]], packed_float4 device* bonds_3 [[buffer(4)]], packed_float4 device* sb_3 [[buffer(8)]], packed_uint4 device* bedge_3 [[buffer(22)]], packed_float4 device* calls_3 [[buffer(2)]], packed_float4 device* imps_3 [[buffer(16)]], packed_uint4 device* cisl_3 [[buffer(5)]], packed_float4 device* cislf_3 [[buffer(6)]], packed_float4 device* contacts_3 [[buffer(17)]], uint device* fctl_3 [[buffer(23)]], uint device* edges_3 [[buffer(20)]], uint device* cols_3 [[buffer(21)]], float device* feat_3 [[buffer(19)]])
+[[kernel]] void feat_brow(uint3 id_2 [[thread_position_in_grid]], FeatParams_0 constant* params_3 [[buffer(0)]], BondStatic_natural_0 device* bond_static_3 [[buffer(14)]], ChunkStatic_natural_0 device* chunks_3 [[buffer(13)]], uint device* sinc_3 [[buffer(9)]], packed_uint4 device* slook_3 [[buffer(10)]], uint device* bmap_3 [[buffer(11)]], BondDyn_natural_0 device* bond_dyn_3 [[buffer(15)]], uint device* ctl_3 [[buffer(1)]], float device* work_3 [[buffer(18)]], packed_float4 device* nodes_3 [[buffer(3)]], packed_uint2 device* key_node_3 [[buffer(12)]], packed_float4 device* sc_3 [[buffer(7)]], packed_float4 device* bonds_3 [[buffer(4)]], packed_float4 device* sb_3 [[buffer(8)]], packed_uint4 device* bedge_3 [[buffer(22)]], packed_float4 device* calls_3 [[buffer(2)]], packed_float4 device* imps_3 [[buffer(16)]], packed_uint4 device* cisl_3 [[buffer(5)]], packed_float4 device* cislf_3 [[buffer(6)]], packed_float4 device* contacts_3 [[buffer(17)]], uint device* fctl_3 [[buffer(23)]], uint device* edges_3 [[buffer(20)]], uint device* cols_3 [[buffer(21)]], float device* feat_3 [[buffer(19)]], Island_natural_0 device* islands_3 [[buffer(24)]], packed_float4 device* ctab_3 [[buffer(25)]], packed_float4 device* bodies_3 [[buffer(26)]], packed_float4 device* state_3 [[buffer(27)]])
 {
     thread KernelContext_0 kernelContext_6;
     (&kernelContext_6)->params_0 = params_3;
@@ -499,6 +547,10 @@ uint node_of_key_0(uint row_1, KernelContext_0 thread* kernelContext_5)
     (&kernelContext_6)->edges_0 = edges_3;
     (&kernelContext_6)->cols_0 = cols_3;
     (&kernelContext_6)->feat_0 = feat_3;
+    (&kernelContext_6)->islands_0 = islands_3;
+    (&kernelContext_6)->ctab_0 = ctab_3;
+    (&kernelContext_6)->bodies_0 = bodies_3;
+    (&kernelContext_6)->state_0 = state_3;
     threadgroup array<array<float4, int(64)>, int(2)> g_red_3;
     (&kernelContext_6)->g_red_0 = &g_red_3;
     threadgroup array<float, int(64)> g_mv_3;
@@ -673,7 +725,7 @@ float hertz_duration_0(float m_0, float r_0, float e_0, float v_1)
     return 2.86999988555908203f * pow(m_0 * m_0 / (r_0 * e_0 * e_0 * max(abs(v_1), 0.00100000004749745f)), 0.20000000298023224f);
 }
 
-[[kernel]] void feat_contacts(uint3 group_0 [[threadgroup_position_in_grid]], uint3 thread_1 [[thread_position_in_threadgroup]], FeatParams_0 constant* params_4 [[buffer(0)]], BondStatic_natural_0 device* bond_static_4 [[buffer(14)]], ChunkStatic_natural_0 device* chunks_4 [[buffer(13)]], uint device* sinc_4 [[buffer(9)]], packed_uint4 device* slook_4 [[buffer(10)]], uint device* bmap_4 [[buffer(11)]], BondDyn_natural_0 device* bond_dyn_4 [[buffer(15)]], uint device* ctl_4 [[buffer(1)]], float device* work_4 [[buffer(18)]], packed_float4 device* nodes_4 [[buffer(3)]], packed_uint2 device* key_node_4 [[buffer(12)]], packed_float4 device* sc_4 [[buffer(7)]], packed_float4 device* bonds_4 [[buffer(4)]], packed_float4 device* sb_4 [[buffer(8)]], packed_uint4 device* bedge_4 [[buffer(22)]], packed_float4 device* calls_4 [[buffer(2)]], packed_float4 device* imps_4 [[buffer(16)]], packed_uint4 device* cisl_4 [[buffer(5)]], packed_float4 device* cislf_4 [[buffer(6)]], packed_float4 device* contacts_4 [[buffer(17)]], uint device* fctl_4 [[buffer(23)]], uint device* edges_4 [[buffer(20)]], uint device* cols_4 [[buffer(21)]], float device* feat_4 [[buffer(19)]])
+[[kernel]] void feat_contacts(uint3 group_0 [[threadgroup_position_in_grid]], uint3 thread_1 [[thread_position_in_threadgroup]], FeatParams_0 constant* params_4 [[buffer(0)]], BondStatic_natural_0 device* bond_static_4 [[buffer(14)]], ChunkStatic_natural_0 device* chunks_4 [[buffer(13)]], uint device* sinc_4 [[buffer(9)]], packed_uint4 device* slook_4 [[buffer(10)]], uint device* bmap_4 [[buffer(11)]], BondDyn_natural_0 device* bond_dyn_4 [[buffer(15)]], uint device* ctl_4 [[buffer(1)]], float device* work_4 [[buffer(18)]], packed_float4 device* nodes_4 [[buffer(3)]], packed_uint2 device* key_node_4 [[buffer(12)]], packed_float4 device* sc_4 [[buffer(7)]], packed_float4 device* bonds_4 [[buffer(4)]], packed_float4 device* sb_4 [[buffer(8)]], packed_uint4 device* bedge_4 [[buffer(22)]], packed_float4 device* calls_4 [[buffer(2)]], packed_float4 device* imps_4 [[buffer(16)]], packed_uint4 device* cisl_4 [[buffer(5)]], packed_float4 device* cislf_4 [[buffer(6)]], packed_float4 device* contacts_4 [[buffer(17)]], uint device* fctl_4 [[buffer(23)]], uint device* edges_4 [[buffer(20)]], uint device* cols_4 [[buffer(21)]], float device* feat_4 [[buffer(19)]], Island_natural_0 device* islands_4 [[buffer(24)]], packed_float4 device* ctab_4 [[buffer(25)]], packed_float4 device* bodies_4 [[buffer(26)]], packed_float4 device* state_4 [[buffer(27)]])
 {
     float t0_0;
     bool _S45;
@@ -708,6 +760,10 @@ float hertz_duration_0(float m_0, float r_0, float e_0, float v_1)
     (&kernelContext_15)->edges_0 = edges_4;
     (&kernelContext_15)->cols_0 = cols_4;
     (&kernelContext_15)->feat_0 = feat_4;
+    (&kernelContext_15)->islands_0 = islands_4;
+    (&kernelContext_15)->ctab_0 = ctab_4;
+    (&kernelContext_15)->bodies_0 = bodies_4;
+    (&kernelContext_15)->state_0 = state_4;
     threadgroup array<array<float4, int(64)>, int(2)> g_red_4;
     (&kernelContext_15)->g_red_0 = &g_red_4;
     threadgroup array<float, int(64)> g_mv_4;
@@ -1410,7 +1466,7 @@ float median_work_0(uint base_1, uint n_4, KernelContext_0 thread* kernelContext
     return _S122;
 }
 
-[[kernel]] void feat_scales(uint3 thread_2 [[thread_position_in_threadgroup]], FeatParams_0 constant* params_5 [[buffer(0)]], BondStatic_natural_0 device* bond_static_5 [[buffer(14)]], ChunkStatic_natural_0 device* chunks_5 [[buffer(13)]], uint device* sinc_5 [[buffer(9)]], packed_uint4 device* slook_5 [[buffer(10)]], uint device* bmap_5 [[buffer(11)]], BondDyn_natural_0 device* bond_dyn_5 [[buffer(15)]], uint device* ctl_5 [[buffer(1)]], float device* work_5 [[buffer(18)]], packed_float4 device* nodes_5 [[buffer(3)]], packed_uint2 device* key_node_5 [[buffer(12)]], packed_float4 device* sc_5 [[buffer(7)]], packed_float4 device* bonds_5 [[buffer(4)]], packed_float4 device* sb_5 [[buffer(8)]], packed_uint4 device* bedge_5 [[buffer(22)]], packed_float4 device* calls_5 [[buffer(2)]], packed_float4 device* imps_5 [[buffer(16)]], packed_uint4 device* cisl_5 [[buffer(5)]], packed_float4 device* cislf_5 [[buffer(6)]], packed_float4 device* contacts_5 [[buffer(17)]], uint device* fctl_5 [[buffer(23)]], uint device* edges_5 [[buffer(20)]], uint device* cols_5 [[buffer(21)]], float device* feat_5 [[buffer(19)]])
+[[kernel]] void feat_scales(uint3 thread_2 [[thread_position_in_threadgroup]], FeatParams_0 constant* params_5 [[buffer(0)]], BondStatic_natural_0 device* bond_static_5 [[buffer(14)]], ChunkStatic_natural_0 device* chunks_5 [[buffer(13)]], uint device* sinc_5 [[buffer(9)]], packed_uint4 device* slook_5 [[buffer(10)]], uint device* bmap_5 [[buffer(11)]], BondDyn_natural_0 device* bond_dyn_5 [[buffer(15)]], uint device* ctl_5 [[buffer(1)]], float device* work_5 [[buffer(18)]], packed_float4 device* nodes_5 [[buffer(3)]], packed_uint2 device* key_node_5 [[buffer(12)]], packed_float4 device* sc_5 [[buffer(7)]], packed_float4 device* bonds_5 [[buffer(4)]], packed_float4 device* sb_5 [[buffer(8)]], packed_uint4 device* bedge_5 [[buffer(22)]], packed_float4 device* calls_5 [[buffer(2)]], packed_float4 device* imps_5 [[buffer(16)]], packed_uint4 device* cisl_5 [[buffer(5)]], packed_float4 device* cislf_5 [[buffer(6)]], packed_float4 device* contacts_5 [[buffer(17)]], uint device* fctl_5 [[buffer(23)]], uint device* edges_5 [[buffer(20)]], uint device* cols_5 [[buffer(21)]], float device* feat_5 [[buffer(19)]], Island_natural_0 device* islands_5 [[buffer(24)]], packed_float4 device* ctab_5 [[buffer(25)]], packed_float4 device* bodies_5 [[buffer(26)]], packed_float4 device* state_5 [[buffer(27)]])
 {
     bool _S124;
     uint ok_0;
@@ -1439,6 +1495,10 @@ float median_work_0(uint base_1, uint n_4, KernelContext_0 thread* kernelContext
     (&kernelContext_22)->edges_0 = edges_5;
     (&kernelContext_22)->cols_0 = cols_5;
     (&kernelContext_22)->feat_0 = feat_5;
+    (&kernelContext_22)->islands_0 = islands_5;
+    (&kernelContext_22)->ctab_0 = ctab_5;
+    (&kernelContext_22)->bodies_0 = bodies_5;
+    (&kernelContext_22)->state_0 = state_5;
     threadgroup array<array<float4, int(64)>, int(2)> g_red_5;
     (&kernelContext_22)->g_red_0 = &g_red_5;
     threadgroup array<float, int(64)> g_mv_5;
@@ -1696,7 +1756,7 @@ float median_work_0(uint base_1, uint n_4, KernelContext_0 thread* kernelContext
     return;
 }
 
-[[kernel]] void feat_summ(uint3 id_3 [[thread_position_in_grid]], FeatParams_0 constant* params_6 [[buffer(0)]], BondStatic_natural_0 device* bond_static_6 [[buffer(14)]], ChunkStatic_natural_0 device* chunks_6 [[buffer(13)]], uint device* sinc_6 [[buffer(9)]], packed_uint4 device* slook_6 [[buffer(10)]], uint device* bmap_6 [[buffer(11)]], BondDyn_natural_0 device* bond_dyn_6 [[buffer(15)]], uint device* ctl_6 [[buffer(1)]], float device* work_6 [[buffer(18)]], packed_float4 device* nodes_6 [[buffer(3)]], packed_uint2 device* key_node_6 [[buffer(12)]], packed_float4 device* sc_6 [[buffer(7)]], packed_float4 device* bonds_6 [[buffer(4)]], packed_float4 device* sb_6 [[buffer(8)]], packed_uint4 device* bedge_6 [[buffer(22)]], packed_float4 device* calls_6 [[buffer(2)]], packed_float4 device* imps_6 [[buffer(16)]], packed_uint4 device* cisl_6 [[buffer(5)]], packed_float4 device* cislf_6 [[buffer(6)]], packed_float4 device* contacts_6 [[buffer(17)]], uint device* fctl_6 [[buffer(23)]], uint device* edges_6 [[buffer(20)]], uint device* cols_6 [[buffer(21)]], float device* feat_6 [[buffer(19)]])
+[[kernel]] void feat_summ(uint3 id_3 [[thread_position_in_grid]], FeatParams_0 constant* params_6 [[buffer(0)]], BondStatic_natural_0 device* bond_static_6 [[buffer(14)]], ChunkStatic_natural_0 device* chunks_6 [[buffer(13)]], uint device* sinc_6 [[buffer(9)]], packed_uint4 device* slook_6 [[buffer(10)]], uint device* bmap_6 [[buffer(11)]], BondDyn_natural_0 device* bond_dyn_6 [[buffer(15)]], uint device* ctl_6 [[buffer(1)]], float device* work_6 [[buffer(18)]], packed_float4 device* nodes_6 [[buffer(3)]], packed_uint2 device* key_node_6 [[buffer(12)]], packed_float4 device* sc_6 [[buffer(7)]], packed_float4 device* bonds_6 [[buffer(4)]], packed_float4 device* sb_6 [[buffer(8)]], packed_uint4 device* bedge_6 [[buffer(22)]], packed_float4 device* calls_6 [[buffer(2)]], packed_float4 device* imps_6 [[buffer(16)]], packed_uint4 device* cisl_6 [[buffer(5)]], packed_float4 device* cislf_6 [[buffer(6)]], packed_float4 device* contacts_6 [[buffer(17)]], uint device* fctl_6 [[buffer(23)]], uint device* edges_6 [[buffer(20)]], uint device* cols_6 [[buffer(21)]], float device* feat_6 [[buffer(19)]], Island_natural_0 device* islands_6 [[buffer(24)]], packed_float4 device* ctab_6 [[buffer(25)]], packed_float4 device* bodies_6 [[buffer(26)]], packed_float4 device* state_6 [[buffer(27)]])
 {
     thread KernelContext_0 kernelContext_23;
     (&kernelContext_23)->params_0 = params_6;
@@ -1723,6 +1783,10 @@ float median_work_0(uint base_1, uint n_4, KernelContext_0 thread* kernelContext
     (&kernelContext_23)->edges_0 = edges_6;
     (&kernelContext_23)->cols_0 = cols_6;
     (&kernelContext_23)->feat_0 = feat_6;
+    (&kernelContext_23)->islands_0 = islands_6;
+    (&kernelContext_23)->ctab_0 = ctab_6;
+    (&kernelContext_23)->bodies_0 = bodies_6;
+    (&kernelContext_23)->state_0 = state_6;
     threadgroup array<array<float4, int(64)>, int(2)> g_red_6;
     (&kernelContext_23)->g_red_0 = &g_red_6;
     threadgroup array<float, int(64)> g_mv_6;
@@ -1839,7 +1903,7 @@ float sphere_contact_time_0(float3 dx_0, float3 dv_0, float r_1, float dt_1)
     return _S176;
 }
 
-[[kernel]] void feat_graph(uint3 group_1 [[threadgroup_position_in_grid]], uint3 thread_3 [[thread_position_in_threadgroup]], FeatParams_0 constant* params_7 [[buffer(0)]], BondStatic_natural_0 device* bond_static_7 [[buffer(14)]], ChunkStatic_natural_0 device* chunks_7 [[buffer(13)]], uint device* sinc_7 [[buffer(9)]], packed_uint4 device* slook_7 [[buffer(10)]], uint device* bmap_7 [[buffer(11)]], BondDyn_natural_0 device* bond_dyn_7 [[buffer(15)]], uint device* ctl_7 [[buffer(1)]], float device* work_7 [[buffer(18)]], packed_float4 device* nodes_7 [[buffer(3)]], packed_uint2 device* key_node_7 [[buffer(12)]], packed_float4 device* sc_7 [[buffer(7)]], packed_float4 device* bonds_7 [[buffer(4)]], packed_float4 device* sb_7 [[buffer(8)]], packed_uint4 device* bedge_7 [[buffer(22)]], packed_float4 device* calls_7 [[buffer(2)]], packed_float4 device* imps_7 [[buffer(16)]], packed_uint4 device* cisl_7 [[buffer(5)]], packed_float4 device* cislf_7 [[buffer(6)]], packed_float4 device* contacts_7 [[buffer(17)]], uint device* fctl_7 [[buffer(23)]], uint device* edges_7 [[buffer(20)]], uint device* cols_7 [[buffer(21)]], float device* feat_7 [[buffer(19)]])
+[[kernel]] void feat_graph(uint3 group_1 [[threadgroup_position_in_grid]], uint3 thread_3 [[thread_position_in_threadgroup]], FeatParams_0 constant* params_7 [[buffer(0)]], BondStatic_natural_0 device* bond_static_7 [[buffer(14)]], ChunkStatic_natural_0 device* chunks_7 [[buffer(13)]], uint device* sinc_7 [[buffer(9)]], packed_uint4 device* slook_7 [[buffer(10)]], uint device* bmap_7 [[buffer(11)]], BondDyn_natural_0 device* bond_dyn_7 [[buffer(15)]], uint device* ctl_7 [[buffer(1)]], float device* work_7 [[buffer(18)]], packed_float4 device* nodes_7 [[buffer(3)]], packed_uint2 device* key_node_7 [[buffer(12)]], packed_float4 device* sc_7 [[buffer(7)]], packed_float4 device* bonds_7 [[buffer(4)]], packed_float4 device* sb_7 [[buffer(8)]], packed_uint4 device* bedge_7 [[buffer(22)]], packed_float4 device* calls_7 [[buffer(2)]], packed_float4 device* imps_7 [[buffer(16)]], packed_uint4 device* cisl_7 [[buffer(5)]], packed_float4 device* cislf_7 [[buffer(6)]], packed_float4 device* contacts_7 [[buffer(17)]], uint device* fctl_7 [[buffer(23)]], uint device* edges_7 [[buffer(20)]], uint device* cols_7 [[buffer(21)]], float device* feat_7 [[buffer(19)]], Island_natural_0 device* islands_7 [[buffer(24)]], packed_float4 device* ctab_7 [[buffer(25)]], packed_float4 device* bodies_7 [[buffer(26)]], packed_float4 device* state_7 [[buffer(27)]])
 {
     thread KernelContext_0 kernelContext_24;
     (&kernelContext_24)->params_0 = params_7;
@@ -1866,6 +1930,10 @@ float sphere_contact_time_0(float3 dx_0, float3 dv_0, float r_1, float dt_1)
     (&kernelContext_24)->edges_0 = edges_7;
     (&kernelContext_24)->cols_0 = cols_7;
     (&kernelContext_24)->feat_0 = feat_7;
+    (&kernelContext_24)->islands_0 = islands_7;
+    (&kernelContext_24)->ctab_0 = ctab_7;
+    (&kernelContext_24)->bodies_0 = bodies_7;
+    (&kernelContext_24)->state_0 = state_7;
     threadgroup array<array<float4, int(64)>, int(2)> g_red_7;
     (&kernelContext_24)->g_red_0 = &g_red_7;
     threadgroup array<float, int(64)> g_mv_7;
@@ -2278,7 +2346,7 @@ void edge_count_0(uint g_14, uint s_5, uint n_8, KernelContext_0 thread* kernelC
     return;
 }
 
-[[kernel]] void feat_ic(uint3 group_2 [[threadgroup_position_in_grid]], uint3 thread_4 [[thread_position_in_threadgroup]], FeatParams_0 constant* params_8 [[buffer(0)]], BondStatic_natural_0 device* bond_static_8 [[buffer(14)]], ChunkStatic_natural_0 device* chunks_8 [[buffer(13)]], uint device* sinc_8 [[buffer(9)]], packed_uint4 device* slook_8 [[buffer(10)]], uint device* bmap_8 [[buffer(11)]], BondDyn_natural_0 device* bond_dyn_8 [[buffer(15)]], uint device* ctl_8 [[buffer(1)]], float device* work_8 [[buffer(18)]], packed_float4 device* nodes_8 [[buffer(3)]], packed_uint2 device* key_node_8 [[buffer(12)]], packed_float4 device* sc_8 [[buffer(7)]], packed_float4 device* bonds_8 [[buffer(4)]], packed_float4 device* sb_8 [[buffer(8)]], packed_uint4 device* bedge_8 [[buffer(22)]], packed_float4 device* calls_8 [[buffer(2)]], packed_float4 device* imps_8 [[buffer(16)]], packed_uint4 device* cisl_8 [[buffer(5)]], packed_float4 device* cislf_8 [[buffer(6)]], packed_float4 device* contacts_8 [[buffer(17)]], uint device* fctl_8 [[buffer(23)]], uint device* edges_8 [[buffer(20)]], uint device* cols_8 [[buffer(21)]], float device* feat_8 [[buffer(19)]])
+[[kernel]] void feat_ic(uint3 group_2 [[threadgroup_position_in_grid]], uint3 thread_4 [[thread_position_in_threadgroup]], FeatParams_0 constant* params_8 [[buffer(0)]], BondStatic_natural_0 device* bond_static_8 [[buffer(14)]], ChunkStatic_natural_0 device* chunks_8 [[buffer(13)]], uint device* sinc_8 [[buffer(9)]], packed_uint4 device* slook_8 [[buffer(10)]], uint device* bmap_8 [[buffer(11)]], BondDyn_natural_0 device* bond_dyn_8 [[buffer(15)]], uint device* ctl_8 [[buffer(1)]], float device* work_8 [[buffer(18)]], packed_float4 device* nodes_8 [[buffer(3)]], packed_uint2 device* key_node_8 [[buffer(12)]], packed_float4 device* sc_8 [[buffer(7)]], packed_float4 device* bonds_8 [[buffer(4)]], packed_float4 device* sb_8 [[buffer(8)]], packed_uint4 device* bedge_8 [[buffer(22)]], packed_float4 device* calls_8 [[buffer(2)]], packed_float4 device* imps_8 [[buffer(16)]], packed_uint4 device* cisl_8 [[buffer(5)]], packed_float4 device* cislf_8 [[buffer(6)]], packed_float4 device* contacts_8 [[buffer(17)]], uint device* fctl_8 [[buffer(23)]], uint device* edges_8 [[buffer(20)]], uint device* cols_8 [[buffer(21)]], float device* feat_8 [[buffer(19)]], Island_natural_0 device* islands_8 [[buffer(24)]], packed_float4 device* ctab_8 [[buffer(25)]], packed_float4 device* bodies_8 [[buffer(26)]], packed_float4 device* state_8 [[buffer(27)]])
 {
     thread KernelContext_0 kernelContext_37;
     (&kernelContext_37)->params_0 = params_8;
@@ -2305,6 +2373,10 @@ void edge_count_0(uint g_14, uint s_5, uint n_8, KernelContext_0 thread* kernelC
     (&kernelContext_37)->edges_0 = edges_8;
     (&kernelContext_37)->cols_0 = cols_8;
     (&kernelContext_37)->feat_0 = feat_8;
+    (&kernelContext_37)->islands_0 = islands_8;
+    (&kernelContext_37)->ctab_0 = ctab_8;
+    (&kernelContext_37)->bodies_0 = bodies_8;
+    (&kernelContext_37)->state_0 = state_8;
     threadgroup array<array<float4, int(64)>, int(2)> g_red_8;
     (&kernelContext_37)->g_red_0 = &g_red_8;
     threadgroup array<float, int(64)> g_mv_8;
@@ -2580,7 +2652,7 @@ void edge_count_0(uint g_14, uint s_5, uint n_8, KernelContext_0 thread* kernelC
     return;
 }
 
-[[kernel]] void feat_cracked_find(uint3 group_3 [[threadgroup_position_in_grid]], uint3 thread_5 [[thread_position_in_threadgroup]], FeatParams_0 constant* params_9 [[buffer(0)]], BondStatic_natural_0 device* bond_static_9 [[buffer(14)]], ChunkStatic_natural_0 device* chunks_9 [[buffer(13)]], uint device* sinc_9 [[buffer(9)]], packed_uint4 device* slook_9 [[buffer(10)]], uint device* bmap_9 [[buffer(11)]], BondDyn_natural_0 device* bond_dyn_9 [[buffer(15)]], uint device* ctl_9 [[buffer(1)]], float device* work_9 [[buffer(18)]], packed_float4 device* nodes_9 [[buffer(3)]], packed_uint2 device* key_node_9 [[buffer(12)]], packed_float4 device* sc_9 [[buffer(7)]], packed_float4 device* bonds_9 [[buffer(4)]], packed_float4 device* sb_9 [[buffer(8)]], packed_uint4 device* bedge_9 [[buffer(22)]], packed_float4 device* calls_9 [[buffer(2)]], packed_float4 device* imps_9 [[buffer(16)]], packed_uint4 device* cisl_9 [[buffer(5)]], packed_float4 device* cislf_9 [[buffer(6)]], packed_float4 device* contacts_9 [[buffer(17)]], uint device* fctl_9 [[buffer(23)]], uint device* edges_9 [[buffer(20)]], uint device* cols_9 [[buffer(21)]], float device* feat_9 [[buffer(19)]])
+[[kernel]] void feat_cracked_find(uint3 group_3 [[threadgroup_position_in_grid]], uint3 thread_5 [[thread_position_in_threadgroup]], FeatParams_0 constant* params_9 [[buffer(0)]], BondStatic_natural_0 device* bond_static_9 [[buffer(14)]], ChunkStatic_natural_0 device* chunks_9 [[buffer(13)]], uint device* sinc_9 [[buffer(9)]], packed_uint4 device* slook_9 [[buffer(10)]], uint device* bmap_9 [[buffer(11)]], BondDyn_natural_0 device* bond_dyn_9 [[buffer(15)]], uint device* ctl_9 [[buffer(1)]], float device* work_9 [[buffer(18)]], packed_float4 device* nodes_9 [[buffer(3)]], packed_uint2 device* key_node_9 [[buffer(12)]], packed_float4 device* sc_9 [[buffer(7)]], packed_float4 device* bonds_9 [[buffer(4)]], packed_float4 device* sb_9 [[buffer(8)]], packed_uint4 device* bedge_9 [[buffer(22)]], packed_float4 device* calls_9 [[buffer(2)]], packed_float4 device* imps_9 [[buffer(16)]], packed_uint4 device* cisl_9 [[buffer(5)]], packed_float4 device* cislf_9 [[buffer(6)]], packed_float4 device* contacts_9 [[buffer(17)]], uint device* fctl_9 [[buffer(23)]], uint device* edges_9 [[buffer(20)]], uint device* cols_9 [[buffer(21)]], float device* feat_9 [[buffer(19)]], Island_natural_0 device* islands_9 [[buffer(24)]], packed_float4 device* ctab_9 [[buffer(25)]], packed_float4 device* bodies_9 [[buffer(26)]], packed_float4 device* state_9 [[buffer(27)]])
 {
     thread KernelContext_0 kernelContext_38;
     (&kernelContext_38)->params_0 = params_9;
@@ -2607,6 +2679,10 @@ void edge_count_0(uint g_14, uint s_5, uint n_8, KernelContext_0 thread* kernelC
     (&kernelContext_38)->edges_0 = edges_9;
     (&kernelContext_38)->cols_0 = cols_9;
     (&kernelContext_38)->feat_0 = feat_9;
+    (&kernelContext_38)->islands_0 = islands_9;
+    (&kernelContext_38)->ctab_0 = ctab_9;
+    (&kernelContext_38)->bodies_0 = bodies_9;
+    (&kernelContext_38)->state_0 = state_9;
     threadgroup array<array<float4, int(64)>, int(2)> g_red_9;
     (&kernelContext_38)->g_red_0 = &g_red_9;
     threadgroup array<float, int(64)> g_mv_9;
@@ -2733,7 +2809,7 @@ void edge_count_0(uint g_14, uint s_5, uint n_8, KernelContext_0 thread* kernelC
     return;
 }
 
-[[kernel]] void feat_cracked(uint3 group_4 [[threadgroup_position_in_grid]], uint3 thread_6 [[thread_position_in_threadgroup]], FeatParams_0 constant* params_10 [[buffer(0)]], BondStatic_natural_0 device* bond_static_10 [[buffer(14)]], ChunkStatic_natural_0 device* chunks_10 [[buffer(13)]], uint device* sinc_10 [[buffer(9)]], packed_uint4 device* slook_10 [[buffer(10)]], uint device* bmap_10 [[buffer(11)]], BondDyn_natural_0 device* bond_dyn_10 [[buffer(15)]], uint device* ctl_10 [[buffer(1)]], float device* work_10 [[buffer(18)]], packed_float4 device* nodes_10 [[buffer(3)]], packed_uint2 device* key_node_10 [[buffer(12)]], packed_float4 device* sc_10 [[buffer(7)]], packed_float4 device* bonds_10 [[buffer(4)]], packed_float4 device* sb_10 [[buffer(8)]], packed_uint4 device* bedge_10 [[buffer(22)]], packed_float4 device* calls_10 [[buffer(2)]], packed_float4 device* imps_10 [[buffer(16)]], packed_uint4 device* cisl_10 [[buffer(5)]], packed_float4 device* cislf_10 [[buffer(6)]], packed_float4 device* contacts_10 [[buffer(17)]], uint device* fctl_10 [[buffer(23)]], uint device* edges_10 [[buffer(20)]], uint device* cols_10 [[buffer(21)]], float device* feat_10 [[buffer(19)]])
+[[kernel]] void feat_cracked(uint3 group_4 [[threadgroup_position_in_grid]], uint3 thread_6 [[thread_position_in_threadgroup]], FeatParams_0 constant* params_10 [[buffer(0)]], BondStatic_natural_0 device* bond_static_10 [[buffer(14)]], ChunkStatic_natural_0 device* chunks_10 [[buffer(13)]], uint device* sinc_10 [[buffer(9)]], packed_uint4 device* slook_10 [[buffer(10)]], uint device* bmap_10 [[buffer(11)]], BondDyn_natural_0 device* bond_dyn_10 [[buffer(15)]], uint device* ctl_10 [[buffer(1)]], float device* work_10 [[buffer(18)]], packed_float4 device* nodes_10 [[buffer(3)]], packed_uint2 device* key_node_10 [[buffer(12)]], packed_float4 device* sc_10 [[buffer(7)]], packed_float4 device* bonds_10 [[buffer(4)]], packed_float4 device* sb_10 [[buffer(8)]], packed_uint4 device* bedge_10 [[buffer(22)]], packed_float4 device* calls_10 [[buffer(2)]], packed_float4 device* imps_10 [[buffer(16)]], packed_uint4 device* cisl_10 [[buffer(5)]], packed_float4 device* cislf_10 [[buffer(6)]], packed_float4 device* contacts_10 [[buffer(17)]], uint device* fctl_10 [[buffer(23)]], uint device* edges_10 [[buffer(20)]], uint device* cols_10 [[buffer(21)]], float device* feat_10 [[buffer(19)]], Island_natural_0 device* islands_10 [[buffer(24)]], packed_float4 device* ctab_10 [[buffer(25)]], packed_float4 device* bodies_10 [[buffer(26)]], packed_float4 device* state_10 [[buffer(27)]])
 {
     thread KernelContext_0 kernelContext_39;
     (&kernelContext_39)->params_0 = params_10;
@@ -2760,6 +2836,10 @@ void edge_count_0(uint g_14, uint s_5, uint n_8, KernelContext_0 thread* kernelC
     (&kernelContext_39)->edges_0 = edges_10;
     (&kernelContext_39)->cols_0 = cols_10;
     (&kernelContext_39)->feat_0 = feat_10;
+    (&kernelContext_39)->islands_0 = islands_10;
+    (&kernelContext_39)->ctab_0 = ctab_10;
+    (&kernelContext_39)->bodies_0 = bodies_10;
+    (&kernelContext_39)->state_0 = state_10;
     threadgroup array<array<float4, int(64)>, int(2)> g_red_10;
     (&kernelContext_39)->g_red_0 = &g_red_10;
     threadgroup array<float, int(64)> g_mv_10;
@@ -3001,7 +3081,7 @@ void edge_count_0(uint g_14, uint s_5, uint n_8, KernelContext_0 thread* kernelC
     return;
 }
 
-[[kernel]] void feat_sc(uint3 group_5 [[threadgroup_position_in_grid]], uint3 thread_7 [[thread_position_in_threadgroup]], FeatParams_0 constant* params_11 [[buffer(0)]], BondStatic_natural_0 device* bond_static_11 [[buffer(14)]], ChunkStatic_natural_0 device* chunks_11 [[buffer(13)]], uint device* sinc_11 [[buffer(9)]], packed_uint4 device* slook_11 [[buffer(10)]], uint device* bmap_11 [[buffer(11)]], BondDyn_natural_0 device* bond_dyn_11 [[buffer(15)]], uint device* ctl_11 [[buffer(1)]], float device* work_11 [[buffer(18)]], packed_float4 device* nodes_11 [[buffer(3)]], packed_uint2 device* key_node_11 [[buffer(12)]], packed_float4 device* sc_11 [[buffer(7)]], packed_float4 device* bonds_11 [[buffer(4)]], packed_float4 device* sb_11 [[buffer(8)]], packed_uint4 device* bedge_11 [[buffer(22)]], packed_float4 device* calls_11 [[buffer(2)]], packed_float4 device* imps_11 [[buffer(16)]], packed_uint4 device* cisl_11 [[buffer(5)]], packed_float4 device* cislf_11 [[buffer(6)]], packed_float4 device* contacts_11 [[buffer(17)]], uint device* fctl_11 [[buffer(23)]], uint device* edges_11 [[buffer(20)]], uint device* cols_11 [[buffer(21)]], float device* feat_11 [[buffer(19)]])
+[[kernel]] void feat_sc(uint3 group_5 [[threadgroup_position_in_grid]], uint3 thread_7 [[thread_position_in_threadgroup]], FeatParams_0 constant* params_11 [[buffer(0)]], BondStatic_natural_0 device* bond_static_11 [[buffer(14)]], ChunkStatic_natural_0 device* chunks_11 [[buffer(13)]], uint device* sinc_11 [[buffer(9)]], packed_uint4 device* slook_11 [[buffer(10)]], uint device* bmap_11 [[buffer(11)]], BondDyn_natural_0 device* bond_dyn_11 [[buffer(15)]], uint device* ctl_11 [[buffer(1)]], float device* work_11 [[buffer(18)]], packed_float4 device* nodes_11 [[buffer(3)]], packed_uint2 device* key_node_11 [[buffer(12)]], packed_float4 device* sc_11 [[buffer(7)]], packed_float4 device* bonds_11 [[buffer(4)]], packed_float4 device* sb_11 [[buffer(8)]], packed_uint4 device* bedge_11 [[buffer(22)]], packed_float4 device* calls_11 [[buffer(2)]], packed_float4 device* imps_11 [[buffer(16)]], packed_uint4 device* cisl_11 [[buffer(5)]], packed_float4 device* cislf_11 [[buffer(6)]], packed_float4 device* contacts_11 [[buffer(17)]], uint device* fctl_11 [[buffer(23)]], uint device* edges_11 [[buffer(20)]], uint device* cols_11 [[buffer(21)]], float device* feat_11 [[buffer(19)]], Island_natural_0 device* islands_11 [[buffer(24)]], packed_float4 device* ctab_11 [[buffer(25)]], packed_float4 device* bodies_11 [[buffer(26)]], packed_float4 device* state_11 [[buffer(27)]])
 {
     thread KernelContext_0 kernelContext_40;
     (&kernelContext_40)->params_0 = params_11;
@@ -3028,6 +3108,10 @@ void edge_count_0(uint g_14, uint s_5, uint n_8, KernelContext_0 thread* kernelC
     (&kernelContext_40)->edges_0 = edges_11;
     (&kernelContext_40)->cols_0 = cols_11;
     (&kernelContext_40)->feat_0 = feat_11;
+    (&kernelContext_40)->islands_0 = islands_11;
+    (&kernelContext_40)->ctab_0 = ctab_11;
+    (&kernelContext_40)->bodies_0 = bodies_11;
+    (&kernelContext_40)->state_0 = state_11;
     threadgroup array<array<float4, int(64)>, int(2)> g_red_11;
     (&kernelContext_40)->g_red_0 = &g_red_11;
     threadgroup array<float, int(64)> g_mv_11;
@@ -3324,7 +3408,7 @@ void edge_count_0(uint g_14, uint s_5, uint n_8, KernelContext_0 thread* kernelC
     return;
 }
 
-[[kernel]] void feat_prefix(FeatParams_0 constant* params_12 [[buffer(0)]], BondStatic_natural_0 device* bond_static_12 [[buffer(14)]], ChunkStatic_natural_0 device* chunks_12 [[buffer(13)]], uint device* sinc_12 [[buffer(9)]], packed_uint4 device* slook_12 [[buffer(10)]], uint device* bmap_12 [[buffer(11)]], BondDyn_natural_0 device* bond_dyn_12 [[buffer(15)]], uint device* ctl_12 [[buffer(1)]], float device* work_12 [[buffer(18)]], packed_float4 device* nodes_12 [[buffer(3)]], packed_uint2 device* key_node_12 [[buffer(12)]], packed_float4 device* sc_12 [[buffer(7)]], packed_float4 device* bonds_12 [[buffer(4)]], packed_float4 device* sb_12 [[buffer(8)]], packed_uint4 device* bedge_12 [[buffer(22)]], packed_float4 device* calls_12 [[buffer(2)]], packed_float4 device* imps_12 [[buffer(16)]], packed_uint4 device* cisl_12 [[buffer(5)]], packed_float4 device* cislf_12 [[buffer(6)]], packed_float4 device* contacts_12 [[buffer(17)]], uint device* fctl_12 [[buffer(23)]], uint device* edges_12 [[buffer(20)]], uint device* cols_12 [[buffer(21)]], float device* feat_12 [[buffer(19)]])
+[[kernel]] void feat_prefix(FeatParams_0 constant* params_12 [[buffer(0)]], BondStatic_natural_0 device* bond_static_12 [[buffer(14)]], ChunkStatic_natural_0 device* chunks_12 [[buffer(13)]], uint device* sinc_12 [[buffer(9)]], packed_uint4 device* slook_12 [[buffer(10)]], uint device* bmap_12 [[buffer(11)]], BondDyn_natural_0 device* bond_dyn_12 [[buffer(15)]], uint device* ctl_12 [[buffer(1)]], float device* work_12 [[buffer(18)]], packed_float4 device* nodes_12 [[buffer(3)]], packed_uint2 device* key_node_12 [[buffer(12)]], packed_float4 device* sc_12 [[buffer(7)]], packed_float4 device* bonds_12 [[buffer(4)]], packed_float4 device* sb_12 [[buffer(8)]], packed_uint4 device* bedge_12 [[buffer(22)]], packed_float4 device* calls_12 [[buffer(2)]], packed_float4 device* imps_12 [[buffer(16)]], packed_uint4 device* cisl_12 [[buffer(5)]], packed_float4 device* cislf_12 [[buffer(6)]], packed_float4 device* contacts_12 [[buffer(17)]], uint device* fctl_12 [[buffer(23)]], uint device* edges_12 [[buffer(20)]], uint device* cols_12 [[buffer(21)]], float device* feat_12 [[buffer(19)]], Island_natural_0 device* islands_12 [[buffer(24)]], packed_float4 device* ctab_12 [[buffer(25)]], packed_float4 device* bodies_12 [[buffer(26)]], packed_float4 device* state_12 [[buffer(27)]])
 {
     thread KernelContext_0 kernelContext_41;
     (&kernelContext_41)->params_0 = params_12;
@@ -3351,6 +3435,10 @@ void edge_count_0(uint g_14, uint s_5, uint n_8, KernelContext_0 thread* kernelC
     (&kernelContext_41)->edges_0 = edges_12;
     (&kernelContext_41)->cols_0 = cols_12;
     (&kernelContext_41)->feat_0 = feat_12;
+    (&kernelContext_41)->islands_0 = islands_12;
+    (&kernelContext_41)->ctab_0 = ctab_12;
+    (&kernelContext_41)->bodies_0 = bodies_12;
+    (&kernelContext_41)->state_0 = state_12;
     threadgroup array<array<float4, int(64)>, int(2)> g_red_12;
     (&kernelContext_41)->g_red_0 = &g_red_12;
     threadgroup array<float, int(64)> g_mv_12;
@@ -3469,7 +3557,7 @@ float cap4_0(float x_1)
     return _S427;
 }
 
-[[kernel]] void feat_nodes(uint3 group_6 [[threadgroup_position_in_grid]], uint3 thread_8 [[thread_position_in_threadgroup]], FeatParams_0 constant* params_13 [[buffer(0)]], BondStatic_natural_0 device* bond_static_13 [[buffer(14)]], ChunkStatic_natural_0 device* chunks_13 [[buffer(13)]], uint device* sinc_13 [[buffer(9)]], packed_uint4 device* slook_13 [[buffer(10)]], uint device* bmap_13 [[buffer(11)]], BondDyn_natural_0 device* bond_dyn_13 [[buffer(15)]], uint device* ctl_13 [[buffer(1)]], float device* work_13 [[buffer(18)]], packed_float4 device* nodes_13 [[buffer(3)]], packed_uint2 device* key_node_13 [[buffer(12)]], packed_float4 device* sc_13 [[buffer(7)]], packed_float4 device* bonds_13 [[buffer(4)]], packed_float4 device* sb_13 [[buffer(8)]], packed_uint4 device* bedge_13 [[buffer(22)]], packed_float4 device* calls_13 [[buffer(2)]], packed_float4 device* imps_13 [[buffer(16)]], packed_uint4 device* cisl_13 [[buffer(5)]], packed_float4 device* cislf_13 [[buffer(6)]], packed_float4 device* contacts_13 [[buffer(17)]], uint device* fctl_13 [[buffer(23)]], uint device* edges_13 [[buffer(20)]], uint device* cols_13 [[buffer(21)]], float device* feat_13 [[buffer(19)]])
+[[kernel]] void feat_nodes(uint3 group_6 [[threadgroup_position_in_grid]], uint3 thread_8 [[thread_position_in_threadgroup]], FeatParams_0 constant* params_13 [[buffer(0)]], BondStatic_natural_0 device* bond_static_13 [[buffer(14)]], ChunkStatic_natural_0 device* chunks_13 [[buffer(13)]], uint device* sinc_13 [[buffer(9)]], packed_uint4 device* slook_13 [[buffer(10)]], uint device* bmap_13 [[buffer(11)]], BondDyn_natural_0 device* bond_dyn_13 [[buffer(15)]], uint device* ctl_13 [[buffer(1)]], float device* work_13 [[buffer(18)]], packed_float4 device* nodes_13 [[buffer(3)]], packed_uint2 device* key_node_13 [[buffer(12)]], packed_float4 device* sc_13 [[buffer(7)]], packed_float4 device* bonds_13 [[buffer(4)]], packed_float4 device* sb_13 [[buffer(8)]], packed_uint4 device* bedge_13 [[buffer(22)]], packed_float4 device* calls_13 [[buffer(2)]], packed_float4 device* imps_13 [[buffer(16)]], packed_uint4 device* cisl_13 [[buffer(5)]], packed_float4 device* cislf_13 [[buffer(6)]], packed_float4 device* contacts_13 [[buffer(17)]], uint device* fctl_13 [[buffer(23)]], uint device* edges_13 [[buffer(20)]], uint device* cols_13 [[buffer(21)]], float device* feat_13 [[buffer(19)]], Island_natural_0 device* islands_13 [[buffer(24)]], packed_float4 device* ctab_13 [[buffer(25)]], packed_float4 device* bodies_13 [[buffer(26)]], packed_float4 device* state_13 [[buffer(27)]])
 {
     float ke_imp_0;
     float _S428;
@@ -3499,6 +3587,10 @@ float cap4_0(float x_1)
     (&kernelContext_43)->edges_0 = edges_13;
     (&kernelContext_43)->cols_0 = cols_13;
     (&kernelContext_43)->feat_0 = feat_13;
+    (&kernelContext_43)->islands_0 = islands_13;
+    (&kernelContext_43)->ctab_0 = ctab_13;
+    (&kernelContext_43)->bodies_0 = bodies_13;
+    (&kernelContext_43)->state_0 = state_13;
     threadgroup array<array<float4, int(64)>, int(2)> g_red_13;
     (&kernelContext_43)->g_red_0 = &g_red_13;
     threadgroup array<float, int(64)> g_mv_13;
@@ -3934,7 +4026,7 @@ float fail_margin_of_0(const JointState_0 thread* js_1, float4 s8_0, bool rebar_
     return q_4;
 }
 
-[[kernel]] void feat_bonds(uint3 id_4 [[thread_position_in_grid]], FeatParams_0 constant* params_14 [[buffer(0)]], BondStatic_natural_0 device* bond_static_14 [[buffer(14)]], ChunkStatic_natural_0 device* chunks_14 [[buffer(13)]], uint device* sinc_14 [[buffer(9)]], packed_uint4 device* slook_14 [[buffer(10)]], uint device* bmap_14 [[buffer(11)]], BondDyn_natural_0 device* bond_dyn_14 [[buffer(15)]], uint device* ctl_14 [[buffer(1)]], float device* work_14 [[buffer(18)]], packed_float4 device* nodes_14 [[buffer(3)]], packed_uint2 device* key_node_14 [[buffer(12)]], packed_float4 device* sc_14 [[buffer(7)]], packed_float4 device* bonds_14 [[buffer(4)]], packed_float4 device* sb_14 [[buffer(8)]], packed_uint4 device* bedge_14 [[buffer(22)]], packed_float4 device* calls_14 [[buffer(2)]], packed_float4 device* imps_14 [[buffer(16)]], packed_uint4 device* cisl_14 [[buffer(5)]], packed_float4 device* cislf_14 [[buffer(6)]], packed_float4 device* contacts_14 [[buffer(17)]], uint device* fctl_14 [[buffer(23)]], uint device* edges_14 [[buffer(20)]], uint device* cols_14 [[buffer(21)]], float device* feat_14 [[buffer(19)]])
+[[kernel]] void feat_bonds(uint3 id_4 [[thread_position_in_grid]], FeatParams_0 constant* params_14 [[buffer(0)]], BondStatic_natural_0 device* bond_static_14 [[buffer(14)]], ChunkStatic_natural_0 device* chunks_14 [[buffer(13)]], uint device* sinc_14 [[buffer(9)]], packed_uint4 device* slook_14 [[buffer(10)]], uint device* bmap_14 [[buffer(11)]], BondDyn_natural_0 device* bond_dyn_14 [[buffer(15)]], uint device* ctl_14 [[buffer(1)]], float device* work_14 [[buffer(18)]], packed_float4 device* nodes_14 [[buffer(3)]], packed_uint2 device* key_node_14 [[buffer(12)]], packed_float4 device* sc_14 [[buffer(7)]], packed_float4 device* bonds_14 [[buffer(4)]], packed_float4 device* sb_14 [[buffer(8)]], packed_uint4 device* bedge_14 [[buffer(22)]], packed_float4 device* calls_14 [[buffer(2)]], packed_float4 device* imps_14 [[buffer(16)]], packed_uint4 device* cisl_14 [[buffer(5)]], packed_float4 device* cislf_14 [[buffer(6)]], packed_float4 device* contacts_14 [[buffer(17)]], uint device* fctl_14 [[buffer(23)]], uint device* edges_14 [[buffer(20)]], uint device* cols_14 [[buffer(21)]], float device* feat_14 [[buffer(19)]], Island_natural_0 device* islands_14 [[buffer(24)]], packed_float4 device* ctab_14 [[buffer(25)]], packed_float4 device* bodies_14 [[buffer(26)]], packed_float4 device* state_14 [[buffer(27)]])
 {
     thread KernelContext_0 kernelContext_44;
     (&kernelContext_44)->params_0 = params_14;
@@ -3961,6 +4053,10 @@ float fail_margin_of_0(const JointState_0 thread* js_1, float4 s8_0, bool rebar_
     (&kernelContext_44)->edges_0 = edges_14;
     (&kernelContext_44)->cols_0 = cols_14;
     (&kernelContext_44)->feat_0 = feat_14;
+    (&kernelContext_44)->islands_0 = islands_14;
+    (&kernelContext_44)->ctab_0 = ctab_14;
+    (&kernelContext_44)->bodies_0 = bodies_14;
+    (&kernelContext_44)->state_0 = state_14;
     threadgroup array<array<float4, int(64)>, int(2)> g_red_14;
     (&kernelContext_44)->g_red_0 = &g_red_14;
     threadgroup array<float, int(64)> g_mv_14;
@@ -4187,6 +4283,281 @@ float fail_margin_of_0(const JointState_0 thread* js_1, float4 s8_0, bool rebar_
         put_0(_S535, 3U, r_4, 43U, 0.0f, &kernelContext_44);
         side_4 = side_4 + 1U;
     }
+    return;
+}
+
+struct Quat_0
+{
+    float w_3;
+    float x_2;
+    float y_1;
+    float z_1;
+};
+
+Quat_0 quat_of_0(float4 q_6)
+{
+    thread Quat_0 r_5;
+    (&r_5)->x_2 = q_6.x;
+    (&r_5)->y_1 = q_6.y;
+    (&r_5)->z_1 = q_6.z;
+    (&r_5)->w_3 = q_6.w;
+    return r_5;
+}
+
+Quat_0 quat_mul_0(const Quat_0 thread* a_12, const Quat_0 thread* o_0)
+{
+    thread Quat_0 r_6;
+    (&r_6)->w_3 = a_12->w_3 * o_0->w_3 - a_12->x_2 * o_0->x_2 - a_12->y_1 * o_0->y_1 - a_12->z_1 * o_0->z_1;
+    (&r_6)->x_2 = a_12->w_3 * o_0->x_2 + a_12->x_2 * o_0->w_3 + a_12->y_1 * o_0->z_1 - a_12->z_1 * o_0->y_1;
+    (&r_6)->y_1 = a_12->w_3 * o_0->y_1 - a_12->x_2 * o_0->z_1 + a_12->y_1 * o_0->w_3 + a_12->z_1 * o_0->x_2;
+    (&r_6)->z_1 = a_12->w_3 * o_0->z_1 + a_12->x_2 * o_0->y_1 - a_12->y_1 * o_0->x_2 + a_12->z_1 * o_0->w_3;
+    return r_6;
+}
+
+float4 quat_vec_0(const Quat_0 thread* q_7)
+{
+    return float4(q_7->x_2, q_7->y_1, q_7->z_1, q_7->w_3);
+}
+
+float4 qmulf_0(float4 a_13, float4 b_9)
+{
+    Quat_0 _S554 = quat_of_0(b_9);
+    thread Quat_0 _S555 = quat_of_0(a_13);
+    thread Quat_0 _S556 = _S554;
+    Quat_0 _S557 = quat_mul_0(&_S555, &_S556);
+    thread Quat_0 _S558 = _S557;
+    float4 _S559 = quat_vec_0(&_S558);
+    return _S559;
+}
+
+float3 to_zup_f_0(float3 v_7)
+{
+    return float3(v_7.x, - v_7.z, v_7.y);
+}
+
+float3 rotate_0(const Quat_0 thread* q_8, float3 v_8)
+{
+    float3 qv_0 = float3(q_8->x_2, q_8->y_1, q_8->z_1);
+    float3 t_15 = cross(qv_0, v_8) * float3(2.0f) ;
+    return v_8 + t_15 * float3(q_8->w_3)  + cross(qv_0, t_15);
+}
+
+float3 inverse_rotate_0(const Quat_0 thread* q_9, float3 v_9)
+{
+    thread Quat_0 c_4;
+    (&c_4)->w_3 = q_9->w_3;
+    (&c_4)->x_2 = - q_9->x_2;
+    (&c_4)->y_1 = - q_9->y_1;
+    (&c_4)->z_1 = - q_9->z_1;
+    thread Quat_0 _S560 = c_4;
+    float3 _S561 = rotate_0(&_S560, v_9);
+    return _S561;
+}
+
+float4 rotvec_quat_f_0(float3 r_7)
+{
+    float th_0 = length(r_7);
+    if(th_0 < 9.999999960041972e-13f)
+    {
+        return normalize(float4(float3(0.5f)  * r_7, 1.0f));
+    }
+    float _S562 = 0.5f * th_0;
+    return float4(r_7 / float3(th_0)  * float3(sin(_S562)) , cos(_S562));
+}
+
+float4 qconj_0(float4 q_10)
+{
+    return float4(- q_10.xyz, q_10.w);
+}
+
+float3 quat_rotvec_0(float4 q_11)
+{
+    float4 p_2;
+    if((q_11.w) < 0.0f)
+    {
+        p_2 = - q_11;
+    }
+    else
+    {
+        p_2 = q_11;
+    }
+    float3 _S563 = p_2.xyz;
+    float s_6 = length(_S563);
+    if(s_6 < 9.999999960041972e-13f)
+    {
+        return float3(2.0f)  * _S563;
+    }
+    return _S563 / float3(s_6)  * float3((2.0f * atan2(s_6, p_2.w))) ;
+}
+
+[[kernel]] void feat_deform(uint3 id_5 [[thread_position_in_grid]], FeatParams_0 constant* params_15 [[buffer(0)]], BondStatic_natural_0 device* bond_static_15 [[buffer(14)]], ChunkStatic_natural_0 device* chunks_15 [[buffer(13)]], uint device* sinc_15 [[buffer(9)]], packed_uint4 device* slook_15 [[buffer(10)]], uint device* bmap_15 [[buffer(11)]], BondDyn_natural_0 device* bond_dyn_15 [[buffer(15)]], uint device* ctl_15 [[buffer(1)]], float device* work_15 [[buffer(18)]], packed_float4 device* nodes_15 [[buffer(3)]], packed_uint2 device* key_node_15 [[buffer(12)]], packed_float4 device* sc_15 [[buffer(7)]], packed_float4 device* bonds_15 [[buffer(4)]], packed_float4 device* sb_15 [[buffer(8)]], packed_uint4 device* bedge_15 [[buffer(22)]], packed_float4 device* calls_15 [[buffer(2)]], packed_float4 device* imps_15 [[buffer(16)]], packed_uint4 device* cisl_15 [[buffer(5)]], packed_float4 device* cislf_15 [[buffer(6)]], packed_float4 device* contacts_15 [[buffer(17)]], uint device* fctl_15 [[buffer(23)]], uint device* edges_15 [[buffer(20)]], uint device* cols_15 [[buffer(21)]], float device* feat_15 [[buffer(19)]], Island_natural_0 device* islands_15 [[buffer(24)]], packed_float4 device* ctab_15 [[buffer(25)]], packed_float4 device* bodies_15 [[buffer(26)]], packed_float4 device* state_15 [[buffer(27)]])
+{
+    thread KernelContext_0 kernelContext_45;
+    (&kernelContext_45)->params_0 = params_15;
+    (&kernelContext_45)->bond_static_0 = bond_static_15;
+    (&kernelContext_45)->chunks_0 = chunks_15;
+    (&kernelContext_45)->sinc_0 = sinc_15;
+    (&kernelContext_45)->slook_0 = slook_15;
+    (&kernelContext_45)->bmap_0 = bmap_15;
+    (&kernelContext_45)->bond_dyn_0 = bond_dyn_15;
+    (&kernelContext_45)->ctl_0 = ctl_15;
+    (&kernelContext_45)->work_0 = work_15;
+    (&kernelContext_45)->nodes_0 = nodes_15;
+    (&kernelContext_45)->key_node_0 = key_node_15;
+    (&kernelContext_45)->sc_0 = sc_15;
+    (&kernelContext_45)->bonds_0 = bonds_15;
+    (&kernelContext_45)->sb_0 = sb_15;
+    (&kernelContext_45)->bedge_0 = bedge_15;
+    (&kernelContext_45)->calls_0 = calls_15;
+    (&kernelContext_45)->imps_0 = imps_15;
+    (&kernelContext_45)->cisl_0 = cisl_15;
+    (&kernelContext_45)->cislf_0 = cislf_15;
+    (&kernelContext_45)->contacts_0 = contacts_15;
+    (&kernelContext_45)->fctl_0 = fctl_15;
+    (&kernelContext_45)->edges_0 = edges_15;
+    (&kernelContext_45)->cols_0 = cols_15;
+    (&kernelContext_45)->feat_0 = feat_15;
+    (&kernelContext_45)->islands_0 = islands_15;
+    (&kernelContext_45)->ctab_0 = ctab_15;
+    (&kernelContext_45)->bodies_0 = bodies_15;
+    (&kernelContext_45)->state_0 = state_15;
+    threadgroup array<array<float4, int(64)>, int(2)> g_red_15;
+    (&kernelContext_45)->g_red_0 = &g_red_15;
+    threadgroup array<float, int(64)> g_mv_15;
+    (&kernelContext_45)->g_mv_0 = &g_mv_15;
+    threadgroup array<uint, int(64)> g_mi_15;
+    (&kernelContext_45)->g_mi_0 = &g_mi_15;
+    threadgroup array<uint, int(4096)> g_plug_15;
+    (&kernelContext_45)->g_plug_0 = &g_plug_15;
+    threadgroup uint g_flag_15;
+    (&kernelContext_45)->g_flag_0 = &g_flag_15;
+    threadgroup array<uint, int(64)> g_scan_15;
+    (&kernelContext_45)->g_scan_0 = &g_scan_15;
+    threadgroup float4 g_scalars_15;
+    (&kernelContext_45)->g_scalars_0 = &g_scalars_15;
+    uint k_11 = id_5.x;
+    if(k_11 >= (params_15->chunk_count_0))
+    {
+        return;
+    }
+    uint4 _S564 = uint4(((&kernelContext_45)->chunks_0+k_11)->info_0) ;
+    uint2 _S565 = uint2(*((&kernelContext_45)->key_node_0+((&kernelContext_45)->sinc_0[2U + _S564.z] + _S564.w))) ;
+    uint _S566 = _S565.x;
+    bool _S567;
+    if(_S566 == 0U)
+    {
+        _S567 = true;
+    }
+    else
+    {
+        _S567 = (_S565.y) != ((&kernelContext_45)->params_0->prev_frame_0);
+    }
+    if(_S567)
+    {
+        return;
+    }
+    uint n_10 = _S566 - 1U;
+    float4 _S568 = node_0(n_10, 3U, &kernelContext_45);
+    if((as_type<uint>(((float4(*((&kernelContext_45)->calls_0+(10U * (as_type<uint>((_S568.w))) + 4U))) ).w))) != 0U)
+    {
+        return;
+    }
+    uint i_3 = _S564.y;
+    Island_natural_0 device* _S569 = (&kernelContext_45)->islands_0+i_3;
+    bool anchored_1 = (((uint4(_S569->info_1) ).x) & 1U) != 0U;
+    float4 _S570 = float4(_S569->rotation_0) ;
+    float3 _S571 = float3(0.0f) ;
+    uint _S572 = 3U * i_3;
+    uint body_2 = (as_type<uint>(((float4(*((&kernelContext_45)->ctab_0+((&kernelContext_45)->params_0->engine_base_0 + _S572))) ).x)));
+    float3 com_w_0;
+    float3 wb_1;
+    float3 vb_0;
+    float4 q_12;
+    if(body_2 != 4294967295U)
+    {
+        uint _S573 = 7U * body_2;
+        float4 _S574 = normalize(qmulf_0(qmulf_0(float4(0.70710676908493042f, 0.0f, 0.0f, 0.70710676908493042f), float4(*((&kernelContext_45)->bodies_0+(_S573 + 1U))) ), float4(*((&kernelContext_45)->ctab_0+((&kernelContext_45)->params_0->engine_base_0 + _S572 + 1U))) ));
+        float3 _S575 = to_zup_f_0((float4(*((&kernelContext_45)->bodies_0+(_S573 + 3U))) ).xyz);
+        float3 _S576 = to_zup_f_0((float4(*((&kernelContext_45)->bodies_0+(_S573 + 4U))) ).xyz);
+        com_w_0 = to_zup_f_0((float4(*((&kernelContext_45)->bodies_0+_S573)) ).xyz);
+        q_12 = _S574;
+        wb_1 = _S576;
+        vb_0 = _S575;
+    }
+    else
+    {
+        float3 _S577 = (float4(_S569->position_0) ).xyz;
+        float3 _S578 = (float4(_S569->com_0) ).xyz;
+        thread Quat_0 _S579 = quat_of_0(_S570);
+        float3 _S580 = rotate_0(&_S579, _S578);
+        com_w_0 = _S577 + _S580;
+        q_12 = _S570;
+        wb_1 = _S571;
+        vb_0 = _S571;
+    }
+    Quat_0 _S581 = quat_of_0(q_12);
+    float3 _S582 = (float4(_S569->com_0) ).xyz;
+    thread Quat_0 _S583 = _S581;
+    float3 _S584 = rotate_0(&_S583, _S582);
+    float3 origin_0 = com_w_0 - _S584;
+    float3 center_1 = (float4(((&kernelContext_45)->chunks_0+k_11)->center_0) ).xyz;
+    float4 _S585 = node_0(n_10, 13U, &kernelContext_45);
+    float3 _S586 = _S585.xyz;
+    float4 _S587 = node_0(n_10, 10U, &kernelContext_45);
+    float3 _S588 = _S586 + _S587.xyz - origin_0;
+    thread Quat_0 _S589 = _S581;
+    float3 _S590 = inverse_rotate_0(&_S589, _S588);
+    float3 u_1 = _S590 - center_1;
+    uint _S591 = 24U * n_10 + 17U;
+    float4 rest_0 = float4(*((&kernelContext_45)->work_0+_S591), *((&kernelContext_45)->work_0+(_S591 + 1U)), *((&kernelContext_45)->work_0+(_S591 + 2U)), *((&kernelContext_45)->work_0+(_S591 + 3U)));
+    float4 _S592 = node_0(n_10, 11U, &kernelContext_45);
+    float4 _S593 = rotvec_quat_f_0(_S592.xyz);
+    float4 _S594 = node_0(n_10, 1U, &kernelContext_45);
+    float3 th_1 = quat_rotvec_0(normalize(qmulf_0(qconj_0(q_12), normalize(qmulf_0(_S593, qmulf_0(_S594, qconj_0(rest_0)))))));
+    float3 _S595 = center_1 + u_1 - _S582;
+    thread Quat_0 _S596 = _S581;
+    float3 _S597 = rotate_0(&_S596, _S595);
+    float4 _S598 = node_0(n_10, 8U, &kernelContext_45);
+    float3 v1_0 = _S598.xyz;
+    float4 _S599 = node_0(n_10, 9U, &kernelContext_45);
+    float3 w1_0 = _S599.xyz;
+    float3 vh_0;
+    if(anchored_1)
+    {
+        float3 _S600 = v1_0 - cross(wb_1, _S597);
+        thread Quat_0 _S601 = _S581;
+        float3 _S602 = inverse_rotate_0(&_S601, _S600);
+        vh_0 = _S602;
+    }
+    else
+    {
+        float3 _S603 = v1_0 - vb_0 - cross(wb_1, _S597);
+        thread Quat_0 _S604 = _S581;
+        float3 _S605 = inverse_rotate_0(&_S604, _S603);
+        vh_0 = _S605;
+    }
+    float3 wh_0;
+    if(anchored_1)
+    {
+        thread Quat_0 _S606 = _S581;
+        float3 _S607 = inverse_rotate_0(&_S606, w1_0);
+        wh_0 = _S607;
+    }
+    else
+    {
+        float3 _S608 = w1_0 - wb_1;
+        thread Quat_0 _S609 = _S581;
+        float3 _S610 = inverse_rotate_0(&_S609, _S608);
+        wh_0 = _S610;
+    }
+    uint _S611 = 4U * k_11;
+    *((&kernelContext_45)->state_0+_S611) = packed_float4(float4(u_1, (float4(*((&kernelContext_45)->state_0+_S611)) ).w)) ;
+    uint _S612 = _S611 + 1U;
+    *((&kernelContext_45)->state_0+_S612) = packed_float4(float4(th_1, (float4(*((&kernelContext_45)->state_0+_S612)) ).w)) ;
+    uint _S613 = _S611 + 2U;
+    *((&kernelContext_45)->state_0+_S613) = packed_float4(float4(vh_0, (float4(*((&kernelContext_45)->state_0+_S613)) ).w)) ;
+    uint _S614 = _S611 + 3U;
+    *((&kernelContext_45)->state_0+_S614) = packed_float4(float4(wh_0, (float4(*((&kernelContext_45)->state_0+_S614)) ).w)) ;
     return;
 }
 
