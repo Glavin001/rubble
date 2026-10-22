@@ -335,3 +335,26 @@ The remaining levers are planning's call:
   everything);
 - on-demand calls for training events;
 - a larger budget.
+
+## Dataset audit, viability v1 (for the morning)
+
+**The audit** (`findings/p1-viability-v1-audit-2026-10-22.{md,json}`, `outcome_audit`):
+- 982 events, 0 failures, 0 integrity problems;
+- 0 events still breaking in their last 0.5 s; 7 (0.7%) truncated at the 10 s cap;
+- splits: train 552, val 310, test 120; every frame kept (99,674);
+- ensembles: 54 groups (432 members), all complete. Chunk B's stop had left
+  `p1_anchored_wall_t2_00069_s21102` (val) at 6 of 8 members; e0 and e1 were recorded from
+  the job's recipes, and the ensemble's `/5` calls rebuilt.
+
+**Completeness, on recorded events** (`learned_impact_full_state_check`,
+`runs/dev/full-state-check-v1.jsonl`). On 32 events, two drawn at random from each of the
+16 jobs, every boundary was rebuilt from its full state and stepped one oracle frame: all
+3,374 boundaries equal the next recorded boundary bit for bit.
+
+**Disk.** The tree is at 28.99 GB (block-counted). The test cache from the `CallStream`
+throughput check (0.13 GB) was removed.
+
+**Decision (planning, accepted).** Training calls stay resident until tonight's viability
+runs finish. Then P2 switches to building them once per run from the cache and drops its
+clone; P1 deletes the training single-run calls (2.25 GB) and records the training
+ballistic ensembles in that space.
