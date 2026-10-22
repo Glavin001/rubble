@@ -28,7 +28,7 @@ import joint;
 import bonds;
 
 static const uint CALL_F4 = 10;
-static const uint NODE_F4 = 14;
+static const uint NODE_F4 = 18;
 static const uint BOND_F4 = 2;
 static const uint CISL_U4 = 2;
 static const uint IMP_F4 = 4;

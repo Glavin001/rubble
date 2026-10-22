@@ -50,6 +50,10 @@
 //          8 v_end   9 w_end   10 dx   11 drot  (decoded, world)
 //          12 (layout chunk or impactor index bits, engine body bits, structure bits, chunk bits)
 //          13 frame-start position (world, absolute), -
+//          14 rest centre (body frame), I_xy   15 I_xx, I_yy, I_zz, I_xz   16 I_yz, -  (the
+//             chunk's inertia about its centre, body frame: `ChunkStatic.inertia`)
+//          17 its body's frame-start orientation (x, y, z, w)  (14..17: the window-end fit's
+//             inputs, which `learned_place` cannot bind: chunks only)
 //   bonds  BOND_F4 float4 per live bond of a call (undirected):
 //          0 (damage at frame start, log q, Δdamage, time bin bits 1..8)
 //          1 (decoded damage, broke bits, layout bond bits, call bits)
@@ -64,7 +68,7 @@ import joint;
 import bonds;
 
 static const uint CALL_F4 = 10;
-static const uint NODE_F4 = 14;
+static const uint NODE_F4 = 18;
 static const uint BOND_F4 = 2;
 static const uint CISL_U4 = 2;
 static const uint ISL_U4 = 5;
@@ -641,6 +645,11 @@ float4 qmul(float4 a, float4 b)
 }
 
 // A rotation matrix's quaternion (x, y, z, w).
+float4 qconj(float4 q)
+{
+    return float4(-q.xyz, q.w);
+}
+
 float4 matrix_quat(float3x3 m)
 {
     float tr = m[0][0] + m[1][1] + m[2][2];
@@ -1215,6 +1224,10 @@ void learned_gather_chunks(uint3 group: SV_GroupID, uint3 thread: SV_GroupThread
         nodes[NODE_F4 * n + 3] = float4(v, asfloat(c0.w));
         nodes[NODE_F4 * n + 4] = float4(w_c, asfloat(0u));
         nodes[NODE_F4 * n + 12] = float4(asfloat(k), asfloat(c1.x), asfloat(ch.info.z), asfloat(ch.info.w));
+        nodes[NODE_F4 * n + 14] = float4(ch.center.xyz, inr[0][1]);
+        nodes[NODE_F4 * n + 15] = float4(inr[0][0], inr[1][1], inr[2][2], inr[0][2]);
+        nodes[NODE_F4 * n + 16] = float4(inr[1][2], 0.0, 0.0, 0.0);
+        nodes[NODE_F4 * n + 17] = f.q;
         chunk_node[k] = n + 1;
     }
 }
@@ -1848,41 +1861,58 @@ struct Fit
     float3 w;
 };
 
-// Sums over nodes `idx(j)`, j < n, by one thread (a call island's or a child's chunks).
+// Sums over nodes `idx(j)`, j < n, by one thread (a call island's or a child's chunks): the
+// body fit of stress-ref's `apply_decoded_with` (P0's definition). COM1 the mass mean of the
+// decoded positions, R1 = exp(mass-mean drot) · R0 (`turn` · the body's frame-start rotation),
+// v the mass-mean velocity, ω = I_w⁻¹ Σ [(x1 − COM1) × m v1 + R1 I_c R1ᵀ w1] with I_w =
+// R1 I_body R1ᵀ, I_body the chunks' rest inertia about their rest centre of mass (I_c body
+// frame, as `ChunkStatic.inertia`).
 Fit fit_nodes(uint first, uint n, bool listed, uint list_base, uint list_first)
 {
+    // positions about the first chunk's frame-start position (f32: small arms)
+    uint k0 = listed ? chunk_node[list_first + split_work[list_base]] - 1 : first;
+    float3 ref = node(k0, 13).xyz;
     float m = 0.0;
-    float3 x0 = float3(0.0), x1 = float3(0.0), rot = float3(0.0), p = float3(0.0);
+    float3 x0 = float3(0.0), x1 = float3(0.0), rot = float3(0.0), p = float3(0.0), c = float3(0.0);
     for (uint j = 0; j < n; j++)
     {
         uint k = listed ? chunk_node[list_first + split_work[list_base + j]] - 1 : first + j;
         float mc = node(k, 0).w;
-        float3 xs = node(k, 13).xyz;
+        float3 xs = node(k, 13).xyz - ref;
         m += mc;
         x0 += xs * mc;
         x1 += (xs + node(k, 10).xyz) * mc;
         rot += node(k, 11).xyz * mc;
         p += node(k, 8).xyz * mc;
+        c += node(k, 14).xyz * mc;
     }
     Fit f;
-    f.com0 = x0 / m;
-    f.com1 = x1 / m;
+    float3 rc1 = x1 / m;
+    f.com0 = ref + x0 / m;
+    f.com1 = ref + rc1;
     f.turn = rotvec_quat(rot / m);
     f.v = p / m;
-    Quat tq = quat_of(f.turn);
-    float3x3 tm = quat_matrix(f.turn);
+    c = c / m;
+    // the body's frame-start rotation (any of its chunks': a child's is its parent's)
+    float4 r0 = node(k0, 17);
+    float3x3 r1 = quat_matrix(normalize(qmul(f.turn, r0)));
+    float3x3 eye = float3x3(float3(1, 0, 0), float3(0, 1, 0), float3(0, 0, 1));
     float3 l = float3(0.0);
-    float3x3 itot = float3x3(float3(0.0), float3(0.0), float3(0.0));
+    float3x3 ibody = float3x3(float3(0.0), float3(0.0), float3(0.0));
     for (uint j = 0; j < n; j++)
     {
         uint k = listed ? chunk_node[list_first + split_work[list_base + j]] - 1 : first + j;
         float mc = node(k, 0).w;
-        float3 r = rotate(tq, node(k, 13).xyz - f.com0);
-        float3x3 ic = mul(mul(tm, world_inertia(node(k, 1), node(k, 2).xyz)), transpose(tm));
-        l += cross(r, mc * node(k, 8).xyz) + mul(ic, node(k, 9).xyz);
-        itot += ic + mc * (dot(r, r) * float3x3(float3(1, 0, 0), float3(0, 1, 0), float3(0, 0, 1)) - outer3(r, r));
+        float4 i14 = node(k, 14), i15 = node(k, 15);
+        float i16 = node(k, 16).x;
+        float3x3 icb = float3x3(float3(i15.x, i14.w, i15.w), float3(i14.w, i15.y, i16), float3(i15.w, i16, i15.z));
+        float3 d = i14.xyz - c;
+        ibody += icb + mc * (dot(d, d) * eye - outer3(d, d));
+        // (Σ m r = 0: the velocities about their mean, the same sum with less cancellation)
+        float3 r = (node(k, 13).xyz - ref) + node(k, 10).xyz - rc1;
+        l += cross(r, mc * (node(k, 8).xyz - f.v)) + mul(mul(mul(r1, icb), transpose(r1)), node(k, 9).xyz);
     }
-    f.w = solve3(itot, l);
+    f.w = solve3(mul(mul(r1, ibody), transpose(r1)), l);
     return f;
 }
 

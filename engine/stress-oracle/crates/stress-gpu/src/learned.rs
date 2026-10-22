@@ -21,7 +21,7 @@ use crate::shaders;
 
 /// float4 words per call, node and bond; uint4 words per call island; float4 per impactor.
 pub const CALL_F4: usize = 10;
-pub const NODE_F4: usize = 14;
+pub const NODE_F4: usize = 18;
 pub const BOND_F4: usize = 2;
 pub const CISL_U4: usize = 2;
 pub const IMP_F4: usize = 4;

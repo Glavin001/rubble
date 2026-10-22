@@ -3,7 +3,10 @@
 //! its departure from its body's fitted rigid motion kept as hidden state (stress-ref
 //! `apply_decoded_with(keep_deformation)`). Checked on the free wall with the punch-wobble stub (pieces that do not move rigidly):
 //! after the window end, each chunk's position in the synced world equals its frame-start
-//! position plus its decoded displacement. A file of its own: the switches are read once.
+//! position plus its decoded displacement, and each body that stood whole moves by P0's fit:
+//! v the mass-mean chunk velocity, ω = I_w⁻¹ Σ [(x − COM) × m v + R I_c Rᵀ w] with I_w =
+//! R I_body Rᵀ (I_body the chunks' rest inertia about their rest centre of mass). A file of
+//! its own: the switches are read once.
 //!
 //!   cargo test --release -p stress-rubble --features gpu --test learned_gpu_deform
 #![cfg(feature = "gpu")]
@@ -13,7 +16,7 @@ use std::collections::HashMap;
 use stress_gpu::gpu::Gpu;
 use stress_gpu::world::GpuWorld;
 use stress_ref::capability::Profile;
-use stress_ref::math::Vec3;
+use stress_ref::math::{Mat3, Vec3};
 use stress_rubble::scenes::{later, realtime, wall_ram_late};
 use stress_rubble::RubbleEngine;
 
@@ -39,6 +42,7 @@ fn window_end_keeps_each_chunks_decoded_position() {
     w.set_tiered(true).expect("tiered coupling");
     let frames = (scene.sim.duration / scene.sim.frame_dt).round() as usize;
     let mut checked = 0;
+    let mut fits = 0;
     let mut pending: Option<HashMap<i64, [f32; 3]>> = None;
     for _ in 0..frames {
         w.step_frame(&gpu).expect("frame");
@@ -58,6 +62,41 @@ fn window_end_keeps_each_chunks_decoded_position() {
                 }
                 worst
             });
+            // each unanchored body all of whose chunks were decoded: P0's momentum fit
+            let (fitted, worst_v, worst_w) = w.with_shell(|s| {
+                let (mut fitted, mut worst_v, mut worst_w) = (0, 0.0f64, 0.0f64);
+                for cl in &s.solver.clusters {
+                    let st = cl.structure;
+                    if cl.anchored || cl.chunks.len() < 2 || !cl.chunks.iter().all(|&c| want.contains_key(&(((st as i64) << 32) | c as i64))) {
+                        continue;
+                    }
+                    let chs = &s.solver.structures[st].chunks;
+                    let m: f64 = cl.chunks.iter().map(|&c| chs[c].mass).sum();
+                    let mean = |f: &dyn Fn(usize) -> Vec3| cl.chunks.iter().fold(Vec3::ZERO, |a, &c| a + f(c) * chs[c].mass) * (1.0 / m);
+                    let com_w = mean(&|c| s.solver.chunk_position(st, c));
+                    let com_rest = mean(&|c| chs[c].center);
+                    let v = mean(&|c| s.solver.chunk_velocity(st, c).0);
+                    let r = cl.pose.rotation.to_mat3();
+                    let (mut l, mut ib) = (Vec3::ZERO, Mat3::ZERO);
+                    for &c in &cl.chunks {
+                        let (vc, wc) = s.solver.chunk_velocity(st, c);
+                        let d = chs[c].center - com_rest;
+                        ib += chs[c].inertia + (Mat3::diag(Vec3::splat(d.dot(d))) - Mat3::outer(d, d)) * chs[c].mass;
+                        l = l + (s.solver.chunk_position(st, c) - com_w).cross(vc * chs[c].mass) + r * chs[c].inertia * r.transpose() * wc;
+                    }
+                    let om = (r * ib * r.transpose()).inverse().expect("inertia") * l;
+                    let scale_w = om.norm().max(cl.angular_velocity.norm()).max(1.0);
+                    assert!(cl.velocity.is_finite() && cl.angular_velocity.is_finite() && om.is_finite(), "a fitted body moves by a non-finite velocity");
+                    worst_v = worst_v.max((v - cl.velocity).norm() / v.norm().max(1.0));
+                    worst_w = worst_w.max((om - cl.angular_velocity).norm() / scale_w);
+                    eprintln!("  body of {} chunks: v {:.4} m/s, ω {:.4} rad/s (fit {:.4})", cl.chunks.len(), cl.velocity.norm(), cl.angular_velocity.norm(), om.norm());
+                    fitted += 1;
+                }
+                (fitted, worst_v, worst_w)
+            });
+            eprintln!("window end: {fitted} bodies fitted, worst relative v {worst_v:.3e}, ω {worst_w:.3e}");
+            assert!(worst_v < 1e-5 && worst_w < 1e-5, "a body's motion is not P0's fit (v {worst_v:.3e}, ω {worst_w:.3e})");
+            fits += fitted;
             // and the pieces really deform (the hidden displacement is not zero)
             let u_max = w.with_shell(|s| s.solver.chunks.iter().flatten().map(|c| c.u.norm()).fold(0.0f64, f64::max));
             eprintln!("window end: {} chunks, worst position error {worst:.3e} m, largest hidden displacement {u_max:.3e} m", want.len());
@@ -79,4 +118,5 @@ fn window_end_keeps_each_chunks_decoded_position() {
         }
     }
     assert!(checked > 0, "no window end checked");
+    assert!(fits > 0, "no body fitted whole");
 }

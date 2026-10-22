@@ -317,7 +317,7 @@ fn feat_map(@builtin(global_invocation_id) id_0 : vec3<u32>)
 
 fn node_0( n_0 : u32,  k_0 : u32) -> vec4<f32>
 {
-    return nodes_0[u32(14) * n_0 + k_0];
+    return nodes_0[u32(18) * n_0 + k_0];
 }
 
 @compute
@@ -407,7 +407,7 @@ fn feat_keys(@builtin(global_invocation_id) id_1 : vec3<u32>)
         work_0[_S10 + u32(21) + k_1] = _S13[k_1];
         k_1 = k_1 + u32(1);
     }
-    var _S15 : u32 = u32(14) * n_1;
+    var _S15 : u32 = u32(18) * n_1;
     nodes_0[_S15 + u32(13)] = vec4<f32>(node_0(n_1, u32(13)).xyz, s3_0.w);
     nodes_0[_S15 + u32(2)] = vec4<f32>(s3_0.xyz, node_0(n_1, u32(2)).w);
     return;
@@ -3665,10 +3665,12 @@ fn feat_deform(@builtin(global_invocation_id) id_5 : vec3<u32>)
     var i_3 : u32 = info_2.y;
     var anchored_1 : bool = (((islands_0[i_3].info_1.x) & (u32(1)))) != u32(0);
     var q_13 : vec4<f32> = islands_0[i_3].rotation_0;
+    var com_b_0 : vec3<f32> = islands_0[i_3].com_0.xyz;
     var _S326 : vec3<f32> = vec3<f32>(0.0f);
     var _S327 : u32 = u32(3) * i_3;
     var body_2 : u32 = (bitcast<u32>((ctab_0[params_0.engine_base_0 + _S327].x)));
     var com_w_0 : vec3<f32>;
+    var com_b_1 : vec3<f32>;
     var wb_1 : vec3<f32>;
     var vb_0 : vec3<f32>;
     var q_14 : vec4<f32>;
@@ -3676,46 +3678,48 @@ fn feat_deform(@builtin(global_invocation_id) id_5 : vec3<u32>)
     {
         var _S328 : u32 = u32(7) * body_2;
         var _S329 : vec4<f32> = normalize(qmulf_0(qmulf_0(vec4<f32>(0.70710676908493042f, 0.0f, 0.0f, 0.70710676908493042f), bodies_0[_S328 + u32(1)]), ctab_0[params_0.engine_base_0 + _S327 + u32(1)]));
-        var _S330 : vec3<f32> = to_zup_f_0(bodies_0[_S328 + u32(3)].xyz);
-        var _S331 : vec3<f32> = to_zup_f_0(bodies_0[_S328 + u32(4)].xyz);
+        var _S330 : vec3<f32> = ctab_0[params_0.engine_base_0 + _S327 + u32(2)].xyz;
+        var _S331 : vec3<f32> = to_zup_f_0(bodies_0[_S328 + u32(3)].xyz);
+        var _S332 : vec3<f32> = to_zup_f_0(bodies_0[_S328 + u32(4)].xyz);
         com_w_0 = to_zup_f_0(bodies_0[_S328].xyz);
         q_14 = _S329;
-        wb_1 = _S331;
-        vb_0 = _S330;
+        com_b_1 = _S330;
+        wb_1 = _S332;
+        vb_0 = _S331;
     }
     else
     {
-        com_w_0 = islands_0[i_3].position_0.xyz + rotate_0(quat_of_0(q_13), islands_0[i_3].com_0.xyz);
+        com_w_0 = islands_0[i_3].position_0.xyz + rotate_0(quat_of_0(q_13), com_b_0);
         q_14 = q_13;
+        com_b_1 = com_b_0;
         wb_1 = _S326;
         vb_0 = _S326;
     }
-    var _S332 : Quat_0 = quat_of_0(q_14);
-    var _S333 : vec3<f32> = islands_0[i_3].com_0.xyz;
+    var _S333 : Quat_0 = quat_of_0(q_14);
     var center_1 : vec3<f32> = chunks_0[k_11].center_0.xyz;
-    var u_1 : vec3<f32> = inverse_rotate_0(_S332, node_0(n_10, u32(13)).xyz + node_0(n_10, u32(10)).xyz - (com_w_0 - rotate_0(_S332, _S333))) - center_1;
+    var u_1 : vec3<f32> = inverse_rotate_0(_S333, node_0(n_10, u32(13)).xyz + node_0(n_10, u32(10)).xyz - (com_w_0 - rotate_0(_S333, com_b_1))) - center_1;
     var _S334 : u32 = u32(24) * n_10 + u32(17);
     var th_1 : vec3<f32> = quat_rotvec_0(normalize(qmulf_0(qconj_0(q_14), normalize(qmulf_0(rotvec_quat_f_0(node_0(n_10, u32(11)).xyz), qmulf_0(node_0(n_10, u32(1)), qconj_0(vec4<f32>(work_0[_S334], work_0[_S334 + u32(1)], work_0[_S334 + u32(2)], work_0[_S334 + u32(3)]))))))));
-    var r_12 : vec3<f32> = rotate_0(_S332, center_1 + u_1 - _S333);
+    var r_12 : vec3<f32> = rotate_0(_S333, center_1 + u_1 - com_b_1);
     var v1_0 : vec3<f32> = node_0(n_10, u32(8)).xyz;
     var w1_0 : vec3<f32> = node_0(n_10, u32(9)).xyz;
     var vh_0 : vec3<f32>;
     if(anchored_1)
     {
-        vh_0 = inverse_rotate_0(_S332, v1_0 - cross(wb_1, r_12));
+        vh_0 = inverse_rotate_0(_S333, v1_0 - cross(wb_1, r_12));
     }
     else
     {
-        vh_0 = inverse_rotate_0(_S332, v1_0 - vb_0 - cross(wb_1, r_12));
+        vh_0 = inverse_rotate_0(_S333, v1_0 - vb_0 - cross(wb_1, r_12));
     }
     var wh_0 : vec3<f32>;
     if(anchored_1)
     {
-        wh_0 = inverse_rotate_0(_S332, w1_0);
+        wh_0 = inverse_rotate_0(_S333, w1_0);
     }
     else
     {
-        wh_0 = inverse_rotate_0(_S332, w1_0 - wb_1);
+        wh_0 = inverse_rotate_0(_S333, w1_0 - wb_1);
     }
     var _S335 : u32 = u32(4) * k_11;
     state_0[_S335] = vec4<f32>(u_1, state_0[_S335].w);
