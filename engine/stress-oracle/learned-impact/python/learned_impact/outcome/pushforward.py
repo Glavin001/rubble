@@ -55,6 +55,20 @@ def _row_frames(frame: np.ndarray) -> np.ndarray:
     return out
 
 
+def _lookup(keys: np.ndarray, d: dict) -> tuple[np.ndarray, np.ndarray]:
+    """Positions in `keys` that `d` has, and `d`'s values for them (vectorised dict lookup)."""
+    if not d or not len(keys):
+        return np.zeros(0, np.int64), np.zeros(0)
+    pk = np.fromiter(d.keys(), dtype=np.int64, count=len(d))
+    vals = np.asarray(list(d.values()))
+    order = np.argsort(pk, kind="stable")
+    pk, vals = pk[order], vals[order]
+    keys = np.asarray(keys, dtype=np.int64)
+    pos = np.clip(np.searchsorted(pk, keys), 0, len(pk) - 1)
+    hit = np.nonzero(pk[pos] == keys)[0]
+    return hit, vals[pos[hit]]
+
+
 def rewrite_carried(c: S.Call, pred: dict[str, dict[int, np.ndarray]]) -> S.Call:
     """`pred` maps keys to predicted frame-start state of `c` (= frame-end of its parent):
     `chunk_v`, `chunk_w` (by chunk key), `imp_v`, `imp_w` (by impactor key), and
@@ -64,12 +78,12 @@ def rewrite_carried(c: S.Call, pred: dict[str, dict[int, np.ndarray]]) -> S.Call
     v_ref, L, cw = c.scales["v"], c.scales["L"], c.scales["c"]
     v = np.concatenate([a["chunk_v"], a["impactor_v"]]).astype(np.float64)
     w = np.concatenate([a["chunk_w"], a["impactor_w"]]).astype(np.float64)
-    for i, k in enumerate(a["chunk_key"].tolist()):
-        if k in pred.get("chunk_v", {}):
-            v[i], w[i] = pred["chunk_v"][k], pred["chunk_w"][k]
-    for i, k in enumerate(a["impactor_key"].tolist()):
-        if k in pred.get("imp_v", {}):
-            v[nc + i], w[nc + i] = pred["imp_v"][k], pred["imp_w"][k]
+    for keys, off, kv, kw in ((a["chunk_key"], 0, "chunk_v", "chunk_w"),
+                              (a["impactor_key"], nc, "imp_v", "imp_w")):
+        idx, vals = _lookup(keys, pred.get(kv, {}))
+        if len(idx):
+            v[off + idx] = vals
+            w[off + idx] = _lookup(keys, pred[kw])[1]
     mass = np.concatenate([a["chunk_mass"], a["impactor_mass"]]).astype(np.float64)
     pos = np.concatenate([a["chunk_pos"], a["impactor_pos"]]).astype(np.float64)
     q = np.concatenate([a["chunk_q_world"], a["impactor_q_world"]]).astype(np.float64)
@@ -130,15 +144,15 @@ def rewrite_carried(c: S.Call, pred: dict[str, dict[int, np.ndarray]]) -> S.Call
     point_edges("cracked")
     if len(a["bond_src"]):
         f = a["bond_feat"]
-        keys = a["bond_key"].tolist()
-        for k, key in enumerate(keys):
-            if key in pred.get("bond_damage", {}):
-                f[2 * k:2 * k + 2, S.col("bond_feat", "damage")] = pred["bond_damage"][key]
-            if key in pred.get("bond_peak", {}):
-                f[2 * k:2 * k + 2, S.col("bond_feat", "log1p_peak_util_prev")] = np.log1p(
-                    pred["bond_peak"][key])
-            if key in pred.get("bond_margin", {}):
-                f[2 * k:2 * k + 2, S.col("bond_feat", "fail_margin")] = pred["bond_margin"][key]
+        for name, column, fn in (("bond_damage", "damage", None),
+                                 ("bond_peak", "log1p_peak_util_prev", np.log1p),
+                                 ("bond_margin", "fail_margin", None)):
+            idx, vals = _lookup(a["bond_key"], pred.get(name, {}))
+            if len(idx):
+                vals = fn(vals) if fn is not None else vals
+                c_ = S.col("bond_feat", column)
+                f[2 * idx, c_] = vals  # both twins of the undirected bond
+                f[2 * idx + 1, c_] = vals
 
     def contact_edges(t: str, spin: bool):
         if not len(a[f"{t}_src"]):

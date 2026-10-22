@@ -110,8 +110,11 @@ CARRIED_COLUMNS: dict[str, tuple[str, ...]] = {
 }
 
 
+_COL_INDEX = {a: {n: i for i, n in enumerate(cols)} for a, cols in FEATURE_COLUMNS.items()}
+
+
 def col(array: str, name: str) -> int:
-    return FEATURE_COLUMNS[array].index(name)
+    return _COL_INDEX[array][name]
 
 
 def carried_indices(array: str) -> list[int]:

@@ -20,6 +20,7 @@ import random
 import time
 import traceback
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -402,6 +403,27 @@ def pick_device(name: str) -> torch.device:
     return torch.device(name)
 
 
+_PF_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pushforward")
+
+
+@torch.no_grad()
+def _successors(chain_calls, bc, oc, data, cfg, coll):
+    """The next pushforward batch from CPU copies of a batch and its outputs: decode, the
+    model's predicted state pushed into each call's recorded successor, collated. None when
+    no call in the chain has a successor."""
+    pairs = [(i, data.successor[(c.event_id, c.call_index)]) for i, c in enumerate(chain_calls)
+             if (c.event_id, c.call_index) in data.successor]
+    if not pairs:
+        return None
+    dec = D.decode(oc, bc, cfg.decode)
+    dec["_log_r"] = oc["bond_log_r"]
+    dec["_log_q"] = oc["bond_log_q"]
+    preds = _predictions(bc, dec)
+    succ = [P.push(chain_calls[i], s_, preds[i], preds[i]["broke"] if cfg.pushforward_topology
+                   else None) for i, s_ in pairs]
+    return succ, coll(succ)
+
+
 def _predictions(b: Batch, dec: dict) -> list[dict[str, dict[int, np.ndarray]]]:
     """Per call, keyed predicted frame-end state (input form of `rewrite_carried`)."""
     t = b.t
@@ -584,41 +606,18 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
         loss, normed = Lo.total(terms, norms, cfg.loss)
         if balancer is not None:
             loss = balancer(normed, cfg.loss.weights)
-        if cfg.pushforward_prob > 0 and random.random() < cfg.pushforward_prob:
-            # Pushforward over up to `pushforward_steps` frames: each step's input is the
-            # model's own decoded outcome of the previous frame (stopped gradient between
-            # steps, Brandstetter et al. 2022), its targets are the oracle's.
-            chain_calls, chain_b, chain_o = calls, b, o
-            pf_losses = []
-            for _k in range(cfg.pushforward_steps):
-                pairs = [(i, data.successor[(c.event_id, c.call_index)])
-                         for i, c in enumerate(chain_calls)
-                         if (c.event_id, c.call_index) in data.successor]
-                if not pairs:
-                    break
-                with torch.no_grad():
-                    bc = chain_b if dev.type == "cpu" else chain_b.to("cpu")
-                    oc = {k: v.detach().cpu() for k, v in chain_o.items()}
-                    dec = D.decode(oc, bc, cfg.decode)
-                    dec["_log_r"] = oc["bond_log_r"]
-                    dec["_log_q"] = oc["bond_log_q"]
-                    preds = _predictions(bc, dec)
-                succ = [P.push(chain_calls[i], s_, preds[i],
-                               preds[i]["broke"] if cfg.pushforward_topology else None)
-                        for i, s_ in pairs]
-                bs = coll(succ).to(dev)
-                os_ = model(bs)
-                ts = Lo.loss_terms(os_, bs, cfg.loss, data.priors, cfg.decode)
-                ls, ns = Lo.total(ts, norms, cfg.loss)
-                if balancer is not None:
-                    ls = balancer(ns, cfg.loss.weights)
-                pf_losses.append(ls)
-                chain_calls, chain_b, chain_o = succ, bs, os_
-            if pf_losses:
-                ls = sum(pf_losses) / len(pf_losses)
-                loss = loss + ls
-                acc["pushforward"].append(ls.detach())
-                acc["pushforward_depth"].append(float(len(pf_losses)))
+        # Pushforward (Brandstetter et al. 2022): each step's input is the model's own decoded
+        # outcome of the previous frame (gradient stopped between steps), its targets the
+        # oracle's. The first successor batch (decode, push, collate: CPU work) is built on a
+        # worker thread while the device runs the main loss's backward; the chain's loss is
+        # back-propagated after it. The gradient is the same sum as one backward of both.
+        do_pf = cfg.pushforward_prob > 0 and random.random() < cfg.pushforward_prob
+        first = None
+        if do_pf:
+            with torch.no_grad():
+                bc0 = b if dev.type == "cpu" else b.to("cpu")
+                oc0 = {k: v.detach().cpu() for k, v in o.items()}
+            first = _PF_POOL.submit(_successors, calls, bc0, oc0, data, cfg, coll)
         opt.zero_grad(set_to_none=True)
         if cfg.grad_norm_every and step % cfg.grad_norm_every == 0:
             eff = balancer.effective(cfg.loss.weights) if balancer else cfg.loss.weights
@@ -630,6 +629,31 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
                           f"per-term gradient norm (V34 failure mode); check the targets and λ")
                 prog.update(force=True, dominance_warning={k: shares[k] for k in flagged})
         loss.backward()
+        if first is not None:
+            pf_losses = []
+            nxt = first.result()
+            for _k in range(cfg.pushforward_steps):
+                if nxt is None:
+                    break
+                succ, bs = nxt
+                bs = bs.to(dev)
+                os_ = model(bs)
+                ts = Lo.loss_terms(os_, bs, cfg.loss, data.priors, cfg.decode)
+                ls, ns = Lo.total(ts, norms, cfg.loss)
+                if balancer is not None:
+                    ls = balancer(ns, cfg.loss.weights)
+                pf_losses.append(ls)
+                if _k + 1 < cfg.pushforward_steps:
+                    with torch.no_grad():
+                        nxt = _successors(succ, bs if dev.type == "cpu" else bs.to("cpu"),
+                                          {k: v.detach().cpu() for k, v in os_.items()},
+                                          data, cfg, coll)
+            if pf_losses:
+                ls = sum(pf_losses) / len(pf_losses)
+                ls.backward()
+                loss = loss.detach() + ls.detach()
+                acc["pushforward"].append(ls.detach())
+                acc["pushforward_depth"].append(float(len(pf_losses)))
         total_norm = torch.nn.utils.clip_grad_norm_(params, cfg.grad_clip)
         opt.step()
         # Logged values stay on the device until a log line: a float() per term per step
