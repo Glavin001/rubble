@@ -1,6 +1,7 @@
 """Censored demand loss, normalisation, and L_energy's independence of booked contact
 dissipation (P0)."""
 
+import numpy as np
 import torch
 
 from learned_impact.outcome import losses as Lo
@@ -135,3 +136,14 @@ def test_body_relative_rates_rigid_zero_and_momentum_free():
     L = torch.zeros(2, 3, dtype=d).index_add_(
         0, body, torch.cross(r, m[:, None] * dv, dim=-1) + (inertia @ dw[..., None])[..., 0])
     assert P.abs().max() < 1e-12 and L.abs().max() < 1e-10  # zero net momentum per body
+
+
+def test_group_balancer_moves_shares_towards_targets():
+    gb = Lo.GroupBalancer()
+    true = {"margin": 0.02, "motion": 5.0, "energy": 1.0, "fs_mode": 0.5, "fs_chunk": 0.5}
+    for _ in range(30):  # gradient norms scale with the multipliers
+        g = {k: v * gb.mult[gb.group_of[k]] for k, v in true.items()}
+        shares = gb.update(g)
+    for grp, sh in shares.items():
+        assert abs(sh - Lo.GROUP_TARGET[grp]) < 0.05, (grp, sh)
+    assert abs(sum(np.log(gb.mult[g]) for g in shares)) < 1e-6  # geometric mean 1

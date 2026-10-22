@@ -48,8 +48,12 @@ TERMS = ("margin", "demand", "break", "time", "motion", "def_motion", "pose", "i
 class LossConfig:
     weights: dict[str, float] = field(default_factory=lambda: {
         "margin": 5.0, "demand": 1.0, "break": 5.0, "time": 1.0, "motion": 2.0,
-        "def_motion": 2.0, "pose": 1.0, "fs_mode": 1.0, "fs_chunk": 1.0, **{k: 1.0 for k in FS_BOND_TERMS}, **{k: 1.0 for k in FS_CLUSTER_TERMS},
-        "break_t": 1.0, **{k: 1.0 for k in HIDDEN_TERMS},
+        "def_motion": 1.0, "pose": 1.0,
+        # Term groups get comparable totals (the /5 viability run: 16 bond-field terms at weight
+        # 1 took 46% of the gradient and def_motion 25%, the break decision ~0%)
+        "fs_mode": 0.5, "fs_chunk": 0.5, **{k: 2.0 / len(FS_BOND_TERMS) for k in FS_BOND_TERMS},
+        **{k: 1.0 / len(FS_CLUSTER_TERMS) for k in FS_CLUSTER_TERMS},
+        "break_t": 0.5, **{k: 1.0 / len(HIDDEN_TERMS) for k in HIDDEN_TERMS},
         "impactor": 2.0, "energy": 1.0, "damage": 1.0, "regime": 1.0})
     huber_delta: float = 1.0
     label_smoothing: float = 0.02  # single-run hard break labels
@@ -72,7 +76,7 @@ class LossConfig:
     # "fixed": λ·L/L_zero (the plan's default; λ changes only on validation metrics).
     # "uncertainty": Kendall, Gal & Cipolla (CVPR 2018) homoscedastic weighting on top of
     # the fixed normalisation, an ablation that must beat "fixed" on validation metrics.
-    balance: str = "fixed"
+    balance: str = "groups"
     # V34 detector: warn when one term carries more than this share of the summed per-term
     # gradient norms for `dominance_patience` consecutive measurements.
     dominance_warn: float = 0.6
@@ -376,6 +380,56 @@ class UncertaintyWeights(torch.nn.Module):
                 for i, k in enumerate(self.terms)}
 
 
+TERM_GROUPS = {
+    "decision": ("margin", "break", "demand", "time", "damage"),
+    "motion": ("motion", "def_motion", "pose", "impactor", "regime"),
+    "energy": ("energy",),
+    "fs_bond": (*FS_BOND_TERMS, "fs_mode"),
+    "fs_rest": (*FS_CLUSTER_TERMS, *HIDDEN_TERMS, "fs_chunk", "break_t"),
+}
+GROUP_TARGET = {"decision": 0.30, "motion": 0.30, "energy": 0.10, "fs_bond": 0.15, "fs_rest": 0.15}
+
+
+class GroupBalancer:
+    """Keeps the term groups' gradient shares near GROUP_TARGET: every measurement (the
+    trainer's per-term gradient norms, weighted), each group's multiplier moves towards
+    target ÷ measured share (geometric EMA, clamped to [1e-2, 1e2]). Terms keep their
+    within-group weights and normalisation; only the groups' totals are balanced. Groups
+    absent from the batch (e.g. no full-state data) keep multiplier 1 and are excluded."""
+
+    def __init__(self, momentum: float = 0.5):
+        self.mult = {g: 1.0 for g in TERM_GROUPS}
+        self.momentum = momentum
+        self.group_of = {t: g for g, ts in TERM_GROUPS.items() for t in ts}
+
+    def update(self, gnorms: dict[str, float]) -> dict[str, float]:
+        tot = {g: 0.0 for g in TERM_GROUPS}
+        for k, v in gnorms.items():
+            g = self.group_of.get(k)
+            if g is not None:
+                tot[g] += v
+        present = {g: v for g, v in tot.items() if v > 0}
+        z = sum(present.values())
+        if z <= 0:
+            return {}
+        tz = sum(GROUP_TARGET[g] for g in present)
+        shares = {g: v / z for g, v in present.items()}
+        for g, sh in shares.items():
+            want = GROUP_TARGET[g] / tz / max(sh, 1e-6)
+            new = self.mult[g] * want
+            self.mult[g] = float(np.clip(np.exp(self.momentum * np.log(new) + (1 - self.momentum)
+                                                * np.log(self.mult[g])), 1e-2, 1e2))
+        # only the ratios matter for the shares: keep the present groups' geometric mean at 1
+        # so the total loss (and gradient clipping) keeps its scale
+        gm = float(np.exp(np.mean([np.log(self.mult[g]) for g in shares])))
+        for g in shares:
+            self.mult[g] = float(np.clip(self.mult[g] / gm, 1e-2, 1e2))
+        return shares
+
+    def weights(self, base: dict[str, float]) -> dict[str, float]:
+        return {k: v * self.mult.get(self.group_of.get(k, ""), 1.0) for k, v in base.items()}
+
+
 class DominanceMonitor:
     """Flags a term whose gradient share stays above `share` (the V34 failure: one field was
     >99% of the loss)."""
@@ -430,7 +484,17 @@ def zero_baselines(batches, cfg: LossConfig, priors=None) -> dict[str, float]:
         for k, v in loss_terms(z, b, cfg, priors).items():
             sums[k] = sums.get(k, 0.0) + float(v)
         n += 1
-    # full-state fields (encodings of order 1) that barely change in these batches would get
-    # a near-zero persistence baseline and dominate the gradient: floor it
-    return {k: max(v / max(n, 1), 1e-4) if (k.startswith("fs_") or k.startswith("hid_")) else ((v / max(n, 1)) if v > 0 else 1.0)
-            for k, v in sums.items()}
+    # Full-state fields that barely change get a tiny persistence baseline; dividing by it
+    # amplifies their gradients ~1/baseline and swamps the other terms. Each field's
+    # normaliser is floored at a tenth of its group's median baseline (and 1e-4).
+    base = {k: v / max(n, 1) for k, v in sums.items()}
+    out = {}
+    for k, v in base.items():
+        group = next((g for g in (FS_BOND_TERMS, FS_CLUSTER_TERMS, HIDDEN_TERMS) if k in g), None)
+        if group is not None or k.startswith("fs_"):
+            grp = [base[g] for g in (group or (k,)) if g in base and base[g] > 0]
+            floor = max(1e-4, 0.1 * float(np.median(grp))) if grp else 1e-4
+            out[k] = max(v, floor)
+        else:
+            out[k] = v if v > 0 else 1.0
+    return out

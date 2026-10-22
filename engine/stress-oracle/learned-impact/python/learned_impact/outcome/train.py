@@ -609,8 +609,11 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
     model = model.to(dev)
     params = [p for p in model.parameters()]
     balancer = None
+    group_bal = None
     if cfg.loss.balance == "uncertainty":
         balancer = Lo.UncertaintyWeights().to(dev)
+    elif cfg.loss.balance == "groups":
+        group_bal = Lo.GroupBalancer()
     elif cfg.loss.balance != "fixed":
         raise ValueError(f"loss.balance {cfg.loss.balance!r}")
     opt = make_optimizer(params + (list(balancer.parameters()) if balancer else []), cfg, dev)
@@ -677,6 +680,9 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
         loss, normed = Lo.total(terms, norms, cfg.loss)
         if balancer is not None:
             loss = balancer(normed, cfg.loss.weights)
+        if group_bal is not None:
+            gw = group_bal.weights(cfg.loss.weights)
+            loss = sum(gw.get(k, 1.0) * v for k, v in normed.items())
         # Pushforward (Brandstetter et al. 2022): each step's input is the model's own decoded
         # outcome of the previous frame (gradient stopped between steps), its targets the
         # oracle's. The first successor batch (decode, push, collate: CPU work) is built on a
@@ -691,8 +697,23 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
             first = _PF_POOL.submit(_successors, calls, bc0, oc0, data, cfg, coll)
         opt.zero_grad(set_to_none=True)
         if cfg.grad_norm_every and step % cfg.grad_norm_every == 0:
-            eff = balancer.effective(cfg.loss.weights) if balancer else cfg.loss.weights
-            gnorm_last = grad_norms({k: eff.get(k, 1.0) * v for k, v in normed.items()}, params)
+            eff = balancer.effective(cfg.loss.weights) if balancer else (
+                group_bal.weights(cfg.loss.weights) if group_bal else cfg.loss.weights)
+            if group_bal is not None:
+                # per group, not per term: 5 extra backward passes instead of ~40
+                gsum: dict[str, torch.Tensor] = {}
+                for k, v in normed.items():
+                    gk = group_bal.group_of.get(k, k)
+                    gsum[gk] = gsum.get(gk, 0) + eff.get(k, 1.0) * v
+                gnorm_last = grad_norms(gsum, params)
+                gshares = group_bal.update({next(iter(Lo.TERM_GROUPS[g])) if g in Lo.TERM_GROUPS else g: v
+                                            for g, v in gnorm_last.items()})
+            else:
+                gnorm_last = grad_norms({k: eff.get(k, 1.0) * v for k, v in normed.items()}, params)
+            if group_bal is not None:
+                if step % (cfg.grad_norm_every * 10) == 0:
+                    prog.line("group gradient shares " + " ".join(f"{g}={v:.2f}" for g, v in gshares.items())
+                              + " → multipliers " + " ".join(f"{g}={v:.3g}" for g, v in group_bal.mult.items()))
             shares, flagged = monitor.update(gnorm_last)
             if flagged:
                 prog.line(f"WARNING gradient dominance: {flagged} carry "
@@ -716,6 +737,9 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
                 ls, ns = Lo.total(ts, norms, cfg.loss)
                 if balancer is not None:
                     ls = balancer(ns, cfg.loss.weights)
+                if group_bal is not None:
+                    gw = group_bal.weights(cfg.loss.weights)
+                    ls = sum(gw.get(k, 1.0) * v for k, v in ns.items())
                 pf_losses.append(ls)
                 if _k + 1 < cfg.pushforward_steps:
                     with torch.no_grad():
@@ -852,7 +876,8 @@ def main(argv=None) -> None:
     ap.add_argument("--eval-every", type=int, default=200)
     ap.add_argument("--energy-tolerance", type=float, default=0.05)
     ap.add_argument("--break-mode", default="threshold", choices=["threshold", "sample"])
-    ap.add_argument("--balance", default="fixed", choices=["fixed", "uncertainty"])
+    ap.add_argument("--balance", default="groups", choices=["fixed", "uncertainty", "groups"],
+                    help="groups: keep the term groups' gradient shares near Lo.GROUP_TARGET")
     ap.add_argument("--no-input-norm", action="store_true",
                     help="disable the fixed per-column input standardisation")
     ap.add_argument("--w-break", type=float, default=None, help="λ for break and margin")
