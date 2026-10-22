@@ -2821,6 +2821,14 @@ fn learned_stub(@builtin(workgroup_id) group_7 : vec3<u32>, @builtin(local_invoc
     }
     if(pa_0)
     {
+        pa_0 = true;
+    }
+    else
+    {
+        pa_0 = mode_1 == u32(5);
+    }
+    if(pa_0)
+    {
         j_6 = u32(1);
     }
     else
@@ -2850,7 +2858,7 @@ fn learned_stub(@builtin(workgroup_id) group_7 : vec3<u32>, @builtin(local_invoc
     var vi_0 : vec3<f32> = node_0(ki_0, u32(3)).xyz;
     var mi_1 : f32 = node_0(ki_0, u32(0)).w;
     var _S212 : f32 = imps_0[u32(4) * (bitcast<u32>((node_0(ki_0, u32(12)).x)))].z;
-    var _S213 : vec3<f32> = normalize(vi_0 - calls_0[_S199 + u32(5)].xyz * vec3<f32>(0.0f));
+    var dir_0 : vec3<f32> = normalize(vi_0 - calls_0[_S199 + u32(5)].xyz * vec3<f32>(0.0f));
     var inf_1 : f32 = float_bits_0(u32(2139095040));
     var best_0 : f32 = inf_1;
     j_6 = t_11;
@@ -2865,8 +2873,8 @@ fn learned_stub(@builtin(workgroup_id) group_7 : vec3<u32>, @builtin(local_invoc
         }
         var k_23 : u32 = first_0 + j_6;
         var r_11 : vec3<f32> = node_0(k_23, u32(0)).xyz - _S211;
-        var along_0 : f32 = dot(r_11, _S213);
-        if((length(r_11 - _S213 * vec3<f32>(along_0))) <= (_S212 + chunks_0[(bitcast<u32>((node_0(k_23, u32(12)).x)))].half_0.w))
+        var along_0 : f32 = dot(r_11, dir_0);
+        if((length(r_11 - dir_0 * vec3<f32>(along_0))) <= (_S212 + chunks_0[(bitcast<u32>((node_0(k_23, u32(12)).x)))].half_0.w))
         {
             pa_0 = along_0 > 0.0f;
         }
@@ -2900,11 +2908,11 @@ fn learned_stub(@builtin(workgroup_id) group_7 : vec3<u32>, @builtin(local_invoc
         workgroupBarrier();
         s_8 = (s_8 >> (u32(1)));
     }
-    var _S214 : f32 = g_sort_0[i32(0)];
+    var _S213 : f32 = g_sort_0[i32(0)];
     workgroupBarrier();
-    var _S215 : vec4<f32> = vec4<f32>(0.0f);
+    var _S214 : vec4<f32> = vec4<f32>(0.0f);
     j_6 = t_11;
-    var sa_7 : vec4<f32> = _S215;
+    var sa_7 : vec4<f32> = _S214;
     loop
     {
         if(j_6 < nc_1)
@@ -2916,11 +2924,11 @@ fn learned_stub(@builtin(workgroup_id) group_7 : vec3<u32>, @builtin(local_invoc
         }
         var k_24 : u32 = first_0 + j_6;
         var r_12 : vec3<f32> = node_0(k_24, u32(0)).xyz - _S211;
-        var along_1 : f32 = dot(r_12, _S213);
+        var along_1 : f32 = dot(r_12, dir_0);
         var h_1 : f32 = chunks_0[(bitcast<u32>((node_0(k_24, u32(12)).x)))].half_0.w;
-        if(_S214 < inf_1)
+        if(_S213 < inf_1)
         {
-            pa_0 = along_1 >= (_S214 - h_1);
+            pa_0 = along_1 >= (_S213 - h_1);
         }
         else
         {
@@ -2928,7 +2936,7 @@ fn learned_stub(@builtin(workgroup_id) group_7 : vec3<u32>, @builtin(local_invoc
         }
         if(pa_0)
         {
-            plug_0 = (length(r_12 - _S213 * vec3<f32>(along_1))) <= _S212;
+            plug_0 = (length(r_12 - dir_0 * vec3<f32>(along_1))) <= _S212;
         }
         else
         {
@@ -2950,7 +2958,7 @@ fn learned_stub(@builtin(workgroup_id) group_7 : vec3<u32>, @builtin(local_invoc
         }
         j_6 = j_6 + u32(64);
     }
-    reduce_store_0(t_11, sa_7, _S215, _S215, _S215);
+    reduce_store_0(t_11, sa_7, _S214, _S214, _S214);
     var a_12 : vec4<f32>;
     var b_10 : vec4<f32>;
     var c_8 : vec4<f32>;
@@ -2965,8 +2973,8 @@ fn learned_stub(@builtin(workgroup_id) group_7 : vec3<u32>, @builtin(local_invoc
     {
         j_6 = u32(0);
     }
-    var _S216 : u32 = group_uniform_0(j_6, t_11);
-    if(_S216 == u32(0))
+    var _S215 : u32 = group_uniform_0(j_6, t_11);
+    if(_S215 == u32(0))
     {
         return;
     }
@@ -2983,10 +2991,10 @@ fn learned_stub(@builtin(workgroup_id) group_7 : vec3<u32>, @builtin(local_invoc
         }
         var k_25 : u32 = first_0 + j_6;
         var r_13 : vec3<f32> = node_0(k_25, u32(0)).xyz - _S211;
-        var along_2 : f32 = dot(r_13, _S213);
-        if(along_2 >= (_S214 - chunks_0[(bitcast<u32>((node_0(k_25, u32(12)).x)))].half_0.w))
+        var along_2 : f32 = dot(r_13, dir_0);
+        if(along_2 >= (_S213 - chunks_0[(bitcast<u32>((node_0(k_25, u32(12)).x)))].half_0.w))
         {
-            pa_0 = (length(r_13 - _S213 * vec3<f32>(along_2))) <= _S212;
+            pa_0 = (length(r_13 - dir_0 * vec3<f32>(along_2))) <= _S212;
         }
         else
         {
@@ -3003,21 +3011,32 @@ fn learned_stub(@builtin(workgroup_id) group_7 : vec3<u32>, @builtin(local_invoc
         if(plug_0)
         {
             var o_1 : vec3<f32> = inverse_rotate_0(quat_of_0(node_0(k_25, u32(1))), vc_1 - node_0(k_25, u32(3)).xyz) / vec3<f32>(vref_0);
-            var _S217 : u32 = u32(14) * k_25;
-            nodes_0[_S217 + u32(5)] = vec4<f32>(o_1, 0.0f);
-            nodes_0[_S217 + u32(6)] = vec4<f32>(0.0f, 0.0f, 0.5f * o_1.x, 0.5f * o_1.y);
-            nodes_0[_S217 + u32(7)] = vec4<f32>(0.5f * o_1.z, 0.0f, 0.0f, 0.0f);
-            nodes_0[_S217 + u32(4)] = vec4<f32>(node_0(k_25, u32(4)).xyz, (bitcast<f32>((u32(2)))));
+            var _S216 : u32 = u32(14) * k_25;
+            nodes_0[_S216 + u32(5)] = vec4<f32>(o_1, 0.0f);
+            nodes_0[_S216 + u32(6)] = vec4<f32>(0.0f, 0.0f, 0.5f * o_1.x, 0.5f * o_1.y);
+            nodes_0[_S216 + u32(7)] = vec4<f32>(0.5f * o_1.z, 0.0f, 0.0f, 0.0f);
+            nodes_0[_S216 + u32(4)] = vec4<f32>(node_0(k_25, u32(4)).xyz, (bitcast<f32>((u32(2)))));
         }
         j_6 = j_6 + u32(64);
     }
     if(t_11 == u32(0))
     {
-        var o_2 : vec3<f32> = inverse_rotate_0(quat_of_0(node_0(ki_0, u32(1))), vc_1 - vi_0) / vec3<f32>(vref_0);
-        var _S218 : u32 = u32(14) * ki_0;
-        nodes_0[_S218 + u32(5)] = vec4<f32>(o_2, 0.0f);
-        nodes_0[_S218 + u32(6)] = vec4<f32>(0.0f, 0.0f, 0.5f * o_2.x, 0.5f * o_2.y);
-        nodes_0[_S218 + u32(7)] = vec4<f32>(0.5f * o_2.z, 0.0f, 0.0f, 0.0f);
+        var q_13 : Quat_0 = quat_of_0(node_0(ki_0, u32(1)));
+        var o_2 : vec3<f32> = inverse_rotate_0(q_13, vc_1 - vi_0) / vec3<f32>(vref_0);
+        var ox_0 : vec3<f32> = vec3<f32>(0.5f) * o_2;
+        var ox_1 : vec3<f32>;
+        if(mode_1 == u32(5))
+        {
+            ox_1 = ox_0 + inverse_rotate_0(q_13, dir_0 * vec3<f32>(0.00499999988824129f)) / vec3<f32>((vref_0 * params_0.dt_0));
+        }
+        else
+        {
+            ox_1 = ox_0;
+        }
+        var _S217 : u32 = u32(14) * ki_0;
+        nodes_0[_S217 + u32(5)] = vec4<f32>(o_2, 0.0f);
+        nodes_0[_S217 + u32(6)] = vec4<f32>(0.0f, 0.0f, ox_1.x, ox_1.y);
+        nodes_0[_S217 + u32(7)] = vec4<f32>(ox_1.z, 0.0f, 0.0f, 0.0f);
     }
     storageBarrier(); textureBarrier(); workgroupBarrier();;
     j_6 = t_11;
@@ -3030,10 +3049,10 @@ fn learned_stub(@builtin(workgroup_id) group_7 : vec3<u32>, @builtin(local_invoc
         {
             break;
         }
-        var _S219 : u32 = u32(2) * (_S202 + j_6);
-        var na_0 : u32 = chunk_node_0[bond_static_0[(bitcast<u32>((bonds_0[_S219 + u32(1)].z)))].law_0.ids_0.y];
-        var nb2_0 : u32 = chunk_node_0[bond_static_0[(bitcast<u32>((bonds_0[_S219 + u32(1)].z)))].law_0.ids_0.z];
-        if(chunk_node_0[bond_static_0[(bitcast<u32>((bonds_0[_S219 + u32(1)].z)))].law_0.ids_0.y] != u32(0))
+        var _S218 : u32 = u32(2) * (_S202 + j_6);
+        var na_0 : u32 = chunk_node_0[bond_static_0[(bitcast<u32>((bonds_0[_S218 + u32(1)].z)))].law_0.ids_0.y];
+        var nb2_0 : u32 = chunk_node_0[bond_static_0[(bitcast<u32>((bonds_0[_S218 + u32(1)].z)))].law_0.ids_0.z];
+        if(chunk_node_0[bond_static_0[(bitcast<u32>((bonds_0[_S218 + u32(1)].z)))].law_0.ids_0.y] != u32(0))
         {
             pa_0 = (((bitcast<u32>((nodes_0[u32(14) * (na_0 - u32(1)) + u32(4)].w))) & (u32(2)))) != u32(0);
         }
@@ -3051,7 +3070,7 @@ fn learned_stub(@builtin(workgroup_id) group_7 : vec3<u32>, @builtin(local_invoc
         }
         if(pa_0 != plug_0)
         {
-            bonds_0[_S219] = vec4<f32>(bonds_0[_S219].x, 1.0f, 0.0f, (bitcast<f32>((u32(1)))));
+            bonds_0[_S218] = vec4<f32>(bonds_0[_S218].x, 1.0f, 0.0f, (bitcast<f32>((u32(1)))));
         }
         j_6 = j_6 + u32(64);
     }
@@ -3086,10 +3105,10 @@ fn learned_stub(@builtin(workgroup_id) group_7 : vec3<u32>, @builtin(local_invoc
             var k_27 : u32 = first_0 + j_6;
             var a_13 : f32 = f32(j_6);
             var wob_0 : vec3<f32> = vec3<f32>(0.0020000000949949f) * vec3<f32>(sin(1.29999995231628418f * a_13), cos(0.69999998807907104f * a_13), sin(0.89999997615814209f * a_13 + 1.0f));
-            var _S220 : u32 = u32(14) * k_27;
-            nodes_0[_S220 + u32(5)] = node_0(k_27, u32(5)) + vec4<f32>(wob_0, 0.0f);
-            nodes_0[_S220 + u32(6)] = node_0(k_27, u32(6)) + vec4<f32>(0.0f, 0.0f, wob_0.x, wob_0.y);
-            nodes_0[_S220 + u32(7)] = node_0(k_27, u32(7)) + vec4<f32>(wob_0.z, 0.0f, 0.0f, 0.0f);
+            var _S219 : u32 = u32(14) * k_27;
+            nodes_0[_S219 + u32(5)] = node_0(k_27, u32(5)) + vec4<f32>(wob_0, 0.0f);
+            nodes_0[_S219 + u32(6)] = node_0(k_27, u32(6)) + vec4<f32>(0.0f, 0.0f, wob_0.x, wob_0.y);
+            nodes_0[_S219 + u32(7)] = node_0(k_27, u32(7)) + vec4<f32>(wob_0.z, 0.0f, 0.0f, 0.0f);
             j_6 = j_6 + u32(64);
         }
     }
@@ -3100,18 +3119,18 @@ fn learned_stub(@builtin(workgroup_id) group_7 : vec3<u32>, @builtin(local_invoc
 @workgroup_size(64, 1, 1)
 fn learned_gate(@builtin(workgroup_id) group_8 : vec3<u32>, @builtin(local_invocation_id) thread_12 : vec3<u32>)
 {
-    var _S221 : bool;
+    var _S220 : bool;
     var g_6 : u32 = group_8.x;
     var t_12 : u32 = thread_12.x;
     if(g_6 >= ctl_0[u32(1)])
     {
         return;
     }
-    var _S222 : u32 = u32(10) * g_6;
-    var _S223 : u32 = _S222 + u32(4);
-    var c4_1 : vec4<f32> = calls_0[_S223];
-    var _S224 : f32 = calls_0[_S223].z;
-    var dec_1 : u32 = (bitcast<u32>((_S224)));
+    var _S221 : u32 = u32(10) * g_6;
+    var _S222 : u32 = _S221 + u32(4);
+    var c4_1 : vec4<f32> = calls_0[_S222];
+    var _S223 : f32 = calls_0[_S222].z;
+    var dec_1 : u32 = (bitcast<u32>((_S223)));
     var fb_0 : u32;
     if(((dec_1 & (u32(4)))) != u32(0))
     {
@@ -3129,13 +3148,13 @@ fn learned_gate(@builtin(workgroup_id) group_8 : vec3<u32>, @builtin(local_invoc
     {
         fb_0 = (fb_0 | (u32(16)));
     }
-    var _S225 : u32 = _S222 + u32(6);
-    var e0_0 : u32 = (bitcast<u32>((calls_0[_S225].x)));
-    var _S226 : u32 = (bitcast<u32>((calls_0[_S225].y)));
-    var mask_8 : u32 = (bitcast<u32>((calls_0[_S222 + u32(5)].w)));
+    var _S224 : u32 = _S221 + u32(6);
+    var e0_0 : u32 = (bitcast<u32>((calls_0[_S224].x)));
+    var _S225 : u32 = (bitcast<u32>((calls_0[_S224].y)));
+    var mask_8 : u32 = (bitcast<u32>((calls_0[_S221 + u32(5)].w)));
     if(t_12 == u32(0))
     {
-        calls_0[_S223] = vec4<f32>(c4_1.x, c4_1.y, _S224, (bitcast<f32>((fb_0))));
+        calls_0[_S222] = vec4<f32>(c4_1.x, c4_1.y, _S223, (bitcast<f32>((fb_0))));
     }
     var j_7 : u32;
     if(fb_0 == u32(16))
@@ -3143,7 +3162,7 @@ fn learned_gate(@builtin(workgroup_id) group_8 : vec3<u32>, @builtin(local_invoc
         j_7 = e0_0 + t_12;
         loop
         {
-            if(j_7 < (e0_0 + _S226))
+            if(j_7 < (e0_0 + _S225))
             {
             }
             else
@@ -3156,19 +3175,19 @@ fn learned_gate(@builtin(workgroup_id) group_8 : vec3<u32>, @builtin(local_invoc
     }
     if(fb_0 != u32(0))
     {
-        var _S227 : u32 = (bitcast<u32>((calls_0[_S222 + u32(2)].z)));
-        var _S228 : u32 = (bitcast<u32>((calls_0[_S222 + u32(3)].w)));
+        var _S226 : u32 = (bitcast<u32>((calls_0[_S221 + u32(2)].z)));
+        var _S227 : u32 = (bitcast<u32>((calls_0[_S221 + u32(3)].w)));
         j_7 = t_12;
         loop
         {
-            if(j_7 < _S228)
+            if(j_7 < _S227)
             {
             }
             else
             {
                 break;
             }
-            chunk_node_0[(bitcast<u32>((nodes_0[u32(14) * (_S227 + j_7) + u32(12)].x)))] = u32(0);
+            chunk_node_0[(bitcast<u32>((nodes_0[u32(14) * (_S226 + j_7) + u32(12)].x)))] = u32(0);
             j_7 = j_7 + u32(64);
         }
         return;
@@ -3176,70 +3195,70 @@ fn learned_gate(@builtin(workgroup_id) group_8 : vec3<u32>, @builtin(local_invoc
     j_7 = e0_0 + t_12;
     loop
     {
-        if(j_7 < (e0_0 + _S226))
+        if(j_7 < (e0_0 + _S225))
         {
         }
         else
         {
             break;
         }
-        var _S229 : u32 = u32(2) * j_7;
-        var c1_2 : vec4<u32> = cisl_0[_S229 + u32(1)];
-        status_0[u32(16) + cisl_0[_S229].x] = (status_0[u32(16) + cisl_0[_S229].x] | (u32(4096)));
+        var _S228 : u32 = u32(2) * j_7;
+        var c1_2 : vec4<u32> = cisl_0[_S228 + u32(1)];
+        status_0[u32(16) + cisl_0[_S228].x] = (status_0[u32(16) + cisl_0[_S228].x] | (u32(4096)));
         var body_2 : u32 = c1_2.x;
         if(body_2 == u32(4294967295))
         {
-            _S221 = true;
+            _S220 = true;
         }
         else
         {
-            _S221 = (c1_2.w) != u32(0);
+            _S220 = (c1_2.w) != u32(0);
         }
-        if(_S221)
+        if(_S220)
         {
             frozen_0[u32(4) * j_7] = vec4<f32>((bitcast<f32>((u32(4294967295)))), 0.0f, 0.0f, 0.0f);
             j_7 = j_7 + u32(64);
             continue;
         }
         var at_1 : u32 = u32(7) * body_2;
-        var _S230 : u32 = u32(4) * j_7;
-        frozen_0[_S230] = vec4<f32>((bitcast<f32>((body_2))), bodies_0[at_1].w, 0.0f, 0.0f);
-        var _S231 : u32 = at_1 + u32(2);
-        frozen_0[_S230 + u32(1)] = bodies_0[_S231];
-        var _S232 : u32 = at_1 + u32(3);
-        frozen_0[_S230 + u32(2)] = bodies_0[_S232];
-        var _S233 : u32 = at_1 + u32(4);
-        frozen_0[_S230 + u32(3)] = bodies_0[_S233];
+        var _S229 : u32 = u32(4) * j_7;
+        frozen_0[_S229] = vec4<f32>((bitcast<f32>((body_2))), bodies_0[at_1].w, 0.0f, 0.0f);
+        var _S230 : u32 = at_1 + u32(2);
+        frozen_0[_S229 + u32(1)] = bodies_0[_S230];
+        var _S231 : u32 = at_1 + u32(3);
+        frozen_0[_S229 + u32(2)] = bodies_0[_S231];
+        var _S232 : u32 = at_1 + u32(4);
+        frozen_0[_S229 + u32(3)] = bodies_0[_S232];
         bodies_0[at_1] = vec4<f32>(bodies_0[at_1].xyz, 0.0f);
+        bodies_0[_S230] = vec4<f32>(0.0f, 0.0f, 0.0f, bodies_0[_S230].w);
         bodies_0[_S231] = vec4<f32>(0.0f, 0.0f, 0.0f, bodies_0[_S231].w);
         bodies_0[_S232] = vec4<f32>(0.0f, 0.0f, 0.0f, bodies_0[_S232].w);
-        bodies_0[_S233] = vec4<f32>(0.0f, 0.0f, 0.0f, bodies_0[_S233].w);
         j_7 = j_7 + u32(64);
     }
     if(t_12 < u32(32))
     {
-        _S221 = ((mask_8 & (((u32(1) << (t_12)))))) != u32(0);
+        _S220 = ((mask_8 & (((u32(1) << (t_12)))))) != u32(0);
     }
     else
     {
-        _S221 = false;
+        _S220 = false;
     }
-    if(_S221)
+    if(_S220)
     {
         var body_3 : u32 = (bitcast<u32>((imps_0[u32(4) * t_12].x)));
         var at_2 : u32 = u32(7) * body_3;
-        var _S234 : u32 = u32(4) * (params_0.max_cisl_0 + t_12);
-        frozen_0[_S234] = vec4<f32>((bitcast<f32>((body_3))), bodies_0[at_2].w, 0.0f, 0.0f);
-        var _S235 : u32 = at_2 + u32(2);
-        frozen_0[_S234 + u32(1)] = bodies_0[_S235];
-        var _S236 : u32 = at_2 + u32(3);
-        frozen_0[_S234 + u32(2)] = bodies_0[_S236];
-        var _S237 : u32 = at_2 + u32(4);
-        frozen_0[_S234 + u32(3)] = bodies_0[_S237];
+        var _S233 : u32 = u32(4) * (params_0.max_cisl_0 + t_12);
+        frozen_0[_S233] = vec4<f32>((bitcast<f32>((body_3))), bodies_0[at_2].w, 0.0f, 0.0f);
+        var _S234 : u32 = at_2 + u32(2);
+        frozen_0[_S233 + u32(1)] = bodies_0[_S234];
+        var _S235 : u32 = at_2 + u32(3);
+        frozen_0[_S233 + u32(2)] = bodies_0[_S235];
+        var _S236 : u32 = at_2 + u32(4);
+        frozen_0[_S233 + u32(3)] = bodies_0[_S236];
         bodies_0[at_2] = vec4<f32>(bodies_0[at_2].xyz, 0.0f);
+        bodies_0[_S234] = vec4<f32>(0.0f, 0.0f, 0.0f, bodies_0[_S234].w);
         bodies_0[_S235] = vec4<f32>(0.0f, 0.0f, 0.0f, bodies_0[_S235].w);
         bodies_0[_S236] = vec4<f32>(0.0f, 0.0f, 0.0f, bodies_0[_S236].w);
-        bodies_0[_S237] = vec4<f32>(0.0f, 0.0f, 0.0f, bodies_0[_S237].w);
     }
     return;
 }
@@ -3248,39 +3267,39 @@ var<workgroup> g_stale_0 : u32;
 
 fn island_current_0( e_6 : u32) -> bool
 {
-    var _S238 : u32;
+    var _S237 : u32;
     var c0_3 : vec4<u32> = cisl_0[u32(2) * e_6];
-    var _S239 : u32 = cisl_0[u32(2) * e_6].y;
+    var _S238 : u32 = cisl_0[u32(2) * e_6].y;
     var island_0 : u32 = u32(4294967295);
     var j_8 : u32 = u32(0);
     loop
     {
-        var _S240 : u32 = c0_3.z;
-        _S238 = _S240;
-        if(j_8 < _S240)
+        var _S239 : u32 = c0_3.z;
+        _S237 = _S239;
+        if(j_8 < _S239)
         {
         }
         else
         {
             break;
         }
-        var w_7 : vec4<f32> = nodes_0[u32(14) * (_S239 + j_8) + u32(12)];
-        var k_28 : u32 = (bitcast<u32>((nodes_0[u32(14) * (_S239 + j_8) + u32(12)].x)));
+        var w_7 : vec4<f32> = nodes_0[u32(14) * (_S238 + j_8) + u32(12)];
+        var k_28 : u32 = (bitcast<u32>((nodes_0[u32(14) * (_S238 + j_8) + u32(12)].x)));
         if(k_28 >= (params_0.chunk_count_0))
         {
             return false;
         }
         var info_2 : vec4<u32> = chunks_0[k_28].info_1;
-        var _S241 : bool;
+        var _S240 : bool;
         if((chunks_0[k_28].info_1.z) != (bitcast<u32>((w_7.z))))
         {
-            _S241 = true;
+            _S240 = true;
         }
         else
         {
-            _S241 = (info_2.w) != (bitcast<u32>((w_7.w)));
+            _S240 = (info_2.w) != (bitcast<u32>((w_7.w)));
         }
-        if(_S241)
+        if(_S240)
         {
             return false;
         }
@@ -3297,11 +3316,11 @@ fn island_current_0( e_6 : u32) -> bool
         }
         j_8 = j_8 + u32(1);
     }
-    if(_S238 == u32(0))
+    if(_S237 == u32(0))
     {
         return false;
     }
-    return (islands_0[island_0].range_0.y - islands_0[island_0].range_0.x) == _S238;
+    return (islands_0[island_0].range_0.y - islands_0[island_0].range_0.x) == _S237;
 }
 
 @compute
@@ -3310,17 +3329,17 @@ fn learned_check(@builtin(workgroup_id) group_9 : vec3<u32>, @builtin(local_invo
 {
     var g_7 : u32 = group_9.x;
     var t_13 : u32 = thread_13.x;
-    var _S242 : bool;
+    var _S241 : bool;
     if(ctl_0[u32(0)] == u32(0))
     {
-        _S242 = true;
+        _S241 = true;
     }
     else
     {
-        _S242 = g_7 >= ctl_0[u32(1)];
+        _S241 = g_7 >= ctl_0[u32(1)];
     }
     var e_7 : u32;
-    if(_S242)
+    if(_S241)
     {
         e_7 = u32(1);
     }
@@ -3328,24 +3347,24 @@ fn learned_check(@builtin(workgroup_id) group_9 : vec3<u32>, @builtin(local_invo
     {
         e_7 = u32(0);
     }
-    var _S243 : u32 = group_uniform_0(e_7, t_13);
-    if(_S243 != u32(0))
+    var _S242 : u32 = group_uniform_0(e_7, t_13);
+    if(_S242 != u32(0))
     {
         return;
     }
-    var _S244 : u32 = u32(10) * g_7;
-    var _S245 : u32 = _S244 + u32(4);
-    var c4_2 : vec4<f32> = calls_0[_S245];
-    var _S246 : u32 = group_uniform_0((bitcast<u32>((calls_0[_S245].w))), t_13);
-    if(_S246 != u32(0))
+    var _S243 : u32 = u32(10) * g_7;
+    var _S244 : u32 = _S243 + u32(4);
+    var c4_2 : vec4<f32> = calls_0[_S244];
+    var _S245 : u32 = group_uniform_0((bitcast<u32>((calls_0[_S244].w))), t_13);
+    if(_S245 != u32(0))
     {
         return;
     }
-    var _S247 : u32 = _S244 + u32(6);
-    var e0_1 : u32 = (bitcast<u32>((calls_0[_S247].x)));
-    var _S248 : u32 = (bitcast<u32>((calls_0[_S247].y)));
-    var _S249 : bool = t_13 == u32(0);
-    if(_S249)
+    var _S246 : u32 = _S243 + u32(6);
+    var e0_1 : u32 = (bitcast<u32>((calls_0[_S246].x)));
+    var _S247 : u32 = (bitcast<u32>((calls_0[_S246].y)));
+    var _S248 : bool = t_13 == u32(0);
+    if(_S248)
     {
         g_stale_0 = u32(0);
     }
@@ -3353,7 +3372,7 @@ fn learned_check(@builtin(workgroup_id) group_9 : vec3<u32>, @builtin(local_invo
     e_7 = e0_1 + t_13;
     loop
     {
-        if(e_7 < (e0_1 + _S248))
+        if(e_7 < (e0_1 + _S247))
         {
         }
         else
@@ -3367,30 +3386,30 @@ fn learned_check(@builtin(workgroup_id) group_9 : vec3<u32>, @builtin(local_invo
         e_7 = e_7 + u32(64);
     }
     workgroupBarrier();
-    var _S250 : u32 = group_uniform_0(g_stale_0, t_13);
-    if(_S250 == u32(0))
+    var _S249 : u32 = group_uniform_0(g_stale_0, t_13);
+    if(_S249 == u32(0))
     {
         return;
     }
-    if(_S249)
+    if(_S248)
     {
-        calls_0[_S245] = vec4<f32>(c4_2.x, c4_2.y, c4_2.z, (bitcast<f32>((u32(8)))));
-        var _S251 : f32 = (bitcast<f32>((u32(0))));
-        calls_0[_S244 + u32(7)] = vec4<f32>((bitcast<f32>((u32(1)))), _S251, _S251, 0.0f);
+        calls_0[_S244] = vec4<f32>(c4_2.x, c4_2.y, c4_2.z, (bitcast<f32>((u32(8)))));
+        var _S250 : f32 = (bitcast<f32>((u32(0))));
+        calls_0[_S243 + u32(7)] = vec4<f32>((bitcast<f32>((u32(1)))), _S250, _S250, 0.0f);
     }
-    var _S252 : u32 = (bitcast<u32>((calls_0[_S244 + u32(2)].z)));
-    var _S253 : u32 = (bitcast<u32>((calls_0[_S244 + u32(3)].w)));
+    var _S251 : u32 = (bitcast<u32>((calls_0[_S243 + u32(2)].z)));
+    var _S252 : u32 = (bitcast<u32>((calls_0[_S243 + u32(3)].w)));
     var j_9 : u32 = t_13;
     loop
     {
-        if(j_9 < _S253)
+        if(j_9 < _S252)
         {
         }
         else
         {
             break;
         }
-        var k_29 : u32 = (bitcast<u32>((nodes_0[u32(14) * (_S252 + j_9) + u32(12)].x)));
+        var k_29 : u32 = (bitcast<u32>((nodes_0[u32(14) * (_S251 + j_9) + u32(12)].x)));
         if(k_29 < (params_0.chunk_count_0))
         {
             chunk_node_0[k_29] = u32(0);
@@ -3419,17 +3438,17 @@ fn learned_apply_bonds(@builtin(workgroup_id) group_10 : vec3<u32>, @builtin(loc
     var count_0 : u32;
     var g_8 : u32 = group_10.x;
     var t_14 : u32 = thread_14.x;
-    var _S254 : bool;
+    var _S253 : bool;
     if(ctl_0[u32(0)] == u32(0))
     {
-        _S254 = true;
+        _S253 = true;
     }
     else
     {
-        _S254 = g_8 >= ctl_0[u32(1)];
+        _S253 = g_8 >= ctl_0[u32(1)];
     }
     var j_10 : u32;
-    if(_S254)
+    if(_S253)
     {
         j_10 = u32(1);
     }
@@ -3437,48 +3456,48 @@ fn learned_apply_bonds(@builtin(workgroup_id) group_10 : vec3<u32>, @builtin(loc
     {
         j_10 = u32(0);
     }
-    var _S255 : u32 = group_uniform_0(j_10, t_14);
-    if(_S255 != u32(0))
+    var _S254 : u32 = group_uniform_0(j_10, t_14);
+    if(_S254 != u32(0))
     {
         return;
     }
-    var _S256 : u32 = u32(10) * g_8;
-    var c4_3 : vec4<f32> = calls_0[_S256 + u32(4)];
-    var _S257 : u32 = group_uniform_0((bitcast<u32>((calls_0[_S256 + u32(4)].w))), t_14);
-    if(_S257 != u32(0))
+    var _S255 : u32 = u32(10) * g_8;
+    var c4_3 : vec4<f32> = calls_0[_S255 + u32(4)];
+    var _S256 : u32 = group_uniform_0((bitcast<u32>((calls_0[_S255 + u32(4)].w))), t_14);
+    if(_S256 != u32(0))
     {
         return;
     }
-    var _S258 : bool = t_14 == u32(0);
-    if(_S258)
+    var _S257 : bool = t_14 == u32(0);
+    if(_S257)
     {
         g_broke_0 = u32(0);
     }
     workgroupBarrier();
-    var _S259 : u32 = (bitcast<u32>((c4_3.x)));
-    var _S260 : u32 = (bitcast<u32>((c4_3.y)));
+    var _S258 : u32 = (bitcast<u32>((c4_3.x)));
+    var _S259 : u32 = (bitcast<u32>((c4_3.y)));
     j_10 = t_14;
     var count_1 : u32 = u32(0);
     loop
     {
-        if(j_10 < _S260)
+        if(j_10 < _S259)
         {
         }
         else
         {
             break;
         }
-        var b1_1 : vec4<f32> = bonds_0[u32(2) * (_S259 + j_10) + u32(1)];
-        var bi_2 : u32 = (bitcast<u32>((bonds_0[u32(2) * (_S259 + j_10) + u32(1)].z)));
-        var _S261 : JointState_0 = JointState_0( bond_dyn_0[bi_2].js_0.damage_0, bond_dyn_0[bi_2].js_0.crush_0, bond_dyn_0[bi_2].js_0.kappa_0, bond_dyn_0[bi_2].js_0.kappa_c_0, bond_dyn_0[bi_2].js_0.ductility_0, bond_dyn_0[bi_2].js_0.ductility_c_0, bond_dyn_0[bi_2].js_0.life_0, bond_dyn_0[bi_2].js_0.plastic_x_0, bond_dyn_0[bi_2].js_0.plastic_y_0, bond_dyn_0[bi_2].js_0.plastic_t_0, bond_dyn_0[bi_2].js_0.rebar_plastic_0, bond_dyn_0[bi_2].js_0.rebar_slip0_0, bond_dyn_0[bi_2].js_0.rebar_slip1_0, bond_dyn_0[bi_2].js_0.rebar_work_0, bond_dyn_0[bi_2].js_0.rebar_broken_0, bond_dyn_0[bi_2].js_0.strain_rate_0, bond_dyn_0[bi_2].js_0.governing_stress_0, bond_dyn_0[bi_2].js_0.dissipated_0, bond_dyn_0[bi_2].js_0.utilization_0, bond_dyn_0[bi_2].js_0.mode_0 );
+        var b1_1 : vec4<f32> = bonds_0[u32(2) * (_S258 + j_10) + u32(1)];
+        var bi_2 : u32 = (bitcast<u32>((bonds_0[u32(2) * (_S258 + j_10) + u32(1)].z)));
+        var _S260 : JointState_0 = JointState_0( bond_dyn_0[bi_2].js_0.damage_0, bond_dyn_0[bi_2].js_0.crush_0, bond_dyn_0[bi_2].js_0.kappa_0, bond_dyn_0[bi_2].js_0.kappa_c_0, bond_dyn_0[bi_2].js_0.ductility_0, bond_dyn_0[bi_2].js_0.ductility_c_0, bond_dyn_0[bi_2].js_0.life_0, bond_dyn_0[bi_2].js_0.plastic_x_0, bond_dyn_0[bi_2].js_0.plastic_y_0, bond_dyn_0[bi_2].js_0.plastic_t_0, bond_dyn_0[bi_2].js_0.rebar_plastic_0, bond_dyn_0[bi_2].js_0.rebar_slip0_0, bond_dyn_0[bi_2].js_0.rebar_slip1_0, bond_dyn_0[bi_2].js_0.rebar_work_0, bond_dyn_0[bi_2].js_0.rebar_broken_0, bond_dyn_0[bi_2].js_0.strain_rate_0, bond_dyn_0[bi_2].js_0.governing_stress_0, bond_dyn_0[bi_2].js_0.dissipated_0, bond_dyn_0[bi_2].js_0.utilization_0, bond_dyn_0[bi_2].js_0.mode_0 );
         var dyn_0 : BondDyn_0;
-        dyn_0.js_0 = _S261;
+        dyn_0.js_0 = _S260;
         dyn_0.force_lin_0 = bond_dyn_0[bi_2].force_lin_0;
         dyn_0.force_ang_0 = bond_dyn_0[bi_2].force_ang_0;
         dyn_0.sums_0 = bond_dyn_0[bi_2].sums_0;
         dyn_0.comps_0 = bond_dyn_0[bi_2].comps_0;
         dyn_0.events_0 = bond_dyn_0[bi_2].events_0;
-        if((bitcast<u32>((bonds_0[u32(2) * (_S259 + j_10) + u32(1)].y))) != u32(0))
+        if((bitcast<u32>((bonds_0[u32(2) * (_S258 + j_10) + u32(1)].y))) != u32(0))
         {
             if(connected_1(dyn_0.js_0, (bond_static_0[bi_2].law_0.stiff1_0.w) != 0.0f))
             {
@@ -3510,10 +3529,10 @@ fn learned_apply_bonds(@builtin(workgroup_id) group_10 : vec3<u32>, @builtin(loc
                 bond_dyn_0[bi_2].sums_0 = dyn_0.sums_0;
                 bond_dyn_0[bi_2].comps_0 = dyn_0.comps_0;
                 bond_dyn_0[bi_2].events_0 = dyn_0.events_0;
-                var _S262 : u32 = count_1 + u32(1);
+                var _S261 : u32 = count_1 + u32(1);
                 status_0[u32(16) + chunks_0[bond_static_0[bi_2].law_0.ids_0.y].info_1.y] = (status_0[u32(16) + chunks_0[bond_static_0[bi_2].law_0.ids_0.y].info_1.y] | (u32(8)));
                 g_broke_0 = u32(1);
-                count_0 = _S262;
+                count_0 = _S261;
             }
             else
             {
@@ -3572,9 +3591,9 @@ fn learned_apply_bonds(@builtin(workgroup_id) group_10 : vec3<u32>, @builtin(loc
         workgroupBarrier();
         count_0 = (count_0 >> (u32(1)));
     }
-    if(_S258)
+    if(_S257)
     {
-        calls_0[_S256 + u32(7)] = vec4<f32>((bitcast<f32>((u32(0)))), (bitcast<f32>((g_scan_0[i32(0)]))), (bitcast<f32>((u32(1)))), 0.0f);
+        calls_0[_S255 + u32(7)] = vec4<f32>((bitcast<f32>((u32(0)))), (bitcast<f32>((g_scan_0[i32(0)]))), (bitcast<f32>((u32(1)))), 0.0f);
         if(g_broke_0 != u32(0))
         {
             status_0[u32(1)] = u32(1);
@@ -3595,13 +3614,13 @@ struct Fit_0
 fn fit_nodes_0( first_1 : u32,  n_5 : u32,  listed_0 : bool,  list_base_0 : u32,  list_first_0 : u32) -> Fit_0
 {
     var k_30 : u32;
-    var _S263 : vec3<f32> = vec3<f32>(0.0f);
+    var _S262 : vec3<f32> = vec3<f32>(0.0f);
     var j_11 : u32 = u32(0);
     var m_9 : f32 = 0.0f;
-    var x0_0 : vec3<f32> = _S263;
-    var x1_0 : vec3<f32> = _S263;
-    var rot_0 : vec3<f32> = _S263;
-    var p_8 : vec3<f32> = _S263;
+    var x0_0 : vec3<f32> = _S262;
+    var x1_0 : vec3<f32> = _S262;
+    var rot_0 : vec3<f32> = _S262;
+    var p_8 : vec3<f32> = _S262;
     loop
     {
         if(j_11 < n_5)
@@ -3622,11 +3641,11 @@ fn fit_nodes_0( first_1 : u32,  n_5 : u32,  listed_0 : bool,  list_base_0 : u32,
         var mc_0 : f32 = node_0(k_30, u32(0)).w;
         var xs_0 : vec3<f32> = node_0(k_30, u32(13)).xyz;
         var m_10 : f32 = m_9 + mc_0;
-        var _S264 : vec3<f32> = vec3<f32>(mc_0);
-        var x0_1 : vec3<f32> = x0_0 + xs_0 * _S264;
-        var x1_1 : vec3<f32> = x1_0 + (xs_0 + node_0(k_30, u32(10)).xyz) * _S264;
-        var rot_1 : vec3<f32> = rot_0 + node_0(k_30, u32(11)).xyz * _S264;
-        var p_9 : vec3<f32> = p_8 + node_0(k_30, u32(8)).xyz * _S264;
+        var _S263 : vec3<f32> = vec3<f32>(mc_0);
+        var x0_1 : vec3<f32> = x0_0 + xs_0 * _S263;
+        var x1_1 : vec3<f32> = x1_0 + (xs_0 + node_0(k_30, u32(10)).xyz) * _S263;
+        var rot_1 : vec3<f32> = rot_0 + node_0(k_30, u32(11)).xyz * _S263;
+        var p_9 : vec3<f32> = p_8 + node_0(k_30, u32(8)).xyz * _S263;
         j_11 = j_11 + u32(1);
         m_9 = m_10;
         x0_0 = x0_1;
@@ -3637,15 +3656,15 @@ fn fit_nodes_0( first_1 : u32,  n_5 : u32,  listed_0 : bool,  list_base_0 : u32,
     var f_4 : Fit_0;
     f_4.com0_0 = x0_0 / vec3<f32>(m_9);
     f_4.com1_0 = x1_0 / vec3<f32>(m_9);
-    var _S265 : vec4<f32> = rotvec_quat_0(rot_0 / vec3<f32>(m_9));
-    f_4.turn_0 = _S265;
+    var _S264 : vec4<f32> = rotvec_quat_0(rot_0 / vec3<f32>(m_9));
+    f_4.turn_0 = _S264;
     f_4.v_8 = p_8 / vec3<f32>(m_9);
-    var _S266 : Quat_0 = quat_of_0(_S265);
-    var _S267 : mat3x3<f32> = quat_matrix_0(_S265);
-    var _S268 : mat3x3<f32> = mat3x3<f32>(_S263, _S263, _S263);
+    var _S265 : Quat_0 = quat_of_0(_S264);
+    var _S266 : mat3x3<f32> = quat_matrix_0(_S264);
+    var _S267 : mat3x3<f32> = mat3x3<f32>(_S262, _S262, _S262);
     j_11 = u32(0);
-    var l_1 : vec3<f32> = _S263;
-    var itot_0 : mat3x3<f32> = _S268;
+    var l_1 : vec3<f32> = _S262;
+    var itot_0 : mat3x3<f32> = _S267;
     loop
     {
         if(j_11 < n_5)
@@ -3664,17 +3683,17 @@ fn fit_nodes_0( first_1 : u32,  n_5 : u32,  listed_0 : bool,  list_base_0 : u32,
             k_30 = first_1 + j_11;
         }
         var mc_1 : f32 = node_0(k_30, u32(0)).w;
-        var r_14 : vec3<f32> = rotate_0(_S266, node_0(k_30, u32(13)).xyz - f_4.com0_0);
-        var ic_1 : mat3x3<f32> = (((transpose(_S267)) * ((((world_inertia_0(node_0(k_30, u32(1)), node_0(k_30, u32(2)).xyz)) * (_S267))))));
+        var r_14 : vec3<f32> = rotate_0(_S265, node_0(k_30, u32(13)).xyz - f_4.com0_0);
+        var ic_1 : mat3x3<f32> = (((transpose(_S266)) * ((((world_inertia_0(node_0(k_30, u32(1)), node_0(k_30, u32(2)).xyz)) * (_S266))))));
         var l_2 : vec3<f32> = l_1 + (cross(r_14, vec3<f32>(mc_1) * node_0(k_30, u32(8)).xyz) + (((node_0(k_30, u32(9)).xyz) * (ic_1))));
-        var _S269 : mat3x3<f32> = mat3x3<f32>(vec3<f32>(1.0f, 0.0f, 0.0f), vec3<f32>(0.0f, 1.0f, 0.0f), vec3<f32>(0.0f, 0.0f, 1.0f));
-        var _S270 : mat3x3<f32> = mat3x3<f32>(dot(r_14, r_14), dot(r_14, r_14), dot(r_14, r_14), dot(r_14, r_14), dot(r_14, r_14), dot(r_14, r_14), dot(r_14, r_14), dot(r_14, r_14), dot(r_14, r_14));
-        var _S271 : mat3x3<f32> = mat3x3<f32>(_S270[0] * _S269[0], _S270[1] * _S269[1], _S270[2] * _S269[2]) - outer3_0(r_14, r_14);
-        var _S272 : mat3x3<f32> = mat3x3<f32>(mc_1, mc_1, mc_1, mc_1, mc_1, mc_1, mc_1, mc_1, mc_1);
-        var _S273 : mat3x3<f32> = itot_0 + (ic_1 + mat3x3<f32>(_S272[0] * _S271[0], _S272[1] * _S271[1], _S272[2] * _S271[2]));
+        var _S268 : mat3x3<f32> = mat3x3<f32>(vec3<f32>(1.0f, 0.0f, 0.0f), vec3<f32>(0.0f, 1.0f, 0.0f), vec3<f32>(0.0f, 0.0f, 1.0f));
+        var _S269 : mat3x3<f32> = mat3x3<f32>(dot(r_14, r_14), dot(r_14, r_14), dot(r_14, r_14), dot(r_14, r_14), dot(r_14, r_14), dot(r_14, r_14), dot(r_14, r_14), dot(r_14, r_14), dot(r_14, r_14));
+        var _S270 : mat3x3<f32> = mat3x3<f32>(_S269[0] * _S268[0], _S269[1] * _S268[1], _S269[2] * _S268[2]) - outer3_0(r_14, r_14);
+        var _S271 : mat3x3<f32> = mat3x3<f32>(mc_1, mc_1, mc_1, mc_1, mc_1, mc_1, mc_1, mc_1, mc_1);
+        var _S272 : mat3x3<f32> = itot_0 + (ic_1 + mat3x3<f32>(_S271[0] * _S270[0], _S271[1] * _S270[1], _S271[2] * _S270[2]));
         j_11 = j_11 + u32(1);
         l_1 = l_2;
-        itot_0 = _S273;
+        itot_0 = _S272;
     }
     f_4.w_8 = solve3_0(itot_0, l_1);
     return f_4;
@@ -3694,24 +3713,24 @@ fn place_body_0( body_4 : u32,  f_5 : Fit_0,  held_mass_0 : vec4<f32>,  held_ine
 {
     var at_3 : u32 = u32(7) * body_4;
     bodies_0[at_3] = vec4<f32>(to_yup_0(f_5.com1_0 + rotate_0(quat_of_0(f_5.turn_0), to_zup_0(bodies_0[at_3].xyz) - f_5.com0_0)), held_mass_0.y);
-    var _S274 : u32 = at_3 + u32(1);
-    var _S275 : vec4<f32> = bodies_0[_S274];
-    var _S276 : vec3<f32> = f_5.turn_0.xyz;
-    var _S277 : f32 = length(_S276);
-    var _S278 : vec3<f32>;
-    if(_S277 > 0.0f)
+    var _S273 : u32 = at_3 + u32(1);
+    var _S274 : vec4<f32> = bodies_0[_S273];
+    var _S275 : vec3<f32> = f_5.turn_0.xyz;
+    var _S276 : f32 = length(_S275);
+    var _S277 : vec3<f32>;
+    if(_S276 > 0.0f)
     {
-        _S278 = vec3<f32>((2.0f * atan2(_S277, f_5.turn_0.w))) * normalize(_S276);
+        _S277 = vec3<f32>((2.0f * atan2(_S276, f_5.turn_0.w))) * normalize(_S275);
     }
     else
     {
-        _S278 = vec3<f32>(0.0f);
+        _S277 = vec3<f32>(0.0f);
     }
-    bodies_0[_S274] = turn_rubble_0(_S275, _S278);
+    bodies_0[_S273] = turn_rubble_0(_S274, _S277);
     bodies_0[at_3 + u32(2)] = held_inertia_0;
     bodies_0[at_3 + u32(3)] = vec4<f32>(to_yup_0(f_5.v_8), 0.0f);
-    var _S279 : u32 = at_3 + u32(4);
-    bodies_0[_S279] = vec4<f32>(to_yup_0(f_5.w_8), bodies_0[_S279].w);
+    var _S278 : u32 = at_3 + u32(4);
+    bodies_0[_S278] = vec4<f32>(to_yup_0(f_5.w_8), bodies_0[_S278].w);
     return;
 }
 
@@ -3720,25 +3739,25 @@ fn place_body_0( body_4 : u32,  f_5 : Fit_0,  held_mass_0 : vec4<f32>,  held_ine
 fn learned_apply_bodies(@builtin(global_invocation_id) id_2 : vec3<u32>)
 {
     var e_8 : u32 = id_2.x;
-    var _S280 : bool;
+    var _S279 : bool;
     if(ctl_0[u32(0)] == u32(0))
     {
-        _S280 = true;
+        _S279 = true;
     }
     else
     {
-        _S280 = e_8 >= ctl_0[u32(9)];
+        _S279 = e_8 >= ctl_0[u32(9)];
     }
-    if(_S280)
+    if(_S279)
     {
         return;
     }
     var c0_4 : vec4<u32> = cisl_0[u32(2) * e_8];
-    var _S281 : u32 = u32(4) * e_8;
-    var h0_0 : vec4<f32> = frozen_0[_S281];
-    var body_5 : u32 = (bitcast<u32>((frozen_0[_S281].x)));
-    var _S282 : u32 = u32(10) * cisl_0[u32(2) * e_8].w + u32(4);
-    var stood_0 : bool = (bitcast<u32>((calls_0[_S282].w))) == u32(0);
+    var _S280 : u32 = u32(4) * e_8;
+    var h0_0 : vec4<f32> = frozen_0[_S280];
+    var body_5 : u32 = (bitcast<u32>((frozen_0[_S280].x)));
+    var _S281 : u32 = u32(10) * cisl_0[u32(2) * e_8].w + u32(4);
+    var stood_0 : bool = (bitcast<u32>((calls_0[_S281].w))) == u32(0);
     if(body_5 == u32(4294967295))
     {
         return;
@@ -3746,24 +3765,24 @@ fn learned_apply_bodies(@builtin(global_invocation_id) id_2 : vec3<u32>)
     var at_4 : u32 = u32(7) * body_5;
     if(!stood_0)
     {
-        if((((bitcast<u32>((calls_0[_S282].w))) & (u32(8)))) != u32(0))
+        if((((bitcast<u32>((calls_0[_S281].w))) & (u32(8)))) != u32(0))
         {
             bodies_0[at_4] = vec4<f32>(bodies_0[at_4].xyz, h0_0.y);
-            bodies_0[at_4 + u32(2)] = frozen_0[_S281 + u32(1)];
-            bodies_0[at_4 + u32(3)] = frozen_0[_S281 + u32(2)];
-            bodies_0[at_4 + u32(4)] = frozen_0[_S281 + u32(3)];
+            bodies_0[at_4 + u32(2)] = frozen_0[_S280 + u32(1)];
+            bodies_0[at_4 + u32(3)] = frozen_0[_S280 + u32(2)];
+            bodies_0[at_4 + u32(4)] = frozen_0[_S280 + u32(3)];
         }
         return;
     }
-    var _S283 : u32 = c0_4.y;
-    if(((status_0[u32(16) + chunks_0[(bitcast<u32>((nodes_0[u32(14) * _S283 + u32(12)].x)))].info_1.y] & (u32(8)))) != u32(0))
+    var _S282 : u32 = c0_4.y;
+    if(((status_0[u32(16) + chunks_0[(bitcast<u32>((nodes_0[u32(14) * _S282 + u32(12)].x)))].info_1.y] & (u32(8)))) != u32(0))
     {
         bodies_0[at_4] = vec4<f32>(bodies_0[at_4].xyz, h0_0.y);
-        bodies_0[at_4 + u32(2)] = frozen_0[_S281 + u32(1)];
+        bodies_0[at_4 + u32(2)] = frozen_0[_S280 + u32(1)];
         bodies_0[at_4 + u32(3)] = vec4<f32>(0.0f, 0.0f, 0.0f, 0.0f);
         return;
     }
-    place_body_0(body_5, fit_nodes_0(_S283, c0_4.z, false, u32(0), u32(0)), h0_0, frozen_0[_S281 + u32(1)]);
+    place_body_0(body_5, fit_nodes_0(_S282, c0_4.z, false, u32(0), u32(0)), h0_0, frozen_0[_S280 + u32(1)]);
     return;
 }
 
@@ -3773,61 +3792,61 @@ fn learned_apply_impactors(@builtin(workgroup_id) group_11 : vec3<u32>, @builtin
 {
     var g_9 : u32 = group_11.x;
     var k_31 : u32 = thread_15.x;
-    var _S284 : bool;
+    var _S283 : bool;
     if(ctl_0[u32(0)] == u32(0))
     {
-        _S284 = true;
+        _S283 = true;
     }
     else
     {
-        _S284 = g_9 >= ctl_0[u32(1)];
+        _S283 = g_9 >= ctl_0[u32(1)];
     }
-    if(_S284)
+    if(_S283)
     {
         return;
     }
-    var _S285 : u32 = u32(10) * g_9;
-    var mask_9 : u32 = (bitcast<u32>((calls_0[_S285 + u32(5)].w)));
-    var fb_1 : u32 = (bitcast<u32>((calls_0[_S285 + u32(4)].w)));
-    var _S286 : u32 = (u32(1) << (k_31));
-    if(((mask_9 & (_S286))) == u32(0))
+    var _S284 : u32 = u32(10) * g_9;
+    var mask_9 : u32 = (bitcast<u32>((calls_0[_S284 + u32(5)].w)));
+    var fb_1 : u32 = (bitcast<u32>((calls_0[_S284 + u32(4)].w)));
+    var _S285 : u32 = (u32(1) << (k_31));
+    if(((mask_9 & (_S285))) == u32(0))
     {
-        _S284 = true;
+        _S283 = true;
     }
     else
     {
         if(fb_1 != u32(0))
         {
-            _S284 = ((fb_1 & (u32(8)))) == u32(0);
+            _S283 = ((fb_1 & (u32(8)))) == u32(0);
         }
         else
         {
-            _S284 = false;
+            _S283 = false;
         }
     }
-    if(_S284)
+    if(_S283)
     {
         return;
     }
-    var _S287 : u32 = u32(4) * (params_0.max_cisl_0 + k_31);
-    var at_5 : u32 = u32(7) * (bitcast<u32>((frozen_0[_S287].x)));
-    var _S288 : f32 = frozen_0[_S287].y;
-    bodies_0[at_5] = vec4<f32>(bodies_0[at_5].xyz, _S288);
-    bodies_0[at_5 + u32(2)] = frozen_0[_S287 + u32(1)];
+    var _S286 : u32 = u32(4) * (params_0.max_cisl_0 + k_31);
+    var at_5 : u32 = u32(7) * (bitcast<u32>((frozen_0[_S286].x)));
+    var _S287 : f32 = frozen_0[_S286].y;
+    bodies_0[at_5] = vec4<f32>(bodies_0[at_5].xyz, _S287);
+    bodies_0[at_5 + u32(2)] = frozen_0[_S286 + u32(1)];
     if(fb_1 != u32(0))
     {
-        bodies_0[at_5 + u32(3)] = frozen_0[_S287 + u32(2)];
-        bodies_0[at_5 + u32(4)] = frozen_0[_S287 + u32(3)];
+        bodies_0[at_5 + u32(3)] = frozen_0[_S286 + u32(2)];
+        bodies_0[at_5 + u32(4)] = frozen_0[_S286 + u32(3)];
         return;
     }
-    var n_6 : u32 = (bitcast<u32>((calls_0[_S285 + u32(2)].z))) + (bitcast<u32>((calls_0[_S285 + u32(3)].w))) + countOneBits((mask_9 & ((_S286 - u32(1)))));
+    var n_6 : u32 = (bitcast<u32>((calls_0[_S284 + u32(2)].z))) + (bitcast<u32>((calls_0[_S284 + u32(3)].w))) + countOneBits((mask_9 & ((_S285 - u32(1)))));
     var dr_1 : vec3<f32> = node_0(n_6, u32(11)).xyz;
-    bodies_0[at_5] = vec4<f32>(bodies_0[at_5].xyz + to_yup_0(node_0(n_6, u32(10)).xyz), _S288);
-    var _S289 : u32 = at_5 + u32(1);
-    bodies_0[_S289] = turn_rubble_0(bodies_0[_S289], dr_1);
+    bodies_0[at_5] = vec4<f32>(bodies_0[at_5].xyz + to_yup_0(node_0(n_6, u32(10)).xyz), _S287);
+    var _S288 : u32 = at_5 + u32(1);
+    bodies_0[_S288] = turn_rubble_0(bodies_0[_S288], dr_1);
     bodies_0[at_5 + u32(3)] = vec4<f32>(to_yup_0(node_0(n_6, u32(8)).xyz), 0.0f);
-    var _S290 : u32 = at_5 + u32(4);
-    bodies_0[_S290] = vec4<f32>(to_yup_0(node_0(n_6, u32(9)).xyz), bodies_0[_S290].w);
+    var _S289 : u32 = at_5 + u32(4);
+    bodies_0[_S289] = vec4<f32>(to_yup_0(node_0(n_6, u32(9)).xyz), bodies_0[_S289].w);
     return;
 }
 
@@ -3836,16 +3855,16 @@ fn learned_apply_impactors(@builtin(workgroup_id) group_11 : vec3<u32>, @builtin
 fn learned_place(@builtin(global_invocation_id) id_3 : vec3<u32>)
 {
     var slot_0 : u32 = id_3.x;
-    var _S291 : bool;
+    var _S290 : bool;
     if(ctl_0[u32(18)] == u32(0))
     {
-        _S291 = true;
+        _S290 = true;
     }
     else
     {
-        _S291 = split_control_0[u32(0)] != u32(0);
+        _S290 = split_control_0[u32(0)] != u32(0);
     }
-    if(_S291)
+    if(_S290)
     {
         return;
     }
@@ -3859,9 +3878,9 @@ fn learned_place(@builtin(global_invocation_id) id_3 : vec3<u32>)
     {
         return;
     }
-    var _S292 : u32 = np_0 - u32(1);
+    var _S291 : u32 = np_0 - u32(1);
     var lo_3 : u32 = u32(0);
-    var hi_3 : u32 = _S292;
+    var hi_3 : u32 = _S291;
     loop
     {
         if(lo_3 < hi_3)
@@ -3882,8 +3901,8 @@ fn learned_place(@builtin(global_invocation_id) id_3 : vec3<u32>)
         }
     }
     var parent_0 : vec4<u32> = split_parents_0[lo_3];
-    var _S293 : u32 = parent_0.y;
-    if((slot_0 - _S293) >= (parent_0.z))
+    var _S292 : u32 = parent_0.y;
+    if((slot_0 - _S292) >= (parent_0.z))
     {
         return;
     }
@@ -3898,7 +3917,7 @@ fn learned_place(@builtin(global_invocation_id) id_3 : vec3<u32>)
         return;
     }
     var count_2 : u32 = (bitcast<u32>((head_0.z)));
-    var base_1 : u32 = total_1 + _S293 + (bitcast<u32>((head_0.y)));
+    var base_1 : u32 = total_1 + _S292 + (bitcast<u32>((head_0.y)));
     var first_2 : u32 = split_firsts_0[lo_3].x;
     if(count_2 == u32(0))
     {
@@ -3920,9 +3939,9 @@ fn learned_place(@builtin(global_invocation_id) id_3 : vec3<u32>)
         }
         j_12 = j_12 + u32(1);
     }
-    var _S294 : u32 = s_9.x;
-    var at_6 : u32 = u32(7) * _S294;
-    place_body_0(_S294, fit_nodes_0(u32(0), count_2, true, base_1, first_2), vec4<f32>(0.0f, bodies_0[at_6].w, 0.0f, 0.0f), bodies_0[at_6 + u32(2)]);
+    var _S293 : u32 = s_9.x;
+    var at_6 : u32 = u32(7) * _S293;
+    place_body_0(_S293, fit_nodes_0(u32(0), count_2, true, base_1, first_2), vec4<f32>(0.0f, bodies_0[at_6].w, 0.0f, 0.0f), bodies_0[at_6 + u32(2)]);
     return;
 }
 
@@ -3947,25 +3966,25 @@ fn learned_tally_apply()
         {
             break;
         }
-        var _S295 : u32 = u32(10) * g_10;
-        var _S296 : u32 = _S295 + u32(4);
-        var _S297 : bool;
-        if((bitcast<u32>((calls_0[_S296].w))) != u32(0))
+        var _S294 : u32 = u32(10) * g_10;
+        var _S295 : u32 = _S294 + u32(4);
+        var _S296 : bool;
+        if((bitcast<u32>((calls_0[_S295].w))) != u32(0))
         {
-            _S297 = (bitcast<u32>((calls_0[_S296].w))) != u32(8);
+            _S296 = (bitcast<u32>((calls_0[_S295].w))) != u32(8);
         }
         else
         {
-            _S297 = false;
+            _S296 = false;
         }
-        if(_S297)
+        if(_S296)
         {
             g_10 = g_10 + u32(1);
             continue;
         }
-        var broken_1 : u32 = broken_0 + (bitcast<u32>((calls_0[_S295 + u32(7)].y)));
-        var applied_1 : u32 = applied_0 + (bitcast<u32>((calls_0[_S295 + u32(7)].z)));
-        stale_0 = stale_0 + (bitcast<u32>((calls_0[_S295 + u32(7)].x)));
+        var broken_1 : u32 = broken_0 + (bitcast<u32>((calls_0[_S294 + u32(7)].y)));
+        var applied_1 : u32 = applied_0 + (bitcast<u32>((calls_0[_S294 + u32(7)].z)));
+        stale_0 = stale_0 + (bitcast<u32>((calls_0[_S294 + u32(7)].x)));
         broken_0 = broken_1;
         applied_0 = applied_1;
         g_10 = g_10 + u32(1);
@@ -3981,7 +4000,7 @@ fn learned_tally_apply()
 @workgroup_size(1, 1, 1)
 fn learned_tally()
 {
-    var _S298 : u32 = ctl_0[u32(1)];
+    var _S297 : u32 = ctl_0[u32(1)];
     var g_11 : u32 = u32(0);
     var bound_1 : u32 = u32(0);
     var infeasible_0 : u32 = u32(0);
@@ -3992,19 +4011,29 @@ fn learned_tally()
     var stood_1 : u32 = u32(0);
     loop
     {
-        if(g_11 < _S298)
+        if(g_11 < _S297)
         {
         }
         else
         {
             break;
         }
-        var _S299 : u32 = u32(10) * g_11;
-        var _S300 : u32 = _S299 + u32(4);
-        var dec_2 : u32 = (bitcast<u32>((calls_0[_S300].z)));
-        var fb_2 : u32 = (bitcast<u32>((calls_0[_S300].w)));
-        var _S301 : u32;
+        var _S298 : u32 = u32(10) * g_11;
+        var _S299 : u32 = _S298 + u32(4);
+        var dec_2 : u32 = (bitcast<u32>((calls_0[_S299].z)));
+        var fb_2 : u32 = (bitcast<u32>((calls_0[_S299].w)));
+        var _S300 : u32;
         if(((dec_2 & (u32(1)))) != u32(0))
+        {
+            _S300 = u32(1);
+        }
+        else
+        {
+            _S300 = u32(0);
+        }
+        var bound_2 : u32 = bound_1 + _S300;
+        var _S301 : u32;
+        if(((dec_2 & (u32(2)))) != u32(0))
         {
             _S301 = u32(1);
         }
@@ -4012,22 +4041,22 @@ fn learned_tally()
         {
             _S301 = u32(0);
         }
-        var bound_2 : u32 = bound_1 + _S301;
-        var _S302 : u32;
-        if(((dec_2 & (u32(2)))) != u32(0))
-        {
-            _S302 = u32(1);
-        }
-        else
-        {
-            _S302 = u32(0);
-        }
-        var infeasible_1 : u32 = infeasible_0 + _S302;
+        var infeasible_1 : u32 = infeasible_0 + _S301;
         if(fb_2 != u32(0))
         {
-            var _S303 : u32 = fallbacks_0 + u32(1);
-            var _S304 : u32;
+            var _S302 : u32 = fallbacks_0 + u32(1);
+            var _S303 : u32;
             if(((fb_2 & (u32(1)))) != u32(0))
+            {
+                _S303 = u32(1);
+            }
+            else
+            {
+                _S303 = u32(0);
+            }
+            var nonfinite_1 : u32 = nonfinite_0 + _S303;
+            var _S304 : u32;
+            if(((fb_2 & (u32(2)))) != u32(0))
             {
                 _S304 = u32(1);
             }
@@ -4035,9 +4064,9 @@ fn learned_tally()
             {
                 _S304 = u32(0);
             }
-            var nonfinite_1 : u32 = nonfinite_0 + _S304;
+            var fb_inf_1 : u32 = fb_inf_0 + _S304;
             var _S305 : u32;
-            if(((fb_2 & (u32(2)))) != u32(0))
+            if(((fb_2 & (u32(4)))) != u32(0))
             {
                 _S305 = u32(1);
             }
@@ -4045,18 +4074,8 @@ fn learned_tally()
             {
                 _S305 = u32(0);
             }
-            var fb_inf_1 : u32 = fb_inf_0 + _S305;
-            var _S306 : u32;
-            if(((fb_2 & (u32(4)))) != u32(0))
-            {
-                _S306 = u32(1);
-            }
-            else
-            {
-                _S306 = u32(0);
-            }
-            var range_2 : u32 = range_1 + _S306;
-            fallbacks_0 = _S303;
+            var range_2 : u32 = range_1 + _S305;
+            fallbacks_0 = _S302;
             nonfinite_0 = nonfinite_1;
             fb_inf_0 = fb_inf_1;
             range_1 = range_2;
@@ -4065,7 +4084,7 @@ fn learned_tally()
         {
             stood_1 = stood_1 + u32(1);
         }
-        calls_0[_S299 + u32(7)] = vec4<f32>(0.0f);
+        calls_0[_S298 + u32(7)] = vec4<f32>(0.0f);
         g_11 = g_11 + u32(1);
         bound_1 = bound_2;
         infeasible_0 = infeasible_1;
@@ -4099,53 +4118,53 @@ fn learned_adopt(@builtin(workgroup_id) group_12 : vec3<u32>, @builtin(local_inv
     {
         return;
     }
-    var _S307 : u32 = u32(10) * g_12;
-    var _S308 : u32 = _S307 + u32(2);
-    var _S309 : u32 = (bitcast<u32>((calls_0[_S308].z)));
-    var _S310 : u32 = (bitcast<u32>((calls_0[_S308].w)));
-    var _S311 : u32 = (bitcast<u32>((calls_0[_S307 + u32(3)].w)));
-    var _S312 : u32 = _S307 + u32(4);
-    var _S313 : u32 = (bitcast<u32>((calls_0[_S312].x)));
-    var _S314 : u32 = (bitcast<u32>((calls_0[_S312].y)));
-    var _S315 : u32 = _S307 + u32(6);
-    var _S316 : u32 = (bitcast<u32>((calls_0[_S315].z)));
-    var _S317 : u32 = (bitcast<u32>((calls_0[_S315].w)));
+    var _S306 : u32 = u32(10) * g_12;
+    var _S307 : u32 = _S306 + u32(2);
+    var _S308 : u32 = (bitcast<u32>((calls_0[_S307].z)));
+    var _S309 : u32 = (bitcast<u32>((calls_0[_S307].w)));
+    var _S310 : u32 = (bitcast<u32>((calls_0[_S306 + u32(3)].w)));
+    var _S311 : u32 = _S306 + u32(4);
+    var _S312 : u32 = (bitcast<u32>((calls_0[_S311].x)));
+    var _S313 : u32 = (bitcast<u32>((calls_0[_S311].y)));
+    var _S314 : u32 = _S306 + u32(6);
+    var _S315 : u32 = (bitcast<u32>((calls_0[_S314].z)));
+    var _S316 : u32 = (bitcast<u32>((calls_0[_S314].w)));
     var j_13 : u32 = t_15;
     loop
     {
-        if(j_13 < _S310)
+        if(j_13 < _S309)
         {
         }
         else
         {
             break;
         }
-        if(j_13 < _S311)
+        if(j_13 < _S310)
         {
-            at_7 = params_0.out_bases_0.x + u32(12) * (_S316 + j_13);
+            at_7 = params_0.out_bases_0.x + u32(12) * (_S315 + j_13);
         }
         else
         {
-            at_7 = params_0.out_bases_0.y + u32(12) * (_S317 + j_13 - _S311);
+            at_7 = params_0.out_bases_0.y + u32(12) * (_S316 + j_13 - _S310);
         }
-        var _S318 : u32 = u32(14) * (_S309 + j_13);
-        nodes_0[_S318 + u32(5)] = vec4<f32>(lout_0[at_7], lout_0[at_7 + u32(1)], lout_0[at_7 + u32(2)], lout_0[at_7 + u32(3)]);
-        nodes_0[_S318 + u32(6)] = vec4<f32>(lout_0[at_7 + u32(4)], lout_0[at_7 + u32(5)], lout_0[at_7 + u32(6)], lout_0[at_7 + u32(7)]);
-        nodes_0[_S318 + u32(7)] = vec4<f32>(lout_0[at_7 + u32(8)], lout_0[at_7 + u32(9)], lout_0[at_7 + u32(10)], lout_0[at_7 + u32(11)]);
+        var _S317 : u32 = u32(14) * (_S308 + j_13);
+        nodes_0[_S317 + u32(5)] = vec4<f32>(lout_0[at_7], lout_0[at_7 + u32(1)], lout_0[at_7 + u32(2)], lout_0[at_7 + u32(3)]);
+        nodes_0[_S317 + u32(6)] = vec4<f32>(lout_0[at_7 + u32(4)], lout_0[at_7 + u32(5)], lout_0[at_7 + u32(6)], lout_0[at_7 + u32(7)]);
+        nodes_0[_S317 + u32(7)] = vec4<f32>(lout_0[at_7 + u32(8)], lout_0[at_7 + u32(9)], lout_0[at_7 + u32(10)], lout_0[at_7 + u32(11)]);
         j_13 = j_13 + u32(64);
     }
     j_13 = t_15;
     loop
     {
-        if(j_13 < _S314)
+        if(j_13 < _S313)
         {
         }
         else
         {
             break;
         }
-        var b_11 : u32 = _S313 + j_13;
-        var _S319 : u32 = params_0.out_bases2_0.x + u32(8) * b_11;
+        var b_11 : u32 = _S312 + j_13;
+        var _S318 : u32 = params_0.out_bases2_0.x + u32(8) * b_11;
         at_7 = u32(0);
         var i_6 : u32 = u32(1);
         loop
@@ -4157,14 +4176,14 @@ fn learned_adopt(@builtin(workgroup_id) group_12 : vec3<u32>, @builtin(local_inv
             {
                 break;
             }
-            if(lout_0[_S319 + i_6] > lout_0[_S319 + at_7])
+            if(lout_0[_S318 + i_6] > lout_0[_S318 + at_7])
             {
                 at_7 = i_6;
             }
             i_6 = i_6 + u32(1);
         }
-        var _S320 : u32 = u32(2) * b_11;
-        bonds_0[_S320] = vec4<f32>(bonds_0[_S320].x, lout_0[params_0.out_bases_0.z + b_11], lout_0[params_0.out_bases_0.w + b_11], (bitcast<f32>((at_7 + u32(1)))));
+        var _S319 : u32 = u32(2) * b_11;
+        bonds_0[_S319] = vec4<f32>(bonds_0[_S319].x, lout_0[params_0.out_bases_0.z + b_11], lout_0[params_0.out_bases_0.w + b_11], (bitcast<f32>((at_7 + u32(1)))));
         j_13 = j_13 + u32(64);
     }
     return;

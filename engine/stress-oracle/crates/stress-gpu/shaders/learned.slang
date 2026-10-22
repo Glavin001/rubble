@@ -1449,6 +1449,7 @@ void learned_finish(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 // The network's place before its weights exist (`STRESS_LEARNED_STUB`):
 //   1 zero: every output 0 (ballistic motion, no break);
 //   3 nonfinite: NaN outputs (a test of the fallback gate);
+//   5 punch-overlap: the punch's outcome with the impactor placed 5 mm into the plug;
 //   4 punch-wobble: the punch's outcome plus a fixed per-chunk pattern (non-rigid pieces);
 //   2 punch: the punch's idea as an outcome: per impactor, the chunks within its face
 //     radius of its path from the struck depth on are a plug; the bonds holding the plug
@@ -1490,7 +1491,7 @@ void learned_stub(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         return;
     }
     uint mode = params.stub & 0xffu;
-    if (group_uniform(mode == 2 || mode == 4 ? 1u : 0u, t) == 0)
+    if (group_uniform(mode == 2 || mode == 4 || mode == 5 ? 1u : 0u, t) == 0)
         return;
     // the plug of the call's first impactor (the call's nodes after its chunks)
     uint ki = first + nc;
@@ -1565,9 +1566,14 @@ void learned_stub(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     {
         Quat q = quat_of(node(ki, 1));
         float3 o = inverse_rotate(q, vc - vi) / vref;
+        float3 ox = 0.5 * o;
+        // 5 punch-overlap (a test of the window end's handover): the impactor placed 5 mm
+        // further along its path than the punch's outcome, into the plug ahead of it
+        if (mode == 5)
+            ox += inverse_rotate(q, dir * 0.005) / (vref * params.dt);
         nodes[NODE_F4 * ki + 5] = float4(o, 0.0);
-        nodes[NODE_F4 * ki + 6] = float4(0.0, 0.0, 0.5 * o.x, 0.5 * o.y);
-        nodes[NODE_F4 * ki + 7] = float4(0.5 * o.z, 0.0, 0.0, 0.0);
+        nodes[NODE_F4 * ki + 6] = float4(0.0, 0.0, ox.x, ox.y);
+        nodes[NODE_F4 * ki + 7] = float4(ox.z, 0.0, 0.0, 0.0);
     }
     DeviceMemoryBarrierWithGroupSync();
     // the bonds holding the plug

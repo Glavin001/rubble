@@ -162,6 +162,9 @@ pub enum Stub {
     /// The punch's outcome plus a fixed per-chunk pattern: pieces that do not move rigidly
     /// (a test of the kept-deformation boundary).
     PunchWobble = 4,
+    /// The punch's outcome with the impactor placed 5 mm into the plug (a test of the window
+    /// end's handover of overlaps to the engine).
+    PunchOverlap = 5,
 }
 
 impl Stub {
@@ -173,6 +176,7 @@ impl Stub {
             Ok("punch") => Ok(Some(Stub::Punch)),
             Ok("nonfinite") => Ok(Some(Stub::NonFinite)),
             Ok("punch-wobble") => Ok(Some(Stub::PunchWobble)),
+            Ok("punch-overlap") => Ok(Some(Stub::PunchOverlap)),
             Ok(other) => Err(format!("STRESS_LEARNED_STUB={other}: expected zero, punch, punch-wobble or nonfinite")),
         }
     }
