@@ -34,7 +34,26 @@ pub struct FullOut {
     pub kind: String,
     pub keys: Vec<i64>,
     pub columns: Vec<String>,
+    /// JSON numbers, or "inf" / "-inf" / "nan" (JSON has no infinities); null is NaN.
+    #[serde(deserialize_with = "lenient_f64s")]
     pub rows: Vec<f64>,
+}
+
+fn lenient_f64s<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<f64>, D::Error> {
+    let raw: Vec<serde_json::Value> = Vec::deserialize(d)?;
+    raw.iter()
+        .map(|v| match v {
+            serde_json::Value::Number(n) => n.as_f64().ok_or_else(|| serde::de::Error::custom(format!("{n}"))),
+            serde_json::Value::Null => Ok(f64::NAN),
+            serde_json::Value::String(s) => match s.as_str() {
+                "inf" | "Infinity" => Ok(f64::INFINITY),
+                "-inf" | "-Infinity" => Ok(f64::NEG_INFINITY),
+                "nan" | "NaN" => Ok(f64::NAN),
+                other => Err(serde::de::Error::custom(format!("row value {other:?}"))),
+            },
+            other => Err(serde::de::Error::custom(format!("row value {other}"))),
+        })
+        .collect()
 }
 
 /// Where the fields a model does not predict come from.
@@ -199,4 +218,39 @@ pub fn apply_full(decoded: &IslandState, base: &IslandState, outs: &[FullOut]) -
 
 fn o_has(by_kind: &HashMap<&str, &FullOut>, kind: &str, col: &str) -> bool {
     by_kind.get(kind).is_some_and(|o| o.columns.iter().any(|c| c == col))
+}
+
+/// An island state's bond and chunk fields as `FullOut` columns (P1's flatten), limited to
+/// `predicted` (kind -> column names; None: every column): the oracle's own `/2` outcome,
+/// the ceiling of a full-state model's contract.
+pub fn columns_of_state(st: &IslandState, predicted: Option<&HashMap<String, Vec<String>>>) -> Result<Vec<FullOut>, String> {
+    let mut outs = Vec::new();
+    let kinds: [(&str, Vec<(i64, Value)>); 2] = [
+        ("bond", st.solver.bonds.iter().map(|((s, _), b)| Ok((stress_ref::keys::bond_key(*s, b.source), to_value(b)?))).collect::<Result<_, String>>()?),
+        ("chunk", st.solver.chunks.iter().map(|((s, c), ch)| Ok((stress_ref::keys::chunk_key(*s, *c), to_value(ch)?))).collect::<Result<_, String>>()?),
+    ];
+    for (kind, ents) in kinds {
+        let rows: Vec<Vec<(String, f64)>> = ents
+            .iter()
+            .map(|(_, v)| {
+                let mut r = Vec::new();
+                crate::full_state_calls::flatten(v, "", &mut r);
+                r
+            })
+            .collect();
+        let columns: Vec<String> = match predicted.and_then(|p| p.get(kind)) {
+            Some(cols) => cols.clone(),
+            None if predicted.is_some() => continue,
+            None => rows.iter().flatten().map(|(c, _)| c.clone()).collect::<std::collections::BTreeSet<_>>().into_iter().collect(),
+        };
+        let data = rows
+            .iter()
+            .flat_map(|r| {
+                let m: HashMap<&str, f64> = r.iter().map(|(n, x)| (n.as_str(), *x)).collect();
+                columns.iter().map(move |c| m.get(c.as_str()).copied().unwrap_or(if c.contains('=') { 0.0 } else { f64::NAN })).collect::<Vec<_>>()
+            })
+            .collect();
+        outs.push(FullOut { kind: kind.into(), keys: ents.iter().map(|(k, _)| *k).collect(), columns, rows: data });
+    }
+    Ok(outs)
 }

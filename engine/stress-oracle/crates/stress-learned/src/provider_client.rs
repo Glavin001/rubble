@@ -64,6 +64,8 @@ pub struct ModelProvider {
     /// `/5` calls with these full-state columns (model.json's `full_state.columns`, or
     /// `STRESS_FULL_STATE_COLUMNS`: a calls manifest with `full_state_columns`).
     full_state: Option<serde_json::Value>,
+    /// The last response's decoded-state `/2` columns (`full_state_out`), if any.
+    pub last_full: Option<Vec<crate::decoded_full::FullOut>>,
 }
 
 impl ModelProvider {
@@ -114,7 +116,7 @@ impl ModelProvider {
         // calls upgraded with the deformation unobserved (P2's `LEARNED_IMPACT_ACCEPT_V3=1`).
         let v3 = std::env::var("STRESS_PROVIDER_CALLS").is_ok_and(|v| v == "v3")
             || schema_py.lines().any(|l| l.trim_start().starts_with("SCHEMA_VERSION") && l.contains("\"learned-impact-outcome/3\""));
-        let mut p = ModelProvider { spec: spec.clone(), dir: dir.to_path_buf(), scene: scene.to_string(), child, qs: true, call_ms: Vec::new(), lock, v3, full_state: None };
+        let mut p = ModelProvider { spec: spec.clone(), dir: dir.to_path_buf(), scene: scene.to_string(), child, qs: true, call_ms: Vec::new(), lock, v3, full_state: None, last_full: None };
         let described = p.read_model_json()?;
         p.qs = match spec.qs {
             Some(q) => q,
@@ -182,7 +184,13 @@ impl ModelProvider {
         loop {
             if let Ok(text) = std::fs::read_to_string(&resp) {
                 self.call_ms.push(t.elapsed().as_secs_f64() * 1e3);
-                return serde_json::from_str(&text).map_err(|e| format!("{}: {e}", resp.display()));
+                let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", resp.display()))?;
+                // Decoded state /2: the /1 fields and `full_state_out` (decoded_full::FullOut).
+                self.last_full = match v.get("full_state_out") {
+                    Some(f) if !f.is_null() => Some(serde_json::from_value(f.clone()).map_err(|e| format!("{}: full_state_out: {e}", resp.display()))?),
+                    _ => None,
+                };
+                return serde_json::from_value(v).map_err(|e| format!("{}: {e}", resp.display()));
             }
             if let Ok(Some(status)) = self.child.try_wait() {
                 let log = std::fs::read_to_string(self.dir.join("provider.log")).unwrap_or_default();

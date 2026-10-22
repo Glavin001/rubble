@@ -20,7 +20,7 @@
 //!   pre_engine      the same, the frame then stepped by the engine with its contacts
 //! A progress line goes to stderr every frame.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use serde_json::{json, Value};
@@ -586,12 +586,19 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
             let frame = f as i64;
             let mut call_ms = 0.0;
             let mut flags = Value::Null;
+            // A full-state model's decoded state /2 columns (`full_state_out`), by call.
+            let last_full: std::cell::RefCell<Option<Vec<stress_learned::decoded_full::FullOut>>> = std::cell::RefCell::new(None);
             let mut provider = |view: &World, keys: &stress_ref::world::IslandKeys| -> Result<stress_ref::world::DecodedState, String> {
                 let tc = Instant::now();
                 let d = match o.kind.as_str() {
-                    "oracle" | "oracle_decoded" => Ok(oracle_outcome(view, keys, frame)),
+                    "oracle" | "oracle_decoded" | "oracle_full2" => Ok(oracle_outcome(view, keys, frame)),
                     "files" => file_outcome(o, view, keys, frame, &s.name),
-                    "model" => model.as_mut().expect("model provider").outcome(view, keys, frame),
+                    "model" => {
+                        let m = model.as_mut().expect("model provider");
+                        let d = m.outcome(view, keys, frame);
+                        *last_full.borrow_mut() = m.last_full.take();
+                        d
+                    }
                     other => Err(format!("unknown --provider {other}")),
                 }?;
                 call_ms = tc.elapsed().as_secs_f64() * 1e3;
@@ -618,6 +625,7 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
                     if exact {
                         return stress_ref::world::oracle_island_step(start, m);
                     }
+                    let oracle_full2 = o.kind == "oracle_full2";
                     // A decoded state: applied to the island on a copy of the frame-start world
                     // (the island's other state carried as it was), the island's state taken.
                     let mut view = start.clone();
@@ -635,8 +643,59 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
                     // carries none: the island's bonds read 0 at the next call, as in the
                     // coupled closed loop).
                     x.solver.reset_peak_utilizations();
-                    x.apply_decoded(&d)?;
-                    Ok(x.extract_island(m))
+                    // `--provider oracle_full2`: the oracle's own outcome through decoded state
+                    // /2 (its /1 decode and its frame-end columns, `STRESS_FULL_PREDICTED`: a
+                    // JSON {kind: [columns]}, default every column): the full-state contract's
+                    // ceiling.
+                    let full = if oracle_full2 {
+                        let predicted: Option<HashMap<String, Vec<String>>> = match std::env::var("STRESS_FULL_PREDICTED") {
+                            Ok(p) => Some(serde_json::from_slice(&std::fs::read(&p).map_err(|e| format!("{p}: {e}"))?).map_err(|e| format!("{p}: {e}"))?),
+                            Err(_) => None,
+                        };
+                        Some(stress_learned::decoded_full::columns_of_state(&stress_ref::world::oracle_island_step(start, m)?, predicted.as_ref())?)
+                    } else {
+                        last_full.borrow_mut().take()
+                    };
+                    let Some(full) = full else {
+                        x.apply_decoded(&d)?;
+                        return Ok(x.extract_island(m));
+                    };
+                    // Decoded state /2: the /1 state with its deformation kept, the model's
+                    // full-state columns over it (`decoded_full::apply_full`), the fields it
+                    // does not predict from `STRESS_FULL_BASE`: `native` (default, P2's choice:
+                    // the oracle's own step of the island, for recomputed or diagnostic fields)
+                    // or `start` (the frame start: no oracle information).
+                    x.apply_decoded_with(&d, true)?;
+                    let decoded = x.extract_island(m);
+                    let base = match std::env::var("STRESS_FULL_BASE").as_deref() {
+                        Ok("start") => {
+                            let mut b = start.clone();
+                            b.solver.reset_peak_utilizations();
+                            b.extract_island(m)
+                        }
+                        Ok("native") | Err(_) => stress_ref::world::oracle_island_step(start, m)?,
+                        Ok(other) => return Err(format!("STRESS_FULL_BASE={other}: native|start")),
+                    };
+                    let mut out = stress_learned::decoded_full::apply_full(&decoded, &base, &full)?;
+                    // Diagnostic (`STRESS_FULL2_NATIVE=bodies|chunks|clusters|impactors`, comma
+                    // list): those parts from the oracle's own step, to locate a /2 ceiling's loss.
+                    if let Ok(parts) = std::env::var("STRESS_FULL2_NATIVE") {
+                        let native = stress_ref::world::oracle_island_step(start, m)?;
+                        for p in parts.split(',') {
+                            match p {
+                                "chunks" => out.solver.chunks = native.solver.chunks.clone(),
+                                "clusters" => out.solver.clusters = native.solver.clusters.clone(),
+                                "impactors" => out.impactors = native.impactors.clone(),
+                                "bodies" => {
+                                    out.solver.chunks = native.solver.chunks.clone();
+                                    out.solver.clusters = native.solver.clusters.clone();
+                                    out.impactors = native.impactors.clone();
+                                }
+                                other => return Err(format!("STRESS_FULL2_NATIVE: {other}")),
+                            }
+                        }
+                    }
+                    Ok(out)
                 };
                 w.step_frame_island_provider(&mut a_provider).map(|m| {
                     let mut chunks: Vec<i64> = m.chunks.iter().map(|&(s, c)| stress_ref::world::stable_key(s, c)).collect();
