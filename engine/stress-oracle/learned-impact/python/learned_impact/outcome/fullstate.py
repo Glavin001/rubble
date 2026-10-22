@@ -121,3 +121,31 @@ def chunk_arrays(c, cols: dict, gravity: float) -> tuple[np.ndarray, np.ndarray]
         return np.stack([np.nan_to_num(a[arr][:, names.index(f)]) if f in names else np.zeros(len(m))
                          for f in CHUNK_FIELDS], 1) / np.maximum(sc, 1e-12)
     return block("fs_chunk_in").astype(np.float32), block("fs_chunk_out").astype(np.float32)
+
+
+def decode_raw(enc: np.ndarray, how: str, sc: dict[str, np.ndarray], dt: float) -> np.ndarray:
+    """The inverse of `_enc`: an encoded prediction back to the field's raw units."""
+    x = enc.astype(np.float64)
+    if how == "log1p":
+        return np.expm1(np.clip(x, 0.0, None))
+    if how == "id":
+        return x
+    if how == "per_gf":
+        return x * sc["gf_area_tension"]
+    if how == "inv1p":
+        return np.where(x > 0, 1.0 / np.clip(x, 1e-12, None) - 1.0, np.inf)
+    if how == "per_uc":
+        return x * sc["u_c"]
+    if how == "per_thc":
+        return x * sc["theta_c"]
+    if how == "per_ft":
+        return x * sc["f_t"]
+    if how == "slog_dt":
+        return np.sign(x) * np.expm1(np.abs(x)) / dt
+    raise ValueError(how)
+
+
+def predicted_columns() -> dict[str, list[str]]:
+    """The full-state columns the model predicts, by entity, in P1's field-path names."""
+    return {"bond": [f for f, _, _ in BOND_FIELDS] + list(BOND_MODE) + ["alive", "joint.damage"],
+            "chunk": list(CHUNK_FIELDS)}

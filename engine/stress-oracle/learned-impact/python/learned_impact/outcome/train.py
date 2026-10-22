@@ -55,6 +55,9 @@ class TrainConfig:
     select_tau: bool = True  # choose the break threshold on validation at the end
     curve_calls: int = 4000  # calls per fixed sample (train and val) for the loss curves
     init_checkpoint: str = ""  # start from these weights (and their input stats): DAgger rounds
+    # `/5`: the training data's full-state column set (P1's manifest.full_state_columns): a
+    # live call must write exactly these columns and static split (P0's provider)
+    full_state_columns: dict = field(default_factory=dict)
     # Pad every batch to bucketed shapes (exact; MPS recompiles per shape: ~1 s a new one)
     pad_shapes: bool = True
     lr: float = 1e-3
@@ -574,6 +577,10 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
     random.seed(cfg.seed)
     dev = pick_device(cfg.device)
     data = data or Data(cfg.dataset, cfg.include_unrouted, cfg.val_dataset or None)
+    if cfg.model.full_state and not cfg.full_state_columns:
+        cols = [e.manifest.get("full_state_columns") for e in data.events if e.manifest.get("full_state_columns")]
+        if cols:
+            cfg.full_state_columns = cols[0]
     (out / "config.json").write_text(json.dumps(cfg.to_dict(), indent=1))
     cache = HierarchyCache(cfg.model.levels)
     model = ImpactOutcomeModel(cfg.model)

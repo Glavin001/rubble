@@ -67,3 +67,17 @@ def test_monotone_margin_never_below_the_frame_start_margin():
     with torch.no_grad():
         out = ImpactOutcomeModel(ModelConfig(monotone_margin=True))(b)
     assert (out["bond_log_q"] >= torch.log(q0) - 1e-6).all()
+
+
+def test_full_state_encodings_round_trip():
+    import numpy as np
+
+    from learned_impact.outcome import fullstate as FS
+
+    rng = np.random.default_rng(0)
+    sc = {k: rng.uniform(0.5, 2.0, 5) for k in ("u_c", "theta_c", "gf_area_tension", "f_t")}
+    for _f, how, _k in FS.BOND_FIELDS:
+        x = rng.uniform(0.0, 3.0, 5) if how in ("log1p", "inv1p") else rng.normal(0, 2, 5)
+        back = FS.decode_raw(FS._enc(x, how, sc, 1 / 60), how, sc, 1 / 60)
+        assert np.allclose(back, x, rtol=1e-9, atol=1e-12), (_f, how)
+    assert np.isinf(FS.decode_raw(FS._enc(np.array([np.inf]), "inv1p", sc, 1 / 60), "inv1p", sc, 1 / 60))[0]

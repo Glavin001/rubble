@@ -56,6 +56,7 @@ class Provider:
             self.model.eval()
             self.device = torch.device(device)
             self.dcfg = decode_config(ck)
+            self.full_state_columns = ck["train_config"].get("full_state_columns") or {}
             self.cache = HierarchyCache(self.model.cfg.levels)
             sha = hashlib.sha256(Path(checkpoint).read_bytes()).hexdigest()
             self.meta = {"checkpoint": str(checkpoint), "sha256": sha,
@@ -125,8 +126,13 @@ class Provider:
         reads the QS-frame features, variant A does not (the host can skip building them)."""
         if self.model is None:
             return {"mode": self.mode, "needs_qs": True}
-        return {"mode": self.mode, "variant": self.model.cfg.variant,
-                "needs_qs": self.model.cfg.variant == "B", "meta": self.meta}
+        doc = {"mode": self.mode, "variant": self.model.cfg.variant,
+               "needs_qs": self.model.cfg.variant == "B", "meta": self.meta}
+        if self.model.cfg.full_state:
+            from . import fullstate as FS
+            doc["full_state"] = {"columns": self.full_state_columns,
+                                 "predicted": FS.predicted_columns()}
+        return doc
 
     def run(self, poll_s: float = 0.002, idle_timeout_s: float | None = None) -> int:
         req_root, resp_root = self.root / "req", self.root / "resp"
