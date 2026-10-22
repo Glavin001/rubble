@@ -8,6 +8,7 @@ ensemble tool) writes arrays. Nothing here derives a feature.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -390,9 +391,54 @@ def with_dummy_targets(c: Call) -> Call:
     return Call(**{**c.__dict__, "arrays": a, "energy": energy})
 
 
+V3 = "learned-impact-outcome/3"
+
+
+def accept_v3() -> bool:
+    """Explicit opt-in (`LEARNED_IMPACT_ACCEPT_V3=1`) to read `/3` calls as `/4` with the
+    hidden deformation *unobserved*: its 12 input columns and arrays are zero, bodies are the
+    live-bond components and their rotation the chunk's own. For runs on `/3` data while the
+    `/4` rebuild is pending (overfit milestone, re-scoring); never a silent default."""
+    return os.environ.get("LEARNED_IMPACT_ACCEPT_V3") == "1"
+
+
+def _upgrade_v3_manifest(m: dict[str, Any]) -> dict[str, Any]:
+    m = dict(m, schema_version=SCHEMA_VERSION, upgraded_from=V3)
+    m["columns"] = dict(m.get("columns", {}), chunk_feat=list(CHUNK_FEAT_COLUMNS))
+    return m
+
+
+def _upgrade_v3_arrays(a: dict[str, np.ndarray], nc: int) -> dict[str, np.ndarray]:
+    a = dict(a)
+    a["chunk_feat"] = np.concatenate([a["chunk_feat"], np.zeros((nc, 12), np.float32)], 1)
+    a["chunk_def"] = np.zeros((nc, 12), np.float32)
+    a["chunk_def_uc"] = np.ones(nc, np.float32)
+    if "y_chunk_v_end" in a:
+        a["y_chunk_def_end"] = np.zeros((nc, 12), np.float32)
+    # bodies: connected components of the live bonds
+    parent = np.arange(nc)
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    for s_, d_ in zip(a["bond_src"][0::2].tolist(), a["bond_dst"][0::2].tolist()):
+        ra, rb = find(s_), find(d_)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+    roots = np.array([find(i) for i in range(nc)], np.int64)
+    a["chunk_body"] = np.unique(roots, return_inverse=True)[1].astype(np.int32)
+    a["chunk_body_q"] = np.array(a["chunk_q_world"], np.float32)
+    return a
+
+
 def load_event(path: Path | str, validate: bool = True, require_targets: bool = True) -> Event:
     root = Path(path)
     manifest = json.loads((root / "manifest.json").read_text())
+    upgrade = manifest.get("schema_version") == V3 and accept_v3()
+    if upgrade:
+        manifest = _upgrade_v3_manifest(manifest)
     if validate:
         validate_manifest(manifest)
     entries = json.loads((root / "calls.json").read_text())
@@ -406,6 +452,8 @@ def load_event(path: Path | str, validate: bool = True, require_targets: bool = 
     calls = []
     for e in entries:
         arrays = {k: _read(blob, v, f"call {e['call_index']}/{k}") for k, v in e["arrays"].items()}
+        if upgrade:
+            arrays = _upgrade_v3_arrays(arrays, int(e["counts"]["chunks"]))
         c = Call(
             event_id=manifest["event_id"], call_index=int(e["call_index"]),
             frame=int(e["frame"]), island=int(e["island"]), prev_call=e.get("prev_call"),
