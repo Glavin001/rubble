@@ -272,3 +272,24 @@ layout leaves its split. It adds 5 configurations × 8 members for each of ancho
 anchored t2, standing t1 and standing t2 (`viability-v1-*-val`, 160 events).
 `calls-v5/.complete` is touched once chunk A's calls and these are built: P2's overnight
 chain waits on it.
+
+**Ballistic ensembles: a bug, and the fix within the budget.** The queue's
+`--ensemble-train-share 0` overrode the sweep's every-speed ensembles. The four
+training-split ballistic families were therefore recorded as single runs (10 speeds each,
+40 events). The validation (`bl_ground_thick`) and test (`bl_anchored_sides`) families
+have full 8-member ensembles at every speed (80 events each), and the acceptance's
+ballistic-limit curve is scored on those.
+
+Full ensembles for the four training families (320 events, about 2.2 GB with calls) don't
+fit beside chunk B in the budget. So `viability-v1d.sh` records them at 5 speeds across
+each family's measured transition, 8 members each (160 events, about 1.1 GB with calls):
+
+| family | speeds (m/s) |
+|---|---|
+| bl_ground_thin | 1.8–3.5 |
+| bl_anchored_base | 1.3–3.2 |
+| bl_standing | 1.6–3.0 |
+| bl_coarse_heavy | 5.5–10 |
+
+It runs after chunk B, under a 28.3 GB guard. Chunk B (`viability-v1c.sh`) records under
+a 27.3 GB guard so its own `/5` calls fit. The whole tree stays under 29 GB.
