@@ -219,3 +219,27 @@ fn the_calls_hidden_state_is_the_solvers() {
     }
     assert!(worst_v <= 1e-3 * scale_v.max(1e-6) + 1e-5, "the fitted rates are the solver's hidden rates");
 }
+
+/// A snapshot stored as a delta (of the previous snapshot) decodes through its chain and
+/// resumes the oracle bit for bit: two frames from it match the recorded f64 state.
+#[test]
+fn a_delta_snapshot_resumes_the_oracle_bit_for_bit() {
+    let (ev, _) = record("snap");
+    let ctx: serde_json::Value = serde_json::from_slice(&std::fs::read(ev.join("context.json")).unwrap()).unwrap();
+    let snaps = ctx["snapshots"]["boundaries"].as_array().unwrap();
+    let deepest = snaps.iter().filter(|s| !s["delta_of"].is_null()).max_by_key(|s| s["boundary"].as_u64().unwrap() % 10).expect("a routed boundary between keyframes");
+    let b = deepest["boundary"].as_u64().unwrap() as usize;
+    let cat = stress_learned::catalog::Catalog::load(&ev.join("catalog.json")).unwrap();
+    let e = &cat.arrays["state_chunk_pos_f64"];
+    let pos = stress_learned::catalog::read_f64(&ev, e).unwrap();
+    let n = e.shape[1] * 3;
+    assert!(b + 2 < e.shape[0], "two recorded frames after boundary {b}");
+    let scene: Scene = serde_json::from_slice(&std::fs::read(ev.join("scene.json")).unwrap()).unwrap();
+    let mut w = World::restore_state(&scene, &stress_learned::outcome::load_snapshot(&ev, b).unwrap()).unwrap();
+    for k in 1..=2 {
+        w.step_frame();
+        let got: Vec<f64> = (0..w.solver.structures.len()).flat_map(|s| (0..w.solver.structures[s].chunks.len()).map(move |c| (s, c))).flat_map(|(s, c)| w.solver.chunk_position(s, c).to_array()).collect();
+        let row = &pos[(b + k) * n..(b + k + 1) * n];
+        assert!(got.iter().zip(row).all(|(x, y)| x.to_bits() == y.to_bits()), "boundary {} from the delta snapshot at {b}", b + k);
+    }
+}

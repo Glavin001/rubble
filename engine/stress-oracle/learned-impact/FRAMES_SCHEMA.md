@@ -66,7 +66,7 @@ possible work) fails the event loudly.
 | `frames.json` | per frame: time, phase, breaks, substeps, routed chunks and impactors, predicted contacts, punch bonds, QS-prior convergence, impactor contact, struck structures, the energy ledger (kinetic split, mechanical, dissipated and its parts, contact terms, elastic) |
 | `outcome.json` | the whole run: stop reason, `truncated`, broken bonds, fragments, largest fraction, last break time, breaks in the last 0.5 s, input energy, each impactor's exit velocity and regime (perforate / arrest / rebound / deflect, geometric), frames per phase, wall-clock cost by part, oracle substeps, fingerprint |
 | `catalog.json`, `arrays/*` | little-endian raw arrays (`catalog.rs`; dtypes `f32`, `i32`, `f64`), below |
-| `snapshots/<boundary>.msgpack.zst` | recorder revision 8 on: exact restart points, the whole `World` (`World::save_state`, rmp-serde with named fields, one zstd frame) at boundary 0, every boundary whose frame routes an island, and every 10th; `World::restore_state(scene.json, bytes)` resumes the oracle bit for bit (contact cohorts, clock and energy ledger included). Listed in `context.json` `snapshots.boundaries` |
+| `snapshots/<boundary>.msgpack.zst` | recorder revision 8 on: exact restart points, the whole `World` (`World::save_state`, rmp-serde with named fields, one zstd frame; between every 10th boundary each is compressed with the previous snapshot as its zstd dictionary, `delta_of`, and `outcome::load_snapshot` decodes the chain) at boundary 0, every boundary whose frame routes an island, and every 10th; `World::restore_state(scene.json, bytes)` resumes the oracle bit for bit (contact cohorts, clock and energy ledger included). Listed in `context.json` `snapshots.boundaries` |
 
 ## Arrays
 

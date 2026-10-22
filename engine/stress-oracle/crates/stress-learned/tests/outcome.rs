@@ -132,12 +132,16 @@ fn a_recording_is_complete_causal_and_replays() {
     let snaps = ctx["snapshots"]["boundaries"].as_array().unwrap();
     let at: Vec<u64> = snaps.iter().map(|s| s["boundary"].as_u64().unwrap()).collect();
     assert!(at.contains(&0) && (0..f as u64).step_by(10).all(|b| at.contains(&b)), "{at:?}");
+    for (k, s) in snaps.iter().enumerate() {
+        let want = (at[k] % 10 != 0).then(|| at[k - 1]);
+        assert_eq!(s["delta_of"].as_u64(), want, "boundaries between keyframes are deltas of the previous snapshot");
+    }
     let scene: stress_ref::scene::Scene = serde_json::from_slice(&std::fs::read(ev.join("scene.json")).unwrap()).unwrap();
     let pos = read_f64(&ev, &cat.arrays["state_chunk_pos_f64"]).unwrap();
     let n = cat.arrays["state_chunk_pos_f64"].shape[1] * 3;
     for s in snaps.iter().filter(|s| s["boundary"].as_u64().unwrap() + 3 <= f as u64) {
         let b = s["boundary"].as_u64().unwrap() as usize;
-        let bytes = zstd::decode_all(std::fs::File::open(ev.join(s["path"].as_str().unwrap())).unwrap()).unwrap();
+        let bytes = stress_learned::outcome::load_snapshot(&ev, b).unwrap();
         let mut world = stress_ref::world::World::restore_state(&scene, &bytes).unwrap();
         for k in 0..3 {
             world.step_frame();

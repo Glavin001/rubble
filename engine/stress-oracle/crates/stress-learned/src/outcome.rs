@@ -1064,6 +1064,7 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
     let mut truncated = false;
     let mut substeps_total = 0u64;
     let mut snapshots: Vec<Value> = Vec::new();
+    let mut prev_snapshot: Option<(usize, Vec<u8>)> = None;
 
     for f in 0..max_frames {
         let t_over = Instant::now();
@@ -1076,11 +1077,24 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
         // An exact restart point at this boundary (the routing's prediction leaves the world
         // as it was): the first, every routed one and every `snapshot_every`-th.
         let routed = chunk_routed.contains(&1) || imp_routed.contains(&1);
-        if opts.storage.snapshots && (f == 0 || routed || f % opts.storage.snapshot_every.max(1) == 0) {
+        let every = opts.storage.snapshot_every.max(1);
+        if opts.storage.snapshots && (f == 0 || routed || f % every == 0) {
             let bytes = world.save_state()?;
             let rel = format!("snapshots/{f:06}.msgpack.zst");
-            catalog::write_zstd(&dir, &rel, &bytes)?;
-            snapshots.push(json!({"boundary": f, "time": world.solver.time, "routed": routed, "path": rel, "bytes": bytes.len()}));
+            // Every `every`-th boundary is self-contained; the others are zstd frames with
+            // the previous snapshot as their dictionary (lossless, 2-4x smaller), so a
+            // restore decodes at most `every - 1` deltas (`load_snapshot`).
+            let key = f % every == 0 || prev_snapshot.is_none();
+            let z = match (&prev_snapshot, key) {
+                (Some((_, prev)), false) => zstd::bulk::Compressor::with_dictionary(19, prev).and_then(|mut c| c.compress(&bytes)),
+                _ => zstd::bulk::compress(&bytes, 19),
+            }
+            .map_err(|e| format!("{rel}: zstd {e}"))?;
+            fs::create_dir_all(dir.join("snapshots")).map_err(|e| e.to_string())?;
+            fs::write(dir.join(&rel), &z).map_err(|e| format!("{rel}: {e}"))?;
+            let delta_of = if key { None } else { prev_snapshot.as_ref().map(|p| p.0) };
+            snapshots.push(json!({"boundary": f, "time": world.solver.time, "routed": routed, "path": rel, "bytes": bytes.len(), "delta_of": delta_of}));
+            prev_snapshot = Some((f, bytes));
         }
         let start_connected = bond_connected(&world);
         let start_energy: Vec<(f64, f64)> = world.solver.bonds.iter().flatten().map(|b| (b.joint.dissipated, b.damped)).collect();
@@ -1338,7 +1352,7 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
         "break_i32_columns": ["frame","bond"],
         "break_f64_columns": ["time"],
         "f64_copies": "Each `<name>_f64` array is the exact f64 value of `<name>` (f32); state_bond_fail_margin_f64 is RtBond::fail_margin unrounded.",
-        "snapshots": {"format": "stress_ref World::save_state (rmp-serde, named fields), one zstd frame; World::restore_state(&scene.json, bytes) resumes the oracle bit for bit",
+        "snapshots": {"format": "stress_ref World::save_state (rmp-serde, named fields), one zstd frame; delta_of: compressed with that boundary's snapshot (raw bytes) as the zstd dictionary; outcome::load_snapshot decodes, World::restore_state(&scene.json, bytes) resumes the oracle bit for bit",
             "rule": format!("boundary 0, every boundary with a routed island, every {}-th", opts.storage.snapshot_every), "boundaries": snapshots},
         "bond_mode_values": ["none","tension","shear","compression","buckling"],
         "ensemble": recipe.parameters.get("ensemble").cloned().unwrap_or(Value::Null),
@@ -1392,6 +1406,34 @@ pub fn finished_events(out: &Path) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = fs::read_dir(out).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.join("outcome.json").exists()).collect();
     v.sort();
     v
+}
+
+/// The raw `World::save_state` bytes of `event`'s snapshot at `boundary` (resolving its
+/// chain of deltas back to the last self-contained one).
+pub fn load_snapshot(event: &Path, boundary: usize) -> Result<Vec<u8>, String> {
+    let ctx: Value = serde_json::from_slice(&fs::read(event.join("context.json")).map_err(|e| format!("context.json: {e}"))?).map_err(|e| e.to_string())?;
+    let list = ctx["snapshots"]["boundaries"].as_array().ok_or("no snapshots in context.json")?;
+    let entry = |b: usize| list.iter().find(|s| s["boundary"].as_u64() == Some(b as u64)).ok_or_else(|| format!("no snapshot at boundary {b}"));
+    let mut chain = vec![entry(boundary)?];
+    while let Some(d) = chain.last().unwrap()["delta_of"].as_u64() {
+        chain.push(entry(d as usize)?);
+    }
+    let mut prev: Option<Vec<u8>> = None;
+    for s in chain.iter().rev() {
+        let rel = s["path"].as_str().ok_or("snapshot path")?;
+        let z = fs::read(event.join(rel)).map_err(|e| format!("{rel}: {e}"))?;
+        let cap = s["bytes"].as_u64().ok_or("snapshot bytes")? as usize;
+        let raw = match &prev {
+            Some(p) => zstd::bulk::Decompressor::with_dictionary(p).and_then(|mut d| d.decompress(&z, cap)),
+            None => zstd::bulk::decompress(&z, cap),
+        }
+        .map_err(|e| format!("{rel}: zstd {e}"))?;
+        if raw.len() != cap {
+            return Err(format!("{rel}: {} bytes, want {cap}", raw.len()));
+        }
+        prev = Some(raw);
+    }
+    Ok(prev.unwrap())
 }
 
 /// What `regenerate` restored and checked.
