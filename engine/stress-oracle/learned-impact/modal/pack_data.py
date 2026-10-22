@@ -3,15 +3,17 @@
     python3 pack_data.py --train <calls-train> --val <calls-eval> --name bulk-v1-calls3 \
         [--val-split val] [--max-train N]
 
-Writes `learned-impact/runs/modal/<name>.tar` (members are the calls' own files: arrays.bin.zst
-is already compressed) with `train/<event>/…` and `val/<event>/…`, plus `<name>.json` (event
-lists, byte counts, sha256). Deterministic: sorted members, zero mtimes and owners, so the
-same inputs give the same hash and an unchanged dataset is never uploaded twice.
+Writes `learned-impact/runs/modal/<name>.tar.gz` with `train/<event>/…` and `val/<event>/…`
+(gzip: arrays.bin.zst is already compressed, calls.json and manifest.json are not), plus
+`<name>.json` (event counts, bytes, sha256). Deterministic: sorted members, zero mtimes and
+owners and a zero gzip header time, so the same inputs give the same hash and an unchanged
+dataset is never uploaded twice (`train_modal.py::upload` checks the remote hash first).
 """
 
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import json
 import tarfile
@@ -45,8 +47,9 @@ def main(argv=None) -> dict:
     if a.max_train:
         tr = tr[: a.max_train]
     va = events(Path(a.val), a.val_split)
-    out = runs / f"{a.name}.tar"
-    with tarfile.open(out, "w", format=tarfile.PAX_FORMAT) as tar:
+    out = runs / f"{a.name}.tar.gz"
+    with open(out, "wb") as raw, gzip.GzipFile(fileobj=raw, mode="wb", mtime=0, filename="") as gz, \
+            tarfile.open(fileobj=gz, mode="w", format=tarfile.PAX_FORMAT) as tar:
         for prefix, evs in (("train", tr), ("val", va)):
             for ev in evs:
                 for f in sorted(ev.iterdir()):
