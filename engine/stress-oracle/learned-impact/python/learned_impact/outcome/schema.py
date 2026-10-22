@@ -539,7 +539,8 @@ def energy_budget(calls: list) -> None:
     """The event's cumulative energy budget (P0's stress_learned::energy_budget, planning
     2026-10-22), before each routed call in call order: E_ref = the largest frame-start
     KE + E_elastic so far, gain = the signed sum of the earlier calls' changes of their
-    island's KE + E_elastic + PE, remaining = max(0, tol·E_ref − gain). Set as
+    island's KE + E_elastic + PE (+ the contacts' stored energy when the calls carry it),
+    remaining = max(0, tol·E_ref − gain). Set as
     energy["E_budget_ref" | "E_budget_gain" | "E_budget_remaining"], unless the call already
     carries them (live calls: the host sends them). An event whose recorded ledger is
     incomplete gets none. Bit-for-bit with P0's fixture energy_budget_v1.json."""
@@ -551,10 +552,29 @@ def energy_budget(calls: list) -> None:
     e_ref, gain = 0.0, 0.0
     for c in routed:
         e = c.energy
-        e_ref = max(e_ref, e["KE_in"] + e["E_elastic_start"])
+        e_ref = max(e_ref, budget_start(e))
         e["E_budget_ref"], e["E_budget_gain"] = e_ref, gain
         e["E_budget_remaining"] = max(ENERGY_BUDGET_TOL * e_ref - gain, 0.0)
-        gain += e["KE_out"] + e["E_elastic_end"] - e["KE_in"] - e["E_elastic_start"] - e["W_gravity"]
+        gain += budget_delta(e)
+
+
+def _contact(e: dict) -> bool:
+    if ("E_contact_start" in e) != ("E_contact_end" in e):
+        raise SchemaError("call energy has only one of E_contact_start, E_contact_end")
+    return "E_contact_start" in e
+
+
+def budget_start(e: dict) -> float:
+    """The island's frame-start mechanical energy: KE + E_elastic (+ E_contact, P0's contact
+    bounds, when the call carries it), summed in this order (bit-for-bit with the host)."""
+    s = e["KE_in"] + e["E_elastic_start"]
+    return s + e["E_contact_start"] if _contact(e) else s
+
+
+def budget_delta(e: dict) -> float:
+    """A call's change of its island's KE + E_elastic + PE (+ E_contact), in the host's order."""
+    d = e["KE_out"] + e["E_elastic_end"] - e["KE_in"] - e["E_elastic_start"] - e["W_gravity"]
+    return d + e["E_contact_end"] - e["E_contact_start"] if _contact(e) else d
 
 
 class _BlobWriter:

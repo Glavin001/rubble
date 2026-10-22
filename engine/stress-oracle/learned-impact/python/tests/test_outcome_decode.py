@@ -135,7 +135,7 @@ def test_decode_reads_inputs_only():
             # stored energy (the energy envelope's E)
             stripped = S.Call(**{**c.__dict__, "arrays": {
                 k: v for k, v in c.arrays.items() if not S._is_target(k)},
-                "energy": {k: c.energy[k] for k in ("KE_in", "E_elastic_start", "E_budget_ref",
+                "energy": {k: c.energy[k] for k in ("KE_in", "E_elastic_start", "E_contact_start", "E_budget_ref",
                                                      "E_budget_gain", "E_budget_remaining")
                            if k in c.energy}})
             blind.append(S.with_dummy_targets(stripped))

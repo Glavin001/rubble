@@ -146,3 +146,24 @@ def test_energy_budget_is_cumulative_and_signed():
     live[0].energy["E_budget_remaining"] = 0.123
     S.energy_budget(live)
     assert live[0].energy["E_budget_remaining"] == 0.123
+
+
+def test_energy_budget_counts_contact_energy():
+    from types import SimpleNamespace as N
+
+    import pytest
+
+    from learned_impact.outcome import schema as S
+
+    e0 = {"KE_in": 100.0, "KE_out": 90.0, "E_elastic_start": 0.0, "E_elastic_end": 0.0,
+          "W_gravity": 0.0, "E_contact_start": 20.0, "E_contact_end": 0.0}
+    e1 = {"KE_in": 90.0, "KE_out": 90.0, "E_elastic_start": 0.0, "E_elastic_end": 0.0,
+          "W_gravity": 0.0, "E_contact_start": 0.0, "E_contact_end": 0.0}
+    cs = [N(routed=True, call_index=0, energy=e0), N(routed=True, call_index=1, energy=e1)]
+    S.energy_budget(cs)
+    assert e0["E_budget_ref"] == 120.0 and e0["E_budget_remaining"] == 6.0
+    assert e1["E_budget_gain"] == -30.0 and e1["E_budget_remaining"] == 36.0  # 10 KE + 20 contact
+    bad = dict(e1)
+    bad.pop("E_contact_end")
+    with pytest.raises(S.SchemaError):
+        S.energy_budget([N(routed=True, call_index=0, energy=bad)])

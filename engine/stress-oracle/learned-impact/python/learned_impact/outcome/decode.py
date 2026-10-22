@@ -244,12 +244,14 @@ def energy_bound(ph: dict[str, Tensor], b: Batch, free: Tensor, tol: float,
     # stress_learned::energy_budget): the island's KE + E_elastic + PE may rise by at most
     # `remaining` (a per-frame +tol compounds over an event). The decode bounds kinetic
     # energy: KE_out ≤ KE_in + E_elastic_start + W_g + remaining, never tighter than the
-    # oracle (its frame-end elastic energy is ≥ 0); the host's bound adds the decoded elastic.
+    # oracle (its frame-end elastic and contact energies are ≥ 0); the host's bound adds the
+    # decoded elastic. The contacts' frame-start energy (P0's contact bounds) is available too.
     rem = b.t["e_budget_remaining"].to(dtype).to(ke_in.device) if "e_budget_remaining" in b.t else None
     if rem is not None:
         st = b.t["e_stored_start"].to(dtype).to(ke_in.device)
+        ec = b.t["e_contact_start"].to(dtype).to(ke_in.device)
         ok = torch.isfinite(rem) & torch.isfinite(st)
-        bound = torch.where(ok, ke_in + torch.where(ok, st, torch.zeros_like(st)) + w_g
+        bound = torch.where(ok, ke_in + torch.where(ok, st, torch.zeros_like(st)) + ec + w_g
                             + torch.where(ok, rem, torch.zeros_like(rem)), bound)
     v, w = ph["v_end"], ph["w_end"]
     ke = kinetic(ph, v, w, inertia1, G)
