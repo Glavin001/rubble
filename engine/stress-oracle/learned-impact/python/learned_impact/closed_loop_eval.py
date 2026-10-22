@@ -445,6 +445,7 @@ def main(argv=None):
     p.add_argument("--checkpoint", type=Path)
     p.add_argument("--python-dir", type=Path)
     p.add_argument("--device", default="cpu")
+    p.add_argument("--no-reference", action="store_true", help="omit the standing ceiling_full column (diagnostic runs of other candidates only)")
     p.add_argument("--timeout", type=float, default=300.0)
     p.add_argument("--max-ensembles", type=int, default=None, help="per family")
     p.add_argument("--jobs", type=int, default=6)
@@ -455,7 +456,7 @@ def main(argv=None):
     # The reference ceiling (`ceiling_full`: the oracle's full state through the call
     # boundary) is a standing column: a family where it fails the gate has a boundary
     # problem, not a training problem.
-    if "ceiling_full" not in cands:
+    if "ceiling_full" not in cands and not a.no_reference:
         cands = ["ceiling_full"] + cands
     if "model" in cands and not a.checkpoint:
         raise SystemExit("--candidates model needs --checkpoint")
