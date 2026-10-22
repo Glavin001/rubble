@@ -832,6 +832,7 @@ impl GpuWorld {
             if frame_mode {
                 if let Some(l) = self.learned.as_mut().filter(|_| self.tiered) {
                     l.follow(&read[learned_part..learned_part + learned_parts], self.frame as u64, learned_apply, learned_batch)?;
+                    l.collect_timing(gpu);
                 }
             }
             if frame_mode {

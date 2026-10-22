@@ -8,6 +8,7 @@
 //! (a column added, moved or removed) moves them without touching the kernels; a column the
 //! kernels do not compute is an error, never a silent zero.
 
+use crate::learned_timing::StageTimer;
 use std::collections::BTreeMap;
 
 use stress_ref::world::World;
@@ -485,12 +486,12 @@ impl Features {
     /// call bonds' rows and the predicted contacts. `calls_args` / `nodes`: indirect
     /// arguments over the calls (one group each) and the batch's capacities for the
     /// thread-per-item kernels (which exit past the batch's counts).
-    pub fn encode_pre(&self, gpu: &Gpu, enc: &mut wgpu::CommandEncoder, b: &BatchBuffers, calls_args: (&wgpu::Buffer, u64), max_bonds: u32) {
+    pub fn encode_pre(&self, gpu: &Gpu, enc: &mut wgpu::CommandEncoder, b: &BatchBuffers, calls_args: (&wgpu::Buffer, u64), max_bonds: u32, timer: Option<&StageTimer>) {
         let params = self.params(gpu, b, false);
         let bufs = self.bufs(&params, b);
         let run = |enc: &mut wgpu::CommandEncoder, k: &Kernel, groups: Option<u32>| {
             let group = gpu.bind(&k.group, &bufs);
-            let mut pass = enc.begin_compute_pass(&Default::default());
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: timer.and_then(|t| t.writes("features")) });
             pass.set_pipeline(&k.pipeline);
             pass.set_bind_group(0, &group, &[]);
             match groups {
@@ -506,14 +507,14 @@ impl Features {
 
     /// After `learned_finish`: scales, summaries, graph distances, the edge sets (counted,
     /// placed, written), node and bond features.
-    pub fn encode_post(&self, gpu: &Gpu, enc: &mut wgpu::CommandEncoder, b: &BatchBuffers, calls_args: (&wgpu::Buffer, u64), max_bonds: u32) {
+    pub fn encode_post(&self, gpu: &Gpu, enc: &mut wgpu::CommandEncoder, b: &BatchBuffers, calls_args: (&wgpu::Buffer, u64), max_bonds: u32, timer: Option<&StageTimer>) {
         let params = self.params(gpu, b, false);
         let count = self.params(gpu, b, true);
         let bufs = self.bufs(&params, b);
         let bufs_count = self.bufs(&count, b);
         let run = |enc: &mut wgpu::CommandEncoder, k: &Kernel, groups: Option<u32>, counting: bool| {
             let group = gpu.bind(&k.group, if counting { &bufs_count } else { &bufs });
-            let mut pass = enc.begin_compute_pass(&Default::default());
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: timer.and_then(|t| t.writes("features")) });
             pass.set_pipeline(&k.pipeline);
             pass.set_bind_group(0, &group, &[]);
             match groups {
@@ -539,11 +540,11 @@ impl Features {
     /// After the split pass of a frame whose batch was applied: each chunk of a call that
     /// stood keeps its decoded departure from its body's fit as its hidden state
     /// (`STRESS_DECODED_DEFORMATION=1`, P0's kept-deformation boundary).
-    pub fn encode_deform(&self, gpu: &Gpu, enc: &mut wgpu::CommandEncoder, b: &BatchBuffers) {
+    pub fn encode_deform(&self, gpu: &Gpu, enc: &mut wgpu::CommandEncoder, b: &BatchBuffers, timer: Option<&StageTimer>) {
         let params = self.params(gpu, b, false);
         let bufs = self.bufs(&params, b);
         let group = gpu.bind(&self.k.deform.group, &bufs);
-        let mut pass = enc.begin_compute_pass(&Default::default());
+        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: timer.and_then(|t| t.writes("deform")) });
         pass.set_pipeline(&self.k.deform.pipeline);
         pass.set_bind_group(0, &group, &[]);
         pass.dispatch_workgroups(b.chunk_count.div_ceil(64).max(1), 1, 1);

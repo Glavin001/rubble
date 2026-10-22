@@ -319,6 +319,8 @@ pub struct Learned {
     /// A batch stood at the last read: its window end is due this frame.
     pub pending: bool,
     pub totals: Totals,
+    /// `STRESS_LEARNED_TIMING=1`: GPU time per stage (`learned_timing.rs`).
+    pub timer: Option<std::rc::Rc<crate::learned_timing::StageTimer>>,
 }
 
 fn rw(gpu: &Gpu, label: &str, bytes: u64, indirect: bool) -> wgpu::Buffer {
@@ -395,6 +397,7 @@ impl Learned {
             keep_deformation: std::env::var("STRESS_DECODED_DEFORMATION").is_ok_and(|v| v == "1"),
             pending: false,
             totals: Totals::default(),
+            timer: crate::learned_timing::StageTimer::new(gpu).map(std::rc::Rc::new),
         }
     }
 
@@ -493,7 +496,7 @@ impl Learned {
         }
         let params = self.params(gpu, &t.s);
         let bufs = self.buffers(&params, t, self.no_split());
-        let mut pass = enc.begin_compute_pass(&Default::default());
+        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: self.timer.as_ref().and_then(|t| t.writes("apply")) });
         for (k, indirect) in [(&self.k.check, Some(0u64)), (&self.k.apply_bonds, Some(0)), (&self.k.apply_bodies, Some(32)), (&self.k.apply_impactors, Some(0)), (&self.k.tally_apply, None)] {
             let group = gpu.bind(&k.group, &bufs);
             pass.set_pipeline(&k.pipeline);
@@ -516,6 +519,29 @@ impl Learned {
         let t = Tables { islands: d, chunks: d, state: d, ctab: d, bodies, bond_static: d, bond_dyn: &self.dummy_rw[0], status: &self.dummy_rw[1], counters: &pass.counters, route: d, island_args: None, s: *sc };
         let bufs = self.buffers(&params, &t, [&pass.parents, &pass.work, &pass.slots, &pass.control, &pass.firsts, &pass.out]);
         gpu.bind(&self.k.place.group, &bufs)
+    }
+
+    /// The stage a batch kernel's time is booked to.
+    fn stage_of(&self, k: &Kernel) -> &'static str {
+        let k = &k.pipeline;
+        if [&self.k.select, &self.k.debris, &self.k.count_bonds, &self.k.compact, &self.k.clear].iter().any(|x| &x.pipeline == k) {
+            "select"
+        } else if [&self.k.gather_chunks, &self.k.gather_bonds, &self.k.gather_impactors].iter().any(|x| &x.pipeline == k) {
+            "gather"
+        } else if &self.k.finish.pipeline == k {
+            "features"
+        } else if [&self.k.stub, &self.k.adopt].iter().any(|x| &x.pipeline == k) {
+            "network"
+        } else {
+            "decode"
+        }
+    }
+
+    /// After the frame's read: the frame's stage times collected (`STRESS_LEARNED_TIMING=1`).
+    pub fn collect_timing(&self, gpu: &Gpu) {
+        if let Some(t) = &self.timer {
+            t.collect(gpu);
+        }
     }
 
     fn batch_buffers<'a>(&'a self, t: &'a Tables) -> crate::learned_feat::BatchBuffers<'a> {
@@ -561,7 +587,8 @@ impl Learned {
         }
         let run = |enc: &mut wgpu::CommandEncoder, k: &Kernel, d: D| {
             let group = gpu.bind(&k.group, if std::ptr::eq(k, &self.k.compact) { &bufs_compact } else { &bufs });
-            let mut pass = enc.begin_compute_pass(&Default::default());
+            let stage = self.stage_of(k);
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: self.timer.as_ref().and_then(|t| t.writes(stage)) });
             pass.set_pipeline(&k.pipeline);
             pass.set_bind_group(0, &group, &[]);
             match d {
@@ -577,7 +604,7 @@ impl Learned {
         if self.pending {
             if self.keep_deformation {
                 if let Some(f) = &self.feat {
-                    f.encode_deform(gpu, enc, &self.batch_buffers(t));
+                    f.encode_deform(gpu, enc, &self.batch_buffers(t), self.timer.as_deref());
                 }
             }
             run(enc, &self.k.clear, D::One);
@@ -595,11 +622,11 @@ impl Learned {
         run(enc, &self.k.gather_impactors, D::Indirect(0));
         let fb = self.batch_buffers(t);
         if let Some(f) = &self.feat {
-            f.encode_pre(gpu, enc, &fb, (&self.largs, 0), self.max_bonds);
+            f.encode_pre(gpu, enc, &fb, (&self.largs, 0), self.max_bonds, self.timer.as_deref());
         }
         run(enc, &self.k.finish, D::Indirect(0));
         if let Some(f) = &self.feat {
-            f.encode_post(gpu, enc, &fb, (&self.largs, 0), self.max_bonds);
+            f.encode_post(gpu, enc, &fb, (&self.largs, 0), self.max_bonds, self.timer.as_deref());
         }
         match network {
             Some(net) => {
@@ -995,5 +1022,13 @@ impl Learned {
             out.push(e);
         }
         out
+    }
+}
+
+impl Drop for Learned {
+    fn drop(&mut self) {
+        if let Some(t) = &self.timer {
+            eprintln!("{}", t.report());
+        }
     }
 }

@@ -54,6 +54,7 @@ pub mod micro;
 pub mod gnn_probe;
 pub mod learned;
 pub mod learned_feat;
+pub mod learned_timing;
 
 /// What `build.rs` reflects from the generated WGSL: how many storage buffers each module's
 /// group 0 declares, and which group-0 bindings each entry point uses.
