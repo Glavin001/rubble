@@ -324,3 +324,40 @@ fn a_live_full_state_call_equals_the_recorded_one() {
         }
     }
 }
+
+/// Written calls store identical arrays once (shared offsets) and read back bit for bit.
+#[test]
+fn written_calls_share_identical_arrays_and_read_back_exactly() {
+    let (ev, _) = record("dedup");
+    let e = build_event(&ev).unwrap();
+    let out = tmp("dedup-out");
+    write_event(&out, &e, true).unwrap();
+    let blob = zstd::decode_all(std::fs::File::open(out.join("arrays.bin.zst")).unwrap()).unwrap();
+    let entries: Vec<serde_json::Value> = serde_json::from_slice(&std::fs::read(out.join("calls.json")).unwrap()).unwrap();
+    let bytes_of = |a: &Arr| -> Vec<u8> {
+        match a {
+            Arr::F32(_, d) => d.iter().flat_map(|x| x.to_le_bytes()).collect(),
+            Arr::I32(_, d) => d.iter().flat_map(|x| x.to_le_bytes()).collect(),
+            Arr::I64(_, d) => d.iter().flat_map(|x| x.to_le_bytes()).collect(),
+            Arr::F64(_, d) => d.iter().flat_map(|x| x.to_le_bytes()).collect(),
+        }
+    };
+    let (mut offsets, mut total) = (std::collections::HashSet::new(), 0usize);
+    for (c, en) in e.calls.iter().zip(&entries) {
+        for (k, a) in &c.arrays {
+            let m = &en["arrays"][k];
+            let off = m["offset"].as_u64().unwrap() as usize;
+            let b = bytes_of(a);
+            assert_eq!(&blob[off..off + b.len()], &b[..], "frame {}: {k}", c.frame);
+            offsets.insert(off);
+            total += 1;
+        }
+    }
+    let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(out.join("manifest.json")).unwrap()).unwrap();
+    for (k, a) in &e.event_arrays {
+        let off = manifest["event_arrays"][k]["offset"].as_u64().unwrap() as usize;
+        let b = bytes_of(a);
+        assert_eq!(&blob[off..off + b.len()], &b[..], "event array {k}");
+    }
+    assert!(offsets.len() < total, "some arrays share their bytes");
+}
