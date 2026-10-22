@@ -128,8 +128,19 @@ def _full_state_out(c: S.Call, out: dict, broke, damage, b_rows, c_rows) -> dict
     for i, (f, how, _) in enumerate(FS.BOND_FIELDS):
         cols.append(f)
         vals.append(FS.decode_raw(enc[:, i], how, sc, dt))
+    # The oracle's margin rule: a bond is disconnected exactly when its failure margin is ≥ 1.
+    # So a broken bond's running margins carry the break (max(fail_ts, fail_c) ≥ 1) and a
+    # survivor's stay below 1; and like the oracle's break_bonds, a broken bond stays
+    # alive = true at damage 1 (connectivity is the damage, not the flag).
+    i_ts, i_c = cols.index("fail_ts"), cols.index("fail_c")
+    fts, fc = vals[i_ts], vals[i_c]
+    below = np.nextafter(1.0, 0.0)
+    fts_b = np.where(fts >= fc, np.maximum(fts, 1.0), fts)
+    fc_b = np.where(fc > fts, np.maximum(fc, 1.0), fc)
+    vals[i_ts] = np.where(broke, fts_b, np.minimum(fts, below))
+    vals[i_c] = np.where(broke, fc_b, np.minimum(fc, below))
     cols += list(FS.BOND_MODE) + ["alive", "joint.damage"]
-    vals += [(mode == 1).astype(float), (mode == 2).astype(float), (~broke).astype(float),
+    vals += [(mode == 1).astype(float), (mode == 2).astype(float), np.ones(len(broke)),
              np.where(broke, 1.0, damage)]
     table = np.stack(vals, 1) if len(keys) else np.zeros((0, len(cols)))
     m = a["chunk_mass"].astype(np.float64)
