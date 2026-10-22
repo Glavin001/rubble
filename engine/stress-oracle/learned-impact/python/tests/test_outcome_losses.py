@@ -57,7 +57,7 @@ def test_normalised_terms_start_near_one():
     for k, v in normed.items():
         assert 0.5 < float(v) < 2.0, (k, float(v))
     # the full-state terms (fs_*) exist only with /5 calls
-    assert set(normed) == {k for k in Lo.TERMS if not k.startswith("fs_")}
+    assert set(normed) == {k for k in Lo.TERMS if not (k.startswith("fs_") or k.startswith("hid_") or k == "break_t")}
 
 
 def test_energy_loss_ignores_booked_contact_dissipation():
