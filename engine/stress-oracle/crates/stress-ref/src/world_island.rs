@@ -376,3 +376,41 @@ impl IslandState {
         }
     }
 }
+
+impl IslandState {
+    /// Scale the island's motion relative to the centre-of-mass velocity of its moving bodies
+    /// and impactors by `alpha` (linear momentum kept; anchored bodies untouched): body
+    /// velocity v -> v_com + alpha (v - v_com), angular velocity and the chunks' hidden
+    /// velocities by alpha, impactors likewise.
+    pub fn scale_relative_motion(&mut self, alpha: f64) {
+        let (mut m, mut p) = (0.0, Vec3::ZERO);
+        for (_, cl) in &self.solver.clusters {
+            if !cl.anchored {
+                m += cl.mass;
+                p += cl.velocity * cl.mass;
+            }
+        }
+        for (_, imp) in &self.impactors {
+            m += imp.mass;
+            p += imp.velocity * imp.mass;
+        }
+        if m <= 0.0 {
+            return;
+        }
+        let vc = p * (1.0 / m);
+        for (_, cl) in &mut self.solver.clusters {
+            if !cl.anchored {
+                cl.velocity = vc + (cl.velocity - vc) * alpha;
+                cl.angular_velocity = cl.angular_velocity * alpha;
+            }
+        }
+        for (_, ch) in &mut self.solver.chunks {
+            ch.v = ch.v * alpha;
+            ch.w = ch.w * alpha;
+        }
+        for (_, imp) in &mut self.impactors {
+            imp.velocity = vc + (imp.velocity - vc) * alpha;
+            imp.angular_velocity = imp.angular_velocity * alpha;
+        }
+    }
+}

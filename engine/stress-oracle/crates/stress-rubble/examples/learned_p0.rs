@@ -461,6 +461,22 @@ struct ProviderOpts {
     qs: Option<bool>,
 }
 
+/// Per run (harness A, decoded state /2): decoded impactors and chunks whose displacement is
+/// outside the kinematically admissible range |dx - dt (v0 + v1) / 2| <= dt |v1 - v0| / 2
+/// (per axis), and frames where the host's energy bound acted.
+static ADMISSIBILITY_IMPACTORS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static ADMISSIBILITY_CHUNKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static HOST_BOUND_FRAMES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// The energy envelope: a body of mass m cannot move further in a frame than dt (sqrt(2 E / m)
+/// + |g| dt), E the island's mechanical energy at the frame's start (KE + stored) plus 5%.
+static ENERGY_ENVELOPE_IMPACTORS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static ENERGY_ENVELOPE_CHUNKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn inadmissible(dx: [f64; 3], v0: stress_ref::math::Vec3, v1: [f64; 3], dt: f64) -> bool {
+    let v0 = v0.to_array();
+    (0..3).any(|i| (dx[i] - dt * (v0[i] + v1[i]) / 2.0).abs() > dt * (v1[i] - v0[i]).abs() / 2.0 + 1e-9)
+}
+
 fn oracle_outcome(view: &World, keys: &stress_ref::world::IslandKeys, frame: i64) -> stress_ref::world::DecodedState {
     let mut model = view.standalone_copy();
     model.step_frame();
@@ -670,9 +686,40 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
                     // `STRESS_FULL_ENERGY_BOUND=tol`: the island's mechanical energy (KE, the joint
                     // law's stored energy, gravity's potential) at most its start's plus tol of it.
                     let bound = std::env::var("STRESS_FULL_ENERGY_BOUND").ok().map(|v| v.parse::<f64>().map_err(|e| format!("STRESS_FULL_ENERGY_BOUND={v}: {e}"))).transpose()?;
+                    {
+                        use std::sync::atomic::Ordering::Relaxed;
+                        let dt = start.scene.sim.frame_dt;
+                        let (k0, e0, _) = start.island_energy(m);
+                        let energy = (k0 + e0) * 1.05;
+                        let g = start.solver.config.gravity.norm();
+                        let reach = |mass: f64| dt * ((2.0 * energy / mass).sqrt() + g * dt);
+                        let norm = |x: [f64; 3]| (x[0] * x[0] + x[1] * x[1] + x[2] * x[2]).sqrt();
+                        for b in &d.impactors {
+                            if let Some(imp) = start.impactors.get(b.key as usize) {
+                                if inadmissible(b.dx, imp.velocity, b.v, dt) {
+                                    ADMISSIBILITY_IMPACTORS.fetch_add(1, Relaxed);
+                                }
+                                if norm(b.dx) > reach(imp.mass) {
+                                    ENERGY_ENVELOPE_IMPACTORS.fetch_add(1, Relaxed);
+                                }
+                            }
+                        }
+                        for b in &d.chunks {
+                            let (s, c) = ((b.key >> 32) as usize, (b.key & 0xffff_ffff) as usize);
+                            if s < start.solver.chunks.len() && c < start.solver.chunks[s].len() {
+                                if inadmissible(b.dx, start.solver.chunk_velocity(s, c).0, b.v, dt) {
+                                    ADMISSIBILITY_CHUNKS.fetch_add(1, Relaxed);
+                                }
+                                if norm(b.dx) > reach(start.solver.structures[s].chunks[c].mass) {
+                                    ENERGY_ENVELOPE_CHUNKS.fetch_add(1, Relaxed);
+                                }
+                            }
+                        }
+                    }
                     let (mut out, alpha) = stress_learned::decoded_full::island_frame_bounded(start, m, &d, &full, stress_learned::decoded_full::Base::from_env()?, stress_learned::decoded_full::ids_from_base(), bound)?;
                     if alpha < 1.0 {
-                        eprintln!("[energy bound] frame {frame}: hidden displacement scaled by {alpha:.4}");
+                        HOST_BOUND_FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        eprintln!("[energy bound] frame {frame}: scaled by {alpha:.4}");
                     }
                     // Diagnostic (`STRESS_FULL2_DIFF=1`): the composed island's fields that differ
                     // from the oracle's own step (stderr, per kind: column and the largest
@@ -1082,7 +1129,12 @@ fn run_event(dir: &std::path::Path, variant: &str, o: &ProviderOpts, samples: Ve
             let flags: Vec<&Value> = out["call_log"].as_array().map(|l| l.iter().filter_map(|x| x.get("flags")).collect()).unwrap_or_default();
             let count = |k: &str| flags.iter().filter(|f| f.get(k).and_then(|v| v.as_bool()).unwrap_or(false)).count();
             let call_ms: Vec<f64> = out["call_log"].as_array().map(|l| l.iter().filter_map(|x| x["call_ms"].as_f64()).collect()).unwrap_or_default();
-            (end, json!({"calls": out["calls"], "fallbacks": count("fallback"), "energy_bound_active": count("energy_bound_active"), "energy_bound_infeasible": count("energy_bound_infeasible"), "call_ms": call_ms}))
+            (end, json!({"calls": out["calls"], "fallbacks": count("fallback"), "energy_bound_active": count("energy_bound_active"), "energy_bound_infeasible": count("energy_bound_infeasible"), "call_ms": call_ms,
+                "admissibility_violations_impactors": ADMISSIBILITY_IMPACTORS.load(std::sync::atomic::Ordering::Relaxed),
+                "admissibility_violations_chunks": ADMISSIBILITY_CHUNKS.load(std::sync::atomic::Ordering::Relaxed),
+                "host_energy_bound_frames": HOST_BOUND_FRAMES.load(std::sync::atomic::Ordering::Relaxed),
+                "energy_envelope_violations_impactors": ENERGY_ENVELOPE_IMPACTORS.load(std::sync::atomic::Ordering::Relaxed),
+                "energy_envelope_violations_chunks": ENERGY_ENVELOPE_CHUNKS.load(std::sync::atomic::Ordering::Relaxed)}))
         }
         other => panic!("event: unknown --variant {other}"),
     };
