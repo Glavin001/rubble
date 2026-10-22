@@ -484,8 +484,12 @@ fn file_outcome(o: &ProviderOpts, view: &World, keys: &stress_ref::world::Island
 /// The closed loop: every routed frame's island outcome from the provider, applied at window
 /// end (reduced state, the island's contacts filtered), to the end of the run.
 fn run_provider(s: &Scene, o: &ProviderOpts, tag: &str) -> Value {
-    let mut w = World::with_engine(s, engine(s));
-    let n = frames(s);
+    run_provider_world(World::with_engine(s, engine(s)), s, frames(s), o, tag, &mut |_, _| {})
+}
+
+/// `run_provider` on a given coupled world for `n` frames, `hook(world, frame)` after each
+/// frame boundary (frame 0: the start).
+fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: &str, hook: &mut dyn FnMut(&World, usize)) -> Value {
     let fdt = s.sim.frame_dt;
     let e0 = w.mechanical_energy();
     let mut series = Vec::with_capacity(n);
@@ -506,6 +510,7 @@ fn run_provider(s: &Scene, o: &ProviderOpts, tag: &str) -> Value {
         std::fs::create_dir_all(o.dir.join("resp")).expect("provider resp dir");
     }
     poses_frame(0, &w.solver, &w.impactors, &[]);
+    hook(&w, 0);
     for f in 0..n {
         let t = Instant::now();
         // (`step_frame_with_provider` resets each frame's peak utilisation after the
@@ -515,7 +520,17 @@ fn run_provider(s: &Scene, o: &ProviderOpts, tag: &str) -> Value {
         }
         let mut islands = 0;
         let mut routed: Vec<i64> = Vec::new();
-        if o.kind == "punch" {
+        if o.kind == "oracle_full" {
+            // Diagnostic: the oracle's frame with its full state carried (hidden deformation
+            // kept between calls, `window_full`), to separate the reduced state's effect.
+            islands = w.predict_islands(fdt, &HashSet::new());
+            if islands > 0 {
+                model_frame(&mut w, "window_full", fdt);
+                log.push(json!({"frame": f, "chunks": islands, "full_state": true}));
+            } else {
+                w.step_frame();
+            }
+        } else if o.kind == "punch" {
             islands = w.predict_islands(fdt, &HashSet::new());
             let bonds = if islands > 0 { w.predict_punch(fdt) } else { Vec::new() };
             if !bonds.is_empty() {
@@ -553,6 +568,7 @@ fn run_provider(s: &Scene, o: &ProviderOpts, tag: &str) -> Value {
         }
         let ms = t.elapsed().as_secs_f64() * 1e3;
         poses_frame(f + 1, &w.solver, &w.impactors, &routed);
+        hook(&w, f + 1);
         series.push(frame_line(&w, ms, islands));
         eprintln!("[provider {tag}] frame {}/{n} islands {islands} ram vy {:.3} fragments {} broken {} ({ms:.0} ms)", f + 1, w.impactors[0].velocity.y, w.solver.clusters.len(), w.solver.broken_bond_count());
     }
@@ -636,9 +652,199 @@ fn run_gpu(s: &Scene, profile: &str, tag: &str) -> Value {
         "profile": profile, "punch": std::env::var("STRESS_IMPACT_PUNCH").ok(), "window": std::env::var("STRESS_IMPACT_WINDOW").ok(), "coupled_frames": w.coupled_frames})
 }
 
+/// What the closed-loop evaluation needs of one run of a recorded event
+/// (`learned_impact.closed_loop_eval`): the physics checks every frame, chunk states at
+/// the sample frames, and the end state by stable key.
+struct EventTrack {
+    e0: f64,
+    pe0: f64,
+    p0: Vec3,
+    free: bool,
+    samples: Vec<usize>,
+    sampled: Vec<Value>,
+    /// Largest (KE + PE - PE0 - E0) / E0 over the run, and its frame.
+    ke_excess: (f64, usize),
+    /// Largest decrease of any bond's damage between frames, and non-finite frames.
+    damage_drop: f64,
+    nonfinite: usize,
+    damage: Vec<Vec<f64>>,
+}
+
+fn total_ke_pe(w: &World) -> (f64, f64, Vec3) {
+    let g = w.solver.config.gravity;
+    let sv = &w.solver;
+    let (mut ke, mut pe, mut p) = (sv.kinetic_energy(), 0.0, Vec3::ZERO);
+    for (si, st) in sv.structures.iter().enumerate() {
+        for (c, ch) in st.chunks.iter().enumerate() {
+            if sv.chunks[si][c].active {
+                pe -= ch.mass * g.dot(sv.chunk_position(si, c));
+                p += sv.chunk_velocity(si, c).0 * ch.mass;
+            }
+        }
+    }
+    for i in &w.impactors {
+        ke += i.kinetic_energy();
+        pe -= i.mass * g.dot(i.pose.position);
+        p += i.velocity * i.mass;
+    }
+    (ke, pe, p)
+}
+
+fn chunk_rows(w: &World) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
+    let sv = &w.solver;
+    let (mut x, mut v) = (Vec::new(), Vec::new());
+    for (si, st) in sv.chunks.iter().enumerate() {
+        for c in 0..st.len() {
+            let (p, vel) = if st[c].active { (sv.chunk_position(si, c), sv.chunk_velocity(si, c).0) } else { (Vec3::splat(f64::NAN), Vec3::splat(f64::NAN)) };
+            x.push([p.x as f32, p.y as f32, p.z as f32]);
+            v.push([vel.x as f32, vel.y as f32, vel.z as f32]);
+        }
+    }
+    (x, v)
+}
+
+impl EventTrack {
+    fn new(w: &World, e0: f64, samples: Vec<usize>) -> EventTrack {
+        let (_, pe0, p0) = total_ke_pe(w);
+        let anchored = w.solver.clusters.iter().any(|c| c.anchored);
+        let free = !anchored && w.solver.config.gravity.norm() == 0.0;
+        let damage = w.solver.bonds.iter().map(|b| b.iter().map(|x| x.joint.damage).collect()).collect();
+        EventTrack { e0, pe0, p0, free, samples, sampled: Vec::new(), ke_excess: (f64::NEG_INFINITY, 0), damage_drop: 0.0, nonfinite: 0, damage }
+    }
+
+    fn frame(&mut self, w: &World, f: usize) {
+        let (ke, pe, _) = total_ke_pe(w);
+        let excess = (ke + pe - self.pe0 - self.e0) / self.e0;
+        if !(excess.is_finite()) {
+            self.nonfinite += 1;
+        } else if excess > self.ke_excess.0 {
+            self.ke_excess = (excess, f);
+        }
+        for (s, bonds) in w.solver.bonds.iter().enumerate() {
+            for (b, x) in bonds.iter().enumerate() {
+                self.damage_drop = self.damage_drop.max(self.damage[s][b] - x.joint.damage);
+                self.damage[s][b] = x.joint.damage;
+            }
+        }
+        if self.samples.contains(&f) {
+            let (x, v) = chunk_rows(w);
+            if x.iter().chain(&v).flatten().any(|z| z.is_infinite()) {
+                self.nonfinite += 1;
+            }
+            self.sampled.push(json!({"frame": f, "t": w.solver.time, "chunk_pos": x, "chunk_vel": v}));
+        }
+    }
+
+    fn finish(self, w: &World, stop_speed: f64) -> Value {
+        let sv = &w.solver;
+        let (_, _, p1) = total_ke_pe(w);
+        let mut cluster = Vec::new();
+        let mut anchored = Vec::new();
+        for st in &sv.chunks {
+            for cs in st {
+                cluster.push(if cs.active { sv.clusters[cs.cluster].id as i64 } else { -1 });
+                anchored.push(cs.active && sv.clusters[cs.cluster].anchored);
+            }
+        }
+        // Regimes as P1's recorder labels them (`outcome.rs`, relative to the remnant).
+        let remnant = sv.clusters.iter().max_by(|a, b| a.mass.total_cmp(&b.mass)).expect("a cluster");
+        let impactors: Vec<Value> = w
+            .impactors
+            .iter()
+            .enumerate()
+            .map(|(i, imp)| {
+                let v0 = Vec3::from_array(w.scene.impactors[i].velocity);
+                let d = v0.normalized();
+                let c = remnant.com_world();
+                let s = remnant.structure;
+                let far = remnant.chunks.iter().map(|&k| (sv.chunk_position(s, k) - c).dot(d) + sv.structures[s].chunks[k].half_extents.norm()).fold(f64::NEG_INFINITY, f64::max);
+                let behind = (imp.pose.position - c).dot(d);
+                let rel = (imp.velocity - remnant.velocity).dot(d);
+                let along = imp.velocity.dot(d);
+                let regime = if behind > far && rel > -stop_speed && along > stop_speed {
+                    "perforate"
+                } else if rel < -stop_speed {
+                    "rebound"
+                } else if rel.abs() <= stop_speed.max(0.05 * v0.norm()) {
+                    "arrest"
+                } else {
+                    "deflect"
+                };
+                json!({"key": stress_ref::keys::impactor_key(i), "v_end": imp.velocity.to_array(), "position_end": imp.pose.position.to_array(), "speed_along_v0": along, "regime": regime,
+                    "finite": imp.velocity.to_array().iter().chain(imp.pose.position.to_array().iter()).all(|z| z.is_finite())})
+            })
+            .collect();
+        let momentum = if self.free { Some((p1 - self.p0).norm() / self.p0.norm().max(1e-12)) } else { None };
+        json!({"t_end": sv.time, "chunk_cluster": cluster, "chunk_anchored": anchored, "impactors": impactors, "fragments": sv.clusters.len(), "broken_bonds": sv.broken_bond_count(),
+            "checks": {"ke_excess_over_e0": self.ke_excess.0, "ke_excess_frame": self.ke_excess.1, "momentum_rel": momentum, "damage_drop": self.damage_drop, "nonfinite": self.nonfinite},
+            "samples": self.sampled})
+    }
+}
+
+/// `learned_p0 event --event-dir D`: one recorded P1 event (its `scene.json`, the member as
+/// recorded) replayed for the oracle's recorded frames under a candidate: `--variant oracle`
+/// (the standalone oracle, which reproduces the record), `--variant qs` (CPU
+/// `blast_parity`, P1's QS baseline), or `--variant provider --provider ...` (the closed
+/// loop). Samples chunk states at the frames `--samples f,f,...`.
+fn run_event(dir: &std::path::Path, variant: &str, o: &ProviderOpts, samples: Vec<usize>) -> Value {
+    let read = |name: &str| -> Value { serde_json::from_str(&std::fs::read_to_string(dir.join(name)).unwrap_or_else(|e| panic!("{}/{name}: {e}", dir.display()))).expect("json") };
+    let mut scene: Scene = serde_json::from_value(read("scene.json")).expect("scene.json");
+    let outcome = read("outcome.json");
+    let context = read("context.json");
+    let n = outcome["frames"].as_u64().expect("outcome frames") as usize;
+    let e0 = outcome["input_energy"].as_f64().expect("input energy");
+    let stop_speed = context["stop_rule"]["stop_speed"].as_f64().unwrap_or(0.05);
+    scene.sim.duration = n as f64 * scene.sim.frame_dt;
+    let tag = scene.name.clone();
+    let t_all = Instant::now();
+    let (track, extra) = match variant {
+        "oracle" | "qs" => {
+            if variant == "qs" {
+                stress_ref::capability::Profile::BlastParity.apply_scene(&mut scene);
+            }
+            let mut w = World::new(&scene);
+            if variant == "qs" {
+                stress_ref::capability::Profile::BlastParity.apply_config(&mut w.solver.config);
+            }
+            let mut track = EventTrack::new(&w, e0, samples);
+            track.frame(&w, 0);
+            for f in 0..n {
+                w.step_frame();
+                track.frame(&w, f + 1);
+                if (f + 1) % 30 == 0 {
+                    eprintln!("[event {tag} {variant}] frame {}/{n}", f + 1);
+                }
+            }
+            let fp = stress_learned::outcome::fingerprint(&w);
+            (track.finish(&w, stop_speed), json!({"fingerprint": fp, "recorded_fingerprint": outcome["fingerprint"]}))
+        }
+        "provider" => {
+            let w = World::with_engine(&scene, engine(&scene));
+            let mut track = Some(EventTrack::new(&w, e0, samples));
+            let mut last: Option<World> = None;
+            let out = run_provider_world(w, &scene, n, o, &tag, &mut |w, f| {
+                track.as_mut().unwrap().frame(w, f);
+                if f == n {
+                    last = Some(w.clone());
+                }
+            });
+            let end = track.take().unwrap().finish(last.as_ref().expect("last frame"), stop_speed);
+            let flags: Vec<&Value> = out["call_log"].as_array().map(|l| l.iter().filter_map(|x| x.get("flags")).collect()).unwrap_or_default();
+            let count = |k: &str| flags.iter().filter(|f| f.get(k).and_then(|v| v.as_bool()).unwrap_or(false)).count();
+            let call_ms: Vec<f64> = out["call_log"].as_array().map(|l| l.iter().filter_map(|x| x["call_ms"].as_f64()).collect()).unwrap_or_default();
+            (end, json!({"calls": out["calls"], "fallbacks": count("fallback"), "energy_bound_active": count("energy_bound_active"), "energy_bound_infeasible": count("energy_bound_infeasible"), "call_ms": call_ms}))
+        }
+        other => panic!("event: unknown --variant {other}"),
+    };
+    json!({"cmd": "event", "event_id": outcome["event_id"], "family": outcome["family"], "variant": if variant == "provider" { format!("provider_{}", o.kind) } else { variant.to_string() },
+        "frames": n, "e0": e0, "run": track, "extra": extra, "total_s": t_all.elapsed().as_secs_f64()})
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
-    let cmd = args.next().expect("oracle|ceiling|hash");
+    let cmd = args.next().expect("oracle|ceiling|gpu|event|hash");
+    let mut event_dir: Option<String> = None;
+    let mut samples: Vec<usize> = Vec::new();
     let (mut name, mut member, mut mode, mut seconds, mut fdt, mut variant) = (String::from("free_wall"), None::<u64>, String::from("kin"), SECONDS, None::<f64>, String::from("coupled"));
     let mut poses: Option<String> = None;
     let mut provider = ProviderOpts { kind: "oracle".into(), dir: "provider".into(), timeout: 60.0, echo_oracle: false, qs: None, checkpoint: None, device: "cpu".into(), python_dir: None };
@@ -660,8 +866,15 @@ fn main() {
             "--device" => provider.device = args.next().expect("--device cpu|mps"),
             "--python-dir" => provider.python_dir = Some(args.next().expect("--python-dir DIR").into()),
             "--poses" => poses = Some(args.next().expect("--poses FILE")),
+            "--event-dir" => event_dir = Some(args.next().expect("--event-dir DIR")),
+            "--samples" => samples = args.next().expect("--samples f,f").split(',').filter(|x| !x.is_empty()).map(|x| x.parse().expect("frame")).collect(),
             other => panic!("unknown argument {other}"),
         }
+    }
+    if cmd == "event" {
+        let dir = std::path::PathBuf::from(event_dir.expect("event needs --event-dir"));
+        println!("{}", serde_json::to_string(&run_event(&dir, &variant, &provider, samples)).unwrap());
+        return;
     }
     if cmd == "bonds" {
         // Each scene's bond and chunk geometry (body frame = world at rest) and its ram, for
