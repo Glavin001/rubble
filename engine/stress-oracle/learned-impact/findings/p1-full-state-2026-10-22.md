@@ -358,3 +358,48 @@ throughput check (0.13 GB) was removed.
 runs finish. Then P2 switches to building them once per run from the cache and drops its
 clone; P1 deletes the training single-run calls (2.25 GB) and records the training
 ballistic ensembles in that space.
+
+## Reclaiming the superseded bulk-v1 recordings (user decision, 2026-10-22)
+
+**Why.** The bulk-v1 recordings are revision 7: no full state, the pre-contract recorder.
+The user approved reclaiming them for full-state training events. The evaluation sets
+(evalplus, sealed, bl-bracket) are kept whole, as references.
+
+**Step (a), done.** `learned_impact.outcome_reclaim --splits train --apply` removed the
+frames of every bulk-v1 training event:
+- events: 1,987 (`p1-bulk-v1-free-t1` 1,371, `anchored-t1` 404, `free-t2` 212), thinned
+  single runs and training ensemble members alike;
+- removed per event: `arrays/`, `catalog.json` and the duplicate copies of the scene
+  (`scene.json`, `replay.json`);
+- kept per event: `context.json`, `outcome.json`, `frames.json` and the job summaries; each
+  job's `recipes.json` is now `recipes.json.zst`, compressed losslessly and verified;
+- freed: **4.34 GB**; the tree went from 26.99 to 22.66 GB.
+
+Each reclaimed event has a `reclaimed.json` with what went and its regenerate command.
+Regeneration uses the current recorder, so it comes back with full state:
+
+    zstd -dc p1-bulk-v1-X/recipes.json.zst > /tmp/r.json
+    learned_impact_outcome_record --recipes /tmp/r.json --event EVENT_ID --out DIR
+
+Nobody read these frames:
+- P0's harness A reads only val and test ensembles;
+- P2's trainer reads viability only, and its /4 overfit events are copied into its own runs.
+
+**Step (b), pending.** The bulk-v1 val and test ensembles: 2,344 members, about 4.5 GB.
+P0 extracted compact references for harness A (its worktree,
+`runs/refs/p1-bulk-v1-*`, 869 MB, commit aac22d01) and verified them: identical reports,
+and the recorded fingerprints re-simulate. The frames go once P2 confirms its n10 DAgger
+jobs point at those references.
+
+**The guard counts the whole footprint.** `viability-v1f.sh` reads its guard from
+`runs/viability-guard.gb`: 29 GB less the learned-impact data outside this tree.
+- Now 24.1 GB: 29 less P0's references (0.87 GB) less P2's call cache cap (4 GB, in P2's
+  worktree).
+- Lowered further if more data lands outside this tree.
+
+The queue records:
+1. the training ballistic ensembles;
+2. chunk B's remainder;
+3. new distinct full-state training configurations (chunk C): anchored t1/t2 and
+   standing t1/t2, 60 configurations each per round, rounds interleaved, so a budget stop
+   leaves the families balanced.
