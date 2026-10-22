@@ -30,7 +30,7 @@ use crate::outcome::{capture_inputs, capture_state, capture_static, Arrays, Inde
 
 pub const CALLS_SCHEMA: &str = "learned-impact-outcome/4";
 /// Bumped whenever the features or targets this builder writes change.
-pub const BUILDER_REVISION: u32 = 4;
+pub const BUILDER_REVISION: u32 = 5;
 pub const N_TIME_BINS: usize = 8;
 const G0: f64 = 9.81;
 const TINY: f64 = 1e-6;
@@ -1016,6 +1016,15 @@ fn build_call(r: &Record, st: &Statics, f: usize, prev_call: Option<usize>, hist
     put("chunk_feat", f32a(&[nc, 45], chunk_feat));
     put("chunk_def", f32a(&[nc, 12], def.iter().flatten().copied().collect()));
     put("chunk_def_uc", f32a(&[nc], uc.clone()));
+    // Each chunk's body (its cluster) at the frame start, numbered within the call in order
+    // of first appearance, and that body's world rotation (wxyz, as chunk_q_world).
+    {
+        let (cl0, q0) = (r.ri("state_chunk_cluster", f)?, r.rf("state_chunk_cluster_quat", f)?);
+        let mut ids: HashMap<i32, i32> = HashMap::new();
+        let body: Vec<i32> = isl.iter().map(|&c| { let k = ids.len() as i32; *ids.entry(cl0[c]).or_insert(k) }).collect();
+        put("chunk_body", Arr::I32(vec![nc], body));
+        put("chunk_body_q", f32a(&[nc, 4], isl.iter().flat_map(|&c| quat(q0, c).to_wxyz()).collect()));
+    }
     put("chunk_mass", f32a(&[nc], mc.clone()));
     put("chunk_inertia_body", f32a(&[nc, 3], flat(&isl.iter().map(|&c| st.inertia[c]).collect::<Vec<_>>())));
     put("chunk_q_world", f32a(&[nc, 4], qc.iter().flat_map(|q| q.to_wxyz()).collect()));

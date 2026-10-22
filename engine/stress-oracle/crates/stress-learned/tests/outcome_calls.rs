@@ -201,5 +201,20 @@ fn the_calls_hidden_state_is_the_solvers() {
     }
     eprintln!("hidden u/theta max |diff| {worst_u:.3e}; hidden rates max |diff| {worst_v:.3e} of max {scale_v:.3e}");
     assert!(worst_u <= 1e-6, "u and theta are the solver's (f32)");
+    // Each chunk's body and its rotation: the cluster's.
+    let (body, bq) = match (call.array("chunk_body"), call.array("chunk_body_q")) {
+        (Some(Arr::I32(_, b)), Some(Arr::F32(_, q))) => (b.clone(), q.clone()),
+        _ => panic!("chunk_body / chunk_body_q"),
+    };
+    for (j, &key) in keys_of(&call, "chunk_key").iter().enumerate() {
+        let (_, c) = stress_ref::keys::split_key(key);
+        let cl = &w.solver.clusters[w.solver.chunks[0][c].cluster];
+        let q = cl.pose.rotation.to_wxyz();
+        assert!((0..4).all(|k| (bq[4 * j + k] as f64 - q[k]).abs() < 1e-6));
+        for (i, &key2) in keys_of(&call, "chunk_key").iter().enumerate() {
+            let (_, c2) = stress_ref::keys::split_key(key2);
+            assert_eq!(body[i] == body[j], w.solver.chunks[0][c2].cluster == w.solver.chunks[0][c].cluster);
+        }
+    }
     assert!(worst_v <= 1e-3 * scale_v.max(1e-6) + 1e-5, "the fitted rates are the solver's hidden rates");
 }
