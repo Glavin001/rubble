@@ -36,7 +36,8 @@ def main(argv=None) -> None:
     if a.split == "sealed" and not a.confirm_sealed:
         ap.error("the sealed set stays closed until P4; pass --confirm-sealed to open it")
     model, ck = load_model(a.checkpoint, a.device)
-    events = [S.load_event(p) for p in S.find_events(a.dataset)]
+    from .train import _split_of
+    events = [S.load_event(p) for p in S.find_events(a.dataset) if _split_of(p) == a.split]
     events = [e for e in events if e.manifest["split"] == a.split
               and not e.manifest.get("truncated", False)]
     # ensemble soft labels and alignment, exactly as training's `Data` derives them

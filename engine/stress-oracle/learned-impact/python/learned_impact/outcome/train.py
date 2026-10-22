@@ -119,8 +119,15 @@ class Progress:
 
 
 # ---- data ---------------------------------------------------------------------------
-def _load_events(dataset: str) -> tuple[list[S.Event], int]:
-    events = [S.load_event(p) for p in S.find_events(dataset)]
+def _split_of(path) -> str:
+    return json.loads((Path(path) / "manifest.json").read_text()).get("split", "")
+
+
+def _load_events(dataset: str, splits: set[str] | None = None) -> tuple[list[S.Event], int]:
+    """Events under `dataset`, only those of `splits` when given: the manifest is read
+    first, so other splits (the sealed set above all) are never loaded."""
+    paths = [p for p in S.find_events(dataset) if splits is None or _split_of(p) in splits]
+    events = [S.load_event(p) for p in paths]
     if not events:
         raise S.SchemaError(f"no events under {dataset}")
     # Ensemble soft labels (break frequency, perforation frequency, members' exit
@@ -167,7 +174,7 @@ class Data:
                     self.source_weights[src] = self.source_weights.get(src, 0.0) + weight
         val_events = self.events
         if val_dataset:
-            val_events, n = _load_events(val_dataset)
+            val_events, n = _load_events(val_dataset, {"val"})
             self.ensemble_aligned_calls += n
             ids = {e.manifest["event_id"] for e in self.events}
             dup = ids & {e.manifest["event_id"] for e in val_events}
