@@ -131,11 +131,11 @@ def test_decode_reads_inputs_only():
         calls, st = make_calls(range(3), **kw)
         blind = []
         for c in calls:
-            # the ledger's E_elastic_start is the one entry an input: the joint law's stored
-            # energy at frame start (the energy envelope's E)
+            # the ledger's KE_in and E_elastic_start are inputs: the frame-start kinetic and
+            # stored energy (the energy envelope's E)
             stripped = S.Call(**{**c.__dict__, "arrays": {
                 k: v for k, v in c.arrays.items() if not S._is_target(k)},
-                "energy": {"E_elastic_start": c.energy["E_elastic_start"]}})
+                "energy": {k: c.energy[k] for k in ("KE_in", "E_elastic_start")}})
             blind.append(S.with_dummy_targets(stripped))
         b1, b2 = batch_of(calls, st), batch_of(blind, st)
         o = _outputs(b1)

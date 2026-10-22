@@ -351,33 +351,63 @@ def trapezoid_excess(ph: dict[str, Tensor], b: Batch) -> tuple[Tensor, Tensor]:
     return out[0], out[1]
 
 
+def _norm3(x: Tensor) -> Tensor:
+    """√(x₀² + x₁² + x₂²) in this order (bit-for-bit with the host's Rust; torch.norm's
+    reduction order is not fixed)."""
+    return torch.sqrt(x[..., 0] * x[..., 0] + x[..., 1] * x[..., 1] + x[..., 2] * x[..., 2])
+
+
 def energy_envelope(ph: dict[str, Tensor], b: Batch, external: Tensor,
                     tol: float) -> tuple[dict[str, Tensor], Tensor, Tensor]:
     """Each free node's dx and drot scaled radially into the energy envelope (see
     ENERGY_ENVELOPE_TOL). Returns the state, the clamped (node, dx|drot) count per call, and
     the calls left unbounded: an external load does work the inputs do not bound, or the
-    call carries no frame-start stored energy (never a tighter bound than the oracle's)."""
+    call carries no frame-start KE_in / E_elastic_start (never a tighter bound than the
+    oracle's). Bit-for-bit with the host (stress_learned::kin_envelope, P0's fixture
+    kin_envelope_v2.json): E = (energy.KE_in + energy.E_elastic_start)·(1 + tol), the builder's
+    f64 scalars; r_x = dt·(√(2E/m) + |g|·dt); r_r = dt·√(2E/I_min), I_min the smallest
+    principal moment (inertia_body: rotation-invariant, no eigensolver)."""
     G = b.n_calls
     call = ph["call"]
     dtype = ph["dx"].dtype
-    dt = b.t["scales"].to(dtype)[:, SCALE_INDEX["dt"]]
-    stored = b.t["e_stored_start"].to(dtype).to(dt.device)
-    ke = kinetic(ph, ph["v"], ph["w"], ph["inertia_w"], G)
-    unbounded = external | ~torch.isfinite(stored)
-    e = (ke + torch.where(unbounded, torch.zeros_like(stored), stored)) * (1 + tol)
-    g = b.t["gravity"].to(dtype).norm(dim=-1)
+    dev = ph["dx"].device
+    dt = b.t["scales"].to(dtype)[:, SCALE_INDEX["dt"]].to(dev)
+    ke = b.t["e_ke_in"].to(dtype).to(dev)
+    stored = b.t["e_stored_start"].to(dtype).to(dev)
+    unbounded = external.to(dev) | ~torch.isfinite(stored) | ~torch.isfinite(ke)
+    e = torch.where(unbounded, torch.zeros_like(ke), ke + stored) * (1.0 + tol)
+    g = _norm3(b.t["gravity"].to(dtype).to(dev))
     m = ph["mass"]
-    lam = torch.linalg.eigvalsh(ph["inertia_w"])[:, 0].clamp(min=1e-30)
-    r_x = dt[call] * (torch.sqrt(2 * e[call] / m) + g[call] * dt[call])
-    r_r = dt[call] * torch.sqrt(2 * e[call] / lam)
+    i_min = ph["inertia"].to(dtype).min(dim=-1).values
+    dtc, ec = dt[call], e[call]
+    r_x = dtc * (torch.sqrt(2.0 * ec / m) + g[call] * dtc)
+    r_r = dtc * torch.sqrt(2.0 * ec / i_min)
     on = ~ph["anchored"] & ~unbounded[call]
-    out, n = dict(ph), torch.zeros(G, dtype=torch.long, device=dt.device)
+    out, n = dict(ph), torch.zeros(G, dtype=torch.long, device=dev)
     for k, r in (("dx", r_x), ("drot", r_r)):
-        norm = ph[k].norm(dim=-1)
-        hit = on & (norm > r * (1 + 1e-9))
-        out[k] = torch.where(hit.unsqueeze(-1), ph[k] * (r / norm.clamp(min=1e-30)).unsqueeze(-1), ph[k])
+        norm = _norm3(ph[k])
+        hit = on & (norm > r * (1.0 + 1e-9))
+        out[k] = torch.where(hit.unsqueeze(-1), ph[k] * (r / torch.where(hit, norm, torch.ones_like(norm))).unsqueeze(-1), ph[k])
         n = n + scatter_sum(hit.to(torch.long), call, G)
     return out, n, unbounded
+
+
+def envelope_radii(b: Batch, tol: float = None) -> tuple[Tensor, Tensor, Tensor]:
+    """(E per call before the tolerance, r_x, r_r per node; NaN where unbounded or anchored)."""
+    tol = ENERGY_ENVELOPE_TOL if tol is None else tol
+    ph = dict(nodes(b))
+    dt = b.t["scales"].double()[:, SCALE_INDEX["dt"]]
+    ke, stored = b.t["e_ke_in"].double(), b.t["e_stored_start"].double()
+    e = (ke + stored) * (1.0 + tol)
+    g = _norm3(b.t["gravity"].double())
+    call = ph["call"]
+    dtc, ec = dt[call], e[call]
+    r_x = dtc * (torch.sqrt(2.0 * ec / ph["mass"]) + g[call] * dtc)
+    r_r = dtc * torch.sqrt(2.0 * ec / ph["inertia"].double().min(dim=-1).values)
+    off = ph["anchored"] | ~torch.isfinite(ec)
+    nan = torch.full_like(r_x, float("nan"))
+    # E as the host reports it: (E·(1 + tol))/(1 + tol), not ke + stored (1 ulp apart)
+    return e / (1.0 + tol), torch.where(off, nan, r_x), torch.where(off, nan, r_r)
 
 
 def label_envelope_clamps(b: Batch, tol: float) -> Tensor:
