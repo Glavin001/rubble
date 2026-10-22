@@ -323,3 +323,15 @@ Not recorded (the budget):
   the same island. Referencing the previous call instead would save about a third of
   `calls-v5`, about 1.7 GB.
 - If the user's 30 GB means `du -h` units (GiB), the budget is 32.2 GB.
+
+**The calls dedup frees no disk (measured).** In 85% of consecutive calls, a call's
+frame-start tables are byte-identical to the previous call's frame-end tables (279 of 328
+in a standing t1 event). The writer now stores identical arrays once, at a shared offset
+(64fbf30f, round-trip test). That cuts the raw arrays by 29% (38 → 27 MB). But zstd level
+19 had already found those repeats: the files are the same size (10.73 vs 10.75 MB), and a
+long-distance window (window_log 27) gains nothing. `calls-v5` was therefore not rebuilt.
+The remaining levers are planning's call:
+- `/5` calls with only P2's frozen field set (derived; the recorded full state keeps
+  everything);
+- on-demand calls for training events;
+- a larger budget.
