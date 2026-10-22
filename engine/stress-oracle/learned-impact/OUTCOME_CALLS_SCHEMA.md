@@ -515,9 +515,12 @@ The recorder has u and θ (`state_chunk_hidden [n,6]`). The rates follow from
 - **Pushforward:** rewrites the hidden-state inputs from the model's decoded chunk state
   through the same fit.
 
-**Open question (P0's point 6):** bond internal state beyond the poses (κ history,
-softening, damping, fail times). The host keeps it, and the inputs see it only through
-damage and `log1p_peak_util_prev`. P0 can measure a variant that resets joint history.
+**Bond internal state (answered by P0).** P0's cl-eval-v2 reset every surviving bond's
+joint history at the call boundary, keeping only damage. The reset covers κ, crushing,
+ductility, fatigue, plastic offsets, rebar and strain rate (`STRESS_DECODED_RESET_JOINTS=1`,
+candidate `ceiling_def_nojoint`). It gives the same gate numbers as `ceiling_def` on both
+families. So damage is the only bond state the boundary needs, and `/4` has no
+joint-history channel.
 
 ## Versioning
 
