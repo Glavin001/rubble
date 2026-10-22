@@ -41,12 +41,14 @@ public struct Record
 // A chunk's engine load over the frame (coupled.rs `LoadFilter::ingest` and
 // `frame_average_terms`, world.rs `host_frame_loads`): from its contact manifolds
 // (coupling.slang, `sort`'s ranges), the sustained part of each impulse as a force, and
-// each impact as a Hertz pulse: at its peak (`impact_peak`) or its mean over the frame,
-// pulses that outlast the frame carried in `store` (`pulse_cap` of 3 float4 per chunk
-// from `pulse_base`, their count at `pulse_count_base`) to the next. The force and its
-// moment about `centre` (world), and whether a pulse found no room.
+// each impact as a Hertz pulse: at its peak (`impact_peak`) or its mean over the frame.
+// Pulses that outlast the frame are carried to the next in `store` (3 float4 each): the
+// `carried` from word `src`, the survivors and this frame's to `dst` (room for `cap`; the
+// same range as `src` when carried in place: a survivor is never written past the one it
+// came from). The force and its moment about `centre` (world), the pulses kept, and
+// whether one found no room.
 [ForceInline]
-public void chunk_engine_load(StructuredBuffer<Record> manifolds, StructuredBuffer<uint> sort, RWStructuredBuffer<float4> store, uint n, uint k, float m_body, float chunk_mass, float3 centre, float4 props, float band, float dt, bool impact_peak, uint pulse_base, uint pulse_count_base, uint pulse_cap, out float3 f_total, out float3 t_total, out bool overflow)
+public void chunk_engine_load(StructuredBuffer<Record> manifolds, StructuredBuffer<uint> sort, RWStructuredBuffer<float4> store, uint n, uint k, float m_body, float chunk_mass, float3 centre, float4 props, float band, float dt, bool impact_peak, uint src, uint carried, uint dst, uint cap, out float3 f_total, out float3 t_total, out uint kept, out bool overflow)
 {
     f_total = float3(0.0);
     t_total = float3(0.0);
@@ -89,15 +91,13 @@ public void chunk_engine_load(StructuredBuffer<Record> manifolds, StructuredBuff
     }
     // Pulses carried from earlier frames, in their order; then this frame's, in
     // manifold order. Survivors are written back in the same order.
-    uint at = pulse_base + 3 * pulse_cap * k;
-    uint carried = asuint(store[pulse_count_base + k].x);
-    uint kept = 0;
+    kept = 0;
     overflow = false;
     for (uint p = 0; p < carried; p++)
     {
-        float4 a = store[at + 3 * p];
-        float4 b = store[at + 3 * p + 1];
-        float4 c = store[at + 3 * p + 2];
+        float4 a = store[src + 3 * p];
+        float4 b = store[src + 3 * p + 1];
+        float4 c = store[src + 3 * p + 2];
         float mean = pulse_mean(a.x, a.y, a.z, a.w, b.w, dt);
         if (mean != 0.0)
         {
@@ -108,9 +108,9 @@ public void chunk_engine_load(StructuredBuffer<Record> manifolds, StructuredBuff
         if (a.x + a.z + b.w > dt)
         {
             a.x -= dt;
-            store[at + 3 * kept] = a;
-            store[at + 3 * kept + 1] = b;
-            store[at + 3 * kept + 2] = c;
+            store[dst + 3 * kept] = a;
+            store[dst + 3 * kept + 1] = b;
+            store[dst + 3 * kept + 2] = c;
             kept++;
         }
     }
@@ -139,11 +139,11 @@ public void chunk_engine_load(StructuredBuffer<Record> manifolds, StructuredBuff
         }
         if (duration > dt)
         {
-            if (kept < pulse_cap)
+            if (kept < cap)
             {
-                store[at + 3 * kept] = float4(-dt, 0.0, 0.0, peak);
-                store[at + 3 * kept + 1] = float4(r.point.xyz, duration);
-                store[at + 3 * kept + 2] = float4(dir, 0.0);
+                store[dst + 3 * kept] = float4(-dt, 0.0, 0.0, peak);
+                store[dst + 3 * kept + 1] = float4(r.point.xyz, duration);
+                store[dst + 3 * kept + 2] = float4(dir, 0.0);
                 kept++;
             }
             else
@@ -152,5 +152,4 @@ public void chunk_engine_load(StructuredBuffer<Record> manifolds, StructuredBuff
             }
         }
     }
-    store[pulse_count_base + k] = float4(asfloat(kept), 0.0, 0.0, 0.0);
 }

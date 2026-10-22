@@ -48,9 +48,9 @@ struct FractureParams
     uint body_count;     // engine body slots the fracture may use (`free`'s length)
     uint max_bodies;     // the engine's capacity (its previous-pose region starts there)
     uint step;           // the engine's next step: a re-parented body's generation
-    uint pulse_cap;
+    uint pool_cap;       // carried impact pulses each half of the pool holds
     uint impact_peak;
-    uint pad0;
+    uint parity;         // the half of the pool this frame reads (the frame's number mod 2)
     float dt;
     float band;          // |g| dt: closing speeds within it are not impacts
     float scale_m;       // fixed-point scales of the mass sums (2^k)
@@ -121,7 +121,8 @@ uint w_rank() { return w_new() + params.chunk_count; }
 uint w_free() { return w_rank() + params.chunk_count; }
 uint w_free_rank() { return w_free() + params.body_count; }
 uint w_free_list() { return w_free_rank() + params.body_count; }
-// (the scans' block sums after it)
+// Per chunk, for each half of the pool: where its carried pulses start and how many.
+uint w_pulses() { return w_free_list() + params.body_count + 2 * 1025; }
 
 // `atom` layout.
 uint a_parent() { return 0; }
@@ -139,10 +140,15 @@ static const uint C_BROKEN = 1;       // bonds broken in all
 static const uint C_PIECES = 2;       // new bodies in all
 static const uint C_ERROR = 3;        // bits: 1 no free slot, 2 a mass sum out of range, 4 a union did not settle, 8 a pulse found no room
 static const uint C_SPLIT_FRAMES = 4;
+static const uint C_POOL_TOP = 5;     // + the half: pulses claimed in it this frame
 
-// `loads` layout: per chunk 1 float4 (its load), then the pulses.
-uint l_pulse_base() { return params.chunk_count; }
-uint l_pulse_count_base() { return params.chunk_count + 3 * params.pulse_cap * params.chunk_count; }
+// `loads` layout: per chunk 1 float4 (its load), then the two halves of the pulse pool
+// (`pool_cap` pulses of 3 float4 each). A frame reads its chunks' carried pulses from one
+// half and writes the ones that last into the other: each chunk claims a run there with
+// one atomic add, where it lands does not matter (each chunk reads only its own, in
+// order), and the pool's size follows the engine's contact records (fracture.rs), not a
+// per-chunk count.
+uint l_pool(uint half) { return params.chunk_count + 3 * params.pool_cap * half; }
 
 // Indirect sizes (`args`, 3 words each).
 static const uint ARG_CHUNKS = 0;
@@ -185,9 +191,29 @@ void fr_loads(uint3 id: SV_DispatchThreadID)
     float3 f_total;
     float3 t_total;
     bool overflow;
-    chunk_engine_load(manifolds, sort, loads, params.chunk_count, k, m_body, c0.w, centre, chunks[4 * k + 3], params.band, params.dt, params.impact_peak != 0, l_pulse_base(), l_pulse_count_base(), params.pulse_cap, f_total, t_total, overflow);
+    uint kept;
+    uint from = params.parity;
+    uint to = 1 - from;
+    uint off = work[w_pulses() + 4 * k + 2 * from];
+    uint carried = work[w_pulses() + 4 * k + 2 * from + 1];
+    // Room for every carried pulse and one per manifold (more than can be kept).
+    uint room = carried + sort[params.chunk_count + 1 + k];
+    uint base = 0;
+    if (room != 0)
+    {
+        base = atom[a_counters() + C_POOL_TOP + to].add(room);
+        if (base + room > params.pool_cap)
+        {
+            // The pool is sized from the engine's contact records: a bug, reported.
+            atom[a_counters() + C_ERROR].or(8u);
+            room = base < params.pool_cap ? params.pool_cap - base : 0;
+        }
+    }
+    chunk_engine_load(manifolds, sort, loads, params.chunk_count, k, m_body, c0.w, centre, chunks[4 * k + 3], params.band, params.dt, params.impact_peak != 0, l_pool(from) + 3 * off, carried, l_pool(to) + 3 * base, room, f_total, t_total, kept, overflow);
     if (overflow)
         atom[a_counters() + C_ERROR].or(8u);
+    work[w_pulses() + 4 * k + 2 * to] = base;
+    work[w_pulses() + 4 * k + 2 * to + 1] = kept;
     loads[k] = float4(length(f_total), 0.0, 0.0, 0.0);
 }
 
@@ -222,6 +248,8 @@ void fr_gate(uint3 id: SV_DispatchThreadID)
 {
     bool run = atom[a_counters() + C_FRAME_BROKEN].load() != 0;
     atom[a_counters() + C_FRAME_BROKEN].store(0);
+    // The half this frame read is the next frame's to write.
+    atom[a_counters() + C_POOL_TOP + params.parity].store(0);
     if (run)
         atom[a_counters() + C_SPLIT_FRAMES].add(1);
     set_args(ARG_CHUNKS, run ? groups_of(params.chunk_count, 64) : 0);

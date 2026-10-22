@@ -587,7 +587,7 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, elapsed_ms: f64) -> Result<(
     });
     STATS.set(stats.to_string());
     if st.error != 0 || st.engine_overflow != 0 {
-        return Err(format!("threshold world: fracture errors {:#x}, engine overflow {:#x} (pulse capacity: STRESS_RESIDENT_PULSES)", st.error, st.engine_overflow));
+        return Err(format!("threshold world: fracture errors {:#x}, engine overflow {:#x} (1 no free body slot, 2 a mass sum out of range, 4 a union did not settle, 8 the impact pulse pool is full)", st.error, st.engine_overflow));
     }
     Ok(())
 }

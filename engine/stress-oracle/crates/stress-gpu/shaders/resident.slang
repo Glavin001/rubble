@@ -140,7 +140,12 @@ void resident_filter(uint3 id: SV_DispatchThreadID)
     float3 f_total = float3(0.0);
     float3 t_total = float3(0.0);
     bool overflow;
-    chunk_engine_load(manifolds, sort, ctab, n, k, m_body, ch.center.w, centre, props, params.gravity.w, dt, params.impact_peak != 0, params.pulse_base, params.pulse_count_base, params.pulse_cap, f_total, t_total, overflow);
+    uint kept;
+    // Carried in place: each chunk's `pulse_cap` slots.
+    uint at = params.pulse_base + 3 * params.pulse_cap * k;
+    uint carried = asuint(ctab[params.pulse_count_base + k].x);
+    chunk_engine_load(manifolds, sort, ctab, n, k, m_body, ch.center.w, centre, props, params.gravity.w, dt, params.impact_peak != 0, at, carried, at, params.pulse_cap, f_total, t_total, kept, overflow);
+    ctab[params.pulse_count_base + k] = float4(asfloat(kept), 0.0, 0.0, 0.0);
     if (overflow)
         ctab[params.status_base] = float4(asfloat(1u), 0.0, 0.0, 0.0);
     ctab[params.eload_base + 2 * k] = float4(f_total, 0.0);

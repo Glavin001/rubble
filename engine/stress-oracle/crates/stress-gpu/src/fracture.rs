@@ -45,8 +45,10 @@ pub struct FractureTables {
     pub free: Vec<u32>,
     /// The engine's body capacity (its previous-pose region starts there).
     pub max_bodies: u32,
-    /// Carried impact pulses per chunk (impact.slang); more is an error, reported.
-    pub pulse_cap: u32,
+    /// Carried impact pulses each half of the pool holds (impact.slang; `fracture.slang`
+    /// `l_pool`): from the engine's contact records, so it holds every pulse a frame can
+    /// keep; more is an error, reported.
+    pub pool_cap: u32,
     /// Impacts at their Hertz peak force (the threshold profile's), else their mean.
     pub impact_peak: bool,
     /// |g| dt: closing speeds within it are not impacts.
@@ -106,9 +108,9 @@ struct FractureParams {
     body_count: u32,
     max_bodies: u32,
     step: u32,
-    pulse_cap: u32,
+    pool_cap: u32,
     impact_peak: u32,
-    pad0: u32,
+    parity: u32,
     dt: f32,
     band: f32,
     scale_m: f32,
@@ -170,8 +172,11 @@ impl Layout {
     pub fn scan_free_blocks(&self) -> u32 {
         self.scan_new_blocks() + 1025
     }
-    pub fn work_words(&self) -> u32 {
+    pub fn w_pulses(&self) -> u32 {
         self.scan_free_blocks() + 1025
+    }
+    pub fn work_words(&self) -> u32 {
+        self.w_pulses() + 4 * self.n
     }
     pub fn a_dirty(&self) -> u32 {
         3 * self.n + SUMS * self.n
@@ -199,8 +204,8 @@ const ARG_ONE: u64 = 5;
 pub struct Counters {
     pub broken: u32,
     pub pieces: u32,
-    /// Bits: 1 no free slot, 2 a mass sum out of range, 4 a union did not settle, 8 an
-    /// impact pulse found no room (`pulse_cap`).
+    /// Bits: 1 no free slot, 2 a mass sum out of range, 4 a union did not settle, 8 the
+    /// impact pulse pool overflowed (`pool_cap`).
     pub error: u32,
     pub split_frames: u32,
 }
@@ -312,7 +317,9 @@ pub struct GpuFracture {
     binds: Vec<wgpu::BindGroup>,
     scan_binds: Vec<wgpu::BindGroup>,
     /// What the core kernels bind in the view's slots, and the view once set.
-    placeholder: wgpu::Buffer,
+    /// One per view slot (a buffer bound read-only and read-write in one dispatch is
+    /// invalid): view chunks, objects, lines, shots.
+    placeholder: [wgpu::Buffer; 4],
     placeholder_uniform: wgpu::Buffer,
     view: Option<View>,
     engine_bodies: Option<wgpu::Buffer>,
@@ -349,7 +356,7 @@ impl GpuFracture {
             body_count: b,
             max_bodies: t.max_bodies,
             step: 0,
-            pulse_cap: t.pulse_cap,
+            pool_cap: t.pool_cap,
             impact_peak: t.impact_peak as u32,
             dt: t.dt,
             band: t.band,
@@ -383,7 +390,7 @@ impl GpuFracture {
         let mut frames: Vec<[f32; 4]> = t.frames.iter().flatten().copied().collect();
         frames.resize((2 * b + 9 * n) as usize, [0.0; 4]);
         let frames = gpu.storage("fracture frames", &frames);
-        let loads = storage_bytes(gpu, "fracture loads", 16 * (n as u64 * (2 + 3 * t.pulse_cap as u64)), wgpu::BufferUsages::empty());
+        let loads = storage_bytes(gpu, "fracture loads", 16 * (n as u64 + 2 * 3 * t.pool_cap as u64), wgpu::BufferUsages::empty());
         let sizes = storage_bytes(gpu, "fracture sizes", 12 * ARGS, wgpu::BufferUsages::empty());
         let args = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("fracture args"),
@@ -411,7 +418,7 @@ impl GpuFracture {
             args,
             binds: Vec::new(),
             scan_binds: Vec::new(),
-            placeholder: storage_bytes(gpu, "fracture view placeholder", 16, wgpu::BufferUsages::empty()),
+            placeholder: std::array::from_fn(|_| storage_bytes(gpu, "fracture view placeholder", 16, wgpu::BufferUsages::empty())),
             placeholder_uniform: gpu.uniform("fracture view placeholder", &ViewParams::default()),
             view: None,
             engine_bodies: None,
@@ -443,10 +450,10 @@ impl GpuFracture {
                 scan,
                 &self.info,
                 &self.placeholder_uniform,
-                &self.placeholder,
-                &self.placeholder,
-                &self.placeholder,
-                &self.placeholder,
+                &self.placeholder[0],
+                &self.placeholder[1],
+                &self.placeholder[2],
+                &self.placeholder[3],
             ];
             gpu.bind(&k.group, &buffers)
         };
@@ -528,7 +535,10 @@ impl GpuFracture {
     /// The frame's loads and breaks, then its splits (gated on the GPU). `step` is the
     /// engine's next step (a re-parented body's generation).
     pub fn encode_frame(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, step: u32) {
-        self.set_step(gpu, step);
+        // The pool's halves swap every frame.
+        self.params.parity ^= 1;
+        self.params.step = step;
+        gpu.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             self.direct(&mut pass, "fr_loads", self.layout.n as usize);

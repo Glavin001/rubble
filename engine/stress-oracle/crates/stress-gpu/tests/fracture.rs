@@ -20,7 +20,7 @@ fn grid(dims: [u32; 3], anchored: bool) -> Grid {
     let n = (nx * ny * nz) as usize;
     let idx = |x: u32, y: u32, z: u32| (x + nx * (y + ny * z)) as u32;
     let centre = [(nx as f32 - 1.0) / 2.0, (ny as f32 - 1.0) / 2.0, (nz as f32 - 1.0) / 2.0];
-    let mut t = FractureTables { max_bodies: n as u32 + 8, pulse_cap: 4, impact_peak: true, band: 0.1, dt: 1.0 / 60.0, ..Default::default() };
+    let mut t = FractureTables { max_bodies: n as u32 + 8, pool_cap: 64, impact_peak: true, band: 0.1, dt: 1.0 / 60.0, ..Default::default() };
     for z in 0..nz {
         for y in 0..ny {
             for x in 0..nx {

@@ -24,10 +24,14 @@ use crate::{to_rubble, Owner, RubbleEngine};
 /// The shots a world holds (the fracture lab's 16).
 pub const SHOTS: usize = 16;
 
-/// Impact pulses carried past their frame per chunk (`STRESS_RESIDENT_PULSES`, default 16
-/// here); a chunk that needs more is an error the world reports.
-pub fn pulse_cap() -> u32 {
-    std::env::var("STRESS_RESIDENT_PULSES").ok().and_then(|v| v.parse().ok()).unwrap_or(16)
+/// Carried impact pulses each half of the pool holds: four per contact record a frame can
+/// hold (the ingest's capacity). Every pulse kept came from one record and lives for its
+/// Hertz duration, a few frames at most under the heaviest impacts; a frame reserves room
+/// for each chunk's carried pulses and one per manifold. `STRESS_PULSE_POOL` multiplies it
+/// (a measurement).
+pub fn pool_cap(records: u32) -> u32 {
+    let k: u32 = std::env::var("STRESS_PULSE_POOL").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+    4 * records * k.max(1)
 }
 
 /// What [`ThresholdWorld::poll`] reads (a frame or more late).
@@ -165,7 +169,7 @@ impl ThresholdWorld {
         }
         let mut t = FractureTables {
             max_bodies: engine.sim.capacity().max_bodies,
-            pulse_cap: pulse_cap(),
+            pool_cap: pool_cap(2 * capacity.max_contacts),
             impact_peak: true,
             band: (Vec3::from_array(scene.gravity).norm() * scene.sim.frame_dt) as f32,
             dt: scene.sim.frame_dt as f32,
