@@ -17,6 +17,7 @@
 // Frames: the engine is Y-up, the stress solver Z-up: (x, y, z) -> (x, -z, y).
 
 import common;
+import impact;
 
 struct ResidentParams
 {
@@ -36,15 +37,6 @@ struct ResidentParams
     uint impact_peak;     // 1: this frame's impacts at their Hertz peak force (a measurement)
     uint pad0;
     uint pad1;
-};
-
-struct Record
-{
-    uint4 ids;
-    float4 point;
-    float4 impulse;
-    float4 other;
-    uint4 key; // coupling.slang `Record::key`
 };
 
 struct EngineBody
@@ -70,7 +62,6 @@ struct EngineBody
 
 static const uint NONE = 0xffffffffu;
 static const uint ISLAND_SOLVE = 8;
-static const float PI = 3.14159265358979;
 
 float3 to_zup(float3 v)
 {
@@ -130,28 +121,6 @@ void resident_poses(uint3 id: SV_DispatchThreadID)
     islands[i] = isl;
 }
 
-// api.rs `hertz_duration`.
-float hertz_duration(float m, float r, float e, float v)
-{
-    float va = max(abs(v), 1e-3);
-    return 2.87 * pow(m * m / (r * e * e * va), 0.2);
-}
-
-// coupled.rs `pulse_integral` with no plateau over [a, b], times relative to the frame.
-float pulse_mean(float start, float plateau, float plateau_time, float peak, float duration, float dt)
-{
-    float sum = plateau * max(min(start + plateau_time, dt) - max(start, 0.0), 0.0);
-    float s0 = start + plateau_time;
-    float lo = max(0.0, s0);
-    float hi = min(dt, s0 + duration);
-    if (hi > lo && duration > 0.0)
-    {
-        float w = PI / duration;
-        sum += peak / w * (cos(w * (lo - s0)) - cos(w * (hi - s0)));
-    }
-    return sum / dt;
-}
-
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void resident_filter(uint3 id: SV_DispatchThreadID)
@@ -170,109 +139,8 @@ void resident_filter(uint3 id: SV_DispatchThreadID)
     float dt = params.dt;
     float3 f_total = float3(0.0);
     float3 t_total = float3(0.0);
-    uint begin = sort[k];
-    uint count = sort[n + 1 + k];
-    // Sustained loads in the order of their key (other body; static geometry first),
-    // as the host's BTreeMap holds them.
-    uint last = 0;
-    bool first = true;
-    for (uint step = 0; step < count; step++)
-    {
-        uint best = NONE;
-        uint best_key = 0;
-        for (uint q2 = 0; q2 < count; q2++)
-        {
-            uint key = manifolds[begin + q2].ids.y + 1; // NONE -> 0
-            if ((first || key > last) && (best == NONE || key < best_key))
-            {
-                best = q2;
-                best_key = key;
-            }
-        }
-        if (best == NONE)
-            break;
-        first = false;
-        last = best_key;
-        Record r = manifolds[begin + best];
-        float j = length(r.impulse.xyz);
-        if (j == 0.0)
-            continue;
-        float m_other = r.other.x;
-        float m = isinf(m_body) ? (isinf(m_other) ? ch.center.w : m_other) : (isinf(m_other) ? m_body : m_body * m_other / (m_body + m_other));
-        float j_impact = min(j, 2.0 * m * max(r.impulse.w - params.gravity.w, 0.0));
-        if (j_impact < j)
-        {
-            float3 f = r.impulse.xyz / j * ((j - j_impact) / dt);
-            f_total += f;
-            t_total += cross(r.point.xyz - centre, f);
-        }
-    }
-    // Pulses carried from earlier frames, in their order; then this frame's, in
-    // manifold order. Survivors are written back in the same order.
-    uint at = params.pulse_base + 3 * params.pulse_cap * k;
-    uint carried = asuint(ctab[params.pulse_count_base + k].x);
-    uint kept = 0;
-    bool overflow = false;
-    for (uint p = 0; p < carried; p++)
-    {
-        float4 a = ctab[at + 3 * p];
-        float4 b = ctab[at + 3 * p + 1];
-        float4 c = ctab[at + 3 * p + 2];
-        float mean = pulse_mean(a.x, a.y, a.z, a.w, b.w, dt);
-        if (mean != 0.0)
-        {
-            float3 f = c.xyz * mean;
-            f_total += f;
-            t_total += cross(b.xyz - centre, f);
-        }
-        if (a.x + a.z + b.w > dt)
-        {
-            a.x -= dt;
-            ctab[at + 3 * kept] = a;
-            ctab[at + 3 * kept + 1] = b;
-            ctab[at + 3 * kept + 2] = c;
-            kept++;
-        }
-    }
-    for (uint q3 = 0; q3 < count; q3++)
-    {
-        Record r = manifolds[begin + q3];
-        float j = length(r.impulse.xyz);
-        if (j == 0.0)
-            continue;
-        float m_other = r.other.x;
-        float m = isinf(m_body) ? (isinf(m_other) ? ch.center.w : m_other) : (isinf(m_other) ? m_body : m_body * m_other / (m_body + m_other));
-        float j_impact = min(j, 2.0 * m * max(r.impulse.w - params.gravity.w, 0.0));
-        if (j_impact <= 0.0)
-            continue;
-        float e_star = 1.0 / ((1.0 - props.y * props.y) / props.x + 1.0 / r.other.y);
-        float radius = min(r.other.z, props.z);
-        float duration = hertz_duration(m, radius, e_star, r.impulse.w);
-        float peak = PI * j_impact / (2.0 * duration);
-        float3 dir = r.impulse.xyz / j;
-        float mean = params.impact_peak != 0 ? peak : pulse_mean(0.0, 0.0, 0.0, peak, duration, dt);
-        if (mean != 0.0)
-        {
-            float3 f = dir * mean;
-            f_total += f;
-            t_total += cross(r.point.xyz - centre, f);
-        }
-        if (duration > dt)
-        {
-            if (kept < params.pulse_cap)
-            {
-                ctab[at + 3 * kept] = float4(-dt, 0.0, 0.0, peak);
-                ctab[at + 3 * kept + 1] = float4(r.point.xyz, duration);
-                ctab[at + 3 * kept + 2] = float4(dir, 0.0);
-                kept++;
-            }
-            else
-            {
-                overflow = true;
-            }
-        }
-    }
-    ctab[params.pulse_count_base + k] = float4(asfloat(kept), 0.0, 0.0, 0.0);
+    bool overflow;
+    chunk_engine_load(manifolds, sort, ctab, n, k, m_body, ch.center.w, centre, props, params.gravity.w, dt, params.impact_peak != 0, params.pulse_base, params.pulse_count_base, params.pulse_cap, f_total, t_total, overflow);
     if (overflow)
         ctab[params.status_base] = float4(asfloat(1u), 0.0, 0.0, 0.0);
     ctab[params.eload_base + 2 * k] = float4(f_total, 0.0);

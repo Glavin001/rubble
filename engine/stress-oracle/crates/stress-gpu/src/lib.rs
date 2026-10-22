@@ -41,6 +41,7 @@ pub mod gpu_plan;
 pub mod gpu_pass;
 pub mod gpu_split;
 pub mod ingest;
+pub mod fracture;
 pub mod resident;
 pub mod routing;
 pub mod gate;
@@ -229,11 +230,35 @@ pub mod shaders {
     pub const SPLIT: ShaderSet = shader_set!("split", [("split_components", (256, 1, 1)), ("split_children", (64, 1, 1)), ("split_frames", (64, 1, 1)), ("split_children_group", (64, 1, 1))]);
     pub const HUD_OVERLAY: ShaderSet = shader_set!("hud_overlay", [("hud_vs", (1, 1, 1)), ("hud_fs", (1, 1, 1))]);
     pub const THRESHOLD: ShaderSet = shader_set!("threshold", [("threshold_breaks", (256, 1, 1)), ("threshold_predict", (256, 1, 1))]);
+    pub const FRACTURE: ShaderSet = shader_set!(
+        "fracture",
+        [
+            ("fr_loads", (64, 1, 1)),
+            ("fr_breaks", (64, 1, 1)),
+            ("fr_gate", (1, 1, 1)),
+            ("fr_uf_init", (64, 1, 1)),
+            ("fr_body_init", (64, 1, 1)),
+            ("fr_uf_union", (64, 1, 1)),
+            ("fr_uf_flatten", (64, 1, 1)),
+            ("fr_best_count", (64, 1, 1)),
+            ("fr_best_root", (64, 1, 1)),
+            ("fr_mark", (64, 1, 1)),
+            ("fr_scan_blocks", (256, 1, 1)),
+            ("fr_scan_top", (1024, 1, 1)),
+            ("fr_scan_add", (64, 1, 1)),
+            ("fr_freelist", (64, 1, 1)),
+            ("fr_assign", (64, 1, 1)),
+            ("fr_piece", (64, 1, 1)),
+            ("fr_commit", (64, 1, 1)),
+            ("fr_reparent", (64, 1, 1)),
+            ("fr_body_clear", (64, 1, 1)),
+        ]
+    );
 
     /// Every set (each Slang file with entry points).
     pub const ALL: &[ShaderSet] = &[
         WORLD_IC, SMOKE, STRESS_STEP, JOINT_TEST, WORLD, STRESS_RENDER, DESTRUCTION_RENDER, COUPLING, RESIDENT, CASCADE, PLAN, LAYOUT, SPAWN, COLLIDERS, PASS, PASSLOG, ROUTING, PUNCH, SPLIT,
-        HUD_OVERLAY, THRESHOLD,
+        HUD_OVERLAY, THRESHOLD, FRACTURE,
     ];
 }
 
