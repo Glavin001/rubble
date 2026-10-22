@@ -59,11 +59,14 @@ class Provider:
             self.dcfg = D.DecodeConfig(temperature=ck.get("temperature", 1.0),
                                        energy_tolerance=tc["decode"]["energy_tolerance"],
                                        tau=ck.get("tau", tc["decode"].get("tau", 1.0)),
-                                       break_mode=tc["decode"].get("break_mode", "threshold"))
+                                       break_mode=ck.get("break_mode",
+                                                         tc["decode"].get("break_mode", "threshold")),
+                                       sample_seed=int(ck.get("sample_seed", 0)))
             self.cache = HierarchyCache(self.model.cfg.levels)
             sha = hashlib.sha256(Path(checkpoint).read_bytes()).hexdigest()
             self.meta = {"checkpoint": str(checkpoint), "sha256": sha,
                          "decode": {"tau": self.dcfg.tau, "break_mode": self.dcfg.break_mode,
+                                    "sample_seed": self.dcfg.sample_seed,
                                     "energy_tolerance": self.dcfg.energy_tolerance,
                                     "temperature": self.dcfg.temperature}}
         elif mode == "ceiling":

@@ -71,15 +71,27 @@ def analyse(ckpt: str | Path, data: Data, taus=(0.6, 0.7, 0.8, 0.9, 1.0, 1.1),
     cache = HierarchyCache(model.cfg.levels)
     batches = [collate(bc, data.structures, cache) for bc in _batches(data.val, 20000, 64)]
     outs = [model(b) for b in batches]
-    temp = ck.get("temperature", 1.0)
-    priors = ck.get("priors")
+    # The prior correction applies only to a model trained with prior reweighting (older
+    # checkpoints stored priors regardless); the temperature is fitted here on validation,
+    # since `best.pt` from older runs predates the end-of-training fit.
+    reweight = ck["train_config"]["loss"].get("break_reweight", "prior")
+    priors = ck.get("priors") if reweight == "prior" else None
+    raw = []
+    for b, o in zip(batches, outs):
+        sh = prior_logit_shift(b, priors)
+        lg = o["bond_break_logit"] + (sh if sh is not None else 0)
+        bv = b.t["bond_valid"].numpy()
+        raw.append((lg.numpy()[bv], np.where(b.t["y_bond_has_freq"].numpy(), b.t["y_bond_freq"].numpy(),
+                                             (b.t["y_bond_broke"].numpy() > 0).astype(float))[bv]))
+    temp = M.fit_temperature(np.concatenate([r[0] for r in raw]), np.concatenate([r[1] for r in raw]))
 
     def p_b(b, out):
         sh = prior_logit_shift(b, priors)
         lg = out["bond_break_logit"] + (sh if sh is not None else 0)
         return torch.sigmoid(lg / temp).double()
 
-    res: dict = {"checkpoint": str(ckpt), "temperature": temp, "rules": {}}
+    res: dict = {"checkpoint": str(ckpt), "temperature": temp, "break_reweight": reweight,
+                 "prior_correction": priors is not None, "rules": {}}
     for tau in taus:
         res["rules"][f"margin q̂ ≥ {tau}"] = _score(
             batches, outs, lambda b, o, tau=tau: o["bond_log_q"] >= float(np.log(tau)))

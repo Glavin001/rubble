@@ -156,8 +156,35 @@ def kinetic(ph: dict[str, Tensor], v: Tensor, w: Tensor, inertia_w: Tensor, G: i
     return scatter_sum(e, ph["call"], G)
 
 
-def energy_bound(ph: dict[str, Tensor], b: Batch, free: Tensor, tol: float
-                 ) -> tuple[dict[str, Tensor], Tensor, Tensor]:
+def causal_freedom(b: Batch) -> tuple[Tensor, Tensor]:
+    """From the call's *inputs* only (never the oracle's ledger, a target):
+
+    - `free[g]`: the island's momentum is conserved (up to gravity), so the projection is
+      exact: no anchored chunk, no pressure/blast load, and no gravity (with gravity, an
+      unseen ground or static contact would add an impulse; no input says there is none).
+    - `external[g]`: a pressure/blast load does work the inputs cannot bound yet; the KE
+      bound is skipped for those calls (counted as `energy_bound_skipped`).
+    """
+    t = b.t
+    G = b.n_calls
+    dev = t["chunk_call"].device
+    anch = torch.zeros(G, dtype=torch.bool, device=dev).index_put_(
+        (t["chunk_call"],), t["chunk_anchored"].to(dev).bool(), accumulate=True)
+    # the call's own frame-start flag (also set on padding calls, which hold no free body)
+    anch = anch | t["call_anchored"].to(dev).bool()
+    gf = t["glob_x"]
+    blast_cols = [S.col("global_feat", c) for c in ("blast_log_tnt", "blast_z", "blast_impulse")]
+    chunk_blast = [S.col("chunk_feat", f"blast_{i}") for i in range(6)]
+    ext = (gf[:, blast_cols] != 0).any(-1)
+    cb = (t["chunk_x"][:, chunk_blast] != 0).any(-1)
+    ext = ext | torch.zeros(G, dtype=torch.bool, device=dev).index_put_(
+        (t["chunk_call"],), cb, accumulate=True)
+    grav = gf[:, S.col("global_feat", "gravity_mag")] != 0
+    return (~anch) & (~ext) & (~grav), ext
+
+
+def energy_bound(ph: dict[str, Tensor], b: Batch, free: Tensor, tol: float,
+                 skip: Tensor | None = None) -> tuple[dict[str, Tensor], Tensor, Tensor]:
     G = b.n_calls
     call = ph["call"]
     dtype = ph["v_end"].dtype
@@ -171,14 +198,17 @@ def energy_bound(ph: dict[str, Tensor], b: Batch, free: Tensor, tol: float
     if pos1 is None:
         pos1 = _com_rel(ph, ph["pos"] + ph["dx"], G)
     g = b.t["gravity"].to(dtype)
-    en = b.t["energy"].to(dtype)
     e_in = b.t["scales"].to(dtype)[:, SCALE_INDEX["E_in"]]
     ke_in = kinetic(ph, ph["v"], ph["w"], inertia0, G)
     w_g = scatter_sum((m * g[call] * ph["dx"]).sum(-1), call, G)
-    bound = ke_in + w_g + en[:, 3] + tol * e_in
+    # inputs only: KE_in and gravity's work from the decoded motion (external work is 0
+    # without a pressure load; calls with one are skipped, `skip`)
+    bound = ke_in + w_g + tol * e_in
     v, w = ph["v_end"], ph["w_end"]
     ke = kinetic(ph, v, w, inertia1, G)
     active = ke > bound
+    if skip is not None:
+        active = active & ~skip.to(active.device)
     # free: split into COM translation + rigid rotation Ω (I_tot Ω = L_rel) + residual
     mt = scatter_sum(m, call, G)
     vc = scatter_sum(m * v, call, G) / mt
@@ -269,13 +299,13 @@ def decode(out: dict[str, Tensor], b: Batch, cfg: DecodeConfig | None = None) ->
     ph = to_physical(out, b, cfg.dtype)
     G = b.n_calls
     dev = ph["v_end"].device
-    no_ext = b.t["energy"][:, 3].to(dev) == 0
-    free = (~b.t["call_anchored"].to(dev)) & no_ext
+    free, external = causal_freedom(b)
+    free, external = free.to(dev), external.to(dev)
     if cfg.project_momentum:
         ph = project(ph, b, free)
     active = infeasible = torch.zeros(G, dtype=torch.bool, device=dev)
     if cfg.energy_bound:
-        ph, active, infeasible = energy_bound(ph, b, free, cfg.energy_tolerance)
+        ph, active, infeasible = energy_bound(ph, b, free, cfg.energy_tolerance, external)
     broke = breaks(out, b, cfg)
     d0 = b.edges["bond"]["x"][0::2, S.col("bond_feat", "damage")].to(out["bond_ddamage"].dtype)
     # A survivor's damage stays strictly below 1: only the break decision (q̂ ≥ τ) breaks a
@@ -290,5 +320,6 @@ def decode(out: dict[str, Tensor], b: Batch, cfg: DecodeConfig | None = None) ->
         "imp_dx": ph["dx"][nc:], "imp_drot": ph["drot"][nc:],
         "bond_broke": broke, "bond_damage_end": damage_end,
         "energy_bound_active": active, "energy_bound_infeasible": infeasible,
+        "energy_bound_skipped": external,
         "free": free, "_phys": ph,
     }

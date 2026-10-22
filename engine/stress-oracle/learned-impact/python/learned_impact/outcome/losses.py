@@ -183,8 +183,7 @@ def loss_terms(out: dict[str, Tensor], b: Batch, cfg: LossConfig,
     # motion and pose in the kinetic-energy norm, ÷ E_in (and ÷ dt² for poses)
     dcfg = decode_cfg or D.DecodeConfig()
     ph = D.to_physical(out, b, dtype)
-    no_ext = t["energy"][:, 3].to(dev) == 0
-    free = (~t["call_anchored"].to(dev)) & no_ext
+    free = D.causal_freedom(b)[0].to(dev)  # the deployed rule (inputs only)
     if dcfg.project_momentum:
         ph = D.project(ph, b, free)
     nc = t["chunk_node"].shape[0]

@@ -33,9 +33,16 @@ def _momenta(ph, G, end):
 def test_momentum_exact_after_projection(gravity):
     calls, st = make_calls(range(6), anchored=False, gravity=gravity)
     b = batch_of(calls, st)
-    dec = D.decode(_outputs(b), b, D.DecodeConfig(energy_bound=False))
+    if gravity:
+        # with gravity the deployed rule cannot rule out ground contact: not free; the
+        # projection's own exactness (P0 + M g dt) is checked by calling it directly
+        assert not D.causal_freedom(b)[0].any()
+        ph = D.project(D.to_physical(_outputs(b), b), b, torch.ones(b.n_calls, dtype=torch.bool))
+        dec = {"_phys": ph}
+    else:
+        dec = D.decode(_outputs(b), b, D.DecodeConfig(energy_bound=False))
+        assert dec["free"].all()
     ph, G = dec["_phys"], b.n_calls
-    assert dec["free"].all()
     p0, l0 = _momenta(ph, G, end=False)
     p1, l1 = _momenta(ph, G, end=True)
     mt = D.scatter_sum(ph["mass"].unsqueeze(-1), ph["call"], G)
@@ -111,3 +118,23 @@ def test_threshold_and_hash_sampling():
     u = D.hash_uniform(torch.arange(100_000, dtype=torch.int64) | (3 << 32), 1).numpy()
     assert 0 <= u.min() and u.max() < 1
     assert abs(u.mean() - 0.5) < 0.01 and abs(np.mean(u < 0.1) - 0.1) < 0.01
+
+
+def test_decode_reads_inputs_only():
+    """Decode output is identical with the oracle's targets present and with dummy targets
+    (closed loop): nothing at inference reads y_*, ens_*, base_* or the energy ledger."""
+    from learned_impact.outcome import schema as S
+
+    for kw in (dict(anchored=False), dict(anchored=True), dict(anchored=False, gravity=True)):
+        calls, st = make_calls(range(3), **kw)
+        blind = []
+        for c in calls:
+            stripped = S.Call(**{**c.__dict__, "arrays": {
+                k: v for k, v in c.arrays.items() if not S._is_target(k)}, "energy": {}})
+            blind.append(S.with_dummy_targets(stripped))
+        b1, b2 = batch_of(calls, st), batch_of(blind, st)
+        o = _outputs(b1)
+        d1, d2 = D.decode(o, b1), D.decode(o, b2)
+        for k in ("chunk_v_end", "chunk_w_end", "chunk_dx", "chunk_drot", "imp_v_end",
+                  "imp_dx", "bond_broke", "bond_damage_end", "energy_bound_active", "free"):
+            assert torch.equal(d1[k], d2[k]), (kw, k)
