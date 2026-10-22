@@ -12,8 +12,12 @@ One round:
    with a successor whose prediction leaves the oracle's topology (a different break set) or
    whose chunk velocities are off by more than `tol`·v, write its decoded frame-end state
    (`learned-impact-decoded-state/1`, the provider's format) and a relabel job
-   {event, frame = parent frame + 1, state, parent_call, split_group}.
-2. `relabel`: run P0's CLI on the jobs: calls records with `source: "dagger"`.
+   {event, frame = the parent call's frame, decoded, parent_call, split_group}; P0's
+   relabel applies the decoded state and writes frame + 1's call.
+2. `relabel`: run P0's CLI (`learned_impact_relabel`, stress-learned) on the jobs: one
+   `learned-impact-outcome/4` call per job with `source: "dagger"`. Its regime target is -1
+   (undecided: a one-frame relabel cannot know the event's final regime), which the loss
+   masks.
 3. Train with them as a weighted source: `--dataset <train>@w,<dagger dir>@w'`. They inherit
    the parent's split group, so splits stay leak-free.
 
@@ -83,7 +87,10 @@ def export(ckpt: Path, data: Data, recordings: dict[str, Path], out: Path, tol: 
                 continue
             sp = out / "states" / f"{c.event_id}__{c.call_index:04d}.json"
             IO.write(sp, docs[g])
-            jobs.append({"event": str(rec), "frame": int(c.frame) + 1, "state": str(sp),
+            # P0's job: `decoded` is the model's decoded state of frame F, applied as harness A
+            # applies it; the relabelled call is frame F+1's (inputs from that state, the
+            # oracle's targets)
+            jobs.append({"event": str(rec), "frame": int(c.frame), "decoded": str(sp),
                          "parent_call": int(c.call_index), "parent_event_id": c.event_id,
                          "split_group": c.split_group})
             if max_jobs and len(jobs) >= max_jobs:

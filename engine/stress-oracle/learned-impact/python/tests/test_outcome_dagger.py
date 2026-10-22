@@ -22,6 +22,6 @@ def test_export_writes_jobs_for_diverged_states(tmp_path):
     by = {(c.event_id, c.call_index): c for c in data.train}
     for j in jobs:
         parent = by[(j["parent_event_id"], j["parent_call"])]
-        assert j["frame"] == parent.frame + 1 and j["split_group"] == parent.split_group
-        doc = json.loads(open(j["state"]).read())
+        assert j["frame"] == parent.frame and j["split_group"] == parent.split_group
+        doc = json.loads(open(j["decoded"]).read())
         assert doc["schema_version"].startswith("learned-impact-decoded-state/")
