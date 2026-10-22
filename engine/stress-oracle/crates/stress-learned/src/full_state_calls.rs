@@ -115,6 +115,8 @@ struct Side {
     impactor: Rows,
     pair_key: Vec<i64>,
     pair: Vec<f64>,
+    /// Per slot row: the call's node index of chunk a and chunk b (-1 outside the island).
+    pair_local: Vec<i64>,
 }
 
 struct Pending {
@@ -165,7 +167,8 @@ fn side(tree: &Value, chunks: &[(usize, usize)], bonds: &[(usize, usize)], impac
         impactor.0.push(row);
     }
     let island: HashSet<(usize, usize)> = chunks.iter().copied().collect();
-    let (mut pair_key, mut pair) = (Vec::new(), Vec::new());
+    let node: HashMap<(usize, usize), i64> = chunks.iter().enumerate().map(|(j, &k)| (k, j as i64)).collect();
+    let (mut pair_key, mut pair, mut pair_local) = (Vec::new(), Vec::new(), Vec::new());
     if let Some(Value::Map(entries)) = field(tree, "pair_offsets") {
         let mut sorted: Vec<([usize; 4], &Value)> = entries
             .iter()
@@ -182,6 +185,7 @@ fn side(tree: &Value, chunks: &[(usize, usize)], bonds: &[(usize, usize)], impac
                 let mut row = Vec::new();
                 flatten(pt, "", &mut row);
                 pair_key.extend(k.iter().map(|&x| x as i64).chain([slot as i64]));
+                pair_local.extend([node.get(&(k[0], k[1])).copied().unwrap_or(-1), node.get(&(k[2], k[3])).copied().unwrap_or(-1)]);
                 pair.extend(row.iter().map(|(_, x)| *x).chain(std::iter::repeat(f64::NAN)).take(4));
             }
         }
@@ -190,6 +194,7 @@ fn side(tree: &Value, chunks: &[(usize, usize)], bonds: &[(usize, usize)], impac
         chunk_keys: chunks.iter().map(|&(s, c)| stress_ref::keys::chunk_key(s, c)).collect(),
         bond_keys: bonds.iter().map(|&(s, b)| ((s as i64) << 32) | b as i64).collect(),
         impactor_keys: impactors.iter().map(|&k| k as i64).collect(),
+        pair_local,
         chunk,
         bond,
         cluster, cluster_id, chunk_cluster: cluster_of.iter().map(|ci| row_of[ci]).collect(), impactor, pair_key, pair })
@@ -302,6 +307,21 @@ pub fn augment(dir: &Path, ctx: &Json, calls: &mut [Call]) -> Result<Option<(Jso
         let keys: Vec<i64> = values.keys().map(|&k| if kind == 1 { stress_ref::keys::bond_key((k >> 32) as usize, source_of[&((k >> 32) as usize, (k & 0xffff_ffff) as usize)]) } else { k }).collect();
         let data: Vec<f64> = values.values().flat_map(|v| v.iter().zip(&fixed).filter(|(_, &f)| f).map(|(x, _)| *x)).collect();
         statics.push((format!("fs_static_{name}_key"), Arr::I64(vec![keys.len()], keys.clone())));
+        if kind == 1 {
+            // Per-bond scales for nondimensional inputs, from its static columns.
+            let col = |n: &str| static_names[1].iter().position(|c| c == n);
+            let k = static_names[1].len();
+            let get = |row: &[f64], n: &str| col(n).map_or(f64::NAN, |i| row[i]);
+            let scales: Vec<f64> = data
+                .chunks(k.max(1))
+                .take(keys.len())
+                .flat_map(|row| {
+                    let (ft, a, kn, st1, kb) = (get(row, "strength.tensile"), get(row, "geometry.area"), get(row, "stiffness.kn"), get(row, "geometry.s_t1"), get(row, "stiffness.kb_t1"));
+                    [ft * a / kn, ft * st1 / kb, get(row, "strength.g_tension") * a, get(row, "strength.g_shear") * a, get(row, "strength.g_compression") * a, ft]
+                })
+                .collect();
+            statics.push(("fs_static_bond_scale".into(), Arr::F64(vec![keys.len(), 6], scales)));
+        }
         statics.push((format!("fs_static_{name}"), Arr::F64(vec![keys.len(), static_names[kind].len()], data)));
     }
     for (c, p) in calls.iter_mut().zip(pending) {
@@ -319,9 +339,13 @@ pub fn augment(dir: &Path, ctx: &Json, calls: &mut [Call]) -> Result<Option<(Jso
             let np = s.pair_key.len() / 5;
             c.arrays.push((format!("fs_pair_key_{x}"), Arr::I64(vec![np, 5], s.pair_key)));
             c.arrays.push((format!("fs_pair_{x}"), Arr::F64(vec![np, 4], s.pair)));
+            c.arrays.push((format!("fs_pair_local_{x}"), Arr::I64(vec![np, 2], s.pair_local)));
         }
     }
     Ok(Some((json!({"chunk": cols[0], "bond": cols[1], "cluster": cols[2], "impactor": cols[3], "pair": ["offset", "x", "y", "z"],
+        "pair_local": ["node_a", "node_b"],
+        "static_bond_scale": ["u_c", "theta_c", "gf_area_tension", "gf_area_shear", "gf_area_compression", "f_t"],
+        "scale_notes": "u_c = f_t A / k_n (m), theta_c = f_t S_t1 / k_b_t1 (rad), G_f A (J) per mode, f_t (Pa); kappa_fail is the joint law's kappa_fail(kind, r) with r = joint.ductility (tension/shear) or joint.ductility_c (compression): brittle max(r, 1), ductile (r + 1) / 2 (stress_ref::joint::kappa_fail); infinite ductility (at rest) -> infinite kappa_fail",
         "static_chunk": static_names[0], "static_bond": static_names[1], "static_impactor": static_names[3],
         "static_rule": "columns with the same value for each entity at every boundary of the event: one row per entity in event_arrays fs_static_<kind> (keys fs_static_<kind>_key: chunk_key, bond_key, impactor index), left out of the calls", "pair_key": ["structure_a", "chunk_a", "structure_b", "chunk_b", "slot"],
         "max_list": MAX_LIST, "rule": "every serialized field of the entity at the boundary (in: the frame's start, out: its end), flattened: a.b struct fields, a[i] list elements (lists longer than max_list left out), a=Variant one-hot enum variants (missing: 0), None and absent NaN; chunk columns prefixed @ are the world's per-chunk arrays"}), statics)))
