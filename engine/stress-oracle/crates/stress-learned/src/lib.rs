@@ -16,6 +16,7 @@ pub mod live;
 pub mod layouts;
 pub mod oracle;
 pub mod oracle_config;
+pub mod full_state;
 pub mod outcome;
 pub mod outcome_calls;
 pub mod procedural;

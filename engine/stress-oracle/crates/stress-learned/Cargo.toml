@@ -15,6 +15,9 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 stress-ref = { path = "../stress-ref" }
 # Lossless compression of call records (`arrays.bin.zst`, P2's loader reads it).
 zstd = "0.13"
+# The full-state recorder: a World serialized (MessagePack) and shredded into columns.
+rmp-serde = "1"
+rmpv = "1"
 
 [[bin]]
 name = "learned_impact_smoke"
