@@ -205,7 +205,38 @@ pub fn apply_full(decoded: &IslandState, base: &IslandState, outs: &[FullOut]) -
     }
     // Not predicted: the per-chunk world arrays, the solver scratch and the contact history.
     st.take_unpredicted(base);
-    // Cluster activity and its timer, where the base has the same body.
+    // Cluster activity and its timer, where the base has the same body (a model that
+    // predicts the bodies, `fs_cluster_out`, set them already: `body_records`).
+    if by_kind.contains_key("cluster") {
+        // The body fields a model does not predict and the partition does not fix (P2): from
+        // the base's body with the same key (its lowest chunk key).
+        const FROM_BASE: &[&str] = &["explicit_window", "driven", "settled_load_norm", "window_utilization"];
+        let key_of = |c: &stress_ref::solver::Cluster| c.chunks.iter().map(|&k| stress_ref::keys::chunk_key(c.structure, k)).min();
+        let base_by_key: HashMap<i64, (Option<usize>, &stress_ref::solver::Cluster)> = base.solver.clusters.iter().filter_map(|(h, c)| key_of(c).map(|k| (k, (*h, c)))).collect();
+        for (hint, c) in st.solver.clusters.iter_mut() {
+            let Some(&(bh, b)) = key_of(c).and_then(|k| base_by_key.get(&k)) else { continue };
+            // The body's bookkeeping too (id, parent, its place in the body list): the
+            // oracle's trajectory depends on it (iteration order), and a decode that splits
+            // all of a frame's breaks at once numbers the bodies differently from the
+            // oracle's break-by-break splits.
+            (*hint, c.id, c.parent) = (bh, b.id, b.parent);
+            let (mut v, bv) = (to_value(&*c)?, to_value(b)?);
+            for f in FROM_BASE {
+                if let (Ok(dst), Some(src)) = (at_mut(&mut v, f), bv.as_map().and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some(f)).map(|(_, x)| x.clone()))) {
+                    *dst = src;
+                }
+            }
+            *c = from_value(&v)?;
+        }
+        st.solver.next_cluster_id = st.solver.next_cluster_id.max(base.solver.next_cluster_id);
+        let mut ids = std::collections::HashSet::new();
+        for (_, c) in &st.solver.clusters {
+            if !ids.insert(c.id) {
+                return Err(format!("decoded state /2: body id {} twice after taking the base's bookkeeping", c.id));
+            }
+        }
+        return Ok(st);
+    }
     let acts: HashMap<u64, (stress_ref::solver::Activity, f64)> = base.solver.clusters.iter().map(|(_, c)| (c.id, (c.activity, c.active_timer))).collect();
     for (_, c) in st.solver.clusters.iter_mut() {
         if let Some(&(a, t)) = acts.get(&c.id) {
@@ -225,9 +256,14 @@ fn o_has(by_kind: &HashMap<&str, &FullOut>, kind: &str, col: &str) -> bool {
 /// the ceiling of a full-state model's contract.
 pub fn columns_of_state(st: &IslandState, predicted: Option<&HashMap<String, Vec<String>>>) -> Result<Vec<FullOut>, String> {
     let mut outs = Vec::new();
-    let kinds: [(&str, Vec<(i64, Value)>); 2] = [
+    let kinds: [(&str, Vec<(i64, Value)>); 3] = [
         ("bond", st.solver.bonds.iter().map(|((s, _), b)| Ok((stress_ref::keys::bond_key(*s, b.source), to_value(b)?))).collect::<Result<_, String>>()?),
         ("chunk", st.solver.chunks.iter().map(|((s, c), ch)| Ok((stress_ref::keys::chunk_key(*s, *c), to_value(ch)?))).collect::<Result<_, String>>()?),
+        // bodies by their lowest chunk key (`World::body_key`)
+        (
+            "cluster",
+            st.solver.clusters.iter().filter_map(|(_, c)| c.chunks.iter().map(|&k| stress_ref::keys::chunk_key(c.structure, k)).min().map(|k| (k, c))).map(|(k, c)| Ok((k, to_value(c)?))).collect::<Result<_, String>>()?,
+        ),
     ];
     for (kind, ents) in kinds {
         let rows: Vec<Vec<(String, f64)>> = ents
@@ -253,4 +289,38 @@ pub fn columns_of_state(st: &IslandState, predicted: Option<&HashMap<String, Vec
         outs.push(FullOut { kind: kind.into(), keys: ents.iter().map(|(k, _)| *k).collect(), columns, rows: data });
     }
     Ok(outs)
+}
+
+/// The bodies of `fs_cluster_out` (kind "cluster", keyed by each body's lowest chunk key) as
+/// `World::set_body_records` takes them: pose.position.{x,y,z}, pose.rotation.{w,x,y,z},
+/// velocity.{x,y,z}, angular_velocity.{x,y,z} required; activity=Active / activity=Settled and
+/// active_timer when given.
+pub fn body_records(out: &FullOut) -> Result<HashMap<i64, stress_ref::world::BodyRecord>, String> {
+    use stress_ref::math::{Quat, Vec3};
+    let col = |n: &str| out.columns.iter().position(|c| c == n);
+    let need = |n: &str| col(n).ok_or_else(|| format!("fs_cluster_out lacks {n}"));
+    let v3 = |p: &str| -> Result<[usize; 3], String> { Ok([need(&format!("{p}.x"))?, need(&format!("{p}.y"))?, need(&format!("{p}.z"))?]) };
+    let (pos, vel, ang) = (v3("pose.position")?, v3("velocity")?, v3("angular_velocity")?);
+    let rot = [need("pose.rotation.w")?, need("pose.rotation.x")?, need("pose.rotation.y")?, need("pose.rotation.z")?];
+    let (act, set, timer) = (col("activity=Active"), col("activity=Settled"), col("active_timer"));
+    let rows = rows_by_key(out)?;
+    let mut recs = HashMap::new();
+    for (key, r) in rows {
+        let v = |ix: [usize; 3]| Vec3::new(r[ix[0]], r[ix[1]], r[ix[2]]);
+        let activity = match (act.map(|i| r[i]), set.map(|i| r[i])) {
+            (Some(a), Some(b)) => Some(if a >= b { stress_ref::solver::Activity::Active } else { stress_ref::solver::Activity::Settled }),
+            (Some(a), None) => Some(if a >= 0.5 { stress_ref::solver::Activity::Active } else { stress_ref::solver::Activity::Settled }),
+            (None, Some(b)) => Some(if b >= 0.5 { stress_ref::solver::Activity::Settled } else { stress_ref::solver::Activity::Active }),
+            (None, None) => None,
+        };
+        recs.insert(key, stress_ref::world::BodyRecord {
+            position: v(pos),
+            rotation: Quat { w: r[rot[0]], x: r[rot[1]], y: r[rot[2]], z: r[rot[3]] },
+            velocity: v(vel),
+            angular_velocity: v(ang),
+            activity,
+            active_timer: timer.map(|i| r[i]).filter(|t| t.is_finite()),
+        });
+    }
+    Ok(recs)
 }

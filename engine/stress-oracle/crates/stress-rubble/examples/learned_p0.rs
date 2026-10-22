@@ -666,6 +666,11 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
                     // the oracle's own step of the island, for recomputed or diagnostic fields)
                     // or `start` (the frame start: no oracle information).
                     x.apply_decoded_with(&d, true)?;
+                    // The model's bodies (`fs_cluster_out`): the body records set, each chunk's
+                    // hidden state re-derived from them (not from the momentum fit).
+                    if let Some(o) = full.iter().find(|o| o.kind == "cluster") {
+                        x.set_body_records(&stress_learned::decoded_full::body_records(o)?, &m.chunks)?;
+                    }
                     let decoded = x.extract_island(m);
                     let base = match std::env::var("STRESS_FULL_BASE").as_deref() {
                         Ok("start") => {
@@ -677,6 +682,31 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
                         Ok(other) => return Err(format!("STRESS_FULL_BASE={other}: native|start")),
                     };
                     let mut out = stress_learned::decoded_full::apply_full(&decoded, &base, &full)?;
+                    // Diagnostic (`STRESS_FULL2_DIFF=1`): the composed island's fields that differ
+                    // from the oracle's own step (stderr, per kind: column and the largest
+                    // absolute difference).
+                    if std::env::var("STRESS_FULL2_DIFF").is_ok_and(|v| v == "1") {
+                        let native = stress_ref::world::oracle_island_step(start, m)?;
+                        let (a, b) = (stress_learned::decoded_full::columns_of_state(&out, None)?, stress_learned::decoded_full::columns_of_state(&native, None)?);
+                        for (x, y) in a.iter().zip(&b) {
+                            let mut worst: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
+                            let rows_y: HashMap<i64, usize> = y.keys.iter().enumerate().map(|(i, k)| (*k, i)).collect();
+                            for (i, k) in x.keys.iter().enumerate() {
+                                let Some(&j) = rows_y.get(k) else { *worst.entry("(missing entity)".into()).or_default() += 1.0; continue };
+                                for (ci, c) in x.columns.iter().enumerate() {
+                                    let Some(cj) = y.columns.iter().position(|d| d == c) else { continue };
+                                    let (u, v) = (x.rows[i * x.columns.len() + ci], y.rows[j * y.columns.len() + cj]);
+                                    if u.to_bits() != v.to_bits() && !(u.is_nan() && v.is_nan()) {
+                                        let e = worst.entry(c.clone()).or_default();
+                                        *e = e.max((u - v).abs());
+                                    }
+                                }
+                            }
+                            if !worst.is_empty() {
+                                eprintln!("[full2 diff] frame {frame} {}: {worst:?}", x.kind);
+                            }
+                        }
+                    }
                     // Diagnostic (`STRESS_FULL2_NATIVE=bodies|chunks|clusters|impactors`, comma
                     // list): those parts from the oracle's own step, to locate a /2 ceiling's loss.
                     if let Ok(parts) = std::env::var("STRESS_FULL2_NATIVE") {
@@ -686,6 +716,17 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
                                 "chunks" => out.solver.chunks = native.solver.chunks.clone(),
                                 "clusters" => out.solver.clusters = native.solver.clusters.clone(),
                                 "impactors" => out.impactors = native.impactors.clone(),
+                                // the bodies' bookkeeping alone: id, parent and list position by body key
+                                "ids" => {
+                                    let key = |c: &stress_ref::solver::Cluster| c.chunks.iter().map(|&k| stress_ref::keys::chunk_key(c.structure, k)).min();
+                                    let by: HashMap<i64, (Option<usize>, u64, Option<u64>)> = native.solver.clusters.iter().filter_map(|(h, c)| key(c).map(|k| (k, (*h, c.id, c.parent)))).collect();
+                                    for (h, c) in out.solver.clusters.iter_mut() {
+                                        if let Some(&(nh, id, parent)) = key(c).and_then(|k| by.get(&k)) {
+                                            (*h, c.id, c.parent) = (nh, id, parent);
+                                        }
+                                    }
+                                    out.solver.next_cluster_id = native.solver.next_cluster_id;
+                                }
                                 "bodies" => {
                                     out.solver.chunks = native.solver.chunks.clone();
                                     out.solver.clusters = native.solver.clusters.clone();

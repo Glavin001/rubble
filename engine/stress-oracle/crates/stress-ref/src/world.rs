@@ -34,7 +34,7 @@ mod handoff;
 #[path = "world_island.rs"]
 mod island;
 pub use island::{oracle_island_step, IslandMembers, IslandState};
-pub use handoff::{stable_key, DecodedBody, DecodedBreak, DecodedDamage, DecodedState, IslandKeys, DECODED_STATE_VERSION, SURVIVOR_DAMAGE_MAX};
+pub use handoff::{stable_key, BodyRecord, DecodedBody, DecodedBreak, DecodedDamage, DecodedState, IslandKeys, DECODED_STATE_VERSION, SURVIVOR_DAMAGE_MAX};
 #[path = "world_branch.rs"]
 mod branch;
 #[path = "world_snapshot.rs"]

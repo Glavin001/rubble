@@ -639,3 +639,80 @@ impl World {
         Ok(())
     }
 }
+
+/// A body's frame-end record from a full-state model (decoded state `/2`'s
+/// `fs_cluster_out`), keyed by the body's lowest chunk key (`World::body_key`).
+#[derive(Clone, Copy, Debug)]
+pub struct BodyRecord {
+    pub position: Vec3,
+    pub rotation: Quat,
+    pub velocity: Vec3,
+    pub angular_velocity: Vec3,
+    pub activity: Option<crate::solver::Activity>,
+    pub active_timer: Option<f64>,
+}
+
+impl World {
+    /// A body's key: its lowest chunk key (`keys::chunk_key`), stable while it keeps its
+    /// chunks; a split gives each new body its own.
+    pub fn body_key(&self, ci: usize) -> Option<i64> {
+        let cl = &self.solver.clusters[ci];
+        cl.chunks.iter().map(|&c| crate::keys::chunk_key(cl.structure, c)).min()
+    }
+
+    /// Set the island's bodies from a model's records (decoded state `/2`): each chunk keeps
+    /// its world pose and motion, the body takes the record's pose, velocity, activity and
+    /// timer, and the chunk's hidden state (u, th, v, w in the body's frame) is re-derived:
+    /// hidden = (body ∘ rest)⁻¹ ∘ world, the inverse of `chunk_position` / `chunk_velocity`.
+    /// Every island body must have a record.
+    pub fn set_body_records(&mut self, records: &std::collections::HashMap<i64, BodyRecord>, island: &std::collections::HashSet<(usize, usize)>) -> Result<usize, String> {
+        let mut set = 0;
+        for ci in 0..self.solver.clusters.len() {
+            let (s, first) = {
+                let cl = &self.solver.clusters[ci];
+                match cl.chunks.first() {
+                    Some(&c) if island.contains(&(cl.structure, c)) => (cl.structure, c),
+                    _ => continue,
+                }
+            };
+            let key = self.body_key(ci).ok_or("a body without chunks")?;
+            let rec = records.get(&key).ok_or_else(|| format!("no body record for body {key} (structure {s}, chunk {first})"))?;
+            let chunks = self.solver.clusters[ci].chunks.clone();
+            let world: Vec<(usize, Vec3, Quat, Vec3, Vec3)> = chunks
+                .iter()
+                .map(|&c| {
+                    let st = &self.solver.chunks[s][c];
+                    let q = self.solver.clusters[ci].pose.rotation * Quat::from_rotation_vector(st.th);
+                    let (v, w) = self.solver.chunk_velocity(s, c);
+                    (c, self.solver.chunk_position(s, c), q, v, w)
+                })
+                .collect();
+            let cl = &mut self.solver.clusters[ci];
+            // A unit quaternion as given (renormalising one changes its last bits); a model's
+            // off-unit output is normalised.
+            let q = rec.rotation;
+            let n2 = q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z;
+            cl.pose = Pose { position: rec.position, rotation: if (n2 - 1.0).abs() > 1e-12 { q.normalized() } else { q } };
+            cl.velocity = rec.velocity;
+            cl.angular_velocity = rec.angular_velocity;
+            if let Some(a) = rec.activity {
+                cl.activity = a;
+            }
+            if let Some(t) = rec.active_timer {
+                cl.active_timer = t;
+            }
+            let cl = cl.clone();
+            let back = cl.pose.rotation.conjugate();
+            for (c, x, q, v, w) in world {
+                let center = self.solver.structures[s].chunks[c].center;
+                let u = cl.pose.inverse_transform_point(x) - center;
+                let th = (back * q).to_rotation_vector();
+                let r = cl.pose.transform_vector(center + u - cl.com);
+                let cs = &mut self.solver.chunks[s][c];
+                (cs.u, cs.th, cs.v, cs.w) = (u, th, back.rotate(v - cl.velocity - cl.angular_velocity.cross(r)), back.rotate(w - cl.angular_velocity));
+            }
+            set += 1;
+        }
+        Ok(set)
+    }
+}
