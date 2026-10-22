@@ -157,6 +157,9 @@ CALL_ARRAYS: dict[str, ArraySpec] = {
     # /4: frame-start body (cluster) per chunk and its world rotation, for pushforward
     "chunk_body": ArraySpec("i32", ("Nc",), raw=True),
     "chunk_body_q": ArraySpec("f32", ("Nc", 4), raw=True),
+    # ChunkData.inertia in the structure's body frame (xx, yy, zz, xy, xz, yz): the solver
+    # rotates it by the body rotation only. `chunk_inertia_body` is its diagonal.
+    "chunk_inertia_struct": ArraySpec("f32", ("Nc", 6), required=False, raw=True),
     # impactors
     "impactor_key": ArraySpec("i64", ("Ni",)),
     "impactor_feat": _feat("impactor_feat", "Ni"),

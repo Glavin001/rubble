@@ -56,6 +56,12 @@ def world_inertia(q: Tensor, principal: Tensor) -> Tensor:
     return r @ torch.diag_embed(principal) @ r.transpose(-1, -2)
 
 
+def sym6_to_matrix(i6: Tensor) -> Tensor:
+    """[..., 6] (xx, yy, zz, xy, xz, yz) → [..., 3, 3]."""
+    xx, yy, zz, xy, xz, yz = i6.unbind(-1)
+    return torch.stack([xx, xy, xz, xy, yy, yz, xz, yz, zz], -1).reshape(i6.shape[:-1] + (3, 3))
+
+
 def random_quat(rng: np.random.Generator, n: int) -> np.ndarray:
     q = rng.normal(size=(n, 4))
     q /= np.linalg.norm(q, axis=1, keepdims=True)

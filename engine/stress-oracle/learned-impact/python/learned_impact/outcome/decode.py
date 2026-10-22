@@ -24,7 +24,7 @@ from torch import Tensor
 from ..mgn.mesh_blocks import scatter_sum
 from . import schema as S
 from .batch import SCALE_INDEX, Batch
-from .geometry import quat_rotate, rotvec_to_matrix, world_inertia
+from .geometry import quat_rotate, quat_to_matrix, rotvec_to_matrix, sym6_to_matrix, world_inertia
 
 
 @dataclass
@@ -60,10 +60,27 @@ def nodes(b: Batch, dtype=torch.float64) -> dict[str, Tensor]:
         "pos": cat("chunk_pos", "imp_pos"),
         "v": cat("chunk_v", "imp_v"),
         "w": cat("chunk_w", "imp_w"),
+        "inertia_w": node_world_inertia(b, dtype),
         "call": torch.cat([t["chunk_call"], t["imp_call"]], 0),
         "anchored": torch.cat([t["chunk_anchored"],
                                torch.zeros_like(t["imp_call"], dtype=torch.bool)], 0),
     }
+
+
+def node_world_inertia(b: Batch, dtype=torch.float64) -> Tensor:
+    """Frame-start world inertia [N,3,3], chunks then impactors. A chunk's inertia is
+    `ChunkData.inertia` in its structure's body frame, rotated by the body (cluster)
+    rotation only, as the solver does (R_body I R_bodyᵀ): with `/4`'s chunk_inertia_struct
+    and chunk_body_q. Without them, the principal diagonal rotated by the chunk's own
+    orientation: exact only for chunks with identity rest rotation (every brick so far)."""
+    t = b.t
+    imp = world_inertia(t["imp_q_world"].to(dtype), t["imp_inertia_body"].to(dtype))
+    if "chunk_inertia_struct" in t and "chunk_body_q" in t:
+        r = quat_to_matrix(t["chunk_body_q"].to(dtype))
+        ch = r @ sym6_to_matrix(t["chunk_inertia_struct"].to(dtype)) @ r.transpose(-1, -2)
+    else:
+        ch = world_inertia(t["chunk_q_world"].to(dtype), t["chunk_inertia_body"].to(dtype))
+    return torch.cat([ch, imp], 0)
 
 
 def to_physical(out: dict[str, Tensor], b: Batch, dtype=torch.float64) -> dict[str, Tensor]:
@@ -112,7 +129,7 @@ def project(ph: dict[str, Tensor], b: Batch, free: Tensor) -> dict[str, Tensor]:
     g = b.t["gravity"].to(dtype)
     dt = b.t["scales"].to(dtype)[:, SCALE_INDEX["dt"]].unsqueeze(-1)
     node_free = free[call].unsqueeze(-1)
-    inertia0 = world_inertia(ph["q"], ph["inertia"])
+    inertia0 = ph["inertia_w"]
     pos0 = _com_rel(ph, ph["pos"], G)
     p0, l0 = momentum(ph, ph["v"], ph["w"], pos0, inertia0, G)
     # centre-of-mass displacement, exact
@@ -189,7 +206,7 @@ def energy_bound(ph: dict[str, Tensor], b: Batch, free: Tensor, tol: float,
     call = ph["call"]
     dtype = ph["v_end"].dtype
     m = ph["mass"].unsqueeze(-1)
-    inertia0 = world_inertia(ph["q"], ph["inertia"])
+    inertia0 = ph["inertia_w"]
     inertia1 = ph.get("inertia_end")
     if inertia1 is None:
         rd = rotvec_to_matrix(ph["drot"])

@@ -138,3 +138,31 @@ def test_decode_reads_inputs_only():
         for k in ("chunk_v_end", "chunk_w_end", "chunk_dx", "chunk_drot", "imp_v_end",
                   "imp_dx", "bond_broke", "bond_damage_end", "energy_bound_active", "free"):
             assert torch.equal(d1[k], d2[k]), (kw, k)
+
+
+def test_chunk_inertia_uses_the_body_rotation_not_the_rest_rotation():
+    """The solver rotates ChunkData.inertia (structure body frame) by the body rotation only
+    (R_body I R_bodyᵀ); with /4's full inertia and body quaternion the decode does the same,
+    whatever the chunk's own (rest-rotated) orientation."""
+    import numpy as np
+    import torch
+
+    from learned_impact.outcome import decode as D
+    from learned_impact.outcome.batch import HierarchyCache, collate
+    from learned_impact.outcome.geometry import quat_to_matrix, random_quat, sym6_to_matrix
+    from learned_impact.outcome.synthetic import make_event
+
+    m, calls, st = make_event(2)
+    c = calls[0]
+    nc = c.counts["chunks"]
+    rng = np.random.default_rng(0)
+    i6 = np.concatenate([rng.uniform(1, 2, (nc, 3)), rng.uniform(-0.2, 0.2, (nc, 3))], 1)
+    body_q = random_quat(rng, nc)
+    c.arrays = dict(c.arrays, chunk_inertia_struct=i6.astype(np.float32),
+                    chunk_body_q=body_q.astype(np.float32),
+                    chunk_q_world=random_quat(rng, nc).astype(np.float32))  # rest-rotated
+    b = collate([c], {c.event_id: st}, HierarchyCache(2))
+    iw = D.node_world_inertia(b)[:nc]
+    r = quat_to_matrix(torch.tensor(body_q))
+    want = r @ sym6_to_matrix(torch.tensor(i6)) @ r.transpose(-1, -2)
+    assert torch.allclose(iw, want, atol=1e-5)

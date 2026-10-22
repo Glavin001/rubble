@@ -83,8 +83,14 @@ def rewrite_carried(c: S.Call, pred: dict[str, dict[int, np.ndarray]]) -> S.Call
     # the body frame. Poses, and so u and θ, stay the recorded ones, like all geometry here.
     if "chunk_body" in a and "chunk_body_q" in a and nc:
         body = a["chunk_body"].astype(np.int64)
-        iw = np.einsum("nij,nj,nkj->nik", rb[:nc],
-                       a["chunk_inertia_body"].astype(np.float64), rb[:nc])
+        if "chunk_inertia_struct" in a:  # the solver's R_body I R_bodyᵀ
+            i6 = a["chunk_inertia_struct"].astype(np.float64)
+            istr = i6[:, [0, 3, 4, 3, 1, 5, 4, 5, 2]].reshape(-1, 3, 3)
+            rbo = quat_to_matrix_np(a["chunk_body_q"].astype(np.float64))
+            iw = rbo @ istr @ rbo.transpose(0, 2, 1)
+        else:
+            iw = np.einsum("nij,nj,nkj->nik", rb[:nc],
+                           a["chunk_inertia_body"].astype(np.float64), rb[:nc])
         dv, dw = body_relative_rates_np(v[:nc], w[:nc], pos[:nc], mass[:nc], iw, body,
                                         int(body.max()) + 1)
         rbody = quat_to_matrix_np(a["chunk_body_q"].astype(np.float64))

@@ -36,7 +36,7 @@ from . import decode as D
 from . import metrics as M
 from . import schema as S
 from .batch import SCALE_INDEX, Batch, HierarchyCache, collate
-from .geometry import quat_rotate_inv, world_inertia
+from .geometry import quat_rotate_inv
 
 BIG = 30.0  # logit for a certain event
 
@@ -90,7 +90,7 @@ def targets_to_outputs(b: Batch, n_time_bins: int = S.N_TIME_BINS) -> dict[str, 
 
 def _ke_err(ph, v, w, yv, yw, G):
     """Kinetic-energy-norm error per call (the L_motion metric), unnormalised."""
-    i0 = world_inertia(ph["q"], ph["inertia"])
+    i0 = ph["inertia_w"]
     dv, dw = v - yv, w - yw
     e = ph["mass"] * (dv * dv).sum(-1) + (dw.unsqueeze(-2) @ i0 @ dw.unsqueeze(-1)).reshape(-1)
     return D.scatter_sum(e, ph["call"], G)
@@ -131,7 +131,7 @@ def stage_errors(b: Batch, tolerances=(0.0, 0.02, 0.05, 0.1)) -> list[dict]:
     imp_err = torch.zeros(G, dtype=torch.float64).scatter_reduce(
         0, t["imp_call"], imp_dv, "amax") / v_ref
     # the oracle's own momentum residual on islands the decode treats as free
-    i0 = world_inertia(ph_e["q"], ph_e["inertia"])
+    i0 = ph_e["inertia_w"]
     pos0 = D._com_rel(ph_e, ph_e["pos"], G)
     p0, _ = D.momentum(ph_e, ph_e["v"], ph_e["w"], pos0, i0, G)
     p1, _ = D.momentum(ph_e, yv, yw, pos0, i0, G)

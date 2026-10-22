@@ -31,7 +31,6 @@ from ..mgn.mesh_blocks import scatter_sum
 from . import decode as D
 from . import schema as S
 from .batch import SCALE_INDEX, Batch
-from .geometry import world_inertia
 
 TERMS = ("margin", "demand", "break", "time", "motion", "def_motion", "pose", "impactor",
          "energy", "damage", "regime")
@@ -193,7 +192,7 @@ def loss_terms(out: dict[str, Tensor], b: Batch, cfg: LossConfig,
     dt = sc[:, SCALE_INDEX["dt"]]
     call = ph["call"]
     m = ph["mass"]
-    i0 = world_inertia(ph["q"], ph["inertia"])
+    i0 = ph["inertia_w"]
     yv = torch.cat([t["y_chunk_v_end"], t["y_imp_v_end"]]).to(dtype)
     yw = torch.cat([t["y_chunk_w_end"], t["y_imp_w_end"]]).to(dtype)
     ydx = torch.cat([t["y_chunk_dx"], t["y_imp_dx"]]).to(dtype)

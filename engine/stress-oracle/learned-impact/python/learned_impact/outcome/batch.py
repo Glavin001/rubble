@@ -95,6 +95,9 @@ def collate(calls: list[S.Call], structures: dict[str, dict[int, dict[str, np.nd
     h_count = [0] * (L + 1)
     node_off = chunk_off = imp_off = frag_off = 0
     ens_rows = []
+    # full chunk inertia only when every call carries it (else the diagonal fallback)
+    full_inertia = all("chunk_inertia_struct" in c.arrays and "chunk_body_q" in c.arrays
+                       for c in calls)
     for gi, c in enumerate(calls):
         a = c.arrays
         nc, ni = c.counts["chunks"], c.counts["impactors"]
@@ -112,6 +115,9 @@ def collate(calls: list[S.Call], structures: dict[str, dict[int, dict[str, np.nd
             add(f"chunk_{k}", a[f"chunk_{k}"])
             add(f"imp_{k}", a[f"impactor_{k}"])
         add("chunk_anchored", a["chunk_anchored"])
+        if full_inertia:  # ChunkData.inertia (structure body frame) and the body rotation
+            add("chunk_inertia_struct", a["chunk_inertia_struct"])
+            add("chunk_body_q", a["chunk_body_q"])
         for k in ("v_end", "w_end", "dx", "drot"):
             add(f"y_chunk_{k}", a[f"y_chunk_{k}"])
             add(f"y_imp_{k}", a[f"y_impactor_{k}"])
@@ -307,6 +313,11 @@ def pad_batch(b: Batch, growth: float = 1.25, call_multiple: int = 8) -> Batch:
         t[f"{pre}_mass"] = _pad_rows(t[f"{pre}_mass"], n, 1.0)
         t[f"{pre}_inertia_body"] = _pad_rows(t[f"{pre}_inertia_body"], n, 1.0)
         t[f"{pre}_q_world"] = torch.cat([t[f"{pre}_q_world"], ident.expand(n, 4)], 0)
+        if pre == "chunk" and "chunk_inertia_struct" in t:
+            unit = torch.tensor([1.0, 1.0, 1.0, 0.0, 0.0, 0.0], dtype=t["chunk_inertia_struct"].dtype)
+            t["chunk_inertia_struct"] = torch.cat([t["chunk_inertia_struct"], unit.expand(n, 6)], 0)
+            t["chunk_body_q"] = torch.cat([t["chunk_body_q"], ident.expand(n, 4)
+                                           .to(t["chunk_body_q"].dtype)], 0)
         for k in ("pos", "v", "w"):
             t[f"{pre}_{k}"] = _pad_rows(t[f"{pre}_{k}"], n)
         for k in ("v_end", "w_end", "dx", "drot"):
