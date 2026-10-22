@@ -253,6 +253,38 @@ def holdout_ballistic_speeds(events: list, positions: tuple) -> list[str]:
     return sorted(moved)
 
 
+def holdout_tier1_configs(events: list, frac: float = 0.1, min_configs: int = 3) -> list[str]:
+    """Tier-1 validation in memory (planning, 2026-10-22: no oracle time or disk): for each
+    training layout (manifest layout_family) with ≥ `min_configs` configurations, about `frac`
+    of them (at least one; a whole configuration with all its ensemble members), chosen by a
+    stable hash, become validation with their own split group. Returns the moved
+    configuration ids (ensemble id, or event id for a single run)."""
+    import hashlib
+
+    configs: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
+    for e in events:
+        m = e.manifest
+        if m["split"] != "train" or m.get("source", "standalone") == "dagger":
+            continue
+        configs[m.get("layout_family", "")][m.get("ensemble_id") or m["event_id"]].append(e)
+    moved = []
+    h = lambda x: hashlib.sha256(x.encode()).hexdigest()  # noqa: E731
+    for lay, cfg in sorted(configs.items()):
+        if not lay or len(cfg) < min_configs:
+            continue
+        k = max(1, int(frac * len(cfg) + 0.5))
+        for cid in sorted(cfg, key=h)[:k]:
+            for e in cfg[cid]:
+                e.manifest["split"], e.manifest["split_group"] = "val", f"tier1:{cid}"
+                for c in e.calls:
+                    c.split_group = f"tier1:{cid}"
+            moved.append(cid)
+    n_lay = sum(1 for lay, cfg in configs.items() if lay and len(cfg) >= min_configs)
+    print(f"[data] tier-1 val: {len(moved)} training configurations held out from {n_lay} layouts "
+          f"with ≥ {min_configs} configurations", flush=True)
+    return sorted(moved)
+
+
 class Data:
     """Train calls from `dataset`'s train split; validation calls from its val split, or,
     with `val_dataset`, from that dataset's val split instead (the bulk evaluation
@@ -261,7 +293,7 @@ class Data:
     def __init__(self, dataset: str, include_unrouted: bool = False,
                  val_dataset: str | None = None, train_events: list | None = None,
                  call_cache: dict | None = None, extra_train: str = "",
-                 holdout_ballistic: tuple = ()):
+                 holdout_ballistic: tuple = (), holdout_tier1: float = 0.0):
         # `dataset` may list several roots, `path[@weight],…`: their training calls are
         # mixed by `MixedSampler` with the given shares of every epoch (default: in
         # proportion to their sizes, i.e. plain concatenation).
@@ -300,6 +332,8 @@ class Data:
             self.events = self.events + val_events
         if holdout_ballistic:
             holdout_ballistic_speeds(self.events, holdout_ballistic)
+        if holdout_tier1:
+            holdout_tier1_configs(self.events, holdout_tier1)
         self.structures = {e.manifest["event_id"]: e.structures for e in self.events}
         keep = (lambda c: True) if include_unrouted else (lambda c: c.routed)
         from_val = {id(e) for e in val_events} if val_dataset else set()
@@ -807,7 +841,7 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress, run: 
                     _batches(data.train, cfg.batch_budget, cfg.batch_calls)[:64]]
     norms = Lo.zero_baselines(norm_batches, cfg.loss, data.priors)
     prog.line("zero-predictor baselines: " + " ".join(f"{k}={v:.4g}" for k, v in norms.items()))
-    val_sel, val_t3 = data.val, []
+    val_sel, val_t3, tier = data.val, [], {}
     if cfg.tiers:
         from .coverage import event_tier
         tmap = json.loads(Path(cfg.tiers).read_text())
@@ -1036,6 +1070,29 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress, run: 
         prog.line(f"tau (validation) = {tau} (scores {scores})")
         save(out / "best.pt", model, cfg, norms, data.priors, ck["step"], ck["metrics"],
              temperature, tau)
+    if cfg.tiers and val_batches and best["step"] is not None:
+        # the per-tier report of the best checkpoint at its τ, from the calls in memory (the
+        # in-memory tier-1 hold-outs exist only here); never one blended average
+        ck = torch.load(out / "best.pt", map_location=dev, weights_only=False)
+        model.load_state_dict(ck["model"])
+        from .coverage import TIER_NAMES
+        dc = decode_config(ck)
+        rep = {"checkpoint": str(out / "best.pt"), "tau": dc.tau, "tiers": {}}
+        for t in (1, 2, 3):
+            ct = [c for c in data.val if tier.get(id(c)) == t]
+            if not ct:
+                continue
+            bt = [coll(bc) for bc in _batches(ct, cfg.batch_budget, cfg.batch_calls)]
+            rt = M.three_way(model, bt, dc, shift_priors)
+            rep["tiers"][str(t)] = {"name": TIER_NAMES[t], "n_calls": len(ct),
+                                    "n_events": len({c.event_id for c in ct}),
+                                    "selection_score": rt["selection_score"], "families": rt["families"],
+                                    "acceptance": rt["acceptance"]}
+            prog.line(f"tier {t} ({TIER_NAMES[t]}): {len(ct)} calls, score {rt['selection_score']:.3f}, "
+                      f"accepted families {[f for f, a in rt['acceptance'].items() if a['accept']]}")
+        (out / "report-val-tiers.json").write_text(json.dumps(rep, indent=1, default=float))
+        tracker.summary({"tiers": {k: {"selection_score": v["selection_score"]} for k, v in rep["tiers"].items()}})
+        tracker.artifact(out / "report-val-tiers.json", f"{out.parent.name}-{out.name}-report-val-tiers")
     prog.update(force=True, state="done", step=cfg.steps)
     tracker.summary({"best_score": best["score"], "best_step": best["step"] or 0,
                      "temperature": temperature, "tau": tau, "best": best["metrics"] or {}})
@@ -1078,6 +1135,9 @@ def main(argv=None) -> None:
                     help="the chunks' frame-end hidden state (u, theta, v, w) as a head")
     ap.add_argument("--tiers", default="", help="coverage tiers JSON (outcome.coverage): select on "
                     "validation tiers 1+2, report tier 3 separately")
+    ap.add_argument("--holdout-tier1", type=float, default=0.0,
+                    help="hold out about this share of the configurations of every training layout "
+                         "with ≥ 3 as tier-1 validation, in memory (e.g. 0.1)")
     ap.add_argument("--holdout-ballistic", default="",
                     help="speed positions (0-based, e.g. 1,3) of each training ballistic family's "
                          "ensembles moved to validation: the in-distribution ballistic test")
@@ -1134,7 +1194,8 @@ def main(argv=None) -> None:
     data = Data(dataset, val_dataset=a.val_dataset or None,
                 train_events=_read_list(a.train_events) if a.train_events else None, call_cache=cc,
                 extra_train=a.extra_train,
-                holdout_ballistic=tuple(int(x) for x in a.holdout_ballistic.split(",") if x))
+                holdout_ballistic=tuple(int(x) for x in a.holdout_ballistic.split(",") if x),
+                holdout_tier1=a.holdout_tier1)
     for s in seeds:
         out = Path(a.out) / (f"seed{s}" if len(seeds) > 1 else "")
         cfg = TrainConfig(dataset=dataset, val_dataset=a.val_dataset, out=str(out), steps=a.steps,

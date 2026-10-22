@@ -25,3 +25,25 @@ def test_tiers():
     assert cov.classify(rec("v5", "val", speed=0.49))[0] == 1  # within the 5% edge margin
     assert cov.classify(rec("v6", "val", extrap="speed"))[0] == 3  # designed extrapolation
     assert C.event_tier({"events": {}}, "held", "val") == 1  # held out in memory from training
+
+
+def test_trainer_reports_tiers_and_holds_out_tier1(tmp_path):
+    import json
+
+    from learned_impact.outcome.ensemble import aggregate_dataset
+    from learned_impact.outcome.synthetic import write_dataset
+    from learned_impact.outcome.train import Data, TrainConfig, train
+
+    write_dataset(tmp_path / "data", 60, ensembles=1, ensemble_size=3)
+    aggregate_dataset(tmp_path / "data")
+    data = Data(str(tmp_path / "data"), holdout_tier1=0.1)
+    held = [c for c in data.val if c.split_group.startswith("tier1:")]
+    assert held, "a training layout with ≥ 3 configurations gives a tier-1 validation config"
+    assert not {c.split_group for c in held} & {c.split_group for c in data.train}
+    tiers = tmp_path / "tiers.json"
+    tiers.write_text(json.dumps({"events": {}}))  # synthetic: every val event unknown → tier 1
+    cfg = TrainConfig(dataset=str(tmp_path / "data"), out=str(tmp_path / "run"), steps=6, batch_calls=4,
+                      eval_every=3, device="cpu", warmup=2, tiers=str(tiers))
+    train(cfg, data)
+    rep = json.loads((tmp_path / "run" / "report-val-tiers.json").read_text())
+    assert "1" in rep["tiers"] and rep["tiers"]["1"]["n_calls"] > 0
