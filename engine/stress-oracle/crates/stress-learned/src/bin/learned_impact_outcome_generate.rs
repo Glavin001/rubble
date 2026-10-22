@@ -6,6 +6,10 @@
 //!       [--max-seconds S] [--max-failure-fraction F] [--pause-file PATH]
 //!       [--members M] [--ensemble-train-share F] [--no-ensembles]
 //!       [--budget-gb G] [--min-free-gb F] [--no-thinning]
+//!       [--split sealed|train|val|test] [--extrapolation speed|mass|size|loads]
+//!
+//! The sealed set: `--split sealed` (every configuration an ensemble, every frame kept), with
+//! `--extrapolation` for the splits beyond the training ranges.
 //!
 //! Storage (default): arrays compressed with zstd, and training events that are not
 //! ensemble members keep only the frames training uses (dropped frames regenerate
@@ -55,10 +59,11 @@ fn main() {
             let family = val("--family").unwrap_or_else(|| "free_wall".into());
             let tier: u32 = val("--tier").map_or(1, |x| x.parse().expect("--tier"));
             let n: usize = val("--n").map_or(20, |x| x.parse().expect("--n"));
-            let ranges = match val("--ranges").as_deref().unwrap_or("pilot") {
-                "pilot" => Ranges::pilot(),
-                "bulk" => Ranges::bulk(),
-                r => panic!("unknown --ranges {r}"),
+            let ranges = match (val("--extrapolation"), val("--ranges").as_deref().unwrap_or("pilot")) {
+                (Some(x), _) => Ranges::extrapolation(&x).expect("--extrapolation"),
+                (None, "pilot") => Ranges::pilot(),
+                (None, "bulk") => Ranges::bulk(),
+                (None, r) => panic!("unknown --ranges {r}"),
             };
             wall_recipes(&family, tier, n, seed, &ranges).expect("recipes")
         }
@@ -67,7 +72,7 @@ fn main() {
     };
     // Splits by layout group, and ensembles on every validation/test/sealed configuration
     // and on a share of the training ones (`--members 1` or `--no-ensembles`: none).
-    let mut plan = EnsemblePlan { seed, ..EnsemblePlan::default() };
+    let mut plan = EnsemblePlan { seed, force_split: val("--split"), ..EnsemblePlan::default() };
     if let Some(m) = val("--members") {
         plan.members = m.parse().expect("--members");
     }

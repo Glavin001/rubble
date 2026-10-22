@@ -85,6 +85,12 @@ pub struct Ranges {
     /// for the plan's ~20% of events that break nothing (the punch-ratio draw alone gave 1-15%).
     pub low_speed_share: f64,
     pub low_speed: (f64, f64),
+    /// Extrapolation splits of the sealed set: every impactor's speed drawn log-uniform in
+    /// this band instead of from the punch ratio, and the number of impactors of tier 2.
+    pub forced_speed: Option<(f64, f64)>,
+    pub loads: (usize, usize),
+    /// The extrapolation this catalog tests (recorded in each recipe), if any.
+    pub extrapolation: Option<&'static str>,
 }
 
 impl Ranges {
@@ -108,7 +114,24 @@ impl Ranges {
             weibull_probability: 0.3,
             low_speed_share: 0.2,
             low_speed: (0.1, 1.0),
+            forced_speed: None,
+            loads: (2, 4),
+            extrapolation: None,
         }
+    }
+
+    /// The sealed set's extrapolation splits, each beyond the training ranges on one axis
+    /// (`pilot` otherwise): "speed" 60-90 m/s, "mass" 1.5-6 t, "size" walls of 16-24 x 2-3 x
+    /// 12-18 chunks, "loads" 5-8 impactors (tier 2).
+    pub fn extrapolation(axis: &str) -> Result<Ranges, String> {
+        let base = Ranges::pilot();
+        Ok(match axis {
+            "speed" => Ranges { forced_speed: Some((60.0, 90.0)), low_speed_share: 0.0, extrapolation: Some("speed"), ..base },
+            "mass" => Ranges { mass: (1500.0, 6000.0), extrapolation: Some("mass"), ..base },
+            "size" => Ranges { nx: (16, 24), ny: (2, 3), nz: (12, 18), extrapolation: Some("size"), ..base },
+            "loads" => Ranges { loads: (5, 8), extrapolation: Some("loads"), ..base },
+            a => return Err(format!("unknown extrapolation {a:?} (speed, mass, size, loads)")),
+        })
     }
 
     /// The bulk ranges (plan P1: size, thickness, resolution, openings, supports).
@@ -339,7 +362,7 @@ pub fn wall_recipes(family: &str, tier: u32, n: usize, seed: u64, r: &Ranges) ->
         }
         scene.bodies.push(wall_body(&layout, "wall", 0.0));
         let y_back = layout.size().y;
-        let loads = if tier == 1 { 1 } else { rng.int(2, 4) };
+        let loads = if tier == 1 { 1 } else { rng.int(r.loads.0, r.loads.1) };
         let mut draws = Vec::new();
         let mut impactors = Vec::new();
         let mut speeds = Vec::new();
@@ -383,7 +406,9 @@ pub fn wall_recipes(family: &str, tier: u32, n: usize, seed: u64, r: &Ranges) ->
                 };
                 // The hypercube's ratio dimension decides the band, so the share is exact.
                 let low = k == 0 && v[5] < r.low_speed_share;
-                let speed = if low {
+                let speed = if let Some((a, b)) = r.forced_speed {
+                    log_uniform(v[5], a, b)
+                } else if low {
                     log_uniform(v[5] / r.low_speed_share, r.low_speed.0, r.low_speed.1)
                 } else {
                     match solve_speed(&scene, &layout, y_back, &d, r) {
@@ -420,7 +445,7 @@ pub fn wall_recipes(family: &str, tier: u32, n: usize, seed: u64, r: &Ranges) ->
                 "spin": d.spin, "target_punch_ratio": d.punch_ratio, "arrival": d.arrival,
                 "speed_band": if d.low { "sub_threshold" } else { "punch_ratio" },
             })).collect::<Vec<_>>(),
-            "seed": seed, "index": i, "catalog": "p1-walls", "redraws": redraws,
+            "seed": seed, "index": i, "catalog": "p1-walls", "redraws": redraws, "extrapolation": r.extrapolation,
         });
         out.push(OutcomeRecipe { event_id: event_id.clone(), family: family.into(), tier, split_group: event_id, layout_group: layout.key(), parameters: params, scene });
     }
@@ -499,6 +524,8 @@ pub struct EnsemblePlan {
     pub fractions: [f64; 3],
     /// Families sent to the sealed set whole.
     pub sealed: Vec<String>,
+    /// Every recipe to this split (the sealed set: `Some("sealed")`), whatever its layout.
+    pub force_split: Option<String>,
     /// Share of training configurations recorded as ensembles; every validation, test and
     /// sealed configuration is.
     pub train_share: f64,
@@ -512,7 +539,7 @@ pub struct EnsemblePlan {
 
 impl Default for EnsemblePlan {
     fn default() -> Self {
-        EnsemblePlan { fractions: [0.8, 0.1, 0.1], sealed: vec!["m5_reference".into()], train_share: 0.15, members: 8, offset: 1e-3, speed: 1e-3, seed: 0 }
+        EnsemblePlan { fractions: [0.8, 0.1, 0.1], sealed: vec!["m5_reference".into()], force_split: None, train_share: 0.15, members: 8, offset: 1e-3, speed: 1e-3, seed: 0 }
     }
 }
 
@@ -539,7 +566,13 @@ pub fn split_of(layout_group: &str, family: &str, plan: &EnsemblePlan) -> &'stat
 pub fn with_splits_and_ensembles(recipes: Vec<OutcomeRecipe>, plan: &EnsemblePlan) -> Vec<OutcomeRecipe> {
     let mut out = Vec::new();
     for mut r in recipes {
-        let split = split_of(&r.layout_group, &r.family, plan);
+        let split = plan.force_split.as_deref().map_or_else(|| split_of(&r.layout_group, &r.family, plan), |s| match s {
+            "sealed" => "sealed",
+            "train" => "train",
+            "val" => "val",
+            "test" => "test",
+            _ => panic!("unknown split {s}"),
+        });
         r.parameters["split"] = json!(split);
         let u = (fnv_str(&r.split_group, plan.seed ^ 0xe5e5) >> 11) as f64 / (1u64 << 53) as f64;
         let ensemble = plan.members > 1 && (split != "train" || u < plan.train_share);
