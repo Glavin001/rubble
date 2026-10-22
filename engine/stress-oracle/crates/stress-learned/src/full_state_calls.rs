@@ -315,7 +315,7 @@ pub fn augment(dir: &Path, ctx: &Json, calls: &mut [Call]) -> Result<Option<(Jso
             put(c, "cluster", &s.cluster, &cols[2]);
             put(c, "impactor", &s.impactor, &cols[3]);
             c.arrays.push((format!("fs_cluster_id_{x}"), Arr::I64(vec![s.cluster_id.len()], s.cluster_id)));
-            c.arrays.push((format!("fs_chunk_cluster_{x}"), Arr::I32(vec![s.chunk_cluster.len()], s.chunk_cluster)));
+            c.arrays.push((format!("fs_chunk_cluster_{x}"), Arr::I64(vec![s.chunk_cluster.len()], s.chunk_cluster.iter().map(|&r| r as i64).collect())));
             let np = s.pair_key.len() / 5;
             c.arrays.push((format!("fs_pair_key_{x}"), Arr::I64(vec![np, 5], s.pair_key)));
             c.arrays.push((format!("fs_pair_{x}"), Arr::F64(vec![np, 4], s.pair)));
