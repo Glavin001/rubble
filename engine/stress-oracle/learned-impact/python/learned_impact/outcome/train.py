@@ -615,6 +615,9 @@ def main(argv=None) -> None:
     ap.add_argument("--levels", type=int, default=2)
     ap.add_argument("--reference", action="store_true", help="W64, rounds 3,2,2,2,3")
     ap.add_argument("--variant", default="B", choices=["A", "B"])
+    ap.add_argument("--drop-features", default="",
+                    help="comma-separated <array>:<column> inputs held at 0 (ablation), e.g. "
+                         "bond_feat:log_qs_hertz_util")
     ap.add_argument("--seeds", default="0")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--noise", type=float, default=0.0)
@@ -646,6 +649,8 @@ def main(argv=None) -> None:
     mc = ModelConfig.reference() if a.reference else ModelConfig(
         width=a.width, rounds=tuple(int(x) for x in a.rounds.split(",")), levels=a.levels)
     mc.variant = a.variant
+    mc.drop_features = tuple(x for x in a.drop_features.split(",") if x)
+    mc.__post_init__()
     seeds = [int(s) for s in a.seeds.split(",")]
     data = Data(dataset, val_dataset=a.val_dataset or None)
     for s in seeds:

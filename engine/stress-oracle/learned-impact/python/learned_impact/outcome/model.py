@@ -47,9 +47,20 @@ class ModelConfig:
     # lossy in f32 (P0 measured 4.4e-3 on bond columns with σ ≈ 8.5e-6).
     input_norm: bool = True
     edge_types: tuple[str, ...] = S.EDGE_TYPES
+    # Input columns held at 0 after standardisation ("<array>:<column>", e.g.
+    # "bond_feat:log_qs_hertz_util"): an input ablation that training, evaluation, the
+    # provider and the export all apply the same way, since it lives in the config.
+    drop_features: tuple[str, ...] = ()
 
     def __post_init__(self):
         self.rounds = tuple(self.rounds)
+        self.drop_features = tuple(self.drop_features)
+        for f in self.drop_features:
+            arr, _, col = f.partition(":")
+            if arr not in S.FEATURE_COLUMNS or col not in S.FEATURE_COLUMNS[arr]:
+                raise ValueError(f"drop_features {f!r}: no such input column")
+            if arr.endswith("_qs_feat") and self.variant != "B":
+                raise ValueError(f"drop_features {f!r}: variant A has no QS-frame inputs")
         if len(self.rounds) != 2 * self.levels + 1:
             raise ValueError(f"rounds {self.rounds} need {2 * self.levels + 1} stages")
         if self.variant not in ("A", "B"):
@@ -130,6 +141,21 @@ class ImpactOutcomeModel(nn.Module):
         for k, d in dims.items():  # identity until set_input_stats (kept in the state dict)
             self.register_buffer(f"in_mean_{k}", torch.zeros(d))
             self.register_buffer(f"in_std_{k}", torch.ones(d))
+        # input key and column offset of every feature array (variant B appends the QS frame)
+        where = {"chunk_feat": ("chunk", 0), "impactor_feat": ("imp", 0), "global_feat": ("glob", 0),
+                 "chunk_qs_feat": ("chunk", len(S.CHUNK_FEAT_COLUMNS)),
+                 "impactor_qs_feat": ("imp", len(S.FEATURE_COLUMNS["impactor_feat"])),
+                 "bond_qs_feat": ("edge_bond", len(S.FEATURE_COLUMNS["bond_feat"])),
+                 **{f"{t}_feat": (f"edge_{t}", 0) for t in cfg.edge_types}}
+        self._keep: dict[str, str] = {}
+        for f in cfg.drop_features:
+            arr, _, col = f.partition(":")
+            k, off = where[arr]
+            name = f"in_keep_{k}"
+            if k not in self._keep:
+                self.register_buffer(name, torch.ones(dims[k]), persistent=False)
+                self._keep[k] = name
+            getattr(self, name)[off + S.FEATURE_COLUMNS[arr].index(col)] = 0.0
         self.unpool = Unpool()
         nt = cfg.n_time_bins
         self.bond_head = _mlp(4 * w + w, 4 + nt, w, hl, norm=False)
@@ -148,9 +174,11 @@ class ImpactOutcomeModel(nn.Module):
             self.energy_head.model[-1].bias[2] = -6.0  # E_elastic / E_in
 
     def _norm(self, key: str, x: Tensor) -> Tensor:
-        if not self.cfg.input_norm:
-            return x
-        return (x - getattr(self, f"in_mean_{key}")) / getattr(self, f"in_std_{key}")
+        if self.cfg.input_norm:
+            x = (x - getattr(self, f"in_mean_{key}")) / getattr(self, f"in_std_{key}")
+        if key in self._keep:
+            x = x * getattr(self, self._keep[key])
+        return x
 
     @torch.no_grad()
     def set_input_stats(self, stats: dict[str, tuple[Tensor, Tensor]]) -> None:

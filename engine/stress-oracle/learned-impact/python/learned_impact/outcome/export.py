@@ -40,7 +40,9 @@ LAYERS = {
                     "`*_head`); state names `model.<i>.weight|bias` in Sequential order",
     "input": "each input array x (chunk: chunk_feat ‖ chunk_qs_feat for variant B; imp: "
              "impactor_feat ‖ impactor_qs_feat; glob: global_feat; edge_<type>: <type>_feat, "
-             "bond ‖ bond_qs_feat for B) → (x − in_mean_<k>) / in_std_<k> when input_norm",
+             "bond ‖ bond_qs_feat for B) → (x − in_mean_<k>) / in_std_<k> when input_norm; then "
+             "every column named in model_config.drop_features is set to 0 (an input "
+             "ablation: the runtime need not compute it)",
     "encode": "h[chunk] = enc_chunk(x), h[impactor] = enc_imp(x), g = enc_glob(x), "
               "e[type] = enc_edge.<type>(x)",
     "FineRound": "for each edge type: e' = e + edge.<type>.edge_mlp([e, h[src], h[dst]]); "
