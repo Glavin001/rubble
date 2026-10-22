@@ -20,6 +20,43 @@ contract.
     helps, never a head.
   - **diagnostic**: nothing reads it. It gets no input and no head.
 
+## Frozen field set (from P1's classification, 2026-10-22)
+
+P1's recorder revision 9 writes every serialised `World` field at each 1/60 boundary
+(`full_state/<boundary>.fs.zst`). Rebuilding from boundary f and stepping one frame gives
+boundary f+1 bit for bit. P1 zeroed each of 508 paths in turn: 244 state, 156 derived, 108
+diagnostic. That classification says "no effect in one frame on these trials", so it is a
+guide, not a licence to drop fields: running maxima classified diagnostic, such as kappa_c
+and ductility, are kept.
+
+The model's contract is the island's **dynamic** state, the fields an island step changes.
+Static fields (bond geometry, stiffness, strength, damping, impactor mass, shape and
+material, chunk mass and inertia, cluster structure and id) are inputs only. World
+bookkeeping and caches (time, true_steps, next_cluster_id, neighbours, contact_dt,
+contact_hits, ledgers, events) are the host's: it advances or rebuilds them itself.
+
+| entity | head (frame-end target) | how |
+|---|---|---|
+| chunk | u, θ, v, w (`ChunkState`) | the per-chunk outputs (v, ω, Δx, Δθ) with the body fit, as `/4`; exact `y_chunk_def_end` |
+| chunk | cluster, active | from the break decision: fragments; `removed` as BCE if a frame can remove a chunk |
+| chunk | reaction (support force and moment, anchored chunks) | new head, body frame, ÷ (m·g) and (m·g·R); impulse-norm loss |
+| cluster | pose, velocity, angular_velocity, com, mass, inertia, chunks, bonds | derived from the chunks and the partition by the host (momentum-exact fit) |
+| cluster | activity (Active/Settled), active_timer | BCE; Δtimer ÷ dt, Huber |
+| bond | alive | the break decision (margin head, τ = 1) |
+| bond | joint.kappa, kappa_c (and fail_ts / fail_c / peak_fail_margin, the per-mode running maxima) | per-family **monotone** heads κ̂ = κ_start · e^softplus, the margin head's form (q = κ / κ_fail, so q̂ is their max) |
+| bond | joint.damage, crush | softplus Δ (damage as now); fracture-energy-weighted Huber |
+| bond | joint.ductility, ductility_c | 1/(1 + ductility) encoding, Δ head |
+| bond | joint.plastic (5 used components), rebar_slip[2], rebar_plastic, rebar_work, rebar_broken | Δ heads in the strain-energy norm; rebar_broken BCE |
+| bond | joint.mode | categorical head on breaking bonds (the `fail_mode` target) |
+| bond | joint.dissipated, fatigue, strain_rate, governing_stress, utilization | Δ heads (dissipated in J ÷ E_in; the rest Huber in their encodings) |
+| contact pair | pair_offsets: ≤ 28 sample points per chunk pair, (overlap, Vec3), NaN = not in contact | on structure-contact edges: 28 slots × 4 with a validity mask; "in contact at frame end" BCE per slot; Δ in the contact strain-energy norm. Pairs new during the frame (1,569 over 16 pilot events) come from the routing sweep's predicted contacts |
+| impactor | pose, velocity, angular_velocity | as now |
+| impactor | crush_used, crush_depth | softplus Δ (classified derived on these trials; kept, as running state) |
+
+Not carried (classified diagnostic or derived, recomputed every substep): bond force,
+elastic, measures, stored, damped; chunk a, alpha, step_start (implicit mode; the
+`blast_parity` profile is explicit); `sticks` (empty without layer contact); world ledgers.
+
 ## Norms and losses, by the physics of the field
 
 Every loss is ÷ the call's `E_in` (J), and then normalised by its zero-predictor value, as
