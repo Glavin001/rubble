@@ -33,6 +33,9 @@ mod coupling;
 mod handoff;
 #[path = "world_branch.rs"]
 mod branch;
+#[path = "world_snapshot.rs"]
+mod snapshot_state;
+pub use snapshot_state::snapshot_placeholder_scene;
 pub use coupling::{cluster_signature, tiered_impact_speed, PredictedContact, PunchPlug};
 #[path = "contact_history.rs"]
 pub mod contact_history;
@@ -54,7 +57,7 @@ pub(crate) const MAX_SET_VISCOSITY: f64 = 1.0;
 /// more never exceeds its face-pair values (the stable-substep assumption).
 pub(crate) const FACE_PAIR_POINTS: usize = 10;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Impactor {
     pub name: String,
     pub shape: ImpactorShape,
@@ -112,7 +115,7 @@ impl Impactor {
 }
 
 /// Energy terms of the contacts (J).
-#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ContactLedger {
     /// Penalty energy currently stored in contacts.
     pub stored: f64,
@@ -139,7 +142,7 @@ pub struct ContactLedger {
 }
 
 /// One kind of contact's energy terms (J).
-#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct KindLedger {
     pub stored: f64,
     pub work: f64,
@@ -160,7 +163,7 @@ pub const KIND_IMPACTOR_GROUND: usize = 2;
 pub const KIND_PAIR: usize = 3;
 
 /// A body a contact acts on, for the contact work.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 enum Party {
     Chunk(usize, usize),
     Impactor(usize),
@@ -169,7 +172,7 @@ enum Party {
 
 /// A contact's load this substep: force and moment on `a` (the opposite on `b`), with
 /// the lever arms from each body's centre to the point of action.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 struct Applied {
     kind: usize,
     a: Party,
@@ -180,7 +183,7 @@ struct Applied {
     moment: Vec3,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct ProbeAcc {
     series: ProbeSeries,
     lo: f64,
@@ -189,14 +192,16 @@ struct ProbeAcc {
 }
 
 /// Cached blast loading of the exposed faces (rebuilt when topology changes).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct BlastCache {
     version: u64,
     faces: Vec<(usize, usize, usize, f64, FaceBlast)>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct World {
+    /// Static (the recipe's): not in a snapshot; `World::restore_state` takes it.
+    #[serde(skip, default = "crate::world::snapshot_placeholder_scene")]
     pub scene: Scene,
     pub solver: ReferenceSolver,
     pub impactors: Vec<Impactor>,
@@ -245,6 +250,8 @@ pub struct World {
     /// Elastic-layer contacts applied this substep (for the contact work by kind).
     applied: Vec<Applied>,
     /// External rigid-body engine, if the world is coupled to one (`World::with_engine`).
+    /// Never in a snapshot (`World::save_state` refuses a coupled world).
+    #[serde(skip)]
     coupling: Option<Coupling>,
     /// Coupled mode: frames that had an impact island, and the most bodies in islands.
     pub island_frames: u64,
@@ -285,7 +292,7 @@ pub struct World {
 ///
 /// Stores **impulse** (`force·dt`, `torque·dt`) per bin; [`LearnedFrameBins::mean_force`]
 /// converts to average force over the bin width `frame_dt / K`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct LearnedFrameBins {
     pub k: usize,
     pub t0: f64,
@@ -2761,7 +2768,7 @@ pub(crate) fn penalty_force(
 }
 
 /// A contact of the elastic-layer method, by the bodies it joins.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 enum ContactKey {
     Ground(usize, usize),
     ImpactorGround(usize),
@@ -2771,7 +2778,7 @@ enum ContactKey {
 
 /// Friction state of an elastic-layer contact: its shear layer (world vectors, in the
 /// contact plane of `normal`) and its torsion about the normal.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct Stick {
     shear: Layer<Vec3>,
     torque: Layer<f64>,
@@ -2798,7 +2805,7 @@ struct Stick {
 /// adds unstrained layer, real shrinking releases what the leaving layer held. Slip
 /// (the whole patch sliding) leaves the strain uniform: one cohort. The stored energy
 /// `sum k_i |d - d_i|^2 / 2` never grows without work.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct Layer<V> {
     d: V,
     cohorts: Vec<(f64, V)>,
@@ -3501,7 +3508,7 @@ fn contact_skin() -> f64 {
 /// on centres and fixed radii only, so a chunk's rotation cannot move a pair in or out.
 /// Every motion counts, hidden deformation, frame folds, rewinds and splits included:
 /// the displacement is measured from the world centres themselves every substep.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct NeighbourList {
     active: Vec<(usize, usize)>,
     cluster_of: Vec<usize>,

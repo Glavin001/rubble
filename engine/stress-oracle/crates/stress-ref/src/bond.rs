@@ -28,7 +28,7 @@ use crate::math::{Mat3, Vec3};
 use crate::scene::{BondDesc, ChunkDesc};
 
 /// Local components: index 0 = t1, 1 = t2, 2 = n.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Local6 {
     /// Translational part (shear t1, shear t2, axial n).
     pub lin: Vec3,
@@ -87,7 +87,7 @@ impl Mat6 {
 }
 
 /// Undeformed geometry of a bond, in the body frame.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BondGeometry {
     pub a: usize,
     pub b: usize,
@@ -236,7 +236,7 @@ impl BondGeometry {
 /// A chunk's finite rotation (rotation vector `th`) in the forms the co-rotational bonds
 /// use: its matrix, unit quaternion and Rodrigues coefficients. Computed once per chunk
 /// and substep rather than once per bond.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ChunkTurn {
     th: Vec3,
     rot: Mat3,
@@ -427,7 +427,7 @@ impl CoRotation {
 }
 
 /// Elastic stiffness of the six bond springs (possibly with scaled moduli).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BondStiffness {
     pub kn: f64,
     pub ks: f64,

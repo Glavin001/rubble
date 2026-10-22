@@ -53,7 +53,7 @@ pub enum FailureMode {
 }
 
 /// Strength parameters of one bond, resolved from its material and geometry.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct JointStrength {
     pub tensile: f64,
     pub compressive: f64,
@@ -118,7 +118,7 @@ impl JointStrength {
 }
 
 /// Rebar crossing a bond.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RebarParams {
     pub k_axial: f64,
     pub k_dowel: f64,
@@ -205,7 +205,7 @@ impl JointState {
 }
 
 /// Stress measures of a generalised bond force.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StressMeasures {
     /// Max extreme-fibre tension (Pa, may be negative = no tension anywhere).
     pub tension: f64,
