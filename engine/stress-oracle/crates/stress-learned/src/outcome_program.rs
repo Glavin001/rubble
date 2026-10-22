@@ -22,7 +22,7 @@
 //! (softplus, sigmoid) on the read-back outputs.
 
 use crate::outcome_calls::CallEvent;
-use crate::outcome_model::{cal_ew, call_hierarchy, idx_of, mat_of, sigmoid, softplus, Hierarchy, Mat, Mlp, Model, Outputs, NODE_OUT};
+use crate::outcome_model::{cal_ew, call_hierarchy, idx_of, mat_of, sigmoid, softplus, CallHierarchy, Hierarchy, Mat, Mlp, Model, Outputs, NODE_OUT};
 
 pub const PARAM_WORDS: usize = 64;
 pub const NONE: u32 = u32::MAX;
@@ -80,8 +80,8 @@ pub mod fibre_p {
     pub const TRIPLES: usize = 5;
     pub const Q: usize = 6;
     pub const OUT_BASE: usize = 7;
-    /// The length scale L (f32 bits): fibres are divided by it, as the reference does.
-    pub const L: usize = 8;
+    // Each edge's (i, j, chunk of i, L as f32 bits) at TRIPLES + 4 k: divided by its
+    // call's length scale, as the reference does.
 }
 
 pub const FLAG_ACCUMULATE: u32 = 1;
@@ -131,6 +131,8 @@ pub struct OutputLayout {
     pub glob: usize,
     pub width: usize,
     pub n_time_bins: usize,
+    /// Per call: chunks, impactors, bonds (the batch's rows are in call order).
+    pub calls: Vec<(usize, usize, usize)>,
 }
 
 /// One call's forward pass as ops over the three buffers.
@@ -366,18 +368,18 @@ impl Builder {
         self.ops.push(Op { label: label.to_string(), params: p, groups: g });
     }
 
-    fn fibre(&mut self, label: &str, edges: &[(usize, usize)], chunk: &[usize], pos: usize, q: usize, out: usize, l_scale: f32) {
+    /// `l_scale[k]`: edge `k`'s call's length scale.
+    fn fibre(&mut self, label: &str, edges: &[(usize, usize)], chunk: &[usize], pos: usize, q: usize, out: usize, l_scale: &[f32]) {
         if edges.is_empty() {
             return;
         }
-        let tri: Vec<u32> = edges.iter().flat_map(|&(i, j)| [i as u32, j as u32, chunk[i] as u32]).collect();
+        let tri: Vec<u32> = edges.iter().zip(l_scale).flat_map(|(&(i, j), l)| [i as u32, j as u32, chunk[i] as u32, l.to_bits()]).collect();
         let t = self.table(&tri);
         let (mut p, g) = self.header(KERNEL_FIBRE, edges.len(), THREADS);
         p[fibre_p::POS] = pos as u32;
         p[fibre_p::TRIPLES] = t;
         p[fibre_p::Q] = q as u32;
         p[fibre_p::OUT_BASE] = out as u32;
-        p[fibre_p::L] = l_scale.to_bits();
         self.ops.push(Op { label: label.to_string(), params: p, groups: g });
     }
 
@@ -423,27 +425,65 @@ fn pack_model(b: &mut Builder, m: &Model) -> PackedModel {
     }
 }
 
+/// One call of a batch: the event, its structures' hierarchies, the call's index.
+pub type BatchCall<'a> = (&'a CallEvent, &'a [Hierarchy], usize);
+
 /// Compile call `ci` of `ev` (`hier` from `outcome_model::structure_hierarchies`).
 pub fn compile(model: &Model, ev: &CallEvent, hier: &[Hierarchy], ci: usize) -> Result<Program, String> {
+    compile_batch(model, &[(ev, hier, ci)])
+}
+
+fn cat_rows(ms: &[Mat]) -> Mat {
+    let cols = ms.iter().map(|m| m.cols).find(|&c| c > 0).unwrap_or(0);
+    let mut out = Mat::zeros(0, cols);
+    for m in ms {
+        if m.rows > 0 {
+            assert_eq!(m.cols, cols, "batched rows of different widths");
+            out.d.extend_from_slice(&m.d);
+            out.rows += m.rows;
+        }
+    }
+    out
+}
+
+/// Compile several calls into one program (P3's batch layout): node rows are every call's
+/// chunks, in call order, then every call's impactors; edges, bonds and coarse levels are
+/// concatenated in call order; each call keeps its own global latent row and means.
+pub fn compile_batch(model: &Model, calls: &[BatchCall]) -> Result<Program, String> {
     let cfg = &model.config;
     let w = cfg.width;
     let lanes = w;
     assert!(lanes.is_power_of_two() && (32..=64).contains(&lanes), "width {w}: the program runs widths 32 and 64");
+    assert!(!calls.is_empty());
     let lever = model.options.node_projection;
-    let call = &ev.calls[ci];
-    let arr = |n: &str| call.array(n).ok_or_else(|| format!("call {ci}: no {n}"));
     let vb = cfg.variant == "B";
+    let ng = calls.len();
     let mut b = Builder { arena: Vec::new(), weights: Vec::new(), table: Vec::new(), ops: Vec::new(), lanes };
     let pm = pack_model(&mut b, model);
 
-    // ---- inputs
-    let cf = mat_of(arr("chunk_feat")?)?;
-    let iff = mat_of(arr("impactor_feat")?)?;
-    let (nc, ni) = (cf.rows, iff.rows);
+    // ---- inputs, concatenated
+    let get = |k: usize, n: &str| -> Result<Mat, String> {
+        let (ev, _, ci) = calls[k];
+        mat_of(ev.calls[ci].array(n).ok_or_else(|| format!("call {ci}: no {n}"))?)
+    };
+    let per = |n: &str| -> Result<Vec<Mat>, String> { (0..ng).map(|k| get(k, n)).collect() };
+    let cfs = per("chunk_feat")?;
+    let ifs = per("impactor_feat")?;
+    let ncs: Vec<usize> = cfs.iter().map(|m| m.rows).collect();
+    let nis: Vec<usize> = ifs.iter().map(|m| m.rows).collect();
+    let (nc, ni) = (ncs.iter().sum::<usize>(), nis.iter().sum::<usize>());
     let n = nc + ni;
-    let gf = mat_of(arr("global_feat")?)?;
-    let cq = mat_of(arr("chunk_qs_feat")?)?;
-    let iq = mat_of(arr("impactor_qs_feat")?)?;
+    let c_off: Vec<usize> = (0..ng).map(|k| ncs[..k].iter().sum()).collect();
+    let i_off: Vec<usize> = (0..ng).map(|k| nc + nis[..k].iter().sum::<usize>()).collect();
+    // node index of call k's local node `x` (chunks then impactors locally)
+    let node = |k: usize, x: usize| if x < ncs[k] { c_off[k] + x } else { i_off[k] + x - ncs[k] };
+    let cf = cat_rows(&cfs);
+    let iff = cat_rows(&ifs);
+    let gf = cat_rows(&per("global_feat")?);
+    let cqs = per("chunk_qs_feat")?;
+    let iqs = per("impactor_qs_feat")?;
+    let cq = cat_rows(&cqs);
+    let iq = cat_rows(&iqs);
     let cf_b = b.input(&cf);
     let cq_b = b.input(&cq);
     let if_b = b.input(&iff);
@@ -457,10 +497,19 @@ pub fn compile(model: &Model, ev: &CallEvent, hier: &[Hierarchy], ci: usize) -> 
         let n = nrm(key);
         b.norm(&n.mean[c0..c0 + width], &n.std[c0..c0 + width])
     };
+    // the call of each node; per call its node rows (for the means)
+    let mut node_call = vec![0u32; n];
+    for k in 0..ng {
+        for x in 0..ncs[k] + nis[k] {
+            node_call[node(k, x)] = k as u32;
+        }
+    }
+    let node_call_t = b.table(&node_call);
+    let chunk_call_t = b.table(&node_call[..nc]);
+    let imp_call_t = b.table(&node_call[nc..]);
 
     let h = b.alloc(n, w);
-    let g = b.alloc(1, w);
-    // encoders
+    let g = b.alloc(ng, w);
     {
         let mut s = vec![Seg { norm: seg_norm(&mut b, "chunk", 0, cf.cols), ..Seg::row(cf_b, cf.cols) }];
         if vb {
@@ -473,23 +522,43 @@ pub fn compile(model: &Model, ev: &CallEvent, hier: &[Hierarchy], ci: usize) -> 
         }
         b.mlp("enc_imp", ni, &pm.enc_imp, &s, MlpOut::to(h + nc * w, w), 0);
         let s = [Seg { norm: seg_norm(&mut b, "glob", 0, gf.cols), ..Seg::row(gf_b, gf.cols) }];
-        b.mlp("enc_glob", 1, &pm.enc_glob, &s, MlpOut::to(g, w), 0);
+        b.mlp("enc_glob", ng, &pm.enc_glob, &s, MlpOut::to(g, w), 0);
     }
-    let mut edges: Vec<(Vec<usize>, Vec<usize>, u32, u32, usize)> = Vec::new(); // src, dst, src table, dst table, e base
+    // per edge type: src, dst (node rows), their tables, the features' base, the edge's call
+    let mut edges: Vec<(Vec<usize>, Vec<usize>, u32, u32, usize)> = Vec::new();
+    let mut bond_call: Vec<u32> = Vec::new();
     for (k, t) in cfg.edge_types.iter().enumerate() {
-        let src = idx_of(arr(&format!("{t}_src"))?)?;
-        let dst = idx_of(arr(&format!("{t}_dst"))?)?;
+        let (mut src, mut dst) = (Vec::new(), Vec::new());
+        let mut xs = Vec::new();
+        let mut qs = Vec::new();
+        for c in 0..ng {
+            let (ev, _, ci) = calls[c];
+            let call = &ev.calls[ci];
+            let s0 = idx_of(call.array(&format!("{t}_src")).ok_or("no src")?)?;
+            let d0 = idx_of(call.array(&format!("{t}_dst")).ok_or("no dst")?)?;
+            if t == "bond" {
+                bond_call.extend(std::iter::repeat_n(c as u32, s0.len() / 2));
+            }
+            if !s0.is_empty() {
+                xs.push(get(c, &format!("{t}_feat"))?);
+                if t == "bond" && vb {
+                    qs.push(get(c, "bond_qs_feat")?);
+                }
+            }
+            src.extend(s0.into_iter().map(|x| node(c, x)));
+            dst.extend(d0.into_iter().map(|x| node(c, x)));
+        }
         let st = b.table(&src.iter().map(|&x| x as u32).collect::<Vec<_>>());
         let dt = b.table(&dst.iter().map(|&x| x as u32).collect::<Vec<_>>());
         let ne = src.len();
         let e = b.alloc(ne, w);
         if ne > 0 {
-            let x = mat_of(arr(&format!("{t}_feat"))?)?;
+            let x = cat_rows(&xs);
             let xb = b.input(&x);
             let key = format!("edge_{t}");
             let mut s = vec![Seg { norm: seg_norm(&mut b, &key, 0, x.cols), ..Seg::row(xb, x.cols) }];
             if t == "bond" && vb {
-                let q = mat_of(arr("bond_qs_feat")?)?;
+                let q = cat_rows(&qs);
                 let qb = b.input(&q);
                 s.push(Seg { norm: seg_norm(&mut b, &key, x.cols, q.cols), ..Seg::row(qb, q.cols) });
             }
@@ -499,11 +568,56 @@ pub fn compile(model: &Model, ev: &CallEvent, hier: &[Hierarchy], ci: usize) -> 
     }
     let max_e = edges.iter().map(|x| x.0.len()).max().unwrap_or(0);
     let aggs: Vec<usize> = (0..edges.len()).map(|_| b.alloc(n, w)).collect();
-    let gmean = b.alloc(1, w);
-    let ch = if cfg.levels > 0 { Some(call_hierarchy(ev, hier, call, cfg.levels)?) } else { None };
-    let n_l: Vec<usize> = (0..=cfg.levels).map(|l| if l == 0 { nc } else { ch.as_ref().unwrap().ids[l].len() }).collect();
+    let gmean = b.alloc(ng, w);
+
+    // the hierarchy, concatenated: level-0 ids are global chunk rows, level-l ids offset by
+    // the earlier calls' level-l counts
+    let levels = cfg.levels;
+    let mut ch = CallHierarchy { edges: vec![Vec::new(); levels + 1], ids: vec![Vec::new(); levels + 1], chunk: vec![Vec::new(); levels + 1] };
+    let mut level_call: Vec<Vec<u32>> = vec![Vec::new(); levels + 1];
+    if levels > 0 {
+        let mut count = vec![0usize; levels + 1];
+        for k in 0..ng {
+            let (ev, hier, ci) = calls[k];
+            let one = call_hierarchy(ev, hier, &ev.calls[ci], levels)?;
+            count[0] = c_off[k];
+            for l in 0..=levels {
+                let off = count[l];
+                ch.edges[l].extend(one.edges[l].iter().map(|&(a, b)| (a + off, b + off)));
+                if l > 0 {
+                    let prev = count[l - 1];
+                    ch.ids[l].extend(one.ids[l].iter().map(|&i| i + prev));
+                    ch.chunk[l].extend(one.chunk[l].iter().map(|&c| c + c_off[k]));
+                    level_call[l].extend(std::iter::repeat_n(k as u32, one.ids[l].len()));
+                }
+            }
+            for l in 1..=levels {
+                count[l] += one.ids[l].len();
+            }
+        }
+        ch.chunk[0] = (0..nc).collect();
+        level_call[0] = node_call[..nc].to_vec();
+    }
+    let n_l: Vec<usize> = (0..=levels).map(|l| if l == 0 { nc } else { ch.ids[l].len() }).collect();
+    let level_call_t: Vec<u32> = level_call.iter().map(|lc| b.table(lc)).collect();
     let max_rows = n_l.iter().copied().chain([n]).max().unwrap();
     let (pa, pb) = (b.alloc(max_rows, w), b.alloc(max_rows, w));
+
+    // per-call means of `rows` rows at `src` whose calls are `calls_of`
+    let call_mean = |b: &mut Builder, label: &str, src: usize, calls_of: &[u32]| {
+        let mut rows: Vec<Vec<usize>> = vec![Vec::new(); ng];
+        for (r, &c) in calls_of.iter().enumerate() {
+            rows[c as usize].push(r);
+        }
+        let ent: Vec<Vec<(usize, f32)>> = rows
+            .iter()
+            .map(|rs| {
+                let inv = 1.0 / rs.len().max(1) as f32;
+                rs.iter().map(|&r| (src + r * w, inv)).collect()
+            })
+            .collect();
+        b.csr(label, &ent, w, gmean, false);
+    };
 
     let fine_round = |b: &mut Builder, label: &str, r: &(Vec<PackedMlp>, PackedMlp, Option<PackedMlp>)| {
         for (k, (src, _, st, dt, e)) in edges.iter().enumerate() {
@@ -513,7 +627,9 @@ pub fn compile(model: &Model, ev: &CallEvent, hier: &[Hierarchy], ci: usize) -> 
             }
             let m = &r.0[k];
             let lbl = format!("{label}.edge.{}", cfg.edge_types[k]);
-            if lever {
+            // The projection pays off only where an edge type has more edges than the
+            // graph has nodes (it moves the node blocks' work from per edge to per node).
+            if lever && ne > n {
                 b.projection(&format!("{lbl}.proj_src"), n, m, w, h, w, pa);
                 b.projection(&format!("{lbl}.proj_dst"), n, m, 2 * w, h, w, pb);
                 let s = [Seg::row(*e, w), Seg { mode: SEG_PROJ_GATHER, ..Seg::gather(pa, w, *st) }, Seg { mode: SEG_PROJ_GATHER, ..Seg::gather(pb, w, *dt) }];
@@ -535,26 +651,25 @@ pub fn compile(model: &Model, ev: &CallEvent, hier: &[Hierarchy], ci: usize) -> 
         }
         let mut s: Vec<Seg> = aggs.iter().map(|&a| Seg::row(a, w)).collect();
         s.push(Seg::row(h, w));
-        s.push(Seg::konst(g, w, 0));
+        s.push(Seg::gather(g, w, node_call_t));
         b.mlp(&format!("{label}.node"), n, &r.1, &s, MlpOut::residual(h, w), 0);
         if let Some(gm) = &r.2 {
-            b.mean(&format!("{label}.mean"), h, n, w, gmean);
-            b.mlp(&format!("{label}.glob"), 1, gm, &[Seg::row(g, w), Seg::row(gmean, w)], MlpOut::residual(g, w), 0);
+            call_mean(b, &format!("{label}.mean"), h, &node_call);
+            b.mlp(&format!("{label}.glob"), ng, gm, &[Seg::row(g, w), Seg::row(gmean, w)], MlpOut::residual(g, w), 0);
         }
     };
     for (i, r) in pm.fine_pre.iter().enumerate() {
         fine_round(&mut b, &format!("fine_pre.{i}"), r);
     }
 
-    if let Some(ch) = &ch {
-        let levels = cfg.levels;
-        let q_b = b.input(&mat_of(arr("chunk_q_world")?)?);
-        let pos0 = b.input(&mat_of(arr("chunk_pos")?)?);
-        let l_scale = *call.scales.get("L").ok_or("call: no L scale")? as f32;
+    if levels > 0 {
+        let q_b = b.input(&cat_rows(&per("chunk_q_world")?));
+        let pos0 = b.input(&cat_rows(&per("chunk_pos")?));
+        // each chunk's call's length scale (fibres of a coarse edge use its chunk's call)
+        let l_of_call: Vec<f32> = calls.iter().map(|&(ev, _, ci)| ev.calls[ci].scales.get("L").copied().ok_or("call: no L scale").map(|x| x as f32)).collect::<Result<_, _>>()?;
         let max_ce = ch.edges.iter().map(Vec::len).max().unwrap_or(0);
         let msg = b.alloc(max_ce.max(max_e), w);
         let cagg = b.alloc(max_rows, w);
-        // per level l ≥ 1: features, positions, fibres; per level < levels the pooling weights
         let mut hl = vec![h];
         let mut pos = vec![pos0];
         let mut fib = vec![0usize];
@@ -565,12 +680,13 @@ pub fn compile(model: &Model, ev: &CallEvent, hier: &[Hierarchy], ci: usize) -> 
             pos.push(b.alloc(n_l[l], 3));
             fib.push(b.alloc(ch.edges[l].len(), 4));
         }
-        let coarse_round = |b: &mut Builder, label: &str, r: &(PackedMlp, PackedMlp, Option<PackedMlp>), x: usize, rows: usize, es: &[(usize, usize)], fb: usize| {
+        let coarse_round = |b: &mut Builder, label: &str, r: &(PackedMlp, PackedMlp, Option<PackedMlp>), x: usize, l: usize, fb: usize| {
+            let (rows, es) = (n_l[l], &ch.edges[l]);
             if !es.is_empty() {
                 let it: Vec<u32> = es.iter().map(|e| e.0 as u32).collect();
                 let jt: Vec<u32> = es.iter().map(|e| e.1 as u32).collect();
                 let (it, jt) = (b.table(&it), b.table(&jt));
-                if lever {
+                if lever && es.len() > rows {
                     b.projection(&format!("{label}.proj_i"), rows, &r.0, 4, x, w, pa);
                     b.projection(&format!("{label}.proj_j"), rows, &r.0, 4 + w, x, w, pb);
                     let s = [Seg::row(fb, 4), Seg { mode: SEG_PROJ_GATHER, ..Seg::gather(pa, w, it) }, Seg { mode: SEG_PROJ_GATHER, ..Seg::gather(pb, w, jt) }];
@@ -584,12 +700,11 @@ pub fn compile(model: &Model, ev: &CallEvent, hier: &[Hierarchy], ci: usize) -> 
             for (k, &(_, j)) in es.iter().enumerate() {
                 agg[j].push((msg + k * w, 1.0));
             }
-            // rows without messages still need zeros: an empty CSR row writes 0
             b.csr(&format!("{label}.sum"), &agg, w, cagg, false);
-            b.mlp(&format!("{label}.node"), rows, &r.1, &[Seg::row(x, w), Seg::row(cagg, w), Seg::konst(g, w, 0)], MlpOut::residual(x, w), 0);
+            b.mlp(&format!("{label}.node"), rows, &r.1, &[Seg::row(x, w), Seg::row(cagg, w), Seg::gather(g, w, level_call_t[l])], MlpOut::residual(x, w), 0);
             if let Some(gm) = &r.2 {
-                b.mean(&format!("{label}.mean"), x, rows, w, gmean);
-                b.mlp(&format!("{label}.glob"), 1, gm, &[Seg::row(g, w), Seg::row(gmean, w)], MlpOut::residual(g, w), 0);
+                call_mean(b, &format!("{label}.mean"), x, &level_call[l]);
+                b.mlp(&format!("{label}.glob"), ng, gm, &[Seg::row(g, w), Seg::row(gmean, w)], MlpOut::residual(g, w), 0);
             }
         };
         for li in 0..levels {
@@ -612,12 +727,12 @@ pub fn compile(model: &Model, ev: &CallEvent, hier: &[Hierarchy], ci: usize) -> 
             b.csr(&format!("pool_pos.{li}"), &ppos, 3, pos[li + 1], false);
             wt = ids.iter().map(|&k| aggr[k]).collect();
             ews.push(ew);
-            b.fibre(&format!("fibre.{}", li + 1), &ch.edges[li + 1], &ch.chunk[li + 1], pos[li + 1], q_b, fib[li + 1], l_scale);
+            let ls: Vec<f32> = ch.edges[li + 1].iter().map(|&(i, _)| l_of_call[node_call[ch.chunk[li + 1][i]] as usize]).collect();
+            b.fibre(&format!("fibre.{}", li + 1), &ch.edges[li + 1], &ch.chunk[li + 1], pos[li + 1], q_b, fib[li + 1], &ls);
             for (i, r) in pm.down[li].iter().enumerate() {
-                coarse_round(&mut b, &format!("down.{li}.{i}"), r, hl[li + 1], n_l[li + 1], &ch.edges[li + 1], fib[li + 1]);
+                coarse_round(&mut b, &format!("down.{li}.{i}"), r, hl[li + 1], li + 1, fib[li + 1]);
             }
         }
-        // up: level `levels` → 0
         let mut cur = hl[levels];
         for (k, li) in (0..levels).rev().enumerate() {
             let gl = &ch.edges[li];
@@ -636,7 +751,7 @@ pub fn compile(model: &Model, ev: &CallEvent, hier: &[Hierarchy], ci: usize) -> 
             b.csr(&format!("unpool.{li}"), &rows, w, up, false);
             if li > 0 {
                 for (i, r) in pm.up[k].iter().enumerate() {
-                    coarse_round(&mut b, &format!("up.{k}.{i}"), r, up, n_l[li], gl, fib[li]);
+                    coarse_round(&mut b, &format!("up.{k}.{i}"), r, up, li, fib[li]);
                 }
                 let skip: Vec<Vec<(usize, f32)>> = (0..n_l[li]).map(|r| vec![(hl[li] + r * w, 1.0)]).collect();
                 b.csr(&format!("skip.{li}"), &skip, w, up, true);
@@ -646,8 +761,6 @@ pub fn compile(model: &Model, ev: &CallEvent, hier: &[Hierarchy], ci: usize) -> 
                 b.csr("unpool.add", &add, w, h, true);
             }
         }
-        // the fine level's pooling read `h` itself: its first `nc` rows are level 0
-        debug_assert_eq!(hl[0], h);
     }
 
     for (i, r) in pm.fine_post.iter().enumerate() {
@@ -665,14 +778,16 @@ pub fn compile(model: &Model, ev: &CallEvent, hier: &[Hierarchy], ci: usize) -> 
     let chunk = b.alloc(nc, NODE_OUT);
     let iw = pm.imp_head.out;
     let imp = b.alloc(ni, iw);
-    let energy = b.alloc(1, pm.energy_head.out);
+    let energy = b.alloc(ng, pm.energy_head.out);
     if nb > 0 {
         let fwd = b.table(&(0..nb).map(|k| (2 * k) as u32).collect::<Vec<_>>());
         let rev = b.table(&(0..nb).map(|k| (2 * k + 1) as u32).collect::<Vec<_>>());
         let hs = b.table(&(0..nb).map(|k| bsrc[2 * k] as u32).collect::<Vec<_>>());
         let hd = b.table(&(0..nb).map(|k| bdst[2 * k] as u32).collect::<Vec<_>>());
+        let bc = b.table(&bond_call);
         let res = if vb {
-            let q = mat_of(arr("bond_qs_feat")?)?;
+            let qs: Vec<Mat> = (0..ng).map(|k| get(k, "bond_qs_feat")).collect::<Result<_, _>>()?;
+            let q = cat_rows(&qs);
             let mut r = Mat::zeros(nb, bw);
             for k in 0..nb {
                 r.d[k * bw] = q.d[2 * k * q.cols];
@@ -681,9 +796,9 @@ pub fn compile(model: &Model, ev: &CallEvent, hier: &[Hierarchy], ci: usize) -> 
         } else {
             None
         };
-        let s1 = [Seg::gather(*be, w, fwd), Seg::gather(*be, w, rev), Seg::gather(h, w, hs), Seg::gather(h, w, hd), Seg::konst(g, w, 0)];
+        let s1 = [Seg::gather(*be, w, fwd), Seg::gather(*be, w, rev), Seg::gather(h, w, hs), Seg::gather(h, w, hd), Seg::gather(g, w, bc)];
         b.mlp("bond_head.fwd", nb, &pm.bond_head, &s1, MlpOut { base: bond, stride: bw, res, accumulate: false, scale: 0.5 }, 0);
-        let s2 = [Seg::gather(*be, w, rev), Seg::gather(*be, w, fwd), Seg::gather(h, w, hd), Seg::gather(h, w, hs), Seg::konst(g, w, 0)];
+        let s2 = [Seg::gather(*be, w, rev), Seg::gather(*be, w, fwd), Seg::gather(h, w, hd), Seg::gather(h, w, hs), Seg::gather(g, w, bc)];
         b.mlp("bond_head.rev", nb, &pm.bond_head, &s2, MlpOut { base: bond, stride: bw, res: None, accumulate: true, scale: 0.5 }, 0);
     }
     let pad = |b: &mut Builder, q: &Mat, width: usize| -> Option<(usize, usize)> {
@@ -699,15 +814,16 @@ pub fn compile(model: &Model, ev: &CallEvent, hier: &[Hierarchy], ci: usize) -> 
         Some((b.input(&r), width))
     };
     let cres = pad(&mut b, &cq, NODE_OUT);
-    b.mlp("chunk_head", nc, &pm.chunk_head, &[Seg::row(h, w), Seg::konst(g, w, 0)], MlpOut { base: chunk, stride: NODE_OUT, res: cres, accumulate: false, scale: 1.0 }, 0);
+    b.mlp("chunk_head", nc, &pm.chunk_head, &[Seg::row(h, w), Seg::gather(g, w, chunk_call_t)], MlpOut { base: chunk, stride: NODE_OUT, res: cres, accumulate: false, scale: 1.0 }, 0);
     let ires = pad(&mut b, &iq, iw);
-    b.mlp("imp_head", ni, &pm.imp_head, &[Seg::row(h + nc * w, w), Seg::konst(g, w, 0)], MlpOut { base: imp, stride: iw, res: ires, accumulate: false, scale: 1.0 }, 0);
-    b.mlp("energy_head", 1, &pm.energy_head, &[Seg::row(g, w)], MlpOut::to(energy, pm.energy_head.out), 0);
+    b.mlp("imp_head", ni, &pm.imp_head, &[Seg::row(h + nc * w, w), Seg::gather(g, w, imp_call_t)], MlpOut { base: imp, stride: iw, res: ires, accumulate: false, scale: 1.0 }, 0);
+    b.mlp("energy_head", ng, &pm.energy_head, &[Seg::row(g, w)], MlpOut::to(energy, pm.energy_head.out), 0);
 
     if b.table.is_empty() {
         b.table.push(0);
     }
-    let layout = OutputLayout { nb, nc, ni, bond, chunk, imp, energy, glob: g, width: w, n_time_bins: nt };
+    let nb_of: Vec<usize> = (0..ng).map(|k| bond_call.iter().filter(|&&c| c as usize == k).count()).collect();
+    let layout = OutputLayout { nb, nc, ni, bond, chunk, imp, energy, glob: g, width: w, n_time_bins: nt, calls: (0..ng).map(|k| (ncs[k], nis[k], nb_of[k])).collect() };
     Ok(Program { arena: b.arena, weights: b.weights, table: b.table, ops: b.ops, layout })
 }
 
@@ -839,10 +955,10 @@ impl Program {
         use fibre_p::*;
         let p = &op.params;
         let t = &self.table;
-        let l_scale = f32::from_bits(p[L]);
         for r in 0..op.rows() {
-            let o = p[TRIPLES] as usize + 3 * r;
+            let o = p[TRIPLES] as usize + 4 * r;
             let (i, j, c) = (t[o] as usize, t[o + 1] as usize, t[o + 2] as usize);
+            let l_scale = f32::from_bits(t[o + 3]);
             let pb = p[POS] as usize;
             let d = [0, 1, 2].map(|k| a[pb + 3 * i + k] - a[pb + 3 * j + k]);
             let q = &a[p[Q] as usize + 4 * c..p[Q] as usize + 4 * c + 4];
@@ -857,35 +973,47 @@ impl Program {
         }
     }
 
-    /// The heads' outputs from a final arena (the elementwise maps applied here).
+    /// The heads' outputs of a single-call program from its final arena.
     pub fn outputs(&self, a: &[f32]) -> Outputs {
+        self.outputs_of(a, 0)
+    }
+
+    /// Call `k`'s heads' outputs from a final arena (the elementwise maps applied here).
+    pub fn outputs_of(&self, a: &[f32], k: usize) -> Outputs {
         let l = &self.layout;
+        let (nc, ni, nb) = l.calls[k];
+        let c0: usize = l.calls[..k].iter().map(|c| c.0).sum();
+        let i0: usize = l.calls[..k].iter().map(|c| c.1).sum();
+        let b0: usize = l.calls[..k].iter().map(|c| c.2).sum();
         let bw = 4 + l.n_time_bins;
-        let col = |c: usize| -> Vec<f32> { (0..l.nb).map(|k| a[l.bond + k * bw + c]).collect() };
-        let mut times = Mat::zeros(l.nb, l.n_time_bins);
-        for k in 0..l.nb {
-            times.row_mut(k).copy_from_slice(&a[l.bond + k * bw + 4..l.bond + k * bw + bw]);
+        let bond = l.bond + b0 * bw;
+        let col = |c: usize| -> Vec<f32> { (0..nb).map(|r| a[bond + r * bw + c]).collect() };
+        let mut times = Mat::zeros(nb, l.n_time_bins);
+        for r in 0..nb {
+            times.row_mut(r).copy_from_slice(&a[bond + r * bw + 4..bond + r * bw + bw]);
         }
         let iw = NODE_OUT + 1;
-        let mut imp = Mat::zeros(l.ni, NODE_OUT);
-        for r in 0..l.ni {
-            imp.row_mut(r).copy_from_slice(&a[l.imp + r * iw..l.imp + r * iw + NODE_OUT]);
+        let imp = l.imp + i0 * iw;
+        let mut im = Mat::zeros(ni, NODE_OUT);
+        for r in 0..ni {
+            im.row_mut(r).copy_from_slice(&a[imp + r * iw..imp + r * iw + NODE_OUT]);
         }
-        let en = &a[l.energy..l.energy + 4];
+        let en = &a[l.energy + 4 * k..l.energy + 4 * k + 4];
+        let chunk = l.chunk + c0 * NODE_OUT;
         Outputs {
             bond_log_r: col(0),
             bond_break_logit: col(1),
             bond_log_q: col(3),
             bond_time_logits: times,
             bond_ddamage: col(2).into_iter().map(softplus).collect(),
-            chunk_out: Mat { rows: l.nc, cols: NODE_OUT, d: a[l.chunk..l.chunk + l.nc * NODE_OUT].to_vec() },
-            imp_out: imp,
-            imp_perf_logit: (0..l.ni).map(|r| a[l.imp + r * iw + NODE_OUT]).collect(),
+            chunk_out: Mat { rows: nc, cols: NODE_OUT, d: a[chunk..chunk + nc * NODE_OUT].to_vec() },
+            imp_out: im,
+            imp_perf_logit: (0..ni).map(|r| a[imp + r * iw + NODE_OUT]).collect(),
             energy_d_bond: softplus(en[0]),
             energy_frac_joint: sigmoid(en[1]),
             energy_e_elastic: softplus(en[2]),
             energy_ke_loss: en[3],
-            latent_global: a[l.glob..l.glob + l.width].to_vec(),
+            latent_global: a[l.glob + k * l.width..l.glob + (k + 1) * l.width].to_vec(),
         }
     }
 }

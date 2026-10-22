@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use stress_learned::outcome_decode::{decode, DecodeConfig};
 use stress_learned::outcome_model::{read_event, structure_hierarchies, Model, Options, Outputs, Weights};
-use stress_learned::outcome_program::compile;
+use stress_learned::outcome_program::{compile, compile_batch};
 
 fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/p3-model")
@@ -198,6 +198,34 @@ fn the_gpu_program_interpreted_on_the_cpu_matches_the_reference() {
                 let e = worst(&a, &b);
                 assert!(e < 1e-5, "{name} (lever {lever}): {k} differs by {e:.2e} ({} ops)", prog.ops.len());
             }
+        }
+    }
+}
+
+/// A batch program (every fixture call in one program, P3's layout: all chunks, then all
+/// impactors) gives each call the outputs it has alone.
+#[test]
+fn a_batch_program_gives_every_call_its_own_outputs() {
+    let w = Weights::load(&fixture()).unwrap();
+    let model = Model::new(&w, Options { node_projection: true }).unwrap();
+    let mut evs = Vec::new();
+    for dir in parity_dirs() {
+        if !torch_outputs(&dir).1 {
+            let ev = read_event(&dir.join("call")).unwrap();
+            let hier = structure_hierarchies(&ev, model.config.levels);
+            evs.push((ev, hier));
+        }
+    }
+    let calls: Vec<_> = evs.iter().map(|(ev, h)| (ev, &h[..], 0usize)).collect();
+    let prog = compile_batch(&model, &calls).unwrap();
+    let arena = prog.run_cpu();
+    for (k, (ev, h)) in evs.iter().enumerate() {
+        let want = model.forward(ev, h, 0).unwrap();
+        let got = prog.outputs_of(&arena, k);
+        for ((name, _, a), (_, _, b)) in got.named().into_iter().zip(want.named()) {
+            assert_eq!(a.len(), b.len(), "call {k}: {name}");
+            let e = worst(&a, &b);
+            assert!(e < 1e-5, "call {k}: {name} differs by {e:.2e}");
         }
     }
 }

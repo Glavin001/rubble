@@ -410,30 +410,29 @@ float slot_sum_0(float v_0, uint tid_0, uint lane_0, uint lanes_0, KernelContext
         return;
     }
     uint _S52 = P_0(5U, &kernelContext_4);
-    uint t_0 = _S52 + 3U * r_1;
+    uint _S53 = 4U * r_1;
+    uint t_0 = _S52 + _S53;
     uint i_1 = (&kernelContext_4)->table_0[t_0];
     uint j_0 = (&kernelContext_4)->table_0[t_0 + 1U];
     uint c_1 = (&kernelContext_4)->table_0[t_0 + 2U];
-    uint _S53 = P_0(4U, &kernelContext_4);
-    uint _S54 = _S53 + 3U * i_1;
-    uint _S55 = _S53 + 3U * j_0;
-    float3 d_1 = float3(*((&kernelContext_4)->arena_0+_S54) - *((&kernelContext_4)->arena_0+_S55), *((&kernelContext_4)->arena_0+(_S54 + 1U)) - *((&kernelContext_4)->arena_0+(_S55 + 1U)), *((&kernelContext_4)->arena_0+(_S54 + 2U)) - *((&kernelContext_4)->arena_0+(_S55 + 2U)));
-    uint _S56 = P_0(6U, &kernelContext_4);
-    uint qb_0 = _S56 + 4U * c_1;
-    float device* _S57 = (&kernelContext_4)->arena_0+qb_0;
+    uint _S54 = P_0(4U, &kernelContext_4);
+    uint _S55 = _S54 + 3U * i_1;
+    uint _S56 = _S54 + 3U * j_0;
+    float3 d_1 = float3(*((&kernelContext_4)->arena_0+_S55) - *((&kernelContext_4)->arena_0+_S56), *((&kernelContext_4)->arena_0+(_S55 + 1U)) - *((&kernelContext_4)->arena_0+(_S56 + 1U)), *((&kernelContext_4)->arena_0+(_S55 + 2U)) - *((&kernelContext_4)->arena_0+(_S56 + 2U)));
+    uint _S57 = P_0(6U, &kernelContext_4);
+    uint qb_0 = _S57 + 4U * c_1;
     float3 u_0 = - float3(*((&kernelContext_4)->arena_0+(qb_0 + 1U)), *((&kernelContext_4)->arena_0+(qb_0 + 2U)), *((&kernelContext_4)->arena_0+(qb_0 + 3U)));
     float3 tt_0 = float3(2.0f)  * cross(u_0, d_1);
-    uint _S58 = P_0(8U, &kernelContext_4);
-    float3 rr_0 = (d_1 + float3(*_S57)  * tt_0 + cross(u_0, tt_0)) / float3((as_type<float>((_S58)))) ;
-    uint _S59 = P_0(7U, &kernelContext_4);
-    uint o_3 = _S59 + 4U * r_1;
-    float _S60 = rr_0.x;
-    *((&kernelContext_4)->arena_0+o_3) = _S60;
-    float _S61 = rr_0.y;
-    *((&kernelContext_4)->arena_0+(o_3 + 1U)) = _S61;
-    float _S62 = rr_0.z;
-    *((&kernelContext_4)->arena_0+(o_3 + 2U)) = _S62;
-    *((&kernelContext_4)->arena_0+(o_3 + 3U)) = sqrt(_S60 * _S60 + _S61 * _S61 + _S62 * _S62);
+    float3 rr_0 = (d_1 + float3(*((&kernelContext_4)->arena_0+qb_0))  * tt_0 + cross(u_0, tt_0)) / float3((as_type<float>(((&kernelContext_4)->table_0[t_0 + 3U])))) ;
+    uint _S58 = P_0(7U, &kernelContext_4);
+    uint o_3 = _S58 + _S53;
+    float _S59 = rr_0.x;
+    *((&kernelContext_4)->arena_0+o_3) = _S59;
+    float _S60 = rr_0.y;
+    *((&kernelContext_4)->arena_0+(o_3 + 1U)) = _S60;
+    float _S61 = rr_0.z;
+    *((&kernelContext_4)->arena_0+(o_3 + 2U)) = _S61;
+    *((&kernelContext_4)->arena_0+(o_3 + 3U)) = sqrt(_S59 * _S59 + _S60 * _S60 + _S61 * _S61);
     return;
 }
 

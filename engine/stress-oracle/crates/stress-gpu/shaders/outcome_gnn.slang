@@ -10,7 +10,7 @@
 //   node-projection lever); an op without a second layer outputs the pre-activation.
 //   Weights are k-major, so lane c reads column c contiguously across rows.
 // - gnn_csr: out[r] (+)= sum_k w_k * arena[o_k + c], entries (offset, f32 weight bits).
-// - gnn_fibre: a coarse edge's (R_body^T (p_i - p_j) / L, |.|).
+// - gnn_fibre: a coarse edge's (R_body^T (p_i - p_j) / L, |.|), L its call's.
 //
 // A workgroup of 128 threads holds 128 / lanes rows, `lanes` threads (one channel each) per
 // row. Control flow around barriers depends on parameters only (uniform), as WGSL's
@@ -217,7 +217,6 @@ void gnn_csr(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID)
 #define F_TRIPLES 5
 #define F_Q 6
 #define F_OUT_BASE 7
-#define F_L 8
 
 [shader("compute")]
 [numthreads(THREADS, 1, 1)]
@@ -226,7 +225,8 @@ void gnn_fibre(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID)
     uint r = (gid.y * P(2) + gid.x) * THREADS + lid.x;
     if (r >= P(1))
         return;
-    uint t = P(F_TRIPLES) + 3 * r;
+    // (i, j, chunk of i, its call's length scale L as f32 bits)
+    uint t = P(F_TRIPLES) + 4 * r;
     uint i = table[t], j = table[t + 1], c = table[t + 2];
     uint pb = P(F_POS);
     float3 d = float3(arena[pb + 3 * i] - arena[pb + 3 * j], arena[pb + 3 * i + 1] - arena[pb + 3 * j + 1], arena[pb + 3 * i + 2] - arena[pb + 3 * j + 2]);
@@ -234,7 +234,7 @@ void gnn_fibre(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID)
     float qw = arena[qb];
     float3 u = -float3(arena[qb + 1], arena[qb + 2], arena[qb + 3]);
     float3 tt = 2.0 * cross(u, d);
-    float L = asfloat(P(F_L));
+    float L = asfloat(table[t + 3]);
     float3 rr = (d + qw * tt + cross(u, tt)) / L;
     uint o = P(F_OUT_BASE) + 4 * r;
     arena[o] = rr.x;

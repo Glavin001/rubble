@@ -360,23 +360,24 @@ fn gnn_fibre(@builtin(workgroup_id) gid_2 : vec3<u32>, @builtin(local_invocation
     {
         return;
     }
-    var t_0 : u32 = P_0(u32(5)) + u32(3) * r_2;
+    var _S24 : u32 = u32(4) * r_2;
+    var t_0 : u32 = P_0(u32(5)) + _S24;
     var pb_0 : u32 = P_0(u32(4));
-    var _S24 : u32 = pb_0 + u32(3) * table_0[t_0];
-    var _S25 : u32 = pb_0 + u32(3) * table_0[t_0 + u32(1)];
-    var d_1 : vec3<f32> = vec3<f32>(arena_0[_S24] - arena_0[_S25], arena_0[_S24 + u32(1)] - arena_0[_S25 + u32(1)], arena_0[_S24 + u32(2)] - arena_0[_S25 + u32(2)]);
+    var _S25 : u32 = pb_0 + u32(3) * table_0[t_0];
+    var _S26 : u32 = pb_0 + u32(3) * table_0[t_0 + u32(1)];
+    var d_1 : vec3<f32> = vec3<f32>(arena_0[_S25] - arena_0[_S26], arena_0[_S25 + u32(1)] - arena_0[_S26 + u32(1)], arena_0[_S25 + u32(2)] - arena_0[_S26 + u32(2)]);
     var qb_0 : u32 = P_0(u32(6)) + u32(4) * table_0[t_0 + u32(2)];
     var u_0 : vec3<f32> = (vec3<f32>(0) - vec3<f32>(arena_0[qb_0 + u32(1)], arena_0[qb_0 + u32(2)], arena_0[qb_0 + u32(3)]));
     var tt_0 : vec3<f32> = vec3<f32>(2.0f) * cross(u_0, d_1);
-    var rr_0 : vec3<f32> = (d_1 + vec3<f32>(arena_0[qb_0]) * tt_0 + cross(u_0, tt_0)) / vec3<f32>((bitcast<f32>((P_0(u32(8))))));
-    var o_3 : u32 = P_0(u32(7)) + u32(4) * r_2;
-    var _S26 : f32 = rr_0.x;
-    arena_0[o_3] = _S26;
-    var _S27 : f32 = rr_0.y;
-    arena_0[o_3 + u32(1)] = _S27;
-    var _S28 : f32 = rr_0.z;
-    arena_0[o_3 + u32(2)] = _S28;
-    arena_0[o_3 + u32(3)] = sqrt(_S26 * _S26 + _S27 * _S27 + _S28 * _S28);
+    var rr_0 : vec3<f32> = (d_1 + vec3<f32>(arena_0[qb_0]) * tt_0 + cross(u_0, tt_0)) / vec3<f32>((bitcast<f32>((table_0[t_0 + u32(3)]))));
+    var o_3 : u32 = P_0(u32(7)) + _S24;
+    var _S27 : f32 = rr_0.x;
+    arena_0[o_3] = _S27;
+    var _S28 : f32 = rr_0.y;
+    arena_0[o_3 + u32(1)] = _S28;
+    var _S29 : f32 = rr_0.z;
+    arena_0[o_3 + u32(2)] = _S29;
+    arena_0[o_3 + u32(3)] = sqrt(_S27 * _S27 + _S28 * _S28 + _S29 * _S29);
     return;
 }
 
