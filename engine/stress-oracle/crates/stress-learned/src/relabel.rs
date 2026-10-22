@@ -109,7 +109,8 @@ pub fn relabel_event(dir: &Path, jobs: &[(usize, Provided)], with_calls: bool) -
             decoded_frame(&mut x, d)?;
             call_frame += 1;
         }
-        x.solver.reset_peak_utilizations();
+        // (The frame-start peak utilisation is the previous frame's, as recorded: the call
+        // reads it; the oracle's frame resets it at its start.)
         let members = match provided {
             Provided::Start(s) => s.members(),
             _ => x.island_members(),
