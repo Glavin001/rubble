@@ -247,6 +247,10 @@ class Call:
     ensemble_id: str | None = None
     ensemble_member: int | None = None
     gravity: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    # Where the oracle outcome came from: "standalone" (stress-ref alone, the bulk v1 data;
+    # pretraining) or "coupled" (stress-ref + rubble, production's inputs). From the event
+    # manifest's `source`; absent means standalone.
+    source: str = "standalone"
 
     def has(self, name: str) -> bool:
         return name in self.arrays
@@ -465,6 +469,7 @@ def load_event(path: Path | str, validate: bool = True, require_targets: bool = 
             split_group=manifest["split_group"], ensemble_id=manifest.get("ensemble_id"),
             ensemble_member=manifest.get("ensemble_member"),
             gravity=tuple(float(x) for x in manifest.get("gravity", (0.0, 0.0, 0.0))),
+            source=manifest.get("source", "standalone"),
         )
         if validate:
             validate_call(c, require_targets)

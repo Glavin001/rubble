@@ -98,3 +98,28 @@ def test_val_dataset_replaces_validation(tmp_path):
     assert vb and {c.event_id for c in d.val} == vb
     with pytest.raises(S.SchemaError):
         Data(str(tmp_path / "a"), val_dataset=str(tmp_path / "a"))
+
+
+def test_sources_mix_by_weight(tmp_path):
+    import json
+    from collections import Counter
+
+    import pytest
+
+    from learned_impact.outcome.train import Data, MixedSampler
+
+    write_dataset(tmp_path / "a", 8, seed=0, val_fraction=0.01)
+    write_dataset(tmp_path / "b", 4, seed=700, val_fraction=0.01)
+    for m in (tmp_path / "b").glob("*/manifest.json"):  # tag b as coupled recordings
+        d = json.loads(m.read_text())
+        m.write_text(json.dumps({**d, "source": "coupled"}))
+    plain = Data(f"{tmp_path / 'a'},{tmp_path / 'b'}")
+    assert {c.source for c in plain.train} == {"standalone", "coupled"}
+    assert plain.source_weights == {}
+    mixed = Data(f"{tmp_path / 'a'}@0.25,{tmp_path / 'b'}@0.75")
+    s = MixedSampler(mixed.train, {"contact": 1.0, "separation": 1.0, "quiet": 1.0,
+                                   "secondary": 1.0}, 0, mixed.source_weights)
+    n = Counter(c.source for _ in range(20) for c in s.epoch())
+    assert abs(n["coupled"] / sum(n.values()) - 0.75) < 0.05
+    with pytest.raises(ValueError):
+        Data(f"{tmp_path / 'a'}@0.5,{tmp_path / 'b'}")

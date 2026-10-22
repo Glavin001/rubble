@@ -109,6 +109,7 @@ manageable (one `.bin` per array would be ~10⁷ files).
 | `n_calls` | int | |
 | `columns` | object | the feature column names of each feature array, in order (see below); the loader checks them against `schema.py` exactly |
 | `available` | object | `{qs_hertz, punch, qs_frame, punch_frame, blast, cracked_edges, structure_contacts, bond_energy_split}` booleans |
+| `source` | string, optional | where the oracle outcome came from: `"standalone"` (stress-ref alone; the bulk v1 data, kept as pretraining) or `"coupled"` (stress-ref + rubble, production's inputs). Absent means standalone. The trainer mixes sources by weight (`--dataset path@w,…`) |
 | `outcome` | object | full-run outcome (below) |
 | `structures` | array | per structure `{structure_id, n_chunks, n_bonds}`; the pristine graph is in `arrays.bin` as `structure/<id>/…` |
 

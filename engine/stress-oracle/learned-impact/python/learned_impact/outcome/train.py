@@ -144,7 +144,24 @@ class Data:
 
     def __init__(self, dataset: str, include_unrouted: bool = False,
                  val_dataset: str | None = None):
-        self.events, self.ensemble_aligned_calls = _load_events(dataset)
+        # `dataset` may list several roots, `path[@weight],…`: their training calls are
+        # mixed by `MixedSampler` with the given shares of every epoch (default: in
+        # proportion to their sizes, i.e. plain concatenation).
+        self.events, self.ensemble_aligned_calls, self.source_weights = [], 0, {}
+        specs = parse_datasets(dataset)
+        if any(w is not None for _, w in specs) and any(w is None for _, w in specs):
+            raise ValueError(f"--dataset {dataset!r}: weight every source or none")
+        for path, weight in specs:
+            evs, n = _load_events(path)
+            ids = {e.manifest["event_id"] for e in self.events}
+            dup = ids & {e.manifest["event_id"] for e in evs}
+            if dup:
+                raise S.SchemaError(f"event ids in two training datasets: {sorted(dup)[:5]}")
+            self.events += evs
+            self.ensemble_aligned_calls += n
+            if weight is not None:
+                for src in {e.manifest.get("source", "standalone") for e in evs}:
+                    self.source_weights[src] = self.source_weights.get(src, 0.0) + weight
         val_events = self.events
         if val_dataset:
             val_events, n = _load_events(val_dataset)
@@ -179,6 +196,55 @@ class Data:
             pos[c.family] += float(c.arrays["y_bond_broke"].sum())
             tot[c.family] += float(len(c.arrays["y_bond_broke"]))
         self.priors = {f: max(pos[f] / max(tot[f], 1), 1e-4) for f in tot}
+
+
+def parse_datasets(spec: str) -> list[tuple[str, float | None]]:
+    """`path[@weight],path[@weight]` → [(path, weight or None)]."""
+    out = []
+    for part in filter(None, (x.strip() for x in spec.split(","))):
+        path, _, w = part.rpartition("@") if "@" in part else (part, "", "")
+        out.append((path, float(w) if w else None))
+    return out
+
+
+class MixedSampler:
+    """One `PhaseQuotaSampler` per data source (`Call.source`), each epoch drawing every
+    source's share of the training calls: `weights[source]` normalised, or proportional to
+    the sources' sizes when unweighted (identical to a single sampler over all calls)."""
+
+    def __init__(self, calls: list[S.Call], quotas: dict[str, float], seed: int,
+                 weights: dict[str, float] | None = None):
+        by: dict[str, list[S.Call]] = defaultdict(list)
+        for c in calls:
+            by[c.source].append(c)
+        self.samplers = {s: PhaseQuotaSampler(cs, quotas, seed + i)
+                         for i, (s, cs) in enumerate(sorted(by.items()))}
+        n = len(calls)
+        w = {s: (weights or {}).get(s, len(by[s]) / n if not weights else 0.0) for s in by}
+        z = sum(w.values()) or 1.0
+        self.share = {s: v / z for s, v in w.items()}
+        self.n = n
+        self.rng = random.Random(seed)
+        self.epoch_counts: Counter = Counter()
+        self.source_counts: Counter = Counter()
+
+    def epoch(self) -> list[S.Call]:
+        if len(self.samplers) == 1:
+            sm = next(iter(self.samplers.values()))
+            out = sm.epoch()
+            self.epoch_counts = sm.epoch_counts
+            self.source_counts = Counter(c.source for c in out)
+            return out
+        out = []
+        for s, sm in self.samplers.items():
+            want = int(round(self.share[s] * self.n))
+            pool = sm.epoch()
+            out += (self.rng.sample(pool, want) if want <= len(pool)
+                    else pool + self.rng.choices(pool, k=want - len(pool)))
+        self.rng.shuffle(out)
+        self.epoch_counts = Counter(PHASE_BUCKET[c.phase] for c in out)
+        self.source_counts = Counter(c.source for c in out)
+        return out
 
 
 class PhaseQuotaSampler:
@@ -248,6 +314,8 @@ def _produce(sampler: "PhaseQuotaSampler", cfg: "TrainConfig", coll, nrng):
             queue.extend(sampler.epoch())
             epoch += 1
             counts = dict(sampler.epoch_counts)
+            if len(getattr(sampler, "source_counts", ())) > 1:
+                counts["sources"] = dict(sampler.source_counts)
         calls, queue = take_batch(queue, cfg.batch_budget, cfg.batch_calls)
         if cfg.noise_sigma > 0:
             calls = [P.add_noise(c, cfg.noise_sigma, nrng) for c in calls]
@@ -452,7 +520,8 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
         raise ValueError(f"loss.balance {cfg.loss.balance!r}")
     opt = make_optimizer(params + (list(balancer.parameters()) if balancer else []), cfg, dev)
     monitor = Lo.DominanceMonitor(cfg.loss.dominance_warn, cfg.loss.dominance_patience)
-    sampler = PhaseQuotaSampler(data.train, cfg.phase_quotas, cfg.seed)
+    sampler = MixedSampler(data.train, cfg.phase_quotas, cfg.seed,
+                           getattr(data, "source_weights", None) or None)
     nrng = np.random.default_rng(cfg.seed)
     prog.line(f"device={dev} params={count_parameters(model)} train_calls={len(data.train)} "
               f"val_calls={len(data.val)} variant={cfg.model.variant} width={cfg.model.width} "
@@ -645,7 +714,8 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
 
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
-    ap.add_argument("--dataset", default="")
+    ap.add_argument("--dataset", default="",
+                    help="training calls: path[@weight],… (several sources mixed by weight)")
     ap.add_argument("--synthetic", type=int, default=0,
                     help="generate N synthetic events into <out>/data first (no accuracy claims)")
     ap.add_argument("--val-dataset", default="",
