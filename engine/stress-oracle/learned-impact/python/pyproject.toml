@@ -16,6 +16,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
+# Weights & Biases run tracking (learned_impact/outcome/tracking.py; offline by default)
+tracking = ["wandb==0.30.0"]
 
 [project.scripts]
 learned-impact-train = "learned_impact.train:main"

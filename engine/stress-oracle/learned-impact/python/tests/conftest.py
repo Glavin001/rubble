@@ -1,3 +1,6 @@
+import os
+
+os.environ.setdefault("LEARNED_IMPACT_WANDB", "off")  # tracking off in tests (tracking test opts in)
 import numpy as np
 import pytest
 import torch

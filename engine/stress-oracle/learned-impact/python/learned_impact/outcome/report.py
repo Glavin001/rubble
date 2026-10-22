@@ -21,6 +21,20 @@ from .batch import HierarchyCache, collate
 from .train import TAU_GRID, _batches, decode_config, load_model
 
 
+def _track(a, rep: dict) -> None:
+    """The report as its own W&B run in the training run's group (summary + artifact)."""
+    from . import tracking as TR
+
+    run = Path(a.checkpoint).resolve().parent
+    tr = TR.Tracker(a.wandb, run, {"checkpoint": str(a.checkpoint), "split": a.split,
+                                   "dataset": str(a.dataset)},
+                    ["report", a.split], group=TR.run_group(run), job_type="report",
+                    name=f"{run.name}-report-{a.split}", marker=False)
+    tr.summary(json.loads(json.dumps(rep, default=float)))
+    tr.artifact(Path(a.out), f"{run.parent.name}-{run.name}-report-{a.split}")
+    tr.finish(0)
+
+
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", required=True)
@@ -30,6 +44,7 @@ def main(argv=None) -> None:
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--confirm-sealed", action="store_true",
                     help="required for --split sealed: the sealed set is opened once, at P4")
+    ap.add_argument("--wandb", default="auto", choices=("auto", "off", "offline", "online"))
     ap.add_argument("--no-tau-sweep", action="store_true",
                     help="skip the informational τ sweep on test (the verdict uses the frozen τ)")
     a = ap.parse_args(argv)
@@ -77,6 +92,7 @@ def main(argv=None) -> None:
     rep["split"] = a.split
     rep["n_events"], rep["n_calls"] = len(events), len(calls)
     Path(a.out).write_text(json.dumps(rep, indent=1, default=float))
+    _track(a, rep)
     for fam, e in sorted(rep["families"].items()):
         print(f"[report] {fam}: superiority={e.get('superiority')} "
               f"non_inferiority={e.get('non_inferiority', {}).get('pass')} model={e.get('model')}")

@@ -59,6 +59,30 @@ in a throwaway venv (the only code that imports `inspiration/`; not run in tests
 `outcome/`: `schema`, `synthetic`, `batch` (collation + per-call hierarchy masks), `model`,
 `decode` (momentum projection, energy bound, breaks), `losses`, `metrics`, `pushforward`, `train`.
 
+### Run tracking (Weights & Biases)
+
+Optional: `pip install -e .[tracking]` (pins `wandb==0.30.0`). Every training run (train,
+pilot/scaling, overfit, DAgger fine-tunes) then logs to the project `rubble-learned-impact`:
+the run name is the run dir's name, the group its path below `runs/` (`v7`, `v7/scaling`),
+the tags carry variant, width, rounds, seed, data revision, git SHA and the run's options,
+and the config is the full `TrainConfig`. It logs what `history.jsonl` records: each
+normalised loss term, LR, |g|, the gradient shares and balancer multipliers per group,
+steps/s, every validation metric (per family, gates, admissibility and energy-bound counts)
+and the loss curves on fixed train/val samples; the final best/τ/temperature as the summary.
+`outcome.report` adds its report as a `<run>-report-<split>` run (summary + artifact).
+
+`--wandb auto|off|offline|online` (train, pilot, overfit_real, report). `auto`, the default,
+is `offline` when wandb is installed: runs are written under `<run dir>/wandb/` with no
+network and no login. Tracking never stops a run (a W&B error turns it off with one warning).
+Runs that predate tracking: `python -m learned_impact.wandb_backfill <run dir or dir of runs> ...`
+(skips runs already tracked or backfilled). To upload, once:
+
+    wandb login                       # W&B's own prompt; nothing here reads the key
+    wandb sync ../runs/*/wandb/offline-run-* ../runs/*/*/wandb/offline-run-* ../runs/*/*/*/wandb/offline-run-*
+
+and pass `--wandb online` from then on (or set `LEARNED_IMPACT_WANDB=online` for runs started
+by scripts, e.g. `scripts/viability.sh`, which keep the `auto` default).
+
 ### Videos: oracle vs learned model (stress-viz)
 
 ```sh

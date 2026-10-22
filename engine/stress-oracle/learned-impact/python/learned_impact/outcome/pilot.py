@@ -101,7 +101,7 @@ def run(dataset: str, out: str, sizes: list[int], seeds: list[int], variants: li
         device: str, model_cfg: ModelConfig, pushforward: float = 0.0,
         rereport: bool = False, val_dataset: str | None = None,
         fractions: list[float] | None = None, train_events: list | None = None,
-        call_cache: dict | None = None, kinematic: bool = False) -> dict:
+        call_cache: dict | None = None, kinematic: bool = False, wandb: str = "auto") -> dict:
     root = Path(out)
     prog = Progress(root, total=len(sizes) * len(seeds) * len(variants))
     full = Data(dataset, val_dataset=val_dataset, train_events=train_events, call_cache=call_cache)
@@ -151,7 +151,8 @@ def run(dataset: str, out: str, sizes: list[int], seeds: list[int], variants: li
                 cfg = TrainConfig(dataset=dataset, val_dataset=val_dataset or "", out=str(rdir),
                                   steps=steps, seed=seed,
                                   device=device, model=mc, eval_every=max(steps // 8, 50),
-                                  pushforward_prob=pushforward)
+                                  pushforward_prob=pushforward, wandb=wandb,
+                                  wandb_tags=("scaling", f"n{n}"))
                 cfg.loss.kinematic = kinematic
                 t0 = time.time()
                 prog.line(f"[{k}/{prog.total}] {tag}: {n_events} events, "
@@ -268,6 +269,9 @@ def main(argv=None) -> None:
     ap.add_argument("--min-steps", type=int, default=500)
     ap.add_argument("--max-steps", type=int, default=20000)
     ap.add_argument("--device", default="auto")
+    ap.add_argument("--wandb", default="auto", choices=("auto", "off", "offline", "online"),
+                    help="Weights & Biases tracking (auto: offline when wandb is installed; runs land in "
+                         "<run dir>/wandb, `wandb sync` uploads them after `wandb login`)")
     ap.add_argument("--reference", action="store_true", help="W64 / 12 rounds (the default)")
     ap.add_argument("--large", action="store_true", help="W128 / 16 rounds")
     ap.add_argument("--cost", action="store_true", help="W32 / 8 rounds (P0's cost point)")
@@ -295,7 +299,7 @@ def main(argv=None) -> None:
         a.val_dataset, [float(x) for x in a.fractions.split(",")] if a.fractions else None,
         [x for x in Path(a.train_events).read_text().split() if x] if a.train_events else None,
         {"module": a.call_cache_module, "root": a.call_cache, "builder": a.call_builder,
-         "max_gb": a.cache_gb} if a.train_events else None, a.kinematic)
+         "max_gb": a.cache_gb} if a.train_events else None, a.kinematic, a.wandb)
 
 
 if __name__ == "__main__":

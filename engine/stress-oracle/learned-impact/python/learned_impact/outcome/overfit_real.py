@@ -231,6 +231,9 @@ def main(argv=None) -> None:
     ap.add_argument("--steps", type=int, default=4000)
     ap.add_argument("--out", required=True)
     ap.add_argument("--device", default="auto")
+    ap.add_argument("--wandb", default="auto", choices=("auto", "off", "offline", "online"),
+                    help="Weights & Biases tracking (auto: offline when wandb is installed; runs land in "
+                         "<run dir>/wandb, `wandb sync` uploads them after `wandb login`)")
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--events-json", default=None,
@@ -273,7 +276,9 @@ def main(argv=None) -> None:
     cfg = TrainConfig(dataset=str(root), out=str(out), steps=a.steps, lr=a.lr, seed=a.seed,
                       device=a.device, weight_decay=0.0, noise_sigma=0.0, pushforward_prob=0.0,
                       eval_every=max(a.steps // 10, 50), select_tau=False,
-                      curve_calls=len(calls), init_checkpoint=a.init_checkpoint)
+                      curve_calls=len(calls), init_checkpoint=a.init_checkpoint, wandb=a.wandb,
+                      wandb_tags=("overfit", f"n{len({c.event_id for c in calls})}",
+                                  *(["dagger-round"] if a.extra_calls else [])))
     cfg.loss = dataclasses.replace(cfg.loss, label_smoothing=0.0)
     cfg.model.full_state = a.full_state
     print(f"[overfit] {len(calls)} calls, {int(pos)} broken bonds, W{cfg.model.width} "

@@ -29,6 +29,7 @@ import numpy as np
 import torch
 
 from . import decode as D
+from . import tracking as TR
 from . import losses as Lo
 from . import metrics as M
 from . import pushforward as P
@@ -56,6 +57,10 @@ class TrainConfig:
     # 220 chunks = 37 ms/step). One call over the budget still forms its own batch.
     batch_budget: int = 20000
     select_tau: bool = True  # choose the break threshold on validation at the end
+    # Weights & Biases (tracking.py): auto (offline when wandb is installed) | off | offline |
+    # online; extra tags (e.g. "scaling", "overfit", "dagger-round")
+    wandb: str = "auto"
+    wandb_tags: tuple = ()
     curve_calls: int = 4000  # calls per fixed sample (train and val) for the loss curves
     init_checkpoint: str = ""  # start from these weights (and their input stats): DAgger rounds
     # `/5`: the training data's full-state column set (P1's manifest.full_state_columns): a
@@ -674,15 +679,35 @@ def load_model(path: str | Path, device="cpu") -> tuple[ImpactOutcomeModel, dict
 def train(cfg: TrainConfig, data: Data | None = None) -> dict:
     out = Path(cfg.out)
     prog = Progress(out, cfg.steps)
+    run: dict = {}
     try:
-        return _train(cfg, data, out, prog)
+        res = _train(cfg, data, out, prog, run)
+        if "tracker" in run:
+            run["tracker"].finish(0)
+        return res
     except Exception as e:  # loud failure, recorded in status.json
         prog.line(f"FAILED: {e!r}")
         prog.update(force=True, state="failed", last_error=traceback.format_exc())
+        if "tracker" in run:
+            run["tracker"].summary({"failed": 1})
+            run["tracker"].finish(1)
         raise
 
 
-def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> dict:
+def _tracker(cfg: TrainConfig, data: Data, out: Path) -> "TR.Tracker":
+    mc = cfg.model
+    tags = [f"variant-{mc.variant}", f"w{mc.width}", f"rounds-{sum(mc.rounds)}", f"seed{cfg.seed}",
+            f"data-{TR.data_revision(data)}", f"git-{TR.git_sha(Path(__file__).parent)}",
+            *(["full-state"] if mc.full_state else []), *(["break-time-head"] if mc.break_time_head else []),
+            *(["hidden-head"] if mc.hidden_head else []), *(["kinematic"] if cfg.loss.kinematic else []),
+            *(["dagger"] if any(c.source == "dagger" for c in data.train) else []),
+            *(["fine-tune"] if cfg.init_checkpoint else []), *cfg.wandb_tags]
+    config = {**cfg.to_dict(), "n_train_calls": len(data.train), "n_val_calls": len(data.val),
+              "n_events": len(getattr(data, "events", []) or [])}
+    return TR.Tracker(cfg.wandb, out, config, tags)
+
+
+def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress, run: dict) -> dict:
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
     random.seed(cfg.seed)
@@ -694,6 +719,9 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
         if cols:
             cfg.full_state_columns = cols[0]
     (out / "config.json").write_text(json.dumps(cfg.to_dict(), indent=1))
+    tracker = run["tracker"] = _tracker(cfg, data, out)
+    if tracker.run is not None:
+        prog.line(f"wandb: {tracker.mode} run {tracker.run.id} ({TR.PROJECT}) under {out / 'wandb'}")
     cache = HierarchyCache(cfg.model.levels)
     model = ImpactOutcomeModel(cfg.model)
     if cfg.init_checkpoint:
@@ -757,7 +785,7 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
         for name, pool in (("val", data.val), ("train", data.train)):
             sample = rs.sample(pool, min(n_curve, len(pool)))
             curve[name] = [coll(bc) for bc in _batches(sample, cfg.batch_budget, cfg.batch_calls)]
-    hist = open(out / "history.jsonl", "a", buffering=1)
+    hist = TR.HistoryWriter(out / "history.jsonl", tracker)
 
     def curve_losses() -> dict:
         model.eval()
@@ -829,6 +857,9 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
                 gnorm_last = grad_norms({k: eff.get(k, 1.0) * v for k, v in normed.items()}, params)
             if group_bal is not None:
                 if step % (cfg.grad_norm_every * 10) == 0 or step <= 5 * cfg.grad_norm_every:
+                    hist.write_record({"kind": "group_shares", "step": step + 1,
+                                       "shares": {g: v / max(share_n, 1) for g, v in share_acc.items()},
+                                       "mult": dict(group_bal.mult)})
                     prog.line(f"group gradient shares (effective, mean of {share_n} measurements) "
                               + " ".join(f"{g}={v / max(share_n, 1):.2f}" for g, v in share_acc.items())
                               + " → multipliers " + " ".join(f"{g}={v:.3g}" for g, v in group_bal.mult.items()))
@@ -897,11 +928,15 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
             if balancer is not None:
                 gn += " λeff[" + " ".join(f"{k}={v:.2f}" for k, v in
                                          balancer.effective(cfg.loss.weights).items()) + "]"
-            hist.write(json.dumps({"kind": "train_running", "step": step + 1, "epoch": epoch,
-                                   "loss": float(np.mean(acc["loss"])),
-                                   "terms": {k: float(np.mean(v)) for k, v in acc.items()
-                                             if k not in ("loss", "grad_norm")},
-                                   "lr": _lr(step, cfg)}) + "\n")
+            hist.write_record({"kind": "train_running", "step": step + 1, "epoch": epoch,
+                               "loss": float(np.mean(acc["loss"])),
+                               "terms": {k: float(np.mean(v)) for k, v in acc.items()
+                                         if k not in ("loss", "grad_norm")},
+                               "lr": _lr(step, cfg), "grad_norm": float(np.mean(acc["grad_norm"])),
+                               "gshare": {k: float(v / tot_g) for k, v in gnorm_last.items()},
+                               **({"mult": {g: float(v) for g, v in group_bal.mult.items()}}
+                                  if group_bal is not None else {}),
+                               "steps_per_s": rate})
             prog.line(f"step {step + 1}/{cfg.steps} ep {epoch} loss={np.mean(acc['loss']):.4f} "
                       f"[{terms_s}] |g|={np.mean(acc['grad_norm']):.3g} gshare[{gn}] "
                       f"lr={_lr(step, cfg):.2e} {rate:.2f} steps/s ETA {eta / 60:.1f} min")
@@ -912,8 +947,8 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
             res = M.evaluate(model, val_batches, cfg.decode,
                              data.priors if cfg.loss.break_reweight == "prior" else None)
             cl = curve_losses()
-            hist.write(json.dumps({"kind": "eval", "step": step + 1, "epoch": epoch, **cl,
-                                   "score": res.score, "metrics": res.metrics}) + "\n")
+            hist.write_record({"kind": "eval", "step": step + 1, "epoch": epoch, **cl,
+                               "score": res.score, "metrics": res.metrics})
             if cl:
                 prog.line(f"loss @ {step + 1}: train-sample {cl['train']['loss']:.4f} "
                           f"val-sample {cl['val']['loss']:.4f}")
@@ -952,6 +987,8 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
         save(out / "best.pt", model, cfg, norms, data.priors, ck["step"], ck["metrics"],
              temperature, tau)
     prog.update(force=True, state="done", step=cfg.steps)
+    tracker.summary({"best_score": best["score"], "best_step": best["step"] or 0,
+                     "temperature": temperature, "tau": tau, "best": best["metrics"] or {}})
     return {"best": best, "norms": norms, "temperature": temperature, "tau": tau}
 
 
@@ -999,6 +1036,9 @@ def main(argv=None) -> None:
                          "bond_feat:log_qs_hertz_util")
     ap.add_argument("--seeds", default="0")
     ap.add_argument("--device", default="auto")
+    ap.add_argument("--wandb", default="auto", choices=("auto", "off", "offline", "online"),
+                    help="Weights & Biases tracking (auto: offline when wandb is installed; runs land in "
+                         "<run dir>/wandb, `wandb sync` uploads them after `wandb login`)")
     ap.add_argument("--noise", type=float, default=0.0)
     ap.add_argument("--pushforward", type=float, default=0.0, help="probability per step")
     ap.add_argument("--pushforward-steps", type=int, default=2)
@@ -1047,7 +1087,7 @@ def main(argv=None) -> None:
                           batch_calls=a.batch_calls, batch_budget=a.batch_budget, lr=a.lr, seed=s, device=a.device,
                           noise_sigma=a.noise, pushforward_prob=a.pushforward,
                           pushforward_steps=a.pushforward_steps,
-                          eval_every=a.eval_every, model=dataclasses.replace(mc),
+                          eval_every=a.eval_every, model=dataclasses.replace(mc), wandb=a.wandb,
                           decode=D.DecodeConfig(energy_tolerance=a.energy_tolerance,
                                                 break_mode=a.break_mode))
         cfg.loss.energy_tolerance = a.energy_tolerance
