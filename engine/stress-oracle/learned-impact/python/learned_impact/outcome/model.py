@@ -42,8 +42,9 @@ class ModelConfig:
     n_time_bins: int = S.N_TIME_BINS
     use_global: bool = True
     # Fixed per-column standardisation of every input array, from training-set statistics
-    # stored in the checkpoint (a global affine map, not per-graph normalisation; the GPU
-    # port folds it into the first layer).
+    # stored in the checkpoint (a global affine map, not per-graph normalisation). The port
+    # applies it as a separate (x − mean) / std step: folding it into the first Linear is
+    # lossy in f32 (P0 measured 4.4e-3 on bond columns with σ ≈ 8.5e-6).
     input_norm: bool = True
     edge_types: tuple[str, ...] = S.EDGE_TYPES
 
