@@ -39,7 +39,7 @@ class OutcomeEvent:
     def array(self, name: str) -> np.ndarray:
         if name not in self._cache:
             e = self.catalog[name]
-            dtype = {"f32": "<f4", "i32": "<i4"}[e["dtype"]]
+            dtype = {"f32": "<f4", "i32": "<i4", "f64": "<f8"}[e["dtype"]]
             if e["path"].endswith(".zst"):
                 import zstandard
                 raw = zstandard.ZstdDecompressor().decompress((self.path / e["path"]).read_bytes(), max_output_size=1 << 34)
@@ -145,7 +145,7 @@ def check_event(ev: OutcomeEvent) -> list[str]:
         if breaks_json[-quiet:].any():
             bad.append(f"breaks within the last {quiet} frames of a finished event")
     for name, e in ev.catalog.items():
-        if e["dtype"] == "f32" and not np.all(np.isfinite(ev.array(name))):
+        if e["dtype"] in ("f32", "f64") and not np.all(np.isfinite(ev.array(name))):
             bad.append(f"{name}: nonfinite")
     if "state_bond_energy" in ev.catalog and (ev.context.get("storage") or {}).get("kept_frames") is None:
         en = ev.array("state_bond_energy")

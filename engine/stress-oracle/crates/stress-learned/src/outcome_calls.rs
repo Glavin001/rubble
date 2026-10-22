@@ -117,6 +117,9 @@ impl Record {
                 "i32" => {
                     i.insert(name.clone(), (e.shape.clone(), catalog::read_i32(dir, e)?));
                 }
+                // Exact f64 copies of state, break times and impactor impulses: labels and
+                // restart data, not features.
+                "f64" => {}
                 d => return Err(format!("{name}: dtype {d}")),
             }
         }

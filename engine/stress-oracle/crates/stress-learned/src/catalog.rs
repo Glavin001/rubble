@@ -103,9 +103,22 @@ pub fn i32_bytes(data: &[i32]) -> Vec<u8> {
     data.iter().flat_map(|x| x.to_le_bytes()).collect()
 }
 
+pub fn f64_bytes(data: &[f64]) -> Vec<u8> {
+    data.iter().flat_map(|x| x.to_le_bytes()).collect()
+}
+
+/// Bytes per element of a catalog dtype.
+pub fn dtype_width(dtype: &str) -> Result<usize, String> {
+    match dtype {
+        "f32" | "i32" => Ok(4),
+        "f64" => Ok(8),
+        d => Err(format!("dtype {d}")),
+    }
+}
+
 /// An array's raw bytes, decompressing a `.zst` file (one zstd frame of the same bytes).
 pub fn read_bytes(root: &Path, entry: &ArrayEntry) -> Result<Vec<u8>, String> {
-    let n = numel(&entry.shape) * 4;
+    let n = numel(&entry.shape) * dtype_width(&entry.dtype)?;
     let path = root.join(&entry.path);
     let buf = if entry.path.ends_with(".zst") {
         zstd::decode_all(File::open(&path).map_err(|e| format!("{}: {e}", entry.path))?).map_err(|e| format!("{}: {e}", entry.path))?
@@ -138,4 +151,12 @@ pub fn read_i32(root: &Path, entry: &ArrayEntry) -> Result<Vec<i32>, String> {
 
 pub fn frame_dir(event: &Path, index: u32) -> PathBuf {
     event.join("frames").join(format!("{index:06}"))
+}
+
+pub fn read_f64(root: &Path, entry: &ArrayEntry) -> Result<Vec<f64>, String> {
+    if entry.dtype != "f64" {
+        return Err(format!("{}: expected f64, got {}", entry.path, entry.dtype));
+    }
+    let buf = read_bytes(root, entry)?;
+    Ok(buf.chunks_exact(8).map(|c| f64::from_le_bytes(c.try_into().unwrap())).collect())
 }

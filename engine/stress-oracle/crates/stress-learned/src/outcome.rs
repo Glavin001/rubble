@@ -41,7 +41,7 @@ use crate::oracle_config::{qs_template, OracleConfig, QS_BASELINE};
 
 pub const OUTCOME_SCHEMA: &str = "learned-impact-frames/1";
 /// Bumped whenever what the recorder writes, or how, changes.
-pub const RECORDER_REVISION: u32 = 7;
+pub const RECORDER_REVISION: u32 = 8;
 /// Break-time bins within a frame.
 pub const TIME_BINS: usize = 8;
 /// Floats per predicted contact (`contact_f32`).
@@ -149,6 +149,7 @@ pub struct OutcomeSummary {
 pub(crate) struct Arrays {
     pub(crate) f32s: BTreeMap<String, (Vec<usize>, Vec<f32>, usize)>,
     pub(crate) i32s: BTreeMap<String, (Vec<usize>, Vec<i32>, usize)>,
+    pub(crate) f64s: BTreeMap<String, (Vec<usize>, Vec<f64>, usize)>,
 }
 
 impl Arrays {
@@ -183,6 +184,34 @@ impl Arrays {
         Ok(())
     }
 
+    /// An exact f64 row (state where f32 loses digits, break times, impulses).
+    pub(crate) fn d(&mut self, name: &str, tail: &[usize], data: &[f64]) -> Result<(), String> {
+        let n: usize = tail.iter().product();
+        if data.len() != n {
+            return Err(format!("{name}: {} values, want {n}", data.len()));
+        }
+        if let Some(x) = data.iter().find(|x| !x.is_finite()) {
+            return Err(format!("{name}: nonfinite value {x}"));
+        }
+        let e = self.f64s.entry(name.into()).or_insert_with(|| (tail.to_vec(), Vec::new(), 0));
+        if e.0 != tail {
+            return Err(format!("{name}: shape changed {:?} -> {tail:?}", e.0));
+        }
+        e.1.extend_from_slice(data);
+        e.2 += 1;
+        Ok(())
+    }
+
+    /// An f32 row and its exact f64 copy (`<name>_f64`).
+    pub(crate) fn fd(&mut self, name: &str, tail: &[usize], data: &[f64]) -> Result<(), String> {
+        self.f(name, tail, &data.iter().map(|&x| x as f32).collect::<Vec<_>>())?;
+        self.d(&format!("{name}_f64"), tail, data)
+    }
+
+    pub(crate) fn declare_d(&mut self, name: &str, tail: &[usize]) {
+        self.f64s.entry(name.into()).or_insert_with(|| (tail.to_vec(), Vec::new(), 0));
+    }
+
     /// Declare an array that may get no rows (a table that can be empty).
     pub(crate) fn declare_f(&mut self, name: &str, tail: &[usize]) {
         self.f32s.entry(name.into()).or_insert_with(|| (tail.to_vec(), Vec::new(), 0));
@@ -206,6 +235,7 @@ impl Arrays {
         let contact_frames = frame_col("contact_i32");
         let pair_frames = frame_col("pair_i32");
         let punch_frames = frame_col("punch_frame");
+        let break_frames = frame_col("break_i32");
         let keep_rows = |name: &str, rows: usize| -> Option<Vec<usize>> {
             let sel = sel?;
             let kept = |frames: &Option<Vec<i32>>| frames.as_ref().map(|v| (0..rows).filter(|&r| sel.keeps(v[r] as usize)).collect());
@@ -221,6 +251,8 @@ impl Arrays {
                 kept(&contact_frames)
             } else if name.starts_with("pair_") {
                 kept(&pair_frames)
+            } else if name.starts_with("break_") {
+                kept(&break_frames)
             } else {
                 None
             }
@@ -247,6 +279,9 @@ impl Arrays {
         }
         for (name, (tail, data, rows)) in &self.i32s {
             put(name, "i32", tail, *rows, catalog::i32_bytes(data), 4 * tail.iter().product::<usize>())?;
+        }
+        for (name, (tail, data, rows)) in &self.f64s {
+            put(name, "f64", tail, *rows, catalog::f64_bytes(data), 8 * tail.iter().product::<usize>())?;
         }
         Ok(cat)
     }
@@ -276,11 +311,23 @@ pub struct Storage {
     pub select_training_frames: bool,
     /// Of the settling frames, keep one in this many.
     pub settling_stride: usize,
+    /// Exact World snapshots (`snapshots/`): boundary 0, every boundary with a routed
+    /// island and every `snapshot_every`-th.
+    #[serde(default)]
+    pub snapshots: bool,
+    #[serde(default = "default_snapshot_every")]
+    pub snapshot_every: usize,
 }
 
+fn default_snapshot_every() -> usize {
+    10
+}
+
+/// The dataset is the ground truth and only grows (user, 2026-10-22): every frame kept,
+/// with exact restart snapshots.
 impl Default for Storage {
     fn default() -> Self {
-        Storage { compress: true, select_training_frames: true, settling_stride: 8 }
+        Storage { compress: true, select_training_frames: false, settling_stride: 8, snapshots: true, snapshot_every: 10 }
     }
 }
 
@@ -477,26 +524,30 @@ fn structure_ke(w: &World) -> f64 {
     (0..w.solver.structures.len()).flat_map(|s| (0..w.solver.structures[s].chunks.len()).map(move |c| (s, c))).filter(|&(s, c)| w.solver.chunks[s][c].active).map(|(s, c)| chunk_ke(w, s, c)).sum()
 }
 
-fn impactor_state(w: &World) -> Vec<f32> {
+fn impactor_state(w: &World) -> Vec<f64> {
     let mut out = Vec::with_capacity(w.impactors.len() * IMPACTOR_STATE);
     for imp in &w.impactors {
-        out.extend(v3(imp.pose.position));
-        out.extend(imp.pose.rotation.to_wxyz().map(|x| x as f32));
-        out.extend(v3(imp.velocity));
-        out.extend(v3(imp.angular_velocity));
+        out.extend(imp.pose.position.to_array());
+        out.extend(imp.pose.rotation.to_wxyz());
+        out.extend(imp.velocity.to_array());
+        out.extend(imp.angular_velocity.to_array());
     }
     out
 }
 
+fn to32(x: &[f64]) -> Vec<f32> {
+    x.iter().map(|&v| v as f32).collect()
+}
+
 /// Frame-end (or frame-start) chunk motion: positions, velocities, angular velocities.
-fn chunk_motion(w: &World, ix: &Index) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+fn chunk_motion(w: &World, ix: &Index) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let (mut p, mut v, mut om) = (Vec::with_capacity(ix.n * 3), Vec::with_capacity(ix.n * 3), Vec::with_capacity(ix.n * 3));
     for s in 0..w.solver.structures.len() {
         for c in 0..w.solver.structures[s].chunks.len() {
-            p.extend(v3(w.solver.chunk_position(s, c)));
+            p.extend(w.solver.chunk_position(s, c).to_array());
             let (a, b) = w.solver.chunk_velocity(s, c);
-            v.extend(v3(a));
-            om.extend(v3(b));
+            v.extend(a.to_array());
+            om.extend(b.to_array());
         }
     }
     (p, v, om)
@@ -570,24 +621,24 @@ fn quat_of(r: &stress_ref::math::Mat3) -> Quat {
 pub(crate) fn capture_state(w: &World, ix: &Index, a: &mut Arrays) -> Result<(), String> {
     let (n, e, ni) = (ix.n, ix.e, w.impactors.len());
     let (p, v, om) = chunk_motion(w, ix);
-    a.f("state_chunk_pos", &[n, 3], &p)?;
-    a.f("state_chunk_vel", &[n, 3], &v)?;
-    a.f("state_chunk_angvel", &[n, 3], &om)?;
+    a.fd("state_chunk_pos", &[n, 3], &p)?;
+    a.fd("state_chunk_vel", &[n, 3], &v)?;
+    a.fd("state_chunk_angvel", &[n, 3], &om)?;
     let mut quat = Vec::with_capacity(n * 4);
     let (mut hidden, mut cluster, mut active, mut anchored) = (Vec::with_capacity(n * 6), Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
     for s in 0..w.solver.structures.len() {
         for c in 0..w.solver.structures[s].chunks.len() {
             let st = &w.solver.chunks[s][c];
             let cl = &w.solver.clusters[st.cluster];
-            quat.extend(cl.pose.rotation.to_wxyz().map(|x| x as f32));
-            hidden.extend(v3(st.u));
-            hidden.extend(v3(st.th));
+            quat.extend(cl.pose.rotation.to_wxyz());
+            hidden.extend(st.u.to_array());
+            hidden.extend(st.th.to_array());
             cluster.push(st.cluster as i32);
             active.push(i32::from(st.active));
             anchored.push(i32::from(cl.anchored));
         }
     }
-    a.f("state_chunk_cluster_quat", &[n, 4], &quat)?;
+    a.fd("state_chunk_cluster_quat", &[n, 4], &quat)?;
     // Each chunk's own world orientation: cluster, hidden rotation, chunk's rest rotation.
     let mut qw = Vec::with_capacity(n * 4);
     for s in 0..w.solver.structures.len() {
@@ -596,26 +647,26 @@ pub(crate) fn capture_state(w: &World, ix: &Index, a: &mut Arrays) -> Result<(),
             let cl = &w.solver.clusters[st.cluster];
             let hidden = Quat::from_rotation_vector(st.th);
             let rest = quat_of(&w.solver.structures[s].chunks[c].rotation);
-            qw.extend((cl.pose.rotation * hidden * rest).normalized().to_wxyz().map(|x| x as f32));
+            qw.extend((cl.pose.rotation * hidden * rest).normalized().to_wxyz());
         }
     }
-    a.f("state_chunk_q_world", &[n, 4], &qw)?;
-    a.f("state_chunk_hidden", &[n, 6], &hidden)?;
+    a.fd("state_chunk_q_world", &[n, 4], &qw)?;
+    a.fd("state_chunk_hidden", &[n, 6], &hidden)?;
     a.i("state_chunk_cluster", &[n], &cluster)?;
     a.i("state_chunk_active", &[n], &active)?;
     a.i("state_chunk_anchored", &[n], &anchored)?;
     let mut joint = Vec::with_capacity(e * 4);
     for b in w.solver.bonds.iter().flatten() {
-        joint.extend([b.joint.damage as f32, b.joint.crush as f32, b.joint.fatigue as f32, b.joint.utilization as f32]);
+        joint.extend([b.joint.damage, b.joint.crush, b.joint.fatigue, b.joint.utilization]);
     }
-    a.f("state_bond_joint", &[e, 4], &joint)?;
+    a.fd("state_bond_joint", &[e, 4], &joint)?;
     // Cumulative per-bond energy (J): joint dissipation (fracture, friction, rebar), dashpot
     // dissipation, stored elastic energy; and the failure mode (0 none, 1 tension, 2 shear,
     // 3 compression, 4 buckling).
     let mut energy = Vec::with_capacity(e * 3);
     let mut mode = Vec::with_capacity(e);
     for b in w.solver.bonds.iter().flatten() {
-        energy.extend([b.joint.dissipated as f32, b.damped as f32, b.stored as f32]);
+        energy.extend([b.joint.dissipated, b.damped, b.stored]);
         mode.push(match b.joint.mode {
             None => 0,
             Some(stress_ref::joint::FailureMode::Tension) => 1,
@@ -624,7 +675,7 @@ pub(crate) fn capture_state(w: &World, ix: &Index, a: &mut Arrays) -> Result<(),
             Some(stress_ref::joint::FailureMode::Buckling) => 4,
         });
     }
-    a.f("state_bond_energy", &[e, 3], &energy)?;
+    a.fd("state_bond_energy", &[e, 3], &energy)?;
     // Failure margin (`RtBond::fail_margin`, a running maximum: >= 1 exactly when the
     // bond disconnected). Written so that the f32 value keeps that rule: a connected
     // bond's margin is never rounded up to 1.
@@ -644,9 +695,10 @@ pub(crate) fn capture_state(w: &World, ix: &Index, a: &mut Arrays) -> Result<(),
         }
     }
     a.f("state_bond_fail_margin", &[e], &margin)?;
+    a.d("state_bond_fail_margin_f64", &[e], &w.solver.bonds.iter().flatten().map(|b| b.fail_margin()).collect::<Vec<_>>())?;
     a.i("state_bond_mode", &[e], &mode)?;
     a.i("state_bond_connected", &[e], &bond_connected(w))?;
-    a.f("state_impactor", &[ni, IMPACTOR_STATE], &impactor_state(w))?;
+    a.fd("state_impactor", &[ni, IMPACTOR_STATE], &impactor_state(w))?;
     Ok(())
 }
 
@@ -662,7 +714,7 @@ fn capture_traj(w: &World, boundary: usize, a: &mut Arrays) -> Result<(), String
         row.extend(v3(cl.angular_velocity));
         a.f("traj_cluster_f32", &[10], &row)?;
     }
-    a.f("traj_impactor", &[w.impactors.len(), IMPACTOR_STATE], &impactor_state(w))
+    a.f("traj_impactor", &[w.impactors.len(), IMPACTOR_STATE], &to32(&impactor_state(w)))
 }
 
 /// The static arrays of the event (`static_*`, one row).
@@ -720,10 +772,10 @@ pub(crate) fn capture_branch(prefix: &str, start_connected: &[i32], w: &World, i
     let peak: Vec<f32> = w.solver.bonds.iter().flatten().map(|b| b.peak_utilization as f32).collect();
     a.f(&format!("{prefix}_bond_peak_util"), &[e], &peak)?;
     let (p, v, om) = chunk_motion(w, ix);
-    a.f(&format!("{prefix}_chunk_pos"), &[n, 3], &p)?;
-    a.f(&format!("{prefix}_chunk_vel"), &[n, 3], &v)?;
-    a.f(&format!("{prefix}_chunk_angvel"), &[n, 3], &om)?;
-    a.f(&format!("{prefix}_impactor"), &[ni, IMPACTOR_STATE], &impactor_state(w))?;
+    a.f(&format!("{prefix}_chunk_pos"), &[n, 3], &to32(&p))?;
+    a.f(&format!("{prefix}_chunk_vel"), &[n, 3], &to32(&v))?;
+    a.f(&format!("{prefix}_chunk_angvel"), &[n, 3], &to32(&om))?;
+    a.f(&format!("{prefix}_impactor"), &[ni, IMPACTOR_STATE], &to32(&impactor_state(w)))?;
     Ok(())
 }
 
@@ -821,12 +873,17 @@ struct ContactWatch {
     first: Vec<Option<usize>>,
     last: Vec<Option<usize>>,
     structures: Vec<HashSet<usize>>,
+    /// Contact impulse on each impactor over the frame (N s): its momentum change less
+    /// gravity's, summed per substep.
+    impulse: Vec<Vec3>,
+    /// Largest substep-mean contact force on each impactor (N).
+    peak_force: Vec<f64>,
 }
 
 impl ContactWatch {
     fn new(w: &World) -> ContactWatch {
         let k = w.impactors.len();
-        ContactWatch { prev: w.impactors.iter().map(|i| i.velocity).collect(), substeps: 0, count: vec![0; k], first: vec![None; k], last: vec![None; k], structures: vec![HashSet::new(); k] }
+        ContactWatch { prev: w.impactors.iter().map(|i| i.velocity).collect(), substeps: 0, count: vec![0; k], first: vec![None; k], last: vec![None; k], structures: vec![HashSet::new(); k], impulse: vec![Vec3::ZERO; k], peak_force: vec![0.0; k] }
     }
 
     fn observe(&mut self, w: &World, dt: f64) {
@@ -836,6 +893,8 @@ impl ContactWatch {
         for (k, imp) in w.impactors.iter().enumerate() {
             let dv = imp.velocity - self.prev[k] - g * dt;
             self.prev[k] = imp.velocity;
+            self.impulse[k] += dv * imp.mass;
+            self.peak_force[k] = self.peak_force[k].max(imp.mass * dv.norm() / dt);
             if dv.norm() <= 1e-12 * imp.velocity.norm().max(1.0) {
                 continue;
             }
@@ -988,6 +1047,8 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
     a.declare_f("contact_f32", &[CONTACT_F32]);
     a.declare_i("punch_frame", &[]);
     a.declare_i("pair_i32", &[3]);
+    a.declare_i("break_i32", &[2]);
+    a.declare_d("break_f64", &[]);
     capture_state(&world, &ix, &mut a)?;
     capture_traj(&world, 0, &mut a)?;
     let mut peak_prev = vec![0f32; ix.e];
@@ -1002,6 +1063,7 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
     let mut stop_reason = String::new();
     let mut truncated = false;
     let mut substeps_total = 0u64;
+    let mut snapshots: Vec<Value> = Vec::new();
 
     for f in 0..max_frames {
         let t_over = Instant::now();
@@ -1011,6 +1073,15 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
         let (chunk_routed, imp_routed, pairs_n, contacts, punch_breaks, prior_converged) =
             (inputs.chunk_routed, inputs.impactor_routed, inputs.pairs, inputs.contacts, inputs.punch_breaks, inputs.prior_converged);
         *cost.get_mut("qs_prior").unwrap() += inputs.prior_seconds;
+        // An exact restart point at this boundary (the routing's prediction leaves the world
+        // as it was): the first, every routed one and every `snapshot_every`-th.
+        let routed = chunk_routed.contains(&1) || imp_routed.contains(&1);
+        if opts.storage.snapshots && (f == 0 || routed || f % opts.storage.snapshot_every.max(1) == 0) {
+            let bytes = world.save_state()?;
+            let rel = format!("snapshots/{f:06}.msgpack.zst");
+            catalog::write_zstd(&dir, &rel, &bytes)?;
+            snapshots.push(json!({"boundary": f, "time": world.solver.time, "routed": routed, "path": rel, "bytes": bytes.len()}));
+        }
         let start_connected = bond_connected(&world);
         let start_energy: Vec<(f64, f64)> = world.solver.bonds.iter().flatten().map(|b| (b.joint.dissipated, b.damped)).collect();
         *cost.get_mut("overhead").unwrap() += t_over.elapsed().as_secs_f64() - inputs.prior_seconds;
@@ -1053,6 +1124,8 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
                     break_bin[g] = bin;
                     n_breaks += 1;
                     break_times.push(*time);
+                    a.i("break_i32", &[2], &[f as i32, g as i32])?;
+                    a.d("break_f64", &[], &[*time])?;
                 }
             }
         }
@@ -1073,6 +1146,8 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
             contact_summary.extend([watch.count[k] as f32 / n_sub as f32, bin(watch.first[k]) as f32, bin(watch.last[k]) as f32, watch.structures[k].iter().map(|&s| 1u32 << s.min(30)).sum::<u32>() as f32]);
         }
         a.f("frame_impactor_contact", &[world.impactors.len(), IMPACTOR_CONTACT], &contact_summary)?;
+        a.d("frame_impactor_impulse", &[world.impactors.len(), 3], &watch.impulse.iter().flat_map(|j| j.to_array()).collect::<Vec<_>>())?;
+        a.d("frame_impactor_peak_force", &[world.impactors.len()], &watch.peak_force)?;
         capture_state(&world, &ix, &mut a)?;
         capture_traj(&world, f + 1, &mut a)?;
 
@@ -1260,10 +1335,16 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
         "bond_joint_columns": ["damage","crush","fatigue","utilization"],
         "bond_energy_columns": ["dissipated_joint","dissipated_damping","stored"],
         "bond_dissipated_columns": ["joint","damping"],
+        "break_i32_columns": ["frame","bond"],
+        "break_f64_columns": ["time"],
+        "f64_copies": "Each `<name>_f64` array is the exact f64 value of `<name>` (f32); state_bond_fail_margin_f64 is RtBond::fail_margin unrounded.",
+        "snapshots": {"format": "stress_ref World::save_state (rmp-serde, named fields), one zstd frame; World::restore_state(&scene.json, bytes) resumes the oracle bit for bit",
+            "rule": format!("boundary 0, every boundary with a routed island, every {}-th", opts.storage.snapshot_every), "boundaries": snapshots},
         "bond_mode_values": ["none","tension","shear","compression","buckling"],
         "ensemble": recipe.parameters.get("ensemble").cloned().unwrap_or(Value::Null),
         "split": recipe.parameters.get("split").cloned().unwrap_or(Value::Null),
         "storage": {"compress": opts.storage.compress, "select_training_frames": opts.storage.select_training_frames,
+            "snapshots": opts.storage.snapshots, "snapshot_every": opts.storage.snapshot_every,
             "settling_stride": opts.storage.settling_stride, "frames": frames.len(),
             "kept_frames": selection.as_ref().map(|x| x.frames.clone()), "state_rows": selection.as_ref().map(|x| x.state_rows.clone()),
             "dropped_frames": selection.as_ref().map_or(0, |x| frames.len() - x.frames.len()),
@@ -1335,7 +1416,7 @@ pub fn regenerate(event: &Path, out: &Path) -> Result<Regenerated, String> {
     let mut opts = RecordOptions::new(serde_json::from_value(ctx["oracle_config"].clone()).map_err(|e| e.to_string())?);
     opts.stop = serde_json::from_value(ctx["stop_rule"].clone()).map_err(|e| e.to_string())?;
     opts.baselines = !ctx["qs_baseline"].is_null();
-    opts.storage = Storage { compress: ctx["storage"]["compress"].as_bool().unwrap_or(false), select_training_frames: false, settling_stride: 1 };
+    opts.storage = Storage { compress: ctx["storage"]["compress"].as_bool().unwrap_or(false), select_training_frames: false, settling_stride: 1, snapshots: true, snapshot_every: 10 };
     fs::create_dir_all(out).map_err(|e| e.to_string())?;
     let summary = record_outcome_event(&recipe, out, &opts, &|_| {})?;
     let fresh = out.join(&recipe.event_id);
@@ -1362,7 +1443,7 @@ pub fn regenerate(event: &Path, out: &Path) -> Result<Regenerated, String> {
             None => Ok(None),
         }
     };
-    let (contact_f, pair_f, punch_f) = (frame_col("contact_i32")?, frame_col("pair_i32")?, frame_col("punch_frame")?);
+    let (contact_f, pair_f, punch_f, break_f) = (frame_col("contact_i32")?, frame_col("pair_i32")?, frame_col("punch_frame")?, frame_col("break_i32")?);
     let (mut arrays_checked, mut rows_checked) = (0, 0);
     for (name, e) in &old_cat.arrays {
         let stored = catalog::read_bytes(event, e)?;
@@ -1387,6 +1468,8 @@ pub fn regenerate(event: &Path, out: &Path) -> Result<Regenerated, String> {
                     pick(by_frame(&contact_f))
                 } else if name.starts_with("pair_") {
                     pick(by_frame(&pair_f))
+                } else if name.starts_with("break_") {
+                    pick(by_frame(&break_f))
                 } else {
                     fresh_bytes.clone()
                 }

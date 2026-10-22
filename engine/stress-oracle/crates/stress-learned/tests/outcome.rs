@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use stress_learned::catalog::{read_f32, read_i32, Catalog};
+use stress_learned::catalog::{read_f32, read_f64, read_i32, Catalog};
 use stress_learned::oracle_config::OracleConfig;
 use stress_learned::outcome::{record_outcome_event, replay_fingerprint, scene_hash, OutcomeRecipe, RecordOptions};
 use stress_learned::procedural::{latin_hypercube, m5_free_wall, m5_wall_row, wall_body, wall_recipes, Layout, Ranges, Rng};
@@ -103,6 +103,49 @@ fn a_recording_is_complete_causal_and_replays() {
     assert_eq!(ctx["split_group"], "tiny");
     let (fp, frames) = replay_fingerprint(&ev).unwrap();
     assert_eq!((fp, frames), (sum.fingerprint.clone(), sum.frames));
+
+    // Exact extras (revision 8): every frame kept; each break's f64 time lies in its frame
+    // and bin; the f64 state rounds to the f32 state; the impactor's contact impulse is its
+    // momentum change less gravity's.
+    assert_eq!(ctx["storage"]["dropped_frames"], 0);
+    let (bi, bt) = (get_i("break_i32"), read_f64(&ev, &cat.arrays["break_f64"]).unwrap());
+    assert_eq!(bt.len(), sum.broken_bonds);
+    let dt = 1.0 / 60.0;
+    for (k, &t) in bt.iter().enumerate() {
+        let (fr, b) = (bi[2 * k] as usize, bi[2 * k + 1] as usize);
+        let bin = bins[fr * e + b];
+        assert!(bin >= 0 && t >= fr as f64 * dt - 1e-12 && t <= (fr + 1) as f64 * dt + 1e-12, "break {k} at {t} in frame {fr}");
+    }
+    for name in ["state_chunk_pos", "state_chunk_vel", "state_chunk_q_world", "state_bond_energy", "state_impactor"] {
+        let (a32, a64) = (read_f32(&ev, &cat.arrays[name]).unwrap(), read_f64(&ev, &cat.arrays[&format!("{name}_f64")]).unwrap());
+        assert!(a32.iter().zip(&a64).all(|(&x, &y)| x == y as f32), "{name}_f64 rounds to {name}");
+    }
+    let imp = read_f64(&ev, &cat.arrays["state_impactor_f64"]).unwrap();
+    let j = read_f64(&ev, &cat.arrays["frame_impactor_impulse"]).unwrap();
+    let w = imp.len() / (f + 1);
+    let dv_y = imp[w + 8] - imp[8]; // velocity is columns 7..10; no gravity here
+    assert!((50.0 * dv_y - j[1]).abs() <= 1e-9 * j[1].abs().max(1.0), "impulse {} vs m dv {}", j[1], 50.0 * dv_y);
+    assert!(j[1] < 0.0, "the wall pushes the ram back");
+    assert!(read_f64(&ev, &cat.arrays["frame_impactor_peak_force"]).unwrap()[0] > 0.0);
+
+    // Snapshots: boundary 0 and every 10th at least; each resumes the oracle bit for bit.
+    let snaps = ctx["snapshots"]["boundaries"].as_array().unwrap();
+    let at: Vec<u64> = snaps.iter().map(|s| s["boundary"].as_u64().unwrap()).collect();
+    assert!(at.contains(&0) && (0..f as u64).step_by(10).all(|b| at.contains(&b)), "{at:?}");
+    let scene: stress_ref::scene::Scene = serde_json::from_slice(&std::fs::read(ev.join("scene.json")).unwrap()).unwrap();
+    let pos = read_f64(&ev, &cat.arrays["state_chunk_pos_f64"]).unwrap();
+    let n = cat.arrays["state_chunk_pos_f64"].shape[1] * 3;
+    for s in snaps.iter().filter(|s| s["boundary"].as_u64().unwrap() + 3 <= f as u64) {
+        let b = s["boundary"].as_u64().unwrap() as usize;
+        let bytes = zstd::decode_all(std::fs::File::open(ev.join(s["path"].as_str().unwrap())).unwrap()).unwrap();
+        let mut world = stress_ref::world::World::restore_state(&scene, &bytes).unwrap();
+        for k in 0..3 {
+            world.step_frame();
+            let row = b + k + 1;
+            let got: Vec<f64> = (0..world.solver.structures.len()).flat_map(|si| (0..world.solver.structures[si].chunks.len()).map(move |c| (si, c))).flat_map(|(si, c)| world.solver.chunk_position(si, c).to_array()).collect();
+            assert!(got.iter().zip(&pos[row * n..(row + 1) * n]).all(|(x, y)| x.to_bits() == y.to_bits()), "snapshot {b} resumed: boundary {row} differs");
+        }
+    }
 }
 
 #[test]

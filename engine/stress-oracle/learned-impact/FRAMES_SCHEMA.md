@@ -65,7 +65,8 @@ possible work) fails the event loudly.
 | `replay.json` | the recipe, frame count, input energy and end fingerprint (`--replay` checks it) |
 | `frames.json` | per frame: time, phase, breaks, substeps, routed chunks and impactors, predicted contacts, punch bonds, QS-prior convergence, impactor contact, struck structures, the energy ledger (kinetic split, mechanical, dissipated and its parts, contact terms, elastic) |
 | `outcome.json` | the whole run: stop reason, `truncated`, broken bonds, fragments, largest fraction, last break time, breaks in the last 0.5 s, input energy, each impactor's exit velocity and regime (perforate / arrest / rebound / deflect, geometric), frames per phase, wall-clock cost by part, oracle substeps, fingerprint |
-| `catalog.json`, `arrays/*` | little-endian raw arrays (`catalog.rs`), below |
+| `catalog.json`, `arrays/*` | little-endian raw arrays (`catalog.rs`; dtypes `f32`, `i32`, `f64`), below |
+| `snapshots/<boundary>.msgpack.zst` | recorder revision 8 on: exact restart points, the whole `World` (`World::save_state`, rmp-serde with named fields, one zstd frame) at boundary 0, every boundary whose frame routes an island, and every 10th; `World::restore_state(scene.json, bytes)` resumes the oracle bit for bit (contact cohorts, clock and energy ledger included). Listed in `context.json` `snapshots.boundaries` |
 
 ## Arrays
 
@@ -134,6 +135,17 @@ exact, then one frame):
 - `punch_*` (`P` rows, frames listed in `punch_frame [P]`): the same with the punch's bonds
   broken first, as `STRESS_IMPACT_PUNCH` does before the engine steps. On other frames the
   punch's outcome is the QS one.
+
+**Exact extras** (recorder revision 8 on; the dataset is the ground truth and only grows,
+user decision 2026-10-22, so every frame is kept: `storage.select_training_frames` is off):
+- `<name>_f64` beside `state_chunk_pos/vel/angvel`, `state_chunk_cluster_quat`,
+  `state_chunk_q_world`, `state_chunk_hidden`, `state_bond_joint`, `state_bond_energy`,
+  `state_bond_fail_margin` (unrounded) and `state_impactor`: the exact f64 values (the f32
+  array is their rounding);
+- `break_i32 [B,2]` (frame, bond) and `break_f64 [B]`: each break's exact solver time (s);
+- `frame_impactor_impulse [F,I,3]` (f64, N s): the contact impulse on each impactor over
+  the frame, its momentum change less gravity's, summed per substep;
+  `frame_impactor_peak_force [F,I]` (f64, N): its largest substep-mean contact force.
 
 These are CPU mirrors of the baselines' *stress models* under the oracle's own contact; the
 GPU baselines additionally run rubble's rigid engine for contact (4 iterations, 1 step a
