@@ -72,12 +72,13 @@ METRICS = ("ram", "partition", "sizes", "motion_v_0.1", "motion_v_0.5", "motion_
 
 
 def validation_ensembles(runs: list[Path], split: str, max_ensembles: int | None) -> dict[str, list[Path]]:
-    """Ensemble id -> member event dirs (sorted by member), for events of `split`."""
+    """Ensemble id -> member event dirs (sorted by member), for events of `split` (a comma list).
+    The sealed split is never read."""
     groups: dict[str, list[tuple[int, Path]]] = defaultdict(list)
     for run in runs:
         for ctx_path in sorted((run / "events").glob("*/context.json")):
             ctx = json.loads(ctx_path.read_text())
-            if ctx.get("split") != split:
+            if ctx.get("split") not in split.split(","):
                 continue
             ens = ctx.get("ensemble") or {}
             if not ens.get("id"):
@@ -477,6 +478,8 @@ def main(argv=None):
     p.add_argument("--members", type=Path, help="JSON list of member names: run only these (scored against their whole ensembles)")
     a = p.parse_args(argv)
     cands = a.candidates.split(",")
+    if "sealed" in a.split.split(","):
+        raise SystemExit("the sealed split is never evaluated here")
     # The reference ceiling (`ceiling_full`: the oracle's full state through the call
     # boundary) is a standing column: a family where it fails the gate has a boundary
     # problem, not a training problem.
@@ -492,13 +495,12 @@ def main(argv=None):
         if missing:
             raise SystemExit(f"--members not in the {a.split} ensembles of --runs: {sorted(missing)}")
     members = [m for ms in ensembles.values() for m in ms]
-    if a.members:
-        members = [m for m in members if m.name in only]
+    run_members = [m for m in members if m.name in only] if a.members else members
     print(f"[cl-eval] {len(ensembles)} ensembles, {len(members)} members, candidates {cands}", flush=True)
     events = {m.name: load_event(m) for m in members}
     samples = {name: sample_frames(ev) for name, ev in events.items()}
-    jobs = [(c, m) for c in cands for m in members if not (a.out / "runs" / c / f"{m.name}.json").exists()]
-    print(f"[cl-eval] {len(jobs)} runs to do ({len(cands) * len(members) - len(jobs)} already done)", flush=True)
+    jobs = [(c, m) for c in cands for m in run_members if not (a.out / "runs" / c / f"{m.name}.json").exists()]
+    print(f"[cl-eval] {len(jobs)} runs to do ({len(cands) * len(run_members) - len(jobs)} already done)", flush=True)
     t0 = time.time()
     done = failed = 0
 
