@@ -104,51 +104,53 @@ fn a_recording_is_complete_causal_and_replays() {
     let (fp, frames) = replay_fingerprint(&ev).unwrap();
     assert_eq!((fp, frames), (sum.fingerprint.clone(), sum.frames));
 
-    // Exact extras (revision 8): every frame kept; each break's f64 time lies in its frame
-    // and bin; the f64 state rounds to the f32 state; the impactor's contact impulse is its
-    // momentum change less gravity's.
+    // Revision 9: every frame kept; each break's exact time lies in its frame and bin, in
+    // order, with its failure mode; the impactor's contact impulse is its momentum change
+    // (from the exact frame-end states) less gravity's; a structure without supports takes
+    // no support impulse.
     assert_eq!(ctx["storage"]["dropped_frames"], 0);
     let (bi, bt) = (get_i("break_i32"), read_f64(&ev, &cat.arrays["break_f64"]).unwrap());
     assert_eq!(bt.len(), sum.broken_bonds);
     let dt = 1.0 / 60.0;
     for (k, &t) in bt.iter().enumerate() {
-        let (fr, b) = (bi[2 * k] as usize, bi[2 * k + 1] as usize);
-        let bin = bins[fr * e + b];
-        assert!(bin >= 0 && t >= fr as f64 * dt - 1e-12 && t <= (fr + 1) as f64 * dt + 1e-12, "break {k} at {t} in frame {fr}");
+        let (fr, b, order, mode) = (bi[4 * k] as usize, bi[4 * k + 1] as usize, bi[4 * k + 2], bi[4 * k + 3]);
+        assert!(bins[fr * e + b] >= 0 && t >= fr as f64 * dt - 1e-12 && t <= (fr + 1) as f64 * dt + 1e-12, "break {k} at {t} in frame {fr}");
+        assert_eq!(order, k as i32);
+        assert!((1..=4).contains(&mode), "a broken bond has a failure mode");
     }
-    for name in ["state_chunk_pos", "state_chunk_vel", "state_chunk_q_world", "state_bond_energy", "state_impactor"] {
-        let (a32, a64) = (read_f32(&ev, &cat.arrays[name]).unwrap(), read_f64(&ev, &cat.arrays[&format!("{name}_f64")]).unwrap());
-        assert!(a32.iter().zip(&a64).all(|(&x, &y)| x == y as f32), "{name}_f64 rounds to {name}");
-    }
-    let imp = read_f64(&ev, &cat.arrays["state_impactor_f64"]).unwrap();
+    let sub = read_f64(&ev, &cat.arrays["frame_impactor_subframe"]).unwrap();
+    assert_eq!(cat.arrays["frame_impactor_subframe"].shape, vec![f, 1, 8, 14]);
     let j = read_f64(&ev, &cat.arrays["frame_impactor_impulse"]).unwrap();
-    let w = imp.len() / (f + 1);
-    let dv_y = imp[w + 8] - imp[8]; // velocity is columns 7..10; no gravity here
-    assert!((50.0 * dv_y - j[1]).abs() <= 1e-9 * j[1].abs().max(1.0), "impulse {} vs m dv {}", j[1], 50.0 * dv_y);
-    assert!(j[1] < 0.0, "the wall pushes the ram back");
-    assert!(read_f64(&ev, &cat.arrays["frame_impactor_peak_force"]).unwrap()[0] > 0.0);
-
-    // Snapshots: boundary 0 and every 10th at least; each resumes the oracle bit for bit.
-    let snaps = ctx["snapshots"]["boundaries"].as_array().unwrap();
-    let at: Vec<u64> = snaps.iter().map(|s| s["boundary"].as_u64().unwrap()).collect();
-    assert!(at.contains(&0) && (0..f as u64).step_by(10).all(|b| at.contains(&b)), "{at:?}");
-    for (k, s) in snaps.iter().enumerate() {
-        let want = (at[k] % 10 != 0).then(|| at[k - 1]);
-        assert_eq!(s["delta_of"].as_u64(), want, "boundaries between keyframes are deltas of the previous snapshot");
+    let v_end = |fr: usize| sub[fr * 8 * 14 + 7 * 14 + 9]; // frame fr's last sub-frame state, v_y
+    for fr in 1..f {
+        let dv = v_end(fr) - v_end(fr - 1);
+        assert!((50.0 * dv - j[3 * fr + 1]).abs() <= 1e-9 * (50.0 * dv).abs().max(1.0), "frame {fr}: impulse {} vs m dv {}", j[3 * fr + 1], 50.0 * dv);
     }
-    let scene: stress_ref::scene::Scene = serde_json::from_slice(&std::fs::read(ev.join("scene.json")).unwrap()).unwrap();
-    let pos = read_f64(&ev, &cat.arrays["state_chunk_pos_f64"]).unwrap();
-    let n = cat.arrays["state_chunk_pos_f64"].shape[1] * 3;
-    for s in snaps.iter().filter(|s| s["boundary"].as_u64().unwrap() + 3 <= f as u64) {
-        let b = s["boundary"].as_u64().unwrap() as usize;
-        let bytes = stress_learned::outcome::load_snapshot(&ev, b).unwrap();
-        let mut world = stress_ref::world::World::restore_state(&scene, &bytes).unwrap();
-        for k in 0..3 {
-            world.step_frame();
-            let row = b + k + 1;
-            let got: Vec<f64> = (0..world.solver.structures.len()).flat_map(|si| (0..world.solver.structures[si].chunks.len()).map(move |c| (si, c))).flat_map(|(si, c)| world.solver.chunk_position(si, c).to_array()).collect();
-            assert!(got.iter().zip(&pos[row * n..(row + 1) * n]).all(|(x, y)| x.to_bits() == y.to_bits()), "snapshot {b} resumed: boundary {row} differs");
+    for fr in 0..f {
+        for k in 1..8 {
+            let (ta, tb) = (sub[fr * 112 + (k - 1) * 14], sub[fr * 112 + k * 14]);
+            assert!(ta < tb && ta >= fr as f64 * dt + (k as f64 / 8.0) * dt - 1e-12, "frame {fr} sub-frame {k} times");
         }
+    }
+    let support = read_f64(&ev, &cat.arrays["frame_structure_support_impulse"]).unwrap();
+    let load = read_f64(&ev, &cat.arrays["frame_structure_load_impulse"]).unwrap();
+    let scale = load.iter().map(|x| x.abs()).fold(0.0, f64::max);
+    assert!(scale > 0.0 && support.iter().take_while(|_| true).enumerate().all(|(k, x)| k % 6 >= 3 || x.abs() <= 1e-6 * scale), "a free wall's linear momentum change is its load impulse");
+    let peaks = get_i("peak_i32");
+    assert!(peaks.chunks(2).filter(|r| bins[r[0] as usize * e + r[1] as usize] >= 0).count() == sum.broken_bonds, "every break has a peak row");
+    let mids = get_i("mid_frame");
+    assert!(!mids.is_empty());
+
+    // The full state: every recorded boundary, rebuilt and stepped, is the next one.
+    let fs = &ctx["full_state"]["boundaries"];
+    assert_eq!(fs.as_array().unwrap().len(), f + 1);
+    let scene: stress_ref::scene::Scene = serde_json::from_slice(&std::fs::read(ev.join("scene.json")).unwrap()).unwrap();
+    for b in 0..f {
+        let mut w = stress_learned::full_state::restore(&scene, &stress_learned::full_state::load_frame(&ev, b).unwrap()).unwrap();
+        stress_learned::full_state::oracle_frame(&mut w, |_| {}).unwrap();
+        let next = stress_learned::full_state::load_frame(&ev, b + 1).unwrap();
+        let diff = stress_learned::full_state::differing_paths(&stress_learned::full_state::shred_world(&w).unwrap(), &next, |_| false);
+        assert!(diff.is_empty(), "boundary {b} -> {}: {diff:?}", b + 1);
     }
 }
 

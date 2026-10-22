@@ -41,7 +41,7 @@ use crate::oracle_config::{qs_template, OracleConfig, QS_BASELINE};
 
 pub const OUTCOME_SCHEMA: &str = "learned-impact-frames/1";
 /// Bumped whenever what the recorder writes, or how, changes.
-pub const RECORDER_REVISION: u32 = 8;
+pub const RECORDER_REVISION: u32 = 9;
 /// Break-time bins within a frame.
 pub const TIME_BINS: usize = 8;
 /// Floats per predicted contact (`contact_f32`).
@@ -202,12 +202,6 @@ impl Arrays {
         Ok(())
     }
 
-    /// An f32 row and its exact f64 copy (`<name>_f64`).
-    pub(crate) fn fd(&mut self, name: &str, tail: &[usize], data: &[f64]) -> Result<(), String> {
-        self.f(name, tail, &data.iter().map(|&x| x as f32).collect::<Vec<_>>())?;
-        self.d(&format!("{name}_f64"), tail, data)
-    }
-
     pub(crate) fn declare_d(&mut self, name: &str, tail: &[usize]) {
         self.f64s.entry(name.into()).or_insert_with(|| (tail.to_vec(), Vec::new(), 0));
     }
@@ -236,6 +230,8 @@ impl Arrays {
         let pair_frames = frame_col("pair_i32");
         let punch_frames = frame_col("punch_frame");
         let break_frames = frame_col("break_i32");
+        let peak_frames = frame_col("peak_i32");
+        let mid_frames = frame_col("mid_frame");
         let keep_rows = |name: &str, rows: usize| -> Option<Vec<usize>> {
             let sel = sel?;
             let kept = |frames: &Option<Vec<i32>>| frames.as_ref().map(|v| (0..rows).filter(|&r| sel.keeps(v[r] as usize)).collect());
@@ -253,6 +249,10 @@ impl Arrays {
                 kept(&pair_frames)
             } else if name.starts_with("break_") {
                 kept(&break_frames)
+            } else if name.starts_with("peak_") {
+                kept(&peak_frames)
+            } else if name.starts_with("mid_") {
+                kept(&mid_frames)
             } else {
                 None
             }
@@ -311,23 +311,30 @@ pub struct Storage {
     pub select_training_frames: bool,
     /// Of the settling frames, keep one in this many.
     pub settling_stride: usize,
-    /// Exact World snapshots (`snapshots/`): boundary 0, every boundary with a routed
-    /// island and every `snapshot_every`-th.
+    /// The oracle's complete state at every frame boundary (`full_state/`, the
+    /// full-state contract), every `full_state_every`-th self-contained, zstd level
+    /// `full_state_level`.
     #[serde(default)]
-    pub snapshots: bool,
-    #[serde(default = "default_snapshot_every")]
-    pub snapshot_every: usize,
+    pub full_state: bool,
+    #[serde(default = "default_full_state_every")]
+    pub full_state_every: usize,
+    #[serde(default = "default_full_state_level")]
+    pub full_state_level: i32,
 }
 
-fn default_snapshot_every() -> usize {
+fn default_full_state_every() -> usize {
     10
 }
 
-/// The dataset is the ground truth and only grows (user, 2026-10-22): every frame kept,
-/// with exact restart snapshots.
+fn default_full_state_level() -> i32 {
+    19
+}
+
+/// Generation runs once (the data retention spec, 2026-10-22): every frame kept, with the
+/// oracle's complete state at every boundary.
 impl Default for Storage {
     fn default() -> Self {
-        Storage { compress: true, select_training_frames: false, settling_stride: 8, snapshots: true, snapshot_every: 10 }
+        Storage { compress: true, select_training_frames: false, settling_stride: 8, full_state: true, full_state_every: 10, full_state_level: 19 }
     }
 }
 
@@ -521,6 +528,28 @@ fn interactions_over(w: &World, b: &Bounds, rule: &StopRule, horizon: f64) -> bo
     true
 }
 
+/// Each structure's momentum over its active chunks (hidden motion included): linear, and
+/// angular about the world origin (x x m v + R I R^T w).
+fn structure_momenta(w: &World) -> Vec<[f64; 6]> {
+    (0..w.solver.structures.len())
+        .map(|s| {
+            let (mut p, mut l) = (Vec3::ZERO, Vec3::ZERO);
+            for (c, ch) in w.solver.structures[s].chunks.iter().enumerate() {
+                let st = &w.solver.chunks[s][c];
+                if !st.active {
+                    continue;
+                }
+                let (v, om) = w.solver.chunk_velocity(s, c);
+                let x = w.solver.chunk_position(s, c);
+                let r = w.solver.clusters[st.cluster].rotation();
+                p += v * ch.mass;
+                l += x.cross(v * ch.mass) + r * ch.inertia * r.transpose() * om;
+            }
+            [p.x, p.y, p.z, l.x, l.y, l.z]
+        })
+        .collect()
+}
+
 fn structure_ke(w: &World) -> f64 {
     (0..w.solver.structures.len()).flat_map(|s| (0..w.solver.structures[s].chunks.len()).map(move |c| (s, c))).filter(|&(s, c)| w.solver.chunks[s][c].active).map(|(s, c)| chunk_ke(w, s, c)).sum()
 }
@@ -622,9 +651,9 @@ fn quat_of(r: &stress_ref::math::Mat3) -> Quat {
 pub(crate) fn capture_state(w: &World, ix: &Index, a: &mut Arrays) -> Result<(), String> {
     let (n, e, ni) = (ix.n, ix.e, w.impactors.len());
     let (p, v, om) = chunk_motion(w, ix);
-    a.fd("state_chunk_pos", &[n, 3], &p)?;
-    a.fd("state_chunk_vel", &[n, 3], &v)?;
-    a.fd("state_chunk_angvel", &[n, 3], &om)?;
+    a.f("state_chunk_pos", &[n, 3], &to32(&p))?;
+    a.f("state_chunk_vel", &[n, 3], &to32(&v))?;
+    a.f("state_chunk_angvel", &[n, 3], &to32(&om))?;
     let mut quat = Vec::with_capacity(n * 4);
     let (mut hidden, mut cluster, mut active, mut anchored) = (Vec::with_capacity(n * 6), Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
     for s in 0..w.solver.structures.len() {
@@ -639,7 +668,7 @@ pub(crate) fn capture_state(w: &World, ix: &Index, a: &mut Arrays) -> Result<(),
             anchored.push(i32::from(cl.anchored));
         }
     }
-    a.fd("state_chunk_cluster_quat", &[n, 4], &quat)?;
+    a.f("state_chunk_cluster_quat", &[n, 4], &to32(&quat))?;
     // Each chunk's own world orientation: cluster, hidden rotation, chunk's rest rotation.
     let mut qw = Vec::with_capacity(n * 4);
     for s in 0..w.solver.structures.len() {
@@ -651,8 +680,8 @@ pub(crate) fn capture_state(w: &World, ix: &Index, a: &mut Arrays) -> Result<(),
             qw.extend((cl.pose.rotation * hidden * rest).normalized().to_wxyz());
         }
     }
-    a.fd("state_chunk_q_world", &[n, 4], &qw)?;
-    a.fd("state_chunk_hidden", &[n, 6], &hidden)?;
+    a.f("state_chunk_q_world", &[n, 4], &to32(&qw))?;
+    a.f("state_chunk_hidden", &[n, 6], &to32(&hidden))?;
     a.i("state_chunk_cluster", &[n], &cluster)?;
     a.i("state_chunk_active", &[n], &active)?;
     a.i("state_chunk_anchored", &[n], &anchored)?;
@@ -660,7 +689,7 @@ pub(crate) fn capture_state(w: &World, ix: &Index, a: &mut Arrays) -> Result<(),
     for b in w.solver.bonds.iter().flatten() {
         joint.extend([b.joint.damage, b.joint.crush, b.joint.fatigue, b.joint.utilization]);
     }
-    a.fd("state_bond_joint", &[e, 4], &joint)?;
+    a.f("state_bond_joint", &[e, 4], &to32(&joint))?;
     // Cumulative per-bond energy (J): joint dissipation (fracture, friction, rebar), dashpot
     // dissipation, stored elastic energy; and the failure mode (0 none, 1 tension, 2 shear,
     // 3 compression, 4 buckling).
@@ -676,7 +705,7 @@ pub(crate) fn capture_state(w: &World, ix: &Index, a: &mut Arrays) -> Result<(),
             Some(stress_ref::joint::FailureMode::Buckling) => 4,
         });
     }
-    a.fd("state_bond_energy", &[e, 3], &energy)?;
+    a.f("state_bond_energy", &[e, 3], &to32(&energy))?;
     // Failure margin (`RtBond::fail_margin`, a running maximum: >= 1 exactly when the
     // bond disconnected). Written so that the f32 value keeps that rule: a connected
     // bond's margin is never rounded up to 1.
@@ -696,10 +725,9 @@ pub(crate) fn capture_state(w: &World, ix: &Index, a: &mut Arrays) -> Result<(),
         }
     }
     a.f("state_bond_fail_margin", &[e], &margin)?;
-    a.d("state_bond_fail_margin_f64", &[e], &w.solver.bonds.iter().flatten().map(|b| b.fail_margin()).collect::<Vec<_>>())?;
     a.i("state_bond_mode", &[e], &mode)?;
     a.i("state_bond_connected", &[e], &bond_connected(w))?;
-    a.fd("state_impactor", &[ni, IMPACTOR_STATE], &impactor_state(w))?;
+    a.f("state_impactor", &[ni, IMPACTOR_STATE], &to32(&impactor_state(w)))?;
     Ok(())
 }
 
@@ -885,18 +913,93 @@ struct ContactWatch {
     impulse: Vec<Vec3>,
     /// Largest substep-mean contact force on each impactor (N).
     peak_force: Vec<f64>,
+    // Frame timing: start, length, the last substep's end; substep sizes and how many
+    // substeps the contact step limited.
+    t0: f64,
+    frame_dt: f64,
+    prev_time: f64,
+    dt_min: f64,
+    dt_max: f64,
+    contact_limited: usize,
+    /// Per bond (flat): the largest failure index seen at a substep end, the generalised
+    /// force then (shear t1, shear t2, axial; bending t1, bending t2, torsion) and its time.
+    peak_util: Vec<f64>,
+    peak_load: Vec<[f64; 6]>,
+    peak_time: Vec<f64>,
+    /// Impactor states at the first substep ends at or past k/8 of the frame, k = 1..8:
+    /// per impactor (time, position, orientation wxyz, velocity, angular velocity).
+    subframe: Vec<Vec<[f64; 14]>>,
+    /// Every chunk's position and velocity at the first substep end at or past mid-frame.
+    mid: Option<(f64, Vec<f64>, Vec<f64>)>,
+}
+
+fn impactor_row(t: f64, imp: &stress_ref::world::Impactor) -> [f64; 14] {
+    let q = imp.pose.rotation.to_wxyz();
+    let (p, v, w) = (imp.pose.position, imp.velocity, imp.angular_velocity);
+    [t, p.x, p.y, p.z, q[0], q[1], q[2], q[3], v.x, v.y, v.z, w.x, w.y, w.z]
 }
 
 impl ContactWatch {
     fn new(w: &World) -> ContactWatch {
         let k = w.impactors.len();
-        ContactWatch { prev: w.impactors.iter().map(|i| i.velocity).collect(), substeps: 0, count: vec![0; k], first: vec![None; k], last: vec![None; k], structures: vec![HashSet::new(); k], impulse: vec![Vec3::ZERO; k], peak_force: vec![0.0; k] }
+        let e = w.solver.bonds.iter().map(Vec::len).sum();
+        ContactWatch {
+            prev: w.impactors.iter().map(|i| i.velocity).collect(),
+            substeps: 0,
+            count: vec![0; k],
+            first: vec![None; k],
+            last: vec![None; k],
+            structures: vec![HashSet::new(); k],
+            impulse: vec![Vec3::ZERO; k],
+            peak_force: vec![0.0; k],
+            t0: w.solver.time,
+            frame_dt: w.scene.sim.frame_dt,
+            prev_time: w.solver.time,
+            dt_min: f64::INFINITY,
+            dt_max: 0.0,
+            contact_limited: 0,
+            peak_util: vec![f64::NEG_INFINITY; e],
+            peak_load: vec![[0.0; 6]; e],
+            peak_time: vec![w.solver.time; e],
+            subframe: Vec::with_capacity(8),
+            mid: None,
+        }
     }
 
-    fn observe(&mut self, w: &World, dt: f64) {
+    fn observe(&mut self, w: &World) {
         let g = w.solver.config.gravity;
         let i = self.substeps;
         self.substeps += 1;
+        let t = w.solver.time;
+        let dt = t - self.prev_time;
+        self.prev_time = t;
+        self.dt_min = self.dt_min.min(dt);
+        self.dt_max = self.dt_max.max(dt);
+        let (stress_dt, contact_dt) = w.step_limits();
+        self.contact_limited += usize::from(contact_dt < stress_dt);
+        for (gi, b) in w.solver.bonds.iter().flatten().enumerate() {
+            let u = b.joint.utilization;
+            if u > self.peak_util[gi] {
+                self.peak_util[gi] = u;
+                let (l, a) = (b.force.lin, b.force.ang);
+                self.peak_load[gi] = [l.x, l.y, l.z, a.x, a.y, a.z];
+                self.peak_time[gi] = t;
+            }
+        }
+        let eps = 1e-9 * self.frame_dt;
+        while self.subframe.len() < 8 && t >= self.t0 + (self.subframe.len() + 1) as f64 * self.frame_dt / 8.0 - eps {
+            self.subframe.push(w.impactors.iter().map(|imp| impactor_row(t, imp)).collect());
+        }
+        if self.mid.is_none() && t >= self.t0 + 0.5 * self.frame_dt - eps {
+            let (mut p, mut v) = (Vec::new(), Vec::new());
+            for s in 0..w.solver.structures.len() {
+                for c in 0..w.solver.structures[s].chunks.len() {
+                    p.extend(w.solver.chunk_position(s, c).to_array());
+                    v.extend(w.solver.chunk_velocity(s, c).0.to_array());
+                }
+            }
+            self.mid = Some((t, p, v));
+        }
         for (k, imp) in w.impactors.iter().enumerate() {
             let dv = imp.velocity - self.prev[k] - g * dt;
             self.prev[k] = imp.velocity;
@@ -1034,6 +1137,7 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
     let max_frames = (opts.stop.max_seconds / frame_dt).round() as usize;
     scene.sim.duration = max_frames as f64 * frame_dt;
     let mut world = World::new(&scene);
+    world.solver.record_load_impulse = true;
     let template = opts.baselines.then(|| qs_template(&scene));
     let ix = Index::new(&world);
     let bounds = Bounds::of(&world, &opts.stop);
@@ -1054,8 +1158,14 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
     a.declare_f("contact_f32", &[CONTACT_F32]);
     a.declare_i("punch_frame", &[]);
     a.declare_i("pair_i32", &[3]);
-    a.declare_i("break_i32", &[2]);
+    a.declare_i("break_i32", &[4]);
     a.declare_d("break_f64", &[]);
+    a.declare_i("peak_i32", &[2]);
+    a.declare_d("peak_f64", &[9]);
+    a.declare_i("mid_frame", &[]);
+    a.declare_d("mid_time", &[]);
+    a.declare_d("mid_chunk_pos", &[ix.n, 3]);
+    a.declare_d("mid_chunk_vel", &[ix.n, 3]);
     capture_state(&world, &ix, &mut a)?;
     capture_traj(&world, 0, &mut a)?;
     let mut peak_prev = vec![0f32; ix.e];
@@ -1070,41 +1180,24 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
     let mut stop_reason = String::new();
     let mut truncated = false;
     let mut substeps_total = 0u64;
-    let mut snapshots: Vec<Value> = Vec::new();
-    let mut prev_snapshot: Option<(usize, Vec<u8>)> = None;
+    let mut full_state = opts.storage.full_state.then(|| crate::full_state::FullStateWriter::new(opts.storage.full_state_every, opts.storage.full_state_level));
+    let mut break_order = 0i32;
 
     for f in 0..max_frames {
         let t_over = Instant::now();
         let t0 = world.solver.time;
+        // The oracle's complete state at this boundary (the full-state contract).
+        if let Some(fs) = full_state.as_mut() {
+            fs.push(&dir, f, &world)?;
+        }
         // Inputs, before the step.
         let inputs = capture_inputs(&mut world, &ix, f, None, &mut a)?;
         let (chunk_routed, imp_routed, pairs_n, contacts, punch_breaks, prior_converged) =
             (inputs.chunk_routed, inputs.impactor_routed, inputs.pairs, inputs.contacts, inputs.punch_breaks, inputs.prior_converged);
         *cost.get_mut("qs_prior").unwrap() += inputs.prior_seconds;
-        // An exact restart point at this boundary (the routing's prediction leaves the world
-        // as it was): the first, every routed one and every `snapshot_every`-th.
-        let routed = chunk_routed.contains(&1) || imp_routed.contains(&1);
-        let every = opts.storage.snapshot_every.max(1);
-        if opts.storage.snapshots && (f == 0 || routed || f % every == 0) {
-            let bytes = world.save_state()?;
-            let rel = format!("snapshots/{f:06}.msgpack.zst");
-            // Every `every`-th boundary is self-contained; the others are zstd frames with
-            // the previous snapshot as their dictionary (lossless, 2-4x smaller), so a
-            // restore decodes at most `every - 1` deltas (`load_snapshot`).
-            let key = f % every == 0 || prev_snapshot.is_none();
-            let z = match (&prev_snapshot, key) {
-                (Some((_, prev)), false) => zstd::bulk::Compressor::with_dictionary(19, prev).and_then(|mut c| c.compress(&bytes)),
-                _ => zstd::bulk::compress(&bytes, 19),
-            }
-            .map_err(|e| format!("{rel}: zstd {e}"))?;
-            fs::create_dir_all(dir.join("snapshots")).map_err(|e| e.to_string())?;
-            fs::write(dir.join(&rel), &z).map_err(|e| format!("{rel}: {e}"))?;
-            let delta_of = if key { None } else { prev_snapshot.as_ref().map(|p| p.0) };
-            snapshots.push(json!({"boundary": f, "time": world.solver.time, "routed": routed, "path": rel, "bytes": bytes.len(), "delta_of": delta_of}));
-            prev_snapshot = Some((f, bytes));
-        }
         let start_connected = bond_connected(&world);
         let start_energy: Vec<(f64, f64)> = world.solver.bonds.iter().flatten().map(|b| (b.joint.dissipated, b.damped)).collect();
+        let start_momentum = structure_momenta(&world);
         *cost.get_mut("overhead").unwrap() += t_over.elapsed().as_secs_f64() - inputs.prior_seconds;
 
         if let Some(t) = &template {
@@ -1123,13 +1216,12 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
 
         // The oracle's frame.
         let t_oracle = Instant::now();
-        world.solver.reset_peak_utilizations();
         let events_before = world.solver.events.len();
         let substeps_before = world.solver.substeps;
         let mut watch = ContactWatch::new(&world);
-        let dt_sub = world.substep_dt();
-        world.step_frame_watched(|w| watch.observe(w, dt_sub))?;
-        *cost.get_mut("oracle").unwrap() += t_oracle.elapsed().as_secs_f64();
+        crate::full_state::oracle_frame(&mut world, |w| watch.observe(w))?;
+        let oracle_seconds = t_oracle.elapsed().as_secs_f64();
+        *cost.get_mut("oracle").unwrap() += oracle_seconds;
         let t_over = Instant::now();
         ix.check(&world)?;
         let substeps = world.solver.substeps - substeps_before;
@@ -1145,8 +1237,16 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
                     break_bin[g] = bin;
                     n_breaks += 1;
                     break_times.push(*time);
-                    a.i("break_i32", &[2], &[f as i32, g as i32])?;
+                    let mode = match world.solver.bonds[*structure][*bond].joint.mode {
+                        None => 0,
+                        Some(stress_ref::joint::FailureMode::Tension) => 1,
+                        Some(stress_ref::joint::FailureMode::Shear) => 2,
+                        Some(stress_ref::joint::FailureMode::Compression) => 3,
+                        Some(stress_ref::joint::FailureMode::Buckling) => 4,
+                    };
+                    a.i("break_i32", &[4], &[f as i32, g as i32, break_order, mode])?;
                     a.d("break_f64", &[], &[*time])?;
+                    break_order += 1;
                 }
             }
         }
@@ -1169,6 +1269,49 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
         a.f("frame_impactor_contact", &[world.impactors.len(), IMPACTOR_CONTACT], &contact_summary)?;
         a.d("frame_impactor_impulse", &[world.impactors.len(), 3], &watch.impulse.iter().flat_map(|j| j.to_array()).collect::<Vec<_>>())?;
         a.d("frame_impactor_peak_force", &[world.impactors.len()], &watch.peak_force)?;
+        // Impactor states at k/8 of the frame (k = 1..8; the last is the frame end).
+        let mut sub = watch.subframe.clone();
+        while sub.len() < 8 {
+            sub.push(world.impactors.iter().map(|imp| impactor_row(world.solver.time, imp)).collect());
+        }
+        let ni = world.impactors.len();
+        a.d("frame_impactor_subframe", &[ni, 8, 14], &(0..ni).flat_map(|k| sub.iter().flat_map(move |row| row[k])).collect::<Vec<_>>())?;
+        // Sparse bond peaks: bonds whose peak failure index passed 0.2 or that broke.
+        for (gi, b) in world.solver.bonds.iter().flatten().enumerate() {
+            if b.peak_utilization > 0.2 || break_bin[gi] >= 0 {
+                a.i("peak_i32", &[2], &[f as i32, gi as i32])?;
+                let l = watch.peak_load[gi];
+                let tp = if watch.peak_util[gi].is_finite() { watch.peak_time[gi] } else { world.solver.time };
+                a.d("peak_f64", &[9], &[tp, b.peak_utilization, watch.peak_util[gi].max(0.0), l[0], l[1], l[2], l[3], l[4], l[5]])?;
+            }
+        }
+        // Cost of the frame.
+        a.i("frame_cost_i32", &[2], &[substeps as i32, watch.contact_limited as i32])?;
+        a.d("frame_cost_f64", &[2], &[if watch.dt_min.is_finite() { watch.dt_min } else { 0.0 }, watch.dt_max])?;
+        // Wall-clock: not reproducible, so `regenerate` does not compare it.
+        a.d("frame_oracle_seconds", &[], &[oracle_seconds])?;
+        // Momentum accounting per structure: external-load impulse (gravity, contact and
+        // scripted loads) and the supports' reaction impulse (the momentum change less it),
+        // linear and angular about the world origin.
+        let end_momentum = structure_momenta(&world);
+        let ns = world.solver.structures.len();
+        let load = &world.solver.load_impulse;
+        let mut load_rows = Vec::with_capacity(ns * 6);
+        let mut support_rows = Vec::with_capacity(ns * 6);
+        for s_i in 0..ns {
+            let li = load.get(s_i).copied().unwrap_or([0.0; 6]);
+            load_rows.extend(li);
+            support_rows.extend((0..6).map(|k| end_momentum[s_i][k] - start_momentum[s_i][k] - li[k]));
+        }
+        a.d("frame_structure_load_impulse", &[ns, 6], &load_rows)?;
+        a.d("frame_structure_support_impulse", &[ns, 6], &support_rows)?;
+        // The energy ledger at the frame end (cumulative J).
+        {
+            let e = &world.solver.energy;
+            let c = &world.contact;
+            a.d("frame_energy", &[14], &[e.bond_dissipation, e.damping_dissipation, e.external_work, e.softening_overshoot, e.split_release, e.static_discard,
+                c.stored, c.dissipated, c.crush, c.work, world.solver.elastic_energy(), structure_ke(&world), world.impactors.iter().map(|i| i.kinetic_energy()).sum(), world.mechanical_energy()])?;
+        }
         capture_state(&world, &ix, &mut a)?;
         capture_traj(&world, f + 1, &mut a)?;
 
@@ -1199,6 +1342,14 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
         }
         *per_phase.get_mut(phase).unwrap() += 1;
         a.i("frame_phase", &[], &[PHASES.iter().position(|p| *p == phase).unwrap() as i32])?;
+        if matches!(phase, "contact" | "secondary" | "separation") {
+            if let Some((tm, p, v)) = &watch.mid {
+                a.i("mid_frame", &[], &[f as i32])?;
+                a.d("mid_time", &[], &[*tm])?;
+                a.d("mid_chunk_pos", &[ix.n, 3], p)?;
+                a.d("mid_chunk_vel", &[ix.n, 3], v)?;
+            }
+        }
 
         // Energy ledger and the stopping rule.
         let e = &world.solver.energy;
@@ -1258,6 +1409,11 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
             stop_reason = format!("cap {} s (impactors done {impactors_done}, quiet {quiet}, calm {calm})", opts.stop.max_seconds);
         }
         beat(&Beat { event_id: &recipe.event_id, frame: f + 1, time: world.solver.time, phase, breaks: break_times.len() });
+    }
+
+    // The last boundary.
+    if let Some(fs) = full_state.as_mut() {
+        fs.push(&dir, frames.len(), &world)?;
     }
 
     // Full-run outcome.
@@ -1356,16 +1512,30 @@ pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOpt
         "bond_joint_columns": ["damage","crush","fatigue","utilization"],
         "bond_energy_columns": ["dissipated_joint","dissipated_damping","stored"],
         "bond_dissipated_columns": ["joint","damping"],
-        "break_i32_columns": ["frame","bond"],
+        "break_i32_columns": ["frame","bond","order","mode"],
         "break_f64_columns": ["time"],
-        "f64_copies": "Each `<name>_f64` array is the exact f64 value of `<name>` (f32); state_bond_fail_margin_f64 is RtBond::fail_margin unrounded.",
-        "snapshots": {"format": "stress_ref World::save_state (rmp-serde, named fields), one zstd frame; delta_of: compressed with that boundary's snapshot (raw bytes) as the zstd dictionary; outcome::load_snapshot decodes, World::restore_state(&scene.json, bytes) resumes the oracle bit for bit",
-            "rule": format!("boundary 0, every boundary with a routed island, every {}-th", opts.storage.snapshot_every), "boundaries": snapshots},
+        "peak_i32_columns": ["frame","bond"],
+        "peak_f64_columns": ["time_of_peak","peak_utilization","observed_peak_utilization","shear_t1","shear_t2","axial","bending_t1","bending_t2","torsion"],
+        "peak_rule": "bonds whose peak failure index over the frame exceeds 0.2 or that broke in it; the generalised force (N, N m, bond frame) at the substep end with the largest failure index seen",
+        "impactor_subframe_columns": ["time","pos_x","pos_y","pos_z","q_w","q_x","q_y","q_z","v_x","v_y","v_z","w_x","w_y","w_z"],
+        "impactor_subframe_rule": "the first substep end at or past k/8 of the frame, k = 1..8",
+        "mid_rule": "contact, secondary and separation frames: every chunk's position and velocity at the first substep end at or past mid-frame (mid_time)",
+        "cost_i32_columns": ["substeps","contact_limited_substeps"],
+        "cost_f64_columns": ["dt_min","dt_max"],
+        "oracle_seconds": "frame_oracle_seconds: wall-clock seconds of the oracle's frame (all threads; not reproducible)",
+        "structure_impulse_columns": ["x","y","z","about_origin_x","about_origin_y","about_origin_z"],
+        "support_rule": "frame_structure_support_impulse = the change of the structure's momentum (active chunks, hidden motion included; angular about the world origin) less frame_structure_load_impulse (gravity, contact and scripted loads, per substep): the supports' reaction (~0 for a structure without supports)",
+        "energy_columns": ["bond_dissipation","damping_dissipation","external_work","softening_overshoot","split_release","static_discard","contact_stored","contact_dissipated","contact_crush","contact_work","elastic","ke_structure","ke_impactors","mechanical"],
+        "full_state": full_state.as_ref().map(|fs| json!({
+            "schema": crate::full_state::FULL_STATE_SCHEMA,
+            "format": "full_state/<boundary>.fs.zst: the World's every serialized field, one column per field path (stress_learned::full_state); delta_of: zstd with that boundary's encoding as dictionary; full_state::load_frame decodes and full_state::restore rebuilds the World (with scene.json), bit for bit",
+            "boundaries": fs.entries, "raw_bytes": fs.raw_bytes, "stored_bytes": fs.stored_bytes})),
+        "provenance": provenance(),
         "bond_mode_values": ["none","tension","shear","compression","buckling"],
         "ensemble": recipe.parameters.get("ensemble").cloned().unwrap_or(Value::Null),
         "split": recipe.parameters.get("split").cloned().unwrap_or(Value::Null),
         "storage": {"compress": opts.storage.compress, "select_training_frames": opts.storage.select_training_frames,
-            "snapshots": opts.storage.snapshots, "snapshot_every": opts.storage.snapshot_every,
+            "full_state": opts.storage.full_state, "full_state_every": opts.storage.full_state_every, "full_state_level": opts.storage.full_state_level,
             "settling_stride": opts.storage.settling_stride, "frames": frames.len(),
             "kept_frames": selection.as_ref().map(|x| x.frames.clone()), "state_rows": selection.as_ref().map(|x| x.state_rows.clone()),
             "dropped_frames": selection.as_ref().map_or(0, |x| frames.len() - x.frames.len()),
@@ -1415,33 +1585,25 @@ pub fn finished_events(out: &Path) -> Vec<PathBuf> {
     v
 }
 
-/// The raw `World::save_state` bytes of `event`'s snapshot at `boundary` (resolving its
-/// chain of deltas back to the last self-contained one).
-pub fn load_snapshot(event: &Path, boundary: usize) -> Result<Vec<u8>, String> {
-    let ctx: Value = serde_json::from_slice(&fs::read(event.join("context.json")).map_err(|e| format!("context.json: {e}"))?).map_err(|e| e.to_string())?;
-    let list = ctx["snapshots"]["boundaries"].as_array().ok_or("no snapshots in context.json")?;
-    let entry = |b: usize| list.iter().find(|s| s["boundary"].as_u64() == Some(b as u64)).ok_or_else(|| format!("no snapshot at boundary {b}"));
-    let mut chain = vec![entry(boundary)?];
-    while let Some(d) = chain.last().unwrap()["delta_of"].as_u64() {
-        chain.push(entry(d as usize)?);
-    }
-    let mut prev: Option<Vec<u8>> = None;
-    for s in chain.iter().rev() {
-        let rel = s["path"].as_str().ok_or("snapshot path")?;
-        let z = fs::read(event.join(rel)).map_err(|e| format!("{rel}: {e}"))?;
-        let cap = s["bytes"].as_u64().ok_or("snapshot bytes")? as usize;
-        let raw = match &prev {
-            Some(p) => zstd::bulk::Decompressor::with_dictionary(p).and_then(|mut d| d.decompress(&z, cap)),
-            None => zstd::bulk::decompress(&z, cap),
-        }
-        .map_err(|e| format!("{rel}: zstd {e}"))?;
-        if raw.len() != cap {
-            return Err(format!("{rel}: {} bytes, want {cap}", raw.len()));
-        }
-        prev = Some(raw);
-    }
-    Ok(prev.unwrap())
+/// Where a recording came from: the source commit the binary was built from, the
+/// binary's own hash (FNV-1a 64 of its bytes) and the revisions.
+pub fn provenance() -> Value {
+    static BIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let bin = BIN.get_or_init(|| {
+        std::env::current_exe().ok().and_then(|p| fs::read(p).ok()).map_or("unknown".into(), |b| {
+            let mut h: u64 = 0xcbf29ce484222325;
+            for x in b {
+                h = (h ^ u64::from(x)).wrapping_mul(0x100000001b3);
+            }
+            format!("{h:016x}")
+        })
+    });
+    json!({"git": env!("STRESS_LEARNED_GIT"), "binary_fnv64": bin, "recorder_revision": RECORDER_REVISION, "full_state_schema": crate::full_state::FULL_STATE_SCHEMA,
+        "seeds_and_perturbations": "context.json parameters (recipe seed, ensemble perturbation and Weibull seed) and replay.json recipe"})
 }
+
+/// Arrays that differ run to run (wall-clock time); everything else regenerates bit for bit.
+pub const NOT_REPRODUCIBLE: &[&str] = &["frame_oracle_seconds"];
 
 /// What `regenerate` restored and checked.
 #[derive(Clone, Debug, Serialize)]
@@ -1465,7 +1627,7 @@ pub fn regenerate(event: &Path, out: &Path) -> Result<Regenerated, String> {
     let mut opts = RecordOptions::new(serde_json::from_value(ctx["oracle_config"].clone()).map_err(|e| e.to_string())?);
     opts.stop = serde_json::from_value(ctx["stop_rule"].clone()).map_err(|e| e.to_string())?;
     opts.baselines = !ctx["qs_baseline"].is_null();
-    opts.storage = Storage { compress: ctx["storage"]["compress"].as_bool().unwrap_or(false), select_training_frames: false, settling_stride: 1, snapshots: true, snapshot_every: 10 };
+    opts.storage = Storage { compress: ctx["storage"]["compress"].as_bool().unwrap_or(false), select_training_frames: false, settling_stride: 1, ..Storage::default() };
     fs::create_dir_all(out).map_err(|e| e.to_string())?;
     let summary = record_outcome_event(&recipe, out, &opts, &|_| {})?;
     let fresh = out.join(&recipe.event_id);
@@ -1493,8 +1655,12 @@ pub fn regenerate(event: &Path, out: &Path) -> Result<Regenerated, String> {
         }
     };
     let (contact_f, pair_f, punch_f, break_f) = (frame_col("contact_i32")?, frame_col("pair_i32")?, frame_col("punch_frame")?, frame_col("break_i32")?);
+    let (peak_f, mid_f) = (frame_col("peak_i32")?, frame_col("mid_frame")?);
     let (mut arrays_checked, mut rows_checked) = (0, 0);
     for (name, e) in &old_cat.arrays {
+        if NOT_REPRODUCIBLE.contains(&name.as_str()) {
+            continue;
+        }
         let stored = catalog::read_bytes(event, e)?;
         let (fresh_bytes, w) = new_bytes(name)?;
         let pick = |rows: Vec<usize>| -> Vec<u8> { rows.iter().flat_map(|&r| fresh_bytes[r * w..(r + 1) * w].to_vec()).collect() };
@@ -1519,6 +1685,10 @@ pub fn regenerate(event: &Path, out: &Path) -> Result<Regenerated, String> {
                     pick(by_frame(&pair_f))
                 } else if name.starts_with("break_") {
                     pick(by_frame(&break_f))
+                } else if name.starts_with("peak_") {
+                    pick(by_frame(&peak_f))
+                } else if name.starts_with("mid_") {
+                    pick(by_frame(&mid_f))
                 } else {
                     fresh_bytes.clone()
                 }

@@ -196,8 +196,21 @@ pub fn world_value(w: &World) -> Result<Value, String> {
     rmpv::decode::read_value(&mut bytes.as_slice()).map_err(|e| format!("decode state: {e}"))
 }
 
+/// Pure caches: maps from a key to a pure function of it, filled as the solver goes (and by
+/// calls outside the oracle's step, such as the routing's prediction). Left out of the
+/// contract (recorded empty): a world restored with them empty steps bit for bit like one
+/// with them full (the completeness gate checks it).
+pub const CACHES: &[&str] = &[
+    // `stable_dt`'s per-cluster bound, keyed by (bonds, chunks, inertia-scale bits).
+    "solver.step_bounds",
+];
+
 pub fn shred_world(w: &World) -> Result<Frame, String> {
-    shred_value(&world_value(w)?)
+    let mut v = world_value(w)?;
+    for c in CACHES {
+        reset_path(&mut v, c);
+    }
+    shred_value(&v)
 }
 
 #[derive(Default)]
@@ -307,10 +320,11 @@ pub fn restore(scene: &Scene, frame: &Frame) -> Result<World, String> {
     World::restore_state(scene, &bytes)
 }
 
-/// The oracle's frame as the recorder steps it: peaks reset, one frame, an observer per
-/// substep (the recorder's contact watch; it only reads).
+/// The oracle's frame as the recorder steps it: peaks and load impulses reset, one frame,
+/// an observer per substep (the recorder's watch; it only reads).
 pub fn oracle_frame(w: &mut World, observe: impl FnMut(&World)) -> Result<(), String> {
     w.solver.reset_peak_utilizations();
+    w.solver.reset_load_impulses();
     w.step_frame_watched(observe)
 }
 
@@ -484,4 +498,70 @@ pub fn reset_path(v: &mut Value, path: &str) {
         *v = z;
     }
     walk(v, "", path);
+}
+
+/// Writes an event's boundaries as `full_state/<boundary>.fs.zst`: every `every`-th one
+/// self-contained, the others zstd frames with the previous boundary's encoding as their
+/// dictionary (lossless; consecutive states share most bytes), so a read decodes at most
+/// `every - 1` deltas (`load_frame`).
+pub struct FullStateWriter {
+    every: usize,
+    level: i32,
+    prev: Option<(usize, Vec<u8>)>,
+    pub entries: Vec<serde_json::Value>,
+    pub raw_bytes: u64,
+    pub stored_bytes: u64,
+}
+
+impl FullStateWriter {
+    pub fn new(every: usize, level: i32) -> FullStateWriter {
+        FullStateWriter { every: every.max(1), level, prev: None, entries: Vec::new(), raw_bytes: 0, stored_bytes: 0 }
+    }
+
+    pub fn push(&mut self, dir: &std::path::Path, boundary: usize, w: &World) -> Result<(), String> {
+        let bytes = encode(&shred_world(w)?)?;
+        let rel = format!("full_state/{boundary:06}.fs.zst");
+        let key = boundary % self.every == 0 || self.prev.is_none();
+        let z = match (&self.prev, key) {
+            (Some((_, prev)), false) => zstd::bulk::Compressor::with_dictionary(self.level, prev).and_then(|mut c| c.compress(&bytes)),
+            _ => zstd::bulk::compress(&bytes, self.level),
+        }
+        .map_err(|e| format!("{rel}: zstd {e}"))?;
+        std::fs::create_dir_all(dir.join("full_state")).map_err(|e| e.to_string())?;
+        std::fs::write(dir.join(&rel), &z).map_err(|e| format!("{rel}: {e}"))?;
+        let delta_of = if key { None } else { self.prev.as_ref().map(|p| p.0) };
+        self.entries.push(serde_json::json!({"boundary": boundary, "path": rel, "bytes": bytes.len(), "delta_of": delta_of}));
+        self.raw_bytes += bytes.len() as u64;
+        self.stored_bytes += z.len() as u64;
+        self.prev = Some((boundary, bytes));
+        Ok(())
+    }
+}
+
+/// The encoded bytes of `event`'s boundary (resolving its delta chain).
+pub fn load_frame_bytes(event: &std::path::Path, boundary: usize) -> Result<Vec<u8>, String> {
+    let ctx: serde_json::Value = serde_json::from_slice(&std::fs::read(event.join("context.json")).map_err(|e| format!("context.json: {e}"))?).map_err(|e| e.to_string())?;
+    let list = ctx["full_state"]["boundaries"].as_array().ok_or("no full_state in context.json")?;
+    let entry = |b: usize| list.get(b).filter(|s| s["boundary"].as_u64() == Some(b as u64)).or_else(|| list.iter().find(|s| s["boundary"].as_u64() == Some(b as u64))).ok_or_else(|| format!("no full state at boundary {b}"));
+    let mut chain = vec![entry(boundary)?];
+    while let Some(d) = chain.last().unwrap()["delta_of"].as_u64() {
+        chain.push(entry(d as usize)?);
+    }
+    let mut prev: Option<Vec<u8>> = None;
+    for s in chain.iter().rev() {
+        let rel = s["path"].as_str().ok_or("full state path")?;
+        let z = std::fs::read(event.join(rel)).map_err(|e| format!("{rel}: {e}"))?;
+        let cap = s["bytes"].as_u64().ok_or("full state bytes")? as usize;
+        let raw = match &prev {
+            Some(p) => zstd::bulk::Decompressor::with_dictionary(p).and_then(|mut d| d.decompress(&z, cap)),
+            None => zstd::bulk::decompress(&z, cap),
+        }
+        .map_err(|e| format!("{rel}: zstd {e}"))?;
+        prev = Some(raw);
+    }
+    Ok(prev.unwrap())
+}
+
+pub fn load_frame(event: &std::path::Path, boundary: usize) -> Result<Frame, String> {
+    decode(&load_frame_bytes(event, boundary)?)
 }
