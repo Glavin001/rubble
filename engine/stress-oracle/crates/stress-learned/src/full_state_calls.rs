@@ -402,3 +402,23 @@ fn augment_trees(ctx: &Json, calls: &mut [Call], trees: &mut Trees, columns: Opt
         "static_rule": "columns with the same value for each entity at every boundary of the event: one row per entity in event_arrays fs_static_<kind> (keys fs_static_<kind>_key: chunk_key, bond_key, impactor index), left out of the calls; augment_live with a training manifest's columns writes that same split", "pair_key": ["structure_a", "chunk_a", "structure_b", "chunk_b", "slot"],
         "max_list": MAX_LIST, "rule": "every serialized field of the entity at the boundary (in: the frame's start, out: its end), flattened: a.b struct fields, a[i] list elements (lists longer than max_list left out), a=Variant one-hot enum variants (missing: 0), None and absent NaN; chunk columns prefixed @ are the world's per-chunk arrays"}), statics))
 }
+
+/// Each recorded call's island penalty contact energy at its frame's start and end
+/// (`energy`'s `E_contact_start`, `E_contact_end`): the World rebuilt from the recorded
+/// full state at both boundaries, `World::island_contact_energy_of` over the call's chunks
+/// and impactors (P0's contact law, the ledger the host keeps). Exact; no re-simulation.
+pub fn add_contact_energy(dir: &Path, scene: &stress_ref::scene::Scene, calls: &mut [Call]) -> Result<(), String> {
+    let mut worlds: HashMap<usize, World> = HashMap::new();
+    for c in calls.iter_mut() {
+        let chunks: HashSet<(usize, usize)> = i64s(c, "chunk_key")?.iter().map(|&k| ((k >> 32) as usize, (k & 0xffff_ffff) as usize)).collect();
+        let impactors: HashSet<usize> = i64s(c, "impactor_key")?.iter().map(|&k| k as usize).collect();
+        for (b, key) in [(c.frame, "E_contact_start"), (c.frame + 1, "E_contact_end")] {
+            if !worlds.contains_key(&b) {
+                worlds.retain(|&k, _| k + 1 >= c.frame);
+                worlds.insert(b, crate::full_state::restore(scene, &load_frame(dir, b)?)?);
+            }
+            c.energy.insert(key.to_string(), worlds[&b].island_contact_energy_of(&chunks, &impactors));
+        }
+    }
+    Ok(())
+}

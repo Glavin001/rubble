@@ -388,3 +388,36 @@ fn break_times_lie_in_their_frame_and_bin() {
     }
     assert!(breaks > 0);
 }
+
+/// `E_contact_start` / `E_contact_end` from the recorded full state equal the live World's
+/// island contact energy at the same boundary (the host's ledger), bit for bit.
+#[test]
+fn recorded_contact_energy_equals_the_live_worlds() {
+    use std::collections::HashSet;
+    let (ev, _) = record("contactE");
+    let e = build_event(&ev).unwrap();
+    let scene: Scene = serde_json::from_slice(&std::fs::read(ev.join("scene.json")).unwrap()).unwrap();
+    let mut w = World::new(&scene);
+    w.solver.record_load_impulse = true;
+    let last = e.calls.iter().map(|c| c.frame + 1).max().unwrap();
+    let (mut checked, mut nonzero) = (0, 0);
+    for b in 0..=last {
+        for c in &e.calls {
+            let keys = |n: &str| match c.array(n) { Some(Arr::I64(_, k)) => k.clone(), _ => panic!() };
+            let chunks: HashSet<(usize, usize)> = keys("chunk_key").iter().map(|&k| ((k >> 32) as usize, (k & 0xffff_ffff) as usize)).collect();
+            let imps: HashSet<usize> = keys("impactor_key").iter().map(|&k| k as usize).collect();
+            for (fb, k) in [(c.frame, "E_contact_start"), (c.frame + 1, "E_contact_end")] {
+                if fb == b {
+                    let live = w.island_contact_energy_of(&chunks, &imps);
+                    assert_eq!(live.to_bits(), c.energy[k].to_bits(), "call {} {k}: live {live} recorded {}", c.frame, c.energy[k]);
+                    checked += 1;
+                    nonzero += usize::from(live != 0.0);
+                }
+            }
+        }
+        if b < last {
+            stress_learned::full_state::oracle_frame(&mut w, |_| {}).unwrap();
+        }
+    }
+    assert!(checked == 2 * e.calls.len() && nonzero > 0, "{checked} checked, {nonzero} nonzero");
+}

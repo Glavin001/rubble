@@ -35,7 +35,7 @@ const F64_TABLES: &[&str] = &["break_f64"];
 /// (`full_state_calls`), for events recorded with the full state (recorder revision 9 on).
 pub const CALLS_SCHEMA_FULL: &str = "learned-impact-outcome/5";
 /// Bumped whenever the features or targets this builder writes change.
-pub const BUILDER_REVISION: u32 = 8;
+pub const BUILDER_REVISION: u32 = 9;
 pub const N_TIME_BINS: usize = 8;
 const G0: f64 = 9.81;
 const TINY: f64 = 1e-6;
@@ -1413,6 +1413,9 @@ pub fn build_event(dir: &Path) -> Result<CallEvent, String> {
     }
     let truncated = r.outcome.as_ref().and_then(|o| o["truncated"].as_bool()).unwrap_or(false);
     let full = crate::full_state_calls::augment(dir, &r.ctx, &mut calls)?;
+    if full.is_some() {
+        crate::full_state_calls::add_contact_energy(dir, &r.scene, &mut calls)?;
+    }
     let mut manifest = manifest_of(&r, &st, &calls, truncated);
     let mut event_arrays = Vec::new();
     if let Some((cols, statics)) = full {
