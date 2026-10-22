@@ -458,61 +458,58 @@ stage (encoding, momentum projection, the 5% KE bound) reproduced the oracle exa
 ## Draft: `/4`, hidden deformation carried across calls (2026-10-21, not yet built)
 
 Why: P0's closed loop shows the reduced state drops each chunk's elastic deformation at the
-handoff. The free wall's reduced-state ceiling fails fragment motion, and with the
-deformation kept it passes. Anchored walls under gravity lose their prestress every routed
-frame and over-crack. So a call must take the island's hidden deformation as input and
-return it at frame end. **P0 sends the exact fields; until then the names and scales below
-are placeholders to agree.**
+handoff. The free wall's reduced-state ceiling fails fragment motion, and keeping the
+deformation passes it. Anchored walls under gravity lose their prestress every routed frame
+and over-crack. Definitions are P0's, from what `STRESS_DECODED_DEFORMATION=1` restores
+(`world_handoff.rs` `apply_decoded_with`). They are provisional until P0's cl-eval-v2
+confirms them.
 
-Definitions, per chunk i of island I:
-- `u_i` and `θ_i` are the oracle's own hidden state, `ChunkState.u` / `th`, in the frame
-  of the chunk's own cluster (fragment): the recorder's `state_chunk_hidden`. An island can
-  hold several clusters, so the cluster is the reference, not the island. This is also
-  what the decode hands back (agreed with P1).
-- The rigid reference for the rates is the island's frame-start rigid motion (COM,
-  v_com, ω_I). The rates are derived exactly from the solver's `chunk_velocity`
-  (v = v_cl + ω_cl × R(c + u − com) + R·v_h), up to f32 round-off.
-- `v_def_i` = v_i − (v_com + ω_I × r_i) and `ω_def_i` = ω_i − ω_I, in the island body frame.
-- They are mass-weighted to zero net momentum and angular momentum per island, so the
-  rigid part keeps all of the island's momentum.
+**Frame: each chunk's own body (its cluster, the fragment), not the island.** The body's
+rigid motion is the momentum-exact fit of its chunks:
+- COM = Σ m·x / M;
+- R_body = exp(mass-mean drot)·R0;
+- v_body = P / M;
+- ω_body = I_w⁻¹ · Σ (r × m v + I_c w).
 
-Inputs (appended to `chunk_feat`, nondimensional):
+So the hidden parts carry zero net linear and angular momentum per body by construction.
 
-| column | meaning | scale |
-|---|---|---|
-| `def_u_body_0..2` | u_i | ÷ u_c, the mean over the chunk's live bonds of the tensile failure elongation (strength ÷ stiffness · L), so 1 ≈ at failure |
-| `def_rot_body_0..2` | θ_i | ÷ θ_c = u_c ÷ R_i |
-| `def_v_body_0..2` | v_def_i | ÷ `v` |
-| `def_w_body_0..2` | ω_def_i · R_i | ÷ `v` |
+**Hidden state per chunk (12 numbers), exactly the solver's `ChunkState` (u, th, v, w):**
+- `u` = R_body⁻¹(x − X_body) − c_rest;
+- `θ`: the chunk's world orientation = R_body · exp(θ) · R_rest;
+- `v_def` = R_body⁻¹(v − v_body − ω_body × r);
+- `ω_def` = R_body⁻¹(w − ω_body).
+- For anchored bodies v_body = 0.
 
-Plus a per-bond `def_strain` column (the bond's elongation from the two chunks'
-deformation ÷ its failure elongation): the prestress the bond carries at frame start.
+The recorder has u and θ (`state_chunk_hidden [n,6]`). The rates follow from
+`state_chunk_vel` / `angvel` and the body fit (P1).
 
-Carried SI arrays: `chunk_def_u`, `chunk_def_rot`, `chunk_def_v`, `chunk_def_w` (f32
-`[Nc,3]`, island body frame), for the decode and pushforward.
+**What changes:**
+- **Inputs only (`chunk_feat` gains 12 columns).** `def_u_body_0..2` ÷ u_c, where u_c is
+  the mean tensile failure elongation of the chunk's live bonds, so 1 ≈ at failure;
+  `def_rot_body_0..2` ÷ (u_c ÷ R_i); `def_v_body_0..2` ÷ `v`; `def_w_body_0..2` · R_i ÷ `v`.
+  The raw `/3` pose and velocity arrays already include the hidden parts. What the model
+  can't see today is the split: the body frame the deformation is measured from. SI
+  copies go in carried arrays `chunk_def` (f32 `[Nc,12]`), for pushforward.
+- **No new targets or outputs.** The per-chunk `y_chunk_v_end` / `w_end` / `dx` / `drot`
+  (unreduced) and the chunk head's 12 outputs already determine all four at frame end; the
+  host derives them from the fit. Decoded state stays `/1`.
+- **Decode:** it must not fold a body to rigid; it doesn't today. The per-island momentum
+  projection stays.
+- **Bond prestress:** not boundary state. A bond's force follows from both ends' (u, θ) and
+  the rest geometry. A derived `def_strain` bond column (elongation ÷ failure elongation)
+  may be added if it helps learning.
+- **KE bound:** unchanged. KE_out already includes the hidden velocities; elastic energy
+  would be a refinement.
+- **Loss (P2):** `def_motion` is the KE norm (½ m |Δv_def error|² + ½ ωᵀ I ω on the ω_def
+  error) of the frame-end hidden rates about each target body's fit, ÷ E_in and normalised
+  by its zero predictor. Without it, the deformation part is a tiny share of the motion
+  term. A strain-energy-norm `def_pose` on u is a later option.
+- **Pushforward:** rewrites the hidden-state inputs from the model's decoded chunk state
+  through the same fit.
 
-Targets (frame end, oracle, same definitions about the island's frame-end rigid motion):
-`y_chunk_def_u_end`, `y_chunk_def_rot_end`, `y_chunk_def_v_end`, `y_chunk_def_w_end`.
-
-Model, decode and loss (P2):
-- **Heads.** The chunk head adds 12 outputs, Δu, Δθ, Δv_def and Δω_def in the body frame,
-  scaled as the inputs.
-- **Decode.** The deformation passes through to the decoded state. It is first projected to
-  zero net momentum and angular momentum per fragment, so the momentum projection stays
-  exact.
-- **Energy bound.** The bound covers deformation kinetic energy plus elastic energy
-  (½ k (elongation)² over live bonds, from the SI stiffness):
-  KE_rigid + KE_def + U_el ≤ E_in + W_g + tol · E_in.
-  For that to hold, E_in also counts the frame-start U_el and KE_def.
-- **Losses.**
-  - `def_motion`: ½ m |Δv_def error|² + ½ ωᵀ I ω on the ω_def error, ÷ E_in.
-  - `def_pose`: the strain-energy norm ½ k |elongation error|² summed over bonds, ÷ E_in.
-  - Both are normalised by their zero predictor, like every other term.
-- **Pushforward.** It rewrites the deformation inputs from the model's own outputs.
-
-Provider and decoded state: `learned-impact-decoded-state/2` adds per-chunk `def_u`,
-`def_rot`, `def_v` and `def_w`, so the harness restores the deformation instead of
-resetting it (P0's `STRESS_DECODED_DEFORMATION=1`).
+**Open question (P0's point 6):** bond internal state beyond the poses (κ history,
+softening, damping, fail times). The host keeps it, and the inputs see it only through
+damage and `log1p_peak_util_prev`. P0 can measure a variant that resets joint history.
 
 ## Versioning
 
