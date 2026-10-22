@@ -180,6 +180,8 @@ class ImpactOutcomeModel(nn.Module):
         fs_c = FS.N_CHUNK_OUT if cfg.full_state else 0
         self.bond_head = _mlp(4 * w + w, 4 + nt + fs_b, w, hl, norm=False)
         self.chunk_head = _mlp(2 * w, NODE_OUT + fs_c, w, hl, norm=False)
+        if cfg.full_state:  # frame-end bodies: pooled chunk states + global + start record
+            self.cluster_head = _mlp(2 * w + FS.N_CL_START, FS.N_CL_OUT, w, hl, norm=False)
         self.imp_head = _mlp(2 * w, NODE_OUT + 1, w, hl, norm=False)
         self.energy_head = _mlp(w, 4, w, hl, norm=False)
         # Start every head at (almost) the zero predictor, so each normalised loss term
@@ -286,6 +288,19 @@ class ImpactOutcomeModel(nn.Module):
 
         return self._heads(h, e, g, b)
 
+    def cluster_out(self, chunk_h: Tensor, g: Tensor, of_chunk: Tensor, clu_call: Tensor,
+                    clu_x: Tensor) -> Tensor:
+        """Frame-end body predictions: the mean chunk state of each body, its call's global
+        state and its frame-start record → [Ncl, 13 changes + 2 activity logits]. Grouping
+        is the oracle's clusters in training and the decoded fragments at inference."""
+        n = clu_x.shape[0]
+        s = torch.zeros(n, chunk_h.shape[1], dtype=chunk_h.dtype, device=chunk_h.device)
+        s = s.index_add(0, of_chunk, chunk_h)
+        cnt = torch.zeros(n, 1, dtype=chunk_h.dtype, device=chunk_h.device).index_add(
+            0, of_chunk, torch.ones_like(chunk_h[:, :1]))
+        pooled = s / cnt.clamp(min=1)
+        return self.cluster_head(torch.cat([pooled, g[clu_call], clu_x.to(chunk_h.dtype)], -1))
+
     def _heads(self, h: Tensor, e: dict[str, Tensor], g: Tensor, b: Batch) -> dict[str, Tensor]:
         t = b.t
         nt = self.cfg.n_time_bins
@@ -329,6 +344,11 @@ class ImpactOutcomeModel(nn.Module):
             extra["bond_fs"] = start + torch.where(mono, F.softplus(raw - 2.0), raw)
             extra["bond_fs_mode_logits"] = out[:, 4 + nt + nf:4 + nt + nf + 3]
             extra["chunk_fs"] = t["chunk_fs_in"].to(c_out.dtype) + c_out[:, NODE_OUT:]
+            extra["_chunk_h"] = chunk_h
+            extra["_glob"] = g
+            if "clu_of_chunk" in t:
+                extra["clu_out"] = self.cluster_out(chunk_h, g, t["clu_of_chunk"], t["clu_call"],
+                                                    t["clu_x"])
         return {**extra, 
             "bond_log_r": log_r,
             "bond_break_logit": out[:, 1],

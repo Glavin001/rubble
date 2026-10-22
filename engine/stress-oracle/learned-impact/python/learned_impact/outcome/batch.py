@@ -100,6 +100,7 @@ def collate(calls: list[S.Call], structures: dict[str, dict[int, dict[str, np.nd
                        for c in calls)
     from . import fullstate as FS
     full_state = bool(calls) and all(c.fs is not None and "fs_bond_in" in c.arrays for c in calls)
+    clu_off = 0
     for gi, c in enumerate(calls):
         a = c.arrays
         nc, ni = c.counts["chunks"], c.counts["impactors"]
@@ -112,6 +113,16 @@ def collate(calls: list[S.Call], structures: dict[str, dict[int, dict[str, np.nd
             ci, co = FS.chunk_arrays(c, c.fs["cols"], float(np.linalg.norm(c.gravity)))
             add("chunk_fs_in", ci)
             add("y_chunk_fs", co)
+            # frame-end bodies, grouped as the oracle's clusters (training targets)
+            cg = FS.cluster_groups(c, a["fs_chunk_cluster_out"])
+            cy, cact = FS.cluster_targets(c, cg)
+            add("clu_of_chunk", cg["of_chunk"].astype(np.int64) + clu_off)
+            add("clu_x", cg["x"])
+            add("clu_call", np.full(len(cg["key"]), gi))
+            add("clu_key", cg["key"])
+            add("y_clu", cy)
+            add("y_clu_act", cact)
+            clu_off += len(cg["key"])
         add("chunk_x", a["chunk_feat"])
         add("chunk_qs", a["chunk_qs_feat"])
         add("imp_x", a["impactor_feat"])
@@ -339,6 +350,15 @@ def pad_batch(b: Batch, growth: float = 1.25, call_multiple: int = 8) -> Batch:
     for k in ("chunk_fs_in", "y_chunk_fs"):
         if k in t:
             t[k] = _pad_rows(t[k], pc)
+    if "clu_of_chunk" in t:  # padding chunks form one padding body (masked out)
+        n_cl = t["clu_x"].shape[0]
+        t["clu_valid"] = torch.cat([torch.ones(n_cl, dtype=torch.bool), torch.zeros(1, dtype=torch.bool)])
+        t["clu_of_chunk"] = torch.cat([t["clu_of_chunk"], torch.full((pc,), n_cl, dtype=torch.long)])
+        for k, fill in (("clu_x", 0.0), ("y_clu", 0.0)):
+            t[k] = _pad_rows(t[k], 1, fill)
+        t["clu_call"] = _pad_rows(t["clu_call"], 1, pcall)
+        t["clu_key"] = _pad_rows(t["clu_key"], 1, -1)
+        t["y_clu_act"] = _pad_rows(t["y_clu_act"], 1, 0)
     f0 = b.n_fragments
     t["y_chunk_fragment"] = torch.cat([t["y_chunk_fragment"], torch.arange(f0, f0 + pc)])
     b.n_fragments = f0 + pc

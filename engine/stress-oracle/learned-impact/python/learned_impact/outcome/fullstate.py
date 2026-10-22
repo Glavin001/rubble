@@ -149,3 +149,116 @@ def predicted_columns() -> dict[str, list[str]]:
     """The full-state columns the model predicts, by entity, in P1's field-path names."""
     return {"bond": [f for f, _, _ in BOND_FIELDS] + list(BOND_MODE) + ["alive", "joint.damage"],
             "chunk": list(CHUNK_FIELDS)}
+
+
+# ---- clusters (bodies) ------------------------------------------------------------------
+# A frame-end body is predicted from its frame-start record: the cluster that held its lowest
+# chunk at the frame's start. Targets are changes from that record: position ÷ L, rotation
+# as the body-frame rotation vector q_s⁻¹ q_e, velocity ÷ v, angular velocity · L ÷ v, the
+# activity (Active / Settled) and Δactive_timer ÷ dt. Keyed by the body's lowest chunk key.
+CL_POS = tuple(f"pose.position.{a}" for a in "xyz")
+CL_ROT = tuple(f"pose.rotation.{a}" for a in "wxyz")
+CL_VEL = tuple(f"velocity.{a}" for a in "xyz")
+CL_ANG = tuple(f"angular_velocity.{a}" for a in "xyz")
+CL_ACT = ("activity=Active", "activity=Settled")
+CL_TIMER = "active_timer"
+N_CL_START = 3 + 3 + 2 + 1  # inputs: v ÷ v_ref, ω·L ÷ v_ref, activity one-hot, timer ÷ dt
+N_CL_OUT = 3 + 3 + 3 + 3 + 1 + 2  # dpos, drot, dv, dω, dtimer, activity logits
+
+
+def _qmul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    w1, x1, y1, z1 = a.T
+    w2, x2, y2, z2 = b.T
+    return np.stack([w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2, w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+                     w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2, w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2], 1)
+
+
+def _qinv(q: np.ndarray) -> np.ndarray:
+    return q * np.array([1.0, -1.0, -1.0, -1.0])
+
+
+def _q_to_rotvec(q: np.ndarray) -> np.ndarray:
+    q = q * np.where(q[:, :1] < 0, -1.0, 1.0)
+    s = np.linalg.norm(q[:, 1:], axis=1, keepdims=True)
+    ang = 2.0 * np.arctan2(s, q[:, :1])
+    return np.where(s > 1e-12, q[:, 1:] / np.maximum(s, 1e-300) * ang, 2.0 * q[:, 1:])
+
+
+def _rotvec_to_q(r: np.ndarray) -> np.ndarray:
+    a = np.linalg.norm(r, axis=1, keepdims=True)
+    half = 0.5 * a
+    k = np.where(a > 1e-12, np.sin(half) / np.maximum(a, 1e-300), 0.5)
+    return np.concatenate([np.cos(half), r * k], 1)
+
+
+def _cl(rows: np.ndarray, names: list[str], cols) -> np.ndarray:
+    return np.stack([np.nan_to_num(rows[:, names.index(c)]) if c in names else np.zeros(len(rows))
+                     for c in cols], 1)
+
+
+def cluster_groups(c, groups: np.ndarray) -> dict:
+    """Frame-end bodies of call `c` given a chunk → group partition (the oracle's
+    `fs_chunk_cluster_out` in training, the decoded fragments at inference): per group its
+    key (lowest chunk key), the frame-start record (raw) and the encoded start inputs."""
+    a = c.arrays
+    names = list(c.fs["cols"]["cluster"])
+    keys = a["chunk_key"].astype(np.int64)
+    _, inv = np.unique(groups, return_inverse=True)
+    n = int(inv.max()) + 1 if len(inv) else 0
+    lowest = np.full(n, -1, np.int64)
+    first_chunk = np.zeros(n, np.int64)
+    for i, (gi, k) in enumerate(zip(inv, keys)):
+        if lowest[gi] < 0 or k < lowest[gi]:
+            lowest[gi], first_chunk[gi] = k, i
+    start_rows = a["fs_chunk_cluster_in"].astype(np.int64)[first_chunk]
+    st = a["fs_cluster_in"][start_rows] if n else np.zeros((0, len(names)))
+    v_ref, L, dt = float(c.scales["v"]), float(c.scales["L"]), float(c.scales["dt"])
+    start = {"pos": _cl(st, names, CL_POS), "rot": _cl(st, names, CL_ROT), "vel": _cl(st, names, CL_VEL),
+             "ang": _cl(st, names, CL_ANG), "act": _cl(st, names, CL_ACT),
+             "timer": _cl(st, names, (CL_TIMER,))[:, 0]}
+    start["rot"][np.linalg.norm(start["rot"], axis=1) < 1e-9] = [1.0, 0.0, 0.0, 0.0]
+    x = np.concatenate([start["vel"] / v_ref, start["ang"] * L / v_ref, start["act"],
+                        (start["timer"] / dt)[:, None]], 1) if n else np.zeros((0, N_CL_START))
+    return {"of_chunk": inv, "key": lowest, "start": start, "x": x.astype(np.float32)}
+
+
+def cluster_targets(c, g: dict) -> tuple[np.ndarray, np.ndarray]:
+    """Encoded frame-end targets of the oracle's clusters grouped as `g` (from
+    `cluster_groups(c, fs_chunk_cluster_out)`): [Ncl, 13] changes and [Ncl] activity."""
+    a = c.arrays
+    names = list(c.fs["cols"]["cluster"])
+    out_rows = np.zeros(len(g["key"]), np.int64)
+    end_of_chunk = a["fs_chunk_cluster_out"].astype(np.int64)
+    for i, gi in enumerate(g["of_chunk"]):
+        out_rows[gi] = end_of_chunk[i]
+    en = a["fs_cluster_out"][out_rows] if len(out_rows) else np.zeros((0, len(names)))
+    v_ref, L, dt = float(c.scales["v"]), float(c.scales["L"]), float(c.scales["dt"])
+    s = g["start"]
+    q_e = _cl(en, names, CL_ROT)
+    q_e[np.linalg.norm(q_e, axis=1) < 1e-9] = [1.0, 0.0, 0.0, 0.0]
+    y = np.concatenate([(_cl(en, names, CL_POS) - s["pos"]) / L,
+                        _q_to_rotvec(_qmul(_qinv(s["rot"]), q_e)),
+                        (_cl(en, names, CL_VEL) - s["vel"]) / v_ref,
+                        (_cl(en, names, CL_ANG) - s["ang"]) * L / v_ref,
+                        ((_cl(en, names, (CL_TIMER,))[:, 0] - s["timer"]) / dt)[:, None]], 1) \
+        if len(out_rows) else np.zeros((0, 13))
+    act = _cl(en, names, CL_ACT)
+    act_cls = np.where(act[:, 1] > 0.5, 1, 0).astype(np.int64) if len(out_rows) else np.zeros(0, np.int64)
+    return y.astype(np.float32), act_cls
+
+
+def cluster_raw(c, g: dict, enc: np.ndarray, act_logits: np.ndarray) -> tuple[list[str], np.ndarray]:
+    """Decoded cluster columns in raw units (world): position, rotation (w, x, y, z), velocity,
+    angular velocity, activity one-hot, active_timer."""
+    v_ref, L, dt = float(c.scales["v"]), float(c.scales["L"]), float(c.scales["dt"])
+    s = g["start"]
+    pos = s["pos"] + enc[:, 0:3] * L
+    rot = _qmul(s["rot"], _rotvec_to_q(enc[:, 3:6]))
+    vel = s["vel"] + enc[:, 6:9] * v_ref
+    ang = s["ang"] + enc[:, 9:12] * v_ref / L
+    timer = s["timer"] + enc[:, 12] * dt
+    act = act_logits.argmax(-1)
+    cols = [*CL_POS, *CL_ROT, *CL_VEL, *CL_ANG, *CL_ACT, CL_TIMER]
+    vals = np.concatenate([pos, rot, vel, ang, np.stack([(act == 0), (act == 1)], 1).astype(float),
+                           timer[:, None]], 1)
+    return cols, vals

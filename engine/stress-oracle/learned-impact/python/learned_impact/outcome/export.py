@@ -117,7 +117,7 @@ def export(ckpt: str | Path, out: str | Path, dataset: str | None = None, parity
                 o = model(b)
             np.savez(d / "outputs.npz", **{k2: v.numpy().astype(np.float32) for k2, v in o.items()})
             dec = D.decode(o, b, dcfg)
-            IO.write(d / "decoded.json", IO.decoded_states(b, o, dec, {"checkpoint": str(ckpt)})[0])
+            IO.write(d / "decoded.json", IO.decoded_states(b, o, dec, {"checkpoint": str(ckpt)}, model=model)[0])
     return out
 
 

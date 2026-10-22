@@ -100,7 +100,7 @@ def export(ckpt: Path, data: Data, recordings: dict[str, Path], out: Path, tol: 
         o = model(b.to(device))
         o = {k: v.cpu() for k, v in o.items()}
         dec = D.decode(o, b, dcfg)
-        docs = IO.decoded_states(b, o, dec, {"checkpoint": str(ckpt), "dagger": True})
+        docs = IO.decoded_states(b, o, dec, {"checkpoint": str(ckpt), "dagger": True}, model=model)
         t = b.t
         cc = t["chunk_call"].numpy()
         dv = np.linalg.norm(dec["chunk_v_end"].numpy() - t["y_chunk_v_end"].numpy(), axis=1)

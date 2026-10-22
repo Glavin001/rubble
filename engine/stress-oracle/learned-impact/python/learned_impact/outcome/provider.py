@@ -116,7 +116,7 @@ class Provider:
             out = self.model(b.to(self.device))
         out = {k: v.cpu() for k, v in out.items()}
         dec = D.decode(out, b, self.dcfg)
-        doc = IO.decoded_states(b, out, dec, dict(self.meta))[0]
+        doc = IO.decoded_states(b, out, dec, dict(self.meta), model=self.model)[0]
         self.t_model += time.perf_counter() - t0
         IO.validate(doc, c)
         return doc

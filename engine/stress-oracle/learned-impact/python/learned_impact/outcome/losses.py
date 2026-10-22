@@ -37,15 +37,16 @@ from . import fullstate as _FS
 # `/5`: one term per carried bond field (each normalised by its own persistence loss, so
 # a field that rarely changes still has to beat "unchanged"), the mode and the reactions
 FS_BOND_TERMS = tuple(f"fs_{name}" for name, _, _ in _FS.BOND_FIELDS)
+FS_CLUSTER_TERMS = ("fs_cl_pos", "fs_cl_rot", "fs_cl_vel", "fs_cl_ang", "fs_cl_timer", "fs_cl_act")
 TERMS = ("margin", "demand", "break", "time", "motion", "def_motion", "pose", "impactor",
-         "energy", "damage", "regime", *FS_BOND_TERMS, "fs_mode", "fs_chunk")
+         "energy", "damage", "regime", *FS_BOND_TERMS, "fs_mode", "fs_chunk", *FS_CLUSTER_TERMS)
 
 
 @dataclass
 class LossConfig:
     weights: dict[str, float] = field(default_factory=lambda: {
         "margin": 5.0, "demand": 1.0, "break": 5.0, "time": 1.0, "motion": 2.0,
-        "def_motion": 2.0, "pose": 1.0, "fs_mode": 1.0, "fs_chunk": 1.0, **{k: 1.0 for k in FS_BOND_TERMS},
+        "def_motion": 2.0, "pose": 1.0, "fs_mode": 1.0, "fs_chunk": 1.0, **{k: 1.0 for k in FS_BOND_TERMS}, **{k: 1.0 for k in FS_CLUSTER_TERMS},
         "impactor": 2.0, "energy": 1.0, "damage": 1.0, "regime": 1.0})
     huber_delta: float = 1.0
     label_smoothing: float = 0.02  # single-run hard break labels
@@ -128,7 +129,9 @@ def zero_outputs(b: Batch, n_time_bins: int = S.N_TIME_BINS) -> dict[str, Tensor
             "energy_ke_loss": z(G),
             # `/5`: persistence (frame end = frame start) is the full state's zero predictor
             **({"bond_fs": t["y_bond_fs_start"].float(), "bond_fs_mode_logits": z(nb, 3),
-                "chunk_fs": t["chunk_fs_in"].float()} if "y_bond_fs" in t else {})}
+                "chunk_fs": t["chunk_fs_in"].float(),
+                **({"clu_out": z(t["clu_x"].shape[0], 15)} if "clu_x" in t else {})}
+               if "y_bond_fs" in t else {})}
 
 
 def loss_terms(out: dict[str, Tensor], b: Batch, cfg: LossConfig,
@@ -263,6 +266,16 @@ def loss_terms(out: dict[str, Tensor], b: Batch, cfg: LossConfig,
         cvd = t["chunk_valid"].to(dev, dtype) if "chunk_valid" in t else torch.ones_like(out["chunk_fs"][:, 0])
         ec = _huber(out["chunk_fs"].to(dtype) - t["y_chunk_fs"].to(dev, dtype), cfg.huber_delta).mean(-1)
         terms["fs_chunk"] = (ec * cvd).sum() / cvd.sum().clamp(min=1)
+    if "clu_out" in out:  # frame-end bodies, each group in its encoding
+        cv_ = t["clu_valid"].to(dev, dtype) if "clu_valid" in t else torch.ones(out["clu_out"].shape[0], device=dev, dtype=dtype)
+        co = out["clu_out"].to(dtype)
+        yc = t["y_clu"].to(dev, dtype)
+        den = cv_.sum().clamp(min=1)
+        for name, sl in (("fs_cl_pos", slice(0, 3)), ("fs_cl_rot", slice(3, 6)), ("fs_cl_vel", slice(6, 9)),
+                         ("fs_cl_ang", slice(9, 12)), ("fs_cl_timer", slice(12, 13))):
+            terms[name] = (_huber(co[:, sl] - yc[:, sl], cfg.huber_delta).mean(-1) * cv_).sum() / den
+        ce_c = F.cross_entropy(co[:, 13:15].float(), t["y_clu_act"].to(dev), reduction="none")
+        terms["fs_cl_act"] = (ce_c * cv_).sum() / den
 
     # impactor: (Δv̂ − Δv)² / v0², plus the ensemble energy score when members exist
     if t["imp_x"].shape[0]:

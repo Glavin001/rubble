@@ -12,6 +12,7 @@ from typing import Any
 import numpy as np
 import torch
 
+from . import decode as D
 from . import schema as S
 from .batch import Batch
 
@@ -23,7 +24,7 @@ def _vec(x) -> list[float]:
 
 
 def decoded_states(b: Batch, out: dict[str, torch.Tensor], dec: dict,
-                   meta: dict[str, Any] | None = None) -> list[dict]:
+                   meta: dict[str, Any] | None = None, model=None) -> list[dict]:
     """One decoded-state document per call of the batch (float64 values, world axes)."""
     t = b.t
     cc, ic, bc = (t["chunk_call"].cpu().numpy(), t["imp_call"].cpu().numpy(),
@@ -40,6 +41,7 @@ def decoded_states(b: Batch, out: dict[str, torch.Tensor], dec: dict,
     infeasible = dec["energy_bound_infeasible"].cpu().numpy()
     free = dec["free"].cpu().numpy()
     anchored = t["chunk_anchored"].cpu().numpy()
+    frag = D.fragments(b, dec["bond_broke"]) if (model is not None and "bond_fs" in out) else None
     docs = []
     for g, c in enumerate(b.calls):
         a = c.arrays
@@ -69,10 +71,43 @@ def decoded_states(b: Batch, out: dict[str, torch.Tensor], dec: dict,
                             zip(bkeys, broke[sb], damage[sb]) if not x],
         }
         if "bond_fs" in out and c.fs is not None:
-            doc["full_state"] = _full_state_out(c, out, broke[sb], damage[sb],
-                                                np.nonzero(sb)[0], np.nonzero(sc)[0])
+            fs = _full_state_out(c, out, broke[sb], damage[sb], np.nonzero(sb)[0], np.nonzero(sc)[0])
+            if model is not None and getattr(model, "cluster_head", None) is not None:
+                fs["cluster"] = _clusters_out(c, out, frag[sc], np.nonzero(sc)[0], g, model)
+            # P0's host format: per kind, keys, field-path columns and flat row-major rows;
+            # JSON has no infinity, so ±inf and NaN (None) go as strings
+            doc["full_state_out"] = [
+                {"kind": kind, "keys": tab["keys"], "columns": tab["columns"],
+                 "rows": [_json_num(x) for row in tab["values"] for x in row]}
+                for kind, tab in fs.items()]
         docs.append(doc)
     return docs
+
+
+def _json_num(x: float):
+    if np.isnan(x):
+        return "nan"
+    if np.isinf(x):
+        return "inf" if x > 0 else "-inf"
+    return float(x)
+
+
+@torch.no_grad()
+def _clusters_out(c: S.Call, out: dict, frag_rows: np.ndarray, c_rows: np.ndarray, gi: int,
+                  model) -> dict:
+    """Frame-end bodies from the decoded fragments: the model's cluster head on each
+    fragment's chunks, decoded to raw world columns, keyed by the body's lowest chunk key."""
+    from . import fullstate as FS
+
+    grp = FS.cluster_groups(c, frag_rows)
+    ch = out["_chunk_h"][torch.as_tensor(c_rows)]
+    g = out["_glob"][gi:gi + 1]
+    n = len(grp["key"])
+    co = model.cluster_out(ch, g, torch.as_tensor(grp["of_chunk"], dtype=torch.long),
+                           torch.zeros(n, dtype=torch.long), torch.as_tensor(grp["x"])).cpu().numpy()
+    cols, vals = FS.cluster_raw(c, grp, co[:, :13].astype(np.float64), co[:, 13:15])
+    return {"keys": grp["key"].tolist(), "columns": cols,
+            "values": [[float(x) for x in row] for row in vals]}
 
 
 def _full_state_out(c: S.Call, out: dict, broke, damage, b_rows, c_rows) -> dict:
