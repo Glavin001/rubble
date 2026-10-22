@@ -100,10 +100,11 @@ def run(dataset: str, out: str, sizes: list[int], seeds: list[int], variants: li
         family: str | None, steps_per_event: float, min_steps: int, max_steps: int,
         device: str, model_cfg: ModelConfig, pushforward: float = 0.0,
         rereport: bool = False, val_dataset: str | None = None,
-        fractions: list[float] | None = None) -> dict:
+        fractions: list[float] | None = None, train_events: list | None = None,
+        call_cache: dict | None = None) -> dict:
     root = Path(out)
     prog = Progress(root, total=len(sizes) * len(seeds) * len(variants))
-    full = Data(dataset, val_dataset=val_dataset)
+    full = Data(dataset, val_dataset=val_dataset, train_events=train_events, call_cache=call_cache)
     keep = (lambda c: True) if family is None else (lambda c: c.family == family)
     train_groups = sorted({c.split_group for c in full.train if keep(c)})
     if fractions:  # shares of the training layout groups (nested, as for sizes)
@@ -270,6 +271,10 @@ def main(argv=None) -> None:
     ap.add_argument("--large", action="store_true", help="W128 / 16 rounds")
     ap.add_argument("--cost", action="store_true", help="W32 / 8 rounds (P0's cost point)")
     ap.add_argument("--full-state", action="store_true", help="/5 full-state inputs and heads")
+    ap.add_argument("--train-events", default="", help="file of P1 recording dirs: training calls via CallCache")
+    ap.add_argument("--call-cache-module", default="")
+    ap.add_argument("--call-cache", default="")
+    ap.add_argument("--call-builder", default="")
     ap.add_argument("--pushforward", type=float, default=0.0)
     ap.add_argument("--rereport", action="store_true",
                     help="re-score every finished run's best.pt with the current metrics")
@@ -280,7 +285,10 @@ def main(argv=None) -> None:
     run(a.dataset, a.out, [int(x) for x in a.sizes.split(",")],
         [int(x) for x in a.seeds.split(",")], a.variants.split(","), a.family,
         a.steps_per_event, a.min_steps, a.max_steps, a.device, mc, a.pushforward, a.rereport,
-        a.val_dataset, [float(x) for x in a.fractions.split(",")] if a.fractions else None)
+        a.val_dataset, [float(x) for x in a.fractions.split(",")] if a.fractions else None,
+        [x for x in Path(a.train_events).read_text().split() if x] if a.train_events else None,
+        {"module": a.call_cache_module, "root": a.call_cache, "builder": a.call_builder}
+        if a.train_events else None)
 
 
 if __name__ == "__main__":

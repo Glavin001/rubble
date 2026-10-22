@@ -8,7 +8,7 @@
 set -e
 TRAIN=$1; EVAL=$2; STEPS=${3:-12000}; EXTRA=${4:-}  # e.g. --full-state for /5
 HERE=${0:a:h}
-PYD=$HERE/../python; R=$HERE/../runs/v5; mkdir -p $R
+PYD=$HERE/../python; R=${VIAB_OUT:-$HERE/../runs/v5}; mkdir -p $R
 cd $PYD
 PY=.venv/bin/python
 LOCK=$HERE/gpu_lock.sh

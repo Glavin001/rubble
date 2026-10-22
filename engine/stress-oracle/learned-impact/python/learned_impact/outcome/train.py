@@ -45,6 +45,8 @@ PHASE_BUCKET = {"contact": "contact", "blast": "contact", "secondary": "secondar
 class TrainConfig:
     dataset: str = ""
     val_dataset: str = ""  # validation from this dataset's val split instead (eval ensembles)
+    train_events: str = ""  # a file listing P1 recording dirs: training calls via CallCache
+    call_cache: dict = field(default_factory=dict)  # {module, root, builder, max_gb, jobs}
     out: str = "runs/outcome"
     steps: int = 1000
     batch_calls: int = 64  # upper bound on calls per batch
@@ -123,6 +125,37 @@ class Progress:
 
 
 # ---- data ---------------------------------------------------------------------------
+def _read_list(path: str) -> list[str]:
+    return [x.strip() for x in Path(path).read_text().splitlines() if x.strip()]
+
+
+def _cached_train_events(event_dirs: list, cfg: dict) -> tuple[list[S.Event], int]:
+    """P1's recorded training events → their calls through P1's CallCache (module imported
+    from `cfg["module"]`, P1's learned_impact/outcome_calls_cache.py), prefetched in one
+    parallel builder run, then loaded like any calls directory."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("outcome_calls_cache", cfg["module"])
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    cache = mod.CallCache(cfg["root"], max_gb=float(cfg.get("max_gb", 4.0)), builder=cfg["builder"],
+                          jobs=int(cfg.get("jobs", 8)))
+    evs = [Path(e) for e in event_dirs]
+    t0 = time.time()
+    cache.prefetch(evs)
+    print(f"[data] {len(evs)} training events' calls ready in {time.time() - t0:.0f} s "
+          f"(cache {cache.bytes() / 1e9:.2f} GB)", flush=True)
+    events = [S.load_event(cache.path(e)) for e in evs]
+    from .ensemble import aggregate
+    groups: dict[str, list[S.Event]] = defaultdict(list)
+    for e in events:
+        if e.manifest.get("ensemble_id"):
+            for c in e.calls:
+                c.arrays = dict(c.arrays)
+            groups[e.manifest["ensemble_id"]].append(e)
+    return events, sum(aggregate(g) for g in groups.values())
+
+
 def _split_of(path) -> str:
     return json.loads((Path(path) / "manifest.json").read_text()).get("split", "")
 
@@ -157,7 +190,8 @@ class Data:
     ensembles). Layout groups may not cross from train into any other split of either."""
 
     def __init__(self, dataset: str, include_unrouted: bool = False,
-                 val_dataset: str | None = None):
+                 val_dataset: str | None = None, train_events: list | None = None,
+                 call_cache: dict | None = None):
         # `dataset` may list several roots, `path[@weight],…`: their training calls are
         # mixed by `MixedSampler` with the given shares of every epoch (default: in
         # proportion to their sizes, i.e. plain concatenation).
@@ -167,8 +201,14 @@ class Data:
             val_dataset = None  # one directory with every split (calls-v5): its own val split
         if any(w is not None for _, w in specs) and any(w is None for _, w in specs):
             raise ValueError(f"--dataset {dataset!r}: weight every source or none")
+        if train_events:
+            # Training calls built on demand from P1's recordings (CallCache: the same Rust
+            # builder, byte-identical calls; built once, cached persistently, LRU-bounded);
+            # `dataset` then contributes only its val split.
+            self.events, self.ensemble_aligned_calls = _cached_train_events(train_events, call_cache or {})
+            specs = [(p, w) for p, w in specs]
         for path, weight in specs:
-            evs, n = _load_events(path)
+            evs, n = _load_events(path, {"val", "test"} if train_events else None)
             ids = {e.manifest["event_id"] for e in self.events}
             dup = ids & {e.manifest["event_id"] for e in evs}
             if dup:
@@ -590,7 +630,8 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
     np.random.seed(cfg.seed)
     random.seed(cfg.seed)
     dev = pick_device(cfg.device)
-    data = data or Data(cfg.dataset, cfg.include_unrouted, cfg.val_dataset or None)
+    data = data or Data(cfg.dataset, cfg.include_unrouted, cfg.val_dataset or None,
+                        _read_list(cfg.train_events) if cfg.train_events else None, cfg.call_cache)
     if cfg.model.full_state and not cfg.full_state_columns:
         cols = [e.manifest.get("full_state_columns") for e in data.events if e.manifest.get("full_state_columns")]
         if cols:
@@ -865,6 +906,11 @@ def main(argv=None) -> None:
     ap.add_argument("--variant", default="B", choices=["A", "B"])
     ap.add_argument("--full-state", action="store_true",
                     help="/5: the oracle's full dynamic bond and chunk state as inputs and heads")
+    ap.add_argument("--train-events", default="", help="file of P1 recording dirs: training calls via CallCache")
+    ap.add_argument("--call-cache-module", default="", help="P1's outcome_calls_cache.py")
+    ap.add_argument("--call-cache", default="", help="cache root")
+    ap.add_argument("--call-builder", default="", help="P1's learned_impact_outcome_calls")
+    ap.add_argument("--cache-gb", type=float, default=4.0)
     ap.add_argument("--break-time-head", action="store_true",
                     help="a continuous break time per bond (the decode's break order)")
     ap.add_argument("--hidden-head", action="store_true",
@@ -911,10 +957,14 @@ def main(argv=None) -> None:
     mc.hidden_head = a.hidden_head
     mc.__post_init__()
     seeds = [int(s) for s in a.seeds.split(",")]
-    data = Data(dataset, val_dataset=a.val_dataset or None)
+    cc = {"module": a.call_cache_module, "root": a.call_cache, "builder": a.call_builder,
+          "max_gb": a.cache_gb} if a.train_events else {}
+    data = Data(dataset, val_dataset=a.val_dataset or None,
+                train_events=_read_list(a.train_events) if a.train_events else None, call_cache=cc)
     for s in seeds:
         out = Path(a.out) / (f"seed{s}" if len(seeds) > 1 else "")
         cfg = TrainConfig(dataset=dataset, val_dataset=a.val_dataset, out=str(out), steps=a.steps,
+                          train_events=a.train_events, call_cache=cc,
                           init_checkpoint=a.init_checkpoint,
                           batch_calls=a.batch_calls, batch_budget=a.batch_budget, lr=a.lr, seed=s, device=a.device,
                           noise_sigma=a.noise, pushforward_prob=a.pushforward,
