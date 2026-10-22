@@ -33,14 +33,15 @@ from . import schema as S
 from .batch import SCALE_INDEX, Batch
 from .geometry import world_inertia
 
-TERMS = ("margin", "demand", "break", "time", "motion", "pose", "impactor", "energy", "damage",
-         "regime")
+TERMS = ("margin", "demand", "break", "time", "motion", "def_motion", "pose", "impactor",
+         "energy", "damage", "regime")
 
 
 @dataclass
 class LossConfig:
     weights: dict[str, float] = field(default_factory=lambda: {
-        "margin": 5.0, "demand": 1.0, "break": 5.0, "time": 1.0, "motion": 2.0, "pose": 1.0,
+        "margin": 5.0, "demand": 1.0, "break": 5.0, "time": 1.0, "motion": 2.0,
+        "def_motion": 2.0, "pose": 1.0,
         "impactor": 2.0, "energy": 1.0, "damage": 1.0, "regime": 1.0})
     huber_delta: float = 1.0
     label_smoothing: float = 0.02  # single-run hard break labels
@@ -216,6 +217,20 @@ def loss_terms(out: dict[str, Tensor], b: Batch, cfg: LossConfig,
     cv = t["call_valid"].to(dev, dtype)
     vmean = lambda x: (x * cv).sum() / cv.sum().clamp(min=1)  # noqa: E731 (padding calls out)
     terms["motion"] = vmean(motion)
+    # def_motion (/4): the frame-end hidden rates about each target body's momentum-exact
+    # rigid fit (P0's definition), in the same KE norm. The hidden part is a small share of
+    # the chunk motion, so `motion` alone barely sees it. Both fits use the target
+    # frame-end positions, so only the velocities differ. The rates come from the f32
+    # world arrays (5e-6 m/s round-off at 50 m/s); the exact `y_chunk_def_end` is kept
+    # for a displacement term.
+    x1 = (t["chunk_pos"] + t["y_chunk_dx"]).to(dev, dtype)
+    ic = i0[:nc]
+    dv_hat, dw_hat = body_relative_rates(ph["v_end"][:nc], ph["w_end"][:nc], x1, m[:nc], ic,
+                                         frag, nf)
+    dv_y, dw_y = body_relative_rates(yv[:nc], yw[:nc], x1, m[:nc], ic, frag, nf)
+    def_err = (m[:nc] * ((dv_hat - dv_y) ** 2).sum(-1)
+               + ((dw_hat - dw_y).unsqueeze(-2) @ ic @ (dw_hat - dw_y).unsqueeze(-1)).reshape(-1))
+    terms["def_motion"] = vmean(scatter_sum(def_err, t["chunk_call"], G) / e_in)
     pose_err = ke_norm(ph["dx"] - ydx, ph["drot"] - ydr)
     terms["pose"] = vmean(scatter_sum(pose_err, call, G) / (e_in * dt * dt))
 
@@ -318,6 +333,32 @@ class DominanceMonitor:
             if self.streak[k] >= self.patience:
                 flagged.append(k)
         return shares, flagged
+
+
+def body_relative_rates(v: Tensor, w: Tensor, x: Tensor, m: Tensor, inertia: Tensor,
+                        body: Tensor, n_bodies: int) -> tuple[Tensor, Tensor]:
+    """Each chunk's velocity relative to its body's momentum-exact rigid motion (world
+    frame): v_body = P/M, ω_body = I_w⁻¹ Σ (r × m v + I_c w) about the body COM, with
+    I_w = Σ I_c + m(|r|² 1 − r rᵀ). Returns v − v_body − ω_body × r and w − ω_body: zero net
+    linear and angular momentum per body by construction."""
+    mc = m.unsqueeze(-1)
+    M = scatter_sum(mc, body, n_bodies).clamp(min=1e-12)
+    X = scatter_sum(mc * x, body, n_bodies) / M
+    r = x - X[body]
+    vb = scatter_sum(mc * v, body, n_bodies) / M
+    L = scatter_sum(torch.cross(r, mc * v, dim=-1) + (inertia @ w.unsqueeze(-1)).squeeze(-1),
+                    body, n_bodies)
+    eye = torch.eye(3, dtype=x.dtype, device=x.device)
+    rr = (r * r).sum(-1)[:, None, None] * eye - r.unsqueeze(-1) * r.unsqueeze(-2)
+    Iw = scatter_sum((inertia + m[:, None, None] * rr).reshape(-1, 9), body, n_bodies).reshape(-1, 3, 3)
+    Iw = Iw + 1e-12 * eye
+    # 3×3 inverse by the adjugate (batched, works on MPS; Iw is symmetric positive definite)
+    a, b_, c = Iw[:, 0], Iw[:, 1], Iw[:, 2]
+    adj = torch.stack([torch.cross(b_, c, dim=-1), torch.cross(c, a, dim=-1),
+                       torch.cross(a, b_, dim=-1)], -1)
+    det = (a * torch.cross(b_, c, dim=-1)).sum(-1)
+    wb = (adj @ L.unsqueeze(-1)).squeeze(-1) / det.unsqueeze(-1)
+    return v - vb[body] - torch.cross(wb[body], r, dim=-1), w - wb[body]
 
 
 @torch.no_grad()

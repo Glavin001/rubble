@@ -1,4 +1,4 @@
-"""`learned-impact-outcome/3`: the recorder ↔ trainer contract (mirror of OUTCOME_CALLS_SCHEMA.md).
+"""`learned-impact-outcome/4`: the recorder ↔ trainer contract (mirror of OUTCOME_CALLS_SCHEMA.md).
 
 One record is one routed impact island at one engine frame (a *call*). The recorder writes
 every model input; this module only names, loads, validates and (for synthetic data and the
@@ -14,7 +14,7 @@ from typing import Any
 
 import numpy as np
 
-SCHEMA_VERSION = "learned-impact-outcome/3"
+SCHEMA_VERSION = "learned-impact-outcome/4"
 N_TIME_BINS = 8
 PHASES = ("pre_contact", "contact", "blast", "separation", "secondary", "settling", "quiet")
 REGIMES = {"arrest": 0, "perforate": 1, "rebound": 2, "deflect": 3}
@@ -43,7 +43,10 @@ CHUNK_FEAT_COLUMNS: tuple[str, ...] = tuple(
     ["log_mass", *_v("inertia"), *_v("half_extent"), "support_fixed", "support_pinned",
      "bond_damage_mean", "bond_damage_max", "n_live_bonds", "n_broken_bonds",
      "hops_to_contact", "wave_arrival", "hops_to_anchor", *_v("gravity_body"),
-     *_v("v_rel_body"), *_v("w_body"), "punch_in_plug", *_v("blast", 6), "in_contact_any"]
+     *_v("v_rel_body"), *_v("w_body"), "punch_in_plug", *_v("blast", 6), "in_contact_any",
+     # /4: the hidden deformation at frame start, in the chunk's own body frame (P0's
+     # momentum-exact fit): u ÷ u_c, θ·R ÷ u_c, v_def ÷ v, ω_def·R ÷ v
+     *_v("def_u_body"), *_v("def_rot_body"), *_v("def_v_body"), *_v("def_w_body")]
 )
 IMPACTOR_FEAT_COLUMNS: tuple[str, ...] = tuple(
     ["log_mass_island", "log_mass_chunk", *_v("inertia"), "log_radius", "log_modulus",
@@ -148,6 +151,12 @@ CALL_ARRAYS: dict[str, ArraySpec] = {
     "chunk_v": ArraySpec("f32", ("Nc", 3), raw=True),
     "chunk_w": ArraySpec("f32", ("Nc", 3), raw=True),
     "chunk_anchored": ArraySpec("i32", ("Nc",), raw=True),
+    # /4: hidden state (u, θ, v_def, ω_def; SI, body frame) and its displacement scale u_c
+    "chunk_def": ArraySpec("f32", ("Nc", 12), raw=True),
+    "chunk_def_uc": ArraySpec("f32", ("Nc",), raw=True),
+    # /4: frame-start body (cluster) per chunk and its world rotation, for pushforward
+    "chunk_body": ArraySpec("i32", ("Nc",), required=False, raw=True),
+    "chunk_body_q": ArraySpec("f32", ("Nc", 4), required=False, raw=True),
     # impactors
     "impactor_key": ArraySpec("i64", ("Ni",)),
     "impactor_feat": _feat("impactor_feat", "Ni"),
@@ -177,6 +186,7 @@ CALL_ARRAYS: dict[str, ArraySpec] = {
     "y_chunk_dx": ArraySpec("f32", ("Nc", 3)),
     "y_chunk_drot": ArraySpec("f32", ("Nc", 3)),
     "y_chunk_fragment": ArraySpec("i32", ("Nc",)),
+    "y_chunk_def_end": ArraySpec("f32", ("Nc", 12)),  # /4: exact frame-end hidden state
     # targets: impactors
     "y_impactor_v_end": ArraySpec("f32", ("Ni", 3)),
     "y_impactor_w_end": ArraySpec("f32", ("Ni", 3)),

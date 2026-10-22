@@ -60,7 +60,7 @@ def test_trainer_end_to_end(tmp_path, device):
     assert (run / "best.pt").exists() and (run / "last.pt").exists()
     from learned_impact.outcome.train import load_model
     model, ck = load_model(run / "last.pt")
-    assert ck["schema_version"] == "learned-impact-outcome/3"
+    assert ck["schema_version"] == "learned-impact-outcome/4"
 
 
 def test_batches_pack_to_a_budget_without_dropping():

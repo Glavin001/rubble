@@ -1,4 +1,4 @@
-"""Synthetic `learned-impact-outcome/3` events for tests and trainer development.
+"""Synthetic `learned-impact-outcome/4` events for tests and trainer development.
 
 A toy, *not* the oracle: a free (or bottom-anchored) one-chunk-thick wall struck by one ram.
 Bond demand falls off with hops from the struck chunk and scales with the energy ratio;
@@ -408,6 +408,9 @@ def make_event(seed: int, *, nx: int | None = None, nz: int | None = None,
             "chunk_q_world": q_c.astype(np.float32), "chunk_pos": pos_w[:nc].astype(np.float32),
             "chunk_v": vv[:nc].astype(np.float32), "chunk_w": ww[:nc].astype(np.float32),
             "chunk_anchored": is_anchor.astype(np.int32),
+            # the toy's chunks are rigid in their bodies: no hidden deformation (/4)
+            "chunk_def": np.zeros((nc, 12), np.float32),
+            "chunk_def_uc": np.full(nc, 1e-5, np.float32),
             "impactor_mass": np.array([m_imp], np.float32),
             "impactor_inertia_body": inert_i[None].astype(np.float32),
             "impactor_q_world": q_imp[None].astype(np.float32),
@@ -464,7 +467,7 @@ def make_event(seed: int, *, nx: int | None = None, nz: int | None = None,
         "y_chunk_v_end": v_end[:nc].astype(np.float32),
         "y_chunk_w_end": w_end[:nc].astype(np.float32),
         "y_chunk_dx": dx[:nc].astype(np.float32), "y_chunk_drot": drot[:nc].astype(np.float32),
-        "y_chunk_fragment": frag,
+        "y_chunk_fragment": frag, "y_chunk_def_end": np.zeros((nc, 12), np.float32),
         "y_impactor_v_end": v_end[nc:].astype(np.float32),
         "y_impactor_w_end": w_end[nc:].astype(np.float32),
         "y_impactor_dx": dx[nc:].astype(np.float32),
@@ -550,7 +553,7 @@ def make_event(seed: int, *, nx: int | None = None, nz: int | None = None,
         "y_chunk_v_end": v1_end[:nc].astype(np.float32),
         "y_chunk_w_end": w1_end[:nc].astype(np.float32),
         "y_chunk_dx": dx1[:nc].astype(np.float32), "y_chunk_drot": drot1[:nc].astype(np.float32),
-        "y_chunk_fragment": frag,
+        "y_chunk_fragment": frag, "y_chunk_def_end": np.zeros((nc, 12), np.float32),
         "y_impactor_v_end": v1_end[nc:].astype(np.float32),
         "y_impactor_w_end": w1_end[nc:].astype(np.float32),
         "y_impactor_dx": dx1[nc:].astype(np.float32),

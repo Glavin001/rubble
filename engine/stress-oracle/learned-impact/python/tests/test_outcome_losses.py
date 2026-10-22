@@ -106,3 +106,31 @@ def test_uncertainty_weights_start_at_the_fixed_weighting():
     torch.testing.assert_close(uw(normed, w), 0.5 * fixed)
     uw(normed, w).backward()
     assert uw.log_var.grad is not None and torch.all(uw.log_var.grad != 0)
+
+
+def test_body_relative_rates_rigid_zero_and_momentum_free():
+    import torch
+
+    from learned_impact.outcome.losses import body_relative_rates
+
+    torch.manual_seed(0)
+    d = torch.float64
+    n = 7
+    m = torch.rand(n, dtype=d) + 0.5
+    x = torch.randn(n, 3, dtype=d)
+    inertia = torch.diag_embed(torch.rand(n, 3, dtype=d) + 0.1)
+    body = torch.tensor([0, 0, 0, 1, 1, 1, 1])
+    M = torch.zeros(2, 1, dtype=d).index_add_(0, body, m[:, None])
+    X = torch.zeros(2, 3, dtype=d).index_add_(0, body, m[:, None] * x) / M
+    vb, wb = torch.randn(2, 3, dtype=d), torch.randn(2, 3, dtype=d)
+    v = vb[body] + torch.cross(wb[body], x - X[body], dim=-1)
+    w = wb[body]
+    dv, dw = body_relative_rates(v, w, x, m, inertia, body, 2)
+    assert dv.abs().max() < 1e-10 and dw.abs().max() < 1e-10  # rigid: no hidden rates
+    dv, dw = body_relative_rates(v + 0.01 * torch.randn(n, 3, dtype=d),
+                                 w + 0.01 * torch.randn(n, 3, dtype=d), x, m, inertia, body, 2)
+    r = x - X[body]
+    P = torch.zeros(2, 3, dtype=d).index_add_(0, body, m[:, None] * dv)
+    L = torch.zeros(2, 3, dtype=d).index_add_(
+        0, body, torch.cross(r, m[:, None] * dv, dim=-1) + (inertia @ dw[..., None])[..., 0])
+    assert P.abs().max() < 1e-12 and L.abs().max() < 1e-10  # zero net momentum per body

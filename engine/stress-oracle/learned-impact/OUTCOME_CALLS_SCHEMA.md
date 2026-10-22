@@ -1,4 +1,4 @@
-# Learned impact-outcome calls (`learned-impact-outcome/3`)
+# Learned impact-outcome calls (`learned-impact-outcome/4`)
 
 **Two layers, two owners** (agreed with P1 on 2026-10-21; P1's reply is in the shared notes,
 `p1-data-contract-reply.md`):
@@ -6,7 +6,7 @@
 | Layer | Version | What | Owner |
 |---|---|---|---|
 | frame record | `learned-impact-frames/1` (`FRAMES_SCHEMA.md`, P1 branch `claude/learned-impact-p1-data-aa822c`) | one scenario's whole life cycle, lossless, frame by frame: state at every frame boundary, the routing's causal inputs, the oracle's outcome, per-bond energies, the energy ledger, QS and punch baselines, keys, splits, ensemble id/member | P1 recorder / generator |
-| **calls** (this document) | `learned-impact-outcome/3` | the model's view: one record per routed island per frame, a typed graph of nondimensional, invariant features plus targets | the Rust call builder `stress-learned/src/outcome_calls.rs` (the single feature builder P3 ports; proposed as its own session, not yet started); its output must pass `schema.py`'s validator. Its feature code takes a *frame-start state* (keys → pose, v, ω, joint state, live bonds): a recorded frame is one source, a model-decoded state (pushforward, DAgger, closed loop) another |
+| **calls** (this document) | `learned-impact-outcome/4` | the model's view: one record per routed island per frame, a typed graph of nondimensional, invariant features plus targets | the Rust call builder `stress-learned/src/outcome_calls.rs` (the single feature builder P3 ports; proposed as its own session, not yet started); its output must pass `schema.py`'s validator. Its feature code takes a *frame-start state* (keys → pose, v, ω, joint state, live bonds): a recorded frame is one source, a model-decoded state (pushforward, DAgger, closed loop) another |
 | decoded state | `learned-impact-decoded-state/1` (`DECODED_STATE.md`) | the model's decoded outcome of one call, keyed by stable keys: what DAgger restarts and the closed-loop harness apply | P2 writes (`outcome/state_io.py`), P1 (DAgger) and the rollout harness read |
 
 The trainer reads only this layer; the frame record stays the archival truth, so a feature
@@ -87,7 +87,7 @@ manageable (one `.bin` per array would be ~10⁷ files).
 
 | Field | Type | Notes |
 |---|---|---|
-| `schema_version` | string | exactly `"learned-impact-outcome/3"` |
+| `schema_version` | string | exactly `"learned-impact-outcome/4"` |
 | `event_id` | string | directory basename |
 | `recipe_id` | string | generator recipe (replayable) |
 | `family` | string | e.g. `free_wall`, `wall_row`, `wall_opening` |
@@ -455,7 +455,7 @@ stage (encoding, momentum projection, the 5% KE bound) reproduced the oracle exa
 - **Reference speed:** `v` now also covers the island's own motion: 5 m/s at least, plus every body's speed relative to the island centre of mass. Before, it was the predicted contacts' closing speed alone: 0.03–0.06 m/s in 10% of calls while debris moved at 40–80 m/s, so some features reached about 600. Now `v` has median 5 and max 76 m/s. Chunk `v_rel_body` ≤ 1.0 and cracked `v_rel_edge` ≤ 1.7. Amplitude still reaches the model through the `/c` features.
 - **Cracked edges:** a face must be within the contact margin and overlap laterally to count (it was gap < 0.5 L along the normal only).
 
-## Draft: `/4`, hidden deformation carried across calls (2026-10-21, not yet built)
+## Changes in `/4` (2026-10-21): hidden deformation carried across calls
 
 Why: P0's closed loop shows the reduced state drops each chunk's elastic deformation at the
 handoff. The free wall's reduced-state ceiling fails fragment motion, and keeping the
@@ -495,6 +495,9 @@ The recorder has u and θ (`state_chunk_hidden [n,6]`). The rates follow from
   host derives them from the fit. Decoded state stays `/1`. For the loss only, the builder
   adds `y_chunk_def_end` (f32 `[Nc,12]`, from the frame-end boundary's hidden state): an
   exact target, since a fit from f32 world arrays would lose µm-scale u.
+- **Body per chunk:** `chunk_body` (i32 `[Nc]`, the frame-start cluster index, local to
+  the call) and `chunk_body_q` (f32 `[Nc,4]`, that body's world rotation, xyzw). Pushforward
+  needs them to re-derive v_def / ω_def from predicted velocities in the body frame.
 - **Input scale u_c:** the mean over the chunk's live bonds of f_t·A ÷ k_n (failure force
   over normal stiffness), floored at 1e-9 m; a chunk with no live bonds takes the island
   median. Also carried as `chunk_def_uc` (f32 `[Nc]`).
@@ -518,7 +521,7 @@ damage and `log1p_peak_util_prev`. P0 can measure a variant that resets joint hi
 
 ## Versioning
 
-`learned-impact-outcome/3`. Any change of meaning, order or shape bumps the version; the
+`learned-impact-outcome/4`. Any change of meaning, order or shape bumps the version; the
 loader accepts exactly one version. Additive optional arrays may be added within a version
 only if old readers ignore them and they appear in this document.
 

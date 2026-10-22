@@ -11,7 +11,7 @@ Writes, under `--out`:
   PyTorch's), `decode` (τ on the failure margin, p_b temperature, energy tolerance, prior
   correction or none), `feature_columns` (the calls schema's input orders), and `layers`, a
   description of every block's computation, so a port need not read the PyTorch;
-- `parity/<k>/`: real validation calls (the single-call `learned-impact-outcome/3` record)
+- `parity/<k>/`: real validation calls (the single-call `learned-impact-outcome/4` record)
   with `outputs.npz` (every head output, f32, CPU) and `decoded.json` (the deployed decoded
   state). A port that reproduces these within fp32 tolerance, with identical break sets,
   passes the plan's parity criterion on these calls.

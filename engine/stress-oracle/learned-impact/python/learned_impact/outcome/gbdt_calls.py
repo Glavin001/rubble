@@ -1,4 +1,4 @@
-"""Per-bond gradient-boosted tree baseline on the calls (`learned-impact-outcome/3`), the
+"""Per-bond gradient-boosted tree baseline on the calls (`learned-impact-outcome/4`), the
 plan's baseline ladder: does a tree over the same physics features already break the right
 bonds? Features per undirected bond: both twins' bond features, both endpoints' chunk
 features, the call's global features and the QS-frame prior (`bond_qs_feat`). Label: the

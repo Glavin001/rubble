@@ -18,6 +18,29 @@ from .geometry import quat_to_matrix_np
 _V3 = [f"v_rel_body_{i}" for i in range(3)]
 _W3 = [f"w_body_{i}" for i in range(3)]
 _E3 = [f"v_rel_edge_{i}" for i in range(3)]
+_DV3 = [f"def_v_body_{i}" for i in range(3)]
+_DW3 = [f"def_w_body_{i}" for i in range(3)]
+
+
+def body_relative_rates_np(v, w, x, m, inertia_world, body, n_bodies):
+    """numpy twin of `losses.body_relative_rates` (world frame)."""
+    M = np.zeros(n_bodies)
+    np.add.at(M, body, m)
+    M = np.maximum(M, 1e-12)
+    X = np.zeros((n_bodies, 3))
+    np.add.at(X, body, m[:, None] * x)
+    X /= M[:, None]
+    r = x - X[body]
+    vb = np.zeros((n_bodies, 3))
+    np.add.at(vb, body, m[:, None] * v)
+    vb /= M[:, None]
+    L = np.zeros((n_bodies, 3))
+    np.add.at(L, body, np.cross(r, m[:, None] * v) + np.einsum("nij,nj->ni", inertia_world, w))
+    rr = (r * r).sum(-1)[:, None, None] * np.eye(3) - r[:, :, None] * r[:, None, :]
+    Iw = np.zeros((n_bodies, 3, 3))
+    np.add.at(Iw, body, inertia_world + m[:, None, None] * rr)
+    wb = np.linalg.solve(Iw + 1e-12 * np.eye(3), L[:, :, None])[..., 0]
+    return v - vb[body] - np.cross(wb[body], r), w - wb[body]
 
 
 def _cols(arr: str, names) -> list[int]:
@@ -56,6 +79,25 @@ def rewrite_carried(c: S.Call, pred: dict[str, dict[int, np.ndarray]]) -> S.Call
     cf = a["chunk_feat"].copy()
     cf[:, _cols("chunk_feat", _V3)] = np.einsum("nji,nj->ni", rb[:nc], v[:nc] - vcom) / v_ref
     cf[:, _cols("chunk_feat", _W3)] = np.einsum("nji,nj->ni", rb[:nc], w[:nc]) * L / v_ref
+    # /4 hidden rates: the predicted velocities about each frame-start body's rigid fit, in
+    # the body frame. Poses, and so u and θ, stay the recorded ones, like all geometry here.
+    if "chunk_body" in a and "chunk_body_q" in a and nc:
+        body = a["chunk_body"].astype(np.int64)
+        iw = np.einsum("nij,nj,nkj->nik", rb[:nc],
+                       a["chunk_inertia_body"].astype(np.float64), rb[:nc])
+        dv, dw = body_relative_rates_np(v[:nc], w[:nc], pos[:nc], mass[:nc], iw, body,
+                                        int(body.max()) + 1)
+        rbody = quat_to_matrix_np(a["chunk_body_q"].astype(np.float64))
+        dv_b = np.einsum("nji,nj->ni", rbody, dv)
+        dw_b = np.einsum("nji,nj->ni", rbody, dw)
+        R = np.linalg.norm(a["chunk_feat"][:, _cols("chunk_feat", [f"half_extent_{i}"
+                                                                  for i in range(3)])]
+                           .astype(np.float64) * L, axis=1)
+        cf[:, _cols("chunk_feat", _DV3)] = dv_b / v_ref
+        cf[:, _cols("chunk_feat", _DW3)] = dw_b * R[:, None] / v_ref
+        d = a["chunk_def"].astype(np.float64).copy()
+        d[:, 6:9], d[:, 9:12] = dv_b, dw_b
+        a["chunk_def"] = d.astype(np.float32)
     a["chunk_feat"] = cf.astype(np.float32)
     if ni:
         f = a["impactor_feat"].copy()
