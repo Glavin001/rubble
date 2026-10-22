@@ -33,7 +33,7 @@ pub const CALLS_SCHEMA: &str = "learned-impact-outcome/4";
 /// (`full_state_calls`), for events recorded with the full state (recorder revision 9 on).
 pub const CALLS_SCHEMA_FULL: &str = "learned-impact-outcome/5";
 /// Bumped whenever the features or targets this builder writes change.
-pub const BUILDER_REVISION: u32 = 6;
+pub const BUILDER_REVISION: u32 = 7;
 pub const N_TIME_BINS: usize = 8;
 const G0: f64 = 9.81;
 const TINY: f64 = 1e-6;
