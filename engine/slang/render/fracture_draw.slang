@@ -5,12 +5,18 @@
 // bodies id + k * instance stride (body 0, the static ground, is shared).
 struct BodyPose { float4 p; float4 q; float4 invI; float4 v; float4 w; float4 ip; float4 iq; };
 // Column-major view-projection; mode.x = instance stride, mode.y = colour mode
-// (0 materials, 1 sleep state: awake orange, asleep blue, static grey).
+// (0 materials, 1 sleep state: awake orange, asleep blue, static grey), mode.z = joints
+// per copy (0: the scene runs without joints).
 struct View { float4 c0; float4 c1; float4 c2; float4 c3; uint4 mode; };
 
 StructuredBuffer<BodyPose> gBodies;
 StructuredBuffer<float> gVerts;
 ConstantBuffer<View> gView;
+// The engine's joint records (engine-schema Joint, JOINT_WORDS words each; flags at word 2,
+// bit 0 broken). Bond line k (vertices 2k, 2k + 1) is joint k of its copy.
+StructuredBuffer<uint> gJoints;
+static const uint JOINT_WORDS = 72u;
+static const uint JOINT_FLAG_BROKEN = 1u;
 
 struct VsOut
 {
@@ -35,16 +41,26 @@ VsOut vs(uint vid : SV_VertexID, uint copy : SV_InstanceID)
     VsOut r;
     r.pos = gView.c0 * world.x + gView.c1 * world.y + gView.c2 * world.z + gView.c3;
     // A bond line (the bond graph): normal = (-(partner + 2), rest distance, rest height),
-    // below any unit normal. It is hidden once its pieces part (their centres more than
-    // BOND_SLACK past the rest distance), or, for an anchor (partner 0), once the piece
-    // leaves its rest height: a broken bond stops showing as a connection.
+    // below any unit normal. With joints it is hidden once its joint breaks. Without them
+    // (pieces sleep until hit) it is hidden once its pieces part (their centres more than
+    // a slack past the rest distance), or, for an anchor (partner 0), once the piece
+    // leaves its rest height. Either way a broken bond stops showing as a connection.
     if (n.x < -1.5)
     {
-        uint partner = uint(-n.x - 2.0 + 0.5);
-        float slack = 0.02 + 0.02 * n.y;
-        bool parted = partner == 0u
-            ? abs(body.p.y - n.z) > slack
-            : abs(length(gBodies[partner + copy * gView.mode.x].p.xyz - body.p.xyz) - n.y) > slack;
+        bool parted;
+        if (gView.mode.z > 0u)
+        {
+            uint joint = vid / 2u + copy * gView.mode.z;
+            parted = (gJoints[joint * JOINT_WORDS + 2u] & JOINT_FLAG_BROKEN) != 0u;
+        }
+        else
+        {
+            uint partner = uint(-n.x - 2.0 + 0.5);
+            float slack = 0.02 + 0.02 * n.y;
+            parted = partner == 0u
+                ? abs(body.p.y - n.z) > slack
+                : abs(length(gBodies[partner + copy * gView.mode.x].p.xyz - body.p.xyz) - n.y) > slack;
+        }
         if (parted)
             r.pos = float4(0.0, 0.0, 2.0, 1.0); // past the far plane: clipped
         n = float3(0.0, 1.0, 0.0);

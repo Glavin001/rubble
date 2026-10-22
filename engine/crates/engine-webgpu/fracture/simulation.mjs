@@ -170,7 +170,7 @@ async function readBuffer(buffer,offset,size){
 const rebind=()=>{for(const p of pipes)if(p.binds.some(b=>b.index===18))p.bind=bindGroup(p.name,p.layout,p.binds)};
 
 return {
- bodyBuffer:bufs[0],renderBodyBuffer:renderBodies,cap,plan,
+ bodyBuffer:bufs[0],renderBodyBuffer:renderBodies,jointBuffer:jointCount?bufs[5]:null,cap,plan,
  // Sliced stepping (see encodeSlices): begin, submit slices frame by frame,
  // then finish to read the counters. A sleeping world needs no step.
  get slicing(){return slices!==null},

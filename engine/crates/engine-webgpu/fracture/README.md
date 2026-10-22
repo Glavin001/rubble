@@ -187,6 +187,12 @@ through WebAssembly JavaScript Promise Integration (JSPI, `gpu-wait.mjs`): Chrom
 137 or later. In a browser without it (Safari) the Bonds menu marks them, and choosing one
 says why instead of failing; the other modes are unaffected.
 
+**Bond graph.** "Inspect bond graph" draws each bond as a line, hidden once the bond breaks.
+In **Breakable D6 joints** line k is the engine's joint k (every builder emits them in the
+same order, `engine-fracture` `tests/bond_lines.rs`), and the draw reads that joint's broken
+flag (`fracture_draw.slang`). With **None** there are no joints, so a line hides once its
+pieces part. The stress modes draw their own (see Stress solver, View options).
+
 **Physics rate.** The **Physics** menu sets the simulated frames per second and reloads
 the level:
 - **Auto** keeps each mode's own rate: 120 Hz for rubble's modes, 60 Hz for the stress

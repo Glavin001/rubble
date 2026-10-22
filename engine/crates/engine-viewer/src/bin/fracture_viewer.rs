@@ -435,6 +435,7 @@ impl App {
                     &self.queue,
                     drawable,
                     l.sim.body_buffer(),
+                    l.sim.joint_buffer(),
                     l.orbit.view_proj(aspect),
                     l.sim.shots(),
                     self.show_bonds,

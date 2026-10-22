@@ -504,11 +504,15 @@ pub fn build_pack_scene(bytes: &[u8]) -> Result<(Scene, PackInfo)> {
         } else {
             [0.25, 0.9, 0.8]
         };
-        vertex(&mut lines, [0.0; 3], [0.0, 1.0, 0.0], line, ba.body);
+        // Line k is joint k (`fracture_draw.slang` hides it once the joint breaks). An
+        // anchor's line ends at its point in the piece's frame, not on body 0: copies share
+        // body 0, so a ground point would sit at the first copy's anchor.
+        let n = |partner: u32| bond_line_normal(partner, pa, (!world).then_some(po));
+        vertex(&mut lines, [0.0; 3], n(if world { 0 } else { bo.body }), line, ba.body);
         if world {
-            vertex(&mut lines, c, [0.0, 1.0, 0.0], line, 0);
+            vertex(&mut lines, inverse_rotate(ba.q, sub(c, pa)), n(0), line, ba.body);
         } else {
-            vertex(&mut lines, [0.0; 3], [0.0, 1.0, 0.0], line, bo.body);
+            vertex(&mut lines, [0.0; 3], n(ba.body), line, bo.body);
         }
     }
     let joints = scale_bond_springs(&joints, &bodies, BOND_TICK);

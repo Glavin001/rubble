@@ -1056,9 +1056,14 @@ pub fn build_scene(
         });
     }
     let joints = scale_bond_springs(&joints, &bodies, BOND_TICK);
+    // Line k is joint k (`fracture_draw.slang` hides it once the joint breaks): the same
+    // bonds as the joints above, in their order.
     for b in &bonds {
         let Some(a) = find(b.a as i64) else { continue };
-        let other = find(b.b as i64);
+        let other = if b.b >= 0 { find(b.b as i64) } else { None };
+        if b.b >= 0 && other.is_none() {
+            continue;
+        }
         let color = if b.anchor {
             [0.95, 0.6, 0.2]
         } else {
