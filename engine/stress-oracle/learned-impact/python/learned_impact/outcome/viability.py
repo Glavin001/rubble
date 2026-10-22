@@ -9,7 +9,10 @@ training here):
    and its projection to the bar;
 3. per-frame validation under gates-v1.1 against QS, the punch and the held-out oracle
    member: `report.py` on each run's `best.pt` (`report-val.json`);
-4. the checkpoint to hand to P0's closed loop (the best on the dense validation score).
+4. the checkpoint to hand to P0's closed loop (the best on the dense validation score):
+   harness A first (the oracle engine with the model as its island step, against standalone
+   oracle ensembles: the acceptance test), then harness B (rubble + model against rubble +
+   the oracle island step: integration).
 
     python -m learned_impact.outcome.viability --runs W64=../runs/v5/w64 W128=../runs/v5/w128 \
         --scaling ../runs/v5/scaling --out ../findings/p2-viability-<date>.md
@@ -183,6 +186,9 @@ def build(runs: dict[str, Path], scaling: Path | None, out: Path) -> Path:
                *gate_table(rep), ""]
     if best:
         md += ["## 4. Closed loop", "",
+               "Acceptance is harness A (the oracle engine with the model as its island step, "
+               "against standalone oracle ensembles); harness B (rubble + model against rubble + "
+               "the oracle island step) checks integration.", "",
                f"Checkpoint for P0's closed-loop comparison against `ceiling_full`: **{best[0]}** "
                f"(`{runs[best[0]] / 'best.pt'}`, best dense validation score {best[1]:.3f}).", ""]
     out.write_text("\n".join(md))
