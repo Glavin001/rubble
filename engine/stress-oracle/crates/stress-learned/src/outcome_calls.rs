@@ -28,9 +28,9 @@ use stress_ref::world::{tiered_impact_speed, World};
 use crate::catalog::{self, Catalog};
 use crate::outcome::{capture_inputs, capture_state, capture_static, Arrays, Index, PHASES};
 
-pub const CALLS_SCHEMA: &str = "learned-impact-outcome/3";
+pub const CALLS_SCHEMA: &str = "learned-impact-outcome/4";
 /// Bumped whenever the features or targets this builder writes change.
-pub const BUILDER_REVISION: u32 = 3;
+pub const BUILDER_REVISION: u32 = 4;
 pub const N_TIME_BINS: usize = 8;
 const G0: f64 = 9.81;
 const TINY: f64 = 1e-6;
@@ -67,7 +67,7 @@ impl From<Vec<String>> for Cols {
 /// The feature columns of every feature array, in P2's `schema.py` order.
 pub fn feature_columns() -> BTreeMap<&'static str, Vec<String>> {
     let mut m = BTreeMap::new();
-    m.insert("chunk_feat", cols!["log_mass", v("inertia", 3), v("half_extent", 3), "support_fixed", "support_pinned", "bond_damage_mean", "bond_damage_max", "n_live_bonds", "n_broken_bonds", "hops_to_contact", "wave_arrival", "hops_to_anchor", v("gravity_body", 3), v("v_rel_body", 3), v("w_body", 3), "punch_in_plug", v("blast", 6), "in_contact_any"]);
+    m.insert("chunk_feat", cols!["log_mass", v("inertia", 3), v("half_extent", 3), "support_fixed", "support_pinned", "bond_damage_mean", "bond_damage_max", "n_live_bonds", "n_broken_bonds", "hops_to_contact", "wave_arrival", "hops_to_anchor", v("gravity_body", 3), v("v_rel_body", 3), v("w_body", 3), "punch_in_plug", v("blast", 6), "in_contact_any", v("def_u_body", 3), v("def_rot_body", 3), v("def_v_body", 3), v("def_w_body", 3)]);
     m.insert("impactor_feat", cols!["log_mass_island", "log_mass_chunk", v("inertia", 3), "log_radius", "log_modulus", "crushable", v("gravity_body", 3), v("v_rel_body", 3), "speed_over_c", "in_contact_any"]);
     m.insert("global_feat", cols!["log_energy_ratio", "log_energy_ratio_plug", "log_dt_c_over_L", "dt_v_over_L", "n_impactors", "log_n_chunks", "gravity_mag", "anchored", "blast_log_tnt", "blast_z", "blast_impulse", "v_over_c"]);
     m.insert("bond_feat", cols!["log_area", v("offset", 3), v("log_stiffness", 6), v("log_strength", 3), v("log_ga", 3), "weibull", "damage", "crush", "fail_margin", "log1p_utilization", "log1p_peak_util_prev", "rebar", "log_qs_hertz_util", "punch_plug_bond", "log_punch_capacity_ratio", v("v_rel_edge", 3), rot_cols()]);
@@ -525,6 +525,88 @@ pub struct BuildOptions {
     pub targets: bool,
 }
 
+/// Each island chunk's hidden state at frame boundary `b` (calls /4, P0's definitions), in
+/// its own body's frame (its cluster: the fragment): u and theta exactly the solver's
+/// `ChunkState` (`state_chunk_hidden`), and the hidden rates about the body's
+/// momentum-exact rigid fit (COM, v = P/M, omega = I_w^-1 L; zero for an anchored body):
+/// v_def = R^-1 (v - v_body - omega_body x r), omega_def = R^-1 (w - omega_body).
+fn hidden_state(r: &Record, st: &Statics, b: usize, isl: &[usize]) -> Result<Vec<[f64; 12]>, String> {
+    let pos = r.rf("state_chunk_pos", b)?;
+    let vel = r.rf("state_chunk_vel", b)?;
+    let ang = r.rf("state_chunk_angvel", b)?;
+    let qw = r.rf("state_chunk_q_world", b)?;
+    let qc = r.rf("state_chunk_cluster_quat", b)?;
+    let hid = r.rf("state_chunk_hidden", b)?;
+    let cl = r.ri("state_chunk_cluster", b)?;
+    let anch = r.ri("state_chunk_anchored", b)?;
+    // Bodies among the island's chunks (a body lies wholly in one island).
+    let mut bodies: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
+    for &c in isl {
+        bodies.entry(cl[c]).or_default().push(c);
+    }
+    let mut fit: HashMap<i32, (Vec3, Vec3, Vec3)> = HashMap::new();
+    for (&id, members) in &bodies {
+        let anchored = members.iter().any(|&c| anch[c] == 1);
+        let m: f64 = members.iter().map(|&c| st.mass[c]).sum();
+        let mut x = Vec3::ZERO;
+        let mut p = Vec3::ZERO;
+        for &c in members {
+            x += v3(pos, c) * st.mass[c];
+            p += v3(vel, c) * st.mass[c];
+        }
+        let x = x * (1.0 / m);
+        if anchored {
+            fit.insert(id, (x, Vec3::ZERO, Vec3::ZERO));
+            continue;
+        }
+        let (mut iw, mut l) = (Mat3::diag(Vec3::ZERO), Vec3::ZERO);
+        for &c in members {
+            let rc = v3(pos, c) - x;
+            let rot = quat(qw, c).to_mat3();
+            let ic = rot * Mat3::diag(st.inertia[c]) * rot.transpose();
+            iw = iw + ic + (Mat3::diag(Vec3::splat(rc.norm2())) - Mat3::outer(rc, rc)) * st.mass[c];
+            l += rc.cross(v3(vel, c) * st.mass[c]) + ic * v3(ang, c);
+        }
+        let w = iw.inverse().map_or(Vec3::ZERO, |inv| inv * l);
+        fit.insert(id, (x, p * (1.0 / m), w));
+    }
+    Ok(isl
+        .iter()
+        .map(|&c| {
+            let (x, vb, wb) = fit[&cl[c]];
+            let rt = quat(qc, c).to_mat3().transpose();
+            let r_c = v3(pos, c) - x;
+            let vd = rt * (v3(vel, c) - vb - wb.cross(r_c));
+            let wd = rt * (v3(ang, c) - wb);
+            let h = |k: usize| hid[6 * c + k] as f64;
+            [h(0), h(1), h(2), h(3), h(4), h(5), vd.x, vd.y, vd.z, wd.x, wd.y, wd.z]
+        })
+        .collect())
+}
+
+/// Each island chunk's deformation scale u_c (calls /4): the mean over its live bonds of the
+/// tensile failure elongation f_t A w / k_n, floored at 1e-9 m; a chunk with no live bond
+/// takes the island median.
+fn deformation_scale(st: &Statics, conn: &[i32], isl: &[usize]) -> Vec<f64> {
+    let index: HashMap<usize, usize> = isl.iter().enumerate().map(|(j, &c)| (c, j)).collect();
+    let (mut sum, mut n) = (vec![0.0; isl.len()], vec![0usize; isl.len()]);
+    for k in 0..st.e {
+        if conn[k] != 1 {
+            continue;
+        }
+        let e = (st.strength[k][0] * st.geom[k][9] * st.weibull[k] / st.stiff[k][0].max(TINY)).max(1e-9);
+        for c in [st.ends[k].0, st.ends[k].1] {
+            if let Some(&j) = index.get(&c) {
+                sum[j] += e;
+                n[j] += 1;
+            }
+        }
+    }
+    let have: Vec<f64> = (0..isl.len()).filter(|&j| n[j] > 0).map(|j| sum[j] / n[j] as f64).collect();
+    let fallback = if have.is_empty() { 1e-9 } else { median(have) };
+    (0..isl.len()).map(|j| if n[j] > 0 { (sum[j] / n[j] as f64).max(1e-9) } else { fallback }).collect()
+}
+
 /// The call of frame `f` (None when the routing put no chunk in an island).
 fn build_call(r: &Record, st: &Statics, f: usize, prev_call: Option<usize>, history: &History, opts: &BuildOptions) -> Result<Option<Call>, String> {
     let (n, e) = (st.n, st.e);
@@ -803,8 +885,11 @@ fn build_call(r: &Record, st: &Statics, f: usize, prev_call: Option<usize>, hist
             in_contact[s_] = true;
         }
     }
+    // the hidden deformation (calls /4)
+    let def = hidden_state(r, st, f, &isl)?;
+    let uc = deformation_scale(st, conn, &isl);
     // chunk features
-    let mut chunk_feat = Vec::with_capacity(nc * 33);
+    let mut chunk_feat = Vec::with_capacity(nc * 45);
     for j in 0..nc {
         let c = isl[j];
         let bt = rb[j].transpose();
@@ -823,6 +908,11 @@ fn build_call(r: &Record, st: &Statics, f: usize, prev_call: Option<usize>, hist
             f64::from(u8::from(in_contact[j])),
         ];
         chunk_feat.extend(row);
+        let (d, ri) = (&def[j], st.half[c].norm());
+        chunk_feat.extend([d[0] / uc[j], d[1] / uc[j], d[2] / uc[j]]);
+        chunk_feat.extend([d[3] * ri / uc[j], d[4] * ri / uc[j], d[5] * ri / uc[j]]);
+        chunk_feat.extend([d[6] / v, d[7] / v, d[8] / v]);
+        chunk_feat.extend([d[9] * ri / v, d[10] * ri / v, d[11] * ri / v]);
     }
     let mut imp_feat = Vec::with_capacity(ni * 16);
     let m_island: f64 = mc.iter().sum();
@@ -923,7 +1013,9 @@ fn build_call(r: &Record, st: &Statics, f: usize, prev_call: Option<usize>, hist
     let mut a: Vec<(String, Arr)> = Vec::new();
     let mut put = |k: &str, x: Arr| a.push((k.to_string(), x));
     put("chunk_key", Arr::I64(vec![nc], isl.iter().map(|&c| st.ckey[c]).collect()));
-    put("chunk_feat", f32a(&[nc, 33], chunk_feat));
+    put("chunk_feat", f32a(&[nc, 45], chunk_feat));
+    put("chunk_def", f32a(&[nc, 12], def.iter().flatten().copied().collect()));
+    put("chunk_def_uc", f32a(&[nc], uc.clone()));
     put("chunk_mass", f32a(&[nc], mc.clone()));
     put("chunk_inertia_body", f32a(&[nc, 3], flat(&isl.iter().map(|&c| st.inertia[c]).collect::<Vec<_>>())));
     put("chunk_q_world", f32a(&[nc, 4], qc.iter().flat_map(|q| q.to_wxyz()).collect()));
@@ -1043,6 +1135,9 @@ fn build_call(r: &Record, st: &Statics, f: usize, prev_call: Option<usize>, hist
         let mut ids: HashMap<i32, i32> = HashMap::new();
         let frag: Vec<i32> = isl.iter().map(|&c| { let k = ids.len() as i32; *ids.entry(cl1[c]).or_insert(k) }).collect();
         put("y_chunk_fragment", Arr::I32(vec![nc], frag));
+        // The frame-end hidden state, exactly (a fit from f32 world arrays loses um-scale u).
+        let def1 = hidden_state(r, st, f + 1, &isl)?;
+        put("y_chunk_def_end", f32a(&[nc, 12], def1.iter().flatten().copied().collect()));
         let i1 = |k: usize, o: usize| Vec3::new(imp1[13 * k + o] as f64, imp1[13 * k + o + 1] as f64, imp1[13 * k + o + 2] as f64);
         let q1 = |k: usize| Quat::from_wxyz([imp1[13 * k + 3] as f64, imp1[13 * k + 4] as f64, imp1[13 * k + 5] as f64, imp1[13 * k + 6] as f64]).normalized();
         put("y_impactor_v_end", f32a(&[ni, 3], iimp.iter().flat_map(|&k| i1(k, 7).to_array()).collect()));

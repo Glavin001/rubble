@@ -173,3 +173,33 @@ fn a_thinned_training_event_regenerates_byte_identically_and_builds_the_same_cal
         assert_eq!(c.energy, f.energy, "frame {}", c.frame);
     }
 }
+
+#[test]
+fn the_calls_hidden_state_is_the_solvers() {
+    let mut s = scene();
+    OracleConfig::named("a12_realtime").unwrap().apply(&mut s);
+    s.sim.duration = 1.0;
+    let mut w = World::new(&s);
+    for _ in 0..2 {
+        w.step_frame();
+    }
+    let chunks: Vec<i64> = (0..w.solver.structures[0].chunks.len()).map(|c| stress_ref::keys::chunk_key(0, c)).collect();
+    let call = live_call(&mut w, "hidden", &json!({}), &chunks, &[0], 2, false).unwrap().calls.remove(0);
+    let def = feats(&call, "chunk_def");
+    let (mut worst_u, mut worst_v, mut scale_v) = (0.0f64, 0.0f64, 0.0f64);
+    for (j, &key) in keys_of(&call, "chunk_key").iter().enumerate() {
+        let (_, c) = stress_ref::keys::split_key(key);
+        let st = &w.solver.chunks[0][c];
+        let d: Vec<f64> = def[12 * j..12 * j + 12].iter().map(|&x| x as f64).collect();
+        let u = [st.u.x, st.u.y, st.u.z, st.th.x, st.th.y, st.th.z];
+        let vh = [st.v.x, st.v.y, st.v.z, st.w.x, st.w.y, st.w.z];
+        for k in 0..6 {
+            worst_u = worst_u.max((d[k] - u[k]).abs());
+            worst_v = worst_v.max((d[6 + k] - vh[k]).abs());
+            scale_v = scale_v.max(vh[k].abs());
+        }
+    }
+    eprintln!("hidden u/theta max |diff| {worst_u:.3e}; hidden rates max |diff| {worst_v:.3e} of max {scale_v:.3e}");
+    assert!(worst_u <= 1e-6, "u and theta are the solver's (f32)");
+    assert!(worst_v <= 1e-3 * scale_v.max(1e-6) + 1e-5, "the fitted rates are the solver's hidden rates");
+}
