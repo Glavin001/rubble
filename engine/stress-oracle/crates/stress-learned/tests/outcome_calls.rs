@@ -169,7 +169,14 @@ fn a_thinned_training_event_regenerates_byte_identically_and_builds_the_same_cal
     for c in &thin.calls {
         let f = full.calls.iter().find(|x| x.frame == c.frame).expect("a full call for each kept frame");
         for (name, a) in &c.arrays {
-            assert_eq!(Some(a), f.array(name), "frame {}: {name}", c.frame);
+            // bitwise: the /5 columns hold NaN (absent values)
+            let bits = |x: &Arr| match x {
+                Arr::F64(s, d) => (s.clone(), d.iter().map(|v| v.to_bits()).collect::<Vec<_>>()),
+                Arr::F32(s, d) => (s.clone(), d.iter().map(|v| u64::from(v.to_bits())).collect()),
+                Arr::I32(s, d) => (s.clone(), d.iter().map(|&v| v as u64).collect()),
+                Arr::I64(s, d) => (s.clone(), d.iter().map(|&v| v as u64).collect()),
+            };
+            assert_eq!(Some(bits(a)), f.array(name).map(bits), "frame {}: {name}", c.frame);
         }
         assert_eq!(c.energy, f.energy, "frame {}", c.frame);
     }
