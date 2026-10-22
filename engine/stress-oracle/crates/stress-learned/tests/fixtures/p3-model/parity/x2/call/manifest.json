@@ -1,0 +1,397 @@
+{
+ "available": {
+  "blast": false,
+  "bond_energy_split": true,
+  "cracked_edges": true,
+  "punch": true,
+  "punch_frame": true,
+  "qs_frame": true,
+  "qs_hertz": true,
+  "structure_contacts": true
+ },
+ "builder_revision": 3,
+ "columns": {
+  "chunk_feat": [
+   "log_mass",
+   "inertia_0",
+   "inertia_1",
+   "inertia_2",
+   "half_extent_0",
+   "half_extent_1",
+   "half_extent_2",
+   "support_fixed",
+   "support_pinned",
+   "bond_damage_mean",
+   "bond_damage_max",
+   "n_live_bonds",
+   "n_broken_bonds",
+   "hops_to_contact",
+   "wave_arrival",
+   "hops_to_anchor",
+   "gravity_body_0",
+   "gravity_body_1",
+   "gravity_body_2",
+   "v_rel_body_0",
+   "v_rel_body_1",
+   "v_rel_body_2",
+   "w_body_0",
+   "w_body_1",
+   "w_body_2",
+   "punch_in_plug",
+   "blast_0",
+   "blast_1",
+   "blast_2",
+   "blast_3",
+   "blast_4",
+   "blast_5",
+   "in_contact_any"
+  ],
+  "impactor_feat": [
+   "log_mass_island",
+   "log_mass_chunk",
+   "inertia_0",
+   "inertia_1",
+   "inertia_2",
+   "log_radius",
+   "log_modulus",
+   "crushable",
+   "gravity_body_0",
+   "gravity_body_1",
+   "gravity_body_2",
+   "v_rel_body_0",
+   "v_rel_body_1",
+   "v_rel_body_2",
+   "speed_over_c",
+   "in_contact_any"
+  ],
+  "global_feat": [
+   "log_energy_ratio",
+   "log_energy_ratio_plug",
+   "log_dt_c_over_L",
+   "dt_v_over_L",
+   "n_impactors",
+   "log_n_chunks",
+   "gravity_mag",
+   "anchored",
+   "blast_log_tnt",
+   "blast_z",
+   "blast_impulse",
+   "v_over_c"
+  ],
+  "bond_feat": [
+   "log_area",
+   "offset_0",
+   "offset_1",
+   "offset_2",
+   "log_stiffness_0",
+   "log_stiffness_1",
+   "log_stiffness_2",
+   "log_stiffness_3",
+   "log_stiffness_4",
+   "log_stiffness_5",
+   "log_strength_0",
+   "log_strength_1",
+   "log_strength_2",
+   "log_ga_0",
+   "log_ga_1",
+   "log_ga_2",
+   "weibull",
+   "damage",
+   "crush",
+   "fail_margin",
+   "log1p_utilization",
+   "log1p_peak_util_prev",
+   "rebar",
+   "log_qs_hertz_util",
+   "punch_plug_bond",
+   "log_punch_capacity_ratio",
+   "v_rel_edge_0",
+   "v_rel_edge_1",
+   "v_rel_edge_2",
+   "rot_src_0",
+   "rot_src_1",
+   "rot_src_2",
+   "rot_src_3",
+   "rot_src_4",
+   "rot_src_5",
+   "rot_dst_0",
+   "rot_dst_1",
+   "rot_dst_2",
+   "rot_dst_3",
+   "rot_dst_4",
+   "rot_dst_5"
+  ],
+  "cracked_feat": [
+   "log_area",
+   "offset_0",
+   "offset_1",
+   "offset_2",
+   "gap",
+   "friction",
+   "v_rel_edge_0",
+   "v_rel_edge_1",
+   "v_rel_edge_2",
+   "frames_since_broken",
+   "rot_src_0",
+   "rot_src_1",
+   "rot_src_2",
+   "rot_src_3",
+   "rot_src_4",
+   "rot_src_5",
+   "rot_dst_0",
+   "rot_dst_1",
+   "rot_dst_2",
+   "rot_dst_3",
+   "rot_dst_4",
+   "rot_dst_5"
+  ],
+  "impactor_contact_feat": [
+   "v_n",
+   "v_t_0",
+   "v_t_1",
+   "v_n_over_c",
+   "log_mass_ratio",
+   "log_radius",
+   "log_modulus",
+   "spin_0",
+   "spin_1",
+   "spin_2",
+   "t_contact",
+   "log_energy_ratio",
+   "log_hertz_force",
+   "hertz_duration",
+   "is_self_impactor",
+   "overlap",
+   "friction",
+   "restitution",
+   "rot_src_0",
+   "rot_src_1",
+   "rot_src_2",
+   "rot_src_3",
+   "rot_src_4",
+   "rot_src_5",
+   "rot_dst_0",
+   "rot_dst_1",
+   "rot_dst_2",
+   "rot_dst_3",
+   "rot_dst_4",
+   "rot_dst_5"
+  ],
+  "structure_contact_feat": [
+   "v_n",
+   "v_t_0",
+   "v_t_1",
+   "v_n_over_c",
+   "log_mass_ratio",
+   "t_contact",
+   "overlap",
+   "friction",
+   "log_area",
+   "same_structure",
+   "rot_src_0",
+   "rot_src_1",
+   "rot_src_2",
+   "rot_src_3",
+   "rot_src_4",
+   "rot_src_5",
+   "rot_dst_0",
+   "rot_dst_1",
+   "rot_dst_2",
+   "rot_dst_3",
+   "rot_dst_4",
+   "rot_dst_5"
+  ],
+  "chunk_qs_feat": [
+   "qs_dv_body_0",
+   "qs_dv_body_1",
+   "qs_dv_body_2",
+   "qs_dw_body_0",
+   "qs_dw_body_1",
+   "qs_dw_body_2"
+  ],
+  "impactor_qs_feat": [
+   "qs_dv_body_0",
+   "qs_dv_body_1",
+   "qs_dv_body_2",
+   "qs_dw_body_0",
+   "qs_dw_body_1",
+   "qs_dw_body_2"
+  ],
+  "bond_qs_feat": [
+   "log_qs_frame_peak_util",
+   "qs_frame_broke",
+   "qs_frame_break_time"
+  ]
+ },
+ "ensemble_id": "p1_free_wall_t2_00112_s1003",
+ "ensemble_member": 4,
+ "ensemble_size": 8,
+ "event_id": "p1_free_wall_t2_00112_s1003_e4",
+ "family": "free_wall",
+ "frame_dt": 0.016666666666666666,
+ "gravity": [
+  0.0,
+  0.0,
+  0.0
+ ],
+ "layout_family": "6x1x6_c100mm_solid_free",
+ "n_calls": 1,
+ "n_time_bins": 8,
+ "oracle": {
+  "config": "a12_realtime",
+  "contact": "penalty",
+  "hash": "067842deeb8b4b97",
+  "methods": {
+   "blast_model": false,
+   "contact_crushing": false,
+   "corotational_bonds": false,
+   "exact_frame_transfer": false,
+   "exact_joint_patch": false,
+   "exact_rate_filter": false,
+   "frame_contact_step": false,
+   "implicit_contact_steps": false,
+   "implicit_contact_windows": false,
+   "implicit_failure_windows": false,
+   "lattice_contact_step": false,
+   "layer_contact": false,
+   "multirate": false,
+   "patch_after_damage": false,
+   "rayleigh_damping": false,
+   "scaled_step_bound": false,
+   "tangent_statics": false,
+   "true_step": true
+  }
+ },
+ "outcome": {
+  "frames": 33,
+  "impactors": [
+   {
+    "key": 0,
+    "regime": "rebound",
+    "speed_exit": 0.26129084062675656,
+    "v_exit": [
+     0.14706502579868594,
+     0.16415281349416183,
+     0.14035182722080913
+    ]
+   },
+   {
+    "key": 1,
+    "regime": "perforate",
+    "speed_exit": 5.7354766282400105,
+    "v_exit": [
+     -3.0796065746600503,
+     4.718381528890052,
+     -1.071723493363453
+    ]
+   },
+   {
+    "key": 2,
+    "regime": "rebound",
+    "speed_exit": 3.042095403403505,
+    "v_exit": [
+     2.060301062335776,
+     2.1943898213437403,
+     -0.44063282665933545
+    ]
+   },
+   {
+    "key": 3,
+    "regime": "perforate",
+    "speed_exit": 20.80396246042343,
+    "v_exit": [
+     8.329596845221657,
+     19.063647878837788,
+     -4.964139785037434e-05
+    ]
+   }
+  ],
+  "largest_fraction": 0.11111111111111108,
+  "n_fragments": 29,
+  "sim_time": 0.550000000000447
+ },
+ "perturbation": {
+  "impactors": [
+   {
+    "offset_m": [
+     0.0008809103145633756,
+     -0.0001684177281547458,
+     0.00034050158084856347
+    ],
+    "speed_scale": 1.0007353656919418
+   },
+   {
+    "offset_m": [
+     0.0005854345747133415,
+     -0.00013798297416398817,
+     0.0007034486821402214
+    ],
+    "speed_scale": 1.00034139151607
+   },
+   {
+    "offset_m": [
+     0.0002081995646160315,
+     0.00010328488856865417,
+     -0.0005478137188885288
+    ],
+    "speed_scale": 1.0008103198683835
+   },
+   {
+    "offset_m": [
+     -0.0007397461589804063,
+     0.00032184333925303104,
+     -0.000197857194559128
+    ],
+    "speed_scale": 0.9996957034507634
+   }
+  ],
+  "weibull_seed": 4350665815585041244
+ },
+ "recipe_id": "p1_free_wall_t2_00112_s1003_e4",
+ "recorder_revision": "p1-rev7",
+ "scene_hash": "067842deeb8b4b97",
+ "schema_version": "learned-impact-outcome/3",
+ "seed": 4350665815585041244,
+ "split": "val",
+ "split_group": "p1_free_wall_t2_00112_s1003",
+ "structures": [
+  {
+   "structure_id": 0,
+   "n_chunks": 36,
+   "n_bonds": 60,
+   "arrays": {
+    "chunk_key": {
+     "dtype": "i64",
+     "shape": [
+      36
+     ],
+     "offset": 0
+    },
+    "bond_key": {
+     "dtype": "i64",
+     "shape": [
+      60
+     ],
+     "offset": 288
+    },
+    "bond_ends": {
+     "dtype": "i32",
+     "shape": [
+      60,
+      2
+     ],
+     "offset": 768
+    },
+    "chunk_rest_pos": {
+     "dtype": "f32",
+     "shape": [
+      36,
+      3
+     ],
+     "offset": 1248
+    }
+   }
+  }
+ ],
+ "truncated": false
+}

@@ -1,0 +1,84 @@
+{
+ "bond_log_r": {
+  "shape": [
+   250
+  ],
+  "offset": 0
+ },
+ "bond_break_logit": {
+  "shape": [
+   250
+  ],
+  "offset": 1008
+ },
+ "bond_log_q": {
+  "shape": [
+   250
+  ],
+  "offset": 2016
+ },
+ "bond_time_logits": {
+  "shape": [
+   250,
+   8
+  ],
+  "offset": 3024
+ },
+ "bond_ddamage": {
+  "shape": [
+   250
+  ],
+  "offset": 11024
+ },
+ "chunk_out": {
+  "shape": [
+   112,
+   12
+  ],
+  "offset": 12032
+ },
+ "imp_out": {
+  "shape": [
+   1,
+   12
+  ],
+  "offset": 17408
+ },
+ "imp_perf_logit": {
+  "shape": [
+   1
+  ],
+  "offset": 17456
+ },
+ "energy_d_bond": {
+  "shape": [
+   1
+  ],
+  "offset": 17472
+ },
+ "energy_frac_joint": {
+  "shape": [
+   1
+  ],
+  "offset": 17488
+ },
+ "energy_e_elastic": {
+  "shape": [
+   1
+  ],
+  "offset": 17504
+ },
+ "energy_ke_loss": {
+  "shape": [
+   1
+  ],
+  "offset": 17520
+ },
+ "latent_global": {
+  "shape": [
+   1,
+   32
+  ],
+  "offset": 17536
+ }
+}
