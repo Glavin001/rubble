@@ -114,6 +114,14 @@ fn zup(v: &Value) -> Vec3 {
     Vec3::new(f("x"), -f("z"), f("y"))
 }
 
+/// A vector given as `{x, y, z}` or `[x, y, z]`, to Z-up.
+fn vector(v: &Value) -> Vec3 {
+    match v.as_array() {
+        Some(a) => points(v).first().copied().filter(|_| a.len() == 3).unwrap_or(Vec3::ZERO),
+        None => zup(v),
+    }
+}
+
 /// A flat `[x, y, z, x, y, z, ...]` list (or a list of `{x, y, z}`) to Z-up points.
 fn points(v: &Value) -> Vec<Vec3> {
     let arr = v.as_array().cloned().unwrap_or_default();
@@ -166,6 +174,19 @@ pub fn import_with(path: &std::path::Path, name: &str, body_name: &str, options:
     if json["format"] == "shardwright-stress/1" {
         return crate::shardwright::import(path, name);
     }
+    let source = path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+    let (mut scene, notes) = import_value_with(&json, name, body_name, &source, options)?;
+    for note in notes {
+        scene.description = format!("{} ({note})", scene.description);
+    }
+    Ok(scene)
+}
+
+/// [`import_with`] from an already parsed pack (e.g. one fetched by a web page), named
+/// `source` in the description. Also returns what the import could not take from the pack
+/// as given (bond patches from the asset's own area, bonds left out and why), for the
+/// caller to show.
+pub fn import_value_with(json: &Value, name: &str, body_name: &str, source: &str, options: ImportOptions) -> Result<(Scene, Vec<String>), String> {
     let sc = &json["scenario"];
     let nodes = sc["nodes"].as_array().ok_or("pack has no nodes")?;
     let colliders = sc["nodeColliders"].as_array().ok_or("pack has no nodeColliders")?;
@@ -196,7 +217,7 @@ pub fn import_with(path: &std::path::Path, name: &str, body_name: &str, options:
     let pack_moduli: Vec<Option<f64>> = json["defaults"]["solver"]["materials"].as_array().map(|a| a.iter().map(|m| Some(m["elasticModulus"].as_f64()? * scale)).collect()).unwrap_or_default();
     let classify = |asset: &str| if options.authored_strengths { map_material_authored(asset) } else { map_material(asset) };
 
-    let mut scene = new_scene(name, &format!("Imported from {}", path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default()));
+    let mut scene = new_scene(name, &format!("Imported from {source}"));
     let mut chunks: Vec<ChunkDesc> = Vec::with_capacity(nodes.len());
     let mut hulls: Vec<ConvexHull> = Vec::with_capacity(nodes.len());
     for (i, node) in nodes.iter().enumerate() {
@@ -206,7 +227,7 @@ pub fn import_with(path: &std::path::Path, name: &str, body_name: &str, options:
         let collider = if collider["kind"] == "shape" { &library[collider["shape"].as_u64().ok_or("bad shape index")? as usize] } else { collider };
         let local: Vec<Vec3> = match collider["kind"].as_str() {
             Some("cuboid") => {
-                let h = zup(&collider["halfExtents"]).abs();
+                let h = vector(&collider["halfExtents"]).abs();
                 (0..8).map(|k| Vec3::new(if k & 1 == 0 { -h.x } else { h.x }, if k & 2 == 0 { -h.y } else { h.y }, if k & 4 == 0 { -h.z } else { h.z })).collect()
             }
             Some("convex_hull") => points(&collider["points"]),
@@ -249,6 +270,8 @@ pub fn import_with(path: &std::path::Path, name: &str, body_name: &str, options:
     let mut bonds = Vec::new();
     let mut fallback = 0usize;
     let mut degenerate = 0usize;
+    // Bonds the pack gives no normal: taken from the shared face, along the chunk centres.
+    let mut unnormal = [0usize; 2];
     for b in sc["bonds"].as_array().ok_or("pack has no bonds")? {
         let (a, bb) = (b["node0"].as_u64().ok_or("bad bond")? as usize, b["node1"].as_u64().ok_or("bad bond")? as usize);
         let asset_material = b["m"].as_u64().and_then(|m| pack_materials.get(m as usize)).cloned().unwrap_or_else(|| node_materials[a].clone());
@@ -278,6 +301,26 @@ pub fn import_with(path: &std::path::Path, name: &str, body_name: &str, options:
         // Normal from a to b (the asset's may point either way).
         let mut normal = zup(&b["normal"]).normalized();
         let (ca, cb) = (Vec3::from_array(chunks[a].center), Vec3::from_array(chunks[bb].center));
+        if normal == Vec3::ZERO {
+            // The pack gives no normal: that of the face of `a` meeting `b` over the
+            // largest patch, else the line between the chunk centres.
+            let shared = hulls[a]
+                .faces
+                .iter()
+                .filter(|f| f.normal.dot(cb - ca) > 0.0)
+                .filter_map(|f| contact_patch(&hulls[a], ca, &hulls[bb], cb, f.normal, SEAM).map(|p| (f.normal, p.area)))
+                .max_by(|x, y| x.1.total_cmp(&y.1));
+            match shared {
+                Some((n, _)) => {
+                    unnormal[0] += 1;
+                    normal = n;
+                }
+                None => {
+                    unnormal[1] += 1;
+                    normal = (cb - ca).normalized();
+                }
+            }
+        }
         if normal.dot(cb - ca) < 0.0 {
             normal = -normal;
         }
@@ -319,18 +362,22 @@ pub fn import_with(path: &std::path::Path, name: &str, body_name: &str, options:
             derived: None,
         });
     }
+    let mut notes = Vec::new();
     if fallback > 0 {
-        scene.description = format!("{} ({fallback} of {} bond patches from the asset's area, no shared face found)", scene.description, bonds.len());
+        notes.push(format!("{fallback} of {} bond patches from the asset's area, no shared face found", bonds.len()));
     }
     if degenerate > 0 {
-        scene.description = format!("{} ({degenerate} asset bonds left out: their shared face has no width)", scene.description);
+        notes.push(format!("{degenerate} asset bonds left out: their shared face has no width"));
+    }
+    if unnormal != [0, 0] {
+        notes.push(format!("{} asset bonds have no normal: {} taken from the shared face, {} along the chunk centres", unnormal[0] + unnormal[1], unnormal[0], unnormal[1]));
     }
 
     scene.materials.entry("concrete".into()).or_insert_with(Material::concrete);
     scene.ground = Some(GroundDesc { height: GRADE, friction: 0.6, material: "concrete".into() });
     scene.bodies.push(body(body_name, chunks, bonds));
     scene.validate()?;
-    Ok(scene)
+    Ok((scene, notes))
 }
 
 /// Bonds per asset material pair and chunk counts per calibrated material.

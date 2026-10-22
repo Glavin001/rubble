@@ -26,7 +26,7 @@ use stress_gpu::world::GpuWorld;
 use stress_ref::capability::Profile;
 use stress_ref::math::Vec3;
 use stress_ref::scene::{ImpactorDesc, ImpactorShape};
-use stress_rubble::render::Renderer;
+use stress_rubble::render::{ColorMode, Renderer};
 use wasm_bindgen::prelude::*;
 
 /// Shots per load, as the lab's other modes (`Planner::launch`).
@@ -66,20 +66,24 @@ struct Shooting {
 thread_local! {
     static DEVICE: RefCell<Option<Device>> = const { RefCell::new(None) };
     static WORLD: RefCell<Option<Loaded>> = const { RefCell::new(None) };
-    static GLB: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
-    /// `Some(layout)`: the next load builds the lab's cuboid houses in that layout
-    /// (`stress_set_cuboid`) instead of the GLB.
-    static CUBOID: RefCell<Option<Option<engine_fracture::Layout>>> = const { RefCell::new(None) };
+    /// What the next load builds (`stress_set_glb`, `stress_set_cuboid`, `stress_set_pack`).
+    static SOURCE: RefCell<Source> = const { RefCell::new(Source::Glb(Vec::new())) };
+    /// What the last load could not take from its input as given (`stress_stats`).
+    static WARNINGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     static CAMERA: RefCell<Option<Orbit>> = const { RefCell::new(None) };
     static SHOOTING: Cell<Option<Shooting>> = const { Cell::new(None) };
     static PENDING: RefCell<Vec<ImpactorDesc>> = const { RefCell::new(Vec::new()) };
     static FIRED: Cell<usize> = const { Cell::new(0) };
     /// The shots' mass as a multiple of the lab's default ball (`stress_set_shot_mass_scale`).
     static MASS_SCALE: Cell<f64> = const { Cell::new(1.0) };
+    /// The shots' speed as a multiple of the lab's (`stress_set_shot_speed_scale`).
+    static SPEED_SCALE: Cell<f64> = const { Cell::new(1.0) };
+    /// The next load's ball radius as a multiple of the lab's (`stress_set_shot_radius_scale`).
+    static RADIUS_SCALE: Cell<f64> = const { Cell::new(1.0) };
     /// The bonds' strengths as a multiple of the asset's (`stress_set_bond_strength_scale`).
     static STRENGTH_SCALE: Cell<f64> = const { Cell::new(1.0) };
-    /// The view toggles (`stress_set_view`): bond graph, colour by body state.
-    static VIEW: Cell<(bool, bool)> = const { Cell::new((false, false)) };
+    /// The view (`stress_set_view`): bond graph, colour mode.
+    static VIEW: Cell<(bool, ColorMode)> = const { Cell::new((false, ColorMode::Material)) };
     /// The capability profile of the next `stress_load` (`stress_set_profile`).
     static PROFILE: Cell<Profile> = const { Cell::new(Profile::BlastParity) };
     /// The physics frame rate of the next `stress_load` (`stress_set_physics_hz`); 0 keeps
@@ -91,6 +95,16 @@ thread_local! {
     /// The last frame's step, state copy and draw (ms).
     static PHASES: Cell<[f64; 3]> = const { Cell::new([0.0; 3]) };
     static ERROR: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+/// The input of the next [`stress_load`].
+enum Source {
+    /// A fracture GLB, at the load's level.
+    Glb(Vec<u8>),
+    /// The lab's cuboid houses in a sample's layout.
+    Cuboid(Option<engine_fracture::Layout>),
+    /// A scene pack's JSON (vibe-city / blast-stress-solver).
+    Pack(Vec<u8>),
 }
 
 /// Asset frame (+Y up) to the stress scene's (+Z up), as `stress_ref::shardwright` imports.
@@ -135,8 +149,17 @@ pub async fn stress_init(canvas: web_sys::HtmlCanvasElement) -> Result<(), JsVal
 /// The fracture GLB the next [`stress_load`] builds.
 #[wasm_bindgen]
 pub fn stress_set_glb(bytes: Vec<u8>) {
-    GLB.set(bytes);
-    CUBOID.set(None);
+    SOURCE.set(Source::Glb(bytes));
+}
+
+/// The scene pack (its JSON bytes) the next [`stress_load`] builds: the lab's scene of
+/// it (`engine_fracture::pack`) for the camera and shots, and stress-ref's import of it
+/// under the load's profile (`Profile::import_options`), as the native bench imports
+/// packs. The pack's supports (nodes of mass 0) are the fixed chunks, and the bonds to them
+/// break like any bond.
+#[wasm_bindgen]
+pub fn stress_set_pack(bytes: Vec<u8>) {
+    SOURCE.set(Source::Pack(bytes));
 }
 
 /// The lab's procedural cuboid houses for the next [`stress_load`], laid out as the
@@ -144,7 +167,7 @@ pub fn stress_set_glb(bytes: Vec<u8>) {
 #[wasm_bindgen]
 pub fn stress_set_cuboid(layout: String) -> Result<(), JsValue> {
     let layout: Option<engine_fracture::Layout> = serde_json::from_str(&layout).map_err(|e| JsValue::from_str(&format!("layout: {e}")))?;
-    CUBOID.set(Some(layout));
+    SOURCE.set(Source::Cuboid(layout));
     Ok(())
 }
 
@@ -193,6 +216,24 @@ pub fn stress_set_shot_mass_scale(scale: f64) {
     }
 }
 
+/// The speed of the shots fired from now on, as a multiple of the lab's
+/// (`plan::default_shot_speed`).
+#[wasm_bindgen]
+pub fn stress_set_shot_speed_scale(scale: f64) {
+    if scale.is_finite() && scale > 0.0 {
+        SPEED_SCALE.set(scale);
+    }
+}
+
+/// The balls' radius from the next load on, as a multiple of the lab's (the mass stays):
+/// the renderer's shot meshes are made at load.
+#[wasm_bindgen]
+pub fn stress_set_shot_radius_scale(scale: f64) {
+    if scale.is_finite() && scale > 0.0 {
+        RADIUS_SCALE.set(scale);
+    }
+}
+
 /// The strength of every bond of the next `stress_load`, as a multiple of the asset's: the
 /// tensile, compressive and shear strengths of the bonds' materials (their fracture
 /// energies and stiffness stay).
@@ -219,14 +260,15 @@ pub fn stress_set_physics_hz(hz: f64) {
     PHYSICS_HZ.set(if hz.is_finite() && hz > 0.0 { hz } else { 0.0 });
 }
 
-/// The lab's view toggles, from the next frame drawn: the bond graph (each intact bond a
-/// line between its chunks' centres) and colour by body state (moving orange, at rest
-/// blue, static grey: the coupled engine keeps bodies awake, so "at rest" means slow).
+/// The lab's view, from the next frame drawn: the bond graph (each intact bond a line
+/// between its chunks' centres) and the colour mode (the View menu, `ColorMode::from_index`):
+/// 0 materials, 1 body state (moving orange, at rest blue, static grey: the coupled engine
+/// keeps bodies awake, so "at rest" means slow), 2 one colour per body, kept as it breaks.
 #[wasm_bindgen]
-pub fn stress_set_view(bond_graph: bool, sleep_colors: bool) {
+pub fn stress_set_view(bond_graph: bool, color_mode: u32) {
     // Only noted: a frame may hold the world across a GPU wait (JSPI) while the page calls
     // this; the frame applies it before it draws.
-    VIEW.set((bond_graph, sleep_colors));
+    VIEW.set((bond_graph, ColorMode::from_index(color_mode)));
 }
 
 /// Orbit the camera by a pointer drag (CSS pixels), as the lab's other modes.
@@ -260,7 +302,8 @@ pub fn stress_shoot(u: f64, v: f64) -> bool {
     }
     let (w, h) = SIZE.get();
     let Some(ray) = CAMERA.with_borrow(|c| c.as_ref().map(|c| c.aim(u, v, w as f64 / h as f64, s.radius))) else { return false };
-    let vel = engine_fracture::plan::shot_velocity(s.center, s.extent, s.radius, ray.origin, ray.direction, s.speed, s.arc);
+    let speed = engine_fracture::plan::default_shot_speed(s.extent, s.speed) * SPEED_SCALE.get();
+    let vel = engine_fracture::plan::shot_velocity(s.center, s.extent, s.radius, ray.origin, ray.direction, Some(speed), s.arc);
     let k = FIRED.get();
     FIRED.set(k + 1);
     PENDING.with_borrow_mut(|p| {
@@ -286,8 +329,8 @@ fn fail(e: String) -> u32 {
     0
 }
 
-/// Build the world from the GLB ([`stress_set_glb`]) at `level`. Called through
-/// `WebAssembly.promising` (it reads the GPU). Returns 1, or 0 with [`stress_error`].
+/// Build the world from the input set last (the GLB at `level`, the cuboid houses or the
+/// pack). Called through `WebAssembly.promising` (it reads the GPU). Returns 1, or 0 with [`stress_error`].
 #[no_mangle]
 pub extern "C" fn stress_load(level: u32) -> u32 {
     match load(level as u8) {
@@ -299,27 +342,38 @@ pub extern "C" fn stress_load(level: u32) -> u32 {
 fn load(level: u8) -> Result<(), String> {
     WORLD.with_borrow_mut(|w| *w = None);
     // The lab's own scene (its camera, centre, extent and projectile) and the stress
-    // oracle's input: the GLB's level, or the cuboid houses in their layout.
-    let (lab, json, name) = match CUBOID.with_borrow(|c| *c) {
-        Some(layout) => {
-            let (lab, json) = engine_fracture::samples::cuboid_stress_scene(layout).map_err(|e| format!("cuboid houses: {e}"))?;
-            (lab, json, "cuboid_houses".to_string())
-        }
-        None => {
-            let bytes = GLB.with_borrow(|b| b.clone());
-            let asset = engine_fracture::parse_fracture_glb(&bytes).map_err(|e| format!("fracture GLB: {e}"))?;
-            let lab = engine_fracture::build_scene(&asset, level, None).map_err(|e| format!("level {level}: {e}"))?;
-            (lab, engine_fracture::stress_export::shardwright_stress_json(&asset, level), asset.physics.name.clone())
-        }
-    };
+    // oracle's input: the GLB's level, the cuboid houses in their layout, or the pack.
+    let profile = PROFILE.get();
+    let mut warnings = Vec::new();
+    let (lab, mut scene) = SOURCE.with_borrow(|source| -> Result<_, String> {
+        Ok(match source {
+            Source::Cuboid(layout) => {
+                let (lab, json) = engine_fracture::samples::cuboid_stress_scene(*layout).map_err(|e| format!("cuboid houses: {e}"))?;
+                // Bonds to the ground break like any bond (an anchored piece comes free when they do).
+                (lab, stress_ref::shardwright::import_value_with(&json, "cuboid_houses", true)?)
+            }
+            Source::Glb(bytes) => {
+                let asset = engine_fracture::parse_fracture_glb(bytes).map_err(|e| format!("fracture GLB: {e}"))?;
+                let lab = engine_fracture::build_scene(&asset, level, None).map_err(|e| format!("level {level}: {e}"))?;
+                let json = engine_fracture::stress_export::shardwright_stress_json(&asset, level);
+                (lab, stress_ref::shardwright::import_value_with(&json, &asset.physics.name, true)?)
+            }
+            Source::Pack(bytes) => {
+                let (lab, info) = engine_fracture::pack::build_pack_scene(bytes).map_err(|e| format!("scene pack: {e}"))?;
+                let json: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| format!("scene pack: {e}"))?;
+                let (scene, notes) = stress_ref::scene_pack::import_value_with(&json, &info.key, "structure", &info.key, profile.import_options())?;
+                warnings = notes;
+                (lab, scene)
+            }
+        })
+    })?;
+    WARNINGS.set(warnings);
     CAMERA.set(Some(Orbit::new(&lab)));
-    SHOOTING.set(Some(Shooting { center: lab.center, extent: lab.extent, radius: lab.projectile_radius, mass: lab.projectile_mass, speed: lab.projectile_speed, arc: lab.projectile_arc, placement: lab.placement }));
+    SHOOTING.set(Some(Shooting { center: lab.center, extent: lab.extent, radius: lab.projectile_radius * RADIUS_SCALE.get(), mass: lab.projectile_mass, speed: lab.projectile_speed, arc: lab.projectile_arc, placement: lab.placement }));
     FIRED.set(0);
     RUNNING.set(false);
     STATS.set("{}".into());
     PENDING.with_borrow_mut(|p| p.clear());
-    // Bonds to the ground break like any bond (an anchored piece comes free when they do).
-    let mut scene = stress_ref::shardwright::import_value_with(&json, &name, true)?;
     let k = STRENGTH_SCALE.get();
     if k != 1.0 {
         let used: std::collections::BTreeSet<String> = scene.bodies.iter().flat_map(|b| &b.bonds).map(|b| b.material.clone()).collect();
@@ -340,7 +394,6 @@ fn load(level: u8) -> Result<(), String> {
     let mut scene = scene.with_derived();
     // The GPU's methods, as the native runs (`STRESS_METHODS=established`).
     scene.sim.methods = stress_ref::scene::Methods::established();
-    let profile = PROFILE.get();
     profile.apply_scene(&mut scene);
     scene.materials.entry("projectile".into()).or_insert_with(stress_ref::builders::elastic_steel);
     DEVICE.with_borrow(|d| {
@@ -363,7 +416,7 @@ fn load(level: u8) -> Result<(), String> {
             );
             (Renderer::for_target(gpu, mirror, &shots, d.config.width, d.config.height, d.view_format), totals)
         });
-        (renderer.bond_graph, renderer.sleep_colors) = VIEW.get();
+        (renderer.bond_graph, renderer.colors) = VIEW.get();
         WORLD.with_borrow_mut(|w| *w = Some(Loaded { world, renderer, behind: 0.0, totals }));
         Ok(())
     })
@@ -400,7 +453,7 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
                 d.surface.configure(&gpu.device, &d.config);
                 let shots = shot_meshes(&l.world);
                 l.renderer = l.world.view_with(gpu, |mirror, _| Renderer::for_target(gpu, mirror, &shots, width, height, d.view_format));
-                (l.renderer.bond_graph, l.renderer.sleep_colors) = VIEW.get();
+                (l.renderer.bond_graph, l.renderer.colors) = VIEW.get();
             }
             let dt = l.world.scene.sim.frame_dt;
             let mut stepped = 0;
@@ -444,7 +497,7 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
             };
             let view = texture.texture.create_view(&wgpu::TextureViewDescriptor { format: Some(d.view_format), ..Default::default() });
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
-            (l.renderer.bond_graph, l.renderer.sleep_colors) = VIEW.get();
+            (l.renderer.bond_graph, l.renderer.colors) = VIEW.get();
             let want_stats = stepped > 0 || STATS.with_borrow(|s| s == "{}");
             let renderer = &l.renderer;
             let totals = l.totals;
@@ -463,9 +516,12 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
                         "hulls": totals.1,
                         "bonds": totals.2,
                         "shots": FIRED.get(),
+                        "warnings": WARNINGS.with_borrow(|w| w.clone()),
                         "gpuWaits": engine_gpu_wait::WAITS.load(std::sync::atomic::Ordering::Relaxed),
                         "gpuYields": engine_gpu_wait::YIELDS.load(std::sync::atomic::Ordering::Relaxed),
                         "ballMass": SHOOTING.get().map_or(0.0, |s| s.mass),
+                        "ballRadius": SHOOTING.get().map_or(0.0, |s| s.radius),
+                        "ballSpeed": SHOOTING.get().map_or(0.0, |s| engine_fracture::plan::default_shot_speed(s.extent, s.speed)),
                         "lastShot": imps.last().map(|i| serde_json::json!({"position": i.pose.position.to_array(), "velocity": i.velocity.to_array()})),
                         "frameHz": 1.0 / dt,
                         "profile": PROFILE.get().name(),

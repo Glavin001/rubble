@@ -154,6 +154,10 @@ impl FractureSim {
     pub fn body_buffer(&self) -> &Buffer {
         &self.bufs[plan::BODY_BUFFER as usize]
     }
+    /// The joints (the draw hides a bond line once its joint breaks).
+    pub fn joint_buffer(&self) -> &Buffer {
+        &self.bufs[plan::JOINT_BUFFER as usize]
+    }
     pub fn steps(&self) -> u32 {
         self.plan.steps
     }

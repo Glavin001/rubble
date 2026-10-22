@@ -10,7 +10,8 @@ use metal::*;
 
 pub use engine_fracture::view::Orbit;
 
-/// Draw uniform: column-major view-projection, then (instance stride, colour mode).
+/// Draw uniform: column-major view-projection, then (instance stride, colour mode, joints
+/// per copy).
 #[repr(C)]
 struct View {
     vp: [f32; 16],
@@ -35,9 +36,13 @@ pub struct Renderer {
     projectile_per_slot: u64,
     copies: u64,
     stride: u32,
+    /// Joints per house copy; 0 when the scene has none (bond lines then hide once their
+    /// pieces part, `fracture_draw.slang`).
+    joints_per_copy: u32,
     depth: Option<Texture>,
     size: (u64, u64),
-    /// 0: materials; 1: sleep state (awake orange, asleep blue, static grey).
+    /// 0: materials; 1: sleep state (awake orange, asleep blue, static grey); 2: bodies
+    /// (one colour per body).
     pub color_mode: u32,
 }
 
@@ -113,6 +118,7 @@ impl Renderer {
                 / scene.projectile_count.max(1) as u64,
             copies: scene.copies.max(1) as u64,
             stride: scene.instance_stride,
+            joints_per_copy: scene.joints.len() as u32 / scene.copies.max(1),
             depth: None,
             size: (0, 0),
             color_mode: 0,
@@ -127,6 +133,7 @@ impl Renderer {
         queue: &CommandQueue,
         drawable: &MetalDrawableRef,
         bodies: &Buffer,
+        joints: &Buffer,
         view_proj: [f32; 16],
         shots: u32,
         show_bonds: bool,
@@ -138,6 +145,7 @@ impl Renderer {
             cb,
             drawable.texture(),
             bodies,
+            joints,
             view_proj,
             shots,
             show_bonds,
@@ -154,6 +162,7 @@ impl Renderer {
         cb: &CommandBufferRef,
         tex: &TextureRef,
         bodies: &Buffer,
+        joints: &Buffer,
         view_proj: [f32; 16],
         shots: u32,
         show_bonds: bool,
@@ -184,9 +193,10 @@ impl Renderer {
         let e = cb.new_render_command_encoder(pass);
         let view = View {
             vp: view_proj,
-            mode: [self.stride, self.color_mode, 0, 0],
+            mode: [self.stride, self.color_mode, self.joints_per_copy, 0],
         };
         e.set_vertex_buffer(0, Some(bodies), 0);
+        e.set_vertex_buffer(3, Some(joints), 0);
         e.set_vertex_bytes(
             2,
             std::mem::size_of::<View>() as u64,

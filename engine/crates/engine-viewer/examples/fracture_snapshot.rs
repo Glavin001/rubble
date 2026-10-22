@@ -57,6 +57,7 @@ fn main() -> anyhow::Result<()> {
         cb,
         &tex,
         sim.body_buffer(),
+        sim.joint_buffer(),
         orbit.view_proj(w as f64 / h as f64),
         sim.shots(),
         false,
