@@ -82,6 +82,11 @@ fn main() {
                     if !j["split_group"].is_null() {
                         c.manifest["split_group"] = j["split_group"].clone();
                     }
+                    let parent = c.manifest["event_id"].as_str().unwrap_or_default().to_string();
+                    let tag = if j["parent_call"].is_null() { format!("j{i}") } else { format!("c{}", j["parent_call"]) };
+                    c.manifest["parent_event_id"] = json!(parent);
+                    c.manifest["parent_call"] = j["parent_call"].clone();
+                    c.manifest["event_id"] = json!(format!("{parent}__dagger_{tag}_f{}", r.frame));
                     write_event(&out.join(format!("{i}_call")), c, true)?;
                 }
                 lines.push(json!({"job": i, "event": event, "frame": r.frame, "chunks": r.members.chunks.len(), "impactors": r.members.impactors.len(), "event_seconds": secs, "event_jobs": idx.len()}));

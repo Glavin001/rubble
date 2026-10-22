@@ -107,7 +107,10 @@ impl ModelProvider {
         // The calls schema the provider validates against (its `schema.py`): a `/3` package
         // (models trained on `/3`) gets each record downgraded (`downgrade_to_v3`, exact).
         let schema_py = std::fs::read_to_string(spec.python_dir.join("learned_impact/outcome/schema.py")).unwrap_or_default();
-        let v3 = schema_py.lines().any(|l| l.trim_start().starts_with("SCHEMA_VERSION") && l.contains("\"learned-impact-outcome/3\""));
+        // `STRESS_PROVIDER_CALLS=v3` forces it: a /4 package serving a model trained on /3
+        // calls upgraded with the deformation unobserved (P2's `LEARNED_IMPACT_ACCEPT_V3=1`).
+        let v3 = std::env::var("STRESS_PROVIDER_CALLS").is_ok_and(|v| v == "v3")
+            || schema_py.lines().any(|l| l.trim_start().starts_with("SCHEMA_VERSION") && l.contains("\"learned-impact-outcome/3\""));
         let mut p = ModelProvider { spec: spec.clone(), dir: dir.to_path_buf(), scene: scene.to_string(), child, qs: true, call_ms: Vec::new(), lock, v3 };
         p.qs = match spec.qs {
             Some(q) => q,

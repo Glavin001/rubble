@@ -474,6 +474,7 @@ def main(argv=None):
     p.add_argument("--jobs", type=int, default=6)
     p.add_argument("--bin", type=Path, default=DEFAULT_BIN)
     p.add_argument("--note", default="")
+    p.add_argument("--members", type=Path, help="JSON list of member names: run only these (scored against their whole ensembles)")
     a = p.parse_args(argv)
     cands = a.candidates.split(",")
     # The reference ceiling (`ceiling_full`: the oracle's full state through the call
@@ -484,7 +485,15 @@ def main(argv=None):
     if "model" in cands and not a.checkpoint:
         raise SystemExit("--candidates model needs --checkpoint")
     ensembles = validation_ensembles(a.runs, a.split, a.max_ensembles)
+    if a.members:
+        only = set(json.loads(a.members.read_text()))
+        ensembles = {k: ms for k, ms in ensembles.items() if any(m.name in only for m in ms)}
+        missing = only - {m.name for ms in ensembles.values() for m in ms}
+        if missing:
+            raise SystemExit(f"--members not in the {a.split} ensembles of --runs: {sorted(missing)}")
     members = [m for ms in ensembles.values() for m in ms]
+    if a.members:
+        members = [m for m in members if m.name in only]
     print(f"[cl-eval] {len(ensembles)} ensembles, {len(members)} members, candidates {cands}", flush=True)
     events = {m.name: load_event(m) for m in members}
     samples = {name: sample_frames(ev) for name, ev in events.items()}
