@@ -37,3 +37,17 @@ def test_f16_forward_is_finite():
     with torch.no_grad():
         out = m(b)
     assert all(torch.isfinite(v).all() for v in out.values())
+
+
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="needs MPS")
+def test_step1_loss_parity_cpu_mps(tmp_path):
+    """The device-parity check remote training relies on (devcheck): the same seeded model
+    on the same batch gives the same per-term loss on CPU and MPS (CUDA is checked on Modal
+    against the same reference)."""
+    from learned_impact.outcome.devcheck import compare, step1_losses
+    from learned_impact.outcome.synthetic import write_dataset
+
+    write_dataset(tmp_path / "d", 6)
+    cpu = step1_losses(str(tmp_path / "d"), "cpu", n_calls=8)
+    mps = step1_losses(str(tmp_path / "d"), "mps", n_calls=8)
+    assert compare(cpu, mps) == [], compare(cpu, mps)
