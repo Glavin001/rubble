@@ -39,6 +39,16 @@ class DecodeConfig:
     project_momentum: bool = True
     energy_bound: bool = True
     energy_tolerance: float = 0.05  # fraction of E_in (P0: ledger residual up to 4.7%)
+    # An impactor's frame displacement lies between dt·v_in and dt·v_end per component: its
+    # velocity changes monotonically within the frame (P1's calls-v5, 799 impactor calls: at
+    # most 0.009·dt·v_ref outside). dx is projected into the ball around dt·(v_in + v_end)/2
+    # that contains that box (rotation-equivariant), widened by this fraction of dt·v_ref
+    # (None: off), before the momentum projection (so momenta and the centre of
+    # mass's displacement stay exact; the projection's uniform shift is small). Without it a decoded ram can sit centimetres from where its
+    # velocities put it, buried among the fragments, and the oracle's penalty contact then
+    # launches it (P0, w64-heads-s0: +1030 E0). Chunks are not boxed: joints and contacts
+    # reverse their velocities within a frame (up to 0.19·dt·v_ref outside, 3.3% at p99.9).
+    impactor_dx_box: float | None = 0.02
     temperature: float = 1.0  # validation-fitted temperature for p_b
     dtype: torch.dtype = torch.float64
 
@@ -311,6 +321,31 @@ def fragments(b: Batch, broke: Tensor) -> np.ndarray:
     return np.unique(roots, return_inverse=True)[1]
 
 
+def impactor_dx_box(ph: dict[str, Tensor], b: Batch, tol: float) -> dict[str, Tensor]:
+    """Each impactor's dx projected into the ball ‖dx − dt·(v_in + v_end)/2‖ ≤
+    dt·‖v_end − v_in‖/2 + tol·dt·v_ref: rotation-equivariant, and it contains the box
+    dt·[min(v_in, v_end), max(v_in, v_end)] per component that the oracle's displacements
+    satisfy. Applied before the momentum projection, which then restores the island's exact
+    centre-of-mass displacement and momenta from the projected state."""
+    nc = b.t["chunk_node"].shape[0]
+    dx = ph["dx"]
+    if dx.shape[0] == nc:
+        return ph
+    call = ph["call"]
+    sc = b.t["scales"].to(dx.dtype)[call[nc:]]
+    dt = sc[:, SCALE_INDEX["dt"]].unsqueeze(-1)
+    v0, v1 = ph["v"][nc:], ph["v_end"][nc:]
+    mid = dt * (v0 + v1) / 2
+    r = dt * (v1 - v0).norm(dim=-1, keepdim=True) / 2 + tol * dt * sc[:, SCALE_INDEX["v"]].unsqueeze(-1)
+    d = dx[nc:] - mid
+    n = d.norm(dim=-1, keepdim=True)
+    proj = torch.where(n > r, mid + d * (r / n.clamp(min=1e-30)), dx[nc:])
+    proj = torch.where(ph["anchored"][nc:].unsqueeze(-1), dx[nc:], proj)
+    out = dict(ph)
+    out["dx"] = torch.cat([dx[:nc], proj], 0)
+    return out
+
+
 def decode(out: dict[str, Tensor], b: Batch, cfg: DecodeConfig | None = None) -> dict:
     cfg = cfg or DecodeConfig()
     ph = to_physical(out, b, cfg.dtype)
@@ -318,6 +353,8 @@ def decode(out: dict[str, Tensor], b: Batch, cfg: DecodeConfig | None = None) ->
     dev = ph["v_end"].device
     free, external = causal_freedom(b)
     free, external = free.to(dev), external.to(dev)
+    if cfg.impactor_dx_box is not None:
+        ph = impactor_dx_box(ph, b, cfg.impactor_dx_box)
     if cfg.project_momentum:
         ph = project(ph, b, free)
     active = infeasible = torch.zeros(G, dtype=torch.bool, device=dev)

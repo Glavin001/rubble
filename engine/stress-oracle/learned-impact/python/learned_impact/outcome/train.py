@@ -17,6 +17,7 @@ import dataclasses
 import json
 import math
 import random
+import shutil
 import time
 import traceback
 from collections import Counter, defaultdict
@@ -155,8 +156,17 @@ def _cached_train_events(event_dirs: list, cfg: dict) -> tuple[list[S.Event], in
         cache.prefetch(part)
         events += [S.load_event(cache.path(e), in_memory=True) for e in part]
         peak = max(peak, cache.bytes())
+    # A cache smaller than one pass is never hit by the next run (LRU over a sequential
+    # pass evicts each event before it comes round again): clear it, the calls are in memory.
+    cleared = not all((Path(cfg["root"]) / e.name / "manifest.json").exists() for e in evs)
+    if cleared:
+        for e in evs:
+            d = Path(cfg["root"]) / e.name
+            if (d / "manifest.json").exists():
+                shutil.rmtree(d)
     print(f"[data] {len(evs)} training events' calls ready in {time.time() - t0:.0f} s "
-          f"(cache peak {peak / 1e9:.2f} GB of {total_gb} GB)", flush=True)
+          f"(cache peak {peak / 1e9:.2f} GB of {total_gb} GB"
+          f"{'; smaller than one pass, cleared' if cleared else ''})", flush=True)
     from .ensemble import aggregate
     groups: dict[str, list[S.Event]] = defaultdict(list)
     for e in events:

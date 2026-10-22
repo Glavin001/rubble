@@ -166,3 +166,38 @@ def test_chunk_inertia_uses_the_body_rotation_not_the_rest_rotation():
     r = quat_to_matrix(torch.tensor(body_q))
     want = r @ sym6_to_matrix(torch.tensor(i6)) @ r.transpose(-1, -2)
     assert torch.allclose(iw, want, atol=1e-5)
+
+
+def test_impactor_dx_ball_is_consistent_and_momentum_stays_exact():
+    from learned_impact.outcome.batch import SCALE_INDEX
+
+    calls, st = make_calls(range(6))
+    b = batch_of(calls, st)
+    nc = b.t["chunk_node"].shape[0]
+    torch.manual_seed(0)
+    with torch.no_grad():
+        out = ImpactOutcomeModel()(b)
+        out["imp_out"][:, 6:9] += 3.0  # displacements far from what the velocities allow
+        raw = D.to_physical(out, b)
+        boxed = D.impactor_dx_box(raw, b, 0.02)
+        off = D.decode(out, b, D.DecodeConfig(energy_bound=False, impactor_dx_box=None))
+        on = D.decode(out, b, D.DecodeConfig(energy_bound=False, impactor_dx_box=0.02))
+    assert nc < raw["dx"].shape[0]
+    sc = b.t["scales"].to(torch.float64)[raw["call"][nc:]]
+    dt, vr = sc[:, SCALE_INDEX["dt"], None], sc[:, SCALE_INDEX["v"], None]
+    v0, v1, dx = raw["v"][nc:], raw["v_end"][nc:], boxed["dx"][nc:]
+    assert not torch.equal(dx, raw["dx"][nc:])
+    r = dt * (v1 - v0).norm(dim=-1, keepdim=True) / 2 + 0.02 * dt * vr
+    assert ((dx - dt * (v0 + v1) / 2).norm(dim=-1, keepdim=True) <= r * (1 + 1e-9)).all()
+    # a displacement inside the per-component box is left alone
+    inside = dict(raw)
+    inside["dx"] = torch.cat([raw["dx"][:nc], dt * (0.3 * v0 + 0.7 * v1)], 0)
+    torch.testing.assert_close(D.impactor_dx_box(inside, b, 0.0)["dx"], inside["dx"])
+    torch.testing.assert_close(boxed["dx"][:nc], raw["dx"][:nc])  # chunks are not boxed
+    # the decoded ram ends where its velocities put it, far closer than unboxed
+    gap = lambda d: (d["imp_dx"] - dt * (d["_phys"]["v"][nc:] + d["imp_v_end"]) / 2).abs().max()  # noqa: E731
+    assert gap(on) < 0.1 * gap(off)
+    # the projection keeps the centre-of-mass displacement exact for free islands
+    m = on["_phys"]["mass"].unsqueeze(-1)
+    com = lambda d: D.scatter_sum(m * torch.cat([d["chunk_dx"], d["imp_dx"]]), d["_phys"]["call"], b.n_calls)  # noqa: E731
+    torch.testing.assert_close(com(on)[on["free"]], com(off)[off["free"]])

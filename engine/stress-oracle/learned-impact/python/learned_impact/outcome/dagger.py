@@ -163,13 +163,34 @@ def export_from_rollouts(rollouts: Path, recordings: dict[str, Path], split_grou
     return summary
 
 
-def relabel(round_dir: Path, binary: Path, threads: int = 8, calls: str | None = None) -> Path:
-    """P0's oracle island step on every job; the calls land in `<round>/calls`."""
+def rollouts_from_json(path: Path) -> tuple[Path, dict[str, Path], dict[str, str]]:
+    """P0's `rollouts.json` ({events: [{event, states, split, split_group, …}]}) → the states
+    root, event_id → recording dir and event_id → split group. Only training rollouts are
+    relabelled for training: any other split raises."""
+    d = json.loads(Path(path).read_text())
+    recs, groups, roots = {}, {}, set()
+    for r in d["events"]:
+        if r.get("split") != "train":
+            raise ValueError(f"{r['event']}: split {r.get('split')!r}: only training rollouts")
+        eid = Path(r["event"]).name
+        recs[eid], groups[eid] = Path(r["event"]), r["split_group"]
+        roots.add(Path(r["states"]).parent)
+    if len(roots) != 1:
+        raise ValueError(f"{path}: states under {len(roots)} roots")
+    return roots.pop(), recs, groups
+
+
+def relabel(round_dir: Path, binary: Path, threads: int = 8, calls: str | None = None,
+            full_state_columns: str | None = None) -> Path:
+    """P0's oracle island step on every job; the calls land in `<round>/calls`. A job the
+    oracle or the call builder rejects (a nonfinite state) produces no call and is listed
+    in `<round>/calls/failures.jsonl` (rev 8)."""
     out = round_dir / "calls"
     out.mkdir(parents=True, exist_ok=True)
     with open(round_dir / "relabel.log", "w") as log:
         subprocess.run([str(binary), "--jobs", str(round_dir / "jobs.json"), "--out", str(out),
-                        "--threads", str(threads), *(["--calls", calls] if calls else [])],
+                        "--threads", str(threads), *(["--calls", calls] if calls else []),
+                        *(["--full-state-columns", full_state_columns] if full_state_columns else [])],
                        stdout=log, stderr=subprocess.STDOUT, check=True)
     return out
 
@@ -191,10 +212,14 @@ def main(argv=None) -> None:
     r.add_argument("--bin", required=True)
     r.add_argument("--threads", type=int, default=8)
     r.add_argument("--calls", default=None, help="v3 for /3-trained checkpoints (P0's rev-5 binary)")
+    r.add_argument("--full-state-columns", default=None,
+                   help="a /5 calls manifest whose full-state columns the relabelled calls use (rev 8)")
     x = sub.add_parser("export-rollouts")
-    x.add_argument("--rollouts", required=True, help="<run>/states/<candidate>")
-    x.add_argument("--recordings", required=True)
-    x.add_argument("--dataset", required=True, help="calls (for each event's split group)")
+    x.add_argument("--rollouts", default=None, help="<run>/states/<candidate>")
+    x.add_argument("--rollouts-json", default=None,
+                   help="P0's rollouts.json (states, recordings and split groups; training only)")
+    x.add_argument("--recordings", default=None)
+    x.add_argument("--dataset", default=None, help="calls (for each event's split group)")
     x.add_argument("--out", required=True)
     x.add_argument("--every", type=int, default=1)
     a = ap.parse_args(argv)
@@ -202,8 +227,10 @@ def main(argv=None) -> None:
         s = export(Path(a.checkpoint), Data(a.dataset), recording_dirs(Path(a.recordings)),
                    Path(a.out), a.tol, a.max_jobs, a.device)
         print(json.dumps(s, indent=1))
+    elif a.cmd == "export-rollouts" and a.rollouts_json:
+        root, recs, groups = rollouts_from_json(Path(a.rollouts_json))
+        print(json.dumps(export_from_rollouts(root, recs, groups, Path(a.out), a.every), indent=1))
     elif a.cmd == "export-rollouts":
-        import glob
         groups = {}
         for ev in Path(a.rollouts).iterdir():
             m = Path(a.dataset) / ev.name / "manifest.json"
@@ -212,7 +239,7 @@ def main(argv=None) -> None:
         print(json.dumps(export_from_rollouts(Path(a.rollouts), recording_dirs(Path(a.recordings)),
                                               groups, Path(a.out), a.every), indent=1))
     else:
-        print(relabel(Path(a.round), Path(a.bin), a.threads, a.calls))
+        print(relabel(Path(a.round), Path(a.bin), a.threads, a.calls, a.full_state_columns))
 
 
 if __name__ == "__main__":
