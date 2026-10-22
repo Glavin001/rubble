@@ -36,6 +36,44 @@ Other validation metrics:
 3. **Training plateaus early.** The dense score was 2.27 at step 1,000 and 2.19 at 8,000. More steps on this data are not the lever.
 4. **Boundary.** These are `/3` calls. P0's cl-eval-v2 showed that the reduced boundary (no hidden deformation) fails fragment motion even for a perfect model. The planning session has since asked for the full-state contract (`/5`) before any simplification, so the next model is trained on that.
 
+## The 171 validation calls worse than QS, by cause
+
+Script: `scripts/worse_than_qs.py`; output in `runs/v4/bulk-w32/worse_than_qs.json`.
+
+These are the calls where the model is worse than `blast_parity` QS by more than the
+tolerance, on calls QS gets right: 123 anchored-wall, 48 free-wall, from 74 events in 28
+ensembles. One anchored ensemble (`t1_00229`) accounts for 48 of them.
+
+| cause | anchored | free |
+|---|---|---|
+| extra breaks where the oracle and QS break nothing | 101 | 42 |
+| extra breaks beside oracle breaks | 9 | 2 |
+| missed breaks | 0 | 2 |
+| same count, wrong bonds | 0 | 2 |
+| exit speed only | 13 | 0 |
+
+By phase:
+- anchored: contact 41, secondary 33, separation 32, settling 17;
+- free: separation 22, contact 11, secondary 9, settling 6.
+
+About half come after the impact itself.
+
+**The extra breaks are marginal.** Typically one bond per call (median 1; 1–2 in 75%).
+- The model's q̂ on those bonds has quantiles 10/50/90% of 1.02/1.12/1.47 (anchored) and
+  1.02/1.06/1.37 (free). That is just past τ = 1.
+- The oracle's own failure margin on the same bonds is 0.46/0.85/1.00 and 0.49/0.93/0.99:
+  near failure, but surviving.
+- None of them is ensemble-ambiguous (every member keeps the bond).
+
+So the failure mode is a threshold decision on near-critical bonds, mostly after impact,
+and not gross over-breaking within a frame. Over a closed-loop event these single extra
+breaks accumulate into the over-fragmentation the videos show.
+
+**The τ grid did not bracket the optimum.** τ = 1.0 was the old grid's upper end, and the
+validation score was still falling there (2.195 at 0.9, 2.191 at 1.0). The grid now runs
+to 1.5 (`train.TAU_GRID`), so the next selection can find τ > 1. This is still a
+validation-only choice.
+
 ## Reproduce
 
 ```bash

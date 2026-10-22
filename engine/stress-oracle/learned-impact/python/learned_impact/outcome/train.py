@@ -383,7 +383,9 @@ def save(path: Path, model, cfg: TrainConfig, norms, priors, step, metrics, temp
                 "schema_version": S.SCHEMA_VERSION}, path)
 
 
-TAU_GRID = (0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
+# The grid must bracket the optimum: the bulk v1 retrain chose 1.0, its old upper end,
+# with the score still falling there.
+TAU_GRID = (0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.35, 1.5)
 
 
 def select_tau(model, val_batches, cfg: "TrainConfig", priors, prog=None) -> tuple[float, dict]:
