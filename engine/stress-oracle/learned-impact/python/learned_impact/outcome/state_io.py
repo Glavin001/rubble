@@ -14,7 +14,7 @@ import torch
 
 from . import decode as D
 from . import schema as S
-from .batch import Batch
+from .batch import SCALE_INDEX, Batch
 
 VERSION = "learned-impact-decoded-state/1"
 
@@ -36,6 +36,11 @@ def decoded_states(b: Batch, out: dict[str, torch.Tensor], dec: dict,
     broke = dec["bond_broke"].cpu().numpy()
     damage = dec["bond_damage_end"].detach().cpu().numpy()
     tbin = out["bond_time_logits"].detach().cpu().numpy().argmax(-1) + 1
+    # exact break time (s from the frame's start; the decode breaks bonds in time order)
+    btime = None
+    if "bond_break_frac" in out:
+        dt_b = t["scales"][:, SCALE_INDEX["dt"]].cpu().numpy()[t["bond_call"].cpu().numpy()]
+        btime = out["bond_break_frac"].detach().cpu().numpy() * dt_b
     p_perf = torch.sigmoid(out["imp_perf_logit"]).detach().cpu().numpy()
     active = dec["energy_bound_active"].cpu().numpy()
     infeasible = dec["energy_bound_infeasible"].cpu().numpy()
@@ -65,8 +70,10 @@ def decoded_states(b: Batch, out: dict[str, torch.Tensor], dec: dict,
                  "p_perforate": float(p)}
                 for k, v, w, dx, dr, p in zip(a["impactor_key"].tolist(), iv[si], iw[si],
                                               idx[si], idr[si], p_perf[si])],
-            "bonds_broken": [{"key": int(k), "bin": int(tb)} for k, x, tb in
-                             zip(bkeys, broke[sb], tbin[sb]) if x],
+            "bonds_broken": [dict({"key": int(k), "bin": int(tb)},
+                                  **({"time": float(bt)} if btime is not None else {}))
+                             for k, x, tb, bt in zip(bkeys, broke[sb], tbin[sb],
+                                                     (btime[sb] if btime is not None else tbin[sb])) if x],
             "bond_damage": [{"key": int(k), "damage": float(d)} for k, x, d in
                             zip(bkeys, broke[sb], damage[sb]) if not x],
         }
