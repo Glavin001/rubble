@@ -415,9 +415,12 @@ def _summarise(rows, bond_p, bond_y, imp_p, imp_y, bound_active, bound_total,
     groups: dict[tuple, list[dict]] = defaultdict(list)
     for r in rows:
         c = r["call"]
-        if c.ensemble_id:
-            # members are compared per call only when aligned: the same island chunks (in
-            # the same order after sorting by key), else each is scored as a single run
+        if c.ensemble_id and "y_bond_break_freq" in c.arrays:
+            # Members are scored together only on calls `ensemble.aggregate` marked aligned:
+            # the same bodies, and inputs equal up to the ensemble's perturbation (after the
+            # first contact the members' states diverge, and scoring one member's input
+            # against the others' outcomes would compare different calls). Every other call
+            # is scored against its own run.
             ck = c.arrays["chunk_key"]
             order = np.argsort(ck, kind="stable")
             r = dict(r, mass=r["mass"][order], pred=r["pred"][order], true=r["true"][order])

@@ -18,14 +18,45 @@ from . import schema as S
 _ENS = ("y_bond_break_freq", "y_impactor_perforate_freq", "ens_impactor_v_end")
 
 
+# Members' frame-start inputs count as equal up to the ensemble's perturbation when the
+# same bodies and bonds exist, every bond's damage is equal, and every velocity agrees to
+# this fraction of the call's reference speed. Positions may differ: the ensemble perturbs
+# the initial placement (offsets of 0.2-1% of L on P1's bulk v1). After the first contact
+# the members' states diverge (bulk v1 eval: damage differs on dozens of bonds by up to
+# 0.87, velocities by up to 10% of v), and their outcomes are no longer draws of one call's
+# outcome distribution.
+ALIGN_DAMAGE_TOL = 1e-6
+ALIGN_VEL_TOL = 1e-3
+
+
+def _sorted(c: S.Call, arr: str, key: str, rows=slice(None)) -> np.ndarray:
+    return c.arrays[arr][rows][np.argsort(c.arrays[key], kind="stable")]
+
+
 def _aligned(calls: list[S.Call]) -> bool:
+    """Ensemble members' calls at one call index are one call's outcome distribution only
+    when their inputs agree up to the perturbation (see the tolerances above)."""
     a = calls[0]
+    v_ref = max(float(a.scales["v"]), 1e-9)
+    dcol = S.col("bond_feat", "damage")
     for c in calls[1:]:
         if not (np.array_equal(np.sort(a.arrays["chunk_key"]), np.sort(c.arrays["chunk_key"]))
                 and np.array_equal(np.sort(a.arrays["bond_key"]), np.sort(c.arrays["bond_key"]))
                 and np.array_equal(np.sort(a.arrays["impactor_key"]),
                                    np.sort(c.arrays["impactor_key"]))):
             return False
+        da = _sorted(a, "bond_feat", "bond_key", slice(0, None, 2))[:, dcol]
+        dc = _sorted(c, "bond_feat", "bond_key", slice(0, None, 2))[:, dcol]
+        if len(da) and np.abs(da - dc).max() > ALIGN_DAMAGE_TOL:
+            return False
+        for arr, key in (("chunk_v", "chunk_key"), ("chunk_w", "chunk_key"),
+                         ("impactor_v", "impactor_key"), ("impactor_w", "impactor_key")):
+            x, y = _sorted(a, arr, key), _sorted(c, arr, key)
+            if len(x) == 0:
+                continue
+            scale = v_ref if arr.endswith("_v") else v_ref / max(float(a.scales["L"]), 1e-9)
+            if np.abs(x.astype(np.float64) - y).max() > ALIGN_VEL_TOL * scale:
+                return False
     return True
 
 

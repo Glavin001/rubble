@@ -39,6 +39,18 @@ def main(argv=None) -> None:
     events = [S.load_event(p) for p in S.find_events(a.dataset)]
     events = [e for e in events if e.manifest["split"] == a.split
               and not e.manifest.get("truncated", False)]
+    # ensemble soft labels and alignment, exactly as training's `Data` derives them
+    from collections import defaultdict
+
+    from .ensemble import aggregate
+    groups = defaultdict(list)
+    for e in events:
+        if e.manifest.get("ensemble_id"):
+            for c in e.calls:
+                c.arrays = dict(c.arrays)
+            groups[e.manifest["ensemble_id"]].append(e)
+    for evs in groups.values():
+        aggregate(evs)
     calls = [c for e in events for c in e.calls if c.routed]
     if not calls:
         ap.error(f"no routed calls in split {a.split!r} under {a.dataset}")

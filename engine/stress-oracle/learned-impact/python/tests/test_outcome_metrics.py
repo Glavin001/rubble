@@ -142,9 +142,12 @@ def test_quiet_calls_are_scored_apart(tmp_path):
     res = M.evaluate(ImpactOutcomeModel(ModelConfig(variant="A")), [b])  # near-zero init: no breaks
     fam = res.per_family["synthetic_wall"]
     assert fam["n_active"] >= 1 and fam["n_quiet"] >= 1
-    assert "skill_over_bar_partition" in fam and "skill_over_bar_partition_quiet" in fam
+    # The contact call is ensemble-aligned (members' inputs equal); after it the members
+    # diverge, so the quiet settling calls are scored per member, apart from the active ones.
+    assert "skill_over_bar_partition" in fam and "dense_1mARI_quiet" in fam
+    assert "skill_over_bar_partition_quiet" not in fam
     # active calls carry the breaks: missing them all cannot pass there
-    assert fam["skill_over_bar_partition"] > fam["skill_over_bar_partition_quiet"]
+    assert fam["dense_1mARI"] > fam["dense_1mARI_quiet"]
 
 
 def _ens_rows(rng, n_ens, members, model_noise, fam="free_wall"):
@@ -162,7 +165,8 @@ def _ens_rows(rng, n_ens, members, model_noise, fam="free_wall"):
         v_hat = float(rng.normal(20, model_noise))
         for k in range(members):
             c = SimpleNamespace(ensemble_id=f"e{e}", call_index=0, family=fam, phase="contact",
-                                event_id=f"e{e}_m{k}", arrays={"chunk_key": key})
+                                event_id=f"e{e}_m{k}",
+                                arrays={"chunk_key": key, "y_bond_break_freq": np.zeros(1)})
             rows.append({"call": c, "mass": mass, "pred": (np.arange(6) >= cut_hat).astype(int),
                          "true": (np.arange(6) >= cuts[k]).astype(int),
                          "imp_speed_hat": np.array([v_hat]), "imp_speed": np.array([vs[k]]),
@@ -216,3 +220,25 @@ def test_heldout_member_uses_the_identical_rule():
                               tolerance=M.TOLERANCE["ram"] * 20.0) for i in range(8)]
     assert abs(r["member"]["ram"][0] - np.mean([h["pass"] for h in held])) < 1e-12
     assert abs(r["member"]["ram"][1] - np.mean([h["skill"] / h["bar"] for h in held])) < 1e-12
+
+
+def test_ensemble_alignment_needs_equal_inputs():
+    """Members count as one call's outcome distribution only while their inputs agree up to
+    the perturbation: positions may differ, damage and velocities may not."""
+    from learned_impact.outcome import schema as S
+    from learned_impact.outcome.ensemble import _aligned
+    from learned_impact.outcome.synthetic import make_event
+
+    cs = [make_event(3, ensemble=("e", k, 3))[1][0] for k in range(3)]
+    assert _aligned(cs)
+    moved = [cs[0]] + [S.Call(**{**c.__dict__, "arrays": dict(c.arrays)}) for c in cs[1:]]
+    moved[1].arrays["chunk_pos"] = moved[1].arrays["chunk_pos"] + 0.01 * moved[1].scales["L"]
+    assert _aligned(moved)  # the perturbation itself
+    fast = [cs[0]] + [S.Call(**{**c.__dict__, "arrays": dict(c.arrays)}) for c in cs[1:]]
+    fast[1].arrays["chunk_v"] = fast[1].arrays["chunk_v"] + 0.01 * fast[1].scales["v"]
+    assert not _aligned(fast)
+    dmg = [cs[0]] + [S.Call(**{**c.__dict__, "arrays": dict(c.arrays)}) for c in cs[1:]]
+    bf = dmg[1].arrays["bond_feat"].copy()
+    bf[:, S.col("bond_feat", "damage")] += 0.1
+    dmg[1].arrays["bond_feat"] = bf
+    assert not _aligned(dmg)
