@@ -38,6 +38,8 @@ pub const KERNEL_FIBRE: u32 = 2;
 pub const KERNEL_MLP_TILED: u32 = 3;
 /// Rows from which an MLP op runs tiled (`Options::tiled_mlp`).
 pub const TILED_MIN_ROWS: usize = 256;
+/// Rows per partial sum of a large call's mean (`call_mean`).
+pub const MEAN_BLOCK: usize = 256;
 
 /// Segment modes of the MLP kernel.
 pub const SEG_ROW: u32 = 0;
@@ -631,20 +633,38 @@ pub fn compile_batch(model: &Model, calls: &[BatchCall]) -> Result<Program, Stri
     let max_rows = n_l.iter().copied().chain([n]).max().unwrap();
     let (pa, pb) = (b.alloc(max_rows, w), b.alloc(max_rows, w));
 
-    // per-call means of `rows` rows at `src` whose calls are `calls_of`
+    // Per-call means of the rows at `src` whose calls are `calls_of`. A call of more than
+    // `MEAN_BLOCK` rows is summed in two stages (blocks of rows, then the blocks), so no
+    // single row of the CSR walks a whole large island: the same mean, reassociated.
+    let partial = b.alloc(max_rows.div_ceil(MEAN_BLOCK) + ng, w);
     let call_mean = |b: &mut Builder, label: &str, src: usize, calls_of: &[u32]| {
         let mut rows: Vec<Vec<usize>> = vec![Vec::new(); ng];
         for (r, &c) in calls_of.iter().enumerate() {
             rows[c as usize].push(r);
         }
-        let ent: Vec<Vec<(usize, f32)>> = rows
-            .iter()
-            .map(|rs| {
-                let inv = 1.0 / rs.len().max(1) as f32;
-                rs.iter().map(|&r| (src + r * w, inv)).collect()
-            })
-            .collect();
-        b.csr(label, &ent, w, gmean, false);
+        if rows.iter().all(|rs| rs.len() <= MEAN_BLOCK) {
+            let ent: Vec<Vec<(usize, f32)>> = rows
+                .iter()
+                .map(|rs| {
+                    let inv = 1.0 / rs.len().max(1) as f32;
+                    rs.iter().map(|&r| (src + r * w, inv)).collect()
+                })
+                .collect();
+            b.csr(label, &ent, w, gmean, false);
+            return;
+        }
+        let (mut blocks, mut finals) = (Vec::new(), Vec::new());
+        for rs in &rows {
+            let inv = 1.0 / rs.len().max(1) as f32;
+            let mut mine = Vec::new();
+            for chunk in rs.chunks(MEAN_BLOCK) {
+                mine.push((partial + blocks.len() * w, 1.0f32));
+                blocks.push(chunk.iter().map(|&r| (src + r * w, inv)).collect::<Vec<_>>());
+            }
+            finals.push(mine);
+        }
+        b.csr(&format!("{label}.blocks"), &blocks, w, partial, false);
+        b.csr(label, &finals, w, gmean, false);
     };
 
     let fine_round = |b: &mut Builder, label: &str, r: &(Vec<PackedMlp>, PackedMlp, Option<PackedMlp>)| {

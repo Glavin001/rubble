@@ -120,6 +120,34 @@ impl OutcomeRun {
         (wall, gpu_t)
     }
 
+    /// Steady state: `n` forward passes in one submission (as consecutive frames would
+    /// keep the GPU busy), the wall time per pass (ms), `samples` times after a warm-up.
+    pub fn time_steady(&self, gpu: &Gpu, k: &OutcomeKernels, n: usize, samples: usize) -> Vec<f64> {
+        let mut out = Vec::new();
+        for r in 0..samples + 1 {
+            let mut enc = gpu.device.create_command_encoder(&Default::default());
+            for _ in 0..n {
+                let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("outcome gnn steady"), timestamp_writes: None });
+                for (kernel, bind, gx, gy) in &self.steps {
+                    pass.set_pipeline(&k.kernels[*kernel].pipeline);
+                    pass.set_bind_group(0, bind, &[]);
+                    pass.dispatch_workgroups(*gx, *gy, 1);
+                }
+            }
+            let t = web_time::Instant::now();
+            gpu.queue.submit([enc.finish()]);
+            let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag = done.clone();
+            gpu.queue.on_submitted_work_done(move || flag.store(true, std::sync::atomic::Ordering::Release));
+            gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+            engine_gpu_wait::until(|| done.load(std::sync::atomic::Ordering::Acquire));
+            if r > 0 {
+                out.push(t.elapsed().as_secs_f64() * 1e3 / n as f64);
+            }
+        }
+        out
+    }
+
     /// Run once and read the final arena back (blocking).
     pub fn run(&self, gpu: &Gpu, k: &OutcomeKernels) -> Vec<f32> {
         let mut enc = gpu.device.create_command_encoder(&Default::default());

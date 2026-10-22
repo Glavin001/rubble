@@ -1,7 +1,9 @@
 //! P3 timing of P2's trained model through the Slang port (`stress_gpu::outcome_gnn`, the op
 //! program of `stress_learned::outcome_program`): the network call alone, per workload, on
 //! this machine's GPU, with and without the node-projection lever. One JSON line per
-//! (workload, lever) on stdout, progress on stderr. With `--write-programs DIR`, also each
+//! (workload, lever) on stdout, progress on stderr: per-submit wall and GPU (timestamp) times,
+//! and `steady_ms`, the wall time per call of 30 calls in one submission (a busy GPU, as
+//! consecutive frames keep it). With `--write-programs DIR`, also each
 //! compiled program as `DIR/<workload>_<lever>.ognn` for the browser page
 //! (`learned-impact/web-probe/outcome.html`, the same programs on WebGPU).
 //!
@@ -234,11 +236,12 @@ fn main() {
                 worst = json!(w);
             }
             let (wall, gt) = run.time(gpu, kernels, warmup, repeats);
+            let steady = run.time_steady(gpu, kernels, 30, 5);
             let (nc, ni, nb): (usize, usize, usize) = prog.layout.calls.iter().fold((0, 0, 0), |a, c| (a.0 + c.0, a.1 + c.1, a.2 + c.2));
             let line = json!({"workload": name, "lever": lever, "tiled": tiled, "fused": fused, "calls": calls.len(), "chunks": nc, "impactors": ni, "bonds": nb, "dispatches": run.dispatches(),
                 "arena_mb": prog.arena.len() as f64 * 4e-6, "table_mb": prog.table.len() as f64 * 4e-6, "compile_ms": compile_ms, "upload_ms": upload_ms,
-                "wall_ms": stats(&wall), "gpu_ms": stats(&gt), "gpu_vs_cpu": worst});
-            eprintln!("[bench] {name} lever {lever}: {nc} chunks, {} dispatches, gpu {:.3} ms, wall {:.3} ms (compile {compile_ms:.0} ms)", run.dispatches(), line["gpu_ms"]["median"].as_f64().unwrap_or(f64::NAN), line["wall_ms"]["median"].as_f64().unwrap_or(f64::NAN));
+                "wall_ms": stats(&wall), "gpu_ms": stats(&gt), "steady_ms": stats(&steady), "gpu_vs_cpu": worst});
+            eprintln!("[bench] {name} lever {lever}: {nc} chunks, {} dispatches, gpu {:.3} ms, wall {:.3} ms, steady {:.3} ms/call (compile {compile_ms:.0} ms)", run.dispatches(), line["gpu_ms"]["median"].as_f64().unwrap_or(f64::NAN), line["wall_ms"]["median"].as_f64().unwrap_or(f64::NAN), line["steady_ms"]["median"].as_f64().unwrap_or(f64::NAN));
             println!("{line}");
         }
     }
