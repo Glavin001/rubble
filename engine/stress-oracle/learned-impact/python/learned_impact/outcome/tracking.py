@@ -79,6 +79,9 @@ def flatten(rec: dict) -> tuple[int | None, dict]:
     elif kind == "group_shares":
         _numeric_leaves(rec.get("shares", {}), "gshare_window", out)
         _numeric_leaves(rec.get("mult", {}), "mult", out)
+    elif kind == "eval_tier3":  # extrapolation, never selected on
+        out["val_t3/score"] = rec.get("score")
+        _numeric_leaves(rec.get("metrics", {}), "val_t3", out)
     elif kind == "eval":
         out["val/score"] = rec.get("score")
         _numeric_leaves(rec.get("metrics", {}), "val", out)

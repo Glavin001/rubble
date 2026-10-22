@@ -61,6 +61,9 @@ class TrainConfig:
     # online; extra tags (e.g. "scaling", "overfit", "dagger-round")
     wandb: str = "auto"
     wandb_tags: tuple = ()
+    # coverage tiers (outcome.coverage) JSON: selection (best step, τ, temperature) on
+    # validation tiers 1+2 only; tier 3 (extrapolation) evaluated and logged, never selected on
+    tiers: str = ""
     curve_calls: int = 4000  # calls per fixed sample (train and val) for the loss curves
     init_checkpoint: str = ""  # start from these weights (and their input stats): DAgger rounds
     # `/5`: the training data's full-state column set (P1's manifest.full_state_columns): a
@@ -804,7 +807,18 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress, run: 
                     _batches(data.train, cfg.batch_budget, cfg.batch_calls)[:64]]
     norms = Lo.zero_baselines(norm_batches, cfg.loss, data.priors)
     prog.line("zero-predictor baselines: " + " ".join(f"{k}={v:.4g}" for k, v in norms.items()))
-    val_batches = [coll(bc) for bc in _batches(data.val, cfg.batch_budget, cfg.batch_calls)]
+    val_sel, val_t3 = data.val, []
+    if cfg.tiers:
+        from .coverage import event_tier
+        tmap = json.loads(Path(cfg.tiers).read_text())
+        tier = {id(c): event_tier(tmap, c.event_id, "val") for c in data.val}
+        val_sel = [c for c in data.val if tier[id(c)] in (1, 2)]
+        val_t3 = [c for c in data.val if tier[id(c)] == 3]
+        prog.line(f"validation tiers: {sum(tier[id(c)] == 1 for c in data.val)} tier-1, "
+                  f"{sum(tier[id(c)] == 2 for c in data.val)} tier-2 calls select; {len(val_t3)} tier-3 "
+                  f"calls are reported only")
+    val_batches = [coll(bc) for bc in _batches(val_sel, cfg.batch_budget, cfg.batch_calls)]
+    t3_batches = [coll(bc) for bc in _batches(val_t3, cfg.batch_budget, cfg.batch_calls)]
     # Loss curves (history.jsonl): per-term loss in eval mode on fixed, equally sized samples
     # of validation and of *training* calls, so the two curves compare like with like (the
     # running train loss is a noisy minibatch mean with pushforward and noise).
@@ -979,6 +993,12 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress, run: 
             cl = curve_losses()
             hist.write_record({"kind": "eval", "step": step + 1, "epoch": epoch, **cl,
                                "score": res.score, "metrics": res.metrics})
+            if t3_batches:  # extrapolation: reported, never selected on
+                r3 = M.evaluate(model, t3_batches, cfg.decode,
+                                data.priors if cfg.loss.break_reweight == "prior" else None)
+                hist.write_record({"kind": "eval_tier3", "step": step + 1, "score": r3.score,
+                                   "metrics": r3.metrics})
+                prog.line(f"val tier 3 @ {step + 1} (not selected on): score {r3.score:.3f}")
             if cl:
                 prog.line(f"loss @ {step + 1}: train-sample {cl['train']['loss']:.4f} "
                           f"val-sample {cl['val']['loss']:.4f}")
@@ -1056,6 +1076,8 @@ def main(argv=None) -> None:
                     help="a continuous break time per bond (the decode's break order)")
     ap.add_argument("--hidden-head", action="store_true",
                     help="the chunks' frame-end hidden state (u, theta, v, w) as a head")
+    ap.add_argument("--tiers", default="", help="coverage tiers JSON (outcome.coverage): select on "
+                    "validation tiers 1+2, report tier 3 separately")
     ap.add_argument("--holdout-ballistic", default="",
                     help="speed positions (0-based, e.g. 1,3) of each training ballistic family's "
                          "ensembles moved to validation: the in-distribution ballistic test")
@@ -1122,6 +1144,7 @@ def main(argv=None) -> None:
                           noise_sigma=a.noise, pushforward_prob=a.pushforward,
                           pushforward_steps=a.pushforward_steps,
                           eval_every=a.eval_every, model=dataclasses.replace(mc), wandb=a.wandb,
+                          tiers=a.tiers,
                           decode=D.DecodeConfig(energy_tolerance=a.energy_tolerance,
                                                 break_mode=a.break_mode))
         cfg.loss.energy_tolerance = a.energy_tolerance

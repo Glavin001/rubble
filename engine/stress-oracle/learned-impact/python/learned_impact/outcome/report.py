@@ -45,6 +45,10 @@ def main(argv=None) -> None:
     ap.add_argument("--confirm-sealed", action="store_true",
                     help="required for --split sealed: the sealed set is opened once, at P4")
     ap.add_argument("--wandb", default="auto", choices=("auto", "off", "offline", "online"))
+    ap.add_argument("--tiers", default="", help="coverage tiers (outcome.coverage): the headline is "
+                    "tiers 1+2, each tier reported separately")
+    ap.add_argument("--holdout-ballistic", default="", help="the training run's held-out ballistic "
+                    "speed positions (tier 1, validation)")
     ap.add_argument("--no-tau-sweep", action="store_true",
                     help="skip the informational τ sweep on test (the verdict uses the frozen τ)")
     a = ap.parse_args(argv)
@@ -52,7 +56,12 @@ def main(argv=None) -> None:
         ap.error("the sealed set stays closed until P4; pass --confirm-sealed to open it")
     model, ck = load_model(a.checkpoint, a.device)
     from .train import _split_of
-    events = [S.load_event(p) for p in S.find_events(a.dataset) if _split_of(p) == a.split]
+    held = tuple(int(x) for x in a.holdout_ballistic.split(",") if x)
+    keep_split = {a.split, "train"} if held and a.split == "val" else {a.split}
+    events = [S.load_event(p) for p in S.find_events(a.dataset) if _split_of(p) in keep_split]
+    if held and a.split == "val":  # the training run's in-memory held-out ballistic speeds
+        from .train import holdout_ballistic_speeds
+        holdout_ballistic_speeds(events, held)
     events = [e for e in events if e.manifest["split"] == a.split
               and not e.manifest.get("truncated", False)]
     # ensemble soft labels and alignment, exactly as training's `Data` derives them
@@ -76,7 +85,31 @@ def main(argv=None) -> None:
     batches = [collate(bc, st, cache) for bc in
                _batches(calls, tc.get("batch_budget", 20000), tc.get("batch_calls", 64))]
     dcfg = decode_config(ck)
+    tier_of = None
+    if a.tiers:  # three tiers, never one blended average; the headline is tiers 1+2
+        from .coverage import TIER_NAMES, event_tier
+        tmap = json.loads(Path(a.tiers).read_text())
+        tier_of = {id(c): event_tier(tmap, c.event_id, a.split) for c in calls}
+        sel = [c for c in calls if tier_of[id(c)] in (1, 2)]
+        if not sel:
+            ap.error("no tier-1/2 calls: nothing to select or report as the headline")
+        batches = [collate(bc, st, cache) for bc in
+                   _batches(sel, tc.get("batch_budget", 20000), tc.get("batch_calls", 64))]
     rep = M.three_way(model, batches, dcfg, ck.get("priors"))
+    if tier_of is not None:
+        rep["headline"] = "tiers 1+2"
+        rep["tiers"] = {}
+        for t in (1, 2, 3):
+            ct = [c for c in calls if tier_of[id(c)] == t]
+            if not ct:
+                continue
+            bt = [collate(bc, st, cache) for bc in
+                  _batches(ct, tc.get("batch_budget", 20000), tc.get("batch_calls", 64))]
+            rt = M.three_way(model, bt, dcfg, ck.get("priors"))
+            rep["tiers"][str(t)] = {"name": TIER_NAMES[t], "n_calls": len(ct),
+                                    "n_events": len({c.event_id for c in ct}),
+                                    "selection_score": rt["selection_score"],
+                                    "families": rt["families"], "acceptance": rt["acceptance"]}
     # τ was chosen on validation and is frozen in the checkpoint. On test it is confirmed,
     # not re-chosen: the verdict is the acceptance gate at the frozen τ; the sweep over the
     # same grid is reported only to show the regret of the validation choice.
