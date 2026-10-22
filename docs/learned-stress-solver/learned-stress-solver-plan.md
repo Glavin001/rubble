@@ -25,6 +25,50 @@ Your decisions on P0's five open questions (`engine/stress-oracle/learned-impact
 4. **The energy cap is `KE_out ≤ E_in + W_gravity` with a tolerance of about 5% of E0**, matching the penalty contact's measured ledger residual. The oracle keeps the penalty contact, and `L_energy` uses kinetic-energy changes and per-bond dissipation, not booked contact dissipation.
 5. **Routing is extended by the reach of debris launched within the frame**, so a plug punched mid-frame is routed together with the structure it reaches. This sits behind a flag, off by default, measured on the wall row; it closes P0's miss for every path, learned or not.
 
+## Goal and definition of done (2026-10-21)
+
+**Goal.** Ship a learned impact-outcome model behind `STRESS_IMPACT_PUNCH=learned` (off by default), default variant B: a MeshGraphNet/BSMS residual over quasi-static. On the M3 Max it replaces the explicit impact window. It must be **as faithful to the oracle as another oracle run**, clearly better than quasi-static and the punch, and cheap enough for real time. Adoption into a profile is the user's decision.
+
+**Stages.** Each stage must pass every criterion below before the next starts:
+1. walls: free and anchored, 1–4 impactors;
+2. houses and the arch, with multiple simultaneous loads (resting, pushing, impacting);
+3. blast;
+4. the vibe-town tiers, after the Shardwright re-export.
+
+**Acceptance criteria.** All are measured per family, on the sealed set, in the **closed loop over the whole event until it settles**, not frame by frame:
+
+1. **Fidelity.** Each of these is within the oracle-calibrated skill bar (a held-out oracle member's range against its ensemble):
+   - impactor exit speed and regime (penetrate, arrest or rebound);
+   - fragment partition, fragment-size distribution and fragment motion;
+   - support survival.
+
+   Each wall family's ballistic-limit curve lies inside the ensemble band, and the perforation frequency is calibrated in the ambiguous band.
+2. **Value.** It beats quasi-static, the punch and the per-bond tree baseline per family (superiority). It is no worse than quasi-static where quasi-static is already right (non-inferiority).
+3. **Physics and robustness:**
+   - momentum is exact after projection;
+   - KE_out ≤ E_in + W_g + 5% E0;
+   - damage never decreases;
+   - no non-finite state;
+   - the out-of-distribution or residual fallback fires on held-out extrapolation (speed, mass, size, load count), and every fallback is logged.
+4. **Generalisation.** Criteria 1–2 hold on unseen families and on the extrapolation splits.
+5. **Speed** (the gate is relaxed for now, by the user's decision; these are the targets):
+   - interim model call ≤ 3 ms on Metal and ≤ 5 ms in Chrome for 10k chunks in total; the goal is ≤ 2 ms on Metal;
+   - every impact frame within the M6 worst-frame target;
+   - the town tiers meet M6 with the flag on (stage 4).
+6. **Engineering:**
+   - Slang kernel with PyTorch, Metal and WebGPU parity (identical break sets on validation);
+   - deterministic: two runs bit-identical;
+   - guard 32/32 with the flag off;
+   - all suites pass;
+   - nothing deleted.
+
+**Remaining work, in order:**
+1. **Finish the P2 sweep.** Pick the default and retrain on the full ~4.3k-event bulk set; rerun the scaling study.
+2. **The closed-loop full-event evaluation** (P0's harness plus P2's provider) on validation walls. This is the decisive check that errors do not build up from frame to frame. If it fails, use pushforward and DAgger, with oracle restarts from decoded states.
+3. **Wall acceptance on the sealed set.**
+4. **P3:** port the trained model to Slang, check parity, measure the real frame cost, apply the lossless speed levers.
+5. **Stages 2–4,** each with its own data (P1 tiers and P5), training and acceptance.
+
 ## What I verified, and what was wrong
 
 ### Code facts (audited on main and on 5a2f5e4f)
