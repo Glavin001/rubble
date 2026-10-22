@@ -269,12 +269,14 @@ def main(argv=None) -> None:
     ap.add_argument("--reference", action="store_true", help="W64 / 12 rounds (the default)")
     ap.add_argument("--large", action="store_true", help="W128 / 16 rounds")
     ap.add_argument("--cost", action="store_true", help="W32 / 8 rounds (P0's cost point)")
+    ap.add_argument("--full-state", action="store_true", help="/5 full-state inputs and heads")
     ap.add_argument("--pushforward", type=float, default=0.0)
     ap.add_argument("--rereport", action="store_true",
                     help="re-score every finished run's best.pt with the current metrics")
     a = ap.parse_args(argv)
     mc = (ModelConfig.large() if a.large else ModelConfig.cost() if a.cost
           else ModelConfig.reference())
+    mc.full_state = a.full_state
     run(a.dataset, a.out, [int(x) for x in a.sizes.split(",")],
         [int(x) for x in a.seeds.split(",")], a.variants.split(","), a.family,
         a.steps_per_event, a.min_steps, a.max_steps, a.device, mc, a.pushforward, a.rereport,

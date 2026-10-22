@@ -160,6 +160,8 @@ class Data:
         # proportion to their sizes, i.e. plain concatenation).
         self.events, self.ensemble_aligned_calls, self.source_weights = [], 0, {}
         specs = parse_datasets(dataset)
+        if val_dataset and any(Path(p).resolve() == Path(val_dataset).resolve() for p, _ in specs):
+            val_dataset = None  # one directory with every split (calls-v5): its own val split
         if any(w is not None for _, w in specs) and any(w is None for _, w in specs):
             raise ValueError(f"--dataset {dataset!r}: weight every source or none")
         for path, weight in specs:
