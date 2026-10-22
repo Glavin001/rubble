@@ -586,7 +586,8 @@ pub extern "C" fn outcome_gnn_run(warmup: u32, repeats: u32) -> u32 {
     let line = OUTCOME.with_borrow(|o| {
         o.as_ref().map(|(k, run)| {
             let (wall, gt) = run.time(&gpu, k, warmup as usize, repeats as usize);
-            serde_json::json!({"dispatches": run.dispatches(), "wall_ms": stress_gpu::gnn_probe::stats(&wall), "gpu_ms": if gt.is_empty() { serde_json::Value::Null } else { stress_gpu::gnn_probe::stats(&gt) }})
+            let steady = run.time_steady(&gpu, k, 30, 5);
+            serde_json::json!({"dispatches": run.dispatches(), "wall_ms": stress_gpu::gnn_probe::stats(&wall), "gpu_ms": if gt.is_empty() { serde_json::Value::Null } else { stress_gpu::gnn_probe::stats(&gt) }, "steady_ms": stress_gpu::gnn_probe::stats(&steady)})
         })
     });
     let Some(mut line) = line else { return 0 };

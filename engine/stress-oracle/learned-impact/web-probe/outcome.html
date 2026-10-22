@@ -23,7 +23,7 @@ try{
   const n=outcome_gnn_load(bytes);
   const ok=await run(warmup,repeats);const l=outcome_gnn_line();if(!ok)throw new Error('WebGPU error: '+JSON.parse(l).error);
   const d=JSON.parse(l);d.program=name;window.__probe.lines.push(JSON.stringify(d));
-  say(`${name}: ${n} dispatches, wall ${d.wall_ms.median.toFixed(3)} ms gpu ${d.gpu_ms?d.gpu_ms.median.toFixed(3):'-'} ms`)}
+  say(`${name}: ${n} dispatches, steady ${d.steady_ms.median.toFixed(3)} ms/call, wall ${d.wall_ms.median.toFixed(3)} ms gpu ${d.gpu_ms?d.gpu_ms.median.toFixed(3):'-'} ms`)}
  window.__probe.done=true;say('done');
 }catch(e){window.__probe.error=String(e);say('error: '+e)}
 </script></body></html>
