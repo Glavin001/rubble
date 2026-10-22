@@ -205,12 +205,17 @@ pub const CACHES: &[&str] = &[
     "solver.step_bounds",
 ];
 
-pub fn shred_world(w: &World) -> Result<Frame, String> {
+/// The contract's tree of a world: its serialized state with the pure caches emptied.
+pub fn contract_value(w: &World) -> Result<Value, String> {
     let mut v = world_value(w)?;
     for c in CACHES {
         reset_path(&mut v, c);
     }
-    shred_value(&v)
+    Ok(v)
+}
+
+pub fn shred_world(w: &World) -> Result<Frame, String> {
+    shred_value(&contract_value(w)?)
 }
 
 #[derive(Default)]

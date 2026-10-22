@@ -27,7 +27,8 @@ use std::path::Path;
 use rmpv::Value;
 use serde_json::{json, Value as Json};
 
-use crate::full_state::{load_frame, unshred};
+use crate::full_state::{contract_value, load_frame, unshred};
+use stress_ref::world::World;
 use crate::outcome_calls::{Arr, Call};
 
 pub const MAX_LIST: usize = 16;
@@ -121,7 +122,7 @@ struct Side {
 
 struct Pending {
     bond_key: Vec<i64>,
-    sides: [Side; 2],
+    sides: Vec<Side>,
 }
 
 fn side(tree: &Value, chunks: &[(usize, usize)], bonds: &[(usize, usize)], impactors: &[usize]) -> Result<Side, String> {
@@ -231,20 +232,12 @@ fn static_columns(rows: &[(&[i64], &Rows)], cols: &[String]) -> (Vec<bool>, BTre
     (fixed, values)
 }
 
+/// Adds the `/5` arrays to every call of a recorded event with a full state; returns the
+/// column names for the manifest and the event-level static tables (None: the event has no
+/// full state).
 pub fn augment(dir: &Path, ctx: &Json, calls: &mut [Call]) -> Result<Option<(Json, Vec<(String, Arr)>)>, String> {
     if ctx["full_state"].is_null() {
         return Ok(None);
-    }
-    // bond (structure, source) -> its index in the structure's bond list; endpoints as chunk keys.
-    let mut source_of: HashMap<(usize, usize), usize> = HashMap::new();
-    let mut by_structure: BTreeMap<usize, Vec<(usize, usize, usize)>> = BTreeMap::new();
-    let mut count: HashMap<usize, usize> = HashMap::new();
-    for k in ctx["bond_keys"].as_array().ok_or("bond_keys")? {
-        let (s, src, a, b) = (k[0].as_u64().unwrap_or(0) as usize, k[1].as_u64().unwrap_or(0) as usize, k[2].as_u64().unwrap_or(0) as usize, k[3].as_u64().unwrap_or(0) as usize);
-        let n = count.entry(s).or_default();
-        source_of.insert((s, *n), src);
-        by_structure.entry(s).or_default().push((*n, a, b));
-        *n += 1;
     }
     let mut cache: HashMap<usize, Value> = HashMap::new();
     let mut tree = |b: usize| -> Result<Value, String> {
@@ -256,6 +249,39 @@ pub fn augment(dir: &Path, ctx: &Json, calls: &mut [Call]) -> Result<Option<(Jso
         }
         Ok(cache[&b].clone())
     };
+    augment_trees(ctx, calls, &mut |c: &Call| Ok((tree(c.frame)?, Some(tree(c.frame + 1)?))), None).map(Some)
+}
+
+/// The `/5` arrays of calls on a live world (harness A's provider calls, DAgger relabels):
+/// `start` is the frame's start (`fs_*_in`), `end`, when given, its end (`fs_*_out`).
+/// With `columns` (a training manifest's `full_state_columns`), exactly those columns and
+/// that static split are written (NaN for a column the world lacks), so a live call matches
+/// the recorded calls a model was trained on; without, the split is this call's own
+/// (columns constant from start to end are static). Every call is on the same frame.
+pub fn augment_live(start: &World, end: Option<&World>, ctx: &Json, calls: &mut [Call], columns: Option<&Json>) -> Result<(Json, Vec<(String, Arr)>), String> {
+    let t0 = contract_value(start)?;
+    let t1 = end.map(contract_value).transpose()?;
+    augment_trees(ctx, calls, &mut |_: &Call| Ok((t0.clone(), t1.clone())), columns)
+}
+
+type Trees<'a> = dyn FnMut(&Call) -> Result<(Value, Option<Value>), String> + 'a;
+
+fn names_of(columns: &Json, k: &str) -> Vec<String> {
+    columns[k].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default()
+}
+
+fn augment_trees(ctx: &Json, calls: &mut [Call], trees: &mut Trees, columns: Option<&Json>) -> Result<(Json, Vec<(String, Arr)>), String> {
+    // bond (structure, source) -> its index in the structure's bond list; endpoints as chunk keys.
+    let mut source_of: HashMap<(usize, usize), usize> = HashMap::new();
+    let mut by_structure: BTreeMap<usize, Vec<(usize, usize, usize)>> = BTreeMap::new();
+    let mut count: HashMap<usize, usize> = HashMap::new();
+    for k in ctx["bond_keys"].as_array().ok_or("bond_keys")? {
+        let (s, src, a, b) = (k[0].as_u64().unwrap_or(0) as usize, k[1].as_u64().unwrap_or(0) as usize, k[2].as_u64().unwrap_or(0) as usize, k[3].as_u64().unwrap_or(0) as usize);
+        let n = count.entry(s).or_default();
+        source_of.insert((s, *n), src);
+        by_structure.entry(s).or_default().push((*n, a, b));
+        *n += 1;
+    }
     let mut pending: Vec<Pending> = Vec::with_capacity(calls.len());
     for c in calls.iter() {
         let chunks: Vec<(usize, usize)> = i64s(c, "chunk_key")?.iter().map(|&k| ((k >> 32) as usize, (k & 0xffff_ffff) as usize)).collect();
@@ -271,46 +297,72 @@ pub fn augment(dir: &Path, ctx: &Json, calls: &mut [Call]) -> Result<Option<(Jso
                 }
             }
         }
-        let t0 = tree(c.frame)?;
-        let t1 = tree(c.frame + 1)?;
-        pending.push(Pending { bond_key, sides: [side(&t0, &chunks, &bonds, &impactors)?, side(&t1, &chunks, &bonds, &impactors)?] });
-    }
-    let mut names: [BTreeSet<String>; 4] = Default::default();
-    for p in &pending {
-        for s in &p.sides {
-            s.chunk.names(&mut names[0]);
-            s.bond.names(&mut names[1]);
-            s.cluster.names(&mut names[2]);
-            s.impactor.names(&mut names[3]);
+        let (t0, t1) = trees(c)?;
+        let mut sides = vec![side(&t0, &chunks, &bonds, &impactors)?];
+        if let Some(t1) = t1 {
+            sides.push(side(&t1, &chunks, &bonds, &impactors)?);
         }
+        pending.push(Pending { bond_key, sides });
     }
-    let all: Vec<Vec<String>> = names.iter().map(|n| n.iter().cloned().collect()).collect();
-    // Static columns (chunks, bonds, impactors; clusters split and merge, so all theirs are
-    // per call) go to event-level tables once; the calls keep the rest.
-    let mut statics: Vec<(String, Arr)> = Vec::new();
-    let mut static_names: Vec<Vec<String>> = vec![Vec::new(); 4];
-    let mut cols: Vec<Vec<String>> = all.clone();
-    for (kind, name) in [(0usize, "chunk"), (1, "bond"), (3, "impactor")] {
-        let rows: Vec<(&[i64], &Rows)> = pending
+    let rows_of = |kind: usize| -> Vec<(&[i64], &Rows)> {
+        pending
             .iter()
             .flat_map(|p| p.sides.iter())
             .map(|s| match kind {
                 0 => (s.chunk_keys.as_slice(), &s.chunk),
                 1 => (s.bond_keys.as_slice(), &s.bond),
+                2 => (&[][..], &s.cluster),
                 _ => (s.impactor_keys.as_slice(), &s.impactor),
             })
-            .collect();
-        let (fixed, values) = static_columns(&rows, &all[kind]);
-        static_names[kind] = all[kind].iter().zip(&fixed).filter(|(_, &f)| f).map(|(c, _)| c.clone()).collect();
-        cols[kind] = all[kind].iter().zip(&fixed).filter(|(_, &f)| !f).map(|(c, _)| c.clone()).collect();
+            .collect()
+    };
+    // Columns: given (a training manifest's), or the union over these calls with the
+    // static split their boundaries show (static: the same value for each entity at every
+    // boundary; clusters split and merge, so all theirs are per call).
+    let (cols, static_names): (Vec<Vec<String>>, Vec<Vec<String>>) = match columns {
+        Some(c) => (
+            ["chunk", "bond", "cluster", "impactor"].iter().map(|k| names_of(c, k)).collect(),
+            ["static_chunk", "static_bond", "", "static_impactor"].iter().map(|k| if k.is_empty() { Vec::new() } else { names_of(c, k) }).collect(),
+        ),
+        None => {
+            let mut names: [BTreeSet<String>; 4] = Default::default();
+            for p in &pending {
+                for s in &p.sides {
+                    s.chunk.names(&mut names[0]);
+                    s.bond.names(&mut names[1]);
+                    s.cluster.names(&mut names[2]);
+                    s.impactor.names(&mut names[3]);
+                }
+            }
+            let all: Vec<Vec<String>> = names.iter().map(|n| n.iter().cloned().collect()).collect();
+            let mut cols = all.clone();
+            let mut stat = vec![Vec::new(); 4];
+            for kind in [0usize, 1, 3] {
+                let (fixed, _) = static_columns(&rows_of(kind), &all[kind]);
+                stat[kind] = all[kind].iter().zip(&fixed).filter(|(_, &f)| f).map(|(c, _)| c.clone()).collect();
+                cols[kind] = all[kind].iter().zip(&fixed).filter(|(_, &f)| !f).map(|(c, _)| c.clone()).collect();
+            }
+            (cols, stat)
+        }
+    };
+    let mut statics: Vec<(String, Arr)> = Vec::new();
+    for (kind, name) in [(0usize, "chunk"), (1, "bond"), (3, "impactor")] {
+        // each entity's static values, at the first boundary it appears in
+        let mut values: BTreeMap<i64, Vec<f64>> = BTreeMap::new();
+        let k = static_names[kind].len();
+        for (keys, r) in rows_of(kind) {
+            let m = r.matrix(&static_names[kind]);
+            for (j, &key) in keys.iter().enumerate() {
+                values.entry(key).or_insert_with(|| m[j * k..(j + 1) * k].to_vec());
+            }
+        }
         // bonds by `keys::bond_key` (structure, source), as fs_bond_key and the calls' bond_key
-        let keys: Vec<i64> = values.keys().map(|&k| if kind == 1 { stress_ref::keys::bond_key((k >> 32) as usize, source_of[&((k >> 32) as usize, (k & 0xffff_ffff) as usize)]) } else { k }).collect();
-        let data: Vec<f64> = values.values().flat_map(|v| v.iter().zip(&fixed).filter(|(_, &f)| f).map(|(x, _)| *x)).collect();
+        let keys: Vec<i64> = values.keys().map(|&key| if kind == 1 { stress_ref::keys::bond_key((key >> 32) as usize, source_of[&((key >> 32) as usize, (key & 0xffff_ffff) as usize)]) } else { key }).collect();
+        let data: Vec<f64> = values.values().flatten().copied().collect();
         statics.push((format!("fs_static_{name}_key"), Arr::I64(vec![keys.len()], keys.clone())));
         if kind == 1 {
             // Per-bond scales for nondimensional inputs, from its static columns.
             let col = |n: &str| static_names[1].iter().position(|c| c == n);
-            let k = static_names[1].len();
             let get = |row: &[f64], n: &str| col(n).map_or(f64::NAN, |i| row[i]);
             let scales: Vec<f64> = data
                 .chunks(k.max(1))
@@ -322,7 +374,7 @@ pub fn augment(dir: &Path, ctx: &Json, calls: &mut [Call]) -> Result<Option<(Jso
                 .collect();
             statics.push(("fs_static_bond_scale".into(), Arr::F64(vec![keys.len(), 6], scales)));
         }
-        statics.push((format!("fs_static_{name}"), Arr::F64(vec![keys.len(), static_names[kind].len()], data)));
+        statics.push((format!("fs_static_{name}"), Arr::F64(vec![keys.len(), k], data)));
     }
     for (c, p) in calls.iter_mut().zip(pending) {
         c.arrays.push(("fs_bond_key".into(), Arr::I64(vec![p.bond_key.len()], p.bond_key)));
@@ -342,11 +394,11 @@ pub fn augment(dir: &Path, ctx: &Json, calls: &mut [Call]) -> Result<Option<(Jso
             c.arrays.push((format!("fs_pair_local_{x}"), Arr::I64(vec![np, 2], s.pair_local)));
         }
     }
-    Ok(Some((json!({"chunk": cols[0], "bond": cols[1], "cluster": cols[2], "impactor": cols[3], "pair": ["offset", "x", "y", "z"],
+    Ok((json!({"chunk": cols[0], "bond": cols[1], "cluster": cols[2], "impactor": cols[3], "pair": ["offset", "x", "y", "z"],
         "pair_local": ["node_a", "node_b"],
         "static_bond_scale": ["u_c", "theta_c", "gf_area_tension", "gf_area_shear", "gf_area_compression", "f_t"],
         "scale_notes": "u_c = f_t A / k_n (m), theta_c = f_t S_t1 / k_b_t1 (rad), G_f A (J) per mode, f_t (Pa); kappa_fail is the joint law's kappa_fail(kind, r) with r = joint.ductility (tension/shear) or joint.ductility_c (compression): brittle max(r, 1), ductile (r + 1) / 2 (stress_ref::joint::kappa_fail); infinite ductility (at rest) -> infinite kappa_fail",
         "static_chunk": static_names[0], "static_bond": static_names[1], "static_impactor": static_names[3],
-        "static_rule": "columns with the same value for each entity at every boundary of the event: one row per entity in event_arrays fs_static_<kind> (keys fs_static_<kind>_key: chunk_key, bond_key, impactor index), left out of the calls", "pair_key": ["structure_a", "chunk_a", "structure_b", "chunk_b", "slot"],
-        "max_list": MAX_LIST, "rule": "every serialized field of the entity at the boundary (in: the frame's start, out: its end), flattened: a.b struct fields, a[i] list elements (lists longer than max_list left out), a=Variant one-hot enum variants (missing: 0), None and absent NaN; chunk columns prefixed @ are the world's per-chunk arrays"}), statics)))
+        "static_rule": "columns with the same value for each entity at every boundary of the event: one row per entity in event_arrays fs_static_<kind> (keys fs_static_<kind>_key: chunk_key, bond_key, impactor index), left out of the calls; augment_live with a training manifest's columns writes that same split", "pair_key": ["structure_a", "chunk_a", "structure_b", "chunk_b", "slot"],
+        "max_list": MAX_LIST, "rule": "every serialized field of the entity at the boundary (in: the frame's start, out: its end), flattened: a.b struct fields, a[i] list elements (lists longer than max_list left out), a=Variant one-hot enum variants (missing: 0), None and absent NaN; chunk columns prefixed @ are the world's per-chunk arrays"}), statics))
 }

@@ -285,3 +285,42 @@ fn full_state_calls_carry_the_islands_complete_state() {
     }
     assert!(checked_breaks > 0, "some bond breaks in a call");
 }
+
+/// A live `/5` call (harness A: `augment_live` on a world rebuilt from the recorded
+/// boundaries, with the training manifest's columns) equals the recorded call bit for bit,
+/// and its static rows are the event's for those entities.
+#[test]
+fn a_live_full_state_call_equals_the_recorded_one() {
+    use stress_learned::full_state::{load_frame, restore};
+    let (ev, _) = record("fs5live");
+    let e = build_event(&ev).unwrap();
+    let cols = e.manifest["full_state_columns"].clone();
+    let ctx: serde_json::Value = serde_json::from_slice(&std::fs::read(ev.join("context.json")).unwrap()).unwrap();
+    let scene: Scene = serde_json::from_slice(&std::fs::read(ev.join("scene.json")).unwrap()).unwrap();
+    let bits = |a: &Arr| match a {
+        Arr::F64(s, d) => (s.clone(), d.iter().map(|v| v.to_bits()).collect::<Vec<_>>()),
+        Arr::F32(s, d) => (s.clone(), d.iter().map(|v| u64::from(v.to_bits())).collect()),
+        Arr::I32(s, d) => (s.clone(), d.iter().map(|&v| v as u64).collect()),
+        Arr::I64(s, d) => (s.clone(), d.iter().map(|&v| v as u64).collect()),
+    };
+    let ev_arr = |n: &str| e.event_arrays.iter().find(|(k, _)| k == n).map(|(_, a)| a.clone()).unwrap();
+    for c in e.calls.iter().step_by(3).take(4) {
+        let (w0, w1) = (restore(&scene, &load_frame(&ev, c.frame).unwrap()).unwrap(), restore(&scene, &load_frame(&ev, c.frame + 1).unwrap()).unwrap());
+        let mut live = c.clone();
+        live.arrays.retain(|(k, _)| !k.starts_with("fs_"));
+        let (_, statics) = stress_learned::full_state_calls::augment_live(&w0, Some(&w1), &ctx, std::slice::from_mut(&mut live), Some(&cols)).unwrap();
+        for (k, a) in c.arrays.iter().filter(|(k, _)| k.starts_with("fs_")) {
+            assert_eq!(live.array(k).map(bits), Some(bits(a)), "frame {}: {k}", c.frame);
+        }
+        // static rows: the event's rows of the same keys
+        for kind in ["chunk", "bond", "impactor"] {
+            let (Arr::I64(_, lk), Arr::F64(ls, lv)) = (statics.iter().find(|(k, _)| *k == format!("fs_static_{kind}_key")).unwrap().1.clone(), statics.iter().find(|(k, _)| *k == format!("fs_static_{kind}")).unwrap().1.clone()) else { panic!() };
+            let (Arr::I64(_, ek), Arr::F64(_, evv)) = (ev_arr(&format!("fs_static_{kind}_key")), ev_arr(&format!("fs_static_{kind}"))) else { panic!() };
+            let w = ls[1];
+            for (j, key) in lk.iter().enumerate() {
+                let r = ek.iter().position(|x| x == key).unwrap();
+                assert!(lv[j * w..(j + 1) * w].iter().zip(&evv[r * w..(r + 1) * w]).all(|(a, b)| a.to_bits() == b.to_bits()), "{kind} {key}: static row");
+            }
+        }
+    }
+}
