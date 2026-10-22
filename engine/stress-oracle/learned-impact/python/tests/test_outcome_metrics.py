@@ -138,7 +138,8 @@ def test_quiet_calls_are_scored_apart(tmp_path):
     evs = [S.load_event(p) for p in S.find_events(tmp_path)]
     b = collate_events(evs, HierarchyCache(2))
     torch.manual_seed(0)
-    res = M.evaluate(ImpactOutcomeModel(), [b])  # near-zero init: predicts no breaks
+    from learned_impact.outcome.model import ModelConfig
+    res = M.evaluate(ImpactOutcomeModel(ModelConfig(variant="A")), [b])  # near-zero init: no breaks
     fam = res.per_family["synthetic_wall"]
     assert fam["n_active"] >= 1 and fam["n_quiet"] >= 1
     assert "skill_over_bar_partition" in fam and "skill_over_bar_partition_quiet" in fam

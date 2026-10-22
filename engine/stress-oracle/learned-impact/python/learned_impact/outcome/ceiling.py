@@ -310,3 +310,47 @@ def decode_ceiling(c: S.Call, structures, doc: dict, cfg: D.DecodeConfig | None 
     out = targets_to_outputs(b)
     dec = D.decode(out, b, cfg or D.DecodeConfig())
     return IO.decoded_states(b, out, dec, {"model": "decode-ceiling"})[0]
+
+
+def marginal_rule_ceiling(batches: list[Batch], taus=(0.2, 0.3, 0.4, 0.5, 0.6),
+                          sample_seeds=(0, 1, 2, 3)) -> dict:
+    """The break rule's own ceiling, no model: decode the oracle ensemble's *marginal* break
+    frequency p̄ (calls where the members are aligned) by a threshold p̄ ≥ τ, or by
+    hash-seeded Bernoulli sampling u(key, seed) < p̄, and score the partition and fragment
+    sizes against the members with the calibrated gates. A rule that fails here fails for
+    any model, however well calibrated (P0: most breaking bonds are uncertain)."""
+    rules = [("member's own breaks", None, None)]
+    rules += [(f"threshold p̄ ≥ {tau}", tau, None) for tau in taus]
+    rules += [(f"Bernoulli sample (seed {s})", None, s) for s in sample_seeds]
+    out_rows = {}
+    for name, tau, seed in rules:
+        rows, bp, by = [], [], []
+        for b in batches:
+            out = targets_to_outputs(b)
+            freq = b.t["y_bond_freq"].double()
+            has = b.t["y_bond_has_freq"]
+            own = b.t["y_bond_broke"] > 0
+            if tau is not None:
+                brk = torch.where(has, freq >= tau, own)
+            elif seed is not None:
+                u = D.hash_uniform(b.t["bond_key"], seed + 7919 * 0)
+                # one draw per member: the seed also depends on the member, so members differ
+                mem = torch.tensor([c.ensemble_member or 0 for c in b.calls]
+                                   + [0] * (b.n_calls - len(b.calls)))[b.t["bond_call"]]
+                u = D.hash_uniform(b.t["bond_key"] * 64 + mem, seed)
+                brk = torch.where(has, u < freq, own)
+            else:
+                brk = own
+            out["bond_log_q"] = torch.where(brk, 1.0, -1.0).double()
+            dec = D.decode(out, b, D.DecodeConfig())
+            rows.extend(M._per_call_outcomes(b, dec))
+            bv = b.t["bond_valid"].numpy()
+            bp.append(dec["bond_broke"].numpy().astype(float)[bv])
+            by.append(np.where(b.t["y_bond_has_freq"].numpy(), b.t["y_bond_freq"].numpy(),
+                               own.numpy().astype(float))[bv])
+        s = M._summarise(rows, bp, by, [np.zeros(0)], [np.zeros(0)], 0, 1)
+        keep = ("skill_over_bar_partition", "skill_over_bar_sizes", "pass_partition",
+                "pass_sizes", "fragments_in_range", "bond_recall", "bond_precision", "bond_f1",
+                "n_active", "skill_over_bar_partition_quiet")
+        out_rows[name] = {k: s.metrics.get(k) for k in keep}
+    return out_rows

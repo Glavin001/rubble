@@ -20,7 +20,7 @@ def test_overfit_four_events_cpu():
     calls = [c for c in calls if c.call_index == 0]
     b = batch_of(calls, st)
     assert (b.t["y_bond_broke"] > 0).any()
-    m = ImpactOutcomeModel(ModelConfig(width=32))
+    m = ImpactOutcomeModel(ModelConfig(width=32, variant="A"))
     cfg = Lo.LossConfig()
     norms = Lo.zero_baselines([b], cfg)
     opt = torch.optim.AdamW(m.parameters(), lr=3e-3)

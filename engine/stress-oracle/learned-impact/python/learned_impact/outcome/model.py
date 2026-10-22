@@ -38,7 +38,7 @@ class ModelConfig:
     # (3, 2, 2, 2, 3) = 12 rounds.
     rounds: tuple[int, ...] = (2, 1, 2, 1, 2)
     levels: int = 2
-    variant: str = "A"  # "A" impact-only, "B" residual over the QS frame outcome
+    variant: str = "B"  # "B" residual over the QS frame outcome (default since the P0 step-5 pilot), "A" impact-only
     n_time_bins: int = S.N_TIME_BINS
     use_global: bool = True
     edge_types: tuple[str, ...] = S.EDGE_TYPES

@@ -118,6 +118,20 @@ class Data:
         self.events = [S.load_event(p) for p in S.find_events(dataset)]
         if not self.events:
             raise S.SchemaError(f"no events under {dataset}")
+        # Ensemble soft labels (break frequency, perforation frequency, members' exit
+        # velocities), aggregated in memory: the dataset on disk is never rewritten.
+        from .ensemble import aggregate
+
+        groups: dict[str, list[S.Event]] = defaultdict(list)
+        for e in self.events:
+            if e.manifest.get("ensemble_id"):
+                groups[e.manifest["ensemble_id"]].append(e)
+        self.ensemble_aligned_calls = 0
+        for evs in groups.values():
+            for e in evs:
+                for c in e.calls:
+                    c.arrays = dict(c.arrays)
+            self.ensemble_aligned_calls += aggregate(evs)
         self.structures = {e.manifest["event_id"]: e.structures for e in self.events}
         keep = (lambda c: True) if include_unrouted else (lambda c: c.routed)
         self.train = [c for e in self.events if e.manifest["split"] == "train"
@@ -512,7 +526,7 @@ def main(argv=None) -> None:
     ap.add_argument("--rounds", default="2,1,2,1,2")
     ap.add_argument("--levels", type=int, default=2)
     ap.add_argument("--reference", action="store_true", help="W64, rounds 3,2,2,2,3")
-    ap.add_argument("--variant", default="A", choices=["A", "B"])
+    ap.add_argument("--variant", default="B", choices=["A", "B"])
     ap.add_argument("--seeds", default="0")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--noise", type=float, default=0.0)
@@ -524,6 +538,8 @@ def main(argv=None) -> None:
     ap.add_argument("--energy-tolerance", type=float, default=0.05)
     ap.add_argument("--break-mode", default="threshold", choices=["threshold", "sample"])
     ap.add_argument("--balance", default="fixed", choices=["fixed", "uncertainty"])
+    ap.add_argument("--break-margin", type=float, default=0.2,
+                    help="broken bonds must reach log q̂ ≥ this (0 = the plain censored hinge)")
     a = ap.parse_args(argv)
     dataset = a.dataset
     if a.synthetic:
@@ -551,6 +567,7 @@ def main(argv=None) -> None:
                                                 break_mode=a.break_mode))
         cfg.loss.energy_tolerance = a.energy_tolerance
         cfg.loss.balance = a.balance
+        cfg.loss.break_margin = a.break_margin
         r = train(cfg, data)
         print(json.dumps({"seed": s, "best_score": r["best"]["score"],
                           "best_step": r["best"]["step"]}))
