@@ -140,6 +140,8 @@ pub enum Stub {
     /// The punch's plug as an outcome: its bonds broken, the plug and the impactor at their
     /// common (inelastic) velocity.
     Punch = 2,
+    /// NaN outputs: every call falls back to the punch (a test of the gate).
+    NonFinite = 3,
 }
 
 impl Stub {
@@ -149,7 +151,8 @@ impl Stub {
             Err(_) => Ok(None),
             Ok("zero") => Ok(Some(Stub::Zero)),
             Ok("punch") => Ok(Some(Stub::Punch)),
-            Ok(other) => Err(format!("STRESS_LEARNED_STUB={other}: expected zero or punch")),
+            Ok("nonfinite") => Ok(Some(Stub::NonFinite)),
+            Ok(other) => Err(format!("STRESS_LEARNED_STUB={other}: expected zero, punch or nonfinite")),
         }
     }
 }

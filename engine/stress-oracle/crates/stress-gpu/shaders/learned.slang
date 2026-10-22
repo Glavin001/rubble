@@ -1381,6 +1381,7 @@ void learned_finish(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 
 // The network's place before its weights exist (`STRESS_LEARNED_STUB`):
 //   1 zero: every output 0 (ballistic motion, no break);
+//   3 nonfinite: NaN outputs (a test of the fallback gate);
 //   2 punch: the punch's idea as an outcome: per impactor, the chunks within its face
 //     radius of its path from the struck depth on are a plug; the bonds holding the plug
 //     break; the plug and the impactor leave at their common (inelastic) velocity.
@@ -1412,6 +1413,14 @@ void learned_stub(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         bonds[BOND_F4 * k] = float4(b0.x, -30.0, 0.0, asfloat(1u));
     }
     DeviceMemoryBarrierWithGroupSync();
+    // 3 nonfinite (a test of the fallback gate): every output NaN
+    if (group_uniform(params.stub == 3 ? 1u : 0u, t) != 0)
+    {
+        float nan = float_bits(0x7fc00000u);
+        for (uint j = t; j < n; j += G)
+            nodes[NODE_F4 * (first + j) + 5] = float4(nan);
+        return;
+    }
     if (group_uniform(params.stub == 2 ? 1u : 0u, t) == 0)
         return;
     // the plug of the call's first impactor (the call's nodes after its chunks)

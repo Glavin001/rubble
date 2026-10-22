@@ -322,6 +322,7 @@ impl Gpu {
     /// Byte ranges `(buffer, offset, size)` read back with one submission and one wait
     /// (each `read_range` costs a round trip of its own).
     pub fn read_ranges(&self, parts: &[(&wgpu::Buffer, u64, u64)]) -> Vec<Vec<u8>> {
+        READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let sizes: Vec<u64> = parts.iter().map(|p| p.2.div_ceil(4) * 4).collect();
         let total: u64 = sizes.iter().sum();
         if total == 0 {
@@ -364,6 +365,7 @@ impl Gpu {
 
     /// Elements `[first, first + count)` of a buffer of `T`.
     pub fn read_range<T: bytemuck::Pod>(&self, buffer: &wgpu::Buffer, first: usize, count: usize) -> Vec<T> {
+        READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let offset = (first * std::mem::size_of::<T>()) as u64;
         let size = ((count * std::mem::size_of::<T>()) as u64).div_ceil(4) * 4;
         if size == 0 {
@@ -463,6 +465,15 @@ impl Staged {
 }
 
 /// Workgroups covering `n` items at `size` per group.
+/// Read-backs (`Gpu::read_ranges` / `read_range`, each one wait on the GPU) since the
+/// process started, on every device: the frame's one-read rule is checked against it.
+pub static READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `READS` now.
+pub fn reads() -> u64 {
+    READS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn groups(n: usize, size: u32) -> u32 {
     (n as u32).div_ceil(size).max(1)
 }

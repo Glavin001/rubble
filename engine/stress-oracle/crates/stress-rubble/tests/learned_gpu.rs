@@ -20,6 +20,8 @@ struct Run {
     coupled: u64,
     totals: stress_gpu::learned::Totals,
     digest: u64,
+    /// Read-backs (`Gpu::read_ranges` / `read_range`) per frame after the first.
+    reads: Vec<u64>,
 }
 
 fn run(scene: stress_ref::scene::Scene) -> Run {
@@ -36,8 +38,13 @@ fn run(scene: stress_ref::scene::Scene) -> Run {
     w.apply_profile(p);
     w.set_tiered(true).expect("tiered coupling");
     let frames = (scene.sim.duration / scene.sim.frame_dt).round() as usize;
-    for _ in 0..frames {
+    let mut reads = Vec::new();
+    for f in 0..frames {
+        let before = stress_gpu::gpu::reads();
         w.step_frame(&gpu).expect("frame");
+        if f > 0 {
+            reads.push(stress_gpu::gpu::reads() - before);
+        }
     }
     w.sync(&gpu);
     let o = w.observation();
@@ -58,7 +65,7 @@ fn run(scene: stress_ref::scene::Scene) -> Run {
         }
     }
     eprintln!("ram {ram:.2} m/s, {fragments} fragments, {} resident frames, {} coupled, learned {totals:?}", w.resident_frames, w.coupled_frames);
-    Run { ram, fragments, coupled: w.coupled_frames, totals, digest: h.finish() }
+    Run { ram, fragments, coupled: w.coupled_frames, totals, digest: h.finish(), reads }
 }
 
 #[test]
@@ -73,10 +80,14 @@ fn learned_stub_runs_the_free_wall_and_the_wall_row() {
     assert_eq!(free.totals.fallbacks, 0, "no call fell back");
     assert!(free.totals.applied > 0 && free.totals.broken > 0, "a call broke the plug out at its window end");
     assert!(free.ram.is_finite() && free.fragments >= 2.0);
+    // Every resident frame, the call's frames included: one read (the frame's status, the
+    // routing flag and the batch's control words together).
+    assert!(free.reads.iter().all(|&r| r == 1), "reads per frame {:?}", free.reads);
     // Deterministic: the same run twice, the same end state.
     let again = run(realtime(later(wall_ram_late(), 2), 0.25));
     assert_eq!(free.digest, again.digest, "two runs differ");
     let row = run(realtime(later(wall_row_late(2), 2), 0.25));
     assert!(row.totals.calls > 0 && row.totals.applied > 0);
     assert!(row.ram.is_finite());
+    assert!(row.reads.iter().all(|&r| r == 1), "reads per frame {:?}", row.reads);
 }
