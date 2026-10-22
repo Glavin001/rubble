@@ -372,8 +372,8 @@ def evaluate(model, batches, decode_cfg: D.DecodeConfig | None = None,
         dev = next(model.parameters()).device
         bd = b.to(dev)
         out = model(bd)
-        bc = bd if dev.type != "mps" else bd.to("cpu")
-        out = {k: v.cpu() for k, v in out.items()} if dev.type == "mps" else out
+        bc = bd if dev.type == "cpu" else bd.to("cpu")
+        out = {k: v.cpu() for k, v in out.items()} if dev.type != "cpu" else out
         dec = D.decode(out, bc, dcfg)
         bound_active += int(dec["energy_bound_active"][:len(bc.calls)].sum())
         bound_total += len(bc.calls)
@@ -564,7 +564,7 @@ def three_way(model, batches, decode_cfg: D.DecodeConfig | None = None,
     for b in batches:
         bd = b.to(dev)
         out = model(bd)
-        bc = bd if dev.type != "mps" else bd.to("cpu")
+        bc = bd if dev.type == "cpu" else bd.to("cpu")
         out = {k: v.cpu() for k, v in out.items()}
         dec = D.decode(out, bc, dcfg)
         bounds[0] += int(dec["energy_bound_active"][:len(bc.calls)].sum())
