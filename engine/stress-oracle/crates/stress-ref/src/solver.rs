@@ -2605,3 +2605,174 @@ mod tests {
         }
     }
 }
+
+// ------------------------------------------------------------------ island state (harness A)
+
+/// The solver's share of an island's full state at a frame's end (the learned-impact
+/// harness A boundary, `World::step_frame_island_provider`): every per-chunk, per-bond and
+/// per-cluster field of the island's chunks, bonds and clusters, verbatim, and the cluster
+/// records with their places in the cluster list (`hint`, from a world stepped natively;
+/// a model's state may leave them `None`).
+#[derive(Clone, Debug)]
+pub struct SolverIsland {
+    pub chunks: Vec<((usize, usize), ChunkState)>,
+    pub chunk_bonds: Vec<((usize, usize), Vec<usize>)>,
+    f_int: Vec<((usize, usize), (Vec3, Vec3))>,
+    turns: Vec<((usize, usize), ChunkTurn)>,
+    pub bonds: Vec<((usize, usize), RtBond)>,
+    multirate: Vec<((usize, usize), (u32, u32, u32))>,
+    pub clusters: Vec<(Option<usize>, Cluster)>,
+    step_bounds: Vec<(u64, (Vec<usize>, Vec<usize>, Vec<u64>, f64))>,
+    pub next_cluster_id: u64,
+}
+
+impl ReferenceSolver {
+    fn cluster_in(&self, cl: &Cluster, set: &std::collections::HashSet<(usize, usize)>) -> bool {
+        cl.chunks.first().is_some_and(|&c| set.contains(&(cl.structure, c)))
+    }
+
+    /// The island's state in this solver (`set`: the island's chunks).
+    pub fn extract_island(&self, set: &std::collections::HashSet<(usize, usize)>) -> SolverIsland {
+        let mut keys: Vec<(usize, usize)> = set.iter().copied().collect();
+        keys.sort_unstable();
+        let in_bond = |s: usize, b: &RtBond| set.contains(&(s, b.geometry.a)) || set.contains(&(s, b.geometry.b));
+        let mut bonds = Vec::new();
+        let mut multirate = Vec::new();
+        for (s, list) in self.bonds.iter().enumerate() {
+            for (bi, b) in list.iter().enumerate() {
+                if in_bond(s, b) {
+                    bonds.push(((s, bi), b.clone()));
+                    if let (Some(r), Some(n), Some(l)) = (self.multirate.rate.get(s).and_then(|v| v.get(bi)), self.multirate.next.get(s).and_then(|v| v.get(bi)), self.multirate.last.get(s).and_then(|v| v.get(bi))) {
+                        multirate.push(((s, bi), (*r, *n, *l)));
+                    }
+                }
+            }
+        }
+        let clusters: Vec<(Option<usize>, Cluster)> = self.clusters.iter().enumerate().filter(|(_, cl)| self.cluster_in(cl, set)).map(|(i, cl)| (Some(i), cl.clone())).collect();
+        let ids: std::collections::HashSet<u64> = clusters.iter().map(|(_, c)| c.id).collect();
+        let mut step_bounds: Vec<(u64, (Vec<usize>, Vec<usize>, Vec<u64>, f64))> = self.step_bounds.0.lock().unwrap().iter().filter(|(k, _)| ids.contains(k)).map(|(k, v)| (*k, v.clone())).collect();
+        step_bounds.sort_by_key(|e| e.0);
+        SolverIsland {
+            chunks: keys.iter().map(|&(s, c)| ((s, c), self.chunks[s][c])).collect(),
+            chunk_bonds: keys.iter().map(|&(s, c)| ((s, c), self.chunk_bonds[s][c].clone())).collect(),
+            f_int: keys.iter().filter_map(|&(s, c)| self.f_int.get(s).and_then(|v| v.get(c)).map(|x| ((s, c), *x))).collect(),
+            turns: keys.iter().filter_map(|&(s, c)| self.turns.get(s).and_then(|v| v.get(c)).map(|x| ((s, c), *x))).collect(),
+            bonds,
+            multirate,
+            clusters,
+            step_bounds,
+            next_cluster_id: self.next_cluster_id,
+        }
+    }
+
+    /// `host` (a frame stepped natively) with the island's state replaced by `st`. Every
+    /// field has its policy here (the destructuring is exhaustive): the island's per-element
+    /// state from `st`, the rest's from `host`, the globals (time, ledgers, logs, counters,
+    /// structure-level caches) from `host`. `set`: the island's chunks.
+    pub fn merge_island(host: &ReferenceSolver, st: &SolverIsland, set: &std::collections::HashSet<(usize, usize)>) -> ReferenceSolver {
+        let ReferenceSolver {
+            config,
+            structures,
+            mut chunks,
+            mut bonds,
+            mut chunk_bonds,
+            clusters,
+            time,
+            energy,
+            events,
+            replacements,
+            handovers,
+            next_cluster_id,
+            mut f_int,
+            pending_split,
+            substeps,
+            max_utilization,
+            true_steps,
+            mut turns,
+            mass_damping,
+            unchanged,
+            step_bounds,
+            mut multirate,
+            bond_evaluations,
+        } = host.clone();
+        for &((s, c), x) in &st.chunks {
+            chunks[s][c] = x;
+        }
+        for ((s, c), x) in &st.chunk_bonds {
+            chunk_bonds[*s][*c] = x.clone();
+        }
+        for &((s, c), x) in &st.f_int {
+            if let Some(v) = f_int.get_mut(s).and_then(|v| v.get_mut(c)) {
+                *v = x;
+            }
+        }
+        for &((s, c), x) in &st.turns {
+            if let Some(v) = turns.get_mut(s).and_then(|v| v.get_mut(c)) {
+                *v = x;
+            }
+        }
+        for ((s, b), x) in &st.bonds {
+            bonds[*s][*b] = x.clone();
+        }
+        for &((s, b), (r, n, l)) in &st.multirate {
+            if let (Some(a), Some(bb), Some(cc)) = (multirate.rate.get_mut(s).and_then(|v| v.get_mut(b)), multirate.next.get_mut(s).and_then(|v| v.get_mut(b)), multirate.last.get_mut(s).and_then(|v| v.get_mut(b))) {
+                (*a, *bb, *cc) = (r, n, l);
+            }
+        }
+        // Clusters: the rest's where the host has them; the island's at their hinted places
+        // when those are exactly the places the host's island clusters hold (a native step's
+        // order), else after the rest's.
+        let host_island: Vec<usize> = clusters.iter().enumerate().filter(|(_, cl)| cl.chunks.first().is_some_and(|&c| set.contains(&(cl.structure, c)))).map(|(i, _)| i).collect();
+        let mut hints: Vec<usize> = st.clusters.iter().filter_map(|(h, _)| *h).collect();
+        hints.sort_unstable();
+        let clusters = if st.clusters.iter().all(|(h, _)| h.is_some()) && hints == host_island {
+            let mut out = clusters;
+            for (h, cl) in &st.clusters {
+                out[h.unwrap()] = cl.clone();
+            }
+            out
+        } else {
+            let mut out: Vec<Cluster> = clusters.into_iter().enumerate().filter(|(i, _)| !host_island.contains(i)).map(|(_, c)| c).collect();
+            out.extend(st.clusters.iter().map(|(_, c)| c.clone()));
+            out
+        };
+        for (i, cl) in clusters.iter().enumerate() {
+            for &c in &cl.chunks {
+                chunks[cl.structure][c].cluster = i;
+            }
+        }
+        let ids: std::collections::HashSet<u64> = clusters.iter().filter(|cl| cl.chunks.first().is_some_and(|&c| set.contains(&(cl.structure, c)))).map(|c| c.id).collect();
+        {
+            let mut m = step_bounds.0.lock().unwrap();
+            m.retain(|k, _| !ids.contains(k));
+            for (k, v) in &st.step_bounds {
+                m.insert(*k, v.clone());
+            }
+        }
+        ReferenceSolver {
+            config,
+            structures,
+            chunks,
+            bonds,
+            chunk_bonds,
+            clusters,
+            time,
+            energy,
+            events,
+            replacements,
+            handovers,
+            next_cluster_id: next_cluster_id.max(st.next_cluster_id),
+            f_int,
+            pending_split,
+            substeps,
+            max_utilization,
+            true_steps,
+            turns,
+            mass_damping,
+            unchanged,
+            step_bounds,
+            multirate,
+            bond_evaluations,
+        }
+    }
+}
