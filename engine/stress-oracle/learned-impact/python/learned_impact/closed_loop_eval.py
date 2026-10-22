@@ -353,6 +353,10 @@ def markdown(agg: dict, meta: dict) -> str:
     for fam, row in agg.items():
         lines.append(f"## {fam} ({row['ensembles']} ensembles)")
         lines.append("")
+        if "ceiling" in row and not row["ceiling"]["accept_all"]:
+            bad = ", ".join(m for m, ok in row["ceiling"]["accept"].items() if not ok)
+            lines.append(f"**Boundary problem: the ceiling (the oracle through the call boundary) fails the gate on {bad}.** A model cannot be accepted where the perfect model is not; fix the boundary before training on this family.")
+            lines.append("")
         metrics = list(row["oracle_member"])
         lines.append("| Candidate | runs | accepted | " + " | ".join(metrics) + " | regime agree | fragments in range | KE ok | momentum ok | damage monotone | finite | fallbacks |")
         lines.append("|---|---|---|" + "---|" * len(metrics) + "---|---|---|---|---|---|---|")
@@ -389,6 +393,10 @@ def main(argv=None):
     p.add_argument("--note", default="")
     a = p.parse_args(argv)
     cands = a.candidates.split(",")
+    # The ceiling is a standing column: a family whose ceiling fails the gate has a boundary
+    # problem (the call interface loses what the outcome needs), not a training problem.
+    if "ceiling" not in cands:
+        cands = ["ceiling"] + cands
     if "model" in cands and not a.checkpoint:
         raise SystemExit("--candidates model needs --checkpoint")
     ensembles = validation_ensembles(a.runs, a.split, a.max_ensembles)
