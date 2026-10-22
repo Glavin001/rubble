@@ -36,7 +36,7 @@ def test_builds_once_rebuilds_on_change_and_evicts(tmp_path, monkeypatch):
     builder.chmod(builder.stat().st_mode | stat.S_IEXEC)
     log = tmp_path / "log"
     monkeypatch.setenv("FAKE_LOG", str(log))
-    cache = CallCache(tmp_path / "cache", max_gb=2.5e-6, builder=builder)  # room for two events
+    cache = CallCache(tmp_path / "cache", max_gb=2.5 * 16e3 / 1e9, builder=builder)  # room for two events (4 KB blocks x 4 files)
     a, b, c = make(tmp_path, "a"), make(tmp_path, "b"), make(tmp_path, "c")
     assert (cache.path(a) / "manifest.json").exists()
     cache.path(a)
@@ -52,3 +52,23 @@ def test_builds_once_rebuilds_on_change_and_evicts(tmp_path, monkeypatch):
     (a / "outcome.json").write_text(json.dumps({"fingerprint": "changed"}))
     cache.path(a)
     assert log.read_text().splitlines()[-1] == "a", "a changed event is rebuilt"
+
+
+def test_a_stream_builds_ahead_in_order_within_the_budget(tmp_path, monkeypatch):
+    from learned_impact.outcome_calls_cache import CallStream
+    builder = tmp_path / "builder"
+    builder.write_text(FAKE)
+    builder.chmod(builder.stat().st_mode | stat.S_IEXEC)
+    log = tmp_path / "log"
+    monkeypatch.setenv("FAKE_LOG", str(log))
+    # room for 4 events (one 1000-byte file each: 4 KB blocks with the manifest and stamps)
+    cache = CallCache(tmp_path / "cache", max_gb=4 * 16e3 / 1e9, builder=builder)
+    evs = [make(tmp_path, f"e{i:02d}") for i in range(10)]
+    seen = []
+    for d in CallStream(cache, evs, ahead=2, batch=2):
+        assert (d / "manifest.json").exists(), "a yielded call is on disk"
+        seen.append(d.name)
+    assert seen == [e.name for e in evs]
+    built = [line.split() for line in log.read_text().splitlines()]
+    assert sum(len(b) for b in built) == 10 and all(len(b) <= 2 for b in built), "built once each, in batches"
+    assert cache.bytes() <= 6 * 16e3, "the cache stays bounded"
