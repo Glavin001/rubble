@@ -19,6 +19,7 @@ until it settles, through P0's coupled harness (`learned_p0 event`), under each 
   a_model_start  a /5 checkpoint with STRESS_FULL_BASE=start (no oracle values)
   a_model_rigid  a /5 checkpoint with rigid bodies (STRESS_FULL_DEFORMATION=0)
   a_model_bound  a /5 checkpoint with the host's energy bound (STRESS_FULL_ENERGY_BOUND=0.05)
+  a_model_table  a /5 checkpoint with its body table applied (STRESS_FULL_BODIES=table)
   a_model / a_model_def  harness A with the checkpoint (/3 decoded state; `_def` keeps the
            decoded deformation)
   coupled  (diagnostic) the oracle's own coupled frame, no call boundary: what the coupling
@@ -201,7 +202,7 @@ def candidate_args(name: str, a, out: Path, event: str) -> tuple[list[str], dict
             # the oracle's outcome through decoded state /2 (the full-state contract's ceiling;
             # STRESS_FULL_PREDICTED limits it to a model's predicted columns)
             return ["--variant", "provider", "--provider", "oracle_full2", "--host", "a"], base
-        if name in ("a_model", "a_model_def", "a_model_start", "a_model_rigid", "a_model_bound"):
+        if name in ("a_model", "a_model_def", "a_model_start", "a_model_rigid", "a_model_bound", "a_model_table"):
             d = out / "provider" / name / event
             args = ["--variant", "provider", "--provider", "model", "--host", "a", "--checkpoint", str(a.checkpoint), "--dir", str(d), "--timeout", str(a.timeout), "--device", a.device]
             if a.python_dir:
@@ -215,6 +216,10 @@ def candidate_args(name: str, a, out: Path, event: str) -> tuple[list[str], dict
                 # with the host's energy bound (STRESS_FULL_ENERGY_BOUND: the island's KE +
                 # stored + gravity potential at most its start's plus 5%)
                 env = {**base, "STRESS_FULL_ENERGY_BOUND": "0.05"}
+            if name == "a_model_table":
+                # a /5 model's body table applied (its cluster head) even where its hidden
+                # state could derive the bodies
+                env = {**base, "STRESS_FULL_BODIES": "table"}
             if name == "a_model_start":
                 # a /5 model through decoded state /2 with the unpredicted fields from the frame
                 # start (no oracle information); a_model takes them from STRESS_FULL_BASE
