@@ -773,11 +773,29 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
                     if isl.contains(&stress_ref::world::stable_key(si, c)) { ki += e } else { ko += e }
                 }
             }
+            // the joint law's stored energy of every live bond now, and the deepest box corner
+            // below the ground
+            let all: HashSet<(usize, usize)> = w.solver.structures.iter().enumerate().flat_map(|(si, st)| (0..st.chunks.len()).map(move |c| (si, c))).collect();
+            let stored_now = w.solver.stored_energy_of(&all);
+            let mut pen = 0.0f64;
+            if let Some(g) = w.scene.ground.as_ref() {
+                for (si, st) in w.solver.structures.iter().enumerate() {
+                    for (c, ch) in st.chunks.iter().enumerate() {
+                        let cs = &w.solver.chunks[si][c];
+                        if !cs.active {
+                            continue;
+                        }
+                        let r = w.solver.clusters[cs.cluster].rotation() * stress_ref::math::Quat::from_rotation_vector(cs.th).to_mat3() * ch.rotation;
+                        let lowest = w.solver.chunk_position(si, c).z - (0..3).map(|k| r.m[2][k].abs() * ch.half_extents.to_array()[k]).sum::<f64>();
+                        pen = pen.max(g.height - lowest);
+                    }
+                }
+            }
             let (mut ii, mut io) = (0.0, 0.0);
             for (k, imp) in w.impactors.iter().enumerate() {
                 if routed_imps.contains(&(k as i64)) { ii += imp.kinetic_energy() } else { io += imp.kinetic_energy() }
             }
-            eprintln!("[ke] {}", json!({"frame": f + 1, "island_chunks": isl.len(), "ke_island_chunks": ki, "ke_island_impactors": ii, "ke_other_chunks": ko, "ke_other_impactors": io, "elastic": w.solver.elastic_energy(), "max_damage_live": w.solver.bonds.iter().flatten().filter(|b| b.connected()).map(|b| b.joint.damage).fold(0.0f64, f64::max), "e0": e0}));
+            eprintln!("[ke] {}", json!({"frame": f + 1, "island_chunks": isl.len(), "ke_island_chunks": ki, "ke_island_impactors": ii, "ke_other_chunks": ko, "ke_other_impactors": io, "elastic": w.solver.elastic_energy(), "stored_now": stored_now, "ground_penetration_max": pen, "max_damage_live": w.solver.bonds.iter().flatten().filter(|b| b.connected()).map(|b| b.joint.damage).fold(0.0f64, f64::max), "e0": e0}));
         }
         if std::env::var("STRESS_P0_WATCH_RAM").is_ok_and(|v| v == "1") {
             let imp = &w.impactors[0];

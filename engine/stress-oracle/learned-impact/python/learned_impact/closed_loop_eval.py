@@ -134,6 +134,8 @@ def oracle_state(ev, samples: list[int]) -> dict:
 
 def candidate_state(run: dict, samples: list[int]) -> dict:
     r = run["run"]
+    if r["checks"]["nonfinite"] > 0 or any(i.get("speed_along_v0") is None for i in r["impactors"]):
+        return {"failed": True}  # a nonfinite run (a blown-up state) fails every metric
     by = {s["frame"]: (np.array(s["chunk_pos"], np.float32), np.array(s["chunk_vel"], np.float32)) for s in r["samples"]}
     cl = np.array(r["chunk_cluster"])
     return {
@@ -352,6 +354,15 @@ def ensemble_scores(truth: list[dict], cands: dict[str, list[dict | None]], mass
         for i, c in enumerate(runs):
             if c is None:
                 continue
+            if c.get("failed"):
+                # a failed or nonfinite run: every metric fails (skill / bar unbounded)
+                for m in metrics:
+                    units[m].append((False, float("inf")))
+                if out["regime_majority"]:
+                    regime_hits.append(False)
+                in_range.append(False)
+                physics.append({"ke_ok": False, "momentum_ok": False, "damage_monotone": False, "finite": False, "fallbacks": 0, "energy_bound_active": 0})
+                continue
             ds = [distance(c, truth[j], mass, samples[i], anchored_family) for j in range(n)]
             for m in metrics:
                 if all(m in x for x in ds):
@@ -501,6 +512,7 @@ def main(argv=None):
     p.add_argument("--jobs", type=int, default=6)
     p.add_argument("--bin", type=Path, default=DEFAULT_BIN)
     p.add_argument("--note", default="")
+    p.add_argument("--score-only", action="store_true", help="score the cached runs only (no simulation; failed runs count as failing)")
     p.add_argument("--dump-island-states", action="store_true", help="a_model*: write each routed frame's exact island start state (<out>/states/<cand>/<member>/<frame>.msgpack, index.jsonl)")
     p.add_argument("--members", type=Path, help="JSON list of member names: run only these (scored against their whole ensembles)")
     a = p.parse_args(argv)
@@ -528,7 +540,7 @@ def main(argv=None):
     from .harness_refs import load_any
     events = {m.name: load_any(m) for m in members}
     samples = {name: sample_frames(ev) for name, ev in events.items()}
-    jobs = [(c, m) for c in cands for m in run_members if not (a.out / "runs" / c / f"{m.name}.json").exists()]
+    jobs = [] if a.score_only else [(c, m) for c in cands for m in run_members if not (a.out / "runs" / c / f"{m.name}.json").exists()]
     print(f"[cl-eval] {len(jobs)} runs to do ({len(cands) * len(run_members) - len(jobs)} already done)", flush=True)
     t0 = time.time()
     done = failed = 0
@@ -565,7 +577,9 @@ def main(argv=None):
             else:
                 done += 1
                 r = d["run"]
-                summary = f"exit {r['impactors'][0]['speed_along_v0']:.2f} m/s {r['impactors'][0]['regime']} fragments {r['fragments']} ke {r['checks']['ke_excess_over_e0']:+.3f}"
+                sp = r['impactors'][0]['speed_along_v0']
+                # (a nonfinite run, e.g. a blown-up model state, has no exit speed)
+                summary = f"exit {'nonfinite' if sp is None else f'{sp:.2f} m/s'} {r['impactors'][0]['regime']} fragments {r['fragments']} ke {r['checks']['ke_excess_over_e0']:+.3f}"
             el = time.time() - t0
             print(f"[cl-eval] {n}/{len(jobs)} | {c} {m.name}: {summary} | {dt:.0f} s | ETA {el / n * (len(jobs) - n) / 60:.0f} min | failures {failed}", flush=True)
     # Score.
@@ -584,7 +598,12 @@ def main(argv=None):
             lst = []
             for m, s in zip(ms, smp):
                 f = a.out / "runs" / c / f"{m.name}.json"
-                lst.append(candidate_state(json.loads(f.read_text()), s) if f.exists() else None)
+                if f.exists():
+                    lst.append(candidate_state(json.loads(f.read_text()), s))
+                elif (a.out / "runs" / c / f"{m.name}.err").exists():
+                    lst.append({"failed": True})  # the run failed: it fails every metric
+                else:
+                    lst.append(None)  # not run
             cruns[c] = lst
         scene = json.loads((evs[0].path / "scene.json").read_text())
         v0 = max(float(np.linalg.norm(i["velocity"])) for i in scene["impactors"])
