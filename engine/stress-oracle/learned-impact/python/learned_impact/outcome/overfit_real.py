@@ -257,8 +257,12 @@ def main(argv=None) -> None:
     d.train, d.val = calls, calls
     if a.extra_calls:
         from .dagger import load_relabelled
-        extra, st, n = load_relabelled(a.extra_calls)
-        d.structures.update(st)
+        extra, n = [], {"relabelled": 0, "admitted": 0}
+        for root_ in a.extra_calls.split(","):  # several rounds' relabels
+            ex, st, nn = load_relabelled(root_)
+            extra += ex
+            d.structures.update(st)
+            n = {k: n[k] + nn[k] for k in n}
         d.train = calls + extra
         print(f"[overfit] + {n['admitted']} of {n['relabelled']} relabelled (DAgger) calls "
               f"(the rest fail the oracle's energy balance)")
