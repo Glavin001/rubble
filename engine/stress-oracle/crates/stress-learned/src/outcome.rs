@@ -1116,6 +1116,39 @@ pub(crate) fn capture_inputs(world: &mut World, ix: &Index, f: usize, routing: O
 
 /// Record one event into `out/<event_id>` (written to `<event_id>.partial` and renamed
 /// when complete).
+/// One oracle frame captured as the recorder captures the rows a call's targets read
+/// (`frame_bond_break_bin`, the peak utilisations, the dissipation, then the frame-end
+/// state and trajectory), stepped as the recorder steps (`full_state::oracle_frame`). The
+/// relabelled call's targets (`outcome_calls::live_call_labelled`); the test
+/// `an_own_state_relabel_is_the_recorded_call` holds it to the recorder bit for bit.
+pub(crate) fn labelled_frame(world: &mut World, ix: &Index, f: usize, peak_prev: &[f32], a: &mut Arrays) -> Result<(), String> {
+    let frame_dt = world.scene.sim.frame_dt;
+    let t0 = world.solver.time;
+    let start_energy: Vec<(f64, f64)> = world.solver.bonds.iter().flatten().map(|b| (b.joint.dissipated, b.damped)).collect();
+    let events_before = world.solver.events.len();
+    crate::full_state::oracle_frame(world, |_| {})?;
+    ix.check(world)?;
+    let mut break_bin = vec![-1i32; ix.e];
+    for ev in &world.solver.events[events_before..] {
+        if let SolverEvent::Broken { time, structure, bond, .. } = ev {
+            let bin = (((time - t0) / frame_dt) * TIME_BINS as f64).floor().clamp(0.0, (TIME_BINS - 1) as f64) as i32;
+            let g = ix.bond0[*structure] + bond;
+            if break_bin[g] < 0 {
+                break_bin[g] = bin;
+            }
+        }
+    }
+    a.i("frame_bond_break_bin", &[ix.e], &break_bin)?;
+    let peak: Vec<f32> = world.solver.bonds.iter().flatten().map(|b| b.peak_utilization as f32).collect();
+    a.f("frame_bond_peak_util", &[ix.e], &peak)?;
+    a.f("frame_bond_peak_util_prev", &[ix.e], peak_prev)?;
+    let dissipated: Vec<f32> = world.solver.bonds.iter().flatten().zip(&start_energy).flat_map(|(b, &(j, d))| [(b.joint.dissipated - j) as f32, (b.damped - d) as f32]).collect();
+    a.f("frame_bond_dissipated", &[ix.e, 2], &dissipated)?;
+    capture_state(world, ix, a)?;
+    capture_traj(world, f + 1, a)?;
+    Ok(())
+}
+
 pub fn record_outcome_event(recipe: &OutcomeRecipe, out: &Path, opts: &RecordOptions, beat: &dyn Fn(&Beat)) -> Result<OutcomeSummary, String> {
     let t_event = Instant::now();
     let final_dir = out.join(&recipe.event_id);

@@ -120,6 +120,9 @@ impl Record {
                 "i32" => {
                     i.insert(name.clone(), (e.shape.clone(), catalog::read_i32(dir, e)?));
                 }
+                // Exact f64 copies of state, break times and impactor impulses: labels and
+                // restart data, not features.
+                "f64" => {}
                 d => return Err(format!("{name}: dtype {d}")),
             }
         }
@@ -1404,7 +1407,7 @@ pub fn live_call(world: &mut World, name: &str, ctx_from: &Value, chunk_keys: &[
 }
 
 /// `live_call`, and with `targets` the oracle's frame from that state as its targets: the
-/// world is stepped one frame (`outcome::oracle_frame`, exactly as the recorder steps and
+/// world is stepped one frame (`outcome::labelled_frame`, exactly as the recorder steps and
 /// records a frame) and left at the frame's end. DAgger relabelling (`relabel`).
 #[allow(clippy::too_many_arguments)]
 pub fn live_call_labelled(world: &mut World, name: &str, ctx_from: &Value, chunk_keys: &[i64], impactor_keys: &[i64], frame: usize, qs: bool, targets: bool) -> Result<CallEvent, String> {
@@ -1454,8 +1457,8 @@ pub fn live_call_labelled(world: &mut World, name: &str, ctx_from: &Value, chunk
     a.i("live_bond_frames_since_broken", &[ix.e], &since)?;
     a.i("frame_phase", &[], &[0])?;
     if targets {
-        let mut peak_prev: Vec<f32> = world.solver.bonds.iter().flatten().map(|b| b.peak_utilization as f32).collect();
-        crate::outcome::oracle_frame(world, &ix, 0, &mut peak_prev, &mut a)?;
+        let peak_prev: Vec<f32> = world.solver.bonds.iter().flatten().map(|b| b.peak_utilization as f32).collect();
+        crate::outcome::labelled_frame(world, &ix, 0, &peak_prev, &mut a)?;
     }
     for (k, x) in statics.f32s {
         a.f32s.insert(k, x);

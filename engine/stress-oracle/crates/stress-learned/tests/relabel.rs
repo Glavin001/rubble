@@ -130,10 +130,12 @@ fn an_own_state_relabel_is_the_recorded_call() {
     for (rec, r) in recorded.calls.iter().zip(&relabelled) {
         let call = &r.call.as_ref().expect("a call").calls[0];
         // (The punch baseline, `base_punch_*`, is the recorder's comparison branch: not a
-        // model input or target, and not built for a live call.)
-        let names = |c: &stress_learned::outcome_calls::Call| c.arrays.iter().map(|(k, _)| k.clone()).filter(|k| !k.starts_with("base_punch_")).collect::<Vec<_>>();
+        // model input or target, and not built for a live call. The /5 full-state arrays,
+        // `fs_*`, need P1's live entry point (pending); this compares the /4 call.)
+        let kept = |k: &str| !k.starts_with("base_punch_") && !k.starts_with("fs_");
+        let names = |c: &stress_learned::outcome_calls::Call| c.arrays.iter().map(|(k, _)| k.clone()).filter(|k| kept(k)).collect::<Vec<_>>();
         assert_eq!(names(call), names(rec), "frame {}: the same arrays", rec.frame);
-        for (k, a) in rec.arrays.iter().filter(|(k, _)| !k.starts_with("base_punch_")) {
+        for (k, a) in rec.arrays.iter().filter(|(k, _)| kept(k)) {
             let b = call.array(k).unwrap();
             if k == "y_impactor_regime" {
                 let Arr::I32(_, v) = b else { panic!() };

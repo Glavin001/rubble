@@ -2741,6 +2741,10 @@ impl ReferenceSolver {
             step_bounds,
             mut multirate,
             bond_evaluations,
+            // The recorder's per-structure load-impulse ledger: a diagnostic of the host's
+            // frame (structure-level, not the island's).
+            record_load_impulse,
+            load_impulse,
         } = host.clone();
         for &((s, c), x) in &st.chunks {
             chunks[s][c] = x;
@@ -2820,6 +2824,8 @@ impl ReferenceSolver {
             step_bounds,
             multirate,
             bond_evaluations,
+            record_load_impulse,
+            load_impulse,
         }
     }
 }

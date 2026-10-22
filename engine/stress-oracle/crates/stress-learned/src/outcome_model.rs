@@ -55,6 +55,7 @@ fn arr_of(blob: &[u8], spec: &Value) -> Result<Arr, String> {
         Some("f32") => Arr::F32(shape, f32s(blob, off, n)?),
         Some("i32") => Arr::I32(shape, get(4)?.chunks_exact(4).map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()),
         Some("i64") => Arr::I64(shape, get(8)?.chunks_exact(8).map(|c| i64::from_le_bytes(c.try_into().unwrap())).collect()),
+        Some("f64") => Arr::F64(shape, get(8)?.chunks_exact(8).map(|c| f64::from_le_bytes(c.try_into().unwrap())).collect()),
         other => return Err(format!("dtype {other:?}")),
     })
 }
@@ -113,7 +114,7 @@ pub fn read_event(dir: &Path) -> Result<CallEvent, String> {
     if let Some(o) = manifest.as_object_mut() {
         o.remove("structures");
     }
-    Ok(CallEvent { manifest, calls, structures })
+    Ok(CallEvent { manifest, calls, structures, event_arrays: Vec::new() })
 }
 
 // ------------------------------------------------------------------ dense rows
@@ -624,6 +625,7 @@ fn i64s(a: &Arr) -> Vec<i64> {
         Arr::I64(_, d) => d.clone(),
         Arr::I32(_, d) => d.iter().map(|&x| i64::from(x)).collect(),
         Arr::F32(_, d) => d.iter().map(|&x| x as i64).collect(),
+        Arr::F64(_, d) => d.iter().map(|&x| x as i64).collect(),
     }
 }
 

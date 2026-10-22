@@ -120,7 +120,7 @@ fn synthetic_island(t: &CallEvent, nx: usize, ny: usize, nz: usize) -> CallEvent
     counts.insert("bond".to_string(), nb);
     let call = Call { frame: 0, prev_call: None, phase: "contact".into(), transition: false, anchored: false, counts, scales: tc.scales.clone(), energy: tc.energy.clone(), arrays };
     let structures = vec![(0usize, (0..n as i64).collect(), (0..nb as i64).collect(), ends.iter().flat_map(|&(a, b)| [a as i32, b as i32]).collect(), pos)];
-    CallEvent { manifest: t.manifest.clone(), calls: vec![call], structures }
+    CallEvent { manifest: t.manifest.clone(), calls: vec![call], structures, event_arrays: Vec::new() }
 }
 
 fn main() {
