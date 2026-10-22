@@ -391,39 +391,41 @@ GROUP_TARGET = {"decision": 0.30, "motion": 0.30, "energy": 0.10, "fs_bond": 0.1
 
 
 class GroupBalancer:
-    """Keeps the term groups' gradient shares near GROUP_TARGET: every measurement (the
-    trainer's per-term gradient norms, weighted), each group's multiplier moves towards
-    target ÷ measured share (geometric EMA, clamped to [1e-2, 1e2]). Terms keep their
-    within-group weights and normalisation; only the groups' totals are balanced. Groups
-    absent from the batch (e.g. no full-state data) keep multiplier 1 and are excluded."""
+    """Keeps the term groups' gradient shares at GROUP_TARGET. Each measurement (the trainer's
+    per-group gradient norms of the weighted losses) is divided by the current multipliers to
+    recover each group's raw gradient norm; an EMA of those raw norms sets the multipliers in
+    closed form, multiplier ∝ target ÷ raw norm (geometric mean 1, clamped to [1e-3, 1e3]).
+    So the effective shares are on target from the first measurement, up to batch noise,
+    which the EMA averages out (the earlier multiplicative update oscillated). Groups absent
+    from the batch keep multiplier 1."""
 
-    def __init__(self, momentum: float = 0.5):
+    def __init__(self, decay: float = 0.8):
         self.mult = {g: 1.0 for g in TERM_GROUPS}
-        self.momentum = momentum
+        self.raw: dict[str, float] = {}
+        self.decay = decay
         self.group_of = {t: g for g, ts in TERM_GROUPS.items() for t in ts}
 
     def update(self, gnorms: dict[str, float]) -> dict[str, float]:
+        """`gnorms`: weighted gradient norms per term or per group (keys are mapped to their
+        group). Returns the effective shares of this measurement."""
         tot = {g: 0.0 for g in TERM_GROUPS}
         for k, v in gnorms.items():
-            g = self.group_of.get(k)
+            g = self.group_of.get(k, k if k in TERM_GROUPS else None)
             if g is not None:
                 tot[g] += v
         present = {g: v for g, v in tot.items() if v > 0}
         z = sum(present.values())
         if z <= 0:
             return {}
-        tz = sum(GROUP_TARGET[g] for g in present)
         shares = {g: v / z for g, v in present.items()}
-        for g, sh in shares.items():
-            want = GROUP_TARGET[g] / tz / max(sh, 1e-6)
-            new = self.mult[g] * want
-            self.mult[g] = float(np.clip(np.exp(self.momentum * np.log(new) + (1 - self.momentum)
-                                                * np.log(self.mult[g])), 1e-2, 1e2))
-        # only the ratios matter for the shares: keep the present groups' geometric mean at 1
-        # so the total loss (and gradient clipping) keeps its scale
-        gm = float(np.exp(np.mean([np.log(self.mult[g]) for g in shares])))
-        for g in shares:
-            self.mult[g] = float(np.clip(self.mult[g] / gm, 1e-2, 1e2))
+        for g, v in present.items():
+            raw = v / self.mult[g]
+            self.raw[g] = raw if g not in self.raw else self.decay * self.raw[g] + (1 - self.decay) * raw
+        tz = sum(GROUP_TARGET[g] for g in present)
+        want = {g: GROUP_TARGET[g] / tz / max(self.raw[g], 1e-12) for g in present}
+        gm = float(np.exp(np.mean([np.log(w) for w in want.values()])))
+        for g, w in want.items():
+            self.mult[g] = float(np.clip(w / gm, 1e-3, 1e3))
         return shares
 
     def weights(self, base: dict[str, float]) -> dict[str, float]:

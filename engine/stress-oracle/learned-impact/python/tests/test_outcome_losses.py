@@ -138,10 +138,10 @@ def test_body_relative_rates_rigid_zero_and_momentum_free():
     assert P.abs().max() < 1e-12 and L.abs().max() < 1e-10  # zero net momentum per body
 
 
-def test_group_balancer_moves_shares_towards_targets():
+def test_group_balancer_reaches_the_target_shares():
     gb = Lo.GroupBalancer()
     true = {"margin": 0.02, "motion": 5.0, "energy": 1.0, "fs_mode": 0.5, "fs_chunk": 0.5}
-    for _ in range(30):  # gradient norms scale with the multipliers
+    for _ in range(3):  # gradient norms scale with the multipliers; closed form: on target at once
         g = {k: v * gb.mult[gb.group_of[k]] for k, v in true.items()}
         shares = gb.update(g)
     for grp, sh in shares.items():

@@ -78,7 +78,7 @@ class TrainConfig:
     eval_every: int = 200
     log_every_s: float = 30.0
     log_every_steps: int = 25
-    grad_norm_every: int = 100
+    grad_norm_every: int = 50
     model: ModelConfig = field(default_factory=ModelConfig)
     loss: Lo.LossConfig = field(default_factory=Lo.LossConfig)
     decode: D.DecodeConfig = field(default_factory=D.DecodeConfig)
@@ -610,6 +610,8 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
     params = [p for p in model.parameters()]
     balancer = None
     group_bal = None
+    share_acc: dict[str, float] = {}
+    share_n = 0
     if cfg.loss.balance == "uncertainty":
         balancer = Lo.UncertaintyWeights().to(dev)
     elif cfg.loss.balance == "groups":
@@ -706,14 +708,18 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
                     gk = group_bal.group_of.get(k, k)
                     gsum[gk] = gsum.get(gk, 0) + eff.get(k, 1.0) * v
                 gnorm_last = grad_norms(gsum, params)
-                gshares = group_bal.update({next(iter(Lo.TERM_GROUPS[g])) if g in Lo.TERM_GROUPS else g: v
-                                            for g, v in gnorm_last.items()})
+                gshares = group_bal.update(gnorm_last)
+                for gk, gv in gshares.items():  # window average of the effective shares
+                    share_acc[gk] = share_acc.get(gk, 0.0) + gv
+                share_n += 1
             else:
                 gnorm_last = grad_norms({k: eff.get(k, 1.0) * v for k, v in normed.items()}, params)
             if group_bal is not None:
-                if step % (cfg.grad_norm_every * 10) == 0:
-                    prog.line("group gradient shares " + " ".join(f"{g}={v:.2f}" for g, v in gshares.items())
+                if step % (cfg.grad_norm_every * 10) == 0 or step <= 5 * cfg.grad_norm_every:
+                    prog.line(f"group gradient shares (effective, mean of {share_n} measurements) "
+                              + " ".join(f"{g}={v / max(share_n, 1):.2f}" for g, v in share_acc.items())
                               + " → multipliers " + " ".join(f"{g}={v:.3g}" for g, v in group_bal.mult.items()))
+                    share_acc, share_n = {}, 0
             shares, flagged = monitor.update(gnorm_last)
             if flagged:
                 prog.line(f"WARNING gradient dominance: {flagged} carry "
