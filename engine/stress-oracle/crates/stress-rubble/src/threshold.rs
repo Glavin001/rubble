@@ -24,10 +24,10 @@ use crate::{to_rubble, Owner, RubbleEngine};
 /// The shots a world holds (the fracture lab's 16).
 pub const SHOTS: usize = 16;
 
-/// Impact pulses carried past their frame per chunk (`STRESS_RESIDENT_PULSES`, default 8
+/// Impact pulses carried past their frame per chunk (`STRESS_RESIDENT_PULSES`, default 16
 /// here); a chunk that needs more is an error the world reports.
 pub fn pulse_cap() -> u32 {
-    std::env::var("STRESS_RESIDENT_PULSES").ok().and_then(|v| v.parse().ok()).unwrap_or(8)
+    std::env::var("STRESS_RESIDENT_PULSES").ok().and_then(|v| v.parse().ok()).unwrap_or(16)
 }
 
 /// What [`ThresholdWorld::poll`] reads (a frame or more late).
