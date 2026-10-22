@@ -266,3 +266,21 @@ def cluster_raw(c, g: dict, enc: np.ndarray, act_logits: np.ndarray) -> tuple[li
     vals = np.concatenate([pos, rot, vel, ang, np.stack([(act == 0), (act == 1)], 1).astype(float),
                            timer[:, None]], 1)
     return cols, vals
+
+
+# ---- chunk hidden state (ChunkState u, θ, v, ω in the body frame), the body derivation's input
+HIDDEN_COLS = tuple(f"def_{g}_body_{i}" for g in ("u", "rot", "v", "w") for i in range(3))
+HIDDEN_NAMES = tuple(f"{g}.{a}" for g in ("u", "th", "v", "w") for a in "xyz")
+
+
+def hidden_scale(c) -> np.ndarray:
+    """[Nc, 12] divisors of (u, θ, v, ω) giving the chunk_feat def_* encodings: u_c, u_c/R, v,
+    v/R (R = |half extents|)."""
+    from . import schema as S
+    a = c.arrays
+    L, v = float(c.scales["L"]), float(c.scales["v"])
+    he = a["chunk_feat"][:, [S.col("chunk_feat", f"half_extent_{i}") for i in range(3)]].astype(np.float64) * L
+    R = np.maximum(np.linalg.norm(he, axis=1), 1e-12)
+    uc = np.maximum(a["chunk_def_uc"].astype(np.float64), 1e-12)
+    rep = lambda x: np.repeat(x[:, None], 3, 1)  # noqa: E731
+    return np.concatenate([rep(uc), rep(uc / R), rep(np.full_like(R, v)), rep(v / R)], 1)

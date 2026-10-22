@@ -137,9 +137,18 @@ def _full_state_out(c: S.Call, out: dict, broke, damage, b_rows, c_rows) -> dict
     L = float(c.scales["L"])
     rs = np.concatenate([np.repeat((m * g)[:, None], 3, 1), np.repeat((m * g * L)[:, None], 3, 1)], 1)
     rx = out["chunk_fs"].detach().cpu().numpy()[c_rows].astype(np.float64) * rs
+    ccols = list(FS.CHUNK_FIELDS)
+    if "chunk_hidden" in out:  # the chunks' frame-end hidden state, raw (body frame)
+        hid = out["chunk_hidden"].detach().cpu().numpy()[c_rows].astype(np.float64) * FS.hidden_scale(c)
+        rx = np.concatenate([rx, hid], 1)
+        ccols += list(FS.HIDDEN_NAMES)
+    if "bond_break_frac" in out and len(keys):  # when within the frame each broken bond broke
+        bt = out["bond_break_frac"].detach().cpu().numpy()[b_rows].astype(np.float64) * dt
+        table = np.concatenate([table, np.where(broke, bt, np.nan)[:, None]], 1)
+        cols = cols + ["@break_time"]
     return {"bond": {"keys": keys.tolist(), "columns": cols,
                      "values": [[float(x) for x in row] for row in table]},
-            "chunk": {"keys": a["chunk_key"].astype(np.int64).tolist(), "columns": list(FS.CHUNK_FIELDS),
+            "chunk": {"keys": a["chunk_key"].astype(np.int64).tolist(), "columns": ccols,
                       "values": [[float(x) for x in row] for row in rx]}}
 
 

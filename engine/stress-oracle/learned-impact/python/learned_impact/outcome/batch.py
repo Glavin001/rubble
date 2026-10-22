@@ -110,6 +110,9 @@ def collate(calls: list[S.Call], structures: dict[str, dict[int, dict[str, np.nd
             add("y_bond_fs", by)
             add("y_bond_fs_mode", bm)
             e_acc["bond"].setdefault("fs", []).append(np.repeat(bx, 2, 0))  # both twins
+            hs = FS.hidden_scale(c)  # frame-end hidden state, encoded like the def_* inputs
+            yd = a["y_chunk_def_end"] if "y_chunk_def_end" in a else np.zeros((nc, 12), np.float32)
+            add("y_chunk_hid", (yd.astype(np.float64) / hs).astype(np.float32))
             ci, co = FS.chunk_arrays(c, c.fs["cols"], float(np.linalg.norm(c.gravity)))
             add("chunk_fs_in", ci)
             add("y_chunk_fs", co)
@@ -158,6 +161,10 @@ def collate(calls: list[S.Call], structures: dict[str, dict[int, dict[str, np.nd
                   "dissipated"):
             add(f"y_bond_{k}", a[f"y_bond_{k}"])
         add("y_bond_support_path", a.get("y_bond_support_path", np.zeros(nb)))
+        # exact break time ÷ dt (NaN where unknown or unbroken); masked in the loss
+        bt = a.get("y_bond_break_time")
+        add("y_bond_break_frac", (np.asarray(bt, np.float64) / float(c.scales["dt"])).astype(np.float32)
+            if bt is not None else np.full(nb, np.nan, np.float32))
         has_bf = "y_bond_break_freq" in a
         add("y_bond_freq", a["y_bond_break_freq"] if has_bf else np.zeros(nb))
         add("y_bond_has_freq", np.full(nb, has_bf))
@@ -349,7 +356,7 @@ def pad_batch(b: Batch, growth: float = 1.25, call_multiple: int = 8) -> Batch:
         for k in ("v_end", "w_end", "dx", "drot"):
             t[f"y_{pre}_{k}"] = _pad_rows(t[f"y_{pre}_{k}"], n)
     t["chunk_anchored"] = _pad_rows(t["chunk_anchored"], pc, True)
-    for k in ("chunk_fs_in", "y_chunk_fs"):
+    for k in ("chunk_fs_in", "y_chunk_fs", "y_chunk_hid"):
         if k in t:
             t[k] = _pad_rows(t[k], pc)
     if "clu_of_chunk" in t:  # padding chunks form one padding body (masked out)

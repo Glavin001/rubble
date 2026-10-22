@@ -27,6 +27,8 @@ from .batch import SCALE_INDEX, Batch
 from .geometry import quat_rotate_inv
 
 NODE_OUT = 12  # Δv(3) Δω(3) Δx(3) Δθ(3), body frame, nondimensional
+from . import fullstate as _FS  # noqa: E402
+FS_N_BOND_OUT, FS_N_CHUNK_OUT = _FS.N_BOND_OUT, _FS.N_CHUNK_OUT
 
 
 @dataclass
@@ -60,6 +62,10 @@ class ModelConfig:
     # `/5`: frame-end body records (pose, velocity, activity) as a head; False for full-state
     # checkpoints that predate it (the host then fits bodies from the chunks)
     cluster_head: bool = True
+    # a continuous break time per bond (fraction of the frame; the decode's break order) and
+    # the chunks' frame-end hidden state (u, θ, v, ω; the body derivation's input, `/4`+)
+    break_time_head: bool = False
+    hidden_head: bool = False
 
     def __post_init__(self):
         self.rounds = tuple(self.rounds)
@@ -179,10 +185,11 @@ class ImpactOutcomeModel(nn.Module):
             getattr(self, name)[off + S.FEATURE_COLUMNS[arr].index(col)] = 0.0
         self.unpool = Unpool()
         nt = cfg.n_time_bins
-        fs_b = FS.N_BOND_OUT if cfg.full_state else 0
-        fs_c = FS.N_CHUNK_OUT if cfg.full_state else 0
+        fs_b = (FS.N_BOND_OUT if cfg.full_state else 0) + (1 if cfg.break_time_head else 0)
+        fs_c = (FS.N_CHUNK_OUT if cfg.full_state else 0) + (12 if cfg.hidden_head else 0)
         self.bond_head = _mlp(4 * w + w, 4 + nt + fs_b, w, hl, norm=False)
         self.chunk_head = _mlp(2 * w, NODE_OUT + fs_c, w, hl, norm=False)
+        self._hid_cols = [S.col("chunk_feat", n) for n in FS.HIDDEN_COLS] if cfg.hidden_head else []
         if cfg.full_state and cfg.cluster_head:  # frame-end bodies: pooled chunk states + global + start record
             self.cluster_head = _mlp(2 * w + FS.N_CL_START, FS.N_CL_OUT, w, hl, norm=False)
         self.imp_head = _mlp(2 * w, NODE_OUT + 1, w, hl, norm=False)
@@ -338,6 +345,13 @@ class ImpactOutcomeModel(nn.Module):
             i_out = i_out + pad_i
         en = self.energy_head(g)
         extra = {}
+        nb_used = 4 + nt + (FS_N_BOND_OUT if self.cfg.full_state else 0)
+        if self.cfg.break_time_head:  # fraction of the frame at which a broken bond broke
+            extra["bond_break_frac"] = torch.sigmoid(out[:, nb_used])
+        nc_used = NODE_OUT + (FS_N_CHUNK_OUT if self.cfg.full_state else 0)
+        if self.cfg.hidden_head:  # frame-end hidden state, residual on its frame-start inputs
+            start = t["chunk_x"][:, self._hid_cols].to(c_out.dtype)
+            extra["chunk_hidden"] = start + c_out[:, nc_used:nc_used + 12]
         if self.cfg.full_state:
             from . import fullstate as FS
             nf = len(FS.BOND_FIELDS)
@@ -346,7 +360,7 @@ class ImpactOutcomeModel(nn.Module):
             start = t["y_bond_fs_start"].to(raw.dtype)
             extra["bond_fs"] = start + torch.where(mono, F.softplus(raw - 2.0), raw)
             extra["bond_fs_mode_logits"] = out[:, 4 + nt + nf:4 + nt + nf + 3]
-            extra["chunk_fs"] = t["chunk_fs_in"].to(c_out.dtype) + c_out[:, NODE_OUT:]
+            extra["chunk_fs"] = t["chunk_fs_in"].to(c_out.dtype) + c_out[:, NODE_OUT:NODE_OUT + FS_N_CHUNK_OUT]
             extra["_chunk_h"] = chunk_h
             extra["_glob"] = g
             if "clu_of_chunk" in t and self.cfg.cluster_head:

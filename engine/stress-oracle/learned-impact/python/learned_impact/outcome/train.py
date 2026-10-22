@@ -561,6 +561,14 @@ def load_model(path: str | Path, device="cpu") -> tuple[ImpactOutcomeModel, dict
     mc.setdefault("monotone_margin", False)  # checkpoints before the monotone margin head
     # full-state checkpoints from before the flag: a cluster head exists iff its weights do
     mc.setdefault("cluster_head", any(k.startswith("cluster_head.") for k in ck["model"]))
+    # break-time / hidden heads: present iff the head's output width includes them
+    from . import fullstate as FS
+    from . import schema as S_
+    bw = [v for k, v in ck["model"].items() if k.startswith("bond_head.") and k.endswith("weight")][-1]
+    cw = [v for k, v in ck["model"].items() if k.startswith("chunk_head.") and k.endswith("weight")][-1]
+    fs = bool(mc.get("full_state"))
+    mc.setdefault("break_time_head", bw.shape[0] == 4 + S_.N_TIME_BINS + (FS.N_BOND_OUT if fs else 0) + 1)
+    mc.setdefault("hidden_head", cw.shape[0] == 12 + (FS.N_CHUNK_OUT if fs else 0) + 12)
     m = ImpactOutcomeModel(ModelConfig(**mc))
     m.load_state_dict(ck["model"])
     return m.to(device), ck
@@ -827,6 +835,10 @@ def main(argv=None) -> None:
     ap.add_argument("--variant", default="B", choices=["A", "B"])
     ap.add_argument("--full-state", action="store_true",
                     help="/5: the oracle's full dynamic bond and chunk state as inputs and heads")
+    ap.add_argument("--break-time-head", action="store_true",
+                    help="a continuous break time per bond (the decode's break order)")
+    ap.add_argument("--hidden-head", action="store_true",
+                    help="the chunks' frame-end hidden state (u, theta, v, w) as a head")
     ap.add_argument("--init-checkpoint", default="",
                     help="start from these weights and input statistics (fine-tuning, DAgger)")
     ap.add_argument("--drop-features", default="",
@@ -864,6 +876,8 @@ def main(argv=None) -> None:
     mc.variant = a.variant
     mc.drop_features = tuple(x for x in a.drop_features.split(",") if x)
     mc.full_state = a.full_state
+    mc.break_time_head = a.break_time_head
+    mc.hidden_head = a.hidden_head
     mc.__post_init__()
     seeds = [int(s) for s in a.seeds.split(",")]
     data = Data(dataset, val_dataset=a.val_dataset or None)

@@ -187,6 +187,8 @@ CALL_ARRAYS: dict[str, ArraySpec] = {
     "y_bond_fail_margin": ArraySpec("f32", ("E",)),
     "y_bond_broke": ArraySpec("i32", ("E",)),
     "y_bond_break_bin": ArraySpec("i32", ("E",)),
+    # exact break time within the frame (s from the frame's start; NaN if not broken)
+    "y_bond_break_time": ArraySpec("f64", ("E",), required=False),
     "y_bond_fail_mode": ArraySpec("i32", ("E",)),
     "y_bond_ddamage": ArraySpec("f32", ("E",)),
     "y_bond_dissipated": ArraySpec("f32", ("E",)),
@@ -360,7 +362,8 @@ def validate_call(c: Call, require_targets: bool = True) -> None:
         want = _resolve(spec.shape, sym)
         if len(a.shape) != len(want) or any(w not in (-1, g) for w, g in zip(want, a.shape)):
             raise SchemaError(f"{c.event_id}#{c.call_index}: {name} shape {a.shape} != {want}")
-        if a.dtype.kind == "f" and not name.startswith("fs_") and not np.all(np.isfinite(a)):
+        if a.dtype.kind == "f" and not name.startswith("fs_") and name != "y_bond_break_time" \
+                and not np.all(np.isfinite(a)):
             raise SchemaError(f"{c.event_id}#{c.call_index}: {name} not finite")
     for name in c.arrays:
         if name not in CALL_ARRAYS:

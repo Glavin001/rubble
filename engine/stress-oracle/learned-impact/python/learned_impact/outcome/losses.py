@@ -37,9 +37,11 @@ from . import fullstate as _FS
 # `/5`: one term per carried bond field (each normalised by its own persistence loss, so
 # a field that rarely changes still has to beat "unchanged"), the mode and the reactions
 FS_BOND_TERMS = tuple(f"fs_{name}" for name, _, _ in _FS.BOND_FIELDS)
+HIDDEN_TERMS = ("hid_u", "hid_th", "hid_v", "hid_w")
 FS_CLUSTER_TERMS = ("fs_cl_pos", "fs_cl_rot", "fs_cl_vel", "fs_cl_ang", "fs_cl_timer", "fs_cl_act")
 TERMS = ("margin", "demand", "break", "time", "motion", "def_motion", "pose", "impactor",
-         "energy", "damage", "regime", *FS_BOND_TERMS, "fs_mode", "fs_chunk", *FS_CLUSTER_TERMS)
+         "energy", "damage", "regime", *FS_BOND_TERMS, "fs_mode", "fs_chunk", *FS_CLUSTER_TERMS,
+         "break_t", *HIDDEN_TERMS)
 
 
 @dataclass
@@ -47,6 +49,7 @@ class LossConfig:
     weights: dict[str, float] = field(default_factory=lambda: {
         "margin": 5.0, "demand": 1.0, "break": 5.0, "time": 1.0, "motion": 2.0,
         "def_motion": 2.0, "pose": 1.0, "fs_mode": 1.0, "fs_chunk": 1.0, **{k: 1.0 for k in FS_BOND_TERMS}, **{k: 1.0 for k in FS_CLUSTER_TERMS},
+        "break_t": 1.0, **{k: 1.0 for k in HIDDEN_TERMS},
         "impactor": 2.0, "energy": 1.0, "damage": 1.0, "regime": 1.0})
     huber_delta: float = 1.0
     label_smoothing: float = 0.02  # single-run hard break labels
@@ -127,6 +130,9 @@ def zero_outputs(b: Batch, n_time_bins: int = S.N_TIME_BINS) -> dict[str, Tensor
             "imp_out": z(t["imp_x"].shape[0], 12), "imp_perf_logit": z(t["imp_x"].shape[0]),
             "energy_d_bond": z(G), "energy_frac_joint": z(G) + 0.5, "energy_e_elastic": z(G),
             "energy_ke_loss": z(G),
+            "bond_break_frac": z(nb) + 0.5,
+            **({"chunk_hidden": t["chunk_x"][:, [S.col("chunk_feat", n) for n in _FS.HIDDEN_COLS]].float()}
+               if "y_chunk_hid" in t else {}),
             # `/5`: persistence (frame end = frame start) is the full state's zero predictor
             **({"bond_fs": t["y_bond_fs_start"].float(), "bond_fs_mode_logits": z(nb, 3),
                 "chunk_fs": t["chunk_fs_in"].float(),
@@ -266,6 +272,17 @@ def loss_terms(out: dict[str, Tensor], b: Batch, cfg: LossConfig,
         cvd = t["chunk_valid"].to(dev, dtype) if "chunk_valid" in t else torch.ones_like(out["chunk_fs"][:, 0])
         ec = _huber(out["chunk_fs"].to(dtype) - t["y_chunk_fs"].to(dev, dtype), cfg.huber_delta).mean(-1)
         terms["fs_chunk"] = (ec * cvd).sum() / cvd.sum().clamp(min=1)
+    if "bond_break_frac" in out and "y_bond_break_frac" in t:
+        # exact break time (fraction of the frame) on broken bonds where it was recorded
+        yb = t["y_bond_break_frac"].to(dev, dtype)
+        m_ = (broke & torch.isfinite(yb) & t["bond_valid"].to(dev)).to(dtype)
+        e_ = _huber(out["bond_break_frac"].to(dtype) - torch.nan_to_num(yb), cfg.huber_delta)
+        terms["break_t"] = (e_ * m_).sum() / m_.sum().clamp(min=1)
+    if "chunk_hidden" in out and "y_chunk_hid" in t:  # frame-end hidden state (u, θ, v, ω)
+        cvh = t["chunk_valid"].to(dev, dtype) if "chunk_valid" in t else torch.ones_like(out["chunk_hidden"][:, 0])
+        eh = _huber(out["chunk_hidden"].to(dtype) - t["y_chunk_hid"].to(dev, dtype), cfg.huber_delta)
+        for j, name in enumerate(HIDDEN_TERMS):
+            terms[name] = (eh[:, 3 * j:3 * j + 3].mean(-1) * cvh).sum() / cvh.sum().clamp(min=1)
     if "clu_out" in out:  # frame-end bodies, each group in its encoding
         cv_ = t["clu_valid"].to(dev, dtype) if "clu_valid" in t else torch.ones(out["clu_out"].shape[0], device=dev, dtype=dtype)
         co = out["clu_out"].to(dtype)
@@ -415,5 +432,5 @@ def zero_baselines(batches, cfg: LossConfig, priors=None) -> dict[str, float]:
         n += 1
     # full-state fields (encodings of order 1) that barely change in these batches would get
     # a near-zero persistence baseline and dominate the gradient: floor it
-    return {k: max(v / max(n, 1), 1e-4) if k.startswith("fs_") else ((v / max(n, 1)) if v > 0 else 1.0)
+    return {k: max(v / max(n, 1), 1e-4) if (k.startswith("fs_") or k.startswith("hid_")) else ((v / max(n, 1)) if v > 0 else 1.0)
             for k, v in sums.items()}
