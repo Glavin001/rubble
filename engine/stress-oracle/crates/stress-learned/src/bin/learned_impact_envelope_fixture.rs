@@ -18,9 +18,9 @@ fn main() {
             let pair = |r: (f64, f64)| json!({"dx": r.0, "drot": r.1, "dx_bits": bits(r.0), "drot_bits": bits(r.1)});
             calls.push(json!({
                 "event": ev.manifest["event_id"], "dir": dir, "call_index": i,
-                "energy": e.energy, "energy_bits": bits(e.energy),
+                "energy": e.energy, "energy_bits": e.energy.map(bits),
                 "chunk_radii": e.chunk_radii.iter().map(|r| r.map_or(Value::Null, pair)).collect::<Vec<_>>(),
-                "impactor_radii": e.impactor_radii.iter().map(|&r| pair(r)).collect::<Vec<_>>(),
+                "impactor_radii": e.impactor_radii.iter().map(|r| r.map_or(Value::Null, pair)).collect::<Vec<_>>(),
             }));
         }
     }

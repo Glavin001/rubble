@@ -127,6 +127,22 @@ fn an_own_state_relabel_is_the_recorded_call() {
     assert!(recorded.calls.len() >= 3, "the strike routes several frames");
     let jobs: Vec<(usize, Provided)> = recorded.calls.iter().map(|c| (c.frame, Provided::Own)).collect();
     let relabelled = relabel_event(&dir, &jobs, true).unwrap();
+    // an inputs-only live call carries the frame-start elastic energy too, the recorded value
+    let scene = stress_learned::relabel::event_scene(&dir).unwrap();
+    let ctx = stress_learned::relabel::event_context(&dir);
+    let mut w = stress_ref::world::World::new(&scene);
+    for f in 0..=recorded.calls.last().unwrap().frame {
+        if let Some((rec, r)) = recorded.calls.iter().zip(&relabelled).find(|(c, _)| c.frame == f) {
+            let mut ck: Vec<i64> = r.members.chunks.iter().map(|&(s, c)| stress_ref::world::stable_key(s, c)).collect();
+            ck.sort_unstable();
+            let mut ik: Vec<i64> = r.members.impactors.iter().map(|&i| stress_ref::keys::impactor_key(i)).collect();
+            ik.sort_unstable();
+            let live = stress_learned::outcome_calls::live_call(&mut w.clone(), "ev", &ctx, &ck, &ik, f, true).unwrap();
+            assert_eq!(live.calls[0].energy.get("E_elastic_start").map(|x| x.to_bits()), rec.energy.get("E_elastic_start").map(|x| x.to_bits()), "frame {f}: E_elastic_start");
+        }
+        w.solver.reset_peak_utilizations();
+        w.step_frame();
+    }
     for (rec, r) in recorded.calls.iter().zip(&relabelled) {
         let call = &r.call.as_ref().expect("a call").calls[0];
         // (The punch baseline, `base_punch_*`, is the recorder's comparison branch: not a

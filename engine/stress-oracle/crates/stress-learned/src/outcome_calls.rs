@@ -1228,6 +1228,12 @@ fn build_call(r: &Record, st: &Statics, f: usize, prev_call: Option<usize>, hist
         }
     } else {
         energy.insert("KE_in".to_string(), ke_in);
+        // The frame-start elastic energy is an input (the decode's energy envelope reads it),
+        // so a live call (no targets) carries it too.
+        if r.has("state_bond_energy") {
+            let en0 = r.rf("state_bond_energy", f)?;
+            energy.insert("E_elastic_start".to_string(), live.iter().map(|&k| en0[3 * k + 2] as f64).sum());
+        }
     }
     let phase_idx = r.ri("frame_phase", f).map(|p| p[0] as usize).unwrap_or(0);
     let phase = PHASES.get(phase_idx).copied().unwrap_or("pre_contact").to_string();

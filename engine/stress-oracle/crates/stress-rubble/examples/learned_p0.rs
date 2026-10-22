@@ -471,6 +471,8 @@ static HOST_BOUND_FRAMES: std::sync::atomic::AtomicUsize = std::sync::atomic::At
 /// + |g| dt), E the island's mechanical energy at the frame's start (KE + stored) plus 5%.
 static ENERGY_ENVELOPE_IMPACTORS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static ENERGY_ENVELOPE_CHUNKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// The largest impactor |dx| / radius seen (f64 bits; `STRESS_ENVELOPE_TOL`, default 0.05).
+static ENVELOPE_MAX_IMPACTOR_RATIO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn inadmissible(dx: [f64; 3], v0: stress_ref::math::Vec3, v1: [f64; 3], dt: f64) -> bool {
     let v0 = v0.to_array();
@@ -690,7 +692,8 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
                         use std::sync::atomic::Ordering::Relaxed;
                         let dt = start.scene.sim.frame_dt;
                         let (k0, e0, _) = start.island_energy(m);
-                        let energy = (k0 + e0) * 1.05;
+                        let tol: f64 = std::env::var("STRESS_ENVELOPE_TOL").ok().and_then(|v| v.parse().ok()).unwrap_or(0.05);
+                        let energy = (k0 + e0) * (1.0 + tol);
                         let g = start.solver.config.gravity.norm();
                         let reach = |mass: f64| dt * ((2.0 * energy / mass).sqrt() + g * dt);
                         let norm = |x: [f64; 3]| (x[0] * x[0] + x[1] * x[1] + x[2] * x[2]).sqrt();
@@ -702,6 +705,8 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
                                 if norm(b.dx) > reach(imp.mass) {
                                     ENERGY_ENVELOPE_IMPACTORS.fetch_add(1, Relaxed);
                                 }
+                                let ratio = norm(b.dx) / reach(imp.mass);
+                                let _ = ENVELOPE_MAX_IMPACTOR_RATIO.fetch_max(ratio.to_bits(), Relaxed);
                             }
                         }
                         for b in &d.chunks {
@@ -1134,7 +1139,8 @@ fn run_event(dir: &std::path::Path, variant: &str, o: &ProviderOpts, samples: Ve
                 "admissibility_violations_chunks": ADMISSIBILITY_CHUNKS.load(std::sync::atomic::Ordering::Relaxed),
                 "host_energy_bound_frames": HOST_BOUND_FRAMES.load(std::sync::atomic::Ordering::Relaxed),
                 "energy_envelope_violations_impactors": ENERGY_ENVELOPE_IMPACTORS.load(std::sync::atomic::Ordering::Relaxed),
-                "energy_envelope_violations_chunks": ENERGY_ENVELOPE_CHUNKS.load(std::sync::atomic::Ordering::Relaxed)}))
+                "energy_envelope_violations_chunks": ENERGY_ENVELOPE_CHUNKS.load(std::sync::atomic::Ordering::Relaxed),
+                "energy_envelope_max_impactor_ratio": f64::from_bits(ENVELOPE_MAX_IMPACTOR_RATIO.load(std::sync::atomic::Ordering::Relaxed))}))
         }
         other => panic!("event: unknown --variant {other}"),
     };
