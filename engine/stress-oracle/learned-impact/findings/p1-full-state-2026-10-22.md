@@ -403,3 +403,50 @@ The queue records:
 3. new distinct full-state training configurations (chunk C): anchored t1/t2 and
    standing t1/t2, 60 configurations each per round, rounds interleaved, so a budget stop
    leaves the families balanced.
+
+## Viability v1: end state (2026-10-22, about 12:50 ADT)
+
+**Recorded:** 1,252 events, all recorder revision 9 (every frame, full state). Splits are
+by layout group (split seed 777). Counts are events (configurations or ensembles):
+
+| family | train | val | test |
+|---|---:|---:|---:|
+| anchored_wall t1 | 197 (197) | 64 (8) | – |
+| anchored_wall t2 | 196 (196) | 40 (5) | 24 (3) |
+| standing_wall t1 | 126 (126) | 77 (10) | 14 (3) |
+| standing_wall t2 | 89 (89) | 56 (7) | 9 (2) |
+| bl_ground_thin | 50 (10 single + 5×8) | – | – |
+| bl_anchored_base | 50 (10 + 5×8) | – | – |
+| bl_standing | 50 (10 + 5×8) | – | – |
+| bl_coarse_heavy | 50 (10 + 5×8) | – | – |
+| bl_ground_thick | – | 80 (10×8) | – |
+| bl_anchored_sides | – | – | 80 (10×8) |
+| **total** | **808** | **317** | **127** |
+
+- **Incomplete ensembles:** 74 of 78 are complete. The budget stopped chunk B in the
+  middle of four standing-wall ensembles: `p1_standing_wall_t1_00134_s21103` and
+  `_00041_s21103` (5 of 8), `p1_standing_wall_t1_00046_s21103` and
+  `p1_standing_wall_t2_00021_s21104` (1 of 8). Filter on `ensemble_size`. Completing them
+  needs 20 events.
+- **Chunk B, stopped by the budget:** standing t1 at 59 of 205 events, standing t2 at
+  13 of 118.
+- **Chunk C:** recorded nothing. Each round job stopped on the budget at once.
+
+**Calls.** `calls-v5` is resident for val/test/ensembles (604 events, 4.08 GB, rev 8, with
+`y_bond_break_time`). The 648 training single runs are built on demand into P2's
+`runs/calls-cache` (in this tree, capped at 1.5 GB).
+
+**Disk.** This tree is 26.78 GB block-counted (the cache's 1.24 GB included). P0's
+references outside it add 0.91 GB, so the learned-impact total is about 27.7 GB, at most
+28.0 GB with the cache full.
+
+**Queue bug, recorded.** After the guard was reached, each chunk C job still wrote its
+plan (`recipes.json`, about 20 MB) before stopping, adding 0.53 GB. The empty plan
+directories (no recorded events) were removed. A future queue should check the guard
+before starting a job.
+
+**Still waiting on the user.** Deleting the remaining bulk-v1 val/test frames (2,344
+members, about 4.5 GB) was blocked by this session's permission checker. P0's verified
+references replace them for harness A (aac22d01), and P2 confirms nothing reads them. If
+approved, the space would go first to completing the four ensembles, then to chunk B's
+standing walls and chunk C.
