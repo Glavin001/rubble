@@ -650,3 +650,144 @@ void fr_body_clear(uint3 id: SV_DispatchThreadID)
         return;
     atom[a_dirty() + s].store(0);
 }
+
+// ---- The view (stress-rubble render.rs objects and bond lines, written where they are) ----
+//
+//   fr_view_chunks  one thread per chunk: its object's rows (render.rs `Object`: rotation
+//                   rows and translation, the stress frame) from its body, and its colour by
+//                   `view.mode`: 0 its material (a free body's mixed with its slot's colour),
+//                   1 its body's state (moving orange, at rest blue, static grey), 2 its body
+//                   slot's colour (stable: a split's largest piece keeps its slot);
+//   fr_view_shots   one thread per shot: its sphere at its body (hidden while parked);
+//   fr_view_bonds   one thread per bond: its line between its chunks' centres, or nothing
+//                   once it broke (both ends at one point).
+
+struct ViewParams
+{
+    uint mode;
+    uint shot_count;
+    uint impactor_base;  // the renderer's first shot object
+    uint pad0;
+    float rest_speed;    // render.rs `REST_SPEED`
+    float pad1;
+    float pad2;
+    float pad3;
+};
+
+[[vk::binding(16, 0)]] ConstantBuffer<ViewParams> view;
+// Per chunk 3 float4: (object as bits, render centre (structure frame)); its rotation
+// (structure frame); (material colour, -).
+[[vk::binding(17, 0)]] StructuredBuffer<float4> view_chunks;
+// The renderer's objects (4 float4: 3 rows, colour) and bond-line vertices (7 floats).
+[[vk::binding(18, 0)]] RWStructuredBuffer<float4> objects;
+[[vk::binding(19, 0)]] RWStructuredBuffer<float> lines;
+// The shots' engine bodies.
+[[vk::binding(20, 0)]] StructuredBuffer<uint> shot_bodies;
+
+static const float3 MOVING = float3(1.0, 0.45, 0.12);
+static const float3 AT_REST = float3(0.25, 0.45, 0.85);
+static const float3 STATIC = float3(0.45, 0.45, 0.48);
+static const float4 BOND_LINE = float4(1.0, 0.86, 0.25, 1.0);
+
+// render.rs `slot_color`: hues a golden-ratio step apart.
+float3 slot_color(uint slot)
+{
+    float h = frac(float(slot) * 0.6180339887) * 6.0;
+    float s = 0.62, v = 0.92, f = frac(h);
+    float p = v * (1.0 - s), q = v * (1.0 - s * f), t = v * (1.0 - s * (1.0 - f));
+    uint k = uint(h);
+    return k == 0u ? float3(v, t, p) : k == 1u ? float3(q, v, p) : k == 2u ? float3(p, v, t)
+         : k == 3u ? float3(p, q, v) : k == 4u ? float3(t, p, v) : float3(v, p, q);
+}
+
+void write_object(uint o, Quat q, float3 t, float4 color)
+{
+    float3 x = rotate(q, float3(1.0, 0.0, 0.0));
+    float3 y = rotate(q, float3(0.0, 1.0, 0.0));
+    float3 z = rotate(q, float3(0.0, 0.0, 1.0));
+    objects[4 * o] = float4(x.x, y.x, z.x, t.x);
+    objects[4 * o + 1] = float4(x.y, y.y, z.y, t.y);
+    objects[4 * o + 2] = float4(x.z, y.z, z.z, t.z);
+    objects[4 * o + 3] = color;
+}
+
+// A chunk's centre in the world (the stress frame).
+float3 chunk_world(uint k)
+{
+    uint slot = body_of(k);
+    Quat q;
+    float3 origin;
+    structure_pose(slot, BODY_WORDS * slot, q, origin);
+    return origin + rotate(q, view_chunks[3 * k].xyz);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_view_chunks(uint3 id: SV_DispatchThreadID)
+{
+    uint k = id.x;
+    if (k >= params.chunk_count)
+        return;
+    uint slot = body_of(k);
+    uint b = BODY_WORDS * slot;
+    Quat q;
+    float3 origin;
+    structure_pose(slot, b, q, origin);
+    float4 v0 = view_chunks[3 * k];
+    float3 base = view_chunks[3 * k + 2].xyz;
+    bool fixed = bodies[b].w == 0.0;
+    float3 color;
+    if (view.mode == 1)
+    {
+        float speed = max(length(bodies[b + 3].xyz), length(bodies[b + 4].xyz));
+        color = fixed ? STATIC : (speed > view.rest_speed ? MOVING : AT_REST);
+    }
+    else if (view.mode == 2)
+        color = slot_color(slot);
+    else
+        color = fixed ? base : 0.45 * base + 0.55 * slot_color(slot);
+    write_object(asuint(v0.w), normalized(quat_mul(q, quat_of(view_chunks[3 * k + 1]))), origin + rotate(q, v0.xyz), float4(color, 1.0));
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_view_shots(uint3 id: SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= view.shot_count)
+        return;
+    uint b = BODY_WORDS * shot_bodies[i];
+    uint o = view.impactor_base + i;
+    if (bodies[b].w == 0.0)
+    {
+        for (uint w = 0; w < 4; w++)
+            objects[4 * o + w] = float4(0.0);
+        return;
+    }
+    write_object(o, rot_from_rubble(quat_of(bodies[b + 1])), from_rubble(bodies[b].xyz), float4(0.18, 0.19, 0.22, 1.0));
+}
+
+void write_line_vertex(uint v, float3 p)
+{
+    lines[7 * v] = p.x;
+    lines[7 * v + 1] = p.y;
+    lines[7 * v + 2] = p.z;
+    lines[7 * v + 3] = BOND_LINE.x;
+    lines[7 * v + 4] = BOND_LINE.y;
+    lines[7 * v + 5] = BOND_LINE.z;
+    lines[7 * v + 6] = BOND_LINE.w;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_view_bonds(uint3 id: SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= params.bond_count)
+        return;
+    uint4 bond = bonds[i];
+    float3 a = chunk_world(bond.x);
+    float3 b = work[w_alive() + i] != 0 ? chunk_world(bond.y) : a;
+    write_line_vertex(2 * i, a);
+    write_line_vertex(2 * i + 1, b);
+}

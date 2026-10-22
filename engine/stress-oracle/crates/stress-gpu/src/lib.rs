@@ -252,6 +252,9 @@ pub mod shaders {
             ("fr_commit", (64, 1, 1)),
             ("fr_reparent", (64, 1, 1)),
             ("fr_body_clear", (64, 1, 1)),
+            ("fr_view_chunks", (64, 1, 1)),
+            ("fr_view_shots", (64, 1, 1)),
+            ("fr_view_bonds", (64, 1, 1)),
         ]
     );
 

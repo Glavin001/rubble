@@ -44,6 +44,18 @@ struct ScanParams_0
     uint block_base_0;
 };
 
+struct ViewParams_0
+{
+    uint mode_0;
+    uint shot_count_0;
+    uint impactor_base_0;
+    uint pad0_1;
+    float rest_speed_0;
+    float pad1_1;
+    float pad2_1;
+    float pad3_1;
+};
+
 struct KernelContext_0
 {
     FractureParams_0 constant* params_0;
@@ -62,6 +74,11 @@ struct KernelContext_0
     packed_float4 device* parts_0;
     packed_float4 device* colliders_0;
     packed_uint4 device* collider_info_0;
+    packed_float4 device* view_chunks_0;
+    ViewParams_0 constant* view_0;
+    packed_float4 device* objects_0;
+    uint device* shot_bodies_0;
+    float device* lines_0;
     array<uint, int(1024)> threadgroup* g_scan_0;
 };
 
@@ -243,7 +260,7 @@ uint a_counters_0(KernelContext_0 thread* kernelContext_8)
     return _S25 + kernelContext_8->params_0->body_count_0;
 }
 
-[[kernel]] void fr_loads(uint3 id_0 [[thread_position_in_grid]], FractureParams_0 constant* params_1 [[buffer(0)]], uint device* work_1 [[buffer(4)]], packed_float4 device* frames_1 [[buffer(6)]], packed_float4 device* bodies_1 [[buffer(7)]], packed_float4 device* chunks_1 [[buffer(1)]], Record_natural_0 device* manifolds_1 [[buffer(10)]], uint device* sort_1 [[buffer(11)]], packed_float4 device* loads_1 [[buffer(12)]], atomic<uint> device* atom_1 [[buffer(5)]], packed_uint4 device* bonds_1 [[buffer(2)]], uint device* args_1 [[buffer(13)]], uint device* info_1 [[buffer(15)]], ScanParams_0 constant* scan_1 [[buffer(14)]], packed_float4 device* parts_1 [[buffer(3)]], packed_float4 device* colliders_1 [[buffer(8)]], packed_uint4 device* collider_info_1 [[buffer(9)]])
+[[kernel]] void fr_loads(uint3 id_0 [[thread_position_in_grid]], FractureParams_0 constant* params_1 [[buffer(0)]], uint device* work_1 [[buffer(4)]], packed_float4 device* frames_1 [[buffer(6)]], packed_float4 device* bodies_1 [[buffer(7)]], packed_float4 device* chunks_1 [[buffer(1)]], Record_natural_0 device* manifolds_1 [[buffer(10)]], uint device* sort_1 [[buffer(11)]], packed_float4 device* loads_1 [[buffer(12)]], atomic<uint> device* atom_1 [[buffer(5)]], packed_uint4 device* bonds_1 [[buffer(2)]], uint device* args_1 [[buffer(13)]], uint device* info_1 [[buffer(15)]], ScanParams_0 constant* scan_1 [[buffer(14)]], packed_float4 device* parts_1 [[buffer(3)]], packed_float4 device* colliders_1 [[buffer(8)]], packed_uint4 device* collider_info_1 [[buffer(9)]], packed_float4 device* view_chunks_1 [[buffer(17)]], ViewParams_0 constant* view_1 [[buffer(16)]], packed_float4 device* objects_1 [[buffer(18)]], uint device* shot_bodies_1 [[buffer(20)]], float device* lines_1 [[buffer(19)]])
 {
     float3 f_total_0;
     float m_1;
@@ -271,6 +288,11 @@ uint a_counters_0(KernelContext_0 thread* kernelContext_8)
     (&kernelContext_9)->parts_0 = parts_1;
     (&kernelContext_9)->colliders_0 = colliders_1;
     (&kernelContext_9)->collider_info_0 = collider_info_1;
+    (&kernelContext_9)->view_chunks_0 = view_chunks_1;
+    (&kernelContext_9)->view_0 = view_1;
+    (&kernelContext_9)->objects_0 = objects_1;
+    (&kernelContext_9)->shot_bodies_0 = shot_bodies_1;
+    (&kernelContext_9)->lines_0 = lines_1;
     threadgroup array<uint, int(1024)> g_scan_1;
     (&kernelContext_9)->g_scan_0 = &g_scan_1;
     uint k_0 = id_0.x;
@@ -594,7 +616,7 @@ uint w_alive_0(KernelContext_0 thread* kernelContext_10)
     return kernelContext_10->params_0->chunk_count_0;
 }
 
-[[kernel]] void fr_breaks(uint3 id_1 [[thread_position_in_grid]], FractureParams_0 constant* params_2 [[buffer(0)]], uint device* work_2 [[buffer(4)]], packed_float4 device* frames_2 [[buffer(6)]], packed_float4 device* bodies_2 [[buffer(7)]], packed_float4 device* chunks_2 [[buffer(1)]], Record_natural_0 device* manifolds_2 [[buffer(10)]], uint device* sort_2 [[buffer(11)]], packed_float4 device* loads_2 [[buffer(12)]], atomic<uint> device* atom_2 [[buffer(5)]], packed_uint4 device* bonds_2 [[buffer(2)]], uint device* args_2 [[buffer(13)]], uint device* info_2 [[buffer(15)]], ScanParams_0 constant* scan_2 [[buffer(14)]], packed_float4 device* parts_2 [[buffer(3)]], packed_float4 device* colliders_2 [[buffer(8)]], packed_uint4 device* collider_info_2 [[buffer(9)]])
+[[kernel]] void fr_breaks(uint3 id_1 [[thread_position_in_grid]], FractureParams_0 constant* params_2 [[buffer(0)]], uint device* work_2 [[buffer(4)]], packed_float4 device* frames_2 [[buffer(6)]], packed_float4 device* bodies_2 [[buffer(7)]], packed_float4 device* chunks_2 [[buffer(1)]], Record_natural_0 device* manifolds_2 [[buffer(10)]], uint device* sort_2 [[buffer(11)]], packed_float4 device* loads_2 [[buffer(12)]], atomic<uint> device* atom_2 [[buffer(5)]], packed_uint4 device* bonds_2 [[buffer(2)]], uint device* args_2 [[buffer(13)]], uint device* info_2 [[buffer(15)]], ScanParams_0 constant* scan_2 [[buffer(14)]], packed_float4 device* parts_2 [[buffer(3)]], packed_float4 device* colliders_2 [[buffer(8)]], packed_uint4 device* collider_info_2 [[buffer(9)]], packed_float4 device* view_chunks_2 [[buffer(17)]], ViewParams_0 constant* view_2 [[buffer(16)]], packed_float4 device* objects_2 [[buffer(18)]], uint device* shot_bodies_2 [[buffer(20)]], float device* lines_2 [[buffer(19)]])
 {
     thread KernelContext_0 kernelContext_11;
     (&kernelContext_11)->params_0 = params_2;
@@ -613,6 +635,11 @@ uint w_alive_0(KernelContext_0 thread* kernelContext_10)
     (&kernelContext_11)->parts_0 = parts_2;
     (&kernelContext_11)->colliders_0 = colliders_2;
     (&kernelContext_11)->collider_info_0 = collider_info_2;
+    (&kernelContext_11)->view_chunks_0 = view_chunks_2;
+    (&kernelContext_11)->view_0 = view_2;
+    (&kernelContext_11)->objects_0 = objects_2;
+    (&kernelContext_11)->shot_bodies_0 = shot_bodies_2;
+    (&kernelContext_11)->lines_0 = lines_2;
     threadgroup array<uint, int(1024)> g_scan_2;
     (&kernelContext_11)->g_scan_0 = &g_scan_2;
     uint i_0 = id_1.x;
@@ -661,7 +688,7 @@ void set_args_0(uint at_0, uint x_1, KernelContext_0 thread* kernelContext_12)
     return;
 }
 
-[[kernel]] void fr_gate(uint3 id_2 [[thread_position_in_grid]], FractureParams_0 constant* params_3 [[buffer(0)]], uint device* work_3 [[buffer(4)]], packed_float4 device* frames_3 [[buffer(6)]], packed_float4 device* bodies_3 [[buffer(7)]], packed_float4 device* chunks_3 [[buffer(1)]], Record_natural_0 device* manifolds_3 [[buffer(10)]], uint device* sort_3 [[buffer(11)]], packed_float4 device* loads_3 [[buffer(12)]], atomic<uint> device* atom_3 [[buffer(5)]], packed_uint4 device* bonds_3 [[buffer(2)]], uint device* args_3 [[buffer(13)]], uint device* info_3 [[buffer(15)]], ScanParams_0 constant* scan_3 [[buffer(14)]], packed_float4 device* parts_3 [[buffer(3)]], packed_float4 device* colliders_3 [[buffer(8)]], packed_uint4 device* collider_info_3 [[buffer(9)]])
+[[kernel]] void fr_gate(uint3 id_2 [[thread_position_in_grid]], FractureParams_0 constant* params_3 [[buffer(0)]], uint device* work_3 [[buffer(4)]], packed_float4 device* frames_3 [[buffer(6)]], packed_float4 device* bodies_3 [[buffer(7)]], packed_float4 device* chunks_3 [[buffer(1)]], Record_natural_0 device* manifolds_3 [[buffer(10)]], uint device* sort_3 [[buffer(11)]], packed_float4 device* loads_3 [[buffer(12)]], atomic<uint> device* atom_3 [[buffer(5)]], packed_uint4 device* bonds_3 [[buffer(2)]], uint device* args_3 [[buffer(13)]], uint device* info_3 [[buffer(15)]], ScanParams_0 constant* scan_3 [[buffer(14)]], packed_float4 device* parts_3 [[buffer(3)]], packed_float4 device* colliders_3 [[buffer(8)]], packed_uint4 device* collider_info_3 [[buffer(9)]], packed_float4 device* view_chunks_3 [[buffer(17)]], ViewParams_0 constant* view_3 [[buffer(16)]], packed_float4 device* objects_3 [[buffer(18)]], uint device* shot_bodies_3 [[buffer(20)]], float device* lines_3 [[buffer(19)]])
 {
     thread KernelContext_0 kernelContext_13;
     (&kernelContext_13)->params_0 = params_3;
@@ -680,6 +707,11 @@ void set_args_0(uint at_0, uint x_1, KernelContext_0 thread* kernelContext_12)
     (&kernelContext_13)->parts_0 = parts_3;
     (&kernelContext_13)->colliders_0 = colliders_3;
     (&kernelContext_13)->collider_info_0 = collider_info_3;
+    (&kernelContext_13)->view_chunks_0 = view_chunks_3;
+    (&kernelContext_13)->view_0 = view_3;
+    (&kernelContext_13)->objects_0 = objects_3;
+    (&kernelContext_13)->shot_bodies_0 = shot_bodies_3;
+    (&kernelContext_13)->lines_0 = lines_3;
     threadgroup array<uint, int(1024)> g_scan_3;
     (&kernelContext_13)->g_scan_0 = &g_scan_3;
     uint _S82 = a_counters_0(&kernelContext_13);
@@ -776,7 +808,7 @@ uint a_anchor_0(KernelContext_0 thread* kernelContext_16)
     return 2U * kernelContext_16->params_0->chunk_count_0;
 }
 
-[[kernel]] void fr_uf_init(uint3 id_3 [[thread_position_in_grid]], FractureParams_0 constant* params_4 [[buffer(0)]], uint device* work_4 [[buffer(4)]], packed_float4 device* frames_4 [[buffer(6)]], packed_float4 device* bodies_4 [[buffer(7)]], packed_float4 device* chunks_4 [[buffer(1)]], Record_natural_0 device* manifolds_4 [[buffer(10)]], uint device* sort_4 [[buffer(11)]], packed_float4 device* loads_4 [[buffer(12)]], atomic<uint> device* atom_4 [[buffer(5)]], packed_uint4 device* bonds_4 [[buffer(2)]], uint device* args_4 [[buffer(13)]], uint device* info_4 [[buffer(15)]], ScanParams_0 constant* scan_4 [[buffer(14)]], packed_float4 device* parts_4 [[buffer(3)]], packed_float4 device* colliders_4 [[buffer(8)]], packed_uint4 device* collider_info_4 [[buffer(9)]])
+[[kernel]] void fr_uf_init(uint3 id_3 [[thread_position_in_grid]], FractureParams_0 constant* params_4 [[buffer(0)]], uint device* work_4 [[buffer(4)]], packed_float4 device* frames_4 [[buffer(6)]], packed_float4 device* bodies_4 [[buffer(7)]], packed_float4 device* chunks_4 [[buffer(1)]], Record_natural_0 device* manifolds_4 [[buffer(10)]], uint device* sort_4 [[buffer(11)]], packed_float4 device* loads_4 [[buffer(12)]], atomic<uint> device* atom_4 [[buffer(5)]], packed_uint4 device* bonds_4 [[buffer(2)]], uint device* args_4 [[buffer(13)]], uint device* info_4 [[buffer(15)]], ScanParams_0 constant* scan_4 [[buffer(14)]], packed_float4 device* parts_4 [[buffer(3)]], packed_float4 device* colliders_4 [[buffer(8)]], packed_uint4 device* collider_info_4 [[buffer(9)]], packed_float4 device* view_chunks_4 [[buffer(17)]], ViewParams_0 constant* view_4 [[buffer(16)]], packed_float4 device* objects_4 [[buffer(18)]], uint device* shot_bodies_4 [[buffer(20)]], float device* lines_4 [[buffer(19)]])
 {
     thread KernelContext_0 kernelContext_17;
     (&kernelContext_17)->params_0 = params_4;
@@ -795,6 +827,11 @@ uint a_anchor_0(KernelContext_0 thread* kernelContext_16)
     (&kernelContext_17)->parts_0 = parts_4;
     (&kernelContext_17)->colliders_0 = colliders_4;
     (&kernelContext_17)->collider_info_0 = collider_info_4;
+    (&kernelContext_17)->view_chunks_0 = view_chunks_4;
+    (&kernelContext_17)->view_0 = view_4;
+    (&kernelContext_17)->objects_0 = objects_4;
+    (&kernelContext_17)->shot_bodies_0 = shot_bodies_4;
+    (&kernelContext_17)->lines_0 = lines_4;
     threadgroup array<uint, int(1024)> g_scan_4;
     (&kernelContext_17)->g_scan_0 = &g_scan_4;
     uint c_2 = id_3.x;
@@ -835,7 +872,7 @@ uint a_anchor_0(KernelContext_0 thread* kernelContext_16)
     return;
 }
 
-[[kernel]] void fr_body_init(uint3 id_4 [[thread_position_in_grid]], FractureParams_0 constant* params_5 [[buffer(0)]], uint device* work_5 [[buffer(4)]], packed_float4 device* frames_5 [[buffer(6)]], packed_float4 device* bodies_5 [[buffer(7)]], packed_float4 device* chunks_5 [[buffer(1)]], Record_natural_0 device* manifolds_5 [[buffer(10)]], uint device* sort_5 [[buffer(11)]], packed_float4 device* loads_5 [[buffer(12)]], atomic<uint> device* atom_5 [[buffer(5)]], packed_uint4 device* bonds_5 [[buffer(2)]], uint device* args_5 [[buffer(13)]], uint device* info_5 [[buffer(15)]], ScanParams_0 constant* scan_5 [[buffer(14)]], packed_float4 device* parts_5 [[buffer(3)]], packed_float4 device* colliders_5 [[buffer(8)]], packed_uint4 device* collider_info_5 [[buffer(9)]])
+[[kernel]] void fr_body_init(uint3 id_4 [[thread_position_in_grid]], FractureParams_0 constant* params_5 [[buffer(0)]], uint device* work_5 [[buffer(4)]], packed_float4 device* frames_5 [[buffer(6)]], packed_float4 device* bodies_5 [[buffer(7)]], packed_float4 device* chunks_5 [[buffer(1)]], Record_natural_0 device* manifolds_5 [[buffer(10)]], uint device* sort_5 [[buffer(11)]], packed_float4 device* loads_5 [[buffer(12)]], atomic<uint> device* atom_5 [[buffer(5)]], packed_uint4 device* bonds_5 [[buffer(2)]], uint device* args_5 [[buffer(13)]], uint device* info_5 [[buffer(15)]], ScanParams_0 constant* scan_5 [[buffer(14)]], packed_float4 device* parts_5 [[buffer(3)]], packed_float4 device* colliders_5 [[buffer(8)]], packed_uint4 device* collider_info_5 [[buffer(9)]], packed_float4 device* view_chunks_5 [[buffer(17)]], ViewParams_0 constant* view_5 [[buffer(16)]], packed_float4 device* objects_5 [[buffer(18)]], uint device* shot_bodies_5 [[buffer(20)]], float device* lines_5 [[buffer(19)]])
 {
     thread KernelContext_0 kernelContext_18;
     (&kernelContext_18)->params_0 = params_5;
@@ -854,6 +891,11 @@ uint a_anchor_0(KernelContext_0 thread* kernelContext_16)
     (&kernelContext_18)->parts_0 = parts_5;
     (&kernelContext_18)->colliders_0 = colliders_5;
     (&kernelContext_18)->collider_info_0 = collider_info_5;
+    (&kernelContext_18)->view_chunks_0 = view_chunks_5;
+    (&kernelContext_18)->view_0 = view_5;
+    (&kernelContext_18)->objects_0 = objects_5;
+    (&kernelContext_18)->shot_bodies_0 = shot_bodies_5;
+    (&kernelContext_18)->lines_0 = lines_5;
     threadgroup array<uint, int(1024)> g_scan_5;
     (&kernelContext_18)->g_scan_0 = &g_scan_5;
     uint s_0 = id_4.x;
@@ -921,7 +963,7 @@ uint find_0(uint x_2, KernelContext_0 thread* kernelContext_19)
     return _S106;
 }
 
-[[kernel]] void fr_uf_union(uint3 id_5 [[thread_position_in_grid]], FractureParams_0 constant* params_6 [[buffer(0)]], uint device* work_6 [[buffer(4)]], packed_float4 device* frames_6 [[buffer(6)]], packed_float4 device* bodies_6 [[buffer(7)]], packed_float4 device* chunks_6 [[buffer(1)]], Record_natural_0 device* manifolds_6 [[buffer(10)]], uint device* sort_6 [[buffer(11)]], packed_float4 device* loads_6 [[buffer(12)]], atomic<uint> device* atom_6 [[buffer(5)]], packed_uint4 device* bonds_6 [[buffer(2)]], uint device* args_6 [[buffer(13)]], uint device* info_6 [[buffer(15)]], ScanParams_0 constant* scan_6 [[buffer(14)]], packed_float4 device* parts_6 [[buffer(3)]], packed_float4 device* colliders_6 [[buffer(8)]], packed_uint4 device* collider_info_6 [[buffer(9)]])
+[[kernel]] void fr_uf_union(uint3 id_5 [[thread_position_in_grid]], FractureParams_0 constant* params_6 [[buffer(0)]], uint device* work_6 [[buffer(4)]], packed_float4 device* frames_6 [[buffer(6)]], packed_float4 device* bodies_6 [[buffer(7)]], packed_float4 device* chunks_6 [[buffer(1)]], Record_natural_0 device* manifolds_6 [[buffer(10)]], uint device* sort_6 [[buffer(11)]], packed_float4 device* loads_6 [[buffer(12)]], atomic<uint> device* atom_6 [[buffer(5)]], packed_uint4 device* bonds_6 [[buffer(2)]], uint device* args_6 [[buffer(13)]], uint device* info_6 [[buffer(15)]], ScanParams_0 constant* scan_6 [[buffer(14)]], packed_float4 device* parts_6 [[buffer(3)]], packed_float4 device* colliders_6 [[buffer(8)]], packed_uint4 device* collider_info_6 [[buffer(9)]], packed_float4 device* view_chunks_6 [[buffer(17)]], ViewParams_0 constant* view_6 [[buffer(16)]], packed_float4 device* objects_6 [[buffer(18)]], uint device* shot_bodies_6 [[buffer(20)]], float device* lines_6 [[buffer(19)]])
 {
     thread KernelContext_0 kernelContext_20;
     (&kernelContext_20)->params_0 = params_6;
@@ -940,6 +982,11 @@ uint find_0(uint x_2, KernelContext_0 thread* kernelContext_19)
     (&kernelContext_20)->parts_0 = parts_6;
     (&kernelContext_20)->colliders_0 = colliders_6;
     (&kernelContext_20)->collider_info_0 = collider_info_6;
+    (&kernelContext_20)->view_chunks_0 = view_chunks_6;
+    (&kernelContext_20)->view_0 = view_6;
+    (&kernelContext_20)->objects_0 = objects_6;
+    (&kernelContext_20)->shot_bodies_0 = shot_bodies_6;
+    (&kernelContext_20)->lines_0 = lines_6;
     threadgroup array<uint, int(1024)> g_scan_6;
     (&kernelContext_20)->g_scan_0 = &g_scan_6;
     uint i_1 = id_5.x;
@@ -1055,7 +1102,7 @@ void add64_0(uint at_1, float value_0, float scale_0, KernelContext_0 thread* ke
     return;
 }
 
-[[kernel]] void fr_uf_flatten(uint3 id_6 [[thread_position_in_grid]], FractureParams_0 constant* params_7 [[buffer(0)]], uint device* work_7 [[buffer(4)]], packed_float4 device* frames_7 [[buffer(6)]], packed_float4 device* bodies_7 [[buffer(7)]], packed_float4 device* chunks_7 [[buffer(1)]], Record_natural_0 device* manifolds_7 [[buffer(10)]], uint device* sort_7 [[buffer(11)]], packed_float4 device* loads_7 [[buffer(12)]], atomic<uint> device* atom_7 [[buffer(5)]], packed_uint4 device* bonds_7 [[buffer(2)]], uint device* args_7 [[buffer(13)]], uint device* info_7 [[buffer(15)]], ScanParams_0 constant* scan_7 [[buffer(14)]], packed_float4 device* parts_7 [[buffer(3)]], packed_float4 device* colliders_7 [[buffer(8)]], packed_uint4 device* collider_info_7 [[buffer(9)]])
+[[kernel]] void fr_uf_flatten(uint3 id_6 [[thread_position_in_grid]], FractureParams_0 constant* params_7 [[buffer(0)]], uint device* work_7 [[buffer(4)]], packed_float4 device* frames_7 [[buffer(6)]], packed_float4 device* bodies_7 [[buffer(7)]], packed_float4 device* chunks_7 [[buffer(1)]], Record_natural_0 device* manifolds_7 [[buffer(10)]], uint device* sort_7 [[buffer(11)]], packed_float4 device* loads_7 [[buffer(12)]], atomic<uint> device* atom_7 [[buffer(5)]], packed_uint4 device* bonds_7 [[buffer(2)]], uint device* args_7 [[buffer(13)]], uint device* info_7 [[buffer(15)]], ScanParams_0 constant* scan_7 [[buffer(14)]], packed_float4 device* parts_7 [[buffer(3)]], packed_float4 device* colliders_7 [[buffer(8)]], packed_uint4 device* collider_info_7 [[buffer(9)]], packed_float4 device* view_chunks_7 [[buffer(17)]], ViewParams_0 constant* view_7 [[buffer(16)]], packed_float4 device* objects_7 [[buffer(18)]], uint device* shot_bodies_7 [[buffer(20)]], float device* lines_7 [[buffer(19)]])
 {
     thread KernelContext_0 kernelContext_23;
     (&kernelContext_23)->params_0 = params_7;
@@ -1074,6 +1121,11 @@ void add64_0(uint at_1, float value_0, float scale_0, KernelContext_0 thread* ke
     (&kernelContext_23)->parts_0 = parts_7;
     (&kernelContext_23)->colliders_0 = colliders_7;
     (&kernelContext_23)->collider_info_0 = collider_info_7;
+    (&kernelContext_23)->view_chunks_0 = view_chunks_7;
+    (&kernelContext_23)->view_0 = view_7;
+    (&kernelContext_23)->objects_0 = objects_7;
+    (&kernelContext_23)->shot_bodies_0 = shot_bodies_7;
+    (&kernelContext_23)->lines_0 = lines_7;
     threadgroup array<uint, int(1024)> g_scan_7;
     (&kernelContext_23)->g_scan_0 = &g_scan_7;
     uint c_3 = id_6.x;
@@ -1154,7 +1206,7 @@ bool is_root_0(uint c_4, KernelContext_0 thread* kernelContext_24)
     return _S148;
 }
 
-[[kernel]] void fr_best_count(uint3 id_7 [[thread_position_in_grid]], FractureParams_0 constant* params_8 [[buffer(0)]], uint device* work_8 [[buffer(4)]], packed_float4 device* frames_8 [[buffer(6)]], packed_float4 device* bodies_8 [[buffer(7)]], packed_float4 device* chunks_8 [[buffer(1)]], Record_natural_0 device* manifolds_8 [[buffer(10)]], uint device* sort_8 [[buffer(11)]], packed_float4 device* loads_8 [[buffer(12)]], atomic<uint> device* atom_8 [[buffer(5)]], packed_uint4 device* bonds_8 [[buffer(2)]], uint device* args_8 [[buffer(13)]], uint device* info_8 [[buffer(15)]], ScanParams_0 constant* scan_8 [[buffer(14)]], packed_float4 device* parts_8 [[buffer(3)]], packed_float4 device* colliders_8 [[buffer(8)]], packed_uint4 device* collider_info_8 [[buffer(9)]])
+[[kernel]] void fr_best_count(uint3 id_7 [[thread_position_in_grid]], FractureParams_0 constant* params_8 [[buffer(0)]], uint device* work_8 [[buffer(4)]], packed_float4 device* frames_8 [[buffer(6)]], packed_float4 device* bodies_8 [[buffer(7)]], packed_float4 device* chunks_8 [[buffer(1)]], Record_natural_0 device* manifolds_8 [[buffer(10)]], uint device* sort_8 [[buffer(11)]], packed_float4 device* loads_8 [[buffer(12)]], atomic<uint> device* atom_8 [[buffer(5)]], packed_uint4 device* bonds_8 [[buffer(2)]], uint device* args_8 [[buffer(13)]], uint device* info_8 [[buffer(15)]], ScanParams_0 constant* scan_8 [[buffer(14)]], packed_float4 device* parts_8 [[buffer(3)]], packed_float4 device* colliders_8 [[buffer(8)]], packed_uint4 device* collider_info_8 [[buffer(9)]], packed_float4 device* view_chunks_8 [[buffer(17)]], ViewParams_0 constant* view_8 [[buffer(16)]], packed_float4 device* objects_8 [[buffer(18)]], uint device* shot_bodies_8 [[buffer(20)]], float device* lines_8 [[buffer(19)]])
 {
     thread KernelContext_0 kernelContext_25;
     (&kernelContext_25)->params_0 = params_8;
@@ -1173,6 +1225,11 @@ bool is_root_0(uint c_4, KernelContext_0 thread* kernelContext_24)
     (&kernelContext_25)->parts_0 = parts_8;
     (&kernelContext_25)->colliders_0 = colliders_8;
     (&kernelContext_25)->collider_info_0 = collider_info_8;
+    (&kernelContext_25)->view_chunks_0 = view_chunks_8;
+    (&kernelContext_25)->view_0 = view_8;
+    (&kernelContext_25)->objects_0 = objects_8;
+    (&kernelContext_25)->shot_bodies_0 = shot_bodies_8;
+    (&kernelContext_25)->lines_0 = lines_8;
     threadgroup array<uint, int(1024)> g_scan_8;
     (&kernelContext_25)->g_scan_0 = &g_scan_8;
     uint c_5 = id_7.x;
@@ -1190,7 +1247,7 @@ bool is_root_0(uint c_4, KernelContext_0 thread* kernelContext_24)
     return;
 }
 
-[[kernel]] void fr_best_root(uint3 id_8 [[thread_position_in_grid]], FractureParams_0 constant* params_9 [[buffer(0)]], uint device* work_9 [[buffer(4)]], packed_float4 device* frames_9 [[buffer(6)]], packed_float4 device* bodies_9 [[buffer(7)]], packed_float4 device* chunks_9 [[buffer(1)]], Record_natural_0 device* manifolds_9 [[buffer(10)]], uint device* sort_9 [[buffer(11)]], packed_float4 device* loads_9 [[buffer(12)]], atomic<uint> device* atom_9 [[buffer(5)]], packed_uint4 device* bonds_9 [[buffer(2)]], uint device* args_9 [[buffer(13)]], uint device* info_9 [[buffer(15)]], ScanParams_0 constant* scan_9 [[buffer(14)]], packed_float4 device* parts_9 [[buffer(3)]], packed_float4 device* colliders_9 [[buffer(8)]], packed_uint4 device* collider_info_9 [[buffer(9)]])
+[[kernel]] void fr_best_root(uint3 id_8 [[thread_position_in_grid]], FractureParams_0 constant* params_9 [[buffer(0)]], uint device* work_9 [[buffer(4)]], packed_float4 device* frames_9 [[buffer(6)]], packed_float4 device* bodies_9 [[buffer(7)]], packed_float4 device* chunks_9 [[buffer(1)]], Record_natural_0 device* manifolds_9 [[buffer(10)]], uint device* sort_9 [[buffer(11)]], packed_float4 device* loads_9 [[buffer(12)]], atomic<uint> device* atom_9 [[buffer(5)]], packed_uint4 device* bonds_9 [[buffer(2)]], uint device* args_9 [[buffer(13)]], uint device* info_9 [[buffer(15)]], ScanParams_0 constant* scan_9 [[buffer(14)]], packed_float4 device* parts_9 [[buffer(3)]], packed_float4 device* colliders_9 [[buffer(8)]], packed_uint4 device* collider_info_9 [[buffer(9)]], packed_float4 device* view_chunks_9 [[buffer(17)]], ViewParams_0 constant* view_9 [[buffer(16)]], packed_float4 device* objects_9 [[buffer(18)]], uint device* shot_bodies_9 [[buffer(20)]], float device* lines_9 [[buffer(19)]])
 {
     thread KernelContext_0 kernelContext_26;
     (&kernelContext_26)->params_0 = params_9;
@@ -1209,6 +1266,11 @@ bool is_root_0(uint c_4, KernelContext_0 thread* kernelContext_24)
     (&kernelContext_26)->parts_0 = parts_9;
     (&kernelContext_26)->colliders_0 = colliders_9;
     (&kernelContext_26)->collider_info_0 = collider_info_9;
+    (&kernelContext_26)->view_chunks_0 = view_chunks_9;
+    (&kernelContext_26)->view_0 = view_9;
+    (&kernelContext_26)->objects_0 = objects_9;
+    (&kernelContext_26)->shot_bodies_0 = shot_bodies_9;
+    (&kernelContext_26)->lines_0 = lines_9;
     threadgroup array<uint, int(1024)> g_scan_9;
     (&kernelContext_26)->g_scan_0 = &g_scan_9;
     uint c_6 = id_8.x;
@@ -1242,7 +1304,7 @@ uint w_new_0(KernelContext_0 thread* kernelContext_28)
     return _S168 + kernelContext_28->params_0->chunk_count_0;
 }
 
-[[kernel]] void fr_mark(uint3 id_9 [[thread_position_in_grid]], FractureParams_0 constant* params_10 [[buffer(0)]], uint device* work_10 [[buffer(4)]], packed_float4 device* frames_10 [[buffer(6)]], packed_float4 device* bodies_10 [[buffer(7)]], packed_float4 device* chunks_10 [[buffer(1)]], Record_natural_0 device* manifolds_10 [[buffer(10)]], uint device* sort_10 [[buffer(11)]], packed_float4 device* loads_10 [[buffer(12)]], atomic<uint> device* atom_10 [[buffer(5)]], packed_uint4 device* bonds_10 [[buffer(2)]], uint device* args_10 [[buffer(13)]], uint device* info_10 [[buffer(15)]], ScanParams_0 constant* scan_10 [[buffer(14)]], packed_float4 device* parts_10 [[buffer(3)]], packed_float4 device* colliders_10 [[buffer(8)]], packed_uint4 device* collider_info_10 [[buffer(9)]])
+[[kernel]] void fr_mark(uint3 id_9 [[thread_position_in_grid]], FractureParams_0 constant* params_10 [[buffer(0)]], uint device* work_10 [[buffer(4)]], packed_float4 device* frames_10 [[buffer(6)]], packed_float4 device* bodies_10 [[buffer(7)]], packed_float4 device* chunks_10 [[buffer(1)]], Record_natural_0 device* manifolds_10 [[buffer(10)]], uint device* sort_10 [[buffer(11)]], packed_float4 device* loads_10 [[buffer(12)]], atomic<uint> device* atom_10 [[buffer(5)]], packed_uint4 device* bonds_10 [[buffer(2)]], uint device* args_10 [[buffer(13)]], uint device* info_10 [[buffer(15)]], ScanParams_0 constant* scan_10 [[buffer(14)]], packed_float4 device* parts_10 [[buffer(3)]], packed_float4 device* colliders_10 [[buffer(8)]], packed_uint4 device* collider_info_10 [[buffer(9)]], packed_float4 device* view_chunks_10 [[buffer(17)]], ViewParams_0 constant* view_10 [[buffer(16)]], packed_float4 device* objects_10 [[buffer(18)]], uint device* shot_bodies_10 [[buffer(20)]], float device* lines_10 [[buffer(19)]])
 {
     thread KernelContext_0 kernelContext_29;
     (&kernelContext_29)->params_0 = params_10;
@@ -1261,6 +1323,11 @@ uint w_new_0(KernelContext_0 thread* kernelContext_28)
     (&kernelContext_29)->parts_0 = parts_10;
     (&kernelContext_29)->colliders_0 = colliders_10;
     (&kernelContext_29)->collider_info_0 = collider_info_10;
+    (&kernelContext_29)->view_chunks_0 = view_chunks_10;
+    (&kernelContext_29)->view_0 = view_10;
+    (&kernelContext_29)->objects_0 = objects_10;
+    (&kernelContext_29)->shot_bodies_0 = shot_bodies_10;
+    (&kernelContext_29)->lines_0 = lines_10;
     threadgroup array<uint, int(1024)> g_scan_10;
     (&kernelContext_29)->g_scan_0 = &g_scan_10;
     uint c_7 = id_9.x;
@@ -1296,7 +1363,7 @@ uint w_new_0(KernelContext_0 thread* kernelContext_28)
     return;
 }
 
-[[kernel]] void fr_scan_blocks(uint3 group_0 [[threadgroup_position_in_grid]], uint3 thread_0 [[thread_position_in_threadgroup]], FractureParams_0 constant* params_11 [[buffer(0)]], uint device* work_11 [[buffer(4)]], packed_float4 device* frames_11 [[buffer(6)]], packed_float4 device* bodies_11 [[buffer(7)]], packed_float4 device* chunks_11 [[buffer(1)]], Record_natural_0 device* manifolds_11 [[buffer(10)]], uint device* sort_11 [[buffer(11)]], packed_float4 device* loads_11 [[buffer(12)]], atomic<uint> device* atom_11 [[buffer(5)]], packed_uint4 device* bonds_11 [[buffer(2)]], uint device* args_11 [[buffer(13)]], uint device* info_11 [[buffer(15)]], ScanParams_0 constant* scan_11 [[buffer(14)]], packed_float4 device* parts_11 [[buffer(3)]], packed_float4 device* colliders_11 [[buffer(8)]], packed_uint4 device* collider_info_11 [[buffer(9)]])
+[[kernel]] void fr_scan_blocks(uint3 group_0 [[threadgroup_position_in_grid]], uint3 thread_0 [[thread_position_in_threadgroup]], FractureParams_0 constant* params_11 [[buffer(0)]], uint device* work_11 [[buffer(4)]], packed_float4 device* frames_11 [[buffer(6)]], packed_float4 device* bodies_11 [[buffer(7)]], packed_float4 device* chunks_11 [[buffer(1)]], Record_natural_0 device* manifolds_11 [[buffer(10)]], uint device* sort_11 [[buffer(11)]], packed_float4 device* loads_11 [[buffer(12)]], atomic<uint> device* atom_11 [[buffer(5)]], packed_uint4 device* bonds_11 [[buffer(2)]], uint device* args_11 [[buffer(13)]], uint device* info_11 [[buffer(15)]], ScanParams_0 constant* scan_11 [[buffer(14)]], packed_float4 device* parts_11 [[buffer(3)]], packed_float4 device* colliders_11 [[buffer(8)]], packed_uint4 device* collider_info_11 [[buffer(9)]], packed_float4 device* view_chunks_11 [[buffer(17)]], ViewParams_0 constant* view_11 [[buffer(16)]], packed_float4 device* objects_11 [[buffer(18)]], uint device* shot_bodies_11 [[buffer(20)]], float device* lines_11 [[buffer(19)]])
 {
     uint step_2;
     uint add_0;
@@ -1317,6 +1384,11 @@ uint w_new_0(KernelContext_0 thread* kernelContext_28)
     (&kernelContext_30)->parts_0 = parts_11;
     (&kernelContext_30)->colliders_0 = colliders_11;
     (&kernelContext_30)->collider_info_0 = collider_info_11;
+    (&kernelContext_30)->view_chunks_0 = view_chunks_11;
+    (&kernelContext_30)->view_0 = view_11;
+    (&kernelContext_30)->objects_0 = objects_11;
+    (&kernelContext_30)->shot_bodies_0 = shot_bodies_11;
+    (&kernelContext_30)->lines_0 = lines_11;
     threadgroup array<uint, int(1024)> g_scan_11;
     (&kernelContext_30)->g_scan_0 = &g_scan_11;
     uint t_1 = thread_0.x;
@@ -1399,7 +1471,7 @@ uint w_new_0(KernelContext_0 thread* kernelContext_28)
     return;
 }
 
-[[kernel]] void fr_scan_top(uint3 thread_1 [[thread_position_in_threadgroup]], FractureParams_0 constant* params_12 [[buffer(0)]], uint device* work_12 [[buffer(4)]], packed_float4 device* frames_12 [[buffer(6)]], packed_float4 device* bodies_12 [[buffer(7)]], packed_float4 device* chunks_12 [[buffer(1)]], Record_natural_0 device* manifolds_12 [[buffer(10)]], uint device* sort_12 [[buffer(11)]], packed_float4 device* loads_12 [[buffer(12)]], atomic<uint> device* atom_12 [[buffer(5)]], packed_uint4 device* bonds_12 [[buffer(2)]], uint device* args_12 [[buffer(13)]], uint device* info_12 [[buffer(15)]], ScanParams_0 constant* scan_12 [[buffer(14)]], packed_float4 device* parts_12 [[buffer(3)]], packed_float4 device* colliders_12 [[buffer(8)]], packed_uint4 device* collider_info_12 [[buffer(9)]])
+[[kernel]] void fr_scan_top(uint3 thread_1 [[thread_position_in_threadgroup]], FractureParams_0 constant* params_12 [[buffer(0)]], uint device* work_12 [[buffer(4)]], packed_float4 device* frames_12 [[buffer(6)]], packed_float4 device* bodies_12 [[buffer(7)]], packed_float4 device* chunks_12 [[buffer(1)]], Record_natural_0 device* manifolds_12 [[buffer(10)]], uint device* sort_12 [[buffer(11)]], packed_float4 device* loads_12 [[buffer(12)]], atomic<uint> device* atom_12 [[buffer(5)]], packed_uint4 device* bonds_12 [[buffer(2)]], uint device* args_12 [[buffer(13)]], uint device* info_12 [[buffer(15)]], ScanParams_0 constant* scan_12 [[buffer(14)]], packed_float4 device* parts_12 [[buffer(3)]], packed_float4 device* colliders_12 [[buffer(8)]], packed_uint4 device* collider_info_12 [[buffer(9)]], packed_float4 device* view_chunks_12 [[buffer(17)]], ViewParams_0 constant* view_12 [[buffer(16)]], packed_float4 device* objects_12 [[buffer(18)]], uint device* shot_bodies_12 [[buffer(20)]], float device* lines_12 [[buffer(19)]])
 {
     thread KernelContext_0 kernelContext_31;
     (&kernelContext_31)->params_0 = params_12;
@@ -1418,6 +1490,11 @@ uint w_new_0(KernelContext_0 thread* kernelContext_28)
     (&kernelContext_31)->parts_0 = parts_12;
     (&kernelContext_31)->colliders_0 = colliders_12;
     (&kernelContext_31)->collider_info_0 = collider_info_12;
+    (&kernelContext_31)->view_chunks_0 = view_chunks_12;
+    (&kernelContext_31)->view_0 = view_12;
+    (&kernelContext_31)->objects_0 = objects_12;
+    (&kernelContext_31)->shot_bodies_0 = shot_bodies_12;
+    (&kernelContext_31)->lines_0 = lines_12;
     threadgroup array<uint, int(1024)> g_scan_12;
     (&kernelContext_31)->g_scan_0 = &g_scan_12;
     uint t_2 = thread_1.x;
@@ -1469,7 +1546,7 @@ uint w_new_0(KernelContext_0 thread* kernelContext_28)
     return;
 }
 
-[[kernel]] void fr_scan_add(uint3 id_10 [[thread_position_in_grid]], FractureParams_0 constant* params_13 [[buffer(0)]], uint device* work_13 [[buffer(4)]], packed_float4 device* frames_13 [[buffer(6)]], packed_float4 device* bodies_13 [[buffer(7)]], packed_float4 device* chunks_13 [[buffer(1)]], Record_natural_0 device* manifolds_13 [[buffer(10)]], uint device* sort_13 [[buffer(11)]], packed_float4 device* loads_13 [[buffer(12)]], atomic<uint> device* atom_13 [[buffer(5)]], packed_uint4 device* bonds_13 [[buffer(2)]], uint device* args_13 [[buffer(13)]], uint device* info_13 [[buffer(15)]], ScanParams_0 constant* scan_13 [[buffer(14)]], packed_float4 device* parts_13 [[buffer(3)]], packed_float4 device* colliders_13 [[buffer(8)]], packed_uint4 device* collider_info_13 [[buffer(9)]])
+[[kernel]] void fr_scan_add(uint3 id_10 [[thread_position_in_grid]], FractureParams_0 constant* params_13 [[buffer(0)]], uint device* work_13 [[buffer(4)]], packed_float4 device* frames_13 [[buffer(6)]], packed_float4 device* bodies_13 [[buffer(7)]], packed_float4 device* chunks_13 [[buffer(1)]], Record_natural_0 device* manifolds_13 [[buffer(10)]], uint device* sort_13 [[buffer(11)]], packed_float4 device* loads_13 [[buffer(12)]], atomic<uint> device* atom_13 [[buffer(5)]], packed_uint4 device* bonds_13 [[buffer(2)]], uint device* args_13 [[buffer(13)]], uint device* info_13 [[buffer(15)]], ScanParams_0 constant* scan_13 [[buffer(14)]], packed_float4 device* parts_13 [[buffer(3)]], packed_float4 device* colliders_13 [[buffer(8)]], packed_uint4 device* collider_info_13 [[buffer(9)]], packed_float4 device* view_chunks_13 [[buffer(17)]], ViewParams_0 constant* view_13 [[buffer(16)]], packed_float4 device* objects_13 [[buffer(18)]], uint device* shot_bodies_13 [[buffer(20)]], float device* lines_13 [[buffer(19)]])
 {
     thread KernelContext_0 kernelContext_32;
     (&kernelContext_32)->params_0 = params_13;
@@ -1488,6 +1565,11 @@ uint w_new_0(KernelContext_0 thread* kernelContext_28)
     (&kernelContext_32)->parts_0 = parts_13;
     (&kernelContext_32)->colliders_0 = colliders_13;
     (&kernelContext_32)->collider_info_0 = collider_info_13;
+    (&kernelContext_32)->view_chunks_0 = view_chunks_13;
+    (&kernelContext_32)->view_0 = view_13;
+    (&kernelContext_32)->objects_0 = objects_13;
+    (&kernelContext_32)->shot_bodies_0 = shot_bodies_13;
+    (&kernelContext_32)->lines_0 = lines_13;
     threadgroup array<uint, int(1024)> g_scan_13;
     (&kernelContext_32)->g_scan_0 = &g_scan_13;
     uint i_2 = id_10.x;
@@ -1524,7 +1606,7 @@ uint w_free_list_0(KernelContext_0 thread* kernelContext_36)
     return _S185 + kernelContext_36->params_0->body_count_0;
 }
 
-[[kernel]] void fr_freelist(uint3 id_11 [[thread_position_in_grid]], FractureParams_0 constant* params_14 [[buffer(0)]], uint device* work_14 [[buffer(4)]], packed_float4 device* frames_14 [[buffer(6)]], packed_float4 device* bodies_14 [[buffer(7)]], packed_float4 device* chunks_14 [[buffer(1)]], Record_natural_0 device* manifolds_14 [[buffer(10)]], uint device* sort_14 [[buffer(11)]], packed_float4 device* loads_14 [[buffer(12)]], atomic<uint> device* atom_14 [[buffer(5)]], packed_uint4 device* bonds_14 [[buffer(2)]], uint device* args_14 [[buffer(13)]], uint device* info_14 [[buffer(15)]], ScanParams_0 constant* scan_14 [[buffer(14)]], packed_float4 device* parts_14 [[buffer(3)]], packed_float4 device* colliders_14 [[buffer(8)]], packed_uint4 device* collider_info_14 [[buffer(9)]])
+[[kernel]] void fr_freelist(uint3 id_11 [[thread_position_in_grid]], FractureParams_0 constant* params_14 [[buffer(0)]], uint device* work_14 [[buffer(4)]], packed_float4 device* frames_14 [[buffer(6)]], packed_float4 device* bodies_14 [[buffer(7)]], packed_float4 device* chunks_14 [[buffer(1)]], Record_natural_0 device* manifolds_14 [[buffer(10)]], uint device* sort_14 [[buffer(11)]], packed_float4 device* loads_14 [[buffer(12)]], atomic<uint> device* atom_14 [[buffer(5)]], packed_uint4 device* bonds_14 [[buffer(2)]], uint device* args_14 [[buffer(13)]], uint device* info_14 [[buffer(15)]], ScanParams_0 constant* scan_14 [[buffer(14)]], packed_float4 device* parts_14 [[buffer(3)]], packed_float4 device* colliders_14 [[buffer(8)]], packed_uint4 device* collider_info_14 [[buffer(9)]], packed_float4 device* view_chunks_14 [[buffer(17)]], ViewParams_0 constant* view_14 [[buffer(16)]], packed_float4 device* objects_14 [[buffer(18)]], uint device* shot_bodies_14 [[buffer(20)]], float device* lines_14 [[buffer(19)]])
 {
     thread KernelContext_0 kernelContext_37;
     (&kernelContext_37)->params_0 = params_14;
@@ -1543,6 +1625,11 @@ uint w_free_list_0(KernelContext_0 thread* kernelContext_36)
     (&kernelContext_37)->parts_0 = parts_14;
     (&kernelContext_37)->colliders_0 = colliders_14;
     (&kernelContext_37)->collider_info_0 = collider_info_14;
+    (&kernelContext_37)->view_chunks_0 = view_chunks_14;
+    (&kernelContext_37)->view_0 = view_14;
+    (&kernelContext_37)->objects_0 = objects_14;
+    (&kernelContext_37)->shot_bodies_0 = shot_bodies_14;
+    (&kernelContext_37)->lines_0 = lines_14;
     threadgroup array<uint, int(1024)> g_scan_14;
     (&kernelContext_37)->g_scan_0 = &g_scan_14;
     uint s_1 = id_11.x;
@@ -1585,7 +1672,7 @@ uint free_total_0(KernelContext_0 thread* kernelContext_40)
     return *(kernelContext_40->work_0+(_S192 + blocks_1));
 }
 
-[[kernel]] void fr_assign(uint3 id_12 [[thread_position_in_grid]], FractureParams_0 constant* params_15 [[buffer(0)]], uint device* work_15 [[buffer(4)]], packed_float4 device* frames_15 [[buffer(6)]], packed_float4 device* bodies_15 [[buffer(7)]], packed_float4 device* chunks_15 [[buffer(1)]], Record_natural_0 device* manifolds_15 [[buffer(10)]], uint device* sort_15 [[buffer(11)]], packed_float4 device* loads_15 [[buffer(12)]], atomic<uint> device* atom_15 [[buffer(5)]], packed_uint4 device* bonds_15 [[buffer(2)]], uint device* args_15 [[buffer(13)]], uint device* info_15 [[buffer(15)]], ScanParams_0 constant* scan_15 [[buffer(14)]], packed_float4 device* parts_15 [[buffer(3)]], packed_float4 device* colliders_15 [[buffer(8)]], packed_uint4 device* collider_info_15 [[buffer(9)]])
+[[kernel]] void fr_assign(uint3 id_12 [[thread_position_in_grid]], FractureParams_0 constant* params_15 [[buffer(0)]], uint device* work_15 [[buffer(4)]], packed_float4 device* frames_15 [[buffer(6)]], packed_float4 device* bodies_15 [[buffer(7)]], packed_float4 device* chunks_15 [[buffer(1)]], Record_natural_0 device* manifolds_15 [[buffer(10)]], uint device* sort_15 [[buffer(11)]], packed_float4 device* loads_15 [[buffer(12)]], atomic<uint> device* atom_15 [[buffer(5)]], packed_uint4 device* bonds_15 [[buffer(2)]], uint device* args_15 [[buffer(13)]], uint device* info_15 [[buffer(15)]], ScanParams_0 constant* scan_15 [[buffer(14)]], packed_float4 device* parts_15 [[buffer(3)]], packed_float4 device* colliders_15 [[buffer(8)]], packed_uint4 device* collider_info_15 [[buffer(9)]], packed_float4 device* view_chunks_15 [[buffer(17)]], ViewParams_0 constant* view_15 [[buffer(16)]], packed_float4 device* objects_15 [[buffer(18)]], uint device* shot_bodies_15 [[buffer(20)]], float device* lines_15 [[buffer(19)]])
 {
     thread KernelContext_0 kernelContext_41;
     (&kernelContext_41)->params_0 = params_15;
@@ -1604,6 +1691,11 @@ uint free_total_0(KernelContext_0 thread* kernelContext_40)
     (&kernelContext_41)->parts_0 = parts_15;
     (&kernelContext_41)->colliders_0 = colliders_15;
     (&kernelContext_41)->collider_info_0 = collider_info_15;
+    (&kernelContext_41)->view_chunks_0 = view_chunks_15;
+    (&kernelContext_41)->view_0 = view_15;
+    (&kernelContext_41)->objects_0 = objects_15;
+    (&kernelContext_41)->shot_bodies_0 = shot_bodies_15;
+    (&kernelContext_41)->lines_0 = lines_15;
     threadgroup array<uint, int(1024)> g_scan_15;
     (&kernelContext_41)->g_scan_0 = &g_scan_15;
     uint c_8 = id_12.x;
@@ -1880,7 +1972,7 @@ float4 quat_vec_0(const Quat_0 thread* q_11)
     return float4(q_11->x_0, q_11->y_0, q_11->z_0, q_11->w_0);
 }
 
-[[kernel]] void fr_piece(uint3 id_13 [[thread_position_in_grid]], FractureParams_0 constant* params_16 [[buffer(0)]], uint device* work_16 [[buffer(4)]], packed_float4 device* frames_16 [[buffer(6)]], packed_float4 device* bodies_16 [[buffer(7)]], packed_float4 device* chunks_16 [[buffer(1)]], Record_natural_0 device* manifolds_16 [[buffer(10)]], uint device* sort_16 [[buffer(11)]], packed_float4 device* loads_16 [[buffer(12)]], atomic<uint> device* atom_16 [[buffer(5)]], packed_uint4 device* bonds_16 [[buffer(2)]], uint device* args_16 [[buffer(13)]], uint device* info_16 [[buffer(15)]], ScanParams_0 constant* scan_16 [[buffer(14)]], packed_float4 device* parts_16 [[buffer(3)]], packed_float4 device* colliders_16 [[buffer(8)]], packed_uint4 device* collider_info_16 [[buffer(9)]])
+[[kernel]] void fr_piece(uint3 id_13 [[thread_position_in_grid]], FractureParams_0 constant* params_16 [[buffer(0)]], uint device* work_16 [[buffer(4)]], packed_float4 device* frames_16 [[buffer(6)]], packed_float4 device* bodies_16 [[buffer(7)]], packed_float4 device* chunks_16 [[buffer(1)]], Record_natural_0 device* manifolds_16 [[buffer(10)]], uint device* sort_16 [[buffer(11)]], packed_float4 device* loads_16 [[buffer(12)]], atomic<uint> device* atom_16 [[buffer(5)]], packed_uint4 device* bonds_16 [[buffer(2)]], uint device* args_16 [[buffer(13)]], uint device* info_16 [[buffer(15)]], ScanParams_0 constant* scan_16 [[buffer(14)]], packed_float4 device* parts_16 [[buffer(3)]], packed_float4 device* colliders_16 [[buffer(8)]], packed_uint4 device* collider_info_16 [[buffer(9)]], packed_float4 device* view_chunks_16 [[buffer(17)]], ViewParams_0 constant* view_16 [[buffer(16)]], packed_float4 device* objects_16 [[buffer(18)]], uint device* shot_bodies_16 [[buffer(20)]], float device* lines_16 [[buffer(19)]])
 {
     thread KernelContext_0 kernelContext_44;
     (&kernelContext_44)->params_0 = params_16;
@@ -1899,6 +1991,11 @@ float4 quat_vec_0(const Quat_0 thread* q_11)
     (&kernelContext_44)->parts_0 = parts_16;
     (&kernelContext_44)->colliders_0 = colliders_16;
     (&kernelContext_44)->collider_info_0 = collider_info_16;
+    (&kernelContext_44)->view_chunks_0 = view_chunks_16;
+    (&kernelContext_44)->view_0 = view_16;
+    (&kernelContext_44)->objects_0 = objects_16;
+    (&kernelContext_44)->shot_bodies_0 = shot_bodies_16;
+    (&kernelContext_44)->lines_0 = lines_16;
     threadgroup array<uint, int(1024)> g_scan_16;
     (&kernelContext_44)->g_scan_0 = &g_scan_16;
     uint c_11 = id_13.x;
@@ -2054,7 +2151,7 @@ float4 quat_vec_0(const Quat_0 thread* q_11)
     return;
 }
 
-[[kernel]] void fr_commit(uint3 id_14 [[thread_position_in_grid]], FractureParams_0 constant* params_17 [[buffer(0)]], uint device* work_17 [[buffer(4)]], packed_float4 device* frames_17 [[buffer(6)]], packed_float4 device* bodies_17 [[buffer(7)]], packed_float4 device* chunks_17 [[buffer(1)]], Record_natural_0 device* manifolds_17 [[buffer(10)]], uint device* sort_17 [[buffer(11)]], packed_float4 device* loads_17 [[buffer(12)]], atomic<uint> device* atom_17 [[buffer(5)]], packed_uint4 device* bonds_17 [[buffer(2)]], uint device* args_17 [[buffer(13)]], uint device* info_17 [[buffer(15)]], ScanParams_0 constant* scan_17 [[buffer(14)]], packed_float4 device* parts_17 [[buffer(3)]], packed_float4 device* colliders_17 [[buffer(8)]], packed_uint4 device* collider_info_17 [[buffer(9)]])
+[[kernel]] void fr_commit(uint3 id_14 [[thread_position_in_grid]], FractureParams_0 constant* params_17 [[buffer(0)]], uint device* work_17 [[buffer(4)]], packed_float4 device* frames_17 [[buffer(6)]], packed_float4 device* bodies_17 [[buffer(7)]], packed_float4 device* chunks_17 [[buffer(1)]], Record_natural_0 device* manifolds_17 [[buffer(10)]], uint device* sort_17 [[buffer(11)]], packed_float4 device* loads_17 [[buffer(12)]], atomic<uint> device* atom_17 [[buffer(5)]], packed_uint4 device* bonds_17 [[buffer(2)]], uint device* args_17 [[buffer(13)]], uint device* info_17 [[buffer(15)]], ScanParams_0 constant* scan_17 [[buffer(14)]], packed_float4 device* parts_17 [[buffer(3)]], packed_float4 device* colliders_17 [[buffer(8)]], packed_uint4 device* collider_info_17 [[buffer(9)]], packed_float4 device* view_chunks_17 [[buffer(17)]], ViewParams_0 constant* view_17 [[buffer(16)]], packed_float4 device* objects_17 [[buffer(18)]], uint device* shot_bodies_17 [[buffer(20)]], float device* lines_17 [[buffer(19)]])
 {
     thread KernelContext_0 kernelContext_45;
     (&kernelContext_45)->params_0 = params_17;
@@ -2073,6 +2170,11 @@ float4 quat_vec_0(const Quat_0 thread* q_11)
     (&kernelContext_45)->parts_0 = parts_17;
     (&kernelContext_45)->colliders_0 = colliders_17;
     (&kernelContext_45)->collider_info_0 = collider_info_17;
+    (&kernelContext_45)->view_chunks_0 = view_chunks_17;
+    (&kernelContext_45)->view_0 = view_17;
+    (&kernelContext_45)->objects_0 = objects_17;
+    (&kernelContext_45)->shot_bodies_0 = shot_bodies_17;
+    (&kernelContext_45)->lines_0 = lines_17;
     threadgroup array<uint, int(1024)> g_scan_17;
     (&kernelContext_45)->g_scan_0 = &g_scan_17;
     uint c_12 = id_14.x;
@@ -2115,7 +2217,7 @@ float4 quat_vec_0(const Quat_0 thread* q_11)
     return;
 }
 
-[[kernel]] void fr_reparent(uint3 id_15 [[thread_position_in_grid]], FractureParams_0 constant* params_18 [[buffer(0)]], uint device* work_18 [[buffer(4)]], packed_float4 device* frames_18 [[buffer(6)]], packed_float4 device* bodies_18 [[buffer(7)]], packed_float4 device* chunks_18 [[buffer(1)]], Record_natural_0 device* manifolds_18 [[buffer(10)]], uint device* sort_18 [[buffer(11)]], packed_float4 device* loads_18 [[buffer(12)]], atomic<uint> device* atom_18 [[buffer(5)]], packed_uint4 device* bonds_18 [[buffer(2)]], uint device* args_18 [[buffer(13)]], uint device* info_18 [[buffer(15)]], ScanParams_0 constant* scan_18 [[buffer(14)]], packed_float4 device* parts_18 [[buffer(3)]], packed_float4 device* colliders_18 [[buffer(8)]], packed_uint4 device* collider_info_18 [[buffer(9)]])
+[[kernel]] void fr_reparent(uint3 id_15 [[thread_position_in_grid]], FractureParams_0 constant* params_18 [[buffer(0)]], uint device* work_18 [[buffer(4)]], packed_float4 device* frames_18 [[buffer(6)]], packed_float4 device* bodies_18 [[buffer(7)]], packed_float4 device* chunks_18 [[buffer(1)]], Record_natural_0 device* manifolds_18 [[buffer(10)]], uint device* sort_18 [[buffer(11)]], packed_float4 device* loads_18 [[buffer(12)]], atomic<uint> device* atom_18 [[buffer(5)]], packed_uint4 device* bonds_18 [[buffer(2)]], uint device* args_18 [[buffer(13)]], uint device* info_18 [[buffer(15)]], ScanParams_0 constant* scan_18 [[buffer(14)]], packed_float4 device* parts_18 [[buffer(3)]], packed_float4 device* colliders_18 [[buffer(8)]], packed_uint4 device* collider_info_18 [[buffer(9)]], packed_float4 device* view_chunks_18 [[buffer(17)]], ViewParams_0 constant* view_18 [[buffer(16)]], packed_float4 device* objects_18 [[buffer(18)]], uint device* shot_bodies_18 [[buffer(20)]], float device* lines_18 [[buffer(19)]])
 {
     thread KernelContext_0 kernelContext_46;
     (&kernelContext_46)->params_0 = params_18;
@@ -2134,6 +2236,11 @@ float4 quat_vec_0(const Quat_0 thread* q_11)
     (&kernelContext_46)->parts_0 = parts_18;
     (&kernelContext_46)->colliders_0 = colliders_18;
     (&kernelContext_46)->collider_info_0 = collider_info_18;
+    (&kernelContext_46)->view_chunks_0 = view_chunks_18;
+    (&kernelContext_46)->view_0 = view_18;
+    (&kernelContext_46)->objects_0 = objects_18;
+    (&kernelContext_46)->shot_bodies_0 = shot_bodies_18;
+    (&kernelContext_46)->lines_0 = lines_18;
     threadgroup array<uint, int(1024)> g_scan_18;
     (&kernelContext_46)->g_scan_0 = &g_scan_18;
     uint c_13 = id_15.x;
@@ -2218,7 +2325,7 @@ float4 quat_vec_0(const Quat_0 thread* q_11)
     return;
 }
 
-[[kernel]] void fr_body_clear(uint3 id_16 [[thread_position_in_grid]], FractureParams_0 constant* params_19 [[buffer(0)]], uint device* work_19 [[buffer(4)]], packed_float4 device* frames_19 [[buffer(6)]], packed_float4 device* bodies_19 [[buffer(7)]], packed_float4 device* chunks_19 [[buffer(1)]], Record_natural_0 device* manifolds_19 [[buffer(10)]], uint device* sort_19 [[buffer(11)]], packed_float4 device* loads_19 [[buffer(12)]], atomic<uint> device* atom_19 [[buffer(5)]], packed_uint4 device* bonds_19 [[buffer(2)]], uint device* args_19 [[buffer(13)]], uint device* info_19 [[buffer(15)]], ScanParams_0 constant* scan_19 [[buffer(14)]], packed_float4 device* parts_19 [[buffer(3)]], packed_float4 device* colliders_19 [[buffer(8)]], packed_uint4 device* collider_info_19 [[buffer(9)]])
+[[kernel]] void fr_body_clear(uint3 id_16 [[thread_position_in_grid]], FractureParams_0 constant* params_19 [[buffer(0)]], uint device* work_19 [[buffer(4)]], packed_float4 device* frames_19 [[buffer(6)]], packed_float4 device* bodies_19 [[buffer(7)]], packed_float4 device* chunks_19 [[buffer(1)]], Record_natural_0 device* manifolds_19 [[buffer(10)]], uint device* sort_19 [[buffer(11)]], packed_float4 device* loads_19 [[buffer(12)]], atomic<uint> device* atom_19 [[buffer(5)]], packed_uint4 device* bonds_19 [[buffer(2)]], uint device* args_19 [[buffer(13)]], uint device* info_19 [[buffer(15)]], ScanParams_0 constant* scan_19 [[buffer(14)]], packed_float4 device* parts_19 [[buffer(3)]], packed_float4 device* colliders_19 [[buffer(8)]], packed_uint4 device* collider_info_19 [[buffer(9)]], packed_float4 device* view_chunks_19 [[buffer(17)]], ViewParams_0 constant* view_19 [[buffer(16)]], packed_float4 device* objects_19 [[buffer(18)]], uint device* shot_bodies_19 [[buffer(20)]], float device* lines_19 [[buffer(19)]])
 {
     thread KernelContext_0 kernelContext_47;
     (&kernelContext_47)->params_0 = params_19;
@@ -2237,6 +2344,11 @@ float4 quat_vec_0(const Quat_0 thread* q_11)
     (&kernelContext_47)->parts_0 = parts_19;
     (&kernelContext_47)->colliders_0 = colliders_19;
     (&kernelContext_47)->collider_info_0 = collider_info_19;
+    (&kernelContext_47)->view_chunks_0 = view_chunks_19;
+    (&kernelContext_47)->view_0 = view_19;
+    (&kernelContext_47)->objects_0 = objects_19;
+    (&kernelContext_47)->shot_bodies_0 = shot_bodies_19;
+    (&kernelContext_47)->lines_0 = lines_19;
     threadgroup array<uint, int(1024)> g_scan_19;
     (&kernelContext_47)->g_scan_0 = &g_scan_19;
     uint s_3 = id_16.x;
@@ -2246,6 +2358,295 @@ float4 quat_vec_0(const Quat_0 thread* q_11)
     }
     uint _S308 = a_dirty_0(&kernelContext_47);
     atomic_store_explicit((&kernelContext_47)->atom_0+(_S308 + s_3), 0U, memory_order_relaxed);
+    return;
+}
+
+float3 slot_color_0(uint slot_5)
+{
+    float h_0 = fract(float(slot_5) * 0.6180340051651001f) * 6.0f;
+    float f_7 = fract(h_0);
+    float q_13 = 0.92000001668930054f * (1.0f - 0.62000000476837158f * f_7);
+    float t_3 = 0.92000001668930054f * (1.0f - 0.62000000476837158f * (1.0f - f_7));
+    uint k_3 = uint(h_0);
+    float3 _S309;
+    if(k_3 == 0U)
+    {
+        _S309 = float3(0.92000001668930054f, t_3, 0.34959998726844788f);
+    }
+    else
+    {
+        if(k_3 == 1U)
+        {
+            _S309 = float3(q_13, 0.92000001668930054f, 0.34959998726844788f);
+        }
+        else
+        {
+            if(k_3 == 2U)
+            {
+                _S309 = float3(0.34959998726844788f, 0.92000001668930054f, t_3);
+            }
+            else
+            {
+                if(k_3 == 3U)
+                {
+                    _S309 = float3(0.34959998726844788f, q_13, 0.92000001668930054f);
+                }
+                else
+                {
+                    if(k_3 == 4U)
+                    {
+                        _S309 = float3(t_3, 0.34959998726844788f, 0.92000001668930054f);
+                    }
+                    else
+                    {
+                        _S309 = float3(0.92000001668930054f, 0.34959998726844788f, q_13);
+                    }
+                }
+            }
+        }
+    }
+    return _S309;
+}
+
+void write_object_0(uint o_1, const Quat_0 thread* q_14, float3 t_4, float4 color_0, KernelContext_0 thread* kernelContext_48)
+{
+    float3 _S310 = rotate_0(q_14, float3(1.0f, 0.0f, 0.0f));
+    float3 _S311 = rotate_0(q_14, float3(0.0f, 1.0f, 0.0f));
+    float3 _S312 = rotate_0(q_14, float3(0.0f, 0.0f, 1.0f));
+    uint _S313 = 4U * o_1;
+    *(kernelContext_48->objects_0+_S313) = packed_float4(float4(_S310.x, _S311.x, _S312.x, t_4.x)) ;
+    *(kernelContext_48->objects_0+(_S313 + 1U)) = packed_float4(float4(_S310.y, _S311.y, _S312.y, t_4.y)) ;
+    *(kernelContext_48->objects_0+(_S313 + 2U)) = packed_float4(float4(_S310.z, _S311.z, _S312.z, t_4.z)) ;
+    *(kernelContext_48->objects_0+(_S313 + 3U)) = packed_float4(color_0) ;
+    return;
+}
+
+[[kernel]] void fr_view_chunks(uint3 id_17 [[thread_position_in_grid]], FractureParams_0 constant* params_20 [[buffer(0)]], uint device* work_20 [[buffer(4)]], packed_float4 device* frames_20 [[buffer(6)]], packed_float4 device* bodies_20 [[buffer(7)]], packed_float4 device* chunks_20 [[buffer(1)]], Record_natural_0 device* manifolds_20 [[buffer(10)]], uint device* sort_20 [[buffer(11)]], packed_float4 device* loads_20 [[buffer(12)]], atomic<uint> device* atom_20 [[buffer(5)]], packed_uint4 device* bonds_20 [[buffer(2)]], uint device* args_20 [[buffer(13)]], uint device* info_20 [[buffer(15)]], ScanParams_0 constant* scan_20 [[buffer(14)]], packed_float4 device* parts_20 [[buffer(3)]], packed_float4 device* colliders_20 [[buffer(8)]], packed_uint4 device* collider_info_20 [[buffer(9)]], packed_float4 device* view_chunks_20 [[buffer(17)]], ViewParams_0 constant* view_20 [[buffer(16)]], packed_float4 device* objects_20 [[buffer(18)]], uint device* shot_bodies_20 [[buffer(20)]], float device* lines_20 [[buffer(19)]])
+{
+    thread KernelContext_0 kernelContext_49;
+    (&kernelContext_49)->params_0 = params_20;
+    (&kernelContext_49)->work_0 = work_20;
+    (&kernelContext_49)->frames_0 = frames_20;
+    (&kernelContext_49)->bodies_0 = bodies_20;
+    (&kernelContext_49)->chunks_0 = chunks_20;
+    (&kernelContext_49)->manifolds_0 = manifolds_20;
+    (&kernelContext_49)->sort_0 = sort_20;
+    (&kernelContext_49)->loads_0 = loads_20;
+    (&kernelContext_49)->atom_0 = atom_20;
+    (&kernelContext_49)->bonds_0 = bonds_20;
+    (&kernelContext_49)->args_0 = args_20;
+    (&kernelContext_49)->info_0 = info_20;
+    (&kernelContext_49)->scan_0 = scan_20;
+    (&kernelContext_49)->parts_0 = parts_20;
+    (&kernelContext_49)->colliders_0 = colliders_20;
+    (&kernelContext_49)->collider_info_0 = collider_info_20;
+    (&kernelContext_49)->view_chunks_0 = view_chunks_20;
+    (&kernelContext_49)->view_0 = view_20;
+    (&kernelContext_49)->objects_0 = objects_20;
+    (&kernelContext_49)->shot_bodies_0 = shot_bodies_20;
+    (&kernelContext_49)->lines_0 = lines_20;
+    threadgroup array<uint, int(1024)> g_scan_20;
+    (&kernelContext_49)->g_scan_0 = &g_scan_20;
+    uint k_4 = id_17.x;
+    if(k_4 >= (params_20->chunk_count_0))
+    {
+        return;
+    }
+    uint _S314 = body_of_0(k_4, &kernelContext_49);
+    uint b_3 = 7U * _S314;
+    thread Quat_0 q_15;
+    thread float3 origin_3;
+    structure_pose_0(_S314, b_3, &q_15, &origin_3, &kernelContext_49);
+    uint _S315 = 3U * k_4;
+    float4 _S316 = float4(*((&kernelContext_49)->view_chunks_0+_S315)) ;
+    float3 base_0 = (float4(*((&kernelContext_49)->view_chunks_0+(_S315 + 2U))) ).xyz;
+    bool fixed_0 = ((float4(*((&kernelContext_49)->bodies_0+b_3)) ).w) == 0.0f;
+    float3 color_1;
+    if(((&kernelContext_49)->view_0->mode_0) == 1U)
+    {
+        float _S317 = max(length((float4(*((&kernelContext_49)->bodies_0+(b_3 + 3U))) ).xyz), length((float4(*((&kernelContext_49)->bodies_0+(b_3 + 4U))) ).xyz));
+        if(fixed_0)
+        {
+            color_1 = float3(0.44999998807907104f, 0.44999998807907104f, 0.47999998927116394f);
+        }
+        else
+        {
+            if(_S317 > ((&kernelContext_49)->view_0->rest_speed_0))
+            {
+                color_1 = float3(1.0f, 0.44999998807907104f, 0.11999999731779099f);
+            }
+            else
+            {
+                color_1 = float3(0.25f, 0.44999998807907104f, 0.85000002384185791f);
+            }
+        }
+    }
+    else
+    {
+        if(((&kernelContext_49)->view_0->mode_0) == 2U)
+        {
+            color_1 = slot_color_0(_S314);
+        }
+        else
+        {
+            if(fixed_0)
+            {
+                color_1 = base_0;
+            }
+            else
+            {
+                color_1 = float3(0.44999998807907104f)  * base_0 + float3(0.55000001192092896f)  * slot_color_0(_S314);
+            }
+        }
+    }
+    uint _S318 = (as_type<uint>((_S316.w)));
+    Quat_0 _S319 = quat_of_0(float4(*((&kernelContext_49)->view_chunks_0+(_S315 + 1U))) );
+    thread Quat_0 _S320 = q_15;
+    thread Quat_0 _S321 = _S319;
+    Quat_0 _S322 = quat_mul_0(&_S320, &_S321);
+    thread Quat_0 _S323 = _S322;
+    Quat_0 _S324 = normalized_0(&_S323);
+    float3 _S325 = _S316.xyz;
+    thread Quat_0 _S326 = q_15;
+    float3 _S327 = rotate_0(&_S326, _S325);
+    float3 _S328 = origin_3 + _S327;
+    float4 _S329 = float4(color_1, 1.0f);
+    thread Quat_0 _S330 = _S324;
+    write_object_0(_S318, &_S330, _S328, _S329, &kernelContext_49);
+    return;
+}
+
+[[kernel]] void fr_view_shots(uint3 id_18 [[thread_position_in_grid]], FractureParams_0 constant* params_21 [[buffer(0)]], uint device* work_21 [[buffer(4)]], packed_float4 device* frames_21 [[buffer(6)]], packed_float4 device* bodies_21 [[buffer(7)]], packed_float4 device* chunks_21 [[buffer(1)]], Record_natural_0 device* manifolds_21 [[buffer(10)]], uint device* sort_21 [[buffer(11)]], packed_float4 device* loads_21 [[buffer(12)]], atomic<uint> device* atom_21 [[buffer(5)]], packed_uint4 device* bonds_21 [[buffer(2)]], uint device* args_21 [[buffer(13)]], uint device* info_21 [[buffer(15)]], ScanParams_0 constant* scan_21 [[buffer(14)]], packed_float4 device* parts_21 [[buffer(3)]], packed_float4 device* colliders_21 [[buffer(8)]], packed_uint4 device* collider_info_21 [[buffer(9)]], packed_float4 device* view_chunks_21 [[buffer(17)]], ViewParams_0 constant* view_21 [[buffer(16)]], packed_float4 device* objects_21 [[buffer(18)]], uint device* shot_bodies_21 [[buffer(20)]], float device* lines_21 [[buffer(19)]])
+{
+    thread KernelContext_0 kernelContext_50;
+    (&kernelContext_50)->params_0 = params_21;
+    (&kernelContext_50)->work_0 = work_21;
+    (&kernelContext_50)->frames_0 = frames_21;
+    (&kernelContext_50)->bodies_0 = bodies_21;
+    (&kernelContext_50)->chunks_0 = chunks_21;
+    (&kernelContext_50)->manifolds_0 = manifolds_21;
+    (&kernelContext_50)->sort_0 = sort_21;
+    (&kernelContext_50)->loads_0 = loads_21;
+    (&kernelContext_50)->atom_0 = atom_21;
+    (&kernelContext_50)->bonds_0 = bonds_21;
+    (&kernelContext_50)->args_0 = args_21;
+    (&kernelContext_50)->info_0 = info_21;
+    (&kernelContext_50)->scan_0 = scan_21;
+    (&kernelContext_50)->parts_0 = parts_21;
+    (&kernelContext_50)->colliders_0 = colliders_21;
+    (&kernelContext_50)->collider_info_0 = collider_info_21;
+    (&kernelContext_50)->view_chunks_0 = view_chunks_21;
+    (&kernelContext_50)->view_0 = view_21;
+    (&kernelContext_50)->objects_0 = objects_21;
+    (&kernelContext_50)->shot_bodies_0 = shot_bodies_21;
+    (&kernelContext_50)->lines_0 = lines_21;
+    threadgroup array<uint, int(1024)> g_scan_21;
+    (&kernelContext_50)->g_scan_0 = &g_scan_21;
+    uint i_3 = id_18.x;
+    if(i_3 >= (view_21->shot_count_0))
+    {
+        return;
+    }
+    uint b_4 = 7U * (&kernelContext_50)->shot_bodies_0[i_3];
+    uint o_2 = (&kernelContext_50)->view_0->impactor_base_0 + i_3;
+    if(((float4(*((&kernelContext_50)->bodies_0+b_4)) ).w) == 0.0f)
+    {
+        uint w_4 = 0U;
+        for(;;)
+        {
+            if(w_4 < 4U)
+            {
+            }
+            else
+            {
+                break;
+            }
+            *((&kernelContext_50)->objects_0+(4U * o_2 + w_4)) = packed_float4(float4(0.0f) ) ;
+            w_4 = w_4 + 1U;
+        }
+        return;
+    }
+    thread Quat_0 _S331 = quat_of_0(float4(*((&kernelContext_50)->bodies_0+(b_4 + 1U))) );
+    Quat_0 _S332 = rot_from_rubble_0(&_S331);
+    float3 _S333 = from_rubble_0((float4(*((&kernelContext_50)->bodies_0+b_4)) ).xyz);
+    float4 _S334 = float4(0.18000000715255737f, 0.18999999761581421f, 0.2199999988079071f, 1.0f);
+    thread Quat_0 _S335 = _S332;
+    write_object_0(o_2, &_S335, _S333, _S334, &kernelContext_50);
+    return;
+}
+
+float3 chunk_world_0(uint k_5, KernelContext_0 thread* kernelContext_51)
+{
+    uint _S336 = body_of_0(k_5, kernelContext_51);
+    thread Quat_0 q_16;
+    thread float3 origin_4;
+    structure_pose_0(_S336, 7U * _S336, &q_16, &origin_4, kernelContext_51);
+    float3 _S337 = (float4(*(kernelContext_51->view_chunks_0+3U * k_5)) ).xyz;
+    thread Quat_0 _S338 = q_16;
+    float3 _S339 = rotate_0(&_S338, _S337);
+    return origin_4 + _S339;
+}
+
+void write_line_vertex_0(uint v_8, float3 p_4, KernelContext_0 thread* kernelContext_52)
+{
+    uint _S340 = 7U * v_8;
+    *(kernelContext_52->lines_0+_S340) = p_4.x;
+    *(kernelContext_52->lines_0+(_S340 + 1U)) = p_4.y;
+    *(kernelContext_52->lines_0+(_S340 + 2U)) = p_4.z;
+    *(kernelContext_52->lines_0+(_S340 + 3U)) = 1.0f;
+    *(kernelContext_52->lines_0+(_S340 + 4U)) = 0.86000001430511475f;
+    *(kernelContext_52->lines_0+(_S340 + 5U)) = 0.25f;
+    *(kernelContext_52->lines_0+(_S340 + 6U)) = 1.0f;
+    return;
+}
+
+[[kernel]] void fr_view_bonds(uint3 id_19 [[thread_position_in_grid]], FractureParams_0 constant* params_22 [[buffer(0)]], uint device* work_22 [[buffer(4)]], packed_float4 device* frames_22 [[buffer(6)]], packed_float4 device* bodies_22 [[buffer(7)]], packed_float4 device* chunks_22 [[buffer(1)]], Record_natural_0 device* manifolds_22 [[buffer(10)]], uint device* sort_22 [[buffer(11)]], packed_float4 device* loads_22 [[buffer(12)]], atomic<uint> device* atom_22 [[buffer(5)]], packed_uint4 device* bonds_22 [[buffer(2)]], uint device* args_22 [[buffer(13)]], uint device* info_22 [[buffer(15)]], ScanParams_0 constant* scan_22 [[buffer(14)]], packed_float4 device* parts_22 [[buffer(3)]], packed_float4 device* colliders_22 [[buffer(8)]], packed_uint4 device* collider_info_22 [[buffer(9)]], packed_float4 device* view_chunks_22 [[buffer(17)]], ViewParams_0 constant* view_22 [[buffer(16)]], packed_float4 device* objects_22 [[buffer(18)]], uint device* shot_bodies_22 [[buffer(20)]], float device* lines_22 [[buffer(19)]])
+{
+    thread KernelContext_0 kernelContext_53;
+    (&kernelContext_53)->params_0 = params_22;
+    (&kernelContext_53)->work_0 = work_22;
+    (&kernelContext_53)->frames_0 = frames_22;
+    (&kernelContext_53)->bodies_0 = bodies_22;
+    (&kernelContext_53)->chunks_0 = chunks_22;
+    (&kernelContext_53)->manifolds_0 = manifolds_22;
+    (&kernelContext_53)->sort_0 = sort_22;
+    (&kernelContext_53)->loads_0 = loads_22;
+    (&kernelContext_53)->atom_0 = atom_22;
+    (&kernelContext_53)->bonds_0 = bonds_22;
+    (&kernelContext_53)->args_0 = args_22;
+    (&kernelContext_53)->info_0 = info_22;
+    (&kernelContext_53)->scan_0 = scan_22;
+    (&kernelContext_53)->parts_0 = parts_22;
+    (&kernelContext_53)->colliders_0 = colliders_22;
+    (&kernelContext_53)->collider_info_0 = collider_info_22;
+    (&kernelContext_53)->view_chunks_0 = view_chunks_22;
+    (&kernelContext_53)->view_0 = view_22;
+    (&kernelContext_53)->objects_0 = objects_22;
+    (&kernelContext_53)->shot_bodies_0 = shot_bodies_22;
+    (&kernelContext_53)->lines_0 = lines_22;
+    threadgroup array<uint, int(1024)> g_scan_22;
+    (&kernelContext_53)->g_scan_0 = &g_scan_22;
+    uint i_4 = id_19.x;
+    if(i_4 >= (params_22->bond_count_0))
+    {
+        return;
+    }
+    uint4 _S341 = uint4(*((&kernelContext_53)->bonds_0+i_4)) ;
+    float3 _S342 = chunk_world_0(_S341.x, &kernelContext_53);
+    uint _S343 = w_alive_0(&kernelContext_53);
+    float3 b_5;
+    if((*((&kernelContext_53)->work_0+(_S343 + i_4))) != 0U)
+    {
+        float3 _S344 = chunk_world_0(_S341.y, &kernelContext_53);
+        b_5 = _S344;
+    }
+    else
+    {
+        b_5 = _S342;
+    }
+    uint _S345 = 2U * i_4;
+    write_line_vertex_0(_S345, _S342, &kernelContext_53);
+    write_line_vertex_0(_S345 + 1U, b_5, &kernelContext_53);
     return;
 }
 

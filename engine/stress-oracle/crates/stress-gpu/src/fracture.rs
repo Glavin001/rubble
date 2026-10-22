@@ -205,7 +205,7 @@ pub struct Counters {
     pub split_frames: u32,
 }
 
-const BINDINGS: [Binding; 16] = [
+const BINDINGS: [Binding; 21] = [
     Binding::Uniform,   // params
     Binding::Storage,   // chunks
     Binding::Storage,   // bonds
@@ -222,9 +222,14 @@ const BINDINGS: [Binding; 16] = [
     Binding::StorageRw, // indirect sizes
     Binding::Uniform,   // scan params
     Binding::Storage,   // chunk info
+    Binding::Uniform,   // view params
+    Binding::Storage,   // view chunks
+    Binding::StorageRw, // the renderer's objects
+    Binding::StorageRw, // the renderer's bond lines
+    Binding::Storage,   // the shots' bodies
 ];
 
-const ENTRIES: [&str; 19] = [
+const ENTRIES: [&str; 22] = [
     "fr_loads",
     "fr_breaks",
     "fr_gate",
@@ -244,7 +249,45 @@ const ENTRIES: [&str; 19] = [
     "fr_commit",
     "fr_reparent",
     "fr_body_clear",
+    "fr_view_chunks",
+    "fr_view_shots",
+    "fr_view_bonds",
 ];
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+struct ViewParams {
+    mode: u32,
+    shot_count: u32,
+    impactor_base: u32,
+    pad0: u32,
+    rest_speed: f32,
+    pad1: f32,
+    pad2: f32,
+    pad3: f32,
+}
+
+/// What the view kernels draw from (`fracture.slang` `fr_view_*`), set once per renderer.
+pub struct ViewTables {
+    /// Per chunk 3 float4: (renderer object as bits, render centre (structure frame));
+    /// rotation (structure frame, x, y, z, w); (material colour, -).
+    pub chunks: Vec<[[f32; 4]; 3]>,
+    /// The shots' engine bodies.
+    pub shot_bodies: Vec<u32>,
+    /// The renderer's first shot object.
+    pub impactor_base: u32,
+}
+
+struct View {
+    params: wgpu::Buffer,
+    chunks: wgpu::Buffer,
+    shots: wgpu::Buffer,
+    shot_count: u32,
+    impactor_base: u32,
+    /// The renderer's buffers the groups bind, and the groups (chunks, shots, bonds).
+    bound: Option<(wgpu::Buffer, wgpu::Buffer, [wgpu::BindGroup; 3])>,
+    mode: u32,
+}
 
 pub struct GpuFracture {
     pub layout: Layout,
@@ -268,6 +311,13 @@ pub struct GpuFracture {
     /// Bind groups per kernel (the scans: the new-piece scan's, then the free slots').
     binds: Vec<wgpu::BindGroup>,
     scan_binds: Vec<wgpu::BindGroup>,
+    /// What the core kernels bind in the view's slots, and the view once set.
+    placeholder: wgpu::Buffer,
+    placeholder_uniform: wgpu::Buffer,
+    view: Option<View>,
+    engine_bodies: Option<wgpu::Buffer>,
+    engine_colliders: Option<wgpu::Buffer>,
+    ingest_buffers: Option<[wgpu::Buffer; 3]>,
 }
 
 fn storage_bytes(gpu: &Gpu, label: &str, bytes: u64, extra: wgpu::BufferUsages) -> wgpu::Buffer {
@@ -361,6 +411,12 @@ impl GpuFracture {
             args,
             binds: Vec::new(),
             scan_binds: Vec::new(),
+            placeholder: storage_bytes(gpu, "fracture view placeholder", 16, wgpu::BufferUsages::empty()),
+            placeholder_uniform: gpu.uniform("fracture view placeholder", &ViewParams::default()),
+            view: None,
+            engine_bodies: None,
+            engine_colliders: None,
+            ingest_buffers: None,
         };
         f.rebind(gpu, engine, ingest);
         Ok(f)
@@ -369,7 +425,7 @@ impl GpuFracture {
     /// The bind groups, against the engine's and the ingest's buffers as they are now.
     pub fn rebind(&mut self, gpu: &Gpu, engine: &EngineBuffers, ingest: &EngineIngest) {
         let group = |scan: &wgpu::Buffer, k: &Kernel| {
-            let buffers: [&wgpu::Buffer; 16] = [
+            let buffers: [&wgpu::Buffer; 21] = [
                 &self.params_buf,
                 &self.chunks,
                 &self.bonds,
@@ -386,6 +442,11 @@ impl GpuFracture {
                 &self.sizes,
                 scan,
                 &self.info,
+                &self.placeholder_uniform,
+                &self.placeholder,
+                &self.placeholder,
+                &self.placeholder,
+                &self.placeholder,
             ];
             gpu.bind(&k.group, &buffers)
         };
@@ -393,6 +454,70 @@ impl GpuFracture {
         let scan_binds = [10, 11, 12].iter().map(|&i| group(&self.scan_free, &self.kernels[i])).collect();
         self.binds = binds;
         self.scan_binds = scan_binds;
+        if let Some(v) = self.view.as_mut() {
+            v.bound = None;
+        }
+        self.engine_bodies = Some(engine.bodies.clone());
+        self.engine_colliders = Some(engine.colliders.clone());
+        self.ingest_buffers = Some([ingest.collider_info.clone(), ingest.manifolds.clone(), ingest.sort.clone()]);
+    }
+
+    /// The view's tables (once per renderer layout).
+    pub fn set_view(&mut self, gpu: &Gpu, t: &ViewTables) {
+        let chunks: Vec<[f32; 4]> = t.chunks.iter().flatten().copied().collect();
+        self.view = Some(View {
+            params: gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("fracture view params"),
+                size: std::mem::size_of::<ViewParams>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            chunks: gpu.storage("fracture view chunks", &chunks),
+            shots: gpu.storage("fracture view shots", &t.shot_bodies),
+            shot_count: t.shot_bodies.len() as u32,
+            impactor_base: t.impactor_base,
+            bound: None,
+            mode: u32::MAX,
+        });
+    }
+
+    /// The renderer's objects (`objects`: chunks and shots) and, with `bonds`, its bond
+    /// lines (`lines`, 2 vertices per bond) from the engine's bodies as they are: recorded
+    /// into `encoder` after the frame's work. `mode`: 0 materials, 1 body state, 2 bodies.
+    pub fn encode_view(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, objects: &wgpu::Buffer, lines: &wgpu::Buffer, mode: u32, bonds: bool) {
+        let Some(v) = self.view.as_mut() else { return };
+        if v.mode != mode {
+            v.mode = mode;
+            let p = ViewParams { mode, shot_count: v.shot_count, impactor_base: v.impactor_base, rest_speed: 0.05, ..Default::default() };
+            gpu.queue.write_buffer(&v.params, 0, bytemuck::bytes_of(&p));
+        }
+        if v.bound.as_ref().is_none_or(|(o, l, _)| o != objects || l != lines) {
+            let bodies = self.engine_bodies.as_ref().expect("engine bound");
+            let colliders = self.engine_colliders.as_ref().expect("engine bound");
+            let ing = self.ingest_buffers.as_ref().expect("ingest bound");
+            let group = |i: usize| {
+                let buffers: [&wgpu::Buffer; 21] = [
+                    &self.params_buf, &self.chunks, &self.bonds, &self.parts, &self.work, &self.atom, &self.frames, bodies, colliders, &ing[0], &ing[1], &ing[2], &self.loads, &self.sizes, &self.scan_new, &self.info, &v.params, &v.chunks, objects, lines, &v.shots,
+                ];
+                gpu.bind(&self.kernels[i].group, &buffers)
+            };
+            let at = |name: &str| ENTRIES.iter().position(|e| *e == name).expect("view entry");
+            let groups = [group(at("fr_view_chunks")), group(at("fr_view_shots")), group(at("fr_view_bonds"))];
+            v.bound = Some((objects.clone(), lines.clone(), groups));
+        }
+        let (_, _, groups) = v.bound.as_ref().expect("bound");
+        let mut pass = encoder.begin_compute_pass(&Default::default());
+        let run = |pass: &mut wgpu::ComputePass<'_>, name: &str, group: &wgpu::BindGroup, n: u32| {
+            let k = &self.kernels[ENTRIES.iter().position(|e| *e == name).expect("view entry")];
+            pass.set_pipeline(&k.pipeline);
+            pass.set_bind_group(0, group, &[]);
+            pass.dispatch_workgroups(groups_of(n), 1, 1);
+        };
+        run(&mut pass, "fr_view_chunks", &groups[0], self.layout.n);
+        run(&mut pass, "fr_view_shots", &groups[1], v.shot_count.max(1));
+        if bonds {
+            run(&mut pass, "fr_view_bonds", &groups[2], self.layout.e);
+        }
     }
 
     fn kernel(&self, name: &str) -> (usize, &Kernel) {
@@ -449,6 +574,10 @@ impl GpuFracture {
 
     /// The split kernels, sized by the gate (`fr_gate`, in the pass before).
     fn record_split(&self, encoder: &mut wgpu::CommandEncoder) {
+        // `STRESS_FRACTURE_SPLIT=0` (a diagnostic): bonds break, bodies never split.
+        if std::env::var("STRESS_FRACTURE_SPLIT").is_ok_and(|v| v == "0") {
+            return;
+        }
         encoder.copy_buffer_to_buffer(&self.sizes, 0, &self.args, 0, 12 * ARGS);
         let mut pass = encoder.begin_compute_pass(&Default::default());
         let pass = &mut pass;
@@ -533,6 +662,10 @@ impl GpuFracture {
 /// components of each body over its intact bonds, rooted at their lowest chunk; a body's
 /// largest piece (ties: the lowest root) keeps it; the k-th other piece by root takes the
 /// k-th free slot.
+fn groups_of(n: u32) -> u32 {
+    n.div_ceil(64).max(1)
+}
+
 pub fn reference_split(t: &FractureTables, intact: &mut [bool], broken: &[u32], chunk_body: &mut [u32], free: &mut [u32]) -> Vec<(u32, f64, [f64; 3], [[f64; 3]; 3])> {
     let n = t.chunks.len();
     let mut dirty = vec![false; t.frames.len()];

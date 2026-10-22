@@ -1236,6 +1236,11 @@ impl WgpuSim {
     /// Encode and submit one step without waiting for it (pipelined hosts and
     /// benchmarks). Previous-step counts reach the next step through GPU copies,
     /// as in the browser host; `drain` waits and refreshes the counters.
+    /// Steps run so far (`HOST_S(17)`: a moved body's generation is the step it moved in).
+    pub fn steps_done(&self) -> u32 {
+        self.steps_done
+    }
+
     pub fn step_submit(&mut self) -> Result<(), ExecError> {
         self.step_core(false, false).map(|_| ())
     }
