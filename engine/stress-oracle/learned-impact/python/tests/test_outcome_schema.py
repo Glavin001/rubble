@@ -124,3 +124,25 @@ def test_sources_mix_by_weight(tmp_path):
     assert abs(n["coupled"] / sum(n.values()) - 0.75) < 0.05
     with pytest.raises(ValueError):
         Data(f"{tmp_path / 'a'}@0.5,{tmp_path / 'b'}")
+
+
+def test_energy_budget_is_cumulative_and_signed():
+    from types import SimpleNamespace as N
+
+    from learned_impact.outcome import schema as S
+
+    def call(i, ke_in, ke_out, el0=0.0, el1=0.0, wg=0.0):
+        return N(routed=True, call_index=i, energy={"KE_in": ke_in, "KE_out": ke_out,
+                                                    "E_elastic_start": el0, "E_elastic_end": el1,
+                                                    "W_gravity": wg})
+    cs = [call(0, 100.0, 90.0), call(1, 90.0, 99.0), call(2, 99.0, 104.0)]
+    S.energy_budget(cs)
+    r = [c.energy["E_budget_remaining"] for c in cs]
+    assert r[0] == 5.0  # 5% of the first frame's energy
+    assert r[1] == 15.0  # 10 J dissipated earlier is credit
+    assert r[2] == 6.0  # 15 − the 9 J regained
+    # a live call's host-sent budget is never overwritten
+    live = [call(0, 1.0, 1.0)]
+    live[0].energy["E_budget_remaining"] = 0.123
+    S.energy_budget(live)
+    assert live[0].energy["E_budget_remaining"] == 0.123

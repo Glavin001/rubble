@@ -187,6 +187,10 @@ def collate(calls: list[S.Call], structures: dict[str, dict[int, dict[str, np.nd
         es, ki = en.get("E_elastic_start"), en.get("KE_in")
         add("e_stored_start", np.array([float(es) if es is not None else np.nan]))
         add("e_ke_in", np.array([float(ki) if ki is not None else np.nan]))  # the builder's f64
+        # the event's energy budget left before this call (schema.energy_budget; live calls:
+        # the host's); NaN without a ledger: the decode's per-frame bound applies instead
+        rb = en.get("E_budget_remaining")
+        add("e_budget_remaining", np.array([float(rb) if rb is not None else np.nan]))
         add("call_anchored", np.array([c.anchored]))
         add("gravity", np.array([c.gravity], dtype=np.float64))
         for t in S.EDGE_TYPES:
@@ -243,6 +247,7 @@ def collate(calls: list[S.Call], structures: dict[str, dict[int, dict[str, np.nd
     b.t["energy"] = torch.from_numpy(np.concatenate(acc["energy"]).astype(np.float64))
     b.t["e_stored_start"] = torch.from_numpy(np.concatenate(acc["e_stored_start"]).astype(np.float64))
     b.t["e_ke_in"] = torch.from_numpy(np.concatenate(acc["e_ke_in"]).astype(np.float64))
+    b.t["e_budget_remaining"] = torch.from_numpy(np.concatenate(acc["e_budget_remaining"]).astype(np.float64))
     b.t["scales"] = torch.from_numpy(np.concatenate(acc["scales"]).astype(np.float64))
     b.t["gravity"] = torch.from_numpy(np.concatenate(acc["gravity"]).astype(np.float64))
     b.t["n_nodes"] = torch.tensor(node_off)
@@ -338,6 +343,7 @@ def pad_batch(b: Batch, growth: float = 1.25, call_multiple: int = 8) -> Batch:
     t["energy_has_split"] = _pad_rows(t["energy_has_split"], pg, False)
     t["e_stored_start"] = _pad_rows(t["e_stored_start"], pg, float("nan"))
     t["e_ke_in"] = _pad_rows(t["e_ke_in"], pg, float("nan"))
+    t["e_budget_remaining"] = _pad_rows(t["e_budget_remaining"], pg, float("nan"))
     t["call_anchored"] = _pad_rows(t["call_anchored"], pg, True)
     t["call_valid"] = _pad_rows(t["call_valid"], pg, False)
     # ---- nodes: padding chunks then padding impactors, after every real node

@@ -426,6 +426,7 @@ def with_dummy_targets(c: Call) -> Call:
     # KE_in and E_elastic_start are inputs (frame-start kinetic and stored energy, the
     # decode's energy envelope): never invented; absent, the envelope leaves the call unbounded
     energy = {k: 0.0 for k in ENERGY_TARGET_KEYS if k not in ("KE_in", "E_elastic_start")}
+    # (E_budget_*: the host's, never invented either)
     energy.update(c.energy)
     return Call(**{**c.__dict__, "arrays": a, "energy": energy})
 
@@ -526,7 +527,34 @@ def load_event(path: Path | str, validate: bool = True, require_targets: bool = 
         calls.append(c)
     if validate and len(calls) != int(manifest["n_calls"]):
         raise SchemaError(f"n_calls {manifest['n_calls']} != {len(calls)}")
+    energy_budget(calls)
     return Event(root=root, manifest=manifest, calls=calls, structures=structures, static=static)
+
+
+ENERGY_BUDGET_TOL = 0.05
+_LEDGER_KEYS = ("KE_in", "KE_out", "E_elastic_start", "E_elastic_end", "W_gravity")
+
+
+def energy_budget(calls: list) -> None:
+    """The event's cumulative energy budget (P0's stress_learned::energy_budget, planning
+    2026-10-22), before each routed call in call order: E_ref = the largest frame-start
+    KE + E_elastic so far, gain = the signed sum of the earlier calls' changes of their
+    island's KE + E_elastic + PE, remaining = max(0, tol·E_ref − gain). Set as
+    energy["E_budget_ref" | "E_budget_gain" | "E_budget_remaining"], unless the call already
+    carries them (live calls: the host sends them). An event whose recorded ledger is
+    incomplete gets none. Bit-for-bit with P0's fixture energy_budget_v1.json."""
+    routed = sorted((c for c in calls if c.routed), key=lambda c: c.call_index)
+    if any("E_budget_remaining" in c.energy for c in routed):
+        return
+    if not routed or not all(all(k in c.energy for k in _LEDGER_KEYS) for c in routed):
+        return
+    e_ref, gain = 0.0, 0.0
+    for c in routed:
+        e = c.energy
+        e_ref = max(e_ref, e["KE_in"] + e["E_elastic_start"])
+        e["E_budget_ref"], e["E_budget_gain"] = e_ref, gain
+        e["E_budget_remaining"] = max(ENERGY_BUDGET_TOL * e_ref - gain, 0.0)
+        gain += e["KE_out"] + e["E_elastic_end"] - e["KE_in"] - e["E_elastic_start"] - e["W_gravity"]
 
 
 class _BlobWriter:

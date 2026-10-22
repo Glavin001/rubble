@@ -240,6 +240,17 @@ def energy_bound(ph: dict[str, Tensor], b: Batch, free: Tensor, tol: float,
     # inputs only: KE_in and gravity's work from the decoded motion (external work is 0
     # without a pressure load; calls with one are skipped, `skip`)
     bound = ke_in + w_g + tol * e_in
+    # The event's cumulative budget where the call has one (planning, 2026-10-22; P0's
+    # stress_learned::energy_budget): the island's KE + E_elastic + PE may rise by at most
+    # `remaining` (a per-frame +tol compounds over an event). The decode bounds kinetic
+    # energy: KE_out ≤ KE_in + E_elastic_start + W_g + remaining, never tighter than the
+    # oracle (its frame-end elastic energy is ≥ 0); the host's bound adds the decoded elastic.
+    rem = b.t["e_budget_remaining"].to(dtype).to(ke_in.device) if "e_budget_remaining" in b.t else None
+    if rem is not None:
+        st = b.t["e_stored_start"].to(dtype).to(ke_in.device)
+        ok = torch.isfinite(rem) & torch.isfinite(st)
+        bound = torch.where(ok, ke_in + torch.where(ok, st, torch.zeros_like(st)) + w_g
+                            + torch.where(ok, rem, torch.zeros_like(rem)), bound)
     v, w = ph["v_end"], ph["w_end"]
     ke = kinetic(ph, v, w, inertia1, G)
     active = ke > bound
