@@ -412,6 +412,10 @@ struct ProviderOpts {
     /// `model`: the Python package directory with its `.venv` (default: this checkout's
     /// `learned-impact/python`).
     python_dir: Option<std::path::PathBuf>,
+    /// `--host standalone`: the closed loop on the oracle's own world (no rigid engine:
+    /// `World::step_frame_with_provider_standalone`, diagnostic only: no contact outside the
+    /// island in routed frames); default `engine` (rubble).
+    standalone: bool,
     /// The call record's variant-B (QS frame) features (`live_call`'s `qs`): `--qs` / `--no-qs`
     /// force them. Unset, `files` builds them (as P1 records them) and `model` asks the
     /// provider (`model.json`'s `needs_qs`).
@@ -555,7 +559,8 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
                 flags = d.flags.clone();
                 Ok(d)
             };
-            match w.step_frame_with_provider(&mut provider) {
+            let stepped = if o.standalone { w.step_frame_with_provider_standalone(&mut provider) } else { w.step_frame_with_provider(&mut provider) };
+            match stepped {
                 Ok(keys) => {
                     islands = keys.chunks.len() + keys.impactors.len();
                     routed = keys.chunks.clone();
@@ -668,6 +673,8 @@ struct EventTrack {
     damage_drop: f64,
     nonfinite: usize,
     damage: Vec<Vec<f64>>,
+    /// (KE + PE - PE0 - E0) / E0 at every frame boundary, and the impactors' KE / E0.
+    energy: Vec<(f64, f64)>,
 }
 
 fn total_ke_pe(w: &World) -> (f64, f64, Vec3) {
@@ -709,12 +716,13 @@ impl EventTrack {
         let anchored = w.solver.clusters.iter().any(|c| c.anchored);
         let free = !anchored && w.solver.config.gravity.norm() == 0.0;
         let damage = w.solver.bonds.iter().map(|b| b.iter().map(|x| x.joint.damage).collect()).collect();
-        EventTrack { e0, pe0, p0, free, samples, sampled: Vec::new(), ke_excess: (f64::NEG_INFINITY, 0), damage_drop: 0.0, nonfinite: 0, damage }
+        EventTrack { e0, pe0, p0, free, samples, sampled: Vec::new(), ke_excess: (f64::NEG_INFINITY, 0), damage_drop: 0.0, nonfinite: 0, damage, energy: Vec::new() }
     }
 
     fn frame(&mut self, w: &World, f: usize) {
         let (ke, pe, _) = total_ke_pe(w);
         let excess = (ke + pe - self.pe0 - self.e0) / self.e0;
+        self.energy.push((excess, w.impactors.iter().map(|i| i.kinetic_energy()).sum::<f64>() / self.e0));
         if !(excess.is_finite()) {
             self.nonfinite += 1;
         } else if excess > self.ke_excess.0 {
@@ -776,6 +784,7 @@ impl EventTrack {
             .collect();
         let momentum = if self.free { Some((p1 - self.p0).norm() / self.p0.norm().max(1e-12)) } else { None };
         json!({"t_end": sv.time, "chunk_cluster": cluster, "chunk_anchored": anchored, "impactors": impactors, "fragments": sv.clusters.len(), "broken_bonds": sv.broken_bond_count(),
+            "energy_series": self.energy.iter().map(|e| [e.0, e.1]).collect::<Vec<_>>(),
             "checks": {"ke_excess_over_e0": self.ke_excess.0, "ke_excess_frame": self.ke_excess.1, "momentum_rel": momentum, "damage_drop": self.damage_drop, "nonfinite": self.nonfinite},
             "samples": self.sampled})
     }
@@ -819,7 +828,7 @@ fn run_event(dir: &std::path::Path, variant: &str, o: &ProviderOpts, samples: Ve
             (track.finish(&w, stop_speed), json!({"fingerprint": fp, "recorded_fingerprint": outcome["fingerprint"]}))
         }
         "provider" => {
-            let w = World::with_engine(&scene, engine(&scene));
+            let w = if o.standalone { World::new(&scene) } else { World::with_engine(&scene, engine(&scene)) };
             let mut track = Some(EventTrack::new(&w, e0, samples));
             let mut last: Option<World> = None;
             let out = run_provider_world(w, &scene, n, o, &tag, &mut |w, f| {
@@ -847,7 +856,7 @@ fn main() {
     let mut samples: Vec<usize> = Vec::new();
     let (mut name, mut member, mut mode, mut seconds, mut fdt, mut variant) = (String::from("free_wall"), None::<u64>, String::from("kin"), SECONDS, None::<f64>, String::from("coupled"));
     let mut poses: Option<String> = None;
-    let mut provider = ProviderOpts { kind: "oracle".into(), dir: "provider".into(), timeout: 60.0, echo_oracle: false, qs: None, checkpoint: None, device: "cpu".into(), python_dir: None };
+    let mut provider = ProviderOpts { kind: "oracle".into(), dir: "provider".into(), timeout: 60.0, echo_oracle: false, qs: None, checkpoint: None, device: "cpu".into(), python_dir: None, standalone: false };
     while let Some(a) = args.next() {
         match a.as_str() {
             "--scene" => name = args.next().expect("--scene NAME"),
@@ -865,6 +874,7 @@ fn main() {
             "--checkpoint" => provider.checkpoint = Some(args.next().expect("--checkpoint PT").into()),
             "--device" => provider.device = args.next().expect("--device cpu|mps"),
             "--python-dir" => provider.python_dir = Some(args.next().expect("--python-dir DIR").into()),
+            "--host" => provider.standalone = match args.next().as_deref() { Some("standalone") => true, Some("engine") => false, other => panic!("--host standalone|engine, not {other:?}") },
             "--poses" => poses = Some(args.next().expect("--poses FILE")),
             "--event-dir" => event_dir = Some(args.next().expect("--event-dir DIR")),
             "--samples" => samples = args.next().expect("--samples f,f").split(',').filter(|x| !x.is_empty()).map(|x| x.parse().expect("frame")).collect(),

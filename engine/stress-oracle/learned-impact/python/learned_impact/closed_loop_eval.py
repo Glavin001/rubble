@@ -7,9 +7,14 @@ until it settles, through P0's coupled harness (`learned_p0 event`), under each 
            targets provider (bit-identical, `closed-loop-harness-2026-10-21.md`)
   ceiling_full  (diagnostic) the same with the full state carried between calls (hidden
            deformation kept): separates what the reduced state loses
+  ceiling_def  the ceiling with each chunk's decoded pose and velocity kept relative to its
+           body's rigid fit (`STRESS_DECODED_DEFORMATION=1`) instead of the rigid fit alone:
+           the elastic deformation of a still-bonded (anchored, prestressed) wall survives
+           the call, from the decoded state alone
   qs       CPU `blast_parity` (P1's QS baseline), standalone
   punch    the host's predictive punch, the engine taking each frame with its contacts
   model    P2's checkpoint (`--checkpoint`), through `stress_learned::provider_client`
+  model_def  the same with `STRESS_DECODED_DEFORMATION=1`
 
 and scored against the event's oracle ensemble (P1's recorded members) with the acceptance
 metrics: impactor exit speed and regime, partition (1 - ARI), fragment sizes (W1 of mass-
@@ -133,16 +138,18 @@ def candidate_args(name: str, a, out: Path, event: str) -> tuple[list[str], dict
     if name == "ceiling_full":
         # Diagnostic: the oracle's frame with the full (hidden) state carried between calls.
         return ["--variant", "provider", "--provider", "oracle_full"], deb
+    if name == "ceiling_def":
+        return ["--variant", "provider", "--provider", "oracle"], {**deb, "STRESS_DECODED_DEFORMATION": "1"}
     if name == "qs":
         return ["--variant", "qs"], {}
     if name == "punch":
         return ["--variant", "provider", "--provider", "punch"], deb
-    if name == "model":
-        d = out / "provider" / event
+    if name in ("model", "model_def"):
+        d = out / "provider" / name / event
         args = ["--variant", "provider", "--provider", "model", "--checkpoint", str(a.checkpoint), "--dir", str(d), "--timeout", str(a.timeout), "--device", a.device]
         if a.python_dir:
             args += ["--python-dir", str(a.python_dir)]
-        return args, deb
+        return args, ({**deb, "STRESS_DECODED_DEFORMATION": "1"} if name == "model_def" else deb)
     raise SystemExit(f"unknown candidate {name}")
 
 

@@ -276,6 +276,9 @@ pub struct World {
     /// heavier body), so its swept bounds grow by `2u dt` along the closing direction and
     /// whatever those pieces can reach within the frame joins its island.
     pub debris_reach_routing: bool,
+    /// `apply_decoded` keeps each chunk's decoded departure from its cluster's rigid fit as
+    /// hidden state (`STRESS_DECODED_DEFORMATION=1`, off by default: the reduced state).
+    pub decoded_keeps_deformation: bool,
     /// `implicit_failure_windows`: chunks whose clusters take this frame in a window
     /// (a bond of theirs started to fail in an implicit step of an earlier attempt),
     /// and those found failing in this attempt.
@@ -517,6 +520,7 @@ impl World {
             qs_islands: false,
             tiered_fast_joins: std::env::var("STRESS_TIERED_JOIN").is_ok_and(|v| v == "fast"),
             debris_reach_routing: std::env::var("STRESS_DEBRIS_ROUTING").is_ok_and(|v| v == "1"),
+            decoded_keeps_deformation: std::env::var("STRESS_DECODED_DEFORMATION").is_ok_and(|v| v == "1"),
             window_forced: Vec::new(),
             implicit_failures: Vec::new(),
             implicit_contact_seen: 0.0,

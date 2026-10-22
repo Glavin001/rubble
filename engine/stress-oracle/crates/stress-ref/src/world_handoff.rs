@@ -348,17 +348,29 @@ impl World {
     /// impactors'. The caller has already stepped the rest of the world (the engine, with
     /// the island frozen) and advances the clocks.
     pub fn apply_decoded(&mut self, d: &DecodedState) -> Result<(), String> {
+        let keep = self.decoded_keeps_deformation;
+        self.apply_decoded_with(d, keep)
+    }
+
+    /// `apply_decoded`; with `keep_deformation`, each chunk's departure from its cluster's
+    /// fitted rigid motion (its decoded position, orientation, velocity and spin against
+    /// the fit) is kept as the chunk's hidden state instead of dropped, so the state handed
+    /// on is the decoded one chunk for chunk (no deformation is lost at the boundary).
+    pub fn apply_decoded_with(&mut self, d: &DecodedState, keep_deformation: bool) -> Result<(), String> {
         if d.schema_version != DECODED_STATE_VERSION {
             return Err(format!("decoded state version {:?}", d.schema_version));
         }
         // Frame-start chunk placements, before any split moves chunks between clusters.
         let mut target: std::collections::HashMap<(usize, usize), (Vec3, Vec3, Vec3, Vec3)> = std::collections::HashMap::new();
+        let mut orient: std::collections::HashMap<(usize, usize), Quat> = std::collections::HashMap::new();
         for b in &d.chunks {
             let (s, c) = unkey(b.key);
             if s >= self.solver.chunks.len() || c >= self.solver.chunks[s].len() || !self.solver.chunks[s][c].active {
                 return Err(format!("chunk key {} is not an active chunk", b.key));
             }
             let x1 = self.solver.chunk_position(s, c) + Vec3::from_array(b.dx);
+            let q1 = (Quat::from_rotation_vector(Vec3::from_array(b.drot)) * self.chunk_orientation(s, c)).normalized();
+            orient.insert((s, c), q1);
             target.insert((s, c), (x1, Vec3::from_array(b.drot), Vec3::from_array(b.v), Vec3::from_array(b.w)));
         }
         let mut breaks: Vec<&DecodedBreak> = d.bonds_broken.iter().collect();
@@ -435,6 +447,27 @@ impl World {
             cl.velocity = p * (1.0 / cl.mass);
             cl.angular_velocity = iw.inverse().ok_or("singular inertia")? * l;
         }
+        if keep_deformation {
+            // Each decoded chunk's departure from its cluster's fitted rigid motion becomes its
+            // hidden state (the frame and its rigid motion stay the fit's).
+            let sv = &mut self.solver;
+            for (&(s, c), &(x1, _, v1, w1)) in &target {
+                let ci = sv.chunks[s][c].cluster;
+                let cl = sv.clusters[ci].clone();
+                let center = sv.structures[s].chunks[c].center;
+                let u = cl.pose.inverse_transform_point(x1) - center;
+                let back = cl.pose.rotation.conjugate();
+                let th = (back * orient[&(s, c)]).normalized().to_rotation_vector();
+                let r = cl.pose.transform_vector(center + u - cl.com);
+                let (vh, wh) = if cl.anchored {
+                    (back.rotate(v1 - cl.angular_velocity.cross(r)), back.rotate(w1))
+                } else {
+                    (back.rotate(v1 - cl.velocity - cl.angular_velocity.cross(r)), back.rotate(w1 - cl.angular_velocity))
+                };
+                let cs = &mut sv.chunks[s][c];
+                (cs.u, cs.th, cs.v, cs.w) = (u, th, vh, wh);
+            }
+        }
         for b in &d.impactors {
             let imp = self.impactors.get_mut(b.key as usize).ok_or_else(|| format!("impactor key {} out of range", b.key))?;
             imp.pose.position += Vec3::from_array(b.dx);
@@ -480,6 +513,64 @@ impl World {
         self.frame += 1;
         self.island_frames += 1;
         self.coupled_write_back(&f.frozen);
+        Ok(keys)
+    }
+}
+
+impl World {
+    /// `step_frame_with_provider` on a standalone world (no engine): the oracle's own world
+    /// carries every body between calls (no engine handover). In a frame the routing (as
+    /// `predict_island_members` predicts it) puts an island in, the provider's decoded state
+    /// is applied to the island at window end, and the bodies outside it move ballistically
+    /// (gravity, no contact) for that frame. For evaluating a model and the call boundary
+    /// apart from the rigid engine. Returns the island's keys (empty: an oracle frame).
+    ///
+    /// Diagnostic only: with no contact outside the island, resting debris and the
+    /// not-routed part of a supported wall sink into the ground and each other during routed
+    /// frames, and the next oracle frame pushes them apart (free walls are clean; anchored
+    /// walls gain up to 1e5 E0). The evaluation host is the engine.
+    pub fn step_frame_with_provider_standalone(&mut self, provider: &mut dyn FnMut(&World, &IslandKeys) -> Result<DecodedState, String>) -> Result<IslandKeys, String> {
+        if self.coupling.is_some() {
+            return Err("step_frame_with_provider_standalone needs a standalone world".into());
+        }
+        let fdt = self.scene.sim.frame_dt;
+        let (clusters, impactors) = self.predict_island_members(fdt, &std::collections::HashSet::new());
+        if clusters.is_empty() && impactors.is_empty() {
+            self.solver.reset_peak_utilizations();
+            self.step_frame();
+            return Ok(IslandKeys::default());
+        }
+        // The island as `routed_island_keys` reads it: its bodies not driven.
+        let island: std::collections::HashSet<u64> = clusters.iter().copied().collect();
+        let mut view = self.clone();
+        for cl in &mut view.solver.clusters {
+            cl.driven = !island.contains(&cl.id);
+        }
+        for (i, imp) in view.impactors.iter_mut().enumerate() {
+            imp.driven = !impactors.contains(&i);
+        }
+        let keys = view.routed_island_keys();
+        let d = provider(&view, &keys)?;
+        self.solver.reset_peak_utilizations();
+        // Bodies outside the island: ballistic over the frame.
+        let g = self.solver.config.gravity;
+        for cl in self.solver.clusters.iter_mut().filter(|c| !c.anchored && !island.contains(&c.id)) {
+            let com0 = cl.com_world();
+            let rot1 = cl.pose.rotation.integrate(cl.angular_velocity, fdt);
+            cl.pose.rotation = rot1;
+            cl.pose.position = com0 + cl.velocity * fdt + g * (0.5 * fdt * fdt) - rot1.rotate(cl.com);
+            cl.velocity += g * fdt;
+        }
+        for (i, imp) in self.impactors.iter_mut().enumerate().filter(|(i, _)| !impactors.contains(i)) {
+            let _ = i;
+            imp.pose.position += imp.velocity * fdt + g * (0.5 * fdt * fdt);
+            imp.pose.rotation = imp.pose.rotation.integrate(imp.angular_velocity, fdt);
+            imp.velocity += g * fdt;
+        }
+        self.apply_decoded(&d)?;
+        self.solver.time += fdt;
+        self.frame += 1;
+        self.island_frames += 1;
         Ok(keys)
     }
 }
