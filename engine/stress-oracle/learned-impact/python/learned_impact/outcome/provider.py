@@ -50,18 +50,12 @@ class Provider:
         if mode == "model":
             if not checkpoint:
                 raise ProviderError("--checkpoint is required in model mode")
-            from .train import load_model
+            from .train import decode_config, load_model
 
             self.model, ck = load_model(checkpoint, device)
             self.model.eval()
             self.device = torch.device(device)
-            tc = ck["train_config"]
-            self.dcfg = D.DecodeConfig(temperature=ck.get("temperature", 1.0),
-                                       energy_tolerance=tc["decode"]["energy_tolerance"],
-                                       tau=ck.get("tau", tc["decode"].get("tau", 1.0)),
-                                       break_mode=ck.get("break_mode",
-                                                         tc["decode"].get("break_mode", "threshold")),
-                                       sample_seed=int(ck.get("sample_seed", 0)))
+            self.dcfg = decode_config(ck)
             self.cache = HierarchyCache(self.model.cfg.levels)
             sha = hashlib.sha256(Path(checkpoint).read_bytes()).hexdigest()
             self.meta = {"checkpoint": str(checkpoint), "sha256": sha,

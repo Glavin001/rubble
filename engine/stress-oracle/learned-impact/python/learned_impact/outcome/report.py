@@ -18,7 +18,7 @@ from . import decode as D
 from . import metrics as M
 from . import schema as S
 from .batch import HierarchyCache, collate
-from .train import TAU_GRID, _batches, load_model
+from .train import TAU_GRID, _batches, decode_config, load_model
 
 
 def main(argv=None) -> None:
@@ -47,14 +47,13 @@ def main(argv=None) -> None:
     tc = ck["train_config"]
     batches = [collate(bc, st, cache) for bc in
                _batches(calls, tc.get("batch_budget", 20000), tc.get("batch_calls", 64))]
-    dcfg = D.DecodeConfig(temperature=ck.get("temperature", 1.0), tau=ck.get("tau", 1.0),
-                          energy_tolerance=tc["decode"]["energy_tolerance"])
+    dcfg = decode_config(ck)
     rep = M.three_way(model, batches, dcfg, ck.get("priors"))
     # τ was chosen on validation and is frozen in the checkpoint. On test it is confirmed,
     # not re-chosen: the verdict is the acceptance gate at the frozen τ; the sweep over the
     # same grid is reported only to show the regret of the validation choice.
     rep["tau_frozen"] = dcfg.tau
-    if a.split != "val" and not a.no_tau_sweep:
+    if a.split != "val" and not a.no_tau_sweep and dcfg.break_mode == "threshold":
         sweep = {t: M.evaluate(model, batches, dataclasses.replace(dcfg, tau=t), ck.get("priors")).score
                  for t in TAU_GRID}
         best = min(sweep, key=sweep.get)

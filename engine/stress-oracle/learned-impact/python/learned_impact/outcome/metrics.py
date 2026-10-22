@@ -229,7 +229,7 @@ def _acceptance_row(rs: list[dict], gates: dict, pm, mass) -> dict:
     v_ref = rs[0]["v_ref"]
     spec = {"partition": (trues, lambda a, b_: 1 - weighted_ari(a, b_, mass), TOLERANCE["partition"]),
             "sizes": (sizes, wasserstein_log_mass, TOLERANCE["sizes"])}
-    if len(rs[0]["imp_speed"]) and "ram" in gates:
+    if "ram" in gates:
         spec["ram"] = ([float(r["imp_speed"][0]) for r in rs], lambda a, b_: abs(a - b_),
                        TOLERANCE["ram"] * v_ref)
     row = {"family": rs[0]["call"].family, "ensemble": rs[0]["call"].ensemble_id, "model": {},
@@ -432,7 +432,7 @@ def _summarise(rows, bond_p, bond_y, imp_p, imp_y, bound_active, bound_total,
                                          [fragment_masses(r["true"], r["mass"]) for r in rs],
                                          wasserstein_log_mass, tolerance=TOLERANCE["sizes"]),
             }
-            if len(x["imp_speed"]):
+            if all(len(r["imp_speed"]) for r in rs):  # every member still has the impactor
                 speeds = [float(r["imp_speed"][0]) for r in rs]
                 gates["ram"] = calibrated_gate(float(x["imp_speed_hat"][0]), speeds,
                                                lambda a, b_: abs(a - b_),

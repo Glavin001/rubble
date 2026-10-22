@@ -399,6 +399,16 @@ def select_tau(model, val_batches, cfg: "TrainConfig", priors, prog=None) -> tup
     return best, scores
 
 
+def decode_config(ck: dict) -> D.DecodeConfig:
+    """The deployed decode of a checkpoint: τ, temperature, break mode and seed as stored."""
+    tc = ck["train_config"]["decode"]
+    return D.DecodeConfig(temperature=ck.get("temperature", 1.0),
+                          energy_tolerance=tc["energy_tolerance"],
+                          tau=ck.get("tau", tc.get("tau", 1.0)),
+                          break_mode=ck.get("break_mode", tc.get("break_mode", "threshold")),
+                          sample_seed=int(ck.get("sample_seed", tc.get("sample_seed", 0))))
+
+
 def load_model(path: str | Path, device="cpu") -> tuple[ImpactOutcomeModel, dict]:
     ck = torch.load(path, map_location=device, weights_only=False)
     m = ImpactOutcomeModel(ModelConfig(**ck["model_config"]))

@@ -30,7 +30,7 @@ from . import decode as D
 from . import schema as S
 from . import state_io as IO
 from .batch import HierarchyCache, collate
-from .train import Data, load_model
+from .train import Data, decode_config, load_model
 
 VERSION = "learned-impact-weights/1"
 
@@ -74,13 +74,17 @@ def export(ckpt: str | Path, out: str | Path, dataset: str | None = None, parity
         blob.append(raw + b"\0" * pad)
         off += len(raw) + pad
     (out / "weights.bin").write_bytes(b"".join(blob))
-    tc = ck["train_config"]
+    dcfg = decode_config(ck)
     manifest = {
         "schema": VERSION, "calls_schema": S.SCHEMA_VERSION, "checkpoint": str(ckpt),
         "model_config": ck["model_config"],
-        "decode": {"tau": ck.get("tau", 1.0), "temperature": ck.get("temperature", 1.0),
-                   "energy_tolerance": tc["decode"]["energy_tolerance"],
-                   "break_rule": "log q ≥ log tau", "prior_correction": ck.get("priors")},
+        "decode": {"tau": dcfg.tau, "temperature": dcfg.temperature,
+                   "energy_tolerance": dcfg.energy_tolerance, "break_mode": dcfg.break_mode,
+                   "sample_seed": dcfg.sample_seed,
+                   "break_rule": ("log q ≥ log tau" if dcfg.break_mode == "threshold" else
+                                  "hash_uniform(bond_key, sample_seed) < sigmoid(break_logit / "
+                                  "temperature) (decode.hash_uniform)"),
+                   "prior_correction": ck.get("priors")},
         "feature_columns": {k: list(v) for k, v in S.FEATURE_COLUMNS.items()},
         "tensors": tensors, "layers": LAYERS,
     }
@@ -89,8 +93,6 @@ def export(ckpt: str | Path, out: str | Path, dataset: str | None = None, parity
         data = Data(dataset)
         calls = [c for c in data.val if c.phase in ("contact", "secondary")][:parity]
         cache = HierarchyCache(model.cfg.levels)
-        dcfg = D.DecodeConfig(tau=ck.get("tau", 1.0), temperature=ck.get("temperature", 1.0),
-                              energy_tolerance=tc["decode"]["energy_tolerance"])
         for k, c in enumerate(calls):
             d = out / "parity" / f"{k}"
             ev = next(e for e in data.events if e.manifest["event_id"] == c.event_id)
