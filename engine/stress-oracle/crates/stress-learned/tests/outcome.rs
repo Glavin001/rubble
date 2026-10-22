@@ -253,3 +253,12 @@ fn stage2_recipes_place_every_load_kind_clear_of_the_structure() {
     }
     assert!(stage2_recipes("bridge", 3, 1, 1).is_err());
 }
+
+#[test]
+fn a_corner_share_aims_first_impactors_at_corners() {
+    let mut r = Ranges::pilot();
+    r.corner_share = 1.0;
+    for x in wall_recipes("anchored_wall", 1, 20, 4, &r).unwrap() {
+        assert_eq!(x.parameters["impactors"][0]["location"], "corner", "{}", x.parameters["impactors"][0]);
+    }
+}

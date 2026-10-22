@@ -1,9 +1,9 @@
 """Calls on demand for training events (the 20 GB budget's lever, planning decision of
 2026-10-21).
 
-Evaluation events (validation, test, sealed and every ensemble member) have their calls built
-once and cached permanently (`learned_impact_outcome_calls --eval-only`). Training events
-have theirs built when a trainer first asks for them, by the same Rust builder (the single
+Evaluation events (validation, test, sealed) have their calls built once and cached
+permanently (`learned_impact_outcome_calls --eval-only`). Training events, ensemble members
+included, have theirs built when a trainer first asks for them, by the same Rust builder (the single
 source of features), into a bounded cache that evicts the least recently used:
 
     cache = CallCache("runs/calls-cache", max_gb=2.0, builder="runs/bin/learned_impact_outcome_calls")

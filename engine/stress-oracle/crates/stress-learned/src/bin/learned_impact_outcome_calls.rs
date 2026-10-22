@@ -2,8 +2,8 @@
 //!
 //!   learned_impact_outcome_calls --out DIR [--plain] [--jobs N] [--eval-only | --train-only] RUN_OR_EVENT_DIR ...
 //!
-//! `--eval-only` takes the events evaluation keeps whole (validation, test, sealed, and every
-//! ensemble member), whose calls are cached permanently; `--train-only` the rest, whose calls
+//! `--eval-only` takes the evaluation events (validation, test, sealed), whose calls are cached
+//! permanently; `--train-only` every training event (ensemble members included), whose calls
 //! are built on demand (`learned_impact/outcome_calls_cache.py`).
 //!
 //! Each argument is an event directory or a generator job (its `events/`). Writes
@@ -70,8 +70,9 @@ fn main() {
     }
 }
 
-/// An event evaluation keeps whole: not a training split, or an ensemble member.
+/// An evaluation event (validation, test, sealed), whose calls are cached; every training
+/// event, ensemble members included, has its calls built on demand (the 20 GB budget).
 fn is_eval(ev: &Path) -> bool {
     let ctx: serde_json::Value = std::fs::read(ev.join("context.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-    ctx["split"].as_str() != Some("train") || !ctx["ensemble"]["id"].is_null()
+    ctx["split"].as_str() != Some("train")
 }
