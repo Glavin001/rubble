@@ -26,7 +26,15 @@ fit is a bug to fix before viability training.
 | 10 events, loss v1 (margin: survivors regression only) | 447 | 896 / 96 / 0 | 0.949 | 0.940 | 0.050 / 0.40 | 0.0019 | 3.0e-16 | -0.036 |
 | 10 events, loss v2 (+ survivor hinge) | 739 | 896 / 125 / 0 | 0.935 | 0.958 | 0.163 / 0.55 | 0.0017 | 3.5e-16 | -0.008 |
 | 10 events, final heads (monotone margin), 12k steps | 739 | 896 / 0 / 0 | 1.000 | 1.000 | 0.090 / 0.34 | 0.0009 | 3.1e-16 | -0.006 |
-N100_ROW
+| 100 events, final heads, 20k steps (not saturated) | 4755 | 9327 / 249 / 432 | 0.965 | 0.956 | 0.036 / 1.21 | 0.0576 | 4.9e-16 | +0.011 |
+
+**100 events are not saturated at 20k steps.**
+- The training-sample loss fell 4.68 → 0.61 and F1 0.60 → 0.965. The last evaluations
+  still improved (0.921, 0.952, 0.962, 0.965) as the cosine schedule ran out.
+- So this is the schedule, not a plateau. A continuation (30k more steps, a cosine restart at
+  lr 5e-4) is running: `runs/overfit-real/n100-cont`.
+- The decoded KE exceeded the bound by 1.1% of E_in on the worst call, which is within the
+  5% tolerance: `ke_excess_over_bound_max` is measured after the tolerance.
 
 Loss floors on the 10 events (each ÷ its zero predictor): demand 7e-3, margin 4e-5, break 2e-7,
 time 3e-5, damage 2e-3, motion 3e-3, def_motion 9e-3, pose 1.5e-2, impactor 9e-6, regime 1e-4,
@@ -69,6 +77,32 @@ memorised model):
   `learned_impact_relabel`, verified bit for bit). It is demonstrated next on these 10 events
   on `/4`. The /3-trained checkpoint cannot be mixed with rev-6 /4 relabels, so the 10-event
   overfit is redone on `/4` first.
+
+### DAgger round 1 on the 10 events
+
+Steps:
+- Relabelled all 779 rollout states with the oracle's island step (P0's
+  `learned_impact_relabel`, 515 s on the CPU).
+- Admitted 736: 43 failed the oracle's own energy balance, gaining up to 400× their input
+  energy. In those, the rollout had left bodies interpenetrating and the oracle launched them.
+- Fine-tuned 4,000 steps (lr 3e-4) on the originals plus the admitted relabels.
+- Re-ran harness A.
+
+Per-call memorisation slipped (F1 0.974, 48 false breaks). Final fragments and impactor
+speed, oracle → round 0 → round 1:
+
+| event | oracle | r0 | r1 |
+|---|---|---|---|
+| free_00611 | 13, 4.08 | 5, 1.10 | **12, 3.64** |
+| free_t2_00112 | 27, 0.23 | 26, 11.85 | 35, 5.03 |
+| anchored_00204 | 27, 2.35 | 71 (KE +933 E0) | 73 (KE +1,440 E0) |
+| free_00190 | 132, 39.65 | 131, 38.53 | 133, 18.82 |
+| free_00502 | 9, 4.87 | 11, 3.25 | 28, 3.16 |
+| free_00440, 00609 | 1, 0.13 / 0.15 | KE excess 6.0 / 1.6 E0 | KE excess 0.0 / 0.0 |
+
+One short round is mixed: one failure fixed, one improved, two regressed. Rounds 2–4 now
+fine-tune to saturation (10k steps) on all relabels so far before each rollout
+(`scripts/dagger_rounds_n10.sh`).
 
 ## Bugs found and fixed
 
