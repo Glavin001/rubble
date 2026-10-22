@@ -60,7 +60,7 @@ pub fn latin_hypercube(n: usize, dims: usize, rng: &mut Rng) -> Vec<Vec<f64>> {
     (0..n).map(|i| cols.iter().map(|c| c[i]).collect()).collect()
 }
 
-fn log_uniform(u: f64, lo: f64, hi: f64) -> f64 {
+pub(crate) fn log_uniform(u: f64, lo: f64, hi: f64) -> f64 {
     (lo.ln() + u * (hi.ln() - lo.ln())).exp()
 }
 
@@ -142,7 +142,7 @@ impl Ranges {
 
 /// Scale the structural material's strength, toughness and stiffness; the steel of the
 /// impactors stays as it is (`permutations.rs`'s helper, same rule).
-fn scale_materials(scene: &mut Scene, strength: f64, toughness: f64, stiffness: f64) {
+pub(crate) fn scale_materials(scene: &mut Scene, strength: f64, toughness: f64, stiffness: f64) {
     for (name, m) in &mut scene.materials {
         if name == "steel" {
             continue;
@@ -294,7 +294,7 @@ fn place(d: &ImpactorDraw, layout: &Layout, y_back: f64, speed: f64, k: usize) -
     }
 }
 
-fn bounding_radius(d: &ImpactorDesc) -> f64 {
+pub(crate) fn bounding_radius(d: &ImpactorDesc) -> f64 {
     match d.shape {
         ImpactorShape::Sphere { radius } => radius,
         ImpactorShape::Box { half_extents } => Vec3::from_array(half_extents).norm(),

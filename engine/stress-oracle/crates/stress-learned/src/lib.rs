@@ -19,6 +19,7 @@ pub mod oracle_config;
 pub mod outcome;
 pub mod outcome_calls;
 pub mod procedural;
+pub mod stage2;
 pub mod progress;
 pub mod peak;
 pub mod permutations;
