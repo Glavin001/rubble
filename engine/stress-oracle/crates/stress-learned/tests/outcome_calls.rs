@@ -361,3 +361,26 @@ fn written_calls_share_identical_arrays_and_read_back_exactly() {
     }
     assert!(offsets.len() < total, "some arrays share their bytes");
 }
+
+/// `y_bond_break_time`: each broken bond's exact break time within the frame, consistent
+/// with its eighth-of-frame bin; NaN for bonds that held.
+#[test]
+fn break_times_lie_in_their_frame_and_bin() {
+    let (ev, _) = record("btime");
+    let e = build_event(&ev).unwrap();
+    let dt = 1.0 / 60.0;
+    let mut breaks = 0;
+    for c in &e.calls {
+        let (Some(Arr::F64(_, t)), Some(Arr::I32(_, bin))) = (c.array("y_bond_break_time"), c.array("y_bond_break_bin")) else { panic!("frame {}", c.frame) };
+        for (&t, &b) in t.iter().zip(bin) {
+            if b == 0 {
+                assert!(t.is_nan());
+            } else {
+                assert!(t >= 0.0 && t <= dt * (1.0 + 1e-9), "time {t}");
+                assert_eq!(((t / dt) * 8.0).floor().clamp(0.0, 7.0) as i32, b - 1, "time {t} bin {b}");
+                breaks += 1;
+            }
+        }
+    }
+    assert!(breaks > 0);
+}
