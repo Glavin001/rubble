@@ -21,6 +21,10 @@ rmpv = "1"
 stress-ref = { path = "../stress-ref" }
 
 [[bin]]
+name = "learned_impact_envelope_fixture"
+path = "src/bin/learned_impact_envelope_fixture.rs"
+
+[[bin]]
 name = "learned_impact_relabel"
 path = "src/bin/learned_impact_relabel.rs"
 

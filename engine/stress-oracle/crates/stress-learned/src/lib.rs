@@ -13,6 +13,7 @@ pub mod oracle;
 pub mod full_state;
 pub mod full_state_calls;
 pub mod decoded_full;
+pub mod kin_envelope;
 pub mod progress;
 pub mod procedural;
 pub mod provider_client;
