@@ -289,6 +289,12 @@ pub struct World {
     /// over from the engine needs: rubble rests a 393 kg ram 7.5 mm into the ground, and
     /// that overlap fired by this stiffer contact launched it at 13 m/s.
     pub handed_ground_overlaps: bool,
+    /// The routing's tiered rule (`select_islands`: only an impactor's contact closing faster
+    /// than the tiered impact speed seeds an island; slow cluster contacts join nothing
+    /// unless `tiered_fast_joins` or debris) whatever the solve mode
+    /// (`STRESS_ROUTING_TIERED=1`, off by default: tiered only with `qs_islands` in
+    /// quasi-static mode). The deployed `blast_parity_routed` routing.
+    pub routing_tiered: bool,
     /// `apply_decoded` resets each surviving bond's joint history but its damage
     /// (`STRESS_DECODED_RESET_JOINTS=1`, diagnostic: does the boundary need the joint state?).
     pub decoded_resets_joints: bool,
@@ -547,6 +553,7 @@ impl World {
             debris_reach_routing: std::env::var("STRESS_DEBRIS_ROUTING").is_ok_and(|v| v == "1"),
             decoded_keeps_deformation: std::env::var("STRESS_DECODED_DEFORMATION").is_ok_and(|v| v == "1"),
             handed_ground_overlaps: std::env::var("STRESS_HANDED_INDENTS").is_ok_and(|v| v == "1"),
+            routing_tiered: std::env::var("STRESS_ROUTING_TIERED").is_ok_and(|v| v == "1"),
             decoded_resets_joints: std::env::var("STRESS_DECODED_RESET_JOINTS").is_ok_and(|v| v == "1"),
             hand_back_after: std::env::var("STRESS_HANDBACK_FRAMES").ok().and_then(|v| v.parse().ok()),
             handed_back: HashSet::new(),

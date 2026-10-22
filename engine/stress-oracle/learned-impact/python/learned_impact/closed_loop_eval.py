@@ -15,6 +15,7 @@ until it settles, through P0's coupled harness (`learned_p0 event`), under each 
   punch    the host's predictive punch, the engine taking each frame with its contacts
   model    P2's checkpoint (`--checkpoint`), through `stress_learned::provider_client`
   model_def  the same with `STRESS_DECODED_DEFORMATION=1`
+  <any>_tiered  with the deployed tiered routing (`STRESS_ROUTING_TIERED=1`)
   <any>_hbN  with the hand-back after N quiet routed frames (`STRESS_HANDBACK_FRAMES=N`)
 
 and scored against the event's oracle ensemble (P1's recorded members) with the acceptance
@@ -137,6 +138,13 @@ def candidate_args(name: str, a, out: Path, event: str) -> tuple[list[str], dict
     # `<base>_hbN`: the hand-back (`STRESS_HANDBACK_FRAMES=N`): an island quiet for N
     # routed frames (no decoded break, no fast impactor contact) leaves the routing for the
     # quasi-static path until a fast contact routes it again.
+    # `<base>_tiered`: the deployed routing's tiered rule (`STRESS_ROUTING_TIERED=1`,
+    # `blast_parity_routed`'s: only a fast impactor contact seeds an island).
+    if name.endswith("_tiered"):
+        args, env = candidate_args(name[: -len("_tiered")], a, out, event)
+        if "--dir" in args:
+            args[args.index("--dir") + 1] = str(out / "provider" / name / event)
+        return args, {**env, "STRESS_ROUTING_TIERED": "1"}
     m = re.fullmatch(r"(.+)_hb(\d+)", name)
     if m:
         args, env = candidate_args(m.group(1), a, out, event)

@@ -557,7 +557,9 @@ impl World {
             {
                 // Tiered: only an impactor's contact is an impact (debris and resting
                 // contacts reach the static solve as the engine's loads).
-                let tiered = self.qs_islands && self.scene.sim.solve_mode == SolveMode::QuasiStatic;
+                // `routing_tiered`: the deployed routing's rule (`blast_parity_routed`) with any
+                // solve mode, so the oracle's own physics can be routed as the engine is.
+                let tiered = self.routing_tiered || (self.qs_islands && self.scene.sim.solve_mode == SolveMode::QuasiStatic);
                 let impactor = matches!(parts[i].key, Some(BodyKey::Impactor(_))) || matches!(parts[j].key, Some(BodyKey::Impactor(_)));
                 let fast = !tiered || closing_speed(&parts[i], &parts[j]).max(closing_speed(&parts[j], &parts[i])) > tiered_impact_speed();
                 let owned = (!tiered || impactor) && fast && (rigid_assumption_fails(&parts[i], &parts[j], false) || rigid_assumption_fails(&parts[j], &parts[i], false));
