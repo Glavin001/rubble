@@ -136,6 +136,11 @@ def candidate_state(run: dict, samples: list[int]) -> dict:
     }
 
 
+# The rubble policy of every coupled candidate: production's (`blast_parity_routed`: 4
+# iterations, one step a frame), the planning session's reference decision of 2026-10-22.
+ENGINE_POLICY = os.environ.get("LEARNED_P0_ENGINE_POLICY", "production")
+
+
 def candidate_args(name: str, a, out: Path, event: str) -> tuple[list[str], dict]:
     # `<base>_hbN`: the hand-back (`STRESS_HANDBACK_FRAMES=N`): an island quiet for N
     # routed frames (no decoded break, no fast impactor contact) leaves the routing for the
@@ -156,7 +161,7 @@ def candidate_args(name: str, a, out: Path, event: str) -> tuple[list[str], dict
     # Debris-reach routing, and the engine's resting ground overlap handed to the oracle's
     # contact as an offset (`World::handed_ground_overlaps`; without it a body the engine
     # rested in the ground is launched when routed, up to 1000 E0).
-    deb = {"STRESS_DEBRIS_ROUTING": "1", "STRESS_HANDED_INDENTS": "1"}
+    deb = {"STRESS_DEBRIS_ROUTING": "1", "STRESS_HANDED_INDENTS": "1", "STRESS_P0_ENGINE_POLICY": ENGINE_POLICY}
     if name == "ceiling":
         return ["--variant", "provider", "--provider", "oracle"], deb
     if name == "ceiling_full":

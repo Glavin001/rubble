@@ -309,8 +309,40 @@ fn run_oracle(s: &Scene, tag: &str) -> Value {
     json!({"e0": e0, "frames": series, "end": outcome(&w), "total_s": t_all.elapsed().as_secs_f64()})
 }
 
+/// The rubble engine of the coupled runs. `STRESS_P0_ENGINE_POLICY=production`: production's
+/// solver policy (`Profile::engine_policy` of `blast_parity_routed`: 4 iterations, one step a
+/// frame), the coupled reference's; unset: the engine's own defaults.
 fn engine(s: &Scene) -> Box<stress_rubble::RubbleEngine> {
-    Box::new(stress_rubble::RubbleEngine::new(Vec3::from_array(s.gravity)).expect("rubble engine"))
+    let mut e = stress_rubble::RubbleEngine::new(Vec3::from_array(s.gravity)).expect("rubble engine");
+    if std::env::var("STRESS_P0_ENGINE_POLICY").is_ok_and(|v| v == "production") {
+        let (iterations, substeps) = stress_ref::capability::Profile::BlastParityRouted.engine_policy();
+        e.set_policy(iterations, substeps);
+    }
+    Box::new(e)
+}
+
+/// What a coupled run's numbers depend on besides the scene: the engine policy, the routing,
+/// and the GPU (rubble's results are deterministic on one adapter and driver, not across).
+fn engine_context() -> Value {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let info = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() }))
+        .ok()
+        .map(|a| a.get_info());
+    let policy = if std::env::var("STRESS_P0_ENGINE_POLICY").is_ok_and(|v| v == "production") {
+        let (i, n) = stress_ref::capability::Profile::BlastParityRouted.engine_policy();
+        json!({"name": "production", "iterations": i, "max_substeps": n})
+    } else {
+        json!({"name": "engine_default"})
+    };
+    json!({
+        "engine_policy": policy,
+        "routing_tiered": std::env::var("STRESS_ROUTING_TIERED").is_ok_and(|v| v == "1"),
+        "debris_routing": std::env::var("STRESS_DEBRIS_ROUTING").is_ok_and(|v| v == "1"),
+        "handed_ground_overlaps": std::env::var("STRESS_HANDED_INDENTS").is_ok_and(|v| v == "1"),
+        "adapter": info.as_ref().map(|i| json!({"name": i.name, "backend": format!("{:?}", i.backend), "driver": i.driver, "driver_info": i.driver_info, "vendor": i.vendor, "device": i.device})),
+        // Metal reports no driver string: the OS build carries the GPU driver on macOS.
+        "os": json!({"os": std::env::consts::OS, "version": std::process::Command::new("sw_vers").arg("-buildVersion").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())}),
+    })
 }
 
 /// The oracle's frame from `w`'s state, applied to `w` as `variant` says.
@@ -866,7 +898,8 @@ fn run_event(dir: &std::path::Path, variant: &str, o: &ProviderOpts, samples: Ve
         other => panic!("event: unknown --variant {other}"),
     };
     json!({"cmd": "event", "event_id": outcome["event_id"], "family": outcome["family"], "variant": if variant == "provider" { format!("provider_{}", o.kind) } else { variant.to_string() },
-        "frames": n, "e0": e0, "run": track, "extra": extra, "total_s": t_all.elapsed().as_secs_f64()})
+        "frames": n, "e0": e0, "run": track, "extra": extra, "total_s": t_all.elapsed().as_secs_f64(),
+        "engine": if variant == "oracle" || variant == "qs" { Value::Null } else { engine_context() }})
 }
 
 fn main() {
