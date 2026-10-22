@@ -33,14 +33,14 @@ from . import schema as S
 from .batch import SCALE_INDEX, Batch
 
 TERMS = ("margin", "demand", "break", "time", "motion", "def_motion", "pose", "impactor",
-         "energy", "damage", "regime")
+         "energy", "damage", "regime", "fs_bond", "fs_mode", "fs_chunk")
 
 
 @dataclass
 class LossConfig:
     weights: dict[str, float] = field(default_factory=lambda: {
         "margin": 5.0, "demand": 1.0, "break": 5.0, "time": 1.0, "motion": 2.0,
-        "def_motion": 2.0, "pose": 1.0,
+        "def_motion": 2.0, "pose": 1.0, "fs_bond": 1.0, "fs_mode": 1.0, "fs_chunk": 1.0,
         "impactor": 2.0, "energy": 1.0, "damage": 1.0, "regime": 1.0})
     huber_delta: float = 1.0
     label_smoothing: float = 0.02  # single-run hard break labels
@@ -120,7 +120,10 @@ def zero_outputs(b: Batch, n_time_bins: int = S.N_TIME_BINS) -> dict[str, Tensor
             "bond_ddamage": z(nb), "chunk_out": z(t["chunk_x"].shape[0], 12),
             "imp_out": z(t["imp_x"].shape[0], 12), "imp_perf_logit": z(t["imp_x"].shape[0]),
             "energy_d_bond": z(G), "energy_frac_joint": z(G) + 0.5, "energy_e_elastic": z(G),
-            "energy_ke_loss": z(G)}
+            "energy_ke_loss": z(G),
+            # `/5`: persistence (frame end = frame start) is the full state's zero predictor
+            **({"bond_fs": t["y_bond_fs_start"].float(), "bond_fs_mode_logits": z(nb, 3),
+                "chunk_fs": t["chunk_fs_in"].float()} if "y_bond_fs" in t else {})}
 
 
 def loss_terms(out: dict[str, Tensor], b: Batch, cfg: LossConfig,
@@ -240,6 +243,19 @@ def loss_terms(out: dict[str, Tensor], b: Batch, cfg: LossConfig,
     terms["def_motion"] = vmean(scatter_sum(def_err, t["chunk_call"], G) / e_in)
     pose_err = ke_norm(ph["dx"] - ydx, ph["drot"] - ydr)
     terms["pose"] = vmean(scatter_sum(pose_err, call, G) / (e_in * dt * dt))
+
+    # `/5` full state: every carried bond field in its encoding (Huber, live bonds, consequence
+    # weights), the failure mode (cross-entropy) and the chunks' support reactions
+    if "bond_fs" in out:
+        bvd = t["bond_valid"].to(dev, dtype)
+        e = _huber(out["bond_fs"].to(dtype) - t["y_bond_fs"].to(dev, dtype), cfg.huber_delta).mean(-1)
+        terms["fs_bond"] = (w_b * bvd * e).sum() / (w_b * bvd).sum().clamp(min=1)
+        ce = F.cross_entropy(out["bond_fs_mode_logits"].float(), t["y_bond_fs_mode"].to(dev),
+                             reduction="none")
+        terms["fs_mode"] = (ce * bvd).sum() / bvd.sum().clamp(min=1)
+        cvd = t["chunk_valid"].to(dev, dtype) if "chunk_valid" in t else torch.ones_like(out["chunk_fs"][:, 0])
+        ec = _huber(out["chunk_fs"].to(dtype) - t["y_chunk_fs"].to(dev, dtype), cfg.huber_delta).mean(-1)
+        terms["fs_chunk"] = (ec * cvd).sum() / cvd.sum().clamp(min=1)
 
     # impactor: (Δv̂ − Δv)² / v0², plus the ensemble energy score when members exist
     if t["imp_x"].shape[0]:

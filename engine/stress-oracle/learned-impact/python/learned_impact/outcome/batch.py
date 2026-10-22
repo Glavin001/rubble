@@ -98,9 +98,20 @@ def collate(calls: list[S.Call], structures: dict[str, dict[int, dict[str, np.nd
     # full chunk inertia only when every call carries it (else the diagonal fallback)
     full_inertia = all("chunk_inertia_struct" in c.arrays and "chunk_body_q" in c.arrays
                        for c in calls)
+    from . import fullstate as FS
+    full_state = bool(calls) and all(c.fs is not None and "fs_bond_in" in c.arrays for c in calls)
     for gi, c in enumerate(calls):
         a = c.arrays
         nc, ni = c.counts["chunks"], c.counts["impactors"]
+        if full_state:
+            bx, by, bm = FS.bond_arrays(c, c.fs["cols"], c.fs["scale"], c.fs["scale_names"])
+            add("y_bond_fs_start", bx[:, :len(FS.BOND_FIELDS)])
+            add("y_bond_fs", by)
+            add("y_bond_fs_mode", bm)
+            e_acc["bond"].setdefault("fs", []).append(np.repeat(bx, 2, 0))  # both twins
+            ci, co = FS.chunk_arrays(c, c.fs["cols"], float(np.linalg.norm(c.gravity)))
+            add("chunk_fs_in", ci)
+            add("y_chunk_fs", co)
         add("chunk_x", a["chunk_feat"])
         add("chunk_qs", a["chunk_qs_feat"])
         add("imp_x", a["impactor_feat"])
@@ -215,6 +226,8 @@ def collate(calls: list[S.Call], structures: dict[str, dict[int, dict[str, np.nd
             "x": _f(np.concatenate(d["x"])), "call": _i(np.concatenate(d["call"])),
             "frame": _f(np.concatenate(d["frame"])),
         }
+        if "fs" in d:  # `/5` full-state bond inputs, per directed twin
+            b.edges[t]["fs"] = _f(np.concatenate(d["fs"]))
     # ensemble members' impactor velocities, padded [Ni, M, 3] with a mask
     m_max = max((r[1].shape[0] for r in ens_rows), default=0)
     ens = np.zeros((imp_off, m_max, 3), np.float32)
@@ -323,6 +336,9 @@ def pad_batch(b: Batch, growth: float = 1.25, call_multiple: int = 8) -> Batch:
         for k in ("v_end", "w_end", "dx", "drot"):
             t[f"y_{pre}_{k}"] = _pad_rows(t[f"y_{pre}_{k}"], n)
     t["chunk_anchored"] = _pad_rows(t["chunk_anchored"], pc, True)
+    for k in ("chunk_fs_in", "y_chunk_fs"):
+        if k in t:
+            t[k] = _pad_rows(t[k], pc)
     f0 = b.n_fragments
     t["y_chunk_fragment"] = torch.cat([t["y_chunk_fragment"], torch.arange(f0, f0 + pc)])
     b.n_fragments = f0 + pc
@@ -350,6 +366,8 @@ def pad_batch(b: Batch, growth: float = 1.25, call_multiple: int = 8) -> Batch:
         d["src"] = torch.cat([d["src"], twin_s])
         d["dst"] = torch.cat([d["dst"], twin_d])
         d["x"] = _pad_rows(d["x"], 2 * n_und)
+        if "fs" in d:
+            d["fs"] = _pad_rows(d["fs"], 2 * n_und)
         d["call"] = _pad_rows(d["call"], 2 * n_und, pcall)
         d["frame"] = torch.cat([d["frame"], torch.eye(3).expand(n_und, 3, 3)], 0)
     # ---- hierarchy: level 0 is chunk-indexed; deeper levels pad onto padding nodes above

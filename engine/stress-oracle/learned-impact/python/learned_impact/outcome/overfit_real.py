@@ -135,11 +135,20 @@ def evaluate_memorisation(ckpt: Path, data: Data, spreads: dict) -> dict:
     tp = fp = fn = 0
     v_err, v_spread, i_err, frag_same, n_calls = [], [], [], 0, 0
     mom_res, ke_excess, bound_active = [], [], 0
+    fs_err, fs_pers, mode_ok, mode_n, rx_err, rx_pers = [], [], 0, 0, [], []
     for bc in _batches(data.val, 20000, 64):
         b = collate(bc, data.structures, cache)
         out = model(b)
         dec = D.decode(out, b, dcfg)
         t = b.t
+        if "bond_fs" in out:  # /5: each carried field against persistence (start = end)
+            y, st = t["y_bond_fs"].numpy(), t["y_bond_fs_start"].numpy()
+            fs_err.append(np.abs(out["bond_fs"].numpy() - y))
+            fs_pers.append(np.abs(st - y))
+            mode_ok += int((out["bond_fs_mode_logits"].argmax(-1).numpy() == t["y_bond_fs_mode"].numpy()).sum())
+            mode_n += len(y)
+            rx_err.append(np.abs(out["chunk_fs"].numpy() - t["y_chunk_fs"].numpy()))
+            rx_pers.append(np.abs(t["chunk_fs_in"].numpy() - t["y_chunk_fs"].numpy()))
         pred = dec["bond_broke"].numpy().astype(bool)
         truth = t["y_bond_broke"].numpy() > 0
         tp += int((pred & truth).sum())
@@ -189,7 +198,17 @@ def evaluate_memorisation(ckpt: Path, data: Data, spreads: dict) -> dict:
     p = tp / max(tp + fp, 1)
     r = tp / max(tp + fn, 1)
     ratio = [e / s for e, s in v_spread if s > 0]
+    fs = None
+    if fs_err:
+        from . import fullstate as FS
+        e, pz = np.concatenate(fs_err), np.concatenate(fs_pers)
+        fs = {"bond_fields_err_over_persistence": {
+                  f: float(e[:, i].mean() / max(pz[:, i].mean(), 1e-12)) for i, (f, _, _) in enumerate(FS.BOND_FIELDS)},
+              "mode_accuracy": mode_ok / max(mode_n, 1),
+              "reaction_err_over_persistence": float(np.concatenate(rx_err).mean()
+                                                     / max(np.concatenate(rx_pers).mean(), 1e-12))}
     return {
+        "full_state": fs,
         "calls": n_calls, "bond_tp_fp_fn": [tp, fp, fn], "bond_precision": p, "bond_recall": r,
         "bond_f1": 2 * p * r / max(p + r, 1e-12),
         "fragments_identical": frag_same / max(n_calls, 1),
@@ -219,6 +238,7 @@ def main(argv=None) -> None:
     ap.add_argument("--extra-calls", default=None,
                     help="DAgger: relabelled calls added to training only (scoring stays on the events)")
     ap.add_argument("--init-checkpoint", default="", help="start from these weights (DAgger rounds)")
+    ap.add_argument("--full-state", action="store_true", help="/5 full-state inputs and heads")
     a = ap.parse_args(argv)
     root, out = Path(a.dataset), Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -251,6 +271,7 @@ def main(argv=None) -> None:
                       eval_every=max(a.steps // 10, 50), select_tau=False,
                       curve_calls=len(calls), init_checkpoint=a.init_checkpoint)
     cfg.loss = dataclasses.replace(cfg.loss, label_smoothing=0.0)
+    cfg.model.full_state = a.full_state
     print(f"[overfit] {len(calls)} calls, {int(pos)} broken bonds, W{cfg.model.width} "
           f"rounds {cfg.model.rounds}")
     train(cfg, d)

@@ -371,21 +371,33 @@ class Prefetch:
         self.stop.set()
 
 
-def input_stats(calls: list[S.Call], variant: str) -> dict:
-    """Per-column mean and std of every input array over the training calls (float64)."""
-    def cat(name, extra=None):
-        xs = [c.arrays[name] if extra is None else np.concatenate([c.arrays[name], c.arrays[extra]], 1)
+def input_stats(calls: list[S.Call], variant: str, full_state: bool = False) -> dict:
+    """Per-column mean and std of every input array over the training calls (float64), in
+    the model's input order (features, variant B's QS frame, `/5` full state)."""
+    from . import fullstate as FS
+
+    def fs_chunk(c):
+        return FS.chunk_arrays(c, c.fs["cols"], float(np.linalg.norm(c.gravity)))[0]
+
+    def fs_bond(c):
+        return np.repeat(FS.bond_arrays(c, c.fs["cols"], c.fs["scale"], c.fs["scale_names"])[0], 2, 0)
+
+    def cat(name, *extra):
+        xs = [np.concatenate([c.arrays[name], *[e(c) if callable(e) else c.arrays[e] for e in extra]], 1)
               for c in calls if len(c.arrays[name])]
         x = np.concatenate(xs).astype(np.float64)
         return torch.tensor(x.mean(0), dtype=torch.float32), torch.tensor(x.std(0), dtype=torch.float32)
 
     b = variant == "B"
-    out = {"chunk": cat("chunk_feat", "chunk_qs_feat" if b else None),
-           "imp": cat("impactor_feat", "impactor_qs_feat" if b else None),
+    ch = (["chunk_qs_feat"] if b else []) + ([fs_chunk] if full_state else [])
+    out = {"chunk": cat("chunk_feat", *ch),
+           "imp": cat("impactor_feat", *(["impactor_qs_feat"] if b else [])),
            "glob": cat("global_feat")}
     for t in S.EDGE_TYPES:
         if any(len(c.arrays[f"{t}_feat"]) for c in calls):
-            out[f"edge_{t}"] = cat(f"{t}_feat", "bond_qs_feat" if (t == "bond" and b) else None)
+            ex = (["bond_qs_feat"] if (t == "bond" and b) else []) + \
+                 ([fs_bond] if (t == "bond" and full_state) else [])
+            out[f"edge_{t}"] = cat(f"{t}_feat", *ex)
     return out
 
 
@@ -570,7 +582,7 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
         model.load_state_dict(init["model"])
         prog.line(f"initialised from {cfg.init_checkpoint} (step {init.get('step')})")
     elif cfg.model.input_norm:
-        model.set_input_stats(input_stats(data.train, cfg.model.variant))
+        model.set_input_stats(input_stats(data.train, cfg.model.variant, cfg.model.full_state))
     model = model.to(dev)
     params = [p for p in model.parameters()]
     balancer = None
@@ -798,6 +810,8 @@ def main(argv=None) -> None:
     ap.add_argument("--large", action="store_true", help="W128, rounds 4,3,2,3,4")
     ap.add_argument("--cost", action="store_true", help="W32, rounds 2,1,2,1,2 (P0's cost point)")
     ap.add_argument("--variant", default="B", choices=["A", "B"])
+    ap.add_argument("--full-state", action="store_true",
+                    help="/5: the oracle's full dynamic bond and chunk state as inputs and heads")
     ap.add_argument("--init-checkpoint", default="",
                     help="start from these weights and input statistics (fine-tuning, DAgger)")
     ap.add_argument("--drop-features", default="",
@@ -834,6 +848,7 @@ def main(argv=None) -> None:
               width=a.width, rounds=tuple(int(x) for x in a.rounds.split(",")), levels=a.levels))
     mc.variant = a.variant
     mc.drop_features = tuple(x for x in a.drop_features.split(",") if x)
+    mc.full_state = a.full_state
     mc.__post_init__()
     seeds = [int(s) for s in a.seeds.split(",")]
     data = Data(dataset, val_dataset=a.val_dataset or None)

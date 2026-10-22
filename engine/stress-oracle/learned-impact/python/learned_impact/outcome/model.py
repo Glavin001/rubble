@@ -55,6 +55,8 @@ class ModelConfig:
     # The break margin as frame-start margin × a non-negative increment (see `_heads`);
     # False only for checkpoints that predate it.
     monotone_margin: bool = True
+    # `/5`: the oracle's full dynamic bond and chunk state as inputs and heads (fullstate.py)
+    full_state: bool = False
 
     def __post_init__(self):
         self.rounds = tuple(self.rounds)
@@ -130,7 +132,9 @@ class ImpactOutcomeModel(nn.Module):
         self.cfg = cfg = cfg or ModelConfig()
         w, hl = cfg.width, cfg.mlp_hidden_layers
         b = cfg.variant == "B"
-        nfc = len(S.CHUNK_FEAT_COLUMNS) + (len(S.CHUNK_QS_FEAT_COLUMNS) if b else 0)
+        from . import fullstate as FS
+        nfc = len(S.CHUNK_FEAT_COLUMNS) + (len(S.CHUNK_QS_FEAT_COLUMNS) if b else 0) \
+            + (FS.N_CHUNK_IN if cfg.full_state else 0)
         nfi = len(S.IMPACTOR_FEAT_COLUMNS) + (len(S.IMPACTOR_QS_FEAT_COLUMNS) if b else 0)
         self.enc_chunk = _mlp(nfc, w, w, hl)
         self.enc_imp = _mlp(nfi, w, w, hl)
@@ -138,6 +142,8 @@ class ImpactOutcomeModel(nn.Module):
         edims = {t: len(S.FEATURE_COLUMNS[f"{t}_feat"]) for t in cfg.edge_types}
         if b:
             edims["bond"] += len(S.BOND_QS_FEAT_COLUMNS)
+        if cfg.full_state:
+            edims["bond"] += FS.N_BOND_IN
         self.enc_edge = nn.ModuleDict({t: _mlp(edims[t], w, w, hl) for t in cfg.edge_types})
         r = cfg.rounds
         self.fine_pre = nn.ModuleList(FineRound(cfg) for _ in range(r[0]))
@@ -170,8 +176,10 @@ class ImpactOutcomeModel(nn.Module):
             getattr(self, name)[off + S.FEATURE_COLUMNS[arr].index(col)] = 0.0
         self.unpool = Unpool()
         nt = cfg.n_time_bins
-        self.bond_head = _mlp(4 * w + w, 4 + nt, w, hl, norm=False)
-        self.chunk_head = _mlp(2 * w, NODE_OUT, w, hl, norm=False)
+        fs_b = FS.N_BOND_OUT if cfg.full_state else 0
+        fs_c = FS.N_CHUNK_OUT if cfg.full_state else 0
+        self.bond_head = _mlp(4 * w + w, 4 + nt + fs_b, w, hl, norm=False)
+        self.chunk_head = _mlp(2 * w, NODE_OUT + fs_c, w, hl, norm=False)
         self.imp_head = _mlp(2 * w, NODE_OUT + 1, w, hl, norm=False)
         self.energy_head = _mlp(w, 4, w, hl, norm=False)
         # Start every head at (almost) the zero predictor, so each normalised loss term
@@ -215,6 +223,8 @@ class ImpactOutcomeModel(nn.Module):
         if cfg.variant == "B":
             cx = torch.cat([cx, t["chunk_qs"]], -1)
             ix = torch.cat([ix, t["imp_qs"]], -1)
+        if cfg.full_state:
+            cx = torch.cat([cx, t["chunk_fs_in"]], -1)
         cx, ix = self._norm("chunk", cx), self._norm("imp", ix)
         n = int(t["n_nodes"])
         h = cx.new_zeros((n, cfg.width))
@@ -226,6 +236,8 @@ class ImpactOutcomeModel(nn.Module):
             x = b.edges[et]["x"]
             if et == "bond" and cfg.variant == "B":
                 x = torch.cat([x, t["bond_qs"]], -1)
+            if et == "bond" and cfg.full_state:
+                x = torch.cat([x, b.edges["bond"]["fs"]], -1)
             e[et] = self.enc_edge[et](self._norm(f"edge_{et}", x))
 
         for rnd in self.fine_pre:
@@ -302,18 +314,28 @@ class ImpactOutcomeModel(nn.Module):
         i_raw = self.imp_head(torch.cat([imp_h, g[t["imp_call"]]], -1))
         i_out = i_raw[:, :NODE_OUT]
         if self.cfg.variant == "B":
-            pad_c = F.pad(t["chunk_qs"], (0, NODE_OUT - 6))
+            pad_c = F.pad(t["chunk_qs"], (0, c_out.shape[-1] - 6))
             pad_i = F.pad(t["imp_qs"], (0, NODE_OUT - 6))
             c_out = c_out + pad_c
             i_out = i_out + pad_i
         en = self.energy_head(g)
-        return {
+        extra = {}
+        if self.cfg.full_state:
+            from . import fullstate as FS
+            nf = len(FS.BOND_FIELDS)
+            raw = out[:, 4 + nt:4 + nt + nf]
+            mono = torch.as_tensor(FS.MONO, device=raw.device)
+            start = t["y_bond_fs_start"].to(raw.dtype)
+            extra["bond_fs"] = start + torch.where(mono, F.softplus(raw - 2.0), raw)
+            extra["bond_fs_mode_logits"] = out[:, 4 + nt + nf:4 + nt + nf + 3]
+            extra["chunk_fs"] = t["chunk_fs_in"].to(c_out.dtype) + c_out[:, NODE_OUT:]
+        return {**extra, 
             "bond_log_r": log_r,
             "bond_break_logit": out[:, 1],
             "bond_log_q": log_q,  # failure margin: the break decision (q ≥ 1)
             "bond_time_logits": out[:, 4:4 + nt],
             "bond_ddamage": F.softplus(out[:, 2]),
-            "chunk_out": c_out,
+            "chunk_out": c_out[:, :NODE_OUT],
             "imp_out": i_out,
             "imp_perf_logit": i_raw[:, NODE_OUT],
             # ÷ E_in: D_bond ≥ 0, its joint (vs dashpot) fraction, E_elastic_end ≥ 0, KE_loss (signed)

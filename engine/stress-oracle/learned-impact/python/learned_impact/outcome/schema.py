@@ -272,6 +272,8 @@ class Call:
     # pretraining) or "coupled" (stress-ref + rubble, production's inputs). From the event
     # manifest's `source`; absent means standalone.
     source: str = "standalone"
+    # `/5`: the event's full-state column names and per-bond static scales (shared per event)
+    fs: dict | None = None
 
     def has(self, name: str) -> bool:
         return name in self.arrays
@@ -480,6 +482,14 @@ def load_event(path: Path | str, validate: bool = True, require_targets: bool = 
                            for k in STRUCTURE_ARRAYS}
     static = {k: _read(blob, v, f"event_arrays/{k}")
               for k, v in manifest.get("event_arrays", {}).items()}
+    fs_meta = None
+    if "full_state_columns" in manifest:
+        cols = manifest["full_state_columns"]
+        scale = {}
+        if "fs_static_bond_scale" in static and "fs_static_bond_key" in static:
+            scale = dict(zip(static["fs_static_bond_key"].tolist(),
+                             np.asarray(static["fs_static_bond_scale"], np.float64)))
+        fs_meta = {"cols": cols, "scale": scale, "scale_names": list(cols.get("static_bond_scale", []))}
     calls = []
     for e in entries:
         arrays = {k: _read(blob, v, f"call {e['call_index']}/{k}") for k, v in e["arrays"].items()}
@@ -496,7 +506,7 @@ def load_event(path: Path | str, validate: bool = True, require_targets: bool = 
             split_group=manifest["split_group"], ensemble_id=manifest.get("ensemble_id"),
             ensemble_member=manifest.get("ensemble_member"),
             gravity=tuple(float(x) for x in manifest.get("gravity", (0.0, 0.0, 0.0))),
-            source=manifest.get("source", "standalone"),
+            source=manifest.get("source", "standalone"), fs=fs_meta,
         )
         if validate:
             validate_call(c, require_targets)
