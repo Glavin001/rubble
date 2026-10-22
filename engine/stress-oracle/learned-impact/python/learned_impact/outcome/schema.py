@@ -423,7 +423,9 @@ def with_dummy_targets(c: Call) -> Call:
             a[name] = np.zeros(_resolve(spec.shape, sym), dtype=DTYPES[spec.dtype])
     if "y_chunk_fragment" in a and not np.any(a["y_chunk_fragment"]):
         a["y_chunk_fragment"] = np.arange(sym["Nc"], dtype=np.int32)
-    energy = {k: 0.0 for k in ENERGY_TARGET_KEYS}
+    # E_elastic_start is an input (the frame-start stored energy, the decode's energy
+    # envelope): never invented; absent, the envelope leaves the call unbounded
+    energy = {k: 0.0 for k in ENERGY_TARGET_KEYS if k != "E_elastic_start"}
     energy.update(c.energy)
     return Call(**{**c.__dict__, "arrays": a, "energy": energy})
 

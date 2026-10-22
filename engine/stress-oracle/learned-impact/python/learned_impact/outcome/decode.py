@@ -27,17 +27,21 @@ from .batch import SCALE_INDEX, Batch
 from .geometry import quat_rotate, quat_to_matrix, rotvec_to_matrix, sym6_to_matrix, world_inertia
 
 
-# Kinematic envelope (planning, 2026-10-22). In each node's frame-start frame (quaternion q),
-# per axis, a frame displacement lies within dt·|Δv|/2 of the trapezoid dt·(v_in + v_end)/2,
-# widened by a tolerance: (chunk dx, impactor dx) in dt·v_ref, (chunk drot, impactor drot)
-# in dt·v_ref/L. The tolerances sit just above the oracle's own excursions (P1's calls-v5,
-# 80 events, 264k chunk and 2k impactor rows; max 0.224, 0.0103, 2.16, 1.79), so the
-# envelope never excludes a displacement the oracle produces. With zero tolerance 0.85% of
-# chunk displacements and 1.7% of chunk rotations would lie outside by > 1% of the scale
-# (rotations: ω changes direction within a frame, so the rotation vector is not ∫ω dt).
-KIN_TOL = (0.25, 0.02, 2.5, 2.5)
-# A kinematic model's correction tanh(c) counts as at the envelope's edge above this
-SATURATED = 0.95
+# Admissibility (planning, 2026-10-22, P0's energy envelope): no node moves further in a
+# frame than its island's frame-start mechanical energy allows. With E = (KE_in + the joint
+# law's stored energy E_elastic_start)·(1 + tol), |dx| ≤ dt·(√(2E/m) + |g|·dt) and
+# |drot| ≤ dt·√(2E/λ_min(I_w)). The oracle cannot exceed it (no body's kinetic energy can
+# pass the island's); a model's buried-ram teleport does. The velocity trapezoid
+# dt·(v_in + v_end)/2 ± dt·|Δv|/2 is only a soft loss term (losses: "kinematic"): the oracle's
+# velocities are not monotone within a frame under contact (0.85% of chunk displacements
+# and 1.7% of rotations lie > 1% of the scale outside it, P1's calls-v5).
+# The tolerance: P0's +5% held on its three events, but on all of P1's calls-v5 (40,713 calls,
+# 4.4M node-frames) two impactor frames exceed it by 1.46× in radius: a ram struck by
+# another ram outside the call's island (p1_anchored_wall_t2_00091_s21202 e5/e7, frame 1:
+# KE 79 → 318 J with 46 J of gravity work), energy the island's inputs cannot see; they
+# need E·(1 + tol) ≥ 2.04 and 2.78 × the island's (solved exactly, gravity term included).
+# +200% (E × 3) covers them; rotations: none outside.
+ENERGY_ENVELOPE_TOL = 2.0
 
 
 @dataclass
@@ -52,9 +56,8 @@ class DecodeConfig:
     project_momentum: bool = True
     energy_bound: bool = True
     energy_tolerance: float = 0.05  # fraction of E_in (P0: ledger residual up to 4.7%)
-    # The kinematic envelope (see KIN_TOL): a checkpoint trained without it (kinematic=False)
-    # has each node's displacement clamped per axis into it, and the clamps counted. None: off.
-    envelope: tuple[float, ...] | None = KIN_TOL
+    # the energy envelope's tolerance (fraction of E; None: off), see ENERGY_ENVELOPE_TOL
+    energy_envelope: float | None = ENERGY_ENVELOPE_TOL
     temperature: float = 1.0  # validation-fitted temperature for p_b
     dtype: torch.dtype = torch.float64
 
@@ -112,15 +115,8 @@ def to_physical(out: dict[str, Tensor], b: Batch, dtype=torch.float64) -> dict[s
     rot = lambda x: quat_rotate(q, x)  # noqa: E731
     v_end = nd["v"] + rot(o[:, 0:3]) * v_ref
     w_end = nd["w"] + rot(o[:, 3:6]) * v_ref / L
-    if "kin_tol" in out:  # kinematic: trapezoid + h·tanh(c), h the per-axis envelope
-        tx, tr = _node_tol(out["kin_tol"].to(dtype), b)
-        hx = dt * (o[:, 0:3].abs() * v_ref / 2 + tx * v_ref)
-        hr = dt * (o[:, 3:6].abs() * v_ref / L / 2 + tr * v_ref / L)
-        dx = dt * (nd["v"] + v_end) / 2 + rot(hx * torch.tanh(o[:, 6:9]))
-        drot = dt * (nd["w"] + w_end) / 2 + rot(hr * torch.tanh(o[:, 9:12]))
-    else:
-        dx = nd["v"] * dt + 0.5 * g * dt * dt + rot(o[:, 6:9]) * v_ref * dt
-        drot = nd["w"] * dt + rot(o[:, 9:12]) * v_ref * dt / L
+    dx = nd["v"] * dt + 0.5 * g * dt * dt + rot(o[:, 6:9]) * v_ref * dt
+    drot = nd["w"] * dt + rot(o[:, 9:12]) * v_ref * dt / L
     anch = nd["anchored"].unsqueeze(-1)
     zero = torch.zeros_like(v_end)
     return {"v_end": torch.where(anch, zero, v_end), "w_end": torch.where(anch, zero, w_end),
@@ -334,42 +330,66 @@ def fragments(b: Batch, broke: Tensor) -> np.ndarray:
     return np.unique(roots, return_inverse=True)[1]
 
 
-def _node_tol(tol: Tensor, b: Batch) -> tuple[Tensor, Tensor]:
-    """Per-node (dx, drot) tolerances [N, 1]: chunks then impactors, as `nodes`."""
-    nc, ni = b.t["chunk_node"].shape[0], b.t["imp_node"].shape[0]
-    is_imp = torch.cat([torch.zeros(nc, dtype=torch.bool), torch.ones(ni, dtype=torch.bool)]).to(tol.device)
-    tx = torch.where(is_imp, tol[1], tol[0]).unsqueeze(-1)
-    tr = torch.where(is_imp, tol[3], tol[2]).unsqueeze(-1)
-    return tx, tr
-
-
-def envelope_clamp(ph: dict[str, Tensor], b: Batch, tol) -> tuple[dict[str, Tensor], Tensor]:
-    """Each node's dx and drot clamped per axis of its frame-start frame into the kinematic
-    envelope (KIN_TOL): |q⁻¹·(dx − dt·(v_in + v_end)/2)| ≤ dt·|q⁻¹·(v_end − v_in)|/2 + tol·dt·v_ref,
-    likewise drot with ω and dt·v_ref/L. Returns the clamped state and the clamped-axis
-    count per call. Applied before the momentum projection, which then restores the
-    island's exact momenta and centre-of-mass displacement."""
+def trapezoid_excess(ph: dict[str, Tensor], b: Batch) -> tuple[Tensor, Tensor]:
+    """Per node and axis of its frame-start frame, how far dx (drot) lies outside the velocity
+    trapezoid's envelope |q⁻¹·(dx − dt·(v_in + v_end)/2)| ≤ dt·|q⁻¹·(v_end − v_in)|/2, in
+    dt·v_ref (dt·v_ref/L); 0 inside and for anchored nodes. The soft kinematic term."""
     from .geometry import quat_rotate_inv
 
     dtype = ph["dx"].dtype
-    call = ph["call"]
-    sc = b.t["scales"].to(dtype)[call]
+    sc = b.t["scales"].to(dtype)[ph["call"]]
     dt = sc[:, SCALE_INDEX["dt"]].unsqueeze(-1)
     v_ref = sc[:, SCALE_INDEX["v"]].unsqueeze(-1)
     L = sc[:, SCALE_INDEX["L"]].unsqueeze(-1)
-    tx, tr = _node_tol(torch.as_tensor(tol, dtype=dtype, device=dt.device), b)
     q = ph["q"] / ph["q"].norm(dim=-1, keepdim=True)  # f32-stored: |q| = 1 ± 1e-7
     free = ~ph["anchored"].unsqueeze(-1)
-    out, n = dict(ph), torch.zeros(b.n_calls, dtype=torch.long, device=dt.device)
-    for k, a0, a1, s in (("dx", ph["v"], ph["v_end"], tx * v_ref), ("drot", ph["w"], ph["w_end"], tr * v_ref / L)):
-        mid = dt * (a0 + a1) / 2
-        res = quat_rotate_inv(q, ph[k] - mid)
-        h = dt * (quat_rotate_inv(q, a1 - a0).abs() / 2 + s)
-        hit = (res.abs() > h * (1 + 1e-9)) & free  # beyond round-off of an inside state
-        cl = torch.where(hit, torch.maximum(torch.minimum(res, h), -h), res)
-        out[k] = torch.where(hit.any(-1, keepdim=True), mid + quat_rotate(q, cl), ph[k])
-        n = n + scatter_sum(hit.sum(-1).to(torch.long), call, b.n_calls)
-    return out, n
+    out = []
+    for k, a0, a1, s in (("dx", ph["v"], ph["v_end"], dt * v_ref), ("drot", ph["w"], ph["w_end"], dt * v_ref / L)):
+        res = quat_rotate_inv(q, ph[k] - dt * (a0 + a1) / 2)
+        h = dt * quat_rotate_inv(q, a1 - a0).abs() / 2
+        out.append(torch.where(free, (res.abs() - h).clamp(min=0) / s, torch.zeros_like(res)))
+    return out[0], out[1]
+
+
+def energy_envelope(ph: dict[str, Tensor], b: Batch, external: Tensor,
+                    tol: float) -> tuple[dict[str, Tensor], Tensor, Tensor]:
+    """Each free node's dx and drot scaled radially into the energy envelope (see
+    ENERGY_ENVELOPE_TOL). Returns the state, the clamped (node, dx|drot) count per call, and
+    the calls left unbounded: an external load does work the inputs do not bound, or the
+    call carries no frame-start stored energy (never a tighter bound than the oracle's)."""
+    G = b.n_calls
+    call = ph["call"]
+    dtype = ph["dx"].dtype
+    dt = b.t["scales"].to(dtype)[:, SCALE_INDEX["dt"]]
+    stored = b.t["e_stored_start"].to(dtype).to(dt.device)
+    ke = kinetic(ph, ph["v"], ph["w"], ph["inertia_w"], G)
+    unbounded = external | ~torch.isfinite(stored)
+    e = (ke + torch.where(unbounded, torch.zeros_like(stored), stored)) * (1 + tol)
+    g = b.t["gravity"].to(dtype).norm(dim=-1)
+    m = ph["mass"]
+    lam = torch.linalg.eigvalsh(ph["inertia_w"])[:, 0].clamp(min=1e-30)
+    r_x = dt[call] * (torch.sqrt(2 * e[call] / m) + g[call] * dt[call])
+    r_r = dt[call] * torch.sqrt(2 * e[call] / lam)
+    on = ~ph["anchored"] & ~unbounded[call]
+    out, n = dict(ph), torch.zeros(G, dtype=torch.long, device=dt.device)
+    for k, r in (("dx", r_x), ("drot", r_r)):
+        norm = ph[k].norm(dim=-1)
+        hit = on & (norm > r * (1 + 1e-9))
+        out[k] = torch.where(hit.unsqueeze(-1), ph[k] * (r / norm.clamp(min=1e-30)).unsqueeze(-1), ph[k])
+        n = n + scatter_sum(hit.to(torch.long), call, G)
+    return out, n, unbounded
+
+
+def label_envelope_clamps(b: Batch, tol: float) -> Tensor:
+    """The oracle's own frame outcomes (the batch's targets) against the energy envelope:
+    (node, dx | drot) pairs per call it would clamp. Recorded data must give 0."""
+    t = b.t
+    ph = dict(nodes(b))
+    ph.update(v_end=torch.cat([t["y_chunk_v_end"], t["y_imp_v_end"]]).double(),
+              w_end=torch.cat([t["y_chunk_w_end"], t["y_imp_w_end"]]).double(),
+              dx=torch.cat([t["y_chunk_dx"], t["y_imp_dx"]]).double(),
+              drot=torch.cat([t["y_chunk_drot"], t["y_imp_drot"]]).double())
+    return energy_envelope(ph, b, causal_freedom(b)[1], tol)[1]
 
 
 def decode(out: dict[str, Tensor], b: Batch, cfg: DecodeConfig | None = None) -> dict:
@@ -379,15 +399,12 @@ def decode(out: dict[str, Tensor], b: Batch, cfg: DecodeConfig | None = None) ->
     dev = ph["v_end"].device
     free, external = causal_freedom(b)
     free, external = free.to(dev), external.to(dev)
-    clamps = torch.zeros(G, dtype=torch.long, device=dev)
-    if cfg.envelope is not None and "kin_tol" not in out:
-        ph, clamps = envelope_clamp(ph, b, cfg.envelope)
-    elif "kin_tol" in out:  # inside by construction; count the node axes at its edge
-        o = torch.cat([out["chunk_out"], out["imp_out"]], 0)
-        edge = (torch.tanh(o[:, 6:12]).abs() > SATURATED) & ~ph["anchored"].unsqueeze(-1)
-        clamps = scatter_sum(edge.sum(-1).to(torch.long), ph["call"], G).to(dev)
     if cfg.project_momentum:
         ph = project(ph, b, free)
+    clamps = torch.zeros(G, dtype=torch.long, device=dev)
+    unbounded = torch.ones(G, dtype=torch.bool, device=dev)
+    if cfg.energy_envelope is not None:  # the hard admissibility constraint, after the projection
+        ph, clamps, unbounded = energy_envelope(ph, b, external, cfg.energy_envelope)
     active = infeasible = torch.zeros(G, dtype=torch.bool, device=dev)
     if cfg.energy_bound:
         ph, active, infeasible = energy_bound(ph, b, free, cfg.energy_tolerance, external)
@@ -406,8 +423,7 @@ def decode(out: dict[str, Tensor], b: Batch, cfg: DecodeConfig | None = None) ->
         "bond_broke": broke, "bond_damage_end": damage_end,
         "energy_bound_active": active, "energy_bound_infeasible": infeasible,
         "energy_bound_skipped": external,
-        # node axes per call clamped into the kinematic envelope (kinematic checkpoints: at its
-        # edge, |tanh| > SATURATED); 6 per free node at most (dx, drot)
-        "admissibility_clamps": clamps,
+        # (node, dx | drot) pairs per call scaled into the energy envelope; calls it cannot bound
+        "admissibility_clamps": clamps, "admissibility_unbounded": unbounded,
         "free": free, "_phys": ph,
     }

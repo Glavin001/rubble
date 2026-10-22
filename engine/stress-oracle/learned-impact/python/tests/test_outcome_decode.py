@@ -40,7 +40,9 @@ def test_momentum_exact_after_projection(gravity):
         ph = D.project(D.to_physical(_outputs(b), b), b, torch.ones(b.n_calls, dtype=torch.bool))
         dec = {"_phys": ph}
     else:
-        dec = D.decode(_outputs(b), b, D.DecodeConfig(energy_bound=False))
+        # (the energy envelope, the hard admissibility constraint, overrides exact momentum
+        # when it fires: off here)
+        dec = D.decode(_outputs(b), b, D.DecodeConfig(energy_bound=False, energy_envelope=None))
         assert dec["free"].all()
     ph, G = dec["_phys"], b.n_calls
     p0, l0 = _momenta(ph, G, end=False)
@@ -129,8 +131,11 @@ def test_decode_reads_inputs_only():
         calls, st = make_calls(range(3), **kw)
         blind = []
         for c in calls:
+            # the ledger's E_elastic_start is the one entry an input: the joint law's stored
+            # energy at frame start (the energy envelope's E)
             stripped = S.Call(**{**c.__dict__, "arrays": {
-                k: v for k, v in c.arrays.items() if not S._is_target(k)}, "energy": {}})
+                k: v for k, v in c.arrays.items() if not S._is_target(k)},
+                "energy": {"E_elastic_start": c.energy["E_elastic_start"]}})
             blind.append(S.with_dummy_targets(stripped))
         b1, b2 = batch_of(calls, st), batch_of(blind, st)
         o = _outputs(b1)
@@ -168,59 +173,44 @@ def test_chunk_inertia_uses_the_body_rotation_not_the_rest_rotation():
     assert torch.allclose(iw, want, atol=1e-5)
 
 
-def _envelope_excess(ph, b, tol):
+def test_energy_envelope_bounds_teleports_and_never_touches_admissible_moves():
     from learned_impact.outcome.batch import SCALE_INDEX
-    from learned_impact.outcome.geometry import quat_rotate_inv
 
-    sc = b.t["scales"].to(torch.float64)[ph["call"]]
-    dt, vr, L = (sc[:, SCALE_INDEX[k], None] for k in ("dt", "v", "L"))
-    tx, tr = D._node_tol(torch.tensor(tol, dtype=torch.float64), b)
-    ex = []
-    for k, a0, a1, s in (("dx", ph["v"], ph["v_end"], tx * vr), ("drot", ph["w"], ph["w_end"], tr * vr / L)):
-        res = quat_rotate_inv(ph["q"], ph[k] - dt * (a0 + a1) / 2)
-        h = dt * (quat_rotate_inv(ph["q"], a1 - a0).abs() / 2 + s)
-        ex.append(((res.abs() - h) / h.clamp(min=1e-30)).amax(-1))
-    return torch.stack(ex, -1)[~ph["anchored"]]
-
-
-def test_envelope_clamp_bounds_old_checkpoints_and_momentum_stays_exact():
     calls, st = make_calls(range(6))
+    for c in calls:
+        c.energy["E_elastic_start"] = 0.0
     b = batch_of(calls, st)
+    nc = b.t["chunk_node"].shape[0]
     torch.manual_seed(0)
     with torch.no_grad():
         out = ImpactOutcomeModel()(b)
-        out["imp_out"][:, 6:9] += 3.0  # displacements far from what the velocities allow
-        raw = D.to_physical(out, b)
-        cl, n = D.envelope_clamp(raw, b, D.KIN_TOL)
+        out["imp_out"][:, 6:9] += 500.0  # a teleport: far beyond any speed the energy allows
         on = D.decode(out, b, D.DecodeConfig(energy_bound=False))
-        off = D.decode(out, b, D.DecodeConfig(energy_bound=False, envelope=None))
-    assert (_envelope_excess(raw, b, D.KIN_TOL) > 1e-6).any()
-    assert (_envelope_excess(cl, b, D.KIN_TOL) <= 1e-6).all()
-    assert int(n.sum()) > 0 and torch.equal(on["admissibility_clamps"], n)
-    # a state inside the envelope is untouched
-    again, n2 = D.envelope_clamp(cl, b, D.KIN_TOL)
-    torch.testing.assert_close(again["dx"], cl["dx"])
-    assert int(n2.sum()) == 0
-    # the momentum projection still makes the centre-of-mass displacement exact
-    m = on["_phys"]["mass"].unsqueeze(-1)
-    com = lambda d: D.scatter_sum(m * torch.cat([d["chunk_dx"], d["imp_dx"]]), d["_phys"]["call"], b.n_calls)  # noqa: E731
-    torch.testing.assert_close(com(on)[on["free"]], com(off)[off["free"]])
-
-
-def test_kinematic_model_is_inside_its_envelope_and_differentiable():
-    from learned_impact.outcome.model import ModelConfig
-
-    calls, st = make_calls(range(6))
-    b = batch_of(calls, st)
-    torch.manual_seed(0)
-    m = ImpactOutcomeModel(ModelConfig(kinematic=True))
-    out = m(b)
-    out["imp_out"] = out["imp_out"] + torch.cat([torch.zeros_like(out["imp_out"][:, :6]),
-                                                 50.0 * torch.ones_like(out["imp_out"][:, 6:])], 1)
-    ph = D.to_physical(out, b)
-    assert (_envelope_excess(ph, b, m.cfg.kin_tol) <= 1e-6).all()
-    ph["dx"].sum().backward()
-    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in m.parameters())
+        off = D.decode(out, b, D.DecodeConfig(energy_bound=False, energy_envelope=None))
+    ph = on["_phys"]
+    G = b.n_calls
+    e = D.kinetic(ph, ph["v"], ph["w"], ph["inertia_w"], G) * (1 + D.ENERGY_ENVELOPE_TOL)
+    dt = b.t["scales"].double()[:, SCALE_INDEX["dt"]]
+    g = b.t["gravity"].double().norm(dim=-1)
+    call = ph["call"]
+    r = dt[call] * (torch.sqrt(2 * e[call] / ph["mass"]) + g[call] * dt[call])
+    dx = torch.cat([on["chunk_dx"], on["imp_dx"]])
+    free = ~ph["anchored"] & ~on["admissibility_unbounded"][call]
+    assert (dx.norm(dim=-1)[free] <= r[free] * (1 + 1e-6)).all()
+    assert int(on["admissibility_clamps"].sum()) > 0
+    assert not torch.equal(on["imp_dx"], off["imp_dx"])
+    # a decode already inside the envelope is unchanged
     with torch.no_grad():
-        dec = D.decode(m(b), b, D.DecodeConfig(energy_bound=False))
-    assert dec["admissibility_clamps"].dtype == torch.long
+        out0 = ImpactOutcomeModel()(b)
+        a0 = D.decode(out0, b, D.DecodeConfig(energy_bound=False, energy_envelope=1e6))
+        b0 = D.decode(out0, b, D.DecodeConfig(energy_bound=False, energy_envelope=None))
+    assert int(a0["admissibility_clamps"].sum()) == 0
+    torch.testing.assert_close(a0["imp_dx"], b0["imp_dx"])
+    # without the frame-start stored energy the call is left unbounded (never tighter)
+    for c in calls:
+        c.energy.pop("E_elastic_start")
+    b2 = batch_of(calls, st)
+    with torch.no_grad():
+        d2 = D.decode(ImpactOutcomeModel()(b2), b2, D.DecodeConfig(energy_bound=False))
+    assert bool(d2["admissibility_unbounded"][:len(calls)].all())
+    assert int(d2["admissibility_clamps"].sum()) == 0

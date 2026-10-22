@@ -41,7 +41,7 @@ HIDDEN_TERMS = ("hid_u", "hid_th", "hid_v", "hid_w")
 FS_CLUSTER_TERMS = ("fs_cl_pos", "fs_cl_rot", "fs_cl_vel", "fs_cl_ang", "fs_cl_timer", "fs_cl_act")
 TERMS = ("margin", "demand", "break", "time", "motion", "def_motion", "pose", "impactor",
          "energy", "damage", "regime", *FS_BOND_TERMS, "fs_mode", "fs_chunk", *FS_CLUSTER_TERMS,
-         "break_t", *HIDDEN_TERMS)
+         "break_t", *HIDDEN_TERMS, "kinematic")
 
 
 @dataclass
@@ -54,7 +54,7 @@ class LossConfig:
         "fs_mode": 0.5, "fs_chunk": 0.5, **{k: 2.0 / len(FS_BOND_TERMS) for k in FS_BOND_TERMS},
         **{k: 1.0 / len(FS_CLUSTER_TERMS) for k in FS_CLUSTER_TERMS},
         "break_t": 0.5, **{k: 1.0 / len(HIDDEN_TERMS) for k in HIDDEN_TERMS},
-        "impactor": 2.0, "energy": 1.0, "damage": 1.0, "regime": 1.0})
+        "impactor": 2.0, "energy": 1.0, "damage": 1.0, "regime": 1.0, "kinematic": 1.0})
     huber_delta: float = 1.0
     label_smoothing: float = 0.02  # single-run hard break labels
     # "none": proper log-loss on the soft labels (default: the P2 sweep found the capped
@@ -66,6 +66,10 @@ class LossConfig:
     alpha_cut: float = 1.0  # consequence weight: bond on the separating cut
     beta_support: float = 1.0  # consequence weight: bond on a support load path
     energy_tolerance: float = 0.05
+    # the soft kinematic-consistency term (planning, 2026-10-22): each node's dx and drot
+    # outside its velocity trapezoid's envelope (decode.trapezoid_excess), squared, in
+    # (dt·v_ref)² — a penalty, not a constraint (the oracle itself leaves it under contact)
+    kinematic: bool = False
     log_r_floor: float = 1e-4
     # Broken bonds must clear the break threshold by this margin in log space (q̂ ≥ e^δ):
     # with δ = 0 the censored hinge stops at q̂ = 1⁺ and leaves every broken bond on the
@@ -261,6 +265,10 @@ def loss_terms(out: dict[str, Tensor], b: Batch, cfg: LossConfig,
     terms["def_motion"] = vmean(scatter_sum(def_err, t["chunk_call"], G) / e_in)
     pose_err = ke_norm(ph["dx"] - ydx, ph["drot"] - ydr)
     terms["pose"] = vmean(scatter_sum(pose_err, call, G) / (e_in * dt * dt))
+    if cfg.kinematic:
+        ex, er = D.trapezoid_excess(ph, b)
+        n_nodes = scatter_sum(torch.ones_like(m), call, G).clamp(min=1)
+        terms["kinematic"] = vmean(scatter_sum((ex * ex + er * er).sum(-1), call, G) / n_nodes)
 
     # `/5` full state: every carried bond field in its encoding (Huber, live bonds, consequence
     # weights), the failure mode (cross-entropy) and the chunks' support reactions
@@ -382,7 +390,7 @@ class UncertaintyWeights(torch.nn.Module):
 
 TERM_GROUPS = {
     "decision": ("margin", "break", "demand", "time", "damage"),
-    "motion": ("motion", "def_motion", "pose", "impactor", "regime"),
+    "motion": ("motion", "def_motion", "pose", "impactor", "regime", "kinematic"),
     "energy": ("energy",),
     "fs_bond": (*FS_BOND_TERMS, "fs_mode"),
     "fs_rest": (*FS_CLUSTER_TERMS, *HIDDEN_TERMS, "fs_chunk", "break_t"),
@@ -497,6 +505,8 @@ def zero_baselines(batches, cfg: LossConfig, priors=None) -> dict[str, float]:
             grp = [base[g] for g in (group or (k,)) if g in base and base[g] > 0]
             floor = max(1e-4, 0.1 * float(np.median(grp))) if grp else 1e-4
             out[k] = max(v, floor)
+        elif k == "kinematic":  # already in (dt·v_ref)²; persistence is ~0 (gravity only)
+            out[k] = 1.0
         else:
             out[k] = v if v > 0 else 1.0
     return out

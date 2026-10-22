@@ -182,6 +182,10 @@ def collate(calls: list[S.Call], structures: dict[str, dict[int, dict[str, np.nd
                                  en["E_elastic_end"], en["D_bond"],
                                  en.get("D_bond_joint", 0.0), en.get("D_bond_damping", 0.0)]]))
         add("energy_has_split", np.array([("D_bond_joint" in en) and ("D_bond_damping" in en)]))
+        # the joint law's frame-start stored energy (an input-side quantity; NaN if absent):
+        # the decode's energy envelope
+        es = en.get("E_elastic_start")
+        add("e_stored_start", np.array([float(es) if es is not None else np.nan]))
         add("call_anchored", np.array([c.anchored]))
         add("gravity", np.array([c.gravity], dtype=np.float64))
         for t in S.EDGE_TYPES:
@@ -236,6 +240,7 @@ def collate(calls: list[S.Call], structures: dict[str, dict[int, dict[str, np.nd
     for k in ("y_bond_support_path",):
         b.t[k] = b.t[k].float()
     b.t["energy"] = torch.from_numpy(np.concatenate(acc["energy"]).astype(np.float64))
+    b.t["e_stored_start"] = torch.from_numpy(np.concatenate(acc["e_stored_start"]).astype(np.float64))
     b.t["scales"] = torch.from_numpy(np.concatenate(acc["scales"]).astype(np.float64))
     b.t["gravity"] = torch.from_numpy(np.concatenate(acc["gravity"]).astype(np.float64))
     b.t["n_nodes"] = torch.tensor(node_off)
@@ -329,6 +334,7 @@ def pad_batch(b: Batch, growth: float = 1.25, call_multiple: int = 8) -> Batch:
     t["energy"] = _pad_rows(t["energy"], pg)
     t["gravity"] = _pad_rows(t["gravity"], pg)
     t["energy_has_split"] = _pad_rows(t["energy_has_split"], pg, False)
+    t["e_stored_start"] = _pad_rows(t["e_stored_start"], pg, float("nan"))
     t["call_anchored"] = _pad_rows(t["call_anchored"], pg, True)
     t["call_valid"] = _pad_rows(t["call_valid"], pg, False)
     # ---- nodes: padding chunks then padding impactors, after every real node

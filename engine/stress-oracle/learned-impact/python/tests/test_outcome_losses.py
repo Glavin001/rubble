@@ -58,7 +58,9 @@ def test_normalised_terms_start_near_one():
     for k, v in normed.items():
         assert 0.5 < float(v) < 2.0, (k, float(v))
     # the full-state terms (fs_*) exist only with /5 calls
-    assert set(normed) == {k for k in Lo.TERMS if not (k.startswith("fs_") or k.startswith("hid_") or k == "break_t")}
+    # (and the soft kinematic term only when enabled)
+    assert set(normed) == {k for k in Lo.TERMS if not (k.startswith("fs_") or k.startswith("hid_")
+                                                       or k in ("break_t", "kinematic"))}
 
 
 def test_energy_loss_ignores_booked_contact_dissipation():
@@ -147,3 +149,26 @@ def test_group_balancer_reaches_the_target_shares():
     for grp, sh in shares.items():
         assert abs(sh - Lo.GROUP_TARGET[grp]) < 0.05, (grp, sh)
     assert abs(sum(np.log(gb.mult[g]) for g in shares)) < 1e-6  # geometric mean 1
+
+
+def test_kinematic_term_penalises_only_displacements_outside_the_trapezoid():
+    from learned_impact.outcome import decode as D
+
+    b, _, _ = _batch()
+    cfg = Lo.LossConfig(kinematic=True)
+    torch.manual_seed(0)
+    m = ImpactOutcomeModel()
+    out = m(b)
+    k0 = Lo.loss_terms(out, b, cfg)["kinematic"]
+    out2 = dict(out)
+    out2["chunk_out"] = out["chunk_out"] + torch.cat(
+        [torch.zeros_like(out["chunk_out"][:, :6]), 3.0 * torch.ones_like(out["chunk_out"][:, 6:])], 1)
+    k1 = Lo.loss_terms(out2, b, cfg)["kinematic"]
+    assert float(k1) > float(k0) >= 0
+    k1.backward()
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in m.parameters())
+    # the trapezoid itself (no correction beyond the envelope) costs nothing
+    with torch.no_grad():
+        ph = D.to_physical(out, b)
+        ph["dx"] = b.t["scales"].double()[ph["call"], 7:8] * (ph["v"] + ph["v_end"]) / 2
+        assert float(D.trapezoid_excess(ph, b)[0].abs().max()) < 1e-9

@@ -288,7 +288,8 @@ class Data:
                     c.source = "dagger"
                 self.train += calls_
                 self.structures.update(st_)
-                print(f"[data] + {n_['admitted']} of {n_['relabelled']} relabelled calls from {path_}", flush=True)
+                print(f"[data] + {n_['admitted']} of {n_['relabelled']} relabelled calls from {path_} "
+                      f"({n_['energy_gain']} gain energy, {n_['outside_envelope']} leave the energy envelope)", flush=True)
             others = {c.source for c in self.train if c.source != "dagger"}
             self.source_weights = {"dagger": share, **{o: (1 - share) / max(len(others), 1) for o in others}}
         g_train = {e.manifest["split_group"] for e in train_events}
@@ -726,6 +727,21 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
     def coll(calls):
         b = collate(calls, data.structures, cache)
         return pad_batch(b) if cfg.pad_shapes else b
+    if cfg.decode.energy_envelope is not None:
+        # The energy envelope is the decode's hard constraint, so it must never exclude what
+        # the oracle itself does: every recorded training frame is checked (DAgger relabels
+        # are admitted by it already). An excess is an error, never a silent clamp.
+        rec = [c for c in data.train if c.source != "dagger"]
+        bad = []
+        for bc in _batches(rec, cfg.batch_budget, cfg.batch_calls):
+            n = D.label_envelope_clamps(collate(bc, data.structures, cache), cfg.decode.energy_envelope)
+            bad += [(c.event_id, c.call_index) for c, k in zip(bc, n.tolist()) if k]
+        prog.line(f"energy envelope (tol {cfg.decode.energy_envelope}): {len(bad)} of {len(rec)} "
+                  f"recorded training calls outside")
+        if bad:
+            raise S.SchemaError(f"the energy envelope (decode.ENERGY_ENVELOPE_TOL = "
+                                f"{cfg.decode.energy_envelope}) excludes {len(bad)} recorded frames, "
+                                f"e.g. {bad[:5]}: widen it (it must hold for the oracle)")
     norm_batches = [coll(bc) for bc in
                     _batches(data.train, cfg.batch_budget, cfg.batch_calls)[:64]]
     norms = Lo.zero_baselines(norm_batches, cfg.loss, data.priors)
@@ -974,8 +990,8 @@ def main(argv=None) -> None:
     ap.add_argument("--hidden-head", action="store_true",
                     help="the chunks' frame-end hidden state (u, theta, v, w) as a head")
     ap.add_argument("--kinematic", action="store_true",
-                    help="displacements as the velocity trapezoid plus a correction bounded by the "
-                         "kinematic envelope (decode.KIN_TOL)")
+                    help="the soft kinematic-consistency loss term (displacements outside the "
+                         "velocity trapezoid's envelope, decode.trapezoid_excess)")
     ap.add_argument("--init-checkpoint", default="",
                     help="start from these weights and input statistics (fine-tuning, DAgger)")
     ap.add_argument("--drop-features", default="",
@@ -1016,7 +1032,6 @@ def main(argv=None) -> None:
     mc.full_state = a.full_state
     mc.break_time_head = a.break_time_head
     mc.hidden_head = a.hidden_head
-    mc.kinematic = a.kinematic
     mc.__post_init__()
     seeds = [int(s) for s in a.seeds.split(",")]
     cc = {"module": a.call_cache_module, "root": a.call_cache, "builder": a.call_builder,
@@ -1036,6 +1051,7 @@ def main(argv=None) -> None:
                           decode=D.DecodeConfig(energy_tolerance=a.energy_tolerance,
                                                 break_mode=a.break_mode))
         cfg.loss.energy_tolerance = a.energy_tolerance
+        cfg.loss.kinematic = a.kinematic
         cfg.loss.balance = a.balance
         cfg.loss.break_margin = a.break_margin
         cfg.model.input_norm = not a.no_input_norm

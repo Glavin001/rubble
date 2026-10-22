@@ -56,18 +56,36 @@ def admissible(c) -> bool:
     return gain <= ADMIT_ENERGY_TOL * c.scales["E_in"]
 
 
+def within_energy_envelope(c, structures) -> bool:
+    """The oracle's frame from the model's state stays inside the decode's energy envelope
+    (decode.energy_envelope, the hard admissibility constraint). The recorded data does by
+    physics; a relabel can leave it when the oracle resolves the model state's overlaps by
+    moving bodies further than any admissible velocity (w64-heads-s0's rollouts: chunks moved
+    1.2 m in a frame from 3 m/s). Such a target teaches a move the decode forbids."""
+    from .batch import HierarchyCache, collate
+
+    b = collate([c], {c.event_id: structures}, HierarchyCache(2))
+    return int(D.label_envelope_clamps(b, D.ENERGY_ENVELOPE_TOL)[0]) == 0
+
+
 def load_relabelled(root: str | Path) -> tuple[list, dict, dict]:
-    """The admissible relabelled calls under `root`, their structures, and the counts."""
+    """The admissible relabelled calls under `root` (the oracle's energy balance and the
+    decode's energy envelope), their structures, and the counts."""
     from . import schema as S
 
-    calls, structures, n = [], {}, {"relabelled": 0, "admitted": 0}
+    calls, structures = [], {}
+    n = {"relabelled": 0, "admitted": 0, "energy_gain": 0, "outside_envelope": 0}
     for p in S.find_events(root):
         e = S.load_event(p)
         for c in e.calls:
             if not c.routed:
                 continue
             n["relabelled"] += 1
-            if admissible(c):
+            if not admissible(c):
+                n["energy_gain"] += 1
+            elif not within_energy_envelope(c, e.structures):
+                n["outside_envelope"] += 1
+            else:
                 calls.append(c)
                 structures[e.manifest["event_id"]] = e.structures
                 n["admitted"] += 1

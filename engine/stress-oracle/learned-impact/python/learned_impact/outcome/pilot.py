@@ -101,7 +101,7 @@ def run(dataset: str, out: str, sizes: list[int], seeds: list[int], variants: li
         device: str, model_cfg: ModelConfig, pushforward: float = 0.0,
         rereport: bool = False, val_dataset: str | None = None,
         fractions: list[float] | None = None, train_events: list | None = None,
-        call_cache: dict | None = None) -> dict:
+        call_cache: dict | None = None, kinematic: bool = False) -> dict:
     root = Path(out)
     prog = Progress(root, total=len(sizes) * len(seeds) * len(variants))
     full = Data(dataset, val_dataset=val_dataset, train_events=train_events, call_cache=call_cache)
@@ -152,6 +152,7 @@ def run(dataset: str, out: str, sizes: list[int], seeds: list[int], variants: li
                                   steps=steps, seed=seed,
                                   device=device, model=mc, eval_every=max(steps // 8, 50),
                                   pushforward_prob=pushforward)
+                cfg.loss.kinematic = kinematic
                 t0 = time.time()
                 prog.line(f"[{k}/{prog.total}] {tag}: {n_events} events, "
                           f"{len(d.train)} calls, {steps} steps")
@@ -287,14 +288,14 @@ def main(argv=None) -> None:
     mc = (ModelConfig.large() if a.large else ModelConfig.cost() if a.cost
           else ModelConfig.reference())
     mc.full_state = a.full_state
-    mc.break_time_head, mc.hidden_head, mc.kinematic = a.break_time_head, a.hidden_head, a.kinematic
+    mc.break_time_head, mc.hidden_head = a.break_time_head, a.hidden_head
     run(a.dataset, a.out, [int(x) for x in a.sizes.split(",")],
         [int(x) for x in a.seeds.split(",")], a.variants.split(","), a.family,
         a.steps_per_event, a.min_steps, a.max_steps, a.device, mc, a.pushforward, a.rereport,
         a.val_dataset, [float(x) for x in a.fractions.split(",")] if a.fractions else None,
         [x for x in Path(a.train_events).read_text().split() if x] if a.train_events else None,
         {"module": a.call_cache_module, "root": a.call_cache, "builder": a.call_builder,
-         "max_gb": a.cache_gb} if a.train_events else None)
+         "max_gb": a.cache_gb} if a.train_events else None, a.kinematic)
 
 
 if __name__ == "__main__":
