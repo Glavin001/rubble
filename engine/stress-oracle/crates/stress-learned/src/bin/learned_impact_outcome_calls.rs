@@ -1,6 +1,10 @@
 //! Build P2's per-call records (`learned-impact-outcome/2`) from P1's frame records.
 //!
-//!   learned_impact_outcome_calls --out DIR [--plain] [--jobs N] RUN_OR_EVENT_DIR ...
+//!   learned_impact_outcome_calls --out DIR [--plain] [--jobs N] [--eval-only | --train-only] RUN_OR_EVENT_DIR ...
+//!
+//! `--eval-only` takes the events evaluation keeps whole (validation, test, sealed, and every
+//! ensemble member), whose calls are cached permanently; `--train-only` the rest, whose calls
+//! are built on demand (`learned_impact/outcome_calls_cache.py`).
 //!
 //! Each argument is an event directory or a generator job (its `events/`). Writes
 //! `DIR/<event_id>/` (manifest.json, calls.json, arrays.bin.zst; `--plain`: arrays.bin) and
@@ -26,18 +30,21 @@ fn main() {
     let mut out = None;
     let mut plain = false;
     let mut jobs = 8;
+    let mut only: Option<bool> = None;
     let mut inputs = Vec::new();
     let mut it = a.into_iter();
     while let Some(x) = it.next() {
         match x.as_str() {
             "--out" => out = it.next().map(PathBuf::from),
             "--plain" => plain = true,
+            "--eval-only" => only = Some(true),
+            "--train-only" => only = Some(false),
             "--jobs" => jobs = it.next().and_then(|v| v.parse().ok()).expect("--jobs N"),
             _ => inputs.push(PathBuf::from(x)),
         }
     }
     let out = out.expect("--out DIR");
-    let events: Vec<PathBuf> = inputs.iter().flat_map(|p| events_in(p)).collect();
+    let events: Vec<PathBuf> = inputs.iter().flat_map(|p| events_in(p)).filter(|e| only.map_or(true, |want| is_eval(e) == want)).collect();
     assert!(!events.is_empty(), "no events");
     let (done, failed) = (AtomicUsize::new(0), AtomicUsize::new(0));
     let total = events.len();
@@ -61,4 +68,10 @@ fn main() {
     if f > 0 {
         std::process::exit(1);
     }
+}
+
+/// An event evaluation keeps whole: not a training split, or an ensemble member.
+fn is_eval(ev: &Path) -> bool {
+    let ctx: serde_json::Value = std::fs::read(ev.join("context.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    ctx["split"].as_str() != Some("train") || !ctx["ensemble"]["id"].is_null()
 }
