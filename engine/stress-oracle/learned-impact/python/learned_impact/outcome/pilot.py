@@ -275,6 +275,11 @@ def main(argv=None) -> None:
     ap.add_argument("--call-cache-module", default="")
     ap.add_argument("--call-cache", default="")
     ap.add_argument("--call-builder", default="")
+    ap.add_argument("--cache-gb", type=float, default=1.5,
+                    help="total disk bound of the call cache (as train.py)")
+    ap.add_argument("--break-time-head", action="store_true")
+    ap.add_argument("--hidden-head", action="store_true")
+    ap.add_argument("--kinematic", action="store_true")
     ap.add_argument("--pushforward", type=float, default=0.0)
     ap.add_argument("--rereport", action="store_true",
                     help="re-score every finished run's best.pt with the current metrics")
@@ -282,13 +287,14 @@ def main(argv=None) -> None:
     mc = (ModelConfig.large() if a.large else ModelConfig.cost() if a.cost
           else ModelConfig.reference())
     mc.full_state = a.full_state
+    mc.break_time_head, mc.hidden_head, mc.kinematic = a.break_time_head, a.hidden_head, a.kinematic
     run(a.dataset, a.out, [int(x) for x in a.sizes.split(",")],
         [int(x) for x in a.seeds.split(",")], a.variants.split(","), a.family,
         a.steps_per_event, a.min_steps, a.max_steps, a.device, mc, a.pushforward, a.rereport,
         a.val_dataset, [float(x) for x in a.fractions.split(",")] if a.fractions else None,
         [x for x in Path(a.train_events).read_text().split() if x] if a.train_events else None,
-        {"module": a.call_cache_module, "root": a.call_cache, "builder": a.call_builder}
-        if a.train_events else None)
+        {"module": a.call_cache_module, "root": a.call_cache, "builder": a.call_builder,
+         "max_gb": a.cache_gb} if a.train_events else None)
 
 
 if __name__ == "__main__":

@@ -144,7 +144,7 @@ def _cached_train_events(event_dirs: list, cfg: dict) -> tuple[list[S.Event], in
     spec.loader.exec_module(mod)
     evs = [Path(e) for e in event_dirs]
     chunk = int(cfg.get("chunk", 32))
-    total_gb = float(cfg.get("max_gb", 2.5))
+    total_gb = float(cfg.get("max_gb", 1.5))
     headroom_gb = float(cfg.get("headroom_gb", 0.25))  # one chunk (32 events ≈ 0.16 GB) staged
     if total_gb <= headroom_gb:
         raise ValueError(f"call cache max_gb {total_gb} must exceed the {headroom_gb} GB chunk headroom")

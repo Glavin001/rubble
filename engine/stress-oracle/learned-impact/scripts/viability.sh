@@ -1,12 +1,15 @@
 #!/bin/zsh
 # Viability runs (planning session, 2026-10-22), local on MPS, standalone-oracle data only:
-#   viability.sh <train calls> <eval calls> [steps]
+#   viability.sh <train calls> <eval calls> [steps] [extra args] [train-only args]
+# (train-only: e.g. --extra-train DAgger relabels, left out of the data-scaling runs, which
+# measure the effect of recorded events)
 # 1. W64/12 (the default), seeds 0,1,2; 2. W128/16, seed 0; 3. data scaling at 25/50/100% of
 # the training groups (W64, seeds 0,1,2); gates-v1.1 reports on CPU behind each; 4. the report
 # in findings/. Every GPU phase holds the machine-wide GPU lock (scripts/gpu_lock.sh).
 # Pushforward stays off until its full-rebuild tests pass.
 set -e
 TRAIN=$1; EVAL=$2; STEPS=${3:-12000}; EXTRA=${4:-}  # e.g. --full-state for /5
+TRAIN_ONLY=${5:-}
 HERE=${0:a:h}
 PYD=$HERE/../python; R=${VIAB_OUT:-$HERE/../runs/v5}; mkdir -p $R
 cd $PYD
@@ -16,7 +19,7 @@ train() {  # name, extra args
   local name=$1; shift
   [ -f $R/$name/done ] && return
   $LOCK "p2 viability $name" -- $PY -u -m learned_impact.outcome.train --dataset $TRAIN \
-    --val-dataset $EVAL --out $R/$name --steps $STEPS --eval-every $((STEPS / 12)) --device mps ${=EXTRA} "$@"
+    --val-dataset $EVAL --out $R/$name --steps $STEPS --eval-every $((STEPS / 12)) --device mps ${=EXTRA} ${=TRAIN_ONLY} "$@"
   touch $R/$name/done
 }
 report() {  # run dir (CPU; one at a time in the background)
