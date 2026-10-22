@@ -4,8 +4,8 @@
 //!       [--family free_wall|anchored_wall] [--tier 1|2] [--n N] [--seed S] [--ranges pilot|bulk]
 //!       [--oracle a12_realtime] [--jobs N] [--limit N] [--plan-only] [--no-baselines]
 //!       [--max-seconds S] [--max-failure-fraction F] [--pause-file PATH]
-//!       [--members M] [--ensemble-train-share F] [--no-ensembles]
-//!       [--budget-gb G] [--min-free-gb F] [--no-thinning]
+//!       [--members M] [--ensemble-train-share F] [--no-ensembles] [--fractions T,V,S] [--split-seed S]
+//!       [--budget-gb G] [--min-free-gb F] [--thin]
 //!       [--split sealed|train|val|test] [--extrapolation speed|mass|size|loads] [--corner-share F]
 //!
 //! Stage 2: `--catalog p1-stage2 --family cuboid_house|masonry_house|arch --tier 3|4|5`.
@@ -13,9 +13,11 @@
 //! The sealed set: `--split sealed` (every configuration an ensemble, every frame kept), with
 //! `--extrapolation` for the splits beyond the training ranges.
 //!
-//! Storage (default): arrays compressed with zstd, and training events that are not
-//! ensemble members keep only the frames training uses (dropped frames regenerate
-//! bit-identically with `learned_impact_outcome_record --regenerate`). `--budget-gb` caps
+//! Storage (default, recorder revision 8): arrays compressed with zstd, every frame kept,
+//! and exact World snapshots at boundary 0, every routed boundary and every 10th (the
+//! dataset is the ground truth and only grows). `--thin` restores the revision-7 thinning
+//! of training events (dropped frames regenerate bit-identically with
+//! `learned_impact_outcome_record --regenerate`). `--budget-gb` caps
 //! the whole `--runs` tree (default 19) and `--min-free-gb` the disk's free space (default
 //! 100): when the next events could cross either, no new event starts, and the job ends
 //! with state "budget" and a clear message.
@@ -110,6 +112,14 @@ fn main() {
     if let Some(m) = val("--members") {
         plan.members = m.parse().expect("--members");
     }
+    if let Some(x) = val("--split-seed") {
+        plan.split_seed = Some(x.parse().expect("--split-seed"));
+    }
+    if let Some(x) = val("--fractions") {
+        // train,val,test shares of the layout groups
+        let v: Vec<f64> = x.split(',').map(|t| t.parse().expect("--fractions T,V,S")).collect();
+        plan.fractions = [v[0], v[1], v[2]];
+    }
     if let Some(x) = val("--ensemble-train-share") {
         plan.train_share = x.parse().expect("--ensemble-train-share");
     }
@@ -126,8 +136,8 @@ fn main() {
     if let Some(s) = val("--max-seconds") {
         opts.stop.max_seconds = s.parse().expect("--max-seconds");
     }
-    if flag("--no-thinning") {
-        opts.storage.select_training_frames = false;
+    if flag("--thin") {
+        opts.storage.select_training_frames = true;
     }
     let budget = (val("--budget-gb").map_or(19.0, |x| x.parse::<f64>().expect("--budget-gb")) * 1e9) as u64;
     let min_free = (val("--min-free-gb").map_or(100.0, |x| x.parse::<f64>().expect("--min-free-gb")) * 1e9) as u64;
@@ -135,8 +145,19 @@ fn main() {
     let plan_json = json!({"job": job, "catalog": catalog, "seed": seed, "oracle_config": oracle, "baselines": opts.baselines, "stop_rule": opts.stop, "storage": opts.storage, "recipes": recipes});
     let bytes = serde_json::to_vec_pretty(&plan_json).unwrap();
     let path = dir.join("recipes.json");
+    // A resumed job must plan the same events; how they are stored may change (revision 8
+    // keeps every frame and snapshots: earlier events keep their own storage, recorded in
+    // each event's context.json).
+    let mut storage_changed = None;
     if path.exists() {
-        assert!(fs::read(&path).unwrap() == bytes, "recipes.json differs from this plan: choose a new --job");
+        let mut old: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).expect("recipes.json");
+        let old_storage = old.as_object_mut().and_then(|o| o.remove("storage"));
+        let mut new = plan_json.clone();
+        let new_storage = new.as_object_mut().and_then(|o| o.remove("storage"));
+        assert!(old == new, "recipes.json differs from this plan: choose a new --job");
+        if old_storage != new_storage {
+            storage_changed = Some((old_storage, new_storage));
+        }
     } else {
         fs::write(&path, &bytes).unwrap();
     }
@@ -152,6 +173,9 @@ fn main() {
     let threads: usize = val("--jobs").map_or(8, |x| x.parse().expect("--jobs"));
     let max_fail: f64 = val("--max-failure-fraction").map_or(0.05, |x| x.parse().expect("--max-failure-fraction"));
     let pause = val("--pause-file").map(PathBuf::from);
+    if let Some((was, now)) = &storage_changed {
+        progress.line(&format!("[gen] storage changed on resume: was {}, now {} (finished events keep theirs)", was.clone().unwrap_or_default(), now.clone().unwrap_or_default()));
+    }
     progress.line(&format!("[gen] start {job}: {total} events, {threads} threads, oracle {} (provisional {}), baselines {}", oracle.name, oracle.provisional, opts.baselines));
     let used = std::sync::atomic::AtomicU64::new(dir_bytes(&runs));
     let over = std::sync::atomic::AtomicBool::new(false);

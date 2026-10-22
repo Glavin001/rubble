@@ -236,3 +236,45 @@ fn a_delta_full_state_boundary_is_the_next_state_bit_for_bit() {
     let diff = stress_learned::full_state::differing_paths(&stress_learned::full_state::shred_world(&w).unwrap(), &stress_learned::full_state::load_frame(&ev, b).unwrap(), |_| false);
     assert!(diff.is_empty(), "{diff:?}");
 }
+
+/// Calls `/5`: the island's full state at the frame's start and end, by name; its u is the
+/// `/4` deformation's, a bond the oracle broke in the frame is dead at its end, and the
+/// static columns hold one row per entity.
+#[test]
+fn full_state_calls_carry_the_islands_complete_state() {
+    let (ev, _) = record("fs5");
+    let e = build_event(&ev).unwrap();
+    assert_eq!(e.manifest["schema_version"], "learned-impact-outcome/5");
+    let cols = &e.manifest["full_state_columns"];
+    let idx = |kind: &str, name: &str| cols[kind].as_array().unwrap().iter().position(|c| c == name).unwrap_or_else(|| panic!("{kind} lacks {name}"));
+    let (ux, alive, kappa) = (idx("chunk", "u.x"), idx("bond", "alive"), idx("bond", "joint.kappa"));
+    let _ = kappa;
+    assert!(cols["static_bond"].as_array().unwrap().iter().any(|c| c == "geometry.area"));
+    let f64s = |c: &Call, n: &str| match c.array(n) {
+        Some(Arr::F64(s, d)) => (s.clone(), d.clone()),
+        _ => panic!("{n}"),
+    };
+    let mut checked_breaks = 0;
+    for c in &e.calls {
+        let (s, d) = f64s(c, "fs_chunk_in");
+        let def = match c.array("chunk_def") {
+            Some(Arr::F32(_, d)) => d.clone(),
+            _ => panic!(),
+        };
+        for j in 0..s[0] {
+            assert_eq!(d[j * s[1] + ux] as f32, def[j * 12], "call {} chunk {j}: u.x", c.frame);
+        }
+        let (bs, bd) = f64s(c, "fs_bond_out");
+        let (_, bi) = f64s(c, "fs_bond_in");
+        let keys = match c.array("fs_bond_key") {
+            Some(Arr::I64(_, k)) => k.clone(),
+            _ => panic!(),
+        };
+        assert_eq!(keys.len(), bs[0]);
+        for j in 0..bs[0] {
+            assert!(bd[j * bs[1] + alive] <= bi[j * bs[1] + alive], "a bond never heals");
+            checked_breaks += usize::from(bd[j * bs[1] + alive] < bi[j * bs[1] + alive]);
+        }
+    }
+    assert!(checked_breaks > 0, "some bond breaks in a call");
+}

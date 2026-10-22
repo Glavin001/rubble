@@ -474,16 +474,17 @@ pub struct BallisticSpec {
     pub split: &'static str,
 }
 
-/// Six families across thickness, supports, resolution, impactor shape and mass: four for
-/// training, one for validation, one for test.
+/// Six families across thickness, supports, resolution, impactor shape and mass, all under
+/// gravity on a ground (the viability dataset: gravity everywhere): four for training, one
+/// for validation, one for test.
 pub fn ballistic_specs() -> Vec<BallisticSpec> {
     let b = |name, counts, chunk, supports, ground, sphere, size, mass, split| BallisticSpec { name, counts, chunk, supports, ground, sphere, size, mass, split };
     vec![
-        b("bl_free_thin", [10, 1, 10], 0.1, "free", false, true, 0.08, 100.0, "train"),
+        b("bl_ground_thin", [10, 1, 10], 0.1, "free", true, true, 0.08, 100.0, "train"),
         b("bl_anchored_base", [12, 1, 10], 0.15, "base", true, true, 0.1, 300.0, "train"),
         b("bl_standing", [10, 1, 8], 0.15, "free", true, true, 0.12, 500.0, "train"),
         b("bl_coarse_heavy", [8, 1, 8], 0.2, "base", true, false, 0.15, 1000.0, "train"),
-        b("bl_free_thick", [10, 2, 10], 0.1, "free", false, false, 0.1, 200.0, "val"),
+        b("bl_ground_thick", [10, 2, 10], 0.1, "free", true, false, 0.1, 200.0, "val"),
         b("bl_anchored_sides", [12, 2, 10], 0.1, "base_sides", true, false, 0.08, 150.0, "test"),
     ]
 }
@@ -631,11 +632,14 @@ pub struct EnsemblePlan {
     pub offset: f64,
     pub speed: f64,
     pub seed: u64,
+    /// The split hash's seed when it must agree across jobs (one layout, one split
+    /// whatever job records it); `seed` otherwise.
+    pub split_seed: Option<u64>,
 }
 
 impl Default for EnsemblePlan {
     fn default() -> Self {
-        EnsemblePlan { fractions: [0.8, 0.1, 0.1], sealed: vec!["m5_reference".into()], force_split: None, train_share: 0.15, members: 8, offset: 1e-3, speed: 1e-3, seed: 0 }
+        EnsemblePlan { fractions: [0.8, 0.1, 0.1], sealed: vec!["m5_reference".into()], force_split: None, train_share: 0.15, members: 8, offset: 1e-3, speed: 1e-3, seed: 0, split_seed: None }
     }
 }
 
@@ -644,7 +648,7 @@ pub fn split_of(layout_group: &str, family: &str, plan: &EnsemblePlan) -> &'stat
     if plan.sealed.iter().any(|f| f == family) {
         return "sealed";
     }
-    let u = (fnv_str(layout_group, plan.seed) >> 11) as f64 / (1u64 << 53) as f64;
+    let u = (fnv_str(layout_group, plan.split_seed.unwrap_or(plan.seed)) >> 11) as f64 / (1u64 << 53) as f64;
     let t = plan.fractions.iter().sum::<f64>();
     if u < plan.fractions[0] / t {
         "train"
