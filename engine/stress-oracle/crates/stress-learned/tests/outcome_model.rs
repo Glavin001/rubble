@@ -88,7 +88,7 @@ fn the_reference_forward_pass_matches_pytorch_on_p2s_parity_calls() {
 
 #[test]
 fn node_projection_gives_the_same_outputs() {
-    check(Options { node_projection: true, tiled_mlp: false }, 1e-4);
+    check(Options { node_projection: true, tiled_mlp: false, fused_sums: false }, 1e-4);
 }
 
 fn close(a: f64, b: f64, tol: f64) -> bool {
@@ -147,7 +147,7 @@ fn the_decode_matches_p2s_decoded_states() {
 fn rust_forward_and_decode_reproduce_p2s_decoded_states() {
     let w = Weights::load(&fixture()).unwrap();
     let cfg = DecodeConfig::from_manifest(&w.manifest).unwrap();
-    let model = Model::new(&w, Options { node_projection: true, tiled_mlp: false }).unwrap();
+    let model = Model::new(&w, Options { node_projection: true, tiled_mlp: false, fused_sums: false }).unwrap();
     for dir in parity_dirs() {
         if torch_outputs(&dir).1 {
             continue;
@@ -181,8 +181,8 @@ fn rust_forward_and_decode_reproduce_p2s_decoded_states() {
 #[test]
 fn the_gpu_program_interpreted_on_the_cpu_matches_the_reference() {
     let w = Weights::load(&fixture()).unwrap();
-    for lever in [false, true] {
-        let model = Model::new(&w, Options { node_projection: lever, tiled_mlp: false }).unwrap();
+    for (lever, fused) in [(false, false), (true, false), (false, true), (true, true)] {
+        let model = Model::new(&w, Options { node_projection: lever, tiled_mlp: false, fused_sums: fused }).unwrap();
         for dir in parity_dirs() {
             if torch_outputs(&dir).1 {
                 continue;
@@ -207,7 +207,7 @@ fn the_gpu_program_interpreted_on_the_cpu_matches_the_reference() {
 #[test]
 fn a_batch_program_gives_every_call_its_own_outputs() {
     let w = Weights::load(&fixture()).unwrap();
-    let model = Model::new(&w, Options { node_projection: true, tiled_mlp: false }).unwrap();
+    let model = Model::new(&w, Options { node_projection: true, tiled_mlp: false, fused_sums: false }).unwrap();
     let mut evs = Vec::new();
     for dir in parity_dirs() {
         if !torch_outputs(&dir).1 {

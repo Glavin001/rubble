@@ -669,6 +669,9 @@ pub struct Options {
     /// The GPU program's MLPs of many rows as GEMM tiles (`gnn_mlp_tiled`; the same
     /// arithmetic, another summation order).
     pub tiled_mlp: bool,
+    /// The GPU program's edge sums staged into the node MLPs (`SEG_CSR`) instead of their
+    /// own dispatches (the same sums, in the same order).
+    pub fused_sums: bool,
 }
 
 pub(crate) struct FineRound {

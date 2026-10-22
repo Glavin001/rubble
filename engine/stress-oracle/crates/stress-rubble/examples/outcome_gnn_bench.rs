@@ -6,7 +6,7 @@
 //! (`learned-impact/web-probe/outcome.html`, the same programs on WebGPU).
 //!
 //!   outcome_gnn_bench --export DIR [--warmup 5] [--repeats 30] [--only NAME,...]
-//!       [--write-programs DIR] [--no-lever | --lever-only] [--tiled] [--check] [--write-only]
+//!       [--write-programs DIR] [--no-lever | --lever-only] [--tiled] [--fused] [--check] [--write-only]
 //!
 //! `--write-only` writes the programs and touches no GPU. `--check` first compares each program's GPU outputs with the CPU interpreter's.
 //!
@@ -126,6 +126,7 @@ fn main() {
     let (mut export, mut warmup, mut repeats, mut only, mut write, mut levers, mut check) = (None, 5usize, 30usize, None::<Vec<String>>, None::<PathBuf>, vec![false, true], false);
     let mut write_only = false;
     let mut tiled = false;
+    let mut fused = false;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--export" => export = args.next().map(PathBuf::from),
@@ -138,6 +139,7 @@ fn main() {
             "--check" => check = true,
             "--write-only" => write_only = true,
             "--tiled" => tiled = true,
+            "--fused" => fused = true,
             other => panic!("unknown argument {other}"),
         }
     }
@@ -200,14 +202,14 @@ fn main() {
             continue;
         }
         for &lever in &levers {
-            let model = Model::new(&weights, Options { node_projection: lever, tiled_mlp: tiled }).unwrap();
+            let model = Model::new(&weights, Options { node_projection: lever, tiled_mlp: tiled, fused_sums: fused }).unwrap();
             let t0 = std::time::Instant::now();
             let prog = compile_batch(&model, calls).unwrap_or_else(|e| panic!("{name}: {e}"));
             let compile_ms = t0.elapsed().as_secs_f64() * 1e3;
             let ops: Vec<_> = prog.ops.iter().map(|o| (o.params, o.groups)).collect();
             if let Some(dir) = &write {
                 std::fs::create_dir_all(dir).unwrap();
-                std::fs::write(dir.join(format!("{name}_{}{}.ognn", if lever { "lever" } else { "plain" }, if tiled { "_tiled" } else { "" })), encode_program(&prog.arena, &prog.weights, &prog.table, &ops)).unwrap();
+                std::fs::write(dir.join(format!("{name}_{}{}.ognn", if lever { "lever" } else { "plain" }, if tiled { "_tiled" } else { "" }) .replace(".ognn", if fused { "_fused.ognn" } else { ".ognn" })), encode_program(&prog.arena, &prog.weights, &prog.table, &ops)).unwrap();
             }
             if write_only {
                 eprintln!("[bench] wrote {name} lever {lever}");
@@ -233,7 +235,7 @@ fn main() {
             }
             let (wall, gt) = run.time(gpu, kernels, warmup, repeats);
             let (nc, ni, nb): (usize, usize, usize) = prog.layout.calls.iter().fold((0, 0, 0), |a, c| (a.0 + c.0, a.1 + c.1, a.2 + c.2));
-            let line = json!({"workload": name, "lever": lever, "tiled": tiled, "calls": calls.len(), "chunks": nc, "impactors": ni, "bonds": nb, "dispatches": run.dispatches(),
+            let line = json!({"workload": name, "lever": lever, "tiled": tiled, "fused": fused, "calls": calls.len(), "chunks": nc, "impactors": ni, "bonds": nb, "dispatches": run.dispatches(),
                 "arena_mb": prog.arena.len() as f64 * 4e-6, "table_mb": prog.table.len() as f64 * 4e-6, "compile_ms": compile_ms, "upload_ms": upload_ms,
                 "wall_ms": stats(&wall), "gpu_ms": stats(&gt), "gpu_vs_cpu": worst});
             eprintln!("[bench] {name} lever {lever}: {nc} chunks, {} dispatches, gpu {:.3} ms, wall {:.3} ms (compile {compile_ms:.0} ms)", run.dispatches(), line["gpu_ms"]["median"].as_f64().unwrap_or(f64::NAN), line["wall_ms"]["median"].as_f64().unwrap_or(f64::NAN));

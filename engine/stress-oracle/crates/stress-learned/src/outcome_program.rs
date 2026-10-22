@@ -43,8 +43,11 @@ pub const TILED_MIN_ROWS: usize = 256;
 pub const SEG_ROW: u32 = 0;
 pub const SEG_GATHER: u32 = 1;
 pub const SEG_CONST: u32 = 2;
-pub const SEG_PROJ_GATHER: u32 = 3;
-pub const SEG_PROJ_ROW: u32 = 4;
+/// The row is a CSR sum, `Σ_k w_k · arena[o_k ..]` (`idx`: its row offsets in the table,
+/// `norm`: its entries): an edge sum staged straight into the MLP (`Options::fused_sums`).
+pub const SEG_CSR: u32 = 3;
+pub const SEG_PROJ_GATHER: u32 = 4;
+pub const SEG_PROJ_ROW: u32 = 5;
 pub const MAX_SEGS: usize = 6;
 
 /// MLP parameter words (after the common header `kernel, rows, grid_x, lanes`).
@@ -157,6 +160,7 @@ struct Builder {
     ops: Vec<Op>,
     lanes: usize,
     tiled: bool,
+    fused: bool,
 }
 
 fn groups(rows: usize, per_group: usize) -> (u32, u32) {
@@ -375,6 +379,23 @@ impl Builder {
         self.ops.push(Op { label: label.to_string(), params: p, groups: g });
     }
 
+    /// The CSR sum of `rows` as an MLP input segment (no op of its own).
+    fn csr_seg(&mut self, rows: &[Vec<(usize, f32)>], width: usize) -> Seg {
+        let mut offsets = Vec::with_capacity(rows.len() + 1);
+        let mut entries = Vec::new();
+        offsets.push(0u32);
+        for r in rows {
+            for &(o, w) in r {
+                entries.push(o as u32);
+                entries.push(w.to_bits());
+            }
+            offsets.push((entries.len() / 2) as u32);
+        }
+        let ot = self.table(&offsets);
+        let et = self.table(&entries);
+        Seg { base: 0, width, mode: SEG_CSR, idx: ot, norm: et }
+    }
+
     /// `l_scale[k]`: edge `k`'s call's length scale.
     fn fibre(&mut self, label: &str, edges: &[(usize, usize)], chunk: &[usize], pos: usize, q: usize, out: usize, l_scale: &[f32]) {
         if edges.is_empty() {
@@ -465,7 +486,7 @@ pub fn compile_batch(model: &Model, calls: &[BatchCall]) -> Result<Program, Stri
     let lever = model.options.node_projection;
     let vb = cfg.variant == "B";
     let ng = calls.len();
-    let mut b = Builder { arena: Vec::new(), weights: Vec::new(), table: Vec::new(), ops: Vec::new(), lanes, tiled: model.options.tiled_mlp };
+    let mut b = Builder { arena: Vec::new(), weights: Vec::new(), table: Vec::new(), ops: Vec::new(), lanes, tiled: model.options.tiled_mlp, fused: model.options.fused_sums };
     let pm = pack_model(&mut b, model);
 
     // ---- inputs, concatenated
@@ -646,17 +667,22 @@ pub fn compile_batch(model: &Model, calls: &[BatchCall]) -> Result<Program, Stri
                 b.mlp(&lbl, ne, m, &s, MlpOut::residual(*e, w), 0);
             }
         }
+        let mut s: Vec<Seg> = Vec::new();
         for (k, (_, dst, _, _, e)) in edges.iter().enumerate() {
-            if dst.is_empty() {
-                continue;
-            }
             let mut rows = vec![Vec::new(); n];
             for (ei, &d) in dst.iter().enumerate() {
                 rows[d].push((e + ei * w, 1.0));
             }
-            b.csr(&format!("{label}.sum.{}", cfg.edge_types[k]), &rows, w, aggs[k], false);
+            if b.fused {
+                // the sum staged into the node MLP itself
+                s.push(b.csr_seg(&rows, w));
+                continue;
+            }
+            if !dst.is_empty() {
+                b.csr(&format!("{label}.sum.{}", cfg.edge_types[k]), &rows, w, aggs[k], false);
+            }
+            s.push(Seg::row(aggs[k], w));
         }
-        let mut s: Vec<Seg> = aggs.iter().map(|&a| Seg::row(a, w)).collect();
         s.push(Seg::row(h, w));
         s.push(Seg::gather(g, w, node_call_t));
         b.mlp(&format!("{label}.node"), n, &r.1, &s, MlpOut::residual(h, w), 0);
@@ -707,8 +733,13 @@ pub fn compile_batch(model: &Model, calls: &[BatchCall]) -> Result<Program, Stri
             for (k, &(_, j)) in es.iter().enumerate() {
                 agg[j].push((msg + k * w, 1.0));
             }
-            b.csr(&format!("{label}.sum"), &agg, w, cagg, false);
-            b.mlp(&format!("{label}.node"), rows, &r.1, &[Seg::row(x, w), Seg::row(cagg, w), Seg::gather(g, w, level_call_t[l])], MlpOut::residual(x, w), 0);
+            let sum = if b.fused {
+                b.csr_seg(&agg, w)
+            } else {
+                b.csr(&format!("{label}.sum"), &agg, w, cagg, false);
+                Seg::row(cagg, w)
+            };
+            b.mlp(&format!("{label}.node"), rows, &r.1, &[Seg::row(x, w), sum, Seg::gather(g, w, level_call_t[l])], MlpOut::residual(x, w), 0);
             if let Some(gm) = &r.2 {
                 call_mean(b, &format!("{label}.mean"), x, &level_call[l]);
                 b.mlp(&format!("{label}.glob"), ng, gm, &[Seg::row(g, w), Seg::row(gmean, w)], MlpOut::residual(g, w), 0);
@@ -870,6 +901,18 @@ impl Program {
             for s in 0..p[N_SEG] as usize {
                 let o = SEG0 + 5 * s;
                 let (base, idx, width, mode, norm) = (p[o] as usize, p[o + 1], p[o + 2] as usize, p[o + 3], p[o + 4]);
+                if mode == SEG_CSR {
+                    let (e0, e1) = (t[idx as usize + r] as usize, t[idx as usize + r + 1] as usize);
+                    for c in 0..width {
+                        let mut v = 0.0f32;
+                        for e in e0..e1 {
+                            v += a[t[norm as usize + 2 * e] as usize + c] * f32::from_bits(t[norm as usize + 2 * e + 1]);
+                        }
+                        x[k + c] = v;
+                    }
+                    k += width;
+                    continue;
+                }
                 let row = match mode {
                     SEG_ROW | SEG_PROJ_ROW => r,
                     SEG_GATHER | SEG_PROJ_GATHER => t[idx as usize + r] as usize,

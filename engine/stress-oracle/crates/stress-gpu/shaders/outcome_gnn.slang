@@ -81,8 +81,9 @@ float slot_sum(float v, uint tid, uint lane, uint lanes)
 #define SEG_ROW 0
 #define SEG_GATHER 1
 #define SEG_CONST 2
-#define SEG_PROJ_GATHER 3
-#define SEG_PROJ_ROW 4
+#define SEG_CSR 3
+#define SEG_PROJ_GATHER 4
+#define SEG_PROJ_ROW 5
 
 [shader("compute")]
 [numthreads(THREADS, 1, 1)]
@@ -116,6 +117,18 @@ void gnn_mlp(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID)
             {
                 if (lane < hidden)
                     pre += arena[base + r * width + lane];
+            }
+            else if (mode == SEG_CSR)
+            {
+                // a CSR sum: offsets at `idx`, (offset, weight) entries at `norm`
+                uint e0 = table[idx + row], e1 = table[idx + row + 1];
+                for (uint c = lane; c < width; c += lanes)
+                {
+                    float v = 0.0;
+                    for (uint e = e0; e < e1; e++)
+                        v += arena[table[norm + 2 * e] + c] * asfloat(table[norm + 2 * e + 1]);
+                    xs[slot][k + c] = v;
+                }
             }
             else
             {
@@ -261,6 +274,14 @@ float seg_value(uint base, uint idx, uint width, uint mode, uint norm, uint row,
 {
     if (c >= width)
         return 0.0;
+    if (mode == SEG_CSR)
+    {
+        uint e0 = table[idx + row], e1 = table[idx + row + 1];
+        float v = 0.0;
+        for (uint e = e0; e < e1; e++)
+            v += arena[table[norm + 2 * e] + c] * asfloat(table[norm + 2 * e + 1]);
+        return v;
+    }
     uint r = row;
     if (mode == SEG_GATHER)
         r = table[idx + row];
