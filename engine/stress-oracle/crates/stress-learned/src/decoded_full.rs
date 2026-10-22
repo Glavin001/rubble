@@ -398,16 +398,34 @@ pub fn hidden_states(outs: &[FullOut]) -> Result<Option<HashMap<(usize, usize), 
 /// Returns the state and the scale applied (1 when the bound did not act).
 #[allow(clippy::too_many_arguments)]
 pub fn island_frame_bounded(start: &stress_ref::world::World, m: &stress_ref::world::IslandMembers, d: &stress_ref::world::DecodedState, full: &[FullOut], base: Base, ids_from_base: bool, energy_bound: Option<f64>) -> Result<(IslandState, f64), String> {
+    let Some(tol) = energy_bound else { return Ok((island_frame(start, m, d, full, base, ids_from_base)?, 1.0)) };
+    let (k0, e0, _) = start.island_energy(m);
+    let (st, alpha, _) = island_frame_budget(start, m, d, full, base, ids_from_base, tol * (k0 + e0).max(1e-12))?;
+    Ok((st, alpha))
+}
+
+/// The island's mechanical energy `KE + E_elastic + PE` with the island's state `x` merged
+/// into the frame-start world `start`.
+pub fn island_total_energy(start: &stress_ref::world::World, x: &IslandState, m: &stress_ref::world::IslandMembers) -> f64 {
+    let (k, e, p) = stress_ref::world::World::merge_island(start, x, m).island_energy(m);
+    k + e + p
+}
+
+/// `island_frame` bounded to add at most `allowed` (>= 0) to the island's mechanical energy
+/// `KE + E_elastic + PE` over the frame (`energy_budget`: the event's remaining budget), as
+/// `island_frame_bounded` scales: the hidden displacement first, then the motion relative to
+/// the centre of mass. Returns the state, the scale applied (1 when the bound did not act)
+/// and the frame's change of the island's mechanical energy (the ledger's `close`).
+#[allow(clippy::too_many_arguments)]
+pub fn island_frame_budget(start: &stress_ref::world::World, m: &stress_ref::world::IslandMembers, d: &stress_ref::world::DecodedState, full: &[FullOut], base: Base, ids_from_base: bool, allowed: f64) -> Result<(IslandState, f64, f64), String> {
     let st = island_frame(start, m, d, full, base, ids_from_base)?;
-    let Some(tol) = energy_bound else { return Ok((st, 1.0)) };
     let (k0, e0, p0) = start.island_energy(m);
-    let budget = k0 + e0 + p0 + tol * (k0 + e0).max(1e-12);
-    let total = |x: &IslandState| -> f64 {
-        let (k, e, p) = stress_ref::world::World::merge_island(start, x, m).island_energy(m);
-        k + e + p
-    };
-    if total(&st) <= budget {
-        return Ok((st, 1.0));
+    let t0 = k0 + e0 + p0;
+    let budget = t0 + allowed.max(0.0);
+    let total = |x: &IslandState| -> f64 { island_total_energy(start, x, m) };
+    let t = total(&st);
+    if t <= budget {
+        return Ok((st, 1.0, t - t0));
     }
     let bisect = |f: &dyn Fn(f64) -> f64| -> f64 {
         let (mut lo, mut hi) = (0.0f64, 1.0f64);
@@ -426,8 +444,9 @@ pub fn island_frame_bounded(start: &stress_ref::world::World, m: &stress_ref::wo
     });
     let mut x = st;
     x.scale_hidden_displacement(a);
-    if total(&x) <= budget {
-        return Ok((x, a));
+    let t = total(&x);
+    if t <= budget {
+        return Ok((x, a, t - t0));
     }
     let b = bisect(&|k| {
         let mut y = x.clone();
@@ -436,7 +455,8 @@ pub fn island_frame_bounded(start: &stress_ref::world::World, m: &stress_ref::wo
     });
     x.scale_relative_motion(b);
     eprintln!("[energy bound] motion relative to the centre of mass scaled by {b:.4}");
-    Ok((x, a.min(b)))
+    let t = total(&x);
+    Ok((x, a.min(b), t - t0))
 }
 
 pub fn island_frame(start: &stress_ref::world::World, m: &stress_ref::world::IslandMembers, d: &stress_ref::world::DecodedState, full: &[FullOut], base: Base, ids_from_base: bool) -> Result<IslandState, String> {

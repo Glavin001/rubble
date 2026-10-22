@@ -66,6 +66,9 @@ pub struct ModelProvider {
     full_state: Option<serde_json::Value>,
     /// The last response's decoded-state `/2` columns (`full_state_out`), if any.
     pub last_full: Option<Vec<crate::decoded_full::FullOut>>,
+    /// The event's energy budget (`energy_budget::Ledger`) the host carries, when set: the
+    /// next call's energy inputs (`E_budget_ref`, `E_budget_gain`, `E_budget_remaining`).
+    pub energy_budget: Option<crate::energy_budget::Ledger>,
 }
 
 impl ModelProvider {
@@ -119,7 +122,7 @@ impl ModelProvider {
         // calls upgraded with the deformation unobserved (P2's `LEARNED_IMPACT_ACCEPT_V3=1`).
         let v3 = std::env::var("STRESS_PROVIDER_CALLS").is_ok_and(|v| v == "v3")
             || schema_py.lines().any(|l| l.trim_start().starts_with("SCHEMA_VERSION") && l.contains("\"learned-impact-outcome/3\""));
-        let mut p = ModelProvider { spec: spec.clone(), dir: dir.to_path_buf(), scene: scene.to_string(), child, qs: true, call_ms: Vec::new(), lock, v3, full_state: None, last_full: None };
+        let mut p = ModelProvider { spec: spec.clone(), dir: dir.to_path_buf(), scene: scene.to_string(), child, qs: true, call_ms: Vec::new(), lock, v3, full_state: None, last_full: None, energy_budget: None };
         let described = p.read_model_json()?;
         p.qs = match spec.qs {
             Some(q) => q,
@@ -179,6 +182,11 @@ impl ModelProvider {
             Some(cols) => outcome_calls::live_call_full(&mut standalone, &self.scene, &json!({}), &keys.chunks, &keys.impactors, frame as usize, self.qs, false, Some(cols))?,
             None => outcome_calls::live_call(&mut standalone, &self.scene, &json!({}), &keys.chunks, &keys.impactors, frame as usize, self.qs)?,
         };
+        if let Some(l) = &self.energy_budget {
+            for c in &mut ev.calls {
+                l.insert(&mut c.energy);
+            }
+        }
         if self.v3 {
             outcome_calls::downgrade_to_v3(&mut ev)?;
         }

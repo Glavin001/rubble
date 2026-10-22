@@ -473,6 +473,10 @@ static ENERGY_ENVELOPE_IMPACTORS: std::sync::atomic::AtomicUsize = std::sync::at
 static ENERGY_ENVELOPE_CHUNKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// The largest impactor |dx| / radius seen (f64 bits; `STRESS_ENVELOPE_TOL`, default 0.05).
 static ENVELOPE_MAX_IMPACTOR_RATIO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// The event's energy budget (`stress_learned::energy_budget`), over the run's routed calls:
+/// the ledger, the largest `gain / E_ref` after a call, and the calls where the budget acted
+/// (`STRESS_FULL_ENERGY_BUDGET=1`) or, measured only, would have.
+static ENERGY_LEDGER: std::sync::Mutex<(stress_learned::energy_budget::Ledger, f64, usize)> = std::sync::Mutex::new((stress_learned::energy_budget::Ledger { e_ref: 0.0, gain: 0.0, calls: 0 }, f64::NEG_INFINITY, 0));
 
 fn inadmissible(dx: [f64; 3], v0: stress_ref::math::Vec3, v1: [f64; 3], dt: f64) -> bool {
     let v0 = v0.to_array();
@@ -607,6 +611,7 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
             let mut flags = Value::Null;
             // A full-state model's decoded state /2 columns (`full_state_out`), by call.
             let last_full: std::cell::RefCell<Option<Vec<stress_learned::decoded_full::FullOut>>> = std::cell::RefCell::new(None);
+            let model_budget: Option<std::cell::Cell<Option<stress_learned::energy_budget::Ledger>>> = model.as_ref().map(|_| std::cell::Cell::new(None));
             let mut provider = |view: &World, keys: &stress_ref::world::IslandKeys| -> Result<stress_ref::world::DecodedState, String> {
                 let tc = Instant::now();
                 let d = match o.kind.as_str() {
@@ -614,6 +619,7 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
                     "files" => file_outcome(o, view, keys, frame, &s.name),
                     "model" => {
                         let m = model.as_mut().expect("model provider");
+                        m.energy_budget = model_budget.as_ref().and_then(|c| c.take());
                         let d = m.outcome(view, keys, frame);
                         *last_full.borrow_mut() = m.last_full.take();
                         d
@@ -656,6 +662,21 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
                         imp.driven = !m.impactors.contains(&i);
                     }
                     let keys = view.routed_island_keys();
+                    // `STRESS_FULL_ENERGY_BUDGET=1`: the event's cumulative energy budget bounds
+                    // the frame (and a model's call carries the ledger as inputs); otherwise
+                    // the ledger is kept and measured only.
+                    let budget_on = std::env::var("STRESS_FULL_ENERGY_BUDGET").is_ok_and(|v| v == "1");
+                    let remaining = {
+                        let (k0, e0, _) = start.island_energy(m);
+                        let mut l = ENERGY_LEDGER.lock().unwrap();
+                        let r = l.0.open(k0 + e0);
+                        if budget_on {
+                            if let Some(mm) = model_budget.as_ref() {
+                                mm.set(Some(l.0));
+                            }
+                        }
+                        r
+                    };
                     let d = provider(&view, &keys)?;
                     let mut x = start.clone();
                     // The frame's peak utilisation afresh, as the host's (the decoded state
@@ -721,7 +742,27 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
                             }
                         }
                     }
-                    let (mut out, alpha) = stress_learned::decoded_full::island_frame_bounded(start, m, &d, &full, stress_learned::decoded_full::Base::from_env()?, stress_learned::decoded_full::ids_from_base(), bound)?;
+                    if budget_on && bound.is_some() {
+                        return Err("STRESS_FULL_ENERGY_BUDGET=1 and STRESS_FULL_ENERGY_BOUND: one energy bound at a time".into());
+                    }
+                    let base = stress_learned::decoded_full::Base::from_env()?;
+                    let (mut out, alpha) = if bound.is_some() {
+                        let (out, alpha) = stress_learned::decoded_full::island_frame_bounded(start, m, &d, &full, base, stress_learned::decoded_full::ids_from_base(), bound)?;
+                        let delta = stress_learned::decoded_full::island_total_energy(start, &out, m) - { let (k, e, p) = start.island_energy(m); k + e + p };
+                        let mut l = ENERGY_LEDGER.lock().unwrap();
+                        l.0.close(delta);
+                        (out, alpha)
+                    } else {
+                        let allowed = if budget_on { remaining } else { f64::INFINITY };
+                        let (out, alpha, delta) = stress_learned::decoded_full::island_frame_budget(start, m, &d, &full, base, stress_learned::decoded_full::ids_from_base(), allowed)?;
+                        let mut l = ENERGY_LEDGER.lock().unwrap();
+                        if delta > remaining * (1.0 + 1e-9) + 1e-12 || alpha < 1.0 {
+                            l.2 += 1;
+                        }
+                        l.0.close(delta);
+                        l.1 = l.1.max(l.0.gain / l.0.e_ref.max(1e-300));
+                        (out, alpha)
+                    };
                     if alpha < 1.0 {
                         HOST_BOUND_FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         eprintln!("[energy bound] frame {frame}: scaled by {alpha:.4}");
@@ -1134,13 +1175,19 @@ fn run_event(dir: &std::path::Path, variant: &str, o: &ProviderOpts, samples: Ve
             let flags: Vec<&Value> = out["call_log"].as_array().map(|l| l.iter().filter_map(|x| x.get("flags")).collect()).unwrap_or_default();
             let count = |k: &str| flags.iter().filter(|f| f.get(k).and_then(|v| v.as_bool()).unwrap_or(false)).count();
             let call_ms: Vec<f64> = out["call_log"].as_array().map(|l| l.iter().filter_map(|x| x["call_ms"].as_f64()).collect()).unwrap_or_default();
+            let budget_json = {
+                let l = ENERGY_LEDGER.lock().unwrap();
+                json!({"on": std::env::var("STRESS_FULL_ENERGY_BUDGET").is_ok_and(|v| v == "1"), "tol": stress_learned::energy_budget::TOL, "e_ref": l.0.e_ref, "gain": l.0.gain, "calls": l.0.calls,
+                    "max_gain_ratio": if l.1.is_finite() { json!(l.1) } else { Value::Null }, "frames_over": l.2})
+            };
             (end, json!({"calls": out["calls"], "fallbacks": count("fallback"), "energy_bound_active": count("energy_bound_active"), "energy_bound_infeasible": count("energy_bound_infeasible"), "call_ms": call_ms,
                 "admissibility_violations_impactors": ADMISSIBILITY_IMPACTORS.load(std::sync::atomic::Ordering::Relaxed),
                 "admissibility_violations_chunks": ADMISSIBILITY_CHUNKS.load(std::sync::atomic::Ordering::Relaxed),
                 "host_energy_bound_frames": HOST_BOUND_FRAMES.load(std::sync::atomic::Ordering::Relaxed),
                 "energy_envelope_violations_impactors": ENERGY_ENVELOPE_IMPACTORS.load(std::sync::atomic::Ordering::Relaxed),
                 "energy_envelope_violations_chunks": ENERGY_ENVELOPE_CHUNKS.load(std::sync::atomic::Ordering::Relaxed),
-                "energy_envelope_max_impactor_ratio": f64::from_bits(ENVELOPE_MAX_IMPACTOR_RATIO.load(std::sync::atomic::Ordering::Relaxed))}))
+                "energy_envelope_max_impactor_ratio": f64::from_bits(ENVELOPE_MAX_IMPACTOR_RATIO.load(std::sync::atomic::Ordering::Relaxed)),
+                "energy_budget": budget_json}))
         }
         other => panic!("event: unknown --variant {other}"),
     };
