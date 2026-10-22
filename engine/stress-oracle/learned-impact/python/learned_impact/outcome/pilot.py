@@ -282,6 +282,8 @@ def main(argv=None) -> None:
     ap.add_argument("--call-cache-module", default="")
     ap.add_argument("--call-cache", default="")
     ap.add_argument("--call-builder", default="")
+    ap.add_argument("--cache-jobs", type=int, default=8, help="0: every core")
+    ap.add_argument("--cache-chunk", type=int, default=0)
     ap.add_argument("--cache-gb", type=float, default=1.5,
                     help="total disk bound of the call cache (as train.py)")
     ap.add_argument("--break-time-head", action="store_true")
@@ -302,7 +304,8 @@ def main(argv=None) -> None:
         a.val_dataset, [float(x) for x in a.fractions.split(",")] if a.fractions else None,
         [x for x in Path(a.train_events).read_text().split() if x] if a.train_events else None,
         {"module": a.call_cache_module, "root": a.call_cache, "builder": a.call_builder,
-         "max_gb": a.cache_gb} if a.train_events else None, a.kinematic, a.wandb,
+         "max_gb": a.cache_gb, "jobs": a.cache_jobs, "chunk": a.cache_chunk} if a.train_events else None,
+        a.kinematic, a.wandb,
         tuple(x for x in a.exclude_families.split(",") if x))
 
 

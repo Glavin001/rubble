@@ -16,6 +16,7 @@ import argparse
 import dataclasses
 import json
 import math
+import os
 import random
 import shutil
 import time
@@ -64,6 +65,10 @@ class TrainConfig:
     # coverage tiers (outcome.coverage) JSON: selection (best step, τ, temperature) on
     # validation tiers 1+2 only; tier 3 (extrapolation) evaluated and logged, never selected on
     tiers: str = ""
+    # robustness (a rented instance can be killed): a resumable last.pt every `ckpt_every`
+    # steps (atomic), and `resume` continues from it
+    ckpt_every: int = 500
+    resume: bool = False
     curve_calls: int = 4000  # calls per fixed sample (train and val) for the loss curves
     init_checkpoint: str = ""  # start from these weights (and their input stats): DAgger rounds
     # `/5`: the training data's full-state column set (P1's manifest.full_state_columns): a
@@ -151,13 +156,17 @@ def _cached_train_events(event_dirs: list, cfg: dict) -> tuple[list[S.Event], in
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     evs = [Path(e) for e in event_dirs]
-    chunk = int(cfg.get("chunk", 32))
+    jobs = int(cfg.get("jobs", 8))
+    jobs = jobs if jobs > 0 else (os.cpu_count() or 8)  # 0: every core (a dedicated box)
+    # a chunk is one parallel builder run: at least two events per thread keeps every core busy
+    chunk = int(cfg.get("chunk") or max(32, 2 * jobs))
     total_gb = float(cfg.get("max_gb", 1.5))
-    headroom_gb = float(cfg.get("headroom_gb", 0.25))  # one chunk (32 events ≈ 0.16 GB) staged
+    # one chunk staged: ≈ 5 MB per event measured (P1's rev-9 calls); 8 MB allowed
+    headroom_gb = float(cfg.get("headroom_gb") or max(0.25, 0.008 * chunk))
     if total_gb <= headroom_gb:
         raise ValueError(f"call cache max_gb {total_gb} must exceed the {headroom_gb} GB chunk headroom")
     cache = mod.CallCache(cfg["root"], max_gb=total_gb - headroom_gb, builder=cfg["builder"],
-                          jobs=int(cfg.get("jobs", 8)))
+                          jobs=jobs)
     t0, events, peak = time.time(), [], 0
     for i in range(0, len(evs), chunk):
         part = evs[i:i + chunk]
@@ -702,6 +711,37 @@ def save(path: Path, model, cfg: TrainConfig, norms, priors, step, metrics, temp
                 "schema_version": S.SCHEMA_VERSION}, path)
 
 
+def save_resume(path: Path, model, opt, balancer, group_bal, cfg: TrainConfig, norms, priors,
+                step: int, best: dict) -> None:
+    """A resumable checkpoint, written atomically (a kill mid-write keeps the previous one):
+    an ordinary checkpoint (load_model reads it) plus the optimiser, the balancer, the best
+    result so far and the RNG states."""
+    tmp = path.with_suffix(".pt.tmp")
+    save(tmp, model, cfg, norms, priors, step, best.get("metrics"))
+    ck = torch.load(tmp, map_location="cpu", weights_only=False)
+    ck["resume"] = {"optimizer": opt.state_dict(), "best": best, "step": step,
+                    "balancer": balancer.state_dict() if balancer is not None else None,
+                    "group_bal": {"mult": group_bal.mult, "raw": group_bal.raw} if group_bal is not None else None,
+                    "rng": {"torch": torch.get_rng_state(), "numpy": np.random.get_state(),
+                            "random": random.getstate()}}
+    torch.save(ck, tmp)
+    os.replace(tmp, path)
+
+
+def load_resume(ck: dict, model, opt, balancer, group_bal) -> int:
+    r = ck["resume"]
+    model.load_state_dict(ck["model"])
+    opt.load_state_dict(r["optimizer"])
+    if balancer is not None and r["balancer"] is not None:
+        balancer.load_state_dict(r["balancer"])
+    if group_bal is not None and r["group_bal"] is not None:
+        group_bal.mult, group_bal.raw = dict(r["group_bal"]["mult"]), dict(r["group_bal"]["raw"])
+    torch.set_rng_state(r["rng"]["torch"])
+    np.random.set_state(r["rng"]["numpy"])
+    random.setstate(r["rng"]["random"])
+    return int(r["step"])
+
+
 # The grid must bracket the optimum: the bulk v1 retrain chose 1.0, its old upper end,
 # with the score still falling there.
 TAU_GRID = (0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.35, 1.5)
@@ -777,7 +817,10 @@ def _tracker(cfg: TrainConfig, data: Data, out: Path) -> "TR.Tracker":
             *(["fine-tune"] if cfg.init_checkpoint else []), *cfg.wandb_tags]
     config = {**cfg.to_dict(), "n_train_calls": len(data.train), "n_val_calls": len(data.val),
               "n_events": len(getattr(data, "events", []) or [])}
-    return TR.Tracker(cfg.wandb, out, config, tags)
+    rid = None
+    if cfg.resume and (out / "wandb-run.json").exists():  # the same W&B run continues
+        rid = json.loads((out / "wandb-run.json").read_text()).get("id")
+    return TR.Tracker(cfg.wandb, out, config, tags, resume_id=rid)
 
 
 def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress, run: dict) -> dict:
@@ -819,9 +862,18 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress, run: 
         raise ValueError(f"loss.balance {cfg.loss.balance!r}")
     opt = make_optimizer(params + (list(balancer.parameters()) if balancer else []), cfg, dev)
     monitor = Lo.DominanceMonitor(cfg.loss.dominance_warn, cfg.loss.dominance_patience)
-    sampler = MixedSampler(data.train, cfg.phase_quotas, cfg.seed,
+    start, resumed = 0, None
+    if cfg.resume and (out / "last.pt").exists():
+        resumed = torch.load(out / "last.pt", map_location=dev, weights_only=False)
+        if "resume" not in resumed:
+            raise ValueError(f"{out / 'last.pt'} is a finished run's checkpoint (no resume state)")
+        start = load_resume(resumed, model, opt, balancer, group_bal)
+        prog.line(f"resumed from {out / 'last.pt'} at step {start}")
+    # a resumed run reseeds the sampler (seed + step): its data order differs from an
+    # uninterrupted run's after the resume, but no epoch prefix is replayed
+    sampler = MixedSampler(data.train, cfg.phase_quotas, cfg.seed + start,
                            getattr(data, "source_weights", None) or None)
-    nrng = np.random.default_rng(cfg.seed)
+    nrng = np.random.default_rng(cfg.seed + start)
     prog.line(f"device={dev} params={count_parameters(model)} train_calls={len(data.train)} "
               f"val_calls={len(data.val)} variant={cfg.model.variant} width={cfg.model.width} "
               f"rounds={cfg.model.rounds} priors={ {k: round(v, 4) for k, v in data.priors.items()} }")
@@ -846,6 +898,8 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress, run: 
     norm_batches = [coll(bc) for bc in
                     _batches(data.train, cfg.batch_budget, cfg.batch_calls)[:64]]
     norms = Lo.zero_baselines(norm_batches, cfg.loss, data.priors)
+    if resumed is not None:  # the normalisers the run started with
+        norms = resumed["norms"]
     prog.line("zero-predictor baselines: " + " ".join(f"{k}={v:.4g}" for k, v in norms.items()))
     val_sel, val_t3, tier = data.val, [], {}
     if cfg.tiers:
@@ -888,14 +942,15 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress, run: 
                 res_[name] = {"loss": tot / len(bl), "terms": {k: v / len(bl) for k, v in sums.items()}}
         model.train()
         return res_
-    best = {"score": float("inf"), "step": None, "metrics": None}
+    best = resumed["resume"]["best"] if resumed is not None else {
+        "score": float("inf"), "step": None, "metrics": None}
     last_log = time.time()
     acc: dict[str, list[float]] = defaultdict(list)
     epoch = 0
     gnorm_last: dict[str, float] = {}
     prog.update(force=True, state="running")
     batches = Prefetch(lambda: _produce(sampler, cfg, coll, nrng), depth=2)
-    for step in range(cfg.steps):
+    for step in range(start, cfg.steps):
         calls, b, epoch, epoch_counts = batches.next()
         if epoch_counts is not None:
             prog.line(f"epoch {epoch}: phase counts {epoch_counts}")
@@ -1050,6 +1105,9 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress, run: 
             prog.line(f"val @ {step + 1}: {msg} {'(best)' if improved else ''} "
                       f"best={best['score']:.3f}@{best['step']}")
             prog.update(force=True, best_score=best["score"], best_step=best["step"])
+        if cfg.ckpt_every and (step + 1) % cfg.ckpt_every == 0 and step + 1 < cfg.steps:
+            save_resume(out / "last.pt", model, opt, balancer, group_bal, cfg, norms, data.priors,
+                        step + 1, best)
     batches.close()
     hist.close()
     # validation-only temperature for p_b, stored with the last checkpoint
@@ -1133,12 +1191,19 @@ def main(argv=None) -> None:
     ap.add_argument("--call-cache-module", default="", help="P1's outcome_calls_cache.py")
     ap.add_argument("--call-cache", default="", help="cache root")
     ap.add_argument("--call-builder", default="", help="P1's learned_impact_outcome_calls")
+    ap.add_argument("--cache-jobs", type=int, default=8,
+                    help="builder threads (0: every core, for a dedicated box; 8 on a shared machine)")
+    ap.add_argument("--cache-chunk", type=int, default=0,
+                    help="events per parallel builder run (0: max(32, 2 × jobs))")
     ap.add_argument("--cache-gb", type=float, default=1.5,
                     help="total disk bound of the call cache (counts toward P1's 30 GB budget)")
     ap.add_argument("--break-time-head", action="store_true",
                     help="a continuous break time per bond (the decode's break order)")
     ap.add_argument("--hidden-head", action="store_true",
                     help="the chunks' frame-end hidden state (u, theta, v, w) as a head")
+    ap.add_argument("--resume", action="store_true",
+                    help="continue from <out>/last.pt (written every --ckpt-every steps)")
+    ap.add_argument("--ckpt-every", type=int, default=500)
     ap.add_argument("--tiers", default="", help="coverage tiers JSON (outcome.coverage): select on "
                     "validation tiers 1+2, report tier 3 separately")
     ap.add_argument("--exclude-families", default="", help="comma-separated families left out of "
@@ -1198,7 +1263,7 @@ def main(argv=None) -> None:
     mc.__post_init__()
     seeds = [int(s) for s in a.seeds.split(",")]
     cc = {"module": a.call_cache_module, "root": a.call_cache, "builder": a.call_builder,
-          "max_gb": a.cache_gb} if a.train_events else {}
+          "max_gb": a.cache_gb, "jobs": a.cache_jobs, "chunk": a.cache_chunk} if a.train_events else {}
     data = Data(dataset, val_dataset=a.val_dataset or None,
                 train_events=_read_list(a.train_events) if a.train_events else None, call_cache=cc,
                 extra_train=a.extra_train,
@@ -1214,7 +1279,7 @@ def main(argv=None) -> None:
                           noise_sigma=a.noise, pushforward_prob=a.pushforward,
                           pushforward_steps=a.pushforward_steps,
                           eval_every=a.eval_every, model=dataclasses.replace(mc), wandb=a.wandb,
-                          tiers=a.tiers,
+                          tiers=a.tiers, resume=a.resume, ckpt_every=a.ckpt_every,
                           decode=D.DecodeConfig(energy_tolerance=a.energy_tolerance,
                                                 break_mode=a.break_mode))
         cfg.loss.energy_tolerance = a.energy_tolerance
