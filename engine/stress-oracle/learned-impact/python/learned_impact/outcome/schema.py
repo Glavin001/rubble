@@ -218,6 +218,8 @@ for _x in ("in", "out"):
     CALL_ARRAYS[f"fs_impactor_{_x}"] = ArraySpec("f64", ("Ni", "*"), required=False, raw=True)
     CALL_ARRAYS[f"fs_pair_key_{_x}"] = ArraySpec("i64", ("*", 5), required=False, raw=True)
     CALL_ARRAYS[f"fs_pair_{_x}"] = ArraySpec("f64", ("*", 4), required=False, raw=True)
+    # each slot's chunk a / chunk b as the call's node index (-1 outside the island)
+    CALL_ARRAYS[f"fs_pair_local_{_x}"] = ArraySpec("i64", ("*", 2), required=False, raw=True)
 CALL_ARRAYS["fs_bond_key"] = ArraySpec("i64", ("*",), required=False, raw=True)
 for _t, _n in (("bond", "E"), ("cracked", "Ec"), ("impactor_contact", "Ei"),
                ("structure_contact", "Es")):
