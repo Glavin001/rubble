@@ -32,7 +32,7 @@ from . import losses as Lo
 from . import metrics as M
 from . import pushforward as P
 from . import schema as S
-from .batch import Batch, HierarchyCache, collate, pad_batch
+from .batch import SCALE_INDEX, Batch, HierarchyCache, collate, pad_batch
 from .model import ImpactOutcomeModel, ModelConfig, count_parameters
 
 DEFAULT_QUOTAS = {"contact": 0.35, "secondary": 0.20, "separation": 0.25, "quiet": 0.20}
@@ -68,7 +68,9 @@ class TrainConfig:
     noise_sigma: float = 0.0  # GNS noise on carried columns (σ tuned on validation)
     pushforward_prob: float = 0.0
     pushforward_steps: int = 2  # frames chained per pushforward (plan: 2–4)
-    pushforward_topology: bool = True  # successors take the model's breaks, not the oracle's
+    # Pushforward samples are kept only on the oracle's topology (same breaks) with chunk
+    # velocities within this fraction of v of the oracle's (`_successors`).
+    pushforward_tol: float = 0.05
     eval_every: int = 200
     log_every_s: float = 30.0
     log_every_steps: int = 25
@@ -408,20 +410,40 @@ _PF_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pushforward")
 
 @torch.no_grad()
 def _successors(chain_calls, bc, oc, data, cfg, coll):
-    """The next pushforward batch from CPU copies of a batch and its outputs: decode, the
-    model's predicted state pushed into each call's recorded successor, collated. None when
-    no call in the chain has a successor."""
-    pairs = [(i, data.successor[(c.event_id, c.call_index)]) for i, c in enumerate(chain_calls)
-             if (c.event_id, c.call_index) in data.successor]
-    if not pairs:
+    """The next pushforward batch from CPU copies of a batch and its outputs, or None.
+
+    Only samples whose prediction stays on the oracle's topology are pushed forward: the
+    model breaks exactly the bonds the oracle breaks in this call (so the fragment partition
+    is the same), and every chunk's frame-end velocity is within `pushforward_tol`·v of the
+    oracle's. The target of the successor is the oracle's next call, which follows from the
+    oracle's state; where the model's state differs in topology it describes a different
+    wall, and the sample is skipped (counted; DAgger relabels such states). Returns
+    (successors, batch, n_candidates, n_skipped)."""
+    cand = [(i, data.successor[(c.event_id, c.call_index)]) for i, c in enumerate(chain_calls)
+            if (c.event_id, c.call_index) in data.successor]
+    if not cand:
         return None
     dec = D.decode(oc, bc, cfg.decode)
     dec["_log_r"] = oc["bond_log_r"]
     dec["_log_q"] = oc["bond_log_q"]
     preds = _predictions(bc, dec)
-    succ = [P.push(chain_calls[i], s_, preds[i], preds[i]["broke"] if cfg.pushforward_topology
-                   else None) for i, s_ in pairs]
-    return succ, coll(succ)
+    t = bc.t
+    cc = t["chunk_call"].numpy()
+    vref = t["scales"][:, SCALE_INDEX["v"]].numpy()
+    dv = np.linalg.norm(dec["chunk_v_end"].numpy() - t["y_chunk_v_end"].numpy(), axis=1)
+    pairs = []
+    for i, s_ in cand:
+        c = chain_calls[i]
+        oracle_broke = {int(k) for k, x in zip(c.arrays["bond_key"].tolist(),
+                                               (c.arrays["y_bond_broke"] > 0).tolist()) if x}
+        sel = cc == i
+        close = (not sel.any()) or float(dv[sel].max()) <= cfg.pushforward_tol * vref[i]
+        if preds[i]["broke"] == oracle_broke and close:
+            pairs.append((i, s_))
+    if not pairs:
+        return [], None, len(cand), len(cand)
+    succ = [P.push(chain_calls[i], s_, preds[i], None) for i, s_ in pairs]
+    return succ, coll(succ), len(cand), len(cand) - len(pairs)
 
 
 def _predictions(b: Batch, dec: dict) -> list[dict[str, dict[int, np.ndarray]]]:
@@ -635,7 +657,10 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
             for _k in range(cfg.pushforward_steps):
                 if nxt is None:
                     break
-                succ, bs = nxt
+                succ, bs, n_cand, n_skip = nxt
+                acc["pushforward_skip_rate"].append(n_skip / max(n_cand, 1))
+                if bs is None:
+                    break
                 bs = bs.to(dev)
                 os_ = model(bs)
                 ts = Lo.loss_terms(os_, bs, cfg.loss, data.priors, cfg.decode)
@@ -767,8 +792,6 @@ def main(argv=None) -> None:
     ap.add_argument("--noise", type=float, default=0.0)
     ap.add_argument("--pushforward", type=float, default=0.0, help="probability per step")
     ap.add_argument("--pushforward-steps", type=int, default=2)
-    ap.add_argument("--pushforward-oracle-topology", action="store_true",
-                    help="keep the oracle's live bonds in successors (the old behaviour)")
     ap.add_argument("--eval-every", type=int, default=200)
     ap.add_argument("--energy-tolerance", type=float, default=0.05)
     ap.add_argument("--break-mode", default="threshold", choices=["threshold", "sample"])
@@ -804,7 +827,6 @@ def main(argv=None) -> None:
                           batch_calls=a.batch_calls, batch_budget=a.batch_budget, lr=a.lr, seed=s, device=a.device,
                           noise_sigma=a.noise, pushforward_prob=a.pushforward,
                           pushforward_steps=a.pushforward_steps,
-                          pushforward_topology=not a.pushforward_oracle_topology,
                           eval_every=a.eval_every, model=dataclasses.replace(mc),
                           decode=D.DecodeConfig(energy_tolerance=a.energy_tolerance,
                                                 break_mode=a.break_mode))

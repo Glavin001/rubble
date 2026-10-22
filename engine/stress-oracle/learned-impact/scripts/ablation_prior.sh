@@ -17,7 +17,7 @@ for seed in 0 1; do
     if [ ! -f $O/best.pt ] || [ ! -f $O/done ]; then
       echo "== train $cfg seed $seed"
       $PY -u -m learned_impact.outcome.train --dataset $TRAIN --val-dataset $EVAL --out $O \
-        --variant $v ${=d} --seeds $seed --steps 8000 --eval-every 2000 --pushforward 0.3 --device mps
+        --variant $v ${=d} --seeds $seed --steps 8000 --eval-every 2000 --device mps
       touch $O/done
     fi
     [ -n "$RPID" ] && wait $RPID  # one report at a time (each holds the eval set in memory)

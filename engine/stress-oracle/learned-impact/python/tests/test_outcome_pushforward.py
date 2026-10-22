@@ -98,3 +98,41 @@ def test_topology_with_colliding_chunk_and_impactor_keys():
     assert ob <= set(out.arrays["bond_key"].tolist())
     nc = out.counts["chunks"]
     assert out.arrays["bond_src"].max() < nc and out.arrays["bond_dst"].max() < nc
+
+
+def test_pushforward_keeps_only_samples_on_the_oracle_topology(tmp_path):
+    """A successor is built only where the prediction breaks exactly the oracle's bonds
+    (and its velocities are within tolerance); a different break set describes another wall
+    than the target's history, so that sample is skipped."""
+    import torch
+
+    from learned_impact.outcome.batch import HierarchyCache, collate, pad_batch
+    from learned_impact.outcome.ceiling import targets_to_outputs
+    from learned_impact.outcome.synthetic import write_dataset
+    from learned_impact.outcome.train import Data, TrainConfig, _successors
+
+    write_dataset(tmp_path / "d", 6, val_fraction=0.01, settle_calls=2)
+    data = Data(str(tmp_path / "d"))
+    calls = [c for c in data.train if (c.event_id, c.call_index) in data.successor
+             and (c.arrays["y_bond_broke"] > 0).any()][:3]
+    assert calls
+    cache = HierarchyCache(2)
+    coll = lambda cs: pad_batch(collate(cs, data.structures, cache))  # noqa: E731
+    b = coll(calls)
+    cfg = TrainConfig()
+    oracle = {k: v.float() if v.is_floating_point() else v for k, v in targets_to_outputs(b).items()}
+    succ, bs, n, skipped = _successors(calls, b, oracle, data, cfg, coll)
+    assert n == len(calls) and skipped == 0 and len(succ) == len(calls)
+    # one extra break in the first call: that sample alone is excluded
+    wrong = dict(oracle)
+    lq = wrong["bond_log_q"].clone()
+    first = int(torch.nonzero((b.t["bond_call"] == 0) & (b.t["y_bond_broke"] == 0))[0])
+    lq[first] = 1.0
+    wrong["bond_log_q"] = lq
+    succ2, _, n2, skipped2 = _successors(calls, b, wrong, data, cfg, coll)
+    assert n2 == len(calls) and skipped2 == 1 and len(succ2) == len(calls) - 1
+    # velocities off by more than the tolerance: excluded too
+    far = dict(oracle)
+    far["chunk_out"] = oracle["chunk_out"] + 1.0
+    _, _, n3, skipped3 = _successors(calls, b, far, data, cfg, coll)
+    assert skipped3 == n3

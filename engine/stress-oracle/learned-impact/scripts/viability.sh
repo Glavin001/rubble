@@ -13,7 +13,7 @@ train() {  # name, extra args
   local O=$R/$1; shift
   [ -f $O/best.pt ] && [ -f $O/done ] && return
   $PY -u -m learned_impact.outcome.train --dataset $TRAIN --val-dataset $EVAL --out $O \
-    --steps $STEPS --eval-every $((STEPS / 12)) --pushforward 0.3 --device mps "$@"
+    --steps $STEPS --eval-every $((STEPS / 12)) --device mps "$@"
   touch $O/done
 }
 report() {
@@ -27,7 +27,7 @@ wait
 (report w128 > $R/w128-report.log 2>&1) &
 $PY -u -m learned_impact.outcome.pilot --dataset $TRAIN --val-dataset $EVAL --out $R/scaling \
   --fractions 0.25,0.5,1 --seeds 0,1 --variants B --steps-per-event 12 --min-steps 2000 \
-  --max-steps $STEPS --device mps --pushforward 0.3
+  --max-steps $STEPS --device mps
 wait
 $PY -m learned_impact.outcome.viability --runs W64=$R/w64 W128=$R/w128 --scaling $R/scaling \
   --out ${0:a:h}/../findings/p2-viability-$(date +%Y-%m-%d).md
