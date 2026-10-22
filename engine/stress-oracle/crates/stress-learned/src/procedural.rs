@@ -339,19 +339,20 @@ fn solve_speed(scene: &Scene, layout: &Layout, y_back: f64, d: &ImpactorDraw, r:
 }
 
 /// A family of wall recipes (`p1-walls`): `family` is "free_wall" (no supports, no gravity:
-/// the M5 free wall's family) or "anchored_wall" (base or base-and-sides supports, gravity
-/// and a ground); `tier` 1 has one impactor, 2 has two to four.
+/// the M5 free wall's family), "anchored_wall" (base or base-and-sides supports, gravity
+/// and a ground) or "standing_wall" (no supports, standing on the ground under gravity);
+/// `tier` 1 has one impactor, 2 has two to four.
 pub fn wall_recipes(family: &str, tier: u32, n: usize, seed: u64, r: &Ranges) -> Result<Vec<OutcomeRecipe>, String> {
-    if !matches!(family, "free_wall" | "anchored_wall") || !(1..=2).contains(&tier) {
+    if !matches!(family, "free_wall" | "anchored_wall" | "standing_wall") || !(1..=2).contains(&tier) {
         return Err(format!("unknown family/tier {family}/{tier}"));
     }
-    let mut rng = Rng::new(seed ^ (tier as u64) << 32 ^ if family == "free_wall" { 0x11 } else { 0x22 });
+    let mut rng = Rng::new(seed ^ (tier as u64) << 32 ^ match family { "free_wall" => 0x11, "anchored_wall" => 0x22, _ => 0x33 });
     // Dimensions: nx, ny, nz, chunk, supports, strength, toughness, stiffness, mass, size,
     // x, z, angle, punch ratio, arrival.
     let lhs = latin_hypercube(n, 15, &mut rng);
     let mut out = Vec::with_capacity(n);
     for (i, u) in lhs.iter().enumerate() {
-        let supports = if family == "free_wall" { "free" } else if u[4] < 0.7 { "base" } else { "base_sides" };
+        let supports = if family != "anchored_wall" { "free" } else if u[4] < 0.7 { "base" } else { "base_sides" };
         let layout = Layout::sample(r, supports, u, &mut rng);
         let (strength, toughness, stiffness) = (log_uniform(u[5], 0.5, 2.0), log_uniform(u[6], 0.5, 2.0), log_uniform(u[7], 0.7, 1.5));
         let weibull = (rng.unit() < r.weibull_probability).then(|| rng.range(6.0, 12.0));
@@ -453,6 +454,96 @@ pub fn wall_recipes(family: &str, tier: u32, n: usize, seed: u64, r: &Ranges) ->
             "seed": seed, "index": i, "catalog": "p1-walls", "redraws": redraws, "extrapolation": r.extrapolation,
         });
         out.push(OutcomeRecipe { event_id: event_id.clone(), family: family.into(), tier, split_group: event_id, layout_group: layout.key(), parameters: params, scene });
+    }
+    Ok(out)
+}
+
+/// A ballistic-limit sweep family (`p1-ballistic`): one wall and one impactor at normal
+/// incidence on the face centre, swept in speed across the penetration transition. The
+/// split is the family's (whole families held out).
+pub struct BallisticSpec {
+    pub name: &'static str,
+    pub counts: [usize; 3],
+    pub chunk: f64,
+    pub supports: &'static str,
+    /// Under gravity on a ground; else free in zero gravity (the M5 free wall's setting).
+    pub ground: bool,
+    pub sphere: bool,
+    pub size: f64,
+    pub mass: f64,
+    pub split: &'static str,
+}
+
+/// Six families across thickness, supports, resolution, impactor shape and mass: four for
+/// training, one for validation, one for test.
+pub fn ballistic_specs() -> Vec<BallisticSpec> {
+    let b = |name, counts, chunk, supports, ground, sphere, size, mass, split| BallisticSpec { name, counts, chunk, supports, ground, sphere, size, mass, split };
+    vec![
+        b("bl_free_thin", [10, 1, 10], 0.1, "free", false, true, 0.08, 100.0, "train"),
+        b("bl_anchored_base", [12, 1, 10], 0.15, "base", true, true, 0.1, 300.0, "train"),
+        b("bl_standing", [10, 1, 8], 0.15, "free", true, true, 0.12, 500.0, "train"),
+        b("bl_coarse_heavy", [8, 1, 8], 0.2, "base", true, false, 0.15, 1000.0, "train"),
+        b("bl_free_thick", [10, 2, 10], 0.1, "free", false, false, 0.1, 200.0, "val"),
+        b("bl_anchored_sides", [12, 2, 10], 0.1, "base_sides", true, false, 0.08, 150.0, "test"),
+    ]
+}
+
+/// The speed at which the punch's force on `spec`'s plug equals its capacity (the sweep is
+/// placed relative to it).
+pub fn ballistic_reference_speed(spec: &BallisticSpec) -> Result<f64, String> {
+    let (scene, layout, d) = ballistic_scene(spec, 1.0);
+    let r = Ranges { speed: (0.01, 1000.0), ..Ranges::pilot() };
+    solve_speed(&scene, &layout, layout.size().y, &d, &r).ok_or_else(|| format!("{}: no punch threshold", spec.name))
+}
+
+fn ballistic_scene(spec: &BallisticSpec, punch_ratio: f64) -> (Scene, Layout, ImpactorDraw) {
+    let layout = Layout { counts: spec.counts, chunk: spec.chunk, opening: None, supports: spec.supports };
+    let mut scene = builders::new_scene(spec.name, "P1 ballistic-limit sweep (learned impact-outcome dataset)");
+    scene.materials.insert("concrete".into(), builders::oracle_concrete(None));
+    scene.materials.insert("steel".into(), builders::elastic_steel());
+    if spec.ground {
+        scene.ground = Some(GroundDesc { height: 0.0, friction: 0.6, material: "concrete".into() });
+    } else {
+        scene.gravity = [0.0; 3];
+    }
+    scene.bodies.push(wall_body(&layout, "wall", 0.0));
+    let d = ImpactorDraw {
+        mass: spec.mass,
+        sphere: spec.sphere,
+        size: spec.size,
+        x_fraction: 0.5,
+        z_fraction: 0.5,
+        back: false,
+        yaw_degrees: 0.0,
+        pitch_degrees: 0.0,
+        spin: [0.0; 3],
+        punch_ratio,
+        arrival: 0.004,
+        low: false,
+    };
+    (scene, layout, d)
+}
+
+/// A family's sweep: one recipe per speed (m/s), sharing the family's split group.
+pub fn ballistic_recipes(family: &str, speeds: &[f64], seed: u64) -> Result<Vec<OutcomeRecipe>, String> {
+    let spec = ballistic_specs().into_iter().find(|s| s.name == family).ok_or_else(|| format!("unknown ballistic family {family:?}"))?;
+    let v_ref = ballistic_reference_speed(&spec)?;
+    let mut out = Vec::new();
+    for (i, &v) in speeds.iter().enumerate() {
+        let (mut scene, layout, d) = ballistic_scene(&spec, 1.0);
+        let desc = place(&d, &layout, layout.size().y, v, 0);
+        scene.impactors = vec![desc];
+        let event_id = format!("p1_{family}_v{i:03}_s{seed}");
+        scene.name = event_id.clone();
+        let params = json!({
+            "layout": {"counts": layout.counts, "chunk": layout.chunk, "opening": null, "supports": layout.supports, "key": layout.key()},
+            "material": {"strength_scale": 1.0, "toughness_scale": 1.0, "stiffness_scale": 1.0, "weibull_modulus": null},
+            "impactors": [{"mass": d.mass, "shape": if d.sphere { "sphere" } else { "box" }, "size": d.size, "speed": v, "x_fraction": 0.5, "z_fraction": 0.5,
+                "face": "front", "location": "centre", "yaw_degrees": 0.0, "pitch_degrees": 0.0, "spin": [0.0, 0.0, 0.0], "arrival": d.arrival, "speed_band": "ballistic_sweep"}],
+            "ballistic": {"family": family, "speed": v, "speed_over_punch_threshold": v / v_ref, "punch_threshold_speed": v_ref, "index": i, "split": spec.split},
+            "seed": seed, "index": i, "catalog": "p1-ballistic",
+        });
+        out.push(OutcomeRecipe { event_id, family: family.into(), tier: 1, split_group: family.into(), layout_group: family.into(), parameters: params, scene });
     }
     Ok(out)
 }

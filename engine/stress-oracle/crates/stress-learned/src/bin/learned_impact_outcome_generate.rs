@@ -74,6 +74,23 @@ fn main() {
             wall_recipes(&family, tier, n, seed, &ranges).expect("recipes")
         }
         "m5" => m5_recipes(),
+        // `--speeds LO:HI:N`: N speeds log-spaced from LO to HI times the family's punch
+        // threshold speed (`--speeds-abs LO:HI:N` in m/s); the family's split is forced.
+        "p1-ballistic" => {
+            let family = val("--family").expect("--family bl_*");
+            let spec = stress_learned::procedural::ballistic_specs().into_iter().find(|s| s.name == family).expect("unknown ballistic family");
+            let parse = |x: String| -> (f64, f64, usize) {
+                let p: Vec<&str> = x.split(':').collect();
+                (p[0].parse().unwrap(), p[1].parse().unwrap(), p[2].parse().unwrap())
+            };
+            let (scale, (lo, hi, n)) = match (val("--speeds"), val("--speeds-abs")) {
+                (Some(x), _) => (stress_learned::procedural::ballistic_reference_speed(&spec).expect("threshold"), parse(x)),
+                (None, Some(x)) => (1.0, parse(x)),
+                _ => panic!("--speeds LO:HI:N or --speeds-abs LO:HI:N"),
+            };
+            let speeds: Vec<f64> = (0..n).map(|i| scale * lo * (hi / lo).powf(if n > 1 { i as f64 / (n - 1) as f64 } else { 0.0 })).collect();
+            stress_learned::procedural::ballistic_recipes(&family, &speeds, seed).expect("ballistic recipes")
+        }
         "p1-stage2" => {
             let family = val("--family").expect("--family cuboid_house|masonry_house|arch");
             let tier: u32 = val("--tier").map_or(3, |x| x.parse().expect("--tier"));
@@ -84,7 +101,12 @@ fn main() {
     };
     // Splits by layout group, and ensembles on every validation/test/sealed configuration
     // and on a share of the training ones (`--members 1` or `--no-ensembles`: none).
-    let mut plan = EnsemblePlan { seed, force_split: val("--split"), ..EnsemblePlan::default() };
+    let ballistic_split = (catalog == "p1-ballistic").then(|| stress_learned::procedural::ballistic_specs().into_iter().find(|s| Some(s.name.to_string()) == val("--family")).map(|s| s.split.to_string())).flatten();
+    let mut plan = EnsemblePlan { seed, force_split: val("--split").or(ballistic_split), ..EnsemblePlan::default() };
+    if catalog == "p1-ballistic" {
+        // Every speed of a sweep is an ensemble, whatever its split.
+        plan.train_share = 1.0;
+    }
     if let Some(m) = val("--members") {
         plan.members = m.parse().expect("--members");
     }
