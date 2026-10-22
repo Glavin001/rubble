@@ -337,3 +337,42 @@ pub fn oracle_island_step(start: &World, m: &IslandMembers) -> Result<IslandStat
     w.step_frame();
     Ok(w.extract_island(m))
 }
+
+impl World {
+    /// The island's mechanical energy now: its chunks' and impactors' kinetic energy, the
+    /// joint law's stored energy of its live bonds (`stored_energy_of`), and the island's
+    /// gravitational potential (m g·x summed, negative of the potential energy's sign
+    /// convention: `potential` = −Σ m g·x).
+    pub fn island_energy(&self, m: &IslandMembers) -> (f64, f64, f64) {
+        let sv = &self.solver;
+        let mut ke = 0.0;
+        let mut pot = 0.0;
+        let g = sv.config.gravity;
+        for &(s, c) in &m.chunks {
+            if !sv.chunks[s][c].active {
+                continue;
+            }
+            let ch = &sv.structures[s].chunks[c];
+            let (v, w) = sv.chunk_velocity(s, c);
+            let r = sv.clusters[sv.chunks[s][c].cluster].rotation();
+            ke += 0.5 * ch.mass * v.norm2() + 0.5 * w.dot(r * ch.inertia * r.transpose() * w);
+            pot -= ch.mass * g.dot(sv.chunk_position(s, c));
+        }
+        for &i in &m.impactors {
+            let imp = &self.impactors[i];
+            ke += imp.kinetic_energy();
+            pot -= imp.mass * g.dot(imp.pose.position);
+        }
+        (ke, sv.stored_energy_of(&m.chunks), pot)
+    }
+}
+
+impl IslandState {
+    /// Scale every chunk's hidden displacement and rotation (u, th) by `alpha`.
+    pub fn scale_hidden_displacement(&mut self, alpha: f64) {
+        for (_, ch) in &mut self.solver.chunks {
+            ch.u = ch.u * alpha;
+            ch.th = ch.th * alpha;
+        }
+    }
+}

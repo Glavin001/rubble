@@ -667,7 +667,13 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
                         x.apply_decoded(&d)?;
                         return Ok(x.extract_island(m));
                     };
-                    let mut out = stress_learned::decoded_full::island_frame(start, m, &d, &full, stress_learned::decoded_full::Base::from_env()?, stress_learned::decoded_full::ids_from_base())?;
+                    // `STRESS_FULL_ENERGY_BOUND=tol`: the island's mechanical energy (KE, the joint
+                    // law's stored energy, gravity's potential) at most its start's plus tol of it.
+                    let bound = std::env::var("STRESS_FULL_ENERGY_BOUND").ok().map(|v| v.parse::<f64>().map_err(|e| format!("STRESS_FULL_ENERGY_BOUND={v}: {e}"))).transpose()?;
+                    let (mut out, alpha) = stress_learned::decoded_full::island_frame_bounded(start, m, &d, &full, stress_learned::decoded_full::Base::from_env()?, stress_learned::decoded_full::ids_from_base(), bound)?;
+                    if alpha < 1.0 {
+                        eprintln!("[energy bound] frame {frame}: hidden displacement scaled by {alpha:.4}");
+                    }
                     // Diagnostic (`STRESS_FULL2_DIFF=1`): the composed island's fields that differ
                     // from the oracle's own step (stderr, per kind: column and the largest
                     // absolute difference).

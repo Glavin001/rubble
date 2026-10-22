@@ -1223,9 +1223,24 @@ impl ReferenceSolver {
         }
     }
 
+    /// Elastic energy of the live bonds with both ends in `chunks` at the current chunk
+    /// state (`bond_stored_now`): the joint law's own stored energy (damage, crushing and
+    /// plastic offsets included), nothing committed.
+    pub fn stored_energy_of(&self, chunks: &std::collections::HashSet<(usize, usize)>) -> f64 {
+        let mut e = 0.0;
+        for (s, bonds) in self.bonds.iter().enumerate() {
+            for (bi, b) in bonds.iter().enumerate() {
+                if b.alive && chunks.contains(&(s, b.geometry.a)) && chunks.contains(&(s, b.geometry.b)) {
+                    e += self.bond_stored_now(s, bi);
+                }
+            }
+        }
+        e
+    }
+
     /// Elastic energy of bond `bi` at the current chunk state, from its committed joint
-    /// state (nothing is committed).
-    fn bond_stored_now(&self, s: usize, bi: usize) -> f64 {
+    /// state (nothing is committed): the joint law's `stored` for that deformation.
+    pub fn bond_stored_now(&self, s: usize, bi: usize) -> f64 {
         let b = &self.bonds[s][bi];
         let (sa, sb) = (self.chunks[s][b.geometry.a], self.chunks[s][b.geometry.b]);
         let d = if self.config.methods.corotational_bonds {

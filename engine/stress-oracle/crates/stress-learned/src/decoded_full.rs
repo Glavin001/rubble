@@ -383,6 +383,38 @@ pub fn hidden_states(outs: &[FullOut]) -> Result<Option<HashMap<(usize, usize), 
 /// (`fs_cluster_out`) when given, else derived from the chunks' world and predicted hidden
 /// state (`World::derive_bodies`) when given; then the predicted columns written by field
 /// path over the island (`apply_full`), the rest from `base`.
+///
+/// `energy_bound`: Some(tol) bounds the island's mechanical energy at the frame's end by its
+/// start's plus the tolerance `tol` of it (gravity's work included, through the potential):
+/// when the composed state exceeds it, the chunks' hidden displacement is scaled down
+/// (bisection) until the joint law's stored energy fits; the kinetic energy is the decode's
+/// (its own bound). It never acts on a state that creates no energy (the oracle's own).
+/// Returns the state and the scale applied (1 when the bound did not act).
+#[allow(clippy::too_many_arguments)]
+pub fn island_frame_bounded(start: &stress_ref::world::World, m: &stress_ref::world::IslandMembers, d: &stress_ref::world::DecodedState, full: &[FullOut], base: Base, ids_from_base: bool, energy_bound: Option<f64>) -> Result<(IslandState, f64), String> {
+    let st = island_frame(start, m, d, full, base, ids_from_base)?;
+    let Some(tol) = energy_bound else { return Ok((st, 1.0)) };
+    let (k0, e0, p0) = start.island_energy(m);
+    let budget = k0 + e0 + p0 + tol * (k0 + e0).max(1e-12);
+    let total = |x: &IslandState| -> f64 {
+        let (k, e, p) = stress_ref::world::World::merge_island(start, x, m).island_energy(m);
+        k + e + p
+    };
+    if total(&st) <= budget {
+        return Ok((st, 1.0));
+    }
+    let (mut lo, mut hi) = (0.0f64, 1.0f64);
+    for _ in 0..30 {
+        let mid = 0.5 * (lo + hi);
+        let mut x = st.clone();
+        x.scale_hidden_displacement(mid);
+        if total(&x) <= budget { lo = mid } else { hi = mid }
+    }
+    let mut x = st;
+    x.scale_hidden_displacement(lo);
+    Ok((x, lo))
+}
+
 pub fn island_frame(start: &stress_ref::world::World, m: &stress_ref::world::IslandMembers, d: &stress_ref::world::DecodedState, full: &[FullOut], base: Base, ids_from_base: bool) -> Result<IslandState, String> {
     let mut x = start.clone();
     x.solver.reset_peak_utilizations();
