@@ -1173,7 +1173,7 @@ impl World {
 
     /// Bodies (by their key at the start of the frame, in `driven`) with a bond broken
     /// since `saved`.
-    fn fractured_since(&self, saved: &World, driven: &HashSet<BodyKey>) -> HashSet<BodyKey> {
+    pub(super) fn fractured_since(&self, saved: &World, driven: &HashSet<BodyKey>) -> HashSet<BodyKey> {
         fractured_since(&saved.solver, &self.solver.events[saved.solver.events.len()..], driven)
     }
 
@@ -1181,6 +1181,15 @@ impl World {
     /// clusters it drove.
     fn coupled_attempt(&mut self, forced: &HashSet<BodyKey>) -> (Vec<BodyKey>, HashSet<BodyKey>) {
         let f = self.coupled_prepare(forced);
+        self.coupled_substeps(&f);
+        (f.frozen, f.driven)
+    }
+
+    /// The second half of a coupled frame (after `coupled_prepare`): the substeps, which
+    /// simulate the impact islands with the driven bodies following the engine's motion,
+    /// and the frame's tail. Needs no engine: it runs as well on a clone of the prepared
+    /// world (the coupled reference's oracle island step, `step_frame_with_frame_provider`).
+    pub fn coupled_substeps(&mut self, f: &CoupledFrame) {
         self.frame_loads.resize(&self.solver);
         let splits_before = self.solver.events.len();
         for i in 0..f.n {
@@ -1202,7 +1211,6 @@ impl World {
             self.refine_where_needed(u);
         }
         self.frame_loads.clear();
-        (f.frozen, f.driven)
     }
 
     /// The first half of a coupled frame, before its substeps: the impact islands, the

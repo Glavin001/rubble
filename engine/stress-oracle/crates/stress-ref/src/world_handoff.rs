@@ -594,3 +594,48 @@ impl World {
         Ok(keys)
     }
 }
+
+impl World {
+    /// A coupled frame whose second half (`coupled_substeps`: the impact islands through the
+    /// frame, the driven bodies following the engine) comes from `provider`: it receives
+    /// the prepared world (a clone, without the engine: the routing done, the engine's step
+    /// taken with the island frozen, the driven bodies' frame motion in the coupling) and the
+    /// frame's schedule, and returns the world at the frame's end; that world is adopted
+    /// (the engine kept) and the island bodies go back to the engine. Frames the engine's
+    /// assumption fails in (a driven body fractured) are solved again with those bodies in
+    /// islands, the provider called anew, exactly as `step_frame` does. With the oracle as
+    /// provider (`coupled_substeps` on the clone) this is `step_frame` bit for bit: the
+    /// coupled reference and its ceiling are one computation.
+    pub fn step_frame_with_frame_provider(&mut self, provider: &mut dyn FnMut(World, &crate::world::CoupledFrame) -> Result<World, String>) -> Result<(), String> {
+        if self.coupling.is_none() {
+            return Err("step_frame_with_frame_provider needs a coupled world".into());
+        }
+        if self.scene.sim.methods.frame_contact_step && self.scene.sim.methods.layer_contact {
+            self.contact_dt = self.frame_contact_dt();
+        }
+        let mut forced: std::collections::HashSet<BodyKey> = std::collections::HashSet::new();
+        let frozen = loop {
+            let saved = self.clone();
+            self.engine_save();
+            let f = self.coupled_prepare(&forced);
+            let done = provider(self.clone(), &f)?;
+            let engine = std::mem::replace(&mut self.coupling.as_mut().expect("coupled").engine, EngineCell(None));
+            *self = done;
+            self.coupling.as_mut().ok_or("the provider's world lost its coupling")?.engine = engine;
+            let broke = self.fractured_since(&saved, &f.driven);
+            if broke.is_empty() || broke.is_subset(&forced) {
+                self.engine_discard();
+                break f.frozen;
+            }
+            let engine = std::mem::replace(&mut self.coupling.as_mut().expect("coupled").engine, EngineCell(None));
+            *self = saved;
+            let c = self.coupling.as_mut().expect("coupled");
+            c.engine = engine;
+            c.engine.restore();
+            self.redone_frames += 1;
+            forced.extend(broke);
+        };
+        self.coupled_write_back(&frozen);
+        Ok(())
+    }
+}
