@@ -20,11 +20,11 @@ use crate::gpu::{Binding, Gpu, Kernel};
 use crate::shaders;
 
 /// float4 words per call, node and bond; uint4 words per call island; float4 per impactor.
-pub const CALL_F4: usize = 8;
+pub const CALL_F4: usize = 10;
 pub const NODE_F4: usize = 14;
 pub const BOND_F4: usize = 2;
 pub const CISL_U4: usize = 2;
-pub const IMP_F4: usize = 3;
+pub const IMP_F4: usize = 4;
 
 /// `calls[2].y` flags.
 pub const CALL_FREE: u32 = 1;
@@ -75,7 +75,7 @@ struct Params {
     debris: u32,
     max_cisl: u32,
     chunk_count: u32,
-    pad0: u32,
+    speed_ref: f32,
     out_bases: [u32; 4],
     out_bases2: [u32; 4],
 }
@@ -100,7 +100,7 @@ const BINDINGS: [Binding; 29] = [
     Binding::StorageRw, // 3 nodes
     Binding::StorageRw, // 4 bonds
     Binding::StorageRw, // 5 isl
-    Binding::StorageRw, // 6 islf
+    Binding::StorageRw, // 6 call islands' frames (learned_feat)
     Binding::StorageRw, // 7 cisl
     Binding::StorageRw, // 8 chunk_node
     Binding::StorageRw, // 9 frozen
@@ -186,8 +186,12 @@ pub struct ImpactorInfo {
     pub inertia: [f32; 3],
     /// Plane-strain modulus as the solver scales it.
     pub modulus: f32,
-    /// |half extents| (the rim speed's lever arm).
-    pub half_norm: f32,
+    /// Half extents (a sphere's radius on every axis: its oriented box, as `Impactor::obox`).
+    pub half: [f32; 3],
+    /// Young's modulus as the solver scales it (not plane-strain: the features' modulus).
+    pub modulus_scaled: f32,
+    pub friction: f32,
+    pub crushable: bool,
 }
 
 /// The solver's and engine's tables a batch reads and writes, for one frame.
@@ -273,8 +277,8 @@ pub struct Learned {
     nodes: wgpu::Buffer,
     bonds: wgpu::Buffer,
     isl: wgpu::Buffer,
-    islf: wgpu::Buffer,
     cisl: wgpu::Buffer,
+    cislf: wgpu::Buffer,
     chunk_node: wgpu::Buffer,
     frozen: wgpu::Buffer,
     imps: wgpu::Buffer,
@@ -288,6 +292,14 @@ pub struct Learned {
     imp_list: Vec<ImpactorInfo>,
     island_cap: u32,
     chunk_count: u32,
+    /// The input features (`learned_feat.rs`), once the static tables are set.
+    pub feat: Option<crate::learned_feat::Features>,
+    /// `STRESS_LEARNED_DRY=1`: batches are built (features included) but no call stands:
+    /// each goes to the punch, unlogged (a feature export's mode: the engine's motion stays
+    /// the plain resident frame's).
+    pub dry: bool,
+    /// The frame the batch is made in (the features' broken-bond stamps).
+    pub frame: u32,
     /// A batch stood at the last read: its window end is due this frame.
     pub pending: bool,
     pub totals: Totals,
@@ -348,8 +360,8 @@ impl Learned {
             nodes: rw(gpu, "learned nodes", 16 * (NODE_F4 * max_nodes as usize) as u64, false),
             bonds: rw(gpu, "learned bonds", 16 * (BOND_F4 * max_bonds as usize) as u64, false),
             isl: rw(gpu, "learned islands", 16, false),
-            islf: rw(gpu, "learned island bounds", 16, false),
             cisl: rw(gpu, "learned call islands", 16 * (CISL_U4 * max_cisl as usize) as u64, false),
+            cislf: rw(gpu, "learned call island frames", 16 * 2 * max_cisl as u64, false),
             chunk_node: rw(gpu, "learned chunk map", 16, false),
             frozen: rw(gpu, "learned held bodies", 16 * 4 * (max_cisl as u64 + 32), false),
             imps: rw(gpu, "learned impactors", 16 * IMP_F4 as u64, false),
@@ -360,9 +372,22 @@ impl Learned {
             imp_list: Vec::new(),
             island_cap: 0,
             chunk_count: 0,
+            feat: None,
+            dry: std::env::var("STRESS_LEARNED_DRY").is_ok_and(|v| v == "1"),
+            frame: 0,
             pending: false,
             totals: Totals::default(),
         }
+    }
+
+    /// The input features: static tables from the world's pristine structures, columns
+    /// placed by `map` (the schema the network was trained on). `layout_cap`: bond records
+    /// the solver's tables hold.
+    pub fn set_features(&mut self, gpu: &Gpu, world: &stress_ref::world::World, map: crate::learned_feat::ColumnMap, layout_cap: u32) -> Result<(), String> {
+        let statics = crate::learned_feat::statics(world)?;
+        let scene = crate::learned_feat::FeatScene { restitution: world.scene.sim.contact_restitution as f32, contact_friction: world.scene.sim.contact_friction.map(|f| f as f32) };
+        self.feat = Some(crate::learned_feat::Features::new(gpu, statics, scene, map, self.max_nodes, self.max_bonds, self.max_cisl, self.max_calls, layout_cap));
+        Ok(())
     }
 
     /// The network's output buffer (P0's kernel writes it; `learned_adopt` reads it).
@@ -377,7 +402,10 @@ impl Learned {
         }
         let words: Vec<[f32; 4]> = list
             .iter()
-            .flat_map(|i| [[f32::from_bits(i.body), i.bound, i.face, i.mass], [i.inertia[0], i.inertia[1], i.inertia[2], i.modulus], [i.half_norm, 0.0, 0.0, 0.0]])
+            .flat_map(|i| {
+                let hn = (i.half[0] * i.half[0] + i.half[1] * i.half[1] + i.half[2] * i.half[2]).sqrt();
+                [[f32::from_bits(i.body), i.bound, i.face, i.mass], [i.inertia[0], i.inertia[1], i.inertia[2], i.modulus], [hn, i.half[0], i.half[1], i.half[2]], [i.modulus_scaled, i.friction, i.face, f32::from(u8::from(i.crushable))]]
+            })
             .collect();
         self.imps = if words.is_empty() { gpu.storage("learned impactors", &[[0f32; 4]; IMP_F4]) } else { gpu.storage("learned impactors", &words) };
         self.imp_list = list.to_vec();
@@ -387,8 +415,7 @@ impl Learned {
     /// Growing the chunk map drops a pending batch's map: only between batches.
     pub fn ensure(&mut self, gpu: &Gpu, island_cap: u32, chunk_count: u32) {
         if island_cap > self.island_cap {
-            self.isl = rw(gpu, "learned islands", 16 * island_cap as u64, false);
-            self.islf = rw(gpu, "learned island bounds", 16 * 3 * island_cap as u64, false);
+            self.isl = rw(gpu, "learned islands", 16 * 4 * island_cap as u64, false);
             self.island_cap = island_cap;
         }
         if chunk_count > self.chunk_count {
@@ -406,7 +433,7 @@ impl Learned {
                 impactor_count: self.imp_list.len() as u32,
                 engine_base: t.engine_base,
                 island_cap: t.island_cap,
-                stub: self.stub as u32,
+                stub: self.stub as u32 | if self.dry { 0x100 } else { 0 },
                 dt: t.dt as f32,
                 speed: (t.speed * (1.0 - 1e-3)) as f32,
                 log_tau: self.cfg.tau.ln() as f32,
@@ -419,7 +446,7 @@ impl Learned {
                 debris: self.debris as u32,
                 max_cisl: self.max_cisl,
                 chunk_count: self.chunk_count,
-                pad0: 0,
+                speed_ref: t.speed as f32,
                 out_bases: [self.out.1.chunk_out, self.out.1.imp_out, self.out.1.bond_log_q, self.out.1.bond_ddamage],
                 out_bases2: [self.out.1.bond_time_logits, 0, 0, 0],
             },
@@ -431,7 +458,7 @@ impl Learned {
         [
             // The indirect arguments only where `learned_compact` writes them (a dispatch that
             // reads them as its arguments may not also bind them read-write).
-            params, &self.ctl, &self.calls, &self.nodes, &self.bonds, &self.isl, &self.islf, &self.cisl, &self.chunk_node, &self.frozen, &self.imps, t.islands, t.chunks, t.state, t.ctab, t.bodies, t.bond_static, t.bond_dyn, t.status, t.counters, parents, work, slots, control, firsts, t.route, out, &self.dummy_rw[2], self.out.0.as_ref().unwrap_or(&self.dummy),
+            params, &self.ctl, &self.calls, &self.nodes, &self.bonds, &self.isl, &self.cislf, &self.cisl, &self.chunk_node, &self.frozen, &self.imps, t.islands, t.chunks, t.state, t.ctab, t.bodies, t.bond_static, t.bond_dyn, t.status, t.counters, parents, work, slots, control, firsts, t.route, out, &self.dummy_rw[2], self.out.0.as_ref().unwrap_or(&self.dummy),
         ]
     }
 
@@ -517,7 +544,30 @@ impl Learned {
         run(enc, &self.k.gather_chunks, D::Indirect(16));
         run(enc, &self.k.gather_bonds, D::Indirect(16));
         run(enc, &self.k.gather_impactors, D::Indirect(0));
+        let fb = crate::learned_feat::BatchBuffers {
+            ctl: &self.ctl,
+            calls: &self.calls,
+            nodes: &self.nodes,
+            bonds: &self.bonds,
+            cisl: &self.cisl,
+            cislf: &self.cislf,
+            imps: &self.imps,
+            chunks: t.chunks,
+            bond_static: t.bond_static,
+            bond_dyn: t.bond_dyn,
+            impactor_count: self.imp_list.len() as u32,
+            frame: self.frame,
+            dt: t.s.dt,
+            speed: t.s.speed,
+            gravity: t.s.gravity,
+        };
+        if let Some(f) = &self.feat {
+            f.encode_pre(gpu, enc, &fb, (&self.largs, 0), self.max_bonds);
+        }
         run(enc, &self.k.finish, D::Indirect(0));
+        if let Some(f) = &self.feat {
+            f.encode_post(gpu, enc, &fb, (&self.largs, 0), self.max_bonds);
+        }
         match network {
             Some(net) => {
                 net(enc);
@@ -530,15 +580,33 @@ impl Learned {
         run(enc, &self.k.tally, D::One);
     }
 
-    /// The control words' range (for the frame's one read).
-    pub fn range(&self) -> (&wgpu::Buffer, u64, u64) {
-        (&self.ctl, 0, 4 * ctl::WORDS as u64)
+    /// The control words' ranges (for the frame's one read): the batch's, then the
+    /// features' (edge totals and overflow bits) when they run.
+    pub fn ranges(&self) -> Vec<(&wgpu::Buffer, u64, u64)> {
+        let mut r = vec![(&self.ctl, 0, 4 * ctl::WORDS as u64)];
+        if let Some(f) = &self.feat {
+            r.push(f.range());
+        }
+        r
     }
 
     /// The frame's read of the control words: `applied` / `batched` say what this frame
     /// recorded. Every fallback is logged; a batch over a capacity is an error.
-    pub fn follow(&mut self, bytes: &[u8], frame: u64, applied: bool, batched: bool) -> Result<(), String> {
+    pub fn follow(&mut self, parts: &[Vec<u8>], frame: u64, applied: bool, batched: bool) -> Result<(), String> {
+        let bytes = &parts[0];
         let w: &[u32] = bytemuck::cast_slice(&bytes[..4 * ctl::WORDS]);
+        if batched && w[ctl::CALLS] > 0 {
+            if let Some(f) = parts.get(1) {
+                let fw: &[u32] = bytemuck::cast_slice(&f[..32]);
+                if fw[5] != 0 {
+                    return Err(format!("learned impact frame {frame}: a call holds more broken bonds than its cracked-face candidates ({} per chunk)", crate::learned_feat::CRACKED_PER_NODE));
+                }
+                if fw[3] != 0 {
+                    let what: Vec<&str> = [(1, "cracked faces"), (2, "impactor contacts"), (4, "structure contacts")].iter().filter(|(b, _)| fw[3] & b != 0).map(|(_, s)| *s).collect();
+                    return Err(format!("learned impact frame {frame}: the call batch's {} exceed their capacity (STRESS_LEARNED_MAX_BONDS / _MAX_CALL_ISLANDS / _MAX_NODES)", what.join(", ")));
+                }
+            }
+        }
         if applied {
             self.totals.applied += w[ctl::APPLIED] as u64;
             self.totals.stale += w[ctl::STALE] as u64;
@@ -550,7 +618,7 @@ impl Learned {
         if batched {
             if w[ctl::OVERFLOW] != 0 {
                 let o = w[ctl::OVERFLOW];
-                let what: Vec<&str> = [(1, "calls (STRESS_LEARNED_MAX_CALLS)"), (2, "nodes (STRESS_LEARNED_MAX_NODES)"), (4, "bonds (STRESS_LEARNED_MAX_BONDS)"), (8, "call islands (STRESS_LEARNED_MAX_CALL_ISLANDS)"), (16, "chunks in one call (STRESS_LEARNED_MAX_CALL_CHUNKS)")]
+                let what: Vec<&str> = [(1, "calls (STRESS_LEARNED_MAX_CALLS)"), (2, "nodes (STRESS_LEARNED_MAX_NODES)"), (4, "bonds (STRESS_LEARNED_MAX_BONDS)"), (8, "call islands (STRESS_LEARNED_MAX_CALL_ISLANDS)"), (16, "chunks in one call (STRESS_LEARNED_MAX_CALL_CHUNKS)"), (64, "bonds in one call (131072)")]
                     .iter()
                     .filter(|(b, _)| o & b != 0)
                     .map(|(_, s)| *s)
@@ -561,7 +629,7 @@ impl Learned {
             self.totals.calls += w[ctl::CALLS] as u64;
             self.totals.routed_islands += w[ctl::ROUTED] as u64;
             self.totals.bound_active += w[ctl::BOUND] as u64;
-            if w[ctl::FALLBACKS] > 0 {
+            if w[ctl::FALLBACKS] > 0 && !self.dry {
                 self.totals.fallbacks += w[ctl::FALLBACKS] as u64;
                 self.totals.fallback_nonfinite += w[ctl::FB_NONFINITE] as u64;
                 self.totals.fallback_infeasible += w[ctl::FB_INFEASIBLE] as u64;
@@ -745,6 +813,151 @@ impl Decode {
             out.push((nodes, bonds, cr[CALL_F4 * g + 4][2].to_bits()));
             first += c.nodes.len();
             bfirst += c.bonds.len();
+        }
+        out
+    }
+}
+
+// ------------------------------------------------------------------ feature export (tests, diagnostics)
+
+/// One call's feature arrays as the GPU made them (`Learned::export`, extra reads: for
+/// tests and diagnostics only), named and shaped as the calls schema's, with each edge set's
+/// identity per undirected edge (row 2k is its first twin).
+#[derive(Clone, Debug, Default)]
+pub struct ExportCall {
+    pub chunk_keys: Vec<i64>,
+    pub impactor_keys: Vec<i64>,
+    /// L, m, v, c, f_t, E, GA, dt, E_in.
+    pub scales: [f32; 9],
+    /// name → (shape, values); edge arrays `[2E, F]` in the GPU's edge order.
+    pub arrays: std::collections::BTreeMap<String, (Vec<usize>, Vec<f32>)>,
+    /// Per edge type ("bond", "cracked", "impactor_contact", "structure_contact"): per
+    /// undirected edge, (src key, dst key) of its first twin (chunk keys; an impactor's key
+    /// is its index with the top bit set) and the edge's own key (a bond's), else 0.
+    pub edges: std::collections::BTreeMap<String, Vec<(i64, i64, i64)>>,
+    /// The call's predicted contact rows (`learned_feat.slang` CON_F4 float4 each).
+    pub contacts: Vec<[[f32; 4]; 6]>,
+    /// Per chunk node: its world position at frame start.
+    pub chunk_pos: Vec<[f32; 3]>,
+    /// Debug words of the contacts kernel (per thread: n, t0, lo.x, cluster mass).
+    pub debug: Vec<f32>,
+    /// Per chunk node: the feature kernels' scratch words (`learned_feat.slang` W_*).
+    pub work: Vec<[f32; crate::learned_feat::WORK_F]>,
+}
+
+/// An impactor's key in `ExportCall::edges` (top bit set, apart from chunk keys).
+pub const IMPACTOR_KEY_BIT: i64 = 1 << 62;
+
+impl Learned {
+    /// The last batch's features, read back (several reads: not for the frame's loop).
+    pub fn export(&self, gpu: &Gpu) -> Vec<ExportCall> {
+        let Some(f) = &self.feat else { return Vec::new() };
+        let ctlw: Vec<u32> = gpu.read(&self.ctl);
+        let n_calls = ctlw[ctl::CALLS] as usize;
+        if n_calls == 0 {
+            return Vec::new();
+        }
+        let calls: Vec<[f32; 4]> = gpu.read_range(&self.calls, 0, CALL_F4 * n_calls);
+        let n_nodes = ctlw[ctl::NODES] as usize;
+        let n_bonds = ctlw[ctl::BONDS] as usize;
+        let nodes: Vec<[f32; 4]> = gpu.read_range(&self.nodes, 0, NODE_F4 * n_nodes.max(1));
+        let bedge: Vec<[u32; 4]> = gpu.read_range(&f.bedge, 0, n_bonds.max(1));
+        let fctl: Vec<u32> = gpu.read(&f.fctl);
+        let feat: Vec<f32> = gpu.read(&f.feat);
+        let edges: Vec<u32> = gpu.read(&f.edges);
+        let l = &f.layout;
+        let st = &f.map.strides;
+        let u = |x: f32| x.to_bits();
+        let chunk_key = |n: usize| -> i64 {
+            let w = nodes[NODE_F4 * n + 12];
+            ((u(w[2]) as i64) << 32) | u(w[3]) as i64
+        };
+        let total_chunks = fctl[4] as usize;
+        let mut out = Vec::new();
+        for g in 0..n_calls {
+            let c = |k: usize| calls[CALL_F4 * g + k];
+            let first = u(c(2)[2]) as usize;
+            let n = u(c(2)[3]) as usize;
+            let nc = u(c(3)[3]) as usize;
+            let bfirst = u(c(4)[0]) as usize;
+            let nb = u(c(4)[1]) as usize;
+            let (cbase, ibase) = (u(c(6)[2]) as usize, u(c(6)[3]) as usize);
+            let mut e = ExportCall { scales: [c(0)[0], c(0)[1], c(0)[2], c(0)[3], c(1)[0], c(1)[1], c(1)[2], c(1)[3], c(2)[0]], ..Default::default() };
+            e.chunk_keys = (0..nc).map(|j| chunk_key(first + j)).collect();
+            e.impactor_keys = (nc..n).map(|j| u(nodes[NODE_F4 * (first + j) + 12][0]) as i64).collect();
+            let node_key = |global: usize| -> i64 {
+                if global < total_chunks {
+                    e.chunk_keys[global - cbase]
+                } else {
+                    IMPACTOR_KEY_BIT | e.impactor_keys[global - total_chunks - ibase]
+                }
+            };
+            // a section's rows [r0, r0 + rows), split into its arrays
+            let mut take = |arrays: &mut std::collections::BTreeMap<String, (Vec<usize>, Vec<f32>)>, s: usize, base: u32, r0: usize, rows: &[usize]| {
+                let stride = st[s] as usize;
+                let mut col = 0usize;
+                for (name, w) in &f.map.arrays[s] {
+                    let mut vals = Vec::with_capacity(rows.len() * w);
+                    for &r in rows {
+                        let at = base as usize + (r0 + r) * stride + col;
+                        vals.extend_from_slice(&feat[at..at + w]);
+                    }
+                    arrays.insert(name.clone(), (vec![rows.len(), *w], vals));
+                    col += w;
+                }
+            };
+            let mut arrays = std::collections::BTreeMap::new();
+            take(&mut arrays, 0, l.chunk, cbase, &(0..nc).collect::<Vec<_>>());
+            take(&mut arrays, 1, l.imp, ibase, &(0..n - nc).collect::<Vec<_>>());
+            take(&mut arrays, 2, l.glob, g, &[0]);
+            // bonds: the live ones (both chunks in the call)
+            let live: Vec<usize> = (bfirst..bfirst + nb).filter(|&b| bedge[b][0] != u32::MAX && bedge[b][1] != u32::MAX).collect();
+            let rows: Vec<usize> = live.iter().flat_map(|&b| [2 * b, 2 * b + 1]).collect();
+            take(&mut arrays, 3, l.bond, 0, &rows);
+            let bk = &f.statics.bond_key;
+            e.edges.insert(
+                "bond".into(),
+                live.iter()
+                    .map(|&b| {
+                        let k = bk[bedge[b][2] as usize];
+                        (chunk_key(bedge[b][0] as usize), chunk_key(bedge[b][1] as usize), ((k.0 as i64) << 32) | k.1 as i64)
+                    })
+                    .collect(),
+            );
+            // the three edge sets: the call's rows, from fctl
+            let caps = [l.cap_cracked as usize, l.cap_ic as usize, l.cap_sc as usize];
+            let ebase = [0usize, 2 * caps[0], 2 * (caps[0] + caps[1])];
+            let kbase = 4 * (caps[0] + caps[1] + caps[2]);
+            let kb = [kbase, kbase + caps[0], kbase + caps[0] + caps[1]];
+            for (s, (name, sect, base)) in [("cracked", 4usize, l.cracked), ("impactor_contact", 5, l.ic), ("structure_contact", 6, l.sc)].into_iter().enumerate() {
+                let count = fctl[8 + 6 * g + s] as usize;
+                let at = fctl[8 + 6 * g + 3 + s] as usize;
+                take(&mut arrays, sect, base, at, &(0..count).collect::<Vec<_>>());
+                let mut list = Vec::new();
+                for k in 0..count / 2 {
+                    let row = at + 2 * k;
+                    let (src, dst) = (edges[ebase[s] + 2 * row] as usize, edges[ebase[s] + 2 * row + 1] as usize);
+                    let key = if s == 0 {
+                        let (ks, kc) = (edges[kb[s] + 2 * ((at / 2) + k)], edges[kb[s] + 2 * ((at / 2) + k) + 1]);
+                        ((ks as i64) << 32) | kc as i64
+                    } else {
+                        0
+                    };
+                    list.push((node_key(src), node_key(dst), key));
+                }
+                e.edges.insert(name.into(), list);
+            }
+            e.arrays = arrays;
+            let (row0, rows) = (u(c(8)[0]) as usize, u(c(8)[1]) as usize);
+            if rows > 0 {
+                let con: Vec<[f32; 4]> = gpu.read_range(&f.contacts, crate::learned_feat::CON_F4 * row0, crate::learned_feat::CON_F4 * rows);
+                e.contacts = con.chunks(6).map(|r| [r[0], r[1], r[2], r[3], r[4], r[5]]).collect();
+            }
+            e.debug = gpu.read_range(&f.work, crate::learned_feat::WORK_F * f.max_nodes_pub() + 3 * crate::learned_feat::SCRATCH - 1024, 1024);
+            let wk: Vec<f32> = gpu.read_range(&f.work, crate::learned_feat::WORK_F * first, crate::learned_feat::WORK_F * nc.max(1));
+            e.work = (0..nc).map(|j| std::array::from_fn(|k| wk[crate::learned_feat::WORK_F * j + k])).collect();
+            e.chunk_pos = (0..nc).map(|j| { let w = nodes[NODE_F4 * (first + j) + 13]; [w[0], w[1], w[2]] }).collect();
+            out.push(e);
         }
         out
     }

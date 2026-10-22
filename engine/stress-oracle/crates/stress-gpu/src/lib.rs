@@ -53,6 +53,7 @@ pub mod methods;
 pub mod micro;
 pub mod gnn_probe;
 pub mod learned;
+pub mod learned_feat;
 
 /// What `build.rs` reflects from the generated WGSL: how many storage buffers each module's
 /// group 0 declares, and which group-0 bindings each entry point uses.
@@ -232,26 +233,46 @@ pub mod shaders {
     pub const LEARNED: ShaderSet = shader_set!(
         "learned",
         [
-            ("learned_decode", (256, 1, 1)),
-            ("learned_clear", (256, 1, 1)),
-            ("learned_select", (256, 1, 1)),
+            ("learned_decode", (64, 1, 1)),
+            ("learned_clear", (64, 1, 1)),
+            ("learned_select", (64, 1, 1)),
             ("learned_debris", (64, 1, 1)),
-            ("learned_compact", (1024, 1, 1)),
-            ("learned_count_bonds", (256, 1, 1)),
-            ("learned_gather_chunks", (256, 1, 1)),
-            ("learned_gather_bonds", (256, 1, 1)),
+            ("learned_compact", (64, 1, 1)),
+            ("learned_count_bonds", (64, 1, 1)),
+            ("learned_gather_chunks", (64, 1, 1)),
+            ("learned_gather_bonds", (64, 1, 1)),
             ("learned_gather_impactors", (32, 1, 1)),
-            ("learned_finish", (256, 1, 1)),
-            ("learned_stub", (256, 1, 1)),
+            ("learned_finish", (64, 1, 1)),
+            ("learned_stub", (64, 1, 1)),
             ("learned_gate", (64, 1, 1)),
-            ("learned_check", (256, 1, 1)),
-            ("learned_apply_bonds", (256, 1, 1)),
+            ("learned_check", (64, 1, 1)),
+            ("learned_apply_bonds", (64, 1, 1)),
             ("learned_apply_bodies", (64, 1, 1)),
             ("learned_apply_impactors", (32, 1, 1)),
             ("learned_place", (64, 1, 1)),
             ("learned_tally_apply", (1, 1, 1)),
             ("learned_tally", (1, 1, 1)),
-            ("learned_adopt", (256, 1, 1)),
+            ("learned_adopt", (64, 1, 1)),
+        ]
+    );
+    /// The learned impact model's input features (`learned_feat.slang`).
+    pub const LEARNED_FEAT: ShaderSet = shader_set!(
+        "learned_feat",
+        [
+            ("feat_map", (64, 1, 1)),
+            ("feat_keys", (64, 1, 1)),
+            ("feat_brow", (64, 1, 1)),
+            ("feat_contacts", (64, 1, 1)),
+            ("feat_scales", (64, 1, 1)),
+            ("feat_summ", (64, 1, 1)),
+            ("feat_graph", (64, 1, 1)),
+            ("feat_ic", (64, 1, 1)),
+            ("feat_cracked_find", (64, 1, 1)),
+            ("feat_cracked", (64, 1, 1)),
+            ("feat_sc", (64, 1, 1)),
+            ("feat_prefix", (1, 1, 1)),
+            ("feat_nodes", (64, 1, 1)),
+            ("feat_bonds", (64, 1, 1)),
         ]
     );
     pub const SPLIT: ShaderSet = shader_set!("split", [("split_components", (256, 1, 1)), ("split_children", (64, 1, 1)), ("split_frames", (64, 1, 1)), ("split_children_group", (64, 1, 1))]);
@@ -264,7 +285,7 @@ pub mod shaders {
     /// Every set (each Slang file with entry points).
     pub const ALL: &[ShaderSet] = &[
         WORLD_IC, SMOKE, STRESS_STEP, JOINT_TEST, WORLD, STRESS_RENDER, DESTRUCTION_RENDER, COUPLING, RESIDENT, CASCADE, PLAN, LAYOUT, SPAWN, COLLIDERS, PASS, PASSLOG, ROUTING, PUNCH, SPLIT,
-        HUD_OVERLAY, THRESHOLD, GNN_PROBE, GNN_PROBE_F16, LEARNED,
+        HUD_OVERLAY, THRESHOLD, GNN_PROBE, GNN_PROBE_F16, LEARNED, LEARNED_FEAT,
     ];
 }
 

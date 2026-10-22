@@ -132,11 +132,23 @@ impl GpuWorld {
                     let slot = e.body_slot(BodyKey::Impactor(i))?;
                     let p = punch_list.iter().find(|p| p.0 == slot)?;
                     let half = match imp.shape {
-                        stress_ref::scene::ImpactorShape::Box { half_extents } => stress_ref::math::Vec3::from_array(half_extents).norm(),
-                        stress_ref::scene::ImpactorShape::Sphere { radius } => radius,
+                        stress_ref::scene::ImpactorShape::Box { half_extents } => half_extents,
+                        stress_ref::scene::ImpactorShape::Sphere { radius } => [radius; 3],
                     };
                     let m = &imp.inertia.m;
-                    Some(crate::learned::ImpactorInfo { body: slot, bound: p.1, face: p.2, mass: p.3, inertia: [m[0][0] as f32, m[1][1] as f32, m[2][2] as f32], modulus: p.4, half_norm: half as f32 })
+                    let scale = self.scene.sim.stiffness_scale;
+                    Some(crate::learned::ImpactorInfo {
+                        body: slot,
+                        bound: p.1,
+                        face: p.2,
+                        mass: p.3,
+                        inertia: [m[0][0] as f32, m[1][1] as f32, m[2][2] as f32],
+                        modulus: p.4,
+                        half: half.map(|h| h as f32),
+                        modulus_scaled: (imp.material.youngs_modulus * scale) as f32,
+                        friction: imp.material.friction as f32,
+                        crushable: imp.crush.is_some(),
+                    })
                 })
                 .collect()
         } else {
@@ -156,11 +168,18 @@ impl GpuWorld {
                 if !crate::gpu_frame() {
                     return Err("STRESS_IMPACT_PUNCH=learned needs the frame's GPU split passes (STRESS_GPU_LAYOUT=1 STRESS_GPU_FRAME=1, or a profile that turns them on)".into());
                 }
-                self.learned = Some(crate::learned::Learned::new(gpu, stub));
+                let mut l = crate::learned::Learned::new(gpu, stub);
+                let map = crate::learned_feat::ColumnMap::new(&crate::learned_feat::schema_columns())?;
+                let cap = (self.solver.routing_inputs().bond_dyn.size() / std::mem::size_of::<crate::solver::BondDyn>() as u64) as u32;
+                let world = self.with_shell(|w| w.standalone_copy());
+                l.set_features(gpu, &world, map, cap)?;
+                self.learned = Some(l);
             }
             let cap = self.solver.island_cap().max(self.solver.mirror.clusters.len()) as u32 + 1;
             let chunks = self.solver.gpu_chunks().len() as u32;
+            let frame = self.frame as u32;
             let l = self.learned.as_mut().expect("learned batch");
+            l.frame = frame;
             l.set_impactors(gpu, &learned_list);
             if !l.pending {
                 l.ensure(gpu, cap, chunks);
@@ -751,8 +770,9 @@ impl GpuWorld {
             }
             let learned_part = parts.len();
             if let Some(l) = learned.filter(|_| frame_mode) {
-                parts.push(l.range());
+                parts.extend(l.ranges());
             }
+            let learned_parts = parts.len() - learned_part;
             // `STRESS_GPU_DET_END=1`: the frame's ingest output and the engine's bodies in
             // this same read (no sync of their own), hashed below.
             let det_end = std::env::var("STRESS_GPU_DET_END").is_ok() && first == 0;
@@ -811,7 +831,7 @@ impl GpuWorld {
             }
             if frame_mode {
                 if let Some(l) = self.learned.as_mut().filter(|_| self.tiered) {
-                    l.follow(&read[learned_part], self.frame as u64, learned_apply, learned_batch)?;
+                    l.follow(&read[learned_part..learned_part + learned_parts], self.frame as u64, learned_apply, learned_batch)?;
                 }
             }
             if frame_mode {

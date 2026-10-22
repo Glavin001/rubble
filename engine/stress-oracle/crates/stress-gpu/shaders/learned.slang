@@ -35,6 +35,9 @@
 //          3 (gravity xyz, chunk nodes bits)
 //          4 (first bond bits, bonds bits, decode flags bits, fallback reason bits)
 //          5 (centre of mass (world), impactor mask bits)
+//          7 window-end counts (`learned_apply_bonds`)
+//          8 (first contact row bits, contact rows bits, -, largest contact speed) (learned_feat)
+//          9 (median live bond area, live G_f·A, plug G_f·A, -) (learned_feat)
 //          6 (first call island bits, call islands bits, chunk base bits, impactor base bits):
 //            the call's first chunk and impactor in the network's global order (every
 //            call's chunks, then every call's impactors: `batch.collate`'s)
@@ -60,12 +63,13 @@ import common;
 import joint;
 import bonds;
 
-static const uint CALL_F4 = 8;
+static const uint CALL_F4 = 10;
 static const uint NODE_F4 = 14;
 static const uint BOND_F4 = 2;
 static const uint CISL_U4 = 2;
-static const uint IMP_F4 = 3;
-static const uint G = 256;
+static const uint IMP_F4 = 4;
+// 64 threads per group (see learned_feat.slang: Metal caps a heavy pipeline's group size).
+static const uint G = 64;
 static const uint NONE = 0xffffffffu;
 
 // calls[2].y flags
@@ -80,6 +84,7 @@ static const uint DEC_NONFINITE = 4;
 static const uint FB_NONFINITE = 1;
 static const uint FB_INFEASIBLE = 2;
 static const uint FB_RANGE = 4;       // an input outside the model's range (speed over c, size)
+static const uint FB_DRY = 16;        // STRESS_LEARNED_DRY: not applied (an export's mode)
 
 // ctl words
 static const uint CTL_PENDING = 0;    // 1: a decoded batch waits for its window end
@@ -126,7 +131,7 @@ struct LearnedParams
     uint debris;          // 1: STRESS_DEBRIS_ROUTING (islands launched debris reaches join)
     uint max_cisl;
     uint chunk_count;     // layout chunks (`chunk_node`)
-    uint pad0;
+    float speed_ref;      // the tiered impact speed, exact (the reference speed's floor)
     // The network's outputs (`lout`, P2's outputs.npz shapes, global node order): float
     // offsets of chunk_out [Nc,12], imp_out [Ni,12], bond_log_q [E], bond_ddamage [E];
     // and of bond_time_logits [E,8].
@@ -141,10 +146,11 @@ struct LearnedParams
 [[vk::binding(2, 0)]] RWStructuredBuffer<float4> calls;
 [[vk::binding(3, 0)]] RWStructuredBuffer<float4> nodes;
 [[vk::binding(4, 0)]] RWStructuredBuffer<float4> bonds;
-// Per island: (impactor mask, call, -, -).
+// Per island 4 uint4: (impactor mask, call, live bonds, -), then as float bits its bounds lo,
+// hi, and its launch (debris routing: 2 (v_impactor - v_island) dt, launched).
 [[vk::binding(5, 0)]] RWStructuredBuffer<uint4> isl;
-// Per island 3 float4: bounds lo, hi, and its velocity (debris routing).
-[[vk::binding(6, 0)]] RWStructuredBuffer<float4> islf;
+// Per call island 2 float4: (centre of mass (world), mass), (velocity, anchored) (learned_feat).
+[[vk::binding(6, 0)]] RWStructuredBuffer<float4> cislf;
 [[vk::binding(7, 0)]] RWStructuredBuffer<uint4> cisl;
 // Per layout chunk: its call node + 1 (0: none), while a decoded batch waits.
 [[vk::binding(8, 0)]] RWStructuredBuffer<uint> chunk_node;
@@ -243,6 +249,9 @@ groupshared uint g_scan[G];
 
 void reduce_store(uint t, float4 a, float4 b, float4 c, float4 d)
 {
+    // A barrier first: the compiler may sink the last call's read of the result past its
+    // trailing barrier, so no thread may overwrite the array until every thread has read it.
+    GroupMemoryBarrierWithGroupSync();
     g_red[0][t] = a;
     g_red[1][t] = b;
     g_red[2][t] = c;
@@ -281,7 +290,7 @@ groupshared float g_lambda[6];
 // ------------------------------------------------------------------ decode
 
 [shader("compute")]
-[numthreads(256, 1, 1)]
+[numthreads(64, 1, 1)]
 void learned_decode(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
     uint g = group.x;
@@ -720,7 +729,7 @@ float3 chunk_world(Frame f, uint k)
 
 // The last batch's chunk map emptied and its pending flag cleared (after its window end).
 [shader("compute")]
-[numthreads(256, 1, 1)]
+[numthreads(64, 1, 1)]
 void learned_clear(uint3 thread: SV_GroupThreadID)
 {
     uint t = thread.x;
@@ -747,7 +756,7 @@ groupshared float3 g_hi[G];
 // impact speed (the punch's sweep, punch.slang), as a mask; its bounds and, for debris
 // routing, its launch: 2 (v_impactor - v_island) dt (`select_islands`' elastic bound).
 [shader("compute")]
-[numthreads(256, 1, 1)]
+[numthreads(64, 1, 1)]
 void learned_select(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
     uint i = group.x;
@@ -759,8 +768,8 @@ void learned_select(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     {
         if (t == 0)
         {
-            isl[i] = uint4(0, NONE, 0, 0);
-            islf[3 * i + 2] = float4(0.0);
+            isl[4 * i] = uint4(0, NONE, 0, 0);
+            isl[4 * i + 3] = uint4(0);
         }
         return;
     }
@@ -833,10 +842,10 @@ void learned_select(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
             }
         }
     }
-    isl[i] = uint4(mask, NONE, 0, 0);
-    islf[3 * i] = float4(lo, 0.0);
-    islf[3 * i + 1] = float4(hi, 0.0);
-    islf[3 * i + 2] = float4(launch, launched ? 1.0 : 0.0);
+    isl[4 * i] = uint4(mask, NONE, 0, 0);
+    isl[4 * i + 1] = asuint(float4(lo, 0.0));
+    isl[4 * i + 2] = asuint(float4(hi, 0.0));
+    isl[4 * i + 3] = asuint(float4(launch, launched ? 1.0 : 0.0));
 }
 
 // ------------------------------------------------------------------ learned_debris
@@ -850,27 +859,27 @@ void learned_debris(uint3 id: SV_DispatchThreadID)
 {
     uint j = id.x;
     uint live = counters[0];
-    if (params.debris == 0 || j >= live || route[0] == 0 || isl[j].x != 0)
+    if (params.debris == 0 || j >= live || route[0] == 0 || isl[4 * j].x != 0)
         return;
-    float3 lo = islf[3 * j].xyz;
-    float3 hi = islf[3 * j + 1].xyz;
+    float3 lo = asfloat(isl[4 * j + 1]).xyz;
+    float3 hi = asfloat(isl[4 * j + 2]).xyz;
     if (!(lo.x <= hi.x))
         return;
     uint mask = 0;
     for (uint i = 0; i < live; i++)
     {
-        float4 l = islf[3 * i + 2];
+        float4 l = asfloat(isl[4 * i + 3]);
         if (l.w == 0.0 || i == j)
             continue;
-        float3 a = islf[3 * i].xyz;
-        float3 b = islf[3 * i + 1].xyz;
+        float3 a = asfloat(isl[4 * i + 1]).xyz;
+        float3 b = asfloat(isl[4 * i + 2]).xyz;
         float3 slo = min(a, a + l.xyz) - float3(1e-3);
         float3 shi = max(b, b + l.xyz) + float3(1e-3);
         if (all(slo <= hi) && all(lo <= shi))
-            mask |= isl[i].x;
+            mask |= isl[4 * i].x;
     }
     if (mask != 0)
-        isl[j] = uint4(mask, NONE, 0, 0);
+        isl[4 * j] = uint4(mask, NONE, 0, 0);
 }
 
 // ------------------------------------------------------------------ learned_compact
@@ -895,13 +904,13 @@ uint lowest_bit(uint m)
 // islands in island order, its nodes (the islands' chunks, then its impactors) and its live
 // bonds laid out; capacities checked (a batch over one is not made: `CTL_OVERFLOW`).
 [shader("compute")]
-[numthreads(1024, 1, 1)]
+[numthreads(64, 1, 1)]
 void learned_compact(uint3 thread: SV_GroupThreadID)
 {
     uint t = thread.x;
     uint live = group_uniform(counters[0], t);
     uint nimp = min(params.impactor_count, 32u);
-    for (uint i = t; i < live; i += 1024)
+    for (uint i = t; i < live; i += G)
         status[ST_ISLANDS + i] &= ~LEARNED_BIT;
     if (t < 32)
         g_label[t] = t;
@@ -936,14 +945,14 @@ void learned_compact(uint3 thread: SV_GroupThreadID)
     {
         uint used = 0;
         for (uint i = 0; i < live; i++)
-            used |= isl[i].x;
+            used |= isl[4 * i].x;
         g_used = used;
         for (uint iter = 0; iter < 32; iter++)
         {
             bool changed = false;
             for (uint i = 0; i < live; i++)
             {
-                uint m = isl[i].x;
+                uint m = isl[4 * i].x;
                 if (countbits(m) < 2)
                     continue;
                 uint lo = 32;
@@ -1000,9 +1009,9 @@ void learned_compact(uint3 thread: SV_GroupThreadID)
     {
         for (uint i = 0; i < live; i++)
         {
-            uint4 e = isl[i];
+            uint4 e = isl[4 * i];
             if (e.x != 0)
-                isl[i] = uint4(e.x, g_call_of[g_label[lowest_bit(e.x)]], e.z, 0);
+                isl[4 * i] = uint4(e.x, g_call_of[g_label[lowest_bit(e.x)]], e.z, 0);
         }
     }
     if (t != 0)
@@ -1013,7 +1022,7 @@ void learned_compact(uint3 thread: SV_GroupThreadID)
     uint routed = 0;
     for (uint i = 0; i < live; i++)
     {
-        uint4 e = isl[i];
+        uint4 e = isl[4 * i];
         if (e.x == 0 || e.y >= 64)
             continue;
         Island rec = islands[i];
@@ -1048,9 +1057,15 @@ void learned_compact(uint3 thread: SV_GroupThreadID)
     // the per-call totals again (the loop above reused the arrays): from the call records
     bond_at = 0;
     cisl_at = 0;
-    uint chunk_base = 0, imp_base = 0;
+    uint chunk_base = 0, imp_base = 0, contact_at = 0;
     for (uint g = 0; g < min(ncalls, 64u); g++)
     {
+        uint nimp = countbits(asuint(calls[CALL_F4 * g + 5].w));
+        calls[CALL_F4 * g + 8] = float4(asfloat(contact_at), asfloat(0u), 0.0, 0.0);
+        calls[CALL_F4 * g + 9] = float4(0.0);
+        contact_at += nimp * asuint(calls[CALL_F4 * g + 6].y);
+        if (asuint(calls[CALL_F4 * g + 4].y) > 131072u)
+            over |= 64;
         calls[CALL_F4 * g + 4].x = asfloat(bond_at);
         calls[CALL_F4 * g + 6] = float4(asfloat(cisl_at), calls[CALL_F4 * g + 6].y, asfloat(chunk_base), asfloat(imp_base));
         chunk_base += asuint(calls[CALL_F4 * g + 3].w);
@@ -1075,7 +1090,7 @@ void learned_compact(uint3 thread: SV_GroupThreadID)
     // the call islands, in island order within each call
     for (uint i = 0; i < live; i++)
     {
-        uint4 e = isl[i];
+        uint4 e = isl[4 * i];
         if (e.x == 0 || e.y >= 64)
             continue;
         Island rec = islands[i];
@@ -1097,9 +1112,9 @@ void learned_compact(uint3 thread: SV_GroupThreadID)
     largs[2] = uint4((cisl_at + 63) / 64, 1, 1, 0);
 }
 
-// One group per routed island: its live bonds counted (`isl[i].z`).
+// One group per routed island: its live bonds counted (`isl[4 * i].z`).
 [shader("compute")]
-[numthreads(256, 1, 1)]
+[numthreads(64, 1, 1)]
 void learned_count_bonds(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
     uint i = group.x;
@@ -1107,7 +1122,7 @@ void learned_count_bonds(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID
     uint live = group_uniform(counters[0], t);
     if (i >= live)
         return;
-    uint4 e = isl[i];
+    uint4 e = isl[4 * i];
     if (group_uniform(route[0] == 0 || e.x == 0 ? 1u : 0u, t) != 0)
         return;
     Island rec = islands[i];
@@ -1117,6 +1132,7 @@ void learned_count_bonds(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID
         if (connected(bond_dyn[bi].js, bond_static[bi].law.stiff1.w != 0.0))
             nb++;
     }
+    GroupMemoryBarrierWithGroupSync();
     g_scan[t] = nb;
     GroupMemoryBarrierWithGroupSync();
     for (uint s = G / 2; s > 0; s >>= 1)
@@ -1126,14 +1142,14 @@ void learned_count_bonds(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID
         GroupMemoryBarrierWithGroupSync();
     }
     if (t == 0)
-        isl[i] = uint4(e.x, e.y, g_scan[0], e.w);
+        isl[4 * i] = uint4(e.x, e.y, g_scan[0], e.w);
 }
 
 // ------------------------------------------------------------------ gathers
 
 // One group per call island: its chunks' frame-start state (world), and the chunk map.
 [shader("compute")]
-[numthreads(256, 1, 1)]
+[numthreads(64, 1, 1)]
 void learned_gather_chunks(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
     uint e = group.x;
@@ -1145,6 +1161,11 @@ void learned_gather_chunks(uint3 group: SV_GroupID, uint3 thread: SV_GroupThread
     uint i = c0.x;
     Island rec = islands[i];
     Frame f = island_frame(i);
+    if (t == 0)
+    {
+        cislf[2 * e] = float4(f.com, rec.com.w);
+        cislf[2 * e + 1] = float4(f.v, c1.w != 0 ? 1.0 : 0.0);
+    }
     for (uint c = t; c < c0.z; c += G)
     {
         uint k = rec.range.x + c;
@@ -1171,7 +1192,7 @@ void learned_gather_chunks(uint3 group: SV_GroupID, uint3 thread: SV_GroupThread
 
 // One group per call island: its live bonds, in bond order (a group scan per block).
 [shader("compute")]
-[numthreads(256, 1, 1)]
+[numthreads(64, 1, 1)]
 void learned_gather_bonds(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
     uint e = group.x;
@@ -1188,6 +1209,7 @@ void learned_gather_bonds(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadI
     {
         uint bi = base + t;
         bool live = bi < w && connected(bond_dyn[bi].js, bond_static[bi].law.stiff1.w != 0.0);
+        GroupMemoryBarrierWithGroupSync();
         g_scan[t] = live ? 1u : 0u;
         GroupMemoryBarrierWithGroupSync();
         for (uint step = 1; step < G; step <<= 1)
@@ -1241,6 +1263,7 @@ void learned_gather_impactors(uint3 group: SV_GroupID, uint3 thread: SV_GroupThr
 // ------------------------------------------------------------------ learned_finish
 
 groupshared float g_sort[4096];
+groupshared float4 g_scalars;
 
 // Sorts g_sort[0..n) ascending (n <= 4096; padded with +inf to a power of two).
 void sort_group(uint t, uint n)
@@ -1285,7 +1308,7 @@ float median_sorted(uint n)
 // One group per call: its centre of mass (positions made relative to it), the scales the
 // decode uses (L, m, v, dt, E_in; the calls schema's definitions), its freedom.
 [shader("compute")]
-[numthreads(256, 1, 1)]
+[numthreads(64, 1, 1)]
 void learned_finish(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
     uint g = group.x;
@@ -1314,7 +1337,8 @@ void learned_finish(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     bool anchored = b.w > 0.0;
     // reference speed: the routing speed, every body's speed relative to the centre of
     // mass and its rim speed, the impactors' closing speeds on the call's chunks
-    float vmax = params.speed;
+    // (the impactors' closing speeds on the call's islands: `feat_contacts`, calls[8].w)
+    float vmax = max(params.speed_ref, calls[CALL_F4 * g + 8].w);
     float ke_in = 0.0;
     float wg = 0.0;
     for (uint j = t; j < n; j += G)
@@ -1327,16 +1351,12 @@ void learned_finish(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         uint id = asuint(node(k, 12).x);
         float rim = imp ? imps[IMP_F4 * id + 2].x : length(chunks[id].half.xyz);
         vmax = max(vmax, max(length(v - vcom), length(w) * rim));
-        if (imp)
-        {
-            for (uint jc = 0; jc < nc; jc++)
-                vmax = max(vmax, dot(v - node(first + jc, 3).xyz, normalize(node(first + jc, 0).xyz - p.xyz)));
-        }
         float3x3 i0 = world_inertia(node(k, 1), node(k, 2).xyz);
         ke_in += 0.5 * (p.w * dot(v, v) + dot(w, mul(i0, w)));
         wg += p.w * dot(v * params.dt + params.gravity.xyz * (0.5 * params.dt * params.dt), params.gravity.xyz);
     }
     // the largest of every thread's
+    GroupMemoryBarrierWithGroupSync();
     g_sort[t] = vmax;
     GroupMemoryBarrierWithGroupSync();
     for (uint s = G / 2; s > 0; s >>= 1)
@@ -1360,18 +1380,24 @@ void learned_finish(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         g_sort[j] = 8.0 * h.x * h.y * h.z;
     }
     sort_group(t, ns);
-    float L = pow(median_sorted(ns), 1.0 / 3.0);
+    // medians kept in their own words (a read of the sorted array may be moved past a
+    // barrier by the compiler, and the array is reused)
+    if (t == 0)
+        g_scalars.x = pow(median_sorted(ns), 1.0 / 3.0);
     GroupMemoryBarrierWithGroupSync();
     for (uint j = t; j < ns; j += G)
         g_sort[j] = node(first + j, 0).w;
     sort_group(t, ns);
-    float mmed = median_sorted(ns);
+    if (t == 0)
+        g_scalars.y = median_sorted(ns);
     GroupMemoryBarrierWithGroupSync();
+    float L = g_scalars.x;
+    float mmed = g_scalars.y;
     for (uint j = t; j < n; j += G)
     {
         uint k = first + j;
         float4 p = node(k, 0);
-        nodes[NODE_F4 * k + 13] = float4(p.xyz, 0.0);
+        nodes[NODE_F4 * k + 13] = float4(p.xyz, node(k, 13).w);
         nodes[NODE_F4 * k] = float4(p.xyz - com, p.w);
     }
     if (t == 0)
@@ -1398,12 +1424,12 @@ void learned_finish(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 //     radius of its path from the struck depth on are a plug; the bonds holding the plug
 //     break; the plug and the impactor leave at their common (inelastic) velocity.
 [shader("compute")]
-[numthreads(256, 1, 1)]
+[numthreads(64, 1, 1)]
 void learned_stub(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
     uint g = group.x;
     uint t = thread.x;
-    if (group_uniform(g >= ctl[CTL_CALLS] || params.stub == 0 ? 1u : 0u, t) != 0)
+    if (group_uniform(g >= ctl[CTL_CALLS] || (params.stub & 0xffu) == 0 ? 1u : 0u, t) != 0)
         return;
     uint first = asuint(calls[CALL_F4 * g + 2].z);
     uint n = group_uniform(asuint(calls[CALL_F4 * g + 2].w), t);
@@ -1426,14 +1452,14 @@ void learned_stub(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     }
     DeviceMemoryBarrierWithGroupSync();
     // 3 nonfinite (a test of the fallback gate): every output NaN
-    if (group_uniform(params.stub == 3 ? 1u : 0u, t) != 0)
+    if (group_uniform((params.stub & 0xffu) == 3 ? 1u : 0u, t) != 0)
     {
         float nan = float_bits(0x7fc00000u);
         for (uint j = t; j < n; j += G)
             nodes[NODE_F4 * (first + j) + 5] = float4(nan);
         return;
     }
-    if (group_uniform(params.stub == 2 ? 1u : 0u, t) == 0)
+    if (group_uniform((params.stub & 0xffu) == 2 ? 1u : 0u, t) == 0)
         return;
     // the plug of the call's first impactor (the call's nodes after its chunks)
     uint ki = first + nc;
@@ -1456,6 +1482,7 @@ void learned_stub(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         if (length(r - dir * along) <= face + h && along > 0.0)
             best = min(best, along);
     }
+    GroupMemoryBarrierWithGroupSync();
     g_sort[t] = best;
     GroupMemoryBarrierWithGroupSync();
     for (uint s = G / 2; s > 0; s >>= 1)
@@ -1478,7 +1505,6 @@ void learned_stub(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         nodes[NODE_F4 * k + 12].y = node(k, 12).y; // (unchanged)
         if (plug)
             sa += float4(node(k, 3).xyz * node(k, 0).w, node(k, 0).w);
-        g_scan[t] = 0;
     }
     float4 a, b, c, d;
     reduce_store(t, sa, float4(0.0), float4(0.0), float4(0.0));
@@ -1559,11 +1585,20 @@ void learned_gate(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
         fb |= FB_NONFINITE;
     if ((dec & DEC_BOUND_INFEASIBLE) != 0)
         fb |= FB_INFEASIBLE;
+    // STRESS_LEARNED_DRY=1: no call stands (a feature export's mode)
+    if ((params.stub & 0x100u) != 0)
+        fb |= FB_DRY;
     uint e0 = asuint(calls[CALL_F4 * g + 6].x);
     uint ne = asuint(calls[CALL_F4 * g + 6].y);
     uint mask = asuint(calls[CALL_F4 * g + 5].w);
     if (t == 0)
         calls[CALL_F4 * g + 4] = float4(c4.x, c4.y, c4.z, asfloat(fb));
+    if (fb == FB_DRY)
+    {
+        // a dry call still takes its islands from the punch (the state stays the batch's)
+        for (uint e = e0 + t; e < e0 + ne; e += 64)
+            status[ST_ISLANDS + cisl[CISL_U4 * e].x] |= LEARNED_BIT;
+    }
     if (fb != 0)
     {
         uint first = asuint(calls[CALL_F4 * g + 2].z);
@@ -1647,7 +1682,7 @@ groupshared uint g_broke;
 // One group per call (pending): a call that stood is checked current at its window end
 // (its islands as it saw them); a stale one is marked (not applied, its chunks unmapped).
 [shader("compute")]
-[numthreads(256, 1, 1)]
+[numthreads(64, 1, 1)]
 void learned_check(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
     uint g = group.x;
@@ -1688,7 +1723,7 @@ void learned_check(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 // damage raised to the decoded value (kept below 1), its broken islands marked
 // disconnected for the split pass.
 [shader("compute")]
-[numthreads(256, 1, 1)]
+[numthreads(64, 1, 1)]
 void learned_apply_bonds(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
     uint g = group.x;
@@ -1730,6 +1765,7 @@ void learned_apply_bonds(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID
             bond_dyn[bi] = dyn;
         }
     }
+    GroupMemoryBarrierWithGroupSync();
     g_scan[t] = count;
     GroupMemoryBarrierWithGroupSync();
     for (uint s = G / 2; s > 0; s >>= 1)
@@ -2008,7 +2044,7 @@ void learned_tally()
 // body-frame outputs, each live bond's log q̂, Δdamage and time bin (argmax + 1; ties: the
 // first, as numpy's).
 [shader("compute")]
-[numthreads(256, 1, 1)]
+[numthreads(64, 1, 1)]
 void learned_adopt(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
     uint g = group.x;
