@@ -293,3 +293,33 @@ each family's measured transition, 8 members each (160 events, about 1.1 GB with
 
 It runs after chunk B, under a 28.3 GB guard. Chunk B (`viability-v1c.sh`) records under
 a 27.3 GB guard so its own `/5` calls fit. The whole tree stays under 29 GB.
+
+**End state at the budget (2026-10-22, about 08:40 ADT).**
+
+The guard had undercounted. The generator summed file lengths (26.2 GB) while the disk
+held 28.45 GB (`du`, allocated blocks), because a recording's many small files take about
+8% more than their lengths. The guard now counts allocated blocks (183ae3d3). Chunk B was
+paused cleanly at that point, and its `/5` calls were built in batches, validation and test
+first, while the tree stayed under 28.95 GB. The tree is now 28.96 GB, measured as decimal
+GB on allocated blocks. (`du -h` shows binary GiB, about 27.0.)
+
+Recorded (982 viability events, every frame, full state):
+- chunk A: 314 train + 26 val and 2 test ensembles, including the extra validation;
+- ballistic: 4 training families as single runs (10 speeds each), plus the val
+  (`bl_ground_thick`) and test (`bl_anchored_sides`) families as 8-member ensembles at
+  10 speeds;
+- chunk B: anchored t1 (134 events) and anchored t2 (110 events).
+
+`/5` calls in `calls-v5` (5.3 GB, 850 events): 420 train; 310 val in 39 ensembles; 120
+test in 15 ensembles. 132 chunk B training events are recorded without calls, which are
+rebuildable when space allows.
+
+Not recorded (the budget):
+- chunk B's standing-wall jobs, and the rest of anchored t2 B;
+- the training ballistic families' ensembles (`viability-v1d.sh` is ready to run).
+
+**Where more space could come from, losslessly.**
+- The calls repeat each frame's state: call f's `fs_*_out` is call f+1's `fs_*_in` for
+  the same island. Referencing the previous call instead would save about a third of
+  `calls-v5`, about 1.7 GB.
+- If the user's 30 GB means `du -h` units (GiB), the budget is 32.2 GB.
