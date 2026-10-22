@@ -231,3 +231,25 @@ fn the_sealed_extrapolation_splits_lie_beyond_the_training_ranges() {
     assert_eq!(sealed.len(), 12 * 8, "every sealed configuration is an 8-member ensemble");
     assert!(sealed.iter().all(|r| r.parameters["split"] == "sealed" && r.parameters["extrapolation"] == "speed"));
 }
+
+#[test]
+fn stage2_recipes_place_every_load_kind_clear_of_the_structure() {
+    use stress_learned::stage2::stage2_recipes;
+    for fam in ["cuboid_house", "masonry_house", "arch"] {
+        for tier in [3u32, 4, 5] {
+            let r = stage2_recipes(fam, tier, 3, 5).unwrap();
+            for x in &r {
+                let kinds: Vec<&str> = x.parameters["loads"].as_array().unwrap().iter().map(|l| l["kind"].as_str().unwrap()).collect();
+                match tier {
+                    3 => assert!(kinds.contains(&"resting") && kinds.contains(&"push") && kinds.contains(&"impact"), "{kinds:?}"),
+                    4 => assert!(kinds.contains(&"repeat") && x.scene.loads.iter().any(|l| matches!(l, stress_ref::scene::LoadDesc::Blast { .. }))),
+                    _ => assert!((5..=12).contains(&kinds.len())),
+                }
+                assert_eq!(kinds.len(), x.scene.impactors.len());
+                assert!(x.scene.ground.is_some());
+                assert!(x.scene.bodies[0].chunks.iter().any(|c| c.support != stress_ref::scene::Support::None));
+            }
+        }
+    }
+    assert!(stage2_recipes("bridge", 3, 1, 1).is_err());
+}

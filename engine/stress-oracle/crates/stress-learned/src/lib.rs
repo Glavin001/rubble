@@ -13,6 +13,7 @@ pub mod oracle;
 pub mod progress;
 pub mod procedural;
 pub mod provider_client;
+pub mod stage2;
 pub mod outcome_calls;
 pub mod outcome_decode;
 pub mod outcome_model;

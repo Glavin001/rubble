@@ -8,6 +8,8 @@
 //!       [--budget-gb G] [--min-free-gb F] [--no-thinning]
 //!       [--split sealed|train|val|test] [--extrapolation speed|mass|size|loads]
 //!
+//! Stage 2: `--catalog p1-stage2 --family cuboid_house|masonry_house|arch --tier 3|4|5`.
+//!
 //! The sealed set: `--split sealed` (every configuration an ensemble, every frame kept), with
 //! `--extrapolation` for the splits beyond the training ranges.
 //!
@@ -68,6 +70,12 @@ fn main() {
             wall_recipes(&family, tier, n, seed, &ranges).expect("recipes")
         }
         "m5" => m5_recipes(),
+        "p1-stage2" => {
+            let family = val("--family").expect("--family cuboid_house|masonry_house|arch");
+            let tier: u32 = val("--tier").map_or(3, |x| x.parse().expect("--tier"));
+            let n: usize = val("--n").map_or(6, |x| x.parse().expect("--n"));
+            stress_learned::stage2::stage2_recipes(&family, tier, n, seed).expect("stage-2 recipes")
+        }
         c => panic!("unknown catalog {c}"),
     };
     // Splits by layout group, and ensembles on every validation/test/sealed configuration
