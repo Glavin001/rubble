@@ -104,6 +104,20 @@ One short round is mixed: one failure fixed, one improved, two regressed. Rounds
 fine-tune to saturation (10k steps) on all relabels so far before each rollout
 (`scripts/dagger_rounds_n10.sh`).
 
+### Full-state (`/5`) heads on P1's 3-event sample
+
+Pooled loss, 3k steps (`runs/overfit-v5/sample3-pooled`):
+- breaks 143/0/0, fragments identical, mode accuracy 1.0;
+- but several fields ended worse than persistence: ductility_c 28×, strain rate 4×,
+  ductility 2.7×, peak margin 1.8×.
+- Cause: one averaged term over 15 fields gave rarely changing fields almost no gradient.
+
+Per-field terms, each normalised by its own persistence loss (3e9ba1d7), 6k steps:
+- breaks 143/2/0, fragments identical, mode 1.0, reactions 0.21× persistence;
+- every bond field now beats persistence: κ 0.12, κ_c 0.05, fail_ts / fail_c 0.10,
+  crush 0.04, dissipated 0.05, peak margin 0.11, ductility 0.10, ductility_c 0.54,
+  plastic 0.08–0.13, governing stress 0.09, strain rate 0.33, utilisation 0.20.
+
 ## Bugs found and fixed
 
 1. **The survivor side of the break decision was not trained as a decision** (dd068fd4).
