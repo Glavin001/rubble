@@ -2674,6 +2674,11 @@ pub struct SolverIsland {
 }
 
 impl SolverIsland {
+    /// Empty the pure caches (`step_bounds`).
+    pub fn clear_caches(&mut self) {
+        self.step_bounds.clear();
+    }
+
     /// The solver's per-chunk scratch (`f_int`, `turns`) from `base`: fields a full-state
     /// model does not predict (decoded state `/2`).
     pub fn take_scratch(&mut self, base: &SolverIsland) {

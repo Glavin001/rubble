@@ -447,7 +447,7 @@ pub fn decode(ev: &CallEvent, ci: usize, out: &Outputs, cfg: &DecodeConfig, meta
                     best = j;
                 }
             }
-            bonds_broken.push(DecodedBreak { key, bin: best as u32 + 1 });
+            bonds_broken.push(DecodedBreak { key, bin: best as u32 + 1, time: None, order: None });
         } else {
             let d0 = bf[2 * k * nbf + dcol];
             let d = (d0 + out.bond_ddamage[k]).min((1.0f64 - 1e-6) as f32);

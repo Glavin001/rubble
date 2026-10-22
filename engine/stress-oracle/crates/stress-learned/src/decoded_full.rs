@@ -165,6 +165,12 @@ fn rows_by_key(out: &FullOut) -> Result<HashMap<i64, &[f64]>, String> {
 /// The island's frame-end state from the `/1`-decoded state `decoded` (the frame start with
 /// the `/1` decode applied), the model's predicted columns `outs`, and `base` for the rest.
 pub fn apply_full(decoded: &IslandState, base: &IslandState, outs: &[FullOut]) -> Result<IslandState, String> {
+    apply_full_with(decoded, base, outs, ids_from_base())
+}
+
+/// `apply_full` with the bodies' bookkeeping (id, parent, list place) from the base
+/// (`ids_from_base`) or the decode's own.
+pub fn apply_full_with(decoded: &IslandState, base: &IslandState, outs: &[FullOut], ids_from_base: bool) -> Result<IslandState, String> {
     let mut st = decoded.clone();
     let by_kind: HashMap<&str, &FullOut> = outs.iter().map(|o| (o.kind.as_str(), o)).collect();
     // Bonds: the base's bond, the predicted columns over it; alive must be the decode's.
@@ -197,9 +203,12 @@ pub fn apply_full(decoded: &IslandState, base: &IslandState, outs: &[FullOut]) -
             nb.fail_ts = nb.fail_ts.min(SURVIVOR_DAMAGE_MAX);
             nb.fail_c = nb.fail_c.min(SURVIVOR_DAMAGE_MAX);
         } else {
-            // A disconnected bond's margin is reached, as `apply_decoded` breaks one.
-            nb.fail_ts = nb.fail_ts.max(b.fail_ts).max(1.0);
-            nb.peak_fail_margin = nb.peak_fail_margin.max(nb.fail_margin());
+            // A disconnected bond's margin is reached (as `apply_decoded` breaks one) when the
+            // model's is not.
+            if nb.fail_margin() < 1.0 {
+                nb.fail_ts = nb.fail_ts.max(1.0);
+                nb.peak_fail_margin = nb.peak_fail_margin.max(nb.fail_margin());
+            }
         }
         if nb.connected() != connected {
             return Err(format!("bond ({s}, {bi}): the model's state is {} where the decode's is {}", if nb.connected() { "connected" } else { "disconnected" }, if connected { "connected" } else { "disconnected" }));
@@ -217,45 +226,50 @@ pub fn apply_full(decoded: &IslandState, base: &IslandState, outs: &[FullOut]) -
             *ch = from_value(&v)?;
         }
     }
+    // Impactors: the decoded impactor with the predicted columns over it (`fs_impactor_out`,
+    // keyed by `keys::impactor_key`).
+    if let Some(o) = by_kind.get("impactor") {
+        let rows = rows_by_key(o)?;
+        for (i, imp) in st.impactors.iter_mut() {
+            let key = stress_ref::keys::impactor_key(*i);
+            let row = rows.get(&key).ok_or_else(|| format!("fs_impactor_out lacks impactor {key}"))?;
+            let mut v = to_value(&*imp)?;
+            write_row(&mut v, &o.columns, row)?;
+            *imp = from_value(&v)?;
+        }
+    }
     // Not predicted: the per-chunk world arrays, the solver scratch and the contact history.
     st.take_unpredicted(base);
-    // Cluster activity and its timer, where the base has the same body (a model that
-    // predicts the bodies, `fs_cluster_out`, set them already: `body_records`).
-    if by_kind.contains_key("cluster") {
-        // The body fields a model does not predict and the partition does not fix (P2): from
-        // the base's body with the same key (its lowest chunk key).
-        const FROM_BASE: &[&str] = &["explicit_window", "driven", "settled_load_norm", "window_utilization"];
-        let key_of = |c: &stress_ref::solver::Cluster| c.chunks.iter().map(|&k| stress_ref::keys::chunk_key(c.structure, k)).min();
-        let base_by_key: HashMap<i64, (Option<usize>, &stress_ref::solver::Cluster)> = base.solver.clusters.iter().filter_map(|(h, c)| key_of(c).map(|k| (k, (*h, c)))).collect();
-        for (hint, c) in st.solver.clusters.iter_mut() {
-            let Some(&(bh, b)) = key_of(c).and_then(|k| base_by_key.get(&k)) else { continue };
-            // The body's bookkeeping too (id, parent, its place in the body list): the
-            // oracle's trajectory depends on it (iteration order), and a decode that splits
-            // all of a frame's breaks at once numbers the bodies differently from the
-            // oracle's break-by-break splits.
-            (*hint, c.id, c.parent) = (bh, b.id, b.parent);
-            let (mut v, bv) = (to_value(&*c)?, to_value(b)?);
-            for f in FROM_BASE {
-                if let (Ok(dst), Some(src)) = (at_mut(&mut v, f), bv.as_map().and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some(f)).map(|(_, x)| x.clone()))) {
-                    *dst = src;
-                }
-            }
-            *c = from_value(&v)?;
-        }
-        st.solver.next_cluster_id = st.solver.next_cluster_id.max(base.solver.next_cluster_id);
-        let mut ids = std::collections::HashSet::new();
-        for (_, c) in &st.solver.clusters {
-            if !ids.insert(c.id) {
-                return Err(format!("decoded state /2: body id {} twice after taking the base's bookkeeping", c.id));
-            }
-        }
-        return Ok(st);
+    // Bodies: the fields a model does not predict and the partition does not fix (P2) from
+    // the base's body with the same key (its lowest chunk key); activity and its timer too
+    // unless the model predicts the bodies (`fs_cluster_out`, set by `body_records`); with
+    // `STRESS_FULL_IDS=base` (default) the bookkeeping (id, parent, list place) as well, with
+    // `decode` the decode's own (its breaks applied in time order number the bodies as the
+    // oracle's break-by-break splits do).
+    let mut from_base: Vec<&str> = vec!["explicit_window", "driven", "settled_load_norm", "window_utilization"];
+    if !by_kind.contains_key("cluster") {
+        from_base.extend(["activity", "active_timer"]);
     }
-    let acts: HashMap<u64, (stress_ref::solver::Activity, f64)> = base.solver.clusters.iter().map(|(_, c)| (c.id, (c.activity, c.active_timer))).collect();
-    for (_, c) in st.solver.clusters.iter_mut() {
-        if let Some(&(a, t)) = acts.get(&c.id) {
-            c.activity = a;
-            c.active_timer = t;
+    let key_of = |c: &stress_ref::solver::Cluster| c.chunks.iter().map(|&k| stress_ref::keys::chunk_key(c.structure, k)).min();
+    let base_by_key: HashMap<i64, (Option<usize>, &stress_ref::solver::Cluster)> = base.solver.clusters.iter().filter_map(|(h, c)| key_of(c).map(|k| (k, (*h, c)))).collect();
+    for (hint, c) in st.solver.clusters.iter_mut() {
+        let Some(&(bh, b)) = key_of(c).and_then(|k| base_by_key.get(&k)) else { continue };
+        if ids_from_base {
+            (*hint, c.id, c.parent) = (bh, b.id, b.parent);
+        }
+        let (mut v, bv) = (to_value(&*c)?, to_value(b)?);
+        for f in &from_base {
+            if let (Ok(dst), Some(src)) = (at_mut(&mut v, f), bv.as_map().and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some(f)).map(|(_, x)| x.clone()))) {
+                *dst = src;
+            }
+        }
+        *c = from_value(&v)?;
+    }
+    st.solver.next_cluster_id = st.solver.next_cluster_id.max(base.solver.next_cluster_id);
+    let mut ids = std::collections::HashSet::new();
+    for (_, c) in &st.solver.clusters {
+        if !ids.insert(c.id) {
+            return Err(format!("decoded state /2: body id {} twice", c.id));
         }
     }
     Ok(st)
@@ -267,7 +281,7 @@ pub fn apply_full(decoded: &IslandState, base: &IslandState, outs: &[FullOut]) -
 /// the ceiling of a full-state model's contract.
 pub fn columns_of_state(st: &IslandState, predicted: Option<&HashMap<String, Vec<String>>>) -> Result<Vec<FullOut>, String> {
     let mut outs = Vec::new();
-    let kinds: [(&str, Vec<(i64, Value)>); 3] = [
+    let kinds: [(&str, Vec<(i64, Value)>); 4] = [
         ("bond", st.solver.bonds.iter().map(|((s, _), b)| Ok((stress_ref::keys::bond_key(*s, b.source), to_value(b)?))).collect::<Result<_, String>>()?),
         ("chunk", st.solver.chunks.iter().map(|((s, c), ch)| Ok((stress_ref::keys::chunk_key(*s, *c), to_value(ch)?))).collect::<Result<_, String>>()?),
         // bodies by their lowest chunk key (`World::body_key`)
@@ -275,6 +289,7 @@ pub fn columns_of_state(st: &IslandState, predicted: Option<&HashMap<String, Vec
             "cluster",
             st.solver.clusters.iter().filter_map(|(_, c)| c.chunks.iter().map(|&k| stress_ref::keys::chunk_key(c.structure, k)).min().map(|k| (k, c))).map(|(k, c)| Ok((k, to_value(c)?))).collect::<Result<_, String>>()?,
         ),
+        ("impactor", st.impactors.iter().map(|(i, imp)| Ok((stress_ref::keys::impactor_key(*i), to_value(imp)?))).collect::<Result<_, String>>()?),
     ];
     for (kind, ents) in kinds {
         let rows: Vec<Vec<(String, f64)>> = ents
@@ -334,4 +349,87 @@ pub fn body_records(out: &FullOut) -> Result<HashMap<i64, stress_ref::world::Bod
         });
     }
     Ok(recs)
+}
+
+/// `STRESS_FULL_IDS=decode`: the bodies' ids, parents and list places are the decode's own
+/// (its breaks applied in time order, as the oracle splits); default `base`.
+pub fn ids_from_base() -> bool {
+    !std::env::var("STRESS_FULL_IDS").is_ok_and(|v| v == "decode")
+}
+
+/// The chunks' predicted hidden state (u, th, v, w in the body's frame) from `fs_chunk_out`
+/// when it has those columns (`World::derive_bodies` derives the bodies from them).
+#[allow(clippy::type_complexity)]
+pub fn hidden_states(outs: &[FullOut]) -> Result<Option<HashMap<(usize, usize), (stress_ref::math::Vec3, stress_ref::math::Vec3, stress_ref::math::Vec3, stress_ref::math::Vec3)>>, String> {
+    use stress_ref::math::Vec3;
+    let Some(o) = outs.iter().find(|o| o.kind == "chunk") else { return Ok(None) };
+    let col = |n: &str| o.columns.iter().position(|c| c == n);
+    let Some(ix) = ["u", "th", "v", "w"].iter().map(|p| Some([col(&format!("{p}.x"))?, col(&format!("{p}.y"))?, col(&format!("{p}.z"))?])).collect::<Option<Vec<_>>>() else { return Ok(None) };
+    let rows = rows_by_key(o)?;
+    Ok(Some(
+        rows.into_iter()
+            .map(|(k, r)| {
+                let v = |i: usize| Vec3::new(r[ix[i][0]], r[ix[i][1]], r[ix[i][2]]);
+                (((k >> 32) as usize, (k & 0xffff_ffff) as usize), (v(0), v(1), v(2), v(3)))
+            })
+            .collect(),
+    ))
+}
+
+/// Harness A's island frame from a decoded state `/2` (the shared host-side decode path):
+/// on a copy of the frame-start world `start` (peak utilisations reset), the `/1` decode `d`
+/// applied with its deformation kept and its breaks in time order (the partition and the
+/// bodies' numbering are the oracle's own split); the bodies from the model's table
+/// (`fs_cluster_out`) when given, else derived from the chunks' world and predicted hidden
+/// state (`World::derive_bodies`) when given; then the predicted columns written by field
+/// path over the island (`apply_full`), the rest from `base`.
+pub fn island_frame(start: &stress_ref::world::World, m: &stress_ref::world::IslandMembers, d: &stress_ref::world::DecodedState, full: &[FullOut], base: Base, ids_from_base: bool) -> Result<IslandState, String> {
+    let mut x = start.clone();
+    x.solver.reset_peak_utilizations();
+    x.apply_decoded_with(d, true)?;
+    if let Some(o) = full.iter().find(|o| o.kind == "cluster") {
+        x.set_body_records(&body_records(o)?, &m.chunks)?;
+    } else if let Some(h) = hidden_states(full)? {
+        x.derive_bodies(&h, &m.chunks)?;
+    }
+    let decoded = x.extract_island(m);
+    let base = match base {
+        Base::Start => {
+            let mut b = start.clone();
+            b.solver.reset_peak_utilizations();
+            b.extract_island(m)
+        }
+        Base::Native => stress_ref::world::oracle_island_step(start, m)?,
+    };
+    apply_full_with(&decoded, &base, full, ids_from_base)
+}
+
+/// The oracle's own outcome of the island's frame as a decoded state `/2` (its `/1` decode
+/// with the exact break times and order, and its frame-end columns limited to `predicted`):
+/// the full-state contract's ceiling.
+pub fn oracle_full2(start: &stress_ref::world::World, m: &stress_ref::world::IslandMembers, frame: i64, predicted: Option<&HashMap<String, Vec<String>>>) -> Result<(stress_ref::world::DecodedState, Vec<FullOut>), String> {
+    let mut view = start.clone();
+    let island: std::collections::HashSet<u64> = view.solver.clusters.iter().filter(|c| c.chunks.first().is_some_and(|&k| m.chunks.contains(&(c.structure, k)))).map(|c| c.id).collect();
+    for cl in &mut view.solver.clusters {
+        cl.driven = !island.contains(&cl.id);
+    }
+    for (i, imp) in view.impactors.iter_mut().enumerate() {
+        imp.driven = !m.impactors.contains(&i);
+    }
+    let keys = view.routed_island_keys();
+    let mut model = view.standalone_copy();
+    model.step_frame();
+    let d = view.decoded_from_oracle(&model, &keys, frame, 0);
+    Ok((d, columns_of_state(&stress_ref::world::oracle_island_step(start, m)?, predicted)?))
+}
+
+impl Base {
+    /// `STRESS_FULL_BASE`: `native` (default) or `start`.
+    pub fn from_env() -> Result<Base, String> {
+        match std::env::var("STRESS_FULL_BASE").as_deref() {
+            Ok("start") => Ok(Base::Start),
+            Ok("native") | Err(_) => Ok(Base::Native),
+            Ok(other) => Err(format!("STRESS_FULL_BASE={other}: native|start")),
+        }
+    }
 }

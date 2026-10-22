@@ -647,41 +647,26 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
                     // /2 (its /1 decode and its frame-end columns, `STRESS_FULL_PREDICTED`: a
                     // JSON {kind: [columns]}, default every column): the full-state contract's
                     // ceiling.
-                    let full = if oracle_full2 {
+                    // Decoded state /2 (`decoded_full::island_frame`, the shared host-side path):
+                    // a model's full-state columns, or with `--provider oracle_full2` the
+                    // oracle's own (`STRESS_FULL_PREDICTED`: a JSON {kind: [columns]}, default
+                    // every column), the contract's ceiling. Unpredicted fields from
+                    // `STRESS_FULL_BASE` (`native`, default, or `start`: no oracle values).
+                    let (d, full) = if oracle_full2 {
                         let predicted: Option<HashMap<String, Vec<String>>> = match std::env::var("STRESS_FULL_PREDICTED") {
                             Ok(p) => Some(serde_json::from_slice(&std::fs::read(&p).map_err(|e| format!("{p}: {e}"))?).map_err(|e| format!("{p}: {e}"))?),
                             Err(_) => None,
                         };
-                        Some(stress_learned::decoded_full::columns_of_state(&stress_ref::world::oracle_island_step(start, m)?, predicted.as_ref())?)
+                        let (d, f) = stress_learned::decoded_full::oracle_full2(start, m, frame, predicted.as_ref())?;
+                        (d, Some(f))
                     } else {
-                        last_full.borrow_mut().take()
+                        (d, last_full.borrow_mut().take())
                     };
                     let Some(full) = full else {
                         x.apply_decoded(&d)?;
                         return Ok(x.extract_island(m));
                     };
-                    // Decoded state /2: the /1 state with its deformation kept, the model's
-                    // full-state columns over it (`decoded_full::apply_full`), the fields it
-                    // does not predict from `STRESS_FULL_BASE`: `native` (default, P2's choice:
-                    // the oracle's own step of the island, for recomputed or diagnostic fields)
-                    // or `start` (the frame start: no oracle information).
-                    x.apply_decoded_with(&d, true)?;
-                    // The model's bodies (`fs_cluster_out`): the body records set, each chunk's
-                    // hidden state re-derived from them (not from the momentum fit).
-                    if let Some(o) = full.iter().find(|o| o.kind == "cluster") {
-                        x.set_body_records(&stress_learned::decoded_full::body_records(o)?, &m.chunks)?;
-                    }
-                    let decoded = x.extract_island(m);
-                    let base = match std::env::var("STRESS_FULL_BASE").as_deref() {
-                        Ok("start") => {
-                            let mut b = start.clone();
-                            b.solver.reset_peak_utilizations();
-                            b.extract_island(m)
-                        }
-                        Ok("native") | Err(_) => stress_ref::world::oracle_island_step(start, m)?,
-                        Ok(other) => return Err(format!("STRESS_FULL_BASE={other}: native|start")),
-                    };
-                    let mut out = stress_learned::decoded_full::apply_full(&decoded, &base, &full)?;
+                    let mut out = stress_learned::decoded_full::island_frame(start, m, &d, &full, stress_learned::decoded_full::Base::from_env()?, stress_learned::decoded_full::ids_from_base())?;
                     // Diagnostic (`STRESS_FULL2_DIFF=1`): the composed island's fields that differ
                     // from the oracle's own step (stderr, per kind: column and the largest
                     // absolute difference).

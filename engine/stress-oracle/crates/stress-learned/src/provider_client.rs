@@ -90,7 +90,10 @@ impl ModelProvider {
         std::fs::write(&lock, std::process::id().to_string()).map_err(|e| format!("{}: {e}", lock.display()))?;
         let _ = std::fs::remove_dir_all(dir);
         std::fs::create_dir_all(dir.join("resp")).map_err(|e| format!("{}: {e}", dir.display()))?;
-        let py = spec.python_dir.join(".venv/bin/python");
+        // Absolute: the provider runs in the package directory, where a relative path would
+        // no longer resolve.
+        let python_dir = std::fs::canonicalize(&spec.python_dir).map_err(|e| format!("python dir {}: {e}", spec.python_dir.display()))?;
+        let py = python_dir.join(".venv/bin/python");
         if !py.exists() {
             return Err(format!("{} not found: create the venv (learned-impact/python/README.md)", py.display()));
         }
@@ -99,7 +102,7 @@ impl ModelProvider {
         let dir = &std::fs::canonicalize(dir).map_err(|e| e.to_string())?;
         let log = std::fs::File::create(dir.join("provider.log")).map_err(|e| e.to_string())?;
         let child = Command::new(&py)
-            .current_dir(&spec.python_dir)
+            .current_dir(&python_dir)
             .args(["-m", "learned_impact.outcome.provider", "--dir"])
             .arg(dir)
             .arg("--checkpoint")
@@ -111,7 +114,7 @@ impl ModelProvider {
             .map_err(|e| format!("starting {}: {e}", py.display()))?;
         // The calls schema the provider validates against (its `schema.py`): a `/3` package
         // (models trained on `/3`) gets each record downgraded (`downgrade_to_v3`, exact).
-        let schema_py = std::fs::read_to_string(spec.python_dir.join("learned_impact/outcome/schema.py")).unwrap_or_default();
+        let schema_py = std::fs::read_to_string(python_dir.join("learned_impact/outcome/schema.py")).unwrap_or_default();
         // `STRESS_PROVIDER_CALLS=v3` forces it: a /4 package serving a model trained on /3
         // calls upgraded with the deformation unobserved (P2's `LEARNED_IMPACT_ACCEPT_V3=1`).
         let v3 = std::env::var("STRESS_PROVIDER_CALLS").is_ok_and(|v| v == "v3")

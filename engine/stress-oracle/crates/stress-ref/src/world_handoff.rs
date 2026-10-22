@@ -209,6 +209,13 @@ pub struct DecodedBody {
 pub struct DecodedBreak {
     pub key: i64,
     pub bin: u32,
+    /// The break's time within the frame (s from its start): breaks are applied in this
+    /// order, so splits number the bodies as the oracle's break-by-break splits do.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time: Option<f64>,
+    /// The oracle's own order among breaks at the same time (its events'; the ceiling's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<u32>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -309,7 +316,8 @@ impl World {
         let mut when = std::collections::HashMap::new();
         for e in &model.solver.events[self.solver.events.len().min(model.solver.events.len())..] {
             if let crate::solver::SolverEvent::Broken { time, structure, bond, .. } = e {
-                when.entry(model.bond_key(*structure, *bond)).or_insert(*time);
+                let n = when.len() as u32;
+                when.entry(model.bond_key(*structure, *bond)).or_insert((*time, n));
             }
         }
         let (mut bonds_broken, mut bond_damage) = (Vec::new(), Vec::new());
@@ -319,9 +327,9 @@ impl World {
             if mb.connected() {
                 bond_damage.push(DecodedDamage { key: k, damage: mb.joint.damage });
             } else {
-                let t = when.get(&k).copied().unwrap_or(t0 + fdt);
+                let (t, order) = when.get(&k).map_or((t0 + fdt, None), |&(t, n)| (t, Some(n)));
                 let bin = (((t - t0) / fdt * 8.0).ceil() as i64).clamp(1, 8) as u32;
-                bonds_broken.push(DecodedBreak { key: k, bin });
+                bonds_broken.push(DecodedBreak { key: k, bin, time: Some(t - t0), order });
             }
         }
         DecodedState {
@@ -374,15 +382,27 @@ impl World {
             target.insert((s, c), (x1, Vec3::from_array(b.drot), Vec3::from_array(b.v), Vec3::from_array(b.w)));
         }
         let mut breaks: Vec<&DecodedBreak> = d.bonds_broken.iter().collect();
-        breaks.sort_by_key(|b| (b.bin, b.key));
-        for b in breaks {
-            let (s, bi) = self.bond_of_key(b.key).ok_or_else(|| format!("bond key {} names no bond", b.key))?;
-            self.solver.break_bonds(&[(s, bi)]);
-            // Broken from outside the law: its failure margin is reached too (as
-            // `World::break_bond`), so margin >= 1 still means disconnected.
-            let bond = &mut self.solver.bonds[s][bi];
-            bond.fail_ts = bond.fail_ts.max(1.0);
-            bond.peak_fail_margin = bond.peak_fail_margin.max(bond.fail_margin());
+        // In time order (a break's exact time when given, else its bin), the oracle's own order
+        // on equal times when given, then by key.
+        breaks.sort_by(|a, b| (a.bin, a.time.unwrap_or(f64::INFINITY), a.order.unwrap_or(u32::MAX), a.key).partial_cmp(&(b.bin, b.time.unwrap_or(f64::INFINITY), b.order.unwrap_or(u32::MAX), b.key)).unwrap_or(std::cmp::Ordering::Equal));
+        // Breaks at the same exact time break together (one `break_bonds`, as the oracle
+        // breaks a substep's bonds and then splits), else one by one.
+        let mut i = 0;
+        while i < breaks.len() {
+            let mut j = i + 1;
+            while j < breaks.len() && breaks[i].time.is_some() && breaks[j].time == breaks[i].time {
+                j += 1;
+            }
+            let group: Vec<(usize, usize)> = breaks[i..j].iter().map(|b| self.bond_of_key(b.key).ok_or_else(|| format!("bond key {} names no bond", b.key))).collect::<Result<_, _>>()?;
+            self.solver.break_bonds(&group);
+            for &(s, bi) in &group {
+                // Broken from outside the law: its failure margin is reached too (as
+                // `World::break_bond`), so margin >= 1 still means disconnected.
+                let bond = &mut self.solver.bonds[s][bi];
+                bond.fail_ts = bond.fail_ts.max(1.0);
+                bond.peak_fail_margin = bond.peak_fail_margin.max(bond.fail_margin());
+            }
+            i = j;
         }
         for x in &d.bond_damage {
             let (s, bi) = self.bond_of_key(x.key).ok_or_else(|| format!("bond key {} names no bond", x.key))?;
@@ -714,5 +734,83 @@ impl World {
             set += 1;
         }
         Ok(set)
+    }
+}
+
+impl World {
+    /// Derive the island's bodies from the chunks' world state (as decoded) and their
+    /// predicted hidden state (u, th, v, w in the body's frame), the identity world =
+    /// body ∘ (rest + hidden) solved for the body: rotation the sign-aligned mean of
+    /// world ⋅ hidden⁻¹ over its chunks, position, angular and linear velocity their
+    /// mass-weighted means; then every chunk takes its predicted hidden state. Anchored bodies
+    /// keep their pose and motion (only the hidden state is set). With the oracle's own
+    /// states the bodies are the oracle's to round-off.
+    pub fn derive_bodies(&mut self, hidden: &std::collections::HashMap<(usize, usize), (Vec3, Vec3, Vec3, Vec3)>, island: &std::collections::HashSet<(usize, usize)>) -> Result<usize, String> {
+        let mut n = 0;
+        for ci in 0..self.solver.clusters.len() {
+            let (s, chunks, anchored) = {
+                let cl = &self.solver.clusters[ci];
+                match cl.chunks.first() {
+                    Some(&c) if island.contains(&(cl.structure, c)) => (cl.structure, cl.chunks.clone(), cl.anchored),
+                    _ => continue,
+                }
+            };
+            let h = |c: usize| hidden.get(&(s, c)).copied().ok_or_else(|| format!("no hidden state for chunk ({s}, {c})"));
+            if !anchored {
+                let world: Vec<(usize, Vec3, Quat, Vec3, Vec3, f64)> = chunks
+                    .iter()
+                    .map(|&c| {
+                        let st = &self.solver.chunks[s][c];
+                        let q = self.solver.clusters[ci].pose.rotation * Quat::from_rotation_vector(st.th);
+                        let (v, w) = self.solver.chunk_velocity(s, c);
+                        (c, self.solver.chunk_position(s, c), q, v, w, self.solver.structures[s].chunks[c].mass)
+                    })
+                    .collect();
+                // rotation: mean of world * hidden^-1, sign-aligned to the first chunk's
+                let mut acc = Quat { w: 0.0, x: 0.0, y: 0.0, z: 0.0 };
+                let mut first: Option<Quat> = None;
+                for &(c, _, q, _, _, _) in &world {
+                    let (_, th, _, _) = h(c)?;
+                    let r = q * Quat::from_rotation_vector(th).conjugate();
+                    let r = match first {
+                        None => {
+                            first = Some(r);
+                            r
+                        }
+                        Some(f) if f.w * r.w + f.x * r.x + f.y * r.y + f.z * r.z < 0.0 => Quat { w: -r.w, x: -r.x, y: -r.y, z: -r.z },
+                        Some(_) => r,
+                    };
+                    acc = Quat { w: acc.w + r.w, x: acc.x + r.x, y: acc.y + r.y, z: acc.z + r.z };
+                }
+                let rot = if world.len() == 1 { first.unwrap() } else { acc.normalized() };
+                let com = self.solver.clusters[ci].com;
+                let (mut m, mut p, mut wb) = (0.0, Vec3::ZERO, Vec3::ZERO);
+                for &(c, x, _, _, w, mass) in &world {
+                    let (u, _, _, wh) = h(c)?;
+                    let center = self.solver.structures[s].chunks[c].center;
+                    p += (x - rot.rotate(center + u)) * mass;
+                    wb += (w - rot.rotate(wh)) * mass;
+                    m += mass;
+                }
+                let (pos, wb) = (p * (1.0 / m), wb * (1.0 / m));
+                let mut vb = Vec3::ZERO;
+                for &(c, _, _, v, _, mass) in &world {
+                    let (u, _, vh, _) = h(c)?;
+                    let center = self.solver.structures[s].chunks[c].center;
+                    vb += (v - wb.cross(rot.rotate(center + u - com)) - rot.rotate(vh)) * mass;
+                }
+                let cl = &mut self.solver.clusters[ci];
+                cl.pose = Pose { position: pos, rotation: rot };
+                cl.angular_velocity = wb;
+                cl.velocity = vb * (1.0 / m);
+            }
+            for &c in &chunks {
+                let (u, th, v, w) = h(c)?;
+                let cs = &mut self.solver.chunks[s][c];
+                (cs.u, cs.th, cs.v, cs.w) = (u, th, v, w);
+            }
+            n += 1;
+        }
+        Ok(n)
     }
 }

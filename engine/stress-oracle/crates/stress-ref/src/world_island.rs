@@ -30,6 +30,15 @@ pub struct IslandState {
 }
 
 impl IslandState {
+    /// Without the pure caches (the step-bound cache, `solver.step_bounds`, filled again by
+    /// the routing's prediction; P1's full-state contract empties it too): for comparing
+    /// states.
+    pub fn without_caches(&self) -> IslandState {
+        let mut x = self.clone();
+        x.solver.clear_caches();
+        x
+    }
+
     /// The island's world-side fields a full-state model does not predict (decoded state
     /// `/2`) from `base`: the per-chunk loads and arrays, the solver's per-chunk scratch and
     /// the contact history (sticks, pair and ground offsets).
@@ -301,8 +310,13 @@ impl World {
         // topology differs from it, the host's structure-level caches were derived from the
         // wrong network and are refreshed. (The oracle's island step differs in nothing.)
         let own = self.extract_island(&m);
+        // (As sets: the same bodies listed in another order are the same topology.)
         let topology = |x: &IslandState| -> (Vec<(usize, usize, bool)>, Vec<(usize, Vec<usize>)>) {
-            (x.solver.bonds.iter().map(|((s, b), r)| (*s, *b, r.alive)).collect(), x.solver.clusters.iter().map(|(_, c)| (c.structure, c.chunks.clone())).collect())
+            let mut bonds: Vec<_> = x.solver.bonds.iter().map(|((s, b), r)| (*s, *b, r.alive)).collect();
+            let mut bodies: Vec<_> = x.solver.clusters.iter().map(|(_, c)| (c.structure, c.chunks.clone())).collect();
+            bonds.sort_unstable();
+            bodies.sort_unstable();
+            (bonds, bodies)
         };
         let changed = topology(&own) != topology(&st);
         *self = World::merge_island(self, &st, &m);

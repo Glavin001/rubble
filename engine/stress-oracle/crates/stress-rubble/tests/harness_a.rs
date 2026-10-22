@@ -85,3 +85,70 @@ fn a_different_island_changes_the_island_alone() {
         eprintln!("{}: island chunk-frames that took the provider's outcome: {differed}", scene.name);
     }
 }
+
+/// The full-state contract's ceiling (decoded state /2, `decoded_full::island_frame`): the
+/// oracle's own outcome through it, every column and the decode's own body numbering (its
+/// breaks in the oracle's time order, a substep's breaks together), is the standalone
+/// oracle bit for bit: the world's fingerprint and the island's whole state every frame. The fields the
+/// columns do not carry (the contact history, the per-chunk world arrays) are the native
+/// step's here (`Base::Native`).
+#[test]
+fn the_oracle_through_decoded_state_2_is_the_oracle() {
+    use stress_learned::decoded_full::{island_frame, oracle_full2, Base};
+    for scene in scenes() {
+        let (mut native, mut harness) = (World::new(&scene), World::new(&scene));
+        let mut routed = 0;
+        for frame in 0..frames(&scene) {
+            native.solver.reset_peak_utilizations();
+            native.step_frame();
+            let m = harness
+                .step_frame_island_provider(&mut |w: &World, m: &IslandMembers| {
+                    let (d, full) = oracle_full2(w, m, frame as i64, None)?;
+                    let st = island_frame(w, m, &d, &full, Base::Native, false)?;
+                    Ok(st)
+                })
+                .unwrap();
+            routed += usize::from(!m.chunks.is_empty());
+            assert_eq!(stress_learned::outcome::fingerprint(&native), stress_learned::outcome::fingerprint(&harness), "{}: frame {frame}: fingerprint", scene.name);
+            // the island's whole state, bit for bit (the pure caches aside)
+            if !m.chunks.is_empty() && stress_learned::relabel::state_bytes(&native.extract_island(&m).without_caches()).unwrap() != stress_learned::relabel::state_bytes(&harness.extract_island(&m).without_caches()).unwrap() {
+                // which parts of the island's state differ
+                let (a, b) = (stress_learned::decoded_full::to_value(&harness.extract_island(&m)).unwrap(), stress_learned::decoded_full::to_value(&native.extract_island(&m)).unwrap());
+                let parts = |v: &rmpv::Value| -> Vec<(String, rmpv::Value)> {
+                    let mut out = Vec::new();
+                    for (k, x) in v.as_map().unwrap() {
+                        let k = k.as_str().unwrap().to_string();
+                        match x.as_map() {
+                            Some(inner) if k == "solver" => out.extend(inner.iter().map(|(k2, y)| (format!("solver.{}", k2.as_str().unwrap()), y.clone()))),
+                            _ => out.push((k, x.clone())),
+                        }
+                    }
+                    out
+                };
+                let diff: Vec<String> = parts(&a).into_iter().zip(parts(&b)).filter(|(x, y)| x.1 != y.1).map(|(x, _)| x.0).collect();
+                let (ha, na) = (harness.extract_island(&m), native.extract_island(&m));
+                let (x, y) = (stress_learned::decoded_full::columns_of_state(&ha, None).unwrap(), stress_learned::decoded_full::columns_of_state(&na, None).unwrap());
+                for (p, q) in x.iter().zip(&y) {
+                    let at: std::collections::HashMap<i64, usize> = q.keys.iter().enumerate().map(|(i, k)| (*k, i)).collect();
+                    let mut worst = std::collections::BTreeMap::<String, f64>::new();
+                    for (i, k) in p.keys.iter().enumerate() {
+                        let Some(&j) = at.get(k) else { worst.insert(format!("missing {k}"), 1.0); continue };
+                        for (ci, c) in p.columns.iter().enumerate() {
+                            let Some(cj) = q.columns.iter().position(|d| d == c) else { continue };
+                            let (u, v) = (p.rows[i * p.columns.len() + ci], q.rows[j * q.columns.len() + cj]);
+                            if u.to_bits() != v.to_bits() && !(u.is_nan() && v.is_nan()) {
+                                let e = worst.entry(c.clone()).or_default();
+                                *e = e.max((u - v).abs());
+                            }
+                        }
+                    }
+                    eprintln!("  {}: {worst:?}", p.kind);
+                }
+                eprintln!("  next_cluster_id harness {} native {}; clusters {} / {}", ha.solver.next_cluster_id, na.solver.next_cluster_id, ha.solver.clusters.len(), na.solver.clusters.len());
+                panic!("{}: frame {frame} differs; island parts {diff:?}", scene.name);
+            }
+        }
+        assert!(routed > 0);
+        eprintln!("{}: {} frames through /2, identical", scene.name, frames(&scene));
+    }
+}

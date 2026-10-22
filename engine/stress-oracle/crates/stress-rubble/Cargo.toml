@@ -28,6 +28,7 @@ bytemuck = { version = "1", features = ["derive"], optional = true }
 engine-fracture = { path = "../../../crates/engine-fracture", optional = true }
 
 [dev-dependencies]
+rmpv = "1"
 # The closed-loop harness (`examples/learned_p0.rs`) writes P2's call records (`live_call`).
 stress-learned = { path = "../stress-learned" }
 
