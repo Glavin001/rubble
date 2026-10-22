@@ -466,8 +466,11 @@ P0's `handed_ground_overlaps` hunk is not ported: this branch's World has no han
 
 **Verified.** In `recorded_contact_energy_equals_the_live_worlds`, at every call boundary
 the recorded values equal the live stepping World's, bit for bit, nonzero cases included.
-P0 is cross-checking against its own implementation, because its fixture
-(`contact_bounds_v1.jsonl`) names no event.
+P0 cross-checked with its own implementation: harness A with the exact oracle, probing
+the routed island's start World and merged end World. All 1,284 of 1,284 values over
+642 calls in 6 events agree bit for bit, nearly all of them nonzero. The events cover
+anchored t1/t2 (box impactors included), standing t1/t2, and the val and test ballistic
+families.
 
 **Rebuilt.** All 604 resident events in `calls-v5` (40,713 calls; 35,817 with nonzero
 contact energy), 24 min at 4 threads. Restoring two boundaries per call roughly doubles the
