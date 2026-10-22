@@ -251,6 +251,7 @@ pub mod shaders {
             ("learned_place", (64, 1, 1)),
             ("learned_tally_apply", (1, 1, 1)),
             ("learned_tally", (1, 1, 1)),
+            ("learned_adopt", (256, 1, 1)),
         ]
     );
     pub const SPLIT: ShaderSet = shader_set!("split", [("split_components", (256, 1, 1)), ("split_children", (64, 1, 1)), ("split_frames", (64, 1, 1)), ("split_children_group", (64, 1, 1))]);

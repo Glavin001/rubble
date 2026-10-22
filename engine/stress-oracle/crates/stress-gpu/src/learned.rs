@@ -76,9 +76,24 @@ struct Params {
     max_cisl: u32,
     chunk_count: u32,
     pad0: u32,
+    out_bases: [u32; 4],
+    out_bases2: [u32; 4],
 }
 
-const BINDINGS: [Binding; 28] = [
+/// Where the network's outputs sit in its buffer (float offsets; P2's outputs.npz shapes in
+/// the global node order: every call's chunks, then every call's impactors; bonds in call
+/// order): `chunk_out` [Nc, 12], `imp_out` [Ni, 12], `bond_log_q` [E], `bond_ddamage` [E],
+/// `bond_time_logits` [E, 8]. `learned_adopt` copies them into the decode's slots.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OutBases {
+    pub chunk_out: u32,
+    pub imp_out: u32,
+    pub bond_log_q: u32,
+    pub bond_ddamage: u32,
+    pub bond_time_logits: u32,
+}
+
+const BINDINGS: [Binding; 29] = [
     Binding::Uniform,   // 0 params
     Binding::StorageRw, // 1 ctl
     Binding::StorageRw, // 2 calls
@@ -107,6 +122,7 @@ const BINDINGS: [Binding; 28] = [
     Binding::Storage,   // 25 routing flag
     Binding::Storage,   // 26 split child records
     Binding::StorageRw, // 27 indirect arguments
+    Binding::Storage,   // 28 the network's outputs
 ];
 
 /// The decode's configuration (P2's `DecodeConfig`; from the weights' manifest).
@@ -217,6 +233,7 @@ struct Kernels {
     decode: Kernel,
     gate: Kernel,
     tally: Kernel,
+    adopt: Kernel,
     check: Kernel,
     apply_bonds: Kernel,
     apply_bodies: Kernel,
@@ -266,6 +283,8 @@ pub struct Learned {
     /// Distinct stand-ins for read-write slots a kernel does not use (the Metal path binds
     /// the module's whole group 0; one buffer may not be read-write twice in a dispatch).
     dummy_rw: [wgpu::Buffer; 3],
+    /// The network's output buffer and where its arrays sit (`set_network_outputs`).
+    out: (Option<wgpu::Buffer>, OutBases),
     imp_list: Vec<ImpactorInfo>,
     island_cap: u32,
     chunk_count: u32,
@@ -301,6 +320,7 @@ impl Learned {
             decode: k("learned_decode"),
             gate: k("learned_gate"),
             tally: k("learned_tally"),
+            adopt: k("learned_adopt"),
             check: k("learned_check"),
             apply_bonds: k("learned_apply_bonds"),
             apply_bodies: k("learned_apply_bodies"),
@@ -336,12 +356,18 @@ impl Learned {
             largs: rw(gpu, "learned indirect arguments", 16 * 4, true),
             dummy: rw(gpu, "learned unbound", 16, false),
             dummy_rw: [rw(gpu, "learned unbound rw 0", 16, false), rw(gpu, "learned unbound rw 1", 16, false), rw(gpu, "learned unbound rw 2", 16, false)],
+            out: (None, OutBases::default()),
             imp_list: Vec::new(),
             island_cap: 0,
             chunk_count: 0,
             pending: false,
             totals: Totals::default(),
         }
+    }
+
+    /// The network's output buffer (P0's kernel writes it; `learned_adopt` reads it).
+    pub fn set_network_outputs(&mut self, buffer: wgpu::Buffer, bases: OutBases) {
+        self.out = (Some(buffer), bases);
     }
 
     /// The impactors (uploaded when they change).
@@ -394,16 +420,18 @@ impl Learned {
                 max_cisl: self.max_cisl,
                 chunk_count: self.chunk_count,
                 pad0: 0,
+                out_bases: [self.out.1.chunk_out, self.out.1.imp_out, self.out.1.bond_log_q, self.out.1.bond_ddamage],
+                out_bases2: [self.out.1.bond_time_logits, 0, 0, 0],
             },
         )
     }
 
-    fn buffers<'a>(&'a self, params: &'a wgpu::Buffer, t: &'a Tables, split: [&'a wgpu::Buffer; 6]) -> [&'a wgpu::Buffer; 28] {
+    fn buffers<'a>(&'a self, params: &'a wgpu::Buffer, t: &'a Tables, split: [&'a wgpu::Buffer; 6]) -> [&'a wgpu::Buffer; 29] {
         let [parents, work, slots, control, firsts, out] = split;
         [
             // The indirect arguments only where `learned_compact` writes them (a dispatch that
             // reads them as its arguments may not also bind them read-write).
-            params, &self.ctl, &self.calls, &self.nodes, &self.bonds, &self.isl, &self.islf, &self.cisl, &self.chunk_node, &self.frozen, &self.imps, t.islands, t.chunks, t.state, t.ctab, t.bodies, t.bond_static, t.bond_dyn, t.status, t.counters, parents, work, slots, control, firsts, t.route, out, &self.dummy_rw[2],
+            params, &self.ctl, &self.calls, &self.nodes, &self.bonds, &self.isl, &self.islf, &self.cisl, &self.chunk_node, &self.frozen, &self.imps, t.islands, t.chunks, t.state, t.ctab, t.bodies, t.bond_static, t.bond_dyn, t.status, t.counters, parents, work, slots, control, firsts, t.route, out, &self.dummy_rw[2], self.out.0.as_ref().unwrap_or(&self.dummy),
         ]
     }
 
@@ -491,7 +519,10 @@ impl Learned {
         run(enc, &self.k.gather_impactors, D::Indirect(0));
         run(enc, &self.k.finish, D::Indirect(0));
         match network {
-            Some(net) => net(enc),
+            Some(net) => {
+                net(enc);
+                run(enc, &self.k.adopt, D::Indirect(0));
+            }
             None => run(enc, &self.k.stub, D::Indirect(0)),
         }
         run(enc, &self.k.decode, D::Indirect(0));
@@ -590,6 +621,7 @@ pub struct CallIn {
 pub fn pack(calls: &[CallIn]) -> (Vec<[f32; 4]>, Vec<[f32; 4]>, Vec<[f32; 4]>) {
     let (mut cw, mut nw, mut bw) = (Vec::new(), Vec::new(), Vec::new());
     let (mut first, mut bfirst) = (0u32, 0u32);
+    let (mut chunk_base, mut imp_base) = (0u32, 0u32);
     let b = f32::from_bits;
     for (g, c) in calls.iter().enumerate() {
         let s = &c.scales;
@@ -598,7 +630,11 @@ pub fn pack(calls: &[CallIn]) -> (Vec<[f32; 4]>, Vec<[f32; 4]>, Vec<[f32; 4]>) {
         cw.push([s[8], b(c.flags), b(first), b(c.nodes.len() as u32)]);
         cw.push([c.gravity[0], c.gravity[1], c.gravity[2], b(c.chunks as u32)]);
         cw.push([b(bfirst), b(c.bonds.len() as u32), 0.0, 0.0]);
-        cw.extend([[0.0; 4]; CALL_F4 - 5]);
+        cw.push([0.0; 4]);
+        cw.push([0.0, 0.0, b(chunk_base), b(imp_base)]);
+        cw.extend([[0.0; 4]; CALL_F4 - 7]);
+        chunk_base += c.chunks as u32;
+        imp_base += (c.nodes.len() - c.chunks) as u32;
         for (j, n) in c.nodes.iter().enumerate() {
             let kind = u32::from(j >= c.chunks);
             nw.push([n.pos[0], n.pos[1], n.pos[2], n.mass]);
@@ -634,16 +670,19 @@ pub struct NodeOut {
 /// The decode kernel on its own (`learned_decode`, tests).
 pub struct Decode {
     kernel: Kernel,
+    adopt: Kernel,
 }
 
 impl Decode {
     pub fn new(gpu: &Gpu) -> Decode {
-        Decode { kernel: gpu.compute(&shaders::LEARNED, "learned_decode", &BINDINGS) }
+        Decode { kernel: gpu.compute(&shaders::LEARNED, "learned_decode", &BINDINGS), adopt: gpu.compute(&shaders::LEARNED, "learned_adopt", &BINDINGS) }
     }
 
     /// The decode of `calls`: per call, its nodes' decoded state, its bonds' (broke,
     /// damage) and its decode flags.
-    pub fn run(&self, gpu: &Gpu, cfg: &DecodeConfig, calls: &[CallIn]) -> Vec<(Vec<NodeOut>, Vec<(bool, f32)>, u32)> {
+    /// With `adopted`, the outputs come from a network buffer (`learned_adopt` first) in
+    /// place of `NodeIn::out` and the bonds' log q̂ / Δdamage / bin.
+    pub fn run(&self, gpu: &Gpu, cfg: &DecodeConfig, calls: &[CallIn], adopted: Option<(&[f32], OutBases)>) -> Vec<(Vec<NodeOut>, Vec<(bool, f32)>, u32)> {
         let (cw, nw, bw) = pack(calls);
         let one = [[0f32; 4]];
         let cb = gpu.storage("learned calls", &cw);
@@ -652,9 +691,17 @@ impl Decode {
         let mut words = [0u32; ctl::WORDS];
         words[ctl::CALLS] = calls.len() as u32;
         let ctl_buf = gpu.storage("learned ctl", &words);
-        let params = gpu.uniform("learned params", &Params { log_tau: cfg.tau.ln() as f32, tolerance: cfg.energy_tolerance as f32, ..Default::default() });
-        let dummies: Vec<wgpu::Buffer> = (0..28).map(|_| gpu.storage("learned unbound", &[0u32; 4])).collect();
-        let mut bufs: [&wgpu::Buffer; 28] = std::array::from_fn(|i| &dummies[i]);
+        let bases = adopted.map(|a| a.1).unwrap_or_default();
+        let params = gpu.uniform(
+            "learned params",
+            &Params { log_tau: cfg.tau.ln() as f32, tolerance: cfg.energy_tolerance as f32, out_bases: [bases.chunk_out, bases.imp_out, bases.bond_log_q, bases.bond_ddamage], out_bases2: [bases.bond_time_logits, 0, 0, 0], ..Default::default() },
+        );
+        let dummies: Vec<wgpu::Buffer> = (0..29).map(|_| gpu.storage("learned unbound", &[0u32; 4])).collect();
+        let lout = adopted.map(|a| gpu.storage("learned network outputs", a.0));
+        let mut bufs: [&wgpu::Buffer; 29] = std::array::from_fn(|i| &dummies[i]);
+        if let Some(l) = &lout {
+            bufs[28] = l;
+        }
         bufs[0] = &params;
         bufs[1] = &ctl_buf;
         bufs[2] = &cb;
@@ -662,6 +709,13 @@ impl Decode {
         bufs[4] = &bb;
         let group = gpu.bind(&self.kernel.group, &bufs);
         let mut enc = gpu.device.create_command_encoder(&Default::default());
+        if lout.is_some() {
+            let group = gpu.bind(&self.adopt.group, &bufs);
+            let mut pass = enc.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.adopt.pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            pass.dispatch_workgroups(calls.len().max(1) as u32, 1, 1);
+        }
         {
             let mut pass = enc.begin_compute_pass(&Default::default());
             pass.set_pipeline(&self.kernel.pipeline);

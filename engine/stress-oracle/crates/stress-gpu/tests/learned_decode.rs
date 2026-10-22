@@ -6,7 +6,7 @@
 //! `learned-impact/scripts/p3_decode_fixture.py` and committed.
 
 use stress_gpu::gpu::Gpu;
-use stress_gpu::learned::{CallIn, Decode, DecodeConfig, NodeIn, CALL_FREE, DEC_BOUND_ACTIVE, DEC_BOUND_INFEASIBLE, DEC_NONFINITE};
+use stress_gpu::learned::{CallIn, Decode, DecodeConfig, NodeIn, OutBases, CALL_FREE, DEC_BOUND_ACTIVE, DEC_BOUND_INFEASIBLE, DEC_NONFINITE};
 
 fn f(v: &serde_json::Value) -> Vec<f64> {
     v.as_array().expect("array").iter().map(|x| x.as_f64().expect("number")).collect()
@@ -59,7 +59,43 @@ fn slang_decode_matches_pytorch() {
         });
     }
     let gpu = Gpu::new().expect("GPU");
-    let got = Decode::new(&gpu).run(&gpu, &cfg, &calls);
+    let dec = Decode::new(&gpu);
+    let direct = dec.run(&gpu, &cfg, &calls, None);
+    // The same outputs as P0's network writes them (P2's outputs.npz shapes, the global node
+    // order: every call's chunks, then every call's impactors), through `learned_adopt`;
+    // time logits one-hot at each bond's bin.
+    let mut out: Vec<f32> = Vec::new();
+    let nc: usize = calls.iter().map(|c| c.chunks).sum();
+    let ni: usize = calls.iter().map(|c| c.nodes.len() - c.chunks).sum();
+    let ne: usize = calls.iter().map(|c| c.bonds.len()).sum();
+    for c in &calls {
+        out.extend(c.nodes[..c.chunks].iter().flat_map(|n| n.out));
+    }
+    for c in &calls {
+        out.extend(c.nodes[c.chunks..].iter().flat_map(|n| n.out));
+    }
+    out.extend(calls.iter().flat_map(|c| c.bonds.iter().map(|b| b.1)));
+    out.extend(calls.iter().flat_map(|c| c.bonds.iter().map(|b| b.2)));
+    out.extend(calls.iter().flat_map(|c| c.bonds.iter().flat_map(|b| (1..=8u32).map(move |i| if i == b.3 { 1.0 } else { 0.0 }))));
+    let bases = OutBases { chunk_out: 0, imp_out: 12 * nc as u32, bond_log_q: 12 * (nc + ni) as u32, bond_ddamage: (12 * (nc + ni) + ne) as u32, bond_time_logits: (12 * (nc + ni) + 2 * ne) as u32 };
+    let mut blank = calls.clone();
+    for c in &mut blank {
+        for n in &mut c.nodes {
+            n.out = [0.0; 12];
+        }
+        for b in &mut c.bonds {
+            *b = (b.0, -99.0, 0.0, 0);
+        }
+    }
+    let adopted = dec.run(&gpu, &cfg, &blank, Some((&out, bases)));
+    for (a, b) in direct.iter().zip(&adopted) {
+        assert_eq!(a.2, b.2, "adopted decode flags");
+        assert!(a.1 == b.1, "adopted bonds differ");
+        for (x, y) in a.0.iter().zip(&b.0) {
+            assert!(x.v == y.v && x.w == y.w && x.dx == y.dx && x.drot == y.drot, "adopted nodes differ");
+        }
+    }
+    let got = direct;
     for (g, (c, (nodes_out, bonds_out, flags))) in doc["calls"].as_array().unwrap().iter().zip(&got).enumerate() {
         let e = &c["expected"];
         assert_eq!(flags & DEC_NONFINITE, 0, "call {g}: non-finite");

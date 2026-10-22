@@ -51,6 +51,8 @@ struct LearnedParams_0
     uint max_cisl_0;
     uint chunk_count_0;
     uint pad0_0;
+    uint4 out_bases_0;
+    uint4 out_bases2_0;
 };
 
 struct Island_natural_0
@@ -193,6 +195,7 @@ struct KernelContext_0
     packed_uint4 device* split_slots_0;
     packed_float4 device* split_out_0;
     packed_uint4 device* split_firsts_0;
+    float device* lout_0;
     array<array<float4, int(256)>, int(4)> threadgroup* g_red_0;
     array<float, int(6)> threadgroup* g_lambda_0;
     array<float3, int(256)> threadgroup* g_lo_0;
@@ -350,7 +353,7 @@ float3 solve3_0(matrix<float,int(3),int(3)>  a_3, float3 b_3)
     return float3(dot(b_3, _S16), dot(c0_0, cross(b_3, c2_0)), dot(c0_0, cross(c1_0, b_3))) / float3(dot(c0_0, _S16)) ;
 }
 
-[[kernel]] void learned_decode(uint3 group_0 [[threadgroup_position_in_grid]], uint3 thread_2 [[thread_position_in_threadgroup]], uint device* ctl_1 [[buffer(1)]], packed_float4 device* calls_1 [[buffer(2)]], packed_float4 device* nodes_1 [[buffer(3)]], LearnedParams_0 constant* params_1 [[buffer(0)]], packed_float4 device* bonds_1 [[buffer(4)]], uint device* chunk_node_1 [[buffer(8)]], uint device* counters_1 [[buffer(19)]], uint device* route_1 [[buffer(25)]], packed_uint4 device* isl_1 [[buffer(5)]], packed_float4 device* islf_1 [[buffer(6)]], Island_natural_0 device* islands_1 [[buffer(11)]], packed_float4 device* ctab_1 [[buffer(14)]], packed_float4 device* bodies_1 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_1 [[buffer(12)]], packed_float4 device* state_1 [[buffer(13)]], packed_float4 device* imps_1 [[buffer(10)]], uint device* status_1 [[buffer(18)]], packed_uint4 device* largs_1 [[buffer(27)]], packed_uint4 device* cisl_1 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_1 [[buffer(17)]], BondStatic_natural_0 device* bond_static_1 [[buffer(16)]], packed_float4 device* frozen_1 [[buffer(9)]], uint device* split_work_1 [[buffer(21)]], uint device* split_control_1 [[buffer(23)]], packed_uint4 device* split_parents_1 [[buffer(20)]], packed_uint4 device* split_slots_1 [[buffer(22)]], packed_float4 device* split_out_1 [[buffer(26)]], packed_uint4 device* split_firsts_1 [[buffer(24)]])
+[[kernel]] void learned_decode(uint3 group_0 [[threadgroup_position_in_grid]], uint3 thread_2 [[thread_position_in_threadgroup]], uint device* ctl_1 [[buffer(1)]], packed_float4 device* calls_1 [[buffer(2)]], packed_float4 device* nodes_1 [[buffer(3)]], LearnedParams_0 constant* params_1 [[buffer(0)]], packed_float4 device* bonds_1 [[buffer(4)]], uint device* chunk_node_1 [[buffer(8)]], uint device* counters_1 [[buffer(19)]], uint device* route_1 [[buffer(25)]], packed_uint4 device* isl_1 [[buffer(5)]], packed_float4 device* islf_1 [[buffer(6)]], Island_natural_0 device* islands_1 [[buffer(11)]], packed_float4 device* ctab_1 [[buffer(14)]], packed_float4 device* bodies_1 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_1 [[buffer(12)]], packed_float4 device* state_1 [[buffer(13)]], packed_float4 device* imps_1 [[buffer(10)]], uint device* status_1 [[buffer(18)]], packed_uint4 device* largs_1 [[buffer(27)]], packed_uint4 device* cisl_1 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_1 [[buffer(17)]], BondStatic_natural_0 device* bond_static_1 [[buffer(16)]], packed_float4 device* frozen_1 [[buffer(9)]], uint device* split_work_1 [[buffer(21)]], uint device* split_control_1 [[buffer(23)]], packed_uint4 device* split_parents_1 [[buffer(20)]], packed_uint4 device* split_slots_1 [[buffer(22)]], packed_float4 device* split_out_1 [[buffer(26)]], packed_uint4 device* split_firsts_1 [[buffer(24)]], float device* lout_1 [[buffer(28)]])
 {
     float3 v_end_0;
     float3 w_end_0;
@@ -384,6 +387,7 @@ float3 solve3_0(matrix<float,int(3),int(3)>  a_3, float3 b_3)
     (&kernelContext_3)->split_slots_0 = split_slots_1;
     (&kernelContext_3)->split_out_0 = split_out_1;
     (&kernelContext_3)->split_firsts_0 = split_firsts_1;
+    (&kernelContext_3)->lout_0 = lout_1;
     threadgroup array<array<float4, int(256)>, int(4)> g_red_1;
     (&kernelContext_3)->g_red_0 = &g_red_1;
     threadgroup array<float, int(6)> g_lambda_1;
@@ -1167,7 +1171,7 @@ float3 solve3_0(matrix<float,int(3),int(3)>  a_3, float3 b_3)
     return;
 }
 
-[[kernel]] void learned_clear(uint3 thread_3 [[thread_position_in_threadgroup]], uint device* ctl_2 [[buffer(1)]], packed_float4 device* calls_2 [[buffer(2)]], packed_float4 device* nodes_2 [[buffer(3)]], LearnedParams_0 constant* params_2 [[buffer(0)]], packed_float4 device* bonds_2 [[buffer(4)]], uint device* chunk_node_2 [[buffer(8)]], uint device* counters_2 [[buffer(19)]], uint device* route_2 [[buffer(25)]], packed_uint4 device* isl_2 [[buffer(5)]], packed_float4 device* islf_2 [[buffer(6)]], Island_natural_0 device* islands_2 [[buffer(11)]], packed_float4 device* ctab_2 [[buffer(14)]], packed_float4 device* bodies_2 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_2 [[buffer(12)]], packed_float4 device* state_2 [[buffer(13)]], packed_float4 device* imps_2 [[buffer(10)]], uint device* status_2 [[buffer(18)]], packed_uint4 device* largs_2 [[buffer(27)]], packed_uint4 device* cisl_2 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_2 [[buffer(17)]], BondStatic_natural_0 device* bond_static_2 [[buffer(16)]], packed_float4 device* frozen_2 [[buffer(9)]], uint device* split_work_2 [[buffer(21)]], uint device* split_control_2 [[buffer(23)]], packed_uint4 device* split_parents_2 [[buffer(20)]], packed_uint4 device* split_slots_2 [[buffer(22)]], packed_float4 device* split_out_2 [[buffer(26)]], packed_uint4 device* split_firsts_2 [[buffer(24)]])
+[[kernel]] void learned_clear(uint3 thread_3 [[thread_position_in_threadgroup]], uint device* ctl_2 [[buffer(1)]], packed_float4 device* calls_2 [[buffer(2)]], packed_float4 device* nodes_2 [[buffer(3)]], LearnedParams_0 constant* params_2 [[buffer(0)]], packed_float4 device* bonds_2 [[buffer(4)]], uint device* chunk_node_2 [[buffer(8)]], uint device* counters_2 [[buffer(19)]], uint device* route_2 [[buffer(25)]], packed_uint4 device* isl_2 [[buffer(5)]], packed_float4 device* islf_2 [[buffer(6)]], Island_natural_0 device* islands_2 [[buffer(11)]], packed_float4 device* ctab_2 [[buffer(14)]], packed_float4 device* bodies_2 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_2 [[buffer(12)]], packed_float4 device* state_2 [[buffer(13)]], packed_float4 device* imps_2 [[buffer(10)]], uint device* status_2 [[buffer(18)]], packed_uint4 device* largs_2 [[buffer(27)]], packed_uint4 device* cisl_2 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_2 [[buffer(17)]], BondStatic_natural_0 device* bond_static_2 [[buffer(16)]], packed_float4 device* frozen_2 [[buffer(9)]], uint device* split_work_2 [[buffer(21)]], uint device* split_control_2 [[buffer(23)]], packed_uint4 device* split_parents_2 [[buffer(20)]], packed_uint4 device* split_slots_2 [[buffer(22)]], packed_float4 device* split_out_2 [[buffer(26)]], packed_uint4 device* split_firsts_2 [[buffer(24)]], float device* lout_2 [[buffer(28)]])
 {
     thread KernelContext_0 kernelContext_4;
     (&kernelContext_4)->ctl_0 = ctl_2;
@@ -1198,6 +1202,7 @@ float3 solve3_0(matrix<float,int(3),int(3)>  a_3, float3 b_3)
     (&kernelContext_4)->split_slots_0 = split_slots_2;
     (&kernelContext_4)->split_out_0 = split_out_2;
     (&kernelContext_4)->split_firsts_0 = split_firsts_2;
+    (&kernelContext_4)->lout_0 = lout_2;
     threadgroup array<array<float4, int(256)>, int(4)> g_red_2;
     (&kernelContext_4)->g_red_0 = &g_red_2;
     threadgroup array<float, int(6)> g_lambda_2;
@@ -1360,7 +1365,7 @@ float3 chunk_world_0(const Frame_0 thread* f_1, uint k_14, KernelContext_0 threa
     return f_1->origin_0 + _S188;
 }
 
-[[kernel]] void learned_select(uint3 group_1 [[threadgroup_position_in_grid]], uint3 thread_4 [[thread_position_in_threadgroup]], uint device* ctl_3 [[buffer(1)]], packed_float4 device* calls_3 [[buffer(2)]], packed_float4 device* nodes_3 [[buffer(3)]], LearnedParams_0 constant* params_3 [[buffer(0)]], packed_float4 device* bonds_3 [[buffer(4)]], uint device* chunk_node_3 [[buffer(8)]], uint device* counters_3 [[buffer(19)]], uint device* route_3 [[buffer(25)]], packed_uint4 device* isl_3 [[buffer(5)]], packed_float4 device* islf_3 [[buffer(6)]], Island_natural_0 device* islands_3 [[buffer(11)]], packed_float4 device* ctab_3 [[buffer(14)]], packed_float4 device* bodies_3 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_3 [[buffer(12)]], packed_float4 device* state_3 [[buffer(13)]], packed_float4 device* imps_3 [[buffer(10)]], uint device* status_3 [[buffer(18)]], packed_uint4 device* largs_3 [[buffer(27)]], packed_uint4 device* cisl_3 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_3 [[buffer(17)]], BondStatic_natural_0 device* bond_static_3 [[buffer(16)]], packed_float4 device* frozen_3 [[buffer(9)]], uint device* split_work_3 [[buffer(21)]], uint device* split_control_3 [[buffer(23)]], packed_uint4 device* split_parents_3 [[buffer(20)]], packed_uint4 device* split_slots_3 [[buffer(22)]], packed_float4 device* split_out_3 [[buffer(26)]], packed_uint4 device* split_firsts_3 [[buffer(24)]])
+[[kernel]] void learned_select(uint3 group_1 [[threadgroup_position_in_grid]], uint3 thread_4 [[thread_position_in_threadgroup]], uint device* ctl_3 [[buffer(1)]], packed_float4 device* calls_3 [[buffer(2)]], packed_float4 device* nodes_3 [[buffer(3)]], LearnedParams_0 constant* params_3 [[buffer(0)]], packed_float4 device* bonds_3 [[buffer(4)]], uint device* chunk_node_3 [[buffer(8)]], uint device* counters_3 [[buffer(19)]], uint device* route_3 [[buffer(25)]], packed_uint4 device* isl_3 [[buffer(5)]], packed_float4 device* islf_3 [[buffer(6)]], Island_natural_0 device* islands_3 [[buffer(11)]], packed_float4 device* ctab_3 [[buffer(14)]], packed_float4 device* bodies_3 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_3 [[buffer(12)]], packed_float4 device* state_3 [[buffer(13)]], packed_float4 device* imps_3 [[buffer(10)]], uint device* status_3 [[buffer(18)]], packed_uint4 device* largs_3 [[buffer(27)]], packed_uint4 device* cisl_3 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_3 [[buffer(17)]], BondStatic_natural_0 device* bond_static_3 [[buffer(16)]], packed_float4 device* frozen_3 [[buffer(9)]], uint device* split_work_3 [[buffer(21)]], uint device* split_control_3 [[buffer(23)]], packed_uint4 device* split_parents_3 [[buffer(20)]], packed_uint4 device* split_slots_3 [[buffer(22)]], packed_float4 device* split_out_3 [[buffer(26)]], packed_uint4 device* split_firsts_3 [[buffer(24)]], float device* lout_3 [[buffer(28)]])
 {
     float t0_0;
     bool _S189;
@@ -1393,6 +1398,7 @@ float3 chunk_world_0(const Frame_0 thread* f_1, uint k_14, KernelContext_0 threa
     (&kernelContext_7)->split_slots_0 = split_slots_3;
     (&kernelContext_7)->split_out_0 = split_out_3;
     (&kernelContext_7)->split_firsts_0 = split_firsts_3;
+    (&kernelContext_7)->lout_0 = lout_3;
     threadgroup array<array<float4, int(256)>, int(4)> g_red_3;
     (&kernelContext_7)->g_red_0 = &g_red_3;
     threadgroup array<float, int(6)> g_lambda_3;
@@ -1639,7 +1645,7 @@ float3 chunk_world_0(const Frame_0 thread* f_1, uint k_14, KernelContext_0 threa
     return;
 }
 
-[[kernel]] void learned_debris(uint3 id_0 [[thread_position_in_grid]], uint device* ctl_4 [[buffer(1)]], packed_float4 device* calls_4 [[buffer(2)]], packed_float4 device* nodes_4 [[buffer(3)]], LearnedParams_0 constant* params_4 [[buffer(0)]], packed_float4 device* bonds_4 [[buffer(4)]], uint device* chunk_node_4 [[buffer(8)]], uint device* counters_4 [[buffer(19)]], uint device* route_4 [[buffer(25)]], packed_uint4 device* isl_4 [[buffer(5)]], packed_float4 device* islf_4 [[buffer(6)]], Island_natural_0 device* islands_4 [[buffer(11)]], packed_float4 device* ctab_4 [[buffer(14)]], packed_float4 device* bodies_4 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_4 [[buffer(12)]], packed_float4 device* state_4 [[buffer(13)]], packed_float4 device* imps_4 [[buffer(10)]], uint device* status_4 [[buffer(18)]], packed_uint4 device* largs_4 [[buffer(27)]], packed_uint4 device* cisl_4 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_4 [[buffer(17)]], BondStatic_natural_0 device* bond_static_4 [[buffer(16)]], packed_float4 device* frozen_4 [[buffer(9)]], uint device* split_work_4 [[buffer(21)]], uint device* split_control_4 [[buffer(23)]], packed_uint4 device* split_parents_4 [[buffer(20)]], packed_uint4 device* split_slots_4 [[buffer(22)]], packed_float4 device* split_out_4 [[buffer(26)]], packed_uint4 device* split_firsts_4 [[buffer(24)]])
+[[kernel]] void learned_debris(uint3 id_0 [[thread_position_in_grid]], uint device* ctl_4 [[buffer(1)]], packed_float4 device* calls_4 [[buffer(2)]], packed_float4 device* nodes_4 [[buffer(3)]], LearnedParams_0 constant* params_4 [[buffer(0)]], packed_float4 device* bonds_4 [[buffer(4)]], uint device* chunk_node_4 [[buffer(8)]], uint device* counters_4 [[buffer(19)]], uint device* route_4 [[buffer(25)]], packed_uint4 device* isl_4 [[buffer(5)]], packed_float4 device* islf_4 [[buffer(6)]], Island_natural_0 device* islands_4 [[buffer(11)]], packed_float4 device* ctab_4 [[buffer(14)]], packed_float4 device* bodies_4 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_4 [[buffer(12)]], packed_float4 device* state_4 [[buffer(13)]], packed_float4 device* imps_4 [[buffer(10)]], uint device* status_4 [[buffer(18)]], packed_uint4 device* largs_4 [[buffer(27)]], packed_uint4 device* cisl_4 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_4 [[buffer(17)]], BondStatic_natural_0 device* bond_static_4 [[buffer(16)]], packed_float4 device* frozen_4 [[buffer(9)]], uint device* split_work_4 [[buffer(21)]], uint device* split_control_4 [[buffer(23)]], packed_uint4 device* split_parents_4 [[buffer(20)]], packed_uint4 device* split_slots_4 [[buffer(22)]], packed_float4 device* split_out_4 [[buffer(26)]], packed_uint4 device* split_firsts_4 [[buffer(24)]], float device* lout_4 [[buffer(28)]])
 {
     thread KernelContext_0 kernelContext_8;
     (&kernelContext_8)->ctl_0 = ctl_4;
@@ -1670,6 +1676,7 @@ float3 chunk_world_0(const Frame_0 thread* f_1, uint k_14, KernelContext_0 threa
     (&kernelContext_8)->split_slots_0 = split_slots_4;
     (&kernelContext_8)->split_out_0 = split_out_4;
     (&kernelContext_8)->split_firsts_0 = split_firsts_4;
+    (&kernelContext_8)->lout_0 = lout_4;
     threadgroup array<array<float4, int(256)>, int(4)> g_red_4;
     (&kernelContext_8)->g_red_0 = &g_red_4;
     threadgroup array<float, int(6)> g_lambda_4;
@@ -1804,7 +1811,7 @@ uint lowest_bit_0(uint m_6)
     return firstbitlow_0(m_6);
 }
 
-[[kernel]] void learned_compact(uint3 thread_5 [[thread_position_in_threadgroup]], uint device* ctl_5 [[buffer(1)]], packed_float4 device* calls_5 [[buffer(2)]], packed_float4 device* nodes_5 [[buffer(3)]], LearnedParams_0 constant* params_5 [[buffer(0)]], packed_float4 device* bonds_5 [[buffer(4)]], uint device* chunk_node_5 [[buffer(8)]], uint device* counters_5 [[buffer(19)]], uint device* route_5 [[buffer(25)]], packed_uint4 device* isl_5 [[buffer(5)]], packed_float4 device* islf_5 [[buffer(6)]], Island_natural_0 device* islands_5 [[buffer(11)]], packed_float4 device* ctab_5 [[buffer(14)]], packed_float4 device* bodies_5 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_5 [[buffer(12)]], packed_float4 device* state_5 [[buffer(13)]], packed_float4 device* imps_5 [[buffer(10)]], uint device* status_5 [[buffer(18)]], packed_uint4 device* largs_5 [[buffer(27)]], packed_uint4 device* cisl_5 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_5 [[buffer(17)]], BondStatic_natural_0 device* bond_static_5 [[buffer(16)]], packed_float4 device* frozen_5 [[buffer(9)]], uint device* split_work_5 [[buffer(21)]], uint device* split_control_5 [[buffer(23)]], packed_uint4 device* split_parents_5 [[buffer(20)]], packed_uint4 device* split_slots_5 [[buffer(22)]], packed_float4 device* split_out_5 [[buffer(26)]], packed_uint4 device* split_firsts_5 [[buffer(24)]])
+[[kernel]] void learned_compact(uint3 thread_5 [[thread_position_in_threadgroup]], uint device* ctl_5 [[buffer(1)]], packed_float4 device* calls_5 [[buffer(2)]], packed_float4 device* nodes_5 [[buffer(3)]], LearnedParams_0 constant* params_5 [[buffer(0)]], packed_float4 device* bonds_5 [[buffer(4)]], uint device* chunk_node_5 [[buffer(8)]], uint device* counters_5 [[buffer(19)]], uint device* route_5 [[buffer(25)]], packed_uint4 device* isl_5 [[buffer(5)]], packed_float4 device* islf_5 [[buffer(6)]], Island_natural_0 device* islands_5 [[buffer(11)]], packed_float4 device* ctab_5 [[buffer(14)]], packed_float4 device* bodies_5 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_5 [[buffer(12)]], packed_float4 device* state_5 [[buffer(13)]], packed_float4 device* imps_5 [[buffer(10)]], uint device* status_5 [[buffer(18)]], packed_uint4 device* largs_5 [[buffer(27)]], packed_uint4 device* cisl_5 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_5 [[buffer(17)]], BondStatic_natural_0 device* bond_static_5 [[buffer(16)]], packed_float4 device* frozen_5 [[buffer(9)]], uint device* split_work_5 [[buffer(21)]], uint device* split_control_5 [[buffer(23)]], packed_uint4 device* split_parents_5 [[buffer(20)]], packed_uint4 device* split_slots_5 [[buffer(22)]], packed_float4 device* split_out_5 [[buffer(26)]], packed_uint4 device* split_firsts_5 [[buffer(24)]], float device* lout_5 [[buffer(28)]])
 {
     uint _S224;
     thread KernelContext_0 kernelContext_9;
@@ -1836,6 +1843,7 @@ uint lowest_bit_0(uint m_6)
     (&kernelContext_9)->split_slots_0 = split_slots_5;
     (&kernelContext_9)->split_out_0 = split_out_5;
     (&kernelContext_9)->split_firsts_0 = split_firsts_5;
+    (&kernelContext_9)->lout_0 = lout_5;
     threadgroup array<array<float4, int(256)>, int(4)> g_red_5;
     (&kernelContext_9)->g_red_0 = &g_red_5;
     threadgroup array<float, int(6)> g_lambda_5;
@@ -2181,6 +2189,8 @@ uint lowest_bit_0(uint m_6)
     g_1 = 0U;
     bond_at_0 = 0U;
     uint cisl_at_0 = 0U;
+    uint chunk_base_0 = 0U;
+    uint imp_base_0 = 0U;
     for(;;)
     {
         if(g_1 < _S224)
@@ -2194,7 +2204,9 @@ uint lowest_bit_0(uint m_6)
         uint _S244 = _S243 + 4U;
         (*((&kernelContext_9)->calls_0+_S244))[int(0)] = (as_type<float>((bond_at_0)));
         uint _S245 = _S243 + 6U;
-        (*((&kernelContext_9)->calls_0+_S245))[int(0)] = (as_type<float>((cisl_at_0)));
+        *((&kernelContext_9)->calls_0+_S245) = packed_float4(float4((as_type<float>((cisl_at_0))), (float4(*((&kernelContext_9)->calls_0+_S245)) ).y, (as_type<float>((chunk_base_0))), (as_type<float>((imp_base_0))))) ;
+        uint chunk_base_1 = chunk_base_0 + (as_type<uint>(((float4(*((&kernelContext_9)->calls_0+(_S243 + 3U))) ).w)));
+        uint imp_base_1 = imp_base_0 + ((uint)popcount(((as_type<uint>(((float4(*((&kernelContext_9)->calls_0+(_S243 + 5U))) ).w))))));
         (*(&kernelContext_9)->g_cnt_bond_0)[g_1] = bond_at_0;
         (*(&kernelContext_9)->g_cnt_isl_0)[g_1] = cisl_at_0;
         uint bond_at_1 = bond_at_0 + (as_type<uint>(((float4(*((&kernelContext_9)->calls_0+_S244)) ).y)));
@@ -2202,6 +2214,8 @@ uint lowest_bit_0(uint m_6)
         g_1 = g_1 + 1U;
         bond_at_0 = bond_at_1;
         cisl_at_0 = cisl_at_1;
+        chunk_base_0 = chunk_base_1;
+        imp_base_0 = imp_base_1;
     }
     if(node_at_0 > ((&kernelContext_9)->params_0->max_nodes_0))
     {
@@ -2301,7 +2315,7 @@ bool connected_0(const JointState_0 thread* st_0, bool has_rebar_0)
     return _S254;
 }
 
-[[kernel]] void learned_count_bonds(uint3 group_2 [[threadgroup_position_in_grid]], uint3 thread_6 [[thread_position_in_threadgroup]], uint device* ctl_6 [[buffer(1)]], packed_float4 device* calls_6 [[buffer(2)]], packed_float4 device* nodes_6 [[buffer(3)]], LearnedParams_0 constant* params_6 [[buffer(0)]], packed_float4 device* bonds_6 [[buffer(4)]], uint device* chunk_node_6 [[buffer(8)]], uint device* counters_6 [[buffer(19)]], uint device* route_6 [[buffer(25)]], packed_uint4 device* isl_6 [[buffer(5)]], packed_float4 device* islf_6 [[buffer(6)]], Island_natural_0 device* islands_6 [[buffer(11)]], packed_float4 device* ctab_6 [[buffer(14)]], packed_float4 device* bodies_6 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_6 [[buffer(12)]], packed_float4 device* state_6 [[buffer(13)]], packed_float4 device* imps_6 [[buffer(10)]], uint device* status_6 [[buffer(18)]], packed_uint4 device* largs_6 [[buffer(27)]], packed_uint4 device* cisl_6 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_6 [[buffer(17)]], BondStatic_natural_0 device* bond_static_6 [[buffer(16)]], packed_float4 device* frozen_6 [[buffer(9)]], uint device* split_work_6 [[buffer(21)]], uint device* split_control_6 [[buffer(23)]], packed_uint4 device* split_parents_6 [[buffer(20)]], packed_uint4 device* split_slots_6 [[buffer(22)]], packed_float4 device* split_out_6 [[buffer(26)]], packed_uint4 device* split_firsts_6 [[buffer(24)]])
+[[kernel]] void learned_count_bonds(uint3 group_2 [[threadgroup_position_in_grid]], uint3 thread_6 [[thread_position_in_threadgroup]], uint device* ctl_6 [[buffer(1)]], packed_float4 device* calls_6 [[buffer(2)]], packed_float4 device* nodes_6 [[buffer(3)]], LearnedParams_0 constant* params_6 [[buffer(0)]], packed_float4 device* bonds_6 [[buffer(4)]], uint device* chunk_node_6 [[buffer(8)]], uint device* counters_6 [[buffer(19)]], uint device* route_6 [[buffer(25)]], packed_uint4 device* isl_6 [[buffer(5)]], packed_float4 device* islf_6 [[buffer(6)]], Island_natural_0 device* islands_6 [[buffer(11)]], packed_float4 device* ctab_6 [[buffer(14)]], packed_float4 device* bodies_6 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_6 [[buffer(12)]], packed_float4 device* state_6 [[buffer(13)]], packed_float4 device* imps_6 [[buffer(10)]], uint device* status_6 [[buffer(18)]], packed_uint4 device* largs_6 [[buffer(27)]], packed_uint4 device* cisl_6 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_6 [[buffer(17)]], BondStatic_natural_0 device* bond_static_6 [[buffer(16)]], packed_float4 device* frozen_6 [[buffer(9)]], uint device* split_work_6 [[buffer(21)]], uint device* split_control_6 [[buffer(23)]], packed_uint4 device* split_parents_6 [[buffer(20)]], packed_uint4 device* split_slots_6 [[buffer(22)]], packed_float4 device* split_out_6 [[buffer(26)]], packed_uint4 device* split_firsts_6 [[buffer(24)]], float device* lout_6 [[buffer(28)]])
 {
     thread KernelContext_0 kernelContext_10;
     (&kernelContext_10)->ctl_0 = ctl_6;
@@ -2332,6 +2346,7 @@ bool connected_0(const JointState_0 thread* st_0, bool has_rebar_0)
     (&kernelContext_10)->split_slots_0 = split_slots_6;
     (&kernelContext_10)->split_out_0 = split_out_6;
     (&kernelContext_10)->split_firsts_0 = split_firsts_6;
+    (&kernelContext_10)->lout_0 = lout_6;
     threadgroup array<array<float4, int(256)>, int(4)> g_red_6;
     (&kernelContext_10)->g_red_0 = &g_red_6;
     threadgroup array<float, int(6)> g_lambda_6;
@@ -2482,7 +2497,7 @@ float4 matrix_quat_0(matrix<float,int(3),int(3)>  m_8)
     return normalize(q_9);
 }
 
-[[kernel]] void learned_gather_chunks(uint3 group_3 [[threadgroup_position_in_grid]], uint3 thread_7 [[thread_position_in_threadgroup]], uint device* ctl_7 [[buffer(1)]], packed_float4 device* calls_7 [[buffer(2)]], packed_float4 device* nodes_7 [[buffer(3)]], LearnedParams_0 constant* params_7 [[buffer(0)]], packed_float4 device* bonds_7 [[buffer(4)]], uint device* chunk_node_7 [[buffer(8)]], uint device* counters_7 [[buffer(19)]], uint device* route_7 [[buffer(25)]], packed_uint4 device* isl_7 [[buffer(5)]], packed_float4 device* islf_7 [[buffer(6)]], Island_natural_0 device* islands_7 [[buffer(11)]], packed_float4 device* ctab_7 [[buffer(14)]], packed_float4 device* bodies_7 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_7 [[buffer(12)]], packed_float4 device* state_7 [[buffer(13)]], packed_float4 device* imps_7 [[buffer(10)]], uint device* status_7 [[buffer(18)]], packed_uint4 device* largs_7 [[buffer(27)]], packed_uint4 device* cisl_7 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_7 [[buffer(17)]], BondStatic_natural_0 device* bond_static_7 [[buffer(16)]], packed_float4 device* frozen_7 [[buffer(9)]], uint device* split_work_7 [[buffer(21)]], uint device* split_control_7 [[buffer(23)]], packed_uint4 device* split_parents_7 [[buffer(20)]], packed_uint4 device* split_slots_7 [[buffer(22)]], packed_float4 device* split_out_7 [[buffer(26)]], packed_uint4 device* split_firsts_7 [[buffer(24)]])
+[[kernel]] void learned_gather_chunks(uint3 group_3 [[threadgroup_position_in_grid]], uint3 thread_7 [[thread_position_in_threadgroup]], uint device* ctl_7 [[buffer(1)]], packed_float4 device* calls_7 [[buffer(2)]], packed_float4 device* nodes_7 [[buffer(3)]], LearnedParams_0 constant* params_7 [[buffer(0)]], packed_float4 device* bonds_7 [[buffer(4)]], uint device* chunk_node_7 [[buffer(8)]], uint device* counters_7 [[buffer(19)]], uint device* route_7 [[buffer(25)]], packed_uint4 device* isl_7 [[buffer(5)]], packed_float4 device* islf_7 [[buffer(6)]], Island_natural_0 device* islands_7 [[buffer(11)]], packed_float4 device* ctab_7 [[buffer(14)]], packed_float4 device* bodies_7 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_7 [[buffer(12)]], packed_float4 device* state_7 [[buffer(13)]], packed_float4 device* imps_7 [[buffer(10)]], uint device* status_7 [[buffer(18)]], packed_uint4 device* largs_7 [[buffer(27)]], packed_uint4 device* cisl_7 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_7 [[buffer(17)]], BondStatic_natural_0 device* bond_static_7 [[buffer(16)]], packed_float4 device* frozen_7 [[buffer(9)]], uint device* split_work_7 [[buffer(21)]], uint device* split_control_7 [[buffer(23)]], packed_uint4 device* split_parents_7 [[buffer(20)]], packed_uint4 device* split_slots_7 [[buffer(22)]], packed_float4 device* split_out_7 [[buffer(26)]], packed_uint4 device* split_firsts_7 [[buffer(24)]], float device* lout_7 [[buffer(28)]])
 {
     thread KernelContext_0 kernelContext_11;
     (&kernelContext_11)->ctl_0 = ctl_7;
@@ -2513,6 +2528,7 @@ float4 matrix_quat_0(matrix<float,int(3),int(3)>  m_8)
     (&kernelContext_11)->split_slots_0 = split_slots_7;
     (&kernelContext_11)->split_out_0 = split_out_7;
     (&kernelContext_11)->split_firsts_0 = split_firsts_7;
+    (&kernelContext_11)->lout_0 = lout_7;
     threadgroup array<array<float4, int(256)>, int(4)> g_red_7;
     (&kernelContext_11)->g_red_0 = &g_red_7;
     threadgroup array<float, int(6)> g_lambda_7;
@@ -2601,7 +2617,7 @@ float4 matrix_quat_0(matrix<float,int(3),int(3)>  m_8)
     return;
 }
 
-[[kernel]] void learned_gather_bonds(uint3 group_4 [[threadgroup_position_in_grid]], uint3 thread_8 [[thread_position_in_threadgroup]], uint device* ctl_8 [[buffer(1)]], packed_float4 device* calls_8 [[buffer(2)]], packed_float4 device* nodes_8 [[buffer(3)]], LearnedParams_0 constant* params_8 [[buffer(0)]], packed_float4 device* bonds_8 [[buffer(4)]], uint device* chunk_node_8 [[buffer(8)]], uint device* counters_8 [[buffer(19)]], uint device* route_8 [[buffer(25)]], packed_uint4 device* isl_8 [[buffer(5)]], packed_float4 device* islf_8 [[buffer(6)]], Island_natural_0 device* islands_8 [[buffer(11)]], packed_float4 device* ctab_8 [[buffer(14)]], packed_float4 device* bodies_8 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_8 [[buffer(12)]], packed_float4 device* state_8 [[buffer(13)]], packed_float4 device* imps_8 [[buffer(10)]], uint device* status_8 [[buffer(18)]], packed_uint4 device* largs_8 [[buffer(27)]], packed_uint4 device* cisl_8 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_8 [[buffer(17)]], BondStatic_natural_0 device* bond_static_8 [[buffer(16)]], packed_float4 device* frozen_8 [[buffer(9)]], uint device* split_work_8 [[buffer(21)]], uint device* split_control_8 [[buffer(23)]], packed_uint4 device* split_parents_8 [[buffer(20)]], packed_uint4 device* split_slots_8 [[buffer(22)]], packed_float4 device* split_out_8 [[buffer(26)]], packed_uint4 device* split_firsts_8 [[buffer(24)]])
+[[kernel]] void learned_gather_bonds(uint3 group_4 [[threadgroup_position_in_grid]], uint3 thread_8 [[thread_position_in_threadgroup]], uint device* ctl_8 [[buffer(1)]], packed_float4 device* calls_8 [[buffer(2)]], packed_float4 device* nodes_8 [[buffer(3)]], LearnedParams_0 constant* params_8 [[buffer(0)]], packed_float4 device* bonds_8 [[buffer(4)]], uint device* chunk_node_8 [[buffer(8)]], uint device* counters_8 [[buffer(19)]], uint device* route_8 [[buffer(25)]], packed_uint4 device* isl_8 [[buffer(5)]], packed_float4 device* islf_8 [[buffer(6)]], Island_natural_0 device* islands_8 [[buffer(11)]], packed_float4 device* ctab_8 [[buffer(14)]], packed_float4 device* bodies_8 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_8 [[buffer(12)]], packed_float4 device* state_8 [[buffer(13)]], packed_float4 device* imps_8 [[buffer(10)]], uint device* status_8 [[buffer(18)]], packed_uint4 device* largs_8 [[buffer(27)]], packed_uint4 device* cisl_8 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_8 [[buffer(17)]], BondStatic_natural_0 device* bond_static_8 [[buffer(16)]], packed_float4 device* frozen_8 [[buffer(9)]], uint device* split_work_8 [[buffer(21)]], uint device* split_control_8 [[buffer(23)]], packed_uint4 device* split_parents_8 [[buffer(20)]], packed_uint4 device* split_slots_8 [[buffer(22)]], packed_float4 device* split_out_8 [[buffer(26)]], packed_uint4 device* split_firsts_8 [[buffer(24)]], float device* lout_8 [[buffer(28)]])
 {
     thread KernelContext_0 kernelContext_12;
     (&kernelContext_12)->ctl_0 = ctl_8;
@@ -2632,6 +2648,7 @@ float4 matrix_quat_0(matrix<float,int(3),int(3)>  m_8)
     (&kernelContext_12)->split_slots_0 = split_slots_8;
     (&kernelContext_12)->split_out_0 = split_out_8;
     (&kernelContext_12)->split_firsts_0 = split_firsts_8;
+    (&kernelContext_12)->lout_0 = lout_8;
     threadgroup array<array<float4, int(256)>, int(4)> g_red_8;
     (&kernelContext_12)->g_red_0 = &g_red_8;
     threadgroup array<float, int(6)> g_lambda_8;
@@ -2757,7 +2774,7 @@ float4 matrix_quat_0(matrix<float,int(3),int(3)>  m_8)
     return;
 }
 
-[[kernel]] void learned_gather_impactors(uint3 group_5 [[threadgroup_position_in_grid]], uint3 thread_9 [[thread_position_in_threadgroup]], uint device* ctl_9 [[buffer(1)]], packed_float4 device* calls_9 [[buffer(2)]], packed_float4 device* nodes_9 [[buffer(3)]], LearnedParams_0 constant* params_9 [[buffer(0)]], packed_float4 device* bonds_9 [[buffer(4)]], uint device* chunk_node_9 [[buffer(8)]], uint device* counters_9 [[buffer(19)]], uint device* route_9 [[buffer(25)]], packed_uint4 device* isl_9 [[buffer(5)]], packed_float4 device* islf_9 [[buffer(6)]], Island_natural_0 device* islands_9 [[buffer(11)]], packed_float4 device* ctab_9 [[buffer(14)]], packed_float4 device* bodies_9 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_9 [[buffer(12)]], packed_float4 device* state_9 [[buffer(13)]], packed_float4 device* imps_9 [[buffer(10)]], uint device* status_9 [[buffer(18)]], packed_uint4 device* largs_9 [[buffer(27)]], packed_uint4 device* cisl_9 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_9 [[buffer(17)]], BondStatic_natural_0 device* bond_static_9 [[buffer(16)]], packed_float4 device* frozen_9 [[buffer(9)]], uint device* split_work_9 [[buffer(21)]], uint device* split_control_9 [[buffer(23)]], packed_uint4 device* split_parents_9 [[buffer(20)]], packed_uint4 device* split_slots_9 [[buffer(22)]], packed_float4 device* split_out_9 [[buffer(26)]], packed_uint4 device* split_firsts_9 [[buffer(24)]])
+[[kernel]] void learned_gather_impactors(uint3 group_5 [[threadgroup_position_in_grid]], uint3 thread_9 [[thread_position_in_threadgroup]], uint device* ctl_9 [[buffer(1)]], packed_float4 device* calls_9 [[buffer(2)]], packed_float4 device* nodes_9 [[buffer(3)]], LearnedParams_0 constant* params_9 [[buffer(0)]], packed_float4 device* bonds_9 [[buffer(4)]], uint device* chunk_node_9 [[buffer(8)]], uint device* counters_9 [[buffer(19)]], uint device* route_9 [[buffer(25)]], packed_uint4 device* isl_9 [[buffer(5)]], packed_float4 device* islf_9 [[buffer(6)]], Island_natural_0 device* islands_9 [[buffer(11)]], packed_float4 device* ctab_9 [[buffer(14)]], packed_float4 device* bodies_9 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_9 [[buffer(12)]], packed_float4 device* state_9 [[buffer(13)]], packed_float4 device* imps_9 [[buffer(10)]], uint device* status_9 [[buffer(18)]], packed_uint4 device* largs_9 [[buffer(27)]], packed_uint4 device* cisl_9 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_9 [[buffer(17)]], BondStatic_natural_0 device* bond_static_9 [[buffer(16)]], packed_float4 device* frozen_9 [[buffer(9)]], uint device* split_work_9 [[buffer(21)]], uint device* split_control_9 [[buffer(23)]], packed_uint4 device* split_parents_9 [[buffer(20)]], packed_uint4 device* split_slots_9 [[buffer(22)]], packed_float4 device* split_out_9 [[buffer(26)]], packed_uint4 device* split_firsts_9 [[buffer(24)]], float device* lout_9 [[buffer(28)]])
 {
     thread KernelContext_0 kernelContext_13;
     (&kernelContext_13)->ctl_0 = ctl_9;
@@ -2788,6 +2805,7 @@ float4 matrix_quat_0(matrix<float,int(3),int(3)>  m_8)
     (&kernelContext_13)->split_slots_0 = split_slots_9;
     (&kernelContext_13)->split_out_0 = split_out_9;
     (&kernelContext_13)->split_firsts_0 = split_firsts_9;
+    (&kernelContext_13)->lout_0 = lout_9;
     threadgroup array<array<float4, int(256)>, int(4)> g_red_9;
     (&kernelContext_13)->g_red_0 = &g_red_9;
     threadgroup array<float, int(6)> g_lambda_9;
@@ -2945,7 +2963,7 @@ float median_sorted_0(uint n_3, KernelContext_0 thread* kernelContext_15)
     return _S293;
 }
 
-[[kernel]] void learned_finish(uint3 group_6 [[threadgroup_position_in_grid]], uint3 thread_10 [[thread_position_in_threadgroup]], uint device* ctl_10 [[buffer(1)]], packed_float4 device* calls_10 [[buffer(2)]], packed_float4 device* nodes_10 [[buffer(3)]], LearnedParams_0 constant* params_10 [[buffer(0)]], packed_float4 device* bonds_10 [[buffer(4)]], uint device* chunk_node_10 [[buffer(8)]], uint device* counters_10 [[buffer(19)]], uint device* route_10 [[buffer(25)]], packed_uint4 device* isl_10 [[buffer(5)]], packed_float4 device* islf_10 [[buffer(6)]], Island_natural_0 device* islands_10 [[buffer(11)]], packed_float4 device* ctab_10 [[buffer(14)]], packed_float4 device* bodies_10 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_10 [[buffer(12)]], packed_float4 device* state_10 [[buffer(13)]], packed_float4 device* imps_10 [[buffer(10)]], uint device* status_10 [[buffer(18)]], packed_uint4 device* largs_10 [[buffer(27)]], packed_uint4 device* cisl_10 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_10 [[buffer(17)]], BondStatic_natural_0 device* bond_static_10 [[buffer(16)]], packed_float4 device* frozen_10 [[buffer(9)]], uint device* split_work_10 [[buffer(21)]], uint device* split_control_10 [[buffer(23)]], packed_uint4 device* split_parents_10 [[buffer(20)]], packed_uint4 device* split_slots_10 [[buffer(22)]], packed_float4 device* split_out_10 [[buffer(26)]], packed_uint4 device* split_firsts_10 [[buffer(24)]])
+[[kernel]] void learned_finish(uint3 group_6 [[threadgroup_position_in_grid]], uint3 thread_10 [[thread_position_in_threadgroup]], uint device* ctl_10 [[buffer(1)]], packed_float4 device* calls_10 [[buffer(2)]], packed_float4 device* nodes_10 [[buffer(3)]], LearnedParams_0 constant* params_10 [[buffer(0)]], packed_float4 device* bonds_10 [[buffer(4)]], uint device* chunk_node_10 [[buffer(8)]], uint device* counters_10 [[buffer(19)]], uint device* route_10 [[buffer(25)]], packed_uint4 device* isl_10 [[buffer(5)]], packed_float4 device* islf_10 [[buffer(6)]], Island_natural_0 device* islands_10 [[buffer(11)]], packed_float4 device* ctab_10 [[buffer(14)]], packed_float4 device* bodies_10 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_10 [[buffer(12)]], packed_float4 device* state_10 [[buffer(13)]], packed_float4 device* imps_10 [[buffer(10)]], uint device* status_10 [[buffer(18)]], packed_uint4 device* largs_10 [[buffer(27)]], packed_uint4 device* cisl_10 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_10 [[buffer(17)]], BondStatic_natural_0 device* bond_static_10 [[buffer(16)]], packed_float4 device* frozen_10 [[buffer(9)]], uint device* split_work_10 [[buffer(21)]], uint device* split_control_10 [[buffer(23)]], packed_uint4 device* split_parents_10 [[buffer(20)]], packed_uint4 device* split_slots_10 [[buffer(22)]], packed_float4 device* split_out_10 [[buffer(26)]], packed_uint4 device* split_firsts_10 [[buffer(24)]], float device* lout_10 [[buffer(28)]])
 {
     uint jc_0;
     thread KernelContext_0 kernelContext_16;
@@ -2977,6 +2995,7 @@ float median_sorted_0(uint n_3, KernelContext_0 thread* kernelContext_15)
     (&kernelContext_16)->split_slots_0 = split_slots_10;
     (&kernelContext_16)->split_out_0 = split_out_10;
     (&kernelContext_16)->split_firsts_0 = split_firsts_10;
+    (&kernelContext_16)->lout_0 = lout_10;
     threadgroup array<array<float4, int(256)>, int(4)> g_red_10;
     (&kernelContext_16)->g_red_0 = &g_red_10;
     threadgroup array<float, int(6)> g_lambda_10;
@@ -3262,7 +3281,7 @@ float3 inverse_rotate_0(const Quat_0 thread* q_12, float3 v_8)
     return _S335;
 }
 
-[[kernel]] void learned_stub(uint3 group_7 [[threadgroup_position_in_grid]], uint3 thread_11 [[thread_position_in_threadgroup]], uint device* ctl_11 [[buffer(1)]], packed_float4 device* calls_11 [[buffer(2)]], packed_float4 device* nodes_11 [[buffer(3)]], LearnedParams_0 constant* params_11 [[buffer(0)]], packed_float4 device* bonds_11 [[buffer(4)]], uint device* chunk_node_11 [[buffer(8)]], uint device* counters_11 [[buffer(19)]], uint device* route_11 [[buffer(25)]], packed_uint4 device* isl_11 [[buffer(5)]], packed_float4 device* islf_11 [[buffer(6)]], Island_natural_0 device* islands_11 [[buffer(11)]], packed_float4 device* ctab_11 [[buffer(14)]], packed_float4 device* bodies_11 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_11 [[buffer(12)]], packed_float4 device* state_11 [[buffer(13)]], packed_float4 device* imps_11 [[buffer(10)]], uint device* status_11 [[buffer(18)]], packed_uint4 device* largs_11 [[buffer(27)]], packed_uint4 device* cisl_11 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_11 [[buffer(17)]], BondStatic_natural_0 device* bond_static_11 [[buffer(16)]], packed_float4 device* frozen_11 [[buffer(9)]], uint device* split_work_11 [[buffer(21)]], uint device* split_control_11 [[buffer(23)]], packed_uint4 device* split_parents_11 [[buffer(20)]], packed_uint4 device* split_slots_11 [[buffer(22)]], packed_float4 device* split_out_11 [[buffer(26)]], packed_uint4 device* split_firsts_11 [[buffer(24)]])
+[[kernel]] void learned_stub(uint3 group_7 [[threadgroup_position_in_grid]], uint3 thread_11 [[thread_position_in_threadgroup]], uint device* ctl_11 [[buffer(1)]], packed_float4 device* calls_11 [[buffer(2)]], packed_float4 device* nodes_11 [[buffer(3)]], LearnedParams_0 constant* params_11 [[buffer(0)]], packed_float4 device* bonds_11 [[buffer(4)]], uint device* chunk_node_11 [[buffer(8)]], uint device* counters_11 [[buffer(19)]], uint device* route_11 [[buffer(25)]], packed_uint4 device* isl_11 [[buffer(5)]], packed_float4 device* islf_11 [[buffer(6)]], Island_natural_0 device* islands_11 [[buffer(11)]], packed_float4 device* ctab_11 [[buffer(14)]], packed_float4 device* bodies_11 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_11 [[buffer(12)]], packed_float4 device* state_11 [[buffer(13)]], packed_float4 device* imps_11 [[buffer(10)]], uint device* status_11 [[buffer(18)]], packed_uint4 device* largs_11 [[buffer(27)]], packed_uint4 device* cisl_11 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_11 [[buffer(17)]], BondStatic_natural_0 device* bond_static_11 [[buffer(16)]], packed_float4 device* frozen_11 [[buffer(9)]], uint device* split_work_11 [[buffer(21)]], uint device* split_control_11 [[buffer(23)]], packed_uint4 device* split_parents_11 [[buffer(20)]], packed_uint4 device* split_slots_11 [[buffer(22)]], packed_float4 device* split_out_11 [[buffer(26)]], packed_uint4 device* split_firsts_11 [[buffer(24)]], float device* lout_11 [[buffer(28)]])
 {
     bool plug_0;
     thread KernelContext_0 kernelContext_17;
@@ -3294,6 +3313,7 @@ float3 inverse_rotate_0(const Quat_0 thread* q_12, float3 v_8)
     (&kernelContext_17)->split_slots_0 = split_slots_11;
     (&kernelContext_17)->split_out_0 = split_out_11;
     (&kernelContext_17)->split_firsts_0 = split_firsts_11;
+    (&kernelContext_17)->lout_0 = lout_11;
     threadgroup array<array<float4, int(256)>, int(4)> g_red_11;
     (&kernelContext_17)->g_red_0 = &g_red_11;
     threadgroup array<float, int(6)> g_lambda_11;
@@ -3702,7 +3722,7 @@ float3 inverse_rotate_0(const Quat_0 thread* q_12, float3 v_8)
     return;
 }
 
-[[kernel]] void learned_gate(uint3 group_8 [[threadgroup_position_in_grid]], uint3 thread_12 [[thread_position_in_threadgroup]], uint device* ctl_12 [[buffer(1)]], packed_float4 device* calls_12 [[buffer(2)]], packed_float4 device* nodes_12 [[buffer(3)]], LearnedParams_0 constant* params_12 [[buffer(0)]], packed_float4 device* bonds_12 [[buffer(4)]], uint device* chunk_node_12 [[buffer(8)]], uint device* counters_12 [[buffer(19)]], uint device* route_12 [[buffer(25)]], packed_uint4 device* isl_12 [[buffer(5)]], packed_float4 device* islf_12 [[buffer(6)]], Island_natural_0 device* islands_12 [[buffer(11)]], packed_float4 device* ctab_12 [[buffer(14)]], packed_float4 device* bodies_12 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_12 [[buffer(12)]], packed_float4 device* state_12 [[buffer(13)]], packed_float4 device* imps_12 [[buffer(10)]], uint device* status_12 [[buffer(18)]], packed_uint4 device* largs_12 [[buffer(27)]], packed_uint4 device* cisl_12 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_12 [[buffer(17)]], BondStatic_natural_0 device* bond_static_12 [[buffer(16)]], packed_float4 device* frozen_12 [[buffer(9)]], uint device* split_work_12 [[buffer(21)]], uint device* split_control_12 [[buffer(23)]], packed_uint4 device* split_parents_12 [[buffer(20)]], packed_uint4 device* split_slots_12 [[buffer(22)]], packed_float4 device* split_out_12 [[buffer(26)]], packed_uint4 device* split_firsts_12 [[buffer(24)]])
+[[kernel]] void learned_gate(uint3 group_8 [[threadgroup_position_in_grid]], uint3 thread_12 [[thread_position_in_threadgroup]], uint device* ctl_12 [[buffer(1)]], packed_float4 device* calls_12 [[buffer(2)]], packed_float4 device* nodes_12 [[buffer(3)]], LearnedParams_0 constant* params_12 [[buffer(0)]], packed_float4 device* bonds_12 [[buffer(4)]], uint device* chunk_node_12 [[buffer(8)]], uint device* counters_12 [[buffer(19)]], uint device* route_12 [[buffer(25)]], packed_uint4 device* isl_12 [[buffer(5)]], packed_float4 device* islf_12 [[buffer(6)]], Island_natural_0 device* islands_12 [[buffer(11)]], packed_float4 device* ctab_12 [[buffer(14)]], packed_float4 device* bodies_12 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_12 [[buffer(12)]], packed_float4 device* state_12 [[buffer(13)]], packed_float4 device* imps_12 [[buffer(10)]], uint device* status_12 [[buffer(18)]], packed_uint4 device* largs_12 [[buffer(27)]], packed_uint4 device* cisl_12 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_12 [[buffer(17)]], BondStatic_natural_0 device* bond_static_12 [[buffer(16)]], packed_float4 device* frozen_12 [[buffer(9)]], uint device* split_work_12 [[buffer(21)]], uint device* split_control_12 [[buffer(23)]], packed_uint4 device* split_parents_12 [[buffer(20)]], packed_uint4 device* split_slots_12 [[buffer(22)]], packed_float4 device* split_out_12 [[buffer(26)]], packed_uint4 device* split_firsts_12 [[buffer(24)]], float device* lout_12 [[buffer(28)]])
 {
     bool _S386;
     thread KernelContext_0 kernelContext_18;
@@ -3734,6 +3754,7 @@ float3 inverse_rotate_0(const Quat_0 thread* q_12, float3 v_8)
     (&kernelContext_18)->split_slots_0 = split_slots_12;
     (&kernelContext_18)->split_out_0 = split_out_12;
     (&kernelContext_18)->split_firsts_0 = split_firsts_12;
+    (&kernelContext_18)->lout_0 = lout_12;
     threadgroup array<array<float4, int(256)>, int(4)> g_red_12;
     (&kernelContext_18)->g_red_0 = &g_red_12;
     threadgroup array<float, int(6)> g_lambda_12;
@@ -3949,7 +3970,7 @@ bool island_current_0(uint e_2, KernelContext_0 thread* kernelContext_19)
     return (_S413.y - _S413.x) == _S406;
 }
 
-[[kernel]] void learned_check(uint3 group_9 [[threadgroup_position_in_grid]], uint3 thread_13 [[thread_position_in_threadgroup]], uint device* ctl_13 [[buffer(1)]], packed_float4 device* calls_13 [[buffer(2)]], packed_float4 device* nodes_13 [[buffer(3)]], LearnedParams_0 constant* params_13 [[buffer(0)]], packed_float4 device* bonds_13 [[buffer(4)]], uint device* chunk_node_13 [[buffer(8)]], uint device* counters_13 [[buffer(19)]], uint device* route_13 [[buffer(25)]], packed_uint4 device* isl_13 [[buffer(5)]], packed_float4 device* islf_13 [[buffer(6)]], Island_natural_0 device* islands_13 [[buffer(11)]], packed_float4 device* ctab_13 [[buffer(14)]], packed_float4 device* bodies_13 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_13 [[buffer(12)]], packed_float4 device* state_13 [[buffer(13)]], packed_float4 device* imps_13 [[buffer(10)]], uint device* status_13 [[buffer(18)]], packed_uint4 device* largs_13 [[buffer(27)]], packed_uint4 device* cisl_13 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_13 [[buffer(17)]], BondStatic_natural_0 device* bond_static_13 [[buffer(16)]], packed_float4 device* frozen_13 [[buffer(9)]], uint device* split_work_13 [[buffer(21)]], uint device* split_control_13 [[buffer(23)]], packed_uint4 device* split_parents_13 [[buffer(20)]], packed_uint4 device* split_slots_13 [[buffer(22)]], packed_float4 device* split_out_13 [[buffer(26)]], packed_uint4 device* split_firsts_13 [[buffer(24)]])
+[[kernel]] void learned_check(uint3 group_9 [[threadgroup_position_in_grid]], uint3 thread_13 [[thread_position_in_threadgroup]], uint device* ctl_13 [[buffer(1)]], packed_float4 device* calls_13 [[buffer(2)]], packed_float4 device* nodes_13 [[buffer(3)]], LearnedParams_0 constant* params_13 [[buffer(0)]], packed_float4 device* bonds_13 [[buffer(4)]], uint device* chunk_node_13 [[buffer(8)]], uint device* counters_13 [[buffer(19)]], uint device* route_13 [[buffer(25)]], packed_uint4 device* isl_13 [[buffer(5)]], packed_float4 device* islf_13 [[buffer(6)]], Island_natural_0 device* islands_13 [[buffer(11)]], packed_float4 device* ctab_13 [[buffer(14)]], packed_float4 device* bodies_13 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_13 [[buffer(12)]], packed_float4 device* state_13 [[buffer(13)]], packed_float4 device* imps_13 [[buffer(10)]], uint device* status_13 [[buffer(18)]], packed_uint4 device* largs_13 [[buffer(27)]], packed_uint4 device* cisl_13 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_13 [[buffer(17)]], BondStatic_natural_0 device* bond_static_13 [[buffer(16)]], packed_float4 device* frozen_13 [[buffer(9)]], uint device* split_work_13 [[buffer(21)]], uint device* split_control_13 [[buffer(23)]], packed_uint4 device* split_parents_13 [[buffer(20)]], packed_uint4 device* split_slots_13 [[buffer(22)]], packed_float4 device* split_out_13 [[buffer(26)]], packed_uint4 device* split_firsts_13 [[buffer(24)]], float device* lout_13 [[buffer(28)]])
 {
     thread KernelContext_0 kernelContext_20;
     (&kernelContext_20)->ctl_0 = ctl_13;
@@ -3980,6 +4001,7 @@ bool island_current_0(uint e_2, KernelContext_0 thread* kernelContext_19)
     (&kernelContext_20)->split_slots_0 = split_slots_13;
     (&kernelContext_20)->split_out_0 = split_out_13;
     (&kernelContext_20)->split_firsts_0 = split_firsts_13;
+    (&kernelContext_20)->lout_0 = lout_13;
     threadgroup array<array<float4, int(256)>, int(4)> g_red_13;
     (&kernelContext_20)->g_red_0 = &g_red_13;
     threadgroup array<float, int(6)> g_lambda_13;
@@ -4112,7 +4134,7 @@ struct BondDyn_0
     uint4 events_0;
 };
 
-[[kernel]] void learned_apply_bonds(uint3 group_10 [[threadgroup_position_in_grid]], uint3 thread_14 [[thread_position_in_threadgroup]], uint device* ctl_14 [[buffer(1)]], packed_float4 device* calls_14 [[buffer(2)]], packed_float4 device* nodes_14 [[buffer(3)]], LearnedParams_0 constant* params_14 [[buffer(0)]], packed_float4 device* bonds_14 [[buffer(4)]], uint device* chunk_node_14 [[buffer(8)]], uint device* counters_14 [[buffer(19)]], uint device* route_14 [[buffer(25)]], packed_uint4 device* isl_14 [[buffer(5)]], packed_float4 device* islf_14 [[buffer(6)]], Island_natural_0 device* islands_14 [[buffer(11)]], packed_float4 device* ctab_14 [[buffer(14)]], packed_float4 device* bodies_14 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_14 [[buffer(12)]], packed_float4 device* state_14 [[buffer(13)]], packed_float4 device* imps_14 [[buffer(10)]], uint device* status_14 [[buffer(18)]], packed_uint4 device* largs_14 [[buffer(27)]], packed_uint4 device* cisl_14 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_14 [[buffer(17)]], BondStatic_natural_0 device* bond_static_14 [[buffer(16)]], packed_float4 device* frozen_14 [[buffer(9)]], uint device* split_work_14 [[buffer(21)]], uint device* split_control_14 [[buffer(23)]], packed_uint4 device* split_parents_14 [[buffer(20)]], packed_uint4 device* split_slots_14 [[buffer(22)]], packed_float4 device* split_out_14 [[buffer(26)]], packed_uint4 device* split_firsts_14 [[buffer(24)]])
+[[kernel]] void learned_apply_bonds(uint3 group_10 [[threadgroup_position_in_grid]], uint3 thread_14 [[thread_position_in_threadgroup]], uint device* ctl_14 [[buffer(1)]], packed_float4 device* calls_14 [[buffer(2)]], packed_float4 device* nodes_14 [[buffer(3)]], LearnedParams_0 constant* params_14 [[buffer(0)]], packed_float4 device* bonds_14 [[buffer(4)]], uint device* chunk_node_14 [[buffer(8)]], uint device* counters_14 [[buffer(19)]], uint device* route_14 [[buffer(25)]], packed_uint4 device* isl_14 [[buffer(5)]], packed_float4 device* islf_14 [[buffer(6)]], Island_natural_0 device* islands_14 [[buffer(11)]], packed_float4 device* ctab_14 [[buffer(14)]], packed_float4 device* bodies_14 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_14 [[buffer(12)]], packed_float4 device* state_14 [[buffer(13)]], packed_float4 device* imps_14 [[buffer(10)]], uint device* status_14 [[buffer(18)]], packed_uint4 device* largs_14 [[buffer(27)]], packed_uint4 device* cisl_14 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_14 [[buffer(17)]], BondStatic_natural_0 device* bond_static_14 [[buffer(16)]], packed_float4 device* frozen_14 [[buffer(9)]], uint device* split_work_14 [[buffer(21)]], uint device* split_control_14 [[buffer(23)]], packed_uint4 device* split_parents_14 [[buffer(20)]], packed_uint4 device* split_slots_14 [[buffer(22)]], packed_float4 device* split_out_14 [[buffer(26)]], packed_uint4 device* split_firsts_14 [[buffer(24)]], float device* lout_14 [[buffer(28)]])
 {
     uint count_0;
     thread KernelContext_0 kernelContext_21;
@@ -4144,6 +4166,7 @@ struct BondDyn_0
     (&kernelContext_21)->split_slots_0 = split_slots_14;
     (&kernelContext_21)->split_out_0 = split_out_14;
     (&kernelContext_21)->split_firsts_0 = split_firsts_14;
+    (&kernelContext_21)->lout_0 = lout_14;
     threadgroup array<array<float4, int(256)>, int(4)> g_red_14;
     (&kernelContext_21)->g_red_0 = &g_red_14;
     threadgroup array<float, int(6)> g_lambda_14;
@@ -4470,7 +4493,7 @@ void place_body_0(uint body_4, const Fit_0 thread* f_3, float4 held_mass_0, floa
     return;
 }
 
-[[kernel]] void learned_apply_bodies(uint3 id_2 [[thread_position_in_grid]], uint device* ctl_15 [[buffer(1)]], packed_float4 device* calls_15 [[buffer(2)]], packed_float4 device* nodes_15 [[buffer(3)]], LearnedParams_0 constant* params_15 [[buffer(0)]], packed_float4 device* bonds_15 [[buffer(4)]], uint device* chunk_node_15 [[buffer(8)]], uint device* counters_15 [[buffer(19)]], uint device* route_15 [[buffer(25)]], packed_uint4 device* isl_15 [[buffer(5)]], packed_float4 device* islf_15 [[buffer(6)]], Island_natural_0 device* islands_15 [[buffer(11)]], packed_float4 device* ctab_15 [[buffer(14)]], packed_float4 device* bodies_15 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_15 [[buffer(12)]], packed_float4 device* state_15 [[buffer(13)]], packed_float4 device* imps_15 [[buffer(10)]], uint device* status_15 [[buffer(18)]], packed_uint4 device* largs_15 [[buffer(27)]], packed_uint4 device* cisl_15 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_15 [[buffer(17)]], BondStatic_natural_0 device* bond_static_15 [[buffer(16)]], packed_float4 device* frozen_15 [[buffer(9)]], uint device* split_work_15 [[buffer(21)]], uint device* split_control_15 [[buffer(23)]], packed_uint4 device* split_parents_15 [[buffer(20)]], packed_uint4 device* split_slots_15 [[buffer(22)]], packed_float4 device* split_out_15 [[buffer(26)]], packed_uint4 device* split_firsts_15 [[buffer(24)]])
+[[kernel]] void learned_apply_bodies(uint3 id_2 [[thread_position_in_grid]], uint device* ctl_15 [[buffer(1)]], packed_float4 device* calls_15 [[buffer(2)]], packed_float4 device* nodes_15 [[buffer(3)]], LearnedParams_0 constant* params_15 [[buffer(0)]], packed_float4 device* bonds_15 [[buffer(4)]], uint device* chunk_node_15 [[buffer(8)]], uint device* counters_15 [[buffer(19)]], uint device* route_15 [[buffer(25)]], packed_uint4 device* isl_15 [[buffer(5)]], packed_float4 device* islf_15 [[buffer(6)]], Island_natural_0 device* islands_15 [[buffer(11)]], packed_float4 device* ctab_15 [[buffer(14)]], packed_float4 device* bodies_15 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_15 [[buffer(12)]], packed_float4 device* state_15 [[buffer(13)]], packed_float4 device* imps_15 [[buffer(10)]], uint device* status_15 [[buffer(18)]], packed_uint4 device* largs_15 [[buffer(27)]], packed_uint4 device* cisl_15 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_15 [[buffer(17)]], BondStatic_natural_0 device* bond_static_15 [[buffer(16)]], packed_float4 device* frozen_15 [[buffer(9)]], uint device* split_work_15 [[buffer(21)]], uint device* split_control_15 [[buffer(23)]], packed_uint4 device* split_parents_15 [[buffer(20)]], packed_uint4 device* split_slots_15 [[buffer(22)]], packed_float4 device* split_out_15 [[buffer(26)]], packed_uint4 device* split_firsts_15 [[buffer(24)]], float device* lout_15 [[buffer(28)]])
 {
     thread KernelContext_0 kernelContext_24;
     (&kernelContext_24)->ctl_0 = ctl_15;
@@ -4501,6 +4524,7 @@ void place_body_0(uint body_4, const Fit_0 thread* f_3, float4 held_mass_0, floa
     (&kernelContext_24)->split_slots_0 = split_slots_15;
     (&kernelContext_24)->split_out_0 = split_out_15;
     (&kernelContext_24)->split_firsts_0 = split_firsts_15;
+    (&kernelContext_24)->lout_0 = lout_15;
     threadgroup array<array<float4, int(256)>, int(4)> g_red_15;
     (&kernelContext_24)->g_red_0 = &g_red_15;
     threadgroup array<float, int(6)> g_lambda_15;
@@ -4584,7 +4608,7 @@ void place_body_0(uint body_4, const Fit_0 thread* f_3, float4 held_mass_0, floa
     return;
 }
 
-[[kernel]] void learned_apply_impactors(uint3 group_11 [[threadgroup_position_in_grid]], uint3 thread_15 [[thread_position_in_threadgroup]], uint device* ctl_16 [[buffer(1)]], packed_float4 device* calls_16 [[buffer(2)]], packed_float4 device* nodes_16 [[buffer(3)]], LearnedParams_0 constant* params_16 [[buffer(0)]], packed_float4 device* bonds_16 [[buffer(4)]], uint device* chunk_node_16 [[buffer(8)]], uint device* counters_16 [[buffer(19)]], uint device* route_16 [[buffer(25)]], packed_uint4 device* isl_16 [[buffer(5)]], packed_float4 device* islf_16 [[buffer(6)]], Island_natural_0 device* islands_16 [[buffer(11)]], packed_float4 device* ctab_16 [[buffer(14)]], packed_float4 device* bodies_16 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_16 [[buffer(12)]], packed_float4 device* state_16 [[buffer(13)]], packed_float4 device* imps_16 [[buffer(10)]], uint device* status_16 [[buffer(18)]], packed_uint4 device* largs_16 [[buffer(27)]], packed_uint4 device* cisl_16 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_16 [[buffer(17)]], BondStatic_natural_0 device* bond_static_16 [[buffer(16)]], packed_float4 device* frozen_16 [[buffer(9)]], uint device* split_work_16 [[buffer(21)]], uint device* split_control_16 [[buffer(23)]], packed_uint4 device* split_parents_16 [[buffer(20)]], packed_uint4 device* split_slots_16 [[buffer(22)]], packed_float4 device* split_out_16 [[buffer(26)]], packed_uint4 device* split_firsts_16 [[buffer(24)]])
+[[kernel]] void learned_apply_impactors(uint3 group_11 [[threadgroup_position_in_grid]], uint3 thread_15 [[thread_position_in_threadgroup]], uint device* ctl_16 [[buffer(1)]], packed_float4 device* calls_16 [[buffer(2)]], packed_float4 device* nodes_16 [[buffer(3)]], LearnedParams_0 constant* params_16 [[buffer(0)]], packed_float4 device* bonds_16 [[buffer(4)]], uint device* chunk_node_16 [[buffer(8)]], uint device* counters_16 [[buffer(19)]], uint device* route_16 [[buffer(25)]], packed_uint4 device* isl_16 [[buffer(5)]], packed_float4 device* islf_16 [[buffer(6)]], Island_natural_0 device* islands_16 [[buffer(11)]], packed_float4 device* ctab_16 [[buffer(14)]], packed_float4 device* bodies_16 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_16 [[buffer(12)]], packed_float4 device* state_16 [[buffer(13)]], packed_float4 device* imps_16 [[buffer(10)]], uint device* status_16 [[buffer(18)]], packed_uint4 device* largs_16 [[buffer(27)]], packed_uint4 device* cisl_16 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_16 [[buffer(17)]], BondStatic_natural_0 device* bond_static_16 [[buffer(16)]], packed_float4 device* frozen_16 [[buffer(9)]], uint device* split_work_16 [[buffer(21)]], uint device* split_control_16 [[buffer(23)]], packed_uint4 device* split_parents_16 [[buffer(20)]], packed_uint4 device* split_slots_16 [[buffer(22)]], packed_float4 device* split_out_16 [[buffer(26)]], packed_uint4 device* split_firsts_16 [[buffer(24)]], float device* lout_16 [[buffer(28)]])
 {
     thread KernelContext_0 kernelContext_25;
     (&kernelContext_25)->ctl_0 = ctl_16;
@@ -4615,6 +4639,7 @@ void place_body_0(uint body_4, const Fit_0 thread* f_3, float4 held_mass_0, floa
     (&kernelContext_25)->split_slots_0 = split_slots_16;
     (&kernelContext_25)->split_out_0 = split_out_16;
     (&kernelContext_25)->split_firsts_0 = split_firsts_16;
+    (&kernelContext_25)->lout_0 = lout_16;
     threadgroup array<array<float4, int(256)>, int(4)> g_red_16;
     (&kernelContext_25)->g_red_0 = &g_red_16;
     threadgroup array<float, int(6)> g_lambda_16;
@@ -4715,7 +4740,7 @@ void place_body_0(uint body_4, const Fit_0 thread* f_3, float4 held_mass_0, floa
     return;
 }
 
-[[kernel]] void learned_place(uint3 id_3 [[thread_position_in_grid]], uint device* ctl_17 [[buffer(1)]], packed_float4 device* calls_17 [[buffer(2)]], packed_float4 device* nodes_17 [[buffer(3)]], LearnedParams_0 constant* params_17 [[buffer(0)]], packed_float4 device* bonds_17 [[buffer(4)]], uint device* chunk_node_17 [[buffer(8)]], uint device* counters_17 [[buffer(19)]], uint device* route_17 [[buffer(25)]], packed_uint4 device* isl_17 [[buffer(5)]], packed_float4 device* islf_17 [[buffer(6)]], Island_natural_0 device* islands_17 [[buffer(11)]], packed_float4 device* ctab_17 [[buffer(14)]], packed_float4 device* bodies_17 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_17 [[buffer(12)]], packed_float4 device* state_17 [[buffer(13)]], packed_float4 device* imps_17 [[buffer(10)]], uint device* status_17 [[buffer(18)]], packed_uint4 device* largs_17 [[buffer(27)]], packed_uint4 device* cisl_17 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_17 [[buffer(17)]], BondStatic_natural_0 device* bond_static_17 [[buffer(16)]], packed_float4 device* frozen_17 [[buffer(9)]], uint device* split_work_17 [[buffer(21)]], uint device* split_control_17 [[buffer(23)]], packed_uint4 device* split_parents_17 [[buffer(20)]], packed_uint4 device* split_slots_17 [[buffer(22)]], packed_float4 device* split_out_17 [[buffer(26)]], packed_uint4 device* split_firsts_17 [[buffer(24)]])
+[[kernel]] void learned_place(uint3 id_3 [[thread_position_in_grid]], uint device* ctl_17 [[buffer(1)]], packed_float4 device* calls_17 [[buffer(2)]], packed_float4 device* nodes_17 [[buffer(3)]], LearnedParams_0 constant* params_17 [[buffer(0)]], packed_float4 device* bonds_17 [[buffer(4)]], uint device* chunk_node_17 [[buffer(8)]], uint device* counters_17 [[buffer(19)]], uint device* route_17 [[buffer(25)]], packed_uint4 device* isl_17 [[buffer(5)]], packed_float4 device* islf_17 [[buffer(6)]], Island_natural_0 device* islands_17 [[buffer(11)]], packed_float4 device* ctab_17 [[buffer(14)]], packed_float4 device* bodies_17 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_17 [[buffer(12)]], packed_float4 device* state_17 [[buffer(13)]], packed_float4 device* imps_17 [[buffer(10)]], uint device* status_17 [[buffer(18)]], packed_uint4 device* largs_17 [[buffer(27)]], packed_uint4 device* cisl_17 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_17 [[buffer(17)]], BondStatic_natural_0 device* bond_static_17 [[buffer(16)]], packed_float4 device* frozen_17 [[buffer(9)]], uint device* split_work_17 [[buffer(21)]], uint device* split_control_17 [[buffer(23)]], packed_uint4 device* split_parents_17 [[buffer(20)]], packed_uint4 device* split_slots_17 [[buffer(22)]], packed_float4 device* split_out_17 [[buffer(26)]], packed_uint4 device* split_firsts_17 [[buffer(24)]], float device* lout_17 [[buffer(28)]])
 {
     thread KernelContext_0 kernelContext_26;
     (&kernelContext_26)->ctl_0 = ctl_17;
@@ -4746,6 +4771,7 @@ void place_body_0(uint body_4, const Fit_0 thread* f_3, float4 held_mass_0, floa
     (&kernelContext_26)->split_slots_0 = split_slots_17;
     (&kernelContext_26)->split_out_0 = split_out_17;
     (&kernelContext_26)->split_firsts_0 = split_firsts_17;
+    (&kernelContext_26)->lout_0 = lout_17;
     threadgroup array<array<float4, int(256)>, int(4)> g_red_17;
     (&kernelContext_26)->g_red_0 = &g_red_17;
     threadgroup array<float, int(6)> g_lambda_17;
@@ -4873,7 +4899,7 @@ void place_body_0(uint body_4, const Fit_0 thread* f_3, float4 held_mass_0, floa
     return;
 }
 
-[[kernel]] void learned_tally_apply(uint device* ctl_18 [[buffer(1)]], packed_float4 device* calls_18 [[buffer(2)]], packed_float4 device* nodes_18 [[buffer(3)]], LearnedParams_0 constant* params_18 [[buffer(0)]], packed_float4 device* bonds_18 [[buffer(4)]], uint device* chunk_node_18 [[buffer(8)]], uint device* counters_18 [[buffer(19)]], uint device* route_18 [[buffer(25)]], packed_uint4 device* isl_18 [[buffer(5)]], packed_float4 device* islf_18 [[buffer(6)]], Island_natural_0 device* islands_18 [[buffer(11)]], packed_float4 device* ctab_18 [[buffer(14)]], packed_float4 device* bodies_18 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_18 [[buffer(12)]], packed_float4 device* state_18 [[buffer(13)]], packed_float4 device* imps_18 [[buffer(10)]], uint device* status_18 [[buffer(18)]], packed_uint4 device* largs_18 [[buffer(27)]], packed_uint4 device* cisl_18 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_18 [[buffer(17)]], BondStatic_natural_0 device* bond_static_18 [[buffer(16)]], packed_float4 device* frozen_18 [[buffer(9)]], uint device* split_work_18 [[buffer(21)]], uint device* split_control_18 [[buffer(23)]], packed_uint4 device* split_parents_18 [[buffer(20)]], packed_uint4 device* split_slots_18 [[buffer(22)]], packed_float4 device* split_out_18 [[buffer(26)]], packed_uint4 device* split_firsts_18 [[buffer(24)]])
+[[kernel]] void learned_tally_apply(uint device* ctl_18 [[buffer(1)]], packed_float4 device* calls_18 [[buffer(2)]], packed_float4 device* nodes_18 [[buffer(3)]], LearnedParams_0 constant* params_18 [[buffer(0)]], packed_float4 device* bonds_18 [[buffer(4)]], uint device* chunk_node_18 [[buffer(8)]], uint device* counters_18 [[buffer(19)]], uint device* route_18 [[buffer(25)]], packed_uint4 device* isl_18 [[buffer(5)]], packed_float4 device* islf_18 [[buffer(6)]], Island_natural_0 device* islands_18 [[buffer(11)]], packed_float4 device* ctab_18 [[buffer(14)]], packed_float4 device* bodies_18 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_18 [[buffer(12)]], packed_float4 device* state_18 [[buffer(13)]], packed_float4 device* imps_18 [[buffer(10)]], uint device* status_18 [[buffer(18)]], packed_uint4 device* largs_18 [[buffer(27)]], packed_uint4 device* cisl_18 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_18 [[buffer(17)]], BondStatic_natural_0 device* bond_static_18 [[buffer(16)]], packed_float4 device* frozen_18 [[buffer(9)]], uint device* split_work_18 [[buffer(21)]], uint device* split_control_18 [[buffer(23)]], packed_uint4 device* split_parents_18 [[buffer(20)]], packed_uint4 device* split_slots_18 [[buffer(22)]], packed_float4 device* split_out_18 [[buffer(26)]], packed_uint4 device* split_firsts_18 [[buffer(24)]], float device* lout_18 [[buffer(28)]])
 {
     thread KernelContext_0 kernelContext_27;
     (&kernelContext_27)->ctl_0 = ctl_18;
@@ -4904,6 +4930,7 @@ void place_body_0(uint body_4, const Fit_0 thread* f_3, float4 held_mass_0, floa
     (&kernelContext_27)->split_slots_0 = split_slots_18;
     (&kernelContext_27)->split_out_0 = split_out_18;
     (&kernelContext_27)->split_firsts_0 = split_firsts_18;
+    (&kernelContext_27)->lout_0 = lout_18;
     threadgroup array<array<float4, int(256)>, int(4)> g_red_18;
     (&kernelContext_27)->g_red_0 = &g_red_18;
     threadgroup array<float, int(6)> g_lambda_18;
@@ -4984,7 +5011,7 @@ void place_body_0(uint body_4, const Fit_0 thread* f_3, float4 held_mass_0, floa
     return;
 }
 
-[[kernel]] void learned_tally(uint device* ctl_19 [[buffer(1)]], packed_float4 device* calls_19 [[buffer(2)]], packed_float4 device* nodes_19 [[buffer(3)]], LearnedParams_0 constant* params_19 [[buffer(0)]], packed_float4 device* bonds_19 [[buffer(4)]], uint device* chunk_node_19 [[buffer(8)]], uint device* counters_19 [[buffer(19)]], uint device* route_19 [[buffer(25)]], packed_uint4 device* isl_19 [[buffer(5)]], packed_float4 device* islf_19 [[buffer(6)]], Island_natural_0 device* islands_19 [[buffer(11)]], packed_float4 device* ctab_19 [[buffer(14)]], packed_float4 device* bodies_19 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_19 [[buffer(12)]], packed_float4 device* state_19 [[buffer(13)]], packed_float4 device* imps_19 [[buffer(10)]], uint device* status_19 [[buffer(18)]], packed_uint4 device* largs_19 [[buffer(27)]], packed_uint4 device* cisl_19 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_19 [[buffer(17)]], BondStatic_natural_0 device* bond_static_19 [[buffer(16)]], packed_float4 device* frozen_19 [[buffer(9)]], uint device* split_work_19 [[buffer(21)]], uint device* split_control_19 [[buffer(23)]], packed_uint4 device* split_parents_19 [[buffer(20)]], packed_uint4 device* split_slots_19 [[buffer(22)]], packed_float4 device* split_out_19 [[buffer(26)]], packed_uint4 device* split_firsts_19 [[buffer(24)]])
+[[kernel]] void learned_tally(uint device* ctl_19 [[buffer(1)]], packed_float4 device* calls_19 [[buffer(2)]], packed_float4 device* nodes_19 [[buffer(3)]], LearnedParams_0 constant* params_19 [[buffer(0)]], packed_float4 device* bonds_19 [[buffer(4)]], uint device* chunk_node_19 [[buffer(8)]], uint device* counters_19 [[buffer(19)]], uint device* route_19 [[buffer(25)]], packed_uint4 device* isl_19 [[buffer(5)]], packed_float4 device* islf_19 [[buffer(6)]], Island_natural_0 device* islands_19 [[buffer(11)]], packed_float4 device* ctab_19 [[buffer(14)]], packed_float4 device* bodies_19 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_19 [[buffer(12)]], packed_float4 device* state_19 [[buffer(13)]], packed_float4 device* imps_19 [[buffer(10)]], uint device* status_19 [[buffer(18)]], packed_uint4 device* largs_19 [[buffer(27)]], packed_uint4 device* cisl_19 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_19 [[buffer(17)]], BondStatic_natural_0 device* bond_static_19 [[buffer(16)]], packed_float4 device* frozen_19 [[buffer(9)]], uint device* split_work_19 [[buffer(21)]], uint device* split_control_19 [[buffer(23)]], packed_uint4 device* split_parents_19 [[buffer(20)]], packed_uint4 device* split_slots_19 [[buffer(22)]], packed_float4 device* split_out_19 [[buffer(26)]], packed_uint4 device* split_firsts_19 [[buffer(24)]], float device* lout_19 [[buffer(28)]])
 {
     thread KernelContext_0 kernelContext_28;
     (&kernelContext_28)->ctl_0 = ctl_19;
@@ -5015,6 +5042,7 @@ void place_body_0(uint body_4, const Fit_0 thread* f_3, float4 held_mass_0, floa
     (&kernelContext_28)->split_slots_0 = split_slots_19;
     (&kernelContext_28)->split_out_0 = split_out_19;
     (&kernelContext_28)->split_firsts_0 = split_firsts_19;
+    (&kernelContext_28)->lout_0 = lout_19;
     threadgroup array<array<float4, int(256)>, int(4)> g_red_19;
     (&kernelContext_28)->g_red_0 = &g_red_19;
     threadgroup array<float, int(6)> g_lambda_19;
@@ -5152,6 +5180,148 @@ void place_body_0(uint body_4, const Fit_0 thread* f_3, float4 held_mass_0, floa
         g_11 = 0U;
     }
     *_S526 = g_11;
+    return;
+}
+
+[[kernel]] void learned_adopt(uint3 group_12 [[threadgroup_position_in_grid]], uint3 thread_16 [[thread_position_in_threadgroup]], uint device* ctl_20 [[buffer(1)]], packed_float4 device* calls_20 [[buffer(2)]], packed_float4 device* nodes_20 [[buffer(3)]], LearnedParams_0 constant* params_20 [[buffer(0)]], packed_float4 device* bonds_20 [[buffer(4)]], uint device* chunk_node_20 [[buffer(8)]], uint device* counters_20 [[buffer(19)]], uint device* route_20 [[buffer(25)]], packed_uint4 device* isl_20 [[buffer(5)]], packed_float4 device* islf_20 [[buffer(6)]], Island_natural_0 device* islands_20 [[buffer(11)]], packed_float4 device* ctab_20 [[buffer(14)]], packed_float4 device* bodies_20 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_20 [[buffer(12)]], packed_float4 device* state_20 [[buffer(13)]], packed_float4 device* imps_20 [[buffer(10)]], uint device* status_20 [[buffer(18)]], packed_uint4 device* largs_20 [[buffer(27)]], packed_uint4 device* cisl_20 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_20 [[buffer(17)]], BondStatic_natural_0 device* bond_static_20 [[buffer(16)]], packed_float4 device* frozen_20 [[buffer(9)]], uint device* split_work_20 [[buffer(21)]], uint device* split_control_20 [[buffer(23)]], packed_uint4 device* split_parents_20 [[buffer(20)]], packed_uint4 device* split_slots_20 [[buffer(22)]], packed_float4 device* split_out_20 [[buffer(26)]], packed_uint4 device* split_firsts_20 [[buffer(24)]], float device* lout_20 [[buffer(28)]])
+{
+    uint at_7;
+    thread KernelContext_0 kernelContext_29;
+    (&kernelContext_29)->ctl_0 = ctl_20;
+    (&kernelContext_29)->calls_0 = calls_20;
+    (&kernelContext_29)->nodes_0 = nodes_20;
+    (&kernelContext_29)->params_0 = params_20;
+    (&kernelContext_29)->bonds_0 = bonds_20;
+    (&kernelContext_29)->chunk_node_0 = chunk_node_20;
+    (&kernelContext_29)->counters_0 = counters_20;
+    (&kernelContext_29)->route_0 = route_20;
+    (&kernelContext_29)->isl_0 = isl_20;
+    (&kernelContext_29)->islf_0 = islf_20;
+    (&kernelContext_29)->islands_0 = islands_20;
+    (&kernelContext_29)->ctab_0 = ctab_20;
+    (&kernelContext_29)->bodies_0 = bodies_20;
+    (&kernelContext_29)->chunks_0 = chunks_20;
+    (&kernelContext_29)->state_0 = state_20;
+    (&kernelContext_29)->imps_0 = imps_20;
+    (&kernelContext_29)->status_0 = status_20;
+    (&kernelContext_29)->largs_0 = largs_20;
+    (&kernelContext_29)->cisl_0 = cisl_20;
+    (&kernelContext_29)->bond_dyn_0 = bond_dyn_20;
+    (&kernelContext_29)->bond_static_0 = bond_static_20;
+    (&kernelContext_29)->frozen_0 = frozen_20;
+    (&kernelContext_29)->split_work_0 = split_work_20;
+    (&kernelContext_29)->split_control_0 = split_control_20;
+    (&kernelContext_29)->split_parents_0 = split_parents_20;
+    (&kernelContext_29)->split_slots_0 = split_slots_20;
+    (&kernelContext_29)->split_out_0 = split_out_20;
+    (&kernelContext_29)->split_firsts_0 = split_firsts_20;
+    (&kernelContext_29)->lout_0 = lout_20;
+    threadgroup array<array<float4, int(256)>, int(4)> g_red_20;
+    (&kernelContext_29)->g_red_0 = &g_red_20;
+    threadgroup array<float, int(6)> g_lambda_20;
+    (&kernelContext_29)->g_lambda_0 = &g_lambda_20;
+    threadgroup array<float3, int(256)> g_lo_20;
+    (&kernelContext_29)->g_lo_0 = &g_lo_20;
+    threadgroup array<float3, int(256)> g_hi_20;
+    (&kernelContext_29)->g_hi_0 = &g_hi_20;
+    threadgroup array<uint, int(32)> g_label_20;
+    (&kernelContext_29)->g_label_0 = &g_label_20;
+    threadgroup uint g_used_20;
+    (&kernelContext_29)->g_used_0 = &g_used_20;
+    threadgroup array<uint, int(32)> g_call_of_20;
+    (&kernelContext_29)->g_call_of_0 = &g_call_of_20;
+    threadgroup array<uint, int(64)> g_mask_of_20;
+    (&kernelContext_29)->g_mask_of_0 = &g_mask_of_20;
+    threadgroup array<uint, int(64)> g_cnt_isl_20;
+    (&kernelContext_29)->g_cnt_isl_0 = &g_cnt_isl_20;
+    threadgroup array<uint, int(64)> g_cnt_chunk_20;
+    (&kernelContext_29)->g_cnt_chunk_0 = &g_cnt_chunk_20;
+    threadgroup array<uint, int(64)> g_cnt_bond_20;
+    (&kernelContext_29)->g_cnt_bond_0 = &g_cnt_bond_20;
+    threadgroup array<uint, int(64)> g_cnt_imp_20;
+    (&kernelContext_29)->g_cnt_imp_0 = &g_cnt_imp_20;
+    threadgroup array<uint, int(256)> g_scan_20;
+    (&kernelContext_29)->g_scan_0 = &g_scan_20;
+    threadgroup array<float, int(4096)> g_sort_20;
+    (&kernelContext_29)->g_sort_0 = &g_sort_20;
+    threadgroup uint g_stale_20;
+    (&kernelContext_29)->g_stale_0 = &g_stale_20;
+    threadgroup uint g_broke_20;
+    (&kernelContext_29)->g_broke_0 = &g_broke_20;
+    uint g_12 = group_12.x;
+    uint t_15 = thread_16.x;
+    if(g_12 >= (*(ctl_20+1U)))
+    {
+        return;
+    }
+    uint _S527 = 8U * g_12;
+    uint _S528 = _S527 + 2U;
+    uint _S529 = (as_type<uint>(((float4(*((&kernelContext_29)->calls_0+_S528)) ).z)));
+    uint _S530 = (as_type<uint>(((float4(*((&kernelContext_29)->calls_0+_S528)) ).w)));
+    uint _S531 = (as_type<uint>(((float4(*((&kernelContext_29)->calls_0+(_S527 + 3U))) ).w)));
+    uint _S532 = _S527 + 4U;
+    uint _S533 = (as_type<uint>(((float4(*((&kernelContext_29)->calls_0+_S532)) ).x)));
+    uint _S534 = (as_type<uint>(((float4(*((&kernelContext_29)->calls_0+_S532)) ).y)));
+    uint _S535 = _S527 + 6U;
+    uint _S536 = (as_type<uint>(((float4(*((&kernelContext_29)->calls_0+_S535)) ).z)));
+    uint _S537 = (as_type<uint>(((float4(*((&kernelContext_29)->calls_0+_S535)) ).w)));
+    uint j_12 = t_15;
+    for(;;)
+    {
+        if(j_12 < _S530)
+        {
+        }
+        else
+        {
+            break;
+        }
+        if(j_12 < _S531)
+        {
+            at_7 = (&kernelContext_29)->params_0->out_bases_0.x + 12U * (_S536 + j_12);
+        }
+        else
+        {
+            at_7 = (&kernelContext_29)->params_0->out_bases_0.y + 12U * (_S537 + j_12 - _S531);
+        }
+        uint _S538 = 14U * (_S529 + j_12);
+        *((&kernelContext_29)->nodes_0+(_S538 + 5U)) = packed_float4(float4((&kernelContext_29)->lout_0[at_7], (&kernelContext_29)->lout_0[at_7 + 1U], (&kernelContext_29)->lout_0[at_7 + 2U], (&kernelContext_29)->lout_0[at_7 + 3U])) ;
+        *((&kernelContext_29)->nodes_0+(_S538 + 6U)) = packed_float4(float4((&kernelContext_29)->lout_0[at_7 + 4U], (&kernelContext_29)->lout_0[at_7 + 5U], (&kernelContext_29)->lout_0[at_7 + 6U], (&kernelContext_29)->lout_0[at_7 + 7U])) ;
+        *((&kernelContext_29)->nodes_0+(_S538 + 7U)) = packed_float4(float4((&kernelContext_29)->lout_0[at_7 + 8U], (&kernelContext_29)->lout_0[at_7 + 9U], (&kernelContext_29)->lout_0[at_7 + 10U], (&kernelContext_29)->lout_0[at_7 + 11U])) ;
+        j_12 = j_12 + 256U;
+    }
+    j_12 = t_15;
+    for(;;)
+    {
+        if(j_12 < _S534)
+        {
+        }
+        else
+        {
+            break;
+        }
+        uint b_10 = _S533 + j_12;
+        uint _S539 = (&kernelContext_29)->params_0->out_bases2_0.x + 8U * b_10;
+        at_7 = 0U;
+        uint i_6 = 1U;
+        for(;;)
+        {
+            if(i_6 < 8U)
+            {
+            }
+            else
+            {
+                break;
+            }
+            if((&kernelContext_29)->lout_0[_S539 + i_6] > ((&kernelContext_29)->lout_0)[_S539 + at_7])
+            {
+                at_7 = i_6;
+            }
+            i_6 = i_6 + 1U;
+        }
+        uint _S540 = 2U * b_10;
+        *((&kernelContext_29)->bonds_0+_S540) = packed_float4(float4((float4(*((&kernelContext_29)->bonds_0+_S540)) ).x, (&kernelContext_29)->lout_0[(&kernelContext_29)->params_0->out_bases_0.z + b_10], (&kernelContext_29)->lout_0[(&kernelContext_29)->params_0->out_bases_0.w + b_10], (as_type<float>((at_7 + 1U))))) ;
+        j_12 = j_12 + 256U;
+    }
     return;
 }
 

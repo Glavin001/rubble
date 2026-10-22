@@ -35,7 +35,9 @@
 //          3 (gravity xyz, chunk nodes bits)
 //          4 (first bond bits, bonds bits, decode flags bits, fallback reason bits)
 //          5 (centre of mass (world), impactor mask bits)
-//          6 (first call island bits, call islands bits, -, -)
+//          6 (first call island bits, call islands bits, chunk base bits, impactor base bits):
+//            the call's first chunk and impactor in the network's global order (every
+//            call's chunks, then every call's impactors: `batch.collate`'s)
 //   nodes  NODE_F4 float4 per node (a call's chunks, then its impactors, contiguous):
 //          0 position relative to the call's centre of mass (world), mass
 //          1 world orientation (x, y, z, w; body -> world)
@@ -125,6 +127,11 @@ struct LearnedParams
     uint max_cisl;
     uint chunk_count;     // layout chunks (`chunk_node`)
     uint pad0;
+    // The network's outputs (`lout`, P2's outputs.npz shapes, global node order): float
+    // offsets of chunk_out [Nc,12], imp_out [Ni,12], bond_log_q [E], bond_ddamage [E];
+    // and of bond_time_logits [E,8].
+    uint4 out_bases;
+    uint4 out_bases2;
 };
 
 // One table for every kernel of this module (each entry point binds at most 10 storage
@@ -173,6 +180,8 @@ struct LearnedParams
 // Indirect dispatch arguments over the batch (`learned_compact`): [0] one group per call,
 // [1] one per call island, [2] call islands in groups of 64.
 [[vk::binding(27, 0)]] RWStructuredBuffer<uint4> largs;
+// The network's outputs (P0's kernel; `params.out_bases`).
+[[vk::binding(28, 0)]] StructuredBuffer<float> lout;
 
 // ------------------------------------------------------------------ math
 
@@ -1039,10 +1048,13 @@ void learned_compact(uint3 thread: SV_GroupThreadID)
     // the per-call totals again (the loop above reused the arrays): from the call records
     bond_at = 0;
     cisl_at = 0;
+    uint chunk_base = 0, imp_base = 0;
     for (uint g = 0; g < min(ncalls, 64u); g++)
     {
         calls[CALL_F4 * g + 4].x = asfloat(bond_at);
-        calls[CALL_F4 * g + 6].x = asfloat(cisl_at);
+        calls[CALL_F4 * g + 6] = float4(asfloat(cisl_at), calls[CALL_F4 * g + 6].y, asfloat(chunk_base), asfloat(imp_base));
+        chunk_base += asuint(calls[CALL_F4 * g + 3].w);
+        imp_base += countbits(asuint(calls[CALL_F4 * g + 5].w));
         g_cnt_bond[g] = bond_at;
         g_cnt_isl[g] = cisl_at;
         bond_at += asuint(calls[CALL_F4 * g + 4].y);
@@ -1987,4 +1999,46 @@ void learned_tally()
     ctl[CTL_FB_INFEASIBLE] = fb_inf;
     ctl[CTL_FB_RANGE] = range;
     ctl[CTL_PENDING] = stood > 0 ? 1u : 0u;
+}
+
+// ------------------------------------------------------------------ learned_adopt
+
+// One group per call: the network's outputs, written in P2's outputs.npz shapes in the
+// global node order (P0's kernel), into the slots the decode reads: each node's 12
+// body-frame outputs, each live bond's log q̂, Δdamage and time bin (argmax + 1; ties: the
+// first, as numpy's).
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void learned_adopt(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    uint g = group.x;
+    uint t = thread.x;
+    if (g >= ctl[CTL_CALLS])
+        return;
+    uint first = asuint(calls[CALL_F4 * g + 2].z);
+    uint n = asuint(calls[CALL_F4 * g + 2].w);
+    uint nc = asuint(calls[CALL_F4 * g + 3].w);
+    uint bfirst = asuint(calls[CALL_F4 * g + 4].x);
+    uint nb = asuint(calls[CALL_F4 * g + 4].y);
+    uint cbase = asuint(calls[CALL_F4 * g + 6].z);
+    uint ibase = asuint(calls[CALL_F4 * g + 6].w);
+    for (uint j = t; j < n; j += G)
+    {
+        uint at = j < nc ? params.out_bases.x + 12 * (cbase + j) : params.out_bases.y + 12 * (ibase + j - nc);
+        uint k = first + j;
+        nodes[NODE_F4 * k + 5] = float4(lout[at], lout[at + 1], lout[at + 2], lout[at + 3]);
+        nodes[NODE_F4 * k + 6] = float4(lout[at + 4], lout[at + 5], lout[at + 6], lout[at + 7]);
+        nodes[NODE_F4 * k + 7] = float4(lout[at + 8], lout[at + 9], lout[at + 10], lout[at + 11]);
+    }
+    for (uint j = t; j < nb; j += G)
+    {
+        uint b = bfirst + j;
+        uint tl = params.out_bases2.x + 8 * b;
+        uint best = 0;
+        for (uint i = 1; i < 8; i++)
+            if (lout[tl + i] > lout[tl + best])
+                best = i;
+        float4 b0 = bonds[BOND_F4 * b];
+        bonds[BOND_F4 * b] = float4(b0.x, lout[params.out_bases.z + b], lout[params.out_bases.w + b], asfloat(best + 1));
+    }
 }

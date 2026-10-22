@@ -23,6 +23,8 @@ struct LearnedParams_std140_0
     @align(4) max_cisl_0 : u32,
     @align(8) chunk_count_0 : u32,
     @align(4) pad0_0 : u32,
+    @align(16) out_bases_0 : vec4<u32>,
+    @align(16) out_bases2_0 : vec4<u32>,
 };
 
 @binding(0) @group(0) var<uniform> params_0 : LearnedParams_std140_0;
@@ -183,6 +185,8 @@ struct BondStatic_std430_0
 @binding(26) @group(0) var<storage, read> split_out_0 : array<vec4<f32>>;
 
 @binding(24) @group(0) var<storage, read> split_firsts_0 : array<vec4<u32>>;
+
+@binding(28) @group(0) var<storage, read> lout_0 : array<f32>;
 
 fn firstbitlow_0( value_0 : u32) -> u32
 {
@@ -1799,6 +1803,8 @@ fn learned_compact(@builtin(local_invocation_id) thread_5 : vec3<u32>)
     g_1 = u32(0);
     bond_at_0 = u32(0);
     var cisl_at_0 : u32 = u32(0);
+    var chunk_base_0 : u32 = u32(0);
+    var imp_base_0 : u32 = u32(0);
     loop
     {
         if(g_1 < _S116)
@@ -1812,7 +1818,9 @@ fn learned_compact(@builtin(local_invocation_id) thread_5 : vec3<u32>)
         var _S132 : u32 = _S131 + u32(4);
         calls_0[_S132][i32(0)] = (bitcast<f32>((bond_at_0)));
         var _S133 : u32 = _S131 + u32(6);
-        calls_0[_S133][i32(0)] = (bitcast<f32>((cisl_at_0)));
+        calls_0[_S133] = vec4<f32>((bitcast<f32>((cisl_at_0))), calls_0[_S133].y, (bitcast<f32>((chunk_base_0))), (bitcast<f32>((imp_base_0))));
+        var chunk_base_1 : u32 = chunk_base_0 + (bitcast<u32>((calls_0[_S131 + u32(3)].w)));
+        var imp_base_1 : u32 = imp_base_0 + countOneBits((bitcast<u32>((calls_0[_S131 + u32(5)].w))));
         g_cnt_bond_0[g_1] = bond_at_0;
         g_cnt_isl_0[g_1] = cisl_at_0;
         var bond_at_1 : u32 = bond_at_0 + (bitcast<u32>((calls_0[_S132].y)));
@@ -1820,6 +1828,8 @@ fn learned_compact(@builtin(local_invocation_id) thread_5 : vec3<u32>)
         g_1 = g_1 + u32(1);
         bond_at_0 = bond_at_1;
         cisl_at_0 = cisl_at_1;
+        chunk_base_0 = chunk_base_1;
+        imp_base_0 = imp_base_1;
     }
     if(node_at_0 > (params_0.max_nodes_0))
     {
@@ -3945,6 +3955,88 @@ fn learned_tally()
         g_11 = u32(0);
     }
     ctl_0[u32(0)] = g_11;
+    return;
+}
+
+@compute
+@workgroup_size(256, 1, 1)
+fn learned_adopt(@builtin(workgroup_id) group_12 : vec3<u32>, @builtin(local_invocation_id) thread_16 : vec3<u32>)
+{
+    var at_7 : u32;
+    var g_12 : u32 = group_12.x;
+    var t_15 : u32 = thread_16.x;
+    if(g_12 >= ctl_0[u32(1)])
+    {
+        return;
+    }
+    var _S299 : u32 = u32(8) * g_12;
+    var _S300 : u32 = _S299 + u32(2);
+    var _S301 : u32 = (bitcast<u32>((calls_0[_S300].z)));
+    var _S302 : u32 = (bitcast<u32>((calls_0[_S300].w)));
+    var _S303 : u32 = (bitcast<u32>((calls_0[_S299 + u32(3)].w)));
+    var _S304 : u32 = _S299 + u32(4);
+    var _S305 : u32 = (bitcast<u32>((calls_0[_S304].x)));
+    var _S306 : u32 = (bitcast<u32>((calls_0[_S304].y)));
+    var _S307 : u32 = _S299 + u32(6);
+    var _S308 : u32 = (bitcast<u32>((calls_0[_S307].z)));
+    var _S309 : u32 = (bitcast<u32>((calls_0[_S307].w)));
+    var j_12 : u32 = t_15;
+    loop
+    {
+        if(j_12 < _S302)
+        {
+        }
+        else
+        {
+            break;
+        }
+        if(j_12 < _S303)
+        {
+            at_7 = params_0.out_bases_0.x + u32(12) * (_S308 + j_12);
+        }
+        else
+        {
+            at_7 = params_0.out_bases_0.y + u32(12) * (_S309 + j_12 - _S303);
+        }
+        var _S310 : u32 = u32(14) * (_S301 + j_12);
+        nodes_0[_S310 + u32(5)] = vec4<f32>(lout_0[at_7], lout_0[at_7 + u32(1)], lout_0[at_7 + u32(2)], lout_0[at_7 + u32(3)]);
+        nodes_0[_S310 + u32(6)] = vec4<f32>(lout_0[at_7 + u32(4)], lout_0[at_7 + u32(5)], lout_0[at_7 + u32(6)], lout_0[at_7 + u32(7)]);
+        nodes_0[_S310 + u32(7)] = vec4<f32>(lout_0[at_7 + u32(8)], lout_0[at_7 + u32(9)], lout_0[at_7 + u32(10)], lout_0[at_7 + u32(11)]);
+        j_12 = j_12 + u32(256);
+    }
+    j_12 = t_15;
+    loop
+    {
+        if(j_12 < _S306)
+        {
+        }
+        else
+        {
+            break;
+        }
+        var b_11 : u32 = _S305 + j_12;
+        var _S311 : u32 = params_0.out_bases2_0.x + u32(8) * b_11;
+        at_7 = u32(0);
+        var i_6 : u32 = u32(1);
+        loop
+        {
+            if(i_6 < u32(8))
+            {
+            }
+            else
+            {
+                break;
+            }
+            if(lout_0[_S311 + i_6] > lout_0[_S311 + at_7])
+            {
+                at_7 = i_6;
+            }
+            i_6 = i_6 + u32(1);
+        }
+        var _S312 : u32 = u32(2) * b_11;
+        bonds_0[_S312] = vec4<f32>(bonds_0[_S312].x, lout_0[params_0.out_bases_0.z + b_11], lout_0[params_0.out_bases_0.w + b_11], (bitcast<f32>((at_7 + u32(1)))));
+        j_12 = j_12 + u32(256);
+    }
     return;
 }
 
