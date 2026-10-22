@@ -386,7 +386,12 @@ pub fn hidden_states(outs: &[FullOut]) -> Result<Option<HashMap<(usize, usize), 
 pub fn island_frame(start: &stress_ref::world::World, m: &stress_ref::world::IslandMembers, d: &stress_ref::world::DecodedState, full: &[FullOut], base: Base, ids_from_base: bool) -> Result<IslandState, String> {
     let mut x = start.clone();
     x.solver.reset_peak_utilizations();
-    x.apply_decoded_with(d, true)?;
+    // The /1 chunk states' departure from their body's rigid fit kept as hidden deformation,
+    // except with `STRESS_FULL_DEFORMATION=0` (rigid bodies; diagnostic: a model's world-state
+    // noise kept as deformation is strain); a body table or a predicted hidden state replaces
+    // it either way.
+    let keep = !std::env::var("STRESS_FULL_DEFORMATION").is_ok_and(|v| v == "0");
+    x.apply_decoded_with(d, keep)?;
     if let Some(o) = full.iter().find(|o| o.kind == "cluster") {
         x.set_body_records(&body_records(o)?, &m.chunks)?;
     } else if let Some(h) = hidden_states(full)? {

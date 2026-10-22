@@ -563,6 +563,7 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
         }
         let mut islands = 0;
         let mut routed: Vec<i64> = Vec::new();
+        let mut routed_imps: Vec<i64> = Vec::new();
         if o.kind == "oracle_full" {
             // Diagnostic: the oracle's frame with its full state carried (hidden deformation
             // kept between calls, `window_full`), to separate the reduced state's effect.
@@ -737,6 +738,7 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
                 Ok(keys) => {
                     islands = keys.chunks.len() + keys.impactors.len();
                     routed = keys.chunks.clone();
+                    routed_imps = keys.impactors.clone();
                     if islands > 0 {
                         log.push(json!({"frame": f, "chunks": keys.chunks.len(), "bonds": keys.bonds.len(), "impactors": keys.impactors.len(), "call_ms": call_ms, "flags": flags}));
                     }
@@ -749,6 +751,28 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
         hook(&w, f + 1);
         series.push(frame_line(&w, ms, islands));
         eprintln!("[provider {tag}] frame {}/{n} islands {islands} ram vy {:.3} fragments {} broken {} ({ms:.0} ms)", f + 1, w.impactors[0].velocity.y, w.solver.clusters.len(), w.solver.broken_bond_count());
+        // Diagnostic (`STRESS_KE_TRACE=1`): each frame's kinetic energy in the frame's routed
+        // island (its chunks and impactors) and in every other body, after the frame.
+        if std::env::var("STRESS_KE_TRACE").is_ok_and(|v| v == "1") {
+            let isl: HashSet<i64> = routed.iter().copied().collect();
+            let (mut ki, mut ko) = (0.0, 0.0);
+            for (si, st) in w.solver.structures.iter().enumerate() {
+                for (c, ch) in st.chunks.iter().enumerate() {
+                    if !w.solver.chunks[si][c].active {
+                        continue;
+                    }
+                    let (v, wv) = w.solver.chunk_velocity(si, c);
+                    let r = w.solver.clusters[w.solver.chunks[si][c].cluster].rotation();
+                    let e = 0.5 * ch.mass * v.norm2() + 0.5 * wv.dot(r * ch.inertia * r.transpose() * wv);
+                    if isl.contains(&stress_ref::world::stable_key(si, c)) { ki += e } else { ko += e }
+                }
+            }
+            let (mut ii, mut io) = (0.0, 0.0);
+            for (k, imp) in w.impactors.iter().enumerate() {
+                if routed_imps.contains(&(k as i64)) { ii += imp.kinetic_energy() } else { io += imp.kinetic_energy() }
+            }
+            eprintln!("[ke] {}", json!({"frame": f + 1, "island_chunks": isl.len(), "ke_island_chunks": ki, "ke_island_impactors": ii, "ke_other_chunks": ko, "ke_other_impactors": io, "elastic": w.solver.elastic_energy(), "max_damage_live": w.solver.bonds.iter().flatten().filter(|b| b.connected()).map(|b| b.joint.damage).fold(0.0f64, f64::max), "e0": e0}));
+        }
         if std::env::var("STRESS_P0_WATCH_RAM").is_ok_and(|v| v == "1") {
             let imp = &w.impactors[0];
             let gz = w.scene.ground.as_ref().map(|g| g.height).unwrap_or(f64::NEG_INFINITY);
