@@ -7,7 +7,7 @@ Checkpoint: `runs/v4/bulk-w32/best.pt`, with the weights export in `runs/v4/bulk
 - **Validation:** the bulk v1 evaluation ensembles (`calls-v3-eval`, val split): 1,055 events, 49,266 calls, 125 complete 8-member ensembles with aligned calls (28 anchored-wall, 97 free-wall).
 - **Selection:** on the dense score (EVALUATION.md §1). Best at step 8,000, score 2.19. τ was chosen on validation and frozen: 1.0 (scores 3.41 / 2.75 / 2.37 / 2.24 / 2.19 / 2.19 for τ 0.5–1.0).
 
-**Verdict: not accepted (gates-v1.1).** Neither family passes; the test split stays unopened for a verdict until one does.
+**Verdict: not accepted (gates-v1.1).** Neither family passes. The test report (frozen τ, confirmation only) follows.
 
 ## gates-v1.1 per family (active ensemble calls, held-out oracle member by the identical rule)
 
