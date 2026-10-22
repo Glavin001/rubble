@@ -63,7 +63,8 @@ LAYERS = {
 }
 
 
-def export(ckpt: str | Path, out: str | Path, dataset: str | None = None, parity: int = 4) -> Path:
+def export(ckpt: str | Path, out: str | Path, dataset: str | None = None, parity: int = 4,
+           near_critical: bool = False) -> Path:
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     model, ck = load_model(ckpt, "cpu")
@@ -96,6 +97,16 @@ def export(ckpt: str | Path, out: str | Path, dataset: str | None = None, parity
     if dataset and parity:
         data = Data(dataset)
         calls = [c for c in data.val if c.phase in ("contact", "secondary")][:parity]
+        if near_critical:
+            # calls with damaged survivors close to failing (the monotone margin head's case)
+            col = S.col("bond_feat", "damage"), S.col("bond_feat", "fail_margin")
+
+            def n_crit(c):
+                bf = c.arrays["bond_feat"][0::2]
+                return int(((bf[:, col[0]] > 0) & (bf[:, col[1]] > 0.85)
+                            & (c.arrays["y_bond_broke"] == 0)).sum()) if len(bf) else 0
+            ranked = sorted((c for c in data.val if n_crit(c) > 0), key=n_crit, reverse=True)
+            calls = calls[: max(1, parity // 2)] + ranked[: parity - max(1, parity // 2)]
         cache = HierarchyCache(model.cfg.levels)
         for k, c in enumerate(calls):
             d = out / "parity" / f"{k}"
@@ -117,8 +128,10 @@ def main(argv=None) -> None:
     ap.add_argument("--out", required=True)
     ap.add_argument("--dataset", default=None, help="calls dataset for parity fixtures")
     ap.add_argument("--parity", type=int, default=4)
+    ap.add_argument("--near-critical", action="store_true",
+                    help="half the parity calls hold damaged survivors with q > 0.85")
     a = ap.parse_args(argv)
-    print(export(a.checkpoint, a.out, a.dataset, a.parity))
+    print(export(a.checkpoint, a.out, a.dataset, a.parity, a.near_critical))
 
 
 if __name__ == "__main__":
