@@ -223,6 +223,33 @@ def _load_events(dataset: str, splits: set[str] | None = None) -> tuple[list[S.E
     return events, aligned
 
 
+def holdout_ballistic_speeds(events: list, positions: tuple) -> list[str]:
+    """The in-distribution ballistic test (planning, 2026-10-22): in each *training* ballistic
+    family, the ensembles at these positions of its speed order (ensemble ids …_v<NNN>_…)
+    become validation, in memory, each its own split group. They share the layout with the
+    family's training speeds by design: the test is generalisation to unseen speeds of a
+    seen layout. Returns the moved ensemble ids."""
+    import re
+
+    fam: dict[str, set] = defaultdict(set)
+    for e in events:
+        m = e.manifest
+        if m.get("ensemble_id") and m["family"].startswith("bl_") and m["split"] == "train":
+            fam[m["family"]].add(m["ensemble_id"])
+    speed = lambda eid: int(re.search(r"_v(\d+)_", eid).group(1))  # noqa: E731
+    moved = {eid for ids in fam.values() for i, eid in enumerate(sorted(ids, key=speed)) if i in positions}
+    for e in events:
+        m = e.manifest
+        if m.get("ensemble_id") in moved:
+            m["split"], m["split_group"] = "val", m["ensemble_id"]
+            for c in e.calls:
+                c.split_group = m["ensemble_id"]
+    print(f"[data] in-distribution ballistic val: {len(moved)} training ensembles held out "
+          f"(speed positions {sorted(positions)} of {', '.join(f'{f} {len(i)}' for f, i in sorted(fam.items()))})",
+          flush=True)
+    return sorted(moved)
+
+
 class Data:
     """Train calls from `dataset`'s train split; validation calls from its val split, or,
     with `val_dataset`, from that dataset's val split instead (the bulk evaluation
@@ -230,7 +257,8 @@ class Data:
 
     def __init__(self, dataset: str, include_unrouted: bool = False,
                  val_dataset: str | None = None, train_events: list | None = None,
-                 call_cache: dict | None = None, extra_train: str = ""):
+                 call_cache: dict | None = None, extra_train: str = "",
+                 holdout_ballistic: tuple = ()):
         # `dataset` may list several roots, `path[@weight],…`: their training calls are
         # mixed by `MixedSampler` with the given shares of every epoch (default: in
         # proportion to their sizes, i.e. plain concatenation).
@@ -267,6 +295,8 @@ class Data:
             if dup:
                 raise S.SchemaError(f"event ids in both datasets: {sorted(dup)[:5]}")
             self.events = self.events + val_events
+        if holdout_ballistic:
+            holdout_ballistic_speeds(self.events, holdout_ballistic)
         self.structures = {e.manifest["event_id"]: e.structures for e in self.events}
         keep = (lambda c: True) if include_unrouted else (lambda c: c.routed)
         from_val = {id(e) for e in val_events} if val_dataset else set()
@@ -1026,6 +1056,9 @@ def main(argv=None) -> None:
                     help="a continuous break time per bond (the decode's break order)")
     ap.add_argument("--hidden-head", action="store_true",
                     help="the chunks' frame-end hidden state (u, theta, v, w) as a head")
+    ap.add_argument("--holdout-ballistic", default="",
+                    help="speed positions (0-based, e.g. 1,3) of each training ballistic family's "
+                         "ensembles moved to validation: the in-distribution ballistic test")
     ap.add_argument("--kinematic", action="store_true",
                     help="the soft kinematic-consistency loss term (displacements outside the "
                          "velocity trapezoid's envelope, decode.trapezoid_excess)")
@@ -1078,7 +1111,8 @@ def main(argv=None) -> None:
           "max_gb": a.cache_gb} if a.train_events else {}
     data = Data(dataset, val_dataset=a.val_dataset or None,
                 train_events=_read_list(a.train_events) if a.train_events else None, call_cache=cc,
-                extra_train=a.extra_train)
+                extra_train=a.extra_train,
+                holdout_ballistic=tuple(int(x) for x in a.holdout_ballistic.split(",") if x))
     for s in seeds:
         out = Path(a.out) / (f"seed{s}" if len(seeds) > 1 else "")
         cfg = TrainConfig(dataset=dataset, val_dataset=a.val_dataset, out=str(out), steps=a.steps,

@@ -26,6 +26,8 @@ ap.add_argument("--checkpoint", required=True)
 ap.add_argument("--dataset", required=True)
 ap.add_argument("--families", default="")
 ap.add_argument("--out", default="")
+ap.add_argument("--holdout", default="", help="the training run's --holdout-ballistic positions: "
+                "those ensembles are reported as held-out val")
 a = ap.parse_args()
 fams = set(a.families.split(",")) if a.families else None
 groups = defaultdict(list)
@@ -34,6 +36,14 @@ for p in S.find_events(a.dataset):
     if not m.get("ensemble_id") or not m["family"].startswith("bl_") or (fams and m["family"] not in fams):
         continue
     groups[m["ensemble_id"]].append(p)
+held = set()
+if a.holdout:
+    from types import SimpleNamespace as N
+
+    from learned_impact.outcome.train import holdout_ballistic_speeds
+    heads = [N(manifest=json.loads((Path(ps[0]) / "manifest.json").read_text()), calls=[])
+             for ps in groups.values()]
+    held = set(holdout_ballistic_speeds(heads, tuple(int(x) for x in a.holdout.split(","))))
 model, ck = load_model(Path(a.checkpoint), "cpu")
 model.eval()
 dcfg = decode_config(ck)
@@ -66,7 +76,8 @@ for eid, paths in sorted(groups.items()):
         u = v_in / max(np.linalg.norm(v_in), 1e-12)
         ens = c.arrays["ens_impactor_v_end"].astype(float)[:, 0] @ u
         model_v = np.array([v_hat[ic == k][0] @ u for k in range(len(calls))])
-        rows.append({"family": m0["family"], "split": m0["split"], "ensemble": eid,
+        rows.append({"family": m0["family"],
+                     "split": "val (held-out speed)" if eid in held else m0["split"], "ensemble": eid,
                      "speed": float(np.linalg.norm(v_in)),
                      "perf_freq": float(c.arrays["y_impactor_perforate_freq"][0]),
                      "p_perf_model": float(np.mean([p_perf[ic == k][0] for k in range(len(calls))])),
@@ -76,11 +87,11 @@ for eid, paths in sorted(groups.items()):
 rows.sort(key=lambda r: (r["family"], r["speed"]))
 for fam in sorted({r["family"] for r in rows}):
     rr = [r for r in rows if r["family"] == fam]
-    print(f"\n{fam} ({rr[0]['split']}), aligned call per ensemble")
-    print("| v0 m/s | perf freq (oracle) | p_perf (model) | v_end oracle mean [min, max] | v_end model |")
-    print("|---:|---:|---:|---|---:|")
+    print(f"\n{fam}, aligned call per ensemble")
+    print("| v0 m/s | split | perf freq (oracle) | p_perf (model) | v_end oracle mean [min, max] | v_end model |")
+    print("|---:|---|---:|---:|---|---:|")
     for r in rr:
-        print(f"| {r['speed']:.2f} | {r['perf_freq']:.2f} | {r['p_perf_model']:.2f} | "
+        print(f"| {r['speed']:.2f} | {r['split']} | {r['perf_freq']:.2f} | {r['p_perf_model']:.2f} | "
               f"{r['v_end_ens_mean']:.2f} [{r['v_end_ens_min']:.2f}, {r['v_end_ens_max']:.2f}] | {r['v_end_model']:.2f} |")
 if a.out:
     Path(a.out).write_text(json.dumps(rows, indent=1))
