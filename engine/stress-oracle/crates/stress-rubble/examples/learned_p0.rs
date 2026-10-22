@@ -473,6 +473,87 @@ static ENERGY_ENVELOPE_IMPACTORS: std::sync::atomic::AtomicUsize = std::sync::at
 static ENERGY_ENVELOPE_CHUNKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// The largest impactor |dx| / radius seen (f64 bits; `STRESS_ENVELOPE_TOL`, default 0.05).
 static ENVELOPE_MAX_IMPACTOR_RATIO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// `STRESS_CONTACT_MEASURE=1` (measured only): per routed call, the island's contacts at the
+/// frame's end against the non-penetration bound (`stress_learned::contact_bound`) and a
+/// ledger whose energy includes the contacts' (`KE + E_elastic + PE + E_contact`).
+#[derive(Default)]
+struct ContactMeasure {
+    calls: usize,
+    contacts: usize,
+    over: usize,
+    over_by_kind: [usize; 4],
+    worst_excess: f64,
+    worst: Option<serde_json::Value>,
+    ledger: stress_learned::energy_budget::Ledger,
+    max_gain_ratio: f64,
+    calls_over_budget: usize,
+}
+/// `STRESS_FULL_CONTACT_BOUNDS=1`: calls checked, calls and contacts projected, the largest
+/// excess projected out (m), contacts left over and their largest excess.
+static NONPENETRATION: std::sync::Mutex<(usize, usize, usize, f64, usize, f64, f64)> = std::sync::Mutex::new((0, 0, 0, 0.0, 0, 0.0, 1.0));
+static CONTACT_MEASURE: std::sync::Mutex<Option<ContactMeasure>> = std::sync::Mutex::new(None);
+
+fn measure_contacts(start: &World, m: &stress_ref::world::IslandMembers, out: &stress_ref::world::IslandState, frame: i64) {
+    if !std::env::var("STRESS_CONTACT_MEASURE").is_ok_and(|v| v == "1") {
+        return;
+    }
+    let end = World::merge_island(start, out, m);
+    let (k0, e0, p0) = start.island_energy(m);
+    let (k1, e1, p1) = end.island_energy(m);
+    let ec0 = start.island_contact_energy(m);
+    let mut g = CONTACT_MEASURE.lock().unwrap();
+    let x = g.get_or_insert_with(ContactMeasure::default);
+    let ec1 = end.island_contact_energy(m);
+    // the call's energy scalars, as a recorded call with the contact bounds carries them
+    // (`energy_budget::call_delta`, `call_start`: the ledger exactly as `ledger_of_calls`)
+    let scalars: std::collections::BTreeMap<String, f64> = [("KE_in", k0), ("E_elastic_start", e0), ("E_contact_start", ec0), ("KE_out", k1), ("E_elastic_end", e1), ("E_contact_end", ec1), ("W_gravity", p0 - p1)].into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+    let remaining = x.ledger.open(stress_learned::energy_budget::call_start(&scalars).unwrap());
+    let e_avail = stress_learned::contact_bound::available_energy(start, m, remaining);
+    let (cs, _, _) = stress_learned::contact_bound::check(start, &end, m, e_avail);
+    // `STRESS_CONTACT_FIXTURE=PATH`: a line per call (scalars, e_avail and its contacts, with
+    // f64 bits) for the parity fixture.
+    if let Ok(path) = std::env::var("STRESS_CONTACT_FIXTURE") {
+        use std::io::Write;
+        let bits = |v: f64| format!("{:016x}", v.to_bits());
+        let line = json!({"frame": frame, "energy": scalars, "energy_bits": scalars.iter().map(|(k, v)| (k.clone(), bits(*v))).collect::<std::collections::BTreeMap<_, _>>(),
+            "E_budget_remaining": remaining, "E_budget_remaining_bits": bits(remaining), "e_avail": e_avail, "e_avail_bits": bits(e_avail),
+            "contacts": cs.iter().map(|c| json!({"key": c.key, "depth_start": c.depth_start, "depth_start_bits": bits(c.depth_start), "k": c.k, "k_bits": bits(c.k), "depth_end": c.depth_end, "depth_end_bits": bits(c.depth_end),
+                "energy_depth_bits": bits(c.energy_depth), "allowed_bits": bits(c.allowed), "over": c.over()})).collect::<Vec<_>>()});
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = writeln!(f, "{line}");
+        }
+    }
+    x.calls += 1;
+    x.contacts += cs.len();
+    let dump = std::env::var("STRESS_CONTACT_DUMP").ok();
+    for c in &cs {
+        if let Some(path) = &dump {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                let _ = writeln!(f, "{}", json!({"frame": frame, "over": c.over(), "c": c}));
+            }
+        }
+        if c.over() {
+            x.over += 1;
+            x.over_by_kind[c.key.0 as usize] += 1;
+            let ex = c.depth_end - c.allowed;
+            if ex > x.worst_excess {
+                x.worst_excess = ex;
+                x.worst = Some(json!({"frame": frame, "contact": c}));
+            }
+        }
+    }
+    let delta = stress_learned::energy_budget::call_delta(&scalars).unwrap();
+    if delta > remaining * (1.0 + 1e-9) + 1e-12 {
+        x.calls_over_budget += 1;
+    }
+    x.ledger.close(delta);
+    let r = x.ledger.gain / x.ledger.e_ref.max(1e-300);
+    if x.calls == 1 || r > x.max_gain_ratio {
+        x.max_gain_ratio = r;
+    }
+}
+
 /// The event's energy budget (`stress_learned::energy_budget`), over the run's routed calls:
 /// the ledger, the largest `gain / E_ref` after a call, and the calls where the budget acted
 /// (`STRESS_FULL_ENERGY_BUDGET=1`) or, measured only, would have.
@@ -611,7 +692,7 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
             let mut flags = Value::Null;
             // A full-state model's decoded state /2 columns (`full_state_out`), by call.
             let last_full: std::cell::RefCell<Option<Vec<stress_learned::decoded_full::FullOut>>> = std::cell::RefCell::new(None);
-            let model_budget: Option<std::cell::Cell<Option<stress_learned::energy_budget::Ledger>>> = model.as_ref().map(|_| std::cell::Cell::new(None));
+            let model_budget: Option<std::cell::Cell<Option<(stress_learned::energy_budget::Ledger, Option<f64>)>>> = model.as_ref().map(|_| std::cell::Cell::new(None));
             let mut provider = |view: &World, keys: &stress_ref::world::IslandKeys| -> Result<stress_ref::world::DecodedState, String> {
                 let tc = Instant::now();
                 let d = match o.kind.as_str() {
@@ -619,7 +700,9 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
                     "files" => file_outcome(o, view, keys, frame, &s.name),
                     "model" => {
                         let m = model.as_mut().expect("model provider");
-                        m.energy_budget = model_budget.as_ref().and_then(|c| c.take());
+                        let b = model_budget.as_ref().and_then(|c| c.take());
+                        m.energy_budget = b.map(|x| x.0);
+                        m.contact_energy = b.and_then(|x| x.1);
                         let d = m.outcome(view, keys, frame);
                         *last_full.borrow_mut() = m.last_full.take();
                         d
@@ -648,7 +731,9 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
                         writeln!(idx, "{line}").map_err(|e| e.to_string())?;
                     }
                     if exact {
-                        return stress_ref::world::oracle_island_step(start, m);
+                        let out = stress_ref::world::oracle_island_step(start, m)?;
+                        measure_contacts(start, m, &out, frame);
+                        return Ok(out);
                     }
                     let oracle_full2 = o.kind == "oracle_full2";
                     // A decoded state: applied to the island on a copy of the frame-start world
@@ -666,13 +751,18 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
                     // the frame (and a model's call carries the ledger as inputs); otherwise
                     // the ledger is kept and measured only.
                     let budget_on = std::env::var("STRESS_FULL_ENERGY_BUDGET").is_ok_and(|v| v == "1");
+                    // `STRESS_FULL_CONTACT_BOUNDS=1` (planning, the penetration leak): the island's
+                    // penalty contact energy counts in the ledger and the budget, and the composed
+                    // state is held to the non-penetration bound (`contact_bound`).
+                    let contact_bounds = std::env::var("STRESS_FULL_CONTACT_BOUNDS").is_ok_and(|v| v == "1");
                     let remaining = {
                         let (k0, e0, _) = start.island_energy(m);
+                        let ec0 = if contact_bounds { start.island_contact_energy(m) } else { 0.0 };
                         let mut l = ENERGY_LEDGER.lock().unwrap();
-                        let r = l.0.open(k0 + e0);
+                        let r = l.0.open(k0 + e0 + ec0);
                         if budget_on {
                             if let Some(mm) = model_budget.as_ref() {
-                                mm.set(Some(l.0));
+                                mm.set(Some((l.0, contact_bounds.then_some(ec0))));
                             }
                         }
                         r
@@ -748,13 +838,26 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
                     let base = stress_learned::decoded_full::Base::from_env()?;
                     let (mut out, alpha) = if bound.is_some() {
                         let (out, alpha) = stress_learned::decoded_full::island_frame_bounded(start, m, &d, &full, base, stress_learned::decoded_full::ids_from_base(), bound)?;
-                        let delta = stress_learned::decoded_full::island_total_energy(start, &out, m) - { let (k, e, p) = start.island_energy(m); k + e + p };
+                        let delta = stress_learned::decoded_full::island_total_energy(start, &out, m, false) - { let (k, e, p) = start.island_energy(m); k + e + p };
                         let mut l = ENERGY_LEDGER.lock().unwrap();
                         l.0.close(delta);
                         (out, alpha)
                     } else {
                         let allowed = if budget_on { remaining } else { f64::INFINITY };
-                        let (out, alpha, delta) = stress_learned::decoded_full::island_frame_budget(start, m, &d, &full, base, stress_learned::decoded_full::ids_from_base(), allowed)?;
+                        let (out, alpha, delta, proj) = stress_learned::decoded_full::island_frame_budget(start, m, &d, &full, base, stress_learned::decoded_full::ids_from_base(), allowed, contact_bounds)?;
+                        if let Some(p) = proj {
+                            let mut np = NONPENETRATION.lock().unwrap();
+                            np.0 += 1;
+                            if p.clamps > 0 {
+                                np.1 += 1;
+                                np.2 += p.clamps;
+                                np.3 = np.3.max(p.max_excess);
+                                eprintln!("[non-penetration] frame {frame}: {} contacts projected out in {} passes, largest excess {:.3e} m, {} left, energy scale {:.4}", p.clamps, p.passes, p.max_excess, p.residual, p.energy_scale);
+                            }
+                            np.4 += p.residual;
+                            np.6 = np.6.min(p.energy_scale);
+                            np.5 = np.5.max(p.residual_excess);
+                        }
                         let mut l = ENERGY_LEDGER.lock().unwrap();
                         if delta > remaining * (1.0 + 1e-9) + 1e-12 || alpha < 1.0 {
                             l.2 += 1;
@@ -821,6 +924,7 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
                             }
                         }
                     }
+                    measure_contacts(start, m, &out, frame);
                     Ok(out)
                 };
                 w.step_frame_island_provider(&mut a_provider).map(|m| {
@@ -1177,10 +1281,13 @@ fn run_event(dir: &std::path::Path, variant: &str, o: &ProviderOpts, samples: Ve
             let call_ms: Vec<f64> = out["call_log"].as_array().map(|l| l.iter().filter_map(|x| x["call_ms"].as_f64()).collect()).unwrap_or_default();
             let budget_json = {
                 let l = ENERGY_LEDGER.lock().unwrap();
-                json!({"on": std::env::var("STRESS_FULL_ENERGY_BUDGET").is_ok_and(|v| v == "1"), "tol": stress_learned::energy_budget::TOL, "e_ref": l.0.e_ref, "gain": l.0.gain, "calls": l.0.calls,
+                json!({"on": std::env::var("STRESS_FULL_ENERGY_BUDGET").is_ok_and(|v| v == "1"), "contact": std::env::var("STRESS_FULL_CONTACT_BOUNDS").is_ok_and(|v| v == "1"), "tol": stress_learned::energy_budget::TOL, "e_ref": l.0.e_ref, "gain": l.0.gain, "calls": l.0.calls,
                     "max_gain_ratio": if l.1.is_finite() { json!(l.1) } else { Value::Null }, "frames_over": l.2})
             };
-            (end, json!({"calls": out["calls"], "fallbacks": count("fallback"), "energy_bound_active": count("energy_bound_active"), "energy_bound_infeasible": count("energy_bound_infeasible"), "call_ms": call_ms,
+            let contact_json = CONTACT_MEASURE.lock().unwrap().as_ref().map(|x| json!({"calls": x.calls, "contacts": x.contacts, "over": x.over, "over_by_kind": x.over_by_kind, "worst_excess": x.worst_excess, "worst": x.worst,
+                "ledger_e_ref": x.ledger.e_ref, "ledger_gain": x.ledger.gain, "max_gain_ratio": x.max_gain_ratio, "calls_over_budget": x.calls_over_budget}));
+            let np_json = { let n = NONPENETRATION.lock().unwrap(); json!({"calls": n.0, "calls_projected": n.1, "contacts_projected": n.2, "max_excess": n.3, "residual_contacts": n.4, "residual_excess": n.5, "min_energy_scale": n.6}) };
+            (end, json!({"contact_measure": contact_json, "nonpenetration": np_json, "calls": out["calls"], "fallbacks": count("fallback"), "energy_bound_active": count("energy_bound_active"), "energy_bound_infeasible": count("energy_bound_infeasible"), "call_ms": call_ms,
                 "admissibility_violations_impactors": ADMISSIBILITY_IMPACTORS.load(std::sync::atomic::Ordering::Relaxed),
                 "admissibility_violations_chunks": ADMISSIBILITY_CHUNKS.load(std::sync::atomic::Ordering::Relaxed),
                 "host_energy_bound_frames": HOST_BOUND_FRAMES.load(std::sync::atomic::Ordering::Relaxed),

@@ -146,7 +146,14 @@ pub fn write_row(v: &mut Value, columns: &[String], row: &[f64]) -> Result<(), S
         }
         match c.split_once('=') {
             Some((p, variant)) => groups.entry(p).or_default().push((variant, x)),
-            None => set_leaf(at_mut(v, c)?, x, c)?,
+            // A column of a field the entity's variant does not have (a box impactor's
+            // `shape.radius`) reads NaN (`columns_of_state`) and writes nothing; any other
+            // value for it is an error.
+            None => match at_mut(v, c) {
+                Ok(leaf) => set_leaf(leaf, x, c)?,
+                Err(_) if x.is_nan() => {}
+                Err(e) => return Err(e),
+            },
         }
     }
     for (p, variants) in groups {
@@ -400,32 +407,66 @@ pub fn hidden_states(outs: &[FullOut]) -> Result<Option<HashMap<(usize, usize), 
 pub fn island_frame_bounded(start: &stress_ref::world::World, m: &stress_ref::world::IslandMembers, d: &stress_ref::world::DecodedState, full: &[FullOut], base: Base, ids_from_base: bool, energy_bound: Option<f64>) -> Result<(IslandState, f64), String> {
     let Some(tol) = energy_bound else { return Ok((island_frame(start, m, d, full, base, ids_from_base)?, 1.0)) };
     let (k0, e0, _) = start.island_energy(m);
-    let (st, alpha, _) = island_frame_budget(start, m, d, full, base, ids_from_base, tol * (k0 + e0).max(1e-12))?;
+    let (st, alpha, _, _) = island_frame_budget(start, m, d, full, base, ids_from_base, tol * (k0 + e0).max(1e-12), false)?;
     Ok((st, alpha))
 }
 
 /// The island's mechanical energy `KE + E_elastic + PE` with the island's state `x` merged
-/// into the frame-start world `start`.
-pub fn island_total_energy(start: &stress_ref::world::World, x: &IslandState, m: &stress_ref::world::IslandMembers) -> f64 {
-    let (k, e, p) = stress_ref::world::World::merge_island(start, x, m).island_energy(m);
-    k + e + p
+/// into the frame-start world `start`, and with `contact` its penalty contacts' energy
+/// (`World::island_contact_energy`, `contact_bound`).
+pub fn island_total_energy(start: &stress_ref::world::World, x: &IslandState, m: &stress_ref::world::IslandMembers, contact: bool) -> f64 {
+    let w = stress_ref::world::World::merge_island(start, x, m);
+    let (k, e, p) = w.island_energy(m);
+    k + e + p + if contact { w.island_contact_energy(m) } else { 0.0 }
 }
 
+/// Bisection steps of the contacts' energy scale (`island_frame_budget`).
+pub const CONTACT_BISECTIONS: usize = 12;
+
 /// `island_frame` bounded to add at most `allowed` (>= 0) to the island's mechanical energy
-/// `KE + E_elastic + PE` over the frame (`energy_budget`: the event's remaining budget), as
-/// `island_frame_bounded` scales: the hidden displacement first, then the motion relative to
-/// the centre of mass. Returns the state, the scale applied (1 when the bound did not act)
-/// and the frame's change of the island's mechanical energy (the ledger's `close`).
+/// `KE + E_elastic + PE` (with `contact`, `+ E_contact`) over the frame (`energy_budget`: the
+/// event's remaining budget), as `island_frame_bounded` scales: the hidden displacement first,
+/// then the motion relative to the centre of mass. With `contact` the composed state's
+/// contacts are first held to the non-penetration bound (`contact_bound::project`). Returns
+/// the state, the scale applied (1 when the bound did not act), the frame's change of the
+/// island's mechanical energy (the ledger's `close`) and the projection, if any.
 #[allow(clippy::too_many_arguments)]
-pub fn island_frame_budget(start: &stress_ref::world::World, m: &stress_ref::world::IslandMembers, d: &stress_ref::world::DecodedState, full: &[FullOut], base: Base, ids_from_base: bool, allowed: f64) -> Result<(IslandState, f64, f64), String> {
+pub fn island_frame_budget(start: &stress_ref::world::World, m: &stress_ref::world::IslandMembers, d: &stress_ref::world::DecodedState, full: &[FullOut], base: Base, ids_from_base: bool, allowed: f64, contact: bool) -> Result<(IslandState, f64, f64, Option<crate::contact_bound::Projection>), String> {
     let st = island_frame(start, m, d, full, base, ids_from_base)?;
     let (k0, e0, p0) = start.island_energy(m);
-    let t0 = k0 + e0 + p0;
+    let t0 = k0 + e0 + p0 + if contact { start.island_contact_energy(m) } else { 0.0 };
     let budget = t0 + allowed.max(0.0);
-    let total = |x: &IslandState| -> f64 { island_total_energy(start, x, m) };
+    let total = |x: &IslandState| -> f64 { island_total_energy(start, x, m, contact) };
+    // With `contact`: the non-penetration bound first; a state still over the budget has its
+    // contacts' allowed depth tightened (the energy each may hold, `E_avail` scaled down by
+    // bisection towards 0, where every contact is held to its frame-start depth) before the
+    // other scalings: the contacts' energy is the one term those cannot reduce.
+    let (st, proj) = if contact {
+        let ea = crate::contact_bound::available_energy(start, m, allowed);
+        let (s1, mut p1) = crate::contact_bound::project(start, m, &st, ea);
+        p1.energy_scale = 1.0;
+        if total(&s1) <= budget {
+            (s1, Some(p1))
+        } else {
+            let (mut lo, mut hi) = (0.0f64, 1.0f64);
+            for _ in 0..CONTACT_BISECTIONS {
+                let mid = 0.5 * (lo + hi);
+                if total(&crate::contact_bound::project(start, m, &st, ea * mid).0) <= budget {
+                    lo = mid
+                } else {
+                    hi = mid
+                }
+            }
+            let (x, mut p) = crate::contact_bound::project(start, m, &st, ea * lo);
+            p.energy_scale = lo;
+            (x, Some(p))
+        }
+    } else {
+        (st, None)
+    };
     let t = total(&st);
     if t <= budget {
-        return Ok((st, 1.0, t - t0));
+        return Ok((st, 1.0, t - t0, proj));
     }
     let bisect = |f: &dyn Fn(f64) -> f64| -> f64 {
         let (mut lo, mut hi) = (0.0f64, 1.0f64);
@@ -446,7 +487,7 @@ pub fn island_frame_budget(start: &stress_ref::world::World, m: &stress_ref::wor
     x.scale_hidden_displacement(a);
     let t = total(&x);
     if t <= budget {
-        return Ok((x, a, t - t0));
+        return Ok((x, a, t - t0, proj));
     }
     let b = bisect(&|k| {
         let mut y = x.clone();
@@ -456,7 +497,7 @@ pub fn island_frame_budget(start: &stress_ref::world::World, m: &stress_ref::wor
     x.scale_relative_motion(b);
     eprintln!("[energy bound] motion relative to the centre of mass scaled by {b:.4}");
     let t = total(&x);
-    Ok((x, a.min(b), t - t0))
+    Ok((x, a.min(b), t - t0, proj))
 }
 
 pub fn island_frame(start: &stress_ref::world::World, m: &stress_ref::world::IslandMembers, d: &stress_ref::world::DecodedState, full: &[FullOut], base: Base, ids_from_base: bool) -> Result<IslandState, String> {

@@ -152,3 +152,42 @@ fn the_oracle_through_decoded_state_2_is_the_oracle() {
         eprintln!("{}: {} frames through /2, identical", scene.name, frames(&scene));
     }
 }
+
+/// The contact bounds of the decode (`stress_learned::contact_bound`, planning 2026-10-22)
+/// never act on the oracle's own island frames: no contact ends deeper than
+/// `max(depth_start, sqrt(2 E_avail / k))` (so `project` returns the state as it is, bit for
+/// bit), and the event's energy budget with the contacts' energy counted is never exceeded.
+#[test]
+fn the_contact_bounds_never_act_on_the_oracle() {
+    for scene in scenes() {
+        let mut w = World::new(&scene);
+        let mut ledger = stress_learned::energy_budget::Ledger::default();
+        let (mut calls, mut contacts) = (0, 0);
+        for frame in 0..frames(&scene) {
+            w.step_frame_island_provider(&mut |start: &World, m: &IslandMembers| {
+                let out = oracle_island_step(start, m)?;
+                let end = World::merge_island(start, &out, m);
+                let ((k0, e0, p0), (k1, e1, p1)) = (start.island_energy(m), end.island_energy(m));
+                let ec0 = start.island_contact_energy(m);
+                let remaining = ledger.open(k0 + e0 + ec0);
+                let e_avail = stress_learned::contact_bound::available_energy(start, m, remaining);
+                let (cs, _, ec1) = stress_learned::contact_bound::check(start, &end, m, e_avail);
+                for c in &cs {
+                    assert!(!c.over(), "{}: frame {frame}: contact {c:?} over the bound", scene.name);
+                }
+                let (projected, p) = stress_learned::contact_bound::project(start, m, &out, e_avail);
+                assert_eq!(p.clamps, 0, "{}: frame {frame}", scene.name);
+                assert_eq!(stress_learned::relabel::state_bytes(&projected).unwrap(), stress_learned::relabel::state_bytes(&out).unwrap(), "{}: frame {frame}: projection changed the oracle's state", scene.name);
+                let delta = (k1 + e1 + p1 + ec1) - (k0 + e0 + p0 + ec0);
+                assert!(delta <= remaining * (1.0 + 1e-9) + 1e-12, "{}: frame {frame}: delta {delta} over the remaining budget {remaining}", scene.name);
+                ledger.close(delta);
+                calls += 1;
+                contacts += cs.len();
+                Ok(out)
+            })
+            .unwrap();
+        }
+        eprintln!("{}: {calls} routed calls, {contacts} frame-end contacts, ledger {ledger:?}", scene.name);
+        assert!(calls > 0 && contacts > 0, "{}: nothing checked", scene.name);
+    }
+}

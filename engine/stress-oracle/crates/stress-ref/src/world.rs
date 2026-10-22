@@ -117,6 +117,59 @@ impl Impactor {
 }
 
 /// Energy terms of the contacts (J).
+/// One penalty contact point as `apply_contacts` evaluates it (`World::island_contacts`):
+/// `kind` 0 chunk on ground (`a` the chunk, `b` (sample point, 0) with handed overlaps, else
+/// (0, 0)), 1 impactor on ground (`a` (impactor, 0), `b` (sample point, 0)), 2 impactor on
+/// chunk (`a` the chunk, `b` (impactor, 0)), 3 chunk on chunk (`a`, `b` the chunks); `normal`
+/// pushes `a`, `rel_velocity` is `a`'s point velocity minus the other's (the approach speed is
+/// `-rel_velocity . normal`), `depth` the depth the law acts on (net of any overlap offset),
+/// `k` and `m_red` the point's stiffness and reduced mass, `energy` its `k depth^2 / 2`.
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub struct ContactProbe {
+    pub kind: u8,
+    pub a: (usize, usize),
+    pub b: (usize, usize),
+    pub point: Vec3,
+    pub normal: Vec3,
+    pub depth: f64,
+    pub k: f64,
+    pub m_red: f64,
+    pub rel_velocity: Vec3,
+    pub energy: f64,
+}
+
+type ProbeKey = (u8, (usize, usize), (usize, usize), Vec3);
+
+thread_local! {
+    /// While `World::island_contacts` evaluates contacts: the next contact's identity and
+    /// every point recorded so far (None otherwise: the contacts record nothing).
+    static CONTACT_PROBE: std::cell::RefCell<Option<(ProbeKey, Vec<ContactProbe>)>> = const { std::cell::RefCell::new(None) };
+}
+
+fn probe_at(kind: u8, a: (usize, usize), b: (usize, usize), point: Vec3) {
+    CONTACT_PROBE.with(|p| {
+        if let Some(x) = p.borrow_mut().as_mut() {
+            x.0 = (kind, a, b, point);
+        }
+    });
+}
+
+fn probe_record(f: impl FnOnce(ProbeKey) -> ContactProbe) {
+    CONTACT_PROBE.with(|p| {
+        if let Some((key, v)) = p.borrow_mut().as_mut() {
+            v.push(f(*key));
+        }
+    });
+}
+
+pub(crate) fn probe_start() {
+    CONTACT_PROBE.with(|p| *p.borrow_mut() = Some(((0, (0, 0), (0, 0), Vec3::ZERO), Vec::new())));
+}
+
+pub(crate) fn probe_take() -> Vec<ContactProbe> {
+    CONTACT_PROBE.with(|p| p.borrow_mut().take().map(|x| x.1).unwrap_or_default())
+}
+
 #[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ContactLedger {
     /// Penalty energy currently stored in contacts.
@@ -1165,6 +1218,7 @@ impl World {
         points: usize,
     ) -> Vec3 {
         let (f, stored, dissipated) = penalty_force(k, m_red, restitution, friction, depth, normal, rel_velocity, dt, points);
+        probe_record(|(kind, a, b, point)| ContactProbe { kind, a, b, point, normal, depth, k, m_red, rel_velocity, energy: stored });
         self.contact.stored += stored;
         self.contact.dissipated += dissipated;
         f
@@ -1294,6 +1348,7 @@ impl World {
                 let m_red = m * imp.mass / (m + imp.mass);
                 let v_chunk = self.solver.point_velocity(s, c, point);
                 let v_imp = imp.velocity + imp.angular_velocity.cross(point - imp.pose.position);
+                probe_at(2, (s, c), (ii, 0), point);
                 let f = self.contact_force(
                     kc,
                     m_red,
@@ -1362,6 +1417,7 @@ impl World {
                         if eff <= 0.0 {
                             continue;
                         }
+                        probe_at(0, (s, c), (i, 0), p);
                         let f = self.contact_force(kc / n.max(5) as f64, m, self.scene.sim.contact_restitution, mu, eff, Vec3::Z, v, dt, n);
                         self.loads.add_at(s, c, f, p, center);
                     }
@@ -1383,6 +1439,7 @@ impl World {
                     let depth = g.height - p.z;
                     let v = self.solver.point_velocity(s, c, p);
                     let mu = self.scene.sim.contact_friction.unwrap_or(g.friction);
+                    probe_at(0, (s, c), (0, 0), p);
                     let f = self.contact_force(kc / n.max(5) as f64, m, self.scene.sim.contact_restitution, mu, depth, Vec3::Z, v, dt, n);
                     let center = self.solver.chunk_position(s, c);
                     self.loads.add_at(s, c, f, p, center);
@@ -1423,6 +1480,7 @@ impl World {
                     }
                     let v = imp.velocity + imp.angular_velocity.cross(p - imp.pose.position);
                     let mu = self.scene.sim.contact_friction.unwrap_or(g.friction);
+                    probe_at(1, (ii, 0), (pi, 0), p);
                     let f = self.contact_force(kp, imp.mass, self.scene.sim.contact_restitution, mu, depth, Vec3::Z, v, dt, n);
                     imp_loads[ii].0 += f;
                     imp_loads[ii].1 += (p - imp.pose.position).cross(f);
@@ -1514,6 +1572,14 @@ impl World {
                     }
                 }
                 self.pair_offsets.insert(pc.key, pc.offsets);
+                {
+                    let (ma, mb) = (self.solver.structures[sa].chunks[ca].mass, self.solver.structures[sb].chunks[cb].mass);
+                    for (q, t) in pc.points.iter().zip(&pc.trace) {
+                        let depth = t.0 - t.1;
+                        let rel = self.solver.point_velocity(sa, ca, q.0) - self.solver.point_velocity(sb, cb, q.0);
+                        probe_record(|_| ContactProbe { kind: 3, a: (sa, ca), b: (sb, cb), point: q.0, normal: t.2, depth, k: 2.0 * q.2 / (depth * depth), m_red: ma * mb / (ma + mb), rel_velocity: rel, energy: q.2 });
+                    }
+                }
                 for (p, f, stored, dissipated, work) in pc.points {
                     self.contact.stored += stored;
                     self.contact.dissipated += dissipated;

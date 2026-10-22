@@ -15,6 +15,7 @@ pub mod full_state_calls;
 pub mod decoded_full;
 pub mod kin_envelope;
 pub mod energy_budget;
+pub mod contact_bound;
 pub mod progress;
 pub mod procedural;
 pub mod provider_client;

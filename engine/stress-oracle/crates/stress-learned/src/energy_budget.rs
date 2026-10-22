@@ -59,10 +59,24 @@ impl Ledger {
 }
 
 /// A recorded call's change of its island's mechanical energy, from its energy scalars:
-/// `KE_out + E_elastic_end - KE_in - E_elastic_start - W_gravity`.
+/// `KE_out + E_elastic_end - KE_in - E_elastic_start - W_gravity`, and with the contact
+/// bounds (`contact_bound`; a call carrying `E_contact_start` and `E_contact_end`)
+/// `+ E_contact_end - E_contact_start`, in that order.
 pub fn call_delta(e: &BTreeMap<String, f64>) -> Result<f64, String> {
     let g = |k: &str| e.get(k).copied().ok_or_else(|| format!("call energy lacks {k}"));
-    Ok(g("KE_out")? + g("E_elastic_end")? - g("KE_in")? - g("E_elastic_start")? - g("W_gravity")?)
+    let d = g("KE_out")? + g("E_elastic_end")? - g("KE_in")? - g("E_elastic_start")? - g("W_gravity")?;
+    Ok(match (e.get("E_contact_start"), e.get("E_contact_end")) {
+        (Some(c0), Some(c1)) => d + c1 - c0,
+        (None, None) => d,
+        _ => return Err("call energy has one of E_contact_start, E_contact_end".into()),
+    })
+}
+
+/// A call's frame-start energy the ledger's `E_ref` reads: `KE_in + E_elastic_start`
+/// (`+ E_contact_start` when the call carries it).
+pub fn call_start(e: &BTreeMap<String, f64>) -> Result<f64, String> {
+    let s = e.get("KE_in").copied().ok_or("call energy lacks KE_in")? + e.get("E_elastic_start").copied().ok_or("call energy lacks E_elastic_start")?;
+    Ok(e.get("E_contact_start").map_or(s, |c| s + c))
 }
 
 /// The ledger before each of an event's recorded calls (`energy` per call, in call order:
@@ -71,8 +85,7 @@ pub fn ledger_of_calls(energy: &[&BTreeMap<String, f64>]) -> Result<Vec<(Ledger,
     let mut l = Ledger::default();
     let mut out = Vec::with_capacity(energy.len());
     for e in energy {
-        let s = e.get("KE_in").copied().ok_or("call energy lacks KE_in")? + e.get("E_elastic_start").copied().ok_or("call energy lacks E_elastic_start")?;
-        let r = l.open(s);
+        let r = l.open(call_start(e)?);
         out.push((l, r));
         l.close(call_delta(e)?);
     }

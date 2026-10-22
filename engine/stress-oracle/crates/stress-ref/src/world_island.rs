@@ -369,6 +369,32 @@ impl World {
     }
 }
 
+impl World {
+    /// The island `m`'s penalty contacts at this state, as the next substep evaluates them
+    /// (`apply_contacts` on a copy, every other body driven): the island's chunks and
+    /// impactors on the ground, its impactors on its chunks and its chunks of different
+    /// clusters on each other (contacts with bodies outside the island are not the island's).
+    pub fn island_contacts(&self, m: &IslandMembers) -> Vec<crate::world::ContactProbe> {
+        let mut w = self.clone();
+        for cl in &mut w.solver.clusters {
+            cl.driven = !cl.chunks.first().is_some_and(|&k| m.chunks.contains(&(cl.structure, k)));
+        }
+        for (i, imp) in w.impactors.iter_mut().enumerate() {
+            imp.driven = !m.impactors.contains(&i);
+        }
+        let dt = w.substep_dt();
+        crate::world::probe_start();
+        w.apply_contacts(dt);
+        crate::world::probe_take()
+    }
+
+    /// The island's penalty contact energy at this state (`island_contacts`: the sum of
+    /// `k depth^2 / 2` over its contact points), the oracle's own contact law.
+    pub fn island_contact_energy(&self, m: &IslandMembers) -> f64 {
+        self.island_contacts(m).iter().map(|p| p.energy).sum()
+    }
+}
+
 impl IslandState {
     /// Scale every chunk's hidden displacement and rotation (u, th) by `alpha`.
     pub fn scale_hidden_displacement(&mut self, alpha: f64) {

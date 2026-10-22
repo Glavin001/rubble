@@ -69,6 +69,9 @@ pub struct ModelProvider {
     /// The event's energy budget (`energy_budget::Ledger`) the host carries, when set: the
     /// next call's energy inputs (`E_budget_ref`, `E_budget_gain`, `E_budget_remaining`).
     pub energy_budget: Option<crate::energy_budget::Ledger>,
+    /// With the contact bounds (`contact_bound`): the island's frame-start penalty contact
+    /// energy, the next call's `energy.E_contact_start`.
+    pub contact_energy: Option<f64>,
 }
 
 impl ModelProvider {
@@ -122,7 +125,7 @@ impl ModelProvider {
         // calls upgraded with the deformation unobserved (P2's `LEARNED_IMPACT_ACCEPT_V3=1`).
         let v3 = std::env::var("STRESS_PROVIDER_CALLS").is_ok_and(|v| v == "v3")
             || schema_py.lines().any(|l| l.trim_start().starts_with("SCHEMA_VERSION") && l.contains("\"learned-impact-outcome/3\""));
-        let mut p = ModelProvider { spec: spec.clone(), dir: dir.to_path_buf(), scene: scene.to_string(), child, qs: true, call_ms: Vec::new(), lock, v3, full_state: None, last_full: None, energy_budget: None };
+        let mut p = ModelProvider { spec: spec.clone(), dir: dir.to_path_buf(), scene: scene.to_string(), child, qs: true, call_ms: Vec::new(), lock, v3, full_state: None, last_full: None, energy_budget: None, contact_energy: None };
         let described = p.read_model_json()?;
         p.qs = match spec.qs {
             Some(q) => q,
@@ -185,6 +188,11 @@ impl ModelProvider {
         if let Some(l) = &self.energy_budget {
             for c in &mut ev.calls {
                 l.insert(&mut c.energy);
+            }
+        }
+        if let Some(e) = self.contact_energy.take() {
+            for c in &mut ev.calls {
+                c.energy.insert("E_contact_start".into(), e);
             }
         }
         if self.v3 {
