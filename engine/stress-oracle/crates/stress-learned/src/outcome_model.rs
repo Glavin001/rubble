@@ -729,6 +729,32 @@ impl Default for Mat {
 }
 
 impl Outputs {
+    /// From `(shape, values)` per output name (`outputs.npz`'s arrays).
+    pub fn from_named(m: &HashMap<String, (Vec<usize>, Vec<f32>)>) -> Result<Outputs, String> {
+        let get = |k: &str| m.get(k).ok_or_else(|| format!("outputs: no {k}"));
+        let v = |k: &str| -> Result<Vec<f32>, String> { Ok(get(k)?.1.clone()) };
+        let mat = |k: &str| -> Result<Mat, String> {
+            let (s, d) = get(k)?;
+            Ok(Mat { rows: s.first().copied().unwrap_or(0), cols: s.get(1).copied().unwrap_or(1), d: d.clone() })
+        };
+        let s = |k: &str| -> Result<f32, String> { get(k)?.1.first().copied().ok_or_else(|| format!("outputs: empty {k}")) };
+        Ok(Outputs {
+            bond_log_r: v("bond_log_r")?,
+            bond_break_logit: v("bond_break_logit")?,
+            bond_log_q: v("bond_log_q")?,
+            bond_time_logits: mat("bond_time_logits")?,
+            bond_ddamage: v("bond_ddamage")?,
+            chunk_out: mat("chunk_out")?,
+            imp_out: mat("imp_out")?,
+            imp_perf_logit: v("imp_perf_logit")?,
+            energy_d_bond: s("energy_d_bond")?,
+            energy_frac_joint: s("energy_frac_joint")?,
+            energy_e_elastic: s("energy_e_elastic")?,
+            energy_ke_loss: s("energy_ke_loss")?,
+            latent_global: v("latent_global")?,
+        })
+    }
+
     /// `(name, shape, values)` of every output, as `outputs.npz` holds them.
     pub fn named(&self) -> Vec<(&'static str, Vec<usize>, Vec<f32>)> {
         let v = |x: &Vec<f32>| (vec![x.len()], x.clone());

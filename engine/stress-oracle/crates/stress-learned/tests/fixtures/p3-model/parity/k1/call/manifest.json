@@ -1,0 +1,343 @@
+{
+ "available": {
+  "blast": false,
+  "bond_energy_split": true,
+  "cracked_edges": true,
+  "punch": true,
+  "punch_frame": false,
+  "qs_frame": true,
+  "qs_hertz": true,
+  "structure_contacts": true
+ },
+ "builder_revision": 3,
+ "columns": {
+  "chunk_feat": [
+   "log_mass",
+   "inertia_0",
+   "inertia_1",
+   "inertia_2",
+   "half_extent_0",
+   "half_extent_1",
+   "half_extent_2",
+   "support_fixed",
+   "support_pinned",
+   "bond_damage_mean",
+   "bond_damage_max",
+   "n_live_bonds",
+   "n_broken_bonds",
+   "hops_to_contact",
+   "wave_arrival",
+   "hops_to_anchor",
+   "gravity_body_0",
+   "gravity_body_1",
+   "gravity_body_2",
+   "v_rel_body_0",
+   "v_rel_body_1",
+   "v_rel_body_2",
+   "w_body_0",
+   "w_body_1",
+   "w_body_2",
+   "punch_in_plug",
+   "blast_0",
+   "blast_1",
+   "blast_2",
+   "blast_3",
+   "blast_4",
+   "blast_5",
+   "in_contact_any"
+  ],
+  "impactor_feat": [
+   "log_mass_island",
+   "log_mass_chunk",
+   "inertia_0",
+   "inertia_1",
+   "inertia_2",
+   "log_radius",
+   "log_modulus",
+   "crushable",
+   "gravity_body_0",
+   "gravity_body_1",
+   "gravity_body_2",
+   "v_rel_body_0",
+   "v_rel_body_1",
+   "v_rel_body_2",
+   "speed_over_c",
+   "in_contact_any"
+  ],
+  "global_feat": [
+   "log_energy_ratio",
+   "log_energy_ratio_plug",
+   "log_dt_c_over_L",
+   "dt_v_over_L",
+   "n_impactors",
+   "log_n_chunks",
+   "gravity_mag",
+   "anchored",
+   "blast_log_tnt",
+   "blast_z",
+   "blast_impulse",
+   "v_over_c"
+  ],
+  "bond_feat": [
+   "log_area",
+   "offset_0",
+   "offset_1",
+   "offset_2",
+   "log_stiffness_0",
+   "log_stiffness_1",
+   "log_stiffness_2",
+   "log_stiffness_3",
+   "log_stiffness_4",
+   "log_stiffness_5",
+   "log_strength_0",
+   "log_strength_1",
+   "log_strength_2",
+   "log_ga_0",
+   "log_ga_1",
+   "log_ga_2",
+   "weibull",
+   "damage",
+   "crush",
+   "fail_margin",
+   "log1p_utilization",
+   "log1p_peak_util_prev",
+   "rebar",
+   "log_qs_hertz_util",
+   "punch_plug_bond",
+   "log_punch_capacity_ratio",
+   "v_rel_edge_0",
+   "v_rel_edge_1",
+   "v_rel_edge_2",
+   "rot_src_0",
+   "rot_src_1",
+   "rot_src_2",
+   "rot_src_3",
+   "rot_src_4",
+   "rot_src_5",
+   "rot_dst_0",
+   "rot_dst_1",
+   "rot_dst_2",
+   "rot_dst_3",
+   "rot_dst_4",
+   "rot_dst_5"
+  ],
+  "cracked_feat": [
+   "log_area",
+   "offset_0",
+   "offset_1",
+   "offset_2",
+   "gap",
+   "friction",
+   "v_rel_edge_0",
+   "v_rel_edge_1",
+   "v_rel_edge_2",
+   "frames_since_broken",
+   "rot_src_0",
+   "rot_src_1",
+   "rot_src_2",
+   "rot_src_3",
+   "rot_src_4",
+   "rot_src_5",
+   "rot_dst_0",
+   "rot_dst_1",
+   "rot_dst_2",
+   "rot_dst_3",
+   "rot_dst_4",
+   "rot_dst_5"
+  ],
+  "impactor_contact_feat": [
+   "v_n",
+   "v_t_0",
+   "v_t_1",
+   "v_n_over_c",
+   "log_mass_ratio",
+   "log_radius",
+   "log_modulus",
+   "spin_0",
+   "spin_1",
+   "spin_2",
+   "t_contact",
+   "log_energy_ratio",
+   "log_hertz_force",
+   "hertz_duration",
+   "is_self_impactor",
+   "overlap",
+   "friction",
+   "restitution",
+   "rot_src_0",
+   "rot_src_1",
+   "rot_src_2",
+   "rot_src_3",
+   "rot_src_4",
+   "rot_src_5",
+   "rot_dst_0",
+   "rot_dst_1",
+   "rot_dst_2",
+   "rot_dst_3",
+   "rot_dst_4",
+   "rot_dst_5"
+  ],
+  "structure_contact_feat": [
+   "v_n",
+   "v_t_0",
+   "v_t_1",
+   "v_n_over_c",
+   "log_mass_ratio",
+   "t_contact",
+   "overlap",
+   "friction",
+   "log_area",
+   "same_structure",
+   "rot_src_0",
+   "rot_src_1",
+   "rot_src_2",
+   "rot_src_3",
+   "rot_src_4",
+   "rot_src_5",
+   "rot_dst_0",
+   "rot_dst_1",
+   "rot_dst_2",
+   "rot_dst_3",
+   "rot_dst_4",
+   "rot_dst_5"
+  ],
+  "chunk_qs_feat": [
+   "qs_dv_body_0",
+   "qs_dv_body_1",
+   "qs_dv_body_2",
+   "qs_dw_body_0",
+   "qs_dw_body_1",
+   "qs_dw_body_2"
+  ],
+  "impactor_qs_feat": [
+   "qs_dv_body_0",
+   "qs_dv_body_1",
+   "qs_dv_body_2",
+   "qs_dw_body_0",
+   "qs_dw_body_1",
+   "qs_dw_body_2"
+  ],
+  "bond_qs_feat": [
+   "log_qs_frame_peak_util",
+   "qs_frame_broke",
+   "qs_frame_break_time"
+  ]
+ },
+ "ensemble_id": "p1_anchored_wall_t1_00028_s1002",
+ "ensemble_member": 0,
+ "ensemble_size": 8,
+ "event_id": "p1_anchored_wall_t1_00028_s1002_e0",
+ "family": "anchored_wall",
+ "frame_dt": 0.016666666666666666,
+ "gravity": [
+  0.0,
+  0.0,
+  -9.81
+ ],
+ "layout_family": "7x1x7_c150mm_o2-3-4-5_base",
+ "n_calls": 1,
+ "n_time_bins": 8,
+ "oracle": {
+  "config": "a12_realtime",
+  "contact": "penalty",
+  "hash": "52dcac84c85a8eba",
+  "methods": {
+   "blast_model": false,
+   "contact_crushing": false,
+   "corotational_bonds": false,
+   "exact_frame_transfer": false,
+   "exact_joint_patch": false,
+   "exact_rate_filter": false,
+   "frame_contact_step": false,
+   "implicit_contact_steps": false,
+   "implicit_contact_windows": false,
+   "implicit_failure_windows": false,
+   "lattice_contact_step": false,
+   "layer_contact": false,
+   "multirate": false,
+   "patch_after_damage": false,
+   "rayleigh_damping": false,
+   "scaled_step_bound": false,
+   "tangent_statics": false,
+   "true_step": true
+  }
+ },
+ "outcome": {
+  "frames": 84,
+  "impactors": [
+   {
+    "key": 0,
+    "regime": "perforate",
+    "speed_exit": 2.274496488033057,
+    "v_exit": [
+     -1.064500880995884,
+     2.010017947291441,
+     3.590392373798083e-13
+    ]
+   }
+  ],
+  "largest_fraction": 0.45833333333333287,
+  "n_fragments": 20,
+  "sim_time": 1.4000000000035866
+ },
+ "perturbation": {
+  "impactors": [
+   {
+    "offset_m": [
+     -8.606691751848695e-05,
+     -3.5877341860297614e-05,
+     -0.0006086607648242281
+    ],
+    "speed_scale": 1.0006018579644123
+   }
+  ],
+  "weibull_seed": 11273955896174277531
+ },
+ "recipe_id": "p1_anchored_wall_t1_00028_s1002_e0",
+ "recorder_revision": "p1-rev7",
+ "scene_hash": "52dcac84c85a8eba",
+ "schema_version": "learned-impact-outcome/3",
+ "seed": 11273955896174277531,
+ "split": "val",
+ "split_group": "p1_anchored_wall_t1_00028_s1002",
+ "structures": [
+  {
+   "structure_id": 0,
+   "n_chunks": 48,
+   "n_bonds": 80,
+   "arrays": {
+    "chunk_key": {
+     "dtype": "i64",
+     "shape": [
+      48
+     ],
+     "offset": 0
+    },
+    "bond_key": {
+     "dtype": "i64",
+     "shape": [
+      80
+     ],
+     "offset": 384
+    },
+    "bond_ends": {
+     "dtype": "i32",
+     "shape": [
+      80,
+      2
+     ],
+     "offset": 1024
+    },
+    "chunk_rest_pos": {
+     "dtype": "f32",
+     "shape": [
+      48,
+      3
+     ],
+     "offset": 1664
+    }
+   }
+  }
+ ],
+ "truncated": false
+}

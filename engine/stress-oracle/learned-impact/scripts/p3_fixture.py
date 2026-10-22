@@ -59,7 +59,10 @@ def extra(argv: list[str]) -> None:
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--name", default="x")
-    ap.add_argument("calls", nargs="+", help="EVENT_DIR:CALL_INDEX")
+    ap.add_argument("calls", nargs="+", help="EVENT_DIR:CALL_INDEX[@g0][@kick]; @g0 zeroes gravity "
+                    "(manifest, gravity features), so a free wall's island is free and the "
+                    "decode's momentum projection runs; @kick scales the node heads' Δv Δω "
+                    "by 30 before decoding (outputs.json marks it), so the energy bound acts")
     a = ap.parse_args(argv)
     sys.path.insert(0, a.p2_python)
     import torch
@@ -75,17 +78,35 @@ def extra(argv: list[str]) -> None:
     dcfg = D.DecodeConfig(tau=ck.get("tau", 1.0), temperature=ck.get("temperature", 1.0),
                           energy_tolerance=tc["decode"]["energy_tolerance"])
     cache = HierarchyCache(model.cfg.levels)
+    import dataclasses
+
     for k, spec in enumerate(a.calls):
         ev_dir, idx = spec.rsplit(":", 1)
+        kick = "@kick" in idx
+        g0 = "@g0" in idx
+        idx = idx.split("@")[0]
         ev = S.load_event(ev_dir)
         c = next(c for c in ev.calls if c.call_index == int(idx))
+        manifest = {**ev.manifest, "event_id": c.event_id}
+        if g0:
+            arrays = {n: np.array(v, copy=True) for n, v in c.arrays.items()}
+            arrays["global_feat"][..., S.col("global_feat", "gravity_mag")] = 0
+            for arr, pre in (("chunk_feat", "gravity_body"), ("impactor_feat", "gravity_body")):
+                for j in range(3):
+                    arrays[arr][..., S.col(arr, f"{pre}_{j}")] = 0
+            c = dataclasses.replace(c, arrays=arrays, gravity=(0.0, 0.0, 0.0))
+            manifest["gravity"] = [0.0, 0.0, 0.0]
         d = Path(a.out) / "parity" / f"{a.name}{k}"
         if d.exists():
             shutil.rmtree(d)
-        S.write_event(d / "call", {**ev.manifest, "event_id": c.event_id}, [c], ev.structures)
+        S.write_event(d / "call", manifest, [c], ev.structures)
         b = collate([c], {c.event_id: ev.structures}, cache)
         with torch.no_grad():
             o = model(b)
+        if kick:
+            for n in ("chunk_out", "imp_out"):
+                o[n] = o[n].clone()
+                o[n][:, 0:6] *= 30.0
         dec = D.decode(o, b, dcfg)
         IO.write(d / "decoded.json", IO.decoded_states(b, o, dec, {"checkpoint": str(a.checkpoint)})[0])
         blob, index, off = [], {}, 0
@@ -97,6 +118,8 @@ def extra(argv: list[str]) -> None:
             blob.append(raw + b"\0" * pad)
             off += len(raw) + pad
         (d / "outputs.bin").write_bytes(b"".join(blob))
+        if kick:
+            index["_modified"] = "node heads' first 6 columns x30 (not the model's output)"
         (d / "outputs.json").write_text(json.dumps(index, indent=1))
         print(d, c.counts)
 

@@ -1,0 +1,85 @@
+{
+ "bond_log_r": {
+  "shape": [
+   80
+  ],
+  "offset": 0
+ },
+ "bond_break_logit": {
+  "shape": [
+   80
+  ],
+  "offset": 320
+ },
+ "bond_log_q": {
+  "shape": [
+   80
+  ],
+  "offset": 640
+ },
+ "bond_time_logits": {
+  "shape": [
+   80,
+   8
+  ],
+  "offset": 960
+ },
+ "bond_ddamage": {
+  "shape": [
+   80
+  ],
+  "offset": 3520
+ },
+ "chunk_out": {
+  "shape": [
+   48,
+   12
+  ],
+  "offset": 3840
+ },
+ "imp_out": {
+  "shape": [
+   1,
+   12
+  ],
+  "offset": 6144
+ },
+ "imp_perf_logit": {
+  "shape": [
+   1
+  ],
+  "offset": 6192
+ },
+ "energy_d_bond": {
+  "shape": [
+   1
+  ],
+  "offset": 6208
+ },
+ "energy_frac_joint": {
+  "shape": [
+   1
+  ],
+  "offset": 6224
+ },
+ "energy_e_elastic": {
+  "shape": [
+   1
+  ],
+  "offset": 6240
+ },
+ "energy_ke_loss": {
+  "shape": [
+   1
+  ],
+  "offset": 6256
+ },
+ "latent_global": {
+  "shape": [
+   1,
+   32
+  ],
+  "offset": 6272
+ },
+ "_modified": "node heads' first 6 columns x30 (not the model's output)"
+}
