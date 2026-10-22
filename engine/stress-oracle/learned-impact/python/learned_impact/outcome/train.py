@@ -293,7 +293,8 @@ class Data:
     def __init__(self, dataset: str, include_unrouted: bool = False,
                  val_dataset: str | None = None, train_events: list | None = None,
                  call_cache: dict | None = None, extra_train: str = "",
-                 holdout_ballistic: tuple = (), holdout_tier1: float = 0.0):
+                 holdout_ballistic: tuple = (), holdout_tier1: float = 0.0,
+                 exclude_families: tuple = ()):
         # `dataset` may list several roots, `path[@weight],…`: their training calls are
         # mixed by `MixedSampler` with the given shares of every epoch (default: in
         # proportion to their sizes, i.e. plain concatenation).
@@ -330,6 +331,11 @@ class Data:
             if dup:
                 raise S.SchemaError(f"event ids in both datasets: {sorted(dup)[:5]}")
             self.events = self.events + val_events
+        if exclude_families:  # keep a run's data fixed when a dataset grows (e.g. the v7 seeds)
+            n0 = len(self.events)
+            self.events = [e for e in self.events if e.manifest["family"] not in exclude_families]
+            print(f"[data] {n0 - len(self.events)} events of excluded families {sorted(exclude_families)} left out",
+                  flush=True)
         if holdout_ballistic:
             holdout_ballistic_speeds(self.events, holdout_ballistic)
         if holdout_tier1:
@@ -1135,6 +1141,8 @@ def main(argv=None) -> None:
                     help="the chunks' frame-end hidden state (u, theta, v, w) as a head")
     ap.add_argument("--tiers", default="", help="coverage tiers JSON (outcome.coverage): select on "
                     "validation tiers 1+2, report tier 3 separately")
+    ap.add_argument("--exclude-families", default="", help="comma-separated families left out of "
+                    "every split (to keep a run series' data fixed as a dataset grows)")
     ap.add_argument("--holdout-tier1", type=float, default=0.0,
                     help="hold out about this share of the configurations of every training layout "
                          "with ≥ 3 as tier-1 validation, in memory (e.g. 0.1)")
@@ -1195,7 +1203,8 @@ def main(argv=None) -> None:
                 train_events=_read_list(a.train_events) if a.train_events else None, call_cache=cc,
                 extra_train=a.extra_train,
                 holdout_ballistic=tuple(int(x) for x in a.holdout_ballistic.split(",") if x),
-                holdout_tier1=a.holdout_tier1)
+                holdout_tier1=a.holdout_tier1,
+                exclude_families=tuple(x for x in a.exclude_families.split(",") if x))
     for s in seeds:
         out = Path(a.out) / (f"seed{s}" if len(seeds) > 1 else "")
         cfg = TrainConfig(dataset=dataset, val_dataset=a.val_dataset, out=str(out), steps=a.steps,

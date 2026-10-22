@@ -15,7 +15,7 @@ CK=${1:?checkpoint}; NAME=${2:?round name}
 L=${0:a:h}/..
 ROLL=${DAGGER_ROLLOUT:?P0's rollout wrapper}
 REL=${DAGGER_RELABEL:?P0's relabel binary}
-COLS=${DAGGER_COLUMNS:-/Users/glavin/Development/rubble/.claude/worktrees/learned-impact-p1-data-aa822c/engine/stress-oracle/learned-impact/runs/calls-v5/p1_anchored_wall_t1_00006_s21001_e0/manifest.json}
+COLS=${DAGGER_COLUMNS:?a /5 calls manifest whose full-state columns the relabels use}
 SHARE=${DAGGER_SHARE:-0.15}
 OUT=$L/runs/dagger-rollouts-$NAME
 D=$L/runs/dagger-v5/$NAME

@@ -101,10 +101,12 @@ def run(dataset: str, out: str, sizes: list[int], seeds: list[int], variants: li
         device: str, model_cfg: ModelConfig, pushforward: float = 0.0,
         rereport: bool = False, val_dataset: str | None = None,
         fractions: list[float] | None = None, train_events: list | None = None,
-        call_cache: dict | None = None, kinematic: bool = False, wandb: str = "auto") -> dict:
+        call_cache: dict | None = None, kinematic: bool = False, wandb: str = "auto",
+        exclude_families: tuple = ()) -> dict:
     root = Path(out)
     prog = Progress(root, total=len(sizes) * len(seeds) * len(variants))
-    full = Data(dataset, val_dataset=val_dataset, train_events=train_events, call_cache=call_cache)
+    full = Data(dataset, val_dataset=val_dataset, train_events=train_events, call_cache=call_cache,
+                exclude_families=exclude_families)
     keep = (lambda c: True) if family is None else (lambda c: c.family == family)
     train_groups = sorted({c.split_group for c in full.train if keep(c)})
     if fractions:  # shares of the training layout groups (nested, as for sizes)
@@ -285,6 +287,7 @@ def main(argv=None) -> None:
     ap.add_argument("--break-time-head", action="store_true")
     ap.add_argument("--hidden-head", action="store_true")
     ap.add_argument("--kinematic", action="store_true")
+    ap.add_argument("--exclude-families", default="")
     ap.add_argument("--pushforward", type=float, default=0.0)
     ap.add_argument("--rereport", action="store_true",
                     help="re-score every finished run's best.pt with the current metrics")
@@ -299,7 +302,8 @@ def main(argv=None) -> None:
         a.val_dataset, [float(x) for x in a.fractions.split(",")] if a.fractions else None,
         [x for x in Path(a.train_events).read_text().split() if x] if a.train_events else None,
         {"module": a.call_cache_module, "root": a.call_cache, "builder": a.call_builder,
-         "max_gb": a.cache_gb} if a.train_events else None, a.kinematic, a.wandb)
+         "max_gb": a.cache_gb} if a.train_events else None, a.kinematic, a.wandb,
+        tuple(x for x in a.exclude_families.split(",") if x))
 
 
 if __name__ == "__main__":
