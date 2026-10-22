@@ -139,6 +139,11 @@ fn set_leaf(leaf: &mut Value, x: f64, path: &str) -> Result<(), String> {
 pub fn write_row(v: &mut Value, columns: &[String], row: &[f64]) -> Result<(), String> {
     let mut groups: BTreeMap<&str, Vec<(&str, f64)>> = BTreeMap::new();
     for (c, &x) in columns.iter().zip(row) {
+        // `@`-prefixed columns are not the entity's fields (P1: the world's per-chunk arrays;
+        // a model's informational columns, e.g. `@break_time`): not written.
+        if c.starts_with('@') {
+            continue;
+        }
         match c.split_once('=') {
             Some((p, variant)) => groups.entry(p).or_default().push((variant, x)),
             None => set_leaf(at_mut(v, c)?, x, c)?,
@@ -424,7 +429,12 @@ pub fn island_frame(start: &stress_ref::world::World, m: &stress_ref::world::Isl
     // it either way.
     let keep = !std::env::var("STRESS_FULL_DEFORMATION").is_ok_and(|v| v == "0");
     x.apply_decoded_with(d, keep)?;
-    if let Some(o) = full.iter().find(|o| o.kind == "cluster") {
+    // `STRESS_FULL_BODIES=derive`: bodies derived from the predicted hidden state even when a
+    // body table is sent (the planning session's contract); default: the body table when sent.
+    let derive = std::env::var("STRESS_FULL_BODIES").is_ok_and(|v| v == "derive");
+    let hidden = hidden_states(full)?;
+    let table = full.iter().find(|o| o.kind == "cluster").filter(|_| !(derive && hidden.is_some()));
+    if let Some(o) = table {
         x.set_body_records(&body_records(o)?, &m.chunks)?;
         if !keep {
             // rigid bodies at the model's body records (no hidden state)
@@ -433,8 +443,8 @@ pub fn island_frame(start: &stress_ref::world::World, m: &stress_ref::world::Isl
                 (cs.u, cs.th, cs.v, cs.w) = (stress_ref::math::Vec3::ZERO, stress_ref::math::Vec3::ZERO, stress_ref::math::Vec3::ZERO, stress_ref::math::Vec3::ZERO);
             }
         }
-    } else if let Some(h) = hidden_states(full)? {
-        x.derive_bodies(&h, &m.chunks)?;
+    } else if let Some(h) = &hidden {
+        x.derive_bodies(h, &m.chunks)?;
     }
     let decoded = x.extract_island(m);
     let base = match base {
@@ -445,7 +455,9 @@ pub fn island_frame(start: &stress_ref::world::World, m: &stress_ref::world::Isl
         }
         Base::Native => stress_ref::world::oracle_island_step(start, m)?,
     };
-    apply_full_with(&decoded, &base, full, ids_from_base)
+    // a body table derived over is not the island's
+    let used: Vec<FullOut> = full.iter().filter(|o| o.kind != "cluster" || table.is_some()).cloned().collect();
+    apply_full_with(&decoded, &base, &used, ids_from_base)
 }
 
 /// The oracle's own outcome of the island's frame as a decoded state `/2` (its `/1` decode
