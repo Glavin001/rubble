@@ -75,10 +75,10 @@ and the loss curves on fixed train/val samples; the final best/τ/temperature as
 is `offline` when wandb is installed: runs are written under `<run dir>/wandb/` with no
 network and no login. Tracking never stops a run (a W&B error turns it off with one warning).
 Runs that predate tracking: `python -m learned_impact.wandb_backfill <run dir or dir of runs> ...`
-(skips runs already tracked or backfilled). To upload, once:
+(skips runs already tracked or backfilled). To upload, once, from `learned-impact/`:
 
-    wandb login                       # W&B's own prompt; nothing here reads the key
-    wandb sync ../runs/*/wandb/offline-run-* ../runs/*/*/wandb/offline-run-* ../runs/*/*/*/wandb/offline-run-*
+    python/.venv/bin/wandb login      # W&B's own prompt; nothing here reads the key
+    find runs -type d -name 'offline-run-*' -prune -exec python/.venv/bin/wandb sync {} +
 
 and pass `--wandb online` from then on (or set `LEARNED_IMPACT_WANDB=online` for runs started
 by scripts, e.g. `scripts/viability.sh`, which keep the `auto` default).
