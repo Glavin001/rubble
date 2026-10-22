@@ -80,6 +80,10 @@ fn a_live_call_equals_the_recorded_call_of_the_same_state() {
             }
             assert_eq!(lc.scales, rec.scales, "frame {f}: scales");
             assert_eq!(lc.counts, rec.counts, "frame {f}: counts");
+            // The inputs among the energies (the decode's envelope reads them) are the recorded ones.
+            for k in ["KE_in", "E_elastic_start"] {
+                assert_eq!(lc.energy.get(k).map(|x| x.to_bits()), rec.energy.get(k).map(|x| x.to_bits()), "frame {f}: energy {k}");
+            }
             checked += 1;
         }
         w.solver.reset_peak_utilizations();
