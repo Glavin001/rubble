@@ -108,6 +108,27 @@ bulk-w32 checkpoint.
 - **Rerun:** `runs/cl-eval-a2`, with a pinned revision-5 build (`bin/learned_p0.cl14-rev5`):
   /3 checkpoints need /3 inputs, and revision 6 changed /3-era features.
 
+## P2's bulk-w32 (/3) in harness A, with the peak fix
+
+`runs/cl-eval-a2/report.md`: same ensembles; pinned revision-5 build. Columns are ram,
+partition, regime agree, KE ok:
+
+| Candidate | anchored | free |
+|---|---|---|
+| held-out oracle member | 91%, 88%, -, - | 100%, 92%, -, - |
+| `a_model` | 27%, 25%, 52%, 67% | 28%, 20%, 41%, 72% |
+| `a_model_def` | 27%, 2%, 57%, 64% | 16%, 12%, 66%, 80% |
+
+- **Far from the bar on every metric.** A third of the runs gain kinetic energy beyond the 5%
+  tolerance.
+- **Carrying deformation makes it worse.** The checkpoint never saw the deformation, so it
+  reads off-distribution inputs.
+- **The ceilings are unchanged** (see above): the gap is the model, not harness A.
+- **Memorisation check** (P2's n10 on its own 10 training events, `runs/cl-eval-a-n10`): 6 of
+  10 land near the oracle, and 3 diverge in the closed loop although every single call is
+  memorised. That is the case for DAgger on the rollout's own states, round 1 of which is
+  running at P2.
+
 ## DAgger relabel (P2)
 
 `stress_learned::relabel` and `learned_impact_relabel` take a job (event, frame, and one of
