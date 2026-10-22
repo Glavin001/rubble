@@ -78,6 +78,68 @@ Full-contract models will return `IslandState` directly, in P1's full-state form
 it's fixed. First run: `runs/cl-eval-a`, on the 16 bulk validation ensembles with P2's
 bulk-w32 checkpoint.
 
+## Harness A ceilings on the bulk validation ensembles
+
+`runs/cl-eval-a-ceilings/report.md`: 16 ensembles, 128 members, gates-v1 / v1.1.
+
+| Candidate | anchored v1 / v1.1 | free v1 / v1.1 |
+|---|---|---|
+| `a_ceiling`: the oracle's island step through the provider | yes / yes | yes / yes |
+| `a_ceiling_decoded`: a perfect /3 model, the oracle's outcome through the decoded state | no / no (all 7 metrics) | no / no (ram, motion) |
+| `a_ceiling_def`: /3 plus the carried deformation | no / no (motion_v_0.1 91% vs 95%, motion_v_0.5 94% vs 97%) | yes / no (ram only, at the bar) |
+
+- **Even a perfect /3 model fails harness A.** The carried deformation closes most of the
+  free-wall gap but not the anchored one.
+- **So the full-state contract (/5) is necessary.**
+
+## Harness A's per-frame peak utilisation (fixed, a2681fa2)
+
+- **The bug:** harness A never reset the bonds' per-frame peak utilisation. A model call's
+  `log1p_peak_util_prev` then read a running maximum over the event, not the previous frame's
+  peak as recorded.
+- **Scope:** physics never reads it, so the oracle and every `a_ceiling*` column are
+  unaffected. The `a_model*` runs in `runs/cl-eval-a` were biased, and that run was stopped at
+  475/640.
+- **The fix:** `step_frame_island_provider` and `oracle_island_step` reset it after the
+  provider reads the frame start, which is the recorder's order. `harness_a.rs` checks it
+  equals the recorder-order native run.
+- **What islands read now:** an island under a decoded state reads 0 at its next call, because
+  the decoded state carries no peak. This matches the coupled closed loop.
+- **Rerun:** `runs/cl-eval-a2`, with a pinned revision-5 build (`bin/learned_p0.cl14-rev5`):
+  /3 checkpoints need /3 inputs, and revision 6 changed /3-era features.
+
+## DAgger relabel (P2)
+
+`stress_learned::relabel` and `learned_impact_relabel` take a job (event, frame, and one of
+the island's own state, an exact `IslandState`, or a model's decoded state).
+
+**What it returns:**
+- the oracle's frame-end `IslandState`;
+- the call (`learned-impact-outcome/4`): inputs from that start, targets from the oracle's
+  frame, captured by the recorder's own code (`outcome::oracle_frame`, now shared);
+- `dagger` provenance in the manifest.
+
+**Tests and checks:**
+- **Round trip:** a relabel of the oracle's own state is bit-identical.
+- **Against the recorder:** an own-state relabel is the recorder's call bit for bit, inputs and
+  targets. This holds on a fresh recording (test) and on P1's calls-v4-eval. The exceptions:
+  - `y_impactor_regime` is -1: the event-level regime, unknown to one frame;
+  - there is no punch baseline.
+- P2's validator accepts the records.
+
+**Cost:** about 1 s per relabel for 40–150-chunk islands, plus one replay of the parent event,
+which an event's jobs share.
+
+## Comparison videos
+
+`runs/videos-2026-10-22/` (`learned_impact.compare_videos`; stress-viz engines `a_learned` and
+`qs`):
+- **What each shows:** oracle | the model in harness A | QS, with a broken-bonds chart, for the
+  M5 free wall, the M5 wall row, an anchored wall under gravity, a corner hit, four rams, a
+  ballistic-limit pair, and a bulk validation event.
+- **Check:** each oracle panel reproduces P1's record (pieces and exit speeds, 8/8).
+- **First set:** P2's bulk-w32 (/3), read in that folder's `index.md`.
+
 ## Parked: the coupled reference (rubble plus the oracle's island step), for later
 
 - **Interface:** `World::step_frame_with_frame_provider` puts the coupled frame's island
