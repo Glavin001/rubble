@@ -214,3 +214,20 @@ fn a_fifth_of_first_impactors_are_sub_threshold() {
         }
     }
 }
+
+#[test]
+fn the_sealed_extrapolation_splits_lie_beyond_the_training_ranges() {
+    use stress_learned::procedural::{with_splits_and_ensembles, EnsemblePlan};
+    let speed = wall_recipes("free_wall", 1, 12, 3, &Ranges::extrapolation("speed").unwrap()).unwrap();
+    assert!(speed.iter().all(|r| (60.0..=90.0).contains(&r.parameters["impactors"][0]["speed"].as_f64().unwrap())));
+    let loads = wall_recipes("anchored_wall", 2, 6, 3, &Ranges::extrapolation("loads").unwrap()).unwrap();
+    assert!(loads.iter().all(|r| (5..=8).contains(&r.scene.impactors.len())));
+    let mass = wall_recipes("free_wall", 1, 6, 3, &Ranges::extrapolation("mass").unwrap()).unwrap();
+    assert!(mass.iter().all(|r| r.scene.impactors[0].mass >= 1500.0));
+    let size = wall_recipes("free_wall", 1, 4, 3, &Ranges::extrapolation("size").unwrap()).unwrap();
+    assert!(size.iter().all(|r| r.parameters["layout"]["counts"][0].as_u64().unwrap() >= 16));
+    assert!(Ranges::extrapolation("colour").is_err());
+    let sealed = with_splits_and_ensembles(speed, &EnsemblePlan { force_split: Some("sealed".into()), ..EnsemblePlan::default() });
+    assert_eq!(sealed.len(), 12 * 8, "every sealed configuration is an 8-member ensemble");
+    assert!(sealed.iter().all(|r| r.parameters["split"] == "sealed" && r.parameters["extrapolation"] == "speed"));
+}
