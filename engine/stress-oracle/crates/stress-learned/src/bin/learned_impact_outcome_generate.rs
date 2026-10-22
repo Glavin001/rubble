@@ -4,7 +4,7 @@
 //!       [--family free_wall|anchored_wall] [--tier 1|2] [--n N] [--seed S] [--ranges pilot|bulk]
 //!       [--oracle a12_realtime] [--jobs N] [--limit N] [--plan-only] [--no-baselines]
 //!       [--max-seconds S] [--max-failure-fraction F] [--pause-file PATH]
-//!       [--members M] [--ensemble-train-share F] [--no-ensembles] [--fractions T,V,S] [--split-seed S]
+//!       [--members M] [--ensemble-train-share F] [--no-ensembles] [--fractions T,V,S] [--split-seed S] [--only-split S]
 //!       [--budget-gb G] [--min-free-gb F] [--thin]
 //!       [--split sealed|train|val|test] [--extrapolation speed|mass|size|loads] [--corner-share F]
 //!
@@ -127,6 +127,11 @@ fn main() {
         plan.members = 1;
     }
     let mut recipes = with_splits_and_ensembles(recipes, &plan);
+    if let Some(only) = val("--only-split") {
+        // Keep the recipes the split hash sends to `only` (more evaluation configurations
+        // without moving any layout out of its split).
+        recipes.retain(|r| r.parameters["split"].as_str() == Some(only.as_str()));
+    }
     if let Some(n) = val("--limit") {
         recipes.truncate(n.parse().expect("--limit"));
     }
