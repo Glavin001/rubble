@@ -426,6 +426,13 @@ pub fn island_frame(start: &stress_ref::world::World, m: &stress_ref::world::Isl
     x.apply_decoded_with(d, keep)?;
     if let Some(o) = full.iter().find(|o| o.kind == "cluster") {
         x.set_body_records(&body_records(o)?, &m.chunks)?;
+        if !keep {
+            // rigid bodies at the model's body records (no hidden state)
+            for &(s, c) in &m.chunks {
+                let cs = &mut x.solver.chunks[s][c];
+                (cs.u, cs.th, cs.v, cs.w) = (stress_ref::math::Vec3::ZERO, stress_ref::math::Vec3::ZERO, stress_ref::math::Vec3::ZERO, stress_ref::math::Vec3::ZERO);
+            }
+        }
     } else if let Some(h) = hidden_states(full)? {
         x.derive_bodies(&h, &m.chunks)?;
     }
