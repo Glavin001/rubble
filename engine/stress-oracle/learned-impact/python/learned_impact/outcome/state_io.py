@@ -176,10 +176,7 @@ def _full_state_out(c: S.Call, out: dict, broke, damage, b_rows, c_rows, ke_out:
         # errors are relative to the failure elongation u_c, the structural guard.
         rx = np.concatenate([rx, hid], 1)
         ccols += list(FS.HIDDEN_NAMES)
-    if "bond_break_frac" in out and len(keys):  # when within the frame each broken bond broke
-        bt = out["bond_break_frac"].detach().cpu().numpy()[b_rows].astype(np.float64) * dt
-        table = np.concatenate([table, np.where(broke, bt, np.nan)[:, None]], 1)
-        cols = cols + ["@break_time"]
+    # when within the frame each broken bond broke: bonds_broken[].time (not a table column)
     return {"bond": {"keys": keys.tolist(), "columns": cols,
                      "values": [[float(x) for x in row] for row in table]},
             "chunk": {"keys": a["chunk_key"].astype(np.int64).tolist(), "columns": ccols,
