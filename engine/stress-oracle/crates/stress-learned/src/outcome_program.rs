@@ -142,6 +142,10 @@ pub struct OutputLayout {
     pub n_time_bins: usize,
     /// Per call: chunks, impactors, bonds (the batch's rows are in call order).
     pub calls: Vec<(usize, usize, usize)>,
+    /// `ModelConfig::monotone_margin`, and every bond's raw frame-start failure margin (in
+    /// batch order) for its map of the head's raw output.
+    pub monotone_margin: bool,
+    pub fail_margins: Vec<f32>,
 }
 
 /// One call's forward pass as ops over the three buffers.
@@ -881,7 +885,16 @@ pub fn compile_batch(model: &Model, calls: &[BatchCall]) -> Result<Program, Stri
         b.table.push(0);
     }
     let nb_of: Vec<usize> = (0..ng).map(|k| bond_call.iter().filter(|&&c| c as usize == k).count()).collect();
-    let layout = OutputLayout { nb, nc, ni, bond, chunk, imp, energy, glob: g, width: w, n_time_bins: nt, calls: (0..ng).map(|k| (ncs[k], nis[k], nb_of[k])).collect() };
+    let fail_margins = if cfg.monotone_margin {
+        let mut v = Vec::new();
+        for &(ev, _, ci) in calls {
+            v.extend(crate::outcome_model::bond_fail_margins(ev, &ev.calls[ci])?);
+        }
+        v
+    } else {
+        Vec::new()
+    };
+    let layout = OutputLayout { nb, nc, ni, bond, chunk, imp, energy, glob: g, width: w, n_time_bins: nt, calls: (0..ng).map(|k| (ncs[k], nis[k], nb_of[k])).collect(), monotone_margin: cfg.monotone_margin, fail_margins };
     Ok(Program { arena: b.arena, weights: b.weights, table: b.table, ops: b.ops, layout })
 }
 
@@ -1073,7 +1086,7 @@ impl Program {
         Outputs {
             bond_log_r: col(0),
             bond_break_logit: col(1),
-            bond_log_q: col(3),
+            bond_log_q: col(3).into_iter().enumerate().map(|(r, x)| crate::outcome_model::bond_log_q(l.monotone_margin, x, l.fail_margins.get(b0 + r).copied().unwrap_or(1.0))).collect(),
             bond_time_logits: times,
             bond_ddamage: col(2).into_iter().map(softplus).collect(),
             chunk_out: Mat { rows: nc, cols: NODE_OUT, d: a[chunk..chunk + nc * NODE_OUT].to_vec() },

@@ -233,3 +233,31 @@ fn a_batch_program_gives_every_call_its_own_outputs() {
         }
     }
 }
+
+/// P2's monotone failure margin (2429f4e7): `log q = ln(max(q0, 1e-4)) + softplus(raw − 2)`,
+/// q0 the bond's raw frame-start margin. The reference and the GPU program apply it alike
+/// (forced on for the fixture's weights; PyTorch parity waits for an export with the flag).
+#[test]
+fn the_monotone_margin_head_is_applied_alike_by_the_reference_and_the_program() {
+    use stress_learned::outcome_model::{bond_fail_margins, bond_log_q, softplus};
+    assert!((bond_log_q(true, 2.0, 0.5) - (0.5f32.ln() + softplus(0.0))).abs() < 1e-7);
+    assert!((bond_log_q(true, 0.0, 0.0) - (1e-4f32.ln() + softplus(-2.0))).abs() < 1e-6);
+    let w = Weights::load(&fixture()).unwrap();
+    let mut model = Model::new(&w, Options { node_projection: true, tiled_mlp: false, fused_sums: false }).unwrap();
+    model.config.monotone_margin = true;
+    let plain = Model::new(&w, Options { node_projection: true, tiled_mlp: false, fused_sums: false }).unwrap();
+    for dir in parity_dirs().into_iter().filter(|d| !torch_outputs(d).1).take(4) {
+        let ev = read_event(&dir.join("call")).unwrap();
+        let hier = structure_hierarchies(&ev, model.config.levels);
+        let raw = plain.forward(&ev, &hier, 0).unwrap();
+        let mono = model.forward(&ev, &hier, 0).unwrap();
+        let q0 = bond_fail_margins(&ev, &ev.calls[0]).unwrap();
+        for (k, (&r, &m)) in raw.bond_log_q.iter().zip(&mono.bond_log_q).enumerate() {
+            assert!((m - bond_log_q(true, r, q0[k])).abs() < 1e-6);
+            assert!(m >= q0[k].max(1e-4).ln(), "a survivor's margin never falls");
+        }
+        let prog = compile(&model, &ev, &hier, 0).unwrap();
+        let got = prog.outputs(&prog.run_cpu());
+        assert!(worst(&got.bond_log_q, &mono.bond_log_q) < 1e-5);
+    }
+}

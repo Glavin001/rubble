@@ -194,6 +194,23 @@ pub(crate) fn idx_of(a: &Arr) -> Result<Vec<usize>, String> {
     }
 }
 
+/// The bond head's log failure margin from its raw output (`ModelConfig::monotone_margin`).
+pub fn bond_log_q(monotone: bool, raw: f32, q0: f32) -> f32 {
+    if monotone {
+        q0.max(1e-4).ln() + softplus(raw - 2.0)
+    } else {
+        raw
+    }
+}
+
+/// Each undirected bond's raw frame-start failure margin (`bond_feat` "fail_margin", the
+/// even rows), for `bond_log_q`.
+pub fn bond_fail_margins(ev: &CallEvent, call: &Call) -> Result<Vec<f32>, String> {
+    let col = ev.manifest["columns"]["bond_feat"].as_array().and_then(|c| c.iter().position(|x| x.as_str() == Some("fail_margin"))).unwrap_or(19);
+    let f = mat_of(call.array("bond_feat").ok_or("no bond_feat")?)?;
+    Ok((0..f.rows / 2).map(|k| f.d[2 * k * f.cols + col]).collect())
+}
+
 fn silu(x: f32) -> f32 {
     x / (1.0 + (-x).exp())
 }
@@ -320,6 +337,10 @@ pub struct ModelConfig {
     pub use_global: bool,
     pub input_norm: bool,
     pub edge_types: Vec<String>,
+    /// P2's 2429f4e7: `log q = ln(max(q0, 1e-4)) + softplus(raw − 2)` with `q0` the bond's
+    /// raw frame-start failure margin (`bond_feat` "fail_margin"): a survivor's margin never
+    /// falls within a frame (κ is a running maximum). Absent: `log q = raw`.
+    pub monotone_margin: bool,
 }
 
 /// A loaded `learned-impact-weights/1` export.
@@ -355,6 +376,7 @@ impl Weights {
             use_global: c["use_global"].as_bool().unwrap_or(true),
             input_norm: c["input_norm"].as_bool().unwrap_or(true),
             edge_types: c["edge_types"].as_array().ok_or("model_config.edge_types")?.iter().map(|x| x.as_str().unwrap_or("").to_string()).collect(),
+            monotone_margin: c["monotone_margin"].as_bool().unwrap_or(false),
         };
         if config.rounds.len() != 2 * config.levels + 1 {
             return Err(format!("rounds {:?} need {} stages", config.rounds, 2 * config.levels + 1));
@@ -1098,11 +1120,12 @@ impl Model {
             h = h2;
             g = g2;
         }
-        self.heads(call, &h, &e, &g, &edges, nc, ni)
+        let q0 = if cfg.monotone_margin { bond_fail_margins(ev, call)? } else { Vec::new() };
+        self.heads(call, &h, &e, &g, &edges, nc, ni, &q0)
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn heads(&self, call: &Call, h: &Mat, e: &[Mat], g: &Mat, edges: &[(Vec<usize>, Vec<usize>)], nc: usize, ni: usize) -> Result<Outputs, String> {
+    fn heads(&self, call: &Call, h: &Mat, e: &[Mat], g: &Mat, edges: &[(Vec<usize>, Vec<usize>)], nc: usize, ni: usize, q0: &[f32]) -> Result<Outputs, String> {
         let cfg = &self.config;
         let nt = cfg.n_time_bins;
         let w = cfg.width;
@@ -1154,7 +1177,7 @@ impl Model {
         Ok(Outputs {
             bond_log_r: log_r,
             bond_break_logit: col(1),
-            bond_log_q: col(3),
+            bond_log_q: col(3).into_iter().enumerate().map(|(k, x)| bond_log_q(cfg.monotone_margin, x, q0.get(k).copied().unwrap_or(1.0))).collect(),
             bond_time_logits: times,
             bond_ddamage: col(2).into_iter().map(softplus).collect(),
             chunk_out: c_out,
