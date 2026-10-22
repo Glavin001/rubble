@@ -137,6 +137,12 @@ fine-tune to saturation (10k steps) on all relabels so far before each rollout
   - The principled route is the Rust builder itself, which DAgger also needs (P0's oracle
     island relabel, requested). So the GPU-rebuild work is deferred until that path exists.
   - The topology gate (eb1bde07) already prevents contradictory labels.
+- **Viability moves to `/5` (05:35, superseding the next item).**
+  - P1's `/5` viability recording stops on the disk budget unless the `/4` calls go. Viability
+    is defined on the full contract, and `/4` was only the interim.
+  - So `/4` is freed, except for a local copy of the 10 overfit events for the DAgger
+    demonstration.
+  - Viability runs with `--full-state` on chunk A of `calls-v5` when P1 marks it complete.
 - **Viability runs use calls `/4`** (hidden deformation inputs, full inertia) as soon as P1's
   `/4` training set completes, and are repeated on `/5` when the full-state data lands. `/4`
   is the closest available contract.
