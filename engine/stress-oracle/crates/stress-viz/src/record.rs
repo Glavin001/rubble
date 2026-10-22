@@ -118,6 +118,8 @@ pub struct RecordOptions {
     /// `Engine::Learned`: the model's checkpoint and device (`cpu` | `mps`).
     pub checkpoint: Option<std::path::PathBuf>,
     pub model_device: String,
+    /// The model's Python package directory with its `.venv` (default: this checkout's).
+    pub model_python: Option<std::path::PathBuf>,
 }
 
 /// Which rigid-body engine moves the bodies: the standalone world's own (the oracle) or
@@ -132,12 +134,18 @@ pub enum Engine {
     /// The same handoff with the oracle as the model (P0's boundary ceiling, the "perfect
     /// model"): what the learned model would give if it were exact.
     Ceiling,
+    /// Harness A: the standalone oracle with every routed island's frame from the learned
+    /// model (`World::step_frame_island_provider`; the model's decoded state applied to the
+    /// island on a copy of the frame-start world, as `learned_p0 --host a`).
+    ALearned,
+    /// The CPU `blast_parity` profile (quasi-static stress, P1's QS baseline), standalone.
+    Qs,
 }
 
 impl Engine {
     /// The routed islands' frames come from a provider at the 1/60 s call boundary.
     pub fn model_coupled(self) -> bool {
-        matches!(self, Engine::Learned | Engine::Ceiling)
+        matches!(self, Engine::Learned | Engine::Ceiling | Engine::ALearned)
     }
 }
 
@@ -150,8 +158,10 @@ impl std::str::FromStr for Engine {
             "rubble" => Err("engine rubble: build stress-viz with --features rubble".into()),
             "learned" | "model" if cfg!(feature = "learned") => Ok(Engine::Learned),
             "ceiling" if cfg!(feature = "learned") => Ok(Engine::Ceiling),
-            "learned" | "model" | "ceiling" => Err(format!("engine {s}: build stress-viz with --features learned")),
-            other => Err(format!("unknown engine '{other}' (standalone | rubble | learned | ceiling)")),
+            "a_learned" | "harness_a" if cfg!(feature = "learned") => Ok(Engine::ALearned),
+            "learned" | "model" | "ceiling" | "a_learned" | "harness_a" => Err(format!("engine {s}: build stress-viz with --features learned")),
+            "qs" | "blast_parity" => Ok(Engine::Qs),
+            other => Err(format!("unknown engine '{other}' (standalone | rubble | learned | ceiling | a_learned | qs)")),
         }
     }
 }
@@ -163,7 +173,14 @@ pub fn new_world(scene: &Scene, engine: Engine) -> World {
 /// The world for `scene` with `engine` as its rigid-body engine.
 pub fn try_new_world(scene: &Scene, engine: Engine) -> Result<World, String> {
     match engine {
-        Engine::Standalone => Ok(World::new(scene)),
+        Engine::Standalone | Engine::ALearned => Ok(World::new(scene)),
+        Engine::Qs => {
+            let mut s = scene.clone();
+            stress_ref::capability::Profile::BlastParity.apply_scene(&mut s);
+            let mut w = World::new(&s);
+            stress_ref::capability::Profile::BlastParity.apply_config(&mut w.solver.config);
+            Ok(w)
+        }
         #[cfg(feature = "rubble")]
         Engine::Rubble => {
             use stress_ref::scene::SolveMode;
@@ -321,10 +338,13 @@ struct FrameStepper {
 impl FrameStepper {
     fn new(scene: &Scene, opts: &RecordOptions) -> FrameStepper {
         #[cfg(feature = "learned")]
-        let model = (opts.engine == Engine::Learned).then(|| {
+        let model = matches!(opts.engine, Engine::Learned | Engine::ALearned).then(|| {
             let ckpt = opts.checkpoint.clone().expect("engine learned needs --checkpoint");
             let mut spec = stress_learned::provider_client::ModelSpec::new(ckpt);
             spec.device = opts.model_device.clone();
+            if let Some(d) = &opts.model_python {
+                spec.python_dir = d.clone();
+            }
             let dir = std::env::temp_dir().join(format!("stress-viz-model-{}-{}", std::process::id(), opts.label.replace(['/', ' ', ':'], "_")));
             stress_learned::provider_client::ModelProvider::spawn(&spec, &dir, &scene.name).unwrap_or_else(|e| panic!("model provider: {e}"))
         });
@@ -360,7 +380,31 @@ impl FrameStepper {
                     _ => model.as_mut().expect("model").outcome(view, keys, frame),
                 }
             };
-            let keys = world.step_frame_with_provider(&mut provider).unwrap_or_else(|e| panic!("frame {frame}: {e}"));
+            let keys = if engine == Engine::ALearned {
+                let mut a_provider = |start: &World, m: &stress_ref::world::IslandMembers| -> Result<stress_ref::world::IslandState, String> {
+                    // The island's view (every other body driven) for the call, the decoded
+                    // state applied on a copy of the frame-start world, the island's state taken.
+                    let mut view = start.clone();
+                    let island: std::collections::HashSet<u64> =
+                        view.solver.clusters.iter().filter(|c| c.chunks.first().is_some_and(|&k| m.chunks.contains(&(c.structure, k)))).map(|c| c.id).collect();
+                    for cl in &mut view.solver.clusters {
+                        cl.driven = !island.contains(&cl.id);
+                    }
+                    for (i, imp) in view.impactors.iter_mut().enumerate() {
+                        imp.driven = !m.impactors.contains(&i);
+                    }
+                    let keys = view.routed_island_keys();
+                    let d = provider(&view, &keys)?;
+                    let mut x = start.clone();
+                    x.solver.reset_peak_utilizations();
+                    x.apply_decoded(&d)?;
+                    Ok(x.extract_island(m))
+                };
+                let m = world.step_frame_island_provider(&mut a_provider).unwrap_or_else(|e| panic!("frame {frame}: {e}"));
+                stress_ref::world::IslandKeys { chunks: m.chunks.iter().map(|&(s, c)| stress_ref::world::stable_key(s, c)).collect(), impactors: m.impactors.iter().map(|&i| i as i64).collect(), ..Default::default() }
+            } else {
+                world.step_frame_with_provider(&mut provider).unwrap_or_else(|e| panic!("frame {frame}: {e}"))
+            };
             if !keys.chunks.is_empty() || !keys.impactors.is_empty() {
                 self.calls += 1;
                 self.call_ms += t.elapsed().as_secs_f64() * 1e3;
@@ -402,6 +446,19 @@ pub fn record(scene: &Scene, opts: &RecordOptions) -> Recording {
     if stepper.engine.model_coupled() && !opts.label.is_empty() {
         eprintln!("{}: {} model calls, {:.0} ms per frame with a call (call record + model + apply)",
                   opts.label, stepper.calls, stepper.call_ms / stepper.calls.max(1) as f64);
+    }
+    if !opts.label.is_empty() {
+        // One machine-readable line per run (for the comparison videos' index).
+        let speeds: Vec<String> = world.impactors.iter().map(|i| format!("{:.4}", i.velocity.norm())).collect();
+        eprintln!(
+            "stress-viz summary: {{\"label\": {:?}, \"t\": {:.6}, \"broken_bonds\": {}, \"pieces\": {}, \"impactor_speeds\": [{}], \"wall_s\": {:.1}}}",
+            opts.label,
+            world.solver.time,
+            world.solver.broken_bond_count(),
+            world.solver.clusters.len(),
+            speeds.join(", "),
+            start.elapsed().as_secs_f64()
+        );
     }
     let obs = world.observation();
     let probes = scene

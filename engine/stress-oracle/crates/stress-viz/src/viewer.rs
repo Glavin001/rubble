@@ -65,6 +65,8 @@ fn engine_label(e: Engine) -> &'static str {
         Engine::Rubble => "rubble AVBD GPU (stress solve owns impact islands)",
         Engine::Learned => "learned impact-outcome model (closed loop)",
         Engine::Ceiling => "oracle through the model's handoff (ceiling)",
+        Engine::ALearned => "harness A: the oracle, routed islands from the learned model",
+        Engine::Qs => "CPU blast_parity (quasi-static stress)",
     }
 }
 

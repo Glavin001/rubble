@@ -76,9 +76,13 @@ options:
                           rubble (rubble's AVBD GPU engine; cargo feature `rubble`) |
                           learned (rubble's engine, each routed island's 1/60 s frame from
                           the learned model, closed loop; cargo feature `learned`) |
-                          ceiling (the same handoff with the oracle as the model)
+                          ceiling (the same handoff with the oracle as the model) |
+                          a_learned (harness A: the standalone oracle, each routed island's
+                          frame from the learned model) | qs (CPU blast_parity, standalone)
   --checkpoint PATH       (engine learned) the model checkpoint (runs/<job>/best.pt)
   --model-device NAME     (engine learned) cpu (default) | mps
+  --model-python DIR      (engine learned) the model's Python package with its .venv
+                          (default: this checkout's learned-impact/python)
   --duration S            simulated time (default: the scene's sim.duration)
   --frame-dt S            simulation frame (default: the scene's, refined to --min-frames)
   --every K               render every K-th simulated frame (default: fit --max-frames)
@@ -123,6 +127,7 @@ struct Args {
     /// `engine learned`: the model checkpoint and its device.
     checkpoint: Option<PathBuf>,
     model_device: String,
+    model_python: Option<PathBuf>,
     duration: Option<f64>,
     frame_dt: Option<f64>,
     every: Option<usize>,
@@ -215,6 +220,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
         engine: record::Engine::Standalone,
         checkpoint: None,
         model_device: "cpu".into(),
+        model_python: None,
         duration: None,
         frame_dt: None,
         every: None,
@@ -254,6 +260,7 @@ fn parse_args(raw: Vec<String>) -> Result<Args, String> {
             "--engine" => a.engine = value()?.parse()?,
             "--checkpoint" => a.checkpoint = Some(PathBuf::from(value()?)),
             "--model-device" => a.model_device = value()?,
+            "--model-python" => a.model_python = Some(PathBuf::from(value()?)),
             "--duration" => a.duration = Some(parse_num(&flag, &value()?)?),
             "--frame-dt" => a.frame_dt = Some(parse_num(&flag, &value()?)?),
             "--every" => a.every = Some(parse_num::<usize>(&flag, &value()?)?.max(1)),
@@ -462,7 +469,7 @@ fn record_all(scenes: &[(String, Scene)], a: &Args, until: Option<f64>) -> Resul
         }
         timing.frame_dt = base.sim.frame_dt;
         timing.every = a.every.unwrap_or(1);
-        if engines.contains(&record::Engine::Learned) && a.checkpoint.is_none() {
+        if engines.iter().any(|e| matches!(e, record::Engine::Learned | record::Engine::ALearned)) && a.checkpoint.is_none() {
             return Err("engine learned needs --checkpoint PATH".into());
         }
     }
@@ -475,7 +482,7 @@ fn record_all(scenes: &[(String, Scene)], a: &Args, until: Option<f64>) -> Resul
                     let mut scene = scene.clone();
                     scene.sim.frame_dt = timing.frame_dt;
                     let opts = RecordOptions { every: timing.every, duration: timing.duration, label: label.clone(), engine,
-                                               checkpoint: a.checkpoint.clone(), model_device: a.model_device.clone() };
+                                               checkpoint: a.checkpoint.clone(), model_device: a.model_device.clone(), model_python: a.model_python.clone() };
                     *slot = Some(record::record(&scene, &opts));
                 });
             }
