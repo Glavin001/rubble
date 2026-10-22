@@ -74,6 +74,7 @@ static const uint NONE = 0xffffffffu;
 static const uint ST_DISCONNECTED = 1;
 static const uint ST_ISLANDS = 16;
 static const uint DISCONNECTED_BIT = 8;
+static const uint LEARNED_BIT = 4096;
 static const uint MAX_CHUNKS = 4096;
 static const uint G = 256;
 
@@ -103,6 +104,14 @@ void punch_islands(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     // earlier pass's split bits are left to the split pass (its parents are laid out).
     // (Exits, loop bounds and stops as uniform values below: barriers follow.)
     if (group_uniform(asuint(fast[0].y), t) == 0)
+    {
+        if (t == 0)
+            status[ST_ISLANDS + i] &= ~DISCONNECTED_BIT;
+        return;
+    }
+    // A learned impact call took the island this frame (`STRESS_IMPACT_PUNCH=learned`,
+    // learned.slang `LEARNED_BIT`): not punched. Never set otherwise.
+    if (group_uniform(status[ST_ISLANDS + i] & LEARNED_BIT, t) != 0)
     {
         if (t == 0)
             status[ST_ISLANDS + i] &= ~DISCONNECTED_BIT;

@@ -79,14 +79,14 @@ impl GpuWorld {
         }
         // Routed (M5): unless the last frame's check found a possible island seed; with the
         // GPU's punch (`STRESS_IMPACT_PUNCH=gpu`) every frame (no island is run).
-        self.routed_resident && (crate::routing::punch_gpu() || !self.route_next) && self.promoted.is_empty()
+        self.routed_resident && (crate::routing::punch_or_learned() || !self.route_next) && self.promoted.is_empty()
     }
 
     /// The routed frame's check, made and given this frame's impactors (engine body and
     /// bounding radius each) when the tiered coupling runs.
-    fn prepare_routing(&mut self, gpu: &Gpu) {
+    fn prepare_routing(&mut self, gpu: &Gpu) -> Result<(), String> {
         if !self.tiered {
-            return;
+            return Ok(());
         }
         let engine = self.resident_engine.clone().expect("resident engine");
         let e = engine.borrow();
@@ -105,7 +105,7 @@ impl GpuWorld {
                 Some((slot, (1.01 * r + 1e-3) as f32))
             })
             .collect();
-        let punch_list: Vec<(u32, f32, f32, f32, f32)> = if crate::routing::punch_gpu() {
+        let punch_list: Vec<(u32, f32, f32, f32, f32)> = if crate::routing::punch_or_learned() {
             let scale = self.scene.sim.stiffness_scale;
             self.solver
                 .impactors
@@ -122,13 +122,51 @@ impl GpuWorld {
         } else {
             Vec::new()
         };
+        // The learned call batch's impactors (`STRESS_IMPACT_PUNCH=learned`).
+        let learned_list: Vec<crate::learned::ImpactorInfo> = if crate::routing::learned_impact() {
+            self.solver
+                .impactors
+                .iter()
+                .enumerate()
+                .filter_map(|(i, imp)| {
+                    let slot = e.body_slot(BodyKey::Impactor(i))?;
+                    let p = punch_list.iter().find(|p| p.0 == slot)?;
+                    let half = match imp.shape {
+                        stress_ref::scene::ImpactorShape::Box { half_extents } => stress_ref::math::Vec3::from_array(half_extents).norm(),
+                        stress_ref::scene::ImpactorShape::Sphere { radius } => radius,
+                    };
+                    let m = &imp.inertia.m;
+                    Some(crate::learned::ImpactorInfo { body: slot, bound: p.1, face: p.2, mass: p.3, inertia: [m[0][0] as f32, m[1][1] as f32, m[2][2] as f32], modulus: p.4, half_norm: half as f32 })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         drop(e);
         let routing = self.routing.get_or_insert_with(|| crate::routing::Routing::new(gpu));
         routing.set_impactors(gpu, &list);
-        if crate::routing::punch_gpu() {
+        if crate::routing::punch_or_learned() {
             let punch = self.punch.get_or_insert_with(|| crate::routing::Punch::new(gpu));
             punch.set_impactors(gpu, &punch_list);
         }
+        if crate::routing::learned_impact() {
+            if self.learned.is_none() {
+                // The network is not wired yet (P0's port): a stub must stand in, explicitly.
+                let stub = crate::learned::Stub::from_env()?.ok_or("STRESS_IMPACT_PUNCH=learned: no network is wired into the engine yet; set STRESS_LEARNED_STUB=zero|punch to run the path with a stand-in")?;
+                if !crate::gpu_frame() {
+                    return Err("STRESS_IMPACT_PUNCH=learned needs the frame's GPU split passes (STRESS_GPU_LAYOUT=1 STRESS_GPU_FRAME=1, or a profile that turns them on)".into());
+                }
+                self.learned = Some(crate::learned::Learned::new(gpu, stub));
+            }
+            let cap = self.solver.island_cap().max(self.solver.mirror.clusters.len()) as u32 + 1;
+            let chunks = self.solver.gpu_chunks().len() as u32;
+            let l = self.learned.as_mut().expect("learned batch");
+            l.set_impactors(gpu, &learned_list);
+            if !l.pending {
+                l.ensure(gpu, cap, chunks);
+            }
+        }
+        Ok(())
     }
 
     /// The engine's collider table as the coupling sees it (`ColliderInfo`), against the
@@ -431,7 +469,7 @@ impl GpuWorld {
         if let Some(r) = self.resident.as_mut() {
             r.qs.set_frame_dt(fdt, self.solver.mirror.config.gravity.norm());
         }
-        self.prepare_routing(gpu);
+        self.prepare_routing(gpu)?;
         if phases {
             eprintln!("resident phases: tables {:.2} ms", t_tables.elapsed().as_secs_f64() * 1e3);
         }
@@ -580,9 +618,49 @@ impl GpuWorld {
             // The punch and its split pass only when the last frame's check (two frames
             // ahead in punch mode) saw an impactor near an island: otherwise neither is
             // recorded (the split pass's dispatches cost even when they exit early).
+            let learned = if self.tiered { self.learned.as_ref() } else { None };
+            if learned.is_some_and(|l| l.pending) && !frame_mode {
+                return Err("learned impact: a decoded call batch waits for its window end, but this frame cannot split on the GPU".into());
+            }
+            // `STRESS_IMPACT_PUNCH=learned`: the last batch's window end in `post` (before the
+            // split pass), the routing check, the new batch and the punch for its fallen-back
+            // calls after it (`post_split`, with the split pass once more).
+            let learned_apply = learned.is_some_and(|l| l.pending) && frame_mode;
+            let learned_batch = learned.is_some() && frame_mode && self.route_next;
             let punch = if self.tiered && frame_mode && self.route_next { self.punch.as_ref() } else { None };
-            self.solver.punch_split = punch.is_some();
+            self.solver.punch_split = if learned.is_some() { learned_apply } else { punch.is_some() };
+            let gravity = self.solver.mirror.config.gravity;
+            let scalars = crate::learned::Scalars {
+                island_cap: self.solver.island_cap().max(self.solver.mirror.clusters.len()) as u32,
+                engine_base,
+                dt: fdt,
+                speed: stress_ref::world::tiered_impact_speed(),
+                gravity: [gravity.x as f32, gravity.y as f32, gravity.z as f32],
+            };
+            let self_punch = if learned_batch { self.punch.as_ref() } else { None };
             let route_post = |s: &crate::solver::GpuSolver, enc: &mut wgpu::CommandEncoder| {
+                if let Some(l) = learned.filter(|_| frame_mode) {
+                    if learned_apply {
+                        let e = engine.borrow();
+                        let ri = s.routing_inputs();
+                        let t = crate::learned::Tables {
+                            islands: ri.islands,
+                            chunks: ri.chunks,
+                            state: ri.state,
+                            ctab: &ctab,
+                            bodies: e.engine_buffers().bodies,
+                            bond_static: ri.bonds,
+                            bond_dyn: ri.bond_dyn,
+                            status: ri.status.expect("cascade status"),
+                            counters: &s.gpu_pass.as_ref().expect("gpu pass").counters,
+                            route: &routing.expect("routing").route,
+                            island_args: ri.island_args,
+                            s: scalars,
+                        };
+                        l.encode_apply(gpu, enc, &t);
+                    }
+                    return;
+                }
                 if let Some(rt) = routing {
                     let e = engine.borrow();
                     // Punch mode: the check two frames ahead (this frame's punch needs last
@@ -593,6 +671,34 @@ impl GpuWorld {
                         p.encode(gpu, enc, &s.routing_inputs(), &ctab, engine_base, e.engine_buffers().bodies, fdt, stress_ref::world::tiered_impact_speed(), rt);
                     }
                 }
+            };
+            let learned_post_split = |s: &crate::solver::GpuSolver, enc: &mut wgpu::CommandEncoder| -> bool {
+                let (Some(l), Some(rt)) = (learned, routing) else { return false };
+                let e = engine.borrow();
+                let ri = s.routing_inputs();
+                // The check two frames ahead, after this frame's splits (as the punch's).
+                rt.encode(gpu, enc, &ri, &ctab, engine_base, e.engine_buffers().bodies, 2.0 * fdt, stress_ref::world::tiered_impact_speed());
+                let t = crate::learned::Tables {
+                    islands: ri.islands,
+                    chunks: ri.chunks,
+                    state: ri.state,
+                    ctab: &ctab,
+                    bodies: e.engine_buffers().bodies,
+                    bond_static: ri.bonds,
+                    bond_dyn: ri.bond_dyn,
+                    status: ri.status.expect("cascade status"),
+                    counters: &s.gpu_pass.as_ref().expect("gpu pass").counters,
+                    route: &rt.route,
+                    island_args: ri.island_args,
+                    s: scalars,
+                };
+                l.encode_batch(gpu, enc, &t, learned_batch, None);
+                if learned_batch {
+                    if let Some(p) = self_punch {
+                        p.encode(gpu, enc, &ri, &ctab, engine_base, e.engine_buffers().bodies, fdt, stress_ref::world::tiered_impact_speed(), rt);
+                    }
+                }
+                learned_batch
             };
             let post: Option<&dyn Fn(&crate::solver::GpuSolver, &mut wgpu::CommandEncoder)> = if routing.is_some() { Some(&route_post) } else { None };
             let pre = |s: &crate::solver::GpuSolver, enc: &mut wgpu::CommandEncoder, pass: usize| {
@@ -606,6 +712,9 @@ impl GpuWorld {
                 let e = engine.borrow();
                 let (bodies, colliders, max_bodies) = e.spawn_buffers().expect("spawn buffers");
                 let max_colliders = e.collider_capacity();
+                let engine_bodies = e.engine_buffers().bodies;
+                let place_bind = |gp: &crate::gpu_pass::GpuPass| learned.expect("learned batch").place_bind(gpu, &scalars, engine_bodies, gp);
+                let hook = learned.filter(|_| learned_apply).map(|l| crate::gpu_pass::PassHook { pipeline: l.place_pipeline(), bind: &place_bind });
                 let fs = crate::solver::FrameSplits {
                     target: crate::gpu_split::SpawnTarget { bodies, colliders, max_bodies },
                     max_colliders,
@@ -613,6 +722,8 @@ impl GpuWorld {
                     resident: r.qs.layout(),
                     colliders: r.colliders.as_ref().filter(|c| c.capacity() >= max_colliders).map(|c| (c, &r.ingest.collider_info)),
                     layout_params: self.solver.frame_layout_params(),
+                    hook: hook.as_ref(),
+                    post_split: if learned.is_some() { Some(&learned_post_split) } else { None },
                 };
                 self.solver.resident_cascade_with(gpu, fdt, first, window, &pre, Some(&fs), post)
             } else {
@@ -637,6 +748,10 @@ impl GpuWorld {
             let route_part = parts.len();
             if let Some(rt) = routing {
                 parts.push(rt.range());
+            }
+            let learned_part = parts.len();
+            if let Some(l) = learned.filter(|_| frame_mode) {
+                parts.push(l.range());
             }
             // `STRESS_GPU_DET_END=1`: the frame's ingest output and the engine's bodies in
             // this same read (no sync of their own), hashed below.
@@ -693,6 +808,11 @@ impl GpuWorld {
             if routing.is_some() {
                 // The last window's check stands (each runs after its own splits).
                 self.route_next = crate::routing::Routing::flagged(&read[route_part]);
+            }
+            if frame_mode {
+                if let Some(l) = self.learned.as_mut().filter(|_| self.tiered) {
+                    l.follow(&read[learned_part], self.frame as u64, learned_apply, learned_batch)?;
+                }
             }
             if frame_mode {
                 // The frame's GPU splits, followed in order (an aborted one ends the log: the

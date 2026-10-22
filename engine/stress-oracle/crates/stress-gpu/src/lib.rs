@@ -229,7 +229,30 @@ pub mod shaders {
     pub const ROUTING: ShaderSet = shader_set!("routing", [("route_islands", (64, 1, 1))]);
     pub const PUNCH: ShaderSet = shader_set!("punch", [("punch_islands", (256, 1, 1)), ("punch_fast", (1024, 1, 1))]);
     /// The learned impact-outcome model's engine side (`STRESS_IMPACT_PUNCH=learned`).
-    pub const LEARNED: ShaderSet = shader_set!("learned", [("learned_decode", (256, 1, 1))]);
+    pub const LEARNED: ShaderSet = shader_set!(
+        "learned",
+        [
+            ("learned_decode", (256, 1, 1)),
+            ("learned_clear", (256, 1, 1)),
+            ("learned_select", (256, 1, 1)),
+            ("learned_debris", (64, 1, 1)),
+            ("learned_compact", (1024, 1, 1)),
+            ("learned_count_bonds", (256, 1, 1)),
+            ("learned_gather_chunks", (256, 1, 1)),
+            ("learned_gather_bonds", (256, 1, 1)),
+            ("learned_gather_impactors", (32, 1, 1)),
+            ("learned_finish", (256, 1, 1)),
+            ("learned_stub", (256, 1, 1)),
+            ("learned_gate", (64, 1, 1)),
+            ("learned_check", (256, 1, 1)),
+            ("learned_apply_bonds", (256, 1, 1)),
+            ("learned_apply_bodies", (64, 1, 1)),
+            ("learned_apply_impactors", (32, 1, 1)),
+            ("learned_place", (64, 1, 1)),
+            ("learned_tally_apply", (1, 1, 1)),
+            ("learned_tally", (1, 1, 1)),
+        ]
+    );
     pub const SPLIT: ShaderSet = shader_set!("split", [("split_components", (256, 1, 1)), ("split_children", (64, 1, 1)), ("split_frames", (64, 1, 1)), ("split_children_group", (64, 1, 1))]);
     pub const HUD_OVERLAY: ShaderSet = shader_set!("hud_overlay", [("hud_vs", (1, 1, 1)), ("hud_fs", (1, 1, 1))]);
     pub const THRESHOLD: ShaderSet = shader_set!("threshold", [("threshold_breaks", (256, 1, 1))]);

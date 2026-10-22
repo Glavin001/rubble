@@ -106,6 +106,14 @@ pub struct PassTables<'a> {
     pub colliders: Option<(&'a crate::colliders::ColliderRefresh, &'a wgpu::Buffer)>,
 }
 
+/// A step recorded after the pass's spawn (its children's bodies made, before the layout
+/// and the log): the pipeline, and its bind group made from the pass's buffers. One thread
+/// per child slot (64 per group, the children's dispatch).
+pub struct PassHook<'a> {
+    pub pipeline: &'a wgpu::ComputePipeline,
+    pub bind: &'a dyn Fn(&GpuPass) -> wgpu::BindGroup,
+}
+
 /// A dispatch's size: direct, or from the pass's arguments at a byte offset.
 enum Size {
     Direct(u32),
@@ -191,7 +199,7 @@ pub struct GpuPass {
     pub control: wgpu::Buffer,
     /// Per member its first collider (spawn.slang `member_offsets`).
     pub member_offsets: wgpu::Buffer,
-    firsts: wgpu::Buffer,
+    pub firsts: wgpu::Buffer,
     args: wgpu::Buffer,
     plan: wgpu::Buffer,
     old: Vec<wgpu::Buffer>,
@@ -258,7 +266,13 @@ impl GpuPass {
 
     /// The split pass's dispatches and bind groups, made once for a frame's passes
     /// (`PreparedPass::record` records them, in one compute pass).
-    pub fn prepare(&self, gpu: &Gpu, splitter: &GpuSplitter, layout: &GpuLayout, t: &PassTables, mut lp: LayoutParams, resume: bool, log: bool) -> PreparedPass {
+    pub fn prepare(&self, gpu: &Gpu, splitter: &GpuSplitter, layout: &GpuLayout, t: &PassTables, lp: LayoutParams, resume: bool, log: bool) -> PreparedPass {
+        self.prepare_hooked(gpu, splitter, layout, t, lp, resume, log, None)
+    }
+
+    /// `prepare`, with `hook` recorded after the spawn (`PassHook`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_hooked(&self, gpu: &Gpu, splitter: &GpuSplitter, layout: &GpuLayout, t: &PassTables, mut lp: LayoutParams, resume: bool, log: bool, hook: Option<&PassHook>) -> PreparedPass {
         let [chunks, index, bonds, bond_dyn, islands, state] = t.buffers;
         let (ctab, bases) = t.resident;
         lp.resident = 1;
@@ -345,6 +359,9 @@ impl GpuPass {
         steps.extend(layout.parent.iter().map(|k| (k, layout_bind(k), Size::Indirect(ARGS_PARENTS))));
         steps.push((&layout.copy, layout_bind(&layout.copy), Size::Direct(groups(self.island_cap + 1, 64))));
         let mut prepared: Vec<(wgpu::ComputePipeline, wgpu::BindGroup, Size)> = steps.into_iter().map(|(k, b, size)| (k.pipeline.clone(), b, size)).collect();
+        if let Some(h) = hook {
+            prepared.push((h.pipeline.clone(), (h.bind)(self), Size::Indirect(ARGS_SLOTS)));
+        }
         if let Some((refresh, collider_info)) = t.colliders {
             let inputs = crate::colliders::RefreshInputs {
                 parent_count: 0,

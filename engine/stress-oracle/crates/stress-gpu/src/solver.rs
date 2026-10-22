@@ -610,7 +610,7 @@ pub struct GpuSolver {
     splitter: Option<crate::gpu_split::GpuSplitter>,
     layouter: Option<crate::gpu_split::GpuLayout>,
     /// The split pass with GPU-made inputs (`gpu_pass.rs`), made once for the tables' sizes.
-    gpu_pass: Option<crate::gpu_pass::GpuPass>,
+    pub(crate) gpu_pass: Option<crate::gpu_pass::GpuPass>,
     /// GPU layouts against the host's in-place split (`STRESS_GPU_SPLIT_CHECK=1`).
     pub split_layout_check: crate::gpu_split::LayoutCheck,
     /// `STRESS_GPU_COLLIDER_CHECK=1`: the GPU's collider table after its splits against the host's.
@@ -2899,7 +2899,7 @@ impl GpuSolver {
                     table: f.table,
                     colliders: f.colliders,
                 };
-                Some(gp.prepare(gpu, self.splitter.as_ref().expect("splitter"), self.layouter.as_ref().expect("layouter"), &tables, f.layout_params, true, true))
+                Some(gp.prepare_hooked(gpu, self.splitter.as_ref().expect("splitter"), self.layouter.as_ref().expect("layouter"), &tables, f.layout_params, true, true, f.hook))
             }
             _ => None,
         };
@@ -3023,6 +3023,13 @@ impl GpuSolver {
         if let Some(post) = post {
             post(self, &mut encoder);
             if self.punch_split {
+                if let Some(p) = &prepared {
+                    p.record(&mut encoder);
+                }
+            }
+        }
+        if let Some(post_split) = splits.and_then(|f| f.post_split) {
+            if post_split(self, &mut encoder) {
                 if let Some(p) = &prepared {
                     p.record(&mut encoder);
                 }
@@ -4698,4 +4705,11 @@ pub struct FrameSplits<'a> {
     pub resident: ResidentLayout<'a>,
     pub colliders: Option<(&'a crate::colliders::ColliderRefresh, &'a wgpu::Buffer)>,
     pub layout_params: crate::gpu_split::LayoutParams,
+    /// A step the split pass records after its spawn (`STRESS_IMPACT_PUNCH=learned`:
+    /// `learned_place`), made from the pass's own buffers.
+    pub hook: Option<&'a crate::gpu_pass::PassHook<'a>>,
+    /// Encoded after the `post` split pass, in the same submission; true: the split pass
+    /// once more after it (`STRESS_IMPACT_PUNCH=learned`: the batch, then the punch for the
+    /// calls that fell back).
+    pub post_split: Option<&'a dyn Fn(&GpuSolver, &mut wgpu::CommandEncoder) -> bool>,
 }

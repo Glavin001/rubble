@@ -126,6 +126,21 @@ pub fn punch_gpu() -> bool {
     *ON.get_or_init(|| std::env::var("STRESS_IMPACT_PUNCH").is_ok_and(|v| v == "gpu"))
 }
 
+/// `STRESS_IMPACT_PUNCH=learned` (off by default; the learned impact-outcome model, P3 of
+/// docs/learned-stress-solver/learned-stress-solver-plan.md): the islands the punch would
+/// route go to the learned call batch (`learned.rs`), at the punch's place in the resident
+/// frame; a call that fails its gate falls back to the GPU punch (logged).
+pub fn learned_impact() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("STRESS_IMPACT_PUNCH").is_ok_and(|v| v == "learned"))
+}
+
+/// The GPU punch runs (`gpu`, or `learned` for its fallback): every routed frame resident,
+/// the check two frames ahead.
+pub fn punch_or_learned() -> bool {
+    punch_gpu() || learned_impact()
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
 struct PunchParams {
