@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use crate::gpu::Gpu;
 
-const PASSES: u32 = 128;
+const PASSES: u32 = 1024;
 
 pub struct StageTimer {
     qs: wgpu::QuerySet,

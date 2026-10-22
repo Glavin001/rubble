@@ -49,7 +49,11 @@ fn routing_cost_at_scale() {
     let frames = (scene.sim.duration / scene.sim.frame_dt).round() as usize;
     for f in 0..frames {
         let t = std::time::Instant::now();
-        w.step_frame(&gpu).expect("frame");
+        // (a call past the batch's capacities ends the run: the whole field in one call)
+        if let Err(e) = w.step_frame(&gpu) {
+            eprintln!("frame {f}: {e}");
+            break;
+        }
         let calls = w.learned.as_ref().map_or(0, |l| l.totals.calls);
         eprintln!("frame {f}: {:.1} ms wall, calls so far {calls}", t.elapsed().as_secs_f64() * 1e3);
     }
