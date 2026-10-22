@@ -16,12 +16,17 @@ from typing import Any
 import numpy as np
 
 SCHEMA_VERSION = "learned-impact-outcome/4"
+# `/5` is `/4` plus the oracle's full dynamic state (`fs_*` arrays, f64, columns named by
+# field path in manifest.full_state_columns; static columns once per event in
+# manifest.event_arrays). Every `/4` array is unchanged, so both are read.
+FULL_STATE_VERSION = "learned-impact-outcome/5"
+ACCEPTED_VERSIONS = (SCHEMA_VERSION, FULL_STATE_VERSION)
 N_TIME_BINS = 8
 PHASES = ("pre_contact", "contact", "blast", "separation", "secondary", "settling", "quiet")
 REGIMES = {"arrest": 0, "perforate": 1, "rebound": 2, "deflect": 3}
 REGIME_UNDECIDED = -1
 EDGE_TYPES = ("bond", "cracked", "impactor_contact", "structure_contact")
-DTYPES = {"f32": np.float32, "i32": np.int32, "i64": np.int64}
+DTYPES = {"f32": np.float32, "i32": np.int32, "i64": np.int64, "f64": np.float64}
 AVAILABLE_FLAGS = (
     "qs_hertz",
     "punch",
@@ -203,6 +208,17 @@ CALL_ARRAYS: dict[str, ArraySpec] = {
     "y_impactor_perforate_freq": ArraySpec("f32", ("Ni",), required=False),
     "ens_impactor_v_end": ArraySpec("f32", ("M", "Ni", 3), required=False),
 }
+# `/5` full dynamic state, frame start (_in) and end (_out); NaN marks None/absent fields
+for _x in ("in", "out"):
+    CALL_ARRAYS[f"fs_chunk_{_x}"] = ArraySpec("f64", ("Nc", "*"), required=False, raw=True)
+    CALL_ARRAYS[f"fs_bond_{_x}"] = ArraySpec("f64", ("*", "*"), required=False, raw=True)
+    CALL_ARRAYS[f"fs_cluster_{_x}"] = ArraySpec("f64", ("*", "*"), required=False, raw=True)
+    CALL_ARRAYS[f"fs_cluster_id_{_x}"] = ArraySpec("i64", ("*",), required=False, raw=True)
+    CALL_ARRAYS[f"fs_chunk_cluster_{_x}"] = ArraySpec("i64", ("Nc",), required=False, raw=True)
+    CALL_ARRAYS[f"fs_impactor_{_x}"] = ArraySpec("f64", ("Ni", "*"), required=False, raw=True)
+    CALL_ARRAYS[f"fs_pair_key_{_x}"] = ArraySpec("i64", ("*", 5), required=False, raw=True)
+    CALL_ARRAYS[f"fs_pair_{_x}"] = ArraySpec("f64", ("*", 4), required=False, raw=True)
+CALL_ARRAYS["fs_bond_key"] = ArraySpec("i64", ("*",), required=False, raw=True)
 for _t, _n in (("bond", "E"), ("cracked", "Ec"), ("impactor_contact", "Ei"),
                ("structure_contact", "Es")):
     CALL_ARRAYS[f"{_t}_src"] = ArraySpec("i32", (f"2{_n}",))
@@ -265,6 +281,8 @@ class Event:
     manifest: dict[str, Any]
     calls: list[Call]
     structures: dict[int, dict[str, np.ndarray]] = field(default_factory=dict)
+    # `/5`: per-event constant full-state columns (manifest.event_arrays), e.g. fs_static_bond
+    static: dict[str, np.ndarray] = field(default_factory=dict)
 
 
 def _resolve(shape: tuple[Any, ...], sym: dict[str, int]) -> tuple[int, ...]:
@@ -272,6 +290,8 @@ def _resolve(shape: tuple[Any, ...], sym: dict[str, int]) -> tuple[int, ...]:
     for s in shape:
         if isinstance(s, int):
             out.append(s)
+        elif s == "*":
+            out.append(-1)  # any size
         elif s.startswith("2"):
             out.append(2 * sym[s[1:]])
         else:
@@ -295,8 +315,8 @@ def _read(blob: np.memmap, entry: dict[str, Any], where: str) -> np.ndarray:
 
 
 def validate_manifest(m: dict[str, Any]) -> None:
-    if m.get("schema_version") != SCHEMA_VERSION:
-        raise SchemaError(f"schema_version {m.get('schema_version')!r} != {SCHEMA_VERSION!r}")
+    if m.get("schema_version") not in ACCEPTED_VERSIONS:
+        raise SchemaError(f"schema_version {m.get('schema_version')!r} not in {ACCEPTED_VERSIONS}")
     if int(m.get("n_time_bins", -1)) != N_TIME_BINS:
         raise SchemaError(f"n_time_bins {m.get('n_time_bins')} != {N_TIME_BINS}")
     cols = m.get("columns", {})
@@ -334,9 +354,9 @@ def validate_call(c: Call, require_targets: bool = True) -> None:
         if a.dtype != DTYPES[spec.dtype]:
             raise SchemaError(f"{name}: dtype {a.dtype}")
         want = _resolve(spec.shape, sym)
-        if a.shape != want:
+        if len(a.shape) != len(want) or any(w not in (-1, g) for w, g in zip(want, a.shape)):
             raise SchemaError(f"{c.event_id}#{c.call_index}: {name} shape {a.shape} != {want}")
-        if a.dtype.kind == "f" and not np.all(np.isfinite(a)):
+        if a.dtype.kind == "f" and not name.startswith("fs_") and not np.all(np.isfinite(a)):
             raise SchemaError(f"{c.event_id}#{c.call_index}: {name} not finite")
     for name in c.arrays:
         if name not in CALL_ARRAYS:
@@ -456,6 +476,8 @@ def load_event(path: Path | str, validate: bool = True, require_targets: bool = 
         cat = s["arrays"]
         structures[sid] = {k: _read(blob, cat[k], f"structure/{sid}/{k}")
                            for k in STRUCTURE_ARRAYS}
+    static = {k: _read(blob, v, f"event_arrays/{k}")
+              for k, v in manifest.get("event_arrays", {}).items()}
     calls = []
     for e in entries:
         arrays = {k: _read(blob, v, f"call {e['call_index']}/{k}") for k, v in e["arrays"].items()}
@@ -479,7 +501,7 @@ def load_event(path: Path | str, validate: bool = True, require_targets: bool = 
         calls.append(c)
     if validate and len(calls) != int(manifest["n_calls"]):
         raise SchemaError(f"n_calls {manifest['n_calls']} != {len(calls)}")
-    return Event(root=root, manifest=manifest, calls=calls, structures=structures)
+    return Event(root=root, manifest=manifest, calls=calls, structures=structures, static=static)
 
 
 class _BlobWriter:
