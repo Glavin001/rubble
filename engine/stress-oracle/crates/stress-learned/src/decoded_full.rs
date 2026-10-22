@@ -14,9 +14,11 @@
 //!   step for those fields; the frame-start base does not (measure both).
 //!
 //! Rules (P2): a one-hot group takes the variant whose value is at least 0.5, else `None`;
-//! `alive`, and whether the bond is connected, must agree with the `/1` decode (an error
-//! otherwise, never a silent choice); a bond the decode keeps connected has its damage
-//! clamped below `SURVIVOR_DAMAGE_MAX` (one already disconnected keeps its damage);
+//! `alive` is the `/1` decode's (the oracle's bookkeeping), and whether the bond is connected
+//! must agree with it (an error otherwise, never a silent choice); a bond the decode keeps connected has its damage
+//! clamped below `SURVIVOR_DAMAGE_MAX` (one already disconnected keeps its damage); the joint
+//! law's rule (failure margin >= 1 exactly when disconnected) holds: a survivor's fail_ts and
+//! fail_c stay below 1, a disconnected bond's fail_ts is at least 1;
 //! infinities are values (an at-rest ductility).
 
 use std::collections::{BTreeMap, HashMap};
@@ -173,19 +175,31 @@ pub fn apply_full(decoded: &IslandState, base: &IslandState, outs: &[FullOut]) -
         let mut v = to_value(*from)?;
         if let (Some(rows), Some(o)) = (&bond_rows, by_kind.get("bond")) {
             let key = stress_ref::keys::bond_key(*s, b.source);
-            let row = rows.get(&key).ok_or_else(|| format!("fs_bond_out lacks bond {key}"))?;
-            write_row(&mut v, &o.columns, row)?;
+            match rows.get(&key) {
+                Some(row) => write_row(&mut v, &o.columns, row)?,
+                // A model may leave out bonds already disconnected (inert): the base's.
+                None if !b.connected() => {}
+                None => return Err(format!("fs_bond_out lacks the connected bond {key}")),
+            }
         }
         let mut nb: stress_ref::solver::RtBond = from_value(&v)?;
-        if o_has(&by_kind, "bond", "alive") && nb.alive != b.alive {
-            return Err(format!("bond ({s}, {bi}): fs alive {} against the decode's {}", nb.alive, b.alive));
-        }
+        // `alive` is the decode's (the oracle's own bookkeeping: `break_bonds` disconnects a
+        // bond at damage 1 and leaves it alive unless a split cuts it); a model's `alive`
+        // column is only checked through connectivity below.
         nb.alive = b.alive;
         // A bond the decode keeps connected survives: its damage stays below 1 (a bond
         // already disconnected, alive at damage 1 as the oracle leaves some, is as given).
         let connected = b.connected();
         if connected {
             nb.joint.damage = nb.joint.damage.min(SURVIVOR_DAMAGE_MAX);
+            // The joint law's rule, failure margin >= 1 <=> disconnected: a survivor's
+            // predicted margins stay below 1.
+            nb.fail_ts = nb.fail_ts.min(SURVIVOR_DAMAGE_MAX);
+            nb.fail_c = nb.fail_c.min(SURVIVOR_DAMAGE_MAX);
+        } else {
+            // A disconnected bond's margin is reached, as `apply_decoded` breaks one.
+            nb.fail_ts = nb.fail_ts.max(b.fail_ts).max(1.0);
+            nb.peak_fail_margin = nb.peak_fail_margin.max(nb.fail_margin());
         }
         if nb.connected() != connected {
             return Err(format!("bond ({s}, {bi}): the model's state is {} where the decode's is {}", if nb.connected() { "connected" } else { "disconnected" }, if connected { "connected" } else { "disconnected" }));
@@ -247,9 +261,6 @@ pub fn apply_full(decoded: &IslandState, base: &IslandState, outs: &[FullOut]) -
     Ok(st)
 }
 
-fn o_has(by_kind: &HashMap<&str, &FullOut>, kind: &str, col: &str) -> bool {
-    by_kind.get(kind).is_some_and(|o| o.columns.iter().any(|c| c == col))
-}
 
 /// An island state's bond and chunk fields as `FullOut` columns (P1's flatten), limited to
 /// `predicted` (kind -> column names; None: every column): the oracle's own `/2` outcome,

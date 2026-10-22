@@ -122,14 +122,18 @@ impl ModelProvider {
             Some(q) => q,
             None => described.get("needs_qs").and_then(|x| x.as_bool()).unwrap_or(true),
         };
-        p.full_state = match described.get("full_state").map(|f| f["columns"].clone()).filter(|c| c.is_object()) {
+        // A column set names the dynamic and static columns of every kind (a model.json from a
+        // checkpoint that predates them may hold an empty object: then the environment's).
+        let complete = |c: &serde_json::Value| ["chunk", "bond", "cluster", "impactor", "static_chunk", "static_bond", "static_impactor"].iter().all(|k| c[*k].is_array());
+        p.full_state = match described.get("full_state").map(|f| f["columns"].clone()).filter(|c| c.as_object().is_some_and(|o| !o.is_empty())) {
+            Some(c) if !complete(&c) => return Err("model.json full_state.columns lacks a kind's columns".into()),
             Some(c) => Some(c),
             None => match std::env::var("STRESS_FULL_STATE_COLUMNS") {
                 Ok(path) => {
                     let m: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?).map_err(|e| format!("{path}: {e}"))?;
                     let c = if m["full_state_columns"].is_object() { m["full_state_columns"].clone() } else { m };
-                    if !c.is_object() {
-                        return Err(format!("{path}: no full_state_columns"));
+                    if !complete(&c) {
+                        return Err(format!("{path}: no complete full_state_columns"));
                     }
                     Some(c)
                 }

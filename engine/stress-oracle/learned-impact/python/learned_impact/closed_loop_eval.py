@@ -15,6 +15,8 @@ until it settles, through P0's coupled harness (`learned_p0 event`), under each 
            oracle's island step (bit for bit the oracle; the sanity column)
   a_ceiling_decoded / a_ceiling_def  harness A with the oracle's outcome through the /3
            decoded state (reduced / with deformation): the /3 boundary's own ceiling
+  a_ceiling_full2  harness A with the oracle's outcome through decoded state /2
+  a_model_start  a /5 checkpoint with STRESS_FULL_BASE=start (no oracle values)
   a_model / a_model_def  harness A with the checkpoint (/3 decoded state; `_def` keeps the
            decoded deformation)
   coupled  (diagnostic) the oracle's own coupled frame, no call boundary: what the coupling
@@ -193,12 +195,20 @@ def candidate_args(name: str, a, out: Path, event: str) -> tuple[list[str], dict
             # the oracle's outcome through the /3 decoded state (reduced, or with deformation)
             env = {**base, "STRESS_DECODED_DEFORMATION": "1"} if name == "a_ceiling_def" else base
             return ["--variant", "provider", "--provider", "oracle_decoded", "--host", "a"], env
-        if name in ("a_model", "a_model_def"):
+        if name == "a_ceiling_full2":
+            # the oracle's outcome through decoded state /2 (the full-state contract's ceiling;
+            # STRESS_FULL_PREDICTED limits it to a model's predicted columns)
+            return ["--variant", "provider", "--provider", "oracle_full2", "--host", "a"], base
+        if name in ("a_model", "a_model_def", "a_model_start"):
             d = out / "provider" / name / event
             args = ["--variant", "provider", "--provider", "model", "--host", "a", "--checkpoint", str(a.checkpoint), "--dir", str(d), "--timeout", str(a.timeout), "--device", a.device]
             if a.python_dir:
                 args += ["--python-dir", str(a.python_dir)]
             env = {**base, "STRESS_DECODED_DEFORMATION": "1"} if name == "a_model_def" else base
+            if name == "a_model_start":
+                # a /5 model through decoded state /2 with the unpredicted fields from the frame
+                # start (no oracle information); a_model takes them from STRESS_FULL_BASE
+                env = {**base, "STRESS_FULL_BASE": "start"}
             return args, env
     if name == "coupled":
         # Diagnostic: the oracle's own coupled frame, no call boundary (the coupling alone).
