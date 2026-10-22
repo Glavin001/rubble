@@ -601,6 +601,20 @@ fn run_provider_world(mut w: World, s: &Scene, n: usize, o: &ProviderOpts, tag: 
             let stepped = if o.harness_a {
                 let exact = o.kind == "oracle";
                 let mut a_provider = |start: &World, m: &stress_ref::world::IslandMembers| -> Result<stress_ref::world::IslandState, String> {
+                    // `STRESS_DUMP_ISLAND_STATES=DIR`: the island's exact frame-start state of
+                    // every routed frame (DAgger: the rollout's own states, relabelled by
+                    // `learned_impact_relabel` as `state` jobs), DIR/<frame>.msgpack, and a line
+                    // per frame in DIR/index.jsonl.
+                    if let Ok(dir) = std::env::var("STRESS_DUMP_ISLAND_STATES") {
+                        use std::io::Write;
+                        let dir = std::path::PathBuf::from(dir);
+                        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                        stress_learned::relabel::write_state(&dir.join(format!("{frame:06}.msgpack")), &start.extract_island(m))?;
+                        let n_chunks: usize = start.solver.structures.iter().map(|st| st.chunks.len()).sum();
+                        let line = json!({"frame": frame, "routed_chunks": m.chunks.len(), "routed_impactors": m.impactors.len(), "n_chunks": n_chunks, "state": format!("{frame:06}.msgpack")});
+                        let mut idx = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("index.jsonl")).map_err(|e| e.to_string())?;
+                        writeln!(idx, "{line}").map_err(|e| e.to_string())?;
+                    }
                     if exact {
                         return stress_ref::world::oracle_island_step(start, m);
                     }

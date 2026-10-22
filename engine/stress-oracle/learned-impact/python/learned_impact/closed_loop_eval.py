@@ -49,6 +49,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import math
 import os
 import subprocess
@@ -475,6 +476,7 @@ def main(argv=None):
     p.add_argument("--jobs", type=int, default=6)
     p.add_argument("--bin", type=Path, default=DEFAULT_BIN)
     p.add_argument("--note", default="")
+    p.add_argument("--dump-island-states", action="store_true", help="a_model*: write each routed frame's exact island start state (<out>/states/<cand>/<member>/<frame>.msgpack, index.jsonl)")
     p.add_argument("--members", type=Path, help="JSON list of member names: run only these (scored against their whole ensembles)")
     a = p.parse_args(argv)
     cands = a.candidates.split(",")
@@ -506,6 +508,11 @@ def main(argv=None):
 
     def one(c: str, m: Path):
         args, env = candidate_args(c, a, a.out, m.name)
+        if a.dump_island_states and c.startswith("a_model"):
+            # The rollout's own island states (DAgger): <out>/states/<cand>/<member>/
+            d = a.out / "states" / c / m.name
+            shutil.rmtree(d, ignore_errors=True)
+            env = {**env, "STRESS_DUMP_ISLAND_STATES": str(d.resolve())}
         cmd = [str(a.bin), "event", "--event-dir", str(m), "--samples", ",".join(map(str, samples[m.name]))] + args
         t = time.time()
         res = subprocess.run(cmd, capture_output=True, text=True, env=dict(os.environ, **env))
