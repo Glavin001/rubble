@@ -10,7 +10,7 @@ mps = pytest.mark.skipif(not torch.backends.mps.is_available(), reason="no MPS")
 
 
 @mps
-@pytest.mark.parametrize("cfg", [ModelConfig(), ModelConfig.reference(), ModelConfig(variant="B")])
+@pytest.mark.parametrize("cfg", [ModelConfig.cost(), ModelConfig.reference(), ModelConfig.large()])
 def test_mps_matches_cpu(cfg):
     calls, st = make_calls(range(3))
     b = batch_of(calls, st)

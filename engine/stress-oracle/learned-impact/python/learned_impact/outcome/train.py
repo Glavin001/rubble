@@ -612,10 +612,12 @@ def main(argv=None) -> None:
     ap.add_argument("--batch-budget", type=int, default=20000,
                     help="nodes + undirected edges per batch")
     ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--width", type=int, default=32)
-    ap.add_argument("--rounds", default="2,1,2,1,2")
+    ap.add_argument("--width", type=int, default=64)
+    ap.add_argument("--rounds", default="3,2,2,2,3")
     ap.add_argument("--levels", type=int, default=2)
-    ap.add_argument("--reference", action="store_true", help="W64, rounds 3,2,2,2,3")
+    ap.add_argument("--reference", action="store_true", help="W64, rounds 3,2,2,2,3 (the default)")
+    ap.add_argument("--large", action="store_true", help="W128, rounds 4,3,2,3,4")
+    ap.add_argument("--cost", action="store_true", help="W32, rounds 2,1,2,1,2 (P0's cost point)")
     ap.add_argument("--variant", default="B", choices=["A", "B"])
     ap.add_argument("--drop-features", default="",
                     help="comma-separated <array>:<column> inputs held at 0 (ablation), e.g. "
@@ -648,8 +650,9 @@ def main(argv=None) -> None:
         aggregate_dataset(dataset)
     if not dataset:
         ap.error("--dataset or --synthetic is required")
-    mc = ModelConfig.reference() if a.reference else ModelConfig(
-        width=a.width, rounds=tuple(int(x) for x in a.rounds.split(",")), levels=a.levels)
+    mc = (ModelConfig.large() if a.large else ModelConfig.cost() if a.cost
+          else ModelConfig.reference() if a.reference else ModelConfig(
+              width=a.width, rounds=tuple(int(x) for x in a.rounds.split(",")), levels=a.levels))
     mc.variant = a.variant
     mc.drop_features = tuple(x for x in a.drop_features.split(",") if x)
     mc.__post_init__()

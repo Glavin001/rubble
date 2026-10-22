@@ -31,12 +31,13 @@ NODE_OUT = 12  # Δv(3) Δω(3) Δx(3) Δθ(3), body frame, nondimensional
 
 @dataclass
 class ModelConfig:
-    width: int = 32
+    # Accuracy first (planning session, 2026-10-22): the default is the reference W64 with
+    # (3, 2, 2, 2, 3) = 12 rounds; `large()` is W128 / 16 rounds; `cost()` is P0's
+    # cost-feasible W32 / 8 rounds, to shrink to only after a model passes.
+    width: int = 64
     mlp_hidden_layers: int = 1  # MeshGraphMLP hidden layers: 1 → two Linear layers
     # Rounds per U stage: [fine, L1 down, …, bottom, …, L1 up, fine]; len = 2·levels + 1.
-    # Default = the P0 cost-feasible point (W32, 8 rounds); reference W64 with
-    # (3, 2, 2, 2, 3) = 12 rounds.
-    rounds: tuple[int, ...] = (2, 1, 2, 1, 2)
+    rounds: tuple[int, ...] = (3, 2, 2, 2, 3)
     levels: int = 2
     variant: str = "B"  # "B" residual over the QS frame outcome (default since the P0 step-5 pilot), "A" impact-only
     n_time_bins: int = S.N_TIME_BINS
@@ -69,6 +70,14 @@ class ModelConfig:
     @staticmethod
     def reference() -> "ModelConfig":
         return ModelConfig(width=64, rounds=(3, 2, 2, 2, 3), levels=2)
+
+    @staticmethod
+    def large() -> "ModelConfig":
+        return ModelConfig(width=128, rounds=(4, 3, 2, 3, 4), levels=2)
+
+    @staticmethod
+    def cost() -> "ModelConfig":
+        return ModelConfig(width=32, rounds=(2, 1, 2, 1, 2), levels=2)
 
     def to_dict(self) -> dict:
         return asdict(self)
