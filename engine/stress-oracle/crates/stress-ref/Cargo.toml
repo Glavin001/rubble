@@ -17,6 +17,8 @@ path = "src/bin/stress_ref.rs"
 web-time = "1.1"
 robust = "1.2"
 rayon = "1"
+# Exact snapshots of a World's state (MessagePack, named fields: every f64 bit kept) (`World::save_state` / `restore_state`).
+rmp-serde = "1"
 serde = { version = "1", features = ["derive"] }
 # Preserve generated f64 scene parameters when reloading saved oracle scenes.
 serde_json = { version = "1", features = ["float_roundtrip"] }

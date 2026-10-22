@@ -37,6 +37,9 @@ pub use island::{oracle_island_step, IslandMembers, IslandState};
 pub use handoff::{stable_key, DecodedBody, DecodedBreak, DecodedDamage, DecodedState, IslandKeys, DECODED_STATE_VERSION, SURVIVOR_DAMAGE_MAX};
 #[path = "world_branch.rs"]
 mod branch;
+#[path = "world_snapshot.rs"]
+mod snapshot_state;
+pub use snapshot_state::snapshot_placeholder_scene;
 pub use coupling::{cluster_signature, tiered_impact_speed, PredictedContact, PunchPlug};
 /// The modal pre-window for impacts (prototype, `modal` feature): a child module so it
 /// drives the world's own contact and substep without widening their visibility.
@@ -114,7 +117,7 @@ impl Impactor {
 }
 
 /// Energy terms of the contacts (J).
-#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ContactLedger {
     /// Penalty energy currently stored in contacts.
     pub stored: f64,
@@ -141,7 +144,7 @@ pub struct ContactLedger {
 }
 
 /// One kind of contact's energy terms (J).
-#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct KindLedger {
     pub stored: f64,
     pub work: f64,
@@ -162,7 +165,7 @@ pub const KIND_IMPACTOR_GROUND: usize = 2;
 pub const KIND_PAIR: usize = 3;
 
 /// A body a contact acts on, for the contact work.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 enum Party {
     Chunk(usize, usize),
     Impactor(usize),
@@ -171,7 +174,7 @@ enum Party {
 
 /// A contact's load this substep: force and moment on `a` (the opposite on `b`), with
 /// the lever arms from each body's centre to the point of action.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 struct Applied {
     kind: usize,
     a: Party,
@@ -182,7 +185,7 @@ struct Applied {
     moment: Vec3,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct ProbeAcc {
     series: ProbeSeries,
     lo: f64,
@@ -191,14 +194,16 @@ struct ProbeAcc {
 }
 
 /// Cached blast loading of the exposed faces (rebuilt when topology changes).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct BlastCache {
     version: u64,
     faces: Vec<(usize, usize, usize, f64, FaceBlast)>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct World {
+    /// Static (the recipe's): not in a snapshot; `World::restore_state` takes it.
+    #[serde(skip, default = "crate::world::snapshot_placeholder_scene")]
     pub scene: Scene,
     pub solver: ReferenceSolver,
     pub impactors: Vec<Impactor>,
@@ -251,6 +256,8 @@ pub struct World {
     /// Elastic-layer contacts applied this substep (for the contact work by kind).
     applied: Vec<Applied>,
     /// External rigid-body engine, if the world is coupled to one (`World::with_engine`).
+    /// Never in a snapshot (`World::save_state` refuses a coupled world).
+    #[serde(skip)]
     coupling: Option<Coupling>,
     /// Coupled mode: frames that had an impact island, and the most bodies in islands.
     pub island_frames: u64,
@@ -326,7 +333,7 @@ pub struct World {
 ///
 /// Stores **impulse** (`force·dt`, `torque·dt`) per bin; [`LearnedFrameBins::mean_force`]
 /// converts to average force over the bin width `frame_dt / K`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct LearnedFrameBins {
     pub k: usize,
     pub t0: f64,
@@ -3505,7 +3512,7 @@ fn contact_skin() -> f64 {
 /// on centres and fixed radii only, so a chunk's rotation cannot move a pair in or out.
 /// Every motion counts, hidden deformation, frame folds, rewinds and splits included:
 /// the displacement is measured from the world centres themselves every substep.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct NeighbourList {
     active: Vec<(usize, usize)>,
     cluster_of: Vec<usize>,

@@ -125,7 +125,7 @@ pub fn friedlander(s: f64, b: f64) -> f64 {
 }
 
 /// Blast parameters seen by one face.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FaceBlast {
     pub arrival: f64,
     pub duration: f64,

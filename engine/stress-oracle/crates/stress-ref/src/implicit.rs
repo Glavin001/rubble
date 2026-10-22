@@ -44,7 +44,7 @@ pub const NEWMARK_BETA: f64 = 0.25;
 pub const NEWMARK_GAMMA: f64 = 0.5;
 
 /// Outcome of one implicit step of a cluster.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ImplicitReport {
     pub newton_iterations: usize,
     pub cg_iterations: usize,

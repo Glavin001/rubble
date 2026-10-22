@@ -48,7 +48,7 @@ use crate::structure::{BondData, Structure};
 pub const CREAK_STRENGTH: f64 = 0.99;
 
 /// What an unconverged static solve leaves (`SolverConfig::static_unconverged`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum UnconvergedSolve {
     /// Its start state; nothing committed.
     #[default]
@@ -59,7 +59,7 @@ pub enum UnconvergedSolve {
     CommitIterate,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SolverConfig {
     pub gravity: Vec3,
     pub fracture: bool,
@@ -310,7 +310,7 @@ impl RtBond {
 }
 
 /// Things that happened, for rendering (crack decals), audio and VFX.
-#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SolverEvent {
     /// A bond first took damage (crack initiation).
@@ -326,7 +326,7 @@ pub enum SolverEvent {
 
 /// A joint broken by a split, as the world needs it to hand its compression over to the
 /// contact of its two chunks.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Handover {
     pub structure: usize,
     pub a: usize,
@@ -342,7 +342,7 @@ pub struct Handover {
 }
 
 /// Cumulative energy terms (J). See `energy_balance` in `world.rs` for the closed form.
-#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct EnergyLedger {
     /// Damage, friction and rebar plasticity in bonds.
     pub bond_dissipation: f64,
@@ -369,7 +369,7 @@ pub struct EnergyLedger {
 }
 
 /// Force-replacement load of a removed member (alternate-path procedure).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ReplacementLoad {
     pub structure: usize,
     pub chunk: usize,
@@ -391,7 +391,7 @@ impl ReplacementLoad {
 }
 
 /// External loads on chunks for one substep (world frame; torque about the chunk centre).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ChunkLoads {
     pub force: Vec<Vec<Vec3>>,
     pub torque: Vec<Vec<Vec3>>,
@@ -439,11 +439,13 @@ impl ChunkLoads {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct ReferenceSolver {
     pub config: SolverConfig,
     /// Shared between clones (snapshots copy the mirror often); written through
     /// `Arc::make_mut`, which copies a structure only while it is shared.
+    /// Static (rebuilt from the scene on a snapshot restore, `World::restore`).
+    #[serde(skip)]
     pub structures: Vec<std::sync::Arc<Structure>>,
     pub chunks: Vec<Vec<ChunkState>>,
     pub bonds: Vec<Vec<RtBond>>,
@@ -508,6 +510,18 @@ impl Clone for StepBounds {
     }
 }
 
+impl serde::Serialize for StepBounds {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        self.0.lock().unwrap().serialize(ser)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for StepBounds {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        Ok(StepBounds(std::sync::Mutex::new(serde::Deserialize::deserialize(de)?)))
+    }
+}
+
 impl StepBounds {
     fn clear(&mut self) {
         self.0.get_mut().unwrap().clear();
@@ -517,7 +531,7 @@ impl StepBounds {
 /// `sim.methods.multirate`: a window of fine substeps (one frame) in which each bond is
 /// evaluated at its own rate. Closed (`ticks` 0) or used up, every bond is evaluated at
 /// every substep with weight 1, which is the single-rate integrator.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct MultirateWindow {
     /// Substeps in the window, and how many have been taken.
     ticks: u32,

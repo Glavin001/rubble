@@ -133,3 +133,31 @@ fn the_failure_margin_reaches_one_exactly_when_a_bond_disconnects() {
         assert!(live_near > 0.0, "{name}: live bonds carry a margin");
     }
 }
+
+/// A world restored from its state snapshot steps bit-identically to the original, mid
+/// impact (fractures, splits, contacts in flight).
+#[test]
+fn a_restored_snapshot_resumes_bit_identically() {
+    let s = scene();
+    let mut a = World::new(&s);
+    for _ in 0..2 {
+        a.step_frame();
+    }
+    assert!(a.solver.broken_bond_count() > 0 && a.solver.clusters.len() > 1, "the snapshot is taken mid-fracture");
+    let bytes = a.save_state().unwrap();
+    // (Byte equality of re-saved states is not a criterion: hash maps iterate in any order.)
+    let mut b = World::restore_state(&s, &bytes).unwrap();
+    let ledger = |w: &World| {
+        let e = &w.solver.energy;
+        [w.solver.time, e.bond_dissipation, e.damping_dissipation, e.external_work, e.softening_overshoot, w.contact.stored, w.contact.dissipated, w.mechanical_energy()]
+            .map(f64::to_bits)
+            .to_vec()
+    };
+    for f in 0..6 {
+        a.step_frame();
+        b.step_frame();
+        assert_eq!(state(&a), state(&b), "frame {f} after the restore");
+        assert_eq!(ledger(&a), ledger(&b), "frame {f}: clock and energy ledger");
+        assert_eq!(a.solver.substeps, b.solver.substeps);
+    }
+}
