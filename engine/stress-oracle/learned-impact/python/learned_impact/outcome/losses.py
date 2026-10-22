@@ -45,7 +45,7 @@ TERMS = ("margin", "demand", "break", "time", "motion", "def_motion", "pose", "i
 class LossConfig:
     weights: dict[str, float] = field(default_factory=lambda: {
         "margin": 5.0, "demand": 1.0, "break": 5.0, "time": 1.0, "motion": 2.0,
-        "def_motion": 2.0, "pose": 1.0, "fs_mode": 1.0, "fs_chunk": 1.0,
+        "def_motion": 2.0, "pose": 1.0, "fs_mode": 1.0, "fs_chunk": 1.0, **{k: 1.0 for k in FS_BOND_TERMS},
         "impactor": 2.0, "energy": 1.0, "damage": 1.0, "regime": 1.0})
     huber_delta: float = 1.0
     label_smoothing: float = 0.02  # single-run hard break labels
