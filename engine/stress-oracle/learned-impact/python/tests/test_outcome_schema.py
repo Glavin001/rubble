@@ -163,7 +163,6 @@ def test_energy_budget_counts_contact_energy():
     S.energy_budget(cs)
     assert e0["E_budget_ref"] == 120.0 and e0["E_budget_remaining"] == 6.0
     assert e1["E_budget_gain"] == -30.0 and e1["E_budget_remaining"] == 36.0  # 10 KE + 20 contact
-    bad = dict(e1)
-    bad.pop("E_contact_end")
+    bad = {k: v for k, v in e1.items() if not k.startswith("E_budget_") and k != "E_contact_end"}
     with pytest.raises(S.SchemaError):
         S.energy_budget([N(routed=True, call_index=0, energy=bad)])
