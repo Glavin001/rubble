@@ -1,8 +1,8 @@
 """Validation tiers by training coverage (planning with the user, 2026-10-22): validation and
 test are reported in three tiers, never one blended average, and selection uses tiers 1+2.
 
-- tier 1, in distribution: a training layout (its layout key occurs in training) and every
-  factor covered; also the in-memory held-out speeds of training ballistic families
+- tier 1, in distribution: a training layout in the same regime (its layout key occurs in
+  training with the same regime, see below) and every factor covered; also the in-memory held-out speeds of training ballistic families
   (`train.holdout_ballistic_speeds`).
 - tier 2, covered-factor generalisation: an unseen layout whose factors are each covered.
 - tier 3, extrapolation: any factor outside training coverage, or a recipe P1 designed as
@@ -78,7 +78,9 @@ def factors(r: dict) -> dict:
 class Coverage:
     def __init__(self, train: list[dict]):
         f = [factors(r) for r in train]
-        self.keys = {x["layout_key"] for x in f}
+        # tier 1 needs the layout seen in the same regime (a wall layout trained only at broad
+        # speeds is not in-distribution for a ballistic transition sweep on it)
+        self.keys = {(x["layout_key"], x["regime"]) for x in f}
         self.sets = {k: {x[k] for x in f} for k in ("depth", "chunk", "supports", "opening", "n_impactors",
                                                      "weibull", "loads")}
         self.thickness = (min(x["thickness"] for x in f), max(x["thickness"] for x in f))
@@ -120,7 +122,7 @@ class Coverage:
                        f"(training: depths {sorted(d for _, d in self.regimes)})")
         if why:
             return 3, why
-        return (1 if x["layout_key"] in self.keys else 2), []
+        return (1 if (x["layout_key"], x["regime"]) in self.keys else 2), []
 
 
 def load_recipes(root: Path, dirs: str = "viability-v1-*,sealed-v1-*") -> list[dict]:
@@ -186,6 +188,7 @@ def main(argv=None) -> None:
                     "are event ids), as train.py's --train-events")
     ap.add_argument("--train-dataset", default="", help="calls dir whose split-train events are "
                     "training too (resident ensembles)")
+    ap.add_argument("--exclude-families", default="", help="training families the run leaves out")
     a = ap.parse_args(argv)
     ids = None
     if a.train_events or a.train_dataset:
@@ -195,6 +198,9 @@ def main(argv=None) -> None:
                 d = json.loads(m.read_text())
                 if d.get("split") == "train":
                     ids.add(d["event_id"])
+    if ids is not None and a.exclude_families:
+        ex = set(a.exclude_families.split(","))
+        ids = {i for i in ids if not any(i.startswith(f"p1_{f}_") for f in ex)}
     t = tiers(Path(a.recipes), ids, a.dirs)
     Path(a.out).write_text(json.dumps(t, indent=1))
     md = markdown(t)
