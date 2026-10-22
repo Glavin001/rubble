@@ -1473,10 +1473,22 @@ pub fn live_call_labelled(world: &mut World, name: &str, ctx_from: &Value, chunk
 /// only added to `/3` (the hidden deformation: chunk_feat's last 12 columns, `chunk_def`,
 /// `chunk_def_uc`, `y_chunk_def_end`; the bodies: `chunk_body`, `chunk_body_q`), so dropping
 /// the additions is the `/3` record exactly.
+///
+/// Exact for builder revisions 4 and 5 only: revision 6 changed `/3`-era quantities (the
+/// chunk inertia features are principal moments, and the KE in `E_in` turns the
+/// structure-frame inertia with the cluster), so a `/3` model is refused rather than fed
+/// shifted inputs; run `/3` checkpoints with a revision-5 build.
 pub fn downgrade_to_v3(ev: &mut CallEvent) -> Result<(), String> {
     const V3_CHUNK_FEAT: usize = 33;
     if ev.manifest["schema_version"] != CALLS_SCHEMA {
         return Err(format!("downgrade_to_v3: schema {} is not {CALLS_SCHEMA}", ev.manifest["schema_version"]));
+    }
+    let rev = ev.manifest["builder_revision"].as_u64().unwrap_or(0);
+    if !(4..=5).contains(&rev) {
+        return Err(format!(
+            "downgrade_to_v3: builder revision {rev} is not exactly /3 plus additions (revision 6 changed the inertia features and E_in); \
+             run a /3 checkpoint with a revision-5 build"
+        ));
     }
     for call in &mut ev.calls {
         call.arrays.retain(|(k, _)| !matches!(k.as_str(), "chunk_def" | "chunk_def_uc" | "y_chunk_def_end" | "chunk_body" | "chunk_body_q"));
