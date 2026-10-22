@@ -57,11 +57,30 @@ pub struct ModelProvider {
     qs: bool,
     /// Wall-clock milliseconds of every call (request written → response read).
     pub call_ms: Vec<f64>,
+    /// `<dir>.lock`, holding this process's id while the provider runs.
+    lock: PathBuf,
 }
 
 impl ModelProvider {
     /// Start the provider in a fresh directory `dir` (removed first).
     pub fn spawn(spec: &ModelSpec, dir: &Path, scene: &str) -> Result<ModelProvider, String> {
+        // One provider per directory: two harnesses writing the same `--dir` (e.g. two
+        // evaluations with the same `--out`) would answer each other's requests and stop each
+        // other's provider through `done`. A live owner's lock is refused; a stale one is taken.
+        let lock = lock_path(dir);
+        if let Ok(text) = std::fs::read_to_string(&lock) {
+            if let Ok(pid) = text.trim().parse::<u32>() {
+                let alive = pid != std::process::id()
+                    && Command::new("kill").args(["-0", &pid.to_string()]).stderr(Stdio::null()).status().map(|s| s.success()).unwrap_or(false);
+                if alive {
+                    return Err(format!("{} is in use by process {pid} (another run with the same output directory?)", dir.display()));
+                }
+            }
+        }
+        if let Some(parent) = lock.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&lock, std::process::id().to_string()).map_err(|e| format!("{}: {e}", lock.display()))?;
         let _ = std::fs::remove_dir_all(dir);
         std::fs::create_dir_all(dir.join("resp")).map_err(|e| format!("{}: {e}", dir.display()))?;
         let py = spec.python_dir.join(".venv/bin/python");
@@ -83,7 +102,7 @@ impl ModelProvider {
             .stderr(Stdio::from(log))
             .spawn()
             .map_err(|e| format!("starting {}: {e}", py.display()))?;
-        let mut p = ModelProvider { spec: spec.clone(), dir: dir.to_path_buf(), scene: scene.to_string(), child, qs: true, call_ms: Vec::new() };
+        let mut p = ModelProvider { spec: spec.clone(), dir: dir.to_path_buf(), scene: scene.to_string(), child, qs: true, call_ms: Vec::new(), lock };
         p.qs = match spec.qs {
             Some(q) => q,
             None => p.read_needs_qs()?,
@@ -143,9 +162,16 @@ impl ModelProvider {
     }
 }
 
+fn lock_path(dir: &Path) -> PathBuf {
+    let mut name = dir.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    name.push(".lock");
+    dir.with_file_name(name)
+}
+
 impl Drop for ModelProvider {
     fn drop(&mut self) {
         let _ = std::fs::write(self.dir.join("done"), b"");
+        let _ = std::fs::remove_file(&self.lock);
         let t = Instant::now();
         while t.elapsed() < Duration::from_secs(5) {
             if let Ok(Some(_)) = self.child.try_wait() {
