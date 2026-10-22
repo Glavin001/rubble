@@ -61,6 +61,13 @@ def test_trainer_end_to_end(tmp_path, device):
     from learned_impact.outcome.train import load_model
     model, ck = load_model(run / "last.pt")
     assert ck["schema_version"] == "learned-impact-outcome/4"
+    # loss curves: eval-mode per-term losses on equal train and val samples at every eval
+    rows = [json.loads(x) for x in (run / "history.jsonl").read_text().splitlines()]
+    ev = [r for r in rows if r["kind"] == "eval"]
+    assert [r["step"] for r in ev] == [6, 12]
+    for r in ev:
+        assert set(r["train"]["terms"]) == set(r["val"]["terms"]) and "motion" in r["val"]["terms"]
+    assert any(r["kind"] == "train_running" for r in rows)
 
 
 def test_batches_pack_to_a_budget_without_dropping():

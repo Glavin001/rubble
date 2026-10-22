@@ -52,6 +52,7 @@ class TrainConfig:
     # 220 chunks = 37 ms/step). One call over the budget still forms its own batch.
     batch_budget: int = 20000
     select_tau: bool = True  # choose the break threshold on validation at the end
+    curve_calls: int = 4000  # calls per fixed sample (train and val) for the loss curves
     # Pad every batch to bucketed shapes (exact; MPS recompiles per shape: ~1 s a new one)
     pad_shapes: bool = True
     lr: float = 1e-3
@@ -462,6 +463,35 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
     norms = Lo.zero_baselines(norm_batches, cfg.loss, data.priors)
     prog.line("zero-predictor baselines: " + " ".join(f"{k}={v:.4g}" for k, v in norms.items()))
     val_batches = [coll(bc) for bc in _batches(data.val, cfg.batch_budget, cfg.batch_calls)]
+    # Loss curves (history.jsonl): per-term loss in eval mode on fixed, equally sized samples
+    # of validation and of *training* calls, so the two curves compare like with like (the
+    # running train loss is a noisy minibatch mean with pushforward and noise).
+    rs = random.Random(cfg.seed + 7)
+    n_curve = min(len(data.val), cfg.curve_calls) if data.val else 0
+    curve = {}
+    if n_curve:
+        for name, pool in (("val", data.val), ("train", data.train)):
+            sample = rs.sample(pool, min(n_curve, len(pool)))
+            curve[name] = [coll(bc) for bc in _batches(sample, cfg.batch_budget, cfg.batch_calls)]
+    hist = open(out / "history.jsonl", "a", buffering=1)
+
+    def curve_losses() -> dict:
+        model.eval()
+        res_ = {}
+        with torch.no_grad():
+            for name, bl in curve.items():
+                sums: dict[str, float] = defaultdict(float)
+                tot = 0.0
+                for cb in bl:
+                    cb = cb.to(dev)
+                    tm = Lo.loss_terms(model(cb), cb, cfg.loss, data.priors, cfg.decode)
+                    ls_, nm_ = Lo.total(tm, norms, cfg.loss)
+                    for k, v in nm_.items():
+                        sums[k] += float(v)
+                    tot += float(ls_)
+                res_[name] = {"loss": tot / len(bl), "terms": {k: v / len(bl) for k, v in sums.items()}}
+        model.train()
+        return res_
     best = {"score": float("inf"), "step": None, "metrics": None}
     last_log = time.time()
     acc: dict[str, list[float]] = defaultdict(list)
@@ -553,6 +583,11 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
             if balancer is not None:
                 gn += " λeff[" + " ".join(f"{k}={v:.2f}" for k, v in
                                          balancer.effective(cfg.loss.weights).items()) + "]"
+            hist.write(json.dumps({"kind": "train_running", "step": step + 1, "epoch": epoch,
+                                   "loss": float(np.mean(acc["loss"])),
+                                   "terms": {k: float(np.mean(v)) for k, v in acc.items()
+                                             if k not in ("loss", "grad_norm")},
+                                   "lr": _lr(step, cfg)}) + "\n")
             prog.line(f"step {step + 1}/{cfg.steps} ep {epoch} loss={np.mean(acc['loss']):.4f} "
                       f"[{terms_s}] |g|={np.mean(acc['grad_norm']):.3g} gshare[{gn}] "
                       f"lr={_lr(step, cfg):.2e} {rate:.2f} steps/s ETA {eta / 60:.1f} min")
@@ -562,6 +597,12 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
         if val_batches and ((step + 1) % cfg.eval_every == 0 or step == cfg.steps - 1):
             res = M.evaluate(model, val_batches, cfg.decode,
                              data.priors if cfg.loss.break_reweight == "prior" else None)
+            cl = curve_losses()
+            hist.write(json.dumps({"kind": "eval", "step": step + 1, "epoch": epoch, **cl,
+                                   "score": res.score, "metrics": res.metrics}) + "\n")
+            if cl:
+                prog.line(f"loss @ {step + 1}: train-sample {cl['train']['loss']:.4f} "
+                          f"val-sample {cl['val']['loss']:.4f}")
             msg = " ".join(f"{k}={v:.3f}" for k, v in sorted(res.metrics.items()))
             improved = res.score < best["score"]
             if improved:
@@ -571,6 +612,7 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
                       f"best={best['score']:.3f}@{best['step']}")
             prog.update(force=True, best_score=best["score"], best_step=best["step"])
     batches.close()
+    hist.close()
     # validation-only temperature for p_b, stored with the last checkpoint
     shift_priors = data.priors if cfg.loss.break_reweight == "prior" else None
     temperature = 1.0

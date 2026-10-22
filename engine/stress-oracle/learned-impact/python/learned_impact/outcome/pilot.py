@@ -99,12 +99,15 @@ def _val_report(ckpt: Path, data: Data, cfg: TrainConfig) -> dict:
 def run(dataset: str, out: str, sizes: list[int], seeds: list[int], variants: list[str],
         family: str | None, steps_per_event: float, min_steps: int, max_steps: int,
         device: str, model_cfg: ModelConfig, pushforward: float = 0.0,
-        rereport: bool = False, val_dataset: str | None = None) -> dict:
+        rereport: bool = False, val_dataset: str | None = None,
+        fractions: list[float] | None = None) -> dict:
     root = Path(out)
     prog = Progress(root, total=len(sizes) * len(seeds) * len(variants))
     full = Data(dataset, val_dataset=val_dataset)
     keep = (lambda c: True) if family is None else (lambda c: c.family == family)
     train_groups = sorted({c.split_group for c in full.train if keep(c)})
+    if fractions:  # shares of the training layout groups (nested, as for sizes)
+        sizes = [max(1, round(f * len(train_groups))) for f in fractions]
     val_calls = [c for c in full.val if keep(c)]
     if not val_calls:
         raise S.SchemaError(f"no validation calls for family {family!r}")
@@ -183,7 +186,8 @@ def summarise(results: list[dict], ensembles: bool) -> dict:
               for g in group_sizes}
         sizes = [int(round(ev[g])) for g in group_sizes]
         table = {}
-        for metric in [*gates, "score", "bond_f1", "bond_recall", "false_break_rate",
+        for metric in [*gates, "score", "crps_ram", "dense_1mARI", "dense_w1_log_mass", "bond_f1",
+                       "bond_recall", "false_break_rate",
                        "regime_brier"]:
             per = {int(round(ev[g])): [r["val"].get(metric) for r in rs if r["n_groups"] == g
                                        and r["val"] and r["val"].get(metric) is not None]
@@ -253,6 +257,8 @@ def main(argv=None) -> None:
                     help="validate on this dataset's val split (the bulk evaluation ensembles)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--sizes", default="250,1000,4000")
+    ap.add_argument("--fractions", default=None,
+                    help="instead of --sizes: shares of the training groups, e.g. 0.25,0.5,1")
     ap.add_argument("--seeds", default="0,1,2")
     ap.add_argument("--variants", default="A,B")
     ap.add_argument("--family", default=None)
@@ -272,7 +278,7 @@ def main(argv=None) -> None:
     run(a.dataset, a.out, [int(x) for x in a.sizes.split(",")],
         [int(x) for x in a.seeds.split(",")], a.variants.split(","), a.family,
         a.steps_per_event, a.min_steps, a.max_steps, a.device, mc, a.pushforward, a.rereport,
-        a.val_dataset)
+        a.val_dataset, [float(x) for x in a.fractions.split(",")] if a.fractions else None)
 
 
 if __name__ == "__main__":
