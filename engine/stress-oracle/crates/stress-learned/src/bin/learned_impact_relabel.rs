@@ -1,6 +1,9 @@
 //! Harness A relabelling for DAgger (`stress_learned::relabel`), batched and deterministic.
 //!
-//!   learned_impact_relabel --jobs JOBS.json --out DIR [--no-calls] [--threads N]
+//!   learned_impact_relabel --jobs JOBS.json --out DIR [--no-calls] [--threads N] [--calls v3]
+//!
+//! `--calls v3`: the calls downgraded to `learned-impact-outcome/3` (for models trained on /3;
+//! exact only from a builder revision-5 build, refused otherwise).
 //!
 //! JOBS.json: `[{"event": EVENT_DIR, "frame": F, "decoded": D.json | "state": S.msgpack | neither,
 //! "parent_call": any, "split_group": G}, …]`:
@@ -26,12 +29,17 @@ use stress_learned::relabel::{read_state, relabel_event, write_state, Provided};
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let (mut jobs, mut out, mut calls, mut threads) = (None, None, true, 0usize);
+    let (mut jobs, mut out, mut calls, mut threads, mut v3) = (None, None, true, 0usize, false);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--jobs" => jobs = args.next().map(PathBuf::from),
             "--out" => out = args.next().map(PathBuf::from),
             "--no-calls" => calls = false,
+            "--calls" => v3 = match args.next().as_deref() {
+                Some("v3") => true,
+                Some("v4") => false,
+                other => panic!("--calls v3|v4, not {other:?}"),
+            },
             "--threads" => threads = args.next().and_then(|v| v.parse().ok()).expect("--threads N"),
             other => panic!("unknown argument {other}"),
         }
@@ -87,6 +95,9 @@ fn main() {
                     c.manifest["parent_event_id"] = json!(parent);
                     c.manifest["parent_call"] = j["parent_call"].clone();
                     c.manifest["event_id"] = json!(format!("{parent}__dagger_{tag}_f{}", r.frame));
+                    if v3 {
+                        stress_learned::outcome_calls::downgrade_to_v3(c)?;
+                    }
                     write_event(&out.join(format!("{i}_call")), c, true)?;
                 }
                 lines.push(json!({"job": i, "event": event, "frame": r.frame, "chunks": r.members.chunks.len(), "impactors": r.members.impactors.len(), "event_seconds": secs, "event_jobs": idx.len()}));
