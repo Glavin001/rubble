@@ -96,8 +96,9 @@ def test_val_dataset_replaces_validation(tmp_path):
     assert {c.event_id for c in d.train} == {c.event_id for c in base.train}
     vb = {c.event_id for c in Data(str(tmp_path / "b")).val}
     assert vb and {c.event_id for c in d.val} == vb
-    with pytest.raises(S.SchemaError):
-        Data(str(tmp_path / "a"), val_dataset=str(tmp_path / "a"))
+    # one directory with every split (calls-v5) as both: its own val split, no duplicates
+    same = Data(str(tmp_path / "a"), val_dataset=str(tmp_path / "a"))
+    assert {c.event_id for c in same.val} == {c.event_id for c in base.val}
 
 
 def test_sources_mix_by_weight(tmp_path):
