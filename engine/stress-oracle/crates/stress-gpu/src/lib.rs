@@ -52,6 +52,7 @@ pub mod loads;
 pub mod methods;
 pub mod micro;
 pub mod gnn_probe;
+pub mod learned;
 
 /// What `build.rs` reflects from the generated WGSL: how many storage buffers each module's
 /// group 0 declares, and which group-0 bindings each entry point uses.
@@ -227,6 +228,8 @@ pub mod shaders {
     pub const PASSLOG: ShaderSet = shader_set!("passlog", [("pass_log", (256, 1, 1)), ("pass_log_head", (256, 1, 1)), ("pass_log_tail", (256, 1, 1))]);
     pub const ROUTING: ShaderSet = shader_set!("routing", [("route_islands", (64, 1, 1))]);
     pub const PUNCH: ShaderSet = shader_set!("punch", [("punch_islands", (256, 1, 1)), ("punch_fast", (1024, 1, 1))]);
+    /// The learned impact-outcome model's engine side (`STRESS_IMPACT_PUNCH=learned`).
+    pub const LEARNED: ShaderSet = shader_set!("learned", [("learned_decode", (256, 1, 1))]);
     pub const SPLIT: ShaderSet = shader_set!("split", [("split_components", (256, 1, 1)), ("split_children", (64, 1, 1)), ("split_frames", (64, 1, 1)), ("split_children_group", (64, 1, 1))]);
     pub const HUD_OVERLAY: ShaderSet = shader_set!("hud_overlay", [("hud_vs", (1, 1, 1)), ("hud_fs", (1, 1, 1))]);
     pub const THRESHOLD: ShaderSet = shader_set!("threshold", [("threshold_breaks", (256, 1, 1))]);
@@ -237,7 +240,7 @@ pub mod shaders {
     /// Every set (each Slang file with entry points).
     pub const ALL: &[ShaderSet] = &[
         WORLD_IC, SMOKE, STRESS_STEP, JOINT_TEST, WORLD, STRESS_RENDER, DESTRUCTION_RENDER, COUPLING, RESIDENT, CASCADE, PLAN, LAYOUT, SPAWN, COLLIDERS, PASS, PASSLOG, ROUTING, PUNCH, SPLIT,
-        HUD_OVERLAY, THRESHOLD, GNN_PROBE, GNN_PROBE_F16,
+        HUD_OVERLAY, THRESHOLD, GNN_PROBE, GNN_PROBE_F16, LEARNED,
     ];
 }
 
