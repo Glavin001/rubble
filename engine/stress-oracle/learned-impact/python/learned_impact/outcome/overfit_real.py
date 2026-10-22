@@ -214,10 +214,16 @@ def main(argv=None) -> None:
     ap.add_argument("--device", default="auto")
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--events-json", default=None,
+                    help="use this events.json (a previous run's) instead of selecting")
+    ap.add_argument("--extra-calls", default=None,
+                    help="DAgger: relabelled calls added to training only (scoring stays on the events)")
+    ap.add_argument("--init-checkpoint", default="", help="start from these weights (DAgger rounds)")
     a = ap.parse_args(argv)
     root, out = Path(a.dataset), Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    paths = select(root, a.n_events, a.seed)
+    paths = ([root / n for n in json.loads(Path(a.events_json).read_text())] if a.events_json
+             else select(root, a.n_events, a.seed))
     (out / "events.json").write_text(json.dumps([p.name for p in paths], indent=1))
     print(f"[overfit] {len(paths)} events: {[p.name for p in paths][:12]}")
     events = [S.load_event(p) for p in paths]
@@ -229,6 +235,12 @@ def main(argv=None) -> None:
         c.arrays = {k: v for k, v in c.arrays.items()
                     if k not in ("y_bond_break_freq", "y_impactor_perforate_freq", "ens_impactor_v_end")}
     d.train, d.val = calls, calls
+    if a.extra_calls:
+        extra = [S.load_event(p) for p in S.find_events(a.extra_calls)]
+        for e in extra:
+            d.structures[e.manifest["event_id"]] = e.structures
+        d.train = calls + [c for e in extra for c in e.calls if c.routed]
+        print(f"[overfit] + {len(d.train) - len(calls)} relabelled (DAgger) calls for training")
     d.successor, d.ensemble_aligned_calls = {}, 0
     pos = sum(float(c.arrays["y_bond_broke"].sum()) for c in calls)
     tot = sum(float(len(c.arrays["y_bond_broke"])) for c in calls)
@@ -236,7 +248,7 @@ def main(argv=None) -> None:
     cfg = TrainConfig(dataset=str(root), out=str(out), steps=a.steps, lr=a.lr, seed=a.seed,
                       device=a.device, weight_decay=0.0, noise_sigma=0.0, pushforward_prob=0.0,
                       eval_every=max(a.steps // 10, 50), select_tau=False,
-                      curve_calls=len(calls))
+                      curve_calls=len(calls), init_checkpoint=a.init_checkpoint)
     cfg.loss = dataclasses.replace(cfg.loss, label_smoothing=0.0)
     print(f"[overfit] {len(calls)} calls, {int(pos)} broken bonds, W{cfg.model.width} "
           f"rounds {cfg.model.rounds}")

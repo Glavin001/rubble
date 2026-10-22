@@ -54,6 +54,7 @@ class TrainConfig:
     batch_budget: int = 20000
     select_tau: bool = True  # choose the break threshold on validation at the end
     curve_calls: int = 4000  # calls per fixed sample (train and val) for the loss curves
+    init_checkpoint: str = ""  # start from these weights (and their input stats): DAgger rounds
     # Pad every batch to bucketed shapes (exact; MPS recompiles per shape: ~1 s a new one)
     pad_shapes: bool = True
     lr: float = 1e-3
@@ -562,7 +563,13 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
     (out / "config.json").write_text(json.dumps(cfg.to_dict(), indent=1))
     cache = HierarchyCache(cfg.model.levels)
     model = ImpactOutcomeModel(cfg.model)
-    if cfg.model.input_norm:
+    if cfg.init_checkpoint:
+        # fine-tuning (DAgger rounds): the previous weights *and* its input standardisation,
+        # so the inputs keep the scale the weights were trained on
+        init = torch.load(cfg.init_checkpoint, map_location="cpu", weights_only=False)
+        model.load_state_dict(init["model"])
+        prog.line(f"initialised from {cfg.init_checkpoint} (step {init.get('step')})")
+    elif cfg.model.input_norm:
         model.set_input_stats(input_stats(data.train, cfg.model.variant))
     model = model.to(dev)
     params = [p for p in model.parameters()]
@@ -791,6 +798,8 @@ def main(argv=None) -> None:
     ap.add_argument("--large", action="store_true", help="W128, rounds 4,3,2,3,4")
     ap.add_argument("--cost", action="store_true", help="W32, rounds 2,1,2,1,2 (P0's cost point)")
     ap.add_argument("--variant", default="B", choices=["A", "B"])
+    ap.add_argument("--init-checkpoint", default="",
+                    help="start from these weights and input statistics (fine-tuning, DAgger)")
     ap.add_argument("--drop-features", default="",
                     help="comma-separated <array>:<column> inputs held at 0 (ablation), e.g. "
                          "bond_feat:log_qs_hertz_util")
@@ -831,6 +840,7 @@ def main(argv=None) -> None:
     for s in seeds:
         out = Path(a.out) / (f"seed{s}" if len(seeds) > 1 else "")
         cfg = TrainConfig(dataset=dataset, val_dataset=a.val_dataset, out=str(out), steps=a.steps,
+                          init_checkpoint=a.init_checkpoint,
                           batch_calls=a.batch_calls, batch_budget=a.batch_budget, lr=a.lr, seed=s, device=a.device,
                           noise_sigma=a.noise, pushforward_prob=a.pushforward,
                           pushforward_steps=a.pushforward_steps,

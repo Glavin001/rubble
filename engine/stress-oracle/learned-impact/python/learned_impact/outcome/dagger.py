@@ -105,6 +105,33 @@ def export(ckpt: Path, data: Data, recordings: dict[str, Path], out: Path, tol: 
     return summary
 
 
+def export_from_rollouts(rollouts: Path, recordings: dict[str, Path], split_groups: dict[str, str],
+                         out: Path, every: int = 1) -> dict:
+    """Relabel jobs from a harness-A model rollout's dumped island states (true DAgger: the
+    model's own states, which teacher-forced predictions never reach). `rollouts` holds
+    `<event>/states/<frame>.msgpack` (P0's exact IslandState at the start of each routed
+    frame); each becomes the job {event, frame F, state}: the oracle's frame-F call from the
+    model's state, with the oracle's targets."""
+    jobs, missing = [], set()
+    for ev_dir in sorted(p for p in rollouts.iterdir() if (p / "states").is_dir()):
+        eid = ev_dir.name
+        rec = recordings.get(eid)
+        if rec is None:
+            missing.add(eid)
+            continue
+        frames = sorted(int(f.stem) for f in (ev_dir / "states").glob("*.msgpack"))
+        for f in frames[::every]:
+            jobs.append({"event": str(rec), "frame": f,
+                         "state": str(ev_dir / "states" / f"{f}.msgpack"),
+                         "parent_call": None, "parent_event_id": eid,
+                         "split_group": split_groups.get(eid, "")})
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "jobs.json").write_text(json.dumps(jobs, indent=1))
+    summary = {"rollouts": str(rollouts), "jobs": len(jobs), "events_without_recording": sorted(missing)}
+    (out / "export.json").write_text(json.dumps(summary, indent=1))
+    return summary
+
+
 def relabel(round_dir: Path, binary: Path, threads: int = 8) -> Path:
     """P0's oracle island step on every job; the calls land in `<round>/calls`."""
     out = round_dir / "calls"
