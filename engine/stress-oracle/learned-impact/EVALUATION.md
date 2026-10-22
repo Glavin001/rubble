@@ -9,17 +9,55 @@ trusted, whether a checkpoint is good. That needs four things:
 
 ## 1. Rules that keep the evaluation honest
 
-- **Pre-registered gates.** `findings/gates-v1.json` (to write before the first real
+- **Pre-registered gates.** `findings/gates-v1.json` (written 2026-10-21, before the first real
   training run) fixes, per gate:
   - the metric;
   - the bar: the oracle-calibrated skill rule, max(1.25, the held-out member's mean);
   - the scenes and families it applies to;
-  - the aggregation: per scene, never averaged across scenes.
+  - the aggregation: per call within a family, against the held-out member (below).
   - Changing it after results exist is a new version with the reason recorded, and the
     old verdict stays reported.
+- **The pre-registered ensemble gate (family acceptance, v1, 2026-10-21).** This is
+  `metrics.family_acceptance`, reported by `report.py` (`acceptance`, `accepted`).
+  - **Unit.** Every active ensemble call: an impact or secondary contact, or a break in any
+    member, with ≥ 3 aligned members. The gates are ram exit speed, partition and fragment
+    sizes, each scored by `calibrated_gate` (skill ≤ max(1.25, held-out member mean), with
+    the `TOLERANCE` floors).
+  - **Reference.** The held-out oracle member, scored by the identical rule. Each member in
+    turn is the candidate against the other members, and its own bar comes from those
+    remaining members (leave-one-out). So the oracle's own pass rate and mean skill ÷ bar
+    are what a candidate must match. They are not 100% and 1: P0 found the oracle fails
+    the literal bar on some scenes.
+  - **Rule, per family and per metric.** Accept ⇔ the model's pass rate ≥ the held-out
+    member pass rate **and** the model's mean skill ÷ bar ≤ the held-out member mean, over
+    the family's active ensemble calls. A family is accepted when all three metrics accept.
+    The checkpoint is accepted (`accepted`) when every family is.
+  - **Uncertainty.** We report 95% percentile bootstrap CIs (2,000 resamples, seed 0) for
+    each rate and for the paired differences. The bootstrap resamples whole ensembles,
+    because calls of one ensemble are correlated. `confident` additionally requires each
+    difference's CI to exclude the failing side. It is reported, not required: with about
+    10² ensembles per family the CIs are wide, and requiring it would reject an
+    oracle-equivalent model about half the time.
+- **Selection is on dense metrics, not on the gate.**
+  - Checkpoints, τ and the temperature are chosen on the validation selection score
+    (`EvalResult.score`).
+  - The score is computed over active calls from:
+    - CRPS of the ram exit speed ÷ v_ref;
+    - 1 − ARI on mass, against every member;
+    - W1 on log mass, against every member.
+  - Each term is ÷ its tolerance (0.05, 0.05, 0.1). The score is the mean over families plus
+    ¼ of the worst family.
+  - Single runs (no ensemble) use their errors, which is CRPS with one member.
+  - The pass/fail gate is too coarse to select on at these sample sizes, so it is used for
+    reporting only.
 - **Split discipline.**
-  - Validation selects checkpoints, λ, τ and the temperature.
-  - The test set is for reporting.
+  - Validation selects checkpoints, λ, τ and the temperature. It uses the bulk v1
+    evaluation ensembles (`calls-v3-eval`, val split; about 130 ensembles).
+  - **τ is frozen on validation** (stored in the checkpoint) and **confirmed on test**.
+    Confirmation means `report.py --split test` evaluates the acceptance gate at the frozen
+    τ. Its sweep over the same τ grid (`tau_sweep`, with the regret of the frozen choice)
+    is informational and never re-selects.
+  - The test set is for confirming the frozen checkpoint and τ, and for reporting.
   - The sealed set is opened once, at P4: `report.py` refuses `--split sealed` without
     `--confirm-sealed`.
   - Splits are by layout group, and `split_group` leakage fails loudly (`train.Data`).

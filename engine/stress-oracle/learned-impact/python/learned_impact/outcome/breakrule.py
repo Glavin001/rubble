@@ -141,9 +141,11 @@ def main(argv=None) -> None:
                                  formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--dataset", required=True)
+    ap.add_argument("--val-dataset", default=None,
+                    help="validation calls from this dataset's val split (eval ensembles)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
-    res = analyse(a.checkpoint, Data(a.dataset))
+    res = analyse(a.checkpoint, Data(a.dataset, val_dataset=a.val_dataset))
     Path(a.out).write_text(json.dumps(res, indent=1, default=float))
     Path(a.out).with_suffix(".md").write_text(markdown(res))
     print(markdown(res))

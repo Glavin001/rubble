@@ -1,0 +1,19 @@
+{
+ "version": "gates-v1",
+ "registered": "2026-10-21",
+ "implementation": "learned_impact.outcome.metrics.family_acceptance (via report.py)",
+ "unit": "active ensemble call (impact/secondary contact or any member breaking), >= 3 aligned members",
+ "metrics": {
+  "ram": {"distance": "|v_exit - v_exit'| along v0", "tolerance": "0.05 * v_ref"},
+  "partition": {"distance": "1 - mass-weighted ARI", "tolerance": 0.05},
+  "sizes": {"distance": "W1 on ln(fragment mass)", "tolerance": 0.1}
+ },
+ "per_call_rule": "skill <= max(1.25, mean held-out member skill); skill floor = tolerance / 1.25",
+ "reference": "each oracle member held out and scored against the others by the identical rule (leave-one-out bar)",
+ "family_accept": "for every metric: model pass rate >= held-out member pass rate AND model mean skill/bar <= held-out member mean",
+ "checkpoint_accept": "every family accepted",
+ "uncertainty": {"bootstrap": "percentile, resampling whole ensembles", "resamples": 2000, "seed": 0, "level": 0.95,
+                 "confident": "reported, not required: CI of each paired difference excludes the failing side"},
+ "selection": "validation dense score: CRPS ram / 0.05, 1-ARI vs every member / 0.05, W1 log mass vs every member / 0.1; mean over families + 0.25 * worst family",
+ "splits": {"select": "calls-v3-eval val", "confirm": "calls-v3-eval test at the frozen tau (sweep informational)", "sealed": "untouched until acceptance"}
+}

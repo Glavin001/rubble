@@ -82,3 +82,19 @@ def test_zstd_arrays_load_identically(tmp_path):
         assert set(ca.arrays) == set(cz.arrays)
         for k in ca.arrays:
             np.testing.assert_array_equal(ca.arrays[k], cz.arrays[k])
+
+
+def test_val_dataset_replaces_validation(tmp_path):
+    import pytest
+
+    from learned_impact.outcome.train import Data
+
+    write_dataset(tmp_path / "a", 6, seed=0)
+    write_dataset(tmp_path / "b", 6, seed=500)
+    base = Data(str(tmp_path / "a"))
+    d = Data(str(tmp_path / "a"), val_dataset=str(tmp_path / "b"))
+    assert {c.event_id for c in d.train} == {c.event_id for c in base.train}
+    vb = {c.event_id for c in Data(str(tmp_path / "b")).val}
+    assert vb and {c.event_id for c in d.val} == vb
+    with pytest.raises(S.SchemaError):
+        Data(str(tmp_path / "a"), val_dataset=str(tmp_path / "a"))

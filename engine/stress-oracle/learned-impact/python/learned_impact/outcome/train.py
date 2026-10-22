@@ -43,6 +43,7 @@ PHASE_BUCKET = {"contact": "contact", "blast": "contact", "secondary": "secondar
 @dataclass
 class TrainConfig:
     dataset: str = ""
+    val_dataset: str = ""  # validation from this dataset's val split instead (eval ensembles)
     out: str = "runs/outcome"
     steps: int = 1000
     batch_calls: int = 64  # upper bound on calls per batch
@@ -114,33 +115,55 @@ class Progress:
 
 
 # ---- data ---------------------------------------------------------------------------
-class Data:
-    def __init__(self, dataset: str, include_unrouted: bool = False):
-        self.events = [S.load_event(p) for p in S.find_events(dataset)]
-        if not self.events:
-            raise S.SchemaError(f"no events under {dataset}")
-        # Ensemble soft labels (break frequency, perforation frequency, members' exit
-        # velocities), aggregated in memory: the dataset on disk is never rewritten.
-        from .ensemble import aggregate
+def _load_events(dataset: str) -> tuple[list[S.Event], int]:
+    events = [S.load_event(p) for p in S.find_events(dataset)]
+    if not events:
+        raise S.SchemaError(f"no events under {dataset}")
+    # Ensemble soft labels (break frequency, perforation frequency, members' exit
+    # velocities), aggregated in memory: the dataset on disk is never rewritten.
+    from .ensemble import aggregate
 
-        groups: dict[str, list[S.Event]] = defaultdict(list)
-        for e in self.events:
-            if e.manifest.get("ensemble_id"):
-                groups[e.manifest["ensemble_id"]].append(e)
-        self.ensemble_aligned_calls = 0
-        for evs in groups.values():
-            for e in evs:
-                for c in e.calls:
-                    c.arrays = dict(c.arrays)
-            self.ensemble_aligned_calls += aggregate(evs)
+    groups: dict[str, list[S.Event]] = defaultdict(list)
+    for e in events:
+        if e.manifest.get("ensemble_id"):
+            groups[e.manifest["ensemble_id"]].append(e)
+    aligned = 0
+    for evs in groups.values():
+        for e in evs:
+            for c in e.calls:
+                c.arrays = dict(c.arrays)
+        aligned += aggregate(evs)
+    return events, aligned
+
+
+class Data:
+    """Train calls from `dataset`'s train split; validation calls from its val split, or,
+    with `val_dataset`, from that dataset's val split instead (the bulk evaluation
+    ensembles). Layout groups may not cross from train into any other split of either."""
+
+    def __init__(self, dataset: str, include_unrouted: bool = False,
+                 val_dataset: str | None = None):
+        self.events, self.ensemble_aligned_calls = _load_events(dataset)
+        val_events = self.events
+        if val_dataset:
+            val_events, n = _load_events(val_dataset)
+            self.ensemble_aligned_calls += n
+            ids = {e.manifest["event_id"] for e in self.events}
+            dup = ids & {e.manifest["event_id"] for e in val_events}
+            if dup:
+                raise S.SchemaError(f"event ids in both datasets: {sorted(dup)[:5]}")
+            self.events = self.events + val_events
         self.structures = {e.manifest["event_id"]: e.structures for e in self.events}
         keep = (lambda c: True) if include_unrouted else (lambda c: c.routed)
-        self.train = [c for e in self.events if e.manifest["split"] == "train"
-                      for c in e.calls if keep(c)]
-        self.val = [c for e in self.events if e.manifest["split"] == "val"
+        from_val = {id(e) for e in val_events} if val_dataset else set()
+        train_events = [e for e in self.events if e.manifest["split"] == "train"
+                        and id(e) not in from_val]
+        self.train = [c for e in train_events for c in e.calls if keep(c)]
+        self.val = [c for e in val_events if e.manifest["split"] == "val"
                     for c in e.calls if keep(c)]
-        g_train = {e.manifest["split_group"] for e in self.events if e.manifest["split"] == "train"}
-        g_other = {e.manifest["split_group"] for e in self.events if e.manifest["split"] != "train"}
+        g_train = {e.manifest["split_group"] for e in train_events}
+        g_other = {e.manifest["split_group"] for e in self.events
+                   if e.manifest["split"] != "train" or id(e) in from_val}
         leak = g_train & g_other
         if leak:
             raise S.SchemaError(f"split_group in train and val/test: {sorted(leak)[:5]}")
@@ -399,7 +422,7 @@ def _train(cfg: TrainConfig, data: Data | None, out: Path, prog: Progress) -> di
     np.random.seed(cfg.seed)
     random.seed(cfg.seed)
     dev = pick_device(cfg.device)
-    data = data or Data(cfg.dataset, cfg.include_unrouted)
+    data = data or Data(cfg.dataset, cfg.include_unrouted, cfg.val_dataset or None)
     (out / "config.json").write_text(json.dumps(cfg.to_dict(), indent=1))
     cache = HierarchyCache(cfg.model.levels)
     model = ImpactOutcomeModel(cfg.model)
@@ -569,6 +592,8 @@ def main(argv=None) -> None:
     ap.add_argument("--dataset", default="")
     ap.add_argument("--synthetic", type=int, default=0,
                     help="generate N synthetic events into <out>/data first (no accuracy claims)")
+    ap.add_argument("--val-dataset", default="",
+                    help="validate on this dataset's val split (the bulk evaluation ensembles)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--steps", type=int, default=1000)
     ap.add_argument("--batch-calls", type=int, default=64, help="max calls per batch")
@@ -612,10 +637,10 @@ def main(argv=None) -> None:
         width=a.width, rounds=tuple(int(x) for x in a.rounds.split(",")), levels=a.levels)
     mc.variant = a.variant
     seeds = [int(s) for s in a.seeds.split(",")]
-    data = Data(dataset)
+    data = Data(dataset, val_dataset=a.val_dataset or None)
     for s in seeds:
         out = Path(a.out) / (f"seed{s}" if len(seeds) > 1 else "")
-        cfg = TrainConfig(dataset=dataset, out=str(out), steps=a.steps,
+        cfg = TrainConfig(dataset=dataset, val_dataset=a.val_dataset, out=str(out), steps=a.steps,
                           batch_calls=a.batch_calls, batch_budget=a.batch_budget, lr=a.lr, seed=s, device=a.device,
                           noise_sigma=a.noise, pushforward_prob=a.pushforward,
                           pushforward_steps=a.pushforward_steps,

@@ -192,11 +192,116 @@ def fit_ballistic_limit(v0: np.ndarray, v_exit: np.ndarray) -> dict[str, float]:
 
 
 # ---- evaluation over a validation set --------------------------------------------------
+GATE_METRICS = ("ram", "partition", "sizes")
+
+
+def _loo_gates(D: np.ndarray, tol: float, literal: float = LITERAL_BAR) -> tuple[float, float]:
+    """Each member held out and scored against the others by `calibrated_gate`'s rule, from
+    the members' pairwise distance matrix (same numbers as calling `calibrated_gate` per
+    member, without recomputing distances): mean pass and mean skill ÷ bar."""
+    m = len(D)
+    floor = max(tol / literal, 1e-12)
+
+    def skill_in(i: int, pool: list[int]) -> float:  # member i against `pool` (i ∉ pool)
+        if len(pool) < 2:
+            return float("nan")
+        d_c = D[i, pool].mean()
+        d_m = np.mean([D[j, [k for k in pool if k != j]].mean() for j in pool])
+        return float(d_c / max(d_m, floor))
+
+    passes, sob = [], []
+    for i in range(m):
+        others = [k for k in range(m) if k != i]
+        s_ = skill_in(i, others)
+        h = [skill_in(j, [k for k in others if k != j]) for j in others] if len(others) >= 3 else []
+        bar = max(literal, float(np.mean(h))) if h else literal
+        passes.append(s_ <= bar)
+        sob.append(s_ / bar)
+    return float(np.mean(passes)), float(np.mean(sob))
+
+
+def _acceptance_row(rs: list[dict], gates: dict, pm, mass) -> dict:
+    """One active ensemble call: the model's pass and skill ÷ bar per metric, and the same
+    for each held-out oracle member scored by the identical rule against the other members
+    (leave-one-out: the member's own bar comes from the remaining members)."""
+    trues = [r["true"] for r in rs]
+    sizes = [fragment_masses(r["true"], r["mass"]) for r in rs]
+    v_ref = rs[0]["v_ref"]
+    spec = {"partition": (trues, lambda a, b_: 1 - weighted_ari(a, b_, mass), TOLERANCE["partition"]),
+            "sizes": (sizes, wasserstein_log_mass, TOLERANCE["sizes"])}
+    if len(rs[0]["imp_speed"]) and "ram" in gates:
+        spec["ram"] = ([float(r["imp_speed"][0]) for r in rs], lambda a, b_: abs(a - b_),
+                       TOLERANCE["ram"] * v_ref)
+    row = {"family": rs[0]["call"].family, "ensemble": rs[0]["call"].ensemble_id, "model": {},
+           "member": {}}
+    for name, (ys, dist, tol) in spec.items():
+        g = gates[name]
+        row["model"][name] = (float(g["pass"]), g["skill"] / g["bar"])
+        m = len(ys)
+        D = np.zeros((m, m))
+        for i in range(m):
+            for k in range(i + 1, m):
+                D[i, k] = D[k, i] = dist(ys[i], ys[k])
+        row["member"][name] = _loo_gates(D, tol)
+    return row
+
+
+def family_acceptance(rows: list[dict], n_boot: int = 2000, seed: int = 0,
+                      alpha: float = 0.05) -> dict:
+    """The pre-registered ensemble gate (EVALUATION.md §1), per family and metric:
+    accept ⇔ model pass rate ≥ held-out member pass rate AND model mean skill ÷ bar ≤ held-out
+    member mean, both over the family's active ensemble calls. Bootstrap CIs (percentile,
+    resampling whole ensembles, since calls of one ensemble are correlated) are reported for
+    each rate and for the paired differences; `confident` adds that the CI of each difference
+    excludes the failing side."""
+    rng = np.random.default_rng(seed)
+    out: dict = {}
+    for fam in sorted({r["family"] for r in rows}):
+        fr = [r for r in rows if r["family"] == fam]
+        ens = sorted({r["ensemble"] for r in fr})
+        idx = {e: [i for i, r in enumerate(fr) if r["ensemble"] == e] for e in ens}
+        fam_out = {"n_ensembles": len(ens), "n_calls": len(fr)}
+        for name in GATE_METRICS:
+            sel = [i for i, r in enumerate(fr) if name in r["model"]]
+            if not sel:
+                continue
+            a = np.array([[*fr[i]["model"][name], *fr[i]["member"][name]] for i in range(len(fr))
+                          if name in fr[i]["model"]])
+            pos = {i: k for k, i in enumerate(sel)}
+            groups = [[pos[i] for i in idx[e] if i in pos] for e in ens]
+            groups = [g for g in groups if g]
+
+            def stats(x):
+                mp, ms, hp, hs = x.mean(0)
+                return np.array([mp, hp, mp - hp, ms, hs, ms - hs])
+            point = stats(a)
+            boot = np.array([stats(a[np.concatenate([groups[j] for j in
+                                                     rng.integers(0, len(groups), len(groups))])])
+                             for _ in range(n_boot)])
+            lo, hi = np.quantile(boot, [alpha / 2, 1 - alpha / 2], axis=0)
+            ci = lambda k: [float(lo[k]), float(hi[k])]  # noqa: E731
+            accept = bool(point[2] >= 0 and point[5] <= 0)
+            fam_out[name] = {
+                "model_pass_rate": float(point[0]), "model_pass_rate_ci": ci(0),
+                "member_pass_rate": float(point[1]), "member_pass_rate_ci": ci(1),
+                "pass_rate_diff_ci": ci(2),
+                "model_mean_skill_over_bar": float(point[3]), "model_mean_skill_over_bar_ci": ci(3),
+                "member_mean_skill_over_bar": float(point[4]),
+                "member_mean_skill_over_bar_ci": ci(4), "skill_over_bar_diff_ci": ci(5),
+                "accept": accept, "confident": bool(accept and lo[2] >= 0 and hi[5] <= 0)}
+        metric_entries = [fam_out[k] for k in GATE_METRICS if k in fam_out]
+        fam_out["accept"] = bool(metric_entries) and all(e["accept"] for e in metric_entries)
+        out[fam] = fam_out
+    return out
+
+
 @dataclass
 class EvalResult:
     metrics: dict[str, float] = field(default_factory=dict)
     per_family: dict[str, dict[str, float]] = field(default_factory=dict)
     score: float = float("inf")  # lower is better; the selection criterion
+    ensemble_rows: list = field(default_factory=list)  # per active ensemble call: gate records
+    acceptance: dict = field(default_factory=dict)  # per family: the pre-registered gate
 
 
 def _per_call_outcomes(b: Batch, dec: dict) -> list[dict]:
@@ -236,7 +341,7 @@ def _per_call_outcomes(b: Batch, dec: dict) -> list[dict]:
 
 @torch.no_grad()
 def evaluate(model, batches, decode_cfg: D.DecodeConfig | None = None,
-             priors: dict[str, float] | None = None) -> EvalResult:
+             priors: dict[str, float] | None = None, acceptance: bool = False) -> EvalResult:
     """Run the model, decode, and compute the skill metrics. Ensemble members are grouped
     by (ensemble_id, call_index) when present; otherwise each call is scored against its
     single run (errors, not skill)."""
@@ -268,12 +373,15 @@ def evaluate(model, batches, decode_cfg: D.DecodeConfig | None = None,
         imp_p.append(torch.sigmoid(out["imp_perf_logit"]).cpu().numpy()[valid])
         imp_y.append(np.where(bc.t["y_imp_has_freq"].numpy(), bc.t["y_imp_perf_freq"].numpy(),
                               (reg == S.REGIMES["perforate"]).astype(float))[valid])
-    res = _summarise(rows, bond_p, bond_y, imp_p, imp_y, bound_active, bound_total)
+    res = _summarise(rows, bond_p, bond_y, imp_p, imp_y, bound_active, bound_total, acceptance)
     model.train()
     return res
 
 
-def _summarise(rows, bond_p, bond_y, imp_p, imp_y, bound_active, bound_total) -> EvalResult:
+def _summarise(rows, bond_p, bond_y, imp_p, imp_y, bound_active, bound_total,
+               acceptance: bool = False) -> EvalResult:
+    """`acceptance` adds the pre-registered family gate (held-out members, bootstrap CIs):
+    for reports; training's validation passes select on the dense score and skip it."""
     res = EvalResult()
     bp, by = np.concatenate(bond_p), np.concatenate(bond_y)
     ip, iy = np.concatenate(imp_p), np.concatenate(imp_y)
@@ -331,6 +439,14 @@ def _summarise(rows, bond_p, bond_y, imp_p, imp_y, bound_active, bound_total) ->
                                                tolerance=TOLERANCE["ram"] * x["v_ref"])
                 per[fam]["crps_ram" + sfx].append(crps_ensemble(float(x["imp_speed_hat"][0]), speeds)
                                             / x["v_ref"])
+            # dense per-call selection metrics: the model's prediction against every member
+            per[fam]["dense_1mARI" + sfx].append(float(np.mean(
+                [1 - weighted_ari(pm, r["true"], mass) for r in rs])))
+            per[fam]["dense_w1_log_mass" + sfx].append(float(np.mean(
+                [wasserstein_log_mass(fragment_masses(pm, mass), fragment_masses(r["true"], r["mass"]))
+                 for r in rs])))
+            if active and acceptance:
+                res.ensemble_rows.append(_acceptance_row(rs, gates, pm, mass))
             for name, gt in gates.items():
                 per[fam][f"skill_{name}" + sfx].append(gt["skill"])
                 per[fam][f"skill_bar_{name}" + sfx].append(gt["bar"])
@@ -340,6 +456,14 @@ def _summarise(rows, bond_p, bond_y, imp_p, imp_y, bound_active, bound_total) ->
             n_frag = [len(np.unique(r["true"])) for r in rs]
             nf_hat = len(np.unique(pm))
             per[fam]["fragments_in_range" + sfx].append(float(min(n_frag) <= nf_hat <= max(n_frag)))
+        else:  # single runs: the dense metrics are their errors (CRPS of one member = |error|)
+            for r in rs:
+                per[fam]["dense_1mARI" + sfx].append(1 - weighted_ari(r["pred"], r["true"], r["mass"]))
+                per[fam]["dense_w1_log_mass" + sfx].append(wasserstein_log_mass(
+                    fragment_masses(r["pred"], r["mass"]), fragment_masses(r["true"], r["mass"])))
+                if len(r["imp_speed"]):
+                    per[fam]["crps_ram" + sfx].append(abs(float(r["imp_speed_hat"][0])
+                                                          - float(r["imp_speed"][0])) / r["v_ref"])
         for r in rs:
             per[fam]["one_minus_ari" + sfx].append(1 - weighted_ari(r["pred"], r["true"], r["mass"]))
             per[fam]["w1_log_mass" + sfx].append(wasserstein_log_mass(
@@ -357,18 +481,22 @@ def _summarise(rows, bond_p, bond_y, imp_p, imp_y, bound_active, bound_total) ->
     keys = sorted({k for d in res.per_family.values() for k in d})
     for k in keys:
         m[k] = float(np.nanmean([d[k] for d in res.per_family.values() if k in d]))
-    # selection score: against the ensemble when present — each skill ÷ its oracle-calibrated
-    # bar (≤ 1 passes); else single-run errors scaled to the plan's tolerances (ram 5% of v0)
-    if any(k.startswith("skill_over_bar_") for k in m):
-        parts = [m.get(f"skill_over_bar_{k}") for k in ("ram", "partition", "sizes")]
-    else:
-        parts = [m.get("ram_err_rel", 0.0) / 0.05, m.get("one_minus_ari", 0.0) * 4,
-                 m.get("w1_log_mass", 0.0), (1 - f) * 4]
-    worst_family = max((np.nanmean([d.get("ram_err_rel", 0) / 0.05,
-                                    d.get("one_minus_ari", 0) * 4])
-                        for d in res.per_family.values()), default=0.0)
-    parts = [x for x in parts if x is not None and np.isfinite(x)]
-    res.score = float((np.mean(parts) if parts else float("inf")) + 0.25 * worst_family)
+    # Selection score (checkpoints, τ, temperature; validation only): the dense per-call
+    # metrics on active calls — CRPS of the ram exit speed (÷ v_ref), 1 − ARI and W1 on log
+    # mass against every member — each ÷ its physical tolerance, mean over families plus a
+    # quarter of the worst family. The ensemble pass/fail gates (`family_acceptance`) are too
+    # coarse to select on with ~10² ensembles per family; they are for reporting.
+    def composite(d: dict) -> float:
+        parts = [d.get("crps_ram", np.nan) / TOLERANCE["ram"],
+                 d.get("dense_1mARI", np.nan) / TOLERANCE["partition"],
+                 d.get("dense_w1_log_mass", np.nan) / TOLERANCE["sizes"]]
+        parts = [x for x in parts if np.isfinite(x)]
+        return float(np.mean(parts)) if parts else float("nan")
+    fam_scores = [c for c in (composite(d) for d in res.per_family.values()) if np.isfinite(c)]
+    res.score = (float(np.mean(fam_scores) + 0.25 * max(fam_scores)) if fam_scores
+                 else float("inf"))
+    if acceptance:
+        res.acceptance = family_acceptance(res.ensemble_rows)
     m["score"] = res.score
     m["ensemble_aligned_groups"] = float(n_ens_groups)
     return res
@@ -446,7 +574,7 @@ def three_way(model, batches, decode_cfg: D.DecodeConfig | None = None,
         report["available"].append(k)
         pp = probs[k]
         summaries[k] = _summarise(rs, pp[0], pp[1], [np.zeros(0)], [np.zeros(0)],
-                                  *(bounds if k == "model" else (0, 1)))
+                                  *(bounds if k == "model" else (0, 1)), acceptance=k == "model")
     if "model" not in summaries:
         return report
     ens = any(k in summaries["model"].metrics for k in PRIMARY_ENSEMBLE)
@@ -496,5 +624,7 @@ def three_way(model, batches, decode_cfg: D.DecodeConfig | None = None,
                 "model_mean_1mARI_ram": me.tolist(), "qs_mean_1mARI_ram": qe.tolist(),
                 "pass": bool(np.all(me <= qe + np.array(tol)))}
     report["metrics"] = {k: s_.metrics for k, s_ in summaries.items()}
+    report["acceptance"] = summaries["model"].acceptance
+    report["selection_score"] = summaries["model"].score
     model.train()
     return report

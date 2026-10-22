@@ -145,3 +145,68 @@ def test_quiet_calls_are_scored_apart(tmp_path):
     assert "skill_over_bar_partition" in fam and "skill_over_bar_partition_quiet" in fam
     # active calls carry the breaks: missing them all cannot pass there
     assert fam["skill_over_bar_partition"] > fam["skill_over_bar_partition_quiet"]
+
+
+def _ens_rows(rng, n_ens, members, model_noise, fam="free_wall"):
+    """Synthetic aligned ensembles: 6 chunks, members split them at a random cut and exit at
+    v ~ N(20, 1); the model's prediction is a member-like draw (noise 1) or far off."""
+    from types import SimpleNamespace
+
+    rows = []
+    for e in range(n_ens):
+        key = np.arange(6, dtype=np.uint64)
+        mass = np.ones(6)
+        cuts = rng.integers(2, 5, members)
+        vs = rng.normal(20, 1, members)
+        cut_hat = int(rng.integers(2, 5)) if model_noise < 5 else 1
+        v_hat = float(rng.normal(20, model_noise))
+        for k in range(members):
+            c = SimpleNamespace(ensemble_id=f"e{e}", call_index=0, family=fam, phase="contact",
+                                event_id=f"e{e}_m{k}", arrays={"chunk_key": key})
+            rows.append({"call": c, "mass": mass, "pred": (np.arange(6) >= cut_hat).astype(int),
+                         "true": (np.arange(6) >= cuts[k]).astype(int),
+                         "imp_speed_hat": np.array([v_hat]), "imp_speed": np.array([vs[k]]),
+                         "v_ref": 20.0, "imp_v0": np.array([30.0]),
+                         "broke_hat": np.array([True]), "broke": np.array([True]),
+                         "freq": np.array([1.0])})
+    return rows
+
+
+def _summ(rows):
+    z = [np.zeros(1)]
+    return M._summarise(rows, z, z, [np.zeros(0)], [np.zeros(0)], 0, 1, acceptance=True)
+
+
+def test_family_acceptance_member_like_passes_outlier_fails():
+    rng = np.random.default_rng(0)
+    good = _summ(_ens_rows(rng, 40, 8, 1.0))
+    acc = good.acceptance["free_wall"]
+    assert acc["n_ensembles"] == 40 and acc["n_calls"] == 40
+    for k in ("ram", "partition", "sizes"):
+        e = acc[k]
+        assert 0 <= e["member_pass_rate"] <= 1
+        lo, hi = e["pass_rate_diff_ci"]
+        assert lo <= e["model_pass_rate"] - e["member_pass_rate"] <= hi
+        # a member-like model is statistically indistinguishable from a held-out member
+        assert lo < 0.15 and hi > -0.15
+    bad = _summ(_ens_rows(np.random.default_rng(0), 40, 8, 10.0))
+    b = bad.acceptance["free_wall"]
+    assert not b["accept"] and not b["ram"]["accept"] and not b["partition"]["accept"]
+    assert b["ram"]["skill_over_bar_diff_ci"][0] > 0
+    # the dense selection score ranks the outlier worse
+    assert bad.score > good.score
+
+
+def test_heldout_member_uses_the_identical_rule():
+    rng = np.random.default_rng(1)
+    rows = _ens_rows(rng, 1, 8, 1.0)
+    r = M._acceptance_row(rows, {
+        "ram": M.calibrated_gate(0.0, [0.0, 1.0, 2.0], lambda a, b: abs(a - b)),
+        "partition": M.calibrated_gate(0.0, [0.0, 1.0, 2.0], lambda a, b: abs(a - b)),
+        "sizes": M.calibrated_gate(0.0, [0.0, 1.0, 2.0], lambda a, b: abs(a - b))},
+        rows[0]["pred"], rows[0]["mass"])
+    speeds = [float(x["imp_speed"][0]) for x in rows]
+    held = [M.calibrated_gate(speeds[i], speeds[:i] + speeds[i + 1:], lambda a, b: abs(a - b),
+                              tolerance=M.TOLERANCE["ram"] * 20.0) for i in range(8)]
+    assert abs(r["member"]["ram"][0] - np.mean([h["pass"] for h in held])) < 1e-12
+    assert abs(r["member"]["ram"][1] - np.mean([h["skill"] / h["bar"] for h in held])) < 1e-12

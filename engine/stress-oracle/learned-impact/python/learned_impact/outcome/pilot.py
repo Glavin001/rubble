@@ -99,10 +99,10 @@ def _val_report(ckpt: Path, data: Data, cfg: TrainConfig) -> dict:
 def run(dataset: str, out: str, sizes: list[int], seeds: list[int], variants: list[str],
         family: str | None, steps_per_event: float, min_steps: int, max_steps: int,
         device: str, model_cfg: ModelConfig, pushforward: float = 0.0,
-        rereport: bool = False) -> dict:
+        rereport: bool = False, val_dataset: str | None = None) -> dict:
     root = Path(out)
     prog = Progress(root, total=len(sizes) * len(seeds) * len(variants))
-    full = Data(dataset)
+    full = Data(dataset, val_dataset=val_dataset)
     keep = (lambda c: True) if family is None else (lambda c: c.family == family)
     train_groups = sorted({c.split_group for c in full.train if keep(c)})
     val_calls = [c for c in full.val if keep(c)]
@@ -144,7 +144,8 @@ def run(dataset: str, out: str, sizes: list[int], seeds: list[int], variants: li
                 n_events = len({c.event_id for c in d.train})
                 steps = int(np.clip(steps_per_event * n_events, min_steps, max_steps))
                 mc = dataclasses.replace(model_cfg, variant=variant)
-                cfg = TrainConfig(dataset=dataset, out=str(rdir), steps=steps, seed=seed,
+                cfg = TrainConfig(dataset=dataset, val_dataset=val_dataset or "", out=str(rdir),
+                                  steps=steps, seed=seed,
                                   device=device, model=mc, eval_every=max(steps // 8, 50),
                                   pushforward_prob=pushforward)
                 t0 = time.time()
@@ -248,6 +249,8 @@ def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("--dataset", required=True)
+    ap.add_argument("--val-dataset", default=None,
+                    help="validate on this dataset's val split (the bulk evaluation ensembles)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--sizes", default="250,1000,4000")
     ap.add_argument("--seeds", default="0,1,2")
@@ -265,7 +268,8 @@ def main(argv=None) -> None:
     mc = ModelConfig.reference() if a.reference else ModelConfig()
     run(a.dataset, a.out, [int(x) for x in a.sizes.split(",")],
         [int(x) for x in a.seeds.split(",")], a.variants.split(","), a.family,
-        a.steps_per_event, a.min_steps, a.max_steps, a.device, mc, a.pushforward, a.rereport)
+        a.steps_per_event, a.min_steps, a.max_steps, a.device, mc, a.pushforward, a.rereport,
+        a.val_dataset)
 
 
 if __name__ == "__main__":
