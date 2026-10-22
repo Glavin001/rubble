@@ -455,6 +455,62 @@ stage (encoding, momentum projection, the 5% KE bound) reproduced the oracle exa
 - **Reference speed:** `v` now also covers the island's own motion: 5 m/s at least, plus every body's speed relative to the island centre of mass. Before, it was the predicted contacts' closing speed alone: 0.03–0.06 m/s in 10% of calls while debris moved at 40–80 m/s, so some features reached about 600. Now `v` has median 5 and max 76 m/s. Chunk `v_rel_body` ≤ 1.0 and cracked `v_rel_edge` ≤ 1.7. Amplitude still reaches the model through the `/c` features.
 - **Cracked edges:** a face must be within the contact margin and overlap laterally to count (it was gap < 0.5 L along the normal only).
 
+## Draft: `/4`, hidden deformation carried across calls (2026-10-21, not yet built)
+
+Why: P0's closed loop shows the reduced state drops each chunk's elastic deformation at the
+handoff. The free wall's reduced-state ceiling fails fragment motion, and with the
+deformation kept it passes. Anchored walls under gravity lose their prestress every routed
+frame and over-crack. So a call must take the island's hidden deformation as input and
+return it at frame end. **P0 sends the exact fields; until then the names and scales below
+are placeholders to agree.**
+
+Definitions, per chunk i of island I:
+- The rigid reference is the island's frame-start rigid motion (COM pose and v_com, ω_I)
+  with the chunk at its rest offset from the pristine structure.
+- `u_i` = chunk COM displacement from its rest offset, and `θ_i` = rotation vector of the
+  chunk relative to the island's rotation. Both are in the island body frame.
+- `v_def_i` = v_i − (v_com + ω_I × r_i) and `ω_def_i` = ω_i − ω_I, in the island body frame.
+- They are mass-weighted to zero net momentum and angular momentum per island, so the
+  rigid part keeps all of the island's momentum.
+
+Inputs (appended to `chunk_feat`, nondimensional):
+
+| column | meaning | scale |
+|---|---|---|
+| `def_u_body_0..2` | u_i | ÷ u_c, the mean over the chunk's live bonds of the tensile failure elongation (strength ÷ stiffness · L), so 1 ≈ at failure |
+| `def_rot_body_0..2` | θ_i | ÷ θ_c = u_c ÷ R_i |
+| `def_v_body_0..2` | v_def_i | ÷ `v` |
+| `def_w_body_0..2` | ω_def_i · R_i | ÷ `v` |
+
+Plus a per-bond `def_strain` column (the bond's elongation from the two chunks'
+deformation ÷ its failure elongation): the prestress the bond carries at frame start.
+
+Carried SI arrays: `chunk_def_u`, `chunk_def_rot`, `chunk_def_v`, `chunk_def_w` (f32
+`[Nc,3]`, island body frame), for the decode and pushforward.
+
+Targets (frame end, oracle, same definitions about the island's frame-end rigid motion):
+`y_chunk_def_u_end`, `y_chunk_def_rot_end`, `y_chunk_def_v_end`, `y_chunk_def_w_end`.
+
+Model, decode and loss (P2):
+- **Heads.** The chunk head adds 12 outputs, Δu, Δθ, Δv_def and Δω_def in the body frame,
+  scaled as the inputs.
+- **Decode.** The deformation passes through to the decoded state. It is first projected to
+  zero net momentum and angular momentum per fragment, so the momentum projection stays
+  exact.
+- **Energy bound.** The bound covers deformation kinetic energy plus elastic energy
+  (½ k (elongation)² over live bonds, from the SI stiffness):
+  KE_rigid + KE_def + U_el ≤ E_in + W_g + tol · E_in.
+  For that to hold, E_in also counts the frame-start U_el and KE_def.
+- **Losses.**
+  - `def_motion`: ½ m |Δv_def error|² + ½ ωᵀ I ω on the ω_def error, ÷ E_in.
+  - `def_pose`: the strain-energy norm ½ k |elongation error|² summed over bonds, ÷ E_in.
+  - Both are normalised by their zero predictor, like every other term.
+- **Pushforward.** It rewrites the deformation inputs from the model's own outputs.
+
+Provider and decoded state: `learned-impact-decoded-state/2` adds per-chunk `def_u`,
+`def_rot`, `def_v` and `def_w`, so the harness restores the deformation instead of
+resetting it (P0's `STRESS_DECODED_DEFORMATION=1`).
+
 ## Versioning
 
 `learned-impact-outcome/3`. Any change of meaning, order or shape bumps the version; the
