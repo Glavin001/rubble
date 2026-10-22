@@ -67,6 +67,7 @@ static const uint CALL_F4 = 10;
 static const uint NODE_F4 = 14;
 static const uint BOND_F4 = 2;
 static const uint CISL_U4 = 2;
+static const uint ISL_U4 = 5;
 static const uint IMP_F4 = 4;
 // 64 threads per group (see learned_feat.slang: Metal caps a heavy pipeline's group size).
 static const uint G = 64;
@@ -105,7 +106,8 @@ static const uint CTL_FB_NONFINITE = 14;
 static const uint CTL_FB_INFEASIBLE = 15;
 static const uint CTL_FB_RANGE = 16;
 static const uint CTL_ROUTED = 17;    // islands routed into calls this frame
-static const uint CTL_PHASE = 18;     // 1: between a batch's window end and the next batch (`learned_place` acts)
+static const uint CTL_PHASE = 18;
+static const uint CTL_JOINED = 19;   // islands joined to a call by their approach (`learned_debris`)     // 1: between a batch's window end and the next batch (`learned_place` acts)
 static const uint CTL_WORDS = 32;
 
 static const uint ST_DISCONNECTED = 1;
@@ -146,8 +148,9 @@ struct LearnedParams
 [[vk::binding(2, 0)]] RWStructuredBuffer<float4> calls;
 [[vk::binding(3, 0)]] RWStructuredBuffer<float4> nodes;
 [[vk::binding(4, 0)]] RWStructuredBuffer<float4> bonds;
-// Per island 4 uint4: (impactor mask, call, live bonds, -), then as float bits its bounds lo,
-// hi, and its launch (debris routing: 2 (v_impactor - v_island) dt, launched).
+// Per island ISL_U4 uint4: (impactor mask, call, live bonds, joined), then as float bits its
+// bounds lo, hi, its launch (debris routing: 2 (v_impactor - v_island) dt, launched), and
+// (its velocity, the mask the impactors gave it: what `learned_debris` reads of others).
 [[vk::binding(5, 0)]] RWStructuredBuffer<uint4> isl;
 // Per call island 2 float4: (centre of mass (world), mass), (velocity, anchored) (learned_feat).
 [[vk::binding(6, 0)]] RWStructuredBuffer<float4> cislf;
@@ -768,8 +771,9 @@ void learned_select(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
     {
         if (t == 0)
         {
-            isl[4 * i] = uint4(0, NONE, 0, 0);
-            isl[4 * i + 3] = uint4(0);
+            isl[ISL_U4 * i] = uint4(0, NONE, 0, 0);
+            isl[ISL_U4 * i + 3] = uint4(0);
+            isl[ISL_U4 * i + 4] = uint4(0);
         }
         return;
     }
@@ -842,44 +846,64 @@ void learned_select(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
             }
         }
     }
-    isl[4 * i] = uint4(mask, NONE, 0, 0);
-    isl[4 * i + 1] = asuint(float4(lo, 0.0));
-    isl[4 * i + 2] = asuint(float4(hi, 0.0));
-    isl[4 * i + 3] = asuint(float4(launch, launched ? 1.0 : 0.0));
+    isl[ISL_U4 * i] = uint4(mask, NONE, 0, 0);
+    isl[ISL_U4 * i + 1] = asuint(float4(lo, 0.0));
+    isl[ISL_U4 * i + 2] = asuint(float4(hi, 0.0));
+    isl[ISL_U4 * i + 3] = asuint(float4(launch, launched ? 1.0 : 0.0));
+    isl[ISL_U4 * i + 4] = uint4(asuint(f.v), mask);
 }
 
 // ------------------------------------------------------------------ learned_debris
 
-// STRESS_DEBRIS_ROUTING=1: an island no impactor reaches joins the call of a launched
-// island whose bounds, swept by its launch, overlap its own (one level, as the host's
-// routing; the launched islands' masks do not change here).
+// An island no impactor reaches joins a call (one level; only the impactors' masks are
+// read of others, `isl[ISL_U4 * i + 4].w`, so the result does not depend on thread order):
+//   - STRESS_DEBRIS_ROUTING=1: when a launched island's bounds, swept by its launch, overlap
+//     its own (the host routing's elastic bound);
+//   - always: when its bounds, swept by its velocity relative to a struck island over the
+//     frame, overlap that island's. A called island's bodies are held static through the
+//     next frame (the call's contacts filtered), so a body that would meet them must be in
+//     the call, or it would meet an immovable object (counted: `joined`).
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void learned_debris(uint3 id: SV_DispatchThreadID)
 {
     uint j = id.x;
     uint live = counters[0];
-    if (params.debris == 0 || j >= live || route[0] == 0 || isl[4 * j].x != 0)
+    if (j >= live || route[0] == 0 || isl[ISL_U4 * j + 4].w != 0)
         return;
-    float3 lo = asfloat(isl[4 * j + 1]).xyz;
-    float3 hi = asfloat(isl[4 * j + 2]).xyz;
+    float3 lo = asfloat(isl[ISL_U4 * j + 1]).xyz;
+    float3 hi = asfloat(isl[ISL_U4 * j + 2]).xyz;
     if (!(lo.x <= hi.x))
         return;
+    float3 vj = asfloat(isl[ISL_U4 * j + 4].xyz);
     uint mask = 0;
+    bool approach = false;
     for (uint i = 0; i < live; i++)
     {
-        float4 l = asfloat(isl[4 * i + 3]);
-        if (l.w == 0.0 || i == j)
+        uint mi = isl[ISL_U4 * i + 4].w;
+        if (mi == 0 || i == j)
             continue;
-        float3 a = asfloat(isl[4 * i + 1]).xyz;
-        float3 b = asfloat(isl[4 * i + 2]).xyz;
-        float3 slo = min(a, a + l.xyz) - float3(1e-3);
-        float3 shi = max(b, b + l.xyz) + float3(1e-3);
-        if (all(slo <= hi) && all(lo <= shi))
-            mask |= isl[4 * i].x;
+        float3 a = asfloat(isl[ISL_U4 * i + 1]).xyz;
+        float3 b = asfloat(isl[ISL_U4 * i + 2]).xyz;
+        float4 l = asfloat(isl[ISL_U4 * i + 3]);
+        if (params.debris != 0 && l.w != 0.0)
+        {
+            float3 slo = min(a, a + l.xyz) - float3(1e-3);
+            float3 shi = max(b, b + l.xyz) + float3(1e-3);
+            if (all(slo <= hi) && all(lo <= shi))
+                mask |= mi;
+        }
+        float3 rel = (vj - asfloat(isl[ISL_U4 * i + 4].xyz)) * params.dt;
+        float3 jlo = min(lo, lo + rel) - float3(1e-3);
+        float3 jhi = max(hi, hi + rel) + float3(1e-3);
+        if (all(jlo <= b) && all(a <= jhi))
+        {
+            mask |= mi;
+            approach = true;
+        }
     }
     if (mask != 0)
-        isl[4 * j] = uint4(mask, NONE, 0, 0);
+        isl[ISL_U4 * j] = uint4(mask, NONE, 0, approach ? 1u : 0u);
 }
 
 // ------------------------------------------------------------------ learned_compact
@@ -945,14 +969,14 @@ void learned_compact(uint3 thread: SV_GroupThreadID)
     {
         uint used = 0;
         for (uint i = 0; i < live; i++)
-            used |= isl[4 * i].x;
+            used |= isl[ISL_U4 * i].x;
         g_used = used;
         for (uint iter = 0; iter < 32; iter++)
         {
             bool changed = false;
             for (uint i = 0; i < live; i++)
             {
-                uint m = isl[4 * i].x;
+                uint m = isl[ISL_U4 * i].x;
                 if (countbits(m) < 2)
                     continue;
                 uint lo = 32;
@@ -1009,9 +1033,9 @@ void learned_compact(uint3 thread: SV_GroupThreadID)
     {
         for (uint i = 0; i < live; i++)
         {
-            uint4 e = isl[4 * i];
+            uint4 e = isl[ISL_U4 * i];
             if (e.x != 0)
-                isl[4 * i] = uint4(e.x, g_call_of[g_label[lowest_bit(e.x)]], e.z, 0);
+                isl[ISL_U4 * i] = uint4(e.x, g_call_of[g_label[lowest_bit(e.x)]], e.z, e.w);
         }
     }
     if (t != 0)
@@ -1019,10 +1043,10 @@ void learned_compact(uint3 thread: SV_GroupThreadID)
     uint over = 0;
     if (ncalls > min(params.max_calls, 64u))
         over |= 1;
-    uint routed = 0;
+    uint routed = 0, joined = 0;
     for (uint i = 0; i < live; i++)
     {
-        uint4 e = isl[4 * i];
+        uint4 e = isl[ISL_U4 * i];
         if (e.x == 0 || e.y >= 64)
             continue;
         Island rec = islands[i];
@@ -1030,6 +1054,7 @@ void learned_compact(uint3 thread: SV_GroupThreadID)
         g_cnt_chunk[e.y] += rec.range.y - rec.range.x;
         g_cnt_bond[e.y] += e.z;
         routed++;
+        joined += e.w;
     }
     // prefix over calls
     uint node_at = 0, bond_at = 0, cisl_at = 0;
@@ -1090,7 +1115,7 @@ void learned_compact(uint3 thread: SV_GroupThreadID)
     // the call islands, in island order within each call
     for (uint i = 0; i < live; i++)
     {
-        uint4 e = isl[4 * i];
+        uint4 e = isl[ISL_U4 * i];
         if (e.x == 0 || e.y >= 64)
             continue;
         Island rec = islands[i];
@@ -1107,12 +1132,13 @@ void learned_compact(uint3 thread: SV_GroupThreadID)
     ctl[CTL_BONDS] = bond_at;
     ctl[CTL_CISL] = cisl_at;
     ctl[CTL_ROUTED] = routed;
+    ctl[CTL_JOINED] = joined;
     largs[0] = uint4(ncalls, 1, 1, 0);
     largs[1] = uint4(cisl_at, 1, 1, 0);
     largs[2] = uint4((cisl_at + 63) / 64, 1, 1, 0);
 }
 
-// One group per routed island: its live bonds counted (`isl[4 * i].z`).
+// One group per routed island: its live bonds counted (`isl[ISL_U4 * i].z`).
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void learned_count_bonds(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
@@ -1122,7 +1148,7 @@ void learned_count_bonds(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID
     uint live = group_uniform(counters[0], t);
     if (i >= live)
         return;
-    uint4 e = isl[4 * i];
+    uint4 e = isl[ISL_U4 * i];
     if (group_uniform(route[0] == 0 || e.x == 0 ? 1u : 0u, t) != 0)
         return;
     Island rec = islands[i];
@@ -1142,7 +1168,7 @@ void learned_count_bonds(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID
         GroupMemoryBarrierWithGroupSync();
     }
     if (t == 0)
-        isl[4 * i] = uint4(e.x, e.y, g_scan[0], e.w);
+        isl[ISL_U4 * i] = uint4(e.x, e.y, g_scan[0], e.w);
 }
 
 // ------------------------------------------------------------------ gathers

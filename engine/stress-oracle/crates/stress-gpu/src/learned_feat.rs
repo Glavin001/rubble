@@ -514,10 +514,6 @@ impl Features {
         run(enc, &self.k.bonds, Some(max_bonds.div_ceil(64)), false);
     }
 
-    pub fn max_nodes_pub(&self) -> usize {
-        self.max_nodes as usize
-    }
-
     /// The feature control words' range (edge totals, overflow bits) for the frame's read.
     pub fn range(&self) -> (&wgpu::Buffer, u64, u64) {
         (&self.fctl, 0, 32)

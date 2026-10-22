@@ -88,6 +88,7 @@ fn compare(scene: stress_ref::scene::Scene, worst: &mut Worst) -> usize {
     w.apply_profile(p);
     w.set_tiered(true).expect("tiered coupling");
     let cols = feature_columns();
+    eprintln!("scene {}: impactor at {:?} v {:?}; {} bodies; mode {:?}", scene.name, scene.impactors[0].position, scene.impactors[0].velocity, scene.bodies.len(), scene.sim.solve_mode);
     let frames = (scene.sim.duration / scene.sim.frame_dt).round() as usize;
     let mut compared = 0;
     let mut batches = 0;
@@ -166,26 +167,7 @@ fn compare(scene: stress_ref::scene::Scene, worst: &mut Worst) -> usize {
                                 best = (dist, j);
                             }
                         }
-                        let mut diffs = Vec::new();
-                        for (j, p) in call.chunk_pos.iter().enumerate() {
-                            let q = [p[0] - hit[0], p[1] - hit[1], p[2] - hit[2]];
-                            let along = q[0] * d[0] + q[1] * d[1] + q[2] * d[2];
-                            let l = [q[0] - d[0] * along, q[1] - d[1] * along, q[2] - d[2] * along];
-                            let dist = (l[0] * l[0] + l[1] * l[1] + l[2] * l[2]).sqrt() + along.abs() * 1e-3;
-                            if (dist - call.work[j][15]).abs() > 1e-4 {
-                                diffs.push((j, dist, call.work[j][15]));
-                            }
-                        }
-                        let dbg = &call.debug;
-                        let distinct = |a: &[f32]| { let mut v: Vec<String> = a.iter().map(|x| format!("{x}")).collect(); v.dedup(); v };
-                        eprintln!("threads saw n {:?} t0 {:?} lo.x {:?} mass {:?}", distinct(&dbg[0..256]), distinct(&dbg[256..512]), distinct(&dbg[512..768]), distinct(&dbg[768..1024]));
-                        let dbg = &call.debug;
-                        for (name, r) in [("ctl", 0..64), ("mask", 64..128), ("n", 128..192), ("t0", 192..256), ("lo", 256..320)] {
-                            eprintln!("  {name}: {:?}", &dbg[r]);
-                        }
-                        eprintln!("dist mismatches ({}): {:?}", diffs.len(), &diffs[..diffs.len().min(12)]);
-                        let gmin = call.work.iter().enumerate().fold((f32::INFINITY, 0usize), |a, (j, w)| if w[15] < a.0 { (w[15], j) } else { a });
-                        eprintln!("host nearest: key {} ({:.4}) ; GPU entry node {} ; GPU dists min {:?} at key {} ; dist[0] {}", call.chunk_keys[best.1], best.0, r[0][1].to_bits(), gmin.0, call.chunk_keys[gmin.1], call.work[0][15]);
+                        eprintln!("host nearest: key {} ({:.4}) ; GPU entry node {}", call.chunk_keys[best.1], best.0, r[0][1].to_bits());
                     }
                     eprintln!("GPU contact rows: {:?}", call.contacts);
                     eprintln!("chunk keys {:?}", &call.chunk_keys[..call.chunk_keys.len().min(8)]);
@@ -215,6 +197,7 @@ fn compare(scene: stress_ref::scene::Scene, worst: &mut Worst) -> usize {
             compared += 1;
         }
     }
+    eprintln!("  totals {:?}, coupled {}, resident {}", w.learned.as_ref().map(|l| l.totals), w.coupled_frames, w.resident_frames);
     compared
 }
 
@@ -233,6 +216,20 @@ fn gpu_features_match_the_rust_call_builder() {
     let mut worst = Worst::default();
     let mut n = compare(perturbed(realtime(later(wall_ram_late(), 2), 0.25), 7.3e-4, -4.1e-4), &mut worst);
     n += compare(perturbed(realtime(later(wall_row_late(2), 2), 0.25), -5.2e-4, 8.9e-4), &mut worst);
+    // P1's evaluation events: the generator's first validation/test members of the free and
+    // anchored wall families (pilot ranges, seed 101), as P1 records them.
+    use stress_learned::procedural::{wall_recipes, with_splits_and_ensembles, EnsemblePlan, Ranges};
+    for family in ["free_wall", "anchored_wall"] {
+        let recipes = with_splits_and_ensembles(wall_recipes(family, 1, 24, 101, &Ranges::pilot()).expect("recipes"), &EnsemblePlan::default());
+        // an evaluation member whose impactor is fast (a routed impact)
+        let fast = |r: &&stress_learned::outcome::OutcomeRecipe| r.scene.impactors.iter().any(|i| Vec3::from_array(i.velocity).norm() > 15.0);
+        let r = recipes.iter().filter(|r| r.parameters["split"] != "train").find(fast).expect("an evaluation recipe");
+        eprintln!("P1 event {} ({}): impactor speed {:.1} m/s", r.event_id, r.parameters["split"], Vec3::from_array(r.scene.impactors[0].velocity).norm());
+        let before = n;
+        // its strike moved two frames later (the GPU world's first frame is a coupled one)
+        n += compare(realtime(later(r.scene.clone(), 2), 0.4), &mut worst);
+        assert!(n > before, "{}: no call compared", r.event_id);
+    }
     assert!(n > 0, "no call compared");
     let mut bad = Vec::new();
     for ((a, c), (rel, g, cpu)) in &worst.cols {

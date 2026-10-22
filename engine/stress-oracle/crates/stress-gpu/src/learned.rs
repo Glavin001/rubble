@@ -53,6 +53,7 @@ pub mod ctl {
     pub const FB_INFEASIBLE: usize = 15;
     pub const FB_RANGE: usize = 16;
     pub const ROUTED: usize = 17;
+    pub const JOINED: usize = 19;
     pub const WORDS: usize = 32;
 }
 
@@ -260,6 +261,8 @@ pub struct Totals {
     pub stale: u64,
     pub broken: u64,
     pub routed_islands: u64,
+    /// Islands joined to a call because they approach a struck island within the frame.
+    pub joined: u64,
 }
 
 pub struct Learned {
@@ -415,7 +418,7 @@ impl Learned {
     /// Growing the chunk map drops a pending batch's map: only between batches.
     pub fn ensure(&mut self, gpu: &Gpu, island_cap: u32, chunk_count: u32) {
         if island_cap > self.island_cap {
-            self.isl = rw(gpu, "learned islands", 16 * 4 * island_cap as u64, false);
+            self.isl = rw(gpu, "learned islands", 16 * 5 * island_cap as u64, false);
             self.island_cap = island_cap;
         }
         if chunk_count > self.chunk_count {
@@ -536,9 +539,8 @@ impl Learned {
             return;
         }
         run(enc, &self.k.select, D::Islands);
-        if self.debris {
-            run(enc, &self.k.debris, D::Threads(t.s.island_cap));
-        }
+        // (debris reach, and the islands approaching a struck one: always)
+        run(enc, &self.k.debris, D::Threads(t.s.island_cap));
         run(enc, &self.k.count_bonds, D::Islands);
         run(enc, &self.k.compact, D::One);
         run(enc, &self.k.gather_chunks, D::Indirect(16));
@@ -628,6 +630,7 @@ impl Learned {
             self.totals.batches += 1;
             self.totals.calls += w[ctl::CALLS] as u64;
             self.totals.routed_islands += w[ctl::ROUTED] as u64;
+            self.totals.joined += w[ctl::JOINED] as u64;
             self.totals.bound_active += w[ctl::BOUND] as u64;
             if w[ctl::FALLBACKS] > 0 && !self.dry {
                 self.totals.fallbacks += w[ctl::FALLBACKS] as u64;
@@ -839,8 +842,6 @@ pub struct ExportCall {
     pub contacts: Vec<[[f32; 4]; 6]>,
     /// Per chunk node: its world position at frame start.
     pub chunk_pos: Vec<[f32; 3]>,
-    /// Debug words of the contacts kernel (per thread: n, t0, lo.x, cluster mass).
-    pub debug: Vec<f32>,
     /// Per chunk node: the feature kernels' scratch words (`learned_feat.slang` W_*).
     pub work: Vec<[f32; crate::learned_feat::WORK_F]>,
 }
@@ -953,7 +954,6 @@ impl Learned {
                 let con: Vec<[f32; 4]> = gpu.read_range(&f.contacts, crate::learned_feat::CON_F4 * row0, crate::learned_feat::CON_F4 * rows);
                 e.contacts = con.chunks(6).map(|r| [r[0], r[1], r[2], r[3], r[4], r[5]]).collect();
             }
-            e.debug = gpu.read_range(&f.work, crate::learned_feat::WORK_F * f.max_nodes_pub() + 3 * crate::learned_feat::SCRATCH - 1024, 1024);
             let wk: Vec<f32> = gpu.read_range(&f.work, crate::learned_feat::WORK_F * first, crate::learned_feat::WORK_F * nc.max(1));
             e.work = (0..nc).map(|j| std::array::from_fn(|k| wk[crate::learned_feat::WORK_F * j + k])).collect();
             e.chunk_pos = (0..nc).map(|j| { let w = nodes[NODE_F4 * (first + j) + 13]; [w[0], w[1], w[2]] }).collect();

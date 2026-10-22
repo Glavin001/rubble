@@ -1449,39 +1449,41 @@ float3 chunk_world_0(const Frame_0 thread* f_1, uint k_14, KernelContext_0 threa
     {
         if(t_4 == 0U)
         {
-            uint _S190 = 4U * i_1;
+            uint _S190 = 5U * i_1;
             *((&kernelContext_7)->isl_0+_S190) = packed_uint4(uint4(0U, 4294967295U, 0U, 0U)) ;
-            *((&kernelContext_7)->isl_0+(_S190 + 3U)) = packed_uint4(uint4(int4(int(0)) )) ;
+            packed_uint4 _S191 = packed_uint4(uint4(int4(int(0)) )) ;
+            *((&kernelContext_7)->isl_0+(_S190 + 3U)) = _S191;
+            *((&kernelContext_7)->isl_0+(_S190 + 4U)) = _S191;
         }
         return;
     }
-    Island_natural_0 device* _S191 = (&kernelContext_7)->islands_0+i_1;
-    uint4 _S192 = uint4(_S191->range_0) ;
-    uint _S193 = _S192.x;
-    uint _S194 = group_uniform_0(_S192.y - _S193, t_4);
-    Frame_0 _S195 = island_frame_0(i_1, &kernelContext_7);
+    Island_natural_0 device* _S192 = (&kernelContext_7)->islands_0+i_1;
+    uint4 _S193 = uint4(_S192->range_0) ;
+    uint _S194 = _S193.x;
+    uint _S195 = group_uniform_0(_S193.y - _S194, t_4);
+    Frame_0 _S196 = island_frame_0(i_1, &kernelContext_7);
     float inf_0 = float_bits_0(2139095040U);
-    float3 _S196 = float3(- inf_0) ;
+    float3 _S197 = float3(- inf_0) ;
     float3 lo_0 = float3(inf_0) ;
-    float3 hi_0 = _S196;
+    float3 hi_0 = _S197;
     uint c_3 = t_4;
     for(;;)
     {
-        if(c_3 < _S194)
+        if(c_3 < _S195)
         {
         }
         else
         {
             break;
         }
-        uint k_15 = _S193 + c_3;
-        thread Frame_0 _S197 = _S195;
-        float3 _S198 = chunk_world_0(&_S197, k_15, &kernelContext_7);
-        float3 _S199 = min(lo_0, _S198 - float3((float4(((&kernelContext_7)->chunks_0+k_15)->half_0) ).w) );
-        float3 _S200 = max(hi_0, _S198 + float3((float4(((&kernelContext_7)->chunks_0+k_15)->half_0) ).w) );
+        uint k_15 = _S194 + c_3;
+        thread Frame_0 _S198 = _S196;
+        float3 _S199 = chunk_world_0(&_S198, k_15, &kernelContext_7);
+        float3 _S200 = min(lo_0, _S199 - float3((float4(((&kernelContext_7)->chunks_0+k_15)->half_0) ).w) );
+        float3 _S201 = max(hi_0, _S199 + float3((float4(((&kernelContext_7)->chunks_0+k_15)->half_0) ).w) );
         uint c_4 = c_3 + 64U;
-        lo_0 = _S199;
-        hi_0 = _S200;
+        lo_0 = _S200;
+        hi_0 = _S201;
         c_3 = c_4;
     }
     (*(&kernelContext_7)->g_lo_0)[t_4] = lo_0;
@@ -1499,9 +1501,9 @@ float3 chunk_world_0(const Frame_0 thread* f_1, uint k_14, KernelContext_0 threa
         }
         if(t_4 < s_1)
         {
-            uint _S201 = t_4 + s_1;
-            (*(&kernelContext_7)->g_lo_0)[t_4] = min((*(&kernelContext_7)->g_lo_0)[t_4], (*(&kernelContext_7)->g_lo_0)[_S201]);
-            (*(&kernelContext_7)->g_hi_0)[t_4] = max((*(&kernelContext_7)->g_hi_0)[t_4], (*(&kernelContext_7)->g_hi_0)[_S201]);
+            uint _S202 = t_4 + s_1;
+            (*(&kernelContext_7)->g_lo_0)[t_4] = min((*(&kernelContext_7)->g_lo_0)[t_4], (*(&kernelContext_7)->g_lo_0)[_S202]);
+            (*(&kernelContext_7)->g_hi_0)[t_4] = max((*(&kernelContext_7)->g_hi_0)[t_4], (*(&kernelContext_7)->g_hi_0)[_S202]);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         s_1 = s_1 >> 1U;
@@ -1512,9 +1514,9 @@ float3 chunk_world_0(const Frame_0 thread* f_1, uint k_14, KernelContext_0 threa
     }
     float3 lo_1 = (*(&kernelContext_7)->g_lo_0)[int(0)];
     float3 hi_1 = (*(&kernelContext_7)->g_hi_0)[int(0)];
-    float3 _S202 = float3(0.0f) ;
+    float3 _S203 = float3(0.0f) ;
     bool launched_0 = false;
-    float3 launch_0 = _S202;
+    float3 launch_0 = _S203;
     uint k_16 = 0U;
     uint mask_0 = 0U;
     for(;;)
@@ -1526,38 +1528,38 @@ float3 chunk_world_0(const Frame_0 thread* f_1, uint k_14, KernelContext_0 threa
         {
             break;
         }
-        float4 _S203 = float4(*((&kernelContext_7)->imps_0+4U * k_16)) ;
-        uint _S204 = 7U * (as_type<uint>((_S203.x)));
-        float3 _S205 = to_zup_0((float4(*((&kernelContext_7)->bodies_0+_S204)) ).xyz);
-        float3 rel_0 = to_zup_0((float4(*((&kernelContext_7)->bodies_0+(_S204 + 3U))) ).xyz) - _S195.v_5;
-        float r_12 = _S203.y;
-        bool _S206;
+        float4 _S204 = float4(*((&kernelContext_7)->imps_0+4U * k_16)) ;
+        uint _S205 = 7U * (as_type<uint>((_S204.x)));
+        float3 _S206 = to_zup_0((float4(*((&kernelContext_7)->bodies_0+_S205)) ).xyz);
+        float3 rel_0 = to_zup_0((float4(*((&kernelContext_7)->bodies_0+(_S205 + 3U))) ).xyz) - _S196.v_5;
+        float r_12 = _S204.y;
+        bool _S207;
         if(!((length(rel_0)) > ((&kernelContext_7)->params_0->speed_0)))
         {
-            _S206 = true;
+            _S207 = true;
         }
         else
         {
-            _S206 = _S194 == 0U;
+            _S207 = _S195 == 0U;
         }
         float3 launch_1;
         bool launched_1;
-        if(_S206)
+        if(_S207)
         {
             launched_1 = launched_0;
             launch_1 = launch_0;
-            uint _S207 = k_16 + 1U;
+            uint _S208 = k_16 + 1U;
             launched_0 = launched_1;
             launch_0 = launch_1;
-            k_16 = _S207;
+            k_16 = _S208;
             continue;
         }
-        float3 _S208 = float3(r_12) ;
-        float3 _S209 = lo_1 - _S208;
-        float3 _S210 = hi_1 + _S208;
-        float _S211 = (&kernelContext_7)->params_0->dt_0;
+        float3 _S209 = float3(r_12) ;
+        float3 _S210 = lo_1 - _S209;
+        float3 _S211 = hi_1 + _S209;
+        float _S212 = (&kernelContext_7)->params_0->dt_0;
         t0_0 = 0.0f;
-        float t1_1 = _S211;
+        float t1_1 = _S212;
         uint ax_0 = 0U;
         for(;;)
         {
@@ -1568,17 +1570,17 @@ float3 chunk_world_0(const Frame_0 thread* f_1, uint k_14, KernelContext_0 threa
             {
                 break;
             }
-            uint _S212 = ax_0;
+            uint _S213 = ax_0;
             if((abs(rel_0[ax_0])) < 9.999999960041972e-13f)
             {
-                uint _S213 = ax_0;
-                if((_S205[ax_0]) < (_S209[ax_0]))
+                uint _S214 = ax_0;
+                if((_S206[ax_0]) < (_S210[ax_0]))
                 {
                     _S189 = true;
                 }
                 else
                 {
-                    _S189 = (_S205[_S213]) > (_S210[ax_0]);
+                    _S189 = (_S206[_S214]) > (_S211[ax_0]);
                 }
                 float t0_1;
                 if(_S189)
@@ -1593,11 +1595,11 @@ float3 chunk_world_0(const Frame_0 thread* f_1, uint k_14, KernelContext_0 threa
                 ax_0 = ax_0 + 1U;
                 continue;
             }
-            float ta_2 = (_S209[ax_0] - _S205[ax_0]) / rel_0[_S212];
-            float tb_2 = (_S210[ax_0] - _S205[ax_0]) / rel_0[_S212];
-            float _S214 = min(t1_1, max(ta_2, tb_2));
+            float ta_2 = (_S210[ax_0] - _S206[ax_0]) / rel_0[_S213];
+            float tb_2 = (_S211[ax_0] - _S206[ax_0]) / rel_0[_S213];
+            float _S215 = min(t1_1, max(ta_2, tb_2));
             t0_0 = max(t0_0, min(ta_2, tb_2));
-            t1_1 = _S214;
+            t1_1 = _S215;
             ax_0 = ax_0 + 1U;
         }
         uint mask_1;
@@ -1606,7 +1608,7 @@ float3 chunk_world_0(const Frame_0 thread* f_1, uint k_14, KernelContext_0 threa
             uint mask_2 = mask_0 | (1U << k_16);
             if(!launched_0)
             {
-                _S189 = (((uint4(_S191->info_0) ).x) & 1U) == 0U;
+                _S189 = (((uint4(_S192->info_0) ).x) & 1U) == 0U;
             }
             else
             {
@@ -1614,9 +1616,9 @@ float3 chunk_world_0(const Frame_0 thread* f_1, uint k_14, KernelContext_0 threa
             }
             if(_S189)
             {
-                float3 _S215 = float3(2.0f)  * rel_0 * float3((&kernelContext_7)->params_0->dt_0) ;
+                float3 _S216 = float3(2.0f)  * rel_0 * float3((&kernelContext_7)->params_0->dt_0) ;
                 launched_1 = true;
-                launch_1 = _S215;
+                launch_1 = _S216;
             }
             else
             {
@@ -1632,16 +1634,16 @@ float3 chunk_world_0(const Frame_0 thread* f_1, uint k_14, KernelContext_0 threa
             mask_1 = mask_0;
         }
         mask_0 = mask_1;
-        uint _S207 = k_16 + 1U;
+        uint _S208 = k_16 + 1U;
         launched_0 = launched_1;
         launch_0 = launch_1;
-        k_16 = _S207;
+        k_16 = _S208;
     }
-    uint _S216 = 4U * i_1;
-    *((&kernelContext_7)->isl_0+_S216) = packed_uint4(uint4(mask_0, 4294967295U, 0U, 0U)) ;
-    *((&kernelContext_7)->isl_0+(_S216 + 1U)) = packed_uint4((as_type<uint4>((float4(lo_1, 0.0f))))) ;
-    *((&kernelContext_7)->isl_0+(_S216 + 2U)) = packed_uint4((as_type<uint4>((float4(hi_1, 0.0f))))) ;
-    packed_uint4 device* _S217 = (&kernelContext_7)->isl_0+(_S216 + 3U);
+    uint _S217 = 5U * i_1;
+    *((&kernelContext_7)->isl_0+_S217) = packed_uint4(uint4(mask_0, 4294967295U, 0U, 0U)) ;
+    *((&kernelContext_7)->isl_0+(_S217 + 1U)) = packed_uint4((as_type<uint4>((float4(lo_1, 0.0f))))) ;
+    *((&kernelContext_7)->isl_0+(_S217 + 2U)) = packed_uint4((as_type<uint4>((float4(hi_1, 0.0f))))) ;
+    packed_uint4 device* _S218 = (&kernelContext_7)->isl_0+(_S217 + 3U);
     if(launched_0)
     {
         t0_0 = 1.0f;
@@ -1650,7 +1652,8 @@ float3 chunk_world_0(const Frame_0 thread* f_1, uint k_14, KernelContext_0 threa
     {
         t0_0 = 0.0f;
     }
-    *_S217 = packed_uint4((as_type<uint4>((float4(launch_0, t0_0))))) ;
+    *_S218 = packed_uint4((as_type<uint4>((float4(launch_0, t0_0))))) ;
+    *((&kernelContext_7)->isl_0+(_S217 + 4U)) = packed_uint4(uint4((as_type<uint3>((_S196.v_5))), mask_0)) ;
     return;
 }
 
@@ -1722,42 +1725,36 @@ float3 chunk_world_0(const Frame_0 thread* f_1, uint k_14, KernelContext_0 threa
     (&kernelContext_8)->g_broke_0 = &g_broke_4;
     uint j_2 = id_0.x;
     uint live_0 = counters_4[int(0)];
-    bool _S218;
-    if((params_4->debris_0) == 0U)
+    bool approach_0;
+    if(j_2 >= live_0)
     {
-        _S218 = true;
+        approach_0 = true;
     }
     else
     {
-        _S218 = j_2 >= live_0;
+        approach_0 = (&kernelContext_8)->route_0[int(0)] == 0U;
     }
-    if(_S218)
+    if(approach_0)
     {
-        _S218 = true;
+        approach_0 = true;
     }
     else
     {
-        _S218 = (&kernelContext_8)->route_0[int(0)] == 0U;
+        approach_0 = ((uint4(*((&kernelContext_8)->isl_0+(5U * j_2 + 4U))) ).w) != 0U;
     }
-    if(_S218)
-    {
-        _S218 = true;
-    }
-    else
-    {
-        _S218 = ((uint4(*((&kernelContext_8)->isl_0+4U * j_2)) ).x) != 0U;
-    }
-    if(_S218)
+    if(approach_0)
     {
         return;
     }
-    uint _S219 = 4U * j_2;
+    uint _S219 = 5U * j_2;
     float3 lo_2 = (as_type<float4>((uint4(*((&kernelContext_8)->isl_0+(_S219 + 1U))) ))).xyz;
     float3 hi_2 = (as_type<float4>((uint4(*((&kernelContext_8)->isl_0+(_S219 + 2U))) ))).xyz;
     if(!((lo_2.x) <= (hi_2.x)))
     {
         return;
     }
+    float3 _S220 = (as_type<float3>(((uint4(*((&kernelContext_8)->isl_0+(_S219 + 4U))) ).xyz)));
+    approach_0 = false;
     uint i_2 = 0U;
     uint mask_3 = 0U;
     for(;;)
@@ -1769,50 +1766,106 @@ float3 chunk_world_0(const Frame_0 thread* f_1, uint k_14, KernelContext_0 threa
         {
             break;
         }
-        uint _S220 = 4U * i_2;
-        float4 l_0 = (as_type<float4>((uint4(*((&kernelContext_8)->isl_0+(_S220 + 3U))) )));
-        if((l_0.w) == 0.0f)
-        {
-            _S218 = true;
-        }
-        else
-        {
-            _S218 = i_2 == j_2;
-        }
-        if(_S218)
-        {
-            i_2 = i_2 + 1U;
-            continue;
-        }
-        float3 a_7 = (as_type<float4>((uint4(*((&kernelContext_8)->isl_0+(_S220 + 1U))) ))).xyz;
-        float3 b_6 = (as_type<float4>((uint4(*((&kernelContext_8)->isl_0+(_S220 + 2U))) ))).xyz;
-        float3 _S221 = l_0.xyz;
-        float3 _S222 = float3(0.00100000004749745f) ;
-        float3 shi_0 = max(b_6, b_6 + _S221) + _S222;
+        uint _S221 = 5U * i_2;
+        uint _S222 = _S221 + 4U;
+        uint mi_0 = (uint4(*((&kernelContext_8)->isl_0+_S222)) ).w;
         bool _S223;
-        if(all((min(a_7, a_7 + _S221) - _S222) <= hi_2))
+        if(mi_0 == 0U)
         {
-            _S223 = all(lo_2 <= shi_0);
+            _S223 = true;
         }
         else
         {
-            _S223 = false;
+            _S223 = i_2 == j_2;
         }
         uint mask_4;
         if(_S223)
         {
-            mask_4 = mask_3 | ((uint4(*((&kernelContext_8)->isl_0+_S220)) ).x);
+            mask_4 = mask_3;
+            i_2 = i_2 + 1U;
+            mask_3 = mask_4;
+            continue;
+        }
+        float3 a_7 = (as_type<float4>((uint4(*((&kernelContext_8)->isl_0+(_S221 + 1U))) ))).xyz;
+        float3 b_6 = (as_type<float4>((uint4(*((&kernelContext_8)->isl_0+(_S221 + 2U))) ))).xyz;
+        float4 l_0 = (as_type<float4>((uint4(*((&kernelContext_8)->isl_0+(_S221 + 3U))) )));
+        bool _S224;
+        if(((&kernelContext_8)->params_0->debris_0) != 0U)
+        {
+            _S224 = (l_0.w) != 0.0f;
+        }
+        else
+        {
+            _S224 = false;
+        }
+        bool _S225;
+        if(_S224)
+        {
+            float3 _S226 = l_0.xyz;
+            float3 _S227 = float3(0.00100000004749745f) ;
+            float3 shi_0 = max(b_6, b_6 + _S226) + _S227;
+            if(all((min(a_7, a_7 + _S226) - _S227) <= hi_2))
+            {
+                _S225 = all(lo_2 <= shi_0);
+            }
+            else
+            {
+                _S225 = false;
+            }
+            if(_S225)
+            {
+                mask_4 = mask_3 | mi_0;
+            }
+            else
+            {
+                mask_4 = mask_3;
+            }
         }
         else
         {
             mask_4 = mask_3;
         }
-        mask_3 = mask_4;
+        float3 rel_1 = (_S220 - (as_type<float3>(((uint4(*((&kernelContext_8)->isl_0+_S222)) ).xyz)))) * float3((&kernelContext_8)->params_0->dt_0) ;
+        float3 _S228 = float3(0.00100000004749745f) ;
+        float3 jhi_0 = max(hi_2, hi_2 + rel_1) + _S228;
+        if(all((min(lo_2, lo_2 + rel_1) - _S228) <= b_6))
+        {
+            _S225 = all(a_7 <= jhi_0);
+        }
+        else
+        {
+            _S225 = false;
+        }
+        bool approach_1;
+        uint mask_5;
+        if(_S225)
+        {
+            uint mask_6 = mask_4 | mi_0;
+            approach_1 = true;
+            mask_5 = mask_6;
+        }
+        else
+        {
+            approach_1 = approach_0;
+            mask_5 = mask_4;
+        }
+        approach_0 = approach_1;
+        mask_4 = mask_5;
         i_2 = i_2 + 1U;
+        mask_3 = mask_4;
     }
     if(mask_3 != 0U)
     {
-        *((&kernelContext_8)->isl_0+_S219) = packed_uint4(uint4(mask_3, 4294967295U, 0U, 0U)) ;
+        packed_uint4 device* _S229 = (&kernelContext_8)->isl_0+_S219;
+        if(approach_0)
+        {
+            i_2 = 1U;
+        }
+        else
+        {
+            i_2 = 0U;
+        }
+        *_S229 = packed_uint4(uint4(mask_3, 4294967295U, 0U, i_2)) ;
     }
     return;
 }
@@ -1824,7 +1877,7 @@ uint lowest_bit_0(uint m_6)
 
 [[kernel]] void learned_compact(uint3 thread_5 [[thread_position_in_threadgroup]], uint device* ctl_5 [[buffer(1)]], packed_float4 device* calls_5 [[buffer(2)]], packed_float4 device* nodes_5 [[buffer(3)]], LearnedParams_0 constant* params_5 [[buffer(0)]], packed_float4 device* bonds_5 [[buffer(4)]], uint device* chunk_node_5 [[buffer(8)]], uint device* counters_5 [[buffer(19)]], uint device* route_5 [[buffer(25)]], packed_uint4 device* isl_5 [[buffer(5)]], Island_natural_0 device* islands_5 [[buffer(11)]], packed_float4 device* ctab_5 [[buffer(14)]], packed_float4 device* bodies_5 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_5 [[buffer(12)]], packed_float4 device* state_5 [[buffer(13)]], packed_float4 device* imps_5 [[buffer(10)]], uint device* status_5 [[buffer(18)]], packed_uint4 device* largs_5 [[buffer(27)]], packed_uint4 device* cisl_5 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_5 [[buffer(17)]], BondStatic_natural_0 device* bond_static_5 [[buffer(16)]], packed_float4 device* cislf_5 [[buffer(6)]], packed_float4 device* frozen_5 [[buffer(9)]], uint device* split_work_5 [[buffer(21)]], uint device* split_control_5 [[buffer(23)]], packed_uint4 device* split_parents_5 [[buffer(20)]], packed_uint4 device* split_slots_5 [[buffer(22)]], packed_float4 device* split_out_5 [[buffer(26)]], packed_uint4 device* split_firsts_5 [[buffer(24)]], float device* lout_5 [[buffer(28)]])
 {
-    uint _S224;
+    uint _S230;
     thread KernelContext_0 kernelContext_9;
     (&kernelContext_9)->ctl_0 = ctl_5;
     (&kernelContext_9)->calls_0 = calls_5;
@@ -1890,28 +1943,28 @@ uint lowest_bit_0(uint m_6)
     threadgroup uint g_broke_5;
     (&kernelContext_9)->g_broke_0 = &g_broke_5;
     uint t_5 = thread_5.x;
-    uint _S225 = group_uniform_0(counters_5[int(0)], t_5);
-    uint _S226 = min(params_5->impactor_count_0, 32U);
+    uint _S231 = group_uniform_0(counters_5[int(0)], t_5);
+    uint _S232 = min(params_5->impactor_count_0, 32U);
     uint i_3 = t_5;
     for(;;)
     {
-        if(i_3 < _S225)
+        if(i_3 < _S231)
         {
         }
         else
         {
             break;
         }
-        uint device* _S227 = (&kernelContext_9)->status_0+(16U + i_3);
-        *_S227 = (*_S227) & 4294963199U;
+        uint device* _S233 = (&kernelContext_9)->status_0+(16U + i_3);
+        *_S233 = (*_S233) & 4294963199U;
         i_3 = i_3 + 64U;
     }
     if(t_5 < 32U)
     {
         (*(&kernelContext_9)->g_label_0)[t_5] = t_5;
     }
-    bool _S228 = t_5 == 0U;
-    if(_S228)
+    bool _S234 = t_5 == 0U;
+    if(_S234)
     {
         *(&kernelContext_9)->g_used_0 = 0U;
         *((&kernelContext_9)->ctl_0+1U) = 0U;
@@ -1927,12 +1980,12 @@ uint lowest_bit_0(uint m_6)
         *((&kernelContext_9)->ctl_0+16U) = 0U;
         *((&kernelContext_9)->ctl_0+17U) = 0U;
     }
-    if(_S228)
+    if(_S234)
     {
-        packed_uint4 _S229 = packed_uint4(uint4(0U, 1U, 1U, 0U)) ;
-        *((&kernelContext_9)->largs_0+int(0)) = _S229;
-        *((&kernelContext_9)->largs_0+int(1)) = _S229;
-        *((&kernelContext_9)->largs_0+int(2)) = _S229;
+        packed_uint4 _S235 = packed_uint4(uint4(0U, 1U, 1U, 0U)) ;
+        *((&kernelContext_9)->largs_0+int(0)) = _S235;
+        *((&kernelContext_9)->largs_0+int(1)) = _S235;
+        *((&kernelContext_9)->largs_0+int(2)) = _S235;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if((group_uniform_0((&kernelContext_9)->route_0[int(0)], t_5)) == 0U)
@@ -1941,24 +1994,24 @@ uint lowest_bit_0(uint m_6)
     }
     uint over_0;
     uint routed_0;
+    uint joined_0;
     uint g_1;
     uint node_at_0;
-    uint contact_at_0;
     bool changed_0;
-    if(_S228)
+    if(_S234)
     {
         i_3 = 0U;
         over_0 = 0U;
         for(;;)
         {
-            if(i_3 < _S225)
+            if(i_3 < _S231)
             {
             }
             else
             {
                 break;
             }
-            uint used_0 = over_0 | ((uint4(*((&kernelContext_9)->isl_0+4U * i_3)) ).x);
+            uint used_0 = over_0 | ((uint4(*((&kernelContext_9)->isl_0+5U * i_3)) ).x);
             i_3 = i_3 + 1U;
             over_0 = used_0;
         }
@@ -1977,24 +2030,40 @@ uint lowest_bit_0(uint m_6)
             i_3 = 0U;
             for(;;)
             {
-                if(i_3 < _S225)
+                if(i_3 < _S231)
                 {
                 }
                 else
                 {
                     break;
                 }
-                uint m_7 = (uint4(*((&kernelContext_9)->isl_0+4U * i_3)) ).x;
+                uint m_7 = (uint4(*((&kernelContext_9)->isl_0+5U * i_3)) ).x;
                 bool changed_1;
                 if(((uint)popcount((m_7))) < 2U)
                 {
                     changed_1 = changed_0;
-                    uint _S230 = i_3 + 1U;
+                    uint _S236 = i_3 + 1U;
                     changed_0 = changed_1;
-                    i_3 = _S230;
+                    i_3 = _S236;
                     continue;
                 }
-                g_1 = 32U;
+                joined_0 = 32U;
+                g_1 = m_7;
+                for(;;)
+                {
+                    if(g_1 != 0U)
+                    {
+                    }
+                    else
+                    {
+                        break;
+                    }
+                    uint _S237 = min(joined_0, (*(&kernelContext_9)->g_label_0)[lowest_bit_0(g_1)]);
+                    uint mm_0 = g_1 & (g_1 - 1U);
+                    joined_0 = _S237;
+                    g_1 = mm_0;
+                }
+                changed_1 = changed_0;
                 node_at_0 = m_7;
                 for(;;)
                 {
@@ -2005,32 +2074,16 @@ uint lowest_bit_0(uint m_6)
                     {
                         break;
                     }
-                    uint _S231 = min(g_1, (*(&kernelContext_9)->g_label_0)[lowest_bit_0(node_at_0)]);
-                    uint mm_0 = node_at_0 & (node_at_0 - 1U);
-                    g_1 = _S231;
-                    node_at_0 = mm_0;
-                }
-                changed_1 = changed_0;
-                contact_at_0 = m_7;
-                for(;;)
-                {
-                    if(contact_at_0 != 0U)
+                    if(((*(&kernelContext_9)->g_label_0)[lowest_bit_0(node_at_0)]) > joined_0)
                     {
-                    }
-                    else
-                    {
-                        break;
-                    }
-                    if(((*(&kernelContext_9)->g_label_0)[lowest_bit_0(contact_at_0)]) > g_1)
-                    {
-                        (*(&kernelContext_9)->g_label_0)[lowest_bit_0(contact_at_0)] = g_1;
+                        (*(&kernelContext_9)->g_label_0)[lowest_bit_0(node_at_0)] = joined_0;
                         changed_1 = true;
                     }
-                    contact_at_0 = contact_at_0 & (contact_at_0 - 1U);
+                    node_at_0 = node_at_0 & (node_at_0 - 1U);
                 }
-                uint _S230 = i_3 + 1U;
+                uint _S236 = i_3 + 1U;
                 changed_0 = changed_1;
-                i_3 = _S230;
+                i_3 = _S236;
             }
             if(!changed_0)
             {
@@ -2040,14 +2093,14 @@ uint lowest_bit_0(uint m_6)
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if(_S228)
+    if(_S234)
     {
-        uint _S232 = *(&kernelContext_9)->g_used_0;
+        uint _S238 = *(&kernelContext_9)->g_used_0;
         over_0 = 0U;
         routed_0 = 0U;
         for(;;)
         {
-            if(over_0 < _S226)
+            if(over_0 < _S232)
             {
             }
             else
@@ -2060,36 +2113,36 @@ uint lowest_bit_0(uint m_6)
                 over_0 = over_0 + 1U;
                 continue;
             }
+            joined_0 = 0U;
             g_1 = 0U;
-            node_at_0 = 0U;
             for(;;)
             {
-                if(g_1 < _S226)
+                if(joined_0 < _S232)
                 {
                 }
                 else
                 {
                     break;
                 }
-                if(((*(&kernelContext_9)->g_label_0)[g_1]) == over_0)
+                if(((*(&kernelContext_9)->g_label_0)[joined_0]) == over_0)
                 {
-                    node_at_0 = node_at_0 | (1U << g_1);
+                    g_1 = g_1 | (1U << joined_0);
                 }
-                g_1 = g_1 + 1U;
+                joined_0 = joined_0 + 1U;
             }
-            uint _S233 = node_at_0 & _S232;
-            if(_S233 == 0U)
+            uint _S239 = g_1 & _S238;
+            if(_S239 == 0U)
             {
                 over_0 = over_0 + 1U;
                 continue;
             }
             if(routed_0 < 64U)
             {
-                (*(&kernelContext_9)->g_mask_of_0)[routed_0] = _S233;
+                (*(&kernelContext_9)->g_mask_of_0)[routed_0] = _S239;
                 (*(&kernelContext_9)->g_cnt_isl_0)[routed_0] = 0U;
                 (*(&kernelContext_9)->g_cnt_chunk_0)[routed_0] = 0U;
                 (*(&kernelContext_9)->g_cnt_bond_0)[routed_0] = 0U;
-                (*(&kernelContext_9)->g_cnt_imp_0)[routed_0] = ((uint)popcount((_S233)));
+                (*(&kernelContext_9)->g_cnt_imp_0)[routed_0] = ((uint)popcount((_S239)));
             }
             (*(&kernelContext_9)->g_call_of_0)[over_0] = routed_0;
             routed_0 = routed_0 + 1U;
@@ -2099,24 +2152,24 @@ uint lowest_bit_0(uint m_6)
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     uint ncalls_0 = group_uniform_0(*((&kernelContext_9)->ctl_0+1U), t_5);
-    if(_S228)
+    if(_S234)
     {
         i_3 = 0U;
         for(;;)
         {
-            if(i_3 < _S225)
+            if(i_3 < _S231)
             {
             }
             else
             {
                 break;
             }
-            uint _S234 = 4U * i_3;
-            uint4 _S235 = uint4(*((&kernelContext_9)->isl_0+_S234)) ;
-            uint _S236 = _S235.x;
-            if(_S236 != 0U)
+            uint _S240 = 5U * i_3;
+            uint4 _S241 = uint4(*((&kernelContext_9)->isl_0+_S240)) ;
+            uint _S242 = _S241.x;
+            if(_S242 != 0U)
             {
-                *((&kernelContext_9)->isl_0+_S234) = packed_uint4(uint4(_S236, (*(&kernelContext_9)->g_call_of_0)[(*(&kernelContext_9)->g_label_0)[lowest_bit_0(_S236)]], _S235.z, 0U)) ;
+                *((&kernelContext_9)->isl_0+_S240) = packed_uint4(uint4(_S242, (*(&kernelContext_9)->g_call_of_0)[(*(&kernelContext_9)->g_label_0)[lowest_bit_0(_S242)]], _S241.z, _S241.w)) ;
             }
             i_3 = i_3 + 1U;
         }
@@ -2135,45 +2188,48 @@ uint lowest_bit_0(uint m_6)
     }
     i_3 = 0U;
     routed_0 = 0U;
+    joined_0 = 0U;
     for(;;)
     {
-        if(i_3 < _S225)
+        if(i_3 < _S231)
         {
         }
         else
         {
             break;
         }
-        uint4 _S237 = uint4(*((&kernelContext_9)->isl_0+4U * i_3)) ;
-        if((_S237.x) == 0U)
+        uint4 _S243 = uint4(*((&kernelContext_9)->isl_0+5U * i_3)) ;
+        if((_S243.x) == 0U)
         {
             changed_0 = true;
         }
         else
         {
-            changed_0 = (_S237.y) >= 64U;
+            changed_0 = (_S243.y) >= 64U;
         }
         if(changed_0)
         {
             i_3 = i_3 + 1U;
             continue;
         }
-        Island_natural_0 device* _S238 = (&kernelContext_9)->islands_0+i_3;
-        uint _S239 = _S237.y;
-        (*(&kernelContext_9)->g_cnt_isl_0)[_S239] = (*(&kernelContext_9)->g_cnt_isl_0)[_S239] + 1U;
-        uint4 _S240 = uint4(_S238->range_0) ;
-        (*(&kernelContext_9)->g_cnt_chunk_0)[_S239] = (*(&kernelContext_9)->g_cnt_chunk_0)[_S239] + (_S240.y - _S240.x);
-        (*(&kernelContext_9)->g_cnt_bond_0)[_S239] = (*(&kernelContext_9)->g_cnt_bond_0)[_S239] + _S237.z;
+        Island_natural_0 device* _S244 = (&kernelContext_9)->islands_0+i_3;
+        uint _S245 = _S243.y;
+        (*(&kernelContext_9)->g_cnt_isl_0)[_S245] = (*(&kernelContext_9)->g_cnt_isl_0)[_S245] + 1U;
+        uint4 _S246 = uint4(_S244->range_0) ;
+        (*(&kernelContext_9)->g_cnt_chunk_0)[_S245] = (*(&kernelContext_9)->g_cnt_chunk_0)[_S245] + (_S246.y - _S246.x);
+        (*(&kernelContext_9)->g_cnt_bond_0)[_S245] = (*(&kernelContext_9)->g_cnt_bond_0)[_S245] + _S243.z;
+        uint joined_1 = joined_0 + _S243.w;
         routed_0 = routed_0 + 1U;
+        joined_0 = joined_1;
         i_3 = i_3 + 1U;
     }
     g_1 = 0U;
     node_at_0 = 0U;
     for(;;)
     {
-        uint _S241 = min(ncalls_0, 64U);
-        _S224 = _S241;
-        if(g_1 < _S241)
+        uint _S247 = min(ncalls_0, 64U);
+        _S230 = _S247;
+        if(g_1 < _S247)
         {
         }
         else
@@ -2186,13 +2242,13 @@ uint lowest_bit_0(uint m_6)
         {
             over_0 = over_0 | 16U;
         }
-        uint _S242 = 10U * g_1;
-        *((&kernelContext_9)->calls_0+(_S242 + 2U)) = packed_float4(float4(0.0f, 0.0f, (as_type<float>((node_at_0))), (as_type<float>((nodes_n_0))))) ;
-        *((&kernelContext_9)->calls_0+(_S242 + 3U)) = packed_float4(float4((&kernelContext_9)->params_0->gravity_0.xyz, (as_type<float>((chunks_n_0))))) ;
-        float _S243 = (as_type<float>((0U)));
-        *((&kernelContext_9)->calls_0+(_S242 + 4U)) = packed_float4(float4(_S243, (as_type<float>(((*(&kernelContext_9)->g_cnt_bond_0)[g_1]))), 0.0f, 0.0f)) ;
-        *((&kernelContext_9)->calls_0+(_S242 + 5U)) = packed_float4(float4(0.0f, 0.0f, 0.0f, (as_type<float>(((*(&kernelContext_9)->g_mask_of_0)[g_1]))))) ;
-        *((&kernelContext_9)->calls_0+(_S242 + 6U)) = packed_float4(float4(_S243, (as_type<float>(((*(&kernelContext_9)->g_cnt_isl_0)[g_1]))), 0.0f, 0.0f)) ;
+        uint _S248 = 10U * g_1;
+        *((&kernelContext_9)->calls_0+(_S248 + 2U)) = packed_float4(float4(0.0f, 0.0f, (as_type<float>((node_at_0))), (as_type<float>((nodes_n_0))))) ;
+        *((&kernelContext_9)->calls_0+(_S248 + 3U)) = packed_float4(float4((&kernelContext_9)->params_0->gravity_0.xyz, (as_type<float>((chunks_n_0))))) ;
+        float _S249 = (as_type<float>((0U)));
+        *((&kernelContext_9)->calls_0+(_S248 + 4U)) = packed_float4(float4(_S249, (as_type<float>(((*(&kernelContext_9)->g_cnt_bond_0)[g_1]))), 0.0f, 0.0f)) ;
+        *((&kernelContext_9)->calls_0+(_S248 + 5U)) = packed_float4(float4(0.0f, 0.0f, 0.0f, (as_type<float>(((*(&kernelContext_9)->g_mask_of_0)[g_1]))))) ;
+        *((&kernelContext_9)->calls_0+(_S248 + 6U)) = packed_float4(float4(_S249, (as_type<float>(((*(&kernelContext_9)->g_cnt_isl_0)[g_1]))), 0.0f, 0.0f)) ;
         (*(&kernelContext_9)->g_cnt_chunk_0)[g_1] = node_at_0;
         (*(&kernelContext_9)->g_cnt_bond_0)[g_1] = 0U;
         (*(&kernelContext_9)->g_cnt_isl_0)[g_1] = 0U;
@@ -2201,40 +2257,40 @@ uint lowest_bit_0(uint m_6)
         node_at_0 = node_at_1;
     }
     g_1 = 0U;
-    contact_at_0 = 0U;
+    uint contact_at_0 = 0U;
     uint bond_at_0 = 0U;
     uint cisl_at_0 = 0U;
     uint chunk_base_0 = 0U;
     uint imp_base_0 = 0U;
     for(;;)
     {
-        if(g_1 < _S224)
+        if(g_1 < _S230)
         {
         }
         else
         {
             break;
         }
-        uint _S244 = 10U * g_1;
-        uint _S245 = _S244 + 5U;
-        uint nimp_0 = ((uint)popcount(((as_type<uint>(((float4(*((&kernelContext_9)->calls_0+_S245)) ).w))))));
-        *((&kernelContext_9)->calls_0+(_S244 + 8U)) = packed_float4(float4((as_type<float>((contact_at_0))), (as_type<float>((0U))), 0.0f, 0.0f)) ;
-        *((&kernelContext_9)->calls_0+(_S244 + 9U)) = packed_float4(float4(0.0f) ) ;
-        uint _S246 = _S244 + 6U;
-        uint contact_at_1 = contact_at_0 + nimp_0 * (as_type<uint>(((float4(*((&kernelContext_9)->calls_0+_S246)) ).y)));
-        uint _S247 = _S244 + 4U;
-        if((as_type<uint>(((float4(*((&kernelContext_9)->calls_0+_S247)) ).y))) > 131072U)
+        uint _S250 = 10U * g_1;
+        uint _S251 = _S250 + 5U;
+        uint nimp_0 = ((uint)popcount(((as_type<uint>(((float4(*((&kernelContext_9)->calls_0+_S251)) ).w))))));
+        *((&kernelContext_9)->calls_0+(_S250 + 8U)) = packed_float4(float4((as_type<float>((contact_at_0))), (as_type<float>((0U))), 0.0f, 0.0f)) ;
+        *((&kernelContext_9)->calls_0+(_S250 + 9U)) = packed_float4(float4(0.0f) ) ;
+        uint _S252 = _S250 + 6U;
+        uint contact_at_1 = contact_at_0 + nimp_0 * (as_type<uint>(((float4(*((&kernelContext_9)->calls_0+_S252)) ).y)));
+        uint _S253 = _S250 + 4U;
+        if((as_type<uint>(((float4(*((&kernelContext_9)->calls_0+_S253)) ).y))) > 131072U)
         {
             over_0 = over_0 | 64U;
         }
-        (*((&kernelContext_9)->calls_0+_S247))[int(0)] = (as_type<float>((bond_at_0)));
-        *((&kernelContext_9)->calls_0+_S246) = packed_float4(float4((as_type<float>((cisl_at_0))), (float4(*((&kernelContext_9)->calls_0+_S246)) ).y, (as_type<float>((chunk_base_0))), (as_type<float>((imp_base_0))))) ;
-        uint chunk_base_1 = chunk_base_0 + (as_type<uint>(((float4(*((&kernelContext_9)->calls_0+(_S244 + 3U))) ).w)));
-        uint imp_base_1 = imp_base_0 + ((uint)popcount(((as_type<uint>(((float4(*((&kernelContext_9)->calls_0+_S245)) ).w))))));
+        (*((&kernelContext_9)->calls_0+_S253))[int(0)] = (as_type<float>((bond_at_0)));
+        *((&kernelContext_9)->calls_0+_S252) = packed_float4(float4((as_type<float>((cisl_at_0))), (float4(*((&kernelContext_9)->calls_0+_S252)) ).y, (as_type<float>((chunk_base_0))), (as_type<float>((imp_base_0))))) ;
+        uint chunk_base_1 = chunk_base_0 + (as_type<uint>(((float4(*((&kernelContext_9)->calls_0+(_S250 + 3U))) ).w)));
+        uint imp_base_1 = imp_base_0 + ((uint)popcount(((as_type<uint>(((float4(*((&kernelContext_9)->calls_0+_S251)) ).w))))));
         (*(&kernelContext_9)->g_cnt_bond_0)[g_1] = bond_at_0;
         (*(&kernelContext_9)->g_cnt_isl_0)[g_1] = cisl_at_0;
-        uint bond_at_1 = bond_at_0 + (as_type<uint>(((float4(*((&kernelContext_9)->calls_0+_S247)) ).y)));
-        uint cisl_at_1 = cisl_at_0 + (as_type<uint>(((float4(*((&kernelContext_9)->calls_0+_S246)) ).y)));
+        uint bond_at_1 = bond_at_0 + (as_type<uint>(((float4(*((&kernelContext_9)->calls_0+_S253)) ).y)));
+        uint cisl_at_1 = cisl_at_0 + (as_type<uint>(((float4(*((&kernelContext_9)->calls_0+_S252)) ).y)));
         g_1 = g_1 + 1U;
         contact_at_0 = contact_at_1;
         bond_at_0 = bond_at_1;
@@ -2263,39 +2319,39 @@ uint lowest_bit_0(uint m_6)
     i_3 = 0U;
     for(;;)
     {
-        if(i_3 < _S225)
+        if(i_3 < _S231)
         {
         }
         else
         {
             break;
         }
-        uint4 _S248 = uint4(*((&kernelContext_9)->isl_0+4U * i_3)) ;
-        if((_S248.x) == 0U)
+        uint4 _S254 = uint4(*((&kernelContext_9)->isl_0+5U * i_3)) ;
+        if((_S254.x) == 0U)
         {
             changed_0 = true;
         }
         else
         {
-            changed_0 = (_S248.y) >= 64U;
+            changed_0 = (_S254.y) >= 64U;
         }
         if(changed_0)
         {
             i_3 = i_3 + 1U;
             continue;
         }
-        Island_natural_0 device* _S249 = (&kernelContext_9)->islands_0+i_3;
-        uint g_2 = _S248.y;
+        Island_natural_0 device* _S255 = (&kernelContext_9)->islands_0+i_3;
+        uint g_2 = _S254.y;
         uint at_0 = (*(&kernelContext_9)->g_cnt_isl_0)[g_2];
-        uint4 _S250 = uint4(_S249->range_0) ;
-        uint nchunks_0 = _S250.y - _S250.x;
-        uint _S251 = 2U * (*(&kernelContext_9)->g_cnt_isl_0)[g_2];
-        *((&kernelContext_9)->cisl_0+_S251) = packed_uint4(uint4(i_3, (*(&kernelContext_9)->g_cnt_chunk_0)[g_2], nchunks_0, g_2)) ;
-        packed_uint4 device* _S252 = (&kernelContext_9)->cisl_0+(_S251 + 1U);
-        uint _S253 = (as_type<uint>(((float4(*((&kernelContext_9)->ctab_0+((&kernelContext_9)->params_0->engine_base_0 + 3U * i_3))) ).x)));
-        uint _S254 = (*(&kernelContext_9)->g_cnt_bond_0)[g_2];
-        uint _S255 = _S248.z;
-        if((((uint4(_S249->info_0) ).x) & 1U) != 0U)
+        uint4 _S256 = uint4(_S255->range_0) ;
+        uint nchunks_0 = _S256.y - _S256.x;
+        uint _S257 = 2U * (*(&kernelContext_9)->g_cnt_isl_0)[g_2];
+        *((&kernelContext_9)->cisl_0+_S257) = packed_uint4(uint4(i_3, (*(&kernelContext_9)->g_cnt_chunk_0)[g_2], nchunks_0, g_2)) ;
+        packed_uint4 device* _S258 = (&kernelContext_9)->cisl_0+(_S257 + 1U);
+        uint _S259 = (as_type<uint>(((float4(*((&kernelContext_9)->ctab_0+((&kernelContext_9)->params_0->engine_base_0 + 3U * i_3))) ).x)));
+        uint _S260 = (*(&kernelContext_9)->g_cnt_bond_0)[g_2];
+        uint _S261 = _S254.z;
+        if((((uint4(_S255->info_0) ).x) & 1U) != 0U)
         {
             over_0 = 1U;
         }
@@ -2303,16 +2359,17 @@ uint lowest_bit_0(uint m_6)
         {
             over_0 = 0U;
         }
-        *_S252 = packed_uint4(uint4(_S253, _S254, _S255, over_0)) ;
+        *_S258 = packed_uint4(uint4(_S259, _S260, _S261, over_0)) ;
         (*(&kernelContext_9)->g_cnt_isl_0)[g_2] = at_0 + 1U;
         (*(&kernelContext_9)->g_cnt_chunk_0)[g_2] = (*(&kernelContext_9)->g_cnt_chunk_0)[g_2] + nchunks_0;
-        (*(&kernelContext_9)->g_cnt_bond_0)[g_2] = (*(&kernelContext_9)->g_cnt_bond_0)[g_2] + _S255;
+        (*(&kernelContext_9)->g_cnt_bond_0)[g_2] = (*(&kernelContext_9)->g_cnt_bond_0)[g_2] + _S261;
         i_3 = i_3 + 1U;
     }
     *((&kernelContext_9)->ctl_0+2U) = node_at_0;
     *((&kernelContext_9)->ctl_0+3U) = bond_at_0;
     *((&kernelContext_9)->ctl_0+9U) = cisl_at_0;
     *((&kernelContext_9)->ctl_0+17U) = routed_0;
+    *((&kernelContext_9)->ctl_0+19U) = joined_0;
     *((&kernelContext_9)->largs_0+int(0)) = packed_uint4(uint4(ncalls_0, 1U, 1U, 0U)) ;
     *((&kernelContext_9)->largs_0+int(1)) = packed_uint4(uint4(cisl_at_0, 1U, 1U, 0U)) ;
     *((&kernelContext_9)->largs_0+int(2)) = packed_uint4(uint4((cisl_at_0 + 63U) / 64U, 1U, 1U, 0U)) ;
@@ -2321,23 +2378,23 @@ uint lowest_bit_0(uint m_6)
 
 bool connected_0(const JointState_0 thread* st_0, bool has_rebar_0)
 {
-    bool _S256;
+    bool _S262;
     if((st_0->damage_0) < 1.0f)
     {
-        _S256 = true;
+        _S262 = true;
     }
     else
     {
         if(has_rebar_0)
         {
-            _S256 = (st_0->rebar_broken_0) == 0.0f;
+            _S262 = (st_0->rebar_broken_0) == 0.0f;
         }
         else
         {
-            _S256 = false;
+            _S262 = false;
         }
     }
-    return _S256;
+    return _S262;
 }
 
 [[kernel]] void learned_count_bonds(uint3 group_2 [[threadgroup_position_in_grid]], uint3 thread_6 [[thread_position_in_threadgroup]], uint device* ctl_6 [[buffer(1)]], packed_float4 device* calls_6 [[buffer(2)]], packed_float4 device* nodes_6 [[buffer(3)]], LearnedParams_0 constant* params_6 [[buffer(0)]], packed_float4 device* bonds_6 [[buffer(4)]], uint device* chunk_node_6 [[buffer(8)]], uint device* counters_6 [[buffer(19)]], uint device* route_6 [[buffer(25)]], packed_uint4 device* isl_6 [[buffer(5)]], Island_natural_0 device* islands_6 [[buffer(11)]], packed_float4 device* ctab_6 [[buffer(14)]], packed_float4 device* bodies_6 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_6 [[buffer(12)]], packed_float4 device* state_6 [[buffer(13)]], packed_float4 device* imps_6 [[buffer(10)]], uint device* status_6 [[buffer(18)]], packed_uint4 device* largs_6 [[buffer(27)]], packed_uint4 device* cisl_6 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_6 [[buffer(17)]], BondStatic_natural_0 device* bond_static_6 [[buffer(16)]], packed_float4 device* cislf_6 [[buffer(6)]], packed_float4 device* frozen_6 [[buffer(9)]], uint device* split_work_6 [[buffer(21)]], uint device* split_control_6 [[buffer(23)]], packed_uint4 device* split_parents_6 [[buffer(20)]], packed_uint4 device* split_slots_6 [[buffer(22)]], packed_float4 device* split_out_6 [[buffer(26)]], packed_uint4 device* split_firsts_6 [[buffer(24)]], float device* lout_6 [[buffer(28)]])
@@ -2412,19 +2469,19 @@ bool connected_0(const JointState_0 thread* st_0, bool has_rebar_0)
     {
         return;
     }
-    uint _S257 = 4U * i_4;
-    uint4 _S258 = uint4(*((&kernelContext_10)->isl_0+_S257)) ;
-    bool _S259;
+    uint _S263 = 5U * i_4;
+    uint4 _S264 = uint4(*((&kernelContext_10)->isl_0+_S263)) ;
+    bool _S265;
     if((&kernelContext_10)->route_0[int(0)] == 0U)
     {
-        _S259 = true;
+        _S265 = true;
     }
     else
     {
-        _S259 = (_S258.x) == 0U;
+        _S265 = (_S264.x) == 0U;
     }
     uint bi_0;
-    if(_S259)
+    if(_S265)
     {
         bi_0 = 1U;
     }
@@ -2436,22 +2493,22 @@ bool connected_0(const JointState_0 thread* st_0, bool has_rebar_0)
     {
         return;
     }
-    uint4 _S260 = uint4(((&kernelContext_10)->islands_0+i_4)->range_0) ;
-    bi_0 = _S260.z + t_6;
+    uint4 _S266 = uint4(((&kernelContext_10)->islands_0+i_4)->range_0) ;
+    bi_0 = _S266.z + t_6;
     uint nb_0 = 0U;
     for(;;)
     {
-        if(bi_0 < (_S260.w))
+        if(bi_0 < (_S266.w))
         {
         }
         else
         {
             break;
         }
-        bool _S261 = ((float4(((&kernelContext_10)->bond_static_0+bi_0)->law_0.stiff1_0) ).w) != 0.0f;
-        thread JointState_0 _S262 = ((&kernelContext_10)->bond_dyn_0+bi_0)->js_0;
-        bool _S263 = connected_0(&_S262, _S261);
-        if(_S263)
+        bool _S267 = ((float4(((&kernelContext_10)->bond_static_0+bi_0)->law_0.stiff1_0) ).w) != 0.0f;
+        thread JointState_0 _S268 = ((&kernelContext_10)->bond_dyn_0+bi_0)->js_0;
+        bool _S269 = connected_0(&_S268, _S267);
+        if(_S269)
         {
             nb_0 = nb_0 + 1U;
         }
@@ -2479,7 +2536,7 @@ bool connected_0(const JointState_0 thread* st_0, bool has_rebar_0)
     }
     if(t_6 == 0U)
     {
-        *((&kernelContext_10)->isl_0+_S257) = packed_uint4(uint4(_S258.x, _S258.y, (*(&kernelContext_10)->g_scan_0)[int(0)], _S258.w)) ;
+        *((&kernelContext_10)->isl_0+_S263) = packed_uint4(uint4(_S264.x, _S264.y, (*(&kernelContext_10)->g_scan_0)[int(0)], _S264.w)) ;
     }
     return;
 }
@@ -2495,16 +2552,16 @@ float4 matrix_quat_0(matrix<float,int(3),int(3)>  m_8)
     }
     else
     {
-        bool _S264;
+        bool _S270;
         if((m_8[int(0)][int(0)]) > (m_8[int(1)][int(1)]))
         {
-            _S264 = (m_8[int(0)][int(0)]) > (m_8[int(2)][int(2)]);
+            _S270 = (m_8[int(0)][int(0)]) > (m_8[int(2)][int(2)]);
         }
         else
         {
-            _S264 = false;
+            _S270 = false;
         }
-        if(_S264)
+        if(_S270)
         {
             float s_4 = sqrt(1.0f + m_8[int(0)][int(0)] - m_8[int(1)][int(1)] - m_8[int(2)][int(2)]) * 2.0f;
             q_9 = float4(0.25f * s_4, (m_8[int(0)][int(1)] + m_8[int(1)][int(0)]) / s_4, (m_8[int(0)][int(2)] + m_8[int(2)][int(0)]) / s_4, (m_8[int(2)][int(1)] - m_8[int(1)][int(2)]) / s_4);
@@ -2598,65 +2655,65 @@ float4 matrix_quat_0(matrix<float,int(3),int(3)>  m_8)
     {
         return;
     }
-    uint _S265 = 2U * e_0;
-    uint4 _S266 = uint4(*((&kernelContext_11)->cisl_0+_S265)) ;
-    uint _S267 = _S265 + 1U;
-    uint4 _S268 = uint4(*((&kernelContext_11)->cisl_0+_S267)) ;
-    uint i_5 = _S266.x;
-    Island_natural_0 device* _S269 = (&kernelContext_11)->islands_0+i_5;
-    Frame_0 _S270 = island_frame_0(i_5, &kernelContext_11);
-    float _S271;
+    uint _S271 = 2U * e_0;
+    uint4 _S272 = uint4(*((&kernelContext_11)->cisl_0+_S271)) ;
+    uint _S273 = _S271 + 1U;
+    uint4 _S274 = uint4(*((&kernelContext_11)->cisl_0+_S273)) ;
+    uint i_5 = _S272.x;
+    Island_natural_0 device* _S275 = (&kernelContext_11)->islands_0+i_5;
+    Frame_0 _S276 = island_frame_0(i_5, &kernelContext_11);
+    float _S277;
     if(t_7 == 0U)
     {
-        *((&kernelContext_11)->cislf_0+_S265) = packed_float4(float4(_S270.com_1, (float4(_S269->com_0) ).w)) ;
-        packed_float4 device* _S272 = (&kernelContext_11)->cislf_0+_S267;
-        if((_S268.w) != 0U)
+        *((&kernelContext_11)->cislf_0+_S271) = packed_float4(float4(_S276.com_1, (float4(_S275->com_0) ).w)) ;
+        packed_float4 device* _S278 = (&kernelContext_11)->cislf_0+_S273;
+        if((_S274.w) != 0U)
         {
-            _S271 = 1.0f;
+            _S277 = 1.0f;
         }
         else
         {
-            _S271 = 0.0f;
+            _S277 = 0.0f;
         }
-        *_S272 = packed_float4(float4(_S270.v_5, _S271)) ;
+        *_S278 = packed_float4(float4(_S276.v_5, _S277)) ;
     }
     uint c_5 = t_7;
     for(;;)
     {
-        if(c_5 < (_S266.z))
+        if(c_5 < (_S272.z))
         {
         }
         else
         {
             break;
         }
-        uint k_17 = (uint4(_S269->range_0) ).x + c_5;
-        uint n_1 = _S266.y + c_5;
-        ChunkStatic_natural_0 device* _S273 = (&kernelContext_11)->chunks_0+k_17;
-        thread Frame_0 _S274 = _S270;
-        float3 _S275 = chunk_world_0(&_S274, k_17, &kernelContext_11);
-        matrix<float,int(3),int(3)>  rest_0 = transpose(matrix<float,int(3),int(3)> ((float4(_S273->crot0_0) ).xyz, (float4(_S273->crot1_0) ).xyz, (float4(_S273->crot2_0) ).xyz));
-        matrix<float,int(3),int(3)>  ic_0 = (((rest_0) * ((((matrix<float,int(3),int(3)> ((float4(_S273->inertia0_1) ).xyz, (float4(_S273->inertia1_1) ).xyz, (float4(_S273->inertia2_1) ).xyz)) * (transpose(rest_0)))))));
-        float4 q_10 = normalize(qmul_0(_S270.q_8, matrix_quat_0(rest_0)));
-        float3 v_6 = _S270.v_5 + cross(_S270.w_4, _S275 - _S270.com_1);
-        uint4 _S276 = uint4(_S273->info_1) ;
-        bool anchored_0 = (_S276.x) != 0U;
-        uint _S277 = 14U * n_1;
-        *((&kernelContext_11)->nodes_0+_S277) = packed_float4(float4(_S275, (float4(_S273->center_0) ).w)) ;
-        *((&kernelContext_11)->nodes_0+(_S277 + 1U)) = packed_float4(q_10) ;
-        packed_float4 device* _S278 = (&kernelContext_11)->nodes_0+(_S277 + 2U);
+        uint k_17 = (uint4(_S275->range_0) ).x + c_5;
+        uint n_1 = _S272.y + c_5;
+        ChunkStatic_natural_0 device* _S279 = (&kernelContext_11)->chunks_0+k_17;
+        thread Frame_0 _S280 = _S276;
+        float3 _S281 = chunk_world_0(&_S280, k_17, &kernelContext_11);
+        matrix<float,int(3),int(3)>  rest_0 = transpose(matrix<float,int(3),int(3)> ((float4(_S279->crot0_0) ).xyz, (float4(_S279->crot1_0) ).xyz, (float4(_S279->crot2_0) ).xyz));
+        matrix<float,int(3),int(3)>  ic_0 = (((rest_0) * ((((matrix<float,int(3),int(3)> ((float4(_S279->inertia0_1) ).xyz, (float4(_S279->inertia1_1) ).xyz, (float4(_S279->inertia2_1) ).xyz)) * (transpose(rest_0)))))));
+        float4 q_10 = normalize(qmul_0(_S276.q_8, matrix_quat_0(rest_0)));
+        float3 v_6 = _S276.v_5 + cross(_S276.w_4, _S281 - _S276.com_1);
+        uint4 _S282 = uint4(_S279->info_1) ;
+        bool anchored_0 = (_S282.x) != 0U;
+        uint _S283 = 14U * n_1;
+        *((&kernelContext_11)->nodes_0+_S283) = packed_float4(float4(_S281, (float4(_S279->center_0) ).w)) ;
+        *((&kernelContext_11)->nodes_0+(_S283 + 1U)) = packed_float4(q_10) ;
+        packed_float4 device* _S284 = (&kernelContext_11)->nodes_0+(_S283 + 2U);
         if(anchored_0)
         {
-            _S271 = 1.0f;
+            _S277 = 1.0f;
         }
         else
         {
-            _S271 = 0.0f;
+            _S277 = 0.0f;
         }
-        *_S278 = packed_float4(float4(ic_0[int(0)][int(0)], ic_0[int(1)][int(1)], ic_0[int(2)][int(2)], _S271)) ;
-        *((&kernelContext_11)->nodes_0+(_S277 + 3U)) = packed_float4(float4(v_6, (as_type<float>((_S266.w))))) ;
-        *((&kernelContext_11)->nodes_0+(_S277 + 4U)) = packed_float4(float4(_S270.w_4, (as_type<float>((0U))))) ;
-        *((&kernelContext_11)->nodes_0+(_S277 + 12U)) = packed_float4(float4((as_type<float>((k_17))), (as_type<float>((_S268.x))), (as_type<float>((_S276.z))), (as_type<float>((_S276.w))))) ;
+        *_S284 = packed_float4(float4(ic_0[int(0)][int(0)], ic_0[int(1)][int(1)], ic_0[int(2)][int(2)], _S277)) ;
+        *((&kernelContext_11)->nodes_0+(_S283 + 3U)) = packed_float4(float4(v_6, (as_type<float>((_S272.w))))) ;
+        *((&kernelContext_11)->nodes_0+(_S283 + 4U)) = packed_float4(float4(_S276.w_4, (as_type<float>((0U))))) ;
+        *((&kernelContext_11)->nodes_0+(_S283 + 12U)) = packed_float4(float4((as_type<float>((k_17))), (as_type<float>((_S274.x))), (as_type<float>((_S282.z))), (as_type<float>((_S282.w))))) ;
         *((&kernelContext_11)->chunk_node_0+k_17) = n_1 + 1U;
         c_5 = c_5 + 64U;
     }
@@ -2744,16 +2801,16 @@ float4 matrix_quat_0(matrix<float,int(3),int(3)>  m_8)
     {
         return;
     }
-    uint _S279 = 2U * e_1;
-    uint4 _S280 = uint4(*((&kernelContext_12)->cisl_0+_S279)) ;
-    uint4 _S281 = uint4(*((&kernelContext_12)->cisl_0+(_S279 + 1U))) ;
-    uint4 _S282 = uint4(((&kernelContext_12)->islands_0+_S280.x)->range_0) ;
-    uint _S283 = group_uniform_0(_S282.w, t_8);
-    base_0 = group_uniform_0(_S282.z, t_8);
+    uint _S285 = 2U * e_1;
+    uint4 _S286 = uint4(*((&kernelContext_12)->cisl_0+_S285)) ;
+    uint4 _S287 = uint4(*((&kernelContext_12)->cisl_0+(_S285 + 1U))) ;
+    uint4 _S288 = uint4(((&kernelContext_12)->islands_0+_S286.x)->range_0) ;
+    uint _S289 = group_uniform_0(_S288.w, t_8);
+    base_0 = group_uniform_0(_S288.z, t_8);
     uint carry_0 = 0U;
     for(;;)
     {
-        if(base_0 < _S283)
+        if(base_0 < _S289)
         {
         }
         else
@@ -2762,28 +2819,28 @@ float4 matrix_quat_0(matrix<float,int(3),int(3)>  m_8)
         }
         uint bi_1 = base_0 + t_8;
         bool live_1;
-        if(bi_1 < _S283)
+        if(bi_1 < _S289)
         {
-            bool _S284 = ((float4(((&kernelContext_12)->bond_static_0+bi_1)->law_0.stiff1_0) ).w) != 0.0f;
-            thread JointState_0 _S285 = ((&kernelContext_12)->bond_dyn_0+bi_1)->js_0;
-            bool _S286 = connected_0(&_S285, _S284);
-            live_1 = _S286;
+            bool _S290 = ((float4(((&kernelContext_12)->bond_static_0+bi_1)->law_0.stiff1_0) ).w) != 0.0f;
+            thread JointState_0 _S291 = ((&kernelContext_12)->bond_dyn_0+bi_1)->js_0;
+            bool _S292 = connected_0(&_S291, _S290);
+            live_1 = _S292;
         }
         else
         {
             live_1 = false;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        uint _S287;
+        uint _S293;
         if(live_1)
         {
-            _S287 = 1U;
+            _S293 = 1U;
         }
         else
         {
-            _S287 = 0U;
+            _S293 = 0U;
         }
-        (*(&kernelContext_12)->g_scan_0)[t_8] = _S287;
+        (*(&kernelContext_12)->g_scan_0)[t_8] = _S293;
         threadgroup_barrier(mem_flags::mem_threadgroup);
         uint step_0 = 1U;
         for(;;)
@@ -2811,9 +2868,9 @@ float4 matrix_quat_0(matrix<float,int(3),int(3)>  m_8)
         }
         if(live_1)
         {
-            uint _S288 = 2U * (_S281.y + carry_0 + (*(&kernelContext_12)->g_scan_0)[t_8] - 1U);
-            *((&kernelContext_12)->bonds_0+_S288) = packed_float4(float4((&((&kernelContext_12)->bond_dyn_0+bi_1)->js_0)->damage_0, -30.0f, 0.0f, (as_type<float>((1U))))) ;
-            *((&kernelContext_12)->bonds_0+(_S288 + 1U)) = packed_float4(float4(0.0f, (as_type<float>((0U))), (as_type<float>((bi_1))), (as_type<float>((_S280.w))))) ;
+            uint _S294 = 2U * (_S287.y + carry_0 + (*(&kernelContext_12)->g_scan_0)[t_8] - 1U);
+            *((&kernelContext_12)->bonds_0+_S294) = packed_float4(float4((&((&kernelContext_12)->bond_dyn_0+bi_1)->js_0)->damage_0, -30.0f, 0.0f, (as_type<float>((1U))))) ;
+            *((&kernelContext_12)->bonds_0+(_S294 + 1U)) = packed_float4(float4(0.0f, (as_type<float>((0U))), (as_type<float>((bi_1))), (as_type<float>((_S286.w))))) ;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         uint carry_1 = carry_0 + (*(&kernelContext_12)->g_scan_0)[63U];
@@ -2895,27 +2952,27 @@ float4 matrix_quat_0(matrix<float,int(3),int(3)>  m_8)
     {
         return;
     }
-    uint _S289 = 10U * g_3;
-    uint mask_5 = (as_type<uint>(((float4(*((&kernelContext_13)->calls_0+(_S289 + 5U))) ).w)));
-    uint _S290 = 1U << k_18;
-    if((mask_5 & _S290) == 0U)
+    uint _S295 = 10U * g_3;
+    uint mask_7 = (as_type<uint>(((float4(*((&kernelContext_13)->calls_0+(_S295 + 5U))) ).w)));
+    uint _S296 = 1U << k_18;
+    if((mask_7 & _S296) == 0U)
     {
         return;
     }
-    uint _S291 = 4U * k_18;
-    float4 _S292 = float4(*((&kernelContext_13)->imps_0+_S291)) ;
-    float4 _S293 = float4(*((&kernelContext_13)->imps_0+(_S291 + 1U))) ;
-    uint body_1 = (as_type<uint>((_S292.x)));
-    uint _S294 = 7U * body_1;
-    float4 q_11 = body_rotation_zup_0(float4(*((&kernelContext_13)->bodies_0+(_S294 + 1U))) , float4(0.0f, 0.0f, 0.0f, 1.0f));
-    uint _S295 = 14U * ((as_type<uint>(((float4(*((&kernelContext_13)->calls_0+(_S289 + 2U))) ).z))) + (as_type<uint>(((float4(*((&kernelContext_13)->calls_0+(_S289 + 3U))) ).w))) + ((uint)popcount((mask_5 & (_S290 - 1U)))));
-    *((&kernelContext_13)->nodes_0+_S295) = packed_float4(float4(to_zup_0((float4(*((&kernelContext_13)->bodies_0+_S294)) ).xyz), _S292.w)) ;
-    *((&kernelContext_13)->nodes_0+(_S295 + 1U)) = packed_float4(q_11) ;
-    *((&kernelContext_13)->nodes_0+(_S295 + 2U)) = packed_float4(float4(_S293.xyz, 0.0f)) ;
-    *((&kernelContext_13)->nodes_0+(_S295 + 3U)) = packed_float4(float4(to_zup_0((float4(*((&kernelContext_13)->bodies_0+(_S294 + 3U))) ).xyz), (as_type<float>((g_3))))) ;
-    *((&kernelContext_13)->nodes_0+(_S295 + 4U)) = packed_float4(float4(to_zup_0((float4(*((&kernelContext_13)->bodies_0+(_S294 + 4U))) ).xyz), (as_type<float>((1U))))) ;
-    float _S296 = (as_type<float>((4294967295U)));
-    *((&kernelContext_13)->nodes_0+(_S295 + 12U)) = packed_float4(float4((as_type<float>((k_18))), (as_type<float>((body_1))), _S296, _S296)) ;
+    uint _S297 = 4U * k_18;
+    float4 _S298 = float4(*((&kernelContext_13)->imps_0+_S297)) ;
+    float4 _S299 = float4(*((&kernelContext_13)->imps_0+(_S297 + 1U))) ;
+    uint body_1 = (as_type<uint>((_S298.x)));
+    uint _S300 = 7U * body_1;
+    float4 q_11 = body_rotation_zup_0(float4(*((&kernelContext_13)->bodies_0+(_S300 + 1U))) , float4(0.0f, 0.0f, 0.0f, 1.0f));
+    uint _S301 = 14U * ((as_type<uint>(((float4(*((&kernelContext_13)->calls_0+(_S295 + 2U))) ).z))) + (as_type<uint>(((float4(*((&kernelContext_13)->calls_0+(_S295 + 3U))) ).w))) + ((uint)popcount((mask_7 & (_S296 - 1U)))));
+    *((&kernelContext_13)->nodes_0+_S301) = packed_float4(float4(to_zup_0((float4(*((&kernelContext_13)->bodies_0+_S300)) ).xyz), _S298.w)) ;
+    *((&kernelContext_13)->nodes_0+(_S301 + 1U)) = packed_float4(q_11) ;
+    *((&kernelContext_13)->nodes_0+(_S301 + 2U)) = packed_float4(float4(_S299.xyz, 0.0f)) ;
+    *((&kernelContext_13)->nodes_0+(_S301 + 3U)) = packed_float4(float4(to_zup_0((float4(*((&kernelContext_13)->bodies_0+(_S300 + 3U))) ).xyz), (as_type<float>((g_3))))) ;
+    *((&kernelContext_13)->nodes_0+(_S301 + 4U)) = packed_float4(float4(to_zup_0((float4(*((&kernelContext_13)->bodies_0+(_S300 + 4U))) ).xyz), (as_type<float>((1U))))) ;
+    float _S302 = (as_type<float>((4294967295U)));
+    *((&kernelContext_13)->nodes_0+(_S301 + 12U)) = packed_float4(float4((as_type<float>((k_18))), (as_type<float>((body_1))), _S302, _S302)) ;
     return;
 }
 
@@ -2933,7 +2990,7 @@ void sort_group_0(uint t_9, uint n_2, KernelContext_0 thread* kernelContext_14)
         }
         m_9 = m_9 << 1U;
     }
-    float _S297 = float_bits_0(2139095040U);
+    float _S303 = float_bits_0(2139095040U);
     uint j_3 = n_2 + t_9;
     for(;;)
     {
@@ -2944,7 +3001,7 @@ void sort_group_0(uint t_9, uint n_2, KernelContext_0 thread* kernelContext_14)
         {
             break;
         }
-        (*kernelContext_14->g_sort_0)[j_3] = _S297;
+        (*kernelContext_14->g_sort_0)[j_3] = _S303;
         j_3 = j_3 + 64U;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -3002,16 +3059,16 @@ void sort_group_0(uint t_9, uint n_2, KernelContext_0 thread* kernelContext_14)
 float median_sorted_0(uint n_3, KernelContext_0 thread* kernelContext_15)
 {
     uint k_19 = n_3 / 2U;
-    float _S298;
+    float _S304;
     if((n_3 % 2U) == 1U)
     {
-        _S298 = (*kernelContext_15->g_sort_0)[k_19];
+        _S304 = (*kernelContext_15->g_sort_0)[k_19];
     }
     else
     {
-        _S298 = 0.5f * ((*kernelContext_15->g_sort_0)[k_19 - 1U] + (*kernelContext_15->g_sort_0)[k_19]);
+        _S304 = 0.5f * ((*kernelContext_15->g_sort_0)[k_19 - 1U] + (*kernelContext_15->g_sort_0)[k_19]);
     }
-    return _S298;
+    return _S304;
 }
 
 [[kernel]] void learned_finish(uint3 group_6 [[threadgroup_position_in_grid]], uint3 thread_10 [[thread_position_in_threadgroup]], uint device* ctl_10 [[buffer(1)]], packed_float4 device* calls_10 [[buffer(2)]], packed_float4 device* nodes_10 [[buffer(3)]], LearnedParams_0 constant* params_10 [[buffer(0)]], packed_float4 device* bonds_10 [[buffer(4)]], uint device* chunk_node_10 [[buffer(8)]], uint device* counters_10 [[buffer(19)]], uint device* route_10 [[buffer(25)]], packed_uint4 device* isl_10 [[buffer(5)]], Island_natural_0 device* islands_10 [[buffer(11)]], packed_float4 device* ctab_10 [[buffer(14)]], packed_float4 device* bodies_10 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_10 [[buffer(12)]], packed_float4 device* state_10 [[buffer(13)]], packed_float4 device* imps_10 [[buffer(10)]], uint device* status_10 [[buffer(18)]], packed_uint4 device* largs_10 [[buffer(27)]], packed_uint4 device* cisl_10 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_10 [[buffer(17)]], BondStatic_natural_0 device* bond_static_10 [[buffer(16)]], packed_float4 device* cislf_10 [[buffer(6)]], packed_float4 device* frozen_10 [[buffer(9)]], uint device* split_work_10 [[buffer(21)]], uint device* split_control_10 [[buffer(23)]], packed_uint4 device* split_parents_10 [[buffer(20)]], packed_uint4 device* split_slots_10 [[buffer(22)]], packed_float4 device* split_out_10 [[buffer(26)]], packed_uint4 device* split_firsts_10 [[buffer(24)]], float device* lout_10 [[buffer(28)]])
@@ -3095,70 +3152,70 @@ float median_sorted_0(uint n_3, KernelContext_0 thread* kernelContext_15)
     {
         return;
     }
-    uint _S299 = 10U * g_4;
-    uint _S300 = _S299 + 2U;
-    uint _S301 = (as_type<uint>(((float4(*((&kernelContext_16)->calls_0+_S300)) ).z)));
-    uint _S302 = group_uniform_0((as_type<uint>(((float4(*((&kernelContext_16)->calls_0+_S300)) ).w))), t_10);
-    uint nc_0 = group_uniform_0((as_type<uint>(((float4(*((&kernelContext_16)->calls_0+(_S299 + 3U))) ).w))), t_10);
+    uint _S305 = 10U * g_4;
+    uint _S306 = _S305 + 2U;
+    uint _S307 = (as_type<uint>(((float4(*((&kernelContext_16)->calls_0+_S306)) ).z)));
+    uint _S308 = group_uniform_0((as_type<uint>(((float4(*((&kernelContext_16)->calls_0+_S306)) ).w))), t_10);
+    uint nc_0 = group_uniform_0((as_type<uint>(((float4(*((&kernelContext_16)->calls_0+(_S305 + 3U))) ).w))), t_10);
     thread float4 a_9;
     thread float4 b_8;
     thread float4 c_6;
     thread float4 d_4;
-    float4 _S303 = float4(0.0f) ;
+    float4 _S309 = float4(0.0f) ;
     j_4 = t_10;
-    float4 sa_5 = _S303;
-    float4 sb_5 = _S303;
+    float4 sa_5 = _S309;
+    float4 sb_5 = _S309;
     for(;;)
     {
-        if(j_4 < _S302)
+        if(j_4 < _S308)
         {
         }
         else
         {
             break;
         }
-        uint k_20 = _S301 + j_4;
-        float4 _S304 = node_0(k_20, 0U, &kernelContext_16);
-        float _S305 = _S304.w;
-        float3 _S306 = float3(_S305) ;
-        float4 sa_6 = sa_5 + float4(_S304.xyz * _S306, _S305);
-        float4 _S307 = node_0(k_20, 3U, &kernelContext_16);
-        float3 _S308 = _S307.xyz * _S306;
-        float4 _S309 = node_0(k_20, 2U, &kernelContext_16);
-        float4 sb_6 = sb_5 + float4(_S308, _S309.w);
+        uint k_20 = _S307 + j_4;
+        float4 _S310 = node_0(k_20, 0U, &kernelContext_16);
+        float _S311 = _S310.w;
+        float3 _S312 = float3(_S311) ;
+        float4 sa_6 = sa_5 + float4(_S310.xyz * _S312, _S311);
+        float4 _S313 = node_0(k_20, 3U, &kernelContext_16);
+        float3 _S314 = _S313.xyz * _S312;
+        float4 _S315 = node_0(k_20, 2U, &kernelContext_16);
+        float4 sb_6 = sb_5 + float4(_S314, _S315.w);
         j_4 = j_4 + 64U;
         sa_5 = sa_6;
         sb_5 = sb_6;
     }
-    reduce_store_0(t_10, sa_5, sb_5, _S303, _S303, &kernelContext_16);
+    reduce_store_0(t_10, sa_5, sb_5, _S309, _S309, &kernelContext_16);
     reduce_read_0(&a_9, &b_8, &c_6, &d_4, &kernelContext_16);
-    float3 _S310 = float3(a_9.w) ;
-    float3 com_3 = a_9.xyz / _S310;
-    float3 _S311 = b_8.xyz / _S310;
+    float3 _S316 = float3(a_9.w) ;
+    float3 com_3 = a_9.xyz / _S316;
+    float3 _S317 = b_8.xyz / _S316;
     bool anchored_1 = (b_8.w) > 0.0f;
-    float vmax_0 = max((&kernelContext_16)->params_0->speed_ref_0, (float4(*((&kernelContext_16)->calls_0+(_S299 + 8U))) ).w);
+    float vmax_0 = max((&kernelContext_16)->params_0->speed_ref_0, (float4(*((&kernelContext_16)->calls_0+(_S305 + 8U))) ).w);
     j_4 = t_10;
     float ke_in_1 = 0.0f;
     float wg_0 = 0.0f;
     for(;;)
     {
-        if(j_4 < _S302)
+        if(j_4 < _S308)
         {
         }
         else
         {
             break;
         }
-        uint k_21 = _S301 + j_4;
-        float4 _S312 = node_0(k_21, 0U, &kernelContext_16);
-        float4 _S313 = node_0(k_21, 3U, &kernelContext_16);
-        float3 v_7 = _S313.xyz;
-        float4 _S314 = node_0(k_21, 4U, &kernelContext_16);
-        float3 w_5 = _S314.xyz;
-        float4 _S315 = node_0(k_21, 4U, &kernelContext_16);
-        bool imp_0 = (as_type<uint>((_S315.w))) != 0U;
-        float4 _S316 = node_0(k_21, 12U, &kernelContext_16);
-        uint id_1 = (as_type<uint>((_S316.x)));
+        uint k_21 = _S307 + j_4;
+        float4 _S318 = node_0(k_21, 0U, &kernelContext_16);
+        float4 _S319 = node_0(k_21, 3U, &kernelContext_16);
+        float3 v_7 = _S319.xyz;
+        float4 _S320 = node_0(k_21, 4U, &kernelContext_16);
+        float3 w_5 = _S320.xyz;
+        float4 _S321 = node_0(k_21, 4U, &kernelContext_16);
+        bool imp_0 = (as_type<uint>((_S321.w))) != 0U;
+        float4 _S322 = node_0(k_21, 12U, &kernelContext_16);
+        uint id_1 = (as_type<uint>((_S322.x)));
         float rim_0;
         if(imp_0)
         {
@@ -3168,14 +3225,14 @@ float median_sorted_0(uint n_3, KernelContext_0 thread* kernelContext_15)
         {
             rim_0 = length((float4(((&kernelContext_16)->chunks_0+id_1)->half_0) ).xyz);
         }
-        float _S317 = max(vmax_0, max(length(v_7 - _S311), length(w_5) * rim_0));
-        float4 _S318 = node_0(k_21, 1U, &kernelContext_16);
-        float4 _S319 = node_0(k_21, 2U, &kernelContext_16);
-        float _S320 = _S312.w;
-        float ke_in_2 = ke_in_1 + 0.5f * (_S320 * dot(v_7, v_7) + dot(w_5, (((w_5) * (world_inertia_0(_S318, _S319.xyz))))));
-        float wg_1 = wg_0 + _S320 * dot(v_7 * float3((&kernelContext_16)->params_0->dt_0)  + (&kernelContext_16)->params_0->gravity_0.xyz * float3((0.5f * (&kernelContext_16)->params_0->dt_0 * (&kernelContext_16)->params_0->dt_0)) , (&kernelContext_16)->params_0->gravity_0.xyz);
+        float _S323 = max(vmax_0, max(length(v_7 - _S317), length(w_5) * rim_0));
+        float4 _S324 = node_0(k_21, 1U, &kernelContext_16);
+        float4 _S325 = node_0(k_21, 2U, &kernelContext_16);
+        float _S326 = _S318.w;
+        float ke_in_2 = ke_in_1 + 0.5f * (_S326 * dot(v_7, v_7) + dot(w_5, (((w_5) * (world_inertia_0(_S324, _S325.xyz))))));
+        float wg_1 = wg_0 + _S326 * dot(v_7 * float3((&kernelContext_16)->params_0->dt_0)  + (&kernelContext_16)->params_0->gravity_0.xyz * float3((0.5f * (&kernelContext_16)->params_0->dt_0 * (&kernelContext_16)->params_0->dt_0)) , (&kernelContext_16)->params_0->gravity_0.xyz);
         uint j_5 = j_4 + 64U;
-        vmax_0 = _S317;
+        vmax_0 = _S323;
         j_4 = j_5;
         ke_in_1 = ke_in_2;
         wg_0 = wg_1;
@@ -3202,53 +3259,53 @@ float median_sorted_0(uint n_3, KernelContext_0 thread* kernelContext_15)
     }
     float vmax_1 = (*(&kernelContext_16)->g_sort_0)[int(0)];
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    reduce_store_0(t_10, float4(ke_in_1, wg_0, 0.0f, 0.0f), _S303, _S303, _S303, &kernelContext_16);
+    reduce_store_0(t_10, float4(ke_in_1, wg_0, 0.0f, 0.0f), _S309, _S309, _S309, &kernelContext_16);
     reduce_read_0(&a_9, &b_8, &c_6, &d_4, &kernelContext_16);
     float ke_in_3 = a_9.x;
     float wg_2 = a_9.y;
-    uint _S321 = min(nc_0, 4096U);
+    uint _S327 = min(nc_0, 4096U);
     j_4 = t_10;
     for(;;)
     {
-        if(j_4 < _S321)
+        if(j_4 < _S327)
         {
         }
         else
         {
             break;
         }
-        float4 _S322 = node_0(_S301 + j_4, 12U, &kernelContext_16);
-        float3 h_0 = (float4(((&kernelContext_16)->chunks_0+(as_type<uint>((_S322.x))))->half_0) ).xyz;
+        float4 _S328 = node_0(_S307 + j_4, 12U, &kernelContext_16);
+        float3 h_0 = (float4(((&kernelContext_16)->chunks_0+(as_type<uint>((_S328.x))))->half_0) ).xyz;
         (*(&kernelContext_16)->g_sort_0)[j_4] = 8.0f * h_0.x * h_0.y * h_0.z;
         j_4 = j_4 + 64U;
     }
-    sort_group_0(t_10, _S321, &kernelContext_16);
-    bool _S323 = t_10 == 0U;
-    if(_S323)
+    sort_group_0(t_10, _S327, &kernelContext_16);
+    bool _S329 = t_10 == 0U;
+    if(_S329)
     {
-        float _S324 = median_sorted_0(_S321, &kernelContext_16);
-        (*(&kernelContext_16)->g_scalars_0).x = pow(_S324, 0.3333333432674408f);
+        float _S330 = median_sorted_0(_S327, &kernelContext_16);
+        (*(&kernelContext_16)->g_scalars_0).x = pow(_S330, 0.3333333432674408f);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     j_4 = t_10;
     for(;;)
     {
-        if(j_4 < _S321)
+        if(j_4 < _S327)
         {
         }
         else
         {
             break;
         }
-        float4 _S325 = node_0(_S301 + j_4, 0U, &kernelContext_16);
-        (*(&kernelContext_16)->g_sort_0)[j_4] = _S325.w;
+        float4 _S331 = node_0(_S307 + j_4, 0U, &kernelContext_16);
+        (*(&kernelContext_16)->g_sort_0)[j_4] = _S331.w;
         j_4 = j_4 + 64U;
     }
-    sort_group_0(t_10, _S321, &kernelContext_16);
-    if(_S323)
+    sort_group_0(t_10, _S327, &kernelContext_16);
+    if(_S329)
     {
-        float _S326 = median_sorted_0(_S321, &kernelContext_16);
-        (*(&kernelContext_16)->g_scalars_0).y = _S326;
+        float _S332 = median_sorted_0(_S327, &kernelContext_16);
+        (*(&kernelContext_16)->g_scalars_0).y = _S332;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     float L_0 = (*(&kernelContext_16)->g_scalars_0).x;
@@ -3256,26 +3313,26 @@ float median_sorted_0(uint n_3, KernelContext_0 thread* kernelContext_15)
     j_4 = t_10;
     for(;;)
     {
-        if(j_4 < _S302)
+        if(j_4 < _S308)
         {
         }
         else
         {
             break;
         }
-        uint k_22 = _S301 + j_4;
-        float4 _S327 = node_0(k_22, 0U, &kernelContext_16);
-        uint _S328 = 14U * k_22;
-        packed_float4 device* _S329 = (&kernelContext_16)->nodes_0+(_S328 + 13U);
-        float3 _S330 = _S327.xyz;
-        float4 _S331 = node_0(k_22, 13U, &kernelContext_16);
-        *_S329 = packed_float4(float4(_S330, _S331.w)) ;
-        *((&kernelContext_16)->nodes_0+_S328) = packed_float4(float4(_S330 - com_3, _S327.w)) ;
+        uint k_22 = _S307 + j_4;
+        float4 _S333 = node_0(k_22, 0U, &kernelContext_16);
+        uint _S334 = 14U * k_22;
+        packed_float4 device* _S335 = (&kernelContext_16)->nodes_0+(_S334 + 13U);
+        float3 _S336 = _S333.xyz;
+        float4 _S337 = node_0(k_22, 13U, &kernelContext_16);
+        *_S335 = packed_float4(float4(_S336, _S337.w)) ;
+        *((&kernelContext_16)->nodes_0+_S334) = packed_float4(float4(_S336 - com_3, _S333.w)) ;
         j_4 = j_4 + 64U;
     }
-    if(_S323)
+    if(_S329)
     {
-        float _S332 = max(ke_in_3 + wg_2, 0.5f * mmed_0 * vmax_1 * vmax_1);
+        float _S338 = max(ke_in_3 + wg_2, 0.5f * mmed_0 * vmax_1 * vmax_1);
         uint flags_1;
         if(anchored_1)
         {
@@ -3285,25 +3342,25 @@ float median_sorted_0(uint n_3, KernelContext_0 thread* kernelContext_15)
         {
             flags_1 = 0U;
         }
-        bool _S333;
+        bool _S339;
         if(!anchored_1)
         {
-            _S333 = ((&kernelContext_16)->params_0->gravity_0.w) == 0.0f;
+            _S339 = ((&kernelContext_16)->params_0->gravity_0.w) == 0.0f;
         }
         else
         {
-            _S333 = false;
+            _S339 = false;
         }
-        if(_S333)
+        if(_S339)
         {
             flags_1 = flags_1 | 1U;
         }
-        float4 _S334 = float4(*((&kernelContext_16)->calls_0+_S300)) ;
-        *((&kernelContext_16)->calls_0+_S299) = packed_float4(float4(L_0, mmed_0, vmax_1, 0.0f)) ;
-        *((&kernelContext_16)->calls_0+(_S299 + 1U)) = packed_float4(float4(0.0f, 0.0f, 0.0f, (&kernelContext_16)->params_0->dt_0)) ;
-        *((&kernelContext_16)->calls_0+_S300) = packed_float4(float4(_S332, (as_type<float>((flags_1))), _S334.z, _S334.w)) ;
-        uint _S335 = _S299 + 5U;
-        *((&kernelContext_16)->calls_0+_S335) = packed_float4(float4(com_3, (float4(*((&kernelContext_16)->calls_0+_S335)) ).w)) ;
+        float4 _S340 = float4(*((&kernelContext_16)->calls_0+_S306)) ;
+        *((&kernelContext_16)->calls_0+_S305) = packed_float4(float4(L_0, mmed_0, vmax_1, 0.0f)) ;
+        *((&kernelContext_16)->calls_0+(_S305 + 1U)) = packed_float4(float4(0.0f, 0.0f, 0.0f, (&kernelContext_16)->params_0->dt_0)) ;
+        *((&kernelContext_16)->calls_0+_S306) = packed_float4(float4(_S338, (as_type<float>((flags_1))), _S340.z, _S340.w)) ;
+        uint _S341 = _S305 + 5U;
+        *((&kernelContext_16)->calls_0+_S341) = packed_float4(float4(com_3, (float4(*((&kernelContext_16)->calls_0+_S341)) ).w)) ;
     }
     return;
 }
@@ -3315,9 +3372,9 @@ float3 inverse_rotate_0(const Quat_0 thread* q_12, float3 v_8)
     (&c_7)->x_0 = - q_12->x_0;
     (&c_7)->y_0 = - q_12->y_0;
     (&c_7)->z_0 = - q_12->z_0;
-    thread Quat_0 _S336 = c_7;
-    float3 _S337 = rotate_0(&_S336, v_8);
-    return _S337;
+    thread Quat_0 _S342 = c_7;
+    float3 _S343 = rotate_0(&_S342, v_8);
+    return _S343;
 }
 
 [[kernel]] void learned_stub(uint3 group_7 [[threadgroup_position_in_grid]], uint3 thread_11 [[thread_position_in_threadgroup]], uint device* ctl_11 [[buffer(1)]], packed_float4 device* calls_11 [[buffer(2)]], packed_float4 device* nodes_11 [[buffer(3)]], LearnedParams_0 constant* params_11 [[buffer(0)]], packed_float4 device* bonds_11 [[buffer(4)]], uint device* chunk_node_11 [[buffer(8)]], uint device* counters_11 [[buffer(19)]], uint device* route_11 [[buffer(25)]], packed_uint4 device* isl_11 [[buffer(5)]], Island_natural_0 device* islands_11 [[buffer(11)]], packed_float4 device* ctab_11 [[buffer(14)]], packed_float4 device* bodies_11 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_11 [[buffer(12)]], packed_float4 device* state_11 [[buffer(13)]], packed_float4 device* imps_11 [[buffer(10)]], uint device* status_11 [[buffer(18)]], packed_uint4 device* largs_11 [[buffer(27)]], packed_uint4 device* cisl_11 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_11 [[buffer(17)]], BondStatic_natural_0 device* bond_static_11 [[buffer(16)]], packed_float4 device* cislf_11 [[buffer(6)]], packed_float4 device* frozen_11 [[buffer(9)]], uint device* split_work_11 [[buffer(21)]], uint device* split_control_11 [[buffer(23)]], packed_uint4 device* split_parents_11 [[buffer(20)]], packed_uint4 device* split_slots_11 [[buffer(22)]], packed_float4 device* split_out_11 [[buffer(26)]], packed_uint4 device* split_firsts_11 [[buffer(24)]], float device* lout_11 [[buffer(28)]])
@@ -3411,15 +3468,15 @@ float3 inverse_rotate_0(const Quat_0 thread* q_12, float3 v_8)
     {
         return;
     }
-    uint _S338 = 10U * g_5;
-    uint _S339 = _S338 + 2U;
-    uint first_0 = (as_type<uint>(((float4(*((&kernelContext_17)->calls_0+_S339)) ).z)));
-    uint n_4 = group_uniform_0((as_type<uint>(((float4(*((&kernelContext_17)->calls_0+_S339)) ).w))), t_11);
-    uint nc_1 = group_uniform_0((as_type<uint>(((float4(*((&kernelContext_17)->calls_0+(_S338 + 3U))) ).w))), t_11);
-    uint _S340 = _S338 + 4U;
-    uint _S341 = (as_type<uint>(((float4(*((&kernelContext_17)->calls_0+_S340)) ).x)));
-    uint _S342 = (as_type<uint>(((float4(*((&kernelContext_17)->calls_0+_S340)) ).y)));
-    float vref_0 = (float4(*((&kernelContext_17)->calls_0+_S338)) ).z;
+    uint _S344 = 10U * g_5;
+    uint _S345 = _S344 + 2U;
+    uint first_0 = (as_type<uint>(((float4(*((&kernelContext_17)->calls_0+_S345)) ).z)));
+    uint n_4 = group_uniform_0((as_type<uint>(((float4(*((&kernelContext_17)->calls_0+_S345)) ).w))), t_11);
+    uint nc_1 = group_uniform_0((as_type<uint>(((float4(*((&kernelContext_17)->calls_0+(_S344 + 3U))) ).w))), t_11);
+    uint _S346 = _S344 + 4U;
+    uint _S347 = (as_type<uint>(((float4(*((&kernelContext_17)->calls_0+_S346)) ).x)));
+    uint _S348 = (as_type<uint>(((float4(*((&kernelContext_17)->calls_0+_S346)) ).y)));
+    float vref_0 = (float4(*((&kernelContext_17)->calls_0+_S344)) ).z;
     j_6 = t_11;
     for(;;)
     {
@@ -3430,25 +3487,25 @@ float3 inverse_rotate_0(const Quat_0 thread* q_12, float3 v_8)
         {
             break;
         }
-        uint _S343 = 14U * (first_0 + j_6);
-        packed_float4 _S344 = packed_float4(float4(0.0f) ) ;
-        *((&kernelContext_17)->nodes_0+(_S343 + 5U)) = _S344;
-        *((&kernelContext_17)->nodes_0+(_S343 + 6U)) = _S344;
-        *((&kernelContext_17)->nodes_0+(_S343 + 7U)) = _S344;
+        uint _S349 = 14U * (first_0 + j_6);
+        packed_float4 _S350 = packed_float4(float4(0.0f) ) ;
+        *((&kernelContext_17)->nodes_0+(_S349 + 5U)) = _S350;
+        *((&kernelContext_17)->nodes_0+(_S349 + 6U)) = _S350;
+        *((&kernelContext_17)->nodes_0+(_S349 + 7U)) = _S350;
         j_6 = j_6 + 64U;
     }
     j_6 = t_11;
     for(;;)
     {
-        if(j_6 < _S342)
+        if(j_6 < _S348)
         {
         }
         else
         {
             break;
         }
-        uint _S345 = 2U * (_S341 + j_6);
-        *((&kernelContext_17)->bonds_0+_S345) = packed_float4(float4((float4(*((&kernelContext_17)->bonds_0+_S345)) ).x, -30.0f, 0.0f, (as_type<float>((1U))))) ;
+        uint _S351 = 2U * (_S347 + j_6);
+        *((&kernelContext_17)->bonds_0+_S351) = packed_float4(float4((float4(*((&kernelContext_17)->bonds_0+_S351)) ).x, -30.0f, 0.0f, (as_type<float>((1U))))) ;
         j_6 = j_6 + 64U;
     }
     threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
@@ -3462,7 +3519,7 @@ float3 inverse_rotate_0(const Quat_0 thread* q_12, float3 v_8)
     }
     if((group_uniform_0(j_6, t_11)) != 0U)
     {
-        float _S346 = float_bits_0(2143289344U);
+        float _S352 = float_bits_0(2143289344U);
         j_6 = t_11;
         for(;;)
         {
@@ -3473,7 +3530,7 @@ float3 inverse_rotate_0(const Quat_0 thread* q_12, float3 v_8)
             {
                 break;
             }
-            *((&kernelContext_17)->nodes_0+(14U * (first_0 + j_6) + 5U)) = packed_float4(float4(_S346) ) ;
+            *((&kernelContext_17)->nodes_0+(14U * (first_0 + j_6) + 5U)) = packed_float4(float4(_S352) ) ;
             j_6 = j_6 + 64U;
         }
         return;
@@ -3503,15 +3560,15 @@ float3 inverse_rotate_0(const Quat_0 thread* q_12, float3 v_8)
     {
         return;
     }
-    float4 _S347 = node_0(ki_0, 0U, &kernelContext_17);
-    float3 _S348 = _S347.xyz;
-    float4 _S349 = node_0(ki_0, 3U, &kernelContext_17);
-    float3 vi_0 = _S349.xyz;
-    float4 _S350 = node_0(ki_0, 0U, &kernelContext_17);
-    float mi_0 = _S350.w;
-    float4 _S351 = node_0(ki_0, 12U, &kernelContext_17);
-    float _S352 = (float4(*((&kernelContext_17)->imps_0+4U * (as_type<uint>((_S351.x))))) ).z;
-    float3 _S353 = normalize(vi_0 - (float4(*((&kernelContext_17)->calls_0+(_S338 + 5U))) ).xyz * float3(0.0f) );
+    float4 _S353 = node_0(ki_0, 0U, &kernelContext_17);
+    float3 _S354 = _S353.xyz;
+    float4 _S355 = node_0(ki_0, 3U, &kernelContext_17);
+    float3 vi_0 = _S355.xyz;
+    float4 _S356 = node_0(ki_0, 0U, &kernelContext_17);
+    float mi_1 = _S356.w;
+    float4 _S357 = node_0(ki_0, 12U, &kernelContext_17);
+    float _S358 = (float4(*((&kernelContext_17)->imps_0+4U * (as_type<uint>((_S357.x))))) ).z;
+    float3 _S359 = normalize(vi_0 - (float4(*((&kernelContext_17)->calls_0+(_S344 + 5U))) ).xyz * float3(0.0f) );
     float inf_1 = float_bits_0(2139095040U);
     float best_0 = inf_1;
     j_6 = t_11;
@@ -3525,11 +3582,11 @@ float3 inverse_rotate_0(const Quat_0 thread* q_12, float3 v_8)
             break;
         }
         uint k_23 = first_0 + j_6;
-        float4 _S354 = node_0(k_23, 0U, &kernelContext_17);
-        float3 r_13 = _S354.xyz - _S348;
-        float along_0 = dot(r_13, _S353);
-        float4 _S355 = node_0(k_23, 12U, &kernelContext_17);
-        if((length(r_13 - _S353 * float3(along_0) )) <= (_S352 + (float4(((&kernelContext_17)->chunks_0+(as_type<uint>((_S355.x))))->half_0) ).w))
+        float4 _S360 = node_0(k_23, 0U, &kernelContext_17);
+        float3 r_13 = _S360.xyz - _S354;
+        float along_0 = dot(r_13, _S359);
+        float4 _S361 = node_0(k_23, 12U, &kernelContext_17);
+        if((length(r_13 - _S359 * float3(along_0) )) <= (_S358 + (float4(((&kernelContext_17)->chunks_0+(as_type<uint>((_S361.x))))->half_0) ).w))
         {
             pa_0 = along_0 > 0.0f;
         }
@@ -3563,11 +3620,11 @@ float3 inverse_rotate_0(const Quat_0 thread* q_12, float3 v_8)
         threadgroup_barrier(mem_flags::mem_threadgroup);
         s_8 = s_8 >> 1U;
     }
-    float _S356 = (*(&kernelContext_17)->g_sort_0)[int(0)];
+    float _S362 = (*(&kernelContext_17)->g_sort_0)[int(0)];
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    float4 _S357 = float4(0.0f) ;
+    float4 _S363 = float4(0.0f) ;
     j_6 = t_11;
-    float4 sa_7 = _S357;
+    float4 sa_7 = _S363;
     for(;;)
     {
         if(j_6 < nc_1)
@@ -3578,14 +3635,14 @@ float3 inverse_rotate_0(const Quat_0 thread* q_12, float3 v_8)
             break;
         }
         uint k_24 = first_0 + j_6;
-        float4 _S358 = node_0(k_24, 0U, &kernelContext_17);
-        float3 r_14 = _S358.xyz - _S348;
-        float along_1 = dot(r_14, _S353);
-        float4 _S359 = node_0(k_24, 12U, &kernelContext_17);
-        float h_1 = (float4(((&kernelContext_17)->chunks_0+(as_type<uint>((_S359.x))))->half_0) ).w;
-        if(_S356 < inf_1)
+        float4 _S364 = node_0(k_24, 0U, &kernelContext_17);
+        float3 r_14 = _S364.xyz - _S354;
+        float along_1 = dot(r_14, _S359);
+        float4 _S365 = node_0(k_24, 12U, &kernelContext_17);
+        float h_1 = (float4(((&kernelContext_17)->chunks_0+(as_type<uint>((_S365.x))))->half_0) ).w;
+        if(_S362 < inf_1)
         {
-            pa_0 = along_1 >= (_S356 - h_1);
+            pa_0 = along_1 >= (_S362 - h_1);
         }
         else
         {
@@ -3593,7 +3650,7 @@ float3 inverse_rotate_0(const Quat_0 thread* q_12, float3 v_8)
         }
         if(pa_0)
         {
-            plug_0 = (length(r_14 - _S353 * float3(along_1) )) <= _S352;
+            plug_0 = (length(r_14 - _S359 * float3(along_1) )) <= _S358;
         }
         else
         {
@@ -3602,27 +3659,27 @@ float3 inverse_rotate_0(const Quat_0 thread* q_12, float3 v_8)
         bool plug_1;
         if(plug_0)
         {
-            float4 _S360 = node_0(k_24, 2U, &kernelContext_17);
-            plug_1 = (_S360.w) == 0.0f;
+            float4 _S366 = node_0(k_24, 2U, &kernelContext_17);
+            plug_1 = (_S366.w) == 0.0f;
         }
         else
         {
             plug_1 = false;
         }
-        float4 _S361 = node_0(k_24, 12U, &kernelContext_17);
-        (*((&kernelContext_17)->nodes_0+(14U * k_24 + 12U)))[int(1)] = _S361.y;
+        float4 _S367 = node_0(k_24, 12U, &kernelContext_17);
+        (*((&kernelContext_17)->nodes_0+(14U * k_24 + 12U)))[int(1)] = _S367.y;
         if(plug_1)
         {
-            float4 _S362 = node_0(k_24, 3U, &kernelContext_17);
-            float3 _S363 = _S362.xyz;
-            float4 _S364 = node_0(k_24, 0U, &kernelContext_17);
-            float3 _S365 = _S363 * float3(_S364.w) ;
-            float4 _S366 = node_0(k_24, 0U, &kernelContext_17);
-            sa_7 = sa_7 + float4(_S365, _S366.w);
+            float4 _S368 = node_0(k_24, 3U, &kernelContext_17);
+            float3 _S369 = _S368.xyz;
+            float4 _S370 = node_0(k_24, 0U, &kernelContext_17);
+            float3 _S371 = _S369 * float3(_S370.w) ;
+            float4 _S372 = node_0(k_24, 0U, &kernelContext_17);
+            sa_7 = sa_7 + float4(_S371, _S372.w);
         }
         j_6 = j_6 + 64U;
     }
-    reduce_store_0(t_11, sa_7, _S357, _S357, _S357, &kernelContext_17);
+    reduce_store_0(t_11, sa_7, _S363, _S363, _S363, &kernelContext_17);
     thread float4 a_10;
     thread float4 b_9;
     thread float4 c_8;
@@ -3641,7 +3698,7 @@ float3 inverse_rotate_0(const Quat_0 thread* q_12, float3 v_8)
     {
         return;
     }
-    float3 vc_1 = (a_10.xyz + float3(mi_0)  * vi_0) / float3((mp_0 + mi_0)) ;
+    float3 vc_1 = (a_10.xyz + float3(mi_1)  * vi_0) / float3((mp_0 + mi_1)) ;
     j_6 = t_11;
     for(;;)
     {
@@ -3653,13 +3710,13 @@ float3 inverse_rotate_0(const Quat_0 thread* q_12, float3 v_8)
             break;
         }
         uint k_25 = first_0 + j_6;
-        float4 _S367 = node_0(k_25, 0U, &kernelContext_17);
-        float3 r_15 = _S367.xyz - _S348;
-        float along_2 = dot(r_15, _S353);
-        float4 _S368 = node_0(k_25, 12U, &kernelContext_17);
-        if(along_2 >= (_S356 - (float4(((&kernelContext_17)->chunks_0+(as_type<uint>((_S368.x))))->half_0) ).w))
+        float4 _S373 = node_0(k_25, 0U, &kernelContext_17);
+        float3 r_15 = _S373.xyz - _S354;
+        float along_2 = dot(r_15, _S359);
+        float4 _S374 = node_0(k_25, 12U, &kernelContext_17);
+        if(along_2 >= (_S362 - (float4(((&kernelContext_17)->chunks_0+(as_type<uint>((_S374.x))))->half_0) ).w))
         {
-            pa_0 = (length(r_15 - _S353 * float3(along_2) )) <= _S352;
+            pa_0 = (length(r_15 - _S359 * float3(along_2) )) <= _S358;
         }
         else
         {
@@ -3667,8 +3724,8 @@ float3 inverse_rotate_0(const Quat_0 thread* q_12, float3 v_8)
         }
         if(pa_0)
         {
-            float4 _S369 = node_0(k_25, 2U, &kernelContext_17);
-            plug_0 = (_S369.w) == 0.0f;
+            float4 _S375 = node_0(k_25, 2U, &kernelContext_17);
+            plug_0 = (_S375.w) == 0.0f;
         }
         else
         {
@@ -3676,52 +3733,52 @@ float3 inverse_rotate_0(const Quat_0 thread* q_12, float3 v_8)
         }
         if(plug_0)
         {
-            float4 _S370 = node_0(k_25, 1U, &kernelContext_17);
-            Quat_0 q_13 = quat_of_0(_S370);
-            float4 _S371 = node_0(k_25, 3U, &kernelContext_17);
-            float3 _S372 = vc_1 - _S371.xyz;
-            thread Quat_0 _S373 = q_13;
-            float3 _S374 = inverse_rotate_0(&_S373, _S372);
-            float3 o_1 = _S374 / float3(vref_0) ;
-            uint _S375 = 14U * k_25;
-            *((&kernelContext_17)->nodes_0+(_S375 + 5U)) = packed_float4(float4(o_1, 0.0f)) ;
-            *((&kernelContext_17)->nodes_0+(_S375 + 6U)) = packed_float4(float4(0.0f, 0.0f, 0.5f * o_1.x, 0.5f * o_1.y)) ;
-            *((&kernelContext_17)->nodes_0+(_S375 + 7U)) = packed_float4(float4(0.5f * o_1.z, 0.0f, 0.0f, 0.0f)) ;
-            packed_float4 device* _S376 = (&kernelContext_17)->nodes_0+(_S375 + 4U);
-            float4 _S377 = node_0(k_25, 4U, &kernelContext_17);
-            *_S376 = packed_float4(float4(_S377.xyz, (as_type<float>((2U))))) ;
+            float4 _S376 = node_0(k_25, 1U, &kernelContext_17);
+            Quat_0 q_13 = quat_of_0(_S376);
+            float4 _S377 = node_0(k_25, 3U, &kernelContext_17);
+            float3 _S378 = vc_1 - _S377.xyz;
+            thread Quat_0 _S379 = q_13;
+            float3 _S380 = inverse_rotate_0(&_S379, _S378);
+            float3 o_1 = _S380 / float3(vref_0) ;
+            uint _S381 = 14U * k_25;
+            *((&kernelContext_17)->nodes_0+(_S381 + 5U)) = packed_float4(float4(o_1, 0.0f)) ;
+            *((&kernelContext_17)->nodes_0+(_S381 + 6U)) = packed_float4(float4(0.0f, 0.0f, 0.5f * o_1.x, 0.5f * o_1.y)) ;
+            *((&kernelContext_17)->nodes_0+(_S381 + 7U)) = packed_float4(float4(0.5f * o_1.z, 0.0f, 0.0f, 0.0f)) ;
+            packed_float4 device* _S382 = (&kernelContext_17)->nodes_0+(_S381 + 4U);
+            float4 _S383 = node_0(k_25, 4U, &kernelContext_17);
+            *_S382 = packed_float4(float4(_S383.xyz, (as_type<float>((2U))))) ;
         }
         j_6 = j_6 + 64U;
     }
     if(t_11 == 0U)
     {
-        float4 _S378 = node_0(ki_0, 1U, &kernelContext_17);
-        float3 _S379 = vc_1 - vi_0;
-        thread Quat_0 _S380 = quat_of_0(_S378);
-        float3 _S381 = inverse_rotate_0(&_S380, _S379);
-        float3 o_2 = _S381 / float3(vref_0) ;
-        uint _S382 = 14U * ki_0;
-        *((&kernelContext_17)->nodes_0+(_S382 + 5U)) = packed_float4(float4(o_2, 0.0f)) ;
-        *((&kernelContext_17)->nodes_0+(_S382 + 6U)) = packed_float4(float4(0.0f, 0.0f, 0.5f * o_2.x, 0.5f * o_2.y)) ;
-        *((&kernelContext_17)->nodes_0+(_S382 + 7U)) = packed_float4(float4(0.5f * o_2.z, 0.0f, 0.0f, 0.0f)) ;
+        float4 _S384 = node_0(ki_0, 1U, &kernelContext_17);
+        float3 _S385 = vc_1 - vi_0;
+        thread Quat_0 _S386 = quat_of_0(_S384);
+        float3 _S387 = inverse_rotate_0(&_S386, _S385);
+        float3 o_2 = _S387 / float3(vref_0) ;
+        uint _S388 = 14U * ki_0;
+        *((&kernelContext_17)->nodes_0+(_S388 + 5U)) = packed_float4(float4(o_2, 0.0f)) ;
+        *((&kernelContext_17)->nodes_0+(_S388 + 6U)) = packed_float4(float4(0.0f, 0.0f, 0.5f * o_2.x, 0.5f * o_2.y)) ;
+        *((&kernelContext_17)->nodes_0+(_S388 + 7U)) = packed_float4(float4(0.5f * o_2.z, 0.0f, 0.0f, 0.0f)) ;
     }
     threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup | mem_flags::mem_texture | mem_flags::mem_threadgroup_imageblock);
     j_6 = t_11;
     for(;;)
     {
-        if(j_6 < _S342)
+        if(j_6 < _S348)
         {
         }
         else
         {
             break;
         }
-        uint _S383 = 2U * (_S341 + j_6);
-        uint4 _S384 = uint4(((&kernelContext_17)->bond_static_0+(as_type<uint>(((float4(*((&kernelContext_17)->bonds_0+(_S383 + 1U))) ).z))))->law_0.ids_0) ;
-        uint device* _S385 = (&kernelContext_17)->chunk_node_0+_S384.y;
-        uint na_0 = *_S385;
-        uint nb2_0 = *((&kernelContext_17)->chunk_node_0+_S384.z);
-        if((*_S385) != 0U)
+        uint _S389 = 2U * (_S347 + j_6);
+        uint4 _S390 = uint4(((&kernelContext_17)->bond_static_0+(as_type<uint>(((float4(*((&kernelContext_17)->bonds_0+(_S389 + 1U))) ).z))))->law_0.ids_0) ;
+        uint device* _S391 = (&kernelContext_17)->chunk_node_0+_S390.y;
+        uint na_0 = *_S391;
+        uint nb2_0 = *((&kernelContext_17)->chunk_node_0+_S390.z);
+        if((*_S391) != 0U)
         {
             pa_0 = ((as_type<uint>(((float4(*((&kernelContext_17)->nodes_0+(14U * (na_0 - 1U) + 4U))) ).w))) & 2U) != 0U;
         }
@@ -3739,7 +3796,7 @@ float3 inverse_rotate_0(const Quat_0 thread* q_12, float3 v_8)
         }
         if(pa_0 != plug_0)
         {
-            *((&kernelContext_17)->bonds_0+_S383) = packed_float4(float4((float4(*((&kernelContext_17)->bonds_0+_S383)) ).x, 1.0f, 0.0f, (as_type<float>((1U))))) ;
+            *((&kernelContext_17)->bonds_0+_S389) = packed_float4(float4((float4(*((&kernelContext_17)->bonds_0+_S389)) ).x, 1.0f, 0.0f, (as_type<float>((1U))))) ;
         }
         j_6 = j_6 + 64U;
     }
@@ -3755,9 +3812,9 @@ float3 inverse_rotate_0(const Quat_0 thread* q_12, float3 v_8)
             break;
         }
         uint k_26 = first_0 + j_6;
-        packed_float4 device* _S386 = (&kernelContext_17)->nodes_0+(14U * k_26 + 4U);
-        float4 _S387 = node_0(k_26, 4U, &kernelContext_17);
-        *_S386 = packed_float4(float4(_S387.xyz, (as_type<float>((0U))))) ;
+        packed_float4 device* _S392 = (&kernelContext_17)->nodes_0+(14U * k_26 + 4U);
+        float4 _S393 = node_0(k_26, 4U, &kernelContext_17);
+        *_S392 = packed_float4(float4(_S393.xyz, (as_type<float>((0U))))) ;
         j_6 = j_6 + 64U;
     }
     return;
@@ -3765,7 +3822,7 @@ float3 inverse_rotate_0(const Quat_0 thread* q_12, float3 v_8)
 
 [[kernel]] void learned_gate(uint3 group_8 [[threadgroup_position_in_grid]], uint3 thread_12 [[thread_position_in_threadgroup]], uint device* ctl_12 [[buffer(1)]], packed_float4 device* calls_12 [[buffer(2)]], packed_float4 device* nodes_12 [[buffer(3)]], LearnedParams_0 constant* params_12 [[buffer(0)]], packed_float4 device* bonds_12 [[buffer(4)]], uint device* chunk_node_12 [[buffer(8)]], uint device* counters_12 [[buffer(19)]], uint device* route_12 [[buffer(25)]], packed_uint4 device* isl_12 [[buffer(5)]], Island_natural_0 device* islands_12 [[buffer(11)]], packed_float4 device* ctab_12 [[buffer(14)]], packed_float4 device* bodies_12 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_12 [[buffer(12)]], packed_float4 device* state_12 [[buffer(13)]], packed_float4 device* imps_12 [[buffer(10)]], uint device* status_12 [[buffer(18)]], packed_uint4 device* largs_12 [[buffer(27)]], packed_uint4 device* cisl_12 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_12 [[buffer(17)]], BondStatic_natural_0 device* bond_static_12 [[buffer(16)]], packed_float4 device* cislf_12 [[buffer(6)]], packed_float4 device* frozen_12 [[buffer(9)]], uint device* split_work_12 [[buffer(21)]], uint device* split_control_12 [[buffer(23)]], packed_uint4 device* split_parents_12 [[buffer(20)]], packed_uint4 device* split_slots_12 [[buffer(22)]], packed_float4 device* split_out_12 [[buffer(26)]], packed_uint4 device* split_firsts_12 [[buffer(24)]], float device* lout_12 [[buffer(28)]])
 {
-    bool _S388;
+    bool _S394;
     thread KernelContext_0 kernelContext_18;
     (&kernelContext_18)->ctl_0 = ctl_12;
     (&kernelContext_18)->calls_0 = calls_12;
@@ -3836,11 +3893,11 @@ float3 inverse_rotate_0(const Quat_0 thread* q_12, float3 v_8)
     {
         return;
     }
-    uint _S389 = 10U * g_6;
-    uint _S390 = _S389 + 4U;
-    float4 _S391 = float4(*((&kernelContext_18)->calls_0+_S390)) ;
-    float _S392 = _S391.z;
-    uint dec_1 = (as_type<uint>((_S392)));
+    uint _S395 = 10U * g_6;
+    uint _S396 = _S395 + 4U;
+    float4 _S397 = float4(*((&kernelContext_18)->calls_0+_S396)) ;
+    float _S398 = _S397.z;
+    uint dec_1 = (as_type<uint>((_S398)));
     uint fb_0;
     if((dec_1 & 4U) != 0U)
     {
@@ -3858,13 +3915,13 @@ float3 inverse_rotate_0(const Quat_0 thread* q_12, float3 v_8)
     {
         fb_0 = fb_0 | 16U;
     }
-    uint _S393 = _S389 + 6U;
-    uint e0_0 = (as_type<uint>(((float4(*((&kernelContext_18)->calls_0+_S393)) ).x)));
-    uint _S394 = (as_type<uint>(((float4(*((&kernelContext_18)->calls_0+_S393)) ).y)));
-    uint mask_6 = (as_type<uint>(((float4(*((&kernelContext_18)->calls_0+(_S389 + 5U))) ).w)));
+    uint _S399 = _S395 + 6U;
+    uint e0_0 = (as_type<uint>(((float4(*((&kernelContext_18)->calls_0+_S399)) ).x)));
+    uint _S400 = (as_type<uint>(((float4(*((&kernelContext_18)->calls_0+_S399)) ).y)));
+    uint mask_8 = (as_type<uint>(((float4(*((&kernelContext_18)->calls_0+(_S395 + 5U))) ).w)));
     if(t_12 == 0U)
     {
-        *((&kernelContext_18)->calls_0+_S390) = packed_float4(float4(_S391.x, _S391.y, _S392, (as_type<float>((fb_0))))) ;
+        *((&kernelContext_18)->calls_0+_S396) = packed_float4(float4(_S397.x, _S397.y, _S398, (as_type<float>((fb_0))))) ;
     }
     uint j_7;
     if(fb_0 == 16U)
@@ -3872,33 +3929,33 @@ float3 inverse_rotate_0(const Quat_0 thread* q_12, float3 v_8)
         j_7 = e0_0 + t_12;
         for(;;)
         {
-            if(j_7 < (e0_0 + _S394))
+            if(j_7 < (e0_0 + _S400))
             {
             }
             else
             {
                 break;
             }
-            uint device* _S395 = (&kernelContext_18)->status_0+(16U + (uint4(*((&kernelContext_18)->cisl_0+2U * j_7)) ).x);
-            *_S395 = (*_S395) | 4096U;
+            uint device* _S401 = (&kernelContext_18)->status_0+(16U + (uint4(*((&kernelContext_18)->cisl_0+2U * j_7)) ).x);
+            *_S401 = (*_S401) | 4096U;
             j_7 = j_7 + 64U;
         }
     }
     if(fb_0 != 0U)
     {
-        uint _S396 = (as_type<uint>(((float4(*((&kernelContext_18)->calls_0+(_S389 + 2U))) ).z)));
-        uint _S397 = (as_type<uint>(((float4(*((&kernelContext_18)->calls_0+(_S389 + 3U))) ).w)));
+        uint _S402 = (as_type<uint>(((float4(*((&kernelContext_18)->calls_0+(_S395 + 2U))) ).z)));
+        uint _S403 = (as_type<uint>(((float4(*((&kernelContext_18)->calls_0+(_S395 + 3U))) ).w)));
         j_7 = t_12;
         for(;;)
         {
-            if(j_7 < _S397)
+            if(j_7 < _S403)
             {
             }
             else
             {
                 break;
             }
-            *((&kernelContext_18)->chunk_node_0+(as_type<uint>(((float4(*((&kernelContext_18)->nodes_0+(14U * (_S396 + j_7) + 12U))) ).x)))) = 0U;
+            *((&kernelContext_18)->chunk_node_0+(as_type<uint>(((float4(*((&kernelContext_18)->nodes_0+(14U * (_S402 + j_7) + 12U))) ).x)))) = 0U;
             j_7 = j_7 + 64U;
         }
         return;
@@ -3906,132 +3963,132 @@ float3 inverse_rotate_0(const Quat_0 thread* q_12, float3 v_8)
     j_7 = e0_0 + t_12;
     for(;;)
     {
-        if(j_7 < (e0_0 + _S394))
+        if(j_7 < (e0_0 + _S400))
         {
         }
         else
         {
             break;
         }
-        uint _S398 = 2U * j_7;
-        uint4 _S399 = uint4(*((&kernelContext_18)->cisl_0+(_S398 + 1U))) ;
-        uint device* _S400 = (&kernelContext_18)->status_0+(16U + (uint4(*((&kernelContext_18)->cisl_0+_S398)) ).x);
-        *_S400 = (*_S400) | 4096U;
-        uint body_2 = _S399.x;
+        uint _S404 = 2U * j_7;
+        uint4 _S405 = uint4(*((&kernelContext_18)->cisl_0+(_S404 + 1U))) ;
+        uint device* _S406 = (&kernelContext_18)->status_0+(16U + (uint4(*((&kernelContext_18)->cisl_0+_S404)) ).x);
+        *_S406 = (*_S406) | 4096U;
+        uint body_2 = _S405.x;
         if(body_2 == 4294967295U)
         {
-            _S388 = true;
+            _S394 = true;
         }
         else
         {
-            _S388 = (_S399.w) != 0U;
+            _S394 = (_S405.w) != 0U;
         }
-        if(_S388)
+        if(_S394)
         {
             *((&kernelContext_18)->frozen_0+4U * j_7) = packed_float4(float4((as_type<float>((4294967295U))), 0.0f, 0.0f, 0.0f)) ;
             j_7 = j_7 + 64U;
             continue;
         }
         uint at_1 = 7U * body_2;
-        uint _S401 = 4U * j_7;
-        *((&kernelContext_18)->frozen_0+_S401) = packed_float4(float4((as_type<float>((body_2))), (float4(*((&kernelContext_18)->bodies_0+at_1)) ).w, 0.0f, 0.0f)) ;
-        uint _S402 = at_1 + 2U;
-        *((&kernelContext_18)->frozen_0+(_S401 + 1U)) = packed_float4(float4(*((&kernelContext_18)->bodies_0+_S402)) ) ;
-        uint _S403 = at_1 + 3U;
-        *((&kernelContext_18)->frozen_0+(_S401 + 2U)) = packed_float4(float4(*((&kernelContext_18)->bodies_0+_S403)) ) ;
-        uint _S404 = at_1 + 4U;
-        *((&kernelContext_18)->frozen_0+(_S401 + 3U)) = packed_float4(float4(*((&kernelContext_18)->bodies_0+_S404)) ) ;
+        uint _S407 = 4U * j_7;
+        *((&kernelContext_18)->frozen_0+_S407) = packed_float4(float4((as_type<float>((body_2))), (float4(*((&kernelContext_18)->bodies_0+at_1)) ).w, 0.0f, 0.0f)) ;
+        uint _S408 = at_1 + 2U;
+        *((&kernelContext_18)->frozen_0+(_S407 + 1U)) = packed_float4(float4(*((&kernelContext_18)->bodies_0+_S408)) ) ;
+        uint _S409 = at_1 + 3U;
+        *((&kernelContext_18)->frozen_0+(_S407 + 2U)) = packed_float4(float4(*((&kernelContext_18)->bodies_0+_S409)) ) ;
+        uint _S410 = at_1 + 4U;
+        *((&kernelContext_18)->frozen_0+(_S407 + 3U)) = packed_float4(float4(*((&kernelContext_18)->bodies_0+_S410)) ) ;
         *((&kernelContext_18)->bodies_0+at_1) = packed_float4(float4((float4(*((&kernelContext_18)->bodies_0+at_1)) ).xyz, 0.0f)) ;
-        *((&kernelContext_18)->bodies_0+_S402) = packed_float4(float4(0.0f, 0.0f, 0.0f, (float4(*((&kernelContext_18)->bodies_0+_S402)) ).w)) ;
-        *((&kernelContext_18)->bodies_0+_S403) = packed_float4(float4(0.0f, 0.0f, 0.0f, (float4(*((&kernelContext_18)->bodies_0+_S403)) ).w)) ;
-        *((&kernelContext_18)->bodies_0+_S404) = packed_float4(float4(0.0f, 0.0f, 0.0f, (float4(*((&kernelContext_18)->bodies_0+_S404)) ).w)) ;
+        *((&kernelContext_18)->bodies_0+_S408) = packed_float4(float4(0.0f, 0.0f, 0.0f, (float4(*((&kernelContext_18)->bodies_0+_S408)) ).w)) ;
+        *((&kernelContext_18)->bodies_0+_S409) = packed_float4(float4(0.0f, 0.0f, 0.0f, (float4(*((&kernelContext_18)->bodies_0+_S409)) ).w)) ;
+        *((&kernelContext_18)->bodies_0+_S410) = packed_float4(float4(0.0f, 0.0f, 0.0f, (float4(*((&kernelContext_18)->bodies_0+_S410)) ).w)) ;
         j_7 = j_7 + 64U;
     }
     if(t_12 < 32U)
     {
-        _S388 = (mask_6 & (1U << t_12)) != 0U;
+        _S394 = (mask_8 & (1U << t_12)) != 0U;
     }
     else
     {
-        _S388 = false;
+        _S394 = false;
     }
-    if(_S388)
+    if(_S394)
     {
         uint body_3 = (as_type<uint>(((float4(*((&kernelContext_18)->imps_0+4U * t_12)) ).x)));
         uint at_2 = 7U * body_3;
-        uint _S405 = 4U * ((&kernelContext_18)->params_0->max_cisl_0 + t_12);
-        *((&kernelContext_18)->frozen_0+_S405) = packed_float4(float4((as_type<float>((body_3))), (float4(*((&kernelContext_18)->bodies_0+at_2)) ).w, 0.0f, 0.0f)) ;
-        uint _S406 = at_2 + 2U;
-        *((&kernelContext_18)->frozen_0+(_S405 + 1U)) = packed_float4(float4(*((&kernelContext_18)->bodies_0+_S406)) ) ;
-        uint _S407 = at_2 + 3U;
-        *((&kernelContext_18)->frozen_0+(_S405 + 2U)) = packed_float4(float4(*((&kernelContext_18)->bodies_0+_S407)) ) ;
-        uint _S408 = at_2 + 4U;
-        *((&kernelContext_18)->frozen_0+(_S405 + 3U)) = packed_float4(float4(*((&kernelContext_18)->bodies_0+_S408)) ) ;
+        uint _S411 = 4U * ((&kernelContext_18)->params_0->max_cisl_0 + t_12);
+        *((&kernelContext_18)->frozen_0+_S411) = packed_float4(float4((as_type<float>((body_3))), (float4(*((&kernelContext_18)->bodies_0+at_2)) ).w, 0.0f, 0.0f)) ;
+        uint _S412 = at_2 + 2U;
+        *((&kernelContext_18)->frozen_0+(_S411 + 1U)) = packed_float4(float4(*((&kernelContext_18)->bodies_0+_S412)) ) ;
+        uint _S413 = at_2 + 3U;
+        *((&kernelContext_18)->frozen_0+(_S411 + 2U)) = packed_float4(float4(*((&kernelContext_18)->bodies_0+_S413)) ) ;
+        uint _S414 = at_2 + 4U;
+        *((&kernelContext_18)->frozen_0+(_S411 + 3U)) = packed_float4(float4(*((&kernelContext_18)->bodies_0+_S414)) ) ;
         *((&kernelContext_18)->bodies_0+at_2) = packed_float4(float4((float4(*((&kernelContext_18)->bodies_0+at_2)) ).xyz, 0.0f)) ;
-        *((&kernelContext_18)->bodies_0+_S406) = packed_float4(float4(0.0f, 0.0f, 0.0f, (float4(*((&kernelContext_18)->bodies_0+_S406)) ).w)) ;
-        *((&kernelContext_18)->bodies_0+_S407) = packed_float4(float4(0.0f, 0.0f, 0.0f, (float4(*((&kernelContext_18)->bodies_0+_S407)) ).w)) ;
-        *((&kernelContext_18)->bodies_0+_S408) = packed_float4(float4(0.0f, 0.0f, 0.0f, (float4(*((&kernelContext_18)->bodies_0+_S408)) ).w)) ;
+        *((&kernelContext_18)->bodies_0+_S412) = packed_float4(float4(0.0f, 0.0f, 0.0f, (float4(*((&kernelContext_18)->bodies_0+_S412)) ).w)) ;
+        *((&kernelContext_18)->bodies_0+_S413) = packed_float4(float4(0.0f, 0.0f, 0.0f, (float4(*((&kernelContext_18)->bodies_0+_S413)) ).w)) ;
+        *((&kernelContext_18)->bodies_0+_S414) = packed_float4(float4(0.0f, 0.0f, 0.0f, (float4(*((&kernelContext_18)->bodies_0+_S414)) ).w)) ;
     }
     return;
 }
 
 bool island_current_0(uint e_2, KernelContext_0 thread* kernelContext_19)
 {
-    uint _S409;
-    uint4 _S410 = uint4(*(kernelContext_19->cisl_0+2U * e_2)) ;
-    uint _S411 = _S410.y;
+    uint _S415;
+    uint4 _S416 = uint4(*(kernelContext_19->cisl_0+2U * e_2)) ;
+    uint _S417 = _S416.y;
     uint island_0 = 4294967295U;
     uint j_8 = 0U;
     for(;;)
     {
-        uint _S412 = _S410.z;
-        _S409 = _S412;
-        if(j_8 < _S412)
+        uint _S418 = _S416.z;
+        _S415 = _S418;
+        if(j_8 < _S418)
         {
         }
         else
         {
             break;
         }
-        float4 _S413 = float4(*(kernelContext_19->nodes_0+(14U * (_S411 + j_8) + 12U))) ;
-        uint k_27 = (as_type<uint>((_S413.x)));
+        float4 _S419 = float4(*(kernelContext_19->nodes_0+(14U * (_S417 + j_8) + 12U))) ;
+        uint k_27 = (as_type<uint>((_S419.x)));
         if(k_27 >= (kernelContext_19->params_0->chunk_count_0))
         {
             return false;
         }
-        uint4 _S414 = uint4((kernelContext_19->chunks_0+k_27)->info_1) ;
-        bool _S415;
-        if((_S414.z) != (as_type<uint>((_S413.z))))
+        uint4 _S420 = uint4((kernelContext_19->chunks_0+k_27)->info_1) ;
+        bool _S421;
+        if((_S420.z) != (as_type<uint>((_S419.z))))
         {
-            _S415 = true;
+            _S421 = true;
         }
         else
         {
-            _S415 = (_S414.w) != (as_type<uint>((_S413.w)));
+            _S421 = (_S420.w) != (as_type<uint>((_S419.w)));
         }
-        if(_S415)
+        if(_S421)
         {
             return false;
         }
         if(j_8 == 0U)
         {
-            island_0 = _S414.y;
+            island_0 = _S420.y;
         }
         else
         {
-            if((_S414.y) != island_0)
+            if((_S420.y) != island_0)
             {
                 return false;
             }
         }
         j_8 = j_8 + 1U;
     }
-    if(_S409 == 0U)
+    if(_S415 == 0U)
     {
         return false;
     }
-    uint4 _S416 = uint4((kernelContext_19->islands_0+island_0)->range_0) ;
-    return (_S416.y - _S416.x) == _S409;
+    uint4 _S422 = uint4((kernelContext_19->islands_0+island_0)->range_0) ;
+    return (_S422.y - _S422.x) == _S415;
 }
 
 [[kernel]] void learned_check(uint3 group_9 [[threadgroup_position_in_grid]], uint3 thread_13 [[thread_position_in_threadgroup]], uint device* ctl_13 [[buffer(1)]], packed_float4 device* calls_13 [[buffer(2)]], packed_float4 device* nodes_13 [[buffer(3)]], LearnedParams_0 constant* params_13 [[buffer(0)]], packed_float4 device* bonds_13 [[buffer(4)]], uint device* chunk_node_13 [[buffer(8)]], uint device* counters_13 [[buffer(19)]], uint device* route_13 [[buffer(25)]], packed_uint4 device* isl_13 [[buffer(5)]], Island_natural_0 device* islands_13 [[buffer(11)]], packed_float4 device* ctab_13 [[buffer(14)]], packed_float4 device* bodies_13 [[buffer(15)]], ChunkStatic_natural_0 device* chunks_13 [[buffer(12)]], packed_float4 device* state_13 [[buffer(13)]], packed_float4 device* imps_13 [[buffer(10)]], uint device* status_13 [[buffer(18)]], packed_uint4 device* largs_13 [[buffer(27)]], packed_uint4 device* cisl_13 [[buffer(7)]], BondDyn_natural_0 device* bond_dyn_13 [[buffer(17)]], BondStatic_natural_0 device* bond_static_13 [[buffer(16)]], packed_float4 device* cislf_13 [[buffer(6)]], packed_float4 device* frozen_13 [[buffer(9)]], uint device* split_work_13 [[buffer(21)]], uint device* split_control_13 [[buffer(23)]], packed_uint4 device* split_parents_13 [[buffer(20)]], packed_uint4 device* split_slots_13 [[buffer(22)]], packed_float4 device* split_out_13 [[buffer(26)]], packed_uint4 device* split_firsts_13 [[buffer(24)]], float device* lout_13 [[buffer(28)]])
@@ -4102,17 +4159,17 @@ bool island_current_0(uint e_2, KernelContext_0 thread* kernelContext_19)
     (&kernelContext_20)->g_broke_0 = &g_broke_13;
     uint g_7 = group_9.x;
     uint t_13 = thread_13.x;
-    bool _S417;
+    bool _S423;
     if((*(ctl_13+0U)) == 0U)
     {
-        _S417 = true;
+        _S423 = true;
     }
     else
     {
-        _S417 = g_7 >= (*((&kernelContext_20)->ctl_0+1U));
+        _S423 = g_7 >= (*((&kernelContext_20)->ctl_0+1U));
     }
     uint e_3;
-    if(_S417)
+    if(_S423)
     {
         e_3 = 1U;
     }
@@ -4124,18 +4181,18 @@ bool island_current_0(uint e_2, KernelContext_0 thread* kernelContext_19)
     {
         return;
     }
-    uint _S418 = 10U * g_7;
-    uint _S419 = _S418 + 4U;
-    float4 _S420 = float4(*((&kernelContext_20)->calls_0+_S419)) ;
-    if((group_uniform_0((as_type<uint>((_S420.w))), t_13)) != 0U)
+    uint _S424 = 10U * g_7;
+    uint _S425 = _S424 + 4U;
+    float4 _S426 = float4(*((&kernelContext_20)->calls_0+_S425)) ;
+    if((group_uniform_0((as_type<uint>((_S426.w))), t_13)) != 0U)
     {
         return;
     }
-    uint _S421 = _S418 + 6U;
-    uint e0_1 = (as_type<uint>(((float4(*((&kernelContext_20)->calls_0+_S421)) ).x)));
-    uint _S422 = (as_type<uint>(((float4(*((&kernelContext_20)->calls_0+_S421)) ).y)));
-    bool _S423 = t_13 == 0U;
-    if(_S423)
+    uint _S427 = _S424 + 6U;
+    uint e0_1 = (as_type<uint>(((float4(*((&kernelContext_20)->calls_0+_S427)) ).x)));
+    uint _S428 = (as_type<uint>(((float4(*((&kernelContext_20)->calls_0+_S427)) ).y)));
+    bool _S429 = t_13 == 0U;
+    if(_S429)
     {
         *(&kernelContext_20)->g_stale_0 = 0U;
     }
@@ -4143,15 +4200,15 @@ bool island_current_0(uint e_2, KernelContext_0 thread* kernelContext_19)
     e_3 = e0_1 + t_13;
     for(;;)
     {
-        if(e_3 < (e0_1 + _S422))
+        if(e_3 < (e0_1 + _S428))
         {
         }
         else
         {
             break;
         }
-        bool _S424 = island_current_0(e_3, &kernelContext_20);
-        if(!_S424)
+        bool _S430 = island_current_0(e_3, &kernelContext_20);
+        if(!_S430)
         {
             *(&kernelContext_20)->g_stale_0 = 1U;
         }
@@ -4162,25 +4219,25 @@ bool island_current_0(uint e_2, KernelContext_0 thread* kernelContext_19)
     {
         return;
     }
-    if(_S423)
+    if(_S429)
     {
-        *((&kernelContext_20)->calls_0+_S419) = packed_float4(float4(_S420.x, _S420.y, _S420.z, (as_type<float>((8U))))) ;
-        float _S425 = (as_type<float>((0U)));
-        *((&kernelContext_20)->calls_0+(_S418 + 7U)) = packed_float4(float4((as_type<float>((1U))), _S425, _S425, 0.0f)) ;
+        *((&kernelContext_20)->calls_0+_S425) = packed_float4(float4(_S426.x, _S426.y, _S426.z, (as_type<float>((8U))))) ;
+        float _S431 = (as_type<float>((0U)));
+        *((&kernelContext_20)->calls_0+(_S424 + 7U)) = packed_float4(float4((as_type<float>((1U))), _S431, _S431, 0.0f)) ;
     }
-    uint _S426 = (as_type<uint>(((float4(*((&kernelContext_20)->calls_0+(_S418 + 2U))) ).z)));
-    uint _S427 = (as_type<uint>(((float4(*((&kernelContext_20)->calls_0+(_S418 + 3U))) ).w)));
+    uint _S432 = (as_type<uint>(((float4(*((&kernelContext_20)->calls_0+(_S424 + 2U))) ).z)));
+    uint _S433 = (as_type<uint>(((float4(*((&kernelContext_20)->calls_0+(_S424 + 3U))) ).w)));
     uint j_9 = t_13;
     for(;;)
     {
-        if(j_9 < _S427)
+        if(j_9 < _S433)
         {
         }
         else
         {
             break;
         }
-        uint k_28 = (as_type<uint>(((float4(*((&kernelContext_20)->nodes_0+(14U * (_S426 + j_9) + 12U))) ).x)));
+        uint k_28 = (as_type<uint>(((float4(*((&kernelContext_20)->nodes_0+(14U * (_S432 + j_9) + 12U))) ).x)));
         if(k_28 < ((&kernelContext_20)->params_0->chunk_count_0))
         {
             *((&kernelContext_20)->chunk_node_0+k_28) = 0U;
@@ -4269,17 +4326,17 @@ struct BondDyn_0
     (&kernelContext_21)->g_broke_0 = &g_broke_14;
     uint g_8 = group_10.x;
     uint t_14 = thread_14.x;
-    bool _S428;
+    bool _S434;
     if((*(ctl_14+0U)) == 0U)
     {
-        _S428 = true;
+        _S434 = true;
     }
     else
     {
-        _S428 = g_8 >= (*((&kernelContext_21)->ctl_0+1U));
+        _S434 = g_8 >= (*((&kernelContext_21)->ctl_0+1U));
     }
     uint j_10;
-    if(_S428)
+    if(_S434)
     {
         j_10 = 1U;
     }
@@ -4291,68 +4348,68 @@ struct BondDyn_0
     {
         return;
     }
-    uint _S429 = 10U * g_8;
-    float4 _S430 = float4(*((&kernelContext_21)->calls_0+(_S429 + 4U))) ;
-    if((group_uniform_0((as_type<uint>((_S430.w))), t_14)) != 0U)
+    uint _S435 = 10U * g_8;
+    float4 _S436 = float4(*((&kernelContext_21)->calls_0+(_S435 + 4U))) ;
+    if((group_uniform_0((as_type<uint>((_S436.w))), t_14)) != 0U)
     {
         return;
     }
-    bool _S431 = t_14 == 0U;
-    if(_S431)
+    bool _S437 = t_14 == 0U;
+    if(_S437)
     {
         *(&kernelContext_21)->g_broke_0 = 0U;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    uint _S432 = (as_type<uint>((_S430.x)));
-    uint _S433 = (as_type<uint>((_S430.y)));
+    uint _S438 = (as_type<uint>((_S436.x)));
+    uint _S439 = (as_type<uint>((_S436.y)));
     j_10 = t_14;
     uint count_1 = 0U;
     for(;;)
     {
-        if(j_10 < _S433)
+        if(j_10 < _S439)
         {
         }
         else
         {
             break;
         }
-        float4 _S434 = float4(*((&kernelContext_21)->bonds_0+(2U * (_S432 + j_10) + 1U))) ;
-        uint bi_2 = (as_type<uint>((_S434.z)));
-        BondDyn_natural_0 device* _S435 = (&kernelContext_21)->bond_dyn_0+bi_2;
-        float4 _S436 = float4((*_S435).force_lin_0) ;
-        float4 _S437 = float4((*_S435).force_ang_0) ;
-        float4 _S438 = float4((*_S435).sums_0) ;
-        float4 _S439 = float4((*_S435).comps_0) ;
-        uint4 _S440 = uint4((*_S435).events_0) ;
+        float4 _S440 = float4(*((&kernelContext_21)->bonds_0+(2U * (_S438 + j_10) + 1U))) ;
+        uint bi_2 = (as_type<uint>((_S440.z)));
+        BondDyn_natural_0 device* _S441 = (&kernelContext_21)->bond_dyn_0+bi_2;
+        float4 _S442 = float4((*_S441).force_lin_0) ;
+        float4 _S443 = float4((*_S441).force_ang_0) ;
+        float4 _S444 = float4((*_S441).sums_0) ;
+        float4 _S445 = float4((*_S441).comps_0) ;
+        uint4 _S446 = uint4((*_S441).events_0) ;
         thread BondDyn_0 dyn_0;
-        (&dyn_0)->js_0 = (*_S435).js_0;
-        (&dyn_0)->force_lin_0 = _S436;
-        (&dyn_0)->force_ang_0 = _S437;
-        (&dyn_0)->sums_0 = _S438;
-        (&dyn_0)->comps_0 = _S439;
-        (&dyn_0)->events_0 = _S440;
-        if((as_type<uint>((_S434.y))) != 0U)
+        (&dyn_0)->js_0 = (*_S441).js_0;
+        (&dyn_0)->force_lin_0 = _S442;
+        (&dyn_0)->force_ang_0 = _S443;
+        (&dyn_0)->sums_0 = _S444;
+        (&dyn_0)->comps_0 = _S445;
+        (&dyn_0)->events_0 = _S446;
+        if((as_type<uint>((_S440.y))) != 0U)
         {
-            bool _S441 = ((float4(((&kernelContext_21)->bond_static_0+bi_2)->law_0.stiff1_0) ).w) != 0.0f;
-            thread JointState_0 _S442 = (&dyn_0)->js_0;
-            bool _S443 = connected_0(&_S442, _S441);
-            if(_S443)
+            bool _S447 = ((float4(((&kernelContext_21)->bond_static_0+bi_2)->law_0.stiff1_0) ).w) != 0.0f;
+            thread JointState_0 _S448 = (&dyn_0)->js_0;
+            bool _S449 = connected_0(&_S448, _S447);
+            if(_S449)
             {
                 (&(&dyn_0)->js_0)->damage_0 = 1.0f;
                 (&(&dyn_0)->js_0)->rebar_broken_0 = 1.0f;
                 (&dyn_0)->events_0.z = max((&dyn_0)->events_0.z, 1U);
-                BondDyn_natural_0 device* _S444 = (&kernelContext_21)->bond_dyn_0+bi_2;
-                _S444->js_0 = dyn_0.js_0;
-                _S444->force_lin_0 = packed_float4(dyn_0.force_lin_0) ;
-                _S444->force_ang_0 = packed_float4(dyn_0.force_ang_0) ;
-                _S444->sums_0 = packed_float4(dyn_0.sums_0) ;
-                _S444->comps_0 = packed_float4(dyn_0.comps_0) ;
-                _S444->events_0 = packed_uint4(dyn_0.events_0) ;
-                uint _S445 = count_1 + 1U;
-                uint device* _S446 = (&kernelContext_21)->status_0+(16U + (uint4(((&kernelContext_21)->chunks_0+(uint4(((&kernelContext_21)->bond_static_0+bi_2)->law_0.ids_0) ).y)->info_1) ).y);
-                *_S446 = (*_S446) | 8U;
+                BondDyn_natural_0 device* _S450 = (&kernelContext_21)->bond_dyn_0+bi_2;
+                _S450->js_0 = dyn_0.js_0;
+                _S450->force_lin_0 = packed_float4(dyn_0.force_lin_0) ;
+                _S450->force_ang_0 = packed_float4(dyn_0.force_ang_0) ;
+                _S450->sums_0 = packed_float4(dyn_0.sums_0) ;
+                _S450->comps_0 = packed_float4(dyn_0.comps_0) ;
+                _S450->events_0 = packed_uint4(dyn_0.events_0) ;
+                uint _S451 = count_1 + 1U;
+                uint device* _S452 = (&kernelContext_21)->status_0+(16U + (uint4(((&kernelContext_21)->chunks_0+(uint4(((&kernelContext_21)->bond_static_0+bi_2)->law_0.ids_0) ).y)->info_1) ).y);
+                *_S452 = (*_S452) | 8U;
                 *(&kernelContext_21)->g_broke_0 = 1U;
-                count_0 = _S445;
+                count_0 = _S451;
             }
             else
             {
@@ -4362,14 +4419,14 @@ struct BondDyn_0
         }
         else
         {
-            (&(&dyn_0)->js_0)->damage_0 = max((&(&dyn_0)->js_0)->damage_0, min(_S434.x, 0.99999898672103882f));
-            BondDyn_natural_0 device* _S447 = (&kernelContext_21)->bond_dyn_0+bi_2;
-            _S447->js_0 = dyn_0.js_0;
-            _S447->force_lin_0 = packed_float4(dyn_0.force_lin_0) ;
-            _S447->force_ang_0 = packed_float4(dyn_0.force_ang_0) ;
-            _S447->sums_0 = packed_float4(dyn_0.sums_0) ;
-            _S447->comps_0 = packed_float4(dyn_0.comps_0) ;
-            _S447->events_0 = packed_uint4(dyn_0.events_0) ;
+            (&(&dyn_0)->js_0)->damage_0 = max((&(&dyn_0)->js_0)->damage_0, min(_S440.x, 0.99999898672103882f));
+            BondDyn_natural_0 device* _S453 = (&kernelContext_21)->bond_dyn_0+bi_2;
+            _S453->js_0 = dyn_0.js_0;
+            _S453->force_lin_0 = packed_float4(dyn_0.force_lin_0) ;
+            _S453->force_ang_0 = packed_float4(dyn_0.force_ang_0) ;
+            _S453->sums_0 = packed_float4(dyn_0.sums_0) ;
+            _S453->comps_0 = packed_float4(dyn_0.comps_0) ;
+            _S453->events_0 = packed_uint4(dyn_0.events_0) ;
         }
         j_10 = j_10 + 64U;
     }
@@ -4393,9 +4450,9 @@ struct BondDyn_0
         threadgroup_barrier(mem_flags::mem_threadgroup);
         count_0 = count_0 >> 1U;
     }
-    if(_S431)
+    if(_S437)
     {
-        *((&kernelContext_21)->calls_0+(_S429 + 7U)) = packed_float4(float4((as_type<float>((0U))), (as_type<float>(((*(&kernelContext_21)->g_scan_0)[int(0)]))), (as_type<float>((1U))), 0.0f)) ;
+        *((&kernelContext_21)->calls_0+(_S435 + 7U)) = packed_float4(float4((as_type<float>((0U))), (as_type<float>(((*(&kernelContext_21)->g_scan_0)[int(0)]))), (as_type<float>((1U))), 0.0f)) ;
         if((*(&kernelContext_21)->g_broke_0) != 0U)
         {
             *((&kernelContext_21)->status_0+1U) = 1U;
@@ -4411,8 +4468,8 @@ float4 rotvec_quat_0(float3 r_16)
     {
         return normalize(float4(float3(0.5f)  * r_16, 1.0f));
     }
-    float _S448 = 0.5f * th_1;
-    return float4(r_16 / float3(th_1)  * float3(sin(_S448)) , cos(_S448));
+    float _S454 = 0.5f * th_1;
+    return float4(r_16 / float3(th_1)  * float3(sin(_S454)) , cos(_S454));
 }
 
 struct Fit_0
@@ -4427,13 +4484,13 @@ struct Fit_0
 Fit_0 fit_nodes_0(uint first_1, uint n_5, bool listed_0, uint list_base_0, uint list_first_0, KernelContext_0 thread* kernelContext_22)
 {
     uint k_29;
-    float3 _S449 = float3(0.0f) ;
+    float3 _S455 = float3(0.0f) ;
     uint j_11 = 0U;
     float m_10 = 0.0f;
-    float3 x0_0 = _S449;
-    float3 x1_0 = _S449;
-    float3 rot_0 = _S449;
-    float3 p_1 = _S449;
+    float3 x0_0 = _S455;
+    float3 x1_0 = _S455;
+    float3 rot_0 = _S455;
+    float3 p_1 = _S455;
     for(;;)
     {
         if(j_11 < n_5)
@@ -4451,19 +4508,19 @@ Fit_0 fit_nodes_0(uint first_1, uint n_5, bool listed_0, uint list_base_0, uint 
         {
             k_29 = first_1 + j_11;
         }
-        float4 _S450 = node_0(k_29, 0U, kernelContext_22);
-        float mc_0 = _S450.w;
-        float4 _S451 = node_0(k_29, 13U, kernelContext_22);
-        float3 xs_0 = _S451.xyz;
+        float4 _S456 = node_0(k_29, 0U, kernelContext_22);
+        float mc_0 = _S456.w;
+        float4 _S457 = node_0(k_29, 13U, kernelContext_22);
+        float3 xs_0 = _S457.xyz;
         float m_11 = m_10 + mc_0;
-        float3 _S452 = float3(mc_0) ;
-        float3 x0_1 = x0_0 + xs_0 * _S452;
-        float4 _S453 = node_0(k_29, 10U, kernelContext_22);
-        float3 x1_1 = x1_0 + (xs_0 + _S453.xyz) * _S452;
-        float4 _S454 = node_0(k_29, 11U, kernelContext_22);
-        float3 rot_1 = rot_0 + _S454.xyz * _S452;
-        float4 _S455 = node_0(k_29, 8U, kernelContext_22);
-        float3 p_2 = p_1 + _S455.xyz * _S452;
+        float3 _S458 = float3(mc_0) ;
+        float3 x0_1 = x0_0 + xs_0 * _S458;
+        float4 _S459 = node_0(k_29, 10U, kernelContext_22);
+        float3 x1_1 = x1_0 + (xs_0 + _S459.xyz) * _S458;
+        float4 _S460 = node_0(k_29, 11U, kernelContext_22);
+        float3 rot_1 = rot_0 + _S460.xyz * _S458;
+        float4 _S461 = node_0(k_29, 8U, kernelContext_22);
+        float3 p_2 = p_1 + _S461.xyz * _S458;
         j_11 = j_11 + 1U;
         m_10 = m_11;
         x0_0 = x0_1;
@@ -4474,15 +4531,15 @@ Fit_0 fit_nodes_0(uint first_1, uint n_5, bool listed_0, uint list_base_0, uint 
     thread Fit_0 f_2;
     (&f_2)->com0_0 = x0_0 / float3(m_10) ;
     (&f_2)->com1_0 = x1_0 / float3(m_10) ;
-    float4 _S456 = rotvec_quat_0(rot_0 / float3(m_10) );
-    (&f_2)->turn_0 = _S456;
+    float4 _S462 = rotvec_quat_0(rot_0 / float3(m_10) );
+    (&f_2)->turn_0 = _S462;
     (&f_2)->v_9 = p_1 / float3(m_10) ;
-    Quat_0 _S457 = quat_of_0(_S456);
-    matrix<float,int(3),int(3)>  _S458 = quat_matrix_0(_S456);
-    matrix<float,int(3),int(3)>  _S459 = matrix<float,int(3),int(3)> (_S449, _S449, _S449);
+    Quat_0 _S463 = quat_of_0(_S462);
+    matrix<float,int(3),int(3)>  _S464 = quat_matrix_0(_S462);
+    matrix<float,int(3),int(3)>  _S465 = matrix<float,int(3),int(3)> (_S455, _S455, _S455);
     j_11 = 0U;
-    float3 l_1 = _S449;
-    matrix<float,int(3),int(3)>  itot_0 = _S459;
+    float3 l_1 = _S455;
+    matrix<float,int(3),int(3)>  itot_0 = _S465;
     for(;;)
     {
         if(j_11 < n_5)
@@ -4500,23 +4557,23 @@ Fit_0 fit_nodes_0(uint first_1, uint n_5, bool listed_0, uint list_base_0, uint 
         {
             k_29 = first_1 + j_11;
         }
-        float4 _S460 = node_0(k_29, 0U, kernelContext_22);
-        float mc_1 = _S460.w;
-        float4 _S461 = node_0(k_29, 13U, kernelContext_22);
-        float3 _S462 = _S461.xyz - (&f_2)->com0_0;
-        thread Quat_0 _S463 = _S457;
-        float3 _S464 = rotate_0(&_S463, _S462);
-        float4 _S465 = node_0(k_29, 1U, kernelContext_22);
-        float4 _S466 = node_0(k_29, 2U, kernelContext_22);
-        matrix<float,int(3),int(3)>  ic_1 = (((transpose(_S458)) * ((((world_inertia_0(_S465, _S466.xyz)) * (_S458))))));
-        float4 _S467 = node_0(k_29, 8U, kernelContext_22);
-        float3 _S468 = cross(_S464, float3(mc_1)  * _S467.xyz);
-        float4 _S469 = node_0(k_29, 9U, kernelContext_22);
-        float3 l_2 = l_1 + (_S468 + (((_S469.xyz) * (ic_1))));
-        matrix<float,int(3),int(3)>  _S470 = itot_0 + (ic_1 + _slang_matrixCompMult(matrix<float,int(3),int(3)> (mc_1, mc_1, mc_1, mc_1, mc_1, mc_1, mc_1, mc_1, mc_1), _slang_matrixCompMult(matrix<float,int(3),int(3)> (dot(_S464, _S464), dot(_S464, _S464), dot(_S464, _S464), dot(_S464, _S464), dot(_S464, _S464), dot(_S464, _S464), dot(_S464, _S464), dot(_S464, _S464), dot(_S464, _S464)), matrix<float,int(3),int(3)> (float3(1.0f, 0.0f, 0.0f), float3(0.0f, 1.0f, 0.0f), float3(0.0f, 0.0f, 1.0f))) - outer3_0(_S464, _S464)));
+        float4 _S466 = node_0(k_29, 0U, kernelContext_22);
+        float mc_1 = _S466.w;
+        float4 _S467 = node_0(k_29, 13U, kernelContext_22);
+        float3 _S468 = _S467.xyz - (&f_2)->com0_0;
+        thread Quat_0 _S469 = _S463;
+        float3 _S470 = rotate_0(&_S469, _S468);
+        float4 _S471 = node_0(k_29, 1U, kernelContext_22);
+        float4 _S472 = node_0(k_29, 2U, kernelContext_22);
+        matrix<float,int(3),int(3)>  ic_1 = (((transpose(_S464)) * ((((world_inertia_0(_S471, _S472.xyz)) * (_S464))))));
+        float4 _S473 = node_0(k_29, 8U, kernelContext_22);
+        float3 _S474 = cross(_S470, float3(mc_1)  * _S473.xyz);
+        float4 _S475 = node_0(k_29, 9U, kernelContext_22);
+        float3 l_2 = l_1 + (_S474 + (((_S475.xyz) * (ic_1))));
+        matrix<float,int(3),int(3)>  _S476 = itot_0 + (ic_1 + _slang_matrixCompMult(matrix<float,int(3),int(3)> (mc_1, mc_1, mc_1, mc_1, mc_1, mc_1, mc_1, mc_1, mc_1), _slang_matrixCompMult(matrix<float,int(3),int(3)> (dot(_S470, _S470), dot(_S470, _S470), dot(_S470, _S470), dot(_S470, _S470), dot(_S470, _S470), dot(_S470, _S470), dot(_S470, _S470), dot(_S470, _S470), dot(_S470, _S470)), matrix<float,int(3),int(3)> (float3(1.0f, 0.0f, 0.0f), float3(0.0f, 1.0f, 0.0f), float3(0.0f, 0.0f, 1.0f))) - outer3_0(_S470, _S470)));
         j_11 = j_11 + 1U;
         l_1 = l_2;
-        itot_0 = _S470;
+        itot_0 = _S476;
     }
     (&f_2)->w_6 = solve3_0(itot_0, l_1);
     return f_2;
@@ -4535,30 +4592,30 @@ float4 turn_rubble_0(float4 q_rubble_1, float3 rotvec_zup_0)
 void place_body_0(uint body_4, const Fit_0 thread* f_3, float4 held_mass_0, float4 held_inertia_0, KernelContext_0 thread* kernelContext_23)
 {
     uint at_3 = 7U * body_4;
-    float4 _S471 = f_3->turn_0;
-    float3 _S472 = to_zup_0((float4(*(kernelContext_23->bodies_0+at_3)) ).xyz) - f_3->com0_0;
-    thread Quat_0 _S473 = quat_of_0(f_3->turn_0);
-    float3 _S474 = rotate_0(&_S473, _S472);
-    *(kernelContext_23->bodies_0+at_3) = packed_float4(float4(to_yup_0(f_3->com1_0 + _S474), held_mass_0.y)) ;
-    uint _S475 = at_3 + 1U;
-    packed_float4 device* _S476 = kernelContext_23->bodies_0+_S475;
-    float4 _S477 = float4(*(kernelContext_23->bodies_0+_S475)) ;
-    float3 _S478 = _S471.xyz;
-    float _S479 = length(_S478);
-    float3 _S480;
-    if(_S479 > 0.0f)
+    float4 _S477 = f_3->turn_0;
+    float3 _S478 = to_zup_0((float4(*(kernelContext_23->bodies_0+at_3)) ).xyz) - f_3->com0_0;
+    thread Quat_0 _S479 = quat_of_0(f_3->turn_0);
+    float3 _S480 = rotate_0(&_S479, _S478);
+    *(kernelContext_23->bodies_0+at_3) = packed_float4(float4(to_yup_0(f_3->com1_0 + _S480), held_mass_0.y)) ;
+    uint _S481 = at_3 + 1U;
+    packed_float4 device* _S482 = kernelContext_23->bodies_0+_S481;
+    float4 _S483 = float4(*(kernelContext_23->bodies_0+_S481)) ;
+    float3 _S484 = _S477.xyz;
+    float _S485 = length(_S484);
+    float3 _S486;
+    if(_S485 > 0.0f)
     {
-        _S480 = float3((2.0f * atan2(_S479, _S471.w)))  * normalize(_S478);
+        _S486 = float3((2.0f * atan2(_S485, _S477.w)))  * normalize(_S484);
     }
     else
     {
-        _S480 = float3(0.0f) ;
+        _S486 = float3(0.0f) ;
     }
-    *_S476 = packed_float4(turn_rubble_0(_S477, _S480)) ;
+    *_S482 = packed_float4(turn_rubble_0(_S483, _S486)) ;
     *(kernelContext_23->bodies_0+(at_3 + 2U)) = packed_float4(held_inertia_0) ;
     *(kernelContext_23->bodies_0+(at_3 + 3U)) = packed_float4(float4(to_yup_0(f_3->v_9), 0.0f)) ;
-    uint _S481 = at_3 + 4U;
-    *(kernelContext_23->bodies_0+_S481) = packed_float4(float4(to_yup_0(f_3->w_6), (float4(*(kernelContext_23->bodies_0+_S481)) ).w)) ;
+    uint _S487 = at_3 + 4U;
+    *(kernelContext_23->bodies_0+_S487) = packed_float4(float4(to_yup_0(f_3->w_6), (float4(*(kernelContext_23->bodies_0+_S487)) ).w)) ;
     return;
 }
 
@@ -4629,25 +4686,25 @@ void place_body_0(uint body_4, const Fit_0 thread* f_3, float4 held_mass_0, floa
     threadgroup uint g_broke_15;
     (&kernelContext_24)->g_broke_0 = &g_broke_15;
     uint e_4 = id_2.x;
-    bool _S482;
+    bool _S488;
     if((*(ctl_15+0U)) == 0U)
     {
-        _S482 = true;
+        _S488 = true;
     }
     else
     {
-        _S482 = e_4 >= (*((&kernelContext_24)->ctl_0+9U));
+        _S488 = e_4 >= (*((&kernelContext_24)->ctl_0+9U));
     }
-    if(_S482)
+    if(_S488)
     {
         return;
     }
-    uint4 _S483 = uint4(*((&kernelContext_24)->cisl_0+2U * e_4)) ;
-    uint _S484 = 4U * e_4;
-    float4 _S485 = float4(*((&kernelContext_24)->frozen_0+_S484)) ;
-    uint body_5 = (as_type<uint>((_S485.x)));
-    uint _S486 = 10U * _S483.w + 4U;
-    bool stood_0 = (as_type<uint>(((float4(*((&kernelContext_24)->calls_0+_S486)) ).w))) == 0U;
+    uint4 _S489 = uint4(*((&kernelContext_24)->cisl_0+2U * e_4)) ;
+    uint _S490 = 4U * e_4;
+    float4 _S491 = float4(*((&kernelContext_24)->frozen_0+_S490)) ;
+    uint body_5 = (as_type<uint>((_S491.x)));
+    uint _S492 = 10U * _S489.w + 4U;
+    bool stood_0 = (as_type<uint>(((float4(*((&kernelContext_24)->calls_0+_S492)) ).w))) == 0U;
     if(body_5 == 4294967295U)
     {
         return;
@@ -4655,27 +4712,27 @@ void place_body_0(uint body_4, const Fit_0 thread* f_3, float4 held_mass_0, floa
     uint at_4 = 7U * body_5;
     if(!stood_0)
     {
-        if(((as_type<uint>(((float4(*((&kernelContext_24)->calls_0+_S486)) ).w))) & 8U) != 0U)
+        if(((as_type<uint>(((float4(*((&kernelContext_24)->calls_0+_S492)) ).w))) & 8U) != 0U)
         {
-            *((&kernelContext_24)->bodies_0+at_4) = packed_float4(float4((float4(*((&kernelContext_24)->bodies_0+at_4)) ).xyz, _S485.y)) ;
-            *((&kernelContext_24)->bodies_0+(at_4 + 2U)) = packed_float4(float4(*((&kernelContext_24)->frozen_0+(_S484 + 1U))) ) ;
-            *((&kernelContext_24)->bodies_0+(at_4 + 3U)) = packed_float4(float4(*((&kernelContext_24)->frozen_0+(_S484 + 2U))) ) ;
-            *((&kernelContext_24)->bodies_0+(at_4 + 4U)) = packed_float4(float4(*((&kernelContext_24)->frozen_0+(_S484 + 3U))) ) ;
+            *((&kernelContext_24)->bodies_0+at_4) = packed_float4(float4((float4(*((&kernelContext_24)->bodies_0+at_4)) ).xyz, _S491.y)) ;
+            *((&kernelContext_24)->bodies_0+(at_4 + 2U)) = packed_float4(float4(*((&kernelContext_24)->frozen_0+(_S490 + 1U))) ) ;
+            *((&kernelContext_24)->bodies_0+(at_4 + 3U)) = packed_float4(float4(*((&kernelContext_24)->frozen_0+(_S490 + 2U))) ) ;
+            *((&kernelContext_24)->bodies_0+(at_4 + 4U)) = packed_float4(float4(*((&kernelContext_24)->frozen_0+(_S490 + 3U))) ) ;
         }
         return;
     }
-    uint _S487 = _S483.y;
-    if(((*((&kernelContext_24)->status_0+(16U + (uint4(((&kernelContext_24)->chunks_0+(as_type<uint>(((float4(*((&kernelContext_24)->nodes_0+(14U * _S487 + 12U))) ).x))))->info_1) ).y))) & 8U) != 0U)
+    uint _S493 = _S489.y;
+    if(((*((&kernelContext_24)->status_0+(16U + (uint4(((&kernelContext_24)->chunks_0+(as_type<uint>(((float4(*((&kernelContext_24)->nodes_0+(14U * _S493 + 12U))) ).x))))->info_1) ).y))) & 8U) != 0U)
     {
-        *((&kernelContext_24)->bodies_0+at_4) = packed_float4(float4((float4(*((&kernelContext_24)->bodies_0+at_4)) ).xyz, _S485.y)) ;
-        *((&kernelContext_24)->bodies_0+(at_4 + 2U)) = packed_float4(float4(*((&kernelContext_24)->frozen_0+(_S484 + 1U))) ) ;
+        *((&kernelContext_24)->bodies_0+at_4) = packed_float4(float4((float4(*((&kernelContext_24)->bodies_0+at_4)) ).xyz, _S491.y)) ;
+        *((&kernelContext_24)->bodies_0+(at_4 + 2U)) = packed_float4(float4(*((&kernelContext_24)->frozen_0+(_S490 + 1U))) ) ;
         *((&kernelContext_24)->bodies_0+(at_4 + 3U)) = packed_float4(float4(0.0f, 0.0f, 0.0f, 0.0f)) ;
         return;
     }
-    Fit_0 _S488 = fit_nodes_0(_S487, _S483.z, false, 0U, 0U, &kernelContext_24);
-    float4 _S489 = float4(*((&kernelContext_24)->frozen_0+(_S484 + 1U))) ;
-    thread Fit_0 _S490 = _S488;
-    place_body_0(body_5, &_S490, _S485, _S489, &kernelContext_24);
+    Fit_0 _S494 = fit_nodes_0(_S493, _S489.z, false, 0U, 0U, &kernelContext_24);
+    float4 _S495 = float4(*((&kernelContext_24)->frozen_0+(_S490 + 1U))) ;
+    thread Fit_0 _S496 = _S494;
+    place_body_0(body_5, &_S496, _S491, _S495, &kernelContext_24);
     return;
 }
 
@@ -4747,69 +4804,69 @@ void place_body_0(uint body_4, const Fit_0 thread* f_3, float4 held_mass_0, floa
     (&kernelContext_25)->g_broke_0 = &g_broke_16;
     uint g_9 = group_11.x;
     uint k_30 = thread_15.x;
-    bool _S491;
+    bool _S497;
     if((*(ctl_16+0U)) == 0U)
     {
-        _S491 = true;
+        _S497 = true;
     }
     else
     {
-        _S491 = g_9 >= (*((&kernelContext_25)->ctl_0+1U));
+        _S497 = g_9 >= (*((&kernelContext_25)->ctl_0+1U));
     }
-    if(_S491)
+    if(_S497)
     {
         return;
     }
-    uint _S492 = 10U * g_9;
-    uint mask_7 = (as_type<uint>(((float4(*((&kernelContext_25)->calls_0+(_S492 + 5U))) ).w)));
-    uint fb_1 = (as_type<uint>(((float4(*((&kernelContext_25)->calls_0+(_S492 + 4U))) ).w)));
-    uint _S493 = 1U << k_30;
-    if((mask_7 & _S493) == 0U)
+    uint _S498 = 10U * g_9;
+    uint mask_9 = (as_type<uint>(((float4(*((&kernelContext_25)->calls_0+(_S498 + 5U))) ).w)));
+    uint fb_1 = (as_type<uint>(((float4(*((&kernelContext_25)->calls_0+(_S498 + 4U))) ).w)));
+    uint _S499 = 1U << k_30;
+    if((mask_9 & _S499) == 0U)
     {
-        _S491 = true;
+        _S497 = true;
     }
     else
     {
         if(fb_1 != 0U)
         {
-            _S491 = (fb_1 & 8U) == 0U;
+            _S497 = (fb_1 & 8U) == 0U;
         }
         else
         {
-            _S491 = false;
+            _S497 = false;
         }
     }
-    if(_S491)
+    if(_S497)
     {
         return;
     }
-    uint _S494 = 4U * ((&kernelContext_25)->params_0->max_cisl_0 + k_30);
-    float4 _S495 = float4(*((&kernelContext_25)->frozen_0+_S494)) ;
-    uint at_5 = 7U * (as_type<uint>((_S495.x)));
-    float _S496 = _S495.y;
-    *((&kernelContext_25)->bodies_0+at_5) = packed_float4(float4((float4(*((&kernelContext_25)->bodies_0+at_5)) ).xyz, _S496)) ;
-    *((&kernelContext_25)->bodies_0+(at_5 + 2U)) = packed_float4(float4(*((&kernelContext_25)->frozen_0+(_S494 + 1U))) ) ;
+    uint _S500 = 4U * ((&kernelContext_25)->params_0->max_cisl_0 + k_30);
+    float4 _S501 = float4(*((&kernelContext_25)->frozen_0+_S500)) ;
+    uint at_5 = 7U * (as_type<uint>((_S501.x)));
+    float _S502 = _S501.y;
+    *((&kernelContext_25)->bodies_0+at_5) = packed_float4(float4((float4(*((&kernelContext_25)->bodies_0+at_5)) ).xyz, _S502)) ;
+    *((&kernelContext_25)->bodies_0+(at_5 + 2U)) = packed_float4(float4(*((&kernelContext_25)->frozen_0+(_S500 + 1U))) ) ;
     if(fb_1 != 0U)
     {
-        *((&kernelContext_25)->bodies_0+(at_5 + 3U)) = packed_float4(float4(*((&kernelContext_25)->frozen_0+(_S494 + 2U))) ) ;
-        *((&kernelContext_25)->bodies_0+(at_5 + 4U)) = packed_float4(float4(*((&kernelContext_25)->frozen_0+(_S494 + 3U))) ) ;
+        *((&kernelContext_25)->bodies_0+(at_5 + 3U)) = packed_float4(float4(*((&kernelContext_25)->frozen_0+(_S500 + 2U))) ) ;
+        *((&kernelContext_25)->bodies_0+(at_5 + 4U)) = packed_float4(float4(*((&kernelContext_25)->frozen_0+(_S500 + 3U))) ) ;
         return;
     }
-    uint n_6 = (as_type<uint>(((float4(*((&kernelContext_25)->calls_0+(_S492 + 2U))) ).z))) + (as_type<uint>(((float4(*((&kernelContext_25)->calls_0+(_S492 + 3U))) ).w))) + ((uint)popcount((mask_7 & (_S493 - 1U))));
-    float4 _S497 = node_0(n_6, 10U, &kernelContext_25);
-    float3 dx_2 = _S497.xyz;
-    float4 _S498 = node_0(n_6, 11U, &kernelContext_25);
-    float3 dr_1 = _S498.xyz;
-    *((&kernelContext_25)->bodies_0+at_5) = packed_float4(float4((float4(*((&kernelContext_25)->bodies_0+at_5)) ).xyz + to_yup_0(dx_2), _S496)) ;
-    uint _S499 = at_5 + 1U;
-    *((&kernelContext_25)->bodies_0+_S499) = packed_float4(turn_rubble_0(float4(*((&kernelContext_25)->bodies_0+_S499)) , dr_1)) ;
-    packed_float4 device* _S500 = (&kernelContext_25)->bodies_0+(at_5 + 3U);
-    float4 _S501 = node_0(n_6, 8U, &kernelContext_25);
-    *_S500 = packed_float4(float4(to_yup_0(_S501.xyz), 0.0f)) ;
-    uint _S502 = at_5 + 4U;
-    packed_float4 device* _S503 = (&kernelContext_25)->bodies_0+_S502;
-    float4 _S504 = node_0(n_6, 9U, &kernelContext_25);
-    *_S503 = packed_float4(float4(to_yup_0(_S504.xyz), (float4(*((&kernelContext_25)->bodies_0+_S502)) ).w)) ;
+    uint n_6 = (as_type<uint>(((float4(*((&kernelContext_25)->calls_0+(_S498 + 2U))) ).z))) + (as_type<uint>(((float4(*((&kernelContext_25)->calls_0+(_S498 + 3U))) ).w))) + ((uint)popcount((mask_9 & (_S499 - 1U))));
+    float4 _S503 = node_0(n_6, 10U, &kernelContext_25);
+    float3 dx_2 = _S503.xyz;
+    float4 _S504 = node_0(n_6, 11U, &kernelContext_25);
+    float3 dr_1 = _S504.xyz;
+    *((&kernelContext_25)->bodies_0+at_5) = packed_float4(float4((float4(*((&kernelContext_25)->bodies_0+at_5)) ).xyz + to_yup_0(dx_2), _S502)) ;
+    uint _S505 = at_5 + 1U;
+    *((&kernelContext_25)->bodies_0+_S505) = packed_float4(turn_rubble_0(float4(*((&kernelContext_25)->bodies_0+_S505)) , dr_1)) ;
+    packed_float4 device* _S506 = (&kernelContext_25)->bodies_0+(at_5 + 3U);
+    float4 _S507 = node_0(n_6, 8U, &kernelContext_25);
+    *_S506 = packed_float4(float4(to_yup_0(_S507.xyz), 0.0f)) ;
+    uint _S508 = at_5 + 4U;
+    packed_float4 device* _S509 = (&kernelContext_25)->bodies_0+_S508;
+    float4 _S510 = node_0(n_6, 9U, &kernelContext_25);
+    *_S509 = packed_float4(float4(to_yup_0(_S510.xyz), (float4(*((&kernelContext_25)->bodies_0+_S508)) ).w)) ;
     return;
 }
 
@@ -4880,16 +4937,16 @@ void place_body_0(uint body_4, const Fit_0 thread* f_3, float4 held_mass_0, floa
     threadgroup uint g_broke_17;
     (&kernelContext_26)->g_broke_0 = &g_broke_17;
     uint slot_0 = id_3.x;
-    bool _S505;
+    bool _S511;
     if((*(ctl_17+18U)) == 0U)
     {
-        _S505 = true;
+        _S511 = true;
     }
     else
     {
-        _S505 = (&kernelContext_26)->split_control_0[0U] != 0U;
+        _S511 = (&kernelContext_26)->split_control_0[0U] != 0U;
     }
-    if(_S505)
+    if(_S511)
     {
         return;
     }
@@ -4903,9 +4960,9 @@ void place_body_0(uint body_4, const Fit_0 thread* f_3, float4 held_mass_0, floa
     {
         return;
     }
-    uint _S506 = np_0 - 1U;
+    uint _S512 = np_0 - 1U;
     uint lo_3 = 0U;
-    uint hi_3 = _S506;
+    uint hi_3 = _S512;
     for(;;)
     {
         if(lo_3 < hi_3)
@@ -4925,24 +4982,24 @@ void place_body_0(uint body_4, const Fit_0 thread* f_3, float4 held_mass_0, floa
             hi_3 = mid_0 - 1U;
         }
     }
-    uint4 _S507 = uint4(*((&kernelContext_26)->split_parents_0+lo_3)) ;
-    uint _S508 = _S507.y;
-    if((slot_0 - _S508) >= (_S507.z))
+    uint4 _S513 = uint4(*((&kernelContext_26)->split_parents_0+lo_3)) ;
+    uint _S514 = _S513.y;
+    if((slot_0 - _S514) >= (_S513.z))
     {
         return;
     }
-    uint4 _S509 = uint4(*((&kernelContext_26)->split_slots_0+slot_0)) ;
-    if((_S509.w) == 0U)
+    uint4 _S515 = uint4(*((&kernelContext_26)->split_slots_0+slot_0)) ;
+    if((_S515.w) == 0U)
     {
         return;
     }
-    float4 _S510 = float4(*((&kernelContext_26)->split_out_0+8U * slot_0)) ;
-    if((as_type<uint>((_S510.w))) != 0U)
+    float4 _S516 = float4(*((&kernelContext_26)->split_out_0+8U * slot_0)) ;
+    if((as_type<uint>((_S516.w))) != 0U)
     {
         return;
     }
-    uint count_2 = (as_type<uint>((_S510.z)));
-    uint base_1 = total_0 + _S508 + (as_type<uint>((_S510.y)));
+    uint count_2 = (as_type<uint>((_S516.z)));
+    uint base_1 = total_0 + _S514 + (as_type<uint>((_S516.y)));
     uint first_2 = (uint4(*((&kernelContext_26)->split_firsts_0+lo_3)) ).x;
     if(count_2 == 0U)
     {
@@ -4964,13 +5021,13 @@ void place_body_0(uint body_4, const Fit_0 thread* f_3, float4 held_mass_0, floa
         }
         j_12 = j_12 + 1U;
     }
-    Fit_0 _S511 = fit_nodes_0(0U, count_2, true, base_1, first_2, &kernelContext_26);
-    uint _S512 = _S509.x;
-    uint at_6 = 7U * _S512;
-    float4 _S513 = float4(0.0f, (float4(*((&kernelContext_26)->bodies_0+at_6)) ).w, 0.0f, 0.0f);
-    float4 _S514 = float4(*((&kernelContext_26)->bodies_0+(at_6 + 2U))) ;
-    thread Fit_0 _S515 = _S511;
-    place_body_0(_S512, &_S515, _S513, _S514, &kernelContext_26);
+    Fit_0 _S517 = fit_nodes_0(0U, count_2, true, base_1, first_2, &kernelContext_26);
+    uint _S518 = _S515.x;
+    uint at_6 = 7U * _S518;
+    float4 _S519 = float4(0.0f, (float4(*((&kernelContext_26)->bodies_0+at_6)) ).w, 0.0f, 0.0f);
+    float4 _S520 = float4(*((&kernelContext_26)->bodies_0+(at_6 + 2U))) ;
+    thread Fit_0 _S521 = _S517;
+    place_body_0(_S518, &_S521, _S519, _S520, &kernelContext_26);
     return;
 }
 
@@ -5057,26 +5114,26 @@ void place_body_0(uint body_4, const Fit_0 thread* f_3, float4 held_mass_0, floa
         {
             break;
         }
-        uint _S516 = 10U * g_10;
-        uint _S517 = _S516 + 4U;
-        bool _S518;
-        if((as_type<uint>(((float4(*((&kernelContext_27)->calls_0+_S517)) ).w))) != 0U)
+        uint _S522 = 10U * g_10;
+        uint _S523 = _S522 + 4U;
+        bool _S524;
+        if((as_type<uint>(((float4(*((&kernelContext_27)->calls_0+_S523)) ).w))) != 0U)
         {
-            _S518 = (as_type<uint>(((float4(*((&kernelContext_27)->calls_0+_S517)) ).w))) != 8U;
+            _S524 = (as_type<uint>(((float4(*((&kernelContext_27)->calls_0+_S523)) ).w))) != 8U;
         }
         else
         {
-            _S518 = false;
+            _S524 = false;
         }
-        if(_S518)
+        if(_S524)
         {
             g_10 = g_10 + 1U;
             continue;
         }
-        float4 _S519 = float4(*((&kernelContext_27)->calls_0+(_S516 + 7U))) ;
-        uint broken_1 = broken_0 + (as_type<uint>((_S519.y)));
-        uint applied_1 = applied_0 + (as_type<uint>((_S519.z)));
-        stale_0 = stale_0 + (as_type<uint>((_S519.x)));
+        float4 _S525 = float4(*((&kernelContext_27)->calls_0+(_S522 + 7U))) ;
+        uint broken_1 = broken_0 + (as_type<uint>((_S525.y)));
+        uint applied_1 = applied_0 + (as_type<uint>((_S525.z)));
+        stale_0 = stale_0 + (as_type<uint>((_S525.x)));
         broken_0 = broken_1;
         applied_0 = applied_1;
         g_10 = g_10 + 1U;
@@ -5154,7 +5211,7 @@ void place_body_0(uint body_4, const Fit_0 thread* f_3, float4 held_mass_0, floa
     (&kernelContext_28)->g_stale_0 = &g_stale_19;
     threadgroup uint g_broke_19;
     (&kernelContext_28)->g_broke_0 = &g_broke_19;
-    uint _S520 = *(ctl_19+1U);
+    uint _S526 = *(ctl_19+1U);
     uint g_11 = 0U;
     uint bound_1 = 0U;
     uint infeasible_0 = 0U;
@@ -5165,71 +5222,71 @@ void place_body_0(uint body_4, const Fit_0 thread* f_3, float4 held_mass_0, floa
     uint stood_1 = 0U;
     for(;;)
     {
-        if(g_11 < _S520)
+        if(g_11 < _S526)
         {
         }
         else
         {
             break;
         }
-        uint _S521 = 10U * g_11;
-        uint _S522 = _S521 + 4U;
-        uint dec_2 = (as_type<uint>(((float4(*((&kernelContext_28)->calls_0+_S522)) ).z)));
-        uint fb_2 = (as_type<uint>(((float4(*((&kernelContext_28)->calls_0+_S522)) ).w)));
-        uint _S523;
+        uint _S527 = 10U * g_11;
+        uint _S528 = _S527 + 4U;
+        uint dec_2 = (as_type<uint>(((float4(*((&kernelContext_28)->calls_0+_S528)) ).z)));
+        uint fb_2 = (as_type<uint>(((float4(*((&kernelContext_28)->calls_0+_S528)) ).w)));
+        uint _S529;
         if((dec_2 & 1U) != 0U)
         {
-            _S523 = 1U;
+            _S529 = 1U;
         }
         else
         {
-            _S523 = 0U;
+            _S529 = 0U;
         }
-        uint bound_2 = bound_1 + _S523;
-        uint _S524;
+        uint bound_2 = bound_1 + _S529;
+        uint _S530;
         if((dec_2 & 2U) != 0U)
         {
-            _S524 = 1U;
+            _S530 = 1U;
         }
         else
         {
-            _S524 = 0U;
+            _S530 = 0U;
         }
-        uint infeasible_1 = infeasible_0 + _S524;
+        uint infeasible_1 = infeasible_0 + _S530;
         if(fb_2 != 0U)
         {
-            uint _S525 = fallbacks_0 + 1U;
-            uint _S526;
+            uint _S531 = fallbacks_0 + 1U;
+            uint _S532;
             if((fb_2 & 1U) != 0U)
             {
-                _S526 = 1U;
+                _S532 = 1U;
             }
             else
             {
-                _S526 = 0U;
+                _S532 = 0U;
             }
-            uint nonfinite_1 = nonfinite_0 + _S526;
-            uint _S527;
+            uint nonfinite_1 = nonfinite_0 + _S532;
+            uint _S533;
             if((fb_2 & 2U) != 0U)
             {
-                _S527 = 1U;
+                _S533 = 1U;
             }
             else
             {
-                _S527 = 0U;
+                _S533 = 0U;
             }
-            uint fb_inf_1 = fb_inf_0 + _S527;
-            uint _S528;
+            uint fb_inf_1 = fb_inf_0 + _S533;
+            uint _S534;
             if((fb_2 & 4U) != 0U)
             {
-                _S528 = 1U;
+                _S534 = 1U;
             }
             else
             {
-                _S528 = 0U;
+                _S534 = 0U;
             }
-            uint range_2 = range_1 + _S528;
-            fallbacks_0 = _S525;
+            uint range_2 = range_1 + _S534;
+            fallbacks_0 = _S531;
             nonfinite_0 = nonfinite_1;
             fb_inf_0 = fb_inf_1;
             range_1 = range_2;
@@ -5238,7 +5295,7 @@ void place_body_0(uint body_4, const Fit_0 thread* f_3, float4 held_mass_0, floa
         {
             stood_1 = stood_1 + 1U;
         }
-        *((&kernelContext_28)->calls_0+(_S521 + 7U)) = packed_float4(float4(0.0f) ) ;
+        *((&kernelContext_28)->calls_0+(_S527 + 7U)) = packed_float4(float4(0.0f) ) ;
         g_11 = g_11 + 1U;
         bound_1 = bound_2;
         infeasible_0 = infeasible_1;
@@ -5249,7 +5306,7 @@ void place_body_0(uint body_4, const Fit_0 thread* f_3, float4 held_mass_0, floa
     *((&kernelContext_28)->ctl_0+14U) = nonfinite_0;
     *((&kernelContext_28)->ctl_0+15U) = fb_inf_0;
     *((&kernelContext_28)->ctl_0+16U) = range_1;
-    uint device* _S529 = (&kernelContext_28)->ctl_0+0U;
+    uint device* _S535 = (&kernelContext_28)->ctl_0+0U;
     if(stood_1 > 0U)
     {
         g_11 = 1U;
@@ -5258,7 +5315,7 @@ void place_body_0(uint body_4, const Fit_0 thread* f_3, float4 held_mass_0, floa
     {
         g_11 = 0U;
     }
-    *_S529 = g_11;
+    *_S535 = g_11;
     return;
 }
 
@@ -5335,53 +5392,53 @@ void place_body_0(uint body_4, const Fit_0 thread* f_3, float4 held_mass_0, floa
     {
         return;
     }
-    uint _S530 = 10U * g_12;
-    uint _S531 = _S530 + 2U;
-    uint _S532 = (as_type<uint>(((float4(*((&kernelContext_29)->calls_0+_S531)) ).z)));
-    uint _S533 = (as_type<uint>(((float4(*((&kernelContext_29)->calls_0+_S531)) ).w)));
-    uint _S534 = (as_type<uint>(((float4(*((&kernelContext_29)->calls_0+(_S530 + 3U))) ).w)));
-    uint _S535 = _S530 + 4U;
-    uint _S536 = (as_type<uint>(((float4(*((&kernelContext_29)->calls_0+_S535)) ).x)));
-    uint _S537 = (as_type<uint>(((float4(*((&kernelContext_29)->calls_0+_S535)) ).y)));
-    uint _S538 = _S530 + 6U;
-    uint _S539 = (as_type<uint>(((float4(*((&kernelContext_29)->calls_0+_S538)) ).z)));
-    uint _S540 = (as_type<uint>(((float4(*((&kernelContext_29)->calls_0+_S538)) ).w)));
+    uint _S536 = 10U * g_12;
+    uint _S537 = _S536 + 2U;
+    uint _S538 = (as_type<uint>(((float4(*((&kernelContext_29)->calls_0+_S537)) ).z)));
+    uint _S539 = (as_type<uint>(((float4(*((&kernelContext_29)->calls_0+_S537)) ).w)));
+    uint _S540 = (as_type<uint>(((float4(*((&kernelContext_29)->calls_0+(_S536 + 3U))) ).w)));
+    uint _S541 = _S536 + 4U;
+    uint _S542 = (as_type<uint>(((float4(*((&kernelContext_29)->calls_0+_S541)) ).x)));
+    uint _S543 = (as_type<uint>(((float4(*((&kernelContext_29)->calls_0+_S541)) ).y)));
+    uint _S544 = _S536 + 6U;
+    uint _S545 = (as_type<uint>(((float4(*((&kernelContext_29)->calls_0+_S544)) ).z)));
+    uint _S546 = (as_type<uint>(((float4(*((&kernelContext_29)->calls_0+_S544)) ).w)));
     uint j_13 = t_15;
     for(;;)
     {
-        if(j_13 < _S533)
+        if(j_13 < _S539)
         {
         }
         else
         {
             break;
         }
-        if(j_13 < _S534)
+        if(j_13 < _S540)
         {
-            at_7 = (&kernelContext_29)->params_0->out_bases_0.x + 12U * (_S539 + j_13);
+            at_7 = (&kernelContext_29)->params_0->out_bases_0.x + 12U * (_S545 + j_13);
         }
         else
         {
-            at_7 = (&kernelContext_29)->params_0->out_bases_0.y + 12U * (_S540 + j_13 - _S534);
+            at_7 = (&kernelContext_29)->params_0->out_bases_0.y + 12U * (_S546 + j_13 - _S540);
         }
-        uint _S541 = 14U * (_S532 + j_13);
-        *((&kernelContext_29)->nodes_0+(_S541 + 5U)) = packed_float4(float4((&kernelContext_29)->lout_0[at_7], (&kernelContext_29)->lout_0[at_7 + 1U], (&kernelContext_29)->lout_0[at_7 + 2U], (&kernelContext_29)->lout_0[at_7 + 3U])) ;
-        *((&kernelContext_29)->nodes_0+(_S541 + 6U)) = packed_float4(float4((&kernelContext_29)->lout_0[at_7 + 4U], (&kernelContext_29)->lout_0[at_7 + 5U], (&kernelContext_29)->lout_0[at_7 + 6U], (&kernelContext_29)->lout_0[at_7 + 7U])) ;
-        *((&kernelContext_29)->nodes_0+(_S541 + 7U)) = packed_float4(float4((&kernelContext_29)->lout_0[at_7 + 8U], (&kernelContext_29)->lout_0[at_7 + 9U], (&kernelContext_29)->lout_0[at_7 + 10U], (&kernelContext_29)->lout_0[at_7 + 11U])) ;
+        uint _S547 = 14U * (_S538 + j_13);
+        *((&kernelContext_29)->nodes_0+(_S547 + 5U)) = packed_float4(float4((&kernelContext_29)->lout_0[at_7], (&kernelContext_29)->lout_0[at_7 + 1U], (&kernelContext_29)->lout_0[at_7 + 2U], (&kernelContext_29)->lout_0[at_7 + 3U])) ;
+        *((&kernelContext_29)->nodes_0+(_S547 + 6U)) = packed_float4(float4((&kernelContext_29)->lout_0[at_7 + 4U], (&kernelContext_29)->lout_0[at_7 + 5U], (&kernelContext_29)->lout_0[at_7 + 6U], (&kernelContext_29)->lout_0[at_7 + 7U])) ;
+        *((&kernelContext_29)->nodes_0+(_S547 + 7U)) = packed_float4(float4((&kernelContext_29)->lout_0[at_7 + 8U], (&kernelContext_29)->lout_0[at_7 + 9U], (&kernelContext_29)->lout_0[at_7 + 10U], (&kernelContext_29)->lout_0[at_7 + 11U])) ;
         j_13 = j_13 + 64U;
     }
     j_13 = t_15;
     for(;;)
     {
-        if(j_13 < _S537)
+        if(j_13 < _S543)
         {
         }
         else
         {
             break;
         }
-        uint b_10 = _S536 + j_13;
-        uint _S542 = (&kernelContext_29)->params_0->out_bases2_0.x + 8U * b_10;
+        uint b_10 = _S542 + j_13;
+        uint _S548 = (&kernelContext_29)->params_0->out_bases2_0.x + 8U * b_10;
         at_7 = 0U;
         uint i_6 = 1U;
         for(;;)
@@ -5393,14 +5450,14 @@ void place_body_0(uint body_4, const Fit_0 thread* f_3, float4 held_mass_0, floa
             {
                 break;
             }
-            if((&kernelContext_29)->lout_0[_S542 + i_6] > ((&kernelContext_29)->lout_0)[_S542 + at_7])
+            if((&kernelContext_29)->lout_0[_S548 + i_6] > ((&kernelContext_29)->lout_0)[_S548 + at_7])
             {
                 at_7 = i_6;
             }
             i_6 = i_6 + 1U;
         }
-        uint _S543 = 2U * b_10;
-        *((&kernelContext_29)->bonds_0+_S543) = packed_float4(float4((float4(*((&kernelContext_29)->bonds_0+_S543)) ).x, (&kernelContext_29)->lout_0[(&kernelContext_29)->params_0->out_bases_0.z + b_10], (&kernelContext_29)->lout_0[(&kernelContext_29)->params_0->out_bases_0.w + b_10], (as_type<float>((at_7 + 1U))))) ;
+        uint _S549 = 2U * b_10;
+        *((&kernelContext_29)->bonds_0+_S549) = packed_float4(float4((float4(*((&kernelContext_29)->bonds_0+_S549)) ).x, (&kernelContext_29)->lout_0[(&kernelContext_29)->params_0->out_bases_0.z + b_10], (&kernelContext_29)->lout_0[(&kernelContext_29)->params_0->out_bases_0.w + b_10], (as_type<float>((at_7 + 1U))))) ;
         j_13 = j_13 + 64U;
     }
     return;
