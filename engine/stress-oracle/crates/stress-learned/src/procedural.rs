@@ -89,6 +89,9 @@ pub struct Ranges {
     /// this band instead of from the punch ratio, and the number of impactors of tier 2.
     pub forced_speed: Option<(f64, f64)>,
     pub loads: (usize, usize),
+    /// Share of first impactors aimed at a corner of the face (both fractions within 0.15 of
+    /// an edge), for evaluation sets that need corner hits (they are ~5% of uniform draws).
+    pub corner_share: f64,
     /// The extrapolation this catalog tests (recorded in each recipe), if any.
     pub extrapolation: Option<&'static str>,
 }
@@ -116,6 +119,7 @@ impl Ranges {
             low_speed: (0.1, 1.0),
             forced_speed: None,
             loads: (2, 4),
+            corner_share: 0.0,
             extrapolation: None,
         }
     }
@@ -379,6 +383,7 @@ pub fn wall_recipes(family: &str, tier: u32, n: usize, seed: u64, r: &Ranges) ->
                     v[5] = u[13];
                 }
                 let angle = (v[4] * 2.0 - 1.0) * r.max_angle_degrees;
+                let corner = k == 0 && rng.unit() < r.corner_share;
                 let along_x = rng.unit() < 0.5;
                 let spin = if rng.unit() < r.spin_probability {
                     let a = rng.int(0, 2);
@@ -394,8 +399,8 @@ pub fn wall_recipes(family: &str, tier: u32, n: usize, seed: u64, r: &Ranges) ->
                     sphere: rng.unit() < 0.4,
                     size,
                     // 10% of hits graze an edge (centre up to 0.1 past it).
-                    x_fraction: if rng.unit() < 0.1 { if rng.unit() < 0.5 { -0.05 } else { 1.05 } } else { 0.05 + 0.9 * v[2] },
-                    z_fraction: 0.05 + 0.9 * v[3],
+                    x_fraction: if corner { if v[2] < 0.5 { 0.03 + 0.24 * v[2] } else { 0.97 - 0.24 * (1.0 - v[2]) } } else if rng.unit() < 0.1 { if rng.unit() < 0.5 { -0.05 } else { 1.05 } } else { 0.05 + 0.9 * v[2] },
+                    z_fraction: if corner { if v[3] < 0.5 { 0.03 + 0.24 * v[3] } else { 0.97 - 0.24 * (1.0 - v[3]) } } else { 0.05 + 0.9 * v[3] },
                     back: k > 0 && rng.unit() < 0.3,
                     yaw_degrees: if along_x { angle } else { 0.0 },
                     pitch_degrees: if along_x { 0.0 } else { angle },

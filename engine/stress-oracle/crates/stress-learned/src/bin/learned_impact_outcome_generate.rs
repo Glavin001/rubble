@@ -6,7 +6,7 @@
 //!       [--max-seconds S] [--max-failure-fraction F] [--pause-file PATH]
 //!       [--members M] [--ensemble-train-share F] [--no-ensembles]
 //!       [--budget-gb G] [--min-free-gb F] [--no-thinning]
-//!       [--split sealed|train|val|test] [--extrapolation speed|mass|size|loads]
+//!       [--split sealed|train|val|test] [--extrapolation speed|mass|size|loads] [--corner-share F]
 //!
 //! Stage 2: `--catalog p1-stage2 --family cuboid_house|masonry_house|arch --tier 3|4|5`.
 //!
@@ -67,6 +67,10 @@ fn main() {
                 (None, "bulk") => Ranges::bulk(),
                 (None, r) => panic!("unknown --ranges {r}"),
             };
+            let mut ranges = ranges;
+            if let Some(x) = val("--corner-share") {
+                ranges.corner_share = x.parse().expect("--corner-share");
+            }
             wall_recipes(&family, tier, n, seed, &ranges).expect("recipes")
         }
         "m5" => m5_recipes(),
