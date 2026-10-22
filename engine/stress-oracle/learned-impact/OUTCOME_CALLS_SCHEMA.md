@@ -465,10 +465,13 @@ return it at frame end. **P0 sends the exact fields; until then the names and sc
 are placeholders to agree.**
 
 Definitions, per chunk i of island I:
-- The rigid reference is the island's frame-start rigid motion (COM pose and v_com, ω_I)
-  with the chunk at its rest offset from the pristine structure.
-- `u_i` = chunk COM displacement from its rest offset, and `θ_i` = rotation vector of the
-  chunk relative to the island's rotation. Both are in the island body frame.
+- `u_i` and `θ_i` are the oracle's own hidden state, `ChunkState.u` / `th`, in the frame
+  of the chunk's own cluster (fragment): the recorder's `state_chunk_hidden`. An island can
+  hold several clusters, so the cluster is the reference, not the island. This is also
+  what the decode hands back (agreed with P1).
+- The rigid reference for the rates is the island's frame-start rigid motion (COM,
+  v_com, ω_I). The rates are derived exactly from the solver's `chunk_velocity`
+  (v = v_cl + ω_cl × R(c + u − com) + R·v_h), up to f32 round-off.
 - `v_def_i` = v_i − (v_com + ω_I × r_i) and `ω_def_i` = ω_i − ω_I, in the island body frame.
 - They are mass-weighted to zero net momentum and angular momentum per island, so the
   rigid part keeps all of the island's momentum.
