@@ -236,11 +236,12 @@ def main(argv=None) -> None:
                     if k not in ("y_bond_break_freq", "y_impactor_perforate_freq", "ens_impactor_v_end")}
     d.train, d.val = calls, calls
     if a.extra_calls:
-        extra = [S.load_event(p) for p in S.find_events(a.extra_calls)]
-        for e in extra:
-            d.structures[e.manifest["event_id"]] = e.structures
-        d.train = calls + [c for e in extra for c in e.calls if c.routed]
-        print(f"[overfit] + {len(d.train) - len(calls)} relabelled (DAgger) calls for training")
+        from .dagger import load_relabelled
+        extra, st, n = load_relabelled(a.extra_calls)
+        d.structures.update(st)
+        d.train = calls + extra
+        print(f"[overfit] + {n['admitted']} of {n['relabelled']} relabelled (DAgger) calls "
+              f"(the rest fail the oracle's energy balance)")
     d.successor, d.ensemble_aligned_calls = {}, 0
     pos = sum(float(c.arrays["y_bond_broke"].sum()) for c in calls)
     tot = sum(float(len(c.arrays["y_bond_broke"])) for c in calls)

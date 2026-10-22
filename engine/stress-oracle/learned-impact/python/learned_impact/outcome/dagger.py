@@ -42,6 +42,38 @@ from .batch import SCALE_INDEX, HierarchyCache, collate
 from .train import Data, _batches, decode_config, load_model
 
 
+# A relabel is admitted only if the oracle's own frame balances energy: the model's state
+# may interpenetrate bodies, and the oracle then resolves the overlap by launching them
+# (bulk v1, 10 memorised events: 43 of 779 relabels gained up to 400× their input energy).
+# Such a target teaches nothing physical.
+ADMIT_ENERGY_TOL = 0.05
+
+
+def admissible(c) -> bool:
+    e = c.energy
+    gain = (e["KE_out"] + e.get("E_elastic_end", 0.0) - e["KE_in"] - e.get("E_elastic_start", 0.0)
+            - e.get("W_gravity", 0.0) - e.get("W_external", 0.0))
+    return gain <= ADMIT_ENERGY_TOL * c.scales["E_in"]
+
+
+def load_relabelled(root: str | Path) -> tuple[list, dict, dict]:
+    """The admissible relabelled calls under `root`, their structures, and the counts."""
+    from . import schema as S
+
+    calls, structures, n = [], {}, {"relabelled": 0, "admitted": 0}
+    for p in S.find_events(root):
+        e = S.load_event(p)
+        for c in e.calls:
+            if not c.routed:
+                continue
+            n["relabelled"] += 1
+            if admissible(c):
+                calls.append(c)
+                structures[e.manifest["event_id"]] = e.structures
+                n["admitted"] += 1
+    return calls, structures, n
+
+
 def recording_dirs(root: Path) -> dict[str, Path]:
     """event_id → P1's recording dir (`<root>/*/events/<event_id>`)."""
     return {p.name: p for p in root.glob("*/events/*") if p.is_dir()}
@@ -109,22 +141,21 @@ def export_from_rollouts(rollouts: Path, recordings: dict[str, Path], split_grou
                          out: Path, every: int = 1) -> dict:
     """Relabel jobs from a harness-A model rollout's dumped island states (true DAgger: the
     model's own states, which teacher-forced predictions never reach). `rollouts` holds
-    `<event>/states/<frame>.msgpack` (P0's exact IslandState at the start of each routed
-    frame); each becomes the job {event, frame F, state}: the oracle's frame-F call from the
-    model's state, with the oracle's targets."""
+    `<event>/index.jsonl` (lines {frame, state, …}) and the states (P0's exact IslandState at
+    the start of each routed frame); each becomes the job {event, frame F, state}: the
+    oracle's frame-F call from the model's state, with the oracle's targets."""
     jobs, missing = [], set()
-    for ev_dir in sorted(p for p in rollouts.iterdir() if (p / "states").is_dir()):
+    for ev_dir in sorted(p for p in rollouts.iterdir() if (p / "index.jsonl").exists()):
         eid = ev_dir.name
         rec = recordings.get(eid)
         if rec is None:
             missing.add(eid)
             continue
-        frames = sorted(int(f.stem) for f in (ev_dir / "states").glob("*.msgpack"))
-        for f in frames[::every]:
-            jobs.append({"event": str(rec), "frame": f,
-                         "state": str(ev_dir / "states" / f"{f}.msgpack"),
-                         "parent_call": None, "parent_event_id": eid,
-                         "split_group": split_groups.get(eid, "")})
+        rows = [json.loads(x) for x in (ev_dir / "index.jsonl").read_text().splitlines() if x]
+        for r in rows[::every]:
+            jobs.append({"event": str(rec), "frame": int(r["frame"]),
+                         "state": str(ev_dir / r["state"]), "parent_call": None,
+                         "parent_event_id": eid, "split_group": split_groups.get(eid, "")})
     out.mkdir(parents=True, exist_ok=True)
     (out / "jobs.json").write_text(json.dumps(jobs, indent=1))
     summary = {"rollouts": str(rollouts), "jobs": len(jobs), "events_without_recording": sorted(missing)}
@@ -132,13 +163,14 @@ def export_from_rollouts(rollouts: Path, recordings: dict[str, Path], split_grou
     return summary
 
 
-def relabel(round_dir: Path, binary: Path, threads: int = 8) -> Path:
+def relabel(round_dir: Path, binary: Path, threads: int = 8, calls: str | None = None) -> Path:
     """P0's oracle island step on every job; the calls land in `<round>/calls`."""
     out = round_dir / "calls"
     out.mkdir(parents=True, exist_ok=True)
     with open(round_dir / "relabel.log", "w") as log:
         subprocess.run([str(binary), "--jobs", str(round_dir / "jobs.json"), "--out", str(out),
-                        "--threads", str(threads)], stdout=log, stderr=subprocess.STDOUT, check=True)
+                        "--threads", str(threads), *(["--calls", calls] if calls else [])],
+                       stdout=log, stderr=subprocess.STDOUT, check=True)
     return out
 
 
@@ -158,13 +190,29 @@ def main(argv=None) -> None:
     r.add_argument("--round", required=True)
     r.add_argument("--bin", required=True)
     r.add_argument("--threads", type=int, default=8)
+    r.add_argument("--calls", default=None, help="v3 for /3-trained checkpoints (P0's rev-5 binary)")
+    x = sub.add_parser("export-rollouts")
+    x.add_argument("--rollouts", required=True, help="<run>/states/<candidate>")
+    x.add_argument("--recordings", required=True)
+    x.add_argument("--dataset", required=True, help="calls (for each event's split group)")
+    x.add_argument("--out", required=True)
+    x.add_argument("--every", type=int, default=1)
     a = ap.parse_args(argv)
     if a.cmd == "export":
         s = export(Path(a.checkpoint), Data(a.dataset), recording_dirs(Path(a.recordings)),
                    Path(a.out), a.tol, a.max_jobs, a.device)
         print(json.dumps(s, indent=1))
+    elif a.cmd == "export-rollouts":
+        import glob
+        groups = {}
+        for ev in Path(a.rollouts).iterdir():
+            m = Path(a.dataset) / ev.name / "manifest.json"
+            if m.exists():
+                groups[ev.name] = json.loads(m.read_text())["split_group"]
+        print(json.dumps(export_from_rollouts(Path(a.rollouts), recording_dirs(Path(a.recordings)),
+                                              groups, Path(a.out), a.every), indent=1))
     else:
-        print(relabel(Path(a.round), Path(a.bin), a.threads))
+        print(relabel(Path(a.round), Path(a.bin), a.threads, a.calls))
 
 
 if __name__ == "__main__":
