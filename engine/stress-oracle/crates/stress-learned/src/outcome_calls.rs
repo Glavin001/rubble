@@ -1478,6 +1478,7 @@ pub fn live_call_labelled(world: &mut World, name: &str, ctx_from: &Value, chunk
     }
     a.i("live_bond_frames_since_broken", &[ix.e], &since)?;
     a.i("frame_phase", &[], &[0])?;
+    let t_start = world.solver.time;
     if targets {
         let peak_prev: Vec<f32> = world.solver.bonds.iter().flatten().map(|b| b.peak_utilization as f32).collect();
         crate::outcome::labelled_frame(world, &ix, 0, &peak_prev, &mut a)?;
@@ -1498,7 +1499,9 @@ pub fn live_call_labelled(world: &mut World, name: &str, ctx_from: &Value, chunk
     ctx["n_impactors"] = json!(world.impactors.len());
     ctx["chunk_keys"] = json!(chunk_keys_json);
     ctx["bond_keys"] = json!(bond_keys_json);
-    let r = Record::from_arrays(name.to_string(), world.scene.clone(), ctx, a);
+    let mut r = Record::from_arrays(name.to_string(), world.scene.clone(), ctx, a);
+    // The frame's start time (the break-time target's origin).
+    r.frames = vec![json!({"frame": 0, "time": t_start})];
     let st = Statics::of(&r)?;
     let hist = History::of(&r, st.e)?;
     let mut call = build_call(&r, &st, 0, None, &hist, &BuildOptions { targets })?.ok_or("live_call: empty island")?;

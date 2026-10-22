@@ -1129,12 +1129,27 @@ pub(crate) fn labelled_frame(world: &mut World, ix: &Index, f: usize, peak_prev:
     crate::full_state::oracle_frame(world, |_| {})?;
     ix.check(world)?;
     let mut break_bin = vec![-1i32; ix.e];
+    // The recorder's break table (frame, bond, order, mode; the exact time), for the
+    // break-time target.
+    a.declare_i("break_i32", &[4]);
+    a.declare_d("break_f64", &[]);
+    let mut order = 0;
     for ev in &world.solver.events[events_before..] {
         if let SolverEvent::Broken { time, structure, bond, .. } = ev {
             let bin = (((time - t0) / frame_dt) * TIME_BINS as f64).floor().clamp(0.0, (TIME_BINS - 1) as f64) as i32;
             let g = ix.bond0[*structure] + bond;
             if break_bin[g] < 0 {
                 break_bin[g] = bin;
+                let mode = match world.solver.bonds[*structure][*bond].joint.mode {
+                    None => 0,
+                    Some(stress_ref::joint::FailureMode::Tension) => 1,
+                    Some(stress_ref::joint::FailureMode::Shear) => 2,
+                    Some(stress_ref::joint::FailureMode::Compression) => 3,
+                    Some(stress_ref::joint::FailureMode::Buckling) => 4,
+                };
+                a.i("break_i32", &[4], &[f as i32, g as i32, order, mode])?;
+                a.d("break_f64", &[], &[*time])?;
+                order += 1;
             }
         }
     }

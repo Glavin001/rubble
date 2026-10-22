@@ -142,7 +142,13 @@ fn an_own_state_relabel_is_the_recorded_call() {
                 assert!(v.iter().all(|&x| x == -1), "frame {}: the regime is unknown to a relabel", rec.frame);
                 continue;
             }
-            assert!(a == b, "frame {}: {k} differs", rec.frame);
+            // by bits (NaN marks "no break")
+            let same = match (a, b) {
+                (Arr::F64(sa, x), Arr::F64(sb, y)) => sa == sb && x.iter().map(|v| v.to_bits()).eq(y.iter().map(|v| v.to_bits())),
+                (Arr::F32(sa, x), Arr::F32(sb, y)) => sa == sb && x.iter().map(|v| v.to_bits()).eq(y.iter().map(|v| v.to_bits())),
+                _ => a == b,
+            };
+            assert!(same, "frame {}: {k} differs", rec.frame);
         }
     }
     let _ = std::fs::remove_dir_all(&out);
