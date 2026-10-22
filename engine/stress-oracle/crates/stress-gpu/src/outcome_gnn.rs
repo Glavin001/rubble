@@ -3,7 +3,7 @@
 //! `stress_learned::outcome_program::compile`; this module only runs it with the Slang
 //! kernels of `shaders/outcome_gnn.slang`, every op in one compute pass (WebGPU orders the
 //! dispatches, each seeing the last one's writes). Op `k`'s 64 parameter words select the
-//! kernel (`params[0]`: 0 MLP, 1 CSR, 2 fibre) and are its uniform.
+//! kernel (`params[0]`: 0 MLP, 1 CSR, 2 fibre, 3 tiled MLP) and are its uniform.
 
 use crate::gpu::{Binding, Gpu, Kernel};
 
@@ -11,14 +11,14 @@ pub const PARAM_WORDS: usize = 64;
 
 /// The model's three kernels on a device.
 pub struct OutcomeKernels {
-    kernels: [Kernel; 3],
+    kernels: [Kernel; 4],
 }
 
 impl OutcomeKernels {
     pub fn new(gpu: &Gpu) -> OutcomeKernels {
         let set = &crate::shaders::OUTCOME_GNN;
         let layout = [Binding::Uniform, Binding::Storage, Binding::Storage, Binding::StorageRw];
-        OutcomeKernels { kernels: [gpu.compute(set, "gnn_mlp", &layout), gpu.compute(set, "gnn_csr", &layout), gpu.compute(set, "gnn_fibre", &layout)] }
+        OutcomeKernels { kernels: [gpu.compute(set, "gnn_mlp", &layout), gpu.compute(set, "gnn_csr", &layout), gpu.compute(set, "gnn_fibre", &layout), gpu.compute(set, "gnn_mlp_tiled", &layout)] }
     }
 }
 
@@ -43,7 +43,7 @@ impl OutcomeRun {
         let mut steps = Vec::with_capacity(ops.len());
         for (p, (gx, gy)) in ops {
             let kernel = p[0] as usize;
-            assert!(kernel < 3, "op kernel {kernel}");
+            assert!(kernel < 4, "op kernel {kernel}");
             let u = gpu.uniform("outcome op", p);
             let bind = gpu.bind(&k.kernels[kernel].group, &[&u, &w, &t, &a]);
             uniforms.push(u);

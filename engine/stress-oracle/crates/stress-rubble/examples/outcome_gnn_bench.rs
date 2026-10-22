@@ -6,9 +6,9 @@
 //! (`learned-impact/web-probe/outcome.html`, the same programs on WebGPU).
 //!
 //!   outcome_gnn_bench --export DIR [--warmup 5] [--repeats 30] [--only NAME,...]
-//!       [--write-programs DIR] [--no-lever | --lever-only] [--check]
+//!       [--write-programs DIR] [--no-lever | --lever-only] [--tiled] [--check] [--write-only]
 //!
-//! `--check` first compares each program's GPU outputs with the CPU interpreter's.
+//! `--write-only` writes the programs and touches no GPU. `--check` first compares each program's GPU outputs with the CPU interpreter's.
 //!
 //! Workloads:
 //! - `m5_free_wall`: the M5 free wall's contact call (220 chunks, 508 bonds);
@@ -124,6 +124,8 @@ fn synthetic_island(t: &CallEvent, nx: usize, ny: usize, nz: usize) -> CallEvent
 fn main() {
     let mut args = std::env::args().skip(1);
     let (mut export, mut warmup, mut repeats, mut only, mut write, mut levers, mut check) = (None, 5usize, 30usize, None::<Vec<String>>, None::<PathBuf>, vec![false, true], false);
+    let mut write_only = false;
+    let mut tiled = false;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--export" => export = args.next().map(PathBuf::from),
@@ -134,6 +136,8 @@ fn main() {
             "--no-lever" => levers = vec![false],
             "--lever-only" => levers = vec![true],
             "--check" => check = true,
+            "--write-only" => write_only = true,
+            "--tiled" => tiled = true,
             other => panic!("unknown argument {other}"),
         }
     }
@@ -175,9 +179,10 @@ fn main() {
     let wr_h = hier_of(&wr);
     let batch_h: Vec<Vec<Hierarchy>> = batch_evs.iter().map(|(e, _)| hier_of(e)).collect();
     let island_h = hier_of(&island);
-    let gpu = Gpu::new().expect("GPU");
-    let kernels = OutcomeKernels::new(&gpu);
-    let info = json!({"adapter": gpu.adapter_info.name, "backend": format!("{:?}", gpu.adapter_info.backend), "shaders": format!("{:?}", gpu.shader_path), "timestamps": gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY), "export": export.display().to_string(), "model": weights.manifest["model_config"]});
+    let gpu = if write_only { None } else { Some(Gpu::new().expect("GPU")) };
+    let gpu_ref = gpu.as_ref();
+    let kernels = gpu_ref.map(OutcomeKernels::new);
+    let info = gpu_ref.map(|gpu| json!({"adapter": gpu.adapter_info.name, "backend": format!("{:?}", gpu.adapter_info.backend), "shaders": format!("{:?}", gpu.shader_path), "timestamps": gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY), "export": export.display().to_string(), "model": weights.manifest["model_config"]}));
     println!("{}", json!({"info": info}));
     let workloads: Vec<(String, Vec<(&CallEvent, &[Hierarchy], usize)>)> = {
         let mut w: Vec<(String, Vec<(&CallEvent, &[Hierarchy], usize)>)> = vec![
@@ -195,22 +200,27 @@ fn main() {
             continue;
         }
         for &lever in &levers {
-            let model = Model::new(&weights, Options { node_projection: lever }).unwrap();
+            let model = Model::new(&weights, Options { node_projection: lever, tiled_mlp: tiled }).unwrap();
             let t0 = std::time::Instant::now();
             let prog = compile_batch(&model, calls).unwrap_or_else(|e| panic!("{name}: {e}"));
             let compile_ms = t0.elapsed().as_secs_f64() * 1e3;
             let ops: Vec<_> = prog.ops.iter().map(|o| (o.params, o.groups)).collect();
             if let Some(dir) = &write {
                 std::fs::create_dir_all(dir).unwrap();
-                std::fs::write(dir.join(format!("{name}_{}.ognn", if lever { "lever" } else { "plain" })), encode_program(&prog.arena, &prog.weights, &prog.table, &ops)).unwrap();
+                std::fs::write(dir.join(format!("{name}_{}{}.ognn", if lever { "lever" } else { "plain" }, if tiled { "_tiled" } else { "" })), encode_program(&prog.arena, &prog.weights, &prog.table, &ops)).unwrap();
+            }
+            if write_only {
+                eprintln!("[bench] wrote {name} lever {lever}");
+                continue;
             }
             let t1 = std::time::Instant::now();
-            let run = OutcomeRun::new(&gpu, &kernels, &prog.arena, &prog.weights, &prog.table, &ops);
+            let (gpu, kernels) = (gpu_ref.unwrap(), kernels.as_ref().unwrap());
+            let run = OutcomeRun::new(gpu, kernels, &prog.arena, &prog.weights, &prog.table, &ops);
             let upload_ms = t1.elapsed().as_secs_f64() * 1e3;
             let mut worst = Value::Null;
             if check {
                 // The GPU's outputs against the program interpreted on the CPU, every call.
-                let got = run.run(&gpu, &kernels);
+                let got = run.run(gpu, kernels);
                 let want = prog.run_cpu();
                 let mut w = 0.0f32;
                 for k in 0..calls.len() {
@@ -221,9 +231,9 @@ fn main() {
                 assert!(w < 1e-4 && w.is_finite(), "{name} lever {lever}: GPU and CPU differ by {w:.2e}");
                 worst = json!(w);
             }
-            let (wall, gt) = run.time(&gpu, &kernels, warmup, repeats);
+            let (wall, gt) = run.time(gpu, kernels, warmup, repeats);
             let (nc, ni, nb): (usize, usize, usize) = prog.layout.calls.iter().fold((0, 0, 0), |a, c| (a.0 + c.0, a.1 + c.1, a.2 + c.2));
-            let line = json!({"workload": name, "lever": lever, "calls": calls.len(), "chunks": nc, "impactors": ni, "bonds": nb, "dispatches": run.dispatches(),
+            let line = json!({"workload": name, "lever": lever, "tiled": tiled, "calls": calls.len(), "chunks": nc, "impactors": ni, "bonds": nb, "dispatches": run.dispatches(),
                 "arena_mb": prog.arena.len() as f64 * 4e-6, "table_mb": prog.table.len() as f64 * 4e-6, "compile_ms": compile_ms, "upload_ms": upload_ms,
                 "wall_ms": stats(&wall), "gpu_ms": stats(&gt), "gpu_vs_cpu": worst});
             eprintln!("[bench] {name} lever {lever}: {nc} chunks, {} dispatches, gpu {:.3} ms, wall {:.3} ms (compile {compile_ms:.0} ms)", run.dispatches(), line["gpu_ms"]["median"].as_f64().unwrap_or(f64::NAN), line["wall_ms"]["median"].as_f64().unwrap_or(f64::NAN));

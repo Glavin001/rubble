@@ -242,3 +242,222 @@ void gnn_fibre(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID)
     arena[o + 2] = rr.z;
     arena[o + 3] = sqrt(rr.x * rr.x + rr.y * rr.y + rr.z * rr.z);
 }
+
+// ---------------------------------------------------------------------------------------
+// gnn_mlp_tiled: gnn_mlp's computation (the same parameter words) as GEMM tiles, for ops
+// with many rows (the P0 probe's layout). A workgroup takes TR = 2048 / lanes rows and all
+// `lanes` channels; each thread a 4 x 4 block (rows rb..rb+3, channels cb..cb+3). The input
+// is staged KT columns at a time, segment by segment, through group memory; projection
+// segments add their rows to the pre-activation block. Requires hidden == lanes and
+// out <= lanes; LayerNorm (out == lanes) per row through group memory.
+
+#define KT 8
+groupshared float tx[KT][64];
+groupshared float tw[KT][64];
+groupshared float th[2048];
+groupshared float tstat[2][64];
+
+float seg_value(uint base, uint idx, uint width, uint mode, uint norm, uint row, uint c)
+{
+    if (c >= width)
+        return 0.0;
+    uint r = row;
+    if (mode == SEG_GATHER)
+        r = table[idx + row];
+    else if (mode == SEG_CONST)
+        r = idx;
+    float v = arena[base + r * width + c];
+    if (norm != NONE)
+        v = (v - wts[norm + c]) / wts[norm + width + c];
+    return v;
+}
+
+[shader("compute")]
+[numthreads(THREADS, 1, 1)]
+void gnn_mlp_tiled(uint3 gid: SV_GroupID, uint3 lid: SV_GroupThreadID)
+{
+    uint lanes = P(3);
+    uint tr = 2048 / lanes;
+    uint t = lid.x;
+    uint cg = lanes / 4;
+    uint rb = (t / cg) * 4;
+    uint cb = (t % cg) * 4;
+    uint row0 = (gid.y * P(2) + gid.x) * tr;
+    uint rows = P(1);
+    uint hidden = P(HIDDEN);
+    uint out = P(OUT);
+    uint w1 = P(W1);
+
+    float4 bias = float4(0.0, 0.0, 0.0, 0.0);
+    if (P(B1) != NONE)
+        bias = float4(wts[P(B1) + cb], wts[P(B1) + cb + 1], wts[P(B1) + cb + 2], wts[P(B1) + cb + 3]);
+    float4 r0 = bias, r1 = bias, r2 = bias, r3 = bias;
+
+    // Layer 1 over the staged segments, KT columns at a time.
+    uint nseg = P(N_SEG);
+    uint koff = 0;
+    for (uint s = 0; s < nseg; s++)
+    {
+        uint o = SEG0 + 5 * s;
+        uint base = P(o), idx = P(o + 1), width = P(o + 2), mode = P(o + 3), norm = P(o + 4);
+        if (mode >= SEG_PROJ_GATHER)
+            continue;
+        for (uint k0 = 0; k0 < width; k0 += KT)
+        {
+            for (uint q = t; q < KT * tr; q += THREADS)
+            {
+                uint kk = q / tr, r = q - kk * tr;
+                uint row = row0 + r;
+                tx[kk][r] = row < rows ? seg_value(base, idx, width, mode, norm, row, k0 + kk) : 0.0;
+            }
+            for (uint q = t; q < KT * lanes; q += THREADS)
+            {
+                uint kk = q / lanes, c = q - kk * lanes;
+                tw[kk][c] = (k0 + kk < width) ? wts[w1 + (koff + k0 + kk) * hidden + c] : 0.0;
+            }
+            GroupMemoryBarrierWithGroupSync();
+            [ForceUnroll]
+            for (uint kk = 0; kk < KT; kk++)
+            {
+                float4 b = float4(tw[kk][cb], tw[kk][cb + 1], tw[kk][cb + 2], tw[kk][cb + 3]);
+                r0 += tx[kk][rb] * b;
+                r1 += tx[kk][rb + 1] * b;
+                r2 += tx[kk][rb + 2] * b;
+                r3 += tx[kk][rb + 3] * b;
+            }
+            GroupMemoryBarrierWithGroupSync();
+        }
+        koff += width;
+    }
+    // Projection rows (pre-activations of node blocks) added per row.
+    for (uint s = 0; s < nseg; s++)
+    {
+        uint o = SEG0 + 5 * s;
+        uint base = P(o), idx = P(o + 1), mode = P(o + 3);
+        if (mode < SEG_PROJ_GATHER)
+            continue;
+        [ForceUnroll]
+        for (uint i = 0; i < 4; i++)
+        {
+            uint row = row0 + rb + i;
+            if (row < rows)
+            {
+                uint r = mode == SEG_PROJ_GATHER ? table[idx + row] : row;
+                float4 pv = float4(arena[base + r * hidden + cb], arena[base + r * hidden + cb + 1], arena[base + r * hidden + cb + 2], arena[base + r * hidden + cb + 3]);
+                if (i == 0) r0 += pv;
+                else if (i == 1) r1 += pv;
+                else if (i == 2) r2 += pv;
+                else r3 += pv;
+            }
+        }
+    }
+
+    float4 y0 = r0, y1 = r1, y2 = r2, y3 = r3;
+    if (P(W2) != NONE)
+    {
+        // SiLU, then layer 2 from group memory.
+        [ForceUnroll]
+        for (uint j = 0; j < 4; j++)
+        {
+            th[(rb + 0) * lanes + cb + j] = silu(r0[j]);
+            th[(rb + 1) * lanes + cb + j] = silu(r1[j]);
+            th[(rb + 2) * lanes + cb + j] = silu(r2[j]);
+            th[(rb + 3) * lanes + cb + j] = silu(r3[j]);
+        }
+        GroupMemoryBarrierWithGroupSync();
+        uint w2 = P(W2);
+        float4 b2 = float4(0.0, 0.0, 0.0, 0.0);
+        [ForceUnroll]
+        for (uint j = 0; j < 4; j++)
+            b2[j] = cb + j < out ? wts[P(B2) + cb + j] : 0.0;
+        y0 = b2;
+        y1 = b2;
+        y2 = b2;
+        y3 = b2;
+        for (uint k0 = 0; k0 < hidden; k0 += KT)
+        {
+            for (uint q = t; q < KT * lanes; q += THREADS)
+            {
+                uint kk = q / lanes, c = q - kk * lanes;
+                tw[kk][c] = c < out ? wts[w2 + (k0 + kk) * out + c] : 0.0;
+            }
+            GroupMemoryBarrierWithGroupSync();
+            [ForceUnroll]
+            for (uint kk = 0; kk < KT; kk++)
+            {
+                float4 b = float4(tw[kk][cb], tw[kk][cb + 1], tw[kk][cb + 2], tw[kk][cb + 3]);
+                y0 += th[(rb + 0) * lanes + k0 + kk] * b;
+                y1 += th[(rb + 1) * lanes + k0 + kk] * b;
+                y2 += th[(rb + 2) * lanes + k0 + kk] * b;
+                y3 += th[(rb + 3) * lanes + k0 + kk] * b;
+            }
+            GroupMemoryBarrierWithGroupSync();
+        }
+        if (P(LN) != NONE)
+        {
+            [ForceUnroll]
+            for (uint j = 0; j < 4; j++)
+            {
+                th[(rb + 0) * lanes + cb + j] = y0[j];
+                th[(rb + 1) * lanes + cb + j] = y1[j];
+                th[(rb + 2) * lanes + cb + j] = y2[j];
+                th[(rb + 3) * lanes + cb + j] = y3[j];
+            }
+            GroupMemoryBarrierWithGroupSync();
+            if (t < tr)
+            {
+                float m = 0.0;
+                for (uint c = 0; c < out; c++)
+                    m += th[t * lanes + c];
+                m /= float(out);
+                float v = 0.0;
+                for (uint c = 0; c < out; c++)
+                {
+                    float d = th[t * lanes + c] - m;
+                    v += d * d;
+                }
+                tstat[0][t] = m;
+                tstat[1][t] = 1.0 / sqrt(v / float(out) + 1e-5);
+            }
+            GroupMemoryBarrierWithGroupSync();
+            uint g = P(LN);
+            [ForceUnroll]
+            for (uint j = 0; j < 4; j++)
+            {
+                uint c = cb + j;
+                y0[j] = (y0[j] - tstat[0][rb + 0]) * tstat[1][rb + 0] * wts[g + c] + wts[g + out + c];
+                y1[j] = (y1[j] - tstat[0][rb + 1]) * tstat[1][rb + 1] * wts[g + c] + wts[g + out + c];
+                y2[j] = (y2[j] - tstat[0][rb + 2]) * tstat[1][rb + 2] * wts[g + c] + wts[g + out + c];
+                y3[j] = (y3[j] - tstat[0][rb + 3]) * tstat[1][rb + 3] * wts[g + c] + wts[g + out + c];
+            }
+        }
+    }
+
+    float scale = asfloat(P(SCALE));
+    uint res = P(RES_BASE);
+    [ForceUnroll]
+    for (uint i = 0; i < 4; i++)
+    {
+        uint row = row0 + rb + i;
+        float4 y = i == 0 ? y0 : (i == 1 ? y1 : (i == 2 ? y2 : y3));
+        if (row < rows)
+        {
+            [ForceUnroll]
+            for (uint j = 0; j < 4; j++)
+            {
+                uint c = cb + j;
+                if (c < out)
+                {
+                    float v = scale * y[j];
+                    if (res != NONE)
+                        v += arena[res + row * P(RES_STRIDE) + c];
+                    uint o = P(OUT_BASE) + row * P(OUT_STRIDE) + c;
+                    if ((P(FLAGS) & 1u) != 0)
+                        arena[o] = arena[o] + v;
+                    else
+                        arena[o] = v;
+                }
+            }
+        }
+    }
+}

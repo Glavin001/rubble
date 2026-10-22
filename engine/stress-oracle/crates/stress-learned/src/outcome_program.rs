@@ -34,6 +34,10 @@ pub const MAX_K: usize = 384;
 pub const KERNEL_MLP: u32 = 0;
 pub const KERNEL_CSR: u32 = 1;
 pub const KERNEL_FIBRE: u32 = 2;
+/// `KERNEL_MLP`'s computation as GEMM tiles of `2048 / lanes` rows.
+pub const KERNEL_MLP_TILED: u32 = 3;
+/// Rows from which an MLP op runs tiled (`Options::tiled_mlp`).
+pub const TILED_MIN_ROWS: usize = 256;
 
 /// Segment modes of the MLP kernel.
 pub const SEG_ROW: u32 = 0;
@@ -152,6 +156,7 @@ struct Builder {
     table: Vec<u32>,
     ops: Vec<Op>,
     lanes: usize,
+    tiled: bool,
 }
 
 fn groups(rows: usize, per_group: usize) -> (u32, u32) {
@@ -281,7 +286,8 @@ impl Builder {
             return;
         }
         assert!(segs.len() <= MAX_SEGS);
-        let (mut p, g) = self.header(KERNEL_MLP, rows, THREADS / self.lanes);
+        let tiled = self.tiled && rows >= TILED_MIN_ROWS && m.hidden == self.lanes;
+        let (mut p, g) = if tiled { self.header(KERNEL_MLP_TILED, rows, 2048 / self.lanes) } else { self.header(KERNEL_MLP, rows, THREADS / self.lanes) };
         use mlp_p::*;
         p[N_SEG] = segs.len() as u32;
         let mut k = 0;
@@ -321,7 +327,8 @@ impl Builder {
         if rows == 0 {
             return;
         }
-        let (mut p, g) = self.header(KERNEL_MLP, rows, THREADS / self.lanes);
+        let tiled = self.tiled && rows >= TILED_MIN_ROWS && m.hidden == self.lanes;
+        let (mut p, g) = if tiled { self.header(KERNEL_MLP_TILED, rows, 2048 / self.lanes) } else { self.header(KERNEL_MLP, rows, THREADS / self.lanes) };
         use mlp_p::*;
         p[N_SEG] = 1;
         p[SEG0..SEG0 + 5].copy_from_slice(&[src as u32, NONE, width as u32, SEG_ROW, NONE]);
@@ -458,7 +465,7 @@ pub fn compile_batch(model: &Model, calls: &[BatchCall]) -> Result<Program, Stri
     let lever = model.options.node_projection;
     let vb = cfg.variant == "B";
     let ng = calls.len();
-    let mut b = Builder { arena: Vec::new(), weights: Vec::new(), table: Vec::new(), ops: Vec::new(), lanes };
+    let mut b = Builder { arena: Vec::new(), weights: Vec::new(), table: Vec::new(), ops: Vec::new(), lanes, tiled: model.options.tiled_mlp };
     let pm = pack_model(&mut b, model);
 
     // ---- inputs, concatenated
@@ -837,7 +844,7 @@ impl Program {
         let mut a = self.arena.clone();
         for op in &self.ops {
             match op.kernel() {
-                KERNEL_MLP => self.mlp_cpu(op, &mut a),
+                KERNEL_MLP | KERNEL_MLP_TILED => self.mlp_cpu(op, &mut a),
                 KERNEL_CSR => self.csr_cpu(op, &mut a),
                 KERNEL_FIBRE => self.fibre_cpu(op, &mut a),
                 k => panic!("kernel {k}"),

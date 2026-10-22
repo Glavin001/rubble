@@ -24,8 +24,8 @@ fn the_gpu_model_matches_the_cpu_reference() {
     let tau = w.manifest["decode"]["tau"].as_f64().unwrap_or(1.0).ln() as f32;
     let mut dirs: Vec<PathBuf> = fs::read_dir(fixture().join("parity")).unwrap().map(|e| e.unwrap().path()).collect();
     dirs.sort();
-    for lever in [false, true] {
-        let model = Model::new(&w, Options { node_projection: lever }).unwrap();
+    for (lever, tiled) in [(false, false), (true, false), (true, true)] {
+        let model = Model::new(&w, Options { node_projection: lever, tiled_mlp: tiled }).unwrap();
         for dir in &dirs {
             let name = dir.file_name().unwrap().to_string_lossy().to_string();
             let ev = read_event(&dir.join("call")).unwrap();

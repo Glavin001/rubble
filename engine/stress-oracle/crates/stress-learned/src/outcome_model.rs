@@ -666,6 +666,9 @@ pub fn call_hierarchy(ev: &CallEvent, hier: &[Hierarchy], call: &Call, levels: u
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Options {
     pub node_projection: bool,
+    /// The GPU program's MLPs of many rows as GEMM tiles (`gnn_mlp_tiled`; the same
+    /// arithmetic, another summation order).
+    pub tiled_mlp: bool,
 }
 
 pub(crate) struct FineRound {

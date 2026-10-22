@@ -554,3 +554,50 @@ pub extern "C" fn gnn_probe_run(index: u32) -> u32 {
 pub fn gnn_probe_line() -> String {
     PROBE_LINE.with_borrow(|l| l.clone())
 }
+
+// ------------------------------------------------------------------ P3: the trained model
+
+// P2's trained model through the Slang port (`stress_gpu::outcome_gnn`) on this page's
+// WebGPU device (made by `gnn_probe_init`): `outcome_gnn_load(bytes)` uploads one OGNN1
+// program (written by the native `outcome_gnn_bench --write-programs`), `outcome_gnn_run`
+// (through `WebAssembly.promising`) times it, `outcome_gnn_line` returns the JSON line.
+thread_local! {
+    static OUTCOME: RefCell<Option<(stress_gpu::outcome_gnn::OutcomeKernels, stress_gpu::outcome_gnn::OutcomeRun)>> = const { RefCell::new(None) };
+    static OUTCOME_LINE: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+/// Upload a program; returns its dispatch count.
+#[wasm_bindgen]
+pub fn outcome_gnn_load(bytes: Vec<u8>) -> Result<u32, JsValue> {
+    let gpu = PROBE_GPU.with_borrow(|g| g.clone()).ok_or_else(|| JsValue::from_str("call gnn_probe_init first"))?;
+    let (arena, weights, table, ops) = stress_gpu::outcome_gnn::decode_program(&bytes).map_err(|e| JsValue::from_str(&e))?;
+    let kernels = stress_gpu::outcome_gnn::OutcomeKernels::new(&gpu);
+    let run = stress_gpu::outcome_gnn::OutcomeRun::new(&gpu, &kernels, &arena, &weights, &table, &ops);
+    let n = run.dispatches() as u32;
+    OUTCOME.set(Some((kernels, run)));
+    Ok(n)
+}
+
+/// Time the loaded program (call through `WebAssembly.promising`); 1 when it ran.
+#[no_mangle]
+pub extern "C" fn outcome_gnn_run(warmup: u32, repeats: u32) -> u32 {
+    let gpu = PROBE_GPU.with_borrow(|g| g.clone());
+    let Some(gpu) = gpu else { return 0 };
+    let line = OUTCOME.with_borrow(|o| {
+        o.as_ref().map(|(k, run)| {
+            let (wall, gt) = run.time(&gpu, k, warmup as usize, repeats as usize);
+            serde_json::json!({"dispatches": run.dispatches(), "wall_ms": stress_gpu::gnn_probe::stats(&wall), "gpu_ms": if gt.is_empty() { serde_json::Value::Null } else { stress_gpu::gnn_probe::stats(&gt) }})
+        })
+    });
+    let Some(mut line) = line else { return 0 };
+    let error = PROBE_ERROR.lock().unwrap().clone();
+    line.as_object_mut().unwrap().insert("error".into(), serde_json::json!(error));
+    OUTCOME_LINE.set(line.to_string());
+    u32::from(error.is_none())
+}
+
+/// The last `outcome_gnn_run`'s JSON line.
+#[wasm_bindgen]
+pub fn outcome_gnn_line() -> String {
+    OUTCOME_LINE.with_borrow(|l| l.clone())
+}
