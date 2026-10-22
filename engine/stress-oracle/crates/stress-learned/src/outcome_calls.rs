@@ -29,6 +29,9 @@ use crate::catalog::{self, Catalog};
 use crate::outcome::{capture_inputs, capture_state, capture_static, Arrays, Index, PHASES};
 
 pub const CALLS_SCHEMA: &str = "learned-impact-outcome/4";
+/// `/4` plus the island's complete oracle state at the frame's start and end
+/// (`full_state_calls`), for events recorded with the full state (recorder revision 9 on).
+pub const CALLS_SCHEMA_FULL: &str = "learned-impact-outcome/5";
 /// Bumped whenever the features or targets this builder writes change.
 pub const BUILDER_REVISION: u32 = 6;
 pub const N_TIME_BINS: usize = 8;
@@ -309,6 +312,7 @@ pub enum Arr {
     F32(Vec<usize>, Vec<f32>),
     I32(Vec<usize>, Vec<i32>),
     I64(Vec<usize>, Vec<i64>),
+    F64(Vec<usize>, Vec<f64>),
 }
 
 fn f32a(shape: &[usize], d: Vec<f64>) -> Arr {
@@ -1309,6 +1313,9 @@ pub struct CallEvent {
     pub calls: Vec<Call>,
     /// Per structure: chunk keys, bond keys, bond ends (local), rest positions.
     pub structures: Vec<(usize, Vec<i64>, Vec<i64>, Vec<i32>, Vec<f32>)>,
+    /// Event-level arrays (`/5`: the full state's static columns), in the manifest's
+    /// `event_arrays`.
+    pub event_arrays: Vec<(String, Arr)>,
 }
 
 fn structures_of(st: &Statics, r: &Record) -> Vec<(usize, Vec<i64>, Vec<i64>, Vec<i32>, Vec<f32>)> {
@@ -1377,8 +1384,15 @@ pub fn build_event(dir: &Path) -> Result<CallEvent, String> {
         }
     }
     let truncated = r.outcome.as_ref().and_then(|o| o["truncated"].as_bool()).unwrap_or(false);
-    let manifest = manifest_of(&r, &st, &calls, truncated);
-    Ok(CallEvent { manifest, calls, structures: structures_of(&st, &r) })
+    let full = crate::full_state_calls::augment(dir, &r.ctx, &mut calls)?;
+    let mut manifest = manifest_of(&r, &st, &calls, truncated);
+    let mut event_arrays = Vec::new();
+    if let Some((cols, statics)) = full {
+        manifest["schema_version"] = json!(CALLS_SCHEMA_FULL);
+        manifest["full_state_columns"] = cols;
+        event_arrays = statics;
+    }
+    Ok(CallEvent { manifest, calls, structures: structures_of(&st, &r), event_arrays })
 }
 
 /// The call of a live world's coming frame for the island of the given chunk and impactor
@@ -1457,7 +1471,7 @@ pub fn live_call(world: &mut World, name: &str, ctx_from: &Value, chunk_keys: &[
     call.frame = frame;
     let calls = vec![call];
     let manifest = manifest_of(&r, &st, &calls, false);
-    Ok(CallEvent { manifest, calls, structures: structures_of(&st, &r) })
+    Ok(CallEvent { manifest, calls, structures: structures_of(&st, &r), event_arrays: Vec::new() })
 }
 
 /// Write an event in P2's on-disk format: `manifest.json`, `calls.json` and the arrays,
@@ -1487,6 +1501,12 @@ pub fn write_event(dir: &Path, ev: &CallEvent, compress: bool) -> Result<PathBuf
                 }
                 ("i64", s)
             }
+            Arr::F64(s, d) => {
+                for x in d {
+                    blob.extend_from_slice(&x.to_le_bytes());
+                }
+                ("f64", s)
+            }
         };
         while blob.len() % 8 != 0 {
             blob.push(0);
@@ -1515,8 +1535,12 @@ pub fn write_event(dir: &Path, ev: &CallEvent, compress: bool) -> Result<PathBuf
                 "routed": true, "anchored": c.anchored, "counts": c.counts, "scales": c.scales, "energy": c.energy, "arrays": arrays})
         })
         .collect();
+    let event_arrays: serde_json::Map<String, Value> = ev.event_arrays.iter().map(|(k, a)| (k.clone(), add(a))).collect();
     let mut manifest = ev.manifest.clone();
     manifest["structures"] = json!(structures);
+    if !event_arrays.is_empty() {
+        manifest["event_arrays"] = Value::Object(event_arrays);
+    }
     let write = |n: &str, b: &[u8]| fs::write(dir.join(n), b).map_err(|e| format!("{n}: {e}"));
     write("manifest.json", &serde_json::to_vec_pretty(&manifest).unwrap())?;
     write("calls.json", &serde_json::to_vec(&entries).unwrap())?;

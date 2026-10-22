@@ -176,3 +176,78 @@ Options:
 - **Irregular-chunk and materials pilots:** pilot-only, after viability.
 - **Regenerating the 828 thinned bulk events, and the evalplus queue:** both paused. The
   queue sits at test anchored t2 56/120, and the PAUSE file is in place.
+
+## Viability dataset v1 (overnight, planning's plan of 2026-10-22; decided without sign-off)
+
+**What is recorded.**
+- **Oracle:** the standalone CPU oracle (a12_realtime), recorder revision 9: every frame
+  kept, full state at every boundary, all the direct labels above.
+- **Gravity:** on everywhere. The families are `anchored_wall` and the new
+  `standing_wall` (no supports, resting on the ground), tiers 1 and 2, with pilot
+  ranges, matching the measured sizes.
+- **Ballistic sweeps:** the six ballistic families are all grounded.
+  `bl_free_thin` and `bl_free_thick` became `bl_ground_thin` and `bl_ground_thick`,
+  re-bracketed (`runs/viability-pilot/`).
+
+**Pilot.** `runs/viability-pilot/`, 8 events per standing tier:
+- standing walls stand still before the impact (no breaks; kinetic energy at most 1e-7 J);
+- standing t1 averages 11 MB per event (median 5.5 MB; one slow settle took 46 MB and
+  237 frames); standing t2 averages 8.9 MB (median 5.7 MB).
+
+**Splits.** By layout group, hashed with one shared `--split-seed 777` so a layout has
+one split whatever job records it. `--fractions 0.98,0.01,0.01`:
+- training configurations are single runs (`--ensemble-train-share 0`);
+- validation and test configurations are 8-member ensembles;
+- the ballistic families' splits are fixed by family (4 train, 1 val, 1 test), every
+  speed an 8-member ensemble.
+
+The jobs run in this order, so a first chunk is ready early. MB per event are means from
+the pilots:
+
+| order | jobs | configurations | events (about) | MB/event | GB |
+|---|---|---:|---:|---:|---:|
+| A | anchored t1 / t2, standing t1 / t2, 80 configurations each (seeds 21001-21004) | 320 | 310 train + about 80 val/test | 8 | 3.1 |
+| ballistic | 6 families × 10 speeds × 8 members (`--speeds-abs` 0.5–2× each bracket's midpoint) | 60 | 480 | 5 | 2.4 |
+| B | anchored t1 120, anchored t2 120, standing t1 170, standing t2 90 (seeds 21101-21104) | 500 | 490 train + about 80 val/test | 8 | 4.6 |
+| total | | 880 | about 1,440 | | **about 10** |
+
+The ballistic speed ranges, in m/s (10 speeds each):
+
+| family | split | range |
+|---|---|---|
+| bl_ground_thin | train | 1.25–5 |
+| bl_anchored_base | train | 0.9–3.6 |
+| bl_standing | train | 1.1–4.5 |
+| bl_coarse_heavy | train | 3.75–15 |
+| bl_ground_thick | val | 2–11 (wider: its bracket is noisy) |
+| bl_anchored_sides | test | 4.5–18 |
+
+**The budget, and why this size.** The user's 30 GB covers all data under
+`learned-impact/runs`, with derived call caches first to evict. Tonight 15.8 GB of caches
+are in use: `calls-v3-eval` (P2's overfit series and P0's harness A) and
+`calls-v4-eval` / `calls-v4-train` (P2's overnight viability training). Evicting them now
+would break those runs.
+
+The most principled reading: recorded ground truth plus the `/5` call cache must fit in
+30 GB on their own. The in-use caches are evicted as soon as their readers release them:
+- recorded data: 16.6 GB before tonight;
+- the `/5` cache: bounded at about 3 GB;
+- that leaves about 10 GB for new events.
+
+The generator's guard reads its budget from `runs/viability-v1.budget`:
+- **45.8 GB tonight:** 30 GB plus the 15.8 GB of caches in use;
+- **lowered to 30 GB** when the old caches are deleted.
+
+So the excess on disk overnight is only caches that are already scheduled for eviction.
+Nothing recorded is ever deleted.
+
+**Calls.** `/5` (`learned-impact-outcome/5`) is the `/4` arrays plus the island's complete
+oracle state at the frame's start and end:
+- every serialized field of its chunks, of every bond inside the island (live or broken),
+  of its clusters and of its impactors, flattened by field path into named f64 columns;
+- the persistent contact slots (`pair_offsets`) as a keyed table;
+- static columns once per event (`event_arrays`).
+
+About 3.8 MB per anchored t2 event (86 calls). The `/5` calls of chunk A go to
+`runs/calls-v5/` as soon as it is recorded; the rest are built as recorded, within the
+bounded cache.

@@ -4,7 +4,7 @@
 //!       [--family free_wall|anchored_wall] [--tier 1|2] [--n N] [--seed S] [--ranges pilot|bulk]
 //!       [--oracle a12_realtime] [--jobs N] [--limit N] [--plan-only] [--no-baselines]
 //!       [--max-seconds S] [--max-failure-fraction F] [--pause-file PATH]
-//!       [--members M] [--ensemble-train-share F] [--no-ensembles]
+//!       [--members M] [--ensemble-train-share F] [--no-ensembles] [--fractions T,V,S] [--split-seed S]
 //!       [--budget-gb G] [--min-free-gb F] [--thin]
 //!       [--split sealed|train|val|test] [--extrapolation speed|mass|size|loads] [--corner-share F]
 //!
@@ -111,6 +111,14 @@ fn main() {
     }
     if let Some(m) = val("--members") {
         plan.members = m.parse().expect("--members");
+    }
+    if let Some(x) = val("--split-seed") {
+        plan.split_seed = Some(x.parse().expect("--split-seed"));
+    }
+    if let Some(x) = val("--fractions") {
+        // train,val,test shares of the layout groups
+        let v: Vec<f64> = x.split(',').map(|t| t.parse().expect("--fractions T,V,S")).collect();
+        plan.fractions = [v[0], v[1], v[2]];
     }
     if let Some(x) = val("--ensemble-train-share") {
         plan.train_share = x.parse().expect("--ensemble-train-share");
