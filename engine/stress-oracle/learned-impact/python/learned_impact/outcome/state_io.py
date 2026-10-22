@@ -68,8 +68,44 @@ def decoded_states(b: Batch, out: dict[str, torch.Tensor], dec: dict,
             "bond_damage": [{"key": int(k), "damage": float(d)} for k, x, d in
                             zip(bkeys, broke[sb], damage[sb]) if not x],
         }
+        if "bond_fs" in out and c.fs is not None:
+            doc["full_state"] = _full_state_out(c, out, broke[sb], damage[sb],
+                                                np.nonzero(sb)[0], np.nonzero(sc)[0])
         docs.append(doc)
     return docs
+
+
+def _full_state_out(c: S.Call, out: dict, broke, damage, b_rows, c_rows) -> dict:
+    """`/5` output: the predicted full-state columns in raw units, by P1's field paths and the
+    entities' keys (the host writes them back through the full-state unshred path)."""
+    from . import fullstate as FS
+
+    a = c.arrays
+    names = c.fs["scale_names"]
+    keys = a["bond_key"].astype(np.int64)
+    sc_rows = np.stack([c.fs["scale"].get(int(k), np.full(len(names), np.nan)) for k in keys]) \
+        if len(keys) else np.zeros((0, len(names)))
+    sc = {n: sc_rows[:, i] for i, n in enumerate(names)}
+    dt = float(c.scales["dt"])
+    enc = out["bond_fs"].detach().cpu().numpy()[b_rows].astype(np.float64)
+    mode = out["bond_fs_mode_logits"].detach().cpu().numpy()[b_rows].argmax(-1)
+    cols, vals = [], []
+    for i, (f, how, _) in enumerate(FS.BOND_FIELDS):
+        cols.append(f)
+        vals.append(FS.decode_raw(enc[:, i], how, sc, dt))
+    cols += list(FS.BOND_MODE) + ["alive", "joint.damage"]
+    vals += [(mode == 1).astype(float), (mode == 2).astype(float), (~broke).astype(float),
+             np.where(broke, 1.0, damage)]
+    table = np.stack(vals, 1) if len(keys) else np.zeros((0, len(cols)))
+    m = a["chunk_mass"].astype(np.float64)
+    g = max(float(np.linalg.norm(c.gravity)), 1e-6)
+    L = float(c.scales["L"])
+    rs = np.concatenate([np.repeat((m * g)[:, None], 3, 1), np.repeat((m * g * L)[:, None], 3, 1)], 1)
+    rx = out["chunk_fs"].detach().cpu().numpy()[c_rows].astype(np.float64) * rs
+    return {"bond": {"keys": keys.tolist(), "columns": cols,
+                     "values": [[float(x) for x in row] for row in table]},
+            "chunk": {"keys": a["chunk_key"].astype(np.int64).tolist(), "columns": list(FS.CHUNK_FIELDS),
+                      "values": [[float(x) for x in row] for row in rx]}}
 
 
 def validate(doc: dict, call: S.Call | None = None) -> None:

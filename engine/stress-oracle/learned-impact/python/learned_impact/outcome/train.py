@@ -390,6 +390,10 @@ def input_stats(calls: list[S.Call], variant: str, full_state: bool = False) -> 
     def cat(name, *extra):
         xs = [np.concatenate([c.arrays[name], *[e(c) if callable(e) else c.arrays[e] for e in extra]], 1)
               for c in calls if len(c.arrays[name])]
+        if not xs:  # no rows of this input in the training calls: identity standardisation
+            d = sum((e(calls[0]) if callable(e) else calls[0].arrays[e]).shape[1] for e in extra) \
+                + calls[0].arrays[name].shape[1]
+            return torch.zeros(d), torch.ones(d)
         x = np.concatenate(xs).astype(np.float64)
         return torch.tensor(x.mean(0), dtype=torch.float32), torch.tensor(x.std(0), dtype=torch.float32)
 
