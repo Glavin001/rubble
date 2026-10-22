@@ -16,6 +16,8 @@ zstd = "0.13"
 # The island state's exact binary form (harness A relabelling): MessagePack, self-describing,
 # every f64 bit and infinity kept, and readable from Python (`msgpack`).
 rmp-serde = "1"
+# The full-state recorder: a World serialized (MessagePack) and shredded into columns.
+rmpv = "1"
 stress-ref = { path = "../stress-ref" }
 
 [[bin]]
