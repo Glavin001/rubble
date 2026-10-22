@@ -39,6 +39,37 @@ covers both families, tiers 1 and 2, perforation and arrest:
 - velocities: errors a tenth of the ensemble spread at the median;
 - invariants: momentum exact, energy below the bound.
 
+### Closed loop on the same 10 events (P0, harness A, `runs/cl-eval-a-n10` in P0's worktree)
+
+Per member: final fragments / first impactor exit speed. Recorded oracle → `a_ceiling` (the
+oracle) | `a_ceiling_decoded` (a perfect /3 model through the decode) | `a_model` (the
+memorised model):
+
+| event | recorded | a_ceiling_decoded | a_model |
+|---|---|---|---|
+| anchored_00204 | 27, 2.35 | 27, 1.87 | **71, 2.08** (KE gain; energy bound active on 20 calls) |
+| free_00502 | 9, 4.87 | 9, 4.87 | 11, 3.25 |
+| free_00440 | 1, 0.13 | 1, 0.13 | 1, 0.22 |
+| free_00190 | 132, 39.65 | 133, 39.70 | 131, 38.53 |
+| free_00611 | 13, 4.08 | 11, 3.70 | **5, 1.10** |
+| free_00757 | 99, 56.83 | 98, 56.83 | 98, 56.78 |
+| free_00561 | 23, 43.74 | 23, 43.74 | 23, 43.74 |
+| free_t2_00112 | 27, 0.23 | 27, 0.26 | 26, **11.85 m/s** |
+| free_00576 | 1, 0.05 | 1, 0.05 | 1, 0.04 |
+| free_00609 | 1, 0.15 | 1, 0.15 | 1, 0.23 |
+
+- **The boundary and the decode reproduce the oracle when their inputs are the oracle's:**
+  the perfect /3 model lands on or beside it on 9 of 10.
+- **The memorised model lands near the ceiling on 6 of 10 and fails on 3,** although every
+  call is memorised. After its first imperfect call it sees its own states, which training
+  never showed it, and the errors compound.
+- So the open milestone criterion (closed loop ≈ ceiling) is not met. The cause is the known
+  distribution shift, not a representation bug.
+- The remedy is DAgger on the model's rollout states (built: `dagger.py` and P0's
+  `learned_impact_relabel`, verified bit for bit). It is demonstrated next on these 10 events
+  on `/4`. The /3-trained checkpoint cannot be mixed with rev-6 /4 relabels, so the 10-event
+  overfit is redone on `/4` first.
+
 ## Bugs found and fixed
 
 1. **The survivor side of the break decision was not trained as a decision** (dd068fd4).
