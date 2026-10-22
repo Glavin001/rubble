@@ -99,6 +99,10 @@ def main() -> int:
     todo = [s for s in SCENARIOS if not only or s[0] in only]
     for k, (name, rel, what) in enumerate(todo):
         event = a.p1_runs / rel
+        if not (event / "scene.json").exists():
+            # a reclaimed recording: its compact harness-A reference (`harness_refs`)
+            event = Path(__file__).resolve().parents[2] / "runs" / "refs" / rel
+
         scene = json.loads((event / "scene.json").read_text())
         outcome = json.loads((event / "outcome.json").read_text())
         context = json.loads((event / "context.json").read_text())

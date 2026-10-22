@@ -519,7 +519,9 @@ def main(argv=None):
     members = [m for ms in ensembles.values() for m in ms]
     run_members = [m for m in members if m.name in only] if a.members else members
     print(f"[cl-eval] {len(ensembles)} ensembles, {len(members)} members, candidates {cands}", flush=True)
-    events = {m.name: load_event(m) for m in members}
+    # recorded events, or compact references (`harness_refs`: the same truth without frames)
+    from .harness_refs import load_any
+    events = {m.name: load_any(m) for m in members}
     samples = {name: sample_frames(ev) for name, ev in events.items()}
     jobs = [(c, m) for c in cands for m in run_members if not (a.out / "runs" / c / f"{m.name}.json").exists()]
     print(f"[cl-eval] {len(jobs)} runs to do ({len(cands) * len(run_members) - len(jobs)} already done)", flush=True)
