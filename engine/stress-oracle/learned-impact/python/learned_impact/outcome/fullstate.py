@@ -284,3 +284,36 @@ def hidden_scale(c) -> np.ndarray:
     uc = np.maximum(a["chunk_def_uc"].astype(np.float64), 1e-12)
     rep = lambda x: np.repeat(x[:, None], 3, 1)  # noqa: E731
     return np.concatenate([rep(uc), rep(uc / R), rep(np.full_like(R, v)), rep(v / R)], 1)
+
+
+def elastic_energy_upper(c, hidden_raw: np.ndarray) -> float:
+    """Elastic energy (J) of the island's live bonds implied by a hidden state (u, θ per chunk,
+    body frame), with every bond undamaged: Σ ½(k_n δn² + k_s |δt|² + k_t Δθn² + k_b1 Δθt1²
+    + k_b2 Δθt2²), δ = (u_b + θ_b × r_b) − (u_a + θ_a × r_a), Δθ = θ_b − θ_a, in each bond's
+    frame (P1's static geometry and stiffness). Exact for undamaged bonds; an upper bound
+    with damage (the softening only lowers it; bulk v1 /5: 1.0–1.4× the recorded energy)."""
+    fs = c.fs
+    if fs is None or fs.get("static_bond") is None:
+        return float("nan")
+    a = c.arrays
+    cols = list(fs["cols"]["static_bond"])
+    sb, sk = fs["static_bond"], fs["static_bond_key"]
+    order = np.argsort(sk)
+    keys = a["bond_key"].astype(np.int64)
+    if not len(keys):
+        return 0.0
+    ii = order[np.clip(np.searchsorted(sk[order], keys), 0, len(sk) - 1)]
+    col = lambda n: sb[ii, cols.index(n)]  # noqa: E731
+    vec = lambda p: np.stack([col(p + ".x"), col(p + ".y"), col(p + ".z")], 1)  # noqa: E731
+    ra, rb, n, t1, t2 = vec("geometry.ra"), vec("geometry.rb"), vec("geometry.normal"), \
+        vec("geometry.t1"), vec("geometry.t2")
+    u, th = hidden_raw[:, 0:3], hidden_raw[:, 3:6]
+    s_, d_ = a["bond_src"][0::2].astype(np.int64), a["bond_dst"][0::2].astype(np.int64)
+    dl = (u[d_] + np.cross(th[d_], rb)) - (u[s_] + np.cross(th[s_], ra))
+    da = th[d_] - th[s_]
+    U = 0.5 * (col("stiffness.kn") * (dl * n).sum(1) ** 2
+               + col("stiffness.ks") * ((dl * t1).sum(1) ** 2 + (dl * t2).sum(1) ** 2)
+               + col("stiffness.kt") * (da * n).sum(1) ** 2
+               + col("stiffness.kb_t1") * (da * t1).sum(1) ** 2
+               + col("stiffness.kb_t2") * (da * t2).sum(1) ** 2)
+    return float(U.sum())

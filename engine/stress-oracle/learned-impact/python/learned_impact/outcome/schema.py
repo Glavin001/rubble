@@ -492,7 +492,11 @@ def load_event(path: Path | str, validate: bool = True, require_targets: bool = 
         if "fs_static_bond_scale" in static and "fs_static_bond_key" in static:
             scale = dict(zip(static["fs_static_bond_key"].tolist(),
                              np.asarray(static["fs_static_bond_scale"], np.float64)))
-        fs_meta = {"cols": cols, "scale": scale, "scale_names": list(cols.get("static_bond_scale", []))}
+        fs_meta = {"cols": cols, "scale": scale, "scale_names": list(cols.get("static_bond_scale", [])),
+                   "static_bond": (np.asarray(static["fs_static_bond"], np.float64)
+                                   if "fs_static_bond" in static else None),
+                   "static_bond_key": (np.asarray(static["fs_static_bond_key"], np.int64)
+                                       if "fs_static_bond_key" in static else None)}
     calls = []
     for e in entries:
         arrays = {k: _read(blob, v, f"call {e['call_index']}/{k}") for k, v in e["arrays"].items()}

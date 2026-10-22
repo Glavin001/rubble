@@ -78,7 +78,15 @@ def decoded_states(b: Batch, out: dict[str, torch.Tensor], dec: dict,
                             zip(bkeys, broke[sb], damage[sb]) if not x],
         }
         if "bond_fs" in out and c.fs is not None:
-            fs = _full_state_out(c, out, broke[sb], damage[sb], np.nonzero(sb)[0], np.nonzero(sc)[0])
+            ke = None
+            if "_phys" in dec:  # the decoded kinetic energy of this call (chunks and impactors)
+                ph = dec["_phys"]
+                sel = (ph["call"] == g).cpu()
+                v_, w_ = ph["v_end"][sel].detach().cpu().double(), ph["w_end"][sel].detach().cpu().double()
+                m_, iw = ph["mass"][sel].detach().cpu().double(), ph["inertia_w"][sel].detach().cpu().double()
+                ke = float(0.5 * (m_ * (v_ ** 2).sum(-1)).sum()
+                           + 0.5 * (w_.unsqueeze(-2) @ iw @ w_.unsqueeze(-1)).sum())
+            fs = _full_state_out(c, out, broke[sb], damage[sb], np.nonzero(sb)[0], np.nonzero(sc)[0], ke)
             if model is not None and getattr(model, "cluster_head", None) is not None:
                 fs["cluster"] = _clusters_out(c, out, frag[sc], np.nonzero(sc)[0], g, model)
             # P0's host format: per kind, keys, field-path columns and flat row-major rows;
@@ -117,7 +125,10 @@ def _clusters_out(c: S.Call, out: dict, frag_rows: np.ndarray, c_rows: np.ndarra
             "values": [[float(x) for x in row] for row in vals]}
 
 
-def _full_state_out(c: S.Call, out: dict, broke, damage, b_rows, c_rows) -> dict:
+ELASTIC_TOL = 0.05  # as the KE bound's tolerance
+
+
+def _full_state_out(c: S.Call, out: dict, broke, damage, b_rows, c_rows, ke_out: float | None = None) -> dict:
     """`/5` output: the predicted full-state columns in raw units, by P1's field paths and the
     entities' keys (the host writes them back through the full-state unshred path)."""
     from . import fullstate as FS
@@ -158,6 +169,11 @@ def _full_state_out(c: S.Call, out: dict, broke, damage, b_rows, c_rows) -> dict
     ccols = list(FS.CHUNK_FIELDS)
     if "chunk_hidden" in out:  # the chunks' frame-end hidden state, raw (body frame)
         hid = out["chunk_hidden"].detach().cpu().numpy()[c_rows].astype(np.float64) * FS.hidden_scale(c)
+        # An elastic-energy bound on the written hidden state is NOT applied: the only bound
+        # available here (fullstate.elastic_energy_upper, undamaged bonds) is up to 6× the
+        # oracle's own recorded elastic energy on damaged calls and would clamp correct states.
+        # It needs the joint law's damaged, plastic elastic energy (pending). The hidden head's
+        # errors are relative to the failure elongation u_c, the structural guard.
         rx = np.concatenate([rx, hid], 1)
         ccols += list(FS.HIDDEN_NAMES)
     if "bond_break_frac" in out and len(keys):  # when within the frame each broken bond broke
