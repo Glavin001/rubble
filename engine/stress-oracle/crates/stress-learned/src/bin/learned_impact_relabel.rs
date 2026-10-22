@@ -2,6 +2,9 @@
 //!
 //!   learned_impact_relabel --jobs JOBS.json --out DIR [--no-calls] [--threads N] [--calls v3]
 //!
+//! `--full-state-columns M`: `learned-impact-outcome/5` calls with the columns and static split
+//! of M (a calls manifest's `full_state_columns`, a model.json's `full_state.columns`, or the
+//! object itself); `own`: the call's own split.
 //! `--calls v3`: the calls downgraded to `learned-impact-outcome/3` (for models trained on /3;
 //! exact only from a builder revision-5 build, refused otherwise).
 //!
@@ -25,16 +28,18 @@ use rayon::prelude::*;
 use serde_json::{json, Value};
 use stress_learned::outcome_calls::write_event;
 use stress_ref::world::DecodedState;
-use stress_learned::relabel::{read_state, relabel_event, write_state, Provided};
+use stress_learned::relabel::{read_state, relabel_event_with, write_state, Provided};
 
 fn main() {
     let mut args = std::env::args().skip(1);
     let (mut jobs, mut out, mut calls, mut threads, mut v3) = (None, None, true, 0usize, false);
+    let mut full_state: Option<String> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--jobs" => jobs = args.next().map(PathBuf::from),
             "--out" => out = args.next().map(PathBuf::from),
             "--no-calls" => calls = false,
+            "--full-state-columns" => full_state = Some(args.next().expect("--full-state-columns MANIFEST.json|own")),
             "--calls" => v3 = match args.next().as_deref() {
                 Some("v3") => true,
                 Some("v4") => false,
@@ -50,6 +55,17 @@ fn main() {
     }
     std::fs::create_dir_all(&out).expect("out dir");
     let list: Vec<Value> = serde_json::from_slice(&std::fs::read(&jobs).expect("jobs file")).expect("jobs json");
+    // `--full-state-columns`: /5 calls, with a training manifest's (or model.json's
+    // "full_state") columns and static split, or `own` for the call's own split.
+    let fs_columns: Option<Value> = full_state.map(|p| {
+        if p == "own" {
+            return Value::Null;
+        }
+        let m: Value = serde_json::from_slice(&std::fs::read(&p).unwrap_or_else(|e| panic!("{p}: {e}"))).expect("columns json");
+        let cols = if !m["full_state_columns"].is_null() { m["full_state_columns"].clone() } else if !m["full_state"]["columns"].is_null() { m["full_state"]["columns"].clone() } else { m };
+        assert!(cols.is_object(), "{p}: no full_state_columns");
+        cols
+    });
     let mut by_event: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (i, j) in list.iter().enumerate() {
         by_event.entry(j["event"].as_str().expect("event").to_string()).or_default().push(i);
@@ -74,7 +90,7 @@ fn main() {
                     Ok((f, p))
                 })
                 .collect::<Result<_, _>>()?;
-            let done = relabel_event(std::path::Path::new(event), &js, calls)?;
+            let done = relabel_event_with(std::path::Path::new(event), &js, calls, fs_columns.as_ref())?;
             let secs = t.elapsed().as_secs_f64();
             let mut lines = Vec::new();
             for (&i, mut r) in idx.iter().zip(done) {

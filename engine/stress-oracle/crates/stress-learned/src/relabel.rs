@@ -18,7 +18,7 @@ use serde_json::Value;
 use stress_ref::scene::Scene;
 use stress_ref::world::{oracle_island_step, DecodedState, IslandMembers, IslandState, World};
 
-use crate::outcome_calls::{live_call_labelled, CallEvent};
+use crate::outcome_calls::{live_call_full, live_call_labelled, CallEvent};
 
 /// What a relabel job starts the oracle's frame from.
 #[derive(Clone)]
@@ -88,6 +88,13 @@ fn decoded_frame(w: &mut World, d: &DecodedState) -> Result<(), String> {
 /// Relabel `jobs` (frame, what to start from) of the event in `dir`. One replay of the
 /// event's native oracle serves every job.
 pub fn relabel_event(dir: &Path, jobs: &[(usize, Provided)], with_calls: bool) -> Result<Vec<Relabelled>, String> {
+    relabel_event_with(dir, jobs, with_calls, None)
+}
+
+/// `relabel_event`; with `full_state` the calls are `learned-impact-outcome/5`
+/// (`outcome_calls::live_call_full`): `Some(columns)` a training manifest's
+/// `full_state_columns`, `Some(Null)` the call's own split.
+pub fn relabel_event_with(dir: &Path, jobs: &[(usize, Provided)], with_calls: bool, full_state: Option<&Value>) -> Result<Vec<Relabelled>, String> {
     let scene = event_scene(dir)?;
     let ctx = event_context(dir);
     let name = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| scene.name.clone());
@@ -126,7 +133,10 @@ pub fn relabel_event(dir: &Path, jobs: &[(usize, Provided)], with_calls: bool) -
             let mut ik: Vec<i64> = members.impactors.iter().map(|&i| stress_ref::keys::impactor_key(i)).collect();
             ik.sort_unstable();
             let mut stepped = x.clone();
-            let ev = live_call_labelled(&mut stepped, &name, &ctx, &ck, &ik, call_frame, true, true)?;
+            let ev = match full_state {
+                None => live_call_labelled(&mut stepped, &name, &ctx, &ck, &ik, call_frame, true, true)?,
+                Some(cols) => live_call_full(&mut stepped, &name, &ctx, &ck, &ik, call_frame, true, true, (!cols.is_null()).then_some(cols))?,
+            };
             // The recorder's frame is the oracle's island step, bit for bit.
             if state_bytes(&stepped.extract_island(&members))? != state_bytes(&end)? {
                 return Err(format!("{name} frame {call_frame}: the recorded frame differs from the oracle's island step"));

@@ -147,3 +147,64 @@ fn an_own_state_relabel_is_the_recorded_call() {
     }
     let _ = std::fs::remove_dir_all(&out);
 }
+
+/// With the recorded manifest's full-state columns, an own-state relabel is the recorder's
+/// `/5` call: the `fs_*` arrays (the island's full state in and out) bit for bit, and the
+/// event-level static rows for its entities.
+#[test]
+fn an_own_state_full_state_relabel_is_the_recorded_call() {
+    use serde_json::json;
+    use stress_learned::oracle_config::OracleConfig;
+    use stress_learned::outcome::{record_outcome_event, OutcomeRecipe, RecordOptions};
+    use stress_learned::outcome_calls::{build_event, Arr};
+    use stress_learned::procedural::{wall_body, Layout};
+    use stress_ref::builders;
+    use stress_ref::scene::{ImpactorDesc, ImpactorShape};
+
+    let mut s = builders::new_scene("relabel5", "relabel /5 test wall");
+    s.gravity = [0.0; 3];
+    s.materials.insert("concrete".into(), builders::oracle_concrete(None));
+    s.materials.insert("steel".into(), builders::elastic_steel());
+    s.bodies.push(wall_body(&Layout { counts: [4, 2, 4], chunk: 0.1, opening: None, supports: "free" }, "wall", 0.0));
+    s.impactors.push(ImpactorDesc {
+        name: "ram".into(),
+        shape: ImpactorShape::Box { half_extents: [0.06, 0.06, 0.06] },
+        mass: 80.0,
+        position: [0.03, -0.065 - 25.0 * 0.004, 0.21],
+        orientation: [1.0, 0.0, 0.0, 0.0],
+        velocity: [0.0, 25.0, 0.0],
+        angular_velocity: [0.0, 0.0, 3.0],
+        material: "steel".into(),
+        crush: None,
+    });
+    let out = std::env::temp_dir().join(format!("relabel-recorded5-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    let recipe = OutcomeRecipe { event_id: "ev".into(), family: "test".into(), tier: 1, split_group: "ev".into(), layout_group: "L".into(), parameters: json!({}), scene: s };
+    let mut opts = RecordOptions::new(OracleConfig::named("a12_realtime").unwrap());
+    opts.stop.max_seconds = 0.3;
+    record_outcome_event(&recipe, &out, &opts, &|_| {}).unwrap();
+    let dir = out.join("ev");
+    let recorded = build_event(&dir).unwrap();
+    let columns = recorded.manifest["full_state_columns"].clone();
+    assert!(columns.is_object(), "the recorder writes /5");
+    let jobs: Vec<(usize, Provided)> = recorded.calls.iter().map(|c| (c.frame, Provided::Own)).collect();
+    let relabelled = stress_learned::relabel::relabel_event_with(&dir, &jobs, true, Some(&columns)).unwrap();
+    let mut checked = 0;
+    for (rec, r) in recorded.calls.iter().zip(&relabelled) {
+        let ev = r.call.as_ref().expect("a call");
+        assert_eq!(ev.manifest["schema_version"], recorded.manifest["schema_version"]);
+        let call = &ev.calls[0];
+        for (k, a) in rec.arrays.iter().filter(|(k, _)| k.starts_with("fs_")) {
+            let b = call.array(k).unwrap_or_else(|| panic!("frame {}: no {k}", rec.frame));
+            let bits = |x: &Arr| match x {
+                Arr::F64(s, d) => (s.clone(), d.iter().map(|v| v.to_bits()).collect::<Vec<_>>()),
+                Arr::I64(s, d) => (s.clone(), d.iter().map(|&v| v as u64).collect()),
+                other => panic!("{k}: {other:?}"),
+            };
+            assert!(bits(a) == bits(b), "frame {}: {k} differs", rec.frame);
+            checked += 1;
+        }
+    }
+    assert!(checked > 0);
+    let _ = std::fs::remove_dir_all(&out);
+}

@@ -1486,6 +1486,24 @@ pub fn live_call_labelled(world: &mut World, name: &str, ctx_from: &Value, chunk
     Ok(CallEvent { manifest, calls, structures: structures_of(&st, &r), event_arrays: Vec::new() })
 }
 
+/// `live_call_labelled` as a `learned-impact-outcome/5` call: the island's full state by field
+/// path (`full_state_calls::augment_live`, the recorder's own rule) from the frame start, and
+/// with `targets` from the frame end. `columns`: the training manifest's
+/// `full_state_columns` (its columns and static split; None: the call's own).
+#[allow(clippy::too_many_arguments)]
+pub fn live_call_full(world: &mut World, name: &str, ctx_from: &Value, chunk_keys: &[i64], impactor_keys: &[i64], frame: usize, qs: bool, targets: bool, columns: Option<&Value>) -> Result<CallEvent, String> {
+    let start = world.clone();
+    let mut ev = live_call_labelled(world, name, ctx_from, chunk_keys, impactor_keys, frame, qs, targets)?;
+    let bond_keys: Vec<Value> = start.solver.bonds.iter().enumerate().flat_map(|(s, bs)| bs.iter().map(move |b| json!([s, b.source, b.geometry.a, b.geometry.b]))).collect();
+    let mut ctx = ctx_from.clone();
+    ctx["bond_keys"] = json!(bond_keys);
+    let (cols, statics) = crate::full_state_calls::augment_live(&start, targets.then_some(&*world), &ctx, &mut ev.calls, columns)?;
+    ev.manifest["schema_version"] = json!(CALLS_SCHEMA_FULL);
+    ev.manifest["full_state_columns"] = cols;
+    ev.event_arrays = statics;
+    Ok(ev)
+}
+
 /// The `learned-impact-outcome/3` record of a `/4` event, for models trained on `/3`: `/4`
 /// only added to `/3` (the hidden deformation: chunk_feat's last 12 columns, `chunk_def`,
 /// `chunk_def_uc`, `y_chunk_def_end`; the bodies: `chunk_body`, `chunk_body_q`), so dropping

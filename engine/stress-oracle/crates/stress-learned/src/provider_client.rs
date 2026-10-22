@@ -61,6 +61,9 @@ pub struct ModelProvider {
     lock: PathBuf,
     /// The provider reads `learned-impact-outcome/3` records.
     v3: bool,
+    /// `/5` calls with these full-state columns (model.json's `full_state.columns`, or
+    /// `STRESS_FULL_STATE_COLUMNS`: a calls manifest with `full_state_columns`).
+    full_state: Option<serde_json::Value>,
 }
 
 impl ModelProvider {
@@ -111,22 +114,39 @@ impl ModelProvider {
         // calls upgraded with the deformation unobserved (P2's `LEARNED_IMPACT_ACCEPT_V3=1`).
         let v3 = std::env::var("STRESS_PROVIDER_CALLS").is_ok_and(|v| v == "v3")
             || schema_py.lines().any(|l| l.trim_start().starts_with("SCHEMA_VERSION") && l.contains("\"learned-impact-outcome/3\""));
-        let mut p = ModelProvider { spec: spec.clone(), dir: dir.to_path_buf(), scene: scene.to_string(), child, qs: true, call_ms: Vec::new(), lock, v3 };
+        let mut p = ModelProvider { spec: spec.clone(), dir: dir.to_path_buf(), scene: scene.to_string(), child, qs: true, call_ms: Vec::new(), lock, v3, full_state: None };
+        let described = p.read_model_json()?;
         p.qs = match spec.qs {
             Some(q) => q,
-            None => p.read_needs_qs()?,
+            None => described.get("needs_qs").and_then(|x| x.as_bool()).unwrap_or(true),
         };
+        p.full_state = match described.get("full_state").map(|f| f["columns"].clone()).filter(|c| c.is_object()) {
+            Some(c) => Some(c),
+            None => match std::env::var("STRESS_FULL_STATE_COLUMNS") {
+                Ok(path) => {
+                    let m: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?).map_err(|e| format!("{path}: {e}"))?;
+                    let c = if m["full_state_columns"].is_object() { m["full_state_columns"].clone() } else { m };
+                    if !c.is_object() {
+                        return Err(format!("{path}: no full_state_columns"));
+                    }
+                    Some(c)
+                }
+                Err(_) => None,
+            },
+        };
+        if p.full_state.is_some() && p.v3 {
+            return Err("a /5 model with a /3 provider".into());
+        }
         Ok(p)
     }
 
     /// Wait for the provider's `model.json` (written once the model is loaded).
-    fn read_needs_qs(&mut self) -> Result<bool, String> {
+    fn read_model_json(&mut self) -> Result<serde_json::Value, String> {
         let path = self.dir.join("model.json");
         let t = Instant::now();
         loop {
             if let Ok(text) = std::fs::read_to_string(&path) {
-                let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-                return Ok(v.get("needs_qs").and_then(|x| x.as_bool()).unwrap_or(true));
+                return serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()));
             }
             if let Ok(Some(status)) = self.child.try_wait() {
                 let log = std::fs::read_to_string(self.dir.join("provider.log")).unwrap_or_default();
@@ -146,7 +166,10 @@ impl ModelProvider {
         let req = self.dir.join("req").join(&name);
         std::fs::create_dir_all(&req).map_err(|e| e.to_string())?;
         let mut standalone = view.standalone_copy();
-        let mut ev = outcome_calls::live_call(&mut standalone, &self.scene, &json!({}), &keys.chunks, &keys.impactors, frame as usize, self.qs)?;
+        let mut ev = match &self.full_state {
+            Some(cols) => outcome_calls::live_call_full(&mut standalone, &self.scene, &json!({}), &keys.chunks, &keys.impactors, frame as usize, self.qs, false, Some(cols))?,
+            None => outcome_calls::live_call(&mut standalone, &self.scene, &json!({}), &keys.chunks, &keys.impactors, frame as usize, self.qs)?,
+        };
         if self.v3 {
             outcome_calls::downgrade_to_v3(&mut ev)?;
         }
