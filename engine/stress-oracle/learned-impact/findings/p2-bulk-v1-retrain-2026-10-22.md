@@ -9,7 +9,34 @@ Checkpoint: `runs/v4/bulk-w32/best.pt`, with the weights export in `runs/v4/bulk
 
 **Verdict: not accepted (gates-v1.1).** Neither family passes. The test report (frozen τ, confirmation only) follows.
 
-## gates-v1.1 per family (active ensemble calls, held-out oracle member by the identical rule)
+## Correction (same day): the ensemble gates above compared diverged members
+
+`ensemble._aligned` grouped members' calls by key sets only. The bulk v1 eval ensembles
+have identical inputs up to and including the first contact call, apart from the 0.2–1% L
+placement perturbation. From the next call on they diverge: damage differs on dozens of
+bonds by up to 0.87, and velocities by up to 10% of v. All those calls were nonetheless
+aggregated into soft training labels and scored as ensembles.
+- The fix (0aa72a86): members are aligned only while bond damage is equal and velocities
+  agree to 1e-3 v.
+- Other calls train on their own hard targets and are scored per member.
+
+Re-scored with the fix (same checkpoint, val; `report-val-aligned.json`):
+
+| family | gate | model pass | member pass | model skill/bar | member skill/bar |
+|---|---|---|---|---|---|
+| anchored_wall (16 ens) | ram | 0.75 | 0.97 | 0.64 | 0.16 |
+| | partition | 0.62 | 0.95 | 1.10 | 0.31 |
+| | sizes | 0.62 | 0.91 | 1.53 | 0.31 |
+| free_wall (55 ens) | ram | 0.85 | 1.00 | 0.55 | 0.08 |
+| | partition | 0.38 | 0.91 | 4.77 | 0.47 |
+| | sizes | 0.40 | 0.91 | 2.89 | 0.41 |
+
+On genuinely equal inputs the oracle members agree far more tightly: member skill/bar
+0.08–0.47, against 0.21–0.73 before. The model is much further from them than the first
+table showed, worst on free-wall partition (pass 0.38 against 0.91). The tables below are
+kept as first reported, but they overstate the model.
+
+## gates-v1.1 per family (as first reported; superseded by the correction above) (active ensemble calls, held-out oracle member by the identical rule)
 
 | family | gate | model pass | member pass | shortfall, 95% upper bound (≤ 0.05) | model skill/bar | member skill/bar | excess, 95% upper bound (≤ 5%) |
 |---|---|---|---|---|---|---|---|
