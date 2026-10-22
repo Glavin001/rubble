@@ -26,6 +26,19 @@ Other validation metrics:
   - On ram, skill/bar is 0.48 vs QS 1.89 (anchored) and 0.34 vs 1.34 (free).
   - On free-wall partition and sizes it is 1.47 / 1.32 vs QS 1.65 / 1.71.
 
+**Against the earlier pilot model**, on the same validation ensembles:
+- The earlier model is `sweep-all3-ref`: W64/12, Bernoulli sampling, trained on the 208-event rev-6 pilot.
+- Its gates-v1.1 verdict is also reject on both families.
+- Mean skill/bar, ram / partition / sizes:
+
+| family | bulk W32 | pilot W64 |
+|---|---|---|
+| anchored | 0.48 / 0.66 / 0.72 | 0.96 / 0.73 / 0.85 |
+| free | 0.34 / 1.47 / 1.32 | 0.44 / 1.50 / 1.31 |
+
+- Worse-than-QS calls: bulk 171, pilot 162.
+- So bulk data plus the smaller model halves the ram error and slightly improves anchored partition and sizes. Free-wall partition and sizes are unchanged, at about 1.5 and 1.3.
+
 ## What it says
 
 1. **The binding constraint is the mean skill ratio, not the pass rate.**
