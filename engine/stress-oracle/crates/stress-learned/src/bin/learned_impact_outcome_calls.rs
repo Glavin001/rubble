@@ -4,7 +4,8 @@
 //!
 //! `--eval-only` takes the evaluation events (validation, test, sealed), whose calls are cached
 //! permanently; `--train-only` every training event (ensemble members included), whose calls
-//! are built on demand (`learned_impact/outcome_calls_cache.py`).
+//! are built on demand (`learned_impact/outcome_calls_cache.py`). `--splits val,test` keeps
+//! only those splits (test and sealed calls can be built when they are used).
 //!
 //! Each argument is an event directory or a generator job (its `events/`). Writes
 //! `DIR/<event_id>/` (manifest.json, calls.json, arrays.bin.zst; `--plain`: arrays.bin) and
@@ -31,6 +32,7 @@ fn main() {
     let mut plain = false;
     let mut jobs = 8;
     let mut only: Option<bool> = None;
+    let mut splits: Option<Vec<String>> = None;
     let mut inputs = Vec::new();
     let mut it = a.into_iter();
     while let Some(x) = it.next() {
@@ -39,12 +41,15 @@ fn main() {
             "--plain" => plain = true,
             "--eval-only" => only = Some(true),
             "--train-only" => only = Some(false),
+            "--splits" => splits = it.next().map(|v| v.split(',').map(str::to_string).collect()),
             "--jobs" => jobs = it.next().and_then(|v| v.parse().ok()).expect("--jobs N"),
             _ => inputs.push(PathBuf::from(x)),
         }
     }
     let out = out.expect("--out DIR");
-    let events: Vec<PathBuf> = inputs.iter().flat_map(|p| events_in(p)).filter(|e| only.map_or(true, |want| is_eval(e) == want)).collect();
+    let events: Vec<PathBuf> = inputs.iter().flat_map(|p| events_in(p)).filter(|e| only.map_or(true, |want| is_eval(e) == want))
+        .filter(|e| splits.as_ref().map_or(true, |s| s.iter().any(|x| Some(x.as_str()) == split_of(e).as_deref())))
+        .collect();
     assert!(!events.is_empty(), "no events");
     let (done, failed) = (AtomicUsize::new(0), AtomicUsize::new(0));
     let total = events.len();
@@ -68,6 +73,11 @@ fn main() {
     if f > 0 {
         std::process::exit(1);
     }
+}
+
+fn split_of(ev: &Path) -> Option<String> {
+    let ctx: serde_json::Value = std::fs::read(ev.join("context.json")).ok().and_then(|b| serde_json::from_slice(&b).ok())?;
+    ctx["split"].as_str().map(str::to_string)
 }
 
 /// An evaluation event (validation, test, sealed), whose calls are cached; every training
