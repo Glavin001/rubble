@@ -403,6 +403,11 @@ pub fn pack(desc: &VehicleDesc, position: Vec3, rotation: Quat, slots: VehicleSl
         "at most {MAX_VEHICLE_WHEELS} wheel slots per vehicle"
     );
     assert!(desc.parts.len() <= 32, "at most 32 parts per vehicle");
+    for (i, p) in desc.parts.iter().enumerate() {
+        if let Some(parent) = p.mount.parent {
+            assert!(i > 0 && (parent as usize) < i, "part {i} ({}): parent {parent} must be an earlier part", p.name);
+        }
+    }
     let up = v3(desc.up).normalize();
     let fwd = v3(desc.forward).normalize();
     let axle = up.cross(fwd).normalize();
@@ -720,6 +725,7 @@ pub fn pack(desc: &VehicleDesc, position: Vec3, rotation: Quat, slots: VehicleSl
             [part_body0 + i as u32, slots.vehicle, 0, 0],
             slot3(m.anchor.map(v3).unwrap_or(com), bf),
             [f(bt), f(0.0), f(0.0), f(0.0)],
+            [p.mount.parent.filter(|_| i > 0).unwrap_or(NO_INDEX), NO_INDEX, 0, 0],
         ]);
     }
     out

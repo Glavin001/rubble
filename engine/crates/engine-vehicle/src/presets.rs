@@ -625,7 +625,7 @@ mod tests {
             assert_eq!(f32::from_bits(part[P_LOAD as usize][0]), 1e30);
         }
         // A finite force limit; torque left unbreakable.
-        d.parts[1].mount = MountDesc { break_force: 5e4, break_torque: 0.0, anchor: Some([0.0, 0.5, 0.0]) };
+        d.parts[1].mount = MountDesc { break_force: 5e4, break_torque: 0.0, anchor: Some([0.0, 0.5, 0.0]), parent: None };
         assert!(d.breakable());
         assert_ne!(flags(&d) & VF_BREAKABLE, 0);
         let c = d.center_of_mass();

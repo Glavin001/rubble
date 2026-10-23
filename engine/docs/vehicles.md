@@ -261,8 +261,22 @@ Contacts are read as each host stores them:
 The check runs only for vehicles flagged `VF_BREAKABLE` (some finite limit) and awake.
 A sleeping vehicle carries its resting load and is skipped.
 
-One level of mounting: every part hangs off the chassis. A headlamp rated against the
-nose stays on the car when the nose comes off.
+**Parts on parts.** `MountDesc::parent` bolts a part to an earlier part instead of the
+chassis (`P_TREE`). While both are on the car, the child's mount wrench passes into the
+parent's: `vehicle_loads` walks parts from the last to the first, so the hood's mount
+carries the bumper bolted to it.
+
+When the parent leaves the car (severed, or its mount broke), every attached
+descendant leaves with it as one rigid piece:
+
+* their colliders join its body;
+* the piece's origin moves to the combined centre of mass, with that point's velocity
+  and the inertia about it;
+* the parent's `P_COM` records that origin;
+* each child's `P_TREE.y` names its carrier.
+
+The dune buggy's headlamps ride the nose, its rear lamps the rear bumper, and its gearbox
+the engine.
 
 **Discrete impacts.** A projectile that moves more than a thin part's depth in one step
 lands its blow on whatever is behind it (`tests/vehicle_mounts.rs` uses impacts under
@@ -355,5 +369,5 @@ controller), `dune_buggy` (vibe-land's sand rail; parts and wheels on breakable 
   exact; the Hessian is block-diagonal).
 * A track belt's speed is set by the sprocket (one-way). Friction the pod meets acts on
   the hull but not back on the track spin, so climbing does not load the engine.
-* Mounts are one level deep (every part on the chassis) and the root part never breaks.
+* The root part never breaks; a part's parent must come before it in `parts`.
 * Not yet: cylinder casts, an inactive (sleeping) query rate.

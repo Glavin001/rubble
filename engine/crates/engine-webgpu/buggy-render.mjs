@@ -126,12 +126,16 @@ struct Out { @builtin(position) clip: vec4f, @location(0) n: vec3f, @location(1)
       n = (dm * vec4f(nrm, 0.0)).xyz;
     }
   } else {
-    let pr = vdata[2u].z + (vdata[vr + ${L.V_POOL2}u].x + inst.info.y) * ${L.PART_STRIDE}u;
-    let com = vdata[pr + ${L.P_COM}u];
-    let state = com.w;
+    let partBase = vdata[2u].z + vdata[vr + ${L.V_POOL2}u].x * ${L.PART_STRIDE}u;
+    let pr = partBase + inst.info.y * ${L.PART_STRIDE}u;
+    let state = vdata[pr + ${L.P_COM}u].w;
     if (state == ${L.PS_DETACHED}u) {
-      body = vdata[pr + ${L.P_PARK}u].x;
-      p = p - bitcast<vec3f>(com.xyz);
+      // On its own body, or carried off on the part it was bolted to (P_TREE.y):
+      // that body's origin is its P_COM.
+      let carrier = vdata[pr + ${L.P_TREE}u].y;
+      let cr = select(pr, partBase + carrier * ${L.PART_STRIDE}u, carrier < 32u);
+      body = vdata[cr + ${L.P_PARK}u].x;
+      p = p - bitcast<vec3f>(vdata[cr + ${L.P_COM}u].xyz);
     } else if (state != ${L.PS_ATTACHED}u) {
       hidden = true;
     }

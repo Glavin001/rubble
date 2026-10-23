@@ -203,6 +203,13 @@ const hybrid = {
 };
 console.error(`hybrid frame: ${hybrid.nodes.length} nodes (${round(hybrid.nodes.reduce((s, n) => s + n.mass, 0), 1)} kg), ${hybrid.beams.length} beams, core on ${hybrid.core_nodes.length} nodes, ${hybrid.rigid_parts.length} jointed parts`);
 
+function parentOf(i, mount) {
+  if (mount.attached_to.includes('frame') || mount.attached_to.length !== 1) return null;
+  const k = parts.findIndex((p) => p.name === mount.attached_to[0]);
+  if (k < 0 || k >= i) throw new Error(`${parts[i].name}: carried by ${mount.attached_to[0]}, which must come earlier`);
+  return k;
+}
+
 const out = {
   source: {
     recipe: 'vibe-land client/src/vehicles/dune/buggy.mjs (see scenes/dune-buggy/README.md)',
@@ -221,7 +228,9 @@ const out = {
       role: p.role,
       mass: round(p.mass, 3),
       colliders: p.colliders,
-      mount: mount ? { break_force: mount.break_force, break_torque: mount.break_torque, anchor: mount.anchor } : { break_force: 0, break_torque: 0, anchor: null },
+      // A part held only by another part (a headlamp on the nose) is that part's
+      // child: it leaves with it, and loads it while both are on.
+      mount: mount ? { break_force: mount.break_force, break_torque: mount.break_torque, anchor: mount.anchor, parent: parentOf(i, mount) } : { break_force: 0, break_torque: 0, anchor: null, parent: null },
       report: { members: p.members, ...(mount ? { bonds: mount.bonds, attached_to: mount.attached_to } : {}) },
     };
   }),

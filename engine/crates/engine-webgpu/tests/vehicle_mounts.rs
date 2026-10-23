@@ -119,10 +119,10 @@ fn wheel_loads(sim: &WgpuSim, v: VehicleHandle) -> Vec<MountLoad> {
 fn measured_sedan() -> VehicleDesc {
     let mut d = presets::destructible_sedan();
     for p in d.parts.iter_mut().skip(1) {
-        p.mount = MountDesc { break_force: 1e12, break_torque: 1e12, anchor: None };
+        p.mount = MountDesc { break_force: 1e12, break_torque: 1e12, anchor: None, parent: None };
     }
     for w in &mut d.wheels {
-        w.mount = MountDesc { break_force: 1e12, break_torque: 1e12, anchor: None };
+        w.mount = MountDesc { break_force: 1e12, break_torque: 1e12, anchor: None, parent: None };
     }
     d
 }
@@ -176,7 +176,7 @@ fn heavy_ball_snaps_the_struck_mount_only(storage: Storage) {
     let mut d = measured_sedan();
     // Front bumper on a 40 kN mount; everything else out of reach.
     let bumper = d.parts.iter().position(|p| p.name == "bumper_front").unwrap();
-    d.parts[bumper].mount = MountDesc { break_force: 40e3, break_torque: 40e3, anchor: None };
+    d.parts[bumper].mount = MountDesc { break_force: 40e3, break_torque: 40e3, anchor: None, parent: None };
     let v = sim.add_vehicle(&d, [0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]).unwrap();
     run(&mut sim, 180);
     assert_eq!(sim.vehicle_state(v).parts_broken, 0, "resting: nothing breaks");
@@ -357,4 +357,51 @@ fn dune_buggy_crash_probe() {
         }
         eprintln!();
     }
+}
+
+/// The destructible sedan with its front bumper bolted to the hood (not the
+/// chassis), every mount measured but out of reach.
+fn sedan_with_bumper_on_hood() -> (VehicleDesc, usize, usize) {
+    let mut d = measured_sedan();
+    let hood = d.parts.iter().position(|p| p.name == "hood").unwrap();
+    let bumper = d.parts.iter().position(|p| p.name == "bumper_front").unwrap();
+    assert!(hood < bumper);
+    d.parts[bumper].mount.parent = Some(hood as u32);
+    (d, hood, bumper)
+}
+
+#[test]
+fn a_child_part_loads_its_parents_mount() {
+    let mut sim = world();
+    let (d, hood, bumper) = sedan_with_bumper_on_hood();
+    let v = sim.add_vehicle(&d, [0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]).unwrap();
+    run(&mut sim, 240);
+    let loads = part_loads(&sim, v);
+    let (wh, wb) = (d.parts[hood].mass * G, d.parts[bumper].mass * G);
+    eprintln!("hood mount {:.0} N (hood {wh:.0} + bumper {wb:.0}); bumper mount {:.0} N", loads[hood].force, loads[bumper].force);
+    // The bumper's mount carries its own weight, the hood's carries both.
+    assert!((loads[bumper].force - wb).abs() < 0.05 * wb + 1.0);
+    assert!((loads[hood].force - (wh + wb)).abs() < 0.05 * (wh + wb) + 1.0);
+}
+
+#[test]
+fn a_severed_parent_takes_its_children_with_it() {
+    let mut sim = world();
+    let (d, hood, bumper) = sedan_with_bumper_on_hood();
+    let v = sim.add_vehicle(&d, [0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]).unwrap();
+    run(&mut sim, 120);
+    let mass0 = sim.vehicle_state(v).mass;
+    sim.detach_part(v, hood as u32);
+    run(&mut sim, 60);
+    let st = sim.vehicle_state(v);
+    let lost = (1 << hood) | (1 << bumper);
+    assert_eq!(st.parts_lost & lost, lost, "hood and the bumper bolted to it left the car");
+    let (mh, mb) = (d.parts[hood].mass, d.parts[bumper].mass);
+    assert!((mass0 - st.mass - (mh + mb)).abs() < 1.0, "chassis lost both masses: {mass0} → {}", st.mass);
+    // One piece: the hood's body carries both masses; the bumper's own stays parked.
+    let piece = sim.read_body(sim.vehicle_host().part_body(v, hood as u32));
+    assert!((1.0 / piece.inv_mass - (mh + mb)).abs() < 0.5, "piece mass {}", 1.0 / piece.inv_mass);
+    let parked = sim.read_body(sim.vehicle_host().part_body(v, bumper as u32));
+    assert!(parked.position[1] < -1000.0, "the bumper's own body was never used");
+    assert!(piece.position[1] > -100.0 && piece.position.iter().all(|x| x.is_finite()));
 }
