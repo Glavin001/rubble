@@ -7,7 +7,7 @@ Chrome WebGPU from one Slang source (`slang/kernels/vehicle_step.slang`).
 cd engine
 cargo run -p engine-webgpu --release --bin wgsl_export     # WGSL + vehicle presets + engine-vehicle wasm (wasm-pack)
 python3 -m http.server 8791 --directory crates/engine-webgpu
-# Chrome → http://127.0.0.1:8791/vehicle.html            (?scene=playground|destruction|buggies|traffic|bridge&preset=sedan)
+# Chrome → http://127.0.0.1:8791/vehicle.html            (?scene=playground|destruction|buggies|vibeland|traffic|bridge&preset=sedan)
 cargo test -p engine-webgpu --test vehicle                 # physical envelopes (wgpu)
 cargo test -p engine-webgpu --test vehicle_mounts          # mounts that break under load (wgpu)
 cargo test -p engine-metal --test vehicle_parity           # Metal behaviour + Metal↔wgpu parity
@@ -282,6 +282,30 @@ the engine.
 lands its blow on whatever is behind it (`tests/vehicle_mounts.rs` uses impacts under
 0.2 m per step). A 45 m/s cannonball goes through a 3 cm lamp bracket and meets the cage.
 
+### vibe-land's catalog
+
+`presets::vibe_vehicle` builds any of vibe-land's seven garage vehicles from its baked
+asset (`engine/scenes/dune-buggy`, `assets/vibe_<model>.json`).
+
+* Six of them share the buggy's chassis under their own bodywork: doors (with side glass
+  and mirrors), hood, fascia, windshield and rear glass, roof and light bar, four wheel
+  arches, bed and tailgate, hatch, trunk lid, wings, exhaust stacks.
+* Each model keeps the parts it has, up to 31 (the limit is 32). A part that only touches
+  another part (a tailgate on the bed, a roof scoop on the roof) is that part's child.
+* Body panels collide as the box fitted to their corner points.
+* Handling is vibe-land's garage setup, as for the buggy. Brake torque scales with mass
+  past 1.5 t.
+* `vehicle.html?scene=vibeland` parks the whole catalog in the arena; Tab drives the next
+  one. Each mesh is painted in its model's catalog finish.
+
+The recipe hangs a few parts by a single joint, and a hard landing can bend them off:
+
+* the sprint car's nerf bars: the rear return stops 16 cm short of the frame rail;
+* the semi's exhaust stacks: one bracket each.
+
+`every_vibe_land_model_drives_and_jumps_without_shedding_parts` allows those, and nothing
+else.
+
 ### The dune buggy
 
 `dune_buggy` is vibe-land's sand rail (`engine/scenes/dune-buggy`, baked from its recipe).
@@ -335,7 +359,10 @@ Presets (`engine_vehicle::presets`, exported to `generated/vehicle_presets.json`
 `jolt_default`, `sedan`, `destructible_sedan`, `sports`, `monster_truck`,
 `six_wheel_truck`, `kart`, `tank` (two 7-wheel tracks, Jolt `TankTest` drivetrain),
 `motorcycle` (Jolt `MotorcycleTest`: 30° caster fork, chain-driven rear wheel, lean
-controller), `dune_buggy` (vibe-land's sand rail; parts and wheels on breakable mounts).
+controller), and vibe-land's catalog with parts and wheels on breakable mounts: `dune_buggy`
+(sand rail), `vibe_trophy`, `vibe_rally`, `vibe_monster`, `vibe_derby`, `vibe_sprint`, and
+`vibe_semi` with `vibe_semi_trailer`. The trailer is hitched by a D6 ball joint at
+`VIBE_SEMI_HITCH`; `vehicle.html` spawns the pair together.
 
 ## Configuration
 

@@ -184,17 +184,22 @@ const section = exact.parts.map((p) => {
   const ext = Math.max(...[0, 1, 2].map((k) => p.bounds.max[k] - p.bounds.min[k]));
   return rho && p.mass > 0 && ext > 0 ? p.mass / rho / ext : Infinity;
 });
+//
+// Contacts under SOLVER_MIN_BOND_AREA_M2 are kept. vibe-land drops them because
+// its PhysX stress stage floors bond stiffness at that area; a Rubble mount is
+// rated as a whole, and a small far contact (a nerf bar's rear return, a light
+// bar's second foot) is what gives the part its moment capacity.
 const bonds = [];
 let dropped = 0, bounded = 0;
 for (const j of exact.joints) {
   const a = indexById.get(j.a), b = indexById.get(j.b);
-  if (j.interfaceAreaM2 < SOLVER_MIN_BOND_AREA_M2) { dropped++; continue; }
+  if (!(j.interfaceAreaM2 > 0)) { dropped++; continue; }
   const st = jointStrength(exact.parts[a].material, exact.parts[b].material);
   const area = Math.min(j.interfaceAreaM2, section[a], section[b]);
   if (area < j.interfaceAreaM2) bounded++;
   bonds.push({ a, b, force: area * Math.min(st.tensionFatal, st.shearFatal), area, anchor: toRubble(j.anchor) });
 }
-console.error(`${bonds.length} joints (${bounded} section-bound, ${dropped} grazes under ${SOLVER_MIN_BOND_AREA_M2} m² dropped)`);
+console.error(`${bonds.length} joints (${bounded} section-bound, ${bonds.filter((b) => b.area < SOLVER_MIN_BOND_AREA_M2).length} under ${SOLVER_MIN_BOND_AREA_M2} m²)`);
 const isRig = (i) => cls[i].cls === 'rig';
 function mountOf(g) {
   let mine;

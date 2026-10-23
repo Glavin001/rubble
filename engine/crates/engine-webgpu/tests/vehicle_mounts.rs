@@ -248,6 +248,37 @@ fn dune_buggy_settles_drives_and_jumps_without_shedding_parts() {
 }
 
 #[test]
+fn every_vibe_land_model_drives_and_jumps_without_shedding_parts() {
+    for d in [presets::vibe_trophy(), presets::vibe_rally(), presets::vibe_monster(), presets::vibe_derby(), presets::vibe_sprint(), presets::vibe_semi()] {
+        let mut sim = world();
+        let q = glam::Quat::from_axis_angle(glam::Vec3::X, -0.25).to_array();
+        add_box(&mut sim, [0.0, 0.5, 25.0], [3.0, 0.3, 3.0], q, 0.0, [0.0; 3]);
+        let lift = if d.name == "vibe_monster" { 1.0 } else { 0.6 };
+        let v = sim.add_vehicle(&d, [0.0, lift, 0.0], [0.0, 0.0, 0.0, 1.0]).unwrap();
+        run(&mut sim, 180);
+        sim.set_vehicle_input(v, VehicleInput { forward: 1.0, ..Default::default() });
+        run(&mut sim, 360);
+        sim.set_vehicle_input(v, VehicleInput { brake: 1.0, ..Default::default() });
+        run(&mut sim, 180);
+        let st = sim.vehicle_state(v);
+        let worst = peaks(&sim, v, &d).into_iter().max_by(|a, b| a.1.total_cmp(&b.1)).unwrap();
+        eprintln!("{:>13}: broken parts {:#b} wheels {:#b}; heaviest mount {} at {:.2} of its limit", d.name, st.parts_broken, st.wheels_broken, worst.0, worst.1);
+        // The recipe hangs these by one joint (a cantilever): the sprint's nerf
+        // bars meet the frame only at the front (their rear return stops short of
+        // the rail), the semi's stacks each stand on one bracket. A hard landing
+        // can bend them off; nothing else may come off.
+        let fragile: &[&str] = match d.name.as_str() {
+            "vibe_sprint" => &["nerf_l", "nerf_r"],
+            "vibe_semi" => &["stack_l", "stack_r"],
+            _ => &[],
+        };
+        let allowed = d.parts.iter().enumerate().filter(|(_, p)| fragile.contains(&p.name.as_str())).fold(0u32, |m, (i, _)| m | (1 << i));
+        assert_eq!(st.parts_broken & !allowed, 0, "{}: a jump sheds nothing else", d.name);
+        assert_eq!(st.wheels_broken, 0, "{}: no wheel comes off", d.name);
+    }
+}
+
+#[test]
 fn a_cannonball_tears_the_struck_part_off_the_dune_buggy() {
     let mut sim = world();
     let d = presets::dune_buggy();
