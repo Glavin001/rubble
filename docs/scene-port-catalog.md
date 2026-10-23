@@ -40,7 +40,8 @@ existing cross-engine adapters (rubble, rapier, physx, jolt, three-avbd) run it.
 | stress-oracle b1–b9, s_* showcases (native only) | `engine/stress-oracle/crates/stress-ref` | PhysX stress-oracle |
 | Packs: brick-building, comp-wall-bay, house-1story, house-2story, rig-portal, rig-toppled, veneer-house-l0, villa-savoye (native stress only) | `engine/stress-oracle/packs/` | blast-stress-solver structures |
 | stress-rubble scenes: wall_ram, b5_v10/20/40, house_ram, house_idle, town(16), town_idle, veneer, wall_row, striker | `stress-rubble` | PhysX stress-physx |
-| Vehicle scenes: playground, destruction, traffic, slab, seesaw, carry, sidewall, bridge, tanklab | `vehicle.html` | rubble |
+| Vehicle scenes: playground, destruction, buggies, traffic, slab, seesaw, carry, sidewall, bridge, tanklab | `vehicle.html` | rubble |
+| Dune buggy (vibe-land garage "Sand rail": recipe mesh, rig, measured joints → breakable part mounts) | `engine/scenes/dune-buggy`, `vehicle.html?scene=buggies`, preset `dune_buggy` | vibe-land `client/src/vehicles/dune` |
 | three-avbd paper/scale scenes, legacy scenes, convex piles, joints | `engine-scenes`, `demo.html` | three-avbd, legacy rubble |
 
 Gaps in this group: the oracle scenes and the 8 packs have no web page; shardwright_house L2/L3
@@ -121,7 +122,7 @@ Source: `PhysX/blast/` on HEAD unless a branch is named (branches in `blast-stre
 | high-rise (Rust demo) + shot presets | high-rise-low/mid-infill, low-column | PK | P1 |
 | wall-contract, wall-arch-contract | resim contract walls 5×4 and 10×8 bricks, set projectiles (`fix/resim-2`) | RS | P1 |
 | JS: Tower Collapse, High-Rise Demolition (wrecking ball), Destructible House, Wall Demolition, Mini-City (meteor + charges) | `js_stress_example/*.html` | PK/RS | P1 |
-| JS: Destructible Vehicle (buggy GLB, CoACD pieces) | | SW | P2 |
+| JS: Destructible Vehicle (buggy GLB, CoACD pieces) | ported from vibe-land's own buggy recipe instead (`vehicle.html?scene=buggies`, rigid parts on breakable mounts) | done | — |
 | JS: Stress Cracks (cantilever), Centrifugal Spinner, Fracture Policy | | RS | P2 |
 | brick-castle | ~2,700 bricks, towers, gatehouse, keep; cannon, wrecking ball, boulders (`origin/claude/brick-castle-demo-wmeuo7`) | RS | P1 |
 | keystone-arch | 15 voussoirs r 7 m, keystone strike (`origin/claude/novel-library-example-luowr2`) | RS | P1 |

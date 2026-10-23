@@ -101,6 +101,27 @@ const TAKES = {
       { n: 120, input: { forward: 0, steer: 0, brake: 1 }, caption: 'Wreck', cam: { orbit: [0.5, 0.35, 12], spin: 0.008 } },
     ],
   },
+  buggy_jump: {
+    query: 'scene=buggies',
+    script: [
+      { n: 60, input: { forward: 0, steer: 0 }, caption: 'Dune buggy (vibe-land): 17 parts on breakable mounts, a rigged suspension', cam: { orbit: [0.8, 0.22, 7], spin: 0.006 } },
+      { n: 60, input: { forward: 0, steer: 0 }, caption: 'Coilovers, wishbones and steering posed from the raycast wheels', cam: 'chase' },
+      { n: 170, cruise: 15, input: { steer: 0 }, caption: 'Over the kicker and the tabletop: nothing comes off on a landing' },
+      { n: 120, cruise: 10, input: { steer: 0.5 }, caption: 'Turn back', cam: { orbit: [-1.0, 0.25, 9], spin: 0.006 } },
+      { n: 100, input: { forward: 0, steer: 0, brake: 1 }, caption: 'Brake', cam: 'chase' },
+    ],
+  },
+  buggy_cannon: {
+    query: 'scene=buggies',
+    script: [
+      { n: 60, input: { forward: 0, steer: 0, brake: 1 }, caption: 'Parked: each mount rated from the measured joints of the recipe', cam: { orbit: [1.57, 0.12, 9] } },
+      { n: 100, act: 'cannon', caption: '400 kg at 45 m/s into the open side: the struck seat tears off its rails' },
+      { n: 60, caption: 'The loose part is a body of its own; the mesh follows it', cam: { orbit: [1.2, 0.3, 9], spin: 0.01 } },
+      { n: 30, cam: { orbit: [0.0, 0.1, 10] } },
+      { n: 120, act: 'cannon', caption: 'Head on: bumper, nose and lamps carry the blow' },
+      { n: 120, caption: 'Broken mounts are severed before the next step: forward-only, like joints', cam: { orbit: [0.6, 0.35, 11], spin: 0.008 } },
+    ],
+  },
   traffic: {
     query: 'scene=traffic&spawn=0,0,0',
     script: [
@@ -193,7 +214,7 @@ const FRAMES = mkdtempSync(join(tmpdir(), 'vehicle-frames-'));
 mkdirSync(OUT, { recursive: true });
 
 // Static files + PUT /rec/<take>/<frame>.jpg.
-const TYPES = { '.html': 'text/html', '.mjs': 'text/javascript', '.js': 'text/javascript', '.json': 'application/json', '.wgsl': 'text/plain', '.wasm': 'application/wasm' };
+const TYPES = { '.html': 'text/html', '.mjs': 'text/javascript', '.js': 'text/javascript', '.json': 'application/json', '.wgsl': 'text/plain', '.wasm': 'application/wasm', '.bin': 'application/octet-stream' };
 const server = createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
   const m = req.method === 'PUT' && url.pathname.match(/^\/rec\/([\w-]+)\/([\w.-]+)$/);
