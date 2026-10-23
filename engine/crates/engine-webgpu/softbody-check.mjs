@@ -71,7 +71,17 @@ const CHECKS = {
     },
   },
   // The other crash-test scenes run without blowing up and deform.
-  ...Object.fromEntries(['sidepole&speed=60', 'rollover&speed=60', 'ramp&speed=90', 'drop&height=12&pitch=50', 'headon&speed=100&overlap=0.5'].map((q) => [q.split('&')[0] + (q.startsWith('headon') ? '_offset' : ''), {
+  // The limbo bar shears the roof off: a piece-detached event names it.
+  limbo: {
+    query: 'scene=limbo&speed=80',
+    run: async (page) => {
+      await page.step(600);
+      await page.step(60); // one more damage read for the last events
+      const torn = await page.eval(`window.__tornOff.join(', ')`);
+      return { ok: /roof/.test(torn), msg: `torn off: ${torn}` };
+    },
+  },
+  ...Object.fromEntries(['sidepole&speed=60', 'rollover&speed=60', 'ramp&speed=90', 'drop&height=12&pitch=50', 'headon&speed=100&overlap=0.5', 'sandwich&speed=60', 'crusher'].map((q) => [q.split('&')[0] + (q.startsWith('headon') ? '_offset' : ''), {
     query: `scene=${q}`,
     run: async (page) => {
       const r = await page.step(600);

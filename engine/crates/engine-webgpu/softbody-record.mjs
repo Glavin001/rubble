@@ -41,6 +41,10 @@ const TAKES = {
   headon_offset: { query: 'scene=headon&speed=80&overlap=0.5&runup=8', title: 'Head-on, 2 × 80 km/h, 50% offset', target: [0.4, 0.8, 0], dist: 12, yaw: 1.3, impact: [20, 260], settle: 560 },
   rollover: { query: 'scene=rollover&speed=70&runup=4', title: 'Sliding sideways into a curb at 70 km/h', target: null, dist: 11, yaw: 0.3, impact: [40, 400], settle: 840 },
   ramp: { query: 'scene=ramp&speed=90', title: 'One-side ramp at 90 km/h', target: null, dist: 13, yaw: 1.9, impact: [40, 520], settle: 960 },
+  limbo: { query: 'scene=limbo&speed=80&runup=6', title: 'Limbo bar at 80 km/h: the roof shears off', target: [0, 1, 4], dist: 11, yaw: 2.0, sweep: 1.4, impact: [60, 330], settle: 600 },
+  sandwich: { query: 'scene=sandwich&speed=60&runup=6', title: 'Sandwich: 18 t truck at 60 km/h into a car behind a parked 15 t truck', target: [0, 1, 0], dist: 18, yaw: 1.3, impact: [60, 360], settle: 640 },
+  crusher: { query: 'scene=crusher', title: 'Crusher: 10 t block dropped 4 m onto the roof', target: [0, 1, 0], dist: 10, yaw: 1.0, impact: [180, 400], settle: 640 },
+  traffic20: { query: 'scene=traffic&cars=20', title: 'Traffic derby: 20 self-driving soft cars', target: [0, 0, 0], dist: 70, yaw: 0.6, impact: [0, 0], settle: 2400, live: true },
   drop: { query: 'scene=drop&height=12&pitch=50', title: 'Nose-first drop from 12 m', target: [0, 1.2, 1], dist: 11, yaw: 1.6, impact: [330, 570], settle: 760 },
 };
 // Imported vehicles (local content, never committed): RUBBLE_ROR_DIR = Rigs of Rods

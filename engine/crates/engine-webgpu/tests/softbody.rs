@@ -831,10 +831,11 @@ fn skinned_render_mesh_follows_the_physics_surface_through_a_crash() {
         part::BUMPER_F => "bumper_front",
         part::BUMPER_R => "bumper_rear",
         part::ENGINE => "engine",
+        part::ROOF => "roof",
         _ => "body",
     };
     let mut bindings = vec![None; vis.vertices.len()];
-    for pt in 0..=part::ENGINE {
+    for pt in 0..=part::ROOF {
         let ids: Vec<usize> = (0..vis.vertices.len()).filter(|&i| vis.part[i] == pt).collect();
         if ids.is_empty() {
             continue;
@@ -850,7 +851,7 @@ fn skinned_render_mesh_follows_the_physics_surface_through_a_crash() {
     let first = sim.soft_host().entry(h).first_body;
     // Paint vertices of the shell and the panels (what the eye reads as the body).
     let check: Vec<usize> = (0..vis.vertices.len())
-        .filter(|&i| vis.part[i] <= part::DOOR_RR)
+        .filter(|&i| vis.part[i] <= part::DOOR_RR || vis.part[i] == part::ROOF)
         .filter(|&i| vis.tris.iter().zip(&vis.tri_material).any(|(t, &m)| m == material::PAINT && t.contains(&(i as u32))))
         .collect();
     let surface_distance = |sim: &WgpuSim, pos: &[[f32; 4]]| -> Vec<f32> {
@@ -899,6 +900,8 @@ fn skinned_render_mesh_follows_the_physics_surface_through_a_crash() {
         q(0.99),
         q(1.0)
     );
-    assert!(q(0.95) < 0.05, "95% of the body stays within 5 cm of the physics skin");
+    // The brittle A-pillars partly snap at 56 km/h, so the roof shell (bound to
+    // the roof nodes) moves against the stretched windscreen faces by a few cm.
+    assert!(q(0.95) < 0.06, "95% of the body stays within 6 cm of the physics skin");
     assert!(q(0.5) < 0.01);
 }

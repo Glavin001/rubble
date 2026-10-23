@@ -37,6 +37,10 @@ pub struct CarParams {
     /// crushes the bay up to it and then pushes it back toward the cabin.
     pub engine_block: bool,
     pub engine_mass: f32,
+    /// Pillars (beams joining the roof to the body) are brittle: elastic up to
+    /// `pillar_strength` × strength, then they snap. A low bar that catches the
+    /// pillars shears the roof off instead of folding it (underride).
+    pub pillar_strength: f32,
 }
 
 impl Default for CarParams {
@@ -62,6 +66,7 @@ impl Default for CarParams {
             mount_strength: 0.3,
             engine_block: true,
             engine_mass: 160.0,
+            pillar_strength: 0.05,
         }
     }
 }
@@ -120,6 +125,7 @@ pub fn car_desc(p: &CarParams) -> (crate::SoftVehicleDesc, CarLayout) {
     parts.push(("bumper_front", layout.front_bumper.clone()));
     parts.push(("bumper_rear", layout.rear_bumper.clone()));
     parts.push(("engine", layout.engine.clone()));
+    parts.push(("roof", layout.roof.clone()));
     d.parts = parts
         .into_iter()
         .filter(|(_, n)| !n.is_empty())
@@ -150,6 +156,8 @@ pub struct CarLayout {
     pub rear_bumper: Vec<u32>,
     /// The engine block's eight nodes (empty without one).
     pub engine: Vec<u32>,
+    /// Roof nodes (the passenger cell's top rows).
+    pub roof: Vec<u32>,
 }
 
 /// [`car_truck`] and the layout of its nodes.
@@ -288,6 +296,10 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
         front_bumper: if p.bumper { (bumper_first as u32..bumper_first as u32 + 6).collect() } else { Vec::new() },
         rear_bumper: Vec::new(),
         engine: Vec::new(),
+        roof: (0..n)
+            .filter(|&k| cabin[k])
+            .flat_map(|k| [4usize, 5, 7].map(|j| (k * CAR_RING + j) as u32))
+            .collect(),
     };
     if p.panels {
         layout.rear_bumper = (rear_bumper_first as u32..rear_bumper_first as u32 + 6).collect();
@@ -406,6 +418,8 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
             door || (!cabin[k] && (k <= 1 || k + 4 >= n))
         }
     };
+    let roof_node = |i: usize| i < ring_nodes && cabin[i / CAR_RING] && matches!(i % CAR_RING, 4 | 5 | 7);
+    let pillar = |a: usize, b: usize| roof_node(a) != roof_node(b);
     let _ = writeln!(s, "beams");
     for zone_crumple in [false, true] {
         let (deform, strength) = if zone_crumple {
@@ -418,12 +432,28 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
             "set_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, {:.2}",
             p.spring, p.damp, deform, strength, p.plastic_coef
         );
-        for (a, b, o) in beams.iter().filter(|(a, b, _)| (crumple(*a) || crumple(*b)) == zone_crumple) {
+        for (a, b, o) in beams.iter().filter(|(a, b, _)| !pillar(*a, *b) && (crumple(*a) || crumple(*b)) == zone_crumple) {
             if o.is_empty() {
                 let _ = writeln!(s, "{a}, {b}");
             } else {
                 let _ = writeln!(s, "{a}, {b}, {o}");
             }
+        }
+    }
+    // Pillars: brittle (the yield threshold above the strength), so they snap.
+    let _ = writeln!(
+        s,
+        "set_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
+        p.spring,
+        p.damp,
+        p.strength * p.pillar_strength * 2.0,
+        p.strength * p.pillar_strength
+    );
+    for (a, b, o) in beams.iter().filter(|(a, b, _)| pillar(*a, *b)) {
+        if o.is_empty() {
+            let _ = writeln!(s, "{a}, {b}");
+        } else {
+            let _ = writeln!(s, "{a}, {b}, {o}");
         }
     }
     if p.bumper {
@@ -510,7 +540,9 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
                             mounts.push((pn, ring(k, jj)));
                         }
                     }
-                    mounts.push((pn, ring(k, if rows.contains(&7) { 6 } else { 7 })));
+                    // Out-of-plane anchor: the section's floor centre (a door must not
+                    // tie the roof to the body).
+                    mounts.push((pn, ring(k, 6)));
                 }
             }
             sheets.push((sheet, mounts));

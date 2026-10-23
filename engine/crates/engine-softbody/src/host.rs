@@ -248,6 +248,16 @@ impl SoftHost {
             .collect();
         if !tri_slots.is_empty() {
             backend.write_soft_slots(l.tri_base + first_tri, &tri_slots);
+            let rest: Vec<Slot> = desc
+                .triangles
+                .iter()
+                .map(|tri| {
+                    let p = |i: u32| Vec3::from_array(desc.nodes[i as usize].position);
+                    let [a, b, c] = tri.nodes.map(p);
+                    [(a - b).length().to_bits(), (b - c).length().to_bits(), (c - a).length().to_bits(), 0]
+                })
+                .collect();
+            backend.write_soft_slots(l.tri_rest_base + first_tri, &rest);
         }
         self.tris_used += tri_slots.len() as u32;
         let ordinal_base = self.particles_used;
@@ -395,7 +405,7 @@ impl SoftHost {
                 l.aabb_base,
                 c.particles_total,
                 st.contact_friction.to_bits(),
-                0,
+                l.tri_rest_base,
             ],
         ];
         backend.write_soft_slots(0, &header);

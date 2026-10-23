@@ -331,7 +331,7 @@ fn paintColor(car: u32) -> vec3f {
 `;
 
 // Visual part ids (engine_softbody::visual::part) → the procedural car's part names.
-const PART_NAMES = ['body', 'bonnet', 'boot', 'door_fl', 'door_rl', 'door_fr', 'door_rr', 'bumper_front', 'bumper_rear', 'body', 'engine'];
+const PART_NAMES = ['body', 'bonnet', 'boot', 'door_fl', 'door_rl', 'door_fr', 'door_rr', 'bumper_front', 'bumper_rear', 'body', 'engine', 'roof'];
 
 /**
  * Car renderer. `visual` = proceduralCarVisual() words; `soft` = the world's

@@ -40,6 +40,7 @@ pub mod part {
     pub const BUMPER_R: u8 = 8;
     pub const INTERIOR: u8 = 9;
     pub const ENGINE: u8 = 10;
+    pub const ROOF: u8 = 11;
 }
 
 #[derive(Clone, Debug, Default)]
@@ -321,6 +322,9 @@ pub fn car_visual(p: &CarParams, layout: &CarLayout, nodes: &[Vec3]) -> VisualMe
                 Region::Roof if (windscreen.0..windscreen.1).contains(&t) || (rear_window.0..rear_window.1).contains(&t) => {
                     (part::BODY, GLASS)
                 }
+                // The roof panel over the passenger cell: bound to the roof nodes, so a
+                // sheared-off roof carries its mesh away.
+                Region::Roof if !layout.roof.is_empty() && c.z > z_of(layout.cabin_first) && c.z < z_of(layout.cabin_last) => (part::ROOF, PAINT),
                 Region::Roof => (part::BODY, PAINT),
                 Region::Greenhouse => {
                     let pillar = (c.z - z_mid).abs() < 0.06;
@@ -453,13 +457,14 @@ pub fn car_visual(p: &CarParams, layout: &CarLayout, nodes: &[Vec3]) -> VisualMe
             part::BUMPER_R => rings(0..=0, &[0, 1, 2, 3, 6]),
             part::INTERIOR => rings(layout.cabin_first.saturating_sub(1)..=layout.cabin_last + 1, &[0, 1, 2, 3, 6]),
             part::ENGINE if !layout.engine.is_empty() => layout.engine.clone(),
+            part::ROOF => layout.roof.clone(),
             part::ENGINE => rings(layout.front_bay.saturating_sub(1)..=n - 1, &[0, 1, 2, 3, 6, 7]),
             _ => shell.clone(),
         }
     };
     let opts = BindOptions { candidates: 12, max_edge: 1.6 };
     let mut bindings = vec![None; b.mesh.vertices.len()];
-    for pt in 0..=part::ENGINE {
+    for pt in 0..=part::ROOF {
         let ids: Vec<usize> = (0..b.mesh.vertices.len()).filter(|&i| b.mesh.part[i] == pt).collect();
         if ids.is_empty() {
             continue;
