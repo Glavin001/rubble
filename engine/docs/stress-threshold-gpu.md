@@ -108,11 +108,13 @@ hits and 1.0× after. The `GpuWorld` dropped to 0.53× and then stopped.
   bodies as projectiles) is not ported yet. At scale it needs a spatial grid of the
   projectiles: the `GpuWorld`'s fast list is O(islands × fast bodies) and truncated at
   `MAX_FAST`.
-- **Determinism at scale.** fracturedTower is bit-identical run to run. The 49-house grid
-  is not. Neither is the `GpuWorld` with `STRESS_FRAME_SUBMITS=one`, so this lies in how
-  rubble steps in one command buffer.
-- **Settle on the 49-house grid.** It breaks about 2,800 bonds over 120 frames, against 62
-  in the `GpuWorld`. Loads agree at frame 1 (1.045 vs 1.050 × 10⁶ N). The engines part
-  from frame 2, and later bursts come from pieces landing at their Hertz peak.
+- **Fixed:** determinism and settling at scale. rubble sized its warm-start hash from a
+  read-back contact count, which this world never read back, so most contacts
+  cold-started. `WgpuSim::set_plan_hints` now gives it a fixed plan: the hash sized for the
+  contact capacity, every colour its own dispatch.
+  - The 49 houses now settle as the `GpuWorld` does: 64 bonds broken against 62, and
+    bit-identical run to run.
+  - 96 houses: median 4.7 ms per frame at 60 Hz (was 19.5), and 5.1 ms at 120 Hz with
+    p95 5.6 ms (budget 8.3).
 - **Host involvement left:** a shot's launch (one body write), and the error check, which
   the host reads a frame or more late.
