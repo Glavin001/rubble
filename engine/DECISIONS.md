@@ -451,3 +451,12 @@ s22. **One soft pass per iteration, and soft-body pair lists.**
 - Node lanes: node collision runs 8 lanes per node, each over every 8th candidate triangle.
 - Colour headroom: the browser plan now dispatches last step's rigid colours + 2, with the tail covering the rest.
 - `wgsl_export` now fails when a soft entry did not compile. A Slang error once left stale modules in place and measurements quietly ran old kernels.
+
+s23. **BDF2 particles are an experimental setting, off by default; they don't buy a coarser step.** `SoftSettings::bdf2` integrates particles with BDF2 instead of backward Euler:
+- inertial target (4/3)xₙ − (1/3)xₙ₋₁ + (2h/3)((4/3)vₙ − (1/3)vₙ₋₁) + (4/9)h²g, weighted (9/4)m/h²;
+- velocity (3x − 4xₙ + xₙ₋₁)/2h;
+- a particle falls back to backward Euler for the step after it has no history, a contact, or a beam yield or break. Without the fallback, BDF2 extrapolated the pre-impact velocity and crashes exploded.
+
+`soft_calibrate` results against 960 Hz × 30 (tap 42 Hz, 30/60 km/h crush max 22.8/50.2 cm):
+- 240 Hz × 10 with BDF2: tap 36 Hz (24 Hz under backward Euler). The 30 km/h crush improves to max 24.8 cm (from 36.9), but the 60 km/h crush worsens to max 209 cm (from 132).
+- 120 Hz × 10 is still out with either integrator: the 1 m drop bends 38–43 beams. Those errors come from unconverged impacts, not damping.

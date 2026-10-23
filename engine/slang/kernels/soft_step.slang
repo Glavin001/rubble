@@ -46,6 +46,7 @@ static const uint SOFT_BREAKING = 2u;
 static const uint SOFT_SLEEP_SYNC = 4u;
 static const uint SOFT_CONTACTS = 8u;
 static const uint SOFT_RIGID_MODE = 16u;
+static const uint SOFT_BDF2 = 32u;
 // Self-collision skips triangles nearer than this to the node in the rest body.
 static const float SELF_REST_GAP = 0.12;
 static const uint ENTRY_CONTACTER = 65536u;
@@ -97,6 +98,10 @@ uint softBodyColorBase() { return SU(8u).x; }
 uint softBodyColorStride() { return SU(8u).y; }
 uint softTriPlaneBase() { return SU(8u).z; }
 uint softPairBase() { return SU(8u).w; }
+uint softBdfBase() { return SU(9u).x; }
+bool softBdf2On() { return (softFlags() & SOFT_BDF2) != 0u; }
+// BDF2 for this particle this step: on, and it has a position one step back.
+bool softBdf2For(uint ord) { return softBdf2On() && SD(softBdfBase() + ord).w == 1.0; }
 static const uint SOFT_PAIR_STRIDE = 8u; // engine_softbody::SOFT_PAIR_STRIDE
 static const uint SOFT_PAIR_MAX = 31u;
 static const uint SOFT_PAIR_ALL = 0xFFFFFFFFu;
@@ -357,12 +362,53 @@ void soft_begin(uint3 tid : SV_DispatchThreadID)
             float3 a = (b.linearVel - vPrev) / max(h, 1e-6);
             float weight = clamp(dot(a, gv) / max(dot(gv, gv), 1e-6), 0.0, 1.0);
             float3 x = b.initialPos + b.linearVel * h + gv * (h * h * weight);
+            if (softBdf2For(ord))
+            {
+                // BDF2 inertial target: (4/3)xₙ − (1/3)xₙ₋₁ + (2h/3)((4/3)vₙ − (1/3)vₙ₋₁)
+                // + (4/9)h²g, weighted (9/4)·m/h² in the solve.
+                float3 xp = SD(softBdfBase() + ord).xyz;
+                float3 y = (4.0 / 3.0) * b.initialPos - (1.0 / 3.0) * xp
+                    + (2.0 * h / 3.0) * ((4.0 / 3.0) * b.linearVel - (1.0 / 3.0) * vPrev)
+                    + gv * (4.0 / 9.0 * h * h);
+                gAabbs[body].mn = y;
+            }
             gBodies[body].position = x;
             gSoftData[q] = float4(x, 0.0);
             gSoftData[q + 1u] = float4(x, 0.0);
             gSoftData[q + 2u] = float4(b.linearVel, 0.0);
         }
     }
+}
+
+// After velocity extraction: BDF2 velocity v = (3x − 4xₙ + xₙ₋₁)/(2h) where the
+// particle has its history, then xₙ becomes the history (none for a sleeping or
+// static particle, or under backward Euler).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void soft_velocity(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (i >= softListCount()) return;
+    uint4 ent = SU(softListBase() + i);
+    uint body = ent.x;
+    uint ord = particleOrdinal(ent.w & 0xFFFFu, body);
+    uint slot = softBdfBase() + ord;
+    BodyState b = gBodies[body];
+    if (!softBdf2On() || !bodyIsDynamic(b) || bodyIsSleeping(b) || wakePending(b))
+    {
+        gSoftData[slot] = float4(0.0, 0.0, 0.0, 0.0);
+        return;
+    }
+    float4 xp = SD(slot);
+    // This step was BDF2 (w = 1, or 2: a beam of it yielded or broke since).
+    if (xp.w >= 1.0)
+        gBodies[body].linearVel = (3.0 * b.position - 4.0 * b.initialPos + xp.xyz) / (2.0 * max(PARAMS.dt, 1e-6));
+    // Next step BDF2 only if nothing interrupted it: no yield or break of its
+    // beams, no contact (an impact's velocity jump would be extrapolated).
+    bool contact = SOLVE_INDEX(body + 1u) != SOLVE_INDEX(body)
+        || (softContactsOn() && SD(softFlagBase() + ord).x != 0.0);
+    bool smooth = xp.w != 2.0 && !contact;
+    gSoftData[slot] = float4(b.initialPos, smooth ? 1.0 : 0.0);
 }
 
 // ---------------------------------------------------------------------------
@@ -978,6 +1024,7 @@ uint softAccumulate(uint4 ent, uint lane, uint lanes, out float3x3 H, out float3
         // No contact or joint edge: primalAccumulate's linear block is the inertia
         // term alone (same arithmetic), without its 6×6 accumulation.
         float k = (b.invMass > 1e-12 ? (1.0 / b.invMass) : 0.0) / (p.dt * p.dt);
+        if (softBdf2For(particleOrdinal(ent.w & 0xFFFFu, body))) k *= 2.25;
         float3 dp = b.position - gAabbs[body].mn;
         H = float3x3(k, 0.0, 0.0, 0.0, k, 0.0, 0.0, 0.0, k);
         g = float3(k * dp.x, k * dp.y, k * dp.z);
@@ -992,6 +1039,13 @@ uint softAccumulate(uint4 ent, uint lane, uint lanes, out float3x3 H, out float3
             A.m[6], A.m[7], A.m[13],
             A.m[12], A.m[13], A.m[14]);
         g = float3(rhs.v[0], rhs.v[1], rhs.v[2]);
+        if (softBdf2For(particleOrdinal(ent.w & 0xFFFFu, body)))
+        {
+            // BDF2 inertia weight 9/4: add the other 5/4 of primalAccumulate's term.
+            float k = 1.25 * (b.invMass > 1e-12 ? (1.0 / b.invMass) : 0.0) / (p.dt * p.dt);
+            H += float3x3(k, 0.0, 0.0, 0.0, k, 0.0, 0.0, 0.0, k);
+            g += k * (b.position - gAabbs[body].mn);
+        }
     }
 
     float3 xa = b.position;
@@ -1287,6 +1341,16 @@ void soft_primal_bodies(uint3 lid : SV_GroupThreadID, uint3 gid : SV_GroupID)
     if (!isSoft) vehicleIterateOne((gid.x - nb) * 256u + local);
 }
 
+// A yield or a break: both ends take a backward-Euler step next (BDF2's history
+// no longer describes them). Marks the history slot (w = 2); soft_velocity reads it.
+void softBdf2Interrupt(uint s, uint a, uint b)
+{
+    if (!softBdf2On()) return;
+    uint ia = softBdfBase() + particleOrdinal(s, a), ib = softBdfBase() + particleOrdinal(s, b);
+    if (SD(ia).w == 1.0) gSoftData[ia].w = 2.0;
+    if (SD(ib).w == 1.0) gSoftData[ib].w = 2.0;
+}
+
 // A yield or a break keeps its body soft: restart its quiet count.
 void softQuietReset(uint s)
 {
@@ -1486,6 +1550,7 @@ void soft_plastic(uint3 tid : SV_DispatchThreadID)
             e.deformC *= old / e.rest;
             e.meta |= BEAM_YIELDED;
             softQuietReset(beamSoftBody(e));
+            softBdf2Interrupt(beamSoftBody(e), e.a, e.b);
         }
         else if (-force > dt && delta > 0.0)
         {
@@ -1500,6 +1565,7 @@ void soft_plastic(uint3 tid : SV_DispatchThreadID)
             e.strength -= deform * k / ts;
             e.meta |= BEAM_YIELDED;
             softQuietReset(beamSoftBody(e));
+            softBdf2Interrupt(beamSoftBody(e), e.a, e.b);
         }
     }
     e.force = force;

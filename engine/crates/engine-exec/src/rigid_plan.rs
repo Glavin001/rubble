@@ -522,6 +522,8 @@ pub fn encode_step(
         e.d("vehicle_post", u64::from(i.vehicle_count));
     }
     if soft {
+        // BDF2 velocities and history (a no-op under backward Euler).
+        e.d("soft_velocity", u64::from(i.soft.particles.max(1)));
         e.d("soft_sleep", u64::from(i.soft.bodies));
     }
     e.d("write_sleep_args", 64);
@@ -617,6 +619,7 @@ pub const SOFT_ENTRIES: &[&str] = &[
     "soft_bounds",
     "soft_tri_planes",
     "soft_pairs",
+    "soft_velocity",
     "soft_collide_nodes",
     "soft_collide_tris",
     "soft_primal",
