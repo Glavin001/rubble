@@ -34,6 +34,7 @@ pub struct Renderer {
     projectiles: Buffer,
     counts: [u64; 3],
     projectile_per_slot: u64,
+    projectile_slots: u32,
     copies: u64,
     stride: u32,
     /// Joints per house copy; 0 when the scene has none (bond lines then hide once their
@@ -113,6 +114,7 @@ impl Renderer {
                 scene.lines.len() as u64 / 10,
                 scene.road_vertices.len() as u64 / 10,
             ],
+            projectile_slots: scene.projectile_count,
             projectile_per_slot: scene.projectile_vertices.len() as u64
                 / 10
                 / scene.projectile_count.max(1) as u64,
@@ -232,7 +234,8 @@ impl Renderer {
             e.draw_primitives(
                 MTLPrimitiveType::Triangle,
                 0,
-                shots as u64 * self.projectile_per_slot,
+                // The newest `projectile_slots` (each shot past them reuses the oldest).
+                shots.min(self.projectile_slots) as u64 * self.projectile_per_slot,
             );
         }
         if show_bonds && self.counts[1] > 0 {

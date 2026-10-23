@@ -348,7 +348,7 @@ impl App {
                 let (c, s) = (l.sim.last, &l.scene);
                 let copies = s.copies.max(1);
                 format!(
-                    "Fracture lab · Metal · {}{} · {} pieces · {} {} · {} bonds{} · {} · {}{}/16 shots · {} contacts · {} awake · {:.1} s{}",
+                    "Fracture lab · Metal · {}{} · {} pieces · {} {} · {} bonds{} · {} · {}{} shots · {} contacts · {} awake · {:.1} s{}",
                     l.name,
                     l.level.map_or(String::new(), |v| format!(" · L{v}")),
                     s.selected.len() as u32 * copies,
@@ -469,7 +469,7 @@ impl App {
         };
         let c = l.sim.last;
         format!(
-            "{}/16 shots · {} steps · {} contacts · {} candidates · {} awake",
+            "{} shots · {} steps · {} contacts · {} candidates · {} awake",
             l.sim.shots(),
             l.sim.steps(),
             c.contact,

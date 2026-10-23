@@ -656,7 +656,8 @@ impl Renderer {
         let lines = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("render lines"),
             size: (line_capacity * std::mem::size_of::<LineVertex>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            // STORAGE: the GPU-resident threshold world writes them (`draw_resident`).
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
         let texture = |label: &str, format: wgpu::TextureFormat, samples: u32, usage: wgpu::TextureUsages| {
@@ -744,6 +745,68 @@ impl Renderer {
         out
     }
 
+    /// The objects buffer (per object 3 rows and a colour), the bond lines' vertices
+    /// (7 floats each), each structure's chunks' objects, and the first impactor's object:
+    /// what a GPU writer fills for [`Self::draw_resident`].
+    pub fn resident_targets(&self) -> (&wgpu::Buffer, &wgpu::Buffer, &[Vec<u32>], u32) {
+        (&self.objects, &self.lines, &self.chunk_object, self.impactor_base)
+    }
+
+    /// Room for bond-line vertices.
+    pub fn line_capacity(&self) -> usize {
+        self.line_capacity
+    }
+
+    /// Draw what a GPU writer left in the objects and lines buffers ([`Self::resident_targets`],
+    /// recorded into `encoder` before this): nothing read from the host but the ground's
+    /// object and the camera. `line_vertices`: the bond lines' vertices to draw (0: none).
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_resident(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, view_proj: [[f32; 4]; 4], eye: Vec3, line_vertices: u32) {
+        let ground = if self.ground { Object { rows: rows(Mat3::IDENTITY, Vec3::ZERO), color: [0.56, 0.58, 0.55, 2.0] } } else { Object { rows: [[0.0; 4]; 3], color: [0.0; 4] } };
+        gpu.queue.write_buffer(&self.objects, 0, bytemuck::bytes_of(&ground));
+        self.pass(gpu, encoder, target, view_proj, eye, line_vertices.min(self.line_capacity as u32));
+    }
+
+    /// The camera, then the geometry and `line_vertices` of the bond lines into `target`.
+    fn pass(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, view_proj: [[f32; 4]; 4], eye: Vec3, line_vertices: u32) {
+        let light = Vec3::new(-0.45, -0.55, 0.70).normalized();
+        let uniform = CameraUniform {
+            view_proj,
+            eye: [eye.x as f32, eye.y as f32, eye.z as f32, 1.0],
+            light: [light.x as f32, light.y as f32, light.z as f32, self.fade as f32],
+        };
+        gpu.queue.write_buffer(&self.camera, 0, bytemuck::bytes_of(&uniform));
+        let view = target;
+        let bg = self.background;
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("render"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.msaa,
+                depth_slice: None,
+                resolve_target: Some(view),
+                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: bg[0], g: bg[1], b: bg[2], a: 1.0 }), store: wgpu::StoreOp::Discard },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth,
+                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind, &[]);
+        pass.set_vertex_buffer(0, self.vertices.slice(..));
+        pass.draw(0..self.vertex_count, 0..1);
+        if line_vertices > 0 {
+            pass.set_pipeline(&self.line_pipeline);
+            pass.set_bind_group(0, &self.line_bind, &[]);
+            pass.set_vertex_buffer(0, self.lines.slice(..));
+            pass.draw(0..line_vertices, 0..1);
+        }
+    }
+
     /// Record the solver's current state, seen through `view_proj` from `eye` (Z up),
     /// into `target` (resolved from the multisampled image; the renderer's size and format).
     #[allow(clippy::too_many_arguments)]
@@ -808,45 +871,7 @@ impl Renderer {
             line_verts.truncate(self.line_capacity);
             gpu.queue.write_buffer(&self.lines, 0, bytemuck::cast_slice(&line_verts));
         }
-        let light = Vec3::new(-0.45, -0.55, 0.70).normalized();
-        let uniform = CameraUniform {
-            view_proj,
-            eye: [eye.x as f32, eye.y as f32, eye.z as f32, 1.0],
-            light: [light.x as f32, light.y as f32, light.z as f32, self.fade as f32],
-        };
-        gpu.queue.write_buffer(&self.camera, 0, bytemuck::bytes_of(&uniform));
-
-        {
-            let view = target;
-            let bg = self.background;
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("render"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.msaa,
-                    depth_slice: None,
-                    resolve_target: Some(view),
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: bg[0], g: bg[1], b: bg[2], a: 1.0 }), store: wgpu::StoreOp::Discard },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bind, &[]);
-            pass.set_vertex_buffer(0, self.vertices.slice(..));
-            pass.draw(0..self.vertex_count, 0..1);
-            if !line_verts.is_empty() {
-                pass.set_pipeline(&self.line_pipeline);
-                pass.set_bind_group(0, &self.line_bind, &[]);
-                pass.set_vertex_buffer(0, self.lines.slice(..));
-                pass.draw(0..line_verts.len() as u32, 0..1);
-            }
-        }
+        self.pass(gpu, encoder, target, view_proj, eye, line_verts.len() as u32);
     }
 }
 

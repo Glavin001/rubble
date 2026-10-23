@@ -1236,6 +1236,21 @@ impl WgpuSim {
     /// Encode and submit one step without waiting for it (pipelined hosts and
     /// benchmarks). Previous-step counts reach the next step through GPU copies,
     /// as in the browser host; `drain` waits and refreshes the counters.
+    /// Planning hints for a host that never reads the counters back (pipelined steps): the
+    /// previous step's contacts (sizes the warm-start hash; the count itself is forwarded on
+    /// the GPU) and its colours (how many get their own dispatch; the rest run in the
+    /// sparse tail, which solves them the same way). Leaves the asleep skip's bookkeeping
+    /// alone: a hint never skips a step.
+    pub fn set_plan_hints(&mut self, contacts: u32, colors: u32) {
+        self.last_counters.contact_count = contacts;
+        self.last_counters.color_count = colors;
+    }
+
+    /// Steps run so far (`HOST_S(17)`: a moved body's generation is the step it moved in).
+    pub fn steps_done(&self) -> u32 {
+        self.steps_done
+    }
+
     pub fn step_submit(&mut self) -> Result<(), ExecError> {
         self.step_core(false, false).map(|_| ())
     }

@@ -49,6 +49,8 @@ pub mod ingest_check;
 pub mod resident;
 #[cfg(feature = "gpu")]
 pub mod render;
+#[cfg(feature = "gpu")]
+pub mod threshold;
 
 use std::collections::HashMap;
 use std::ops::Range;

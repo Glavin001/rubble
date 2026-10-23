@@ -49,6 +49,14 @@ struct Loaded {
     totals: (usize, usize, usize),
 }
 
+/// The threshold profile's GPU-resident world and its renderer.
+struct TLoaded {
+    world: stress_rubble::threshold::ThresholdWorld,
+    renderer: Renderer,
+    behind: f64,
+    totals: (usize, usize, usize),
+}
+
 /// What the lab's shot rule needs of the scene (asset frame, +Y up).
 #[derive(Clone, Copy)]
 struct Shooting {
@@ -66,6 +74,11 @@ struct Shooting {
 thread_local! {
     static DEVICE: RefCell<Option<Device>> = const { RefCell::new(None) };
     static WORLD: RefCell<Option<Loaded>> = const { RefCell::new(None) };
+    /// The threshold profile's GPU-resident world (`stress_rubble::threshold`), when the
+    /// load chose it (`stress_set_threshold_gpu`).
+    static TWORLD: RefCell<Option<TLoaded>> = const { RefCell::new(None) };
+    /// The threshold profile on the GPU-resident world (default) or the resident GpuWorld.
+    static THRESHOLD_GPU: Cell<bool> = const { Cell::new(true) };
     /// What the next load builds (`stress_set_glb`, `stress_set_cuboid`, `stress_set_pack`).
     static SOURCE: RefCell<Source> = const { RefCell::new(Source::Glb(Vec::new())) };
     /// What the last load could not take from its input as given (`stress_stats`).
@@ -191,6 +204,21 @@ pub fn stress_phases() -> Vec<f64> {
     PHASES.get().to_vec()
 }
 
+/// The next threshold load on the GPU-resident world (`stress_rubble::threshold`: the
+/// splits, loads and drawing on the GPU, nothing read back), or on the resident GpuWorld.
+#[wasm_bindgen]
+pub fn stress_set_threshold_gpu(on: bool) {
+    THRESHOLD_GPU.set(on);
+}
+
+/// Whether the next threshold load runs on the GPU-resident world
+/// (`stress_set_threshold_gpu`, default on).
+#[wasm_bindgen]
+pub fn stress_threshold_gpu() -> bool {
+    THRESHOLD_GPU.get()
+}
+
+/// Running (the frames step) or paused.
 #[wasm_bindgen]
 pub fn stress_set_running(on: bool) {
     RUNNING.set(on);
@@ -297,7 +325,8 @@ pub fn stress_zoom(delta_y: f64) {
 #[wasm_bindgen]
 pub fn stress_shoot(u: f64, v: f64) -> bool {
     let Some(s) = SHOOTING.get() else { return false };
-    if FIRED.get() >= SHOTS {
+    // The resident GpuWorld draws SHOTS balls; the threshold world reuses its oldest.
+    if FIRED.get() >= SHOTS && TWORLD.with_borrow(|w| w.is_none()) {
         return false;
     }
     let (w, h) = SIZE.get();
@@ -341,6 +370,7 @@ pub extern "C" fn stress_load(level: u32) -> u32 {
 
 fn load(level: u8) -> Result<(), String> {
     WORLD.with_borrow_mut(|w| *w = None);
+    TWORLD.with_borrow_mut(|w| *w = None);
     // The lab's own scene (its camera, centre, extent and projectile) and the stress
     // oracle's input: the GLB's level, the cuboid houses in their layout, or the pack.
     let profile = PROFILE.get();
@@ -396,6 +426,25 @@ fn load(level: u8) -> Result<(), String> {
     scene.sim.methods = stress_ref::scene::Methods::established();
     profile.apply_scene(&mut scene);
     scene.materials.entry("projectile".into()).or_insert_with(stress_ref::builders::elastic_steel);
+    if profile == Profile::Threshold && THRESHOLD_GPU.get() {
+        return DEVICE.with_borrow(|d| {
+            let d = d.as_ref().ok_or("stress_init first")?;
+            let gpu = &d.gpu;
+            let s = SHOOTING.get().expect("shooting set");
+            let mut world = stress_rubble::threshold::ThresholdWorld::new(gpu, &scene, s.radius, s.mass)?;
+            let shots = world.shot_impactors();
+            let renderer = Renderer::for_target(gpu, &world.mirror, &shots, d.config.width, d.config.height, d.view_format);
+            world.attach_view(gpu, &renderer);
+            let m = &world.mirror;
+            let totals = (
+                m.structures.iter().map(|s| s.chunks.len()).sum::<usize>(),
+                m.structures.iter().flat_map(|s| &s.chunks).map(|c| c.parts.as_ref().map_or(1, |p| p.len())).sum::<usize>(),
+                world.tables.bond_count() as usize,
+            );
+            TWORLD.with_borrow_mut(|w| *w = Some(TLoaded { world, renderer, behind: 0.0, totals }));
+            Ok(())
+        });
+    }
     DEVICE.with_borrow(|d| {
         let d = d.as_ref().ok_or("stress_init first")?;
         let gpu = &d.gpu;
@@ -431,6 +480,9 @@ fn load(level: u8) -> Result<(), String> {
 /// under a 120 Hz simulation, or a hitch) otherwise drops time and the run falls behind
 /// real time even when each physics frame is fast.
 const MAX_BEHIND_S: f64 = 0.1;
+/// Physics frames the GPU-resident threshold world may have queued ahead of the last one the
+/// GPU finished (its counters read back).
+const IN_FLIGHT: u64 = 3;
 
 #[no_mangle]
 pub extern "C" fn stress_frame(elapsed_ms: f64) -> u32 {
@@ -440,7 +492,130 @@ pub extern "C" fn stress_frame(elapsed_ms: f64) -> u32 {
     }
 }
 
+/// The lab's camera for the renderer: its view-projection and eye in the stress scene's
+/// frame. The lab's camera looks at its own frame (the asset, +Y up, moved by
+/// `placement`); the renderer draws the stress scene's (+Z up): view_proj times the map
+/// from the stress frame into the lab's, column by column.
+fn camera_view(width: u32, height: u32) -> ([[f32; 4]; 4], Vec3) {
+    let aspect = width as f64 / height as f64;
+    let (vp, eye) = CAMERA.with_borrow(|c| {
+        let c = c.as_ref().expect("a camera with the world");
+        (c.view_proj(aspect), c.eye(aspect))
+    });
+    let p = SHOOTING.get().map_or([0.0; 3], |s| s.placement);
+    let col = |k: usize| -> [f32; 4] { std::array::from_fn(|r| vp[4 * k + r]) };
+    let (c0, c1, c2, c3) = (col(0), col(1), col(2), col(3));
+    let moved: [f32; 4] = std::array::from_fn(|r| p[0] as f32 * c0[r] + p[1] as f32 * c1[r] + p[2] as f32 * c2[r] + c3[r]);
+    let view_proj = [c0, c2.map(|x| -x), c1, moved];
+    let eye = Vec3::from_array(zup(std::array::from_fn(|k| eye[k] - p[k])));
+    (view_proj, eye)
+}
+
+/// A frame of the threshold profile's GPU-resident world: the frames due (shots
+/// launched), the view written on the GPU and drawn, the counters as the GPU last
+/// finished them (never waited for). Nothing here reads the GPU.
+fn frame_threshold(d: &mut Device, l: &mut TLoaded, elapsed_ms: f64) -> Result<(), String> {
+    let gpu = &d.gpu;
+    let (width, height) = SIZE.get();
+    if (width, height) != (d.config.width, d.config.height) {
+        d.config.width = width;
+        d.config.height = height;
+        d.surface.configure(&gpu.device, &d.config);
+        let shots = l.world.shot_impactors();
+        l.renderer = Renderer::for_target(gpu, &l.world.mirror, &shots, width, height, d.view_format);
+        l.world.attach_view(gpu, &l.renderer);
+    }
+    let dt = l.world.frame_dt;
+    let mut stepped = 0;
+    let t_step = web_time::Instant::now();
+    if RUNNING.get() {
+        l.behind = (l.behind + elapsed_ms * 1e-3).min(MAX_BEHIND_S.max(2.0 * dt));
+        for desc in PENDING.with_borrow_mut(std::mem::take) {
+            l.world.launch(gpu, &desc);
+        }
+        // At most `IN_FLIGHT` frames queued ahead of what the GPU has finished: when it
+        // cannot keep up, the simulation runs slower than real time instead of the queue
+        // (and with it the display's frames) backing up.
+        while l.behind >= dt {
+            l.world.poll(gpu);
+            if l.world.frame >= l.world.last.frame + IN_FLIGHT {
+                l.behind = 0.0;
+                break;
+            }
+            l.world.step_frame(gpu)?;
+            l.behind -= dt;
+            stepped += 1;
+        }
+    }
+    let step_ms = t_step.elapsed().as_secs_f64() * 1e3;
+    let (view_proj, eye) = camera_view(width, height);
+    let texture = match d.surface.get_current_texture() {
+        wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+        _ => return Ok(()),
+    };
+    let view = texture.texture.create_view(&wgpu::TextureViewDescriptor { format: Some(d.view_format), ..Default::default() });
+    let t_draw = web_time::Instant::now();
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    let (bonds, colors) = VIEW.get();
+    let mode = match colors {
+        ColorMode::Material => 0,
+        ColorMode::Sleep => 1,
+        ColorMode::Bodies => 2,
+    };
+    let lines = l.world.encode_view(gpu, &mut encoder, &l.renderer, mode, bonds);
+    l.renderer.draw_resident(gpu, &mut encoder, &view, view_proj, eye, lines);
+    gpu.queue.submit([encoder.finish()]);
+    gpu.queue.present(texture);
+    let draw_ms = t_draw.elapsed().as_secs_f64() * 1e3;
+    PHASES.set([step_ms, 0.0, draw_ms]);
+    let st = l.world.poll(gpu);
+    let s = SHOOTING.get();
+    let stats = serde_json::json!({
+        "gpuResident": true,
+        "simSeconds": l.world.frame as f64 * dt,
+        "stepMs": if stepped > 0 { step_ms / stepped as f64 } else { 0.0 },
+        "chunks": l.totals.0,
+        "hulls": l.totals.1,
+        "bonds": l.totals.2,
+        "shots": FIRED.get(),
+        "warnings": WARNINGS.with_borrow(|w| w.clone()),
+        "ballMass": s.map_or(0.0, |s| s.mass),
+        "ballRadius": s.map_or(0.0, |s| s.radius),
+        "ballSpeed": s.map_or(0.0, |s| engine_fracture::plan::default_shot_speed(s.extent, s.speed)),
+        "frameHz": 1.0 / dt,
+        "profile": PROFILE.get().name(),
+        // As the GPU last finished them (a frame or two behind).
+        "frames": l.world.frame,
+        "statsFrame": st.frame,
+        "bodies": st.bodies,
+        "fragments": st.bodies,
+        "brokenBonds": st.broken,
+        "splitFrames": st.split_frames,
+        "awake": st.awake,
+        "contacts": st.contacts,
+        "errors": st.error,
+        "engineOverflow": st.engine_overflow,
+        "compactions": 0,
+    });
+    STATS.set(stats.to_string());
+    if st.error != 0 || st.engine_overflow != 0 {
+        // Paused: one report, not one a frame.
+        RUNNING.set(false);
+        return Err(format!("threshold world: fracture errors {:#x}, engine overflow {:#x} (fracture: 1 no free body slot, 2 a mass sum out of range, 4 a union did not settle, 8 the impact pulse pool is full; engine: 1 contacts, 2 candidate pairs, 64 manifolds)", st.error, st.engine_overflow));
+    }
+    Ok(())
+}
+
 fn frame(elapsed_ms: f64) -> Result<(), String> {
+    let threshold = DEVICE.with_borrow_mut(|d| {
+        TWORLD.with_borrow_mut(|w| match (d.as_mut(), w.as_mut()) {
+            (Some(d), Some(l)) => Some(frame_threshold(d, l, elapsed_ms)),
+            _ => None,
+        })
+    });
+    if let Some(r) = threshold {
+        return r;
+    }
     DEVICE.with_borrow_mut(|d| {
         let d = d.as_mut().ok_or("stress_init first")?;
         WORLD.with_borrow_mut(|w| {
@@ -473,20 +648,7 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
                     stepped += 1;
                 }
             }
-            let aspect = width as f64 / height as f64;
-            let (vp, eye) = CAMERA.with_borrow(|c| {
-                let c = c.as_ref().expect("a camera with the world");
-                (c.view_proj(aspect), c.eye(aspect))
-            });
-            // The lab's camera looks at its own frame (the asset, +Y up, moved by
-            // `placement`); the renderer draws the stress scene's (+Z up): view_proj times
-            // the map from the stress frame into the lab's, column by column.
-            let p = SHOOTING.get().map_or([0.0; 3], |s| s.placement);
-            let col = |k: usize| -> [f32; 4] { std::array::from_fn(|r| vp[4 * k + r]) };
-            let (c0, c1, c2, c3) = (col(0), col(1), col(2), col(3));
-            let moved: [f32; 4] = std::array::from_fn(|r| p[0] as f32 * c0[r] + p[1] as f32 * c1[r] + p[2] as f32 * c2[r] + c3[r]);
-            let view_proj = [c0, c2.map(|x| -x), c1, moved];
-            let eye = Vec3::from_array(zup(std::array::from_fn(|k| eye[k] - p[k])));
+            let (view_proj, eye) = camera_view(width, height);
             // Every GPU read of the view (splits, bonds, the engine's motion) before the
             // canvas texture is taken: none waits while the frame holds it.
             let t_view = web_time::Instant::now();
