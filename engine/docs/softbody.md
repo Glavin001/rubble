@@ -233,14 +233,14 @@ glTF that is not built yet; the binding and the skinning shader are what it woul
 **Damage character.** Front residual crush, inward fold ("wrap") of the front ring, and
 side intrusion, in cm; raw file thresholds at 240 Hz × 10 iterations:
 
-| Impact | Bent beams | Front crush | Front wrap | Struck / far side intrusion |
-|---|---|---|---|---|
-| Rigid wall, 54 km/h | 237 | 11.4 | 0 | 0.5 / 0.4 |
-| 20 cm pole, 40 km/h | 93 | 0.6 | 3.6 | 0 / 0 |
-| 1,500 kg block into the side, 40 km/h | 158 | 0.4 | 0 | 4.2 / 0.5 |
+| Impact | Bent beams | Front crush | Front wrap | Struck / far side intrusion | Mid-car crush |
+|---|---|---|---|---|---|
+| Rigid wall, 54 km/h | 209 | 11.0 | −0.1 | 0.5 / 0.5 | 0.0 |
+| 20 cm pole, 40 km/h | 90 | 0.6 | 3.6 | 0 / 0 | 0.0 |
+| 1,500 kg block into the side, 40 km/h | 108 | 0.2 | 0 | 1.9 / −0.1 | — |
 
-With the calibrated threshold scale (0.30 at 240 Hz) the same tests give 426, 268 and
-368 bent beams: 16.9 cm wall crush, a 6.1 cm pole wrap, and 7.6 cm side intrusion.
+The demo applies the calibrated threshold scale (below), so the same impacts bend more
+and crush deeper there. The head-on at 2 × 29 km/h, for example, bends 242 beams per car.
 
 ## Calibration
 
