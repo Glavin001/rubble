@@ -410,6 +410,7 @@ impl RigidStep {
                     look_ahead: self.params.flags & engine_schema::FLAG_SPEC_VELOCITY != 0,
                     projectiles: counts.get(6).copied().unwrap_or(0),
                     characters: counts.get(7).copied().unwrap_or(0),
+                    queries: counts.get(8).copied().unwrap_or(0),
                 }
             },
         }
@@ -465,7 +466,7 @@ impl RigidStep {
         };
         // Every kernel a step can emit (small and large scenes, joints, vehicles).
         for (n, prefix, motion) in [(1u32, true, 0u32), (4096, false, 0), (4096, false, 7)] {
-            let mut i = s.inputs(&[n, n, 1, 1, 1, motion, motion, motion]);
+            let mut i = s.inputs(&[n, n, 1, 1, 1, motion, motion, motion, motion]);
             i.sleep_time = 0.5;
             i.motion.look_ahead = motion != 0;
             for c in engine_exec::rigid_plan::encode_step(&s.modes(), &i, false, prefix) {

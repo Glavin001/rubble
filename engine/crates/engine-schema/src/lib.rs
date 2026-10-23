@@ -7,6 +7,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat3, Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
+pub mod character;
 pub mod commands;
 pub mod convex;
 pub mod handles;
@@ -253,10 +254,12 @@ pub const FAST_COUNT: u32 = CCD_BASE + 1;
 pub const IMPULSE_COUNT: u32 = CCD_BASE + 2;
 /// TOI casts that left their pair to look-ahead this step (GJK budget).
 pub const CCD_FALLBACKS: u32 = CCD_BASE + 3;
+/// Host impulse records this step (`apply_impulses`' late pass starts after them).
+pub const IMPULSE_FIRST: u32 = CCD_BASE + 4;
 /// Awake `BODY_CCD` bodies a step can hold; more set `OVERFLOW_CCD_BODIES`.
 pub const CCD_BODY_CAP: u32 = 1024;
 /// Four words per CCD body: body, min TOI bits, winning candidate, flags.
-pub const CCD_BODY_BASE: u32 = CCD_BASE + 4;
+pub const CCD_BODY_BASE: u32 = CCD_BASE + 8;
 /// Colliders whose sweep is longer than a grid cell (fast list); more set
 /// `OVERFLOW_FAST_LIST`.
 pub const FAST_CAP: u32 = 1024;
@@ -265,8 +268,9 @@ pub const FAST_BASE: u32 = CCD_BODY_BASE + 4 * CCD_BODY_CAP;
 pub const IMPULSE_CAP: u32 = 1024;
 pub const IMPULSE_WORDS: u32 = 8;
 pub const IMPULSE_BASE: u32 = FAST_BASE + FAST_CAP;
-/// Impulse record modes: an impulse at a world point (dynamic bodies), or a
-/// kinematic body's new velocity (`j` linear, `point` angular).
+/// Impulse record modes (low 8 bits of `mode`; the rest is the record's sum
+/// order key): an impulse at a world point (dynamic bodies), or a kinematic
+/// body's new velocity (`j` linear, `point` angular).
 pub const IMPULSE_AT_POINT: u32 = 0;
 pub const IMPULSE_SET_VELOCITY: u32 = 1;
 
@@ -397,6 +401,8 @@ pub const OVERFLOW_LARGE_DYNAMICS: u32 = 2048;
 pub const OVERFLOW_CCD_BODIES: u32 = 4096;
 /// More impulse records than `IMPULSE_CAP` in one step.
 pub const OVERFLOW_IMPULSES: u32 = 8192;
+/// A character gathered more colliders than `character::CHAR_MAX_CANDIDATES`.
+pub const OVERFLOW_CHAR_CANDIDATES: u32 = 16384;
 /// Oversized-static list (statics wider than half a grid cell, uniform grid):
 /// this many collider ids in the scratch-atomics buffer at `LARGE_STATIC_BASE`.
 pub const LARGE_STATIC_CAP: u32 = 1024;

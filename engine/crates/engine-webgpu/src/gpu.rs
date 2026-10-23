@@ -153,6 +153,14 @@ pub struct WgpuSim {
     impulse_queue: Vec<ImpulseRecord>,
     /// The step being encoded applies impulse records.
     impulses_this_step: bool,
+    /// Character / query / projectile pool (binding 32).
+    char_cap: engine_schema::character::CharacterCapacity,
+    /// Characters: (inner kinematic body, inner collider).
+    characters: Vec<(u32, u32)>,
+    query_count: u32,
+    projectile_count: u32,
+    /// Event ring read cursor of `poll_motion_events`.
+    motion_events_seen: u32,
 }
 
 /// Motion bookkeeping of uploaded bodies: CCD and kinematic flags.
@@ -399,6 +407,8 @@ impl WgpuSim {
         let mut sizes = sizes;
         sizes[9] += u64::from(4 * (vehicle_capacity.max_vehicles + vehicle_capacity.max_wheels)) * 32;
         sizes[31] = vehicle_capacity.bytes().max(16);
+        let char_cap = engine_schema::character::CharacterCapacity::default();
+        sizes[32] = char_cap.bytes().max(16);
         let mut bufs = Vec::with_capacity(BIND_COUNT);
         for (i, &bytes) in sizes.iter().enumerate() {
             let usage = wgpu::BufferUsages::COPY_DST
@@ -611,7 +621,13 @@ impl WgpuSim {
             has_kinematic: false,
             impulse_queue: Vec::new(),
             impulses_this_step: false,
+            char_cap,
+            characters: Vec::new(),
+            query_count: 0,
+            projectile_count: 0,
+            motion_events_seen: 0,
         };
+        sim.write_character_header();
         // Kernel fixtures in the unit tests set the modes they exercise on top
         // of the pre-P0 controls; integration tests run the shipped defaults.
         #[cfg(test)]
@@ -738,12 +754,17 @@ impl WgpuSim {
         let n = self.impulse_queue.len() as u32;
         self.impulses_this_step = n > 0;
         if n > 0 {
-            self.queue.write_buffer(
-                &self.bufs[21],
-                u64::from(IMPULSE_BASE) * 4,
-                bytemuck::cast_slice(&self.impulse_queue),
-            );
+            // Mode word: mode | queue index << 8 (the per-body sum order).
+            let keyed: Vec<ImpulseRecord> = self
+                .impulse_queue
+                .iter()
+                .enumerate()
+                .map(|(k, r)| ImpulseRecord { mode: (r.mode & 255) | ((k as u32) << 8), ..*r })
+                .collect();
+            self.queue.write_buffer(&self.bufs[21], u64::from(IMPULSE_BASE) * 4, bytemuck::cast_slice(&keyed));
+            // IMPULSE_COUNT and IMPULSE_FIRST are adjacent words.
             self.queue.write_buffer(&self.bufs[21], u64::from(IMPULSE_COUNT) * 4, bytemuck::bytes_of(&n));
+            self.queue.write_buffer(&self.bufs[21], u64::from(IMPULSE_FIRST) * 4, bytemuck::bytes_of(&n));
         }
         self.impulse_queue.clear();
     }
@@ -1360,7 +1381,7 @@ impl WgpuSim {
         self.counted_steps = self.steps_done;
         // Wheel queries walk this step's broadphase grid, so vehicle worlds
         // never reuse a whole step's manifolds.
-        self.manifolds_valid = counters.overflow_flags == 0 && self.vehicle_count() == 0;
+        self.manifolds_valid = counters.overflow_flags == 0 && self.vehicle_count() == 0 && self.characters.is_empty();
         if counters.overflow_flags != 0 {
             return Err(ExecError::Overflow(counters.overflow_flags));
         }
@@ -1588,7 +1609,7 @@ impl WgpuSim {
         self.last_timings.total_gpu = wall.elapsed().as_secs_f64() * 1000.0;
         self.last_counters = counters;
         self.counted_steps = self.steps_done;
-        self.manifolds_valid = counters.overflow_flags == 0 && self.vehicle_count() == 0;
+        self.manifolds_valid = counters.overflow_flags == 0 && self.vehicle_count() == 0 && self.characters.is_empty();
         if counters.overflow_flags != 0 {
             return Err(ExecError::Overflow(counters.overflow_flags));
         }
@@ -1707,8 +1728,9 @@ impl WgpuSim {
                 kinematic: self.has_kinematic,
                 look_ahead: self.params.flags & FLAG_SPEC_VELOCITY != 0,
                 impulses: self.impulses_this_step,
-                projectiles: 0,
-                characters: 0,
+                projectiles: self.projectile_count,
+                characters: self.characters.len() as u32,
+                queries: self.query_count,
             },
         }
     }
@@ -2039,6 +2061,9 @@ impl VehicleBackend for WgpuSim {
 
 #[path = "gpu_host_state.rs"]
 mod host_state;
+#[path = "gpu_characters.rs"]
+mod characters;
+pub use characters::{CharacterHandle, MotionEvent};
 pub use host_state::SimSnapshot;
 
 #[cfg(test)]

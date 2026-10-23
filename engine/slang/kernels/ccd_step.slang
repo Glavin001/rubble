@@ -415,6 +415,9 @@ float3 simplexClosest(inout float3 Y[4], inout float3 P[4], inout uint n)
 }
 
 static const uint GJK_MAX_ITERS = 32u;
+// Largest gap a stalled cast still reports as touching (m); under any skin or
+// contact depth that uses it (character skin 2 cm).
+static const float GJK_TOUCH = 0.005;
 static const uint CAST_MISS = 0u;
 static const uint CAST_HIT = 1u;
 static const uint CAST_OVERLAP = 2u;
@@ -467,9 +470,16 @@ uint gjkCast(Collider ca, float3 pa, float4 qa, Collider cb, float3 pb, float4 q
         if (count == 4u) return advanced ? CAST_HIT : CAST_OVERLAP;
         // No progress: |v| is at f32 resolution of the configuration (Jolt's
         // GJK stops the same way). After an advance, x touches C to within |v|.
+        // A stall is a touch within GJK_TOUCH: f32 GJK between a curved shape
+        // and an edge can stop improving a millimetre or two away. Farther, the
+        // ray grazes past C (it cannot get closer along r) and misses.
         float vv = dot(v, v);
         if (vv >= prevVV * (1.0 - 1.0e-5))
-            return advanced ? CAST_HIT : (vv <= 100.0 * eps * eps ? CAST_OVERLAP : CAST_BUDGET);
+        {
+            float touch = max(10.0 * eps, GJK_TOUCH);
+            if (vv <= touch * touch) return advanced ? CAST_HIT : CAST_OVERLAP;
+            return CAST_MISS;
+        }
         prevVV = vv;
     }
     return CAST_BUDGET;
@@ -792,6 +802,14 @@ void ccd_emit(uint3 tid : SV_DispatchThreadID)
 static const uint IMPULSE_AT_POINT = 0u;
 static const uint IMPULSE_SET_VELOCITY = 1u;
 
+// Mode word: mode (bits 0..7) | key << 8. A body's records are summed in
+// ascending key order (host records: their queue index; projectile hits:
+// after every host record, by projectile then hit), whatever order the
+// atomic appends left them in. PASS_U 0 applies [0, count) at the start of
+// the step (host records); PASS_U 1, after projectile_step, applies the
+// records past the host's (IMPULSE_FIRST).
+uint impulseKey(uint r) { return ALOAD(gScratchAtomics[r + 1u]) >> 8; }
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void apply_impulses(uint3 tid : SV_DispatchThreadID)
@@ -803,21 +821,30 @@ void apply_impulses(uint3 tid : SV_DispatchThreadID)
         if (k == 0u) AOR2(gCounters[0].overflowFlags, OVERFLOW_IMPULSES);
         count = IMPULSE_CAP;
     }
+    uint first = PASS_U == 1u ? min(ALOAD(gScratchAtomics[IMPULSE_FIRST]), count) : 0u;
+    k += first;
     if (k >= count) return;
-    uint body = ALOAD(gScratchAtomics[IMPULSE_BASE + IMPULSE_WORDS * k]);
-    for (uint q = 0u; q < k; q++)
-        if (ALOAD(gScratchAtomics[IMPULSE_BASE + IMPULSE_WORDS * q]) == body) return;
+    uint rk = IMPULSE_BASE + IMPULSE_WORDS * k;
+    uint body = ALOAD(gScratchAtomics[rk]);
+    uint myKey = impulseKey(rk);
+    // Only the body's lowest-key record sums the run.
+    for (uint q = first; q < count; q++)
+    {
+        uint rq = IMPULSE_BASE + IMPULSE_WORDS * q;
+        if (q != k && ALOAD(gScratchAtomics[rq]) == body && impulseKey(rq) < myKey) return;
+    }
     if (body >= gCounters[0].bodyCount) return;
     BodyState b = gBodies[body];
     float3 dv = float3(0, 0, 0);
     float3 dw = float3(0, 0, 0);
     bool setVel = false;
     float3 setLin = b.linearVel, setAng = b.angularVel;
-    for (uint q = k; q < count; q++)
+    uint key = myKey;
+    uint at = k;
+    for (uint n = first; n < count; n++)
     {
-        uint r = IMPULSE_BASE + IMPULSE_WORDS * q;
-        if (ALOAD(gScratchAtomics[r]) != body) continue;
-        uint mode = ALOAD(gScratchAtomics[r + 1u]);
+        uint r = IMPULSE_BASE + IMPULSE_WORDS * at;
+        uint mode = ALOAD(gScratchAtomics[r + 1u]) & 255u;
         float3 J = asfloat(uint3(ALOAD(gScratchAtomics[r + 2u]), ALOAD(gScratchAtomics[r + 3u]), ALOAD(gScratchAtomics[r + 4u])));
         float3 P = asfloat(uint3(ALOAD(gScratchAtomics[r + 5u]), ALOAD(gScratchAtomics[r + 6u]), ALOAD(gScratchAtomics[r + 7u])));
         if (mode == IMPULSE_SET_VELOCITY)
@@ -825,13 +852,27 @@ void apply_impulses(uint3 tid : SV_DispatchThreadID)
             setVel = true;
             setLin = J;
             setAng = P;
-            continue;
         }
-        if (!bodyIsDynamic(b)) continue;
-        dv += J * b.invMass;
-        float3 torque = cross(P - b.position, J);
-        float3 local = quatRotate(quatConjugate(b.orientation), torque);
-        dw += quatRotate(b.orientation, local * b.invInertia);
+        else if (bodyIsDynamic(b))
+        {
+            dv += J * b.invMass;
+            float3 torque = cross(P - b.position, J);
+            float3 local = quatRotate(quatConjugate(b.orientation), torque);
+            dw += quatRotate(b.orientation, local * b.invInertia);
+        }
+        // Next record of this body: the smallest key above the current one.
+        uint nextKey = 0xFFFFFFFFu;
+        uint next = count;
+        for (uint q = first; q < count; q++)
+        {
+            uint rq = IMPULSE_BASE + IMPULSE_WORDS * q;
+            if (ALOAD(gScratchAtomics[rq]) != body) continue;
+            uint kq = impulseKey(rq);
+            if (kq > key && kq < nextKey) { nextKey = kq; next = q; }
+        }
+        if (next == count) break;
+        key = nextKey;
+        at = next;
     }
     if (setVel && !bodyIsDynamic(b))
     {

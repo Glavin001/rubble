@@ -127,7 +127,14 @@ const WORLD_ENTRIES: &[&str] = &[
     "vehicle_iterate",
     "vehicle_post",
     "raycast_batch",
+    // Characters, in-step queries, projectiles (slang/kernels/character_step.slang).
+    "char_move",
+    "char_post",
+    "query_batch",
+    "projectile_step",
 ];
+
+const CHARACTER_ENTRIES: &[&str] = &["char_move", "char_post", "query_batch", "projectile_step"];
 
 const VEHICLE_ENTRIES: &[&str] = &[
     "vehicle_input",
@@ -144,6 +151,9 @@ fn source_for(root: &std::path::Path, entry: &str) -> PathBuf {
     let kernels = root.join("kernels");
     if VEHICLE_ENTRIES.contains(&entry) {
         return kernels.join("vehicle_step.slang");
+    }
+    if CHARACTER_ENTRIES.contains(&entry) {
+        return kernels.join("character_step.slang");
     }
     if entry.starts_with("convex_") {
         return kernels.join(if entry.ends_with("_persistent") {

@@ -112,6 +112,8 @@ pub struct MotionInputs {
     pub projectiles: u32,
     /// Character controllers in the pool (`character_step.slang`).
     pub characters: u32,
+    /// In-step scene query records (`query_batch`).
+    pub queries: u32,
 }
 
 /// `apply_impulses` threads (one per record slot).
@@ -278,6 +280,19 @@ pub fn encode_step(
             // the constraint graph, link wheels standing on dynamic bodies.
             e.d("wheel_query", u64::from(i.wheel_count) * 64);
             e.d("vehicle_link", u64::from(i.wheel_count.max(1)));
+        }
+        // Projectiles, queries and characters walk the same grid, in the same
+        // window. Projectile hits push bodies through a second (late)
+        // apply_impulses pass over the records they appended.
+        if mo.projectiles > 0 {
+            e.d("projectile_step", u64::from(mo.projectiles) * 64);
+            e.dp("apply_impulses", u64::from(IMPULSE_CAP), 1);
+        }
+        if mo.queries > 0 {
+            e.d("query_batch", u64::from(mo.queries) * 64);
+        }
+        if mo.characters > 0 {
+            e.d("char_move", u64::from(mo.characters) * 64);
         }
     }
     e.d(work_args, 64);
@@ -474,6 +489,10 @@ pub fn encode_step(
     if vehicles {
         e.d("vehicle_post", u64::from(i.vehicle_count));
     }
+    if mo.characters > 0 {
+        // One lane walks the characters in order (weights on shared supports).
+        e.d("char_post", 64);
+    }
     e.d("write_sleep_args", 64);
     // A sleep time beyond any run's length cannot produce candidates, so the
     // island gate has nothing to revoke (ring/gables benchmarks: 1e6 s).
@@ -498,6 +517,10 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "ccd_mark",
     "ccd_emit_persistent",
     "ccd_emit_copy_persistent",
+    "char_move",
+    "char_post",
+    "query_batch",
+    "projectile_step",
     "vehicle_input",
     "wheel_query",
     "vehicle_link",
@@ -564,6 +587,9 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "sleep_island_commit",
 ];
 
+/// Character, query and projectile entries (`character_step.slang`).
+pub const CHARACTER_ENTRIES: &[&str] = &["char_move", "char_post", "query_batch", "projectile_step"];
+
 /// Slang source (under `slang/kernels/`) that defines `entry`.
 /// Vehicle controller entries (`vehicle_step.slang`).
 pub const VEHICLE_ENTRIES: &[&str] = &[
@@ -579,6 +605,9 @@ pub const VEHICLE_ENTRIES: &[&str] = &[
 pub fn kernel_source(entry: &str) -> &'static str {
     if VEHICLE_ENTRIES.contains(&entry) {
         return "vehicle_step.slang";
+    }
+    if CHARACTER_ENTRIES.contains(&entry) {
+        return "character_step.slang";
     }
     if entry.starts_with("convex_") {
         return if entry.ends_with("_persistent") {
@@ -651,8 +680,9 @@ pub fn pair_warm_key(a: u32, b: u32) -> u32 {
     }
 }
 
-/// GPU bindings every rigid host allocates (`BIND(0..30)` in world_step.slang).
-pub const BIND_COUNT: usize = 32;
+/// GPU bindings every rigid host allocates (`BIND(0..30)` in world_step.slang,
+/// 31 the vehicle pool, 32 the character / query / projectile pool).
+pub const BIND_COUNT: usize = 33;
 /// Pass-uniform slot stride (binding 22, dynamic offsets).
 pub const PASS_ALIGN: u64 = 256;
 

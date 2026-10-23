@@ -182,6 +182,7 @@ fn rigid_kernels(root: &std::path::Path, out_dir: &std::path::Path) -> Result<()
         kernels.join("world_step.slang"),
         kernels.join("convex_step.slang"),
         kernels.join("vehicle_step.slang"),
+        kernels.join("character_step.slang"),
         root.join("physics/contact_storage.slang"),
     ])?;
     // The world_step entries are large: compile them in parallel.

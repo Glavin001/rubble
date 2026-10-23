@@ -481,8 +481,10 @@ static const uint FAST_COUNT = CCD_BASE + 1u;
 static const uint IMPULSE_COUNT = CCD_BASE + 2u;
 // TOI casts that fell back to look-ahead this step (GJK budget, degenerate).
 static const uint CCD_FALLBACKS = CCD_BASE + 3u;
+// Impulse records from the host (the late apply_impulses pass starts after them).
+static const uint IMPULSE_FIRST = CCD_BASE + 4u;
 static const uint CCD_BODY_CAP = 1024u;
-static const uint CCD_BODY_BASE = CCD_BASE + 4u;
+static const uint CCD_BODY_BASE = CCD_BASE + 8u;
 static const uint FAST_CAP = 1024u;
 static const uint FAST_BASE = CCD_BODY_BASE + 4u * CCD_BODY_CAP;
 static const uint IMPULSE_CAP = 1024u;
@@ -3489,7 +3491,11 @@ void build_awake_list(uint3 tid : SV_DispatchThreadID)
 {
     uint i = dispatchIndex(tid);
     // apply_impulses consumed this step's records at its start.
-    if (i == 0u) ASTORE(gScratchAtomics[IMPULSE_COUNT], 0u);
+    if (i == 0u)
+    {
+        ASTORE(gScratchAtomics[IMPULSE_COUNT], 0u);
+        ASTORE(gScratchAtomics[IMPULSE_FIRST], 0u);
+    }
     if (i >= gCounters[0].bodyCount) return;
     BodyState b = gBodies[i];
     if (bodyIsDynamic(b) && !bodyIsSleeping(b))
