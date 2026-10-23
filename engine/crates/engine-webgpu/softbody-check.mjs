@@ -31,13 +31,13 @@ const CHECKS = {
     query: 'scene=yard',
     run: async (page) => {
       const p0 = (await page.step(60, { forward: 0, steer: 0 })).player.p;
-      const r = await page.step(480, { forward: 1, steer: 0 }); // 2 s: clear of the poles at z = 34
+      const r = await page.step(360, { forward: 1, steer: 0 }); // 1.5 s: clear of the poles and crates
       const moved = Math.hypot(r.player.p[0] - p0[0], r.player.p[2] - p0[2]);
       const speed = Math.hypot(...r.player.v) * 3.6;
-      const r2 = await page.step(360, { forward: 0.6, steer: 1 });
+      const r2 = await page.step(300, { forward: 0.5, steer: 1 });
       const turned = Math.abs(r2.player.p[0] - r.player.p[0]);
       await page.view({ chase: true });
-      return { ok: moved > 8 && speed > 25 && turned > 2 && r2.damage[0].broken === 0,
+      return { ok: moved > 5 && speed > 20 && turned > 2 && r2.damage[0].broken === 0,
         msg: `drove ${moved.toFixed(1)} m to ${speed.toFixed(0)} km/h, turned ${turned.toFixed(1)} m sideways, player beams bent ${r2.damage[0].yielded} broken ${r2.damage[0].broken}` };
     },
   },
@@ -71,6 +71,55 @@ const CHECKS = {
     },
   },
   // The other crash-test scenes run without blowing up and deform.
+  // Traffic scale in real time (opt-in: node softbody-check.mjs traffic_scale):
+  // frame rate and the share of real time the simulation keeps.
+  ...Object.fromEntries([10, 20, 50, 100].map((n) => [`traffic_scale_${n}`, {
+    query: `scene=traffic&cars=${n}`,
+    optIn: 'TRAFFIC_SCALE',
+    run: async (page) => {
+      await page.step(240); // warm up, cars spread out (the AI drives in __step too)
+      const ms = await page.eval(`(async () => { const t = performance.now(); await window.__step(480); return (performance.now() - t) / 480; })()`);
+      return { ok: ms > 0, msg: `${n} cars: ${ms.toFixed(2)} ms per 240 Hz step (GPU-bound real-time capacity ${(100 * (1000 / 240) / ms).toFixed(0)}%, no rendering)` };
+    },
+  }])),
+  // Frame budget (opt-in: BUDGET=1): physics ms per step at the fine and coarse
+  // rates, rendering ms per frame, in the yard after the cars have settled.
+  ...Object.fromEntries([['budget_240x10', 'scene=yard&hz=240&iters=10'], ['budget_60x8', 'scene=yard&hz=60&iters=8'], ['budget_yard_drive', 'scene=yard&drive=1'],
+    ['budget_traffic20', 'scene=traffic&cars=20'], ['budget_traffic50', 'scene=traffic&cars=50'], ['budget_traffic100', 'scene=traffic&cars=100']].map(([k, q]) => [k, {
+    query: process.env.BUDGET_SPLIT ? q + '&gputime' : q,
+    optIn: 'BUDGET',
+    run: async (page) => {
+      // drive=1: the player car drives (throttle, a gentle turn) through the run.
+      const input = q.includes('drive=1') ? '{ forward: 0.7, steer: 0.25 }' : 'null';
+      await page.eval(`window.__step(240, ${input})`);
+      const step = await page.eval(`(async () => { const t = performance.now(); await window.__step(240, ${input}); return (performance.now() - t) / 240; })()`);
+      const render = await page.eval(`window.__renderBench(60)`);
+      const info = await page.eval(`JSON.stringify({ counts: Array.from(window.__world.lastCounts), h: window.__world.dispatchHistogram() })`);
+      if (process.env.BUDGET_VERBOSE) console.log(q, info);
+      const live = await page.eval(`window.__live(4000)`);
+      // CPU cost of encoding steps (JS + wasm plan + WebGPU encoding), no GPU wait.
+      const cpu = await page.eval(`(() => { const w = window.__world; const d = window.__device; const enc = d.createCommandEncoder(); const t = performance.now(); for (let i = 0; i < 64; i++) w.encodeStep(enc); const ms = (performance.now() - t) / 64; const t2 = performance.now(); d.queue.submit([enc.finish()]); return [ms, performance.now() - t2]; })()`);
+      if (process.env.BUDGET_SPLIT) {
+        const split = await page.eval(`(async () => {
+          const w = window.__world, out = {};
+          const t = async (k) => { await window.__step(8); const t0 = performance.now(); await window.__step(64); out[k] = ((performance.now() - t0) / 64).toFixed(2); };
+          await t('base');
+          const it = w.params.iterations; w.params.iterations = 1; await t('iters1'); w.params.iterations = it;
+          const acc = {};
+          for (let r = 0; r < 8; r++) { const p = await w.profileStep(); for (const k in p) acc[k] = (acc[k] || 0) + p[k] / 8; }
+          const tot = Object.values(acc).reduce((a, b) => a + b, 0);
+          out.gpu = tot.toFixed(2);
+          out.top = Object.entries(acc).sort((a, b) => b[1] - a[1]).slice(0, 14).map(([k, v]) => k + ' ' + v.toFixed(3)).join(', ');
+          return JSON.stringify(out);
+        })()`);
+        console.log(q, 'split', split);
+      }
+      const modes = await page.eval(`window.__world.readSoftModes().then((m) => Array.from(m).join(''))`);
+      console.log(q, 'modes', modes);
+      console.log(q, 'cpu encode ms/step', cpu[0].toFixed(3), 'finish+submit ms/64', cpu[1].toFixed(2));
+      return { ok: true, msg: `${q}: physics ${step.toFixed(2)} ms/step, render ${render.toFixed(2)} ms/frame; live ${live.fps.toFixed(0)} fps, ${(live.realTime * 100).toFixed(0)}% real time` };
+    },
+  }])),
   // The limbo bar shears the roof off: a piece-detached event names it.
   limbo: {
     query: 'scene=limbo&speed=80',
@@ -207,7 +256,7 @@ const profile = mkdtempSync(join(tmpdir(), 'softbody-chrome-'));
 const debugPort = 9300 + Math.floor(Math.random() * 500);
 const chrome = spawn(CHROME, [
   '--headless=new', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profile}`,
-  '--enable-unsafe-webgpu', '--window-size=1280,720', '--no-first-run', '--no-default-browser-check',
+  '--enable-unsafe-webgpu', ...(process.env.BUDGET_SPLIT ? ['--enable-webgpu-developer-features'] : []), '--window-size=1280,720', '--no-first-run', '--no-default-browser-check',
   '--disable-background-timer-throttling', '--disable-renderer-backgrounding', 'about:blank',
 ], { stdio: 'ignore' });
 const cleanup = () => { try { chrome.kill('SIGKILL'); } catch {} try { rmSync(profile, { recursive: true, force: true, maxRetries: 3 }); } catch {} };

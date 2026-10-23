@@ -44,6 +44,12 @@ const TAKES = {
   limbo: { query: 'scene=limbo&speed=80&runup=6', title: 'Limbo bar at 80 km/h: the roof shears off', target: [0, 1, 4], dist: 11, yaw: 2.0, sweep: 1.4, impact: [60, 330], settle: 600 },
   sandwich: { query: 'scene=sandwich&speed=60&runup=6', title: 'Sandwich: 18 t truck at 60 km/h into a car behind a parked 15 t truck', target: [0, 1, 0], dist: 18, yaw: 1.3, impact: [60, 360], settle: 640 },
   crusher: { query: 'scene=crusher', title: 'Crusher: 10 t block dropped 4 m onto the roof', target: [0, 1, 0], dist: 10, yaw: 1.0, impact: [180, 400], settle: 640 },
+  // Camera views on subjects (softbody.html cam modes): crash phases ride the view.
+  sandwich_cab: { query: 'scene=sandwich&speed=60&runup=6', cam: { mode: 'mount', from: '18 t truck', target: 'car0' }, title: 'Sandwich, from the 18 t truck\'s cab', target: [0, 1, 0], dist: 18, yaw: 1.3, impact: [60, 360], settle: 640 },
+  sandwich_side: { query: 'scene=sandwich&speed=60&runup=6', cam: { mode: 'right', target: 'car0' }, title: 'Sandwich, the car\'s starboard side', target: [0, 1, 0], dist: 18, yaw: 1.3, impact: [60, 360], settle: 640 },
+  crusher_side: { query: 'scene=crusher', cam: { mode: 'right', target: 'car0' }, title: 'Crusher: drop, then the winch lifts it to show the wreck', target: [0, 1, 0], dist: 10, yaw: 1.0, impact: [180, 420], settle: 1800 },
+  limbo_side: { query: 'scene=limbo&speed=80&runup=6', cam: { mode: 'left', target: 'car0' }, title: 'Limbo bar at 80 km/h, tracking the car from its left side', target: [0, 1, 4], dist: 11, yaw: 2.0, sweep: 1.4, impact: [60, 330], settle: 600 },
+  limbo_chase: { query: 'scene=limbo&speed=80&runup=6', cam: { mode: 'chase', target: 'car0' }, title: 'Limbo bar at 80 km/h, chasing the car', target: [0, 1, 4], dist: 11, yaw: 2.0, sweep: 1.4, impact: [60, 330], settle: 600 },
   traffic20: { query: 'scene=traffic&cars=20', title: 'Traffic derby: 20 self-driving soft cars', target: [0, 0, 0], dist: 70, yaw: 0.6, impact: [0, 0], settle: 2400, live: true },
   drop: { query: 'scene=drop&height=12&pitch=50', title: 'Nose-first drop from 12 m', target: [0, 1.2, 1], dist: 11, yaw: 1.6, impact: [330, 570], settle: 760 },
 };
@@ -144,7 +150,8 @@ for (const name of takes) {
     const status = await evaluate(`document.getElementById('status')?.textContent + ' ' + (document.getElementById('err')?.textContent || '')`).catch(() => '');
     throw new Error(`${name}: demo did not start: ${status}`);
   };
-  const orbit = (yaw, dist = t.dist, pitch = 0.32) => ({ skin: 'flex', beams: false, orbit: { yaw, pitch, dist, target: t.target } });
+  const orbit = (yaw, dist = t.dist, pitch = 0.32) => t.cam && !wreck ? { skin: 'flex', beams: false, cam: t.cam } : { skin: 'flex', beams: false, cam: { mode: 'orbit' }, orbit: { yaw, pitch, dist, target: t.target } };
+  let wreck = false;
   const t0 = performance.now();
   // 1. Real time.
   await reload();
@@ -156,6 +163,7 @@ for (const name of takes) {
   await evaluate(`window.__step(${t.impact[0]}).then(() => 0)`);
   for (let s = t.impact[0]; s < t.impact[1]; s += 1) await frame(1, orbit((yaw += 0.003), t.dist * 0.7, 0.25), `${t.title} — 4× slow motion`);
   // 3. Orbit the wreck, then the beam view (plastic strain).
+  wreck = true;
   await evaluate(`window.__step(${Math.max(0, t.settle - t.impact[1])}).then(() => 0)`);
   // Full turn, or a swing across the open side where a wall would block the view.
   const sweep = t.sweep ?? Math.PI * 2;

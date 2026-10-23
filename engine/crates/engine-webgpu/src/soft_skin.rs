@@ -28,7 +28,12 @@ pub struct SoftSkinner {
 impl SoftSkinner {
     /// `bindings` from `SoftHost::bind_mesh`, `rest` the same vertices' rest
     /// positions (for crumple strain), `triangles` the mesh's faces.
-    pub fn new(sim: &WgpuSim, bindings: &[SkinBinding], rest: &[Vec3], triangles: &[[u32; 3]]) -> Self {
+    pub fn new(
+        sim: &WgpuSim,
+        bindings: &[SkinBinding],
+        rest: &[Vec3],
+        triangles: &[[u32; 3]],
+    ) -> Self {
         let device = sim.device();
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("soft_skin"),
@@ -44,7 +49,11 @@ impl SoftSkinner {
                 cache: None,
             })
         };
-        let pipelines = [pipe("soft_skin_vertices"), pipe("soft_skin_faces"), pipe("soft_skin_normals")];
+        let pipelines = [
+            pipe("soft_skin_vertices"),
+            pipe("soft_skin_faces"),
+            pipe("soft_skin_normals"),
+        ];
         let nv = bindings.len();
         let nt = triangles.len();
         let words: Vec<u32> = bindings.iter().flat_map(|b| b.to_words(0)).collect();
@@ -73,9 +82,19 @@ impl SoftSkinner {
         }
         let storage = wgpu::BufferUsages::STORAGE;
         let init = |label: &str, contents: &[u8], usage| {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents, usage })
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents,
+                usage,
+            })
         };
-        let pad = |b: &[u8]| if b.is_empty() { vec![0u8; 16] } else { b.to_vec() };
+        let pad = |b: &[u8]| {
+            if b.is_empty() {
+                vec![0u8; 16]
+            } else {
+                b.to_vec()
+            }
+        };
         let bind = init("skin-bind", &pad(bytemuck::cast_slice(&words)), storage);
         let restb = init("skin-rest", &pad(bytemuck::cast_slice(&rest4)), storage);
         let trisb = init("skin-tris", &pad(bytemuck::cast_slice(&tris4)), storage);
@@ -100,21 +119,61 @@ impl SoftSkinner {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
                 layout: &p.get_bind_group_layout(0),
-                entries: &list.iter().map(|&(binding, b)| wgpu::BindGroupEntry { binding, resource: b.as_entire_binding() }).collect::<Vec<_>>(),
+                entries: &list
+                    .iter()
+                    .map(|&(binding, b)| wgpu::BindGroupEntry {
+                        binding,
+                        resource: b.as_entire_binding(),
+                    })
+                    .collect::<Vec<_>>(),
             })
         };
         let groups = [
-            group(&pipelines[0], &[(0, sim.body_buffer()), (1, &bind), (5, &positions), (8, &params)]),
-            group(&pipelines[1], &[(2, &restb), (3, &trisb), (5, &positions), (6, &faces), (8, &params)]),
-            group(&pipelines[2], &[(4, &adjb), (6, &faces), (7, &normals), (8, &params)]),
+            group(
+                &pipelines[0],
+                &[
+                    (0, sim.body_buffer()),
+                    (1, &bind),
+                    (5, &positions),
+                    (8, &params),
+                ],
+            ),
+            group(
+                &pipelines[1],
+                &[
+                    (2, &restb),
+                    (3, &trisb),
+                    (5, &positions),
+                    (6, &faces),
+                    (8, &params),
+                ],
+            ),
+            group(
+                &pipelines[2],
+                &[(4, &adjb), (6, &faces), (7, &normals), (8, &params)],
+            ),
         ];
-        Self { pipelines, groups, positions, normals, faces, vertices: nv as u32, triangles: nt as u32 }
+        Self {
+            pipelines,
+            groups,
+            positions,
+            normals,
+            faces,
+            vertices: nv as u32,
+            triangles: nt as u32,
+        }
     }
 
     /// Skin the mesh from the current body buffer (after a step).
     pub fn encode(&self, enc: &mut wgpu::CommandEncoder) {
-        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("soft_skin"), timestamp_writes: None });
-        for (i, n) in [self.vertices, self.triangles, self.vertices].into_iter().enumerate() {
+        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("soft_skin"),
+            timestamp_writes: None,
+        });
+        for (i, n) in [self.vertices, self.triangles, self.vertices]
+            .into_iter()
+            .enumerate()
+        {
             pass.set_pipeline(&self.pipelines[i]);
             pass.set_bind_group(0, &self.groups[i], &[]);
             pass.dispatch_workgroups(n.div_ceil(64).max(1), 1, 1);
@@ -129,7 +188,12 @@ impl SoftSkinner {
         self.encode(&mut enc);
         let size = (self.vertices.max(1) * 16) as u64;
         let staging = |label| {
-            device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false })
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
         };
         let (sp, sn) = (staging("skin-read-p"), staging("skin-read-n"));
         enc.copy_buffer_to_buffer(&self.positions, 0, &sp, 0, size);
@@ -143,12 +207,16 @@ impl SoftSkinner {
             });
             let _ = device.poll(wgpu::PollType::wait_indefinitely());
             rx.recv().expect("map").expect("map ok");
-            let v: Vec<[f32; 4]> = bytemuck::cast_slice(&slice.get_mapped_range().expect("mapped")).to_vec();
+            let v: Vec<[f32; 4]> =
+                bytemuck::cast_slice(&slice.get_mapped_range().expect("mapped")).to_vec();
             b.unmap();
             v
         };
         let p = read(&sp);
         let n = read(&sn);
-        (p[..self.vertices as usize].to_vec(), n[..self.vertices as usize].to_vec())
+        (
+            p[..self.vertices as usize].to_vec(),
+            n[..self.vertices as usize].to_vec(),
+        )
     }
 }

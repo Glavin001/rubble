@@ -507,9 +507,15 @@ pub const CMD_WORDS: usize = 6;
 
 impl RigidStep {
     fn modes(&self) -> engine_exec::rigid_plan::StepModes {
+        // Colours and colouring rounds: last step's counts plus headroom, the
+        // rest in the single-workgroup tails (same result; native WebGPU, Metal
+        // and CUDA defaults). Empty dispatches cost a barrier each: 32 rounds and
+        // 32 colours × iterations per step otherwise.
         engine_exec::rigid_plan::StepModes {
             sparse_start: 32,
-            tail_ok: true,
+            color_headroom: Some(4),
+            color_round_headroom: Some(2),
+            tail_ok: self.cap.max_bodies <= (1 << 16) * 8,
             ..Default::default()
         }
     }
@@ -619,9 +625,21 @@ impl RigidStep {
         // Every kernel a step can emit (small and large scenes, joints, vehicles).
         // Small and large scenes; soft passes with every option on, both with the
         // fused particle sweep (small colours) and one dispatch per colour.
-        for (n, prefix, max_color) in [(1u32, true, 1u32), (4096, false, 1), (4096, false, 4096)] {
-            let mut i = s.inputs(&[n, n, 1, 1, 1, 1, 1, 1, max_color, 1, 1, 1, 1, 1, 1, 1, 1]);
+        // After the first step, colours and colouring rounds past last step's
+        // counts run in the tail kernels.
+        // Several soft bodies: one workgroup per body.
+        for (n, prefix, max_color, done, bodies) in [
+            (1u32, true, 1u32, 0u32, 1u32),
+            (4096, false, 1, 0, 1),
+            (4096, false, 4096, 0, 1),
+            (4096, false, 1, 1, 1),
+            (4096, false, 1, 0, 2),
+        ] {
+            let mut i = s.inputs(&[
+                n, n, 1, 1, 1, bodies, 1, 1, max_color, 1, 1, 1, 1, 1, 1, 1, 1,
+            ]);
             i.sleep_time = 0.5;
+            i.steps_done = done;
             for c in engine_exec::rigid_plan::encode_step(&s.modes(), &i, false, prefix) {
                 match c {
                     engine_exec::rigid_plan::Cmd::Dispatch { kernel, .. }
