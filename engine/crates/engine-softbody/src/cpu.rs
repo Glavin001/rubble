@@ -83,9 +83,8 @@ impl CpuSoft {
         let h = self.h;
         let n = self.x.len();
         let x0 = self.x.clone();
-        // Inertial target y = x + h v + h² g. Initial guess (as soft_begin): the
-        // full inertial step for free particles, VBD's adaptive acceleration
-        // weight for particles touching a plane.
+        // Inertial target y = x + h v + h² g. Initial guess (as soft_begin):
+        // VBD's adaptive x + h v + h² g ã, ã = last step's acceleration along g.
         let y: Vec<Vec3> = (0..n)
             .map(|i| if self.fixed[i] { x0[i] } else { x0[i] + self.v[i] * h + self.gravity * h * h })
             .collect();
@@ -95,8 +94,7 @@ impl CpuSoft {
                 self.x[i] = x0[i];
                 continue;
             }
-            let touching = self.collide[i] && self.planes.iter().any(|p| p.normal.dot(x0[i]) - p.offset - self.radius < 0.02);
-            let w = if touching { ((self.v[i] - self.v_prev[i]) / h).dot(self.gravity) / g2 } else { 1.0 };
+            let w = ((self.v[i] - self.v_prev[i]) / h).dot(self.gravity) / g2;
             self.x[i] = x0[i] + self.v[i] * h + self.gravity * (h * h * w.clamp(0.0, 1.0));
         }
         self.v_prev.clone_from(&self.v);

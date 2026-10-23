@@ -3,7 +3,7 @@
 //! reference, driving on raycast wheels, and crushing differently against a
 //! wall, a pole and a side impact.
 
-use engine_schema::{AvbdParams, BodyState, Collider, Material, ShapeType, WorldCapacity};
+use engine_schema::{BodyState, Collider, Material, ShapeType, WorldCapacity};
 use engine_softbody::cpu::CpuSoft;
 use engine_softbody::procedural::{box_truck, car_truck, CarParams};
 use engine_softbody::truck::load_truck;
@@ -64,7 +64,17 @@ fn static_box(sim: &mut WgpuSim, pos: [f32; 3], half: [f32; 3]) -> u32 {
 /// Flat ground (top at y = 0), soft arena, 120 Hz.
 fn world(hz: f32, iterations: u32) -> WgpuSim {
     let mut sim = WgpuSim::new_with_soft(capacity(), VehicleCapacity::default(), SoftCapacity::default()).expect("wgpu");
-    sim.set_params(engine_softbody::soft_scene_params(hz, iterations));
+    let mut p = engine_softbody::soft_scene_params(hz, iterations);
+    if let Some(k) = std::env::var("KMAXN").ok().and_then(|v| v.parse().ok()) {
+        p.k_max_n = k;
+    }
+    if let Some(k) = std::env::var("BETA").ok().and_then(|v| v.parse().ok()) {
+        p.beta_lin = k;
+    }
+    sim.set_params(p);
+    if let Some(r) = std::env::var("CHEB").ok().and_then(|v| v.parse().ok()) {
+        sim.set_soft_settings(SoftSettings { chebyshev_rho: r, ..Default::default() });
+    }
     sim.set_material(0, Material { friction: 1.0, restitution: 0.0, contact_offset: 0.01, _pad: 0.0 });
     sim.set_material(9, Material { friction: 0.8, restitution: 0.0, contact_offset: 0.01, _pad: 0.0 });
     static_box(&mut sim, [0.0, -5.0, 0.0], [400.0, 5.0, 400.0]);
@@ -168,6 +178,7 @@ fn debug_box_drop() {
     let mut sim = world(120.0, 10);
     let env = |k: &str, d: f32| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
     let mut p = engine_softbody::soft_scene_params(120.0, 10);
+    let _ = engine_schema::AvbdParams::default();
     p.k_start = env("KSTART", p.k_start);
     p.beta_lin = env("BETA", p.beta_lin);
     p.alpha = env("ALPHA", p.alpha);
@@ -190,4 +201,123 @@ fn debug_box_drop() {
         let c = sim.last_counters();
         eprintln!("step {k}: y0 {:.4} vy {:.3} flags {} timer {:.3} | contacts {} awake {} colors {}", p[0].position[1], p[0].linear_vel[1], p[0].flags, p[0].sleep_timer, c.contact_count, c.awake_count, c.color_count);
     }
+}
+
+fn spawn_car(sim: &mut WgpuSim, pos: [f32; 3], vel: [f32; 3]) -> SoftHandle {
+    let opts = SpawnOptions { velocity: vel, ..Default::default() };
+    sim.add_soft_vehicle(&car_desc(), pos, [0.0, 0.0, 0.0, 1.0], &opts).expect("spawn car")
+}
+
+fn yielded(sim: &WgpuSim, h: SoftHandle) -> usize {
+    sim.read_soft_beams(h).iter().filter(|b| b.flags & engine_softbody::BEAM_YIELDED != 0).count()
+}
+
+fn broken(sim: &WgpuSim, h: SoftHandle) -> usize {
+    sim.read_soft_beams(h).iter().filter(|b| b.broken()).count()
+}
+
+fn centroid(p: &[Vec3]) -> Vec3 {
+    p.iter().copied().sum::<Vec3>() / p.len() as f32
+}
+
+#[test]
+fn soft_car_settles_on_its_raycast_wheels() {
+    let mut sim = world(120.0, 12);
+    let h = spawn_car(&mut sim, [0.0, 0.05, 0.0], [0.0; 3]);
+    run(&mut sim, 360);
+    let core = sim.soft_host().entry(h).core.expect("rigid core").0;
+    let st = sim.vehicle_state(core);
+    let p = positions(&sim, h);
+    let lowest = p.iter().map(|x| x.y).fold(f32::MAX, f32::min);
+    eprintln!("contacts {} lowest node {lowest:.3} ke {:.3} yielded {}", st.contacts, kinetic(&sim, h), yielded(&sim, h));
+    for w in &st.wheels {
+        eprintln!("  wheel contact {} L {:.3} F {:.0}", w.in_contact, w.suspension_length, w.suspension_force);
+    }
+    assert_eq!(st.contacts, 4, "stands on four wheels");
+    assert!(lowest > 0.12, "bodywork clear of the ground ({lowest})");
+    let total: f32 = st.wheels.iter().map(|w| w.suspension_force).sum();
+    let parts: f32 = sim.read_soft_particles(h).iter().filter(|b| b.inv_mass > 0.0).map(|b| 1.0 / b.inv_mass).sum();
+    let core_body = sim.read_body(sim.soft_host().entry(h).core.unwrap().1);
+    let mass = parts + 1.0 / core_body.inv_mass;
+    let joints = sim.download_joints();
+    let r = sim.soft_host().entry(h).core_joints.clone();
+    let lam: Vec<[f32; 8]> = joints[r.start as usize..r.end as usize].iter().map(|j| j.lambda).collect();
+    let sum: Vec3 = lam.iter().map(|l| Vec3::new(l[0], l[1], l[2])).sum();
+    eprintln!("joints {} lambda sum {sum:?}", lam.len());
+    eprintln!("particles {parts:.1} kg + core {:.1} kg = {mass:.1} kg (desc {:.1})", 1.0 / core_body.inv_mass, car_desc().total_mass());
+    assert!((total - mass * 9.81).abs() < 0.08 * mass * 9.81, "suspension carries the vehicle: {total} vs {}", mass * 9.81);
+    assert_eq!(yielded(&sim, h), 0, "standing does not deform the body");
+    assert!(kinetic(&sim, h) < 2.0, "at rest");
+}
+
+#[test]
+fn soft_car_drives_and_steers_without_deforming() {
+    let mut sim = world(120.0, 12);
+    let h = spawn_car(&mut sim, [0.0, 0.05, 0.0], [0.0; 3]);
+    run(&mut sim, 120);
+    let core = sim.soft_host().entry(h).core.expect("rigid core").0;
+    let start = centroid(&positions(&sim, h));
+    sim.set_vehicle_input(core, VehicleInput { forward: 1.0, ..Default::default() });
+    run(&mut sim, 360);
+    let mid = centroid(&positions(&sim, h));
+    let v = Vec3::from_array(sim.read_body(sim.soft_host().entry(h).core.unwrap().1).linear_vel);
+    eprintln!("after 3 s throttle: moved {:?}, speed {:.2} m/s, yielded {}", mid - start, v.length(), yielded(&sim, h));
+    assert!(mid.z - start.z > 8.0, "drives forward (+Z): {:?}", mid - start);
+    assert!((mid.x - start.x).abs() < 1.0, "straight line");
+    sim.set_vehicle_input(core, VehicleInput { forward: 0.6, steer: 1.0, ..Default::default() });
+    run(&mut sim, 240);
+    let end = centroid(&positions(&sim, h));
+    eprintln!("after steering: {:?}", end - mid);
+    assert!((end.x - mid.x).abs() > 1.5, "steering turns the car: {:?}", end - mid);
+    assert_eq!(broken(&sim, h), 0, "driving breaks nothing");
+    assert!(yielded(&sim, h) < 5, "driving barely yields: {}", yielded(&sim, h));
+}
+
+#[test]
+#[ignore]
+fn debug_core_alone() {
+    let mut sim = world(120.0, 12);
+    let d = car_desc();
+    let mut masses: Vec<f32> = d.nodes.iter().map(|n| n.mass).collect();
+    let _ = &mut masses;
+    let opts = SpawnOptions::default();
+    let packed = engine_softbody::pack::pack_soft(&d, engine_softbody::pack::Placement { position: Vec3::ZERO, rotation: glam::Quat::IDENTITY }, &opts, 0, -5);
+    let plan = packed.core.unwrap();
+    let mut vd = plan.vehicle.clone();
+    // Whole vehicle mass on the core.
+    vd.parts[0].mass = d.total_mass();
+    let v = sim.add_vehicle(&vd, (plan.origin + Vec3::Y * 0.05).to_array(), [0.0, 0.0, 0.0, 1.0]).unwrap();
+    run(&mut sim, 360);
+    let st = sim.vehicle_state(v);
+    let total: f32 = st.wheels.iter().map(|w| w.suspension_force).sum();
+    let b = sim.read_body(sim.vehicle_host().chassis_body(v));
+    eprintln!("core alone: mass {:.1} total {total:.0} weight {:.0} L {:?}", 1.0 / b.inv_mass, 9.81 / b.inv_mass, st.wheels.iter().map(|w| w.suspension_length).collect::<Vec<_>>());
+}
+
+#[test]
+#[ignore]
+fn debug_core_with_rigid_masses() {
+    let mut sim = world(120.0, 12);
+    let d = car_desc();
+    let opts = SpawnOptions::default();
+    let packed = engine_softbody::pack::pack_soft(&d, engine_softbody::pack::Placement { position: Vec3::ZERO, rotation: glam::Quat::IDENTITY }, &opts, 0, -5);
+    let plan = packed.core.unwrap();
+    let origin = plan.origin + Vec3::Y * 0.05;
+    let v = sim.add_vehicle(&plan.vehicle, origin.to_array(), [0.0, 0.0, 0.0, 1.0]).unwrap();
+    let chassis = sim.vehicle_host().chassis_body(v);
+    let hung = 770.0f32;
+    let n = plan.frame_nodes.len() as f32;
+    let mut weight = 0.0;
+    for &i in &plan.frame_nodes {
+        let p = Vec3::from_array(d.nodes[i as usize].position) + Vec3::Y * 0.05;
+        let m = hung / n;
+        let b = sim.add_body(BodyState::dynamic(p, glam::Quat::IDENTITY, m, Vec3::splat(0.01 * m)));
+        weight += m * 9.81;
+        sim.add_joint_desc(&engine_schema::JointDesc::ball(chassis, b, p - origin, Vec3::ZERO));
+    }
+    run(&mut sim, 360);
+    let st = sim.vehicle_state(v);
+    let total: f32 = st.wheels.iter().map(|w| w.suspension_force).sum();
+    let core = sim.read_body(chassis);
+    eprintln!("rigid hung masses: suspension {total:.0} vs weight {:.0}", weight + 9.81 / core.inv_mass);
 }

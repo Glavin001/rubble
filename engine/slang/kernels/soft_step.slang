@@ -248,12 +248,13 @@ void soft_begin(uint3 tid : SV_DispatchThreadID)
     if (i < softGroupCount()) gSoftData[softGroupBase() + i] = float4(0, 0, 0, 0);
     if (i < softListCount())
     {
-        // Particle initial guess (VBD adaptive initialisation): x⁻ + h v + h² g ã.
-        // The rigid predictor's at-rest rule holds slow bodies still, which a
-        // Gauss–Seidel sweep over stiff beams cannot undo in a few iterations
-        // (a lattice would "fall" at a few cm/s). Free particles take the full
-        // inertial step (ã = 1); particles with contact or joint edges use the
-        // acceleration they had along gravity last step.
+        // Particle initial guess (VBD adaptive initialisation): x⁻ + h v + h² g ã,
+        // ã = last step's acceleration along gravity, clamped to [0, 1]. The
+        // rigid predictor's at-rest rule (no h v below 0.1 m/s) would cap a
+        // falling lattice at a few cm/s, since a Gauss–Seidel sweep over stiff
+        // beams moves the whole structure only slowly; a full h² g drop at rest
+        // would leave an under-converged sweep sagging (and its supports
+        // over-loaded) every step.
         uint body = SU(softListBase() + i).x;
         uint q = softChebBase() + 3u * i;
         BodyState b = gBodies[body];
@@ -262,13 +263,9 @@ void soft_begin(uint3 tid : SV_DispatchThreadID)
             AvbdParams p = PARAMS;
             float h = p.dt;
             float3 gv = float3(0.0, p.gravityY, 0.0);
-            float weight = 1.0;
-            if (SOLVE_INDEX(body + 1u) != SOLVE_INDEX(body))
-            {
-                float3 vPrev = SD(q + 2u).xyz;
-                float3 a = (b.linearVel - vPrev) / max(h, 1e-6);
-                weight = clamp(dot(a, gv) / max(dot(gv, gv), 1e-6), 0.0, 1.0);
-            }
+            float3 vPrev = SD(q + 2u).xyz;
+            float3 a = (b.linearVel - vPrev) / max(h, 1e-6);
+            float weight = clamp(dot(a, gv) / max(dot(gv, gv), 1e-6), 0.0, 1.0);
             float3 x = b.initialPos + b.linearVel * h + gv * (h * h * weight);
             gBodies[body].position = x;
             gSoftData[q] = float4(x, 0.0);
