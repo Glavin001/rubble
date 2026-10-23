@@ -495,7 +495,7 @@ impl SoftHost {
                 st.contact_friction.to_bits(),
                 l.tri_rest_base,
             ],
-            [l.body_color_base, l.body_color_stride, 0, 0],
+            [l.body_color_base, l.body_color_stride, l.tri_plane_base, 0],
         ];
         backend.write_soft_slots(0, &header);
     }

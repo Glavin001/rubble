@@ -141,6 +141,9 @@ pub struct SoftLayout {
     /// per slot, `body_color_stride` slots per body (one workgroup per body).
     pub body_color_base: u32,
     pub body_color_stride: u32,
+    /// Per triangle, 2 slots written each step before node contacts: (unit normal,
+    /// area; 0 = torn or degenerate) and (first vertex, cull radius).
+    pub tri_plane_base: u32,
     pub total_slots: u32,
 }
 
@@ -180,10 +183,15 @@ impl SoftCapacity {
             rigid_base: aabb_base + 2 * self.max_bodies,
             body_color_base: aabb_base + 2 * self.max_bodies + 2 * self.max_particles,
             body_color_stride: self.max_colors.div_ceil(2),
-            total_slots: aabb_base
+            tri_plane_base: aabb_base
                 + 2 * self.max_bodies
                 + 2 * self.max_particles
                 + self.max_bodies * self.max_colors.div_ceil(2),
+            total_slots: aabb_base
+                + 2 * self.max_bodies
+                + 2 * self.max_particles
+                + self.max_bodies * self.max_colors.div_ceil(2)
+                + 2 * self.max_triangles,
         }
     }
 
@@ -272,8 +280,9 @@ mod tests {
         assert_eq!(l.rigid_base + 2 * c.max_particles, l.body_color_base);
         assert_eq!(
             l.body_color_base + c.max_bodies * l.body_color_stride,
-            l.total_slots
+            l.tri_plane_base
         );
+        assert_eq!(l.tri_plane_base + 2 * c.max_triangles, l.total_slots);
         // The default pool stays well under WebGPU's 128 MiB binding limit.
         assert!(c.bytes() < 128 << 20);
     }
