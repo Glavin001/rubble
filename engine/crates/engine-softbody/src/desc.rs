@@ -2,7 +2,19 @@
 //! into (nodes, beams with resolved properties, collision triangles, wheels,
 //! drivetrain). Positions are in Rubble's frame (Y up, metres).
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+/// JSON has no infinity: write ±∞ thresholds as ±f32::MAX (which every
+/// comparison treats the same) and read `null` back as +∞.
+mod inf_f32 {
+    use super::*;
+    pub fn serialize<S: Serializer>(v: &f32, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_f32(if v.is_infinite() { f32::MAX.copysign(*v) } else { *v })
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
+        Ok(Option::<f32>::deserialize(d)?.unwrap_or(f32::INFINITY))
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -77,8 +89,10 @@ pub struct SoftBeam {
     /// N·s/m.
     pub damp: f32,
     /// Deform (yield) threshold, N. `f32::INFINITY` = elastic only.
+    #[serde(with = "inf_f32")]
     pub deform: f32,
     /// Break strength, N. `f32::INFINITY` = unbreakable.
+    #[serde(with = "inf_f32")]
     pub strength: f32,
     /// RoR plastic coefficient 0..1 (0 = the beam ends exactly on its threshold).
     pub plastic_coef: f32,
@@ -218,6 +232,12 @@ impl SoftVehicleDesc {
         let a = glam::Vec3::from_array(self.nodes[beam.a as usize].position);
         let b = glam::Vec3::from_array(self.nodes[beam.b as usize].position);
         (a - b).length()
+    }
+
+    /// JSON form (infinite thresholds as ±f32::MAX), e.g. for hosts that pass
+    /// descriptors across a language boundary.
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).expect("desc serialises")
     }
 
     pub fn bounds(&self) -> ([f32; 3], [f32; 3]) {

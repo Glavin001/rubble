@@ -30,6 +30,7 @@
     <div class="row">
       <select id="sceneSel"></select>
       <label class="file">Load .truck <input id="truckFile" type="file" accept=".truck,.load,.car,.trailer,.boat,.airplane,.fixed,.train" hidden /></label>
+      <label class="file" title="A BeamNG vehicle folder (.jbeam parts, optional .pc config)">Load JBeam folder <input id="jbeamDir" type="file" webkitdirectory multiple hidden /></label>
       <button id="beamsBtn">beams (V)</button>
       <button id="resetBtn">reset (R)</button>
     </div>
@@ -49,7 +50,7 @@
   <script type="module">
     import { createWorld, sceneCapacity } from './world-host.mjs';
     import { L, WHEEL_RIM_MATERIAL } from './vehicle.mjs';
-    import { loadTruck, proceduralCar, latticeCrate, SOFT } from './soft.mjs';
+    import { loadTruck, loadJbeam, proceduralCar, latticeCrate, SOFT } from './soft.mjs';
 
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
@@ -538,20 +539,34 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     }
     const initialSoftCount = softs.length;
 
-    // Load a user .truck file: import, spawn ahead of the player.
+    // Load user content: a Rigs of Rods .truck file or a BeamNG JBeam folder;
+    // import, spawn ahead of the player.
+    const spawnImported = (desc, label) => {
+      const ahead = lastPlayer ? lastPlayer.p.map((x, i) => x + norm3(qrot(lastPlayer.q, [0, 0, 1]))[i] * 8) : [0, 0, 8];
+      const [mn, mx] = desc.nodes.reduce(([a, b], n) => [a.map((v, i) => Math.min(v, n.position[i])), b.map((v, i) => Math.max(v, n.position[i]))], [[1e9, 1e9, 1e9], [-1e9, -1e9, -1e9]]);
+      const h = addSoft(desc, [ahead[0] - (mn[0] + mx[0]) / 2, 0.3 - mn[1], ahead[2] - (mn[2] + mx[2]) / 2]);
+      rebuildSkin();
+      const en = world.soft.entries[h];
+      truckInfo.textContent = `${label}: ${en.nodes} nodes, ${en.beams} beams, ${en.tris} triangles, ${en.mass.toFixed(0)} kg` +
+        (en.warnings.length ? ` · ${en.warnings.length} warnings (first: ${en.warnings[0]})` : '');
+      return h;
+    };
+    window.__spawnImported = (desc, label = 'imported') => spawnImported(desc, label);
     document.getElementById('truckFile').addEventListener('change', async (e) => {
       const file = e.target.files[0];
       if (!file) return;
+      try { spawnImported(loadTruck(await file.text()), file.name); } catch (err) { truckInfo.textContent = `${file.name}: ${err.message || err}`; }
+      e.target.value = '';
+    });
+    document.getElementById('jbeamDir').addEventListener('change', async (e) => {
+      const all = [...e.target.files];
       try {
-        const desc = loadTruck(await file.text());
-        const ahead = lastPlayer ? lastPlayer.p.map((x, i) => x + norm3(qrot(lastPlayer.q, [0, 0, 1]))[i] * 8) : [0, 0, 8];
-        const [mn, mx] = desc.nodes.reduce(([a, b], n) => [a.map((v, i) => Math.min(v, n.position[i])), b.map((v, i) => Math.max(v, n.position[i]))], [[1e9, 1e9, 1e9], [-1e9, -1e9, -1e9]]);
-        const h = addSoft(desc, [ahead[0] - (mn[0] + mx[0]) / 2, 0.3 - mn[1], ahead[2] - (mn[2] + mx[2]) / 2]);
-        rebuildSkin();
-        const en = world.soft.entries[h];
-        truckInfo.textContent = `${file.name}: ${en.nodes} nodes, ${en.beams} beams, ${en.tris} triangles, ${en.mass.toFixed(0)} kg` +
-          (en.warnings.length ? ` · ${en.warnings.length} warnings (first: ${en.warnings[0]})` : '');
-      } catch (err) { truckInfo.textContent = `${file.name}: ${err.message || err}`; }
+        const files = await Promise.all(all.filter((f) => f.name.endsWith('.jbeam')).map(async (f) => [f.webkitRelativePath || f.name, await f.text()]));
+        const pcs = all.filter((f) => f.name.endsWith('.pc'));
+        const pcFile = pcs.find((f) => f.name === 'start.pc') || pcs[0];
+        const pc = pcFile ? await pcFile.text() : undefined;
+        spawnImported(loadJbeam(files, pc), `${files.length} jbeam files${pcFile ? ' + ' + pcFile.name : ''}`);
+      } catch (err) { truckInfo.textContent = `JBeam: ${err.message || err}`; }
       e.target.value = '';
     });
 

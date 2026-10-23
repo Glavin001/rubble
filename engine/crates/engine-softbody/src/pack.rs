@@ -179,8 +179,12 @@ pub fn pack_soft(desc: &SoftVehicleDesc, place: Placement, opts: &SpawnOptions, 
         let rest = l0 * sb.precompression.max(1e-3);
         let kind = sb.kind.code();
         let (deform_c, deform_t) = match sb.kind {
-            // Bounded beams never deform: the slot holds the stiff limit spring.
-            BeamKind::Bounded => (crate::truck::DEFAULT_SPRING, f32::INFINITY),
+            // Bounded beams never deform: the slot holds the stiff limit spring
+            // (JBeam beamLimitSpring via `deform`; RoR's default beam spring otherwise).
+            BeamKind::Bounded => (
+                if sb.deform.is_finite() && sb.deform < f32::MAX { sb.deform } else { crate::truck::DEFAULT_SPRING },
+                f32::INFINITY,
+            ),
             BeamKind::Normal => (sb.deform, sb.deform),
             _ => (f32::INFINITY, f32::INFINITY),
         };

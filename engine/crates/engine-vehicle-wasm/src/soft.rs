@@ -189,3 +189,14 @@ impl WasmSoftHost {
         self.host = snap.host.clone();
     }
 }
+
+/// Load a BeamNG JBeam vehicle: `files_json` = [[name, source], …] of its
+/// `.jbeam` files, `pc` an optional `.pc` configuration. Returns the
+/// `SoftVehicleDesc` (JSON) or the loader's error.
+#[wasm_bindgen]
+pub fn soft_load_jbeam(files_json: &str, pc: Option<String>) -> Result<String, JsError> {
+    let files: Vec<(String, String)> = parse(files_json)?;
+    let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let d = engine_softbody::jbeam::load_jbeam(&refs, pc.as_deref()).map_err(err)?;
+    Ok(serde_json::to_string(&d).expect("desc serialises"))
+}

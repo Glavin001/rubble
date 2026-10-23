@@ -91,8 +91,29 @@ const CHECKS = {
       return { ok: true, msg: `${r.damage.length} lattice crates dropped, ${sum(r.damage, 'yielded')} beams bent, ${awake} bodies awake` };
     },
   },
+  // Opt-in: a real BeamNG vehicle from local files (not redistributable):
+  // RUBBLE_JBEAM_DIR=<vehicles dir with agenty_legocar/ and common/>.
+  legocar: {
+    query: 'scene=yard',
+    optIn: 'RUBBLE_JBEAM_DIR',
+    run: async (page) => {
+      const { readdirSync } = await import('node:fs');
+      const dir = process.env.RUBBLE_JBEAM_DIR;
+      const files = [];
+      const walk = (d) => { for (const e of readdirSync(d, { withFileTypes: true })) { const p = join(d, e.name); if (e.isDirectory()) walk(p); else if (e.name.endsWith('.jbeam')) files.push([p, readFileSync(p, 'utf8')]); } };
+      walk(join(dir, 'agenty_legocar'));
+      walk(join(dir, 'common'));
+      const pc = readFileSync(join(dir, 'agenty_legocar', 'start.pc'), 'utf8');
+      const h = await page.eval(`(async () => { const m = await import('./soft.mjs'); const d = m.loadJbeam(${JSON.stringify(files)}, ${JSON.stringify(pc)}); return window.__spawnImported(d, 'legocar'); })()`);
+      const r = await page.step(480);
+      const d = r.damage[h];
+      await page.view({ orbit: { yaw: 0.4, pitch: 0.3, dist: 9, target: [0, 0.8, 8] } });
+      await page.step(1);
+      return { ok: !!d && d.broken < 20, msg: `legocar spawned as soft body ${h}: ${d?.beams} beams, ${d?.yielded} bent, ${d?.broken} broken after 2 s` };
+    },
+  },
 };
-const names = only.length ? only : Object.keys(CHECKS);
+const names = only.length ? only : Object.keys(CHECKS).filter((k) => !CHECKS[k].optIn || process.env[CHECKS[k].optIn]);
 
 const TYPES = { '.html': 'text/html', '.mjs': 'text/javascript', '.js': 'text/javascript', '.json': 'application/json', '.wgsl': 'text/plain', '.wasm': 'application/wasm' };
 const server = createServer((req, res) => {

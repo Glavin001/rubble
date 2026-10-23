@@ -507,3 +507,42 @@ fn two_soft_cars_collide_head_on_without_passing_through() {
     assert!(min_gap > 2.0, "bodies do not pass through each other (min centre gap {min_gap})");
     assert!(cb.z > ca.z, "still on their own sides");
 }
+
+/// Real BeamNG content, opt-in (not redistributable, so not in the repo):
+/// RUBBLE_JBEAM_DIR=<vehicles dir with agenty_legocar/ and common/>.
+#[test]
+#[ignore]
+fn jbeam_legocar_settles_and_drives() {
+    let Ok(dir) = std::env::var("RUBBLE_JBEAM_DIR") else { return };
+    let dir = std::path::PathBuf::from(dir);
+    fn collect(d: &std::path::Path, out: &mut Vec<(String, String)>) {
+        for e in std::fs::read_dir(d).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                collect(&p, out);
+            } else if p.extension().is_some_and(|x| x == "jbeam") {
+                out.push((p.display().to_string(), std::fs::read_to_string(&p).unwrap_or_default()));
+            }
+        }
+    }
+    let mut files = Vec::new();
+    collect(&dir.join("agenty_legocar"), &mut files);
+    collect(&dir.join("common"), &mut files);
+    let pc = std::fs::read_to_string(dir.join("agenty_legocar/start.pc")).unwrap();
+    let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let d = engine_softbody::jbeam::load_jbeam(&refs, Some(&pc)).unwrap();
+    let (mn, _) = d.bounds();
+    let mut sim = world(240.0, 10);
+    let h = sim.add_soft_vehicle(&d, [0.0, 0.25 - mn[1], 0.0], [0.0, 0.0, 0.0, 1.0], &SpawnOptions::default()).expect("spawn");
+    run(&mut sim, 480);
+    let core = sim.soft_host().entry(h).core.expect("core").0;
+    let st = sim.vehicle_state(core);
+    eprintln!("legocar: {} nodes, contacts {}, yielded {}, ke {:.2}", d.nodes.len(), st.contacts, yielded(&sim, h), kinetic(&sim, h));
+    let start = centroid(&positions(&sim, h));
+    sim.set_vehicle_input(core, VehicleInput { forward: 1.0, ..Default::default() });
+    run(&mut sim, 720);
+    let end = centroid(&positions(&sim, h));
+    eprintln!("legocar drove {:?}, yielded {}, broken {}", end - start, yielded(&sim, h), broken(&sim, h));
+    assert!(positions(&sim, h).iter().all(|p| p.is_finite()));
+    assert!((end - start).length() > 3.0, "drives");
+}
