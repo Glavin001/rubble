@@ -55,10 +55,24 @@ compaction. A split rewrites body records and re-parents colliders in place.
 and the bond lines on the GPU. `Renderer::draw_resident` draws them. The *Bodies* colour
 is a body slot's, stable because the largest piece keeps its slot.
 
+**Carried impact pulses** live in a two-half pool, not in per-chunk slots. Each frame a
+chunk reads its carried pulses from one half and writes the ones that last into the
+other, claiming its run with one atomic add. Where the run lands changes no result,
+because each chunk reads only its own pulses, in order. The pool holds two pulses per
+engine contact.
+
+**Capacity.** rubble's contacts are sized for a debris pile: 24 per chunk, within 2^18,
+so rubble's 256-byte contact records fit WebGPU's 128 MB binding.
+
 **Counters.** A ring of mapped buffers, read without waiting (`ThresholdWorld::poll`):
 broken bonds, bodies, error bits, and rubble's own step counters. A fracture error (no
-free slot, a sum out of range, a union that did not settle, an impact pulse with no room)
-or an engine overflow is reported as an error.
+free slot, a sum out of range, a union that did not settle, a full pulse pool) or an
+engine overflow is reported as an error, and the lab pauses on it.
+
+**Pacing.** The lab queues at most 3 physics frames ahead of the last one the GPU
+finished. A slow stretch then slows the simulation instead of backing up the queue.
+
+**Shots.** There is no limit. Past the 16 parked spheres, each shot reuses the oldest.
 
 ## Tests and measurements
 
@@ -100,5 +114,5 @@ hits and 1.0× after. The `GpuWorld` dropped to 0.53× and then stopped.
 - **Settle on the 49-house grid.** It breaks about 2,800 bonds over 120 frames, against 62
   in the `GpuWorld`. Loads agree at frame 1 (1.045 vs 1.050 × 10⁶ N). The engines part
   from frame 2, and later bursts come from pieces landing at their Hertz peak.
-- **Not GPU-resident yet:** the shots' launch (one body write each) and the pulse cap
-  check, which the host reads a frame late.
+- **Host involvement left:** a shot's launch (one body write), and the error check, which
+  the host reads a frame or more late.
