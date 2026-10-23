@@ -131,6 +131,11 @@ fn zup(v: [f64; 3]) -> [f64; 3] {
 pub async fn stress_init(canvas: web_sys::HtmlCanvasElement) -> Result<(), JsValue> {
     std::panic::set_hook(Box::new(|info| {
         web_sys::console::error_1(&info.to_string().into());
+        // Kept for the page (`stress_panic`): a panic traps the export ("unreachable"), and a
+        // phone shows no console.
+        if let Ok(mut last) = PANIC.try_lock() {
+            *last = info.to_string();
+        }
         // The JavaScript stack: which export reached the panic.
         web_sys::console::trace_0();
     }));
@@ -186,6 +191,14 @@ pub fn stress_set_cuboid(layout: String) -> Result<(), JsValue> {
 }
 
 /// The message of the last failed [`stress_load`] or [`stress_frame`].
+/// The last panic's message (empty if none): what an export that trapped hit.
+static PANIC: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+#[wasm_bindgen]
+pub fn stress_panic() -> String {
+    PANIC.try_lock().map(|p| p.clone()).unwrap_or_default()
+}
+
 #[wasm_bindgen]
 pub fn stress_error() -> String {
     ERROR.with_borrow(|e| e.clone())
