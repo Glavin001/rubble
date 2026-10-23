@@ -624,7 +624,11 @@ float3 triPoint(uint4 tri, float3 w)
 void softContactsFor(uint body, uint sb, float3 x, float3 x0, uint triStart, uint triCount, inout float3 g, inout float3x3 H)
 {
     if (!softContactsOn()) return;
-    uint ns = softNodeSlotBase() + 2u * particleOrdinal(sb, body);
+    // Detection flags every particle in a soft contact this step (node or
+    // triangle vertex); the rest have nothing to read.
+    uint ord = particleOrdinal(sb, body);
+    if (SD(softFlagBase() + ord).x == 0.0) return;
+    uint ns = softNodeSlotBase() + 2u * ord;
     float4 s0 = SD(ns);
     uint t = asuint(s0.w);
     if (t != SOFT_NONE)
@@ -666,17 +670,9 @@ void softContactsFor(uint body, uint sb, float3 x, float3 x0, uint triStart, uin
     }
 }
 
-// One particle colour (PASS_U): VBD block solve of each particle.
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void soft_primal(uint3 tid : SV_DispatchThreadID)
+// VBD block solve of one particle (colour-list entry `ent`).
+void softSolveEntry(uint4 ent)
 {
-    uint color = PASS_U & 255u;
-    gStabilize = false;
-    uint t = dispatchIndex(tid);
-    uint4 cr = SU(softColorBase() + color);
-    if (color >= softColorCount() || t >= cr.y) return;
-    uint4 ent = SU(softListBase() + cr.x + t);
     uint body = ent.x;
     BodyState b = gBodies[body];
     if (!bodyIsDynamic(b) || bodyIsSleeping(b) || wakePending(b)) return;
@@ -740,17 +736,26 @@ void soft_primal(uint3 tid : SV_DispatchThreadID)
     gBodies[body].position = xa + dx;
 }
 
+// One particle colour (PASS_U): VBD block solve of each particle.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void soft_primal(uint3 tid : SV_DispatchThreadID)
+{
+    uint color = PASS_U & 255u;
+    gStabilize = false;
+    uint t = dispatchIndex(tid);
+    uint4 cr = SU(softColorBase() + color);
+    if (color >= softColorCount() || t >= cr.y) return;
+    softSolveEntry(SU(softListBase() + cr.x + t));
+}
+
 // Chebyshev semi-iterative acceleration of the particle sweep (VBD §3.6),
 // PASS_U = iteration index. Particles with any contact or joint edge this step
 // are left alone.
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void soft_chebyshev(uint3 tid : SV_DispatchThreadID)
+// Chebyshev step of colour-list entry `i` after iteration `it`.
+void softChebyshevEntry(uint i, uint it)
 {
-    uint i = dispatchIndex(tid);
     float rho = softChebyshevRho();
-    if (i >= softListCount() || rho <= 0.0) return;
-    uint it = PASS_U;
     uint body = SU(softListBase() + i).x;
     uint q = softChebBase() + 3u * i;
     float3 prev2 = SD(q).xyz;
@@ -770,6 +775,42 @@ void soft_chebyshev(uint3 tid : SV_DispatchThreadID)
     }
     gSoftData[q] = float4(prev1, 0.0);
     gSoftData[q + 1u] = float4(x, 0.0);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void soft_chebyshev(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (i >= softListCount() || softChebyshevRho() <= 0.0) return;
+    softChebyshevEntry(i, PASS_U);
+}
+
+// One whole particle iteration in a single 256-lane workgroup: every colour in
+// order with a device barrier between colours (the same Gauss–Seidel order as
+// one soft_primal dispatch per colour), then the Chebyshev step. Hosts use it
+// while every colour fits in one workgroup pass, where dispatch latency, not
+// arithmetic, dominates a small scene. PASS_U = iteration index.
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void soft_primal_fused(uint3 lid : SV_GroupThreadID)
+{
+    uint local = lid.x;
+    gStabilize = false;
+    if (local == 0u) gsUniformLanes = softColorCount();
+    GROUP_SYNC();
+    uint colors = gsUniformLanes;
+    for (uint c = 0u; c < colors; c++)
+    {
+        uint4 cr = SU(softColorBase() + c);
+        for (uint t = local; t < cr.y; t += 256u) softSolveEntry(SU(softListBase() + cr.x + t));
+        DeviceMemoryBarrierWithGroupSync();
+    }
+    if (softChebyshevRho() > 0.0)
+    {
+        uint n = softListCount();
+        for (uint i = local; i < n; i += 256u) softChebyshevEntry(i, PASS_U);
+    }
 }
 
 // Dual update per beam: the finite-stiffness ramp k ← min(k*, k + β|C|), and the

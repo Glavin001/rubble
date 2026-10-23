@@ -421,7 +421,8 @@ impl RigidStep {
         use engine_exec::rigid_plan as rp;
         let (bodies, colliders, joints, vehicles, wheels) = (counts[0], counts[1], counts[2], counts[3], counts[4]);
         let c = |i: usize| counts.get(i).copied().unwrap_or(0);
-        // counts[5..15]: soft counts (WasmSoftHost::counts), counts[15]: collision filters in use.
+        // counts[5..15]: soft counts (WasmSoftHost::counts), counts[15]: collision filters
+        // in use, counts[16]: the soft dual pass has work.
         let soft = rp::SoftCounts {
             bodies: c(5),
             beams: c(6),
@@ -433,6 +434,7 @@ impl RigidStep {
             particles_total: c(12),
             triangles: c(13),
             contacts: c(14) != 0,
+            dual: c(16) != 0,
         };
         let prev_n = self.last.contact_count.min(self.cap.max_contacts).max(256);
         rp::StepInputs {
@@ -509,9 +511,10 @@ impl RigidStep {
             kernels: Vec::new(),
         };
         // Every kernel a step can emit (small and large scenes, joints, vehicles).
-        for (n, prefix) in [(1u32, true), (4096, false)] {
-            // Soft passes too (contacts and Chebyshev on), so every entry is listed.
-            let mut i = s.inputs(&[n, n, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
+        // Small and large scenes; soft passes with every option on, both with the
+        // fused particle sweep (small colours) and one dispatch per colour.
+        for (n, prefix, max_color) in [(1u32, true, 1u32), (4096, false, 1), (4096, false, 4096)] {
+            let mut i = s.inputs(&[n, n, 1, 1, 1, 1, 1, 1, max_color, 1, 1, 1, 1, 1, 1, 1, 1]);
             i.sleep_time = 0.5;
             for c in engine_exec::rigid_plan::encode_step(&s.modes(), &i, false, prefix) {
                 match c {

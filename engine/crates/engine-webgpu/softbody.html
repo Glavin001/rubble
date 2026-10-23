@@ -594,14 +594,17 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     async function readDamage() {
       if (damageBusy || !beamTotal) return damage;
       damageBusy = true;
+      // Spawning can change the beam count while this read is in flight.
+      const bytes = beamTotal * 64;
+      const entries = world.soft.entries.slice();
       const enc = device.createCommandEncoder();
-      enc.copyBufferToBuffer(world.bufs[32], world.soft.layout.beamBase * 16, beamRb, 0, beamTotal * 64);
+      enc.copyBufferToBuffer(world.bufs[32], world.soft.layout.beamBase * 16, beamRb, 0, bytes);
       device.queue.submit([enc.finish()]);
-      await beamRb.mapAsync(GPUMapMode.READ, 0, beamTotal * 64);
-      const w = new Uint32Array(beamRb.getMappedRange(0, beamTotal * 64).slice(0));
+      await beamRb.mapAsync(GPUMapMode.READ, 0, bytes);
+      const w = new Uint32Array(beamRb.getMappedRange(0, bytes).slice(0));
       beamRb.unmap();
       damageBusy = false;
-      damage = world.soft.entries.map((e) => {
+      damage = entries.map((e) => {
         let yielded = 0, broken = 0;
         for (let i = e.firstBeam; i < e.firstBeam + e.beams; i++) {
           const meta = w[i * 16 + 11];

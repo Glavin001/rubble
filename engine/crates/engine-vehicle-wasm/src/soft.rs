@@ -130,7 +130,7 @@ impl WasmSoftHost {
     }
 
     /// Plan inputs: [bodies, beams, colours, max colour, groups + 1, particles,
-    /// chebyshev, particles total, triangles, contacts].
+    /// chebyshev, particles total, triangles, contacts] (the dual flag is `dual()`).
     pub fn counts(&self) -> Vec<u32> {
         let c = self.host.counts();
         vec![
@@ -145,6 +145,11 @@ impl WasmSoftHost {
             c.triangles,
             u32::from(c.contacts),
         ]
+    }
+
+    /// The soft dual pass has work (plan input counts[16]).
+    pub fn dual(&self) -> bool {
+        self.host.counts().dual
     }
 
     #[wasm_bindgen(getter)]

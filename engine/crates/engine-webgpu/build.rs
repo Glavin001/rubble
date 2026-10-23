@@ -126,6 +126,7 @@ const WORLD_ENTRIES: &[&str] = &[
     "soft_collide_nodes",
     "soft_collide_tris",
     "soft_primal",
+    "soft_primal_fused",
     "soft_chebyshev",
     "soft_dual",
     "soft_plastic",

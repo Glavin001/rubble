@@ -38,3 +38,7 @@ path = "src/bin/wgsl_export.rs"
 [[bin]]
 name = "wg_drop"
 path = "src/bin/wg_drop.rs"
+
+[[bin]]
+name = "soft_bench"
+path = "src/bin/soft_bench.rs"

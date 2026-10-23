@@ -86,6 +86,8 @@ pub struct SoftCounts {
     pub obstacles: u32,
     /// Soft contact passes run (contacts on and something to collide).
     pub contacts: bool,
+    /// The dual pass has work: penalties start below k* or hard beams exist.
+    pub dual: bool,
 }
 
 impl SoftHost {
@@ -125,6 +127,7 @@ impl SoftHost {
             triangles: self.tris_used,
             obstacles: self.obstacles.len() as u32,
             contacts: self.settings.contacts && self.tris_used > 0 && (self.entries.len() > 1 || !self.obstacles.is_empty()),
+            dual: self.settings.ramp_start < 1.0 || self.settings.hard_ratio > 0.0,
         }
     }
 

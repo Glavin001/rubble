@@ -91,6 +91,15 @@ const CHECKS = {
       return { ok: true, msg: `${r.damage.length} lattice crates dropped, ${sum(r.damage, 'yielded')} beams bent, ${awake} bodies awake` };
     },
   },
+  // Chrome step cost: the yard (3 cars, 3 crates: 387 particles, 2,190 beams) at 240 Hz × 10 iterations.
+  perf: {
+    query: 'scene=yard',
+    run: async (page) => {
+      await page.step(120, { forward: 0.5, steer: 0.2 });
+      const ms = await page.eval(`(async () => { const t = performance.now(); await window.__step(480); return (performance.now() - t) / 480; })()`);
+      return { ok: ms > 0, msg: `${ms.toFixed(2)} ms per 240 Hz step in Chrome WebGPU (${(ms * 4).toFixed(1)} ms per 60 fps frame of 4 steps)` };
+    },
+  },
   // Opt-in: a real BeamNG vehicle from local files (not redistributable):
   // RUBBLE_JBEAM_DIR=<vehicles dir with agenty_legocar/ and common/>.
   legocar: {

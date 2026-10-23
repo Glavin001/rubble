@@ -64,6 +64,7 @@ impl WebGpuWorld {
                     (*n).to_string(),
                     Ok(uniformize_workgroup_lanes(&cap_loop_iterations(&if n
                         .starts_with("solve_primal_sparse")
+                        || n.starts_with("soft_primal_fused")
                         || n.starts_with("color_bodies_local")
                         || n.starts_with("color_bodies_tail")
                     {

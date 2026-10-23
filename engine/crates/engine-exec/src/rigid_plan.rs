@@ -96,6 +96,10 @@ pub struct StepInputs {
     pub soft: SoftCounts,
 }
 
+/// Largest particle colour `soft_primal_fused` (one 256-lane workgroup) takes;
+/// bigger colours get one dispatch each.
+pub const SOFT_FUSED_MAX_COLOR: u32 = 256;
+
 /// Dispatch sizes of the soft-body passes (`soft_step.slang`), from the host's
 /// `engine_softbody::SoftHost`. Particle colours are computed at spawn, so the
 /// host knows every colour's size.
@@ -118,6 +122,9 @@ pub struct SoftCounts {
     pub triangles: u32,
     /// Node–triangle / triangle–obstacle contact passes.
     pub contacts: bool,
+    /// Some beam still ramps its penalty or is a hard (AL) beam: run `soft_dual`.
+    /// Otherwise the pass would change nothing and is skipped.
+    pub dual: bool,
 }
 
 /// JP rounds dispatched this step; later rounds run in `color_bodies_tail`.
@@ -454,17 +461,24 @@ pub fn encode_step(
             e.dp(sparse, 64, sparse_start);
         }
         if soft {
-            // Particle colours (spawn colouring; colour k of every vehicle at once).
-            for color in 0..i.soft.colors {
-                e.dp("soft_primal", u64::from(i.soft.max_color.max(1)), color);
-            }
-            if i.soft.chebyshev {
-                e.dp("soft_chebyshev", u64::from(i.soft.particles.max(1)), u32::from(iter));
+            if i.soft.max_color <= SOFT_FUSED_MAX_COLOR {
+                // Every colour fits one workgroup pass: the whole sweep (and the
+                // Chebyshev step) in one dispatch, same order. Exactly one 256-lane
+                // workgroup: hosts size dispatches as threads / 64, so ask for 64.
+                e.dp("soft_primal_fused", 64, u32::from(iter));
+            } else {
+                // Particle colours (spawn colouring; colour k of every vehicle at once).
+                for color in 0..i.soft.colors {
+                    e.dp("soft_primal", u64::from(i.soft.max_color.max(1)), color);
+                }
+                if i.soft.chebyshev {
+                    e.dp("soft_chebyshev", u64::from(i.soft.particles.max(1)), u32::from(iter));
+                }
             }
         }
         e.phase("primal");
         e.wp(dual, 65, u32::from(iter + 1 == i.iterations));
-        if soft {
+        if soft && i.soft.dual {
             e.d("soft_dual", u64::from(i.soft.beams.max(1)));
         }
         if vehicles {
@@ -578,6 +592,7 @@ pub const SOFT_ENTRIES: &[&str] = &[
     "soft_collide_nodes",
     "soft_collide_tris",
     "soft_primal",
+    "soft_primal_fused",
     "soft_chebyshev",
     "soft_dual",
     "soft_plastic",
@@ -1043,6 +1058,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn soft_passes_are_planned_in_order() {
+        let mut i = inputs(10, 0);
+        i.soft = SoftCounts { bodies: 2, beams: 100, colors: 5, max_color: 30, groups: 1, particles: 60, chebyshev: true, particles_total: 60, triangles: 40, contacts: true, dual: false };
+        let names: Vec<&str> = encode_step(&fast(), &i, false, true)
+            .into_iter()
+            .filter_map(|c| match c {
+                Cmd::Dispatch { kernel, .. } | Cmd::Indirect { kernel, .. } => Some(kernel),
+                _ => None,
+            })
+            .collect();
+        let at = |k: &str| names.iter().position(|n| *n == k).unwrap_or_else(|| panic!("{k} missing"));
+        assert!(at("soft_wake") < at("predict_bodies"));
+        assert!(at("predict_bodies") < at("soft_begin"));
+        assert!(at("soft_begin") < at("soft_collide_nodes") && at("soft_collide_nodes") < at("soft_collide_tris"));
+        assert!(at("soft_collide_tris") < at("soft_primal_fused"));
+        assert_eq!(names.iter().filter(|n| **n == "soft_primal_fused").count(), i.iterations as usize, "one fused sweep per iteration");
+        assert!(!names.contains(&"soft_dual"), "no-op dual pass skipped");
+        assert!(at("soft_plastic") < at("soft_break_groups") && at("soft_break_groups") < at("extract_velocity_sleep"));
+        assert!(at("extract_velocity_sleep") < at("soft_sleep"));
+        // Colours too large for one workgroup: one dispatch per colour, then Chebyshev.
+        i.soft.max_color = SOFT_FUSED_MAX_COLOR + 1;
+        let n = encode_step(&fast(), &i, false, true)
+            .into_iter()
+            .filter(|c| matches!(c, Cmd::Dispatch { kernel: "soft_primal", .. }))
+            .count();
+        assert_eq!(n, (i.soft.colors * i.iterations) as usize);
     }
 
     #[test]

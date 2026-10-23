@@ -1797,13 +1797,15 @@ impl WgpuSim {
             bodies: c.bodies,
             beams: c.beams,
             colors: c.colors,
-            max_color: c.max_color,
+            // ENGINE_SOFT_UNFUSED=1: one dispatch per particle colour (comparison control).
+            max_color: if env_str("ENGINE_SOFT_UNFUSED").is_some() { c.max_color.max(rigid_plan::SOFT_FUSED_MAX_COLOR + 1) } else { c.max_color },
             groups: c.groups + 1,
             particles: c.particles,
             chebyshev: h.settings.chebyshev_rho > 0.0,
             particles_total: c.particles_total,
             triangles: c.triangles,
             contacts: c.contacts,
+            dual: c.dual,
         }
     }
 
