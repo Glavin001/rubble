@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebGPU limits</title>
+<style>
+:root{--bg:#f4f6f8;--fg:#14181d;--muted:#5b6672;--line:#d9dee4;--bad:#b42318;--ok:#1a7f4b;--card:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1318;--fg:#e8ecf1;--muted:#9aa5b1;--line:#27303a;--bad:#ff8a7a;--ok:#5fd39a;--card:#161b22}}
+body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:15px/1.45 -apple-system,system-ui,sans-serif}
+h1{font-size:20px;margin:0 0 4px}p{color:var(--muted);margin:0 0 12px}
+table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden;margin-bottom:16px}
+td,th{padding:6px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;font-variant-numeric:tabular-nums}
+th{font-size:12px;color:var(--muted);font-weight:600}td:nth-child(2),td:nth-child(3){text-align:right;white-space:nowrap}
+td:first-child{word-break:break-all}.bad{color:var(--bad);font-weight:600}.ok{color:var(--ok)}
+button{font:inherit;font-weight:600;padding:10px 16px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);margin:0 0 12px}
+button:active{opacity:.7}#copied{color:var(--ok);margin-left:8px}
+</style>
+</head>
+<body>
+<h1>WebGPU limits</h1>
+<p id="who">Checking…</p>
+<button id="copy" disabled>Copy all</button><span id="copied"></span>
+<table id="need"></table>
+<table id="all"></table>
+<script type="module">
+// What the fracture lab's stress solver needs (stress-gpu kernels, ThresholdWorld's buffers).
+const NEED={maxStorageBuffersPerShaderStage:10,maxStorageBufferBindingSize:128*2**20,maxBufferSize:256*2**20,maxComputeInvocationsPerWorkgroup:256,maxComputeWorkgroupSizeX:256,maxBindingsPerBindGroup:23};
+const fmt=v=>v>=2**20?`${(v/2**20).toFixed(v%2**20?1:0)} MiB`:String(v);
+const $=id=>document.getElementById(id);
+const jspi='Suspending' in WebAssembly;
+// The report "Copy all" copies: plain text, one line per value.
+const report=[`WebGPU limits (${location.href})`,`userAgent: ${navigator.userAgent}`,`JSPI: ${jspi}`];
+const ready=()=>{$('copy').disabled=false};
+$('copy').onclick=async()=>{
+ const text=report.join('\n');
+ try{await navigator.clipboard.writeText(text)}
+ catch{const t=document.createElement('textarea');t.value=text;t.setAttribute('readonly','');t.style.position='fixed';t.style.opacity='0';document.body.append(t);t.select();t.setSelectionRange(0,text.length);document.execCommand('copy');t.remove()}
+ $('copied').textContent='Copied';setTimeout(()=>$('copied').textContent='',2000);
+};
+if(!navigator.gpu){$('who').textContent='This browser has no WebGPU (navigator.gpu is missing).';report.push('WebGPU: missing (navigator.gpu)');ready()}
+else{
+ const adapter=await navigator.gpu.requestAdapter();
+ if(!adapter){$('who').textContent='WebGPU is present but returned no adapter.';report.push('WebGPU: no adapter');ready()}
+ else{
+  const info=adapter.info??{};
+  $('who').textContent=`${[info.vendor,info.architecture,info.description].filter(Boolean).join(' · ')||'adapter'} · JSPI ${jspi?'yes':'no (the lab uses its Asyncify build)'} · ${navigator.userAgent}`;
+  const rows=Object.entries(NEED).map(([k,need])=>{const v=adapter.limits[k];const ok=v>=need;return `<tr><td>${k}</td><td class="${ok?'ok':'bad'}">${fmt(v)}</td><td>${fmt(need)}</td></tr>`});
+  $('need').innerHTML=`<tr><th>Stress solver needs</th><th>This device</th><th>Needed</th></tr>${rows.join('')}`;
+  const all=[];for(const k in adapter.limits)all.push([k,adapter.limits[k]]);
+  all.sort((a,b)=>a[0].localeCompare(b[0]));
+  report.push(`adapter: ${[info.vendor,info.architecture,info.device,info.description].filter(Boolean).join(' / ')||'(no info)'}`,'','Stress solver needs (this device / needed):');
+  for(const [k,need] of Object.entries(NEED)){const v=adapter.limits[k];report.push(`${v>=need?'ok  ':'LOW '} ${k}: ${v} / ${need}`)}
+  report.push('','All adapter limits:',...all.map(([k,v])=>`${k}: ${v}`),'',`features: ${[...adapter.features].sort().join(', ')||'none'}`);
+  ready();
+  $('all').innerHTML=`<tr><th>All adapter limits</th><th>Value</th><th></th></tr>${all.map(([k,v])=>`<tr><td>${k}</td><td>${fmt(v)}</td><td></td></tr>`).join('')}<tr><td>features</td><td colspan="2" style="text-align:left;white-space:normal">${[...adapter.features].sort().join(', ')||'none'}</td></tr>`;
+ }
+}
+</script>
+</body>
+</html>

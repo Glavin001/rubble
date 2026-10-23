@@ -2,13 +2,23 @@
 // WebGPU device and canvas (engine/stress-oracle/crates/stress-web). This file loads the
 // module, forwards input and drives one frame per animation frame; the physics, camera,
 // shot rule and drawing are the Rust's.
-import init,{stress_init,stress_set_glb,stress_set_cuboid,stress_set_pack,stress_error,stress_stats,stress_set_running,stress_running,stress_resize,stress_drag,stress_zoom,stress_shoot,stress_set_shot_mass_scale,stress_set_shot_speed_scale,stress_set_shot_radius_scale,stress_set_bond_strength_scale,stress_set_profile,stress_set_view,stress_set_physics_hz} from '../generated/stress-web/stress_web.js';
-if(!('Suspending' in WebAssembly))throw new Error('Stress-solver mode needs WebAssembly JavaScript Promise Integration (Chrome 137 or later).');
+import init,{stress_init,stress_set_glb,stress_set_cuboid,stress_set_pack,stress_error,stress_stats,stress_set_running,stress_running,stress_resize,stress_drag,stress_zoom,stress_shoot,stress_set_shot_mass_scale,stress_set_shot_speed_scale,stress_set_shot_radius_scale,stress_set_bond_strength_scale,stress_set_profile,stress_set_view,stress_set_physics_hz,stress_panic} from '../generated/stress-web/stress_web.js';
+// Chrome and Edge 137+ suspend the wasm stack natively (JSPI). Elsewhere (Safari) the
+// Asyncify build of the same Rust does, driven by gpu-wait.mjs, which picks the build.
+import {JSPI,bindAsyncify,asyncifyPromising} from './gpu-wait.mjs';
 let module=null;
 export async function createStressMode(canvas){
- module??=await init({module_or_path:new URL('../generated/stress-web/stress_web_bg.wasm',import.meta.url)});
+ if(!module){
+  const wasm=JSPI?'stress_web_bg.wasm':'stress_web_bg.asyncify.wasm';
+  module=await init({module_or_path:new URL(`../generated/stress-web/${wasm}`,import.meta.url)});
+  if(!JSPI)bindAsyncify(module,module.stress_asyncify_buffer());
+ }
  // Exports that may wait on the GPU (they suspend; see gpu-wait.mjs).
- const load=WebAssembly.promising(module.stress_load),frame=WebAssembly.promising(module.stress_frame);
+ const suspendable=JSPI?f=>WebAssembly.promising(f):asyncifyPromising;
+ // A trap (a Rust panic: "unreachable") reports the panic's message, which only the console
+ // shows otherwise.
+ const why=f=>async(...a)=>{try{return await f(...a)}catch(e){const p=stress_panic();throw p?new Error(`${p} (${e?.message??e})`):e}};
+ const load=why(suspendable(module.stress_load)),frame=why(suspendable(module.stress_frame));
  const fit=()=>{const r=devicePixelRatio||1,w=Math.max(1,Math.round(canvas.clientWidth*r)),h=Math.max(1,Math.round(canvas.clientHeight*r));
   if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h;stress_resize(w,h)}};
  fit();await stress_init(canvas);

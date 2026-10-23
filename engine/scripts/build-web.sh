@@ -14,6 +14,8 @@ set -euo pipefail
 
 SLANG_VERSION=2026.19   # engine/TOOLCHAIN.md
 WASM_PACK_VERSION=0.14.0
+# Binaryen's wasm-opt makes the stress solver's Asyncify build (browsers without JSPI).
+BINARYEN_VERSION=123
 
 ENGINE="$(cd "$(dirname "$0")/.." && pwd)"
 WEB="$ENGINE/crates/engine-webgpu"
@@ -89,6 +91,33 @@ wasm-pack build crates/engine-fracture-wasm --release --target web \
 echo "==> Stress-solver wasm (the Fracture lab's stress bond mode)"
 CARGO_PROFILE_RELEASE_DEBUG=0 wasm-pack build stress-oracle/crates/stress-web --release --target web \
   --out-dir ../../../crates/engine-webgpu/generated/stress-web --no-typescript
+echo "==> Stress-solver wasm, Asyncify build (browsers without JSPI: Safari)"
+# The solver waits on GPU maps through the import rubble-gpu-wait.yield_to_browser
+# (engine-gpu-wait). Chrome suspends the stack there with JSPI; elsewhere this build's
+# Asyncify unwinds it (fracture/gpu-wait.mjs). Only that import may unwind. Indirect calls
+# are followed (the blast_parity world reaches its waits through trait objects). Asyncify
+# cannot instrument externref, which only wasm-bindgen's shims use (`* externref shim`,
+# `__externref_*`): they call into JavaScript and never wait, so they are left out.
+case "$(uname -s)-$(uname -m)" in
+  Darwin-arm64) binaryen_target=arm64-macos ;;
+  Darwin-x86_64) binaryen_target=x86_64-macos ;;
+  Linux-x86_64) binaryen_target=x86_64-linux ;;
+  Linux-aarch64) binaryen_target=aarch64-linux ;;
+  *) echo "no Binaryen release for $(uname -s)-$(uname -m): install wasm-opt $BINARYEN_VERSION" >&2; exit 1 ;;
+esac
+WASM_OPT="$TOOLS/binaryen-version_$BINARYEN_VERSION/bin/wasm-opt"
+if [[ ! -x "$WASM_OPT" ]]; then
+  echo "==> Downloading Binaryen $BINARYEN_VERSION"
+  mkdir -p "$TOOLS"
+  curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/version_$BINARYEN_VERSION/binaryen-version_$BINARYEN_VERSION-$binaryen_target.tar.gz" \
+    | tar -xz -C "$TOOLS"
+fi
+STRESS_WASM="$ENGINE/crates/engine-webgpu/generated/stress-web/stress_web_bg.wasm"
+# The features rustc's wasm32 target emits, all in Safari 15+ (nothing newer may appear).
+"$WASM_OPT" "$STRESS_WASM" --enable-bulk-memory --enable-sign-ext --enable-mutable-globals \
+  --enable-nontrapping-float-to-int --enable-multivalue --enable-reference-types --asyncify \
+  --pass-arg=asyncify-imports@rubble-gpu-wait.yield_to_browser '--pass-arg=asyncify-removelist@*externref*' -O2 \
+  -o "${STRESS_WASM%.wasm}.asyncify.wasm"
 echo "==> Scene snapshots (scene_export, host build)"
 cargo run --release -p engine-scenes --no-default-features --bin scene_export
 
