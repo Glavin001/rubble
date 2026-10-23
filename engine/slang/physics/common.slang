@@ -26,6 +26,8 @@ static const uint BODY_SLEEPING = 4u;
 static const uint BODY_AWAKE = 8u;
 // Vehicle chassis: initialPad holds asfloat(gAabbs index) of its 4-entry wheel block.
 static const uint BODY_VEHICLE = 32u; // 16 is BODY_WAKE_PENDING
+// Soft-body particle (3-DOF node): solved by soft_step.slang, not the rigid colours.
+static const uint BODY_PARTICLE = 64u;
 
 struct Collider
 {

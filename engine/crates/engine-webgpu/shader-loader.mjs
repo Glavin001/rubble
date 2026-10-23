@@ -11,8 +11,12 @@ export async function loadShaderModules(device, kernels, { urlOf, status = () =>
   status(`compiling ${kernels.length} shaders…`);
   return Promise.all(kernels.map(async ({ name, file }) => {
     const url = urlOf(file);
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(missing ? missing(file) : `${url}: HTTP ${response.status}`);
+    // One retry: on a phone or a proxied link, one of ~100 parallel fetches can fail
+    // in transit (a network error or a 5xx from the proxy) though the file is there.
+    const get = () => fetch(url).catch((e) => ({ ok: false, status: e.message }));
+    let response = await get();
+    if (!response.ok) response = await get();
+    if (!response.ok) throw new Error(`${missing ? missing(file) : url} (HTTP ${response.status})`);
     const src = await response.text();
     const module = device.createShaderModule({ label: name, code: src });
     // Force frontend validation now so createComputePipeline cannot hang forever

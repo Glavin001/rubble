@@ -2,13 +2,23 @@
 // WebGPU device and canvas (engine/stress-oracle/crates/stress-web). This file loads the
 // module, forwards input and drives one frame per animation frame; the physics, camera,
 // shot rule and drawing are the Rust's.
-import init,{stress_init,stress_set_glb,stress_set_cuboid,stress_set_pack,stress_error,stress_stats,stress_set_running,stress_running,stress_resize,stress_drag,stress_zoom,stress_shoot,stress_set_shot_mass_scale,stress_set_bond_strength_scale,stress_set_profile,stress_set_view,stress_set_physics_hz} from '../generated/stress-web/stress_web.js';
-if(!('Suspending' in WebAssembly))throw new Error('Stress-solver mode needs WebAssembly JavaScript Promise Integration (Chrome 137 or later).');
+import init,{stress_init,stress_set_glb,stress_set_cuboid,stress_set_pack,stress_error,stress_stats,stress_set_running,stress_running,stress_resize,stress_drag,stress_zoom,stress_shoot,stress_set_shot_mass_scale,stress_set_shot_speed_scale,stress_set_shot_radius_scale,stress_set_bond_strength_scale,stress_set_profile,stress_set_view,stress_set_physics_hz,stress_panic} from '../generated/stress-web/stress_web.js';
+// Chrome and Edge 137+ suspend the wasm stack natively (JSPI). Elsewhere (Safari) the
+// Asyncify build of the same Rust does, driven by gpu-wait.mjs, which picks the build.
+import {JSPI,bindAsyncify,asyncifyPromising} from './gpu-wait.mjs';
 let module=null;
 export async function createStressMode(canvas){
- module??=await init({module_or_path:new URL('../generated/stress-web/stress_web_bg.wasm',import.meta.url)});
+ if(!module){
+  const wasm=JSPI?'stress_web_bg.wasm':'stress_web_bg.asyncify.wasm';
+  module=await init({module_or_path:new URL(`../generated/stress-web/${wasm}`,import.meta.url)});
+  if(!JSPI)bindAsyncify(module,module.stress_asyncify_buffer());
+ }
  // Exports that may wait on the GPU (they suspend; see gpu-wait.mjs).
- const load=WebAssembly.promising(module.stress_load),frame=WebAssembly.promising(module.stress_frame);
+ const suspendable=JSPI?f=>WebAssembly.promising(f):asyncifyPromising;
+ // A trap (a Rust panic: "unreachable") reports the panic's message, which only the console
+ // shows otherwise.
+ const why=f=>async(...a)=>{try{return await f(...a)}catch(e){const p=stress_panic();throw p?new Error(`${p} (${e?.message??e})`):e}};
+ const load=why(suspendable(module.stress_load)),frame=why(suspendable(module.stress_frame));
  const fit=()=>{const r=devicePixelRatio||1,w=Math.max(1,Math.round(canvas.clientWidth*r)),h=Math.max(1,Math.round(canvas.clientHeight*r));
   if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h;stress_resize(w,h)}};
  fit();await stress_init(canvas);
@@ -28,13 +38,18 @@ export async function createStressMode(canvas){
   async frame(elapsedMs){fit();if(!await frame(elapsedMs))throw new Error(stress_error())},
   get stats(){return JSON.parse(stress_stats())},
   setShotMassScale(scale){stress_set_shot_mass_scale(scale)},
+  // The shots' speed (from the next shot) and radius (from the next load), as multiples
+  // of the lab's.
+  setShotSpeedScale(scale){stress_set_shot_speed_scale(scale)},
+  setShotRadiusScale(scale){stress_set_shot_radius_scale(scale)},
   setBondStrengthScale(scale){stress_set_bond_strength_scale(scale)},
   // The capability profile of the next load: blast_parity, or threshold (the v0 mode).
   setProfile(name){stress_set_profile(name)},
   // The physics frame rate of the next load (Hz; 0 keeps the scene's).
   setPhysicsHz(hz){stress_set_physics_hz(hz)},
-  // The lab's view boxes: the bond graph, and colour by body state.
-  setView(bonds,sleep){stress_set_view(bonds,sleep)},
+  // The lab's view: the bond graph, and the colour mode (0 materials, 1 body state,
+  // 2 one colour per body, kept as it breaks).
+  setView(bonds,colorMode){stress_set_view(bonds,colorMode)},
   get running(){return stress_running()},set running(on){stress_set_running(on)},
   dispose(){canvas.removeEventListener('pointerdown',down);canvas.removeEventListener('pointermove',move);canvas.removeEventListener('pointerup',up);canvas.removeEventListener('pointercancel',cancel);canvas.removeEventListener('wheel',wheel)}};
 }

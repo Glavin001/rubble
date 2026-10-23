@@ -182,10 +182,29 @@ level, camera and shot rule, so the three can be compared:
 | **Stress solver · simple threshold (v0)** | The same pipeline with no stress solve (profile `threshold`), forward only. A strike is predicted before rubble steps (its Hertz force against each bond's strength × area) and its island split first. After each step, a contact force beyond a bond's capacity breaks it. The breaks split fragments into new bodies on the GPU, exactly as the stress solver's do | As **Stress solver** |
 | **Learned impact** | **Compute only** — lean MGN-T forward (H=48, P=64, ~139k random weights) on the house-1story pack graph. Does not break bonds or drive rubble; the HUD shows **ms/forward** so browser WebGPU latency can be compared to the native Metal M0 finding | This page's WebGPU device; Slang → WGSL (`slang/kernels/learned_impact.slang` → `generated/wgsl/learned_impact.wgsl`) |
 
-**Browser support (stress modes).** The two stress-solver modes wait on the GPU from Rust
-through WebAssembly JavaScript Promise Integration (JSPI, `gpu-wait.mjs`): Chrome or Edge
-137 or later. In a browser without it (Safari) the Bonds menu marks them, and choosing one
-says why instead of failing; the other modes are unaffected.
+**Browser support (stress modes).** The two stress-solver modes wait on the GPU from Rust.
+Chrome and Edge 137+ suspend the wasm stack there with WebAssembly JavaScript Promise
+Integration (JSPI). Other WebGPU browsers (Safari, including iPhone) load an Asyncify build of
+the same Rust (`stress_web_bg.asyncify.wasm`), whose stack the page unwinds and rewinds
+(`gpu-wait.mjs`). `?asyncify=1` forces that build in Chrome, to test it.
+
+**Balls.** **Ball mass**, **Ball speed** and **Ball radius** are power-of-two multiples of
+the scene's ball, in every mode. Mass and speed apply to the next shots. Radius reloads the
+level, because the ball colliders and the broadphase grid are sized when it loads; the mass
+stays as Ball mass sets it. The default speed is the scene's own, else three scene extents a
+second within 5–18 m/s (`plan::default_shot_speed`). rubble has no swept collision, so a
+very fast, small ball can pass through thin pieces.
+
+**View.** The **View** menu picks what the pieces are coloured by: **Materials** (the
+default), **Sleep state** (awake orange, asleep blue, static grey) or **Bodies** (one colour
+per rigid body). In rubble's modes every piece is its own body, so Bodies gives each piece a
+colour. The stress modes' Bodies view follows splits (see Stress solver, View options).
+
+**Bond graph.** "Inspect bond graph" draws each bond as a line, hidden once the bond breaks.
+In **Breakable D6 joints** line k is the engine's joint k (every builder emits them in the
+same order, `engine-fracture` `tests/bond_lines.rs`), and the draw reads that joint's broken
+flag (`fracture_draw.slang`). With **None** there are no joints, so a line hides once its
+pieces part. The stress modes draw their own (see Stress solver, View options).
 
 **Physics rate.** The **Physics** menu sets the simulated frames per second and reloads
 the level:
@@ -280,9 +299,13 @@ its own weight before it settles in the stress modes.
 - It uses the lab's orbit camera and shot rule (`engine-fracture` `view.rs`,
   `plan::shot_velocity`).
 - It runs one copy of the structure; the samples' layouts of copies are the other modes'.
-- **JSPI.** The solver reads the GPU synchronously, so in the browser each read
-  suspends the wasm stack to the event loop through JavaScript Promise Integration
-  (`engine-gpu-wait`, `gpu-wait.mjs`, the page's import map). It needs Chrome 137 or later.
+- **JSPI or Asyncify.** The solver reads the GPU synchronously, so in the browser each read
+  suspends the wasm stack to the event loop (`engine-gpu-wait`, `gpu-wait.mjs`, the page's
+  import map): through JavaScript Promise Integration in Chrome and Edge 137+, else through
+  the Asyncify build. `build-web.sh` makes that build with Binaryen's `wasm-opt --asyncify`
+  (pinned, downloaded once). Only the import `rubble-gpu-wait.yield_to_browser` unwinds.
+  wasm-bindgen's externref shims are left out (Asyncify cannot instrument externref; they
+  never wait). It is about 6% larger than the JSPI build.
 - **Build:**
   ```sh
   CARGO_PROFILE_RELEASE_DEBUG=0 wasm-pack build engine/stress-oracle/crates/stress-web --release --target web \
@@ -319,7 +342,7 @@ its own weight before it settles in the stress modes.
     `group_uniform4`, `group_uniform_island`, and uniform reductions in `group_sum2`);
   - storage access read from the shader's declarations (`gpu.rs` `wgsl_access`).
   Metal's values are unchanged (guard).
-- **View options.** Both stress modes draw "Inspect bond graph" and "Color by sleep state"
+- **View options.** Both stress modes draw "Inspect bond graph" and the **View** menu
   with their own renderer (`stress-rubble` `render.rs`, set by `stress_set_view`):
   - **Bond graph:** each intact bond is a line between its chunks' centres, drawn over the
     geometry and gone once the bond breaks.
@@ -327,6 +350,11 @@ its own weight before it settles in the stress modes.
     a sleeping body's support loads would leave the stress solve. So here "asleep" (blue)
     means at rest, slower than 0.05 m/s and 0.05 rad/s; moving bodies are orange and
     static ones grey.
+  - **Bodies:** one colour per body (cluster). A structure starts as one body, so one
+    colour. A split retires the body and gives each piece a new cluster id. The piece with
+    most of the old body's chunks keeps its colour, and the others take new ones
+    (`BodyColors`), so a body keeps its colour from frame to frame and you can watch it
+    break up.
 
 ### Breakable D6 joints (experimental)
 

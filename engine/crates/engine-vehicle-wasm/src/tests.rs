@@ -84,16 +84,25 @@ impl VehicleBackend for Mem {
         self.bodies.extend_from_slice(bytemuck::cast_slice(bodies));
     }
     fn append_colliders(&mut self, colliders: &[Collider]) {
-        self.colliders.extend_from_slice(bytemuck::cast_slice(colliders));
+        self.colliders
+            .extend_from_slice(bytemuck::cast_slice(colliders));
     }
     fn append_joints(&mut self, joints: &[Joint]) {
         self.joints.extend_from_slice(bytemuck::cast_slice(joints));
     }
     fn write_body(&mut self, index: u32, body: &BodyState) {
-        put(&mut self.bodies, index as usize * BODY_WORDS, bytemuck::cast_slice(std::slice::from_ref(body)));
+        put(
+            &mut self.bodies,
+            index as usize * BODY_WORDS,
+            bytemuck::cast_slice(std::slice::from_ref(body)),
+        );
     }
     fn write_collider(&mut self, index: u32, collider: &Collider) {
-        put(&mut self.colliders, index as usize * COLLIDER_WORDS, bytemuck::cast_slice(std::slice::from_ref(collider)));
+        put(
+            &mut self.colliders,
+            index as usize * COLLIDER_WORDS,
+            bytemuck::cast_slice(std::slice::from_ref(collider)),
+        );
     }
     fn write_slots(&mut self, slot: u32, data: &[Slot]) {
         put(&mut self.data, slot as usize * 4, data.as_flattened());
@@ -103,7 +112,10 @@ impl VehicleBackend for Mem {
         put(&mut self.data, byte_offset as usize / 4, &words);
     }
     fn read_slots(&self, slot: u32, count: u32) -> Vec<Slot> {
-        self.slots(slot, count).chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect()
+        self.slots(slot, count)
+            .chunks_exact(4)
+            .map(|c| [c[0], c[1], c[2], c[3]])
+            .collect()
     }
 }
 
@@ -130,7 +142,12 @@ fn replayed_ops_match_direct_host_for_every_preset() {
     }
     for i in 0..all.len() as u32 {
         let h = VehicleHandle(i);
-        let input = VehicleInput { forward: 0.5, steer: -0.25, gear: GearRequest::Gear(2), ..Default::default() };
+        let input = VehicleInput {
+            forward: 0.5,
+            steer: -0.25,
+            gear: GearRequest::Gear(2),
+            ..Default::default()
+        };
         direct.0.set_input(&mut direct.1, h, input);
         direct.0.detach_wheel(&mut direct.1, h, 0);
         let mut r = Recorder::new([0; 3], None);
@@ -139,8 +156,16 @@ fn replayed_ops_match_direct_host_for_every_preset() {
         replayed.1.replay(&r.ops);
     }
     // A spare-slot wheel goes through the reader callback.
-    let (h, d) = all.iter().enumerate().find(|(_, d)| d.spare_wheels > 0).map(|(i, d)| (VehicleHandle(i as u32), d)).expect("a preset with spares");
-    let wheel = WheelDesc { position: [0.3, 0.1, 0.2], ..d.wheels[0].clone() };
+    let (h, d) = all
+        .iter()
+        .enumerate()
+        .find(|(_, d)| d.spare_wheels > 0)
+        .map(|(i, d)| (VehicleHandle(i as u32), d))
+        .expect("a preset with spares");
+    let wheel = WheelDesc {
+        position: [0.3, 0.1, 0.2],
+        ..d.wheels[0].clone()
+    };
     let a = direct.0.add_wheel(&mut direct.1, h, &wheel).unwrap();
     let mem = &replayed.1;
     let reader = |slot, count| mem.slots(slot, count);
@@ -149,7 +174,11 @@ fn replayed_ops_match_direct_host_for_every_preset() {
     let ops = r.ops;
     replayed.1.replay(&ops);
     assert_eq!(a, b);
-    assert_eq!(direct.0.desc(h).wheels.last(), Some(&wheel), "descriptor keeps the design-space wheel");
+    assert_eq!(
+        direct.0.desc(h).wheels.last(),
+        Some(&wheel),
+        "descriptor keeps the design-space wheel"
+    );
 
     assert_eq!(direct.1.bodies, replayed.1.bodies, "bodies");
     assert_eq!(direct.1.colliders, replayed.1.colliders, "colliders");
@@ -157,7 +186,10 @@ fn replayed_ops_match_direct_host_for_every_preset() {
     assert_eq!(direct.1.data, replayed.1.data, "vehicle data");
     for i in 0..all.len() as u32 {
         let h = VehicleHandle(i);
-        assert_eq!(direct.0.read_state(&direct.1, h), replayed.0.read_state(&replayed.1, h));
+        assert_eq!(
+            direct.0.read_state(&direct.1, h),
+            replayed.0.read_state(&replayed.1, h)
+        );
     }
 }
 

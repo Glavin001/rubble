@@ -10,8 +10,8 @@ use engine_schema::vehicle::{BODY_VEHICLE, LAYOUT};
 use engine_schema::{BodyState, Collider, Joint, JOINT_FLAG_TYRE};
 use engine_vehicle::pack::{self, Slot, WHEEL_RIM_MATERIAL};
 use engine_vehicle::{
-    FunctionalState, GearRequest, VehicleBackend, VehicleCapacity, VehicleDesc, VehicleHandle, VehicleHost,
-    VehicleInput, WheelDesc,
+    FunctionalState, GearRequest, VehicleBackend, VehicleCapacity, VehicleDesc, VehicleHandle,
+    VehicleHost, VehicleInput, WheelDesc,
 };
 use serde_json::json;
 use wasm_bindgen::prelude::*;
@@ -28,6 +28,8 @@ pub const OP_WRITE_COLLIDER: u32 = 5;
 pub const OP_WRITE_SLOTS: u32 = 6;
 /// `arg` = byte offset into gVehicleData.
 pub const OP_WRITE_BYTES: u32 = 7;
+/// `arg` = first float4 slot of gSoftData (binding 32).
+pub const OP_WRITE_SOFT_SLOTS: u32 = 8;
 
 /// [`VehicleBackend`] that records writes for a JS host to replay.
 pub struct Recorder<'a> {
@@ -36,11 +38,23 @@ pub struct Recorder<'a> {
     pub joints: u32,
     pub ops: Vec<u32>,
     read: Option<&'a dyn Fn(u32, u32) -> Vec<u32>>,
+    /// Records appended or written through this recorder (host mirrors for
+    /// `SoftBackend::host_body` / `host_collider`).
+    body_mirror: std::collections::HashMap<u32, BodyState>,
+    collider_mirror: std::collections::HashMap<u32, Collider>,
 }
 
 impl<'a> Recorder<'a> {
     pub fn new(counts: [u32; 3], read: Option<&'a dyn Fn(u32, u32) -> Vec<u32>>) -> Self {
-        Self { bodies: counts[0], colliders: counts[1], joints: counts[2], ops: Vec::new(), read }
+        Self {
+            bodies: counts[0],
+            colliders: counts[1],
+            joints: counts[2],
+            ops: Vec::new(),
+            read,
+            body_mirror: Default::default(),
+            collider_mirror: Default::default(),
+        }
     }
 
     fn op(&mut self, op: u32, arg: u32, words: &[u32]) {
@@ -61,27 +75,51 @@ impl VehicleBackend for Recorder<'_> {
     }
     fn append_bodies(&mut self, bodies: &[BodyState]) {
         for b in bodies {
-            self.op(OP_APPEND_BODY, self.bodies, bytemuck::cast_slice(std::slice::from_ref(b)));
+            self.op(
+                OP_APPEND_BODY,
+                self.bodies,
+                bytemuck::cast_slice(std::slice::from_ref(b)),
+            );
+            self.body_mirror.insert(self.bodies, *b);
             self.bodies += 1;
         }
     }
     fn append_colliders(&mut self, colliders: &[Collider]) {
         for c in colliders {
-            self.op(OP_APPEND_COLLIDER, self.colliders, bytemuck::cast_slice(std::slice::from_ref(c)));
+            self.op(
+                OP_APPEND_COLLIDER,
+                self.colliders,
+                bytemuck::cast_slice(std::slice::from_ref(c)),
+            );
+            self.collider_mirror.insert(self.colliders, *c);
             self.colliders += 1;
         }
     }
     fn append_joints(&mut self, joints: &[Joint]) {
         for j in joints {
-            self.op(OP_APPEND_JOINT, self.joints, bytemuck::cast_slice(std::slice::from_ref(j)));
+            self.op(
+                OP_APPEND_JOINT,
+                self.joints,
+                bytemuck::cast_slice(std::slice::from_ref(j)),
+            );
             self.joints += 1;
         }
     }
     fn write_body(&mut self, index: u32, body: &BodyState) {
-        self.op(OP_WRITE_BODY, index, bytemuck::cast_slice(std::slice::from_ref(body)));
+        self.op(
+            OP_WRITE_BODY,
+            index,
+            bytemuck::cast_slice(std::slice::from_ref(body)),
+        );
+        self.body_mirror.insert(index, *body);
     }
     fn write_collider(&mut self, index: u32, collider: &Collider) {
-        self.op(OP_WRITE_COLLIDER, index, bytemuck::cast_slice(std::slice::from_ref(collider)));
+        self.op(
+            OP_WRITE_COLLIDER,
+            index,
+            bytemuck::cast_slice(std::slice::from_ref(collider)),
+        );
+        self.collider_mirror.insert(index, *collider);
     }
     fn write_slots(&mut self, slot: u32, data: &[Slot]) {
         self.op(OP_WRITE_SLOTS, slot, data.as_flattened());
@@ -93,10 +131,43 @@ impl VehicleBackend for Recorder<'_> {
     fn read_slots(&self, slot: u32, count: u32) -> Vec<Slot> {
         let read = self.read.expect("this call needs a gVehicleData reader");
         let words = read(slot, count);
-        assert_eq!(words.len(), count as usize * 4, "reader returned the wrong length");
-        words.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect()
+        assert_eq!(
+            words.len(),
+            count as usize * 4,
+            "reader returned the wrong length"
+        );
+        words
+            .chunks_exact(4)
+            .map(|c| [c[0], c[1], c[2], c[3]])
+            .collect()
     }
 }
+
+impl engine_softbody::SoftBackend for Recorder<'_> {
+    fn write_soft_slots(&mut self, slot: u32, data: &[Slot]) {
+        if !data.is_empty() {
+            self.op(OP_WRITE_SOFT_SLOTS, slot, data.as_flattened());
+        }
+    }
+    fn read_soft_slots(&self, slot: u32, count: u32) -> Vec<Slot> {
+        self.read_slots(slot, count)
+    }
+    fn host_body(&self, index: u32) -> BodyState {
+        *self
+            .body_mirror
+            .get(&index)
+            .expect("body not written through this recorder")
+    }
+    fn host_collider(&self, index: u32) -> Collider {
+        *self
+            .collider_mirror
+            .get(&index)
+            .expect("collider not written through this recorder")
+    }
+}
+
+mod soft;
+pub use soft::*;
 
 fn err(e: impl std::fmt::Display) -> JsError {
     JsError::new(&e.to_string())
@@ -109,7 +180,9 @@ fn parse<T: serde::de::DeserializeOwned>(json: &str) -> Result<T, JsError> {
 /// `read(slot, count)` → Uint32Array of `count` float4 slots of gVehicleData.
 fn js_reader(read: &js_sys::Function) -> impl Fn(u32, u32) -> Vec<u32> + '_ {
     move |slot, count| {
-        let v = read.call2(&JsValue::NULL, &slot.into(), &count.into()).expect("vehicle data reader threw");
+        let v = read
+            .call2(&JsValue::NULL, &slot.into(), &count.into())
+            .expect("vehicle data reader threw");
         js_sys::Uint32Array::from(v).to_vec()
     }
 }
@@ -118,10 +191,14 @@ fn js_reader(read: &js_sys::Function) -> impl Fn(u32, u32) -> Vec<u32> + '_ {
 /// demo needs, as a JSON object.
 #[wasm_bindgen]
 pub fn layout_constants() -> String {
-    let mut m: serde_json::Map<String, serde_json::Value> = LAYOUT.iter().map(|&(n, v)| (n.into(), v.into())).collect();
+    let mut m: serde_json::Map<String, serde_json::Value> =
+        LAYOUT.iter().map(|&(n, v)| (n.into(), v.into())).collect();
     m.insert("BODY_VEHICLE".into(), BODY_VEHICLE.into());
     m.insert("JOINT_FLAG_TYRE".into(), JOINT_FLAG_TYRE.into());
-    m.insert("JOINT_BYTES".into(), (std::mem::size_of::<Joint>() as u32).into());
+    m.insert(
+        "JOINT_BYTES".into(),
+        (std::mem::size_of::<Joint>() as u32).into(),
+    );
     m.insert("WHEEL_RIM_MATERIAL".into(), WHEEL_RIM_MATERIAL.into());
     serde_json::Value::Object(m).to_string()
 }
@@ -131,7 +208,7 @@ pub fn layout_constants() -> String {
 pub fn op_codes() -> String {
     json!({"OP_APPEND_BODY": OP_APPEND_BODY, "OP_APPEND_COLLIDER": OP_APPEND_COLLIDER, "OP_APPEND_JOINT": OP_APPEND_JOINT,
         "OP_WRITE_BODY": OP_WRITE_BODY, "OP_WRITE_COLLIDER": OP_WRITE_COLLIDER, "OP_WRITE_SLOTS": OP_WRITE_SLOTS,
-        "OP_WRITE_BYTES": OP_WRITE_BYTES})
+        "OP_WRITE_BYTES": OP_WRITE_BYTES, "OP_WRITE_SOFT_SLOTS": OP_WRITE_SOFT_SLOTS})
     .to_string()
 }
 
@@ -139,14 +216,16 @@ pub fn op_codes() -> String {
 #[wasm_bindgen]
 pub fn requirements(desc_json: &str) -> Result<String, JsError> {
     let r = pack::requirements(&parse::<VehicleDesc>(desc_json)?);
-    Ok(json!({"wheelSlots": r.wheel_slots, "curvePoints": r.curve_points, "diffs": r.diffs,
+    Ok(
+        json!({"wheelSlots": r.wheel_slots, "curvePoints": r.curve_points, "diffs": r.diffs,
         "antiRolls": r.anti_rolls, "parts": r.parts, "bodies": r.bodies, "colliders": r.colliders})
-    .to_string())
+        .to_string(),
+    )
 }
 
 #[wasm_bindgen]
 pub struct WasmVehicleHost {
-    host: VehicleHost,
+    pub(crate) host: VehicleHost,
 }
 
 impl WasmVehicleHost {
@@ -171,7 +250,9 @@ impl WasmVehicleHost {
             max_parts: cap[5],
             max_rays: cap[6],
         };
-        WasmVehicleHost { host: VehicleHost::new(capacity, aabb_tail) }
+        WasmVehicleHost {
+            host: VehicleHost::new(capacity, aabb_tail),
+        }
     }
 
     /// Region bases (float4 slots) inside gVehicleData (JSON, camelCase).
@@ -214,42 +295,92 @@ impl WasmVehicleHost {
     }
 
     /// Pack and allocate a vehicle; `counts` = [bodies, colliders, joints] already in the world.
-    pub fn add_vehicle(&mut self, counts: &[u32], desc_json: &str, position: &[f32], rotation: &[f32]) -> Result<Vec<u32>, JsError> {
+    pub fn add_vehicle(
+        &mut self,
+        counts: &[u32],
+        desc_json: &str,
+        position: &[f32],
+        rotation: &[f32],
+    ) -> Result<Vec<u32>, JsError> {
         let desc: VehicleDesc = parse(desc_json)?;
         let mut r = Recorder::new([counts[0], counts[1], counts[2]], None);
         let pos = [position[0], position[1], position[2]];
         let rot = [rotation[0], rotation[1], rotation[2], rotation[3]];
-        self.host.add_vehicle(&mut r, &desc, pos, rot).map_err(err)?;
+        self.host
+            .add_vehicle(&mut r, &desc, pos, rot)
+            .map_err(err)?;
         Ok(r.ops)
     }
 
     /// Attach a wheel (design-space position) into the next spare slot.
-    pub fn add_wheel(&mut self, h: u32, wheel_json: &str, read: &js_sys::Function) -> Result<Vec<u32>, JsError> {
+    pub fn add_wheel(
+        &mut self,
+        h: u32,
+        wheel_json: &str,
+        read: &js_sys::Function,
+    ) -> Result<Vec<u32>, JsError> {
         let wheel: WheelDesc = parse(wheel_json)?;
         let reader = js_reader(read);
         let mut r = Recorder::new([0; 3], Some(&reader));
-        self.host.add_wheel(&mut r, VehicleHandle(h), &wheel).map_err(err)?;
+        self.host
+            .add_wheel(&mut r, VehicleHandle(h), &wheel)
+            .map_err(err)?;
         Ok(r.ops)
     }
 
     /// Replace a wheel's tuning in place.
-    pub fn set_wheel_params(&mut self, h: u32, wheel: u32, wheel_json: &str, read: &js_sys::Function) -> Result<Vec<u32>, JsError> {
+    pub fn set_wheel_params(
+        &mut self,
+        h: u32,
+        wheel: u32,
+        wheel_json: &str,
+        read: &js_sys::Function,
+    ) -> Result<Vec<u32>, JsError> {
         let desc: WheelDesc = parse(wheel_json)?;
         let reader = js_reader(read);
         let mut r = Recorder::new([0; 3], Some(&reader));
-        self.host.set_wheel_params(&mut r, VehicleHandle(h), wheel, &desc);
+        self.host
+            .set_wheel_params(&mut r, VehicleHandle(h), wheel, &desc);
         Ok(r.ops)
     }
 
     /// Driver input; `gear` undefined = automatic.
-    pub fn set_input(&mut self, h: u32, forward: f32, steer: f32, brake: f32, handbrake: f32, gear: Option<i32>) -> Vec<u32> {
+    pub fn set_input(
+        &mut self,
+        h: u32,
+        forward: f32,
+        steer: f32,
+        brake: f32,
+        handbrake: f32,
+        gear: Option<i32>,
+    ) -> Vec<u32> {
         let gear = gear.map_or(GearRequest::Auto, GearRequest::Gear);
-        let input = VehicleInput { forward, steer, brake, handbrake, gear };
+        let input = VehicleInput {
+            forward,
+            steer,
+            brake,
+            handbrake,
+            gear,
+        };
         self.record(|host, r| host.set_input(r, VehicleHandle(h), input))
     }
 
-    pub fn set_functional_state(&mut self, h: u32, wheel_mask: u32, drive_mask: u32, steer_mask: u32, brake_mask: u32, engine_connected: bool) -> Vec<u32> {
-        let s = FunctionalState { wheel_mask, drive_mask, steer_mask, brake_mask, engine_connected };
+    pub fn set_functional_state(
+        &mut self,
+        h: u32,
+        wheel_mask: u32,
+        drive_mask: u32,
+        steer_mask: u32,
+        brake_mask: u32,
+        engine_connected: bool,
+    ) -> Vec<u32> {
+        let s = FunctionalState {
+            wheel_mask,
+            drive_mask,
+            steer_mask,
+            brake_mask,
+            engine_connected,
+        };
         self.record(|host, r| host.set_functional_state(r, VehicleHandle(h), s))
     }
 
@@ -279,7 +410,9 @@ impl WasmVehicleHost {
         let r = Recorder::new([0; 3], Some(&reader));
         // Through `Value` so f32s print as their exact f64 value (JS sees the same
         // numbers a Float32Array view would give).
-        serde_json::to_value(self.host.read_state(&r, VehicleHandle(h))).expect("state serialises").to_string()
+        serde_json::to_value(self.host.read_state(&r, VehicleHandle(h)))
+            .expect("state serialises")
+            .to_string()
     }
 
     /// Bookkeeping the demo reads (JSON): descriptor, slots, wheel slots, bodies.
@@ -312,7 +445,9 @@ impl WasmVehicleHost {
 
     /// Copy of the bookkeeping (pair with the GPU records for a scene reset).
     pub fn save(&self) -> WasmVehicleHost {
-        WasmVehicleHost { host: self.host.clone() }
+        WasmVehicleHost {
+            host: self.host.clone(),
+        }
     }
 
     pub fn restore(&mut self, snap: &WasmVehicleHost) {
@@ -356,6 +491,7 @@ pub fn ball_joint_words(
 pub struct RigidStep {
     cap: engine_schema::WorldCapacity,
     vehicles: VehicleCapacity,
+    soft: engine_softbody::SoftCapacity,
     params: engine_schema::AvbdParams,
     last: engine_schema::StepCounters,
     steps: u32,
@@ -371,16 +507,41 @@ pub const CMD_WORDS: usize = 6;
 
 impl RigidStep {
     fn modes(&self) -> engine_exec::rigid_plan::StepModes {
+        // Colours and colouring rounds: last step's counts plus headroom, the
+        // rest in the single-workgroup tails (same result; native WebGPU, Metal
+        // and CUDA defaults). Empty dispatches cost a barrier each: 32 rounds and
+        // 32 colours × iterations per step otherwise.
         engine_exec::rigid_plan::StepModes {
             sparse_start: 32,
-            tail_ok: true,
+            color_headroom: Some(4),
+            color_round_headroom: Some(2),
+            tail_ok: self.cap.max_bodies <= (1 << 16) * 8,
             ..Default::default()
         }
     }
 
     fn inputs(&self, counts: &[u32]) -> engine_exec::rigid_plan::StepInputs {
         use engine_exec::rigid_plan as rp;
-        let (bodies, colliders, joints, vehicles, wheels) = (counts[0], counts[1], counts[2], counts[3], counts[4]);
+        let (bodies, colliders, joints, vehicles, wheels) =
+            (counts[0], counts[1], counts[2], counts[3], counts[4]);
+        let c = |i: usize| counts.get(i).copied().unwrap_or(0);
+        // counts[5..15]: soft counts (WasmSoftHost::counts), counts[15]: collision filters
+        // in use, counts[16]: the soft dual pass has work, counts[17]: particle
+        // sweeps per iteration.
+        let soft = rp::SoftCounts {
+            bodies: c(5),
+            beams: c(6),
+            colors: c(7),
+            max_color: c(8),
+            groups: c(9),
+            particles: c(10),
+            chebyshev: c(11) != 0,
+            particles_total: c(12),
+            triangles: c(13),
+            contacts: c(14) != 0,
+            dual: c(16) != 0,
+            sweeps: c(17),
+        };
         let prev_n = self.last.contact_count.min(self.cap.max_contacts).max(256);
         rp::StepInputs {
             body_count: bodies,
@@ -399,6 +560,7 @@ impl RigidStep {
             last: self.last,
             vehicle_count: vehicles,
             wheel_count: wheels,
+            soft,
         }
     }
 
@@ -418,8 +580,10 @@ impl RigidStep {
     /// `world` = [maxBodies, maxColliders, maxContacts, maxJoints, maxCandidates,
     /// maxColors, maxCommands, maxHullVertices] (user joints: one tyre joint per
     /// wheel slot is added); `vehicles` as for [`WasmVehicleHost::new`].
+    /// `soft` (optional) = [maxBodies, maxBeams, maxParticles, maxColors, maxGroups,
+    /// maxTriangles, maxObstacles] of the soft-body arena (binding 32).
     #[wasm_bindgen(constructor)]
-    pub fn new(world: &[u32], vehicles: &[u32]) -> RigidStep {
+    pub fn new(world: &[u32], vehicles: &[u32], soft: Option<Vec<u32>>) -> RigidStep {
         let mut cap = engine_schema::WorldCapacity {
             max_bodies: world[0],
             max_colliders: world[1],
@@ -440,9 +604,17 @@ impl RigidStep {
             max_rays: vehicles[6],
         };
         cap.max_joints += vehicles.max_wheels;
+        let soft = soft.map_or(
+            engine_softbody::SoftCapacity {
+                max_bodies: 0,
+                ..Default::default()
+            },
+            |v| soft_capacity(&v),
+        );
         let mut s = RigidStep {
             cap,
             vehicles,
+            soft,
             params: engine_schema::AvbdParams::default(),
             last: engine_schema::StepCounters::default(),
             steps: 0,
@@ -451,9 +623,23 @@ impl RigidStep {
             kernels: Vec::new(),
         };
         // Every kernel a step can emit (small and large scenes, joints, vehicles).
-        for (n, prefix) in [(1u32, true), (4096, false)] {
-            let mut i = s.inputs(&[n, n, 1, 1, 1]);
+        // Small and large scenes; soft passes with every option on, both with the
+        // fused particle sweep (small colours) and one dispatch per colour.
+        // After the first step, colours and colouring rounds past last step's
+        // counts run in the tail kernels.
+        // Several soft bodies: one workgroup per body.
+        for (n, prefix, max_color, done, bodies) in [
+            (1u32, true, 1u32, 0u32, 1u32),
+            (4096, false, 1, 0, 1),
+            (4096, false, 4096, 0, 1),
+            (4096, false, 1, 1, 1),
+            (4096, false, 1, 0, 2),
+        ] {
+            let mut i = s.inputs(&[
+                n, n, 1, 1, 1, bodies, 1, 1, max_color, 1, 1, 1, 1, 1, 1, 1, 1,
+            ]);
             i.sleep_time = 0.5;
+            i.steps_done = done;
             for c in engine_exec::rigid_plan::encode_step(&s.modes(), &i, false, prefix) {
                 match c {
                     engine_exec::rigid_plan::Cmd::Dispatch { kernel, .. }
@@ -478,6 +664,9 @@ impl RigidStep {
         // Collider AABBs, then a 4-entry block per vehicle and per wheel slot.
         s[9] += u64::from(4 * (self.vehicles.max_vehicles + self.vehicles.max_wheels)) * 32;
         s[31] = self.vehicles.bytes().max(16);
+        if self.soft.max_bodies > 0 {
+            s[32] = self.soft.bytes();
+        }
         s.iter().map(|&b| b as f64).collect()
     }
 
@@ -493,7 +682,9 @@ impl RigidStep {
 
     /// `AvbdParams` as its 80 raw bytes (`engine_schema::AvbdParams` field order).
     pub fn set_params(&mut self, bytes: &[u8]) {
-        self.params = bytemuck::pod_read_unaligned(&bytes[..std::mem::size_of::<engine_schema::AvbdParams>()]);
+        self.params = bytemuck::pod_read_unaligned(
+            &bytes[..std::mem::size_of::<engine_schema::AvbdParams>()],
+        );
     }
 
     /// Island gate rounds per step (0 disables the gate).
@@ -533,7 +724,7 @@ impl RigidStep {
             &rp::HostState {
                 contacts_parity: self.parity,
                 grid_levels: 0,
-                has_filters: false,
+                has_filters: counts.get(15).is_some_and(|&f| f != 0),
                 record_hash: false,
                 np_defer_limit: 0,
                 persist_list_limit: 0,
@@ -546,7 +737,7 @@ impl RigidStep {
     }
 
     /// Commands of one pipelined step for `counts` = [bodies, colliders, joints,
-    /// vehicles, wheels]; advances the step and contact parity.
+    /// vehicles, wheels, soft counts × 10, filters]; advances the step and contact parity.
     pub fn encode(&mut self, counts: &[u32]) -> Vec<u32> {
         use engine_exec::rigid_plan::Cmd;
         let i = self.inputs(counts);
@@ -554,11 +745,28 @@ impl RigidStep {
         let mut out = Vec::with_capacity(cmds.len() * CMD_WORDS);
         for c in cmds {
             let w = match c {
-                Cmd::Copy { src, src_offset, dst, dst_offset, size } => [0, src, src_offset, dst, dst_offset, size],
-                Cmd::Dispatch { kernel, threads, pass } => {
-                    [1, self.kernel_index(kernel), threads.min(u64::from(u32::MAX)) as u32, pass, 0, 0]
+                Cmd::Copy {
+                    src,
+                    src_offset,
+                    dst,
+                    dst_offset,
+                    size,
+                } => [0, src, src_offset, dst, dst_offset, size],
+                Cmd::Dispatch {
+                    kernel,
+                    threads,
+                    pass,
+                } => [
+                    1,
+                    self.kernel_index(kernel),
+                    threads.min(u64::from(u32::MAX)) as u32,
+                    pass,
+                    0,
+                    0,
+                ],
+                Cmd::Indirect { kernel, slot, pass } => {
+                    [2, self.kernel_index(kernel), slot, pass, 0, 0]
                 }
-                Cmd::Indirect { kernel, slot, pass } => [2, self.kernel_index(kernel), slot, pass, 0, 0],
                 Cmd::Phase { .. } => continue,
             };
             out.extend_from_slice(&w);

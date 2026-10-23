@@ -220,6 +220,11 @@ impl Scene {
             procedural,
         )))
     }
+    /// The scene with the balls' radius times `scale` (their mass stays).
+    #[wasm_bindgen(js_name = withProjectileRadius)]
+    pub fn with_projectile_radius(&self, scale: f64) -> Result<Scene, JsError> {
+        self.0.clone().scale_projectile_radius(scale).map(Scene).map_err(err)
+    }
     /// The scene with every bond's break capacities times `scale`.
     #[wasm_bindgen(js_name = withBondStrength)]
     pub fn with_bond_strength(&self, scale: f64) -> Scene {
@@ -818,6 +823,16 @@ impl Plan {
     #[wasm_bindgen(js_name = setProjectileMass)]
     pub fn set_projectile_mass(&mut self, mass: f64) -> Result<(), JsError> {
         self.0.set_projectile_mass(mass).map_err(err)
+    }
+    /// The speed of the projectiles fired from now on, as a multiple of the scene's.
+    #[wasm_bindgen(js_name = setProjectileSpeedScale)]
+    pub fn set_projectile_speed_scale(&mut self, scale: f64) -> Result<(), JsError> {
+        self.0.set_projectile_speed_scale(scale).map_err(err)
+    }
+    /// The scene's shot speed (m/s) before the scale.
+    #[wasm_bindgen(js_name = shotSpeed)]
+    pub fn shot_speed(&self) -> f64 {
+        self.0.shot_speed()
     }
     /// Fire the next projectile: `{id, bytes, offsets}` (write `bytes` at both offsets of buffer 0).
     pub fn launch(

@@ -48,6 +48,7 @@ export const buildPairScene=({a='box',b='box',count=4096}={})=>sceneObject(Scene
 export const layoutScene=(one,layout,procedural=false)=>sceneObject(sceneHandle(one).layout(layout??null,procedural));
 export const withoutJoints=scene=>sceneObject(sceneHandle(scene).withoutJoints());
 export const withBondStrength=(scene,scale)=>sceneObject(sceneHandle(scene).withBondStrength(scale));
+export const withProjectileRadius=(scene,scale)=>sceneObject(sceneHandle(scene).withProjectileRadius(scale));
 export const withCapacity=(scene,partial)=>sceneObject(sceneHandle(scene).withCapacity(partial));
 export const withParams=(scene,partial)=>sceneObject(sceneHandle(scene).withParams(partial));
 export const wakeAll=scene=>sceneObject(sceneHandle(scene).wakeAll());

@@ -329,6 +329,7 @@ impl MetalSim {
             last: self.last_counters,
             vehicle_count: 0,
             wheel_count: 0,
+            soft: Default::default(),
         }
     }
 

@@ -364,6 +364,25 @@ bool tyreAccepts(float3 o, float3 d, float t, float3 n, float rad, float coneCos
     return true;
 }
 
+// Negative collision group of the body a query starts from (0 = none): a soft
+// vehicle's rigid core shares it with its node spheres, so its wheels ignore
+// their own bodywork. Set per query before scanning.
+static int gRayExcludeGroup = 0;
+
+int bodyNegativeGroup(uint body)
+{
+    uint c = firstColliderOfBody(body);
+    if (c >= gCounters[0].colliderCount || gColliders[c].body != body) return 0;
+    int g = int(gColliders[c].material) >> 16;
+    return g < 0 ? g : 0;
+}
+
+bool rayIgnores(Collider col, uint excludeBody)
+{
+    if (col.body == excludeBody) return true;
+    return gRayExcludeGroup != 0 && (int(col.material) >> 16) == gRayExcludeGroup;
+}
+
 // One workgroup per query: lanes stride the colliders, then a min-reduction.
 groupshared float gsRayT[64];
 groupshared uint gsRayC[64];
@@ -381,7 +400,7 @@ void rayLaneScan(uint lane, bool live, float3 o, float3 d, float maxT, uint excl
     for (uint ci = lane; ci < nCols; ci += 64u)
     {
         Collider col = gColliders[ci];
-        if (col.body == excludeBody) continue;
+        if (rayIgnores(col, excludeBody)) continue;
         if (col.shape != SHAPE_PLANE && !segmentHitsAabb(mn, mx, gAabbs[base + ci])) continue;
         float t;
         float3 n;
@@ -399,7 +418,7 @@ void rayTestCollider(uint ci, float3 o, float3 d, float maxT, uint excludeBody, 
     float coneCos, float lmin, float3 mn, float3 mx, uint base, inout float bestT, inout uint bestC)
 {
     Collider col = gColliders[ci];
-    if (col.body == excludeBody) return;
+    if (rayIgnores(col, excludeBody)) return;
     if (col.shape != SHAPE_PLANE && !segmentHitsAabb(mn, mx, gAabbs[base + ci])) return;
     float t;
     float3 n;
@@ -972,6 +991,7 @@ void wheel_query(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         bool hadHit = (VU(wr + W_C0).z & WD_CONTACT) != 0u && VD(wr + W_LHIT).w > 0.5;
         if (interval > 1u && hadHit && ((HOST_S(17) + w) % interval) != 0u) probe = false;
     }
+    gRayExcludeGroup = (live && HOST_S(30) != 0u) ? bodyNegativeGroup(chassis) : 0;
     // Query mode in the vehicle header: 0 = broadphase grid walk, 1 = full scan.
     if (VU(VH_MISC).w == 1u) rayLaneScan(lane, probe, o, d, maxT, chassis, sweep, coneCos, lmin);
     else rayLaneScanGrid(lane, probe, o, d, maxT, chassis, sweep, coneCos, lmin);
@@ -1511,7 +1531,8 @@ void groundClear(uint wheelSlot)
 
 // Assemble every wheel row at chassis displacement (dl, da) from x⁻.
 // When dual is set, first update multipliers/penalties at this iterate.
-void assembleVehicle(uint v, uint vr, uint4 cfg, BodyState c, float3 dl, float3 da,
+// N: per-wheel scratch size (≥ the vehicle's wheels; see assembleVehicle).
+void assembleVehicleN<let N : uint>(uint v, uint vr, uint4 cfg, BodyState c, float3 dl, float3 da,
     bool dual, out Mat6 H, out Vec6 g)
 {
     H = mat6Zero();
@@ -1519,15 +1540,15 @@ void assembleVehicle(uint v, uint vr, uint4 cfg, BodyState c, float3 dl, float3 
     AvbdParams p = PARAMS;
     float alphaStab = 1.0 - p.alpha;
     float3 upW = quatRotate(c.initialRot, vehicleUpLocal(vr));
-    uint nW = min(cfg.z, MAX_VEHICLE_WHEELS);
+    uint nW = min(cfg.z, N);
 
     // Ground blocks are rebuilt with the chassis block, at the same iterate.
     for (uint wi = 0u; wi < nW; wi++)
         if (wheelGround(wheelRec(cfg.y + wi)) != NO_INDEX) groundClear(cfg.y + wi);
 
     // Pass 1: suspension / bump stop.
-    float Lw[MAX_VEHICLE_WHEELS];
-    float FnW[MAX_VEHICLE_WHEELS];
+    float Lw[N];
+    float FnW[N];
     uint contacts = 0u;
     for (uint wi = 0u; wi < nW; wi++)
     {
@@ -1634,19 +1655,19 @@ void assembleVehicle(uint v, uint vr, uint4 cfg, BodyState c, float3 dl, float3 
         float4 k2Lead = VD(lr + W_K2);
         bool servo = yv.w > 0.0;
 
-        uint mWheel[MAX_VEHICLE_WHEELS];
-        float mR[MAX_VEHICLE_WHEELS];
-        float mCL0[MAX_VEHICLE_WHEELS];
-        float mCT[MAX_VEHICLE_WHEELS];
-        float mKL[MAX_VEHICLE_WHEELS];
-        float mLamL[MAX_VEHICLE_WHEELS];
-        float mAL[MAX_VEHICLE_WHEELS];
-        float mAT[MAX_VEHICLE_WHEELS];
-        float mFT[MAX_VEHICLE_WHEELS];
-        bool mClampT[MAX_VEHICLE_WHEELS];
-        bool mContact[MAX_VEHICLE_WHEELS];
-        bool mClampL[MAX_VEHICLE_WHEELS];
-        float mFL[MAX_VEHICLE_WHEELS];
+        uint mWheel[N];
+        float mR[N];
+        float mCL0[N];
+        float mCT[N];
+        float mKL[N];
+        float mLamL[N];
+        float mAL[N];
+        float mAT[N];
+        float mFT[N];
+        bool mClampT[N];
+        bool mContact[N];
+        bool mClampL[N];
+        float mFL[N];
         uint nm = 0u;
         float rAsum = 0.0;
         for (uint wi = 0u; wi < nW; wi++)
@@ -1972,6 +1993,16 @@ void assembleVehicle(uint v, uint vr, uint4 cfg, BodyState c, float3 dl, float3 
         float m = VD(vr + V_MASS).x;
         g.v[1] -= (gScale - 1.0) * m * p.gravityY;
     }
+}
+
+// Per-wheel scratch sized to the vehicle: thread-private arrays live in memory on
+// GPUs, and the spin solve walks them every Newton step, so a car pays for 4
+// wheels, not MAX_VEHICLE_WHEELS (identical arithmetic either way).
+void assembleVehicle(uint v, uint vr, uint4 cfg, BodyState c, float3 dl, float3 da,
+    bool dual, out Mat6 H, out Vec6 g)
+{
+    if (cfg.z <= 4u) assembleVehicleN<4>(v, vr, cfg, c, dl, da, dual, H, g);
+    else assembleVehicleN<MAX_VEHICLE_WHEELS>(v, vr, cfg, c, dl, da, dual, H, g);
 }
 
 void writeVehicleBlock(uint at, Mat6 H, Vec6 g, bool active)

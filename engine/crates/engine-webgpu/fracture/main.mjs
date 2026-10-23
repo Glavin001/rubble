@@ -1,4 +1,4 @@
-import {parseFractureGlb,buildScene,buildCuboidHouse,buildPackScene,layoutScene,withoutJoints,withBondStrength,withParams,SAMPLES} from './wasm.mjs';
+import {parseFractureGlb,buildScene,buildCuboidHouse,buildPackScene,layoutScene,withoutJoints,withBondStrength,withProjectileRadius,withParams,SAMPLES} from './wasm.mjs';
 import {createSimulation} from './simulation.mjs';
 import {preloadBonds} from './bonds.mjs';
 import {createRenderer} from './render.mjs';
@@ -44,18 +44,23 @@ $('panel-toggle').onclick=()=>setPanel(document.body.classList.contains('collaps
 // The stress solver's modes, and the capability profile each runs (stress-web).
 const STRESS_PROFILES={stress:'blast_parity',threshold:'threshold'};
 const stressMode=()=>bondMode() in STRESS_PROFILES;
-// The stress-solver modes wait on the GPU from Rust through WebAssembly JavaScript Promise
-// Integration (gpu-wait.mjs). A browser without it (Safari) gets the reason, not a crash.
-const JSPI='Suspending' in WebAssembly;
-const NO_JSPI='The stress-solver modes need WebAssembly JavaScript Promise Integration (JSPI), which this browser does not support. Use Chrome or Edge 137 or later, or pick another Bonds mode.';
-if(!JSPI)for(const o of $('bond-mode').options)if(o.value in STRESS_PROFILES){o.text+=' · needs Chrome 137+';o.title=NO_JSPI}
+// The stress-solver modes wait on the GPU from Rust: through WebAssembly JavaScript Promise
+// Integration where the browser has it, else (Safari) through the Asyncify build
+// (gpu-wait.mjs, stress-mode.mjs).
 let stress=null,stressOn=false,stressHud={t:0,frames:0,renders:0};
 let learned=null,learnedMs=0,learnedBusy=false;
-// The bond-graph and sleep-colour views: this page's renderer reads the boxes as it draws;
-// the stress modes draw with their own (Rust, stress-web), told here.
-function applyView(){if(stressOn)stress?.setView($('show-bonds').checked,$('show-sleep').checked)}
+// The bond graph and the View menu (0 materials, 1 sleep state, 2 bodies): this page's
+// renderer reads them as it draws; the stress modes draw with their own (Rust, stress-web),
+// told here.
+const viewMode=()=>Number($('view-mode').value);
+function applyView(){if(stressOn)stress?.setView($('show-bonds').checked,viewMode())}
 // Ball mass: a power-of-two multiple of the scene's default ball, applied to the next shots.
 const massScale=()=>2**Number($('ball-mass').value);
+// Ball speed: a power-of-two multiple of the scene's launch speed, applied to the next shots.
+const speedScale=()=>2**Number($('ball-speed').value);
+// Ball radius: a power-of-two multiple of the scene's ball (the mass stays), applied when
+// the level loads.
+const radiusScale=()=>2**Number($('ball-radius').value);
 // Bond strength: a power-of-two multiple of every bond's break strength (D6 joints and
 // the stress solver), applied when the level loads.
 const strengthScale=()=>2**Number($('bond-strength').value);
@@ -63,6 +68,15 @@ const strengthScale=()=>2**Number($('bond-strength').value);
 // simulated time, applied when the level loads.
 const physicsHz=()=>Number($('physics-hz').value);
 const scaleLabel=k=>`×${k>=1?k:`1/${1/k}`}`;
+function applyBallSpeed(){
+ const k=speedScale(),ms=(stressOn?stress?.stats.ballSpeed:sim?.shotSpeed)*k;
+ $('ball-speed-value').textContent=`${scaleLabel(k)}${ms?` · ${ms.toFixed(ms<10?1:0)} m/s`:''}`;
+ if(stressOn)stress?.setShotSpeedScale(k);else sim?.setProjectileSpeedScale(k);
+}
+function showBallRadius(){
+ const r=stressOn?stress?.stats.ballRadius:scene?.projectileRadius;
+ $('ball-radius-value').textContent=`${scaleLabel(radiusScale())}${r?` · ${r.toFixed(2)} m`:''}`;
+}
 function applyBallMass(){
  const k=massScale(),kg=(stressOn?stress?.stats.ballMass:scene?.projectileMass)*k;
  $('ball-mass-value').textContent=`×${k>=1?k:`1/${1/k}`}${kg?` · ${Math.round(kg).toLocaleString()} kg`:''}`;
@@ -116,10 +130,11 @@ async function loadLevel(level){
   // Learned mode: rubble stays unbonded (same as none); the MGN-T forward is timed separately.
   const one=bondMode()==='d6'?await preloadBonds(device,strengthScale()===1?built:withBondStrength(built,strengthScale())):withoutJoints(built);
   // Copies laid out as the sample says (procedural houses get a larger contact budget).
-  next=layoutScene(one,layout,!!procedural)}catch(e){if(scene)$('level').value=String(scene.level??0);throw e}
+  const laid=layoutScene(one,layout,!!procedural);
+  next=radiusScale()===1?laid:withProjectileRadius(laid,radiusScale())}catch(e){if(scene)$('level').value=String(scene.level??0);throw e}
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;accumulator=0;
  scene=next;sim=await createSimulation(device,scene,setStatus);renderer=await createRenderer(device,$('view'),sim,scene,shoot);
- renderer.colorMode=$('show-sleep').checked?1:0;applyBallMass();
+ renderer.colorMode=viewMode();applyBallMass();applyBallSpeed();showBallRadius();
  if(bondMode()==='learned'){
   setStatus('Loading learned-impact kernels (Slang→WGSL)…');
   const {createLearnedImpact}=await import('./learned-impact.mjs');
@@ -141,21 +156,20 @@ async function loadStress(level){
  // A fracture GLB's level (one copy of the structure), the cuboid houses in their
  // sample's layout (every copy), or a scene pack.
  const cuboid=procedural==='cuboid',pack=procedural==='pack';
- if(!JSPI)throw new Error(NO_JSPI);
  if(!cuboid&&!pack&&(procedural||!assetBytes))throw new Error('The stress-solver mode runs a fracture GLB, a scene pack or the cuboid houses: pick one of those scenes.');
  learned?.dispose();learned=null;learnedMs=0;
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;
  $('view').hidden=true;$('stress-view').hidden=false;
  setStatus('Loading the stress solver (Rust and Slang on WebGPU)…');
- // The mode is on only once its module loaded: a failed import (an old build, no JSPI)
+ // The mode is on only once its module loaded: a failed import (an old build)
  // leaves the page in its own renderer with the error shown.
  try{if(!stress){const {createStressMode}=await import('./stress-mode.mjs');stress=await createStressMode($('stress-view'))}}
- catch(e){$('view').hidden=false;$('stress-view').hidden=true;throw new Error(`Stress-solver mode unavailable: ${e.message}. Rebuild it (README, Bond modes).`)}
+ catch(e){$('view').hidden=false;$('stress-view').hidden=true;throw new Error(`Stress-solver mode unavailable: ${e?.message??e}. Rebuild it (README, Bond modes).`)}
  stressOn=true;
  const profile=STRESS_PROFILES[bondMode()];
- stress.setProfile(profile);stress.setPhysicsHz(physicsHz());stress.setBondStrengthScale(strengthScale());applyView();
+ stress.setProfile(profile);stress.setPhysicsHz(physicsHz());stress.setBondStrengthScale(strengthScale());stress.setShotRadiusScale(radiusScale());applyView();
  if(cuboid)await stress.loadCuboid(layout);else if(pack)await stress.loadPack(packBytes);else await stress.load(assetBytes,level);
- await stress.frame(0);applyBallMass();
+ await stress.frame(0);applyBallMass();applyBallSpeed();showBallRadius();
  const st=stress.stats;stressHud={t:performance.now(),frames:0,renders:0};
  $('fragments').textContent=st.chunks;$('bonds').textContent=st.bonds;$('hulls').textContent=st.hulls;$('awake').textContent='0';$('contacts').textContent='—';
  $('release').textContent='Start simulation';$('fire').hidden=true;
@@ -212,9 +226,12 @@ $('fire').onclick=()=>scene?.rowShot&&shoot(scene.rowShot);
 $('scene').onchange=()=>sample($('scene').value);
 $('file').onchange=()=>{const f=$('file').files[0];if(f)serializeLoad(async()=>importBytes(await f.arrayBuffer(),f.name))};
 $('level').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
-$('show-sleep').onchange=()=>{if(renderer)renderer.colorMode=$('show-sleep').checked?1:0;applyView()};
+$('view-mode').onchange=()=>{if(renderer)renderer.colorMode=viewMode();applyView()};
 $('show-bonds').onchange=applyView;
 $('ball-mass').oninput=applyBallMass;
+$('ball-speed').oninput=applyBallSpeed;
+$('ball-radius').oninput=()=>{$('ball-radius-value').textContent=scaleLabel(radiusScale())};
+$('ball-radius').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('bond-strength').oninput=()=>{$('bond-strength-value').textContent=scaleLabel(strengthScale())};
 $('bond-strength').onchange=()=>{if(bondMode()!=='none')serializeLoad(()=>loadLevel(Number($('level').value)))};
 $('bond-mode').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
@@ -252,11 +269,14 @@ function stressTick(now,elapsedMs){
  frame=(async()=>{try{
   const before=stress.stats.frames??0;await stress.frame(elapsedMs);const st=stress.stats;
   stressHud.frames+=(st.frames??0)-before;stressHud.renders++;
-  if(now-stressHud.t>=1000){const s=(now-stressHud.t)/1000;$('tps').textContent=(stressHud.frames/s).toFixed(0);$('fps').textContent=(stressHud.renders/s).toFixed(0);$('sim-speed').textContent=`${(stressHud.frames/s/st.frameHz).toFixed(2)}×`;stressHud={t:now,frames:0,renders:0}}
-  $('step-ms').textContent=st.stepMs?`${st.stepMs.toFixed(1)} ms/frame (stress + rubble)`:`target ${Math.round(st.frameHz)} frames/s`;
+  if(now-stressHud.t>=1000){const s=(now-stressHud.t)/1000;$('tps').textContent=(stressHud.frames/s).toFixed(0);$('fps').textContent=(stressHud.renders/s).toFixed(0);$('sim-speed').textContent=`${(stressHud.frames/s/st.frameHz).toFixed(2)}×`;stressHud={t:now,frames:0,renders:0,stepMs:stressHud.stepMs}}
+  // A display frame that stepped no physics frame (a 120 Hz display, a 60 Hz simulation)
+  // reports no step time: the last measured one stays, so the label does not flip.
+  if(st.stepMs)stressHud.stepMs=st.stepMs;
+  $('step-ms').textContent=stressHud.stepMs?`${stressHud.stepMs.toFixed(1)} ms/frame (stress + rubble)`:`target ${Math.round(st.frameHz)} frames/s`;
   $('frame-ms').textContent='frames / second';
-  $('awake').textContent=st.moving;
-  if(stress.running||st.shots){$('release').textContent=stress.running?'Pause':'Resume';setStatus(`${st.shots}/16 shots · ${st.frames} frames · ${st.fragments} fragments · ${st.bodies??'—'} bodies · ${st.brokenBonds} bonds broken · ${st.simSeconds.toFixed(1)} s${stressWarning(st)}`)}
+  $('awake').textContent=st.moving??st.awake??'—';
+  if(stress.running||st.shots){$('release').textContent=stress.running?'Pause':'Resume';setStatus(`${st.shots} shots · ${st.frames} frames · ${st.fragments} fragments · ${st.bodies??'—'} bodies · ${st.brokenBonds} bonds broken · ${st.simSeconds.toFixed(1)} s${stressWarning(st)}`)}
  }catch(e){fail(e)}})();
  frame.finally(()=>requestAnimationFrame(tick));
 }
@@ -305,7 +325,7 @@ function tick(now){
   renderer.draw($('show-bonds').checked);
   if(work){await work;if(!document.hidden)for(let i=0;i<ticks;i++)rates.step(sim.timing)}
   if(running){const c=sim.counters;$("awake").textContent=c.awake;$("contacts").textContent=c.contact}
-  if(running){const c=sim.counters;setStatus(`${sim.shots}/16 shots · ${sim.steps} steps · ${c.contact} contacts · ${c.awake} awake · ${(sim.steps/stepHz()).toFixed(1)} s`)}
+  if(running){const c=sim.counters;setStatus(`${sim.shots} shots · ${sim.steps} steps · ${c.contact} contacts · ${c.awake} awake · ${(sim.steps/stepHz()).toFixed(1)} s`)}
   if(!document.hidden)rates.frame();
  }catch(e){fail(e)}})();frame.finally(()=>requestAnimationFrame(tick))}else requestAnimationFrame(tick);
 }

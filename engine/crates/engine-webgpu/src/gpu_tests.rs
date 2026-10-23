@@ -1,8 +1,8 @@
 //! GPU regressions for adjacency construction and contact persistence.
 //! These require a real wgpu adapter; absence fails explicitly instead of skipping.
 use super::*;
-use engine_exec::rigid_plan::HostUniforms;
 use bytemuck::Zeroable;
+use engine_exec::rigid_plan::HostUniforms;
 use wgpu::util::DeviceExt;
 
 /// Ball joint record for hand-built kernel fixtures (identity frames).
@@ -4544,7 +4544,9 @@ fn convex_library() -> Vec<engine_schema::convex::ConvexHull> {
     };
     let mut out = vec![ConvexHull::cuboid(glam::Vec3::new(0.3, 0.2, 0.25))];
     for n in [8usize, 14, 20, 30] {
-        let pts: Vec<glam::Vec3> = (0..n).map(|_| glam::Vec3::new(rnd(), rnd() * 0.7, rnd()) * 0.8).collect();
+        let pts: Vec<glam::Vec3> = (0..n)
+            .map(|_| glam::Vec3::new(rnd(), rnd() * 0.7, rnd()) * 0.8)
+            .collect();
         out.push(ConvexHull::from_points(&pts).unwrap());
     }
     out
@@ -4557,7 +4559,12 @@ fn convex_pile_sim(n: u32, persistent: bool) -> (WgpuSim, Vec<u32>) {
     } else {
         WgpuSim::new_with_compact_contacts(convex_capacity(), false).expect("wgpu adapter")
     };
-    let mut params = AvbdParams { dt: 1.0 / 120.0, iterations: 6, flags: FLAG_REUSE_CONTACTS, ..AvbdParams::default() };
+    let mut params = AvbdParams {
+        dt: 1.0 / 120.0,
+        iterations: 6,
+        flags: FLAG_REUSE_CONTACTS,
+        ..AvbdParams::default()
+    };
     params.gravity_y = -9.81;
     sim.set_params(params);
     let ground = sim.add_body(BodyState::static_plane_support());
@@ -4575,8 +4582,13 @@ fn convex_pile_sim(n: u32, persistent: bool) -> (WgpuSim, Vec<u32>) {
     let mut arena = engine_schema::convex::HullArena::new();
     let mut bodies = Vec::new();
     for i in 0..n {
-        let p = glam::Vec3::new((i % 8) as f32 * 1.1, 0.6 + (i / 64) as f32 * 1.1, ((i / 8) % 8) as f32 * 1.1);
-        let rot = glam::Quat::from_rotation_y(i as f32 * 0.7) * glam::Quat::from_rotation_x(i as f32 * 0.3);
+        let p = glam::Vec3::new(
+            (i % 8) as f32 * 1.1,
+            0.6 + (i / 64) as f32 * 1.1,
+            ((i / 8) % 8) as f32 * 1.1,
+        );
+        let rot = glam::Quat::from_rotation_y(i as f32 * 0.7)
+            * glam::Quat::from_rotation_x(i as f32 * 0.3);
         let mut hulls = vec![lib[i as usize % lib.len()].clone()];
         if i % 4 == 0 {
             let mut child = lib[(i as usize + 1) % lib.len()].clone();
@@ -4598,13 +4610,21 @@ fn convex_pile_settles_without_overflow_or_ground_penetration() {
     for persistent in [false, true] {
         let (mut sim, bodies) = convex_pile_sim(256, persistent);
         for step in 0..480 {
-            sim.step().unwrap_or_else(|e| panic!("step {step} (persistent {persistent}): {e:?}"));
+            sim.step()
+                .unwrap_or_else(|e| panic!("step {step} (persistent {persistent}): {e:?}"));
         }
         let all = sim.download_bodies();
         for &b in &bodies {
             let s = all[b as usize];
-            assert!(s.position.iter().all(|x| x.is_finite()), "body {b} not finite");
-            assert!(s.position[1] > -0.05, "body {b} fell through the ground: {:?}", s.position);
+            assert!(
+                s.position.iter().all(|x| x.is_finite()),
+                "body {b} not finite"
+            );
+            assert!(
+                s.position[1] > -0.05,
+                "body {b} fell through the ground: {:?}",
+                s.position
+            );
             let v = glam::Vec3::from_array(s.linear_vel).length();
             assert!(v < 1.0, "body {b} still moving at {v} m/s after 4 s");
         }
@@ -4630,15 +4650,27 @@ fn convex_first_step_manifolds_are_unique_unit_and_reach_sat() {
         if m.contact_count == 0 {
             continue;
         }
-        assert!(m.contact_count <= 4, "convex manifolds keep at most 4 points");
-        assert!(seen.insert((m.collider_a, m.collider_b)), "duplicate manifold");
+        assert!(
+            m.contact_count <= 4,
+            "convex manifolds keep at most 4 points"
+        );
+        assert!(
+            seen.insert((m.collider_a, m.collider_b)),
+            "duplicate manifold"
+        );
         let n = glam::Vec3::from_array(m.normal);
         assert!((n.length() - 1.0).abs() < 1e-3, "non-unit manifold normal");
-        let (ba, bb) = (cols[m.collider_a as usize].body, cols[m.collider_b as usize].body);
+        let (ba, bb) = (
+            cols[m.collider_a as usize].body,
+            cols[m.collider_b as usize].body,
+        );
         assert_ne!(ba, bb, "self contact");
         assert!(bodies[ba as usize].is_dynamic() || bodies[bb as usize].is_dynamic());
     }
-    assert!(counters.convex_sat_small + counters.convex_sat_large > 0, "no hull pair reached SAT");
+    assert!(
+        counters.convex_sat_small + counters.convex_sat_large > 0,
+        "no hull pair reached SAT"
+    );
     assert!(!manifolds.is_empty());
 }
 
@@ -4653,13 +4685,23 @@ fn capsule_rests_flat_on_a_box_and_a_plane_with_two_contacts() {
     let (r, l) = (0.1f32, 0.4f32);
     for (support_is_box, yaw) in [(true, 0.0f32), (true, 0.6), (false, 0.0), (false, 0.6)] {
         let label = format!("{} yaw {yaw}", if support_is_box { "box" } else { "plane" });
-        let mut sim = WgpuSim::new_with_compact_contacts(convex_capacity(), false).expect("wgpu adapter");
-        let mut params = AvbdParams { dt: 1.0 / 120.0, iterations: 6, flags: FLAG_REUSE_CONTACTS, ..AvbdParams::default() };
+        let mut sim =
+            WgpuSim::new_with_compact_contacts(convex_capacity(), false).expect("wgpu adapter");
+        let mut params = AvbdParams {
+            dt: 1.0 / 120.0,
+            iterations: 6,
+            flags: FLAG_REUSE_CONTACTS,
+            ..AvbdParams::default()
+        };
         params.gravity_y = -9.81;
         sim.set_params(params);
         let ground = sim.add_body(BodyState::static_plane_support());
         let (shape, gparams, top) = if support_is_box {
-            (ShapeType::Box, [1.0, 0.25, 1.0, (2.0f32 + 0.0625).sqrt()], 0.25f32)
+            (
+                ShapeType::Box,
+                [1.0, 0.25, 1.0, (2.0f32 + 0.0625).sqrt()],
+                0.25f32,
+            )
         } else {
             (ShapeType::Plane, [0.0, 1.0, 0.0, 0.0], 0.0)
         };
@@ -4673,8 +4715,14 @@ fn capsule_rests_flat_on_a_box_and_a_plane_with_two_contacts() {
             local_rot: [0.0, 0.0, 0.0, 1.0],
             params: gparams,
         });
-        let rot = glam::Quat::from_rotation_y(yaw) * glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
-        let cap_body = sim.add_body(BodyState::dynamic(glam::Vec3::new(0.0, top + r + 0.02, 0.0), rot, 1.0, glam::Vec3::splat(0.02)));
+        let rot = glam::Quat::from_rotation_y(yaw)
+            * glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+        let cap_body = sim.add_body(BodyState::dynamic(
+            glam::Vec3::new(0.0, top + r + 0.02, 0.0),
+            rot,
+            1.0,
+            glam::Vec3::splat(0.02),
+        ));
         let cap = sim.add_collider(Collider {
             body: cap_body,
             shape: ShapeType::Capsule as u32,
@@ -4686,24 +4734,48 @@ fn capsule_rests_flat_on_a_box_and_a_plane_with_two_contacts() {
             params: [r, l, 0.0, r + l],
         });
         for step in 0..240 {
-            sim.step().unwrap_or_else(|e| panic!("{label}: step {step}: {e:?}"));
+            sim.step()
+                .unwrap_or_else(|e| panic!("{label}: step {step}: {e:?}"));
         }
         let b = sim.download_bodies()[cap_body as usize];
         let p = glam::Vec3::from_array(b.position);
         let rest = top + r;
         // Equilibrium sits ~contactOffset deep (three-avbd C0 = gap + margin).
         let margin = sim.params.contact_offset;
-        assert!(p.y > rest - margin - 0.005 && p.y < rest + 0.005, "{label}: capsule at y {} (rest {rest})", p.y);
+        assert!(
+            p.y > rest - margin - 0.005 && p.y < rest + 0.005,
+            "{label}: capsule at y {} (rest {rest})",
+            p.y
+        );
         let axis = glam::Quat::from_array(b.orientation) * glam::Vec3::Y;
         assert!(axis.y.abs() < 0.02, "{label}: capsule tipped (axis {axis})");
-        assert!(glam::Vec3::from_array(b.linear_vel).length() < 0.05, "{label}: still moving {:?}", b.linear_vel);
+        assert!(
+            glam::Vec3::from_array(b.linear_vel).length() < 0.05,
+            "{label}: still moving {:?}",
+            b.linear_vel
+        );
         let m: Vec<Manifold> = download(&sim, 25, 0, sim.last_counters.manifold_count as usize);
-        let pair: Vec<&Manifold> = m.iter().filter(|m| m.collider_a == cap || m.collider_b == cap).collect();
-        assert_eq!(pair.len(), 1, "{label}: {} manifolds for the capsule", pair.len());
-        assert_eq!(pair[0].contact_count, 2, "{label}: {} contacts", pair[0].contact_count);
+        let pair: Vec<&Manifold> = m
+            .iter()
+            .filter(|m| m.collider_a == cap || m.collider_b == cap)
+            .collect();
+        assert_eq!(
+            pair.len(),
+            1,
+            "{label}: {} manifolds for the capsule",
+            pair.len()
+        );
+        assert_eq!(
+            pair[0].contact_count, 2,
+            "{label}: {} contacts",
+            pair[0].contact_count
+        );
         let n = glam::Vec3::from_array(pair[0].normal);
         let up = if pair[0].collider_b == cap { 1.0 } else { -1.0 };
-        assert!((n - glam::Vec3::Y * up).length() < 1e-3, "{label}: normal {n}");
+        assert!(
+            (n - glam::Vec3::Y * up).length() < 1e-3,
+            "{label}: normal {n}"
+        );
     }
 }
 
@@ -4718,11 +4790,23 @@ fn capsule_rests_across_and_along_two_capsules() {
     // (label, top orientation, support half spacing along Z, rest height, contacts per support)
     let cases = [
         ("across", lying_z, 0.3f32, big_r + r, 1u32),
-        ("groove", lying_x, gap, ((big_r + r) * (big_r + r) - gap * gap).sqrt(), 2),
+        (
+            "groove",
+            lying_x,
+            gap,
+            ((big_r + r) * (big_r + r) - gap * gap).sqrt(),
+            2,
+        ),
     ];
     for (label, top_rot, s, rest, per_support) in cases {
-        let mut sim = WgpuSim::new_with_compact_contacts(convex_capacity(), false).expect("wgpu adapter");
-        let mut params = AvbdParams { dt: 1.0 / 120.0, iterations: 6, flags: FLAG_REUSE_CONTACTS, ..AvbdParams::default() };
+        let mut sim =
+            WgpuSim::new_with_compact_contacts(convex_capacity(), false).expect("wgpu adapter");
+        let mut params = AvbdParams {
+            dt: 1.0 / 120.0,
+            iterations: 6,
+            flags: FLAG_REUSE_CONTACTS,
+            ..AvbdParams::default()
+        };
         params.gravity_y = -9.81;
         sim.set_params(params);
         let capsule = |body: u32, radius: f32, half: f32| Collider {
@@ -4743,28 +4827,60 @@ fn capsule_rests_across_and_along_two_capsules() {
             let b = sim.add_body(st);
             supports.push(sim.add_collider(capsule(b, big_r, big_l)));
         }
-        let top = sim.add_body(BodyState::dynamic(glam::Vec3::new(0.0, rest + 0.02, 0.0), top_rot, 1.0, glam::Vec3::splat(0.02)));
+        let top = sim.add_body(BodyState::dynamic(
+            glam::Vec3::new(0.0, rest + 0.02, 0.0),
+            top_rot,
+            1.0,
+            glam::Vec3::splat(0.02),
+        ));
         let cap = sim.add_collider(capsule(top, r, l));
         for step in 0..240 {
-            sim.step().unwrap_or_else(|e| panic!("{label}: step {step}: {e:?}"));
+            sim.step()
+                .unwrap_or_else(|e| panic!("{label}: step {step}: {e:?}"));
         }
         let b = sim.download_bodies()[top as usize];
         let p = glam::Vec3::from_array(b.position);
         let margin = sim.params.contact_offset;
-        assert!(p.y > rest - 1.5 * margin - 0.005 && p.y < rest + 0.005, "{label}: capsule at y {} (rest {rest})", p.y);
-        assert!(p.x.abs() < 0.01 && p.z.abs() < 0.01, "{label}: capsule drifted to {p}");
-        assert!(glam::Vec3::from_array(b.linear_vel).length() < 0.05, "{label}: still moving {:?}", b.linear_vel);
+        assert!(
+            p.y > rest - 1.5 * margin - 0.005 && p.y < rest + 0.005,
+            "{label}: capsule at y {} (rest {rest})",
+            p.y
+        );
+        assert!(
+            p.x.abs() < 0.01 && p.z.abs() < 0.01,
+            "{label}: capsule drifted to {p}"
+        );
+        assert!(
+            glam::Vec3::from_array(b.linear_vel).length() < 0.05,
+            "{label}: still moving {:?}",
+            b.linear_vel
+        );
         let axis = glam::Quat::from_array(b.orientation) * glam::Vec3::Y;
         let want = top_rot * glam::Vec3::Y;
-        assert!(axis.dot(want).abs() > 0.999, "{label}: capsule turned (axis {axis})");
+        assert!(
+            axis.dot(want).abs() > 0.999,
+            "{label}: capsule turned (axis {axis})"
+        );
         let m: Vec<Manifold> = download(&sim, 25, 0, sim.last_counters.manifold_count as usize);
         for &support in &supports {
             let pair: Vec<&Manifold> = m
                 .iter()
-                .filter(|m| (m.collider_a, m.collider_b) == (cap, support) || (m.collider_a, m.collider_b) == (support, cap))
+                .filter(|m| {
+                    (m.collider_a, m.collider_b) == (cap, support)
+                        || (m.collider_a, m.collider_b) == (support, cap)
+                })
                 .collect();
-            assert_eq!(pair.len(), 1, "{label}: {} manifolds with support {support}", pair.len());
-            assert_eq!(pair[0].contact_count, per_support, "{label}: {} contacts with support {support}", pair[0].contact_count);
+            assert_eq!(
+                pair.len(),
+                1,
+                "{label}: {} manifolds with support {support}",
+                pair.len()
+            );
+            assert_eq!(
+                pair[0].contact_count, per_support,
+                "{label}: {} contacts with support {support}",
+                pair[0].contact_count
+            );
         }
     }
 }
@@ -4792,11 +4908,17 @@ fn hull_buffer_grows_and_keeps_released_block_reuse_exact() {
     assert!(sim.hull_records_capacity >= arena.len() as u32);
     // Free one block and reuse it with a different hull.
     assert!(arena.release(bases[1]));
-    let reused = arena.insert(&ConvexHull::cuboid(glam::Vec3::new(0.1, 0.2, 0.3))).unwrap();
+    let reused = arena
+        .insert(&ConvexHull::cuboid(glam::Vec3::new(0.1, 0.2, 0.3)))
+        .unwrap();
     assert_eq!(reused, bases[1]);
     sim.sync_hulls(&mut arena);
     let gpu: Vec<[u32; 4]> = download(&sim, 18, 0, arena.len());
-    assert_eq!(gpu.as_slice(), arena.records(), "GPU hull records equal the arena after growth and reuse");
+    assert_eq!(
+        gpu.as_slice(),
+        arena.records(),
+        "GPU hull records equal the arena after growth and reuse"
+    );
 }
 
 /// Two overlapping hull pairs; one pair is excluded by categories, another by a
@@ -4804,20 +4926,51 @@ fn hull_buffer_grows_and_keeps_released_block_reuse_exact() {
 #[test]
 fn collision_filters_drop_exactly_the_filtered_pairs_on_gpu() {
     use engine_schema::convex::{convex_collider_params, CollisionFilter, ConvexHull, HullArena};
-    let mut sim = WgpuSim::new_with_compact_contacts(convex_capacity(), false).expect("wgpu adapter");
-    sim.set_params(AvbdParams { dt: 1.0 / 120.0, iterations: 0, gravity_y: 0.0, ..AvbdParams::default() });
+    let mut sim =
+        WgpuSim::new_with_compact_contacts(convex_capacity(), false).expect("wgpu adapter");
+    sim.set_params(AvbdParams {
+        dt: 1.0 / 120.0,
+        iterations: 0,
+        gravity_y: 0.0,
+        ..AvbdParams::default()
+    });
     let mut arena = HullArena::new();
     let hull = ConvexHull::cuboid(glam::Vec3::splat(0.5));
     let base = arena.insert(&hull).unwrap();
     let filters = [
         (CollisionFilter::default(), CollisionFilter::default()), // allowed
-        (CollisionFilter { categories: 1, mask: 1, group: 0 }, CollisionFilter { categories: 2, mask: 2, group: 0 }),
-        (CollisionFilter { group: -1, ..Default::default() }, CollisionFilter { group: -1, ..Default::default() }),
+        (
+            CollisionFilter {
+                categories: 1,
+                mask: 1,
+                group: 0,
+            },
+            CollisionFilter {
+                categories: 2,
+                mask: 2,
+                group: 0,
+            },
+        ),
+        (
+            CollisionFilter {
+                group: -1,
+                ..Default::default()
+            },
+            CollisionFilter {
+                group: -1,
+                ..Default::default()
+            },
+        ),
     ];
     let mut cols = Vec::new();
     for (k, (fa, fb)) in filters.iter().enumerate() {
         for (dx, f) in [(0.0f32, fa), (0.9, fb)] {
-            let b = sim.add_body(BodyState::dynamic(glam::Vec3::new(k as f32 * 5.0 + dx, 2.0, 0.0), glam::Quat::IDENTITY, 1.0, glam::Vec3::ONE));
+            let b = sim.add_body(BodyState::dynamic(
+                glam::Vec3::new(k as f32 * 5.0 + dx, 2.0, 0.0),
+                glam::Quat::IDENTITY,
+                1.0,
+                glam::Vec3::ONE,
+            ));
             let mut c = Collider {
                 body: b,
                 shape: ShapeType::ConvexHull as u32,
@@ -4836,7 +4989,11 @@ fn collision_filters_drop_exactly_the_filtered_pairs_on_gpu() {
     sim.sync_hulls(&mut arena);
     sim.step().unwrap();
     let m: Vec<Manifold> = download(&sim, 25, 0, sim.last_counters.manifold_count as usize);
-    let pairs: Vec<(u32, u32)> = m.iter().filter(|m| m.contact_count > 0).map(|m| (m.collider_a, m.collider_b)).collect();
+    let pairs: Vec<(u32, u32)> = m
+        .iter()
+        .filter(|m| m.contact_count > 0)
+        .map(|m| (m.collider_a, m.collider_b))
+        .collect();
     assert_eq!(pairs, vec![(0, 1)], "only the unfiltered pair collides");
 }
 
@@ -4855,7 +5012,13 @@ fn whole_step_manifold_reuse_reproduces_previous_manifolds_on_gpu() {
         for i in 0..12 {
             let h = &lib[i % lib.len()];
             let lo = h.vertices.iter().map(|v| v.y).fold(f32::INFINITY, f32::min);
-            sim.add_convex_body(&mut arena, std::slice::from_ref(h), glam::Vec3::new(i as f32 * 0.45, -lo - 0.003, 0.0), glam::Quat::IDENTITY, 500.0);
+            sim.add_convex_body(
+                &mut arena,
+                std::slice::from_ref(h),
+                glam::Vec3::new(i as f32 * 0.45, -lo - 0.003, 0.0),
+                glam::Quat::IDENTITY,
+                500.0,
+            );
         }
         sim.step().unwrap();
         sim.step().unwrap();
@@ -4863,17 +5026,27 @@ fn whole_step_manifold_reuse_reproduces_previous_manifolds_on_gpu() {
         assert!(before.manifold_count > 10, "fixture has contacts");
         let set = |sim: &WgpuSim| -> Vec<(u32, u32, u32)> {
             let m: Vec<Manifold> = download(sim, 25, 0, sim.last_counters.manifold_count as usize);
-            let mut v: Vec<_> = m.iter().map(|m| (m.collider_a, m.collider_b, m.contact_count)).collect();
+            let mut v: Vec<_> = m
+                .iter()
+                .map(|m| (m.collider_a, m.collider_b, m.contact_count))
+                .collect();
             v.sort_unstable();
             v
         };
         let full = set(&sim);
         sim.step_reuse_manifolds().unwrap();
         let after = sim.last_counters;
-        assert_eq!(after.candidate_count, 0, "reuse skipped the broadphase (persistent {persistent})");
+        assert_eq!(
+            after.candidate_count, 0,
+            "reuse skipped the broadphase (persistent {persistent})"
+        );
         assert_eq!(after.manifold_count, before.manifold_count);
         assert_eq!(after.contact_count, before.contact_count);
-        assert_eq!(set(&sim), full, "reused manifolds equal the previous set (persistent {persistent})");
+        assert_eq!(
+            set(&sim),
+            full,
+            "reused manifolds equal the previous set (persistent {persistent})"
+        );
     }
 }
 
@@ -4894,21 +5067,37 @@ fn convex_pairs_bypass_the_two_pass_narrowphase_tail() {
         for i in 0..12 {
             let h = &lib[i % lib.len()];
             let lo = h.vertices.iter().map(|v| v.y).fold(f32::INFINITY, f32::min);
-            sim.add_convex_body(&mut arena, std::slice::from_ref(h), glam::Vec3::new(i as f32 * 0.45, -lo - 0.003, 0.0), glam::Quat::IDENTITY, 500.0);
+            sim.add_convex_body(
+                &mut arena,
+                std::slice::from_ref(h),
+                glam::Vec3::new(i as f32 * 0.45, -lo - 0.003, 0.0),
+                glam::Quat::IDENTITY,
+                500.0,
+            );
         }
         sim.step().unwrap();
         sim.step().unwrap();
         let c = sim.last_counters;
         let m: Vec<Manifold> = download(&sim, 25, 0, c.manifold_count as usize);
-        let mut v: Vec<_> = m.iter().map(|m| (m.collider_a, m.collider_b, m.contact_count)).collect();
+        let mut v: Vec<_> = m
+            .iter()
+            .map(|m| (m.collider_a, m.collider_b, m.contact_count))
+            .collect();
         v.sort_unstable();
         (c, v)
     };
     let (single, a) = run(false);
     let (split, b) = run(true);
     assert!(single.manifold_count > 10);
-    assert!(split.convex_sat_small + split.convex_sat_large > 0 || !b.is_empty(), "hull pairs reached the convex stages");
-    assert_eq!(a.iter().map(|x| (x.0, x.1)).collect::<Vec<_>>(), b.iter().map(|x| (x.0, x.1)).collect::<Vec<_>>(), "same manifold pairs");
+    assert!(
+        split.convex_sat_small + split.convex_sat_large > 0 || !b.is_empty(),
+        "hull pairs reached the convex stages"
+    );
+    assert_eq!(
+        a.iter().map(|x| (x.0, x.1)).collect::<Vec<_>>(),
+        b.iter().map(|x| (x.0, x.1)).collect::<Vec<_>>(),
+        "same manifold pairs"
+    );
 }
 
 /// Settled stacks fall asleep; waking one body must not jolt it or cascade.
@@ -5106,10 +5295,19 @@ fn adaptive_colour_dispatches_match_the_whole_palette() {
             let c = sim.step().expect("step");
             colors = colors.max(c.color_count);
         }
-        (bytemuck::cast_slice::<BodyState, u8>(&sim.download_bodies()).to_vec(), colors)
+        (
+            bytemuck::cast_slice::<BodyState, u8>(&sim.download_bodies()).to_vec(),
+            colors,
+        )
     };
     let (whole, colors) = run(true);
     let (adaptive, _) = run(false);
-    assert!(colors > 0 && 2 * colors <= 32, "the stack should use a few colours: {colors}");
-    assert!(whole == adaptive, "adaptive colour dispatches changed the bodies");
+    assert!(
+        colors > 0 && 2 * colors <= 32,
+        "the stack should use a few colours: {colors}"
+    );
+    assert!(
+        whole == adaptive,
+        "adaptive colour dispatches changed the bodies"
+    );
 }

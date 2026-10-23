@@ -197,6 +197,13 @@ impl World {
         }
     }
 
+    /// Every body as a newly coupled engine is given it (`engine_bodies` with nothing
+    /// cached): one per cluster, one per impactor. For an engine a host sets up itself (the
+    /// GPU-resident threshold world, stress-rubble `threshold`).
+    pub fn initial_engine_bodies(&self) -> Vec<EngineBody> {
+        self.engine_bodies(&mut HashMap::new())
+    }
+
     /// Every body as the engine should have it: one per cluster (boxes per chunk) and
     /// one per impactor. A cluster's shapes are built when its signature is new and
     /// shared from `cache` after that (they depend only on its chunks).

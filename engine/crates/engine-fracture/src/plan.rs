@@ -405,6 +405,8 @@ pub struct Planner {
     projectile_mass: f64,
     projectile_radius: f64,
     projectile_speed: Option<f64>,
+    /// The shots' speed as a multiple of the scene's (`set_projectile_speed_scale`).
+    projectile_speed_scale: f64,
     projectile_arc: bool,
     extent: f64,
     center: [f64; 3],
@@ -532,6 +534,7 @@ impl Planner {
             projectile_mass: scene.projectile_mass,
             projectile_radius: scene.projectile_radius,
             projectile_speed: scene.projectile_speed,
+            projectile_speed_scale: 1.0,
             projectile_arc: scene.projectile_arc,
             extent: scene.extent,
             center: scene.center,
@@ -1296,7 +1299,20 @@ impl Planner {
         Ok(())
     }
 
-    /// Fire the next projectile along a ray: returns its body id and record
+    /// The speed of the shots fired from now on, as a multiple of the scene's
+    /// ([`Self::shot_speed`] at scale 1).
+    pub fn set_projectile_speed_scale(&mut self, scale: f64) -> Result<()> {
+        ensure!(scale.is_finite() && scale > 0.0, "Projectile speed scale must be positive");
+        self.projectile_speed_scale = scale;
+        Ok(())
+    }
+
+    /// The scene's shot speed (m/s) before the scale ([`default_shot_speed`]).
+    pub fn shot_speed(&self) -> f64 {
+        default_shot_speed(self.extent, self.projectile_speed)
+    }
+
+    /// Fire a projectile along a ray: returns its body id and record
     /// (write it at the id in both body halves). Shots compensate for gravity to
     /// aim near the scene centre's depth unless `arc` is false.
     pub fn launch(
@@ -1308,14 +1324,13 @@ impl Planner {
     ) -> Result<(u32, Vec<u8>)> {
         self.mark_stale(false);
         ensure!(
-            self.shots < self.projectile_count,
-            "All 16 projectiles fired. Reset to reload."
-        );
-        ensure!(
             origin.iter().chain(&direction).all(|x| x.is_finite()),
             "Invalid projectile ray"
         );
-        let id = self.projectile_start + self.shots;
+        // No limit on shots: past the slots, each shot reuses the oldest projectile (the
+        // world holds the newest `projectile_count`).
+        ensure!(self.projectile_count > 0, "The scene has no projectile slots");
+        let id = self.projectile_start + self.shots % self.projectile_count;
         let (m, r) = (self.projectile_mass, self.projectile_radius);
         let v = shot_velocity(
             self.center,
@@ -1323,7 +1338,7 @@ impl Planner {
             r,
             origin,
             direction,
-            speed.or(self.projectile_speed),
+            Some(speed.unwrap_or_else(|| self.shot_speed()) * self.projectile_speed_scale),
             arc.unwrap_or(self.projectile_arc),
         );
         let body = Body {
@@ -1384,6 +1399,11 @@ pub fn snapshot_pose(snapshot: &[f32], i: usize) -> ([f32; 3], [f32; 4]) {
 /// with `arc` lifted to cancel the gravity drop over the distance to the scene centre's
 /// depth. The lab's every bond mode fires by this rule (`Planner::launch` and the stress
 /// mode's `stress-web`).
+/// A scene's shot speed (m/s): its own, else three scene extents a second within 5–18.
+pub fn default_shot_speed(extent: f64, speed: Option<f64>) -> f64 {
+    speed.unwrap_or_else(|| (extent * 3.0).clamp(5.0, 18.0))
+}
+
 pub fn shot_velocity(
     center: [f64; 3],
     extent: f64,
@@ -1393,7 +1413,7 @@ pub fn shot_velocity(
     speed: Option<f64>,
     arc: bool,
 ) -> [f64; 3] {
-    let speed = speed.unwrap_or_else(|| (extent * 3.0).clamp(5.0, 18.0));
+    let speed = default_shot_speed(extent, speed);
     let distance = radius.max(
         (0..3)
             .map(|i| (center[i] - origin[i]) * direction[i])

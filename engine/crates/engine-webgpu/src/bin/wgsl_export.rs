@@ -44,20 +44,30 @@ fn main() -> anyhow::Result<()> {
     );
     std::fs::write(out.join("manifest.json"), manifest)?;
     // The fracture lab's draw shader: one module, the Metal viewer's entries.
-    let draw = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../slang/render/fracture_draw.slang");
+    let draw =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../slang/render/fracture_draw.slang");
     let status = std::process::Command::new(engine_slang_build::find_slangc()?)
         .args(["-target", "wgsl", "-entry", "vs", "-stage", "vertex"])
-        .args(["-entry", "fs", "-stage", "fragment", "-entry", "ground", "-stage", "fragment", "-entry", "wire", "-stage", "fragment"])
+        .args([
+            "-entry", "fs", "-stage", "fragment", "-entry", "ground", "-stage", "fragment",
+            "-entry", "wire", "-stage", "fragment",
+        ])
         .arg("-o")
         .arg(out.join("fracture_draw.wgsl"))
         .arg(&draw)
         .status()?;
     anyhow::ensure!(status.success(), "slangc failed for {}", draw.display());
+    // Soft-body skinning (standalone, run after the step): the same module the
+    // native SoftSkinner embeds.
+    std::fs::write(out.join("soft_skin.wgsl"), engine_webgpu::SOFT_SKIN_WGSL)?;
     println!("Wrote {} WGSL modules to {}", names.len(), out.display());
 
     // Vehicle presets (fully expanded descriptors) for vehicle.html.
     let all = presets::all();
-    std::fs::write(root.join("vehicle_presets.json"), serde_json::to_string_pretty(&all)?)?;
+    std::fs::write(
+        root.join("vehicle_presets.json"),
+        serde_json::to_string_pretty(&all)?,
+    )?;
     println!("Wrote {} vehicle presets", all.len());
     // engine-vehicle's packer and VehicleHost for vehicle.mjs.
     let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../engine-vehicle-wasm");
@@ -66,8 +76,13 @@ fn main() -> anyhow::Result<()> {
         .arg(root.join("vehicle_wasm"))
         .arg(&crate_dir)
         .status()
-        .map_err(|e| anyhow::anyhow!("wasm-pack (cargo install wasm-pack) for generated/vehicle_wasm: {e}"))?;
-    anyhow::ensure!(status.success(), "wasm-pack build of engine-vehicle-wasm failed");
+        .map_err(|e| {
+            anyhow::anyhow!("wasm-pack (cargo install wasm-pack) for generated/vehicle_wasm: {e}")
+        })?;
+    anyhow::ensure!(
+        status.success(),
+        "wasm-pack build of engine-vehicle-wasm failed"
+    );
     if bad > 0 {
         anyhow::bail!("{bad} translations failed");
     }

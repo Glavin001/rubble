@@ -119,6 +119,21 @@ const WORLD_ENTRIES: &[&str] = &[
     "vehicle_iterate",
     "vehicle_post",
     "raycast_batch",
+    // Soft bodies (slang/kernels/soft_step.slang).
+    "soft_wake",
+    "soft_begin",
+    "soft_bounds",
+    "soft_collide_nodes",
+    "soft_collide_tris",
+    "soft_primal",
+    "soft_primal_fused",
+    "soft_primal_bodies",
+    "soft_chebyshev",
+    "soft_mode",
+    "soft_dual",
+    "soft_plastic",
+    "soft_break_groups",
+    "soft_sleep",
 ];
 
 const VEHICLE_ENTRIES: &[&str] = &[
@@ -136,6 +151,9 @@ fn source_for(root: &std::path::Path, entry: &str) -> PathBuf {
     let kernels = root.join("kernels");
     if VEHICLE_ENTRIES.contains(&entry) {
         return kernels.join("vehicle_step.slang");
+    }
+    if entry.starts_with("soft_") {
+        return kernels.join("soft_step.slang");
     }
     if entry.starts_with("convex_") {
         return kernels.join(if entry.ends_with("_persistent") {
@@ -246,6 +264,18 @@ fn main() -> Result<()> {
         PathBuf::from(env::var("OUT_DIR")?).join("direct_wgsl.rs"),
         table,
     )?;
+    // Soft-body skinning: one standalone WGSL module, three entries.
+    let skin = wgsl_dir.join("soft_skin.wgsl");
+    let status = std::process::Command::new(find_slangc()?)
+        .args(["-target", "wgsl"])
+        .args(["-entry", "soft_skin_vertices", "-stage", "compute"])
+        .args(["-entry", "soft_skin_faces", "-stage", "compute"])
+        .args(["-entry", "soft_skin_normals", "-stage", "compute"])
+        .arg("-o")
+        .arg(&skin)
+        .arg(slang_root.join("kernels/soft_skin.slang"))
+        .status()?;
+    anyhow::ensure!(status.success(), "slangc failed for soft_skin.slang");
     if !wgsl_failed.is_empty() {
         println!(
             "cargo:warning=direct WGSL failed: {}",
