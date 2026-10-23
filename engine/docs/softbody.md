@@ -434,6 +434,25 @@ button). A crash-test preset menu sets them for standard tests:
 | `ramp` | `speed` (70) | A ramp under the left wheels only |
 | `drop` | `height` m (8), `pitch` ° nose down (35) | Dropped nose first |
 
+**Camera views** (demo):
+
+* `?cam=` (also the panel's camera menu, and `C` to cycle) picks the view:
+  * `orbit`, free;
+  * `chase`, `front`, `rear`, `left` (port), `right` (starboard) or `top`, around a
+    subject and level with it;
+  * `driver`, the driver's seat;
+  * `mount`, riding on one subject and looking at another, such as from the 18 t
+    truck's cab at the car it is about to hit.
+* `?camTarget=` and `?camFrom=` name the subjects: every car (`car0`…) and the
+  scene's rigid bodies (`18_t_truck`, `parked_truck`, `crusher_block`, `side_ram`).
+* Subject poses are read back every frame and carried forward by their velocity over
+  the readback's lag.
+
+**Scripted events:** in the crusher scene, `liftAt` seconds in, a winch lifts the
+block `liftTo` m and holds it there, to show the wreck. The block is kinematic: its
+record is rewritten each frame with near-infinite mass. The script also runs in
+frame-stepped (`__step`) runs and restarts on reset.
+
 Every vehicle is free (an initial velocity, then physics): it pitches, trips and rolls
 as the impact makes it.
 
