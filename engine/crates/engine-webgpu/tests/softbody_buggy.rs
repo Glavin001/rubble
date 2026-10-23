@@ -199,6 +199,43 @@ fn a_struck_seat_tears_off_its_mounts() {
     assert!(!loose.contains(&"seat_r".to_string()), "the other seat stays");
 }
 
+#[test]
+fn a_head_on_cannonball_tears_off_a_front_piece_reported_by_name() {
+    let mut sim = world();
+    let h = spawn(&mut sim, [0.0, 0.05, 0.0], [0.0; 3]);
+    run(&mut sim, 480);
+    sim.poll_soft_events();
+    // The demo's cannonball (400 kg, r 0.6) at 30 m/s, head on at bumper height.
+    let body = sim.add_body({
+        let mut b = BodyState::dynamic(Vec3::new(0.0, 0.85, 4.5), glam::Quat::IDENTITY, 400.0, Vec3::splat(57.6));
+        b.linear_vel = [0.0, 0.0, -30.0];
+        b
+    });
+    sim.add_collider(Collider {
+        body,
+        shape: ShapeType::Sphere as u32,
+        material: 0,
+        generation: 0,
+        local_pos: [0.0; 3],
+        density: 0.0,
+        local_rot: [0.0, 0.0, 0.0, 1.0],
+        params: [0.6, 0.0, 0.0, 0.6],
+    });
+    let mut pieces = Vec::new();
+    for _ in 0..8 {
+        run(&mut sim, 60);
+        pieces.extend(sim.poll_soft_events().pieces);
+    }
+    let named: Vec<&Vec<String>> = pieces.iter().filter(|p| p.soft_body == h).map(|p| &p.parts).collect();
+    eprintln!("pieces {named:?}");
+    // The front bumper and the nose (panel on its standoffs) are the pieces in front.
+    assert!(
+        named.iter().any(|p| p.iter().any(|n| n == "front_bumper" || n == "nose")),
+        "a torn-off front piece is reported by name"
+    );
+    assert!(named.iter().all(|p| !p.contains(&"frame".to_string())), "the frame stays the car");
+}
+
 /// Calibration probe (run by hand): frame crush and damage in a 50 km/h wall
 /// crash across crumple-zone thresholds.
 #[test]

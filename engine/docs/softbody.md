@@ -113,6 +113,9 @@ How the frame graph is built:
 * **Stiffness:** 1e6 N/m. The light nodes rang at 3e6 and spiked loads, which tore off
   the rear bumper in a frontal crash (`hybrid_buggy_crash_probe`).
 * **Core attachment:** the 8 lower-wishbone pivots.
+* **Named parts** (`SoftVehicleDesc::parts`): `frame`, `front_bumper`, `rear_bumper`
+  and `nose`. A torn-off piece's `PieceDetached` event and the damage readouts use these
+  names.
 
 `tests/softbody_buggy.rs` (240 Hz × 10 iterations) checks three cases:
 

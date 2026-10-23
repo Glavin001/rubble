@@ -230,8 +230,18 @@ const out = {
   dropped_grazes: dropped,
   hybrid,
 };
+// One record per line (a part, a wheel, a node, a beam): readable diffs when
+// the recipe or a rule changes, without a line per number.
+function layout(v, depth = 0) {
+  const pad = ' '.repeat(depth + 1), end = ' '.repeat(depth);
+  if (Array.isArray(v) && v.length && v.every((x) => x && typeof x === 'object'))
+    return `[\n${v.map((x) => pad + JSON.stringify(x)).join(',\n')}\n${end}]`;
+  if (v && typeof v === 'object' && !Array.isArray(v) && depth < 2)
+    return `{\n${Object.entries(v).map(([k, x]) => `${pad}${JSON.stringify(k)}: ${layout(x, depth + 1)}`).join(',\n')}\n${end}}`;
+  return JSON.stringify(v);
+}
 mkdirSync(dirname(OUT), { recursive: true });
-writeFileSync(OUT, JSON.stringify(out, null, 1) + '\n');
+writeFileSync(OUT, layout(out) + '\n');
 for (const p of out.parts) console.error(`${p.name.padEnd(16)} ${p.mass.toFixed(1).padStart(7)} kg  ${String(p.colliders.length).padStart(3)} colliders  F ${(p.mount.break_force / 1e3).toFixed(0).padStart(5)} kN  τ ${(p.mount.break_torque / 1e3).toFixed(1).padStart(6)} kN·m`);
 for (const w of wheels) console.error(`wheel ${w.corner}  ${w.mass.toFixed(1)} kg  travel -${w.extension}/+${w.compression}  F ${(w.mount.break_force / 1e3).toFixed(0)} kN  τ ${(w.mount.break_torque / 1e3).toFixed(1)} kN·m`);
 console.error(`wrote ${OUT}`);

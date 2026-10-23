@@ -182,8 +182,19 @@ pub fn dune_buggy_soft_with(k: &BuggyBeams) -> SoftVehicleDesc {
         })
         .collect();
 
+    // Named node sets (SoftVehicleDesc::parts): the frame, then the pieces that
+    // tear off whole, so PieceDetached events and damage readouts name them.
+    let parts = ["frame", "front_bumper", "rear_bumper", "nose"]
+        .iter()
+        .map(|&g| SoftPart {
+            name: g.into(),
+            nodes: h.nodes.iter().enumerate().filter(|(_, n)| n.group == g).map(|(i, _)| i as u32).collect(),
+        })
+        .collect();
+
     SoftVehicleDesc {
         name: "dune_buggy_hybrid".into(),
+        parts,
         nodes,
         beams,
         core: Some(SoftCore { vehicle: core, nodes: h.core_nodes }),
@@ -226,6 +237,11 @@ mod tests {
             let mounts: Vec<&SoftBeam> = d.beams.iter().filter(|b| b.break_group == g).collect();
             assert!(!mounts.is_empty() && mounts.iter().all(|b| b.strength.is_finite() && b.strength > 0.0), "group {g}");
         }
+        // Named parts cover every node exactly once.
+        let names: Vec<&str> = d.parts.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["frame", "front_bumper", "rear_bumper", "nose"]);
+        assert!(d.parts.iter().all(|p| !p.nodes.is_empty()));
+        assert_eq!(d.parts.iter().map(|p| p.nodes.len()).sum::<usize>(), n);
         // The whole buggy weighs what the rigid one does.
         let rigid = presets::dune_buggy();
         let m_rigid: f32 = rigid.parts.iter().map(|p| p.mass).sum::<f32>() + rigid.wheels.iter().map(|w| w.mass).sum::<f32>();
