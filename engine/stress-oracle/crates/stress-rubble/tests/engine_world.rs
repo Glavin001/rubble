@@ -95,6 +95,58 @@ fn frozen_bodies_hold_still_and_are_released_with_the_given_motion() {
     assert!((ma.pose.position.z - (1.0 + 2.0 * dt)).abs() < 1e-3, "{:?}", ma.pose.position);
 }
 
+/// A 250 m/s impactor flagged `ccd` stops at a fixed 0.1 m wall with one engine
+/// step per frame (no whole-world substeps: time-of-impact contacts in the
+/// step); the same impactor without `ccd` passes through it (CCD audit Phase 2).
+#[test]
+fn a_ccd_impactor_stops_at_a_thin_wall_without_substeps() {
+    for ccd in [false, true] {
+        let Ok(mut e) = RubbleEngine::new(Vec3::ZERO) else {
+            eprintln!("no wgpu adapter; skipping");
+            return;
+        };
+        let wall = EngineBody {
+            key: BodyKey::Cluster(1),
+            signature: 1,
+            geometry: BodyGeometry::Boxes(
+                vec![BoxShape { local: Pose::default(), half_extents: Vec3::new(0.05, 1.5, 1.5), mass: 100.0, chunk: Some((0, 0)), hull: None }].into(),
+            ),
+            fixed: true,
+            ccd: false,
+            pose: Pose::new(Vec3::new(10.05, 0.0, 0.0), Quat::IDENTITY),
+            velocity: Vec3::ZERO,
+            angular_velocity: Vec3::ZERO,
+        };
+        let ball = EngineBody {
+            key: BodyKey::Impactor(0),
+            signature: 1,
+            geometry: BodyGeometry::Sphere { radius: 0.1, mass: 5.0 },
+            fixed: false,
+            ccd,
+            pose: Pose::new(Vec3::new(0.37, 0.03, 0.02), Quat::IDENTITY),
+            velocity: Vec3::new(250.0, 0.0, 0.0),
+            angular_velocity: Vec3::ZERO,
+        };
+        e.sync_bodies(&[wall, ball]);
+        let mut max_x = f64::MIN;
+        let mut hits = 0;
+        for _ in 0..12 {
+            let contacts = e.step(1.0 / 60.0, &[], &[]);
+            hits += contacts.iter().filter(|c| c.chunk == 0).count();
+            let m = e.motion();
+            max_x = max_x.max(m.iter().find(|m| m.key == BodyKey::Impactor(0)).unwrap().pose.position.x);
+            assert_eq!(e.last_substeps, 1, "one engine step per frame");
+        }
+        println!("ccd {ccd}: impactor reached x {max_x:.3} (wall face at 10.0), {hits} wall contacts");
+        if ccd {
+            assert!(max_x < 10.0 - 0.1 + 0.02, "the CCD impactor tunnelled or embedded: {max_x}");
+            assert!(hits > 0, "its wall contacts are reported (stress loads)");
+        } else {
+            assert!(max_x > 10.1, "control: without CCD the impactor passes the wall ({max_x})");
+        }
+    }
+}
+
 /// Impulses change a driven body's velocity: linear `J / m`, angular `I^-1 L`.
 #[test]
 fn impulses_change_the_velocity() {

@@ -801,6 +801,7 @@ void ccd_emit(uint3 tid : SV_DispatchThreadID)
 // ---------------------------------------------------------------------------
 static const uint IMPULSE_AT_POINT = 0u;
 static const uint IMPULSE_SET_VELOCITY = 1u;
+static const uint IMPULSE_LINEAR_ANGULAR = 2u; // J through the centre, angular impulse in `point`
 
 // Mode word: mode (bits 0..7) | key << 8. A body's records are summed in
 // ascending key order (host records: their queue index; projectile hits:
@@ -852,6 +853,12 @@ void apply_impulses(uint3 tid : SV_DispatchThreadID)
             setVel = true;
             setLin = J;
             setAng = P;
+        }
+        else if (bodyIsDynamic(b) && mode == IMPULSE_LINEAR_ANGULAR)
+        {
+            dv += J * b.invMass;
+            float3 local = quatRotate(quatConjugate(b.orientation), P);
+            dw += quatRotate(b.orientation, local * b.invInertia);
         }
         else if (bodyIsDynamic(b))
         {

@@ -730,6 +730,12 @@ impl WgpuSim {
         self.queue_impulses(&[ImpulseRecord::at_point(body, j, point)]);
     }
 
+    /// Queue a linear impulse through the body's centre of mass and an angular
+    /// impulse (world, N·m·s), applied on the GPU at the next step's start.
+    pub fn apply_linear_angular_impulse(&mut self, body: u32, linear: [f32; 3], angular: [f32; 3]) {
+        self.queue_impulses(&[ImpulseRecord::linear_angular(body, linear, angular)]);
+    }
+
     /// Set a kinematic body's velocity (linear m/s, angular rad/s) from the next
     /// step on, on the GPU: the body moves by it each step (contacts carry what
     /// rides on it) until changed.

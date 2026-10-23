@@ -21,13 +21,15 @@
 //! world's end state back with the body's mass restored; a frozen body the world does
 //! not hand back is released where it stands.
 //!
-//! **Impulses** of the scripted loads change the driven bodies' velocities before the
-//! step (`dv = J / m`, `dw = I_world^-1 L`).
+//! **Impulses** of the scripted loads change the driven bodies' velocities at the start
+//! of the step (`dv = J / m`, `dw = I_world^-1 L`), as GPU impulse records
+//! (`WgpuSim::apply_linear_angular_impulse`): no body upload, so manifold reuse stays on.
 //!
-//! **CCD.** rubble has no swept collision; an impactor flagged `ccd` makes the step
-//! subdivide so that no CCD body moves more than half its smallest half extent per
-//! substep (refining the step, never coarsening it). Contacts of every substep are
-//! reported, each with its substep's impulse.
+//! **CCD.** An impactor flagged `ccd` is a `BODY_CCD` rubble body: uncapped look-ahead,
+//! the fast broadphase list and time-of-impact contacts inside the one step
+//! (engine/docs/ccd.md). The whole-world substeps this engine used to take for it
+//! (no CCD body moving more than half its smallest half extent per substep) are a
+//! reference run only: `STRESS_RUBBLE_CCD_SUBSTEPS=1`.
 //!
 //! **Contacts** are the solved rows of the last step (`WgpuSim::last_contacts`): the
 //! force of each row times the (sub)step, at the midpoint of its two anchors, with the
@@ -715,6 +717,9 @@ impl RubbleEngine {
         state.inv_inertia = [inv(c.moments.x), inv(c.moments.y), inv(c.moments.z)];
         if !b.fixed {
             state.flags = BodyFlags::Dynamic as u32 | BodyFlags::Awake as u32;
+            if b.ccd {
+                state.flags |= engine_schema::BODY_CCD;
+            }
             state.linear_vel = to_rubble(b.velocity);
             state.angular_vel = to_rubble(b.angular_velocity);
         }
@@ -941,7 +946,9 @@ impl RigidEngine for RubbleEngine {
         self.bodies_changed();
             self.frozen.push(*k);
         }
-        // The scripted loads' impulses into driven bodies.
+        // The scripted loads' impulses into driven bodies: GPU impulse records,
+        // applied at the start of the step (no body upload). The host mirror
+        // `all` takes the same change for this step's CCD and contact bookkeeping.
         for (k, lin, ang) in impulses {
             let Some(e) = self.bodies.get(k) else { continue };
             if e.inv_mass <= 0.0 || self.frozen.contains(k) {
@@ -955,14 +962,16 @@ impl RigidEngine for RubbleEngine {
             let dv = glam::Vec3::from_array(to_rubble(*lin)) * e.inv_mass;
             s.linear_vel = (glam::Vec3::from_array(s.linear_vel) + dv).to_array();
             s.angular_vel = (glam::Vec3::from_array(s.angular_vel) + dw).to_array();
-            let s = *s;
-            self.sim.write_bodies(e.id, &[s]);
-        self.bodies_changed();
+            self.sim.apply_linear_angular_impulse(e.id, to_rubble(*lin), to_rubble(*ang));
+            self.bodies_changed();
         }
 
-        // Substeps: CCD bodies move at most half their thinnest extent per substep.
+        // Substeps: CCD bodies are BODY_CCD (time-of-impact contacts in the one step).
+        // `STRESS_RUBBLE_CCD_SUBSTEPS=1` (reference only) subdivides the whole world
+        // instead, so that no CCD body moves more than half its thinnest extent per substep.
         let mut n = self.substeps.max(1);
-        for (_, e) in self.bodies.iter().filter(|(k, e)| !self.speculative_ccd && e.ccd && e.inv_mass > 0.0 && !self.frozen.contains(k)) {
+        let ccd_substeps = std::env::var("STRESS_RUBBLE_CCD_SUBSTEPS").is_ok_and(|v| v == "1");
+        for (_, e) in self.bodies.iter().filter(|(k, e)| ccd_substeps && !self.speculative_ccd && e.ccd && e.inv_mass > 0.0 && !self.frozen.contains(k)) {
             let s = &all[e.id as usize];
             let travel = glam::Vec3::from_array(s.linear_vel).length() as f64 * dt + glam::Vec3::from_array(s.angular_vel).length() as f64 * e.thin * dt;
             let need = (travel / (0.5 * e.thin)).ceil() as u32;

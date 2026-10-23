@@ -273,6 +273,9 @@ pub const IMPULSE_BASE: u32 = FAST_BASE + FAST_CAP;
 /// body's new velocity (`j` linear, `point` angular).
 pub const IMPULSE_AT_POINT: u32 = 0;
 pub const IMPULSE_SET_VELOCITY: u32 = 1;
+/// A linear impulse `j` through the centre of mass and an angular impulse
+/// (world, N·m·s) in `point`.
+pub const IMPULSE_LINEAR_ANGULAR: u32 = 2;
 
 /// One `apply_impulses` record (`[body, mode, J.xyz, point.xyz]`).
 #[repr(C)]
@@ -290,6 +293,9 @@ impl ImpulseRecord {
     }
     pub fn set_velocity(body: u32, linear: [f32; 3], angular: [f32; 3]) -> Self {
         Self { body, mode: IMPULSE_SET_VELOCITY, j: linear, point: angular }
+    }
+    pub fn linear_angular(body: u32, linear: [f32; 3], angular: [f32; 3]) -> Self {
+        Self { body, mode: IMPULSE_LINEAR_ANGULAR, j: linear, point: angular }
     }
 }
 /// Scratch word of the oversized-static count (uniform grid; see `LARGE_STATIC_CAP`).
