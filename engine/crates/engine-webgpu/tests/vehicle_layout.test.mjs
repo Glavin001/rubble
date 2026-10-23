@@ -114,7 +114,7 @@ test('the browser step replays rigid_plan with the vehicle passes', () => {
     assert.ok(kernels.includes(k), `${k} in the plan`);
   assert.ok(!kernels.includes('sleep_island_gate_joints'), 'joint edges gate sleep inside sleep_island_gate');
   const sizes = Array.from(plan.buffer_sizes());
-  assert.equal(sizes.length, 32);
+  assert.equal(sizes.length, 33, 'bindings 0..31 plus the soft arena at 32');
   assert.ok(sizes[31] > 16, 'vehicle pool at binding 31');
   assert.equal(sizes[5], (64 + DEFAULT_VEHICLE_CAPACITY.maxWheels) * 288, 'user + tyre joints');
   const counts = Uint32Array.of(10, 10, 4, 1, 4);
