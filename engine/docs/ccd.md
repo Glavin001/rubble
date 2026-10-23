@@ -10,7 +10,7 @@ steps, all inside the GPU step (`slang/kernels/ccd_step.slang`, scheduled by
 | Want | Call | Notes |
 |---|---|---|
 | Look-ahead contacts for every awake body | `AvbdParams::flags \|= FLAG_SPEC_VELOCITY` | Off in the engine default, on in the fracture lab (see row 6). A body's contacts reach as far as it moves this step, capped at 0.5 m per collider unless host word 31 says otherwise |
-| A body that must never tunnel | `BodyState::flags \|= BODY_CCD` (64) | Uncapped reach, the fast list, a time-of-impact (TOI) contact and a TOI start pose. For projectiles, rockets, thrown debris, vehicles at speed |
+| A body that must never tunnel | `BodyState::flags \|= BODY_CCD` (128) | Uncapped reach, the fast list, a time-of-impact (TOI) contact and a TOI start pose. For projectiles, rockets, thrown debris, vehicles at speed |
 | An impulse at a point, a set velocity, or linear + angular | `WgpuSim::apply_impulse`, `set_kinematic_velocity`, `apply_linear_angular_impulse`, `queue_impulses` | Applied on the GPU at step start (`apply_impulses`), summed per body in record order, so the result does not depend on thread timing |
 | A kinematic body (platform, elevator, door) | `flags & 3 == 2` and a velocity | Moved by its velocity in `predict`; dynamic bodies ride and are pushed; it wakes what it touches |
 | Bullets that pierce | `WgpuSim::spawn_projectile(&ProjectileDesc)` | Segment casts, not bodies: energy cost per metre of collider, impulses on the bodies hit, hit and stop events (`poll_motion_events`) |
