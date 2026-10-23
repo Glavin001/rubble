@@ -210,6 +210,64 @@ pub struct RefNodes {
     pub left: u32,
 }
 
+/// An authored rigid core (instead of the one derived from the wheels): a
+/// complete raycast vehicle, ball-jointed to `nodes`. Its wheels, drivetrain and
+/// parts (with their `MountDesc`s) are used as given; node masses are not shared
+/// with it. Positions are in the soft vehicle's desc space.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SoftCore {
+    pub vehicle: engine_vehicle::VehicleDesc,
+    pub nodes: Vec<u32>,
+}
+
+/// One ball joint of a rigid part to a node (at the node), breaking past either
+/// limit (≤ 0 = unbreakable), as `JointDesc::with_break`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SoftAttach {
+    pub node: u32,
+    pub break_force: f32,
+    pub break_torque: f32,
+}
+
+/// A rigid body bolted to the node–beam structure (a seat, a lamp): its
+/// colliders (desc space) and the breakable ball joints that hold it. When they
+/// have all broken it is loose.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SoftRigidPart {
+    pub name: String,
+    pub mass: f32,
+    pub colliders: Vec<engine_vehicle::PartColliderDesc>,
+    pub attach: Vec<SoftAttach>,
+}
+
+impl SoftRigidPart {
+    /// Volume-weighted centre of the colliders (desc space): the body origin.
+    pub fn center(&self) -> glam::Vec3 {
+        let vol: f32 = self.colliders.iter().map(|c| c.shape.volume()).sum::<f32>().max(1e-9);
+        self.colliders
+            .iter()
+            .map(|c| glam::Vec3::from_array(c.position) * (c.shape.volume() / vol))
+            .sum()
+    }
+
+    /// Principal inertia (body axes = desc axes) about [`Self::center`].
+    pub fn inertia(&self) -> glam::Vec3 {
+        let vol: f32 = self.colliders.iter().map(|c| c.shape.volume()).sum::<f32>().max(1e-9);
+        let o = self.center();
+        let mut i = glam::Vec3::splat(1e-6);
+        for c in &self.colliders {
+            let m = self.mass * c.shape.volume() / vol;
+            let d = glam::Vec3::from_array(c.position) - o;
+            i += glam::Vec3::from_array(c.shape.inertia(m))
+                + m * glam::Vec3::new(d.y * d.y + d.z * d.z, d.x * d.x + d.z * d.z, d.x * d.x + d.y * d.y);
+        }
+        i
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct SoftVehicleDesc {
@@ -223,6 +281,10 @@ pub struct SoftVehicleDesc {
     pub refs: Option<RefNodes>,
     /// Triangle collision thickness δ (RoR `set_collision_range`).
     pub collision_range: f32,
+    /// Authored rigid core (default: derived from `wheels`).
+    pub core: Option<SoftCore>,
+    /// Rigid parts bolted to nodes by breakable joints.
+    pub rigid_parts: Vec<SoftRigidPart>,
     /// Sections or options the importer skipped.
     pub warnings: Vec<String>,
 }

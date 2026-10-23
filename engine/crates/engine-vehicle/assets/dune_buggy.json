@@ -2889,5 +2889,3032 @@
  "steering": {
   "max_steer_deg": 25
  },
- "dropped_grazes": 177
+ "dropped_grazes": 177,
+ "hybrid": {
+  "nodes": [
+   {
+    "position": [
+     0.43,
+     0.545,
+     1.57
+    ],
+    "mass": 4.6171,
+    "group": "frame",
+    "cls": "crumple"
+   },
+   {
+    "position": [
+     0.65,
+     0.485,
+     0.88
+    ],
+    "mass": 6.7412,
+    "group": "frame",
+    "cls": "crumple"
+   },
+   {
+    "position": [
+     0.65,
+     0.485,
+     -0.63
+    ],
+    "mass": 5.8851,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     0.5,
+     0.595,
+     -1.66
+    ],
+    "mass": 7.4789,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     0.65,
+     1.02,
+     0.73
+    ],
+    "mass": 8.5703,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     0.65,
+     1.02,
+     -0.72
+    ],
+    "mass": 11.7131,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     0.54,
+     1.78,
+     0.23
+    ],
+    "mass": 7.8188,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     0.54,
+     1.78,
+     -0.72
+    ],
+    "mass": 7.6771,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     0.5,
+     1.2,
+     -1.53
+    ],
+    "mass": 4.3929,
+    "group": "frame",
+    "cls": "crumple"
+   },
+   {
+    "position": [
+     0.43,
+     0.58675,
+     1.57458
+    ],
+    "mass": 0.6523,
+    "group": "front_bumper",
+    "cls": "crumple"
+   },
+   {
+    "position": [
+     0.43,
+     0.91,
+     1.61
+    ],
+    "mass": 2.1914,
+    "group": "front_bumper",
+    "cls": "crumple"
+   },
+   {
+    "position": [
+     -0.43,
+     0.545,
+     1.57
+    ],
+    "mass": 4.6171,
+    "group": "frame",
+    "cls": "crumple"
+   },
+   {
+    "position": [
+     -0.65,
+     0.485,
+     0.88
+    ],
+    "mass": 6.7412,
+    "group": "frame",
+    "cls": "crumple"
+   },
+   {
+    "position": [
+     -0.65,
+     0.485,
+     -0.63
+    ],
+    "mass": 5.8851,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     -0.5,
+     0.595,
+     -1.66
+    ],
+    "mass": 7.4789,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     -0.65,
+     1.02,
+     0.73
+    ],
+    "mass": 8.5816,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     -0.65,
+     1.02,
+     -0.72
+    ],
+    "mass": 14.1875,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     -0.54,
+     1.78,
+     0.23
+    ],
+    "mass": 5.2727,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     -0.54,
+     1.78,
+     -0.72
+    ],
+    "mass": 10.2232,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     -0.5,
+     1.2,
+     -1.53
+    ],
+    "mass": 4.3929,
+    "group": "frame",
+    "cls": "crumple"
+   },
+   {
+    "position": [
+     -0.43,
+     0.58675,
+     1.57458
+    ],
+    "mass": 0.6523,
+    "group": "front_bumper",
+    "cls": "crumple"
+   },
+   {
+    "position": [
+     -0.43,
+     0.91,
+     1.61
+    ],
+    "mass": 2.1914,
+    "group": "front_bumper",
+    "cls": "crumple"
+   },
+   {
+    "position": [
+     0.65,
+     0.485,
+     0.1
+    ],
+    "mass": 14.4707,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     -0.65,
+     0.485,
+     0.1
+    ],
+    "mass": 15.0635,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     0.65,
+     0.485,
+     -0.58
+    ],
+    "mass": 11.5097,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     -0.65,
+     0.485,
+     -0.58
+    ],
+    "mass": 9.0354,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     0.57,
+     0.71,
+     -1.77
+    ],
+    "mass": 2.3427,
+    "group": "rear_bumper",
+    "cls": "crumple"
+   },
+   {
+    "position": [
+     -0.57,
+     0.71,
+     -1.77
+    ],
+    "mass": 2.3427,
+    "group": "rear_bumper",
+    "cls": "crumple"
+   },
+   {
+    "position": [
+     0.51691,
+     0.62278,
+     -1.68657
+    ],
+    "mass": 0.2896,
+    "group": "rear_bumper",
+    "cls": "crumple"
+   },
+   {
+    "position": [
+     -0.51691,
+     0.62278,
+     -1.68657
+    ],
+    "mass": 0.2896,
+    "group": "rear_bumper",
+    "cls": "crumple"
+   },
+   {
+    "position": [
+     0.39,
+     0.525,
+     1.54
+    ],
+    "mass": 1.5397,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     0.55,
+     0.485,
+     0.91
+    ],
+    "mass": 4.8691,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     0.39,
+     0.765,
+     1.494
+    ],
+    "mass": 0.4223,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     0.39,
+     0.525,
+     1.08
+    ],
+    "mass": 0.8174,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     0.39,
+     0.765,
+     1.126
+    ],
+    "mass": 0.4292,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     0.57,
+     1.02,
+     0.99
+    ],
+    "mass": 1.2061,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     -0.39,
+     0.525,
+     1.54
+    ],
+    "mass": 1.5397,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     -0.55,
+     0.485,
+     0.91
+    ],
+    "mass": 4.8691,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     -0.39,
+     0.765,
+     1.494
+    ],
+    "mass": 0.4223,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     -0.39,
+     0.525,
+     1.08
+    ],
+    "mass": 0.8174,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     -0.39,
+     0.765,
+     1.126
+    ],
+    "mass": 0.4292,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     -0.57,
+     1.02,
+     0.99
+    ],
+    "mass": 1.2173,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     0.47,
+     0.525,
+     -1.08
+    ],
+    "mass": 0.7545,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     0.58,
+     0.485,
+     -0.76
+    ],
+    "mass": 3.3754,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     0.47,
+     0.765,
+     -1.126
+    ],
+    "mass": 0.429,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     0.47,
+     0.525,
+     -1.54
+    ],
+    "mass": 1.4766,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     0.47,
+     0.765,
+     -1.494
+    ],
+    "mass": 0.4265,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     0.58,
+     1.1,
+     -0.96
+    ],
+    "mass": 1.3625,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     0.55,
+     0.485,
+     -0.91
+    ],
+    "mass": 3.2858,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     -0.47,
+     0.525,
+     -1.08
+    ],
+    "mass": 0.7545,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     -0.58,
+     0.485,
+     -0.76
+    ],
+    "mass": 3.3754,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     -0.47,
+     0.765,
+     -1.126
+    ],
+    "mass": 0.429,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     -0.47,
+     0.525,
+     -1.54
+    ],
+    "mass": 1.4766,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     -0.47,
+     0.765,
+     -1.494
+    ],
+    "mass": 0.4265,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     -0.58,
+     1.1,
+     -0.96
+    ],
+    "mass": 1.3625,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     -0.55,
+     0.485,
+     -0.91
+    ],
+    "mass": 3.2858,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     0.45357,
+     0.59589,
+     1.48
+    ],
+    "mass": 0.7825,
+    "group": "nose",
+    "cls": "panel"
+   },
+   {
+    "position": [
+     0.36,
+     0.92452,
+     1.48
+    ],
+    "mass": 2.9957,
+    "group": "nose",
+    "cls": "panel"
+   },
+   {
+    "position": [
+     0.57143,
+     0.85036,
+     1.03
+    ],
+    "mass": 0.6764,
+    "group": "nose",
+    "cls": "panel"
+   },
+   {
+    "position": [
+     0.36,
+     1.00372,
+     1.03
+    ],
+    "mass": 2.8004,
+    "group": "nose",
+    "cls": "panel"
+   },
+   {
+    "position": [
+     -0.45357,
+     0.59589,
+     1.48
+    ],
+    "mass": 0.7825,
+    "group": "nose",
+    "cls": "panel"
+   },
+   {
+    "position": [
+     -0.36,
+     0.92452,
+     1.48
+    ],
+    "mass": 0.7839,
+    "group": "nose",
+    "cls": "panel"
+   },
+   {
+    "position": [
+     -0.57143,
+     0.85036,
+     1.03
+    ],
+    "mass": 0.582,
+    "group": "nose",
+    "cls": "panel"
+   },
+   {
+    "position": [
+     -0.36,
+     1.00372,
+     1.03
+    ],
+    "mass": 2.706,
+    "group": "nose",
+    "cls": "panel"
+   },
+   {
+    "position": [
+     0.65,
+     0.955,
+     0.73
+    ],
+    "mass": 3.5998,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     -0.65,
+     0.955,
+     0.73
+    ],
+    "mass": 3.3353,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     0.5,
+     0.485,
+     0.77
+    ],
+    "mass": 0.6165,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     0.5,
+     0.665,
+     0.65
+    ],
+    "mass": 0.7861,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     0.38,
+     0.485,
+     0.77
+    ],
+    "mass": 0.6165,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     0.38,
+     0.665,
+     0.65
+    ],
+    "mass": 4.0387,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     0.26,
+     0.485,
+     0.77
+    ],
+    "mass": 3.4237,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     0.26,
+     0.665,
+     0.65
+    ],
+    "mass": 3.7436,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     -0.025,
+     0.485,
+     -0.05
+    ],
+    "mass": 20.2872,
+    "group": "frame",
+    "cls": "cell"
+   },
+   {
+    "position": [
+     -0.025,
+     0.8,
+     0.1
+    ],
+    "mass": 20.2872,
+    "group": "frame",
+    "cls": "cell"
+   }
+  ],
+  "beams": [
+   {
+    "a": 0,
+    "b": 1,
+    "kind": "tube",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 1,
+    "b": 22,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 22,
+    "b": 24,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 24,
+    "b": 2,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 2,
+    "b": 3,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 1,
+    "b": 64,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 64,
+    "b": 4,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 4,
+    "b": 5,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 5,
+    "b": 2,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 4,
+    "b": 6,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 6,
+    "b": 7,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 7,
+    "b": 5,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 5,
+    "b": 8,
+    "kind": "tube",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 8,
+    "b": 3,
+    "kind": "tube",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 3,
+    "b": 7,
+    "kind": "tube",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 1,
+    "b": 5,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 24,
+    "b": 4,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 0,
+    "b": 4,
+    "kind": "tube",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 9,
+    "b": 10,
+    "kind": "tube",
+    "cls": "crumple",
+    "group": "front_bumper"
+   },
+   {
+    "a": 11,
+    "b": 12,
+    "kind": "tube",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 12,
+    "b": 23,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 23,
+    "b": 25,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 25,
+    "b": 13,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 13,
+    "b": 14,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 12,
+    "b": 65,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 65,
+    "b": 15,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 15,
+    "b": 16,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 16,
+    "b": 13,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 15,
+    "b": 17,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 17,
+    "b": 18,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 18,
+    "b": 16,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 16,
+    "b": 19,
+    "kind": "tube",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 19,
+    "b": 14,
+    "kind": "tube",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 14,
+    "b": 18,
+    "kind": "tube",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 12,
+    "b": 16,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 25,
+    "b": 15,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 11,
+    "b": 15,
+    "kind": "tube",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 20,
+    "b": 21,
+    "kind": "tube",
+    "cls": "crumple",
+    "group": "front_bumper"
+   },
+   {
+    "a": 0,
+    "b": 11,
+    "kind": "tube",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 1,
+    "b": 31,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 31,
+    "b": 37,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 37,
+    "b": 12,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 22,
+    "b": 23,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 24,
+    "b": 25,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 5,
+    "b": 16,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 7,
+    "b": 18,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 6,
+    "b": 17,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 3,
+    "b": 14,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 8,
+    "b": 19,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 10,
+    "b": 21,
+    "kind": "tube",
+    "cls": "crumple",
+    "group": "front_bumper"
+   },
+   {
+    "a": 6,
+    "b": 18,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 24,
+    "b": 16,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 26,
+    "b": 27,
+    "kind": "tube",
+    "cls": "crumple",
+    "group": "rear_bumper"
+   },
+   {
+    "a": 28,
+    "b": 26,
+    "kind": "tube",
+    "cls": "crumple",
+    "group": "rear_bumper"
+   },
+   {
+    "a": 29,
+    "b": 27,
+    "kind": "tube",
+    "cls": "crumple",
+    "group": "rear_bumper"
+   },
+   {
+    "a": 30,
+    "b": 31,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 32,
+    "b": 30,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 33,
+    "b": 31,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 34,
+    "b": 33,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 35,
+    "b": 31,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 36,
+    "b": 37,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 38,
+    "b": 36,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 39,
+    "b": 37,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 40,
+    "b": 39,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 41,
+    "b": 37,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 42,
+    "b": 48,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 48,
+    "b": 43,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 44,
+    "b": 42,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 45,
+    "b": 48,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 46,
+    "b": 45,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 47,
+    "b": 48,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 49,
+    "b": 55,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 55,
+    "b": 50,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 51,
+    "b": 49,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 52,
+    "b": 55,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 53,
+    "b": 52,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 54,
+    "b": 55,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 56,
+    "b": 57,
+    "kind": "tube",
+    "cls": "panel",
+    "group": "nose"
+   },
+   {
+    "a": 58,
+    "b": 59,
+    "kind": "tube",
+    "cls": "panel",
+    "group": "nose"
+   },
+   {
+    "a": 60,
+    "b": 61,
+    "kind": "tube",
+    "cls": "panel",
+    "group": "nose"
+   },
+   {
+    "a": 62,
+    "b": 63,
+    "kind": "tube",
+    "cls": "panel",
+    "group": "nose"
+   },
+   {
+    "a": 64,
+    "b": 65,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 66,
+    "b": 67,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 68,
+    "b": 69,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 70,
+    "b": 71,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 72,
+    "b": 73,
+    "kind": "tube",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 0,
+    "b": 30,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 0,
+    "b": 32,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 0,
+    "b": 33,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 0,
+    "b": 34,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 0,
+    "b": 31,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 1,
+    "b": 66,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 1,
+    "b": 68,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 1,
+    "b": 67,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 1,
+    "b": 33,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 2,
+    "b": 43,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 2,
+    "b": 48,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 2,
+    "b": 42,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 3,
+    "b": 45,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 3,
+    "b": 46,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 3,
+    "b": 44,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 3,
+    "b": 42,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 4,
+    "b": 35,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 4,
+    "b": 67,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 4,
+    "b": 69,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 4,
+    "b": 71,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 5,
+    "b": 47,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 5,
+    "b": 44,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 5,
+    "b": 43,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 5,
+    "b": 24,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 6,
+    "b": 64,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 6,
+    "b": 35,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 7,
+    "b": 47,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 7,
+    "b": 8,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 8,
+    "b": 46,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 8,
+    "b": 47,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 8,
+    "b": 44,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 8,
+    "b": 45,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 9,
+    "b": 20,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": "front_bumper"
+   },
+   {
+    "a": 9,
+    "b": 21,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": "front_bumper"
+   },
+   {
+    "a": 10,
+    "b": 20,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": "front_bumper"
+   },
+   {
+    "a": 11,
+    "b": 36,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 11,
+    "b": 38,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 11,
+    "b": 39,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 11,
+    "b": 40,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 11,
+    "b": 37,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 12,
+    "b": 39,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 12,
+    "b": 40,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 12,
+    "b": 41,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 13,
+    "b": 50,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 13,
+    "b": 55,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 13,
+    "b": 49,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 14,
+    "b": 52,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 14,
+    "b": 53,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 14,
+    "b": 51,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 14,
+    "b": 49,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 15,
+    "b": 41,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 15,
+    "b": 40,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 15,
+    "b": 12,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 15,
+    "b": 37,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 16,
+    "b": 54,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 16,
+    "b": 51,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 16,
+    "b": 50,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 16,
+    "b": 25,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 17,
+    "b": 65,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 17,
+    "b": 41,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 18,
+    "b": 54,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 18,
+    "b": 19,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 19,
+    "b": 53,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 19,
+    "b": 54,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 19,
+    "b": 51,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 19,
+    "b": 52,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": null
+   },
+   {
+    "a": 22,
+    "b": 67,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 22,
+    "b": 69,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 22,
+    "b": 66,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 22,
+    "b": 72,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 23,
+    "b": 72,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 23,
+    "b": 73,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 23,
+    "b": 13,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 24,
+    "b": 43,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 24,
+    "b": 48,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 24,
+    "b": 42,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 25,
+    "b": 50,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 25,
+    "b": 55,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 25,
+    "b": 49,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 26,
+    "b": 29,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": "rear_bumper"
+   },
+   {
+    "a": 27,
+    "b": 28,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": "rear_bumper"
+   },
+   {
+    "a": 28,
+    "b": 29,
+    "kind": "brace",
+    "cls": "crumple",
+    "group": "rear_bumper"
+   },
+   {
+    "a": 30,
+    "b": 33,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 30,
+    "b": 34,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 31,
+    "b": 66,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 31,
+    "b": 68,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 31,
+    "b": 67,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 32,
+    "b": 34,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 32,
+    "b": 33,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 32,
+    "b": 35,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 33,
+    "b": 68,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 33,
+    "b": 66,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 34,
+    "b": 35,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 34,
+    "b": 31,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 34,
+    "b": 68,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 35,
+    "b": 64,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 35,
+    "b": 67,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 35,
+    "b": 69,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 36,
+    "b": 39,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 36,
+    "b": 40,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 37,
+    "b": 40,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 37,
+    "b": 65,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 38,
+    "b": 40,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 38,
+    "b": 39,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 38,
+    "b": 41,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 40,
+    "b": 41,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 41,
+    "b": 65,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 41,
+    "b": 39,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 42,
+    "b": 43,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 42,
+    "b": 45,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 42,
+    "b": 46,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 43,
+    "b": 44,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 44,
+    "b": 48,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 44,
+    "b": 46,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 44,
+    "b": 47,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 45,
+    "b": 44,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 47,
+    "b": 42,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 49,
+    "b": 50,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 49,
+    "b": 52,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 49,
+    "b": 53,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 50,
+    "b": 51,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 51,
+    "b": 55,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 51,
+    "b": 53,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 51,
+    "b": 54,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 52,
+    "b": 51,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 54,
+    "b": 49,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 56,
+    "b": 58,
+    "kind": "brace",
+    "cls": "cell",
+    "group": "nose"
+   },
+   {
+    "a": 56,
+    "b": 59,
+    "kind": "brace",
+    "cls": "cell",
+    "group": "nose"
+   },
+   {
+    "a": 56,
+    "b": 61,
+    "kind": "brace",
+    "cls": "cell",
+    "group": "nose"
+   },
+   {
+    "a": 56,
+    "b": 60,
+    "kind": "brace",
+    "cls": "cell",
+    "group": "nose"
+   },
+   {
+    "a": 57,
+    "b": 59,
+    "kind": "brace",
+    "cls": "cell",
+    "group": "nose"
+   },
+   {
+    "a": 57,
+    "b": 58,
+    "kind": "brace",
+    "cls": "cell",
+    "group": "nose"
+   },
+   {
+    "a": 57,
+    "b": 61,
+    "kind": "brace",
+    "cls": "cell",
+    "group": "nose"
+   },
+   {
+    "a": 57,
+    "b": 63,
+    "kind": "brace",
+    "cls": "cell",
+    "group": "nose"
+   },
+   {
+    "a": 58,
+    "b": 63,
+    "kind": "brace",
+    "cls": "cell",
+    "group": "nose"
+   },
+   {
+    "a": 58,
+    "b": 61,
+    "kind": "brace",
+    "cls": "cell",
+    "group": "nose"
+   },
+   {
+    "a": 59,
+    "b": 63,
+    "kind": "brace",
+    "cls": "cell",
+    "group": "nose"
+   },
+   {
+    "a": 59,
+    "b": 61,
+    "kind": "brace",
+    "cls": "cell",
+    "group": "nose"
+   },
+   {
+    "a": 60,
+    "b": 62,
+    "kind": "brace",
+    "cls": "cell",
+    "group": "nose"
+   },
+   {
+    "a": 60,
+    "b": 63,
+    "kind": "brace",
+    "cls": "cell",
+    "group": "nose"
+   },
+   {
+    "a": 60,
+    "b": 57,
+    "kind": "brace",
+    "cls": "cell",
+    "group": "nose"
+   },
+   {
+    "a": 61,
+    "b": 63,
+    "kind": "brace",
+    "cls": "cell",
+    "group": "nose"
+   },
+   {
+    "a": 61,
+    "b": 62,
+    "kind": "brace",
+    "cls": "cell",
+    "group": "nose"
+   },
+   {
+    "a": 62,
+    "b": 59,
+    "kind": "brace",
+    "cls": "cell",
+    "group": "nose"
+   },
+   {
+    "a": 62,
+    "b": 57,
+    "kind": "brace",
+    "cls": "cell",
+    "group": "nose"
+   },
+   {
+    "a": 64,
+    "b": 67,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 64,
+    "b": 69,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 64,
+    "b": 71,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 65,
+    "b": 40,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 66,
+    "b": 68,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 66,
+    "b": 70,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 67,
+    "b": 69,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 67,
+    "b": 71,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 67,
+    "b": 68,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 68,
+    "b": 70,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 69,
+    "b": 71,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 69,
+    "b": 66,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 69,
+    "b": 70,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 70,
+    "b": 31,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 71,
+    "b": 68,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 71,
+    "b": 66,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 72,
+    "b": 71,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 72,
+    "b": 25,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 73,
+    "b": 71,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 73,
+    "b": 69,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 73,
+    "b": 22,
+    "kind": "brace",
+    "cls": "cell",
+    "group": null
+   },
+   {
+    "a": 9,
+    "b": 0,
+    "kind": "mount",
+    "cls": null,
+    "group": "front_bumper",
+    "strength": 38575
+   },
+   {
+    "a": 9,
+    "b": 30,
+    "kind": "mount",
+    "cls": null,
+    "group": "front_bumper",
+    "strength": 38575
+   },
+   {
+    "a": 9,
+    "b": 32,
+    "kind": "mount",
+    "cls": null,
+    "group": "front_bumper",
+    "strength": 38575
+   },
+   {
+    "a": 10,
+    "b": 32,
+    "kind": "mount",
+    "cls": null,
+    "group": "front_bumper",
+    "strength": 38575
+   },
+   {
+    "a": 10,
+    "b": 0,
+    "kind": "mount",
+    "cls": null,
+    "group": "front_bumper",
+    "strength": 38575
+   },
+   {
+    "a": 10,
+    "b": 30,
+    "kind": "mount",
+    "cls": null,
+    "group": "front_bumper",
+    "strength": 38575
+   },
+   {
+    "a": 20,
+    "b": 11,
+    "kind": "mount",
+    "cls": null,
+    "group": "front_bumper",
+    "strength": 38575
+   },
+   {
+    "a": 20,
+    "b": 36,
+    "kind": "mount",
+    "cls": null,
+    "group": "front_bumper",
+    "strength": 38575
+   },
+   {
+    "a": 20,
+    "b": 38,
+    "kind": "mount",
+    "cls": null,
+    "group": "front_bumper",
+    "strength": 38575
+   },
+   {
+    "a": 21,
+    "b": 38,
+    "kind": "mount",
+    "cls": null,
+    "group": "front_bumper",
+    "strength": 38575
+   },
+   {
+    "a": 21,
+    "b": 11,
+    "kind": "mount",
+    "cls": null,
+    "group": "front_bumper",
+    "strength": 38575
+   },
+   {
+    "a": 21,
+    "b": 36,
+    "kind": "mount",
+    "cls": null,
+    "group": "front_bumper",
+    "strength": 38575
+   },
+   {
+    "a": 26,
+    "b": 3,
+    "kind": "mount",
+    "cls": null,
+    "group": "rear_bumper",
+    "strength": 51485
+   },
+   {
+    "a": 26,
+    "b": 46,
+    "kind": "mount",
+    "cls": null,
+    "group": "rear_bumper",
+    "strength": 51485
+   },
+   {
+    "a": 26,
+    "b": 45,
+    "kind": "mount",
+    "cls": null,
+    "group": "rear_bumper",
+    "strength": 51485
+   },
+   {
+    "a": 27,
+    "b": 14,
+    "kind": "mount",
+    "cls": null,
+    "group": "rear_bumper",
+    "strength": 51485
+   },
+   {
+    "a": 27,
+    "b": 53,
+    "kind": "mount",
+    "cls": null,
+    "group": "rear_bumper",
+    "strength": 51485
+   },
+   {
+    "a": 27,
+    "b": 52,
+    "kind": "mount",
+    "cls": null,
+    "group": "rear_bumper",
+    "strength": 51485
+   },
+   {
+    "a": 28,
+    "b": 3,
+    "kind": "mount",
+    "cls": null,
+    "group": "rear_bumper",
+    "strength": 51485
+   },
+   {
+    "a": 28,
+    "b": 45,
+    "kind": "mount",
+    "cls": null,
+    "group": "rear_bumper",
+    "strength": 51485
+   },
+   {
+    "a": 28,
+    "b": 46,
+    "kind": "mount",
+    "cls": null,
+    "group": "rear_bumper",
+    "strength": 51485
+   },
+   {
+    "a": 29,
+    "b": 14,
+    "kind": "mount",
+    "cls": null,
+    "group": "rear_bumper",
+    "strength": 51485
+   },
+   {
+    "a": 29,
+    "b": 52,
+    "kind": "mount",
+    "cls": null,
+    "group": "rear_bumper",
+    "strength": 51485
+   },
+   {
+    "a": 29,
+    "b": 53,
+    "kind": "mount",
+    "cls": null,
+    "group": "rear_bumper",
+    "strength": 51485
+   },
+   {
+    "a": 56,
+    "b": 0,
+    "kind": "mount",
+    "cls": null,
+    "group": "nose",
+    "strength": 39830
+   },
+   {
+    "a": 56,
+    "b": 30,
+    "kind": "mount",
+    "cls": null,
+    "group": "nose",
+    "strength": 39830
+   },
+   {
+    "a": 56,
+    "b": 32,
+    "kind": "mount",
+    "cls": null,
+    "group": "nose",
+    "strength": 39830
+   },
+   {
+    "a": 57,
+    "b": 32,
+    "kind": "mount",
+    "cls": null,
+    "group": "nose",
+    "strength": 39830
+   },
+   {
+    "a": 57,
+    "b": 34,
+    "kind": "mount",
+    "cls": null,
+    "group": "nose",
+    "strength": 39830
+   },
+   {
+    "a": 57,
+    "b": 0,
+    "kind": "mount",
+    "cls": null,
+    "group": "nose",
+    "strength": 39830
+   },
+   {
+    "a": 58,
+    "b": 35,
+    "kind": "mount",
+    "cls": null,
+    "group": "nose",
+    "strength": 39830
+   },
+   {
+    "a": 58,
+    "b": 34,
+    "kind": "mount",
+    "cls": null,
+    "group": "nose",
+    "strength": 39830
+   },
+   {
+    "a": 58,
+    "b": 64,
+    "kind": "mount",
+    "cls": null,
+    "group": "nose",
+    "strength": 39830
+   },
+   {
+    "a": 59,
+    "b": 35,
+    "kind": "mount",
+    "cls": null,
+    "group": "nose",
+    "strength": 39830
+   },
+   {
+    "a": 59,
+    "b": 34,
+    "kind": "mount",
+    "cls": null,
+    "group": "nose",
+    "strength": 39830
+   },
+   {
+    "a": 59,
+    "b": 4,
+    "kind": "mount",
+    "cls": null,
+    "group": "nose",
+    "strength": 39830
+   },
+   {
+    "a": 60,
+    "b": 11,
+    "kind": "mount",
+    "cls": null,
+    "group": "nose",
+    "strength": 39830
+   },
+   {
+    "a": 60,
+    "b": 36,
+    "kind": "mount",
+    "cls": null,
+    "group": "nose",
+    "strength": 39830
+   },
+   {
+    "a": 60,
+    "b": 38,
+    "kind": "mount",
+    "cls": null,
+    "group": "nose",
+    "strength": 39830
+   },
+   {
+    "a": 61,
+    "b": 38,
+    "kind": "mount",
+    "cls": null,
+    "group": "nose",
+    "strength": 39830
+   },
+   {
+    "a": 61,
+    "b": 40,
+    "kind": "mount",
+    "cls": null,
+    "group": "nose",
+    "strength": 39830
+   },
+   {
+    "a": 61,
+    "b": 11,
+    "kind": "mount",
+    "cls": null,
+    "group": "nose",
+    "strength": 39830
+   },
+   {
+    "a": 62,
+    "b": 41,
+    "kind": "mount",
+    "cls": null,
+    "group": "nose",
+    "strength": 39830
+   },
+   {
+    "a": 62,
+    "b": 40,
+    "kind": "mount",
+    "cls": null,
+    "group": "nose",
+    "strength": 39830
+   },
+   {
+    "a": 62,
+    "b": 65,
+    "kind": "mount",
+    "cls": null,
+    "group": "nose",
+    "strength": 39830
+   },
+   {
+    "a": 63,
+    "b": 41,
+    "kind": "mount",
+    "cls": null,
+    "group": "nose",
+    "strength": 39830
+   },
+   {
+    "a": 63,
+    "b": 40,
+    "kind": "mount",
+    "cls": null,
+    "group": "nose",
+    "strength": 39830
+   },
+   {
+    "a": 63,
+    "b": 15,
+    "kind": "mount",
+    "cls": null,
+    "group": "nose",
+    "strength": 39830
+   }
+  ],
+  "core_nodes": [
+   30,
+   33,
+   36,
+   39,
+   42,
+   45,
+   49,
+   52
+  ],
+  "core_parts": [
+   "engine",
+   "transmission",
+   "steering_column"
+  ],
+  "core_root_mass": 211.77,
+  "soft_groups": [
+   "front_bumper",
+   "rear_bumper",
+   "nose"
+  ],
+  "rigid_parts": [
+   {
+    "name": "headlamp_l",
+    "part": 3,
+    "carrier": "nose",
+    "nodes": [
+     57,
+     56,
+     59
+    ],
+    "break_force": 19185
+   },
+   {
+    "name": "headlamp_r",
+    "part": 4,
+    "carrier": "nose",
+    "nodes": [
+     61,
+     60,
+     63
+    ],
+    "break_force": 23811
+   },
+   {
+    "name": "mirror_l",
+    "part": 5,
+    "carrier": "frame",
+    "nodes": [
+     4,
+     64,
+     35
+    ],
+    "break_force": 57314
+   },
+   {
+    "name": "mirror_r",
+    "part": 6,
+    "carrier": "frame",
+    "nodes": [
+     15,
+     65,
+     41
+    ],
+    "break_force": 57314
+   },
+   {
+    "name": "rear_lamp_l",
+    "part": 8,
+    "carrier": "rear_bumper",
+    "nodes": [
+     26,
+     28,
+     29
+    ],
+    "break_force": 29290
+   },
+   {
+    "name": "rear_lamp_r",
+    "part": 9,
+    "carrier": "rear_bumper",
+    "nodes": [
+     27,
+     29,
+     28
+    ],
+    "break_force": 29290
+   },
+   {
+    "name": "fuel_tank",
+    "part": 12,
+    "carrier": "frame",
+    "nodes": [
+     47,
+     54,
+     44
+    ],
+    "break_force": 52230
+   },
+   {
+    "name": "seat_l",
+    "part": 13,
+    "carrier": "frame",
+    "nodes": [
+     5,
+     73,
+     24
+    ],
+    "break_force": 25805
+   },
+   {
+    "name": "seat_r",
+    "part": 14,
+    "carrier": "frame",
+    "nodes": [
+     16,
+     73,
+     25
+    ],
+    "break_force": 25805
+   },
+   {
+    "name": "extinguisher",
+    "part": 15,
+    "carrier": "frame",
+    "nodes": [
+     16,
+     54,
+     18
+    ],
+    "break_force": 29061
+   }
+  ]
+ }
 }

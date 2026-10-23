@@ -71,7 +71,27 @@ fn ball(sim: &mut WgpuSim, pos: [f32; 3], radius: f32, mass: f32, vel: [f32; 3])
 }
 
 fn world() -> WgpuSim {
-    let mut sim = WgpuSim::new(capacity()).expect("wgpu");
+    world_on(WgpuSim::new(capacity()).expect("wgpu"))
+}
+
+/// Contact storage variants: vehicle_loads reads contacts as each one stores them.
+#[derive(Clone, Copy, Debug)]
+enum Storage {
+    Canonical,
+    Compact,
+    Persistent,
+}
+
+fn world_with(storage: Storage) -> WgpuSim {
+    world_on(match storage {
+        Storage::Canonical => WgpuSim::new_with_compact_contacts(capacity(), false),
+        Storage::Compact => WgpuSim::new_with_compact_contacts(capacity(), true),
+        Storage::Persistent => WgpuSim::new_with_persistent_contacts(capacity()),
+    }
+    .expect("wgpu"))
+}
+
+fn world_on(mut sim: WgpuSim) -> WgpuSim {
     let mut p = AvbdParams::default();
     p.iterations = 10;
     sim.set_params(p);
@@ -145,7 +165,14 @@ fn default_mounts_never_break() {
 
 #[test]
 fn a_heavy_ball_snaps_the_struck_mount_only() {
-    let mut sim = world();
+    for storage in [Storage::Canonical, Storage::Compact, Storage::Persistent] {
+        eprintln!("--- {storage:?} contacts");
+        heavy_ball_snaps_the_struck_mount_only(storage);
+    }
+}
+
+fn heavy_ball_snaps_the_struck_mount_only(storage: Storage) {
+    let mut sim = world_with(storage);
     let mut d = measured_sedan();
     // Front bumper on a 40 kN mount; everything else out of reach.
     let bumper = d.parts.iter().position(|p| p.name == "bumper_front").unwrap();
@@ -242,102 +269,6 @@ fn a_cannonball_tears_the_struck_part_off_the_dune_buggy() {
     assert_eq!(st.parts_broken, 1 << mirror, "the struck mirror came off, and only it");
     assert_eq!(st.wheels_broken, 0);
     assert_eq!(breaks.len(), 1);
-}
-
-/// Calibration probe (run by hand): peak mount force of every buggy part when a
-/// cannonball strikes it, and over a drive with a jump, all mounts unbreakable.
-#[test]
-#[ignore]
-fn dune_buggy_mount_load_probe() {
-    let unbreakable = || {
-        let mut d = presets::dune_buggy();
-        for p in d.parts.iter_mut().skip(1) {
-            p.mount = MountDesc { break_force: 1e12, break_torque: 1e12, anchor: None };
-        }
-        for w in &mut d.wheels {
-            w.mount = MountDesc { break_force: 1e12, break_torque: 1e12, anchor: None };
-        }
-        d
-    };
-    let d = unbreakable();
-    let peak_force = |sim: &WgpuSim, v: VehicleHandle, peak: &mut Vec<(f32, f32)>| {
-        for (k, l) in sim.vehicle_mount_loads(v).iter().enumerate() {
-            peak[k].0 = peak[k].0.max(l.force);
-            peak[k].1 = peak[k].1.max(l.torque);
-        }
-    };
-    let n = d.parts.len() + d.wheels.len();
-    // Drive and jump.
-    let mut sim = world();
-    let q = glam::Quat::from_axis_angle(glam::Vec3::X, -0.25).to_array();
-    add_box(&mut sim, [0.0, 0.5, 25.0], [3.0, 0.3, 3.0], q, 0.0, [0.0; 3]);
-    let v = sim.add_vehicle(&d, [0.0, 0.6, 0.0], [0.0, 0.0, 0.0, 1.0]).unwrap();
-    run(&mut sim, 180);
-    let mut drive = vec![(0.0f32, 0.0f32); n];
-    sim.set_vehicle_input(v, VehicleInput { forward: 1.0, ..Default::default() });
-    for _ in 0..360 {
-        sim.step().unwrap();
-        peak_force(&sim, v, &mut drive);
-    }
-    // Cannonball at each part's first collider.
-    let mut hit = vec![(0.0f32, 0.0f32); n];
-    for (pi, p) in d.parts.iter().enumerate().skip(1) {
-        let mut sim = world();
-        let v = sim.add_vehicle(&d, [0.0, 0.6, 0.0], [0.0, 0.0, 0.0, 1.0]).unwrap();
-        run(&mut sim, 120);
-        let c = sim.read_body(sim.vehicle_host().chassis_body(v));
-        let o = sim.vehicle_host().origin(v);
-        let at = p.colliders[0].position;
-        let w = [c.position[0] + at[0] - o[0], c.position[1] + at[1] - o[1], c.position[2] + at[2] - o[2]];
-        // From outside the car: along +X for the left side, -X right, ±Z for the ends.
-        let dir = if at[2] > 1.2 { [0.0, 0.0, -1.0] } else if at[2] < -1.2 { [0.0, 0.0, 1.0] } else if at[0] >= 0.0 { [-1.0, 0.0, 0.0] } else { [1.0, 0.0, 0.0] };
-        let start = [w[0] - dir[0] * 3.0, w[1] - dir[1] * 3.0, w[2] - dir[2] * 3.0];
-        ball(&mut sim, start, 0.2, 30.0, [dir[0] * 40.0, dir[1] * 40.0, dir[2] * 40.0]);
-        let mut peak = vec![(0.0f32, 0.0f32); n];
-        for _ in 0..30 {
-            sim.step().unwrap();
-            peak_force(&sim, v, &mut peak);
-        }
-        hit[pi] = peak[pi];
-    }
-    eprintln!("{:>16} {:>10} {:>10} {:>10} {:>10} {:>12} {:>12}", "part", "drive F", "drive τ", "hit F", "hit τ", "limit F", "limit τ");
-    let real = presets::dune_buggy();
-    for k in 0..n {
-        let (name, lim) = if k < d.parts.len() {
-            (real.parts[k].name.clone(), (real.parts[k].mount.break_force, real.parts[k].mount.break_torque))
-        } else {
-            (format!("wheel {}", k - d.parts.len()), (real.wheels[k - d.parts.len()].mount.break_force, real.wheels[k - d.parts.len()].mount.break_torque))
-        };
-        eprintln!("{name:>16} {:>10.0} {:>10.0} {:>10.0} {:>10.0} {:>12.0} {:>12.0}", drive[k].0, drive[k].1, hit[k].0, hit[k].1, lim.0, lim.1);
-    }
-}
-
-#[test]
-#[ignore]
-fn dune_buggy_hit_trace() {
-    let mut d = presets::dune_buggy();
-    for p in d.parts.iter_mut().skip(1) {
-        p.mount = MountDesc { break_force: 1e12, break_torque: 1e12, anchor: None };
-    }
-    let mut sim = world();
-    let v = sim.add_vehicle(&d, [0.0, 0.6, 0.0], [0.0, 0.0, 0.0, 1.0]).unwrap();
-    run(&mut sim, 120);
-    let c = sim.read_body(sim.vehicle_host().chassis_body(v));
-    let o = sim.vehicle_host().origin(v);
-    let pi = std::env::var("PART").ok().and_then(|s| s.parse().ok()).unwrap_or(1usize);
-    let speed: f32 = std::env::var("SPEED").ok().and_then(|s| s.parse().ok()).unwrap_or(15.0);
-    let mass: f32 = std::env::var("MASS").ok().and_then(|s| s.parse().ok()).unwrap_or(300.0);
-    let at = d.parts[pi].colliders[0].position;
-    let w = [c.position[0] + at[0] - o[0], c.position[1] + at[1] - o[1], c.position[2] + at[2] - o[2]];
-    eprintln!("part {} collider at {:?} world {:?} chassis {:?}", d.parts[pi].name, at, w, c.position);
-    let b = ball(&mut sim, [w[0], w[1], w[2] + 3.0], 0.25, mass, [0.0, 0.0, -speed]);
-    for i in 0..40 {
-        sim.step().unwrap();
-        let bb = sim.read_body(b);
-        let cc = sim.read_body(sim.vehicle_host().chassis_body(v));
-        let l = &sim.vehicle_mount_loads(v)[pi];
-        eprintln!("{i:3} ball z {:7.3} vz {:7.2} | chassis vz {:6.2} | {} F {:9.0} τ {:7.0}", bb.position[2], bb.linear_vel[2], cc.linear_vel[2], d.parts[pi].name, l.force, l.torque);
-    }
 }
 
 /// Calibration probe (run by hand): peak load ratio (load / limit) of every

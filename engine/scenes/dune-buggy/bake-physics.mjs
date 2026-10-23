@@ -22,6 +22,7 @@ import { createRigDefinition } from './src/vehicle-rig.mjs';
 import { jointStrength, SOLVER_MIN_BOND_AREA_M2, STRENGTH_PROFILE_VERSION } from './src/strength-profile.mjs';
 import { DENSITY } from './src/real-joint-capacity.mjs';
 import { classify, toRubble, RUBBLE_PARTS, CORNERS } from './parts.mjs';
+import { buildFrameGraph, attachNodes } from './frame-graph.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const OUT = resolve(here, '../../crates/engine-vehicle/assets/dune_buggy.json');
@@ -172,6 +173,36 @@ const wheels = CORNERS.map((id) => {
   };
 });
 
+// ---- hybrid build: the frame as nodes and beams, bolted parts on joints ----
+// The front bumper, rear bumper and nose are node-beam pieces in break groups;
+// engine, gearbox and steering column stay on the rigid core (with their
+// mounts, so losing them still cuts drive and steering); the rest are rigid
+// bodies on breakable ball joints to the three nearest nodes of what carries
+// them (headlamps on the nose, rear lamps on the rear bumper, else the frame).
+const partMounts = Object.fromEntries(parts.map((p, i) => [p.name, i === 0 ? null : mountOf(p.name)]));
+const graph = buildFrameGraph(liveGeometry, live, exact.parts.map((p) => p.mass), partMounts);
+const CORE_PARTS = ['engine', 'transmission', 'steering_column'];
+const SOFT_GROUPS = ['front_bumper', 'rear_bumper', 'nose'];
+const rigMass = exact.parts.reduce((s, p, i) => s + (cls[i].cls === 'rig' ? p.mass : 0), 0);
+const hybrid = {
+  nodes: graph.nodes,
+  beams: graph.beams.map((b) => ({ a: b.a, b: b.b, kind: b.kind, cls: b.cls ?? null, group: b.group ?? null, ...(b.strength ? { strength: Math.round(b.strength) } : {}) })),
+  core_nodes: graph.coreNodes,
+  core_parts: CORE_PARTS,
+  // The moving suspension (arms, uprights, dampers, axles) rides on the core.
+  core_root_mass: round(rigMass, 2),
+  soft_groups: SOFT_GROUPS,
+  rigid_parts: parts.flatMap((p, i) => {
+    if (i === 0 || CORE_PARTS.includes(p.name) || SOFT_GROUPS.includes(p.name)) return [];
+    const m = partMounts[p.name];
+    const carrier = m.attached_to.includes('frame') ? 'frame' : m.attached_to[0];
+    const center = [0, 1, 2].map((k) => p.colliders.reduce((s, c) => s + c.position[k], 0) / p.colliders.length);
+    const nodes = attachNodes(graph, center, carrier);
+    return [{ name: p.name, part: i, carrier, nodes, break_force: round(m.break_force / nodes.length, 0) }];
+  }),
+};
+console.error(`hybrid frame: ${hybrid.nodes.length} nodes (${round(hybrid.nodes.reduce((s, n) => s + n.mass, 0), 1)} kg), ${hybrid.beams.length} beams, core on ${hybrid.core_nodes.length} nodes, ${hybrid.rigid_parts.length} jointed parts`);
+
 const out = {
   source: {
     recipe: 'vibe-land client/src/vehicles/dune/buggy.mjs (see scenes/dune-buggy/README.md)',
@@ -197,6 +228,7 @@ const out = {
   wheels,
   steering: { max_steer_deg: rig.steering.maxCentreRad * 180 / Math.PI },
   dropped_grazes: dropped,
+  hybrid,
 };
 mkdirSync(dirname(OUT), { recursive: true });
 writeFileSync(OUT, JSON.stringify(out, null, 1) + '\n');

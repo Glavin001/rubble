@@ -8,6 +8,7 @@
 //! [`SoftBackend`] ([`SoftHost`]). [`cpu`] is a reference solver of the same
 //! particle and beam model for tests and calibration.
 
+pub mod buggy;
 pub mod calibrate;
 pub mod color;
 pub mod cpu;

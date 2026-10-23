@@ -150,10 +150,15 @@ pub fn pack_soft(
 ) -> PackedSoft {
     let n = desc.nodes.len();
     let mut masses: Vec<f32> = desc.nodes.iter().map(|nd| nd.mass.max(1.0e-3)).collect();
-    let core = if opts.rigid_core && !desc.wheels.is_empty() {
-        Some(core_plan(desc, &mut masses, opts))
-    } else {
-        None
+    let core = match &desc.core {
+        // An authored core: a whole vehicle, jointed to its nodes as given.
+        Some(c) if opts.rigid_core => Some(CorePlan {
+            vehicle: c.vehicle.clone(),
+            origin: Vec3::from_array(c.vehicle.center_of_mass()),
+            frame_nodes: c.nodes.clone(),
+        }),
+        _ if opts.rigid_core && !desc.wheels.is_empty() => Some(core_plan(desc, &mut masses, opts)),
+        _ => None,
     };
     let vel = Vec3::from_array(opts.velocity);
     let mut bodies = Vec::with_capacity(n);

@@ -7,7 +7,7 @@ use crate::desc::SoftVehicleDesc;
 use crate::layout::*;
 use crate::model::Beam;
 use crate::pack::{pack_soft, CorePlan, Placement, SpawnOptions};
-use engine_schema::{BodyState, Collider, JointDesc};
+use engine_schema::{BodyState, Collider, JointDesc, ShapeType};
 use engine_vehicle::{VehicleBackend, VehicleHandle, VehicleHost};
 use glam::{Quat, Vec3};
 
@@ -40,6 +40,8 @@ pub struct SoftEntry {
     pub group: i16,
     pub core: Option<(VehicleHandle, u32)>,
     pub core_joints: std::ops::Range<u32>,
+    /// Per rigid part (`desc.rigid_parts`): its body and its joints.
+    pub rigid_parts: Vec<(u32, std::ops::Range<u32>)>,
     pub desc: SoftVehicleDesc,
     pub masses: Vec<f32>,
     pub node_collider: Vec<u32>,
@@ -297,6 +299,57 @@ impl SoftHost {
             core_joints = start..backend.joint_count();
             core = Some((h, chassis));
         }
+
+        // Rigid parts: free bodies held to their nodes by breakable ball joints.
+        let mut rigid_parts = Vec::new();
+        for part in &desc.rigid_parts {
+            let o = part.center();
+            let mut b = BodyState::dynamic(place.apply(o), place.rotation, part.mass, part.inertia());
+            b.linear_vel = opts.velocity;
+            b.initial_pos = b.position;
+            b.initial_rot = b.orientation;
+            let body = backend.body_count();
+            backend.append_bodies(&[b]);
+            let cols: Vec<Collider> = part
+                .colliders
+                .iter()
+                .map(|c| {
+                    let (shape, params) = match c.shape {
+                        engine_vehicle::ShapeDesc::Box { half } => (ShapeType::Box, [half[0], half[1], half[2], Vec3::from_array(half).length()]),
+                        engine_vehicle::ShapeDesc::Sphere { radius } => (ShapeType::Sphere, [radius, 0.0, 0.0, radius]),
+                        engine_vehicle::ShapeDesc::Capsule { radius, half_length } => {
+                            (ShapeType::Capsule, [radius, half_length, 0.0, radius + half_length])
+                        }
+                    };
+                    let mut col = Collider {
+                        body,
+                        shape: shape as u32,
+                        material: c.material,
+                        generation: 0,
+                        local_pos: (Vec3::from_array(c.position) - o).to_array(),
+                        density: 0.0,
+                        local_rot: c.rotation,
+                        params,
+                    };
+                    // No contact with its own vehicle's nodes, core or parts: the joints hold it.
+                    engine_schema::convex::CollisionFilter { group, ..Default::default() }.apply(&mut col);
+                    col
+                })
+                .collect();
+            backend.append_colliders(&cols);
+            let joints: Vec<engine_schema::Joint> = part
+                .attach
+                .iter()
+                .map(|a| {
+                    let local = Vec3::from_array(desc.nodes[a.node as usize].position) - o;
+                    let jd = JointDesc::ball(body, first_body + a.node, local, Vec3::ZERO).with_break(a.break_force, a.break_torque);
+                    backend.joint_from_desc(&jd)
+                })
+                .collect();
+            let start = backend.joint_count();
+            backend.append_joints(&joints);
+            rigid_parts.push((body, start..backend.joint_count()));
+        }
         self.entries.push(SoftEntry {
             first_body,
             particles: desc.nodes.len() as u32,
@@ -307,6 +360,7 @@ impl SoftHost {
             group,
             core,
             core_joints,
+            rigid_parts,
             desc: desc.clone(),
             masses: packed.masses,
             node_collider: packed.node_collider,
