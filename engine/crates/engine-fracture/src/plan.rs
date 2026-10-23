@@ -122,6 +122,7 @@ pub const KERNELS: &[(&str, &str)] = &[
     ("ccd_pick", "ccd_pick"),
     ("ccd_mark", "ccd_mark"),
     ("ccd_emit", "ccd_emit_persistent"),
+    ("ccd_respond", "ccd_respond"),
     ("joint_hash_clear", "joint_hash_clear"),
     ("joint_hash_insert", "joint_hash_insert"),
     ("bond_wake", "bond_wake"),
@@ -999,6 +1000,11 @@ impl Planner {
             self.work("broadphase_query_awake", 81, 0);
             self.disp("write_finer_args", 64, 0);
             self.work("broadphase_query_finer", 77, 0);
+            if self.ccd_step() {
+                // Before the awake table is emptied: a fast collider walks it too
+                // (bodies woken last step are tombstones in the resting table).
+                self.disp("broadphase_fast", 64 * 64, 0);
+            }
             self.work("broadphase_clear_awake", 81, 0);
         } else if self.moved_only_step && self.awake_queries {
             // Only last step's awake bodies query; coarse movers then scan finer
@@ -1011,8 +1017,9 @@ impl Planner {
         } else {
             self.disp("broadphase_query", n_cols, 0);
         }
-        if self.ccd_step() {
-            // Sweeps longer than a cell query along their path (any table).
+        if self.ccd_step() && !self.rest_step {
+            // Sweeps longer than a cell query along their path (any table; rest
+            // steps walk before the awake table is cleared, above).
             self.disp("broadphase_fast", 64 * 64, 0);
         }
         self.disp("write_work_args", 64, 0);
@@ -1234,6 +1241,10 @@ impl Planner {
             self.work("sleep_island_gate", 66, i + 1);
         }
         self.work("sleep_island_commit", 67, self.listed_passes as u32);
+        if self.ccd_step() {
+            // CCD impacts on dynamic bodies: the momentum exchange.
+            self.disp("ccd_respond", 64, 0);
+        }
         self.phase("sleep");
         self.manifolds_valid = true;
         self.initialized = true;

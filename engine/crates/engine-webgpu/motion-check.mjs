@@ -207,7 +207,7 @@ const CHECKS = {
     await ready();
     const r = await evaluate(`import('./regression.mjs').then((m) => m.runCcdShotRegression()).then((r) => JSON.stringify(r))`, true).then(JSON.parse);
     console.log(`lab arch, 300 m/s ball: control reached z ${r.control.minZ.toFixed(2)} and moved the arch ${r.control.moved.toFixed(3)} m; CCD reached z ${r.ccd.minZ.toFixed(2)}, moved ${r.ccd.moved.toFixed(3)} m (arch from z ${r.back.toFixed(2)})`);
-    expect(r.passed, 'lab: the CCD ball stops at the arch, the plain ball tunnels');
+    expect(r.passed, 'lab: the CCD ball knocks the crown out, the plain ball tunnels');
     await evaluate('window.__FRACTURE_DEMO__.stepFrames(30)', true);
     console.log(`  screenshot ${await shot('motion_lab_ccd_arch')}`);
   },

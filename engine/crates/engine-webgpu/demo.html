@@ -578,7 +578,7 @@
       ...(compactContacts ? ['clear_solver_contacts', 'pack_solver_contacts', 'persist_manifolds_compact', 'solve_primal_color_compact', 'solve_dual_compact'] : []),
       'solve_dual', 'extract_velocity_sleep', 'write_sleep_args', 'sleep_island_gate', 'sleep_island_commit',
       ...(jointCount > 0 ? ['joint_hash_clear', 'joint_hash_insert', 'warmstart_joints', 'csr_degree_joints', 'csr_scatter_joints'] : []),
-      ...(ccdBalls ? ['ccd_register', 'broadphase_fast', 'ccd_toi', 'ccd_pick', 'ccd_mark', ccdEmit] : []),
+      ...(ccdBalls ? ['ccd_register', 'broadphase_fast', 'ccd_toi', 'ccd_pick', 'ccd_mark', ccdEmit, 'ccd_respond'] : []),
     ];
 
     function bindingsOf(wgsl) {
@@ -1449,6 +1449,8 @@ struct VsOut {
       // A sleep time beyond any run's length produces no candidates to revoke.
       if (!(params.sleepTime >= SLEEP_NEVER_S)) for (let i = 0; i < sleepRounds; i++) dispWork(pass, 'sleep_island_gate', 66);
       dispWork(pass, 'sleep_island_commit', 67);
+      // CCD impacts on dynamic bodies: the momentum exchange (ccd_step.slang).
+      if (sceneCcd) disp(pass, 'ccd_respond', 64);
       pass.end();
       if (readback) {
         enc.copyBufferToBuffer(bufs[7], 0, staging, 0, 80);

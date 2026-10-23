@@ -170,10 +170,12 @@ fn every_scene_menu_entry_runs_on_metal() {
     }
 }
 
-/// A 300 m/s shot at the arch crown (five metres a step at 60 Hz): without
-/// CCD it passes the arch between steps and barely moves it; a CCD shot
-/// (`Planner::set_projectile_ccd`) gets a time-of-impact contact, stops at
-/// the crown and knocks it out (engine/docs/ccd.md, in the lab's own plan).
+/// A 300 m/s shot at the arch crown (2.5 m a step at 120 Hz): without CCD it
+/// passes the arch between steps and barely moves it; a CCD shot
+/// (`Planner::set_projectile_ccd`) strikes the crown (time-of-impact contact,
+/// then the inelastic momentum exchange, `ccd_respond`) and knocks it out, then
+/// carries on through the gap (engine/docs/ccd.md, in the lab's own plan).
+/// Phase-through itself is checked exactly in `fracture_tower_ccd.rs`.
 #[test]
 fn a_ccd_shot_does_not_tunnel_through_the_arch() {
     let scene = build_scene(&asset("masonry-arch.glb"), 0, None)
@@ -222,10 +224,6 @@ fn a_ccd_shot_does_not_tunnel_through_the_arch() {
             moved[k]
         );
         if ccd {
-            assert!(
-                (min_z as f64) > back - 1.0,
-                "the CCD shot passed the arch (z {min_z})"
-            );
             assert!(after[projectile * 28..projectile * 28 + 28].iter().all(|x| x.is_finite()));
         } else {
             assert!(
@@ -236,7 +234,7 @@ fn a_ccd_shot_does_not_tunnel_through_the_arch() {
     }
     // The tunnelling shot only grazes the crown's look-ahead contacts.
     assert!(
-        moved[1] > 1.0 && moved[1] > 5.0 * moved[0],
+        moved[1] > 5.0 && moved[1] > 20.0 * moved[0],
         "the CCD shot should knock the crown out ({} vs control {})",
         moved[1],
         moved[0]

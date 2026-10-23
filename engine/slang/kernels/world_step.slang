@@ -374,6 +374,11 @@ void buildColliderBounds(uint i, Collider col, BodyState b)
     float reach = colliderReach(b, col);
     float3 sweep = reach > 0.0 ? b.linearVel * PARAMS.dt : float3(0, 0, 0);
     float aabbPad = max(1.0e-4, speculativeMargin()) + (reach > 0.0 ? max(reach - length(sweep), 0.0) : 0.0);
+    // A CCD body can be deflected off its straight sweep within the step (a
+    // struck piece that spins carries it sideways): pad it all round by the
+    // farthest the solve can move it from its predicted pose (the trust
+    // region's per-iteration step times the iterations), at most the sweep.
+    if (bodyIsCcd(b)) aabbPad += ccdDeflectionBound(length(sweep));
     if (col.shape == SHAPE_SPHERE)
     {
         worldAabbSphere(worldPos, col.params.x + aabbPad, mn, mx);
@@ -491,6 +496,8 @@ static const uint FAST_BASE = CCD_BODY_BASE + 4u * CCD_BODY_CAP;
 static const uint IMPULSE_CAP = 1024u;
 static const uint IMPULSE_WORDS = 8u;
 static const uint IMPULSE_BASE = FAST_BASE + FAST_CAP;
+static const uint CCD_CARRY_BASE = IMPULSE_BASE + IMPULSE_WORDS * IMPULSE_CAP;
+static const uint CCD_CARRY_WORDS = 8u;
 static const uint CCD_NO_PAIR = 0xFFFFFFFFu;
 static const uint CCD_TOI_NONE = 0x7F800000u; // +inf
 
@@ -2224,6 +2231,12 @@ void emitManifoldRows(
         BoxManifoldPt pt = points.pts[k];
         Contact row = makeContactRow(pair, rowA, rowB, ca, cb, nrm, pt.pA, pt.pB, pt.feature, margin, mu);
         if (toi) row = refreshReusedContact(row, ba, bb);
+        // A CCD body's contacts (its time-of-impact contact and its look-ahead
+        // ones) start rigid (k_max), not at the cold-start floor (m/h²) that
+        // ramps up over the iterations: against the whole step's inertial
+        // target (a 576 m/s ball is 4.8 m past the wall at 120 Hz) a soft start
+        // let the ball through the piece within the step.
+        if (toi || bodyIsCcd(ba) || bodyIsCcd(bb)) row.kN = PARAMS.kMaxN;
         STORE_NEW_CONTACT(curOff + cStart + k, mslot, row);
     }
 #if defined(ENGINE_REUSE_COPY)
@@ -2390,6 +2403,15 @@ bool contactGapMode() { return (PARAMS.flags & FLAG_CONTACT_GAP) != 0u; }
 // points, positive gaps kept whole) when the flag is set or a body is CCD or
 // kinematic (their contacts are speculative by construction).
 bool lookAheadOn() { return (PARAMS.flags & FLAG_SPEC_VELOCITY) != 0u || sceneHasCcd() || sceneHasKinematic(); }
+
+// Farthest the solve moves a body from its predicted pose in one step: the
+// primal trust region (trustLin · 0.5 per iteration) over the iterations, and
+// at most `sweep` (the bound for a CCD body's broadphase pad).
+float ccdDeflectionBound(float sweep)
+{
+    float trust = float(PARAMS.iterations) * 0.5 * PARAMS.trustLin;
+    return trust > 0.0 ? min(sweep, trust) : sweep;
+}
 
 // How far any point of collider `c` on body `b` moves this step:
 // (|v| + |ω|·r)·h + |g|·h², from the velocity at the start of the step. Motion

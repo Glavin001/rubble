@@ -619,7 +619,100 @@ void ccd_mark(uint3 tid : SV_DispatchThreadID)
     uint k = dispatchIndex(tid);
     if (k >= ccdBodyCount()) return;
     uint win = ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * k + 2u]);
-    if (win != CCD_NO_PAIR) gCandidates[win]._pad |= CCD_WIN;
+    if (win == CCD_NO_PAIR) return;
+    gCandidates[win]._pad |= CCD_WIN;
+    // The impact response (ccd_respond): both bodies' step-start velocities.
+    CandidatePair pair = gCandidates[win];
+    uint fast = ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * k]);
+    uint other = gColliders[pair.colliderA].body == fast ? gColliders[pair.colliderB].body : gColliders[pair.colliderA].body;
+    BodyState bo = gBodies[other];
+    if (!bodyIsDynamic(bo)) return;
+    float3 v = gBodies[fast].linearVel;
+    float3 vo = bodyIsSleeping(bo) || wakePending(bo) ? float3(0, 0, 0) : bo.linearVel;
+    uint r = CCD_CARRY_BASE + CCD_CARRY_WORDS * k;
+    ASTORE(gScratchAtomics[r], asuint(v.x));
+    ASTORE(gScratchAtomics[r + 1u], asuint(v.y));
+    ASTORE(gScratchAtomics[r + 2u], asuint(v.z));
+    ASTORE(gScratchAtomics[r + 3u], win);
+    ASTORE(gScratchAtomics[r + 4u], asuint(vo.x));
+    ASTORE(gScratchAtomics[r + 5u], asuint(vo.y));
+    ASTORE(gScratchAtomics[r + 6u], asuint(vo.z));
+    ASTORE(gScratchAtomics[r + 7u], other);
+    ASTORE(gScratchAtomics[CCD_BODY_BASE + 4u * k + 3u], CCD_RESPOND);
+}
+
+// ccd slot flags word (+3): set by ccd_mark when the TOI partner is dynamic.
+static const uint CCD_RESPOND = 1u;
+
+// ---------------------------------------------------------------------------
+// Impact response (after extract_velocity_sleep). A rigid TOI contact stops a
+// CCD body at its partner's surface, but the solve barely passes momentum
+// through a rigid contact in one step's iterations, and a partner held still
+// this step (asleep, its wake deferred) or pinned by such neighbours takes
+// none: the striker would stop dead. So each CCD body that struck a dynamic
+// body gets a perfectly inelastic, momentum-conserving exchange along the TOI
+// normal from both bodies' step-start velocities (the partner also spins, from
+// the contact point), and a held partner wakes with its new velocity. Against
+// a free partner the solve's result is already close, so this changes little;
+// kinetic energy never grows. One thread, CCD slots in order (deterministic
+// when two strikers share a partner).
+// ---------------------------------------------------------------------------
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ccd_respond(uint3 tid : SV_DispatchThreadID)
+{
+    if (dispatchIndex(tid) != 0u || !sceneHasCcd()) return;
+    uint n = ccdBodyCount();
+    for (uint k = 0u; k < n; k++)
+    {
+        if ((ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * k + 3u]) & CCD_RESPOND) == 0u) continue;
+        uint fast = ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * k]);
+        uint r = CCD_CARRY_BASE + CCD_CARRY_WORDS * k;
+        float3 v0 = asfloat(uint3(ALOAD(gScratchAtomics[r]), ALOAD(gScratchAtomics[r + 1u]), ALOAD(gScratchAtomics[r + 2u])));
+        uint win = ALOAD(gScratchAtomics[r + 3u]);
+        float3 vo0 = asfloat(uint3(ALOAD(gScratchAtomics[r + 4u]), ALOAD(gScratchAtomics[r + 5u]), ALOAD(gScratchAtomics[r + 6u])));
+        uint other = ALOAD(gScratchAtomics[r + 7u]);
+        CandidatePair pair = gCandidates[win];
+        bool fastIsA = gColliders[pair.colliderA].body == fast;
+        Collider cf = gColliders[fastIsA ? pair.colliderA : pair.colliderB];
+        Collider co = gColliders[fastIsA ? pair.colliderB : pair.colliderA];
+        BodyState bf = gBodies[fast];
+        BodyState bo = gBodies[other];
+        if (!bodyIsDynamic(bo) || !bodyIsDynamic(bf)) continue;
+        // The TOI normal again, from the step-start poses (a held partner did
+        // not move) along the step's relative motion.
+        BodyState bf0 = bf;
+        bf0.position = bf.initialPos;
+        bf0.orientation = bf.initialRot;
+        float3 rel = v0 * PARAMS.dt;
+        float t;
+        float3 nrm;
+        if (ccdCast(cf, bf0, co, bo, rel, t, nrm) != CAST_HIT || dot(nrm, nrm) < 0.5) nrm = normalize(rel);
+        float closing = dot(v0 - vo0, nrm);
+        if (closing <= 0.0) continue;
+        float mf = 1.0 / max(bf.invMass, 1e-12);
+        float mo = 1.0 / max(bo.invMass, 1e-12);
+        // Common normal speed of a perfectly inelastic impact.
+        float vc = (mf * dot(v0, nrm) + mo * dot(vo0, nrm)) / (mf + mo);
+        // The striker: its normal speed becomes vc (its tangential motion as
+        // the solve left it); never faster along n than it came in.
+        float vfn = dot(bf.linearVel, nrm);
+        if (vc > vfn) gBodies[fast].linearVel = bf.linearVel + nrm * (vc - vfn);
+        // The partner: raised to vc along n, the impulse at the contact point.
+        float von = dot(bo.linearVel, nrm);
+        if (vc > von)
+        {
+            float3 J = nrm * (mo * (vc - von));
+            float3 pf; float4 qf; colliderPose(cf, bf, pf, qf);
+            float3 at = shapeSupport(cf, pf, qf, nrm);
+            float3 torque = cross(at - bo.position, J);
+            float3 local = quatRotate(quatConjugate(bo.orientation), torque);
+            gBodies[other].linearVel = bo.linearVel + J * bo.invMass;
+            gBodies[other].angularVel = bo.angularVel + quatRotate(bo.orientation, local * bo.invInertia);
+            gBodies[other].flags = (bo.flags & ~(BODY_SLEEPING | BODY_WAKE_PENDING)) | BODY_AWAKE;
+            gBodies[other].sleepTimer = 0.0;
+        }
+    }
 }
 
 // The narrowphase leaves each CCD body's winning pair to ccd_emit.

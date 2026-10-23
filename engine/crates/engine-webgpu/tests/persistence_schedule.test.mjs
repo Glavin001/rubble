@@ -14,7 +14,7 @@ const source = html.slice(start, end);
 // fixed-palette controls on (colors=full, rounds=full): these tests check the full
 // schedule; adaptive counts are exercised by the browser regressions.
 // The wasm constants demo.html imports (vehicle.mjs M) that the sliced code reads.
-const MOTION = { SCRATCH_WORDS: 18540, BODY_CCD: 64, CCD_BODY_CAP: 1024 };
+const MOTION = { SCRATCH_WORDS: 26732, BODY_CCD: 64, CCD_BODY_CAP: 1024 };
 const dispatchSource = html.slice(html.indexOf('const COLOR_ROUND_LIMIT'), html.indexOf('const colorsFull'));
 const DISPATCH = {
   ...runInNewContext(`${dispatchSource}({COLOR_ROUND_LIMIT, COLOR_ROUND_HEADROOM, COLOR_HEADROOM, SLEEP_NEVER_S})`),

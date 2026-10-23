@@ -32,7 +32,8 @@ export async function runFractureRegression(demo=window.__FRACTURE_DEMO__) {
 }
 // A 300 m/s shot at the arch crown (2.5 m a tick at 120 Hz), without and with
 // CCD balls (engine-viewer fracture_regression a_ccd_shot_does_not_tunnel_through_the_arch):
-// the plain ball passes the arch between ticks, the CCD ball stops at the crown.
+// the plain ball passes the arch between ticks, the CCD ball strikes the crown and
+// knocks it out (time-of-impact contact, then the inelastic momentum exchange).
 export async function runCcdShotRegression(demo=window.__FRACTURE_DEMO__,{speed=300,ticks=30}={}) {
  const require=(ok,message)=>{if(!ok)throw new Error(`CCD shot regression: ${message}`)};
  require(demo.ready,'demo is not ready');
@@ -50,7 +51,7 @@ export async function runCcdShotRegression(demo=window.__FRACTURE_DEMO__,{speed=
  }
  sim().setProjectileSpeedScale(1);
  require(runs.control.minZ<back-2,`the plain ball should pass the arch (z ${runs.control.minZ})`);
- require(runs.ccd.minZ>back-1&&runs.ccd.finite,`the CCD ball passed the arch (z ${runs.ccd.minZ})`);
- require(runs.ccd.moved>1&&runs.ccd.moved>5*runs.control.moved,`the CCD ball should knock the crown out (${runs.ccd.moved} vs ${runs.control.moved})`);
+ require(runs.ccd.finite,'the CCD ball has a non-finite state');
+ require(runs.ccd.moved>5&&runs.ccd.moved>20*runs.control.moved,`the CCD ball should knock the crown out (${runs.ccd.moved} vs ${runs.control.moved})`);
  return {passed:true,back,...runs};
 }

@@ -511,6 +511,10 @@ pub fn encode_step(
         }
     }
     e.w("sleep_island_commit", 67);
+    if mo.ccd && !reuse_manifolds {
+        // CCD impacts on dynamic bodies: the momentum exchange (ccd_step.slang).
+        e.d("ccd_respond", 64);
+    }
     e.phase("sleep");
     e.0
 }
@@ -524,6 +528,7 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "ccd_toi",
     "ccd_pick",
     "ccd_mark",
+    "ccd_respond",
     "ccd_emit_persistent",
     "ccd_emit_copy_persistent",
     "char_move",

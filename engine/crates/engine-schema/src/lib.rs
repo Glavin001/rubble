@@ -243,8 +243,8 @@ pub struct Manifold {
 pub const EVENT_RING_BASE: u32 = 96;
 pub const EVENT_RING_CAPACITY: u32 = 1024;
 /// Total `u32` words of the scratch-atomics buffer (host words, lists, ring,
-/// continuous-collision lists and impulse records).
-pub const SCRATCH_WORDS: u32 = IMPULSE_BASE + IMPULSE_WORDS * IMPULSE_CAP;
+/// continuous-collision lists, impulse records and carried CCD velocities).
+pub const SCRATCH_WORDS: u32 = CCD_CARRY_BASE + CCD_CARRY_WORDS * CCD_BODY_CAP;
 
 /// Continuous-collision scratch (`ccd_step.slang`), after the oversized-static
 /// list: CCD body count, fast-collider count, impulse count, TOI fallbacks.
@@ -268,6 +268,11 @@ pub const FAST_BASE: u32 = CCD_BODY_BASE + 4 * CCD_BODY_CAP;
 pub const IMPULSE_CAP: u32 = 1024;
 pub const IMPULSE_WORDS: u32 = 8;
 pub const IMPULSE_BASE: u32 = FAST_BASE + FAST_CAP;
+/// Per CCD slot (`ccd_mark` → `ccd_respond`): the CCD body's step-start velocity,
+/// its winning candidate, its dynamic TOI partner's step-start velocity and the
+/// partner — the impact's momentum exchange along the TOI normal.
+pub const CCD_CARRY_BASE: u32 = IMPULSE_BASE + IMPULSE_WORDS * IMPULSE_CAP;
+pub const CCD_CARRY_WORDS: u32 = 8;
 /// Impulse record modes (low 8 bits of `mode`; the rest is the record's sum
 /// order key): an impulse at a world point (dynamic bodies), or a kinematic
 /// body's new velocity (`j` linear, `point` angular).

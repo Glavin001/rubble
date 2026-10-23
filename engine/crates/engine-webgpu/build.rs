@@ -105,6 +105,7 @@ const WORLD_ENTRIES: &[&str] = &[
     "ccd_toi",
     "ccd_pick",
     "ccd_mark",
+    "ccd_respond",
     "ccd_emit",
     "ccd_emit_persistent",
     "ccd_emit_copy_persistent",
