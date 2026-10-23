@@ -1312,7 +1312,7 @@ impl Planner {
         default_shot_speed(self.extent, self.projectile_speed)
     }
 
-    /// Fire the next projectile along a ray: returns its body id and record
+    /// Fire a projectile along a ray: returns its body id and record
     /// (write it at the id in both body halves). Shots compensate for gravity to
     /// aim near the scene centre's depth unless `arc` is false.
     pub fn launch(
@@ -1324,14 +1324,13 @@ impl Planner {
     ) -> Result<(u32, Vec<u8>)> {
         self.mark_stale(false);
         ensure!(
-            self.shots < self.projectile_count,
-            "All 16 projectiles fired. Reset to reload."
-        );
-        ensure!(
             origin.iter().chain(&direction).all(|x| x.is_finite()),
             "Invalid projectile ray"
         );
-        let id = self.projectile_start + self.shots;
+        // No limit on shots: past the slots, each shot reuses the oldest projectile (the
+        // world holds the newest `projectile_count`).
+        ensure!(self.projectile_count > 0, "The scene has no projectile slots");
+        let id = self.projectile_start + self.shots % self.projectile_count;
         let (m, r) = (self.projectile_mass, self.projectile_radius);
         let v = shot_velocity(
             self.center,

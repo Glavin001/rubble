@@ -24,14 +24,21 @@ use crate::{to_rubble, Owner, RubbleEngine};
 /// The shots a world holds (the fracture lab's 16).
 pub const SHOTS: usize = 16;
 
-/// Carried impact pulses each half of the pool holds: four per contact record a frame can
-/// hold (the ingest's capacity). Every pulse kept came from one record and lives for its
-/// Hertz duration, a few frames at most under the heaviest impacts; a frame reserves room
-/// for each chunk's carried pulses and one per manifold. `STRESS_PULSE_POOL` multiplies it
-/// (a measurement).
-pub fn pool_cap(records: u32) -> u32 {
+/// Carried impact pulses each half of the pool holds: two per contact the engine can hold
+/// (a pulse comes from one and lasts its Hertz duration). A frame reserves room for each
+/// chunk's carried pulses and one per manifold. `STRESS_PULSE_POOL` multiplies it (a
+/// measurement).
+pub fn pool_cap(max_contacts: u32) -> u32 {
     let k: u32 = std::env::var("STRESS_PULSE_POOL").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
-    4 * records * k.max(1)
+    2 * max_contacts * k.max(1)
+}
+
+/// The engine's contacts for a world of `chunks` chunks: a debris pile has every piece
+/// touching several others at a few points each (24 a chunk), within 2^18 (rubble's contact
+/// buffer is 256 bytes a contact: 64 MB, under WebGPU's 128 MB a binding). More contacts
+/// than that in one step is an error the world reports (rubble's overflow flags).
+pub fn contact_capacity(chunks: usize, floor: u32) -> u32 {
+    ((24 * chunks) as u32).next_power_of_two().clamp(floor, 1 << 18).max(floor)
 }
 
 /// What [`ThresholdWorld::poll`] reads (a frame or more late).
@@ -86,7 +93,7 @@ pub struct ThresholdWorld {
     shot_radius: f64,
 }
 
-const RING: usize = 3;
+const RING: usize = 4;
 const COUNTER_BYTES: u64 = std::mem::size_of::<engine_schema::StepCounters>() as u64;
 // Ring slot states.
 const IDLE: u8 = 0;
@@ -105,6 +112,8 @@ impl ThresholdWorld {
         let mut capacity = crate::capacity_for(scene);
         let bodies_needed = (chunk_count + SHOTS + 4) as u32;
         capacity.max_bodies = capacity.max_bodies.max(bodies_needed.next_power_of_two());
+        capacity.max_contacts = contact_capacity(chunk_count, capacity.max_contacts);
+        capacity.max_candidates = capacity.max_candidates.max(capacity.max_contacts);
         let mut engine = RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), capacity.clone()).map_err(|e| format!("rubble: {e}"))?;
         let profile = stress_ref::capability::Profile::Threshold;
         let (iterations, substeps) = profile.engine_policy();
@@ -169,7 +178,7 @@ impl ThresholdWorld {
         }
         let mut t = FractureTables {
             max_bodies: engine.sim.capacity().max_bodies,
-            pool_cap: pool_cap(2 * capacity.max_contacts),
+            pool_cap: pool_cap(capacity.max_contacts),
             impact_peak: true,
             band: (Vec3::from_array(scene.gravity).norm() * scene.sim.frame_dt) as f32,
             dt: scene.sim.frame_dt as f32,
@@ -259,11 +268,11 @@ impl ThresholdWorld {
         Ok(ThresholdWorld { mirror, scene: scene.clone(), engine, ingest, fracture, tables: t, chunk_of, frame_dt: scene.sim.frame_dt, frame: 0, shots, fired: 0, ring, ring_next: 0, last: ThresholdStats::default(), initial_bodies: m.clusters.len() as u32, ground_modulus, projectile_modulus: projectile.youngs_modulus, shot_radius })
     }
 
-    /// Launch the next parked shot (`desc`: the stress frame, its pose and velocity):
-    /// its record written in both pose regions, its collider's mass in the ingest's table.
-    /// False when all are fired.
+    /// Launch a shot (`desc`: the stress frame, its pose and velocity): its record written
+    /// in both pose regions, its collider's mass in the ingest's table. No limit: past the
+    /// [`SHOTS`] spheres, each shot reuses the oldest. False only for a world with none.
     pub fn launch(&mut self, gpu: &Gpu, desc: &ImpactorDesc) -> bool {
-        let Some(sh) = self.shots.get(self.fired).copied() else { return false };
+        let Some(sh) = self.shots.get(self.fired % self.shots.len().max(1)).copied() else { return false };
         self.fired += 1;
         let r = match desc.shape {
             stress_ref::scene::ImpactorShape::Sphere { radius } => radius,

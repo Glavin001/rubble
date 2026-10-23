@@ -71,7 +71,8 @@ export async function createRenderer(device,canvas,simulation,scene,onShoot=()=>
   pass.setPipeline(ground);pass.setBindGroup(0,floor.group);pass.draw(floor.count);
   if(roads.count){pass.setPipeline(decal);pass.setBindGroup(0,roads.group);pass.draw(roads.count)}
   pass.setPipeline(solid);pass.setBindGroup(0,mesh.group);pass.setIndexBuffer(index,'uint32');pass.drawIndexed(indices.length,scene.copies||1);
-  if(simulation.shots){pass.setBindGroup(0,projectiles.group);pass.draw(simulation.shots*projectiles.count/scene.projectileCount)}
+  // The newest projectileCount balls (a shot past them reuses the oldest).
+  if(simulation.shots){pass.setBindGroup(0,projectiles.group);pass.draw(Math.min(simulation.shots,scene.projectileCount)*projectiles.count/scene.projectileCount)}
   if(showBonds&&lines.count){pass.setPipeline(wire);pass.setBindGroup(0,lines.group);pass.draw(lines.count,scene.copies||1)}pass.end();
   if(timed){frameTimer.busy=true;frameTimer.last=performance.now();enc.resolveQuerySet(frameTimer.query,0,2,frameTimer.resolve,0);enc.copyBufferToBuffer(frameTimer.resolve,0,frameTimer.read,0,16)}
   device.queue.submit([enc.finish()]);

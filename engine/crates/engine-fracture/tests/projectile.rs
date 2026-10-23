@@ -51,3 +51,15 @@ fn speed_scale_multiplies_the_shot() {
     assert!((v4[2] as f64 - 4.0 * base).abs() < 1e-4 * base);
     assert!(plan.set_projectile_speed_scale(-1.0).is_err());
 }
+
+/// No limit on shots: past the projectile slots, each shot reuses the oldest.
+#[test]
+fn shots_reuse_the_oldest_slot() {
+    let scene = build_cuboid_house(&CuboidOptions::default()).unwrap();
+    let mut plan = Planner::new(&scene, LIMITS).unwrap();
+    let n = scene.projectile_count;
+    let ids: Vec<u32> = (0..40).map(|_| plan.launch([0.0, 1.0, -20.0], [0.0, 0.0, 1.0], None, Some(false)).unwrap().0).collect();
+    for (k, id) in ids.iter().enumerate() {
+        assert_eq!(*id, scene.projectile_start + k as u32 % n, "shot {k}");
+    }
+}

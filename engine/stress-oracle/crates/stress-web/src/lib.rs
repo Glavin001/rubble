@@ -325,7 +325,8 @@ pub fn stress_zoom(delta_y: f64) {
 #[wasm_bindgen]
 pub fn stress_shoot(u: f64, v: f64) -> bool {
     let Some(s) = SHOOTING.get() else { return false };
-    if FIRED.get() >= SHOTS {
+    // The resident GpuWorld draws SHOTS balls; the threshold world reuses its oldest.
+    if FIRED.get() >= SHOTS && TWORLD.with_borrow(|w| w.is_none()) {
         return false;
     }
     let (w, h) = SIZE.get();
@@ -479,6 +480,9 @@ fn load(level: u8) -> Result<(), String> {
 /// under a 120 Hz simulation, or a hitch) otherwise drops time and the run falls behind
 /// real time even when each physics frame is fast.
 const MAX_BEHIND_S: f64 = 0.1;
+/// Physics frames the GPU-resident threshold world may have queued ahead of the last one the
+/// GPU finished (its counters read back).
+const IN_FLIGHT: u64 = 3;
 
 #[no_mangle]
 pub extern "C" fn stress_frame(elapsed_ms: f64) -> u32 {
@@ -529,7 +533,15 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, elapsed_ms: f64) -> Result<(
         for desc in PENDING.with_borrow_mut(std::mem::take) {
             l.world.launch(gpu, &desc);
         }
+        // At most `IN_FLIGHT` frames queued ahead of what the GPU has finished: when it
+        // cannot keep up, the simulation runs slower than real time instead of the queue
+        // (and with it the display's frames) backing up.
         while l.behind >= dt {
+            l.world.poll(gpu);
+            if l.world.frame >= l.world.last.frame + IN_FLIGHT {
+                l.behind = 0.0;
+                break;
+            }
             l.world.step_frame(gpu)?;
             l.behind -= dt;
             stepped += 1;
@@ -587,7 +599,9 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, elapsed_ms: f64) -> Result<(
     });
     STATS.set(stats.to_string());
     if st.error != 0 || st.engine_overflow != 0 {
-        return Err(format!("threshold world: fracture errors {:#x}, engine overflow {:#x} (1 no free body slot, 2 a mass sum out of range, 4 a union did not settle, 8 the impact pulse pool is full)", st.error, st.engine_overflow));
+        // Paused: one report, not one a frame.
+        RUNNING.set(false);
+        return Err(format!("threshold world: fracture errors {:#x}, engine overflow {:#x} (fracture: 1 no free body slot, 2 a mass sum out of range, 4 a union did not settle, 8 the impact pulse pool is full; engine: 1 contacts, 2 candidate pairs, 64 manifolds)", st.error, st.engine_overflow));
     }
     Ok(())
 }
