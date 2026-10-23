@@ -30,17 +30,8 @@ jobs:
           bash .github/scripts/check-large-files.sh "$base" HEAD
 
   web:
-    name: Web demos (build + JS tests + Vercel deploy)
+    name: Web demos (build + JS tests)
     runs-on: ubuntu-latest
-    # One deploy per ref at a time, so an older main build never lands after a newer one.
-    # A newer push to a PR supersedes its running build.
-    concurrency:
-      group: web-${{ github.ref }}
-      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-    env:
-      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN || vars.VERCEL_TOKEN }}
-      VERCEL_ORG_ID: team_9BEP6m6pAw2dpH7RJPuYYHK8
-      VERCEL_PROJECT_ID: prj_kbVYCVdS13IPuAtWq2qYh7gcwUUL
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/lfs-pull
@@ -75,22 +66,6 @@ jobs:
           name: web-dist
           path: engine/web-dist
           retention-days: 7
-      # The site is deployed from this build (vercel.json turns off Vercel's own Git builds):
-      # a preview for each PR from this repository, production for pushes to main.
-      - name: Deploy to Vercel
-        id: deploy
-        if: env.VERCEL_TOKEN != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-        run: |
-          out=.vercel/output
-          rm -rf "$out"
-          mkdir -p "$out"
-          cp -R engine/web-dist "$out/static"
-          echo '{"version":3}' > "$out/config.json"
-          prod=()
-          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/main ]]; then prod=(--prod); fi
-          url=$(npx --yes vercel@65.1.0 deploy --prebuilt "${prod[@]}" --yes --token "$VERCEL_TOKEN")
-          echo "url=$url" >> "$GITHUB_OUTPUT"
-          echo "Deployed to Vercel: $url" >> "$GITHUB_STEP_SUMMARY"
 
   engine-host:
     name: Engine host tests (no GPU)

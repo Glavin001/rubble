@@ -5,13 +5,22 @@
 //! (not native Metal `scene_fps` vs their browser `gpuTotal`). Metal remains the M3
 //! interactive gate; this crate is the apples-to-apples oracle path.
 
+#[cfg(feature = "gpu")]
 mod gpu;
+#[cfg(feature = "gpu")]
 mod soft_skin;
+#[cfg(feature = "gpu")]
 pub use gpu::{default_device, SimSnapshot, SoftEvents, WgpuSim};
-pub use soft_skin::{SoftSkinner, SOFT_SKIN_WGSL};
+#[cfg(feature = "gpu")]
+pub use soft_skin::SoftSkinner;
+
+/// The skinning kernels as one WGSL module (entries `soft_skin_vertices`,
+/// `soft_skin_faces`, `soft_skin_normals`), as `generated/wgsl/soft_skin.wgsl`.
+pub const SOFT_SKIN_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/wgsl/soft_skin.wgsl"));
 
 use engine_exec::{ExecError, PhaseTimingsMs, PhysicsBackend};
 use engine_schema::{AvbdParams, StepCounters, WorldCapacity};
+#[cfg(feature = "gpu")]
 use std::borrow::Cow;
 
 pub struct WebGpuWorld {
@@ -156,6 +165,7 @@ impl WebGpuWorld {
         })
     }
 
+    #[cfg(feature = "gpu")]
     /// Create a wgpu device and load every successfully translated WGSL module.
     /// Returns adapter label + counts (ok / fail).
     pub fn smoke_device() -> anyhow::Result<String> {
