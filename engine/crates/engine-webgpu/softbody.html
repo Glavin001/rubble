@@ -958,11 +958,14 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     // Seconds of simulation since the last drawn frame (particle effects follow the
     // physics, so a paused or frame-stepped scene freezes them too).
     let fxDt = 0, fxSteps = 0;
+    const FX = qs.get('fx') === '1';
     function drawScene(enc) {
       fxDt = Math.min(0.1, Math.max(0, world.steps - fxSteps) / HZ); fxSteps = world.steps;
       if (!skinBind) skinBind = bind(skinPipe, [[0, world.bufs[0]], [1, frameBuf], [5, triBuf], [6, restBuf], ...SH]);
       const flexMode = skinMode === 'flex';
-      if (flexMode) carR.compute(enc, fxDt);
+      // Particle effects (sparks, shards, chips, dust) are off by default so the
+      // deformation reads clearly; ?fx=1 turns them on.
+      if (flexMode) carR.compute(enc, FX ? fxDt : 0);
       // Sun shadow map.
       const sp = enc.beginRenderPass({ colorAttachments: [], depthStencilAttachment: { view: shadowView, depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' } });
       sp.setPipeline(colShadow); sp.setBindGroup(0, colShadowBind); sp.setVertexBuffer(0, cubeVbo); sp.draw(36, world.colliderCount - 1);
@@ -991,7 +994,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       } else if (triCount) { rp.setPipeline(skinPipe); rp.setBindGroup(0, skinBind); rp.draw(triCount * 3); }
       if (beamView && beamTotal) { rp.setPipeline(beamPipe); rp.setBindGroup(0, beamBind); rp.draw(2, beamTotal); }
       if (world.vehicles.wheelCount) { rp.setPipeline(wheelPipe); rp.setBindGroup(0, wheelBind); rp.setVertexBuffer(0, cylVbo); rp.draw(cyl.length / 6, world.vehicles.wheelCount); }
-      if (flexMode) { carR.drawGlass(rp); carR.drawFx(rp); }
+      if (flexMode) { carR.drawGlass(rp); if (FX) carR.drawFx(rp); }
       rp.end();
     }
     function stepPhysics(enc, n) {
