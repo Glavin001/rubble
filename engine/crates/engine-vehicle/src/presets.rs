@@ -473,10 +473,117 @@ pub fn motorcycle() -> VehicleDesc {
 
 /// vibe-land's dune buggy ("Sand rail"), baked by `engine/scenes/dune-buggy`
 /// (`bun run bake:physics`) into `assets/dune_buggy.json`: 17 parts with their
-/// recipe masses and primitive colliders, mounts rated from the measured joint
-/// areas, and the rig's hubs and travel. Handling follows vibe-land's garage
-/// setup: springs at 30% static sag, critically damped, all-wheel drive.
+/// recipe masses and primitive colliders, mounts rated from the measured joints,
+/// and the rig's hubs and travel. Handling follows vibe-land's garage setup:
+/// springs at 30% static sag, critically damped, all-wheel drive.
 pub fn dune_buggy() -> VehicleDesc {
+    vibe_vehicle("dune_buggy", include_str!("../assets/dune_buggy.json"))
+}
+
+/// vibe-land's Baja trophy truck ("Baja / T1"): the buggy chassis under panel
+/// bodywork, an open bed and a tailgate.
+pub fn vibe_trophy() -> VehicleDesc {
+    vibe_vehicle("vibe_trophy", include_str!("../assets/vibe_trophy.json"))
+}
+
+/// vibe-land's rally hatchback ("Vector / R3"): enclosed cabin, hatch, rear wing.
+pub fn vibe_rally() -> VehicleDesc {
+    vibe_vehicle("vibe_rally", include_str!("../assets/vibe_rally.json"))
+}
+
+/// vibe-land's monster truck ("Goliath / M4"): lifted, 0.72 m tyres half again as wide.
+pub fn vibe_monster() -> VehicleDesc {
+    vibe_vehicle("vibe_monster", include_str!("../assets/vibe_monster.json"))
+}
+
+/// vibe-land's derby sedan ("Brawler / D8"): reinforced doors, window guards, trunk.
+pub fn vibe_derby() -> VehicleDesc {
+    vibe_vehicle("vibe_derby", include_str!("../assets/vibe_derby.json"))
+}
+
+/// vibe-land's sprint car ("Firefly / S9"): open wheels, top and front wings, nerf bars.
+pub fn vibe_sprint() -> VehicleDesc {
+    vibe_vehicle("vibe_sprint", include_str!("../assets/vibe_sprint.json"))
+}
+
+/// vibe-land's semi tractor ("Hauler / H6"); its flatbed is [`vibe_semi_trailer`],
+/// hitched at [`VIBE_SEMI_HITCH`] by a ball joint.
+pub fn vibe_semi() -> VehicleDesc {
+    vibe_vehicle("vibe_semi", include_str!("../assets/vibe_semi.json"))
+}
+
+/// The semi's fifth wheel (design space, both vehicles): the trailer's kingpin.
+pub const VIBE_SEMI_HITCH: [f32; 3] = [0.0, 1.12, -2.3];
+
+/// The semi's flatbed trailer: one rigid body on two raycast wheels (its leaf
+/// springs), no drive, hitched at [`VIBE_SEMI_HITCH`]. Its front rests on the
+/// tractor, so each wheel's spring is sized for a quarter of its weight.
+pub fn vibe_semi_trailer() -> VehicleDesc {
+    #[derive(serde::Deserialize)]
+    struct Wheel {
+        hub: [f32; 3],
+        radius: f32,
+        width: f32,
+        mass: f32,
+    }
+    #[derive(serde::Deserialize)]
+    struct Trailer {
+        mass: f32,
+        colliders: Vec<PartColliderDesc>,
+        hitch: [f32; 3],
+        wheels: Vec<Wheel>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Asset {
+        trailer: Trailer,
+    }
+    let a: Asset = serde_json::from_str(include_str!("../assets/vibe_semi.json")).expect("assets/vibe_semi.json");
+    let t = a.trailer;
+    debug_assert_eq!(t.hitch, VIBE_SEMI_HITCH);
+    const G: f32 = 9.81;
+    let (compression, extension) = (0.10, 0.08); // vibe-land's semi handling
+    let corner = 0.25 * (t.mass + t.wheels.iter().map(|w| w.mass).sum::<f32>());
+    let k = corner * G / (0.3 * (compression + extension));
+    let wheels = t
+        .wheels
+        .iter()
+        .map(|w| {
+            let neutral = 0.05 + compression;
+            WheelDesc {
+                position: [w.hub[0], w.hub[1] + neutral, w.hub[2]],
+                radius: w.radius,
+                width: w.width,
+                mass: w.mass,
+                inertia: None,
+                suspension_min: 0.05,
+                suspension_max: neutral + extension,
+                spring: Spring::StiffnessDamping { k, c: 2.0 * (k * corner).sqrt() },
+                max_steer: 0.0,
+                max_brake_torque: 1500.0,
+                rolling_resistance: 0.015,
+                long_mu_scale: 1.2,
+                lat_mu_scale: 1.2,
+                rim_material: crate::pack::WHEEL_RIM_MATERIAL,
+                ..Default::default()
+            }
+        })
+        .collect();
+    VehicleDesc {
+        name: "vibe_semi_trailer".into(),
+        parts: vec![PartDesc { name: "trailer".into(), role: PartRole::Body, mass: t.mass, colliders: t.colliders, mount: MountDesc::default() }],
+        wheels,
+        drive: DriveDesc::Direct { max_torque: 0.0, top_speed: 30.0 },
+        wheel_query: WheelQuery::Sphere,
+        ..Default::default()
+    }
+}
+
+/// A vibe-land catalog vehicle from its baked asset (`engine/scenes/dune-buggy`):
+/// parts with their recipe masses, primitive colliders and rated mounts (parts
+/// bolted to parts), the rig's hubs and travel. Handling is vibe-land's garage
+/// setup: springs at 30% static sag, critically damped, bump stops ten times
+/// as stiff, all-wheel drive at 7.5 m/s² to 30 m/s.
+pub fn vibe_vehicle(name: &str, json: &str) -> VehicleDesc {
     #[derive(serde::Deserialize)]
     struct Wheel {
         hub: [f32; 3],
@@ -499,7 +606,7 @@ pub fn dune_buggy() -> VehicleDesc {
         wheels: Vec<Wheel>,
         steering: Steering,
     }
-    let a: Asset = serde_json::from_str(include_str!("../assets/dune_buggy.json")).expect("assets/dune_buggy.json");
+    let a: Asset = serde_json::from_str(json).unwrap_or_else(|e| panic!("{name} asset: {e}"));
     const G: f32 = 9.81;
     const SAG: f32 = 0.3; // vibe-land customization.mjs STATIC_SAG_FRACTION
     const S_MIN: f32 = 0.05;
@@ -529,7 +636,8 @@ pub fn dune_buggy() -> VehicleDesc {
                 max_steer: if w.steerable { a.steering.max_steer_deg.to_radians() } else { 0.0 },
                 driven: true,
                 handbrake: !w.steerable,
-                max_brake_torque: 2500.0,
+                // Heavier models brake harder: the buggy (1.47 t) keeps 2.5 kN·m.
+                max_brake_torque: 2500.0 * (a.total_mass / 1500.0).max(1.0),
                 max_handbrake_torque: 4000.0,
                 long_mu_scale: 1.4,
                 lat_mu_scale: 1.4,
@@ -545,7 +653,7 @@ pub fn dune_buggy() -> VehicleDesc {
     let r = wheels[0].radius;
     let max_torque = a.total_mass * 7.5 * r / wheels.len() as f32;
     VehicleDesc {
-        name: "dune_buggy".into(),
+        name: name.into(),
         parts: a.parts,
         wheels,
         drive: DriveDesc::Direct { max_torque, top_speed: 30.0 },
@@ -571,6 +679,13 @@ pub fn all() -> Vec<VehicleDesc> {
         tank(),
         motorcycle(),
         dune_buggy(),
+        vibe_trophy(),
+        vibe_rally(),
+        vibe_monster(),
+        vibe_derby(),
+        vibe_sprint(),
+        vibe_semi(),
+        vibe_semi_trailer(),
     ]
 }
 
@@ -639,5 +754,46 @@ mod tests {
         d.parts[0].mount.break_force = 1.0;
         let p = pack(&d, Vec3::ZERO, Quat::IDENTITY, VehicleSlots::default());
         assert_eq!(f32::from_bits(p.parts[0][P_MOUNT as usize][3]), 1e30);
+    }
+}
+
+#[cfg(test)]
+mod vibe_tests {
+    use super::*;
+    use crate::pack::{pack, requirements, VehicleSlots};
+    use glam::{Quat, Vec3};
+
+    #[test]
+    fn every_vibe_land_model_packs() {
+        for d in [dune_buggy(), vibe_trophy(), vibe_rally(), vibe_monster(), vibe_derby(), vibe_sprint(), vibe_semi()] {
+            assert!(d.parts.len() <= 32 && d.parts[0].name == "frame", "{}", d.name);
+            assert!(d.parts.iter().all(|p| !p.colliders.is_empty() && p.mass > 0.0), "{}", d.name);
+            assert!(d.parts[1..].iter().all(|p| p.mount.breakable()), "{}: every part has a rated mount", d.name);
+            for (i, p) in d.parts.iter().enumerate() {
+                if let Some(parent) = p.mount.parent {
+                    assert!((parent as usize) < i, "{}: {} on a later part", d.name, p.name);
+                }
+            }
+            assert_eq!(d.wheels.len(), 4);
+            let p: Vec<[f32; 3]> = d.wheels.iter().map(|w| w.position).collect();
+            assert!(p[0][0] > 0.0 && p[1][0] < 0.0 && p[0][2] > p[2][2], "{}: FL, FR, RL, RR", d.name);
+            let req = requirements(&d);
+            let packed = pack(&d, Vec3::ZERO, Quat::IDENTITY, VehicleSlots::default());
+            assert_eq!(req.colliders as usize, packed.colliders.len(), "{}", d.name);
+        }
+        let monster = vibe_monster();
+        assert!(monster.wheels[0].radius > 0.7 && monster.wheels[0].width > 0.4, "monster tyres");
+    }
+
+    #[test]
+    fn the_semi_trailer_hitches_behind_the_cab() {
+        let t = vibe_semi_trailer();
+        assert_eq!(t.wheels.len(), 2);
+        assert!(t.wheels.iter().all(|w| !w.driven && !w.steerable));
+        // Hitch over the tractor's rear axle, the trailer axle well behind it (+Z forward).
+        let tractor_rear = vibe_semi().wheels[2].position[2];
+        assert!(VIBE_SEMI_HITCH[2] < 0.0 && VIBE_SEMI_HITCH[2] > tractor_rear - 1.5);
+        assert!(t.wheels[0].position[2] < VIBE_SEMI_HITCH[2] - 2.0);
+        assert!(t.parts[0].mass > 1000.0);
     }
 }

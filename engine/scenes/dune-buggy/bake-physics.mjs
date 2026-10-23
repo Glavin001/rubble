@@ -1,8 +1,10 @@
-// Bake vibe-land's buggy into the Rubble preset asset
-// (engine/crates/engine-vehicle/assets/dune_buggy.json, committed: CI builds the
-// preset without bun or this directory's node_modules).
+// Bake a vibe-land catalog vehicle into its Rubble preset asset
+// (engine/crates/engine-vehicle/assets/dune_buggy.json for the buggy,
+// vibe_<model>.json for the others; committed: CI builds the presets without
+// bun or this directory's node_modules).
 //
-//   bun install && bun run bake:physics
+//   bun install && bun run bake:physics          # every model
+//   bun run bake-physics.mjs trophy               # one
 //
 // Two builds of the same recipe (src/buggy.mjs), part for part:
 // - the exact build (manifold-3d CSG, ~40 s): solid volumes → masses, and the
@@ -21,14 +23,18 @@ import { LiveGeometry } from './src/live-geometry.mjs';
 import { createRigDefinition } from './src/vehicle-rig.mjs';
 import { jointStrength, SOLVER_MIN_BOND_AREA_M2, STRENGTH_PROFILE_VERSION } from './src/strength-profile.mjs';
 import { DENSITY } from './src/real-joint-capacity.mjs';
-import { classify, toRubble, RUBBLE_PARTS, CORNERS } from './parts.mjs';
+import { classify, toRubble, partsFor, CORNERS, MODELS } from './parts.mjs';
+import { vehicleById, tireWidthScale, trailerSpec } from './src/vehicle-catalog.mjs';
 import { buildFrameGraph, attachNodes } from './frame-graph.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const OUT = resolve(here, '../../crates/engine-vehicle/assets/dune_buggy.json');
-const PARAMS = { ...defaults, vehicle: 'buggy' };
-// Rubble's own wheel shape: the tyre's width (live tread spans 0.30 m).
-const WHEEL_WIDTH = 0.3;
+const MODEL = process.argv[2] ?? 'buggy';
+if (!MODELS.includes(MODEL)) throw new Error(`unknown model ${MODEL}; have ${MODELS.join(', ')}`);
+const OUT = resolve(here, `../../crates/engine-vehicle/assets/${MODEL === 'buggy' ? 'dune_buggy' : `vibe_${MODEL}`}.json`);
+const PARAMS = { ...defaults, ...vehicleById(MODEL).parameters, vehicle: MODEL };
+// Rubble's own wheel shape: the tyre's width (live tread spans 0.30 m; the
+// monster's tyres are half as wide again).
+const WHEEL_WIDTH = 0.3 * tireWidthScale(PARAMS);
 
 const round = (x, d = 5) => Math.round(x * 10 ** d) / 10 ** d;
 const r3 = (a) => a.map((x) => round(x));
@@ -75,23 +81,81 @@ function collider(part) {
     return { shape: { type: 'box', half: r3([radius, radius, length / 2]) }, position, rotation: quat(rot), material: 0 };
   }
   if (key.startsWith('sphere:')) return { shape: { type: 'sphere', radius: round(s.x) }, position, rotation: [0, 0, 0, 1], material: 0 };
+  // A body panel (a door skin, a windshield, a wing): a thin convex plate from
+  // its corner points. Vehicle parts take boxes, spheres and capsules, so it
+  // gets the box along its principal axes that holds every vertex.
+  if (key.startsWith('panel:')) return panelBox(part);
   throw new Error(`no collision primitive for ${part.name} (${key})`);
 }
 
+/** Symmetric 3×3 eigenvectors (Jacobi), as columns of a Matrix3-like array. */
+function eigenAxes(c) {
+  const a = [[c[0], c[1], c[2]], [c[1], c[3], c[4]], [c[2], c[4], c[5]]];
+  const v = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+  for (let sweep = 0; sweep < 50; sweep++) {
+    let off = 0;
+    for (let p = 0; p < 3; p++) for (let q = p + 1; q < 3; q++) off += a[p][q] ** 2;
+    if (off < 1e-20) break;
+    for (let p = 0; p < 3; p++) for (let q = p + 1; q < 3; q++) {
+      if (Math.abs(a[p][q]) < 1e-14) continue;
+      const th = 0.5 * Math.atan2(2 * a[p][q], a[q][q] - a[p][p]);
+      const cs = Math.cos(th), sn = Math.sin(th);
+      for (let k = 0; k < 3; k++) { const akp = a[k][p], akq = a[k][q]; a[k][p] = cs * akp - sn * akq; a[k][q] = sn * akp + cs * akq; }
+      for (let k = 0; k < 3; k++) { const apk = a[p][k], aqk = a[q][k]; a[p][k] = cs * apk - sn * aqk; a[q][k] = sn * apk + cs * aqk; }
+      for (let k = 0; k < 3; k++) { const vkp = v[k][p], vkq = v[k][q]; v[k][p] = cs * vkp - sn * vkq; v[k][q] = sn * vkp + cs * vkq; }
+    }
+  }
+  return [0, 1, 2].map((j) => new T.Vector3(v[0][j], v[1][j], v[2][j]).normalize());
+}
+
+function panelBox(part) {
+  const pos = part.geometry.attributes.position;
+  const pts = [];
+  for (let i = 0; i < pos.count; i++) pts.push(new T.Vector3().fromBufferAttribute(pos, i).applyMatrix4(part.matrix));
+  const mean = pts.reduce((m, p) => m.add(p), new T.Vector3()).multiplyScalar(1 / pts.length);
+  const c = [0, 0, 0, 0, 0, 0];
+  for (const p of pts) {
+    const d = p.clone().sub(mean);
+    c[0] += d.x * d.x; c[1] += d.x * d.y; c[2] += d.x * d.z; c[3] += d.y * d.y; c[4] += d.y * d.z; c[5] += d.z * d.z;
+  }
+  let [e0, e1, e2] = eigenAxes(c);
+  if (e0.clone().cross(e1).dot(e2) < 0) e2.negate(); // a rotation, not a reflection
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (const p of pts) {
+    const d = p.clone().sub(mean);
+    [e0, e1, e2].forEach((e, k) => { const t = d.dot(e); lo[k] = Math.min(lo[k], t); hi[k] = Math.max(hi[k], t); });
+  }
+  const centre = mean.clone();
+  [e0, e1, e2].forEach((e, k) => centre.addScaledVector(e, (lo[k] + hi[k]) / 2));
+  const q = new T.Quaternion().setFromRotationMatrix(new T.Matrix4().makeBasis(e0, e1, e2));
+  return {
+    shape: { type: 'box', half: r3([0, 1, 2].map((k) => Math.max((hi[k] - lo[k]) / 2, 0.004))) },
+    position: r3(toRubble(centre.toArray())),
+    rotation: r3(Q_R.clone().multiply(q).normalize().toArray()),
+    material: 0,
+  };
+}
+
 // ---- groups ----
-const cls = exact.parts.map(classify);
-const groupOf = (i) => (cls[i].cls === 'wheel' ? `wheel_${cls[i].corner}` : RUBBLE_PARTS[cls[i].part].name);
+const cls = exact.parts.map((p) => classify(p, MODEL));
+const groupOf = (i) => (cls[i].cls === 'wheel' ? `wheel_${cls[i].corner}` : cls[i].name);
 const indexById = new Map(exact.parts.map((p, i) => [p.id, i]));
 
-const parts = RUBBLE_PARTS.map((p) => ({ name: p.name, role: p.role, mass: 0, colliders: [], members: 0 }));
+const parts = partsFor(cls).map((p) => ({ name: p.name, role: p.role, mass: 0, colliders: [], members: 0 }));
+const partByName = new Map(parts.map((p) => [p.name, p]));
 const wheelMass = Object.fromEntries(CORNERS.map((c) => [c, 0]));
+const trailerParts = [];
 exact.parts.forEach((p, i) => {
   const c = cls[i];
   if (c.cls === 'wheel') {
     wheelMass[c.corner] += p.mass;
     return;
   }
-  const out = parts[c.part];
+  if (c.cls === 'trailer') {
+    trailerParts.push(i);
+    return;
+  }
+  const out = partByName.get(c.name);
   out.mass += p.mass;
   out.members++;
   if (c.collider) out.colliders.push(collider(live.parts[i]));
@@ -179,12 +243,12 @@ const wheels = CORNERS.map((id) => {
 // mounts, so losing them still cuts drive and steering); the rest are rigid
 // bodies on breakable ball joints to the three nearest nodes of what carries
 // them (headlamps on the nose, rear lamps on the rear bumper, else the frame).
-const partMounts = Object.fromEntries(parts.map((p, i) => [p.name, i === 0 ? null : mountOf(p.name)]));
-const graph = buildFrameGraph(liveGeometry, live, exact.parts.map((p) => p.mass), partMounts);
+const partMounts = MODEL !== 'buggy' ? null : Object.fromEntries(parts.map((p, i) => [p.name, i === 0 ? null : mountOf(p.name)]));
+const graph = MODEL !== 'buggy' ? null : buildFrameGraph(liveGeometry, live, exact.parts.map((p) => p.mass), partMounts);
 const CORE_PARTS = ['engine', 'transmission', 'steering_column'];
 const SOFT_GROUPS = ['front_bumper', 'rear_bumper', 'nose'];
 const rigMass = exact.parts.reduce((s, p, i) => s + (cls[i].cls === 'rig' ? p.mass : 0), 0);
-const hybrid = {
+const hybrid = MODEL !== 'buggy' ? null : {
   nodes: graph.nodes,
   beams: graph.beams.map((b) => ({ a: b.a, b: b.b, kind: b.kind, cls: b.cls ?? null, group: b.group ?? null, ...(b.strength ? { strength: Math.round(b.strength) } : {}) })),
   core_nodes: graph.coreNodes,
@@ -201,7 +265,30 @@ const hybrid = {
     return [{ name: p.name, part: i, carrier, nodes, break_force: round(m.break_force / nodes.length, 0) }];
   }),
 };
-console.error(`hybrid frame: ${hybrid.nodes.length} nodes (${round(hybrid.nodes.reduce((s, n) => s + n.mass, 0), 1)} kg), ${hybrid.beams.length} beams, core on ${hybrid.core_nodes.length} nodes, ${hybrid.rigid_parts.length} jointed parts`);
+if (hybrid) console.error(`hybrid frame: ${hybrid.nodes.length} nodes (${round(hybrid.nodes.reduce((s, n) => s + n.mass, 0), 1)} kg), ${hybrid.beams.length} beams, core on ${hybrid.core_nodes.length} nodes, ${hybrid.rigid_parts.length} jointed parts`);
+
+// ---- the semi's trailer: a vehicle of its own, hitched by a ball joint ----
+// Its frame, deck and flatbed parts are one rigid body; its two wheels are
+// raycast wheels on one axle (the leaf springs are the suspension).
+function trailerOf() {
+  const spec = trailerSpec(PARAMS);
+  if (!spec) return null;
+  let mass = 0, wheelM = 0;
+  const colliders = [];
+  for (const i of trailerParts) {
+    if (cls[i].trailerWheel) { wheelM += exact.parts[i].mass; continue; }
+    mass += exact.parts[i].mass;
+    if (cls[i].collider) colliders.push(collider(live.parts[i]));
+  }
+  const y = spec.wheelRadius;
+  return {
+    mass: round(mass, 2),
+    colliders,
+    // Recipe +Z is the rear: Rubble -Z.
+    hitch: r3(toRubble(spec.hitch)),
+    wheels: [1, -1].map((s) => ({ side: s > 0 ? 'l' : 'r', hub: r3(toRubble([-s * spec.halfTrack, y, spec.axleZ])), radius: spec.wheelRadius, width: 0.3, mass: round(wheelM / 2, 2) })),
+  };
+}
 
 function parentOf(i, mount) {
   if (mount.attached_to.includes('frame') || mount.attached_to.length !== 1) return null;
@@ -213,13 +300,16 @@ function parentOf(i, mount) {
 const out = {
   source: {
     recipe: 'vibe-land client/src/vehicles/dune/buggy.mjs (see scenes/dune-buggy/README.md)',
+    model: MODEL,
+    name: vehicleById(MODEL).name,
     parameters: PARAMS,
     strength_profile: STRENGTH_PROFILE_VERSION,
     joint_capacity: 'section-bound (vibe-land real-joint-capacity.mjs)',
     frame: 'Rubble chassis space: +Z forward, +Y up, +X left; origin on the ground at the recipe origin',
     generated_by: 'engine/scenes/dune-buggy/bake-physics.mjs',
   },
-  total_mass: round(exact.parts.reduce((s, p) => s + p.mass, 0), 2),
+  // The vehicle's own mass (a semi's trailer is reported in `trailer`).
+  total_mass: round(exact.parts.reduce((s, p, i) => s + (cls[i].cls === 'trailer' ? 0 : p.mass), 0), 2),
   parts: parts.map((p, i) => {
     const mount = i === 0 ? null : mountOf(p.name);
     if (!p.colliders.length) throw new Error(`${p.name} has no colliders`);
@@ -237,7 +327,8 @@ const out = {
   wheels,
   steering: { max_steer_deg: rig.steering.maxCentreRad * 180 / Math.PI },
   dropped_grazes: dropped,
-  hybrid,
+  ...(hybrid ? { hybrid } : {}),
+  ...(trailerParts.length ? { trailer: trailerOf() } : {}),
 };
 // One record per line (a part, a wheel, a node, a beam): readable diffs when
 // the recipe or a rule changes, without a line per number.

@@ -1009,7 +1009,8 @@ fn raycast_batch_hits_ground_and_misses_sky() {
 
 #[test]
 fn every_preset_settles_drives_and_turns_without_blowing_up() {
-    for desc in presets::all() {
+    // A trailer stands on its own two wheels and a hitch (semi_pulls_its_trailer).
+    for desc in presets::all().into_iter().filter(|d| !d.name.ends_with("_trailer")) {
         let mut sim = world();
         let v = spawn(&mut sim, &desc, 2.0);
         run(&mut sim, 150);
@@ -1238,4 +1239,31 @@ fn bridge_probe_truck_speed() {
         let r = cross_bridge(&presets::monster_truck(), BOLT_BREAK_FORCE, v);
         eprintln!("speed {v}: breaks {}, final {:?} (end_z {:.2}), ride {:.2}", r.breaks.len(), r.chassis, r.end_z, r.ride_y);
     }
+}
+
+#[test]
+fn semi_pulls_its_trailer() {
+    let mut sim = world();
+    let tractor = presets::vibe_semi();
+    let trailer = presets::vibe_semi_trailer();
+    // Both in design space, lifted 0.6 m: each body sits at its own centre of
+    // mass, and the hitch is the same design point in each.
+    let (ov, ot) = (tractor.center_of_mass(), trailer.center_of_mass());
+    let v = sim.add_vehicle(&tractor, [ov[0], ov[1] + 0.6, ov[2]], [0.0, 0.0, 0.0, 1.0]).unwrap();
+    let t = sim.add_vehicle(&trailer, [ot[0], ot[1] + 0.6, ot[2]], [0.0, 0.0, 0.0, 1.0]).unwrap();
+    let (cv, ct) = (sim.vehicle_host().chassis_body(v), sim.vehicle_host().chassis_body(t));
+    let h = glam::Vec3::from_array(presets::VIBE_SEMI_HITCH);
+    sim.add_joint_desc(&engine_schema::JointDesc::ball(cv, ct, h - glam::Vec3::from_array(ov), h - glam::Vec3::from_array(ot)));
+    run(&mut sim, 240);
+    let st = sim.vehicle_state(t);
+    assert_eq!(st.contacts, 2, "trailer on its wheels");
+    let z0 = sim.read_body(ct).position[2];
+    drive(&mut sim, v, throttle(1.0, 0.0), 360);
+    let speed = sim.vehicle_state(v).forward_speed;
+    let tb = sim.read_body(ct);
+    let gap = (glam::Vec3::from_array(sim.read_body(cv).position) - glam::Vec3::from_array(tb.position)).length();
+    eprintln!("semi {speed:.1} m/s, trailer moved {:.1} m, chassis gap {gap:.2} m", tb.position[2] - z0);
+    assert!(speed > 5.0, "the semi pulls ({speed} m/s)");
+    assert!(tb.position[2] - z0 > 10.0, "the trailer follows");
+    assert!((glam::Quat::from_array(tb.orientation) * glam::Vec3::Y).y > 0.9, "upright");
 }
