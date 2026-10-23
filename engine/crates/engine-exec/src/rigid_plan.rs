@@ -632,7 +632,6 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "write_sleep_args",
     "sleep_island_gate",
     "sleep_island_commit",
-    "pose_pack",
 ];
 
 /// Soft-body entries (`soft_step.slang`).

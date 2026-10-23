@@ -406,3 +406,29 @@ fn config_errors_are_explicit() {
     };
     assert!(w.create_body(&BodyDef::default(), &[off_centre]).is_err());
 }
+
+#[test]
+fn dropped_readbacks_are_marked_and_poses_resynchronise() {
+    let mut w = World::new(
+        GpuContext::Default,
+        WorldConfig {
+            readback_frames: 1,
+            backpressure: Backpressure::Drop,
+            ..config(ContactStorage::Persistent)
+        },
+    )
+    .unwrap();
+    let ids = pile(&mut w, 2);
+    for _ in 0..10 {
+        w.step().unwrap();
+    }
+    let frames = w.poll_blocking().unwrap();
+    assert_eq!(frames.len(), 10);
+    assert!(!frames[0].dropped && frames[1..].iter().all(|f| f.dropped && f.moved.is_empty()));
+    let poses = w.read_poses();
+    let bodies = w.sim().download_bodies();
+    assert_eq!(poses.len(), ids.len() + 1);
+    for (id, pose) in poses {
+        assert_eq!(pose.position, bodies[id.index() as usize].position);
+    }
+}
