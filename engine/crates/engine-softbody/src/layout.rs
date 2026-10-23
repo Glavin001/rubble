@@ -2,21 +2,29 @@
 //! `slang/kernels/soft_step.slang`. Every constant here has a twin there.
 //!
 //! ```text
-//! slot 0..7              header (counts, bases, flags, solver settings)
-//! bodyRecBase + 2·s      soft body s: [firstBody, particles, firstBeam, beams], [steer, …]
-//! beamBase + 4·e         beam e: 16 words (BEAM_* below)
+//! slot 0..7              header (counts, bases, flags, solver settings; see SoftHost::write_header)
+//! bodyBase + 3·s         soft body s: [firstBody, particles, firstBeam, beams],
+//!                        [steer, group, core body, ordinal base], [firstTri, tris, δ, 0]
+//! beamBase + 4·e         beam e: 16 words (BW_* below)
 //! groupBase + g          break group g: x ≠ 0 once triggered this step
 //! colorBase + c          colour c: [listStart, listCount, 0, 0]
-//! listBase + i           list entry: [body, adjStart, adjCount, softBody]
-//! adjBase + i/4          adjacency: beam ids, 4 per slot
+//! listBase + i           list entry: [body, adjStart, beams | tris << 16, softBody | flags]
+//! adjBase + i/4          adjacency: beam ids, then triangle ids, 4 per slot
 //! chebBase + 3·i         list entry i: Chebyshev x⁽ⁿ⁻²⁾, x⁽ⁿ⁻¹⁾, last step's velocity
+//! triBase + t            triangle t: [a, b, c, softBody | collide << 8]
+//! triContactBase + 7·t   triangle t's contacts this step: obstacle, then two nodes
+//! nodeSlotBase + 2·o     particle ordinal o: the triangle it touches this step
+//! flagBase + o           particle ordinal o: x ≠ 0 when in a soft contact this step
+//! obstacleBase + k       thin obstacle k (static sphere / capsule): [collider, 0, 0, 0]
+//! aabbBase + 2·s         soft body s bounds this step: min, max
 //! ```
 
 use serde::{Deserialize, Serialize};
 
 pub const HEADER_SLOTS: u32 = 8;
-pub const BODY_STRIDE: u32 = 2;
+pub const BODY_STRIDE: u32 = 3;
 pub const BEAM_STRIDE: u32 = 4;
+pub const TRI_CONTACT_STRIDE: u32 = 7;
 
 /// Beam record words (u32/f32 view of its 4 slots).
 pub const BW_A: usize = 0;
@@ -53,6 +61,11 @@ pub const BEAM_YIELDED: u32 = 1 << 7;
 pub const SOFT_PLASTICITY: u32 = 1;
 pub const SOFT_BREAKING: u32 = 2;
 pub const SOFT_SLEEP_SYNC: u32 = 4;
+/// Node–triangle and triangle–obstacle contacts.
+pub const SOFT_CONTACTS: u32 = 8;
+
+/// List entry flags (word w, above the soft body index).
+pub const ENTRY_CONTACTER: u32 = 1 << 16;
 
 /// Body flag marking a particle (3-DOF node) in `gBodies`.
 pub const BODY_PARTICLE: u32 = 64;
@@ -65,15 +78,26 @@ pub const EVENT_BEAM_BREAK: u32 = 5;
 pub struct SoftCapacity {
     pub max_bodies: u32,
     pub max_beams: u32,
-    /// Particles across all soft bodies (colour-list entries).
+    /// Particles across all soft bodies.
     pub max_particles: u32,
     pub max_colors: u32,
     pub max_groups: u32,
+    pub max_triangles: u32,
+    /// Thin static obstacles (spheres, capsules) tested against soft triangles.
+    pub max_obstacles: u32,
 }
 
 impl Default for SoftCapacity {
     fn default() -> Self {
-        Self { max_bodies: 64, max_beams: 65536, max_particles: 16384, max_colors: 64, max_groups: 4096 }
+        Self {
+            max_bodies: 64,
+            max_beams: 65536,
+            max_particles: 16384,
+            max_colors: 64,
+            max_groups: 4096,
+            max_triangles: 32768,
+            max_obstacles: 64,
+        }
     }
 }
 
@@ -86,6 +110,12 @@ pub struct SoftLayout {
     pub list_base: u32,
     pub adj_base: u32,
     pub cheb_base: u32,
+    pub tri_base: u32,
+    pub tri_contact_base: u32,
+    pub node_slot_base: u32,
+    pub flag_base: u32,
+    pub obstacle_base: u32,
+    pub aabb_base: u32,
     pub total_slots: u32,
 }
 
@@ -97,9 +127,15 @@ impl SoftCapacity {
         let color_base = group_base + self.max_groups;
         let list_base = color_base + self.max_colors;
         let adj_base = list_base + self.max_particles;
-        // Every beam appears in the adjacency of both of its particles.
-        let adj_slots = (2 * self.max_beams).div_ceil(4);
+        // Every beam appears in the adjacency of both particles, every triangle in three.
+        let adj_slots = (2 * self.max_beams + 3 * self.max_triangles).div_ceil(4);
         let cheb_base = adj_base + adj_slots;
+        let tri_base = cheb_base + 3 * self.max_particles;
+        let tri_contact_base = tri_base + self.max_triangles;
+        let node_slot_base = tri_contact_base + TRI_CONTACT_STRIDE * self.max_triangles;
+        let flag_base = node_slot_base + 2 * self.max_particles;
+        let obstacle_base = flag_base + self.max_particles;
+        let aabb_base = obstacle_base + self.max_obstacles;
         SoftLayout {
             body_base,
             beam_base,
@@ -108,7 +144,13 @@ impl SoftCapacity {
             list_base,
             adj_base,
             cheb_base,
-            total_slots: cheb_base + 3 * self.max_particles,
+            tri_base,
+            tri_contact_base,
+            node_slot_base,
+            flag_base,
+            obstacle_base,
+            aabb_base,
+            total_slots: aabb_base + 2 * self.max_bodies,
         }
     }
 
@@ -140,6 +182,11 @@ pub struct SoftSettings {
     pub threshold_scale: f32,
     /// Chebyshev acceleration spectral radius ρ for the particle sweep (0 = off).
     pub chebyshev_rho: f32,
+    /// Node–triangle and triangle–obstacle contacts.
+    pub contacts: bool,
+    /// Penalty stiffness of soft contacts (N/m) and their friction coefficient.
+    pub contact_stiffness: f32,
+    pub contact_friction: f32,
 }
 
 impl Default for SoftSettings {
@@ -155,6 +202,9 @@ impl Default for SoftSettings {
             sleep_sync: true,
             threshold_scale: 1.0,
             chebyshev_rho: 0.9,
+            contacts: true,
+            contact_stiffness: 1.0e7,
+            contact_friction: 0.5,
         }
     }
 }
@@ -168,10 +218,10 @@ mod tests {
         let c = SoftCapacity::default();
         let l = c.layout();
         assert!(l.body_base >= HEADER_SLOTS);
-        assert_eq!(l.beam_base - l.body_base, 2 * c.max_bodies);
+        assert_eq!(l.beam_base - l.body_base, 3 * c.max_bodies);
         assert_eq!(l.group_base - l.beam_base, 4 * c.max_beams);
-        assert_eq!(l.adj_base + (2 * c.max_beams).div_ceil(4), l.cheb_base);
-        assert_eq!(l.cheb_base + 3 * c.max_particles, l.total_slots);
+        assert_eq!(l.adj_base + (2 * c.max_beams + 3 * c.max_triangles).div_ceil(4), l.cheb_base);
+        assert_eq!(l.aabb_base + 2 * c.max_bodies, l.total_slots);
         // The default pool stays well under WebGPU's 128 MiB binding limit.
         assert!(c.bytes() < 128 << 20);
     }

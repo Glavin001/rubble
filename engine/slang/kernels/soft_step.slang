@@ -44,6 +44,10 @@ static const uint BEAM_YIELDED = 128u;
 static const uint SOFT_PLASTICITY = 1u;
 static const uint SOFT_BREAKING = 2u;
 static const uint SOFT_SLEEP_SYNC = 4u;
+static const uint SOFT_CONTACTS = 8u;
+static const uint ENTRY_CONTACTER = 65536u;
+static const uint TRI_CONTACT_STRIDE = 7u;
+static const uint SOFT_NONE = 0xFFFFFFFFu;
 
 static const uint EVENT_BEAM_BREAK = 5u;
 static const uint SOFT_NO_BODY = 0xFFFFFFFFu;
@@ -68,7 +72,19 @@ float softBeta() { return SD(3u).y; }
 float softMinLength() { return SD(3u).z; }
 float softThresholdScale() { return SD(4u).x; }
 float softChebyshevRho() { return SD(4u).z; }
+float softContactStiffness() { return SD(4u).w; }
 uint softChebBase() { return SU(5u).x; }
+uint softTriBase() { return SU(5u).y; }
+uint softTriCount() { return SU(5u).z; }
+uint softTriContactBase() { return SU(5u).w; }
+uint softNodeSlotBase() { return SU(6u).x; }
+uint softFlagBase() { return SU(6u).y; }
+uint softObstacleBase() { return SU(6u).z; }
+uint softObstacleCount() { return SU(6u).w; }
+uint softAabbBase() { return SU(7u).x; }
+uint softParticleTotal() { return SU(7u).y; }
+float softContactFriction() { return SD(7u).z; }
+bool softContactsOn() { return (softFlags() & SOFT_CONTACTS) != 0u; }
 
 struct SoftBeam
 {
@@ -157,10 +173,15 @@ float beamReadout(SoftBeam e, float len, float len0, float h)
 }
 
 // ---------------------------------------------------------------------------
-// Soft body records: [firstBody, particles, firstBeam, beams], [steer, group, core, 0]
+// Soft body records: [firstBody, particles, firstBeam, beams],
+// [steer, group, core, ordinal base], [firstTri, tris, δ, 0]
 // ---------------------------------------------------------------------------
-uint4 softBodyRec(uint s) { return SU(softBodyBase() + 2u * s); }
-float4 softBodyRec1(uint s) { return SD(softBodyBase() + 2u * s + 1u); }
+uint4 softBodyRec(uint s) { return SU(softBodyBase() + 3u * s); }
+float4 softBodyRec1(uint s) { return SD(softBodyBase() + 3u * s + 1u); }
+uint4 softBodyRec2(uint s) { return SU(softBodyBase() + 3u * s + 2u); }
+
+// Ordinal (index across every soft particle) of a particle body.
+uint particleOrdinal(uint s, uint body) { return asuint(softBodyRec1(s).w) + body - softBodyRec(s).x; }
 
 void wakeBody(uint i)
 {
@@ -246,6 +267,7 @@ void soft_begin(uint3 tid : SV_DispatchThreadID)
         }
     }
     if (i < softGroupCount()) gSoftData[softGroupBase() + i] = float4(0, 0, 0, 0);
+    if (i < softParticleTotal()) gSoftData[softFlagBase() + i] = float4(0, 0, 0, 0);
     if (i < softListCount())
     {
         // Particle initial guess (VBD adaptive initialisation): x⁻ + h v + h² g ã,
@@ -271,6 +293,373 @@ void soft_begin(uint3 tid : SV_DispatchThreadID)
             gSoftData[q] = float4(x, 0.0);
             gSoftData[q + 1u] = float4(x, 0.0);
             gSoftData[q + 2u] = float4(b.linearVel, 0.0);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Soft contacts: node–triangle (between soft bodies) and triangle–obstacle
+// (thin static spheres and capsules that would pass between nodes). Detected
+// once per step at the initial guess, normals and barycentrics frozen for the
+// step, the gap re-evaluated every iteration as a penalty ½k·min(C, 0)² with
+// lagged Coulomb friction. Each particle reads only its own slots: a node its
+// node slot, a triangle vertex the slots of its adjacent triangles.
+// ---------------------------------------------------------------------------
+
+// Closest point on triangle abc to p (Ericson 5.1.5); w = barycentrics.
+float3 closestOnTriangle(float3 p, float3 a, float3 b, float3 c, out float3 w)
+{
+    float3 ab = b - a, ac = c - a, ap = p - a;
+    float d1 = dot(ab, ap), d2 = dot(ac, ap);
+    if (d1 <= 0.0 && d2 <= 0.0) { w = float3(1, 0, 0); return a; }
+    float3 bp = p - b;
+    float d3 = dot(ab, bp), d4 = dot(ac, bp);
+    if (d3 >= 0.0 && d4 <= d3) { w = float3(0, 1, 0); return b; }
+    float vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0)
+    {
+        float v = d1 / (d1 - d3);
+        w = float3(1.0 - v, v, 0.0);
+        return a + v * ab;
+    }
+    float3 cp = p - c;
+    float d5 = dot(ab, cp), d6 = dot(ac, cp);
+    if (d6 >= 0.0 && d5 <= d6) { w = float3(0, 0, 1); return c; }
+    float vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0)
+    {
+        float t = d2 / (d2 - d6);
+        w = float3(1.0 - t, 0.0, t);
+        return a + t * ac;
+    }
+    float va = d3 * d6 - d5 * d4;
+    if (va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0)
+    {
+        float t = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        w = float3(0.0, 1.0 - t, t);
+        return b + t * (c - b);
+    }
+    float denom = 1.0 / (va + vb + vc);
+    float v = vb * denom, u = vc * denom;
+    w = float3(1.0 - v - u, v, u);
+    return a + ab * v + ac * u;
+}
+
+// Closest points of segments p1q1 and p2q2 (Ericson 5.1.9): s, t parameters.
+void closestSegSeg(float3 p1, float3 q1, float3 p2, float3 q2, out float s, out float t)
+{
+    float3 d1 = q1 - p1, d2 = q2 - p2, r = p1 - p2;
+    float a = dot(d1, d1), e = dot(d2, d2), f = dot(d2, r);
+    if (a <= 1e-12 && e <= 1e-12) { s = 0.0; t = 0.0; return; }
+    if (a <= 1e-12) { s = 0.0; t = clamp(f / e, 0.0, 1.0); return; }
+    float c = dot(d1, r);
+    if (e <= 1e-12) { t = 0.0; s = clamp(-c / a, 0.0, 1.0); return; }
+    float b = dot(d1, d2);
+    float denom = a * e - b * b;
+    s = denom > 1e-12 ? clamp((b * f - c * e) / denom, 0.0, 1.0) : 0.0;
+    t = (b * s + f) / e;
+    if (t < 0.0) { t = 0.0; s = clamp(-c / a, 0.0, 1.0); }
+    else if (t > 1.0) { t = 1.0; s = clamp((b - c) / a, 0.0, 1.0); }
+}
+
+// Closest points between segment p0p1 and triangle abc: q on the triangle
+// (barycentrics w), cs on the segment.
+void closestSegTriangle(float3 p0, float3 p1, float3 a, float3 b, float3 c, out float3 q, out float3 cs, out float3 w)
+{
+    float best = 1e30;
+    float3 wq;
+    float3 qq = closestOnTriangle(p0, a, b, c, wq);
+    best = dot(qq - p0, qq - p0); q = qq; cs = p0; w = wq;
+    qq = closestOnTriangle(p1, a, b, c, wq);
+    float d = dot(qq - p1, qq - p1);
+    if (d < best) { best = d; q = qq; cs = p1; w = wq; }
+    float3 ea[3] = { a, b, c };
+    float3 eb[3] = { b, c, a };
+    [unroll]
+    for (uint k = 0u; k < 3u; k++)
+    {
+        float s, t;
+        closestSegSeg(p0, p1, ea[k], eb[k], s, t);
+        float3 x = p0 + (p1 - p0) * s;
+        float3 y = ea[k] + (eb[k] - ea[k]) * t;
+        d = dot(x - y, x - y);
+        if (d < best)
+        {
+            best = d; q = y; cs = x;
+            w = k == 0u ? float3(1.0 - t, t, 0.0) : (k == 1u ? float3(0.0, 1.0 - t, t) : float3(t, 0.0, 1.0 - t));
+        }
+    }
+    // The segment piercing the triangle.
+    float3 n = cross(b - a, c - a);
+    float d0 = dot(p0 - a, n), d1 = dot(p1 - a, n);
+    if (d0 * d1 < 0.0)
+    {
+        float3 x = p0 + (p1 - p0) * (d0 / (d0 - d1));
+        float3 wx;
+        float3 qx = closestOnTriangle(x, a, b, c, wx);
+        if (dot(qx - x, qx - x) < 1e-10) { q = qx; cs = x; w = wx; }
+    }
+}
+
+uint triNode(uint t, uint k) { return SU(softTriBase() + t)[k]; }
+
+// Per soft body: bounds of its particles at the initial guess, padded by this
+// step's travel, for culling contact pairs.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void soft_bounds(uint3 tid : SV_DispatchThreadID)
+{
+    uint s = dispatchIndex(tid);
+    if (s >= softBodyCount()) return;
+    uint4 r = softBodyRec(s);
+    float3 mn = float3(1e30, 1e30, 1e30), mx = float3(-1e30, -1e30, -1e30);
+    float travel = 0.0;
+    for (uint k = 0u; k < r.y; k++)
+    {
+        BodyState b = gBodies[r.x + k];
+        mn = min(mn, b.position);
+        mx = max(mx, b.position);
+        travel = max(travel, length(b.position - b.initialPos));
+    }
+    float pad = 2.0 * travel + 0.1;
+    gSoftData[softAabbBase() + 2u * s] = float4(mn - pad, 0.0);
+    gSoftData[softAabbBase() + 2u * s + 1u] = float4(mx + pad, 0.0);
+}
+
+bool softAabbHas(uint s, float3 p)
+{
+    float3 mn = SD(softAabbBase() + 2u * s).xyz, mx = SD(softAabbBase() + 2u * s + 1u).xyz;
+    return all(p >= mn) && all(p <= mx);
+}
+
+bool softAabbOverlaps(uint s, float3 lo, float3 hi)
+{
+    float3 mn = SD(softAabbBase() + 2u * s).xyz, mx = SD(softAabbBase() + 2u * s + 1u).xyz;
+    return all(lo <= mx) && all(hi >= mn);
+}
+
+// Per solved particle: the closest other-vehicle collision triangle it is in
+// front of (or slightly behind) within the collision range.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void soft_collide_nodes(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (i >= softListCount()) return;
+    uint4 ent = SU(softListBase() + i);
+    uint body = ent.x;
+    uint sb = ent.w & 0xFFFFu;
+    uint ns = softNodeSlotBase() + 2u * particleOrdinal(sb, body);
+    gSoftData[ns] = float4(0, 0, 0, asfloat(SOFT_NONE));
+    if (!softContactsOn() || (ent.w & ENTRY_CONTACTER) == 0u) return;
+    BodyState b = gBodies[body];
+    if (!bodyIsDynamic(b) || bodyIsSleeping(b)) return;
+    float3 x = b.position, x0 = b.initialPos;
+    float bestScore = 1e30;
+    uint bestTri = SOFT_NONE;
+    float3 bestN = float3(0, 0, 0), bestW = float3(0, 0, 0);
+    float bestDelta = 0.0;
+    uint nb = softBodyCount();
+    for (uint s2 = 0u; s2 < nb; s2++)
+    {
+        if (s2 == sb || !softAabbHas(s2, x)) continue;
+        uint4 r2 = softBodyRec2(s2);
+        float delta = asfloat(r2.z);
+        for (uint t = r2.x; t < r2.x + r2.y; t++)
+        {
+            uint4 tri = SU(softTriBase() + t);
+            if (((tri.w >> 8) & 1u) == 0u) continue;
+            BodyState ba = gBodies[tri.x], bb = gBodies[tri.y], bc = gBodies[tri.z];
+            float3 a = ba.position, bpos = bb.position, c = bc.position;
+            float3 nr = cross(bpos - a, c - a);
+            float area = length(nr);
+            if (area < 1e-8) continue;
+            float3 n = nr / area;
+            float d = dot(x - a, n);
+            float reach = delta + length(x - x0) + 0.05;
+            if (d > reach || d < -0.3) continue;
+            // Step-start side: the node must come from the front face.
+            float3 a0 = ba.initialPos, b0 = bb.initialPos, c0 = bc.initialPos;
+            float3 n0 = cross(b0 - a0, c0 - a0);
+            float l0 = length(n0);
+            float d0 = l0 > 1e-8 ? dot(x0 - a0, n0 / l0) : d;
+            if (d0 < -0.05) continue;
+            float3 w;
+            float3 q = closestOnTriangle(x - n * d, a, bpos, c, w);
+            // Prism test: the node projects inside the triangle.
+            if (dot(q - (x - n * d), q - (x - n * d)) > 1e-6) continue;
+            float score = abs(d);
+            if (score < bestScore)
+            {
+                bestScore = score; bestTri = t; bestN = n; bestW = w; bestDelta = delta;
+            }
+        }
+    }
+    if (bestTri == SOFT_NONE) return;
+    gSoftData[ns] = float4(bestN, asfloat(bestTri));
+    gSoftData[ns + 1u] = float4(bestW, bestDelta);
+    gSoftData[softFlagBase() + particleOrdinal(sb, body)] = float4(1, 0, 0, 0);
+}
+
+// Per collision triangle: its deepest thin obstacle, and the (up to two) nodes
+// that chose it in soft_collide_nodes (the triangle side of their contacts).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void soft_collide_tris(uint3 tid : SV_DispatchThreadID)
+{
+    uint t = dispatchIndex(tid);
+    if (t >= softTriCount()) return;
+    uint tc = softTriContactBase() + TRI_CONTACT_STRIDE * t;
+    gSoftData[tc] = float4(0, 0, 0, asfloat(SOFT_NONE));
+    gSoftData[tc + 3u] = float4(0, 0, 0, asfloat(SOFT_NONE));
+    gSoftData[tc + 5u] = float4(0, 0, 0, asfloat(SOFT_NONE));
+    if (!softContactsOn()) return;
+    uint4 tri = SU(softTriBase() + t);
+    if (((tri.w >> 8) & 1u) == 0u) return;
+    uint sb = tri.w & 255u;
+    BodyState ba = gBodies[tri.x], bb = gBodies[tri.y], bc = gBodies[tri.z];
+    if (bodyIsSleeping(ba) && bodyIsSleeping(bb) && bodyIsSleeping(bc)) return;
+    float3 a = ba.position, b = bb.position, c = bc.position;
+    float delta = asfloat(softBodyRec2(sb).z);
+    float travel = max(max(length(a - ba.initialPos), length(b - bb.initialPos)), length(c - bc.initialPos));
+    float3 lo = min(min(a, b), c), hi = max(max(a, b), c);
+    bool marked = false;
+
+    // Thin obstacles.
+    float bestGap = 1e30;
+    uint nObs = softObstacleCount();
+    for (uint k = 0u; k < nObs; k++)
+    {
+        uint ci = SU(softObstacleBase() + k).x;
+        Collider col = gColliders[ci];
+        BodyState ob = gBodies[col.body];
+        float r = col.params.x;
+        float3 q, cs, w;
+        if (col.shape == SHAPE_SPHERE)
+        {
+            cs = transformPoint(ob.position, ob.orientation, col.localPos);
+            q = closestOnTriangle(cs, a, b, c, w);
+        }
+        else if (col.shape == SHAPE_CAPSULE)
+        {
+            float3 ax = quatRotate(quatMul(ob.orientation, col.localRot), float3(0.0, col.params.y, 0.0));
+            float3 mid = transformPoint(ob.position, ob.orientation, col.localPos);
+            closestSegTriangle(mid - ax, mid + ax, a, b, c, q, cs, w);
+        }
+        else continue;
+        float3 dv = q - cs;
+        float dist = length(dv);
+        float gap = dist - r;
+        if (gap > delta + travel + 0.05 || gap >= bestGap) continue;
+        float3 n = dist > 1e-5 ? dv / dist : normalize(cross(b - a, c - a));
+        bestGap = gap;
+        gSoftData[tc] = float4(n, asfloat(ci));
+        gSoftData[tc + 1u] = float4(cs + n * r, 0.0);
+        gSoftData[tc + 2u] = float4(w, delta);
+        marked = true;
+    }
+
+    // Nodes of other soft bodies that chose this triangle.
+    uint found = 0u;
+    uint nb = softBodyCount();
+    for (uint s2 = 0u; s2 < nb && found < 2u; s2++)
+    {
+        if (s2 == sb || !softAabbOverlaps(s2, lo - 0.3, hi + 0.3)) continue;
+        uint4 r2 = softBodyRec(s2);
+        uint ordBase = asuint(softBodyRec1(s2).w);
+        for (uint k = 0u; k < r2.y && found < 2u; k++)
+        {
+            uint ns = softNodeSlotBase() + 2u * (ordBase + k);
+            float4 s0 = SD(ns);
+            if (asuint(s0.w) != t) continue;
+            float4 s1 = SD(ns + 1u);
+            gSoftData[tc + 3u + 2u * found] = float4(s0.xyz, asfloat(r2.x + k));
+            gSoftData[tc + 4u + 2u * found] = s1;
+            found++;
+            marked = true;
+        }
+    }
+    if (marked)
+    {
+        uint ob = asuint(softBodyRec1(sb).w) - softBodyRec(sb).x;
+        gSoftData[softFlagBase() + ob + tri.x] = float4(1, 0, 0, 0);
+        gSoftData[softFlagBase() + ob + tri.y] = float4(1, 0, 0, 0);
+        gSoftData[softFlagBase() + ob + tri.z] = float4(1, 0, 0, 0);
+    }
+}
+
+// Penalty contact on one particle: Jacobian coefficient s (1 for a node, ±w for a
+// triangle vertex), gap C along n, tangential relative travel u this step.
+void softContactTerm(inout float3 g, inout float3x3 H, float s, float C, float3 n, float3 u)
+{
+    if (C >= 0.0) return;
+    float k = softContactStiffness();
+    float3x3 nn = float3x3(n * n.x, n * n.y, n * n.z);
+    g += n * (s * k * C);
+    H += nn * (s * s * k);
+    // Lagged Coulomb friction: a tangential spring capped at μ·|f_n| (secant stiffness).
+    float3 ut = u - n * dot(u, n);
+    float ul = length(ut);
+    if (ul < 1e-9) { H += (float3x3(1, 0, 0, 0, 1, 0, 0, 0, 1) - nn) * (s * s * k); return; }
+    float cap = softContactFriction() * k * (-C);
+    float kt = min(k, cap / ul);
+    g += ut * (s * kt);
+    H += (float3x3(1, 0, 0, 0, 1, 0, 0, 0, 1) - nn) * (s * s * kt);
+}
+
+float3 triTravel(uint4 tri, float3 w)
+{
+    BodyState a = gBodies[tri.x], b = gBodies[tri.y], c = gBodies[tri.z];
+    return w.x * (a.position - a.initialPos) + w.y * (b.position - b.initialPos) + w.z * (c.position - c.initialPos);
+}
+
+float3 triPoint(uint4 tri, float3 w)
+{
+    return w.x * gBodies[tri.x].position + w.y * gBodies[tri.y].position + w.z * gBodies[tri.z].position;
+}
+
+// Soft contact terms of one particle (node side and triangle-vertex side).
+void softContactsFor(uint body, uint sb, float3 x, float3 x0, uint triStart, uint triCount, inout float3 g, inout float3x3 H)
+{
+    if (!softContactsOn()) return;
+    uint ns = softNodeSlotBase() + 2u * particleOrdinal(sb, body);
+    float4 s0 = SD(ns);
+    uint t = asuint(s0.w);
+    if (t != SOFT_NONE)
+    {
+        float4 s1 = SD(ns + 1u);
+        uint4 tri = SU(softTriBase() + t);
+        float C = dot(s0.xyz, x - triPoint(tri, s1.xyz)) - s1.w;
+        softContactTerm(g, H, 1.0, C, s0.xyz, (x - x0) - triTravel(tri, s1.xyz));
+    }
+    uint adj = softAdjBase();
+    for (uint k = 0u; k < triCount; k++)
+    {
+        uint wi = triStart + k;
+        uint tt = SU(adj + (wi >> 2))[wi & 3u];
+        uint4 tri = SU(softTriBase() + tt);
+        uint tc = softTriContactBase() + TRI_CONTACT_STRIDE * tt;
+        // This particle's weight in the triangle.
+        uint j = tri.x == body ? 0u : (tri.y == body ? 1u : 2u);
+        float4 o0 = SD(tc);
+        if (asuint(o0.w) != SOFT_NONE)
+        {
+            float4 o2 = SD(tc + 2u);
+            float wj = o2[j];
+            float C = dot(o0.xyz, triPoint(tri, o2.xyz) - SD(tc + 1u).xyz) - o2.w;
+            softContactTerm(g, H, wj, C, o0.xyz, triTravel(tri, o2.xyz));
+        }
+        [unroll]
+        for (uint m = 0u; m < 2u; m++)
+        {
+            float4 c0 = SD(tc + 3u + 2u * m);
+            uint node = asuint(c0.w);
+            if (node == SOFT_NONE) continue;
+            float4 c1 = SD(tc + 4u + 2u * m);
+            BodyState nb = gBodies[node];
+            float C = dot(c0.xyz, nb.position - triPoint(tri, c1.xyz)) - c1.w;
+            float3 u = (nb.position - nb.initialPos) - triTravel(tri, c1.xyz);
+            softContactTerm(g, H, -c1[j], C, c0.xyz, u);
         }
     }
 }
@@ -305,7 +694,8 @@ void soft_primal(uint3 tid : SV_DispatchThreadID)
     float3 xa = b.position;
     float3 xa0 = b.initialPos;
     uint adj = softAdjBase();
-    for (uint k = 0u; k < ent.z; k++)
+    uint nBeams = ent.z & 0xFFFFu;
+    for (uint k = 0u; k < nBeams; k++)
     {
         uint w = ent.y + k;
         uint e = SU(adj + (w >> 2))[w & 3u];
@@ -328,6 +718,7 @@ void soft_primal(uint3 tid : SV_DispatchThreadID)
         H += nn * (d2 - lat);
         H[0][0] += lat; H[1][1] += lat; H[2][2] += lat;
     }
+    softContactsFor(body, ent.w & 0xFFFFu, xa, xa0, ent.y + nBeams, ent.z >> 16, g, H);
 
     // Closed-form 3×3 solve (adjugate); skip near-singular blocks (VBD).
     float3 c0 = float3(H[0][0], H[1][0], H[2][0]);
@@ -364,7 +755,9 @@ void soft_chebyshev(uint3 tid : SV_DispatchThreadID)
     float3 prev1 = SD(q + 1u).xyz;
     BodyState b = gBodies[body];
     float3 x = b.position;
-    if (it > 0u && bodyIsDynamic(b) && !bodyIsSleeping(b) && !wakePending(b)
+    uint4 ent = SU(softListBase() + i);
+    bool soft = softContactsOn() && SD(softFlagBase() + particleOrdinal(ent.w & 0xFFFFu, body)).x != 0.0;
+    if (it > 0u && bodyIsDynamic(b) && !bodyIsSleeping(b) && !wakePending(b) && !soft
         && SOLVE_INDEX(body + 1u) == SOLVE_INDEX(body))
     {
         float rho2 = rho * rho;

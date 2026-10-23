@@ -45,6 +45,12 @@ pub struct SoftEntry {
     pub node_collider: Vec<u32>,
     pub colors: Vec<u32>,
     pub adjacency: Vec<Vec<u32>>,
+    /// Triangles (relative) touching each node.
+    pub tri_adjacency: Vec<Vec<u32>>,
+    pub first_tri: u32,
+    pub tris: u32,
+    /// Ordinal of the first particle across all soft bodies.
+    pub ordinal_base: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -54,6 +60,10 @@ pub struct SoftHost {
     pub entries: Vec<SoftEntry>,
     beams_used: u32,
     groups_used: u32,
+    tris_used: u32,
+    particles_used: u32,
+    /// Thin static obstacles (collider indices) tested against soft triangles.
+    obstacles: Vec<u32>,
     /// Steering input per soft body (hydros).
     steer: Vec<f32>,
     pub dirty: bool,
@@ -70,11 +80,28 @@ pub struct SoftCounts {
     pub groups: u32,
     /// Solved (non-fixed) particles: colour-list entries.
     pub particles: u32,
+    /// Every particle (fixed included): ordinals.
+    pub particles_total: u32,
+    pub triangles: u32,
+    pub obstacles: u32,
+    /// Soft contact passes run (contacts on and something to collide).
+    pub contacts: bool,
 }
 
 impl SoftHost {
     pub fn new(capacity: SoftCapacity) -> Self {
-        Self { capacity, settings: SoftSettings::default(), entries: Vec::new(), beams_used: 0, groups_used: 0, steer: Vec::new(), dirty: true }
+        Self {
+            capacity,
+            settings: SoftSettings::default(),
+            entries: Vec::new(),
+            beams_used: 0,
+            groups_used: 0,
+            tris_used: 0,
+            particles_used: 0,
+            obstacles: Vec::new(),
+            steer: Vec::new(),
+            dirty: true,
+        }
     }
 
     pub fn counts(&self) -> SoftCounts {
@@ -94,6 +121,10 @@ impl SoftHost {
             max_color: per.iter().copied().max().unwrap_or(0),
             groups: self.groups_used,
             particles: self.list_len(),
+            particles_total: self.particles_used,
+            triangles: self.tris_used,
+            obstacles: self.obstacles.len() as u32,
+            contacts: self.settings.contacts && self.tris_used > 0 && (self.entries.len() > 1 || !self.obstacles.is_empty()),
         }
     }
 
@@ -119,9 +150,11 @@ impl SoftHost {
         if self.beams_used + desc.beams.len() as u32 > self.capacity.max_beams {
             return Err("beam capacity exhausted".into());
         }
-        let particles_used: u32 = self.entries.iter().map(|e| e.particles).sum();
-        if particles_used + desc.nodes.len() as u32 > self.capacity.max_particles {
+        if self.particles_used + desc.nodes.len() as u32 > self.capacity.max_particles {
             return Err("particle capacity exhausted".into());
+        }
+        if self.tris_used + desc.triangles.len() as u32 > self.capacity.max_triangles {
+            return Err("triangle capacity exhausted".into());
         }
         let place = Placement { position: Vec3::from_array(position), rotation: Quat::from_array(rotation).normalize() };
         let group = -(1000 + s as i32) as i16;
@@ -164,6 +197,30 @@ impl SoftHost {
             .collect();
         backend.write_soft_slots(l.beam_base + BEAM_STRIDE * first_beam, &words);
         self.beams_used += packed.beams.len() as u32;
+        // Triangles (static): global particle indices, owner and collide flag.
+        let first_tri = self.tris_used;
+        let mut tri_adjacency = vec![Vec::new(); desc.nodes.len()];
+        let tri_slots: Vec<Slot> = desc
+            .triangles
+            .iter()
+            .enumerate()
+            .map(|(t, tri)| {
+                for &n in &tri.nodes {
+                    tri_adjacency[n as usize].push(t as u32);
+                }
+                [first_body + tri.nodes[0], first_body + tri.nodes[1], first_body + tri.nodes[2], s | (u32::from(tri.collision) << 8)]
+            })
+            .collect();
+        if !tri_slots.is_empty() {
+            backend.write_soft_slots(l.tri_base + first_tri, &tri_slots);
+        }
+        self.tris_used += tri_slots.len() as u32;
+        let ordinal_base = self.particles_used;
+        self.particles_used += desc.nodes.len() as u32;
+        // Node contact slots start empty (fixed particles are never rewritten).
+        let none = [[0u32, 0, 0, u32::MAX], [0, 0, 0, 0]];
+        let slots: Vec<Slot> = (0..desc.nodes.len()).flat_map(|_| none).collect();
+        backend.write_soft_slots(l.node_slot_base + 2 * ordinal_base, &slots);
 
         // Rigid core (stage 1): wheels and drivetrain on a frame proxy.
         let mut core = None;
@@ -213,6 +270,10 @@ impl SoftHost {
             node_collider: packed.node_collider,
             colors: packed.colors,
             adjacency: packed.adjacency,
+            tri_adjacency,
+            first_tri,
+            tris: desc.triangles.len() as u32,
+            ordinal_base,
         });
         self.steer.push(0.0);
         self.upload_topology(backend);
@@ -234,7 +295,8 @@ impl SoftHost {
         let l = self.capacity.layout();
         let rec = [
             [e.first_body, e.particles, e.first_beam, e.beams],
-            [self.steer[s as usize].to_bits(), e.group as i32 as u32, e.core.map_or(u32::MAX, |c| c.1), 0],
+            [self.steer[s as usize].to_bits(), e.group as i32 as u32, e.core.map_or(u32::MAX, |c| c.1), e.ordinal_base],
+            [e.first_tri, e.tris, e.desc.collision_range.max(0.005).to_bits(), 0],
         ];
         backend.write_soft_slots(l.body_base + BODY_STRIDE * s, &rec);
     }
@@ -243,17 +305,20 @@ impl SoftHost {
         let l = self.capacity.layout();
         let c = self.counts();
         let st = &self.settings;
-        let flags = u32::from(st.plasticity) * SOFT_PLASTICITY | u32::from(st.breaking) * SOFT_BREAKING | u32::from(st.sleep_sync) * SOFT_SLEEP_SYNC;
+        let flags = u32::from(st.plasticity) * SOFT_PLASTICITY
+            | u32::from(st.breaking) * SOFT_BREAKING
+            | u32::from(st.sleep_sync) * SOFT_SLEEP_SYNC
+            | u32::from(c.contacts) * SOFT_CONTACTS;
         let list_count: u32 = self.list_len();
         let header: [Slot; 8] = [
             [c.bodies, c.beams, c.colors, list_count],
             [l.body_base, l.beam_base, l.list_base, l.adj_base],
             [l.color_base, l.group_base, c.groups + 1, flags],
             [st.damping_scale.to_bits(), st.beta.to_bits(), st.min_length.to_bits(), st.hard_ratio.to_bits()],
-            [st.threshold_scale.to_bits(), st.ramp_start.to_bits(), st.chebyshev_rho.to_bits(), 0],
-            [l.cheb_base, 0, 0, 0],
-            [0; 4],
-            [0; 4],
+            [st.threshold_scale.to_bits(), st.ramp_start.to_bits(), st.chebyshev_rho.to_bits(), st.contact_stiffness.to_bits()],
+            [l.cheb_base, l.tri_base, c.triangles, l.tri_contact_base],
+            [l.node_slot_base, l.flag_base, l.obstacle_base, c.obstacles],
+            [l.aabb_base, c.particles_total, st.contact_friction.to_bits(), 0],
         ];
         backend.write_soft_slots(0, &header);
     }
@@ -278,7 +343,12 @@ impl SoftHost {
                 for &b in &e.adjacency[i] {
                     adj.push(e.first_beam + b);
                 }
-                lists[c as usize].push([e.first_body + i as u32, start, e.adjacency[i].len() as u32, s as u32]);
+                for &t in &e.tri_adjacency[i] {
+                    adj.push(e.first_tri + t);
+                }
+                let counts = e.adjacency[i].len() as u32 | (e.tri_adjacency[i].len() as u32) << 16;
+                let flags = if e.desc.nodes[i].contacter && e.desc.nodes[i].collision { ENTRY_CONTACTER } else { 0 };
+                lists[c as usize].push([e.first_body + i as u32, start, counts, s as u32 | flags]);
             }
         }
         let mut color_slots = Vec::with_capacity(lists.len());
@@ -310,6 +380,19 @@ impl SoftHost {
         self.dirty = true;
     }
 
+    /// Register a thin static obstacle (sphere or capsule collider) that soft
+    /// triangles collide with (poles and bollards narrower than node spacing).
+    pub fn add_obstacle(&mut self, backend: &mut impl SoftBackend, collider: u32) -> Result<(), String> {
+        if self.obstacles.len() as u32 >= self.capacity.max_obstacles {
+            return Err("obstacle capacity exhausted".into());
+        }
+        let l = self.capacity.layout();
+        backend.write_soft_slots(l.obstacle_base + self.obstacles.len() as u32, &[[collider, 0, 0, 0]]);
+        self.obstacles.push(collider);
+        self.write_header(backend);
+        Ok(())
+    }
+
     /// Current beam records of a soft body (GPU readback).
     pub fn read_beams(&self, backend: &impl SoftBackend, h: SoftHandle) -> Vec<Beam> {
         let e = &self.entries[h.0 as usize];
@@ -330,4 +413,29 @@ impl SoftHost {
     pub fn entry(&self, h: SoftHandle) -> &SoftEntry {
         &self.entries[h.0 as usize]
     }
+}
+
+/// A beam that broke (from the shared event ring, `EVENT_BEAM_BREAK` records).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BeamBreak {
+    pub beam: u32,
+    pub force: f32,
+    pub soft_body: u32,
+}
+
+/// Decode beam breaks from the event ring words (cursor, then 4-word records)
+/// since `seen`; returns how many records were overwritten before being read.
+pub fn decode_beam_breaks(words: &[u32], seen: &mut u32, capacity: u32, out: &mut Vec<BeamBreak>) -> u32 {
+    let cursor = words[0];
+    let lost = cursor.wrapping_sub(*seen).saturating_sub(capacity);
+    let mut n = seen.wrapping_add(lost);
+    while n != cursor {
+        let r = 4 + 4 * (n % capacity) as usize;
+        if words[r] == EVENT_BEAM_BREAK {
+            out.push(BeamBreak { beam: words[r + 1], force: f32::from_bits(words[r + 2]), soft_body: words[r + 3] });
+        }
+        n = n.wrapping_add(1);
+    }
+    *seen = cursor;
+    lost
 }

@@ -7,14 +7,19 @@ use glam::Vec3;
 fn main() {
     let args: Vec<f32> = std::env::args().skip(1).map(|a| a.parse().unwrap()).collect();
     let (speed, hz, iters) = (args.first().copied().unwrap_or(15.0), args.get(1).copied().unwrap_or(240.0), args.get(2).copied().unwrap_or(12.0) as u32);
-    let d = load_truck(&car_truck(&CarParams::default()));
+    let deform = args.get(4).copied().unwrap_or(CarParams::default().deform);
+    let d = load_truck(&car_truck(&CarParams { deform, ..Default::default() }));
     let mut s = CpuSoft::from_desc(&d, Vec3::new(0.0, 0.05, 0.0), Vec3::new(0.0, 0.0, speed));
     s.h = 1.0 / hz;
     s.iterations = iters;
     s.chebyshev_rho = args.get(3).copied().unwrap_or(0.0);
     s.planes.push(Plane { normal: Vec3::Y, offset: 0.0, friction: 0.8 });
     s.planes.push(Plane { normal: -Vec3::Z, offset: -3.0, friction: 0.5 });
-    let len = |s: &CpuSoft| s.x.iter().map(|p| p.z).fold(f32::MIN, f32::max) - s.x.iter().map(|p| p.z).fold(f32::MAX, f32::min);
+    let n = CarParams::default().stations;
+    let len = |s: &CpuSoft| {
+        let c = |k: usize| (0..6).map(|j| s.x[k * 6 + j]).sum::<Vec3>() / 6.0;
+        (c(n - 1) - c(0)).length()
+    };
     let l0 = len(&s);
     for k in 0..(hz as usize) {
         let r = s.step();

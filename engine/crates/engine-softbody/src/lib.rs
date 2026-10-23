@@ -20,6 +20,6 @@ pub mod truck;
 pub mod procedural;
 
 pub use desc::*;
-pub use host::{SoftBackend, SoftCounts, SoftEntry, SoftHandle, SoftHost};
+pub use host::{decode_beam_breaks, BeamBreak, SoftBackend, SoftCounts, SoftEntry, SoftHandle, SoftHost};
 pub use layout::*;
 pub use pack::SpawnOptions;

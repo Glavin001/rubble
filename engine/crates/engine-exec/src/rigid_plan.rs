@@ -113,6 +113,11 @@ pub struct SoftCounts {
     pub particles: u32,
     /// Chebyshev acceleration enabled.
     pub chebyshev: bool,
+    /// Every particle (fixed included).
+    pub particles_total: u32,
+    pub triangles: u32,
+    /// Node–triangle / triangle–obstacle contact passes.
+    pub contacts: bool,
 }
 
 /// JP rounds dispatched this step; later rounds run in `color_bodies_tail`.
@@ -411,8 +416,14 @@ pub fn encode_step(
         e.d("vehicle_prepare", u64::from(i.vehicle_count));
     }
     if soft {
-        let n = i.soft.beams.max(i.soft.groups).max(i.soft.particles);
+        let n = i.soft.beams.max(i.soft.groups).max(i.soft.particles).max(i.soft.particles_total);
         e.d("soft_begin", u64::from(n.max(1)));
+        if i.soft.contacts {
+            // Soft contacts at the initial guess, frozen for the step.
+            e.d("soft_bounds", u64::from(i.soft.bodies));
+            e.d("soft_collide_nodes", u64::from(i.soft.particles.max(1)));
+            e.d("soft_collide_tris", u64::from(i.soft.triangles.max(1)));
+        }
     }
 
     if m.compact_contacts && !m.fused_persistence && !early_pair_pack {
@@ -563,6 +574,9 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
 pub const SOFT_ENTRIES: &[&str] = &[
     "soft_wake",
     "soft_begin",
+    "soft_bounds",
+    "soft_collide_nodes",
+    "soft_collide_tris",
     "soft_primal",
     "soft_chebyshev",
     "soft_dual",

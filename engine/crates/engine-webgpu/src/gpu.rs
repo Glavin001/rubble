@@ -148,6 +148,8 @@ pub struct WgpuSim {
     soft: Option<SoftHost>,
     /// Event ring read cursor (`poll_joint_breaks`).
     events_seen: u32,
+    /// Event ring read cursor (`poll_beam_breaks`).
+    beam_events_seen: u32,
 }
 
 /// Must agree with Slang dispatchIndex: 2^21 threads per row, with no truncation.
@@ -616,6 +618,7 @@ impl WgpuSim {
             vehicles: Some(VehicleHost::new(vehicle_capacity, aabb_tail)),
             soft: None,
             events_seen: 0,
+            beam_events_seen: 0,
         };
         // Kernel fixtures in the unit tests set the modes they exercise on top
         // of the pre-P0 controls; integration tests run the shipped defaults.
@@ -1798,6 +1801,9 @@ impl WgpuSim {
             groups: c.groups + 1,
             particles: c.particles,
             chebyshev: h.settings.chebyshev_rho > 0.0,
+            particles_total: c.particles_total,
+            triangles: c.triangles,
+            contacts: c.contacts,
         }
     }
 
@@ -1827,6 +1833,15 @@ impl WgpuSim {
         let mut soft = self.soft.take().expect("soft host");
         soft.set_settings(self, settings);
         self.soft = Some(soft);
+    }
+
+    /// Register a thin static obstacle (sphere or capsule collider) that soft
+    /// vehicle triangles collide with.
+    pub fn add_soft_obstacle(&mut self, collider: u32) -> Result<(), String> {
+        let mut soft = self.soft.take().expect("soft host");
+        let r = soft.add_obstacle(self, collider);
+        self.soft = Some(soft);
+        r
     }
 
     /// Steering input of a soft vehicle's hydros (−1..1).
@@ -1939,6 +1954,21 @@ impl WgpuSim {
         let lost = decode_joint_breaks(&words, &mut self.events_seen, &mut out);
         if lost > 0 {
             eprintln!("event ring overflow: {lost} events lost");
+        }
+        out
+    }
+
+    /// Soft-body beams that broke since the last call (event ring readback).
+    pub fn poll_beam_breaks(&mut self) -> Vec<engine_softbody::BeamBreak> {
+        let words: Vec<u32> = self.read_buffer_range(
+            21,
+            u64::from(EVENT_RING_BASE) * 4,
+            (4 + 4 * EVENT_RING_CAPACITY) as usize,
+        );
+        let mut out = Vec::new();
+        let lost = engine_softbody::decode_beam_breaks(&words, &mut self.beam_events_seen, EVENT_RING_CAPACITY, &mut out);
+        if lost > 0 {
+            eprintln!("event ring overflow: {lost} beam events lost");
         }
         out
     }

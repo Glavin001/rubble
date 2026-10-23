@@ -122,6 +122,9 @@ const WORLD_ENTRIES: &[&str] = &[
     // Soft bodies (slang/kernels/soft_step.slang).
     "soft_wake",
     "soft_begin",
+    "soft_bounds",
+    "soft_collide_nodes",
+    "soft_collide_tris",
     "soft_primal",
     "soft_chebyshev",
     "soft_dual",

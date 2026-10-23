@@ -321,3 +321,189 @@ fn debug_core_with_rigid_masses() {
     let core = sim.read_body(chassis);
     eprintln!("rigid hung masses: suspension {total:.0} vs weight {:.0}", weight + 9.81 / core.inv_mass);
 }
+
+/// Residual deformation: positions in the car's rigid best-fit frame minus rest.
+fn residual(rest: &[Vec3], now: &[Vec3]) -> Vec<Vec3> {
+    // Kabsch-free approximation: the rear ring (6 nodes, far from every impact
+    // in these tests) fixes the frame.
+    let c0 = rest[..6].iter().copied().sum::<Vec3>() / 6.0;
+    let c1 = now[..6].iter().copied().sum::<Vec3>() / 6.0;
+    let axis = |p: &[Vec3]| {
+        let x = (p[0] + p[2] + p[4]) / 3.0 - (p[1] + p[3] + p[5]) / 3.0; // left − right
+        let y = (p[4] + p[5]) / 2.0 - (p[0] + p[1]) / 2.0; // top − floor
+        let x = x.normalize();
+        let z = x.cross((y - x * y.dot(x)).normalize());
+        glam::Mat3::from_cols(x, x.cross(z) * -1.0, z)
+    };
+    let r0 = axis(&rest[..6]);
+    let r1 = axis(&now[..6]);
+    now.iter().zip(rest).map(|(p, q)| r1.transpose() * (*p - c1) - r0.transpose() * (*q - c0)).collect()
+}
+
+struct Crash {
+    yielded: usize,
+    broken: usize,
+    /// Residual displacement per node in the car frame.
+    disp: Vec<Vec3>,
+    events: usize,
+}
+
+fn crash(setup: impl FnOnce(&mut WgpuSim), speed: f32, seconds: f32) -> Crash {
+    let mut sim = world(240.0, 10);
+    setup(&mut sim);
+    let h = spawn_car(&mut sim, [0.0, 0.05, 0.0], [0.0, 0.0, speed]);
+    // Rest pose of the bodywork as spawned (desc space shifted by the spawn offset).
+    let rest = positions(&sim, h);
+    let mut events = 0;
+    for _ in 0..(240.0 * seconds) as u32 / 24 {
+        run(&mut sim, 24);
+        events += sim.poll_beam_breaks().len();
+    }
+    let now = positions(&sim, h);
+    assert!(now.iter().all(|p| p.is_finite()), "finite");
+    Crash { yielded: yielded(&sim, h), broken: broken(&sim, h), disp: residual(&rest, &now), events }
+}
+
+const STATIONS: usize = 11;
+fn ring(k: usize, j: usize) -> usize {
+    k * engine_softbody::procedural::CAR_RING + j
+}
+
+#[test]
+fn wall_crash_crumples_the_front_and_sheds_the_bumper() {
+    // A rigid wall 0.5 m ahead of the bumper; 15 m/s (54 km/h).
+    let c = crash(|sim| { static_box(sim, [0.0, 1.5, 3.0], [3.0, 1.5, 0.2]); }, 15.0, 1.5);
+    let front = front_crush(&c);
+    let mid: f32 = (0..6).map(|j| c.disp[ring(STATIONS / 2, j)].z).sum::<f32>() / 6.0;
+    eprintln!("wall: yielded {} broken {} events {} front crush {front:.3} m, mid {mid:.3} m", c.yielded, c.broken, c.events);
+    assert!(c.yielded > 40, "front structure yields ({})", c.yielded);
+    assert!(front < -0.08, "permanent front crush ({front})");
+    assert!(front < mid - 0.05, "crush concentrated at the front ({front} vs {mid})");
+    // Left and right of the front ring crush alike against a flat wall.
+    let l: f32 = [0, 2, 4].iter().map(|&j| c.disp[ring(STATIONS - 1, j)].z).sum::<f32>() / 3.0;
+    let r: f32 = [1, 3, 5].iter().map(|&j| c.disp[ring(STATIONS - 1, j)].z).sum::<f32>() / 3.0;
+    assert!((l - r).abs() < 0.5 * front.abs(), "symmetric crush: left {l} right {r}");
+}
+
+fn static_capsule(sim: &mut WgpuSim, pos: [f32; 3], radius: f32, half: f32) -> u32 {
+    let b = static_body(sim, pos);
+    sim.add_collider(Collider {
+        body: b,
+        shape: ShapeType::Capsule as u32,
+        material: 0,
+        generation: 0,
+        local_pos: [0.0; 3],
+        density: 0.0,
+        local_rot: [0.0, 0.0, 0.0, 1.0],
+        params: [radius, half, 0.0, radius + half],
+    })
+}
+
+/// Mean inward (toward the centre line) lateral motion of the front ring.
+fn front_wrap(c: &Crash) -> f32 {
+    (0..6)
+        .map(|j| {
+            let side = if j % 2 == 0 { 1.0 } else { -1.0 };
+            -side * c.disp[ring(STATIONS - 1, j)].x
+        })
+        .sum::<f32>()
+        / 6.0
+}
+
+fn front_crush(c: &Crash) -> f32 {
+    (0..6).map(|j| c.disp[ring(STATIONS - 1, j)].z).sum::<f32>() / 6.0
+}
+
+/// Mean inward motion of the left (+X) side nodes of the middle rings.
+fn side_intrusion(c: &Crash, left: bool) -> f32 {
+    let mut sum = 0.0;
+    let mut n = 0.0;
+    for k in STATIONS / 2 - 2..=STATIONS / 2 + 2 {
+        for j in [0usize, 2, 4] {
+            let j = if left { j } else { j + 1 };
+            let sign = if left { -1.0 } else { 1.0 };
+            sum += sign * c.disp[ring(k, j)].x;
+            n += 1.0;
+        }
+    }
+    sum / n
+}
+
+#[test]
+fn wall_pole_and_side_impact_crush_differently() {
+    let wall = crash(|sim| { static_box(sim, [0.0, 1.5, 3.0], [3.0, 1.5, 0.2]); }, 15.0, 1.5);
+    let pole = crash(
+        |sim| {
+            // A 20 cm pole on the centre line: narrower than the node spacing.
+            let c = static_capsule(sim, [0.0, 1.5, 2.8], 0.1, 1.5);
+            sim.add_soft_obstacle(c).expect("obstacle");
+        },
+        11.0,
+        1.5,
+    );
+    let tbone = {
+        let mut sim = world(240.0, 10);
+        let h = spawn_car(&mut sim, [0.0, 0.05, 0.0], [0.0; 3]);
+        run(&mut sim, 120);
+        let rest = positions(&sim, h);
+        // A 1,500 kg car-height block at 40 km/h into the left (+X) side.
+        let half = [0.6, 0.6, 0.9];
+        let m = 1500.0;
+        let inertia = Vec3::new(half[1] * half[1] + half[2] * half[2], half[0] * half[0] + half[2] * half[2], half[0] * half[0] + half[1] * half[1]) * (m / 3.0);
+        let mut block = BodyState::dynamic(Vec3::new(2.2, 0.7, 0.0), glam::Quat::IDENTITY, m, inertia);
+        block.linear_vel = [-11.1, 0.0, 0.0];
+        let b = sim.add_body(block);
+        add_box_collider(&mut sim, b, half);
+        run(&mut sim, 360);
+        let now = positions(&sim, h);
+        Crash { yielded: yielded(&sim, h), broken: broken(&sim, h), disp: residual(&rest, &now), events: 0 }
+    };
+    let report = |name: &str, c: &Crash| {
+        eprintln!(
+            "{name:>5}: yielded {:>3} broken {:>2} front crush {:+.3} wrap {:+.3} left intrusion {:+.3} right {:+.3}",
+            c.yielded,
+            c.broken,
+            front_crush(c),
+            front_wrap(c),
+            side_intrusion(c, true),
+            side_intrusion(c, false)
+        );
+    };
+    report("wall", &wall);
+    report("pole", &pole);
+    report("tbone", &tbone);
+    // Wall: the whole front pushed back evenly, no wrap.
+    assert!(front_crush(&wall) < -0.05);
+    // Pole: the front folds around it (inward lateral motion) far more than at the wall.
+    assert!(pole.yielded > 10, "pole crumples the front");
+    assert!(front_wrap(&pole) > front_wrap(&wall) + 0.02, "pole wraps the front: {} vs {}", front_wrap(&pole), front_wrap(&wall));
+    // T-bone: the struck side intrudes, the far side much less, the front untouched.
+    assert!(tbone.yielded > 10, "side impact crumples the door");
+    assert!(side_intrusion(&tbone, true) > 0.025, "struck side intrudes");
+    assert!(side_intrusion(&tbone, true) > side_intrusion(&tbone, false) + 0.02, "intrusion is on the struck side");
+    assert!(front_crush(&tbone).abs() < 0.03, "front untouched by a side hit");
+}
+
+#[test]
+fn two_soft_cars_collide_head_on_without_passing_through() {
+    let mut sim = world(240.0, 10);
+    let a = spawn_car(&mut sim, [0.0, 0.05, -3.0], [0.0, 0.0, 8.0]);
+    let opts = SpawnOptions { velocity: [0.0, 0.0, -8.0], ..Default::default() };
+    let rot = glam::Quat::from_rotation_y(std::f32::consts::PI).to_array();
+    let b = sim.add_soft_vehicle(&car_desc(), [0.3, 0.05, 3.0], rot, &opts).expect("car b");
+    let mut min_gap = f32::MAX;
+    for _ in 0..30 {
+        run(&mut sim, 12);
+        let za = positions(&sim, a).iter().map(|p| p.z).fold(f32::MIN, f32::max);
+        let zb = positions(&sim, b).iter().map(|p| p.z).fold(f32::MAX, f32::min);
+        min_gap = min_gap.min(centroid(&positions(&sim, b)).z - centroid(&positions(&sim, a)).z);
+        let _ = (za, zb);
+    }
+    let (ya, yb) = (yielded(&sim, a), yielded(&sim, b));
+    let ca = centroid(&positions(&sim, a));
+    let cb = centroid(&positions(&sim, b));
+    eprintln!("head-on: yielded a {ya} b {yb}, centroids {ca:?} {cb:?}, min centre gap {min_gap:.3}");
+    assert!(ya > 10 && yb > 10, "both cars crumple");
+    assert!(min_gap > 2.0, "bodies do not pass through each other (min centre gap {min_gap})");
+    assert!(cb.z > ca.z, "still on their own sides");
+}

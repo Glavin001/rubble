@@ -34,7 +34,7 @@ impl Default for CarParams {
             minimass: 5.0,
             spring: 2.0e6,
             damp: 1500.0,
-            deform: 15_000.0,
+            deform: 7_000.0,
             strength: 260_000.0,
             plastic_coef: 0.0,
             wheel_radius: 0.32,
@@ -58,10 +58,16 @@ fn roof(t: f32) -> f32 {
     0.82
 }
 
-/// Hatchback: rings of 6 nodes (floor, belt line, top on each side) at
-/// `stations` positions along +Z (forward), cross-braced into a closed shell,
-/// with a skin of collision triangles, four wheels on dedicated axle nodes, an
-/// engine, and a bumper on a detacher group.
+/// Nodes per ring of the procedural car.
+pub const CAR_RING: usize = 8;
+
+/// Hatchback: rings of 8 nodes along +Z (forward): floor left/right, belt line
+/// left/right, roof (or bonnet) left/right, then floor centre and roof centre.
+/// Consecutive rings form a hollow, fully triangulated shell (every outer face
+/// cross-braced, a skin of collision triangles), with bulkheads only at the ends
+/// and through the engine bay and boot, so the cabin is open like a real body:
+/// a door can intrude and a pole can fold the front. Four wheels on dedicated
+/// axle nodes, an engine, and a bumper on a detacher group.
 pub fn car_truck(p: &CarParams) -> String {
     let mut s = String::new();
     let _ = writeln!(s, "{}", p.name);
@@ -78,22 +84,28 @@ pub fn car_truck(p: &CarParams) -> String {
     let n = p.stations.max(4);
     let hw = 0.5 * p.width;
     let mut nodes: Vec<[f32; 3]> = Vec::new();
-    // ring layout: 0 floorL, 1 floorR, 2 beltL, 3 beltR, 4 topL, 5 topR (L = +X)
+    let mut cabin = Vec::with_capacity(n);
     for k in 0..n {
         let t = k as f32 / (n - 1) as f32;
         let z = -0.5 * p.length + t * p.length;
         let top = roof(t);
-        let cabin = top > 1.2;
+        let is_cabin = top > 1.2;
+        cabin.push(is_cabin);
         let taper = 1.0 - 0.08 * ((2.0 * t - 1.0).abs()).powi(4);
         let floor_y = 0.26;
         let belt_y = 0.78;
-        let top_w = if cabin { hw * 0.8 } else { hw * 0.93 };
+        let top_w = if is_cabin { hw * 0.8 } else { hw * 0.93 };
         for (x, y) in [(hw * taper * 0.97, floor_y), (hw * taper, belt_y), (top_w * taper, top)] {
             nodes.push([x, y, z]);
             nodes.push([-x, y, z]);
         }
+        nodes.push([0.0, floor_y + 0.04, z]); // transmission tunnel
+        nodes.push([0.0, top + 0.04, z]);
     }
-    let ring = |k: usize, j: usize| k * 6 + j;
+    let ring = |k: usize, j: usize| k * CAR_RING + j;
+    // Perimeter of a ring, in order around the section (L = +X):
+    // floorL → floorC → floorR → beltR → topR → topC → topL → beltL → floorL.
+    const PERIM: [usize; 8] = [0, 6, 1, 3, 5, 7, 4, 2];
     // Axle nodes: inner (n1) and outer (n2) per wheel.
     let wb = 0.32 * p.length;
     let axle_y = p.wheel_radius;
@@ -109,8 +121,10 @@ pub fn car_truck(p: &CarParams) -> String {
     let bumper_first = nodes.len();
     if p.bumper {
         let z = 0.5 * p.length + 0.18;
-        for (x, y) in [(hw * 0.8, 0.38), (-hw * 0.8, 0.38), (hw * 0.8, 0.62), (-hw * 0.8, 0.62)] {
-            nodes.push([x, y, z]);
+        for y in [0.38f32, 0.62] {
+            for x in [hw * 0.8, 0.0, -hw * 0.8] {
+                nodes.push([x, y, z - if x == 0.0 { 0.0 } else { 0.06 }]);
+            }
         }
     }
     let _ = writeln!(s, "nodes");
@@ -121,42 +135,50 @@ pub fn car_truck(p: &CarParams) -> String {
     let mut beams: Vec<(usize, usize, &str)> = Vec::new();
     for k in 0..n {
         let r = |j| ring(k, j);
-        // Ring frame and its bracing.
-        for (a, b) in [(0, 1), (2, 3), (4, 5), (0, 2), (2, 4), (1, 3), (3, 5), (0, 3), (1, 2), (2, 5), (3, 4), (0, 5), (1, 4)] {
-            beams.push((r(a), r(b), ""));
+        for e in 0..8 {
+            beams.push((r(PERIM[e]), r(PERIM[(e + 1) % 8]), ""));
+        }
+        // Floor pan and roof stiffened toward the sills and rails.
+        for (a, b) in [(6, 2), (6, 3), (7, 2), (7, 3)] {
+            beams.push((r(a), r(b), "i"));
+        }
+        let end = k == 0 || k == n - 1;
+        if !cabin[k] || end {
+            // Bulkheads: ends, engine bay and boot (radiator support, strut braces).
+            for (a, b) in [(2, 3), (0, 3), (1, 2), (6, 7), (2, 7), (3, 7), (0, 7), (1, 7)] {
+                beams.push((r(a), r(b), "i"));
+            }
         }
         if k + 1 < n {
-            for j in 0..6 {
+            for j in 0..CAR_RING {
                 beams.push((ring(k, j), ring(k + 1, j), ""));
             }
-            // Shear panels: both diagonals of every face between the two rings.
-            for (a, b) in [(0, 1), (2, 3), (4, 5), (0, 2), (2, 4), (1, 3), (3, 5)] {
-                beams.push((ring(k, a), ring(k + 1, b), ""));
-                beams.push((ring(k, b), ring(k + 1, a), ""));
+            // Shear panels: both diagonals of every outer face between the rings.
+            for e in 0..8 {
+                let (a, b) = (PERIM[e], PERIM[(e + 1) % 8]);
+                beams.push((ring(k, a), ring(k + 1, b), "i"));
+                beams.push((ring(k, b), ring(k + 1, a), "i"));
             }
         }
         if k + 2 < n {
-            // Bending stiffeners along the sills and roof rails.
-            for j in [0, 1, 4, 5] {
+            // Bending stiffeners: sills, roof rails, tunnel.
+            for j in [0, 1, 4, 5, 6] {
                 beams.push((ring(k, j), ring(k + 2, j), "i"));
             }
         }
     }
-    // Axles: tie each axle node into the nearest ring's floor and belt nodes.
+    // Axles: tie each axle node into the nearest rings' floor and belt nodes.
     for &(n1, n2, z) in &wheel_axles {
         let k = (((z + 0.5 * p.length) / p.length) * (n - 1) as f32).round() as usize;
         let left = nodes[n1][0] > 0.0;
         let (f, b) = if left { (0, 2) } else { (1, 3) };
         for kk in [k.saturating_sub(1), k, (k + 1).min(n - 1)] {
-            for j in [f, b] {
+            for j in [f, b, 6] {
                 beams.push((n1, ring(kk, j), "i"));
                 beams.push((n2, ring(kk, j), "i"));
             }
         }
         beams.push((n1, n2, "i"));
-        // Across the car to the other side's floor for lateral stiffness.
-        let other = if left { 1 } else { 0 };
-        beams.push((n1, ring(k, other), "i"));
     }
     let _ = writeln!(s, "beams");
     for (a, b, o) in &beams {
@@ -172,10 +194,11 @@ pub fn car_truck(p: &CarParams) -> String {
         let _ = writeln!(s, "detacher_group 1");
         let f = n - 1;
         let b0 = bumper_first;
-        for (a, bb) in [(b0, b0 + 1), (b0 + 2, b0 + 3), (b0, b0 + 2), (b0 + 1, b0 + 3), (b0, b0 + 3), (b0 + 1, b0 + 2)] {
+        // Bumper bar: lower row b0..b0+2 (L, C, R), upper row b0+3..b0+5.
+        for (a, bb) in [(b0, b0 + 1), (b0 + 1, b0 + 2), (b0 + 3, b0 + 4), (b0 + 4, b0 + 5), (b0, b0 + 3), (b0 + 1, b0 + 4), (b0 + 2, b0 + 5), (b0, b0 + 4), (b0 + 1, b0 + 3), (b0 + 1, b0 + 5), (b0 + 2, b0 + 4)] {
             let _ = writeln!(s, "{a}, {bb}");
         }
-        for (a, bb) in [(b0, ring(f, 0)), (b0, ring(f, 2)), (b0 + 2, ring(f, 2)), (b0 + 2, ring(f, 0)), (b0 + 1, ring(f, 1)), (b0 + 1, ring(f, 3)), (b0 + 3, ring(f, 3)), (b0 + 3, ring(f, 1)), (b0, ring(f - 1, 0)), (b0 + 1, ring(f - 1, 1))] {
+        for (a, bb) in [(b0, ring(f, 0)), (b0, ring(f, 2)), (b0 + 3, ring(f, 2)), (b0 + 3, ring(f, 0)), (b0 + 2, ring(f, 1)), (b0 + 2, ring(f, 3)), (b0 + 5, ring(f, 3)), (b0 + 5, ring(f, 1)), (b0 + 1, ring(f, 6)), (b0 + 4, ring(f, 6)), (b0, ring(f - 1, 0)), (b0 + 2, ring(f - 1, 1))] {
             let _ = writeln!(s, "{a}, {bb}");
         }
         let _ = writeln!(s, "detacher_group end");
@@ -187,38 +210,36 @@ pub fn car_truck(p: &CarParams) -> String {
         let _ = writeln!(s, "{a}, {c}, {d}, c");
     };
     for k in 0..n - 1 {
-        let (r0, r1) = (|j| ring(k, j), |j| ring(k + 1, j));
-        // Left side (+X): floor→belt, belt→top; right side mirrored; roof; floor.
-        quad(&mut s, r0(0), r1(0), r1(2), r0(2));
-        quad(&mut s, r0(2), r1(2), r1(4), r0(4));
-        quad(&mut s, r0(1), r0(3), r1(3), r1(1));
-        quad(&mut s, r0(3), r0(5), r1(5), r1(3));
-        quad(&mut s, r0(4), r1(4), r1(5), r0(5));
-        quad(&mut s, r0(0), r0(1), r1(1), r1(0));
+        for e in 0..8 {
+            let (a, b) = (PERIM[e], PERIM[(e + 1) % 8]);
+            // Perimeter runs clockwise seen from the front (+Z): outward normal
+            // of (k,a)→(k+1,a)→(k+1,b) points away from the section centre.
+            quad(&mut s, ring(k, a), ring(k + 1, a), ring(k + 1, b), ring(k, b));
+        }
     }
-    for (k, flip) in [(0usize, false), (n - 1, true)] {
-        let r = |j| ring(k, j);
-        let tris = [(r(0), r(2), r(3)), (r(0), r(3), r(1)), (r(2), r(4), r(5)), (r(2), r(5), r(3))];
-        for (a, b, c) in tris {
-            if flip {
-                let _ = writeln!(s, "{a}, {b}, {c}, c");
+    // End caps: fans around the belt-line centre (floor centre → roof centre).
+    for (k, front) in [(0usize, false), (n - 1, true)] {
+        let c = ring(k, 6);
+        for e in 2..8 {
+            let (a, b) = (ring(k, PERIM[e]), ring(k, PERIM[(e + 1) % 8]));
+            if front {
+                let _ = writeln!(s, "{c}, {b}, {a}, c");
             } else {
-                let _ = writeln!(s, "{a}, {c}, {b}, c");
+                let _ = writeln!(s, "{c}, {a}, {b}, c");
             }
         }
     }
     if p.bumper {
         let b0 = bumper_first;
-        quad(&mut s, b0 + 1, b0, b0 + 2, b0 + 3);
+        quad(&mut s, b0 + 1, b0, b0 + 3, b0 + 4);
+        quad(&mut s, b0 + 2, b0 + 1, b0 + 4, b0 + 5);
     }
     // Reference frame: centre, back, left.
     let mid = ring(n / 2, 0);
-    let _ = writeln!(s, "\ncameras\n{}, {}, {}", ring(n - 1, 0), ring(0, 0), mid);
+    let _ = writeln!(s, "\ncameras\n{}, {}, {}", ring(n - 1, 6), ring(0, 6), mid);
     let _ = writeln!(s, "\nwheels");
-    for (i, &(n1, n2, z)) in wheel_axles.iter().enumerate() {
-        let front = z > 0.0;
-        let propulsed = if front { 1 } else { 0 };
-        let _ = i;
+    for &(n1, n2, z) in &wheel_axles {
+        let propulsed = if z > 0.0 { 1 } else { 0 };
         let _ = writeln!(s, "{:.3}, 0.20, 12, {n1}, {n2}, 9999, 1, {propulsed}, 9999, 15.0, 800000, 4000, tracks/wheelface, tracks/wheelband1", p.wheel_radius);
     }
     let _ = writeln!(s, "\nengine\n1200, 4800, 320, 3.9, 3.3, 1.0, 3.3, 2.1, 1.45, 1.1, 0.9, -1.0");
@@ -297,7 +318,18 @@ mod tests {
         assert!(bad.is_empty(), "{bad:?}");
         let d = load_truck(&src);
         assert_eq!(d.wheels.len(), 4);
-        assert!(d.nodes.len() > 60 && d.beams.len() > 400, "{} nodes {} beams", d.nodes.len(), d.beams.len());
+        assert!(d.nodes.len() > 90 && d.beams.len() > 500, "{} nodes {} beams", d.nodes.len(), d.beams.len());
+        // Every skin triangle faces outward (away from the body's centre line).
+        let p = |i: u32| glam::Vec3::from_array(d.nodes[i as usize].position);
+        for t in &d.triangles {
+            let (a, b, c) = (p(t.nodes[0]), p(t.nodes[1]), p(t.nodes[2]));
+            let n = (b - a).cross(c - a);
+            let centre = glam::Vec3::new(0.0, 0.75, (a.z + b.z + c.z) / 3.0);
+            let out = (a + b + c) / 3.0 - centre;
+            let end = (a.z - b.z).abs() < 1e-3 && (b.z - c.z).abs() < 1e-3;
+            let out = if end { glam::Vec3::new(0.0, 0.0, a.z.signum()) } else { out };
+            assert!(n.dot(out) > 0.0, "inward-facing triangle {:?}", t.nodes);
+        }
         assert!(d.triangles.iter().all(|t| t.collision));
         assert!(d.engine.is_some());
         // Bumper beams share a break group.

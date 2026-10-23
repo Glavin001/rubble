@@ -25,7 +25,7 @@ pub struct SpawnOptions {
     pub node_radius: f32,
     /// `gMaterials` index of node colliders (its friction is the node friction).
     pub node_material: u32,
-    /// Fraction of each frame node's mass moved into the rigid core.
+    /// Fraction of every node's mass moved into the rigid core (engine, gearbox, axles).
     pub core_mass_fraction: f32,
     /// Build the rigid core with raycast wheels and drivetrain (stage 1).
     pub rigid_core: bool,
@@ -42,7 +42,7 @@ impl Default for SpawnOptions {
         Self {
             node_radius: 0.06,
             node_material: 9,
-            core_mass_fraction: 0.5,
+            core_mass_fraction: 0.25,
             rigid_core: true,
             suspension_hz: 1.6,
             suspension_zeta: 0.45,
@@ -116,31 +116,14 @@ pub fn forward_axis(desc: &SoftVehicleDesc) -> Vec3 {
     -Vec3::X
 }
 
-/// Frame nodes the rigid core attaches to: each wheel's axle and arm nodes and
-/// their beam neighbours.
+/// Frame nodes the rigid core attaches to: each wheel's axle node pair (the hub
+/// structure). Only these are held rigid, so the bodywork between and around
+/// the axles stays free to crumple.
 pub fn frame_nodes(desc: &SoftVehicleDesc) -> Vec<u32> {
     let mut set = std::collections::BTreeSet::new();
-    let mut seeds = Vec::new();
     for w in &desc.wheels {
-        seeds.push(w.node1);
-        seeds.push(w.node2);
-        if let Some(a) = w.arm {
-            seeds.push(a);
-        }
-    }
-    for &s in &seeds {
-        set.insert(s);
-    }
-    for b in &desc.beams {
-        if b.kind != BeamKind::Normal {
-            continue;
-        }
-        if seeds.contains(&b.a) {
-            set.insert(b.b);
-        }
-        if seeds.contains(&b.b) {
-            set.insert(b.a);
-        }
+        set.insert(w.node1);
+        set.insert(w.node2);
     }
     set.into_iter().filter(|&i| !desc.nodes[i as usize].fixed).collect()
 }
@@ -239,22 +222,30 @@ pub fn pack_soft(desc: &SoftVehicleDesc, place: Placement, opts: &SpawnOptions, 
 fn core_plan(desc: &SoftVehicleDesc, masses: &mut [f32], opts: &SpawnOptions) -> CorePlan {
     let p = |i: u32| Vec3::from_array(desc.nodes[i as usize].position);
     let frame = frame_nodes(desc);
+    // The core (engine, gearbox, axles) takes a share of every node's mass, so
+    // its inertia follows the vehicle's mass distribution.
     let mut core_mass = 0.0f32;
     let mut centroid = Vec3::ZERO;
-    let mut taken = Vec::with_capacity(frame.len());
-    for &i in &frame {
-        let m = masses[i as usize] * opts.core_mass_fraction;
-        masses[i as usize] -= m;
-        core_mass += m;
-        centroid += p(i) * m;
-        taken.push(m);
+    let mut taken = vec![0.0f32; masses.len()];
+    for (i, m) in masses.iter_mut().enumerate() {
+        if desc.nodes[i].fixed {
+            continue;
+        }
+        let t = *m * opts.core_mass_fraction;
+        *m -= t;
+        taken[i] = t;
+        core_mass += t;
+        centroid += p(i as u32) * t;
     }
     let origin = if core_mass > 0.0 { centroid / core_mass } else { Vec3::ZERO };
     let mut inertia = Vec3::splat(1.0);
+    for (i, &t) in taken.iter().enumerate() {
+        let r = p(i as u32) - origin;
+        inertia += t * Vec3::new(r.y * r.y + r.z * r.z, r.x * r.x + r.z * r.z, r.x * r.x + r.y * r.y);
+    }
     let (mut mn, mut mx) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-    for (k, &i) in frame.iter().enumerate() {
+    for &i in &frame {
         let r = p(i) - origin;
-        inertia += taken[k] * Vec3::new(r.y * r.y + r.z * r.z, r.x * r.x + r.z * r.z, r.x * r.x + r.y * r.y);
         mn = mn.min(r);
         mx = mx.max(r);
     }
@@ -361,7 +352,8 @@ fn core_plan(desc: &SoftVehicleDesc, masses: &mut [f32], opts: &SpawnOptions) ->
             ..Default::default()
         })
     };
-    let half = ((mx - mn) * 0.25).max(Vec3::splat(0.08));
+    // A compact block between the axles (engine and drivetrain), well inside the bodywork.
+    let half = Vec3::new((mx.x - mn.x) * 0.2, 0.1, (mx.z - mn.z) * 0.15).max(Vec3::splat(0.08));
     let center = (mn + mx) * 0.5;
     let vehicle = VehicleDesc {
         name: format!("{} core", desc.name),
