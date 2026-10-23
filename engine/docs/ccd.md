@@ -258,6 +258,17 @@ percent. The viewer sizes its tick batch from that GPU time, not the wall time
 (which includes the wait for the next drawable), so a late frame catches up the
 next one instead of losing the tick.
 
+**In the browser lab** (`fracture/`, Scene → Vibe City presets → "Fractured
+towers · 2×2 city block", then **Fire the volley**): the same block, ball and
+volley (`engine_fracture::towers`, through `Scene.towers` / `Scene.volley` in the
+lab's wasm), Bonds: breakable D6 at 0.2× strength, Ball speed 16×, CCD balls on.
+Ball trails (cyan CCD, red plain) are drawn in every lab scene. Headless Chrome
+on the M3 Max: 120 TPS, 1.00× real time after the first second (GPU 5.6–6.5
+ms/tick), 0 phase-throughs with CCD, 7 without (`motion-check.mjs towers`). The
+lab sizes its tick batch from the GPU timestamp time too: at 9 ms wall (the
+counter readback included) for a 6 ms GPU tick it ran one tick per frame, so a
+60 Hz display held physics at 60 TPS.
+
 ## Tests
 
 | Test | Shows |
@@ -278,6 +289,8 @@ next one instead of losing the tick.
 | **`engine-viewer/tests/fracture_scale_ccd.rs`** (`--ignored`) | `SCALE_GRID`×`SCALE_GRID` fractured towers under a stream of balls in the lab's plan on Metal: timing (no shots, plain, CCD) and every ball checked every step for a phase-through |
 | **`engine-viewer/tests/fracture_tower_ccd.rs` `…cuboid_house`** | The lab's procedural cuboid house (715 boxes, and the same as hulls), built in code so it runs everywhere: the tower shots at 4–64×, 0 phase-throughs; the CCD-off control phases through |
 | **`engine-viewer/tests/towers_volley.rs`** (`--ignored`) | The showcase's volley headless: ms/tick against the 120 Hz budget, and every ball every step checked for a phase-through, CCD on (0) and off (the control) |
+| `motion-check.mjs live` (`fracture/regression.mjs runLiveShotRegression`) | The lab as a person uses it: the frame loop running (heavy steps sliced across frames), 24 shots through the page's click path while earlier balls fly into an already broken tower, every step captured and every ball checked: both towers 0 phase-throughs with CCD, 8 and 32 without. `LIVE_CASES=all` sweeps the panel (60 Hz, D6 bonds, ball radius and mass, the house, cuboid, grid and arch scenes) |
+| `motion-check.mjs towers` | The towers block's volley in the browser: phase-throughs (0 with CCD) and the page's rates |
 | `engine-webgpu/motion-check.mjs` | The same in headless Chrome: `motion.html`, `demo.html` (wall, ring check with `?ccd=1`), `vehicle.html`, and the fracture lab (arch; `tower`: both towers at 16× and 64×, 72 shots, with sensitive controls) |
 
 ## In the demos

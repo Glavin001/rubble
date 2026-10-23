@@ -1,4 +1,4 @@
-import {parseFractureGlb,buildScene,buildCuboidHouse,buildPackScene,layoutScene,withoutJoints,withBondStrength,withProjectileRadius,withParams,SAMPLES} from './wasm.mjs';
+import {parseFractureGlb,buildScene,buildCuboidHouse,buildPackScene,layoutScene,withoutJoints,withBondStrength,withProjectileRadius,withParams,buildTowersScene,towersVolley,SAMPLES} from './wasm.mjs';
 import {createSimulation} from './simulation.mjs';
 import {preloadBonds} from './bonds.mjs';
 import {createRenderer} from './render.mjs';
@@ -22,6 +22,34 @@ let sliceRate=1,sliceCredit=0,frameEma=FRAME_BUDGET_MS;
 // and 33 ms, too coarse to steer by.
 let workDone=[{done:true},{done:true}];
 let currentRates=null,layout=null,maxHullVertices,procedural=null,assetBytes=null,packBytes=null;
+// The towers showcase (engine-fracture towers.rs): a block of a pack's towers,
+// its own ball, bonds at 0.2× the pack's strength unless Bonds is None.
+const TOWERS={columns:2,rows:2,gap:6,radius:1,mass:30000,strength:0.2};
+let towersBlock=false;
+// The scripted volley in flight: shots with absolute steps, the next to fire.
+let volley=null;
+// Ball trails: per projectile slot, its path and whether it was a CCD shot;
+// positions come from a small async readback of the ball bodies each frame.
+let trails=[],trailRead=null;
+function resetTrails(){trails=scene?Array.from({length:scene.projectileCount},()=>({path:[],ccd:false})):[];renderer?.setTrails(new Float32Array(0))}
+function trailLaunched(id){const t=trails[id-scene.projectileStart];if(t){t.path=[];t.ccd=$('ball-ccd').checked&&!stressOn}}
+function updateTrails(){
+ if(!sim||!renderer||trailRead||!sim.shots)return;
+ const n=Math.min(sim.shots,scene.projectileCount),bytes=n*112,src=sim.renderBodyBuffer??sim.bodyBuffer;
+ const buf=device.createBuffer({size:bytes,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST}),enc=device.createCommandEncoder();
+ enc.copyBufferToBuffer(src,scene.projectileStart*112,buf,0,bytes);device.queue.submit([enc.finish()]);
+ const r=renderer;trailRead=buf.mapAsync(GPUMapMode.READ).then(()=>{
+  const f=new Float32Array(buf.getMappedRange().slice(0));buf.destroy();if(r!==renderer)return;
+  const out=[];
+  for(let k=0;k<n;k++){
+   const t=trails[k];if(!t)continue;const p=[f[k*28],f[k*28+1],f[k*28+2]];
+   if(p[1]>-100){const q=t.path[t.path.length-1];if(!q||Math.hypot(p[0]-q[0],p[1]-q[1],p[2]-q[2])>0.01){t.path.push(p);if(t.path.length>600)t.path.shift()}}
+   const m=t.path.length,c=t.ccd?[0.2,0.95,1]:[1,0.25,0.2];
+   for(let i=1;i<m;i++){const a=0.25+0.75*i/m;for(const v of [t.path[i-1],t.path[i]])out.push(v[0],v[1],v[2],0,c[0],c[1],c[2],a)}
+  }
+  renderer.setTrails(new Float32Array(out));
+ }).catch(()=>buf.destroy()).finally(()=>{trailRead=null});
+}
 // Bond mode (the Bonds menu): 'none' (pieces sleep until hit), 'd6' (breakable D6
 // joints, AVBD welds), 'stress' (GPU stress solver on its own canvas), 'threshold' (the
 // same, with the v0 rule: a bond breaks on contact force alone, no solve), or 'learned'
@@ -109,13 +137,13 @@ const rates=createRates(value=>{
 },undefined,()=>stepHz());
 document.addEventListener('visibilitychange',()=>{last=0;accumulator=0;rates.reset()});
 const setStatus=text=>{status.textContent=text;status.classList.remove('error')};
-const fail=e=>{console.error(e);running=false;status.textContent=e.message;status.classList.add('error');$('release').textContent=released?'Resume':'Start simulation'};
-const controls=enabled=>{enabled||=stressOn&&!loading;for(const id of ['release','reset','level','metadata','fire'])$(id).disabled=!enabled;for(const id of ['file','sample','scene'])$(id).disabled=!device||loading};
+const fail=e=>{console.error(e?.message??e);running=false;status.textContent=e.message;status.classList.add('error');$('release').textContent=released?'Resume':'Start simulation'};
+const controls=enabled=>{enabled||=stressOn&&!loading;for(const id of ['release','reset','level','metadata','fire','volley'])$(id).disabled=!enabled;for(const id of ['file','sample','scene'])$(id).disabled=!device||loading};
 function serializeLoad(task){const result=loadTail.catch(()=>{}).then(async()=>{loading=true;running=false;controls(false);await frame;rates.reset();try{await task()}catch(e){fail(e)}finally{loading=false;last=0;rates.reset();controls(!!sim)}});loadTail=result;return result}
 let shotQueue=Promise.resolve();
 function shoot(ray){
  if(loading||!sim)return;
- shotQueue=shotQueue.then(async()=>{await frame;if(loading||!sim)return;try{sim.launch(ray.origin,ray.direction);if(!running)rates.reset();released=true;running=true;accumulator=0;$('release').textContent='Pause'}catch(e){fail(e)}});
+ shotQueue=shotQueue.then(async()=>{await frame;if(loading||!sim)return;try{trailLaunched(sim.launch(ray.origin,ray.direction));if(!running)rates.reset();released=true;running=true;accumulator=0;$('release').textContent='Pause'}catch(e){fail(e)}});
  return shotQueue;
 }
 async function loadLevel(level){
@@ -128,14 +156,21 @@ async function loadLevel(level){
   learned?.dispose();learned=null;learnedMs=0;
   const raw=procedural==='pack'?buildPackScene(packBytes):procedural?buildCuboidHouse():buildScene(asset,level,{maxHullVertices});
   const built=physicsHz()?withParams(raw,{dt:1/physicsHz()}):raw;
-  if(bondMode()==='d6')setStatus('Settling bonds under self-weight…');
+  if(towersBlock){
+   // The pack's welds as authored (no settling pass: the towers start at rest),
+   // weakened so the volley can bring them down; loose pieces with Bonds: None.
+   const one=bondMode()==='none'?withoutJoints(built):withBondStrength(built,TOWERS.strength*strengthScale());
+   const laid=buildTowersScene(one,TOWERS);
+   next=radiusScale()===1?laid:withProjectileRadius(laid,radiusScale());
+  }else{
+  if(bondMode()==='d6'&&!towersBlock)setStatus('Settling bonds under self-weight…');
   // Learned mode: rubble stays unbonded (same as none); the MGN-T forward is timed separately.
   const one=bondMode()==='d6'?await preloadBonds(device,strengthScale()===1?built:withBondStrength(built,strengthScale())):withoutJoints(built);
   // Copies laid out as the sample says (procedural houses get a larger contact budget).
   const laid=layoutScene(one,layout,!!procedural);
-  next=radiusScale()===1?laid:withProjectileRadius(laid,radiusScale())}catch(e){if(scene)$('level').value=String(scene.level??0);throw e}
+  next=radiusScale()===1?laid:withProjectileRadius(laid,radiusScale())}}catch(e){if(scene)$('level').value=String(scene.level??0);throw e}
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;accumulator=0;
- scene=next;sim=await createSimulation(device,scene,setStatus);renderer=await createRenderer(device,$('view'),sim,scene,shoot);
+ scene=next;volley=null;sim=await createSimulation(device,scene,setStatus);renderer=await createRenderer(device,$('view'),sim,scene,shoot);resetTrails();
  renderer.colorMode=viewMode();applyBallMass();applyBallSpeed();applyBallCcd();showBallRadius();
  if(bondMode()==='learned'){
   setStatus('Loading learned-impact kernels (Slang→WGSL)…');
@@ -144,12 +179,12 @@ async function loadLevel(level){
   learnedMs=await learned.run();
  }
  const copies=scene.copies||1;$('fragments').textContent=scene.selected.length*copies;$('hulls').textContent=procedural?scene.pieces*copies:scene.hullCount;$('bonds').textContent=scene.bondCount*copies;$('release').textContent='Start simulation';
- $('fire').hidden=!scene.rowShot;$('awake').textContent='0';$('contacts').textContent='0';
+ $('fire').hidden=!scene.rowShot||towersBlock;$('volley').hidden=!towersBlock;$('awake').textContent='0';$('contacts').textContent='0';
  const skipped=scene.skippedHulls.length?` · ${scene.skippedHulls.length} flat zero-volume hulls skipped${copies>1?' per house':''}`:'';
- const what=copies>1?`${copies} houses · ${scene.bodyCount-1-scene.projectileCount} bodies · `:'';
+ const what=towersBlock?`${copies} fractured towers · ${scene.bodyCount-1-scene.projectileCount} pieces · ${scene.jointCount} bonds · `:copies>1?`${copies} houses · ${scene.bodyCount-1-scene.projectileCount} bodies · `:'';
  const source=procedural==='pack'?`scene pack · ${scene.pieces} nodes`:procedural?'procedural cuboid houses (box colliders)':`${(asset.bytes/1048576).toFixed(2)} MB · ${asset.materialCount} materials${skipped}`;
  const learnedNote=learned?` · learned-impact ${learnedMs.toFixed(2)} ms/fwd (${learned.graph.nNodes} chunks, ${learned.params} weights, compute only)`:'';
- setStatus(`${what}${source}${learnedNote} · ${scene.rowShot?'fire the ball through the row or click to shoot':'click the model to shoot'}`);
+ setStatus(`${what}${source}${learnedNote} · ${towersBlock?'fire the volley or click to shoot':scene.rowShot?'fire the ball through the row or click to shoot':'click the model to shoot'}`);
 }
 // The stress-solver mode, built and run by stress-web: a GLB's level (one copy of the
 // structure; the sample's layout of copies is the other modes'), the cuboid houses in
@@ -178,7 +213,7 @@ async function loadStress(level){
  setStatus(`Stress solver · ${st.chunks} chunks · ${st.bonds} bonds · ${profile==='threshold'?'simple threshold (v0): a bond breaks when a contact force beats its strength':profile}, resident GPU frame at ${Math.round(st.frameHz)} Hz${cuboid||pack?'':' · one copy'}${stressWarning(st)} · click the model to shoot`);
 }
 async function importBytes(bytes,name,sampleKey="",entry={}){
- assetBytes=bytes;layout=entry.layout??null;maxHullVertices=entry.maxHullVertices;procedural=null;
+ assetBytes=bytes;layout=entry.layout??null;maxHullVertices=entry.maxHullVertices;procedural=null;towersBlock=false;
  const start=performance.now(),next=parseFractureGlb(bytes);const ms=performance.now()-start;
  asset?.handle.free();asset=next;$('scene').value=sampleKey;
  $('level').replaceChildren(...asset.levels.map(l=>new Option(`Level ${l} · ${asset.levelFragments(l)} fragments`,l)));$('filename').textContent=name;
@@ -195,6 +230,12 @@ $('scene').replaceChildren(...sceneGroups,optgroup('Your file',[Object.assign(ne
 const VIBE_CITY='../generated/vibe-city/';
 try{const index=await (await fetch(`${VIBE_CITY}index.json`)).json();
  const group=document.createElement('optgroup');group.label='Vibe City presets (generated scene packs)';
+ const tower=index.presets.find(p=>p.id==='fracturedTower'&&!p.failed&&!p.pending);
+ if(tower){
+  // The CCD showcase: the fractured tower as a 2×2 city block, fast off-angle balls.
+  samples['vc-towers']={key:'vc-towers',label:'fractured towers block',pack:`${VIBE_CITY}fracturedTower.json`,nodes:tower.nodes*4,bonds:tower.bonds*4,towers:true};
+  group.append(new Option(`Fractured towers · 2×2 city block · ${tower.nodes*4} nodes (CCD volley)`,'vc-towers'));
+ }
  for(const p of index.presets.filter(p=>!p.failed&&!p.pending)){
   const key=`vc:${p.id}`;samples[key]={key,label:p.id,pack:`${VIBE_CITY}${p.id}.json`,nodes:p.nodes,bonds:p.bonds};
   group.append(new Option(`${p.id} · ${p.nodes} nodes`,key));
@@ -208,16 +249,21 @@ const sample=(key=$('scene').value||'house')=>serializeLoad(async()=>{
   setStatus(`Fetching ${entry.label}…`);
   const response=await fetch(entry.pack);
   if(!response.ok)throw new Error('Scene pack missing: run bun run export.ts in engine/scenes/vibe-city.');
-  packBytes=await response.arrayBuffer();assetBytes=null;layout=null;procedural='pack';asset?.handle.free();asset=null;$('scene').value=key;$('filename').textContent=entry.pack.split('/').pop();
+  packBytes=await response.arrayBuffer();assetBytes=null;layout=null;procedural='pack';
+  // The towers block: breakable welds, CCD balls at 16× unless the panel says otherwise.
+  if(entry.towers&&!towersBlock){$('bond-mode').value='d6';$('ball-speed').value='4';$('ball-ccd').checked=true}
+  towersBlock=!!entry.towers;asset?.handle.free();asset=null;$('scene').value=key;$('filename').textContent=entry.pack.split('/').pop();
   $('level').replaceChildren(new Option(`Scene pack · ${entry.nodes} nodes · ${entry.bonds} bonds`,0));$('level').value='0';
   await loadLevel(0);return;
  }
  if(entry.procedural){
+  towersBlock=false;
   // Built in code from box colliders: no GLB, one level, no baked bonds.
   layout=entry.layout??null;procedural=entry.procedural;assetBytes=null;asset?.handle.free();asset=null;$('scene').value=key;$('filename').textContent='Procedural cuboid house';
   $('level').replaceChildren(new Option('Cuboids · box colliders only',0));$('level').value='0';
   await loadLevel(0);return;
  }
+ towersBlock=false;
  setStatus(`Fetching baked ${entry.label}…`);
  const response=await fetch(`./assets/${entry.file}`);
  if(!response.ok)throw new Error('Bundled asset missing. Follow README.md to export it.');
@@ -225,6 +271,15 @@ const sample=(key=$('scene').value||'house')=>serializeLoad(async()=>{
 });
 $('sample').onclick=()=>sample();
 $('fire').onclick=()=>scene?.rowShot&&shoot(scene.rowShot);
+// The volley's shots fire from the frame loop at their steps (never inside a
+// step split across frames), counted from the step the button was pressed at.
+$('volley').onclick=()=>{if(!sim||!towersBlock)return;applyBallCcd();applyBallSpeed();
+ const base=sim.steps;volley={shots:towersVolley(scene).map(s=>({...s,step:s.step+base})),next:0};released=true;running=true;accumulator=0;$('release').textContent='Pause'};
+function fireVolley(){
+ if(!volley||sim.slicing)return;
+ while(volley.next<volley.shots.length&&volley.shots[volley.next].step<=sim.steps){const s=volley.shots[volley.next++];trailLaunched(sim.launch(s.origin,s.dir))}
+ if(volley.next>=volley.shots.length)volley=null;
+}
 $('scene').onchange=()=>sample($('scene').value);
 $('file').onchange=()=>{const f=$('file').files[0];if(f)serializeLoad(async()=>importBytes(await f.arrayBuffer(),f.name))};
 $('level').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
@@ -240,12 +295,19 @@ $('bond-strength').onchange=()=>{if(bondMode()!=='none')serializeLoad(()=>loadLe
 $('bond-mode').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('physics-hz').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('release').onclick=()=>{if(stressOn&&stress){stress.running=!stress.running;$('release').textContent=stress.running?'Pause':'Resume';return}released=true;running=!running;$('release').textContent=running?'Pause':'Resume';accumulator=0;rates.reset()};
-$('reset').onclick=()=>serializeLoad(async()=>{if(stressOn){await loadStress(Number($('level').value));return}sim.reset();released=false;$('release').textContent='Start simulation';setStatus('Reset · click the model to shoot')});
+$('reset').onclick=()=>serializeLoad(async()=>{if(stressOn){await loadStress(Number($('level').value));return}sim.reset();volley=null;resetTrails();released=false;$('release').textContent='Start simulation';setStatus('Reset · click the model to shoot')});
 $('metadata').onclick=()=>{if(!asset)return;const url=URL.createObjectURL(new Blob([asset.metadataJson()],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='fracture-metadata.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};
 for(const type of ['dragenter','dragover'])window.addEventListener(type,e=>{e.preventDefault();document.body.classList.add('drop')});
 window.addEventListener('dragleave',()=>document.body.classList.remove('drop'));
 window.addEventListener('drop',e=>{e.preventDefault();document.body.classList.remove('drop');const f=e.dataTransfer.files[0];if(f&&device)serializeLoad(async()=>importBytes(await f.arrayBuffer(),f.name))});
-window.__FRACTURE_DEMO__={get sliceRate(){return sliceRate},get ready(){return !loading&&!!sim},get device(){return device},get asset(){return asset},get scene(){return scene},get simulation(){return sim},get renderer(){return renderer},get rates(){return currentRates},
+window.__FRACTURE_DEMO__={get sliceRate(){return sliceRate},
+ // The page's own shot (a click's path: queued behind the frame, the loop keeps running).
+ shoot:ray=>shoot(ray),
+ // Run or pause the frame loop's physics, as the Start / Pause button does.
+ setRunning(on){released=true;running=!!on;accumulator=0;$('release').textContent=running?'Pause':'Resume'},
+ get running(){return running},
+ // The towers volley still firing (the Fire the volley button).
+ get volleyActive(){return !!volley},get ready(){return !loading&&!!sim},get device(){return device},get asset(){return asset},get scene(){return scene},get simulation(){return sim},get renderer(){return renderer},get rates(){return currentRates},
  async shootRay(origin,direction){running=false;await frame;return sim.launch(origin,direction)},
  async fireRow(){running=false;await frame;return sim.launch(scene.rowShot.origin,scene.rowShot.direction)},
  // Repeatable row benchmark: fire, then every `every` steps record wall ms per
@@ -293,6 +355,7 @@ function tick(now){
  if(!sim?.slicing)sliceRate=Math.min(MAX_SLICE_RATE,Math.max(0.25,sliceRate*Math.min(1.03,Math.max(0.7,FRAME_BUDGET_MS/frameEma))));
  if(!loading&&renderer){frame=(async()=>{try{
   let work=null,ticks=0;
+  if(running)fireVolley();
   if(running){
    accumulator=Math.min(accumulator+elapsed,4/stepHz());
    if(sim.slicing){
@@ -310,7 +373,12 @@ function tick(now){
     // Overlapped ticks (opt-in) queue without waiting for counters, so the
     // frame can carry the whole backlog (the simulation caps ticks in flight).
     const overlap=$('overlap-ticks').checked;
-    const budget=overlap?4:Math.max(1,Math.min(4,Math.floor(12/Math.max(sim.timing.wallMs,0.1))));
+    // Sized by the tick's GPU time (timestamps, when the browser has them):
+    // the wall time also counts the counter readback, so at 9 ms wall a 6 ms
+    // GPU tick got one tick per frame and a 60 Hz display held physics at
+    // 60 TPS. Up to a 60 Hz frame's worth: a late frame catches up.
+    const tickMs=sim.gpuTickMs??sim.timing.wallMs;
+    const budget=overlap?4:Math.max(1,Math.min(4,Math.floor((sim.gpuTickMs?16:12)/Math.max(tickMs,0.1))));
     ticks=Math.min(budget,Math.floor(accumulator*stepHz()));
     if(ticks){
      accumulator-=ticks/stepHz();
@@ -325,7 +393,7 @@ function tick(now){
   // Learned-impact: time one forward per frame when idle enough (discard output).
   if(learned&&!learnedBusy){learnedBusy=true;learned.run().then(ms=>{learnedMs=ms;learnedBusy=false;$('step-ms').textContent=`learned ${ms.toFixed(2)} ms/fwd · ${learned.graph.nNodes} n · ${learned.params} w`}).catch(e=>{learnedBusy=false;fail(e)})}
   // Queue the draw immediately behind physics; do not wait for CPU stats first.
-  renderer.draw($('show-bonds').checked);
+  updateTrails();renderer.draw($('show-bonds').checked);
   if(work){await work;if(!document.hidden)for(let i=0;i<ticks;i++)rates.step(sim.timing)}
   if(running){const c=sim.counters;$("awake").textContent=c.awake;$("contacts").textContent=c.contact}
   if(running){const c=sim.counters;setStatus(`${sim.shots} shots · ${sim.steps} steps · ${c.contact} contacts · ${c.awake} awake · ${(sim.steps/stepHz()).toFixed(1)} s`)}

@@ -218,6 +218,81 @@ const CHECKS = {
       console.log(`  screenshot ${await shot(`motion_lab_${pack}_ccd`)}`);
     }
   },
+  // The towers showcase scene in the browser lab (fracture/regression.mjs
+  // runTowersVolleyRegression): the Fire the volley button, CCD off and on.
+  async towers() {
+    await send('Page.navigate', { url: `${base}/fracture/index.html` });
+    const ready = async () => {
+      for (let i = 0; i < 3000; i++) {
+        if (await evaluate('!!window.__FRACTURE_DEMO__?.ready')) return;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      throw new Error('fracture lab did not load');
+    };
+    await ready();
+    await evaluate('window.__FRACTURE_DEMO__.load("vc-towers")', true);
+    await ready();
+    for (const ccd of [false, true]) {
+      const r = await evaluate(`import('./regression.mjs').then((m) => m.runTowersVolleyRegression(undefined, { ccd: ${ccd} })).then((r) => JSON.stringify(r))`, true).then(JSON.parse);
+      console.log(`towers CCD ${ccd}: ${r.shots} shots, ${r.steps} steps, ${r.phaseThroughs} phase-throughs, ${r.meanTps?.toFixed(0)} TPS mean, ${r.meanSpeed?.toFixed(2)}× real time mean (min ${r.minSpeed?.toFixed(2)})${r.first.length ? `\n    ${r.first.join('\n    ')}` : ''}`);
+      if (ccd) expect(r.passed, 'towers: no CCD ball phases through a still piece');
+      else expect(r.phaseThroughs > 0, 'towers control: without CCD the detector finds phase-throughs');
+    }
+    // Rates alone, as a person sees the page (no capture).
+    const p = await evaluate(`import('./regression.mjs').then((m) => m.runTowersVolleyRegression(undefined, { check: false })).then((r) => JSON.stringify(r))`, true).then(JSON.parse);
+    console.log(`towers (no capture): ${p.meanTps?.toFixed(0)} TPS mean, ${p.meanSpeed?.toFixed(2)}× real time mean (min ${p.minSpeed?.toFixed(2)})`);
+    console.log(`  per second: ${p.samples.map((s) => `${s.tps?.toFixed(0)} TPS/${s.fps?.toFixed(0)} FPS gpu ${s.gpu?.toFixed(1)} wall ${s.wall?.toFixed(1)}${s.sliced ? ' sliced' : ''}`).join(' | ')}`);
+    console.log(`  screenshot ${await shot('motion_lab_towers_volley')}`);
+  },
+  // The lab as a person uses it (fracture/regression.mjs runLiveShotRegression):
+  // the frame loop running, heavy steps sliced across frames, shots through the
+  // click path while earlier balls fly, every ball checked in every step.
+  async live() {
+    await send('Page.navigate', { url: `${base}/fracture/index.html` });
+    const ready = async () => {
+      for (let i = 0; i < 3000; i++) {
+        if (await evaluate('!!window.__FRACTURE_DEMO__?.ready')) return;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      throw new Error('fracture lab did not load');
+    };
+    await ready();
+    // Panel settings as a person sets them (the Bonds / Physics / Ball sliders),
+    // then the scene loads with them. LIVE_CASES=all adds the wider sweep.
+    const set = (values) => evaluate(`(() => { const v = ${JSON.stringify(values)}; for (const [id, value] of Object.entries(v)) { const el = document.getElementById(id); el.value = String(value); el.dispatchEvent(new Event('input')); } return true; })()`);
+    const defaults = { 'bond-mode': 'none', 'physics-hz': 0, 'ball-mass': 0, 'ball-radius': 0, 'bond-strength': 0 };
+    const cases = [{ scene: 'vc:fracturedTower' }, { scene: 'vc:reinforcedTower' }];
+    if (process.env.LIVE_CASES === 'all') cases.push(
+      { scene: 'vc:fracturedTower', 'physics-hz': 60 },
+      { scene: 'vc:fracturedTower', 'bond-mode': 'd6' },
+      { scene: 'vc:fracturedTower', 'ball-radius': -2 },
+      { scene: 'vc:fracturedTower', 'ball-mass': 6 },
+      { scene: 'vc:fracturedTower', 'ball-mass': -3 },
+      { scene: 'vc:reinforcedTower', 'physics-hz': 60, 'ball-radius': -2 },
+      { scene: 'house' }, { scene: 'cuboid' }, { scene: 'grid' }, { scene: 'cuboidGrid' }, { scene: 'arch' });
+    if (process.env.LIVE_ONLY) cases.splice(0, cases.length, ...cases.filter((c) => process.env.LIVE_ONLY.split(',').includes(c.scene)));
+    for (const c of cases) {
+      const { scene, ...panel } = c;
+      await set({ ...defaults, ...panel });
+      await evaluate(`window.__FRACTURE_DEMO__.load(${JSON.stringify(scene)})`, true);
+      await ready();
+      const pack = `${scene}${Object.keys(panel).length ? ` ${JSON.stringify(panel)}` : ''}`;
+      for (const ccd of [false, true]) {
+        const r = await evaluate(`import('./regression.mjs').then((m) => m.runLiveShotRegression(undefined, { ccd: ${ccd} })).then((r) => JSON.stringify(r), (e) => JSON.stringify({ error: e.message }))`, true).then(JSON.parse);
+        if (r.error) {
+          // A capacity limit the panel's settings reach (it fails loudly, as it must): logged, not a CCD result.
+          console.log(`live ${pack} CCD ${ccd}: ${r.error}`);
+          expect(/capacity exceeded/.test(r.error), `live ${pack}: ${r.error}`);
+          await evaluate(`window.__FRACTURE_DEMO__.load(${JSON.stringify(scene)})`, true);
+          await ready();
+          continue;
+        }
+        console.log(`live ${pack} CCD ${ccd}: ${r.shots} shots, ${r.steps} steps (${r.launchedMidSlicedStep} launched mid sliced step): ${r.phaseThroughs} phase-throughs${r.first.length ? `\n    ${r.first.join('\n    ')}` : ''}`);
+        if (ccd) expect(r.passed, `live ${pack}: no CCD ball phases through a still piece`);
+        else if (!process.env.LIVE_CASES) expect(r.phaseThroughs > 0, `live ${pack} control: without CCD the detector finds phase-throughs`);
+      }
+    }
+  },
   // The fracture lab's own step plan (engine-fracture plan.rs) with CCD balls:
   // needs the lab's wasm (wasm-pack build engine/crates/engine-fracture-wasm …).
   async lab() {

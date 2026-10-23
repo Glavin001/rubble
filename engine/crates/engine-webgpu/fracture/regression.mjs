@@ -150,3 +150,97 @@ export async function runPhaseThroughRegression(demo=window.__FRACTURE_DEMO__,{s
  const failed=results.filter(r=>r.phase>0||!r.hit);
  return {passed:failed.length===0,shots:results.length,failed,phaseThroughs:results.reduce((s,r)=>s+r.phase,0)};
 }
+
+// Phase-throughs of ball `id` between two body snapshots: still pieces (moved
+// pieces are hits) whose hull the ball's centre path meets (exact GJK).
+function stepCrossings(scene,pieces,prev,now,id){
+ const pose=(s,b)=>({p:[s[b*28],s[b*28+1],s[b*28+2]],q:[s[b*28+4],s[b*28+5],s[b*28+6],s[b*28+7]]});
+ const b0=pose(prev,id).p,b1=pose(now,id).p,seg=sub(b1,b0),out=[];
+ if(b0[1]<-100||b1[1]<-100)return out;
+ for(const {c} of pieces){
+  const P0=pose(prev,c.body),P1=pose(now,c.body);
+  if(Math.hypot(...sub(P1.p,P0.p))>1e-3||Math.abs(dot3(P0.q,P1.q)+P0.q[3]*P1.q[3])<1-1e-6)continue;
+  const w=sub(P0.p,b0),tt=Math.min(1,Math.max(0,dot3(w,seg)/Math.max(dot3(seg,seg),1e-20)));
+  const bound=c.shape===2?Math.hypot(c.params[0],c.params[1],c.params[2]):c.params[3];
+  if(Math.hypot(...sub(add(b0,mul3(seg,tt)),P0.p))>bound+Math.hypot(...c.localPos??[0,0,0])+1e-3)continue;
+  if(segmentHullDistance(b0,b1,pieceVertices(scene,c,P0))<=1e-6)out.push(`ball ${id} ${b0.map(x=>x.toFixed(2))} -> ${b1.map(x=>x.toFixed(2))} crossed still piece ${c.body}`);
+ }
+ return out;
+}
+
+// The lab as a person uses it: the frame loop running (heavy steps sliced
+// across frames), shots fired through the page's own click path at points
+// around the view's centre while earlier balls are still flying and the
+// structure is already broken. Every step's bodies are captured and every ball
+// checked in every step. `ccd` and `scale` (Ball speed) as the panel sets them.
+export async function runLiveShotRegression(demo=window.__FRACTURE_DEMO__,{shots=24,everyMs=150,settleMs=3000,scale=16,ccd=true,log=()=>{}}={}){
+ const require=(ok,message)=>{if(!ok)throw new Error(`Live shot regression: ${message}`)};
+ require(demo.ready,'demo is not ready');
+ await demo.reset();
+ const scene=demo.scene,sim=demo.simulation,start=scene.projectileStart;
+ const pieces=scene.colliders.map((c,i)=>({c,i})).filter(({c})=>(c.shape===3||c.shape===2)&&c.body>=1&&c.body<start);
+ sim.setProjectileCcd(ccd);sim.setProjectileSpeedScale(scale);
+ const canvas=document.getElementById('view'),rect=canvas.getBoundingClientRect();
+ sim.captureSteps(true);demo.setRunning(true);
+ let k=0x5eed;const rnd=()=>{k=(k*1103515245+12345)>>>0;return k/4294967296};
+ // The page stops on an error (a capacity limit, a GPU error): report it.
+ const pageError=()=>{const st=document.getElementById('status');if(st.classList.contains('error'))throw new Error(`page stopped: ${st.textContent}`)};
+ for(let i=0;i<shots;i++){
+  pageError();
+  // Points over the middle of the view, where the structure is.
+  const x=rect.left+rect.width*(0.3+0.4*rnd()),y=rect.top+rect.height*(0.3+0.4*rnd());
+  await demo.shoot(demo.renderer.aim(x,y));
+  await new Promise(r=>setTimeout(r,everyMs));
+ }
+ await new Promise(r=>setTimeout(r,settleMs));
+ pageError();
+ demo.setRunning(false);
+ while(demo.simulation.slicing)await new Promise(r=>setTimeout(r,20));
+ await new Promise(r=>setTimeout(r,100));
+ const entries=await sim.takeCaptured();sim.captureSteps(false);
+ let prev=null,steps=0,sliced=0;const fresh=new Set(),flying=new Set(),failures=[];
+ for(const e of entries){
+  if(e.launch!==undefined){fresh.add(e.launch);flying.add(e.launch);if(e.sliced)sliced++;continue}
+  if(prev)for(const id of flying)if(!fresh.has(id))for(const f of stepCrossings(scene,pieces,prev,e.bodies,id))failures.push(`step ${steps}: ${f}`);
+  fresh.clear();prev=e.bodies;steps++;
+ }
+ sim.setProjectileSpeedScale(1);sim.setProjectileCcd(true);
+ const r={passed:failures.length===0,shots,steps,launchedMidSlicedStep:sliced,phaseThroughs:failures.length,first:failures.slice(0,5)};
+ log(JSON.stringify(r));return r;
+}
+
+// The towers showcase in the browser: the "Fire the volley" button on the
+// towers block scene, the frame loop running as a person watches it. Every
+// step captured, every ball checked; the page's own rates (TPS, × real time)
+// sampled each second while the volley flies.
+export async function runTowersVolleyRegression(demo=window.__FRACTURE_DEMO__,{ccd=true,settleMs=4000,check=true,log=()=>{}}={}){
+ const require=(ok,message)=>{if(!ok)throw new Error(`Towers volley regression: ${message}`)};
+ require(demo.ready,'demo is not ready');
+ await demo.reset();
+ const scene=demo.scene,sim=demo.simulation,start=scene.projectileStart;
+ const pieces=scene.colliders.map((c,i)=>({c,i})).filter(({c})=>(c.shape===3||c.shape===2)&&c.body>=1&&c.body<start);
+ document.getElementById('ball-ccd').checked=ccd;
+ // check: false measures the page's rates alone (no per-step capture).
+ if(check)sim.captureSteps(true);
+ document.getElementById('volley').click();
+ const rates=[];
+ while(demo.volleyActive){await new Promise(r=>setTimeout(r,1000));if(demo.rates)rates.push({tps:demo.rates.tps,speed:demo.rates.speed,gpu:demo.simulation.gpuTickMs,fps:demo.rates.fps,sliced:demo.simulation.timing.sliced,wall:demo.simulation.timing.wallMs})}
+ const t0=performance.now();
+ while(performance.now()-t0<settleMs){await new Promise(r=>setTimeout(r,1000));if(demo.rates)rates.push({tps:demo.rates.tps,speed:demo.rates.speed})}
+ demo.setRunning(false);
+ while(demo.simulation.slicing)await new Promise(r=>setTimeout(r,20));
+ await new Promise(r=>setTimeout(r,100));
+ const entries=await sim.takeCaptured();sim.captureSteps(false);
+ let prev=null,steps=0;const fresh=new Set(),flying=new Set(),failures=[];
+ for(const e of entries){
+  if(e.launch!==undefined){fresh.add(e.launch);flying.add(e.launch);continue}
+  if(prev)for(const id of flying)if(!fresh.has(id))for(const f of stepCrossings(scene,pieces,prev,e.bodies,id))failures.push(`step ${steps}: ${f}`);
+  fresh.clear();prev=e.bodies;steps++;
+ }
+ document.getElementById('ball-ccd').checked=true;
+ const speeds=rates.map(r=>r.speed).filter(Number.isFinite);
+ const r={passed:failures.length===0,steps,shots:sim.shots,phaseThroughs:failures.length,first:failures.slice(0,5),
+  minSpeed:speeds.length?Math.min(...speeds):null,meanSpeed:speeds.length?speeds.reduce((a,b)=>a+b,0)/speeds.length:null,
+  meanTps:rates.length?rates.reduce((a,b)=>a+b.tps,0)/rates.length:null,samples:rates};
+ log(JSON.stringify(r));return r;
+}

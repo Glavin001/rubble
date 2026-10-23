@@ -41,6 +41,15 @@ export async function createRenderer(device,canvas,simulation,scene,onShoot=()=>
  const cancel=()=>drag=null;
  const wheel=e=>{e.preventDefault();orbit.zoom(e.deltaY)};
  canvas.addEventListener('pointerdown',down);canvas.addEventListener('pointermove',move);canvas.addEventListener('pointerup',up);canvas.addEventListener('pointercancel',cancel);canvas.addEventListener('wheel',wheel,{passive:false});
+ // Ball trails (setTrails): line segments, 8 floats per vertex (xyz, pad, rgba),
+ // drawn four times a pixel apart so they read at any size.
+ const trailModule=device.createShaderModule({code:`struct V{vp:mat4x4f,px:vec4f};@group(0)@binding(0)var<uniform> v:V;@group(0)@binding(1)var<storage,read> t:array<vec4f>;
+struct O{@builtin(position)p:vec4f,@location(0)c:vec4f};
+@vertex fn vs(@builtin(vertex_index)i:u32,@builtin(instance_index)k:u32)->O{var o:O;o.p=v.vp*vec4f(t[2u*i].xyz,1.);let off=vec2f(f32(k&1u),f32(k>>1u))-.5;o.p=vec4f(o.p.xy+off*v.px.xy*2.*o.p.w,o.p.zw);o.c=t[2u*i+1u];return o;}
+@fragment fn fs(i:O)->@location(0)vec4f{return i.c;}`});
+ const trailPipe=device.createRenderPipeline({layout:'auto',vertex:{module:trailModule,entryPoint:'vs'},fragment:{module:trailModule,entryPoint:'fs',targets:[{format}]},primitive:{topology:'line-list'},depthStencil:{format:'depth24plus',depthWriteEnabled:false,depthCompare:'less'}});
+ const trailView=device.createBuffer({size:80,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+ let trailBuf=null,trailGroup=null,trailVerts=0;
  let stamps=null,colorMode=0;
  // GPU time of a sampled frame's render pass, about four times a second (stats
  // panel). One sample in flight; nothing waits on its readback.
@@ -48,6 +57,13 @@ export async function createRenderer(device,canvas,simulation,scene,onShoot=()=>
   resolve:device.createBuffer({size:16,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC}),
   read:device.createBuffer({size:16,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST}),busy:false,last:0,ms:null}:null;
  return {aim,
+ // Trail segments for the next frames (8 floats per vertex: xyz, pad, rgba).
+ setTrails(data){
+  trailVerts=data.length/8;if(!trailVerts)return;
+  if(!trailBuf||trailBuf.size<data.byteLength){trailBuf?.destroy();trailBuf=device.createBuffer({size:Math.max(65536,data.byteLength*2),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
+   trailGroup=device.createBindGroup({layout:trailPipe.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:trailView}},{binding:1,resource:{buffer:trailBuf}}]})}
+  device.queue.writeBuffer(trailBuf,0,data);
+ },
  // GPU ms of the latest sampled frame's render pass, or null if unsupported.
  get gpuFrameMs(){return frameTimer?.ms??null},
  // 0: materials; 1: sleep state (awake orange, asleep blue, static grey).
@@ -73,9 +89,10 @@ export async function createRenderer(device,canvas,simulation,scene,onShoot=()=>
   pass.setPipeline(solid);pass.setBindGroup(0,mesh.group);pass.setIndexBuffer(index,'uint32');pass.drawIndexed(indices.length,scene.copies||1);
   // The newest projectileCount balls (a shot past them reuses the oldest).
   if(simulation.shots){pass.setBindGroup(0,projectiles.group);pass.draw(Math.min(simulation.shots,scene.projectileCount)*projectiles.count/scene.projectileCount)}
+  if(trailVerts){const vp=orbit.viewProj(w/h);device.queue.writeBuffer(trailView,0,vp);device.queue.writeBuffer(trailView,64,new Float32Array([1/w,1/h,0,0]));pass.setPipeline(trailPipe);pass.setBindGroup(0,trailGroup);pass.draw(trailVerts,4)}
   if(showBonds&&lines.count){pass.setPipeline(wire);pass.setBindGroup(0,lines.group);pass.draw(lines.count,scene.copies||1)}pass.end();
   if(timed){frameTimer.busy=true;frameTimer.last=performance.now();enc.resolveQuerySet(frameTimer.query,0,2,frameTimer.resolve,0);enc.copyBufferToBuffer(frameTimer.resolve,0,frameTimer.read,0,16)}
   device.queue.submit([enc.finish()]);
   if(timed)frameTimer.read.mapAsync(GPUMapMode.READ).then(()=>{const t=new BigUint64Array(frameTimer.read.getMappedRange());frameTimer.ms=Number(t[1]-t[0])/1e6;frameTimer.read.unmap()}).catch(()=>{}).finally(()=>{frameTimer.busy=false});
- },dispose(){for(const b of [uniform,index,...streams])b.destroy();if(joints!==simulation.jointBuffer)joints.destroy();orbit.free();if(frameTimer){frameTimer.query.destroy();frameTimer.resolve.destroy();frameTimer.read.destroy()}depth?.destroy();canvas.removeEventListener('pointerdown',down);canvas.removeEventListener('pointermove',move);canvas.removeEventListener('pointerup',up);canvas.removeEventListener('pointercancel',cancel);canvas.removeEventListener('wheel',wheel)}};
+ },dispose(){for(const b of [uniform,index,trailView,...streams])b.destroy();trailBuf?.destroy();if(joints!==simulation.jointBuffer)joints.destroy();orbit.free();if(frameTimer){frameTimer.query.destroy();frameTimer.resolve.destroy();frameTimer.read.destroy()}depth?.destroy();canvas.removeEventListener('pointerdown',down);canvas.removeEventListener('pointermove',move);canvas.removeEventListener('pointerup',up);canvas.removeEventListener('pointercancel',cancel);canvas.removeEventListener('wheel',wheel)}};
 }
