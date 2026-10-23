@@ -1,7 +1,7 @@
 //! Tunnelling suite (CCD audit, Phase 0): fast bodies against thin walls,
 //! control-paired. Each case runs three ways on the same scene:
 //!
-//! - `Off`: no look-ahead (engine default before the audit);
+//! - `Off`: no look-ahead (the engine default);
 //! - `LookAhead`: `FLAG_SPEC_VELOCITY` only (reach capped per collider);
 //! - `Ccd`: look-ahead plus `BODY_CCD` on the projectile (uncapped reach, the
 //!   fast list, time-of-impact contacts and the TOI start pose).

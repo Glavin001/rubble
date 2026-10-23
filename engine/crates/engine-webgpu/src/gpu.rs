@@ -984,6 +984,9 @@ impl WgpuSim {
     /// the separating-axis cache, hints keyed by id, are cleared. Returns the old → new
     /// maps (`u32::MAX`: dropped). For appenders that retire slots instead of reusing
     /// them (stress-rubble's fracture splits).
+    /// Characters, projectiles and queued impulses are renumbered too (a
+    /// character's inner capsule must be kept; a dropped ground or hit reads
+    /// as none, a queued impulse on a dropped body is discarded).
     pub fn compact(&mut self, keep_bodies: &[u32], keep_colliders: &[u32]) -> (Vec<u32>, Vec<u32>) {
         assert!(self.joint_count == 0 && self.vehicle_count() == 0, "compact: joints and vehicles name bodies and are not renumbered");
         let mut body_map = vec![u32::MAX; self.body_count as usize];
@@ -1061,6 +1064,7 @@ impl WgpuSim {
         self.grid_cache = None;
         self.manifolds_valid = false;
         self.wake_pending = true;
+        self.remap_motion(&body_map, &col_map);
         (body_map, col_map)
     }
 

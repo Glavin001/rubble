@@ -324,3 +324,55 @@ fn a_ccd_rocket_never_passes_through_a_character() {
     let _ = p0;
     assert!(max_x < -(d.radius + r) + 0.05, "rocket passed into or through the character: {max_x}");
 }
+
+/// `compact` renumbers the character pool (character audit Phase 3): its inner
+/// capsule and the crate it stands on move to new ids, a dropped body vanishes,
+/// and the character keeps standing on the crate.
+#[test]
+fn compact_renumbers_characters_and_their_ground() {
+    let mut sim = world();
+    ground(&mut sim);
+    let debris = dynamic_box(&mut sim, Vec3::new(20.0, 0.25, 20.0), [0.25; 3], 5.0);
+    let crate_ = dynamic_box(&mut sim, Vec3::new(0.0, 0.5, 0.0), [0.75, 0.5, 0.75], 400.0);
+    let d = desc();
+    let h = sim.add_character(&d, [0.0, stand_y(&d, 1.0) + 0.02, 0.0]);
+    let inner = sim.character_body(h);
+    let s = walk(&mut sim, h, [0.0; 3], 60).pop().unwrap();
+    assert_eq!(s.ground_body, Some(crate_), "{s:?}");
+    // Drop the debris box (body 1, collider 1).
+    let (bm, _) = sim.compact(&[0, crate_, inner], &[0, 2, 3]);
+    assert_eq!(bm[debris as usize], u32::MAX);
+    let (new_crate, new_inner) = (bm[crate_ as usize], bm[inner as usize]);
+    assert_eq!(sim.character_body(h), new_inner);
+    assert_eq!(sim.character_state(h).ground_body, Some(new_crate), "ground renumbered");
+    let states = walk(&mut sim, h, [0.0; 3], 60);
+    let s = states.last().unwrap();
+    println!("after compact: {:?} on {:?}", s.position, s.ground_body);
+    assert!(states.iter().all(|s| s.ground == GroundState::OnGround && s.ground_body == Some(new_crate)));
+    assert!((s.position[1] - stand_y(&d, 1.0)).abs() < 0.02, "height {}", s.position[1]);
+    let b = sim.read_body(new_inner);
+    assert!((Vec3::from_array(b.position) - Vec3::from_array(s.position)).length() < 1e-3, "inner capsule follows");
+}
+
+/// A heavy block dropped into a standing character's head (overlapping it by
+/// 0.15 m) reports `Crushed`; a block resting on the capsule does not.
+#[test]
+fn a_block_pressed_into_the_head_reports_crushed() {
+    for overlap in [0.0f32, 0.15] {
+        let mut sim = world();
+        ground(&mut sim);
+        let d = desc();
+        let h = sim.add_character(&d, [0.0, stand_y(&d, 0.0), 0.0]);
+        walk(&mut sim, h, [0.0; 3], 20);
+        sim.poll_motion_events();
+        let head = stand_y(&d, 0.0) + d.half_height + d.radius;
+        dynamic_box(&mut sim, Vec3::new(0.0, head + 0.25 + d.skin - overlap, 0.0), [0.4, 0.25, 0.4], 1000.0);
+        walk(&mut sim, h, [0.0; 3], 3);
+        let crushed = sim
+            .poll_motion_events()
+            .iter()
+            .any(|e| matches!(e, MotionEvent::Crushed { character: 0, .. }));
+        println!("overlap {overlap}: crushed {crushed}");
+        assert_eq!(crushed, overlap > 0.0, "overlap {overlap}");
+    }
+}

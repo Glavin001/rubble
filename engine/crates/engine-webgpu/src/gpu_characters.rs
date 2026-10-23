@@ -168,6 +168,44 @@ impl WgpuSim {
         slots.chunks(PROJ_STRIDE as usize).map(ProjectileState::decode).collect()
     }
 
+    /// `compact`'s renumbering of the motion records: characters (inner
+    /// capsule, ground body and collider), projectiles (excluded body, last hit
+    /// collider) and the host's queued impulses.
+    pub(crate) fn remap_motion(&mut self, body_map: &[u32], col_map: &[u32]) {
+        let map = |m: &[u32], id: u32| m.get(id as usize).copied().unwrap_or(u32::MAX);
+        // NO_INDEX: "none" in the float-packed id words.
+        let opt = |m: &[u32], id: u32| if id == NO_INDEX { NO_INDEX } else { Some(map(m, id)).filter(|&n| n != u32::MAX).unwrap_or(NO_INDEX) };
+        for (k, (body, collider)) in self.characters.iter_mut().enumerate() {
+            let (nb, nc) = (map(body_map, *body), map(col_map, *collider));
+            assert!(nb != u32::MAX && nc != u32::MAX, "compact: character {k}'s inner capsule was dropped");
+            (*body, *collider) = (nb, nc);
+        }
+        let n = self.characters.len() as u32;
+        if n > 0 {
+            let base = self.char_cap.character_base();
+            let mut slots = self.read_char_slots(base, n * CHAR_STRIDE);
+            for (k, rec) in slots.chunks_mut(CHAR_STRIDE as usize).enumerate() {
+                rec[C_CFG as usize][0] = self.characters[k].0;
+                rec[C_GND as usize][3] = opt(body_map, rec[C_GND as usize][3]);
+                rec[C_GPT as usize][3] = opt(col_map, rec[C_GPT as usize][3]);
+            }
+            self.write_char_slots(base, &slots);
+        }
+        if self.projectile_count > 0 {
+            let base = self.char_cap.projectile_base();
+            let mut slots = self.read_char_slots(base, self.projectile_count * PROJ_STRIDE);
+            for rec in slots.chunks_mut(PROJ_STRIDE as usize) {
+                rec[PJ_CFG as usize][2] = opt(body_map, rec[PJ_CFG as usize][2]);
+                rec[PJ_OUT as usize][3] = opt(col_map, rec[PJ_OUT as usize][3]);
+            }
+            self.write_char_slots(base, &slots);
+        }
+        self.impulse_queue.retain_mut(|r| {
+            r.body = map(body_map, r.body);
+            r.body != u32::MAX
+        });
+    }
+
     /// Character and projectile events since the last call (event ring).
     pub fn poll_motion_events(&mut self) -> Vec<MotionEvent> {
         let words = self.read_words(21, u64::from(EVENT_RING_BASE), (4 + 4 * EVENT_RING_CAPACITY) as usize);
