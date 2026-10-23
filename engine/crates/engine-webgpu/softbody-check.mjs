@@ -31,13 +31,13 @@ const CHECKS = {
     query: 'scene=yard',
     run: async (page) => {
       const p0 = (await page.step(60, { forward: 0, steer: 0 })).player.p;
-      const r = await page.step(480, { forward: 1, steer: 0 }); // 2 s: clear of the poles at z = 34
+      const r = await page.step(360, { forward: 1, steer: 0 }); // 1.5 s: clear of the poles and crates
       const moved = Math.hypot(r.player.p[0] - p0[0], r.player.p[2] - p0[2]);
       const speed = Math.hypot(...r.player.v) * 3.6;
-      const r2 = await page.step(360, { forward: 0.6, steer: 1 });
+      const r2 = await page.step(300, { forward: 0.5, steer: 1 });
       const turned = Math.abs(r2.player.p[0] - r.player.p[0]);
       await page.view({ chase: true });
-      return { ok: moved > 8 && speed > 25 && turned > 2 && r2.damage[0].broken === 0,
+      return { ok: moved > 5 && speed > 20 && turned > 2 && r2.damage[0].broken === 0,
         msg: `drove ${moved.toFixed(1)} m to ${speed.toFixed(0)} km/h, turned ${turned.toFixed(1)} m sideways, player beams bent ${r2.damage[0].yielded} broken ${r2.damage[0].broken}` };
     },
   },

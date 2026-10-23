@@ -905,3 +905,39 @@ fn skinned_render_mesh_follows_the_physics_surface_through_a_crash() {
     assert!(q(0.95) < 0.06, "95% of the body stays within 6 cm of the physics skin");
     assert!(q(0.5) < 0.01);
 }
+
+#[test]
+fn rigid_mode_rides_the_core_while_quiet_and_crashes_like_soft() {
+    // Rigid mode: a car cruising with nothing near turns rigid within its quiet
+    // time; hitting a wall turns it soft in the same step, and the crush matches
+    // the always-soft car's.
+    let run_crash = |rigid: bool| -> (bool, bool, f32) {
+        let mut sim = world(240.0, 10);
+        sim.set_soft_settings(SoftSettings { rigid_mode: rigid, ..Default::default() });
+        static_box(&mut sim, [0.0, 1.5, 22.5], [3.0, 1.5, 0.2]);
+        let (desc, _) = engine_softbody::procedural::car_desc(&CarParams::default());
+        let h = sim
+            .add_soft_vehicle(&desc, [0.0, 0.05, 0.0], [0.0, 0.0, 0.0, 1.0], &SpawnOptions { velocity: [0.0, 0.0, 15.6], ..Default::default() })
+            .expect("spawn");
+        let rest = positions(&sim, h);
+        run(&mut sim, 240); // 1 s of cruising, 15.6 m: still 4 m short of the wall
+        let was_rigid = sim.read_soft_rigid(h);
+        run(&mut sim, 480);
+        let now = positions(&sim, h);
+        let ring = engine_softbody::procedural::CAR_RING;
+        let n = CarParams::default().stations;
+        let len = |x: &[Vec3]| {
+            let c = |k: usize| (0..6).map(|j| x[k * ring + j]).sum::<Vec3>() / 6.0;
+            (c(n - 1) - c(0)).length()
+        };
+        (was_rigid, sim.read_soft_rigid(h), len(&rest) - len(&now))
+    };
+    let (soft_before, _, soft_crush) = run_crash(false);
+    let (rigid_before, rigid_after, rigid_crush) = run_crash(true);
+    eprintln!("crush: always soft {soft_crush:.3} m, rigid mode {rigid_crush:.3} m");
+    assert!(!soft_before, "rigid mode off: never rigid");
+    assert!(rigid_before, "cruising quietly for 1 s: rigid");
+    assert!(!rigid_after, "after the wall: soft");
+    assert!(soft_crush > 0.3);
+    assert!((soft_crush - rigid_crush).abs() < 0.05, "same crush within 5 cm");
+}

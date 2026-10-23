@@ -22,7 +22,11 @@
 use serde::{Deserialize, Serialize};
 
 pub const HEADER_SLOTS: u32 = 8;
-pub const BODY_STRIDE: u32 = 3;
+/// Soft body record: [firstBody, particles, firstBeam, beams], [steer, group,
+/// core, ordinal base], [firstTri, tris, δ, 0], then rigid mode: [mode, quiet
+/// steps, flags | core joint count << 8, first core joint], the core's soft-mode
+/// [1/m, 1/I xyz] and rigid-mode [1/m, 1/I xyz] (f32).
+pub const BODY_STRIDE: u32 = 6;
 pub const BEAM_STRIDE: u32 = 4;
 /// Node contacts a triangle records (its side of node–triangle contacts).
 pub const TRI_NODE_CONTACTS: u32 = 4;
@@ -63,6 +67,8 @@ pub const BEAM_YIELDED: u32 = 1 << 7;
 
 /// Header flags (slot 2 .w).
 pub const SOFT_PLASTICITY: u32 = 1;
+/// Quiet soft bodies ride their core rigidly (`SoftSettings::rigid_mode`).
+pub const SOFT_RIGID_MODE: u32 = 16;
 pub const SOFT_BREAKING: u32 = 2;
 pub const SOFT_SLEEP_SYNC: u32 = 4;
 /// Node–triangle and triangle–obstacle contacts.
@@ -119,6 +125,9 @@ pub struct SoftLayout {
     pub adj_base: u32,
     pub cheb_base: u32,
     pub tri_base: u32,
+    /// Per particle (by ordinal): its position in its core's frame, captured each
+    /// step while the body is soft and followed while it is rigid.
+    pub rigid_base: u32,
     /// Rest edge lengths per triangle (ab, bc, ca as f32): a triangle stretched
     /// past `TRI_TEAR` × rest is torn and stops colliding.
     pub tri_rest_base: u32,
@@ -163,7 +172,8 @@ impl SoftCapacity {
             flag_base,
             obstacle_base,
             aabb_base,
-            total_slots: aabb_base + 2 * self.max_bodies,
+            rigid_base: aabb_base + 2 * self.max_bodies,
+            total_slots: aabb_base + 2 * self.max_bodies + self.max_particles,
         }
     }
 
@@ -198,6 +208,14 @@ pub struct SoftSettings {
     /// Penalty stiffness of soft contacts (N/m) and their friction coefficient.
     pub contact_stiffness: f32,
     pub contact_friction: f32,
+    /// Rigid mode (design: "rigid mode with promotion"): a soft body with a rigid
+    /// core that has had no contact and no plastic yield for `rigid_quiet` s
+    /// rides its core rigidly (its particles follow the core's pose, the core
+    /// carries the whole mass and inertia) and skips the particle solve. It turns
+    /// soft again, within the same step, on any contact of its particles or when
+    /// its bounds near another soft body or an obstacle.
+    pub rigid_mode: bool,
+    pub rigid_quiet: f32,
     /// Particle sweeps per solver iteration (1 = one per iteration). The soft
     /// bodies couple to the rigid passes only through their core joints, so
     /// extra sweeps converge them at about half the cost of extra iterations.
@@ -220,6 +238,8 @@ impl Default for SoftSettings {
             contact_stiffness: 1.0e7,
             contact_friction: 0.5,
             sweeps: 1,
+            rigid_mode: false,
+            rigid_quiet: 0.5,
         }
     }
 }
@@ -233,13 +253,13 @@ mod tests {
         let c = SoftCapacity::default();
         let l = c.layout();
         assert!(l.body_base >= HEADER_SLOTS);
-        assert_eq!(l.beam_base - l.body_base, 3 * c.max_bodies);
+        assert_eq!(l.beam_base - l.body_base, BODY_STRIDE * c.max_bodies);
         assert_eq!(l.group_base - l.beam_base, 4 * c.max_beams);
         assert_eq!(
             l.adj_base + (2 * c.max_beams + 3 * c.max_triangles).div_ceil(4),
             l.cheb_base
         );
-        assert_eq!(l.aabb_base + 2 * c.max_bodies, l.total_slots);
+        assert_eq!(l.rigid_base + c.max_particles, l.total_slots);
         // The default pool stays well under WebGPU's 128 MiB binding limit.
         assert!(c.bytes() < 128 << 20);
     }

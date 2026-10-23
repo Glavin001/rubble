@@ -203,7 +203,9 @@
     const calibrated = calibratedSettings(HZ);
     const threshold = Number(qs.get('threshold')) || calibrated.threshold_scale;
     const sweeps = Number(qs.get('sweeps')) || calibrated.sweeps;
-    world.setSoftSettings({ ...calibrated, threshold_scale: threshold, sweeps });
+    // Rigid mode (on unless ?rigid=0): quiet cars ride their cores rigidly and
+    // skip the particle solve; any contact or nearby body turns them soft.
+    world.setSoftSettings({ ...calibrated, threshold_scale: threshold, sweeps, rigid_mode: qs.get('rigid') !== '0' });
 
     const qAxis = (ax, ang) => { const s = Math.sin(ang / 2); return [ax[0] * s, ax[1] * s, ax[2] * s, Math.cos(ang / 2)]; };
     const boxInv = (m, hx, hy, hz) => [3 / (m * (hy * hy + hz * hz)), 3 / (m * (hx * hx + hz * hz)), 3 / (m * (hx * hx + hy * hy))];
@@ -1072,6 +1074,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
         }
         return { name: e.name, beams: e.beams, yielded, broken };
       });
+      world.readSoftModes().then((m) => { rigidCount = m.filter((x) => x === 1).length; }).catch(() => {});
       // Destruction events (engine): beam breaks and the parts they tore off.
       const ev = await world.pollSoftEvents();
       breaks += ev.breaks.length;
@@ -1234,10 +1237,11 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     let fpsAcc = 0, fpsN = 0, fpsShow = 0;
     const updateStatus = () => {
       statusEl.textContent = `${world.bodyCount} bodies (${world.soft.entries.reduce((n, e) => n + e.particles, 0)} particles, ${beamTotal} beams) · ${HZ} Hz × ${world.params.iterations} it · step ${world.steps} (${(world.steps / HZ).toFixed(1)} s)`
+        + ` · ${rigidCount}/${softs.filter((x) => x.core).length} rigid`
         + (manual ? '' : ` · ${fpsShow.toFixed(0)} fps · ${(realTime * 100).toFixed(0)}% real time`) + (lastCounters ? ` · contacts ${lastCounters.contact} · awake ${lastCounters.awake}` : '');
     };
     let manual = false;
-    let stepAcc = 0, simAcc = 0, wallAcc = 0, realTime = 1;
+    let stepAcc = 0, simAcc = 0, wallAcc = 0, realTime = 1, rigidCount = 0;
     function frame(now) {
       const dt = Math.min(0.05, (now - lastT) / 1000);
       lastT = now;

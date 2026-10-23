@@ -440,6 +440,8 @@ pub fn encode_step(
             e.d("soft_collide_nodes", u64::from(i.soft.particles.max(1)));
             e.d("soft_collide_tris", u64::from(i.soft.triangles.max(1)));
         }
+        // Rigid mode: promote / demote before the solve (soft_step.slang).
+        e.d("soft_mode", u64::from(i.soft.bodies.max(1)));
         e.phase("soft_begin");
     }
 
@@ -614,6 +616,7 @@ pub const SOFT_ENTRIES: &[&str] = &[
     "soft_primal",
     "soft_primal_fused",
     "soft_chebyshev",
+    "soft_mode",
     "soft_dual",
     "soft_plastic",
     "soft_break_groups",

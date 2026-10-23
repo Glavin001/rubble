@@ -57,6 +57,10 @@ pub struct SoftEntry {
     pub broken: Vec<bool>,
     /// Nodes already reported as part of a detached piece.
     pub detached: Vec<bool>,
+    /// The core's [1/m, 1/I xyz] in soft mode (its own share) and in rigid mode
+    /// (the whole vehicle), for `soft_mode` to swap.
+    pub core_soft_mass: [f32; 4],
+    pub core_rigid_mass: [f32; 4],
 }
 
 #[derive(Clone, Debug)]
@@ -270,6 +274,7 @@ impl SoftHost {
         // Rigid core (stage 1): wheels and drivetrain on a frame proxy.
         let mut core = None;
         let mut core_joints = 0..0;
+        let mut rigid_props: Option<([f32; 4], [f32; 4])> = None;
         if let (Some(plan), Some(vh)) = (packed.core.clone(), vehicles) {
             let CorePlan {
                 vehicle,
@@ -311,6 +316,27 @@ impl SoftHost {
             let start = backend.joint_count();
             backend.append_joints(&j);
             core_joints = start..backend.joint_count();
+            // Mass properties of the core alone (soft mode) and of the whole
+            // vehicle about the core (rigid mode), in the core's frame.
+            let cb = backend.host_body(chassis);
+            let cpos = Vec3::from_array(cb.position);
+            let cq = Quat::from_array(cb.orientation).inverse();
+            let core_m = if cb.inv_mass > 0.0 { 1.0 / cb.inv_mass } else { 0.0 };
+            let mut inertia = Vec3::from_array(cb.inv_inertia).map(|x| if x > 0.0 { 1.0 / x } else { 0.0 });
+            let mut total = core_m;
+            for (k, n) in desc.nodes.iter().enumerate() {
+                let m = packed.masses.get(k).copied().unwrap_or(0.0);
+                if n.fixed || m <= 0.0 {
+                    continue;
+                }
+                let r = cq * (place.apply(Vec3::from_array(n.position)) - cpos);
+                inertia += m * Vec3::new(r.y * r.y + r.z * r.z, r.x * r.x + r.z * r.z, r.x * r.x + r.y * r.y);
+                total += m;
+            }
+            rigid_props = Some((
+                [cb.inv_mass, cb.inv_inertia[0], cb.inv_inertia[1], cb.inv_inertia[2]],
+                [1.0 / total.max(1e-6), 1.0 / inertia.x.max(1e-6), 1.0 / inertia.y.max(1e-6), 1.0 / inertia.z.max(1e-6)],
+            ));
             core = Some((h, chassis));
         }
         let beam_ends: Vec<(u32, u32)> = packed.beams.iter().map(|b| (b.a - first_body, b.b - first_body)).collect();
@@ -319,6 +345,8 @@ impl SoftHost {
             beam_ends,
             broken: vec![false; n_beams],
             detached: vec![false; desc.nodes.len()],
+            core_soft_mass: rigid_props.map_or([0.0; 4], |r| r.0),
+            core_rigid_mass: rigid_props.map_or([0.0; 4], |r| r.1),
             first_body,
             particles: desc.nodes.len() as u32,
             first_collider,
@@ -340,6 +368,7 @@ impl SoftHost {
         });
         self.steer.push(0.0);
         self.upload_topology(backend);
+        self.write_body_mode(backend, s);
         Ok(SoftHandle(s))
     }
 
@@ -374,6 +403,25 @@ impl SoftHost {
         backend.write_soft_slots(l.body_base + BODY_STRIDE * s, &rec);
     }
 
+    /// Rigid-mode state (spawn only: `soft_mode` owns the mode and quiet count).
+    fn write_body_mode(&self, backend: &mut impl SoftBackend, s: u32) {
+        let e = &self.entries[s as usize];
+        let l = self.capacity.layout();
+        let has_core = u32::from(e.core.is_some());
+        let joints = e.core_joints.end - e.core_joints.start;
+        let rec = [
+            [
+                0,
+                0,
+                has_core | (joints.min(255) << 8) | (((self.settings.rigid_quiet * 1000.0) as u32).min(65535) << 16),
+                e.core_joints.start,
+            ],
+            e.core_soft_mass.map(f32::to_bits),
+            e.core_rigid_mass.map(f32::to_bits),
+        ];
+        backend.write_soft_slots(l.body_base + BODY_STRIDE * s + 3, &rec);
+    }
+
     fn write_header(&self, backend: &mut impl SoftBackend) {
         let l = self.capacity.layout();
         let c = self.counts();
@@ -381,7 +429,8 @@ impl SoftHost {
         let flags = u32::from(st.plasticity) * SOFT_PLASTICITY
             | u32::from(st.breaking) * SOFT_BREAKING
             | u32::from(st.sleep_sync) * SOFT_SLEEP_SYNC
-            | u32::from(c.contacts) * SOFT_CONTACTS;
+            | u32::from(c.contacts) * SOFT_CONTACTS
+            | u32::from(st.rigid_mode) * SOFT_RIGID_MODE;
         let list_count: u32 = self.list_len();
         let header: [Slot; 8] = [
             [c.bodies, c.beams, c.colors, list_count],
@@ -391,7 +440,7 @@ impl SoftHost {
                 st.damping_scale.to_bits(),
                 st.beta.to_bits(),
                 st.min_length.to_bits(),
-                0,
+                l.rigid_base,
             ],
             [
                 st.threshold_scale.to_bits(),

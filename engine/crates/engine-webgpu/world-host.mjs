@@ -273,6 +273,13 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     for (let i = 0; i < e.particles; i++) out.set(f.subarray(i * 28, i * 28 + 3), i * 3);
     return out;
   };
+  // Rigid mode of every soft body (1 = riding its core rigidly, 0 = soft):
+  // SoftSettings.rigid_mode; the record's first word, BODY_STRIDE = 6 slots.
+  world.readSoftModes = async () => {
+    const n = world.soft.entries.length;
+    const w = await readWords(bufs[32], world.soft.layout.bodyBase * 16, n * 6 * 16);
+    return Array.from({ length: n }, (_, s) => w[(s * 6 + 3) * 4]);
+  };
   // Damage of soft body `h` (SoftHost.damage).
   world.readSoftDamage = async (h) => world.soft.damage(h, await world.readSoftBeams(h), await world.readSoftParticles(h));
   // Destruction events since the last call: beam breaks and the pieces they cut

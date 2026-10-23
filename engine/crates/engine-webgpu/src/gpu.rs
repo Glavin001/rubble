@@ -2226,6 +2226,15 @@ impl WgpuSim {
         SoftEvents { breaks, pieces, lost }
     }
 
+    /// Whether soft body `h` is in rigid mode right now (`SoftSettings::rigid_mode`):
+    /// riding its core with the particle solve skipped.
+    pub fn read_soft_rigid(&self, h: SoftHandle) -> bool {
+        let l = self.soft_host().capacity.layout();
+        let slot = l.body_base + engine_softbody::BODY_STRIDE * h.0 + 3;
+        let w: Vec<u32> = self.read_buffer_range(32, u64::from(slot) * 16, 4);
+        w[0] == 1
+    }
+
     /// A soft body's damage: beams bent and broken, plastic work, and the
     /// per-node deformation from its rest shape (rigid motion removed).
     pub fn read_soft_damage(&self, h: SoftHandle) -> engine_softbody::SoftDamage {

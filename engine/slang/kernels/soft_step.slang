@@ -45,6 +45,7 @@ static const uint SOFT_PLASTICITY = 1u;
 static const uint SOFT_BREAKING = 2u;
 static const uint SOFT_SLEEP_SYNC = 4u;
 static const uint SOFT_CONTACTS = 8u;
+static const uint SOFT_RIGID_MODE = 16u;
 static const uint ENTRY_CONTACTER = 65536u;
 // Node contacts a triangle records (the triangle side of node–triangle contacts).
 static const uint TRI_NODE_CONTACTS = 4u;
@@ -190,9 +191,14 @@ float beamReadout(SoftBeam e, float len, float len0, float h)
 // Soft body records: [firstBody, particles, firstBeam, beams],
 // [steer, group, core, ordinal base], [firstTri, tris, δ, 0]
 // ---------------------------------------------------------------------------
-uint4 softBodyRec(uint s) { return SU(softBodyBase() + 3u * s); }
-float4 softBodyRec1(uint s) { return SD(softBodyBase() + 3u * s + 1u); }
-uint4 softBodyRec2(uint s) { return SU(softBodyBase() + 3u * s + 2u); }
+uint4 softBodyRec(uint s) { return SU(softBodyBase() + 6u * s); }
+float4 softBodyRec1(uint s) { return SD(softBodyBase() + 6u * s + 1u); }
+uint4 softBodyRec2(uint s) { return SU(softBodyBase() + 6u * s + 2u); }
+// Rigid mode: [mode, quiet steps, flags (bit 0 has core) | joints << 8 | quiet ms << 16, first core joint].
+uint softModeSlot(uint s) { return softBodyBase() + 6u * s + 3u; }
+bool softIsRigid(uint s) { return SU(softModeSlot(s)).x == 1u; }
+uint softRigidBase() { return SU(3u).w; }
+float3 quatRotateInv(float4 q, float3 v) { return quatRotate(float4(-q.xyz, q.w), v); }
 
 // Ordinal (index across every soft particle) of a particle body.
 uint particleOrdinal(uint s, uint body) { return asuint(softBodyRec1(s).w) + body - softBodyRec(s).x; }
@@ -291,11 +297,32 @@ void soft_begin(uint3 tid : SV_DispatchThreadID)
         // beams moves the whole structure only slowly; a full h² g drop at rest
         // would leave an under-converged sweep sagging (and its supports
         // over-loaded) every step.
-        uint body = SU(softListBase() + i).x;
+        uint4 ent = SU(softListBase() + i);
+        uint body = ent.x;
         uint q = softChebBase() + 3u * i;
         BodyState b = gBodies[body];
-        if (bodyIsDynamic(b) && !bodyIsSleeping(b) && !wakePending(b))
+        uint sb = ent.w & 0xFFFFu;
+        uint core = asuint(softBodyRec1(sb).z);
+        uint ord = particleOrdinal(sb, body);
+        if (bodyIsDynamic(b) && !bodyIsSleeping(b) && !wakePending(b) && core != SOFT_NO_BODY && softIsRigid(sb))
         {
+            // Rigid mode: the particle rides its core (predicted pose).
+            BodyState c = gBodies[core];
+            float3 x = c.position + quatRotate(c.orientation, SD(softRigidBase() + ord).xyz);
+            gBodies[body].position = x;
+            gSoftData[q] = float4(x, 0.0);
+            gSoftData[q + 1u] = float4(x, 0.0);
+            gSoftData[q + 2u] = float4(b.linearVel, 0.0);
+        }
+        else if (bodyIsDynamic(b) && !bodyIsSleeping(b) && !wakePending(b))
+        {
+            // Soft: remember where the particle sits in its core's frame at the
+            // start of the step (what rigid mode would hold it to).
+            if (core != SOFT_NO_BODY)
+            {
+                BodyState c = gBodies[core];
+                gSoftData[softRigidBase() + ord] = float4(quatRotateInv(c.initialRot, b.initialPos - c.initialPos), 0.0);
+            }
             AvbdParams p = PARAMS;
             float h = p.dt;
             float3 gv = float3(0.0, p.gravityY, 0.0);
@@ -774,6 +801,14 @@ void softSolveEntry(uint4 ent)
     uint body = ent.x;
     BodyState b = gBodies[body];
     if (!bodyIsDynamic(b) || bodyIsSleeping(b) || wakePending(b)) return;
+    uint sb0 = ent.w & 0xFFFFu;
+    if (softIsRigid(sb0))
+    {
+        // Rigid mode: follow the core's current iterate, no particle solve.
+        BodyState c = gBodies[asuint(softBodyRec1(sb0).z)];
+        gBodies[body].position = c.position + quatRotate(c.orientation, SD(softRigidBase() + particleOrdinal(sb0, body)).xyz);
+        return;
+    }
     AvbdParams p = PARAMS;
     float h = max(p.dt, 1e-6);
 
@@ -873,6 +908,7 @@ void softChebyshevEntry(uint i, uint it)
     float3 x = b.position;
     uint4 ent = SU(softListBase() + i);
     bool soft = softContactsOn() && SD(softFlagBase() + particleOrdinal(ent.w & 0xFFFFu, body)).x != 0.0;
+    if (softIsRigid(ent.w & 0xFFFFu)) soft = true; // rigid mode: no acceleration
     if (it > 0u && bodyIsDynamic(b) && !bodyIsSleeping(b) && !wakePending(b) && !soft
         && SOLVE_INDEX(body + 1u) == SOLVE_INDEX(body))
     {
@@ -922,6 +958,94 @@ void soft_primal_fused(uint3 lid : SV_GroupThreadID)
     }
 }
 
+// A yield or a break keeps its body soft: restart its quiet count.
+void softQuietReset(uint s)
+{
+    uint4 st = SU(softModeSlot(s));
+    if (st.y != 0u) gSoftData[softModeSlot(s)] = asfloat(uint4(st.x, 0u, st.z, st.w));
+}
+
+// Core mass properties and core joints for a mode (soft: the core alone, joined
+// to the axle nodes; rigid: the whole vehicle, joints off).
+void softSetMode(uint s, uint core, uint4 st, bool rigid)
+{
+    float4 m = SD(softBodyBase() + 6u * s + (rigid ? 5u : 4u));
+    gBodies[core].invMass = m.x;
+    gBodies[core].invInertia = m.yzw;
+    uint nj = (st.z >> 8) & 255u;
+    for (uint j = st.w; j < st.w + nj; j++)
+    {
+        uint f = gJoints[j].flags;
+        gJoints[j].flags = rigid ? (f | JOINT_FLAG_BROKEN) : (f & ~JOINT_FLAG_BROKEN);
+    }
+}
+
+// Rigid mode (design: "rigid mode with promotion"), once per soft body per step
+// after the contact passes and before the solve. Promote (turn soft) on any
+// contact of a particle (a contact edge in its constraint list) or bounds that
+// near another soft body or an obstacle; demote (turn rigid) after `quiet ms`
+// with neither and no yield. Both take effect this step.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void soft_mode(uint3 tid : SV_DispatchThreadID)
+{
+    uint s = dispatchIndex(tid);
+    if (s >= softBodyCount()) return;
+    uint4 st = SU(softModeSlot(s));
+    if ((st.z & 1u) == 0u) return; // no rigid core
+    uint core = asuint(softBodyRec1(s).z);
+    if (core == SOFT_NO_BODY) return;
+    bool enabled = (softFlags() & SOFT_RIGID_MODE) != 0u;
+    uint4 r = softBodyRec(s);
+    bool trigger = !enabled;
+    uint nJ = gCounters[0].jointCount;
+    for (uint k = 0u; k < r.y && !trigger; k++)
+    {
+        uint b = r.x + k;
+        uint hi = SOLVE_INDEX(b + 1u);
+        for (uint e = SOLVE_INDEX(b); e < hi; e++)
+        {
+            if (SOLVE_ID(e) >= nJ) { trigger = true; break; }
+        }
+    }
+    if (!trigger && softContactsOn())
+    {
+        BodyState c = gBodies[core];
+        float m = 0.5 + 0.15 * length(c.linearVel);
+        float3 lo = SD(softAabbBase() + 2u * s).xyz - m, hi = SD(softAabbBase() + 2u * s + 1u).xyz + m;
+        uint nb = softBodyCount();
+        for (uint s2 = 0u; s2 < nb && !trigger; s2++)
+        {
+            if (s2 == s) continue;
+            float3 lo2 = SD(softAabbBase() + 2u * s2).xyz, hi2 = SD(softAabbBase() + 2u * s2 + 1u).xyz;
+            if (all(lo <= hi2) && all(lo2 <= hi)) trigger = true;
+        }
+        uint nObs = softObstacleCount();
+        for (uint k = 0u; k < nObs && !trigger; k++)
+        {
+            Collider col = gColliders[SU(softObstacleBase() + k).x];
+            BodyState ob = gBodies[col.body];
+            float3 cs = transformPoint(ob.position, ob.orientation, col.localPos);
+            float rad = col.params.w;
+            if (all(cs + rad >= lo) && all(cs - rad <= hi)) trigger = true;
+        }
+    }
+    float h = max(PARAMS.dt, 1e-6);
+    uint quiet = trigger ? 0u : min(st.y + 1u, 1u << 24);
+    uint mode = st.x;
+    if (mode == 1u && trigger)
+    {
+        mode = 0u;
+        softSetMode(s, core, st, false);
+    }
+    else if (mode == 0u && enabled && float(quiet) * h * 1000.0 >= float(st.z >> 16))
+    {
+        mode = 1u;
+        softSetMode(s, core, st, true);
+    }
+    gSoftData[softModeSlot(s)] = asfloat(uint4(mode, quiet, st.z, st.w));
+}
+
 // Dual update per beam: the finite-stiffness ramp k ← min(k*, k + β|C|), and the
 // multiplier of hard (augmented-Lagrangian) beams.
 [shader("compute")]
@@ -956,6 +1080,7 @@ void soft_plastic(uint3 tid : SV_DispatchThreadID)
     if (i >= softBeamCount()) return;
     SoftBeam e = loadBeam(i);
     if (beamBroken(e)) return;
+    if (softIsRigid(beamSoftBody(e))) return; // rigid mode: the shape does not change
     BodyState ba = gBodies[e.a];
     BodyState bb = gBodies[e.b];
     // Both ends asleep (or static): nothing moved this step.
@@ -984,6 +1109,7 @@ void soft_plastic(uint3 tid : SV_DispatchThreadID)
             if (e.shortB > 0.0) e.rest = max(e.rest, e.rest0 * e.shortB);
             e.deformC *= old / e.rest;
             e.meta |= BEAM_YIELDED;
+            softQuietReset(beamSoftBody(e));
         }
         else if (-force > dt && delta > 0.0)
         {
@@ -997,6 +1123,7 @@ void soft_plastic(uint3 tid : SV_DispatchThreadID)
             e.deformT *= e.rest / old;
             e.strength -= deform * k / ts;
             e.meta |= BEAM_YIELDED;
+            softQuietReset(beamSoftBody(e));
         }
     }
     e.force = force;

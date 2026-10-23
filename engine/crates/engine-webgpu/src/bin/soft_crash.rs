@@ -139,6 +139,7 @@ fn main() {
     sim.set_soft_settings(SoftSettings {
         threshold_scale: a.get("threshold", cal.threshold_scale),
         sweeps: a.get("sweeps", 1.0) as u32,
+        rigid_mode: a.get("rigidmode", 0.0) > 0.5,
         ..cal
     });
     for (m, f) in [(0, 1.0), (9, 0.8)] {
@@ -183,7 +184,8 @@ fn main() {
             .collect();
         Car { h, rest }
     };
-    let gap = 0.3;
+    // `back=` m of extra run-up (time to settle, and to turn rigid in rigid mode).
+    let gap = 0.3 + a.get("back", 0.0);
     let mut cars = Vec::new();
     let mut ram = None;
     match scenario.as_str() {
