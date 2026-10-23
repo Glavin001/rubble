@@ -252,6 +252,10 @@ fn threshold_gpu(gpu: &Gpu, scene: &stress_ref::scene::Scene, ball: (f64, f64, f
             bodies.hash(&mut h);
             h.finish()
         };
+        if !w.phases.is_empty() {
+            let line: Vec<String> = w.phases.iter().map(|(n, ms)| format!("{n} {:.2}", ms / frames as f64)).collect();
+            println!("  phases (ms a frame, each waited for): {}", line.join(", "));
+        }
         println!("  end state: broken {}, new bodies {}, split frames {}, errors {:#x}; bodies hash {hash:x}", exact.broken, exact.pieces, exact.split_frames, exact.error);
         let after = &mut ms[5.min(ms.len())..].to_vec();
         after.sort_by(f64::total_cmp);

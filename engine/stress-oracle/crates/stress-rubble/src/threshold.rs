@@ -86,6 +86,8 @@ pub struct ThresholdWorld {
     pub last: ThresholdStats,
     /// The structures' bodies at the start.
     initial_bodies: u32,
+    /// `STRESS_THRESHOLD_PHASES=1`: each part's summed wall time (ms).
+    pub phases: Vec<(&'static str, f64)>,
     /// The ground's Young's modulus (the ingest's static side).
     ground_modulus: f64,
     /// The shots' material's (the scene's "projectile").
@@ -258,6 +260,11 @@ impl ThresholdWorld {
         }
         let ingest = EngineIngest::new(gpu, capacity.max_contacts, 1, capacity.max_bodies, chunk_count as u32, &table);
         let fracture = GpuFracture::new(gpu, &t, &engine.engine_buffers_now(), &ingest)?;
+        // Nothing reads rubble's counters back each step, and a plan from counters read a
+        // frame or two late would differ run to run (the warm-start hash's size, which
+        // colours get their own dispatch: both change results). Fixed instead: the hash
+        // sized for the contact capacity, every colour its own dispatch.
+        engine.sim.set_plan_hints(capacity.max_contacts, capacity.max_colors.min(32));
         let ring = (0..RING)
             .map(|_| {
                 let b = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("threshold stats"), size: 64 + COUNTER_BYTES, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
@@ -265,7 +272,7 @@ impl ThresholdWorld {
             })
             .collect();
         let mirror = world.solver.clone();
-        Ok(ThresholdWorld { mirror, scene: scene.clone(), engine, ingest, fracture, tables: t, chunk_of, frame_dt: scene.sim.frame_dt, frame: 0, shots, fired: 0, ring, ring_next: 0, last: ThresholdStats::default(), initial_bodies: m.clusters.len() as u32, ground_modulus, projectile_modulus: projectile.youngs_modulus, shot_radius })
+        Ok(ThresholdWorld { mirror, scene: scene.clone(), engine, ingest, fracture, tables: t, chunk_of, frame_dt: scene.sim.frame_dt, frame: 0, shots, fired: 0, ring, ring_next: 0, last: ThresholdStats::default(), initial_bodies: m.clusters.len() as u32, phases: Vec::new(), ground_modulus, projectile_modulus: projectile.youngs_modulus, shot_radius })
     }
 
     /// Launch a shot (`desc`: the stress frame, its pose and velocity): its record written
@@ -306,7 +313,26 @@ impl ThresholdWorld {
     /// One frame: rubble's step, its contacts ingested, the loads, breaks and splits. One
     /// submission; nothing waited for.
     pub fn step_frame(&mut self, gpu: &Gpu) -> Result<(), String> {
+        // `STRESS_THRESHOLD_PHASES=1` (a diagnostic): each part submitted and waited for,
+        // its wall time summed in `phases`.
+        let timing = std::env::var("STRESS_THRESHOLD_PHASES").is_ok_and(|v| v == "1");
+        let mut clock = web_time::Instant::now();
+        let mut mark = |name: &'static str, enc: &mut wgpu::CommandEncoder, phases: &mut Vec<(&'static str, f64)>| {
+            if !timing {
+                return;
+            }
+            let done = std::mem::replace(enc, gpu.device.create_command_encoder(&Default::default()));
+            gpu.queue.submit([done.finish()]);
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+            let ms = clock.elapsed().as_secs_f64() * 1e3;
+            match phases.iter_mut().find(|p| p.0 == name) {
+                Some(p) => p.1 += ms,
+                None => phases.push((name, ms)),
+            }
+            clock = web_time::Instant::now();
+        };
         let mut enc = gpu.device.create_command_encoder(&Default::default());
+        mark("(before)", &mut enc, &mut self.phases);
         let e = self.engine.engine_buffers_now();
         self.ingest.begin_frame(&mut enc, &e);
         let mut params = self.engine.sim.params();
@@ -322,10 +348,13 @@ impl ThresholdWorld {
         } else {
             self.engine.sim.step_encode(&mut enc).map_err(|e| format!("rubble step failed: {e:?}"))?;
         }
+        mark("rubble step", &mut enc, &mut self.phases);
         let e = self.engine.engine_buffers_now();
         self.ingest.substep(gpu, &mut enc, &e, self.engine.sim.last_contact_offset(), 0, self.frame_dt);
         self.ingest.merge(gpu, &mut enc, &e, 1);
+        mark("ingest", &mut enc, &mut self.phases);
         self.fracture.encode_frame(gpu, &mut enc, self.engine.sim.steps_done());
+        mark("fracture", &mut enc, &mut self.phases);
         self.frame += 1;
         // The counters into the ring's next free slot (a read when the host polls).
         let slot = self.ring_next;
