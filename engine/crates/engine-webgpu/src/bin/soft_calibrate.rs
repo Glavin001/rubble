@@ -7,6 +7,8 @@
 //!
 //! ```bash
 //! cargo run -p engine-webgpu --release --bin soft_calibrate
+//! # a custom sweep: step rate × iterations, Chebyshev ρ, particle sweeps per iteration, no fit
+//! SETTINGS=120x10,120x20,240x10 CHEB=0 SWEEPS=2 FIT=0 cargo run -p engine-webgpu --release --bin soft_calibrate
 //! ```
 use engine_schema::{BodyState, Collider, Material, ShapeType, WorldCapacity};
 use engine_softbody::calibrate::*;
@@ -24,6 +26,8 @@ struct Setting {
     hz: f32,
     iterations: u32,
     threshold_scale: f32,
+    /// The reference ignores the sweep's CHEB and HARD overrides.
+    reference: bool,
 }
 
 fn world(s: Setting) -> WgpuSim {
@@ -42,9 +46,17 @@ fn world(s: Setting) -> WgpuSim {
     let mut p = soft_scene_params(s.hz, s.iterations);
     p.sleep_time = 1.0e6;
     sim.set_params(p);
+    let d = SoftSettings::default();
     sim.set_soft_settings(SoftSettings {
         threshold_scale: s.threshold_scale,
-        ..Default::default()
+        chebyshev_rho: env_f32("CHEB")
+            .filter(|_| !s.reference)
+            .unwrap_or(d.chebyshev_rho),
+        sweeps: env_f32("SWEEPS")
+            .filter(|_| !s.reference)
+            .map_or(d.sweeps, |v| v as u32),
+        plasticity: std::env::var("PLASTIC").as_deref() != Ok("0") || s.reference,
+        ..d
     });
     sim.set_material(
         0,
@@ -76,6 +88,10 @@ fn world(s: Setting) -> WgpuSim {
         params: [400.0, 5.0, 400.0, 566.0],
     });
     sim
+}
+
+fn env_f32(name: &str) -> Option<f32> {
+    std::env::var(name).ok().and_then(|v| v.parse().ok())
 }
 
 fn positions(sim: &WgpuSim, h: SoftHandle) -> Vec<Vec3> {
@@ -232,6 +248,7 @@ fn main() {
         hz: 960.0,
         iterations: 30,
         threshold_scale: 1.0,
+        reference: true,
     };
     let t = std::time::Instant::now();
     let r = metrics(&desc, reference);
@@ -253,13 +270,30 @@ fn main() {
         );
     };
     row("reference 960 Hz × 30", &r);
-    for (hz, it) in [(120.0, 10), (240.0, 10), (240.0, 20), (480.0, 10)] {
+    let sweep: Vec<(f32, u32)> = match std::env::var("SETTINGS") {
+        Ok(v) => v
+            .split(',')
+            .map(|p| {
+                let (hz, it) = p.split_once('x').expect("SETTINGS=HZxITERS,...");
+                (hz.parse().unwrap(), it.parse().unwrap())
+            })
+            .collect(),
+        Err(_) => vec![(120.0, 10), (240.0, 10), (240.0, 20), (480.0, 10)],
+    };
+    for (hz, it) in sweep {
         let s = Setting {
             hz,
             iterations: it,
             threshold_scale: 1.0,
+            reference: false,
         };
-        row(&format!("{hz} Hz × {it}"), &metrics(&desc, s));
+        let t = std::time::Instant::now();
+        let m = metrics(&desc, s);
+        eprintln!("{hz} Hz × {it} done in {:.1} s", t.elapsed().as_secs_f32());
+        row(&format!("{hz} Hz × {it}"), &m);
+    }
+    if std::env::var("FIT").as_deref() == Ok("0") {
+        return;
     }
     // Fit: one global threshold scale per step rate so the 60 km/h crush depth
     // (max residual) matches the reference.
@@ -280,6 +314,7 @@ fn main() {
                             hz,
                             iterations: 10,
                             threshold_scale: k,
+                            reference: false,
                         },
                         60.0,
                     )
@@ -298,6 +333,7 @@ fn main() {
                 hz,
                 iterations: 10,
                 threshold_scale: scale,
+                reference: false,
             },
             60.0,
         )

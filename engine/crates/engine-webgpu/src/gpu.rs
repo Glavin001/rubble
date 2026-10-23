@@ -2006,6 +2006,7 @@ impl WgpuSim {
             triangles: c.triangles,
             contacts: c.contacts,
             dual: c.dual,
+            sweeps: c.sweeps,
         }
     }
 

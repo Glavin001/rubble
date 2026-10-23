@@ -117,10 +117,11 @@
     world.setMaterial(WHEEL_RIM_MATERIAL, 0.9);
     // Deform/break thresholds scaled for the step rate (engine_softbody
     // SoftSettings::calibrated_for, fitted by soft_calibrate); ?threshold=1 keeps
-    // the file's raw values.
+    // the file's raw values. ?sweeps=N runs N particle sweeps per iteration.
     const calibrated = calibratedSettings(HZ);
     const threshold = Number(qs.get('threshold')) || calibrated.threshold_scale;
-    world.setSoftSettings({ ...calibrated, threshold_scale: threshold });
+    const sweeps = Number(qs.get('sweeps')) || calibrated.sweeps;
+    world.setSoftSettings({ ...calibrated, threshold_scale: threshold, sweeps });
 
     const qAxis = (ax, ang) => { const s = Math.sin(ang / 2); return [ax[0] * s, ax[1] * s, ax[2] * s, Math.cos(ang / 2)]; };
     const boxInv = (m, hx, hy, hz) => [3 / (m * (hy * hy + hz * hz)), 3 / (m * (hx * hx + hz * hz)), 3 / (m * (hx * hx + hy * hy))];

@@ -86,7 +86,7 @@ vehicle_input → soft_wake → … broadphase, narrowphase, CSR, colouring …
 | `soft_primal` | One particle colour: the 3×3 VBD block solve |
 | `soft_primal_fused` | Every colour plus the Chebyshev step in one 256-lane workgroup, when each colour fits one pass. Same Gauss–Seidel order and bit-identical results (`ENGINE_SOFT_UNFUSED=1` forces the per-colour path); saves one dispatch per colour per iteration |
 | `soft_chebyshev` | Chebyshev acceleration of the sweep (ρ = 0.9), skipped for particles with any contact or joint |
-| `soft_dual` | AVBD finite-stiffness ramp and hard-beam multipliers. Planned only when some beam ramps or is hard |
+| `soft_dual` | AVBD finite-stiffness ramp (and the multipliers of beams flagged hard; no importer sets the flag). Planned only when some beam ramps |
 | `soft_plastic`, `soft_break_groups` | Post-step plasticity and breaking at the converged state, then detacher groups |
 
 ## Beam model
@@ -256,15 +256,15 @@ and crush deeper there. The head-on at 2 × 29 km/h, for example, bends 242 beam
 `soft_calibrate` runs the standard tests (rest, tap, 1 m drop, wall at 30 and 60 km/h)
 at candidate settings against a reference. No Rigs of Rods recording is available, so
 the reference is Rubble at 960 Hz × 30 iterations, a stand-in for a 2,000 Hz explicit
-engine; this is the design's convergence check. Results on the procedural car (M3 Max):
+engine; this is the design's convergence check. Results on the procedural car with crumple zones (M3 Max):
 
 | Setting | Tap test (Hz) | Crush 30 km/h RMS / max (cm) | Crush 60 km/h RMS / max (cm) |
 |---|---|---|---|
-| reference 960 Hz × 30 | 44 | 1.7 / 5.1 | 8.6 / 22.7 |
-| 120 Hz × 10 | 15 | 2.4 / 5.9 | 6.0 / 14.8 |
-| 240 Hz × 10 | 24 | 1.4 / 4.4 | 4.6 / 12.1 |
-| 240 Hz × 20 | 24 | 1.3 / 4.2 | 4.1 / 11.4 |
-| 480 Hz × 10 | 36 | 1.7 / 4.7 | 6.6 / 17.3 |
+| reference 960 Hz × 30 | 44 | 1.7 / 5.1 | 8.4 / 22.6 |
+| 120 Hz × 10 | 15 | 2.3 / 5.8 | 5.6 / 14.3 |
+| 240 Hz × 10 | 23 | 1.4 / 4.4 | 4.5 / 12.0 |
+| 240 Hz × 20 | 25 | 1.3 / 4.2 | 4.0 / 11.3 |
+| 480 Hz × 10 | 36 | 1.7 / 4.7 | 6.4 / 17.1 |
 
 At every setting:
 
@@ -282,7 +282,7 @@ Two effects meet in crush depth. Under-convergence makes a coarse step softer;
 backward Euler's dissipation and lower peak forces make it crush less. The second
 wins, as the design predicted, so thresholds need scaling down at coarse steps. One
 global threshold scale per step rate brings the 60 km/h crush back to the reference:
-0.45 at 120 Hz (24.0 cm) and 0.30 at 240 Hz (20.8 cm). `SoftSettings::calibrated_for(hz)`
+0.45 at 120 Hz (23.3 cm) and 0.30 at 240 Hz (20.6 cm), unchanged by the crumple zones. `SoftSettings::calibrated_for(hz)`
 interpolates these; the demo uses it, and `?threshold=1` keeps raw file values. With
 it, everyday driving still bends no beams. These values come from one vehicle; the
 design's 15-vehicle set and Rigs of Rods reference runs remain to do.
@@ -290,7 +290,8 @@ design's 15-vehicle set and Rigs of Rods reference runs remain to do.
 ## Performance
 
 `soft_bench` drives N procedural cars at 240 Hz × 10 iterations, all awake (Apple M3
-Max, wgpu/Metal, pipelined submission):
+Max, wgpu/Metal, pipelined submission). `HZ`, `ITERS`, `SWEEPS`, `CHEB` and `CONTACTS`
+override the solver settings, and `RUBBLE_GPU_TIMING=1` prints GPU time per phase.
 
 | Cars | Particles | Beams | ms / step | ms / 60 fps frame (4 steps) | Rigid-only baseline, same cars |
 |---|---|---|---|---|---|
@@ -298,15 +299,85 @@ Max, wgpu/Metal, pipelined submission):
 | 10 | 1,020 | 5,720 | 3.6 | 14.4 | |
 | 50 | 5,100 | 28,600 | 4.0 | 16.0 | 2.0 ms / step |
 
-Chrome WebGPU runs the yard (3 cars and 3 crates: 387 particles, 2,190 beams) at
-5.2 ms per 240 Hz step; `?hz=120` halves that. Cost is dominated by per-dispatch
-latency, not arithmetic: 50 cars cost 1.0 ms per step more than one. Levers already
-in: the fused sweep, the contact-flag skip, and skipping the no-op dual pass, all
-lossless. The design's other levers are not implemented yet: rigid mode with
-promotion, per-island step rates, and per-state iteration budgets. Against the
-design's milestone-2 targets (about 2 ms per frame for one car, 10 ms for ten), the
-soft part alone is about 4.6 ms per frame for one car and 6.4 ms for ten, on top of the
-rigid step's fixed 7.5 ms per frame at 240 Hz.
+GPU time per phase, 10 cars, 240 Hz × 10 (ms):
+
+| Phase | ms | Per step |
+|---|---|---|
+| broadphase, narrowphase, colouring | 0.28 | once |
+| `soft_begin` (initial guess, hydros; soft contacts when present) | 0.20 | once |
+| rigid primal | 0.05 | per iteration |
+| particle sweep (`soft_primal_fused`) | 0.17 | per iteration |
+| rigid dual and vehicle solve | 0.12 | per iteration |
+| `soft_plastic` and break groups | 0.01 | once |
+
+Each solver pass waits on the one before, so the cost is per-dispatch latency rather
+than arithmetic. One car's sweep costs 0.135 ms and ten cars' 0.17 ms, so 50 cars cost
+only 1.0 ms more per step than one. Chrome WebGPU runs the yard (3 cars and 3 crates:
+387 particles, 2,190 beams) at 5.2 ms per 240 Hz step.
+
+### Accuracy against cost
+
+`soft_calibrate` with `SETTINGS=HZxITERS,...` and `SWEEPS`: metrics as in
+Calibration, raw thresholds, against 960 Hz × 30. The cost is `soft_bench` at 10 cars.
+
+| Setting | Tap (Hz) | 1 m drop: beams bent | Crush max 30 / 60 km/h (cm) | ms / step | ms / 60 fps frame |
+|---|---|---|---|---|---|
+| reference 960 Hz × 30 | 44 | 0 | 5.1 / 22.6 | | |
+| 60 Hz × 10 | 4 | 16 | 12.6 / 42.3 | | |
+| 60 Hz × 20 | 6 | 0 | 3.4 / 15.7 | 6.34 | 6.3 |
+| 120 Hz × 5 | 3 | 33 | 11.8 / 30.1 | | |
+| 120 Hz × 10 | 15 | 1 | 5.8 / 14.3 | 3.45 | 6.9 |
+| 120 Hz × 20 | 15 | 0 | 3.2 / 7.1 | 6.31 | 12.6 |
+| 240 Hz × 5 | 23 | 0 | 6.6 / 17.3 | 2.06 | 8.2 |
+| 240 Hz × 10 (default) | 23 | 0 | 4.4 / 12.0 | 3.58 | 14.3 |
+| 240 Hz × 20 | 25 | 0 | 4.2 / 11.3 | 6.62 | 26.5 |
+| 480 Hz × 5 | 35 | 0 | 4.4 / 17.0 | 2.10 | 16.8 |
+| 120 Hz × 5, 2 sweeps | 14 | 4 | 6.5 / 16.2 | | |
+| 120 Hz × 10, 2 sweeps | 15 | 0 | 3.6 / 7.9 | | |
+| 240 Hz × 5, 2 sweeps | 22 | 0 | 4.8 / 13.1 | 2.83 | 11.3 |
+| 240 Hz × 3, 4 sweeps | 22 | 0 | 4.4 / 13.5 | 2.83 | 11.3 |
+
+What the sweep shows:
+
+* **Step rate sets the dynamics.** The tap frequency depends almost only on the step
+  rate: backward Euler's atan(ωh)/h. 60 Hz is out: the structure barely rings
+  (4–6 Hz against 44 Hz), and at 10 iterations a 1 m drop bends 16 beams.
+* **Too few iterations reads as phantom damage.** 120 Hz × 5 bends 33 beams in a
+  1 m drop; 10 iterations are the floor at 120 Hz.
+* **Past 10 iterations at 240 Hz little changes.** 240 Hz × 20 is within 6% of × 10
+  at almost twice the cost.
+* **Extra particle sweeps buy convergence at half the price of iterations**
+  (`SoftSettings::sweeps`, decision s9).
+  * 240 Hz × 5 with 2 sweeps tracks 240 Hz × 10 (13.1 against 12.0 cm, 22 against
+    23 Hz) at 21% less cost natively.
+  * In Chrome the same setting runs the yard at 3.53 instead of 5.18 ms per step
+    (−32%), and every `softbody-check` scene passes
+    (`SOFT_QUERY='iters=5&sweeps=2'`).
+  * The default stays 1 sweep because it halves the rigid iterations; the demo takes
+    `?iters=5&sweeps=2`.
+
+Negative results (decisions s10 and s11):
+
+* **Hard AVBD beams fail.** Augmented-Lagrangian beams with λ carried across steps
+  wind up while the sweep is unconverged, and the car flies apart at rest.
+* **A multi-lane particle solve is slower.** Eight lanes per particle with a
+  groupshared reduction took 3.0 → 4.85 ms per step for one car.
+
+Levers in place, all lossless:
+
+* the fused sweep;
+* the contact-flag skip;
+* skipping the no-op dual pass.
+
+Not implemented yet:
+
+* rigid mode with promotion;
+* per-island step rates;
+* per-state iteration budgets.
+
+Against the design's milestone-2 targets (about 2 ms per frame for one car, 10 ms for
+ten), the soft part alone is about 4.6 ms per frame for one car and 6.4 ms for ten. That
+comes on top of the rigid step's fixed 7.5 ms per frame at 240 Hz.
 
 ## Deviations from the design
 

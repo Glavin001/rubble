@@ -122,9 +122,13 @@ pub struct SoftCounts {
     pub triangles: u32,
     /// Node–triangle / triangle–obstacle contact passes.
     pub contacts: bool,
-    /// Some beam still ramps its penalty or is a hard (AL) beam: run `soft_dual`.
+    /// Some beam still ramps its penalty: run `soft_dual`.
     /// Otherwise the pass would change nothing and is skipped.
     pub dual: bool,
+    /// Particle sweeps per solver iteration (0 = 1). Extra sweeps refine the
+    /// soft bodies between the rigid passes, which couple to them only
+    /// through the core joints.
+    pub sweeps: u32,
 }
 
 /// JP rounds dispatched this step; later rounds run in `color_bodies_tail`.
@@ -468,22 +472,24 @@ pub fn encode_step(
         }
         if soft {
             e.phase("primal");
-            if i.soft.max_color <= SOFT_FUSED_MAX_COLOR {
-                // Every colour fits one workgroup pass: the whole sweep (and the
-                // Chebyshev step) in one dispatch, same order. Exactly one 256-lane
-                // workgroup: hosts size dispatches as threads / 64, so ask for 64.
-                e.dp("soft_primal_fused", 64, u32::from(iter));
-            } else {
-                // Particle colours (spawn colouring; colour k of every vehicle at once).
-                for color in 0..i.soft.colors {
-                    e.dp("soft_primal", u64::from(i.soft.max_color.max(1)), color);
-                }
-                if i.soft.chebyshev {
-                    e.dp(
-                        "soft_chebyshev",
-                        u64::from(i.soft.particles.max(1)),
-                        u32::from(iter),
-                    );
+            let sweeps = i.soft.sweeps.max(1);
+            for k in 0..sweeps {
+                // Chebyshev pass index across every sweep of the step (ω has
+                // converged long before the pass-parameter table runs out).
+                let pass = (u32::from(iter) * sweeps + k).min(95);
+                if i.soft.max_color <= SOFT_FUSED_MAX_COLOR {
+                    // Every colour fits one workgroup pass: the whole sweep (and the
+                    // Chebyshev step) in one dispatch, same order. Exactly one 256-lane
+                    // workgroup: hosts size dispatches as threads / 64, so ask for 64.
+                    e.dp("soft_primal_fused", 64, pass);
+                } else {
+                    // Particle colours (spawn colouring; colour k of every vehicle at once).
+                    for color in 0..i.soft.colors {
+                        e.dp("soft_primal", u64::from(i.soft.max_color.max(1)), color);
+                    }
+                    if i.soft.chebyshev {
+                        e.dp("soft_chebyshev", u64::from(i.soft.particles.max(1)), pass);
+                    }
                 }
             }
             e.phase("soft_primal");
@@ -760,7 +766,10 @@ pub fn buffer_sizes(c: &WorldCapacity, compact: bool, persistent: bool) -> [u64;
     s[2] = b(c.max_colliders, 64);
     s[3] = b(64, 16);
     s[4] = b(c.max_contacts.saturating_mul(2), 128);
-    s[5] = b(c.max_joints, std::mem::size_of::<engine_schema::Joint>() as u64);
+    s[5] = b(
+        c.max_joints,
+        std::mem::size_of::<engine_schema::Joint>() as u64,
+    );
     s[6] = 256;
     s[7] = 256;
     s[8] = b(c.max_commands, 64);
@@ -1089,6 +1098,7 @@ mod tests {
             triangles: 40,
             contacts: true,
             dual: false,
+            sweeps: 1,
         };
         let names: Vec<&str> = encode_step(&fast(), &i, false, true)
             .into_iter()
@@ -1116,6 +1126,21 @@ mod tests {
             "one fused sweep per iteration"
         );
         assert!(!names.contains(&"soft_dual"), "no-op dual pass skipped");
+        let mut two = i;
+        two.soft.sweeps = 2;
+        let fused = encode_step(&fast(), &two, false, true)
+            .into_iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    Cmd::Dispatch {
+                        kernel: "soft_primal_fused",
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(fused, 2 * i.iterations as usize, "two sweeps per iteration");
         assert!(
             at("soft_plastic") < at("soft_break_groups")
                 && at("soft_break_groups") < at("extract_velocity_sleep")

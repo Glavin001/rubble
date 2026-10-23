@@ -5,6 +5,7 @@
 //
 //   cargo run -p engine-webgpu --release --bin wgsl_export      # WGSL + wasm first
 //   node --experimental-websocket softbody-check.mjs [scene ...] [--out DIR]
+//   SOFT_QUERY='iters=5&sweeps=2' node --experimental-websocket softbody-check.mjs  # other solver settings
 //
 // Needs Chrome (CHROME env to override). Exits non-zero when a check fails.
 import { createServer } from 'node:http';
@@ -210,7 +211,9 @@ for (const name of names) {
   const c = CHECKS[name];
   if (!c) throw new Error(`unknown check ${name}; have ${Object.keys(CHECKS).join(', ')}`);
   pageErrors.length = 0;
-  await send('Page.navigate', { url: `${base}/softbody.html?${c.query}` });
+  // SOFT_QUERY appends to every scene's query (e.g. SOFT_QUERY='iters=5&sweeps=2').
+  const extra = process.env.SOFT_QUERY ? `&${process.env.SOFT_QUERY}` : '';
+  await send('Page.navigate', { url: `${base}/softbody.html?${c.query}${extra}` });
   let ready = false;
   for (let i = 0; i < 300 && !ready; i++) {
     await new Promise((r) => setTimeout(r, 200));

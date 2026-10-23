@@ -294,7 +294,7 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     const soft = world.soft && world.soft.bodyCount > 0 ? world.soft.counts() : new Uint32Array(10);
     const counts = Uint32Array.of(world.bodyCount, world.colliderCount, world.jointCount,
       world.vehicles.vehicleCount, world.vehicles.wheelCount, ...soft, world.hasFilters ? 1 : 0,
-      world.soft && world.soft.inner.dual() ? 1 : 0);
+      world.soft && world.soft.inner.dual() ? 1 : 0, world.soft ? world.soft.inner.sweeps() : 1);
     // Host words (binding 21), host uniform (binding 6), counter block (copy source).
     const host = plan.host_upload(counts);
     const uniformBytes = host.length - 256 - 80;

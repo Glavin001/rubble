@@ -169,6 +169,11 @@ impl WasmSoftHost {
         self.host.counts().dual
     }
 
+    /// Particle sweeps per solver iteration (plan input counts[17]).
+    pub fn sweeps(&self) -> u32 {
+        self.host.counts().sweeps
+    }
+
     #[wasm_bindgen(getter)]
     pub fn body_count(&self) -> u32 {
         self.host.entries.len() as u32

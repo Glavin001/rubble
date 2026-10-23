@@ -56,10 +56,17 @@ fn main() -> anyhow::Result<()> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(10);
-        sim.set_params(soft_scene_params(240.0, iters));
+        let hz: f32 = std::env::var("HZ")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(240.0);
+        sim.set_params(soft_scene_params(hz, iters));
         let mut st = engine_softbody::SoftSettings::default();
         if let Ok(r) = std::env::var("CHEB") {
             st.chebyshev_rho = r.parse().unwrap_or(0.9);
+        }
+        if let Ok(r) = std::env::var("SWEEPS") {
+            st.sweeps = r.parse().unwrap_or(1);
         }
         if std::env::var("CONTACTS").as_deref() == Ok("0") {
             st.contacts = false;
@@ -150,14 +157,17 @@ fn main() -> anyhow::Result<()> {
         let ms = t.elapsed().as_secs_f64() * 1e3 / steps as f64;
         let c = sim.soft_host().counts();
         let rc = sim.last_counters();
-        eprintln!("  rigid colours {} awake {} contacts {}", rc.color_count, rc.awake_count, rc.contact_count);
+        eprintln!(
+            "  rigid colours {} awake {} contacts {}",
+            rc.color_count, rc.awake_count, rc.contact_count
+        );
         println!(
-            "{}{n:>3} cars: {:>5} particles, {:>6} beams, {:>2} particle colours · pipelined {ms:5.2} ms/step ({:5.1} ms per 60 fps frame of 4 steps) · synchronous {sync_ms:5.2} ms/step · {}",
+            "{}{n:>3} cars: {:>5} particles, {:>6} beams, {:>2} particle colours · pipelined {ms:5.2} ms/step ({:5.1} ms per 60 fps frame) · synchronous {sync_ms:5.2} ms/step · {}",
             if rigid { "rigid baseline " } else { "" },
             c.particles_total,
             c.beams,
             c.colors,
-            ms * 4.0,
+            ms * f64::from(hz) / 60.0,
             sim.chip()
         );
     }

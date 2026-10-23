@@ -520,7 +520,8 @@ impl RigidStep {
             (counts[0], counts[1], counts[2], counts[3], counts[4]);
         let c = |i: usize| counts.get(i).copied().unwrap_or(0);
         // counts[5..15]: soft counts (WasmSoftHost::counts), counts[15]: collision filters
-        // in use, counts[16]: the soft dual pass has work.
+        // in use, counts[16]: the soft dual pass has work, counts[17]: particle
+        // sweeps per iteration.
         let soft = rp::SoftCounts {
             bodies: c(5),
             beams: c(6),
@@ -533,6 +534,7 @@ impl RigidStep {
             triangles: c(13),
             contacts: c(14) != 0,
             dual: c(16) != 0,
+            sweeps: c(17),
         };
         let prev_n = self.last.contact_count.min(self.cap.max_contacts).max(256);
         rp::StepInputs {

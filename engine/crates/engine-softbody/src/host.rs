@@ -86,8 +86,10 @@ pub struct SoftCounts {
     pub obstacles: u32,
     /// Soft contact passes run (contacts on and something to collide).
     pub contacts: bool,
-    /// The dual pass has work: penalties start below k* or hard beams exist.
+    /// The dual pass has work: penalties start below k*.
     pub dual: bool,
+    /// Particle sweeps per solver iteration.
+    pub sweeps: u32,
 }
 
 impl SoftHost {
@@ -134,7 +136,8 @@ impl SoftHost {
             contacts: self.settings.contacts
                 && self.tris_used > 0
                 && (self.entries.len() > 1 || !self.obstacles.is_empty()),
-            dual: self.settings.ramp_start < 1.0 || self.settings.hard_ratio > 0.0,
+            dual: self.settings.ramp_start < 1.0,
+            sweeps: self.settings.sweeps.max(1),
         }
     }
 
@@ -367,7 +370,7 @@ impl SoftHost {
                 st.damping_scale.to_bits(),
                 st.beta.to_bits(),
                 st.min_length.to_bits(),
-                st.hard_ratio.to_bits(),
+                0,
             ],
             [
                 st.threshold_scale.to_bits(),

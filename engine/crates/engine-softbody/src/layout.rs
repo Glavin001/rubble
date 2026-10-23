@@ -179,8 +179,6 @@ pub struct SoftSettings {
     pub ramp_start: f32,
     /// Shortest rest length plasticity may produce (RoR floors at 0.1 m).
     pub min_length: f32,
-    /// Beams with k*/(m/h²) above this become hard AL constraints (0 = never).
-    pub hard_ratio: f32,
     pub plasticity: bool,
     pub breaking: bool,
     /// Sleep and wake each soft body as a whole.
@@ -195,6 +193,10 @@ pub struct SoftSettings {
     /// Penalty stiffness of soft contacts (N/m) and their friction coefficient.
     pub contact_stiffness: f32,
     pub contact_friction: f32,
+    /// Particle sweeps per solver iteration (1 = one per iteration). The soft
+    /// bodies couple to the rigid passes only through their core joints, so
+    /// extra sweeps converge them at about half the cost of extra iterations.
+    pub sweeps: u32,
 }
 
 impl Default for SoftSettings {
@@ -204,7 +206,6 @@ impl Default for SoftSettings {
             beta: 1.0e9,
             ramp_start: 1.0,
             min_length: 0.1,
-            hard_ratio: 0.0,
             plasticity: true,
             breaking: true,
             sleep_sync: true,
@@ -213,6 +214,7 @@ impl Default for SoftSettings {
             contacts: true,
             contact_stiffness: 1.0e7,
             contact_friction: 0.5,
+            sweeps: 1,
         }
     }
 }
