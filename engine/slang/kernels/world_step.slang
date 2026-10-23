@@ -122,6 +122,67 @@ void emitEvent(uint type, uint id, uint a, uint b)
 bool bodyIsDynamic(BodyState b) { return b.invMass > 0.0 && (b.flags & BODY_DYNAMIC) != 0u; }
 bool bodyIsSleeping(BodyState b) { return (b.flags & BODY_SLEEPING) != 0u; }
 
+// World-frame inverse inertia times v: R diag(invI) R^T v.
+float3 invInertiaWorld(BodyState b, float3 v)
+{
+    float4 q = b.orientation;
+    float3 local = quatRotate(float4(-q.xyz, q.w), v);
+    return quatRotate(q, b.invInertia * local);
+}
+
+// The host's `wake`: dynamic bodies only, sleep timer reset.
+void wakeBody(inout BodyState b)
+{
+    if (b.invMass > 0.0)
+    {
+        b.flags = (b.flags & ~BODY_SLEEPING) | BODY_AWAKE;
+        b.sleepTimer = 0.0;
+    }
+}
+
+// A run of `n` commands on one body, in submission order, stored once into both
+// rows (as `write_bodies` does): the same state a host read-modify-write gives.
+void applyCommandRun(uint first, uint n, uint body, float dt)
+{
+    BodyState b = gBodies[body];
+    for (uint k = 0u; k < n; k++)
+    {
+        GpuCommand c = gCommands[first + k];
+        if (c.op == CMD_WAKE_BODY)
+        {
+            wakeBody(b);
+        }
+        else if (c.op == CMD_TELEPORT)
+        {
+            b.position = c.f0.xyz;
+            b.orientation = c.f1;
+            wakeBody(b);
+        }
+        else if (c.op == CMD_SET_VELOCITY)
+        {
+            b.linearVel = c.f0.xyz;
+            b.angularVel = c.f1.xyz;
+            wakeBody(b);
+        }
+        else if (c.op == CMD_APPLY_IMPULSE && b.invMass > 0.0)
+        {
+            float3 j = c.f0.xyz;
+            float3 r = c.f1.xyz - b.position;
+            b.linearVel = b.linearVel + j * b.invMass;
+            b.angularVel = b.angularVel + invInertiaWorld(b, cross(r, j));
+            wakeBody(b);
+        }
+        else if (c.op == CMD_ADD_FORCE && b.invMass > 0.0)
+        {
+            b.linearVel = b.linearVel + c.f0.xyz * (b.invMass * dt);
+            b.angularVel = b.angularVel + invInertiaWorld(b, c.f1.xyz * dt);
+            wakeBody(b);
+        }
+    }
+    gBodies[body] = b;
+    BODY_PREV(body) = b;
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void apply_commands(uint3 tid : SV_DispatchThreadID)
@@ -132,6 +193,12 @@ void apply_commands(uint3 tid : SV_DispatchThreadID)
     uint cmdCount = HOST_S(0);
     if (i >= cmdCount) return;
     GpuCommand cmd = gCommands[i];
+    if (cmd.c == CMD_RUN_MEMBER) return;
+    if (cmd.c > 0u)
+    {
+        applyCommandRun(i, min(cmd.c, cmdCount - i), cmd.a, p.dt);
+        return;
+    }
     if (cmd.op == CMD_WAKE_BODY)
     {
         BodyState b = gBodies[cmd.a];

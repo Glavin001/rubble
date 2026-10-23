@@ -231,6 +231,9 @@ public static const uint CMD_DESTROY_COLLIDER = 7u;
 public static const uint CMD_REPARENT = 8u;
 public static const uint CMD_SPAWN_JOINT = 9u;
 public static const uint CMD_DESTROY_JOINT = 10u;
+public static const uint CMD_ADD_FORCE = 11u;
+public static const uint CMD_APPLY_IMPULSE = 12u;
+public static const uint CMD_RUN_MEMBER = 0xFFFFFFFFu;
 
 public struct Aabb
 {

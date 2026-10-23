@@ -330,6 +330,7 @@ impl MetalSim {
             vehicle_count: 0,
             wheel_count: 0,
             soft: Default::default(),
+            command_count: 0,
         }
     }
 

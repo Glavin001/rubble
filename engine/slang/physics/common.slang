@@ -232,6 +232,13 @@ static const uint CMD_WAKE_BODY = 3u;
 static const uint CMD_TELEPORT = 4u;
 static const uint CMD_SET_VELOCITY = 5u;
 static const uint CMD_REPARENT = 8u;
+static const uint CMD_ADD_FORCE = 11u;    // f0 = force (N), f1 = torque (N m), one step
+static const uint CMD_APPLY_IMPULSE = 12u; // f0 = impulse (N s), f1 = world point
+// GpuCommand.c: 0 = a lone command (one thread each, the original stream);
+// n > 0 = the first of n commands on body `a`, applied in order by one thread
+// as a host read-modify-write would (both body rows written, dynamic bodies
+// woken with their sleep timer reset); CMD_RUN_MEMBER = applied by its run head.
+static const uint CMD_RUN_MEMBER = 0xFFFFFFFFu;
 
 struct Aabb
 {

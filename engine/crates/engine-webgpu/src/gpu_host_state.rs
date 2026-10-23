@@ -4,6 +4,15 @@
 //! simulation. All additive: a host that never calls these steps exactly as before.
 
 use super::*;
+use engine_schema::commands::{CommandType, GpuCommand, CMD_RUN_MEMBER};
+
+const BODY_COMMANDS: [u32; 5] = [
+    CommandType::WakeBody as u32,
+    CommandType::TeleportBody as u32,
+    CommandType::SetVelocity as u32,
+    CommandType::AttachForce as u32,
+    CommandType::ApplyImpulse as u32,
+];
 
 /// Every GPU buffer and the host mirror of a [`WgpuSim`] at one instant
 /// ([`WgpuSim::save_state`]).
@@ -108,6 +117,76 @@ impl WgpuSim {
         self.host_bodies[first as usize..(first + count) as usize].copy_from_slice(bodies);
         self.manifolds_valid = false;
         self.wake_pending = true;
+    }
+
+    /// Queue body commands for the next step, without reading anything back:
+    /// wake, teleport, set velocity, apply an impulse at a point, add a force and
+    /// torque for one step (`GpuCommand::{wake, teleport, set_velocity,
+    /// apply_impulse, add_force}`). The step applies them before anything reads
+    /// body state, in submission order per body, with the result a host
+    /// `read_body` → edit → `write_bodies` would give (both rows written; dynamic
+    /// bodies woken with their sleep timer reset). More than `max_commands` in one
+    /// step is an error, never a silent drop.
+    pub fn push_body_commands(&mut self, cmds: &[GpuCommand]) -> anyhow::Result<()> {
+        let total = self.pending_commands.len() + cmds.len();
+        anyhow::ensure!(
+            total <= self.capacity.max_commands as usize,
+            "{total} body commands this step exceed WorldCapacity::max_commands ({})",
+            self.capacity.max_commands
+        );
+        for c in cmds {
+            anyhow::ensure!(
+                c.a < self.body_count,
+                "body command for body {} outside the {} bodies",
+                c.a,
+                self.body_count
+            );
+            anyhow::ensure!(
+                BODY_COMMANDS.contains(&c.op),
+                "op {} is not a body command",
+                c.op
+            );
+        }
+        for c in cmds {
+            if c.op == CommandType::TeleportBody as u32 {
+                // The broadphase cell sizing reads host poses.
+                let b = &mut self.host_bodies[c.a as usize];
+                b.position = [c.f0[0], c.f0[1], c.f0[2]];
+                b.orientation = c.f1;
+            }
+        }
+        self.pending_commands.extend_from_slice(cmds);
+        self.command_count = self.pending_commands.len() as u32;
+        self.manifolds_valid = false;
+        Ok(())
+    }
+
+    /// Body commands queued for the next step.
+    pub fn pending_body_commands(&self) -> usize {
+        self.pending_commands.len()
+    }
+
+    /// Write the queued commands to binding 8, grouped into one run per body
+    /// (stable: submission order within a body), so one thread applies each run.
+    pub(crate) fn flush_commands(&mut self) {
+        if self.pending_commands.is_empty() {
+            return;
+        }
+        let mut cmds = std::mem::take(&mut self.pending_commands);
+        cmds.sort_by_key(|c| c.a);
+        let mut start = 0;
+        while start < cmds.len() {
+            let mut end = start + 1;
+            while end < cmds.len() && cmds[end].a == cmds[start].a {
+                cmds[end].c = CMD_RUN_MEMBER;
+                end += 1;
+            }
+            cmds[start].c = (end - start) as u32;
+            start = end;
+        }
+        self.queue
+            .write_buffer(&self.bufs[8], 0, bytemuck::cast_slice(&cmds));
+        self.command_count = cmds.len() as u32;
     }
 
     /// The contact rows the last step solved, with their final forces: live rows

@@ -15,10 +15,21 @@ use engine_vehicle::{
 };
 use std::collections::HashMap;
 
+use crate::features::{
+    check_limits, ContactStorage, EngineFeatures, GridLayout, ManifoldPersistence, SimOptions,
+    WarmHash,
+};
 use engine_exec::rigid_plan::{BIND_COUNT, PASS_ALIGN};
 use engine_softbody::{
     SoftBackend, SoftCapacity, SoftHandle, SoftHost, SoftSettings, SoftVehicleDesc, SpawnOptions,
 };
+
+/// Bindings of the render-pose buffers, after the shared plan's `BIND_COUNT`.
+pub const POSES_BINDING: usize = BIND_COUNT;
+pub const POSE_HEADER_BINDING: usize = BIND_COUNT + 1;
+pub const MOVED_BINDING: usize = BIND_COUNT + 2;
+/// Bytes of one [`crate::PoseRecord`].
+pub const POSE_RECORD_BYTES: u64 = 32;
 
 struct Pipe {
     pipeline: wgpu::ComputePipeline,
@@ -99,6 +110,8 @@ pub struct WgpuSim {
     /// JP rounds dispatched: last step's rounds plus this headroom, then
     /// `color_bodies_tail` (`None`: all 32 rounds).
     color_round_headroom: Option<u32>,
+    /// One dispatch per soft particle colour (comparison control).
+    soft_unfused: bool,
     device: wgpu::Device,
     queue: wgpu::Queue,
     capacity: WorldCapacity,
@@ -109,6 +122,10 @@ pub struct WgpuSim {
     collider_count: u32,
     joint_count: u32,
     command_count: u32,
+    /// Run `pose_pack` each step (render poses and the moved-body list).
+    pose_output: bool,
+    /// The last `step*` call ran the GPU step (false: skipped, nothing awake).
+    last_step_ran: bool,
     sleep_island_rounds: u32,
     last_counters: StepCounters,
     last_timings: PhaseTimingsMs,
@@ -118,6 +135,8 @@ pub struct WgpuSim {
     host_cols: Vec<Collider>,
     /// Released joint slots, reused by `add_joint`.
     free_joints: Vec<u32>,
+    /// Body commands queued for the next step (`push_body_commands`).
+    pending_commands: Vec<GpuCommand>,
     /// Per-body collider reach (torque arm default).
     body_reach: Vec<f32>,
     chip: String,
@@ -197,42 +216,6 @@ fn bindings_of(wgsl: &str) -> Vec<Bind> {
 }
 
 /// Word offset where the CSR index lives inside `gConstraintIds` on the WGSL path.
-/// Split broadphase grids: awake dynamics in one table, sleepers and small
-/// statics in a second (HOST_S(20)); awake queriers walk 14 cells.
-fn grid_split_env() -> bool {
-    !matches!(
-        env_str("ENGINE_GRID").as_deref(),
-        Some("scaled") | Some("fixed")
-    )
-}
-
-/// ENGINE_AUDIT P0: every measured win is the default on every host; an
-/// `ENGINE_*` variable set to its control value restores the old path.
-fn env_str(name: &str) -> Option<String> {
-    std::env::var(name).ok()
-}
-
-/// `true` unless `name` is set to one of the listed control values.
-fn env_default_on(name: &str, controls: &[&str]) -> bool {
-    match env_str(name) {
-        Some(v) => !controls.contains(&v.as_str()),
-        None => true,
-    }
-}
-
-fn env_list(name: &str) -> Option<Vec<String>> {
-    env_str(name).map(|v| v.split(',').map(|n| n.trim().to_string()).collect())
-}
-
-/// Headroom over last step's count; `ENGINE_<X>=full` dispatches everything.
-fn env_headroom(name: &str, default: u32) -> Option<u32> {
-    match env_str(name).as_deref() {
-        Some("full") => None,
-        Some(v) => v.parse().ok().or(Some(default)),
-        None => Some(default),
-    }
-}
-
 fn persistent_entry(name: &str) -> &str {
     match name {
         "apply_commands" => "apply_commands_persistent",
@@ -284,45 +267,41 @@ pub fn default_device() -> anyhow::Result<(wgpu::AdapterInfo, wgpu::Device, wgpu
 }
 
 impl WgpuSim {
+    /// The shipped configuration on the default device, with the `ENGINE_*`
+    /// control variables applied ([`SimOptions::from_env`]).
     pub fn new(capacity: WorldCapacity) -> anyhow::Result<Self> {
-        // Persistent 32 B pair + 64 B point records are the default (8cz/8dg);
-        // ENGINE_CONTACTS=canonical|compact keep the controls.
         // Unit-test fixtures read the canonical 128-byte contact layout.
         if cfg!(test) {
             return Self::new_with_compact_contacts(capacity, false);
         }
-        let legacy_compact = env_str("ENGINE_COMPACT_CONTACTS").as_deref() == Some("1");
-        let legacy_off = env_str("ENGINE_PERSISTENT_CONTACTS").as_deref() == Some("0");
-        match env_str("ENGINE_CONTACTS").as_deref() {
-            Some("canonical") => Self::new_with_compact_contacts(capacity, false),
-            Some("compact") => Self::new_with_compact_contacts(capacity, true),
-            _ if legacy_compact => Self::new_with_compact_contacts(capacity, true),
-            _ if legacy_off => Self::new_with_compact_contacts(capacity, false),
-            _ => Self::new_with_persistent_contacts(capacity),
-        }
+        Self::new_with_options(capacity, SimOptions::from_env())
     }
 
     pub fn new_with_compact_contacts(
         capacity: WorldCapacity,
         compact_contacts: bool,
     ) -> anyhow::Result<Self> {
-        Self::new_with_contact_storage(capacity, compact_contacts, false)
+        let contacts = if compact_contacts {
+            ContactStorage::Compact
+        } else {
+            ContactStorage::Canonical
+        };
+        Self::new_with_options(
+            capacity,
+            SimOptions {
+                contacts,
+                ..SimOptions::from_env()
+            },
+        )
     }
 
     pub fn new_with_persistent_contacts(capacity: WorldCapacity) -> anyhow::Result<Self> {
-        Self::new_with_contact_storage(capacity, true, true)
-    }
-
-    fn new_with_contact_storage(
-        capacity: WorldCapacity,
-        compact_contacts: bool,
-        persistent_contacts: bool,
-    ) -> anyhow::Result<Self> {
-        Self::new_full(
+        Self::new_with_options(
             capacity,
-            compact_contacts,
-            persistent_contacts,
-            VehicleCapacity::default(),
+            SimOptions {
+                contacts: ContactStorage::Persistent,
+                ..SimOptions::from_env()
+            },
         )
     }
 
@@ -331,7 +310,14 @@ impl WgpuSim {
         capacity: WorldCapacity,
         vehicles: VehicleCapacity,
     ) -> anyhow::Result<Self> {
-        Self::new_full(capacity, false, false, vehicles)
+        Self::new_with_options(
+            capacity,
+            SimOptions {
+                contacts: ContactStorage::Canonical,
+                vehicles,
+                ..SimOptions::from_env()
+            },
+        )
     }
 
     /// Canonical contacts with a vehicle pool and a soft-body arena (soft bodies
@@ -341,27 +327,66 @@ impl WgpuSim {
         vehicles: VehicleCapacity,
         soft: SoftCapacity,
     ) -> anyhow::Result<Self> {
-        let mut sim = Self::new_full(capacity, false, false, vehicles)?;
-        let bytes = soft.bytes();
-        sim.bufs[32] = sim.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("b32 soft"),
-            size: bytes,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        sim.rebind_buffer(32);
-        sim.soft = Some(SoftHost::new(soft));
-        Ok(sim)
+        Self::new_with_options(
+            capacity,
+            SimOptions {
+                contacts: ContactStorage::Canonical,
+                vehicles,
+                soft: Some(soft),
+                ..SimOptions::from_env()
+            },
+        )
     }
 
-    fn new_full(
-        mut capacity: WorldCapacity,
-        compact_contacts: bool,
-        persistent_contacts: bool,
-        vehicle_capacity: VehicleCapacity,
+    /// Any configuration on the default device ([`default_device`]).
+    pub fn new_with_options(capacity: WorldCapacity, options: SimOptions) -> anyhow::Result<Self> {
+        let (info, device, queue) = default_device()?;
+        Self::with_device_options(capacity, options, info, device, queue)
+    }
+
+    /// The simulation on an existing device (e.g. one shared with the GPU stress solver,
+    /// so both read each other's buffers without a host round trip). Canonical
+    /// contacts, the default vehicle pool, environment-resolved features.
+    pub fn with_device(
+        capacity: WorldCapacity,
+        info: wgpu::AdapterInfo,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
     ) -> anyhow::Result<Self> {
+        Self::with_device_options(
+            capacity,
+            SimOptions {
+                contacts: ContactStorage::Canonical,
+                ..SimOptions::from_env()
+            },
+            info,
+            device,
+            queue,
+        )
+    }
+
+    /// Every configuration on a caller's device: the one constructor the others wrap.
+    /// Fails with a clear error when the device's limits cannot hold the capacity.
+    pub fn with_device_options(
+        mut capacity: WorldCapacity,
+        options: SimOptions,
+        info: wgpu::AdapterInfo,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+    ) -> anyhow::Result<Self> {
+        let SimOptions {
+            contacts,
+            vehicles: vehicle_capacity,
+            soft,
+            features,
+            pose_output,
+        } = options;
+        anyhow::ensure!(
+            soft.is_none() || contacts == ContactStorage::Canonical,
+            "soft bodies need ContactStorage::Canonical (got {contacts:?})"
+        );
+        let compact_contacts = contacts.compact();
+        let persistent_contacts = contacts.persistent();
         // One tyre joint per vehicle wheel slot rides on top of the user joints.
         capacity.max_joints += vehicle_capacity.max_wheels;
         anyhow::ensure!(
@@ -378,42 +403,47 @@ impl WgpuSim {
             capacity.max_candidates < 0x7fff_ffff,
             "compact pair index exceeds 31 bits"
         );
-        let (info, device, queue) = default_device()?;
-        Self::with_device_storage(
+        let mut sim = Self::with_device_storage(
             capacity,
             compact_contacts,
             persistent_contacts,
             vehicle_capacity,
+            features,
+            pose_output,
             info,
             device,
             queue,
-        )
+        )?;
+        if let Some(soft) = soft {
+            let bytes = soft.bytes();
+            sim.check_buffer_fits(32, bytes)?;
+            sim.bufs[32] = sim.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("b32 soft"),
+                size: bytes,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            sim.rebind_buffer(32);
+            sim.soft = Some(SoftHost::new(soft));
+        }
+        Ok(sim)
     }
 
-    /// The simulation on an existing device (e.g. one shared with the GPU stress solver,
-    /// so both read each other's buffers without a host round trip).
-    pub fn with_device(
-        capacity: WorldCapacity,
-        info: wgpu::AdapterInfo,
-        device: wgpu::Device,
-        queue: wgpu::Queue,
-    ) -> anyhow::Result<Self> {
-        Self::with_device_storage(
-            capacity,
-            false,
-            false,
-            VehicleCapacity::default(),
-            info,
-            device,
-            queue,
-        )
+    /// A storage binding of `bytes` must fit the device's binding and buffer limits.
+    fn check_buffer_fits(&self, binding: usize, bytes: u64) -> anyhow::Result<()> {
+        check_limits(&self.device.limits(), binding, bytes)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn with_device_storage(
         capacity: WorldCapacity,
         compact_contacts: bool,
         persistent_contacts: bool,
         vehicle_capacity: VehicleCapacity,
+        features: EngineFeatures,
+        pose_output: bool,
         info: wgpu::AdapterInfo,
         device: wgpu::Device,
         queue: wgpu::Queue,
@@ -432,6 +462,10 @@ impl WgpuSim {
         sizes[9] +=
             u64::from(4 * (vehicle_capacity.max_vehicles + vehicle_capacity.max_wheels)) * 32;
         sizes[31] = vehicle_capacity.bytes().max(16);
+        let limits = device.limits();
+        for (i, &bytes) in sizes.iter().enumerate() {
+            check_limits(&limits, i, bytes)?;
+        }
         let mut bufs = Vec::with_capacity(BIND_COUNT);
         for (i, &bytes) in sizes.iter().enumerate() {
             let usage = wgpu::BufferUsages::COPY_DST
@@ -450,6 +484,29 @@ impl WgpuSim {
                 label: Some(&format!("b{i}")),
                 size: bytes.max(4),
                 usage,
+                mapped_at_creation: false,
+            }));
+        }
+        // Render-pose buffers (pose_pack.slang), past the shared plan's bindings:
+        // full size only when the host asked for pose output.
+        let pose_bytes = if pose_output {
+            u64::from(capacity.max_bodies.max(1)) * POSE_RECORD_BYTES
+        } else {
+            256
+        };
+        for (binding, bytes) in [
+            (POSES_BINDING, pose_bytes),
+            (POSE_HEADER_BINDING, 16),
+            (MOVED_BINDING, pose_bytes),
+        ] {
+            check_limits(&limits, binding, bytes)?;
+            debug_assert_eq!(bufs.len(), binding);
+            bufs.push(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("b{binding} poses")),
+                size: bytes,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             }));
         }
@@ -575,41 +632,33 @@ impl WgpuSim {
             persistent_contacts,
             spec_reach_max: 0.0,
             sparse_start: if capacity.max_bodies <= crate::WGSL_LOOP_CAP * 8 {
-                env_str("ENGINE_SPARSE_COLORS")
-                    .and_then(|v| v.parse::<u32>().ok())
-                    .unwrap_or(32)
-                    .min(32)
+                features.sparse_colors.min(32)
             } else {
                 32
             },
             fused_persistence: compact_contacts
-                && env_str("ENGINE_MANIFOLD_PERSISTENCE").as_deref() == Some("fused"),
-            manifold_persistence: env_str("ENGINE_MANIFOLD_PERSISTENCE").as_deref() == Some("1"),
-            // Record warm hash (8ed) is the default; ENGINE_HASH_INSERT=contact|manifold.
-            manifold_hash_insert: env_default_on("ENGINE_HASH_INSERT", &["contact"]),
-            warm_record_hash: env_default_on("ENGINE_HASH_INSERT", &["contact", "manifold"]),
-            reuse_copy: persistent_contacts && env_default_on("ENGINE_REUSE", &["pass"]),
-            np_split: persistent_contacts
-                && env_default_on("ENGINE_REUSE", &["pass"])
-                && env_default_on("ENGINE_NP", &["fused"]),
+                && features.manifold_persistence == ManifoldPersistence::Fused,
+            manifold_persistence: features.manifold_persistence == ManifoldPersistence::Manifolds,
+            // Record warm hash (8ed) is the default; WarmHash::{Manifold, Contact} are controls.
+            manifold_hash_insert: features.warm_hash != WarmHash::Contact,
+            warm_record_hash: features.warm_hash == WarmHash::Record,
+            reuse_copy: persistent_contacts && features.reuse_copy,
+            np_split: persistent_contacts && features.reuse_copy && features.np_split,
             np_defer_limit: 0,
             persist_list_limit: 0,
-            local_repair: env_default_on("ENGINE_REPAIR", &["rounds"]),
-            carry_rest: env_default_on("ENGINE_REST", &["drop"]),
-            persist_list: persistent_contacts
-                && env_default_on("ENGINE_REUSE", &["pass"])
-                && env_default_on("ENGINE_PERSIST", &["scan"]),
-            grid_split: grid_split_env(),
-            grid_fixed: env_str("ENGINE_GRID").as_deref() == Some("fixed"),
-            grid_levels_mode: match env_str("ENGINE_GRID_LEVELS").as_deref() {
-                Some("off") => Some(false),
-                Some("on") => Some(true),
-                _ => None,
-            },
-            wg_only: env_list("WG_ONLY"),
-            wg_skip: env_list("WG_SKIP"),
-            color_headroom: env_headroom("ENGINE_COLOR_HEADROOM", 4),
-            color_round_headroom: env_headroom("ENGINE_COLOR_ROUND_HEADROOM", 2),
+            local_repair: features.local_repair,
+            carry_rest: features.carry_rest,
+            persist_list: persistent_contacts && features.reuse_copy && features.persist_list,
+            // Split broadphase grids: awake dynamics in one table, sleepers and small
+            // statics in a second (HOST_S(20)); awake queriers walk 14 cells.
+            grid_split: features.grid == GridLayout::Split,
+            grid_fixed: features.grid == GridLayout::Fixed,
+            grid_levels_mode: features.grid_levels,
+            color_headroom: features.color_headroom,
+            color_round_headroom: features.color_round_headroom,
+            soft_unfused: features.soft_unfused,
+            wg_only: features.wg_only,
+            wg_skip: features.wg_skip,
             device,
             queue,
             capacity,
@@ -620,6 +669,8 @@ impl WgpuSim {
             collider_count: 0,
             joint_count: 0,
             command_count: 0,
+            pose_output,
+            last_step_ran: false,
             sleep_island_rounds: 8,
             last_counters: StepCounters::default(),
             last_timings: PhaseTimingsMs::default(),
@@ -628,6 +679,7 @@ impl WgpuSim {
             host_bodies: Vec::new(),
             host_cols: Vec::new(),
             free_joints: Vec::new(),
+            pending_commands: Vec::new(),
             body_reach: Vec::new(),
             chip: format!("{} / {}", info.name, info.backend),
             has_convex: false,
@@ -1316,6 +1368,34 @@ impl WgpuSim {
         Ok(())
     }
 
+    pub(crate) fn pose_output_enabled(&self) -> bool {
+        self.pose_output
+    }
+
+    /// Whether the last `step*` call ran the GPU step (false: it was skipped
+    /// because nothing was awake and nothing was written).
+    pub fn last_step_ran(&self) -> bool {
+        self.last_step_ran
+    }
+
+    pub(crate) fn buffer(&self, binding: usize) -> &wgpu::Buffer {
+        &self.bufs[binding]
+    }
+
+    pub(crate) fn read_binding<T: bytemuck::Pod>(
+        &self,
+        binding: usize,
+        offset: u64,
+        count: usize,
+    ) -> Vec<T> {
+        self.read_buffer_range(binding, offset, count)
+    }
+
+    pub(crate) fn write_binding<T: bytemuck::Pod>(&self, binding: usize, offset: u64, data: &[T]) {
+        self.queue
+            .write_buffer(&self.bufs[binding], offset, bytemuck::cast_slice(data));
+    }
+
     fn read_buffer_range<T: bytemuck::Pod>(
         &self,
         binding: usize,
@@ -1432,6 +1512,7 @@ impl WgpuSim {
             self.steps_done += 1;
             self.counted_steps = self.steps_done;
             self.last_timings.total_gpu = 0.0;
+            self.last_step_ran = false;
             return Ok(self.last_counters);
         }
         let host_t = std::env::var("RUBBLE_HOST_TIMING")
@@ -1439,6 +1520,8 @@ impl WgpuSim {
             .then(web_time::Instant::now);
         self.refresh_cell();
         let t_cell = host_t.map(|t| t.elapsed().as_secs_f64() * 1e3);
+        self.last_step_ran = true;
+        self.flush_commands();
         self.write_host_uniforms_ex(!read);
         if let (Some(t), Some(c)) = (host_t, t_cell) {
             eprintln!(
@@ -1641,9 +1724,12 @@ impl WgpuSim {
             self.steps_done += 1;
             self.counted_steps = self.steps_done;
             self.last_timings.total_gpu = 0.0;
+            self.last_step_ran = false;
             return Ok(());
         }
         self.refresh_cell();
+        self.last_step_ran = true;
+        self.flush_commands();
         self.write_host_uniforms_ex(true);
         self.wake_pending = false;
         self.last_contact_offset = if self.contacts_parity == 0 {
@@ -1785,6 +1871,7 @@ impl WgpuSim {
             color_headroom: self.color_headroom,
             color_round_headroom: self.color_round_headroom,
             tail_ok: self.capacity.max_bodies <= crate::WGSL_LOOP_CAP * 8,
+            pose_output: self.pose_output,
         }
     }
 
@@ -1819,6 +1906,7 @@ impl WgpuSim {
             vehicle_count: self.vehicle_count(),
             wheel_count: self.vehicles.as_ref().map_or(0, |v| v.wheel_count()),
             soft: self.soft_counts(),
+            command_count: self.command_count,
         }
     }
 
@@ -1928,6 +2016,14 @@ impl WgpuSim {
         let zeros = vec![0u32; 128];
         self.queue
             .write_buffer(&self.bufs[17], 0, bytemuck::cast_slice(&zeros));
+        if self.pose_output {
+            // pose_pack appends from 0 and scans this step's bodies.
+            self.queue.write_buffer(
+                &self.bufs[POSE_HEADER_BINDING],
+                0,
+                bytemuck::cast_slice(&[0u32, self.body_count, 0, 0]),
+            );
+        }
     }
 
     fn refresh_cell(&mut self) {
@@ -2000,8 +2096,8 @@ impl WgpuSim {
             bodies: c.bodies,
             beams: c.beams,
             colors: c.colors,
-            // ENGINE_SOFT_UNFUSED=1: one dispatch per particle colour (comparison control).
-            max_color: if env_str("ENGINE_SOFT_UNFUSED").is_some() {
+            // EngineFeatures::soft_unfused: one dispatch per particle colour (comparison control).
+            max_color: if self.soft_unfused {
                 c.max_color.max(rigid_plan::SOFT_FUSED_MAX_COLOR + 1)
             } else {
                 c.max_color
