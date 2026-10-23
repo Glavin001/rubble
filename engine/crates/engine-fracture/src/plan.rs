@@ -123,6 +123,8 @@ pub const KERNELS: &[(&str, &str)] = &[
     ("ccd_mark", "ccd_mark"),
     ("ccd_emit", "ccd_emit_persistent"),
     ("ccd_respond", "ccd_respond"),
+    ("ccd_validate", "ccd_validate"),
+    ("ccd_clamp", "ccd_clamp"),
     ("joint_hash_clear", "joint_hash_clear"),
     ("joint_hash_insert", "joint_hash_insert"),
     ("bond_wake", "bond_wake"),
@@ -517,7 +519,10 @@ impl Planner {
             grid_levels,
             // Incremental colouring recolours only changed neighbourhoods but lets
             // the palette drift (more solve passes); fresh colouring is the default.
-            color_round_limit: budget.color_rounds.unwrap_or(32).min(64),
+            // 64: a fast ball through a dense pile (vibe-city reinforcedTower,
+            // 6,308 0.42 m cubes, at 576 m/s) needs more than 32 rounds; rounds
+            // past last step's need plus headroom run only when a body is blocked.
+            color_round_limit: budget.color_rounds.unwrap_or(64).min(64),
             // Per-body passes (predict, velocity/sleep, sleep commit) over the awake list.
             listed_passes: budget.awake_list_passes,
             incremental: budget.incremental_coloring,
@@ -1228,6 +1233,11 @@ impl Planner {
                     self.disp("solve_primal_sparse", 64, STAB_PASS + dispatched);
                 }
             }
+        }
+        if self.ccd_step() {
+            // Post-solve sweep check: no CCD body ends the step past a surface.
+            self.disp("ccd_validate", engine_schema::CCD_PAIR_CAP, 0);
+            self.disp("ccd_clamp", engine_schema::CCD_BODY_CAP, 0);
         }
         self.phase("solve");
         if self.listed_passes {

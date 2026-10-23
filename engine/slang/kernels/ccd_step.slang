@@ -45,6 +45,9 @@ void ccd_register(uint3 tid : SV_DispatchThreadID)
     ASTORE(gScratchAtomics[r + 1u], CCD_TOI_NONE);
     ASTORE(gScratchAtomics[r + 2u], CCD_NO_PAIR);
     ASTORE(gScratchAtomics[r + 3u], 0u);
+    ASTORE(gScratchAtomics[CCD_CARRY_BASE + CCD_CARRY_WORDS * slot + 8u], CCD_TOI_NONE);
+    ASTORE(gScratchAtomics[CCD_CARRY_BASE + CCD_CARRY_WORDS * slot + 10u], CCD_TOI_NONE);
+    ASTORE(gScratchAtomics[CCD_CARRY_BASE + CCD_CARRY_WORDS * slot + 11u], 0u);
     gBodies[i].initialPad = asfloat(slot);
 }
 
@@ -595,16 +598,36 @@ void ccd_pick(uint3 tid : SV_DispatchThreadID)
     uint i = dispatchIndex(tid);
     if (i >= min(ALOAD(gCounters[0].candidateCount), HOST_S(2))) return;
     CandidatePair pair = gCandidates[i];
-    if (pair._pad == 0u || (pair._pad & (CONVEX_DEFER | CCD_WIN)) != 0u) return;
+    if ((pair._pad & (CONVEX_DEFER | CCD_WIN)) != 0u) return;
     Collider ca = gColliders[pair.colliderA];
     Collider cb = gColliders[pair.colliderB];
     BodyState ba = gBodies[ca.body];
     BodyState bb = gBodies[cb.body];
+    if (!bodyIsCcd(ba) && !bodyIsCcd(bb)) return;
     bool fastIsA = ccdFastIsA(ba, ca.body, bb, cb.body);
     uint slot = ccdSlotOf(fastIsA ? ca.body : cb.body, fastIsA ? ba : bb);
     if (slot == CCD_NO_PAIR) return;
-    if (pair._pad - 1u == ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * slot + 1u]))
-        AMIN2(gScratchAtomics[CCD_BODY_BASE + 4u * slot + 2u], i);
+    // For the post-solve sweep check (the candidate buffer is the constraint
+    // graph's by then).
+    uint at;
+    AADD3(gScratchAtomics[CCD_PAIR_COUNT], 1u, at);
+    if (at < CCD_PAIR_CAP)
+    {
+        ASTORE(gScratchAtomics[CCD_PAIR_BASE + 2u * at], pair.colliderA);
+        ASTORE(gScratchAtomics[CCD_PAIR_BASE + 2u * at + 1u], pair.colliderB);
+    }
+    else if (at == CCD_PAIR_CAP) AOR2(gCounters[0].overflowFlags, OVERFLOW_CCD_PAIRS);
+    uint minBits = ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * slot + 1u]);
+    if (pair._pad != 0u)
+    {
+        if (pair._pad - 1u == minBits) AMIN2(gScratchAtomics[CCD_BODY_BASE + 4u * slot + 2u], i);
+        return;
+    }
+    // Found only through the deflection pad (clear of the whole straight
+    // sweep): the post-solve sweep check uses the pair, the solve needs no
+    // contact row. Pairs along the path keep theirs: a striker that pushes its
+    // first partner along meets the next ones in the same solve.
+    if (ccdApartAlongSweep(ca, ba, cb, bb, 1.0)) gCandidates[i]._pad = CCD_BEYOND;
 }
 
 // Third pass, one thread per CCD body: tag its winning candidate in place, so
@@ -633,12 +656,155 @@ void ccd_mark(uint3 tid : SV_DispatchThreadID)
     ASTORE(gScratchAtomics[r], asuint(v.x));
     ASTORE(gScratchAtomics[r + 1u], asuint(v.y));
     ASTORE(gScratchAtomics[r + 2u], asuint(v.z));
-    ASTORE(gScratchAtomics[r + 3u], win);
+    bool fastA = gColliders[pair.colliderA].body == fast;
+    ASTORE(gScratchAtomics[r + 3u], fastA ? pair.colliderA : pair.colliderB);
+    ASTORE(gScratchAtomics[r + 9u], fastA ? pair.colliderB : pair.colliderA);
     ASTORE(gScratchAtomics[r + 4u], asuint(vo.x));
     ASTORE(gScratchAtomics[r + 5u], asuint(vo.y));
     ASTORE(gScratchAtomics[r + 6u], asuint(vo.z));
     ASTORE(gScratchAtomics[r + 7u], other);
     ASTORE(gScratchAtomics[CCD_BODY_BASE + 4u * k + 3u], CCD_RESPOND);
+}
+
+// ---------------------------------------------------------------------------
+// Post-solve sweep check (after the solve, before extract_velocity_sleep). The
+// TOI contact places the first hit and the look-ahead contacts hold the rest,
+// but in dense rubble the solve can still push a CCD body into a piece it was
+// paired with (wedged among rigid contacts, some against bodies held still
+// this step). ccd_validate casts each CCD body's solved motion this step
+// relative to each candidate partner, from both step-start poses; ccd_clamp
+// pulls the body back along its own path to the first contact found. Its
+// bounds are padded by the farthest the solve can deflect it, so every body
+// it can reach is a candidate: it never ends a step past a surface.
+// ---------------------------------------------------------------------------
+// Smallest half extent of a collider (sphere and capsule: the radius; hull:
+// half its bound radius, a conservative stand-in).
+float colliderThickness(Collider c)
+{
+    if (c.shape == SHAPE_SPHERE || c.shape == SHAPE_CAPSULE) return c.params.x;
+    if (c.shape == SHAPE_BOX) return min(c.params.x, min(c.params.y, c.params.z));
+    if (c.shape == SHAPE_CONVEX) return 0.5 * c.params.w;
+    return 1.0e30;
+}
+
+// Step-start pose of a body: x⁻ (predict saved it), or the pose itself for a
+// body the step did not move (asleep, held, static).
+void stepStartPose(BodyState b, out float3 x, out float4 q)
+{
+    bool moved = bodyMovingOrKinematic(b) && !wakePending(b);
+    x = moved ? b.initialPos : b.position;
+    q = moved ? b.initialRot : b.orientation;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ccd_validate(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (i >= min(ALOAD(gScratchAtomics[CCD_PAIR_COUNT]), CCD_PAIR_CAP)) return;
+    uint colA = ALOAD(gScratchAtomics[CCD_PAIR_BASE + 2u * i]);
+    uint colB = ALOAD(gScratchAtomics[CCD_PAIR_BASE + 2u * i + 1u]);
+    for (uint side = 0u; side < 2u; side++)
+    {
+        Collider cf = gColliders[side == 0u ? colA : colB];
+        Collider co = gColliders[side == 0u ? colB : colA];
+        if (cf.body == co.body || co.shape == SHAPE_PLANE) continue;
+        BodyState bf = gBodies[cf.body];
+        if (!bodyIsCcd(bf)) continue;
+        uint slot = ccdSlotOf(cf.body, bf);
+        if (slot == CCD_NO_PAIR) continue;
+        BodyState bo = gBodies[co.body];
+        float3 xf0; float4 qf0; stepStartPose(bf, xf0, qf0);
+        float3 xo0; float4 qo0; stepStartPose(bo, xo0, qo0);
+        // Only bodies that cannot move this step: static, kinematic, asleep or
+        // held (wake deferred). An awake body the solve did not reach yet (a
+        // heavy ball through a deep brick wall in 4 iterations) is pushed by
+        // its contacts next step; crossing a body that cannot move is a
+        // pass-through.
+        bool fixedThisStep = !bodyIsDynamic(bo) || bodyIsSleeping(bo) || wakePending(bo);
+        // An awake body that did not move this step: only the CCD body's centre
+        // entering it counts (a centre crossing is a pass-through; a heavy
+        // ball's overlap with bricks the solve has not pushed yet is not).
+        bool stillThisStep = length(bo.position - xo0) <= 1.0e-3 && abs(dot(bo.orientation, qo0)) >= 1.0 - 1.0e-6;
+        if (!fixedThisStep && !stillThisStep) continue;
+        // Relative motion of the CCD body over the step, against the other at
+        // its step-start pose.
+        float3 d = (bf.position - xf0) - (bo.position - xo0);
+        if (dot(d, d) < 1e-10) continue;
+        BodyState sf = bf; sf.position = xf0; sf.orientation = qf0;
+        BodyState so = bo; so.position = xo0; so.orientation = qo0;
+        float3 pf; float4 qf; colliderPose(cf, sf, pf, qf);
+        float3 po; float4 qo; colliderPose(co, so, po, qo);
+        float mu;
+        float3 n;
+        float eps = 1.0e-4 + 1.0e-5 * length(d);
+        // The centre alone (a sphere of radius 0) against a body that is awake.
+        Collider probe = cf;
+        if (!fixedThisStep)
+        {
+            probe.shape = SHAPE_SPHERE;
+            probe.params = float4(0.0, 0.0, 0.0, 0.0);
+        }
+        uint status = gjkCast(probe, float3(0, 0, 0), qf, co, po - pf, qo, float3(0, 0, 0), d, 1.0, eps, mu, n);
+        // Overlapping at the start (resting, sliding) is the contacts' business.
+        if (status != CAST_HIT) continue;
+        // Only a real crossing: deeper than a quarter of the thinner body's
+        // smallest half extent (contact depth, rolling and resting sink stay
+        // the solve's; a centre crossing is far past it).
+        float depth = max(2.0 * PARAMS.contactOffset, 0.25 * min(colliderThickness(cf), colliderThickness(co)));
+        if (fixedThisStep && (1.0 - mu) * dot(d, n) <= depth) continue;
+        AMIN2(gScratchAtomics[CCD_CARRY_BASE + CCD_CARRY_WORDS * slot + 8u], asuint(mu));
+        // First contact with a body that cannot move (static, kinematic).
+        if (!bodyIsDynamic(bo)) AMIN2(gScratchAtomics[CCD_CARRY_BASE + CCD_CARRY_WORDS * slot + 10u], asuint(mu));
+    }
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ccd_clamp(uint3 tid : SV_DispatchThreadID)
+{
+    uint k = dispatchIndex(tid);
+    if (k >= ccdBodyCount()) return;
+    uint bits = ALOAD(gScratchAtomics[CCD_CARRY_BASE + CCD_CARRY_WORDS * k + 8u]);
+    if (bits == CCD_TOI_NONE) return;
+    uint body = ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * k]);
+    BodyState b = gBodies[body];
+    float3 x0; float4 q0; stepStartPose(b, x0, q0);
+    float3 d = b.position - x0;
+    float len = length(d);
+    if (len < 1e-8) return;
+    // Back to the first contact, a contact offset short of it.
+    float t = clamp(asfloat(bits) - PARAMS.contactOffset / len, 0.0, 1.0);
+    float3 x = x0 + d * t;
+    float4 q1 = dot(q0, b.orientation) < 0.0 ? -b.orientation : b.orientation;
+    gBodies[body].position = x;
+    gBodies[body].orientation = quatNormalize(q0 + (q1 - q0) * t);
+    // Stopped by a dynamic body (held still this step, its wake deferred, or
+    // pinned): it keeps the velocity of its solved motion and meets that body,
+    // awake, next step. Stopped by static geometry: the clamped motion is its
+    // velocity (it presses no further).
+    uint r = CCD_CARRY_BASE + CCD_CARRY_WORDS * k;
+    bool byStatic = ALOAD(gScratchAtomics[r + 10u]) <= bits;
+    float3 v = (byStatic ? x - x0 : d) / max(PARAMS.dt, 1e-8);
+    ASTORE(gScratchAtomics[r + 12u], asuint(v.x));
+    ASTORE(gScratchAtomics[r + 13u], asuint(v.y));
+    ASTORE(gScratchAtomics[r + 14u], asuint(v.z));
+    ASTORE(gScratchAtomics[r + 11u], 1u);
+    if (postStabilize()) gBodies[body].linearVel = v;
+}
+
+// The velocity ccd_clamp left for a clamped CCD body (extract_velocity_sleep
+// takes it instead of the one its clamped motion gives).
+bool ccdClampedVelocity(uint body, BodyState b, out float3 v)
+{
+    v = float3(0, 0, 0);
+    if (!sceneHasCcd()) return false;
+    uint slot = ccdSlotOf(body, b);
+    if (slot == CCD_NO_PAIR) return false;
+    uint r = CCD_CARRY_BASE + CCD_CARRY_WORDS * slot;
+    if (ALOAD(gScratchAtomics[r + 11u]) == 0u) return false;
+    v = asfloat(uint3(ALOAD(gScratchAtomics[r + 12u]), ALOAD(gScratchAtomics[r + 13u]), ALOAD(gScratchAtomics[r + 14u])));
+    return true;
 }
 
 // ccd slot flags word (+3): set by ccd_mark when the TOI partner is dynamic.
@@ -669,13 +835,12 @@ void ccd_respond(uint3 tid : SV_DispatchThreadID)
         uint fast = ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * k]);
         uint r = CCD_CARRY_BASE + CCD_CARRY_WORDS * k;
         float3 v0 = asfloat(uint3(ALOAD(gScratchAtomics[r]), ALOAD(gScratchAtomics[r + 1u]), ALOAD(gScratchAtomics[r + 2u])));
-        uint win = ALOAD(gScratchAtomics[r + 3u]);
         float3 vo0 = asfloat(uint3(ALOAD(gScratchAtomics[r + 4u]), ALOAD(gScratchAtomics[r + 5u]), ALOAD(gScratchAtomics[r + 6u])));
         uint other = ALOAD(gScratchAtomics[r + 7u]);
-        CandidatePair pair = gCandidates[win];
-        bool fastIsA = gColliders[pair.colliderA].body == fast;
-        Collider cf = gColliders[fastIsA ? pair.colliderA : pair.colliderB];
-        Collider co = gColliders[fastIsA ? pair.colliderB : pair.colliderA];
+        // The winning pair's colliders (ccd_mark): the candidate buffer is the
+        // constraint graph's by now.
+        Collider cf = gColliders[ALOAD(gScratchAtomics[r + 3u])];
+        Collider co = gColliders[ALOAD(gScratchAtomics[r + 9u])];
         BodyState bf = gBodies[fast];
         BodyState bo = gBodies[other];
         if (!bodyIsDynamic(bo) || !bodyIsDynamic(bf)) continue;
@@ -813,7 +978,16 @@ void ccd_emit(uint3 tid : SV_DispatchThreadID)
     float3 r = ccdRelativeMotion(bf, bo);
     float t;
     float3 n;
-    if (ccdCast(cf, bf, co, bo, r, t, n) != CAST_HIT) return;
+    // The narrowphase left this pair to us (ccd_mark): it must get a contact.
+    // The cast that found it (ccd_toi) ran in another kernel; a touching pair
+    // at TOI 0 is borderline in f32 and can come out differently here, so a
+    // miss falls back to the TOI ccd_toi stored and a stopper normal along the
+    // relative motion (the pair would otherwise have no contact at all).
+    if (dot(r, r) < 1e-20 || ccdCast(cf, bf, co, bo, r, t, n) != CAST_HIT)
+    {
+        t = clamp(asfloat((pair._pad & ~CCD_WIN) - 1u), 0.0, 1.0);
+        n = dot(r, r) > 1e-20 ? normalize(r) : float3(0, -1, 0);
+    }
     // TOI pose: the fast body moved by t·r relative to the other (at x⁻).
     BodyState bfT = bf;
     bfT.position += r * t;

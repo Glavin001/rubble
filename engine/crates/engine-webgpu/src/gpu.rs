@@ -647,7 +647,9 @@ impl WgpuSim {
         self.color_headroom = None;
     }
 
-    pub(crate) fn use_control_modes(&mut self) {
+    /// The browser host's step modes (rigid_plan::StepModes::default): the
+    /// control path for checks that must match world-host.mjs.
+    pub fn use_control_modes(&mut self) {
         self.manifold_hash_insert = false;
         self.warm_record_hash = false;
         self.reuse_copy = false;

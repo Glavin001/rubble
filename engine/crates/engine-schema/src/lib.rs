@@ -244,7 +244,7 @@ pub const EVENT_RING_BASE: u32 = 96;
 pub const EVENT_RING_CAPACITY: u32 = 1024;
 /// Total `u32` words of the scratch-atomics buffer (host words, lists, ring,
 /// continuous-collision lists, impulse records and carried CCD velocities).
-pub const SCRATCH_WORDS: u32 = CCD_CARRY_BASE + CCD_CARRY_WORDS * CCD_BODY_CAP;
+pub const SCRATCH_WORDS: u32 = CCD_PAIR_BASE + 2 * CCD_PAIR_CAP;
 
 /// Continuous-collision scratch (`ccd_step.slang`), after the oversized-static
 /// list: CCD body count, fast-collider count, impulse count, TOI fallbacks.
@@ -270,9 +270,17 @@ pub const IMPULSE_WORDS: u32 = 8;
 pub const IMPULSE_BASE: u32 = FAST_BASE + FAST_CAP;
 /// Per CCD slot (`ccd_mark` → `ccd_respond`): the CCD body's step-start velocity,
 /// its winning candidate, its dynamic TOI partner's step-start velocity and the
-/// partner — the impact's momentum exchange along the TOI normal.
+/// partner (words 0-7, 9) — the impact's momentum exchange along the TOI normal;
+/// the post-solve sweep check's first contact, first static contact, clamped
+/// flag and the velocity the clamp leaves (words 8, 10, 11, 12-14).
 pub const CCD_CARRY_BASE: u32 = IMPULSE_BASE + IMPULSE_WORDS * IMPULSE_CAP;
-pub const CCD_CARRY_WORDS: u32 = 8;
+pub const CCD_CARRY_WORDS: u32 = 16;
+/// Candidate pairs involving a CCD body this step (colliders A, B), listed by
+/// `ccd_pick` for the post-solve sweep check (the candidate buffer is reused by
+/// the constraint graph after the narrowphase); the count is `CCD_PAIR_COUNT`.
+pub const CCD_PAIR_COUNT: u32 = CCD_BASE + 5;
+pub const CCD_PAIR_CAP: u32 = 8192;
+pub const CCD_PAIR_BASE: u32 = CCD_CARRY_BASE + CCD_CARRY_WORDS * CCD_BODY_CAP;
 /// Impulse record modes (low 8 bits of `mode`; the rest is the record's sum
 /// order key): an impulse at a world point (dynamic bodies), or a kinematic
 /// body's new velocity (`j` linear, `point` angular).
@@ -412,6 +420,9 @@ pub const OVERFLOW_LARGE_DYNAMICS: u32 = 2048;
 pub const OVERFLOW_CCD_BODIES: u32 = 4096;
 /// More impulse records than `IMPULSE_CAP` in one step.
 pub const OVERFLOW_IMPULSES: u32 = 8192;
+/// More candidate pairs of CCD bodies than `CCD_PAIR_CAP` (the post-solve sweep
+/// check would miss some).
+pub const OVERFLOW_CCD_PAIRS: u32 = 32768;
 /// A character gathered more colliders than `character::CHAR_MAX_CANDIDATES`.
 pub const OVERFLOW_CHAR_CANDIDATES: u32 = 16384;
 /// Oversized-static list (statics wider than half a grid cell, uniform grid):

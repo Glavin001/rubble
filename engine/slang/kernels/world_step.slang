@@ -497,7 +497,10 @@ static const uint IMPULSE_CAP = 1024u;
 static const uint IMPULSE_WORDS = 8u;
 static const uint IMPULSE_BASE = FAST_BASE + FAST_CAP;
 static const uint CCD_CARRY_BASE = IMPULSE_BASE + IMPULSE_WORDS * IMPULSE_CAP;
-static const uint CCD_CARRY_WORDS = 8u;
+static const uint CCD_CARRY_WORDS = 16u;
+static const uint CCD_PAIR_COUNT = CCD_BASE + 5u;
+static const uint CCD_PAIR_CAP = 8192u;
+static const uint CCD_PAIR_BASE = CCD_CARRY_BASE + CCD_CARRY_WORDS * CCD_BODY_CAP;
 static const uint CCD_NO_PAIR = 0xFFFFFFFFu;
 static const uint CCD_TOI_NONE = 0x7F800000u; // +inf
 
@@ -775,6 +778,7 @@ void broadphase_clear(uint3 tid : SV_DispatchThreadID)
         ASTORE(gScratchAtomics[CCD_BODY_COUNT], 0u);
         ASTORE(gScratchAtomics[FAST_COUNT], 0u);
         ASTORE(gScratchAtomics[CCD_FALLBACKS], 0u);
+        ASTORE(gScratchAtomics[CCD_PAIR_COUNT], 0u);
     }
 }
 
@@ -1875,6 +1879,7 @@ void rest_publish(uint3 tid : SV_DispatchThreadID)
     ASTORE(gScratchAtomics[CCD_BODY_COUNT], 0u);
     ASTORE(gScratchAtomics[FAST_COUNT], 0u);
     ASTORE(gScratchAtomics[CCD_FALLBACKS], 0u);
+    ASTORE(gScratchAtomics[CCD_PAIR_COUNT], 0u);
     AOR2(gScratchAtomics[HIER_LEVEL_MASK_SLOT], ALOAD(gConstraintIds[hdr]));
     uint planes = ALOAD(gConstraintIds[hdr + 1u]);
     ASTORE(gScratchAtomics[42], planes);
@@ -2231,12 +2236,19 @@ void emitManifoldRows(
         BoxManifoldPt pt = points.pts[k];
         Contact row = makeContactRow(pair, rowA, rowB, ca, cb, nrm, pt.pA, pt.pB, pt.feature, margin, mu);
         if (toi) row = refreshReusedContact(row, ba, bb);
-        // A CCD body's contacts (its time-of-impact contact and its look-ahead
-        // ones) start rigid (k_max), not at the cold-start floor (m/h²) that
-        // ramps up over the iterations: against the whole step's inertial
-        // target (a 576 m/s ball is 4.8 m past the wall at 120 Hz) a soft start
-        // let the ball through the piece within the step.
-        if (toi || bodyIsCcd(ba) || bodyIsCcd(bb)) row.kN = PARAMS.kMaxN;
+        // A time-of-impact contact with a body that cannot move this step
+        // (static, kinematic, or asleep with its wake deferred) starts rigid
+        // (k_max), not at the cold-start floor (m/h²) that ramps up over the
+        // iterations: against the whole step's inertial target (a 576 m/s ball
+        // is 4.8 m past the wall at 120 Hz) a soft start let the ball through
+        // within the step. Against a free dynamic body it starts as usual: a
+        // rigid row there made a 21 t ball yield to a 0.25 kg brick (it rode up
+        // over the wall); ccd_respond exchanges the momentum, and the
+        // post-solve sweep check (ccd_validate) stops any crossing of a still
+        // body. A CCD body's other contacts start as usual too.
+        bool heldA = !bodyIsDynamic(ba) || bodyIsSleeping(ba) || wakePending(ba);
+        bool heldB = !bodyIsDynamic(bb) || bodyIsSleeping(bb) || wakePending(bb);
+        if (toi && row.c0N >= 0.0 && (heldA || heldB)) row.kN = PARAMS.kMaxN;
         STORE_NEW_CONTACT(curOff + cStart + k, mslot, row);
     }
 #if defined(ENGINE_REUSE_COPY)
@@ -2403,6 +2415,34 @@ bool contactGapMode() { return (PARAMS.flags & FLAG_CONTACT_GAP) != 0u; }
 // points, positive gaps kept whole) when the flag is set or a body is CCD or
 // kinematic (their contacts are speculative by construction).
 bool lookAheadOn() { return (PARAMS.flags & FLAG_SPEC_VELOCITY) != 0u || sceneHasCcd() || sceneHasKinematic(); }
+
+// gCandidates[i]._pad of a CCD pair only its deflection pad found (ccd_pick):
+// asuint(1.0) + 2, above every TOI tag (asuint(t) + 1, t <= 1), bit 30 clear.
+static const uint CCD_BEYOND = 0x3F800002u;
+
+// A candidate pair whose bodies' bounding spheres stay apart along the CCD
+// body's straight sweep (relative to the other) up to `fraction` of it: found
+// only through the deflection pad (buildColliderBounds), or beyond the first
+// impact, so it needs no contact row.
+bool ccdApartAlongSweep(Collider ca, BodyState ba, Collider cb, BodyState bb, float fraction)
+{
+    bool ccdA = bodyIsCcd(ba), ccdB = bodyIsCcd(bb);
+    if (!ccdA && !ccdB) return false;
+    // A plane has no bounding sphere.
+    if (ca.shape == SHAPE_PLANE || cb.shape == SHAPE_PLANE) return false;
+    float3 pa = transformPoint(ba.position, ba.orientation, ca.localPos);
+    float3 pb = transformPoint(bb.position, bb.orientation, cb.localPos);
+    float3 va = bodyMovingOrKinematic(ba) ? ba.linearVel : float3(0, 0, 0);
+    float3 vb = bodyMovingOrKinematic(bb) ? bb.linearVel : float3(0, 0, 0);
+    float3 d = (va - vb) * (PARAMS.dt * fraction);
+    float h = PARAMS.dt;
+    float spin = (length(ba.angularVel) * colliderExtent(ca) + length(bb.angularVel) * colliderExtent(cb)) * h;
+    float reach = colliderExtent(ca) + colliderExtent(cb) + spin + abs(PARAMS.gravityY) * h * h + 2.0 * PARAMS.contactOffset;
+    // Closest approach of b's centre to a's centre swept by d.
+    float3 w = pb - pa;
+    float t = clamp(dot(w, d) / max(dot(d, d), 1e-20), 0.0, 1.0);
+    return length(w - d * t) > reach;
+}
 
 // Farthest the solve moves a body from its predicted pose in one step: the
 // primal trust region (trustLin · 0.5 per iteration) over the iterations, and
@@ -3067,6 +3107,9 @@ void narrowphase(uint3 tid : SV_DispatchThreadID)
     BodyState bb = gBodies[cb.body];
     // A CCD body's winning pair gets its manifold at the TOI pose (ccd_emit).
     if (ccdOwnsPair(pair)) return;
+    // Only the CCD body's deflection pad found this pair (ccd_pick): no contact
+    // row; the post-solve sweep check still sees the pair.
+    if (pair._pad == CCD_BEYOND) return;
     // three-avbd: reuseContacts before any shape SAT (ground + box-box + spheres).
     uint prevFeature = 0u;
     if ((PARAMS.flags & FLAG_REUSE_CONTACTS) != 0u &&
@@ -3101,6 +3144,9 @@ void narrowphase_defer(uint3 tid : SV_DispatchThreadID)
     BodyState ba = gBodies[ca.body];
     BodyState bb = gBodies[cb.body];
     if (ccdOwnsPair(pair)) return;
+    // Only the CCD body's deflection pad found this pair (ccd_pick): no contact
+    // row; the post-solve sweep check still sees the pair.
+    if (pair._pad == CCD_BEYOND) return;
     uint prevFeature = 0u;
     if ((PARAMS.flags & FLAG_REUSE_CONTACTS) != 0u &&
         tryReuseContactsHint(pair, ba, bb, PARAMS.contactOffset, prevFeature))
@@ -5495,6 +5541,8 @@ void extract_velocity_sleep(uint3 tid : SV_DispatchThreadID)
         b.linearVel = bodyLinearVelocity(b, p.dt);
         b.angularVel = bodyAngularVelocity(b, p.dt);
     }
+    float3 clampedVel;
+    if (ccdClampedVelocity(i, b, clampedVel)) b.linearVel = clampedVel;
 
     if ((p.flags & FLAG_MAX_ROTATION) != 0u)
     {

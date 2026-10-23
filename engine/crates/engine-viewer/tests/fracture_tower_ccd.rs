@@ -20,7 +20,7 @@
 //!   cargo test --release -p engine-viewer --test fracture_tower_ccd -- --nocapture
 
 use engine_fracture::pack::build_pack_scene;
-use engine_fracture::scene::{collider_vertices, Scene, SHAPE_CONVEX};
+use engine_fracture::scene::{collider_vertices, Collider, Scene, SHAPE_BOX, SHAPE_CONVEX};
 use engine_viewer::fracture::FractureSim;
 use metal::Device;
 use std::path::PathBuf;
@@ -147,6 +147,41 @@ fn segment_hull_distance_is_exact_on_a_cube() {
     assert!((diag - 2f64.sqrt()).abs() < 1e-9, "diagonal {diag}");
 }
 
+fn qrot(q: [f64; 4], v: V) -> V {
+    let u = [q[0], q[1], q[2]];
+    let w = q[3];
+    let c = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+    add(add(mul(u, 2.0 * dot(u, v)), mul(v, w * w - dot(u, u))), mul(c, 2.0 * w))
+}
+fn qmul(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
+    [
+        a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+        a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+        a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+        a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
+    ]
+}
+
+/// World vertices of a hull or box piece at a body pose.
+fn piece_vertices(scene: &Scene, c: &Collider, p: V, q: [f64; 4]) -> Vec<V> {
+    if c.shape == SHAPE_CONVEX {
+        return collider_vertices(&scene.hull_data, c, p, q);
+    }
+    let h = [c.params[0], c.params[1], c.params[2]];
+    let centre = add(p, qrot(q, c.local_pos));
+    let rot = qmul(q, c.local_rot);
+    (0..8)
+        .map(|i| {
+            let corner = [
+                if i & 1 != 0 { h[0] } else { -h[0] },
+                if i & 2 != 0 { h[1] } else { -h[1] },
+                if i & 4 != 0 { h[2] } else { -h[2] },
+            ];
+            add(centre, qrot(rot, corner))
+        })
+        .collect()
+}
+
 /// One convex piece: its body and hull (local vertices, as `collider_vertices` builds
 /// them at a pose).
 struct Piece {
@@ -181,11 +216,19 @@ fn run_shot(sim: &mut FractureSim, scene: &Scene, pieces: &[Piece], shot: &Shot,
     let mut prev = sim.snapshot(n).unwrap();
     let mut out = Outcome::default();
     for step in 0..steps {
-        sim.step(1).unwrap();
+        let res = sim.step(1);
+        if std::env::var("TOWER_TRACE").is_ok() {
+            let c = sim.last;
+            println!("  {} step {step}: awake {} contacts {} candidates {} colors {} overflow {:#x}", shot.label, c.awake, c.contact, c.candidate, c.color, c.overflow);
+        }
+        res.unwrap();
         assert_eq!(sim.last.overflow, 0, "{}: GPU capacity overflow", shot.label);
         let now = sim.snapshot(n).unwrap();
         let (b0, _) = pose(&prev, id);
         let (b1, _) = pose(&now, id);
+        if std::env::var("TOWER_TRACE").is_ok() {
+            println!("  {} step {step}: ball {:?} -> {:?}", shot.label, b0.map(|x| (x * 100.0).round() / 100.0), b1.map(|x| (x * 100.0).round() / 100.0));
+        }
         let (lo, hi) = ([0, 1, 2].map(|k| b0[k].min(b1[k])), [0, 1, 2].map(|k| b0[k].max(b1[k])));
         for p in pieces {
             let (x0, q0) = pose(&prev, p.body);
@@ -197,7 +240,7 @@ fn run_shot(sim: &mut FractureSim, scene: &Scene, pieces: &[Piece], shot: &Shot,
                 continue;
             }
             let c = &scene.colliders[p.collider];
-            let verts = collider_vertices(&scene.hull_data, c, x0, q0);
+            let verts = piece_vertices(scene, c, x0, q0);
             // AABB prefilter (the segment's box against the hull's).
             let mut vlo = [f64::INFINITY; 3];
             let mut vhi = [f64::NEG_INFINITY; 3];
@@ -245,9 +288,11 @@ fn tower_shots(scene: &Scene) -> (Vec<Shot>, V, V) {
             hi[k] = hi[k].max(b.p[k]);
         }
     }
-    let c = [0, 1, 2].map(|k| 0.5 * (lo[k] + hi[k]));
+    // Aimed a little off the axis: piece grids have seams on it (a centre path
+    // along a seam only touches hulls).
+    let c = [0, 1, 2].map(|k| 0.5 * (lo[k] + hi[k]) + [0.137, 0.0, 0.071][k]);
     let back = 0.5 * (hi[0] - lo[0]).max(hi[2] - lo[2]) + 6.0;
-    let height = |f: f64| lo[1] + f * (hi[1] - lo[1]);
+    let height = |f: f64| lo[1] + f * (hi[1] - lo[1]) + 0.053;
     let norm = |d: V| mul(d, 1.0 / dot(d, d).sqrt());
     let mut shots = Vec::new();
     // Four sides at three heights, aimed horizontally at the tower's axis.
@@ -273,9 +318,13 @@ fn tower_shots(scene: &Scene) -> (Vec<Shot>, V, V) {
 }
 
 fn tower_scene() -> Option<(Scene, usize)> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../engine-webgpu/generated/vibe-city/fracturedTower.json");
+    pack_scene("fracturedTower")
+}
+
+fn pack_scene(name: &str) -> Option<(Scene, usize)> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../engine-webgpu/generated/vibe-city/{name}.json"));
     let Ok(bytes) = std::fs::read(&path) else {
-        eprintln!("skip: {} missing (bun run export.ts fracturedTower in engine/scenes/vibe-city)", path.display());
+        eprintln!("skip: {} missing (bun run export.ts {name} in engine/scenes/vibe-city)", path.display());
         return None;
     };
     let (scene, info) = build_pack_scene(&bytes).unwrap();
@@ -291,7 +340,7 @@ fn tower_run(label: &str, scene: &Scene, ccd: bool, scales: &[f64], only: usize)
         .colliders
         .iter()
         .enumerate()
-        .filter(|(_, c)| c.shape == SHAPE_CONVEX && (c.body as usize) >= 1 && (c.body as usize) < start)
+        .filter(|(_, c)| (c.shape == SHAPE_CONVEX || c.shape == SHAPE_BOX) && (c.body as usize) >= 1 && (c.body as usize) < start)
         .map(|(i, c)| Piece { body: c.body as usize, collider: i })
         .collect();
     let (shots, lo, hi) = tower_shots(scene);
@@ -366,4 +415,17 @@ fn ccd_balls_never_phase_through_the_welded_tower() {
     let Some((scene, _)) = tower_scene() else { return };
     let (failures, _) = tower_run("d6 120 Hz", &scene, true, &[4.0, 16.0, 64.0], usize::MAX);
     assert!(failures.is_empty(), "CCD balls phased through the tower:\n{}", failures.join("\n"));
+}
+
+/// vibe-city's reinforcedTower (6,308 box pieces): the same shots at 4×, 16× and 64×.
+#[test]
+fn ccd_balls_never_phase_through_the_reinforced_tower() {
+    let Some((scene, nodes)) = pack_scene("reinforcedTower") else { return };
+    let scene = scene.without_joints();
+    let pieces = scene.colliders.iter().filter(|c| c.shape == SHAPE_BOX || c.shape == SHAPE_CONVEX).count();
+    println!("reinforcedTower: {nodes} nodes, {pieces} box/hull colliders");
+    let (_, control) = tower_run("reinforced", &scene, false, &[64.0], 4);
+    assert!(control > 0, "control: without CCD the 64× balls should phase through pieces");
+    let (failures, _) = tower_run("reinforced", &scene, true, &[4.0, 16.0, 64.0], usize::MAX);
+    assert!(failures.is_empty(), "CCD balls phased through the reinforced tower:\n{}", failures.join("\n"));
 }

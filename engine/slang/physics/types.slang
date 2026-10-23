@@ -212,6 +212,7 @@ public static const uint OVERFLOW_FAST_LIST = 1024u; // more fast (long-sweep) c
 public static const uint OVERFLOW_LARGE_DYNAMICS = 2048u; // uniform grid: more than 16 dynamics wider than a cell
 public static const uint OVERFLOW_CCD_BODIES = 4096u; // more awake CCD bodies than CCD_BODY_CAP
 public static const uint OVERFLOW_IMPULSES = 8192u; // more impulse records than IMPULSE_CAP
+public static const uint OVERFLOW_CCD_PAIRS = 32768u; // more CCD candidate pairs than CCD_PAIR_CAP
 
 public struct GpuCommand
 {

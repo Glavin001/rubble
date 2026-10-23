@@ -494,6 +494,11 @@ pub fn encode_step(
         }
         e.phase("dual");
     }
+    if mo.ccd && !reuse_manifolds {
+        // Post-solve sweep check: no CCD body ends the step past a surface.
+        e.d("ccd_validate", u64::from(engine_schema::CCD_PAIR_CAP));
+        e.d("ccd_clamp", u64::from(CCD_BODY_CAP));
+    }
     e.d("extract_velocity_sleep", n_bodies);
     if vehicles {
         e.d("vehicle_post", u64::from(i.vehicle_count));
@@ -529,6 +534,8 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "ccd_pick",
     "ccd_mark",
     "ccd_respond",
+    "ccd_validate",
+    "ccd_clamp",
     "ccd_emit_persistent",
     "ccd_emit_copy_persistent",
     "char_move",

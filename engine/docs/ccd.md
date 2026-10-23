@@ -36,6 +36,10 @@ ccd_emit                    the winner's manifold at the TOI pose
 ... graph, colouring ...
 predict_bodies              a CCD body starts from its TOI pose
 solve
+ccd_validate / ccd_clamp    post-solve sweep check: no CCD body ends past a surface
+extract_velocity_sleep
+... sleep ...
+ccd_respond                 inelastic momentum exchange with a struck dynamic body
 ```
 
 ### Row 1: look-ahead that scales
@@ -76,6 +80,40 @@ AVBD solves it as an ordinary contact: real two-way forces, visible to
 `last_contacts` and the stress solver. `predict_bodies` starts the body at its
 TOI fraction of the motion, so it arrives at the surface rather than inside it.
 A TOI that would not matter (the body stops short anyway) is skipped.
+
+Against a body that cannot move this step (static, kinematic, or asleep with its
+wake deferred) the TOI row starts rigid (`k_max`): the usual cold start
+(m/h², ramping up over the iterations) let a 576 m/s ball through a sleeping
+wall piece within the step. Against a free dynamic body it starts as usual (a
+rigid row made a 21 t ball yield to a 0.25 kg brick). If `ccd_emit`'s own cast
+misses a pair `ccd_toi` gave it (a touching pair at TOI 0 is borderline in f32
+across two kernels), it still emits a stopper contact at the stored TOI, normal
+along the motion: a pair the narrowphase left to it always gets a contact.
+
+**Impact response (`ccd_respond`).** A rigid contact passes almost no momentum
+within one step's iterations, and a partner held still (wake deferred) takes
+none, so a ball would stop dead against what it hits. At the end of the step
+each CCD body that struck a dynamic body gets a perfectly inelastic,
+momentum-conserving exchange along the TOI normal from both step-start
+velocities (the partner also spins from the contact point) and a held partner
+wakes with its velocity. The lab's 277 kg ball at 300 m/s sends the 123 kg arch
+crown off at 207.5 m/s (207.75 inelastic). One thread over the CCD slots in
+order: deterministic.
+
+**Post-solve sweep check (`ccd_validate`, `ccd_clamp`).** In dense rubble the
+solve can still push a CCD body into a piece (wedged among contacts, or carried
+by a struck piece that spins). After the solve, each CCD pair (listed by
+`ccd_pick`; the candidate buffer is the constraint graph's by then) is cast
+along the body's solved motion relative to the other, from both step-start
+poses, and the body is pulled back along its path to the first contact:
+against a body that cannot move this step, any crossing deeper than a quarter of
+the thinner body's smallest half extent; against an awake body that stayed
+still, the CCD body's centre entering it (a heavy ball's overlap with bricks the
+solve has not pushed yet is left to the contacts). Stopped by a dynamic body it
+keeps its velocity (it meets that body awake next step); by static geometry it
+stops. A CCD body's bounds are padded all round by the farthest the solve can
+deflect it (trust region × iterations, at most its sweep) so every body it can
+reach is paired; pairs only the pad found get no contact row.
 
 ### Row 4: GPU impulses
 
@@ -133,9 +171,15 @@ look-ahead on for the scene by itself).
 | Impulse records | 1024 | host panic / `OVERFLOW_IMPULSES` (8192) |
 | GJK iterations | 32 | not an overflow: counted in `ccd_fallbacks()`, and the pair keeps its ordinary look-ahead contact |
 | Large dynamics on the uniform grid | 16 | `OVERFLOW_LARGE_DYNAMICS` (2048) |
+| Candidate pairs of CCD bodies (post-solve check) | 8192 | `OVERFLOW_CCD_PAIRS` (32768) |
 
 Manifold reuse (`step_reuse_manifolds`, the lab's reuse mode) is off while CCD
 bodies exist: a reused step would keep last step's TOI contacts.
+
+The fracture lab's colouring-round limit is 64 (was 32): a 576 m/s ball through
+`reinforcedTower`'s dense cubes needs more than 32 rounds (the lab failed loudly
+with "choose a coarser level"); rounds past last step's need run only when a
+body is blocked.
 
 ## Tests
 
@@ -148,7 +192,10 @@ bodies exist: a reused step would keep last step's TOI contacts.
 | `stress-rubble/tests/engine_world.rs` | With TOI CCD on, a 250 m/s CCD impactor stops at a 0.1 m wall with one step per frame |
 | `tests/static_pairs.rs` | A box lands on a lower-index static pedestal (on main it fell through: the grid query dropped dynamic–static pairs whose static had the lower index) |
 | `engine-viewer/tests/fracture_regression.rs` | A 300 m/s lab ball tunnels through the arch without CCD and knocks the crown out with it |
-| `engine-webgpu/motion-check.mjs` | The same in headless Chrome (`motion.html` and the fracture lab) |
+| **`engine-viewer/tests/fracture_tower_ccd.rs`** (acceptance) | vibe-city `fracturedTower` (3,711 hull pieces) and `reinforcedTower` (6,308 box pieces) in the lab's own plan: balls from four sides at three heights, four corners and two plunging roof shots at 1×–64× the shot speed (to ~2,300 m/s), bonds off at 120 and 60 Hz and D6-welded: 234 shots, no phase-through (the ball's centre path in a step meets a piece that did not move that step; exact GJK segment–hull distance). The CCD-off controls phase through dozens of times |
+| `tests/ccd_gallery.rs` | `motion.html`'s gallery natively, native and browser contact modes: 0 of 49 CCD cubes through the slab (40 without) |
+| `tests/ccd_plough.rs` | The ring benchmark's 21 t ball ploughs through a brick wall with CCD as without, and does not ride up |
+| `engine-webgpu/motion-check.mjs` | The same in headless Chrome: `motion.html`, `demo.html` (wall, ring check with `?ccd=1`), `vehicle.html`, and the fracture lab (arch; `tower`: both towers at 16× and 64×, 72 shots, with sensitive controls) |
 
 ## In the demos
 
