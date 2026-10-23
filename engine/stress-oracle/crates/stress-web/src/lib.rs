@@ -13,8 +13,7 @@
 //! resident frame, more while loading). In the browser those reads suspend the wasm stack
 //! to the event loop (`engine-gpu-wait`, JavaScript Promise Integration), so the exports
 //! that can reach a read are plain `extern "C"` functions the page calls through
-//! `WebAssembly.promising` ([`stress_load`], [`stress_frame`]), or, without JSPI, through the
-//! Asyncify build's driver ([`stress_asyncify_buffer`] is its save area); everything else is a
+//! `WebAssembly.promising` ([`stress_load`], [`stress_frame`]); everything else is a
 //! wasm-bindgen function that never waits. The camera, pending shots and stats live apart
 //! from the world, so input arriving while a frame is suspended never meets a borrowed
 //! world.
@@ -721,18 +720,4 @@ fn shot_meshes(world: &GpuWorld) -> Vec<stress_ref::world::Impactor> {
             stress_ref::world::Impactor::from_desc(&desc, &world.scene)
         })
         .collect()
-}
-
-/// The save area of the Asyncify build (`stress_web_bg.asyncify.wasm`, for browsers without
-/// JSPI such as Safari; `engine/scripts/build-web.sh`, `fracture/gpu-wait.mjs`): a header of
-/// the next free address and the end address, then room for the stack a suspended export
-/// saves. Returns the area's address; the page calls it once. The JSPI build never calls it.
-#[no_mangle]
-pub extern "C" fn stress_asyncify_buffer() -> u32 {
-    const BYTES: usize = 1 << 20;
-    let area: &'static mut [u8] = Box::leak(vec![0u8; BYTES].into_boxed_slice());
-    let base = area.as_mut_ptr() as usize as u32;
-    area[0..4].copy_from_slice(&(base + 8).to_le_bytes());
-    area[4..8].copy_from_slice(&(base + BYTES as u32).to_le_bytes());
-    base
 }

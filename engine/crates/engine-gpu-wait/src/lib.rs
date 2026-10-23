@@ -7,9 +7,7 @@
 //! callback has run, through JavaScript Promise Integration: the import
 //! `rubble-gpu-wait.yield_to_browser` is a `WebAssembly.Suspending` that resolves after
 //! one macrotask, and the export that reached the wait is called through
-//! `WebAssembly.promising` (`engine-webgpu/fracture/gpu-wait.mjs`). Without JSPI (Safari)
-//! the same import is the Asyncify unwind of an Asyncify build of the module (`build-web.sh`),
-//! and the page rewinds the stack after the macrotask (`asyncifyPromising`).
+//! `WebAssembly.promising` (`engine-webgpu/fracture/gpu-wait.mjs`).
 
 #[cfg(target_arch = "wasm32")]
 #[link(wasm_import_module = "rubble-gpu-wait")]

@@ -182,11 +182,10 @@ level, camera and shot rule, so the three can be compared:
 | **Stress solver · simple threshold (v0)** | The same pipeline with no stress solve (profile `threshold`), forward only. A strike is predicted before rubble steps (its Hertz force against each bond's strength × area) and its island split first. After each step, a contact force beyond a bond's capacity breaks it. The breaks split fragments into new bodies on the GPU, exactly as the stress solver's do | As **Stress solver** |
 | **Learned impact** | **Compute only** — lean MGN-T forward (H=48, P=64, ~139k random weights) on the house-1story pack graph. Does not break bonds or drive rubble; the HUD shows **ms/forward** so browser WebGPU latency can be compared to the native Metal M0 finding | This page's WebGPU device; Slang → WGSL (`slang/kernels/learned_impact.slang` → `generated/wgsl/learned_impact.wgsl`) |
 
-**Browser support (stress modes).** The two stress-solver modes wait on the GPU from Rust.
-Chrome and Edge 137+ suspend the wasm stack there with WebAssembly JavaScript Promise
-Integration (JSPI). Other WebGPU browsers (Safari, including iPhone) load an Asyncify build of
-the same Rust (`stress_web_bg.asyncify.wasm`), whose stack the page unwinds and rewinds
-(`gpu-wait.mjs`). `?asyncify=1` forces that build in Chrome, to test it.
+**Browser support (stress modes).** The two stress-solver modes wait on the GPU from Rust
+through WebAssembly JavaScript Promise Integration (JSPI, `gpu-wait.mjs`): Chrome or Edge
+137 or later. In a browser without it (Safari) the Bonds menu marks them, and choosing one
+says why instead of failing; the other modes are unaffected.
 
 **Balls.** **Ball mass**, **Ball speed** and **Ball radius** are power-of-two multiples of
 the scene's ball, in every mode. Mass and speed apply to the next shots. Radius reloads the
@@ -299,13 +298,9 @@ its own weight before it settles in the stress modes.
 - It uses the lab's orbit camera and shot rule (`engine-fracture` `view.rs`,
   `plan::shot_velocity`).
 - It runs one copy of the structure; the samples' layouts of copies are the other modes'.
-- **JSPI or Asyncify.** The solver reads the GPU synchronously, so in the browser each read
-  suspends the wasm stack to the event loop (`engine-gpu-wait`, `gpu-wait.mjs`, the page's
-  import map): through JavaScript Promise Integration in Chrome and Edge 137+, else through
-  the Asyncify build. `build-web.sh` makes that build with Binaryen's `wasm-opt --asyncify`
-  (pinned, downloaded once). Only the import `rubble-gpu-wait.yield_to_browser` unwinds.
-  wasm-bindgen's externref shims are left out (Asyncify cannot instrument externref; they
-  never wait). It is about 6% larger than the JSPI build.
+- **JSPI.** The solver reads the GPU synchronously, so in the browser each read
+  suspends the wasm stack to the event loop through JavaScript Promise Integration
+  (`engine-gpu-wait`, `gpu-wait.mjs`, the page's import map). It needs Chrome 137 or later.
 - **Build:**
   ```sh
   CARGO_PROFILE_RELEASE_DEBUG=0 wasm-pack build engine/stress-oracle/crates/stress-web --release --target web \

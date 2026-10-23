@@ -44,9 +44,11 @@ $('panel-toggle').onclick=()=>setPanel(document.body.classList.contains('collaps
 // The stress solver's modes, and the capability profile each runs (stress-web).
 const STRESS_PROFILES={stress:'blast_parity',threshold:'threshold'};
 const stressMode=()=>bondMode() in STRESS_PROFILES;
-// The stress-solver modes wait on the GPU from Rust: through WebAssembly JavaScript Promise
-// Integration where the browser has it, else (Safari) through the Asyncify build
-// (gpu-wait.mjs, stress-mode.mjs).
+// The stress-solver modes wait on the GPU from Rust through WebAssembly JavaScript Promise
+// Integration (gpu-wait.mjs). A browser without it (Safari) gets the reason, not a crash.
+const JSPI='Suspending' in WebAssembly;
+const NO_JSPI='The stress-solver modes need WebAssembly JavaScript Promise Integration (JSPI), which this browser does not support. Use Chrome or Edge 137 or later, or pick another Bonds mode.';
+if(!JSPI)for(const o of $('bond-mode').options)if(o.value in STRESS_PROFILES){o.text+=' · needs Chrome 137+';o.title=NO_JSPI}
 let stress=null,stressOn=false,stressHud={t:0,frames:0,renders:0};
 let learned=null,learnedMs=0,learnedBusy=false;
 // The bond graph and the View menu (0 materials, 1 sleep state, 2 bodies): this page's
@@ -156,15 +158,16 @@ async function loadStress(level){
  // A fracture GLB's level (one copy of the structure), the cuboid houses in their
  // sample's layout (every copy), or a scene pack.
  const cuboid=procedural==='cuboid',pack=procedural==='pack';
+ if(!JSPI)throw new Error(NO_JSPI);
  if(!cuboid&&!pack&&(procedural||!assetBytes))throw new Error('The stress-solver mode runs a fracture GLB, a scene pack or the cuboid houses: pick one of those scenes.');
  learned?.dispose();learned=null;learnedMs=0;
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;
  $('view').hidden=true;$('stress-view').hidden=false;
  setStatus('Loading the stress solver (Rust and Slang on WebGPU)…');
- // The mode is on only once its module loaded: a failed import (an old build)
+ // The mode is on only once its module loaded: a failed import (an old build, no JSPI)
  // leaves the page in its own renderer with the error shown.
  try{if(!stress){const {createStressMode}=await import('./stress-mode.mjs');stress=await createStressMode($('stress-view'))}}
- catch(e){$('view').hidden=false;$('stress-view').hidden=true;throw new Error(`Stress-solver mode unavailable: ${e?.message??e}. Rebuild it (README, Bond modes).`)}
+ catch(e){$('view').hidden=false;$('stress-view').hidden=true;throw new Error(`Stress-solver mode unavailable: ${e.message}. Rebuild it (README, Bond modes).`)}
  stressOn=true;
  const profile=STRESS_PROFILES[bondMode()];
  stress.setProfile(profile);stress.setPhysicsHz(physicsHz());stress.setBondStrengthScale(strengthScale());stress.setShotRadiusScale(radiusScale());applyView();
