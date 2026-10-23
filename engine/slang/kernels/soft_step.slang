@@ -46,6 +46,8 @@ static const uint SOFT_BREAKING = 2u;
 static const uint SOFT_SLEEP_SYNC = 4u;
 static const uint SOFT_CONTACTS = 8u;
 static const uint SOFT_RIGID_MODE = 16u;
+// Self-collision skips triangles nearer than this to the node in the rest body.
+static const float SELF_REST_GAP = 0.12;
 static const uint ENTRY_CONTACTER = 65536u;
 // Node contacts a triangle records (the triangle side of node–triangle contacts).
 static const uint TRI_NODE_CONTACTS = 4u;
@@ -308,7 +310,7 @@ void soft_begin(uint3 tid : SV_DispatchThreadID)
         {
             // Rigid mode: the particle rides its core (predicted pose).
             BodyState c = gBodies[core];
-            float3 x = c.position + quatRotate(c.orientation, SD(softRigidBase() + ord).xyz);
+            float3 x = c.position + quatRotate(c.orientation, SD(softRigidBase() + 2u * ord).xyz);
             gBodies[body].position = x;
             gSoftData[q] = float4(x, 0.0);
             gSoftData[q + 1u] = float4(x, 0.0);
@@ -321,7 +323,7 @@ void soft_begin(uint3 tid : SV_DispatchThreadID)
             if (core != SOFT_NO_BODY)
             {
                 BodyState c = gBodies[core];
-                gSoftData[softRigidBase() + ord] = float4(quatRotateInv(c.initialRot, b.initialPos - c.initialPos), 0.0);
+                gSoftData[softRigidBase() + 2u * ord] = float4(quatRotateInv(c.initialRot, b.initialPos - c.initialPos), 0.0);
             }
             AvbdParams p = PARAMS;
             float h = p.dt;
@@ -503,15 +505,32 @@ void soft_collide_nodes(uint3 tid : SV_DispatchThreadID)
     float bestDelta = 0.0;
     float bestGap = 0.0;
     uint nb = softBodyCount();
+    // Self-collision: a node against its own body's triangles too (a torn door,
+    // a folding bonnet), but not triangles it is a corner of, nor any within
+    // SELF_REST_GAP of it in the undeformed body (its own panel).
+    uint ordSelf = particleOrdinal(sb, body);
+    float3 restSelf = SD(softRigidBase() + 2u * ordSelf + 1u).xyz;
+    uint selfOrdBase = asuint(softBodyRec1(sb).w) - softBodyRec(sb).x;
+    bool selfOn = !softIsRigid(sb);
     for (uint s2 = 0u; s2 < nb; s2++)
     {
-        if (s2 == sb || !softAabbHas(s2, x)) continue;
+        bool self = s2 == sb;
+        if (self ? !selfOn : !softAabbHas(s2, x)) continue;
         uint4 r2 = softBodyRec2(s2);
         float delta = asfloat(r2.z);
         for (uint t = r2.x; t < r2.x + r2.y; t++)
         {
             uint4 tri = SU(softTriBase() + t);
             if (((tri.w >> 8) & 1u) == 0u) continue;
+            if (self)
+            {
+                if (tri.x == body || tri.y == body || tri.z == body) continue;
+                float3 wr;
+                float3 ra = SD(softRigidBase() + 2u * (selfOrdBase + tri.x) + 1u).xyz;
+                float3 rb = SD(softRigidBase() + 2u * (selfOrdBase + tri.y) + 1u).xyz;
+                float3 rc = SD(softRigidBase() + 2u * (selfOrdBase + tri.z) + 1u).xyz;
+                if (length(closestOnTriangle(restSelf, ra, rb, rc, wr) - restSelf) < SELF_REST_GAP) continue;
+            }
             BodyState ba = gBodies[tri.x], bb = gBodies[tri.y], bc = gBodies[tri.z];
             float3 a = ba.position, bpos = bb.position, c = bc.position;
             if (triTorn(t, a, bpos, c)) continue;
@@ -687,7 +706,8 @@ void soft_collide_tris(uint3 tid : SV_DispatchThreadID)
     uint nb = softBodyCount();
     for (uint s2 = 0u; s2 < nb && found < TRI_NODE_CONTACTS; s2++)
     {
-        if (s2 == sb || !softAabbOverlaps(s2, lo - 0.3, hi + 0.3)) continue;
+        // Own nodes too (self-collision, filtered on the node side).
+        if (s2 == sb ? softIsRigid(sb) : !softAabbOverlaps(s2, lo - 0.3, hi + 0.3)) continue;
         uint4 r2 = softBodyRec(s2);
         uint ordBase = asuint(softBodyRec1(s2).w);
         for (uint k = 0u; k < r2.y && found < TRI_NODE_CONTACTS; k++)
@@ -806,7 +826,7 @@ void softSolveEntry(uint4 ent)
     {
         // Rigid mode: follow the core's current iterate, no particle solve.
         BodyState c = gBodies[asuint(softBodyRec1(sb0).z)];
-        gBodies[body].position = c.position + quatRotate(c.orientation, SD(softRigidBase() + particleOrdinal(sb0, body)).xyz);
+        gBodies[body].position = c.position + quatRotate(c.orientation, SD(softRigidBase() + 2u * particleOrdinal(sb0, body)).xyz);
         return;
     }
     AvbdParams p = PARAMS;

@@ -125,8 +125,9 @@ pub struct SoftLayout {
     pub adj_base: u32,
     pub cheb_base: u32,
     pub tri_base: u32,
-    /// Per particle (by ordinal): its position in its core's frame, captured each
-    /// step while the body is soft and followed while it is rigid.
+    /// Per particle (by ordinal), 2 slots: its position in its core's frame
+    /// (captured each step while the body is soft, followed while it is rigid),
+    /// and its rest position (desc frame: the self-collision filter).
     pub rigid_base: u32,
     /// Rest edge lengths per triangle (ab, bc, ca as f32): a triangle stretched
     /// past `TRI_TEAR` × rest is torn and stops colliding.
@@ -173,7 +174,7 @@ impl SoftCapacity {
             obstacle_base,
             aabb_base,
             rigid_base: aabb_base + 2 * self.max_bodies,
-            total_slots: aabb_base + 2 * self.max_bodies + self.max_particles,
+            total_slots: aabb_base + 2 * self.max_bodies + 2 * self.max_particles,
         }
     }
 
@@ -259,7 +260,7 @@ mod tests {
             l.adj_base + (2 * c.max_beams + 3 * c.max_triangles).div_ceil(4),
             l.cheb_base
         );
-        assert_eq!(l.rigid_base + c.max_particles, l.total_slots);
+        assert_eq!(l.rigid_base + 2 * c.max_particles, l.total_slots);
         // The default pool stays well under WebGPU's 128 MiB binding limit.
         assert!(c.bytes() < 128 << 20);
     }

@@ -369,6 +369,12 @@ impl SoftHost {
         self.steer.push(0.0);
         self.upload_topology(backend);
         self.write_body_mode(backend, s);
+        // Rest positions (desc frame), second slot of each particle's rigid pair.
+        let ord = self.entries[s as usize].ordinal_base;
+        for (k, n) in desc.nodes.iter().enumerate() {
+            let p = n.position;
+            backend.write_soft_slots(l.rigid_base + 2 * (ord + k as u32) + 1, &[[p[0].to_bits(), p[1].to_bits(), p[2].to_bits(), 0]]);
+        }
         Ok(SoftHandle(s))
     }
 
