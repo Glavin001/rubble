@@ -114,6 +114,8 @@
       ['Traffic derby, 20 cars', 'scene=traffic&cars=20'],
       ['Traffic derby, 50 cars', 'scene=traffic&cars=50'],
       ['Traffic derby, 100 cars', 'scene=traffic&cars=100'],
+      ['Traffic (cruising), 100 cars', 'scene=traffic&cars=100&ai=cruise'],
+      ['Parked, 100 cars (idle)', 'scene=traffic&cars=100&ai=0'],
     ];
     const PARAMS = {
       wall: [['speed', 'km/h', 54], ['overlap', 'overlap', 1], ['angle', '°', 0]],
@@ -838,8 +840,10 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     const aiCars = [];
     let aiRb = null, aiBusy = false, aiPoses = null, userUntil = 0;
     function setupAi() {
-      if (scene !== 'traffic') return;
-      softs.forEach((s, i) => s.core && aiCars.push({ i, core: s.core, mode: i % 3 === 2 ? 'chase' : 'wander', target: null, t: 0, slow: 0, reverse: 0, kmh: 35 + ((i * 17) % 45), seed: i * 7919 + 13 }));
+      if (scene !== 'traffic' || qs.get('ai') === '0') return;
+      // ?ai=cruise: everyone wanders and brakes for cars ahead (traffic, not a derby).
+      const cruise = qs.get('ai') === 'cruise';
+      softs.forEach((s, i) => s.core && aiCars.push({ i, core: s.core, mode: !cruise && i % 3 === 2 ? 'chase' : 'wander', cruise, target: null, t: 0, slow: 0, reverse: 0, kmh: 35 + ((i * 17) % 45), seed: i * 7919 + 13 }));
       aiRb = device.createBuffer({ size: Math.max(16, aiCars.length * 112), usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
     }
     const aiRand = (c) => { c.seed = (c.seed * 1103515245 + 12345) >>> 0; return (c.seed >>> 8) / 16777216; };
@@ -878,7 +882,19 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
         const d = [c.target[0] - me.p[0], 0, c.target[2] - me.p[2]];
         const ang = Math.atan2(d[0] * right[0] + d[2] * right[2], d[0] * fwd[0] + d[2] * fwd[2]);
         input.steer = Math.max(-1, Math.min(1, ang * 1.6));
-        const want = c.kmh / 3.6 * (Math.abs(ang) > 1.2 ? 0.45 : 1);
+        let want = c.kmh / 3.6 * (Math.abs(ang) > 1.2 ? 0.45 : 1);
+        if (c.cruise) {
+          // Brake for a car ahead (within 14 m, ±30°), steer off to its far side.
+          for (let j = 0; j < aiPoses.length; j++) {
+            if (j === k) continue;
+            const o = aiPoses[j], dx = o.p[0] - me.p[0], dz = o.p[2] - me.p[2];
+            const ahead = dx * fwd[0] + dz * fwd[2], side = dx * right[0] + dz * right[2];
+            if (ahead > 0 && ahead < 14 && Math.abs(side) < ahead * 0.58) {
+              want = Math.min(want, Math.max(0, (ahead - 6) * 0.6));
+              input.steer = Math.max(-1, Math.min(1, input.steer - Math.sign(side || 1) * 0.6));
+            }
+          }
+        }
         input.forward = speed < want ? 0.85 : 0;
         if (speed > want * 1.3) input.brake = 0.4;
         // Stuck against something: reverse out with the wheel turned the other way.

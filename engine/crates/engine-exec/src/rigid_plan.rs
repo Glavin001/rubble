@@ -437,6 +437,7 @@ pub fn encode_step(
         if i.soft.contacts {
             // Soft contacts at the initial guess, frozen for the step.
             e.d("soft_bounds", u64::from(i.soft.bodies));
+            e.d("soft_tri_planes", u64::from(i.soft.triangles.max(1)));
             e.d("soft_collide_nodes", u64::from(i.soft.particles.max(1)));
             e.d("soft_collide_tris", u64::from(i.soft.triangles.max(1)));
         }
@@ -616,6 +617,7 @@ pub const SOFT_ENTRIES: &[&str] = &[
     "soft_wake",
     "soft_begin",
     "soft_bounds",
+    "soft_tri_planes",
     "soft_collide_nodes",
     "soft_collide_tris",
     "soft_primal",

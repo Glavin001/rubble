@@ -436,3 +436,10 @@ s20. **The browser step is latency-bound; every fix keeps the results identical.
 - `assembleVehicle` sizes its per-wheel scratch arrays to the vehicle: 4 when it has at most 4 wheels, else `MAX_VEHICLE_WHEELS`. These thread-private arrays live in memory and the spin solve walks them on every Newton step, so a driving car's `vehicle_iterate` cost about 0.4 ms per iteration in Chrome.
 - Self-collision runs its rest-pose exclusion after the cheap plane and prism culls, not before.
 - Obstacles are bounded by their oriented box, not their bounding sphere. A 140 m arena wall's 70 m radius kept every traffic car soft.
+
+s21. **Rigid-mode promotion is tight, and particle work spreads across lanes.**
+- Promotion margin: soft contacts only form inside bounds already padded by twice the step's travel, so promotion adds only the two skins and 0.1 m, plus a moving obstacle's own travel. Promotion still happens the step before any contact force. The old 0.5 m + 0.15 s × speed margin added nothing.
+- Rigid contact edges: an edge promotes only if it can push this step, meaning its start gap closes under twice the step's approach along the normal, or it carries force. Speculative ground contacts under a moving car's sills kept every driving car soft.
+- Lane-split sweep: a colour holds a few dozen of a car's particles. Each particle now gets up to 16 lanes, with its beams and contact triangles strided over them and the 3×3 blocks summed in workgroup memory. The math is the same; only the float summation order changes.
+- Triangle planes: `soft_tri_planes` stores each triangle's normal, area, first vertex and cull radius before node contacts, so a node rejects a far triangle from two reads. The values are identical to those computed from the vertices.
+- Determinism: crash outcomes were already not bit-deterministic. Cross-body contacts read other bodies' particles while they move within a colour, so tbone breaks 10–29 beams between runs of one build. Rigid mode now matches always-soft within that spread.
