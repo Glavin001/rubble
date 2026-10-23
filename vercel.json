@@ -4,5 +4,5 @@
   "buildCommand": "bash engine/scripts/build-web.sh",
   "outputDirectory": "engine/web-dist",
   "framework": null,
-  "ignoreCommand": "prev=\"${VERCEL_GIT_PREVIOUS_SHA:-HEAD^}\"; git cat-file -e \"$prev^{commit}\" 2>/dev/null || exit 1; git diff --quiet \"$prev\" HEAD -- engine vercel.json ':(exclude)engine/docs' ':(exclude)engine/stress-oracle' ':(exclude)engine/*.md'"
+  "git": { "deploymentEnabled": false }
 }

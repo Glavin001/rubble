@@ -1,5 +1,5 @@
 use anyhow::Result;
-use engine_slang_build::{compile, compile_with_defines, find_slangc, SlangTarget};
+use engine_slang_build::{compile, compile_with_defines, find_slangc, par_map, SlangTarget};
 use std::env;
 use std::path::PathBuf;
 
@@ -194,15 +194,18 @@ fn main() -> Result<()> {
 
     let mut ok = vec!["abi_roundtrip".to_string()];
     let mut failed = Vec::new();
-    for entry in WORLD_ENTRIES {
+    let spirv = par_map(WORLD_ENTRIES, |entry| {
         let dest = out.join(format!("{entry}.spv"));
-        match compile(
+        compile(
             &source_for(&slang_root, entry),
             entry,
             SlangTarget::Spirv,
             &dest,
             &[],
-        ) {
+        )
+    });
+    for (entry, result) in WORLD_ENTRIES.iter().zip(spirv) {
+        match result {
             Ok(()) => ok.push((*entry).to_string()),
             Err(e) => {
                 println!("cargo:warning=SPIR-V skip {entry}: {e}");
@@ -234,20 +237,26 @@ fn main() -> Result<()> {
     std::fs::create_dir_all(&wgsl_dir)?;
     let mut table = String::from("pub static DIRECT_WGSL: &[(&str, &str)] = &[\n");
     let mut wgsl_failed = Vec::new();
-    for entry in WORLD_ENTRIES
+    let wgsl_entries: Vec<&str> = WORLD_ENTRIES
         .iter()
-        .chain(std::iter::once(&"broadphase_grid"))
-    {
+        .copied()
+        .chain(std::iter::once("broadphase_grid"))
+        .collect();
+    let wgsl = par_map(&wgsl_entries, |entry| {
         let dest = wgsl_dir.join(format!("{entry}.wgsl"));
-        match compile_with_defines(
+        compile_with_defines(
             &source_for(&slang_root, entry),
             entry,
             SlangTarget::Wgsl,
             &dest,
             &[],
             &[("ENGINE_WGSL", "1")],
-        ) {
-            Ok(()) => table.push_str(&format!(
+        )
+        .map(|()| dest)
+    });
+    for (entry, result) in wgsl_entries.iter().zip(wgsl) {
+        match result {
+            Ok(dest) => table.push_str(&format!(
                 "    ({entry:?}, include_str!({:?})),\n",
                 dest.display().to_string()
             )),
