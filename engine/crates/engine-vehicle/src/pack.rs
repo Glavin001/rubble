@@ -83,6 +83,11 @@ fn v3(a: [f32; 3]) -> Vec3 {
     Vec3::from_array(a)
 }
 
+/// A mount limit as packed: ≤ 0 (unbreakable) becomes 1e30, as `JOINT_BIG`.
+pub fn mount_limit(v: f32) -> f32 {
+    if v > 0.0 { v } else { 1e30 }
+}
+
 fn rim_count(w: &WheelDesc) -> u32 {
     w.rim_spheres.clamp(1, RIM_SPHERES_MAX)
 }
@@ -382,6 +387,9 @@ pub fn pack_wheel(
         Some(p) => slot3(v3(p), 1.0),
         None => slot3(Vec3::ZERO, 0.0),
     };
+    let (bf, bt) = if w.mount.breakable() { (mount_limit(w.mount.break_force), mount_limit(w.mount.break_torque)) } else { (1e30, 1e30) };
+    s[W_MOUNT as usize] = [f(bf), f(bt), f(0.0), f(0.0)];
+    s[W_MOUNT2 as usize] = slot3(w.mount.anchor.map(v3).unwrap_or(pos), 0.0);
     s
 }
 
@@ -596,6 +604,9 @@ pub fn pack(desc: &VehicleDesc, position: Vec3, rotation: Quat, slots: VehicleSl
     if desc.tracks.is_some() {
         flags |= VF_TRACKED;
     }
+    if desc.breakable() {
+        flags |= VF_BREAKABLE;
+    }
     let mut v = vec![[0u32; 4]; VEH_STRIDE as usize];
     let (direct_torque, top_speed) = match &desc.drive {
         DriveDesc::Direct { max_torque, top_speed } => {
@@ -699,11 +710,16 @@ pub fn pack(desc: &VehicleDesc, position: Vec3, rotation: Quat, slots: VehicleSl
             PartRole::Brake { wheels } => (PR_BRAKE, wheels),
         };
         let (com, ip) = part_props[i];
+        // Part 0 is the root: it stays the car.
+        let m = if i == 0 || !p.mount.breakable() { MountDesc::default() } else { p.mount };
+        let (bf, bt) = if m.breakable() { (mount_limit(m.break_force), mount_limit(m.break_torque)) } else { (1e30, 1e30) };
         out.parts.push(vec![
             [part_cols[i].0, part_cols[i].1, role, mask],
             [f(p.mass), f(ip.x), f(ip.y), f(ip.z)],
             slot3u(com, PS_ATTACHED),
             [part_body0 + i as u32, slots.vehicle, 0, 0],
+            slot3(m.anchor.map(v3).unwrap_or(com), bf),
+            [f(bt), f(0.0), f(0.0), f(0.0)],
         ]);
     }
     out

@@ -86,6 +86,7 @@ impl Pipelines {
             ("vehicle_link", msl!("vehicle_link")),
             ("vehicle_prepare", msl!("vehicle_prepare")),
             ("vehicle_iterate", msl!("vehicle_iterate")),
+            ("vehicle_loads", msl!("vehicle_loads")),
             ("vehicle_post", msl!("vehicle_post")),
             ("raycast_batch", msl!("raycast_batch")),
         ];

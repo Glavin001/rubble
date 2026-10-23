@@ -471,6 +471,93 @@ pub fn motorcycle() -> VehicleDesc {
     }
 }
 
+/// vibe-land's dune buggy ("Sand rail"), baked by `engine/scenes/dune-buggy`
+/// (`bun run bake:physics`) into `assets/dune_buggy.json`: 17 parts with their
+/// recipe masses and primitive colliders, mounts rated from the measured joint
+/// areas, and the rig's hubs and travel. Handling follows vibe-land's garage
+/// setup: springs at 30% static sag, critically damped, all-wheel drive.
+pub fn dune_buggy() -> VehicleDesc {
+    #[derive(serde::Deserialize)]
+    struct Wheel {
+        hub: [f32; 3],
+        radius: f32,
+        width: f32,
+        mass: f32,
+        compression: f32,
+        extension: f32,
+        steerable: bool,
+        mount: MountDesc,
+    }
+    #[derive(serde::Deserialize)]
+    struct Steering {
+        max_steer_deg: f32,
+    }
+    #[derive(serde::Deserialize)]
+    struct Asset {
+        total_mass: f32,
+        parts: Vec<PartDesc>,
+        wheels: Vec<Wheel>,
+        steering: Steering,
+    }
+    let a: Asset = serde_json::from_str(include_str!("../assets/dune_buggy.json")).expect("assets/dune_buggy.json");
+    const G: f32 = 9.81;
+    const SAG: f32 = 0.3; // vibe-land customization.mjs STATIC_SAG_FRACTION
+    const S_MIN: f32 = 0.05;
+    let corner_mass = a.total_mass / a.wheels.len() as f32;
+    let wheels = a
+        .wheels
+        .iter()
+        .map(|w| {
+            // Design pose = the rig's neutral: room to compress and to droop either side.
+            let neutral = S_MIN + w.compression;
+            let travel = w.compression + w.extension;
+            let k = corner_mass * G / (SAG * travel);
+            let c = 2.0 * (k * corner_mass).sqrt();
+            let hz = (k / corner_mass).sqrt() / std::f32::consts::TAU;
+            WheelDesc {
+                position: [w.hub[0], w.hub[1] + neutral, w.hub[2]],
+                radius: w.radius,
+                width: w.width,
+                mass: w.mass,
+                inertia: None,
+                suspension_min: S_MIN,
+                suspension_max: neutral + w.extension,
+                spring: Spring::StiffnessDamping { k, c },
+                // vibe-land's bump stop: ten times the spring rate (√10 × its frequency).
+                bump_stop: BumpStop::Spring { hz: hz * 10f32.sqrt(), zeta: 0.7, max_force: 0.0 },
+                steerable: w.steerable,
+                max_steer: if w.steerable { a.steering.max_steer_deg.to_radians() } else { 0.0 },
+                driven: true,
+                handbrake: !w.steerable,
+                max_brake_torque: 2500.0,
+                max_handbrake_torque: 4000.0,
+                long_mu_scale: 1.4,
+                lat_mu_scale: 1.4,
+                rolling_resistance: 0.015,
+                rim_material: crate::pack::WHEEL_RIM_MATERIAL,
+                mount: w.mount,
+                ..Default::default()
+            }
+        })
+        .collect::<Vec<_>>();
+    // vibe-land drivingSetup: 7.5 m/s² (within 80% of the grip budget on four
+    // driven wheels), 30 m/s top speed.
+    let r = wheels[0].radius;
+    let max_torque = a.total_mass * 7.5 * r / wheels.len() as f32;
+    VehicleDesc {
+        name: "dune_buggy".into(),
+        parts: a.parts,
+        wheels,
+        drive: DriveDesc::Direct { max_torque, top_speed: 30.0 },
+        // vibe-land PHYSX_CENTER_OF_MASS_Y: 0.2 m below the computed centre.
+        center_of_mass_offset: [0.0, -0.2, 0.0],
+        // Full lock to 6 m/s, tapering to 35% at 28 m/s (vibe-land's steering shaping).
+        steering: SteeringDesc { speed_curve: Curve(vec![[0.0, 1.0], [6.0, 1.0], [28.0, 0.35]]), ..Default::default() },
+        wheel_query: WheelQuery::Sphere,
+        ..Default::default()
+    }
+}
+
 /// Every preset by name (also exported as JSON for the browser demo).
 pub fn all() -> Vec<VehicleDesc> {
     vec![
@@ -483,9 +570,74 @@ pub fn all() -> Vec<VehicleDesc> {
         kart(),
         tank(),
         motorcycle(),
+        dune_buggy(),
     ]
 }
 
 pub fn by_name(name: &str) -> Option<VehicleDesc> {
     all().into_iter().find(|d| d.name == name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pack::{pack, requirements, VehicleSlots};
+    use engine_schema::vehicle::*;
+    use glam::{Quat, Vec3};
+
+    #[test]
+    fn dune_buggy_is_complete() {
+        let d = dune_buggy();
+        assert_eq!(d.parts.len(), 17);
+        assert!(d.parts.len() <= 32);
+        assert_eq!(d.parts[0].name, "frame");
+        assert!(d.parts.iter().all(|p| !p.colliders.is_empty() && p.mass > 0.0), "every part has mass and shape");
+        // The root never breaks; every other part and every wheel can.
+        assert!(!d.parts[0].mount.breakable());
+        assert!(d.parts[1..].iter().all(|p| p.mount.breakable()), "{:?}", d.parts.iter().map(|p| (&p.name, p.mount)).collect::<Vec<_>>());
+        assert!(d.wheels.iter().all(|w| w.mount.breakable()));
+        assert!(d.breakable());
+        // Wheel order FL, FR, RL, RR with +X left, +Z forward.
+        let p: Vec<[f32; 3]> = d.wheels.iter().map(|w| w.position).collect();
+        assert!(p[0][0] > 0.0 && p[1][0] < 0.0 && p[2][0] > 0.0 && p[3][0] < 0.0);
+        assert!(p[0][2] > 0.0 && p[2][2] < 0.0);
+        assert!(d.wheels[0].steerable && !d.wheels[2].steerable);
+        // The recipe's mass, about 1.47 t with four 128 kg wheels.
+        let m: f32 = d.parts.iter().map(|p| p.mass).sum::<f32>() + d.wheels.iter().map(|w| w.mass).sum::<f32>();
+        assert!((1400.0..1550.0).contains(&m), "mass {m}");
+        let req = requirements(&d);
+        let packed = pack(&d, Vec3::ZERO, Quat::IDENTITY, VehicleSlots::default());
+        assert_eq!(req.colliders as usize, packed.colliders.len());
+        assert_eq!(packed.parts.len(), 17);
+    }
+
+    #[test]
+    fn mounts_pack_their_limits() {
+        let mut d = destructible_sedan();
+        let flags = |d: &VehicleDesc| pack(d, Vec3::ZERO, Quat::IDENTITY, VehicleSlots::default()).vehicle[V_CFG as usize][3];
+        // Every existing preset stays unbreakable.
+        assert!(!d.breakable());
+        assert_eq!(flags(&d) & VF_BREAKABLE, 0);
+        let p = pack(&d, Vec3::ZERO, Quat::IDENTITY, VehicleSlots::default());
+        for part in &p.parts {
+            assert_eq!(part.len(), PART_STRIDE as usize);
+            assert_eq!(f32::from_bits(part[P_MOUNT as usize][3]), 1e30);
+            assert_eq!(f32::from_bits(part[P_LOAD as usize][0]), 1e30);
+        }
+        // A finite force limit; torque left unbreakable.
+        d.parts[1].mount = MountDesc { break_force: 5e4, break_torque: 0.0, anchor: Some([0.0, 0.5, 0.0]) };
+        assert!(d.breakable());
+        assert_ne!(flags(&d) & VF_BREAKABLE, 0);
+        let c = d.center_of_mass();
+        let p = pack(&d, Vec3::ZERO, Quat::IDENTITY, VehicleSlots::default());
+        let m = p.parts[1][P_MOUNT as usize];
+        assert_eq!(f32::from_bits(m[3]), 5e4);
+        assert_eq!(f32::from_bits(p.parts[1][P_LOAD as usize][0]), 1e30);
+        // The anchor is centred with the rest of the design.
+        assert!((f32::from_bits(m[1]) - (0.5 - c[1])).abs() < 1e-5);
+        // The root's mount is never packed, whatever it says.
+        d.parts[0].mount.break_force = 1.0;
+        let p = pack(&d, Vec3::ZERO, Quat::IDENTITY, VehicleSlots::default());
+        assert_eq!(f32::from_bits(p.parts[0][P_MOUNT as usize][3]), 1e30);
+    }
 }
