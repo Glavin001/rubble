@@ -188,9 +188,57 @@ fn threshold_gpu(gpu: &Gpu, scene: &stress_ref::scene::Scene, ball: (f64, f64, f
         println!("threshold GPU world: {} chunks, {} bonds, {} body slots, built in {:.2} s", w.tables.chunk_count(), w.tables.bond_count(), w.tables.body_count(), t.elapsed().as_secs_f64());
         let mut ms = Vec::with_capacity(frames);
         let run = std::time::Instant::now();
+        // `STRESS_THRESHOLD_EDGE=1`: one lab ball at frame 5 from outside the scene, at its
+        // -x-most house, instead of `STRESS_SHOTS`.
+        let edge = std::env::var("STRESS_THRESHOLD_EDGE").is_ok_and(|v| v == "1");
+        // `STRESS_THRESHOLD_WHERE=1`: each frame's new breaks by structure (house): its
+        // distance from the first struck structure, and the nearest moving chunk of another
+        // structure to a broken bond (could debris have done it?). Waits each frame.
+        let r#where = std::env::var("STRESS_THRESHOLD_WHERE").is_ok_and(|v| v == "1");
+        let mut intact_before: Vec<bool> = Vec::new();
+        let mut house_centre: Vec<[f64; 3]> = Vec::new();
+        let mut hit_house: Option<usize> = None;
+        let mut house_of: Vec<usize> = Vec::new();
+        if r#where {
+            intact_before = w.fracture.bonds_intact(gpu);
+            let c = w.chunk_centres(gpu);
+            // Houses: the bond graph's components at the start.
+            let n = w.tables.chunk_count() as usize;
+            let mut parent: Vec<usize> = (0..n).collect();
+            fn find(p: &mut [usize], mut x: usize) -> usize {
+                while p[x] != x {
+                    p[x] = p[p[x]];
+                    x = p[x];
+                }
+                x
+            }
+            for b in &w.tables.bonds {
+                let (x, y) = (find(&mut parent, b[0] as usize), find(&mut parent, b[1] as usize));
+                parent[x.max(y)] = x.min(y);
+            }
+            let mut ids: std::collections::HashMap<usize, usize> = Default::default();
+            house_of = (0..n).map(|k| {
+                let r = find(&mut parent, k);
+                let next = ids.len();
+                *ids.entry(r).or_insert(next)
+            }).collect();
+            let mut sum = vec![([0.0f64; 3], 0usize); ids.len()];
+            for (k, &st) in house_of.iter().enumerate() {
+                for a in 0..3 {
+                    sum[st].0[a] += c[k].0[a];
+                }
+                sum[st].1 += 1;
+            }
+            house_centre = sum.iter().map(|(p, n)| [p[0] / *n as f64, p[1] / *n as f64, p[2] / *n as f64]).collect();
+        }
         for f in 0..frames {
             if shots > 0 && f >= 5 && (f - 5) % 30 == 0 && (f - 5) / 30 < shots {
                 w.launch(gpu, &shot_at((f - 5) / 30));
+            }
+            if edge && f == 5 {
+                // The scene's -x-most chunk: its y, 1.5 m up, from 3 radii + 1 m outside.
+                let c = all.iter().min_by(|a, b| a.center[0].total_cmp(&b.center[0])).expect("chunks").center;
+                w.launch(gpu, &ImpactorDesc { position: [c[0] - 3.0 * radius - 1.0, c[1], lo[2] + 1.5], ..shot_at(0) });
             }
             // `STRESS_THRESHOLD_CHECK=1`: no chunk jumps further in a frame than its body's
             // motion allows (a split re-parents bodies in place).
@@ -238,6 +286,62 @@ fn threshold_gpu(gpu: &Gpu, scene: &stress_ref::scene::Scene, ball: (f64, f64, f
                         *prev = intact;
                     });
                 }
+            }
+            if r#where {
+                let intact = w.fracture.bonds_intact(gpu);
+                let new: Vec<usize> = (0..intact.len()).filter(|&i| intact_before[i] && !intact[i]).collect();
+                if !new.is_empty() {
+                    let c = w.chunk_centres(gpu);
+                    let moving: Vec<usize> = (0..c.len()).filter(|&k| c[k].1 > 1.0).collect();
+                    let mut by: std::collections::BTreeMap<usize, (usize, f64)> = Default::default();
+                    for &i in &new {
+                        let a = w.tables.bonds[i][0] as usize;
+                        let st = house_of[a];
+                        let near = moving.iter().filter(|&&k| house_of[k] != st).map(|&k| ((c[k].0[0] - c[a].0[0]).powi(2) + (c[k].0[1] - c[a].0[1]).powi(2) + (c[k].0[2] - c[a].0[2]).powi(2)).sqrt()).fold(f64::INFINITY, f64::min);
+                        let e = by.entry(st).or_insert((0, f64::INFINITY));
+                        e.0 += 1;
+                        e.1 = e.1.min(near);
+                    }
+                    // `STRESS_THRESHOLD_WHERE_DETAIL=1`: each new break's chunks and the
+                    // nearest moving chunk of another component (its component's size, speed).
+                    if std::env::var("STRESS_THRESHOLD_WHERE_DETAIL").is_ok_and(|v| v == "1") && f >= 3 {
+                        let size = |h: usize| house_of.iter().filter(|&&x| x == h).count();
+                        for &i in &new {
+                            let (a, b) = (w.tables.bonds[i][0] as usize, w.tables.bonds[i][1] as usize);
+                            let near = moving.iter().filter(|&&k| house_of[k] != house_of[a]).min_by(|&&x, &&y| {
+                                let d = |k: usize| (0..3).map(|j| (c[k].0[j] - c[a].0[j]).powi(2)).sum::<f64>();
+                                d(x).total_cmp(&d(y))
+                            });
+                            eprintln!(
+                                "  bond {i}: chunks {a} {b} at {:?} (speed {:.2}, {:.2}), component {} of {} chunks; nearest mover {:?}",
+                                c[a].0.map(|x| (x * 100.0).round() / 100.0), c[a].1, c[b].1, house_of[a], size(house_of[a]),
+                                near.map(|&k| (k, house_of[k], size(house_of[k]), c[k].0.map(|x| (x * 100.0).round() / 100.0), (c[k].1 * 100.0).round() / 100.0))
+                            );
+                        }
+                    }
+                    if f > 5 && hit_house.is_none() {
+                        hit_house = by.iter().max_by_key(|(_, v)| v.0).map(|(s, _)| *s);
+                    }
+                    let h = hit_house.map(|s| house_centre[s]);
+                    let balls: Vec<[f64; 3]> = w.shot_states(gpu).into_iter().filter(|s| s.2).map(|s| s.0).collect();
+                    let line: Vec<String> = by
+                        .iter()
+                        .map(|(s, (n, near))| {
+                            let c = house_centre[*s];
+                            let d = h.map_or(0.0, |h| ((c[0] - h[0]).powi(2) + (c[1] - h[1]).powi(2)).sqrt());
+                            let ball = balls.iter().map(|b| ((b[0] - c[0]).powi(2) + (b[1] - c[1]).powi(2)).sqrt()).fold(f64::INFINITY, f64::min);
+                            format!("house {s} ({d:.0} m away): {n} bonds, nearest foreign debris {near:.1} m, ball {ball:.1} m")
+                        })
+                        .collect();
+                    eprintln!("frame {f}: {}", line.join("; "));
+                }
+                intact_before = intact;
+            }
+            // `STRESS_TRACE_CHUNK=k`: chunk k's centre, speed and body each frame (waits).
+            if let Some(k) = std::env::var("STRESS_TRACE_CHUNK").ok().and_then(|v| v.parse::<usize>().ok()) {
+                let c = w.chunk_centres(gpu);
+                let body = w.fracture.chunk_bodies(gpu)[k];
+                eprintln!("trace {f}: chunk {k} at {:?} speed {:.3} body {body}", c[k].0.map(|x| (x * 1000.0).round() / 1000.0), c[k].1);
             }
             // `STRESS_THRESHOLD_STRIKES=1`: each strike predicted this frame (body, shot,
             // contact, force), read back (waits).

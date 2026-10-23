@@ -472,6 +472,17 @@ impl ThresholdWorld {
     }
 
     /// The shots as impactors (their meshes, for a renderer's shot objects).
+    /// Diagnostic read (waits): each shot's centre and velocity in the stress frame, and
+    /// whether it is in flight (not parked).
+    pub fn shot_states(&self, gpu: &Gpu) -> Vec<([f64; 3], [f64; 3], bool)> {
+        let bodies: Vec<BodyState> = gpu.read_range(self.engine.sim.body_buffer(), 0, self.tables.body_count() as usize);
+        let z = |v: [f32; 3]| [v[0] as f64, -v[2] as f64, v[1] as f64];
+        self.shots.iter().map(|sh| {
+            let b = &bodies[sh.body as usize];
+            (z(b.position), z(b.linear_vel), b.inv_mass > 0.0)
+        }).collect()
+    }
+
     pub fn shot_impactors(&self) -> Vec<stress_ref::world::Impactor> {
         (0..self.shots.len())
             .map(|k| {
