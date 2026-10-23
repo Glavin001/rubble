@@ -2321,19 +2321,39 @@ impl WgpuSim {
         &self.queue
     }
 
-    /// Soft-body destruction events since the last poll: beam breaks, and the
-    /// pieces they cut loose (`SoftHost::note_breaks`). After an event-ring
-    /// overflow every soft body is resynchronised from a beam readback, so no
-    /// piece is missed.
-    pub fn poll_soft_events(&mut self) -> SoftEvents {
-        let words: Vec<u32> = self.read_buffer_range(
-            21,
+    /// The event ring (binding 21 from `EVENT_RING_BASE`): buffer, byte offset and
+    /// byte size, for hosts that copy it into their own readback with each step.
+    pub fn event_ring_range(&self) -> (&wgpu::Buffer, u64, u64) {
+        (
+            &self.bufs[21],
             u64::from(EVENT_RING_BASE) * 4,
-            (4 + 4 * EVENT_RING_CAPACITY) as usize,
-        );
+            u64::from(4 + 4 * EVENT_RING_CAPACITY) * 4,
+        )
+    }
+
+    /// Every event in a copy of the event ring (`event_ring_range`) since the last
+    /// poll: joint, mount and beam breaks and the soft pieces those cut loose. It
+    /// advances the same cursors as `poll_joint_breaks`, `poll_mount_breaks` and
+    /// `poll_soft_events`, so a host uses this or those. `lost` counts records
+    /// overwritten before they were read (soft bodies are then resynchronised).
+    pub fn ring_events(&mut self, words: &[u32]) -> RingEvents {
+        let mut joint_breaks = Vec::new();
+        let lost_joints = decode_joint_breaks(words, &mut self.events_seen, &mut joint_breaks);
+        let mut mount_breaks = Vec::new();
+        let lost_mounts = decode_mount_breaks(words, &mut self.mount_events_seen, &mut mount_breaks);
+        let soft = self.soft_events_from(words);
+        RingEvents {
+            joint_breaks,
+            mount_breaks,
+            lost: lost_joints.max(lost_mounts).max(soft.lost),
+            soft,
+        }
+    }
+
+    fn soft_events_from(&mut self, words: &[u32]) -> SoftEvents {
         let mut breaks = Vec::new();
         let lost = engine_softbody::decode_beam_breaks(
-            &words,
+            words,
             &mut self.beam_events_seen,
             EVENT_RING_CAPACITY,
             &mut breaks,
@@ -2356,6 +2376,19 @@ impl WgpuSim {
             pieces,
             lost,
         }
+    }
+
+    /// Soft-body destruction events since the last poll: beam breaks, and the
+    /// pieces they cut loose (`SoftHost::note_breaks`). After an event-ring
+    /// overflow every soft body is resynchronised from a beam readback, so no
+    /// piece is missed.
+    pub fn poll_soft_events(&mut self) -> SoftEvents {
+        let words: Vec<u32> = self.read_buffer_range(
+            21,
+            u64::from(EVENT_RING_BASE) * 4,
+            (4 + 4 * EVENT_RING_CAPACITY) as usize,
+        );
+        self.soft_events_from(&words)
     }
 
     /// Whether soft body `h` is in rigid mode right now (`SoftSettings::rigid_mode`):
@@ -2550,6 +2583,16 @@ pub use host_state::SimSnapshot;
 mod tests;
 
 /// [`WgpuSim::poll_soft_events`] result.
+/// Everything in the event ring since the last poll ([`WgpuSim::ring_events`]).
+#[derive(Clone, Debug, Default)]
+pub struct RingEvents {
+    pub joint_breaks: Vec<JointBreak>,
+    pub mount_breaks: Vec<MountBreak>,
+    pub soft: SoftEvents,
+    /// Records overwritten before they were read (the largest loss of any kind).
+    pub lost: u32,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct SoftEvents {
     pub breaks: Vec<engine_softbody::BeamBreak>,

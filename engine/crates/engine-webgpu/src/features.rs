@@ -183,7 +183,7 @@ impl EngineFeatures {
 
 /// Everything [`crate::WgpuSim::with_device_options`] needs beyond the capacity
 /// and the device.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct SimOptions {
     pub contacts: ContactStorage,
     pub vehicles: VehicleCapacity,
@@ -194,18 +194,6 @@ pub struct SimOptions {
     /// moved ([`crate::WgpuSim::pose_buffer`], `moved_buffer`). Read-only on the
     /// physics state, so the simulation is the same with it on or off.
     pub pose_output: bool,
-}
-
-impl Default for SimOptions {
-    fn default() -> Self {
-        Self {
-            contacts: ContactStorage::default(),
-            vehicles: VehicleCapacity::default(),
-            soft: None,
-            features: EngineFeatures::default(),
-            pose_output: false,
-        }
-    }
 }
 
 impl SimOptions {
@@ -255,9 +243,9 @@ pub(crate) fn check_limits(
     // Binding 6 is a uniform; binding 22 (the pass table) is bound 16 B at a
     // dynamic offset, so only the buffer limit applies; the rest are storage.
     let binding_max = match binding {
-        6 => u64::from(limits.max_uniform_buffer_binding_size),
+        6 => limits.max_uniform_buffer_binding_size,
         22 => limits.max_buffer_size,
-        _ => u64::from(limits.max_storage_buffer_binding_size),
+        _ => limits.max_storage_buffer_binding_size,
     };
     anyhow::ensure!(
         bytes <= limits.max_buffer_size && bytes <= binding_max,

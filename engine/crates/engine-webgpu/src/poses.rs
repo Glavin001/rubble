@@ -91,3 +91,15 @@ impl WgpuSim {
         }
     }
 }
+
+impl WgpuSim {
+    /// Published poses of bodies `first..first + count` (blocking): what a host
+    /// reads once to resynchronise after it dropped a frame.
+    pub fn read_poses(&self, first: u32, count: u32) -> Vec<PoseRecord> {
+        assert!(
+            self.pose_output_enabled(),
+            "pose output is off (SimOptions::pose_output)"
+        );
+        self.read_binding(POSES_BINDING, u64::from(first) * 32, count as usize)
+    }
+}

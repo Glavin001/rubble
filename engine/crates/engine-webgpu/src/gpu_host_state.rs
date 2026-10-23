@@ -161,6 +161,17 @@ impl WgpuSim {
         Ok(())
     }
 
+    /// The body collider `id` belongs to (host mirror).
+    pub fn collider_body(&self, id: u32) -> Option<u32> {
+        self.host_cols.get(id as usize).map(|c| c.body)
+    }
+
+    /// Drop the queued commands for `body` (it is being removed or overwritten).
+    pub fn cancel_body_commands(&mut self, body: u32) {
+        self.pending_commands.retain(|c| c.a != body);
+        self.command_count = self.pending_commands.len() as u32;
+    }
+
     /// Body commands queued for the next step.
     pub fn pending_body_commands(&self) -> usize {
         self.pending_commands.len()

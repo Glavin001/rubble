@@ -8,6 +8,7 @@ use glam::{Mat3, Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
 pub mod commands;
+pub mod mass;
 pub mod convex;
 pub mod handles;
 pub mod joint;

@@ -19,7 +19,7 @@ pub use features::{
 };
 #[cfg(feature = "gpu")]
 pub use gpu::{
-    default_device, SimSnapshot, SoftEvents, WgpuSim, MOVED_BINDING, POSES_BINDING,
+    default_device, RingEvents, SimSnapshot, SoftEvents, WgpuSim, MOVED_BINDING, POSES_BINDING,
     POSE_HEADER_BINDING, POSE_RECORD_BYTES,
 };
 #[cfg(feature = "gpu")]

@@ -1,0 +1,20 @@
+[package]
+name = "engine-world"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rubble's public world API: one handle for rigid bodies, joints, vehicles and soft bodies on the GPU"
+
+[lib]
+name = "rubble"
+
+[dependencies]
+engine-schema.workspace = true
+engine-webgpu.workspace = true
+engine-vehicle.workspace = true
+engine-softbody.workspace = true
+engine-gpu-wait.workspace = true
+wgpu.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
+anyhow.workspace = true
