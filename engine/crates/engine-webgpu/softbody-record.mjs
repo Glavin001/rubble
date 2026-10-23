@@ -48,7 +48,8 @@ const TAKES = {
   sandwich_cab: { query: 'scene=sandwich&speed=60&runup=6', cam: { mode: 'mount', from: '18 t truck', target: 'car0' }, title: 'Sandwich, from the 18 t truck\'s cab', target: [0, 1, 0], dist: 18, yaw: 1.3, impact: [60, 360], settle: 640 },
   sandwich_side: { query: 'scene=sandwich&speed=60&runup=6', cam: { mode: 'right', target: 'car0' }, title: 'Sandwich, the car\'s starboard side', target: [0, 1, 0], dist: 18, yaw: 1.3, impact: [60, 360], settle: 640 },
   crusher_side: { query: 'scene=crusher', cam: { mode: 'right', target: 'car0' }, title: 'Crusher: drop, then the winch lifts it to show the wreck', target: [0, 1, 0], dist: 10, yaw: 1.0, impact: [180, 420], settle: 1800 },
-  limbo_driver: { query: 'scene=limbo&speed=80&runup=6', cam: { mode: 'driver', target: 'car0' }, title: 'Limbo bar from the driver\'s seat', target: [0, 1, 4], dist: 11, yaw: 2.0, sweep: 1.4, impact: [60, 330], settle: 600 },
+  limbo_side: { query: 'scene=limbo&speed=80&runup=6', cam: { mode: 'left', target: 'car0' }, title: 'Limbo bar at 80 km/h, tracking the car from its left side', target: [0, 1, 4], dist: 11, yaw: 2.0, sweep: 1.4, impact: [60, 330], settle: 600 },
+  limbo_chase: { query: 'scene=limbo&speed=80&runup=6', cam: { mode: 'chase', target: 'car0' }, title: 'Limbo bar at 80 km/h, chasing the car', target: [0, 1, 4], dist: 11, yaw: 2.0, sweep: 1.4, impact: [60, 330], settle: 600 },
   traffic20: { query: 'scene=traffic&cars=20', title: 'Traffic derby: 20 self-driving soft cars', target: [0, 0, 0], dist: 70, yaw: 0.6, impact: [0, 0], settle: 2400, live: true },
   drop: { query: 'scene=drop&height=12&pitch=50', title: 'Nose-first drop from 12 m', target: [0, 1.2, 1], dist: 11, yaw: 1.6, impact: [330, 570], settle: 760 },
 };

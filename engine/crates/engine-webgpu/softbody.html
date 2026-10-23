@@ -336,7 +336,8 @@
       world.addSoftObstacle(world.colliderCount - 1);
       for (const x of [-3.3, 3.3]) staticBox([x, y / 2, 6], [0.12, y / 2, 0.12]);
       addSoft(carDesc, [0, 0.05, -2 - runup], 0, { velocity: [0, 0, P('speed', 80) / 3.6] });
-      camMode = 'orbit'; orbit = { yaw: 2.0, pitch: 0.25, dist: 11, target: [0, 1, 6] };
+      // Third person: track the car from its left side to watch the roof go.
+      camMode = 'left';
     } else if (scene === 'sandwich') {
       // The car waits behind a parked 15 t truck; an 18 t truck at `speed` hits
       // it from behind and shunts it into the parked one.
