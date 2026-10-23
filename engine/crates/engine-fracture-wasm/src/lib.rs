@@ -829,6 +829,11 @@ impl Plan {
     pub fn set_projectile_speed_scale(&mut self, scale: f64) -> Result<(), JsError> {
         self.0.set_projectile_speed_scale(scale).map_err(err)
     }
+    /// Continuous collision (time-of-impact contacts) for the shots fired from now on.
+    #[wasm_bindgen(js_name = setProjectileCcd)]
+    pub fn set_projectile_ccd(&mut self, on: bool) {
+        self.0.set_projectile_ccd(on)
+    }
     /// The scene's shot speed (m/s) before the scale.
     #[wasm_bindgen(js_name = shotSpeed)]
     pub fn shot_speed(&self) -> f64 {

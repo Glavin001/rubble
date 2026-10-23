@@ -169,3 +169,76 @@ fn every_scene_menu_entry_runs_on_metal() {
         );
     }
 }
+
+/// A 300 m/s shot at the arch crown (five metres a step at 60 Hz): without
+/// CCD it passes the arch between steps and barely moves it; a CCD shot
+/// (`Planner::set_projectile_ccd`) gets a time-of-impact contact, stops at
+/// the crown and knocks it out (engine/docs/ccd.md, in the lab's own plan).
+#[test]
+fn a_ccd_shot_does_not_tunnel_through_the_arch() {
+    let scene = build_scene(&asset("masonry-arch.glb"), 0, None)
+        .unwrap()
+        .without_joints();
+    let device = Device::system_default().expect("Metal device");
+    let queue = device.new_command_queue();
+    let (n, start) = (scene.bodies.len(), scene.projectile_start as usize);
+    let crown = scene.bodies[1..start]
+        .iter()
+        .max_by(|a, b| a.p[1].total_cmp(&b.p[1]))
+        .unwrap()
+        .p;
+    let back = scene.bodies[1..start]
+        .iter()
+        .map(|b| b.p[2])
+        .fold(f64::INFINITY, f64::min);
+    let mut moved = [0f32; 2];
+    for (k, ccd) in [false, true].into_iter().enumerate() {
+        let mut sim = FractureSim::new(&device, &queue, &scene).unwrap();
+        sim.step(10).unwrap();
+        let before = sim.snapshot(n).unwrap();
+        sim.plan.set_projectile_ccd(ccd);
+        let scale = 300.0 / sim.plan.shot_speed();
+        sim.plan.set_projectile_speed_scale(scale).unwrap();
+        let origin = [crown[0], crown[1], crown[2] + 3.0];
+        let projectile = sim.launch(origin, [0.0, 0.0, -1.0]).unwrap() as usize;
+        let mut min_z = f32::INFINITY;
+        for _ in 0..30 {
+            sim.step(1).unwrap();
+            assert_eq!(sim.last.overflow, 0, "GPU capacity overflow");
+            let snap = sim.snapshot(n).unwrap();
+            min_z = min_z.min(snap[projectile * 28 + 2]);
+        }
+        let after = sim.snapshot(n).unwrap();
+        moved[k] = (1..start)
+            .map(|i| {
+                (0..3)
+                    .map(|c| (after[i * 28 + c] - before[i * 28 + c]).powi(2))
+                    .sum::<f32>()
+                    .sqrt()
+            })
+            .fold(0.0, f32::max);
+        println!(
+            "ccd {ccd}: shot reached z {min_z:.2} (arch centres from z {back:.2}), arch moved {:.3} m",
+            moved[k]
+        );
+        if ccd {
+            assert!(
+                (min_z as f64) > back - 1.0,
+                "the CCD shot passed the arch (z {min_z})"
+            );
+            assert!(after[projectile * 28..projectile * 28 + 28].iter().all(|x| x.is_finite()));
+        } else {
+            assert!(
+                (min_z as f64) < back - 2.0,
+                "control: the plain shot should pass the arch (z {min_z})"
+            );
+        }
+    }
+    // The tunnelling shot only grazes the crown's look-ahead contacts.
+    assert!(
+        moved[1] > 1.0 && moved[1] > 5.0 * moved[0],
+        "the CCD shot should knock the crown out ({} vs control {})",
+        moved[1],
+        moved[0]
+    );
+}

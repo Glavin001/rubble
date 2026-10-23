@@ -75,6 +75,8 @@ function applyBallSpeed(){
  $('ball-speed-value').textContent=`${scaleLabel(k)}${ms?` · ${ms.toFixed(ms<10?1:0)} m/s`:''}`;
  if(stressOn)stress?.setShotSpeedScale(k);else sim?.setProjectileSpeedScale(k);
 }
+// CCD balls: the next shots carry BODY_CCD (rubble modes; the stress modes fire their own).
+function applyBallCcd(){if(!stressOn)sim?.setProjectileCcd($('ball-ccd').checked)}
 function showBallRadius(){
  const r=stressOn?stress?.stats.ballRadius:scene?.projectileRadius;
  $('ball-radius-value').textContent=`${scaleLabel(radiusScale())}${r?` · ${r.toFixed(2)} m`:''}`;
@@ -136,7 +138,7 @@ async function loadLevel(level){
   next=radiusScale()===1?laid:withProjectileRadius(laid,radiusScale())}catch(e){if(scene)$('level').value=String(scene.level??0);throw e}
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;accumulator=0;
  scene=next;sim=await createSimulation(device,scene,setStatus);renderer=await createRenderer(device,$('view'),sim,scene,shoot);
- renderer.colorMode=viewMode();applyBallMass();applyBallSpeed();showBallRadius();
+ renderer.colorMode=viewMode();applyBallMass();applyBallSpeed();applyBallCcd();showBallRadius();
  if(bondMode()==='learned'){
   setStatus('Loading learned-impact kernels (Slang→WGSL)…');
   const {createLearnedImpact}=await import('./learned-impact.mjs');
@@ -233,6 +235,7 @@ $('view-mode').onchange=()=>{if(renderer)renderer.colorMode=viewMode();applyView
 $('show-bonds').onchange=applyView;
 $('ball-mass').oninput=applyBallMass;
 $('ball-speed').oninput=applyBallSpeed;
+$('ball-ccd').onchange=applyBallCcd;
 $('ball-radius').oninput=()=>{$('ball-radius-value').textContent=scaleLabel(radiusScale())};
 $('ball-radius').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('bond-strength').oninput=()=>{$('bond-strength-value').textContent=scaleLabel(strengthScale())};

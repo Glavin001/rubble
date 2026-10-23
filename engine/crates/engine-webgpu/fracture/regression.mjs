@@ -30,3 +30,27 @@ export async function runFractureRegression(demo=window.__FRACTURE_DEMO__) {
  await demo.reset();const reset=await demo.snapshot();require(reset.every((x,i)=>x===before[i]),'reset did not restore every body field');require(demo.simulation.shots===0,'reset did not reload projectiles');
  return result;
 }
+// A 300 m/s shot at the arch crown (2.5 m a tick at 120 Hz), without and with
+// CCD balls (engine-viewer fracture_regression a_ccd_shot_does_not_tunnel_through_the_arch):
+// the plain ball passes the arch between ticks, the CCD ball stops at the crown.
+export async function runCcdShotRegression(demo=window.__FRACTURE_DEMO__,{speed=300,ticks=30}={}) {
+ const require=(ok,message)=>{if(!ok)throw new Error(`CCD shot regression: ${message}`)};
+ require(demo.ready,'demo is not ready');
+ const sim=()=>demo.simulation,start=demo.scene.projectileStart,bodies=demo.scene.bodies.slice(1,start);
+ const crown=bodies.reduce((a,b)=>a.p[1]>b.p[1]?a:b).p,back=Math.min(...bodies.map(b=>b.p[2]));
+ const runs={};
+ for(const ccd of [false,true]){
+  await demo.reset();await demo.stepFrames(10);const before=await demo.snapshot();
+  sim().setProjectileCcd(ccd);sim().setProjectileSpeedScale(speed/sim().shotSpeed);
+  const id=await demo.shootRay(add(crown,[0,0,3]),[0,0,-1]);let minZ=Infinity;
+  for(let t=0;t<ticks;t++){const c=await demo.stepFrames(1);require(c.overflow===0,'GPU capacity overflow');minZ=Math.min(minZ,(await demo.snapshot())[id*28+2])}
+  const after=await demo.snapshot();let moved=0;
+  for(let i=1;i<start;i++)moved=Math.max(moved,Math.hypot(...sub(Array.from(after.slice(i*28,i*28+3)),Array.from(before.slice(i*28,i*28+3)))));
+  runs[ccd?'ccd':'control']={minZ,moved,finite:after.slice(id*28,id*28+28).every(Number.isFinite)};
+ }
+ sim().setProjectileSpeedScale(1);
+ require(runs.control.minZ<back-2,`the plain ball should pass the arch (z ${runs.control.minZ})`);
+ require(runs.ccd.minZ>back-1&&runs.ccd.finite,`the CCD ball passed the arch (z ${runs.ccd.minZ})`);
+ require(runs.ccd.moved>1&&runs.ccd.moved>5*runs.control.moved,`the CCD ball should knock the crown out (${runs.ccd.moved} vs ${runs.control.moved})`);
+ return {passed:true,back,...runs};
+}

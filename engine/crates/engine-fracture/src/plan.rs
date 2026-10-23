@@ -114,6 +114,14 @@ pub const KERNELS: &[(&str, &str)] = &[
     ("record_stab_velocity", "record_stab_velocity"),
     ("extract_velocity_sleep", "extract_velocity_sleep"),
     ("carry_rest_pairs", "carry_rest_pairs"),
+    // Continuous collision for projectiles (engine/docs/ccd.md; scheduled only
+    // once a CCD shot is fired, `Planner::set_projectile_ccd`).
+    ("ccd_register", "ccd_register"),
+    ("broadphase_fast", "broadphase_fast"),
+    ("ccd_toi", "ccd_toi"),
+    ("ccd_pick", "ccd_pick"),
+    ("ccd_mark", "ccd_mark"),
+    ("ccd_emit", "ccd_emit_persistent"),
     ("joint_hash_clear", "joint_hash_clear"),
     ("joint_hash_insert", "joint_hash_insert"),
     ("bond_wake", "bond_wake"),
@@ -387,6 +395,10 @@ pub struct Planner {
     pub incremental: bool,
     has_convex: bool,
     has_filters: bool,
+    /// Shots carry `BODY_CCD` (time-of-impact contacts, fast broadphase list).
+    projectile_ccd: bool,
+    /// A CCD shot was fired since the last reset (its flag stays on the body).
+    ccd_fired: bool,
     sleep_rounds: u32,
     color_headroom: Option<u32>,
     color_round_headroom: Option<u32>,
@@ -510,6 +522,8 @@ impl Planner {
             incremental: budget.incremental_coloring,
             has_convex: scene.colliders.iter().any(|c| c.shape == SHAPE_CONVEX),
             has_filters: scene.colliders.iter().any(Collider::has_filter),
+            projectile_ccd: false,
+            ccd_fired: false,
             sleep_rounds: params.sleep_rounds.min(16),
             color_headroom: budget.color_headroom.unwrap_or(Some(COLOR_HEADROOM)),
             color_round_headroom: budget
@@ -624,7 +638,10 @@ impl Planner {
         s[18] = b(cap.max_hull, 16);
         s[19] = self.joint_hash_slots as u64 * 3 * 4; // joint hash: index + body pair per slot
         s[20] = b(cap.max_bodies, 4);
-        s[21] = 96 * 4; // scratch: host-reset words 0..63, uniform-grid large list 64..79
+        // Scratch: host-reset words 0..63, uniform-grid large list 64..79, then
+        // the GPU-owned lists past them (large statics, CCD slots, fast list,
+        // impulse records; world_step.slang CCD_BASE..).
+        s[21] = engine_schema::SCRATCH_WORDS as u64 * 4;
         s[22] = (PASS_SLOTS * PASS_ALIGN) as u64;
         // Colours, work 64..73, convex 74..76, finer scan 77, moved 78, rest rebuild 79..80, awake colliders 81.
         s[23] = b(cap.max_colors.max(82) * 3, 4);
@@ -718,6 +735,7 @@ impl Planner {
         self.warm_cycle = -1;
         self.parity = 0;
         self.shots = 0;
+        self.ccd_fired = false;
         self.initialized = false;
         self.last = Counters {
             awake: self.body_count.saturating_sub(1),
@@ -779,6 +797,8 @@ impl Planner {
         s[18] = self.grid_levels; // hierarchical broadphase levels
         s[29] = 1; // degree-aware primal lanes (buffer 17 holds 128 words)
         s[30] = self.has_filters as u32; // collision filters present
+        // Bit 2: CCD bodies; bit 4: broadphase_fast scheduled (rigid_plan's bits).
+        s[30] |= (self.ccd_step() as u32) << 2 | (self.ccd_step() as u32) << 4;
                                          // Moved-only bounds: rebuild AABBs only for last step's awake bodies
                                          // (build_aabbs). Needs colliders sorted by body, no kinematic bodies, and no
                                          // host-side pose/collider write since the last step.
@@ -803,6 +823,12 @@ impl Planner {
         s[24] = self.csr_base;
         s[28] = self.carry_rest() as u32;
         s
+    }
+
+    /// A CCD shot is in the world: the step registers CCD bodies, walks the
+    /// fast list and places time-of-impact contacts.
+    fn ccd_step(&self) -> bool {
+        self.ccd_fired
     }
 
     /// Resting-pair carry (FLAG_CARRY_REST): resting pairs keep their contacts
@@ -954,12 +980,18 @@ impl Planner {
             self.work("rest_clear", 79, 0);
             self.work("rest_insert", 80, 0);
             self.disp("rest_publish", 64, 0);
+            if self.ccd_step() {
+                self.disp("ccd_register", n_bodies, 0);
+            }
             // Colliders of moving bodies, then one thread per collider (slot 81).
             self.work("list_awake_colliders", 78, 0);
             self.disp("write_awake_collider_args", 64, 0);
             self.work("broadphase_insert_awake", 81, 0);
         } else {
             self.disp("broadphase_clear", self.grid_hash_words, 0);
+            if self.ccd_step() {
+                self.disp("ccd_register", n_bodies, 0);
+            }
             self.disp("broadphase_insert", n_cols, 0);
         }
         self.phase("broadphaseInsert");
@@ -979,12 +1011,23 @@ impl Planner {
         } else {
             self.disp("broadphase_query", n_cols, 0);
         }
+        if self.ccd_step() {
+            // Sweeps longer than a cell query along their path (any table).
+            self.disp("broadphase_fast", 64 * 64, 0);
+        }
         self.disp("write_work_args", 64, 0);
         if self.carry_rest() {
             // Last step's manifolds (slot 72) are intact until narrowphase;
             // recount candidates after the carried pairs join them.
             self.work("carry_rest_pairs", 72, 0);
             self.disp("write_work_args", 64, 0);
+        }
+        if self.ccd_step() {
+            // Each CCD body's nearest time of impact and its winning pair; the
+            // narrowphase leaves that pair to ccd_emit.
+            self.work("ccd_toi", 64, 0);
+            self.work("ccd_pick", 64, 0);
+            self.disp("ccd_mark", engine_schema::CCD_BODY_CAP, 0);
         }
         self.phase("broadphase");
         if reuse {
@@ -1012,6 +1055,9 @@ impl Planner {
             self.work("convex_manifold", 76, 0);
             self.phase("convexManifold");
         }
+        if self.ccd_step() {
+            self.work("ccd_emit", 64, 0);
+        }
     }
 
     /// Steps to skip without GPU work: a fully sleeping world whose counters
@@ -1031,7 +1077,8 @@ impl Planner {
     /// whole-step manifold reuse (no bounds, broadphase or narrowphase), honoured
     /// only when the previous step's manifolds are valid.
     pub fn encode_step(&mut self, reuse_manifolds: bool) -> &[u32] {
-        let reuse_manifolds = reuse_manifolds && self.manifolds_valid;
+        // CCD steps re-run collision (fresh TOI slots and contacts each step).
+        let reuse_manifolds = reuse_manifolds && self.manifolds_valid && !self.ccd_step();
         self.commands.clear();
         let n_bodies = self.body_count.max(1);
         self.write_host();
@@ -1307,6 +1354,12 @@ impl Planner {
         Ok(())
     }
 
+    /// Shots fired from now on carry `BODY_CCD`: a fast shot stops at a thin
+    /// piece instead of passing it between steps (engine/docs/ccd.md).
+    pub fn set_projectile_ccd(&mut self, on: bool) {
+        self.projectile_ccd = on;
+    }
+
     /// The scene's shot speed (m/s) before the scale ([`default_shot_speed`]).
     pub fn shot_speed(&self) -> f64 {
         default_shot_speed(self.extent, self.projectile_speed)
@@ -1348,12 +1401,13 @@ impl Planner {
             w: [0.0; 3],
             inv_mass: 1.0 / m,
             inv_i: [1.0 / (0.4 * m * r * r); 3],
-            flags: 9,
+            flags: if self.projectile_ccd { 9 | engine_schema::BODY_CCD } else { 9 },
         };
         self.manifolds_valid = false;
         self.last.awake = self.last.awake.max(1);
         self.wake_serial += 1;
         self.shots += 1;
+        self.ccd_fired |= self.projectile_ccd;
         Ok((id, bytes_of(&body_record(&body)).to_vec()))
     }
 

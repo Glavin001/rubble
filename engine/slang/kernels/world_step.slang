@@ -1728,6 +1728,8 @@ void broadphase_query_awake(uint3 tid : SV_DispatchThreadID)
     if (li >= awakeColliderCount()) return;
     uint c = awakeCollider(li);
     uint levels = HOST_S(18);
+    // Fast colliders are not in the grid: broadphase_fast owns their pairs.
+    if (colliderIsFast(c, gColliders[c], gBodies[gColliders[c].body])) return;
     hierQuery(c);
     if (gColliders[c].shape == SHAPE_PLANE) return;
     Aabb aa = gAabbs[HOST_S(1) + c];
@@ -1862,6 +1864,10 @@ void rest_publish(uint3 tid : SV_DispatchThreadID)
 {
     if (dispatchIndex(tid) != 0u) return;
     uint hdr = restBase();
+    // Rest steps skip broadphase_clear: reset the GPU-owned CCD lists here.
+    ASTORE(gScratchAtomics[CCD_BODY_COUNT], 0u);
+    ASTORE(gScratchAtomics[FAST_COUNT], 0u);
+    ASTORE(gScratchAtomics[CCD_FALLBACKS], 0u);
     AOR2(gScratchAtomics[HIER_LEVEL_MASK_SLOT], ALOAD(gConstraintIds[hdr]));
     uint planes = ALOAD(gConstraintIds[hdr + 1u]);
     ASTORE(gScratchAtomics[42], planes);
@@ -1882,6 +1888,11 @@ void broadphase_insert_awake(uint3 tid : SV_DispatchThreadID)
     if (li >= awakeColliderCount()) return;
     uint c = awakeCollider(li);
     if (gColliders[c].shape == SHAPE_PLANE) return;
+    if (colliderIsFast(c, gColliders[c], gBodies[gColliders[c].body]))
+    {
+        fastListAppend(c);
+        return;
+    }
     Aabb box = gAabbs[HOST_S(1) + c];
     uint level = hierLevel(box._pad0);
     if (level >= HOST_S(18))
@@ -1907,6 +1918,7 @@ void broadphase_clear_awake(uint3 tid : SV_DispatchThreadID)
     if (li >= awakeColliderCount()) return;
     uint c = awakeCollider(li);
     if (gColliders[c].shape == SHAPE_PLANE) return;
+    if (colliderIsFast(c, gColliders[c], gBodies[gColliders[c].body])) return;
     Aabb box = gAabbs[HOST_S(1) + c];
     uint level = hierLevel(box._pad0);
     if (level < HOST_S(18))

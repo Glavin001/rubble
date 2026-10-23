@@ -23,7 +23,7 @@ mkdirSync(OUT, { recursive: true });
 const CHROME = process.env.CHROME || (process.platform === 'darwin'
   ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : 'google-chrome');
 
-const TYPES = { '.html': 'text/html', '.mjs': 'text/javascript', '.js': 'text/javascript', '.json': 'application/json', '.wgsl': 'text/plain', '.wasm': 'application/wasm' };
+const TYPES = { '.glb': 'model/gltf-binary', '.html': 'text/html', '.mjs': 'text/javascript', '.js': 'text/javascript', '.json': 'application/json', '.wgsl': 'text/plain', '.wasm': 'application/wasm' };
 const server = createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
   const path = normalize(join(ROOT, decodeURIComponent(url.pathname)));
@@ -133,6 +133,26 @@ const CHECKS = {
     const pushed = r.targets.filter((t) => t && Math.hypot(...t.v) > 0.01).length;
     expect(pushed >= 1, `bullets pushed the targets (${pushed})`);
     console.log(`  screenshot ${await shot('motion_bullets')}`);
+  },
+  // The fracture lab's own step plan (engine-fracture plan.rs) with CCD balls:
+  // needs the lab's wasm (wasm-pack build engine/crates/engine-fracture-wasm …).
+  async lab() {
+    await send('Page.navigate', { url: `${base}/fracture/index.html` });
+    const ready = async () => {
+      for (let i = 0; i < 1200; i++) {
+        if (await evaluate('!!window.__FRACTURE_DEMO__?.ready')) return;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      throw new Error('fracture lab did not load');
+    };
+    await ready();
+    await evaluate('window.__FRACTURE_DEMO__.load("arch")', true);
+    await ready();
+    const r = await evaluate(`import('./regression.mjs').then((m) => m.runCcdShotRegression()).then((r) => JSON.stringify(r))`, true).then(JSON.parse);
+    console.log(`lab arch, 300 m/s ball: control reached z ${r.control.minZ.toFixed(2)} and moved the arch ${r.control.moved.toFixed(3)} m; CCD reached z ${r.ccd.minZ.toFixed(2)}, moved ${r.ccd.moved.toFixed(3)} m (arch from z ${r.back.toFixed(2)})`);
+    expect(r.passed, 'lab: the CCD ball stops at the arch, the plain ball tunnels');
+    await evaluate('window.__FRACTURE_DEMO__.stepFrames(30)', true);
+    console.log(`  screenshot ${await shot('motion_lab_ccd_arch')}`);
   },
 };
 

@@ -1434,7 +1434,9 @@ impl WgpuSim {
     /// carry every previous manifold forward (persistence re-evaluates C0). Falls
     /// back to a full step when the scene changed since the last step.
     pub fn step_reuse_manifolds(&mut self) -> Result<StepCounters, ExecError> {
-        let reuse = self.manifolds_valid;
+        // CCD scenes re-run collision every step: a reused step would keep last
+        // step's time-of-impact contacts and skip ccd_register (stale TOI slots).
+        let reuse = self.manifolds_valid && !self.has_ccd;
         self.step_inner(reuse)
     }
 
