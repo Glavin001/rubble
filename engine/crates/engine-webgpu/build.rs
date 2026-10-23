@@ -262,6 +262,18 @@ fn main() -> Result<()> {
         PathBuf::from(env::var("OUT_DIR")?).join("direct_wgsl.rs"),
         table,
     )?;
+    // Soft-body skinning: one standalone WGSL module, three entries.
+    let skin = wgsl_dir.join("soft_skin.wgsl");
+    let status = std::process::Command::new(find_slangc()?)
+        .args(["-target", "wgsl"])
+        .args(["-entry", "soft_skin_vertices", "-stage", "compute"])
+        .args(["-entry", "soft_skin_faces", "-stage", "compute"])
+        .args(["-entry", "soft_skin_normals", "-stage", "compute"])
+        .arg("-o")
+        .arg(&skin)
+        .arg(slang_root.join("kernels/soft_skin.slang"))
+        .status()?;
+    anyhow::ensure!(status.success(), "slangc failed for soft_skin.slang");
     if !wgsl_failed.is_empty() {
         println!(
             "cargo:warning=direct WGSL failed: {}",

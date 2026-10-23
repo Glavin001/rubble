@@ -57,7 +57,7 @@
   <script type="module">
     import { createWorld, sceneCapacity } from './world-host.mjs';
     import { L, WHEEL_RIM_MATERIAL } from './vehicle.mjs';
-    import { loadTruck, loadJbeam, proceduralCar, proceduralCarVisual, latticeCrate, calibratedSettings, SOFT } from './soft.mjs';
+    import { loadTruck, loadJbeam, proceduralCar, proceduralCarDesc, proceduralCarVisual, latticeCrate, calibratedSettings, SOFT } from './soft.mjs';
     import { createCarRenderer, LIGHTING_WGSL } from './car-render.mjs';
 
     const statusEl = document.getElementById('status');
@@ -207,8 +207,9 @@
     };
     staticBox([0, -5, 0], [400, 5, 400], [0, 0, 0, 1], MAT_GROUND);
 
-    const carTruck = proceduralCar(Number(qs.get('deform')) || 0, 0);
-    const carDesc = loadTruck(carTruck);
+    // The procedural car with named parts (bonnet, doors, bumpers, engine…);
+    // ?deform= rebuilds it from .truck text with another threshold (no parts).
+    const carDesc = qs.get('deform') ? loadTruck(proceduralCar(Number(qs.get('deform')), 0)) : proceduralCarDesc();
     const softs = []; // {h, name, core}
     const addSoft = (desc, p, yaw = 0, opts = {}) => {
       const h = world.addSoftVehicle(desc, p, qAxis([0, 1, 0], yaw), opts);
@@ -351,7 +352,7 @@
       // Flexbody meshes: cars get rounded panels, crates and imports stay flat.
       const binds = [], idx = [];
       const isCar = (s) => softs.some((x) => x.h === s && x.car);
-      carR?.rebuild(world.soft.entries.map((e, s) => ({ firstBody: e.firstBody, index: s })).filter((c) => isCar(c.index)));
+      carR?.rebuild(world.soft.entries.map((e, s) => ({ h: s, index: s })).filter((c) => isCar(c.index))).catch(fail);
       world.soft.entries.forEach((e, s) => {
         if (!e.tris || (carR && isCar(s))) return;
         if (!flexCache.has(s)) flexCache.set(s, world.soft.inner.flexbody(s, e.core ? 0.06 : 0.0));
@@ -661,7 +662,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     const wheelShadowBind = bind(wheelShadow, [[1, frameBuf], [3, world.bufs[31]]]);
     let flexShadowBind = null;
     // The procedural car's detailed mesh (car-render.mjs); imports keep the flexbody skin.
-    carR = createCarRenderer(device, { format, sampleCount: SAMPLES, bodies: world.bufs[0], frameBuf, shadowView, shadowSampler, visual: proceduralCarVisual() });
+    carR = createCarRenderer(device, { format, sampleCount: SAMPLES, bodies: world.bufs[0], frameBuf, shadowView, shadowSampler, visual: proceduralCarVisual(), soft: world.soft });
     const beamBind = bind(beamPipe, [[0, world.bufs[0]], [1, frameBuf], [4, world.bufs[32]]]);
     let skinBind = null;
     rebuildSkin();
@@ -767,6 +768,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       rebuildSkin();
       damage = null;
       breaks = 0;
+      tornOff.length = 0;
       if (scene === 'tbone') pendingRam = 60;
     }
     const initialSoftCount = softs.length;
@@ -853,6 +855,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     }
     // Beam records of every soft body (a few times a second): yielded / broken counts.
     let damage = null, breaks = 0, damageBusy = false, damageStep = -1;
+    const tornOff = []; // "car: part" per piece-detached event
     const beamRb = device.createBuffer({ size: Math.max(64, world.soft.cap.maxBeams * 64), usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
     async function readDamage() {
       if (damageBusy || !beamTotal) return damage;
@@ -876,8 +879,13 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
         }
         return { name: e.name, beams: e.beams, yielded, broken };
       });
-      const list = await world.pollBeamBreaks();
-      breaks += list.length;
+      // Destruction events (engine): beam breaks and the parts they tore off.
+      const ev = await world.pollSoftEvents();
+      breaks += ev.breaks.length;
+      for (const p of ev.pieces) {
+        const who = world.soft.entries[p.softBody]?.name.split(' (')[0] ?? `body ${p.softBody}`;
+        tornOff.push(`${who}: ${p.parts.length ? p.parts.join(', ') : `${p.nodes.length} nodes`}`);
+      }
       return damage;
     }
 
@@ -889,7 +897,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       if (damage) {
         damageEl.innerHTML = damage.filter((d) => d.beams > 200 || damage.length < 4)
           .map((d, i) => `${i === player ? '▶ ' : ''}${d.name.split(' (')[0].slice(0, 22)}: ${d.yielded} bent · ${d.broken} broken / ${d.beams}`).join('<br>');
-        eventsEl.textContent = `${breaks} beam-break events`;
+        eventsEl.innerHTML = `${breaks} beam-break events` + (tornOff.length ? `<br>torn off: ${tornOff.slice(-4).join('<br>')}` : '');
       }
     }
     const frameF = new Float32Array(60);

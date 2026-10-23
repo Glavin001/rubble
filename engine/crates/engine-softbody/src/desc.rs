@@ -225,9 +225,26 @@ pub struct SoftVehicleDesc {
     pub collision_range: f32,
     /// Sections or options the importer skipped.
     pub warnings: Vec<String>,
+    /// Named node sets (a bonnet, a door, an engine): what an integration binds
+    /// its render meshes to, and what [`crate::host::PieceDetached`] reports.
+    /// A node may be in several parts.
+    pub parts: Vec<SoftPart>,
+}
+
+/// A named set of nodes (indices into [`SoftVehicleDesc::nodes`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SoftPart {
+    pub name: String,
+    pub nodes: Vec<u32>,
 }
 
 impl SoftVehicleDesc {
+    /// The part called `name`.
+    pub fn part(&self, name: &str) -> Option<&SoftPart> {
+        self.parts.iter().find(|p| p.name == name)
+    }
+
     pub fn total_mass(&self) -> f32 {
         self.nodes.iter().map(|n| n.mass).sum()
     }

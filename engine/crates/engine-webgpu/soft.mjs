@@ -23,6 +23,9 @@ export const proceduralCar = (deform = 0, strength = 0) => wasm.soft_procedural_
 /** Render mesh of the procedural hatchback (engine_softbody::visual): parts,
  * materials and node bindings; see `soft_procedural_car_visual` for the words. */
 export const proceduralCarVisual = () => wasm.soft_procedural_car_visual();
+/** The procedural hatchback as a SoftVehicleDesc with named parts (body,
+ * bonnet, boot, door_fl, door_rl, door_fr, door_rr, bumper_front, bumper_rear, engine). */
+export const proceduralCarDesc = () => JSON.parse(wasm.soft_procedural_car_desc());
 /** A braced lattice crate (n³ nodes) as `.truck` text. */
 export const latticeCrate = (n, step, mass, spring, deform, strength) => wasm.soft_box_truck(n, step, mass, spring, deform, strength);
 
@@ -55,6 +58,25 @@ export class SoftHost {
   setSettings(backend, settings) { applyOps(backend, this.inner.set_settings(JSON.stringify({ ...this.settings(), ...settings }))); }
   settings() { return JSON.parse(this.inner.settings()); }
   setSteer(backend, h, steer) { applyOps(backend, this.inner.set_steer(h, steer)); }
+
+  /**
+   * Bind render-mesh vertices (Float32Array xyz, the vehicle's own frame) to soft
+   * body `h`, only to part `part`'s nodes when given: 8 words per vertex
+   * (engine_softbody::SkinBinding) for soft-skin.mjs or your own shader.
+   */
+  bindMesh(h, vertices, part) { return this.inner.bind_mesh(h, vertices, part ?? undefined); }
+  /** Record beam breaks ([{beam, softBody}]); returns the pieces they cut loose:
+   * [{softBody, nodes, parts, mass}]. */
+  noteBreaks(breaks) {
+    const pairs = new Uint32Array(breaks.length * 2);
+    breaks.forEach((b, i) => { pairs[i * 2] = b.beam; pairs[i * 2 + 1] = b.softBody; });
+    return JSON.parse(this.inner.note_breaks(pairs));
+  }
+  /** Resynchronise `h`'s broken beams from a readback (16 words per beam). */
+  syncBroken(h, beamWords) { return JSON.parse(this.inner.sync_broken(h, beamWords)); }
+  /** Damage of `h` from a beam readback and optional positions (Float32Array xyz):
+   * {bent, broken, beams, plasticWork, maxBeamStrain, nodeDeformation, detached}. */
+  damage(h, beamWords, positions) { return JSON.parse(this.inner.damage(h, beamWords, positions ?? new Float32Array(0))); }
 
   save() { return { inner: this.inner.save(), entries: structuredClone(this.entries) }; }
   restore(snap) { this.inner.restore(snap.inner); this.entries = structuredClone(snap.entries); }

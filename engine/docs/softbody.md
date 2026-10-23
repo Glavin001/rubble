@@ -89,6 +89,76 @@ vehicle_input → soft_wake → … broadphase, narrowphase, CSR, colouring …
 | `soft_dual` | AVBD finite-stiffness ramp (and the multipliers of beams flagged hard; no importer sets the flag). Planned only when some beam ramps |
 | `soft_plastic`, `soft_break_groups` | Post-step plasticity and breaking at the converged state, then detacher groups |
 
+## Integration API
+
+Rubble simulates the vehicle; a game draws it. Everything a renderer, audio or
+gameplay layer needs comes from the engine, in Rust (`WgpuSim`, `SoftHost`) and in
+JS (`world-host.mjs`, `soft.mjs`, `soft-skin.mjs`). The demo page is one consumer
+of this API.
+
+| Need | Rust | JS |
+|---|---|---|
+| Build a vehicle | `load_truck`, `load_jbeam`, `procedural::car_desc` → `SoftVehicleDesc` | `loadTruck`, `loadJbeam`, `proceduralCarDesc` |
+| Named parts (bonnet, doors, engine…) | `SoftVehicleDesc::parts`, `part(name)` | `desc.parts` |
+| Spawn, steer | `WgpuSim::add_soft_vehicle`, `set_soft_steer` | `world.addSoftVehicle`, `world.soft.setSteer` |
+| Node positions and velocities | `read_soft_particles`, or the body buffer (`body_buffer`, rows `first_body…`) | `world.readSoftParticles`, or `world.bufs[0]` |
+| Beam states (rest, flags, force) | `read_soft_beams` | `world.readSoftBeams` (16 words per beam) |
+| Destruction events | `poll_soft_events` → `SoftEvents { breaks, pieces, lost }` | `world.pollSoftEvents()` → `{ breaks, pieces, lost }` |
+| Damage | `read_soft_damage` → `SoftDamage` | `world.readSoftDamage(h)` |
+| Bind a render mesh | `SoftHost::bind_mesh(h, vertices, part)` → `SkinBinding`s | `world.soft.bindMesh(h, xyz, part)` (8 words per vertex) |
+| Skin it on the GPU | `SoftSkinner` (`SOFT_SKIN_WGSL`) | `createSoftSkinner` (`generated/wgsl/soft_skin.wgsl`) |
+
+**Parts** are named sets of nodes:
+
+* JBeam: every part's own nodes under the part's name, and every node `group`
+  (what BeamNG flexbodies bind to).
+* The procedural car: `body`, `bonnet`, `boot`, `door_fl`, `door_rl`, `door_fr`,
+  `door_rr`, `bumper_front`, `bumper_rear` and `engine`.
+* Rigs of Rods files declare none yet.
+
+**Events.**
+
+* A `BeamBreak` (beam, force, soft body) comes from the GPU event ring.
+* A `PieceDetached` (soft body, nodes, parts, mass) reports nodes no longer joined
+  by any unbroken beam to the body's main part, the one with the most mass.
+  `SoftHost::note_breaks` finds pieces from the breaks, and each piece is reported
+  once.
+* If the event ring overflowed (`lost` > 0), every body is resynchronised from a
+  beam readback, so no piece is missed.
+* Use `poll_soft_events` or `poll_beam_breaks`, not both: they share the ring's
+  read cursor.
+
+**Damage.** `SoftDamage` reports:
+
+* beams bent and broken;
+* the plastic work absorbed: Σ threshold · |L − L₀| over yielded beams, in joules;
+* the largest permanent beam strain;
+* per-node deformation from the rest shape, after removing the best-fit rigid
+  motion of the nodes still attached. Detached nodes report how far they have
+  gone.
+
+**Skinning.**
+
+* `bind_mesh` gives each vertex (in the vehicle's own frame) a frame of three
+  nodes of its part, so a door's mesh follows only the door and leaves with it.
+* Vertex = c + a·(x − c) + b·(y − c) + d·((x − c) × (y − c)), torn when its frame
+  stretches past 1.8× rest.
+* `SkinBinding::skin` is the CPU reference.
+* The kernel (`slang/kernels/soft_skin.slang`, run after the step with no readback)
+  writes per vertex the position (w = torn) and a smooth normal (w = the largest
+  strain around it), and per triangle the normal (w = strain against rest, −1 when
+  torn). A renderer draws from those buffers.
+
+**Accuracy of what is drawn.** `skinned_render_mesh_follows_the_physics_surface_through_a_crash`
+binds the detailed mesh part by part, skins it on the GPU and crashes the car into a
+wall at 56 km/h:
+
+* The GPU positions match `SkinBinding::skin` to under 1 mm.
+* The render surface's distance to the deformed collision skin grows by 0 at the
+  median, 3.3 cm at the 95th percentile and 12 cm at the 99th, over about 4,900
+  paint vertices.
+* The tail is the heart of the crushed zone, where a three-node frame extrapolates.
+
 ## Beam model
 
 With d = xᵢ − xⱼ, ℓ = |d| and d̂ = d/ℓ, a beam stores E = ½k(ℓ − L)². Its gradient is

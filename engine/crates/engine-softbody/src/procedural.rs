@@ -103,6 +103,31 @@ pub fn car_truck(p: &CarParams) -> String {
     car_truck_layout(p).0
 }
 
+/// The procedural car as a [`crate::SoftVehicleDesc`] with named parts: `body`
+/// (the shell and axle nodes), `bonnet`, `boot`, `door_fl`, `door_rl`,
+/// `door_fr`, `door_rr`, `bumper_front`, `bumper_rear` and `engine` (those the
+/// parameters include).
+pub fn car_desc(p: &CarParams) -> (crate::SoftVehicleDesc, CarLayout) {
+    let (text, layout) = car_truck_layout(p);
+    let mut d = crate::truck::load_truck(&text);
+    let ring_nodes = (layout.stations * CAR_RING) as u32;
+    let mut body: Vec<u32> = (0..ring_nodes).collect();
+    body.extend(ring_nodes..ring_nodes + 8); // axle nodes follow the rings
+    let mut parts = vec![("body", body)];
+    for (name, nodes) in ["bonnet", "boot", "door_fl", "door_rl", "door_fr", "door_rr"].iter().zip(&layout.panels) {
+        parts.push((name, nodes.clone()));
+    }
+    parts.push(("bumper_front", layout.front_bumper.clone()));
+    parts.push(("bumper_rear", layout.rear_bumper.clone()));
+    parts.push(("engine", layout.engine.clone()));
+    d.parts = parts
+        .into_iter()
+        .filter(|(_, n)| !n.is_empty())
+        .map(|(name, nodes)| crate::SoftPart { name: name.to_string(), nodes })
+        .collect();
+    (d, layout)
+}
+
 /// What the visual mesh needs to know about the procedural car's node layout.
 #[derive(Clone, Debug, Default)]
 pub struct CarLayout {

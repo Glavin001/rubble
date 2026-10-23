@@ -6,7 +6,9 @@
 //! interactive gate; this crate is the apples-to-apples oracle path.
 
 mod gpu;
-pub use gpu::{default_device, SimSnapshot, WgpuSim};
+mod soft_skin;
+pub use gpu::{default_device, SimSnapshot, SoftEvents, WgpuSim};
+pub use soft_skin::{SoftSkinner, SOFT_SKIN_WGSL};
 
 use engine_exec::{ExecError, PhaseTimingsMs, PhysicsBackend};
 use engine_schema::{AvbdParams, StepCounters, WorldCapacity};

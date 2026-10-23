@@ -1,15 +1,15 @@
-// Render path of the procedural soft-body car (engine_softbody::visual): a
-// detailed, multi-part mesh skinned to the particles on the GPU every frame,
-// shaded as car paint, glass, chrome, trim, lamps, interior and engine.
+// Demo renderer of the procedural soft-body car (engine_softbody::visual): a
+// detailed, multi-part mesh bound to the car's parts through the engine API
+// (SoftHost.bindMesh) and skinned by the engine kernel (soft-skin.mjs), shaded
+// here as car paint, glass, chrome, trim, lamps, interior and engine. An
+// integration replaces this file with its own renderer; the binding, skinning,
+// strain and tear data come from the engine.
 //
-// Per frame (compute): 1. skin each vertex from its frame of three particles;
-// 2. per triangle: face normal, crumple strain against the rest shape, torn flag;
-// 3. per vertex: smooth normal (sum of its triangles') and the largest strain
-// around it. The render pass draws opaque triangles, then glass (blended).
-// A triangle with a vertex whose frame stretched past 1.8× rest is torn.
+// Optional particle effects (sparks, glass, chips, dust) spawn from per-triangle
+// strain changes; off unless the caller passes a dt.
 
-/** Shared lighting: Frame uniform (binding 1), shadow map (9, 10), sky, PBR-lite
- * shading, tone mapping. Colours in are sRGB; lighting runs in linear. */
+import { createSoftSkinner } from './soft-skin.mjs';
+
 const FX_N = 16384;
 
 export const LIGHTING_WGSL = /* wgsl */`
@@ -98,12 +98,11 @@ struct Counts { verts: u32, tris: u32, seed: u32, dt: f32 };
 struct Particle { pos: vec3f, life: f32, vel: vec3f, kind: u32 };
 struct Particles { head: atomic<u32>, pad0: u32, pad1: u32, pad2: u32, p: array<Particle, ${FX_N}> };
 @group(0) @binding(0) var<storage, read> bodies: array<Body>;
-@group(0) @binding(1) var<storage, read> vdata: array<vec4u>;      // 3 per vertex
 @group(0) @binding(2) var<storage, read> tris: array<vec4u>;
-@group(0) @binding(3) var<storage, read> adj: array<u32>;          // starts (verts + 1), then triangles
-@group(0) @binding(4) var<storage, read_write> vpos: array<vec4f>;
-@group(0) @binding(5) var<storage, read_write> tinfo: array<vec4f>;
-@group(0) @binding(6) var<storage, read_write> vnrm: array<vec4f>;
+@group(0) @binding(3) var<storage, read> faces: array<vec4f>;
+@group(0) @binding(4) var<storage, read> vpos: array<vec4f>;
+@group(0) @binding(5) var<storage, read_write> prevStrain: array<f32>;
+@group(0) @binding(6) var<storage, read> vmeta: array<vec4u>;
 @group(0) @binding(7) var<uniform> counts: Counts;
 @group(0) @binding(8) var<storage, read_write> fx: Particles;
 
@@ -124,69 +123,33 @@ fn spawn(pos: vec3f, vel: vec3f, life: f32, kind: u32) {
   fx.p[i] = Particle(pos, life, vel, kind);
 }
 
-@compute @workgroup_size(64) fn skin(@builtin(global_invocation_id) id: vec3u) {
-  let v = id.x;
-  if (v >= counts.verts) { return; }
-  let b0 = vdata[v * 3u];
-  let b1 = bitcast<vec4f>(vdata[v * 3u + 1u]);
-  let c = bodies[b0.x].position;
-  let ex = bodies[b0.y].position - c;
-  let ey = bodies[b0.z].position - c;
-  let stretch = max(length(ex), length(ey)) / max(b1.w, 1e-4);
-  let p = c + ex * b1.x + ey * b1.y + cross(ex, ey) * b1.z;
-  vpos[v] = vec4f(p, select(0.0, 1.0, stretch > 1.8 && b1.w > 0.0));
-}
-
-@compute @workgroup_size(64) fn faces(@builtin(global_invocation_id) id: vec3u) {
+// Effects from what changed since the last frame (engine faces: w = strain, −1
+// torn): a tear sheds a chip, a pane that lets go sheds a shard, a sudden
+// crumple throws a spark and a little dust.
+@compute @workgroup_size(64) fn spawnFx(@builtin(global_invocation_id) id: vec3u) {
   let t = id.x;
   if (t >= counts.tris) { return; }
-  let f = tris[t];
-  let a = vpos[f.x]; let b = vpos[f.y]; let c = vpos[f.z];
-  let ra = bitcast<vec4f>(vdata[f.x * 3u + 2u]).xyz;
-  let rb = bitcast<vec4f>(vdata[f.y * 3u + 2u]).xyz;
-  let rc = bitcast<vec4f>(vdata[f.z * 3u + 2u]).xyz;
-  let la = length(a.xyz - b.xyz) / max(length(ra - rb), 1e-4);
-  let lb = length(b.xyz - c.xyz) / max(length(rb - rc), 1e-4);
-  let lc = length(c.xyz - a.xyz) / max(length(rc - ra), 1e-4);
-  let strain = max(max(abs(la - 1.0), abs(lb - 1.0)), abs(lc - 1.0));
-  let torn = a.w + b.w + c.w > 0.0 || max(max(la, lb), lc) > 2.5;
-  let n = cross(b.xyz - a.xyz, c.xyz - a.xyz);
-  let prev = tinfo[t].w;
-  tinfo[t] = vec4f(n, select(strain, -1.0, torn));
-  // Effects from what changed since the last frame: a tear sheds a chip, a pane
-  // that lets go sheds shards, a sudden crumple throws sparks and a little dust.
+  let cur = faces[t].w;
+  let prev = prevStrain[t];
+  prevStrain[t] = cur;
   if (counts.dt <= 0.0 || prev < 0.0) { return; }
-  let cen = (a.xyz + b.xyz + c.xyz) / 3.0;
-  let vel = bodies[vdata[f.x * 3u].x].linearVel;
-  let car = vdata[f.x * 3u].w >> 16u;
-  if (torn) {
+  let f = tris[t];
+  let cen = (vpos[f.x].xyz + vpos[f.y].xyz + vpos[f.z].xyz) / 3.0;
+  let vel = bodies[vmeta[f.x * 2u].y].linearVel;
+  let car = vmeta[f.x * 2u].x >> 16u;
+  if (cur < 0.0) {
     if (f.w == 0u && rnd(t, 1u) < 0.025) { spawn(cen, vel * 0.85 + rndDir(t, 2u) * 1.2 + vec3f(0.0, 0.8, 0.0), 5.0, 2u | (car << 8u)); }
     return;
   }
-  if (f.w == 1u && strain > 0.06 && prev <= 0.06) {
+  if (f.w == 1u && cur > 0.06 && prev <= 0.06) {
     if (rnd(t, 10u) < 0.5) { spawn(cen, vel * 0.8 + rndDir(t, 11u) * 1.5 + vec3f(0.0, 0.6, 0.0), 4.0, 1u); }
     return;
   }
-  let jump = strain - prev;
+  let jump = cur - prev;
   if (f.w == 0u && jump > 0.02 && rnd(t, 3u) < min(jump * 1.2, 0.08)) {
     spawn(cen, vel * 0.6 + rndDir(t, 4u) * (2.0 + 4.0 * rnd(t, 5u)) + vec3f(0.0, 1.5, 0.0), 0.25 + 0.35 * rnd(t, 6u), 0u);
     if (rnd(t, 8u) < 0.04) { spawn(cen, vel * 0.3 + rndDir(t, 9u) * 0.4, 1.0, 3u); }
   }
-}
-
-@compute @workgroup_size(64) fn normals(@builtin(global_invocation_id) id: vec3u) {
-  let v = id.x;
-  if (v >= counts.verts) { return; }
-  var n = vec3f(0.0);
-  var dmg = 0.0;
-  for (var k = adj[v]; k < adj[v + 1u]; k++) {
-    let ti = tinfo[adj[k]];
-    if (ti.w < 0.0) { continue; }
-    n += ti.xyz;
-    dmg = max(dmg, ti.w);
-  }
-  let l = length(n);
-  vnrm[v] = vec4f(select(vec3f(0.0, 1.0, 0.0), n / l, l > 1e-12), dmg);
 }
 
 // Particles: gravity, drag, a bouncing ground at y = 0.
@@ -215,7 +178,7 @@ const RENDER_WGSL = LIGHTING_WGSL + /* wgsl */`
 @group(0) @binding(3) var<storage, read> tinfo: array<vec4f>;
 @group(0) @binding(4) var<storage, read> vpos: array<vec4f>;
 @group(0) @binding(5) var<storage, read> vnrm: array<vec4f>;
-@group(0) @binding(6) var<storage, read> vdata: array<vec4u>;
+@group(0) @binding(6) var<storage, read> vmeta: array<vec4u>; // 2 per vertex: flags, centre body | rest xyz bits
 
 struct Out { @builtin(position) clip: vec4f, @location(0) n: vec3f, @location(1) w: vec3f, @location(2) rest: vec3f,
   @location(3) @interpolate(flat) mat: u32, @location(4) dmg: f32, @location(5) seam: f32, @location(6) @interpolate(flat) car: u32,
@@ -228,13 +191,13 @@ fn carVertex(vi: u32, vp: mat4x4f) -> Out {
   let k = vi % 3u;
   let v = select(select(f.z, f.y, k == 1u), f.x, k == 0u);
   let ti = tinfo[t];
-  let vflags = vdata[v * 3u].w;
+  let vflags = vmeta[v * 2u].x;
   var o: Out;
   o.w = vpos[v].xyz;
   o.n = vnrm[v].xyz;
   o.dmg = vnrm[v].w;
   o.tstrain = max(ti.w, 0.0);
-  o.rest = bitcast<vec4f>(vdata[v * 3u + 2u]).xyz;
+  o.rest = bitcast<vec4f>(vmeta[v * 2u + 1u]).xyz;
   o.mat = f.w;
   o.seam = select(0.0, 1.0, ((vflags >> 8u) & 1u) != 0u);
   o.car = vflags >> 16u;
@@ -367,19 +330,34 @@ fn paintColor(car: u32) -> vec3f {
 }
 `;
 
+// Visual part ids (engine_softbody::visual::part) → the procedural car's part names.
+const PART_NAMES = ['body', 'bonnet', 'boot', 'door_fl', 'door_rl', 'door_fr', 'door_rr', 'bumper_front', 'bumper_rear', 'body', 'engine'];
+
 /**
- * Car renderer. `visual` = proceduralCarVisual() words; `bodies` = the body
- * buffer (binding 0 of the step). Pipelines target `format` with `sampleCount`.
+ * Car renderer. `visual` = proceduralCarVisual() words; `soft` = the world's
+ * SoftHost (bindMesh); `bodies` = the body buffer (binding 0 of the step).
  */
-export function createCarRenderer(device, { format, sampleCount, bodies, frameBuf, shadowView, shadowSampler, visual }) {
+export function createCarRenderer(device, { format, sampleCount, bodies, frameBuf, shadowView, shadowSampler, visual, soft }) {
   const nv0 = visual[0], nt0 = visual[1];
   const bindW = visual.subarray(2, 2 + nv0 * 8);
   const restW = visual.subarray(2 + nv0 * 8, 2 + nv0 * 11);
   const triW = visual.subarray(2 + nv0 * 11, 2 + nv0 * 11 + nt0 * 4);
-  const compMod = device.createShaderModule({ label: 'car-compute', code: COMPUTE_WGSL });
+  const rest0 = new Float32Array(restW.buffer, restW.byteOffset, restW.length);
+  // Vertices per part (the part id is the low byte of the visual's flags).
+  const byPart = new Map();
+  for (let v = 0; v < nv0; v++) {
+    const pt = bindW[v * 8 + 3] & 255;
+    if (!byPart.has(pt)) byPart.set(pt, []);
+    byPart.get(pt).push(v);
+  }
+  // Triangles: opaque first, then glass (drawn blended after everything else).
+  const order = [];
+  for (const glassPass of [false, true]) for (let t = 0; t < nt0; t++) if ((triW[t * 4 + 3] === 1) === glassPass) order.push(t);
+  const opaquePerCar = order.findIndex((t) => triW[t * 4 + 3] === 1);
+  const compMod = device.createShaderModule({ label: 'car-fx', code: COMPUTE_WGSL });
   const rendMod = device.createShaderModule({ label: 'car-render', code: RENDER_WGSL });
   const cp = (entry) => device.createComputePipeline({ layout: 'auto', compute: { module: compMod, entryPoint: entry } });
-  const pSkin = cp('skin'), pFaces = cp('faces'), pNormals = cp('normals'), pFx = cp('particles');
+  const pSpawn = cp('spawnFx'), pFx = cp('particles');
   const depthStencil = { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' };
   const opaque = device.createRenderPipeline({
     layout: 'auto', vertex: { module: rendMod, entryPoint: 'vsCar' },
@@ -406,88 +384,85 @@ export function createCarRenderer(device, { format, sampleCount, bodies, frameBu
     layout: 'auto', vertex: { module: rendMod, entryPoint: 'vsCarShadow' },
     primitive: { cullMode: 'none' }, depthStencil: { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'less', depthBias: 2, depthBiasSlopeScale: 2.5 },
   });
-  const r = { verts: 0, tris: 0, opaqueTris: 0, groups: null };
+  const r = { verts: 0, tris: 0, opaqueTris: 0, groups: null, skinner: null };
   let bufs = [];
+  let generation = 0;
   const buf = (data, usage) => {
     const b = device.createBuffer({ size: Math.max(16, data.byteLength), usage: usage | GPUBufferUsage.COPY_DST });
     if (data.byteLength) device.queue.writeBuffer(b, 0, data);
     bufs.push(b);
     return b;
   };
-  /** cars: [{ firstBody, index }] — one mesh instance per procedural car. */
-  r.rebuild = (cars) => {
-    bufs.forEach((b) => b.destroy()); bufs = [];
+  const bg = (p, list) => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: list.map(([binding, resource]) => ({ binding, resource: resource instanceof GPUBuffer ? { buffer: resource } : resource })) });
+  /** cars: [{ h, index }]: one mesh per procedural car, bound with soft.bindMesh. */
+  r.rebuild = async (cars) => {
+    const gen = ++generation;
     const nv = nv0 * cars.length, nt = nt0 * cars.length;
-    r.verts = nv; r.tris = nt;
     if (!nt) { r.groups = null; return; }
-    const vdata = new Uint32Array(nv * 12);
-    const rest = new Float32Array(restW.buffer, restW.byteOffset, restW.length);
+    // Engine bindings, part by part (a door's mesh follows only the door's nodes).
+    const bindings = new Uint32Array(nv * 8);
+    const vmeta = new Uint32Array(nv * 8);
+    const rest = new Float32Array(nv * 3);
     cars.forEach((car, ci) => {
-      for (let v = 0; v < nv0; v++) {
-        const o = (ci * nv0 + v) * 12, b = v * 8;
-        vdata[o] = car.firstBody + bindW[b]; vdata[o + 1] = car.firstBody + bindW[b + 1]; vdata[o + 2] = car.firstBody + bindW[b + 2];
-        vdata[o + 3] = bindW[b + 3] | (car.index << 16);
-        vdata[o + 4] = bindW[b + 4]; vdata[o + 5] = bindW[b + 5]; vdata[o + 6] = bindW[b + 6]; vdata[o + 7] = bindW[b + 7];
-        const f = new Float32Array(vdata.buffer, (o + 8) * 4, 3);
-        f[0] = rest[v * 3]; f[1] = rest[v * 3 + 1]; f[2] = rest[v * 3 + 2];
+      for (const [pt, verts] of byPart) {
+        const xyz = new Float32Array(verts.length * 3);
+        verts.forEach((v, k) => xyz.set(rest0.subarray(v * 3, v * 3 + 3), k * 3));
+        let w;
+        try { w = soft.bindMesh(car.h, xyz, PART_NAMES[pt] ?? 'body'); } catch { w = soft.bindMesh(car.h, xyz); } // a desc without parts
+        verts.forEach((v, k) => {
+          const o = ci * nv0 + v;
+          bindings.set(w.subarray(k * 8, k * 8 + 8), o * 8);
+          vmeta[o * 8] = (bindW[v * 8 + 3] & 0xffff) | (car.index << 16);
+          vmeta[o * 8 + 1] = w[k * 8];
+          vmeta.set(new Uint32Array(rest0.buffer, rest0.byteOffset + v * 12, 3), o * 8 + 4);
+          rest.set(rest0.subarray(v * 3, v * 3 + 3), o * 3);
+        });
       }
     });
-    // Triangles: opaque first, then glass (drawn blended after everything else).
-    const order = [];
-    for (let pass = 0; pass < 2; pass++) for (let t = 0; t < nt0; t++) if ((triW[t * 4 + 3] === 1) === (pass === 1)) order.push(t);
-    const opaque0 = order.findIndex((t) => triW[t * 4 + 3] === 1);
-    r.opaqueTris = (opaque0 < 0 ? nt0 : opaque0) * cars.length;
     const tris = new Uint32Array(nt * 4);
     let k = 0;
     for (const glassPass of [false, true]) {
       cars.forEach((car, ci) => {
         for (const t of order) {
           if ((triW[t * 4 + 3] === 1) !== glassPass) continue;
-          tris[k * 4] = ci * nv0 + triW[t * 4]; tris[k * 4 + 1] = ci * nv0 + triW[t * 4 + 1];
-          tris[k * 4 + 2] = ci * nv0 + triW[t * 4 + 2]; tris[k * 4 + 3] = triW[t * 4 + 3];
+          tris.set([ci * nv0 + triW[t * 4], ci * nv0 + triW[t * 4 + 1], ci * nv0 + triW[t * 4 + 2], triW[t * 4 + 3]], k * 4);
           k++;
         }
       });
     }
-    // Vertex → triangles (CSR): starts, then the lists.
-    const deg = new Uint32Array(nv);
-    for (let t = 0; t < nt; t++) for (let c = 0; c < 3; c++) deg[tris[t * 4 + c]]++;
-    const adj = new Uint32Array(nv + 1 + nt * 3);
-    let acc = nv + 1;
-    for (let v = 0; v < nv; v++) { adj[v] = acc; acc += deg[v]; }
-    adj[nv] = acc;
-    const fill = adj.slice(0, nv);
-    for (let t = 0; t < nt; t++) for (let c = 0; c < 3; c++) adj[fill[tris[t * 4 + c]]++] = t;
+    const skinner = await createSoftSkinner(device, bodies, { bindings, rest, triangles: tris, stride: 4 });
+    if (gen !== generation) { skinner.destroy(); return; }
+    r.skinner?.destroy();
+    bufs.forEach((b) => b.destroy()); bufs = [];
+    r.skinner = skinner;
+    r.verts = nv; r.tris = nt;
+    r.opaqueTris = (opaquePerCar < 0 ? nt0 : opaquePerCar) * cars.length;
     const S = GPUBufferUsage.STORAGE;
-    const vdataB = buf(vdata, S), trisB = buf(tris, S), adjB = buf(adj, S);
-    const vposB = buf(new Float32Array(nv * 4), S), tinfoB = buf(new Float32Array(nt * 4), S), vnrmB = buf(new Float32Array(nv * 4), S);
-    const countsB = buf(Uint32Array.of(nv, nt, 0, 0), GPUBufferUsage.UNIFORM);
-    r.countsB = countsB;
-    const bg = (p, list) => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: list.map(([binding, resource]) => ({ binding, resource: resource instanceof GPUBuffer ? { buffer: resource } : resource })) });
+    const vmetaB = buf(vmeta, S), prevB = buf(new Float32Array(nt), S);
+    r.countsB = buf(Uint32Array.of(nv, nt, 0, 0), GPUBufferUsage.UNIFORM);
+    const T = skinner.triangles, F = skinner.faces, P = skinner.positions, N = skinner.normals;
     r.groups = {
-      skin: bg(pSkin, [[0, bodies], [1, vdataB], [4, vposB], [7, countsB]]),
-      faces: bg(pFaces, [[0, bodies], [1, vdataB], [2, trisB], [4, vposB], [5, tinfoB], [7, countsB], [8, fxBuf]]),
-      fx: bg(pFx, [[7, countsB], [8, fxBuf]]),
+      spawn: bg(pSpawn, [[0, bodies], [2, T], [3, F], [4, P], [5, prevB], [6, vmetaB], [7, r.countsB], [8, fxBuf]]),
+      fx: bg(pFx, [[7, r.countsB], [8, fxBuf]]),
       fxDraw: bg(fxPipe, [[1, frameBuf], [7, fxBuf]]),
-      normals: bg(pNormals, [[3, adjB], [5, tinfoB], [6, vnrmB], [7, countsB]]),
-      opaque: bg(opaque, [[1, frameBuf], [2, trisB], [3, tinfoB], [4, vposB], [5, vnrmB], [6, vdataB], [9, shadowView], [10, shadowSampler]]),
-      glass: bg(glass, [[1, frameBuf], [2, trisB], [3, tinfoB], [4, vposB], [5, vnrmB], [6, vdataB], [9, shadowView], [10, shadowSampler]]),
-      shadow: bg(shadow, [[1, frameBuf], [2, trisB], [3, tinfoB], [4, vposB], [5, vnrmB], [6, vdataB]]),
+      opaque: bg(opaque, [[1, frameBuf], [2, T], [3, F], [4, P], [5, N], [6, vmetaB], [9, shadowView], [10, shadowSampler]]),
+      glass: bg(glass, [[1, frameBuf], [2, T], [3, F], [4, P], [5, N], [6, vmetaB], [9, shadowView], [10, shadowSampler]]),
+      shadow: bg(shadow, [[1, frameBuf], [2, T], [3, F], [4, P], [5, N], [6, vmetaB]]),
     };
   };
   let seed = 0;
   const tick = new ArrayBuffer(8);
-  /** `dt` = seconds since the last frame (0 = paused: no effects). */
+  /** Skin (engine kernel), then effects. `dt` = simulated seconds since the last
+   * frame (0 = effects paused). */
   r.compute = (enc, dt = 0) => {
     if (!r.groups) return;
+    r.skinner.encode(enc);
     new Uint32Array(tick)[0] = ++seed;
     new Float32Array(tick)[1] = dt;
     device.queue.writeBuffer(r.countsB, 8, tick);
     const pass = enc.beginComputePass();
     const run = (p, g, n) => { pass.setPipeline(p); pass.setBindGroup(0, g); pass.dispatchWorkgroups(Math.ceil(n / 64)); };
-    run(pSkin, r.groups.skin, r.verts);
-    run(pFaces, r.groups.faces, r.tris);
-    run(pNormals, r.groups.normals, r.verts);
+    run(pSpawn, r.groups.spawn, r.tris);
     run(pFx, r.groups.fx, FX_N);
     pass.end();
   };

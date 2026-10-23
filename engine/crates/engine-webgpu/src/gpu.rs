@@ -2167,6 +2167,9 @@ impl WgpuSim {
     }
 
     /// Soft-body beams that broke since the last call (event ring readback).
+    /// Beam breaks since the last poll. Prefer [`Self::poll_soft_events`], which
+    /// also reports the pieces they cut loose; use one or the other (both read
+    /// the same cursor).
     pub fn poll_beam_breaks(&mut self) -> Vec<engine_softbody::BeamBreak> {
         let words: Vec<u32> = self.read_buffer_range(
             21,
@@ -2184,6 +2187,53 @@ impl WgpuSim {
             eprintln!("event ring overflow: {lost} beam events lost");
         }
         out
+    }
+
+    /// The wgpu device and queue, for integrations that draw from the
+    /// simulation's buffers (`body_buffer`) without a readback.
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
+    /// Soft-body destruction events since the last poll: beam breaks, and the
+    /// pieces they cut loose (`SoftHost::note_breaks`). After an event-ring
+    /// overflow every soft body is resynchronised from a beam readback, so no
+    /// piece is missed.
+    pub fn poll_soft_events(&mut self) -> SoftEvents {
+        let words: Vec<u32> = self.read_buffer_range(
+            21,
+            u64::from(EVENT_RING_BASE) * 4,
+            (4 + 4 * EVENT_RING_CAPACITY) as usize,
+        );
+        let mut breaks = Vec::new();
+        let lost = engine_softbody::decode_beam_breaks(&words, &mut self.beam_events_seen, EVENT_RING_CAPACITY, &mut breaks);
+        let mut pieces = Vec::new();
+        if self.soft.is_some() {
+            if lost > 0 {
+                let n = self.soft.as_ref().map_or(0, |h| h.entries.len());
+                for s in 0..n {
+                    let h = engine_softbody::SoftHandle(s as u32);
+                    let beams = self.read_soft_beams(h);
+                    pieces.extend(self.soft.as_mut().unwrap().sync_broken(h, &beams));
+                }
+            } else {
+                pieces = self.soft.as_mut().unwrap().note_breaks(&breaks);
+            }
+        }
+        SoftEvents { breaks, pieces, lost }
+    }
+
+    /// A soft body's damage: beams bent and broken, plastic work, and the
+    /// per-node deformation from its rest shape (rigid motion removed).
+    pub fn read_soft_damage(&self, h: SoftHandle) -> engine_softbody::SoftDamage {
+        let beams = self.read_soft_beams(h);
+        let rest: Vec<glam::Vec3> = self.soft_host().entry(h).desc.nodes.iter().map(|n| glam::Vec3::from_array(n.position)).collect();
+        let now: Vec<glam::Vec3> = self.read_soft_particles(h).iter().map(|b| glam::Vec3::from_array(b.position)).collect();
+        let detached = self.soft_host().entry(h).detached.clone();
+        engine_softbody::damage_summary(&beams, Some((&rest, &now)), Some(&detached))
     }
 
     /// Batched scene ray casts against the current poses.
@@ -2346,3 +2396,13 @@ pub use host_state::SimSnapshot;
 #[cfg(test)]
 #[path = "gpu_tests.rs"]
 mod tests;
+
+/// [`WgpuSim::poll_soft_events`] result.
+#[derive(Clone, Debug, Default)]
+pub struct SoftEvents {
+    pub breaks: Vec<engine_softbody::BeamBreak>,
+    pub pieces: Vec<engine_softbody::PieceDetached>,
+    /// Records overwritten in the event ring before this poll (bodies were
+    /// resynchronised from a readback).
+    pub lost: u32,
+}

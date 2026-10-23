@@ -858,8 +858,11 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
         desc.name = n.to_string();
     }
 
-    // Nodes.
+    // Nodes. Parts: each JBeam part's own nodes (named as the part), and each
+    // node `group` (the sets BeamNG flexbodies bind to).
     let mut ids: HashMap<String, u32> = HashMap::new();
+    let mut part_nodes: Vec<(String, Vec<u32>)> = Vec::new();
+    let mut group_nodes: Vec<(String, Vec<u32>)> = Vec::new();
     for (pi, f) in expand(&db, &parts, "nodes", &vars) {
         let Some(id) = f.get("id").and_then(|v| {
             v.as_str()
@@ -891,12 +894,39 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             friction: f.get("frictionCoef").and_then(as_f32).unwrap_or(1.0),
             frame: false,
         };
-        if let Some(&i) = ids.get(&id) {
+        let index = if let Some(&i) = ids.get(&id) {
             // A later part redefines the node (JBeam: last definition wins).
             desc.nodes[i as usize] = node;
+            i
         } else {
             ids.insert(id, desc.nodes.len() as u32);
             desc.nodes.push(node);
+            desc.nodes.len() as u32 - 1
+        };
+        let mut add = |list: &mut Vec<(String, Vec<u32>)>, name: &str| {
+            match list.iter_mut().find(|(n, _)| n == name) {
+                Some((_, v)) => {
+                    if !v.contains(&index) {
+                        v.push(index);
+                    }
+                }
+                None => list.push((name.to_string(), vec![index])),
+            }
+        };
+        add(&mut part_nodes, &place.name);
+        match f.get("group") {
+            Some(Value::String(g)) if !g.is_empty() => add(&mut group_nodes, g),
+            Some(Value::Array(gs)) => {
+                for g in gs.iter().filter_map(Value::as_str).filter(|g| !g.is_empty()) {
+                    add(&mut group_nodes, g);
+                }
+            }
+            _ => {}
+        }
+    }
+    for (name, nodes) in part_nodes.into_iter().chain(group_nodes) {
+        if !desc.parts.iter().any(|p| p.name == name) {
+            desc.parts.push(crate::desc::SoftPart { name, nodes });
         }
     }
     let node = |f: &Map<String, Value>, k: &str| {
