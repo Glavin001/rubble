@@ -13,8 +13,9 @@
 #
 # RUBBLE_BUILD_CACHE=<dir> keeps work between builds: cargo's target dir (both
 # workspaces), slangc's outputs, the vibe-city packs and the Asyncify build, each keyed
-# by its inputs so a hit is the same bytes. On Vercel it is engine/.build-cache, which
-# the Build Output written at the end asks Vercel to restore on the next build.
+# by its inputs so a hit is the same bytes. On Vercel it is node_modules/.cache/rubble-build:
+# Vercel's static builder keeps every **/node_modules/** between builds (and a branch's
+# first build starts from production's cache).
 set -euo pipefail
 
 SLANG_VERSION=2026.19   # engine/TOOLCHAIN.md
@@ -27,7 +28,7 @@ WEB="$ENGINE/crates/engine-webgpu"
 OUT="${OUT:-$ENGINE/web-dist}"
 TOOLS="${RUBBLE_TOOLS:-$HOME/.cache/rubble-tools}"
 CACHE="${RUBBLE_BUILD_CACHE:-}"
-if [[ -z "$CACHE" && -n "${VERCEL:-}" ]]; then CACHE="$ENGINE/.build-cache"; fi
+if [[ -z "$CACHE" && -n "${VERCEL:-}" ]]; then CACHE="$ENGINE/../node_modules/.cache/rubble-build"; fi
 if [[ -n "$CACHE" ]]; then
   mkdir -p "$CACHE"
   CACHE="$(cd "$CACHE" && pwd)"
@@ -200,12 +201,4 @@ find "$OUT" \( -name '*.test.mjs' -o -name '.gitignore' -o -name '*-check.mjs' \
 rm -rf "$OUT"/generated/*/.gitignore "$OUT"/generated/*/package.json
 echo "==> Done: $OUT ($(du -sh "$OUT" | cut -f1))"
 
-if [[ -n "${VERCEL:-}" ]]; then
-  # Build Output API: the site, plus the paths Vercel restores before the next build.
-  VO="$ENGINE/../.vercel/output"
-  rm -rf "$VO"
-  mkdir -p "$VO"
-  cp -R "$OUT" "$VO/static"
-  printf '{"version":3,"cache":["engine/.build-cache/**","engine/scenes/*/node_modules/**"]}\n' >"$VO/config.json"
-  echo "==> Build Output: $VO (build cache $(du -sh "$CACHE" | cut -f1))"
-fi
+if [[ -n "$CACHE" ]]; then echo "==> Build cache: $(du -sh "$CACHE" | cut -f1)"; fi
