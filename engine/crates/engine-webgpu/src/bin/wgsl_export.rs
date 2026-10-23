@@ -33,6 +33,16 @@ fn main() -> anyhow::Result<()> {
         }
     }
     names.sort();
+    // build.rs skips an entry slangc rejects (with only a cargo warning): fail
+    // here rather than leave a stale module from an earlier build in place.
+    let missing: Vec<_> = engine_exec::rigid_plan::SOFT_ENTRIES
+        .iter()
+        .filter(|k| !names.iter().any(|n| n == *k))
+        .collect();
+    anyhow::ensure!(
+        missing.is_empty() && bad == 0,
+        "WGSL entries failed to compile: {missing:?} (see the engine-webgpu build warnings)"
+    );
     let entries = names
         .iter()
         .map(|n| format!("    \"{n}\""))

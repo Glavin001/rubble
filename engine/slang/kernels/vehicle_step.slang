@@ -2383,11 +2383,9 @@ void vehicle_prepare(uint3 tid : SV_DispatchThreadID)
 // ---------------------------------------------------------------------------
 // vehicle_iterate: back-substitute wheel spin, dual update, rebuild block
 // ---------------------------------------------------------------------------
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void vehicle_iterate(uint3 tid : SV_DispatchThreadID)
+// One vehicle's iterate (vehicle_iterate, or soft_iterate's vehicle workgroups).
+void vehicleIterateOne(uint v)
 {
-    uint v = dispatchIndex(tid);
     if (v >= vehicleCount()) return;
     uint vr = vehRec(v);
     if ((VU(vr + V_D3).y & VS_ACTIVE) == 0u) return;
@@ -2404,6 +2402,13 @@ void vehicle_iterate(uint3 tid : SV_DispatchThreadID)
     writeVehicleBlock(vehicleAabbBlock(v), H, g, true);
     VSet(vr + V_REFP, float4(c.position, VD(vr + V_REFP).w));
     VSet(vr + V_REFQ, c.orientation);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void vehicle_iterate(uint3 tid : SV_DispatchThreadID)
+{
+    vehicleIterateOne(dispatchIndex(tid));
 }
 
 // ---------------------------------------------------------------------------

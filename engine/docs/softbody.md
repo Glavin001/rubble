@@ -551,7 +551,18 @@ After s21 (lane-split sweep, triangle planes, tight promotion), Chrome, 240 Hz Ã
 | Traffic cruising, 100 cars (`ai=cruise`) | 5.4 | 4.7 | 41 of 100 rigid |
 | Parked, 100 cars (`ai=0`) | 2.9 | 3.1 | 95 rigid and asleep; 5 rest against blocks |
 
-GPU time per kernel for 100 cruising cars is led by `vehicle_iterate` (1.0 ms), the
+After s22 (one soft pass per iteration, pair lists), Chrome, 240 Hz Ã— 10, GPU ms / step:
+
+| Scene | ms / step | GPU ms / step |
+|---|---|---|
+| One soft car into a wall | 2.1 | 2.3 |
+| One always-soft car driving (`rigid=0`) | 2.2 | 2.6 |
+| Yard, player driving | 1.9 | 2.3 |
+| Traffic cruising, 100 cars | 4.7 | 3.5 |
+| Traffic derby, 100 cars | 4.7 | 4.4 |
+| Parked, 100 cars | 2.8 | 3.0 |
+
+Before s22, GPU time per kernel for 100 cruising cars was led by `vehicle_iterate` (1.0 ms), the
 particle sweep (0.9 ms), node collision (0.7 ms) and the rigid colour solve (0.5 ms).
 
 Traffic still varies run to run with the AI and the crashes. The slowest soft car's

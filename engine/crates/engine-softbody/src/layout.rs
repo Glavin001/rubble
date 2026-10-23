@@ -22,6 +22,8 @@
 use serde::{Deserialize, Serialize};
 
 pub const HEADER_SLOTS: u32 = 9;
+/// Slots per soft body in the pair list (a count and up to 31 bodies).
+pub const SOFT_PAIR_STRIDE: u32 = 8;
 /// Soft body record: [firstBody, particles, firstBeam, beams], [steer, group,
 /// core, ordinal base], [firstTri, tris, δ, 0], then rigid mode: [mode, quiet
 /// steps, flags | core joint count << 8, first core joint], the core's soft-mode
@@ -144,6 +146,10 @@ pub struct SoftLayout {
     /// Per triangle, 2 slots written each step before node contacts: (unit normal,
     /// area; 0 = torn or degenerate) and (first vertex, cull radius).
     pub tri_plane_base: u32,
+    /// Per soft body, `SOFT_PAIR_STRIDE` slots written each step by `soft_pairs`:
+    /// a count, then the soft bodies (itself included, ascending) whose bounds
+    /// come within reach of its own (count `u32::MAX`: too many, walk them all).
+    pub body_pair_base: u32,
     pub total_slots: u32,
 }
 
@@ -187,11 +193,17 @@ impl SoftCapacity {
                 + 2 * self.max_bodies
                 + 2 * self.max_particles
                 + self.max_bodies * self.max_colors.div_ceil(2),
-            total_slots: aabb_base
+            body_pair_base: aabb_base
                 + 2 * self.max_bodies
                 + 2 * self.max_particles
                 + self.max_bodies * self.max_colors.div_ceil(2)
                 + 2 * self.max_triangles,
+            total_slots: aabb_base
+                + 2 * self.max_bodies
+                + 2 * self.max_particles
+                + self.max_bodies * self.max_colors.div_ceil(2)
+                + 2 * self.max_triangles
+                + SOFT_PAIR_STRIDE * self.max_bodies,
         }
     }
 
@@ -282,7 +294,11 @@ mod tests {
             l.body_color_base + c.max_bodies * l.body_color_stride,
             l.tri_plane_base
         );
-        assert_eq!(l.tri_plane_base + 2 * c.max_triangles, l.total_slots);
+        assert_eq!(l.tri_plane_base + 2 * c.max_triangles, l.body_pair_base);
+        assert_eq!(
+            l.body_pair_base + SOFT_PAIR_STRIDE * c.max_bodies,
+            l.total_slots
+        );
         // The default pool stays well under WebGPU's 128 MiB binding limit.
         assert!(c.bytes() < 128 << 20);
     }

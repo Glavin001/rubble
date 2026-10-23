@@ -85,6 +85,7 @@ const CHECKS = {
   // Frame budget (opt-in: BUDGET=1): physics ms per step at the fine and coarse
   // rates, rendering ms per frame, in the yard after the cars have settled.
   ...Object.fromEntries([['budget_240x10', 'scene=yard&hz=240&iters=10'], ['budget_60x8', 'scene=yard&hz=60&iters=8'], ['budget_yard_drive', 'scene=yard&drive=1'],
+    ['budget_one_wall', 'scene=wall'], ['budget_one_soft_drive', 'scene=yard&rigid=0&drive=1'],
     ['budget_parked100', 'scene=traffic&cars=100&ai=0'], ['budget_cruise100', 'scene=traffic&cars=100&ai=cruise'], ['budget_traffic20', 'scene=traffic&cars=20'], ['budget_traffic50', 'scene=traffic&cars=50'], ['budget_traffic100', 'scene=traffic&cars=100']].map(([k, q]) => [k, {
     query: process.env.BUDGET_SPLIT ? q + '&gputime' : q,
     optIn: 'BUDGET',

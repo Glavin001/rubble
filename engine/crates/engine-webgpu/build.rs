@@ -124,6 +124,7 @@ const WORLD_ENTRIES: &[&str] = &[
     "soft_begin",
     "soft_bounds",
     "soft_tri_planes",
+    "soft_pairs",
     "soft_collide_nodes",
     "soft_collide_tris",
     "soft_primal",
