@@ -57,7 +57,11 @@ pub fn soft_procedural_car_visual() -> Vec<u32> {
     let p = CarParams::default();
     let (text, layout) = car_truck_layout(&p);
     let d = load_truck(&text);
-    let nodes: Vec<Vec3> = d.nodes.iter().map(|n| Vec3::from_array(n.position)).collect();
+    let nodes: Vec<Vec3> = d
+        .nodes
+        .iter()
+        .map(|n| Vec3::from_array(n.position))
+        .collect();
     let v = car_visual(&p, &layout, &nodes);
     let mut out = vec![v.vertices.len() as u32, v.tris.len() as u32];
     for (i, b) in v.bindings.iter().enumerate() {
@@ -82,7 +86,9 @@ pub fn soft_procedural_car_visual() -> Vec<u32> {
 /// (`body`, `bonnet`, `boot`, `door_fl`…, `bumper_front`, `bumper_rear`, `engine`).
 #[wasm_bindgen]
 pub fn soft_procedural_car_desc() -> String {
-    engine_softbody::procedural::car_desc(&CarParams::default()).0.to_json()
+    engine_softbody::procedural::car_desc(&CarParams::default())
+        .0
+        .to_json()
 }
 
 fn pieces_json(p: &[engine_softbody::PieceDetached]) -> String {
@@ -297,10 +303,21 @@ impl WasmSoftHost {
     /// body `h`, optionally only to the nodes of part `part`. Returns 8 words per
     /// vertex (engine_softbody::SkinBinding::to_words): centre, x, y body index,
     /// flags (0), coordinates and rest edge as f32 bits.
-    pub fn bind_mesh(&self, h: u32, vertices: &[f32], part: Option<String>) -> Result<Vec<u32>, JsError> {
+    pub fn bind_mesh(
+        &self,
+        h: u32,
+        vertices: &[f32],
+        part: Option<String>,
+    ) -> Result<Vec<u32>, JsError> {
         use glam::Vec3;
-        let verts: Vec<Vec3> = vertices.chunks_exact(3).map(|c| Vec3::new(c[0], c[1], c[2])).collect();
-        let b = self.host.bind_mesh(SoftHandle(h), &verts, part.as_deref()).map_err(|e| JsError::new(&e))?;
+        let verts: Vec<Vec3> = vertices
+            .chunks_exact(3)
+            .map(|c| Vec3::new(c[0], c[1], c[2]))
+            .collect();
+        let b = self
+            .host
+            .bind_mesh(SoftHandle(h), &verts, part.as_deref())
+            .map_err(|e| JsError::new(&e))?;
         Ok(b.iter().flat_map(|b| b.to_words(0)).collect())
     }
 
@@ -310,7 +327,11 @@ impl WasmSoftHost {
     pub fn note_breaks(&mut self, pairs: &[u32]) -> String {
         let breaks: Vec<engine_softbody::BeamBreak> = pairs
             .chunks_exact(2)
-            .map(|c| engine_softbody::BeamBreak { beam: c[0], force: 0.0, soft_body: c[1] })
+            .map(|c| engine_softbody::BeamBreak {
+                beam: c[0],
+                force: 0.0,
+                soft_body: c[1],
+            })
             .collect();
         pieces_json(&self.host.note_breaks(&breaks))
     }
@@ -318,7 +339,10 @@ impl WasmSoftHost {
     /// Resynchronise soft body `h`'s broken set from a beam readback (16 words
     /// per beam, the arena records), returning newly detached pieces as JSON.
     pub fn sync_broken(&mut self, h: u32, beam_words: &[u32]) -> String {
-        let beams: Vec<engine_softbody::model::Beam> = beam_words.chunks_exact(16).map(engine_softbody::model::Beam::from_words).collect();
+        let beams: Vec<engine_softbody::model::Beam> = beam_words
+            .chunks_exact(16)
+            .map(engine_softbody::model::Beam::from_words)
+            .collect();
         pieces_json(&self.host.sync_broken(SoftHandle(h), &beams))
     }
 
@@ -327,10 +351,21 @@ impl WasmSoftHost {
     /// engine_softbody::SoftDamage (`node_deformation` empty without positions).
     pub fn damage(&self, h: u32, beam_words: &[u32], positions: &[f32]) -> String {
         use glam::Vec3;
-        let beams: Vec<engine_softbody::model::Beam> = beam_words.chunks_exact(16).map(engine_softbody::model::Beam::from_words).collect();
+        let beams: Vec<engine_softbody::model::Beam> = beam_words
+            .chunks_exact(16)
+            .map(engine_softbody::model::Beam::from_words)
+            .collect();
         let e = self.host.entry(SoftHandle(h));
-        let rest: Vec<Vec3> = e.desc.nodes.iter().map(|n| Vec3::from_array(n.position)).collect();
-        let now: Vec<Vec3> = positions.chunks_exact(3).map(|c| Vec3::new(c[0], c[1], c[2])).collect();
+        let rest: Vec<Vec3> = e
+            .desc
+            .nodes
+            .iter()
+            .map(|n| Vec3::from_array(n.position))
+            .collect();
+        let now: Vec<Vec3> = positions
+            .chunks_exact(3)
+            .map(|c| Vec3::new(c[0], c[1], c[2]))
+            .collect();
         let pos = (now.len() == rest.len()).then_some((&rest[..], &now[..]));
         let d = engine_softbody::damage_summary(&beams, pos, Some(&e.detached));
         json!({

@@ -155,7 +155,10 @@
     if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
     const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
     if (!adapter) throw new Error('no WebGPU adapter');
+    // ?gputime: timestamp queries for window.__world.profileStep (per-kernel GPU ms).
+    const gpuTime = qs.has('gputime') && adapter.features.has('timestamp-query');
     const device = await adapter.requestDevice({
+      requiredFeatures: gpuTime ? ['timestamp-query'] : [],
       requiredLimits: {
         maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage,
         maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
@@ -1350,6 +1353,27 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       for (const id of ['info', 'status']) document.getElementById(id).style.display = clean ? 'none' : '';
     };
     window.__world = world;
+    window.__device = device;
+    // Live loop for ms milliseconds (rAF, wall-clock stepping): fps and real-time ratio.
+    window.__live = async (ms = 3000) => {
+      manual = false;
+      await new Promise((r) => setTimeout(r, ms));
+      manual = true;
+      return { fps: fpsShow, realTime };
+    };
+    // Rendering cost: n frames drawn and waited on (no physics), ms per frame.
+    window.__renderBench = async (n = 60) => {
+      manual = true;
+      const t = performance.now();
+      for (let i = 0; i < n; i++) {
+        updateCamera(1 / 60, false);
+        const enc = device.createCommandEncoder();
+        drawScene(enc);
+        device.queue.submit([enc.finish()]);
+        await device.queue.onSubmittedWorkDone();
+      }
+      return (performance.now() - t) / n;
+    };
     window.__ready = true;
     statusEl.textContent = `scene ready · ${world.bodyCount} bodies · ${softs.length} soft bodies`;
     requestAnimationFrame(frame);

@@ -124,7 +124,11 @@ pub fn bind(
 /// its first node). A mesh derived from the skin keeps every vertex on the panel
 /// it came from, so a vertex near a seam never borrows nodes across it (a bumper
 /// tearing off would otherwise shear the frame and fling the vertex).
-pub fn bind_to_triangles(vertices: &[Vec3], nodes: &[Vec3], sources: &[[u32; 3]]) -> Vec<Option<FlexBinding>> {
+pub fn bind_to_triangles(
+    vertices: &[Vec3],
+    nodes: &[Vec3],
+    sources: &[[u32; 3]],
+) -> Vec<Option<FlexBinding>> {
     vertices
         .iter()
         .zip(sources)
@@ -134,7 +138,10 @@ pub fn bind_to_triangles(vertices: &[Vec3], nodes: &[Vec3], sources: &[[u32; 3]]
             if f.determinant().abs() < 1e-12 {
                 return None;
             }
-            Some(FlexBinding { nodes: *t, coords: (f.inverse() * (v - c)).to_array() })
+            Some(FlexBinding {
+                nodes: *t,
+                coords: (f.inverse() * (v - c)).to_array(),
+            })
         })
         .collect()
 }
@@ -143,7 +150,11 @@ pub fn bind_to_triangles(vertices: &[Vec3], nodes: &[Vec3], sources: &[[u32; 3]]
 /// four with its edge midpoints pushed out along the averaged vertex normals, so
 /// flat node–beam panels read as rounded bodywork. Returns (vertices, triangles,
 /// the skin triangle each vertex belongs to).
-pub fn rounded_skin(nodes: &[Vec3], triangles: &[[u32; 3]], bulge: f32) -> (Vec<Vec3>, Vec<[u32; 3]>, Vec<[u32; 3]>) {
+pub fn rounded_skin(
+    nodes: &[Vec3],
+    triangles: &[[u32; 3]],
+    bulge: f32,
+) -> (Vec<Vec3>, Vec<[u32; 3]>, Vec<[u32; 3]>) {
     let mut normals = vec![Vec3::ZERO; nodes.len()];
     for t in triangles {
         let [a, b, c] = t.map(|i| nodes[i as usize]);
@@ -276,12 +287,21 @@ mod tests {
         let tris = vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]];
         let (v, t, src) = rounded_skin(&nodes, &tris, 0.05);
         assert_eq!(t.len(), 16);
-        assert_eq!(v.len(), 4 + 6, "the nodes plus one shared midpoint per edge");
+        assert_eq!(
+            v.len(),
+            4 + 6,
+            "the nodes plus one shared midpoint per edge"
+        );
         // Bound to their own panels, the vertices follow any motion of its nodes.
         let b = bind_to_triangles(&v, &nodes, &src);
-        let moved: Vec<Vec3> = nodes.iter().map(|p| *p * 1.0 + Vec3::new(1.0, 2.0, 3.0)).collect();
+        let moved: Vec<Vec3> = nodes
+            .iter()
+            .map(|p| *p * 1.0 + Vec3::new(1.0, 2.0, 3.0))
+            .collect();
         for (vert, bnd) in v.iter().zip(&b) {
-            assert!((bnd.unwrap().skin(&moved) - (*vert + Vec3::new(1.0, 2.0, 3.0))).length() < 1e-5);
+            assert!(
+                (bnd.unwrap().skin(&moved) - (*vert + Vec3::new(1.0, 2.0, 3.0))).length() < 1e-5
+            );
         }
     }
 }

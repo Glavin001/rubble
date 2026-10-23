@@ -528,8 +528,22 @@ GPU time per phase, 10 cars, 240 Hz × 10 (ms):
 
 Each solver pass waits on the one before, so the cost is per-dispatch latency rather
 than arithmetic. One car's sweep costs 0.135 ms and ten cars' 0.17 ms, so 50 cars cost
-only 1.0 ms more per step than one. Chrome WebGPU runs the yard (3 cars and 3 crates:
-387 particles, 2,190 beams) at 5.2 ms per 240 Hz step.
+only 1.0 ms more per step than one.
+
+Chrome WebGPU (M3 Max), 240 Hz × 10, after the latency fixes in DECISIONS s20.
+`BUDGET=1 node softbody-check.mjs budget_yard_drive budget_traffic20 …` measures it,
+and `BUDGET_SPLIT=1` adds GPU time per kernel (`?gputime`, `world.profileStep()`).
+
+| Scene | Before (ms / step) | After (ms / step) | Live |
+|---|---|---|---|
+| Yard, cars parked (3 cars, 3 crates) | 4.6 | 1.1 | 100% real time |
+| Yard, player driving | — | 2.0–2.7 | 100% real time; 2 steps + render ≈ 6 ms, inside a 120 fps frame |
+| Traffic, 20 cars (most soft, crashing) | 10 | 6–10 | 86–100% real time at 60 fps |
+| Traffic, 100 cars | 12.5 | 7–9.5 | 67% real time |
+
+Traffic still varies run to run with the AI and the crashes. The slowest soft car's
+sweep sets each iteration's time, about 0.2 ms, with `vehicle_iterate`, rigid primal
+and node collision behind it.
 
 ### Accuracy against cost
 

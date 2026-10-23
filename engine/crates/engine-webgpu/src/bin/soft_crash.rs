@@ -420,7 +420,14 @@ fn main() {
         // Destruction events (engine API): name the parts that tore off.
         for p in sim.poll_soft_events().pieces {
             let who = cars.iter().position(|c| c.h == p.soft_body).unwrap_or(0);
-            torn.push(format!("car {who}: {}", if p.parts.is_empty() { format!("{} nodes", p.nodes.len()) } else { p.parts.join("+") }));
+            torn.push(format!(
+                "car {who}: {}",
+                if p.parts.is_empty() {
+                    format!("{} nodes", p.nodes.len())
+                } else {
+                    p.parts.join("+")
+                }
+            ));
         }
         let c = &cars[0];
         let ps = sim.read_soft_particles(c.h);
@@ -518,8 +525,16 @@ fn main() {
     // Self-penetration: own nodes inside (behind and within the prism of) own
     // skin triangles they are not excluded from, by more than 2 cm.
     {
-        let x: Vec<Vec3> = sim.read_soft_particles(cars[0].h).iter().map(|b| Vec3::from_array(b.position)).collect();
-        let rest: Vec<Vec3> = desc.nodes.iter().map(|n| Vec3::from_array(n.position)).collect();
+        let x: Vec<Vec3> = sim
+            .read_soft_particles(cars[0].h)
+            .iter()
+            .map(|b| Vec3::from_array(b.position))
+            .collect();
+        let rest: Vec<Vec3> = desc
+            .nodes
+            .iter()
+            .map(|n| Vec3::from_array(n.position))
+            .collect();
         let closest = |p: Vec3, a: Vec3, b: Vec3, c: Vec3| -> Vec3 {
             let (ab, ac, ap) = (b - a, c - a, p - a);
             let n = ab.cross(ac);
@@ -530,12 +545,19 @@ fn main() {
             let n = n / l;
             let q = p - n * n.dot(p - a);
             // barycentric inside test; fall back to vertices/edges roughly
-            let v0 = ab; let v1 = ac; let v2 = q - a;
-            let (d00, d01, d11, d20, d21) = (v0.dot(v0), v0.dot(v1), v1.dot(v1), v2.dot(v0), v2.dot(v1));
+            let v0 = ab;
+            let v1 = ac;
+            let v2 = q - a;
+            let (d00, d01, d11, d20, d21) =
+                (v0.dot(v0), v0.dot(v1), v1.dot(v1), v2.dot(v0), v2.dot(v1));
             let den = d00 * d11 - d01 * d01;
             let v = (d11 * d20 - d01 * d21) / den;
             let w = (d00 * d21 - d01 * d20) / den;
-            if v >= 0.0 && w >= 0.0 && v + w <= 1.0 { q } else { Vec3::splat(f32::MAX) }
+            if v >= 0.0 && w >= 0.0 && v + w <= 1.0 {
+                q
+            } else {
+                Vec3::splat(f32::MAX)
+            }
         };
         let mut bad = 0;
         for (i, &p) in x.iter().enumerate() {
@@ -563,8 +585,22 @@ fn main() {
         let first = sim.soft_host().entry(cars[0].h).first_body;
         let is_roof = |g: u32| roof.nodes.contains(&(g - first));
         let beams = sim.read_soft_beams(cars[0].h);
-        let pillars: Vec<_> = beams.iter().filter(|b| is_roof(b.a) != is_roof(b.b)).collect();
-        println!("roof pillars: {} of {} broken", pillars.iter().filter(|b| b.broken()).count(), pillars.len());
+        let pillars: Vec<_> = beams
+            .iter()
+            .filter(|b| is_roof(b.a) != is_roof(b.b))
+            .collect();
+        println!(
+            "roof pillars: {} of {} broken",
+            pillars.iter().filter(|b| b.broken()).count(),
+            pillars.len()
+        );
     }
-    println!("torn off: {}", if torn.is_empty() { "nothing".to_string() } else { torn.join(", ") });
+    println!(
+        "torn off: {}",
+        if torn.is_empty() {
+            "nothing".to_string()
+        } else {
+            torn.join(", ")
+        }
+    );
 }

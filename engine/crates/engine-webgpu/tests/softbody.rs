@@ -68,10 +68,31 @@ fn static_box(sim: &mut WgpuSim, pos: [f32; 3], half: [f32; 3]) -> u32 {
 
 /// Flat ground (top at y = 0), soft arena, 120 Hz.
 fn world(hz: f32, iterations: u32) -> WgpuSim {
-    let mut sim = WgpuSim::new_with_soft(capacity(), VehicleCapacity::default(), SoftCapacity::default()).expect("wgpu");
+    let mut sim = WgpuSim::new_with_soft(
+        capacity(),
+        VehicleCapacity::default(),
+        SoftCapacity::default(),
+    )
+    .expect("wgpu");
     sim.set_params(engine_softbody::soft_scene_params(hz, iterations));
-    sim.set_material(0, Material { friction: 1.0, restitution: 0.0, contact_offset: 0.01, _pad: 0.0 });
-    sim.set_material(9, Material { friction: 0.8, restitution: 0.0, contact_offset: 0.01, _pad: 0.0 });
+    sim.set_material(
+        0,
+        Material {
+            friction: 1.0,
+            restitution: 0.0,
+            contact_offset: 0.01,
+            _pad: 0.0,
+        },
+    );
+    sim.set_material(
+        9,
+        Material {
+            friction: 0.8,
+            restitution: 0.0,
+            contact_offset: 0.01,
+            _pad: 0.0,
+        },
+    );
     static_box(&mut sim, [0.0, -5.0, 0.0], [400.0, 5.0, 400.0]);
     sim
 }
@@ -688,25 +709,46 @@ fn ror_bus_and_semi_settle_drive_and_steer() {
         return;
     };
     let dir = std::path::PathBuf::from(dir);
-    for file in ["agora/95bbUID-agoras.truck", "agora/95bbUID-agoral.truck", "dafsemi/b6b0UID-semi.truck"] {
+    for file in [
+        "agora/95bbUID-agoras.truck",
+        "agora/95bbUID-agoral.truck",
+        "dafsemi/b6b0UID-semi.truck",
+    ] {
         let d = load_truck(&std::fs::read_to_string(dir.join(file)).unwrap());
         let (mn, mx) = d.bounds();
         let mut sim = world(240.0, 10);
         let centre = [-(mn[0] + mx[0]) * 0.5, 0.25 - mn[1], -(mn[2] + mx[2]) * 0.5];
-        let h = sim.add_soft_vehicle(&d, centre, [0.0, 0.0, 0.0, 1.0], &SpawnOptions::default()).expect("spawn");
+        let h = sim
+            .add_soft_vehicle(&d, centre, [0.0, 0.0, 0.0, 1.0], &SpawnOptions::default())
+            .expect("spawn");
         run(&mut sim, 480);
         let core = sim.soft_host().entry(h).core.expect("core").0;
         let st = sim.vehicle_state(core);
         let settled = yielded(&sim, h);
         let start = centroid(&positions(&sim, h));
-        sim.set_vehicle_input(core, VehicleInput { forward: 1.0, ..Default::default() });
+        sim.set_vehicle_input(
+            core,
+            VehicleInput {
+                forward: 1.0,
+                ..Default::default()
+            },
+        );
         run(&mut sim, 960);
         let mid = centroid(&positions(&sim, h));
-        sim.set_vehicle_input(core, VehicleInput { forward: 0.5, steer: 1.0, ..Default::default() });
+        sim.set_vehicle_input(
+            core,
+            VehicleInput {
+                forward: 0.5,
+                steer: 1.0,
+                ..Default::default()
+            },
+        );
         run(&mut sim, 960);
         let end = centroid(&positions(&sim, h));
         let straight = mid - start;
-        let turn = (end - mid).normalize_or_zero().dot(straight.normalize_or_zero());
+        let turn = (end - mid)
+            .normalize_or_zero()
+            .dot(straight.normalize_or_zero());
         eprintln!(
             "{}: contacts {} at rest, bent {settled}; drove {:.1} m in 4 s; heading change cos {turn:.2}; bent {} broken {}",
             d.name,
@@ -716,7 +758,12 @@ fn ror_bus_and_semi_settle_drive_and_steer() {
             broken(&sim, h)
         );
         assert!(positions(&sim, h).iter().all(|p| p.is_finite()));
-        assert_eq!(st.contacts as usize, d.wheels.len(), "{}: every wheel on the ground", d.name);
+        assert_eq!(
+            st.contacts as usize,
+            d.wheels.len(),
+            "{}: every wheel on the ground",
+            d.name
+        );
         assert!(straight.length() > 3.0, "{} drives", d.name);
         assert!(turn < 0.97, "{} turns", d.name);
     }
@@ -730,10 +777,18 @@ fn destruction_events_name_the_parts_that_tear_off() {
     let mut sim = world(240.0, 10);
     let (desc, _) = engine_softbody::procedural::car_desc(&CarParams::default());
     let h = sim
-        .add_soft_vehicle(&desc, [0.0, 0.05, 0.0], [0.0, 0.0, 0.0, 1.0], &SpawnOptions::default())
+        .add_soft_vehicle(
+            &desc,
+            [0.0, 0.05, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+            &SpawnOptions::default(),
+        )
         .expect("spawn");
     run(&mut sim, 120);
-    assert!(sim.poll_soft_events().pieces.is_empty(), "nothing tears while settling");
+    assert!(
+        sim.poll_soft_events().pieces.is_empty(),
+        "nothing tears while settling"
+    );
     let half = [0.6, 0.6, 0.9];
     let m = 1500.0;
     let inertia = Vec3::new(
@@ -755,21 +810,42 @@ fn destruction_events_name_the_parts_that_tear_off() {
         pieces.extend(ev.pieces);
     }
     for p in &pieces {
-        eprintln!("piece: {} nodes, {:.1} kg, parts {:?}", p.nodes.len(), p.mass, p.parts);
+        eprintln!(
+            "piece: {} nodes, {:.1} kg, parts {:?}",
+            p.nodes.len(),
+            p.mass,
+            p.parts
+        );
     }
     assert!(breaks >= 10, "{breaks} breaks");
     assert!(
-        pieces.iter().any(|p| p.parts.iter().any(|n| n == "bumper_front")),
+        pieces
+            .iter()
+            .any(|p| p.parts.iter().any(|n| n == "bumper_front")),
         "the front bumper is reported as a detached piece"
     );
     // Each node is reported in at most one piece.
     let mut seen = std::collections::HashSet::new();
-    assert!(pieces.iter().flat_map(|p| &p.nodes).all(|n| seen.insert(*n)));
+    assert!(pieces
+        .iter()
+        .flat_map(|p| &p.nodes)
+        .all(|n| seen.insert(*n)));
     let d = sim.read_soft_damage(h);
     let detached = sim.soft_host().entry(h).detached.clone();
-    let max_def = d.node_deformation.iter().zip(&detached).filter(|(_, &x)| !x).map(|(v, _)| *v).fold(0.0, f32::max);
-    eprintln!("damage: bent {} broken {} plastic work {:.0} J max node deformation {max_def:.2} m", d.bent, d.broken, d.plastic_work);
-    assert!(d.bent > 20 && d.broken >= 10 && d.plastic_work > 100.0 && max_def > 0.05 && max_def < 1.5);
+    let max_def = d
+        .node_deformation
+        .iter()
+        .zip(&detached)
+        .filter(|(_, &x)| !x)
+        .map(|(v, _)| *v)
+        .fold(0.0, f32::max);
+    eprintln!(
+        "damage: bent {} broken {} plastic work {:.0} J max node deformation {max_def:.2} m",
+        d.bent, d.broken, d.plastic_work
+    );
+    assert!(
+        d.bent > 20 && d.broken >= 10 && d.plastic_work > 100.0 && max_def > 0.05 && max_def < 1.5
+    );
 }
 
 /// Distance from `p` to triangle (a, b, c).
@@ -814,12 +890,24 @@ fn skinned_render_mesh_follows_the_physics_surface_through_a_crash() {
     use engine_softbody::visual::{car_visual, material, part};
     let p = CarParams::default();
     let (desc, layout) = engine_softbody::procedural::car_desc(&p);
-    let rest_nodes: Vec<Vec3> = desc.nodes.iter().map(|n| Vec3::from_array(n.position)).collect();
+    let rest_nodes: Vec<Vec3> = desc
+        .nodes
+        .iter()
+        .map(|n| Vec3::from_array(n.position))
+        .collect();
     let vis = car_visual(&p, &layout, &rest_nodes);
     let mut sim = world(240.0, 10);
     static_box(&mut sim, [0.0, 1.5, 2.6], [3.0, 1.5, 0.2]);
     let h = sim
-        .add_soft_vehicle(&desc, [0.0, 0.05, 0.0], [0.0, 0.0, 0.0, 1.0], &SpawnOptions { velocity: [0.0, 0.0, 15.6], ..Default::default() })
+        .add_soft_vehicle(
+            &desc,
+            [0.0, 0.05, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+            &SpawnOptions {
+                velocity: [0.0, 0.0, 15.6],
+                ..Default::default()
+            },
+        )
         .expect("spawn");
     let name = |pt: u8| match pt {
         part::BONNET => "bonnet",
@@ -836,12 +924,17 @@ fn skinned_render_mesh_follows_the_physics_surface_through_a_crash() {
     };
     let mut bindings = vec![None; vis.vertices.len()];
     for pt in 0..=part::ROOF {
-        let ids: Vec<usize> = (0..vis.vertices.len()).filter(|&i| vis.part[i] == pt).collect();
+        let ids: Vec<usize> = (0..vis.vertices.len())
+            .filter(|&i| vis.part[i] == pt)
+            .collect();
         if ids.is_empty() {
             continue;
         }
         let verts: Vec<Vec3> = ids.iter().map(|&i| vis.vertices[i]).collect();
-        let got = sim.soft_host().bind_mesh(h, &verts, Some(name(pt))).expect("bind");
+        let got = sim
+            .soft_host()
+            .bind_mesh(h, &verts, Some(name(pt)))
+            .expect("bind");
         for (i, b) in ids.into_iter().zip(got) {
             bindings[i] = Some(b);
         }
@@ -852,17 +945,33 @@ fn skinned_render_mesh_follows_the_physics_surface_through_a_crash() {
     // Paint vertices of the shell and the panels (what the eye reads as the body).
     let check: Vec<usize> = (0..vis.vertices.len())
         .filter(|&i| vis.part[i] <= part::DOOR_RR || vis.part[i] == part::ROOF)
-        .filter(|&i| vis.tris.iter().zip(&vis.tri_material).any(|(t, &m)| m == material::PAINT && t.contains(&(i as u32))))
+        .filter(|&i| {
+            vis.tris
+                .iter()
+                .zip(&vis.tri_material)
+                .any(|(t, &m)| m == material::PAINT && t.contains(&(i as u32)))
+        })
         .collect();
     let surface_distance = |sim: &WgpuSim, pos: &[[f32; 4]]| -> Vec<f32> {
-        let x: Vec<Vec3> = sim.read_soft_particles(h).iter().map(|b| Vec3::from_array(b.position)).collect();
+        let x: Vec<Vec3> = sim
+            .read_soft_particles(h)
+            .iter()
+            .map(|b| Vec3::from_array(b.position))
+            .collect();
         check
             .iter()
             .map(|&i| {
                 let q = Vec3::new(pos[i][0], pos[i][1], pos[i][2]);
                 desc.triangles
                     .iter()
-                    .map(|t| point_triangle(q, x[t.nodes[0] as usize], x[t.nodes[1] as usize], x[t.nodes[2] as usize]))
+                    .map(|t| {
+                        point_triangle(
+                            q,
+                            x[t.nodes[0] as usize],
+                            x[t.nodes[1] as usize],
+                            x[t.nodes[2] as usize],
+                        )
+                    })
                     .fold(f32::MAX, f32::min)
             })
             .collect()
@@ -902,7 +1011,10 @@ fn skinned_render_mesh_follows_the_physics_surface_through_a_crash() {
     );
     // The brittle A-pillars partly snap at 56 km/h, so the roof shell (bound to
     // the roof nodes) moves against the stretched windscreen faces by a few cm.
-    assert!(q(0.95) < 0.06, "95% of the body stays within 6 cm of the physics skin");
+    assert!(
+        q(0.95) < 0.06,
+        "95% of the body stays within 6 cm of the physics skin"
+    );
     assert!(q(0.5) < 0.01);
 }
 
@@ -913,11 +1025,22 @@ fn rigid_mode_rides_the_core_while_quiet_and_crashes_like_soft() {
     // the always-soft car's.
     let run_crash = |rigid: bool| -> (bool, bool, f32) {
         let mut sim = world(240.0, 10);
-        sim.set_soft_settings(SoftSettings { rigid_mode: rigid, ..Default::default() });
+        sim.set_soft_settings(SoftSettings {
+            rigid_mode: rigid,
+            ..Default::default()
+        });
         static_box(&mut sim, [0.0, 1.5, 22.5], [3.0, 1.5, 0.2]);
         let (desc, _) = engine_softbody::procedural::car_desc(&CarParams::default());
         let h = sim
-            .add_soft_vehicle(&desc, [0.0, 0.05, 0.0], [0.0, 0.0, 0.0, 1.0], &SpawnOptions { velocity: [0.0, 0.0, 15.6], ..Default::default() })
+            .add_soft_vehicle(
+                &desc,
+                [0.0, 0.05, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+                &SpawnOptions {
+                    velocity: [0.0, 0.0, 15.6],
+                    ..Default::default()
+                },
+            )
             .expect("spawn");
         let rest = positions(&sim, h);
         run(&mut sim, 240); // 1 s of cruising, 15.6 m: still 4 m short of the wall
@@ -939,5 +1062,8 @@ fn rigid_mode_rides_the_core_while_quiet_and_crashes_like_soft() {
     assert!(rigid_before, "cruising quietly for 1 s: rigid");
     assert!(!rigid_after, "after the wall: soft");
     assert!(soft_crush > 0.3);
-    assert!((soft_crush - rigid_crush).abs() < 0.05, "same crush within 5 cm");
+    assert!(
+        (soft_crush - rigid_crush).abs() < 0.05,
+        "same crush within 5 cm"
+    );
 }

@@ -23,11 +23,11 @@ pub mod procedural;
 pub mod truck;
 pub mod visual;
 
+pub use damage::{damage_summary, SoftDamage};
 pub use desc::*;
 pub use host::{
-    decode_beam_breaks, BeamBreak, PieceDetached, SkinBinding, SoftBackend, SoftCounts,
-    SoftEntry, SoftHandle, SoftHost,
+    decode_beam_breaks, BeamBreak, PieceDetached, SkinBinding, SoftBackend, SoftCounts, SoftEntry,
+    SoftHandle, SoftHost,
 };
-pub use damage::{damage_summary, SoftDamage};
 pub use layout::*;
 pub use pack::SpawnOptions;

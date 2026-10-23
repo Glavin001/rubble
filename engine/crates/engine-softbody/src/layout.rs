@@ -21,7 +21,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const HEADER_SLOTS: u32 = 8;
+pub const HEADER_SLOTS: u32 = 9;
 /// Soft body record: [firstBody, particles, firstBeam, beams], [steer, group,
 /// core, ordinal base], [firstTri, tris, δ, 0], then rigid mode: [mode, quiet
 /// steps, flags | core joint count << 8, first core joint], the core's soft-mode
@@ -137,6 +137,10 @@ pub struct SoftLayout {
     pub flag_base: u32,
     pub obstacle_base: u32,
     pub aabb_base: u32,
+    /// Per soft body, its share of every colour list: `(start, count)` pairs, two
+    /// per slot, `body_color_stride` slots per body (one workgroup per body).
+    pub body_color_base: u32,
+    pub body_color_stride: u32,
     pub total_slots: u32,
 }
 
@@ -174,7 +178,12 @@ impl SoftCapacity {
             obstacle_base,
             aabb_base,
             rigid_base: aabb_base + 2 * self.max_bodies,
-            total_slots: aabb_base + 2 * self.max_bodies + 2 * self.max_particles,
+            body_color_base: aabb_base + 2 * self.max_bodies + 2 * self.max_particles,
+            body_color_stride: self.max_colors.div_ceil(2),
+            total_slots: aabb_base
+                + 2 * self.max_bodies
+                + 2 * self.max_particles
+                + self.max_bodies * self.max_colors.div_ceil(2),
         }
     }
 
@@ -260,7 +269,11 @@ mod tests {
             l.adj_base + (2 * c.max_beams + 3 * c.max_triangles).div_ceil(4),
             l.cheb_base
         );
-        assert_eq!(l.rigid_base + 2 * c.max_particles, l.total_slots);
+        assert_eq!(l.rigid_base + 2 * c.max_particles, l.body_color_base);
+        assert_eq!(
+            l.body_color_base + c.max_bodies * l.body_color_stride,
+            l.total_slots
+        );
         // The default pool stays well under WebGPU's 128 MiB binding limit.
         assert!(c.bytes() < 128 << 20);
     }

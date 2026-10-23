@@ -26,8 +26,15 @@ pub struct SoftDamage {
 /// Summarise `beams` (a readback, e.g. `WgpuSim::read_soft_beams`). With `rest`
 /// and `now` node positions (and which nodes are detached, if known), also the
 /// per-node deformation.
-pub fn damage_summary(beams: &[Beam], positions: Option<(&[Vec3], &[Vec3])>, detached: Option<&[bool]>) -> SoftDamage {
-    let mut d = SoftDamage { beams: beams.len() as u32, ..Default::default() };
+pub fn damage_summary(
+    beams: &[Beam],
+    positions: Option<(&[Vec3], &[Vec3])>,
+    detached: Option<&[bool]>,
+) -> SoftDamage {
+    let mut d = SoftDamage {
+        beams: beams.len() as u32,
+        ..Default::default()
+    };
     for b in beams {
         if b.broken() {
             d.broken += 1;
@@ -40,7 +47,11 @@ pub fn damage_summary(beams: &[Beam], positions: Option<(&[Vec3], &[Vec3])>, det
             d.max_beam_strain = d.max_beam_strain.max(strain);
             if b.flags & BEAM_YIELDED != 0 {
                 // Yield happened at the threshold on the side it moved.
-                let threshold = if b.rest < b.rest0 { b.deform_c } else { b.deform_t };
+                let threshold = if b.rest < b.rest0 {
+                    b.deform_c
+                } else {
+                    b.deform_t
+                };
                 if threshold.is_finite() {
                     d.plastic_work += threshold * (b.rest - b.rest0).abs();
                 }
@@ -49,9 +60,16 @@ pub fn damage_summary(beams: &[Beam], positions: Option<(&[Vec3], &[Vec3])>, det
     }
     if let Some((rest, now)) = positions {
         let keep = |i: usize| detached.is_none_or(|m| !m.get(i).copied().unwrap_or(false));
-        let (fr, fn_): (Vec<Vec3>, Vec<Vec3>) = (0..rest.len().min(now.len())).filter(|&i| keep(i)).map(|i| (rest[i], now[i])).unzip();
+        let (fr, fn_): (Vec<Vec3>, Vec<Vec3>) = (0..rest.len().min(now.len()))
+            .filter(|&i| keep(i))
+            .map(|i| (rest[i], now[i]))
+            .unzip();
         let (r, t) = crate::calibrate::rigid_fit(&fr, &fn_);
-        d.node_deformation = rest.iter().zip(now).map(|(a, b)| (*b - (r * *a + t)).length()).collect();
+        d.node_deformation = rest
+            .iter()
+            .zip(now)
+            .map(|(a, b)| (*b - (r * *a + t)).length())
+            .collect();
     }
     d
 }

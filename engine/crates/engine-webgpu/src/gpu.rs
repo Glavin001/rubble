@@ -2209,7 +2209,12 @@ impl WgpuSim {
             (4 + 4 * EVENT_RING_CAPACITY) as usize,
         );
         let mut breaks = Vec::new();
-        let lost = engine_softbody::decode_beam_breaks(&words, &mut self.beam_events_seen, EVENT_RING_CAPACITY, &mut breaks);
+        let lost = engine_softbody::decode_beam_breaks(
+            &words,
+            &mut self.beam_events_seen,
+            EVENT_RING_CAPACITY,
+            &mut breaks,
+        );
         let mut pieces = Vec::new();
         if self.soft.is_some() {
             if lost > 0 {
@@ -2223,7 +2228,11 @@ impl WgpuSim {
                 pieces = self.soft.as_mut().unwrap().note_breaks(&breaks);
             }
         }
-        SoftEvents { breaks, pieces, lost }
+        SoftEvents {
+            breaks,
+            pieces,
+            lost,
+        }
     }
 
     /// Whether soft body `h` is in rigid mode right now (`SoftSettings::rigid_mode`):
@@ -2239,8 +2248,19 @@ impl WgpuSim {
     /// per-node deformation from its rest shape (rigid motion removed).
     pub fn read_soft_damage(&self, h: SoftHandle) -> engine_softbody::SoftDamage {
         let beams = self.read_soft_beams(h);
-        let rest: Vec<glam::Vec3> = self.soft_host().entry(h).desc.nodes.iter().map(|n| glam::Vec3::from_array(n.position)).collect();
-        let now: Vec<glam::Vec3> = self.read_soft_particles(h).iter().map(|b| glam::Vec3::from_array(b.position)).collect();
+        let rest: Vec<glam::Vec3> = self
+            .soft_host()
+            .entry(h)
+            .desc
+            .nodes
+            .iter()
+            .map(|n| glam::Vec3::from_array(n.position))
+            .collect();
+        let now: Vec<glam::Vec3> = self
+            .read_soft_particles(h)
+            .iter()
+            .map(|b| glam::Vec3::from_array(b.position))
+            .collect();
         let detached = self.soft_host().entry(h).detached.clone();
         engine_softbody::damage_summary(&beams, Some((&rest, &now)), Some(&detached))
     }
