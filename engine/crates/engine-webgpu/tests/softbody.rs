@@ -519,6 +519,8 @@ fn wall_pole_and_side_impact_crush_differently() {
         block.linear_vel = [-11.1, 0.0, 0.0];
         let b = sim.add_body(block);
         add_box_collider(&mut sim, b, half);
+        let collider = sim.collider_count() - 1;
+        sim.add_soft_obstacle(collider).expect("obstacle");
         run(&mut sim, 360);
         let now = positions(&sim, h);
         Crash {

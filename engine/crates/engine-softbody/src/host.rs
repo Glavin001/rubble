@@ -451,8 +451,10 @@ impl SoftHost {
         self.dirty = true;
     }
 
-    /// Register a thin static obstacle (sphere or capsule collider) that soft
-    /// triangles collide with (poles and bollards narrower than node spacing).
+    /// Register an obstacle (sphere, capsule or box collider) that soft triangles
+    /// collide with: poles and bollards narrower than the node spacing, or a rigid
+    /// ram whose edges would slip between nodes. One-way: the triangles are pushed,
+    /// the obstacle's own reaction comes through the node spheres.
     pub fn add_obstacle(
         &mut self,
         backend: &mut impl SoftBackend,

@@ -46,6 +46,7 @@
     <div class="damage muted" id="events"></div>
   </div>
   <div class="panel" id="status">loading…</div>
+  <div id="caption" style="position:absolute;left:50%;bottom:64px;transform:translateX(-50%);font:600 24px system-ui,sans-serif;color:#fff;text-shadow:0 2px 6px #000;display:none"></div>
   <div id="err"></div>
   <script type="module">
     import { createWorld, sceneCapacity } from './world-host.mjs';
@@ -157,8 +158,12 @@
     let orbit = { yaw: 0.9, pitch: 0.3, dist: 12, target: null };
     let ram = null; // parked side ram (T key / tbone scene)
     let pendingRam = -1;
+    // ?runup=metres: extra approach distance before a crash test (videos).
+    const runup = Number(qs.get('runup')) || 0;
     const parkRam = () => {
       ram = dynBox([-4000, -4000, -4000], [0.6, 0.6, 0.9], 1500);
+      // Its edges would slip between the nodes: the skin collides with it too.
+      world.addSoftObstacle(world.colliderCount - 1);
     };
     if (scene === 'yard') {
       addSoft(carDesc, [0, 0.05, 0]);
@@ -175,11 +180,11 @@
       parkRam();
     } else if (scene === 'wall') {
       staticBox([0, 1.5, 3.0], [3, 1.5, 0.2]);
-      addSoft(carDesc, [0, 0.05, -2], 0, { velocity: [0, 0, 15] });
+      addSoft(carDesc, [0, 0.05, -2 - runup], 0, { velocity: [0, 0, 15] });
       camMode = 'orbit'; orbit = { yaw: 2.2, pitch: 0.25, dist: 9, target: [0, 0.8, 0.5] };
     } else if (scene === 'pole') {
       pole([0, 1.5, 2.8], 0.1, 1.5);
-      addSoft(carDesc, [0, 0.05, -2], 0, { velocity: [0, 0, 11] });
+      addSoft(carDesc, [0, 0.05, -2 - runup], 0, { velocity: [0, 0, 11] });
       camMode = 'orbit'; orbit = { yaw: 2.3, pitch: 0.35, dist: 9, target: [0, 0.8, 1.5] };
     } else if (scene === 'tbone') {
       addSoft(carDesc, [0, 0.05, 0]);
@@ -187,8 +192,8 @@
       pendingRam = 60; // launch after the car has settled
       camMode = 'orbit'; orbit = { yaw: 0.6, pitch: 0.45, dist: 10, target: [0, 0.8, 0] };
     } else if (scene === 'headon') {
-      addSoft(carDesc, [0, 0.05, -3], 0, { velocity: [0, 0, 8] });
-      addSoft(carDesc, [0.3, 0.05, 3], Math.PI, { velocity: [0, 0, -8] });
+      addSoft(carDesc, [0, 0.05, -3 - runup / 2], 0, { velocity: [0, 0, 8] });
+      addSoft(carDesc, [0.3, 0.05, 3 + runup / 2], Math.PI, { velocity: [0, 0, -8] });
       camMode = 'orbit'; orbit = { yaw: 1.4, pitch: 0.35, dist: 12, target: [0, 0.8, 0] };
     } else if (scene === 'crates') {
       for (let i = 0; i < 9; i++) {
@@ -594,7 +599,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       const pl = lastPlayer || { p: [0, 0.6, 0], q: [0, 0, 0, 1] };
       const c = pl.p;
       const right = norm3(qrot(pl.q, [1, 0, 0]));
-      const p = [c[0] + right[0] * 2.4, 0.7, c[2] + right[2] * 2.4];
+      const p = [c[0] + right[0] * (2.4 + runup), 0.7, c[2] + right[2] * (2.4 + runup)];
       const words = new Uint32Array(world.bodyWords.buffer, ram * 112, 28).slice();
       const f = new Float32Array(words.buffer);
       f.set(p, 0); f.set([0, 0, 0, 1], 4); words[11] = 1 | 8; f.set(right.map((d) => -d * 11.1), 12); f[15] = 0; f.set([0, 0, 0], 16); words[19] = world.steps;
@@ -831,6 +836,12 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     };
     window.__setView = (o) => { if (o.beams !== undefined) beamView = o.beams; if (o.skin) skinMode = o.skin; if (o.orbit) { camMode = 'orbit'; orbit = { ...orbit, ...o.orbit }; } if (o.chase) camMode = 'chase'; };
     window.__launchRam = launchRam;
+    // Recording: caption overlay, and hide the panels for a clean frame.
+    window.__setCaption = (text, clean = true) => {
+      const c = document.getElementById('caption');
+      c.textContent = text || ''; c.style.display = text ? 'block' : 'none';
+      for (const id of ['info', 'status']) document.getElementById(id).style.display = clean ? 'none' : '';
+    };
     window.__world = world;
     window.__ready = true;
     statusEl.textContent = `scene ready · ${world.bodyCount} bodies · ${softs.length} soft bodies`;

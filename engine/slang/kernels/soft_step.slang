@@ -304,7 +304,8 @@ void soft_begin(uint3 tid : SV_DispatchThreadID)
 
 // ---------------------------------------------------------------------------
 // Soft contacts: node–triangle (between soft bodies) and triangle–obstacle
-// (thin static spheres and capsules that would pass between nodes). Detected
+// (spheres, capsules and boxes registered as obstacles: poles and bollards that
+// would pass between nodes, rams whose edges would slip between them). Detected
 // once per step at the initial guess, normals and barycentrics frozen for the
 // step, the gap re-evaluated every iteration as a penalty ½k·min(C, 0)² with
 // lagged Coulomb friction. Each particle reads only its own slots: a node its
@@ -511,6 +512,70 @@ void soft_collide_nodes(uint3 tid : SV_DispatchThreadID)
     gSoftData[softFlagBase() + particleOrdinal(sb, body)] = float4(1, 0, 0, 0);
 }
 
+// Closest points between an (oriented) box and triangle abc: q on the triangle
+// (barycentrics w), cs on the box surface. A triangle corner inside the box gives
+// `inside`, with cs its exit point through the nearest face and n that face's
+// normal. Otherwise the closest pair is a triangle corner against the box or a box
+// edge against the triangle (which covers face–corner and edge–edge).
+void boxTriangle(Collider col, BodyState ob, float3 a, float3 b, float3 c, out float3 q, out float3 cs, out float3 w,
+    out bool inside, out float3 n)
+{
+    float4 rot = quatMul(ob.orientation, col.localRot);
+    float3 centre = transformPoint(ob.position, ob.orientation, col.localPos);
+    float3 h = col.params.xyz;
+    inside = false;
+    n = float3(0, 1, 0);
+    float best = 1e30;
+    float deepest = 0.0;
+    float3 corners[3] = { a, b, c };
+    float3 bary[3] = { float3(1, 0, 0), float3(0, 1, 0), float3(0, 0, 1) };
+    [unroll]
+    for (uint k = 0u; k < 3u; k++)
+    {
+        float3 l = quatRotate(quatConjugate(rot), corners[k] - centre);
+        float3 clamped = clamp(l, -h, h);
+        if (all(abs(l) < h))
+        {
+            // Inside: leave through the nearest face.
+            float3 room = h - abs(l);
+            uint ax = room.x < room.y ? (room.x < room.z ? 0u : 2u) : (room.y < room.z ? 1u : 2u);
+            float3 out = l;
+            out[ax] = h[ax] * (l[ax] >= 0.0 ? 1.0 : -1.0);
+            if (room[ax] > deepest)
+            {
+                deepest = room[ax];
+                inside = true;
+                q = corners[k];
+                w = bary[k];
+                cs = centre + quatRotate(rot, out);
+                float3 fn = float3(0, 0, 0);
+                fn[ax] = l[ax] >= 0.0 ? 1.0 : -1.0;
+                n = quatRotate(rot, fn);
+            }
+            continue;
+        }
+        float3 p = centre + quatRotate(rot, clamped);
+        float d = dot(corners[k] - p, corners[k] - p);
+        if (!inside && d < best) { best = d; q = corners[k]; w = bary[k]; cs = p; }
+    }
+    if (inside) return;
+    // The twelve box edges against the triangle.
+    [unroll]
+    for (uint e = 0u; e < 12u; e++)
+    {
+        uint axis = e / 4u;
+        uint u = (axis + 1u) % 3u, v = (axis + 2u) % 3u;
+        float3 lo = float3(0, 0, 0), hi = float3(0, 0, 0);
+        lo[axis] = -h[axis]; hi[axis] = h[axis];
+        lo[u] = (e & 1u) != 0u ? h[u] : -h[u]; hi[u] = lo[u];
+        lo[v] = (e & 2u) != 0u ? h[v] : -h[v]; hi[v] = lo[v];
+        float3 qq, cc, ww;
+        closestSegTriangle(centre + quatRotate(rot, lo), centre + quatRotate(rot, hi), a, b, c, qq, cc, ww);
+        float d = dot(qq - cc, qq - cc);
+        if (d < best) { best = d; q = qq; cs = cc; w = ww; }
+    }
+}
+
 // Per collision triangle: its deepest thin obstacle, and the (up to four) nodes
 // that chose it in soft_collide_nodes (the triangle side of their contacts).
 [shader("compute")]
@@ -544,6 +609,8 @@ void soft_collide_tris(uint3 tid : SV_DispatchThreadID)
         BodyState ob = gBodies[col.body];
         float r = col.params.x;
         float3 q, cs, w;
+        bool inside = false;
+        float3 insideN = float3(0, 1, 0);
         if (col.shape == SHAPE_SPHERE)
         {
             cs = transformPoint(ob.position, ob.orientation, col.localPos);
@@ -555,12 +622,19 @@ void soft_collide_tris(uint3 tid : SV_DispatchThreadID)
             float3 mid = transformPoint(ob.position, ob.orientation, col.localPos);
             closestSegTriangle(mid - ax, mid + ax, a, b, c, q, cs, w);
         }
+        else if (col.shape == SHAPE_BOX)
+        {
+            r = 0.0;
+            boxTriangle(col, ob, a, b, c, q, cs, w, inside, insideN);
+        }
         else continue;
         float3 dv = q - cs;
         float dist = length(dv);
-        float gap = dist - r;
+        float gap = inside ? -dist : dist - r;
         if (gap > delta + travel + 0.05 || gap >= bestGap) continue;
-        float3 n = dist > 1e-5 ? dv / dist : normalize(cross(b - a, c - a));
+        float3 n = inside ? insideN : (dist > 1e-5 ? dv / dist : normalize(cross(b - a, c - a)));
+        // Touching or crossing (no direction from the gap): point away from the obstacle.
+        if (!inside && dist <= 1e-5 && dot(n, (a + b + c) / 3.0 - cs) < 0.0) n = -n;
         bestGap = gap;
         // Gap at the step start (triangle at x⁻) for the stabilised constraint.
         float3 q0 = w.x * ba.initialPos + w.y * bb.initialPos + w.z * bc.initialPos;
