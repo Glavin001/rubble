@@ -71,6 +71,17 @@ const CHECKS = {
     },
   },
   // The other crash-test scenes run without blowing up and deform.
+  // Traffic scale in real time (opt-in: node softbody-check.mjs traffic_scale):
+  // frame rate and the share of real time the simulation keeps.
+  ...Object.fromEntries([10, 20, 50, 100].map((n) => [`traffic_scale_${n}`, {
+    query: `scene=traffic&cars=${n}`,
+    optIn: 'TRAFFIC_SCALE',
+    run: async (page) => {
+      await page.step(240); // warm up, cars spread out (the AI drives in __step too)
+      const ms = await page.eval(`(async () => { const t = performance.now(); await window.__step(480); return (performance.now() - t) / 480; })()`);
+      return { ok: ms > 0, msg: `${n} cars: ${ms.toFixed(2)} ms per 240 Hz step (GPU-bound real-time capacity ${(100 * (1000 / 240) / ms).toFixed(0)}%, no rendering)` };
+    },
+  }])),
   // The limbo bar shears the roof off: a piece-detached event names it.
   limbo: {
     query: 'scene=limbo&speed=80',
