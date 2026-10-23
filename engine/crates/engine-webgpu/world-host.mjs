@@ -245,8 +245,51 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
       const r = 4 + 4 * (n % EVENT_RING_CAPACITY);
       if (w[r] === EVENT_BEAM_BREAK) out.push({ beam: w[r + 1], force: fl[r + 2], softBody: w[r + 3] });
     }
+    world.beamEventsLost = Math.max(0, cursor - world.beamEventsSeen - EVENT_RING_CAPACITY);
     world.beamEventsSeen = Math.max(world.beamEventsSeen, cursor);
     return out;
+  };
+  // GPU → CPU copy of `bytes` from `buffer` at `offset` (Uint32Array).
+  const readWords = async (buffer, offset, bytes) => {
+    const rb = device.createBuffer({ size: Math.max(16, bytes), usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    const enc = device.createCommandEncoder();
+    if (bytes) enc.copyBufferToBuffer(buffer, offset, rb, 0, bytes);
+    device.queue.submit([enc.finish()]);
+    await rb.mapAsync(GPUMapMode.READ);
+    const w = new Uint32Array(rb.getMappedRange(0, bytes).slice(0));
+    rb.unmap(); rb.destroy();
+    return w;
+  };
+  // Soft body `h`'s beam records (16 words each: engine_softbody::model::Beam).
+  world.readSoftBeams = async (h) => {
+    const e = world.soft.entries[h];
+    return readWords(bufs[32], (world.soft.layout.beamBase + 4 * e.firstBeam) * 16, e.beams * 64);
+  };
+  // Soft body `h`'s particle positions (Float32Array xyz).
+  world.readSoftParticles = async (h) => {
+    const e = world.soft.entries[h];
+    const f = new Float32Array((await readWords(bufs[0], e.firstBody * 112, e.particles * 112)).buffer);
+    const out = new Float32Array(e.particles * 3);
+    for (let i = 0; i < e.particles; i++) out.set(f.subarray(i * 28, i * 28 + 3), i * 3);
+    return out;
+  };
+  // Damage of soft body `h` (SoftHost.damage).
+  world.readSoftDamage = async (h) => world.soft.damage(h, await world.readSoftBeams(h), await world.readSoftParticles(h));
+  // Destruction events since the last call: beam breaks and the pieces they cut
+  // loose ([{softBody, nodes, parts, mass}]). After an event-ring overflow every
+  // soft body is resynchronised from a beam readback. Use this or pollBeamBreaks,
+  // not both (they share the ring cursor).
+  world.pollSoftEvents = async () => {
+    const breaks = await world.pollBeamBreaks();
+    const lost = world.beamEventsLost || 0;
+    let pieces;
+    if (lost > 0) {
+      pieces = [];
+      for (let h = 0; h < world.soft.entries.length; h++) pieces.push(...world.soft.syncBroken(h, await world.readSoftBeams(h)));
+    } else {
+      pieces = world.soft.noteBreaks(breaks);
+    }
+    return { breaks, pieces, lost };
   };
   // Soft vehicles (engine_softbody::SoftHost): `desc` from soft.mjs loadTruck.
   world.addSoftVehicle = (desc, p, q = [0, 0, 0, 1], opts = {}) => world.soft.add(world.backend, world.vehicles, desc, p, q, opts);

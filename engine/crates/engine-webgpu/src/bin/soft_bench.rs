@@ -24,30 +24,30 @@ fn main() -> anyhow::Result<()> {
     } else {
         counts
     };
-    let desc = load_truck(&car_truck(&CarParams::default()));
+    let desc = engine_softbody::procedural::car_desc(&CarParams::default()).0;
     for &n in &counts {
         let cap = WorldCapacity {
-            max_bodies: 16384,
-            max_colliders: 32768,
-            max_contacts: 262_144,
+            max_bodies: 49152,
+            max_colliders: 98304,
+            max_contacts: 524_288,
             max_joints: 4096,
-            max_candidates: 524_288,
+            max_candidates: 1_048_576,
             max_colors: 32,
             max_commands: 64,
             max_hull_vertices: 64,
         };
         let soft = SoftCapacity {
-            max_bodies: 64,
-            max_beams: 65536,
-            max_particles: 8192,
-            max_triangles: 32768,
+            max_bodies: 256,
+            max_beams: 262_144,
+            max_particles: 49152,
+            max_triangles: 131_072,
             ..Default::default()
         };
         let mut sim = WgpuSim::new_with_soft(
             cap,
             VehicleCapacity {
-                max_vehicles: 64,
-                max_wheels: 512,
+                max_vehicles: 256,
+                max_wheels: 1024,
                 ..Default::default()
             },
             soft,

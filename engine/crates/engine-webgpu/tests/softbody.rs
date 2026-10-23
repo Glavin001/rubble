@@ -721,3 +721,187 @@ fn ror_bus_and_semi_settle_drive_and_steer() {
         assert!(turn < 0.97, "{} turns", d.name);
     }
 }
+
+#[test]
+fn destruction_events_name_the_parts_that_tear_off() {
+    // A 1,500 kg block at 60 km/h into the front-left corner pulls the front
+    // bumper sideways: its mounts tear (one detacher group) and the poll reports
+    // a piece holding the `bumper_front` part.
+    let mut sim = world(240.0, 10);
+    let (desc, _) = engine_softbody::procedural::car_desc(&CarParams::default());
+    let h = sim
+        .add_soft_vehicle(&desc, [0.0, 0.05, 0.0], [0.0, 0.0, 0.0, 1.0], &SpawnOptions::default())
+        .expect("spawn");
+    run(&mut sim, 120);
+    assert!(sim.poll_soft_events().pieces.is_empty(), "nothing tears while settling");
+    let half = [0.6, 0.6, 0.9];
+    let m = 1500.0;
+    let inertia = Vec3::new(
+        half[1] * half[1] + half[2] * half[2],
+        half[0] * half[0] + half[2] * half[2],
+        half[0] * half[0] + half[1] * half[1],
+    ) * (m / 3.0);
+    let mut block = BodyState::dynamic(Vec3::new(1.8, 0.75, 1.6), glam::Quat::IDENTITY, m, inertia);
+    block.linear_vel = [-16.7, 0.0, 0.0];
+    let b = sim.add_body(block);
+    add_box_collider(&mut sim, b, half);
+    let collider = sim.collider_count() - 1;
+    sim.add_soft_obstacle(collider).expect("obstacle");
+    let (mut breaks, mut pieces) = (0, Vec::new());
+    for _ in 0..24 {
+        run(&mut sim, 20);
+        let ev = sim.poll_soft_events();
+        breaks += ev.breaks.len();
+        pieces.extend(ev.pieces);
+    }
+    for p in &pieces {
+        eprintln!("piece: {} nodes, {:.1} kg, parts {:?}", p.nodes.len(), p.mass, p.parts);
+    }
+    assert!(breaks >= 10, "{breaks} breaks");
+    assert!(
+        pieces.iter().any(|p| p.parts.iter().any(|n| n == "bumper_front")),
+        "the front bumper is reported as a detached piece"
+    );
+    // Each node is reported in at most one piece.
+    let mut seen = std::collections::HashSet::new();
+    assert!(pieces.iter().flat_map(|p| &p.nodes).all(|n| seen.insert(*n)));
+    let d = sim.read_soft_damage(h);
+    let detached = sim.soft_host().entry(h).detached.clone();
+    let max_def = d.node_deformation.iter().zip(&detached).filter(|(_, &x)| !x).map(|(v, _)| *v).fold(0.0, f32::max);
+    eprintln!("damage: bent {} broken {} plastic work {:.0} J max node deformation {max_def:.2} m", d.bent, d.broken, d.plastic_work);
+    assert!(d.bent > 20 && d.broken >= 10 && d.plastic_work > 100.0 && max_def > 0.05 && max_def < 1.5);
+}
+
+/// Distance from `p` to triangle (a, b, c).
+fn point_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> f32 {
+    let (ab, ac, ap) = (b - a, c - a, p - a);
+    let (d1, d2) = (ab.dot(ap), ac.dot(ap));
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return (p - a).length();
+    }
+    let bp = p - b;
+    let (d3, d4) = (ab.dot(bp), ac.dot(bp));
+    if d3 >= 0.0 && d4 <= d3 {
+        return (p - b).length();
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        return (p - (a + ab * (d1 / (d1 - d3)))).length();
+    }
+    let cp = p - c;
+    let (d5, d6) = (ab.dot(cp), ac.dot(cp));
+    if d6 >= 0.0 && d5 <= d6 {
+        return (p - c).length();
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        return (p - (a + ac * (d2 / (d2 - d6)))).length();
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        return (p - (b + (c - b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6))))).length();
+    }
+    let denom = 1.0 / (va + vb + vc);
+    (p - (a + ab * (vb * denom) + ac * (vc * denom))).length()
+}
+
+#[test]
+fn skinned_render_mesh_follows_the_physics_surface_through_a_crash() {
+    // The detailed render mesh, bound part by part through the public API and
+    // skinned on the GPU, must (a) match the CPU formula and (b) stay on the
+    // deformed physics skin: its distance to the nearest collision triangle may
+    // not grow by more than a few cm where the car crumples.
+    use engine_softbody::visual::{car_visual, material, part};
+    let p = CarParams::default();
+    let (desc, layout) = engine_softbody::procedural::car_desc(&p);
+    let rest_nodes: Vec<Vec3> = desc.nodes.iter().map(|n| Vec3::from_array(n.position)).collect();
+    let vis = car_visual(&p, &layout, &rest_nodes);
+    let mut sim = world(240.0, 10);
+    static_box(&mut sim, [0.0, 1.5, 2.6], [3.0, 1.5, 0.2]);
+    let h = sim
+        .add_soft_vehicle(&desc, [0.0, 0.05, 0.0], [0.0, 0.0, 0.0, 1.0], &SpawnOptions { velocity: [0.0, 0.0, 15.6], ..Default::default() })
+        .expect("spawn");
+    let name = |pt: u8| match pt {
+        part::BONNET => "bonnet",
+        part::BOOT => "boot",
+        part::DOOR_FL => "door_fl",
+        part::DOOR_RL => "door_rl",
+        part::DOOR_FR => "door_fr",
+        part::DOOR_RR => "door_rr",
+        part::BUMPER_F => "bumper_front",
+        part::BUMPER_R => "bumper_rear",
+        part::ENGINE => "engine",
+        part::ROOF => "roof",
+        _ => "body",
+    };
+    let mut bindings = vec![None; vis.vertices.len()];
+    for pt in 0..=part::ROOF {
+        let ids: Vec<usize> = (0..vis.vertices.len()).filter(|&i| vis.part[i] == pt).collect();
+        if ids.is_empty() {
+            continue;
+        }
+        let verts: Vec<Vec3> = ids.iter().map(|&i| vis.vertices[i]).collect();
+        let got = sim.soft_host().bind_mesh(h, &verts, Some(name(pt))).expect("bind");
+        for (i, b) in ids.into_iter().zip(got) {
+            bindings[i] = Some(b);
+        }
+    }
+    let bindings: Vec<_> = bindings.into_iter().map(Option::unwrap).collect();
+    let skinner = engine_webgpu::SoftSkinner::new(&sim, &bindings, &vis.vertices, &vis.tris);
+    let first = sim.soft_host().entry(h).first_body;
+    // Paint vertices of the shell and the panels (what the eye reads as the body).
+    let check: Vec<usize> = (0..vis.vertices.len())
+        .filter(|&i| vis.part[i] <= part::DOOR_RR || vis.part[i] == part::ROOF)
+        .filter(|&i| vis.tris.iter().zip(&vis.tri_material).any(|(t, &m)| m == material::PAINT && t.contains(&(i as u32))))
+        .collect();
+    let surface_distance = |sim: &WgpuSim, pos: &[[f32; 4]]| -> Vec<f32> {
+        let x: Vec<Vec3> = sim.read_soft_particles(h).iter().map(|b| Vec3::from_array(b.position)).collect();
+        check
+            .iter()
+            .map(|&i| {
+                let q = Vec3::new(pos[i][0], pos[i][1], pos[i][2]);
+                desc.triangles
+                    .iter()
+                    .map(|t| point_triangle(q, x[t.nodes[0] as usize], x[t.nodes[1] as usize], x[t.nodes[2] as usize]))
+                    .fold(f32::MAX, f32::min)
+            })
+            .collect()
+    };
+    let (pos0, _) = skinner.skin_and_read(&sim);
+    let d0 = surface_distance(&sim, &pos0);
+    run(&mut sim, 360);
+    let (pos1, nrm1) = skinner.skin_and_read(&sim);
+    // (a) GPU skinning equals SkinBinding::skin on the read-back particles.
+    let parts = sim.read_soft_particles(h);
+    let at = |g: u32| Vec3::from_array(parts[(g - first) as usize].position);
+    let mut worst = 0.0f32;
+    for (b, p) in bindings.iter().zip(&pos1) {
+        let (cpu, torn) = b.skin(at);
+        assert_eq!(torn, p[3] > 0.5);
+        worst = worst.max((cpu - Vec3::new(p[0], p[1], p[2])).length());
+    }
+    assert!(worst < 1e-3, "GPU vs CPU skinning {worst}");
+    assert!(nrm1.iter().all(|n| n.iter().all(|x| x.is_finite())));
+    // (b) The render surface stays on the physics surface.
+    let d1 = surface_distance(&sim, &pos1);
+    let mut grow: Vec<f32> = check
+        .iter()
+        .enumerate()
+        .filter(|&(_, &i)| pos1[i][3] < 0.5)
+        .map(|(k, _)| d1[k] - d0[k])
+        .collect();
+    grow.sort_by(f32::total_cmp);
+    let q = |f: f32| grow[((grow.len() - 1) as f32 * f) as usize];
+    eprintln!(
+        "render-to-physics surface drift after a 56 km/h wall hit ({} vertices): median {:+.3} m, 95% {:+.3} m, 99% {:+.3} m, max {:+.3} m",
+        grow.len(),
+        q(0.5),
+        q(0.95),
+        q(0.99),
+        q(1.0)
+    );
+    // The brittle A-pillars partly snap at 56 km/h, so the roof shell (bound to
+    // the roof nodes) moves against the stretched windscreen faces by a few cm.
+    assert!(q(0.95) < 0.06, "95% of the body stays within 6 cm of the physics skin");
+    assert!(q(0.5) < 0.01);
+}

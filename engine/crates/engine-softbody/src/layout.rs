@@ -119,6 +119,9 @@ pub struct SoftLayout {
     pub adj_base: u32,
     pub cheb_base: u32,
     pub tri_base: u32,
+    /// Rest edge lengths per triangle (ab, bc, ca as f32): a triangle stretched
+    /// past `TRI_TEAR` × rest is torn and stops colliding.
+    pub tri_rest_base: u32,
     pub tri_contact_base: u32,
     pub node_slot_base: u32,
     pub flag_base: u32,
@@ -139,7 +142,8 @@ impl SoftCapacity {
         let adj_slots = (2 * self.max_beams + 3 * self.max_triangles).div_ceil(4);
         let cheb_base = adj_base + adj_slots;
         let tri_base = cheb_base + 3 * self.max_particles;
-        let tri_contact_base = tri_base + self.max_triangles;
+        let tri_rest_base = tri_base + self.max_triangles;
+        let tri_contact_base = tri_rest_base + self.max_triangles;
         let node_slot_base = tri_contact_base + TRI_CONTACT_STRIDE * self.max_triangles;
         let flag_base = node_slot_base + NODE_SLOT_STRIDE * self.max_particles;
         let obstacle_base = flag_base + self.max_particles;
@@ -153,6 +157,7 @@ impl SoftCapacity {
             adj_base,
             cheb_base,
             tri_base,
+            tri_rest_base,
             tri_contact_base,
             node_slot_base,
             flag_base,

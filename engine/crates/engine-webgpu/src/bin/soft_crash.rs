@@ -115,9 +115,10 @@ fn main() {
         cell_deform_scale: a.get("cell_deform", d.cell_deform_scale),
         cell_strength_scale: a.get("cell_strength", d.cell_strength_scale),
         spring: a.get("spring", d.spring),
+        pillar_strength: a.get("pillar", d.pillar_strength),
         ..d
     };
-    let desc: SoftVehicleDesc = load_truck(&car_truck(&params));
+    let desc: SoftVehicleDesc = engine_softbody::procedural::car_desc(&params).0;
     let stations = params.stations;
     let cap = WorldCapacity {
         max_bodies: 4096,
@@ -336,9 +337,62 @@ fn main() {
                 .collect();
             cars.push(Car { h, rest });
         }
-        s => panic!(
-            "unknown scenario {s}: wall, pole, sidepole, tbone, headon, rollover, ramp, drop"
-        ),
+        "limbo" => {
+            // A fixed bar across the road at `bar` m (underside): the bonnet passes
+            // under it, the pillars and the roof do not.
+            let y = a.get("bar", 1.1) + 0.1;
+            let (_, c) = add_box(&mut sim, body(Vec3::new(0.0, y, front + 1.0), Quat::IDENTITY, 0.0, [3.0, 0.1, 0.1]), [3.0, 0.1, 0.1]);
+            sim.add_soft_obstacle(c).expect("obstacle");
+            cars.push(spawn(&mut sim, Vec3::new(0.0, 0.05, 0.0), 0.0, Vec3::Z * v));
+        }
+        "sandwich" => {
+            // The car stopped behind a parked 15 t truck; an 18 t truck at `speed`
+            // hits it from behind.
+            let half = [1.25, 1.6, 6.0];
+            let mut parked = body(Vec3::new(0.0, 1.75, front + 0.4 + half[2]), Quat::IDENTITY, a.get("parked", 15000.0), half);
+            parked.linear_vel = [0.0; 3];
+            let (_, c1) = add_box(&mut sim, parked, half);
+            sim.add_soft_obstacle(c1).expect("obstacle");
+            cars.push(spawn(&mut sim, Vec3::new(0.0, 0.05, 0.0), 0.0, Vec3::ZERO));
+            let mut ram = body(Vec3::new(0.0, 1.75, -front - 3.0 - half[2]), Quat::IDENTITY, a.get("mass", 18000.0), half);
+            ram.linear_vel = [0.0, 0.0, v];
+            let (_, c2) = add_box(&mut sim, ram, half);
+            sim.add_soft_obstacle(c2).expect("obstacle");
+        }
+        "crusher" => {
+            // A `mass` kg block dropped from `height` m onto the roof.
+            let half = [1.2, 0.5, 1.5];
+            let (_, c) = add_box(&mut sim, body(Vec3::new(0.0, a.get("height", 4.0) + 1.5, 0.0), Quat::IDENTITY, a.get("mass", 10000.0), half), half);
+            sim.add_soft_obstacle(c).expect("obstacle");
+            cars.push(spawn(&mut sim, Vec3::new(0.0, 0.05, 0.0), 0.0, Vec3::ZERO));
+        }
+        "drive" => {
+            // Full throttle from rest on a flat road: the soft car's speed, rpm and
+            // gear against the rigid sedan preset (`rigid=1`).
+            let rigid = a.get("rigid", 0.0) > 0.5;
+            let v = if rigid {
+                sim.add_vehicle(&engine_vehicle::presets::sedan(), [0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]).expect("sedan")
+            } else {
+                let c = spawn(&mut sim, Vec3::new(0.0, 0.05, 0.0), 0.0, Vec3::ZERO);
+                sim.soft_host().entry(c.h).core.expect("core").0
+            };
+            for _ in 0..(0.5 * hz) as u32 {
+                sim.step().unwrap();
+            }
+            sim.set_vehicle_input(v, engine_vehicle::VehicleInput { forward: a.get("throttle", 1.0), ..Default::default() });
+            println!("   t (s) | speed (km/h) | rpm | gear | contacts");
+            for k in 0..=(a.get("seconds", 10.0) * 4.0) as u32 {
+                if k > 0 {
+                    for _ in 0..(hz / 4.0) as u32 {
+                        sim.step().unwrap();
+                    }
+                }
+                let st = sim.vehicle_state(v);
+                println!("{:8.2} | {:12.1} | {:4.0} | {:4} | {}", k as f32 / 4.0, st.forward_speed * 3.6, st.engine_rpm, st.gear, st.contacts);
+            }
+            return;
+        }
+        s => panic!("unknown scenario {s}: wall, pole, sidepole, tbone, headon, rollover, ramp, drop, drive"),
     }
     let _ = ram;
     let len0 = |c: &Car| (ring_centre(&c.rest, stations - 1) - ring_centre(&c.rest, 0)).length();
@@ -353,12 +407,18 @@ fn main() {
         a.get("iters", 10.0)
     );
     println!("   t (s) | speed (km/h) | crush (m) | pitch (°) | roll (°) | cell height (m)");
+    let mut torn: Vec<String> = Vec::new();
     for s in 0..=steps {
         if s > 0 {
             sim.step().unwrap();
         }
         if s % every != 0 {
             continue;
+        }
+        // Destruction events (engine API): name the parts that tore off.
+        for p in sim.poll_soft_events().pieces {
+            let who = cars.iter().position(|c| c.h == p.soft_body).unwrap_or(0);
+            torn.push(format!("car {who}: {}", if p.parts.is_empty() { format!("{} nodes", p.nodes.len()) } else { p.parts.join("+") }));
         }
         let c = &cars[0];
         let ps = sim.read_soft_particles(c.h);
@@ -453,4 +513,12 @@ fn main() {
         );
     }
     println!("max pitch {max_pitch:.0}° · max roll {max_roll:.0}° · max cell height {max_height:.2} m · rolled over: {flipped}");
+    if let Some(roof) = desc.part("roof") {
+        let first = sim.soft_host().entry(cars[0].h).first_body;
+        let is_roof = |g: u32| roof.nodes.contains(&(g - first));
+        let beams = sim.read_soft_beams(cars[0].h);
+        let pillars: Vec<_> = beams.iter().filter(|b| is_roof(b.a) != is_roof(b.b)).collect();
+        println!("roof pillars: {} of {} broken", pillars.iter().filter(|b| b.broken()).count(), pillars.len());
+    }
+    println!("torn off: {}", if torn.is_empty() { "nothing".to_string() } else { torn.join(", ") });
 }

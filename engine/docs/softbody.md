@@ -89,6 +89,76 @@ vehicle_input → soft_wake → … broadphase, narrowphase, CSR, colouring …
 | `soft_dual` | AVBD finite-stiffness ramp (and the multipliers of beams flagged hard; no importer sets the flag). Planned only when some beam ramps |
 | `soft_plastic`, `soft_break_groups` | Post-step plasticity and breaking at the converged state, then detacher groups |
 
+## Integration API
+
+Rubble simulates the vehicle; a game draws it. Everything a renderer, audio or
+gameplay layer needs comes from the engine, in Rust (`WgpuSim`, `SoftHost`) and in
+JS (`world-host.mjs`, `soft.mjs`, `soft-skin.mjs`). The demo page is one consumer
+of this API.
+
+| Need | Rust | JS |
+|---|---|---|
+| Build a vehicle | `load_truck`, `load_jbeam`, `procedural::car_desc` → `SoftVehicleDesc` | `loadTruck`, `loadJbeam`, `proceduralCarDesc` |
+| Named parts (bonnet, doors, engine…) | `SoftVehicleDesc::parts`, `part(name)` | `desc.parts` |
+| Spawn, steer | `WgpuSim::add_soft_vehicle`, `set_soft_steer` | `world.addSoftVehicle`, `world.soft.setSteer` |
+| Node positions and velocities | `read_soft_particles`, or the body buffer (`body_buffer`, rows `first_body…`) | `world.readSoftParticles`, or `world.bufs[0]` |
+| Beam states (rest, flags, force) | `read_soft_beams` | `world.readSoftBeams` (16 words per beam) |
+| Destruction events | `poll_soft_events` → `SoftEvents { breaks, pieces, lost }` | `world.pollSoftEvents()` → `{ breaks, pieces, lost }` |
+| Damage | `read_soft_damage` → `SoftDamage` | `world.readSoftDamage(h)` |
+| Bind a render mesh | `SoftHost::bind_mesh(h, vertices, part)` → `SkinBinding`s | `world.soft.bindMesh(h, xyz, part)` (8 words per vertex) |
+| Skin it on the GPU | `SoftSkinner` (`SOFT_SKIN_WGSL`) | `createSoftSkinner` (`generated/wgsl/soft_skin.wgsl`) |
+
+**Parts** are named sets of nodes:
+
+* JBeam: every part's own nodes under the part's name, and every node `group`
+  (what BeamNG flexbodies bind to).
+* The procedural car: `body`, `bonnet`, `boot`, `door_fl`, `door_rl`, `door_fr`,
+  `door_rr`, `bumper_front`, `bumper_rear` and `engine`.
+* Rigs of Rods files declare none yet.
+
+**Events.**
+
+* A `BeamBreak` (beam, force, soft body) comes from the GPU event ring.
+* A `PieceDetached` (soft body, nodes, parts, mass) reports nodes no longer joined
+  by any unbroken beam to the body's main part, the one with the most mass.
+  `SoftHost::note_breaks` finds pieces from the breaks, and each piece is reported
+  once.
+* If the event ring overflowed (`lost` > 0), every body is resynchronised from a
+  beam readback, so no piece is missed.
+* Use `poll_soft_events` or `poll_beam_breaks`, not both: they share the ring's
+  read cursor.
+
+**Damage.** `SoftDamage` reports:
+
+* beams bent and broken;
+* the plastic work absorbed: Σ threshold · |L − L₀| over yielded beams, in joules;
+* the largest permanent beam strain;
+* per-node deformation from the rest shape, after removing the best-fit rigid
+  motion of the nodes still attached. Detached nodes report how far they have
+  gone.
+
+**Skinning.**
+
+* `bind_mesh` gives each vertex (in the vehicle's own frame) a frame of three
+  nodes of its part, so a door's mesh follows only the door and leaves with it.
+* Vertex = c + a·(x − c) + b·(y − c) + d·((x − c) × (y − c)), torn when its frame
+  stretches past 1.8× rest.
+* `SkinBinding::skin` is the CPU reference.
+* The kernel (`slang/kernels/soft_skin.slang`, run after the step with no readback)
+  writes per vertex the position (w = torn) and a smooth normal (w = the largest
+  strain around it), and per triangle the normal (w = strain against rest, −1 when
+  torn). A renderer draws from those buffers.
+
+**Accuracy of what is drawn.** `skinned_render_mesh_follows_the_physics_surface_through_a_crash`
+binds the detailed mesh part by part, skins it on the GPU and crashes the car into a
+wall at 56 km/h:
+
+* The GPU positions match `SkinBinding::skin` to under 1 mm.
+* The render surface's distance to the deformed collision skin grows by 0 at the
+  median, 3.3 cm at the 95th percentile and 12 cm at the 99th, over about 4,900
+  paint vertices.
+* The tail is the heart of the crushed zone, where a three-node frame extrapolates.
+
 ## Beam model
 
 With d = xᵢ − xⱼ, ℓ = |d| and d̂ = d/ℓ, a beam stores E = ½k(ℓ − L)². Its gradient is
@@ -236,6 +306,49 @@ intact beams by load and deformed ones by plastic strain |L/L₀ − 1| (yellow,
 Mesh-file flexbodies (RoR OGRE `.mesh`, BeamNG `.dae`) need an offline converter to
 glTF that is not built yet; the binding and the skinning shader are what it would feed.
 
+**The procedural car's render mesh** (`visual.rs`, `car-render.mjs`) is a separate,
+detailed model, about 12,000 vertices on the car's roughly 160 nodes.
+
+* **Body:** made from 84 fine cross-sections with a rounded profile.
+* **Parts:** bonnet, boot lid, four doors and two bumpers, matching the physics panels.
+  Each has its own vertices, and the seam between parts is drawn as a thin dark gap.
+* **Details:** glass, head and tail lamps, a grille, wheel arches with smooth edges,
+  seats, a dashboard, a steering wheel and the engine.
+* **Binding:** each part is bound only to its own nodes. A door binds to the door
+  panel's nodes and the engine to the engine block's, so a torn panel carries its
+  mesh away and leaves an opening into the cabin.
+
+GPU compute rebuilds the mesh each frame:
+
+1. **Skin:** each vertex from its frame of three particles. A frame stretched past
+   1.8× is torn.
+2. **Faces:** each triangle's normal, its strain against the rest triangle, and
+   whether it is torn.
+3. **Normals:** smooth per-vertex normals, so crumples and creases catch the light,
+   plus the largest strain around each vertex.
+
+Shading (`LIGHTING_WGSL`, shared by every pass):
+
+* a sky, a sun shadow map (2,048², 3×3 PCF), tone mapping and 4× MSAA;
+* clearcoat paint, chrome, black trim, emissive lamps, primer on a panel's inner face,
+  and asphalt for the ground;
+* damage from strain: the clearcoat dulls, creases darken, and thin scrapes along the
+  car cut through to bare steel where it crumpled most;
+* glass, blended and drawn last, cracks at about 1% strain and shatters past 6%.
+
+**Effects** are GPU particles spawned from what changed in each triangle since the
+last frame, with no CPU readback:
+
+* sparks where metal suddenly crumples;
+* glass shards when a pane lets go;
+* paint-coloured chips where the skin tears;
+* a little dust.
+
+The particles fly with the local body velocity, fall, and bounce on the ground. They
+follow simulation time, so a paused scene freezes them.
+
+Imported vehicles keep the flexbody skin above, lit the same way.
+
 ## Validation
 
 | Test | Shows |
@@ -348,6 +461,17 @@ Results at 240 Hz × 10, file thresholds:
 | Head-on 2 × 80 km/h, 50% offset | 0.33–0.38 m | 106–115 per car | 2 per car | |
 | Sideways into a curb, 70 km/h | — | 115 | 3 panels | rolls onto its roof |
 | One-side ramp, 90 km/h | — | 13 | bumper | airborne to 3.3 m, lands inverted |
+
+**Engine block.** The procedural car carries a 160 kg engine block in the front bay
+(`CarParams::engine_block`):
+
+* eight nodes braced to each other far more stiffly than the body;
+* mounts to the frame rails and the belt line of the bay and of the bulkhead behind
+  it.
+
+A frontal crash folds the bay up to the block, then bends and tears the mounts and
+shoves the block back toward the cabin. The engine mesh is bound to the block, so it
+moves with it.
 
 **Bolt-on panels.** The procedural car has a bonnet, a boot lid, four doors and a rear
 bumper beside the front one (`CarParams::panels`, default on):

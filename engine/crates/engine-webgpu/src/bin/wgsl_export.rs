@@ -53,6 +53,9 @@ fn main() -> anyhow::Result<()> {
         .arg(&draw)
         .status()?;
     anyhow::ensure!(status.success(), "slangc failed for {}", draw.display());
+    // Soft-body skinning (standalone, run after the step): the same module the
+    // native SoftSkinner embeds.
+    std::fs::write(out.join("soft_skin.wgsl"), engine_webgpu::SOFT_SKIN_WGSL)?;
     println!("Wrote {} WGSL modules to {}", names.len(), out.display());
 
     // Vehicle presets (fully expanded descriptors) for vehicle.html.

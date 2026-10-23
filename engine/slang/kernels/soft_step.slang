@@ -89,6 +89,15 @@ uint softObstacleCount() { return SU(6u).w; }
 uint softAabbBase() { return SU(7u).x; }
 uint softParticleTotal() { return SU(7u).y; }
 float softContactFriction() { return SD(7u).z; }
+uint softTriRestBase() { return SU(7u).w; }
+// A skin triangle stretched past this × its rest edges is torn (the parts it
+// joined have separated): it stops colliding, as renderers stop drawing it.
+static const float TRI_TEAR = 2.5;
+bool triTorn(uint t, float3 a, float3 b, float3 c)
+{
+    float3 r = SD(softTriRestBase() + t).xyz;
+    return length(a - b) > TRI_TEAR * r.x || length(b - c) > TRI_TEAR * r.y || length(c - a) > TRI_TEAR * r.z;
+}
 bool softContactsOn() { return (softFlags() & SOFT_CONTACTS) != 0u; }
 
 struct SoftBeam
@@ -478,6 +487,7 @@ void soft_collide_nodes(uint3 tid : SV_DispatchThreadID)
             if (((tri.w >> 8) & 1u) == 0u) continue;
             BodyState ba = gBodies[tri.x], bb = gBodies[tri.y], bc = gBodies[tri.z];
             float3 a = ba.position, bpos = bb.position, c = bc.position;
+            if (triTorn(t, a, bpos, c)) continue;
             float3 nr = cross(bpos - a, c - a);
             float area = length(nr);
             if (area < 1e-8) continue;
@@ -594,6 +604,7 @@ void soft_collide_tris(uint3 tid : SV_DispatchThreadID)
     BodyState ba = gBodies[tri.x], bb = gBodies[tri.y], bc = gBodies[tri.z];
     if (bodyIsSleeping(ba) && bodyIsSleeping(bb) && bodyIsSleeping(bc)) return;
     float3 a = ba.position, b = bb.position, c = bc.position;
+    if (triTorn(t, a, b, c)) return;
     float delta = asfloat(softBodyRec2(sb).z);
     float travel = max(max(length(a - ba.initialPos), length(b - bb.initialPos)), length(c - bc.initialPos));
     float3 lo = min(min(a, b), c), hi = max(max(a, b), c);

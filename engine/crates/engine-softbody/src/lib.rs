@@ -11,6 +11,7 @@
 pub mod calibrate;
 pub mod color;
 pub mod cpu;
+pub mod damage;
 pub mod desc;
 pub mod flexbody;
 pub mod host;
@@ -20,10 +21,13 @@ pub mod model;
 pub mod pack;
 pub mod procedural;
 pub mod truck;
+pub mod visual;
 
 pub use desc::*;
 pub use host::{
-    decode_beam_breaks, BeamBreak, SoftBackend, SoftCounts, SoftEntry, SoftHandle, SoftHost,
+    decode_beam_breaks, BeamBreak, PieceDetached, SkinBinding, SoftBackend, SoftCounts,
+    SoftEntry, SoftHandle, SoftHost,
 };
+pub use damage::{damage_summary, SoftDamage};
 pub use layout::*;
 pub use pack::SpawnOptions;
