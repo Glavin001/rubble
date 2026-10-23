@@ -25,11 +25,14 @@
 //! of the step (`dv = J / m`, `dw = I_world^-1 L`), as GPU impulse records
 //! (`WgpuSim::apply_linear_angular_impulse`): no body upload, so manifold reuse stays on.
 //!
-//! **CCD.** An impactor flagged `ccd` is a `BODY_CCD` rubble body: uncapped look-ahead,
-//! the fast broadphase list and time-of-impact contacts inside the one step
-//! (engine/docs/ccd.md). The whole-world substeps this engine used to take for it
-//! (no CCD body moving more than half its smallest half extent per substep) are a
-//! reference run only: `STRESS_RUBBLE_CCD_SUBSTEPS=1`.
+//! **CCD.** An impactor flagged `ccd` makes the step subdivide so that no CCD body
+//! moves more than half its smallest half extent per substep (refining the step, never
+//! coarsening it). Contacts of every substep are reported, each with its substep's
+//! impulse. `set_toi_ccd(true)` (or `STRESS_RUBBLE_TOI_CCD=1`) makes such an impactor
+//! a `BODY_CCD` rubble body instead: time-of-impact contacts in one step
+//! (engine/docs/ccd.md). Opt-in: `BODY_CCD` turns on look-ahead contact semantics for
+//! the whole scene, and the stress coupling's breakage was measured against substeps
+//! (punch_gpu: the ram leaves at 6.5 m/s instead of 28, reference 35.1).
 //!
 //! **Contacts** are the solved rows of the last step (`WgpuSim::last_contacts`): the
 //! force of each row times the (sub)step, at the midpoint of its two anchors, with the
@@ -432,6 +435,8 @@ pub struct RubbleEngine {
     resident_offset: f32,
     /// Look-ahead contacts instead of CCD substeps (`STRESS_RUBBLE_SPECULATIVE_CCD`).
     pub speculative_ccd: bool,
+    /// CCD impactors as `BODY_CCD` bodies in one step, not substeps (`set_toi_ccd`).
+    toi_ccd: bool,
 }
 
 /// Room for a scene: the default, or more when the scene is larger. A split's children
@@ -563,6 +568,7 @@ impl RubbleEngine {
             resident_reads: 0,
             resident_offset: 0.01,
             speculative_ccd: std::env::var("STRESS_RUBBLE_SPECULATIVE_CCD").is_ok_and(|v| v == "1"),
+            toi_ccd: std::env::var("STRESS_RUBBLE_TOI_CCD").is_ok_and(|v| v == "1"),
         })
     }
 
@@ -582,6 +588,17 @@ impl RubbleEngine {
         if let Some(n) = max_substeps {
             self.max_substeps = n.max(1);
         }
+    }
+
+    /// CCD impactors as `BODY_CCD` rubble bodies with time-of-impact contacts in one
+    /// step (true), or whole-world substeps (false, the default). Set before the
+    /// impactors are created: it is their body flag.
+    pub fn set_toi_ccd(&mut self, on: bool) {
+        self.toi_ccd = on;
+    }
+
+    pub fn toi_ccd(&self) -> bool {
+        self.toi_ccd
     }
 
     /// Number of live bodies (ground and retired bodies excluded).
@@ -717,11 +734,13 @@ impl RubbleEngine {
         state.inv_inertia = [inv(c.moments.x), inv(c.moments.y), inv(c.moments.z)];
         if !b.fixed {
             state.flags = BodyFlags::Dynamic as u32 | BodyFlags::Awake as u32;
-            if b.ccd {
-                state.flags |= engine_schema::BODY_CCD;
-            }
             state.linear_vel = to_rubble(b.velocity);
             state.angular_vel = to_rubble(b.angular_velocity);
+        }
+        // TOI CCD: `BODY_CCD`, also on a parked (fixed) shot slot, where it is inert until
+        // a launch makes the body dynamic, and tells the engine to schedule its CCD passes.
+        if b.ccd && self.toi_ccd {
+            state.flags |= engine_schema::BODY_CCD;
         }
         let id = self.sim.add_body(state);
         // The bodies' snapshot (if any) takes the record as uploaded (no download for the
@@ -966,11 +985,10 @@ impl RigidEngine for RubbleEngine {
             self.bodies_changed();
         }
 
-        // Substeps: CCD bodies are BODY_CCD (time-of-impact contacts in the one step).
-        // `STRESS_RUBBLE_CCD_SUBSTEPS=1` (reference only) subdivides the whole world
-        // instead, so that no CCD body moves more than half its thinnest extent per substep.
+        // Substeps: CCD bodies move at most half their thinnest extent per substep, unless
+        // they are BODY_CCD (`toi_ccd`: time-of-impact contacts in the one step).
         let mut n = self.substeps.max(1);
-        let ccd_substeps = std::env::var("STRESS_RUBBLE_CCD_SUBSTEPS").is_ok_and(|v| v == "1");
+        let ccd_substeps = !self.toi_ccd;
         for (_, e) in self.bodies.iter().filter(|(k, e)| ccd_substeps && !self.speculative_ccd && e.ccd && e.inv_mass > 0.0 && !self.frozen.contains(k)) {
             let s = &all[e.id as usize];
             let travel = glam::Vec3::from_array(s.linear_vel).length() as f64 * dt + glam::Vec3::from_array(s.angular_vel).length() as f64 * e.thin * dt;
@@ -1203,3 +1221,4 @@ mod tests {
         assert!((along - cube).abs() < 1e-9, "{moments:?} vs {cube}");
     }
 }
+

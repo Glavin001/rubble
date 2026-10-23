@@ -95,9 +95,10 @@ fn frozen_bodies_hold_still_and_are_released_with_the_given_motion() {
     assert!((ma.pose.position.z - (1.0 + 2.0 * dt)).abs() < 1e-3, "{:?}", ma.pose.position);
 }
 
-/// A 250 m/s impactor flagged `ccd` stops at a fixed 0.1 m wall with one engine
-/// step per frame (no whole-world substeps: time-of-impact contacts in the
-/// step); the same impactor without `ccd` passes through it (CCD audit Phase 2).
+/// With TOI CCD (`set_toi_ccd`), a 250 m/s impactor flagged `ccd` stops at a fixed
+/// 0.1 m wall with one engine step per frame (no whole-world substeps: time-of-impact
+/// contacts in the step); the same impactor without `ccd` passes through it (CCD audit
+/// Phase 2).
 #[test]
 fn a_ccd_impactor_stops_at_a_thin_wall_without_substeps() {
     for ccd in [false, true] {
@@ -105,6 +106,7 @@ fn a_ccd_impactor_stops_at_a_thin_wall_without_substeps() {
             eprintln!("no wgpu adapter; skipping");
             return;
         };
+        e.set_toi_ccd(true);
         let wall = EngineBody {
             key: BodyKey::Cluster(1),
             signature: 1,

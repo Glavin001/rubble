@@ -308,9 +308,10 @@ impl RubbleEngine {
         ]
     }
 
-    /// Whether the frame's substep count reads CCD bodies' speeds (`resident_substeps`).
+    /// Whether the frame's substep count reads CCD bodies' speeds (`resident_substeps`):
+    /// not with TOI CCD (`set_toi_ccd`), where CCD bodies are `BODY_CCD` in one step.
     fn needs_ccd_bodies(&self) -> bool {
-        !self.speculative_ccd && self.bodies.iter().any(|(k, e)| e.ccd && e.inv_mass > 0.0 && !self.frozen.contains(k))
+        !self.toi_ccd && !self.speculative_ccd && self.bodies.iter().any(|(k, e)| e.ccd && e.inv_mass > 0.0 && !self.frozen.contains(k))
     }
 }
 
