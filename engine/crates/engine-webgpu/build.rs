@@ -416,5 +416,15 @@ fn store(dir: &Path, out_dir: &Path, compiled: &Compiled) -> Result<()> {
         // Another build stored the same key first.
         std::fs::remove_dir_all(&tmp)?;
     }
+    // Keep only this key: entries for older slang/ trees would only grow the cache.
+    if let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) {
+        for entry in std::fs::read_dir(parent)? {
+            let entry = entry?;
+            let other = entry.file_name();
+            if other != name && other.to_string_lossy().starts_with("engine-webgpu-") {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
     Ok(())
 }

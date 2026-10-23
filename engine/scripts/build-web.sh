@@ -32,6 +32,15 @@ if [[ -n "$CACHE" ]]; then
   mkdir -p "$CACHE"
   CACHE="$(cd "$CACHE" && pwd)"
   export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$CACHE/cargo-target}"
+  # Cargo never deletes stale artifacts (old dependency versions, a new toolchain), and
+  # Vercel's build cache holds 1 GB. Past the cap, start the target dir over: one cold
+  # build, then it fits again.
+  CAP_MB="${RUBBLE_TARGET_CAP_MB:-1600}"
+  if [[ -d "$CARGO_TARGET_DIR" ]] \
+    && (( $(du -sm "$CARGO_TARGET_DIR" | cut -f1) > CAP_MB )); then
+    echo "==> $CARGO_TARGET_DIR is over ${CAP_MB} MB: starting it over"
+    rm -rf "$CARGO_TARGET_DIR"
+  fi
   export RUBBLE_SLANG_CACHE="$CACHE/slang"
   echo "==> Build cache: $CACHE"
 fi
