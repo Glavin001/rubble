@@ -339,3 +339,91 @@ fn dune_buggy_hit_trace() {
         eprintln!("{i:3} ball z {:7.3} vz {:7.2} | chassis vz {:6.2} | {} F {:9.0} τ {:7.0}", bb.position[2], bb.linear_vel[2], cc.linear_vel[2], d.parts[pi].name, l.force, l.torque);
     }
 }
+
+/// Calibration probe (run by hand): peak load ratio (load / limit) of every
+/// buggy mount across crash scenarios, all mounts measured but unbreakable.
+#[test]
+#[ignore]
+fn dune_buggy_crash_probe() {
+    let real = presets::dune_buggy();
+    let measured = || {
+        let mut d = real.clone();
+        // Limits ×1e6: ratios stay comparable (÷1e6) and nothing breaks.
+        for p in d.parts.iter_mut().skip(1) {
+            p.mount.break_force *= 1e6;
+            p.mount.break_torque *= 1e6;
+        }
+        for w in &mut d.wheels {
+            w.mount.break_force *= 1e6;
+            w.mount.break_torque *= 1e6;
+        }
+        d
+    };
+    let d = measured();
+    let names: Vec<String> = d.parts.iter().map(|p| p.name.clone()).chain((0..4).map(|i| format!("wheel {i}"))).collect();
+    let mut table: Vec<(String, Vec<f32>)> = Vec::new();
+    let collect = |sim: &WgpuSim, v: VehicleHandle| -> Vec<f32> { sim.vehicle_mount_loads(v).iter().map(|l| l.peak_ratio * 1e6).collect() };
+    // 1. Full throttle into a concrete wall from 40 m.
+    {
+        let mut sim = world();
+        add_box(&mut sim, [0.0, 1.0, 40.0], [6.0, 1.0, 0.5], [0.0, 0.0, 0.0, 1.0], 0.0, [0.0; 3]);
+        let v = sim.add_vehicle(&d, [0.0, 0.6, 0.0], [0.0, 0.0, 0.0, 1.0]).unwrap();
+        run(&mut sim, 60);
+        sim.set_vehicle_input(v, VehicleInput { forward: 1.0, ..Default::default() });
+        let mut top = 0.0f32;
+        for _ in 0..360 {
+            sim.step().unwrap();
+            top = top.max(sim.vehicle_state(v).forward_speed);
+        }
+        table.push((format!("wall @{top:.0} m/s"), collect(&sim, v)));
+    }
+    // 2. Head-on: two buggies at full throttle from 30 m apart.
+    {
+        let mut sim = world();
+        let a = sim.add_vehicle(&d, [0.0, 0.6, 0.0], [0.0, 0.0, 0.0, 1.0]).unwrap();
+        let b = sim.add_vehicle(&d, [0.2, 0.6, 50.0], glam::Quat::from_rotation_y(std::f32::consts::PI).to_array()).unwrap();
+        run(&mut sim, 60);
+        sim.set_vehicle_input(a, VehicleInput { forward: 1.0, ..Default::default() });
+        sim.set_vehicle_input(b, VehicleInput { forward: 1.0, ..Default::default() });
+        run(&mut sim, 300);
+        table.push(("head-on".into(), collect(&sim, a)));
+    }
+    // 3. Cannonballs (400 kg, r 0.6, as vehicle.html) at 25 and 45 m/s: front and side.
+    for (label, speed, from, dir) in [
+        ("cannon front 25", 25.0f32, [0.0, 0.8, 8.0], [0.0, 0.0, -1.0]),
+        ("cannon side 25", 25.0, [8.0, 0.9, 0.0], [-1.0, 0.0, 0.0]),
+        ("cannon front 45", 45.0, [0.0, 0.8, 10.0], [0.0, 0.0, -1.0]),
+        ("cannon side 45", 45.0, [10.0, 0.9, 0.0], [-1.0, 0.0, 0.0]),
+        ("cannon wheel 45", 45.0, [10.0, 0.45, 1.6], [-1.0, 0.0, 0.0]),
+    ] {
+        let mut sim = world();
+        let v = sim.add_vehicle(&d, [0.0, 0.6, 0.0], [0.0, 0.0, 0.0, 1.0]).unwrap();
+        run(&mut sim, 90);
+        ball(&mut sim, from, 0.6, 400.0, [dir[0] * speed, dir[1] * speed, dir[2] * speed]);
+        run(&mut sim, 90);
+        table.push((label.into(), collect(&sim, v)));
+    }
+    // 4. Jump off a kicker at full throttle.
+    {
+        let mut sim = world();
+        let q = glam::Quat::from_axis_angle(glam::Vec3::X, -0.3).to_array();
+        add_box(&mut sim, [0.0, 0.55, 25.0], [3.5, 0.3, 4.0], q, 0.0, [0.0; 3]);
+        let v = sim.add_vehicle(&d, [0.0, 0.6, 0.0], [0.0, 0.0, 0.0, 1.0]).unwrap();
+        run(&mut sim, 60);
+        sim.set_vehicle_input(v, VehicleInput { forward: 1.0, ..Default::default() });
+        run(&mut sim, 360);
+        table.push(("jump".into(), collect(&sim, v)));
+    }
+    eprint!("{:>16}", "mount");
+    for (label, _) in &table {
+        eprint!(" {:>16}", label);
+    }
+    eprintln!();
+    for (k, name) in names.iter().enumerate() {
+        eprint!("{name:>16}");
+        for (_, r) in &table {
+            eprint!(" {:>16.3}", r[k]);
+        }
+        eprintln!();
+    }
+}
