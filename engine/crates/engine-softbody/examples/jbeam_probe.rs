@@ -12,7 +12,10 @@ fn collect(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
         if p.is_dir() {
             collect(&p, out);
         } else if p.extension().is_some_and(|x| x == "jbeam") {
-            out.push((p.display().to_string(), std::fs::read_to_string(&p).unwrap_or_default()));
+            out.push((
+                p.display().to_string(),
+                std::fs::read_to_string(&p).unwrap_or_default(),
+            ));
         }
     }
 }
@@ -23,8 +26,14 @@ fn main() {
     for a in args.iter().filter(|a| !a.ends_with(".pc")) {
         collect(std::path::Path::new(a), &mut files);
     }
-    let pc = args.iter().find(|a| a.ends_with(".pc")).map(|p| std::fs::read_to_string(p).expect("pc"));
-    let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let pc = args
+        .iter()
+        .find(|a| a.ends_with(".pc"))
+        .map(|p| std::fs::read_to_string(p).expect("pc"));
+    let refs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
     let t = std::time::Instant::now();
     let d = load_jbeam(&refs, pc.as_deref()).expect("load");
     println!(
@@ -48,7 +57,11 @@ fn main() {
     s.h = 1.0 / 240.0;
     s.iterations = 10;
     s.chebyshev_rho = 0.9;
-    s.planes.push(Plane { normal: Vec3::Y, offset: 0.0, friction: 0.8 });
+    s.planes.push(Plane {
+        normal: Vec3::Y,
+        offset: 0.0,
+        friction: 0.8,
+    });
     for k in 0..480 {
         s.step();
         if k % 120 == 119 {

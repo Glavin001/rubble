@@ -5,7 +5,9 @@
 use crate::{err, parse, Recorder, WasmVehicleHost};
 use engine_softbody::procedural::{box_truck, car_truck, CarParams};
 use engine_softbody::truck::load_truck;
-use engine_softbody::{SoftCapacity, SoftHandle, SoftHost, SoftSettings, SoftVehicleDesc, SpawnOptions};
+use engine_softbody::{
+    SoftCapacity, SoftHandle, SoftHost, SoftSettings, SoftVehicleDesc, SpawnOptions,
+};
 use serde_json::json;
 use wasm_bindgen::prelude::*;
 
@@ -44,7 +46,14 @@ pub fn soft_procedural_car(deform: f32, strength: f32) -> String {
 
 /// A braced lattice crate as `.truck` text.
 #[wasm_bindgen]
-pub fn soft_box_truck(n: u32, step: f32, mass: f32, spring: f32, deform: f32, strength: f32) -> String {
+pub fn soft_box_truck(
+    n: u32,
+    step: f32,
+    mass: f32,
+    spring: f32,
+    deform: f32,
+    strength: f32,
+) -> String {
     let n = n.max(2) as usize;
     box_truck(n, n, n, step, mass, spring, deform, strength)
 }
@@ -69,7 +78,9 @@ pub struct WasmSoftHost {
 impl WasmSoftHost {
     #[wasm_bindgen(constructor)]
     pub fn new(cap: &[u32]) -> WasmSoftHost {
-        WasmSoftHost { host: SoftHost::new(soft_capacity(cap)) }
+        WasmSoftHost {
+            host: SoftHost::new(soft_capacity(cap)),
+        }
     }
 
     /// Region bases (float4 slots) inside gSoftData (JSON, camelCase).
@@ -96,11 +107,17 @@ impl WasmSoftHost {
         vehicles: &mut WasmVehicleHost,
     ) -> Result<Vec<u32>, JsError> {
         let desc: SoftVehicleDesc = parse(desc_json)?;
-        let opts: SpawnOptions = if opts_json.is_empty() { SpawnOptions::default() } else { parse(opts_json)? };
+        let opts: SpawnOptions = if opts_json.is_empty() {
+            SpawnOptions::default()
+        } else {
+            parse(opts_json)?
+        };
         let mut r = Recorder::new([counts[0], counts[1], counts[2]], None);
         let pos = [position[0], position[1], position[2]];
         let rot = [rotation[0], rotation[1], rotation[2], rotation[3]];
-        self.host.add(&mut r, Some(&mut vehicles.host), &desc, pos, rot, &opts).map_err(err)?;
+        self.host
+            .add(&mut r, Some(&mut vehicles.host), &desc, pos, rot, &opts)
+            .map_err(err)?;
         Ok(r.ops)
     }
 
@@ -162,14 +179,22 @@ impl WasmSoftHost {
     pub fn entry(&self, h: u32) -> String {
         let e = self.host.entry(SoftHandle(h));
         let d = &e.desc;
-        let tris: Vec<[u32; 3]> = d.triangles.iter().map(|t| t.nodes.map(|n| e.first_body + n)).collect();
+        let tris: Vec<[u32; 3]> = d
+            .triangles
+            .iter()
+            .map(|t| t.nodes.map(|n| e.first_body + n))
+            .collect();
         let rest: Vec<[f32; 3]> = d
             .triangles
             .iter()
             .map(|t| {
                 let p = |i: u32| glam::Vec3::from_array(d.nodes[i as usize].position);
                 let [a, b, c] = t.nodes;
-                [(p(a) - p(b)).length(), (p(b) - p(c)).length(), (p(c) - p(a)).length()]
+                [
+                    (p(a) - p(b)).length(),
+                    (p(b) - p(c)).length(),
+                    (p(c) - p(a)).length(),
+                ]
             })
             .collect();
         json!({
@@ -187,7 +212,9 @@ impl WasmSoftHost {
     }
 
     pub fn save(&self) -> WasmSoftHost {
-        WasmSoftHost { host: self.host.clone() }
+        WasmSoftHost {
+            host: self.host.clone(),
+        }
     }
 
     pub fn restore(&mut self, snap: &WasmSoftHost) {
@@ -201,7 +228,10 @@ impl WasmSoftHost {
 #[wasm_bindgen]
 pub fn soft_load_jbeam(files_json: &str, pc: Option<String>) -> Result<String, JsError> {
     let files: Vec<(String, String)> = parse(files_json)?;
-    let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let refs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
     let d = engine_softbody::jbeam::load_jbeam(&refs, pc.as_deref()).map_err(err)?;
     Ok(serde_json::to_string(&d).expect("desc serialises"))
 }
@@ -209,36 +239,71 @@ pub fn soft_load_jbeam(files_json: &str, pc: Option<String>) -> Result<String, J
 #[wasm_bindgen]
 impl WasmSoftHost {
     /// Visual mesh of soft body `h` (flexbody skinning): its skin triangles
-    /// subdivided and rounded (`bulge` × edge length), each vertex bound to a
-    /// frame of three particles. Returns `[vertexCount, triCount, bindings…, indices…]`
+    /// subdivided and rounded (`bulge` × edge length), each vertex bound to the
+    /// frame of the skin triangle it came from. Returns `[vertexCount, triCount, bindings…, indices…]`
     /// with bindings as 8 words per vertex: centre, x, y particle (global body
     /// indices), soft body, then the frame coordinates and the frame's longest
     /// rest edge (f32 bits). Unbound vertices collapse onto their nearest node.
     pub fn flexbody(&self, h: u32, bulge: f32) -> Vec<u32> {
-        use engine_softbody::flexbody::{bind, rounded_skin, BindOptions};
+        use engine_softbody::flexbody::{bind_to_triangles, rounded_skin};
         use glam::Vec3;
         let e = self.host.entry(SoftHandle(h));
-        let nodes: Vec<Vec3> = e.desc.nodes.iter().map(|n| Vec3::from_array(n.position)).collect();
+        let nodes: Vec<Vec3> = e
+            .desc
+            .nodes
+            .iter()
+            .map(|n| Vec3::from_array(n.position))
+            .collect();
         let tris: Vec<[u32; 3]> = e.desc.triangles.iter().map(|t| t.nodes).collect();
-        let (verts, faces) = rounded_skin(&nodes, &tris, bulge);
-        let binds = bind(&verts, &nodes, None, BindOptions::default());
+        let (verts, faces, sources) = rounded_skin(&nodes, &tris, bulge);
+        let binds = bind_to_triangles(&verts, &nodes, &sources);
         let mut out = vec![verts.len() as u32, faces.len() as u32];
         for (v, b) in verts.iter().zip(&binds) {
             match b {
                 Some(b) => {
                     let [c, x, y] = b.nodes;
-                    let rest = (nodes[x as usize] - nodes[c as usize]).length().max((nodes[y as usize] - nodes[c as usize]).length());
-                    out.extend_from_slice(&[e.first_body + c, e.first_body + x, e.first_body + y, h]);
+                    let rest = (nodes[x as usize] - nodes[c as usize])
+                        .length()
+                        .max((nodes[y as usize] - nodes[c as usize]).length());
+                    out.extend_from_slice(&[
+                        e.first_body + c,
+                        e.first_body + x,
+                        e.first_body + y,
+                        h,
+                    ]);
                     out.extend(b.coords.iter().map(|f| f.to_bits()));
                     out.push(rest.to_bits());
                 }
                 None => {
-                    let c = nodes.iter().enumerate().min_by(|a, b| (*a.1 - *v).length_squared().total_cmp(&(*b.1 - *v).length_squared())).map_or(0, |(i, _)| i as u32);
-                    out.extend_from_slice(&[e.first_body + c, e.first_body + c, e.first_body + c, h, 0, 0, 0, 1f32.to_bits()]);
+                    let c = nodes
+                        .iter()
+                        .enumerate()
+                        .min_by(|a, b| {
+                            (*a.1 - *v)
+                                .length_squared()
+                                .total_cmp(&(*b.1 - *v).length_squared())
+                        })
+                        .map_or(0, |(i, _)| i as u32);
+                    out.extend_from_slice(&[
+                        e.first_body + c,
+                        e.first_body + c,
+                        e.first_body + c,
+                        h,
+                        0,
+                        0,
+                        0,
+                        1f32.to_bits(),
+                    ]);
                 }
             }
         }
         out.extend(faces.iter().flatten());
         out
     }
+}
+
+/// `SoftSettings::calibrated_for(hz)` as JSON (threshold scale fitted per step rate).
+#[wasm_bindgen]
+pub fn soft_calibrated_settings(hz: f32) -> String {
+    serde_json::to_string(&SoftSettings::calibrated_for(hz)).expect("settings serialise")
 }

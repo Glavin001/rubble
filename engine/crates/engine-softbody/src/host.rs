@@ -7,7 +7,7 @@ use crate::desc::SoftVehicleDesc;
 use crate::layout::*;
 use crate::model::Beam;
 use crate::pack::{pack_soft, CorePlan, Placement, SpawnOptions};
-use engine_schema::{JointDesc, BodyState, Collider};
+use engine_schema::{BodyState, Collider, JointDesc};
 use engine_vehicle::{VehicleBackend, VehicleHandle, VehicleHost};
 use glam::{Quat, Vec3};
 
@@ -107,7 +107,12 @@ impl SoftHost {
     }
 
     pub fn counts(&self) -> SoftCounts {
-        let colors = self.entries.iter().map(|e| e.color_count).max().unwrap_or(0);
+        let colors = self
+            .entries
+            .iter()
+            .map(|e| e.color_count)
+            .max()
+            .unwrap_or(0);
         let mut per = vec![0u32; colors as usize];
         for e in &self.entries {
             for (i, &c) in e.colors.iter().enumerate() {
@@ -126,7 +131,9 @@ impl SoftHost {
             particles_total: self.particles_used,
             triangles: self.tris_used,
             obstacles: self.obstacles.len() as u32,
-            contacts: self.settings.contacts && self.tris_used > 0 && (self.entries.len() > 1 || !self.obstacles.is_empty()),
+            contacts: self.settings.contacts
+                && self.tris_used > 0
+                && (self.entries.len() > 1 || !self.obstacles.is_empty()),
             dual: self.settings.ramp_start < 1.0 || self.settings.hard_ratio > 0.0,
         }
     }
@@ -159,13 +166,19 @@ impl SoftHost {
         if self.tris_used + desc.triangles.len() as u32 > self.capacity.max_triangles {
             return Err("triangle capacity exhausted".into());
         }
-        let place = Placement { position: Vec3::from_array(position), rotation: Quat::from_array(rotation).normalize() };
+        let place = Placement {
+            position: Vec3::from_array(position),
+            rotation: Quat::from_array(rotation).normalize(),
+        };
         let group = -(1000 + s as i32) as i16;
         let first_body = backend.body_count();
         let first_collider = backend.collider_count();
         let mut packed = pack_soft(desc, place, opts, first_body, group);
         if packed.color_count > self.capacity.max_colors {
-            return Err(format!("{} colours exceed the soft colour capacity {}", packed.color_count, self.capacity.max_colors));
+            return Err(format!(
+                "{} colours exceed the soft colour capacity {}",
+                packed.color_count, self.capacity.max_colors
+            ));
         }
         // Break groups get global ids.
         let mut group_map = std::collections::HashMap::new();
@@ -195,7 +208,12 @@ impl SoftHost {
             .iter()
             .flat_map(|b| {
                 let w = b.to_words();
-                [[w[0], w[1], w[2], w[3]], [w[4], w[5], w[6], w[7]], [w[8], w[9], w[10], w[11]], [w[12], w[13], w[14], w[15]]]
+                [
+                    [w[0], w[1], w[2], w[3]],
+                    [w[4], w[5], w[6], w[7]],
+                    [w[8], w[9], w[10], w[11]],
+                    [w[12], w[13], w[14], w[15]],
+                ]
             })
             .collect();
         backend.write_soft_slots(l.beam_base + BEAM_STRIDE * first_beam, &words);
@@ -211,7 +229,12 @@ impl SoftHost {
                 for &n in &tri.nodes {
                     tri_adjacency[n as usize].push(t as u32);
                 }
-                [first_body + tri.nodes[0], first_body + tri.nodes[1], first_body + tri.nodes[2], s | (u32::from(tri.collision) << 8)]
+                [
+                    first_body + tri.nodes[0],
+                    first_body + tri.nodes[1],
+                    first_body + tri.nodes[2],
+                    s | (u32::from(tri.collision) << 8),
+                ]
             })
             .collect();
         if !tri_slots.is_empty() {
@@ -229,17 +252,30 @@ impl SoftHost {
         let mut core = None;
         let mut core_joints = 0..0;
         if let (Some(plan), Some(vh)) = (packed.core.clone(), vehicles) {
-            let CorePlan { vehicle, origin, frame_nodes } = plan;
+            let CorePlan {
+                vehicle,
+                origin,
+                frame_nodes,
+            } = plan;
             let world_origin = place.apply(origin);
             let cols_before = backend.collider_count();
             let h = vh
-                .add_vehicle(backend, &vehicle, world_origin.to_array(), place.rotation.to_array())
+                .add_vehicle(
+                    backend,
+                    &vehicle,
+                    world_origin.to_array(),
+                    place.rotation.to_array(),
+                )
                 .map_err(|e| format!("rigid core: {e:?}"))?;
             let chassis = vh.chassis_body(h);
             // The core's colliders join the vehicle's no-self-collision group.
             for ci in cols_before..backend.collider_count() {
                 let mut c = backend.host_collider(ci);
-                engine_schema::convex::CollisionFilter { group, ..Default::default() }.apply(&mut c);
+                engine_schema::convex::CollisionFilter {
+                    group,
+                    ..Default::default()
+                }
+                .apply(&mut c);
                 backend.write_collider(ci, &c);
             }
             if opts.velocity != [0.0; 3] {
@@ -298,8 +334,18 @@ impl SoftHost {
         let l = self.capacity.layout();
         let rec = [
             [e.first_body, e.particles, e.first_beam, e.beams],
-            [self.steer[s as usize].to_bits(), e.group as i32 as u32, e.core.map_or(SOFT_NONE, |c| c.1), e.ordinal_base],
-            [e.first_tri, e.tris, e.desc.collision_range.max(0.005).to_bits(), 0],
+            [
+                self.steer[s as usize].to_bits(),
+                e.group as i32 as u32,
+                e.core.map_or(SOFT_NONE, |c| c.1),
+                e.ordinal_base,
+            ],
+            [
+                e.first_tri,
+                e.tris,
+                e.desc.collision_range.max(0.005).to_bits(),
+                0,
+            ],
         ];
         backend.write_soft_slots(l.body_base + BODY_STRIDE * s, &rec);
     }
@@ -317,17 +363,35 @@ impl SoftHost {
             [c.bodies, c.beams, c.colors, list_count],
             [l.body_base, l.beam_base, l.list_base, l.adj_base],
             [l.color_base, l.group_base, c.groups + 1, flags],
-            [st.damping_scale.to_bits(), st.beta.to_bits(), st.min_length.to_bits(), st.hard_ratio.to_bits()],
-            [st.threshold_scale.to_bits(), st.ramp_start.to_bits(), st.chebyshev_rho.to_bits(), st.contact_stiffness.to_bits()],
+            [
+                st.damping_scale.to_bits(),
+                st.beta.to_bits(),
+                st.min_length.to_bits(),
+                st.hard_ratio.to_bits(),
+            ],
+            [
+                st.threshold_scale.to_bits(),
+                st.ramp_start.to_bits(),
+                st.chebyshev_rho.to_bits(),
+                st.contact_stiffness.to_bits(),
+            ],
             [l.cheb_base, l.tri_base, c.triangles, l.tri_contact_base],
             [l.node_slot_base, l.flag_base, l.obstacle_base, c.obstacles],
-            [l.aabb_base, c.particles_total, st.contact_friction.to_bits(), 0],
+            [
+                l.aabb_base,
+                c.particles_total,
+                st.contact_friction.to_bits(),
+                0,
+            ],
         ];
         backend.write_soft_slots(0, &header);
     }
 
     fn list_len(&self) -> u32 {
-        self.entries.iter().map(|e| e.desc.nodes.iter().filter(|n| !n.fixed).count() as u32).sum()
+        self.entries
+            .iter()
+            .map(|e| e.desc.nodes.iter().filter(|n| !n.fixed).count() as u32)
+            .sum()
     }
 
     /// Rebuild the colour lists and adjacency of every soft body (static topology;
@@ -350,7 +414,11 @@ impl SoftHost {
                     adj.push(e.first_tri + t);
                 }
                 let counts = e.adjacency[i].len() as u32 | (e.tri_adjacency[i].len() as u32) << 16;
-                let flags = if e.desc.nodes[i].contacter && e.desc.nodes[i].collision { ENTRY_CONTACTER } else { 0 };
+                let flags = if e.desc.nodes[i].contacter && e.desc.nodes[i].collision {
+                    ENTRY_CONTACTER
+                } else {
+                    0
+                };
                 lists[c as usize].push([e.first_body + i as u32, start, counts, s as u32 | flags]);
             }
         }
@@ -385,12 +453,19 @@ impl SoftHost {
 
     /// Register a thin static obstacle (sphere or capsule collider) that soft
     /// triangles collide with (poles and bollards narrower than node spacing).
-    pub fn add_obstacle(&mut self, backend: &mut impl SoftBackend, collider: u32) -> Result<(), String> {
+    pub fn add_obstacle(
+        &mut self,
+        backend: &mut impl SoftBackend,
+        collider: u32,
+    ) -> Result<(), String> {
         if self.obstacles.len() as u32 >= self.capacity.max_obstacles {
             return Err("obstacle capacity exhausted".into());
         }
         let l = self.capacity.layout();
-        backend.write_soft_slots(l.obstacle_base + self.obstacles.len() as u32, &[[collider, 0, 0, 0]]);
+        backend.write_soft_slots(
+            l.obstacle_base + self.obstacles.len() as u32,
+            &[[collider, 0, 0, 0]],
+        );
         self.obstacles.push(collider);
         self.write_header(backend);
         Ok(())
@@ -400,7 +475,10 @@ impl SoftHost {
     pub fn read_beams(&self, backend: &impl SoftBackend, h: SoftHandle) -> Vec<Beam> {
         let e = &self.entries[h.0 as usize];
         let l = self.capacity.layout();
-        let slots = backend.read_soft_slots(l.beam_base + BEAM_STRIDE * e.first_beam, BEAM_STRIDE * e.beams);
+        let slots = backend.read_soft_slots(
+            l.beam_base + BEAM_STRIDE * e.first_beam,
+            BEAM_STRIDE * e.beams,
+        );
         slots
             .chunks(4)
             .map(|c| {
@@ -428,14 +506,23 @@ pub struct BeamBreak {
 
 /// Decode beam breaks from the event ring words (cursor, then 4-word records)
 /// since `seen`; returns how many records were overwritten before being read.
-pub fn decode_beam_breaks(words: &[u32], seen: &mut u32, capacity: u32, out: &mut Vec<BeamBreak>) -> u32 {
+pub fn decode_beam_breaks(
+    words: &[u32],
+    seen: &mut u32,
+    capacity: u32,
+    out: &mut Vec<BeamBreak>,
+) -> u32 {
     let cursor = words[0];
     let lost = cursor.wrapping_sub(*seen).saturating_sub(capacity);
     let mut n = seen.wrapping_add(lost);
     while n != cursor {
         let r = 4 + 4 * (n % capacity) as usize;
         if words[r] == EVENT_BEAM_BREAK {
-            out.push(BeamBreak { beam: words[r + 1], force: f32::from_bits(words[r + 2]), soft_body: words[r + 3] });
+            out.push(BeamBreak {
+                beam: words[r + 1],
+                force: f32::from_bits(words[r + 2]),
+                soft_body: words[r + 3],
+            });
         }
         n = n.wrapping_add(1);
     }

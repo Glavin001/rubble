@@ -11,8 +11,9 @@ use crate::model::*;
 use engine_schema::convex::CollisionFilter;
 use engine_schema::{BodyState, Collider, ShapeType};
 use engine_vehicle::{
-    AntiRollDesc, AssistDesc, Curve, DifferentialDesc, DriveDesc, DrivetrainDesc, EngineDesc, PartColliderDesc, PartDesc,
-    PartRole, ShapeDesc, Spring, SteeringDesc, TransmissionDesc, VehicleDesc, WheelDesc,
+    AntiRollDesc, AssistDesc, Curve, DifferentialDesc, DriveDesc, DrivetrainDesc, EngineDesc,
+    PartColliderDesc, PartDesc, PartRole, ShapeDesc, Spring, SteeringDesc, TransmissionDesc,
+    VehicleDesc, WheelDesc,
 };
 use glam::{Quat, Vec3};
 use serde::{Deserialize, Serialize};
@@ -103,8 +104,18 @@ pub fn forward_axis(desc: &SoftVehicleDesc) -> Vec3 {
         }
     }
     let mid = |w: &SoftWheel| 0.5 * (p(w.node1) + p(w.node2));
-    let steer: Vec<Vec3> = desc.wheels.iter().filter(|w| w.steerable).map(mid).collect();
-    let other: Vec<Vec3> = desc.wheels.iter().filter(|w| !w.steerable).map(mid).collect();
+    let steer: Vec<Vec3> = desc
+        .wheels
+        .iter()
+        .filter(|w| w.steerable)
+        .map(mid)
+        .collect();
+    let other: Vec<Vec3> = desc
+        .wheels
+        .iter()
+        .filter(|w| !w.steerable)
+        .map(mid)
+        .collect();
     if !steer.is_empty() && !other.is_empty() {
         let a = steer.iter().copied().sum::<Vec3>() / steer.len() as f32;
         let b = other.iter().copied().sum::<Vec3>() / other.len() as f32;
@@ -125,10 +136,18 @@ pub fn frame_nodes(desc: &SoftVehicleDesc) -> Vec<u32> {
         set.insert(w.node1);
         set.insert(w.node2);
     }
-    set.into_iter().filter(|&i| !desc.nodes[i as usize].fixed).collect()
+    set.into_iter()
+        .filter(|&i| !desc.nodes[i as usize].fixed)
+        .collect()
 }
 
-pub fn pack_soft(desc: &SoftVehicleDesc, place: Placement, opts: &SpawnOptions, body_index: u32, group: i16) -> PackedSoft {
+pub fn pack_soft(
+    desc: &SoftVehicleDesc,
+    place: Placement,
+    opts: &SpawnOptions,
+    body_index: u32,
+    group: i16,
+) -> PackedSoft {
     let n = desc.nodes.len();
     let mut masses: Vec<f32> = desc.nodes.iter().map(|nd| nd.mass.max(1.0e-3)).collect();
     let core = if opts.rigid_core && !desc.wheels.is_empty() {
@@ -168,10 +187,15 @@ pub fn pack_soft(desc: &SoftVehicleDesc, place: Placement, opts: &SpawnOptions, 
             local_rot: [0.0, 0.0, 0.0, 1.0],
             params: [opts.node_radius, 0.0, 0.0, 0.0],
         };
-        CollisionFilter { group, ..Default::default() }.apply(&mut c);
+        CollisionFilter {
+            group,
+            ..Default::default()
+        }
+        .apply(&mut c);
         node_collider[i] = colliders.len() as u32;
         colliders.push(c);
     }
+    let core_nodes: Vec<u32> = core.as_ref().map_or(Vec::new(), |c| c.frame_nodes.clone());
     let mut beams = Vec::with_capacity(desc.beams.len());
     let mut adjacency = vec![Vec::new(); n];
     for sb in &desc.beams {
@@ -182,7 +206,11 @@ pub fn pack_soft(desc: &SoftVehicleDesc, place: Placement, opts: &SpawnOptions, 
             // Bounded beams never deform: the slot holds the stiff limit spring
             // (JBeam beamLimitSpring via `deform`; RoR's default beam spring otherwise).
             BeamKind::Bounded => (
-                if sb.deform.is_finite() && sb.deform < f32::MAX { sb.deform } else { crate::truck::DEFAULT_SPRING },
+                if sb.deform.is_finite() && sb.deform < f32::MAX {
+                    sb.deform
+                } else {
+                    crate::truck::DEFAULT_SPRING
+                },
                 f32::INFINITY,
             ),
             BeamKind::Normal => (sb.deform, sb.deform),
@@ -201,7 +229,17 @@ pub fn pack_soft(desc: &SoftVehicleDesc, place: Placement, opts: &SpawnOptions, 
             damp: sb.damp,
             deform_c,
             strength: sb.strength,
-            coef: if sb.kind == BeamKind::Hydro { sb.hydro_factor } else { sb.plastic_coef },
+            // Stage 1: the raycast wheels steer, and the core holds the axle nodes,
+            // so a hydro on an axle node keeps its length instead of fighting the core.
+            coef: if sb.kind == BeamKind::Hydro {
+                if core_nodes.contains(&sb.a) || core_nodes.contains(&sb.b) {
+                    0.0
+                } else {
+                    sb.hydro_factor
+                }
+            } else {
+                sb.plastic_coef
+            },
             short_bound,
             long_bound,
             kind,
@@ -220,7 +258,17 @@ pub fn pack_soft(desc: &SoftVehicleDesc, place: Placement, opts: &SpawnOptions, 
     }
     let edges: Vec<(u32, u32)> = desc.beams.iter().map(|b| (b.a, b.b)).collect();
     let (colors, color_count) = color_graph(n, &edges);
-    PackedSoft { bodies, colliders, node_collider, beams, adjacency, colors, color_count, core, masses }
+    PackedSoft {
+        bodies,
+        colliders,
+        node_collider,
+        beams,
+        adjacency,
+        colors,
+        color_count,
+        core,
+        masses,
+    }
 }
 
 fn core_plan(desc: &SoftVehicleDesc, masses: &mut [f32], opts: &SpawnOptions) -> CorePlan {
@@ -241,11 +289,19 @@ fn core_plan(desc: &SoftVehicleDesc, masses: &mut [f32], opts: &SpawnOptions) ->
         core_mass += t;
         centroid += p(i as u32) * t;
     }
-    let origin = if core_mass > 0.0 { centroid / core_mass } else { Vec3::ZERO };
+    let origin = if core_mass > 0.0 {
+        centroid / core_mass
+    } else {
+        Vec3::ZERO
+    };
     let mut inertia = Vec3::splat(1.0);
     for (i, &t) in taken.iter().enumerate() {
         let r = p(i as u32) - origin;
-        inertia += t * Vec3::new(r.y * r.y + r.z * r.z, r.x * r.x + r.z * r.z, r.x * r.x + r.y * r.y);
+        inertia += t * Vec3::new(
+            r.y * r.y + r.z * r.z,
+            r.x * r.x + r.z * r.z,
+            r.x * r.x + r.y * r.y,
+        );
     }
     let (mut mn, mut mx) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
     for &i in &frame {
@@ -253,7 +309,8 @@ fn core_plan(desc: &SoftVehicleDesc, masses: &mut [f32], opts: &SpawnOptions) ->
         mn = mn.min(r);
         mx = mx.max(r);
     }
-    let total_mass: f32 = masses.iter().sum::<f32>() + core_mass + desc.wheels.iter().map(|w| w.mass).sum::<f32>();
+    let total_mass: f32 =
+        masses.iter().sum::<f32>() + core_mass + desc.wheels.iter().map(|w| w.mass).sum::<f32>();
     let up = Vec3::Y;
     let forward = forward_axis(desc);
     let nw = desc.wheels.len().max(1) as f32;
@@ -300,7 +357,11 @@ fn core_plan(desc: &SoftVehicleDesc, masses: &mut [f32], opts: &SpawnOptions) ->
             steerable,
             driven: w.propulsion != 0,
             max_brake_torque: if w.braked { brake * w.radius } else { 0.0 },
-            max_handbrake_torque: if w.braked && !steerable { 2.0 * brake * w.radius } else { 0.0 },
+            max_handbrake_torque: if w.braked && !steerable {
+                2.0 * brake * w.radius
+            } else {
+                0.0
+            },
             handbrake: w.braked && !steerable,
             rolling_resistance: 0.012,
             ..Default::default()
@@ -328,7 +389,11 @@ fn core_plan(desc: &SoftVehicleDesc, masses: &mut [f32], opts: &SpawnOptions) ->
         };
         differentials.push(DifferentialDesc {
             left: Some(l as u32),
-            right: if pair.len() == 2 { Some(r as u32) } else { None },
+            right: if pair.len() == 2 {
+                Some(r as u32)
+            } else {
+                None
+            },
             ratio: desc.engine.as_ref().map_or(3.5, |e| e.diff_ratio),
             ..Default::default()
         });
@@ -339,10 +404,17 @@ fn core_plan(desc: &SoftVehicleDesc, masses: &mut [f32], opts: &SpawnOptions) ->
     }
     let eng = desc.engine.clone().unwrap_or_default();
     let drive = if differentials.is_empty() {
-        DriveDesc::Direct { max_torque: 0.0, top_speed: 1.0 }
+        DriveDesc::Direct {
+            max_torque: 0.0,
+            top_speed: 1.0,
+        }
     } else {
         DriveDesc::Drivetrain(DrivetrainDesc {
-            engine: EngineDesc { max_torque: eng.max_torque, max_rpm: eng.max_rpm, ..Default::default() },
+            engine: EngineDesc {
+                max_torque: eng.max_torque,
+                max_rpm: eng.max_rpm,
+                ..Default::default()
+            },
             transmission: TransmissionDesc {
                 gear_ratios: eng.gear_ratios.clone(),
                 reverse_ratios: vec![-eng.reverse_ratio.abs()],
@@ -361,10 +433,18 @@ fn core_plan(desc: &SoftVehicleDesc, masses: &mut [f32], opts: &SpawnOptions) ->
     let mut anti_roll = Vec::new();
     for i in 0..wheels.len() {
         for j in i + 1..wheels.len() {
-            let (a, b) = (Vec3::from_array(wheels[i].position), Vec3::from_array(wheels[j].position));
-            if (a.dot(forward) - b.dot(forward)).abs() < 0.3 && (a.dot(right) * b.dot(right)) < 0.0 {
+            let (a, b) = (
+                Vec3::from_array(wheels[i].position),
+                Vec3::from_array(wheels[j].position),
+            );
+            if (a.dot(forward) - b.dot(forward)).abs() < 0.3 && (a.dot(right) * b.dot(right)) < 0.0
+            {
                 let (l, r) = if a.dot(right) < 0.0 { (i, j) } else { (j, i) };
-                anti_roll.push(AntiRollDesc { left: l as u32, right: r as u32, stiffness: 0.5 * k });
+                anti_roll.push(AntiRollDesc {
+                    left: l as u32,
+                    right: r as u32,
+                    stiffness: 0.5 * k,
+                });
             }
         }
     }
@@ -379,7 +459,9 @@ fn core_plan(desc: &SoftVehicleDesc, masses: &mut [f32], opts: &SpawnOptions) ->
             role: PartRole::Engine,
             mass: core_mass.max(1.0),
             colliders: vec![PartColliderDesc {
-                shape: ShapeDesc::Box { half: half.to_array() },
+                shape: ShapeDesc::Box {
+                    half: half.to_array(),
+                },
                 position: center.to_array(),
                 rotation: [0.0, 0.0, 0.0, 1.0],
                 material: 0,
@@ -394,10 +476,21 @@ fn core_plan(desc: &SoftVehicleDesc, masses: &mut [f32], opts: &SpawnOptions) ->
         anti_roll,
         // Less lock at speed, as the rigid presets: full lock at 40 km/h would roll
         // a tall node–beam body.
-        steering: SteeringDesc { ackermann: 1.0, speed_curve: Curve::road_steering(), ..Default::default() },
-        assists: AssistDesc { traction_control: true, ..Default::default() },
+        steering: SteeringDesc {
+            ackermann: 1.0,
+            speed_curve: Curve::road_steering(),
+            ..Default::default()
+        },
+        assists: AssistDesc {
+            traction_control: true,
+            ..Default::default()
+        },
         can_sleep: true,
         ..Default::default()
     };
-    CorePlan { vehicle, origin, frame_nodes: frame }
+    CorePlan {
+        vehicle,
+        origin,
+        frame_nodes: frame,
+    }
 }

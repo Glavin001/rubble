@@ -62,7 +62,10 @@ impl Beam {
         w[BW_COEF] = self.coef.to_bits();
         w[BW_SHORT] = self.short_bound.to_bits();
         w[BW_LONG] = self.long_bound.to_bits();
-        w[BW_META] = (self.kind & 0xF) | (self.flags & 0xF0) | ((self.body & 0xFF) << 8) | ((self.group & 0xFFFF) << 16);
+        w[BW_META] = (self.kind & 0xF)
+            | (self.flags & 0xF0)
+            | ((self.body & 0xFF) << 8)
+            | ((self.group & 0xFFFF) << 16);
         w[BW_PENALTY] = self.penalty.to_bits();
         w[BW_LAMBDA] = self.lambda.to_bits();
         w[BW_DEFORM_T] = self.deform_t.to_bits();
@@ -141,14 +144,23 @@ pub fn elastic_terms(beam: &Beam, len: f32, k: f32) -> (f32, f32) {
 /// Damping coefficient in use for this state (supports and ropes slack at 10%).
 pub fn damping_coef(beam: &Beam, len: f32, scale: f32) -> f32 {
     let delta = len - beam.rest;
-    let slack = (beam.kind == KIND_SUPPORT && delta > 0.0) || (beam.kind == KIND_ROPE && delta < 0.0);
+    let slack =
+        (beam.kind == KIND_SUPPORT && delta > 0.0) || (beam.kind == KIND_ROPE && delta < 0.0);
     beam.damp * scale * if slack { 0.1 } else { 1.0 }
 }
 
 /// Gradient and Hessian block of `beam` for the particle at `xa` (the other end at
 /// `xb`), with step-start positions `xa0`, `xb0` for the axial dashpot.
 #[allow(clippy::too_many_arguments)]
-pub fn beam_block(beam: &Beam, xa: Vec3, xb: Vec3, xa0: Vec3, xb0: Vec3, h: f32, damp_scale: f32) -> (Vec3, Mat3) {
+pub fn beam_block(
+    beam: &Beam,
+    xa: Vec3,
+    xb: Vec3,
+    xa0: Vec3,
+    xb0: Vec3,
+    h: f32,
+    damp_scale: f32,
+) -> (Vec3, Mat3) {
     let d = xa - xb;
     let len = d.length();
     if len < 1.0e-6 {
@@ -186,7 +198,14 @@ pub struct PlasticOutcome {
 /// Post-step plasticity and breaking (RoR rules) at the converged length.
 /// `force` is [`readout_force`]. Only normal beams deform; hydros, shocks and
 /// supports never do.
-pub fn plastic_update(beam: &mut Beam, len: f32, force: f32, min_length: f32, plasticity: bool, breaking: bool) -> PlasticOutcome {
+pub fn plastic_update(
+    beam: &mut Beam,
+    len: f32,
+    force: f32,
+    min_length: f32,
+    plasticity: bool,
+    breaking: bool,
+) -> PlasticOutcome {
     let mut out = PlasticOutcome::default();
     beam.force = force;
     if beam.broken() {
@@ -285,7 +304,11 @@ mod tests {
             let mut dp = Vec3::ZERO;
             dp[i] = eps;
             let fd = (e(xa + dp) - e(xa - dp)) / (2.0 * eps);
-            assert!((fd - g[i]).abs() < 1e-2 * g.length().max(1.0), "axis {i}: {fd} vs {}", g[i]);
+            assert!(
+                (fd - g[i]).abs() < 1e-2 * g.length().max(1.0),
+                "axis {i}: {fd} vs {}",
+                g[i]
+            );
             // Hessian column by central difference of the gradient (stretched beam: no clamp).
             let (gp, _) = beam_block(&b, xa + dp, xb, xa + dp, xb, 1.0 / 60.0, 1.0);
             let (gm, _) = beam_block(&b, xa - dp, xb, xa - dp, xb, 1.0 / 60.0, 1.0);
@@ -297,7 +320,15 @@ mod tests {
     #[test]
     fn compressed_hessian_stays_psd() {
         let b = beam(1.0);
-        let (_, h) = beam_block(&b, Vec3::new(0.5, 0.0, 0.0), Vec3::ZERO, Vec3::new(0.5, 0.0, 0.0), Vec3::ZERO, 0.01, 1.0);
+        let (_, h) = beam_block(
+            &b,
+            Vec3::new(0.5, 0.0, 0.0),
+            Vec3::ZERO,
+            Vec3::new(0.5, 0.0, 0.0),
+            Vec3::ZERO,
+            0.01,
+            1.0,
+        );
         for v in [Vec3::X, Vec3::Y, Vec3::Z, Vec3::ONE.normalize()] {
             assert!(v.dot(h * v) >= -1e-6);
         }
@@ -313,7 +344,11 @@ mod tests {
         let o = plastic_update(&mut b, len, f, 0.1, true, true);
         assert!(o.yielded && !o.broke);
         // Coefficient 0: the elastic force after yielding equals the old threshold.
-        assert!((b.spring * (b.rest - len) - 1.0e4).abs() < 1.0, "rest {}", b.rest);
+        assert!(
+            (b.spring * (b.rest - len) - 1.0e4).abs() < 1.0,
+            "rest {}",
+            b.rest
+        );
         assert!(b.deform_c > 1.0e4, "hardens as it shortens");
     }
 

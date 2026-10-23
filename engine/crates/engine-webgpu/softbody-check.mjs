@@ -100,6 +100,23 @@ const CHECKS = {
       return await (new Function('page', `return (async () => { ${body} })()`))(page);
     },
   },
+  // Close-ups of the head-on crush: flexbody skin, collision skin, beam view.
+  headon_zoom: {
+    query: 'scene=headon',
+    run: async (page) => {
+      await page.step(360);
+      const views = [['flex', { skin: 'flex', beams: false, orbit: { yaw: 1.2, pitch: 0.25, dist: 3.2, target: [0.15, 0.7, 0] } }],
+        ['flex_top', { skin: 'flex', beams: false, orbit: { yaw: 0.0, pitch: 1.2, dist: 3.5, target: [0.15, 0.7, 0] } }],
+        ['collision', { skin: 'collision', beams: false, orbit: { yaw: 1.2, pitch: 0.25, dist: 3.2, target: [0.15, 0.7, 0] } }],
+        ['beams', { skin: 'flex', beams: true, orbit: { yaw: 1.2, pitch: 0.25, dist: 3.2, target: [0.15, 0.7, 0] } }]];
+      for (const [name, v] of views) {
+        await page.view(v);
+        await page.step(1);
+        await page.shot(`headon_zoom_${name}`);
+      }
+      return { ok: true, msg: `close-ups: ${views.map((v) => v[0]).join(', ')}` };
+    },
+  },
   // Chrome step cost: the yard (3 cars, 3 crates: 387 particles, 2,190 beams) at 240 Hz × 10 iterations.
   perf: {
     query: 'scene=yard',
@@ -182,6 +199,10 @@ const page = {
   step: (n, input = null) => evaluate(`window.__step(${n}, ${JSON.stringify(input)})`),
   view: (o) => evaluate(`window.__setView(${JSON.stringify(o)})`),
   eval: (e) => evaluate(e),
+  shot: async (name) => {
+    const shot = await send('Page.captureScreenshot', { format: 'png' });
+    writeFileSync(join(OUT, `${name}.png`), Buffer.from(shot.result.data, 'base64'));
+  },
 };
 let failed = 0;
 const report = [];

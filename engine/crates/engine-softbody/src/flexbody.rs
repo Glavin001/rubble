@@ -45,14 +45,22 @@ pub struct BindOptions {
 
 impl Default for BindOptions {
     fn default() -> Self {
-        Self { candidates: 12, max_edge: 1.5 }
+        Self {
+            candidates: 12,
+            max_edge: 1.5,
+        }
     }
 }
 
 /// Bind `vertices` to frames of `nodes` (rest positions). `allowed` restricts the
 /// nodes a mesh may bind to (a flexbody's node group); `None` allows all. Returns
 /// `None` for a vertex with no valid frame (BeamNG drops such meshes).
-pub fn bind(vertices: &[Vec3], nodes: &[Vec3], allowed: Option<&[u32]>, opts: BindOptions) -> Vec<Option<FlexBinding>> {
+pub fn bind(
+    vertices: &[Vec3],
+    nodes: &[Vec3],
+    allowed: Option<&[u32]>,
+    opts: BindOptions,
+) -> Vec<Option<FlexBinding>> {
     let pool: Vec<u32> = match allowed {
         Some(a) => a.to_vec(),
         None => (0..nodes.len() as u32).collect(),
@@ -62,7 +70,10 @@ pub fn bind(vertices: &[Vec3], nodes: &[Vec3], allowed: Option<&[u32]>, opts: Bi
         .iter()
         .map(|&v| {
             near.clear();
-            near.extend(pool.iter().map(|&i| ((nodes[i as usize] - v).length_squared(), i)));
+            near.extend(
+                pool.iter()
+                    .map(|&i| ((nodes[i as usize] - v).length_squared(), i)),
+            );
             let k = opts.candidates.min(near.len());
             if k < 3 {
                 return None;
@@ -101,15 +112,38 @@ pub fn bind(vertices: &[Vec3], nodes: &[Vec3], allowed: Option<&[u32]>, opts: Bi
                 return None;
             }
             let coords = f.inverse() * (v - pc);
-            Some(FlexBinding { nodes: [c, x, y], coords: coords.to_array() })
+            Some(FlexBinding {
+                nodes: [c, x, y],
+                coords: coords.to_array(),
+            })
+        })
+        .collect()
+}
+
+/// Bind each vertex to the three nodes of a given skin triangle (frame centre at
+/// its first node). A mesh derived from the skin keeps every vertex on the panel
+/// it came from, so a vertex near a seam never borrows nodes across it (a bumper
+/// tearing off would otherwise shear the frame and fling the vertex).
+pub fn bind_to_triangles(vertices: &[Vec3], nodes: &[Vec3], sources: &[[u32; 3]]) -> Vec<Option<FlexBinding>> {
+    vertices
+        .iter()
+        .zip(sources)
+        .map(|(&v, t)| {
+            let [c, x, y] = t.map(|i| nodes[i as usize]);
+            let f = frame(c, x, y);
+            if f.determinant().abs() < 1e-12 {
+                return None;
+            }
+            Some(FlexBinding { nodes: *t, coords: (f.inverse() * (v - c)).to_array() })
         })
         .collect()
 }
 
 /// A visual mesh made from a soft body's skin triangles: each triangle split in
 /// four with its edge midpoints pushed out along the averaged vertex normals, so
-/// flat node–beam panels read as rounded bodywork. Returns (vertices, triangles).
-pub fn rounded_skin(nodes: &[Vec3], triangles: &[[u32; 3]], bulge: f32) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+/// flat node–beam panels read as rounded bodywork. Returns (vertices, triangles,
+/// the skin triangle each vertex belongs to).
+pub fn rounded_skin(nodes: &[Vec3], triangles: &[[u32; 3]], bulge: f32) -> (Vec<Vec3>, Vec<[u32; 3]>, Vec<[u32; 3]>) {
     let mut normals = vec![Vec3::ZERO; nodes.len()];
     for t in triangles {
         let [a, b, c] = t.map(|i| nodes[i as usize]);
@@ -121,26 +155,44 @@ pub fn rounded_skin(nodes: &[Vec3], triangles: &[[u32; 3]], bulge: f32) -> (Vec<
     for n in &mut normals {
         *n = n.normalize_or_zero();
     }
+    // Corners are the nodes themselves; each edge midpoint is shared by the two
+    // panels on that edge and bound to one of them (the first), so both panels
+    // rebuild the same point and the skin stays closed under deformation.
     let mut verts: Vec<Vec3> = nodes.to_vec();
+    let mut sources: Vec<[u32; 3]> = vec![[u32::MAX; 3]; nodes.len()];
+    for t in triangles {
+        for k in 0..3 {
+            let v = t[k] as usize;
+            if sources[v][0] == u32::MAX {
+                sources[v] = [t[k], t[(k + 1) % 3], t[(k + 2) % 3]];
+            }
+        }
+    }
     let mut mids = std::collections::HashMap::new();
-    let mut mid = |a: u32, b: u32, verts: &mut Vec<Vec3>| -> u32 {
-        let key = (a.min(b), a.max(b));
-        *mids.entry(key).or_insert_with(|| {
-            let (pa, pb) = (nodes[a as usize], nodes[b as usize]);
-            let n = (normals[a as usize] + normals[b as usize]).normalize_or_zero();
-            verts.push(0.5 * (pa + pb) + n * (bulge * (pa - pb).length()));
-            verts.len() as u32 - 1
-        })
-    };
     let mut tris = Vec::with_capacity(triangles.len() * 4);
     for t in triangles {
         let [a, b, c] = *t;
-        let ab = mid(a, b, &mut verts);
-        let bc = mid(b, c, &mut verts);
-        let ca = mid(c, a, &mut verts);
+        let mut mid = |i: u32, j: u32, verts: &mut Vec<Vec3>, sources: &mut Vec<[u32; 3]>| -> u32 {
+            *mids.entry((i.min(j), i.max(j))).or_insert_with(|| {
+                let (pi, pj) = (nodes[i as usize], nodes[j as usize]);
+                let n = (normals[i as usize] + normals[j as usize]).normalize_or_zero();
+                verts.push(0.5 * (pi + pj) + n * (bulge * (pi - pj).length()));
+                sources.push(*t);
+                verts.len() as u32 - 1
+            })
+        };
+        let ab = mid(a, b, &mut verts, &mut sources);
+        let bc = mid(b, c, &mut verts, &mut sources);
+        let ca = mid(c, a, &mut verts, &mut sources);
         tris.extend_from_slice(&[[a, ab, ca], [ab, b, bc], [ca, bc, c], [ab, bc, ca]]);
     }
-    (verts, tris)
+    // Nodes no skin triangle touches keep a placeholder frame (unused by any face).
+    for (i, src) in sources.iter_mut().enumerate() {
+        if src[0] == u32::MAX {
+            *src = [i as u32; 3];
+        }
+    }
+    (verts, tris, sources)
 }
 
 #[cfg(test)]
@@ -163,7 +215,15 @@ mod tests {
     #[test]
     fn rigid_motion_reproduces_the_mesh() {
         let nodes = lattice();
-        let verts: Vec<Vec3> = (0..50).map(|i| Vec3::new((i as f32 * 0.37).fract(), (i as f32 * 0.61).fract(), (i as f32 * 0.13).fract()) * 1.0).collect();
+        let verts: Vec<Vec3> = (0..50)
+            .map(|i| {
+                Vec3::new(
+                    (i as f32 * 0.37).fract(),
+                    (i as f32 * 0.61).fract(),
+                    (i as f32 * 0.13).fract(),
+                ) * 1.0
+            })
+            .collect();
         let b = bind(&verts, &nodes, None, BindOptions::default());
         assert!(b.iter().all(Option::is_some));
         let q = Quat::from_rotation_y(0.7) * Quat::from_rotation_x(-0.3);
@@ -189,8 +249,14 @@ mod tests {
         }
         let near = b[0].unwrap().skin(&crushed);
         let far = b[1].unwrap().skin(&crushed);
-        assert!((near.x - verts[0].x - 0.2).abs() < 0.05, "near vertex follows its nodes: {near:?}");
-        assert!((far - verts[1]).length() < 0.05, "far vertex stays: {far:?}");
+        assert!(
+            (near.x - verts[0].x - 0.2).abs() < 0.05,
+            "near vertex follows its nodes: {near:?}"
+        );
+        assert!(
+            (far - verts[1]).length() < 0.05,
+            "far vertex stays: {far:?}"
+        );
     }
 
     #[test]
@@ -208,8 +274,14 @@ mod tests {
     fn rounded_skin_quadruples_triangles() {
         let nodes = vec![Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::Z];
         let tris = vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]];
-        let (v, t) = rounded_skin(&nodes, &tris, 0.05);
+        let (v, t, src) = rounded_skin(&nodes, &tris, 0.05);
         assert_eq!(t.len(), 16);
-        assert_eq!(v.len(), 4 + 6, "one midpoint per edge");
+        assert_eq!(v.len(), 4 + 6, "the nodes plus one shared midpoint per edge");
+        // Bound to their own panels, the vertices follow any motion of its nodes.
+        let b = bind_to_triangles(&v, &nodes, &src);
+        let moved: Vec<Vec3> = nodes.iter().map(|p| *p * 1.0 + Vec3::new(1.0, 2.0, 3.0)).collect();
+        for (vert, bnd) in v.iter().zip(&b) {
+            assert!((bnd.unwrap().skin(&moved) - (*vert + Vec3::new(1.0, 2.0, 3.0))).length() < 1e-5);
+        }
     }
 }

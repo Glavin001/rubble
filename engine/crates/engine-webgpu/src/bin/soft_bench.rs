@@ -15,8 +15,15 @@ use engine_webgpu::WgpuSim;
 
 fn main() -> anyhow::Result<()> {
     let rigid = std::env::args().any(|a| a == "--rigid");
-    let counts: Vec<usize> = std::env::args().skip(1).filter_map(|a| a.parse().ok()).collect();
-    let counts = if counts.is_empty() { vec![1, 10, 50] } else { counts };
+    let counts: Vec<usize> = std::env::args()
+        .skip(1)
+        .filter_map(|a| a.parse().ok())
+        .collect();
+    let counts = if counts.is_empty() {
+        vec![1, 10, 50]
+    } else {
+        counts
+    };
     let desc = load_truck(&car_truck(&CarParams::default()));
     for &n in &counts {
         let cap = WorldCapacity {
@@ -29,9 +36,26 @@ fn main() -> anyhow::Result<()> {
             max_commands: 64,
             max_hull_vertices: 64,
         };
-        let soft = SoftCapacity { max_bodies: 64, max_beams: 65536, max_particles: 8192, max_triangles: 32768, ..Default::default() };
-        let mut sim = WgpuSim::new_with_soft(cap, VehicleCapacity { max_vehicles: 64, max_wheels: 512, ..Default::default() }, soft)?;
-        let iters = std::env::var("ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
+        let soft = SoftCapacity {
+            max_bodies: 64,
+            max_beams: 65536,
+            max_particles: 8192,
+            max_triangles: 32768,
+            ..Default::default()
+        };
+        let mut sim = WgpuSim::new_with_soft(
+            cap,
+            VehicleCapacity {
+                max_vehicles: 64,
+                max_wheels: 512,
+                ..Default::default()
+            },
+            soft,
+        )?;
+        let iters = std::env::var("ITERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10);
         sim.set_params(soft_scene_params(240.0, iters));
         let mut st = engine_softbody::SoftSettings::default();
         if let Ok(r) = std::env::var("CHEB") {
@@ -41,8 +65,24 @@ fn main() -> anyhow::Result<()> {
             st.contacts = false;
         }
         sim.set_soft_settings(st);
-        sim.set_material(0, Material { friction: 1.0, restitution: 0.0, contact_offset: 0.01, _pad: 0.0 });
-        sim.set_material(9, Material { friction: 0.8, restitution: 0.0, contact_offset: 0.01, _pad: 0.0 });
+        sim.set_material(
+            0,
+            Material {
+                friction: 1.0,
+                restitution: 0.0,
+                contact_offset: 0.01,
+                _pad: 0.0,
+            },
+        );
+        sim.set_material(
+            9,
+            Material {
+                friction: 0.8,
+                restitution: 0.0,
+                contact_offset: 0.01,
+                _pad: 0.0,
+            },
+        );
         let ground = sim.add_body(BodyState::static_plane_support());
         sim.add_collider(Collider {
             body: ground,
@@ -60,16 +100,35 @@ fn main() -> anyhow::Result<()> {
             let (x, z) = ((i % cols) as f32 * 6.0, (i / cols) as f32 * 9.0);
             if rigid {
                 // Baseline: the rigid sedan preset, same count, no soft bodies.
-                cores.push(sim.add_vehicle(&engine_vehicle::presets::sedan(), [x, 1.0, z], [0.0, 0.0, 0.0, 1.0]).map_err(anyhow::Error::msg)?);
+                cores.push(
+                    sim.add_vehicle(
+                        &engine_vehicle::presets::sedan(),
+                        [x, 1.0, z],
+                        [0.0, 0.0, 0.0, 1.0],
+                    )
+                    .map_err(anyhow::Error::msg)?,
+                );
                 continue;
             }
             let h = sim
-                .add_soft_vehicle(&desc, [x, 0.05, z], [0.0, 0.0, 0.0, 1.0], &SpawnOptions::default())
+                .add_soft_vehicle(
+                    &desc,
+                    [x, 0.05, z],
+                    [0.0, 0.0, 0.0, 1.0],
+                    &SpawnOptions::default(),
+                )
                 .map_err(anyhow::Error::msg)?;
             cores.push(sim.soft_host().entry(h).core.unwrap().0);
         }
         for &c in &cores {
-            sim.set_vehicle_input(c, VehicleInput { forward: 0.5, steer: 0.3, ..Default::default() });
+            sim.set_vehicle_input(
+                c,
+                VehicleInput {
+                    forward: 0.5,
+                    steer: 0.3,
+                    ..Default::default()
+                },
+            );
         }
         for _ in 0..120 {
             sim.step()?;

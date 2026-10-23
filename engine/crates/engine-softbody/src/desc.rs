@@ -9,7 +9,11 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 mod inf_f32 {
     use super::*;
     pub fn serialize<S: Serializer>(v: &f32, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_f32(if v.is_infinite() { f32::MAX.copysign(*v) } else { *v })
+        s.serialize_f32(if v.is_infinite() {
+            f32::MAX.copysign(*v)
+        } else {
+            *v
+        })
     }
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
         Ok(Option::<f32>::deserialize(d)?.unwrap_or(f32::INFINITY))
@@ -271,9 +275,16 @@ impl SoftVehicleDesc {
         });
         let dropped = before - self.beams.len();
         if dropped > 0 {
-            self.warnings.push(format!("dropped {dropped} duplicate, zero-length or invalid beams"));
+            self.warnings.push(format!(
+                "dropped {dropped} duplicate, zero-length or invalid beams"
+            ));
         }
-        self.triangles.retain(|t| t.nodes.iter().all(|&i| i < n) && t.nodes[0] != t.nodes[1] && t.nodes[1] != t.nodes[2] && t.nodes[0] != t.nodes[2]);
+        self.triangles.retain(|t| {
+            t.nodes.iter().all(|&i| i < n)
+                && t.nodes[0] != t.nodes[1]
+                && t.nodes[1] != t.nodes[2]
+                && t.nodes[0] != t.nodes[2]
+        });
         let mut degree = vec![0u32; self.nodes.len()];
         for b in &self.beams {
             degree[b.a as usize] += 1;
@@ -281,7 +292,8 @@ impl SoftVehicleDesc {
         }
         let isolated = degree.iter().filter(|&&d| d == 0).count();
         if isolated > 0 {
-            self.warnings.push(format!("{isolated} isolated nodes (no beams)"));
+            self.warnings
+                .push(format!("{isolated} isolated nodes (no beams)"));
         }
         for node in &mut self.nodes {
             if node.mass < min_mass {

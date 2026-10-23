@@ -42,3 +42,7 @@ path = "src/bin/wg_drop.rs"
 [[bin]]
 name = "soft_bench"
 path = "src/bin/soft_bench.rs"
+
+[[bin]]
+name = "soft_calibrate"
+path = "src/bin/soft_calibrate.rs"

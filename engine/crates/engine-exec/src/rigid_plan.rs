@@ -423,7 +423,12 @@ pub fn encode_step(
         e.d("vehicle_prepare", u64::from(i.vehicle_count));
     }
     if soft {
-        let n = i.soft.beams.max(i.soft.groups).max(i.soft.particles).max(i.soft.particles_total);
+        let n = i
+            .soft
+            .beams
+            .max(i.soft.groups)
+            .max(i.soft.particles)
+            .max(i.soft.particles_total);
         e.d("soft_begin", u64::from(n.max(1)));
         if i.soft.contacts {
             // Soft contacts at the initial guess, frozen for the step.
@@ -472,7 +477,11 @@ pub fn encode_step(
                     e.dp("soft_primal", u64::from(i.soft.max_color.max(1)), color);
                 }
                 if i.soft.chebyshev {
-                    e.dp("soft_chebyshev", u64::from(i.soft.particles.max(1)), u32::from(iter));
+                    e.dp(
+                        "soft_chebyshev",
+                        u64::from(i.soft.particles.max(1)),
+                        u32::from(iter),
+                    );
                 }
             }
         }
@@ -1063,7 +1072,19 @@ mod tests {
     #[test]
     fn soft_passes_are_planned_in_order() {
         let mut i = inputs(10, 0);
-        i.soft = SoftCounts { bodies: 2, beams: 100, colors: 5, max_color: 30, groups: 1, particles: 60, chebyshev: true, particles_total: 60, triangles: 40, contacts: true, dual: false };
+        i.soft = SoftCounts {
+            bodies: 2,
+            beams: 100,
+            colors: 5,
+            max_color: 30,
+            groups: 1,
+            particles: 60,
+            chebyshev: true,
+            particles_total: 60,
+            triangles: 40,
+            contacts: true,
+            dual: false,
+        };
         let names: Vec<&str> = encode_step(&fast(), &i, false, true)
             .into_iter()
             .filter_map(|c| match c {
@@ -1071,20 +1092,43 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let at = |k: &str| names.iter().position(|n| *n == k).unwrap_or_else(|| panic!("{k} missing"));
+        let at = |k: &str| {
+            names
+                .iter()
+                .position(|n| *n == k)
+                .unwrap_or_else(|| panic!("{k} missing"))
+        };
         assert!(at("soft_wake") < at("predict_bodies"));
         assert!(at("predict_bodies") < at("soft_begin"));
-        assert!(at("soft_begin") < at("soft_collide_nodes") && at("soft_collide_nodes") < at("soft_collide_tris"));
+        assert!(
+            at("soft_begin") < at("soft_collide_nodes")
+                && at("soft_collide_nodes") < at("soft_collide_tris")
+        );
         assert!(at("soft_collide_tris") < at("soft_primal_fused"));
-        assert_eq!(names.iter().filter(|n| **n == "soft_primal_fused").count(), i.iterations as usize, "one fused sweep per iteration");
+        assert_eq!(
+            names.iter().filter(|n| **n == "soft_primal_fused").count(),
+            i.iterations as usize,
+            "one fused sweep per iteration"
+        );
         assert!(!names.contains(&"soft_dual"), "no-op dual pass skipped");
-        assert!(at("soft_plastic") < at("soft_break_groups") && at("soft_break_groups") < at("extract_velocity_sleep"));
+        assert!(
+            at("soft_plastic") < at("soft_break_groups")
+                && at("soft_break_groups") < at("extract_velocity_sleep")
+        );
         assert!(at("extract_velocity_sleep") < at("soft_sleep"));
         // Colours too large for one workgroup: one dispatch per colour, then Chebyshev.
         i.soft.max_color = SOFT_FUSED_MAX_COLOR + 1;
         let n = encode_step(&fast(), &i, false, true)
             .into_iter()
-            .filter(|c| matches!(c, Cmd::Dispatch { kernel: "soft_primal", .. }))
+            .filter(|c| {
+                matches!(
+                    c,
+                    Cmd::Dispatch {
+                        kernel: "soft_primal",
+                        ..
+                    }
+                )
+            })
             .count();
         assert_eq!(n, (i.soft.colors * i.iterations) as usize);
     }

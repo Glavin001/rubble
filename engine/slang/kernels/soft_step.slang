@@ -46,7 +46,9 @@ static const uint SOFT_BREAKING = 2u;
 static const uint SOFT_SLEEP_SYNC = 4u;
 static const uint SOFT_CONTACTS = 8u;
 static const uint ENTRY_CONTACTER = 65536u;
-static const uint TRI_CONTACT_STRIDE = 9u;
+// Node contacts a triangle records (the triangle side of node–triangle contacts).
+static const uint TRI_NODE_CONTACTS = 4u;
+static const uint TRI_CONTACT_STRIDE = 3u + 3u * TRI_NODE_CONTACTS;
 static const uint NODE_SLOT_STRIDE = 3u;
 // "No index" marker stored in float4 slots: FLT_MAX bits (an all-ones NaN pattern
 // cannot appear as a WGSL constant).
@@ -509,7 +511,7 @@ void soft_collide_nodes(uint3 tid : SV_DispatchThreadID)
     gSoftData[softFlagBase() + particleOrdinal(sb, body)] = float4(1, 0, 0, 0);
 }
 
-// Per collision triangle: its deepest thin obstacle, and the (up to two) nodes
+// Per collision triangle: its deepest thin obstacle, and the (up to four) nodes
 // that chose it in soft_collide_nodes (the triangle side of their contacts).
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -519,8 +521,7 @@ void soft_collide_tris(uint3 tid : SV_DispatchThreadID)
     if (t >= softTriCount()) return;
     uint tc = softTriContactBase() + TRI_CONTACT_STRIDE * t;
     gSoftData[tc] = float4(0, 0, 0, asfloat(SOFT_NONE));
-    gSoftData[tc + 3u] = float4(0, 0, 0, asfloat(SOFT_NONE));
-    gSoftData[tc + 6u] = float4(0, 0, 0, asfloat(SOFT_NONE));
+    for (uint m = 0u; m < TRI_NODE_CONTACTS; m++) gSoftData[tc + 3u + 3u * m] = float4(0, 0, 0, asfloat(SOFT_NONE));
     if (!softContactsOn()) return;
     uint4 tri = SU(softTriBase() + t);
     if (((tri.w >> 8) & 1u) == 0u) return;
@@ -572,12 +573,12 @@ void soft_collide_tris(uint3 tid : SV_DispatchThreadID)
     // Nodes of other soft bodies that chose this triangle.
     uint found = 0u;
     uint nb = softBodyCount();
-    for (uint s2 = 0u; s2 < nb && found < 2u; s2++)
+    for (uint s2 = 0u; s2 < nb && found < TRI_NODE_CONTACTS; s2++)
     {
         if (s2 == sb || !softAabbOverlaps(s2, lo - 0.3, hi + 0.3)) continue;
         uint4 r2 = softBodyRec(s2);
         uint ordBase = asuint(softBodyRec1(s2).w);
-        for (uint k = 0u; k < r2.y && found < 2u; k++)
+        for (uint k = 0u; k < r2.y && found < TRI_NODE_CONTACTS; k++)
         {
             uint ns = softNodeSlotBase() + NODE_SLOT_STRIDE * (ordBase + k);
             float4 s0 = SD(ns);
@@ -668,8 +669,7 @@ void softContactsFor(uint body, uint sb, float3 x, float3 x0, uint triStart, uin
             float C = dot(o0.xyz, triPoint(tri, o2.xyz) - o1.xyz) - o2.w;
             softContactTerm(g, H, wj, C, o1.w, o0.xyz, triTravel(tri, o2.xyz));
         }
-        [unroll]
-        for (uint m = 0u; m < 2u; m++)
+        for (uint m = 0u; m < TRI_NODE_CONTACTS; m++)
         {
             float4 c0 = SD(tc + 3u + 3u * m);
             uint node = asuint(c0.w);

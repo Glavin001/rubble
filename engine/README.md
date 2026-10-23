@@ -19,6 +19,10 @@ CPU/GPU verification) are described in [docs/convex-hulls.md](docs/convex-hulls.
 Vehicles (raycast wheels solved inside AVBD, drivetrain, tanks and motorcycles, severable parts, drivable
 WebGPU demo `vehicle.html`): see [docs/vehicles.md](docs/vehicles.md).
 
+Soft-body vehicles (node–beam cars that crumple and tear; Rigs of Rods `.truck` and BeamNG `.jbeam`
+import; particles and plastic, breakable beams in the same AVBD step; crash-test WebGPU demo
+`softbody.html`): see [docs/softbody.md](docs/softbody.md).
+
 ## Quick start (Metal)
 
 ```bash
@@ -85,7 +89,8 @@ Ported from `inspiration/pinned/three-avbd` paper/GPU showcases (Z-up → Y-up):
 | `crates/engine-oracles` | three-avbd / Newton / Jolt / demo3d adapters |
 | `crates/engine-webgpu` | Slang→SPIR-V→WGSL (fair Chrome bar vs three-avbd); `wgsl_smoke`; `index.html`, `demo.html`, `vehicle.html`, `fracture/` lab; the site is built by `scripts/build-web.sh` |
 | `crates/engine-vehicle` | Vehicle descriptors, presets, GPU record packing, host bookkeeping |
-| `crates/engine-vehicle-wasm` | wasm-bindgen face of `engine-vehicle` for the browser vehicle demo |
+| `crates/engine-vehicle-wasm` | wasm-bindgen face of `engine-vehicle` and `engine-softbody` for the browser vehicle and soft-body demos |
+| `crates/engine-softbody` | Soft-body vehicles: `.truck` / `.jbeam` importers, beam model, spawn colouring, GPU records, `SoftHost`, flexbody skinning, CPU reference, calibration metrics |
 | `crates/engine-fracture` | Fracture-lab host logic shared by the browser and Metal hosts: Shardwright GLB reader, scene builders, tick plan; stress cooking |
 | `crates/engine-fracture-wasm` | wasm-bindgen bindings of `engine-fracture` for the browser fracture lab |
 | `crates/engine-slang-build` | Runs `slangc` offline and embeds the Metal / SPIR-V / CUDA artifacts |

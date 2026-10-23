@@ -35,7 +35,7 @@
       <button id="resetBtn">reset (R)</button>
     </div>
     <div class="muted" style="margin-top:6px">
-      <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> drive · <kbd>Space</kbd> handbrake · <kbd>C</kbd> camera · <kbd>V</kbd> beam stress view · <kbd>M</kbd> flexbody / collision skin ·
+      <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> drive · <kbd>Space</kbd> handbrake · <kbd>C</kbd> camera · <kbd>V</kbd> beam view (load, plastic strain) · <kbd>M</kbd> flexbody / collision skin ·
       <kbd>B</kbd> fire a 300 kg ball · <kbd>T</kbd> side ram · drag to orbit, wheel to zoom
     </div>
     <div class="muted" id="truckInfo"></div>
@@ -50,7 +50,7 @@
   <script type="module">
     import { createWorld, sceneCapacity } from './world-host.mjs';
     import { L, WHEEL_RIM_MATERIAL } from './vehicle.mjs';
-    import { loadTruck, loadJbeam, proceduralCar, latticeCrate, SOFT } from './soft.mjs';
+    import { loadTruck, loadJbeam, proceduralCar, latticeCrate, calibratedSettings, SOFT } from './soft.mjs';
 
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
@@ -114,8 +114,12 @@
     world.setMaterial(MAT_PROP, 0.6);
     world.setMaterial(MAT_NODE, 0.8);
     world.setMaterial(WHEEL_RIM_MATERIAL, 0.9);
-    const threshold = Number(qs.get('threshold')) || 1.0;
-    world.setSoftSettings({ threshold_scale: threshold });
+    // Deform/break thresholds scaled for the step rate (engine_softbody
+    // SoftSettings::calibrated_for, fitted by soft_calibrate); ?threshold=1 keeps
+    // the file's raw values.
+    const calibrated = calibratedSettings(HZ);
+    const threshold = Number(qs.get('threshold')) || calibrated.threshold_scale;
+    world.setSoftSettings({ ...calibrated, threshold_scale: threshold });
 
     const qAxis = (ax, ang) => { const s = Math.sin(ang / 2); return [ax[0] * s, ax[1] * s, ax[2] * s, Math.cos(ang / 2)]; };
     const boxInv = (m, hx, hy, hz) => [3 / (m * (hy * hy + hz * hz)), 3 / (m * (hx * hx + hz * hz)), 3 / (m * (hx * hx + hy * hy))];
@@ -391,8 +395,10 @@ fn flexVertex(v: u32, torn: ptr<function, bool>, strain: ptr<function, f32>) -> 
   return vec4f(shade(i.c, n, i.w), 1.0);
 }
 
-// Beam view: one line per beam, coloured by load (|F| over its yield threshold,
-// green → red), orange once it has yielded, hidden once broken.
+// Beam view: one line per beam. Intact beams go green → blue with load (|F| over
+// the yield threshold); a beam with permanent plastic strain |L/L₀ − 1| goes
+// yellow → red (8%), so a millimetre of yield does not read as wreckage; broken
+// beams are hidden.
 @vertex fn vsBeam(@builtin(vertex_index) vi: u32, @builtin(instance_index) inst: u32) -> Out {
   let base = soft[1u].y + 4u * inst;
   let s0 = soft[base];
@@ -404,8 +410,9 @@ fn flexVertex(v: u32, torn: ptr<function, bool>, strain: ptr<function, f32>) -> 
   var o: Out;
   o.w = p; o.center = p; o.r = 0.0; o.n = vec3f(0.0, 1.0, 0.0);
   let load = clamp(abs(s3.w) / max(s1.z, 1.0), 0.0, 1.0);
-  o.c = mix(vec3f(0.15, 0.85, 0.35), vec3f(1.0, 0.1, 0.1), load);
-  if ((flags & ${SOFT.BEAM_YIELDED}u) != 0u) { o.c = vec3f(1.0, 0.55, 0.05); }
+  o.c = mix(vec3f(0.15, 0.85, 0.35), vec3f(0.3, 0.55, 1.0), load);
+  let strain = abs(bitcast<f32>(s0.z) / max(bitcast<f32>(s0.w), 1e-4) - 1.0);
+  if (strain > 0.002) { o.c = mix(vec3f(1.0, 0.85, 0.1), vec3f(1.0, 0.1, 0.05), clamp(strain / 0.08, 0.0, 1.0)); }
   if ((flags & ${SOFT.BEAM_INVISIBLE}u) != 0u) { o.c = o.c * 0.55; }
   let broken = (flags & ${SOFT.BEAM_BROKEN}u) != 0u || inst >= soft[0u].y;
   o.clip = select(frame.viewProj * vec4f(p, 1.0), HIDE, broken || frame.opts.x < 0.5);

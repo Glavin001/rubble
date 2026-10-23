@@ -54,7 +54,12 @@ struct Scale {
 
 impl Default for Scale {
     fn default() -> Self {
-        Self { spring: 1.0, damp: 1.0, deform: 1.0, brk: 1.0 }
+        Self {
+            spring: 1.0,
+            damp: 1.0,
+            deform: 1.0,
+            brk: 1.0,
+        }
     }
 }
 
@@ -140,7 +145,9 @@ fn tokens(line: &str) -> Vec<&str> {
 }
 
 fn f(t: &[&str], i: usize, default: f32) -> f32 {
-    t.get(i).and_then(|s| s.parse::<f32>().ok()).unwrap_or(default)
+    t.get(i)
+        .and_then(|s| s.parse::<f32>().ok())
+        .unwrap_or(default)
 }
 
 /// `-1` (or any negative) means "use the default" in RoR's default directives.
@@ -166,12 +173,16 @@ struct Parser {
     next_number: u32,
     skipped: HashMap<String, u32>,
     line_no: usize,
+    /// `cameras` lines, resolved after the file (they may precede `nodes`).
+    cameras: Vec<(usize, Vec<String>)>,
 }
 
 impl Parser {
     fn warn(&mut self, msg: String) {
         if self.out.warnings.len() < 200 {
-            self.out.warnings.push(format!("line {}: {msg}", self.line_no));
+            self.out
+                .warnings
+                .push(format!("line {}: {msg}", self.line_no));
         }
     }
 
@@ -240,15 +251,62 @@ impl Parser {
             "cameras" => Section::Cameras,
             "cinecam" => Section::Cinecam,
             // Known sections this importer does not simulate (phase 3 / cosmetic).
-            "engoption" | "engturbo" | "torquecurve" | "axles" | "flexbodies" | "props" | "slidenodes"
-            | "rotators" | "rotators2" | "ties" | "ropes" | "ropables" | "triggers" | "wings" | "turboprops"
-            | "turboprops2" | "turbojets" | "pistonprops" | "screwprops" | "soundsources" | "soundsources2"
-            | "flares" | "flares2" | "flares3" | "exhausts" | "particles" | "materialflarebindings"
-            | "managedmaterials" | "airbrakes" | "animators" | "texcoords" | "railgroups" | "slidenode_connect_instantly"
-            | "collisionboxes" | "camerarail" | "lockgroups" | "videocamera" | "interaxles" | "transfercase"
-            | "nodecollision" | "fusedrag" | "description" | "help" | "comment" | "submesh_groundmodel_only"
-            | "tractioncontrol" | "antilockbrakes" | "cruisecontrol" | "speedlimiter" | "guisettings"
-            | "set_shadows" | "fileinfo" | "author" | "guid" | "extcamera" | "globeams" => Section::Skipped,
+            "engoption"
+            | "engturbo"
+            | "torquecurve"
+            | "axles"
+            | "flexbodies"
+            | "props"
+            | "slidenodes"
+            | "rotators"
+            | "rotators2"
+            | "ties"
+            | "ropes"
+            | "ropables"
+            | "triggers"
+            | "wings"
+            | "turboprops"
+            | "turboprops2"
+            | "turbojets"
+            | "pistonprops"
+            | "screwprops"
+            | "soundsources"
+            | "soundsources2"
+            | "flares"
+            | "flares2"
+            | "flares3"
+            | "exhausts"
+            | "particles"
+            | "materialflarebindings"
+            | "managedmaterials"
+            | "airbrakes"
+            | "animators"
+            | "texcoords"
+            | "railgroups"
+            | "slidenode_connect_instantly"
+            | "collisionboxes"
+            | "camerarail"
+            | "lockgroups"
+            | "videocamera"
+            | "interaxles"
+            | "transfercase"
+            | "nodecollision"
+            | "fusedrag"
+            | "description"
+            | "help"
+            | "comment"
+            | "submesh_groundmodel_only"
+            | "tractioncontrol"
+            | "antilockbrakes"
+            | "cruisecontrol"
+            | "speedlimiter"
+            | "guisettings"
+            | "set_shadows"
+            | "fileinfo"
+            | "author"
+            | "guid"
+            | "extcamera"
+            | "globeams" => Section::Skipped,
             _ => return false,
         };
         if section == Section::Skipped {
@@ -298,16 +356,43 @@ impl Parser {
             "set_default_minimass" => self.out.minimass = fd(t, 1, DEFAULT_MINIMASS),
             "enable_advanced_deformation" => self.out.advanced_deformation = true,
             "detacher_group" => {
-                self.detacher_group = if t.get(1) == Some(&"end") { 0 } else { f(t, 1, 0.0).abs() as u32 };
+                self.detacher_group = if t.get(1) == Some(&"end") {
+                    0
+                } else {
+                    f(t, 1, 0.0).abs() as u32
+                };
             }
             "set_collision_range" => self.out.collision_range = fd(t, 1, DEFAULT_COLLISION_RANGE),
             "fileformatversion" => self.out.file_format_version = f(t, 1, 0.0) as u32,
-            "forwardcommands" | "importcommands" | "rescuer" | "disabledefaultsounds" | "hideInChooser"
-            | "lockgroup_default_nolock" | "rollon" | "slopebrake" | "submesh" | "backmesh" | "forset"
-            | "set_skeleton_settings" | "set_managedmaterials_options" | "set_inertia_defaults"
-            | "set_shadows" | "prop_camera_mode" | "flexbody_camera_mode" | "add_animation" | "sectionconfig"
-            | "section" | "end_section" | "submesh_groundmodel" | "speedlimiter" | "guid" | "author" | "fileinfo"
-            | "enable_advanced_deformation_end" | "end_description" | "end_comment" => {
+            "forwardcommands"
+            | "importcommands"
+            | "rescuer"
+            | "disabledefaultsounds"
+            | "hideInChooser"
+            | "lockgroup_default_nolock"
+            | "rollon"
+            | "slopebrake"
+            | "submesh"
+            | "backmesh"
+            | "forset"
+            | "set_skeleton_settings"
+            | "set_managedmaterials_options"
+            | "set_inertia_defaults"
+            | "set_shadows"
+            | "prop_camera_mode"
+            | "flexbody_camera_mode"
+            | "add_animation"
+            | "sectionconfig"
+            | "section"
+            | "end_section"
+            | "submesh_groundmodel"
+            | "speedlimiter"
+            | "guid"
+            | "author"
+            | "fileinfo"
+            | "enable_advanced_deformation_end"
+            | "end_description"
+            | "end_comment" => {
                 if word == "end_description" || word == "end_comment" {
                     self.section = Section::None;
                 }
@@ -338,7 +423,9 @@ impl Parser {
                 if t.len() < 2 {
                     return;
                 }
-                let (Some(a), Some(b)) = (self.node(t[0]), self.node(t[1])) else { return };
+                let (Some(a), Some(b)) = (self.node(t[0]), self.node(t[1])) else {
+                    return;
+                };
                 let mut beam = self.beam(a, b);
                 let opts = t.get(2).copied().unwrap_or("n");
                 for c in opts.chars() {
@@ -348,7 +435,11 @@ impl Parser {
                         's' => {
                             beam.kind = BeamKind::Support;
                             let factor = f(t, 3, DEFAULT_SUPPORT_BREAK_FACTOR);
-                            beam.long_bound = if factor > 0.0 { factor } else { DEFAULT_SUPPORT_BREAK_FACTOR };
+                            beam.long_bound = if factor > 0.0 {
+                                factor
+                            } else {
+                                DEFAULT_SUPPORT_BREAK_FACTOR
+                            };
                         }
                         _ => {}
                     }
@@ -360,7 +451,9 @@ impl Parser {
                 if t.len() < 3 {
                     return;
                 }
-                let (Some(a), Some(b)) = (self.node(t[0]), self.node(t[1])) else { return };
+                let (Some(a), Some(b)) = (self.node(t[0]), self.node(t[1])) else {
+                    return;
+                };
                 let mut beam = self.beam(a, b);
                 beam.kind = BeamKind::Hydro;
                 beam.hydro_factor = f(t, 2, 0.0);
@@ -374,7 +467,9 @@ impl Parser {
                 if t.len() < 2 {
                     return;
                 }
-                let (Some(a), Some(b)) = (self.node(t[0]), self.node(t[1])) else { return };
+                let (Some(a), Some(b)) = (self.node(t[0]), self.node(t[1])) else {
+                    return;
+                };
                 // Key-bound actuators: simulated as fixed-length hydros (no input bound yet).
                 let mut beam = self.beam(a, b);
                 beam.kind = BeamKind::Hydro;
@@ -386,10 +481,19 @@ impl Parser {
                 if t.len() < 3 {
                     return;
                 }
-                let (Some(a), Some(b), Some(c)) = (self.node(t[0]), self.node(t[1]), self.node(t[2])) else { return };
+                let (Some(a), Some(b), Some(c)) =
+                    (self.node(t[0]), self.node(t[1]), self.node(t[2]))
+                else {
+                    return;
+                };
                 let opts = t.get(3).copied().unwrap_or("");
-                let collision = opts.chars().any(|c| matches!(c, 'c' | 'p' | 'u' | 'D' | 'F' | 'S'));
-                self.out.triangles.push(SoftTriangle { nodes: [a, b, c], collision });
+                let collision = opts
+                    .chars()
+                    .any(|c| matches!(c, 'c' | 'p' | 'u' | 'D' | 'F' | 'S'));
+                self.out.triangles.push(SoftTriangle {
+                    nodes: [a, b, c],
+                    collision,
+                });
             }
             Section::Contacters => {
                 for tok in t {
@@ -405,34 +509,49 @@ impl Parser {
                     }
                 }
             }
-            Section::Wheels | Section::Wheels2 | Section::MeshWheels | Section::MeshWheels2 | Section::FlexBodyWheels => {
-                self.parse_wheel(t)
-            }
+            Section::Wheels
+            | Section::Wheels2
+            | Section::MeshWheels
+            | Section::MeshWheels2
+            | Section::FlexBodyWheels => self.parse_wheel(t),
             Section::Engine => {
-                let mut ratios: Vec<f32> = t.iter().skip(4).filter_map(|s| s.parse::<f32>().ok()).collect();
+                let mut ratios: Vec<f32> = t
+                    .iter()
+                    .skip(4)
+                    .filter_map(|s| s.parse::<f32>().ok())
+                    .collect();
                 if let Some(end) = ratios.iter().position(|&r| r < 0.0) {
                     ratios.truncate(end);
                 }
                 // ratios = [reverse, neutral, forward…]
                 let reverse = ratios.first().copied().unwrap_or(3.0);
-                let gears: Vec<f32> = ratios.iter().skip(2).copied().collect();
+                let mut gears: Vec<f32> = ratios.iter().skip(2).copied().collect();
+                // Rubble's gearbox holds 8 ratios with reverse: keep 7 forward spread
+                // over the range (first and top included) and say so.
+                if gears.len() > 7 {
+                    let n = gears.len();
+                    let picked: Vec<f32> = (0..7).map(|k| gears[(k * (n - 1) + 3) / 6]).collect();
+                    self.warn(format!("{n} forward gears: Rubble's gearbox holds 7 with reverse, kept {picked:?}"));
+                    gears = picked;
+                }
                 self.out.engine = Some(SoftEngine {
                     shift_down_rpm: f(t, 0, 1500.0),
                     shift_up_rpm: f(t, 1, 4500.0),
                     max_torque: f(t, 2, 400.0),
                     diff_ratio: f(t, 3, 3.5),
                     reverse_ratio: reverse,
-                    gear_ratios: if gears.is_empty() { SoftEngine::default().gear_ratios } else { gears },
+                    gear_ratios: if gears.is_empty() {
+                        SoftEngine::default().gear_ratios
+                    } else {
+                        gears
+                    },
                     max_rpm: (f(t, 1, 4500.0) * 1.25).max(3000.0),
                 });
             }
             Section::Brakes => self.out.brake_force = Some(f(t, 0, 30000.0)),
             Section::Cameras => {
                 if t.len() >= 3 {
-                    let (Some(center), Some(back), Some(left)) = (self.node(t[0]), self.node(t[1]), self.node(t[2])) else { return };
-                    if self.out.cameras.is_none() {
-                        self.out.cameras = Some(RefNodes { center, back, left });
-                    }
+                    self.cameras.push((self.line_no, t[..3].iter().map(|x| x.to_string()).collect()));
                 }
             }
             Section::Cinecam => {
@@ -453,7 +572,10 @@ impl Parser {
         if self.section == Section::Nodes && self.sequential() {
             if let Ok(n) = id.parse::<u32>() {
                 if n != self.next_number {
-                    self.warn(format!("node {n} out of sequence (expected {})", self.next_number));
+                    self.warn(format!(
+                        "node {n} out of sequence (expected {})",
+                        self.next_number
+                    ));
                 }
             }
         }
@@ -500,13 +622,36 @@ impl Parser {
             self.warn(format!("{s:?} line needs {need} fields"));
             return;
         }
-        let (Some(a), Some(b)) = (self.node(t[0]), self.node(t[1])) else { return };
+        let (Some(a), Some(b)) = (self.node(t[0]), self.node(t[1])) else {
+            return;
+        };
         let (spring, damp, short, long, pre, opt_i) = match s {
-            Section::Shocks => (f(t, 2, 0.0), f(t, 3, 0.0), f(t, 4, 0.0), f(t, 5, 0.0), f(t, 6, 1.0), 7),
+            Section::Shocks => (
+                f(t, 2, 0.0),
+                f(t, 3, 0.0),
+                f(t, 4, 0.0),
+                f(t, 5, 0.0),
+                f(t, 6, 1.0),
+                7,
+            ),
             // shocks2: spring/damp in and out — use the "in" pair for the spring-damper.
-            Section::Shocks2 => (f(t, 2, 0.0), f(t, 3, 0.0), f(t, 8, 0.0), f(t, 9, 0.0), f(t, 10, 1.0), 11),
+            Section::Shocks2 => (
+                f(t, 2, 0.0),
+                f(t, 3, 0.0),
+                f(t, 8, 0.0),
+                f(t, 9, 0.0),
+                f(t, 10, 1.0),
+                11,
+            ),
             // shocks3: spring_in, damp_in, damp_in_fast, vsplit_in, spring_out, …
-            _ => (f(t, 2, 0.0), f(t, 3, 0.0), f(t, 10, 0.0), f(t, 11, 0.0), f(t, 12, 1.0), 13),
+            _ => (
+                f(t, 2, 0.0),
+                f(t, 3, 0.0),
+                f(t, 10, 0.0),
+                f(t, 11, 0.0),
+                f(t, 12, 1.0),
+                13,
+            ),
         };
         let mut beam = self.beam(a, b);
         beam.kind = BeamKind::Bounded;
@@ -519,7 +664,11 @@ impl Parser {
         let opts = t.get(opt_i).copied().unwrap_or("n");
         let metric = opts.contains('m');
         let l0 = self.rest(a, b) * beam.precompression;
-        let (short, long) = if metric && l0 > 1e-6 { (short / l0, long / l0) } else { (short, long) };
+        let (short, long) = if metric && l0 > 1e-6 {
+            (short / l0, long / l0)
+        } else {
+            (short, long)
+        };
         beam.short_bound = short.max(0.0);
         beam.long_bound = long.max(0.0);
         if opts.contains('i') {
@@ -549,9 +698,15 @@ impl Parser {
             return;
         }
         let rays = f(t, n1_col - 1, 12.0).max(1.0) as u32;
-        let (Some(node1), Some(node2)) = (self.node(t[n1_col]), self.node(t[n1_col + 1])) else { return };
+        let (Some(node1), Some(node2)) = (self.node(t[n1_col]), self.node(t[n1_col + 1])) else {
+            return;
+        };
         let arm_tok = t[n1_col + 5];
-        let arm = if arm_tok == "9999" || arm_tok == "-1" { None } else { self.ids.get(arm_tok).copied() };
+        let arm = if arm_tok == "9999" || arm_tok == "-1" {
+            None
+        } else {
+            self.ids.get(arm_tok).copied()
+        };
         let radius = match s {
             Section::Wheels => f(t, 0, 0.4),
             // wheels2: rim radius, tyre radius; mesh/flexbody wheels: tyre radius first.
@@ -597,6 +752,7 @@ pub fn parse_truck(src: &str) -> TruckFile {
         next_number: 0,
         skipped: HashMap::new(),
         line_no: 0,
+        cameras: Vec::new(),
     };
     let mut have_title = false;
     for (i, raw) in src.lines().enumerate() {
@@ -628,14 +784,33 @@ pub fn parse_truck(src: &str) -> TruckFile {
             p.out.minimass_skip_loaded = t.get(2) == Some(&"l");
             continue;
         }
-        if t.len() == 1 && word.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) && p.keyword(word, &t) {
+        if t.len() == 1
+            && word.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+            && p.keyword(word, &t)
+        {
             continue;
         }
         if p.directive(word, &t) {
             continue;
         }
         if word.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
-            && !matches!(p.section, Section::Nodes2 | Section::Nodes | Section::Beams | Section::Cab | Section::Contacters | Section::Fixes | Section::Skipped | Section::Shocks | Section::Shocks2 | Section::Shocks3 | Section::Hydros | Section::Commands | Section::Commands2 | Section::Cameras)
+            && !matches!(
+                p.section,
+                Section::Nodes2
+                    | Section::Nodes
+                    | Section::Beams
+                    | Section::Cab
+                    | Section::Contacters
+                    | Section::Fixes
+                    | Section::Skipped
+                    | Section::Shocks
+                    | Section::Shocks2
+                    | Section::Shocks3
+                    | Section::Hydros
+                    | Section::Commands
+                    | Section::Commands2
+                    | Section::Cameras
+            )
         {
             // An unknown keyword: skip its block with a warning.
             if t.len() == 1 {
@@ -646,10 +821,19 @@ pub fn parse_truck(src: &str) -> TruckFile {
         }
         p.data(&t);
     }
+    for (line, t) in std::mem::take(&mut p.cameras) {
+        p.line_no = line;
+        let (Some(center), Some(back), Some(left)) = (p.node(&t[0]), p.node(&t[1]), p.node(&t[2])) else { continue };
+        if p.out.cameras.is_none() {
+            p.out.cameras = Some(RefNodes { center, back, left });
+        }
+    }
     let mut skipped: Vec<_> = p.skipped.into_iter().collect();
     skipped.sort();
     for (s, _) in skipped {
-        p.out.warnings.push(format!("section `{s}` skipped (not simulated)"));
+        p.out
+            .warnings
+            .push(format!("section `{s}` skipped (not simulated)"));
     }
     for &c in &p.out.contacters.clone() {
         p.out.nodes[c as usize].contacter = true;
@@ -665,7 +849,9 @@ pub fn distribute_masses(file: &mut TruckFile) {
     let n = file.nodes.len();
     let mut mass = vec![0.0f32; n];
     // 1. Cargo on loaded nodes.
-    let shared: Vec<usize> = (0..n).filter(|&i| file.loaded[i].0 && file.loaded[i].1.is_none()).collect();
+    let shared: Vec<usize> = (0..n)
+        .filter(|&i| file.loaded[i].0 && file.loaded[i].1.is_none())
+        .collect();
     for i in 0..n {
         if let (true, Some(w)) = file.loaded[i] {
             mass[i] = w;
@@ -681,7 +867,12 @@ pub fn distribute_masses(file: &mut TruckFile) {
     let pos = |i: u32| Vec3::from_array(file.nodes[i as usize].position);
     let mut halves: Vec<(u32, f32)> = Vec::new();
     for b in &file.beams {
-        let l = (pos(b.a) - pos(b.b)).length() * if b.kind == BeamKind::Bounded { b.precompression } else { 1.0 };
+        let l = (pos(b.a) - pos(b.b)).length()
+            * if b.kind == BeamKind::Bounded {
+                b.precompression
+            } else {
+                1.0
+            };
         halves.push((b.a, 0.5 * l));
         halves.push((b.b, 0.5 * l));
     }
@@ -741,22 +932,29 @@ fn lower(file: TruckFile) -> SoftVehicleDesc {
         }
     }
     for w in &file.wheels {
-        // Steering: a wheel whose arm node is driven by a hydro steers. The max
-        // angle comes from the hydro's travel over the arm's lever.
+        // Steering: a hydro on the wheel's axle or arm nodes, or one beam from them, steers it.
+        // The max angle is the hydro's travel over its lever about the axle midpoint.
         let mut steerable = false;
         let mut max_steer = 0.0f32;
-        if let Some(arm) = w.arm {
-            for b in desc.beams.iter().filter(|b| b.kind == BeamKind::Hydro && b.hydro_factor != 0.0) {
-                if b.a != arm && b.b != arm {
-                    continue;
-                }
-                let p = |i: u32| Vec3::from_array(desc.nodes[i as usize].position);
-                let hub = 0.5 * (p(w.node1) + p(w.node2));
-                let lever = (p(arm) - hub).length().max(0.05);
-                let travel = (p(b.a) - p(b.b)).length() * b.hydro_factor.abs();
-                steerable = true;
-                max_steer = max_steer.max((travel / lever).atan().clamp(10f32.to_radians(), 45f32.to_radians()));
+        let p = |i: u32| Vec3::from_array(desc.nodes[i as usize].position);
+        let hub = 0.5 * (p(w.node1) + p(w.node2));
+        // The wheel's nodes and their beam neighbours (steering linkages are often one
+        // beam away from the axle, as on the Agora bus).
+        let mut ends: Vec<u32> = [Some(w.node1), Some(w.node2), w.arm].into_iter().flatten().collect();
+        let direct = ends.clone();
+        for b in desc.beams.iter().filter(|b| b.kind != BeamKind::Hydro) {
+            if direct.contains(&b.a) && !ends.contains(&b.b) {
+                ends.push(b.b);
+            } else if direct.contains(&b.b) && !ends.contains(&b.a) {
+                ends.push(b.a);
             }
+        }
+        for b in desc.beams.iter().filter(|b| b.kind == BeamKind::Hydro && b.hydro_factor != 0.0) {
+            let Some(&end) = ends.iter().find(|&&e| b.a == e || b.b == e) else { continue };
+            let lever = (p(end) - hub).length().max(0.2);
+            let travel = (p(b.a) - p(b.b)).length() * b.hydro_factor.abs();
+            steerable = true;
+            max_steer = max_steer.max((travel / lever).atan().clamp(10f32.to_radians(), 45f32.to_radians()));
         }
         desc.wheels.push(SoftWheel {
             node1: w.node1,
@@ -840,18 +1038,56 @@ end
         let total: f32 = l.iter().sum::<f32>();
         // node 0 touches beams 0,1,2 (lengths 1,1,1): share = 1.5 / total.
         let expect0 = total_dry * 1.5 / total;
-        assert!((f.nodes[0].mass - expect0.max(50.0)).abs() < 1e-3, "{}", f.nodes[0].mass);
+        assert!(
+            (f.nodes[0].mass - expect0.max(50.0)).abs() < 1e-3,
+            "{}",
+            f.nodes[0].mass
+        );
         assert!(f.nodes[2].mass > 75.0);
         let sum: f32 = f.nodes.iter().map(|n| n.mass).sum();
-        assert!(sum >= total_dry + 75.0 - 1e-2, "dry + cargo at least, got {sum}");
+        assert!(
+            sum >= total_dry + 75.0 - 1e-2,
+            "dry + cargo at least, got {sum}"
+        );
     }
 
     #[test]
     fn advanced_deformation_keeps_low_thresholds() {
-        let src = TINY.replace("set_beam_defaults -1, -1, 200000, 800000", "enable_advanced_deformation\nset_beam_defaults -1, -1, 200000, 800000, -1, -1, 0.5");
+        let src = TINY.replace(
+            "set_beam_defaults -1, -1, 200000, 800000",
+            "enable_advanced_deformation\nset_beam_defaults -1, -1, 200000, 800000, -1, -1, 0.5",
+        );
         let f = parse_truck(&src);
         assert_eq!(f.beams[0].deform, 200_000.0);
         assert_eq!(f.beams[0].plastic_coef, 0.5);
+    }
+
+    #[test]
+    fn cameras_before_nodes_and_axle_hydro_steering() {
+        let src = "cam
+cameras
+0, 1, 2
+nodes
+0, 0, 0.5, 0
+1, -1, 0.5, 0
+2, 0, 0.5, 1
+3, 0, 0.3, 1
+4, 0, 0.3, 0.6
+beams
+0, 1
+0, 2
+2, 3
+3, 4
+hydros
+3, 1, 0.2
+wheels
+0.3, 0.2, 12, 3, 4, 9999, 1, 1, 9999, 20, 1000, 10
+end
+";
+        let d = load_truck(src);
+        assert!(d.warnings.iter().all(|w| !w.contains("unknown node")), "{:?}", d.warnings);
+        assert!(d.refs.is_some());
+        assert!(d.wheels[0].steerable, "hydro on the axle node steers the wheel");
     }
 
     #[test]
@@ -871,7 +1107,11 @@ end
 ";
         let f = parse_truck(src);
         // 3 nodes + 2×6 tyre nodes ⇒ the next file node is number 15, no warnings.
-        assert!(f.warnings.iter().all(|w| !w.contains("out of sequence")), "{:?}", f.warnings);
+        assert!(
+            f.warnings.iter().all(|w| !w.contains("out of sequence")),
+            "{:?}",
+            f.warnings
+        );
         assert_eq!(f.wheels.len(), 1);
         assert_eq!(f.wheels[0].rays, 6);
         assert_eq!(f.beams.len(), 1);

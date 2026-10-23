@@ -35,7 +35,11 @@ struct Reader<'a> {
 
 impl Reader<'_> {
     fn err(&self, msg: &str) -> String {
-        let line = self.s[..self.i.min(self.s.len())].iter().filter(|&&c| c == b'\n').count() + 1;
+        let line = self.s[..self.i.min(self.s.len())]
+            .iter()
+            .filter(|&&c| c == b'\n')
+            .count()
+            + 1;
         format!("line {line}: {msg}")
     }
 
@@ -51,7 +55,9 @@ impl Reader<'_> {
                 }
             } else if c == b'/' && self.s.get(self.i + 1) == Some(&b'*') {
                 self.i += 2;
-                while self.i + 1 < self.s.len() && !(self.s[self.i] == b'*' && self.s[self.i + 1] == b'/') {
+                while self.i + 1 < self.s.len()
+                    && !(self.s[self.i] == b'*' && self.s[self.i + 1] == b'/')
+                {
                     self.i += 1;
                 }
                 self.i += 2;
@@ -63,7 +69,9 @@ impl Reader<'_> {
 
     fn value(&mut self) -> Result<Value, String> {
         self.skip();
-        let Some(&c) = self.s.get(self.i) else { return Err(self.err("unexpected end")) };
+        let Some(&c) = self.s.get(self.i) else {
+            return Err(self.err("unexpected end"));
+        };
         match c {
             b'{' => self.object(),
             b'[' => self.array(),
@@ -88,7 +96,13 @@ impl Reader<'_> {
         let start = self.i;
         while self.i < self.s.len() {
             let c = self.s[self.i];
-            if c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c == b'.' || c == b'|' || c == b'-' {
+            if c.is_ascii_alphanumeric()
+                || c == b'_'
+                || c == b'$'
+                || c == b'.'
+                || c == b'|'
+                || c == b'-'
+            {
                 self.i += 1;
             } else {
                 break;
@@ -126,8 +140,12 @@ impl Reader<'_> {
         if matches!(self.s[self.i], b'-' | b'+') {
             self.i += 1;
         }
-        while self.i < self.s.len() && (self.s[self.i].is_ascii_digit() || matches!(self.s[self.i], b'.' | b'e' | b'E')) {
-            if matches!(self.s[self.i], b'e' | b'E') && matches!(self.s.get(self.i + 1), Some(b'-' | b'+')) {
+        while self.i < self.s.len()
+            && (self.s[self.i].is_ascii_digit() || matches!(self.s[self.i], b'.' | b'e' | b'E'))
+        {
+            if matches!(self.s[self.i], b'e' | b'E')
+                && matches!(self.s.get(self.i + 1), Some(b'-' | b'+'))
+            {
                 self.i += 1;
             }
             self.i += 1;
@@ -141,7 +159,10 @@ impl Reader<'_> {
             }
             return Err(self.err(&format!("bad number `{t}{w}`")));
         }
-        t.trim_start_matches('+').parse::<f64>().map(num).map_err(|_| self.err(&format!("bad number `{t}`")))
+        t.trim_start_matches('+')
+            .parse::<f64>()
+            .map(num)
+            .map_err(|_| self.err(&format!("bad number `{t}`")))
     }
 
     fn array(&mut self) -> Result<Value, String> {
@@ -192,12 +213,17 @@ impl Reader<'_> {
 }
 
 fn num(v: f64) -> Value {
-    Number::from_f64(v).map(Value::Number).unwrap_or(Value::Null)
+    Number::from_f64(v)
+        .map(Value::Number)
+        .unwrap_or(Value::Null)
 }
 
 /// Parse JBeam's relaxed JSON.
 pub fn parse_relaxed(src: &str) -> Result<Value, String> {
-    let mut r = Reader { s: src.as_bytes(), i: 0 };
+    let mut r = Reader {
+        s: src.as_bytes(),
+        i: 0,
+    };
     let v = r.value()?;
     r.skip();
     // Stray closing brackets after the top-level value (hand-edited files) are
@@ -249,15 +275,25 @@ fn tokenize(s: &str) -> Vec<String> {
         let c = b[i];
         if c.is_ascii_whitespace() {
             i += 1;
-        } else if c.is_ascii_digit() || (c == b'.' && b.get(i + 1).is_some_and(|d| d.is_ascii_digit())) {
+        } else if c.is_ascii_digit()
+            || (c == b'.' && b.get(i + 1).is_some_and(|d| d.is_ascii_digit()))
+        {
             let st = i;
-            while i < b.len() && (b[i].is_ascii_digit() || b[i] == b'.' || b[i] == b'e' || b[i] == b'E' || ((b[i] == b'-' || b[i] == b'+') && matches!(b[i - 1], b'e' | b'E'))) {
+            while i < b.len()
+                && (b[i].is_ascii_digit()
+                    || b[i] == b'.'
+                    || b[i] == b'e'
+                    || b[i] == b'E'
+                    || ((b[i] == b'-' || b[i] == b'+') && matches!(b[i - 1], b'e' | b'E')))
+            {
                 i += 1;
             }
             out.push(s[st..i].to_string());
         } else if c.is_ascii_alphabetic() || c == b'_' || c == b'$' {
             let st = i;
-            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'$' || b[i] == b'.') {
+            while i < b.len()
+                && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'$' || b[i] == b'.')
+            {
                 i += 1;
             }
             out.push(s[st..i].to_string());
@@ -315,7 +351,10 @@ impl Expr<'_> {
         if matches!(op.as_str(), "<" | ">" | "<=" | ">=" | "==" | "~=" | "!=") {
             self.i += 1;
             let b = self.add()?;
-            let (x, y) = (a.num().ok_or("comparison of non-numbers")?, b.num().ok_or("comparison of non-numbers")?);
+            let (x, y) = (
+                a.num().ok_or("comparison of non-numbers")?,
+                b.num().ok_or("comparison of non-numbers")?,
+            );
             return Ok(Lua::Bool(match op.as_str() {
                 "<" => x < y,
                 ">" => x > y,
@@ -332,7 +371,10 @@ impl Expr<'_> {
         while matches!(self.peek(), "+" | "-") {
             let op = self.next();
             let b = self.mul()?;
-            let (x, y) = (a.num().ok_or("arithmetic on non-number")?, b.num().ok_or("arithmetic on non-number")?);
+            let (x, y) = (
+                a.num().ok_or("arithmetic on non-number")?,
+                b.num().ok_or("arithmetic on non-number")?,
+            );
             a = Lua::Num(if op == "+" { x + y } else { x - y });
         }
         Ok(a)
@@ -342,7 +384,10 @@ impl Expr<'_> {
         while matches!(self.peek(), "*" | "/" | "%") {
             let op = self.next();
             let b = self.unary()?;
-            let (x, y) = (a.num().ok_or("arithmetic on non-number")?, b.num().ok_or("arithmetic on non-number")?);
+            let (x, y) = (
+                a.num().ok_or("arithmetic on non-number")?,
+                b.num().ok_or("arithmetic on non-number")?,
+            );
             a = Lua::Num(match op.as_str() {
                 "*" => x * y,
                 "/" => x / y,
@@ -355,7 +400,9 @@ impl Expr<'_> {
         match self.peek() {
             "-" => {
                 self.i += 1;
-                Ok(Lua::Num(-self.unary()?.num().ok_or("negation of non-number")?))
+                Ok(Lua::Num(
+                    -self.unary()?.num().ok_or("negation of non-number")?,
+                ))
             }
             "not" => {
                 self.i += 1;
@@ -369,7 +416,11 @@ impl Expr<'_> {
         if self.peek() == "^" {
             self.i += 1;
             let b = self.unary()?;
-            return Ok(Lua::Num(a.num().ok_or("power of non-number")?.powf(b.num().ok_or("power of non-number")?)));
+            return Ok(Lua::Num(
+                a.num()
+                    .ok_or("power of non-number")?
+                    .powf(b.num().ok_or("power of non-number")?),
+            ));
         }
         Ok(a)
     }
@@ -392,7 +443,11 @@ impl Expr<'_> {
             _ => {}
         }
         if let Some(name) = t.strip_prefix('$') {
-            return self.vars.get(name).map(|&v| Lua::Num(v)).ok_or_else(|| format!("unknown variable ${name}"));
+            return self
+                .vars
+                .get(name)
+                .map(|&v| Lua::Num(v))
+                .ok_or_else(|| format!("unknown variable ${name}"));
         }
         // Function call.
         if self.peek() == "(" {
@@ -409,7 +464,11 @@ impl Expr<'_> {
             }
             self.expect(")")?;
             let f = t.trim_start_matches("math.");
-            let a = |k: usize| args.get(k).copied().ok_or_else(|| format!("{f}: missing argument"));
+            let a = |k: usize| {
+                args.get(k)
+                    .copied()
+                    .ok_or_else(|| format!("{f}: missing argument"))
+            };
             return Ok(Lua::Num(match f {
                 "min" => args.iter().copied().fold(f64::INFINITY, f64::min),
                 "max" => args.iter().copied().fold(f64::NEG_INFINITY, f64::max),
@@ -435,7 +494,11 @@ impl Expr<'_> {
 
 /// Evaluate a `$=` expression with Lua semantics against variable values.
 pub fn eval_expr(src: &str, vars: &HashMap<String, f64>) -> Result<f64, String> {
-    let mut e = Expr { t: tokenize(src), i: 0, vars };
+    let mut e = Expr {
+        t: tokenize(src),
+        i: 0,
+        vars,
+    };
     let v = e.or()?;
     if e.i < e.t.len() {
         return Err(format!("trailing `{}`", e.peek()));
@@ -462,10 +525,17 @@ pub struct PcConfig {
 impl PcConfig {
     pub fn parse(src: &str) -> Result<Self, String> {
         let v = parse_relaxed(src)?;
-        let mut c = PcConfig { main_part: v.get("mainPartName").and_then(Value::as_str).map(str::to_string), ..Default::default() };
+        let mut c = PcConfig {
+            main_part: v
+                .get("mainPartName")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            ..Default::default()
+        };
         if let Some(p) = v.get("parts").and_then(Value::as_object) {
             for (k, x) in p {
-                c.parts.insert(k.clone(), x.as_str().unwrap_or("").to_string());
+                c.parts
+                    .insert(k.clone(), x.as_str().unwrap_or("").to_string());
             }
         }
         if let Some(p) = v.get("vars").and_then(Value::as_object) {
@@ -497,7 +567,9 @@ impl JbeamDb {
     /// Add the parts of one `.jbeam` file.
     pub fn add_file(&mut self, name: &str, src: &str) -> Result<(), String> {
         let v = parse_relaxed(src).map_err(|e| format!("{name}: {e}"))?;
-        let Value::Object(map) = v else { return Err(format!("{name}: top level is not an object")) };
+        let Value::Object(map) = v else {
+            return Err(format!("{name}: top level is not an object"));
+        };
         for (k, part) in map {
             if part.is_object() {
                 self.parts.insert(k, part);
@@ -528,7 +600,14 @@ impl JbeamDb {
         }
         let zero = || [num(0.0), num(0.0), num(0.0)];
         let mut out = Vec::new();
-        let mut stack = vec![(Placed { name: main, offset: zero(), moved: zero() }, 0u32)];
+        let mut stack = vec![(
+            Placed {
+                name: main,
+                offset: zero(),
+                moved: zero(),
+            },
+            0u32,
+        )];
         let mut seen = HashSet::new();
         while let Some((placed, depth)) = stack.pop() {
             if depth > 50 || !seen.insert(placed.name.clone()) {
@@ -537,30 +616,55 @@ impl JbeamDb {
             let part = self.parts[&placed.name].clone();
             let mut children = Vec::new();
             for (key, v2) in [("slots", false), ("slots2", true)] {
-                let Some(rows) = part.get(key).and_then(Value::as_array) else { continue };
-                let header: Vec<String> = rows.first().and_then(Value::as_array).map(|h| h.iter().map(|x| x.as_str().unwrap_or("").to_string()).collect()).unwrap_or_default();
+                let Some(rows) = part.get(key).and_then(Value::as_array) else {
+                    continue;
+                };
+                let header: Vec<String> = rows
+                    .first()
+                    .and_then(Value::as_array)
+                    .map(|h| {
+                        h.iter()
+                            .map(|x| x.as_str().unwrap_or("").to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 for row in rows.iter().skip(1) {
                     let Some(r) = row.as_array() else { continue };
                     let field = |n: &str| header.iter().position(|h| h == n).and_then(|i| r.get(i));
-                    let slot_name = if v2 { field("name") } else { field("type") }.and_then(Value::as_str).unwrap_or("").to_string();
-                    let default = field("default").and_then(Value::as_str).unwrap_or("").to_string();
-                    let opts = r.last().and_then(Value::as_object).cloned().unwrap_or_default();
+                    let slot_name = if v2 { field("name") } else { field("type") }
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let default = field("default")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let opts = r
+                        .last()
+                        .and_then(Value::as_object)
+                        .cloned()
+                        .unwrap_or_default();
                     let chosen = config.parts.get(&slot_name).cloned().unwrap_or(default);
                     if chosen.is_empty() {
                         continue;
                     }
                     if !self.parts.contains_key(&chosen) {
-                        self.warnings.push(format!("slot `{slot_name}`: part `{chosen}` not found"));
+                        self.warnings
+                            .push(format!("slot `{slot_name}`: part `{chosen}` not found"));
                         continue;
                     }
                     let ty = self.slot_type(&chosen).unwrap_or("");
                     let allowed = if v2 {
-                        field("allowTypes").and_then(Value::as_array).is_none_or(|a| a.iter().any(|t| t.as_str() == Some(ty)))
+                        field("allowTypes")
+                            .and_then(Value::as_array)
+                            .is_none_or(|a| a.iter().any(|t| t.as_str() == Some(ty)))
                     } else {
                         ty == slot_name
                     };
                     if !allowed {
-                        self.warnings.push(format!("slot `{slot_name}`: part `{chosen}` has slotType `{ty}`"));
+                        self.warnings.push(format!(
+                            "slot `{slot_name}`: part `{chosen}` has slotType `{ty}`"
+                        ));
                         continue;
                     }
                     let mut offset = placed.offset.clone();
@@ -574,7 +678,11 @@ impl JbeamDb {
                             }
                         }
                     }
-                    children.push(Placed { name: chosen, offset, moved });
+                    children.push(Placed {
+                        name: chosen,
+                        offset,
+                        moved,
+                    });
                 }
             }
             out.push(placed);
@@ -592,16 +700,31 @@ fn collect_vars(db: &JbeamDb, parts: &[Placed], config: &PcConfig) -> HashMap<St
     let mut vars = HashMap::new();
     let mut ranges = HashMap::new();
     for p in parts {
-        let Some(rows) = db.parts[&p.name].get("variables").and_then(Value::as_array) else { continue };
-        let header: Vec<String> = rows.first().and_then(Value::as_array).map(|h| h.iter().map(|x| x.as_str().unwrap_or("").to_string()).collect()).unwrap_or_default();
+        let Some(rows) = db.parts[&p.name].get("variables").and_then(Value::as_array) else {
+            continue;
+        };
+        let header: Vec<String> = rows
+            .first()
+            .and_then(Value::as_array)
+            .map(|h| {
+                h.iter()
+                    .map(|x| x.as_str().unwrap_or("").to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
         for row in rows.iter().skip(1) {
             let Some(r) = row.as_array() else { continue };
             let f = |n: &str| header.iter().position(|h| h == n).and_then(|i| r.get(i));
-            let Some(name) = f("name").and_then(Value::as_str) else { continue };
+            let Some(name) = f("name").and_then(Value::as_str) else {
+                continue;
+            };
             let name = name.trim_start_matches('$').to_string();
             let default = f("default").and_then(Value::as_f64).unwrap_or(0.0);
             vars.entry(name.clone()).or_insert(default);
-            if let (Some(lo), Some(hi)) = (f("min").and_then(Value::as_f64), f("max").and_then(Value::as_f64)) {
+            if let (Some(lo), Some(hi)) = (
+                f("min").and_then(Value::as_f64),
+                f("max").and_then(Value::as_f64),
+            ) {
                 ranges.insert(name, (lo.min(hi), lo.max(hi)));
             }
         }
@@ -617,10 +740,12 @@ fn collect_vars(db: &JbeamDb, parts: &[Placed], config: &PcConfig) -> HashMap<St
 fn resolve(v: &Value, vars: &HashMap<String, f64>) -> Option<Value> {
     match v {
         Value::String(s) if s.starts_with("$=") => eval_expr(&s[2..], vars).ok().map(num),
-        Value::String(s) if s.starts_with('$') && s.len() > 1 && !s.contains(' ') => match vars.get(&s[1..]) {
-            Some(&x) => Some(num(x)),
-            None => Some(v.clone()),
-        },
+        Value::String(s) if s.starts_with('$') && s.len() > 1 && !s.contains(' ') => {
+            match vars.get(&s[1..]) {
+                Some(&x) => Some(num(x)),
+                None => Some(v.clone()),
+            }
+        }
         Value::String(s) if s == "FLT_MAX" => Some(num(f64::MAX)),
         Value::String(s) if s == "MINUS_FLT_MAX" => Some(num(-f64::MAX)),
         _ => Some(v.clone()),
@@ -628,18 +753,38 @@ fn resolve(v: &Value, vars: &HashMap<String, f64>) -> Option<Value> {
 }
 
 fn as_f32(v: &Value) -> Option<f32> {
-    v.as_f64().map(|x| if x >= f32::MAX as f64 { f32::INFINITY } else if x <= -(f32::MAX as f64) { f32::NEG_INFINITY } else { x as f32 })
+    v.as_f64().map(|x| {
+        if x >= f32::MAX as f64 {
+            f32::INFINITY
+        } else if x <= -(f32::MAX as f64) {
+            f32::NEG_INFINITY
+        } else {
+            x as f32
+        }
+    })
 }
 
 /// Rows of one section across the assembled parts: each row's fields by header
 /// name, merged over the modifiers in effect (and part-level defaults).
-fn expand(db: &JbeamDb, parts: &[Placed], section: &str, vars: &HashMap<String, f64>) -> Vec<(usize, Map<String, Value>)> {
+fn expand(
+    db: &JbeamDb,
+    parts: &[Placed],
+    section: &str,
+    vars: &HashMap<String, f64>,
+) -> Vec<(usize, Map<String, Value>)> {
     let mut out = Vec::new();
     for (pi, p) in parts.iter().enumerate() {
         let part = &db.parts[&p.name];
-        let Some(rows) = part.get(section).and_then(Value::as_array) else { continue };
-        let Some(header) = rows.first().and_then(Value::as_array) else { continue };
-        let header: Vec<String> = header.iter().map(|x| x.as_str().unwrap_or("").to_string()).collect();
+        let Some(rows) = part.get(section).and_then(Value::as_array) else {
+            continue;
+        };
+        let Some(header) = rows.first().and_then(Value::as_array) else {
+            continue;
+        };
+        let header: Vec<String> = header
+            .iter()
+            .map(|x| x.as_str().unwrap_or("").to_string())
+            .collect();
         let mut modifiers: Map<String, Value> = Map::new();
         for row in rows.iter().skip(1) {
             match row {
@@ -699,16 +844,30 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
     };
     let parts = db.assemble(&config)?;
     let vars = collect_vars(&db, &parts, &config);
-    let mut desc = SoftVehicleDesc { name: parts[0].name.clone(), collision_range: 0.03, ..Default::default() };
+    let mut desc = SoftVehicleDesc {
+        name: parts[0].name.clone(),
+        collision_range: 0.03,
+        ..Default::default()
+    };
     desc.warnings.append(&mut db.warnings);
-    if let Some(n) = db.parts[&parts[0].name].get("information").and_then(|i| i.get("name")).and_then(Value::as_str) {
+    if let Some(n) = db.parts[&parts[0].name]
+        .get("information")
+        .and_then(|i| i.get("name"))
+        .and_then(Value::as_str)
+    {
         desc.name = n.to_string();
     }
 
     // Nodes.
     let mut ids: HashMap<String, u32> = HashMap::new();
     for (pi, f) in expand(&db, &parts, "nodes", &vars) {
-        let Some(id) = f.get("id").and_then(|v| v.as_str().map(str::to_string).or_else(|| v.as_f64().map(|x| x.to_string()))) else { continue };
+        let Some(id) = f.get("id").and_then(|v| {
+            v.as_str()
+                .map(str::to_string)
+                .or_else(|| v.as_f64().map(|x| x.to_string()))
+        }) else {
+            continue;
+        };
         let coord = |k: &str| f.get(k).and_then(as_f32).unwrap_or(0.0);
         let place = &parts[pi];
         let off = |v: &Value| resolve(v, &vars).and_then(|x| as_f32(&x)).unwrap_or(0.0);
@@ -724,7 +883,11 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             mass: f.get("nodeWeight").and_then(as_f32).unwrap_or(25.0),
             collision: f.get("collision").and_then(Value::as_bool).unwrap_or(true),
             fixed: f.get("fixed").and_then(Value::as_bool).unwrap_or(false),
-            contacter: f.get("selfCollision").and_then(Value::as_bool).unwrap_or(false) || f.get("collision").and_then(Value::as_bool).unwrap_or(true),
+            contacter: f
+                .get("selfCollision")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                || f.get("collision").and_then(Value::as_bool).unwrap_or(true),
             friction: f.get("frictionCoef").and_then(as_f32).unwrap_or(1.0),
             frame: false,
         };
@@ -736,7 +899,11 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             desc.nodes.push(node);
         }
     }
-    let node = |f: &Map<String, Value>, k: &str| f.get(k).and_then(Value::as_str).and_then(|n| ids.get(n).copied());
+    let node = |f: &Map<String, Value>, k: &str| {
+        f.get(k)
+            .and_then(Value::as_str)
+            .and_then(|n| ids.get(n).copied())
+    };
 
     // Beams.
     let mut groups: HashMap<String, u32> = HashMap::new();
@@ -749,7 +916,12 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             }
             continue;
         };
-        let ty = f.get("beamType").and_then(Value::as_str).unwrap_or("|NORMAL").trim_start_matches('|').to_ascii_uppercase();
+        let ty = f
+            .get("beamType")
+            .and_then(Value::as_str)
+            .unwrap_or("|NORMAL")
+            .trim_start_matches('|')
+            .to_ascii_uppercase();
         let kind = match ty.as_str() {
             "NORMAL" | "ANISOTROPIC" | "PRESSURED" | "" => BeamKind::Normal,
             "SUPPORT" => BeamKind::Support,
@@ -762,7 +934,9 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             }
         };
         if matches!(ty.as_str(), "ANISOTROPIC" | "PRESSURED") {
-            *skipped.entry(format!("beam type {ty} (simulated as NORMAL)")).or_default() += 1;
+            *skipped
+                .entry(format!("beam type {ty} (simulated as NORMAL)"))
+                .or_default() += 1;
         }
         let g = |k: &str, d: f32| f.get(k).and_then(as_f32).unwrap_or(d);
         let group = match f.get("breakGroup") {
@@ -770,10 +944,14 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
                 let n = groups.len() as u32 + 1;
                 *groups.entry(s.clone()).or_insert(n)
             }
-            Some(Value::Array(a)) => a.first().and_then(Value::as_str).filter(|s| !s.is_empty()).map_or(0, |s| {
-                let n = groups.len() as u32 + 1;
-                *groups.entry(s.to_string()).or_insert(n)
-            }),
+            Some(Value::Array(a)) => a
+                .first()
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map_or(0, |s| {
+                    let n = groups.len() as u32 + 1;
+                    *groups.entry(s.to_string()).or_insert(n)
+                }),
             _ => 0,
         };
         let mut beam = SoftBeam {
@@ -809,7 +987,11 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
                 let factor = g("inputFactor", 1.0);
                 let out_limit = g("outLimit", 1.2);
                 let in_limit = g("inLimit", 0.8);
-                let span = if factor >= 0.0 { 1.0 - in_limit } else { out_limit - 1.0 };
+                let span = if factor >= 0.0 {
+                    1.0 - in_limit
+                } else {
+                    out_limit - 1.0
+                };
                 beam.hydro_factor = span * factor.signum();
                 beam.deform = f32::INFINITY;
                 if f.get("inputSource").and_then(Value::as_str) != Some("steering") {
@@ -818,10 +1000,18 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             }
             BeamKind::Normal => {
                 // deformLimit / deformLimitExpansion: plastic rest-length ratios of L₀.
-                if let Some(l) = f.get("deformLimit").and_then(as_f32).filter(|l| l.is_finite() && *l > 0.0 && *l < 1.0) {
+                if let Some(l) = f
+                    .get("deformLimit")
+                    .and_then(as_f32)
+                    .filter(|l| l.is_finite() && *l > 0.0 && *l < 1.0)
+                {
                     beam.short_bound = l;
                 }
-                if let Some(l) = f.get("deformLimitExpansion").and_then(as_f32).filter(|l| l.is_finite() && *l > 1.0) {
+                if let Some(l) = f
+                    .get("deformLimitExpansion")
+                    .and_then(as_f32)
+                    .filter(|l| l.is_finite() && *l > 1.0)
+                {
                     beam.long_bound = l;
                 }
             }
@@ -830,53 +1020,108 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
         desc.beams.push(beam);
     }
     if missing > 0 {
-        desc.warnings.push(format!("{missing} beams reference nodes not in this configuration"));
+        desc.warnings.push(format!(
+            "{missing} beams reference nodes not in this configuration"
+        ));
     }
 
     // Triangles and quads.
     for (_, f) in expand(&db, &parts, "triangles", &vars) {
-        let (Some(a), Some(b), Some(c)) = (node(&f, "id1"), node(&f, "id2"), node(&f, "id3")) else { continue };
-        let collision = f.get("triangleType").and_then(Value::as_str).is_none_or(|t| !t.contains("NONCOLLIDABLE"));
-        desc.triangles.push(SoftTriangle { nodes: [a, b, c], collision });
+        let (Some(a), Some(b), Some(c)) = (node(&f, "id1"), node(&f, "id2"), node(&f, "id3"))
+        else {
+            continue;
+        };
+        let collision = f
+            .get("triangleType")
+            .and_then(Value::as_str)
+            .is_none_or(|t| !t.contains("NONCOLLIDABLE"));
+        desc.triangles.push(SoftTriangle {
+            nodes: [a, b, c],
+            collision,
+        });
     }
     for (_, f) in expand(&db, &parts, "quads", &vars) {
-        let (Some(a), Some(b), Some(c), Some(d)) = (node(&f, "id1"), node(&f, "id2"), node(&f, "id3"), node(&f, "id4")) else { continue };
-        let collision = f.get("triangleType").and_then(Value::as_str).is_none_or(|t| !t.contains("NONCOLLIDABLE"));
-        desc.triangles.push(SoftTriangle { nodes: [a, b, c], collision });
-        desc.triangles.push(SoftTriangle { nodes: [a, c, d], collision });
+        let (Some(a), Some(b), Some(c), Some(d)) = (
+            node(&f, "id1"),
+            node(&f, "id2"),
+            node(&f, "id3"),
+            node(&f, "id4"),
+        ) else {
+            continue;
+        };
+        let collision = f
+            .get("triangleType")
+            .and_then(Value::as_str)
+            .is_none_or(|t| !t.contains("NONCOLLIDABLE"));
+        desc.triangles.push(SoftTriangle {
+            nodes: [a, b, c],
+            collision,
+        });
+        desc.triangles.push(SoftTriangle {
+            nodes: [a, c, d],
+            collision,
+        });
     }
 
     // Powertrain: wheels connected (through any chain) to an engine or motor are driven.
     let mut device_input: HashMap<String, (String, String)> = HashMap::new();
     let mut wheel_shafts: Vec<(String, String)> = Vec::new();
     for (_, f) in expand(&db, &parts, "powertrain", &vars) {
-        let (Some(ty), Some(name)) = (f.get("type").and_then(Value::as_str), f.get("name").and_then(Value::as_str)) else { continue };
-        let input = f.get("inputName").and_then(Value::as_str).unwrap_or("").to_string();
+        let (Some(ty), Some(name)) = (
+            f.get("type").and_then(Value::as_str),
+            f.get("name").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        let input = f
+            .get("inputName")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         device_input.insert(name.to_string(), (ty.to_string(), input));
         if let Some(w) = f.get("connectedWheel").and_then(Value::as_str) {
             wheel_shafts.push((w.to_string(), name.to_string()));
         }
     }
     let driven_wheel = |wheel: &str| {
-        wheel_shafts.iter().filter(|(w, _)| w == wheel).any(|(_, shaft)| {
-            let mut cur = shaft.clone();
-            for _ in 0..32 {
-                let Some((ty, input)) = device_input.get(&cur) else { return false };
-                if ty.contains("Engine") || ty.contains("Motor") {
-                    return true;
+        wheel_shafts
+            .iter()
+            .filter(|(w, _)| w == wheel)
+            .any(|(_, shaft)| {
+                let mut cur = shaft.clone();
+                for _ in 0..32 {
+                    let Some((ty, input)) = device_input.get(&cur) else {
+                        return false;
+                    };
+                    if ty.contains("Engine") || ty.contains("Motor") {
+                        return true;
+                    }
+                    cur = input.clone();
                 }
-                cur = input.clone();
-            }
-            false
-        })
+                false
+            })
     };
 
     // Wheels.
     for (_, f) in expand(&db, &parts, "pressureWheels", &vars) {
-        let (Some(n1), Some(n2)) = (node(&f, "node1"), node(&f, "node2")) else { continue };
-        let name = f.get("name").and_then(Value::as_str).unwrap_or("").to_string();
-        let radius = f.get("radius").and_then(as_f32).or_else(|| f.get("hubRadius").and_then(as_f32)).unwrap_or(0.3);
-        let width = f.get("tireWidth").and_then(as_f32).or_else(|| f.get("hubWidth").and_then(as_f32)).unwrap_or(0.2);
+        let (Some(n1), Some(n2)) = (node(&f, "node1"), node(&f, "node2")) else {
+            continue;
+        };
+        let name = f
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let radius = f
+            .get("radius")
+            .and_then(as_f32)
+            .or_else(|| f.get("hubRadius").and_then(as_f32))
+            .unwrap_or(0.3);
+        let width = f
+            .get("tireWidth")
+            .and_then(as_f32)
+            .or_else(|| f.get("hubWidth").and_then(as_f32))
+            .unwrap_or(0.2);
         let brake = f.get("brakeTorque").and_then(as_f32).unwrap_or(0.0);
         desc.wheels.push(SoftWheel {
             node1: n1,
@@ -894,7 +1139,9 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
     // Steering: a wheel whose arm node is driven by a steering hydro.
     for w in &mut desc.wheels {
         if let Some(arm) = w.arm {
-            if desc.beams.iter().any(|b| b.kind == BeamKind::Hydro && b.hydro_factor != 0.0 && (b.a == arm || b.b == arm)) {
+            if desc.beams.iter().any(|b| {
+                b.kind == BeamKind::Hydro && b.hydro_factor != 0.0 && (b.a == arm || b.b == arm)
+            }) {
                 w.steerable = true;
                 w.max_steer = 35f32.to_radians();
             }
@@ -903,12 +1150,21 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
 
     // Reference frame.
     if let Some((_, f)) = expand(&db, &parts, "refNodes", &vars).into_iter().last() {
-        if let (Some(center), Some(back), Some(left)) = (node(&f, "ref"), node(&f, "back"), node(&f, "left")) {
+        if let (Some(center), Some(back), Some(left)) =
+            (node(&f, "ref"), node(&f, "back"), node(&f, "left"))
+        {
             desc.refs = Some(RefNodes { center, back, left });
         }
     }
 
-    for section in ["torsionbars", "rails", "slidenodes", "flexbodies", "props", "thrusters"] {
+    for section in [
+        "torsionbars",
+        "rails",
+        "slidenodes",
+        "flexbodies",
+        "props",
+        "thrusters",
+    ] {
         let n = expand(&db, &parts, section, &vars).len();
         if n > 0 {
             skipped.insert(format!("section {section}"), n as u32);
@@ -940,19 +1196,26 @@ mod tests {
         assert_eq!(p["neg"].as_f64(), Some(-f64::MAX));
         assert_eq!(p["k"].as_array().unwrap().len(), 3);
         assert_eq!(p["dup"].as_f64(), Some(2.0), "last duplicate wins");
-        assert!(parse_relaxed("{ a: 1 } }").is_ok(), "stray closing brace tolerated");
+        assert!(
+            parse_relaxed("{ a: 1 } }").is_ok(),
+            "stray closing brace tolerated"
+        );
         assert!(parse_relaxed("{ a: 1 } x").is_err());
     }
 
     #[test]
     fn expressions_follow_lua() {
-        let vars: HashMap<String, f64> = [("weight".to_string(), 2.0), ("k".to_string(), 0.0)].into();
+        let vars: HashMap<String, f64> =
+            [("weight".to_string(), 2.0), ("k".to_string(), 0.0)].into();
         assert_eq!(eval_expr("$weight*1001000", &vars), Ok(2_002_000.0));
         assert_eq!(eval_expr("-$weight + 2^3 * (1 + 1)", &vars), Ok(14.0));
         assert_eq!(eval_expr("$k > 0 and 5 or 7", &vars), Ok(7.0));
         // Lua: 0 is truthy.
         assert_eq!(eval_expr("$k and 3 or 4", &vars), Ok(3.0));
-        assert_eq!(eval_expr("math.max(1, $weight, 3) + min(4, 5)", &vars), Ok(7.0));
+        assert_eq!(
+            eval_expr("math.max(1, $weight, 3) + min(4, 5)", &vars),
+            Ok(7.0)
+        );
         assert!(eval_expr("$missing + 1", &vars).is_err());
     }
 
@@ -1014,7 +1277,12 @@ mod tests {
         let pc = r#"{"format": 2, "mainPartName": "toycar", "parts": {"toycar_body": "toycar_body_soft"}, "vars": {"$stiff": 3}}"#;
         let d = load_jbeam(&[("toycar.jbeam", CAR)], Some(pc)).unwrap();
         assert_eq!(d.name, "Toy JBeam Car");
-        assert_eq!(d.nodes.len(), 7, "{:?}", d.nodes.iter().map(|n| &n.name).collect::<Vec<_>>());
+        assert_eq!(
+            d.nodes.len(),
+            7,
+            "{:?}",
+            d.nodes.iter().map(|n| &n.name).collect::<Vec<_>>()
+        );
         // Frame: JBeam (x, y, z) → Rubble (x, z, −y).
         let f1 = d.nodes.iter().find(|n| n.name == "f1").unwrap();
         assert_eq!(f1.position, [-0.5, 0.3, 1.0]);
@@ -1029,8 +1297,18 @@ mod tests {
         assert!(d.beams[0].strength.is_infinite());
         // Break group, support, optional beam to a missing node dropped silently.
         assert!(d.beams.iter().filter(|b| b.break_group != 0).count() == 4);
-        assert_eq!(d.beams.iter().filter(|b| b.kind == BeamKind::Support).count(), 1);
-        assert!(!d.warnings.iter().any(|w| w.contains("reference nodes")), "{:?}", d.warnings);
+        assert_eq!(
+            d.beams
+                .iter()
+                .filter(|b| b.kind == BeamKind::Support)
+                .count(),
+            1
+        );
+        assert!(
+            !d.warnings.iter().any(|w| w.contains("reference nodes")),
+            "{:?}",
+            d.warnings
+        );
         // Triangles: 2 + a quad as 2; one non-collidable.
         assert_eq!(d.triangles.len(), 4);
         assert_eq!(d.triangles.iter().filter(|t| !t.collision).count(), 1);
@@ -1048,7 +1326,12 @@ mod tests {
         assert!(d.beams.iter().any(|b| b.strength.is_infinite()));
         let back: SoftVehicleDesc = serde_json::from_str(&d.to_json()).unwrap();
         assert_eq!(back.beams.len(), d.beams.len());
-        assert!(back.beams.iter().zip(&d.beams).all(|(a, b)| a.strength >= f32::MAX && b.strength >= f32::MAX || a.strength == b.strength));
+        assert!(back
+            .beams
+            .iter()
+            .zip(&d.beams)
+            .all(|(a, b)| a.strength >= f32::MAX && b.strength >= f32::MAX
+                || a.strength == b.strength));
     }
 
     #[test]

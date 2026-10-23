@@ -50,7 +50,9 @@ pub fn color_graph(nodes: usize, edges: &[(u32, u32)]) -> (Vec<u32>, u32) {
 
 /// True when no edge joins two nodes of one colour.
 pub fn is_valid(colors: &[u32], edges: &[(u32, u32)]) -> bool {
-    edges.iter().all(|&(a, b)| a == b || colors[a as usize] != colors[b as usize])
+    edges
+        .iter()
+        .all(|&(a, b)| a == b || colors[a as usize] != colors[b as usize])
 }
 
 #[cfg(test)]
@@ -66,7 +68,14 @@ mod tests {
         for x in 0..n {
             for y in 0..n {
                 for z in 0..n {
-                    for (dx, dy, dz) in [(1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 0), (1, 0, 1), (0, 1, 1)] {
+                    for (dx, dy, dz) in [
+                        (1, 0, 0),
+                        (0, 1, 0),
+                        (0, 0, 1),
+                        (1, 1, 0),
+                        (1, 0, 1),
+                        (0, 1, 1),
+                    ] {
                         if x + dx < n && y + dy < n && z + dz < n {
                             edges.push((id(x, y, z), id(x + dx, y + dy, z + dz)));
                         }

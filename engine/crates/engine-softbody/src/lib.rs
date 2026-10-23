@@ -8,6 +8,7 @@
 //! [`SoftBackend`] ([`SoftHost`]). [`cpu`] is a reference solver of the same
 //! particle and beam model for tests and calibration.
 
+pub mod calibrate;
 pub mod color;
 pub mod cpu;
 pub mod desc;
@@ -17,10 +18,12 @@ pub mod jbeam;
 pub mod layout;
 pub mod model;
 pub mod pack;
-pub mod truck;
 pub mod procedural;
+pub mod truck;
 
 pub use desc::*;
-pub use host::{decode_beam_breaks, BeamBreak, SoftBackend, SoftCounts, SoftEntry, SoftHandle, SoftHost};
+pub use host::{
+    decode_beam_breaks, BeamBreak, SoftBackend, SoftCounts, SoftEntry, SoftHandle, SoftHost,
+};
 pub use layout::*;
 pub use pack::SpawnOptions;

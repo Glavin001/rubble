@@ -7,7 +7,11 @@ use engine_softbody::truck::load_truck;
 use glam::Vec3;
 
 fn ground() -> Plane {
-    Plane { normal: Vec3::Y, offset: 0.0, friction: 0.8 }
+    Plane {
+        normal: Vec3::Y,
+        offset: 0.0,
+        friction: 0.8,
+    }
 }
 
 fn car(velocity: Vec3, hz: f32, iterations: u32) -> CpuSoft {
@@ -18,7 +22,6 @@ fn car(velocity: Vec3, hz: f32, iterations: u32) -> CpuSoft {
     s.planes.push(ground());
     s
 }
-
 
 #[test]
 fn car_rests_on_its_nodes_without_exploding() {
@@ -39,7 +42,16 @@ fn car_rests_on_its_nodes_without_exploding() {
 /// weight must approach the fine reference as iterations and step rate grow.
 #[test]
 fn sag_converges_with_iterations_and_rate() {
-    let d = load_truck(&box_truck(6, 2, 2, 0.4, 400.0, 3.0e6, f32::INFINITY, f32::INFINITY));
+    let d = load_truck(&box_truck(
+        6,
+        2,
+        2,
+        0.4,
+        400.0,
+        3.0e6,
+        f32::INFINITY,
+        f32::INFINITY,
+    ));
     let run_rho = |hz: f32, iters: u32, rho: f32| {
         let mut s = CpuSoft::from_desc(&d, Vec3::ZERO, Vec3::ZERO);
         s.chebyshev_rho = rho;
@@ -58,7 +70,13 @@ fn sag_converges_with_iterations_and_rate() {
         for _ in 0..(hz as usize * 5) {
             s.step();
         }
-        let tip = s.x.iter().zip(&rest).filter(|(_, r)| r.x > 1.9).map(|(p, r)| r.y - p.y).sum::<f32>() / 4.0;
+        let tip =
+            s.x.iter()
+                .zip(&rest)
+                .filter(|(_, r)| r.x > 1.9)
+                .map(|(p, r)| r.y - p.y)
+                .sum::<f32>()
+                / 4.0;
         (tip, s.kinetic_energy())
     };
     let run = |hz: f32, iters: u32| run_rho(hz, iters, 0.0);
@@ -68,18 +86,27 @@ fn sag_converges_with_iterations_and_rate() {
     for iters in [4, 10, 30] {
         let (sag, _) = run(120.0, iters);
         let err = (sag - fine).abs() / fine;
-        println!("120 Hz, {iters:>2} iterations: sag {sag:.5} (fine {fine:.5}) error {:.1}%", err * 100.0);
+        println!(
+            "120 Hz, {iters:>2} iterations: sag {sag:.5} (fine {fine:.5}) error {:.1}%",
+            err * 100.0
+        );
         assert!(err <= last + 1e-3, "error must shrink with iterations");
         last = err;
     }
     let (sag240, _) = run(240.0, 10);
     let (sag60, _) = run(60.0, 10);
     println!("10 iterations: 60 Hz {sag60:.5}, 240 Hz {sag240:.5}");
-    assert!((sag240 - fine).abs() <= (sag60 - fine).abs() + 1e-5, "higher rate converges closer");
+    assert!(
+        (sag240 - fine).abs() <= (sag60 - fine).abs() + 1e-5,
+        "higher rate converges closer"
+    );
     assert!(last < 0.35, "30 iterations within 35% of the reference");
     for rho in [0.5, 0.8, 0.9, 0.95] {
         let (sag, _) = run_rho(120.0, 10, rho);
-        println!("120 Hz, 10 iterations, Chebyshev ρ={rho}: sag {sag:.5} error {:.1}%", (sag - fine).abs() / fine * 100.0);
+        println!(
+            "120 Hz, 10 iterations, Chebyshev ρ={rho}: sag {sag:.5} error {:.1}%",
+            (sag - fine).abs() / fine * 100.0
+        );
     }
 }
 
@@ -87,7 +114,11 @@ fn sag_converges_with_iterations_and_rate() {
 fn wall_crash_crumples_and_drops_the_bumper() {
     let mut s = car(Vec3::new(0.0, 0.0, 15.0), 240.0, 12);
     // Wall facing −Z at z = 3.0, just ahead of the bumper.
-    s.planes.push(Plane { normal: -Vec3::Z, offset: -3.0, friction: 0.5 });
+    s.planes.push(Plane {
+        normal: -Vec3::Z,
+        offset: -3.0,
+        friction: 0.5,
+    });
     // Body length between the rear and front rings (6 nodes each; the bumper is
     // separate and may detach).
     let stations = CarParams::default().stations;
@@ -103,9 +134,21 @@ fn wall_crash_crumples_and_drops_the_bumper() {
     let yielded = s.yielded_beams();
     let broken = s.broken_beams();
     let crush = len0 - body_len(&s.x);
-    println!("yielded {yielded}, broken {broken}, crush {crush:.3} m, ke {}", s.kinetic_energy());
-    assert!(yielded > 50, "a 54 km/h wall hit must crumple the front ({yielded})");
-    assert!(broken >= 10, "the bumper mounts (one detacher group) go together ({broken})");
-    assert!(s.kinetic_energy() < 0.1 * 0.5 * 1300.0 * 225.0, "most energy absorbed");
+    println!(
+        "yielded {yielded}, broken {broken}, crush {crush:.3} m, ke {}",
+        s.kinetic_energy()
+    );
+    assert!(
+        yielded > 50,
+        "a 54 km/h wall hit must crumple the front ({yielded})"
+    );
+    assert!(
+        broken >= 10,
+        "the bumper mounts (one detacher group) go together ({broken})"
+    );
+    assert!(
+        s.kinetic_energy() < 0.1 * 0.5 * 1300.0 * 225.0,
+        "most energy absorbed"
+    );
     assert!(crush > 0.05, "permanent shortening ({crush})");
 }

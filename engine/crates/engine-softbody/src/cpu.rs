@@ -52,13 +52,32 @@ pub struct CpuSoft {
 impl CpuSoft {
     /// Particles and beams of `desc` (no rigid core), placed in the world.
     pub fn from_desc(desc: &SoftVehicleDesc, position: Vec3, velocity: Vec3) -> Self {
-        let opts = SpawnOptions { rigid_core: false, ..Default::default() };
-        let p = pack_soft(desc, Placement { position, rotation: Quat::IDENTITY }, &opts, 0, -1);
+        let opts = SpawnOptions {
+            rigid_core: false,
+            ..Default::default()
+        };
+        let p = pack_soft(
+            desc,
+            Placement {
+                position,
+                rotation: Quat::IDENTITY,
+            },
+            &opts,
+            0,
+            -1,
+        );
         let edges: Vec<(u32, u32)> = p.beams.iter().map(|b| (b.a, b.b)).collect();
         let (colors, color_count) = color_graph(desc.nodes.len(), &edges);
         Self {
-            x: p.bodies.iter().map(|b| Vec3::from_array(b.position)).collect(),
-            v: desc.nodes.iter().map(|n| if n.fixed { Vec3::ZERO } else { velocity }).collect(),
+            x: p.bodies
+                .iter()
+                .map(|b| Vec3::from_array(b.position))
+                .collect(),
+            v: desc
+                .nodes
+                .iter()
+                .map(|n| if n.fixed { Vec3::ZERO } else { velocity })
+                .collect(),
             mass: p.masses,
             fixed: desc.nodes.iter().map(|n| n.fixed).collect(),
             collide: desc.nodes.iter().map(|n| n.collision).collect(),
@@ -86,7 +105,13 @@ impl CpuSoft {
         // Inertial target y = x + h v + h² g. Initial guess (as soft_begin):
         // VBD's adaptive x + h v + h² g ã, ã = last step's acceleration along g.
         let y: Vec<Vec3> = (0..n)
-            .map(|i| if self.fixed[i] { x0[i] } else { x0[i] + self.v[i] * h + self.gravity * h * h })
+            .map(|i| {
+                if self.fixed[i] {
+                    x0[i]
+                } else {
+                    x0[i] + self.v[i] * h + self.gravity * h * h
+                }
+            })
             .collect();
         let g2 = self.gravity.length_squared().max(1e-6);
         for i in 0..n {
@@ -125,7 +150,11 @@ impl CpuSoft {
                     _ => 4.0 / (4.0 - rho2 * omega),
                 };
                 for i in 0..n {
-                    let in_contact = self.collide[i] && self.planes.iter().any(|p| p.normal.dot(self.x[i]) - p.offset - self.radius < 0.0);
+                    let in_contact = self.collide[i]
+                        && self
+                            .planes
+                            .iter()
+                            .any(|p| p.normal.dot(self.x[i]) - p.offset - self.radius < 0.0);
                     if !self.fixed[i] && it > 0 && !in_contact {
                         self.x[i] = prev2[i] + (self.x[i] - prev2[i]) * omega;
                     }
@@ -152,7 +181,14 @@ impl CpuSoft {
             let len = (self.x[b.a as usize] - self.x[b.b as usize]).length();
             let len0 = (x0[b.a as usize] - x0[b.b as usize]).length();
             let f = readout_force(b, len, len0, h, self.settings.damping_scale);
-            let o = plastic_update(b, len, f, self.settings.min_length, self.settings.plasticity, self.settings.breaking);
+            let o = plastic_update(
+                b,
+                len,
+                f,
+                self.settings.min_length,
+                self.settings.plasticity,
+                self.settings.breaking,
+            );
             rep.yielded += u32::from(o.yielded);
             if o.broke {
                 rep.broke += 1;
@@ -170,7 +206,11 @@ impl CpuSoft {
             }
         }
         for i in 0..n {
-            self.v[i] = if self.fixed[i] { Vec3::ZERO } else { (self.x[i] - x0[i]) / h };
+            self.v[i] = if self.fixed[i] {
+                Vec3::ZERO
+            } else {
+                (self.x[i] - x0[i]) / h
+            };
         }
         self.steps += 1;
         rep
@@ -188,8 +228,20 @@ impl CpuSoft {
                 continue;
             }
             // The block is symmetric in the ends: evaluate with this particle first.
-            let other = if b.a as usize == i { b.b as usize } else { b.a as usize };
-            let (g, hb) = beam_block(b, xi, self.x[other], x0[i], x0[other], h, self.settings.damping_scale);
+            let other = if b.a as usize == i {
+                b.b as usize
+            } else {
+                b.a as usize
+            };
+            let (g, hb) = beam_block(
+                b,
+                xi,
+                self.x[other],
+                x0[i],
+                x0[other],
+                h,
+                self.settings.damping_scale,
+            );
             grad += g;
             hess += hb;
         }
@@ -200,15 +252,28 @@ impl CpuSoft {
                     let k = self.contact_stiffness;
                     let fn_ = -k * c;
                     grad += p.normal * (k * c);
-                    hess += Mat3::from_cols(p.normal * p.normal.x, p.normal * p.normal.y, p.normal * p.normal.z) * k;
+                    hess += Mat3::from_cols(
+                        p.normal * p.normal.x,
+                        p.normal * p.normal.y,
+                        p.normal * p.normal.z,
+                    ) * k;
                     // Lagged Coulomb friction toward the step-start tangential position.
                     let slip = (xi - x0[i]) - p.normal * p.normal.dot(xi - x0[i]);
                     let ks = k.min(m / (h * h) * 10.0);
                     let ft = slip * ks;
                     let cap = p.friction * fn_;
-                    let (ft, kt) = if ft.length() > cap && slip.length() > 1e-9 { (slip.normalize() * cap, cap / slip.length()) } else { (ft, ks) };
+                    let (ft, kt) = if ft.length() > cap && slip.length() > 1e-9 {
+                        (slip.normalize() * cap, cap / slip.length())
+                    } else {
+                        (ft, ks)
+                    };
                     grad += ft;
-                    let tt = Mat3::IDENTITY - Mat3::from_cols(p.normal * p.normal.x, p.normal * p.normal.y, p.normal * p.normal.z);
+                    let tt = Mat3::IDENTITY
+                        - Mat3::from_cols(
+                            p.normal * p.normal.x,
+                            p.normal * p.normal.y,
+                            p.normal * p.normal.z,
+                        );
                     hess += tt * kt;
                 }
             }
@@ -224,7 +289,11 @@ impl CpuSoft {
     }
 
     pub fn kinetic_energy(&self) -> f32 {
-        self.v.iter().zip(&self.mass).map(|(v, m)| 0.5 * m * v.length_squared()).sum()
+        self.v
+            .iter()
+            .zip(&self.mass)
+            .map(|(v, m)| 0.5 * m * v.length_squared())
+            .sum()
     }
 
     pub fn broken_beams(&self) -> usize {
@@ -232,6 +301,9 @@ impl CpuSoft {
     }
 
     pub fn yielded_beams(&self) -> usize {
-        self.beams.iter().filter(|b| b.flags & crate::layout::BEAM_YIELDED != 0).count()
+        self.beams
+            .iter()
+            .filter(|b| b.flags & crate::layout::BEAM_YIELDED != 0)
+            .count()
     }
 }

@@ -12,7 +12,7 @@
 //! adjBase + i/4          adjacency: beam ids, then triangle ids, 4 per slot
 //! chebBase + 3·i         list entry i: Chebyshev x⁽ⁿ⁻²⁾, x⁽ⁿ⁻¹⁾, last step's velocity
 //! triBase + t            triangle t: [a, b, c, softBody | collide << 8]
-//! triContactBase + 9·t   triangle t's contacts this step: obstacle, then two nodes
+//! triContactBase + 15·t  triangle t's contacts this step: obstacle, then four nodes
 //! nodeSlotBase + 3·o     particle ordinal o: the triangle it touches this step
 //! flagBase + o           particle ordinal o: x ≠ 0 when in a soft contact this step
 //! obstacleBase + k       thin obstacle k (static sphere / capsule): [collider, 0, 0, 0]
@@ -24,7 +24,9 @@ use serde::{Deserialize, Serialize};
 pub const HEADER_SLOTS: u32 = 8;
 pub const BODY_STRIDE: u32 = 3;
 pub const BEAM_STRIDE: u32 = 4;
-pub const TRI_CONTACT_STRIDE: u32 = 9;
+/// Node contacts a triangle records (its side of node–triangle contacts).
+pub const TRI_NODE_CONTACTS: u32 = 4;
+pub const TRI_CONTACT_STRIDE: u32 = 3 + 3 * TRI_NODE_CONTACTS;
 /// Node contact slot stride (normal + triangle, barycentrics + δ, initial gap).
 pub const NODE_SLOT_STRIDE: u32 = 3;
 
@@ -226,10 +228,39 @@ mod tests {
         assert!(l.body_base >= HEADER_SLOTS);
         assert_eq!(l.beam_base - l.body_base, 3 * c.max_bodies);
         assert_eq!(l.group_base - l.beam_base, 4 * c.max_beams);
-        assert_eq!(l.adj_base + (2 * c.max_beams + 3 * c.max_triangles).div_ceil(4), l.cheb_base);
+        assert_eq!(
+            l.adj_base + (2 * c.max_beams + 3 * c.max_triangles).div_ceil(4),
+            l.cheb_base
+        );
         assert_eq!(l.aabb_base + 2 * c.max_bodies, l.total_slots);
         // The default pool stays well under WebGPU's 128 MiB binding limit.
         assert!(c.bytes() < 128 << 20);
+    }
+}
+
+impl SoftSettings {
+    /// Settings with the deform/break threshold scale fitted for a step rate by
+    /// `soft_calibrate` (60 km/h wall crush of the procedural car against a
+    /// 960 Hz × 30-iteration reference): coarse steps under-trigger yield
+    /// (lower peak forces, numerical dissipation), so thresholds come down.
+    /// Interpolated in log(h); 960 Hz and finer keep the file's values. Fitted on
+    /// one vehicle so far: a starting point for the global calibration.
+    pub fn calibrated_for(hz: f32) -> Self {
+        const FIT: [(f32, f32); 3] = [(120.0, 0.45), (240.0, 0.30), (960.0, 1.0)];
+        let scale = if hz <= FIT[0].0 {
+            FIT[0].1
+        } else if hz >= FIT[2].0 {
+            1.0
+        } else {
+            let i = if hz < FIT[1].0 { 0 } else { 1 };
+            let (a, b) = (FIT[i], FIT[i + 1]);
+            let t = (hz.ln() - a.0.ln()) / (b.0.ln() - a.0.ln());
+            a.1 + t * (b.1 - a.1)
+        };
+        Self {
+            threshold_scale: scale,
+            ..Default::default()
+        }
     }
 }
 

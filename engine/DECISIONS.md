@@ -387,3 +387,22 @@ v17. **Track pods: a solid, belt-driven track run instead of rays and wheel shel
 * **Preset.** Pods are 0.6 m wide (twice the road wheels). A belly plate between the road wheels gives about 0.5 m ground clearance where the hull had about 1.0 m, so what fits between the tracks now meets the belly. The plate ends before the ramps, like a glacis, because a full-length lower hull blocked a 0.7 m ledge before the ramps reached it. It is nearly massless (1 kg): carrying 300 kg of hull mass lowered the centre of mass 5 cm, and that alone turned the pivot test's full-steer coast at 16 m/s from a pivot into a stall in third gear.
 
 Results (wgpu, `tests/vehicle.rs`): with pods the tank climbs 0.5 m and 0.7 m steps, while the old shell tank stalls at both faces. At 5 m/s through rows of 0.22 m and 0.35 m crates, crates got up to 0.11 m and 0.17 m into the old tank's track runs, against 0.02 m and 0.05 m (soft-contact give) with pods. An idle tank's belt doesn't move a crate leaning on it (0 drift over 3 s). Pivots, turns and reverse are unchanged. The belt is one-way: what the pod meets acts on the hull, not on the track spin.
+
+## Soft bodies (`slang/kernels/soft_step.slang`, `crates/engine-softbody`; see `docs/softbody.md`)
+
+s1. **Particles are bodies; beams are not joints.** A node is a `BodyState` flagged `BODY_PARTICLE` (zero inverse inertia), so prediction, broadphase, node-sphere contacts, CSR, extraction and sleep apply unchanged. Beams live in their own 64 B records in one `float4` arena at binding 32 (a 288 B D6 joint per beam would fill the joint capacity). The particle kernel binds 9 storage buffers. The rigid kernels' 10-binding budget is untouched.
+
+s2. **Separate particle colours, computed at spawn, swept after the rigid colours each iteration (Newton-style).** Particles are left out of the rigid colour lists, but stay in the JP graph as neighbours. Breaks only remove edges, so the spawn colouring stays valid. When every colour fits one 256-lane workgroup, one `soft_primal_fused` dispatch runs the whole sweep plus Chebyshev, bit-identical to one dispatch per colour (`ENGINE_SOFT_UNFUSED=1`). A first version dispatched it as four workgroups (hosts size dispatches as threads / 64) and raced.
+
+s3. **Particle initial guess is VBD's adaptive one, not the rigid predictor's.** The rigid at-rest rule (no h·v below 0.1 m/s) capped a falling lattice at 0.07 m/s, because a Gauss–Seidel sweep over stiff beams moves a whole structure only slowly. A full h²g drop at rest made an under-converged sweep sag every step, and the joints of a hanging body carried 17–60% more than its weight. Adaptive ã from last step's acceleration fixes both: the GPU and CPU reference agree on a cantilever to 0.2%.
+
+s4. **Soft scenes raise `beta_lin` to 1e7 (`soft_scene_params`).** Light nodes need contact stiffness at m/h² within an iteration or two. At 1e4 a dropped lattice sank and bounced back to most of its height. Raising `k_max_n` does not affect joints, which use their own ramp.
+
+s5. **Soft contacts are stabilised penalties.** Node–triangle and triangle–obstacle contacts correct (1 − α) of a step-start overlap per step, like rigid contacts. Unstabilised, a node freed inside a crushed panel left at 35 m/s. A per-particle contact flag skips the slot reads elsewhere.
+
+s6. **Stage-1 rigid core at the axle nodes only.** Attaching the core to the axles' beam neighbours as well held three rings rigid and capped crush at 7 cm. The core takes 25% of every node's mass; anti-roll bars, road steering and traction control are on, because a tall node–beam body rolled at full lock and 40 km/h.
+
+s7. **Threshold calibration per step rate is explicit (`SoftSettings::calibrated_for`).** Coarse steps under-trigger yield. Against a 960 Hz × 30 reference, 240 Hz × 10 needs thresholds × 0.30 and 120 Hz × 0.45 to match 60 km/h crush. Defaults keep the file's raw values; the demo opts in.
+
+s8. **The legocar is not CC0.** BeamNG's test vehicles in Blender-JBeam-Editor carry their own non-CC0 licence file, so they stay out of the repo. Tests use original content; real JBeam content runs only as opt-in local checks (`RUBBLE_JBEAM_DIR`).
+

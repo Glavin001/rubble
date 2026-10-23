@@ -14,6 +14,8 @@ export const softCapWords = (c) => Uint32Array.of(c.maxBodies, c.maxBeams, c.max
 
 /** `.truck` text → SoftVehicleDesc (masses distributed, warnings listed). */
 export const loadTruck = (src) => JSON.parse(wasm.soft_load_truck(src));
+/** SoftSettings with the threshold scale calibrated for a step rate (soft_calibrate). */
+export const calibratedSettings = (hz) => JSON.parse(wasm.soft_calibrated_settings(hz));
 /** JBeam files ([[name, source], …]) and an optional `.pc` → SoftVehicleDesc. */
 export const loadJbeam = (files, pc = undefined) => JSON.parse(wasm.soft_load_jbeam(JSON.stringify(files), pc));
 /** The procedural test hatchback as `.truck` text (thresholds in N, 0 = default). */
