@@ -19,6 +19,8 @@ export const M = JSON.parse(wasm.motion_constants());
 /** A character record (Uint32Array, 16 slots) from a CharacterDesc JSON. */
 export const characterRecord = (descJson, innerBody, x, y, z) => wasm.character_record(descJson, innerBody, x, y, z);
 export const characterDefault = () => JSON.parse(wasm.character_default());
+/** The whole wasm module (soft.mjs builds on the same instance). */
+export { wasm };
 const OP = JSON.parse(wasm.op_codes());
 
 const f32b = new Float32Array(1);
@@ -56,6 +58,7 @@ export function applyOps(backend, ops) {
       case OP.OP_WRITE_COLLIDER: backend.writeCollider(arg, w); break;
       case OP.OP_WRITE_SLOTS: backend.writeSlots(arg, w); break;
       case OP.OP_WRITE_BYTES: backend.writeBytes(arg, w); break;
+      case OP.OP_WRITE_SOFT_SLOTS: backend.writeSoftSlots(arg, w); break;
       default: throw new Error(`unknown vehicle op ${op}`);
     }
   }

@@ -1,0 +1,13 @@
+[package]
+name = "engine-softbody"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Soft-body (node–beam) vehicles: Rigs of Rods .truck / JBeam import, GPU particle and beam records, CPU reference solver"
+
+[dependencies]
+engine-schema.workspace = true
+engine-vehicle.workspace = true
+glam.workspace = true
+serde.workspace = true
+serde_json.workspace = true

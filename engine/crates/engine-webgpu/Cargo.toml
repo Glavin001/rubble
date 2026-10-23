@@ -11,6 +11,7 @@ engine-gpu-wait.workspace = true
 web-time.workspace = true
 engine-exec.workspace = true
 engine-vehicle.workspace = true
+engine-softbody.workspace = true
 glam.workspace = true
 serde_json.workspace = true
 engine-slang-build.workspace = true
@@ -37,3 +38,11 @@ path = "src/bin/wgsl_export.rs"
 [[bin]]
 name = "wg_drop"
 path = "src/bin/wg_drop.rs"
+
+[[bin]]
+name = "soft_bench"
+path = "src/bin/soft_bench.rs"
+
+[[bin]]
+name = "soft_calibrate"
+path = "src/bin/soft_calibrate.rs"

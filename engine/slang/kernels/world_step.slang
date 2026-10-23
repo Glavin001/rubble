@@ -4547,6 +4547,7 @@ void pack_color_lists(uint3 tid : SV_DispatchThreadID)
     uint awakeN = ALOAD(gCounters[0].awakeCount);
     if (li >= awakeN) return;
     uint body = gAwakeList[li];
+    if ((gBodies[body].flags & BODY_PARTICLE) != 0u) return; // soft_primal solves particles
     uint color = ALOAD(gBodyColor[body]);
     // Never turn an unfinished graph into racing colour-zero solves.
     if (color >= HOST_S(4))
@@ -4584,7 +4585,7 @@ void count_color_tiles(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThre
     if (body < n)
     {
         BodyState b = gBodies[body];
-        if (bodyIsDynamic(b) && !bodyIsSleeping(b))
+        if (bodyIsDynamic(b) && !bodyIsSleeping(b) && (b.flags & BODY_PARTICLE) == 0u)
         {
             color = ALOAD(gBodyColor[body]);
             if (color >= palette)
@@ -4678,7 +4679,7 @@ void scatter_color_tiles(uint3 tid : SV_DispatchThreadID)
     uint n = gCounters[0].bodyCount;
     if (body >= n) return;
     BodyState b = gBodies[body];
-    if (!bodyIsDynamic(b) || bodyIsSleeping(b)) return;
+    if (!bodyIsDynamic(b) || bodyIsSleeping(b) || (b.flags & BODY_PARTICLE) != 0u) return;
     uint color = ALOAD(gBodyColor[body]);
     if (color >= min(HOST_S(4), 64u)) return; // count pass reports overflow
     uint groups = (n + 63u) / 64u;

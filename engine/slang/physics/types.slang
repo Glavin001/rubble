@@ -21,7 +21,8 @@ public static const uint BODY_KINEMATIC = 2u;
 public static const uint BODY_SLEEPING = 4u;
 public static const uint BODY_AWAKE = 8u;
 public static const uint BODY_VEHICLE = 32u; // 16 is BODY_WAKE_PENDING
-public static const uint BODY_CCD = 64u;
+public static const uint BODY_PARTICLE = 64u;
+public static const uint BODY_CCD = 128u;
 
 public struct Collider
 {

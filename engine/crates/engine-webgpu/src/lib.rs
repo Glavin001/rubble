@@ -6,7 +6,9 @@
 //! interactive gate; this crate is the apples-to-apples oracle path.
 
 mod gpu;
-pub use gpu::{default_device, CharacterHandle, MotionEvent, SimSnapshot, WgpuSim};
+mod soft_skin;
+pub use gpu::{default_device, CharacterHandle, MotionEvent, SimSnapshot, SoftEvents, WgpuSim};
+pub use soft_skin::{SoftSkinner, SOFT_SKIN_WGSL};
 
 use engine_exec::{ExecError, PhaseTimingsMs, PhysicsBackend};
 use engine_schema::{AvbdParams, StepCounters, WorldCapacity};
@@ -64,6 +66,7 @@ impl WebGpuWorld {
                     (*n).to_string(),
                     Ok(uniformize_workgroup_lanes(&cap_loop_iterations(&if n
                         .starts_with("solve_primal_sparse")
+                        || n.starts_with("soft_primal_fused")
                         || n.starts_with("color_bodies_local")
                         || n.starts_with("color_bodies_tail")
                     {

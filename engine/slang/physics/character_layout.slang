@@ -1,5 +1,5 @@
 // Character / scene-query / projectile pool layout in gCharData
-// (RWStructuredBuffer<float4>, binding 32), in float4 slots. Single source of
+// (RWStructuredBuffer<float4>, binding 33), in float4 slots. Single source of
 // truth for the GPU side; engine-schema/src/character.rs mirrors these numbers
 // (`layout_matches_slang`).
 #ifndef ENGINE_PHYSICS_CHARACTER_LAYOUT_SLANG

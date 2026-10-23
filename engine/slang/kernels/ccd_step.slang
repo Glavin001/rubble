@@ -1090,8 +1090,9 @@ void ccd_respond_apply(uint3 tid : SV_DispatchThreadID)
             }
         }
         if (!any) continue;
+        // This thread owns body b: one load, one store.
         BodyState bb = gBodies[b];
-        gBodies[b].linearVel = bb.linearVel + dv;
+        bb.linearVel += dv;
         // Under the per-step rotation limit as extract_velocity_sleep is (it ran
         // before this pass): an edge hit spun a box to 6 rad a step.
         float3 w = bb.angularVel + dw;
@@ -1100,12 +1101,13 @@ void ccd_respond_apply(uint3 tid : SV_DispatchThreadID)
             float wMax = MAX_ROTATION / max(PARAMS.dt, 1e-8);
             if (length(w) > wMax) w *= wMax / length(w);
         }
-        gBodies[b].angularVel = w;
+        bb.angularVel = w;
         if (pass == 1u)
         {
-            gBodies[b].flags = (bb.flags & ~(BODY_SLEEPING | BODY_WAKE_PENDING)) | BODY_AWAKE;
-            gBodies[b].sleepTimer = 0.0;
+            bb.flags = (bb.flags & ~(BODY_SLEEPING | BODY_WAKE_PENDING)) | BODY_AWAKE;
+            bb.sleepTimer = 0.0;
         }
+        gBodies[b] = bb;
     }
 }
 

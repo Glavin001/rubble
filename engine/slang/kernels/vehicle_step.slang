@@ -597,6 +597,7 @@ void wheel_query(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         bool hadHit = (VU(wr + W_C0).z & WD_CONTACT) != 0u && VD(wr + W_LHIT).w > 0.5;
         if (interval > 1u && hadHit && ((HOST_S(17) + w) % interval) != 0u) probe = false;
     }
+    gRayExcludeGroup = (live && (HOST_S(30) & 3u) != 0u) ? bodyNegativeGroup(chassis) : 0;
     // Query mode in the vehicle header: 0 = broadphase grid walk, 1 = full scan.
     if (VU(VH_MISC).w == 1u) rayLaneScan(lane, probe, o, d, maxT, chassis, sweep, coneCos, lmin);
     else rayLaneScanGrid(lane, probe, o, d, maxT, chassis, sweep, coneCos, lmin);

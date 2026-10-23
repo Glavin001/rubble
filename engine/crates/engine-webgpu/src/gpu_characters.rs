@@ -1,5 +1,5 @@
 //! Characters, in-step scene queries and projectiles on the native wgpu host
-//! (`slang/kernels/character_step.slang`, binding 32). Records are written
+//! (`slang/kernels/character_step.slang`, binding 33). Records are written
 //! between steps; the step's own kernels move characters, answer queries and
 //! cast projectiles, and the results are read back after it.
 
@@ -24,7 +24,7 @@ pub enum MotionEvent {
 
 impl WgpuSim {
     fn write_char_slots(&self, slot: u32, words: &[[u32; 4]]) {
-        self.queue.write_buffer(&self.bufs[32], u64::from(slot) * 16, bytemuck::cast_slice(words));
+        self.queue.write_buffer(&self.bufs[33], u64::from(slot) * 16, bytemuck::cast_slice(words));
     }
 
     pub(crate) fn write_character_header(&self) {
@@ -36,7 +36,7 @@ impl WgpuSim {
     }
 
     fn read_char_slots(&self, slot: u32, n: u32) -> Vec<[u32; 4]> {
-        let words = self.read_words(32, u64::from(slot) * 4, n as usize * 4);
+        let words = self.read_words(33, u64::from(slot) * 4, n as usize * 4);
         words.chunks(4).map(|c| [c[0], c[1], c[2], c[3]]).collect()
     }
 

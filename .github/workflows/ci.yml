@@ -75,8 +75,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: engine
-      # Schema, scene builders (host build, no Metal), step graph, vehicle and fracture
-      # host logic. GPU tests need a real adapter (Metal or a hardware wgpu backend) and
-      # run locally; see engine/crates/engine-webgpu/README.md.
+      # Schema, scene builders (host build, no Metal), step graph, vehicle, soft-body
+      # (importers, beam model, CPU reference) and fracture host logic. GPU tests need a
+      # real adapter (Metal or a hardware wgpu backend) and run locally; see
+      # engine/crates/engine-webgpu/README.md and engine/docs/softbody.md.
       - name: cargo test
-        run: cargo test --release -p engine-schema -p engine-exec -p engine-scenes -p engine-vehicle -p engine-fracture --no-default-features
+        run: cargo test --release -p engine-schema -p engine-exec -p engine-scenes -p engine-vehicle -p engine-softbody -p engine-fracture --no-default-features

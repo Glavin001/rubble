@@ -1,5 +1,5 @@
 //! Character controllers, in-step scene queries and projectiles: the pool in
-//! `gCharData` (binding 32, float4 slots). Mirrors
+//! `gCharData` (binding 33, float4 slots). Mirrors
 //! `slang/physics/character_layout.slang`; `layout_matches_slang` keeps them
 //! equal. The kernels are in `slang/kernels/character_step.slang`.
 
@@ -115,7 +115,7 @@ pub const LAYOUT: &[(&str, u32)] = &[
 /// Slots `NO_INDEX` (FLT_MAX bits, as in the vehicle pool).
 pub const NO_INDEX: u32 = crate::vehicle::NO_INDEX;
 
-/// Pool sizes (binding 32). Explicit limits: adding past them fails.
+/// Pool sizes (binding 33). Explicit limits: adding past them fails.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CharacterCapacity {
     pub max_characters: u32,

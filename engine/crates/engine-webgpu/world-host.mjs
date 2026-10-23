@@ -4,6 +4,7 @@
 // its own benchmark host.
 import { loadShaderModules, pipelineBuilder } from './shader-loader.mjs';
 import { VehicleHost, DEFAULT_VEHICLE_CAPACITY, vehicleLayout, capWords, fbits, L, RigidStep, ballJointWords, M, characterRecord } from './vehicle.mjs';
+import { SoftHost, DEFAULT_SOFT_CAPACITY, softCapWords } from './soft.mjs';
 
 // ---- record encoding (BodyState 112 B, Collider 64 B) for scene objects ----
 export function bodyWords(b) {
@@ -35,7 +36,7 @@ const nextPow2 = (n) => { let p = 1; while (p < n) p <<= 1; return p; };
 export const JOINT_BYTES = L.JOINT_BYTES;
 // Scratch atomics (binding 21): the EVENT_BREAK ring starts at word 96 (engine-schema
 // EVENT_RING_BASE): cursor, then [kind, joint, force bits, torque bits] records.
-export const EVENT_RING_BASE = 96, EVENT_RING_CAPACITY = 1024, EVENT_BREAK = 3;
+export const EVENT_RING_BASE = 96, EVENT_RING_CAPACITY = 1024, EVENT_BREAK = 3, EVENT_BEAM_BREAK = 5;
 
 export function sceneCapacity(bodies, colliders) {
   const b = nextPow2(Math.max(bodies, 4096));
@@ -69,7 +70,7 @@ export const DEFAULT_PARAMS = {
   residualExit: 1e-4, trustLin: 0.35, trustAng: 0.5, pivotFloor: 1e-6, gridCellSize: 2,
 };
 
-/** Character / query / projectile pool sizes (binding 32). */
+/** Character / query / projectile pool sizes (binding 33). */
 export const DEFAULT_MOTION_CAPACITY = { maxCharacters: 64, maxQueries: 256, maxProjectiles: 256 };
 export function motionLayout(c) {
   const characterBase = M.CH_SLOTS;
@@ -79,14 +80,16 @@ export function motionLayout(c) {
   return { characterBase, queryBase, projectileBase, slots, bytes: slots * 16 };
 }
 
-export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_VEHICLE_CAPACITY, motionCap = DEFAULT_MOTION_CAPACITY, wgslBase = './generated/wgsl/', status = () => {} }) {
+export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_VEHICLE_CAPACITY, motionCap = DEFAULT_MOTION_CAPACITY, softCap = null, wgslBase = './generated/wgsl/', status = () => {} }) {
   // engine_exec::rigid_plan in wasm: buffer sizes, host uploads and the step's
   // commands, the same graph WgpuSim and MetalSim replay (canonical contacts).
   const vcap = { ...DEFAULT_VEHICLE_CAPACITY, ...vehicleCap };
+  // Soft bodies (binding 32) only when asked for: softCap = {} takes the defaults.
+  const scap = softCap ? { ...DEFAULT_SOFT_CAPACITY, ...softCap } : null;
   const plan = new RigidStep(
     Uint32Array.of(userCap.maxBodies, userCap.maxColliders, userCap.maxContacts, userCap.maxJoints,
       userCap.maxCandidates, userCap.maxColors, userCap.maxCommands, userCap.maxHull),
-    capWords(vcap));
+    capWords(vcap), scap ? softCapWords(scap) : undefined);
   // One tyre joint per vehicle wheel slot rides on top of the user joints.
   const cap = { ...userCap, maxJoints: userCap.maxJoints + vcap.maxWheels };
   const vlayout = vehicleLayout(vcap);
@@ -94,7 +97,7 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
   const sizes = Array.from(plan.buffer_sizes());
   const mcap = { ...DEFAULT_MOTION_CAPACITY, ...motionCap };
   const mlayout = motionLayout(mcap);
-  sizes[32] = Math.max(sizes[32] || 0, mlayout.bytes);
+  sizes[33] = Math.max(sizes[33] || 0, mlayout.bytes);
   const kernels = JSON.parse(plan.kernels());
 
   const limit = Math.min(device.limits.maxBufferSize, device.limits.maxStorageBufferBindingSize);
@@ -141,6 +144,9 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     colliderInfo: [], // {body, radius, dynamic}
     vehicles: new VehicleHost(vcap, aabbTail),
     vehicleShadow: new Uint32Array(vlayout.totalSlots * 4),
+    soft: scap ? new SoftHost(scap) : null,
+    softShadow: null,
+    hasFilters: false,
     eventsSeen: 0,
     // Continuous collision, kinematics, impulses, characters, projectiles.
     motionCap: mcap, mlayout,
@@ -151,7 +157,9 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     queryCount: 0,
     motionShadow: new Uint32Array(mlayout.slots * 4),
     motionEventsSeen: 0,
+    beamEventsSeen: 0,
   };
+  if (world.soft) world.softShadow = new Uint32Array(world.soft.layout.totalSlots * 4);
 
   const noteFlags = (words) => {
     const flags = words[11];
@@ -185,6 +193,7 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     writeCollider: (i, w) => writeColliderRaw(i, w),
     writeSlots: (slot, u32) => { world.vehicleShadow.set(u32, slot * 4); device.queue.writeBuffer(bufs[31], slot * 16, u32); },
     writeBytes: (offset, u32) => { world.vehicleShadow.set(u32, offset / 4); device.queue.writeBuffer(bufs[31], offset, u32); },
+    writeSoftSlots: (slot, u32) => { world.softShadow.set(u32, slot * 4); device.queue.writeBuffer(bufs[32], slot * 16, u32); },
   };
 
   world.addBodyWords = (words) => {
@@ -197,6 +206,8 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     if (world.colliderCount >= cap.maxColliders) throw new Error('collider capacity exhausted');
     const i = world.colliderCount++;
     writeColliderRaw(i, words);
+    // Category/mask (generation) or group (material bits 16..31): enable the GPU filter test.
+    if (words[3] !== 0 || (words[2] >>> 16) !== 0) world.hasFilters = true;
     const f = new Float32Array(words.buffer, words.byteOffset, 16);
     const body = words[0];
     const inv = new Float32Array(world.bodyWords.buffer, body * 112, 28);
@@ -243,6 +254,75 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     world.eventsSeen = Math.max(world.eventsSeen, cursor);
     return out;
   };
+  // Soft-body beams that broke since the last call: [{beam, force, softBody}]
+  // (EVENT_BEAM_BREAK records of the same ring).
+  world.pollBeamBreaks = async () => {
+    if (ringBusy) return [];
+    ringBusy = true;
+    const enc = device.createCommandEncoder();
+    enc.copyBufferToBuffer(bufs[21], EVENT_RING_BASE * 4, ringRead, 0, ringBytes);
+    device.queue.submit([enc.finish()]);
+    await ringRead.mapAsync(GPUMapMode.READ);
+    const w = new Uint32Array(ringRead.getMappedRange().slice(0));
+    ringRead.unmap();
+    ringBusy = false;
+    const out = [];
+    const cursor = w[0];
+    const fl = new Float32Array(w.buffer);
+    for (let n = Math.max(world.beamEventsSeen, cursor - EVENT_RING_CAPACITY); n < cursor; n++) {
+      const r = 4 + 4 * (n % EVENT_RING_CAPACITY);
+      if (w[r] === EVENT_BEAM_BREAK) out.push({ beam: w[r + 1], force: fl[r + 2], softBody: w[r + 3] });
+    }
+    world.beamEventsLost = Math.max(0, cursor - world.beamEventsSeen - EVENT_RING_CAPACITY);
+    world.beamEventsSeen = Math.max(world.beamEventsSeen, cursor);
+    return out;
+  };
+  // GPU → CPU copy of `bytes` from `buffer` at `offset` (Uint32Array).
+  const readWords = async (buffer, offset, bytes) => {
+    const rb = device.createBuffer({ size: Math.max(16, bytes), usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    const enc = device.createCommandEncoder();
+    if (bytes) enc.copyBufferToBuffer(buffer, offset, rb, 0, bytes);
+    device.queue.submit([enc.finish()]);
+    await rb.mapAsync(GPUMapMode.READ);
+    const w = new Uint32Array(rb.getMappedRange(0, bytes).slice(0));
+    rb.unmap(); rb.destroy();
+    return w;
+  };
+  // Soft body `h`'s beam records (16 words each: engine_softbody::model::Beam).
+  world.readSoftBeams = async (h) => {
+    const e = world.soft.entries[h];
+    return readWords(bufs[32], (world.soft.layout.beamBase + 4 * e.firstBeam) * 16, e.beams * 64);
+  };
+  // Soft body `h`'s particle positions (Float32Array xyz).
+  world.readSoftParticles = async (h) => {
+    const e = world.soft.entries[h];
+    const f = new Float32Array((await readWords(bufs[0], e.firstBody * 112, e.particles * 112)).buffer);
+    const out = new Float32Array(e.particles * 3);
+    for (let i = 0; i < e.particles; i++) out.set(f.subarray(i * 28, i * 28 + 3), i * 3);
+    return out;
+  };
+  // Damage of soft body `h` (SoftHost.damage).
+  world.readSoftDamage = async (h) => world.soft.damage(h, await world.readSoftBeams(h), await world.readSoftParticles(h));
+  // Destruction events since the last call: beam breaks and the pieces they cut
+  // loose ([{softBody, nodes, parts, mass}]). After an event-ring overflow every
+  // soft body is resynchronised from a beam readback. Use this or pollBeamBreaks,
+  // not both (they share the ring cursor).
+  world.pollSoftEvents = async () => {
+    const breaks = await world.pollBeamBreaks();
+    const lost = world.beamEventsLost || 0;
+    let pieces;
+    if (lost > 0) {
+      pieces = [];
+      for (let h = 0; h < world.soft.entries.length; h++) pieces.push(...world.soft.syncBroken(h, await world.readSoftBeams(h)));
+    } else {
+      pieces = world.soft.noteBreaks(breaks);
+    }
+    return { breaks, pieces, lost };
+  };
+  // Soft vehicles (engine_softbody::SoftHost): `desc` from soft.mjs loadTruck.
+  world.addSoftVehicle = (desc, p, q = [0, 0, 0, 1], opts = {}) => world.soft.add(world.backend, world.vehicles, desc, p, q, opts);
+  world.addSoftObstacle = (collider) => world.soft.addObstacle(world.backend, collider);
+  world.setSoftSettings = (s) => world.soft.setSettings(world.backend, s);
   world.addCollider = (c) => world.addColliderWords(colliderWords({
     body: c.body, shape: c.shape, material: c.material ?? 0, generation: 0, localPos: c.localPos || [0, 0, 0],
     density: 0, localRot: c.localRot || [0, 0, 0, 1], params: c.params,
@@ -265,10 +345,10 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     params.gridCellSize = Math.max(0.5, 2 * r * 1.0001);
   };
 
-  // ---- characters, queries, projectiles (binding 32), impulses (binding 21) ----
+  // ---- characters, queries, projectiles (binding 33), impulses (binding 21) ----
   const writeMotion = (slot, words) => {
     world.motionShadow.set(words, slot * 4);
-    device.queue.writeBuffer(bufs[32], slot * 16, words);
+    device.queue.writeBuffer(bufs[33], slot * 16, words);
   };
   world.writeMotionHeader = () => {
     const h = new Uint32Array(16);
@@ -342,7 +422,7 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     if (motionBusy) return null;
     motionBusy = true;
     const enc = device.createCommandEncoder();
-    enc.copyBufferToBuffer(bufs[32], 0, motionRead, 0, motionReadBytes);
+    enc.copyBufferToBuffer(bufs[33], 0, motionRead, 0, motionReadBytes);
     enc.copyBufferToBuffer(bufs[21], M.EVENT_RING_BASE * 4, motionRead, motionReadBytes, ringWords * 4);
     device.queue.submit([enc.finish()]);
     await motionRead.mapAsync(GPUMapMode.READ);
@@ -398,9 +478,13 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     plan.set_params(new Uint8Array(paramBytes));
     const impulses = uploadImpulses();
     const motionBits = (world.motion.ccd ? 1 : 0) | (world.motion.kinematic ? 2 : 0) | (impulses ? 4 : 0);
+    const soft = world.soft && world.soft.bodyCount > 0 ? world.soft.counts() : new Uint32Array(10);
+    // [bodies, colliders, joints, vehicles, wheels, soft x10, filters, soft dual, sweeps,
+    //  motion bits, projectiles, characters, queries] (RigidStep::inputs).
     const counts = Uint32Array.of(world.bodyCount, world.colliderCount, world.jointCount,
-      world.vehicles.vehicleCount, world.vehicles.wheelCount, motionBits, world.projectileCount,
-      world.characters.length, world.queryCount);
+      world.vehicles.vehicleCount, world.vehicles.wheelCount, ...soft, world.hasFilters ? 1 : 0,
+      world.soft && world.soft.inner.dual() ? 1 : 0, world.soft ? world.soft.inner.sweeps() : 1,
+      motionBits, world.projectileCount, world.characters.length, world.queryCount);
     // Host words (binding 21), host uniform (binding 6), counter block (copy source).
     const host = plan.host_upload(counts);
     const uniformBytes = host.length - 256 - 80;
@@ -450,6 +534,9 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     motionPool: world.motionShadow.slice(),
     characters: world.characters.slice(),
     projectileCount: world.projectileCount,
+    soft: world.soft ? world.softShadow.slice() : null,
+    softHost: world.soft ? world.soft.save() : null,
+    hasFilters: world.hasFilters,
   });
   world.restore = (snap) => {
     world.bodyCount = snap.bodyCount;
@@ -467,11 +554,17 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     device.queue.writeBuffer(bufs[31], 0, snap.vehicle);
     world.vehicles.restore(snap.host);
     world.motionShadow.set(snap.motionPool);
-    device.queue.writeBuffer(bufs[32], 0, snap.motionPool);
+    device.queue.writeBuffer(bufs[33], 0, snap.motionPool);
     world.characters = snap.characters.slice();
     world.projectileCount = snap.projectileCount;
     world.impulses = [];
     world.writeMotionHeader();
+    if (snap.soft) {
+      world.softShadow.set(snap.soft);
+      device.queue.writeBuffer(bufs[32], 0, snap.soft);
+      world.soft.restore(snap.softHost);
+    }
+    world.hasFilters = snap.hasFilters;
     plan.reset();
     world.steps = 0;
     world.last = { contact: 0, candidate: 0, awake: 0, color: 0, manifold: 0, overflow: 0 };

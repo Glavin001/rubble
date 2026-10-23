@@ -417,6 +417,7 @@ impl CudaSim {
                 look_ahead: self.params.flags & engine_schema::FLAG_SPEC_VELOCITY != 0,
                 ..self.motion
             },
+            soft: Default::default(),
         }
     }
 

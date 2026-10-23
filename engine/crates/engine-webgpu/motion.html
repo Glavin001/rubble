@@ -423,7 +423,7 @@ fn capsuleHit(ro: vec3f, rd: vec3f, pa: vec3f, pb: vec3f, r: f32) -> f32 {
     const groundPipe = pipe('vsGround', 'fsGround', [{ arrayStride: 12, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }] }], 'none');
     const bind = (p, entries) => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: entries.map(([b, buf]) => ({ binding: b, resource: { buffer: buf } })) });
     const colBind = bind(colPipe, [[0, world.bufs[0]], [1, frameBuf], [2, world.bufs[2]]]);
-    const shotBind = bind(shotPipe, [[1, frameBuf], [3, world.bufs[32]]]);
+    const shotBind = bind(shotPipe, [[1, frameBuf], [3, world.bufs[33]]]);
     const groundBind = bind(groundPipe, [[0, world.bufs[0]], [1, frameBuf]]);
     let depth = null;
 

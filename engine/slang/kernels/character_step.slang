@@ -21,7 +21,7 @@
 #include "scene_query.slang"
 #include "../physics/character_layout.slang"
 
-BIND(32) RWStructuredBuffer<float4> gCharData;
+BIND(33) RWStructuredBuffer<float4> gCharData;
 
 float4 CD(uint q) { return gCharData[q]; }
 uint4 CU(uint q) { return asuint(gCharData[q]); }

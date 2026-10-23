@@ -349,6 +349,25 @@ bool tyreAccepts(float3 o, float3 d, float t, float3 n, float rad, float coneCos
     return true;
 }
 
+// Negative collision group of the body a query starts from (0 = none): a soft
+// vehicle's rigid core shares it with its node spheres, so its wheels ignore
+// their own bodywork. Set per query before scanning.
+static int gRayExcludeGroup = 0;
+
+int bodyNegativeGroup(uint body)
+{
+    uint c = firstColliderOfBody(body);
+    if (c >= gCounters[0].colliderCount || gColliders[c].body != body) return 0;
+    int g = int(gColliders[c].material) >> 16;
+    return g < 0 ? g : 0;
+}
+
+bool rayIgnores(Collider col, uint excludeBody)
+{
+    if (col.body == excludeBody) return true;
+    return gRayExcludeGroup != 0 && (int(col.material) >> 16) == gRayExcludeGroup;
+}
+
 // One workgroup per query: lanes stride the colliders, then a min-reduction.
 groupshared float gsRayT[64];
 groupshared uint gsRayC[64];
@@ -366,7 +385,7 @@ void rayLaneScan(uint lane, bool live, float3 o, float3 d, float maxT, uint excl
     for (uint ci = lane; ci < nCols; ci += 64u)
     {
         Collider col = gColliders[ci];
-        if (col.body == excludeBody) continue;
+        if (rayIgnores(col, excludeBody)) continue;
         if (col.shape != SHAPE_PLANE && !segmentHitsAabb(mn, mx, gAabbs[base + ci])) continue;
         float t;
         float3 n;
@@ -384,7 +403,7 @@ void rayTestCollider(uint ci, float3 o, float3 d, float maxT, uint excludeBody, 
     float coneCos, float lmin, float3 mn, float3 mx, uint base, inout float bestT, inout uint bestC)
 {
     Collider col = gColliders[ci];
-    if (col.body == excludeBody) return;
+    if (rayIgnores(col, excludeBody)) return;
     if (col.shape != SHAPE_PLANE && !segmentHitsAabb(mn, mx, gAabbs[base + ci])) return;
     float t;
     float3 n;

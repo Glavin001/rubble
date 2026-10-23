@@ -2,7 +2,7 @@
 
 A Rubble character is a kinematic mover solved on the GPU inside the physics
 step, in the style of Jolt's `CharacterVirtual`
-(`slang/kernels/character_step.slang`, pool at binding 32,
+(`slang/kernels/character_step.slang`, pool at binding 33,
 `slang/physics/character_layout.slang` ↔ `engine-schema/src/character.rs`).
 It implements the character audit's Phases 0–3. Phase 4 (a dynamic-body NPC
 mode) is not implemented.

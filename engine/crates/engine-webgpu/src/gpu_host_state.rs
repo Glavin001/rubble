@@ -98,7 +98,8 @@ impl WgpuSim {
         }
         let stride = std::mem::size_of::<BodyState>() as u64;
         let bytes = bytemuck::cast_slice(bodies);
-        self.queue.write_buffer(&self.bufs[0], u64::from(first) * stride, bytes);
+        self.queue
+            .write_buffer(&self.bufs[0], u64::from(first) * stride, bytes);
         self.queue.write_buffer(
             &self.bufs[0],
             (u64::from(self.capacity.max_bodies) + u64::from(first)) * stride,
@@ -126,7 +127,10 @@ impl WgpuSim {
         if self.steps_done == 0 {
             return Ok(Vec::new());
         }
-        let n = self.last_counters.contact_count.min(self.capacity.max_contacts);
+        let n = self
+            .last_counters
+            .contact_count
+            .min(self.capacity.max_contacts);
         Ok(self.read_buffer_range(
             4,
             u64::from(self.last_contact_offset) * std::mem::size_of::<Contact>() as u64,
@@ -150,9 +154,11 @@ impl WgpuSim {
 
     fn save_into(&self, old: Vec<(wgpu::Buffer, u64)>) -> SimSnapshot {
         let mut old = old.into_iter();
-        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("save-state"),
-        });
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("save-state"),
+            });
         let bufs = self
             .bufs
             .iter()
@@ -199,10 +205,16 @@ impl WgpuSim {
 
     /// Return to a snapshot of this simulation (`save_state`).
     pub fn restore_state(&mut self, s: &SimSnapshot) {
-        assert_eq!(s.bufs.len(), self.bufs.len(), "snapshot of another simulation");
-        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("restore-state"),
-        });
+        assert_eq!(
+            s.bufs.len(),
+            self.bufs.len(),
+            "snapshot of another simulation"
+        );
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("restore-state"),
+            });
         for (i, (copy, size)) in s.bufs.iter().enumerate() {
             if i == 18 {
                 continue; // the hull arena stays the host's
@@ -299,8 +311,14 @@ mod tests {
         let (b1, c1) = run(&mut sim);
         sim.restore_state(&saved);
         let (b2, c2) = run(&mut sim);
-        assert_eq!(bytemuck::cast_slice::<_, u8>(&b1), bytemuck::cast_slice::<_, u8>(&b2));
-        assert_eq!(bytemuck::cast_slice::<_, u8>(&c1), bytemuck::cast_slice::<_, u8>(&c2));
+        assert_eq!(
+            bytemuck::cast_slice::<_, u8>(&b1),
+            bytemuck::cast_slice::<_, u8>(&b2)
+        );
+        assert_eq!(
+            bytemuck::cast_slice::<_, u8>(&c1),
+            bytemuck::cast_slice::<_, u8>(&c2)
+        );
 
         // Resting: the forces on the box (B of its plane pairs) add up to its weight.
         for _ in 0..120 {
@@ -315,10 +333,17 @@ mod tests {
                 let f = glam::Vec3::from_array(c.normal) * c.lambda_n
                     + glam::Vec3::from_array(c.tangent1) * c.lambda_t1
                     + glam::Vec3::from_array(c.tangent2) * c.lambda_t2;
-                if sim.host_cols[c.collider_b as usize].body == body { -f } else { f }
+                if sim.host_cols[c.collider_b as usize].body == body {
+                    -f
+                } else {
+                    f
+                }
             })
             .sum();
-        assert!((force.y - mass * 9.81).abs() < 0.02 * mass * 9.81, "{force:?}");
+        assert!(
+            (force.y - mass * 9.81).abs() < 0.02 * mass * 9.81,
+            "{force:?}"
+        );
 
         // Static for a few steps: no motion; written back, it falls again.
         let mut s = sim.read_body(body);
@@ -333,7 +358,13 @@ mod tests {
             sim.step().unwrap();
         }
         assert_eq!(sim.read_body(body).position[1], 3.0);
-        sim.write_bodies(body, &[BodyState { position: s.position, ..resting }]);
+        sim.write_bodies(
+            body,
+            &[BodyState {
+                position: s.position,
+                ..resting
+            }],
+        );
         sim.step().unwrap();
         assert!(sim.read_body(body).position[1] < 3.0);
     }

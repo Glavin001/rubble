@@ -80,7 +80,7 @@ pub enum BodyFlags {
 /// reach is not capped, a sweep longer than a grid cell takes the fast list,
 /// and the nearest time of impact along its path places a speculative contact
 /// in the solve and starts the body's iterate at that pose.
-pub const BODY_CCD: u32 = 64;
+pub const BODY_CCD: u32 = 128; // 64 is engine-softbody BODY_PARTICLE
 
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -26,10 +26,12 @@ static const uint BODY_SLEEPING = 4u;
 static const uint BODY_AWAKE = 8u;
 // Vehicle chassis: initialPad holds asfloat(gAabbs index) of its 4-entry wheel block.
 static const uint BODY_VEHICLE = 32u; // 16 is BODY_WAKE_PENDING
+// Soft-body particle (3-DOF node): solved by soft_step.slang, not the rigid colours.
+static const uint BODY_PARTICLE = 64u;
 // Continuous collision (ccd_step.slang): uncapped look-ahead reach, the fast
 // broadphase list and time-of-impact contacts. While registered for a step,
 // initialPad holds asfloat(CCD slot); vehicle chassis cannot be CCD bodies.
-static const uint BODY_CCD = 64u;
+static const uint BODY_CCD = 128u;
 // Kinematic bodies (BODY_KINEMATIC, no BODY_DYNAMIC): moved by their given
 // velocity each step, infinite mass; contacts see their motion.
 
