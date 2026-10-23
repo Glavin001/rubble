@@ -40,7 +40,11 @@ fn main() {
         s.h = 1.0 / 240.0;
         s.iterations = 10;
         s.chebyshev_rho = 0.9;
-        s.planes.push(Plane { normal: Vec3::Y, offset: 0.0, friction: 0.8 });
+        s.planes.push(Plane {
+            normal: Vec3::Y,
+            offset: 0.0,
+            friction: 0.8,
+        });
         for k in 0..480 {
             s.step();
             if k % 160 == 159 {

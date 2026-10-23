@@ -301,6 +301,13 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     for (let i = 0; i < e.particles; i++) out.set(f.subarray(i * 28, i * 28 + 3), i * 3);
     return out;
   };
+  // Rigid mode of every soft body (1 = riding its core rigidly, 0 = soft):
+  // SoftSettings.rigid_mode; the record's first word, BODY_STRIDE = 6 slots.
+  world.readSoftModes = async () => {
+    const n = world.soft.entries.length;
+    const w = await readWords(bufs[32], world.soft.layout.bodyBase * 16, n * 6 * 16);
+    return Array.from({ length: n }, (_, s) => w[(s * 6 + 3) * 4]);
+  };
   // Damage of soft body `h` (SoftHost.damage).
   world.readSoftDamage = async (h) => world.soft.damage(h, await world.readSoftBeams(h), await world.readSoftParticles(h));
   // Destruction events since the last call: beam breaks and the pieces they cut
@@ -472,6 +479,13 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     if (k.dynamic) p.setBindGroup(0, k.bind, [passIdx * PASS_ALIGN]); else p.setBindGroup(0, k.bind);
   };
 
+  // Dispatches of the last encoded step by kernel name (profiling).
+  world.dispatchHistogram = () => {
+    const h = {};
+    const c = world.lastCmds || [];
+    for (let i = 0; i < c.length; i += 6) if (c[i] === 1 || c[i] === 2) { const k = kernels[c[i + 1]]; h[k] = (h[k] || 0) + 1; }
+    return h;
+  };
   world.encodeStep = (enc) => {
     world.refreshCell();
     PFIELDS.forEach((k, i) => (i === 2 || i === 3) ? pv.setUint32(i * 4, params[k], true) : pv.setFloat32(i * 4, params[k], true));
@@ -495,6 +509,8 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     enc.copyBufferToBuffer(upload, 256, bufs[6], 0, uniformBytes);
     device.queue.writeBuffer(bufs[17], 0, colorZero);
     const cmds = plan.encode(counts);
+    world.lastCounts = counts;
+    world.lastCmds = cmds;
     for (let i = 0; i < cmds.length; i += 6) {
       if (cmds[i] !== 0) continue;
       const src = cmds[i + 1] === 0xFFFFFFFF ? upload : bufs[cmds[i + 1]];
@@ -515,6 +531,49 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     p.end();
     world.steps = plan.steps();
     world.vehicles.dirty = false;
+  };
+  // Profiling (device with 'timestamp-query'): encode and run one step with every
+  // dispatch in its own timed pass; resolves to GPU ms per kernel name. The step
+  // itself is a normal step (same commands, same order).
+  world.profileStep = async () => {
+    world.encodeStep(device.createCommandEncoder()); // plan this step's commands
+    const cmds = world.lastCmds;
+    const n = cmds.length / 6;
+    const qs = device.createQuerySet({ type: 'timestamp', count: 2 * n });
+    const res = device.createBuffer({ size: 16 * n, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
+    const rb = device.createBuffer({ size: 16 * n, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    const enc = device.createCommandEncoder();
+    // The host words and uniform the planning encodeStep staged in `upload`.
+    const host = plan.host_upload(world.lastCounts);
+    enc.copyBufferToBuffer(upload, 0, bufs[21], 0, 256);
+    enc.copyBufferToBuffer(upload, 256, bufs[6], 0, host.length - 256 - 80);
+    for (let i = 0; i < cmds.length; i += 6) {
+      if (cmds[i] !== 0) continue;
+      const src = cmds[i + 1] === 0xFFFFFFFF ? upload : bufs[cmds[i + 1]];
+      const srcOff = cmds[i + 1] === 0xFFFFFFFF ? 512 + cmds[i + 2] : cmds[i + 2];
+      enc.copyBufferToBuffer(src, srcOff, bufs[cmds[i + 3]], cmds[i + 4], cmds[i + 5]);
+    }
+    const timed = [];
+    for (let i = 0; i < cmds.length; i += 6) {
+      const op = cmds[i];
+      if (op !== 1 && op !== 2) continue;
+      const k = timed.length;
+      timed.push(kernels[cmds[i + 1]]);
+      const p = enc.beginComputePass({ timestampWrites: { querySet: qs, beginningOfPassWriteIndex: 2 * k, endOfPassWriteIndex: 2 * k + 1 } });
+      bindPipe(p, pipes[cmds[i + 1]], cmds[i + 3]);
+      if (op === 1) p.dispatchWorkgroups(...groups(cmds[i + 2])); else p.dispatchWorkgroupsIndirect(bufs[23], cmds[i + 2] * 12);
+      p.end();
+    }
+    enc.resolveQuerySet(qs, 0, 2 * timed.length, res, 0);
+    enc.copyBufferToBuffer(res, 0, rb, 0, 16 * timed.length);
+    device.queue.submit([enc.finish()]);
+    await rb.mapAsync(GPUMapMode.READ);
+    const t = new BigUint64Array(rb.getMappedRange().slice(0));
+    rb.unmap();
+    const out = {};
+    timed.forEach((k, j) => { out[k] = (out[k] || 0) + Number(t[2 * j + 1] - t[2 * j]) / 1e6; });
+    qs.destroy(); res.destroy(); rb.destroy();
+    return out;
   };
   // Counters read back by the page (binding 7 words) size the next steps.
   world.setLastCounters = (words) => {

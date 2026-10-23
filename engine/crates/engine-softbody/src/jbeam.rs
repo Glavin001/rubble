@@ -903,21 +903,26 @@ pub fn load_jbeam(files: &[(&str, &str)], config: Option<&str>) -> Result<SoftVe
             desc.nodes.push(node);
             desc.nodes.len() as u32 - 1
         };
-        let mut add = |list: &mut Vec<(String, Vec<u32>)>, name: &str| {
-            match list.iter_mut().find(|(n, _)| n == name) {
-                Some((_, v)) => {
-                    if !v.contains(&index) {
-                        v.push(index);
-                    }
+        let mut add = |list: &mut Vec<(String, Vec<u32>)>, name: &str| match list
+            .iter_mut()
+            .find(|(n, _)| n == name)
+        {
+            Some((_, v)) => {
+                if !v.contains(&index) {
+                    v.push(index);
                 }
-                None => list.push((name.to_string(), vec![index])),
             }
+            None => list.push((name.to_string(), vec![index])),
         };
         add(&mut part_nodes, &place.name);
         match f.get("group") {
             Some(Value::String(g)) if !g.is_empty() => add(&mut group_nodes, g),
             Some(Value::Array(gs)) => {
-                for g in gs.iter().filter_map(Value::as_str).filter(|g| !g.is_empty()) {
+                for g in gs
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|g| !g.is_empty())
+                {
                     add(&mut group_nodes, g);
                 }
             }

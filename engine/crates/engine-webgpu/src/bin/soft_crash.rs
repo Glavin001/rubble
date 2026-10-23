@@ -139,6 +139,7 @@ fn main() {
     sim.set_soft_settings(SoftSettings {
         threshold_scale: a.get("threshold", cal.threshold_scale),
         sweeps: a.get("sweeps", 1.0) as u32,
+        rigid_mode: a.get("rigidmode", 0.0) > 0.5,
         ..cal
     });
     for (m, f) in [(0, 1.0), (9, 0.8)] {
@@ -183,7 +184,8 @@ fn main() {
             .collect();
         Car { h, rest }
     };
-    let gap = 0.3;
+    // `back=` m of extra run-up (time to settle, and to turn rigid in rigid mode).
+    let gap = 0.3 + a.get("back", 0.0);
     let mut cars = Vec::new();
     let mut ram = None;
     match scenario.as_str() {
@@ -418,7 +420,14 @@ fn main() {
         // Destruction events (engine API): name the parts that tore off.
         for p in sim.poll_soft_events().pieces {
             let who = cars.iter().position(|c| c.h == p.soft_body).unwrap_or(0);
-            torn.push(format!("car {who}: {}", if p.parts.is_empty() { format!("{} nodes", p.nodes.len()) } else { p.parts.join("+") }));
+            torn.push(format!(
+                "car {who}: {}",
+                if p.parts.is_empty() {
+                    format!("{} nodes", p.nodes.len())
+                } else {
+                    p.parts.join("+")
+                }
+            ));
         }
         let c = &cars[0];
         let ps = sim.read_soft_particles(c.h);
@@ -513,12 +522,85 @@ fn main() {
         );
     }
     println!("max pitch {max_pitch:.0}° · max roll {max_roll:.0}° · max cell height {max_height:.2} m · rolled over: {flipped}");
+    // Self-penetration: own nodes inside (behind and within the prism of) own
+    // skin triangles they are not excluded from, by more than 2 cm.
+    {
+        let x: Vec<Vec3> = sim
+            .read_soft_particles(cars[0].h)
+            .iter()
+            .map(|b| Vec3::from_array(b.position))
+            .collect();
+        let rest: Vec<Vec3> = desc
+            .nodes
+            .iter()
+            .map(|n| Vec3::from_array(n.position))
+            .collect();
+        let closest = |p: Vec3, a: Vec3, b: Vec3, c: Vec3| -> Vec3 {
+            let (ab, ac, ap) = (b - a, c - a, p - a);
+            let n = ab.cross(ac);
+            let l = n.length();
+            if l < 1e-9 {
+                return a;
+            }
+            let n = n / l;
+            let q = p - n * n.dot(p - a);
+            // barycentric inside test; fall back to vertices/edges roughly
+            let v0 = ab;
+            let v1 = ac;
+            let v2 = q - a;
+            let (d00, d01, d11, d20, d21) =
+                (v0.dot(v0), v0.dot(v1), v1.dot(v1), v2.dot(v0), v2.dot(v1));
+            let den = d00 * d11 - d01 * d01;
+            let v = (d11 * d20 - d01 * d21) / den;
+            let w = (d00 * d21 - d01 * d20) / den;
+            if v >= 0.0 && w >= 0.0 && v + w <= 1.0 {
+                q
+            } else {
+                Vec3::splat(f32::MAX)
+            }
+        };
+        let mut bad = 0;
+        for (i, &p) in x.iter().enumerate() {
+            for t in &desc.triangles {
+                if t.nodes.contains(&(i as u32)) {
+                    continue;
+                }
+                let [ra, rb, rc] = t.nodes.map(|k| rest[k as usize]);
+                let rq = closest(rest[i], ra, rb, rc);
+                let rn = (rb - ra).cross(rc - ra).normalize_or_zero();
+                if rq.x != f32::MAX && (rest[i] - ra).dot(rn).abs() < 0.12 {
+                    continue; // excluded: it sat over this face at rest
+                }
+                let [a, b, c] = t.nodes.map(|k| x[k as usize]);
+                let n = (b - a).cross(c - a).normalize_or_zero();
+                let d = (p - a).dot(n);
+                if d < -0.02 && d > -0.3 && closest(p, a, b, c).x != f32::MAX {
+                    bad += 1;
+                }
+            }
+        }
+        println!("self-penetration: {bad} node-triangle pairs (own body)");
+    }
     if let Some(roof) = desc.part("roof") {
         let first = sim.soft_host().entry(cars[0].h).first_body;
         let is_roof = |g: u32| roof.nodes.contains(&(g - first));
         let beams = sim.read_soft_beams(cars[0].h);
-        let pillars: Vec<_> = beams.iter().filter(|b| is_roof(b.a) != is_roof(b.b)).collect();
-        println!("roof pillars: {} of {} broken", pillars.iter().filter(|b| b.broken()).count(), pillars.len());
+        let pillars: Vec<_> = beams
+            .iter()
+            .filter(|b| is_roof(b.a) != is_roof(b.b))
+            .collect();
+        println!(
+            "roof pillars: {} of {} broken",
+            pillars.iter().filter(|b| b.broken()).count(),
+            pillars.len()
+        );
     }
-    println!("torn off: {}", if torn.is_empty() { "nothing".to_string() } else { torn.join(", ") });
+    println!(
+        "torn off: {}",
+        if torn.is_empty() {
+            "nothing".to_string()
+        } else {
+            torn.join(", ")
+        }
+    );
 }

@@ -5,7 +5,10 @@
 //! reports `EVENT_BREAK` with the force that exceeded the threshold, and its
 //! bodies separate.
 
-use engine_schema::{AvbdParams, BodyState, Collider, Joint, JointDesc, JointFrame, JointType, ShapeType, WorldCapacity, JOINT_BIG, JOINT_FLAG_BROKEN};
+use engine_schema::{
+    AvbdParams, BodyState, Collider, Joint, JointDesc, JointFrame, JointType, ShapeType,
+    WorldCapacity, JOINT_BIG, JOINT_FLAG_BROKEN,
+};
 use engine_webgpu::WgpuSim;
 use glam::{Quat, Vec3};
 
@@ -33,8 +36,11 @@ fn world() -> WgpuSim {
 
 fn add_box(sim: &mut WgpuSim, pos: Vec3, half: Vec3, mass: f32) -> u32 {
     let body = if mass > 0.0 {
-        let i = Vec3::new(half.y * half.y + half.z * half.z, half.x * half.x + half.z * half.z, half.x * half.x + half.y * half.y)
-            * (mass / 3.0);
+        let i = Vec3::new(
+            half.y * half.y + half.z * half.z,
+            half.x * half.x + half.z * half.z,
+            half.x * half.x + half.y * half.y,
+        ) * (mass / 3.0);
         sim.add_body(BodyState::dynamic(pos, Quat::IDENTITY, mass, i))
     } else {
         sim.add_body(BodyState {
@@ -67,7 +73,15 @@ fn add_box(sim: &mut WgpuSim, pos: Vec3, half: Vec3, mass: f32) -> u32 {
 
 /// A D6 ball or weld at the anchors (bodies start unrotated, so the frames are
 /// at rest); a threshold of 0 never breaks.
-fn joint(kind: JointType, a: u32, b: u32, anchor_a: Vec3, anchor_b: Vec3, break_force: f32, break_torque: f32) -> JointDesc {
+fn joint(
+    kind: JointType,
+    a: u32,
+    b: u32,
+    anchor_a: Vec3,
+    anchor_b: Vec3,
+    break_force: f32,
+    break_torque: f32,
+) -> JointDesc {
     let d = match kind {
         JointType::Ball => JointDesc::ball(a, b, anchor_a, anchor_b),
         _ => JointDesc::fixed(a, b, JointFrame::at(anchor_a), JointFrame::at(anchor_b)),
@@ -81,7 +95,15 @@ fn hanging_box(break_force: f32) -> (WgpuSim, u32, u32) {
     let mut sim = world();
     let anchor = add_box(&mut sim, Vec3::new(0.0, 6.0, 0.0), Vec3::splat(0.2), 0.0);
     let bob = add_box(&mut sim, Vec3::new(0.0, 5.0, 0.0), Vec3::splat(0.25), 10.0);
-    let j = sim.add_joint_desc(&joint(JointType::Ball, anchor, bob, Vec3::new(0.0, -0.5, 0.0), Vec3::new(0.0, 0.5, 0.0), break_force, 0.0));
+    let j = sim.add_joint_desc(&joint(
+        JointType::Ball,
+        anchor,
+        bob,
+        Vec3::new(0.0, -0.5, 0.0),
+        Vec3::new(0.0, 0.5, 0.0),
+        break_force,
+        0.0,
+    ));
     (sim, bob, j)
 }
 
@@ -99,11 +121,24 @@ fn a_joint_below_its_break_force_holds() {
     let joint = sim.read_joint(j);
     let lambda = Vec3::new(joint.lambda[0], joint.lambda[1], joint.lambda[2]);
     let b = sim.read_body(bob);
-    eprintln!("λ {lambda:?} |λ| {:.2} N, bob y {:.4} v {:?}", lambda.length(), b.position[1], b.linear_vel);
+    eprintln!(
+        "λ {lambda:?} |λ| {:.2} N, bob y {:.4} v {:?}",
+        lambda.length(),
+        b.position[1],
+        b.linear_vel
+    );
     assert_eq!(joint.flags & JOINT_FLAG_BROKEN, 0, "the joint holds");
     assert!(sim.poll_joint_breaks().is_empty(), "no break events");
-    assert!((lambda.length() - 10.0 * G).abs() < 0.05 * 10.0 * G, "converged force is the weight: {}", lambda.length());
-    assert!((b.position[1] - 5.0).abs() < 0.01, "still hanging at the anchor: y {}", b.position[1]);
+    assert!(
+        (lambda.length() - 10.0 * G).abs() < 0.05 * 10.0 * G,
+        "converged force is the weight: {}",
+        lambda.length()
+    );
+    assert!(
+        (b.position[1] - 5.0).abs() < 0.01,
+        "still hanging at the anchor: y {}",
+        b.position[1]
+    );
 }
 
 #[test]
@@ -117,11 +152,18 @@ fn a_joint_above_its_break_force_breaks_once_and_reports_it() {
     }
     let joint = sim.read_joint(j);
     let b = sim.read_body(bob);
-    eprintln!("breaks {breaks:?}, bob y {:.3} vy {:.3}", b.position[1], b.linear_vel[1]);
+    eprintln!(
+        "breaks {breaks:?}, bob y {:.3} vy {:.3}",
+        b.position[1], b.linear_vel[1]
+    );
     assert_ne!(joint.flags & JOINT_FLAG_BROKEN, 0, "the joint is broken");
     assert_eq!(breaks.len(), 1, "exactly one EVENT_BREAK");
     assert_eq!(breaks[0].joint, j);
-    assert!(breaks[0].force > 60.0, "the reported force exceeds the threshold: {}", breaks[0].force);
+    assert!(
+        breaks[0].force > 60.0,
+        "the reported force exceeds the threshold: {}",
+        breaks[0].force
+    );
     // Free fall from the break: well below the anchor after 2 s.
     assert!(b.position[1] < 0.0, "the box fell: y {}", b.position[1]);
 }
@@ -130,13 +172,39 @@ fn a_joint_above_its_break_force_breaks_once_and_reports_it() {
 /// carries 200 N and a 100 N·m moment. `arm_first` makes the arm the joint's body A.
 fn cantilever(break_torque: f32, arm_first: bool) -> (Joint, Vec<engine_schema::JointBreak>, f32) {
     let mut sim = world();
-    let wall = add_box(&mut sim, Vec3::new(0.0, 3.0, 0.0), Vec3::new(0.25, 1.0, 1.0), 0.0);
-    let arm = add_box(&mut sim, Vec3::new(0.75, 3.0, 0.0), Vec3::new(0.5, 0.1, 0.1), 20.0);
+    let wall = add_box(
+        &mut sim,
+        Vec3::new(0.0, 3.0, 0.0),
+        Vec3::new(0.25, 1.0, 1.0),
+        0.0,
+    );
+    let arm = add_box(
+        &mut sim,
+        Vec3::new(0.75, 3.0, 0.0),
+        Vec3::new(0.5, 0.1, 0.1),
+        20.0,
+    );
     let (wall_anchor, arm_anchor) = (Vec3::new(0.25, 0.0, 0.0), Vec3::new(-0.5, 0.0, 0.0));
     let jt = if arm_first {
-        joint(JointType::Fixed, arm, wall, arm_anchor, wall_anchor, 1000.0, break_torque)
+        joint(
+            JointType::Fixed,
+            arm,
+            wall,
+            arm_anchor,
+            wall_anchor,
+            1000.0,
+            break_torque,
+        )
     } else {
-        joint(JointType::Fixed, wall, arm, wall_anchor, arm_anchor, 1000.0, break_torque)
+        joint(
+            JointType::Fixed,
+            wall,
+            arm,
+            wall_anchor,
+            arm_anchor,
+            1000.0,
+            break_torque,
+        )
     };
     // Start the rows at the branch's 1e4 penalty (D6 otherwise ramps from kStart).
     let mut rec = jt.to_gpu();
@@ -177,6 +245,10 @@ fn a_fixed_joint_breaks_on_torque_not_force() {
     eprintln!("snapped: breaks {breaks:?}, arm y {y:.3}");
     assert_ne!(snapped.flags & JOINT_FLAG_BROKEN, 0);
     assert_eq!(breaks.len(), 1);
-    assert!(breaks[0].torque > 50.0 && breaks[0].force < 1000.0, "broken by torque: {:?}", breaks[0]);
+    assert!(
+        breaks[0].torque > 50.0 && breaks[0].force < 1000.0,
+        "broken by torque: {:?}",
+        breaks[0]
+    );
     assert!(y < 1.0, "the arm fell: {y}");
 }

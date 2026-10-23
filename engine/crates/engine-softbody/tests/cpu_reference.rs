@@ -149,5 +149,8 @@ fn wall_crash_crumples_the_front() {
         s.kinetic_energy() < 0.1 * 0.5 * 1300.0 * 225.0,
         "most energy absorbed"
     );
-    assert!(crush > 0.25, "54 km/h folds the front by tens of cm ({crush})");
+    assert!(
+        crush > 0.25,
+        "54 km/h folds the front by tens of cm ({crush})"
+    );
 }

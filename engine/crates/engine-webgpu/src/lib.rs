@@ -67,6 +67,7 @@ impl WebGpuWorld {
                     Ok(uniformize_workgroup_lanes(&cap_loop_iterations(&if n
                         .starts_with("solve_primal_sparse")
                         || n.starts_with("soft_primal_fused")
+                        || n.starts_with("soft_primal_bodies")
                         || n.starts_with("color_bodies_local")
                         || n.starts_with("color_bodies_tail")
                     {
@@ -657,7 +658,10 @@ mod tests {
         // Safari's WGSL parser rejects `;;` ("Not a valid statement"); Tint accepts it.
         for (name, result) in WebGpuWorld::compile_shaders_report() {
             let source = result.unwrap();
-            assert!(!source.contains(";;"), "{name}: empty statement `;;` breaks Safari");
+            assert!(
+                !source.contains(";;"),
+                "{name}: empty statement `;;` breaks Safari"
+            );
         }
     }
 
@@ -880,7 +884,9 @@ mod tests {
             atomic_offsets.sort_unstable();
             let expected = match name {
                 "apply_commands" => vec![8],
-                "predict_bodies" | "extract_velocity_sleep" | "record_stab_velocity"
+                "predict_bodies"
+                | "extract_velocity_sleep"
+                | "record_stab_velocity"
                 | "sleep_island_commit" => vec![20],
                 _ => vec![],
             };
