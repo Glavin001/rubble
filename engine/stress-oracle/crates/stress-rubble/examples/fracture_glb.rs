@@ -53,6 +53,18 @@ fn main() {
     };
     let name = file.rsplit('/').next().unwrap_or(&file).to_string();
     let mut scene = scene;
+    // `STRESS_STRENGTH=0.125`: every bond's strength times this (the lab's Bond strength).
+    if let Some(k) = std::env::var("STRESS_STRENGTH").ok().map(|v| v.parse::<f64>().expect("STRESS_STRENGTH")) {
+        let used: std::collections::BTreeSet<String> = scene.bodies.iter().flat_map(|b| &b.bonds).map(|b| b.material.clone()).collect();
+        for name in used {
+            if let Some(m) = scene.materials.get_mut(&name) {
+                m.tensile_strength *= k;
+                m.compressive_strength *= k;
+                m.cohesion *= k;
+                m.shear_cap = m.shear_cap.map(|c| c * k);
+            }
+        }
+    }
     // Before `with_derived`, as stress-web sets the lab's Physics rate.
     if let Some(hz) = std::env::var("STRESS_HZ").ok().map(|v| v.parse::<f64>().expect("STRESS_HZ")) {
         scene.sim.frame_dt = 1.0 / hz;
@@ -225,6 +237,15 @@ fn threshold_gpu(gpu: &Gpu, scene: &stress_ref::scene::Scene, ball: (f64, f64, f
                         }
                         *prev = intact;
                     });
+                }
+            }
+            // `STRESS_THRESHOLD_STRIKES=1`: each strike predicted this frame (body, shot,
+            // contact, force), read back (waits).
+            if std::env::var("STRESS_THRESHOLD_STRIKES").is_ok_and(|v| v == "1") {
+                let (n, b) = (w.tables.chunk_count() as usize, w.tables.body_count() as usize);
+                let s: Vec<[f32; 4]> = gpu.read_range(&w.fracture.frames, 2 * b + 9 * n, 3 * b);
+                for (i, r) in s.chunks_exact(3).enumerate().filter(|(_, r)| r[0][3] != 0.0) {
+                    eprintln!("frame {f}: body {i} struck by shot {} at t {:.4}, contact {:?}, force {:.3e} N", r[0][3] as u32 - 1, r[1][3], &r[2][..3], r[2][3]);
                 }
             }
             if std::env::var("STRESS_GPU_QS_LOADS").is_ok() {

@@ -61,8 +61,21 @@ other, claiming its run with one atomic add. Where the run lands changes no resu
 because each chunk reads only its own pulses, in order. The pool holds two pulses per
 engine contact.
 
-**Capacity.** rubble's contacts are sized for a debris pile: 24 per chunk, within 2^18,
-so rubble's 256-byte contact records fit WebGPU's 128 MB binding.
+**Capacity.** rubble's contacts are sized for a whole suburb in a heap: 12 per chunk, at
+most 2^19 and what the device's storage binding holds. 2^19 of rubble's 256-byte records is
+WebGPU's default 128 MiB binding, so the world fits any WebGPU device. More is an error the
+world reports (rubble's overflow bits), never a silent drop. The 96 houses at bond strength
+×1/8 with 16 shots (58k bodies, 115k bonds broken) stay within it.
+
+**Strikes.** A shot that will reach a body within the next frame, closing faster than
+`tiered_impact_speed` (5 m/s), breaks every intact bond of that body whose share of the hit
+beats its capacity, before the engine steps: the threshold profile's `threshold_predict`.
+The force is the impulse of an inelastic hit over the Hertz contact time, spread as a point
+load on a half-space: `F min(1, A / (2 pi d^2))` at distance d from the contact. The
+contact is where the shot first meets a chunk's box; the struck chunk is the nearest to its
+path. `fr_strike_*` run per body, chunk and bond (atomics, not a group per island), so the
+cost does not depend on body size. `STRESS_THRESHOLD_STRIKE=0` turns strikes off (a
+measurement), and `STRESS_THRESHOLD_STRIKES=1` in the harness prints each strike.
 
 **Counters.** A ring of mapped buffers, read without waiting (`ThresholdWorld::poll`):
 broken bonds, bodies, error bits, and rubble's own step counters. A fracture error (no
@@ -103,11 +116,12 @@ hits and 1.0× after. The `GpuWorld` dropped to 0.53× and then stopped.
 
 ## Open
 
-- **Strike prediction.** The world breaks bonds from the step's contact loads. The
-  profile's forward strike prediction (`threshold_predict`, the routing check, fast free
-  bodies as projectiles) is not ported yet. At scale it needs a spatial grid of the
-  projectiles: the `GpuWorld`'s fast list is O(islands × fast bodies) and truncated at
-  `MAX_FAST`.
+- **Strikes from debris.** Shots strike (above). Fast free debris as projectiles (the
+  `GpuWorld`'s fast list) is not ported. At scale it needs a spatial grid: the fast list
+  is O(islands × fast bodies) and truncated at `MAX_FAST`.
+- On the 96 houses, the `GpuWorld`'s own `threshold_predict` never fired for the lab's
+  ball (one shot: 366 bonds broken with strikes on or off). That is why shots barely
+  dented the houses. This world breaks 1,250-1,340 bonds for the same shot.
 - **Fixed:** determinism and settling at scale. rubble sized its warm-start hash from a
   read-back contact count, which this world never read back, so most contacts
   cold-started. `WgpuSim::set_plan_hints` now gives it a fixed plan: the hash sized for the

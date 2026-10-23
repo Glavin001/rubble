@@ -56,8 +56,8 @@ struct FractureParams
     float scale_m;       // fixed-point scales of the mass sums (2^k)
     float scale_s;
     float scale_j;
-    float pad1;
-    float pad2;
+    float strike_speed;  // a slower closing is no strike (world_coupling.rs `tiered_impact_speed`)
+    uint shot_count;     // the shots (`shots`), parked ones included
     float pad3;
 };
 
@@ -133,6 +133,10 @@ uint a_dirty() { return a_sums() + SUMS * params.chunk_count; }
 uint a_best_count() { return a_dirty() + params.body_count; }
 uint a_best_root() { return a_best_count() + params.body_count; }
 uint a_counters() { return a_best_root() + params.body_count; }
+// Per body slot 9 words for the strike: its bounds (ordered floats: low xyz, high xyz), the
+// entry time (float bits), the entry chunk's distance to the path (float bits), the entry
+// chunk.
+uint a_strike() { return a_counters() + 16; }
 
 // Counters (`a_counters` + i).
 static const uint C_FRAME_BROKEN = 0; // bonds broken this frame (fr_gate clears it)
@@ -555,6 +559,9 @@ void fr_assign(uint3 id: SV_DispatchThreadID)
 }
 
 uint stage(uint c) { return 2 * params.body_count + 9 * c; }
+// Per body slot 3 float4 (the strike): (the shot's centre at the frame's start, the
+// shot + 1, 0 for none: a NaN constant, asfloat(NONE), is not valid WGSL); (its velocity relative to the body, t0); (contact point, force).
+uint strike_at(uint b) { return 2 * params.body_count + 9 * params.chunk_count + 3 * b; }
 
 // The piece's body: `cook_with`'s mass, centre and principal axes of its chunks, posed in
 // its parent's structure frame, moving with the parent's rigid motion.
@@ -711,6 +718,11 @@ struct ViewParams
 [[vk::binding(19, 0)]] RWStructuredBuffer<float> lines;
 // The shots' engine bodies.
 [[vk::binding(20, 0)]] StructuredBuffer<uint> shot_bodies;
+// Per chunk 3 float4 (the strike's): (box centre (structure frame), bounding radius); (half
+// extents, plane-strain modulus E'); box rotation (structure frame).
+[[vk::binding(21, 0)]] StructuredBuffer<float4> geometry;
+// Per shot 2 float4: (engine body as bits, bounding radius, face radius, mass); (E', -, -, -).
+[[vk::binding(22, 0)]] StructuredBuffer<float4> shots;
 
 static const float3 MOVING = float3(1.0, 0.45, 0.12);
 static const float3 AT_REST = float3(0.25, 0.45, 0.85);
@@ -818,4 +830,285 @@ void fr_view_bonds(uint3 id: SV_DispatchThreadID)
     float3 b = work[w_alive() + i] != 0 ? chunk_world(bond.y) : a;
     write_line_vertex(2 * i, a);
     write_line_vertex(2 * i + 1, b);
+}
+
+
+// ---- Strike prediction (threshold.slang `threshold_predict`, strike.slang `find_strike`) ----
+//
+// A shot that will reach a body within the next frame, closing faster than
+// `strike_speed`, breaks every intact bond of it whose share of the strike's Hertz force
+// (a point load on a half-space: F min(1, A / (2 pi d^2)) at distance d) beats its tensile
+// capacity, before the engine steps: forward only, the step meets the pieces.
+//
+//   fr_strike_reset    one thread per body: no bounds, no strike;
+//   fr_strike_bounds   one thread per chunk: its body's bounds (chunk centres +- bounding
+//                      radius);
+//   fr_strike_find     one thread per body: the first shot (in order) whose sphere reaches
+//                      its bounds within the frame;
+//   fr_strike_entry    one thread per chunk of a struck body: the first time the shot meets
+//                      its box, and its distance to the shot's path;
+//   fr_strike_nearest  the struck chunk: the nearest to the path (ties: the lowest);
+//   fr_strike_force    one thread per struck body: the contact point and the Hertz force;
+//   fr_strike_breaks   one thread per bond.
+
+uint ordered(float f)
+{
+    uint u = asuint(f);
+    return (u & 0x80000000u) != 0 ? ~u : (u | 0x80000000u);
+}
+
+float unordered(uint u)
+{
+    return asfloat((u & 0x80000000u) != 0 ? (u & 0x7fffffffu) : ~u);
+}
+
+// A chunk's box centre in the world (the stress frame), and its body's rotation.
+float3 chunk_box_world(uint k, out Quat q)
+{
+    uint slot = body_of(k);
+    float3 origin;
+    structure_pose(slot, BODY_WORDS * slot, q, origin);
+    return origin + rotate(q, geometry[3 * k].xyz);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_strike_reset(uint3 id: SV_DispatchThreadID)
+{
+    uint b = id.x;
+    if (b >= params.body_count)
+        return;
+    uint at = a_strike() + 9 * b;
+    for (uint w = 0; w < 3; w++)
+    {
+        atom[at + w].store(0xffffffffu);
+        atom[at + 3 + w].store(0u);
+    }
+    atom[at + 6].store(0x7f800000u);
+    atom[at + 7].store(0x7f800000u);
+    atom[at + 8].store(NONE);
+    frames[strike_at(b)].w = 0.0;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_strike_bounds(uint3 id: SV_DispatchThreadID)
+{
+    uint k = id.x;
+    if (k >= params.chunk_count || params.shot_count == 0)
+        return;
+    Quat q;
+    float3 c = chunk_box_world(k, q);
+    float r = geometry[3 * k].w;
+    uint at = a_strike() + 9 * body_of(k);
+    for (uint ax = 0; ax < 3; ax++)
+    {
+        atom[at + ax].min(ordered(c[ax] - r));
+        atom[at + 3 + ax].max(ordered(c[ax] + r));
+    }
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_strike_find(uint3 id: SV_DispatchThreadID)
+{
+    uint b = id.x;
+    if (b >= params.body_count || params.shot_count == 0)
+        return;
+    uint at = a_strike() + 9 * b;
+    if (atom[at].load() == 0xffffffffu)
+        return; // no chunk on this body
+    float3 lo = float3(unordered(atom[at].load()), unordered(atom[at + 1].load()), unordered(atom[at + 2].load()));
+    float3 hi = float3(unordered(atom[at + 3].load()), unordered(atom[at + 4].load()), unordered(atom[at + 5].load()));
+    float3 v = from_rubble(bodies[BODY_WORDS * b + 3].xyz);
+    float inf = float_bits(0x7f800000u);
+    for (uint k = 0; k < params.shot_count; k++)
+    {
+        float4 info = shots[2 * k];
+        uint sb = BODY_WORDS * asuint(info.x);
+        if (bodies[sb].w == 0.0)
+            continue; // parked
+        float3 c = from_rubble(bodies[sb].xyz);
+        float3 rel = from_rubble(bodies[sb + 3].xyz) - v;
+        float sp = length(rel);
+        if (!(sp > params.strike_speed))
+            continue;
+        float r = info.y;
+        float3 elo = lo - float3(r);
+        float3 ehi = hi + float3(r);
+        float t0 = 0.0;
+        float t1 = params.dt;
+        for (uint ax = 0; ax < 3; ax++)
+        {
+            if (abs(rel[ax]) < 1e-12)
+            {
+                if (c[ax] < elo[ax] || c[ax] > ehi[ax])
+                    t0 = inf;
+                continue;
+            }
+            float ta = (elo[ax] - c[ax]) / rel[ax];
+            float tb = (ehi[ax] - c[ax]) / rel[ax];
+            t0 = max(t0, min(ta, tb));
+            t1 = min(t1, max(ta, tb));
+        }
+        if (t0 <= t1)
+        {
+            uint st = strike_at(b);
+            frames[st] = float4(c, float(k + 1));
+            frames[st + 1] = float4(rel, t0);
+            return;
+        }
+    }
+}
+
+bool struck(uint b, out uint shot)
+{
+    uint k = uint(frames[strike_at(b)].w);
+    shot = k - 1;
+    return k != 0;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_strike_entry(uint3 id: SV_DispatchThreadID)
+{
+    uint k = id.x;
+    if (k >= params.chunk_count || params.shot_count == 0)
+        return;
+    uint b = body_of(k);
+    uint shot;
+    if (!struck(b, shot))
+        return;
+    float4 s0 = frames[strike_at(b)];
+    float4 s1 = frames[strike_at(b) + 1];
+    float3 from = s0.xyz;
+    float3 rel = s1.xyz;
+    float3 d = rel / max(length(rel), 1e-12);
+    float radius = shots[2 * shot].y;
+    Quat q;
+    float3 cc = chunk_box_world(k, q);
+    Quat box = normalized(quat_mul(q, quat_of(geometry[3 * k + 2])));
+    float3 half = geometry[3 * k + 1].xyz;
+    float inf = float_bits(0x7f800000u);
+    float t_in = 0.0;
+    float t_out = params.dt;
+    for (uint ax = 0; ax < 3; ax++)
+    {
+        float3 e = float3(0.0);
+        e[ax] = 1.0;
+        float3 axis = rotate(box, e);
+        float o = dot(from - cc, axis);
+        float dv = dot(rel, axis);
+        float ext = half[ax] + radius;
+        if (abs(dv) < 1e-12)
+        {
+            if (abs(o) > ext)
+                t_in = inf;
+            continue;
+        }
+        float ta = (-ext - o) / dv;
+        float tb = (ext - o) / dv;
+        t_in = max(t_in, min(ta, tb));
+        t_out = min(t_out, max(ta, tb));
+    }
+    uint at = a_strike() + 9 * b;
+    if (t_in <= t_out)
+        atom[at + 6].min(asuint(t_in));
+    // The struck chunk: the nearest to the path from where it meets the bounds.
+    float3 hit = from + rel * s1.w;
+    float3 r = cc - hit;
+    float along = dot(r, d);
+    float dist = length(r - d * along) + abs(along) * 1e-3;
+    atom[at + 7].min(asuint(dist));
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_strike_nearest(uint3 id: SV_DispatchThreadID)
+{
+    uint k = id.x;
+    if (k >= params.chunk_count || params.shot_count == 0)
+        return;
+    uint b = body_of(k);
+    uint shot;
+    if (!struck(b, shot))
+        return;
+    float4 s0 = frames[strike_at(b)];
+    float4 s1 = frames[strike_at(b) + 1];
+    float3 d = s1.xyz / max(length(s1.xyz), 1e-12);
+    Quat q;
+    float3 r = chunk_box_world(k, q) - (s0.xyz + s1.xyz * s1.w);
+    float along = dot(r, d);
+    float dist = length(r - d * along) + abs(along) * 1e-3;
+    uint at = a_strike() + 9 * b;
+    if (asuint(dist) == atom[at + 7].load())
+        atom[at + 8].min(k);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_strike_force(uint3 id: SV_DispatchThreadID)
+{
+    uint b = id.x;
+    if (b >= params.body_count || params.shot_count == 0)
+        return;
+    uint shot;
+    if (!struck(b, shot))
+        return;
+    uint at = a_strike() + 9 * b;
+    float t_in = asfloat(atom[at + 6].load());
+    uint entry = atom[at + 8].load();
+    uint st = strike_at(b);
+    if (!(t_in <= params.dt) || entry == NONE)
+    {
+        frames[st].w = 0.0; // the bounds were reached, no box: no strike
+        return;
+    }
+    float4 s0 = frames[st];
+    float4 s1 = frames[st + 1];
+    float3 rel = s1.xyz;
+    float speed = length(rel);
+    float3 d = rel / max(speed, 1e-12);
+    float4 info = shots[2 * shot];
+    float radius = info.y;
+    float face = max(info.z, 1e-3);
+    float m_imp = info.w;
+    float e_imp = shots[2 * shot + 1].x;
+    float3 contact = s0.xyz + rel * t_in + d * radius;
+    float inv_mass = bodies[BODY_WORDS * b].w;
+    bool anchored = inv_mass == 0.0;
+    float m_body = anchored ? 0.0 : 1.0 / inv_mass;
+    float m_eff = anchored ? m_imp : m_imp * m_body / (m_imp + m_body);
+    float modulus = 1.0 / (1.0 / e_imp + 1.0 / geometry[3 * entry + 1].w);
+    // api.rs `hertz_duration`, as `punch_islands` takes it.
+    float tau = 2.87 * pow(m_eff * m_eff / (face * modulus * modulus * max(speed, 1e-3)), 0.2);
+    frames[st + 2] = float4(contact, m_eff * speed / tau);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_strike_breaks(uint3 id: SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= params.bond_count || params.shot_count == 0 || work[w_alive() + i] == 0)
+        return;
+    uint4 bond = bonds[i];
+    uint b = body_of(bond.x);
+    uint shot;
+    if (!struck(b, shot))
+        return;
+    float4 f = frames[strike_at(b) + 2];
+    Quat q;
+    float3 pa = chunk_box_world(bond.x, q);
+    float3 pb = chunk_box_world(bond.y, q);
+    float dist = length(0.5 * (pa + pb) - f.xyz);
+    float area = asfloat(bond.w);
+    float reach = f.w * min(1.0, area / (6.28318530718 * max(dist * dist, 1e-12)));
+    if (reach > asfloat(bond.z))
+    {
+        work[w_alive() + i] = 0;
+        atom[a_dirty() + b].or(1u);
+        atom[a_counters() + C_FRAME_BROKEN].add(1u);
+        atom[a_counters() + C_BROKEN].add(1u);
+    }
 }

@@ -34,7 +34,8 @@ pub const INFO_SUPPORT: u32 = 1;
 pub struct FractureTables {
     pub chunks: Vec<ChunkRecord>,
     pub info: Vec<u32>,
-    /// Per bond: chunk a, chunk b (in the same body), tensile capacity (N) as bits, 0.
+    /// Per bond: chunk a, chunk b (in the same body), tensile capacity (N) as bits, area
+    /// (m^2) as bits (the strike's share, `fr_strike_breaks`).
     pub bonds: Vec<[u32; 4]>,
     pub parts: Vec<PartRecord>,
     /// Each chunk's engine body at the start.
@@ -54,6 +55,12 @@ pub struct FractureTables {
     /// |g| dt: closing speeds within it are not impacts.
     pub band: f32,
     pub dt: f32,
+    /// Per chunk 3 float4, for strike prediction (`fracture.slang` `geometry`): (box centre
+    /// (structure frame), bounding radius); (half extents, plane-strain modulus E'); box
+    /// rotation (structure frame, x, y, z, w). Empty: no strikes.
+    pub geometry: Vec<[[f32; 4]; 3]>,
+    /// A slower closing is no strike (world_coupling.rs `tiered_impact_speed`).
+    pub strike_speed: f32,
 }
 
 impl FractureTables {
@@ -116,9 +123,22 @@ struct FractureParams {
     scale_m: f32,
     scale_s: f32,
     scale_j: f32,
-    pad1: f32,
-    pad2: f32,
+    strike_speed: f32,
+    shot_count: u32,
     pad3: f32,
+}
+
+/// A shot, for strike prediction (`fracture.slang` `shots`).
+#[derive(Clone, Copy, Debug)]
+pub struct Shot {
+    pub body: u32,
+    /// Its sphere's bounding radius (the punch list's: 1.01 r + 1e-3).
+    pub bound: f32,
+    /// Its contact face radius (Hertz).
+    pub face: f32,
+    pub mass: f32,
+    /// Plane-strain modulus E'.
+    pub modulus: f32,
 }
 
 #[repr(C)]
@@ -184,12 +204,18 @@ impl Layout {
     pub fn a_counters(&self) -> u32 {
         self.a_dirty() + 3 * self.b
     }
-    pub fn atom_words(&self) -> u32 {
+    /// Per body slot 9 words: the strike's bounds, entry time, and entry chunk.
+    pub fn a_strike(&self) -> u32 {
         self.a_counters() + 16
+    }
+    pub fn atom_words(&self) -> u32 {
+        self.a_strike() + 9 * self.b
     }
 }
 
 const SUMS: u32 = 20;
+/// The shots strike prediction checks, at most.
+pub const MAX_SHOTS: usize = 64;
 const BODY_WORDS: u32 = 7;
 const ARGS: u64 = 6;
 const ARG_CHUNKS: u64 = 0;
@@ -210,7 +236,7 @@ pub struct Counters {
     pub split_frames: u32,
 }
 
-const BINDINGS: [Binding; 21] = [
+const BINDINGS: [Binding; 23] = [
     Binding::Uniform,   // params
     Binding::Storage,   // chunks
     Binding::Storage,   // bonds
@@ -232,9 +258,11 @@ const BINDINGS: [Binding; 21] = [
     Binding::StorageRw, // the renderer's objects
     Binding::StorageRw, // the renderer's bond lines
     Binding::Storage,   // the shots' bodies
+    Binding::Storage,   // strike geometry
+    Binding::Storage,   // strike shots
 ];
 
-const ENTRIES: [&str; 22] = [
+const ENTRIES: [&str; 29] = [
     "fr_loads",
     "fr_breaks",
     "fr_gate",
@@ -257,6 +285,13 @@ const ENTRIES: [&str; 22] = [
     "fr_view_chunks",
     "fr_view_shots",
     "fr_view_bonds",
+    "fr_strike_reset",
+    "fr_strike_bounds",
+    "fr_strike_find",
+    "fr_strike_entry",
+    "fr_strike_nearest",
+    "fr_strike_force",
+    "fr_strike_breaks",
 ];
 
 #[repr(C)]
@@ -313,6 +348,8 @@ pub struct GpuFracture {
     /// (a buffer bound for writing cannot drive a dispatch in the same usage scope).
     pub sizes: wgpu::Buffer,
     pub args: wgpu::Buffer,
+    pub geometry: wgpu::Buffer,
+    pub shots: wgpu::Buffer,
     /// Bind groups per kernel (the scans: the new-piece scan's, then the free slots').
     binds: Vec<wgpu::BindGroup>,
     scan_binds: Vec<wgpu::BindGroup>,
@@ -363,8 +400,12 @@ impl GpuFracture {
             scale_m,
             scale_s,
             scale_j,
+            strike_speed: t.strike_speed,
             ..Default::default()
         };
+        if !t.geometry.is_empty() && t.geometry.len() != n as usize {
+            return Err("fracture: strike geometry of mismatched length".into());
+        }
         let params_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("fracture params"),
             size: std::mem::size_of::<FractureParams>() as u64,
@@ -388,7 +429,8 @@ impl GpuFracture {
         let work = gpu.storage("fracture work", &words);
         let atom = storage_bytes(gpu, "fracture atom", 4 * layout.atom_words() as u64, wgpu::BufferUsages::empty());
         let mut frames: Vec<[f32; 4]> = t.frames.iter().flatten().copied().collect();
-        frames.resize((2 * b + 9 * n) as usize, [0.0; 4]);
+        // + staging (9 per chunk) + the strikes (3 per body slot).
+        frames.resize((2 * b + 9 * n + 3 * b) as usize, [0.0; 4]);
         let frames = gpu.storage("fracture frames", &frames);
         let loads = storage_bytes(gpu, "fracture loads", 16 * (n as u64 + 2 * 3 * t.pool_cap as u64), wgpu::BufferUsages::empty());
         let sizes = storage_bytes(gpu, "fracture sizes", 12 * ARGS, wgpu::BufferUsages::empty());
@@ -398,6 +440,12 @@ impl GpuFracture {
             usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let g: Vec<[f32; 4]> = t.geometry.iter().flatten().copied().collect();
+        let geometry = storage_bytes(gpu, "fracture strike geometry", 16 * g.len() as u64, wgpu::BufferUsages::empty());
+        if !g.is_empty() {
+            gpu.queue.write_buffer(&geometry, 0, bytemuck::cast_slice(&g));
+        }
+        let shots = storage_bytes(gpu, "fracture strike shots", 32 * MAX_SHOTS as u64, wgpu::BufferUsages::empty());
         let kernels = ENTRIES.iter().map(|entry| gpu.compute(&shaders::FRACTURE, entry, &BINDINGS)).collect();
         let mut f = GpuFracture {
             layout,
@@ -416,6 +464,8 @@ impl GpuFracture {
             loads,
             sizes,
             args,
+            geometry,
+            shots,
             binds: Vec::new(),
             scan_binds: Vec::new(),
             placeholder: std::array::from_fn(|_| storage_bytes(gpu, "fracture view placeholder", 16, wgpu::BufferUsages::empty())),
@@ -432,7 +482,7 @@ impl GpuFracture {
     /// The bind groups, against the engine's and the ingest's buffers as they are now.
     pub fn rebind(&mut self, gpu: &Gpu, engine: &EngineBuffers, ingest: &EngineIngest) {
         let group = |scan: &wgpu::Buffer, k: &Kernel| {
-            let buffers: [&wgpu::Buffer; 21] = [
+            let buffers: [&wgpu::Buffer; 23] = [
                 &self.params_buf,
                 &self.chunks,
                 &self.bonds,
@@ -454,6 +504,8 @@ impl GpuFracture {
                 &self.placeholder[1],
                 &self.placeholder[2],
                 &self.placeholder[3],
+                &self.geometry,
+                &self.shots,
             ];
             gpu.bind(&k.group, &buffers)
         };
@@ -503,8 +555,8 @@ impl GpuFracture {
             let colliders = self.engine_colliders.as_ref().expect("engine bound");
             let ing = self.ingest_buffers.as_ref().expect("ingest bound");
             let group = |i: usize| {
-                let buffers: [&wgpu::Buffer; 21] = [
-                    &self.params_buf, &self.chunks, &self.bonds, &self.parts, &self.work, &self.atom, &self.frames, bodies, colliders, &ing[0], &ing[1], &ing[2], &self.loads, &self.sizes, &self.scan_new, &self.info, &v.params, &v.chunks, objects, lines, &v.shots,
+                let buffers: [&wgpu::Buffer; 23] = [
+                    &self.params_buf, &self.chunks, &self.bonds, &self.parts, &self.work, &self.atom, &self.frames, bodies, colliders, &ing[0], &ing[1], &ing[2], &self.loads, &self.sizes, &self.scan_new, &self.info, &v.params, &v.chunks, objects, lines, &v.shots, &self.geometry, &self.shots,
                 ];
                 gpu.bind(&self.kernels[i].group, &buffers)
             };
@@ -543,9 +595,36 @@ impl GpuFracture {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             self.direct(&mut pass, "fr_loads", self.layout.n as usize);
             self.direct(&mut pass, "fr_breaks", self.layout.e as usize);
+            if self.params.shot_count > 0 {
+                self.direct(&mut pass, "fr_strike_reset", self.layout.b as usize);
+                self.direct(&mut pass, "fr_strike_bounds", self.layout.n as usize);
+                self.direct(&mut pass, "fr_strike_find", self.layout.b as usize);
+                self.direct(&mut pass, "fr_strike_entry", self.layout.n as usize);
+                self.direct(&mut pass, "fr_strike_nearest", self.layout.n as usize);
+                self.direct(&mut pass, "fr_strike_force", self.layout.b as usize);
+                self.direct(&mut pass, "fr_strike_breaks", self.layout.e as usize);
+            }
             self.direct(&mut pass, "fr_gate", 1);
         }
         self.record_split(encoder);
+    }
+
+    /// The shots strike prediction checks (in order: the first that reaches a body is its
+    /// strike), at most [`MAX_SHOTS`]. None until set. Needs the tables' `geometry`.
+    pub fn set_shots(&mut self, gpu: &Gpu, shots: &[Shot]) -> Result<(), String> {
+        if shots.len() > MAX_SHOTS {
+            return Err(format!("fracture: {} shots; strike prediction holds at most {MAX_SHOTS}", shots.len()));
+        }
+        if !shots.is_empty() && self.layout.n > 0 && self.geometry.size() < 48 * self.layout.n as u64 {
+            return Err("fracture: shots set without strike geometry".into());
+        }
+        let words: Vec<[f32; 4]> = shots.iter().flat_map(|s| [[f32::from_bits(s.body), s.bound, s.face, s.mass], [s.modulus, 0.0, 0.0, 0.0]]).collect();
+        if !words.is_empty() {
+            gpu.queue.write_buffer(&self.shots, 0, bytemuck::cast_slice(&words));
+        }
+        self.params.shot_count = shots.len() as u32;
+        gpu.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
+        Ok(())
     }
 
     /// Only the split (the gate, then every split kernel): the bonds already marked broken

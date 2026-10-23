@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 
 use engine_schema::BodyState;
-use stress_gpu::fracture::{FractureTables, GpuFracture, INFO_SUPPORT};
+use stress_gpu::fracture::{self, FractureTables, GpuFracture, INFO_SUPPORT};
 use stress_gpu::gpu::Gpu;
 use stress_gpu::ingest::{ColliderInfo, EngineIngest, KIND_BODY, KIND_STATIC, NONE};
 use stress_ref::engine::{BodyGeometry, BodyKey, EngineBody, RigidEngine};
@@ -33,12 +33,20 @@ pub fn pool_cap(max_contacts: u32) -> u32 {
     2 * max_contacts * k.max(1)
 }
 
-/// The engine's contacts for a world of `chunks` chunks: a debris pile has every piece
-/// touching several others at a few points each (24 a chunk), within 2^18 (rubble's contact
-/// buffer is 256 bytes a contact: 64 MB, under WebGPU's 128 MB a binding). More contacts
-/// than that in one step is an error the world reports (rubble's overflow flags).
-pub fn contact_capacity(chunks: usize, floor: u32) -> u32 {
-    ((24 * chunks) as u32).next_power_of_two().clamp(floor, 1 << 18).max(floor)
+/// The engine's contacts for a world of `chunks` chunks: a collapsed structure has every
+/// piece resting on several others at a few points each (a whole suburb in a heap: about 8 a
+/// chunk; 12 a chunk here), within 2^19 and what one binding of rubble's 256-byte contact
+/// records can hold on this device (`max_binding` bytes). 2^19 is WebGPU's default binding
+/// (128 MiB), so this fits any WebGPU device, and every buffer the world makes stays under
+/// the default limits. More contacts than that in one step is an error the world reports
+/// (rubble's overflow flags).
+pub fn contact_capacity(chunks: usize, floor: u32, max_binding: u64) -> u32 {
+    let device = (max_binding / 256).min(1 << 19) as u32;
+    ((12 * chunks) as u32).next_power_of_two().max(floor).min(prev_power_of_two(device)).max(floor.min(device))
+}
+
+fn prev_power_of_two(n: u32) -> u32 {
+    if n == 0 { 0 } else { 1 << (31 - n.leading_zeros()) }
 }
 
 /// What [`ThresholdWorld::poll`] reads (a frame or more late).
@@ -93,6 +101,8 @@ pub struct ThresholdWorld {
     /// The shots' material's (the scene's "projectile").
     projectile_modulus: f64,
     shot_radius: f64,
+    /// What strike prediction knows of each shot (`GpuFracture::set_shots`).
+    strikes: Vec<fracture::Shot>,
 }
 
 const RING: usize = 4;
@@ -114,7 +124,7 @@ impl ThresholdWorld {
         let mut capacity = crate::capacity_for(scene);
         let bodies_needed = (chunk_count + SHOTS + 4) as u32;
         capacity.max_bodies = capacity.max_bodies.max(bodies_needed.next_power_of_two());
-        capacity.max_contacts = contact_capacity(chunk_count, capacity.max_contacts);
+        capacity.max_contacts = contact_capacity(chunk_count, capacity.max_contacts, gpu.device.limits().max_storage_buffer_binding_size as u64);
         capacity.max_candidates = capacity.max_candidates.max(capacity.max_contacts);
         let mut engine = RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), capacity.clone()).map_err(|e| format!("rubble: {e}"))?;
         let profile = stress_ref::capability::Profile::Threshold;
@@ -184,6 +194,7 @@ impl ThresholdWorld {
             impact_peak: true,
             band: (Vec3::from_array(scene.gravity).norm() * scene.sim.frame_dt) as f32,
             dt: scene.sim.frame_dt as f32,
+            strike_speed: stress_ref::world::tiered_impact_speed() as f32,
             frames: vec![[[0.0; 4], [0.0, 0.0, 0.0, 1.0]]; body_count as usize],
             free: vec![0; body_count as usize],
             ..Default::default()
@@ -219,6 +230,11 @@ impl ThresholdWorld {
                 [f(i.m[0][2]), f(i.m[1][2]), f32::from_bits(first), f32::from_bits(parts.len() as u32)],
                 [f(ch.youngs_modulus), f(ch.poisson_ratio), f(ch.volume().cbrt()), f(ch.half_extents.min_elem())],
             ]);
+            // Strike prediction: the chunk's box and its plane-strain modulus.
+            let mat = scene.material(&ch.material);
+            let e_plane = mat.youngs_modulus * scene.sim.stiffness_scale / (1.0 - mat.poisson_ratio * mat.poisson_ratio);
+            let (bc, h, bq) = (ch.center, ch.half_extents, rotation_quat(&ch.rotation));
+            t.geometry.push([[f(bc.x), f(bc.y), f(bc.z), f(h.norm())], [f(h.x), f(h.y), f(h.z), f(e_plane)], [f(bq.x), f(bq.y), f(bq.z), f(bq.w)]]);
             t.info.push(if ch.support != Support::None { INFO_SUPPORT } else { 0 });
             t.chunk_body.push(collider_body[cols[0] as usize]);
         }
@@ -234,7 +250,7 @@ impl ThresholdWorld {
                     continue;
                 }
                 let capacity = b.strength.tensile * b.geometry.area * b.weibull;
-                t.bonds.push([global(cl.structure, b.geometry.a), global(cl.structure, b.geometry.b), (capacity as f32).to_bits(), 0]);
+                t.bonds.push([global(cl.structure, b.geometry.a), global(cl.structure, b.geometry.b), (capacity as f32).to_bits(), (b.geometry.area as f32).to_bits()]);
             }
         }
         // The ingest's collider table: chunks' colliders on their bodies, the shots, the
@@ -259,7 +275,18 @@ impl ThresholdWorld {
             table[sh.collider as usize] = ColliderInfo { a: [NONE, sh.body, KIND_BODY, 0], b: [shot_mass as f32, projectile.youngs_modulus as f32, shot_radius as f32, 0.0] };
         }
         let ingest = EngineIngest::new(gpu, capacity.max_contacts, 1, capacity.max_bodies, chunk_count as u32, &table);
-        let fracture = GpuFracture::new(gpu, &t, &engine.engine_buffers_now(), &ingest)?;
+        let mut fracture = GpuFracture::new(gpu, &t, &engine.engine_buffers_now(), &ingest)?;
+        // The punch list's sphere (world_coupling.rs `predict_punch`): bounding radius
+        // 1.01 r + 1e-3, face r.
+        let e_shot = projectile.youngs_modulus * scene.sim.stiffness_scale / (1.0 - projectile.poisson_ratio * projectile.poisson_ratio);
+        let strikes: Vec<fracture::Shot> = shots
+            .iter()
+            .map(|sh| fracture::Shot { body: sh.body, bound: (1.01 * shot_radius + 1e-3) as f32, face: shot_radius as f32, mass: shot_mass as f32, modulus: e_shot as f32 })
+            .collect();
+        // `STRESS_THRESHOLD_STRIKE=0` (a measurement): contact loads only, no strikes.
+        if !std::env::var("STRESS_THRESHOLD_STRIKE").is_ok_and(|v| v == "0") {
+            fracture.set_shots(gpu, &strikes)?;
+        }
         // Nothing reads rubble's counters back each step, and a plan from counters read a
         // frame or two late would differ run to run (the warm-start hash's size, which
         // colours get their own dispatch: both change results). Fixed instead: the hash
@@ -272,7 +299,7 @@ impl ThresholdWorld {
             })
             .collect();
         let mirror = world.solver.clone();
-        Ok(ThresholdWorld { mirror, scene: scene.clone(), engine, ingest, fracture, tables: t, chunk_of, frame_dt: scene.sim.frame_dt, frame: 0, shots, fired: 0, ring, ring_next: 0, last: ThresholdStats::default(), initial_bodies: m.clusters.len() as u32, phases: Vec::new(), ground_modulus, projectile_modulus: projectile.youngs_modulus, shot_radius })
+        Ok(ThresholdWorld { mirror, scene: scene.clone(), engine, ingest, fracture, tables: t, chunk_of, frame_dt: scene.sim.frame_dt, frame: 0, shots, fired: 0, ring, ring_next: 0, last: ThresholdStats::default(), initial_bodies: m.clusters.len() as u32, phases: Vec::new(), ground_modulus, projectile_modulus: projectile.youngs_modulus, shot_radius, strikes })
     }
 
     /// Launch a shot (`desc`: the stress frame, its pose and velocity): its record written
@@ -307,6 +334,17 @@ impl ThresholdWorld {
         }
         let info = ColliderInfo { a: [NONE, sh.body, KIND_BODY, 0], b: [desc.mass as f32, self.projectile_modulus as f32, r as f32, 0.0] };
         gpu.queue.write_buffer(&self.ingest.collider_info, std::mem::size_of::<ColliderInfo>() as u64 * sh.collider as u64, bytemuck::bytes_of(&info));
+        let k = (self.fired - 1) % self.shots.len();
+        self.strikes[k].mass = desc.mass as f32;
+        self.strikes[k].face = r as f32;
+        self.strikes[k].bound = match desc.shape {
+            stress_ref::scene::ImpactorShape::Sphere { radius } => 1.01 * radius + 1e-3,
+            stress_ref::scene::ImpactorShape::Box { half_extents } => 1.01 * Vec3::from_array(half_extents).norm() + 1e-3,
+        } as f32;
+        if !std::env::var("STRESS_THRESHOLD_STRIKE").is_ok_and(|v| v == "0") {
+            // The table is a few hundred bytes; its count is unchanged.
+            let _ = self.fracture.set_shots(gpu, &self.strikes);
+        }
         true
     }
 

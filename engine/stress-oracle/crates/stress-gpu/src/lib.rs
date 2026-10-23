@@ -255,6 +255,13 @@ pub mod shaders {
             ("fr_view_chunks", (64, 1, 1)),
             ("fr_view_shots", (64, 1, 1)),
             ("fr_view_bonds", (64, 1, 1)),
+            ("fr_strike_reset", (64, 1, 1)),
+            ("fr_strike_bounds", (64, 1, 1)),
+            ("fr_strike_find", (64, 1, 1)),
+            ("fr_strike_entry", (64, 1, 1)),
+            ("fr_strike_nearest", (64, 1, 1)),
+            ("fr_strike_force", (64, 1, 1)),
+            ("fr_strike_breaks", (64, 1, 1)),
         ]
     );
 
