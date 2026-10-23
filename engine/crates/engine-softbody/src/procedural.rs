@@ -27,6 +27,11 @@ pub struct CarParams {
     pub cell_strength_scale: f32,
     pub wheel_radius: f32,
     pub bumper: bool,
+    /// Bolt-on panels (bonnet, boot lid, four doors, rear bumper): their own nodes
+    /// a few cm outside the shell, on mounts of `mount_strength` × strength, one
+    /// detacher group per panel, so a hard enough hit tears a whole panel off.
+    pub panels: bool,
+    pub mount_strength: f32,
 }
 
 impl Default for CarParams {
@@ -36,7 +41,7 @@ impl Default for CarParams {
             length: 4.0,
             width: 1.7,
             stations: 11,
-            dry_mass: 750.0,
+            dry_mass: 600.0,
             cargo_mass: 250.0,
             minimass: 5.0,
             spring: 2.0e6,
@@ -48,6 +53,8 @@ impl Default for CarParams {
             cell_strength_scale: 2.0,
             wheel_radius: 0.32,
             bumper: true,
+            panels: true,
+            mount_strength: 0.3,
         }
     }
 }
@@ -155,6 +162,70 @@ pub fn car_truck(p: &CarParams) -> String {
             }
         }
     }
+    // Bolt-on panels: (rings, perimeter rows) of the shell each covers. Doors
+    // cover floor→belt on each side, the bonnet and boot lid the top rows of the
+    // end bays. Each gets its own nodes, offset outward from the shell nodes.
+    let front_bay = (0..n).find(|&k| k > n / 2 && !cabin[k]).unwrap_or(n - 3);
+    let rear_bay = (0..n).rev().find(|&k| k < n / 2 && !cabin[k]).unwrap_or(2);
+    let cabin_first = rear_bay + 1;
+    let cabin_last = front_bay - 1;
+    let mid = (cabin_first + cabin_last + 1) / 2;
+    let panel_specs: Vec<(Vec<usize>, Vec<usize>)> = if p.panels {
+        vec![
+            // Bonnet and boot lid: topR, topC, topL.
+            ((front_bay..n).collect(), vec![5, 7, 4]),
+            ((0..=rear_bay).collect(), vec![5, 7, 4]),
+            // Doors: left (beltL, floorL) and right (floorR, beltR), front and rear.
+            ((mid..=cabin_last + 1).collect(), vec![2, 0]),
+            ((cabin_first - 1..mid).collect(), vec![2, 0]),
+            ((mid..=cabin_last + 1).collect(), vec![1, 3]),
+            ((cabin_first - 1..mid).collect(), vec![1, 3]),
+        ]
+    } else {
+        Vec::new()
+    };
+    // Panel node index per (panel, ring position, row position).
+    let mut panel_nodes: Vec<Vec<Vec<usize>>> = Vec::new();
+    for (ks, rows) in &panel_specs {
+        let mut grid = Vec::new();
+        for &k in ks {
+            let centre = {
+                let c: [f32; 3] = (0..6).fold([0.0; 3], |a, j| {
+                    let q = nodes[k * CAR_RING + j];
+                    [a[0] + q[0] / 6.0, a[1] + q[1] / 6.0, a[2] + q[2] / 6.0]
+                });
+                c
+            };
+            let mut col = Vec::new();
+            for &j in rows {
+                let q = nodes[k * CAR_RING + j];
+                // Doors stand off sideways (never below the floor), the lids upward.
+                let (dx, dy) = if j < 4 { (q[0] - centre[0], 0.0) } else { (q[0] - centre[0], q[1] - centre[1]) };
+                let l = (dx * dx + dy * dy).sqrt().max(1e-4);
+                col.push(nodes.len());
+                nodes.push([q[0] + 0.05 * dx / l, q[1] + 0.05 * dy / l + if j < 2 { 0.03 } else { 0.0 }, q[2]]);
+            }
+            grid.push(col);
+        }
+        panel_nodes.push(grid);
+    }
+    let rear_bumper_first = nodes.len();
+    if p.panels {
+        let z = -0.5 * p.length - 0.16;
+        for y in [0.38f32, 0.62] {
+            for x in [hw * 0.8, 0.0, -hw * 0.8] {
+                nodes.push([x, y, z + if x == 0.0 { 0.0 } else { 0.06 }]);
+            }
+        }
+    }
+    // Shell faces a panel covers (it is the skin there): (ring k, row a, row b).
+    let covered = |k: usize, a: usize, b: usize| {
+        panel_specs.iter().any(|(ks, rows)| {
+            ks.contains(&k)
+                && ks.contains(&(k + 1))
+                && rows.windows(2).any(|w| (w[0] == a && w[1] == b) || (w[0] == b && w[1] == a))
+        })
+    };
     let _ = writeln!(s, "nodes");
     let ring_nodes = n * CAR_RING;
     for (i, q) in nodes.iter().enumerate() {
@@ -211,12 +282,15 @@ pub fn car_truck(p: &CarParams) -> String {
             }
         }
     }
-    // Axles: tie each axle node into the nearest rings' floor and belt nodes.
+    // Axles: tie each axle node into the floor and belt nodes of its ring and the
+    // ring on the cabin side only. The rigid core holds the axle nodes, so a tie
+    // toward the bumper would brace the crumple zone and stop it folding.
     for &(n1, n2, z) in &wheel_axles {
         let k = (((z + 0.5 * p.length) / p.length) * (n - 1) as f32).round() as usize;
         let left = nodes[n1][0] > 0.0;
         let (f, b) = if left { (0, 2) } else { (1, 3) };
-        for kk in [k.saturating_sub(1), k, (k + 1).min(n - 1)] {
+        let inner = if z > 0.0 { k.saturating_sub(1) } else { (k + 1).min(n - 1) };
+        for kk in [inner, k] {
             for j in [f, b, 6] {
                 beams.push((n1, ring(kk, j), "i"));
                 beams.push((n2, ring(kk, j), "i"));
@@ -304,6 +378,91 @@ pub fn car_truck(p: &CarParams) -> String {
         }
         let _ = writeln!(s, "detacher_group end");
     }
+    if p.panels {
+        // Panels: a braced sheet (strong, so a panel leaves whole), then its mounts
+        // to the shell on its own detacher group (groups 2…).
+        let mut group = 2;
+        let mut sheets: Vec<(Vec<(usize, usize)>, Vec<(usize, usize)>)> = Vec::new();
+        for (pi, (ks, rows)) in panel_specs.iter().enumerate() {
+            let g = &panel_nodes[pi];
+            let mut sheet = Vec::new();
+            let mut mounts = Vec::new();
+            for (ki, &k) in ks.iter().enumerate() {
+                for (ri, &j) in rows.iter().enumerate() {
+                    let pn = g[ki][ri];
+                    if ri + 1 < rows.len() {
+                        sheet.push((pn, g[ki][ri + 1]));
+                    }
+                    if ki + 1 < ks.len() {
+                        sheet.push((pn, g[ki + 1][ri]));
+                        if ri + 1 < rows.len() {
+                            sheet.push((pn, g[ki + 1][ri + 1]));
+                            sheet.push((g[ki][ri + 1], g[ki + 1][ri]));
+                        }
+                    }
+                    // Mounts: the shell nodes of the neighbouring rings (same row)
+                    // and of the other rows (same ring), plus the section centre.
+                    for kk in [k.wrapping_sub(1), k + 1] {
+                        if kk < n {
+                            mounts.push((pn, ring(kk, j)));
+                        }
+                    }
+                    for &jj in rows {
+                        if jj != j {
+                            mounts.push((pn, ring(k, jj)));
+                        }
+                    }
+                    mounts.push((pn, ring(k, if rows.contains(&7) { 6 } else { 7 })));
+                }
+            }
+            sheets.push((sheet, mounts));
+        }
+        let rb = rear_bumper_first;
+        let r0 = 0;
+        let bar: Vec<(usize, usize)> = [
+            (0, 1), (1, 2), (3, 4), (4, 5), (0, 3), (1, 4), (2, 5), (0, 4), (1, 3), (1, 5), (2, 4), (0, 2), (3, 5),
+        ]
+        .iter()
+        .map(|&(a, b)| (rb + a, rb + b))
+        .collect();
+        let bar_mounts: Vec<(usize, usize)> = [
+            (0, 0), (0, 2), (3, 2), (3, 0), (2, 1), (2, 3), (5, 3), (5, 1), (1, 6), (4, 6),
+        ]
+        .iter()
+        .map(|&(a, j)| (rb + a, ring(r0, j)))
+        .chain([(rb, ring(r0 + 1, 0)), (rb + 2, ring(r0 + 1, 1))])
+        .collect();
+        sheets.push((bar, bar_mounts));
+        let _ = writeln!(
+            s,
+            "\nset_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
+            p.spring,
+            p.damp,
+            p.deform * p.cell_deform_scale,
+            p.strength * p.cell_strength_scale
+        );
+        for (sheet, _) in &sheets {
+            for (a, b) in sheet {
+                let _ = writeln!(s, "{a}, {b}");
+            }
+        }
+        let _ = writeln!(
+            s,
+            "\nset_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
+            p.spring,
+            p.damp,
+            p.deform,
+            p.strength * p.mount_strength
+        );
+        for (_, mounts) in &sheets {
+            let _ = writeln!(s, "detacher_group {group}");
+            for (a, b) in mounts {
+                let _ = writeln!(s, "{a}, {b}");
+            }
+            group += 1;
+        }
+        let _ = writeln!(s, "detacher_group end");
+    }
     // Collision skin: every outer face of the shell, counter-clockwise from outside.
     let _ = writeln!(s, "\ncab");
     let quad = |s: &mut String, a: usize, b: usize, c: usize, d: usize| {
@@ -315,6 +474,9 @@ pub fn car_truck(p: &CarParams) -> String {
             let (a, b) = (PERIM[e], PERIM[(e + 1) % 8]);
             // Perimeter runs clockwise seen from the front (+Z): outward normal
             // of (k,a)→(k+1,a)→(k+1,b) points away from the section centre.
+            if covered(k, a, b) {
+                continue;
+            }
             quad(
                 &mut s,
                 ring(k, a),
@@ -322,6 +484,23 @@ pub fn car_truck(p: &CarParams) -> String {
                 ring(k + 1, b),
                 ring(k, b),
             );
+        }
+    }
+    // Panel faces, wound as the shell faces they replace.
+    for (pi, (ks, rows)) in panel_specs.iter().enumerate() {
+        let g = &panel_nodes[pi];
+        let at = |k: usize, j: usize| {
+            let ki = ks.iter().position(|&x| x == k)?;
+            let ri = rows.iter().position(|&x| x == j)?;
+            Some(g[ki][ri])
+        };
+        for k in 0..n - 1 {
+            for e in 0..8 {
+                let (a, b) = (PERIM[e], PERIM[(e + 1) % 8]);
+                if let (Some(ka), Some(k1a), Some(k1b), Some(kb)) = (at(k, a), at(k + 1, a), at(k + 1, b), at(k, b)) {
+                    quad(&mut s, ka, k1a, k1b, kb);
+                }
+            }
         }
     }
     // End caps: fans around the belt-line centre (floor centre → roof centre).
@@ -340,6 +519,12 @@ pub fn car_truck(p: &CarParams) -> String {
         let b0 = bumper_first;
         quad(&mut s, b0 + 1, b0, b0 + 3, b0 + 4);
         quad(&mut s, b0 + 2, b0 + 1, b0 + 4, b0 + 5);
+    }
+    if p.panels {
+        // Rear bumper, facing −Z.
+        let b0 = rear_bumper_first;
+        quad(&mut s, b0, b0 + 1, b0 + 4, b0 + 3);
+        quad(&mut s, b0 + 1, b0 + 2, b0 + 5, b0 + 4);
     }
     // Reference frame: centre, back, left.
     let mid = ring(n / 2, 0);

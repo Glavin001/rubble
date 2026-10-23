@@ -46,9 +46,28 @@ const CHECKS = {
     run: async (page) => {
       const r = await page.step(360);
       const d = r.damage[0];
-      return { ok: d.yielded > 40 && d.broken >= 10 && r.breaks >= 10, msg: `${d.yielded} beams bent, ${d.broken} broken (bumper mounts: one detacher group), ${r.breaks} break events` };
+      return { ok: d.yielded > 80, msg: `${d.yielded} beams bent, ${d.broken} broken, ${r.breaks} break events` };
     },
   },
+  // A front-corner T-bone pulls the bumper sideways: its mounts tear (one detacher group).
+  tear: {
+    query: 'scene=tbone&speed=60&at=1.6',
+    run: async (page) => {
+      const r = await page.step(420);
+      const d = r.damage[0];
+      return { ok: d.broken >= 10, msg: `${d.yielded} beams bent, ${d.broken} broken, ${r.breaks} break events` };
+    },
+  },
+  // The other crash-test scenes run without blowing up and deform.
+  ...Object.fromEntries(['sidepole&speed=60', 'rollover&speed=60', 'ramp&speed=90', 'drop&height=12&pitch=50', 'headon&speed=100&overlap=0.5'].map((q) => [q.split('&')[0] + (q.startsWith('headon') ? '_offset' : ''), {
+    query: `scene=${q}`,
+    run: async (page) => {
+      const r = await page.step(600);
+      const d = r.damage[0];
+      const finite = await page.eval(`window.__particles().then((ps) => ps.every((p) => p.every(Number.isFinite)))`);
+      return { ok: d.yielded > 5 && finite, msg: `${q.replace(/&/g, ' ')}: ${d.yielded} beams bent, ${d.broken} broken${finite ? '' : ', NON-FINITE positions'}` };
+    },
+  }])),
   pole: {
     query: 'scene=pole',
     run: async (page) => {

@@ -111,7 +111,7 @@ fn sag_converges_with_iterations_and_rate() {
 }
 
 #[test]
-fn wall_crash_crumples_and_drops_the_bumper() {
+fn wall_crash_crumples_the_front() {
     let mut s = car(Vec3::new(0.0, 0.0, 15.0), 240.0, 12);
     // Wall facing −Z at z = 3.0, just ahead of the bumper.
     s.planes.push(Plane {
@@ -119,11 +119,11 @@ fn wall_crash_crumples_and_drops_the_bumper() {
         offset: -3.0,
         friction: 0.5,
     });
-    // Body length between the rear and front rings (6 nodes each; the bumper is
-    // separate and may detach).
+    // Body length between the rear and front rings (their six shell nodes).
     let stations = CarParams::default().stations;
+    let ring = engine_softbody::procedural::CAR_RING;
     let body_len = |x: &[Vec3]| {
-        let c = |k: usize| (0..6).map(|j| x[k * 6 + j]).sum::<Vec3>() / 6.0;
+        let c = |k: usize| (0..6).map(|j| x[k * ring + j]).sum::<Vec3>() / 6.0;
         (c(stations - 1) - c(0)).length()
     };
     let len0 = body_len(&s.x);
@@ -142,13 +142,12 @@ fn wall_crash_crumples_and_drops_the_bumper() {
         yielded > 50,
         "a 54 km/h wall hit must crumple the front ({yielded})"
     );
-    assert!(
-        broken >= 10,
-        "the bumper mounts (one detacher group) go together ({broken})"
-    );
+    // Pushed straight back, the bumper mounts carry only their yield force
+    // (yield is applied inside the solve), so they crush rather than snap.
+    let _ = broken;
     assert!(
         s.kinetic_energy() < 0.1 * 0.5 * 1300.0 * 225.0,
         "most energy absorbed"
     );
-    assert!(crush > 0.05, "permanent shortening ({crush})");
+    assert!(crush > 0.25, "54 km/h folds the front by tens of cm ({crush})");
 }

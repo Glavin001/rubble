@@ -243,21 +243,19 @@ mod tests {
 impl SoftSettings {
     /// Settings with the deform/break threshold scale fitted for a step rate by
     /// `soft_calibrate` (60 km/h wall crush of the procedural car against a
-    /// 960 Hz × 30-iteration reference): coarse steps under-trigger yield
-    /// (lower peak forces, numerical dissipation), so thresholds come down.
-    /// Interpolated in log(h); 960 Hz and finer keep the file's values. Fitted on
-    /// one vehicle so far: a starting point for the global calibration.
+    /// 960 Hz × 30-iteration reference). With yield applied inside the solve the
+    /// crush no longer depends on the step at 240 Hz and finer (fitted 1.08 at
+    /// 240 Hz: kept at 1). 120 Hz × 10 is under-converged, crushes deeper and
+    /// needs thresholds × 1.44. Interpolated in log(h).
     pub fn calibrated_for(hz: f32) -> Self {
-        const FIT: [(f32, f32); 3] = [(120.0, 0.45), (240.0, 0.30), (960.0, 1.0)];
+        const FIT: [(f32, f32); 2] = [(120.0, 1.44), (240.0, 1.0)];
         let scale = if hz <= FIT[0].0 {
             FIT[0].1
-        } else if hz >= FIT[2].0 {
-            1.0
+        } else if hz >= FIT[1].0 {
+            FIT[1].1
         } else {
-            let i = if hz < FIT[1].0 { 0 } else { 1 };
-            let (a, b) = (FIT[i], FIT[i + 1]);
-            let t = (hz.ln() - a.0.ln()) / (b.0.ln() - a.0.ln());
-            a.1 + t * (b.1 - a.1)
+            let t = (hz.ln() - FIT[0].0.ln()) / (FIT[1].0.ln() - FIT[0].0.ln());
+            FIT[0].1 + t * (FIT[1].1 - FIT[0].1)
         };
         Self {
             threshold_scale: scale,

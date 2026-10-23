@@ -32,6 +32,16 @@ const TAKES = {
   wall: { sweep: 1.6, query: 'scene=wall&runup=8', title: 'Rigid wall at 54 km/h', target: [0, 0.8, -1], dist: 10, yaw: 2.2, impact: [120, 340], settle: 560 },
   tbone: { query: 'scene=tbone&runup=4', title: 'Side impact: 1,500 kg block at 40 km/h', target: [1, 0.8, 0], dist: 9.5, yaw: 0.5, impact: [120, 360], settle: 560 },
   pole: { sweep: 2.4, query: 'scene=pole&runup=6', title: '20 cm pole at 40 km/h', target: [0, 0.8, 0], dist: 9, yaw: 2.2, impact: [120, 360], settle: 560 },
+  // Harder tests (scene parameters; target null = follow the car).
+  wall100: { sweep: 1.6, query: 'scene=wall&speed=100&runup=8', title: 'Rigid wall at 100 km/h', target: [0, 0.8, 0], dist: 10, yaw: 2.2, impact: [50, 300], settle: 560 },
+  overlap: { sweep: 1.6, query: 'scene=wall&speed=64&overlap=0.25&runup=8', title: 'Small overlap (25% of the width) at 64 km/h', target: [0, 0.8, 0], dist: 10, yaw: 2.4, impact: [90, 340], settle: 600 },
+  tbone_front: { query: 'scene=tbone&speed=60&at=1.6&runup=4', title: 'Side impact at the front wheel: 1,500 kg at 60 km/h', target: [0.5, 0.8, 1], dist: 9.5, yaw: 0.5, impact: [110, 350], settle: 600 },
+  tbone80: { query: 'scene=tbone&speed=80&mass=2000&runup=4', title: 'Side impact: 2,000 kg at 80 km/h', target: null, dist: 10, yaw: 0.5, impact: [100, 340], settle: 640 },
+  sidepole: { query: 'scene=sidepole&speed=60&runup=4', title: 'Side pole at the door, 60 km/h', target: [-1.5, 0.8, 0], dist: 9, yaw: 0.4, impact: [40, 280], settle: 560 },
+  headon_offset: { query: 'scene=headon&speed=80&overlap=0.5&runup=8', title: 'Head-on, 2 × 80 km/h, 50% offset', target: [0.4, 0.8, 0], dist: 12, yaw: 1.3, impact: [20, 260], settle: 560 },
+  rollover: { query: 'scene=rollover&speed=70&runup=4', title: 'Sliding sideways into a curb at 70 km/h', target: null, dist: 11, yaw: 0.3, impact: [40, 400], settle: 840 },
+  ramp: { query: 'scene=ramp&speed=90', title: 'One-side ramp at 90 km/h', target: null, dist: 13, yaw: 1.9, impact: [40, 520], settle: 960 },
+  drop: { query: 'scene=drop&height=12&pitch=50', title: 'Nose-first drop from 12 m', target: [0, 1.2, 1], dist: 11, yaw: 1.6, impact: [330, 570], settle: 760 },
 };
 // Imported vehicles (local content, never committed): RUBBLE_ROR_DIR = Rigs of Rods
 // content-master/, RUBBLE_JBEAM_DIR = a vehicles/ dir with agenty_legocar/ and common/.
@@ -60,7 +70,8 @@ const importExpr = (v) => {
   return `m.loadJbeam(${JSON.stringify(files)}, ${JSON.stringify(pc)})`;
 };
 const names = args.filter((a, i) => !a.startsWith('--') && args[i - 1] !== '--out');
-const takes = names.length ? names : Object.keys(TAKES).filter((k) => !TAKES[k].imported);
+const DEFAULT_TAKES = ['headon', 'wall', 'tbone', 'pole'];
+const takes = names.length ? names : DEFAULT_TAKES;
 mkdirSync(OUT, { recursive: true });
 
 const TYPES = { '.html': 'text/html', '.mjs': 'text/javascript', '.js': 'text/javascript', '.json': 'application/json', '.wgsl': 'text/plain', '.wasm': 'application/wasm' };

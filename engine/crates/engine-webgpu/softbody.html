@@ -14,6 +14,8 @@
     #speed small { font-size: 14px; font-weight: 400; color: #9aa4b2; }
     .muted { color: #9aa4b2; }
     .row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; align-items: center; }
+    .row input[type=number] { width: 58px; background: #1d2533; color: #e6e9ef; border: 1px solid #334055; border-radius: 5px; padding: 2px 4px; font: inherit; }
+    .row label.p { color: #9aa4b2; }
     button, select, label.file { background: #1d2533; color: #e6e9ef; border: 1px solid #334055; border-radius: 5px; padding: 3px 8px; font: inherit; cursor: pointer; }
     button:hover, label.file:hover { background: #26324a; }
     #status { bottom: 10px; left: 10px; font: 12px ui-monospace, monospace; }
@@ -34,6 +36,10 @@
       <button id="beamsBtn">beams (V)</button>
       <button id="resetBtn">reset (R)</button>
     </div>
+    <div class="row">
+      <select id="presetSel" title="Crash-test presets"></select>
+    </div>
+    <div class="row" id="paramRow"></div>
     <div class="muted" style="margin-top:6px">
       <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> drive · <kbd>Space</kbd> handbrake · <kbd>C</kbd> camera · <kbd>V</kbd> beam view (load, plastic strain) · <kbd>M</kbd> flexbody / collision skin ·
       <kbd>B</kbd> fire a 300 kg ball · <kbd>T</kbd> side ram · drag to orbit, wheel to zoom
@@ -66,6 +72,10 @@
       pole: 'Crash test: 20 cm pole, 40 km/h',
       tbone: 'Crash test: 1,500 kg side impact, 40 km/h',
       headon: 'Crash test: head-on, 2 × 29 km/h',
+      sidepole: 'Crash test: side pole, 32 km/h',
+      rollover: 'Rollover: sliding sideways into a curb',
+      ramp: 'Corkscrew ramp (one side)',
+      drop: 'Nose-first drop',
       crates: 'Lattice crates drop',
       import: 'Crash test: your .truck / JBeam into a wall, 40 km/h',
     };
@@ -73,7 +83,58 @@
     if (!SCENES[scene]) throw new Error(`unknown scene ${scene}`);
     const sceneSel = document.getElementById('sceneSel');
     for (const [id, t] of Object.entries(SCENES)) sceneSel.add(new Option(t, id, false, id === scene));
-    sceneSel.onchange = () => { const u = new URL(location.href); u.searchParams.set('scene', sceneSel.value); location.href = u.href; };
+    sceneSel.onchange = () => { const u = new URL(location.href); u.search = ''; u.searchParams.set('scene', sceneSel.value); location.href = u.href; };
+    // Crash-test presets (query strings) and the editable parameters of each scene.
+    const PRESETS = [
+      ['Frontal, full width, 56 km/h (NCAP-style)', 'scene=wall&speed=56'],
+      ['Frontal, full width, 100 km/h', 'scene=wall&speed=100'],
+      ['Small overlap 25%, 64 km/h (IIHS-style)', 'scene=wall&speed=64&overlap=0.25'],
+      ['Oblique wall 30°, 80 km/h', 'scene=wall&speed=80&angle=30'],
+      ['Pole off-centre (left headlight), 60 km/h', 'scene=pole&speed=60&offset=0.6'],
+      ['Pole, centre, 100 km/h', 'scene=pole&speed=100'],
+      ['Side pole at the door, 32 km/h (NCAP-style)', 'scene=sidepole&speed=32'],
+      ['Side pole, 60 km/h', 'scene=sidepole&speed=60'],
+      ['T-bone at the front wheel, 60 km/h', 'scene=tbone&speed=60&at=1.6'],
+      ['T-bone, centre, 2 t at 80 km/h', 'scene=tbone&speed=80&mass=2000'],
+      ['T-bone at the rear, moving car (50 km/h)', 'scene=tbone&speed=60&at=-1.6&carSpeed=50'],
+      ['Head-on 2 × 80 km/h, 50% offset', 'scene=headon&speed=80&overlap=0.5'],
+      ['Head-on 2 × 100 km/h', 'scene=headon&speed=100'],
+      ['Rollover: sideways into a curb, 60 km/h', 'scene=rollover&speed=60'],
+      ['Corkscrew ramp, 90 km/h', 'scene=ramp&speed=90'],
+      ['Nose-first drop from 12 m', 'scene=drop&height=12&pitch=50'],
+    ];
+    const PARAMS = {
+      wall: [['speed', 'km/h', 54], ['overlap', 'overlap', 1], ['angle', '°', 0]],
+      pole: [['speed', 'km/h', 40], ['offset', 'offset m', 0]],
+      sidepole: [['speed', 'km/h', 32], ['at', 'at m', 0.3]],
+      tbone: [['speed', 'km/h', 40], ['mass', 'kg', 1500], ['at', 'at m', 0], ['carSpeed', 'car km/h', 0]],
+      headon: [['speed', 'km/h each', 29], ['overlap', 'overlap', 1]],
+      rollover: [['speed', 'km/h', 50]],
+      ramp: [['speed', 'km/h', 70]],
+      drop: [['height', 'm', 8], ['pitch', '°', 35]],
+    };
+    {
+      const presetSel = document.getElementById('presetSel');
+      presetSel.add(new Option('Crash-test presets…', ''));
+      const here = new URLSearchParams(location.search);
+      for (const [label, q] of PRESETS) {
+        const pq = new URLSearchParams(q);
+        const match = [...pq].every(([k, v]) => here.get(k) === v) && [...here.keys()].every((k) => pq.has(k) || !['scene', 'speed', 'overlap', 'angle', 'offset', 'at', 'mass', 'carSpeed', 'height', 'pitch'].includes(k));
+        presetSel.add(new Option(label, q, false, match));
+      }
+      presetSel.onchange = () => { if (presetSel.value) location.search = presetSel.value; };
+      const row = document.getElementById('paramRow');
+      const fields = PARAMS[scene] || [];
+      for (const [k, unit, d] of fields) {
+        const l = document.createElement('label'); l.className = 'p'; l.textContent = unit + ' ';
+        const inp = document.createElement('input'); inp.type = 'number'; inp.step = 'any'; inp.id = 'p_' + k;
+        inp.value = here.has(k) ? here.get(k) : d;
+        inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === 'Enter') run(); };
+        l.appendChild(inp); row.appendChild(l);
+      }
+      const run = () => { const u = new URLSearchParams(location.search); u.set('scene', scene); for (const [k] of fields) u.set(k, document.getElementById('p_' + k).value); location.search = u.toString(); };
+      if (fields.length) { const b = document.createElement('button'); b.textContent = 'run'; b.onclick = run; row.appendChild(b); }
+    }
 
     if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
     const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
@@ -162,11 +223,16 @@
     let pendingRam = -1;
     // ?runup=metres: extra approach distance before a crash test (videos).
     const runup = Number(qs.get('runup')) || 0;
-    const parkRam = () => {
-      ram = dynBox([-4000, -4000, -4000], [0.6, 0.6, 0.9], 1500);
+    let ramSpeed = 11.1, ramAt = 0;
+    const parkRam = (mass) => {
+      ram = dynBox([-4000, -4000, -4000], [0.6, 0.6, 0.9], mass);
       // Its edges would slip between the nodes: the skin collides with it too.
       world.addSoftObstacle(world.colliderCount - 1);
     };
+    // Crash parameters (?speed= km/h, ?overlap=, ?angle=, ?offset=, ?at=, ?mass=,
+    // ?carSpeed=, ?height=, ?pitch=); defaults are each scene's standard test.
+    const P = (k, d) => (qs.has(k) && qs.get(k) !== '' && Number.isFinite(Number(qs.get(k))) ? Number(qs.get(k)) : d);
+    const CAR_HW = 0.85, CAR_FRONT = 2.2; // half width, bumper face ahead of the centre
     if (scene === 'yard') {
       addSoft(carDesc, [0, 0.05, 0]);
       // A wall, a row of poles, parked soft cars, crates, a ramp.
@@ -179,24 +245,63 @@
         const crate = loadTruck(latticeCrate(3, 0.45, 120, 1.5e6, 6e3, 1e5));
         addSoft(crate, [-9 + i * 1.6, 0.1, 22], 0, { rigid_core: false });
       }
-      parkRam();
+      parkRam(1500);
     } else if (scene === 'wall') {
-      staticBox([0, 1.5, 3.0], [3, 1.5, 0.2]);
-      addSoft(carDesc, [0, 0.05, -2 - runup], 0, { velocity: [0, 0, 15] });
+      // Rigid wall 0.8 m ahead of the bumper. overlap: share of the car's width it
+      // covers, from the left (+X) side (1 = full width, 0.25 = small overlap);
+      // angle: wall yaw in degrees (oblique impact).
+      const overlap = P('overlap', 1), angle = P('angle', 0) * Math.PI / 180;
+      const edge = CAR_HW - overlap * 2 * CAR_HW;
+      staticBox([edge + 3, 1.5, 3.0], [3, 1.5, 0.2], qAxis([0, 1, 0], angle));
+      addSoft(carDesc, [0, 0.05, -2 - runup], 0, { velocity: [0, 0, P('speed', 54) / 3.6] });
       camMode = 'orbit'; orbit = { yaw: 2.2, pitch: 0.25, dist: 9, target: [0, 0.8, 0.5] };
     } else if (scene === 'pole') {
-      pole([0, 1.5, 2.8], 0.1, 1.5);
-      addSoft(carDesc, [0, 0.05, -2 - runup], 0, { velocity: [0, 0, 11] });
+      // 20 cm pole; offset: lateral offset from the centre line (m, + = left).
+      pole([P('offset', 0), 1.5, 2.8], 0.1, 1.5);
+      addSoft(carDesc, [0, 0.05, -2 - runup], 0, { velocity: [0, 0, P('speed', 40) / 3.6] });
       camMode = 'orbit'; orbit = { yaw: 2.3, pitch: 0.35, dist: 9, target: [0, 0.8, 1.5] };
+    } else if (scene === 'sidepole') {
+      // The car slides sideways (right side first) into a pole at the driver's
+      // door; at = the pole's position along the car (m forward of the centre).
+      pole([-(CAR_HW + 0.5 + runup), 1.5, P('at', 0.3)], 0.125, 1.5);
+      addSoft(carDesc, [0, 0.05, 0], 0, { velocity: [-P('speed', 32) / 3.6, 0, 0] });
+      camMode = 'orbit'; orbit = { yaw: 0.4, pitch: 0.4, dist: 9, target: [-1, 0.8, 0] };
     } else if (scene === 'tbone') {
-      addSoft(carDesc, [0, 0.05, 0]);
-      parkRam();
+      // A block of `mass` kg at `speed` into the left side, `at` m forward of the
+      // car's centre (+1.6 = the front wheel, −1.6 = the rear); carSpeed: the
+      // struck car's own speed (km/h).
+      addSoft(carDesc, [0, 0.05, -P('carSpeed', 0) / 3.6 * 0.25], 0, { velocity: [0, 0, P('carSpeed', 0) / 3.6] });
+      parkRam(P('mass', 1500));
+      ramSpeed = P('speed', 40) / 3.6; ramAt = P('at', 0);
       pendingRam = 60; // launch after the car has settled
       camMode = 'orbit'; orbit = { yaw: 0.6, pitch: 0.45, dist: 10, target: [0, 0.8, 0] };
     } else if (scene === 'headon') {
-      addSoft(carDesc, [0, 0.05, -3 - runup / 2], 0, { velocity: [0, 0, 8] });
-      addSoft(carDesc, [0.3, 0.05, 3 + runup / 2], Math.PI, { velocity: [0, 0, -8] });
+      // speed: each car's speed; overlap: share of the width that meets.
+      const v = P('speed', 29) / 3.6, dx = 2 * CAR_HW * (1 - P('overlap', 1)) + 0.3 * P('overlap', 1);
+      addSoft(carDesc, [0, 0.05, -3 - runup / 2], 0, { velocity: [0, 0, v] });
+      addSoft(carDesc, [dx, 0.05, 3 + runup / 2], Math.PI, { velocity: [0, 0, -v] });
       camMode = 'orbit'; orbit = { yaw: 1.4, pitch: 0.35, dist: 12, target: [0, 0.8, 0] };
+    } else if (scene === 'rollover') {
+      // Sliding sideways (right side first) into a 25 cm curb: the tyres and the
+      // curb trip it.
+      staticBox([-(CAR_HW + 1.2 + runup) - 0.3, 0.125, 0], [0.3, 0.125, 4]);
+      world.addSoftObstacle(world.colliderCount - 1);
+      addSoft(carDesc, [0, 0.05, 0], 0, { velocity: [-P('speed', 50) / 3.6, 0, 0] });
+      camMode = 'orbit'; orbit = { yaw: 0.2, pitch: 0.3, dist: 12, target: [-3, 0.8, 0] };
+    } else if (scene === 'ramp') {
+      // A ramp under the left wheels only: one side launches, the car corkscrews.
+      const ang = Math.atan(1.1 / 4);
+      staticBox([0.55, 2 * Math.sin(ang) - 0.2 * Math.cos(ang) + 0.02, CAR_FRONT + 5 + 2 + runup], [0.45, 0.2, 2], qAxis([1, 0, 0], -ang));
+      world.addSoftObstacle(world.colliderCount - 1);
+      addSoft(carDesc, [0, 0.05, 0], 0, { velocity: [0, 0, P('speed', 70) / 3.6] });
+      camMode = 'orbit'; orbit = { yaw: 2.0, pitch: 0.3, dist: 14, target: [0, 1, 10] };
+    } else if (scene === 'drop') {
+      // Dropped from `height` m, nose down by `pitch` degrees.
+      const q = qAxis([1, 0, 0], P('pitch', 35) * Math.PI / 180);
+      const h = world.addSoftVehicle(carDesc, [0, P('height', 8), 0], q, {});
+      const e = world.soft.entries[h];
+      softs.push({ h, name: e.name, core: e.core });
+      camMode = 'orbit'; orbit = { yaw: 1.6, pitch: 0.2, dist: 11, target: [0, 1.5, 1] };
     } else if (scene === 'import') {
       // Crash target for an imported vehicle (window.__crashImported): ?target=wall
       // (rigid wall across z = 12) or car (a procedural car parked side-on there).
@@ -607,10 +712,14 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       const pl = lastPlayer || { p: [0, 0.6, 0], q: [0, 0, 0, 1] };
       const c = pl.p;
       const right = norm3(qrot(pl.q, [1, 0, 0]));
-      const p = [c[0] + right[0] * (2.4 + runup), 0.7, c[2] + right[2] * (2.4 + runup)];
+      const fwd = norm3(qrot(pl.q, [0, 0, 1]));
+      // Aim `ramAt` m forward of the centre, leading a moving car by its travel
+      // until the ram arrives.
+      const along = ramAt + (scene === 'tbone' ? P('carSpeed', 0) / 3.6 : 0) * (2.4 + runup - CAR_HW - 0.6) / ramSpeed;
+      const p = [c[0] + right[0] * (2.4 + runup) + fwd[0] * along, 0.7, c[2] + right[2] * (2.4 + runup) + fwd[2] * along];
       const words = new Uint32Array(world.bodyWords.buffer, ram * 112, 28).slice();
       const f = new Float32Array(words.buffer);
-      f.set(p, 0); f.set([0, 0, 0, 1], 4); words[11] = 1 | 8; f.set(right.map((d) => -d * 11.1), 12); f[15] = 0; f.set([0, 0, 0], 16); words[19] = world.steps;
+      f.set(p, 0); f.set([0, 0, 0, 1], 4); words[11] = 1 | 8; f.set(right.map((d) => -d * ramSpeed), 12); f[15] = 0; f.set([0, 0, 0], 16); words[19] = world.steps;
       f.set(p, 20); f.set([0, 0, 0, 1], 24);
       world.backend.writeBody(ram, words);
     }

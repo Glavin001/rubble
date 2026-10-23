@@ -105,10 +105,25 @@ stored. Kinds:
 | Bounded | Spring-damper plus a stiff limit spring outside [L(1 − short), L(1 + long)]; never deforms | RoR shocks / shocks2 / shocks3 (in-rates), JBeam BOUNDED (`beamLimitSpring`) |
 | Hydro | L = L₀(1 − steer·factor), never deforms | RoR hydros (commands as fixed hydros), JBeam HYDRO with `inputSource: steering` |
 
-Plasticity and breaking follow Rigs of Rods' rules. Compression past the threshold
-moves L so the beam sits on it; the threshold hardens by L_old/L_new. Tension is
-symmetric and weakens the break strength by the plastic stretch. |F| past the strength
-breaks the beam. A broken beam with a detacher group breaks its whole group and writes
+Plasticity and breaking follow Rigs of Rods' rules, with yield applied inside the
+solve:
+
+* **In the solve.** A normal beam's axial force (spring plus dashpot) is capped at its
+  compression and tension thresholds, so past them it flows at the threshold. The
+  curvature stays the elastic k (an upper bound on the capped energy's), which keeps
+  the undamped per-particle step from overshooting.
+* **After the step**, at the converged length:
+  * Compression past the threshold moves L so the beam sits on it, and the
+    threshold hardens by L_old/L_new.
+  * Tension is symmetric and uses up the break strength by the plastic stretch, so a
+    beam pulled long enough tears.
+  * The force a beam carried (its threshold once it yields) past its strength breaks
+    the beam.
+
+Rigs of Rods checks yield every 0.5 ms. Checked only after a 4 ms step, a beam stays
+elastic for the whole step. A front beam closing at 15 m/s then pushes back with
+k·v·h ≈ 120 kN against a 7 kN threshold, and a fast crash met a car about 3× too
+stiff (decision s12). A broken beam with a detacher group breaks its whole group and writes
 `EVENT_BEAM_BREAK` (5) records to the shared event ring (`WgpuSim::poll_beam_breaks`,
 `world.pollBeamBreaks`).
 
@@ -226,21 +241,21 @@ glTF that is not built yet; the binding and the skinning shader are what it woul
 | Test | Shows |
 |---|---|
 | `engine-softbody` unit tests (28) | Section parsing, defaults and RoR mass rules; numbering; gradient and Hessian against finite differences; PSD in compression; yield, hardening, weakening, supports, ropes, bounded; colouring validity; relaxed JSON, Lua expressions, slots, variables, wheels; JSON round trip of infinite thresholds; flexbody exactness under rigid motion; calibration metrics |
-| `tests/cpu_reference.rs` | Car rests without yielding; convergence check (sag error 150% → 2% → 0% with iterations, and closer at 240 Hz than at 60 Hz); a 54 km/h wall crash crumples and sheds the bumper |
-| `tests/softbody.rs` (GPU) | Lattice lands, keeps its shape and sleeps as a whole; cantilever sag on the GPU matches the CPU reference (0.01678 vs 0.01674 m); car settles on four raycast wheels with the suspension carrying its weight; drives 9.7 m in 3 s and steers, with no yielding; wall crash crumples the front (12 bumper-mount breaks, matching ring events); wall, pole and side impact crush differently; head-on cars crumple without passing through |
-| `softbody-check.mjs` (Chrome) | Every demo scene steps, checks and saves a screenshot to `recordings/softbody/`. The browser matches the native run: wall 229–236 beams bent with every mount break reported, head-on symmetric |
+| `tests/cpu_reference.rs` | Car rests without yielding; convergence check (sag error 150% → 2% → 0% with iterations, and closer at 240 Hz than at 60 Hz); a 54 km/h wall crash folds the front by tens of cm |
+| `tests/softbody.rs` (GPU) | Lattice lands, keeps its shape and sleeps as a whole; cantilever sag on the GPU matches the CPU reference (0.01678 vs 0.01674 m); car settles on four raycast wheels with the suspension carrying its weight; drives 14 m in 3 s at 240 Hz and steers, with no yielding; a 54 km/h wall crash folds the front 0.50 m (63 breaks, matching ring events); wall, pole and side impact crush differently; head-on cars crumple without passing through |
+| `softbody-check.mjs` (Chrome) | Every demo scene steps, checks and saves a screenshot to `recordings/softbody/`, including the crash-test scenes below (no non-finite positions). A front-corner T-bone tears the bumper off |
 
 **Damage character.** Front residual crush, inward fold ("wrap") of the front ring, and
-side intrusion, in cm; raw file thresholds at 240 Hz × 10 iterations:
+side intrusion, in cm; file thresholds at 240 Hz × 10 iterations (`wall_pole_and_side_impact_crush_differently`):
 
-| Impact | Bent beams | Front crush | Front wrap | Struck / far side intrusion | Mid-car crush |
+| Impact | Bent beams | Broken | Front crush | Front wrap | Struck / far side intrusion |
 |---|---|---|---|---|---|
-| Rigid wall, 54 km/h | 209 | 11.0 | −0.1 | 0.5 / 0.5 | 0.0 |
-| 20 cm pole, 40 km/h | 90 | 0.6 | 3.6 | 0 / 0 | 0.0 |
-| 1,500 kg block into the side, 40 km/h | 108 | 0.2 | 0 | 1.9 / −0.1 | — |
+| Rigid wall, 54 km/h | 248 | 63 | 49.6 | 0.1 | 0.2 / 0.2 |
+| 20 cm pole, 40 km/h | 126 | 69 | 6.8 | 20.7 | 0 / 0 |
+| 1,500 kg block into the side, 40 km/h | 163 | 36 | 0.3 | 0 | 3.8 / −0.8 |
 
-The demo applies the calibrated threshold scale (below), so the same impacts bend more
-and crush deeper there. The head-on at 2 × 29 km/h, for example, bends 242 beams per car.
+A small car crushes about 0.5–0.65 m in a 56 km/h full-width test. The procedural car
+folds 0.50 m at 54 km/h.
 
 ## Calibration
 
@@ -256,21 +271,20 @@ and crush deeper there. The head-on at 2 × 29 km/h, for example, bends 242 beam
 `soft_calibrate` runs the standard tests (rest, tap, 1 m drop, wall at 30 and 60 km/h)
 at candidate settings against a reference. No Rigs of Rods recording is available, so
 the reference is Rubble at 960 Hz × 30 iterations, a stand-in for a 2,000 Hz explicit
-engine; this is the design's convergence check. Results on the procedural car with crumple zones (M3 Max):
+engine; this is the design's convergence check. Results on the procedural car with
+bolt-on panels, file thresholds (M3 Max):
 
-| Setting | Tap test (Hz) | Crush 30 km/h RMS / max (cm) | Crush 60 km/h RMS / max (cm) |
-|---|---|---|---|
-| reference 960 Hz × 30 | 44 | 1.7 / 5.1 | 8.4 / 22.6 |
-| 120 Hz × 10 | 15 | 2.3 / 5.8 | 5.6 / 14.3 |
-| 240 Hz × 10 | 23 | 1.4 / 4.4 | 4.5 / 12.0 |
-| 240 Hz × 20 | 25 | 1.3 / 4.2 | 4.0 / 11.3 |
-| 480 Hz × 10 | 36 | 1.7 / 4.7 | 6.4 / 17.1 |
+| Setting | Tap test (Hz) | 1 m drop: beams bent | Crush 30 km/h RMS / max (cm) | Crush 60 km/h RMS / max (cm) |
+|---|---|---|---|---|
+| reference 960 Hz × 30 | 43 | 0 | 4.4 / 13.0 | 14.5 / 45.1 |
+| 120 Hz × 10 | 14 | 8 | 9.5 / 30.2 | 21.9 / 69.6 |
+| 240 Hz × 10 | 23 | 0 | 4.6 / 14.3 | 14.7 / 46.2 |
+| 240 Hz × 20 | 24 | 0 | 4.0 / 12.8 | 14.0 / 44.2 |
+| 480 Hz × 10 | 36 | 0 | 4.2 / 13.2 | 14.4 / 44.9 |
 
 At every setting:
 
-* static sag is 0.65 mm RMS;
-* a 1 m drop bends at most one beam;
-* the broken-beam set matches the reference (Jaccard 1.0);
+* static sag is 0.68 mm RMS;
 * the car stops (100% of kinetic energy absorbed).
 
 The tap test shows backward Euler lowering a stiff structure's frequency at coarse
@@ -278,14 +292,73 @@ steps. The discrete frequency is atan(ωh)/h: about 22 Hz for a 44 Hz mode at 12
 before under-convergence. Only step rate (and iterations) close that gap; no threshold
 setting does.
 
-Two effects meet in crush depth. Under-convergence makes a coarse step softer;
-backward Euler's dissipation and lower peak forces make it crush less. The second
-wins, as the design predicted, so thresholds need scaling down at coarse steps. One
-global threshold scale per step rate brings the 60 km/h crush back to the reference:
-0.45 at 120 Hz (23.3 cm) and 0.30 at 240 Hz (20.6 cm), unchanged by the crumple zones. `SoftSettings::calibrated_for(hz)`
-interpolates these; the demo uses it, and `?threshold=1` keeps raw file values. With
-it, everyday driving still bends no beams. These values come from one vehicle; the
-design's 15-vehicle set and Rigs of Rods reference runs remain to do.
+**Crush matches the reference from 240 Hz up.** With yield inside the solve, 240, 480
+and 960 Hz crush within 2 cm of each other at 60 km/h, and the fitted 240 Hz threshold
+scale is 1.08, so `SoftSettings::calibrated_for` keeps the file's values from 240 Hz.
+With yield only after the step, the fit was 0.30 at 240 Hz: it was compensating for
+the over-stiff elastic step.
+
+**120 Hz × 10 is under-converged.** It bends beams in a 1 m drop, crushes deeper, and
+acts as drag when driving. It keeps a fitted × 1.44 (the fit reaches 57 cm against the
+reference's 45). Prefer 240 Hz, or 240 Hz × 5 with 2 sweeps.
+
+These values come from one vehicle; the design's 15-vehicle set and Rigs of Rods
+reference runs remain to do.
+
+## Crash scenarios
+
+The demo's scenes take parameters (query string, or the panel's fields and its run
+button). A crash-test preset menu sets them for standard tests:
+
+| Scene | Parameters (defaults) | What it is |
+|---|---|---|
+| `wall` | `speed` km/h (54), `overlap` share of the width from the left (1), `angle` ° (0) | Full-width, small-overlap (0.25) and oblique rigid wall |
+| `pole` | `speed` (40), `offset` m from the centre line (0) | 20 cm pole, central or off-centre |
+| `sidepole` | `speed` (32), `at` m forward of the centre (0.3) | Sliding sideways into a 25 cm pole at the door |
+| `tbone` | `speed` (40), `mass` kg (1,500), `at` m (0; +1.6 = front wheel, −1.6 = rear), `carSpeed` km/h (0) | A block into the left side; the ram leads a moving car |
+| `headon` | `speed` each (29), `overlap` (1) | Two cars, full or offset |
+| `rollover` | `speed` (50) | Sliding sideways into a 25 cm curb |
+| `ramp` | `speed` (70) | A ramp under the left wheels only |
+| `drop` | `height` m (8), `pitch` ° nose down (35) | Dropped nose first |
+
+Every vehicle is free (an initial velocity, then physics): it pitches, trips and rolls
+as the impact makes it.
+
+`soft_crash` runs the same scenarios headless on the native wgpu host and prints a
+time series and a summary:
+
+* the time series: speed, crush (shortening), pitch, roll and passenger-cell height;
+* the summary: beams bent and broken, and the pieces torn off (connected parts of the
+  unbroken beam graph).
+
+```bash
+cargo run -p engine-webgpu --release --bin soft_crash -- wall speed=100
+cargo run -p engine-webgpu --release --bin soft_crash -- tbone speed=60 at=1.6
+```
+
+Results at 240 Hz × 10, file thresholds:
+
+| Scenario | Crush | Broken | Pieces torn off | Motion |
+|---|---|---|---|---|
+| Wall 56 km/h | 0.54 m | 61 | bonnet | |
+| Wall 100 km/h | 0.91 m | 69 | bonnet | tail lifts 34° |
+| T-bone 60 km/h at the front wheel | — | 36 | bumper, a door | |
+| T-bone 80 km/h, centre | — | 105 | 3 panels | rolls 32° |
+| Side pole 60 km/h | — | 186 | 5 panels | |
+| Head-on 2 × 80 km/h, 50% offset | 0.33–0.38 m | 106–115 per car | 2 per car | |
+| Sideways into a curb, 70 km/h | — | 115 | 3 panels | rolls onto its roof |
+| One-side ramp, 90 km/h | — | 13 | bumper | airborne to 3.3 m, lands inverted |
+
+**Bolt-on panels.** The procedural car has a bonnet, a boot lid, four doors and a rear
+bumper beside the front one (`CarParams::panels`, default on):
+
+* Each panel is its own braced node sheet, 5 cm outside the shell, and is the skin
+  where it sits.
+* Its mounts (`mount_strength` × the body's break strength, 0.3) are one detacher
+  group, so the whole panel leaves together and opens the shell underneath.
+* A mount pushed straight in crushes, carrying its yield force. A mount pulled or
+  sheared stretches plastically until it tears, which is how a side hit at the front
+  corner rips the bumper off.
 
 ## Performance
 

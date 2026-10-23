@@ -34,7 +34,7 @@ test('importers: procedural .truck and a JBeam part tree', () => {
   assert.equal(d.beams.length, 3);
   assert.ok(d.beams[0].strength > 3e38, 'FLT_MAX strength');
   assert.deepEqual(d.nodes[2].position, [0, 0, -1], 'JBeam +Y (rear) becomes Rubble −Z');
-  assert.ok(calibratedSettings(240).threshold_scale < 1 && calibratedSettings(960).threshold_scale === 1);
+  assert.ok(calibratedSettings(120).threshold_scale > 1 && calibratedSettings(240).threshold_scale === 1 && calibratedSettings(960).threshold_scale === 1);
 });
 
 /** In-memory backend shaped like world-host's (bodies, colliders, joints, both pools). */

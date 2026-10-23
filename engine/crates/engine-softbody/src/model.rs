@@ -161,6 +161,34 @@ pub fn beam_block(
     h: f32,
     damp_scale: f32,
 ) -> (Vec3, Mat3) {
+    beam_block_plastic(beam, xa, xb, xa0, xb0, h, damp_scale, None)
+}
+
+/// Axial force capped at a normal beam's yield thresholds (× `scale`) inside the
+/// solve: past them the beam flows at the threshold. `d1` = φ' of spring plus
+/// dashpot. The curvature stays the elastic one: the capped energy's true
+/// curvature is 0 there, which lets an undamped per-particle Newton step
+/// overshoot; k bounds it from above, so every step still lowers the energy.
+pub fn yield_cap(beam: &Beam, d1: f32, scale: f32) -> f32 {
+    if beam.kind != KIND_NORMAL || beam.spring <= 0.0 || beam.hard() {
+        return d1;
+    }
+    d1.clamp(-beam.deform_c * scale, beam.deform_t * scale)
+}
+
+/// [`beam_block`] with in-solve plasticity: `yield_scale` = the threshold scale,
+/// `None` = elastic within the step.
+#[allow(clippy::too_many_arguments)]
+pub fn beam_block_plastic(
+    beam: &Beam,
+    xa: Vec3,
+    xb: Vec3,
+    xa0: Vec3,
+    xb0: Vec3,
+    h: f32,
+    damp_scale: f32,
+    yield_scale: Option<f32>,
+) -> (Vec3, Mat3) {
     let d = xa - xb;
     let len = d.length();
     if len < 1.0e-6 {
@@ -172,8 +200,13 @@ pub fn beam_block(
     let len0 = (xa0 - xb0).length();
     d1 += c / h * (len - len0);
     d2 += c / h;
+    let mut tension = elastic_terms(beam, len, beam.penalty).0;
+    if let Some(s) = yield_scale {
+        d1 = yield_cap(beam, d1, s);
+        tension = tension.min(d1.max(0.0));
+    }
     let nn = Mat3::from_cols(n * n.x, n * n.y, n * n.z);
-    let lateral = (Mat3::IDENTITY - nn) * (elastic_terms(beam, len, beam.penalty).0 / len).max(0.0);
+    let lateral = (Mat3::IDENTITY - nn) * (tension / len).max(0.0);
     (n * d1, nn * d2 + lateral)
 }
 
@@ -212,11 +245,14 @@ pub fn plastic_update(
         return out;
     }
     let delta = len - beam.rest;
+    let mut out_force = force;
     if plasticity && beam.kind == KIND_NORMAL && beam.spring > 0.0 {
         let k = beam.spring;
         if force > beam.deform_c && delta < 0.0 {
             // Compression past the threshold: the rest length moves so the beam
             // sits on the yield surface; the threshold hardens as it shortens.
+            // The solve capped it there, so that is the force it carried.
+            out_force = beam.deform_c;
             let old = beam.rest;
             let deform = delta + beam.deform_c * (1.0 - beam.coef) / k;
             beam.rest = (beam.rest + deform).max(min_length);
@@ -227,7 +263,9 @@ pub fn plastic_update(
             beam.flags |= BEAM_YIELDED;
             out.yielded = true;
         } else if -force > beam.deform_t && delta > 0.0 {
-            // Tension: symmetric, and the beam weakens by the plastic stretch.
+            // Tension: symmetric, and the beam weakens by the plastic stretch
+            // until it tears.
+            out_force = -beam.deform_t;
             let old = beam.rest;
             let deform = delta - beam.deform_t * (1.0 - beam.coef) / k;
             beam.rest += deform;
@@ -240,11 +278,12 @@ pub fn plastic_update(
             out.yielded = true;
         }
     }
+    beam.force = out_force;
     if breaking {
         let broke = match beam.kind {
             // A support breaks once stretched past L·factor.
             KIND_SUPPORT => delta > beam.rest * beam.long_bound && beam.long_bound > 0.0,
-            _ => force.abs() > beam.strength,
+            _ => out_force.abs() > beam.strength,
         };
         if broke {
             beam.flags |= BEAM_BROKEN;

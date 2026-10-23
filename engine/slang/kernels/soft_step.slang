@@ -780,6 +780,8 @@ void softSolveEntry(uint4 ent)
     float3 xa0 = b.initialPos;
     uint adj = softAdjBase();
     uint nBeams = ent.z & 0xFFFFu;
+    bool plastic = (softFlags() & SOFT_PLASTICITY) != 0u;
+    float ts = softThresholdScale();
     for (uint k = 0u; k < nBeams; k++)
     {
         uint w = ent.y + k;
@@ -797,7 +799,16 @@ void softSolveEntry(uint4 ent)
         float len0 = length(xa0 - o.initialPos);
         float d1 = el.x + c / h * (len - len0);
         float d2 = el.y + c / h;
-        float lat = max(el.x / len, 0.0);
+        float tension = el.x;
+        if (plastic && beamKind(sb) == BEAM_NORMAL && sb.spring > 0.0 && !beamHard(sb))
+        {
+            // In-solve plasticity (engine_softbody::model::yield_cap): past its
+            // threshold the beam flows at it. The curvature stays elastic, an upper
+            // bound that keeps the undamped block step from overshooting.
+            d1 = clamp(d1, -sb.deformC * ts, sb.deformT * ts);
+            tension = min(tension, max(d1, 0.0));
+        }
+        float lat = max(tension / len, 0.0);
         g += n * d1;
         float3x3 nn = float3x3(n * n.x, n * n.y, n * n.z);
         H += nn * (d2 - lat);
@@ -944,7 +955,6 @@ void soft_plastic(uint3 tid : SV_DispatchThreadID)
     float len = length(ba.position - bb.position);
     float len0 = length(ba.initialPos - bb.initialPos);
     float force = beamReadout(e, len, len0, h);
-    e.force = force;
     uint flags = softFlags();
     float delta = len - e.rest;
     float ts = softThresholdScale();
@@ -955,6 +965,8 @@ void soft_plastic(uint3 tid : SV_DispatchThreadID)
         float dt = e.deformT * ts;
         if (force > dc && delta < 0.0)
         {
+            // The solve capped it at the threshold: that is the force it carried.
+            force = dc;
             float old = e.rest;
             float deform = delta + dc * (1.0 - e.coef) / k;
             e.rest = max(e.rest + deform, softMinLength());
@@ -964,15 +976,19 @@ void soft_plastic(uint3 tid : SV_DispatchThreadID)
         }
         else if (-force > dt && delta > 0.0)
         {
+            // Tension: it carried the threshold, and the plastic stretch uses up
+            // its strength until it tears.
+            force = -dt;
             float old = e.rest;
             float deform = delta - dt * (1.0 - e.coef) / k;
             e.rest += deform;
             if (e.longB > 0.0) e.rest = min(e.rest, e.rest0 * e.longB);
             e.deformT *= e.rest / old;
-            e.strength -= deform * k;
+            e.strength -= deform * k / ts;
             e.meta |= BEAM_YIELDED;
         }
     }
+    e.force = force;
     if ((flags & SOFT_BREAKING) != 0u)
     {
         bool broke = beamKind(e) == BEAM_SUPPORT

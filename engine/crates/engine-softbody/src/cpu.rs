@@ -233,7 +233,7 @@ impl CpuSoft {
             } else {
                 b.a as usize
             };
-            let (g, hb) = beam_block(
+            let (g, hb) = beam_block_plastic(
                 b,
                 xi,
                 self.x[other],
@@ -241,6 +241,7 @@ impl CpuSoft {
                 x0[other],
                 h,
                 self.settings.damping_scale,
+                self.settings.plasticity.then_some(1.0),
             );
             grad += g;
             hess += hb;

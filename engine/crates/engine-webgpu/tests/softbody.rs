@@ -291,9 +291,10 @@ fn soft_car_settles_on_its_raycast_wheels() {
 
 #[test]
 fn soft_car_drives_and_steers_without_deforming() {
-    let mut sim = world(120.0, 12);
+    // 240 Hz as the demo: 120 Hz × 12 is under-converged and acts as drag.
+    let mut sim = world(240.0, 10);
     let h = spawn_car(&mut sim, [0.0, 0.05, 0.0], [0.0; 3]);
-    run(&mut sim, 120);
+    run(&mut sim, 240);
     let core = sim.soft_host().entry(h).core.expect("rigid core").0;
     let start = centroid(&positions(&sim, h));
     sim.set_vehicle_input(
@@ -303,7 +304,7 @@ fn soft_car_drives_and_steers_without_deforming() {
             ..Default::default()
         },
     );
-    run(&mut sim, 360);
+    run(&mut sim, 720);
     let mid = centroid(&positions(&sim, h));
     let v = Vec3::from_array(
         sim.read_body(sim.soft_host().entry(h).core.unwrap().1)
@@ -329,7 +330,7 @@ fn soft_car_drives_and_steers_without_deforming() {
             ..Default::default()
         },
     );
-    run(&mut sim, 240);
+    run(&mut sim, 480);
     let end = centroid(&positions(&sim, h));
     eprintln!("after steering: {:?}", end - mid);
     assert!(
@@ -382,7 +383,7 @@ fn crash(setup: impl FnOnce(&mut WgpuSim), speed: f32, seconds: f32) -> Crash {
     let rest = positions(&sim, h);
     let mut events = 0;
     for _ in 0..(240.0 * seconds) as u32 / 24 {
-        run(&mut sim, 24);
+        run(&mut sim, 48);
         events += sim.poll_beam_breaks().len();
     }
     let now = positions(&sim, h);
