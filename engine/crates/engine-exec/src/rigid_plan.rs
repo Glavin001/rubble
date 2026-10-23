@@ -114,6 +114,15 @@ pub struct MotionInputs {
     pub characters: u32,
     /// In-step scene query records (`query_batch`).
     pub queries: u32,
+    /// Measurement control: never schedule the fast list (long sweeps then
+    /// stay in the 27-cell stencil, as before the CCD audit's row 1).
+    pub fast_list_off: bool,
+}
+
+/// Whether a step dispatches `broadphase_fast` (host word 30 bit 4 tells the
+/// kernels, which divert long sweeps to the fast list only then).
+pub fn fast_list_scheduled(mo: &MotionInputs) -> bool {
+    (mo.ccd || mo.look_ahead || mo.kinematic) && !mo.fast_list_off
 }
 
 /// `apply_impulses` threads (one per record slot).
@@ -270,7 +279,7 @@ pub fn encode_step(
         }
         e.d("broadphase_insert", n_cols);
         e.d("broadphase_query", n_cols);
-        if mo.ccd || mo.look_ahead || mo.kinematic {
+        if fast_list_scheduled(&mo) {
             // Sweeps longer than a cell query along their path (row 1).
             e.d("broadphase_fast", FAST_GROUPS * 64);
         }
@@ -863,8 +872,11 @@ pub fn host_words(c: &WorldCapacity, m: &StepModes, i: &StepInputs, h: &HostStat
     // Bit 0: category/mask/group filters. Bit 1: vehicle sever grace (severed
     // parts ignore their chassis by collider generation) unless filters are on.
     s[30] = u32::from(h.has_filters) | (u32::from(!h.has_filters && i.vehicle_count > 0) << 1);
-    // Bit 2: CCD bodies (ccd_step.slang sceneHasCcd); bit 3: kinematic bodies.
-    s[30] |= (u32::from(i.motion.ccd) << 2) | (u32::from(i.motion.kinematic) << 3);
+    // Bit 2: CCD bodies (ccd_step.slang sceneHasCcd); bit 3: kinematic bodies;
+    // bit 4: broadphase_fast is scheduled (encode_step's condition).
+    let mo = i.motion;
+    s[30] |= (u32::from(mo.ccd) << 2) | (u32::from(mo.kinematic) << 3)
+        | (u32::from(fast_list_scheduled(&mo)) << 4);
     s
 }
 

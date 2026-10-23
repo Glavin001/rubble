@@ -422,8 +422,9 @@ void buildColliderBounds(uint i, Collider col, BodyState b)
     // reaches radius + half height, beyond length(radius, half height).
     if (col.shape == SHAPE_CAPSULE) boundR = col.params.x + col.params.y;
     // The swept reach counts as size, so the grid level still bounds the box:
-    // the whole sweep, not the capped reach (the box spans all of it).
-    box._pad0 = boundR + max(reach, length(sweep));
+    // the whole sweep, not the capped reach (the box spans all of it). Sweeps
+    // too long for the grid take the fast list, where it is scheduled.
+    box._pad0 = boundR + (fastListScheduled() ? max(reach, length(sweep)) : reach);
     box._pad1 = asfloat(col.body);
     // Store at collider index offset by max_bodies — host allocates gAabbs sized max_bodies+max_colliders
     // Convention: collider AABBs start at index max_bodies. Host sets gScratchAtomics[1] = max_bodies.
@@ -506,9 +507,13 @@ uint ccdSlotOf(uint body, BodyState b)
     return ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * slot]) == body ? slot : CCD_NO_PAIR;
 }
 
+// HOST_S(30) bit 4: this step schedules broadphase_fast. Step graphs that do
+// not (the legacy Metal schedule) keep the grid exactly as before: no fast
+// list, and the grid level sized by the capped reach.
+bool fastListScheduled() { return (HOST_S(30) & 16u) != 0u; }
 // The fast list exists where the broadphase uses a grid (hierarchical, or the
 // uniform grid past the exact pairwise path's 512 colliders).
-bool fastListOn() { return HOST_S(18) != 0u || gCounters[0].colliderCount > 512u; }
+bool fastListOn() { return fastListScheduled() && (HOST_S(18) != 0u || gCounters[0].colliderCount > 512u); }
 
 // A swept box the grid cannot hold: a moving collider whose sweep is longer
 // than a cell (the 27-cell stencil covers boxes within a cell), or whose swept
@@ -1162,6 +1167,87 @@ int3 gridForwardOffset(uint c)
     return int3(1, 0, 0);                              // dz = 0, dy = 0, dx = +1
 }
 
+// ---- Oversize swept boxes on the uniform grid ----
+// The 27-cell stencil finds a pair only if both half extents add up to at most
+// a cell, i.e. each box is at most half a cell (the cell is twice the largest
+// small radius). Look-ahead sweeps and spin pads grow a box past that without
+// making it fast. When the fast list is scheduled (look-ahead scenes), a box
+// past half a cell (with the pad's tolerance) is oversize: it owns its pairs
+// with awake neighbours of smaller (or equal, then by index) size, and walks
+// every cell its box ± its own half extent can reach, so nothing is missed.
+// Other scenes keep the 27-cell query exactly.
+float boxHalfMax(Aabb a)
+{
+    float3 h = 0.5 * (a.mx - a.mn);
+    return max(h.x, max(h.y, h.z));
+}
+
+bool boxOversize(Aabb a, float cellSize)
+{
+    return fastListScheduled() && boxHalfMax(a) > 0.5 * cellSize + 1.0e-3;
+}
+
+// Which of two awake colliders emits their pair: the lower index between two
+// standard boxes (the 27-cell rule), else the larger box (ties: lower index).
+bool ownsAwakePair(uint i, Aabb ai, uint j, Aabb aj, float cellSize)
+{
+    bool oi = boxOversize(ai, cellSize), oj = boxOversize(aj, cellSize);
+    if (!oi && !oj) return i < j;
+    float hi = boxHalfMax(ai), hj = boxHalfMax(aj);
+    return hi > hj || (hi == hj && i < j);
+}
+
+static const int OVERSIZE_MAX_CELLS = 4096;
+
+void oversizeQuery(uint i, Collider col, BodyState b, Aabb box, float3 cA, float rA,
+    bool probeIsBox, BoxObb probeObb, float faceGap, float cellSize)
+{
+    uint base = HOST_S(1);
+    float h = boxHalfMax(box);
+    int3 lo = int3(floor((box.mn - h) / cellSize));
+    int3 hi = int3(floor((box.mx + h) / cellSize));
+    int3 span = hi - lo + int3(1, 1, 1);
+    if (span.x * span.y * span.z > OVERSIZE_MAX_CELLS)
+    {
+        AOR2(gCounters[0].overflowFlags, OVERFLOW_FAST_LIST);
+        return;
+    }
+    uint tables = gridSplit() ? 2u : 1u;
+    for (int z = lo.z; z <= hi.z; z++)
+    for (int y = lo.y; y <= hi.y; y++)
+    for (int x = lo.x; x <= hi.x; x++)
+    for (uint t = 0u; t < tables; t++)
+    {
+        uint link = ALOAD(gConstraintIds[t * gridHashSize() + gridHash(x, y, z)]);
+        uint guard = 0u;
+        while (link != 0xFFFFFFFFu && guard < 4096u)
+        {
+            uint cur = link & GRID_COLLIDER_MASK;
+            bool awakeEntry = (link & GRID_AWAKE_DYNAMIC) != 0u;
+            Aabb ab = gAabbs[base + cur];
+            link = gridSplit() ? asuint(ab._pad1) : gColorLists[cur];
+            guard++;
+            if (guard == 4096u) AOR2(gCounters[0].overflowFlags, OVERFLOW_BP_CHAIN);
+            if (cur == i) continue;
+            if (any(int3(floor((0.5 * (ab.mn + ab.mx)) / cellSize)) != int3(x, y, z))) continue;
+            float rB = ab._pad0;
+            if (rB > 0.0)
+            {
+                float3 d = cA - 0.5 * (ab.mn + ab.mx);
+                float rr = rA + rB;
+                if (dot(d, d) > rr * rr) continue;
+            }
+            if (!aabbOverlap(box, ab)) continue;
+            if (awakeEntry && !ownsAwakePair(i, box, cur, ab, cellSize)) continue;
+            Collider other = gColliders[cur];
+            if (other.body == col.body || other.shape == SHAPE_PLANE || bodiesJointed(col.body, other.body)) continue;
+            if (probeIsBox && boxesSeparatedOnFaceAxis(probeObb, cur, faceGap)) continue;
+            // Statics, kinematics and sleepers never query: this querier owns them.
+            emitCandidate(i, cur);
+        }
+    }
+}
+
 // One cell of a split table. In the awake table every visited pair belongs to
 // this querier (forward cell) or to the higher index (own cell); the other
 // table keeps the legacy sleeper/static rule. Geometry tests match the full scan.
@@ -1196,6 +1282,8 @@ void gridScanCell(uint i, Collider col, BodyState b, Aabb box, float3 cA, float 
             box.mx.y < ab.mn.y || ab.mx.y < box.mn.y ||
             box.mx.z < ab.mn.z || ab.mx.z < box.mn.z)
             continue;
+        // An oversize awake neighbour owns the pair (oversizeQuery).
+        if (awakeEntry && boxOversize(ab, cellSize)) continue;
         Collider other = gColliders[cur];
         bool keep;
         if (awakeEntry)
@@ -1329,7 +1417,11 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
     for (uint pi = 0u; pi < nPlanes; pi++)
         emitCandidate(i, ALOAD(gScratchAtomics[43u + pi]));
     float3 cA = 0.5 * (box.mn + box.mx);
-    if (!queryLarge && gridSplit())
+    if (!queryLarge && boxOversize(box, cellSize))
+    {
+        oversizeQuery(i, col, b, box, cA, rA, probeIsBox, probeObb, faceGap, cellSize);
+    }
+    else if (!queryLarge && gridSplit())
     {
         // Awake table: own cell (higher index owns) + 13 forward cells (all).
         for (uint c = 0u; c < 14u; c++)
@@ -1362,7 +1454,8 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
         while (link != 0xFFFFFFFFu && guard < 4096u)
         {
             uint cur = link & GRID_COLLIDER_MASK;
-            bool ownedElsewhere = (link & GRID_AWAKE_DYNAMIC) != 0u && cur <= i;
+            bool awakeEntry = (link & GRID_AWAKE_DYNAMIC) != 0u;
+            bool ownedElsewhere = awakeEntry && cur <= i;
             // Fetch the next dependent link before this candidate's geometry.
             // Lower-index awake dynamics own the reverse query; sleepers do not.
             link = gColorLists[cur];
@@ -1396,6 +1489,8 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
             {
                 continue;
             }
+            // An oversize awake neighbour owns the pair (oversizeQuery).
+            if (awakeEntry && boxOversize(ab, cellSize)) continue;
             // Dynamic-dynamic once (higher index), PLUS awake→sleeping at any index:
             // smash balls are last, so cur>i alone never pairs them with sleeping
             // bricks (sleepers only keep static contacts and would not emit).

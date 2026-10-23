@@ -461,6 +461,7 @@ impl RigidStep {
                     projectiles: counts.get(6).copied().unwrap_or(0),
                     characters: counts.get(7).copied().unwrap_or(0),
                     queries: counts.get(8).copied().unwrap_or(0),
+                    fast_list_off: false,
                 }
             },
         }

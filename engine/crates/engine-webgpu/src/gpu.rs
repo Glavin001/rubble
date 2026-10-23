@@ -161,6 +161,8 @@ pub struct WgpuSim {
     projectile_count: u32,
     /// Event ring read cursor of `poll_motion_events`.
     motion_events_seen: u32,
+    /// Measurement control (`set_fast_list`): long sweeps stay in the grid.
+    fast_list_off: bool,
 }
 
 /// Motion bookkeeping of uploaded bodies: CCD and kinematic flags.
@@ -626,6 +628,7 @@ impl WgpuSim {
             query_count: 0,
             projectile_count: 0,
             motion_events_seen: 0,
+            fast_list_off: false,
         };
         sim.write_character_header();
         // Kernel fixtures in the unit tests set the modes they exercise on top
@@ -1292,6 +1295,27 @@ impl WgpuSim {
         Ok(())
     }
 
+    /// Diagnostic: run this step's graph only up to the end of the broadphase
+    /// (bounds, grid, fast list) and return its candidate pairs (lower collider
+    /// first). The step is not taken. The CSR build reuses the candidate buffer
+    /// later in a step, so this is the only point where the pairs are readable.
+    pub fn debug_broadphase_pairs(&mut self) -> Vec<(u32, u32)> {
+        self.refresh_cell();
+        self.write_host_uniforms_ex(false);
+        let cmds = rigid_plan::encode_step(&self.step_modes(), &self.step_inputs(), false, false);
+        let cut = cmds
+            .iter()
+            .position(|c| matches!(c, rigid_plan::Cmd::Phase { name: "broadphase" }))
+            .expect("broadphase phase marker");
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("broadphase-only") });
+        self.encode_dispatches(&mut enc, &cmds[..cut]);
+        self.queue.submit([enc.finish()]);
+        let c = self.read_counters();
+        let n = c.candidate_count.min(self.capacity.max_candidates) as usize;
+        let words: Vec<u32> = self.read_buffer_range(10, 0, n * 4);
+        (0..n).map(|k| (words[4 * k].min(words[4 * k + 1]), words[4 * k].max(words[4 * k + 1]))).collect()
+    }
+
     /// Diagnostic read of `count` words of a binding from word `first` (waits
     /// for the GPU). For tests and probes; never on a host's hot path.
     pub fn read_words(&self, binding: usize, first: u64, count: usize) -> Vec<u32> {
@@ -1338,6 +1362,13 @@ impl WgpuSim {
     /// within its step's motion up to this, so it needs no substeps to meet what it hits.
     pub fn set_spec_reach_max(&mut self, reach: f32) {
         self.spec_reach_max = reach;
+    }
+
+    /// Measurement control: `false` never schedules the fast broadphase list or
+    /// the oversize ownership, so long sweeps use the 27-cell stencil as before
+    /// the CCD audit (they then miss pairs; see tests/broadphase_oracle.rs).
+    pub fn set_fast_list(&mut self, on: bool) {
+        self.fast_list_off = !on;
     }
 
     /// Force the hierarchical grid on or off (`None`: convex scenes use it), as
@@ -1738,6 +1769,7 @@ impl WgpuSim {
                 projectiles: self.projectile_count,
                 characters: self.characters.len() as u32,
                 queries: self.query_count,
+                fast_list_off: self.fast_list_off,
             },
         }
     }
