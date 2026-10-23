@@ -126,6 +126,56 @@ pub fn layout_constants() -> String {
     serde_json::Value::Object(m).to_string()
 }
 
+/// Character / query / projectile pool layout (`character_layout.slang`), the
+/// continuous-collision words and flags a browser host writes (impulse records,
+/// CCD and kinematic body flags, the event ring), as a JSON object.
+#[wasm_bindgen]
+pub fn motion_constants() -> String {
+    use engine_schema as s;
+    let mut m: serde_json::Map<String, serde_json::Value> =
+        s::character::LAYOUT.iter().map(|&(n, v)| (n.into(), v.into())).collect();
+    for (n, v) in [
+        ("BODY_CCD", s::BODY_CCD),
+        ("BODY_KINEMATIC", s::BodyFlags::Kinematic as u32),
+        ("FLAG_SPEC_VELOCITY", s::FLAG_SPEC_VELOCITY),
+        ("IMPULSE_BASE", s::IMPULSE_BASE),
+        ("IMPULSE_COUNT", s::IMPULSE_COUNT),
+        ("IMPULSE_FIRST", s::IMPULSE_FIRST),
+        ("IMPULSE_WORDS", s::IMPULSE_WORDS),
+        ("IMPULSE_CAP", s::IMPULSE_CAP),
+        ("IMPULSE_AT_POINT", s::IMPULSE_AT_POINT),
+        ("IMPULSE_SET_VELOCITY", s::IMPULSE_SET_VELOCITY),
+        ("CCD_FALLBACKS", s::CCD_FALLBACKS),
+        ("EVENT_RING_BASE", s::EVENT_RING_BASE),
+        ("EVENT_RING_CAPACITY", s::EVENT_RING_CAPACITY),
+        ("NO_INDEX", s::character::NO_INDEX),
+    ] {
+        m.insert(n.into(), v.into());
+    }
+    serde_json::Value::Object(m).to_string()
+}
+
+/// A character's record (16 float4 slots as words) from a `CharacterDesc` JSON
+/// (snake_case fields; missing ones take the defaults).
+#[wasm_bindgen]
+pub fn character_record(desc_json: &str, inner_body: u32, x: f32, y: f32, z: f32) -> Result<Vec<u32>, JsError> {
+    let mut v: serde_json::Value = parse(desc_json)?;
+    let mut base = serde_json::to_value(engine_schema::character::CharacterDesc::default()).map_err(err)?;
+    if let (Some(b), Some(o)) = (base.as_object_mut(), v.as_object_mut()) {
+        for (k, val) in o.iter() {
+            b.insert(k.clone(), val.clone());
+        }
+    }
+    let d: engine_schema::character::CharacterDesc = serde_json::from_value(base).map_err(err)?;
+    Ok(d.record(inner_body, [x, y, z]).iter().flatten().copied().collect())
+}
+
+/// Default character descriptor (JSON).
+#[wasm_bindgen]
+pub fn character_default() -> String {
+    serde_json::to_string(&engine_schema::character::CharacterDesc::default()).unwrap()
+}
+
 /// Op codes of the stream (JSON object, `OP_*` names).
 #[wasm_bindgen]
 pub fn op_codes() -> String {

@@ -345,29 +345,32 @@ void char_move(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         X *= castF;
         outFlags |= CO_CAST_CUT;
     }
-    // 6. Step up: on the ground, blocked horizontally by something steep.
+    // 6. Step up: on the ground, blocked horizontally by something steep. The
+    // casts always run (masked per lane): WGSL requires every barrier in
+    // uniform control flow, and record values read from storage are not.
     float3 Dh = float3(D.x, 0.0, D.z);
     float3 Xh = float3(X.x, 0.0, X.z);
     bool tryStep = live && wasGround && !jump && mv.x > 0.0 && length(Dh) > 1e-4 &&
         length(Xh) < 0.9 * length(Dh);
     float stepped = 0.0;
-    if (tryStep) // workgroup-uniform: every lane reads the same record
+    // Up (ceiling), across, then down onto the step.
+    castCandidates(lane, tryStep, P, CHAR_UP * mv.x, r, hh, skin, MOTION_NONE, true, false);
+    rayReduce(lane);
+    float up = mv.x * min(gsRayT[0], 1.0);
+    GROUP_SYNC();
+    float3 P1 = P + CHAR_UP * up;
+    castCandidates(lane, tryStep, P1, Dh, r, hh, skin, MOTION_NONE, true, false);
+    rayReduce(lane);
+    float across = min(gsRayT[0], 1.0);
+    GROUP_SYNC();
+    float3 P2 = P1 + Dh * across;
+    castCandidates(lane, tryStep, P2, -CHAR_UP * (up + skin), r, hh, skin, MOTION_NONE, true, false);
+    rayReduce(lane);
+    float downF = gsRayT[0];
+    uint downK = gsRayC[0];
+    GROUP_SYNC();
+    if (tryStep)
     {
-        // Up (ceiling), across, then down onto the step.
-        castCandidates(lane, live, P, CHAR_UP * mv.x, r, hh, skin, MOTION_NONE, true, false);
-        rayReduce(lane);
-        float up = mv.x * min(gsRayT[0], 1.0);
-        GROUP_SYNC();
-        float3 P1 = P + CHAR_UP * up;
-        castCandidates(lane, live, P1, Dh, r, hh, skin, MOTION_NONE, true, false);
-        rayReduce(lane);
-        float across = min(gsRayT[0], 1.0);
-        GROUP_SYNC();
-        float3 P2 = P1 + Dh * across;
-        castCandidates(lane, live, P2, -CHAR_UP * (up + skin), r, hh, skin, MOTION_NONE, true, false);
-        rayReduce(lane);
-        float downF = gsRayT[0];
-        uint downK = gsRayC[0];
         float3 P3 = P2 - CHAR_UP * ((up + skin) * min(downF, 1.0));
         bool landed = downF < 1.0;
         bool walkable = false;
@@ -385,35 +388,32 @@ void char_move(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             stepped = Xs.y;
             outFlags |= CO_STEPPED_UP;
         }
-        GROUP_SYNC();
     }
     // 7. Stick to the floor: walking off a step or down a slope keeps contact.
     bool tryStick = live && wasGround && !jump && mv.y > 0.0 && X.y <= 1e-4;
-    if (tryStick)
+    float3 S = P + X;
+    castCandidates(lane, tryStick, S, -CHAR_UP * (mv.y + skin), r, hh, skin, MOTION_AFTER, true, false);
+    rayReduce(lane);
+    float stickF = gsRayT[0];
+    uint stickK = gsRayC[0];
+    GROUP_SYNC();
+    if (lane == 0u)
     {
-        float3 S = P + X;
-        castCandidates(lane, live, S, -CHAR_UP * (mv.y + skin), r, hh, skin, MOTION_AFTER, true, false);
-        rayReduce(lane);
-        float f = gsRayT[0];
-        uint kk = gsRayC[0];
-        if (f < 1.0 && kk != NO_INDEX && lane == 0u)
+        gsShare[1] = float4(0, 0, 0, 0);
+        if (tryStick && stickF < 1.0 && stickK != NO_INDEX)
         {
             float t; float3 nrm;
             Collider cap = capsuleShape(r, hh);
-            if (shapeCastCollider(cap, S - gsMove[kk].xyz, float4(0, 0, 0, 1), -CHAR_UP, mv.y + 2.0 * skin, gsCand[kk], t, nrm) &&
-                castSurfaceNormal(gsCand[kk], r, hh, S - gsMove[kk].xyz, -CHAR_UP, t, nrm).y >= cosSlope)
-                gsShare[1] = float4(-CHAR_UP * ((mv.y + skin) * f), 1.0);
-            else
-                gsShare[1] = float4(0, 0, 0, 0);
+            if (shapeCastCollider(cap, S - gsMove[stickK].xyz, float4(0, 0, 0, 1), -CHAR_UP, mv.y + 2.0 * skin, gsCand[stickK], t, nrm) &&
+                castSurfaceNormal(gsCand[stickK], r, hh, S - gsMove[stickK].xyz, -CHAR_UP, t, nrm).y >= cosSlope)
+                gsShare[1] = float4(-CHAR_UP * ((mv.y + skin) * stickF), 1.0);
         }
-        else if (lane == 0u)
-            gsShare[1] = float4(0, 0, 0, 0);
-        GROUP_SYNC();
-        if (gsShare[1].w > 0.5)
-        {
-            X += gsShare[1].xyz;
-            outFlags |= CO_STUCK_TO_FLOOR;
-        }
+    }
+    GROUP_SYNC();
+    if (gsShare[1].w > 0.5)
+    {
+        X += gsShare[1].xyz;
+        outFlags |= CO_STUCK_TO_FLOOR;
     }
     // 8. Ground probe at the new pose (obstacles where the step leaves them).
     float3 Pn = P + X;
@@ -686,6 +686,8 @@ void projectile_step(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     QueryFilter f;
     f.excludeBody = cfg.z;
     f.mask = cfg.y;
+    // Every loop runs its full count and every lane reaches every barrier
+    // (WGSL uniformity): finished segments and dead projectiles cast nothing.
     for (uint s = 0u; s < PROJ_SEGMENTS; s++)
     {
         float3 x1 = x + v * h + g * (0.5 * h * h);
@@ -696,26 +698,30 @@ void projectile_step(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         float3 dir = segLive ? seg / len : float3(0, -1, 0);
         float3 from = x;
         float travelled = 0.0;
+        bool segDone = !segLive;
         // Hits along this segment, nearest first.
         for (uint it = 0u; it < PROJ_MAX_HITS; it++)
         {
-            bool castLive = segLive && hits < maxHits && travelled < len;
-            QueryFilter fk = f;
-            rayLaneWalk(lane, castLive, from, dir, len - travelled, rad, -2.0, 0.0, fk, charFullScan(), 0.0);
+            bool castLive = !segDone && hits < maxHits && travelled < len;
+            rayLaneWalk(lane, castLive, from, dir, len - travelled, rad, -2.0, 0.0, f, charFullScan(), 0.0);
             rayReduce(lane);
             float t = gsRayT[0];
             uint ci = gsRayC[0];
+            GROUP_SYNC();
             bool hit = castLive && ci != NO_INDEX && t <= len - travelled;
-            float thick = 0.0;
-            float3 n = -dir;
-            float3 hp = from;
-            if (hit)
+            if (!hit)
             {
+                segDone = true;
+            }
+            else
+            {
+                float thick = 0.0;
+                float3 n = -dir;
                 t = max(t, 0.0);
                 rayCollider(ci, from, dir, rad, t, n);
                 t = max(t, 0.0);
                 if (dot(n, dir) > 0.0) n = -n;
-                hp = from + dir * t;
+                float3 hp = from + dir * t;
                 // Thickness along the path: cast back from beyond the collider.
                 Collider col = gColliders[ci];
                 float bound = col.params.w > 0.0 ? col.params.w : length(col.params.xyz);
@@ -726,64 +732,66 @@ void projectile_step(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                     thick = max(span - tb, 0.0);
                 else
                     thick = 1e30;
-            }
-            GROUP_SYNC();
-            if (!hit) break;
-            // Energy to cross the collider (its thickness along the path); the
-            // rest carries on beyond it.
-            float cost = pen.y * thick;
-            Collider col = gColliders[ci];
-            BodyState hb = gBodies[col.body];
-            float speed = length(v1);
-            float energy = 0.5 * m * speed * speed;
-            float3 vBefore = dir * speed;
-            bool through = energy > cost && thick < 1e29;
-            float3 vAfter = through ? dir * sqrt(max(2.0 * (energy - cost) / m, 0.0)) : float3(0, 0, 0);
-            if (lane == 0u)
-            {
-                emitEvent(EVENT_PROJECTILE_HIT, p, ci, asuint(through ? thick : -1.0));
-                if ((cfg.x & PF_IMPULSES) != 0u && bodyIsDynamic(hb))
+                // Energy to cross the collider (its thickness along the path); the
+                // rest carries on beyond it.
+                float cost = pen.y * thick;
+                BodyState hb = gBodies[col.body];
+                float speed = length(v1);
+                float energy = 0.5 * m * speed * speed;
+                float3 vBefore = dir * speed;
+                bool through = energy > cost && thick < 1e29;
+                float3 vAfter = through ? dir * sqrt(max(2.0 * (energy - cost) / m, 0.0)) : float3(0, 0, 0);
+                if (lane == 0u)
                 {
-                    uint slot;
-                    AADD3(gScratchAtomics[IMPULSE_COUNT], 1u, slot);
-                    if (slot < IMPULSE_CAP)
+                    emitEvent(EVENT_PROJECTILE_HIT, p, ci, asuint(through ? thick : -1.0));
+                    if ((cfg.x & PF_IMPULSES) != 0u && bodyIsDynamic(hb))
                     {
-                        uint rec = IMPULSE_BASE + IMPULSE_WORDS * slot;
-                        float3 J = (vBefore - vAfter) * m;
-                        // Key: after every host record, by projectile then hit.
-                        uint key = 0x100000u + p * 16u + hits;
-                        ASTORE(gScratchAtomics[rec], col.body);
-                        ASTORE(gScratchAtomics[rec + 1u], (key << 8) | IMPULSE_AT_POINT);
-                        ASTORE(gScratchAtomics[rec + 2u], asuint(J.x));
-                        ASTORE(gScratchAtomics[rec + 3u], asuint(J.y));
-                        ASTORE(gScratchAtomics[rec + 4u], asuint(J.z));
-                        ASTORE(gScratchAtomics[rec + 5u], asuint(hp.x));
-                        ASTORE(gScratchAtomics[rec + 6u], asuint(hp.y));
-                        ASTORE(gScratchAtomics[rec + 7u], asuint(hp.z));
+                        uint slot;
+                        AADD3(gScratchAtomics[IMPULSE_COUNT], 1u, slot);
+                        if (slot < IMPULSE_CAP)
+                        {
+                            uint rec = IMPULSE_BASE + IMPULSE_WORDS * slot;
+                            float3 J = (vBefore - vAfter) * m;
+                            // Key: after every host record, by projectile then hit.
+                            uint key = 0x100000u + p * 16u + hits;
+                            ASTORE(gScratchAtomics[rec], col.body);
+                            ASTORE(gScratchAtomics[rec + 1u], (key << 8) | IMPULSE_AT_POINT);
+                            ASTORE(gScratchAtomics[rec + 2u], asuint(J.x));
+                            ASTORE(gScratchAtomics[rec + 3u], asuint(J.y));
+                            ASTORE(gScratchAtomics[rec + 4u], asuint(J.z));
+                            ASTORE(gScratchAtomics[rec + 5u], asuint(hp.x));
+                            ASTORE(gScratchAtomics[rec + 6u], asuint(hp.y));
+                            ASTORE(gScratchAtomics[rec + 7u], asuint(hp.z));
+                        }
                     }
                 }
+                hits++;
+                lastHit = ci;
+                lastN = n;
+                lastP = hp;
+                if (!through)
+                {
+                    alive = false;
+                    segDone = true;
+                    x1 = hp;
+                    v1 = float3(0, 0, 0);
+                    if (lane == 0u) emitEvent(EVENT_PROJECTILE_STOPPED, p, ci, 0u);
+                }
+                else
+                {
+                    v1 = normalize(v1) * length(vAfter);
+                    float adv = t + thick + 1e-4;
+                    travelled += adv;
+                    from += dir * adv;
+                }
             }
-            hits++;
-            lastHit = ci;
-            lastN = n;
-            lastP = hp;
-            if (!through)
-            {
-                alive = false;
-                x1 = hp;
-                v1 = float3(0, 0, 0);
-                if (lane == 0u) emitEvent(EVENT_PROJECTILE_STOPPED, p, ci, 0u);
-                break;
-            }
-            v1 = normalize(v1) * length(vAfter);
-            float adv = t + thick + 1e-4;
-            travelled += adv;
-            from += dir * adv;
         }
-        // A hit's exit can lie past the segment's end: carry on from there.
-        x = travelled > len ? from : x1;
-        v = v1;
-        if (!alive) break;
+        if (segLive)
+        {
+            // A hit's exit can lie past the segment's end: carry on from there.
+            x = travelled > len ? from : x1;
+            v = v1;
+        }
     }
     if (!live || lane != 0u) return;
     float energy = alive ? 0.5 * m * dot(v, v) : 0.0;

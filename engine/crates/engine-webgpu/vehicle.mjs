@@ -14,6 +14,11 @@ export const L = JSON.parse(wasm.layout_constants());
 export const { BODY_VEHICLE, JOINT_FLAG_TYRE, JOINT_BYTES, WHEEL_RIM_MATERIAL } = L;
 /** engine_exec::rigid_plan for browser hosts, and D6 joint records (world-host.mjs). */
 export const { RigidStep, ball_joint_words: ballJointWords } = wasm;
+/** Character / projectile pool and continuous-collision constants (engine-schema). */
+export const M = JSON.parse(wasm.motion_constants());
+/** A character record (Uint32Array, 16 slots) from a CharacterDesc JSON. */
+export const characterRecord = (descJson, innerBody, x, y, z) => wasm.character_record(descJson, innerBody, x, y, z);
+export const characterDefault = () => JSON.parse(wasm.character_default());
 const OP = JSON.parse(wasm.op_codes());
 
 const f32b = new Float32Array(1);

@@ -3,7 +3,7 @@
 // contact path, including the vehicle passes. Used by vehicle.html; demo.html keeps
 // its own benchmark host.
 import { loadShaderModules, pipelineBuilder } from './shader-loader.mjs';
-import { VehicleHost, DEFAULT_VEHICLE_CAPACITY, vehicleLayout, capWords, fbits, L, RigidStep, ballJointWords } from './vehicle.mjs';
+import { VehicleHost, DEFAULT_VEHICLE_CAPACITY, vehicleLayout, capWords, fbits, L, RigidStep, ballJointWords, M, characterRecord } from './vehicle.mjs';
 
 // ---- record encoding (BodyState 112 B, Collider 64 B) for scene objects ----
 export function bodyWords(b) {
@@ -69,7 +69,17 @@ export const DEFAULT_PARAMS = {
   residualExit: 1e-4, trustLin: 0.35, trustAng: 0.5, pivotFloor: 1e-6, gridCellSize: 2,
 };
 
-export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_VEHICLE_CAPACITY, wgslBase = './generated/wgsl/', status = () => {} }) {
+/** Character / query / projectile pool sizes (binding 32). */
+export const DEFAULT_MOTION_CAPACITY = { maxCharacters: 64, maxQueries: 256, maxProjectiles: 256 };
+export function motionLayout(c) {
+  const characterBase = M.CH_SLOTS;
+  const queryBase = characterBase + c.maxCharacters * M.CHAR_STRIDE;
+  const projectileBase = queryBase + c.maxQueries * M.QUERY_STRIDE;
+  const slots = projectileBase + c.maxProjectiles * M.PROJ_STRIDE;
+  return { characterBase, queryBase, projectileBase, slots, bytes: slots * 16 };
+}
+
+export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_VEHICLE_CAPACITY, motionCap = DEFAULT_MOTION_CAPACITY, wgslBase = './generated/wgsl/', status = () => {} }) {
   // engine_exec::rigid_plan in wasm: buffer sizes, host uploads and the step's
   // commands, the same graph WgpuSim and MetalSim replay (canonical contacts).
   const vcap = { ...DEFAULT_VEHICLE_CAPACITY, ...vehicleCap };
@@ -82,6 +92,9 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
   const vlayout = vehicleLayout(vcap);
   const aabbTail = plan.aabb_tail();
   const sizes = Array.from(plan.buffer_sizes());
+  const mcap = { ...DEFAULT_MOTION_CAPACITY, ...motionCap };
+  const mlayout = motionLayout(mcap);
+  sizes[32] = Math.max(sizes[32] || 0, mlayout.bytes);
   const kernels = JSON.parse(plan.kernels());
 
   const limit = Math.min(device.limits.maxBufferSize, device.limits.maxStorageBufferBindingSize);
@@ -129,9 +142,24 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     vehicles: new VehicleHost(vcap, aabbTail),
     vehicleShadow: new Uint32Array(vlayout.totalSlots * 4),
     eventsSeen: 0,
+    // Continuous collision, kinematics, impulses, characters, projectiles.
+    motionCap: mcap, mlayout,
+    motion: { ccd: false, kinematic: false },
+    impulses: [],
+    characters: [], // {body, collider}
+    projectileCount: 0,
+    queryCount: 0,
+    motionShadow: new Uint32Array(mlayout.slots * 4),
+    motionEventsSeen: 0,
   };
 
+  const noteFlags = (words) => {
+    const flags = words[11];
+    if (flags & M.BODY_CCD) world.motion.ccd = true;
+    if ((flags & 3) === M.BODY_KINEMATIC) world.motion.kinematic = true;
+  };
   const writeBodyRaw = (index, words) => {
+    noteFlags(words);
     world.bodyWords.set(words, index * 28);
     device.queue.writeBuffer(bufs[0], index * 112, words);
     device.queue.writeBuffer(bufs[0], (cap.maxBodies + index) * 112, words);
@@ -237,6 +265,120 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     params.gridCellSize = Math.max(0.5, 2 * r * 1.0001);
   };
 
+  // ---- characters, queries, projectiles (binding 32), impulses (binding 21) ----
+  const writeMotion = (slot, words) => {
+    world.motionShadow.set(words, slot * 4);
+    device.queue.writeBuffer(bufs[32], slot * 16, words);
+  };
+  world.writeMotionHeader = () => {
+    const h = new Uint32Array(16);
+    h.set([mcap.maxCharacters, world.characters.length, mcap.maxQueries, world.queryCount], 0);
+    h.set([mlayout.characterBase, mlayout.queryBase, mlayout.projectileBase, mcap.maxProjectiles], 4);
+    h.set([world.projectileCount, 0, 0, 0], 8);
+    writeMotion(0, h);
+  };
+  world.writeMotionHeader();
+  /** Capsule character (engine_schema::character::CharacterDesc, snake_case);
+   * its inner kinematic capsule is a body of its own. Returns its index. */
+  world.addCharacter = (desc, p) => {
+    const d = { ...desc };
+    const r = d.radius ?? 0.3, hh = d.half_height ?? 0.6;
+    if (world.characters.length >= mcap.maxCharacters) throw new Error('character capacity exhausted');
+    const body = world.addBody({ p, flags: M.BODY_KINEMATIC | 8 });
+    const collider = world.addCollider({ body, shape: 1, material: d.material ?? 0, params: [r, hh, 0, r + hh] });
+    const index = world.characters.length;
+    world.characters.push({ body, collider });
+    writeMotion(mlayout.characterBase + index * M.CHAR_STRIDE, characterRecord(JSON.stringify(d), body, p[0], p[1], p[2]));
+    world.writeMotionHeader();
+    return index;
+  };
+  /** Desired horizontal velocity (world m/s) and the jump sequence (bump to jump). */
+  world.setCharacterInput = (index, v, jumpSeq = 0) => {
+    const w = new Uint32Array(4);
+    w.set([fbits(v[0]), fbits(v[1] ?? 0), fbits(v[2]), jumpSeq >>> 0]);
+    writeMotion(mlayout.characterBase + index * M.CHAR_STRIDE + M.C_IN, w);
+  };
+  /** Bullet-class projectile (segment casts before each step). */
+  world.spawnProjectile = ({ p, v, radius = 0, mass = 0.01, cost = 1e5, drag = 0, maxHits = 8, excludeBody = M.NO_INDEX, mask = 0, impulses = true }) => {
+    if (world.projectileCount >= mcap.maxProjectiles) world.projectileCount = 0; // ring: reuse the oldest slot
+    const i = world.projectileCount++;
+    const e = 0.5 * mass * (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    const w = new Uint32Array(M.PROJ_STRIDE * 4);
+    w.set([fbits(p[0]), fbits(p[1]), fbits(p[2]), fbits(radius)], 0);
+    w.set([fbits(v[0]), fbits(v[1]), fbits(v[2]), fbits(mass)], 4);
+    w.set([1 | (impulses ? 2 : 0), mask, excludeBody, 0], 8);
+    w.set([fbits(e), fbits(cost), fbits(drag), fbits(maxHits)], 12);
+    w.set([0, 0, 0, M.NO_INDEX], 16);
+    writeMotion(mlayout.projectileBase + i * M.PROJ_STRIDE, w);
+    world.writeMotionHeader();
+    return i;
+  };
+  /** Impulse J (N·s) at world point p, applied on the GPU at the next step's start. */
+  world.applyImpulse = (body, j, p) => world.impulses.push([body, M.IMPULSE_AT_POINT, ...j, ...p]);
+  /** A kinematic body's velocity from the next step on (GPU record, no body upload). */
+  world.setKinematicVelocity = (body, lin, ang = [0, 0, 0]) => world.impulses.push([body, M.IMPULSE_SET_VELOCITY, ...lin, ...ang]);
+  const uploadImpulses = () => {
+    const n = world.impulses.length;
+    if (!n) return false;
+    if (n > M.IMPULSE_CAP) throw new Error(`more than ${M.IMPULSE_CAP} impulse records in one step`);
+    const w = new Uint32Array(n * M.IMPULSE_WORDS);
+    const f = new Float32Array(w.buffer);
+    world.impulses.forEach((r, k) => {
+      w[k * 8] = r[0]; w[k * 8 + 1] = (r[1] & 255) | (k << 8);
+      f.set(r.slice(2), k * 8 + 2);
+    });
+    device.queue.writeBuffer(bufs[21], M.IMPULSE_BASE * 4, w);
+    device.queue.writeBuffer(bufs[21], M.IMPULSE_COUNT * 4, Uint32Array.of(n));
+    device.queue.writeBuffer(bufs[21], M.IMPULSE_FIRST * 4, Uint32Array.of(n));
+    world.impulses = [];
+    return true;
+  };
+  // Async read of the characters, projectiles and the event ring (one map).
+  const motionReadBytes = mlayout.slots * 16;
+  const ringWords = 4 + 4 * M.EVENT_RING_CAPACITY;
+  const motionRead = device.createBuffer({ size: motionReadBytes + ringWords * 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  let motionBusy = false;
+  world.readMotion = async () => {
+    if (motionBusy) return null;
+    motionBusy = true;
+    const enc = device.createCommandEncoder();
+    enc.copyBufferToBuffer(bufs[32], 0, motionRead, 0, motionReadBytes);
+    enc.copyBufferToBuffer(bufs[21], M.EVENT_RING_BASE * 4, motionRead, motionReadBytes, ringWords * 4);
+    device.queue.submit([enc.finish()]);
+    await motionRead.mapAsync(GPUMapMode.READ);
+    const all = new Uint32Array(motionRead.getMappedRange().slice(0));
+    motionRead.unmap();
+    motionBusy = false;
+    const f = new Float32Array(all.buffer);
+    const v3 = (q) => [f[q], f[q + 1], f[q + 2]];
+    const characters = world.characters.map((c, i) => {
+      const r = (mlayout.characterBase + i * M.CHAR_STRIDE) * 4;
+      const gb = all[r + M.C_GND * 4 + 3];
+      return {
+        position: v3(r + M.C_POS * 4), velocity: v3(r + M.C_VEL * 4), ground: ['ground', 'steep', 'air'][all[r + M.C_VEL * 4 + 3]] ?? 'air',
+        groundNormal: v3(r + M.C_GND * 4), groundBody: gb === M.NO_INDEX ? null : gb, flags: all[r + M.C_OUT * 4 + 3],
+        planes: all[r + M.C_OUT * 4 + 2], push: v3(r + M.C_PUSH * 4),
+      };
+    });
+    const projectiles = [];
+    for (let i = 0; i < world.projectileCount; i++) {
+      const r = (mlayout.projectileBase + i * M.PROJ_STRIDE) * 4;
+      projectiles.push({ position: v3(r), velocity: v3(r + 4), alive: (all[r + 8] & 1) !== 0, hits: all[r + 11], energy: f[r + 12] });
+    }
+    const ring = all.subarray(motionReadBytes / 4);
+    const cursor = ring[0];
+    const events = [];
+    const rf = new Float32Array(ring.buffer, ring.byteOffset, ring.length);
+    for (let n = Math.max(world.motionEventsSeen, cursor - M.EVENT_RING_CAPACITY); n < cursor; n++) {
+      const r = 4 + 4 * (n % M.EVENT_RING_CAPACITY);
+      const t = ring[r];
+      if (t >= M.EVENT_CHAR_LANDED && t <= M.EVENT_PROJECTILE_STOPPED)
+        events.push({ type: { 5: 'landed', 6: 'supportLost', 7: 'crushed', 8: 'projectileHit', 9: 'projectileStopped' }[t], id: ring[r + 1], a: ring[r + 2], b: rf[r + 3] });
+    }
+    world.motionEventsSeen = Math.max(world.motionEventsSeen, cursor);
+    return { characters, projectiles, events };
+  };
+
   // ---- per-step replay of the rigid_plan commands ----
   const PFIELDS = ['dt', 'gravityY', 'iterations', 'flags', 'alpha', 'gamma', 'betaLin', 'betaAng', 'kStart', 'kMaxN',
     'kMaxT', 'contactOffset', 'sleepLin', 'sleepAng', 'sleepTime', 'residualExit', 'trustLin', 'trustAng', 'pivotFloor', 'gridCellSize'];
@@ -254,8 +396,11 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     world.refreshCell();
     PFIELDS.forEach((k, i) => (i === 2 || i === 3) ? pv.setUint32(i * 4, params[k], true) : pv.setFloat32(i * 4, params[k], true));
     plan.set_params(new Uint8Array(paramBytes));
+    const impulses = uploadImpulses();
+    const motionBits = (world.motion.ccd ? 1 : 0) | (world.motion.kinematic ? 2 : 0) | (impulses ? 4 : 0);
     const counts = Uint32Array.of(world.bodyCount, world.colliderCount, world.jointCount,
-      world.vehicles.vehicleCount, world.vehicles.wheelCount);
+      world.vehicles.vehicleCount, world.vehicles.wheelCount, motionBits, world.projectileCount,
+      world.characters.length, world.queryCount);
     // Host words (binding 21), host uniform (binding 6), counter block (copy source).
     const host = plan.host_upload(counts);
     const uniformBytes = host.length - 256 - 80;
@@ -302,6 +447,9 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     colliders: world.colliderWords.slice(0, world.colliderCount * 16),
     vehicle: world.vehicleShadow.slice(),
     host: world.vehicles.save(),
+    motionPool: world.motionShadow.slice(),
+    characters: world.characters.slice(),
+    projectileCount: world.projectileCount,
   });
   world.restore = (snap) => {
     world.bodyCount = snap.bodyCount;
@@ -318,6 +466,12 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     world.vehicleShadow.set(snap.vehicle);
     device.queue.writeBuffer(bufs[31], 0, snap.vehicle);
     world.vehicles.restore(snap.host);
+    world.motionShadow.set(snap.motionPool);
+    device.queue.writeBuffer(bufs[32], 0, snap.motionPool);
+    world.characters = snap.characters.slice();
+    world.projectileCount = snap.projectileCount;
+    world.impulses = [];
+    world.writeMotionHeader();
     plan.reset();
     world.steps = 0;
     world.last = { contact: 0, candidate: 0, awake: 0, color: 0, manifold: 0, overflow: 0 };
