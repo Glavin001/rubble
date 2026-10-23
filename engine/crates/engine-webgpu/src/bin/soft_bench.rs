@@ -65,6 +65,9 @@ fn main() -> anyhow::Result<()> {
         if let Ok(r) = std::env::var("CHEB") {
             st.chebyshev_rho = r.parse().unwrap_or(0.9);
         }
+        if std::env::var("RIGID").as_deref() == Ok("1") {
+            st.rigid_mode = true;
+        }
         if let Ok(r) = std::env::var("SWEEPS") {
             st.sweeps = r.parse().unwrap_or(1);
         }

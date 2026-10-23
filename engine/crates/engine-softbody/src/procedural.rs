@@ -119,7 +119,10 @@ pub fn car_desc(p: &CarParams) -> (crate::SoftVehicleDesc, CarLayout) {
     let mut body: Vec<u32> = (0..ring_nodes).collect();
     body.extend(ring_nodes..ring_nodes + 8); // axle nodes follow the rings
     let mut parts = vec![("body", body)];
-    for (name, nodes) in ["bonnet", "boot", "door_fl", "door_rl", "door_fr", "door_rr"].iter().zip(&layout.panels) {
+    for (name, nodes) in ["bonnet", "boot", "door_fl", "door_rl", "door_fr", "door_rr"]
+        .iter()
+        .zip(&layout.panels)
+    {
         parts.push((name, nodes.clone()));
     }
     parts.push(("bumper_front", layout.front_bumper.clone()));
@@ -129,7 +132,10 @@ pub fn car_desc(p: &CarParams) -> (crate::SoftVehicleDesc, CarLayout) {
     d.parts = parts
         .into_iter()
         .filter(|(_, n)| !n.is_empty())
-        .map(|(name, nodes)| crate::SoftPart { name: name.to_string(), nodes })
+        .map(|(name, nodes)| crate::SoftPart {
+            name: name.to_string(),
+            nodes,
+        })
         .collect();
     (d, layout)
 }
@@ -269,10 +275,18 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
             for &j in rows {
                 let q = nodes[k * CAR_RING + j];
                 // Doors stand off sideways (never below the floor), the lids upward.
-                let (dx, dy) = if j < 4 { (q[0] - centre[0], 0.0) } else { (q[0] - centre[0], q[1] - centre[1]) };
+                let (dx, dy) = if j < 4 {
+                    (q[0] - centre[0], 0.0)
+                } else {
+                    (q[0] - centre[0], q[1] - centre[1])
+                };
                 let l = (dx * dx + dy * dy).sqrt().max(1e-4);
                 col.push(nodes.len());
-                nodes.push([q[0] + 0.05 * dx / l, q[1] + 0.05 * dy / l + if j < 2 { 0.03 } else { 0.0 }, q[2]]);
+                nodes.push([
+                    q[0] + 0.05 * dx / l,
+                    q[1] + 0.05 * dy / l + if j < 2 { 0.03 } else { 0.0 },
+                    q[2],
+                ]);
             }
             grid.push(col);
         }
@@ -293,7 +307,11 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
             .iter()
             .map(|g| g.iter().flatten().map(|&i| i as u32).collect())
             .collect(),
-        front_bumper: if p.bumper { (bumper_first as u32..bumper_first as u32 + 6).collect() } else { Vec::new() },
+        front_bumper: if p.bumper {
+            (bumper_first as u32..bumper_first as u32 + 6).collect()
+        } else {
+            Vec::new()
+        },
         rear_bumper: Vec::new(),
         engine: Vec::new(),
         roof: (0..n)
@@ -331,7 +349,9 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
         panel_specs.iter().any(|(ks, rows)| {
             ks.contains(&k)
                 && ks.contains(&(k + 1))
-                && rows.windows(2).any(|w| (w[0] == a && w[1] == b) || (w[0] == b && w[1] == a))
+                && rows
+                    .windows(2)
+                    .any(|w| (w[0] == a && w[1] == b) || (w[0] == b && w[1] == a))
         })
     };
     let _ = writeln!(s, "nodes");
@@ -340,7 +360,14 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
         // Floor nodes carry the cargo (seats, engine, fuel): a low centre of mass.
         let floor = i < ring_nodes && matches!(i % CAR_RING, 0 | 1 | 6);
         if p.engine_block && (engine_first..engine_first + 8).contains(&i) {
-            let _ = writeln!(s, "{i}, {:.4}, {:.4}, {:.4}, l, {:.1}", q[0], q[1], q[2], p.engine_mass / 8.0);
+            let _ = writeln!(
+                s,
+                "{i}, {:.4}, {:.4}, {:.4}, l, {:.1}",
+                q[0],
+                q[1],
+                q[2],
+                p.engine_mass / 8.0
+            );
         } else if floor {
             let _ = writeln!(s, "{i}, {:.4}, {:.4}, {:.4}, l", q[0], q[1], q[2]);
         } else {
@@ -399,7 +426,11 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
         let k = (((z + 0.5 * p.length) / p.length) * (n - 1) as f32).round() as usize;
         let left = nodes[n1][0] > 0.0;
         let (f, b) = if left { (0, 2) } else { (1, 3) };
-        let inner = if z > 0.0 { k.saturating_sub(1) } else { (k + 1).min(n - 1) };
+        let inner = if z > 0.0 {
+            k.saturating_sub(1)
+        } else {
+            (k + 1).min(n - 1)
+        };
         for kk in [inner, k] {
             for j in [f, b, 6] {
                 beams.push((n1, ring(kk, j), "i"));
@@ -418,21 +449,28 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
             door || (!cabin[k] && (k <= 1 || k + 4 >= n))
         }
     };
-    let roof_node = |i: usize| i < ring_nodes && cabin[i / CAR_RING] && matches!(i % CAR_RING, 4 | 5 | 7);
+    let roof_node =
+        |i: usize| i < ring_nodes && cabin[i / CAR_RING] && matches!(i % CAR_RING, 4 | 5 | 7);
     let pillar = |a: usize, b: usize| roof_node(a) != roof_node(b);
     let _ = writeln!(s, "beams");
     for zone_crumple in [false, true] {
         let (deform, strength) = if zone_crumple {
             (p.deform, p.strength)
         } else {
-            (p.deform * p.cell_deform_scale, p.strength * p.cell_strength_scale)
+            (
+                p.deform * p.cell_deform_scale,
+                p.strength * p.cell_strength_scale,
+            )
         };
         let _ = writeln!(
             s,
             "set_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, {:.2}",
             p.spring, p.damp, deform, strength, p.plastic_coef
         );
-        for (a, b, o) in beams.iter().filter(|(a, b, _)| !pillar(*a, *b) && (crumple(*a) || crumple(*b)) == zone_crumple) {
+        for (a, b, o) in beams
+            .iter()
+            .filter(|(a, b, _)| !pillar(*a, *b) && (crumple(*a) || crumple(*b)) == zone_crumple)
+        {
             if o.is_empty() {
                 let _ = writeln!(s, "{a}, {b}");
             } else {
@@ -550,13 +588,34 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
         let rb = rear_bumper_first;
         let r0 = 0;
         let bar: Vec<(usize, usize)> = [
-            (0, 1), (1, 2), (3, 4), (4, 5), (0, 3), (1, 4), (2, 5), (0, 4), (1, 3), (1, 5), (2, 4), (0, 2), (3, 5),
+            (0, 1),
+            (1, 2),
+            (3, 4),
+            (4, 5),
+            (0, 3),
+            (1, 4),
+            (2, 5),
+            (0, 4),
+            (1, 3),
+            (1, 5),
+            (2, 4),
+            (0, 2),
+            (3, 5),
         ]
         .iter()
         .map(|&(a, b)| (rb + a, rb + b))
         .collect();
         let bar_mounts: Vec<(usize, usize)> = [
-            (0, 0), (0, 2), (3, 2), (3, 0), (2, 1), (2, 3), (5, 3), (5, 1), (1, 6), (4, 6),
+            (0, 0),
+            (0, 2),
+            (3, 2),
+            (3, 0),
+            (2, 1),
+            (2, 3),
+            (5, 3),
+            (5, 1),
+            (1, 6),
+            (4, 6),
         ]
         .iter()
         .map(|&(a, j)| (rb + a, ring(r0, j)))
@@ -629,7 +688,11 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
                 .flat_map(|&k| rows.iter().map(move |&j| ring(k, j)))
                 .map(|i| {
                     let r = nodes[i];
-                    (((r[0] - q[0]).powi(2) + (r[1] - q[1]).powi(2) + (r[2] - q[2]).powi(2)).sqrt(), i)
+                    (
+                        ((r[0] - q[0]).powi(2) + (r[1] - q[1]).powi(2) + (r[2] - q[2]).powi(2))
+                            .sqrt(),
+                        i,
+                    )
                 })
                 .collect();
             near.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -675,7 +738,9 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
         for k in 0..n - 1 {
             for e in 0..8 {
                 let (a, b) = (PERIM[e], PERIM[(e + 1) % 8]);
-                if let (Some(ka), Some(k1a), Some(k1b), Some(kb)) = (at(k, a), at(k + 1, a), at(k + 1, b), at(k, b)) {
+                if let (Some(ka), Some(k1a), Some(k1b), Some(kb)) =
+                    (at(k, a), at(k + 1, a), at(k + 1, b), at(k, b))
+                {
                     quad(&mut s, ka, k1a, k1b, kb);
                 }
             }

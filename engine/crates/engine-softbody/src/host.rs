@@ -59,6 +59,10 @@ pub struct SoftEntry {
     pub broken: Vec<bool>,
     /// Nodes already reported as part of a detached piece.
     pub detached: Vec<bool>,
+    /// The core's [1/m, 1/I xyz] in soft mode (its own share) and in rigid mode
+    /// (the whole vehicle), for `soft_mode` to swap.
+    pub core_soft_mass: [f32; 4],
+    pub core_rigid_mass: [f32; 4],
 }
 
 #[derive(Clone, Debug)]
@@ -256,7 +260,12 @@ impl SoftHost {
                 .map(|tri| {
                     let p = |i: u32| Vec3::from_array(desc.nodes[i as usize].position);
                     let [a, b, c] = tri.nodes.map(p);
-                    [(a - b).length().to_bits(), (b - c).length().to_bits(), (c - a).length().to_bits(), 0]
+                    [
+                        (a - b).length().to_bits(),
+                        (b - c).length().to_bits(),
+                        (c - a).length().to_bits(),
+                        0,
+                    ]
                 })
                 .collect();
             backend.write_soft_slots(l.tri_rest_base + first_tri, &rest);
@@ -272,6 +281,7 @@ impl SoftHost {
         // Rigid core (stage 1): wheels and drivetrain on a frame proxy.
         let mut core = None;
         let mut core_joints = 0..0;
+        let mut rigid_props: Option<([f32; 4], [f32; 4])> = None;
         if let (Some(plan), Some(vh)) = (packed.core.clone(), vehicles) {
             let CorePlan {
                 vehicle,
@@ -313,6 +323,46 @@ impl SoftHost {
             let start = backend.joint_count();
             backend.append_joints(&j);
             core_joints = start..backend.joint_count();
+            // Mass properties of the core alone (soft mode) and of the whole
+            // vehicle about the core (rigid mode), in the core's frame.
+            let cb = backend.host_body(chassis);
+            let cpos = Vec3::from_array(cb.position);
+            let cq = Quat::from_array(cb.orientation).inverse();
+            let core_m = if cb.inv_mass > 0.0 {
+                1.0 / cb.inv_mass
+            } else {
+                0.0
+            };
+            let mut inertia =
+                Vec3::from_array(cb.inv_inertia).map(|x| if x > 0.0 { 1.0 / x } else { 0.0 });
+            let mut total = core_m;
+            for (k, n) in desc.nodes.iter().enumerate() {
+                let m = packed.masses.get(k).copied().unwrap_or(0.0);
+                if n.fixed || m <= 0.0 {
+                    continue;
+                }
+                let r = cq * (place.apply(Vec3::from_array(n.position)) - cpos);
+                inertia += m * Vec3::new(
+                    r.y * r.y + r.z * r.z,
+                    r.x * r.x + r.z * r.z,
+                    r.x * r.x + r.y * r.y,
+                );
+                total += m;
+            }
+            rigid_props = Some((
+                [
+                    cb.inv_mass,
+                    cb.inv_inertia[0],
+                    cb.inv_inertia[1],
+                    cb.inv_inertia[2],
+                ],
+                [
+                    1.0 / total.max(1e-6),
+                    1.0 / inertia.x.max(1e-6),
+                    1.0 / inertia.y.max(1e-6),
+                    1.0 / inertia.z.max(1e-6),
+                ],
+            ));
             core = Some((h, chassis));
         }
 
@@ -367,12 +417,18 @@ impl SoftHost {
             rigid_parts.push((body, start..backend.joint_count()));
         }
 
-        let beam_ends: Vec<(u32, u32)> = packed.beams.iter().map(|b| (b.a - first_body, b.b - first_body)).collect();
+        let beam_ends: Vec<(u32, u32)> = packed
+            .beams
+            .iter()
+            .map(|b| (b.a - first_body, b.b - first_body))
+            .collect();
         let n_beams = beam_ends.len();
         self.entries.push(SoftEntry {
             beam_ends,
             broken: vec![false; n_beams],
             detached: vec![false; desc.nodes.len()],
+            core_soft_mass: rigid_props.map_or([0.0; 4], |r| r.0),
+            core_rigid_mass: rigid_props.map_or([0.0; 4], |r| r.1),
             first_body,
             particles: desc.nodes.len() as u32,
             first_collider,
@@ -395,6 +451,16 @@ impl SoftHost {
         });
         self.steer.push(0.0);
         self.upload_topology(backend);
+        self.write_body_mode(backend, s);
+        // Rest positions (desc frame), second slot of each particle's rigid pair.
+        let ord = self.entries[s as usize].ordinal_base;
+        for (k, n) in desc.nodes.iter().enumerate() {
+            let p = n.position;
+            backend.write_soft_slots(
+                l.rigid_base + 2 * (ord + k as u32) + 1,
+                &[[p[0].to_bits(), p[1].to_bits(), p[2].to_bits(), 0]],
+            );
+        }
         Ok(SoftHandle(s))
     }
 
@@ -429,6 +495,27 @@ impl SoftHost {
         backend.write_soft_slots(l.body_base + BODY_STRIDE * s, &rec);
     }
 
+    /// Rigid-mode state (spawn only: `soft_mode` owns the mode and quiet count).
+    fn write_body_mode(&self, backend: &mut impl SoftBackend, s: u32) {
+        let e = &self.entries[s as usize];
+        let l = self.capacity.layout();
+        let has_core = u32::from(e.core.is_some());
+        let joints = e.core_joints.end - e.core_joints.start;
+        let rec = [
+            [
+                0,
+                0,
+                has_core
+                    | (joints.min(255) << 8)
+                    | (((self.settings.rigid_quiet * 1000.0) as u32).min(65535) << 16),
+                e.core_joints.start,
+            ],
+            e.core_soft_mass.map(f32::to_bits),
+            e.core_rigid_mass.map(f32::to_bits),
+        ];
+        backend.write_soft_slots(l.body_base + BODY_STRIDE * s + 3, &rec);
+    }
+
     fn write_header(&self, backend: &mut impl SoftBackend) {
         let l = self.capacity.layout();
         let c = self.counts();
@@ -436,9 +523,10 @@ impl SoftHost {
         let flags = u32::from(st.plasticity) * SOFT_PLASTICITY
             | u32::from(st.breaking) * SOFT_BREAKING
             | u32::from(st.sleep_sync) * SOFT_SLEEP_SYNC
-            | u32::from(c.contacts) * SOFT_CONTACTS;
+            | u32::from(c.contacts) * SOFT_CONTACTS
+            | u32::from(st.rigid_mode) * SOFT_RIGID_MODE;
         let list_count: u32 = self.list_len();
-        let header: [Slot; 8] = [
+        let header: [Slot; 9] = [
             [c.bodies, c.beams, c.colors, list_count],
             [l.body_base, l.beam_base, l.list_base, l.adj_base],
             [l.color_base, l.group_base, c.groups + 1, flags],
@@ -446,7 +534,7 @@ impl SoftHost {
                 st.damping_scale.to_bits(),
                 st.beta.to_bits(),
                 st.min_length.to_bits(),
-                0,
+                l.rigid_base,
             ],
             [
                 st.threshold_scale.to_bits(),
@@ -462,6 +550,7 @@ impl SoftHost {
                 st.contact_friction.to_bits(),
                 l.tri_rest_base,
             ],
+            [l.body_color_base, l.body_color_stride, 0, 0],
         ];
         backend.write_soft_slots(0, &header);
     }
@@ -509,6 +598,23 @@ impl SoftHost {
         }
         if !color_slots.is_empty() {
             backend.write_soft_slots(l.color_base, &color_slots);
+        }
+        // Each body's range in every colour list (entries are in body order).
+        let stride = l.body_color_stride as usize;
+        let mut ranges = vec![[0u32; 4]; self.entries.len() * stride];
+        for (c, list) in lists.iter().enumerate() {
+            let base = color_slots[c][0];
+            for (k, entry) in list.iter().enumerate() {
+                let s = (entry[3] & 0xFFFF) as usize;
+                let r = &mut ranges[s * stride + c / 2][2 * (c % 2)..2 * (c % 2) + 2];
+                if r[1] == 0 {
+                    r[0] = base + k as u32;
+                }
+                r[1] += 1;
+            }
+        }
+        if !ranges.is_empty() {
+            backend.write_soft_slots(l.body_color_base, &ranges);
         }
         if !flat.is_empty() {
             backend.write_soft_slots(l.list_base, &flat);
@@ -580,11 +686,27 @@ impl SoftHost {
     /// frame, the desc's node coordinates) gets a frame of three nodes, from the
     /// part `part` when given (so a door's mesh follows only the door's nodes and
     /// leaves with it). See [`SkinBinding`] for the skinning formula.
-    pub fn bind_mesh(&self, h: SoftHandle, vertices: &[Vec3], part: Option<&str>) -> Result<Vec<SkinBinding>, String> {
+    pub fn bind_mesh(
+        &self,
+        h: SoftHandle,
+        vertices: &[Vec3],
+        part: Option<&str>,
+    ) -> Result<Vec<SkinBinding>, String> {
         let e = self.entries.get(h.0 as usize).ok_or("no such soft body")?;
-        let nodes: Vec<Vec3> = e.desc.nodes.iter().map(|n| Vec3::from_array(n.position)).collect();
+        let nodes: Vec<Vec3> = e
+            .desc
+            .nodes
+            .iter()
+            .map(|n| Vec3::from_array(n.position))
+            .collect();
         let pool: Option<Vec<u32>> = match part {
-            Some(name) => Some(e.desc.part(name).ok_or_else(|| format!("no part `{name}`"))?.nodes.clone()),
+            Some(name) => Some(
+                e.desc
+                    .part(name)
+                    .ok_or_else(|| format!("no part `{name}`"))?
+                    .nodes
+                    .clone(),
+            ),
             None => None,
         };
         let opts = crate::flexbody::BindOptions::default();
@@ -594,7 +716,9 @@ impl SoftHost {
             .zip(got)
             .map(|(v, b)| {
                 // Fall back to any nodes, then to the nearest node alone.
-                let b = b.or_else(|| crate::flexbody::bind(std::slice::from_ref(v), &nodes, None, opts)[0]);
+                let b = b.or_else(|| {
+                    crate::flexbody::bind(std::slice::from_ref(v), &nodes, None, opts)[0]
+                });
                 match b {
                     Some(b) => {
                         let [c, x, y] = b.nodes.map(|i| nodes[i as usize]);
@@ -611,9 +735,17 @@ impl SoftHost {
                             .iter()
                             .copied()
                             .chain(0..nodes.len() as u32)
-                            .min_by(|&a, &b| (nodes[a as usize] - *v).length_squared().total_cmp(&(nodes[b as usize] - *v).length_squared()))
+                            .min_by(|&a, &b| {
+                                (nodes[a as usize] - *v)
+                                    .length_squared()
+                                    .total_cmp(&(nodes[b as usize] - *v).length_squared())
+                            })
                             .unwrap_or(0);
-                        SkinBinding { nodes: [e.first_body + c; 3], coords: [0.0; 3], rest_edge: 0.0 }
+                        SkinBinding {
+                            nodes: [e.first_body + c; 3],
+                            coords: [0.0; 3],
+                            rest_edge: 0.0,
+                        }
                     }
                 }
             })
@@ -627,7 +759,9 @@ impl SoftHost {
     pub fn note_breaks(&mut self, breaks: &[BeamBreak]) -> Vec<PieceDetached> {
         let mut touched = Vec::new();
         for b in breaks {
-            let Some(e) = self.entries.get_mut(b.soft_body as usize) else { continue };
+            let Some(e) = self.entries.get_mut(b.soft_body as usize) else {
+                continue;
+            };
             let local = b.beam.wrapping_sub(e.first_beam) as usize;
             if local < e.broken.len() && !e.broken[local] {
                 e.broken[local] = true;
@@ -646,7 +780,9 @@ impl SoftHost {
     /// Replace a body's known broken set from a beam readback (after the event
     /// ring overflowed, or to resynchronise), returning newly detached pieces.
     pub fn sync_broken(&mut self, h: SoftHandle, beams: &[Beam]) -> Vec<PieceDetached> {
-        let Some(e) = self.entries.get_mut(h.0 as usize) else { return Vec::new() };
+        let Some(e) = self.entries.get_mut(h.0 as usize) else {
+            return Vec::new();
+        };
         for (k, b) in beams.iter().enumerate().take(e.broken.len()) {
             e.broken[k] = b.broken();
         }
@@ -684,8 +820,14 @@ impl SoftHost {
             }
             comps.push(nodes);
         }
-        let mass = |c: &Vec<u32>| c.iter().map(|&i| e.masses.get(i as usize).copied().unwrap_or(0.0)).sum::<f32>();
-        let main = (0..comps.len()).max_by(|&a, &b| mass(&comps[a]).total_cmp(&mass(&comps[b]))).unwrap_or(0);
+        let mass = |c: &Vec<u32>| {
+            c.iter()
+                .map(|&i| e.masses.get(i as usize).copied().unwrap_or(0.0))
+                .sum::<f32>()
+        };
+        let main = (0..comps.len())
+            .max_by(|&a, &b| mass(&comps[a]).total_cmp(&mass(&comps[b])))
+            .unwrap_or(0);
         let mut out = Vec::new();
         for (ci, c) in comps.iter().enumerate() {
             if ci == main || c.iter().all(|&i| e.detached[i as usize]) {
@@ -701,10 +843,23 @@ impl SoftHost {
                 .desc
                 .parts
                 .iter()
-                .filter(|p| !p.nodes.is_empty() && p.nodes.iter().filter(|i| nodes.binary_search(i).is_ok()).count() * 2 > p.nodes.len())
+                .filter(|p| {
+                    !p.nodes.is_empty()
+                        && p.nodes
+                            .iter()
+                            .filter(|i| nodes.binary_search(i).is_ok())
+                            .count()
+                            * 2
+                            > p.nodes.len()
+                })
                 .map(|p| p.name.clone())
                 .collect();
-            out.push(PieceDetached { soft_body: h, mass: mass(c), nodes, parts });
+            out.push(PieceDetached {
+                soft_body: h,
+                mass: mass(c),
+                nodes,
+                parts,
+            });
         }
         out
     }
@@ -748,7 +903,10 @@ impl SkinBinding {
         let ex = pos(self.nodes[1]) - c;
         let ey = pos(self.nodes[2]) - c;
         let torn = self.rest_edge > 0.0 && ex.length().max(ey.length()) > 1.8 * self.rest_edge;
-        (c + ex * self.coords[0] + ey * self.coords[1] + ex.cross(ey) * self.coords[2], torn)
+        (
+            c + ex * self.coords[0] + ey * self.coords[1] + ex.cross(ey) * self.coords[2],
+            torn,
+        )
     }
 }
 

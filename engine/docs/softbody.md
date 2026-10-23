@@ -495,6 +495,25 @@ button). A crash-test preset menu sets them for standard tests:
 | `ramp` | `speed` (70) | A ramp under the left wheels only |
 | `drop` | `height` m (8), `pitch` ° nose down (35) | Dropped nose first |
 
+**Camera views** (demo):
+
+* `?cam=` (also the panel's camera menu, and `C` to cycle) picks the view:
+  * `orbit`, free;
+  * `chase`, `front`, `rear`, `left` (port), `right` (starboard) or `top`, around a
+    subject and level with it;
+  * `driver`, the driver's seat;
+  * `mount`, riding on one subject and looking at another, such as from the 18 t
+    truck's cab at the car it is about to hit.
+* `?camTarget=` and `?camFrom=` name the subjects: every car (`car0`…) and the
+  scene's rigid bodies (`18_t_truck`, `parked_truck`, `crusher_block`, `side_ram`).
+* Subject poses are read back every frame and carried forward by their velocity over
+  the readback's lag.
+
+**Scripted events:** in the crusher scene, `liftAt` seconds in, a winch lifts the
+block `liftTo` m and holds it there, to show the wreck. The block is kinematic: its
+record is rewritten each frame with near-infinite mass. The script also runs in
+frame-stepped (`__step`) runs and restarts on reset.
+
 Every vehicle is free (an initial velocity, then physics): it pitches, trips and rolls
 as the impact makes it.
 
@@ -570,8 +589,22 @@ GPU time per phase, 10 cars, 240 Hz × 10 (ms):
 
 Each solver pass waits on the one before, so the cost is per-dispatch latency rather
 than arithmetic. One car's sweep costs 0.135 ms and ten cars' 0.17 ms, so 50 cars cost
-only 1.0 ms more per step than one. Chrome WebGPU runs the yard (3 cars and 3 crates:
-387 particles, 2,190 beams) at 5.2 ms per 240 Hz step.
+only 1.0 ms more per step than one.
+
+Chrome WebGPU (M3 Max), 240 Hz × 10, after the latency fixes in DECISIONS s20.
+`BUDGET=1 node softbody-check.mjs budget_yard_drive budget_traffic20 …` measures it,
+and `BUDGET_SPLIT=1` adds GPU time per kernel (`?gputime`, `world.profileStep()`).
+
+| Scene | Before (ms / step) | After (ms / step) | Live |
+|---|---|---|---|
+| Yard, cars parked (3 cars, 3 crates) | 4.6 | 1.1 | 100% real time |
+| Yard, player driving | — | 2.0–2.7 | 100% real time; 2 steps + render ≈ 6 ms, inside a 120 fps frame |
+| Traffic, 20 cars (most soft, crashing) | 10 | 6–10 | 86–100% real time at 60 fps |
+| Traffic, 100 cars | 12.5 | 7–9.5 | 67% real time |
+
+Traffic still varies run to run with the AI and the crashes. The slowest soft car's
+sweep sets each iteration's time, about 0.2 ms, with `vehicle_iterate`, rigid primal
+and node collision behind it.
 
 ### Accuracy against cost
 
@@ -621,6 +654,53 @@ Negative results (decisions s10 and s11):
 * **A multi-lane particle solve is slower.** Eight lanes per particle with a
   groupshared reduction took 3.0 → 4.85 ms per step for one car.
 
+### Rigid mode
+
+Rigid mode (`SoftSettings::rigid_mode`, on in the demo, `?rigid=0` off) is the design's
+"rigid mode with promotion":
+
+* **Turning rigid.** A soft body with a rigid core that has had no contact and no
+  plastic yield for `rigid_quiet` (0.5 s) rides its core. Every step its particles
+  are placed at the core's pose from their offsets in the core's frame, which are
+  captured each step while the body is soft. The core takes the whole vehicle's
+  mass and inertia, and its joints to the axle nodes are switched off. The particle
+  solve, Chebyshev acceleration and plasticity skip the body.
+* **Turning soft.** The `soft_mode` pass runs once per body each step, after the
+  contact passes and before the solve. The body turns soft in the same step on
+  either trigger:
+  * any contact edge on one of its particles;
+  * its bounds nearing another soft body or an obstacle, with a margin of 0.5 m plus
+    0.15 s of travel.
+* **Readback.** `WgpuSim::read_soft_rigid(h)` and `world.readSoftModes()` report
+  each body's mode.
+
+Measured cost (native, 240 Hz × 10, all cars cruising):
+
+| Cars | Always soft | Rigid mode |
+|---|---|---|
+| 1 | 3.26 ms / step | 2.06 ms / step |
+| 10 | 3.98 | 2.43 |
+| 100 | 4.90 | 2.65 |
+
+In Chrome the yard drops from 5.8 to 4.7 ms per step.
+
+Crashes match within the GPU's run-to-run variation (car–car contacts are not
+deterministic, about ±3 cm). With a 20 m run-up, so the car is rigid when it
+hits:
+
+| Crash | Always soft | Rigid mode |
+|---|---|---|
+| Wall 56 km/h | 0.49 m | 0.50 m |
+| Wall 100 km/h | 0.78 m | 0.78 m |
+| Head-on 60 km/h | 0.50 m | 0.49 m |
+| Pole 60 km/h | 0.01 m | 0.01 m |
+
+`rigid_mode_rides_the_core_while_quiet_and_crashes_like_soft` tests this.
+
+Driving accelerates a little faster in rigid mode: 123 km/h after 8 s, against 110
+soft and 120 for the rigid sedan preset. An under-converged soft body acts as slight
+drag.
+
 Levers in place, all lossless:
 
 * the fused sweep;
@@ -629,7 +709,7 @@ Levers in place, all lossless:
 
 Not implemented yet:
 
-* rigid mode with promotion;
+* skipping the solver iterations' dispatches when every body is rigid;
 * per-island step rates;
 * per-state iteration budgets.
 
