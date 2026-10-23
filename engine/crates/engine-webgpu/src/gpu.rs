@@ -871,6 +871,11 @@ impl WgpuSim {
         self.manifolds_valid = false;
     }
 
+    /// The host's copy of a collider record.
+    pub fn collider(&self, id: u32) -> Collider {
+        self.host_cols[id as usize]
+    }
+
     /// Replace a collider (e.g. swap a fractured chunk's hull or its filter).
     /// Release the old hull's arena reference yourself once nothing uses it.
     pub fn set_collider(&mut self, id: u32, col: Collider) {
@@ -1413,6 +1418,7 @@ impl WgpuSim {
             && !self.wake_pending
             && !vehicles_dirty
             && !self.has_kinematic
+            && self.projectile_count == 0
         {
             self.steps_done += 1;
             self.counted_steps = self.steps_done;
@@ -1565,6 +1571,7 @@ impl WgpuSim {
             && !self.wake_pending
             && !vehicles_dirty
             && !self.has_kinematic
+            && self.projectile_count == 0
         {
             self.steps_done += 1;
             self.counted_steps = self.steps_done;

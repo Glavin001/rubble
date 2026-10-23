@@ -120,6 +120,8 @@ impl WgpuSim {
         }
         self.query_count = queries.len() as u32;
         self.write_character_header();
+        // Answered by the next step, even in a world that is all asleep.
+        self.wake_pending = true;
     }
 
     /// Results of the queries the last step answered (`None`: no hit).

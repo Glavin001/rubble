@@ -302,15 +302,17 @@ pub struct SceneQuery {
     pub half_height: f32,
     pub exclude_body: u32,
     pub mask: u32,
+    /// Walk every collider instead of the grid (the grid walk's oracle).
+    pub full_scan: bool,
 }
 
 impl SceneQuery {
     pub fn ray(origin: [f32; 3], dir: [f32; 3], max_dist: f32) -> Self {
-        Self { origin, dir, max_dist, radius: 0.0, half_height: 0.0, exclude_body: NO_INDEX, mask: 0 }
+        Self { origin, dir, max_dist, radius: 0.0, half_height: 0.0, exclude_body: NO_INDEX, mask: 0, full_scan: false }
     }
     pub fn slots(&self) -> [[u32; 4]; QUERY_STRIDE as usize] {
         let f = |v: f32| v.to_bits();
-        let kind = u32::from(self.half_height > 0.0);
+        let kind = u32::from(self.half_height > 0.0) | (u32::from(self.full_scan) << 8);
         [
             [f(self.origin[0]), f(self.origin[1]), f(self.origin[2]), f(self.max_dist)],
             [f(self.dir[0]), f(self.dir[1]), f(self.dir[2]), f(self.radius)],

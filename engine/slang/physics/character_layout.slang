@@ -47,7 +47,7 @@ static const uint CO_CAST_CUT = 16u;  // the verifying cast found geometry the p
 static const uint QUERY_STRIDE = 5u;
 static const uint Q_IN0 = 0u;  // origin.xyz, maxDist
 static const uint Q_IN1 = 1u;  // dir.xyz, radius (0 = ray, > 0 = sphere / capsule cast)
-static const uint Q_IN2 = 2u;  // uint4(excludeBody, mask, kind (0 ray/sphere, 1 capsule along +Y), asfloat(halfHeight))
+static const uint Q_IN2 = 2u;  // uint4(excludeBody, mask, kind (bit 0 capsule along +Y, bit 8 full scan), asfloat(halfHeight))
 static const uint Q_OUT0 = 3u; // hit point.xyz, distance (< 0: miss)
 static const uint Q_OUT1 = 4u; // normal.xyz, asfloat(collider)
 

@@ -607,7 +607,11 @@ void query_batch(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     f.excludeBody = k.x;
     f.mask = k.y;
     float hh = asfloat(k.w);
-    if (k.z == 1u)
+    // Kind: bit 0 capsule cast; bit 8 walks every collider (the oracle the
+    // grid walk is checked against).
+    bool capsule = (k.z & 1u) != 0u;
+    bool full = charFullScan() || (k.z & 256u) != 0u;
+    if (capsule)
     {
         CapsuleVisitor v;
         v.o = a.xyz; v.d = dir; v.maxT = a.w; v.r = b.w; v.hh = hh;
@@ -617,12 +621,12 @@ void query_batch(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         v.filter = f;
         v.bestT = 1e30;
         v.bestC = NO_INDEX;
-        sceneWalk(lane, live, a.xyz, e, b.w + hh, charFullScan(), v);
+        sceneWalk(lane, live, a.xyz, e, b.w + hh, full, v);
         gsRayT[lane] = v.bestT;
         gsRayC[lane] = v.bestC;
     }
     else
-        rayLaneWalk(lane, live, a.xyz, dir, a.w, b.w, -2.0, 0.0, f, charFullScan());
+        rayLaneWalk(lane, live, a.xyz, dir, a.w, b.w, -2.0, 0.0, f, full);
     rayReduce(lane);
     if (!live || lane != 0u) return;
     uint best = gsRayC[0];
@@ -634,7 +638,7 @@ void query_batch(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     }
     float t;
     float3 n;
-    if (k.z == 1u) shapeCastCollider(capsuleShape(b.w, hh), a.xyz, float4(0, 0, 0, 1), dir, a.w, best, t, n);
+    if (capsule) shapeCastCollider(capsuleShape(b.w, hh), a.xyz, float4(0, 0, 0, 1), dir, a.w, best, t, n);
     else rayCollider(best, a.xyz, dir, b.w, t, n);
     float tHit = max(gsRayT[0], 0.0);
     if (gsRayT[0] < 0.0) n = -dir;
@@ -697,7 +701,7 @@ void projectile_step(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         {
             bool castLive = segLive && hits < maxHits && travelled < len;
             QueryFilter fk = f;
-            rayLaneWalk(lane, castLive, from, dir, len - travelled, rad, -2.0, 0.0, fk, charFullScan());
+            rayLaneWalk(lane, castLive, from, dir, len - travelled, rad, -2.0, 0.0, fk, charFullScan(), 0.0);
             rayReduce(lane);
             float t = gsRayT[0];
             uint ci = gsRayC[0];
@@ -776,7 +780,8 @@ void projectile_step(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             travelled += adv;
             from += dir * adv;
         }
-        x = x1;
+        // A hit's exit can lie past the segment's end: carry on from there.
+        x = travelled > len ? from : x1;
         v = v1;
         if (!alive) break;
     }

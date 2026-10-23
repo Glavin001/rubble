@@ -604,7 +604,7 @@ bool queryAccepts(Collider col, QueryFilter f)
 
 struct RayVisitor : IColliderVisitor
 {
-    float3 o; float3 d; float maxT; float rad; float coneCos; float lmin;
+    float3 o; float3 d; float maxT; float minT; float rad; float coneCos; float lmin;
     float3 mn; float3 mx;
     QueryFilter filter;
     float bestT; uint bestC;
@@ -615,7 +615,7 @@ struct RayVisitor : IColliderVisitor
         if (col.shape != SHAPE_PLANE && !segmentHitsAabb(mn, mx, gAabbs[HOST_S(1) + ci])) return;
         float t;
         float3 n;
-        if (rayCollider(ci, o, d, rad, t, n) && t <= maxT && t < bestT && tyreAccepts(o, d, t, n, rad, coneCos, lmin))
+        if (rayCollider(ci, o, d, rad, t, n) && t <= maxT && t >= minT && t < bestT && tyreAccepts(o, d, t, n, rad, coneCos, lmin))
         {
             bestT = t;
             bestC = ci;
@@ -625,11 +625,13 @@ struct RayVisitor : IColliderVisitor
 
 // A ray (rad 0) or sphere cast through the grid walk, filtered; lanes write
 // their best hit to gsRayT / gsRayC (rayReduce then finds the nearest).
+// minT: hits nearer than this are ignored (projectiles: 0, so a cast leaving a
+// collider it is inside does not hit it again; wheels: −∞, the entry behind).
 void rayLaneWalk(uint lane, bool live, float3 o, float3 d, float maxT, float rad, float coneCos, float lmin,
-    QueryFilter filter, bool fullScan)
+    QueryFilter filter, bool fullScan, float minT = -1e30)
 {
     RayVisitor v;
-    v.o = o; v.d = d; v.maxT = maxT; v.rad = rad; v.coneCos = coneCos; v.lmin = lmin;
+    v.o = o; v.d = d; v.maxT = maxT; v.minT = minT; v.rad = rad; v.coneCos = coneCos; v.lmin = lmin;
     float3 e = o + d * maxT;
     v.mn = min(o, e) - rad;
     v.mx = max(o, e) + rad;
