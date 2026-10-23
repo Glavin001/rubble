@@ -7,8 +7,9 @@ Chrome WebGPU from one Slang source (`slang/kernels/vehicle_step.slang`).
 cd engine
 cargo run -p engine-webgpu --release --bin wgsl_export     # WGSL + vehicle presets + engine-vehicle wasm (wasm-pack)
 python3 -m http.server 8791 --directory crates/engine-webgpu
-# Chrome → http://127.0.0.1:8791/vehicle.html            (?scene=playground|destruction|traffic|bridge&preset=sedan)
+# Chrome → http://127.0.0.1:8791/vehicle.html            (?scene=playground|destruction|buggies|traffic|bridge&preset=sedan)
 cargo test -p engine-webgpu --test vehicle                 # physical envelopes (wgpu)
+cargo test -p engine-webgpu --test vehicle_mounts          # mounts that break under load (wgpu)
 cargo test -p engine-metal --test vehicle_parity           # Metal behaviour + Metal↔wgpu parity
 node --test crates/engine-webgpu/tests/vehicle_layout.test.mjs   # JS wrapper over the wasm host
 ```
@@ -214,8 +215,86 @@ A vehicle is built from **parts** (collider groups on the chassis) with roles:
 * `snapshot` / `restore` (`WgpuSim`) — copies every GPU buffer plus host state; replay
   from a snapshot is bit-identical on the same device (rollback netcode, debugging).
 
-`MountDesc { break_force, break_torque }` is reserved on parts; no automatic fracture
-reads it yet.
+### Mounts that break under load
+
+Every part except the root (part 0) and every wheel has a `MountDesc { break_force,
+break_torque, anchor }`. A limit ≤ 0 is unbreakable (the default: every preset but
+`dune_buggy` keeps its parts until something severs them).
+
+`vehicle_loads` runs once per step after the final dual and `extract_velocity_sleep`.
+It uses one thread per vehicle and walks the chassis's contacts in its sorted CSR order,
+so the sums are deterministic and use no float atomics. A part is rigid with the chassis,
+so its mount carries what the part's own motion needs minus what its contacts supply:
+
+    F = m (a_p − g) − Σ F_contact
+    τ_anchor = I α + ω × I ω − (anchor − com) × F − Σ (x_i − com) × F_i
+
+* `a_p` comes from the chassis's linear and angular acceleration over the step and the
+  part's centre of mass.
+* The contact forces are the final λ of the contacts on the part's colliders (n = A→B; B
+  gets −λ).
+* A wheel's mount carries its tyre force, its shell contacts and its own inertia. The
+  moment about the spin axis is left out (the drive and brakes react it).
+* `anchor` defaults to the part's centre of mass, or a wheel's hardpoint.
+
+Past either limit, the part's (or wheel's) bit is set in `V_BRK` and an
+`EVENT_MOUNT_BREAK` record `[6, vehicle << 8 | is_wheel << 7 | index, force, torque]`
+goes on the shared event ring. The next step's `vehicle_input` severs it exactly as
+`detach_part` / `detach_wheel` would. The break is decided on the converged step and the
+split happens before the next step solves: forward-only, the same rule joints break by.
+
+Readouts:
+
+* `VehicleState::parts_broken` / `wheels_broken`: latched masks.
+* `VehicleEvent::PartBroken` / `WheelBroken`.
+* `read_mount_loads` / `WgpuSim::vehicle_mount_loads`: each mount's last force and moment
+  against its limits, and the peak ratio since spawn.
+* `poll_mount_breaks` (Rust); `world.pollMountBreaks` / `VehicleHost.readMountLoads` (JS).
+
+Contacts are read as each host stores them:
+
+* Canonical and compact hosts (the browser, Metal) publish final λ to `gContacts`.
+* The persistent-contact host compiles `vehicle_loads_persistent`
+  (`slang/kernels/vehicle_step_persistent.slang`), which reads its solver pairs and the
+  contacts' cold records.
+
+The check runs only for vehicles flagged `VF_BREAKABLE` (some finite limit) and awake.
+A sleeping vehicle carries its resting load and is skipped.
+
+One level of mounting: every part hangs off the chassis. A headlamp rated against the
+nose stays on the car when the nose comes off.
+
+**Discrete impacts.** A projectile that moves more than a thin part's depth in one step
+lands its blow on whatever is behind it (`tests/vehicle_mounts.rs` uses impacts under
+0.2 m per step). A 45 m/s cannonball goes through a 3 cm lamp bracket and meets the cage.
+
+### The dune buggy
+
+`dune_buggy` is vibe-land's sand rail (`engine/scenes/dune-buggy`, baked from its recipe).
+
+* Its 17 parts carry the recipe's masses.
+* Each part's mount is rated from the measured joints between it and the frame. Each
+  joint gives interface area × the weaker material's fatal strength, bounded by the
+  smaller member's section (vibe-land `real-joint-capacity.mjs`).
+* A wheel's mount is its suspension arms, tie rod and damper where they meet the frame.
+
+`vehicle.html?scene=buggies` draws it with the recipe's full mesh and a posed suspension
+(`buggy-render.mjs`, `buggy-rig.mjs`). `?strength=0.5` (the *Mounts* menu) scales every
+limit.
+
+`&build=hybrid` (the *Frame* menu) swaps in the hybrid buggy (`docs/softbody.md`, "The
+hybrid dune buggy"):
+
+* its tube frame is node–beam and bends;
+* its bumpers and nose tear off as pieces;
+* its seats, tank, lamps and mirrors are rigid bodies on breakable joints;
+* its engine, gearbox and steering column keep their mounts on the rigid core.
+
+At the rated strength (native wgpu, 10 iterations, `dune_buggy_crash_probe`):
+
+* Two buggies meeting head-on tear off each other's front bumper, nose and headlamps.
+* A side hit by a 400 kg ball at 25 m/s snaps the seat it strikes.
+* Jumps and full-throttle driving stay under 11% of every limit.
 
 ## API
 
@@ -242,14 +321,14 @@ Presets (`engine_vehicle::presets`, exported to `generated/vehicle_presets.json`
 `jolt_default`, `sedan`, `destructible_sedan`, `sports`, `monster_truck`,
 `six_wheel_truck`, `kart`, `tank` (two 7-wheel tracks, Jolt `TankTest` drivetrain),
 `motorcycle` (Jolt `MotorcycleTest`: 30° caster fork, chain-driven rear wheel, lean
-controller).
+controller), `dune_buggy` (vibe-land's sand rail; parts and wheels on breakable mounts).
 
 ## Configuration
 
 | Group | Options |
 |---|---|
-| Chassis | parts (shape, position, rotation, material, mass, role), inertia override, auto centre of mass, centre-of-mass offset, gravity scale, can sleep, spare wheels |
-| Wheel | position, suspension dir, steer axis (caster/kingpin), forward (toe), up (camber, visual), radius, width, mass, inertia, angular damping, suspension force point, rim spheres/material of the free wheel |
+| Chassis | parts (shape, position, rotation, material, mass, role, mount limits), inertia override, auto centre of mass, centre-of-mass offset, gravity scale, can sleep, spare wheels |
+| Wheel | position, suspension dir, steer axis (caster/kingpin), forward (toe), up (camber, visual), radius, width, mass, inertia, angular damping, suspension force point, rim spheres/material of the free wheel, mount limits |
 | Suspension | min/max length, preload, spring (frequency+ζ or k+c), bump stop (spring / rigid / none, max force), roll influence |
 | Tyre | longitudinal μ(slip ratio) and lateral μ(slip angle °) curves, μ scales, friction model (ellipse / box), rolling resistance; surface friction combines as √(tyre·surface) |
 | Steering | max steer per wheel, Ackermann strength, wheelbase/track (auto), slew rate, steer-vs-speed curve |
@@ -276,5 +355,5 @@ controller).
   exact; the Hessian is block-diagonal).
 * A track belt's speed is set by the sprocket (one-way). Friction the pod meets acts on
   the hull but not back on the track spin, so climbing does not load the engine.
-* Not yet: cylinder casts, an inactive (sleeping) query rate, and automatic load-based
-  fracture (its inputs already exist via `step_loads`).
+* Mounts are one level deep (every part on the chassis) and the root part never breaks.
+* Not yet: cylinder casts, an inactive (sleeping) query rate.

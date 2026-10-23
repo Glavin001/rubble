@@ -1,0 +1,14 @@
+{
+  "name": "rubble-dune-buggy",
+  "private": true,
+  "type": "module",
+  "description": "vibe-land's dune buggy, baked into a Rubble vehicle preset and render mesh",
+  "scripts": {
+    "bake:mesh": "bun run bake-mesh.mjs",
+    "bake:physics": "bun run bake-physics.mjs"
+  },
+  "dependencies": {
+    "manifold-3d": "3.5.1",
+    "three": "0.170.0"
+  }
+}

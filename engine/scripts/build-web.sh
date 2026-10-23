@@ -177,6 +177,8 @@ vibe_city() { (cd "$VIBE" && "${BUN[@]}" install --frozen-lockfile && "${BUN[@]}
 # the packages bun.lock pins.
 vibe_key="$( (cd "$VIBE" && git ls-files -z | sort -z | xargs -0 cat; "${BUN[@]}" --version) | key)"
 cached vibe-city "$vibe_key" "$WEB/generated/vibe-city" vibe_city
+echo "==> Dune buggy render mesh (engine/scenes/dune-buggy, bun)"
+(cd "$ENGINE/scenes/dune-buggy" && "${BUN[@]}" install --frozen-lockfile && "${BUN[@]}" run bake-mesh.mjs)
 
 echo "==> Assembling $OUT"
 rm -rf "$OUT"

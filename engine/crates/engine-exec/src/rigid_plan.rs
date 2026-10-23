@@ -171,6 +171,8 @@ pub fn resolve_entry(name: &str, persistent: bool) -> &str {
         "convex_classify" => "convex_classify_persistent",
         "convex_manifold" => "convex_manifold_persistent",
         "reuse_all_manifolds" => "reuse_all_manifolds_persistent",
+        // The one vehicle kernel that reads contacts (vehicle_step_persistent.slang).
+        "vehicle_loads" => "vehicle_loads_persistent",
         _ => name,
     }
 }
@@ -440,6 +442,8 @@ pub fn encode_step(
             e.d("soft_collide_nodes", u64::from(i.soft.particles.max(1)));
             e.d("soft_collide_tris", u64::from(i.soft.triangles.max(1)));
         }
+        // Rigid mode: promote / demote before the solve (soft_step.slang).
+        e.d("soft_mode", u64::from(i.soft.bodies.max(1)));
         e.phase("soft_begin");
     }
 
@@ -477,7 +481,12 @@ pub fn encode_step(
                 // Chebyshev pass index across every sweep of the step (ω has
                 // converged long before the pass-parameter table runs out).
                 let pass = (u32::from(iter) * sweeps + k).min(95);
-                if i.soft.max_color <= SOFT_FUSED_MAX_COLOR {
+                if i.soft.bodies > 1 {
+                    // One workgroup per soft body (`soft_primal_bodies`): the sweep
+                    // of every body at once, one dispatch at any vehicle count.
+                    // Hosts size workgroups as threads / 64.
+                    e.dp("soft_primal_bodies", u64::from(i.soft.bodies) * 64, pass);
+                } else if i.soft.max_color <= SOFT_FUSED_MAX_COLOR {
                     // Every colour fits one workgroup pass: the whole sweep (and the
                     // Chebyshev step) in one dispatch, same order. Exactly one 256-lane
                     // workgroup: hosts size dispatches as threads / 64, so ask for 64.
@@ -513,6 +522,9 @@ pub fn encode_step(
     }
     e.d("extract_velocity_sleep", n_bodies);
     if vehicles {
+        // Mount loads from the final λ and solved velocities; overloaded parts
+        // and wheels are severed by the next step's vehicle_input.
+        e.d("vehicle_loads", u64::from(i.vehicle_count));
         e.d("vehicle_post", u64::from(i.vehicle_count));
     }
     if soft {
@@ -543,6 +555,7 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "vehicle_link",
     "vehicle_prepare",
     "vehicle_iterate",
+    "vehicle_loads_persistent",
     "vehicle_post",
     "build_aabbs",
     "joint_hash_clear",
@@ -613,7 +626,9 @@ pub const SOFT_ENTRIES: &[&str] = &[
     "soft_collide_tris",
     "soft_primal",
     "soft_primal_fused",
+    "soft_primal_bodies",
     "soft_chebyshev",
+    "soft_mode",
     "soft_dual",
     "soft_plastic",
     "soft_break_groups",
@@ -628,11 +643,15 @@ pub const VEHICLE_ENTRIES: &[&str] = &[
     "vehicle_link",
     "vehicle_prepare",
     "vehicle_iterate",
+    "vehicle_loads",
     "vehicle_post",
     "raycast_batch",
 ];
 
 pub fn kernel_source(entry: &str) -> &'static str {
+    if entry == "vehicle_loads_persistent" {
+        return "vehicle_step_persistent.slang";
+    }
     if VEHICLE_ENTRIES.contains(&entry) {
         return "vehicle_step.slang";
     }
@@ -1087,7 +1106,7 @@ mod tests {
     fn soft_passes_are_planned_in_order() {
         let mut i = inputs(10, 0);
         i.soft = SoftCounts {
-            bodies: 2,
+            bodies: 1,
             beams: 100,
             colors: 5,
             max_color: 30,
@@ -1141,6 +1160,25 @@ mod tests {
             })
             .count();
         assert_eq!(fused, 2 * i.iterations as usize, "two sweeps per iteration");
+        // Several bodies: one workgroup per body, one dispatch per sweep.
+        let mut many = i;
+        many.soft.bodies = 20;
+        many.soft.max_color = 20 * SOFT_FUSED_MAX_COLOR;
+        let per_body: Vec<_> = encode_step(&fast(), &many, false, true)
+            .into_iter()
+            .filter_map(|c| match c {
+                Cmd::Dispatch {
+                    kernel: k @ ("soft_primal_bodies" | "soft_primal" | "soft_primal_fused"),
+                    threads,
+                    ..
+                } => Some((k, threads)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(per_body.len(), i.iterations as usize);
+        assert!(per_body
+            .iter()
+            .all(|&(k, t)| k == "soft_primal_bodies" && t == 20 * 64));
         assert!(
             at("soft_plastic") < at("soft_break_groups")
                 && at("soft_break_groups") < at("extract_velocity_sleep")

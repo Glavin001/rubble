@@ -152,6 +152,8 @@ pub struct WgpuSim {
     events_seen: u32,
     /// Event ring read cursor (`poll_beam_breaks`).
     beam_events_seen: u32,
+    /// Event ring read cursor (`poll_mount_breaks`).
+    mount_events_seen: u32,
 }
 
 /// Must agree with Slang dispatchIndex: 2^21 threads per row, with no truncation.
@@ -250,6 +252,7 @@ fn persistent_entry(name: &str) -> &str {
         "convex_classify" => "convex_classify_persistent",
         "convex_manifold" => "convex_manifold_persistent",
         "reuse_all_manifolds" => "reuse_all_manifolds_persistent",
+        "vehicle_loads" => "vehicle_loads_persistent",
         _ => name,
     }
 }
@@ -639,6 +642,7 @@ impl WgpuSim {
             soft: None,
             events_seen: 0,
             beam_events_seen: 0,
+            mount_events_seen: 0,
         };
         // Kernel fixtures in the unit tests set the modes they exercise on top
         // of the pre-P0 controls; integration tests run the shipped defaults.
@@ -721,6 +725,9 @@ impl WgpuSim {
             self.host_bodies.extend_from_slice(bodies);
             self.body_count += count;
             self.manifolds_valid = false;
+            // A body added to a world that fell asleep must still step: the
+            // all-asleep skip only knows the last step's awake count.
+            self.wake_pending = true;
         }
         start..self.body_count
     }
@@ -2166,6 +2173,26 @@ impl WgpuSim {
         out
     }
 
+    /// Vehicle part / wheel mounts that broke since the last call (event ring).
+    pub fn poll_mount_breaks(&mut self) -> Vec<MountBreak> {
+        let words: Vec<u32> = self.read_buffer_range(
+            21,
+            u64::from(EVENT_RING_BASE) * 4,
+            (4 + 4 * EVENT_RING_CAPACITY) as usize,
+        );
+        let mut out = Vec::new();
+        let lost = decode_mount_breaks(&words, &mut self.mount_events_seen, &mut out);
+        if lost > 0 {
+            eprintln!("event ring overflow: {lost} mount events lost");
+        }
+        out
+    }
+
+    /// What each part's and wheel's mount carried on the last step (`vehicle_loads`).
+    pub fn vehicle_mount_loads(&self, v: VehicleHandle) -> Vec<engine_vehicle::MountLoad> {
+        self.vehicle_host().read_mount_loads(self, v)
+    }
+
     /// Soft-body beams that broke since the last call (event ring readback).
     /// Beam breaks since the last poll. Prefer [`Self::poll_soft_events`], which
     /// also reports the pieces they cut loose; use one or the other (both read
@@ -2209,7 +2236,12 @@ impl WgpuSim {
             (4 + 4 * EVENT_RING_CAPACITY) as usize,
         );
         let mut breaks = Vec::new();
-        let lost = engine_softbody::decode_beam_breaks(&words, &mut self.beam_events_seen, EVENT_RING_CAPACITY, &mut breaks);
+        let lost = engine_softbody::decode_beam_breaks(
+            &words,
+            &mut self.beam_events_seen,
+            EVENT_RING_CAPACITY,
+            &mut breaks,
+        );
         let mut pieces = Vec::new();
         if self.soft.is_some() {
             if lost > 0 {
@@ -2223,15 +2255,39 @@ impl WgpuSim {
                 pieces = self.soft.as_mut().unwrap().note_breaks(&breaks);
             }
         }
-        SoftEvents { breaks, pieces, lost }
+        SoftEvents {
+            breaks,
+            pieces,
+            lost,
+        }
+    }
+
+    /// Whether soft body `h` is in rigid mode right now (`SoftSettings::rigid_mode`):
+    /// riding its core with the particle solve skipped.
+    pub fn read_soft_rigid(&self, h: SoftHandle) -> bool {
+        let l = self.soft_host().capacity.layout();
+        let slot = l.body_base + engine_softbody::BODY_STRIDE * h.0 + 3;
+        let w: Vec<u32> = self.read_buffer_range(32, u64::from(slot) * 16, 4);
+        w[0] == 1
     }
 
     /// A soft body's damage: beams bent and broken, plastic work, and the
     /// per-node deformation from its rest shape (rigid motion removed).
     pub fn read_soft_damage(&self, h: SoftHandle) -> engine_softbody::SoftDamage {
         let beams = self.read_soft_beams(h);
-        let rest: Vec<glam::Vec3> = self.soft_host().entry(h).desc.nodes.iter().map(|n| glam::Vec3::from_array(n.position)).collect();
-        let now: Vec<glam::Vec3> = self.read_soft_particles(h).iter().map(|b| glam::Vec3::from_array(b.position)).collect();
+        let rest: Vec<glam::Vec3> = self
+            .soft_host()
+            .entry(h)
+            .desc
+            .nodes
+            .iter()
+            .map(|n| glam::Vec3::from_array(n.position))
+            .collect();
+        let now: Vec<glam::Vec3> = self
+            .read_soft_particles(h)
+            .iter()
+            .map(|b| glam::Vec3::from_array(b.position))
+            .collect();
         let detached = self.soft_host().entry(h).detached.clone();
         engine_softbody::damage_summary(&beams, Some((&rest, &now)), Some(&detached))
     }

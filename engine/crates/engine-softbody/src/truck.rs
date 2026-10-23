@@ -531,7 +531,9 @@ impl Parser {
                 if gears.len() > 7 {
                     let n = gears.len();
                     let picked: Vec<f32> = (0..7).map(|k| gears[(k * (n - 1) + 3) / 6]).collect();
-                    self.warn(format!("{n} forward gears: Rubble's gearbox holds 7 with reverse, kept {picked:?}"));
+                    self.warn(format!(
+                        "{n} forward gears: Rubble's gearbox holds 7 with reverse, kept {picked:?}"
+                    ));
                     gears = picked;
                 }
                 self.out.engine = Some(SoftEngine {
@@ -551,7 +553,8 @@ impl Parser {
             Section::Brakes => self.out.brake_force = Some(f(t, 0, 30000.0)),
             Section::Cameras => {
                 if t.len() >= 3 {
-                    self.cameras.push((self.line_no, t[..3].iter().map(|x| x.to_string()).collect()));
+                    self.cameras
+                        .push((self.line_no, t[..3].iter().map(|x| x.to_string()).collect()));
                 }
             }
             Section::Cinecam => {
@@ -823,7 +826,10 @@ pub fn parse_truck(src: &str) -> TruckFile {
     }
     for (line, t) in std::mem::take(&mut p.cameras) {
         p.line_no = line;
-        let (Some(center), Some(back), Some(left)) = (p.node(&t[0]), p.node(&t[1]), p.node(&t[2])) else { continue };
+        let (Some(center), Some(back), Some(left)) = (p.node(&t[0]), p.node(&t[1]), p.node(&t[2]))
+        else {
+            continue;
+        };
         if p.out.cameras.is_none() {
             p.out.cameras = Some(RefNodes { center, back, left });
         }
@@ -940,7 +946,10 @@ fn lower(file: TruckFile) -> SoftVehicleDesc {
         let hub = 0.5 * (p(w.node1) + p(w.node2));
         // The wheel's nodes and their beam neighbours (steering linkages are often one
         // beam away from the axle, as on the Agora bus).
-        let mut ends: Vec<u32> = [Some(w.node1), Some(w.node2), w.arm].into_iter().flatten().collect();
+        let mut ends: Vec<u32> = [Some(w.node1), Some(w.node2), w.arm]
+            .into_iter()
+            .flatten()
+            .collect();
         let direct = ends.clone();
         for b in desc.beams.iter().filter(|b| b.kind != BeamKind::Hydro) {
             if direct.contains(&b.a) && !ends.contains(&b.b) {
@@ -949,12 +958,22 @@ fn lower(file: TruckFile) -> SoftVehicleDesc {
                 ends.push(b.a);
             }
         }
-        for b in desc.beams.iter().filter(|b| b.kind == BeamKind::Hydro && b.hydro_factor != 0.0) {
-            let Some(&end) = ends.iter().find(|&&e| b.a == e || b.b == e) else { continue };
+        for b in desc
+            .beams
+            .iter()
+            .filter(|b| b.kind == BeamKind::Hydro && b.hydro_factor != 0.0)
+        {
+            let Some(&end) = ends.iter().find(|&&e| b.a == e || b.b == e) else {
+                continue;
+            };
             let lever = (p(end) - hub).length().max(0.2);
             let travel = (p(b.a) - p(b.b)).length() * b.hydro_factor.abs();
             steerable = true;
-            max_steer = max_steer.max((travel / lever).atan().clamp(10f32.to_radians(), 45f32.to_radians()));
+            max_steer = max_steer.max(
+                (travel / lever)
+                    .atan()
+                    .clamp(10f32.to_radians(), 45f32.to_radians()),
+            );
         }
         desc.wheels.push(SoftWheel {
             node1: w.node1,
@@ -1085,9 +1104,16 @@ wheels
 end
 ";
         let d = load_truck(src);
-        assert!(d.warnings.iter().all(|w| !w.contains("unknown node")), "{:?}", d.warnings);
+        assert!(
+            d.warnings.iter().all(|w| !w.contains("unknown node")),
+            "{:?}",
+            d.warnings
+        );
         assert!(d.refs.is_some());
-        assert!(d.wheels[0].steerable, "hydro on the axle node steers the wheel");
+        assert!(
+            d.wheels[0].steerable,
+            "hydro on the axle node steers the wheel"
+        );
     }
 
     #[test]

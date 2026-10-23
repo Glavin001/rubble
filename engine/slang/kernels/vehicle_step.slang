@@ -743,12 +743,14 @@ void vehicle_input(uint3 tid : SV_DispatchThreadID)
     float dt = p.dt;
 
     // --- severing requests (applied once; masks are latched in V_D4) ---
+    // Host requests, plus mounts vehicle_loads found overloaded last step.
     uint4 applied = VU(vr + V_D4);
     uint4 in1 = VU(vr + V_IN1);
     uint4 in3 = VU(vr + V_IN3);
+    uint4 brk = VU(vr + V_BRK);
     bool changed = false;
-    uint newDetach = in1.z & ~applied.x;
-    uint newDisable = in1.w & ~applied.y & ~in1.z;
+    uint newDetach = (in1.z | brk.y) & ~applied.x;
+    uint newDisable = in1.w & ~applied.y & ~(in1.z | brk.y);
     for (uint wi = 0u; wi < cfg.z; wi++)
     {
         uint bit = 1u << wi;
@@ -758,8 +760,8 @@ void vehicle_input(uint3 tid : SV_DispatchThreadID)
     applied.x |= newDetach;
     applied.y |= newDisable;
     uint4 pool2 = VU(vr + V_POOL2);
-    uint newPartDetach = in3.x & ~applied.z;
-    uint newPartDisable = in3.y & ~applied.w & ~in3.x;
+    uint newPartDetach = (in3.x | brk.x) & ~applied.z;
+    uint newPartDisable = in3.y & ~applied.w & ~(in3.x | brk.x);
     for (uint pi = 0u; pi < pool2.y && pi < 32u; pi++)
     {
         uint bit = 1u << pi;
@@ -769,6 +771,11 @@ void vehicle_input(uint3 tid : SV_DispatchThreadID)
     applied.z |= newPartDetach;
     applied.w |= newPartDisable;
     VSetU(vr + V_D4, applied);
+    if ((brk.x | brk.y) != 0u)
+    {
+        VSetU(vr + V_BRK, uint4(0u, 0u, brk.z | brk.x, brk.w | brk.y));
+        changed = true;
+    }
 
     // --- wheels attached at runtime by the host (spare slots) ---
     for (uint wi = 0u; wi < cfg.z; wi++)
@@ -1531,7 +1538,8 @@ void groundClear(uint wheelSlot)
 
 // Assemble every wheel row at chassis displacement (dl, da) from x⁻.
 // When dual is set, first update multipliers/penalties at this iterate.
-void assembleVehicle(uint v, uint vr, uint4 cfg, BodyState c, float3 dl, float3 da,
+// N: per-wheel scratch size (≥ the vehicle's wheels; see assembleVehicle).
+void assembleVehicleN<let N : uint>(uint v, uint vr, uint4 cfg, BodyState c, float3 dl, float3 da,
     bool dual, out Mat6 H, out Vec6 g)
 {
     H = mat6Zero();
@@ -1539,15 +1547,15 @@ void assembleVehicle(uint v, uint vr, uint4 cfg, BodyState c, float3 dl, float3 
     AvbdParams p = PARAMS;
     float alphaStab = 1.0 - p.alpha;
     float3 upW = quatRotate(c.initialRot, vehicleUpLocal(vr));
-    uint nW = min(cfg.z, MAX_VEHICLE_WHEELS);
+    uint nW = min(cfg.z, N);
 
     // Ground blocks are rebuilt with the chassis block, at the same iterate.
     for (uint wi = 0u; wi < nW; wi++)
         if (wheelGround(wheelRec(cfg.y + wi)) != NO_INDEX) groundClear(cfg.y + wi);
 
     // Pass 1: suspension / bump stop.
-    float Lw[MAX_VEHICLE_WHEELS];
-    float FnW[MAX_VEHICLE_WHEELS];
+    float Lw[N];
+    float FnW[N];
     uint contacts = 0u;
     for (uint wi = 0u; wi < nW; wi++)
     {
@@ -1654,19 +1662,19 @@ void assembleVehicle(uint v, uint vr, uint4 cfg, BodyState c, float3 dl, float3 
         float4 k2Lead = VD(lr + W_K2);
         bool servo = yv.w > 0.0;
 
-        uint mWheel[MAX_VEHICLE_WHEELS];
-        float mR[MAX_VEHICLE_WHEELS];
-        float mCL0[MAX_VEHICLE_WHEELS];
-        float mCT[MAX_VEHICLE_WHEELS];
-        float mKL[MAX_VEHICLE_WHEELS];
-        float mLamL[MAX_VEHICLE_WHEELS];
-        float mAL[MAX_VEHICLE_WHEELS];
-        float mAT[MAX_VEHICLE_WHEELS];
-        float mFT[MAX_VEHICLE_WHEELS];
-        bool mClampT[MAX_VEHICLE_WHEELS];
-        bool mContact[MAX_VEHICLE_WHEELS];
-        bool mClampL[MAX_VEHICLE_WHEELS];
-        float mFL[MAX_VEHICLE_WHEELS];
+        uint mWheel[N];
+        float mR[N];
+        float mCL0[N];
+        float mCT[N];
+        float mKL[N];
+        float mLamL[N];
+        float mAL[N];
+        float mAT[N];
+        float mFT[N];
+        bool mClampT[N];
+        bool mContact[N];
+        bool mClampL[N];
+        float mFL[N];
         uint nm = 0u;
         float rAsum = 0.0;
         for (uint wi = 0u; wi < nW; wi++)
@@ -1994,6 +2002,16 @@ void assembleVehicle(uint v, uint vr, uint4 cfg, BodyState c, float3 dl, float3 
     }
 }
 
+// Per-wheel scratch sized to the vehicle: thread-private arrays live in memory on
+// GPUs, and the spin solve walks them every Newton step, so a car pays for 4
+// wheels, not MAX_VEHICLE_WHEELS (identical arithmetic either way).
+void assembleVehicle(uint v, uint vr, uint4 cfg, BodyState c, float3 dl, float3 da,
+    bool dual, out Mat6 H, out Vec6 g)
+{
+    if (cfg.z <= 4u) assembleVehicleN<4>(v, vr, cfg, c, dl, da, dual, H, g);
+    else assembleVehicleN<MAX_VEHICLE_WHEELS>(v, vr, cfg, c, dl, da, dual, H, g);
+}
+
 void writeVehicleBlock(uint at, Mat6 H, Vec6 g, bool active)
 {
     float f[32];
@@ -2166,6 +2184,9 @@ void vehicle_prepare(uint3 tid : SV_DispatchThreadID)
         writeVehicleBlock(at, H0, g0, false);
         return;
     }
+    // Step-start velocity for vehicle_loads (BODY_PREV's fields are sleep scratch).
+    VSet(vr + V_V0, float4(c.linearVel, 0.0));
+    VSet(vr + V_W0, float4(c.angularVel, 0.0));
     AvbdParams p = PARAMS;
     float dt = p.dt;
     float4 q0 = c.initialRot;
@@ -2393,6 +2414,186 @@ void vehicle_iterate(uint3 tid : SV_DispatchThreadID)
     writeVehicleBlock(vehicleAabbBlock(v), H, g, true);
     VSet(vr + V_REFP, float4(c.position, VD(vr + V_REFP).w));
     VSet(vr + V_REFQ, c.orientation);
+}
+
+// ---------------------------------------------------------------------------
+// vehicle_loads: what each part's / wheel's mount carried this step
+// ---------------------------------------------------------------------------
+// After the final dual (λ = this step's converged contact forces) and
+// extract_velocity_sleep (the solved velocities). A part is rigid with the
+// chassis, so the wrench through its mount is what the part's own motion needs
+// minus what its contacts supply: F = m·(a_p − g) − ΣF_contact, and the moment
+// about the mount anchor likewise. A wheel's mount carries its tyre force and
+// its shell contacts. Past a limit the part (wheel) is flagged in V_BRK and
+// vehicle_input severs it before the next step solves: forward-only, as joints
+// break on the final dual and leave the next step's solve.
+//
+// One thread per vehicle walks the chassis's CSR row in its sorted order, so
+// the sums are deterministic (no float atomics). Contacts come through
+// READ_CONTACT: canonical and compact hosts publish final λ to gContacts; the
+// persistent host compiles vehicle_loads_persistent (vehicle_step_persistent.slang).
+static const uint EVENT_MOUNT_BREAK = 6u;
+static const uint MAX_VEHICLE_PARTS = 32u;
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void vehicle_loads(uint3 tid : SV_DispatchThreadID)
+{
+    uint v = dispatchIndex(tid);
+    if (v >= vehicleCount()) return;
+    uint vr = vehRec(v);
+    uint4 cfg = VU(vr + V_CFG);
+    if ((cfg.w & (VF_ENABLED | VF_BREAKABLE)) != (VF_ENABLED | VF_BREAKABLE)) return;
+    // A sleeping (inactive) vehicle carries its resting loads: nothing new to check.
+    if ((VU(vr + V_D3).y & VS_ACTIVE) == 0u) return;
+    uint chassis = cfg.x;
+    BodyState c = gBodies[chassis];
+    AvbdParams p = PARAMS;
+    float dt = p.dt;
+    float4 qi = quatConjugate(c.orientation);
+    uint4 pool2 = VU(vr + V_POOL2);
+    uint nP = min(pool2.y, MAX_VEHICLE_PARTS);
+    uint nW = min(cfg.z, MAX_VEHICLE_WHEELS);
+    // Chassis-local contact force and moment (about the origin) per part / wheel shell.
+    float3 partF[MAX_VEHICLE_PARTS], partM[MAX_VEHICLE_PARTS];
+    float3 wheelF[MAX_VEHICLE_WHEELS], wheelM[MAX_VEHICLE_WHEELS];
+    for (uint k = 0u; k < MAX_VEHICLE_PARTS; k++) { partF[k] = float3(0, 0, 0); partM[k] = float3(0, 0, 0); }
+    for (uint k = 0u; k < MAX_VEHICLE_WHEELS; k++) { wheelF[k] = float3(0, 0, 0); wheelM[k] = float3(0, 0, 0); }
+
+    // ---- contacts on the chassis (final λ), in its CSR order ----
+    uint nJ = gCounters[0].jointCount;
+    uint lo = SOLVE_INDEX(chassis);
+    uint hi = SOLVE_INDEX(chassis + 1u);
+    for (uint e = lo; e < hi; e++)
+    {
+        uint id = SOLVE_ID(e);
+        if (id < nJ) continue; // tyre / user joints: not part mounts
+#if defined(ENGINE_PERSISTENT_CONTACTS)
+        // Persistent hosts key graph edges to their solver pairs; each contact's
+        // colliders live in its cold record.
+        SolverPair pair = gSolverPairs[id - nJ];
+        uint contactStart = pair.contactStart;
+        uint contactCount = pair.countAndSphere & SOLVER_COUNT_MASK;
+        bool isA = pair.bodyA == chassis;
+#else
+        Manifold mf = gManifolds[id - nJ];
+        uint contactStart = mf.contactStart;
+        uint contactCount = mf.contactCount;
+        bool isA = gColliders[mf.colliderA].body == chassis;
+        uint ci = isA ? mf.colliderA : mf.colliderB;
+#endif
+        for (uint k = 0u; k < contactCount; k++)
+        {
+            Contact ct = READ_CONTACT(contactStart + k);
+            if (ct.alive == 0u) continue;
+#if defined(ENGINE_PERSISTENT_CONTACTS)
+            uint ci = isA ? ct.colliderA : ct.colliderB;
+#endif
+            // n = A→B; the force on B is −(λN n + λT1 t1 + λT2 t2), on A its opposite.
+            float3 fB = -(ct.normal * ct.lambdaN + ct.tangent1 * ct.lambdaT1 + ct.tangent2 * ct.lambdaT2);
+            float3 fW = isA ? -fB : fB;
+            // Anchors are body-local offsets from the centre of mass: for the
+            // chassis that is already the chassis-local point.
+            float3 xL = isA ? ct.anchorA : ct.anchorB;
+            float3 fL = quatRotate(qi, fW);
+            // The part (collider range) or wheel shell that owns the collider.
+            bool found = false;
+            for (uint pi = 0u; pi < nP && !found; pi++)
+            {
+                uint4 pc = VU(partRec(pool2.x + pi) + P_CFG);
+                if (ci >= pc.x && ci < pc.x + pc.y)
+                {
+                    partF[pi] += fL;
+                    partM[pi] += cross(xL, fL);
+                    found = true;
+                }
+            }
+            for (uint wi = 0u; wi < nW && !found; wi++)
+            {
+                uint shell = VU(wheelRec(cfg.y + wi) + W_TJ).y;
+                if (shell != NO_INDEX && ci >= shell && ci < shell + SHELL_SPHERES)
+                {
+                    wheelF[wi] += fL;
+                    wheelM[wi] += cross(xL, fL);
+                    found = true;
+                }
+            }
+        }
+    }
+
+    // ---- chassis kinematics this step (chassis-local) ----
+    float3 aL = quatRotate(qi, (c.linearVel - VD(vr + V_V0).xyz) / dt);
+    float3 wL = quatRotate(qi, c.angularVel);
+    float3 alL = quatRotate(qi, (c.angularVel - VD(vr + V_W0).xyz) / dt);
+    float gScale = VD(vr + V_AERO0).z;
+    float3 gL = quatRotate(qi, float3(0.0, p.gravityY * (gScale != 0.0 ? gScale : 1.0), 0.0));
+
+    uint4 brk = VU(vr + V_BRK);
+    for (uint pi = 1u; pi < nP; pi++)
+    {
+        uint pr = partRec(pool2.x + pi);
+        float4 com = VD(pr + P_COM);
+        if (asuint(com.w) != PS_ATTACHED) continue;
+        float4 mount = VD(pr + P_MOUNT);
+        float4 load = VD(pr + P_LOAD);
+        if (mount.w >= 1e29 && load.x >= 1e29) continue;
+        float4 mass = VD(pr + P_MASS);
+        float3 r = com.xyz;
+        float3 ap = aL + cross(alL, r) + cross(wL, cross(wL, r));
+        float3 fm = mass.x * (ap - gL) - partF[pi];
+        float3 tauCom = mass.yzw * alL + cross(wL, mass.yzw * wL);
+        float3 mContactCom = partM[pi] - cross(r, partF[pi]);
+        float3 tm = tauCom - cross(mount.xyz - r, fm) - mContactCom;
+        float F = length(fm), Tq = length(tm);
+        float ratio = max(F / mount.w, Tq / load.x);
+        VSet(pr + P_LOAD, float4(load.x, F, Tq, max(load.w, ratio)));
+        uint bit = 1u << pi;
+        if (ratio > 1.0 && (brk.z & bit) == 0u && (brk.x & bit) == 0u)
+        {
+            brk.x |= bit;
+            emitEvent(EVENT_MOUNT_BREAK, (v << 8u) | pi, asuint(F), asuint(Tq));
+        }
+    }
+
+    float3 axl = axleLocal(vr);
+    for (uint wi = 0u; wi < nW; wi++)
+    {
+        uint wr = wheelRec(cfg.y + wi);
+        uint4 dyn = VU(wr + W_C0);
+        if ((dyn.z & (WD_DETACHED | WD_DISABLED)) != 0u) continue;
+        float4 wm = VD(wr + W_MOUNT);
+        if (wm.x >= 1e29 && wm.y >= 1e29) continue;
+        float4 wm2 = VD(wr + W_MOUNT2);
+        // Tyre force from the ground on the chassis, as vehicle_post reports it.
+        float3 fT = float3(0, 0, 0);
+        float3 hitL = float3(0, 0, 0);
+        if ((dyn.z & WD_CONTACT) != 0u)
+        {
+            float4 f = VD(wr + W_F);
+            float3 fw = VD(wr + W_C2).xyz * f.x - VD(wr + W_C3).xyz * f.y - VD(wr + W_C4).xyz * f.z;
+            fT = quatRotate(qi, fw);
+            hitL = quatRotate(qi, VD(wr + W_HIT).xyz - c.position);
+        }
+        float3 center = VD(wr + W_HP).xyz + VD(wr + W_DIR).xyz * VD(wr + W_O_POS).w;
+        float mw = VD(wr + W_MISC).x;
+        float3 aw = aL + cross(alL, center) + cross(wL, cross(wL, center));
+        float3 fm = mw * (aw - gL) - fT - wheelF[wi];
+        float3 mContact = cross(hitL - center, fT) + wheelM[wi] - cross(center, wheelF[wi]);
+        float3 tm = -cross(wm2.xyz - center, fm) - mContact;
+        // Torque about the spin axis goes to the drive and brakes, not the mount.
+        tm -= axl * dot(tm, axl);
+        float F = length(fm), Tq = length(tm);
+        float ratio = max(F / wm.x, Tq / wm.y);
+        VSet(wr + W_MOUNT, float4(wm.x, wm.y, F, Tq));
+        VSet(wr + W_MOUNT2, float4(wm2.xyz, max(wm2.w, ratio)));
+        uint bit = 1u << wi;
+        if (ratio > 1.0 && (brk.w & bit) == 0u && (brk.y & bit) == 0u)
+        {
+            brk.y |= bit;
+            emitEvent(EVENT_MOUNT_BREAK, (v << 8u) | 0x80u | wi, asuint(F), asuint(Tq));
+        }
+    }
+    VSetU(vr + V_BRK, brk);
 }
 
 // ---------------------------------------------------------------------------

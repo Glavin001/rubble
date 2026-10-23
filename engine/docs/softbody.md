@@ -67,6 +67,67 @@ all the bodywork stays free to crumple. The core takes a share of every node's m
 ignore the vehicle's own node spheres: the core and its nodes share a negative
 collision group.
 
+**Authored cores and bolted rigid parts.** A `SoftVehicleDesc` may bring its own core
+(`SoftCore`). This is a complete `VehicleDesc` (wheels, drivetrain, and parts with their
+`MountDesc`s), ball-jointed to the nodes it lists. Node masses are not shared with it.
+
+It may also bring `SoftRigidPart`s: rigid bodies (colliders, mass) held to nodes by
+D6 ball joints with break limits. `SoftHost::add` spawns these after the core, in the
+vehicle's collision group, and records each one's body and joint range
+(`SoftEntry::rigid_parts`). A part whose joints have all broken is loose. It is an
+ordinary body, and its joint breaks are `EVENT_BREAK` records on the event ring.
+
+### The hybrid dune buggy
+
+`engine_softbody::buggy::dune_buggy_soft()` is vibe-land's sand rail in three parts:
+
+* **Frame:** node–beam.
+* **Rigid core:** the `dune_buggy` raycast vehicle with only its drivetrain parts.
+* **Bolted parts:** rigid bodies on joints.
+
+`engine/scenes/dune-buggy/frame-graph.mjs` bakes it into the `hybrid` section of
+`engine-vehicle/assets/dune_buggy.json`.
+
+What each piece of the buggy is in each build:
+
+| Behaviour | Parts | Model |
+|---|---|---|
+| Bends, stiff (safety cell) | hoop, pillars, roof, side bars, floor rails | beams, yield 30 kN, break 400 kN |
+| Bends, soft (crumple) | frame horns, front crossmember, engine cage tail | beams, yield 6 kN, break 100 kN |
+| Bends, then tears off | front bumper, rear bumper, nose (panel on its standoffs) | own nodes and beams; mount beams in one break group each, rated from the rigid preset's mount |
+| Snaps (on the core) | engine, gearbox, steering column | core parts with `MountDesc` (losing them cuts drive or steering) |
+| Snaps (on joints) | seats, fuel tank, lamps, mirrors, extinguisher | `SoftRigidPart` on the 3 nearest nodes of what carries it (headlamps on the nose, rear lamps on the rear bumper) |
+| Wheels | 4 | the core's raycast wheels with their suspension mounts |
+
+How the frame graph is built:
+
+* **Nodes** sit at every tube junction, merged within 3.5 cm and splitting tubes at
+  T-junctions. Long spans get nodes along them, up to 4 per tube and about every 0.42 m.
+  This gives contact along the tube and somewhere for it to bend. Only node spheres touch
+  the rigid world: a beam between two nodes collides with nothing.
+* **Braces.** Each node takes up to 5 brace beams to its nearest neighbours whose
+  direction differs from every beam it already has by over 25°. Plain beams only resist
+  stretch: without braces in several directions, a node mid-tube has no stiffness across
+  the tube and the frame folds like a mechanism.
+* **Size:** 152 nodes (307 kg; median 1.3 kg) and 861 beams.
+* **Stiffness:** 1e6 N/m. The light nodes rang at 3e6 and spiked loads, which tore off
+  the rear bumper in a frontal crash (`hybrid_buggy_crash_probe`).
+* **Core attachment:** the 8 lower-wishbone pivots.
+* **Named parts** (`SoftVehicleDesc::parts`): `frame`, `front_bumper`, `rear_bumper`
+  and `nose`. A torn-off piece's `PieceDetached` event and the damage readouts use these
+  names.
+
+`tests/softbody_buggy.rs` (240 Hz × 10 iterations) checks three cases:
+
+* The buggy stands and drives without yielding a beam.
+* A 50 km/h wall crash bends the front (about 5 cm, 54 beams yield), tears out both front
+  wheels' suspensions (the tyres stand proud of the bumper) and leaves the safety cell's
+  shape within a millimetre.
+* A cannonball into the open side tears the struck seat off its rails.
+
+`vehicle.html?scene=buggies&build=hybrid` runs it in the browser (240 Hz, 4 steps a
+frame). `buggy-render.mjs` skins each frame tube along its node chain.
+
 ### Step placement
 
 ```text
@@ -434,6 +495,25 @@ button). A crash-test preset menu sets them for standard tests:
 | `ramp` | `speed` (70) | A ramp under the left wheels only |
 | `drop` | `height` m (8), `pitch` ° nose down (35) | Dropped nose first |
 
+**Camera views** (demo):
+
+* `?cam=` (also the panel's camera menu, and `C` to cycle) picks the view:
+  * `orbit`, free;
+  * `chase`, `front`, `rear`, `left` (port), `right` (starboard) or `top`, around a
+    subject and level with it;
+  * `driver`, the driver's seat;
+  * `mount`, riding on one subject and looking at another, such as from the 18 t
+    truck's cab at the car it is about to hit.
+* `?camTarget=` and `?camFrom=` name the subjects: every car (`car0`…) and the
+  scene's rigid bodies (`18_t_truck`, `parked_truck`, `crusher_block`, `side_ram`).
+* Subject poses are read back every frame and carried forward by their velocity over
+  the readback's lag.
+
+**Scripted events:** in the crusher scene, `liftAt` seconds in, a winch lifts the
+block `liftTo` m and holds it there, to show the wreck. The block is kinematic: its
+record is rewritten each frame with near-infinite mass. The script also runs in
+frame-stepped (`__step`) runs and restarts on reset.
+
 Every vehicle is free (an initial velocity, then physics): it pitches, trips and rolls
 as the impact makes it.
 
@@ -509,8 +589,22 @@ GPU time per phase, 10 cars, 240 Hz × 10 (ms):
 
 Each solver pass waits on the one before, so the cost is per-dispatch latency rather
 than arithmetic. One car's sweep costs 0.135 ms and ten cars' 0.17 ms, so 50 cars cost
-only 1.0 ms more per step than one. Chrome WebGPU runs the yard (3 cars and 3 crates:
-387 particles, 2,190 beams) at 5.2 ms per 240 Hz step.
+only 1.0 ms more per step than one.
+
+Chrome WebGPU (M3 Max), 240 Hz × 10, after the latency fixes in DECISIONS s20.
+`BUDGET=1 node softbody-check.mjs budget_yard_drive budget_traffic20 …` measures it,
+and `BUDGET_SPLIT=1` adds GPU time per kernel (`?gputime`, `world.profileStep()`).
+
+| Scene | Before (ms / step) | After (ms / step) | Live |
+|---|---|---|---|
+| Yard, cars parked (3 cars, 3 crates) | 4.6 | 1.1 | 100% real time |
+| Yard, player driving | — | 2.0–2.7 | 100% real time; 2 steps + render ≈ 6 ms, inside a 120 fps frame |
+| Traffic, 20 cars (most soft, crashing) | 10 | 6–10 | 86–100% real time at 60 fps |
+| Traffic, 100 cars | 12.5 | 7–9.5 | 67% real time |
+
+Traffic still varies run to run with the AI and the crashes. The slowest soft car's
+sweep sets each iteration's time, about 0.2 ms, with `vehicle_iterate`, rigid primal
+and node collision behind it.
 
 ### Accuracy against cost
 
@@ -560,6 +654,53 @@ Negative results (decisions s10 and s11):
 * **A multi-lane particle solve is slower.** Eight lanes per particle with a
   groupshared reduction took 3.0 → 4.85 ms per step for one car.
 
+### Rigid mode
+
+Rigid mode (`SoftSettings::rigid_mode`, on in the demo, `?rigid=0` off) is the design's
+"rigid mode with promotion":
+
+* **Turning rigid.** A soft body with a rigid core that has had no contact and no
+  plastic yield for `rigid_quiet` (0.5 s) rides its core. Every step its particles
+  are placed at the core's pose from their offsets in the core's frame, which are
+  captured each step while the body is soft. The core takes the whole vehicle's
+  mass and inertia, and its joints to the axle nodes are switched off. The particle
+  solve, Chebyshev acceleration and plasticity skip the body.
+* **Turning soft.** The `soft_mode` pass runs once per body each step, after the
+  contact passes and before the solve. The body turns soft in the same step on
+  either trigger:
+  * any contact edge on one of its particles;
+  * its bounds nearing another soft body or an obstacle, with a margin of 0.5 m plus
+    0.15 s of travel.
+* **Readback.** `WgpuSim::read_soft_rigid(h)` and `world.readSoftModes()` report
+  each body's mode.
+
+Measured cost (native, 240 Hz × 10, all cars cruising):
+
+| Cars | Always soft | Rigid mode |
+|---|---|---|
+| 1 | 3.26 ms / step | 2.06 ms / step |
+| 10 | 3.98 | 2.43 |
+| 100 | 4.90 | 2.65 |
+
+In Chrome the yard drops from 5.8 to 4.7 ms per step.
+
+Crashes match within the GPU's run-to-run variation (car–car contacts are not
+deterministic, about ±3 cm). With a 20 m run-up, so the car is rigid when it
+hits:
+
+| Crash | Always soft | Rigid mode |
+|---|---|---|
+| Wall 56 km/h | 0.49 m | 0.50 m |
+| Wall 100 km/h | 0.78 m | 0.78 m |
+| Head-on 60 km/h | 0.50 m | 0.49 m |
+| Pole 60 km/h | 0.01 m | 0.01 m |
+
+`rigid_mode_rides_the_core_while_quiet_and_crashes_like_soft` tests this.
+
+Driving accelerates a little faster in rigid mode: 123 km/h after 8 s, against 110
+soft and 120 for the rigid sedan preset. An under-converged soft body acts as slight
+drag.
+
 Levers in place, all lossless:
 
 * the fused sweep;
@@ -568,7 +709,7 @@ Levers in place, all lossless:
 
 Not implemented yet:
 
-* rigid mode with promotion;
+* skipping the solver iterations' dispatches when every body is rigid;
 * per-island step rates;
 * per-state iteration budgets.
 
@@ -592,5 +733,6 @@ comes on top of the rigid step's fixed 7.5 ms per frame at 240 Hz.
   simulated (JBeam PRESSURED and ANISOTROPIC run as NORMAL).
 * Only the native wgpu host and the browser run soft bodies. The Metal (`MetalSim`)
   and CUDA hosts compile and plan no soft passes (`SoftCounts::default`).
+* Rigid parts hang one level deep on nodes (no rigid part carries another).
 * Stage-2 wheels (mounted on particles), rigid-mode demotion, crash-island substeps and
   the 15-vehicle Rigs of Rods calibration are next.

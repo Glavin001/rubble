@@ -8,7 +8,7 @@ pub const VH_BASES: u32 = 1; // uint4(vehicleBase, wheelBase, curveBase, aabbTai
 pub const VH_POOLS: u32 = 2; // uint4(diffBase, antiRollBase, partBase, rayBase)
 pub const VH_MISC: u32 = 3; // uint4(rayCount, maxRays, partCount, queryMode: 0 grid walk, 1 full scan)
 pub const VH_SLOTS: u32 = 4;
-pub const VEH_STRIDE: u32 = 40;
+pub const VEH_STRIDE: u32 = 44;
 pub const V_CFG: u32 = 0; // uint4(chassisBody, wheelStart, wheelCount, flags)
 pub const V_FWD: u32 = 1; // forwardLocal.xyz, cosMaxPitchRoll (<= -1 disables)
 pub const V_UP: u32 = 2; // upLocal.xyz, maxSlopeCos (wheel contacts steeper than this are ignored)
@@ -47,6 +47,9 @@ pub const V_TRACK_D: u32 = 36; // leftRatio, rightRatio, effective forward, pad
 pub const V_QUERY: u32 = 37; // uint4(stepsBetweenQueries (0/1 = every step), asfloat(tractionCut), left pod, right pod: firstCollider | count << POD_COUNT_SHIFT)
 pub const V_ASSIST: u32 = 31; // airPitch, airYaw (rad/s² per input), uprightStiffness (1/s²), uprightDamping (1/s)
 pub const V_O3: u32 = 30; // uint4(engineConnected, partsLost) , pitch/roll λ, pitch/roll k
+pub const V_BRK: u32 = 38; // uint4(partBreakReq, wheelBreakReq, partsBroken, wheelsBroken): mount breaks (vehicle_loads)
+pub const V_V0: u32 = 39; // chassis linear velocity at step start.xyz, pad (vehicle_prepare)
+pub const V_W0: u32 = 40; // chassis angular velocity at step start.xyz, pad (vehicle_prepare)
 pub const VF_ENABLED: u32 = 1;
 pub const VF_DIRECT_DRIVE: u32 = 2; // per-wheel torque; no engine/gearbox
 pub const VF_MANUAL_TRANS: u32 = 4; // gearRequest selects the gear
@@ -55,6 +58,7 @@ pub const VF_REVERSE_BRAKE: u32 = 16; // throttle against travel brakes first
 pub const VF_SPHERE_CAST: u32 = 32; // wheels sweep a sphere of their radius (kerbs, edges)
 pub const VF_TRACKED: u32 = 64; // two tracks: shared spin per track, left/right drive ratios
 pub const VF_TRACTION_CONTROL: u32 = 128; // cut engine torque while a driven wheel spins past peak slip
+pub const VF_BREAKABLE: u32 = 256; // some part or wheel mount has a finite limit (vehicle_loads)
 pub const VS_ENGINE_LOST: u32 = 1;
 pub const VS_ACTIVE: u32 = 2; // block built this step
 pub const VS_SLIPPING: u32 = 4; // a driven wheel slipped (blocks upshift)
@@ -99,6 +103,8 @@ pub const W_LHIT: u32 = 35; // last hit in ground-body space.xyz, valid (1/0) �
 pub const W_LN: u32 = 36; // last hit normal in ground-body space.xyz, pad
 pub const W_FP: u32 = 37;
 pub const W_TJ: u32 = 38; // suspension force point (chassis space).xyz, enabled (1/0)
+pub const W_MOUNT: u32 = 39; // breakForce, breakTorque, lastForce, lastTorque (vehicle_loads)
+pub const W_MOUNT2: u32 = 40; // mount anchor (chassis space).xyz, peak load ratio
 pub const WF_STEER: u32 = 1;
 pub const WF_DRIVEN: u32 = 2;
 pub const WF_HANDBRAKE: u32 = 4;
@@ -114,11 +120,13 @@ pub const WD_SUSP: u32 = 32;
 pub const WD_SLIDE: u32 = 64;
 pub const WD_BUMP: u32 = 128;
 pub const WD_PENDING_ADD: u32 = 256; // host attached this wheel slot; GPU adds its mass
-pub const PART_STRIDE: u32 = 4;
+pub const PART_STRIDE: u32 = 6;
 pub const P_CFG: u32 = 0; // uint4(colliderStart, colliderCount, role, roleWheelMask)
 pub const P_MASS: u32 = 1; // mass, Ixx, Iyy, Izz (about part COM, chassis axes)
 pub const P_COM: u32 = 2; // localCom.xyz, asfloat(state)
 pub const P_PARK: u32 = 3; // uint4(parkedBody, vehicle, pad, pad)
+pub const P_MOUNT: u32 = 4; // mount anchor (chassis space).xyz, breakForce
+pub const P_LOAD: u32 = 5; // breakTorque, lastForce, lastTorque, peak load ratio (vehicle_loads)
 pub const PR_BODY: u32 = 0;
 pub const PR_ENGINE: u32 = 1;
 pub const PR_DRIVESHAFT: u32 = 2;
@@ -187,6 +195,9 @@ pub const LAYOUT: &[(&str, u32)] = &[
     ("V_QUERY", V_QUERY),
     ("V_ASSIST", V_ASSIST),
     ("V_O3", V_O3),
+    ("V_BRK", V_BRK),
+    ("V_V0", V_V0),
+    ("V_W0", V_W0),
     ("VF_ENABLED", VF_ENABLED),
     ("VF_DIRECT_DRIVE", VF_DIRECT_DRIVE),
     ("VF_MANUAL_TRANS", VF_MANUAL_TRANS),
@@ -195,6 +206,7 @@ pub const LAYOUT: &[(&str, u32)] = &[
     ("VF_SPHERE_CAST", VF_SPHERE_CAST),
     ("VF_TRACKED", VF_TRACKED),
     ("VF_TRACTION_CONTROL", VF_TRACTION_CONTROL),
+    ("VF_BREAKABLE", VF_BREAKABLE),
     ("VS_ENGINE_LOST", VS_ENGINE_LOST),
     ("VS_ACTIVE", VS_ACTIVE),
     ("VS_SLIPPING", VS_SLIPPING),
@@ -239,6 +251,8 @@ pub const LAYOUT: &[(&str, u32)] = &[
     ("W_LN", W_LN),
     ("W_FP", W_FP),
     ("W_TJ", W_TJ),
+    ("W_MOUNT", W_MOUNT),
+    ("W_MOUNT2", W_MOUNT2),
     ("WF_STEER", WF_STEER),
     ("WF_DRIVEN", WF_DRIVEN),
     ("WF_HANDBRAKE", WF_HANDBRAKE),
@@ -259,6 +273,8 @@ pub const LAYOUT: &[(&str, u32)] = &[
     ("P_MASS", P_MASS),
     ("P_COM", P_COM),
     ("P_PARK", P_PARK),
+    ("P_MOUNT", P_MOUNT),
+    ("P_LOAD", P_LOAD),
     ("PR_BODY", PR_BODY),
     ("PR_ENGINE", PR_ENGINE),
     ("PR_DRIVESHAFT", PR_DRIVESHAFT),
