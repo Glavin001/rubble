@@ -452,6 +452,7 @@ pub fn car_visual(p: &CarParams, layout: &CarLayout, nodes: &[Vec3]) -> VisualMe
             part::BUMPER_F => rings(n - 1..=n - 1, &[0, 1, 2, 3, 6]),
             part::BUMPER_R => rings(0..=0, &[0, 1, 2, 3, 6]),
             part::INTERIOR => rings(layout.cabin_first.saturating_sub(1)..=layout.cabin_last + 1, &[0, 1, 2, 3, 6]),
+            part::ENGINE if !layout.engine.is_empty() => layout.engine.clone(),
             part::ENGINE => rings(layout.front_bay.saturating_sub(1)..=n - 1, &[0, 1, 2, 3, 6, 7]),
             _ => shell.clone(),
         }

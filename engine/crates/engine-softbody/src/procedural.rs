@@ -32,6 +32,11 @@ pub struct CarParams {
     /// detacher group per panel, so a hard enough hit tears a whole panel off.
     pub panels: bool,
     pub mount_strength: f32,
+    /// An engine block: a dense eight-node box in the front bay on breakable
+    /// mounts, carrying `engine_mass` kg (out of the dry mass). A frontal crash
+    /// crushes the bay up to it and then pushes it back toward the cabin.
+    pub engine_block: bool,
+    pub engine_mass: f32,
 }
 
 impl Default for CarParams {
@@ -41,7 +46,7 @@ impl Default for CarParams {
             length: 4.0,
             width: 1.7,
             stations: 11,
-            dry_mass: 600.0,
+            dry_mass: 520.0,
             cargo_mass: 250.0,
             minimass: 5.0,
             spring: 2.0e6,
@@ -55,6 +60,8 @@ impl Default for CarParams {
             bumper: true,
             panels: true,
             mount_strength: 0.3,
+            engine_block: true,
+            engine_mass: 160.0,
         }
     }
 }
@@ -116,6 +123,8 @@ pub struct CarLayout {
     pub panels: Vec<Vec<u32>>,
     pub front_bumper: Vec<u32>,
     pub rear_bumper: Vec<u32>,
+    /// The engine block's eight nodes (empty without one).
+    pub engine: Vec<u32>,
 }
 
 /// [`car_truck`] and the layout of its nodes.
@@ -253,6 +262,7 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
             .collect(),
         front_bumper: if p.bumper { (bumper_first as u32..bumper_first as u32 + 6).collect() } else { Vec::new() },
         rear_bumper: Vec::new(),
+        engine: Vec::new(),
     };
     if p.panels {
         layout.rear_bumper = (rear_bumper_first as u32..rear_bumper_first as u32 + 6).collect();
@@ -264,6 +274,20 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
                 nodes.push([x, y, z + if x == 0.0 { 0.0 } else { 0.06 }]);
             }
         }
+    }
+    let ring_z = |k: usize| -0.5 * p.length + k as f32 / (n - 1) as f32 * p.length;
+    let engine_first = nodes.len();
+    let bay_rings: Vec<usize> = (front_bay..n).collect();
+    let engine_z = 0.5 * (ring_z(front_bay) + ring_z(n - 1));
+    if p.engine_block {
+        for &y in &[0.4f32, 0.72] {
+            for &z in &[engine_z - 0.22, engine_z + 0.22] {
+                for &x in &[0.26f32, -0.26] {
+                    nodes.push([x, y, z]);
+                }
+            }
+        }
+        layout.engine = (engine_first as u32..engine_first as u32 + 8).collect();
     }
     // Shell faces a panel covers (it is the skin there): (ring k, row a, row b).
     let covered = |k: usize, a: usize, b: usize| {
@@ -278,7 +302,9 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
     for (i, q) in nodes.iter().enumerate() {
         // Floor nodes carry the cargo (seats, engine, fuel): a low centre of mass.
         let floor = i < ring_nodes && matches!(i % CAR_RING, 0 | 1 | 6);
-        if floor {
+        if p.engine_block && (engine_first..engine_first + 8).contains(&i) {
+            let _ = writeln!(s, "{i}, {:.4}, {:.4}, {:.4}, l, {:.1}", q[0], q[1], q[2], p.engine_mass / 8.0);
+        } else if floor {
             let _ = writeln!(s, "{i}, {:.4}, {:.4}, {:.4}, l", q[0], q[1], q[2]);
         } else {
             let _ = writeln!(s, "{i}, {:.4}, {:.4}, {:.4}", q[0], q[1], q[2]);
@@ -509,6 +535,54 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
             group += 1;
         }
         let _ = writeln!(s, "detacher_group end");
+    }
+    if p.engine_block {
+        // The block itself: every pair of its corners, far stronger than the body.
+        let _ = writeln!(
+            s,
+            "\nset_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
+            p.spring * 2.0,
+            p.damp,
+            p.deform * 40.0,
+            p.strength * 20.0
+        );
+        for a in 0..8 {
+            for b in a + 1..8 {
+                let _ = writeln!(s, "{}, {}", engine_first + a, engine_first + b);
+            }
+        }
+        // Mounts: lower corners to the floor rails, upper ones to the belt line,
+        // of the bay rings and the bulkhead behind it. They bend and then tear in
+        // a hard frontal crash, letting the block move back.
+        let _ = writeln!(
+            s,
+            "set_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
+            p.spring,
+            p.damp,
+            p.deform * 2.0,
+            p.strength * 0.6
+        );
+        let mut mounts = Vec::new();
+        for e in 0..8 {
+            let q = nodes[engine_first + e];
+            let rows: &[usize] = if q[1] < 0.5 { &[0, 1] } else { &[2, 3] };
+            let mut near: Vec<(f32, usize)> = bay_rings
+                .iter()
+                .chain(std::iter::once(&(front_bay - 1)))
+                .flat_map(|&k| rows.iter().map(move |&j| ring(k, j)))
+                .map(|i| {
+                    let r = nodes[i];
+                    (((r[0] - q[0]).powi(2) + (r[1] - q[1]).powi(2) + (r[2] - q[2]).powi(2)).sqrt(), i)
+                })
+                .collect();
+            near.sort_by(|a, b| a.0.total_cmp(&b.0));
+            for &(_, i) in near.iter().take(4) {
+                mounts.push((engine_first + e, i));
+            }
+        }
+        for (a, b) in mounts {
+            let _ = writeln!(s, "{a}, {b}");
+        }
     }
     // Collision skin: every outer face of the shell, counter-clockwise from outside.
     let _ = writeln!(s, "\ncab");

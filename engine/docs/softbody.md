@@ -236,6 +236,49 @@ intact beams by load and deformed ones by plastic strain |L/L₀ − 1| (yellow,
 Mesh-file flexbodies (RoR OGRE `.mesh`, BeamNG `.dae`) need an offline converter to
 glTF that is not built yet; the binding and the skinning shader are what it would feed.
 
+**The procedural car's render mesh** (`visual.rs`, `car-render.mjs`) is a separate,
+detailed model, about 12,000 vertices on the car's roughly 160 nodes.
+
+* **Body:** made from 84 fine cross-sections with a rounded profile.
+* **Parts:** bonnet, boot lid, four doors and two bumpers, matching the physics panels.
+  Each has its own vertices, and the seam between parts is drawn as a thin dark gap.
+* **Details:** glass, head and tail lamps, a grille, wheel arches with smooth edges,
+  seats, a dashboard, a steering wheel and the engine.
+* **Binding:** each part is bound only to its own nodes. A door binds to the door
+  panel's nodes and the engine to the engine block's, so a torn panel carries its
+  mesh away and leaves an opening into the cabin.
+
+GPU compute rebuilds the mesh each frame:
+
+1. **Skin:** each vertex from its frame of three particles. A frame stretched past
+   1.8× is torn.
+2. **Faces:** each triangle's normal, its strain against the rest triangle, and
+   whether it is torn.
+3. **Normals:** smooth per-vertex normals, so crumples and creases catch the light,
+   plus the largest strain around each vertex.
+
+Shading (`LIGHTING_WGSL`, shared by every pass):
+
+* a sky, a sun shadow map (2,048², 3×3 PCF), tone mapping and 4× MSAA;
+* clearcoat paint, chrome, black trim, emissive lamps, primer on a panel's inner face,
+  and asphalt for the ground;
+* damage from strain: the clearcoat dulls, creases darken, and thin scrapes along the
+  car cut through to bare steel where it crumpled most;
+* glass, blended and drawn last, cracks at about 1% strain and shatters past 6%.
+
+**Effects** are GPU particles spawned from what changed in each triangle since the
+last frame, with no CPU readback:
+
+* sparks where metal suddenly crumples;
+* glass shards when a pane lets go;
+* paint-coloured chips where the skin tears;
+* a little dust.
+
+The particles fly with the local body velocity, fall, and bounce on the ground. They
+follow simulation time, so a paused scene freezes them.
+
+Imported vehicles keep the flexbody skin above, lit the same way.
+
 ## Validation
 
 | Test | Shows |
@@ -348,6 +391,17 @@ Results at 240 Hz × 10, file thresholds:
 | Head-on 2 × 80 km/h, 50% offset | 0.33–0.38 m | 106–115 per car | 2 per car | |
 | Sideways into a curb, 70 km/h | — | 115 | 3 panels | rolls onto its roof |
 | One-side ramp, 90 km/h | — | 13 | bumper | airborne to 3.3 m, lands inverted |
+
+**Engine block.** The procedural car carries a 160 kg engine block in the front bay
+(`CarParams::engine_block`):
+
+* eight nodes braced to each other far more stiffly than the body;
+* mounts to the frame rails and the belt line of the bay and of the bulkhead behind
+  it.
+
+A frontal crash folds the bay up to the block, then bends and tears the mounts and
+shoves the block back toward the cabin. The engine mesh is bound to the block, so it
+moves with it.
 
 **Bolt-on panels.** The procedural car has a bonnet, a boot lid, four doors and a rear
 bumper beside the front one (`CarParams::panels`, default on):
