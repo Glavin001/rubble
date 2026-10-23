@@ -16,6 +16,7 @@ use engine_vehicle::{
 };
 
 use engine_exec::rigid_plan::{BIND_COUNT, PASS_ALIGN};
+use engine_softbody::{SoftBackend, SoftCapacity, SoftHandle, SoftHost, SoftSettings, SoftVehicleDesc, SpawnOptions};
 
 struct Pipe {
     pipeline: wgpu::ComputePipeline,
@@ -143,6 +144,8 @@ pub struct WgpuSim {
     last_contact_offset: u32,
     /// Vehicle controller pool (`vehicle_step.slang`).
     vehicles: Option<VehicleHost>,
+    /// Soft-body particles and beams (`soft_step.slang`, binding 32).
+    soft: Option<SoftHost>,
     /// Event ring read cursor (`poll_joint_breaks`).
     events_seen: u32,
 }
@@ -307,6 +310,26 @@ impl WgpuSim {
     /// Canonical contacts with an explicit vehicle pool size.
     pub fn new_with_vehicles(capacity: WorldCapacity, vehicles: VehicleCapacity) -> anyhow::Result<Self> {
         Self::new_full(capacity, false, false, vehicles)
+    }
+
+    /// Canonical contacts with a vehicle pool and a soft-body arena (soft bodies
+    /// need the canonical contact layout their particle kernel reads).
+    pub fn new_with_soft(
+        capacity: WorldCapacity,
+        vehicles: VehicleCapacity,
+        soft: SoftCapacity,
+    ) -> anyhow::Result<Self> {
+        let mut sim = Self::new_full(capacity, false, false, vehicles)?;
+        let bytes = soft.bytes();
+        sim.bufs[32] = sim.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("b32 soft"),
+            size: bytes,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        sim.rebind_buffer(32);
+        sim.soft = Some(SoftHost::new(soft));
+        Ok(sim)
     }
 
     fn new_full(
@@ -591,6 +614,7 @@ impl WgpuSim {
             wake_pending: false,
             last_contact_offset: 0,
             vehicles: Some(VehicleHost::new(vehicle_capacity, aabb_tail)),
+            soft: None,
             events_seen: 0,
         };
         // Kernel fixtures in the unit tests set the modes they exercise on top
@@ -1605,6 +1629,7 @@ impl WgpuSim {
             last: self.last_counters,
             vehicle_count: self.vehicle_count(),
             wheel_count: self.vehicles.as_ref().map_or(0, |v| v.wheel_count()),
+            soft: self.soft_counts(),
         }
     }
 
@@ -1749,6 +1774,79 @@ impl WgpuSim {
         self.last_timings.total_gpu
     }
 
+    /// Rebuild the bind groups that use `binding` after its buffer was replaced.
+    fn rebind_buffer(&mut self, binding: u32) {
+        for (name, pipe) in self.pipes.iter_mut() {
+            if pipe.bindings.contains(&binding) {
+                pipe.bind = make_bind_group(&self.device, name, &pipe.layout, &pipe.bindings, &self.bufs);
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Soft bodies (slang/kernels/soft_step.slang)
+    // ---------------------------------------------------------------------
+
+    fn soft_counts(&self) -> rigid_plan::SoftCounts {
+        let Some(h) = self.soft.as_ref() else { return Default::default() };
+        let c = h.counts();
+        rigid_plan::SoftCounts {
+            bodies: c.bodies,
+            beams: c.beams,
+            colors: c.colors,
+            max_color: c.max_color,
+            groups: c.groups + 1,
+            particles: c.particles,
+            chebyshev: h.settings.chebyshev_rho > 0.0,
+        }
+    }
+
+    pub fn soft_host(&self) -> &SoftHost {
+        self.soft.as_ref().expect("soft host (WgpuSim::new_with_soft)")
+    }
+
+    /// Spawn a soft vehicle (particles, node colliders, beams and, with wheels,
+    /// its rigid core carrying the raycast wheels and drivetrain).
+    pub fn add_soft_vehicle(
+        &mut self,
+        desc: &SoftVehicleDesc,
+        position: [f32; 3],
+        rotation: [f32; 4],
+        opts: &SpawnOptions,
+    ) -> Result<SoftHandle, String> {
+        let mut soft = self.soft.take().ok_or("soft host (WgpuSim::new_with_soft)")?;
+        let mut vehicles = self.vehicles.take();
+        let r = soft.add(self, vehicles.as_mut(), desc, position, rotation, opts);
+        self.vehicles = vehicles;
+        self.soft = Some(soft);
+        self.manifolds_valid = false;
+        r
+    }
+
+    pub fn set_soft_settings(&mut self, settings: SoftSettings) {
+        let mut soft = self.soft.take().expect("soft host");
+        soft.set_settings(self, settings);
+        self.soft = Some(soft);
+    }
+
+    /// Steering input of a soft vehicle's hydros (−1..1).
+    pub fn set_soft_steer(&mut self, h: SoftHandle, steer: f32) {
+        let mut soft = self.soft.take().expect("soft host");
+        soft.set_steer(self, h, steer);
+        self.soft = Some(soft);
+    }
+
+    /// Current beam records of a soft vehicle (GPU readback).
+    pub fn read_soft_beams(&self, h: SoftHandle) -> Vec<engine_softbody::model::Beam> {
+        self.soft_host().read_beams(self, h)
+    }
+
+    /// Particle states of a soft vehicle (GPU readback).
+    pub fn read_soft_particles(&self, h: SoftHandle) -> Vec<BodyState> {
+        let e = self.soft_host().entry(h);
+        self.read_body_range(e.first_body, e.particles)
+    }
+
     // ---------------------------------------------------------------------
     // Vehicles (slang/kernels/vehicle_step.slang)
     // ---------------------------------------------------------------------
@@ -1860,6 +1958,42 @@ impl WgpuSim {
         }
         self.queue.submit([enc.finish()]);
         self.vehicle_host().read_ray_hits(self)
+    }
+}
+
+impl SoftBackend for WgpuSim {
+    fn write_soft_slots(&mut self, slot: u32, data: &[[u32; 4]]) {
+        if !data.is_empty() {
+            self.queue.write_buffer(&self.bufs[32], u64::from(slot) * 16, bytemuck::cast_slice(data));
+        }
+    }
+
+    fn read_soft_slots(&self, slot: u32, count: u32) -> Vec<[u32; 4]> {
+        self.read_buffer_range(32, u64::from(slot) * 16, count as usize)
+    }
+
+    fn host_body(&self, index: u32) -> BodyState {
+        self.host_bodies[index as usize]
+    }
+
+    fn host_collider(&self, index: u32) -> Collider {
+        self.host_cols[index as usize]
+    }
+
+    fn joint_from_desc(&self, desc: &JointDesc) -> Joint {
+        let mut j = desc.to_gpu();
+        if desc.torque_arm <= 0.0 {
+            let reach = |id: u32| {
+                let dynamic = self.host_bodies.get(id as usize).is_some_and(|b| b.inv_mass > 0.0);
+                if dynamic {
+                    self.body_reach.get(id as usize).copied().unwrap_or(0.0)
+                } else {
+                    0.0
+                }
+            };
+            j.torque_arm = engine_schema::default_torque_arm(reach(desc.body_a), reach(desc.body_b));
+        }
+        j
     }
 }
 

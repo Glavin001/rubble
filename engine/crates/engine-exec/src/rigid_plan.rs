@@ -92,6 +92,27 @@ pub struct StepInputs {
     /// Vehicle controller pool in use (`vehicle_step.slang`; 0 = no vehicle passes).
     pub vehicle_count: u32,
     pub wheel_count: u32,
+    /// Soft bodies in use (`soft_step.slang`; zero bodies = no soft passes).
+    pub soft: SoftCounts,
+}
+
+/// Dispatch sizes of the soft-body passes (`soft_step.slang`), from the host's
+/// `engine_softbody::SoftHost`. Particle colours are computed at spawn, so the
+/// host knows every colour's size.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SoftCounts {
+    pub bodies: u32,
+    pub beams: u32,
+    /// Particle colours (the largest vehicle's colour count).
+    pub colors: u32,
+    /// Particles in the largest colour (threads per `soft_primal` dispatch).
+    pub max_color: u32,
+    /// Break-group flag slots (groups + 1).
+    pub groups: u32,
+    /// Solved particles (colour-list entries).
+    pub particles: u32,
+    /// Chebyshev acceleration enabled.
+    pub chebyshev: bool,
 }
 
 /// JP rounds dispatched this step; later rounds run in `color_bodies_tail`.
@@ -218,6 +239,11 @@ pub fn encode_step(
     let vehicles = i.vehicle_count > 0;
     if vehicles {
         e.d("vehicle_input", u64::from(i.vehicle_count));
+    }
+    let soft = i.soft.bodies > 0;
+    if soft {
+        // A soft body sleeps and wakes as a whole.
+        e.d("soft_wake", u64::from(i.soft.bodies));
     }
     if !reuse_manifolds {
         e.d("build_aabbs", n_cols);
@@ -384,6 +410,10 @@ pub fn encode_step(
     if vehicles {
         e.d("vehicle_prepare", u64::from(i.vehicle_count));
     }
+    if soft {
+        let n = i.soft.beams.max(i.soft.groups).max(i.soft.particles);
+        e.d("soft_begin", u64::from(n.max(1)));
+    }
 
     if m.compact_contacts && !m.fused_persistence && !early_pair_pack {
         if !m.persistent_contacts {
@@ -412,16 +442,36 @@ pub fn encode_step(
         if sparse_start < max_c {
             e.dp(sparse, 64, sparse_start);
         }
+        if soft {
+            // Particle colours (spawn colouring; colour k of every vehicle at once).
+            for color in 0..i.soft.colors {
+                e.dp("soft_primal", u64::from(i.soft.max_color.max(1)), color);
+            }
+            if i.soft.chebyshev {
+                e.dp("soft_chebyshev", u64::from(i.soft.particles.max(1)), u32::from(iter));
+            }
+        }
         e.phase("primal");
         e.wp(dual, 65, u32::from(iter + 1 == i.iterations));
+        if soft {
+            e.d("soft_dual", u64::from(i.soft.beams.max(1)));
+        }
         if vehicles {
             e.d("vehicle_iterate", u64::from(i.vehicle_count));
         }
         e.phase("dual");
     }
+    if soft {
+        // Plasticity and breaking at the converged state, then detacher groups.
+        e.d("soft_plastic", u64::from(i.soft.beams.max(1)));
+        e.d("soft_break_groups", u64::from(i.soft.beams.max(1)));
+    }
     e.d("extract_velocity_sleep", n_bodies);
     if vehicles {
         e.d("vehicle_post", u64::from(i.vehicle_count));
+    }
+    if soft {
+        e.d("soft_sleep", u64::from(i.soft.bodies));
     }
     e.d("write_sleep_args", 64);
     // A sleep time beyond any run's length cannot produce candidates, so the
@@ -429,6 +479,10 @@ pub fn encode_step(
     if i.sleep_island_rounds > 0 && i.sleep_time < SLEEP_NEVER_S {
         for _ in 0..i.sleep_island_rounds.min(16) {
             e.w("sleep_island_gate", 66);
+        }
+        if soft {
+            // The gate may have revoked part of a soft body: revoke it whole.
+            e.d("soft_sleep", u64::from(i.soft.bodies));
         }
     }
     e.w("sleep_island_commit", 67);
@@ -505,6 +559,18 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "sleep_island_commit",
 ];
 
+/// Soft-body entries (`soft_step.slang`).
+pub const SOFT_ENTRIES: &[&str] = &[
+    "soft_wake",
+    "soft_begin",
+    "soft_primal",
+    "soft_chebyshev",
+    "soft_dual",
+    "soft_plastic",
+    "soft_break_groups",
+    "soft_sleep",
+];
+
 /// Slang source (under `slang/kernels/`) that defines `entry`.
 /// Vehicle controller entries (`vehicle_step.slang`).
 pub const VEHICLE_ENTRIES: &[&str] = &[
@@ -520,6 +586,9 @@ pub const VEHICLE_ENTRIES: &[&str] = &[
 pub fn kernel_source(entry: &str) -> &'static str {
     if VEHICLE_ENTRIES.contains(&entry) {
         return "vehicle_step.slang";
+    }
+    if SOFT_ENTRIES.contains(&entry) {
+        return "soft_step.slang";
     }
     if entry.starts_with("convex_") {
         return if entry.ends_with("_persistent") {
@@ -593,7 +662,7 @@ pub fn pair_warm_key(a: u32, b: u32) -> u32 {
 }
 
 /// GPU bindings every rigid host allocates (`BIND(0..30)` in world_step.slang).
-pub const BIND_COUNT: usize = 32;
+pub const BIND_COUNT: usize = 33;
 /// Pass-uniform slot stride (binding 22, dynamic offsets).
 pub const PASS_ALIGN: u64 = 256;
 
@@ -679,7 +748,8 @@ pub fn buffer_sizes(c: &WorldCapacity, compact: bool, persistent: bool) -> [u64;
     s[29] = b(c.max_candidates, 32);
     // SAT separating-feature cache (convex_step gSatCache): uint2 slots, power of two.
     s[30] = u64::from(c.max_candidates.max(1024).next_power_of_two()) * 8;
-    // Vehicle pool (vehicle_step gVehicleData): hosts with vehicles resize it.
+    // Vehicle pool (vehicle_step gVehicleData) and soft-body arena (soft_step
+    // gSoftData, 32): hosts with vehicles or soft bodies resize them.
     if persistent {
         s[4] = u64::from(c.max_contacts) * 2 * 32;
         s[27] = u64::from(c.max_contacts) * 2 * 64;
@@ -827,6 +897,7 @@ mod tests {
             },
             vehicle_count: 0,
             wheel_count: 0,
+            soft: SoftCounts::default(),
         }
     }
 
