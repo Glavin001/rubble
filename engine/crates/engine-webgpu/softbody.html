@@ -57,7 +57,8 @@
   <script type="module">
     import { createWorld, sceneCapacity } from './world-host.mjs';
     import { L, WHEEL_RIM_MATERIAL } from './vehicle.mjs';
-    import { loadTruck, loadJbeam, proceduralCar, latticeCrate, calibratedSettings, SOFT } from './soft.mjs';
+    import { loadTruck, loadJbeam, proceduralCar, proceduralCarDesc, proceduralCarVisual, latticeCrate, calibratedSettings, SOFT } from './soft.mjs';
+    import { createCarRenderer, LIGHTING_WGSL } from './car-render.mjs';
 
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
@@ -78,6 +79,10 @@
       drop: 'Nose-first drop',
       crates: 'Lattice crates drop',
       import: 'Crash test: your .truck / JBeam into a wall, 40 km/h',
+      traffic: 'Traffic derby: self-driving soft cars (?cars=10…100)',
+      limbo: 'Limbo bar: low clearance shears the roof off',
+      sandwich: 'Sandwich: 18 t truck shunts the car into a parked truck',
+      crusher: 'Crusher: 10 t block dropped on the roof',
     };
     const scene = qs.get('scene') || 'yard';
     if (!SCENES[scene]) throw new Error(`unknown scene ${scene}`);
@@ -102,6 +107,12 @@
       ['Rollover: sideways into a curb, 60 km/h', 'scene=rollover&speed=60'],
       ['Corkscrew ramp, 90 km/h', 'scene=ramp&speed=90'],
       ['Nose-first drop from 12 m', 'scene=drop&height=12&pitch=50'],
+      ['Limbo bar at 80 km/h: the roof shears off', 'scene=limbo&speed=80&bar=1.2'],
+      ['Sandwich: 18 t truck at 60 km/h shunts the car into a parked truck', 'scene=sandwich&speed=60'],
+      ['Crusher: 10 t block from 4 m', 'scene=crusher&mass=10000&height=4'],
+      ['Traffic derby, 20 cars', 'scene=traffic&cars=20'],
+      ['Traffic derby, 50 cars', 'scene=traffic&cars=50'],
+      ['Traffic derby, 100 cars', 'scene=traffic&cars=100'],
     ];
     const PARAMS = {
       wall: [['speed', 'km/h', 54], ['overlap', 'overlap', 1], ['angle', '°', 0]],
@@ -112,6 +123,10 @@
       rollover: [['speed', 'km/h', 50]],
       ramp: [['speed', 'km/h', 70]],
       drop: [['height', 'm', 8], ['pitch', '°', 35]],
+      limbo: [['speed', 'km/h', 80], ['bar', 'bar m', 1.2]],
+      sandwich: [['speed', 'km/h', 60], ['mass', 'truck kg', 18000], ['parked', 'parked kg', 15000]],
+      crusher: [['mass', 'kg', 10000], ['height', 'm', 4]],
+      traffic: [['cars', 'cars', 20]],
     };
     {
       const presetSel = document.getElementById('presetSel');
@@ -165,10 +180,14 @@
     // nodes need the smaller step (engine_softbody::soft_scene_params).
     const HZ = Number(qs.get('hz')) || 240;
     const STEPS_PER_FRAME = Math.max(1, Math.round(HZ / 60));
-    const cap = sceneCapacity(4096, 8192);
-    cap.maxJoints = 512;
+    // Traffic scales the arenas with its car count (161 particles, 923 beams each).
+    const NCARS = scene === 'traffic' ? Math.max(1, Math.min(128, Number(qs.get('cars')) || 20)) : 0;
+    const big = Math.max(NCARS, 24);
+    const cap = sceneCapacity(200 * big + 2000, 220 * big + 4000);
+    cap.maxJoints = 512 + 16 * big;
     const world = await createWorld(device, {
-      cap, vehicleCap: { maxVehicles: 32, maxWheels: 256, maxRays: 16 }, softCap: {},
+      cap, vehicleCap: { maxVehicles: big + 8, maxWheels: 4 * big + 32, maxRays: 16 },
+      softCap: { maxBodies: big + 16, maxBeams: 1000 * big + 8192, maxParticles: 170 * big + 2048, maxTriangles: 400 * big + 4096 },
       status: (s) => { statusEl.textContent = s; },
     });
     Object.assign(world.params, { dt: 1 / HZ, iterations: Number(qs.get('iters')) || 10, gravityY: -9.81, betaLin: 1e7 });
@@ -206,13 +225,14 @@
     };
     staticBox([0, -5, 0], [400, 5, 400], [0, 0, 0, 1], MAT_GROUND);
 
-    const carTruck = proceduralCar(Number(qs.get('deform')) || 0, 0);
-    const carDesc = loadTruck(carTruck);
+    // The procedural car with named parts (bonnet, doors, bumpers, engine…);
+    // ?deform= rebuilds it from .truck text with another threshold (no parts).
+    const carDesc = qs.get('deform') ? loadTruck(proceduralCar(Number(qs.get('deform')), 0)) : proceduralCarDesc();
     const softs = []; // {h, name, core}
     const addSoft = (desc, p, yaw = 0, opts = {}) => {
       const h = world.addSoftVehicle(desc, p, qAxis([0, 1, 0], yaw), opts);
       const e = world.soft.entries[h];
-      softs.push({ h, name: e.name, core: e.core });
+      softs.push({ h, name: e.name, core: e.core, car: desc === carDesc });
       return h;
     };
 
@@ -300,8 +320,50 @@
       const q = qAxis([1, 0, 0], P('pitch', 35) * Math.PI / 180);
       const h = world.addSoftVehicle(carDesc, [0, P('height', 8), 0], q, {});
       const e = world.soft.entries[h];
-      softs.push({ h, name: e.name, core: e.core });
+      softs.push({ h, name: e.name, core: e.core, car: true });
       camMode = 'orbit'; orbit = { yaw: 1.6, pitch: 0.2, dist: 11, target: [0, 1.5, 1] };
+    } else if (scene === 'limbo') {
+      // A fixed bar across the road (underside at `bar` m): the bonnet passes
+      // under, the pillars catch it, and past their strength the roof shears off.
+      const y = P('bar', 1.2) + 0.1;
+      staticBox([0, y, 6], [3.2, 0.1, 0.1]);
+      world.addSoftObstacle(world.colliderCount - 1);
+      for (const x of [-3.3, 3.3]) staticBox([x, y / 2, 6], [0.12, y / 2, 0.12]);
+      addSoft(carDesc, [0, 0.05, -2 - runup], 0, { velocity: [0, 0, P('speed', 80) / 3.6] });
+      camMode = 'orbit'; orbit = { yaw: 2.0, pitch: 0.25, dist: 11, target: [0, 1, 6] };
+    } else if (scene === 'sandwich') {
+      // The car waits behind a parked 15 t truck; an 18 t truck at `speed` hits
+      // it from behind and shunts it into the parked one.
+      const half = [1.25, 1.6, 6.0];
+      dynBox([0, 1.75, CAR_FRONT + 0.4 + half[2]], half, P('parked', 15000));
+      world.addSoftObstacle(world.colliderCount - 1);
+      addSoft(carDesc, [0, 0.05, 0]);
+      dynBox([0, 1.75, -CAR_FRONT - 3 - half[2] - runup], half, P('mass', 18000), [0, 0, P('speed', 60) / 3.6]);
+      world.addSoftObstacle(world.colliderCount - 1);
+      camMode = 'orbit'; orbit = { yaw: 1.3, pitch: 0.3, dist: 16, target: [0, 1, 0] };
+    } else if (scene === 'crusher') {
+      // A `mass` kg block dropped from `height` m onto the roof.
+      dynBox([0, P('height', 4) + 1.5, 0], [1.2, 0.5, 1.5], P('mass', 10000));
+      world.addSoftObstacle(world.colliderCount - 1);
+      addSoft(carDesc, [0, 0.05, 0]);
+      camMode = 'orbit'; orbit = { yaw: 1.0, pitch: 0.35, dist: 10, target: [0, 1, 0] };
+    } else if (scene === 'traffic') {
+      // A walled 140 m arena with concrete blocks and poles; the cars drive
+      // themselves (wander, or chase the nearest car: a demolition derby).
+      const A = 70;
+      for (const [x, z, hx, hz] of [[0, A, A, 0.5], [0, -A, A, 0.5], [A, 0, 0.5, A], [-A, 0, 0.5, A]]) staticBox([x, 1, z], [hx, 1, hz]);
+      for (let i = 0; i < 10; i++) {
+        const a = i * 2.39996, r = 18 + (i % 4) * 11;
+        staticBox([Math.cos(a) * r, 0.5, Math.sin(a) * r], [1.5, 0.5, 0.5], qAxis([0, 1, 0], a));
+        world.addSoftObstacle(world.colliderCount - 1);
+      }
+      for (let i = 0; i < 8; i++) { const a = i * 0.785 + 0.4; pole([Math.cos(a) * 32, 1.5, Math.sin(a) * 32], 0.15, 1.5); }
+      const cols = Math.ceil(Math.sqrt(NCARS));
+      for (let i = 0; i < NCARS; i++) {
+        const x = ((i % cols) - (cols - 1) / 2) * 9, z = (Math.floor(i / cols) - (cols - 1) / 2) * 11;
+        addSoft(carDesc, [x, 0.05, z], ((i * 1.7) % 6.283));
+      }
+      camMode = 'orbit'; orbit = { yaw: 0.6, pitch: 0.6, dist: Math.min(140, 40 + NCARS * 0.9), target: [0, 0, 0] };
     } else if (scene === 'import') {
       // Crash target for an imported vehicle (window.__crashImported): ?target=wall
       // (rigid wall across z = 12) or car (a procedural car parked side-on there).
@@ -332,6 +394,7 @@
     // Flexbody meshes (rounded, subdivided skins bound to particle frames).
     let flexBuf = null, flexIdx = null, flexCount = 0, flexBind = null;
     let skinMode = qs.get('skin') || 'flex';
+    let carR = null;
     const flexCache = new Map();
     const rebuildSkin = () => {
       const tris = [], rest = [];
@@ -348,8 +411,10 @@
       skinBind = null;
       // Flexbody meshes: cars get rounded panels, crates and imports stay flat.
       const binds = [], idx = [];
+      const isCar = (s) => softs.some((x) => x.h === s && x.car);
+      carR?.rebuild(world.soft.entries.map((e, s) => ({ h: s, index: s })).filter((c) => isCar(c.index))).catch(fail);
       world.soft.entries.forEach((e, s) => {
-        if (!e.tris) return;
+        if (!e.tris || (carR && isCar(s))) return;
         if (!flexCache.has(s)) flexCache.set(s, world.soft.inner.flexbody(s, e.core ? 0.06 : 0.0));
         const w = flexCache.get(s);
         const nv = w[0], nt = w[1], base = binds.length / 8;
@@ -363,15 +428,15 @@
       if (binds.length) device.queue.writeBuffer(flexBuf, 0, new Uint32Array(binds));
       if (idx.length) device.queue.writeBuffer(flexIdx, 0, new Uint32Array(idx));
       flexBind = null;
+      flexShadowBind = null;
     };
 
     const SHADER = /* wgsl */`
 struct Body { position: vec3f, invMass: f32, orientation: vec4f, invInertia: vec3f, flags: u32,
   linearVel: vec3f, sleepTimer: f32, angularVel: vec3f, generation: u32, initialPos: vec3f, initialPad: f32, initialRot: vec4f };
 struct Collider { body: u32, shape: u32, material: u32, generation: u32, localPos: vec3f, density: f32, localRot: vec4f, params: vec4f };
-struct Frame { viewProj: mat4x4f, eye: vec4f, light: vec4f, opts: vec4f };
+${LIGHTING_WGSL}
 @group(0) @binding(0) var<storage, read> bodies: array<Body>;
-@group(0) @binding(1) var<uniform> frame: Frame;
 @group(0) @binding(2) var<storage, read> cols: array<Collider>;
 @group(0) @binding(3) var<storage, read> vdata: array<vec4u>;
 @group(0) @binding(4) var<storage, read> soft: array<vec4u>;
@@ -384,14 +449,19 @@ fn qrot(q: vec4f, v: vec3f) -> vec3f {
   return u * (2.0 * dot(u, v)) + v * (q.w * q.w - dot(u, u)) + cross(u, v) * (2.0 * q.w);
 }
 fn hash(n: u32) -> f32 { var x = n * 747796405u + 2891336453u; x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u; return f32((x >> 22u) ^ x) / 4294967295.0; }
-fn shade(c: vec3f, n: vec3f, w: vec3f) -> vec3f {
-  let l = normalize(frame.light.xyz);
-  let diff = max(dot(n, l), 0.0);
-  let v = normalize(frame.eye.xyz - w);
-  let spec = pow(max(dot(reflect(-l, n), v), 0.0), 40.0) * 0.35;
-  let sky = 0.5 + 0.5 * n.y;
-  let fog = clamp(length(frame.eye.xyz - w) / 260.0, 0.0, 1.0);
-  return mix(c * (0.22 + 0.18 * sky + 0.75 * diff) + spec, vec3f(0.55, 0.62, 0.72), fog * fog);
+fn shadeR(c: vec3f, n: vec3f, w: vec3f, rough: f32, metal: f32) -> vec3f { return tonemap(surface(toLinear(c), n, w, rough, metal, 0.0)); }
+fn shade(c: vec3f, n: vec3f, w: vec3f) -> vec3f { return shadeR(c, n, w, 0.6, 0.0); }
+
+// Sky: a full-screen triangle at the far plane.
+struct SkyOut { @builtin(position) clip: vec4f, @location(0) ndc: vec2f };
+@vertex fn vsSky(@builtin(vertex_index) vi: u32) -> SkyOut {
+  let p = vec2f(f32((vi << 1u) & 2u), f32(vi & 2u)) * 2.0 - 1.0;
+  var o: SkyOut; o.clip = vec4f(p, 0.9999, 1.0); o.ndc = p; return o;
+}
+@fragment fn fsSky(i: SkyOut) -> @location(0) vec4f {
+  let far = frame.invViewProj * vec4f(i.ndc, 1.0, 1.0);
+  let d = normalize(far.xyz / far.w - frame.eye.xyz);
+  return vec4f(tonemap(skyColor(d)), 1.0);
 }
 
 struct Out { @builtin(position) clip: vec4f, @location(0) n: vec3f, @location(1) c: vec3f, @location(2) w: vec3f, @location(3) center: vec3f, @location(4) r: f32 };
@@ -562,10 +632,13 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
   o.clip = select(frame.viewProj * vec4f(o.w, 1.0), HIDE, hidden);
   let rr = length(mesh.yz);
   let spoke = step(0.5, fract(atan2(mesh.z, mesh.y) * 0.954930));
-  o.c = select(vec3f(0.08, 0.08, 0.09), mix(vec3f(0.55, 0.57, 0.62), vec3f(0.3, 0.31, 0.34), spoke), abs(mesh.x) > 0.98 && rr < 0.62);
+  o.c = select(vec3f(0.05, 0.05, 0.055), mix(vec3f(0.75, 0.76, 0.8), vec3f(0.25, 0.26, 0.28), spoke), abs(mesh.x) > 0.98 && rr < 0.62);
   return o;
 }
-@fragment fn fsWheel(i: Out) -> @location(0) vec4f { return vec4f(shade(i.c, normalize(i.n), i.w), 1.0); }
+@fragment fn fsWheel(i: Out) -> @location(0) vec4f {
+  let rim = i.c.x > 0.2;
+  return vec4f(shadeR(i.c, normalize(i.n), i.w, select(0.85, 0.25, rim), select(0.0, 1.0, rim)), 1.0);
+}
 
 @vertex fn vsGround(@location(0) p: vec3f) -> Out {
   var o: Out;
@@ -574,11 +647,13 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
   return o;
 }
 @fragment fn fsGround(i: Out) -> @location(0) vec4f {
-  let g = abs(fract(i.w.xz / 4.0) - 0.5);
-  let line = smoothstep(0.47, 0.5, max(g.x, g.y));
-  let checker = step(0.0, sin(i.w.x * 0.3927) * sin(i.w.z * 0.3927));
-  let base = mix(vec3f(0.26, 0.29, 0.27), vec3f(0.3, 0.33, 0.31), checker);
-  return vec4f(shade(mix(base, vec3f(0.45, 0.48, 0.46), line * 0.6), vec3f(0.0, 1.0, 0.0), i.w), 1.0);
+  // Asphalt: grain at two scales, faint 8 m slab lines.
+  let p = vec3f(i.w.x, 0.0, i.w.z);
+  let grain = noise3(p * 9.0) * 0.5 + noise3(p * 1.3) * 0.35 + noise3(p * 0.15) * 0.15;
+  let g = abs(fract(i.w.xz / 8.0) - 0.5);
+  let line = smoothstep(0.485, 0.5, max(g.x, g.y));
+  let base = mix(vec3f(0.2, 0.2, 0.21), vec3f(0.31, 0.31, 0.32), grain) * (1.0 - 0.25 * line);
+  return vec4f(shadeR(base, vec3f(0.0, 1.0, 0.0), i.w, 0.85, 0.0), 1.0);
 }
 `;
     const mod = device.createShaderModule({ label: 'softbody-render', code: SHADER });
@@ -608,12 +683,23 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     const ground = [[-G, -G], [G, -G], [G, G], [-G, -G], [G, G], [-G, G]].flatMap(([x, z]) => [x, 0.001, z]);
     const vbo = (arr) => { const b = device.createBuffer({ size: arr.length * 4, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST }); device.queue.writeBuffer(b, 0, new Float32Array(arr)); return b; };
     const cubeVbo = vbo(cube), cylVbo = vbo(cyl), groundVbo = vbo(ground);
-    const frameBuf = device.createBuffer({ size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const frameBuf = device.createBuffer({ size: 240, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    // 4× MSAA; a 2,048² sun shadow map around the camera target.
+    const SAMPLES = 4;
+    const SHADOW = 2048;
+    const shadowTex = device.createTexture({ size: [SHADOW, SHADOW], format: 'depth32float', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+    const shadowView = shadowTex.createView();
+    const shadowSampler = device.createSampler({ compare: 'less', magFilter: 'linear', minFilter: 'linear' });
+    const shMod = device.createShaderModule({ label: 'softbody-shadow', code: SHADER.replaceAll('frame.viewProj *', 'frame.lightVP *') });
+    const shadowPipe = (vs, buffers) => device.createRenderPipeline({
+      layout: 'auto', vertex: { module: shMod, entryPoint: vs, buffers }, primitive: { cullMode: 'none' },
+      depthStencil: { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'less', depthBias: 2, depthBiasSlopeScale: 2.5 },
+    });
     const vtx6 = [{ arrayStride: 24, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }, { shaderLocation: 1, offset: 12, format: 'float32x3' }] }];
     const depthStencil = { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' };
     const pipe = (vs, fs, buffers, cull = 'back', topology = 'triangle-list') => device.createRenderPipeline({
       layout: 'auto', vertex: { module: mod, entryPoint: vs, buffers }, fragment: { module: mod, entryPoint: fs, targets: [{ format }] },
-      primitive: { cullMode: cull, topology }, depthStencil,
+      primitive: { cullMode: cull, topology }, depthStencil, multisample: { count: SAMPLES },
     });
     const colPipe = pipe('vsCol', 'fsCol', vtx6);
     const wheelPipe = pipe('vsWheel', 'fsWheel', vtx6, 'none');
@@ -621,14 +707,26 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     const skinPipe = pipe('vsSkin', 'fsSkin', [], 'none');
     const beamPipe = pipe('vsBeam', 'fsBeam', [], 'none', 'line-list');
     const flexPipe = pipe('vsFlex', 'fsFlex', [], 'none');
-    const bind = (p, entries) => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: entries.map(([b, buf]) => ({ binding: b, resource: { buffer: buf } })) });
-    const colBind = bind(colPipe, [[0, world.bufs[0]], [1, frameBuf], [2, world.bufs[2]]]);
-    const wheelBind = bind(wheelPipe, [[1, frameBuf], [3, world.bufs[31]]]);
-    const groundBind = bind(groundPipe, [[0, world.bufs[0]], [1, frameBuf]]);
+    const skyPipe = device.createRenderPipeline({
+      layout: 'auto', vertex: { module: mod, entryPoint: 'vsSky' }, fragment: { module: mod, entryPoint: 'fsSky', targets: [{ format }] },
+      primitive: { cullMode: 'none' }, depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'less-equal' }, multisample: { count: SAMPLES },
+    });
+    const bind = (p, entries) => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: entries.map(([b, r]) => ({ binding: b, resource: r instanceof GPUBuffer ? { buffer: r } : r })) });
+    const SH = [[9, shadowView], [10, shadowSampler]];
+    const colBind = bind(colPipe, [[0, world.bufs[0]], [1, frameBuf], [2, world.bufs[2]], ...SH]);
+    const wheelBind = bind(wheelPipe, [[1, frameBuf], [3, world.bufs[31]], ...SH]);
+    const groundBind = bind(groundPipe, [[0, world.bufs[0]], [1, frameBuf], ...SH]);
+    const skyBind = bind(skyPipe, [[1, frameBuf]]);
+    const colShadow = shadowPipe('vsCol', vtx6), wheelShadow = shadowPipe('vsWheel', vtx6), flexShadow = shadowPipe('vsFlex', []);
+    const colShadowBind = bind(colShadow, [[0, world.bufs[0]], [1, frameBuf], [2, world.bufs[2]]]);
+    const wheelShadowBind = bind(wheelShadow, [[1, frameBuf], [3, world.bufs[31]]]);
+    let flexShadowBind = null;
+    // The procedural car's detailed mesh (car-render.mjs); imports keep the flexbody skin.
+    carR = createCarRenderer(device, { format, sampleCount: SAMPLES, bodies: world.bufs[0], frameBuf, shadowView, shadowSampler, visual: proceduralCarVisual(), soft: world.soft });
     const beamBind = bind(beamPipe, [[0, world.bufs[0]], [1, frameBuf], [4, world.bufs[32]]]);
     let skinBind = null;
     rebuildSkin();
-    let depth = null;
+    let depth = null, msaa = null;
     let beamView = qs.get('beams') === '1';
     document.getElementById('beamsBtn').onclick = (e) => { beamView = !beamView; e.target.blur(); };
     document.getElementById('resetBtn').onclick = (e) => { resetScene(); e.target.blur(); };
@@ -695,6 +793,65 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     }
     const playerCore = () => softs[player]?.core;
 
+    // ---------------------------------------------------------------- traffic AI
+    // Each car reads back its core's pose every frame and steers toward a target:
+    // a random point in the arena (wander) or the nearest other car (chase). Two in
+    // three wander, one chases; a stuck car reverses out. Keys take over car 0.
+    const aiCars = [];
+    let aiRb = null, aiBusy = false, aiPoses = null, userUntil = 0;
+    function setupAi() {
+      if (scene !== 'traffic') return;
+      softs.forEach((s, i) => s.core && aiCars.push({ i, core: s.core, mode: i % 3 === 2 ? 'chase' : 'wander', target: null, t: 0, slow: 0, reverse: 0, kmh: 35 + ((i * 17) % 45), seed: i * 7919 + 13 }));
+      aiRb = device.createBuffer({ size: Math.max(16, aiCars.length * 112), usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    }
+    const aiRand = (c) => { c.seed = (c.seed * 1103515245 + 12345) >>> 0; return (c.seed >>> 8) / 16777216; };
+    function encodeAiRead(enc) {
+      if (!aiRb || aiBusy) return false;
+      aiCars.forEach((c, k) => enc.copyBufferToBuffer(world.bufs[0], c.core.chassis * 112, aiRb, k * 112, 112));
+      return true;
+    }
+    function afterAiRead() {
+      aiBusy = true;
+      aiRb.mapAsync(GPUMapMode.READ).then(() => {
+        const f = new Float32Array(aiRb.getMappedRange().slice(0));
+        aiRb.unmap();
+        aiPoses = aiCars.map((_, k) => ({ p: [f[k * 28], f[k * 28 + 1], f[k * 28 + 2]], q: [f[k * 28 + 4], f[k * 28 + 5], f[k * 28 + 6], f[k * 28 + 7]], v: [f[k * 28 + 12], f[k * 28 + 13], f[k * 28 + 14]] }));
+        aiBusy = false;
+      }).catch(fail);
+    }
+    function aiDrive(dt) {
+      if (!aiPoses) return;
+      const userDriving = performance.now() < userUntil;
+      aiCars.forEach((c, k) => {
+        if (userDriving && c.i === player) return;
+        const me = aiPoses[k];
+        const fwd = qrot(me.q, [0, 0, 1]), right = qrot(me.q, [-1, 0, 0]), up = qrot(me.q, [0, 1, 0]);
+        const speed = Math.hypot(me.v[0], me.v[2]);
+        let input = { forward: 0, steer: 0, brake: 0, handbrake: 0 };
+        c.t += dt;
+        if (up[1] < 0.3) { world.vehicles.setInput(world.backend, c.core.vehicle, input); return; } // on its side or roof
+        if (c.mode === 'chase') {
+          let best = null, bd = 1e9;
+          aiPoses.forEach((o, j) => { if (j !== k) { const d = Math.hypot(o.p[0] - me.p[0], o.p[2] - me.p[2]); if (d < bd) { bd = d; best = o; } } });
+          if (best) c.target = [best.p[0] + best.v[0] * 0.4, 0, best.p[2] + best.v[2] * 0.4];
+        } else if (!c.target || c.t > 9 || Math.hypot(c.target[0] - me.p[0], c.target[2] - me.p[2]) < 8) {
+          c.target = [(aiRand(c) - 0.5) * 120, 0, (aiRand(c) - 0.5) * 120]; c.t = 0;
+        }
+        const d = [c.target[0] - me.p[0], 0, c.target[2] - me.p[2]];
+        const ang = Math.atan2(d[0] * right[0] + d[2] * right[2], d[0] * fwd[0] + d[2] * fwd[2]);
+        input.steer = Math.max(-1, Math.min(1, ang * 1.6));
+        const want = c.kmh / 3.6 * (Math.abs(ang) > 1.2 ? 0.45 : 1);
+        input.forward = speed < want ? 0.85 : 0;
+        if (speed > want * 1.3) input.brake = 0.4;
+        // Stuck against something: reverse out with the wheel turned the other way.
+        c.slow = speed < 0.8 ? c.slow + dt : 0;
+        if (c.slow > 1.6 && c.reverse <= 0) { c.reverse = 1.4; c.slow = 0; }
+        if (c.reverse > 0) { c.reverse -= dt; input = { forward: -0.8, steer: -input.steer, brake: 0, handbrake: 0 }; }
+        world.vehicles.setInput(world.backend, c.core.vehicle, input);
+      });
+    }
+    setupAi();
+
     let cannonNext = 0;
     function fireCannon() {
       const body = cannon[cannonNext++ % cannon.length];
@@ -730,6 +887,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       rebuildSkin();
       damage = null;
       breaks = 0;
+      tornOff.length = 0;
       if (scene === 'tbone') pendingRam = 60;
     }
     const initialSoftCount = softs.length;
@@ -816,6 +974,8 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     }
     // Beam records of every soft body (a few times a second): yielded / broken counts.
     let damage = null, breaks = 0, damageBusy = false, damageStep = -1;
+    const tornOff = []; // "car: part" per piece-detached event
+    window.__tornOff = tornOff;
     const beamRb = device.createBuffer({ size: Math.max(64, world.soft.cap.maxBeams * 64), usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
     async function readDamage() {
       if (damageBusy || !beamTotal) return damage;
@@ -839,8 +999,13 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
         }
         return { name: e.name, beams: e.beams, yielded, broken };
       });
-      const list = await world.pollBeamBreaks();
-      breaks += list.length;
+      // Destruction events (engine): beam breaks and the parts they tore off.
+      const ev = await world.pollSoftEvents();
+      breaks += ev.breaks.length;
+      for (const p of ev.pieces) {
+        const who = world.soft.entries[p.softBody]?.name.split(' (')[0] ?? `body ${p.softBody}`;
+        tornOff.push(`${who}: ${p.parts.length ? p.parts.join(', ') : `${p.nodes.length} nodes`}`);
+      }
       return damage;
     }
 
@@ -850,12 +1015,46 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       if (lastPlayer) speedEl.innerHTML = `${(Math.hypot(...lastPlayer.v) * 3.6).toFixed(0)} <small>km/h</small>`;
       if (world.steps - damageStep >= 30) { damageStep = world.steps; readDamage().catch(fail); }
       if (damage) {
-        damageEl.innerHTML = damage.filter((d) => d.beams > 200 || damage.length < 4)
-          .map((d, i) => `${i === player ? '▶ ' : ''}${d.name.split(' (')[0].slice(0, 22)}: ${d.yielded} bent · ${d.broken} broken / ${d.beams}`).join('<br>');
-        eventsEl.textContent = `${breaks} beam-break events`;
+        damageEl.innerHTML = damage.map((d, i) => ({ ...d, i })).filter((d) => d.i === player || (d.beams > 200 && (damage.length < 6 || d.yielded > 0))).slice(0, 8)
+          .map((d) => `${d.i === player ? '▶ ' : ''}${d.name.split(' (')[0].slice(0, 22)}: ${d.yielded} bent · ${d.broken} broken / ${d.beams}`).join('<br>');
+        eventsEl.innerHTML = `${breaks} beam-break events` + (tornOff.length ? `<br>torn off: ${tornOff.slice(-4).join('<br>')}` : '');
       }
     }
-    const frameF = new Float32Array(28);
+    const frameF = new Float32Array(60);
+    const mat4Mul = (a, b) => { const o = new Float32Array(16); for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) { let x = 0; for (let k = 0; k < 4; k++) x += a[k * 4 + r] * b[c * 4 + k]; o[c * 4 + r] = x; } return o; };
+    function mat4Inv(m) {
+      const inv = new Float32Array(16);
+      inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+      inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+      inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+      inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+      inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+      inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+      inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+      inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+      inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+      inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+      inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+      inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+      inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+      inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+      inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+      inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+      const det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+      for (let i = 0; i < 16; i++) inv[i] /= det || 1;
+      return inv;
+    }
+    const LIGHT = norm3([0.45, 0.8, 0.35]);
+    // Sun's orthographic view over a 36 m square around the camera target.
+    function lightViewProj(at) {
+      const E = 18, near = 1, far = 160;
+      const eye = [at[0] + LIGHT[0] * 80, at[1] + LIGHT[1] * 80, at[2] + LIGHT[2] * 80];
+      const z = norm3(sub3(eye, at)), x = norm3(cross3([0, 1, 0], z)), y = cross3(z, x);
+      const view = new Float32Array([x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0,
+        -(x[0] * eye[0] + x[1] * eye[1] + x[2] * eye[2]), -(y[0] * eye[0] + y[1] * eye[1] + y[2] * eye[2]), -(z[0] * eye[0] + z[1] * eye[1] + z[2] * eye[2]), 1]);
+      const proj = new Float32Array([1 / E, 0, 0, 0, 0, 1 / E, 0, 0, 0, 0, 1 / (near - far), 0, 0, 0, near / (near - far), 1]);
+      return mat4Mul(proj, view);
+    }
     function updateCamera(dt, snap) {
       const at = camMode === 'orbit' && orbit.target ? orbit.target : lastPlayer ? [lastPlayer.p[0], lastPlayer.p[1] + 0.6, lastPlayer.p[2]] : camTarget;
       let desiredE;
@@ -871,29 +1070,59 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       camTarget = camTarget.map((x, i) => x + (at[i] - x) * Math.min(1, k * 4));
       camEye = camEye.map((x, i) => x + (desiredE[i] - x) * k);
       if (!depth || depth.width !== canvas.width || depth.height !== canvas.height) {
-        depth?.destroy();
-        depth = device.createTexture({ size: [canvas.width, canvas.height], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT });
+        depth?.destroy(); msaa?.destroy();
+        depth = device.createTexture({ size: [canvas.width, canvas.height], format: 'depth24plus', sampleCount: SAMPLES, usage: GPUTextureUsage.RENDER_ATTACHMENT });
+        msaa = device.createTexture({ size: [canvas.width, canvas.height], format, sampleCount: SAMPLES, usage: GPUTextureUsage.RENDER_ATTACHMENT });
       }
-      frameF.set(viewProj(camEye, camTarget, canvas.width / canvas.height), 0);
+      const vp = viewProj(camEye, camTarget, canvas.width / canvas.height);
+      frameF.set(vp, 0);
       frameF.set([...camEye, 0], 16);
-      frameF.set([0.4, 0.85, 0.3, 0], 20);
+      frameF.set([...LIGHT, 0], 20);
       frameF.set([beamView ? 1 : 0, 0, 0, 0], 24);
+      frameF.set(lightViewProj(camTarget), 28);
+      frameF.set(mat4Inv(vp), 44);
       device.queue.writeBuffer(frameBuf, 0, frameF);
     }
+    // Seconds of simulation since the last drawn frame (particle effects follow the
+    // physics, so a paused or frame-stepped scene freezes them too).
+    let fxDt = 0, fxSteps = 0;
+    const FX = qs.get('fx') === '1';
     function drawScene(enc) {
-      if (!skinBind) skinBind = bind(skinPipe, [[0, world.bufs[0]], [1, frameBuf], [5, triBuf], [6, restBuf]]);
+      fxDt = Math.min(0.1, Math.max(0, world.steps - fxSteps) / HZ); fxSteps = world.steps;
+      if (!skinBind) skinBind = bind(skinPipe, [[0, world.bufs[0]], [1, frameBuf], [5, triBuf], [6, restBuf], ...SH]);
+      const flexMode = skinMode === 'flex';
+      // Particle effects (sparks, shards, chips, dust) are off by default so the
+      // deformation reads clearly; ?fx=1 turns them on.
+      if (flexMode) carR.compute(enc, FX ? fxDt : 0);
+      // Sun shadow map.
+      const sp = enc.beginRenderPass({ colorAttachments: [], depthStencilAttachment: { view: shadowView, depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' } });
+      sp.setPipeline(colShadow); sp.setBindGroup(0, colShadowBind); sp.setVertexBuffer(0, cubeVbo); sp.draw(36, world.colliderCount - 1);
+      if (world.vehicles.wheelCount) { sp.setPipeline(wheelShadow); sp.setBindGroup(0, wheelShadowBind); sp.setVertexBuffer(0, cylVbo); sp.draw(cyl.length / 6, world.vehicles.wheelCount); }
+      if (flexMode) {
+        carR.drawShadow(sp);
+        if (flexCount) {
+          if (!flexShadowBind) flexShadowBind = bind(flexShadow, [[0, world.bufs[0]], [1, frameBuf], [7, flexBuf], [8, flexIdx]]);
+          sp.setPipeline(flexShadow); sp.setBindGroup(0, flexShadowBind); sp.draw(flexCount);
+        }
+      }
+      sp.end();
       const rp = enc.beginRenderPass({
-        colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.55, 0.62, 0.72, 1], loadOp: 'clear', storeOp: 'store' }],
+        colorAttachments: [{ view: msaa.createView(), resolveTarget: context.getCurrentTexture().createView(), clearValue: [0.55, 0.62, 0.72, 1], loadOp: 'clear', storeOp: 'discard' }],
         depthStencilAttachment: { view: depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
       });
+      rp.setPipeline(skyPipe); rp.setBindGroup(0, skyBind); rp.draw(3);
       rp.setPipeline(groundPipe); rp.setBindGroup(0, groundBind); rp.setVertexBuffer(0, groundVbo); rp.draw(6);
       rp.setPipeline(colPipe); rp.setBindGroup(0, colBind); rp.setVertexBuffer(0, cubeVbo); rp.draw(36, world.colliderCount - 1);
-      if (skinMode === 'flex' && flexCount) {
-        if (!flexBind) flexBind = bind(flexPipe, [[0, world.bufs[0]], [1, frameBuf], [7, flexBuf], [8, flexIdx]]);
-        rp.setPipeline(flexPipe); rp.setBindGroup(0, flexBind); rp.draw(flexCount);
+      if (flexMode) {
+        carR.drawOpaque(rp);
+        if (flexCount) {
+          if (!flexBind) flexBind = bind(flexPipe, [[0, world.bufs[0]], [1, frameBuf], [7, flexBuf], [8, flexIdx], ...SH]);
+          rp.setPipeline(flexPipe); rp.setBindGroup(0, flexBind); rp.draw(flexCount);
+        }
       } else if (triCount) { rp.setPipeline(skinPipe); rp.setBindGroup(0, skinBind); rp.draw(triCount * 3); }
       if (beamView && beamTotal) { rp.setPipeline(beamPipe); rp.setBindGroup(0, beamBind); rp.draw(2, beamTotal); }
       if (world.vehicles.wheelCount) { rp.setPipeline(wheelPipe); rp.setBindGroup(0, wheelBind); rp.setVertexBuffer(0, cylVbo); rp.draw(cyl.length / 6, world.vehicles.wheelCount); }
+      if (flexMode) { carR.drawGlass(rp); if (FX) carR.drawFx(rp); }
       rp.end();
     }
     function stepPhysics(enc, n) {
@@ -906,9 +1135,10 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     let fpsAcc = 0, fpsN = 0, fpsShow = 0;
     const updateStatus = () => {
       statusEl.textContent = `${world.bodyCount} bodies (${world.soft.entries.reduce((n, e) => n + e.particles, 0)} particles, ${beamTotal} beams) · ${HZ} Hz × ${world.params.iterations} it · step ${world.steps} (${(world.steps / HZ).toFixed(1)} s)`
-        + (manual ? '' : ` · ${fpsShow.toFixed(0)} fps`) + (lastCounters ? ` · contacts ${lastCounters.contact} · awake ${lastCounters.awake}` : '');
+        + (manual ? '' : ` · ${fpsShow.toFixed(0)} fps · ${(realTime * 100).toFixed(0)}% real time`) + (lastCounters ? ` · contacts ${lastCounters.contact} · awake ${lastCounters.awake}` : '');
     };
     let manual = false;
+    let stepAcc = 0, simAcc = 0, wallAcc = 0, realTime = 1;
     function frame(now) {
       const dt = Math.min(0.05, (now - lastT) / 1000);
       lastT = now;
@@ -925,16 +1155,28 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       const core = playerCore();
       if (core) {
         const input = readInput();
-        world.vehicles.setInput(world.backend, core.vehicle, input);
+        const touched = input.forward || input.steer || input.handbrake;
+        if (touched) userUntil = performance.now() + 3000;
+        if (scene !== 'traffic' || performance.now() < userUntil) world.vehicles.setInput(world.backend, core.vehicle, input);
       }
+      aiDrive(dt);
       updateCamera(dt, false);
       const enc = device.createCommandEncoder();
-      stepPhysics(enc, STEPS_PER_FRAME);
+      const aiRead = encodeAiRead(enc);
+      // Real time: as many steps as the wall clock moved (a slow frame catches up
+      // with up to twice the usual count; beyond that the simulation slows down).
+      stepAcc += dt * HZ;
+      const steps = Math.min(Math.floor(stepAcc), 2 * STEPS_PER_FRAME);
+      stepAcc = Math.min(stepAcc - steps, STEPS_PER_FRAME);
+      simAcc += steps / HZ; wallAcc += dt;
+      if (wallAcc > 0.5) { realTime = simAcc / wallAcc; simAcc = 0; wallAcc = 0; }
+      if (steps) stepPhysics(enc, steps);
       drawScene(enc);
       const rb = rbFree.pop();
       encodeReadback(enc, rb);
       device.queue.submit([enc.finish()]);
       rb.mapAsync(GPUMapMode.READ).then(() => { decode(rb); rbFree.push(rb); updateHud(); }).catch(fail);
+      if (aiRead) afterAiRead();
       updateStatus();
       requestAnimationFrame(frame);
     }
@@ -946,6 +1188,12 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       const core = playerCore();
       if (input && core) world.vehicles.setInput(world.backend, core.vehicle, input);
       for (let i = 0; i < n; i += 8) {
+        if (aiCars.length) {
+          // Traffic drives itself in frame-stepped runs too: fresh poses, then AI.
+          const re = device.createCommandEncoder();
+          if (encodeAiRead(re)) { device.queue.submit([re.finish()]); afterAiRead(); while (aiBusy) await new Promise((r) => setTimeout(r, 1)); }
+          aiDrive(Math.min(8, n - i) / HZ);
+        }
         const enc = device.createCommandEncoder();
         stepPhysics(enc, Math.min(8, n - i));
         device.queue.submit([enc.finish()]);

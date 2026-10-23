@@ -56,6 +56,56 @@ pub fn soft_dune_buggy(mount_scale: f32) -> String {
     engine_softbody::buggy::dune_buggy_soft_with(&k).to_json()
 }
 
+/// Render mesh of the procedural hatchback (engine_softbody::visual), bound to
+/// its nodes (indices relative to the soft body). Words: [vertices, triangles],
+/// then 8 per vertex (centre, x, y node; part | seam << 8; frame coordinates and
+/// the frame's longest rest edge as f32 bits), 3 per vertex (rest position, f32
+/// bits), 4 per triangle (vertices, material).
+#[wasm_bindgen]
+pub fn soft_procedural_car_visual() -> Vec<u32> {
+    use engine_softbody::procedural::car_truck_layout;
+    use engine_softbody::visual::car_visual;
+    use glam::Vec3;
+    let p = CarParams::default();
+    let (text, layout) = car_truck_layout(&p);
+    let d = load_truck(&text);
+    let nodes: Vec<Vec3> = d.nodes.iter().map(|n| Vec3::from_array(n.position)).collect();
+    let v = car_visual(&p, &layout, &nodes);
+    let mut out = vec![v.vertices.len() as u32, v.tris.len() as u32];
+    for (i, b) in v.bindings.iter().enumerate() {
+        let [c, x, y] = b.nodes;
+        let rest = (nodes[x as usize] - nodes[c as usize])
+            .length()
+            .max((nodes[y as usize] - nodes[c as usize]).length());
+        out.extend_from_slice(&[c, x, y, u32::from(v.part[i]) | u32::from(v.seam[i]) << 8]);
+        out.extend(b.coords.iter().map(|f| f.to_bits()));
+        out.push(rest.to_bits());
+    }
+    for p in &v.vertices {
+        out.extend(p.to_array().iter().map(|f| f.to_bits()));
+    }
+    for (t, m) in v.tris.iter().zip(&v.tri_material) {
+        out.extend_from_slice(&[t[0], t[1], t[2], u32::from(*m)]);
+    }
+    out
+}
+
+/// The procedural hatchback as a SoftVehicleDesc (JSON) with named parts
+/// (`body`, `bonnet`, `boot`, `door_fl`…, `bumper_front`, `bumper_rear`, `engine`).
+#[wasm_bindgen]
+pub fn soft_procedural_car_desc() -> String {
+    engine_softbody::procedural::car_desc(&CarParams::default()).0.to_json()
+}
+
+fn pieces_json(p: &[engine_softbody::PieceDetached]) -> String {
+    serde_json::Value::Array(
+        p.iter()
+            .map(|p| json!({ "softBody": p.soft_body.0, "nodes": p.nodes, "parts": p.parts, "mass": p.mass }))
+            .collect(),
+    )
+    .to_string()
+}
+
 /// A braced lattice crate as `.truck` text.
 #[wasm_bindgen]
 pub fn soft_box_truck(
@@ -259,6 +309,53 @@ pub fn soft_load_jbeam(files_json: &str, pc: Option<String>) -> Result<String, J
 
 #[wasm_bindgen]
 impl WasmSoftHost {
+    /// Bind render-mesh vertices (xyz triples in the vehicle's own frame) to soft
+    /// body `h`, optionally only to the nodes of part `part`. Returns 8 words per
+    /// vertex (engine_softbody::SkinBinding::to_words): centre, x, y body index,
+    /// flags (0), coordinates and rest edge as f32 bits.
+    pub fn bind_mesh(&self, h: u32, vertices: &[f32], part: Option<String>) -> Result<Vec<u32>, JsError> {
+        use glam::Vec3;
+        let verts: Vec<Vec3> = vertices.chunks_exact(3).map(|c| Vec3::new(c[0], c[1], c[2])).collect();
+        let b = self.host.bind_mesh(SoftHandle(h), &verts, part.as_deref()).map_err(|e| JsError::new(&e))?;
+        Ok(b.iter().flat_map(|b| b.to_words(0)).collect())
+    }
+
+    /// Record beam breaks (`[beam, softBody]` pairs from the event ring) and
+    /// return the pieces they cut loose as JSON:
+    /// `[{softBody, nodes: [...], parts: [...], mass}]`.
+    pub fn note_breaks(&mut self, pairs: &[u32]) -> String {
+        let breaks: Vec<engine_softbody::BeamBreak> = pairs
+            .chunks_exact(2)
+            .map(|c| engine_softbody::BeamBreak { beam: c[0], force: 0.0, soft_body: c[1] })
+            .collect();
+        pieces_json(&self.host.note_breaks(&breaks))
+    }
+
+    /// Resynchronise soft body `h`'s broken set from a beam readback (16 words
+    /// per beam, the arena records), returning newly detached pieces as JSON.
+    pub fn sync_broken(&mut self, h: u32, beam_words: &[u32]) -> String {
+        let beams: Vec<engine_softbody::model::Beam> = beam_words.chunks_exact(16).map(engine_softbody::model::Beam::from_words).collect();
+        pieces_json(&self.host.sync_broken(SoftHandle(h), &beams))
+    }
+
+    /// Damage of soft body `h` from a beam readback (16 words per beam) and,
+    /// when given, its particle positions (xyz triples): JSON
+    /// engine_softbody::SoftDamage (`node_deformation` empty without positions).
+    pub fn damage(&self, h: u32, beam_words: &[u32], positions: &[f32]) -> String {
+        use glam::Vec3;
+        let beams: Vec<engine_softbody::model::Beam> = beam_words.chunks_exact(16).map(engine_softbody::model::Beam::from_words).collect();
+        let e = self.host.entry(SoftHandle(h));
+        let rest: Vec<Vec3> = e.desc.nodes.iter().map(|n| Vec3::from_array(n.position)).collect();
+        let now: Vec<Vec3> = positions.chunks_exact(3).map(|c| Vec3::new(c[0], c[1], c[2])).collect();
+        let pos = (now.len() == rest.len()).then_some((&rest[..], &now[..]));
+        let d = engine_softbody::damage_summary(&beams, pos, Some(&e.detached));
+        json!({
+            "bent": d.bent, "broken": d.broken, "beams": d.beams, "plasticWork": d.plastic_work,
+            "maxBeamStrain": d.max_beam_strain, "nodeDeformation": d.node_deformation, "detached": e.detached,
+        })
+        .to_string()
+    }
+
     /// Visual mesh of soft body `h` (flexbody skinning): its skin triangles
     /// subdivided and rounded (`bulge` × edge length), each vertex bound to the
     /// frame of the skin triangle it came from. Returns `[vertexCount, triCount, bindings…, indices…]`

@@ -32,6 +32,15 @@ pub struct CarParams {
     /// detacher group per panel, so a hard enough hit tears a whole panel off.
     pub panels: bool,
     pub mount_strength: f32,
+    /// An engine block: a dense eight-node box in the front bay on breakable
+    /// mounts, carrying `engine_mass` kg (out of the dry mass). A frontal crash
+    /// crushes the bay up to it and then pushes it back toward the cabin.
+    pub engine_block: bool,
+    pub engine_mass: f32,
+    /// Pillars (beams joining the roof to the body) are brittle: elastic up to
+    /// `pillar_strength` × strength, then they snap. A low bar that catches the
+    /// pillars shears the roof off instead of folding it (underride).
+    pub pillar_strength: f32,
 }
 
 impl Default for CarParams {
@@ -41,7 +50,7 @@ impl Default for CarParams {
             length: 4.0,
             width: 1.7,
             stations: 11,
-            dry_mass: 600.0,
+            dry_mass: 520.0,
             cargo_mass: 250.0,
             minimass: 5.0,
             spring: 2.0e6,
@@ -55,6 +64,9 @@ impl Default for CarParams {
             bumper: true,
             panels: true,
             mount_strength: 0.3,
+            engine_block: true,
+            engine_mass: 160.0,
+            pillar_strength: 0.05,
         }
     }
 }
@@ -93,6 +105,63 @@ pub const CAR_RING: usize = 8;
 /// a door can intrude and a pole can fold the front. Four wheels on dedicated
 /// axle nodes, an engine, and a bumper on a detacher group.
 pub fn car_truck(p: &CarParams) -> String {
+    car_truck_layout(p).0
+}
+
+/// The procedural car as a [`crate::SoftVehicleDesc`] with named parts: `body`
+/// (the shell and axle nodes), `bonnet`, `boot`, `door_fl`, `door_rl`,
+/// `door_fr`, `door_rr`, `bumper_front`, `bumper_rear` and `engine` (those the
+/// parameters include).
+pub fn car_desc(p: &CarParams) -> (crate::SoftVehicleDesc, CarLayout) {
+    let (text, layout) = car_truck_layout(p);
+    let mut d = crate::truck::load_truck(&text);
+    let ring_nodes = (layout.stations * CAR_RING) as u32;
+    let mut body: Vec<u32> = (0..ring_nodes).collect();
+    body.extend(ring_nodes..ring_nodes + 8); // axle nodes follow the rings
+    let mut parts = vec![("body", body)];
+    for (name, nodes) in ["bonnet", "boot", "door_fl", "door_rl", "door_fr", "door_rr"].iter().zip(&layout.panels) {
+        parts.push((name, nodes.clone()));
+    }
+    parts.push(("bumper_front", layout.front_bumper.clone()));
+    parts.push(("bumper_rear", layout.rear_bumper.clone()));
+    parts.push(("engine", layout.engine.clone()));
+    parts.push(("roof", layout.roof.clone()));
+    d.parts = parts
+        .into_iter()
+        .filter(|(_, n)| !n.is_empty())
+        .map(|(name, nodes)| crate::SoftPart { name: name.to_string(), nodes })
+        .collect();
+    (d, layout)
+}
+
+/// What the visual mesh needs to know about the procedural car's node layout.
+#[derive(Clone, Debug, Default)]
+pub struct CarLayout {
+    pub stations: usize,
+    /// Rings that belong to the passenger cell.
+    pub cabin: Vec<bool>,
+    pub front_bay: usize,
+    pub rear_bay: usize,
+    /// First ring of the front doors (the rear doors end there).
+    pub mid: usize,
+    pub cabin_first: usize,
+    pub cabin_last: usize,
+    /// Axle positions along Z (front, rear) and the axle height.
+    pub axles: [f32; 2],
+    pub axle_y: f32,
+    /// Panel node indices: bonnet, boot lid, front-left, rear-left, front-right,
+    /// rear-right door (empty without panels).
+    pub panels: Vec<Vec<u32>>,
+    pub front_bumper: Vec<u32>,
+    pub rear_bumper: Vec<u32>,
+    /// The engine block's eight nodes (empty without one).
+    pub engine: Vec<u32>,
+    /// Roof nodes (the passenger cell's top rows).
+    pub roof: Vec<u32>,
+}
+
+/// [`car_truck`] and the layout of its nodes.
+pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
     let mut s = String::new();
     let _ = writeln!(s, "{}", p.name);
     let _ = writeln!(
@@ -210,6 +279,31 @@ pub fn car_truck(p: &CarParams) -> String {
         panel_nodes.push(grid);
     }
     let rear_bumper_first = nodes.len();
+    let mut layout = CarLayout {
+        stations: n,
+        cabin: cabin.clone(),
+        front_bay,
+        rear_bay,
+        mid,
+        cabin_first,
+        cabin_last,
+        axles: [wb, -wb],
+        axle_y,
+        panels: panel_nodes
+            .iter()
+            .map(|g| g.iter().flatten().map(|&i| i as u32).collect())
+            .collect(),
+        front_bumper: if p.bumper { (bumper_first as u32..bumper_first as u32 + 6).collect() } else { Vec::new() },
+        rear_bumper: Vec::new(),
+        engine: Vec::new(),
+        roof: (0..n)
+            .filter(|&k| cabin[k])
+            .flat_map(|k| [4usize, 5, 7].map(|j| (k * CAR_RING + j) as u32))
+            .collect(),
+    };
+    if p.panels {
+        layout.rear_bumper = (rear_bumper_first as u32..rear_bumper_first as u32 + 6).collect();
+    }
     if p.panels {
         let z = -0.5 * p.length - 0.16;
         for y in [0.38f32, 0.62] {
@@ -217,6 +311,20 @@ pub fn car_truck(p: &CarParams) -> String {
                 nodes.push([x, y, z + if x == 0.0 { 0.0 } else { 0.06 }]);
             }
         }
+    }
+    let ring_z = |k: usize| -0.5 * p.length + k as f32 / (n - 1) as f32 * p.length;
+    let engine_first = nodes.len();
+    let bay_rings: Vec<usize> = (front_bay..n).collect();
+    let engine_z = 0.5 * (ring_z(front_bay) + ring_z(n - 1));
+    if p.engine_block {
+        for &y in &[0.4f32, 0.72] {
+            for &z in &[engine_z - 0.22, engine_z + 0.22] {
+                for &x in &[0.26f32, -0.26] {
+                    nodes.push([x, y, z]);
+                }
+            }
+        }
+        layout.engine = (engine_first as u32..engine_first as u32 + 8).collect();
     }
     // Shell faces a panel covers (it is the skin there): (ring k, row a, row b).
     let covered = |k: usize, a: usize, b: usize| {
@@ -231,7 +339,9 @@ pub fn car_truck(p: &CarParams) -> String {
     for (i, q) in nodes.iter().enumerate() {
         // Floor nodes carry the cargo (seats, engine, fuel): a low centre of mass.
         let floor = i < ring_nodes && matches!(i % CAR_RING, 0 | 1 | 6);
-        if floor {
+        if p.engine_block && (engine_first..engine_first + 8).contains(&i) {
+            let _ = writeln!(s, "{i}, {:.4}, {:.4}, {:.4}, l, {:.1}", q[0], q[1], q[2], p.engine_mass / 8.0);
+        } else if floor {
             let _ = writeln!(s, "{i}, {:.4}, {:.4}, {:.4}, l", q[0], q[1], q[2]);
         } else {
             let _ = writeln!(s, "{i}, {:.4}, {:.4}, {:.4}", q[0], q[1], q[2]);
@@ -308,6 +418,8 @@ pub fn car_truck(p: &CarParams) -> String {
             door || (!cabin[k] && (k <= 1 || k + 4 >= n))
         }
     };
+    let roof_node = |i: usize| i < ring_nodes && cabin[i / CAR_RING] && matches!(i % CAR_RING, 4 | 5 | 7);
+    let pillar = |a: usize, b: usize| roof_node(a) != roof_node(b);
     let _ = writeln!(s, "beams");
     for zone_crumple in [false, true] {
         let (deform, strength) = if zone_crumple {
@@ -320,12 +432,28 @@ pub fn car_truck(p: &CarParams) -> String {
             "set_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, {:.2}",
             p.spring, p.damp, deform, strength, p.plastic_coef
         );
-        for (a, b, o) in beams.iter().filter(|(a, b, _)| (crumple(*a) || crumple(*b)) == zone_crumple) {
+        for (a, b, o) in beams.iter().filter(|(a, b, _)| !pillar(*a, *b) && (crumple(*a) || crumple(*b)) == zone_crumple) {
             if o.is_empty() {
                 let _ = writeln!(s, "{a}, {b}");
             } else {
                 let _ = writeln!(s, "{a}, {b}, {o}");
             }
+        }
+    }
+    // Pillars: brittle (the yield threshold above the strength), so they snap.
+    let _ = writeln!(
+        s,
+        "set_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
+        p.spring,
+        p.damp,
+        p.strength * p.pillar_strength * 2.0,
+        p.strength * p.pillar_strength
+    );
+    for (a, b, o) in beams.iter().filter(|(a, b, _)| pillar(*a, *b)) {
+        if o.is_empty() {
+            let _ = writeln!(s, "{a}, {b}");
+        } else {
+            let _ = writeln!(s, "{a}, {b}, {o}");
         }
     }
     if p.bumper {
@@ -412,7 +540,9 @@ pub fn car_truck(p: &CarParams) -> String {
                             mounts.push((pn, ring(k, jj)));
                         }
                     }
-                    mounts.push((pn, ring(k, if rows.contains(&7) { 6 } else { 7 })));
+                    // Out-of-plane anchor: the section's floor centre (a door must not
+                    // tie the roof to the body).
+                    mounts.push((pn, ring(k, 6)));
                 }
             }
             sheets.push((sheet, mounts));
@@ -462,6 +592,54 @@ pub fn car_truck(p: &CarParams) -> String {
             group += 1;
         }
         let _ = writeln!(s, "detacher_group end");
+    }
+    if p.engine_block {
+        // The block itself: every pair of its corners, far stronger than the body.
+        let _ = writeln!(
+            s,
+            "\nset_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
+            p.spring * 2.0,
+            p.damp,
+            p.deform * 40.0,
+            p.strength * 20.0
+        );
+        for a in 0..8 {
+            for b in a + 1..8 {
+                let _ = writeln!(s, "{}, {}", engine_first + a, engine_first + b);
+            }
+        }
+        // Mounts: lower corners to the floor rails, upper ones to the belt line,
+        // of the bay rings and the bulkhead behind it. They bend and then tear in
+        // a hard frontal crash, letting the block move back.
+        let _ = writeln!(
+            s,
+            "set_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
+            p.spring,
+            p.damp,
+            p.deform * 2.0,
+            p.strength * 0.6
+        );
+        let mut mounts = Vec::new();
+        for e in 0..8 {
+            let q = nodes[engine_first + e];
+            let rows: &[usize] = if q[1] < 0.5 { &[0, 1] } else { &[2, 3] };
+            let mut near: Vec<(f32, usize)> = bay_rings
+                .iter()
+                .chain(std::iter::once(&(front_bay - 1)))
+                .flat_map(|&k| rows.iter().map(move |&j| ring(k, j)))
+                .map(|i| {
+                    let r = nodes[i];
+                    (((r[0] - q[0]).powi(2) + (r[1] - q[1]).powi(2) + (r[2] - q[2]).powi(2)).sqrt(), i)
+                })
+                .collect();
+            near.sort_by(|a, b| a.0.total_cmp(&b.0));
+            for &(_, i) in near.iter().take(4) {
+                mounts.push((engine_first + e, i));
+            }
+        }
+        for (a, b) in mounts {
+            let _ = writeln!(s, "{a}, {b}");
+        }
     }
     // Collision skin: every outer face of the shell, counter-clockwise from outside.
     let _ = writeln!(s, "\ncab");
@@ -531,15 +709,19 @@ pub fn car_truck(p: &CarParams) -> String {
     let _ = writeln!(s, "\ncameras\n{}, {}, {}", ring(n - 1, 6), ring(0, 6), mid);
     let _ = writeln!(s, "\nwheels");
     for &(n1, n2, z) in &wheel_axles {
-        let propulsed = if z > 0.0 { 1 } else { 0 };
+        // Rear-wheel drive (as the sedan preset): weight moves onto the rear axle
+        // under acceleration, so it puts more power down than front drive.
+        let propulsed = if z < 0.0 { 1 } else { 0 };
         let _ = writeln!(s, "{:.3}, 0.20, 12, {n1}, {n2}, 9999, 1, {propulsed}, 9999, 15.0, 800000, 4000, tracks/wheelface, tracks/wheelband1", p.wheel_radius);
     }
     let _ = writeln!(
         s,
-        "\nengine\n1200, 4800, 320, 3.9, 3.3, 1.0, 3.3, 2.1, 1.45, 1.1, 0.9, -1.0"
+        // Shift down/up rpm, torque, differential, reverse, neutral, six gears: the
+        // rigid sedan preset's drivetrain (engine_vehicle::presets::sedan).
+        "\nengine\n2400, 5800, 420, 3.9, 3.2, 1.0, 3.4, 2.2, 1.55, 1.18, 0.95, 0.78, -1.0"
     );
     let _ = writeln!(s, "\nbrakes\n12000\n\nend");
-    s
+    (s, layout)
 }
 
 /// Braced lattice box of `nx × ny × nz` nodes (spacing `step`), with a skin.

@@ -243,7 +243,7 @@ fn metrics(desc: &SoftVehicleDesc, s: Setting) -> Metrics {
 }
 
 fn main() {
-    let desc = load_truck(&car_truck(&CarParams::default()));
+    let desc = engine_softbody::procedural::car_desc(&CarParams::default()).0;
     let reference = Setting {
         hz: 960.0,
         iterations: 30,

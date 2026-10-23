@@ -53,6 +53,12 @@ pub struct SoftEntry {
     pub tris: u32,
     /// Ordinal of the first particle across all soft bodies.
     pub ordinal_base: u32,
+    /// Beam endpoints (relative node indices), in beam order.
+    pub beam_ends: Vec<(u32, u32)>,
+    /// Beams known broken (from break events, [`SoftHost::note_breaks`]).
+    pub broken: Vec<bool>,
+    /// Nodes already reported as part of a detached piece.
+    pub detached: Vec<bool>,
 }
 
 #[derive(Clone, Debug)]
@@ -244,6 +250,16 @@ impl SoftHost {
             .collect();
         if !tri_slots.is_empty() {
             backend.write_soft_slots(l.tri_base + first_tri, &tri_slots);
+            let rest: Vec<Slot> = desc
+                .triangles
+                .iter()
+                .map(|tri| {
+                    let p = |i: u32| Vec3::from_array(desc.nodes[i as usize].position);
+                    let [a, b, c] = tri.nodes.map(p);
+                    [(a - b).length().to_bits(), (b - c).length().to_bits(), (c - a).length().to_bits(), 0]
+                })
+                .collect();
+            backend.write_soft_slots(l.tri_rest_base + first_tri, &rest);
         }
         self.tris_used += tri_slots.len() as u32;
         let ordinal_base = self.particles_used;
@@ -350,7 +366,13 @@ impl SoftHost {
             backend.append_joints(&joints);
             rigid_parts.push((body, start..backend.joint_count()));
         }
+
+        let beam_ends: Vec<(u32, u32)> = packed.beams.iter().map(|b| (b.a - first_body, b.b - first_body)).collect();
+        let n_beams = beam_ends.len();
         self.entries.push(SoftEntry {
+            beam_ends,
+            broken: vec![false; n_beams],
+            detached: vec![false; desc.nodes.len()],
             first_body,
             particles: desc.nodes.len() as u32,
             first_collider,
@@ -438,7 +460,7 @@ impl SoftHost {
                 l.aabb_base,
                 c.particles_total,
                 st.contact_friction.to_bits(),
-                0,
+                l.tri_rest_base,
             ],
         ];
         backend.write_soft_slots(0, &header);
@@ -553,6 +575,192 @@ impl SoftHost {
     pub fn entry(&self, h: SoftHandle) -> &SoftEntry {
         &self.entries[h.0 as usize]
     }
+
+    /// Bind a render mesh to soft body `h`: each vertex (in the vehicle's own
+    /// frame, the desc's node coordinates) gets a frame of three nodes, from the
+    /// part `part` when given (so a door's mesh follows only the door's nodes and
+    /// leaves with it). See [`SkinBinding`] for the skinning formula.
+    pub fn bind_mesh(&self, h: SoftHandle, vertices: &[Vec3], part: Option<&str>) -> Result<Vec<SkinBinding>, String> {
+        let e = self.entries.get(h.0 as usize).ok_or("no such soft body")?;
+        let nodes: Vec<Vec3> = e.desc.nodes.iter().map(|n| Vec3::from_array(n.position)).collect();
+        let pool: Option<Vec<u32>> = match part {
+            Some(name) => Some(e.desc.part(name).ok_or_else(|| format!("no part `{name}`"))?.nodes.clone()),
+            None => None,
+        };
+        let opts = crate::flexbody::BindOptions::default();
+        let got = crate::flexbody::bind(vertices, &nodes, pool.as_deref(), opts);
+        Ok(vertices
+            .iter()
+            .zip(got)
+            .map(|(v, b)| {
+                // Fall back to any nodes, then to the nearest node alone.
+                let b = b.or_else(|| crate::flexbody::bind(std::slice::from_ref(v), &nodes, None, opts)[0]);
+                match b {
+                    Some(b) => {
+                        let [c, x, y] = b.nodes.map(|i| nodes[i as usize]);
+                        SkinBinding {
+                            nodes: b.nodes.map(|i| e.first_body + i),
+                            coords: b.coords,
+                            rest_edge: (x - c).length().max((y - c).length()),
+                        }
+                    }
+                    None => {
+                        let c = pool
+                            .as_deref()
+                            .unwrap_or(&[])
+                            .iter()
+                            .copied()
+                            .chain(0..nodes.len() as u32)
+                            .min_by(|&a, &b| (nodes[a as usize] - *v).length_squared().total_cmp(&(nodes[b as usize] - *v).length_squared()))
+                            .unwrap_or(0);
+                        SkinBinding { nodes: [e.first_body + c; 3], coords: [0.0; 3], rest_edge: 0.0 }
+                    }
+                }
+            })
+            .collect())
+    }
+
+    /// Record beam breaks (from the event ring, e.g. `WgpuSim::poll_beam_breaks`)
+    /// and return the pieces they cut loose: groups of nodes no longer joined by
+    /// any unbroken beam to the body's main part (the one holding the most mass).
+    /// Each piece is reported once.
+    pub fn note_breaks(&mut self, breaks: &[BeamBreak]) -> Vec<PieceDetached> {
+        let mut touched = Vec::new();
+        for b in breaks {
+            let Some(e) = self.entries.get_mut(b.soft_body as usize) else { continue };
+            let local = b.beam.wrapping_sub(e.first_beam) as usize;
+            if local < e.broken.len() && !e.broken[local] {
+                e.broken[local] = true;
+                if !touched.contains(&b.soft_body) {
+                    touched.push(b.soft_body);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for s in touched {
+            out.extend(self.new_pieces(SoftHandle(s)));
+        }
+        out
+    }
+
+    /// Replace a body's known broken set from a beam readback (after the event
+    /// ring overflowed, or to resynchronise), returning newly detached pieces.
+    pub fn sync_broken(&mut self, h: SoftHandle, beams: &[Beam]) -> Vec<PieceDetached> {
+        let Some(e) = self.entries.get_mut(h.0 as usize) else { return Vec::new() };
+        for (k, b) in beams.iter().enumerate().take(e.broken.len()) {
+            e.broken[k] = b.broken();
+        }
+        self.new_pieces(h)
+    }
+
+    fn new_pieces(&mut self, h: SoftHandle) -> Vec<PieceDetached> {
+        let e = &mut self.entries[h.0 as usize];
+        let n = e.desc.nodes.len();
+        let mut label = vec![u32::MAX; n];
+        let mut adj: Vec<Vec<u32>> = vec![Vec::new(); n];
+        for (k, &(a, b)) in e.beam_ends.iter().enumerate() {
+            if !e.broken[k] && (a as usize) < n && (b as usize) < n {
+                adj[a as usize].push(b);
+                adj[b as usize].push(a);
+            }
+        }
+        let mut comps: Vec<Vec<u32>> = Vec::new();
+        for start in 0..n {
+            if label[start] != u32::MAX {
+                continue;
+            }
+            let id = comps.len() as u32;
+            let mut stack = vec![start as u32];
+            label[start] = id;
+            let mut nodes = Vec::new();
+            while let Some(v) = stack.pop() {
+                nodes.push(v);
+                for &w in &adj[v as usize] {
+                    if label[w as usize] == u32::MAX {
+                        label[w as usize] = id;
+                        stack.push(w);
+                    }
+                }
+            }
+            comps.push(nodes);
+        }
+        let mass = |c: &Vec<u32>| c.iter().map(|&i| e.masses.get(i as usize).copied().unwrap_or(0.0)).sum::<f32>();
+        let main = (0..comps.len()).max_by(|&a, &b| mass(&comps[a]).total_cmp(&mass(&comps[b]))).unwrap_or(0);
+        let mut out = Vec::new();
+        for (ci, c) in comps.iter().enumerate() {
+            if ci == main || c.iter().all(|&i| e.detached[i as usize]) {
+                continue;
+            }
+            for &i in c {
+                e.detached[i as usize] = true;
+            }
+            let mut nodes = c.clone();
+            nodes.sort_unstable();
+            // Parts mostly inside the piece.
+            let parts = e
+                .desc
+                .parts
+                .iter()
+                .filter(|p| !p.nodes.is_empty() && p.nodes.iter().filter(|i| nodes.binary_search(i).is_ok()).count() * 2 > p.nodes.len())
+                .map(|p| p.name.clone())
+                .collect();
+            out.push(PieceDetached { soft_body: h, mass: mass(c), nodes, parts });
+        }
+        out
+    }
+}
+
+/// A render-mesh vertex bound to a frame of three particles (global body
+/// indices: rows of the body buffer). With c, x, y their current positions,
+/// e_x = x − c, e_y = y − c:
+///
+/// p = c + coords[0]·e_x + coords[1]·e_y + coords[2]·(e_x × e_y)
+///
+/// The frame's longest edge at rest is `rest_edge`; a frame stretched past
+/// 1.8 × `rest_edge` is torn (drop triangles that use the vertex).
+/// `rest_edge` = 0 marks a vertex pinned to one node.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SkinBinding {
+    pub nodes: [u32; 3],
+    pub coords: [f32; 3],
+    pub rest_edge: f32,
+}
+
+impl SkinBinding {
+    /// GPU record (`soft_skin.slang`): c, x, y, flags; coords and rest edge (f32 bits).
+    pub fn to_words(&self, flags: u32) -> [u32; 8] {
+        [
+            self.nodes[0],
+            self.nodes[1],
+            self.nodes[2],
+            flags,
+            self.coords[0].to_bits(),
+            self.coords[1].to_bits(),
+            self.coords[2].to_bits(),
+            self.rest_edge.to_bits(),
+        ]
+    }
+
+    /// CPU twin of the kernel: the vertex for body positions `pos(i)`, and
+    /// whether its frame is torn.
+    pub fn skin(&self, pos: impl Fn(u32) -> Vec3) -> (Vec3, bool) {
+        let c = pos(self.nodes[0]);
+        let ex = pos(self.nodes[1]) - c;
+        let ey = pos(self.nodes[2]) - c;
+        let torn = self.rest_edge > 0.0 && ex.length().max(ey.length()) > 1.8 * self.rest_edge;
+        (c + ex * self.coords[0] + ey * self.coords[1] + ex.cross(ey) * self.coords[2], torn)
+    }
+}
+
+/// Nodes of a soft body cut loose from its main part by beam breaks.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PieceDetached {
+    pub soft_body: SoftHandle,
+    /// Relative node indices (sorted).
+    pub nodes: Vec<u32>,
+    /// Names of the parts more than half inside the piece (a door, a bumper).
+    pub parts: Vec<String>,
+    pub mass: f32,
 }
 
 /// A beam that broke (from the shared event ring, `EVENT_BEAM_BREAK` records).
