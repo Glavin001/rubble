@@ -130,6 +130,8 @@ const WORLD_ENTRIES: &[&str] = &[
     "vehicle_link",
     "vehicle_prepare",
     "vehicle_iterate",
+    "vehicle_loads",
+    "vehicle_loads_persistent",
     "vehicle_post",
     "raycast_batch",
     // Characters, in-step queries, projectiles (slang/kernels/character_step.slang).
@@ -162,6 +164,7 @@ const VEHICLE_ENTRIES: &[&str] = &[
     "vehicle_link",
     "vehicle_prepare",
     "vehicle_iterate",
+    "vehicle_loads",
     "vehicle_post",
     "raycast_batch",
 ];
@@ -169,6 +172,9 @@ const VEHICLE_ENTRIES: &[&str] = &[
 /// Slang source that defines `entry`.
 fn source_for(root: &std::path::Path, entry: &str) -> PathBuf {
     let kernels = root.join("kernels");
+    if entry == "vehicle_loads_persistent" {
+        return kernels.join("vehicle_step_persistent.slang");
+    }
     if VEHICLE_ENTRIES.contains(&entry) {
         return kernels.join("vehicle_step.slang");
     }

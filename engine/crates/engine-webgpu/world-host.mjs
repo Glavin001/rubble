@@ -36,7 +36,7 @@ const nextPow2 = (n) => { let p = 1; while (p < n) p <<= 1; return p; };
 export const JOINT_BYTES = L.JOINT_BYTES;
 // Scratch atomics (binding 21): the EVENT_BREAK ring starts at word 96 (engine-schema
 // EVENT_RING_BASE): cursor, then [kind, joint, force bits, torque bits] records.
-export const EVENT_RING_BASE = 96, EVENT_RING_CAPACITY = 1024, EVENT_BREAK = 3, EVENT_BEAM_BREAK = 5;
+export const EVENT_RING_BASE = 96, EVENT_RING_CAPACITY = 1024, EVENT_BREAK = 3, EVENT_BEAM_BREAK = 5, EVENT_MOUNT_BREAK = 6;
 
 export function sceneCapacity(bodies, colliders) {
   const b = nextPow2(Math.max(bodies, 4096));
@@ -158,6 +158,7 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     motionShadow: new Uint32Array(mlayout.slots * 4),
     motionEventsSeen: 0,
     beamEventsSeen: 0,
+    mountEventsSeen: 0,
   };
   if (world.soft) world.softShadow = new Uint32Array(world.soft.layout.totalSlots * 4);
 
@@ -252,6 +253,31 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
       if (w[r] === EVENT_BREAK) out.push({ joint: w[r + 1], force: fl[r + 2], torque: fl[r + 3] });
     }
     world.eventsSeen = Math.max(world.eventsSeen, cursor);
+    return out;
+  };
+  // Vehicle part / wheel mounts that broke since the last call (EVENT_MOUNT_BREAK
+  // records): [{vehicle, index, wheel, force, torque}].
+  world.pollMountBreaks = async () => {
+    if (ringBusy) return [];
+    ringBusy = true;
+    const enc = device.createCommandEncoder();
+    enc.copyBufferToBuffer(bufs[21], EVENT_RING_BASE * 4, ringRead, 0, ringBytes);
+    device.queue.submit([enc.finish()]);
+    await ringRead.mapAsync(GPUMapMode.READ);
+    const w = new Uint32Array(ringRead.getMappedRange().slice(0));
+    ringRead.unmap();
+    ringBusy = false;
+    const out = [];
+    const cursor = w[0];
+    const fl = new Float32Array(w.buffer);
+    for (let n = Math.max(world.mountEventsSeen, cursor - EVENT_RING_CAPACITY); n < cursor; n++) {
+      const r = 4 + 4 * (n % EVENT_RING_CAPACITY);
+      if (w[r] === EVENT_MOUNT_BREAK) {
+        const id = w[r + 1];
+        out.push({ vehicle: id >>> 8, index: id & 0x7f, wheel: (id & 0x80) !== 0, force: fl[r + 2], torque: fl[r + 3] });
+      }
+    }
+    world.mountEventsSeen = Math.max(world.mountEventsSeen, cursor);
     return out;
   };
   // Soft-body beams that broke since the last call: [{beam, force, softBody}]

@@ -146,6 +146,9 @@ pub struct WheelDesc {
     /// Rim spheres of the free rigid wheel spawned on detach.
     pub rim_spheres: u32,
     pub rim_material: u32,
+    /// Wheel mount (hub, bearing, arms): past its limits the wheel comes off as
+    /// a free body, as `detach_wheel` would.
+    pub mount: MountDesc,
 }
 
 impl Default for WheelDesc {
@@ -183,6 +186,7 @@ impl Default for WheelDesc {
             suspension_force_point: None,
             rim_spheres: 12,
             rim_material: 7,
+            mount: MountDesc::default(),
         }
     }
 }
@@ -265,12 +269,27 @@ pub enum PartRole {
     Brake { wheels: u32 },
 }
 
-/// Reserved for a future fracture system; not read by the solver yet.
+/// How a part (or wheel) is fixed to the chassis. Every step `vehicle_loads`
+/// measures the wrench the mount carries (the part's own inertia and weight
+/// against the contacts on its colliders); past either limit the part is
+/// severed before the next step, exactly as `detach_part` would. A limit ≤ 0 is
+/// unbreakable (the default), as for joints. Part 0's mount is never checked.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct MountDesc {
+    /// N; the magnitude of the force through the mount.
     pub break_force: f32,
+    /// N·m; the moment about `anchor`.
     pub break_torque: f32,
+    /// Design-space point the moment is taken about (default: the part's
+    /// centre of mass; a wheel's: its hardpoint).
+    pub anchor: Option<[f32; 3]>,
+}
+
+impl MountDesc {
+    pub fn breakable(&self) -> bool {
+        self.break_force > 0.0 || self.break_torque > 0.0
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -659,6 +678,11 @@ pub enum WheelQuery {
 }
 
 impl VehicleDesc {
+    /// True when some part (other than the root) or wheel can break off.
+    pub fn breakable(&self) -> bool {
+        self.parts.iter().skip(1).any(|p| p.mount.breakable()) || self.wheels.iter().any(|w| w.mount.breakable())
+    }
+
     /// Design-space centre of mass the body origin is placed at.
     pub fn center_of_mass(&self) -> [f32; 3] {
         let off = self.center_of_mass_offset;
@@ -693,10 +717,12 @@ impl VehicleDesc {
             for k in &mut p.colliders {
                 k.position = sh(k.position);
             }
+            p.mount.anchor = p.mount.anchor.map(sh);
         }
         for w in &mut d.wheels {
             w.position = sh(w.position);
             w.suspension_force_point = w.suspension_force_point.map(sh);
+            w.mount.anchor = w.mount.anchor.map(sh);
         }
         d.aero.center = sh(d.aero.center);
         d.auto_center_of_mass = false;

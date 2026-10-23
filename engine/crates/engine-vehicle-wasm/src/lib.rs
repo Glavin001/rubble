@@ -469,6 +469,16 @@ impl WasmVehicleHost {
             .to_string()
     }
 
+    /// Mount loads (JSON array of `MountLoad`, parts then wheels) from the
+    /// vehicle records `read(slot, count)` returns.
+    pub fn read_mount_loads(&self, h: u32, read: &js_sys::Function) -> String {
+        let reader = js_reader(read);
+        let r = Recorder::new([0; 3], Some(&reader));
+        serde_json::to_value(self.host.read_mount_loads(&r, VehicleHandle(h)))
+            .expect("loads serialise")
+            .to_string()
+    }
+
     /// Bookkeeping the demo reads (JSON): descriptor, slots, wheel slots, bodies.
     pub fn entry(&self, h: u32) -> String {
         let v = VehicleHandle(h);
@@ -481,6 +491,8 @@ impl WasmVehicleHost {
             "wheelSlots": self.host.wheel_slots(v),
             "chassis": self.host.chassis_body(v),
             "firstPartBody": self.host.part_body(v, 0),
+            // Design-space centre of mass at spawn: design geometry sits at p − origin in body space.
+            "origin": self.host.origin(v),
         })
         .to_string()
     }

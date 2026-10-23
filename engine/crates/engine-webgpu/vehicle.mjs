@@ -72,7 +72,7 @@ const reader = (words) => (slot, count) => words.subarray(slot * 4, (slot + coun
  * jointCount(), appendBodies/appendColliders/appendJoints(words[]), writeBody(index, words),
  * writeCollider(index, words), writeSlots(slot, Uint32Array) and writeBytes(byteOffset,
  * Uint32Array) into gVehicleData. `entries[h]` mirrors the Rust bookkeeping
- * ({desc, slots, wheelSlots, chassis, firstPartBody}) for the UI.
+ * ({desc, slots, wheelSlots, chassis, firstPartBody, origin}) for the UI.
  */
 export class VehicleHost {
   constructor(cap, aabbTail) {
@@ -134,6 +134,10 @@ export class VehicleHost {
 
   /** Decode outputs from a Uint32Array view of gVehicleData (whole buffer or prefix). */
   readState(words, h) { return JSON.parse(this.inner.read_state(h, reader(words))); }
+
+  /** Mount loads (parts, then wheels: {index, wheel, force, torque, breakForce,
+   * breakTorque, peakRatio}) from a Uint32Array view of gVehicleData. */
+  readMountLoads(words, h) { return JSON.parse(this.inner.read_mount_loads(h, reader(words))); }
 
   /** Bookkeeping copy for a scene reset (restore the GPU records alongside). */
   save() { return { inner: this.inner.save(), entries: structuredClone(this.entries) }; }

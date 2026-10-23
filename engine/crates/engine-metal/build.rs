@@ -32,6 +32,7 @@ fn main() -> Result<()> {
         "vehicle_link",
         "vehicle_prepare",
         "vehicle_iterate",
+        "vehicle_loads",
         "vehicle_post",
         "raycast_batch",
     ];
@@ -103,6 +104,7 @@ fn main() -> Result<()> {
         "vehicle_link",
         "vehicle_prepare",
         "vehicle_iterate",
+        "vehicle_loads",
         "vehicle_post",
         "raycast_batch",
     ];

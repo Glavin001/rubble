@@ -12,7 +12,7 @@ static const uint VH_MISC = 3u;    // uint4(rayCount, maxRays, partCount, queryM
 static const uint VH_SLOTS = 4u;
 
 // ---- Vehicle record ----
-static const uint VEH_STRIDE = 40u;
+static const uint VEH_STRIDE = 44u;
 static const uint V_CFG = 0u;      // uint4(chassisBody, wheelStart, wheelCount, flags)
 static const uint V_FWD = 1u;      // forwardLocal.xyz, cosMaxPitchRoll (<= -1 disables)
 static const uint V_UP = 2u;       // upLocal.xyz, maxSlopeCos (wheel contacts steeper than this are ignored)
@@ -51,6 +51,9 @@ static const uint V_TRACK_D = 36u; // leftRatio, rightRatio, effective forward, 
 static const uint V_QUERY = 37u;   // uint4(stepsBetweenQueries (0/1 = every step), asfloat(tractionCut, filtered), left pod, right pod)
 static const uint V_ASSIST = 31u;  // airPitch, airYaw (rad/s² per input), uprightStiffness (1/s²), uprightDamping (1/s)
 static const uint V_O3 = 30u;      // uint4(engineConnected, partsLost) , pitch/roll λ, pitch/roll k
+static const uint V_BRK = 38u;     // uint4(partBreakReq, wheelBreakReq, partsBroken, wheelsBroken): mount breaks (vehicle_loads)
+static const uint V_V0 = 39u;      // chassis linear velocity at step start.xyz, pad (vehicle_prepare)
+static const uint V_W0 = 40u;      // chassis angular velocity at step start.xyz, pad (vehicle_prepare)
 
 // Vehicle flags (V_CFG.w)
 static const uint VF_ENABLED = 1u;
@@ -61,6 +64,7 @@ static const uint VF_REVERSE_BRAKE = 16u; // throttle against travel brakes firs
 static const uint VF_SPHERE_CAST = 32u;   // wheels sweep a sphere of their radius (kerbs, edges)
 static const uint VF_TRACKED = 64u;       // two tracks: shared spin per track, left/right drive ratios
 static const uint VF_TRACTION_CONTROL = 128u; // cut engine torque while a driven wheel spins past peak slip
+static const uint VF_BREAKABLE = 256u;    // some part or wheel mount has a finite limit (vehicle_loads)
 
 // Vehicle status (V_D3.y)
 static const uint VS_ENGINE_LOST = 1u;
@@ -111,6 +115,8 @@ static const uint W_LHIT = 35u;    // last hit in ground-body space.xyz, valid (
 static const uint W_LN = 36u;      // last hit normal in ground-body space.xyz, spin servo target y* (rad/step)
 static const uint W_FP = 37u;      // suspension force point (chassis space).xyz, enabled (1/0)
 static const uint W_TJ = 38u;      // uint4(tyreJoint, shellCollider, twoBodyGround (NO_INDEX = static ground), pad)
+static const uint W_MOUNT = 39u;   // breakForce, breakTorque, lastForce, lastTorque (vehicle_loads)
+static const uint W_MOUNT2 = 40u;  // mount anchor (chassis space).xyz, peak load ratio
 
 // Wheel config flags (W_CFG.y)
 static const uint WF_STEER = 1u;
@@ -132,11 +138,13 @@ static const uint WD_BUMP = 128u;
 static const uint WD_PENDING_ADD = 256u; // host attached this wheel slot; GPU adds its mass
 
 // ---- Parts (chassis collider groups with a functional role) ----
-static const uint PART_STRIDE = 4u;
+static const uint PART_STRIDE = 6u;
 static const uint P_CFG = 0u;      // uint4(colliderStart, colliderCount, role, roleWheelMask)
 static const uint P_MASS = 1u;     // mass, Ixx, Iyy, Izz (about part COM, chassis axes)
 static const uint P_COM = 2u;      // localCom.xyz, asfloat(state)
 static const uint P_PARK = 3u;     // uint4(parkedBody, vehicle, pad, pad)
+static const uint P_MOUNT = 4u;    // mount anchor (chassis space).xyz, breakForce
+static const uint P_LOAD = 5u;     // breakTorque, lastForce, lastTorque, peak load ratio (vehicle_loads)
 
 static const uint PR_BODY = 0u;
 static const uint PR_ENGINE = 1u;

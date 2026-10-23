@@ -1135,6 +1135,7 @@ impl MetalWorld {
 
         self.dispatch(&encoder, "extract_velocity_sleep", n_bodies);
         if n_veh > 0 {
+            self.dispatch_vehicle(&encoder, "vehicle_loads", n_veh, false);
             self.dispatch_vehicle(&encoder, "vehicle_post", n_veh, false);
         }
         self.dispatch(&encoder, "write_sleep_args", 64);

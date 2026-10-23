@@ -170,6 +170,8 @@ pub struct WgpuSim {
     fast_list_off: bool,
     /// Event ring read cursor (`poll_beam_breaks`).
     beam_events_seen: u32,
+    /// Event ring read cursor (`poll_mount_breaks`).
+    mount_events_seen: u32,
 }
 
 /// Motion bookkeeping of uploaded bodies: CCD and kinematic flags.
@@ -275,6 +277,7 @@ fn persistent_entry(name: &str) -> &str {
         "convex_classify" => "convex_classify_persistent",
         "convex_manifold" => "convex_manifold_persistent",
         "reuse_all_manifolds" => "reuse_all_manifolds_persistent",
+        "vehicle_loads" => "vehicle_loads_persistent",
         _ => name,
     }
 }
@@ -676,6 +679,7 @@ impl WgpuSim {
             motion_events_seen: 0,
             fast_list_off: false,
             beam_events_seen: 0,
+            mount_events_seen: 0,
         };
         sim.write_character_header();
         // Kernel fixtures in the unit tests set the modes they exercise on top
@@ -762,6 +766,9 @@ impl WgpuSim {
             self.body_count += count;
             self.manifolds_valid = false;
             self.note_motion_flags(bodies);
+            // A body added to a world that fell asleep must still step: the
+            // all-asleep skip only knows the last step's awake count.
+            self.wake_pending = true;
         }
         start..self.body_count
     }
@@ -2358,6 +2365,26 @@ impl WgpuSim {
             eprintln!("event ring overflow: {lost} events lost");
         }
         out
+    }
+
+    /// Vehicle part / wheel mounts that broke since the last call (event ring).
+    pub fn poll_mount_breaks(&mut self) -> Vec<MountBreak> {
+        let words: Vec<u32> = self.read_buffer_range(
+            21,
+            u64::from(EVENT_RING_BASE) * 4,
+            (4 + 4 * EVENT_RING_CAPACITY) as usize,
+        );
+        let mut out = Vec::new();
+        let lost = decode_mount_breaks(&words, &mut self.mount_events_seen, &mut out);
+        if lost > 0 {
+            eprintln!("event ring overflow: {lost} mount events lost");
+        }
+        out
+    }
+
+    /// What each part's and wheel's mount carried on the last step (`vehicle_loads`).
+    pub fn vehicle_mount_loads(&self, v: VehicleHandle) -> Vec<engine_vehicle::MountLoad> {
+        self.vehicle_host().read_mount_loads(self, v)
     }
 
     /// Soft-body beams that broke since the last call (event ring readback).
