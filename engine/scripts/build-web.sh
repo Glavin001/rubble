@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Builds the WebGPU demos into one static site: the demo scenes (demo.html), the vehicle
-# demo (vehicle.html), the fracture lab (fracture/) and a landing page (index.html).
+# demo (vehicle.html), soft-body vehicles (softbody.html), the fracture lab (fracture/) and
+# a landing page (index.html).
 # The one command Vercel, CI and local builds use. Runs on Linux and macOS; no GPU needed.
 #
 #   bash engine/scripts/build-web.sh            # output: engine/web-dist/
@@ -127,10 +128,10 @@ if command -v bun >/dev/null 2>&1; then BUN=(bun); else BUN=(npx --yes bun@1.2.4
 echo "==> Assembling $OUT"
 rm -rf "$OUT"
 mkdir -p "$OUT"
-cp "$WEB"/index.html "$WEB"/demo.html "$WEB"/vehicle.html "$OUT"/
+cp "$WEB"/index.html "$WEB"/demo.html "$WEB"/vehicle.html "$WEB"/softbody.html "$OUT"/
 cp "$WEB"/*.mjs "$OUT"/
 cp -R "$WEB"/generated "$OUT"/generated
 cp -R "$WEB"/fracture "$OUT"/fracture
-find "$OUT" \( -name '*.test.mjs' -o -name '.gitignore' \) -delete
+find "$OUT" \( -name '*.test.mjs' -o -name '.gitignore' -o -name '*-check.mjs' \) -delete
 rm -rf "$OUT"/generated/*/.gitignore "$OUT"/generated/*/package.json
 echo "==> Done: $OUT ($(du -sh "$OUT" | cut -f1))"

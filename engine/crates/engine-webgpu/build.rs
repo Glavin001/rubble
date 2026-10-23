@@ -119,6 +119,19 @@ const WORLD_ENTRIES: &[&str] = &[
     "vehicle_iterate",
     "vehicle_post",
     "raycast_batch",
+    // Soft bodies (slang/kernels/soft_step.slang).
+    "soft_wake",
+    "soft_begin",
+    "soft_bounds",
+    "soft_collide_nodes",
+    "soft_collide_tris",
+    "soft_primal",
+    "soft_primal_fused",
+    "soft_chebyshev",
+    "soft_dual",
+    "soft_plastic",
+    "soft_break_groups",
+    "soft_sleep",
 ];
 
 const VEHICLE_ENTRIES: &[&str] = &[
@@ -136,6 +149,9 @@ fn source_for(root: &std::path::Path, entry: &str) -> PathBuf {
     let kernels = root.join("kernels");
     if VEHICLE_ENTRIES.contains(&entry) {
         return kernels.join("vehicle_step.slang");
+    }
+    if entry.starts_with("soft_") {
+        return kernels.join("soft_step.slang");
     }
     if entry.starts_with("convex_") {
         return kernels.join(if entry.ends_with("_persistent") {
