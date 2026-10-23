@@ -79,6 +79,7 @@
       drop: 'Nose-first drop',
       crates: 'Lattice crates drop',
       import: 'Crash test: your .truck / JBeam into a wall, 40 km/h',
+      traffic: 'Traffic derby: self-driving soft cars (?cars=10…100)',
     };
     const scene = qs.get('scene') || 'yard';
     if (!SCENES[scene]) throw new Error(`unknown scene ${scene}`);
@@ -166,10 +167,14 @@
     // nodes need the smaller step (engine_softbody::soft_scene_params).
     const HZ = Number(qs.get('hz')) || 240;
     const STEPS_PER_FRAME = Math.max(1, Math.round(HZ / 60));
-    const cap = sceneCapacity(4096, 8192);
-    cap.maxJoints = 512;
+    // Traffic scales the arenas with its car count (161 particles, 923 beams each).
+    const NCARS = scene === 'traffic' ? Math.max(1, Math.min(128, Number(qs.get('cars')) || 20)) : 0;
+    const big = Math.max(NCARS, 24);
+    const cap = sceneCapacity(200 * big + 2000, 220 * big + 4000);
+    cap.maxJoints = 512 + 16 * big;
     const world = await createWorld(device, {
-      cap, vehicleCap: { maxVehicles: 32, maxWheels: 256, maxRays: 16 }, softCap: {},
+      cap, vehicleCap: { maxVehicles: big + 8, maxWheels: 4 * big + 32, maxRays: 16 },
+      softCap: { maxBodies: big + 16, maxBeams: 1000 * big + 8192, maxParticles: 170 * big + 2048, maxTriangles: 400 * big + 4096 },
       status: (s) => { statusEl.textContent = s; },
     });
     Object.assign(world.params, { dt: 1 / HZ, iterations: Number(qs.get('iters')) || 10, gravityY: -9.81, betaLin: 1e7 });
@@ -304,6 +309,23 @@
       const e = world.soft.entries[h];
       softs.push({ h, name: e.name, core: e.core, car: true });
       camMode = 'orbit'; orbit = { yaw: 1.6, pitch: 0.2, dist: 11, target: [0, 1.5, 1] };
+    } else if (scene === 'traffic') {
+      // A walled 140 m arena with concrete blocks and poles; the cars drive
+      // themselves (wander, or chase the nearest car: a demolition derby).
+      const A = 70;
+      for (const [x, z, hx, hz] of [[0, A, A, 0.5], [0, -A, A, 0.5], [A, 0, 0.5, A], [-A, 0, 0.5, A]]) staticBox([x, 1, z], [hx, 1, hz]);
+      for (let i = 0; i < 10; i++) {
+        const a = i * 2.39996, r = 18 + (i % 4) * 11;
+        staticBox([Math.cos(a) * r, 0.5, Math.sin(a) * r], [1.5, 0.5, 0.5], qAxis([0, 1, 0], a));
+        world.addSoftObstacle(world.colliderCount - 1);
+      }
+      for (let i = 0; i < 8; i++) { const a = i * 0.785 + 0.4; pole([Math.cos(a) * 32, 1.5, Math.sin(a) * 32], 0.15, 1.5); }
+      const cols = Math.ceil(Math.sqrt(NCARS));
+      for (let i = 0; i < NCARS; i++) {
+        const x = ((i % cols) - (cols - 1) / 2) * 9, z = (Math.floor(i / cols) - (cols - 1) / 2) * 11;
+        addSoft(carDesc, [x, 0.05, z], ((i * 1.7) % 6.283));
+      }
+      camMode = 'orbit'; orbit = { yaw: 0.6, pitch: 0.6, dist: Math.min(140, 40 + NCARS * 0.9), target: [0, 0, 0] };
     } else if (scene === 'import') {
       // Crash target for an imported vehicle (window.__crashImported): ?target=wall
       // (rigid wall across z = 12) or car (a procedural car parked side-on there).
@@ -733,6 +755,65 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     }
     const playerCore = () => softs[player]?.core;
 
+    // ---------------------------------------------------------------- traffic AI
+    // Each car reads back its core's pose every frame and steers toward a target:
+    // a random point in the arena (wander) or the nearest other car (chase). Two in
+    // three wander, one chases; a stuck car reverses out. Keys take over car 0.
+    const aiCars = [];
+    let aiRb = null, aiBusy = false, aiPoses = null, userUntil = 0;
+    function setupAi() {
+      if (scene !== 'traffic') return;
+      softs.forEach((s, i) => s.core && aiCars.push({ i, core: s.core, mode: i % 3 === 2 ? 'chase' : 'wander', target: null, t: 0, slow: 0, reverse: 0, kmh: 35 + ((i * 17) % 45), seed: i * 7919 + 13 }));
+      aiRb = device.createBuffer({ size: Math.max(16, aiCars.length * 112), usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    }
+    const aiRand = (c) => { c.seed = (c.seed * 1103515245 + 12345) >>> 0; return (c.seed >>> 8) / 16777216; };
+    function encodeAiRead(enc) {
+      if (!aiRb || aiBusy) return false;
+      aiCars.forEach((c, k) => enc.copyBufferToBuffer(world.bufs[0], c.core.chassis * 112, aiRb, k * 112, 112));
+      return true;
+    }
+    function afterAiRead() {
+      aiBusy = true;
+      aiRb.mapAsync(GPUMapMode.READ).then(() => {
+        const f = new Float32Array(aiRb.getMappedRange().slice(0));
+        aiRb.unmap();
+        aiPoses = aiCars.map((_, k) => ({ p: [f[k * 28], f[k * 28 + 1], f[k * 28 + 2]], q: [f[k * 28 + 4], f[k * 28 + 5], f[k * 28 + 6], f[k * 28 + 7]], v: [f[k * 28 + 12], f[k * 28 + 13], f[k * 28 + 14]] }));
+        aiBusy = false;
+      }).catch(fail);
+    }
+    function aiDrive(dt) {
+      if (!aiPoses) return;
+      const userDriving = performance.now() < userUntil;
+      aiCars.forEach((c, k) => {
+        if (userDriving && c.i === player) return;
+        const me = aiPoses[k];
+        const fwd = qrot(me.q, [0, 0, 1]), right = qrot(me.q, [-1, 0, 0]), up = qrot(me.q, [0, 1, 0]);
+        const speed = Math.hypot(me.v[0], me.v[2]);
+        let input = { forward: 0, steer: 0, brake: 0, handbrake: 0 };
+        c.t += dt;
+        if (up[1] < 0.3) { world.vehicles.setInput(world.backend, c.core.vehicle, input); return; } // on its side or roof
+        if (c.mode === 'chase') {
+          let best = null, bd = 1e9;
+          aiPoses.forEach((o, j) => { if (j !== k) { const d = Math.hypot(o.p[0] - me.p[0], o.p[2] - me.p[2]); if (d < bd) { bd = d; best = o; } } });
+          if (best) c.target = [best.p[0] + best.v[0] * 0.4, 0, best.p[2] + best.v[2] * 0.4];
+        } else if (!c.target || c.t > 9 || Math.hypot(c.target[0] - me.p[0], c.target[2] - me.p[2]) < 8) {
+          c.target = [(aiRand(c) - 0.5) * 120, 0, (aiRand(c) - 0.5) * 120]; c.t = 0;
+        }
+        const d = [c.target[0] - me.p[0], 0, c.target[2] - me.p[2]];
+        const ang = Math.atan2(d[0] * right[0] + d[2] * right[2], d[0] * fwd[0] + d[2] * fwd[2]);
+        input.steer = Math.max(-1, Math.min(1, ang * 1.6));
+        const want = c.kmh / 3.6 * (Math.abs(ang) > 1.2 ? 0.45 : 1);
+        input.forward = speed < want ? 0.85 : 0;
+        if (speed > want * 1.3) input.brake = 0.4;
+        // Stuck against something: reverse out with the wheel turned the other way.
+        c.slow = speed < 0.8 ? c.slow + dt : 0;
+        if (c.slow > 1.6 && c.reverse <= 0) { c.reverse = 1.4; c.slow = 0; }
+        if (c.reverse > 0) { c.reverse -= dt; input = { forward: -0.8, steer: -input.steer, brake: 0, handbrake: 0 }; }
+        world.vehicles.setInput(world.backend, c.core.vehicle, input);
+      });
+    }
+    setupAi();
+
     let cannonNext = 0;
     function fireCannon() {
       const body = cannon[cannonNext++ % cannon.length];
@@ -895,8 +976,8 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       if (lastPlayer) speedEl.innerHTML = `${(Math.hypot(...lastPlayer.v) * 3.6).toFixed(0)} <small>km/h</small>`;
       if (world.steps - damageStep >= 30) { damageStep = world.steps; readDamage().catch(fail); }
       if (damage) {
-        damageEl.innerHTML = damage.filter((d) => d.beams > 200 || damage.length < 4)
-          .map((d, i) => `${i === player ? '▶ ' : ''}${d.name.split(' (')[0].slice(0, 22)}: ${d.yielded} bent · ${d.broken} broken / ${d.beams}`).join('<br>');
+        damageEl.innerHTML = damage.map((d, i) => ({ ...d, i })).filter((d) => d.i === player || (d.beams > 200 && (damage.length < 6 || d.yielded > 0))).slice(0, 8)
+          .map((d) => `${d.i === player ? '▶ ' : ''}${d.name.split(' (')[0].slice(0, 22)}: ${d.yielded} bent · ${d.broken} broken / ${d.beams}`).join('<br>');
         eventsEl.innerHTML = `${breaks} beam-break events` + (tornOff.length ? `<br>torn off: ${tornOff.slice(-4).join('<br>')}` : '');
       }
     }
@@ -1015,9 +1096,10 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     let fpsAcc = 0, fpsN = 0, fpsShow = 0;
     const updateStatus = () => {
       statusEl.textContent = `${world.bodyCount} bodies (${world.soft.entries.reduce((n, e) => n + e.particles, 0)} particles, ${beamTotal} beams) · ${HZ} Hz × ${world.params.iterations} it · step ${world.steps} (${(world.steps / HZ).toFixed(1)} s)`
-        + (manual ? '' : ` · ${fpsShow.toFixed(0)} fps`) + (lastCounters ? ` · contacts ${lastCounters.contact} · awake ${lastCounters.awake}` : '');
+        + (manual ? '' : ` · ${fpsShow.toFixed(0)} fps · ${(realTime * 100).toFixed(0)}% real time`) + (lastCounters ? ` · contacts ${lastCounters.contact} · awake ${lastCounters.awake}` : '');
     };
     let manual = false;
+    let stepAcc = 0, simAcc = 0, wallAcc = 0, realTime = 1;
     function frame(now) {
       const dt = Math.min(0.05, (now - lastT) / 1000);
       lastT = now;
@@ -1034,16 +1116,28 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       const core = playerCore();
       if (core) {
         const input = readInput();
-        world.vehicles.setInput(world.backend, core.vehicle, input);
+        const touched = input.forward || input.steer || input.handbrake;
+        if (touched) userUntil = performance.now() + 3000;
+        if (scene !== 'traffic' || performance.now() < userUntil) world.vehicles.setInput(world.backend, core.vehicle, input);
       }
+      aiDrive(dt);
       updateCamera(dt, false);
       const enc = device.createCommandEncoder();
-      stepPhysics(enc, STEPS_PER_FRAME);
+      const aiRead = encodeAiRead(enc);
+      // Real time: as many steps as the wall clock moved (a slow frame catches up
+      // with up to twice the usual count; beyond that the simulation slows down).
+      stepAcc += dt * HZ;
+      const steps = Math.min(Math.floor(stepAcc), 2 * STEPS_PER_FRAME);
+      stepAcc = Math.min(stepAcc - steps, STEPS_PER_FRAME);
+      simAcc += steps / HZ; wallAcc += dt;
+      if (wallAcc > 0.5) { realTime = simAcc / wallAcc; simAcc = 0; wallAcc = 0; }
+      if (steps) stepPhysics(enc, steps);
       drawScene(enc);
       const rb = rbFree.pop();
       encodeReadback(enc, rb);
       device.queue.submit([enc.finish()]);
       rb.mapAsync(GPUMapMode.READ).then(() => { decode(rb); rbFree.push(rb); updateHud(); }).catch(fail);
+      if (aiRead) afterAiRead();
       updateStatus();
       requestAnimationFrame(frame);
     }

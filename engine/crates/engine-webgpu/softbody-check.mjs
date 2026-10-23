@@ -31,13 +31,13 @@ const CHECKS = {
     query: 'scene=yard',
     run: async (page) => {
       const p0 = (await page.step(60, { forward: 0, steer: 0 })).player.p;
-      const r = await page.step(720, { forward: 1, steer: 0 });
+      const r = await page.step(480, { forward: 1, steer: 0 }); // 2 s: clear of the poles at z = 34
       const moved = Math.hypot(r.player.p[0] - p0[0], r.player.p[2] - p0[2]);
       const speed = Math.hypot(...r.player.v) * 3.6;
       const r2 = await page.step(360, { forward: 0.6, steer: 1 });
       const turned = Math.abs(r2.player.p[0] - r.player.p[0]);
       await page.view({ chase: true });
-      return { ok: moved > 10 && speed > 15 && turned > 2 && r2.damage[0].broken === 0,
+      return { ok: moved > 8 && speed > 25 && turned > 2 && r2.damage[0].broken === 0,
         msg: `drove ${moved.toFixed(1)} m to ${speed.toFixed(0)} km/h, turned ${turned.toFixed(1)} m sideways, player beams bent ${r2.damage[0].yielded} broken ${r2.damage[0].broken}` };
     },
   },
@@ -56,6 +56,18 @@ const CHECKS = {
       const r = await page.step(420);
       const d = r.damage[0];
       return { ok: d.broken >= 10, msg: `${d.yielded} beams bent, ${d.broken} broken, ${r.breaks} break events` };
+    },
+  },
+  // Traffic: self-driving cars spread out and collide (the AI drives in rAF time,
+  // so this lets the page run in real time for a few seconds).
+  traffic: {
+    query: 'scene=traffic&cars=20',
+    run: async (page) => {
+      await page.eval(`new Promise((r) => setTimeout(r, 8000))`);
+      const r = await page.step(1);
+      const moved = await page.eval(`window.__particles(0).then((p) => p.length)`);
+      const bent = r.damage.reduce((n, d) => n + d.yielded, 0);
+      return { ok: moved > 0 && r.damage.length === 20, msg: `20 cars, ${bent} beams bent across them after 8 s` };
     },
   },
   // The other crash-test scenes run without blowing up and deform.

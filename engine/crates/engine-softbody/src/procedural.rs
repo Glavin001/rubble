@@ -677,12 +677,16 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
     let _ = writeln!(s, "\ncameras\n{}, {}, {}", ring(n - 1, 6), ring(0, 6), mid);
     let _ = writeln!(s, "\nwheels");
     for &(n1, n2, z) in &wheel_axles {
-        let propulsed = if z > 0.0 { 1 } else { 0 };
+        // Rear-wheel drive (as the sedan preset): weight moves onto the rear axle
+        // under acceleration, so it puts more power down than front drive.
+        let propulsed = if z < 0.0 { 1 } else { 0 };
         let _ = writeln!(s, "{:.3}, 0.20, 12, {n1}, {n2}, 9999, 1, {propulsed}, 9999, 15.0, 800000, 4000, tracks/wheelface, tracks/wheelband1", p.wheel_radius);
     }
     let _ = writeln!(
         s,
-        "\nengine\n1200, 4800, 320, 3.9, 3.3, 1.0, 3.3, 2.1, 1.45, 1.1, 0.9, -1.0"
+        // Shift down/up rpm, torque, differential, reverse, neutral, six gears: the
+        // rigid sedan preset's drivetrain (engine_vehicle::presets::sedan).
+        "\nengine\n2400, 5800, 420, 3.9, 3.2, 1.0, 3.4, 2.2, 1.55, 1.18, 0.95, 0.78, -1.0"
     );
     let _ = writeln!(s, "\nbrakes\n12000\n\nend");
     (s, layout)

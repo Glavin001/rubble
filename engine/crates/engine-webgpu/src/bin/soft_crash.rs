@@ -336,9 +336,33 @@ fn main() {
                 .collect();
             cars.push(Car { h, rest });
         }
-        s => panic!(
-            "unknown scenario {s}: wall, pole, sidepole, tbone, headon, rollover, ramp, drop"
-        ),
+        "drive" => {
+            // Full throttle from rest on a flat road: the soft car's speed, rpm and
+            // gear against the rigid sedan preset (`rigid=1`).
+            let rigid = a.get("rigid", 0.0) > 0.5;
+            let v = if rigid {
+                sim.add_vehicle(&engine_vehicle::presets::sedan(), [0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]).expect("sedan")
+            } else {
+                let c = spawn(&mut sim, Vec3::new(0.0, 0.05, 0.0), 0.0, Vec3::ZERO);
+                sim.soft_host().entry(c.h).core.expect("core").0
+            };
+            for _ in 0..(0.5 * hz) as u32 {
+                sim.step().unwrap();
+            }
+            sim.set_vehicle_input(v, engine_vehicle::VehicleInput { forward: a.get("throttle", 1.0), ..Default::default() });
+            println!("   t (s) | speed (km/h) | rpm | gear | contacts");
+            for k in 0..=(a.get("seconds", 10.0) * 4.0) as u32 {
+                if k > 0 {
+                    for _ in 0..(hz / 4.0) as u32 {
+                        sim.step().unwrap();
+                    }
+                }
+                let st = sim.vehicle_state(v);
+                println!("{:8.2} | {:12.1} | {:4.0} | {:4} | {}", k as f32 / 4.0, st.forward_speed * 3.6, st.engine_rpm, st.gear, st.contacts);
+            }
+            return;
+        }
+        s => panic!("unknown scenario {s}: wall, pole, sidepole, tbone, headon, rollover, ramp, drop, drive"),
     }
     let _ = ram;
     let len0 = |c: &Car| (ring_centre(&c.rest, stations - 1) - ring_centre(&c.rest, 0)).length();
