@@ -5,13 +5,14 @@
 //
 //   cargo run -p engine-webgpu --release --bin wgsl_export   # WGSL + wasm first
 //   node --experimental-websocket softbody-record.mjs [take ...] [--out DIR]
+//   RUBBLE_ROR_DIR=… RUBBLE_JBEAM_DIR=… node --experimental-websocket softbody-record.mjs bus_wall semi_car legocar_wall
 //
 // Each take: the crash in real time (4 steps of 240 Hz per 60 fps frame), the impact
 // again in 4× slow motion (1 step per frame), an orbit around the wreck, and the beam
 // view coloured by plastic strain. Needs Chrome and ffmpeg (CHROME / FFMPEG env).
 import { createServer } from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -32,8 +33,34 @@ const TAKES = {
   tbone: { query: 'scene=tbone&runup=4', title: 'Side impact: 1,500 kg block at 40 km/h', target: [1, 0.8, 0], dist: 9.5, yaw: 0.5, impact: [120, 360], settle: 560 },
   pole: { sweep: 2.4, query: 'scene=pole&runup=6', title: '20 cm pole at 40 km/h', target: [0, 0.8, 0], dist: 9, yaw: 2.2, impact: [120, 360], settle: 560 },
 };
+// Imported vehicles (local content, never committed): RUBBLE_ROR_DIR = Rigs of Rods
+// content-master/, RUBBLE_JBEAM_DIR = a vehicles/ dir with agenty_legocar/ and common/.
+// The import scene's target is at z = 12; the vehicle starts `gap` m short of it.
+const IMPORTED = {
+  bus_wall: { ror: 'agora/95bbUID-agoras.truck', target: 'wall', speed: 11, gap: 8, title: 'Rigs of Rods Agora bus (imported .truck) into a wall at 40 km/h', look: [0, 1.5, 6], dist: 22, yaw: 2.5, sweep: 1.6, impact: [150, 420] },
+  semi_car: { ror: 'dafsemi/b6b0UID-semi.truck', target: 'car', speed: 11, gap: 8, title: 'Rigs of Rods DAF semi (imported .truck) into a parked car at 40 km/h', look: null, dist: 15, yaw: 1.0, impact: [150, 420] },
+  legocar_wall_raw: { jbeam: 'agenty_legocar', query: 'threshold=1', target: 'wall', speed: 14, gap: 8, title: 'BeamNG legocar (imported JBeam, file thresholds) into a wall at 50 km/h', look: [0, 1, 9], dist: 12, yaw: 2.3, sweep: 1.6, impact: [110, 380] },
+  legocar_wall: { jbeam: 'agenty_legocar', target: 'wall', speed: 14, gap: 8, title: 'BeamNG legocar (imported JBeam) into a wall at 50 km/h', look: [0, 1, 9], dist: 12, yaw: 2.3, sweep: 1.6, impact: [110, 380] },
+};
+for (const [k, v] of Object.entries(IMPORTED)) {
+  TAKES[k] = { query: `scene=import&target=${v.target}${v.query ? '&' + v.query : ''}`, title: v.title, target: v.look, dist: v.dist, yaw: v.yaw, sweep: v.sweep, impact: v.impact, settle: v.impact[1] + 240, imported: v };
+}
+const walk = (dir, out = []) => { for (const f of readdirSync(dir)) { const p = join(dir, f); if (statSync(p).isDirectory()) walk(p, out); else out.push(p); } return out; };
+const importExpr = (v) => {
+  if (v.ror) {
+    const dir = process.env.RUBBLE_ROR_DIR;
+    if (!dir) throw new Error('set RUBBLE_ROR_DIR to the Rigs of Rods content-master/ dir');
+    return `m.loadTruck(${JSON.stringify(readFileSync(join(dir, v.ror), 'utf8'))})`;
+  }
+  const dir = process.env.RUBBLE_JBEAM_DIR;
+  if (!dir) throw new Error('set RUBBLE_JBEAM_DIR to a vehicles/ dir with agenty_legocar/ and common/');
+  const files = [...walk(join(dir, v.jbeam)), ...walk(join(dir, 'common'))].filter((f) => f.endsWith('.jbeam'))
+    .map((f) => [f.slice(dir.length + 1), readFileSync(f, 'utf8')]);
+  const pc = readFileSync(join(dir, v.jbeam, 'start.pc'), 'utf8');
+  return `m.loadJbeam(${JSON.stringify(files)}, ${JSON.stringify(pc)})`;
+};
 const names = args.filter((a, i) => !a.startsWith('--') && args[i - 1] !== '--out');
-const takes = names.length ? names : Object.keys(TAKES);
+const takes = names.length ? names : Object.keys(TAKES).filter((k) => !TAKES[k].imported);
 mkdirSync(OUT, { recursive: true });
 
 const TYPES = { '.html': 'text/html', '.mjs': 'text/javascript', '.js': 'text/javascript', '.json': 'application/json', '.wgsl': 'text/plain', '.wasm': 'application/wasm' };
@@ -86,13 +113,21 @@ for (const name of takes) {
     await evaluate(`window.__step(${steps}).then(() => 0)`);
     await shot();
   };
+  let info = null;
   const reload = async () => {
     await send('Page.navigate', { url: `${base}/softbody.html?${t.query}` });
     for (let i = 0; i < 300; i++) {
       await new Promise((r) => setTimeout(r, 200));
-      if (await evaluate('window.__ready === true').catch(() => false)) return;
+      if (await evaluate('window.__ready === true').catch(() => false)) {
+        if (t.imported) {
+          const v = t.imported;
+          info = await evaluate(`(async () => { const m = await import('./soft.mjs'); return window.__crashImported(${importExpr(v)}, ${JSON.stringify({ speed: v.speed, gap: v.gap, label: name })}); })()`);
+        }
+        return;
+      }
     }
-    throw new Error(`${name}: demo did not start`);
+    const status = await evaluate(`document.getElementById('status')?.textContent + ' ' + (document.getElementById('err')?.textContent || '')`).catch(() => '');
+    throw new Error(`${name}: demo did not start: ${status}`);
   };
   const orbit = (yaw, dist = t.dist, pitch = 0.32) => ({ skin: 'flex', beams: false, orbit: { yaw, pitch, dist, target: t.target } });
   const t0 = performance.now();
@@ -118,6 +153,7 @@ for (const name of takes) {
   if (r.status !== 0) throw new Error('ffmpeg failed');
   spawnSync(FFMPEG, ['-loglevel', 'error', '-y', '-i', join(frames, 'f%05d.jpg'), '-vf', "select='not(mod(n\\,45))',scale=400:-1,tile=4x4", '-frames:v', '1', join(OUT, `crash_${name}_sheet.jpg`)]);
   rmSync(frames, { recursive: true, force: true });
+  if (info) console.log(`${name}: ${info.nodes} nodes, ${info.beams} beams, ${info.mass.toFixed(0)} kg, ${info.length.toFixed(1)} m long`);
   console.log(`${name}: ${n} frames (${(n / 60).toFixed(1)} s) in ${((performance.now() - t0) / 1000).toFixed(0)} s → ${mp4}`);
 }
 ws.close();

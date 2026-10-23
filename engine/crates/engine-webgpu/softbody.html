@@ -67,6 +67,7 @@
       tbone: 'Crash test: 1,500 kg side impact, 40 km/h',
       headon: 'Crash test: head-on, 2 × 29 km/h',
       crates: 'Lattice crates drop',
+      import: 'Crash test: your .truck / JBeam into a wall, 40 km/h',
     };
     const scene = qs.get('scene') || 'yard';
     if (!SCENES[scene]) throw new Error(`unknown scene ${scene}`);
@@ -196,6 +197,12 @@
       addSoft(carDesc, [0, 0.05, -3 - runup / 2], 0, { velocity: [0, 0, 8] });
       addSoft(carDesc, [0.3, 0.05, 3 + runup / 2], Math.PI, { velocity: [0, 0, -8] });
       camMode = 'orbit'; orbit = { yaw: 1.4, pitch: 0.35, dist: 12, target: [0, 0.8, 0] };
+    } else if (scene === 'import') {
+      // Crash target for an imported vehicle (window.__crashImported): ?target=wall
+      // (rigid wall across z = 12) or car (a procedural car parked side-on there).
+      if (qs.get('target') === 'car') addSoft(carDesc, [0, 0.05, 13], Math.PI / 2);
+      else staticBox([0, 2.5, 12.3], [6, 2.5, 0.3]);
+      camMode = 'orbit'; orbit = { yaw: 2.2, pitch: 0.3, dist: 16, target: [0, 1.2, 10] };
     } else if (scene === 'crates') {
       for (let i = 0; i < 9; i++) {
         const crate = loadTruck(latticeCrate(3, 0.45, 120, 1.5e6, 6e3, 1e5));
@@ -631,10 +638,41 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       return h;
     };
     window.__spawnImported = (desc, label = 'imported') => spawnImported(desc, label);
+    // Forward of a desc (engine_softbody::pack::forward_axis): reference nodes, else
+    // the steering axle, else −X like most Rigs of Rods trucks.
+    const forwardOf = (d) => {
+      const p = (i) => d.nodes[i].position;
+      const flat = (v) => { const l = Math.hypot(v[0], v[2]); return l > 1e-4 ? [v[0] / l, 0, v[2] / l] : null; };
+      if (d.refs) { const f = flat(p(d.refs.center).map((x, i) => x - p(d.refs.back)[i])); if (f) return f; }
+      const mid = (w) => p(w.node1).map((x, i) => 0.5 * (x + p(w.node2)[i]));
+      const mean = (ws) => ws.map(mid).reduce((a, b) => a.map((x, i) => x + b[i] / ws.length), [0, 0, 0]);
+      const st = d.wheels.filter((w) => w.steerable), other = d.wheels.filter((w) => !w.steerable);
+      if (st.length && other.length) { const f = flat(mean(st).map((x, i) => x - mean(other)[i])); if (f) return f; }
+      return [-1, 0, 0];
+    };
+    // Launch an imported vehicle along +Z at `speed` m/s so its front is `gap` m short
+    // of the import scene's target at z = 12; it becomes the followed vehicle.
+    window.__crashImported = (desc, { speed = 11, gap = 3, label = 'imported' } = {}) => {
+      const f = forwardOf(desc);
+      const yaw = -Math.atan2(f[0], f[2]);
+      const c = Math.cos(yaw), s = Math.sin(yaw);
+      const rot = desc.nodes.map((n) => [n.position[0] * c + n.position[2] * s, n.position[1], -n.position[0] * s + n.position[2] * c]);
+      const mn = [0, 1, 2].map((i) => Math.min(...rot.map((r) => r[i]))), mx = [0, 1, 2].map((i) => Math.max(...rot.map((r) => r[i])));
+      const h = addSoft(desc, [-(mn[0] + mx[0]) / 2, 0.15 - mn[1], 12 - gap - mx[2]], yaw, { velocity: [0, 0, speed] });
+      player = softs.length - 1;
+      rebuildSkin();
+      const en = world.soft.entries[h];
+      truckInfo.textContent = `${label}: ${en.nodes} nodes, ${en.beams} beams, ${en.mass.toFixed(0)} kg`;
+      return { h, nodes: en.nodes, beams: en.beams, mass: en.mass, length: mx[2] - mn[2], height: mx[1] - mn[1] };
+    };
+    // Loaded files: the import scene crashes them into its target; others park them ahead.
+    function place(desc, label) {
+      if (scene === 'import') { resetScene(); window.__crashImported(desc, { label }); } else spawnImported(desc, label);
+    }
     document.getElementById('truckFile').addEventListener('change', async (e) => {
       const file = e.target.files[0];
       if (!file) return;
-      try { spawnImported(loadTruck(await file.text()), file.name); } catch (err) { truckInfo.textContent = `${file.name}: ${err.message || err}`; }
+      try { place(loadTruck(await file.text()), file.name); } catch (err) { truckInfo.textContent = `${file.name}: ${err.message || err}`; }
       e.target.value = '';
     });
     document.getElementById('jbeamDir').addEventListener('change', async (e) => {
@@ -644,7 +682,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
         const pcs = all.filter((f) => f.name.endsWith('.pc'));
         const pcFile = pcs.find((f) => f.name === 'start.pc') || pcs[0];
         const pc = pcFile ? await pcFile.text() : undefined;
-        spawnImported(loadJbeam(files, pc), `${files.length} jbeam files${pcFile ? ' + ' + pcFile.name : ''}`);
+        place(loadJbeam(files, pc), `${files.length} jbeam files${pcFile ? ' + ' + pcFile.name : ''}`);
       } catch (err) { truckInfo.textContent = `JBeam: ${err.message || err}`; }
       e.target.value = '';
     });
