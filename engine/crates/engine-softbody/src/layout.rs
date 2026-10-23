@@ -70,6 +70,10 @@ pub const ENTRY_CONTACTER: u32 = 1 << 16;
 /// Body flag marking a particle (3-DOF node) in `gBodies`.
 pub const BODY_PARTICLE: u32 = 64;
 
+/// "No index" marker in `gSoftData` slots (FLT_MAX bits: an all-ones NaN pattern
+/// cannot be a WGSL constant).
+pub const SOFT_NONE: u32 = 0x7F7F_FFFF;
+
 /// Event type written to the shared event ring when a beam breaks:
 /// [EVENT_BEAM_BREAK, beam, |force| bits, soft body].
 pub const EVENT_BEAM_BREAK: u32 = 5;

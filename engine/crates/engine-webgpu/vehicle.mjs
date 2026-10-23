@@ -14,6 +14,8 @@ export const L = JSON.parse(wasm.layout_constants());
 export const { BODY_VEHICLE, JOINT_FLAG_TYRE, JOINT_BYTES, WHEEL_RIM_MATERIAL } = L;
 /** engine_exec::rigid_plan for browser hosts, and D6 joint records (world-host.mjs). */
 export const { RigidStep, ball_joint_words: ballJointWords } = wasm;
+/** The whole wasm module (soft.mjs builds on the same instance). */
+export { wasm };
 const OP = JSON.parse(wasm.op_codes());
 
 const f32b = new Float32Array(1);
@@ -51,6 +53,7 @@ export function applyOps(backend, ops) {
       case OP.OP_WRITE_COLLIDER: backend.writeCollider(arg, w); break;
       case OP.OP_WRITE_SLOTS: backend.writeSlots(arg, w); break;
       case OP.OP_WRITE_BYTES: backend.writeBytes(arg, w); break;
+      case OP.OP_WRITE_SOFT_SLOTS: backend.writeSoftSlots(arg, w); break;
       default: throw new Error(`unknown vehicle op ${op}`);
     }
   }

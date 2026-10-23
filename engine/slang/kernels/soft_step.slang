@@ -47,10 +47,12 @@ static const uint SOFT_SLEEP_SYNC = 4u;
 static const uint SOFT_CONTACTS = 8u;
 static const uint ENTRY_CONTACTER = 65536u;
 static const uint TRI_CONTACT_STRIDE = 7u;
-static const uint SOFT_NONE = 0xFFFFFFFFu;
+// "No index" marker stored in float4 slots: FLT_MAX bits (an all-ones NaN pattern
+// cannot appear as a WGSL constant).
+static const uint SOFT_NONE = 0x7F7FFFFFu;
 
 static const uint EVENT_BEAM_BREAK = 5u;
-static const uint SOFT_NO_BODY = 0xFFFFFFFFu;
+static const uint SOFT_NO_BODY = 0x7F7FFFFFu;
 
 float4 SD(uint q) { return gSoftData[q]; }
 uint4 SU(uint q) { return asuint(gSoftData[q]); }

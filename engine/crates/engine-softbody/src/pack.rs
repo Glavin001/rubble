@@ -11,8 +11,8 @@ use crate::model::*;
 use engine_schema::convex::CollisionFilter;
 use engine_schema::{BodyState, Collider, ShapeType};
 use engine_vehicle::{
-    DifferentialDesc, DriveDesc, DrivetrainDesc, EngineDesc, PartColliderDesc, PartDesc, PartRole, ShapeDesc, Spring,
-    SteeringDesc, TransmissionDesc, VehicleDesc, WheelDesc,
+    AntiRollDesc, AssistDesc, Curve, DifferentialDesc, DriveDesc, DrivetrainDesc, EngineDesc, PartColliderDesc, PartDesc,
+    PartRole, ShapeDesc, Spring, SteeringDesc, TransmissionDesc, VehicleDesc, WheelDesc,
 };
 use glam::{Quat, Vec3};
 use serde::{Deserialize, Serialize};
@@ -353,6 +353,17 @@ fn core_plan(desc: &SoftVehicleDesc, masses: &mut [f32], opts: &SpawnOptions) ->
         })
     };
     // A compact block between the axles (engine and drivetrain), well inside the bodywork.
+    // Anti-roll bars on every left/right wheel pair of an axle (half the wheel rate).
+    let mut anti_roll = Vec::new();
+    for i in 0..wheels.len() {
+        for j in i + 1..wheels.len() {
+            let (a, b) = (Vec3::from_array(wheels[i].position), Vec3::from_array(wheels[j].position));
+            if (a.dot(forward) - b.dot(forward)).abs() < 0.3 && (a.dot(right) * b.dot(right)) < 0.0 {
+                let (l, r) = if a.dot(right) < 0.0 { (i, j) } else { (j, i) };
+                anti_roll.push(AntiRollDesc { left: l as u32, right: r as u32, stiffness: 0.5 * k });
+            }
+        }
+    }
     let half = Vec3::new((mx.x - mn.x) * 0.2, 0.1, (mx.z - mn.z) * 0.15).max(Vec3::splat(0.08));
     let center = (mn + mx) * 0.5;
     let vehicle = VehicleDesc {
@@ -376,7 +387,11 @@ fn core_plan(desc: &SoftVehicleDesc, masses: &mut [f32], opts: &SpawnOptions) ->
         center_of_mass_offset: [0.0; 3],
         wheels,
         drive,
-        steering: SteeringDesc { ackermann: 1.0, ..Default::default() },
+        anti_roll,
+        // Less lock at speed, as the rigid presets: full lock at 40 km/h would roll
+        // a tall node–beam body.
+        steering: SteeringDesc { ackermann: 1.0, speed_curve: Curve::road_steering(), ..Default::default() },
+        assists: AssistDesc { traction_control: true, ..Default::default() },
         can_sleep: true,
         ..Default::default()
     };
