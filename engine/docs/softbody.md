@@ -67,6 +67,67 @@ all the bodywork stays free to crumple. The core takes a share of every node's m
 ignore the vehicle's own node spheres: the core and its nodes share a negative
 collision group.
 
+**Authored cores and bolted rigid parts.** A `SoftVehicleDesc` may bring its own core
+(`SoftCore`). This is a complete `VehicleDesc` (wheels, drivetrain, and parts with their
+`MountDesc`s), ball-jointed to the nodes it lists. Node masses are not shared with it.
+
+It may also bring `SoftRigidPart`s: rigid bodies (colliders, mass) held to nodes by
+D6 ball joints with break limits. `SoftHost::add` spawns these after the core, in the
+vehicle's collision group, and records each one's body and joint range
+(`SoftEntry::rigid_parts`). A part whose joints have all broken is loose. It is an
+ordinary body, and its joint breaks are `EVENT_BREAK` records on the event ring.
+
+### The hybrid dune buggy
+
+`engine_softbody::buggy::dune_buggy_soft()` is vibe-land's sand rail in three parts:
+
+* **Frame:** node–beam.
+* **Rigid core:** the `dune_buggy` raycast vehicle with only its drivetrain parts.
+* **Bolted parts:** rigid bodies on joints.
+
+`engine/scenes/dune-buggy/frame-graph.mjs` bakes it into the `hybrid` section of
+`engine-vehicle/assets/dune_buggy.json`.
+
+What each piece of the buggy is in each build:
+
+| Behaviour | Parts | Model |
+|---|---|---|
+| Bends, stiff (safety cell) | hoop, pillars, roof, side bars, floor rails | beams, yield 30 kN, break 400 kN |
+| Bends, soft (crumple) | frame horns, front crossmember, engine cage tail | beams, yield 6 kN, break 100 kN |
+| Bends, then tears off | front bumper, rear bumper, nose (panel on its standoffs) | own nodes and beams; mount beams in one break group each, rated from the rigid preset's mount |
+| Snaps (on the core) | engine, gearbox, steering column | core parts with `MountDesc` (losing them cuts drive or steering) |
+| Snaps (on joints) | seats, fuel tank, lamps, mirrors, extinguisher | `SoftRigidPart` on the 3 nearest nodes of what carries it (headlamps on the nose, rear lamps on the rear bumper) |
+| Wheels | 4 | the core's raycast wheels with their suspension mounts |
+
+How the frame graph is built:
+
+* **Nodes** sit at every tube junction, merged within 3.5 cm and splitting tubes at
+  T-junctions. Long spans get nodes along them, up to 4 per tube and about every 0.42 m.
+  This gives contact along the tube and somewhere for it to bend. Only node spheres touch
+  the rigid world: a beam between two nodes collides with nothing.
+* **Braces.** Each node takes up to 5 brace beams to its nearest neighbours whose
+  direction differs from every beam it already has by over 25°. Plain beams only resist
+  stretch: without braces in several directions, a node mid-tube has no stiffness across
+  the tube and the frame folds like a mechanism.
+* **Size:** 152 nodes (307 kg; median 1.3 kg) and 861 beams.
+* **Stiffness:** 1e6 N/m. The light nodes rang at 3e6 and spiked loads, which tore off
+  the rear bumper in a frontal crash (`hybrid_buggy_crash_probe`).
+* **Core attachment:** the 8 lower-wishbone pivots.
+* **Named parts** (`SoftVehicleDesc::parts`): `frame`, `front_bumper`, `rear_bumper`
+  and `nose`. A torn-off piece's `PieceDetached` event and the damage readouts use these
+  names.
+
+`tests/softbody_buggy.rs` (240 Hz × 10 iterations) checks three cases:
+
+* The buggy stands and drives without yielding a beam.
+* A 50 km/h wall crash bends the front (about 5 cm, 54 beams yield), tears out both front
+  wheels' suspensions (the tyres stand proud of the bumper) and leaves the safety cell's
+  shape within a millimetre.
+* A cannonball into the open side tears the struck seat off its rails.
+
+`vehicle.html?scene=buggies&build=hybrid` runs it in the browser (240 Hz, 4 steps a
+frame). `buggy-render.mjs` skins each frame tube along its node chain.
+
 ### Step placement
 
 ```text
@@ -672,5 +733,6 @@ comes on top of the rigid step's fixed 7.5 ms per frame at 240 Hz.
   simulated (JBeam PRESSURED and ANISOTROPIC run as NORMAL).
 * Only the native wgpu host and the browser run soft bodies. The Metal (`MetalSim`)
   and CUDA hosts compile and plan no soft passes (`SoftCounts::default`).
+* Rigid parts hang one level deep on nodes (no rigid part carries another).
 * Stage-2 wheels (mounted on particles), rigid-mode demotion, crash-island substeps and
   the 15-vehicle Rigs of Rods calibration are next.

@@ -274,6 +274,46 @@ pub fn decode_joint_breaks(words: &[u32], seen: &mut u32, out: &mut Vec<JointBre
     lost
 }
 
+/// Event record type of a vehicle mount break (`vehicle_step.slang`
+/// `EVENT_MOUNT_BREAK`): `[6, vehicle << 8 | is_wheel << 7 | index, force bits,
+/// torque bits]`. (5 is the soft-body beam break.)
+pub const EVENT_MOUNT_BREAK: u32 = 6;
+
+/// A vehicle part or wheel whose mount broke: the vehicle, which part (or
+/// wheel, when `wheel`) and the mount force / moment that exceeded its limit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MountBreak {
+    pub vehicle: u32,
+    pub index: u32,
+    pub wheel: bool,
+    pub force: f32,
+    pub torque: f32,
+}
+
+/// Decode new `EVENT_MOUNT_BREAK` records, as [`decode_joint_breaks`] does
+/// (each event kind keeps its own read cursor over the shared ring).
+pub fn decode_mount_breaks(words: &[u32], seen: &mut u32, out: &mut Vec<MountBreak>) -> u32 {
+    let cursor = words[0];
+    let lost = cursor.wrapping_sub(*seen).saturating_sub(EVENT_RING_CAPACITY);
+    let mut n = seen.wrapping_add(lost);
+    while n != cursor {
+        let r = 4 + 4 * (n % EVENT_RING_CAPACITY) as usize;
+        if words[r] == EVENT_MOUNT_BREAK {
+            let id = words[r + 1];
+            out.push(MountBreak {
+                vehicle: id >> 8,
+                index: id & 0x7F,
+                wheel: id & 0x80 != 0,
+                force: f32::from_bits(words[r + 2]),
+                torque: f32::from_bits(words[r + 3]),
+            });
+        }
+        n = n.wrapping_add(1);
+    }
+    *seen = cursor;
+    lost
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct StepCounters {

@@ -171,6 +171,8 @@ pub fn resolve_entry(name: &str, persistent: bool) -> &str {
         "convex_classify" => "convex_classify_persistent",
         "convex_manifold" => "convex_manifold_persistent",
         "reuse_all_manifolds" => "reuse_all_manifolds_persistent",
+        // The one vehicle kernel that reads contacts (vehicle_step_persistent.slang).
+        "vehicle_loads" => "vehicle_loads_persistent",
         _ => name,
     }
 }
@@ -520,6 +522,9 @@ pub fn encode_step(
     }
     e.d("extract_velocity_sleep", n_bodies);
     if vehicles {
+        // Mount loads from the final λ and solved velocities; overloaded parts
+        // and wheels are severed by the next step's vehicle_input.
+        e.d("vehicle_loads", u64::from(i.vehicle_count));
         e.d("vehicle_post", u64::from(i.vehicle_count));
     }
     if soft {
@@ -550,6 +555,7 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "vehicle_link",
     "vehicle_prepare",
     "vehicle_iterate",
+    "vehicle_loads_persistent",
     "vehicle_post",
     "build_aabbs",
     "joint_hash_clear",
@@ -637,11 +643,15 @@ pub const VEHICLE_ENTRIES: &[&str] = &[
     "vehicle_link",
     "vehicle_prepare",
     "vehicle_iterate",
+    "vehicle_loads",
     "vehicle_post",
     "raycast_batch",
 ];
 
 pub fn kernel_source(entry: &str) -> &'static str {
+    if entry == "vehicle_loads_persistent" {
+        return "vehicle_step_persistent.slang";
+    }
     if VEHICLE_ENTRIES.contains(&entry) {
         return "vehicle_step.slang";
     }

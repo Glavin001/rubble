@@ -88,7 +88,25 @@ pub struct VehicleState {
     pub event_seq: u32,
     /// Current chassis mass (drops as parts are lost).
     pub mass: f32,
+    /// Parts / wheels whose mount broke under load (`MountDesc`), latched.
+    pub parts_broken: u32,
+    pub wheels_broken: u32,
     pub wheels: Vec<WheelState>,
+}
+
+/// What a part's (or wheel's) mount carried on the last step it was attached
+/// (`vehicle_loads`), against its limits.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MountLoad {
+    pub index: u32,
+    pub wheel: bool,
+    pub force: f32,
+    pub torque: f32,
+    pub break_force: f32,
+    pub break_torque: f32,
+    /// Largest max(force / break_force, torque / break_torque) seen since spawn.
+    pub peak_ratio: f32,
 }
 
 /// Per-wheel impulse wrench at its mount over the last step (chassis frame).
@@ -145,6 +163,10 @@ pub enum VehicleEvent {
     WheelRemoved { vehicle: VehicleHandle, wheel: u32 },
     /// A part left the chassis: severed into `body`, disabled, or reparented elsewhere.
     PartLost { vehicle: VehicleHandle, part: u32, body: u32 },
+    /// The part's mount broke under load (also reported as `PartLost`).
+    PartBroken { vehicle: VehicleHandle, part: u32, body: u32 },
+    /// The wheel's mount broke under load (also reported as `WheelDetached`).
+    WheelBroken { vehicle: VehicleHandle, wheel: u32, body: u32 },
     /// Wheel / drive / steer masks or engine connection changed.
     FunctionalStateChanged { vehicle: VehicleHandle, wheel_mask: u32, drive_mask: u32, steer_mask: u32, engine_connected: bool },
     WheelContactBegin { vehicle: VehicleHandle, wheel: u32, ground_body: Option<u32> },
@@ -211,9 +233,19 @@ impl VehicleHost {
                     });
                 }
                 let lost = now.parts_lost & !prev.parts_lost;
+                let broken = now.parts_broken & !prev.parts_broken;
                 for p in 0..32 {
                     if lost & (1 << p) != 0 {
                         out.push(VehicleEvent::PartLost { vehicle: h, part: p, body: self.part_body(h, p) });
+                    }
+                    if broken & (1 << p) != 0 {
+                        out.push(VehicleEvent::PartBroken { vehicle: h, part: p, body: self.part_body(h, p) });
+                    }
+                }
+                let broken = now.wheels_broken & !prev.wheels_broken;
+                for w in 0..now.wheels.len() as u32 {
+                    if broken & (1 << w) != 0 {
+                        out.push(VehicleEvent::WheelBroken { vehicle: h, wheel: w, body: self.wheel_body(h, w) });
                     }
                 }
                 for (w, (a, b)) in prev.wheels.iter().zip(&now.wheels).enumerate() {
@@ -561,6 +593,8 @@ impl VehicleHost {
             engine_connected: o3[0] != 0,
             parts_lost: o3[1],
             mass: f32::from_bits(v[V_MASS as usize][0]),
+            parts_broken: v[V_BRK as usize][2],
+            wheels_broken: v[V_BRK as usize][3],
             wheels: Vec::new(),
         };
         for wi in 0..e.wheels_used as usize {
@@ -598,6 +632,49 @@ impl VehicleHost {
             });
         }
         out
+    }
+
+    /// Mount loads of every part (part 0, the root, included for completeness)
+    /// and wheel of `h`. Limits read 1e30 where unbreakable.
+    pub fn read_mount_loads(&self, backend: &impl VehicleBackend, h: VehicleHandle) -> Vec<MountLoad> {
+        let l = self.capacity.layout();
+        let e = &self.entries[h.0 as usize];
+        let mut out = Vec::new();
+        let parts = backend.read_slots(l.part_base + e.slots.part_base * PART_STRIDE, e.desc.parts.len() as u32 * PART_STRIDE);
+        for i in 0..e.desc.parts.len() {
+            let p = &parts[i * PART_STRIDE as usize..(i + 1) * PART_STRIDE as usize];
+            let load = p[P_LOAD as usize];
+            out.push(MountLoad {
+                index: i as u32,
+                wheel: false,
+                force: f32::from_bits(load[1]),
+                torque: f32::from_bits(load[2]),
+                break_force: fw(p[P_MOUNT as usize]),
+                break_torque: f32::from_bits(load[0]),
+                peak_ratio: f32::from_bits(load[3]),
+            });
+        }
+        let wheels = backend.read_slots(l.wheel_base + e.slots.wheel_base * WHEEL_STRIDE, e.wheels_used * WHEEL_STRIDE);
+        for wi in 0..e.wheels_used as usize {
+            let w = &wheels[wi * WHEEL_STRIDE as usize..(wi + 1) * WHEEL_STRIDE as usize];
+            let m = w[W_MOUNT as usize];
+            out.push(MountLoad {
+                index: wi as u32,
+                wheel: true,
+                force: f32::from_bits(m[2]),
+                torque: f32::from_bits(m[3]),
+                break_force: f32::from_bits(m[0]),
+                break_torque: f32::from_bits(m[1]),
+                peak_ratio: fw(w[W_MOUNT2 as usize]),
+            });
+        }
+        out
+    }
+
+    /// Design-space position of `h`'s body origin (its centre of mass at spawn):
+    /// design-space geometry (a render mesh) sits at `p - origin` in body space.
+    pub fn origin(&self, h: VehicleHandle) -> [f32; 3] {
+        self.entries[h.0 as usize].origin
     }
 
     /// Mount impulse wrenches for the last step (`force · dt`), for a stress solver.
