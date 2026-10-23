@@ -149,6 +149,8 @@ fn main() -> anyhow::Result<()> {
         sim.drain()?;
         let ms = t.elapsed().as_secs_f64() * 1e3 / steps as f64;
         let c = sim.soft_host().counts();
+        let rc = sim.last_counters();
+        eprintln!("  rigid colours {} awake {} contacts {}", rc.color_count, rc.awake_count, rc.contact_count);
         println!(
             "{}{n:>3} cars: {:>5} particles, {:>6} beams, {:>2} particle colours · pipelined {ms:5.2} ms/step ({:5.1} ms per 60 fps frame of 4 steps) · synchronous {sync_ms:5.2} ms/step · {}",
             if rigid { "rigid baseline " } else { "" },

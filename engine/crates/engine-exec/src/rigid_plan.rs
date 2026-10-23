@@ -436,6 +436,7 @@ pub fn encode_step(
             e.d("soft_collide_nodes", u64::from(i.soft.particles.max(1)));
             e.d("soft_collide_tris", u64::from(i.soft.triangles.max(1)));
         }
+        e.phase("soft_begin");
     }
 
     if m.compact_contacts && !m.fused_persistence && !early_pair_pack {
@@ -466,6 +467,7 @@ pub fn encode_step(
             e.dp(sparse, 64, sparse_start);
         }
         if soft {
+            e.phase("primal");
             if i.soft.max_color <= SOFT_FUSED_MAX_COLOR {
                 // Every colour fits one workgroup pass: the whole sweep (and the
                 // Chebyshev step) in one dispatch, same order. Exactly one 256-lane
@@ -484,8 +486,10 @@ pub fn encode_step(
                     );
                 }
             }
+            e.phase("soft_primal");
+        } else {
+            e.phase("primal");
         }
-        e.phase("primal");
         e.wp(dual, 65, u32::from(iter + 1 == i.iterations));
         if soft && i.soft.dual {
             e.d("soft_dual", u64::from(i.soft.beams.max(1)));
@@ -499,6 +503,7 @@ pub fn encode_step(
         // Plasticity and breaking at the converged state, then detacher groups.
         e.d("soft_plastic", u64::from(i.soft.beams.max(1)));
         e.d("soft_break_groups", u64::from(i.soft.beams.max(1)));
+        e.phase("soft_plastic");
     }
     e.d("extract_velocity_sleep", n_bodies);
     if vehicles {
