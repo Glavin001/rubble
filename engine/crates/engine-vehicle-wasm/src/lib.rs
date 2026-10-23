@@ -148,6 +148,7 @@ pub fn motion_constants() -> String {
         ("CCD_FALLBACKS", s::CCD_FALLBACKS),
         ("CCD_BODY_CAP", s::CCD_BODY_CAP),
         ("CCD_PAIR_CAP", s::CCD_PAIR_CAP),
+        ("FAST_CAP", s::FAST_CAP),
         ("SCRATCH_WORDS", s::SCRATCH_WORDS),
         ("EVENT_RING_BASE", s::EVENT_RING_BASE),
         ("EVENT_RING_CAPACITY", s::EVENT_RING_CAPACITY),

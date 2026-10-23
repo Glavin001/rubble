@@ -491,15 +491,17 @@ static const uint CCD_FALLBACKS = CCD_BASE + 3u;
 static const uint IMPULSE_FIRST = CCD_BASE + 4u;
 static const uint CCD_BODY_CAP = 1024u;
 static const uint CCD_BODY_BASE = CCD_BASE + 8u;
-static const uint FAST_CAP = 1024u;
+static const uint FAST_CAP = 16384u;
 static const uint FAST_BASE = CCD_BODY_BASE + 4u * CCD_BODY_CAP;
 static const uint IMPULSE_CAP = 1024u;
 static const uint IMPULSE_WORDS = 8u;
 static const uint IMPULSE_BASE = FAST_BASE + FAST_CAP;
 static const uint CCD_CARRY_BASE = IMPULSE_BASE + IMPULSE_WORDS * IMPULSE_CAP;
-static const uint CCD_CARRY_WORDS = 16u;
+static const uint CCD_CARRY_WORDS = 32u;
 static const uint CCD_PAIR_COUNT = CCD_BASE + 5u;
-static const uint CCD_PAIR_CAP = 8192u;
+// Largest |v|·h of this step's CCD bodies (asuint, ccd_register; ccd_trust).
+static const uint CCD_MAX_REACH = CCD_BASE + 6u;
+static const uint CCD_PAIR_CAP = 131072u;
 static const uint CCD_PAIR_BASE = CCD_CARRY_BASE + CCD_CARRY_WORDS * CCD_BODY_CAP;
 static const uint CCD_NO_PAIR = 0xFFFFFFFFu;
 static const uint CCD_TOI_NONE = 0x7F800000u; // +inf
@@ -779,6 +781,7 @@ void broadphase_clear(uint3 tid : SV_DispatchThreadID)
         ASTORE(gScratchAtomics[FAST_COUNT], 0u);
         ASTORE(gScratchAtomics[CCD_FALLBACKS], 0u);
         ASTORE(gScratchAtomics[CCD_PAIR_COUNT], 0u);
+        ASTORE(gScratchAtomics[CCD_MAX_REACH], 0u);
     }
 }
 
@@ -1880,6 +1883,7 @@ void rest_publish(uint3 tid : SV_DispatchThreadID)
     ASTORE(gScratchAtomics[FAST_COUNT], 0u);
     ASTORE(gScratchAtomics[CCD_FALLBACKS], 0u);
     ASTORE(gScratchAtomics[CCD_PAIR_COUNT], 0u);
+    ASTORE(gScratchAtomics[CCD_MAX_REACH], 0u);
     AOR2(gScratchAtomics[HIER_LEVEL_MASK_SLOT], ALOAD(gConstraintIds[hdr]));
     uint planes = ALOAD(gConstraintIds[hdr + 1u]);
     ASTORE(gScratchAtomics[42], planes);
@@ -2444,9 +2448,11 @@ bool ccdApartAlongSweep(Collider ca, BodyState ba, Collider cb, BodyState bb, fl
     return length(w - d * t) > reach;
 }
 
-// Farthest the solve moves a body from its predicted pose in one step: the
-// primal trust region (trustLin · 0.5 per iteration) over the iterations, and
-// at most `sweep` (the bound for a CCD body's broadphase pad).
+// Farthest the solve moves a CCD body off its straight sweep in one step: the
+// primal trust region (trustLin · 0.5 per iteration) over the iterations
+// (primalApply holds a CCD body's sideways steps to it and its position along
+// the sweep to the swept segment, padded by it), at most `sweep` (the bound for
+// a CCD body's broadphase pad).
 float ccdDeflectionBound(float sweep)
 {
     float trust = float(PARAMS.iterations) * 0.5 * PARAMS.trustLin;
@@ -2469,10 +2475,21 @@ float colliderReach(BodyState b, Collider c)
     // debris jammed into neighbours (7x7 grid: 3,869 awake at 30 s vs 6).
     float h = PARAMS.dt;
     float linear = length(b.linearVel) * h;
-    float motion = linear + length(b.angularVel) * colliderExtent(c) * h;
+    float motion = linear + spinSweep(b, c);
     if (motion <= PARAMS.contactOffset) return 0.0;
     float reach = motion + abs(PARAMS.gravityY) * h * h;
     return ccd || kin ? reach : min(reach, specReachMax());
+}
+
+// How far rotation this step moves any point of collider `c`: |ω|·h·r, but
+// never more than its diameter (2r: a turn cannot carry a point farther), and
+// nothing for a sphere about its body's centre (it fills the same space). A
+// CCD ball spun to 7,500 rad/s by contact friction had a box past the fast
+// walk's cell limit.
+float spinSweep(BodyState b, Collider c)
+{
+    if (c.shape == SHAPE_SPHERE && dot(c.localPos, c.localPos) < 1e-12) return 0.0;
+    return min(length(b.angularVel) * PARAMS.dt, 2.0) * colliderExtent(c);
 }
 // Reach of a hull or box collider, cached with its world OBB by build_aabbs.
 // Bounds and early-outs use these per-collider reaches (a conservative sweep).
@@ -2490,10 +2507,9 @@ float pairReach(BodyState ba, Collider ca, BodyState bb, Collider cb)
     // Spin counts here (the narrowphase margin): closingPoints keeps only the
     // points whose ω×r velocity actually closes the gap. The broadphase sweep
     // stays linear (colliderReach), so spin does not flood the candidates.
-    float spin = (moveA ? length(ba.angularVel) * colliderExtent(ca) : 0.0)
-               + (moveB ? length(bb.angularVel) * colliderExtent(cb) : 0.0);
+    float spin = (moveA ? spinSweep(ba, ca) : 0.0) + (moveB ? spinSweep(bb, cb) : 0.0);
     float h = PARAMS.dt;
-    float motion = (length(vB - vA) + spin) * h;
+    float motion = length(vB - vA) * h + spin;
     if (motion <= PARAMS.contactOffset) return 0.0;
     float reach = motion + abs(PARAMS.gravityY) * h * h;
     return uncapped ? reach : min(reach, 2.0 * specReachMax());
@@ -3558,7 +3574,16 @@ Contact persistContact(uint i, Contact c, bool reused, BodyState ba, BodyState b
             // normal injects energy (random Box Pile). three-avbd avoids this via
             // reuseContacts keeping the manifold; without reuse, require n·n_prev>0.9.
             float nAgree = dot(prev.normal, c.normal);
-            if (nAgree > 0.9)
+            // Nor from a time-of-impact row (ccd_emit's features): its force
+            // stopped a fast body within one step, often rigidly against a
+            // partner held still, and ccd_respond already exchanged that
+            // impact's momentum. Carried over, the rigid stiffness and the
+            // stopping force held the striker dead against the struck body the
+            // next step while the body moved off (an edge hit lost 84% of the
+            // momentum).
+            uint prevTag = prev.featureId >> 16;
+            bool prevToi = prevTag == 0x0CCDu || prevTag == 0x0CCEu || prevTag == 0x0CCFu;
+            if (nAgree > 0.9 && !prevToi)
             {
                 c.lambdaN = prev.lambdaN;
                 c.lambdaT1 = prev.lambdaT1;
@@ -5080,10 +5105,7 @@ void primalApply(uint bodyIdx, Mat6 A, Vec6 rhs)
     if (floors > 0) AADD2(gCounters[0].pivotFloorHits, floors);
     float3 dlin = float3(dz.v[0], dz.v[1], dz.v[2]);
     float3 dang = float3(dz.v[3], dz.v[4], dz.v[5]);
-    float r = 0.5;
-    float maxLin = p.trustLin * r;
-    float len = length(dlin);
-    if (len > maxLin && len > 1e-12) dlin *= maxLin / len;
+    dlin = ccdTrustStep(bodyIdx, b, dlin);
     float alen = length(dang);
     if (alen > p.trustAng && alen > 1e-12) dang *= p.trustAng / alen;
     if (dlin.x != dlin.x || dlin.y != dlin.y || dlin.z != dlin.z) return;

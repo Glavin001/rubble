@@ -578,7 +578,7 @@
       ...(compactContacts ? ['clear_solver_contacts', 'pack_solver_contacts', 'persist_manifolds_compact', 'solve_primal_color_compact', 'solve_dual_compact'] : []),
       'solve_dual', 'extract_velocity_sleep', 'write_sleep_args', 'sleep_island_gate', 'sleep_island_commit',
       ...(jointCount > 0 ? ['joint_hash_clear', 'joint_hash_insert', 'warmstart_joints', 'csr_degree_joints', 'csr_scatter_joints'] : []),
-      ...(ccdBalls ? ['ccd_register', 'broadphase_fast', 'ccd_toi', 'ccd_pick', 'ccd_mark', ccdEmit, 'ccd_respond', 'ccd_validate', 'ccd_clamp'] : []),
+      ...(ccdBalls ? ['ccd_register', 'broadphase_fast', 'ccd_toi', 'ccd_pick', 'ccd_mark', ccdEmit, 'ccd_respond', 'ccd_respond_apply', 'ccd_trust', 'ccd_validate', 'ccd_clamp'] : []),
     ];
 
     function bindingsOf(wgsl) {
@@ -1321,7 +1321,7 @@ struct VsOut {
       disp(pass, 'broadphase_insert', nCols);
       disp(pass, 'broadphase_query', nCols);
       // Sweeps longer than a cell query along their path (64 workgroups).
-      if (sceneCcd) disp(pass, 'broadphase_fast', 64 * 64);
+      if (sceneCcd) disp(pass, 'broadphase_fast', M.FAST_CAP * 64);
       disp(pass, 'write_work_args', 64);
       if (carryRest) {
         // Previous manifolds (slot 72) are intact until narrowphase; recount
@@ -1416,6 +1416,8 @@ struct VsOut {
       disp(pass, 'write_color_args', 64);
       if (graphProfile) nextPhase();
       disp(pass, 'predict_bodies', nBodies);
+      // Struck bodies' trust regions for this step (ccd_step.slang).
+      if (sceneCcd) disp(pass, 'ccd_trust', M.CCD_PAIR_CAP);
       nextPhase();
       // Cover newly introduced colours even inside batches without readbacks.
       const colors = Math.min(cap.maxColors, 32);
@@ -1455,7 +1457,10 @@ struct VsOut {
       if (!(params.sleepTime >= SLEEP_NEVER_S)) for (let i = 0; i < sleepRounds; i++) dispWork(pass, 'sleep_island_gate', 66);
       dispWork(pass, 'sleep_island_commit', 67);
       // CCD impacts on dynamic bodies: the momentum exchange (ccd_step.slang).
-      if (sceneCcd) disp(pass, 'ccd_respond', 64);
+      if (sceneCcd) {
+        disp(pass, 'ccd_respond', M.CCD_BODY_CAP);
+        disp(pass, 'ccd_respond_apply', M.CCD_BODY_CAP);
+      }
       pass.end();
       if (readback) {
         enc.copyBufferToBuffer(bufs[7], 0, staging, 0, 80);

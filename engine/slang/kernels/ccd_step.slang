@@ -49,6 +49,7 @@ void ccd_register(uint3 tid : SV_DispatchThreadID)
     ASTORE(gScratchAtomics[CCD_CARRY_BASE + CCD_CARRY_WORDS * slot + 10u], CCD_TOI_NONE);
     ASTORE(gScratchAtomics[CCD_CARRY_BASE + CCD_CARRY_WORDS * slot + 11u], 0u);
     gBodies[i].initialPad = asfloat(slot);
+    AMAX2(gScratchAtomics[CCD_MAX_REACH], asuint(length(b.linearVel) * PARAMS.dt));
 }
 
 // ---------------------------------------------------------------------------
@@ -214,16 +215,16 @@ void fastQuery(uint i, uint lane)
     }
 }
 
-// One workgroup per fast collider (FAST_GROUPS groups stride the list).
-static const uint FAST_GROUPS = 64u;
-
+// One workgroup per fast collider: FAST_CAP groups (in rows of 32768), those
+// past the list's count return at once, so a flood of fast debris after big
+// impacts is walked in parallel, not a few groups striding the list.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void broadphase_fast(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
-    uint n = fastCount();
-    for (uint k = gid.x; k < n; k += FAST_GROUPS)
-        fastQuery(ALOAD(gScratchAtomics[FAST_BASE + k]), lid.x);
+    uint k = gid.x + gid.y * 32768u;
+    if (k >= fastCount()) return;
+    fastQuery(ALOAD(gScratchAtomics[FAST_BASE + k]), lid.x);
 }
 
 // A moving kinematic finds the sleeping dynamics it may wake (uniform grid;
@@ -663,6 +664,9 @@ void ccd_mark(uint3 tid : SV_DispatchThreadID)
     ASTORE(gScratchAtomics[r + 5u], asuint(vo.y));
     ASTORE(gScratchAtomics[r + 6u], asuint(vo.z));
     ASTORE(gScratchAtomics[r + 7u], other);
+    // Held still this step (asleep, or its wake deferred): the solve treated it
+    // as immovable, so the response resolves the whole impact.
+    ASTORE(gScratchAtomics[r + 15u], bodyIsSleeping(bo) || wakePending(bo) ? 1u : 0u);
     ASTORE(gScratchAtomics[CCD_BODY_BASE + 4u * k + 3u], CCD_RESPOND);
 }
 
@@ -677,6 +681,83 @@ void ccd_mark(uint3 tid : SV_DispatchThreadID)
 // bounds are padded by the farthest the solve can deflect it, so every body
 // it can reach is a candidate: it never ends a step past a surface.
 // ---------------------------------------------------------------------------
+// Whether the segment a + s·d (s in [0, 1]) enters collider c posed at
+// (pos, rot) from outside, and where (s). Exact for boxes and hulls (the slab
+// test over their faces) and spheres; other shapes fall back to a GJK point
+// cast. A start inside is not an entry (false).
+bool segmentEnters(Collider c, float3 pos, float4 rot, float3 a, float3 d, out float s)
+{
+    s = 1.0;
+    float4 qi = quatConjugate(rot);
+    float3 lo = quatRotate(qi, a - pos);
+    float3 ld = quatRotate(qi, d);
+    float tNear = -1e30, tFar = 1e30;
+    if (c.shape == SHAPE_BOX)
+    {
+        for (int k = 0; k < 3; k++)
+        {
+            float h = c.params[k];
+            if (abs(ld[k]) < 1e-12)
+            {
+                if (abs(lo[k]) > h) return false;
+                continue;
+            }
+            float t0 = (-h - lo[k]) / ld[k];
+            float t1 = (h - lo[k]) / ld[k];
+            tNear = max(tNear, min(t0, t1));
+            tFar = min(tFar, max(t0, t1));
+            if (tNear > tFar) return false;
+        }
+    }
+    else if (c.shape == SHAPE_CONVEX)
+    {
+        HullRef hr = hullOf(c);
+        for (uint f = 0u; f < hr.nf; f++)
+        {
+            float4 pl = hullPlane(hr, f);
+            float denom = dot(pl.xyz, ld);
+            float num = pl.w - dot(pl.xyz, lo);
+            if (abs(denom) < 1e-12)
+            {
+                if (num < 0.0) return false;
+                continue;
+            }
+            float tt = num / denom;
+            if (denom < 0.0) tNear = max(tNear, tt);
+            else tFar = min(tFar, tt);
+            if (tNear > tFar) return false;
+        }
+    }
+    else if (c.shape == SHAPE_SPHERE)
+    {
+        float r = c.params.x;
+        float dd = dot(ld, ld);
+        if (dd < 1e-20) return false;
+        float b = dot(lo, ld);
+        float cc = dot(lo, lo) - r * r;
+        float disc = b * b - dd * cc;
+        if (disc < 0.0) return false;
+        tNear = (-b - sqrt(disc)) / dd;
+        tFar = (-b + sqrt(disc)) / dd;
+    }
+    else
+    {
+        Collider probe = c;
+        probe.shape = SHAPE_SPHERE;
+        probe.params = float4(0.0, 0.0, 0.0, 0.0);
+        float mu;
+        float3 n;
+        // The point (a) cast against c along d, in a's frame.
+        uint st = gjkCast(probe, float3(0, 0, 0), float4(0, 0, 0, 1), c, pos - a, rot, float3(0, 0, 0), d, 1.0, 1.0e-4, mu, n);
+        s = mu;
+        return st == CAST_HIT;
+    }
+    // Entry from outside within the segment.
+    if (tNear <= 0.0 || tNear > 1.0 || tFar < tNear) return false;
+    s = tNear;
+    return true;
+}
+
 // Smallest half extent of a collider (sphere and capsule: the radius; hull:
 // half its bound radius, a conservative stand-in).
 float colliderThickness(Collider c)
@@ -716,17 +797,14 @@ void ccd_validate(uint3 tid : SV_DispatchThreadID)
         BodyState bo = gBodies[co.body];
         float3 xf0; float4 qf0; stepStartPose(bf, xf0, qf0);
         float3 xo0; float4 qo0; stepStartPose(bo, xo0, qo0);
-        // Only bodies that cannot move this step: static, kinematic, asleep or
-        // held (wake deferred). An awake body the solve did not reach yet (a
-        // heavy ball through a deep brick wall in 4 iterations) is pushed by
-        // its contacts next step; crossing a body that cannot move is a
-        // pass-through.
+        // A body that cannot move this step (static, kinematic, asleep or held,
+        // its wake deferred): any real crossing.
         bool fixedThisStep = !bodyIsDynamic(bo) || bodyIsSleeping(bo) || wakePending(bo);
-        // An awake body that did not move this step: only the CCD body's centre
-        // entering it counts (a centre crossing is a pass-through; a heavy
-        // ball's overlap with bricks the solve has not pushed yet is not).
-        bool stillThisStep = length(bo.position - xo0) <= 1.0e-3 && abs(dot(bo.orientation, qo0)) >= 1.0 - 1.0e-6;
-        if (!fixedThisStep && !stillThisStep) continue;
+        // An awake body (moved or not): only the CCD body's centre entering it,
+        // along their relative motion, counts. A centre inside a piece is a
+        // pass-through in the making (it comes out the far side once the piece
+        // stops); a heavy ball's overlap with bricks it pushes, or that the
+        // solve has not pushed yet, is not.
         // Relative motion of the CCD body over the step, against the other at
         // its step-start pose.
         float3 d = (bf.position - xf0) - (bo.position - xo0);
@@ -735,24 +813,28 @@ void ccd_validate(uint3 tid : SV_DispatchThreadID)
         BodyState so = bo; so.position = xo0; so.orientation = qo0;
         float3 pf; float4 qf; colliderPose(cf, sf, pf, qf);
         float3 po; float4 qo; colliderPose(co, so, po, qo);
-        float mu;
-        float3 n;
+        float mu = 1.0;
+        float3 n = float3(0, 0, 0);
         float eps = 1.0e-4 + 1.0e-5 * length(d);
-        // The centre alone (a sphere of radius 0) against a body that is awake.
-        Collider probe = cf;
-        if (!fixedThisStep)
+        // A body that cannot move: the whole shape, cast (GJK). Already
+        // touching it (resting against it in rubble), or an awake body: its
+        // centre must not go in (an exact segment test, not a cast: a GJK
+        // point cast grazing a box edge can stall and miss).
+        uint status = CAST_OVERLAP;
+        if (fixedThisStep)
+            status = gjkCast(cf, float3(0, 0, 0), qf, co, po - pf, qo, float3(0, 0, 0), d, 1.0, eps, mu, n);
+        bool centreOnly = status == CAST_OVERLAP;
+        if (centreOnly)
         {
-            probe.shape = SHAPE_SPHERE;
-            probe.params = float4(0.0, 0.0, 0.0, 0.0);
+            if (!segmentEnters(co, po, qo, pf, d, mu)) continue;
+            status = CAST_HIT;
         }
-        uint status = gjkCast(probe, float3(0, 0, 0), qf, co, po - pf, qo, float3(0, 0, 0), d, 1.0, eps, mu, n);
-        // Overlapping at the start (resting, sliding) is the contacts' business.
         if (status != CAST_HIT) continue;
         // Only a real crossing: deeper than a quarter of the thinner body's
         // smallest half extent (contact depth, rolling and resting sink stay
         // the solve's; a centre crossing is far past it).
         float depth = max(2.0 * PARAMS.contactOffset, 0.25 * min(colliderThickness(cf), colliderThickness(co)));
-        if (fixedThisStep && (1.0 - mu) * dot(d, n) <= depth) continue;
+        if (!centreOnly && (1.0 - mu) * dot(d, n) <= depth) continue;
         AMIN2(gScratchAtomics[CCD_CARRY_BASE + CCD_CARRY_WORDS * slot + 8u], asuint(mu));
         // First contact with a body that cannot move (static, kinematic).
         if (!bodyIsDynamic(bo)) AMIN2(gScratchAtomics[CCD_CARRY_BASE + CCD_CARRY_WORDS * slot + 10u], asuint(mu));
@@ -807,77 +889,231 @@ bool ccdClampedVelocity(uint body, BodyState b, out float3 v)
     return true;
 }
 
+// Trust region of the bodies a CCD body can strike (after predict_bodies,
+// before the solve). A free body struck by a fast one takes the impact through
+// the solve, a position correction of up to the closing speed times h, but the
+// primal trust region lets an ordinary body move only iterations · trustLin ·
+// 0.5 (1.75 m) in a step: a 300 m/s ball into a free 2 kg box (inelastic
+// 214 m/s, 3.6 m) kept 85% of the momentum. So for this step every awake
+// dynamic body paired with a CCD body (ccd_pick's list) gets a trust region
+// covering the largest CCD travel this step, read by primalApply from its
+// inertial-target record's spare word (predict_bodies just zeroed it). Every
+// write is the same value, so concurrent ones agree.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ccd_trust(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (!sceneHasCcd() || i >= min(ALOAD(gScratchAtomics[CCD_PAIR_COUNT]), CCD_PAIR_CAP)) return;
+    float reach = asfloat(ALOAD(gScratchAtomics[CCD_MAX_REACH]));
+    for (uint side = 0u; side < 2u; side++)
+    {
+        uint body = gColliders[ALOAD(gScratchAtomics[CCD_PAIR_BASE + 2u * i + side])].body;
+        BodyState b = gBodies[body];
+        if (!bodyIsDynamic(b) || bodyIsSleeping(b) || wakePending(b) || bodyIsCcd(b)) continue;
+        gAabbs[body]._pad1 = reach;
+    }
+}
+
+// The primal step of body i under the trust region (trustLin · 0.5 per
+// iteration). A CCD body's iterate starts at its time of impact: held to that
+// trust it could advance only iterations · 0.175 m (1.75 m) in a step, so a
+// fast ball pushing a free box lost the rest of its motion and with it the
+// momentum. So along its velocity it may move as far as its step's travel
+// over the iterations, its position along the sweep staying within the swept
+// segment padded by the ordinary bound (ccdDeflectionBound), and across it the
+// ordinary trust still holds: its broadphase pad stays a hard bound. A body a
+// CCD body can strike gets that reach all round (ccd_trust).
+float3 ccdTrustStep(uint i, BodyState b, float3 dlin)
+{
+    float base = PARAMS.trustLin * 0.5;
+    float iters = max(float(PARAMS.iterations), 1.0);
+    float sp = length(b.linearVel);
+    if (sceneHasCcd() && bodyIsCcd(b) && sp > 1e-6)
+    {
+        float3 u = b.linearVel / sp;
+        float along = dot(dlin, u);
+        float3 perp = dlin - u * along;
+        float pl = length(perp);
+        if (pl > base) perp *= base / pl;
+        float reach = sp * PARAMS.dt;
+        along = clamp(along, -max(base, 2.0 * reach / iters), max(base, 2.0 * reach / iters));
+        // Position along the sweep: within [x⁻, x⁻ + v·h], padded.
+        float pad = ccdDeflectionBound(reach);
+        float s0 = dot(b.position - b.initialPos, u);
+        along = clamp(s0 + along, min(s0, -pad), max(s0, reach + pad)) - s0;
+        return perp + u * along;
+    }
+    float maxLin = base;
+    if (sceneHasCcd() && !bodyIsCcd(b))
+        maxLin = max(maxLin, 2.0 * gAabbs[i]._pad1 / iters);
+    float len = length(dlin);
+    if (len > maxLin && len > 1e-12) dlin *= maxLin / len;
+    return dlin;
+}
+
 // ccd slot flags word (+3): set by ccd_mark when the TOI partner is dynamic.
 static const uint CCD_RESPOND = 1u;
 
 // ---------------------------------------------------------------------------
-// Impact response (after extract_velocity_sleep). A rigid TOI contact stops a
-// CCD body at its partner's surface, but the solve barely passes momentum
-// through a rigid contact in one step's iterations, and a partner held still
-// this step (asleep, its wake deferred) or pinned by such neighbours takes
-// none: the striker would stop dead. So each CCD body that struck a dynamic
-// body gets a perfectly inelastic, momentum-conserving exchange along the TOI
-// normal from both bodies' step-start velocities (the partner also spins, from
-// the contact point), and a held partner wakes with its new velocity. Against
-// a free partner the solve's result is already close, so this changes little;
-// kinetic energy never grows. One thread, CCD slots in order (deterministic
-// when two strikers share a partner).
+// Impact response (after the sleep pass). A rigid TOI contact stops a CCD body
+// at its partner's surface, but the solve barely passes momentum through a
+// rigid contact in one step's iterations, and a partner held still this step
+// (asleep, its wake deferred) or pinned by such neighbours takes none: the
+// striker would stop dead. So each CCD body that struck a dynamic body gets a
+// perfectly inelastic, momentum-conserving exchange along the TOI normal from
+// both bodies' step-start velocities, with both bodies' rotational effective
+// mass (the partner also spins, from the contact point), and a held partner
+// wakes with its new velocity. Against a free partner the solve's result is
+// already close, so this changes little; kinetic energy never grows.
+//
+// Two passes, one thread per CCD slot: ccd_respond computes each slot's
+// velocity changes from the bodies as the solve left them (reads only);
+// ccd_respond_apply has one owner thread per affected body (its own slot if it
+// struck, else the lowest slot that struck it), which sums every change
+// addressed to it in slot order. (One thread looping over the slots cost 3 ms
+// at 512 strikers.)
 // ---------------------------------------------------------------------------
+static const uint CCD_RESP = 16u; // carry words: flag, striker dv, dw, partner dv, dw
+
+void ccdStoreVec(uint at, float3 v)
+{
+    ASTORE(gScratchAtomics[at], asuint(v.x));
+    ASTORE(gScratchAtomics[at + 1u], asuint(v.y));
+    ASTORE(gScratchAtomics[at + 2u], asuint(v.z));
+}
+float3 ccdLoadVec(uint at)
+{
+    return asfloat(uint3(ALOAD(gScratchAtomics[at]), ALOAD(gScratchAtomics[at + 1u]), ALOAD(gScratchAtomics[at + 2u])));
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void ccd_respond(uint3 tid : SV_DispatchThreadID)
 {
-    if (dispatchIndex(tid) != 0u || !sceneHasCcd()) return;
+    uint k = dispatchIndex(tid);
+    if (!sceneHasCcd() || k >= ccdBodyCount()) return;
+    uint r = CCD_CARRY_BASE + CCD_CARRY_WORDS * k;
+    ASTORE(gScratchAtomics[r + CCD_RESP], 0u);
+    if ((ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * k + 3u]) & CCD_RESPOND) == 0u) return;
+    uint fast = ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * k]);
+    float3 v0 = ccdLoadVec(r);
+    float3 vo0 = ccdLoadVec(r + 4u);
+    uint other = ALOAD(gScratchAtomics[r + 7u]);
+    // The winning pair's colliders (ccd_mark): the candidate buffer is the
+    // constraint graph's by now.
+    Collider cf = gColliders[ALOAD(gScratchAtomics[r + 3u])];
+    Collider co = gColliders[ALOAD(gScratchAtomics[r + 9u])];
+    BodyState bf = gBodies[fast];
+    BodyState bo = gBodies[other];
+    if (!bodyIsDynamic(bo) || !bodyIsDynamic(bf)) return;
+    // The TOI normal again, from the step-start poses (a held partner did not
+    // move) along the step's relative motion.
+    BodyState bf0 = bf;
+    bf0.position = bf.initialPos;
+    bf0.orientation = bf.initialRot;
+    float3 rel = v0 * PARAMS.dt;
+    float t;
+    float3 nrm;
+    if (ccdCast(cf, bf0, co, bo, rel, t, nrm) != CAST_HIT || dot(nrm, nrm) < 0.5) nrm = normalize(rel);
+    float closing = dot(v0 - vo0, nrm);
+    if (closing <= 0.0) return;
+    // The perfectly inelastic impulse along n at the contact point, with both
+    // bodies' rotational effective mass (a linear-only impulse with the torque
+    // added on top over-counts it off centre: struck bricks spun to 15,000 rad/s).
+    float3 pf; float4 qf; colliderPose(cf, bf, pf, qf);
+    float3 at = shapeSupport(cf, pf, qf, nrm);
+    float3 rfn = cross(at - bf.position, nrm);
+    float3 ron = cross(at - bo.position, nrm);
+    float kf = bf.invMass + dot(rfn, applyInvInertia(bf, rfn));
+    float ko = bo.invMass + dot(ron, applyInvInertia(bo, ron));
+    float J = closing / max(kf + ko, 1e-20);
+    // Each body's normal speed is only ever raised over the solve's result:
+    // the striker to what the impulse leaves it, the partner to what it gives.
+    // Only a partner held still this step needs it: the solve treated it as
+    // immovable (the striker stopped against it as against a wall, its motion
+    // across the normal too) and it took no momentum. A free partner's
+    // contacts already exchange momentum in the solve; adjusting only one
+    // side's speed there broke conservation (an edge hit that spun the box
+    // into the ball again lost 57% of the momentum).
+    if (ALOAD(gScratchAtomics[r + 15u]) == 0u) return;
+    // The whole frictionless impact from the step-start velocities.
+    ccdStoreVec(r + CCD_RESP + 1u, (v0 - nrm * (J * bf.invMass)) - bf.linearVel);
+    ccdStoreVec(r + CCD_RESP + 4u, -applyInvInertia(bf, rfn * J));
+    ccdStoreVec(r + CCD_RESP + 7u, (vo0 + nrm * (J * bo.invMass)) - bo.linearVel);
+    ccdStoreVec(r + CCD_RESP + 10u, applyInvInertia(bo, ron * J));
+    ASTORE(gScratchAtomics[r + CCD_RESP], 1u);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ccd_respond_apply(uint3 tid : SV_DispatchThreadID)
+{
+    uint k = dispatchIndex(tid);
     uint n = ccdBodyCount();
-    for (uint k = 0u; k < n; k++)
+    if (!sceneHasCcd() || k >= n) return;
+    uint rk = CCD_CARRY_BASE + CCD_CARRY_WORDS * k;
+    uint fast = ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * k]);
+    bool struck = ALOAD(gScratchAtomics[rk + CCD_RESP]) != 0u;
+    uint other = ALOAD(gScratchAtomics[rk + 7u]);
+    // Owner of `other` (it struck nothing itself, so no slot owns it as a
+    // striker): this slot, if no lower slot struck it too.
+    bool ownsOther = struck;
+    for (uint j = 0u; j < n && ownsOther; j++)
     {
-        if ((ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * k + 3u]) & CCD_RESPOND) == 0u) continue;
-        uint fast = ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * k]);
-        uint r = CCD_CARRY_BASE + CCD_CARRY_WORDS * k;
-        float3 v0 = asfloat(uint3(ALOAD(gScratchAtomics[r]), ALOAD(gScratchAtomics[r + 1u]), ALOAD(gScratchAtomics[r + 2u])));
-        float3 vo0 = asfloat(uint3(ALOAD(gScratchAtomics[r + 4u]), ALOAD(gScratchAtomics[r + 5u]), ALOAD(gScratchAtomics[r + 6u])));
-        uint other = ALOAD(gScratchAtomics[r + 7u]);
-        // The winning pair's colliders (ccd_mark): the candidate buffer is the
-        // constraint graph's by now.
-        Collider cf = gColliders[ALOAD(gScratchAtomics[r + 3u])];
-        Collider co = gColliders[ALOAD(gScratchAtomics[r + 9u])];
-        BodyState bf = gBodies[fast];
-        BodyState bo = gBodies[other];
-        if (!bodyIsDynamic(bo) || !bodyIsDynamic(bf)) continue;
-        // The TOI normal again, from the step-start poses (a held partner did
-        // not move) along the step's relative motion.
-        BodyState bf0 = bf;
-        bf0.position = bf.initialPos;
-        bf0.orientation = bf.initialRot;
-        float3 rel = v0 * PARAMS.dt;
-        float t;
-        float3 nrm;
-        if (ccdCast(cf, bf0, co, bo, rel, t, nrm) != CAST_HIT || dot(nrm, nrm) < 0.5) nrm = normalize(rel);
-        float closing = dot(v0 - vo0, nrm);
-        if (closing <= 0.0) continue;
-        float mf = 1.0 / max(bf.invMass, 1e-12);
-        float mo = 1.0 / max(bo.invMass, 1e-12);
-        // Common normal speed of a perfectly inelastic impact.
-        float vc = (mf * dot(v0, nrm) + mo * dot(vo0, nrm)) / (mf + mo);
-        // The striker: its normal speed becomes vc (its tangential motion as
-        // the solve left it); never faster along n than it came in.
-        float vfn = dot(bf.linearVel, nrm);
-        if (vc > vfn) gBodies[fast].linearVel = bf.linearVel + nrm * (vc - vfn);
-        // The partner: raised to vc along n, the impulse at the contact point.
-        float von = dot(bo.linearVel, nrm);
-        if (vc > von)
+        uint rj = CCD_CARRY_BASE + CCD_CARRY_WORDS * j;
+        if (ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * j]) == other) ownsOther = false;
+        else if (j < k && ALOAD(gScratchAtomics[rj + CCD_RESP]) != 0u && ALOAD(gScratchAtomics[rj + 7u]) == other) ownsOther = false;
+    }
+    // This slot's striker always belongs to this thread; `other` too if owned.
+    for (uint pass = 0u; pass < 2u; pass++)
+    {
+        uint b = pass == 0u ? fast : other;
+        if (pass == 1u && !ownsOther) break;
+        float3 dv = float3(0, 0, 0), dw = float3(0, 0, 0);
+        bool any = false;
+        for (uint j = 0u; j < n; j++)
         {
-            float3 J = nrm * (mo * (vc - von));
-            float3 pf; float4 qf; colliderPose(cf, bf, pf, qf);
-            float3 at = shapeSupport(cf, pf, qf, nrm);
-            float3 torque = cross(at - bo.position, J);
-            float3 local = quatRotate(quatConjugate(bo.orientation), torque);
-            gBodies[other].linearVel = bo.linearVel + J * bo.invMass;
-            gBodies[other].angularVel = bo.angularVel + quatRotate(bo.orientation, local * bo.invInertia);
-            gBodies[other].flags = (bo.flags & ~(BODY_SLEEPING | BODY_WAKE_PENDING)) | BODY_AWAKE;
-            gBodies[other].sleepTimer = 0.0;
+            uint rj = CCD_CARRY_BASE + CCD_CARRY_WORDS * j;
+            if (ALOAD(gScratchAtomics[rj + CCD_RESP]) == 0u) continue;
+            if (ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * j]) == b)
+            {
+                dv += ccdLoadVec(rj + CCD_RESP + 1u);
+                dw += ccdLoadVec(rj + CCD_RESP + 4u);
+                any = true;
+            }
+            if (ALOAD(gScratchAtomics[rj + 7u]) == b)
+            {
+                dv += ccdLoadVec(rj + CCD_RESP + 7u);
+                dw += ccdLoadVec(rj + CCD_RESP + 10u);
+                any = true;
+            }
+        }
+        if (!any) continue;
+        BodyState bb = gBodies[b];
+        gBodies[b].linearVel = bb.linearVel + dv;
+        // Under the per-step rotation limit as extract_velocity_sleep is (it ran
+        // before this pass): an edge hit spun a box to 6 rad a step.
+        float3 w = bb.angularVel + dw;
+        if ((PARAMS.flags & FLAG_MAX_ROTATION) != 0u)
+        {
+            float wMax = MAX_ROTATION / max(PARAMS.dt, 1e-8);
+            if (length(w) > wMax) w *= wMax / length(w);
+        }
+        gBodies[b].angularVel = w;
+        if (pass == 1u)
+        {
+            gBodies[b].flags = (bb.flags & ~(BODY_SLEEPING | BODY_WAKE_PENDING)) | BODY_AWAKE;
+            gBodies[b].sleepTimer = 0.0;
         }
     }
+}
+
+// World inverse inertia times v (diagonal in the body frame).
+float3 applyInvInertia(BodyState b, float3 v)
+{
+    float3 local = quatRotate(quatConjugate(b.orientation), v);
+    return quatRotate(b.orientation, local * b.invInertia);
 }
 
 // The narrowphase leaves each CCD body's winning pair to ccd_emit.

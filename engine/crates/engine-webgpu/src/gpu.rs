@@ -284,7 +284,12 @@ pub fn default_device() -> anyhow::Result<(wgpu::AdapterInfo, wgpu::Device, wgpu
     let info = adapter.get_info();
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("engine-webgpu-sim"),
-        required_features: wgpu::Features::empty(),
+        // Timestamps for RUBBLE_GPU_TIMING=1 (per-phase GPU time), when offered.
+        required_features: if std::env::var("RUBBLE_GPU_TIMING").is_ok_and(|v| v == "1") {
+            adapter.features() & wgpu::Features::TIMESTAMP_QUERY
+        } else {
+            wgpu::Features::empty()
+        },
         required_limits: adapter.limits(),
         ..Default::default()
     }))?;
@@ -1484,9 +1489,13 @@ impl WgpuSim {
         } else {
             self.capacity.max_contacts
         };
+        let prof = std::env::var("RUBBLE_STEP_PROFILE").is_ok().then(web_time::Instant::now);
         let modes = self.step_modes();
         let inputs = self.step_inputs();
         let cmds = rigid_plan::encode_step(&modes, &inputs, reuse_manifolds, !read);
+        if let Some(t) = prof {
+            eprintln!("rubble step profile: inputs+plan {:.3} ms since start {:.3}", t.elapsed().as_secs_f64() * 1e3, wall.elapsed().as_secs_f64() * 1e3);
+        }
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1564,7 +1573,10 @@ impl WgpuSim {
             let t: Vec<u64> = bytemuck::cast_slice(&slice.get_mapped_range().expect("mapped")).to_vec();
             let period = self.queue.get_timestamp_period() as f64 * 1e-6;
             let parts: Vec<String> = names.iter().enumerate().map(|(i, n)| format!("{n} {:.2}", t[2 * i + 1].saturating_sub(t[2 * i]) as f64 * period)).collect();
-            eprintln!("rubble step GPU ms: {}", parts.join(", "));
+            let begin = t.iter().step_by(2).copied().filter(|&x| x > 0).min().unwrap_or(0);
+            let end = t.iter().skip(1).step_by(2).copied().max().unwrap_or(0);
+            let span = end.saturating_sub(begin) as f64 * period;
+            eprintln!("rubble step GPU ms: span {span:.2}, {}", parts.join(", "));
             return self.finish_step(read, wall);
         }
         self.encode_dispatches(&mut enc, &cmds);
@@ -1584,8 +1596,20 @@ impl WgpuSim {
             label: Some("step"),
             timestamp_writes: None,
         });
+        let split = std::env::var("RUBBLE_PASS_PER_PHASE").is_ok_and(|v| v == "1");
+        // `RUBBLE_SKIP_KERNELS=a,b` (diagnostic, A/B timing): leave those out.
+        let skip = std::env::var("RUBBLE_SKIP_KERNELS").unwrap_or_default();
+        let skipped = |k: &str| !skip.is_empty() && skip.split(',').any(|s| s == k);
         for c in cmds {
             match *c {
+                rigid_plan::Cmd::Dispatch { kernel, .. } | rigid_plan::Cmd::Indirect { kernel, .. } if skipped(kernel) => continue,
+                _ => {}
+            }
+            match *c {
+                rigid_plan::Cmd::Phase { .. } if split => {
+                    drop(pass);
+                    pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("step"), timestamp_writes: None });
+                }
                 rigid_plan::Cmd::Copy { .. } | rigid_plan::Cmd::Phase { .. } => {}
                 rigid_plan::Cmd::Dispatch { kernel, threads, pass: p } => {
                     self.disp(&mut pass, kernel, threads, Some(p));
@@ -1654,7 +1678,11 @@ impl WgpuSim {
             self.last_timings.total_gpu = wall.elapsed().as_secs_f64() * 1000.0;
             return Ok(self.last_counters);
         }
+        let t_read = web_time::Instant::now();
         let counters = self.read_counters();
+        if std::env::var("RUBBLE_STEP_PROFILE").is_ok() {
+            eprintln!("rubble step profile: read {:.3} ms, total {:.3} ms", t_read.elapsed().as_secs_f64() * 1e3, wall.elapsed().as_secs_f64() * 1e3);
+        }
         self.contacts_parity ^= 1;
         self.steps_done = self.steps_done.saturating_add(1);
         self.command_count = 0;

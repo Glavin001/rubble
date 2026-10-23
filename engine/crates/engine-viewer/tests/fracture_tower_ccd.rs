@@ -429,3 +429,22 @@ fn ccd_balls_never_phase_through_the_reinforced_tower() {
     let (failures, _) = tower_run("reinforced", &scene, true, &[4.0, 16.0, 64.0], usize::MAX);
     assert!(failures.is_empty(), "CCD balls phased through the reinforced tower:\n{}", failures.join("\n"));
 }
+
+/// The lab's procedural cuboid house (box pieces: running-bond walls, openings,
+/// gables, roof, chimney, porch, fence), and the same house with every box as a
+/// convex hull. Built in code, so this runs everywhere (no generated pack): the
+/// same shots at 4×, 16× and 64×, and the CCD-off control.
+#[test]
+fn ccd_balls_never_phase_through_the_cuboid_house() {
+    use engine_fracture::cuboid::{build_cuboid_house, CuboidOptions};
+    for hulls in [false, true] {
+        let label = if hulls { "cuboid hulls" } else { "cuboid boxes" };
+        let scene = build_cuboid_house(&CuboidOptions { hulls, ..CuboidOptions::default() }).unwrap().without_joints();
+        let pieces = scene.projectile_start - 1;
+        println!("{label}: {pieces} pieces, shot speed {:.1} m/s", engine_fracture::plan::default_shot_speed(scene.extent, scene.projectile_speed));
+        let (_, control) = tower_run(label, &scene, false, &[64.0], 4);
+        assert!(control > 0, "{label} control: without CCD the 64× balls should phase through pieces");
+        let (failures, _) = tower_run(label, &scene, true, &[4.0, 16.0, 64.0], usize::MAX);
+        assert!(failures.is_empty(), "CCD balls phased through the {label} house:\n{}", failures.join("\n"));
+    }
+}

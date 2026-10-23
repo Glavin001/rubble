@@ -130,7 +130,7 @@ pub const IMPULSE_CAP: u32 = engine_schema::IMPULSE_CAP;
 /// `ccd_mark` threads (one per CCD body slot).
 pub const CCD_BODY_CAP: u32 = engine_schema::CCD_BODY_CAP;
 /// `broadphase_fast` workgroups (they stride the fast list).
-pub const FAST_GROUPS: u64 = 64;
+pub const FAST_GROUPS: u64 = engine_schema::FAST_CAP as u64;
 
 /// JP rounds dispatched this step; later rounds run in `color_bodies_tail`.
 pub fn color_rounds_dispatched(m: &StepModes, last: &StepCounters) -> u32 {
@@ -281,7 +281,9 @@ pub fn encode_step(
         e.d("broadphase_query", n_cols);
         if fast_list_scheduled(&mo) {
             // Sweeps longer than a cell query along their path (row 1).
+            e.phase("broadphaseGrid");
             e.d("broadphase_fast", FAST_GROUPS * 64);
+            e.phase("ccdFast");
         }
         if vehicles {
             // One workgroup per wheel, cast at x⁻ through this step's grid (the
@@ -318,6 +320,7 @@ pub fn encode_step(
         e.w("ccd_toi", 64);
         e.w("ccd_pick", 64);
         e.d("ccd_mark", u64::from(CCD_BODY_CAP));
+        e.phase("ccdToi");
     }
     let reuse = i.reuse_contacts;
     if reuse_manifolds {
@@ -365,7 +368,9 @@ pub fn encode_step(
             e.w("convex_manifold", 76);
         }
         if mo.ccd {
+            e.phase("narrowphaseMain");
             e.w(if m.copy_reuse { "ccd_emit_copy_persistent" } else { "ccd_emit" }, 64);
+            e.phase("ccdEmit");
         }
     }
     e.phase("narrowphase");
@@ -456,6 +461,10 @@ pub fn encode_step(
     e.w("record_color_degrees", 67);
     e.d("write_color_args", 64);
     e.d("predict_bodies", n_bodies);
+    if mo.ccd && !reuse_manifolds {
+        // Struck bodies' trust regions for this step (ccd_step.slang).
+        e.d("ccd_trust", u64::from(engine_schema::CCD_PAIR_CAP));
+    }
     if vehicles {
         e.d("vehicle_prepare", u64::from(i.vehicle_count));
     }
@@ -496,8 +505,10 @@ pub fn encode_step(
     }
     if mo.ccd && !reuse_manifolds {
         // Post-solve sweep check: no CCD body ends the step past a surface.
+        e.phase("solveMain");
         e.d("ccd_validate", u64::from(engine_schema::CCD_PAIR_CAP));
         e.d("ccd_clamp", u64::from(CCD_BODY_CAP));
+        e.phase("ccdValidate");
     }
     e.d("extract_velocity_sleep", n_bodies);
     if vehicles {
@@ -518,7 +529,10 @@ pub fn encode_step(
     e.w("sleep_island_commit", 67);
     if mo.ccd && !reuse_manifolds {
         // CCD impacts on dynamic bodies: the momentum exchange (ccd_step.slang).
-        e.d("ccd_respond", 64);
+        e.phase("sleepMain");
+        e.d("ccd_respond", u64::from(CCD_BODY_CAP));
+        e.d("ccd_respond_apply", u64::from(CCD_BODY_CAP));
+        e.phase("ccdRespond");
     }
     e.phase("sleep");
     e.0
@@ -534,6 +548,8 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "ccd_pick",
     "ccd_mark",
     "ccd_respond",
+    "ccd_respond_apply",
+    "ccd_trust",
     "ccd_validate",
     "ccd_clamp",
     "ccd_emit_persistent",

@@ -6,12 +6,18 @@
 //! cargo run -p engine-viewer --release --bin fracture_viewer -- grid --shoot
 //! cargo run -p engine-viewer --release --bin fracture_viewer -- arch --level 1
 //! cargo run -p engine-viewer --release --bin fracture_viewer -- path/to/model.fracture.glb
+//! cargo run -p engine-viewer --release --bin fracture_viewer -- towers --grid 3x2 --volley
 //! ```
+//!
+//! `towers`: a block of vibe-city fractured towers (`--grid CxR`) under a scripted
+//! volley of fast off-angle balls (`--volley`, `--speed N`× the shot speed), CCD
+//! on unless `--no-ccd`. Ball trails: cyan with CCD, red without.
 //!
 //! 1-9 scenes (the lab's Scene menu, in its order) · [ ] level · drop a .glb onto the window ·
 //! click to shoot · F fire the wrecking ball (rows, grids, suburbs) · drag to
 //! orbit · scroll to zoom · Space start/pause · R reset · B bond graph ·
-//! K breakable bonds (experimental) · C colours (materials, sleep state, bodies) · Esc quit.
+//! K breakable bonds (experimental) · C colours (materials, sleep state, bodies) ·
+//! X CCD balls on/off · V replay the volley · Esc quit.
 
 // objc 0.2 `msg_send!` expands a cfg the current compiler does not know.
 #![allow(unexpected_cfgs)]
@@ -20,6 +26,7 @@ use core_graphics_types::geometry::CGSize;
 use engine_fracture::samples::{base_scene, layout_scene, Layout, Sample, SAMPLES};
 use engine_fracture::scene::{Ray, Scene};
 use engine_fracture::{parse_fracture_glb, FractureAsset};
+use engine_viewer::fracture::volley::{towers_scene, volley, Shot};
 use engine_viewer::fracture::{FractureSim, Orbit, Renderer};
 use metal::*;
 use objc::runtime::{Object, YES};
@@ -43,6 +50,8 @@ fn assets_dir() -> PathBuf {
 enum Source {
     Sample(&'static Sample),
     File(PathBuf),
+    /// vibe-city fracturedTower × columns × rows.
+    Towers(u32, u32),
 }
 
 impl Source {
@@ -56,24 +65,25 @@ impl Source {
         match self {
             Source::Sample(s) => s.file.map(|f| assets_dir().join(f)),
             Source::File(p) => Some(p.clone()),
+            Source::Towers(..) => None,
         }
     }
     fn layout(&self) -> Option<Layout> {
         match self {
             Source::Sample(s) => s.layout,
-            Source::File(_) => None,
+            Source::File(_) | Source::Towers(..) => None,
         }
     }
     fn level(&self) -> Option<u8> {
         match self {
             Source::Sample(s) => s.level,
-            Source::File(_) => None,
+            Source::File(_) | Source::Towers(..) => None,
         }
     }
     fn max_hull_vertices(&self) -> Option<usize> {
         match self {
             Source::Sample(s) => s.max_hull_vertices,
-            Source::File(_) => None,
+            Source::File(_) | Source::Towers(..) => None,
         }
     }
     fn name(&self) -> String {
@@ -82,6 +92,7 @@ impl Source {
             Source::File(p) => p
                 .file_name()
                 .map_or("model".into(), |n| n.to_string_lossy().into_owned()),
+            Source::Towers(c, r) => format!("{c}×{r} fractured towers"),
         }
     }
 }
@@ -95,6 +106,9 @@ struct Rates {
     step_ms: f64,
     encode_ms: f64,
     wait_ms: f64,
+    gpu_ms: f64,
+    draw_ms: f64,
+    draws: u32,
     summary: String,
 }
 
@@ -110,6 +124,7 @@ impl Rates {
         self.step_ms += t.wall_ms;
         self.encode_ms += t.encode_ms;
         self.wait_ms += t.wait_ms;
+        self.gpu_ms += t.gpu_ms;
     }
     /// True once per second, when a new summary is published.
     fn frame(&mut self, hz: f64) -> bool {
@@ -123,11 +138,12 @@ impl Rates {
         let steps = self.steps.max(1) as f64;
         let summary = if self.steps > 0 {
             format!(
-                "{tps:.0} TPS · {fps:.0} FPS · {:.2}× · {:.1} ms/tick ({:.1} encode + {:.1} wait)",
+                "{tps:.0} TPS · {fps:.0} FPS · {:.2}× real time · physics GPU {:.2} ms/tick (budget {:.2}) · draw GPU {:.2} ms/frame · {:.1} ms/tick wall",
                 tps / hz,
-                self.step_ms / steps,
-                self.encode_ms / steps,
-                self.wait_ms / steps
+                self.gpu_ms / steps,
+                1000.0 / hz,
+                self.draw_ms / self.draws.max(1) as f64,
+                self.step_ms / steps
             )
         } else {
             format!("{tps:.0} TPS · {fps:.0} FPS")
@@ -177,6 +193,24 @@ struct App {
     cursor: PhysicalPosition<f64>,
     drag: Option<Drag>,
     status: String,
+    /// Scripted shots (`--volley`), the next to fire, and whether it is armed.
+    volley: Vec<Shot>,
+    next_shot: usize,
+    volley_on: bool,
+    /// Shots carry BODY_CCD; speed scale over the scene's shot speed.
+    ccd: bool,
+    speed: f64,
+    /// Per projectile slot: its path so far and whether it was a CCD shot.
+    trails: Vec<(Vec<[f32; 3]>, bool)>,
+    /// `--quit-after S`: exit S seconds after the first frame (scripted runs).
+    quit_after: Option<f64>,
+    started: Option<Instant>,
+    /// `--at X,Y`: the window's top-left (logical points), for recordings.
+    at: Option<(f64, f64)>,
+    /// `--ball R,M`: the towers' ball radius (m) and mass (kg).
+    ball: Option<(f64, f64)>,
+    /// `--bond-strength S`: the towers' bond break limits × S.
+    strength: f64,
 }
 
 impl App {
@@ -235,6 +269,11 @@ impl App {
         })();
         match result {
             Ok((l, notice)) => {
+                self.trails = vec![(Vec::new(), false); l.scene.projectile_count as usize];
+                if self.volley_on || !self.volley.is_empty() {
+                    self.volley = volley(&l.scene, 8, 16, 45);
+                    self.next_shot = 0;
+                }
                 self.loaded = Some(l);
                 self.source = source;
                 self.status = notice.unwrap_or_default();
@@ -249,15 +288,21 @@ impl App {
     /// none, then the sample's layout.
     fn build(&self, source: &Source, level: Option<u8>) -> anyhow::Result<Loaded> {
         let t = Instant::now();
-        let asset = level.and(self.asset.as_ref().map(|(_, a)| a));
-        let built = base_scene(asset, level.unwrap_or(0), source.max_hull_vertices())?;
-        let one = if self.bonds {
-            self.preload(&built)?
+        let scene = if let Source::Towers(c, r) = source {
+            towers_scene(*c, *r, 6.0, self.bonds, self.ball, self.strength)?
         } else {
-            built.without_joints()
+            let asset = level.and(self.asset.as_ref().map(|(_, a)| a));
+            let built = base_scene(asset, level.unwrap_or(0), source.max_hull_vertices())?;
+            let one = if self.bonds {
+                self.preload(&built)?
+            } else {
+                built.without_joints()
+            };
+            layout_scene(one, source.layout(), asset.is_none())
         };
-        let scene = layout_scene(one, source.layout(), asset.is_none());
-        let sim = FractureSim::new(&self.device, &self.queue, &scene)?;
+        let mut sim = FractureSim::new(&self.device, &self.queue, &scene)?;
+        sim.plan.set_projectile_ccd(self.ccd);
+        sim.plan.set_projectile_speed_scale(self.speed)?;
         let renderer = Renderer::new(&self.device, MTLPixelFormat::BGRA8Unorm, &scene)?;
         let name = source.name();
         println!(
@@ -348,7 +393,9 @@ impl App {
                 let (c, s) = (l.sim.last, &l.scene);
                 let copies = s.copies.max(1);
                 format!(
-                    "Fracture lab · Metal · {}{} · {} pieces · {} {} · {} bonds{} · {} · {}{} shots · {} contacts · {} awake · {:.1} s{}",
+                    "Fracture lab · Metal · CCD balls {} · {:.0} m/s · {}{} · {} pieces · {} {} · {} bonds{} · {} · {}{} shots · {} contacts · {} awake · {:.1} s{}",
+                    if self.ccd { "ON" } else { "OFF" },
+                    l.sim.plan.shot_speed() * self.speed,
                     l.name,
                     l.level.map_or(String::new(), |v| format!(" · L{v}")),
                     s.selected.len() as u32 * copies,
@@ -373,7 +420,11 @@ impl App {
     fn fire(&mut self, ray: Ray) {
         let Some(l) = &mut self.loaded else { return };
         match l.sim.launch(ray.origin, ray.direction) {
-            Ok(_) => {
+            Ok(id) => {
+                let slot = (id - l.scene.projectile_start) as usize;
+                if let Some(t) = self.trails.get_mut(slot) {
+                    *t = (Vec::new(), self.ccd);
+                }
                 if !self.running {
                     self.rates.reset();
                 }
@@ -407,15 +458,48 @@ impl App {
             .map_or(0.0, |t| (now - t).as_secs_f64().min(0.04));
         self.last_frame = Some(now);
         let hz = self.hz();
+        if let Some(q) = self.quit_after {
+            if self.started.get_or_insert(now).elapsed().as_secs_f64() > q {
+                std::process::exit(0);
+            }
+        }
+        if self.running && self.volley_on {
+            let step = self.loaded.as_ref().map_or(0, |l| l.sim.steps());
+            while let Some(shot) = self
+                .volley
+                .get(self.next_shot)
+                .filter(|s| s.step <= step)
+                .cloned()
+            {
+                self.next_shot += 1;
+                self.fire(Ray {
+                    origin: shot.origin,
+                    direction: shot.dir,
+                });
+            }
+        }
         let (Some(layer), Some(l)) = (&self.layer, &mut self.loaded) else {
             return;
         };
         let mut ticks = 0;
         let mut error = None;
+        if let Some(ms) = l.renderer.last_draw_gpu_ms() {
+            self.rates.draw_ms += ms;
+            self.rates.draws += 1;
+        }
         if self.running {
             self.accumulator = (self.accumulator + elapsed).min(4.0 / hz);
-            // Bound outstanding work: slow ticks get one tick per frame.
-            let budget = ((12.0 / l.sim.timing.wall_ms.max(0.1)).floor() as u32).clamp(1, 4);
+            // Bound outstanding work by the ticks' GPU time (wall time includes
+            // the wait for the next drawable): a late frame catches up next
+            // frame when the GPU has room, so physics keeps real time.
+            let gpu = if l.sim.timing.gpu_ms > 0.0 {
+                l.sim.timing.gpu_ms
+            } else {
+                l.sim.timing.wall_ms
+            };
+            // Up to a 60 Hz frame's worth: when behind, the display drops a
+            // frame rather than the simulation losing time.
+            let budget = ((16.0 / gpu.max(0.1)).floor() as u32).clamp(1, 4);
             ticks = budget.min((self.accumulator * hz).floor() as u32);
             if ticks > 0 {
                 self.accumulator -= ticks as f64 / hz;
@@ -451,6 +535,43 @@ impl App {
                 }
                 Err(e) => error = Some(e),
             }
+            // Trails: each live ball's pose, read from the shared body buffer.
+            let start = l.scene.projectile_start as usize;
+            let body = l.sim.body_buffer().contents() as *const f32;
+            let mut verts = Vec::new();
+            for (k, (path, ccd)) in self.trails.iter_mut().enumerate() {
+                if (k as u32) >= l.sim.shots() {
+                    continue;
+                }
+                let p = unsafe { std::slice::from_raw_parts(body.add((start + k) * 28), 3) };
+                let p = [p[0], p[1], p[2]];
+                if p[1] < -100.0 {
+                    continue;
+                }
+                if path
+                    .last()
+                    .is_none_or(|q| (0..3).map(|i| (p[i] - q[i]).powi(2)).sum::<f32>() > 1e-4)
+                {
+                    path.push(p);
+                    if path.len() > 900 {
+                        path.remove(0);
+                    }
+                }
+                let n = path.len();
+                for (i, w) in path.windows(2).enumerate() {
+                    // Fades along its length; cyan with CCD, red without.
+                    let a = 0.25 + 0.75 * (i + 1) as f32 / n as f32;
+                    let c = if *ccd {
+                        [0.2, 0.95, 1.0, a]
+                    } else {
+                        [1.0, 0.25, 0.2, a]
+                    };
+                    for q in w {
+                        verts.extend_from_slice(&[q[0], q[1], q[2], c[0], c[1], c[2], c[3]]);
+                    }
+                }
+            }
+            l.renderer.set_trails(&self.device, &verts);
         }
         if let Some(e) = error {
             self.fail(e);
@@ -490,11 +611,35 @@ impl App {
             "r" => {
                 if let Some(l) = &mut self.loaded {
                     l.sim.reset();
+                    self.trails = vec![(Vec::new(), false); l.scene.projectile_count as usize];
                 }
+                self.volley_on = false;
                 self.running = false;
                 self.status = "reset".into();
             }
             "b" => self.show_bonds = !self.show_bonds,
+            "x" => {
+                self.ccd = !self.ccd;
+                if let Some(l) = &mut self.loaded {
+                    l.sim.plan.set_projectile_ccd(self.ccd);
+                }
+                self.status = format!("CCD balls {}", if self.ccd { "on" } else { "off" });
+            }
+            "v" => {
+                if let Some(l) = &mut self.loaded {
+                    l.sim.reset();
+                    if self.volley.is_empty() {
+                        self.volley = volley(&l.scene, 8, 16, 45);
+                    }
+                    self.trails = vec![(Vec::new(), false); l.scene.projectile_count as usize];
+                }
+                self.next_shot = 0;
+                self.volley_on = true;
+                self.running = true;
+                self.accumulator = 0.0;
+                self.rates.reset();
+                self.status = "volley".into();
+            }
             "c" => {
                 if let Some(l) = &mut self.loaded {
                     l.renderer.color_mode = (l.renderer.color_mode + 1) % 3;
@@ -534,9 +679,12 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
-        let attrs = Window::default_attributes()
+        let mut attrs = Window::default_attributes()
             .with_title("Fracture lab · Metal")
             .with_inner_size(LogicalSize::new(1400.0, 900.0));
+        if let Some((x, y)) = self.at {
+            attrs = attrs.with_position(winit::dpi::LogicalPosition::new(x, y));
+        }
         let window = event_loop.create_window(attrs).expect("window");
         window.focus_window();
         let layer = MetalLayer::new();
@@ -558,7 +706,10 @@ impl ApplicationHandler for App {
         self.status = format!("loading {}…", self.source.name());
         self.update_title();
         self.load(self.source.clone(), self.initial_level);
-        if self.auto_shoot {
+        if self.volley_on && self.loaded.is_some() {
+            self.running = true;
+            self.rates.reset();
+        } else if self.auto_shoot {
             match self.loaded.as_ref().and_then(|l| l.scene.row_shot) {
                 Some(ray) => self.fire(ray),
                 None => {
@@ -659,15 +810,56 @@ fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let (mut source, mut level, mut auto_shoot, mut bonds) =
         ("house".to_string(), None, false, false);
+    let (
+        mut grid,
+        mut volley_on,
+        mut ccd,
+        mut speed,
+        mut quit_after,
+        mut at,
+        mut ball,
+        mut strength,
+    ) = ((3u32, 2u32), false, true, 1.0f64, None, None, None, 1.0f64);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--level" => level = args.next().and_then(|s| s.parse().ok()),
             "--shoot" => auto_shoot = true,
             "--bonds" => bonds = true,
+            "--grid" => {
+                let g = args.next().unwrap_or_default();
+                if let Some((c, r)) = g
+                    .split_once('x')
+                    .and_then(|(c, r)| Some((c.parse().ok()?, r.parse().ok()?)))
+                {
+                    grid = (c, r);
+                }
+            }
+            "--volley" => {
+                volley_on = true;
+                if speed == 1.0 {
+                    speed = 10.0;
+                }
+            }
+            "--no-ccd" => ccd = false,
+            "--speed" => speed = args.next().and_then(|s| s.parse().ok()).unwrap_or(speed),
+            "--quit-after" => quit_after = args.next().and_then(|s| s.parse().ok()),
+            "--ball" => {
+                ball = args.next().and_then(|s| {
+                    s.split_once(',')
+                        .and_then(|(r, m)| Some((r.parse().ok()?, m.parse().ok()?)))
+                })
+            }
+            "--bond-strength" => strength = args.next().and_then(|s| s.parse().ok()).unwrap_or(1.0),
+            "--at" => {
+                at = args.next().and_then(|s| {
+                    s.split_once(',')
+                        .and_then(|(x, y)| Some((x.parse().ok()?, y.parse().ok()?)))
+                })
+            }
             "-h" | "--help" => {
                 let keys: Vec<&str> = SAMPLES.iter().map(|s| s.key).collect();
                 println!(
-                    "fracture_viewer [{}|path.glb] [--level N] [--shoot] [--bonds]",
+                    "fracture_viewer [{}|towers|path.glb] [--level N] [--shoot] [--bonds] [--grid CxR] [--volley] [--speed N] [--no-ccd] [--quit-after S]",
                     keys.join("|")
                 );
                 return Ok(());
@@ -686,7 +878,11 @@ fn main() -> anyhow::Result<()> {
     let mut app = App {
         device,
         queue,
-        source: Source::parse(&source),
+        source: if source == "towers" {
+            Source::Towers(grid.0, grid.1)
+        } else {
+            Source::parse(&source)
+        },
         asset: None,
         initial_level: level,
         auto_shoot,
@@ -702,6 +898,17 @@ fn main() -> anyhow::Result<()> {
         cursor: PhysicalPosition::new(0.0, 0.0),
         drag: None,
         status: String::new(),
+        volley: Vec::new(),
+        next_shot: 0,
+        volley_on,
+        ccd,
+        speed,
+        trails: Vec::new(),
+        quit_after,
+        started: None,
+        at,
+        ball,
+        strength,
     };
     event_loop.run_app(&mut app)?;
     Ok(())

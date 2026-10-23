@@ -262,7 +262,7 @@ pub const CCD_BODY_CAP: u32 = 1024;
 pub const CCD_BODY_BASE: u32 = CCD_BASE + 8;
 /// Colliders whose sweep is longer than a grid cell (fast list); more set
 /// `OVERFLOW_FAST_LIST`.
-pub const FAST_CAP: u32 = 1024;
+pub const FAST_CAP: u32 = 16384;
 pub const FAST_BASE: u32 = CCD_BODY_BASE + 4 * CCD_BODY_CAP;
 /// Impulse records a step applies (`apply_impulses`); more set `OVERFLOW_IMPULSES`.
 pub const IMPULSE_CAP: u32 = 1024;
@@ -272,14 +272,17 @@ pub const IMPULSE_BASE: u32 = FAST_BASE + FAST_CAP;
 /// its winning candidate, its dynamic TOI partner's step-start velocity and the
 /// partner (words 0-7, 9) — the impact's momentum exchange along the TOI normal;
 /// the post-solve sweep check's first contact, first static contact, clamped
-/// flag and the velocity the clamp leaves (words 8, 10, 11, 12-14).
+/// flag and the velocity the clamp leaves (words 8, 10, 11, 12-14); the impact
+/// response's flag and the striker's and partner's velocity changes (16-28).
 pub const CCD_CARRY_BASE: u32 = IMPULSE_BASE + IMPULSE_WORDS * IMPULSE_CAP;
-pub const CCD_CARRY_WORDS: u32 = 16;
+pub const CCD_CARRY_WORDS: u32 = 32;
 /// Candidate pairs involving a CCD body this step (colliders A, B), listed by
 /// `ccd_pick` for the post-solve sweep check (the candidate buffer is reused by
 /// the constraint graph after the narrowphase); the count is `CCD_PAIR_COUNT`.
 pub const CCD_PAIR_COUNT: u32 = CCD_BASE + 5;
-pub const CCD_PAIR_CAP: u32 = 8192;
+/// Largest |v|·h of this step's CCD bodies (f32 bits; `ccd_trust`).
+pub const CCD_MAX_REACH: u32 = CCD_BASE + 6;
+pub const CCD_PAIR_CAP: u32 = 131072;
 pub const CCD_PAIR_BASE: u32 = CCD_CARRY_BASE + CCD_CARRY_WORDS * CCD_BODY_CAP;
 /// Impulse record modes (low 8 bits of `mode`; the rest is the record's sum
 /// order key): an impulse at a world point (dynamic bodies), or a kinematic

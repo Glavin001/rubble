@@ -123,6 +123,8 @@ pub const KERNELS: &[(&str, &str)] = &[
     ("ccd_mark", "ccd_mark"),
     ("ccd_emit", "ccd_emit_persistent"),
     ("ccd_respond", "ccd_respond"),
+    ("ccd_respond_apply", "ccd_respond_apply"),
+    ("ccd_trust", "ccd_trust"),
     ("ccd_validate", "ccd_validate"),
     ("ccd_clamp", "ccd_clamp"),
     ("joint_hash_clear", "joint_hash_clear"),
@@ -1008,7 +1010,7 @@ impl Planner {
             if self.ccd_step() {
                 // Before the awake table is emptied: a fast collider walks it too
                 // (bodies woken last step are tombstones in the resting table).
-                self.disp("broadphase_fast", 64 * 64, 0);
+                self.disp("broadphase_fast", engine_schema::FAST_CAP * 64, 0);
             }
             self.work("broadphase_clear_awake", 81, 0);
         } else if self.moved_only_step && self.awake_queries {
@@ -1025,7 +1027,7 @@ impl Planner {
         if self.ccd_step() && !self.rest_step {
             // Sweeps longer than a cell query along their path (any table; rest
             // steps walk before the awake table is cleared, above).
-            self.disp("broadphase_fast", 64 * 64, 0);
+            self.disp("broadphase_fast", engine_schema::FAST_CAP * 64, 0);
         }
         self.disp("write_work_args", 64, 0);
         if self.carry_rest() {
@@ -1180,6 +1182,10 @@ impl Planner {
         } else {
             self.disp("predict_bodies", n_bodies, 0);
         }
+        if self.ccd_step() {
+            // Struck bodies' trust regions for this step.
+            self.disp("ccd_trust", engine_schema::CCD_PAIR_CAP, 0);
+        }
         self.work("pack_solver_contacts", 66, 0);
         self.phase("topology");
         // Few awake bodies: one workgroup walks every colour in order (barrier
@@ -1253,7 +1259,8 @@ impl Planner {
         self.work("sleep_island_commit", 67, self.listed_passes as u32);
         if self.ccd_step() {
             // CCD impacts on dynamic bodies: the momentum exchange.
-            self.disp("ccd_respond", 64, 0);
+            self.disp("ccd_respond", engine_schema::CCD_BODY_CAP, 0);
+            self.disp("ccd_respond_apply", engine_schema::CCD_BODY_CAP, 0);
         }
         self.phase("sleep");
         self.manifolds_valid = true;
