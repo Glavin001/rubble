@@ -1172,6 +1172,9 @@ static const uint SOFT_LANES_MAX = 16u;
 groupshared float4 gsSoftRedA[256]; // H00 H01 H02 H11
 groupshared float4 gsSoftRedB[256]; // H12 H22 g.x g.y
 groupshared float gsSoftRedC[256];  // g.z
+groupshared uint gsSoftAwake;
+static const uint SOFT_ROLE_FOLLOW = 0xFFFFFFFEu;
+static const uint SOFT_ROLE_VEHICLE = 0xFFFFFFFFu;
 
 uint softLanesFor(uint n)
 {
@@ -1185,10 +1188,44 @@ void soft_primal_bodies(uint3 lid : SV_GroupThreadID, uint3 gid : SV_GroupID)
 {
     uint local = lid.x;
     gStabilize = false;
-    if (local == 0u) gsUniformLanes = gid.x < softBodyCount() ? softColorCount() : 0u;
-    GROUP_SYNC();
-    uint colors = gsUniformLanes;
+    uint nb = softBodyCount();
+    bool isSoft = gid.x < nb;
     uint base = softBodyColorBase() + gid.x * softBodyColorStride();
+    uint allColors = softColorCount();
+    // Anything of this body to solve? (A soft body sleeps and wakes whole; a
+    // sleeping particle's solve is a no-op, and soft_begin reseeds the Chebyshev
+    // history every step.)
+    if (local == 0u) gsSoftAwake = 0u;
+    GroupMemoryBarrierWithGroupSync();
+    for (uint c = 0u; c < (isSoft ? allColors : 0u); c++)
+    {
+        uint4 slot = SU(base + c / 2u);
+        uint2 cr = (c & 1u) == 0u ? slot.xy : slot.zw;
+        for (uint t = local; t < cr.y; t += 256u)
+        {
+            BodyState pb = gBodies[SU(softListBase() + cr.x + t).x];
+            if (bodyIsDynamic(pb) && !bodyIsSleeping(pb) && !wakePending(pb)) gsSoftAwake = 1u;
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    // Role: SOFT_ROLE_VEHICLE (workgroups past the bodies), nothing awake (0),
+    // SOFT_ROLE_FOLLOW (rigid mode: particles take the core's pose once; the
+    // colour order cannot matter, each writes only itself), or the colour count.
+    if (local == 0u)
+        gsUniformLanes = !isSoft ? SOFT_ROLE_VEHICLE
+            : (gsSoftAwake == 0u ? 0u : (softIsRigid(gid.x) ? SOFT_ROLE_FOLLOW : allColors));
+    GROUP_SYNC();
+    uint role = gsUniformLanes;
+    if (role == SOFT_ROLE_FOLLOW)
+    {
+        for (uint c = 0u; c < allColors; c++)
+        {
+            uint4 slot = SU(base + c / 2u);
+            uint2 cr = (c & 1u) == 0u ? slot.xy : slot.zw;
+            for (uint t = local; t < cr.y; t += 256u) softSolveEntry(SU(softListBase() + cr.x + t));
+        }
+    }
+    uint colors = role < SOFT_ROLE_FOLLOW ? role : 0u;
     for (uint c = 0u; c < colors; c++)
     {
         uint4 slot = SU(base + c / 2u);
@@ -1242,13 +1279,12 @@ void soft_primal_bodies(uint3 lid : SV_GroupThreadID, uint3 gid : SV_GroupID)
             for (uint t = local; t < cr.y; t += 256u) softChebyshevEntry(cr.x + t, PASS_U);
         }
     }
-    // Workgroups past the soft bodies: vehicle_iterate, 256 vehicles each. It
+    // Workgroups past the soft bodies (SOFT_ROLE_VEHICLE): vehicle_iterate, 256 vehicles each. It
     // reads only the cores' iterate (solved before this pass), and the sweep reads
     // nothing it writes, so the two run side by side instead of one after the
     // other. (A wheel standing on another car's particle reads that particle
     // mid-sweep, as cross-body contacts already do.)
-    uint nb = softBodyCount();
-    if (gid.x >= nb) vehicleIterateOne((gid.x - nb) * 256u + local);
+    if (!isSoft) vehicleIterateOne((gid.x - nb) * 256u + local);
 }
 
 // A yield or a break keeps its body soft: restart its quiet count.
