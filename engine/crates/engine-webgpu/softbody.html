@@ -209,9 +209,12 @@
 
     const qAxis = (ax, ang) => { const s = Math.sin(ang / 2); return [ax[0] * s, ax[1] * s, ax[2] * s, Math.cos(ang / 2)]; };
     const boxInv = (m, hx, hy, hz) => [3 / (m * (hy * hy + hz * hz)), 3 / (m * (hx * hx + hz * hz)), 3 / (m * (hx * hx + hy * hy))];
+    // Every static box but the ground is a soft obstacle: soft skin triangles
+    // collide with it too, so a wall's edge cannot slip between a panel's nodes.
     const staticBox = (p, half, q = [0, 0, 0, 1], material = MAT_PROP) => {
       const body = world.addBody({ p, q, flags: 0 });
       world.addCollider({ body, shape: 2, material, params: [...half, Math.hypot(...half)] });
+      if (material !== MAT_GROUND) world.addSoftObstacle(world.colliderCount - 1);
       return body;
     };
     const dynBox = (p, half, mass, v = [0, 0, 0]) => {
@@ -313,14 +316,12 @@
       // Sliding sideways (right side first) into a 25 cm curb: the tyres and the
       // curb trip it.
       staticBox([-(CAR_HW + 1.2 + runup) - 0.3, 0.125, 0], [0.3, 0.125, 4]);
-      world.addSoftObstacle(world.colliderCount - 1);
       addSoft(carDesc, [0, 0.05, 0], 0, { velocity: [-P('speed', 50) / 3.6, 0, 0] });
       camMode = 'orbit'; orbit = { yaw: 0.2, pitch: 0.3, dist: 12, target: [-3, 0.8, 0] };
     } else if (scene === 'ramp') {
       // A ramp under the left wheels only: one side launches, the car corkscrews.
       const ang = Math.atan(1.1 / 4);
       staticBox([0.55, 2 * Math.sin(ang) - 0.2 * Math.cos(ang) + 0.02, CAR_FRONT + 5 + 2 + runup], [0.45, 0.2, 2], qAxis([1, 0, 0], -ang));
-      world.addSoftObstacle(world.colliderCount - 1);
       addSoft(carDesc, [0, 0.05, 0], 0, { velocity: [0, 0, P('speed', 70) / 3.6] });
       camMode = 'orbit'; orbit = { yaw: 2.0, pitch: 0.3, dist: 14, target: [0, 1, 10] };
     } else if (scene === 'drop') {
@@ -335,7 +336,6 @@
       // under, the pillars catch it, and past their strength the roof shears off.
       const y = P('bar', 1.2) + 0.1;
       staticBox([0, y, 6], [3.2, 0.1, 0.1]);
-      world.addSoftObstacle(world.colliderCount - 1);
       for (const x of [-3.3, 3.3]) staticBox([x, y / 2, 6], [0.12, y / 2, 0.12]);
       addSoft(carDesc, [0, 0.05, -2 - runup], 0, { velocity: [0, 0, P('speed', 80) / 3.6] });
       // Third person: track the car from its left side to watch the roof go.
@@ -364,7 +364,6 @@
       for (let i = 0; i < 10; i++) {
         const a = i * 2.39996, r = 18 + (i % 4) * 11;
         staticBox([Math.cos(a) * r, 0.5, Math.sin(a) * r], [1.5, 0.5, 0.5], qAxis([0, 1, 0], a));
-        world.addSoftObstacle(world.colliderCount - 1);
       }
       for (let i = 0; i < 8; i++) { const a = i * 0.785 + 0.4; pole([Math.cos(a) * 32, 1.5, Math.sin(a) * 32], 0.15, 1.5); }
       const cols = Math.ceil(Math.sqrt(NCARS));
@@ -391,6 +390,7 @@
     for (let i = 0; i < 6; i++) {
       const body = world.addBody({ p: [-3000 - i * 5, -3000, -3000], flags: 0, invMass: 1 / 300, invI: [2.5 / (300 * 0.25), 2.5 / (300 * 0.25), 2.5 / (300 * 0.25)] });
       world.addCollider({ body, shape: 0, material: MAT_PROP, params: [0.5, 0, 0, 0.5] });
+      world.addSoftObstacle(world.colliderCount - 1);
       cannon.push(body);
     }
     const truckInfo = document.getElementById('truckInfo');

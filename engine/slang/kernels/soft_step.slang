@@ -529,7 +529,15 @@ void soft_collide_nodes(uint3 tid : SV_DispatchThreadID)
                 float3 ra = SD(softRigidBase() + 2u * (selfOrdBase + tri.x) + 1u).xyz;
                 float3 rb = SD(softRigidBase() + 2u * (selfOrdBase + tri.y) + 1u).xyz;
                 float3 rc = SD(softRigidBase() + 2u * (selfOrdBase + tri.z) + 1u).xyz;
-                if (length(closestOnTriangle(restSelf, ra, rb, rc, wr) - restSelf) < SELF_REST_GAP) continue;
+                // Excluded only if the node sat over this triangle's face, within
+                // SELF_REST_GAP, in the rest body: its own panel, or the shell under
+                // a bolt-on part. A neighbour beside it (a fender next to the
+                // bonnet) still collides once the part comes loose.
+                float3 rn = cross(rb - ra, rc - ra);
+                float rl = length(rn);
+                float dPlane = rl > 1e-8 ? abs(dot(restSelf - ra, rn / rl)) : 0.0;
+                float dRest = length(closestOnTriangle(restSelf, ra, rb, rc, wr) - restSelf);
+                if (dRest < SELF_REST_GAP && dRest - dPlane < 0.02) continue;
             }
             BodyState ba = gBodies[tri.x], bb = gBodies[tri.y], bc = gBodies[tri.z];
             float3 a = ba.position, bpos = bb.position, c = bc.position;

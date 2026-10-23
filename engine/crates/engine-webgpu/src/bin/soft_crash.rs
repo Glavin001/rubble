@@ -515,6 +515,50 @@ fn main() {
         );
     }
     println!("max pitch {max_pitch:.0}° · max roll {max_roll:.0}° · max cell height {max_height:.2} m · rolled over: {flipped}");
+    // Self-penetration: own nodes inside (behind and within the prism of) own
+    // skin triangles they are not excluded from, by more than 2 cm.
+    {
+        let x: Vec<Vec3> = sim.read_soft_particles(cars[0].h).iter().map(|b| Vec3::from_array(b.position)).collect();
+        let rest: Vec<Vec3> = desc.nodes.iter().map(|n| Vec3::from_array(n.position)).collect();
+        let closest = |p: Vec3, a: Vec3, b: Vec3, c: Vec3| -> Vec3 {
+            let (ab, ac, ap) = (b - a, c - a, p - a);
+            let n = ab.cross(ac);
+            let l = n.length();
+            if l < 1e-9 {
+                return a;
+            }
+            let n = n / l;
+            let q = p - n * n.dot(p - a);
+            // barycentric inside test; fall back to vertices/edges roughly
+            let v0 = ab; let v1 = ac; let v2 = q - a;
+            let (d00, d01, d11, d20, d21) = (v0.dot(v0), v0.dot(v1), v1.dot(v1), v2.dot(v0), v2.dot(v1));
+            let den = d00 * d11 - d01 * d01;
+            let v = (d11 * d20 - d01 * d21) / den;
+            let w = (d00 * d21 - d01 * d20) / den;
+            if v >= 0.0 && w >= 0.0 && v + w <= 1.0 { q } else { Vec3::splat(f32::MAX) }
+        };
+        let mut bad = 0;
+        for (i, &p) in x.iter().enumerate() {
+            for t in &desc.triangles {
+                if t.nodes.contains(&(i as u32)) {
+                    continue;
+                }
+                let [ra, rb, rc] = t.nodes.map(|k| rest[k as usize]);
+                let rq = closest(rest[i], ra, rb, rc);
+                let rn = (rb - ra).cross(rc - ra).normalize_or_zero();
+                if rq.x != f32::MAX && (rest[i] - ra).dot(rn).abs() < 0.12 {
+                    continue; // excluded: it sat over this face at rest
+                }
+                let [a, b, c] = t.nodes.map(|k| x[k as usize]);
+                let n = (b - a).cross(c - a).normalize_or_zero();
+                let d = (p - a).dot(n);
+                if d < -0.02 && d > -0.3 && closest(p, a, b, c).x != f32::MAX {
+                    bad += 1;
+                }
+            }
+        }
+        println!("self-penetration: {bad} node-triangle pairs (own body)");
+    }
     if let Some(roof) = desc.part("roof") {
         let first = sim.soft_host().entry(cars[0].h).first_body;
         let is_roof = |g: u32| roof.nodes.contains(&(g - first));
