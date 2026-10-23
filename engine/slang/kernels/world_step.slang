@@ -257,9 +257,18 @@ void predictOne(uint i)
         // pull it back through the wall (CCD audit row 2). The inertial target
         // below is unchanged, so its momentum is kept.
         float toi = ccdStartFraction(i, b);
-        b.position = b.position + b.linearVel * (toi * dt) + float3(0, p.gravityY, 0) * (toi * accelWeight * dt * dt);
-        b.orientation = quatNormalize(
-            b.orientation + quatMul(float4(b.angularVel * (toi * dt), 0.0), b.orientation) * 0.5);
+        if (toi < 1.0)
+        {
+            b.position = b.position + b.linearVel * (toi * dt) + float3(0, p.gravityY, 0) * (toi * accelWeight * dt * dt);
+            b.orientation = quatNormalize(
+                b.orientation + quatMul(float4(b.angularVel * (toi * dt), 0.0), b.orientation) * 0.5);
+        }
+        else
+        {
+            b.position = b.position + b.linearVel * dt + float3(0, p.gravityY, 0) * (accelWeight * dt * dt);
+            b.orientation = quatNormalize(
+                b.orientation + quatMul(float4(b.angularVel * dt, 0.0), b.orientation) * 0.5);
+        }
     }
     Aabb box;
     box.mn = inertialLin;
@@ -1256,6 +1265,8 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
                     bool otherStatic = !bodyIsDynamic(ob);
                     bool keep = true;
                     if (sleeper && (!otherStatic || carryRestPairs())) keep = false;
+                    // A moving kinematic owns its pairs with sleepers (kinematicQuery).
+                    if (sleeper && kinematicMoving(ob)) keep = false;
                     if (bodyIsSleeping(ob) && sleeper) keep = false;
                     // Lower-index dynamics own the pair, unless asleep: sleepers
                     // never query, so an awake body must emit its sleeping
@@ -2924,7 +2935,7 @@ void narrowphase(uint3 tid : SV_DispatchThreadID)
     BodyState ba = gBodies[ca.body];
     BodyState bb = gBodies[cb.body];
     // A CCD body's winning pair gets its manifold at the TOI pose (ccd_emit).
-    if (ccdOwnsPair(i, pair, ca.body, ba, cb.body, bb)) return;
+    if (ccdOwnsPair(pair)) return;
     // three-avbd: reuseContacts before any shape SAT (ground + box-box + spheres).
     uint prevFeature = 0u;
     if ((PARAMS.flags & FLAG_REUSE_CONTACTS) != 0u &&
@@ -2958,7 +2969,7 @@ void narrowphase_defer(uint3 tid : SV_DispatchThreadID)
     Collider cb = gColliders[pair.colliderB];
     BodyState ba = gBodies[ca.body];
     BodyState bb = gBodies[cb.body];
-    if (ccdOwnsPair(i, pair, ca.body, ba, cb.body, bb)) return;
+    if (ccdOwnsPair(pair)) return;
     uint prevFeature = 0u;
     if ((PARAMS.flags & FLAG_REUSE_CONTACTS) != 0u &&
         tryReuseContactsHint(pair, ba, bb, PARAMS.contactOffset, prevFeature))

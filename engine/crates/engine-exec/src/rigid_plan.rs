@@ -116,7 +116,7 @@ pub struct MotionInputs {
 
 /// `apply_impulses` threads (one per record slot).
 pub const IMPULSE_CAP: u32 = engine_schema::IMPULSE_CAP;
-/// `ccd_emit` threads (one per CCD body slot).
+/// `ccd_mark` threads (one per CCD body slot).
 pub const CCD_BODY_CAP: u32 = engine_schema::CCD_BODY_CAP;
 /// `broadphase_fast` workgroups (they stride the fast list).
 pub const FAST_GROUPS: u64 = 64;
@@ -293,6 +293,7 @@ pub fn encode_step(
         // (rows 2-3); the narrowphase leaves that pair to ccd_emit.
         e.w("ccd_toi", 64);
         e.w("ccd_pick", 64);
+        e.d("ccd_mark", u64::from(CCD_BODY_CAP));
     }
     let reuse = i.reuse_contacts;
     if reuse_manifolds {
@@ -340,10 +341,7 @@ pub fn encode_step(
             e.w("convex_manifold", 76);
         }
         if mo.ccd {
-            e.d(
-                if m.copy_reuse { "ccd_emit_copy_persistent" } else { "ccd_emit" },
-                u64::from(CCD_BODY_CAP),
-            );
+            e.w(if m.copy_reuse { "ccd_emit_copy_persistent" } else { "ccd_emit" }, 64);
         }
     }
     e.phase("narrowphase");
@@ -497,6 +495,7 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "broadphase_fast",
     "ccd_toi",
     "ccd_pick",
+    "ccd_mark",
     "ccd_emit_persistent",
     "ccd_emit_copy_persistent",
     "vehicle_input",

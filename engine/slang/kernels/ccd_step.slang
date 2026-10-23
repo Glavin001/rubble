@@ -585,7 +585,7 @@ void ccd_pick(uint3 tid : SV_DispatchThreadID)
     uint i = dispatchIndex(tid);
     if (i >= min(ALOAD(gCounters[0].candidateCount), HOST_S(2))) return;
     CandidatePair pair = gCandidates[i];
-    if (pair._pad == 0u || (pair._pad & CONVEX_DEFER) != 0u) return;
+    if (pair._pad == 0u || (pair._pad & (CONVEX_DEFER | CCD_WIN)) != 0u) return;
     Collider ca = gColliders[pair.colliderA];
     Collider cb = gColliders[pair.colliderB];
     BodyState ba = gBodies[ca.body];
@@ -597,13 +597,25 @@ void ccd_pick(uint3 tid : SV_DispatchThreadID)
         AMIN2(gScratchAtomics[CCD_BODY_BASE + 4u * slot + 2u], i);
 }
 
-// The narrowphase leaves each CCD body's winning pair to ccd_emit.
-bool ccdOwnsPair(uint i, CandidatePair pair, uint bodyA, BodyState ba, uint bodyB, BodyState bb)
+// Third pass, one thread per CCD body: tag its winning candidate in place, so
+// the narrowphase and ccd_emit find it without the scratch buffer (the
+// narrowphase entries are at WebGPU's ten storage buffers).
+static const uint CCD_WIN = 0x40000000u;
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ccd_mark(uint3 tid : SV_DispatchThreadID)
 {
-    if (!sceneHasCcd() || pair._pad == 0u || (pair._pad & CONVEX_DEFER) != 0u) return false;
-    bool fastIsA = ccdFastIsA(ba, bodyA, bb, bodyB);
-    uint slot = ccdSlotOf(fastIsA ? bodyA : bodyB, fastIsA ? ba : bb);
-    return slot != CCD_NO_PAIR && ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * slot + 2u]) == i;
+    uint k = dispatchIndex(tid);
+    if (k >= ccdBodyCount()) return;
+    uint win = ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * k + 2u]);
+    if (win != CCD_NO_PAIR) gCandidates[win]._pad |= CCD_WIN;
+}
+
+// The narrowphase leaves each CCD body's winning pair to ccd_emit.
+bool ccdOwnsPair(CandidatePair pair)
+{
+    return (pair._pad & (CCD_WIN | CONVEX_DEFER)) == CCD_WIN;
 }
 
 // Fraction of its motion a CCD body is predicted forward (1: no TOI).
@@ -663,23 +675,29 @@ void supportFeature(Collider c, float3 pos, float4 rot, float3 n, float tol, ino
     }
 }
 
-// Whether p lies within the collider's bounds (its AABB at pose, padded).
-bool pointNearBounds(float3 p, Aabb box, float pad)
+// Whether p lies within a collider's local bounds at pose (pos, rot), padded.
+bool pointNearCollider(float3 p, Collider c, float3 pos, float4 rot, float pad)
 {
-    return all(p >= box.mn - pad) && all(p <= box.mx + pad);
+    float3 l = quatRotate(quatConjugate(rot), p - pos);
+    if (c.shape == SHAPE_SPHERE) return length(l) <= c.params.x + pad;
+    if (c.shape == SHAPE_CAPSULE)
+        return length(float3(l.x, max(abs(l.y) - c.params.y, 0.0), l.z)) <= c.params.x + pad;
+    if (c.shape == SHAPE_BOX) return all(abs(l) <= c.params.xyz + pad);
+    HullRef h = hullOf(c);
+    return all(abs(l - hullLocalCenter(h)) <= hullLocalHalf(h) + pad);
 }
 
-// One thread per CCD body: build its winning pair's manifold at the TOI pose
-// and emit it as a speculative contact whose rows hold the gap along the path.
+// One thread per candidate (work slot 64); the CCD winners (ccd_mark) build
+// their manifold at the TOI pose and emit it as a speculative contact whose
+// rows hold the gap along the path.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void ccd_emit(uint3 tid : SV_DispatchThreadID)
 {
-    uint k = dispatchIndex(tid);
-    if (k >= ccdBodyCount()) return;
-    uint win = ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * k + 2u]);
-    if (win == CCD_NO_PAIR) return;
+    uint win = dispatchIndex(tid);
+    if (win >= min(ALOAD(gCounters[0].candidateCount), HOST_S(2))) return;
     CandidatePair pair = gCandidates[win];
+    if (!ccdOwnsPair(pair)) return;
     Collider ca = gColliders[pair.colliderA];
     Collider cb = gColliders[pair.colliderB];
     BodyState ba = gBodies[ca.body];
@@ -719,14 +737,13 @@ void ccd_emit(uint3 tid : SV_DispatchThreadID)
     {
         float3 po; float4 qo; colliderPose(co, bo, po, qo);
         float3 sO = shapeSupport(co, po, qo, -n);
-        Aabb boxO = gAabbs[HOST_S(1) + (fastIsA ? pair.colliderB : pair.colliderA)];
         // The fast body's support points that land on the other's support
         // plane inside its bounds; else the other's points on the fast body's;
         // else the single touching pair of support points.
         for (uint q = 0u; q < nf; q++)
         {
             float3 pB = fp[q] + n * dot(n, sO - fp[q]);
-            if (pointNearBounds(pB, boxO, tol))
+            if (pointNearCollider(pB, co, po, qo, tol))
             {
                 mf.pts[mf.count].pA = fp[q];
                 mf.pts[mf.count].pB = pB;
@@ -740,14 +757,10 @@ void ccd_emit(uint3 tid : SV_DispatchThreadID)
             uint no = 0u;
             supportFeature(co, po, qo, -n, tol, op, no);
             float3 sF = shapeSupport(cf, pf, qf, n);
-            float3 fmn = pf, fmx = pf;
-            for (uint q = 0u; q < nf; q++) { fmn = min(fmn, fp[q]); fmx = max(fmx, fp[q]); }
-            Aabb boxF;
-            boxF.mn = fmn; boxF.mx = fmx; boxF._pad0 = 0.0; boxF._pad1 = 0.0;
             for (uint q = 0u; q < no; q++)
             {
                 float3 pA = op[q] - n * dot(n, op[q] - sF);
-                if (pointNearBounds(pA, boxF, tol) && mf.count < 8)
+                if (pointNearCollider(pA, cf, pf, qf, tol) && mf.count < 8)
                 {
                     mf.pts[mf.count].pA = pA;
                     mf.pts[mf.count].pB = op[q];
