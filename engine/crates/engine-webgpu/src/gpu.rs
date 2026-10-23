@@ -145,6 +145,21 @@ pub struct WgpuSim {
     vehicles: Option<VehicleHost>,
     /// Event ring read cursor (`poll_joint_breaks`).
     events_seen: u32,
+    /// Some body carries `BODY_CCD` (the continuous-collision passes run).
+    has_ccd: bool,
+    /// Some body is kinematic: its motion needs every step (no asleep skip).
+    has_kinematic: bool,
+    /// Impulse records for the next step (`apply_impulses`).
+    impulse_queue: Vec<ImpulseRecord>,
+    /// The step being encoded applies impulse records.
+    impulses_this_step: bool,
+}
+
+/// Motion bookkeeping of uploaded bodies: CCD and kinematic flags.
+pub(crate) fn body_motion_flags(bodies: &[BodyState]) -> (bool, bool) {
+    let ccd = bodies.iter().any(|b| b.flags & BODY_CCD != 0);
+    let kin = bodies.iter().any(|b| b.flags & (BodyFlags::Kinematic as u32 | BodyFlags::Dynamic as u32) == BodyFlags::Kinematic as u32);
+    (ccd, kin)
 }
 
 /// Must agree with Slang dispatchIndex: 2^21 threads per row, with no truncation.
@@ -592,6 +607,10 @@ impl WgpuSim {
             last_contact_offset: 0,
             vehicles: Some(VehicleHost::new(vehicle_capacity, aabb_tail)),
             events_seen: 0,
+            has_ccd: false,
+            has_kinematic: false,
+            impulse_queue: Vec::new(),
+            impulses_this_step: false,
         };
         // Kernel fixtures in the unit tests set the modes they exercise on top
         // of the pre-P0 controls; integration tests run the shipped defaults.
@@ -673,8 +692,66 @@ impl WgpuSim {
             self.host_bodies.extend_from_slice(bodies);
             self.body_count += count;
             self.manifolds_valid = false;
+            self.note_motion_flags(bodies);
         }
         start..self.body_count
+    }
+
+    pub(crate) fn note_motion_flags(&mut self, bodies: &[BodyState]) {
+        let (ccd, kin) = body_motion_flags(bodies);
+        self.has_ccd |= ccd;
+        self.has_kinematic |= kin;
+    }
+
+    /// Queue an impulse `j` (N·s) at world point `point` on a dynamic body, applied
+    /// on the GPU at the start of the next step (`apply_impulses`): no body
+    /// upload, so manifold reuse stays on. Records on one body are summed in
+    /// queue order; the body wakes.
+    pub fn apply_impulse(&mut self, body: u32, j: [f32; 3], point: [f32; 3]) {
+        self.queue_impulses(&[ImpulseRecord::at_point(body, j, point)]);
+    }
+
+    /// Set a kinematic body's velocity (linear m/s, angular rad/s) from the next
+    /// step on, on the GPU: the body moves by it each step (contacts carry what
+    /// rides on it) until changed.
+    pub fn set_kinematic_velocity(&mut self, body: u32, linear: [f32; 3], angular: [f32; 3]) {
+        self.queue_impulses(&[ImpulseRecord::set_velocity(body, linear, angular)]);
+    }
+
+    /// Queue impulse records for the next step. Panics past `IMPULSE_CAP` records
+    /// in one step (an explicit limit, never a silent drop).
+    pub fn queue_impulses(&mut self, records: &[ImpulseRecord]) {
+        assert!(
+            self.impulse_queue.len() + records.len() <= IMPULSE_CAP as usize,
+            "more than {IMPULSE_CAP} impulse records in one step"
+        );
+        for r in records {
+            assert!(r.body < self.body_count, "impulse on body {} of {}", r.body, self.body_count);
+        }
+        self.impulse_queue.extend_from_slice(records);
+        self.wake_pending = true;
+    }
+
+    /// Upload the queued impulse records and their count (scratch words), before
+    /// the step's uniforms (which schedule `apply_impulses` from it).
+    fn upload_impulses(&mut self) {
+        let n = self.impulse_queue.len() as u32;
+        self.impulses_this_step = n > 0;
+        if n > 0 {
+            self.queue.write_buffer(
+                &self.bufs[21],
+                u64::from(IMPULSE_BASE) * 4,
+                bytemuck::cast_slice(&self.impulse_queue),
+            );
+            self.queue.write_buffer(&self.bufs[21], u64::from(IMPULSE_COUNT) * 4, bytemuck::bytes_of(&n));
+        }
+        self.impulse_queue.clear();
+    }
+
+    /// TOI casts that fell back to look-ahead in the last step (GJK budget):
+    /// a diagnostic read of the scratch word.
+    pub fn ccd_fallbacks(&self) -> u32 {
+        self.read_buffer_range::<u32>(21, u64::from(CCD_FALLBACKS) * 4, 1)[0]
     }
 
     pub fn add_collider(&mut self, col: Collider) -> u32 {
@@ -791,6 +868,7 @@ impl WgpuSim {
             self.host_bodies.extend_from_slice(bodies);
             self.body_count += count;
             self.manifolds_valid = false;
+            self.note_motion_flags(bodies);
         }
         let col_start = self.collider_count;
         let count = u32::try_from(colliders.len()).expect("collider batch exceeds u32 index space");
@@ -825,6 +903,7 @@ impl WgpuSim {
         self.host_bodies[first as usize..(first + count) as usize].copy_from_slice(bodies);
         self.manifolds_valid = false;
         self.wake_pending = true;
+        self.note_motion_flags(bodies);
     }
 
     /// A body a GPU kernel retired in place (no mass, motion or flags; stress-gpu
@@ -1187,6 +1266,12 @@ impl WgpuSim {
         Ok(())
     }
 
+    /// Diagnostic read of `count` words of a binding from word `first` (waits
+    /// for the GPU). For tests and probes; never on a host's hot path.
+    pub fn read_words(&self, binding: usize, first: u64, count: usize) -> Vec<u32> {
+        self.read_buffer_range(binding, first * 4, count)
+    }
+
     fn read_buffer_range<T: bytemuck::Pod>(
         &self,
         binding: usize,
@@ -1227,6 +1312,13 @@ impl WgpuSim {
     /// within its step's motion up to this, so it needs no substeps to meet what it hits.
     pub fn set_spec_reach_max(&mut self, reach: f32) {
         self.spec_reach_max = reach;
+    }
+
+    /// Force the hierarchical grid on or off (`None`: convex scenes use it), as
+    /// `ENGINE_GRID_LEVELS=on|off` does.
+    pub fn set_grid_levels(&mut self, mode: Option<bool>) {
+        self.grid_levels_mode = mode;
+        self.grid_cache = None;
     }
 
     pub fn step(&mut self) -> Result<StepCounters, ExecError> {
@@ -1299,6 +1391,7 @@ impl WgpuSim {
             && self.body_count > 0
             && !self.wake_pending
             && !vehicles_dirty
+            && !self.has_kinematic
         {
             self.steps_done += 1;
             self.counted_steps = self.steps_done;
@@ -1308,6 +1401,7 @@ impl WgpuSim {
         let host_t = std::env::var("RUBBLE_HOST_TIMING").is_ok().then(web_time::Instant::now);
         self.refresh_cell();
         let t_cell = host_t.map(|t| t.elapsed().as_secs_f64() * 1e3);
+        self.upload_impulses();
         self.write_host_uniforms_ex(!read);
         if let (Some(t), Some(c)) = (host_t, t_cell) {
             eprintln!("rubble host: grid cell {c:.2} ms, uniforms {:.2} ms", t.elapsed().as_secs_f64() * 1e3 - c);
@@ -1449,6 +1543,7 @@ impl WgpuSim {
             && self.body_count > 0
             && !self.wake_pending
             && !vehicles_dirty
+            && !self.has_kinematic
         {
             self.steps_done += 1;
             self.counted_steps = self.steps_done;
@@ -1456,6 +1551,7 @@ impl WgpuSim {
             return Ok(());
         }
         self.refresh_cell();
+        self.upload_impulses();
         self.write_host_uniforms_ex(true);
         self.wake_pending = false;
         self.last_contact_offset = if self.contacts_parity == 0 { 0 } else { self.capacity.max_contacts };
@@ -1477,6 +1573,7 @@ impl WgpuSim {
         if let Some(v) = self.vehicles.as_mut() {
             v.dirty = false;
         }
+        self.impulses_this_step = false;
         if !read {
             self.contacts_parity ^= 1;
             self.steps_done = self.steps_done.saturating_add(1);
@@ -1605,6 +1702,14 @@ impl WgpuSim {
             last: self.last_counters,
             vehicle_count: self.vehicle_count(),
             wheel_count: self.vehicles.as_ref().map_or(0, |v| v.wheel_count()),
+            motion: rigid_plan::MotionInputs {
+                ccd: self.has_ccd,
+                kinematic: self.has_kinematic,
+                look_ahead: self.params.flags & FLAG_SPEC_VELOCITY != 0,
+                impulses: self.impulses_this_step,
+                projectiles: 0,
+                characters: 0,
+            },
         }
     }
 

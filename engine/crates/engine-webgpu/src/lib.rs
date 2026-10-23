@@ -805,8 +805,6 @@ mod tests {
             "extract_velocity_sleep",
             "record_stab_velocity",
             "sleep_island_commit",
-            "ccd_classify",
-            "ccd_sweep",
             "recompute_inertia",
         ];
         let shaders = WebGpuWorld::compile_shaders_report();

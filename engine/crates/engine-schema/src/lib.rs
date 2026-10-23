@@ -74,6 +74,13 @@ pub enum BodyFlags {
     Awake = 8,
 }
 
+/// `BodyState::flags` bit: continuous collision for this body (`world_step.slang`
+/// BODY_CCD). With look-ahead contacts on (`FLAG_SPEC_VELOCITY`) the body's
+/// reach is not capped, a sweep longer than a grid cell takes the fast list,
+/// and the nearest time of impact along its path places a speculative contact
+/// in the solve and starts the body's iterate at that pose.
+pub const BODY_CCD: u32 = 64;
+
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ShapeType {
@@ -234,8 +241,53 @@ pub struct Manifold {
 /// joint count.)
 pub const EVENT_RING_BASE: u32 = 96;
 pub const EVENT_RING_CAPACITY: u32 = 1024;
-/// Total `u32` words of the scratch-atomics buffer (host words, lists, ring).
-pub const SCRATCH_WORDS: u32 = LARGE_STATIC_BASE + LARGE_STATIC_CAP;
+/// Total `u32` words of the scratch-atomics buffer (host words, lists, ring,
+/// continuous-collision lists and impulse records).
+pub const SCRATCH_WORDS: u32 = IMPULSE_BASE + IMPULSE_WORDS * IMPULSE_CAP;
+
+/// Continuous-collision scratch (`ccd_step.slang`), after the oversized-static
+/// list: CCD body count, fast-collider count, impulse count, TOI fallbacks.
+pub const CCD_BASE: u32 = LARGE_STATIC_BASE + LARGE_STATIC_CAP;
+pub const CCD_BODY_COUNT: u32 = CCD_BASE;
+pub const FAST_COUNT: u32 = CCD_BASE + 1;
+pub const IMPULSE_COUNT: u32 = CCD_BASE + 2;
+/// TOI casts that left their pair to look-ahead this step (GJK budget).
+pub const CCD_FALLBACKS: u32 = CCD_BASE + 3;
+/// Awake `BODY_CCD` bodies a step can hold; more set `OVERFLOW_CCD_BODIES`.
+pub const CCD_BODY_CAP: u32 = 1024;
+/// Four words per CCD body: body, min TOI bits, winning candidate, flags.
+pub const CCD_BODY_BASE: u32 = CCD_BASE + 4;
+/// Colliders whose sweep is longer than a grid cell (fast list); more set
+/// `OVERFLOW_FAST_LIST`.
+pub const FAST_CAP: u32 = 1024;
+pub const FAST_BASE: u32 = CCD_BODY_BASE + 4 * CCD_BODY_CAP;
+/// Impulse records a step applies (`apply_impulses`); more set `OVERFLOW_IMPULSES`.
+pub const IMPULSE_CAP: u32 = 1024;
+pub const IMPULSE_WORDS: u32 = 8;
+pub const IMPULSE_BASE: u32 = FAST_BASE + FAST_CAP;
+/// Impulse record modes: an impulse at a world point (dynamic bodies), or a
+/// kinematic body's new velocity (`j` linear, `point` angular).
+pub const IMPULSE_AT_POINT: u32 = 0;
+pub const IMPULSE_SET_VELOCITY: u32 = 1;
+
+/// One `apply_impulses` record (`[body, mode, J.xyz, point.xyz]`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub struct ImpulseRecord {
+    pub body: u32,
+    pub mode: u32,
+    pub j: [f32; 3],
+    pub point: [f32; 3],
+}
+
+impl ImpulseRecord {
+    pub fn at_point(body: u32, j: [f32; 3], point: [f32; 3]) -> Self {
+        Self { body, mode: IMPULSE_AT_POINT, j, point }
+    }
+    pub fn set_velocity(body: u32, linear: [f32; 3], angular: [f32; 3]) -> Self {
+        Self { body, mode: IMPULSE_SET_VELOCITY, j: linear, point: angular }
+    }
+}
 /// Scratch word of the oversized-static count (uniform grid; see `LARGE_STATIC_CAP`).
 pub const LARGE_STATIC_COUNT: u32 = 80;
 /// First scratch word of the oversized-static collider ids, after the event ring.
@@ -336,6 +388,15 @@ pub const OVERFLOW_WARM_HASH: u32 = 256;
 /// More oversized statics than `LARGE_STATIC_CAP`: some are found only by the
 /// endpoint probes.
 pub const OVERFLOW_LARGE_STATICS: u32 = 512;
+/// More fast (long-sweep) colliders than `FAST_CAP`, or a sweep crossing more
+/// grid cells than the fast query walks.
+pub const OVERFLOW_FAST_LIST: u32 = 1024;
+/// Uniform grid: more than 16 dynamics wider than a cell (the 17th is never found).
+pub const OVERFLOW_LARGE_DYNAMICS: u32 = 2048;
+/// More awake `BODY_CCD` bodies than `CCD_BODY_CAP`.
+pub const OVERFLOW_CCD_BODIES: u32 = 4096;
+/// More impulse records than `IMPULSE_CAP` in one step.
+pub const OVERFLOW_IMPULSES: u32 = 8192;
 /// Oversized-static list (statics wider than half a grid cell, uniform grid):
 /// this many collider ids in the scratch-atomics buffer at `LARGE_STATIC_BASE`.
 pub const LARGE_STATIC_CAP: u32 = 1024;
@@ -385,5 +446,6 @@ mod tests {
         assert_eq!(size_of::<StepCounters>(), 80);
         assert_eq!(size_of::<Joint>(), 288);
         assert_eq!(align_of::<BodyState>(), 4);
+        assert_eq!(size_of::<ImpulseRecord>(), 4 * IMPULSE_WORDS as usize);
     }
 }

@@ -121,6 +121,24 @@ void emitEvent(uint type, uint id, uint a, uint b)
 
 bool bodyIsDynamic(BodyState b) { return b.invMass > 0.0 && (b.flags & BODY_DYNAMIC) != 0u; }
 bool bodyIsSleeping(BodyState b) { return (b.flags & BODY_SLEEPING) != 0u; }
+// Kinematic: moved by its given velocity (predict), never by the solver. It
+// counts as moving for contacts, bounds, the broadphase and wakes, while its
+// target is moving.
+bool bodyIsKinematic(BodyState b) { return (b.flags & (BODY_KINEMATIC | BODY_DYNAMIC)) == BODY_KINEMATIC; }
+bool kinematicMoving(BodyState b)
+{
+    return bodyIsKinematic(b) && !bodyIsSleeping(b) &&
+        (dot(b.linearVel, b.linearVel) > 0.0 || dot(b.angularVel, b.angularVel) > 0.0);
+}
+// Continuous collision (ccd_step.slang): an awake dynamic body flagged BODY_CCD.
+bool bodyIsCcd(BodyState b)
+{
+    return (b.flags & BODY_CCD) != 0u && bodyIsDynamic(b) && !bodyIsSleeping(b) && (b.flags & BODY_VEHICLE) == 0u;
+}
+// HOST_S(30) bit 2: some body carries BODY_CCD (the CCD passes are scheduled).
+// Bit 3: some body is kinematic.
+bool sceneHasCcd() { return (HOST_S(30) & 4u) != 0u; }
+bool sceneHasKinematic() { return (HOST_S(30) & 8u) != 0u; }
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -190,6 +208,20 @@ void predictOne(uint i)
 {
     AvbdParams p = PARAMS;
     BodyState b = gBodies[i];
+    if (bodyIsKinematic(b))
+    {
+        // Kinematic: x⁻ for the contact rows, then the given motion (no
+        // gravity, no solve). A stopped kinematic is a static this step.
+        gBodies[i].initialPos = b.position;
+        gBodies[i].initialRot = b.orientation;
+        if (kinematicMoving(b))
+        {
+            gBodies[i].position = b.position + b.linearVel * p.dt;
+            gBodies[i].orientation = quatNormalize(
+                b.orientation + quatMul(float4(b.angularVel * p.dt, 0.0), b.orientation) * 0.5);
+        }
+        return;
+    }
     // Sleeping/static: do not touch prev/pose (three-avbd mover compaction).
     if (!bodyIsDynamic(b) || bodyIsSleeping(b)) return;
     float dt = p.dt;
@@ -220,9 +252,14 @@ void predictOne(uint i)
     // A deferred wake keeps its pose this step (it is solved from the next).
     if (!startAtRest && !wakePending(b))
     {
-        b.position = b.position + b.linearVel * dt + float3(0, p.gravityY, 0) * (accelWeight * dt * dt);
+        // CCD body with a time of impact (ccd_toi): start the iterate at the
+        // TOI pose, short of what it hits, so the trust region never has to
+        // pull it back through the wall (CCD audit row 2). The inertial target
+        // below is unchanged, so its momentum is kept.
+        float toi = ccdStartFraction(i, b);
+        b.position = b.position + b.linearVel * (toi * dt) + float3(0, p.gravityY, 0) * (toi * accelWeight * dt * dt);
         b.orientation = quatNormalize(
-            b.orientation + quatMul(float4(b.angularVel * dt, 0.0), b.orientation) * 0.5);
+            b.orientation + quatMul(float4(b.angularVel * (toi * dt), 0.0), b.orientation) * 0.5);
     }
     Aabb box;
     box.mn = inertialLin;
@@ -375,8 +412,9 @@ void buildColliderBounds(uint i, Collider col, BodyState b)
     // The hierarchical grid needs every AABB half extent ≤ _pad0; a capsule's
     // reaches radius + half height, beyond length(radius, half height).
     if (col.shape == SHAPE_CAPSULE) boundR = col.params.x + col.params.y;
-    // The swept reach counts as size, so the grid level still bounds the box.
-    box._pad0 = boundR + reach;
+    // The swept reach counts as size, so the grid level still bounds the box:
+    // the whole sweep, not the capped reach (the box spans all of it).
+    box._pad0 = boundR + max(reach, length(sweep));
     box._pad1 = asfloat(col.body);
     // Store at collider index offset by max_bodies — host allocates gAabbs sized max_bodies+max_colliders
     // Convention: collider AABBs start at index max_bodies. Host sets gScratchAtomics[1] = max_bodies.
@@ -388,7 +426,7 @@ void buildColliderBounds(uint i, Collider col, BodyState b)
     {
         HullRef h = hullOf(col);
         WorldObbGpu w;
-        w.center = float4(transformPoint(worldPos, worldRot, hullLocalCenter(h)), reach);
+        w.center = float4(transformPoint(worldPos, worldRot, hullLocalCenter(h)), max(reach, length(sweep)));
         w.half = float4(hullLocalHalf(h), 0.0);
         w.axis0 = float4(quatRotate(worldRot, float3(1, 0, 0)), 0.0);
         w.axis1 = float4(quatRotate(worldRot, float3(0, 1, 0)), 0.0);
@@ -400,7 +438,7 @@ void buildColliderBounds(uint i, Collider col, BodyState b)
         float4 q = quatMul(b.orientation, col.localRot);
         BoxObb obb = makeBoxObb(worldPos, q, col.params.xyz);
         WorldObbGpu w;
-        w.center = float4(obb.center, reach);
+        w.center = float4(obb.center, max(reach, length(sweep)));
         w.half = float4(obb.half, 0.0);
         w.axis0 = float4(obb.axis0, 0.0);
         w.axis1 = float4(obb.axis1, 0.0);
@@ -420,6 +458,68 @@ static const uint LARGE_STATIC_CAP = 1024u;
 static const uint LARGE_STATIC_BASE = EVENT_RING_BASE + 4u + 4u * EVENT_RING_CAPACITY;
 uint largeStaticCount() { return min(ALOAD(gScratchAtomics[LARGE_STATIC_COUNT]), LARGE_STATIC_CAP); }
 uint largeStaticCollider(uint k) { return ALOAD(gScratchAtomics[LARGE_STATIC_BASE + k]); }
+
+// Continuous-collision scratch (engine-schema CCD_*), after the oversized-static
+// list. Counts are reset by broadphase_clear (CCD bodies, fast colliders) and
+// build_awake_list (impulses, after apply_impulses consumed them).
+//  - CCD bodies: 4 words per slot [body, min TOI bits, winning candidate, flags];
+//  - fast colliders: swept boxes longer than a grid cell (row 1), queried by
+//    broadphase_fast instead of the grid;
+//  - impulses: 8 words per record [body, mode, J.xyz, point.xyz] (row 4).
+static const uint CCD_BASE = LARGE_STATIC_BASE + LARGE_STATIC_CAP;
+static const uint CCD_BODY_COUNT = CCD_BASE;
+static const uint FAST_COUNT = CCD_BASE + 1u;
+static const uint IMPULSE_COUNT = CCD_BASE + 2u;
+// TOI casts that fell back to look-ahead this step (GJK budget, degenerate).
+static const uint CCD_FALLBACKS = CCD_BASE + 3u;
+static const uint CCD_BODY_CAP = 1024u;
+static const uint CCD_BODY_BASE = CCD_BASE + 4u;
+static const uint FAST_CAP = 1024u;
+static const uint FAST_BASE = CCD_BODY_BASE + 4u * CCD_BODY_CAP;
+static const uint IMPULSE_CAP = 1024u;
+static const uint IMPULSE_WORDS = 8u;
+static const uint IMPULSE_BASE = FAST_BASE + FAST_CAP;
+static const uint CCD_NO_PAIR = 0xFFFFFFFFu;
+static const uint CCD_TOI_NONE = 0x7F800000u; // +inf
+
+uint ccdBodyCount() { return min(ALOAD(gScratchAtomics[CCD_BODY_COUNT]), CCD_BODY_CAP); }
+uint fastCount() { return min(ALOAD(gScratchAtomics[FAST_COUNT]), FAST_CAP); }
+
+// CCD slot of `body` this step, or CCD_NO_PAIR (initialPad carries the slot
+// while registered; the record's body word confirms it).
+uint ccdSlotOf(uint body, BodyState b)
+{
+    if (!bodyIsCcd(b)) return CCD_NO_PAIR;
+    uint slot = asuint(b.initialPad);
+    if (slot >= ccdBodyCount()) return CCD_NO_PAIR;
+    return ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * slot]) == body ? slot : CCD_NO_PAIR;
+}
+
+// The fast list exists where the broadphase uses a grid (hierarchical, or the
+// uniform grid past the exact pairwise path's 512 colliders).
+bool fastListOn() { return HOST_S(18) != 0u || gCounters[0].colliderCount > 512u; }
+
+// A swept box the grid cannot hold: a moving collider whose sweep is longer
+// than a cell (the 27-cell stencil covers boxes within a cell), or whose swept
+// size would put it past the hierarchical grid's top level (the oversized
+// list, which only movers query). broadphase_insert and broadphase_query
+// evaluate this on the same inputs, so both agree.
+bool colliderIsFast(uint i, Collider col, BodyState b)
+{
+    if (col.shape == SHAPE_PLANE || !fastListOn() || !bodyMovingOrKinematic(b)) return false;
+    if (colliderReach(b, col) <= 0.0) return false; // unswept box
+    float sweep = length(b.linearVel) * PARAMS.dt;
+    if (HOST_S(18) == 0u) return sweep > max(PARAMS.gridCellSize, 0.5);
+    return sweep > PARAMS.gridCellSize || hierLevel(gAabbs[HOST_S(1) + i]._pad0) >= HOST_S(18);
+}
+
+void fastListAppend(uint i)
+{
+    uint slot;
+    AADD3(gScratchAtomics[FAST_COUNT], 1u, slot);
+    if (slot < FAST_CAP) ASTORE(gScratchAtomics[FAST_BASE + slot], i);
+    else AOR2(gCounters[0].overflowFlags, OVERFLOW_FAST_LIST);
+}
 // Heads/links carry immutable broadphase eligibility alongside the collider ID.
 // Collider IDs occupy 31 bits; 0xffffffff remains the empty-list sentinel.
 static const uint GRID_AWAKE_DYNAMIC = 0x80000000u;
@@ -576,7 +676,7 @@ uint materialIndex(Collider c) { return c.material & 0xFFFFu; }
 // close on them. Undo both sweeps and sweep one box by (vi − vj)·h instead.
 bool lookAheadSeparated(uint i, uint j)
 {
-    if ((PARAMS.flags & FLAG_SPEC_VELOCITY) == 0u) return false;
+    if (!lookAheadOn()) return false;
     Collider ci = gColliders[i];
     Collider cj = gColliders[j];
     BodyState bi = gBodies[ci.body];
@@ -649,6 +749,9 @@ void broadphase_clear(uint3 tid : SV_DispatchThreadID)
         ASTORE(gScratchAtomics[25], 0u);
         ASTORE(gScratchAtomics[42], 0u);
         ASTORE(gScratchAtomics[LARGE_STATIC_COUNT], 0u);
+        ASTORE(gScratchAtomics[CCD_BODY_COUNT], 0u);
+        ASTORE(gScratchAtomics[FAST_COUNT], 0u);
+        ASTORE(gScratchAtomics[CCD_FALLBACKS], 0u);
     }
 }
 
@@ -751,6 +854,8 @@ bool aabbOverlap(Aabb a, Aabb b)
 }
 
 bool bodyMoving(BodyState b) { return bodyIsDynamic(b) && !bodyIsSleeping(b); }
+// Movers for pair bookkeeping: awake dynamics and kinematics whose target moves.
+bool bodyMovingOrKinematic(BodyState b) { return bodyMoving(b) || kinematicMoving(b); }
 
 // AABB and plane n·x = w: true when the box lies entirely above the plane.
 bool aabbAbovePlane(Aabb a, float4 plane)
@@ -785,7 +890,7 @@ void hierInsert(uint i)
     // Occupied-level mask (scratch 51, zeroed by the host each step): queries
     // skip empty levels, so the host can keep slack levels for f32 rounding.
     AOR2(gScratchAtomics[HIER_LEVEL_MASK_SLOT], 1u << level);
-    if (bodyMoving(gBodies[col.body]))
+    if (bodyMovingOrKinematic(gBodies[col.body]))
     {
         AOR2(gScratchAtomics[HIER_MOVING_MASK_SLOT], 1u << level);
         if (level > 0u)
@@ -846,9 +951,11 @@ void hierVisitCell(uint i, Collider a, bool active, uint own, Aabb aa, bool prob
             all(hierCell(ab, level) == cell))
         {
             Collider b = gColliders[j];
-            if (b.body != a.body)
+            BodyState ob = gBodies[b.body];
+            // Kinematic or static pairs need no contact (neither body is solved).
+            if (b.body != a.body && (bodyIsDynamic(ob) || bodyIsDynamic(gBodies[a.body])))
             {
-                bool other = bodyMoving(gBodies[b.body]);
+                bool other = bodyMovingOrKinematic(ob);
                 bool owner = level > own || (active && (!other || i < j));
                 // A moving collider in R is a tombstone (found in W).
                 if ((active || other) && owner && !(rest && other) &&
@@ -867,7 +974,9 @@ void hierQuery(uint i)
     Collider a = gColliders[i];
     if (a.shape == SHAPE_PLANE) return;
     BodyState ba = gBodies[a.body];
-    bool active = bodyMoving(ba);
+    bool active = bodyMovingOrKinematic(ba);
+    // Fast colliders query along their sweep (broadphase_fast).
+    if (colliderIsFast(i, a, ba)) return;
     uint base = HOST_S(1);
     Aabb aa = gAabbs[base + i];
     uint own = hierLevel(aa._pad0);
@@ -878,7 +987,7 @@ void hierQuery(uint i)
     BoxObb probe = probeHasObb ? worldObbFromCache(i)
                                : makeBoxObb(float3(0, 0, 0), float4(0, 0, 0, 1), float3(0, 0, 0));
     float faceGap = max(0.001, speculativeMargin()) + (probeHasObb ? cachedReach(i) : 0.0);
-    if (active)
+    if (active && bodyIsDynamic(ba))
     {
         uint nPlanes = min(ALOAD(gScratchAtomics[42]), 8u);
         for (uint pi = 0u; pi < nPlanes; pi++)
@@ -955,12 +1064,18 @@ void broadphase_insert(uint3 tid : SV_DispatchThreadID)
 {
     uint i = dispatchIndex(tid);
     if (i >= gCounters[0].colliderCount) return;
+    Collider col = gColliders[i];
+    // Long sweeps query along their path instead of sitting in the grid.
+    if (colliderIsFast(i, col, gBodies[col.body]))
+    {
+        fastListAppend(i);
+        return;
+    }
     if (HOST_S(18) != 0u)
     {
         hierInsert(i);
         return;
     }
-    Collider col = gColliders[i];
     if (col.shape == SHAPE_PLANE)
     {
         uint slot;
@@ -1000,6 +1115,9 @@ void broadphase_insert(uint3 tid : SV_DispatchThreadID)
         uint slot;
         AADD3(gScratchAtomics[25], 1, slot);
         if (slot < 16u) ASTORE(gScratchAtomics[LEGACY_LARGE_BASE + slot], i);
+        // The 17th is never found: fail the step (AGENTS.md) instead of
+        // silently dropping its pairs.
+        else AOR2(gCounters[0].overflowFlags, OVERFLOW_LARGE_DYNAMICS);
         return;
     }
     float3 center = 0.5 * (box.mn + box.mx);
@@ -1075,7 +1193,8 @@ void gridScanCell(uint i, Collider col, BodyState b, Aabb box, float3 cA, float 
         {
             BodyState ob = gBodies[other.body];
             bool otherSleep = bodyIsDynamic(ob) && bodyIsSleeping(ob);
-            keep = cur > i || (!sleeper && otherSleep);
+            // Statics and kinematics never query: owned at any index.
+            keep = cur > i || (!sleeper && (otherSleep || !bodyIsDynamic(ob)));
         }
         if (!keep || other.body == col.body || bodiesJointed(col.body, other.body) ||
             other.shape == SHAPE_PLANE)
@@ -1100,8 +1219,16 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
     }
     Collider col = gColliders[i];
     BodyState b = gBodies[col.body];
-    if (!bodyIsDynamic(b)) return;
     if (col.shape == SHAPE_PLANE) return;
+    // Fast colliders query along their sweep (broadphase_fast).
+    if (colliderIsFast(i, col, b)) return;
+    if (!bodyIsDynamic(b))
+    {
+        // A moving kinematic finds the sleepers it may wake; awake dynamics
+        // find it like a static.
+        if (kinematicMoving(b)) kinematicQuery(i, col);
+        return;
+    }
     uint base = HOST_S(1);
     Aabb box = gAabbs[base + i];
     bool sleeper = bodyIsSleeping(b);
@@ -1162,7 +1289,9 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
     // the grid and wake sleepers on impact; a woken body re-acquires the plane next step.
     float rA = col.params.w > 0.0 ? col.params.w : length(col.params.xyz);
     bool queryLarge = rA > cellSize;
-    rA += colliderReach(b, col);
+    // The whole swept bound (_pad0), not the capped reach: the box is centred
+    // mid-sweep and spans all of it.
+    rA = max(rA + colliderReach(b, col), box._pad0);
     uint nLarge = min(ALOAD(gScratchAtomics[25]), 16u);
     for (uint k = 0u; k < nLarge; k++)
     {
@@ -1260,7 +1389,10 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
             Collider other = gColliders[cur];
             BodyState ob = gBodies[other.body];
             bool otherSleep = bodyIsDynamic(ob) && bodyIsSleeping(ob);
-            bool pairOnce = cur > i || (!sleeper && otherSleep);
+            // Statics and kinematics never query the grid for awake bodies, so
+            // the awake querier owns those pairs at any index (a lower-index
+            // small static used to be dropped: bricks in a wall, debris shelves).
+            bool pairOnce = cur > i || (!sleeper && (otherSleep || !bodyIsDynamic(ob)));
             if (pairOnce && cur != i)
             {
                 if (other.body != col.body &&
@@ -1777,8 +1909,8 @@ void wakeFromContact(BodyState ba, BodyState bb, Collider ca, Collider cb)
     bool awakeB = bodyIsDynamic(bb) && !bodyIsSleeping(bb);
     // Displacement sleep: a body that has itself stayed put for sleepTime (a
     // sleep candidate) only jitters in place; it cannot wake its neighbours.
-    awakeA = awakeA && canWake(ba);
-    awakeB = awakeB && canWake(bb);
+    awakeA = (awakeA && canWake(ba)) || kinematicMoving(ba);
+    awakeB = (awakeB && canWake(bb)) || kinematicMoving(bb);
     if (!awakeA && !awakeB) return;
     float3 vRel = ba.linearVel - bb.linearVel;
     float wRel = length(ba.angularVel) + length(bb.angularVel);
@@ -1873,8 +2005,8 @@ void persistListAppend(uint first, uint count)
 // contact (and no graph edge); touching points (gap ≤ contactOffset) are kept.
 BoxManifold closingPoints(BoxManifold points, BodyState ba, Collider ca, BodyState bb, Collider cb)
 {
-    bool moveA = bodyIsDynamic(ba) && !bodyIsSleeping(ba);
-    bool moveB = bodyIsDynamic(bb) && !bodyIsSleeping(bb);
+    bool moveA = bodyMovingOrKinematic(ba);
+    bool moveB = bodyMovingOrKinematic(bb);
     float h = PARAMS.dt;
     float3 n = points.normal;
     BoxManifold kept = points;
@@ -1894,7 +2026,32 @@ void emitContactManifold(
     CandidatePair pair, BodyState ba, BodyState bb, Collider ca, Collider cb,
     BoxManifold points, float margin)
 {
-    if ((PARAMS.flags & FLAG_SPEC_VELOCITY) != 0u) points = closingPoints(points, ba, ca, bb, cb);
+    if (lookAheadOn()) points = closingPoints(points, ba, ca, bb, cb);
+    emitManifoldRows(pair, ba, bb, ca, cb, points, margin, false, ba, bb);
+}
+
+// A CCD body's winning pair (ccd_emit): points found at the time-of-impact
+// pose, which is the step-start pose moved by shiftA / shiftB. Anchors come
+// from that pose; every row's step-start offset is then taken at x⁻, so C0 is
+// the gap along the path (kept whole like any look-ahead gap) and the solver
+// stops the body at the TOI. No closing-point filter: they close by construction.
+void emitToiManifold(
+    CandidatePair pair, BodyState ba, BodyState bb, Collider ca, Collider cb,
+    BoxManifold points, float3 shiftA, float3 shiftB)
+{
+    BodyState aT = ba;
+    BodyState bT = bb;
+    aT.position += shiftA;
+    bT.position += shiftB;
+    emitManifoldRows(pair, aT, bT, ca, cb, points, PARAMS.contactOffset, true, ba, bb);
+}
+
+// Rows from bodies (rowA, rowB); `toi` re-evaluates their offsets at the
+// step-start bodies (ba, bb), which also wake.
+void emitManifoldRows(
+    CandidatePair pair, BodyState rowA, BodyState rowB, Collider ca, Collider cb,
+    BoxManifold points, float margin, bool toi, BodyState ba, BodyState bb)
+{
     int count = points.count;
     float3 nrm = points.normal;
     if (count <= 0) return;
@@ -1945,7 +2102,9 @@ void emitContactManifold(
     for (int k = 0; k < count; k++)
     {
         BoxManifoldPt pt = points.pts[k];
-        STORE_NEW_CONTACT(curOff + cStart + k, mslot, makeContactRow(pair, ba, bb, ca, cb, nrm, pt.pA, pt.pB, pt.feature, margin, mu));
+        Contact row = makeContactRow(pair, rowA, rowB, ca, cb, nrm, pt.pA, pt.pB, pt.feature, margin, mu);
+        if (toi) row = refreshReusedContact(row, ba, bb);
+        STORE_NEW_CONTACT(curOff + cStart + k, mslot, row);
     }
 #if defined(ENGINE_REUSE_COPY)
     persistListAppend(cStart, (uint)count);
@@ -2107,6 +2266,10 @@ float specReachMax()
     return v != 0u ? asfloat(v) : SPEC_REACH_MAX;
 }
 bool contactGapMode() { return (PARAMS.flags & FLAG_CONTACT_GAP) != 0u; }
+// Look-ahead semantics are on for the whole scene (bounds sweeps, closing
+// points, positive gaps kept whole) when the flag is set or a body is CCD or
+// kinematic (their contacts are speculative by construction).
+bool lookAheadOn() { return (PARAMS.flags & FLAG_SPEC_VELOCITY) != 0u || sceneHasCcd() || sceneHasKinematic(); }
 
 // How far any point of collider `c` on body `b` moves this step:
 // (|v| + |ω|·r)·h + |g|·h², from the velocity at the start of the step. Motion
@@ -2114,7 +2277,11 @@ bool contactGapMode() { return (PARAMS.flags & FLAG_CONTACT_GAP) != 0u; }
 // contacts, so slower colliders get no look-ahead and rest exactly as before.
 float colliderReach(BodyState b, Collider c)
 {
-    if ((PARAMS.flags & FLAG_SPEC_VELOCITY) == 0u || !bodyIsDynamic(b) || bodyIsSleeping(b)) return 0.0;
+    // CCD bodies sweep with or without the global flag, and are never capped:
+    // their reach is the whole motion (row 1 of the CCD audit).
+    bool ccd = bodyIsCcd(b);
+    bool kin = kinematicMoving(b);
+    if (((PARAMS.flags & FLAG_SPEC_VELOCITY) == 0u && !ccd && !kin) || !(bodyMoving(b) || kin)) return 0.0;
     // Spin pads the box all round (|ω|·r·h); with the rotation limit
     // (FLAG_MAX_ROTATION) that is at most 0.785 r. Without spin, tumbling
     // debris jammed into neighbours (7x7 grid: 3,869 awake at 30 s vs 6).
@@ -2122,7 +2289,8 @@ float colliderReach(BodyState b, Collider c)
     float linear = length(b.linearVel) * h;
     float motion = linear + length(b.angularVel) * colliderExtent(c) * h;
     if (motion <= PARAMS.contactOffset) return 0.0;
-    return min(motion + abs(PARAMS.gravityY) * h * h, specReachMax());
+    float reach = motion + abs(PARAMS.gravityY) * h * h;
+    return ccd || kin ? reach : min(reach, specReachMax());
 }
 // Reach of a hull or box collider, cached with its world OBB by build_aabbs.
 // Bounds and early-outs use these per-collider reaches (a conservative sweep).
@@ -2131,9 +2299,10 @@ float cachedReach(uint c) { return gWorldObbs[c].center.w; }
 // pieces carried along together (debris pushed by the ball) get no look-ahead.
 float pairReach(BodyState ba, Collider ca, BodyState bb, Collider cb)
 {
-    if ((PARAMS.flags & FLAG_SPEC_VELOCITY) == 0u) return 0.0;
-    bool moveA = bodyIsDynamic(ba) && !bodyIsSleeping(ba);
-    bool moveB = bodyIsDynamic(bb) && !bodyIsSleeping(bb);
+    bool uncapped = bodyIsCcd(ba) || bodyIsCcd(bb) || kinematicMoving(ba) || kinematicMoving(bb);
+    if ((PARAMS.flags & FLAG_SPEC_VELOCITY) == 0u && !uncapped) return 0.0;
+    bool moveA = bodyMovingOrKinematic(ba);
+    bool moveB = bodyMovingOrKinematic(bb);
     float3 vA = moveA ? ba.linearVel : float3(0, 0, 0);
     float3 vB = moveB ? bb.linearVel : float3(0, 0, 0);
     // Spin counts here (the narrowphase margin): closingPoints keeps only the
@@ -2144,7 +2313,8 @@ float pairReach(BodyState ba, Collider ca, BodyState bb, Collider cb)
     float h = PARAMS.dt;
     float motion = (length(vB - vA) + spin) * h;
     if (motion <= PARAMS.contactOffset) return 0.0;
-    return min(motion + abs(PARAMS.gravityY) * h * h, 2.0 * specReachMax());
+    float reach = motion + abs(PARAMS.gravityY) * h * h;
+    return uncapped ? reach : min(reach, 2.0 * specReachMax());
 }
 // Gap under which a pair keeps (speculative) contacts.
 float pairMargin(BodyState ba, Collider ca, BodyState bb, Collider cb)
@@ -2285,7 +2455,7 @@ float contactC0NRegFull(float c0N, float keep)
     // Look-ahead without FLAG_CONTACT_GAP: C0 = gap + margin. Only a real gap
     // (C0 beyond the margin) is clearance kept whole; the margin band below it
     // behaves exactly as without look-ahead.
-    if ((PARAMS.flags & FLAG_SPEC_VELOCITY) != 0u)
+    if (lookAheadOn())
     {
         float margin = PARAMS.contactOffset;
         return max(c0N - margin, 0.0) + min(c0N, margin) * keep;
@@ -2753,6 +2923,8 @@ void narrowphase(uint3 tid : SV_DispatchThreadID)
     Collider cb = gColliders[pair.colliderB];
     BodyState ba = gBodies[ca.body];
     BodyState bb = gBodies[cb.body];
+    // A CCD body's winning pair gets its manifold at the TOI pose (ccd_emit).
+    if (ccdOwnsPair(i, pair, ca.body, ba, cb.body, bb)) return;
     // three-avbd: reuseContacts before any shape SAT (ground + box-box + spheres).
     uint prevFeature = 0u;
     if ((PARAMS.flags & FLAG_REUSE_CONTACTS) != 0u &&
@@ -2786,6 +2958,7 @@ void narrowphase_defer(uint3 tid : SV_DispatchThreadID)
     Collider cb = gColliders[pair.colliderB];
     BodyState ba = gBodies[ca.body];
     BodyState bb = gBodies[cb.body];
+    if (ccdOwnsPair(i, pair, ca.body, ba, cb.body, bb)) return;
     uint prevFeature = 0u;
     if ((PARAMS.flags & FLAG_REUSE_CONTACTS) != 0u &&
         tryReuseContactsHint(pair, ba, bb, PARAMS.contactOffset, prevFeature))
@@ -3093,8 +3266,7 @@ Contact finishWarmContact(Contact c, BodyState ba, BodyState bb)
 
 bool contactPairAtRest(BodyState ba, BodyState bb)
 {
-    return (!bodyIsDynamic(ba) || bodyIsSleeping(ba)) &&
-        (!bodyIsDynamic(bb) || bodyIsSleeping(bb));
+    return !bodyMovingOrKinematic(ba) && !bodyMovingOrKinematic(bb);
 }
 
 // Shared point update; callers choose contact or manifold scheduling. Pair bodies
@@ -3305,6 +3477,8 @@ void persist_manifolds(uint3 tid : SV_DispatchThreadID)
 void build_awake_list(uint3 tid : SV_DispatchThreadID)
 {
     uint i = dispatchIndex(tid);
+    // apply_impulses consumed this step's records at its start.
+    if (i == 0u) ASTORE(gScratchAtomics[IMPULSE_COUNT], 0u);
     if (i >= gCounters[0].bodyCount) return;
     BodyState b = gBodies[i];
     if (bodyIsDynamic(b) && !bodyIsSleeping(b))
@@ -4554,12 +4728,13 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
             belt = pairBeltDisp(colA, colB, bA, bB, mf.normal);
 #endif
             // Sphere lever arms use step-start rotation; static poses stay current.
-            float4 rotA = (anySphere && bodyIsDynamic(bA)) ? bA.initialRot : bA.orientation;
-            float4 rotB = (anySphere && bodyIsDynamic(bB)) ? bB.initialRot : bB.orientation;
+            float4 rotA = (anySphere && (bodyIsDynamic(bA) || kinematicMoving(bA))) ? bA.initialRot : bA.orientation;
+            float4 rotB = (anySphere && (bodyIsDynamic(bB) || kinematicMoving(bB))) ? bB.initialRot : bB.orientation;
             float4 rotSelf = isA ? rotA : rotB;
-            // Displacement from x⁻ stored on the body (predict). Static/sleeping stay at 0.
-            bool moveA = bodyIsDynamic(bA) && !bodyIsSleeping(bA);
-            bool moveB = bodyIsDynamic(bB) && !bodyIsSleeping(bB);
+            // Displacement from x⁻ stored on the body (predict). Static/sleeping
+            // stay at 0; a kinematic carries its given motion v·h.
+            bool moveA = bodyMovingOrKinematic(bA);
+            bool moveB = bodyMovingOrKinematic(bB);
             float3 dLinA = moveA ? (bA.position - bA.initialPos) : float3(0, 0, 0);
             float3 dLinB = moveB ? (bB.position - bB.initialPos) : float3(0, 0, 0);
             float3 dAngA = float3(0, 0, 0);
@@ -4969,11 +5144,11 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
 #else
             belt = pairBeltDisp(colA, colB, bA, bB, c.normal);
 #endif
-            float4 rotA = (anySphere && bodyIsDynamic(bA)) ? bA.initialRot : bA.orientation;
-            float4 rotB = (anySphere && bodyIsDynamic(bB)) ? bB.initialRot : bB.orientation;
+            float4 rotA = (anySphere && (bodyIsDynamic(bA) || kinematicMoving(bA))) ? bA.initialRot : bA.orientation;
+            float4 rotB = (anySphere && (bodyIsDynamic(bB) || kinematicMoving(bB))) ? bB.initialRot : bB.orientation;
             // three-avbd evalContact: Ĉ = c0*(1-α) + J·(x-x⁻), not absolute geometric C.
-            bool moveA = bodyIsDynamic(bA) && !bodyIsSleeping(bA);
-            bool moveB = bodyIsDynamic(bB) && !bodyIsSleeping(bB);
+            bool moveA = bodyMovingOrKinematic(bA);
+            bool moveB = bodyMovingOrKinematic(bB);
             float3 dLinA = moveA ? (bA.position - bA.initialPos) : float3(0, 0, 0);
             float3 dLinB = moveB ? (bB.position - bB.initialPos) : float3(0, 0, 0);
             float3 dAngA = float3(0, 0, 0);
@@ -5386,67 +5561,6 @@ void sleep_island_commit(uint3 tid : SV_DispatchThreadID)
     gBodies[i] = b;
 }
 
-// --- CCD stretch: classify fast bodies (linear + angular rim) ---
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void ccd_classify(uint3 tid : SV_DispatchThreadID)
-{
-    uint i = dispatchIndex(tid);
-    if (i >= gCounters[0].bodyCount) return;
-    BodyState b = gBodies[i];
-    gCcdFlags[i] = 0;
-    if (!bodyIsDynamic(b) || bodyIsSleeping(b)) return;
-    AvbdParams p = PARAMS;
-    float speed = length(b.linearVel);
-    float aspeed = length(b.angularVel);
-    float radius = 0.5; // conservative; refined per-collider in full CCD
-    float rim = aspeed * radius;
-    float thresh = radius * 0.5 / max(p.dt, 1e-8);
-    if (speed + rim > thresh)
-        gCcdFlags[i] = 1;
-}
-
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void ccd_sweep(uint3 tid : SV_DispatchThreadID)
-{
-    // Stretch goal: swept sphere-sphere / sphere-plane TOI for flagged bodies.
-    // Exhaustion and misses set CCD_* flags — never report certified no-hit on miss.
-    uint i = dispatchIndex(tid);
-    if (i >= gCounters[0].colliderCount) return;
-    Collider col = gColliders[i];
-    if (gCcdFlags[col.body] == 0) return;
-    BodyState b = gBodies[col.body];
-    AvbdParams p = PARAMS;
-    float3 v = b.linearVel;
-    float maxIter = 8.0;
-    // Against planes only in this stretch slice
-    for (uint j = 0; j < gCounters[0].colliderCount; j++)
-    {
-        if (j == i) continue;
-        Collider other = gColliders[j];
-        if (other.shape != SHAPE_PLANE) continue;
-        float3 n = normalize(other.params.xyz);
-        float r = col.shape == SHAPE_SPHERE ? col.params.x : col.params.w;
-        float3 x0 = transformPoint(b.position, b.orientation, col.localPos);
-        float denom = dot(v, n);
-        if (denom >= -1e-8) continue;
-        float dist = dot(x0, n) - other.params.w - r;
-        float toi = dist / -denom;
-        if (toi < 0.0 || toi > p.dt) continue;
-        // Advance and mark — budget check
-        if (maxIter <= 0.0)
-        {
-            AOR2(gCounters[0].overflowFlags, CCD_BUDGET_EXHAUSTED);
-            return;
-        }
-        maxIter -= 1.0;
-        b.position += v * toi;
-        b.linearVel -= n * max(0.0, -dot(b.linearVel, n));
-        gBodies[col.body] = b;
-    }
-}
-
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void recompute_inertia(uint3 tid : SV_DispatchThreadID)
@@ -5524,3 +5638,5 @@ void recompute_inertia(uint3 tid : SV_DispatchThreadID)
     // Shift body origin note: we keep authoring frame; COM offset absorbed into colliders later if needed.
     gBodies[body] = b;
 }
+
+#include "ccd_step.slang"

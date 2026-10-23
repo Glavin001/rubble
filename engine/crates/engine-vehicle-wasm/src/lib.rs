@@ -399,6 +399,19 @@ impl RigidStep {
             last: self.last,
             vehicle_count: vehicles,
             wheel_count: wheels,
+            // counts[5]: bit 0 CCD bodies, bit 1 kinematic bodies, bit 2 impulse
+            // records this step; counts[6] projectiles, counts[7] characters.
+            motion: {
+                let bits = counts.get(5).copied().unwrap_or(0);
+                rp::MotionInputs {
+                    ccd: bits & 1 != 0,
+                    kinematic: bits & 2 != 0,
+                    impulses: bits & 4 != 0,
+                    look_ahead: self.params.flags & engine_schema::FLAG_SPEC_VELOCITY != 0,
+                    projectiles: counts.get(6).copied().unwrap_or(0),
+                    characters: counts.get(7).copied().unwrap_or(0),
+                }
+            },
         }
     }
 
@@ -451,9 +464,10 @@ impl RigidStep {
             kernels: Vec::new(),
         };
         // Every kernel a step can emit (small and large scenes, joints, vehicles).
-        for (n, prefix) in [(1u32, true), (4096, false)] {
-            let mut i = s.inputs(&[n, n, 1, 1, 1]);
+        for (n, prefix, motion) in [(1u32, true, 0u32), (4096, false, 0), (4096, false, 7)] {
+            let mut i = s.inputs(&[n, n, 1, 1, 1, motion, motion, motion]);
             i.sleep_time = 0.5;
+            i.motion.look_ahead = motion != 0;
             for c in engine_exec::rigid_plan::encode_step(&s.modes(), &i, false, prefix) {
                 match c {
                     engine_exec::rigid_plan::Cmd::Dispatch { kernel, .. }

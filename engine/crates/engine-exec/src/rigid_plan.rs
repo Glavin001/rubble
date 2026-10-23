@@ -92,7 +92,34 @@ pub struct StepInputs {
     /// Vehicle controller pool in use (`vehicle_step.slang`; 0 = no vehicle passes).
     pub vehicle_count: u32,
     pub wheel_count: u32,
+    /// Continuous collision and step-start motion (`ccd_step.slang`).
+    pub motion: MotionInputs,
 }
+
+/// What the continuous-collision, impulse, projectile and character passes
+/// need this step (all off: the step graph is unchanged).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MotionInputs {
+    /// Some body carries `BODY_CCD` (registration, TOI casts, TOI manifolds).
+    pub ccd: bool,
+    /// Some body is kinematic (`BODY_KINEMATIC`).
+    pub kinematic: bool,
+    /// `FLAG_SPEC_VELOCITY` is set (swept bounds: the fast list may fill).
+    pub look_ahead: bool,
+    /// The host queued impulse records, or projectiles may write some.
+    pub impulses: bool,
+    /// Projectile records in the character/projectile pool (`projectile_step`).
+    pub projectiles: u32,
+    /// Character controllers in the pool (`character_step.slang`).
+    pub characters: u32,
+}
+
+/// `apply_impulses` threads (one per record slot).
+pub const IMPULSE_CAP: u32 = engine_schema::IMPULSE_CAP;
+/// `ccd_emit` threads (one per CCD body slot).
+pub const CCD_BODY_CAP: u32 = engine_schema::CCD_BODY_CAP;
+/// `broadphase_fast` workgroups (they stride the fast list).
+pub const FAST_GROUPS: u64 = 64;
 
 /// JP rounds dispatched this step; later rounds run in `color_bodies_tail`.
 pub fn color_rounds_dispatched(m: &StepModes, last: &StepCounters) -> u32 {
@@ -133,6 +160,7 @@ pub fn resolve_entry(name: &str, persistent: bool) -> &str {
         "solve_dual_compact" => "solve_dual_persistent",
         "convex_classify" => "convex_classify_persistent",
         "convex_manifold" => "convex_manifold_persistent",
+        "ccd_emit" => "ccd_emit_persistent",
         "reuse_all_manifolds" => "reuse_all_manifolds_persistent",
         _ => name,
     }
@@ -216,6 +244,12 @@ pub fn encode_step(
     }
 
     let vehicles = i.vehicle_count > 0;
+    let mo = i.motion;
+    // GPU impulses first (CCD audit row 4): scripted loads and projectile hits
+    // change velocities before bounds are swept.
+    if mo.impulses || mo.projectiles > 0 {
+        e.d("apply_impulses", u64::from(IMPULSE_CAP));
+    }
     if vehicles {
         e.d("vehicle_input", u64::from(i.vehicle_count));
     }
@@ -229,8 +263,15 @@ pub fn encode_step(
             "broadphase_clear",
             u64::from(i.grid_hash_words) * if m.grid_split { 2 } else { 1 },
         );
+        if mo.ccd {
+            e.d("ccd_register", n_bodies);
+        }
         e.d("broadphase_insert", n_cols);
         e.d("broadphase_query", n_cols);
+        if mo.ccd || mo.look_ahead || mo.kinematic {
+            // Sweeps longer than a cell query along their path (row 1).
+            e.d("broadphase_fast", FAST_GROUPS * 64);
+        }
         if vehicles {
             // One workgroup per wheel, cast at x⁻ through this step's grid (the
             // contact hash reuses its heads later in the step); then, before
@@ -246,6 +287,12 @@ pub fn encode_step(
         // candidates (slot 64) after the carried resting pairs join them.
         e.w("carry_rest_pairs", 72);
         e.d(work_args, 64);
+    }
+    if mo.ccd && !reuse_manifolds {
+        // Each CCD body's nearest time of impact, then its winning pair
+        // (rows 2-3); the narrowphase leaves that pair to ccd_emit.
+        e.w("ccd_toi", 64);
+        e.w("ccd_pick", 64);
     }
     let reuse = i.reuse_contacts;
     if reuse_manifolds {
@@ -291,6 +338,12 @@ pub fn encode_step(
             e.w("convex_sat_small", 74);
             e.w("convex_sat_large", 75);
             e.w("convex_manifold", 76);
+        }
+        if mo.ccd {
+            e.d(
+                if m.copy_reuse { "ccd_emit_copy_persistent" } else { "ccd_emit" },
+                u64::from(CCD_BODY_CAP),
+            );
         }
     }
     e.phase("narrowphase");
@@ -439,6 +492,13 @@ pub fn encode_step(
 /// Entries a persistent-contact host replays (every name `encode_step` can
 /// emit, resolved with [`resolve_entry`]). Native hosts compile exactly these.
 pub const PERSISTENT_ENTRIES: &[&str] = &[
+    "apply_impulses",
+    "ccd_register",
+    "broadphase_fast",
+    "ccd_toi",
+    "ccd_pick",
+    "ccd_emit_persistent",
+    "ccd_emit_copy_persistent",
     "vehicle_input",
     "wheel_query",
     "vehicle_link",
@@ -774,6 +834,8 @@ pub fn host_words(c: &WorldCapacity, m: &StepModes, i: &StepInputs, h: &HostStat
     // Bit 0: category/mask/group filters. Bit 1: vehicle sever grace (severed
     // parts ignore their chassis by collider generation) unless filters are on.
     s[30] = u32::from(h.has_filters) | (u32::from(!h.has_filters && i.vehicle_count > 0) << 1);
+    // Bit 2: CCD bodies (ccd_step.slang sceneHasCcd); bit 3: kinematic bodies.
+    s[30] |= (u32::from(i.motion.ccd) << 2) | (u32::from(i.motion.kinematic) << 3);
     s
 }
 
@@ -827,6 +889,7 @@ mod tests {
             },
             vehicle_count: 0,
             wheel_count: 0,
+            motion: MotionInputs::default(),
         }
     }
 
@@ -987,5 +1050,35 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn motion_passes_are_scheduled_only_when_needed() {
+        let names = |i: &StepInputs| -> Vec<&'static str> {
+            encode_step(&fast(), i, false, false)
+                .into_iter()
+                .filter_map(|c| match c {
+                    Cmd::Dispatch { kernel, .. } | Cmd::Indirect { kernel, .. } => Some(kernel),
+                    _ => None,
+                })
+                .collect()
+        };
+        let plain = names(&inputs(10, 0));
+        for k in ["apply_impulses", "ccd_register", "broadphase_fast", "ccd_toi", "ccd_pick", "ccd_emit"] {
+            assert!(!plain.contains(&k), "{k} scheduled without CCD");
+        }
+        let mut i = inputs(10, 0);
+        i.motion.ccd = true;
+        i.motion.impulses = true;
+        let ccd = names(&i);
+        let at = |k: &str| ccd.iter().position(|n| *n == k).unwrap_or_else(|| panic!("{k} missing"));
+        assert!(at("apply_impulses") < at("build_aabbs"));
+        assert!(at("broadphase_clear") < at("ccd_register") && at("ccd_register") < at("broadphase_insert"));
+        assert!(at("broadphase_query") < at("broadphase_fast"));
+        assert!(at("broadphase_fast") < at("ccd_toi") && at("ccd_toi") < at("ccd_pick"));
+        let np = ccd.iter().position(|n| n.starts_with("narrowphase")).unwrap();
+        assert!(at("ccd_pick") < np);
+        let emit = ccd.iter().position(|n| n.starts_with("ccd_emit")).unwrap();
+        assert!(np < emit && emit < at("predict_bodies"));
     }
 }

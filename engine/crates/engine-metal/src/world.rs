@@ -19,7 +19,6 @@ pub struct MetalWorld {
     pipelines: Pipelines,
     capacity: WorldCapacity,
     params: AvbdParams,
-    enable_ccd: bool,
 
     bodies: Buffer,
     bodies_prev: Buffer,
@@ -258,7 +257,6 @@ impl MetalWorld {
             pipelines,
             capacity,
             params,
-            enable_ccd: false,
             bodies,
             bodies_prev,
             colliders,
@@ -316,10 +314,6 @@ impl MetalWorld {
             manifolds_valid: false,
             reuse_next: false,
         })
-    }
-
-    pub fn set_ccd_enabled(&mut self, on: bool) {
-        self.enable_ccd = on;
     }
 
     pub fn set_sleep_island_rounds(&mut self, rounds: u32) {
@@ -1155,11 +1149,6 @@ impl MetalWorld {
             }
         }
         self.dispatch_work(&encoder, "sleep_island_commit", 67, 0);
-
-        if self.enable_ccd {
-            self.dispatch(&encoder, "ccd_classify", n_bodies);
-            self.dispatch(&encoder, "ccd_sweep", n_cols);
-        }
 
         encoder.end_encoding();
         let cpu_submit = cpu_t0.elapsed().as_secs_f64() * 1000.0;

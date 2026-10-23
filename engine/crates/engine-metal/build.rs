@@ -89,8 +89,6 @@ fn main() -> Result<()> {
         "sleep_island_gate",
         "sleep_island_commit",
         "extract_velocity_sleep",
-        "ccd_classify",
-        "ccd_sweep",
         "recompute_inertia",
         "record_color_degrees",
         "reuse_all_manifolds",
