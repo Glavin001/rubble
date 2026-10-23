@@ -93,6 +93,33 @@ pub const CAR_RING: usize = 8;
 /// a door can intrude and a pole can fold the front. Four wheels on dedicated
 /// axle nodes, an engine, and a bumper on a detacher group.
 pub fn car_truck(p: &CarParams) -> String {
+    car_truck_layout(p).0
+}
+
+/// What the visual mesh needs to know about the procedural car's node layout.
+#[derive(Clone, Debug, Default)]
+pub struct CarLayout {
+    pub stations: usize,
+    /// Rings that belong to the passenger cell.
+    pub cabin: Vec<bool>,
+    pub front_bay: usize,
+    pub rear_bay: usize,
+    /// First ring of the front doors (the rear doors end there).
+    pub mid: usize,
+    pub cabin_first: usize,
+    pub cabin_last: usize,
+    /// Axle positions along Z (front, rear) and the axle height.
+    pub axles: [f32; 2],
+    pub axle_y: f32,
+    /// Panel node indices: bonnet, boot lid, front-left, rear-left, front-right,
+    /// rear-right door (empty without panels).
+    pub panels: Vec<Vec<u32>>,
+    pub front_bumper: Vec<u32>,
+    pub rear_bumper: Vec<u32>,
+}
+
+/// [`car_truck`] and the layout of its nodes.
+pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
     let mut s = String::new();
     let _ = writeln!(s, "{}", p.name);
     let _ = writeln!(
@@ -210,6 +237,26 @@ pub fn car_truck(p: &CarParams) -> String {
         panel_nodes.push(grid);
     }
     let rear_bumper_first = nodes.len();
+    let mut layout = CarLayout {
+        stations: n,
+        cabin: cabin.clone(),
+        front_bay,
+        rear_bay,
+        mid,
+        cabin_first,
+        cabin_last,
+        axles: [wb, -wb],
+        axle_y,
+        panels: panel_nodes
+            .iter()
+            .map(|g| g.iter().flatten().map(|&i| i as u32).collect())
+            .collect(),
+        front_bumper: if p.bumper { (bumper_first as u32..bumper_first as u32 + 6).collect() } else { Vec::new() },
+        rear_bumper: Vec::new(),
+    };
+    if p.panels {
+        layout.rear_bumper = (rear_bumper_first as u32..rear_bumper_first as u32 + 6).collect();
+    }
     if p.panels {
         let z = -0.5 * p.length - 0.16;
         for y in [0.38f32, 0.62] {
@@ -539,7 +586,7 @@ pub fn car_truck(p: &CarParams) -> String {
         "\nengine\n1200, 4800, 320, 3.9, 3.3, 1.0, 3.3, 2.1, 1.45, 1.1, 0.9, -1.0"
     );
     let _ = writeln!(s, "\nbrakes\n12000\n\nend");
-    s
+    (s, layout)
 }
 
 /// Braced lattice box of `nx × ny × nz` nodes (spacing `step`), with a skin.

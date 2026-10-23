@@ -20,6 +20,7 @@ pub mod model;
 pub mod pack;
 pub mod procedural;
 pub mod truck;
+pub mod visual;
 
 pub use desc::*;
 pub use host::{

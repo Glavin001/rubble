@@ -57,7 +57,8 @@
   <script type="module">
     import { createWorld, sceneCapacity } from './world-host.mjs';
     import { L, WHEEL_RIM_MATERIAL } from './vehicle.mjs';
-    import { loadTruck, loadJbeam, proceduralCar, latticeCrate, calibratedSettings, SOFT } from './soft.mjs';
+    import { loadTruck, loadJbeam, proceduralCar, proceduralCarVisual, latticeCrate, calibratedSettings, SOFT } from './soft.mjs';
+    import { createCarRenderer, LIGHTING_WGSL } from './car-render.mjs';
 
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
@@ -212,7 +213,7 @@
     const addSoft = (desc, p, yaw = 0, opts = {}) => {
       const h = world.addSoftVehicle(desc, p, qAxis([0, 1, 0], yaw), opts);
       const e = world.soft.entries[h];
-      softs.push({ h, name: e.name, core: e.core });
+      softs.push({ h, name: e.name, core: e.core, car: desc === carDesc });
       return h;
     };
 
@@ -300,7 +301,7 @@
       const q = qAxis([1, 0, 0], P('pitch', 35) * Math.PI / 180);
       const h = world.addSoftVehicle(carDesc, [0, P('height', 8), 0], q, {});
       const e = world.soft.entries[h];
-      softs.push({ h, name: e.name, core: e.core });
+      softs.push({ h, name: e.name, core: e.core, car: true });
       camMode = 'orbit'; orbit = { yaw: 1.6, pitch: 0.2, dist: 11, target: [0, 1.5, 1] };
     } else if (scene === 'import') {
       // Crash target for an imported vehicle (window.__crashImported): ?target=wall
@@ -332,6 +333,7 @@
     // Flexbody meshes (rounded, subdivided skins bound to particle frames).
     let flexBuf = null, flexIdx = null, flexCount = 0, flexBind = null;
     let skinMode = qs.get('skin') || 'flex';
+    let carR = null;
     const flexCache = new Map();
     const rebuildSkin = () => {
       const tris = [], rest = [];
@@ -348,8 +350,10 @@
       skinBind = null;
       // Flexbody meshes: cars get rounded panels, crates and imports stay flat.
       const binds = [], idx = [];
+      const isCar = (s) => softs.some((x) => x.h === s && x.car);
+      carR?.rebuild(world.soft.entries.map((e, s) => ({ firstBody: e.firstBody, index: s })).filter((c) => isCar(c.index)));
       world.soft.entries.forEach((e, s) => {
-        if (!e.tris) return;
+        if (!e.tris || (carR && isCar(s))) return;
         if (!flexCache.has(s)) flexCache.set(s, world.soft.inner.flexbody(s, e.core ? 0.06 : 0.0));
         const w = flexCache.get(s);
         const nv = w[0], nt = w[1], base = binds.length / 8;
@@ -363,15 +367,15 @@
       if (binds.length) device.queue.writeBuffer(flexBuf, 0, new Uint32Array(binds));
       if (idx.length) device.queue.writeBuffer(flexIdx, 0, new Uint32Array(idx));
       flexBind = null;
+      flexShadowBind = null;
     };
 
     const SHADER = /* wgsl */`
 struct Body { position: vec3f, invMass: f32, orientation: vec4f, invInertia: vec3f, flags: u32,
   linearVel: vec3f, sleepTimer: f32, angularVel: vec3f, generation: u32, initialPos: vec3f, initialPad: f32, initialRot: vec4f };
 struct Collider { body: u32, shape: u32, material: u32, generation: u32, localPos: vec3f, density: f32, localRot: vec4f, params: vec4f };
-struct Frame { viewProj: mat4x4f, eye: vec4f, light: vec4f, opts: vec4f };
+${LIGHTING_WGSL}
 @group(0) @binding(0) var<storage, read> bodies: array<Body>;
-@group(0) @binding(1) var<uniform> frame: Frame;
 @group(0) @binding(2) var<storage, read> cols: array<Collider>;
 @group(0) @binding(3) var<storage, read> vdata: array<vec4u>;
 @group(0) @binding(4) var<storage, read> soft: array<vec4u>;
@@ -384,14 +388,19 @@ fn qrot(q: vec4f, v: vec3f) -> vec3f {
   return u * (2.0 * dot(u, v)) + v * (q.w * q.w - dot(u, u)) + cross(u, v) * (2.0 * q.w);
 }
 fn hash(n: u32) -> f32 { var x = n * 747796405u + 2891336453u; x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u; return f32((x >> 22u) ^ x) / 4294967295.0; }
-fn shade(c: vec3f, n: vec3f, w: vec3f) -> vec3f {
-  let l = normalize(frame.light.xyz);
-  let diff = max(dot(n, l), 0.0);
-  let v = normalize(frame.eye.xyz - w);
-  let spec = pow(max(dot(reflect(-l, n), v), 0.0), 40.0) * 0.35;
-  let sky = 0.5 + 0.5 * n.y;
-  let fog = clamp(length(frame.eye.xyz - w) / 260.0, 0.0, 1.0);
-  return mix(c * (0.22 + 0.18 * sky + 0.75 * diff) + spec, vec3f(0.55, 0.62, 0.72), fog * fog);
+fn shadeR(c: vec3f, n: vec3f, w: vec3f, rough: f32, metal: f32) -> vec3f { return tonemap(surface(toLinear(c), n, w, rough, metal, 0.0)); }
+fn shade(c: vec3f, n: vec3f, w: vec3f) -> vec3f { return shadeR(c, n, w, 0.6, 0.0); }
+
+// Sky: a full-screen triangle at the far plane.
+struct SkyOut { @builtin(position) clip: vec4f, @location(0) ndc: vec2f };
+@vertex fn vsSky(@builtin(vertex_index) vi: u32) -> SkyOut {
+  let p = vec2f(f32((vi << 1u) & 2u), f32(vi & 2u)) * 2.0 - 1.0;
+  var o: SkyOut; o.clip = vec4f(p, 0.9999, 1.0); o.ndc = p; return o;
+}
+@fragment fn fsSky(i: SkyOut) -> @location(0) vec4f {
+  let far = frame.invViewProj * vec4f(i.ndc, 1.0, 1.0);
+  let d = normalize(far.xyz / far.w - frame.eye.xyz);
+  return vec4f(tonemap(skyColor(d)), 1.0);
 }
 
 struct Out { @builtin(position) clip: vec4f, @location(0) n: vec3f, @location(1) c: vec3f, @location(2) w: vec3f, @location(3) center: vec3f, @location(4) r: f32 };
@@ -562,10 +571,13 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
   o.clip = select(frame.viewProj * vec4f(o.w, 1.0), HIDE, hidden);
   let rr = length(mesh.yz);
   let spoke = step(0.5, fract(atan2(mesh.z, mesh.y) * 0.954930));
-  o.c = select(vec3f(0.08, 0.08, 0.09), mix(vec3f(0.55, 0.57, 0.62), vec3f(0.3, 0.31, 0.34), spoke), abs(mesh.x) > 0.98 && rr < 0.62);
+  o.c = select(vec3f(0.05, 0.05, 0.055), mix(vec3f(0.75, 0.76, 0.8), vec3f(0.25, 0.26, 0.28), spoke), abs(mesh.x) > 0.98 && rr < 0.62);
   return o;
 }
-@fragment fn fsWheel(i: Out) -> @location(0) vec4f { return vec4f(shade(i.c, normalize(i.n), i.w), 1.0); }
+@fragment fn fsWheel(i: Out) -> @location(0) vec4f {
+  let rim = i.c.x > 0.2;
+  return vec4f(shadeR(i.c, normalize(i.n), i.w, select(0.85, 0.25, rim), select(0.0, 1.0, rim)), 1.0);
+}
 
 @vertex fn vsGround(@location(0) p: vec3f) -> Out {
   var o: Out;
@@ -574,11 +586,13 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
   return o;
 }
 @fragment fn fsGround(i: Out) -> @location(0) vec4f {
-  let g = abs(fract(i.w.xz / 4.0) - 0.5);
-  let line = smoothstep(0.47, 0.5, max(g.x, g.y));
-  let checker = step(0.0, sin(i.w.x * 0.3927) * sin(i.w.z * 0.3927));
-  let base = mix(vec3f(0.26, 0.29, 0.27), vec3f(0.3, 0.33, 0.31), checker);
-  return vec4f(shade(mix(base, vec3f(0.45, 0.48, 0.46), line * 0.6), vec3f(0.0, 1.0, 0.0), i.w), 1.0);
+  // Asphalt: grain at two scales, faint 8 m slab lines.
+  let p = vec3f(i.w.x, 0.0, i.w.z);
+  let grain = noise3(p * 9.0) * 0.5 + noise3(p * 1.3) * 0.35 + noise3(p * 0.15) * 0.15;
+  let g = abs(fract(i.w.xz / 8.0) - 0.5);
+  let line = smoothstep(0.485, 0.5, max(g.x, g.y));
+  let base = mix(vec3f(0.2, 0.2, 0.21), vec3f(0.31, 0.31, 0.32), grain) * (1.0 - 0.25 * line);
+  return vec4f(shadeR(base, vec3f(0.0, 1.0, 0.0), i.w, 0.85, 0.0), 1.0);
 }
 `;
     const mod = device.createShaderModule({ label: 'softbody-render', code: SHADER });
@@ -608,12 +622,23 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     const ground = [[-G, -G], [G, -G], [G, G], [-G, -G], [G, G], [-G, G]].flatMap(([x, z]) => [x, 0.001, z]);
     const vbo = (arr) => { const b = device.createBuffer({ size: arr.length * 4, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST }); device.queue.writeBuffer(b, 0, new Float32Array(arr)); return b; };
     const cubeVbo = vbo(cube), cylVbo = vbo(cyl), groundVbo = vbo(ground);
-    const frameBuf = device.createBuffer({ size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const frameBuf = device.createBuffer({ size: 240, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    // 4× MSAA; a 2,048² sun shadow map around the camera target.
+    const SAMPLES = 4;
+    const SHADOW = 2048;
+    const shadowTex = device.createTexture({ size: [SHADOW, SHADOW], format: 'depth32float', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+    const shadowView = shadowTex.createView();
+    const shadowSampler = device.createSampler({ compare: 'less', magFilter: 'linear', minFilter: 'linear' });
+    const shMod = device.createShaderModule({ label: 'softbody-shadow', code: SHADER.replaceAll('frame.viewProj *', 'frame.lightVP *') });
+    const shadowPipe = (vs, buffers) => device.createRenderPipeline({
+      layout: 'auto', vertex: { module: shMod, entryPoint: vs, buffers }, primitive: { cullMode: 'none' },
+      depthStencil: { format: 'depth32float', depthWriteEnabled: true, depthCompare: 'less', depthBias: 2, depthBiasSlopeScale: 2.5 },
+    });
     const vtx6 = [{ arrayStride: 24, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }, { shaderLocation: 1, offset: 12, format: 'float32x3' }] }];
     const depthStencil = { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' };
     const pipe = (vs, fs, buffers, cull = 'back', topology = 'triangle-list') => device.createRenderPipeline({
       layout: 'auto', vertex: { module: mod, entryPoint: vs, buffers }, fragment: { module: mod, entryPoint: fs, targets: [{ format }] },
-      primitive: { cullMode: cull, topology }, depthStencil,
+      primitive: { cullMode: cull, topology }, depthStencil, multisample: { count: SAMPLES },
     });
     const colPipe = pipe('vsCol', 'fsCol', vtx6);
     const wheelPipe = pipe('vsWheel', 'fsWheel', vtx6, 'none');
@@ -621,14 +646,26 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     const skinPipe = pipe('vsSkin', 'fsSkin', [], 'none');
     const beamPipe = pipe('vsBeam', 'fsBeam', [], 'none', 'line-list');
     const flexPipe = pipe('vsFlex', 'fsFlex', [], 'none');
-    const bind = (p, entries) => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: entries.map(([b, buf]) => ({ binding: b, resource: { buffer: buf } })) });
-    const colBind = bind(colPipe, [[0, world.bufs[0]], [1, frameBuf], [2, world.bufs[2]]]);
-    const wheelBind = bind(wheelPipe, [[1, frameBuf], [3, world.bufs[31]]]);
-    const groundBind = bind(groundPipe, [[0, world.bufs[0]], [1, frameBuf]]);
+    const skyPipe = device.createRenderPipeline({
+      layout: 'auto', vertex: { module: mod, entryPoint: 'vsSky' }, fragment: { module: mod, entryPoint: 'fsSky', targets: [{ format }] },
+      primitive: { cullMode: 'none' }, depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'less-equal' }, multisample: { count: SAMPLES },
+    });
+    const bind = (p, entries) => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: entries.map(([b, r]) => ({ binding: b, resource: r instanceof GPUBuffer ? { buffer: r } : r })) });
+    const SH = [[9, shadowView], [10, shadowSampler]];
+    const colBind = bind(colPipe, [[0, world.bufs[0]], [1, frameBuf], [2, world.bufs[2]], ...SH]);
+    const wheelBind = bind(wheelPipe, [[1, frameBuf], [3, world.bufs[31]], ...SH]);
+    const groundBind = bind(groundPipe, [[0, world.bufs[0]], [1, frameBuf], ...SH]);
+    const skyBind = bind(skyPipe, [[1, frameBuf]]);
+    const colShadow = shadowPipe('vsCol', vtx6), wheelShadow = shadowPipe('vsWheel', vtx6), flexShadow = shadowPipe('vsFlex', []);
+    const colShadowBind = bind(colShadow, [[0, world.bufs[0]], [1, frameBuf], [2, world.bufs[2]]]);
+    const wheelShadowBind = bind(wheelShadow, [[1, frameBuf], [3, world.bufs[31]]]);
+    let flexShadowBind = null;
+    // The procedural car's detailed mesh (car-render.mjs); imports keep the flexbody skin.
+    carR = createCarRenderer(device, { format, sampleCount: SAMPLES, bodies: world.bufs[0], frameBuf, shadowView, shadowSampler, visual: proceduralCarVisual() });
     const beamBind = bind(beamPipe, [[0, world.bufs[0]], [1, frameBuf], [4, world.bufs[32]]]);
     let skinBind = null;
     rebuildSkin();
-    let depth = null;
+    let depth = null, msaa = null;
     let beamView = qs.get('beams') === '1';
     document.getElementById('beamsBtn').onclick = (e) => { beamView = !beamView; e.target.blur(); };
     document.getElementById('resetBtn').onclick = (e) => { resetScene(); e.target.blur(); };
@@ -855,7 +892,41 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
         eventsEl.textContent = `${breaks} beam-break events`;
       }
     }
-    const frameF = new Float32Array(28);
+    const frameF = new Float32Array(60);
+    const mat4Mul = (a, b) => { const o = new Float32Array(16); for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) { let x = 0; for (let k = 0; k < 4; k++) x += a[k * 4 + r] * b[c * 4 + k]; o[c * 4 + r] = x; } return o; };
+    function mat4Inv(m) {
+      const inv = new Float32Array(16);
+      inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] + m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
+      inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] - m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
+      inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] + m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
+      inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] - m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
+      inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] - m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
+      inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] + m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
+      inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] - m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
+      inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] + m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
+      inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] + m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
+      inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] - m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
+      inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] + m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
+      inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] - m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
+      inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] - m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
+      inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] + m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
+      inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] - m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
+      inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] + m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
+      const det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+      for (let i = 0; i < 16; i++) inv[i] /= det || 1;
+      return inv;
+    }
+    const LIGHT = norm3([0.45, 0.8, 0.35]);
+    // Sun's orthographic view over a 36 m square around the camera target.
+    function lightViewProj(at) {
+      const E = 18, near = 1, far = 160;
+      const eye = [at[0] + LIGHT[0] * 80, at[1] + LIGHT[1] * 80, at[2] + LIGHT[2] * 80];
+      const z = norm3(sub3(eye, at)), x = norm3(cross3([0, 1, 0], z)), y = cross3(z, x);
+      const view = new Float32Array([x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0,
+        -(x[0] * eye[0] + x[1] * eye[1] + x[2] * eye[2]), -(y[0] * eye[0] + y[1] * eye[1] + y[2] * eye[2]), -(z[0] * eye[0] + z[1] * eye[1] + z[2] * eye[2]), 1]);
+      const proj = new Float32Array([1 / E, 0, 0, 0, 0, 1 / E, 0, 0, 0, 0, 1 / (near - far), 0, 0, 0, near / (near - far), 1]);
+      return mat4Mul(proj, view);
+    }
     function updateCamera(dt, snap) {
       const at = camMode === 'orbit' && orbit.target ? orbit.target : lastPlayer ? [lastPlayer.p[0], lastPlayer.p[1] + 0.6, lastPlayer.p[2]] : camTarget;
       let desiredE;
@@ -871,29 +942,56 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       camTarget = camTarget.map((x, i) => x + (at[i] - x) * Math.min(1, k * 4));
       camEye = camEye.map((x, i) => x + (desiredE[i] - x) * k);
       if (!depth || depth.width !== canvas.width || depth.height !== canvas.height) {
-        depth?.destroy();
-        depth = device.createTexture({ size: [canvas.width, canvas.height], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT });
+        depth?.destroy(); msaa?.destroy();
+        depth = device.createTexture({ size: [canvas.width, canvas.height], format: 'depth24plus', sampleCount: SAMPLES, usage: GPUTextureUsage.RENDER_ATTACHMENT });
+        msaa = device.createTexture({ size: [canvas.width, canvas.height], format, sampleCount: SAMPLES, usage: GPUTextureUsage.RENDER_ATTACHMENT });
       }
-      frameF.set(viewProj(camEye, camTarget, canvas.width / canvas.height), 0);
+      const vp = viewProj(camEye, camTarget, canvas.width / canvas.height);
+      frameF.set(vp, 0);
       frameF.set([...camEye, 0], 16);
-      frameF.set([0.4, 0.85, 0.3, 0], 20);
+      frameF.set([...LIGHT, 0], 20);
       frameF.set([beamView ? 1 : 0, 0, 0, 0], 24);
+      frameF.set(lightViewProj(camTarget), 28);
+      frameF.set(mat4Inv(vp), 44);
       device.queue.writeBuffer(frameBuf, 0, frameF);
     }
+    // Seconds of simulation since the last drawn frame (particle effects follow the
+    // physics, so a paused or frame-stepped scene freezes them too).
+    let fxDt = 0, fxSteps = 0;
     function drawScene(enc) {
-      if (!skinBind) skinBind = bind(skinPipe, [[0, world.bufs[0]], [1, frameBuf], [5, triBuf], [6, restBuf]]);
+      fxDt = Math.min(0.1, Math.max(0, world.steps - fxSteps) / HZ); fxSteps = world.steps;
+      if (!skinBind) skinBind = bind(skinPipe, [[0, world.bufs[0]], [1, frameBuf], [5, triBuf], [6, restBuf], ...SH]);
+      const flexMode = skinMode === 'flex';
+      if (flexMode) carR.compute(enc, fxDt);
+      // Sun shadow map.
+      const sp = enc.beginRenderPass({ colorAttachments: [], depthStencilAttachment: { view: shadowView, depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' } });
+      sp.setPipeline(colShadow); sp.setBindGroup(0, colShadowBind); sp.setVertexBuffer(0, cubeVbo); sp.draw(36, world.colliderCount - 1);
+      if (world.vehicles.wheelCount) { sp.setPipeline(wheelShadow); sp.setBindGroup(0, wheelShadowBind); sp.setVertexBuffer(0, cylVbo); sp.draw(cyl.length / 6, world.vehicles.wheelCount); }
+      if (flexMode) {
+        carR.drawShadow(sp);
+        if (flexCount) {
+          if (!flexShadowBind) flexShadowBind = bind(flexShadow, [[0, world.bufs[0]], [1, frameBuf], [7, flexBuf], [8, flexIdx]]);
+          sp.setPipeline(flexShadow); sp.setBindGroup(0, flexShadowBind); sp.draw(flexCount);
+        }
+      }
+      sp.end();
       const rp = enc.beginRenderPass({
-        colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.55, 0.62, 0.72, 1], loadOp: 'clear', storeOp: 'store' }],
+        colorAttachments: [{ view: msaa.createView(), resolveTarget: context.getCurrentTexture().createView(), clearValue: [0.55, 0.62, 0.72, 1], loadOp: 'clear', storeOp: 'discard' }],
         depthStencilAttachment: { view: depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
       });
+      rp.setPipeline(skyPipe); rp.setBindGroup(0, skyBind); rp.draw(3);
       rp.setPipeline(groundPipe); rp.setBindGroup(0, groundBind); rp.setVertexBuffer(0, groundVbo); rp.draw(6);
       rp.setPipeline(colPipe); rp.setBindGroup(0, colBind); rp.setVertexBuffer(0, cubeVbo); rp.draw(36, world.colliderCount - 1);
-      if (skinMode === 'flex' && flexCount) {
-        if (!flexBind) flexBind = bind(flexPipe, [[0, world.bufs[0]], [1, frameBuf], [7, flexBuf], [8, flexIdx]]);
-        rp.setPipeline(flexPipe); rp.setBindGroup(0, flexBind); rp.draw(flexCount);
+      if (flexMode) {
+        carR.drawOpaque(rp);
+        if (flexCount) {
+          if (!flexBind) flexBind = bind(flexPipe, [[0, world.bufs[0]], [1, frameBuf], [7, flexBuf], [8, flexIdx], ...SH]);
+          rp.setPipeline(flexPipe); rp.setBindGroup(0, flexBind); rp.draw(flexCount);
+        }
       } else if (triCount) { rp.setPipeline(skinPipe); rp.setBindGroup(0, skinBind); rp.draw(triCount * 3); }
       if (beamView && beamTotal) { rp.setPipeline(beamPipe); rp.setBindGroup(0, beamBind); rp.draw(2, beamTotal); }
       if (world.vehicles.wheelCount) { rp.setPipeline(wheelPipe); rp.setBindGroup(0, wheelBind); rp.setVertexBuffer(0, cylVbo); rp.draw(cyl.length / 6, world.vehicles.wheelCount); }
+      if (flexMode) { carR.drawGlass(rp); carR.drawFx(rp); }
       rp.end();
     }
     function stepPhysics(enc, n) {

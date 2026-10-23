@@ -44,6 +44,40 @@ pub fn soft_procedural_car(deform: f32, strength: f32) -> String {
     })
 }
 
+/// Render mesh of the procedural hatchback (engine_softbody::visual), bound to
+/// its nodes (indices relative to the soft body). Words: [vertices, triangles],
+/// then 8 per vertex (centre, x, y node; part | seam << 8; frame coordinates and
+/// the frame's longest rest edge as f32 bits), 3 per vertex (rest position, f32
+/// bits), 4 per triangle (vertices, material).
+#[wasm_bindgen]
+pub fn soft_procedural_car_visual() -> Vec<u32> {
+    use engine_softbody::procedural::car_truck_layout;
+    use engine_softbody::visual::car_visual;
+    use glam::Vec3;
+    let p = CarParams::default();
+    let (text, layout) = car_truck_layout(&p);
+    let d = load_truck(&text);
+    let nodes: Vec<Vec3> = d.nodes.iter().map(|n| Vec3::from_array(n.position)).collect();
+    let v = car_visual(&p, &layout, &nodes);
+    let mut out = vec![v.vertices.len() as u32, v.tris.len() as u32];
+    for (i, b) in v.bindings.iter().enumerate() {
+        let [c, x, y] = b.nodes;
+        let rest = (nodes[x as usize] - nodes[c as usize])
+            .length()
+            .max((nodes[y as usize] - nodes[c as usize]).length());
+        out.extend_from_slice(&[c, x, y, u32::from(v.part[i]) | u32::from(v.seam[i]) << 8]);
+        out.extend(b.coords.iter().map(|f| f.to_bits()));
+        out.push(rest.to_bits());
+    }
+    for p in &v.vertices {
+        out.extend(p.to_array().iter().map(|f| f.to_bits()));
+    }
+    for (t, m) in v.tris.iter().zip(&v.tri_material) {
+        out.extend_from_slice(&[t[0], t[1], t[2], u32::from(*m)]);
+    }
+    out
+}
+
 /// A braced lattice crate as `.truck` text.
 #[wasm_bindgen]
 pub fn soft_box_truck(

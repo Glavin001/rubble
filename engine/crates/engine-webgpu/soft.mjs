@@ -20,6 +20,9 @@ export const calibratedSettings = (hz) => JSON.parse(wasm.soft_calibrated_settin
 export const loadJbeam = (files, pc = undefined) => JSON.parse(wasm.soft_load_jbeam(JSON.stringify(files), pc));
 /** The procedural test hatchback as `.truck` text (thresholds in N, 0 = default). */
 export const proceduralCar = (deform = 0, strength = 0) => wasm.soft_procedural_car(deform, strength);
+/** Render mesh of the procedural hatchback (engine_softbody::visual): parts,
+ * materials and node bindings; see `soft_procedural_car_visual` for the words. */
+export const proceduralCarVisual = () => wasm.soft_procedural_car_visual();
 /** A braced lattice crate (n³ nodes) as `.truck` text. */
 export const latticeCrate = (n, step, mass, spring, deform, strength) => wasm.soft_box_truck(n, step, mass, spring, deform, strength);
 
