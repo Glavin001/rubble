@@ -146,6 +146,8 @@ pub fn motion_constants() -> String {
         ("IMPULSE_AT_POINT", s::IMPULSE_AT_POINT),
         ("IMPULSE_SET_VELOCITY", s::IMPULSE_SET_VELOCITY),
         ("CCD_FALLBACKS", s::CCD_FALLBACKS),
+        ("CCD_BODY_CAP", s::CCD_BODY_CAP),
+        ("SCRATCH_WORDS", s::SCRATCH_WORDS),
         ("EVENT_RING_BASE", s::EVENT_RING_BASE),
         ("EVENT_RING_CAPACITY", s::EVENT_RING_CAPACITY),
         ("NO_INDEX", s::character::NO_INDEX),

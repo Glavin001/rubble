@@ -121,9 +121,8 @@ look-ahead on for the scene by itself).
   fast movers `BODY_CCD` rather than raising the step rate.
 - 120 Hz halves the distance per step but is no substitute for CCD at
   projectile speeds (the 250 m/s cases tunnel at 120 Hz without CCD).
-- `stress-rubble`'s whole-world CCD substeps are off by default
-  (`STRESS_RUBBLE_CCD_SUBSTEPS=1` turns them on); its impactors are flagged
-  `BODY_CCD` instead.
+- `stress-rubble` keeps its whole-world CCD substeps by default; TOI CCD for its
+  impactors is opt-in (`set_toi_ccd`, see "In the demos").
 
 ## Limits
 
@@ -146,9 +145,25 @@ bodies exist: a reused step would keep last step's TOI contacts.
 | `tests/broadphase_oracle.rs` | Candidate pairs equal a CPU brute force for sweeps of 0.5–10 cells |
 | `tests/kinematic.rs` | Kinematic platforms carry and push; sleeping bodies wake |
 | `tests/queries.rs` | Ray and shape casts match a full scan; bullets pierce five walls with exact energy accounting; impulses are exact and replay bit-identically |
-| `stress-rubble/tests/engine_world.rs` | A 250 m/s CCD impactor stops at a 0.1 m wall with one step per frame |
+| `stress-rubble/tests/engine_world.rs` | With TOI CCD on, a 250 m/s CCD impactor stops at a 0.1 m wall with one step per frame |
+| `tests/static_pairs.rs` | A box lands on a lower-index static pedestal (on main it fell through: the grid query dropped dynamic–static pairs whose static had the lower index) |
 | `engine-viewer/tests/fracture_regression.rs` | A 300 m/s lab ball tunnels through the arch without CCD and knocks the crown out with it |
 | `engine-webgpu/motion-check.mjs` | The same in headless Chrome (`motion.html` and the fracture lab) |
+
+## In the demos
+
+| Page | CCD | Switch |
+|---|---|---|
+| `motion.html` | CCD gallery, character rockets, bullets | per lane, per body |
+| `demo.html` | the smash balls of the built scenes and the snapshot scenes' F projectile carry `BODY_CCD`; `demo.html`'s own schedule runs the CCD passes only in a scene that has one | `?ccd=0` off. The `?check=ring\|gables` regressions keep it off unless `?ccd=1` (their native baselines run without it); the ring check passes with it too |
+| `vehicle.html` | cannonballs (B) | `?ccd=0` off |
+| `fracture/` | Rubble bond modes: the "CCD balls" checkbox (on). Stress-solver modes: whole-world substeps for their balls (below) | checkbox |
+
+stress-rubble keeps whole-world CCD substeps by default: `BODY_CCD` turns on
+look-ahead contact semantics for the whole scene, and the stress coupling's breakage
+was measured against substeps (with `BODY_CCD`, `punch_gpu`'s ram left the wall at
+6.5 m/s instead of 28, reference 35.1). `RubbleEngine::set_toi_ccd(true)` or
+`STRESS_RUBBLE_TOI_CCD=1` opts in.
 
 ## Browser demo
 

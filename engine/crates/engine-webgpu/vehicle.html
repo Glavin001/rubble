@@ -63,7 +63,7 @@
   </div>
   <script type="module">
     import { createWorld, sceneCapacity } from './world-host.mjs';
-    import { L, WHEEL_RIM_MATERIAL, bitsf } from './vehicle.mjs';
+    import { L, M, WHEEL_RIM_MATERIAL, bitsf } from './vehicle.mjs';
 
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
@@ -322,9 +322,13 @@
       for (let i = 0; i < 400; i++) dynBox([(rand() - 0.5) * 120, 0.5 + rand() * 6, (rand() - 0.5) * 120], [0.5, 0.5, 0.5], 30);
     }
     // Cannonballs: parked static spheres, launched by writing their body records.
+    // Continuous collision (BODY_CCD, engine/docs/ccd.md): a 45 m/s ball gets a
+    // time-of-impact contact instead of passing thin parts between steps; ?ccd=0
+    // turns it off. The flag is inert on a parked (static) ball.
+    const cannonCcd = new URLSearchParams(location.search).get('ccd') === '0' ? 0 : M.BODY_CCD;
     const cannon = [];
     for (let i = 0; i < 12; i++) {
-      const body = world.addBody({ p: [-4000 - i * 5, -4000, -4000], flags: 0, invMass: 1 / 400, invI: [2.5 / (400 * 0.36), 2.5 / (400 * 0.36), 2.5 / (400 * 0.36)] });
+      const body = world.addBody({ p: [-4000 - i * 5, -4000, -4000], flags: cannonCcd, invMass: 1 / 400, invI: [2.5 / (400 * 0.36), 2.5 / (400 * 0.36), 2.5 / (400 * 0.36)] });
       world.addCollider({ body, shape: 0, material: MAT_PROP, params: [0.6, 0, 0, 0.6] });
       cannon.push(body);
     }
@@ -608,7 +612,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       const v = dir.map((d) => d * 45);
       const words = new Uint32Array(world.bodyWords.buffer, body * 112, 28).slice();
       const f = new Float32Array(words.buffer);
-      f.set(p, 0); f.set([0, 0, 0, 1], 4); words[11] = 1 | 8; f.set(v, 12); f[15] = 0; f.set([0, 0, 0], 16); words[19] = world.steps;
+      f.set(p, 0); f.set([0, 0, 0, 1], 4); words[11] = 1 | 8 | cannonCcd; f.set(v, 12); f[15] = 0; f.set([0, 0, 0], 16); words[19] = world.steps;
       f.set(p, 20); f.set([0, 0, 0, 1], 24);
       world.backend.writeBody(body, words);
     }

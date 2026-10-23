@@ -93,10 +93,11 @@ through `world-host.mjs` (same `wgsl_export` step as the vehicle demo):
   pushing the targets behind them.
 - Hooks: `__step(n)`, `__check()` (the scene's scripted checks), `__world`.
 
-`node motion-check.mjs [ccd|character|bullets|lab]` runs every scene's checks in
+`node motion-check.mjs [ccd|character|bullets|demo|ring|vehicle|lab]` runs every scene's checks in
 headless Chrome and saves screenshots to `recordings/`; `lab` fires a 300 m/s
 ball at the fracture lab's arch with and without CCD balls (needs the lab's
-wasm). See [../../docs/ccd.md](../../docs/ccd.md) and
+wasm); `demo`, `ring` and `vehicle` run `demo.html` and `vehicle.html` with their
+CCD balls (`?ccd=0` turns them off on both pages). See [../../docs/ccd.md](../../docs/ccd.md) and
 [../../docs/characters.md](../../docs/characters.md).
 
 ## Browser verification

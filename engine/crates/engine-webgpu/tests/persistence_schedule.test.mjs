@@ -13,10 +13,14 @@ const source = html.slice(start, end);
 // The encoder's dispatch-count constants (8ev), read from the shipped page, with the
 // fixed-palette controls on (colors=full, rounds=full): these tests check the full
 // schedule; adaptive counts are exercised by the browser regressions.
+// The wasm constants demo.html imports (vehicle.mjs M) that the sliced code reads.
+const MOTION = { SCRATCH_WORDS: 18540, BODY_CCD: 64, CCD_BODY_CAP: 1024 };
 const dispatchSource = html.slice(html.indexOf('const COLOR_ROUND_LIMIT'), html.indexOf('const colorsFull'));
 const DISPATCH = {
   ...runInNewContext(`${dispatchSource}({COLOR_ROUND_LIMIT, COLOR_ROUND_HEADROOM, COLOR_HEADROOM, SLEEP_NEVER_S})`),
   colorsFull: true, roundsFull: true,
+  // CCD (engine/docs/ccd.md): off in these schedules; the motion checks run it.
+  sceneCcd: false, ccdEmit: 'ccd_emit', M: MOTION,
 };
 
 for (const [query, expected] of [
@@ -68,7 +72,7 @@ for (const [query, expectedMode] of [
       persistentContacts, compactContacts, sizes:bufferSizes(),
       entries:['narrowphase','contact_hash_insert','persist_contacts','persist_manifolds_compact',
         'pack_solver_contacts','solve_primal_color_compact','solve_dual_compact'].map(shaderEntry)
-    })`, {URLSearchParams,location:{search:query},cap,csrBase:32768,PASS_ALIGN:256});
+    })`, {URLSearchParams,location:{search:query},cap,csrBase:32768,PASS_ALIGN:256,M:MOTION});
     assert.equal(output.persistentContacts,expectedMode === 'persistent');
     assert.equal(output.compactContacts,expectedMode !== 'canonical');
     assert.equal(output.sizes[4],cap.maxContacts*2*(expectedMode === 'persistent' ? 32 : 128),

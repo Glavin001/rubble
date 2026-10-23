@@ -134,6 +134,63 @@ const CHECKS = {
     expect(pushed >= 1, `bullets pushed the targets (${pushed})`);
     console.log(`  screenshot ${await shot('motion_bullets')}`);
   },
+  // demo.html's own schedule with CCD smash balls (default) and without (?ccd=0):
+  // both run the wall smash to step 180 with no GPU error or overflow.
+  async demo() {
+    const runs = {};
+    for (const ccd of ['1', '0']) {
+      await send('Page.navigate', { url: `${base}/demo.html?scene=wall&stopAt=180&ccd=${ccd}` });
+      let status = '', err = '';
+      for (let i = 0; i < 1800; i++) {
+        const st = JSON.parse(await evaluate(`JSON.stringify({ s: document.getElementById('status')?.textContent || '', e: document.getElementById('err')?.textContent || '' })`) || '{}');
+        status = st.s || ''; err = st.e || '';
+        if (err || status.includes('stopped at step')) break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      const pos = err ? null : await evaluate('window.__bodyPositions().then((p) => JSON.stringify(p))', true).then(JSON.parse);
+      const n = pos ? pos.positions.length / 3 : 0;
+      const ball = pos ? pos.positions.slice(3 * (n - 1), 3 * n) : null;
+      runs[ccd] = { status, err, ball };
+      console.log(`demo wall, ccd=${ccd}: ${err ? `ERROR ${err.slice(0, 300)}` : status}`);
+      if (ball) console.log(`  ball at (${ball.map((x) => x.toFixed(2)).join(', ')})`);
+      expect(!err && status.includes('stopped at step 180') && status.includes('ov 0x0'), `demo wall ccd=${ccd}: runs to step 180 without error or overflow`);
+      if (ccd === '1') console.log(`  screenshot ${await shot('demo_wall_ccd')}`);
+    }
+    // The 30 m/s ball smashes through the wall either way (it is too slow to tunnel):
+    // CCD changes nothing it should not.
+    if (runs['1'].ball && runs['0'].ball) expect(Math.abs(runs['1'].ball[2] - runs['0'].ball[2]) < 2, `demo wall: the same smash with and without CCD (ball z ${runs['1'].ball[2].toFixed(2)} vs ${runs['0'].ball[2].toFixed(2)})`);
+  },
+  // demo.html's ring regression (tests/ring_hold.rs in the browser): CCD off (the
+  // check's default, its native baseline) and on (?ccd=1, the smash balls CCD).
+  async ring() {
+    for (const q of ['', '&ccd=1']) {
+      await send('Page.navigate', { url: `${base}/demo.html?scene=ring110k&check=ring${q}` });
+      let status = '', err = '';
+      for (let i = 0; i < 6000; i++) {
+        const st = JSON.parse(await evaluate(`JSON.stringify({ s: document.getElementById('status')?.textContent || '', e: document.getElementById('err')?.textContent || '' })`) || '{}');
+        status = st.s || ''; err = st.e || '';
+        if (err || status.startsWith('PASS')) break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      console.log(`ring regression${q || ' (ccd off)'}: ${err ? `ERROR ${err.slice(0, 400)}` : status}`);
+      expect(!err && status.startsWith('PASS'), `ring regression${q} passes`);
+    }
+  },
+  // vehicle.html (world-host.mjs): CCD cannonballs fired into the destruction scene.
+  async vehicle() {
+    await send('Page.navigate', { url: `${base}/vehicle.html?scene=destruction` });
+    for (let i = 0; i < 1800 && !(await evaluate('!!window.__step || !!document.getElementById("err")?.textContent')); i++)
+      await new Promise((r) => setTimeout(r, 100));
+    let r = await evaluate('window.__step(60).then((r) => JSON.stringify(r.counters))', true).then(JSON.parse);
+    const key = async (code) => { for (const type of ['keyDown', 'keyUp']) await send('Input.dispatchKeyEvent', { type, code, key: 'b', windowsVirtualKeyCode: 66 }); };
+    for (let k = 0; k < 4; k++) { await key('KeyB'); r = await evaluate('window.__step(30).then((r) => JSON.stringify(r.counters))', true).then(JSON.parse); }
+    const err = await evaluate('document.getElementById("err")?.textContent || ""');
+    const ccd = await evaluate('JSON.stringify(window.__world?.motion || null)');
+    console.log(`vehicle destruction, 4 cannonballs: counters ${JSON.stringify(r)}, motion ${ccd}${err ? `, ERROR ${err.slice(0, 300)}` : ''}`);
+    expect(!err && r.overflow === 0, 'vehicle: CCD cannonballs fired with no GPU error or overflow');
+    expect(ccd && JSON.parse(ccd).ccd === true, 'vehicle: the scene schedules the CCD passes');
+    console.log(`  screenshot ${await shot('vehicle_ccd_cannon')}`);
+  },
   // The fracture lab's own step plan (engine-fracture plan.rs) with CCD balls:
   // needs the lab's wasm (wasm-pack build engine/crates/engine-fracture-wasm …).
   async lab() {

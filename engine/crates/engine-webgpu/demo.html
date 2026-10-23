@@ -75,6 +75,7 @@
     import { measurePhysicsBatches, assertBenchmarkWorkload } from "./physics-benchmark.mjs?v=2";
     import { installJointControls } from "./joint-interaction.mjs";
     import { loadShaderModules, pipelineBuilder } from "./shader-loader.mjs";
+    import { M } from "./vehicle.mjs";
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
     const warnEl = document.getElementById('warn');
@@ -208,6 +209,11 @@
     const spatialOrder = qs.get('order') === 'morton' && !(qs.get('scene') || '').match(/^(joints|ragdolls|hingechains|motorfield)/);
     const physicalAdjacency = qs.get('adjacency') !== 'append';
     const regressionKind = qs.get('check');
+    // Continuous collision (engine/docs/ccd.md) for the smash balls and the F
+    // projectile: time-of-impact contacts and the fast broadphase list. On by
+    // default; ?ccd=0 turns it off. The ring/gables checks compare against native
+    // runs without CCD, so they keep it off unless ?ccd=1.
+    const ccdBalls = qs.has('ccd') ? qs.get('ccd') !== '0' : !regressionKind;
     const regressionEnabled = ['ring', 'gables'].includes(regressionKind);
     const regressionSteps = regressionKind === 'gables' ? 240 : 480;
     if (regressionEnabled || benchmarkEnabled) {
@@ -536,7 +542,9 @@
       s[18] = b(cap.maxHull, 16);
       s[19] = (65536 + 4 + 4 * 1024) * 4; // joint pair hash, then the event ring
       s[20] = b(cap.maxBodies, 4);
-      s[21] = 96 * 4; // scratch: host-reset words 0..63, uniform-grid large list 64..79
+      // Scratch: host-reset words 0..63, uniform-grid large list 64..79, then the
+      // GPU-owned lists (large statics, CCD slots, fast list, impulse records).
+      s[21] = M.SCRATCH_WORDS * 4;
       s[22] = 96 * PASS_ALIGN;
       s[23] = b(Math.max(cap.maxColors, 73) * 3, 4);
       s[24] = b(cap.maxColliders, 80);
@@ -547,6 +555,8 @@
       return s;
     }
 
+    // ccd_emit writes the TOI contact into the same contact storage as the narrowphase.
+    const ccdEmit = reuseCopy ? 'ccd_emit_copy_persistent' : 'ccd_emit';
     const K = [
       'build_aabbs', 'broadphase_clear', 'broadphase_insert', 'broadphase_query',
       'update_refs', 'narrowphase', 'contact_hash_clear', 'contact_hash_insert', 'persist_contacts', 'persist_manifolds',
@@ -568,6 +578,7 @@
       ...(compactContacts ? ['clear_solver_contacts', 'pack_solver_contacts', 'persist_manifolds_compact', 'solve_primal_color_compact', 'solve_dual_compact'] : []),
       'solve_dual', 'extract_velocity_sleep', 'write_sleep_args', 'sleep_island_gate', 'sleep_island_commit',
       ...(jointCount > 0 ? ['joint_hash_clear', 'joint_hash_insert', 'warmstart_joints', 'csr_degree_joints', 'csr_scatter_joints'] : []),
+      ...(ccdBalls ? ['ccd_register', 'broadphase_fast', 'ccd_toi', 'ccd_pick', 'ccd_mark', ccdEmit] : []),
     ];
 
     function bindingsOf(wgsl) {
@@ -958,7 +969,7 @@ struct VsOut {
     const addBall = (pos, radius, density, vel, ang) => {
       const { mass, invInertia } = sphereMassProperties(radius, density);
       const id = bodies.length;
-      bodies.push({ p: pos, invMass: 1 / mass, invI: [invInertia, invInertia, invInertia], flags: 1 | 8, v: vel, w: ang });
+      bodies.push({ p: pos, invMass: 1 / mass, invI: [invInertia, invInertia, invInertia], flags: 1 | 8 | (ccdBalls ? M.BODY_CCD : 0), v: vel, w: ang });
       colliders.push({ body: id, shape: 0, density, params: [radius, 0, 0, radius] });
     };
     statusEl.textContent = `building ${scene}…`;
@@ -1074,10 +1085,14 @@ struct VsOut {
     });
     device.queue.writeBuffer(bufs[0], 0, bodyBytes);
     device.queue.writeBuffer(bufs[2], 0, colBytes);
+    // The CCD passes run only in a scene with a CCD ball: the snapshot scenes' F
+    // projectile, or the built scenes' smash balls.
+    const sceneCcd = ccdBalls && (snap ? snap.meta.projectile !== undefined : bodies.some((b) => b.flags & M.BODY_CCD));
     if (snap) {
       jointControls = installJointControls({
         device, bodyBuffer: bufs[0], jointBuffer: bufs[5], snap, maxBodies: cap.maxBodies, canvas,
         camera: { eye: cameraEye, target: () => target, fovY: Math.PI / 5 },
+        projectileFlags: 1 | 8 | (ccdBalls ? M.BODY_CCD : 0),
       });
     }
 
@@ -1085,6 +1100,7 @@ struct VsOut {
       narrowphase: 'narrowphase_persistent', contact_hash_insert: 'contact_hash_insert_persistent',
       contact_hash_insert_manifolds: 'contact_hash_insert_manifolds_persistent',
       persist_contacts: 'persist_contacts_persistent', persist_manifolds: 'persist_manifolds_persistent',
+      ccd_emit: 'ccd_emit_persistent',
       persist_manifolds_compact: 'persist_manifolds_persistent', pack_solver_contacts: 'pack_solver_pairs_persistent',
       solve_primal_sparse_compact: 'solve_primal_sparse_persistent',
       solve_primal_color_compact: 'solve_primal_color_persistent', solve_dual_compact: 'solve_dual_persistent',
@@ -1227,6 +1243,8 @@ struct VsOut {
       s[28] = carryRest ? 1 : 0;
       s[24] = csrBase;
       s[29] = cap.maxBodies + cap.maxColliders; // oversized-static list base
+      // Bit 2: CCD bodies; bit 4: broadphase_fast scheduled (rigid_plan's bits).
+      s[30] = sceneCcd ? (4 | 16) : 0;
       s[4] = Math.min(cap.maxColors, 32);
       return s;
     }
@@ -1297,15 +1315,26 @@ struct VsOut {
         disp(pass, 'joint_hash_insert', jointCount);
       }
       disp(pass, 'broadphase_clear', gridClearWords());
+      // CCD bodies register after the clear (it resets their count).
+      if (sceneCcd) disp(pass, 'ccd_register', nBodies);
       nextPhase();
       disp(pass, 'broadphase_insert', nCols);
       disp(pass, 'broadphase_query', nCols);
+      // Sweeps longer than a cell query along their path (64 workgroups).
+      if (sceneCcd) disp(pass, 'broadphase_fast', 64 * 64);
       disp(pass, 'write_work_args', 64);
       if (carryRest) {
         // Previous manifolds (slot 72) are intact until narrowphase; recount
         // candidates (slot 64) once the carried resting pairs join them.
         dispWork(pass, 'carry_rest_pairs', 72);
         disp(pass, 'write_work_args', 64);
+      }
+      if (sceneCcd) {
+        // Each CCD body's nearest time of impact and its winning pair; the
+        // narrowphase leaves that pair to ccd_emit.
+        dispWork(pass, 'ccd_toi', 64);
+        dispWork(pass, 'ccd_pick', 64);
+        disp(pass, 'ccd_mark', M.CCD_BODY_CAP);
       }
       nextPhase();
       const reuse = (params.flags & 1) !== 0;
@@ -1324,6 +1353,7 @@ struct VsOut {
         dispWork(pass, 'narrowphase_defer_copy_persistent', 64);
         dispWork(pass, 'narrowphase_fresh_copy_persistent', 64);
       } else dispWork(pass, reuseCopy ? 'narrowphase_copy_persistent' : 'narrowphase', 64);
+      if (sceneCcd) dispWork(pass, ccdEmit, 64);
       disp(pass, 'write_work_args', 64);
       nextPhase();
       if (!reuse) {
