@@ -24,6 +24,9 @@ const MERGE = 0.035;      // m: tube ends this close share a node
 const MIN_TUBE_R = 0.012; // thinner tubes (gauge needles, pedals) are not structure
 const BRACE_K = 5;        // brace each node to this many nearest unbraced neighbours
 const BRACE_MAX = 1.1;    // m
+const BRACE_SPREAD = 25 * Math.PI / 180; // braces differ from a node's other beams by this
+const SEG_MAX = 0.42;     // m: longer tube spans get nodes along them (to 4 per tube)
+const CHAIN_MAX = 4;      // nodes per tube (the renderer skins a tube along its chain)
 export const GROUPS = ['front_bumper', 'rear_bumper', 'nose'];
 
 const v3 = (a) => new T.Vector3(...a);
@@ -97,6 +100,22 @@ export function buildFrameGraph(live, model, masses, mounts) {
     inner.sort((x, y) => x[0] - y[0]);
     t.chain = [t.na, ...inner.map(([, k]) => k), t.nb];
   }
+  // Subdivide long spans: a node sphere every SEG_MAX or so (contact along the
+  // tube), and somewhere for it to bend. Longest span first, to CHAIN_MAX nodes.
+  for (const t of tubes) {
+    for (;;) {
+      if (t.chain.length >= CHAIN_MAX) break;
+      let worst = -1, wl = SEG_MAX;
+      for (let k = 0; k + 1 < t.chain.length; k++) {
+        const l = v3(nodes[t.chain[k]].p).distanceTo(v3(nodes[t.chain[k + 1]].p));
+        if (l > wl) { wl = l; worst = k; }
+      }
+      if (worst < 0) break;
+      const mid = v3(nodes[t.chain[worst]].p).add(v3(nodes[t.chain[worst + 1]].p)).multiplyScalar(0.5).toArray();
+      nodes.push({ p: mid, group: t.group, cls: t.cls, mass: 0 });
+      t.chain.splice(worst + 1, 0, nodes.length - 1);
+    }
+  }
 
   // ---- beams ----
   const beams = [];
@@ -111,14 +130,31 @@ export function buildFrameGraph(live, model, masses, mounts) {
   for (const t of tubes) {
     for (let k = 0; k + 1 < t.chain.length; k++) addBeam(t.chain[k], t.chain[k + 1], 'tube', { cls: t.cls, group: t.group === 'frame' ? null : t.group, radius: t.r });
   }
-  // Braces within each group (frame braces only to frame nodes).
+  // Braces within each group (frame braces only to frame nodes). Beams only
+  // resist stretch, so a node needs beams in several directions: a node in the
+  // middle of a straight tube has none across it. Each node takes its nearest
+  // neighbours whose direction differs by over BRACE_SPREAD from every beam it
+  // already has, until it has BRACE_K braces.
+  const dirsAt = nodes.map(() => []);
+  const unit = (a, b) => v3(nodes[b].p).sub(v3(nodes[a].p)).normalize();
+  for (const b of beams) { dirsAt[b.a].push(unit(b.a, b.b)); dirsAt[b.b].push(unit(b.b, b.a)); }
+  const spreadCos = Math.cos(BRACE_SPREAD);
   for (let i = 0; i < nodes.length; i++) {
     const near = nodes
       .map((n, k) => [v3(n.p).distanceTo(v3(nodes[i].p)), k])
       .filter(([d, k]) => k !== i && nodes[k].group === nodes[i].group && d < BRACE_MAX)
-      .sort((x, y) => x[0] - y[0])
-      .slice(0, BRACE_K);
-    for (const [, k] of near) addBeam(i, k, 'brace', { cls: nodes[i].cls === 'crumple' || nodes[k].cls === 'crumple' ? 'crumple' : 'cell', group: nodes[i].group === 'frame' ? null : nodes[i].group });
+      .sort((x, y) => x[0] - y[0]);
+    let added = 0;
+    for (const [, k] of near) {
+      if (added >= BRACE_K) break;
+      const d = unit(i, k);
+      if (dirsAt[i].some((e) => Math.abs(e.dot(d)) > spreadCos)) continue;
+      const id = addBeam(i, k, 'brace', { cls: nodes[i].cls === 'crumple' || nodes[k].cls === 'crumple' ? 'crumple' : 'cell', group: nodes[i].group === 'frame' ? null : nodes[i].group });
+      if (id === null) continue;
+      dirsAt[i].push(d);
+      dirsAt[k].push(d.clone().negate());
+      added++;
+    }
   }
   // Mount beams: each detachable node to its 3 nearest frame nodes, in the group's break group.
   const groupNodes = Object.fromEntries(GROUPS.map((g) => [g, nodes.map((n, k) => (n.group === g ? k : -1)).filter((k) => k >= 0)]));
@@ -162,7 +198,11 @@ export function buildFrameGraph(live, model, masses, mounts) {
     if (!frameish(i)) return;
     const t = tubeOfInstance.get(i);
     if (t) {
-      bindings[i] = { mode: 'tube', nodes: [t.chain[0], t.chain[t.chain.length - 1]] };
+      // The whole chain (to CHAIN_MAX nodes) and each node's fraction of the length.
+      const lens = t.chain.slice(1).map((k, j) => v3(nodes[t.chain[j]].p).distanceTo(v3(nodes[k].p)));
+      const total = lens.reduce((a, b) => a + b, 0);
+      let acc = 0;
+      bindings[i] = { mode: 'tube', nodes: t.chain.slice(0, CHAIN_MAX), at: [0, ...lens.map((l) => (acc += l) / total)].map((x) => Math.round(x * 1e5) / 1e5) };
       // Mass along the chain, by segment length.
       const segs = t.chain.slice(1).map((k, j) => [t.chain[j], k, v3(nodes[t.chain[j]].p).distanceTo(v3(nodes[k].p))]);
       const L = segs.reduce((s, x) => s + x[2], 0) || 1;

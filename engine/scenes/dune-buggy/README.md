@@ -143,10 +143,28 @@ part is drawn in one of these places:
 The suspension is posed from each buggy's wheel records: travel from the suspension
 length, the steer angle, and the spin.
 
-## Hybrid classes
+## Hybrid build
 
-`parts.mjs` also tags each recipe part with how it would behave on a soft-body (node–beam)
-frame:
+`frame-graph.mjs` turns the frame classes into a node–beam structure:
+
+* **Tubes:** tube junction nodes (with T-junction splits); long spans subdivided to 4
+  nodes a tube.
+* **Braces:** direction-aware, so no node is free to move across its tube.
+* **Detachable pieces:** the front bumper, rear bumper and nose get nodes of their own.
+  They are tied to the frame by mount beams in one break group each.
+* **Mass:** frame-class mass on the nodes.
+* **Render bindings:** each frame tube is skinned along its node chain; any other frame
+  part rides three nodes.
+
+`bake-physics.mjs` writes it into the asset's `hybrid` section (nodes, beams, the core's
+attachment nodes, and the nodes each bolted part attaches to). `bake-mesh.mjs` writes the
+render bindings (`instances[].bind`, `frameNodes`).
+
+`engine_softbody::buggy::dune_buggy_soft()` assembles the soft vehicle. The beam
+calibration and the table of what bends and what snaps are in
+[`engine/docs/softbody.md`](../../docs/softbody.md).
+
+`parts.mjs` classes:
 
 | Class | Parts |
 |---|---|
@@ -156,5 +174,3 @@ frame:
 | `rigid` | bolted-on parts that snap off |
 | `wheel` | wheel and hub parts |
 | `rig` | the suspension |
-
-The rigid mode (the preset above) uses only the Rubble part grouping.

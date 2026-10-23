@@ -35,12 +35,15 @@ pub struct BuggyBeams {
 impl Default for BuggyBeams {
     fn default() -> Self {
         Self {
-            spring: 3.0e6,
-            damp: 2500.0,
-            cell_deform: 40_000.0,
+            // The frame's nodes are light (median 1.3 kg): stiffer beams ring at
+            // 240 Hz and spike loads (3e6 N/m tore the rear bumper off in a
+            // frontal crash, hybrid_buggy_crash_probe).
+            spring: 1.0e6,
+            damp: 2000.0,
+            cell_deform: 30_000.0,
             cell_strength: 400_000.0,
-            crumple_deform: 12_000.0,
-            crumple_strength: 150_000.0,
+            crumple_deform: 6_000.0,
+            crumple_strength: 100_000.0,
             mount_scale: 1.0,
         }
     }

@@ -19,6 +19,7 @@ import { LiveGeometry } from './src/live-geometry.mjs';
 import { createRigDefinition, cornerIds } from './src/vehicle-rig.mjs';
 import { VisualRig } from './src/visual-rig.mjs';
 import { classify, RUBBLE_PARTS, CORNERS, CLASSES } from './parts.mjs';
+import { buildFrameGraph } from './frame-graph.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const OUT = resolve(here, '../../crates/engine-webgpu/generated/dune-buggy');
@@ -54,6 +55,10 @@ for (const part of model.parts) {
   templates.push({ key, vertexCount: pos.count, indexCount: indices.length, vertexOffset: push(vertices), indexOffset: push(indices) });
 }
 
+// ---- hybrid build: the frame graph's render bindings (bake-physics builds the
+// same graph from the same live build; masses do not change the bindings) ----
+const graph = buildFrameGraph(live, model, model.parts.map(() => 0), {});
+
 // ---- instances ----
 const palette = Object.keys(materials);
 const instances = model.parts.map((p) => {
@@ -72,6 +77,8 @@ const instances = model.parts.map((p) => {
     role: m?.role ?? null,
     ...(m?.endpoints ? { endpoint: m.endpoints[0].map(r6) } : {}),
     ...(m?.radius ? { radius: r6(m.radius) } : {}),
+    // Hybrid: a frame tube spans two nodes; other frame parts ride three.
+    ...(graph.bindings[model.parts.indexOf(p)] ? { bind: graph.bindings[model.parts.indexOf(p)] } : {}),
   };
 });
 
@@ -127,6 +134,8 @@ writeFileSync(resolve(OUT, 'buggy-mesh.json'), JSON.stringify({
   templates,
   instances,
   rig: rigDef,
+  // Hybrid frame nodes at rest (Rubble design frame), in engine_softbody::buggy order.
+  frameNodes: graph.nodes.map((n) => n.position),
 }));
 writeFileSync(resolve(OUT, 'rig-fixtures.json'), JSON.stringify({ poses }));
 const tris = instances.reduce((s, i) => s + templates[i.template].indexCount / 3, 0);

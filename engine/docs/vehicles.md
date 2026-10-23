@@ -282,6 +282,14 @@ lands its blow on whatever is behind it (`tests/vehicle_mounts.rs` uses impacts 
 (`buggy-render.mjs`, `buggy-rig.mjs`). `?strength=0.5` (the *Mounts* menu) scales every
 limit.
 
+`&build=hybrid` (the *Frame* menu) swaps in the hybrid buggy (`docs/softbody.md`, "The
+hybrid dune buggy"):
+
+* its tube frame is node–beam and bends;
+* its bumpers and nose tear off as pieces;
+* its seats, tank, lamps and mirrors are rigid bodies on breakable joints;
+* its engine, gearbox and steering column keep their mounts on the rigid core.
+
 At the rated strength (native wgpu, 10 iterations, `dune_buggy_crash_probe`):
 
 * Two buggies meeting head-on tear off each other's front bumper, nose and headlamps.

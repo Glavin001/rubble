@@ -65,6 +65,7 @@
     import { createWorld, sceneCapacity } from './world-host.mjs';
     import { L, WHEEL_RIM_MATERIAL, bitsf } from './vehicle.mjs';
     import { createBuggyRenderer } from './buggy-render.mjs';
+    import { duneBuggySoft, calibratedSettings } from './soft.mjs';
 
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
@@ -118,6 +119,15 @@
       for (const [k, t] of [[1, 'rated'], [0.5, '½ strength'], [0.25, '¼ strength'], [0.1, 'fragile']]) sel.add(new Option(t, k, false, Number(qs.get('strength') || 1) === k));
       sel.onchange = () => go('strength', sel.value);
       presetSel.parentElement.append(label, sel);
+      if (scene === 'buggies') {
+        const bl = document.createElement('label');
+        bl.className = 'muted'; bl.htmlFor = 'buildSel'; bl.textContent = 'Frame';
+        const bs = document.createElement('select');
+        bs.id = 'buildSel';
+        for (const [k, t] of [['rigid', 'rigid parts'], ['hybrid', 'soft frame + rigid parts']]) bs.add(new Option(t, k, false, (qs.get('build') || 'rigid') === k));
+        bs.onchange = () => go('build', bs.value);
+        presetSel.parentElement.append(bl, bs);
+      }
     }
 
     if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
@@ -149,10 +159,21 @@
     const est = scene === 'traffic' ? 4000 + nTraffic * 40 : 6000;
     const cap = sceneCapacity(est, est * 2);
     const vehicleCap = { maxVehicles: 64, maxWheels: 1024, maxCurvePoints: 8192, maxDiffs: 256, maxAntiRolls: 256, maxParts: 512, maxRays: 64 };
-    const world = await createWorld(device, { cap, vehicleCap, status: (s) => { statusEl.textContent = s; } });
+    // ?build=hybrid (buggies scene): node-beam frames with bolted parts on joints
+    // (engine_softbody::buggy), stepped as the soft-body demo: 240 Hz, 4 steps a frame.
+    const hybrid = scene === 'buggies' && qs.get('build') === 'hybrid';
+    const SOFT_HZ = 240;
+    const STEPS_PER_FRAME = hybrid ? Math.round(SOFT_HZ / 60) : 1;
+    if (hybrid) cap.maxJoints = 1024;
+    const world = await createWorld(device, { cap, vehicleCap, ...(hybrid ? { softCap: {} } : {}), status: (s) => { statusEl.textContent = s; } });
     // The bridge needs 20 iterations to converge its bending within a fast crossing
     // (tests/vehicle.rs BRIDGE_ITERATIONS).
     world.params.iterations = scene === 'bridge' ? 20 : 8;
+    if (hybrid) {
+      Object.assign(world.params, { dt: 1 / SOFT_HZ, iterations: 10, gravityY: -9.81, betaLin: 1e7 });
+      world.setSoftSettings(calibratedSettings(SOFT_HZ));
+      world.setMaterial(9, 0.8); // node spheres
+    }
     const sleepQ = qs.get('sleep');
     if (sleepQ === 'off') world.params.sleepTime = 1e6;
     const MAT_GROUND = 0, MAT_PROP = 1, MAT_ICE = 2;
@@ -192,8 +213,16 @@
       d.wheels.forEach((w) => scaleMount(w.mount));
       return d;
     };
-    const vehicles = []; // {h, preset, ai}
+    const vehicles = []; // {h, preset, ai, soft?}
     const addVehicle = (name, p, yaw = 0, ai = null) => {
+      if (hybrid && name === 'dune_buggy') {
+        // The soft frame stands on its core's wheels from the ground up.
+        const desc = duneBuggySoft(strength);
+        const s = world.addSoftVehicle(desc, [p[0], 0.1, p[2]], qAxis([0, 1, 0], yaw));
+        const h = world.soft.entries[s].core.vehicle;
+        vehicles.push({ h, name, ai, soft: s, softDesc: desc });
+        return h;
+      }
       const h = world.vehicles.addVehicle(world.backend, withStrength(byName[name]), p, qAxis([0, 1, 0], yaw));
       vehicles.push({ h, name, ai });
       return h;
@@ -562,12 +591,12 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     const buggyMesh = vehicles.some((v) => v.name === 'dune_buggy')
       ? await createBuggyRenderer({ device, format, world, frameBuf, L, shadeWgsl: LIGHT_WGSL })
       : null;
-    for (const v of vehicles) if (v.name === 'dune_buggy') buggyMesh.add(v.h);
+    for (const v of vehicles) if (v.name === 'dune_buggy') { if (v.soft !== undefined) buggyMesh.addHybrid(v.soft, v.softDesc); else buggyMesh.add(v.h); }
     const hideWords = new Uint32Array((HIDE_VEHICLES + 64 + 31) >> 5);
     if (buggyMesh && qs.get('colliders') !== '1') {
       const setBit = (i) => { hideWords[i >> 5] |= 1 << (i & 31); };
       for (const c of buggyMesh.covered()) {
-        for (let b = 0; b < c.bodyCount; b++) setBit(c.firstBody + b);
+        for (const r of c.bodies) for (let b = 0; b < r.bodyCount; b++) setBit(r.firstBody + b);
         setBit(HIDE_VEHICLES + c.vehicle);
       }
     }
@@ -819,11 +848,33 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     // Mount breaks (EVENT_MOUNT_BREAK ring): parts and wheels torn off under load.
     const breakable = vehicles.some((v) => world.vehicles.entries[v.h].desc.parts.some((p, i) => i > 0 && (p.mount?.break_force > 0 || p.mount?.break_torque > 0)));
     let mounts = { last: null };
+    // Hybrid buggies: bolted parts whose joints all broke, and detached frame pieces
+    // (break groups), from the joint and beam break events.
+    const hybridParts = vehicles.filter((v) => v.soft !== undefined).flatMap((v) => world.soft.entries[v.soft].rigidParts.map((r) => ({ ...r, broken: 0 })));
+    const jointOwner = new Map(hybridParts.flatMap((r) => Array.from({ length: r.joints[1] - r.joints[0] }, (_, k) => [r.joints[0] + k, r])));
+    const brokenGroups = new Set();
+    const softGroupNames = ['', 'front_bumper', 'rear_bumper', 'nose'];
     let mountPollStep = -1, mountPolling = false;
     function pollMounts() {
       if (!breakable || mountPolling || world.steps - mountPollStep < 15) return;
       mountPollStep = world.steps;
       mountPolling = true;
+      if (hybrid) {
+        world.pollJointBreaks().then((list) => {
+          for (const j of list) {
+            const r = jointOwner.get(j.joint);
+            if (r && ++r.broken === r.joints[1] - r.joints[0]) mounts.last = `${r.name} at ${(j.force / 1000).toFixed(0)} kN`;
+          }
+          return world.pollBeamBreaks();
+        }).then((list) => {
+          for (const b of list || []) {
+            const e = world.soft.entries[b.softBody];
+            const v = vehicles.find((x) => x.soft === b.softBody);
+            const g = v?.softDesc.beams[b.beam - e.firstBeam]?.break_group;
+            if (g && !brokenGroups.has(`${b.softBody}:${g}`)) { brokenGroups.add(`${b.softBody}:${g}`); mounts.last = `${softGroupNames[g]} torn off`; }
+          }
+        }).catch(fail);
+      }
       world.pollMountBreaks().then((list) => {
         mountPolling = false;
         for (const m of list) {
@@ -837,6 +888,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     const mountText = () => {
       if (!breakable) return '';
       const n = buggyMesh ? buggyMesh.broken() : { parts: 0, wheels: 0 };
+      n.parts += hybridParts.filter((r) => r.broken === r.joints[1] - r.joints[0]).length + brokenGroups.size;
       return ` · broken off: ${n.parts} parts, ${n.wheels} wheels${mounts.last ? ` (last ${mounts.last})` : ''}`;
     };
     const boltText = () => bridgeBolts ? ` · bolts broken ${bolts.broken}/${bridgeBolts}${bolts.broken ? ` (last at ${(bolts.lastForce / 1000).toFixed(0)} kN)` : ''}` : '';
@@ -933,7 +985,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       updateCamera(dt, false);
       const enc = device.createCommandEncoder();
       const frozen = stopAt > 0 && world.steps >= stopAt;
-      if (!frozen) world.encodeStep(enc);
+      if (!frozen) for (let k = 0; k < STEPS_PER_FRAME; k++) world.encodeStep(enc);
       drawScene(enc);
       const rb = rbFree.pop();
       encodeReadback(enc, rb);
@@ -1014,8 +1066,10 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
             const e = seg.cruise - lastState.forwardSpeed;
             world.vehicles.setInput(world.backend, player, { ...(seg.input || {}), forward: Math.max(0, Math.min(1, e * 0.4)), brake: e < -1 ? Math.min(1, -e * 0.2) : 0 });
           }
+          // Frames the render loop queued before the take may still hold the readbacks.
+          while (rbFree.length === 0) await new Promise((r) => setTimeout(r, 5));
           const enc = device.createCommandEncoder();
-          world.encodeStep(enc);
+          for (let k = 0; k < STEPS_PER_FRAME; k++) world.encodeStep(enc);
           const rb = rbFree.pop();
           encodeReadback(enc, rb);
           const buggyRb = buggyMesh?.encodeReadback(enc);
@@ -1072,7 +1126,10 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     window.__vehicleState = () => lastState;
     window.__cannon = (p, v) => fireCannonAt(p, v);
     // Parts / wheels broken off under load over every buggy, and the latest break.
-    window.__mounts = () => ({ ...(buggyMesh ? buggyMesh.broken() : { parts: 0, wheels: 0 }), last: mounts.last });
+    window.__mounts = () => {
+      const n = buggyMesh ? buggyMesh.broken() : { parts: 0, wheels: 0 };
+      return { ...n, loose: hybridParts.filter((r) => r.broken === r.joints[1] - r.joints[0]).map((r) => r.name), groups: [...brokenGroups], last: mounts.last };
+    };
     window.__setVehicleInput = (h, input) => world.vehicles.setInput(world.backend, h, input);
     window.__world = world;
     renderParts();

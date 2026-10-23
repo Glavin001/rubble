@@ -12,6 +12,11 @@
 // chassis frame from each buggy's wheel records (a small pipelined readback): the
 // chassis and loose bodies themselves are read by the vertex shader from the
 // current GPU state, so nothing lags the physics but the suspension's own pose.
+//
+// Hybrid buggies (engine_softbody::buggy, `addHybrid`): the vehicle is the soft
+// body's rigid core (wheels, rig, engine, gearbox, steering column); a frame
+// tube spans its two nodes as they are now; other frame parts ride the frame of
+// three nodes they are bound to; bolted parts follow their own bodies.
 
 import { BuggyRig, CORNER_IDS, mul } from './buggy-rig.mjs';
 
@@ -20,7 +25,10 @@ const NONE = 0xffffffff;
 const F_ABS = 1;    // the dynamic slot is the whole local matrix (beams, spring)
 const F_WHEEL = 2;  // travels with its wheel's free body once detached
 const F_RIG = 4;    // posed by the rig (dynamic slot)
-const INST_WORDS = 28; // 4 × vec4f rest columns, vec4f colour, 2 × vec4u
+// Instance modes (Inst.slot.z).
+const M_VEHICLE = 0, M_BODY = 2, M_TUBE = 3, M_FRAME = 4;
+// 4 × vec4f rest columns, vec4f colour, 3 × vec4u, 4 × vec4f extra matrix.
+const INST_WORDS = 48;
 const BUGGY_WORDS = 8;
 const MAT_FLOATS = 16;
 
@@ -73,7 +81,8 @@ export async function createBuggyRenderer({ device, format, world, frameBuf, L, 
 struct Body { position: vec3f, invMass: f32, orientation: vec4f, invInertia: vec3f, flags: u32,
   linearVel: vec3f, sleepTimer: f32, angularVel: vec3f, generation: u32, initialPos: vec3f, initialPad: f32, initialRot: vec4f };
 struct Frame { viewProj: mat4x4f, eye: vec4f, light: vec4f };
-struct Inst { c0: vec4f, c1: vec4f, c2: vec4f, c3: vec4f, color: vec4f, info: vec4u, slot: vec4u };
+struct Inst { c0: vec4f, c1: vec4f, c2: vec4f, c3: vec4f, color: vec4f, info: vec4u, slot: vec4u, nodes: vec4u,
+  e0: vec4f, e1: vec4f, e2: vec4f, e3: vec4f };
 struct Buggy { vehicle: vec4u, extra: vec4u };
 @group(0) @binding(0) var<storage, read> bodies: array<Body>;
 @group(0) @binding(1) var<uniform> frame: Frame;
@@ -83,6 +92,12 @@ struct Buggy { vehicle: vec4u, extra: vec4u };
 @group(0) @binding(5) var<storage, read> dyn: array<mat4x4f>;
 ${shadeWgsl}
 fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
+// Shortest-arc rotation taking +Z onto unit d.
+fn quatFromZ(d: vec3f) -> vec4f {
+  let r = d.z + 1.0;
+  if (r < 1e-6) { return vec4f(1.0, 0.0, 0.0, 0.0); }
+  return normalize(vec4f(-d.y, d.x, 0.0, r));
+}
 
 struct Out { @builtin(position) clip: vec4f, @location(0) n: vec3f, @location(1) c: vec4f, @location(2) w: vec3f };
 
@@ -125,6 +140,45 @@ struct Out { @builtin(position) clip: vec4f, @location(0) n: vec3f, @location(1)
   var o: Out;
   o.w = b.position + qrot(b.orientation, p);
   o.n = qrot(b.orientation, n);
+  let mode = inst.slot.z;
+  let extra = mat4x4f(inst.e0, inst.e1, inst.e2, inst.e3);
+  if (mode == ${M_BODY}u) {
+    // A bolted part on its own body: extra = design → body local.
+    let rb = bodies[inst.slot.w];
+    o.w = rb.position + qrot(rb.orientation, (extra * vec4f(pos, 1.0)).xyz);
+    o.n = qrot(rb.orientation, (extra * vec4f(nrm, 0.0)).xyz);
+    hidden = false;
+  } else if (mode == ${M_TUBE}u) {
+    // A frame tube skinned along its node chain (2–4 nodes): the unit template's
+    // z ∈ [−½, ½] runs along the chain by length fraction (e1: the nodes'
+    // fractions, e0.y: node count); its section (radius e0.x) follows the span.
+    let t = clamp(pos.z + 0.5, 0.0, 1.0);
+    let count = u32(inst.e0.y);
+    var k = 0u;
+    if (count > 2u && t > inst.e1.y) { k = 1u; }
+    if (count > 3u && t > inst.e1.z) { k = 2u; }
+    let ids = array<u32, 4>(inst.nodes.x, inst.nodes.y, inst.nodes.z, inst.nodes.w);
+    let fr = array<f32, 4>(inst.e1.x, inst.e1.y, inst.e1.z, inst.e1.w);
+    let pa = bodies[ids[k]].position;
+    let pb = bodies[ids[k + 1u]].position;
+    let u = (t - fr[k]) / max(fr[k + 1u] - fr[k], 1e-6);
+    let d = pb - pa;
+    let q = quatFromZ(d / max(length(d), 1e-4));
+    let r = inst.e0.x;
+    o.w = mix(pa, pb, u) + qrot(q, vec3f(pos.x * r, pos.y * r, 0.0));
+    o.n = qrot(q, nrm);
+    hidden = false;
+  } else if (mode == ${M_FRAME}u) {
+    // Riding three nodes: extra = design → their rest frame (origin node 0).
+    let p0 = bodies[inst.nodes.x].position;
+    let e1 = normalize(bodies[inst.nodes.y].position - p0);
+    let e3 = normalize(cross(e1, bodies[inst.nodes.z].position - p0));
+    let e2 = cross(e3, e1);
+    let f = mat3x3f(e1, e2, e3);
+    o.w = p0 + f * (extra * vec4f(pos, 1.0)).xyz;
+    o.n = f * (extra * vec4f(nrm, 0.0)).xyz;
+    hidden = false;
+  }
   o.c = inst.color;
   o.clip = select(frame.viewProj * vec4f(o.w, 1.0), vec4f(0.0, 0.0, 2.0, 1.0), hidden);
   return o;
@@ -183,8 +237,11 @@ struct Out { @builtin(position) clip: vec4f, @location(0) n: vec3f, @location(1)
         f.set(palette[inst.material], o + 16);
         const wheel = mesh.classes[inst.cls] === 'wheel';
         const flags = (slotOf[i] >= SLOT_CORNER + 8 ? F_ABS : 0) | (wheel ? F_WHEEL : 0) | (inst.role ? F_RIG : 0);
-        u.set([b, inst.part, inst.corner < 0 ? NONE : inst.corner, flags], o + 20);
-        u.set([slotOf[i], wheel ? SLOT_WHEEL_DET + inst.corner : SLOT_STATIC, 0, 0], o + 24);
+        const bind = buggies[b].bind(i);
+        u.set([b, bind.part, inst.corner < 0 ? NONE : inst.corner, flags], o + 20);
+        u.set([slotOf[i], wheel ? SLOT_WHEEL_DET + inst.corner : SLOT_STATIC, bind.mode, bind.body ?? 0], o + 24);
+        u.set([...(bind.nodes ?? []), 0, 0, 0, 0].slice(0, 4), o + 28);
+        if (bind.extra) f.set(bind.extra, o + 32);
         k++;
       }
       const tp = mesh.templates[t];
@@ -237,25 +294,87 @@ struct Out { @builtin(position) clip: vec4f, @location(0) n: vec3f, @location(1)
     if (dynBuf) device.queue.writeBuffer(dynBuf, buggies.indexOf(g) * slotsPerBuggy * MAT_FLOATS * 4, d);
   }
 
+  const buggyOf = (h) => {
+    const entry = world.vehicles.entries[h];
+    // Neutral suspension length per wheel: the hardpoint sits that far above the
+    // rig's neutral hub (presets.rs dune_buggy).
+    const neutralL = CORNER_IDS.map((id, c) => entry.desc.wheels[c].position[1] - rigDef.corners[id].hub[1]);
+    return { h, entry, rig: new BuggyRig(rigDef), origin: entry.origin, neutralL, dyn: new Float32Array(slotsPerBuggy * MAT_FLOATS), wheelSlot: entry.slots.wheelBase };
+  };
+  const vehicleBodies = (entry) => ({ firstBody: entry.chassis, bodyCount: 2 + entry.wheelSlots + entry.desc.parts.length });
+  const volume = (s) => s.type === 'box' ? 8 * s.half[0] * s.half[1] * s.half[2]
+    : s.type === 'sphere' ? 4 / 3 * Math.PI * s.radius ** 3 : Math.PI * s.radius ** 2 * (2 * s.half_length + 4 / 3 * s.radius);
+  // Volume-weighted collider centre: SoftRigidPart::center, its body origin.
+  const centerOf = (cols) => {
+    const V = cols.reduce((a, c) => a + volume(c.shape), 0) || 1;
+    return [0, 1, 2].map((k) => cols.reduce((a, c) => a + c.position[k] * volume(c.shape) / V, 0));
+  };
+  const transpose3 = (m) => [m[0], m[4], m[8], 0, m[1], m[5], m[9], 0, m[2], m[6], m[10], 0, 0, 0, 0, 1];
+  const restOf = (i) => { const m = mesh.instances[i].matrix; return [m[0], m[1], m[2], 0, m[3], m[4], m[5], 0, m[6], m[7], m[8], 0, m[9], m[10], m[11], 1]; };
+
   return {
     mesh,
     get count() { return buggies.length; },
-    /** Draw vehicle `h` (a dune_buggy) with the mesh. */
+    /** Draw rigid vehicle `h` (a dune_buggy preset) with the mesh. */
     add(h) {
-      const entry = world.vehicles.entries[h];
-      const desc = entry.desc;
+      const desc = world.vehicles.entries[h].desc;
       if (desc.parts.length !== mesh.parts.length || desc.parts.some((p, i) => p.name !== mesh.parts[i]))
         throw new Error(`vehicle ${h} (${desc.name}) is not the baked dune buggy`);
-      // Neutral suspension length per wheel: the hardpoint sits that far above the
-      // rig's neutral hub (presets.rs dune_buggy).
-      const neutralL = CORNER_IDS.map((id, c) => desc.wheels[c].position[1] - rigDef.corners[id].hub[1]);
-      buggies.push({ h, entry, rig: new BuggyRig(rigDef), origin: entry.origin, neutralL, dyn: new Float32Array(slotsPerBuggy * MAT_FLOATS), wheelSlot: entry.slots.wheelBase });
+      const g = buggyOf(h);
+      g.bind = (i) => ({ mode: M_VEHICLE, part: mesh.instances[i].part });
+      g.covers = () => [vehicleBodies(g.entry)];
+      buggies.push(g);
       rebuild();
     },
-    /** Bodies (chassis, anchor, wheel and part bodies) whose generic collider boxes
-     * this mesh replaces, and the vehicle handles whose generic wheels it replaces. */
+    /** Draw hybrid soft vehicle `s` (engine_softbody::buggy; `desc` is its
+     * SoftVehicleDesc) with the mesh: its core carries wheels, rig and drivetrain. */
+    addHybrid(s, desc) {
+      const soft = world.soft.entries[s];
+      if (!soft.core) throw new Error('hybrid buggy without its core');
+      if (soft.nodes !== mesh.frameNodes.length) throw new Error(`soft vehicle ${s} has ${soft.nodes} nodes, the mesh ${mesh.frameNodes.length}`);
+      const g = buggyOf(soft.core.vehicle);
+      const coreParts = g.entry.desc.parts.map((p) => p.name);
+      const rigid = Object.fromEntries(soft.rigidParts.map((r, k) => [r.name, { body: r.body, center: centerOf(desc.rigid_parts[k].colliders) }]));
+      const node = (k) => soft.firstBody + k;
+      g.bind = (i) => {
+        const inst = mesh.instances[i];
+        const name = mesh.parts[inst.part];
+        if (mesh.classes[inst.cls] === 'wheel') return { mode: M_VEHICLE, part: 0 };
+        if (inst.role === 'steering') return { mode: M_VEHICLE, part: Math.max(0, coreParts.indexOf('steering_column')) };
+        if (inst.role) return { mode: M_VEHICLE, part: 0 };
+        if (coreParts.includes(name)) return { mode: M_VEHICLE, part: coreParts.indexOf(name) };
+        if (inst.bind?.mode === 'tube') {
+          const m = inst.matrix, ns = inst.bind.nodes, at = inst.bind.at;
+          const ids = [0, 1, 2, 3].map((j) => node(ns[Math.min(j, ns.length - 1)]));
+          const fr = [0, 1, 2, 3].map((j) => at[Math.min(j, at.length - 1)]);
+          return { mode: M_TUBE, part: 0, nodes: ids, extra: [Math.hypot(m[0], m[1], m[2]), ns.length, 0, 0, ...fr] };
+        }
+        if (inst.bind?.mode === 'frame') {
+          const [a, b, c] = inst.bind.nodes.map((k) => mesh.frameNodes[k]);
+          const sub = (x, y) => x.map((v, k) => v - y[k]);
+          const norm = (x) => { const l = Math.hypot(...x) || 1; return x.map((v) => v / l); };
+          const cross = (x, y) => [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]];
+          const e1 = norm(sub(b, a)), e3 = norm(cross(e1, sub(c, a))), e2 = cross(e3, e1);
+          const frame = [...e1, 0, ...e2, 0, ...e3, 0, 0, 0, 0, 1];
+          return { mode: M_FRAME, part: 0, nodes: inst.bind.nodes.map(node), extra: mul(mul(mul(transpose3(frame), translation(a.map((x) => -x))), R), restOf(i)) };
+        }
+        const r = rigid[name];
+        if (r) return { mode: M_BODY, part: 0, body: r.body, extra: mul(mul(translation(r.center.map((x) => -x)), R), restOf(i)) };
+        throw new Error(`hybrid buggy: no binding for ${inst.name} (${name})`);
+      };
+      g.covers = () => [
+        vehicleBodies(g.entry),
+        { firstBody: soft.firstBody, bodyCount: soft.nodes },
+        ...soft.rigidParts.map((r) => ({ firstBody: r.body, bodyCount: 1 })),
+      ];
+      buggies.push(g);
+      rebuild();
+    },
+    /** Bodies (chassis, anchor, wheel and part bodies; soft nodes and bolted parts)
+     * whose generic collider shapes this mesh replaces, and the vehicle handles
+     * whose generic wheels it replaces. */
     covered() {
-      return buggies.map((g) => ({ vehicle: g.h, firstBody: g.entry.chassis, bodyCount: 2 + g.entry.wheelSlots + g.entry.desc.parts.length }));
+      return buggies.map((g) => ({ vehicle: g.h, bodies: g.covers() }));
     },
     /** Queue the wheel-record copies after a step (pass the frame's encoder). */
     encodeReadback(enc) {

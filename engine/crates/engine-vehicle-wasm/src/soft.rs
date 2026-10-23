@@ -44,6 +44,18 @@ pub fn soft_procedural_car(deform: f32, strength: f32) -> String {
     })
 }
 
+/// vibe-land's dune buggy as a hybrid soft/rigid vehicle (`engine_softbody::buggy`):
+/// SoftVehicleDesc JSON. `mount_scale` scales its bolted parts' and detachable
+/// pieces' mount limits (≤ 0 = 1).
+#[wasm_bindgen]
+pub fn soft_dune_buggy(mount_scale: f32) -> String {
+    let k = engine_softbody::buggy::BuggyBeams {
+        mount_scale: if mount_scale > 0.0 { mount_scale } else { 1.0 },
+        ..Default::default()
+    };
+    engine_softbody::buggy::dune_buggy_soft_with(&k).to_json()
+}
+
 /// A braced lattice crate as `.truck` text.
 #[wasm_bindgen]
 pub fn soft_box_truck(
@@ -209,6 +221,10 @@ impl WasmSoftHost {
             "firstTri": e.first_tri, "tris": e.tris,
             "triangles": tris, "triRest": rest,
             "core": e.core.map(|(v, chassis)| json!({"vehicle": v.0, "chassis": chassis})),
+            // Bolted rigid parts: body and joint range [start, end).
+            "rigidParts": e.rigid_parts.iter().zip(&d.rigid_parts)
+                .map(|((body, j), p)| json!({"name": p.name, "body": body, "joints": [j.start, j.end]}))
+                .collect::<Vec<_>>(),
             "mass": d.total_mass(),
             "nodes": d.nodes.len(),
             "warnings": d.warnings,

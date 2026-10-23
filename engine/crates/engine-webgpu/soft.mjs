@@ -20,6 +20,8 @@ export const calibratedSettings = (hz) => JSON.parse(wasm.soft_calibrated_settin
 export const loadJbeam = (files, pc = undefined) => JSON.parse(wasm.soft_load_jbeam(JSON.stringify(files), pc));
 /** The procedural test hatchback as `.truck` text (thresholds in N, 0 = default). */
 export const proceduralCar = (deform = 0, strength = 0) => wasm.soft_procedural_car(deform, strength);
+/** vibe-land's dune buggy, hybrid: SoftVehicleDesc (engine_softbody::buggy); mount limits × `mountScale`. */
+export const duneBuggySoft = (mountScale = 1) => JSON.parse(wasm.soft_dune_buggy(mountScale));
 /** A braced lattice crate (n³ nodes) as `.truck` text. */
 export const latticeCrate = (n, step, mass, spring, deform, strength) => wasm.soft_box_truck(n, step, mass, spring, deform, strength);
 

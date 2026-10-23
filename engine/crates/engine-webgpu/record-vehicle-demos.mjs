@@ -122,6 +122,17 @@ const TAKES = {
       { n: 120, caption: 'Broken mounts are severed before the next step: forward-only, like joints', cam: { orbit: [0.6, 0.35, 11], spin: 0.008 } },
     ],
   },
+  buggy_hybrid: {
+    query: 'scene=buggies&build=hybrid',
+    script: [
+      { n: 60, input: { forward: 0, steer: 0, brake: 1 }, caption: 'Hybrid buggy: node-beam tube frame on the raycast core, bolted parts on joints', cam: { orbit: [0.9, 0.2, 8], spin: 0.006 } },
+      { n: 30, cam: { orbit: [0.0, 0.1, 10] } },
+      { n: 120, act: 'cannon', caption: 'Head on: the bumper bends and tears off, the nose dents' },
+      { n: 30, cam: { orbit: [1.57, 0.12, 9] } },
+      { n: 120, act: 'cannon', caption: 'Into the side: the cage dents, a seat tears off its rails' },
+      { n: 150, caption: 'The safety cell keeps its shape', cam: { orbit: [0.7, 0.35, 9], spin: 0.008 } },
+    ],
+  },
   traffic: {
     query: 'scene=traffic&spawn=0,0,0',
     script: [
