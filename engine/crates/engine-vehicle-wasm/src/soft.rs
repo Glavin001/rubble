@@ -205,3 +205,40 @@ pub fn soft_load_jbeam(files_json: &str, pc: Option<String>) -> Result<String, J
     let d = engine_softbody::jbeam::load_jbeam(&refs, pc.as_deref()).map_err(err)?;
     Ok(serde_json::to_string(&d).expect("desc serialises"))
 }
+
+#[wasm_bindgen]
+impl WasmSoftHost {
+    /// Visual mesh of soft body `h` (flexbody skinning): its skin triangles
+    /// subdivided and rounded (`bulge` × edge length), each vertex bound to a
+    /// frame of three particles. Returns `[vertexCount, triCount, bindings…, indices…]`
+    /// with bindings as 8 words per vertex: centre, x, y particle (global body
+    /// indices), soft body, then the frame coordinates and the frame's longest
+    /// rest edge (f32 bits). Unbound vertices collapse onto their nearest node.
+    pub fn flexbody(&self, h: u32, bulge: f32) -> Vec<u32> {
+        use engine_softbody::flexbody::{bind, rounded_skin, BindOptions};
+        use glam::Vec3;
+        let e = self.host.entry(SoftHandle(h));
+        let nodes: Vec<Vec3> = e.desc.nodes.iter().map(|n| Vec3::from_array(n.position)).collect();
+        let tris: Vec<[u32; 3]> = e.desc.triangles.iter().map(|t| t.nodes).collect();
+        let (verts, faces) = rounded_skin(&nodes, &tris, bulge);
+        let binds = bind(&verts, &nodes, None, BindOptions::default());
+        let mut out = vec![verts.len() as u32, faces.len() as u32];
+        for (v, b) in verts.iter().zip(&binds) {
+            match b {
+                Some(b) => {
+                    let [c, x, y] = b.nodes;
+                    let rest = (nodes[x as usize] - nodes[c as usize]).length().max((nodes[y as usize] - nodes[c as usize]).length());
+                    out.extend_from_slice(&[e.first_body + c, e.first_body + x, e.first_body + y, h]);
+                    out.extend(b.coords.iter().map(|f| f.to_bits()));
+                    out.push(rest.to_bits());
+                }
+                None => {
+                    let c = nodes.iter().enumerate().min_by(|a, b| (*a.1 - *v).length_squared().total_cmp(&(*b.1 - *v).length_squared())).map_or(0, |(i, _)| i as u32);
+                    out.extend_from_slice(&[e.first_body + c, e.first_body + c, e.first_body + c, h, 0, 0, 0, 1f32.to_bits()]);
+                }
+            }
+        }
+        out.extend(faces.iter().flatten());
+        out
+    }
+}

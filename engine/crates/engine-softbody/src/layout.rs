@@ -12,8 +12,8 @@
 //! adjBase + i/4          adjacency: beam ids, then triangle ids, 4 per slot
 //! chebBase + 3·i         list entry i: Chebyshev x⁽ⁿ⁻²⁾, x⁽ⁿ⁻¹⁾, last step's velocity
 //! triBase + t            triangle t: [a, b, c, softBody | collide << 8]
-//! triContactBase + 7·t   triangle t's contacts this step: obstacle, then two nodes
-//! nodeSlotBase + 2·o     particle ordinal o: the triangle it touches this step
+//! triContactBase + 9·t   triangle t's contacts this step: obstacle, then two nodes
+//! nodeSlotBase + 3·o     particle ordinal o: the triangle it touches this step
 //! flagBase + o           particle ordinal o: x ≠ 0 when in a soft contact this step
 //! obstacleBase + k       thin obstacle k (static sphere / capsule): [collider, 0, 0, 0]
 //! aabbBase + 2·s         soft body s bounds this step: min, max
@@ -24,7 +24,9 @@ use serde::{Deserialize, Serialize};
 pub const HEADER_SLOTS: u32 = 8;
 pub const BODY_STRIDE: u32 = 3;
 pub const BEAM_STRIDE: u32 = 4;
-pub const TRI_CONTACT_STRIDE: u32 = 7;
+pub const TRI_CONTACT_STRIDE: u32 = 9;
+/// Node contact slot stride (normal + triangle, barycentrics + δ, initial gap).
+pub const NODE_SLOT_STRIDE: u32 = 3;
 
 /// Beam record words (u32/f32 view of its 4 slots).
 pub const BW_A: usize = 0;
@@ -137,7 +139,7 @@ impl SoftCapacity {
         let tri_base = cheb_base + 3 * self.max_particles;
         let tri_contact_base = tri_base + self.max_triangles;
         let node_slot_base = tri_contact_base + TRI_CONTACT_STRIDE * self.max_triangles;
-        let flag_base = node_slot_base + 2 * self.max_particles;
+        let flag_base = node_slot_base + NODE_SLOT_STRIDE * self.max_particles;
         let obstacle_base = flag_base + self.max_particles;
         let aabb_base = obstacle_base + self.max_obstacles;
         SoftLayout {

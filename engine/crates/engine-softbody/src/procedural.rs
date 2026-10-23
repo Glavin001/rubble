@@ -200,14 +200,15 @@ pub fn car_truck(p: &CarParams) -> String {
     }
     if p.bumper {
         // A bolted-on bumper: weaker mounts on detacher group 1 (all go together).
-        let _ = writeln!(s, "\nset_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0", p.spring, p.damp, p.deform, p.strength * 0.15);
-        let _ = writeln!(s, "detacher_group 1");
         let f = n - 1;
         let b0 = bumper_first;
-        // Bumper bar: lower row b0..b0+2 (L, C, R), upper row b0+3..b0+5.
-        for (a, bb) in [(b0, b0 + 1), (b0 + 1, b0 + 2), (b0 + 3, b0 + 4), (b0 + 4, b0 + 5), (b0, b0 + 3), (b0 + 1, b0 + 4), (b0 + 2, b0 + 5), (b0, b0 + 4), (b0 + 1, b0 + 3), (b0 + 1, b0 + 5), (b0 + 2, b0 + 4)] {
+        // Bumper bar (stays one piece): lower row b0..b0+2 (L, C, R), upper row b0+3..b0+5.
+        for (a, bb) in [(b0, b0 + 1), (b0 + 1, b0 + 2), (b0 + 3, b0 + 4), (b0 + 4, b0 + 5), (b0, b0 + 3), (b0 + 1, b0 + 4), (b0 + 2, b0 + 5), (b0, b0 + 4), (b0 + 1, b0 + 3), (b0 + 1, b0 + 5), (b0 + 2, b0 + 4), (b0, b0 + 2), (b0 + 3, b0 + 5)] {
             let _ = writeln!(s, "{a}, {bb}");
         }
+        // Its mounts: weaker, on detacher group 1 (they all let go together).
+        let _ = writeln!(s, "\nset_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0", p.spring, p.damp, p.deform, p.strength * 0.15);
+        let _ = writeln!(s, "detacher_group 1");
         for (a, bb) in [(b0, ring(f, 0)), (b0, ring(f, 2)), (b0 + 3, ring(f, 2)), (b0 + 3, ring(f, 0)), (b0 + 2, ring(f, 1)), (b0 + 2, ring(f, 3)), (b0 + 5, ring(f, 3)), (b0 + 5, ring(f, 1)), (b0 + 1, ring(f, 6)), (b0 + 4, ring(f, 6)), (b0, ring(f - 1, 0)), (b0 + 2, ring(f - 1, 1))] {
             let _ = writeln!(s, "{a}, {bb}");
         }
@@ -342,8 +343,10 @@ mod tests {
         }
         assert!(d.triangles.iter().all(|t| t.collision));
         assert!(d.engine.is_some());
-        // Bumper beams share a break group.
+        // The bumper's mounts share a break group; its own bracing does not.
         assert!(d.beams.iter().filter(|b| b.break_group == 1).count() >= 10);
+        let bumper = d.nodes.len() as u32 - 6;
+        assert!(d.beams.iter().filter(|b| b.a >= bumper && b.b >= bumper).all(|b| b.break_group == 0));
         let m = d.total_mass();
         assert!(m > 1000.0 && m < 1600.0, "total mass {m}");
         let fwd = crate::pack::forward_axis(&d);

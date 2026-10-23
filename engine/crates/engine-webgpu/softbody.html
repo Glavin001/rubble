@@ -35,7 +35,7 @@
       <button id="resetBtn">reset (R)</button>
     </div>
     <div class="muted" style="margin-top:6px">
-      <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> drive · <kbd>Space</kbd> handbrake · <kbd>C</kbd> camera · <kbd>V</kbd> beam stress view ·
+      <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> drive · <kbd>Space</kbd> handbrake · <kbd>C</kbd> camera · <kbd>V</kbd> beam stress view · <kbd>M</kbd> flexbody / collision skin ·
       <kbd>B</kbd> fire a 300 kg ball · <kbd>T</kbd> side ram · drag to orbit, wheel to zoom
     </div>
     <div class="muted" id="truckInfo"></div>
@@ -207,6 +207,10 @@
     // Skin: every soft triangle (global particle indices) with its rest edge lengths.
     let triCount = 0, beamTotal = 0;
     let triBuf = null, restBuf = null;
+    // Flexbody meshes (rounded, subdivided skins bound to particle frames).
+    let flexBuf = null, flexIdx = null, flexCount = 0, flexBind = null;
+    let skinMode = qs.get('skin') || 'flex';
+    const flexCache = new Map();
     const rebuildSkin = () => {
       const tris = [], rest = [];
       world.soft.entries.forEach((e, s) => {
@@ -220,6 +224,23 @@
       if (tris.length) device.queue.writeBuffer(triBuf, 0, new Uint32Array(tris));
       if (rest.length) device.queue.writeBuffer(restBuf, 0, new Float32Array(rest));
       skinBind = null;
+      // Flexbody meshes: cars get rounded panels, crates and imports stay flat.
+      const binds = [], idx = [];
+      world.soft.entries.forEach((e, s) => {
+        if (!e.tris) return;
+        if (!flexCache.has(s)) flexCache.set(s, world.soft.inner.flexbody(s, e.core ? 0.06 : 0.0));
+        const w = flexCache.get(s);
+        const nv = w[0], nt = w[1], base = binds.length / 8;
+        for (let i = 0; i < nv * 8; i++) binds.push(w[2 + i]);
+        for (let i = 0; i < nt * 3; i++) idx.push(base + w[2 + nv * 8 + i]);
+      });
+      flexCount = idx.length;
+      flexBuf?.destroy(); flexIdx?.destroy();
+      flexBuf = device.createBuffer({ size: Math.max(32, binds.length * 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      flexIdx = device.createBuffer({ size: Math.max(16, idx.length * 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      if (binds.length) device.queue.writeBuffer(flexBuf, 0, new Uint32Array(binds));
+      if (idx.length) device.queue.writeBuffer(flexIdx, 0, new Uint32Array(idx));
+      flexBind = null;
     };
 
     const SHADER = /* wgsl */`
@@ -234,6 +255,7 @@ struct Frame { viewProj: mat4x4f, eye: vec4f, light: vec4f, opts: vec4f };
 @group(0) @binding(4) var<storage, read> soft: array<vec4u>;
 @group(0) @binding(5) var<storage, read> tris: array<vec4u>;
 @group(0) @binding(6) var<storage, read> rest: array<vec4f>;
+@group(0) @binding(7) var<storage, read> flex: array<vec4u>;
 
 fn qrot(q: vec4f, v: vec3f) -> vec3f {
   let u = q.xyz;
@@ -324,6 +346,47 @@ const HIDE = vec4f(0.0, 0.0, 2.0, 1.0);
   return o;
 }
 @fragment fn fsSkin(i: Out, @builtin(front_facing) front: bool) -> @location(0) vec4f {
+  let n = select(-normalize(i.n), normalize(i.n), front);
+  return vec4f(shade(i.c, n, i.w), 1.0);
+}
+
+// Flexbody skinning: each render vertex rebuilt from its frame of three particles
+// (centre c, x, y): p = c + a·(x − c) + b·(y − c) + d·((x − c) × (y − c)). A frame
+// stretched past 1.8× its rest edge is torn; a triangle with a torn corner is
+// dropped (all three corners decide alike), so a tear opens instead of spiking.
+@group(0) @binding(8) var<storage, read> flexTris: array<u32>;
+fn flexVertex(v: u32, torn: ptr<function, bool>, strain: ptr<function, f32>) -> vec3f {
+  let b0 = flex[v * 2u];
+  let b1 = bitcast<vec4f>(flex[v * 2u + 1u]);
+  let c = bodies[b0.x].position;
+  let ex = bodies[b0.y].position - c;
+  let ey = bodies[b0.z].position - c;
+  let stretch = max(length(ex), length(ey)) / max(b1.w, 1e-4);
+  *torn = *torn || stretch > 1.8;
+  *strain = max(*strain, abs(stretch - 1.0));
+  return c + ex * b1.x + ey * b1.y + cross(ex, ey) * b1.z;
+}
+@vertex fn vsFlex(@builtin(vertex_index) vi: u32) -> Out {
+  let t = vi / 3u;
+  var torn = false;
+  var strain = 0.0;
+  let pa = flexVertex(flexTris[t * 3u], &torn, &strain);
+  let pb = flexVertex(flexTris[t * 3u + 1u], &torn, &strain);
+  let pc = flexVertex(flexTris[t * 3u + 2u], &torn, &strain);
+  let k = vi % 3u;
+  let p = select(select(pc, pb, k == 1u), pa, k == 0u);
+  let soft = flex[flexTris[t * 3u] * 2u].w;
+  var o: Out;
+  o.w = p; o.center = p; o.r = 0.0;
+  o.n = normalize(cross(pb - pa, pc - pa));
+  let hue = hash(soft * 7u + 3u);
+  var base = mix(vec3f(0.78, 0.1, 0.08), vec3f(0.1, 0.32, 0.8), step(0.5, hue));
+  if (soft > 0u && fract(hue * 7.0) < 0.33) { base = vec3f(0.9, 0.9, 0.92); }
+  o.c = mix(base, vec3f(0.18, 0.16, 0.15), clamp(strain * 5.0, 0.0, 0.85));
+  o.clip = select(frame.viewProj * vec4f(p, 1.0), HIDE, torn || frame.opts.x > 0.5);
+  return o;
+}
+@fragment fn fsFlex(i: Out, @builtin(front_facing) front: bool) -> @location(0) vec4f {
   let n = select(-normalize(i.n), normalize(i.n), front);
   return vec4f(shade(i.c, n, i.w), 1.0);
 }
@@ -432,6 +495,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     const groundPipe = pipe('vsGround', 'fsGround', [{ arrayStride: 12, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }] }], 'none');
     const skinPipe = pipe('vsSkin', 'fsSkin', [], 'none');
     const beamPipe = pipe('vsBeam', 'fsBeam', [], 'none', 'line-list');
+    const flexPipe = pipe('vsFlex', 'fsFlex', [], 'none');
     const bind = (p, entries) => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: entries.map(([b, buf]) => ({ binding: b, resource: { buffer: buf } })) });
     const colBind = bind(colPipe, [[0, world.bufs[0]], [1, frameBuf], [2, world.bufs[2]]]);
     const wheelBind = bind(wheelPipe, [[1, frameBuf], [3, world.bufs[31]]]);
@@ -484,6 +548,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       if (e.code === 'KeyR') resetScene();
       else if (e.code === 'KeyC') camMode = camMode === 'chase' ? 'orbit' : 'chase';
       else if (e.code === 'KeyV') beamView = !beamView;
+      else if (e.code === 'KeyM') skinMode = skinMode === 'flex' ? 'collision' : 'flex';
       else if (e.code === 'KeyB') fireCannon();
       else if (e.code === 'KeyT') launchRam();
     });
@@ -532,6 +597,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     function resetScene() {
       world.restore(initial);
       while (softs.length > initialSoftCount) softs.pop();
+      for (const k of [...flexCache.keys()]) if (k >= initialSoftCount) flexCache.delete(k);
       rebuildSkin();
       damage = null;
       breaks = 0;
@@ -662,7 +728,10 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       });
       rp.setPipeline(groundPipe); rp.setBindGroup(0, groundBind); rp.setVertexBuffer(0, groundVbo); rp.draw(6);
       rp.setPipeline(colPipe); rp.setBindGroup(0, colBind); rp.setVertexBuffer(0, cubeVbo); rp.draw(36, world.colliderCount - 1);
-      if (triCount) { rp.setPipeline(skinPipe); rp.setBindGroup(0, skinBind); rp.draw(triCount * 3); }
+      if (skinMode === 'flex' && flexCount) {
+        if (!flexBind) flexBind = bind(flexPipe, [[0, world.bufs[0]], [1, frameBuf], [7, flexBuf], [8, flexIdx]]);
+        rp.setPipeline(flexPipe); rp.setBindGroup(0, flexBind); rp.draw(flexCount);
+      } else if (triCount) { rp.setPipeline(skinPipe); rp.setBindGroup(0, skinBind); rp.draw(triCount * 3); }
       if (beamView && beamTotal) { rp.setPipeline(beamPipe); rp.setBindGroup(0, beamBind); rp.draw(2, beamTotal); }
       if (world.vehicles.wheelCount) { rp.setPipeline(wheelPipe); rp.setBindGroup(0, wheelBind); rp.setVertexBuffer(0, cylVbo); rp.draw(cyl.length / 6, world.vehicles.wheelCount); }
       rp.end();
@@ -753,7 +822,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       buf.destroy();
       return Array.from({ length: e.particles }, (_, i) => [f[i * 28], f[i * 28 + 1], f[i * 28 + 2]]);
     };
-    window.__setView = (o) => { if (o.beams !== undefined) beamView = o.beams; if (o.orbit) { camMode = 'orbit'; orbit = { ...orbit, ...o.orbit }; } if (o.chase) camMode = 'chase'; };
+    window.__setView = (o) => { if (o.beams !== undefined) beamView = o.beams; if (o.skin) skinMode = o.skin; if (o.orbit) { camMode = 'orbit'; orbit = { ...orbit, ...o.orbit }; } if (o.chase) camMode = 'chase'; };
     window.__launchRam = launchRam;
     window.__world = world;
     window.__ready = true;

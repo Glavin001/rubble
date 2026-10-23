@@ -11,6 +11,7 @@
 pub mod color;
 pub mod cpu;
 pub mod desc;
+pub mod flexbody;
 pub mod host;
 pub mod jbeam;
 pub mod layout;

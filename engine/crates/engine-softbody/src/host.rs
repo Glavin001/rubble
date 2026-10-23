@@ -221,9 +221,9 @@ impl SoftHost {
         let ordinal_base = self.particles_used;
         self.particles_used += desc.nodes.len() as u32;
         // Node contact slots start empty (fixed particles are never rewritten).
-        let none = [[0u32, 0, 0, SOFT_NONE], [0, 0, 0, 0]];
+        let none = [[0u32, 0, 0, SOFT_NONE], [0, 0, 0, 0], [0, 0, 0, 0]];
         let slots: Vec<Slot> = (0..desc.nodes.len()).flat_map(|_| none).collect();
-        backend.write_soft_slots(l.node_slot_base + 2 * ordinal_base, &slots);
+        backend.write_soft_slots(l.node_slot_base + NODE_SLOT_STRIDE * ordinal_base, &slots);
 
         // Rigid core (stage 1): wheels and drivetrain on a frame proxy.
         let mut core = None;

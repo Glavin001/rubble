@@ -46,7 +46,8 @@ static const uint SOFT_BREAKING = 2u;
 static const uint SOFT_SLEEP_SYNC = 4u;
 static const uint SOFT_CONTACTS = 8u;
 static const uint ENTRY_CONTACTER = 65536u;
-static const uint TRI_CONTACT_STRIDE = 7u;
+static const uint TRI_CONTACT_STRIDE = 9u;
+static const uint NODE_SLOT_STRIDE = 3u;
 // "No index" marker stored in float4 slots: FLT_MAX bits (an all-ones NaN pattern
 // cannot appear as a WGSL constant).
 static const uint SOFT_NONE = 0x7F7FFFFFu;
@@ -451,7 +452,7 @@ void soft_collide_nodes(uint3 tid : SV_DispatchThreadID)
     uint4 ent = SU(softListBase() + i);
     uint body = ent.x;
     uint sb = ent.w & 0xFFFFu;
-    uint ns = softNodeSlotBase() + 2u * particleOrdinal(sb, body);
+    uint ns = softNodeSlotBase() + NODE_SLOT_STRIDE * particleOrdinal(sb, body);
     gSoftData[ns] = float4(0, 0, 0, asfloat(SOFT_NONE));
     if (!softContactsOn() || (ent.w & ENTRY_CONTACTER) == 0u) return;
     BodyState b = gBodies[body];
@@ -461,6 +462,7 @@ void soft_collide_nodes(uint3 tid : SV_DispatchThreadID)
     uint bestTri = SOFT_NONE;
     float3 bestN = float3(0, 0, 0), bestW = float3(0, 0, 0);
     float bestDelta = 0.0;
+    float bestGap = 0.0;
     uint nb = softBodyCount();
     for (uint s2 = 0u; s2 < nb; s2++)
     {
@@ -494,12 +496,16 @@ void soft_collide_nodes(uint3 tid : SV_DispatchThreadID)
             if (score < bestScore)
             {
                 bestScore = score; bestTri = t; bestN = n; bestW = w; bestDelta = delta;
+                // Gap at the step start (frozen normal): the stabilised constraint
+                // corrects only (1 − α) of an existing overlap per step.
+                bestGap = dot(x0 - (w.x * a0 + w.y * b0 + w.z * c0), n) - delta;
             }
         }
     }
     if (bestTri == SOFT_NONE) return;
     gSoftData[ns] = float4(bestN, asfloat(bestTri));
     gSoftData[ns + 1u] = float4(bestW, bestDelta);
+    gSoftData[ns + 2u] = float4(bestGap, 0.0, 0.0, 0.0);
     gSoftData[softFlagBase() + particleOrdinal(sb, body)] = float4(1, 0, 0, 0);
 }
 
@@ -514,7 +520,7 @@ void soft_collide_tris(uint3 tid : SV_DispatchThreadID)
     uint tc = softTriContactBase() + TRI_CONTACT_STRIDE * t;
     gSoftData[tc] = float4(0, 0, 0, asfloat(SOFT_NONE));
     gSoftData[tc + 3u] = float4(0, 0, 0, asfloat(SOFT_NONE));
-    gSoftData[tc + 5u] = float4(0, 0, 0, asfloat(SOFT_NONE));
+    gSoftData[tc + 6u] = float4(0, 0, 0, asfloat(SOFT_NONE));
     if (!softContactsOn()) return;
     uint4 tri = SU(softTriBase() + t);
     if (((tri.w >> 8) & 1u) == 0u) return;
@@ -555,8 +561,10 @@ void soft_collide_tris(uint3 tid : SV_DispatchThreadID)
         if (gap > delta + travel + 0.05 || gap >= bestGap) continue;
         float3 n = dist > 1e-5 ? dv / dist : normalize(cross(b - a, c - a));
         bestGap = gap;
+        // Gap at the step start (triangle at x⁻) for the stabilised constraint.
+        float3 q0 = w.x * ba.initialPos + w.y * bb.initialPos + w.z * bc.initialPos;
         gSoftData[tc] = float4(n, asfloat(ci));
-        gSoftData[tc + 1u] = float4(cs + n * r, 0.0);
+        gSoftData[tc + 1u] = float4(cs + n * r, dot(q0 - (cs + n * r), n) - delta);
         gSoftData[tc + 2u] = float4(w, delta);
         marked = true;
     }
@@ -571,12 +579,12 @@ void soft_collide_tris(uint3 tid : SV_DispatchThreadID)
         uint ordBase = asuint(softBodyRec1(s2).w);
         for (uint k = 0u; k < r2.y && found < 2u; k++)
         {
-            uint ns = softNodeSlotBase() + 2u * (ordBase + k);
+            uint ns = softNodeSlotBase() + NODE_SLOT_STRIDE * (ordBase + k);
             float4 s0 = SD(ns);
             if (asuint(s0.w) != t) continue;
-            float4 s1 = SD(ns + 1u);
-            gSoftData[tc + 3u + 2u * found] = float4(s0.xyz, asfloat(r2.x + k));
-            gSoftData[tc + 4u + 2u * found] = s1;
+            gSoftData[tc + 3u + 3u * found] = float4(s0.xyz, asfloat(r2.x + k));
+            gSoftData[tc + 4u + 3u * found] = SD(ns + 1u);
+            gSoftData[tc + 5u + 3u * found] = SD(ns + 2u);
             found++;
             marked = true;
         }
@@ -591,9 +599,13 @@ void soft_collide_tris(uint3 tid : SV_DispatchThreadID)
 }
 
 // Penalty contact on one particle: Jacobian coefficient s (1 for a node, ±w for a
-// triangle vertex), gap C along n, tangential relative travel u this step.
-void softContactTerm(inout float3 g, inout float3x3 H, float s, float C, float3 n, float3 u)
+// triangle vertex), gap C along n, gap C0 at the step start, tangential relative
+// travel u this step. As rigid contacts (AVBD α), only (1 − α) of an overlap
+// present at the step start is corrected per step, so a deep overlap (a node
+// freed inside a crushed panel) is not fired out.
+void softContactTerm(inout float3 g, inout float3x3 H, float s, float C, float C0, float3 n, float3 u)
 {
+    C -= PARAMS.alpha * min(C0, 0.0);
     if (C >= 0.0) return;
     float k = softContactStiffness();
     float3x3 nn = float3x3(n * n.x, n * n.y, n * n.z);
@@ -628,7 +640,7 @@ void softContactsFor(uint body, uint sb, float3 x, float3 x0, uint triStart, uin
     // triangle vertex); the rest have nothing to read.
     uint ord = particleOrdinal(sb, body);
     if (SD(softFlagBase() + ord).x == 0.0) return;
-    uint ns = softNodeSlotBase() + 2u * ord;
+    uint ns = softNodeSlotBase() + NODE_SLOT_STRIDE * ord;
     float4 s0 = SD(ns);
     uint t = asuint(s0.w);
     if (t != SOFT_NONE)
@@ -636,7 +648,7 @@ void softContactsFor(uint body, uint sb, float3 x, float3 x0, uint triStart, uin
         float4 s1 = SD(ns + 1u);
         uint4 tri = SU(softTriBase() + t);
         float C = dot(s0.xyz, x - triPoint(tri, s1.xyz)) - s1.w;
-        softContactTerm(g, H, 1.0, C, s0.xyz, (x - x0) - triTravel(tri, s1.xyz));
+        softContactTerm(g, H, 1.0, C, SD(ns + 2u).x, s0.xyz, (x - x0) - triTravel(tri, s1.xyz));
     }
     uint adj = softAdjBase();
     for (uint k = 0u; k < triCount; k++)
@@ -650,22 +662,23 @@ void softContactsFor(uint body, uint sb, float3 x, float3 x0, uint triStart, uin
         float4 o0 = SD(tc);
         if (asuint(o0.w) != SOFT_NONE)
         {
+            float4 o1 = SD(tc + 1u);
             float4 o2 = SD(tc + 2u);
             float wj = o2[j];
-            float C = dot(o0.xyz, triPoint(tri, o2.xyz) - SD(tc + 1u).xyz) - o2.w;
-            softContactTerm(g, H, wj, C, o0.xyz, triTravel(tri, o2.xyz));
+            float C = dot(o0.xyz, triPoint(tri, o2.xyz) - o1.xyz) - o2.w;
+            softContactTerm(g, H, wj, C, o1.w, o0.xyz, triTravel(tri, o2.xyz));
         }
         [unroll]
         for (uint m = 0u; m < 2u; m++)
         {
-            float4 c0 = SD(tc + 3u + 2u * m);
+            float4 c0 = SD(tc + 3u + 3u * m);
             uint node = asuint(c0.w);
             if (node == SOFT_NONE) continue;
-            float4 c1 = SD(tc + 4u + 2u * m);
+            float4 c1 = SD(tc + 4u + 3u * m);
             BodyState nb = gBodies[node];
             float C = dot(c0.xyz, nb.position - triPoint(tri, c1.xyz)) - c1.w;
             float3 u = (nb.position - nb.initialPos) - triTravel(tri, c1.xyz);
-            softContactTerm(g, H, -c1[j], C, c0.xyz, u);
+            softContactTerm(g, H, -c1[j], C, SD(tc + 5u + 3u * m).x, c0.xyz, u);
         }
     }
 }

@@ -105,7 +105,7 @@ fn wall_crash_crumples_and_drops_the_bumper() {
     let crush = len0 - body_len(&s.x);
     println!("yielded {yielded}, broken {broken}, crush {crush:.3} m, ke {}", s.kinetic_energy());
     assert!(yielded > 50, "a 54 km/h wall hit must crumple the front ({yielded})");
-    assert!(broken >= 16, "the bumper's detacher group goes as one ({broken})");
+    assert!(broken >= 10, "the bumper mounts (one detacher group) go together ({broken})");
     assert!(s.kinetic_energy() < 0.1 * 0.5 * 1300.0 * 225.0, "most energy absorbed");
     assert!(crush > 0.05, "permanent shortening ({crush})");
 }

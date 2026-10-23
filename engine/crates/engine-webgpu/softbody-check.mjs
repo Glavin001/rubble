@@ -45,7 +45,7 @@ const CHECKS = {
     run: async (page) => {
       const r = await page.step(360);
       const d = r.damage[0];
-      return { ok: d.yielded > 40 && d.broken >= 16 && r.breaks >= 16, msg: `${d.yielded} beams bent, ${d.broken} broken (bumper detacher group), ${r.breaks} break events` };
+      return { ok: d.yielded > 40 && d.broken >= 10 && r.breaks >= 10, msg: `${d.yielded} beams bent, ${d.broken} broken (bumper mounts: one detacher group), ${r.breaks} break events` };
     },
   },
   pole: {
@@ -89,6 +89,15 @@ const CHECKS = {
       const r = await page.step(480);
       const awake = r.counters.awake;
       return { ok: true, msg: `${r.damage.length} lattice crates dropped, ${sum(r.damage, 'yielded')} beams bent, ${awake} bodies awake` };
+    },
+  },
+  probe: {
+    query: 'scene=headon',
+    optIn: 'SOFT_PROBE',
+    run: async (page) => {
+      const { readFileSync } = await import('node:fs');
+      const body = readFileSync(process.env.SOFT_PROBE, 'utf8');
+      return await (new Function('page', `return (async () => { ${body} })()`))(page);
     },
   },
   // Chrome step cost: the yard (3 cars, 3 crates: 387 particles, 2,190 beams) at 240 Hz × 10 iterations.
