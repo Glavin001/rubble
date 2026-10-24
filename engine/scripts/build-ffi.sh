@@ -24,6 +24,20 @@ cd "$ENGINE"
 
 . "$ENGINE/scripts/slangc.sh"
 
+case "$(uname -s)" in
+  Darwin) os=macos ;;
+  Linux) os=linux ;;
+  MINGW* | MSYS* | CYGWIN*) os=windows ;;
+  *) os="$(uname -s | tr '[:upper:]' '[:lower:]')" ;;
+esac
+if [[ "$os" == windows ]]; then
+  # Git Bash's /usr/bin/link (coreutils) shadows MSVC's link.exe, which sits
+  # next to cl.exe: put that directory first so rustc and cl find the linker.
+  command -v cl >/dev/null || { echo "cl not on PATH: run from an MSVC developer shell" >&2; exit 1; }
+  PATH="$(dirname "$(command -v cl)"):$PATH"
+  export PATH
+fi
+
 echo "==> cargo build -p engine-ffi --release"
 cargo build -p engine-ffi --release
 echo "==> The committed header matches the ABI"
@@ -33,12 +47,6 @@ NATIVE_LIBS="$(cargo rustc -p engine-ffi --release --lib -- --print native-stati
   | sed -n 's/.*native-static-libs: //p' | tail -n 1)"
 
 TARGET="${CARGO_TARGET_DIR:-$ENGINE/target}/release"
-case "$(uname -s)" in
-  Darwin) os=macos ;;
-  Linux) os=linux ;;
-  MINGW* | MSYS* | CYGWIN*) os=windows ;;
-  *) os="$(uname -s | tr '[:upper:]' '[:lower:]')" ;;
-esac
 arch="$(uname -m)"
 case "$arch" in arm64) arch=aarch64 ;; esac
 PKG="$ENGINE/ffi-dist/rubble-$os-$arch"
