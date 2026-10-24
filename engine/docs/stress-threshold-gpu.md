@@ -134,8 +134,13 @@ unchanged: an A/B digest of two shot scenes matches main bit for bit.
 `stress-ref/src/impact_local.rs` holds the closed forms and their derivations, and is the
 f64 twin. The strike is evaluated once, before the engine steps.
 
-1. **Thickness.** `fr_il_extend` follows the chunks along the path, widened by the shot's
-   radius, for at most 8 passes; error bit 16 if it is still growing.
+1. **Thickness.** The struck body's tube is listed first (`fr_il_tube_*`): its chunks
+   whose interval along the path, widened by the shot's radius, ends past the entry. Then
+   one group per struck body (`fr_il_run`) grows the run over every interval that starts
+   within it, until no interval reaches further. There is no cap: each round passes a
+   further interval's end, so the run settles within the tube's count of rounds. Debris
+   striking down a 60 m tower crosses the whole column. The old 8-pass version ran out
+   there (error bit 16); that bit is no longer set.
 2. **Closed forms** (`fr_il_strike`):
    - Hertz contact;
    - strain-rate DIF at `v / H`;

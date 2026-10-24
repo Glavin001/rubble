@@ -144,8 +144,6 @@ impl ExtTables {
     }
 }
 
-/// The analytic strike's thickness passes (even): chunks through a wall it can follow.
-pub const IL_PASSES: u32 = 8;
 /// Fixed-point scale of the load path's per-body sums (N and N m): 1/256 resolution.
 const LP_SCALE: f32 = 256.0;
 
@@ -224,7 +222,6 @@ struct FractureParams {
     ext_chunks: u32,
     ext_adj: u32,
     ext_mat: u32,
-    il_passes: u32,
     lp_scale: f32,
     cs_sweeps: u32,
     cs_row_cap: u32,
@@ -317,8 +314,13 @@ impl Layout {
     pub fn w_cs_list(&self) -> u32 {
         self.w_carry() + self.n
     }
-    pub fn work_words(&self) -> u32 {
+    /// The struck bodies' tubes (2 words per chunk: its interval along the path), listed
+    /// body by body: the analytic strike's run (`fracture.slang` `fr_il_tube_*`).
+    pub fn w_il_tube(&self) -> u32 {
         self.w_cs_list() + self.n + self.b
+    }
+    pub fn work_words(&self) -> u32 {
+        self.w_il_tube() + 2 * self.n
     }
     pub fn a_dirty(&self) -> u32 {
         3 * self.n + SUMS * self.n
@@ -334,18 +336,19 @@ impl Layout {
     pub fn a_lp(&self) -> u32 {
         self.a_strike() + 9 * self.b
     }
-    /// Per body slot 4 words of the analytic strike: its thickness's two copies, its plug's
-    /// mass.
+    /// Per body slot 6 words of the analytic strike: its run's end, its tube's count, its
+    /// plug's mass, its tube's start and fill.
     pub fn a_il(&self) -> u32 {
         self.a_lp() + 14 * self.b
     }
     /// Per shot ([`MAX_SHOTS`]) the earliest strike time of the frame.
     pub fn a_first(&self) -> u32 {
-        self.a_il() + 4 * self.b
+        self.a_il() + 6 * self.b
     }
-    /// Per body slot 12 words of the in-step contact strike.
+    /// After the shots' words, the analytic strike's tubes listed so far; then per body
+    /// slot 12 words of the in-step contact strike.
     pub fn a_cs(&self) -> u32 {
-        self.a_first() + MAX_SHOTS as u32
+        self.a_first() + MAX_SHOTS as u32 + 1
     }
     pub fn atom_words(&self) -> u32 {
         self.a_cs() + 12 * self.b
@@ -389,8 +392,9 @@ pub struct Counters {
     pub broken: u32,
     pub pieces: u32,
     /// Bits: 1 no free slot, 2 a mass sum out of range, 4 a union did not settle, 8 the
-    /// impact pulse pool overflowed (`pool_cap`), 16 an analytic strike's thickness did not
-    /// settle within [`IL_PASSES`], 32 a load-path block was not positive definite.
+    /// impact pulse pool overflowed (`pool_cap`), 32 a load-path block was not positive
+    /// definite (16, an analytic strike's thickness past a cap of passes, is no longer set:
+    /// its run has no cap).
     pub error: u32,
     pub split_frames: u32,
     /// Analytic strikes by outcome (`fr_il_strike`), in all.
@@ -486,7 +490,7 @@ const BINDINGS: [Binding; 29] = [
     Binding::Storage,   // the load path's bond sides
 ];
 
-const ENTRIES: [&str; 69] = [
+const ENTRIES: [&str; 73] = [
     "fr_loads",
     "fr_breaks",
     "fr_gate",
@@ -526,8 +530,10 @@ const ENTRIES: [&str; 69] = [
     "fr_il_first_reset",
     "fr_il_first",
     "fr_il_begin",
-    "fr_il_extend_even",
-    "fr_il_extend_odd",
+    "fr_il_tube_count",
+    "fr_il_tube_base",
+    "fr_il_tube_collect",
+    "fr_il_run",
     "fr_il_strike",
     "fr_il_mark",
     "fr_il_breaks",
@@ -550,8 +556,10 @@ const ENTRIES: [&str; 69] = [
     "fr_cs_fix",
     "fr_cs_clean",
     "fr_csl_begin",
-    "fr_csl_extend_even",
-    "fr_csl_extend_odd",
+    "fr_csl_tube_count",
+    "fr_csl_tube_base",
+    "fr_csl_tube_collect",
+    "fr_csl_run",
     "fr_csl_strike",
     "fr_csl_mark",
     "fr_csl_breaks",
@@ -739,7 +747,6 @@ impl GpuFracture {
             ext_chunks,
             ext_adj,
             ext_mat,
-            il_passes: IL_PASSES,
             lp_scale: LP_SCALE,
             cs_sweeps: t.contact_sweeps,
             cs_row_cap: t.max_contacts,
@@ -1031,9 +1038,11 @@ impl GpuFracture {
                     self.direct(&mut pass, "fr_il_first_reset", MAX_SHOTS);
                     self.direct(&mut pass, "fr_il_first", b);
                     self.direct(&mut pass, "fr_il_begin", b);
-                    for p in 0..IL_PASSES {
-                        self.direct(&mut pass, if p % 2 == 0 { "fr_il_extend_even" } else { "fr_il_extend_odd" }, n);
-                    }
+                    self.direct(&mut pass, "fr_il_tube_count", n);
+                    self.direct(&mut pass, "fr_il_tube_base", b);
+                    self.direct(&mut pass, "fr_il_tube_collect", n);
+                    // A group per body slot.
+                    self.direct(&mut pass, "fr_il_run", 64 * b);
                     self.direct(&mut pass, "fr_il_strike", b);
                     self.direct(&mut pass, "fr_il_mark", n);
                     self.direct(&mut pass, "fr_il_breaks", e);
@@ -1097,9 +1106,11 @@ impl GpuFracture {
                 self.indirect(&mut p, "fr_cs_solve", ARG_CS_BODIES, None);
             } else if analytic {
                 self.indirect(&mut p, "fr_csl_begin", ARG_CS_SLOTS, None);
-                for i in 0..IL_PASSES {
-                    self.indirect(&mut p, if i % 2 == 0 { "fr_csl_extend_even" } else { "fr_csl_extend_odd" }, ARG_CS_CHUNKS, None);
-                }
+                self.indirect(&mut p, "fr_csl_tube_count", ARG_CS_CHUNKS, None);
+                self.indirect(&mut p, "fr_csl_tube_base", ARG_CS_SLOTS, None);
+                self.indirect(&mut p, "fr_csl_tube_collect", ARG_CS_CHUNKS, None);
+                // A group per struck structure.
+                self.indirect(&mut p, "fr_csl_run", ARG_CS_BODIES, None);
                 self.indirect(&mut p, "fr_csl_strike", ARG_CS_SLOTS, None);
                 self.indirect(&mut p, "fr_csl_mark", ARG_CS_CHUNKS, None);
                 self.indirect(&mut p, "fr_csl_breaks", ARG_CS_BONDS, None);

@@ -73,7 +73,6 @@ struct FractureParams
     uint ext_chunks;     // `ext` offsets (float4s): the chunks' records, their bonds' list, the materials
     uint ext_adj;
     uint ext_mat;
-    uint il_passes;      // the thickness's passes (even)
     float lp_scale;      // fixed-point scale of the load path's per-body sums
     uint cs_sweeps;      // the in-step contact fracture: on (> 0), the load path's sweeps (even)
     uint cs_row_cap;     // the engine's contact rows, at most
@@ -172,7 +171,7 @@ static const uint C_FRAME_BROKEN = 0; // bonds broken this frame (fr_gate clears
 static const uint C_BROKEN = 1;       // bonds broken in all
 static const uint C_PIECES = 2;       // new bodies in all
 static const uint C_ERROR = 3;        // bits: 1 no free slot, 2 a mass sum out of range, 4 a union did not settle, 8 a pulse found no room,
-                                      // 16 a strike's thickness did not settle, 32 a load-path block was not positive definite
+                                      // 32 a load-path block was not positive definite (16 is no longer set)
 static const uint C_SPLIT_FRAMES = 4;
 static const uint C_POOL_TOP = 5;     // + the half: pulses claimed in it this frame (5, 6)
 // The analytic strikes' outcomes, in all (`fr_il_strike`), and the load path's largest
@@ -1253,12 +1252,18 @@ uint lp_l(uint k) { return LP_CHUNK * k + 8; }
 uint lp_body(uint b) { return LP_CHUNK * params.chunk_count + 7 * b; }
 
 // `atom`: per body slot 14 words of the load path's sums (force, moment: 3 x 64 bits each;
-// lowest chunk; supported), then per body slot 4 words of the analytic strike: its
-// thickness's two copies, its plug's mass (64-bit fixed point, `scale_m`).
+// lowest chunk; supported), then per body slot 6 words of the analytic strike: its run's
+// end along the path, its tube's count, its plug's mass (64-bit fixed point, `scale_m`),
+// its tube's start in the list and fill (`fr_il_tube_*`).
 uint a_lp(uint b) { return a_strike() + 9 * params.body_count + 14 * b; }
-uint a_il(uint b) { return a_strike() + 23 * params.body_count + 4 * b; }
+uint a_il(uint b) { return a_strike() + 23 * params.body_count + 6 * b; }
 // Per shot (`MAX_SHOTS`): the earliest strike time of this frame's strikes (float bits).
-uint a_first(uint shot) { return a_strike() + 27 * params.body_count + shot; }
+uint a_first(uint shot) { return a_strike() + 29 * params.body_count + shot; }
+// The tubes listed so far (`fr_il_tube_base`), after the shots' words.
+uint a_il_cursor() { return a_first(0) + 64; }
+// `work`: the struck bodies' tubes (2 words per chunk: its interval along the path), listed
+// body by body, after the in-step lists.
+uint w_il_tube() { return w_carry() + 2 * params.chunk_count + params.body_count; }
 
 // `add64` for terms up to 2^62 (a load's): the magnitude split into two words exactly (it
 // has 24 significant bits), negated as a 64-bit integer.
@@ -1690,11 +1695,15 @@ void fr_lp_breaks(uint3 id: SV_DispatchThreadID)
 //   fr_il_begin        one thread per struck body: the thickness run starts at the entry
 //                      chunk's far side (along the path, its box widened by the striker's
 //                      radius);
-//   fr_il_extend_even, fr_il_extend_odd
-//                      `il_passes` passes, one thread per chunk of a struck body: a chunk
-//                      whose interval starts within the run extends it (each pass reads one
-//                      copy and writes the other, so a pass's result does not depend on the
-//                      threads' order); the run must stop growing within the passes;
+//   fr_il_tube_count, fr_il_tube_base, fr_il_tube_collect
+//                      one thread per chunk (per struck body): the tube, the struck body's
+//                      chunks whose interval along the path (their box widened by the
+//                      striker's radius) ends past the run's start, listed body by body
+//                      (where an interval lands in the list depends on the threads' order;
+//                      the run does not);
+//   fr_il_run          one group per struck body: the run grows over every tube interval
+//                      that starts within it until none does (no cap: each round reaches a
+//                      further interval's end, at most the tube's count of rounds);
 //   fr_il_strike       one thread per struck body: the closed forms (impact_local.rs
 //                      `strike`), the outcome counted and recorded; a perforating striker's
 //                      fracture work, or the contact of one that does not get through
@@ -1731,7 +1740,7 @@ static const uint IL_PERFORATE = 8;
 // fill; whether it is listed; the complements of the strike's other collider and of its
 // feature and side; its row and side (`2 row + side + 1`).
 static const uint CS_WORDS = 12;
-uint a_cs(uint b) { return a_first(0) + 64 + CS_WORDS * b; }
+uint a_cs(uint b) { return a_il_cursor() + 1 + CS_WORDS * b; }
 
 bool cs_struck(uint b)
 {
@@ -1854,6 +1863,8 @@ float2 il_interval(uint k, float3 p, float3 d, float pad)
 [numthreads(64, 1, 1)]
 void fr_il_first_reset(uint3 id: SV_DispatchThreadID)
 {
+    if (id.x == 0)
+        atom[a_il_cursor()].store(0u);
     if (id.x < params.shot_count)
         atom[a_first(id.x)].store(0x7f800000u);
 }
@@ -1894,33 +1905,99 @@ void il_begin<let SRC : uint>(uint b)
     float speed;
     il_path<SRC>(b, contact, d, speed);
     float2 t = il_interval(il_entry<SRC>(b), contact, d, il_striker<SRC>(b).radius);
-    uint end = asuint(max(t.y, 0.0));
-    atom[a_il(b)].store(end);
-    atom[a_il(b) + 1].store(end);
-    atom[a_il(b) + 2].store(0u);
-    atom[a_il(b) + 3].store(0u);
+    atom[a_il(b)].store(asuint(max(t.y, 0.0)));
+    for (uint i = 1; i < 6; i++)
+        atom[a_il(b) + i].store(0u);
 }
 
-void il_extend<let SRC : uint>(uint k, uint from)
+// Chunk `k`'s interval along its struck body's path (`b`), when it is in the body's tube:
+// it ends past the run's start (`il_begin`).
+bool il_tube<let SRC : uint>(uint k, out uint b, out float2 t)
 {
+    b = 0;
+    t = float2(1.0, 0.0);
     if (k >= params.chunk_count)
-        return;
-    uint b = body_of(k);
+        return false;
+    b = body_of(k);
     if (!il_struck<SRC>(b))
-        return;
+        return false;
     float3 contact;
     float3 d;
     float speed;
     il_path<SRC>(b, contact, d, speed);
+    t = il_interval(k, contact, d, il_striker<SRC>(b).radius);
+    return t.x <= t.y && t.y > asfloat(atom[a_il(b)].load());
+}
+
+void il_tube_count<let SRC : uint>(uint k)
+{
+    uint b;
+    float2 t;
+    if (il_tube<SRC>(k, b, t))
+        atom[a_il(b) + 1].add(1u);
+}
+
+void il_tube_base<let SRC : uint>(uint b)
+{
+    if (b < params.body_count && il_struck<SRC>(b))
+        atom[a_il(b) + 4].store(atom[a_il_cursor()].add(atom[a_il(b) + 1].load()));
+}
+
+void il_tube_collect<let SRC : uint>(uint k)
+{
+    uint b;
+    float2 t;
+    if (!il_tube<SRC>(k, b, t))
+        return;
+    uint at = w_il_tube() + 2 * (atom[a_il(b) + 4].load() + atom[a_il(b) + 5].add(1u));
+    work[at] = asuint(t.x);
+    work[at + 1] = asuint(t.y);
+}
+
+static const uint IL_GROUP = 64;
+groupshared float g_il_best[IL_GROUP];
+
+// Struck body `b`'s run (alike in the group, thread `i`): from the entry chunk's far side,
+// each round reaches the furthest end of the tube's intervals that start within it
+// (touching within a millimetre and a 50th of the striker's radius: chunks of one wall
+// share faces; a gap wider than that is another wall), until a round reaches no further.
+// Every round passes a further interval's end, so the run settles within the tube's count
+// of rounds, however many chunks it crosses; a maximum, it does not depend on the list's
+// order. The exits are group-uniform (`group_uniform`): the rounds have barriers.
+void il_run<let SRC : uint>(uint b, uint i)
+{
+    if (group_uniform(il_struck<SRC>(b) ? 1u : 0u, i) == 0)
+        return;
     float pad = il_striker<SRC>(b).radius;
-    float end = asfloat(atom[a_il(b) + from].load());
-    uint to = a_il(b) + 1 - from;
-    atom[to].max(asuint(end));
-    float2 t = il_interval(k, contact, d, pad);
-    // Touching within a millimetre (and a 50th of the striker's radius): chunks of one
-    // wall share faces; a gap wider than that is another wall.
-    if (t.x <= t.y && t.x <= end + 1e-3 + 0.02 * pad && t.y > end)
-        atom[to].max(asuint(t.y));
+    float touch = 1e-3 + 0.02 * pad;
+    uint base = atom[a_il(b) + 4].load();
+    uint count = atom[a_il(b) + 1].load();
+    float end = group_uniform_float(asfloat(atom[a_il(b)].load()), i);
+    for (;;)
+    {
+        float best = end;
+        for (uint j = i; j < count; j += IL_GROUP)
+        {
+            uint at = w_il_tube() + 2 * (base + j);
+            if (asfloat(work[at]) <= end + touch)
+                best = max(best, asfloat(work[at + 1]));
+        }
+        g_il_best[i] = best;
+        GroupMemoryBarrierWithGroupSync();
+        for (uint step = IL_GROUP / 2; step > 0; step >>= 1)
+        {
+            if (i < step)
+                g_il_best[i] = max(g_il_best[i], g_il_best[i + step]);
+            GroupMemoryBarrierWithGroupSync();
+        }
+        float next = group_uniform_float(g_il_best[0], i);
+        GroupMemoryBarrierWithGroupSync();
+        if (!(next > end))
+            break;
+        end = next;
+    }
+    if (i == 0)
+        atom[a_il(b)].store(asuint(end));
 }
 
 // An impulse `j` along the path (the stress frame's `d`) from the striker (body `sb`, of
@@ -1973,11 +2050,7 @@ void il_strike<let SRC : uint>(uint b)
         lp[lp_body(b) + 1] = float4(0.0);
         return;
     }
-    uint e0 = asuint(atom[a_il(b)].load());
-    uint e1 = asuint(atom[a_il(b) + 1].load());
-    if (e0 != e1)
-        atom[a_counters() + C_ERROR].or(16u);
-    float h = max(asfloat(e0) - r, 1e-6);
+    float h = max(asfloat(atom[a_il(b)].load()) - r, 1e-6);
     // Prediction: already touching at the frame's start, the strike was met before (one
     // strike per contact; the engine's contact carries on from it). In the step, a contact
     // closing faster than `strike_speed` is the strike itself, touching or not.
@@ -2281,18 +2354,35 @@ void fr_il_begin(uint3 id: SV_DispatchThreadID)
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void fr_il_extend_even(uint3 id: SV_DispatchThreadID)
+void fr_il_tube_count(uint3 id: SV_DispatchThreadID)
 {
     if (params.shot_count > 0)
-        il_extend<0>(id.x, 0);
+        il_tube_count<0>(id.x);
 }
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void fr_il_extend_odd(uint3 id: SV_DispatchThreadID)
+void fr_il_tube_base(uint3 id: SV_DispatchThreadID)
 {
     if (params.shot_count > 0)
-        il_extend<0>(id.x, 1);
+        il_tube_base<0>(id.x);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_il_tube_collect(uint3 id: SV_DispatchThreadID)
+{
+    if (params.shot_count > 0)
+        il_tube_collect<0>(id.x);
+}
+
+// A group per body slot (most leave at once: not struck).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_il_run(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    if (params.shot_count > 0)
+        il_run<0>(group.x, thread.x);
 }
 
 [shader("compute")]
@@ -2337,16 +2427,31 @@ void fr_csl_begin(uint3 id: SV_DispatchThreadID)
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void fr_csl_extend_even(uint3 id: SV_DispatchThreadID)
+void fr_csl_tube_count(uint3 id: SV_DispatchThreadID)
 {
-    il_extend<1>(id.x, 0);
+    il_tube_count<1>(id.x);
 }
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void fr_csl_extend_odd(uint3 id: SV_DispatchThreadID)
+void fr_csl_tube_base(uint3 id: SV_DispatchThreadID)
 {
-    il_extend<1>(id.x, 1);
+    il_tube_base<1>(id.x);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_csl_tube_collect(uint3 id: SV_DispatchThreadID)
+{
+    il_tube_collect<1>(id.x);
+}
+
+// A group per struck structure (`fr_cs_record`'s list).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_csl_run(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
+{
+    il_run<1>(work[w_cs_bodies() + group.x], thread.x);
 }
 
 [shader("compute")]
@@ -2508,6 +2613,7 @@ void fr_cs_begin(uint3 id: SV_DispatchThreadID)
 {
     atom[a_counters() + C_CS_BODIES].store(0u);
     atom[a_counters() + C_CS_CURSOR].store(0u);
+    atom[a_il_cursor()].store(0u);
     // The detection sized by the step's contact rows, not the engine's capacity.
     set_args(ARG_CS_ROWS, groups_of(cs_rows(), 64));
 }

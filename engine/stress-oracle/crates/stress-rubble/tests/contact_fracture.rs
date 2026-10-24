@@ -343,6 +343,33 @@ fn the_analytic_strike_judges_as_its_host_twin() {
     assert!(outcomes[0] & 8 == 0 && outcomes[2] & 8 != 0, "below the limit no hole, above it one");
 }
 
+/// The analytic strike's thickness has no cap: through a wall 40 chunks thick along the
+/// path (4 m), the run takes about 20 rounds, past the 8 fixed passes it once had, and covers
+/// the whole wall. This holds in the step and in the end-of-frame prediction, with no error.
+#[test]
+fn the_analytic_thickness_crosses_a_thick_wall() {
+    let gpu = Gpu::new().expect("GPU");
+    let scene = prepared(shot_wall(40, true), Profile::ImpactLocal);
+    for contact in [true, false] {
+        let options = FractureOptions { contact: Some(contact), toi_ccd: Some(true) };
+        let mut w = ThresholdWorld::with_options(&gpu, &scene, R, steel_mass(R), Profile::ImpactLocal, options).expect("fracture world");
+        w.set_strike_prediction(&gpu, !contact).expect("prediction");
+        assert!(w.launch(&gpu, &ball(30.0)));
+        let wall = w.tables.chunk_body[0] as usize;
+        let mut thickness = 0.0;
+        for _ in 0..30 {
+            w.step_frame(&gpu).expect("frame");
+            thickness = w.fracture.strike_records(&gpu)[wall].thickness;
+            if thickness > 0.0 {
+                break;
+            }
+        }
+        println!("contact {contact}: thickness {thickness}");
+        assert_eq!(w.fracture.counters(&gpu).error, 0, "no error bits");
+        assert!((thickness as f64 - 4.0).abs() < 1e-3, "contact {contact}: the whole wall along the path, {thickness}");
+    }
+}
+
 /// Debris strikes too, with no shot, whichever solver: a free concrete block (2 x 2 x 2
 /// chunks of 0.1 m) at 8 m/s into a 0.4 m wall is a strike; against a wall a thousand
 /// times stronger nothing breaks. (Debris is not a CCD body: much faster, a block crosses
