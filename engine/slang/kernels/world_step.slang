@@ -4907,11 +4907,12 @@ float3 bodyAngularVelocity(BodyState b, float dt)
     return dq.w < 0.0 ? -av : av;
 }
 
-// primalApply for a body with motion locks: locked rows and columns become
-// identity, so their deltas are zero and the free axes solve consistently. A
-// separate function, so the unlocked path compiles exactly as before on
-// fast-math backends.
-void primalApplyLocked(uint bodyIdx, Mat6 A, Vec6 rhs, BodyState b)
+// The Newton update of a body with motion locks: locked rows and columns
+// become identity, so their deltas are zero and the free axes solve
+// consistently. Leaves `b`'s pose updated; false when the step is rejected. A
+// separate function, so the unlocked path compiles as before on fast-math
+// backends; primalApply publishes either pose from the same two stores.
+bool primalLockedPose(Mat6 A, Vec6 rhs, inout BodyState b)
 {
     AvbdParams p = PARAMS;
     uint locks = bodyLocks(b);
@@ -4938,12 +4939,11 @@ void primalApplyLocked(uint bodyIdx, Mat6 A, Vec6 rhs, BodyState b)
     if (len > maxLin && len > 1e-12) dlin *= maxLin / len;
     float alen = length(dang);
     if (alen > p.trustAng && alen > 1e-12) dang *= p.trustAng / alen;
-    if (dlin.x != dlin.x || dlin.y != dlin.y || dlin.z != dlin.z) return;
-    if (dang.x != dang.x || dang.y != dang.y || dang.z != dang.z) return;
+    if (dlin.x != dlin.x || dlin.y != dlin.y || dlin.z != dlin.z) return false;
+    if (dang.x != dang.x || dang.y != dang.y || dang.z != dang.z) return false;
     b.position += dlin;
     b.orientation = quatNormalize(b.orientation + quatMul(float4(dang, 0.0), b.orientation) * 0.5);
-    gBodies[bodyIdx].position = b.position;
-    gBodies[bodyIdx].orientation = b.orientation;
+    return true;
 }
 
 void primalApply(uint bodyIdx, Mat6 A, Vec6 rhs)
@@ -4954,9 +4954,10 @@ void primalApply(uint bodyIdx, Mat6 A, Vec6 rhs)
         return;
     if (bodyLocks(b) != 0u)
     {
-        primalApplyLocked(bodyIdx, A, rhs, b);
-        return;
+        if (!primalLockedPose(A, rhs, b)) return;
     }
+    else
+    {
     AvbdParams p = PARAMS;
     uint floors = 0;
     Vec6 neg = rhs;
@@ -4977,6 +4978,7 @@ void primalApply(uint bodyIdx, Mat6 A, Vec6 rhs)
     // three-avbd qadd: normalize(q + ½·(δω,0)·q) — first-order chart matching
     // Taylor C / qsub. Full exp-map quatApplyDelta disagrees for large δω.
     b.orientation = quatNormalize(b.orientation + quatMul(float4(dang, 0.0), b.orientation) * 0.5);
+    }
     gBodies[bodyIdx].position = b.position;
     gBodies[bodyIdx].orientation = b.orientation;
 }
