@@ -6,6 +6,7 @@
 #define narrowphase narrowphase_copy_persistent
 #define narrowphase_defer narrowphase_defer_copy_persistent
 #define narrowphase_fresh narrowphase_fresh_copy_persistent
+#define ccd_emit ccd_emit_copy_persistent
 #define persist_contacts persist_contacts_copy_persistent
 #define persist_list persist_list_copy_persistent
 #define write_work_args write_work_args_copy_persistent

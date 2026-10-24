@@ -148,7 +148,9 @@ impl ThresholdWorld {
                 signature: 0,
                 geometry: BodyGeometry::Sphere { radius: shot_radius, mass: shot_mass },
                 fixed: true,
-                ccd: false,
+                // With TOI CCD (`set_toi_ccd`), BODY_CCD on the slot: a fired shot gets
+                // time-of-impact contacts.
+                ccd: engine.toi_ccd(),
                 pose: park(i),
                 velocity: Vec3::ZERO,
                 angular_velocity: Vec3::ZERO,
@@ -316,7 +318,8 @@ impl ThresholdWorld {
         let p = to_rubble(Vec3::from_array(desc.position));
         let v = to_rubble(Vec3::from_array(desc.velocity));
         let w = to_rubble(Vec3::from_array(desc.angular_velocity));
-        let flags = engine_schema::BodyFlags::Dynamic as u32 | engine_schema::BodyFlags::Awake as u32;
+        let ccd = if self.engine.toi_ccd() { engine_schema::BODY_CCD } else { 0 };
+        let flags = engine_schema::BodyFlags::Dynamic as u32 | engine_schema::BodyFlags::Awake as u32 | ccd;
         let record = BodyState {
             position: p,
             inv_mass: (1.0 / desc.mass) as f32,
