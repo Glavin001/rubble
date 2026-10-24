@@ -51,8 +51,9 @@ Render graph (RDG), one GPU, one device:
   [async compute]  Rubble step x k (replayed engine_exec plan)
                      -> pose_pack (current + previous pose, 32 B/body)
                      -> fracture views (chunk -> body)    -> soft_skin (vertices, normals, strain, torn)
-  [graphics]       cull + bucket (compute, GPU)  -> indirect draws with the Rubble vertex factory
-                   base pass, VSM shadows, velocity (motion vectors from the previous pose)
+  [GPU Scene write] compute: poses -> instance transforms (rigid, chunks); soft_frames -> bones
+  [graphics]       Unreal's own paths: Nanite / instanced meshes, skeletal meshes, VSM, Lumen,
+                   velocity (motion vectors from the previous pose)
 ```
 
 ### 1. Rubble's buffers live on Unreal's GPU device
@@ -227,14 +228,18 @@ All of it is asynchronous, 1–2 frames late, and grows with events rather than 
 
 ### 6. Rendering features at this scale
 
-- **Nanite:** not for simulated bodies (custom vertex factory). Static scenery stays Nanite.
+- **Nanite:** on for simulated bodies. Rigid bodies and chunks are GPU Scene instances (section
+  2). Soft cars are Nanite skeletal meshes (section 4). Where the platform has no Nanite, the
+  same primitives draw as ordinary instanced and skeletal meshes.
 - **Virtual shadow maps:** moving instances invalidate their pages every frame, which is a
-  known cost at 100k awake. Distant moving geometry can use a coarser shadow LOD, which changes
-  shadows, not physics.
-- **Lumen:** software tracing doesn't see custom vertex factories, so dynamic bodies are lit by
-  screen traces and the static world's surface cache. Hardware ray tracing would mean rebuilding
-  bottom-level structures for 100k movers every frame, which is too costly.
-- **Motion blur and TSR** come from the per-instance and per-vertex motion vectors.
+  known cost at 100k awake. It needs measuring on an SM6 platform. Any coarser shadow LOD for
+  distant movers is a visual trade-off for the user to decide, and changes shadows, not physics.
+- **Lumen:** every body is lit by Lumen. Large bodies also occlude and bounce light in Lumen's
+  world-space tracing, while GPU-only debris does not (the hybrid in section 2). Hardware ray
+  tracing would mean rebuilding bottom-level structures for 100k movers every frame, which is
+  too costly. Software Lumen is the default.
+- **Motion blur and TSR** come from the previous-frame transforms written with each instance and
+  bone.
 
 ## Frame budget (120 FPS, 8.3 ms)
 

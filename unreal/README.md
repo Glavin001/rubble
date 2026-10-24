@@ -5,6 +5,9 @@ This is a single-player Unreal client for Rubble's web demos: rigid scenes (`dem
 through its C ABI (`engine/crates/engine-ffi/include/rubble.h`). Unreal adds the look: Lumen,
 virtual shadow maps, a physical sky, volumetric clouds and fog, PBR materials and cosmetic debris.
 
+The at-scale design is in [DESIGN.md](DESIGN.md), and the plan and status are in
+[PLAN.md](PLAN.md).
+
 ## Run
 
 ```bash
