@@ -34,7 +34,7 @@
 
 ## Cursor Cloud specific instructions
 
-> All standard build/test/lint/web commands and prerequisites are in `README.md`.
+> All standard build/test/lint/web commands and prerequisites are in `CONTRIBUTING.md`.
 > This section covers **only** Cloud-Agent-specific setup and caveats.
 
 ### Shell environment
@@ -62,7 +62,7 @@ DISPLAY=:1 cargo run -p rubble-viewer --example demo_3d --release
 ### Chrome WebGPU in this VM
 
 The system Chrome `.desktop` entry has been patched with the SwiftShader
-WebGPU flags documented in `README.md → Chrome WebGPU without a GPU`.
+WebGPU flags documented in `CONTRIBUTING.md → Chrome WebGPU without a GPU`.
 If Chrome is already running without those flags, kill it and relaunch so
 the web demos render properly.
 
@@ -71,4 +71,4 @@ the web demos render properly.
 The VM update script installs: `mesa-vulkan-drivers`, `libxkbcommon-x11-0`,
 `libxcb-xkb1`, Rust stable + `rustfmt` + `clippy`, `wasm32-unknown-unknown`
 target, `cargo-nextest`, and `npm ci` for `web/`. It does **not** start any
-services. See `README.md` for how to run builds, tests, and servers.
+services. See `CONTRIBUTING.md` for how to run builds, tests, and servers.
