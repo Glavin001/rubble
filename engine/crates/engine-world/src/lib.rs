@@ -294,18 +294,19 @@ fn retired_collider(body: u32) -> Collider {
 }
 
 /// A simulated world.
-/// Host-owned buffers the step copies its render poses into ([`World::export_poses`]).
-struct PoseExport {
-    current: wgpu::Buffer,
-    current_offset: u64,
+/// Pose exports into host-owned buffers ([`World::export_poses`]).
+struct PoseExports {
+    /// The poses before the latest step (Rubble-owned, a copy of the pose buffer taken at the
+    /// start of each step), so an export carries that step's own previous poses.
     previous: wgpu::Buffer,
-    previous_offset: u64,
-    bytes: u64,
+    /// Tickets of exports whose GPU copies have finished.
+    completed: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    next_ticket: u64,
 }
 
 pub struct World {
     sim: WgpuSim,
-    pose_export: Option<PoseExport>,
+    pose_exports: Option<PoseExports>,
     hulls: HullArena,
     bodies: Vec<BodySlot>,
     free_bodies: Vec<u32>,
@@ -386,7 +387,7 @@ impl World {
         let readback = ReadbackRing::new(&sim, def.readback_frames);
         Ok(Self {
             sim,
-            pose_export: None,
+            pose_exports: None,
             hulls: HullArena::new(),
             bodies: Vec::new(),
             free_bodies: Vec::new(),
@@ -423,19 +424,24 @@ impl World {
     }
 
     /// The simulation underneath, for reads this API does not cover yet.
-    /// Copy every step's render poses into host-owned GPU buffers: `current` gets this step's
-    /// poses and `previous` the step before's, at the given byte offsets, `bytes` long (32-byte
-    /// [`engine_webgpu::PoseRecord`]s in Rubble's frame, indexed by
-    /// [`World::body_pose_index`]). Renderers on the same device read them in place to draw and
-    /// interpolate without a readback. Lossless: the step computes the same either way.
+    /// Copy the latest step's render poses into host-owned GPU buffers on the same device:
+    /// `current` gets that step's poses and `previous` the poses before it, at the given byte
+    /// offsets, `bytes` long (32-byte [`engine_webgpu::PoseRecord`]s in Rubble's frame, indexed
+    /// by [`World::body_pose_index`]). Renderers read them in place to draw and interpolate
+    /// within the latest step, with no readback.
+    ///
+    /// The copies are submitted now. The result is a ticket: the host reads the buffers only
+    /// once [`World::completed_pose_export`] reaches it, and must not reuse them for an export
+    /// while its own GPU work still reads them (host buffers need not be hazard-tracked).
+    /// Lossless: the step computes the same either way.
     pub fn export_poses(
         &mut self,
-        current: wgpu::Buffer,
+        current: &wgpu::Buffer,
         current_offset: u64,
-        previous: wgpu::Buffer,
+        previous: &wgpu::Buffer,
         previous_offset: u64,
         bytes: u64,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<u64> {
         let have = self.sim.pose_buffer().size();
         anyhow::ensure!(bytes > 0 && bytes <= have, "export of {bytes} bytes: the pose buffer holds {have}");
         anyhow::ensure!(
@@ -446,14 +452,47 @@ impl World {
             current_offset + bytes <= current.size() && previous_offset + bytes <= previous.size(),
             "pose export range past the end of a host buffer"
         );
-        self.pose_export = Some(PoseExport {
-            current,
-            current_offset,
-            previous,
-            previous_offset,
-            bytes,
+        let mut enc = self.sim.device().create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("pose export"),
         });
-        Ok(())
+        if self.pose_exports.is_none() {
+            // From now on each step keeps the poses before it. Until the next step, previous =
+            // current (nothing has moved since).
+            let previous = self.sim.device().create_buffer(&wgpu::BufferDescriptor {
+                label: Some("poses before the latest step"),
+                size: have,
+                usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            enc.copy_buffer_to_buffer(self.sim.pose_buffer(), 0, &previous, 0, have);
+            self.pose_exports = Some(PoseExports {
+                previous,
+                completed: Default::default(),
+                next_ticket: 1,
+            });
+        }
+        let exports = self.pose_exports.as_mut().expect("set above");
+        enc.copy_buffer_to_buffer(self.sim.pose_buffer(), 0, current, current_offset, bytes);
+        enc.copy_buffer_to_buffer(&exports.previous, 0, previous, previous_offset, bytes);
+        let ticket = exports.next_ticket;
+        exports.next_ticket += 1;
+        let queue = self.sim.queue();
+        queue.submit([enc.finish()]);
+        let completed = exports.completed.clone();
+        queue.on_submitted_work_done(move || {
+            completed.fetch_max(ticket, std::sync::atomic::Ordering::AcqRel);
+        });
+        Ok(ticket)
+    }
+
+    /// The latest pose export ([`World::export_poses`]) whose copies have finished on the GPU,
+    /// 0 for none. Never waits.
+    pub fn completed_pose_export(&self) -> anyhow::Result<u64> {
+        let Some(exports) = &self.pose_exports else {
+            return Ok(0);
+        };
+        let _ = self.sim.device().poll(wgpu::PollType::Poll);
+        Ok(exports.completed.load(std::sync::atomic::Ordering::Acquire))
     }
 
     /// Where a body's pose is in the pose buffer and its exports (its GPU slot).
@@ -1349,18 +1388,15 @@ impl World {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("world step"),
             });
+        if let Some(e) = &self.pose_exports {
+            // The poses before this step, for exports (a GPU copy in the step's own submission).
+            // If the step does not run, nothing moves and previous = current is right.
+            enc.copy_buffer_to_buffer(self.sim.pose_buffer(), 0, &e.previous, 0, e.previous.size());
+        }
         self.sim
             .step_encode(&mut enc)
             .map_err(|e| anyhow::anyhow!("step: {e:?}"))?;
         let ran = self.sim.last_step_ran();
-        if ran {
-            if let Some(e) = &self.pose_export {
-                // The host's previous poses take its current ones, then the current take
-                // this step's: GPU copies in the step's own submission, nothing on the CPU.
-                enc.copy_buffer_to_buffer(&e.current, e.current_offset, &e.previous, e.previous_offset, e.bytes);
-                enc.copy_buffer_to_buffer(self.sim.pose_buffer(), 0, &e.current, e.current_offset, e.bytes);
-            }
-        }
         let mut mapped = None;
         if ran {
             // Ray results are never dropped: a frame with queries waits for a slot.

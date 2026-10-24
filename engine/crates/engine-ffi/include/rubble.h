@@ -535,18 +535,27 @@ enum RbResult rbCreateWorldOnMetal(const struct RbWorldDef *def,
                                    void *mtl_command_queue,
                                    struct RbWorld **out);
 
-// Copy every step's render poses into the host's GPU buffers (`MTLBuffer*` on the world's
-// device, at byte offsets: hosts that sub-allocate pass their range). `current` gets the
-// step's poses, `previous` the step before's: `bytes` of 32-byte records indexed by
-// `rbBody_GetPoseIndex`, each `{ position xyz (f32), word, rotation xyzw (f32) }` **in
-// Rubble's frame** (Y up, metres; the renderer applies the host's axis map). GPU copies in the
-// step's own submission; nothing is read back.
+// Copy the latest step's render poses into the host's GPU buffers (`MTLBuffer*` on the
+// world's device, at byte offsets: hosts that sub-allocate pass their range). `current` gets
+// the latest step's poses, `previous` the poses before that step: `bytes` of 32-byte records
+// indexed by `rbBody_GetPoseIndex`, each `{ position xyz (f32), word, rotation xyzw (f32) }`
+// **in Rubble's frame** (Y up, metres; the renderer applies the host's axis map).
+//
+// The GPU copies are submitted on the world's queue now, and `out_ticket` names them. Read the
+// buffers only after `rbWorld_GetCompletedPoseExport` reaches the ticket, and don't export
+// into them again while the host's own GPU work still reads them: the host's buffers need not
+// be hazard-tracked, so a ring of a few is the usual pattern. Nothing is read back.
 enum RbResult rbWorld_ExportPoses(struct RbWorld *world,
                                   void *current,
                                   uint64_t current_offset,
                                   void *previous,
                                   uint64_t previous_offset,
-                                  uint64_t bytes);
+                                  uint64_t bytes,
+                                  uint64_t *out_ticket);
+
+// The latest `rbWorld_ExportPoses` ticket whose copies have finished on the GPU (0 for none).
+// Never waits.
+enum RbResult rbWorld_GetCompletedPoseExport(struct RbWorld *world, uint64_t *out_ticket);
 
 // A body's slot in the pose buffer and its exports.
 enum RbResult rbBody_GetPoseIndex(struct RbWorld *world, RbBodyId body, uint32_t *out);

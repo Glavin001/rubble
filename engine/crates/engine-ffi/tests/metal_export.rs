@@ -1,11 +1,12 @@
 //! A world on a host's own Metal device, queue and buffers (rbCreateWorldOnMetal,
 //! rbWorld_ExportPoses): the poses exported into the host's buffers, at the host's offsets,
-//! are the poses the world reports, and the previous buffer holds the step before's.
+//! are the poses the world reports, and the previous range holds the poses before the latest
+//! step, also when a frame takes several steps.
 #![cfg(target_vendor = "apple")]
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_metal::{MTLBuffer, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions};
+use objc2_metal::{MTLBuffer, MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions};
 use rubble_ffi::*;
 use std::ptr;
 
@@ -61,19 +62,36 @@ fn poses_land_in_the_hosts_buffers() {
             .newBufferWithLength_options((bytes * 2 + 512) as usize, MTLResourceOptions::StorageModeShared)
             .expect("a host buffer");
         let (cur_off, prev_off) = (256u64, 256 + bytes);
-        ok(rbWorld_ExportPoses(
-            w,
-            Retained::as_ptr(&host) as *mut _,
-            cur_off,
-            Retained::as_ptr(&host) as *mut _,
-            prev_off,
-            bytes,
-        ));
-        let mut last_y = f32::INFINITY;
-        for step in 0..30 {
-            ok(rbWorld_Step(w));
-            let mut f = std::mem::zeroed::<RbFrame>();
-            ok(rbWorld_Poll(w, true, true, &mut f));
+        // The box's height after each step, starting with its spawn height.
+        let mut ys = vec![3.0f32];
+        let mut last_ticket = 0;
+        for frame in 0..20 {
+            // One or two steps per frame, then one export.
+            for _ in 0..1 + frame % 2 {
+                let mut t = RbTransform::default();
+                ok(rbWorld_Step(w));
+                let mut f = std::mem::zeroed::<RbFrame>();
+                ok(rbWorld_Poll(w, true, true, &mut f));
+                ok(rbBody_GetTransform(w, boxy, &mut t));
+                ys.push(t.p.y);
+            }
+            let before_latest = ys[ys.len() - 2];
+            let mut ticket = 0;
+            ok(rbWorld_ExportPoses(
+                w,
+                Retained::as_ptr(&host) as *mut _,
+                cur_off,
+                Retained::as_ptr(&host) as *mut _,
+                prev_off,
+                bytes,
+                &mut ticket,
+            ));
+            assert!(ticket > last_ticket, "tickets increase");
+            last_ticket = ticket;
+            let mut done = 0;
+            while done < ticket {
+                ok(rbWorld_GetCompletedPoseExport(w, &mut done));
+            }
             let mut t = RbTransform::default();
             ok(rbBody_GetTransform(w, boxy, &mut t));
             let cur = poses(&host, cur_off as usize, slot);
@@ -81,13 +99,17 @@ fn poses_land_in_the_hosts_buffers() {
             // The export holds the reported pose (body origin = centre of mass for a centred box).
             for k in 0..3 {
                 let want = [t.p.x, t.p.y, t.p.z][k];
-                assert!((cur.p[k] - want).abs() < 1e-5, "step {step}: exported {:?} vs reported {:?}", cur.p, t.p);
+                assert!((cur.p[k] - want).abs() < 1e-5, "frame {frame}: exported {:?} vs reported {:?}", cur.p, t.p);
             }
-            if step > 0 {
-                assert!((prev.p[1] - last_y).abs() < 1e-5, "step {step}: previous {:?} vs last {last_y}", prev.p);
+            if frame > 0 {
+                assert!(
+                    (prev.p[1] - before_latest).abs() < 1e-5,
+                    "frame {frame}: previous {} vs the pose before the latest step {before_latest}",
+                    prev.p[1]
+                );
             }
-            last_y = cur.p[1];
         }
+        let last_y = *ys.last().unwrap();
         assert!(last_y < 3.0, "the box fell ({last_y})");
         rbDestroyWorld(w);
     }

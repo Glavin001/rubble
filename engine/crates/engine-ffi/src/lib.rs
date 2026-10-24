@@ -582,6 +582,10 @@ pub struct RbWorld {
     /// Joints whose drive is a length (prismatic, distance); the rest drive
     /// angles (`rbJoint_SetDrive`).
     linear_joints: std::collections::HashSet<u64>,
+    /// Host GPU buffers imported for pose exports, by native handle (each imported once and
+    /// retained while the world lives).
+    #[cfg(target_vendor = "apple")]
+    imported: std::collections::HashMap<usize, wgpu::Buffer>,
 }
 
 thread_local! {
@@ -1130,6 +1134,8 @@ unsafe fn create_world(def: *const RbWorldDef, gpu: GpuContext, out: *mut *mut R
         store: FrameStore::default(),
         pending: VecDeque::new(),
         linear_joints: Default::default(),
+        #[cfg(target_vendor = "apple")]
+        imported: Default::default(),
     });
     write(out, Box::into_raw(boxed))
 }
@@ -1164,12 +1170,16 @@ pub unsafe extern "C" fn rbCreateWorldOnMetal(
     }
 }
 
-/// Copy every step's render poses into the host's GPU buffers (`MTLBuffer*` on the world's
-/// device, at byte offsets: hosts that sub-allocate pass their range). `current` gets the
-/// step's poses, `previous` the step before's: `bytes` of 32-byte records indexed by
-/// `rbBody_GetPoseIndex`, each `{ position xyz (f32), word, rotation xyzw (f32) }` **in
-/// Rubble's frame** (Y up, metres; the renderer applies the host's axis map). GPU copies in the
-/// step's own submission; nothing is read back.
+/// Copy the latest step's render poses into the host's GPU buffers (`MTLBuffer*` on the
+/// world's device, at byte offsets: hosts that sub-allocate pass their range). `current` gets
+/// the latest step's poses, `previous` the poses before that step: `bytes` of 32-byte records
+/// indexed by `rbBody_GetPoseIndex`, each `{ position xyz (f32), word, rotation xyzw (f32) }`
+/// **in Rubble's frame** (Y up, metres; the renderer applies the host's axis map).
+///
+/// The GPU copies are submitted on the world's queue now, and `out_ticket` names them. Read the
+/// buffers only after `rbWorld_GetCompletedPoseExport` reaches the ticket, and don't export
+/// into them again while the host's own GPU work still reads them: the host's buffers need not
+/// be hazard-tracked, so a ring of a few is the usual pattern. Nothing is read back.
 #[no_mangle]
 pub unsafe extern "C" fn rbWorld_ExportPoses(
     world: *mut RbWorld,
@@ -1178,21 +1188,41 @@ pub unsafe extern "C" fn rbWorld_ExportPoses(
     previous: *mut c_void,
     previous_offset: u64,
     bytes: u64,
+    out_ticket: *mut u64,
 ) -> RbResult {
     guard_args(|| {
         let w = world_mut(world)?;
         #[cfg(target_vendor = "apple")]
         {
+            anyhow::ensure!(!current.is_null() && !previous.is_null(), "null host buffer");
             let device = w.world.device().clone();
-            let cur = engine_webgpu::metal_interop::import_buffer(&device, current, "host poses (current)")?;
-            let prev = engine_webgpu::metal_interop::import_buffer(&device, previous, "host poses (previous)")?;
-            w.world.export_poses(cur, current_offset, prev, previous_offset, bytes)
+            for (ptr, label) in [(current, "host poses (current)"), (previous, "host poses (previous)")] {
+                if !w.imported.contains_key(&(ptr as usize)) {
+                    let b = engine_webgpu::metal_interop::import_buffer(&device, ptr, label)?;
+                    w.imported.insert(ptr as usize, b);
+                }
+            }
+            let cur = &w.imported[&(current as usize)];
+            let prev = &w.imported[&(previous as usize)];
+            let ticket = w.world.export_poses(cur, current_offset, prev, previous_offset, bytes)?;
+            write(out_ticket, ticket)
         }
         #[cfg(not(target_vendor = "apple"))]
         {
-            let _ = (w, current, current_offset, previous, previous_offset, bytes);
+            let _ = (w, current, current_offset, previous, previous_offset, bytes, out_ticket);
             Err(anyhow::Error::new(Unsupported("rbWorld_ExportPoses imports Metal buffers (Apple platforms)")))
         }
+    })
+}
+
+/// The latest `rbWorld_ExportPoses` ticket whose copies have finished on the GPU (0 for none).
+/// Never waits.
+#[no_mangle]
+pub unsafe extern "C" fn rbWorld_GetCompletedPoseExport(world: *mut RbWorld, out_ticket: *mut u64) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let t = w.world.completed_pose_export()?;
+        write(out_ticket, t)
     })
 }
 
