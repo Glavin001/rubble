@@ -1120,7 +1120,13 @@ void broadphase_query(uint3 tid : SV_DispatchThreadID)
         uint j = 0u;
         while (j < gCounters[0].colliderCount)
         {
-            if (j != i)
+            // Bounds first: a non-plane collider whose box misses this one's is
+            // never kept, so skip it before loading its collider and body records
+            // (most pairs; the same pairs, in the same order, as testing it last).
+            Aabb pre = gAabbs[base + j];
+            bool apart = box.mx.x < pre.mn.x || pre.mx.x < box.mn.x || box.mx.y < pre.mn.y || pre.mx.y < box.mn.y
+                || box.mx.z < pre.mn.z || pre.mx.z < box.mn.z;
+            if (j != i && !(apart && gColliders[j].shape != SHAPE_PLANE))
             {
                 Collider other = gColliders[j];
                 if (other.body != col.body)

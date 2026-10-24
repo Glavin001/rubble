@@ -245,55 +245,61 @@ void softWakeBody(uint i)
 
 // A soft body sleeps and wakes as a whole: when any of its particles (or its
 // rigid core) is awake, wake every sleeping one before the step builds its lists.
+groupshared uint gsBodyFlags[2];
+groupshared float4 gsBodyLo[64];
+groupshared float4 gsBodyHi[64];
+// One 64-lane workgroup per soft body (hosts size it as bodies × 64 threads).
+uint softGroupBody(uint3 gid) { return gid.y * 32768u + gid.x; }
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void soft_wake(uint3 tid : SV_DispatchThreadID)
+void soft_wake(uint3 lid : SV_GroupThreadID, uint3 gid : SV_GroupID)
 {
-    uint s = dispatchIndex(tid);
-    if (s >= softBodyCount() || (softFlags() & SOFT_SLEEP_SYNC) == 0u) return;
-    uint4 r = softBodyRec(s);
-    uint core = asuint(softBodyRec1(s).z);
-    bool anyAwake = false, anyAsleep = false;
-    for (uint k = 0u; k < r.y; k++)
+    uint s = softGroupBody(gid), local = lid.x;
+    bool live = s < softBodyCount() && (softFlags() & SOFT_SLEEP_SYNC) != 0u;
+    uint4 r = live ? softBodyRec(s) : uint4(0, 0, 0, 0);
+    uint core = live ? asuint(softBodyRec1(s).z) : SOFT_NO_BODY;
+    if (local == 0u) { gsBodyFlags[0] = 0u; gsBodyFlags[1] = 0u; }
+    GroupMemoryBarrierWithGroupSync();
+    // [0]: something awake, [1]: something asleep (particles and the core).
+    for (uint k = local; k < r.y + 1u; k += 64u)
     {
-        BodyState b = gBodies[r.x + k];
+        uint body = k < r.y ? r.x + k : core;
+        if (body == SOFT_NO_BODY) continue;
+        BodyState b = gBodies[body];
         if (!bodyIsDynamic(b)) continue;
-        if (bodyIsSleeping(b)) anyAsleep = true; else anyAwake = true;
+        gsBodyFlags[bodyIsSleeping(b) ? 1u : 0u] = 1u;
     }
-    if (core != SOFT_NO_BODY)
-    {
-        BodyState c = gBodies[core];
-        if (bodyIsDynamic(c)) { if (bodyIsSleeping(c)) anyAsleep = true; else anyAwake = true; }
-    }
-    if (!(anyAwake && anyAsleep)) return;
-    for (uint k = 0u; k < r.y; k++) softWakeBody(r.x + k);
-    if (core != SOFT_NO_BODY) softWakeBody(core);
+    GroupMemoryBarrierWithGroupSync();
+    if (!live || gsBodyFlags[0] == 0u || gsBodyFlags[1] == 0u) return;
+    for (uint k = local; k < r.y; k += 64u) softWakeBody(r.x + k);
+    if (local == 0u && core != SOFT_NO_BODY) softWakeBody(core);
 }
 
 // Sleep candidates (gCcdFlags ≠ 0 after extract_velocity_sleep and the island
 // gate) only stand when every particle and the core of the soft body agree.
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void soft_sleep(uint3 tid : SV_DispatchThreadID)
+void soft_sleep(uint3 lid : SV_GroupThreadID, uint3 gid : SV_GroupID)
 {
-    uint s = dispatchIndex(tid);
-    if (s >= softBodyCount() || (softFlags() & SOFT_SLEEP_SYNC) == 0u) return;
-    uint4 r = softBodyRec(s);
-    uint core = asuint(softBodyRec1(s).z);
-    bool all = true;
-    for (uint k = 0u; k < r.y && all; k++)
+    uint s = softGroupBody(gid), local = lid.x;
+    bool live = s < softBodyCount() && (softFlags() & SOFT_SLEEP_SYNC) != 0u;
+    uint4 r = live ? softBodyRec(s) : uint4(0, 0, 0, 0);
+    uint core = live ? asuint(softBodyRec1(s).z) : SOFT_NO_BODY;
+    if (local == 0u) gsBodyFlags[0] = 0u;
+    GroupMemoryBarrierWithGroupSync();
+    // [0]: an awake particle (or the core) that is not a sleep candidate.
+    for (uint k = local; k < r.y + 1u; k += 64u)
     {
-        BodyState b = gBodies[r.x + k];
-        if (bodyIsDynamic(b) && !bodyIsSleeping(b) && gCcdFlags[r.x + k] == 0u) all = false;
+        uint body = k < r.y ? r.x + k : core;
+        if (body == SOFT_NO_BODY) continue;
+        BodyState b = gBodies[body];
+        if (bodyIsDynamic(b) && !bodyIsSleeping(b) && gCcdFlags[body] == 0u) gsBodyFlags[0] = 1u;
     }
-    if (all && core != SOFT_NO_BODY)
-    {
-        BodyState c = gBodies[core];
-        if (bodyIsDynamic(c) && !bodyIsSleeping(c) && gCcdFlags[core] == 0u) all = false;
-    }
-    if (all) return;
-    for (uint k = 0u; k < r.y; k++) gCcdFlags[r.x + k] = 0u;
-    if (core != SOFT_NO_BODY) gCcdFlags[core] = 0u;
+    GroupMemoryBarrierWithGroupSync();
+    if (!live || gsBodyFlags[0] == 0u) return;
+    for (uint k = local; k < r.y; k += 64u) gCcdFlags[r.x + k] = 0u;
+    if (local == 0u && core != SOFT_NO_BODY) gCcdFlags[core] = 0u;
 }
 
 // Per step, after prediction: hydro rest lengths from the steering input, clear
@@ -522,19 +528,29 @@ uint triNode(uint t, uint k) { return SU(softTriBase() + t)[k]; }
 // step's travel, for culling contact pairs.
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void soft_bounds(uint3 tid : SV_DispatchThreadID)
+void soft_bounds(uint3 lid : SV_GroupThreadID, uint3 gid : SV_GroupID)
 {
-    uint s = dispatchIndex(tid);
-    if (s >= softBodyCount()) return;
-    uint4 r = softBodyRec(s);
+    uint s = softGroupBody(gid), local = lid.x;
+    bool live = s < softBodyCount();
+    uint4 r = live ? softBodyRec(s) : uint4(0, 0, 0, 0);
     float3 mn = float3(1e30, 1e30, 1e30), mx = float3(-1e30, -1e30, -1e30);
     float travel = 0.0;
-    for (uint k = 0u; k < r.y; k++)
+    for (uint k = local; k < r.y; k += 64u)
     {
-        BodyState b = gBodies[r.x + k];
-        mn = min(mn, b.position);
-        mx = max(mx, b.position);
-        travel = max(travel, length(b.position - b.initialPos));
+        float3 x = gBodies[r.x + k].position;
+        mn = min(mn, x);
+        mx = max(mx, x);
+        travel = max(travel, length(x - gBodies[r.x + k].initialPos));
+    }
+    gsBodyLo[local] = float4(mn, travel);
+    gsBodyHi[local] = float4(mx, 0.0);
+    GroupMemoryBarrierWithGroupSync();
+    if (!live || local != 0u) return;
+    for (uint k = 1u; k < 64u; k++)
+    {
+        mn = min(mn, gsBodyLo[k].xyz);
+        mx = max(mx, gsBodyHi[k].xyz);
+        travel = max(travel, gsBodyLo[k].w);
     }
     float pad = 2.0 * travel + 0.1;
     gSoftData[softAabbBase() + 2u * s] = float4(mn - pad, 0.0);
@@ -948,13 +964,82 @@ float3 triPoint(uint4 tri, float3 w)
 }
 
 // Soft contact terms of one particle (node side and triangle-vertex side).
-void softContactsFor(uint body, uint sb, float3 x, float3 x0, uint triStart, uint triCount, uint lane, uint lanes,
+// Triangle-side contact terms of a particle at corner j of triangle tt: the
+// triangle's thin obstacle (kind 0) or the node in its slot m (kind m + 1).
+void softTriObstacleTerm(uint4 tri, uint tc, uint j, inout float3 g, inout float3x3 H)
+{
+    float4 o0 = SD(tc);
+    float4 o1 = SD(tc + 1u);
+    float4 o2 = SD(tc + 2u);
+    float C = dot(o0.xyz, triPoint(tri, o2.xyz) - o1.xyz) - o2.w;
+    softContactTerm(g, H, o2[j], C, o1.w, o0.xyz, triTravel(tri, o2.xyz));
+}
+void softTriNodeTerm(uint4 tri, uint tc, uint j, uint m, inout float3 g, inout float3x3 H)
+{
+    float4 c0 = SD(tc + 3u + 3u * m);
+    uint node = asuint(c0.w);
+    float4 c1 = SD(tc + 4u + 3u * m);
+    float3 np = softPos(node);
+    float C = dot(c0.xyz, np - triPoint(tri, c1.xyz)) - c1.w;
+    float3 u = (np - softPos0(node)) - triTravel(tri, c1.xyz);
+    softContactTerm(g, H, -c1[j], C, SD(tc + 5u + 3u * m).x, c0.xyz, u);
+}
+
+uint softContactListBase() { return SU(9u).y; }
+static const uint CONTACT_LIST_STRIDE = 4u; // engine_softbody::CONTACT_LIST_STRIDE
+static const uint CONTACT_LIST_MAX = 15u;
+static const uint CONTACT_LIST_ALL = 0xFFFFFFFFu;
+
+// Per particle, after soft_collide_tris: its triangle-side contacts this step,
+// (triangle << 5 | corner << 3 | kind), in the order softContactsFor's walk of
+// its triangles visits them. The sweep then reads only real contacts instead of
+// every slot of every triangle around it.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void soft_contact_lists(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (i >= softListCount()) return;
+    uint4 ent = SU(softListBase() + i);
+    uint body = ent.x;
+    uint ord = particleOrdinal(ent.w & 0xFFFFu, body);
+    uint base = softContactListBase() + CONTACT_LIST_STRIDE * ord;
+    uint n = 0u;
+    uint4 slot = uint4(0, 0, 0, 0);
+    if (softContactsOn() && SD(softFlagBase() + ord).x != 0.0)
+    {
+        uint adj = softAdjBase();
+        uint triStart = ent.y + 2u * (ent.z & 0xFFFFu), triCount = ent.z >> 16;
+        for (uint k = 0u; k < triCount && n <= CONTACT_LIST_MAX; k++)
+        {
+            uint wi = triStart + k;
+            uint tt = SU(adj + (wi >> 2))[wi & 3u];
+            uint4 tri = SU(softTriBase() + tt);
+            uint tc = softTriContactBase() + TRI_CONTACT_STRIDE * tt;
+            uint j = tri.x == body ? 0u : (tri.y == body ? 1u : 2u);
+            for (uint kind = 0u; kind <= TRI_NODE_CONTACTS && n <= CONTACT_LIST_MAX; kind++)
+            {
+                uint w = kind == 0u ? asuint(SD(tc).w) : asuint(SD(tc + 3u * kind).w);
+                if (w == SOFT_NONE) continue;
+                n++;
+                if (n > CONTACT_LIST_MAX) break;
+                slot[n & 3u] = (tt << 5) | (j << 3) | kind;
+                if ((n & 3u) == 3u) { gSoftData[base + (n >> 2)] = asfloat(slot); slot = uint4(0, 0, 0, 0); }
+            }
+        }
+    }
+    if ((n & 3u) != 3u && n <= CONTACT_LIST_MAX) gSoftData[base + (n >> 2)] = asfloat(slot);
+    uint4 head = SU(base);
+    head.x = n > CONTACT_LIST_MAX ? CONTACT_LIST_ALL : n;
+    gSoftData[base] = asfloat(head);
+}
+
+void softContactsFor(uint body, uint ord, float3 x, float3 x0, uint triStart, uint triCount, uint lane, uint lanes,
     inout float3 g, inout float3x3 H)
 {
     if (!softContactsOn()) return;
     // Detection flags every particle in a soft contact this step (node or
     // triangle vertex); the rest have nothing to read.
-    uint ord = particleOrdinal(sb, body);
     if (SD(softFlagBase() + ord).x == 0.0) return;
     uint ns = softNodeSlotBase() + NODE_SLOT_STRIDE * ord;
     float4 s0 = SD(ns);
@@ -966,6 +1051,23 @@ void softContactsFor(uint body, uint sb, float3 x, float3 x0, uint triStart, uin
         float C = dot(s0.xyz, x - triPoint(tri, s1.xyz)) - s1.w;
         softContactTerm(g, H, 1.0, C, SD(ns + 2u).x, s0.xyz, (x - x0) - triTravel(tri, s1.xyz));
     }
+    uint cl = softContactListBase() + CONTACT_LIST_STRIDE * ord;
+    uint n = SU(cl).x;
+    if (n != CONTACT_LIST_ALL)
+    {
+        for (uint k = lane; k < n; k += lanes)
+        {
+            uint w = k + 1u;
+            uint code = SU(cl + (w >> 2))[w & 3u];
+            uint tt = code >> 5, kind = code & 7u;
+            uint4 tri = SU(softTriBase() + tt);
+            uint tc = softTriContactBase() + TRI_CONTACT_STRIDE * tt;
+            if (kind == 0u) softTriObstacleTerm(tri, tc, (code >> 3) & 3u, g, H);
+            else softTriNodeTerm(tri, tc, (code >> 3) & 3u, kind - 1u, g, H);
+        }
+        return;
+    }
+    // Too many for the list: walk every triangle around the particle.
     uint adj = softAdjBase();
     for (uint k = lane; k < triCount; k += lanes)
     {
@@ -975,26 +1077,9 @@ void softContactsFor(uint body, uint sb, float3 x, float3 x0, uint triStart, uin
         uint tc = softTriContactBase() + TRI_CONTACT_STRIDE * tt;
         // This particle's weight in the triangle.
         uint j = tri.x == body ? 0u : (tri.y == body ? 1u : 2u);
-        float4 o0 = SD(tc);
-        if (asuint(o0.w) != SOFT_NONE)
-        {
-            float4 o1 = SD(tc + 1u);
-            float4 o2 = SD(tc + 2u);
-            float wj = o2[j];
-            float C = dot(o0.xyz, triPoint(tri, o2.xyz) - o1.xyz) - o2.w;
-            softContactTerm(g, H, wj, C, o1.w, o0.xyz, triTravel(tri, o2.xyz));
-        }
+        if (asuint(SD(tc).w) != SOFT_NONE) softTriObstacleTerm(tri, tc, j, g, H);
         for (uint m = 0u; m < TRI_NODE_CONTACTS; m++)
-        {
-            float4 c0 = SD(tc + 3u + 3u * m);
-            uint node = asuint(c0.w);
-            if (node == SOFT_NONE) continue;
-            float4 c1 = SD(tc + 4u + 3u * m);
-            float3 np = softPos(node);
-            float C = dot(c0.xyz, np - triPoint(tri, c1.xyz)) - c1.w;
-            float3 u = (np - softPos0(node)) - triTravel(tri, c1.xyz);
-            softContactTerm(g, H, -c1[j], C, SD(tc + 5u + 3u * m).x, c0.xyz, u);
-        }
+            if (asuint(SD(tc + 3u + 3u * m).w) != SOFT_NONE) softTriNodeTerm(tri, tc, j, m, g, H);
     }
 }
 
@@ -1018,8 +1103,9 @@ uint softAccumulate(uint4 ent, uint lane, uint lanes, out float3x3 H, out float3
     float h = max(p.dt, 1e-6);
 
     // Inertia, contacts and joints: the rigid accumulation, rotation frozen.
-    if (lane != 0u) {}
-    else if (SOLVE_INDEX(body) == SOLVE_INDEX(body + 1u) && (b.flags & BODY_VEHICLE) == 0u)
+    bool edges = SOLVE_INDEX(body) != SOLVE_INDEX(body + 1u) || (b.flags & BODY_VEHICLE) != 0u;
+    if (!edges && lane != 0u) {}
+    else if (!edges)
     {
         // No contact or joint edge: primalAccumulate's linear block is the inertia
         // term alone (same arithmetic), without its 6×6 accumulation.
@@ -1031,15 +1117,17 @@ uint softAccumulate(uint4 ent, uint lane, uint lanes, out float3x3 H, out float3
     }
     else
     {
+        // Its contact and joint edges strided over the particle's lanes (lane 0
+        // also adds the inertia), as the rigid colour solve splits a body.
         Mat6 A;
         Vec6 rhs;
-        primalAccumulate(body, 0u, 1u, A, rhs);
+        primalAccumulate(body, lane, lanes, A, rhs);
         H = float3x3(
             A.m[0], A.m[6], A.m[12],
             A.m[6], A.m[7], A.m[13],
             A.m[12], A.m[13], A.m[14]);
         g = float3(rhs.v[0], rhs.v[1], rhs.v[2]);
-        if (softBdf2For(particleOrdinal(ent.w & 0xFFFFu, body)))
+        if (lane == 0u && softBdf2For(particleOrdinal(ent.w & 0xFFFFu, body)))
         {
             // BDF2 inertia weight 9/4: add the other 5/4 of primalAccumulate's term.
             float k = 1.25 * (b.invMass > 1e-12 ? (1.0 / b.invMass) : 0.0) / (p.dt * p.dt);
@@ -1056,20 +1144,22 @@ uint softAccumulate(uint4 ent, uint lane, uint lanes, out float3x3 H, out float3
     float ts = softThresholdScale();
     for (uint k = lane; k < nBeams; k += lanes)
     {
-        uint w = ent.y + k;
+        // (beam, other end) pairs: the neighbour's position loads beside the beam.
+        uint w = ent.y + 2u * k, w1 = w + 1u;
         uint e = SU(adj + (w >> 2))[w & 3u];
-        SoftBeam sb = loadBeam(e);
-        if (beamBroken(sb)) continue;
-        uint other = sb.a == body ? sb.b : sb.a;
+        uint other = SU(adj + (w1 >> 2))[w1 & 3u];
         // Fields, not the 112-byte record: WGSL copies a loaded struct whole.
         float3 oPos = softPos(other);
+        float3 oPos0 = softPos0(other);
+        SoftBeam sb = loadBeam(e);
+        if (beamBroken(sb)) continue;
         float3 d = xa - oPos;
         float len = length(d);
         if (len < 1e-6) continue;
         float3 n = d / len;
         float2 el = beamElastic(sb, len, sb.penalty);
         float c = beamDampCoef(sb, len);
-        float len0 = length(xa0 - softPos0(other));
+        float len0 = length(xa0 - oPos0);
         float d1 = el.x + c / h * (len - len0);
         float d2 = el.y + c / h;
         float tension = el.x;
@@ -1087,7 +1177,7 @@ uint softAccumulate(uint4 ent, uint lane, uint lanes, out float3x3 H, out float3
         H += nn * (d2 - lat);
         H[0][0] += lat; H[1][1] += lat; H[2][2] += lat;
     }
-    softContactsFor(body, ent.w & 0xFFFFu, xa, xa0, ent.y + nBeams, ent.z >> 16, lane, lanes, g, H);
+    softContactsFor(body, particleOrdinal(ent.w & 0xFFFFu, body), xa, xa0, ent.y + 2u * nBeams, ent.z >> 16, lane, lanes, g, H);
     return SOFT_SOLVE;
 }
 
@@ -1230,6 +1320,101 @@ groupshared uint gsSoftAwake;
 static const uint SOFT_ROLE_FOLLOW = 0xFFFFFFFEu;
 static const uint SOFT_ROLE_VEHICLE = 0xFFFFFFFFu;
 
+groupshared float gsVehL[256];  // per vehicle lane: its wheel's suspension length
+groupshared float gsVehF[256];  // its wheel's normal load (after the anti-roll bars)
+groupshared uint gsVehCt[256];  // its wheel touches the ground
+
+// Lane-summed vehicle block: every lane adds its share of H's lower triangle and g
+// into lane 0's, 9 values a round through gsSoftRed (soft workgroups' buffers).
+static const uint VEH_LOWER[21] = { 0, 6, 7, 12, 13, 14, 18, 19, 20, 21, 24, 25, 26, 27, 28, 30, 31, 32, 33, 34, 35 };
+float vehBlockValue(Mat6 H, Vec6 g, uint k) { return k < 21u ? H.m[VEH_LOWER[k]] : g.v[k - 21u]; }
+
+// vehicle_iterate for 64 vehicles, four lanes each (one wheel or spin group per
+// lane): suspension per wheel, anti-roll bars and chassis rows on lane 0, spin
+// groups per lane, then the lanes' blocks summed. The same rows as
+// assembleVehicle in its order per lane; vehicles over four wheels take one lane.
+void softVehicleLanes(uint group, uint local)
+{
+    uint slot = local / 4u, lane = local % 4u, first = slot * 4u;
+    uint v = group * 64u + slot;
+    bool act = v < vehicleCount();
+    uint vr = act ? vehRec(v) : 0u;
+    act = act && (VU(vr + V_D3).y & VS_ACTIVE) != 0u;
+    uint4 cfg = act ? VU(vr + V_CFG) : uint4(0, 0, 0, 0);
+    BodyState c = gBodies[cfg.x];
+    act = act && bodyIsDynamic(c) && !bodyIsSleeping(c);
+    bool split = act && cfg.z <= 4u;
+    if (act && !split && lane == 0u) vehicleIterateOne(v);
+    uint nW = split ? cfg.z : 0u;
+    float3 dl = float3(0, 0, 0), da = float3(0, 0, 0);
+    if (split) chassisDisplacement(c, dl, da);
+    Mat6 H = mat6Zero();
+    Vec6 g = vec6Zero();
+    gsVehL[local] = 0.0;
+    gsVehF[local] = 0.0;
+    gsVehCt[local] = 0u;
+    if (lane < nW)
+    {
+        if (wheelGround(wheelRec(cfg.y + lane)) != NO_INDEX) groundClear(cfg.y + lane);
+        float L, Fn;
+        bool ct;
+        vehSuspension(lane, vr, cfg, c, dl, da, H, g, L, Fn, ct);
+        gsVehL[local] = L;
+        gsVehF[local] = Fn;
+        gsVehCt[local] = ct ? 1u : 0u;
+    }
+    GroupMemoryBarrierWithGroupSync();
+    float Lw[4];
+    float FnW[4];
+    for (uint k = 0u; k < 4u; k++) { Lw[k] = gsVehL[first + k]; FnW[k] = gsVehF[first + k]; }
+    if (split && lane == 0u)
+    {
+        vehAntiRoll<4>(vr, cfg, c, nW, Lw, FnW, H, g);
+        for (uint k = 0u; k < 4u; k++) gsVehF[first + k] = FnW[k];
+    }
+    GroupMemoryBarrierWithGroupSync();
+    for (uint k = 0u; k < 4u; k++) FnW[k] = gsVehF[first + k];
+    if (lane < nW) vehSpinGroup<4>(lane, vr, cfg, c, dl, da, true, nW, FnW, H, g);
+    if (split && lane == 0u)
+    {
+        uint contacts = gsVehCt[first] + gsVehCt[first + 1u] + gsVehCt[first + 2u] + gsVehCt[first + 3u];
+        vehChassisRows<4>(vr, cfg, c, dl, da, true, nW, FnW, contacts, H, g);
+    }
+    // 27 values (21 lower-triangle entries of H, 6 of g) in three rounds of 9.
+    for (uint round = 0u; round < 3u; round++)
+    {
+        uint k0 = round * 9u;
+        gsSoftRedA[local] = float4(vehBlockValue(H, g, k0), vehBlockValue(H, g, k0 + 1u), vehBlockValue(H, g, k0 + 2u), vehBlockValue(H, g, k0 + 3u));
+        gsSoftRedB[local] = float4(vehBlockValue(H, g, k0 + 4u), vehBlockValue(H, g, k0 + 5u), vehBlockValue(H, g, k0 + 6u), vehBlockValue(H, g, k0 + 7u));
+        gsSoftRedC[local] = vehBlockValue(H, g, k0 + 8u);
+        GroupMemoryBarrierWithGroupSync();
+        if (lane == 0u)
+        {
+            float vals[9];
+            for (uint q = 0u; q < 9u; q++) vals[q] = 0.0;
+            for (uint o = 0u; o < 4u; o++)
+            {
+                float4 a = gsSoftRedA[first + o], b = gsSoftRedB[first + o];
+                vals[0] += a.x; vals[1] += a.y; vals[2] += a.z; vals[3] += a.w;
+                vals[4] += b.x; vals[5] += b.y; vals[6] += b.z; vals[7] += b.w;
+                vals[8] += gsSoftRedC[first + o];
+            }
+            for (uint q = 0u; q < 9u; q++)
+            {
+                uint k = k0 + q;
+                if (k < 21u) H.m[VEH_LOWER[k]] = vals[q]; else g.v[k - 21u] = vals[q];
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (split && lane == 0u)
+    {
+        writeVehicleBlock(vehicleAabbBlock(v), H, g, true);
+        VSet(vr + V_REFP, float4(c.position, VD(vr + V_REFP).w));
+        VSet(vr + V_REFQ, c.orientation);
+    }
+}
+
 uint softLanesFor(uint n)
 {
     uint q = 256u / max(n, 1u);
@@ -1333,12 +1518,12 @@ void soft_primal_bodies(uint3 lid : SV_GroupThreadID, uint3 gid : SV_GroupID)
             for (uint t = local; t < cr.y; t += 256u) softChebyshevEntry(cr.x + t, PASS_U);
         }
     }
-    // Workgroups past the soft bodies (SOFT_ROLE_VEHICLE): vehicle_iterate, 256 vehicles each. It
+    // Workgroups past the soft bodies (SOFT_ROLE_VEHICLE): vehicle_iterate, 64 vehicles each. It
     // reads only the cores' iterate (solved before this pass), and the sweep reads
     // nothing it writes, so the two run side by side instead of one after the
     // other. (A wheel standing on another car's particle reads that particle
     // mid-sweep, as cross-body contacts already do.)
-    if (!isSoft) vehicleIterateOne((gid.x - nb) * 256u + local);
+    if (role == SOFT_ROLE_VEHICLE) softVehicleLanes(gid.x - nb, local);
 }
 
 // A yield or a break: both ends take a backward-Euler step next (BDF2's history

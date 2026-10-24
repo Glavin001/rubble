@@ -1539,31 +1539,21 @@ void groundClear(uint wheelSlot)
 // Assemble every wheel row at chassis displacement (dl, da) from x⁻.
 // When dual is set, first update multipliers/penalties at this iterate.
 // N: per-wheel scratch size (≥ the vehicle's wheels; see assembleVehicle).
-void assembleVehicleN<let N : uint>(uint v, uint vr, uint4 cfg, BodyState c, float3 dl, float3 da,
-    bool dual, out Mat6 H, out Vec6 g)
+// assembleVehicleN's passes, one function each (the serial path calls them in
+// order; soft_primal_bodies' vehicle lanes split the per-wheel ones).
+// Pass 1: suspension / bump stop of wheel wi.
+void vehSuspension(uint wi, uint vr, uint4 cfg, BodyState c, float3 dl, float3 da, inout Mat6 H, inout Vec6 g,
+    out float outL, out float outFn, out bool contact)
 {
-    H = mat6Zero();
-    g = vec6Zero();
     AvbdParams p = PARAMS;
     float alphaStab = 1.0 - p.alpha;
     float3 upW = quatRotate(c.initialRot, vehicleUpLocal(vr));
-    uint nW = min(cfg.z, N);
 
-    // Ground blocks are rebuilt with the chassis block, at the same iterate.
-    for (uint wi = 0u; wi < nW; wi++)
-        if (wheelGround(wheelRec(cfg.y + wi)) != NO_INDEX) groundClear(cfg.y + wi);
-
-    // Pass 1: suspension / bump stop.
-    float Lw[N];
-    float FnW[N];
-    uint contacts = 0u;
-    for (uint wi = 0u; wi < nW; wi++)
-    {
-        Lw[wi] = 0.0; FnW[wi] = 0.0;
+        outL = 0.0; outFn = 0.0; contact = false;
         uint wr = wheelRec(cfg.y + wi);
         uint4 dyn = VU(wr + W_C0);
-        if ((dyn.z & WD_CONTACT) == 0u) continue;
-        contacts++;
+        if ((dyn.z & WD_CONTACT) == 0u) return;
+        contact = true;
         float4 c1 = VD(wr + W_C1);
         float4 c2 = VD(wr + W_C2);
         float3 eg = wheelGroundDisp(wr);
@@ -1572,7 +1562,7 @@ void assembleVehicleN<let N : uint>(uint v, uint vr, uint4 cfg, BodyState c, flo
         Vec6 jn = jac(c2.xyz, suspensionLever(wr, c1.xyz, c.initialRot));
         float un = jdot(jn, dl, da) - dot(c2.xyz, eg);
         float L = c1.w + c2.w * un;
-        Lw[wi] = L;
+        outL = L;
         float Lnat = susp.y + susp.z;
         float fS = k.x * (L - Lnat) + k.y * (L - c1.w);
         uint flags = dyn.z & ~(WD_SUSP | WD_BUMP);
@@ -1604,11 +1594,17 @@ void assembleVehicleN<let N : uint>(uint v, uint vr, uint4 cfg, BodyState c, flo
                 groundAdd(cfg.y + wi, jg, kTotal, fsTotal);
             }
         }
-        FnW[wi] = max(0.0, -fsTotal * c2.w);
+        outFn = max(0.0, -fsTotal * c2.w);
         dyn.z = flags;
         VSetU(wr + W_C0, dyn);
     }
 
+void vehAntiRoll<let N : uint>(uint vr, uint4 cfg, BodyState c, uint nW, float Lw[N], inout float FnW[N],
+    inout Mat6 H, inout Vec6 g)
+{
+    AvbdParams p = PARAMS;
+    float alphaStab = 1.0 - p.alpha;
+    float3 upW = quatRotate(c.initialRot, vehicleUpLocal(vr));
     // Pass 2: anti-roll bars (only when both wheels touch the ground, as Jolt).
     uint4 pool = VU(vr + V_POOL);
     uint arBase = VU(VH_POOLS).y;
@@ -1645,18 +1641,25 @@ void assembleVehicleN<let N : uint>(uint v, uint vr, uint4 cfg, BodyState c, flo
         FnW[r] = max(0.0, FnW[r] + ar.z * diff * nr.w);
     }
 
+}
+
     // Pass 3: friction rows + wheel spin. Each spin group (one wheel, or every
     // wheel of a track) shares one rotation y, solved exactly for the current
     // chassis iterate (1-D, monotone, piecewise linear in the tyre and brake
     // limits), then folded in with the Schur complement of the regime it lands
     // in: rolling (coupled) or saturated (decoupled). The group's inertia, brake
     // and drive live on its leader (the driven sprocket for a track).
-    for (uint li = 0u; li < nW; li++)
-    {
+void vehSpinGroup<let N : uint>(uint li, uint vr, uint4 cfg, BodyState c, float3 dl, float3 da, bool dual, uint nW,
+    float FnW[N], inout Mat6 H, inout Vec6 g)
+{
+    AvbdParams p = PARAMS;
+    float alphaStab = 1.0 - p.alpha;
+    float3 upW = quatRotate(c.initialRot, vehicleUpLocal(vr));
+
         uint lr = wheelRec(cfg.y + li);
         uint leadOf = VU(lr + W_CFG).w;
-        if (leadOf != NO_INDEX && leadOf != li) continue; // a member: its leader handles it
-        if ((VU(lr + W_C0).z & (WD_DETACHED | WD_DISABLED)) != 0u) continue;
+        if (leadOf != NO_INDEX && leadOf != li) return; // a member: its leader handles it
+        if ((VU(lr + W_C0).z & (WD_DETACHED | WD_DISABLED)) != 0u) return;
         float4 yv = VD(lr + W_Y);     // y, yTilde, mY, tauB (group)
         float4 lamLead = VD(lr + W_LAM);
         float4 k2Lead = VD(lr + W_K2);
@@ -1867,6 +1870,12 @@ void assembleVehicleN<let N : uint>(uint v, uint vr, uint4 cfg, BodyState c, flo
         VSet(lr + W_BS, float4(0.0, A, 0.0, 0.0));
     }
 
+void vehChassisRows<let N : uint>(uint vr, uint4 cfg, BodyState c, float3 dl, float3 da, bool dual, uint nW,
+    float FnW[N], uint contacts, inout Mat6 H, inout Vec6 g)
+{
+    AvbdParams p = PARAMS;
+    float alphaStab = 1.0 - p.alpha;
+    float3 upW = quatRotate(c.initialRot, vehicleUpLocal(vr));
     // Pitch/roll limit (Jolt mMaxPitchRollAngle): one-sided angular AVBD row that
     // keeps the chassis up axis within a cone around world up.
     float cosMax = VD(vr + V_FWD).w;
@@ -2000,6 +2009,37 @@ void assembleVehicleN<let N : uint>(uint v, uint vr, uint4 cfg, BodyState c, flo
         float m = VD(vr + V_MASS).x;
         g.v[1] -= (gScale - 1.0) * m * p.gravityY;
     }
+}
+
+void assembleVehicleN<let N : uint>(uint v, uint vr, uint4 cfg, BodyState c, float3 dl, float3 da,
+    bool dual, out Mat6 H, out Vec6 g)
+{
+    H = mat6Zero();
+    g = vec6Zero();
+    AvbdParams p = PARAMS;
+    float alphaStab = 1.0 - p.alpha;
+    float3 upW = quatRotate(c.initialRot, vehicleUpLocal(vr));
+    uint nW = min(cfg.z, N);
+
+    // Ground blocks are rebuilt with the chassis block, at the same iterate.
+    for (uint wi = 0u; wi < nW; wi++)
+        if (wheelGround(wheelRec(cfg.y + wi)) != NO_INDEX) groundClear(cfg.y + wi);
+
+    float Lw[N];
+    float FnW[N];
+    uint contacts = 0u;
+    for (uint wi = 0u; wi < nW; wi++)
+    {
+        float L, Fn;
+        bool ct;
+        vehSuspension(wi, vr, cfg, c, dl, da, H, g, L, Fn, ct);
+        Lw[wi] = L;
+        FnW[wi] = Fn;
+        if (ct) contacts++;
+    }
+    vehAntiRoll<N>(vr, cfg, c, nW, Lw, FnW, H, g);
+    for (uint li = 0u; li < nW; li++) vehSpinGroup<N>(li, vr, cfg, c, dl, da, dual, nW, FnW, H, g);
+    vehChassisRows<N>(vr, cfg, c, dl, da, dual, nW, FnW, contacts, H, g);
 }
 
 // Per-wheel scratch sized to the vehicle: thread-private arrays live in memory on

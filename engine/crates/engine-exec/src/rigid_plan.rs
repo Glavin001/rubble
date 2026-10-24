@@ -261,7 +261,7 @@ pub fn encode_step(
     let soft = i.soft.bodies > 0;
     if soft {
         // A soft body sleeps and wakes as a whole.
-        e.d("soft_wake", u64::from(i.soft.bodies));
+        e.d("soft_wake", u64::from(i.soft.bodies) * 64);
     }
     if !reuse_manifolds {
         e.d("build_aabbs", n_cols);
@@ -438,12 +438,13 @@ pub fn encode_step(
         e.d("soft_begin", u64::from(n.max(1)));
         if i.soft.contacts {
             // Soft contacts at the initial guess, frozen for the step.
-            e.d("soft_bounds", u64::from(i.soft.bodies));
+            e.d("soft_bounds", u64::from(i.soft.bodies) * 64);
             e.d("soft_pairs", u64::from(i.soft.bodies));
             e.d("soft_tri_planes", u64::from(i.soft.triangles.max(1)));
             // SOFT_NODE_LANES (8) lanes per node.
             e.d("soft_collide_nodes", u64::from(i.soft.particles.max(1)) * 8);
             e.d("soft_collide_tris", u64::from(i.soft.triangles.max(1)));
+            e.d("soft_contact_lists", u64::from(i.soft.particles.max(1)));
         }
         // Rigid mode: promote / demote before the solve (soft_step.slang).
         e.d("soft_mode", u64::from(i.soft.bodies.max(1)));
@@ -487,10 +488,10 @@ pub fn encode_step(
                 // One workgroup per soft body (`soft_primal_bodies`): every body's
                 // sweep at once, its particles' beams and contacts over the lanes,
                 // one dispatch at any vehicle count. On the iteration's last sweep,
-                // workgroups past the bodies run vehicle_iterate (256 vehicles each)
+                // workgroups past the bodies run vehicle_iterate (64 vehicles each)
                 // beside it. Hosts size workgroups as threads / 64.
                 let vehicle_groups = if vehicles && k + 1 == sweeps {
-                    u64::from(i.vehicle_count).div_ceil(256)
+                    u64::from(i.vehicle_count).div_ceil(64)
                 } else {
                     0
                 };
@@ -529,7 +530,7 @@ pub fn encode_step(
     if soft {
         // BDF2 velocities and history (a no-op under backward Euler).
         e.d("soft_velocity", u64::from(i.soft.particles.max(1)));
-        e.d("soft_sleep", u64::from(i.soft.bodies));
+        e.d("soft_sleep", u64::from(i.soft.bodies) * 64);
     }
     e.d("write_sleep_args", 64);
     // A sleep time beyond any run's length cannot produce candidates, so the
@@ -540,7 +541,7 @@ pub fn encode_step(
         }
         if soft {
             // The gate may have revoked part of a soft body: revoke it whole.
-            e.d("soft_sleep", u64::from(i.soft.bodies));
+            e.d("soft_sleep", u64::from(i.soft.bodies) * 64);
         }
     }
     e.w("sleep_island_commit", 67);
@@ -626,6 +627,7 @@ pub const SOFT_ENTRIES: &[&str] = &[
     "soft_tri_planes",
     "soft_pairs",
     "soft_velocity",
+    "soft_contact_lists",
     "soft_collide_nodes",
     "soft_collide_tris",
     "soft_primal",
@@ -1178,7 +1180,7 @@ mod tests {
         let mut many = i;
         many.soft.bodies = 20;
         many.vehicle_count = 300;
-        assert_eq!(sweeps(&many), vec![(20 + 2) * 64; i.iterations as usize]);
+        assert_eq!(sweeps(&many), vec![(20 + 5) * 64; i.iterations as usize]);
         assert!(!encode_step(&fast(), &many, false, true)
             .iter()
             .any(|c| matches!(

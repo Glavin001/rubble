@@ -460,3 +460,15 @@ s23. **BDF2 particles are an experimental setting, off by default; they don't bu
 `soft_calibrate` results against 960 Hz × 30 (tap 42 Hz, 30/60 km/h crush max 22.8/50.2 cm):
 - 240 Hz × 10 with BDF2: tap 36 Hz (24 Hz under backward Euler). The 30 km/h crush improves to max 24.8 cm (from 36.9), but the 60 km/h crush worsens to max 209 cm (from 132).
 - 120 Hz × 10 is still out with either integrator: the 1 m drop bends 38–43 beams. Those errors come from unconverged impacts, not damping.
+
+s24. **Per-step and per-iteration latency, measured A/B on a loaded machine.**
+- Method: other work on the machine moved absolute times about 30%. Variants were saved, shaders plus wasm, and alternated in one window. To measure a part's cost, it was duplicated with its result weighted by a runtime zero; physics is unchanged that way. Removing work instead changes the scene, and misled twice: a wall crash without particle rigid contacts went through the wall.
+- Particle solve:
+  - Each particle's triangle-side contacts are listed once per step (`soft_contact_lists`, up to 15, else the full walk). The adjacency stores each beam with its other end, so the neighbour's position loads beside the beam.
+  - Rigid contact edges are strided over the particle's lanes.
+  - Single-car sweep: 0.79 → 0.70 ms per step.
+  - Staging the list entries on chip gave nothing and was dropped.
+  - What remains (wall crash, per iteration): contacts about 15 µs, the 6×6 rigid path about 13 µs, beams about 10 µs, and about 30 µs of fixed per-colour work (barriers, reduction, finish, Chebyshev).
+- Per-body passes: `soft_wake`, `soft_sleep` and `soft_bounds` use one 64-lane workgroup per body, not one thread looping its particles. 0.115 → 0.025 ms per step for one car.
+- Broadphase: the pairwise path (≤ 512 colliders) tests bounds before loading a collider's records. Same pairs, same order; 0.17 → 0.09 ms per step for one car.
+- Vehicle solve: `assembleVehicle` is split into pass functions (suspension, anti-roll, spin group, chassis rows), which the serial path calls in order. The fused soft pass runs vehicles four lanes each (a wheel or spin group per lane), and the lanes' blocks are summed. Yard driving 0.78 → 0.69 ms per step. The spin group's Newton solve is about 14 µs per iteration; the rest is many small serial pieces.
