@@ -47,6 +47,7 @@ select{padding:10px 12px}
 <label class="eyebrow" for="level">Fracture level</label><select id="level" disabled></select>
 <div class="actions"><button class="primary" id="release" disabled>Start simulation</button><button id="reset" disabled>Reset</button></div>
 <button id="fire" hidden disabled style="width:100%;margin-top:8px">Fire the wrecking ball through the row</button>
+<button id="detonate" hidden disabled style="width:100%;margin-top:8px" title="Set off the scene's demolition charges (the pack's defaults.charges), each at its delay: their bonds are cut between two frames and the blast throws the cut pieces out (stress modes; README, Topple)">Detonate charges</button>
 <button id="replay" style="width:100%;margin-top:8px" title="Re-run the scene from its load with the same shots, then play the last moments at quarter speed from another angle, and carry on live (R)">Instant replay · ¼ speed (R)</button>
 <section class="performance" aria-label="Live performance"><div class="stats">
 <div title="Completed physics ticks per wall-clock second (target 120). Below: GPU time of a sampled tick (timestamps) and the ticks per second that time alone would allow."><strong id="tps">—</strong><span>Physics TPS</span><small id="step-ms">target TPS</small></div>

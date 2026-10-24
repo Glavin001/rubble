@@ -47,3 +47,7 @@ required-features = ["gpu"]
 [[example]]
 name = "wrecking_yard"
 required-features = ["gpu"]
+
+[[example]]
+name = "topple"
+required-features = ["gpu"]

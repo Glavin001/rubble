@@ -182,11 +182,12 @@ each named for what it is, then how many:
 - **Wrecking Yard:** tall structures for heavy balls, built in Rust as scene packs
   (`PACK_SAMPLES`; below).
 - **Bridge Out:** a highway viaduct for a pier hit, also a Rust-built pack (below).
+- **Topple:** a high-rise beside a street with demolition charges (below).
 - **Vibe City presets:** generated scene packs, when they are built.
 - **Your file:** a dropped or chosen GLB.
 
-The native viewer numbers the same scenes 1–9 in this order (the Wrecking Yard is the
-web lab's).
+The native viewer numbers the same scenes 1–9 in this order (the Wrecking Yard and Topple are
+the web lab's).
 
 ### Wrecking Yard
 
@@ -328,6 +329,109 @@ The other balls, under `blast_parity`:
 Under `threshold` nothing comes down: the strike breaks the struck column chunk's 3 bonds
 (51 with the sphere). There is no stress solve, and the rest of the viaduct is one
 anchored, static body, so no span drops.
+
+### Topple
+
+A narrow high-rise beside a street, brought down by demolition charges (The Finals'
+street-building topple, Teardown's high-rise topple). `stress_ref::topple`, built and loaded
+like the Wrecking Yard (Scene menu group **Topple**).
+
+| Scene | What | Chunks · bonds |
+|---|---|---|
+| High-rise beside a street, with charges | The Wrecking Yard frame (`wrecking::rc_frame`) at 2 × 1 bays and 10 storeys: 12.5 × 6.5 m in plan, 35.5 m tall, about 1,000 t. Shear walls across both short ends from the second storey up, a ground-storey back wall on strip footings, pad footings. A 20 m street of 4 m slab tiles (supports) along its long street side (-y) | 420 · 714 |
+
+**Charges.** The pack carries them as `defaults.charges`, in firing order:
+
+```json
+{"name": "street-side columns", "delay": 0, "bonds": [[node0, node1], ...], "debris": [node, ...], "kick": {"x": 0, "y": 1, "z": 12}}
+```
+
+- `bonds` are node pairs, not bond indices. A pair names its bond whatever order an import
+  keeps the bonds in, and whichever bonds it leaves out (`PackCharge::bond_indices`
+  resolves them and names any pair that is not a bond). Node indices are stable: every
+  import keeps the pack's node order.
+- `debris` are the chunks the blast throws out. `kick` is the velocity it adds to them
+  (Y-up, m/s) once they come free.
+- `delay` is in seconds after the charges are set off.
+
+The tower's two charges:
+1. **street-side columns** (at once): every bond of the three street-side ground-storey
+   columns, to their footings and to the joints above. The columns are thrown out over the
+   street at 12 m/s, as a demolition's kicker charges do. A rigid column cut loose would
+   otherwise stand where it was and carry the storeys above as before.
+2. **back-row footings** (0.25 s later, once the columns are clear): the back line's bonds
+   to its footings (3 columns, the back wall's 4 halves to their strips and pads). The tower
+   then stands on its back line alone, its weight over the empty street side.
+
+**Setting them off.** Use **Detonate charges** (stress modes, shown only for a scene with
+charges), or call stress-web `stress_detonate(name)` with an empty name for every charge,
+each at its delay. `stress_charges()` lists the charges, and `stats.charges` holds their
+names. The cut happens between two frames, at the start of the next one, and never by
+stepping a frame again:
+- `threshold` (GPU-resident world): `ThresholdWorld::cut_bonds` / `detonate`. The bonds break
+  as if the last frame had broken them (`GpuFracture::break_bonds`, after one wait for the
+  GPU's bond and body state). The next frame splits them after its step. The kick is added
+  before the frame after that, to bodies made of debris alone.
+- `blast_parity` (resident GpuWorld): `GpuWorld::cut_bonds`. The host splits the bonds as the
+  punch path does (`flush_pending`, the engine's motion, `break_bonds`, `rebuild`), sets the
+  debris clusters' kick, and writes the bodies back to the engine.
+- `stress_rubble::demolition::Demolition` schedules the charges (by name, or all at their
+  delays) for natively run hosts.
+
+**What it does.** Native, M3 Max:
+`cargo run --release -p stress-rubble --features gpu --example topple -- 480 30`
+sets the charges off before frame 30. Add `STRESS_PROFILE=blast_parity` for the other
+profile and `TOPPLE_TRACE=1` for the bonds broken by storey and kind. Both profiles stand
+under self-weight, and both repeat exactly run to run.
+
+- **threshold**: the tower topples across the street.
+  - Frame 31: 6 bonds are cut. The columns are 2.7 m out by frame 45 and about 20 m out in
+    the end.
+  - Frame 46: 11 bonds are cut. The tower then leans out over the street as one body.
+    | Frame | Lean | Largest body |
+    |---|---|---|
+    | 105 | 3.9° | 92% of the storeys' chunks |
+    | 180 | 16° | 84% |
+    | 285 | 51° | 72% |
+  - Frame 330 (5.5 s): it lands with its top storey 21 m out over the street. The landing
+    breaks bonds from 300 to 402 by frame 375.
+  - The end: 405 of 714 bonds broken and 233 bodies.
+  - It does not break into storey-sized slabs. The landing strips the street face, and
+    storeys 3–10 stay one 188-chunk piece. This profile breaks a bond only when a *contact*
+    load on one of its chunks beats it, so the bonds between storeys on the far side and in
+    the end walls never see a load.
+  - The base also erodes while the tower leans: the free tower's weight on its back line is
+    a sustained contact load above those chunks' bond capacity.
+- **blast_parity**: the charges cut as above, but the tower does not topple.
+  - The cut of the street-side columns breaks 16 more bonds around them.
+  - Once the back row is cut, the quasi-static solve of the free tower breaks about 140 bonds in
+    storeys 1–5 within 15 frames, and the whole tower by frame 135. It collapses almost in
+    place: the top storey moves 6 m toward the street, and 680 of 714 bonds break.
+  - Walls along the long faces as well did not change this.
+- **In Chrome (threshold)** the lab's run diverged from the native one. The back line
+  crushed faster than the tower tipped, and the tower came down nearly vertically (704
+  bonds broken by 9 s). The outcome sits close to that crushing threshold, and Chrome's
+  WebGPU runs other shader code (WGSL rather than Metal), so treat the native run as the
+  reference.
+
+**Checks** (in `engine/stress-oracle`):
+- `cargo test --release -p stress-ref --test topple`:
+  - counts and mass from the layout;
+  - what each charge cuts; both together leave the tower one piece, bonded to no support,
+    its centre of mass over the street side of its back line;
+  - the charges survive both profiles' imports.
+- `cargo test --release -p stress-rubble --features gpu --test topple`:
+  - threshold: a second after the release the tower leans out as one body. In the end the
+    top storey is more than 15 m across the street, on the ground, and over 100 bonds past
+    the charges' are broken.
+  - blast_parity: the charges' bonds are broken before the next frame, the columns are
+    thrown and the tower is free of its footings.
+- `wrecking_yard` (settle) and `pack_samples` include the tower.
+
+**Scripted takes and replay.** A take step `act: {detonate: name}` (`''` for every charge
+at its delay) sets the charges off, and the Detonate button's charges are logged. Either
+way, instant replay sets them off at the same frame (see "Takes, instant replay and slow
+motion"). The `topple_detonate` take (`takes/lab.mjs`) records the threshold run.
 
 ### Bond modes
 

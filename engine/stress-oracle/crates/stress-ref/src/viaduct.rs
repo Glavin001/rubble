@@ -304,5 +304,6 @@ pub fn viaduct() -> Structure {
         bonds,
         aim: Aim { target: [L::line(L::HINGE_PIER), -0.5 * L::COLUMN, L::FOOTING_DEPTH + L::column_chunk()], direction: [0.0, 1.0, 0.0] },
         ball: BALLS[1],
+        charges: Vec::new(),
     }
 }

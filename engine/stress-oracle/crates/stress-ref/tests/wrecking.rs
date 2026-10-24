@@ -153,6 +153,8 @@ fn viaduct_counts_and_mass() {
 /// and its line of attack is horizontal.
 #[test]
 fn structures_are_well_formed() {
+    let keys: Vec<&str> = STRUCTURES.iter().map(|s| s.0).collect();
+    assert_eq!(keys, ["wy_frame10", "wy_round_tower", "wy_brick_tower", "bo_viaduct", "topple_tower"]);
     for &(key, title) in STRUCTURES {
         let s = wrecking::structure(key).expect(key);
         assert_eq!((s.key, s.title), (key, title));
@@ -216,7 +218,8 @@ fn structures_stand_under_self_weight() {
         w.run();
         let chunks = w.solver.structures[0].chunks.len();
         let vmax = (0..chunks).map(|c| w.solver.chunk_velocity(0, c).0.norm()).fold(0.0, f64::max);
-        let weight: f64 = w.solver.structures[0].chunks.iter().map(|c| c.mass * 9.81).sum();
+        // A support no bond joins (the Topple street's tiles) rests on the ground alone.
+        let weight: f64 = (0..chunks).filter(|&c| !w.solver.clusters[w.solver.chunks[0][c].cluster].bonds.is_empty()).map(|c| w.solver.structures[0].chunks[c].mass * 9.81).sum();
         let reaction: f64 = (0..chunks).map(|c| w.solver.reaction_world(0, c).0.z).sum();
         println!("{key}: {chunks} chunks, {:.0} t, max speed {vmax:.2e} m/s, reaction / weight {:.9}, {:.2} s", weight / 9.81e3, reaction / weight, t.elapsed().as_secs_f64());
         assert_eq!(w.solver.broken_bond_count(), 0, "{key}: bonds broke under self-weight");

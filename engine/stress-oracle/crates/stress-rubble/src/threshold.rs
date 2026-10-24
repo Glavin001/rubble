@@ -103,6 +103,21 @@ pub struct ThresholdWorld {
     shot_radius: f64,
     /// What strike prediction knows of each shot (`GpuFracture::set_shots`).
     strikes: Vec<fracture::Shot>,
+    /// Each bond's index in the fracture's table, by the global chunks it joins (lower
+    /// first).
+    bond_of: HashMap<(u32, u32), u32>,
+    /// Blasts waiting for their chunks to come free ([`ThresholdWorld::cut_bonds`]).
+    kicks: Vec<Kick>,
+}
+
+/// A charge's kick ([`ThresholdWorld::cut_bonds`]): the global chunks it throws and the
+/// velocity it adds (rubble's frame), applied before the frame `due` (the one after the
+/// cut's split).
+#[derive(Clone, Debug)]
+struct Kick {
+    chunks: Vec<u32>,
+    velocity: [f32; 3],
+    due: u64,
 }
 
 const RING: usize = 4;
@@ -240,6 +255,7 @@ impl ThresholdWorld {
         }
         // Each cluster's body frame (its structure's frame: a cluster's shapes are its
         // chunks at their structure-frame poses) and its bonds.
+        let mut bond_of = HashMap::new();
         for cl in &m.clusters {
             let e = &engine.bodies[&BodyKey::Cluster(cl.id)];
             let p = e.principal;
@@ -250,6 +266,8 @@ impl ThresholdWorld {
                     continue;
                 }
                 let capacity = b.strength.tensile * b.geometry.area * b.weibull;
+                let (ga, gb) = (global(cl.structure, b.geometry.a), global(cl.structure, b.geometry.b));
+                bond_of.insert((ga.min(gb), ga.max(gb)), t.bonds.len() as u32);
                 t.bonds.push([global(cl.structure, b.geometry.a), global(cl.structure, b.geometry.b), (capacity as f32).to_bits(), (b.geometry.area as f32).to_bits()]);
             }
         }
@@ -299,7 +317,7 @@ impl ThresholdWorld {
             })
             .collect();
         let mirror = world.solver.clone();
-        Ok(ThresholdWorld { mirror, scene: scene.clone(), engine, ingest, fracture, tables: t, chunk_of, frame_dt: scene.sim.frame_dt, frame: 0, shots, fired: 0, ring, ring_next: 0, last: ThresholdStats::default(), initial_bodies: m.clusters.len() as u32, phases: Vec::new(), ground_modulus, projectile_modulus: projectile.youngs_modulus, shot_radius, strikes })
+        Ok(ThresholdWorld { mirror, scene: scene.clone(), engine, ingest, fracture, tables: t, chunk_of, frame_dt: scene.sim.frame_dt, frame: 0, shots, fired: 0, ring, ring_next: 0, last: ThresholdStats::default(), initial_bodies: m.clusters.len() as u32, phases: Vec::new(), ground_modulus, projectile_modulus: projectile.youngs_modulus, shot_radius, strikes, bond_of, kicks: Vec::new() })
     }
 
     /// Launch a shot (`desc`: the stress frame, its pose and velocity): its record written
@@ -348,9 +366,90 @@ impl ThresholdWorld {
         true
     }
 
+    /// Cut bonds now, between frames (a demolition charge, `stress_ref::wrecking::Charge`):
+    /// the bonds of structure `structure` joining each pair of its chunks in `pairs` break
+    /// as if the last frame had broken them, so the next frame splits their bodies after
+    /// its step, as it splits any frame's breaks (forward: nothing is stepped again). The
+    /// chunks of `debris` that come free then (bodies of debris chunks alone) get `kick`
+    /// (m/s, the stress frame) added to their motion before the frame after. Waits for
+    /// the GPU (it reads the bonds' and chunks' state). Returns the bonds cut (those not
+    /// already broken); an error names a pair no bond of the world joins.
+    pub fn cut_bonds(&mut self, gpu: &Gpu, structure: usize, pairs: &[[usize; 2]], debris: &[usize], kick: [f64; 3]) -> Result<usize, String> {
+        let offset = self.chunk_of.iter().position(|&(s, _)| s == structure).ok_or_else(|| format!("no structure {structure}"))? as u32;
+        let mut cut = Vec::with_capacity(pairs.len());
+        for &[a, b] in pairs {
+            let (ga, gb) = (offset + a as u32, offset + b as u32);
+            let i = self.bond_of.get(&(ga.min(gb), ga.max(gb))).copied().ok_or_else(|| format!("no bond joins chunks {a} and {b} of structure {structure}"))?;
+            cut.push(i);
+        }
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        let intact = self.fracture.bonds_intact(gpu);
+        let bodies = self.fracture.chunk_bodies(gpu);
+        let count = cut.iter().filter(|&&i| intact[i as usize]).count();
+        if count > 0 {
+            let total = self.fracture.counters(gpu).broken;
+            self.fracture.break_bonds(gpu, &cut, &intact, &bodies, &self.tables.bonds);
+            // The bonds broken in all (`C_BROKEN`) count the cut ones.
+            let at = 4 * (self.fracture.layout.a_counters() as u64 + 1);
+            gpu.queue.write_buffer(&self.fracture.atom, at, bytemuck::bytes_of(&(total + count as u32)));
+        }
+        if !debris.is_empty() && kick != [0.0; 3] {
+            let v = to_rubble(Vec3::from_array(kick));
+            self.kicks.push(Kick { chunks: debris.iter().map(|&c| offset + c as u32).collect(), velocity: v, due: self.frame + 1 });
+        }
+        Ok(count)
+    }
+
+    /// Set off a pack's charge (`stress_ref::wrecking::charges_of`) on the world's one
+    /// structure: [`Self::cut_bonds`] of its bonds, debris and kick.
+    pub fn detonate(&mut self, gpu: &Gpu, charge: &stress_ref::wrecking::PackCharge) -> Result<usize, String> {
+        self.cut_bonds(gpu, 0, &charge.bonds, &charge.debris, charge.kick)
+    }
+
+    /// The kicks due before this frame: each body made of a kick's chunks alone (its
+    /// chunks came free) gets the kick's velocity added, in both pose regions.
+    fn apply_kicks(&mut self, gpu: &Gpu) {
+        if !self.kicks.iter().any(|k| k.due <= self.frame) {
+            return;
+        }
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        let owner = self.fracture.chunk_bodies(gpu);
+        let mut members: HashMap<u32, usize> = HashMap::new();
+        for &b in &owner {
+            *members.entry(b).or_default() += 1;
+        }
+        let stride = std::mem::size_of::<BodyState>() as u64;
+        let max = self.engine.sim.capacity().max_bodies as u64;
+        let (due, later): (Vec<Kick>, Vec<Kick>) = std::mem::take(&mut self.kicks).into_iter().partition(|k| k.due <= self.frame);
+        self.kicks = later;
+        for k in due {
+            let mut count: HashMap<u32, usize> = HashMap::new();
+            for &c in &k.chunks {
+                *count.entry(owner[c as usize]).or_default() += 1;
+            }
+            let mut thrown: Vec<u32> = count.into_iter().filter(|(b, n)| members[b] == *n).map(|(b, _)| b).collect();
+            thrown.sort_unstable();
+            for b in thrown {
+                for region in [0, max] {
+                    let mut rec: BodyState = gpu.read_range::<BodyState>(self.engine.sim.body_buffer(), (region + b as u64) as usize, 1)[0];
+                    if rec.inv_mass <= 0.0 {
+                        continue;
+                    }
+                    for (v, dv) in rec.linear_vel.iter_mut().zip(k.velocity) {
+                        *v += dv;
+                    }
+                    rec.flags |= engine_schema::BodyFlags::Awake as u32;
+                    gpu.queue.write_buffer(self.engine.sim.body_buffer(), (region + b as u64) * stride, bytemuck::bytes_of(&rec));
+                }
+            }
+        }
+    }
+
     /// One frame: rubble's step, its contacts ingested, the loads, breaks and splits. One
-    /// submission; nothing waited for.
+    /// submission; nothing waited for (but before the frame after a charge's cut, its
+    /// kick: [`Self::cut_bonds`]).
     pub fn step_frame(&mut self, gpu: &Gpu) -> Result<(), String> {
+        self.apply_kicks(gpu);
         // `STRESS_THRESHOLD_PHASES=1` (a diagnostic): each part submitted and waited for,
         // its wall time summed in `phases`.
         let timing = std::env::var("STRESS_THRESHOLD_PHASES").is_ok_and(|v| v == "1");

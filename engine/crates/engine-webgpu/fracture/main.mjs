@@ -128,7 +128,7 @@ const rates=createRates(value=>{
 document.addEventListener('visibilitychange',()=>{last=0;accumulator=0;rates.reset()});
 const setStatus=text=>{status.textContent=text;status.classList.remove('error')};
 const fail=e=>{console.error(e);running=false;status.textContent=e.message;status.classList.add('error');$('release').textContent=released?'Resume':'Start simulation'};
-const controls=enabled=>{enabled||=stressOn&&!loading;for(const id of ['release','reset','level','metadata','fire'])$(id).disabled=!enabled;for(const id of ['file','sample','scene'])$(id).disabled=!device||loading};
+const controls=enabled=>{enabled||=stressOn&&!loading;for(const id of ['release','reset','level','metadata','fire','detonate'])$(id).disabled=!enabled;for(const id of ['file','sample','scene'])$(id).disabled=!device||loading};
 function serializeLoad(task){const result=loadTail.catch(()=>{}).then(async()=>{loading=true;running=false;controls(false);await frame;rates.reset();try{await task()}catch(e){fail(e)}finally{loading=false;last=0;rates.reset();controls(!!sim)}});loadTail=result;return result}
 let shotQueue=Promise.resolve();
 function shoot(ray){
@@ -142,7 +142,7 @@ async function loadLevel(level){
   // static equilibrium (bonds carrying their load) rather than at zero force.
   // Breakable bonds are experimental (opt-in): see README "Breakable bonds".
   if(stressMode())return loadStress(level);
-  stressOn=false;$('view').hidden=false;$('stress-view').hidden=true;$('ball-preset-row').hidden=true;$('fire').textContent='Fire the wrecking ball through the row';if(stress)stress.running=false;
+  stressOn=false;$('view').hidden=false;$('stress-view').hidden=true;$('ball-preset-row').hidden=true;$('detonate').hidden=true;$('fire').textContent='Fire the wrecking ball through the row';if(stress)stress.running=false;
   learned?.dispose();learned=null;learnedMs=0;
   const raw=procedural==='pack'?buildPackScene(packBytes):procedural?buildCuboidHouse():buildScene(asset,level,{maxHullVertices});
   const built=physicsHz()?withParams(raw,{dt:1/physicsHz()}):raw;
@@ -196,6 +196,8 @@ async function loadStress(level){
  const st=stress.stats;stressHud={t:performance.now(),frames:0,renders:0};
  $('fragments').textContent=st.chunks;$('bonds').textContent=st.bonds;$('hulls').textContent=st.hulls;$('awake').textContent='0';$('contacts').textContent='—';
  $('release').textContent='Start simulation';$('fire').hidden=!st.canFire;$('fire').textContent='Fire the ball along the line of attack';
+ // A scene with demolition charges (the pack's defaults.charges: Topple) gets the detonator.
+ $('detonate').hidden=!st.charges?.length;
  setStatus(`Stress solver · ${st.chunks} chunks · ${st.bonds} bonds · ${profile==='threshold'?'simple threshold (v0): a bond breaks when a contact force beats its strength':profile}, resident GPU frame at ${Math.round(st.frameHz)} Hz${cuboid||pack?'':' · one copy'}${stressWarning(st)} · click the model to shoot`);
 }
 async function importBytes(bytes,name,sampleKey="",entry={}){
@@ -251,6 +253,9 @@ const sample=(key=$('scene').value||'house')=>serializeLoad(async()=>{
 });
 $('sample').onclick=()=>sample();
 $('fire').onclick=()=>{if(stressOn){if(stress?.fire())director.logFire();return}scene?.rowShot&&shoot(scene.rowShot)};
+// Every charge, each at its delay (stress-web stress_detonate: cut between frames); logged
+// so a replay sets them off at the same frame.
+$('detonate').onclick=()=>{if(stressOn&&stress?.detonate(''))director.logDetonate('')};
 $('ball-preset').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('scene').onchange=()=>sample($('scene').value);
 $('file').onchange=()=>{const f=$('file').files[0];if(f)serializeLoad(async()=>importBytes(await f.arrayBuffer(),f.name))};

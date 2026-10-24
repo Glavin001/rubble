@@ -43,11 +43,11 @@ const SEAM: f64 = 1e-6;
 const BLAST_DT: f64 = 1.0 / 60.0;
 
 /// The yard's structures: (key, title), in menu order.
-pub const STRUCTURES: &[(&str, &str)] = &[("wy_frame10", "10-floor concrete frame"), ("wy_round_tower", "Round tower on columns"), ("wy_brick_tower", "Brick tower"), ("bo_viaduct", "Highway viaduct")];
+pub const STRUCTURES: &[(&str, &str)] = &[("wy_frame10", "10-floor concrete frame"), ("wy_round_tower", "Round tower on columns"), ("wy_brick_tower", "Brick tower"), ("bo_viaduct", "Highway viaduct"), ("topple_tower", "Topple: high-rise beside a street")];
 
 /// A structure as the builders make it (Z-up): chunks (box or hull, `material` the pack's
 /// asset material, footings `Support::Fixed`), bonds (`material` the pack material's
-/// name), the line a ball comes in along, and the click ball.
+/// name), the line a ball comes in along, the click ball, and its demolition charges.
 pub struct Structure {
     pub key: &'static str,
     pub title: &'static str,
@@ -55,6 +55,67 @@ pub struct Structure {
     pub bonds: Vec<BondDesc>,
     pub aim: Aim,
     pub ball: Ball,
+    /// In firing order (`Charge::delay` ascending); empty for a structure without any.
+    pub charges: Vec<Charge>,
+}
+
+/// A demolition charge (Z-up): a named group of bonds a host cuts at once, between two
+/// frames (never by re-running one), `delay` s after the structure's charges are set
+/// off, and the chunks the blast throws out (`debris`, each left with no bond by the
+/// cut) at the speed it gives them (`kick`, m/s, added to their motion as they come
+/// free). Written in a pack as `defaults.charges` ([`to_pack`], read with
+/// [`charges_of`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Charge {
+    pub name: String,
+    pub delay: f64,
+    /// Indices into the structure's bonds.
+    pub bonds: Vec<usize>,
+    /// Chunk indices.
+    pub debris: Vec<usize>,
+    pub kick: [f64; 3],
+}
+
+/// A pack's charge as a host reads it ([`charges_of`]): its bonds as the node pairs they
+/// join (each pair as the pack's bond lists it), which name a bond whatever order an
+/// import keeps the bonds in or whichever it leaves out; its debris as node indices
+/// (every import keeps the pack's node order), its kick in the stress scene's frame
+/// (Z-up).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PackCharge {
+    pub name: String,
+    pub delay: f64,
+    pub bonds: Vec<[usize; 2]>,
+    pub debris: Vec<usize>,
+    pub kick: [f64; 3],
+}
+
+impl PackCharge {
+    /// The charge's bonds as indices into `bonds` (an import's: chunk indices are the
+    /// pack's nodes), in the charge's order; an error naming the first pair no bond joins.
+    pub fn bond_indices(&self, bonds: &[BondDesc]) -> Result<Vec<usize>, String> {
+        let index: std::collections::HashMap<(usize, usize), usize> = bonds.iter().enumerate().map(|(i, b)| ((b.a.min(b.b), b.a.max(b.b)), i)).collect();
+        self.bonds.iter().map(|&[a, b]| index.get(&(a.min(b), a.max(b))).copied().ok_or_else(|| format!("charge {}: no bond joins nodes {a} and {b}", self.name))).collect()
+    }
+}
+
+/// The charges a pack carries (`defaults.charges`), in firing order; empty for a pack
+/// without any. Each is `{name, delay, bonds: [[node0, node1], ...], debris: [node, ...],
+/// kick: {x, y, z}}` (Y-up, m/s).
+pub fn charges_of(pack: &Value) -> Vec<PackCharge> {
+    let Some(list) = pack["defaults"]["charges"].as_array() else { return Vec::new() };
+    let mut charges: Vec<PackCharge> = list
+        .iter()
+        .filter_map(|c| {
+            let bonds = c["bonds"].as_array()?.iter().filter_map(|p| Some([p[0].as_u64()? as usize, p[1].as_u64()? as usize])).collect();
+            let debris = c["debris"].as_array().map(|d| d.iter().filter_map(|n| Some(n.as_u64()? as usize)).collect()).unwrap_or_default();
+            let k = &c["kick"];
+            let kick = z_up([k["x"].as_f64().unwrap_or(0.0), k["y"].as_f64().unwrap_or(0.0), k["z"].as_f64().unwrap_or(0.0)]);
+            Some(PackCharge { name: c["name"].as_str()?.to_string(), delay: c["delay"].as_f64().unwrap_or(0.0), bonds, debris, kick })
+        })
+        .collect();
+    charges.sort_by(|a, b| a.delay.total_cmp(&b.delay));
+    charges
 }
 
 /// Where a ready-made shot goes (Z-up, the stress scene's frame): the point it is aimed
@@ -153,6 +214,7 @@ pub fn structure(key: &str) -> Option<Structure> {
         "wy_round_tower" => Some(round_tower()),
         "wy_brick_tower" => Some(brick_tower()),
         "bo_viaduct" => Some(crate::viaduct::viaduct()),
+        "topple_tower" => Some(crate::topple::topple_tower()),
         _ => None,
     }
 }
@@ -259,16 +321,34 @@ pub fn to_pack(s: &Structure) -> Value {
         "compressionFatal": joint.compressive_strength * BLAST_DT,
         "shearFatal": joint.cohesion * BLAST_DT,
     });
+    // The camera looks at the middle of the plan, half way up.
+    let target = xyz([0.5 * (lo[0] + hi[0]), 0.5 * (lo[1] + hi[1]), 0.5 * height]);
+    let mut defaults = json!({
+        "camera": {"target": target, "distance": 2.2 * height},
+        "projectile": {"radius": s.ball.radius, "mass": s.ball.mass, "speed": s.ball.speed, "ttlMs": 8000},
+        "solver": {"gravity": -9.81, "materialScale": 1, "materials": materials, "limits": limits},
+        "wreckingYard": {"target": xyz(s.aim.target), "direction": xyz(s.aim.direction)},
+    });
+    if !s.charges.is_empty() {
+        defaults["charges"] = s
+            .charges
+            .iter()
+            .map(|c| {
+                json!({
+                    "name": c.name,
+                    "delay": c.delay,
+                    "bonds": c.bonds.iter().map(|&i| [s.bonds[i].a, s.bonds[i].b]).collect::<Vec<_>>(),
+                    "debris": c.debris,
+                    "kick": xyz(c.kick),
+                })
+            })
+            .collect();
+    }
     json!({
         "version": 2,
         "key": s.key,
         "title": s.title,
-        "defaults": {
-            "camera": {"target": {"x": 0.0, "y": 0.5 * height, "z": 0.0}, "distance": 2.2 * height},
-            "projectile": {"radius": s.ball.radius, "mass": s.ball.mass, "speed": s.ball.speed, "ttlMs": 8000},
-            "solver": {"gravity": -9.81, "materialScale": 1, "materials": materials, "limits": limits},
-            "wreckingYard": {"target": xyz(s.aim.target), "direction": xyz(s.aim.direction)},
-        },
+        "defaults": defaults,
         "scenario": {
             "nodes": nodes,
             "bonds": bonds,
@@ -432,26 +512,70 @@ impl FrameLayout {
 /// column's ground storey.
 pub fn frame10() -> Structure {
     type L = FrameLayout;
-    let n = L::BAYS + 1;
-    let half_span = 0.5 * L::BAYS as f64 * L::BAY;
-    let line = |i: usize| i as f64 * L::BAY - half_span;
+    // The lift core: the central bay's four sides, every storey, on strip footings.
+    let side = |along_x: bool, line: usize| WallRun { along_x, line, bays: 1..2, storeys: 0..L::STOREYS };
+    let chunks = rc_frame([L::BAYS, L::BAYS], L::STOREYS, &[side(true, 1), side(true, 2), side(false, 1), side(false, 2)]);
+    let bonds = between_free(&chunks, auto_bonds(&chunks, joint_of));
+    let corner = -0.5 * L::BAYS as f64 * L::BAY;
+    let hc = 0.5 * L::COLUMN;
+    Structure {
+        key: "wy_frame10",
+        title: "10-floor concrete frame",
+        chunks,
+        bonds,
+        aim: Aim { target: [corner - hc, corner, L::FOOTING_DEPTH + 0.5 * (L::STOREY - L::BEAM_DEPTH)], direction: [1.0, 0.0, 0.0] },
+        ball: BALLS[0],
+        charges: Vec::new(),
+    }
+}
+
+/// A run of walls in a frame ([`rc_frame`]): on grid line `line`, running along x (on a
+/// y line) or along y (on an x line), between the columns of the bays `bays` along it, in
+/// the storeys `storeys` (0 the ground storey, which stands them on strip footings).
+#[derive(Clone, Debug, PartialEq)]
+pub struct WallRun {
+    pub along_x: bool,
+    pub line: usize,
+    pub bays: std::ops::Range<usize>,
+    pub storeys: std::ops::Range<usize>,
+}
+
+/// The chunks of a reinforced-concrete frame of `bays` (along x, along y) bays and
+/// `storeys` storeys at [`FrameLayout`]'s dimensions, centred on the origin: pad footings
+/// (`footing`, supports) under every grid line, then storey by storey (`storey-N`) a
+/// column and a beam-column joint on every grid line, the beams between the joints in two
+/// chunks a span, the walls of `walls` (0.3 m, between the columns, under the beams, two
+/// chunks a bay) and the slab in four chunks a bay. A wall run that starts at the ground
+/// storey stands on strip footings between the pads. [`frame10`]'s is the 3 x 3 frame
+/// with its core's four sides.
+pub fn rc_frame(bays: [usize; 2], storeys: usize, walls: &[WallRun]) -> Vec<ChunkDesc> {
+    type L = FrameLayout;
+    let (bx, by) = (bays[0], bays[1]);
+    assert!(bx >= 1 && by >= 1 && storeys >= 1, "a frame of at least one bay and storey");
+    for w in walls {
+        let (lines, spans) = if w.along_x { (by, bx) } else { (bx, by) };
+        assert!(w.line <= lines && w.bays.end <= spans && w.storeys.end <= storeys, "{w:?}: outside a {bx} x {by} frame of {storeys} storeys");
+    }
+    let line_x = |i: usize| i as f64 * L::BAY - 0.5 * bx as f64 * L::BAY;
+    let line_y = |j: usize| j as f64 * L::BAY - 0.5 * by as f64 * L::BAY;
     let (hc, hw) = (0.5 * L::COLUMN, 0.5 * L::BEAM_WIDTH);
     let base = L::FOOTING_DEPTH;
     let top = |s: usize| base + (s + 1) as f64 * L::STOREY;
     let rc = "reinforced-concrete";
-    let mut chunks = Vec::with_capacity(L::CHUNKS);
-    for j in 0..n {
-        for i in 0..n {
-            let (x, y) = (line(i), line(j));
+    let mut chunks = Vec::new();
+    for j in 0..=by {
+        for i in 0..=bx {
+            let (x, y) = (line_x(i), line_y(j));
             let h = 0.5 * L::FOOTING;
             chunks.push(footing(block([x - h, y - h, 0.0], [x + h, y + h, base], "footing-anchor", "footing", "footing".into())));
         }
     }
-    // The core's walls run along the grid lines 1 and 2 between their columns: each
-    // side's two halves (from, to) along the line, on line `c`, running along x or y.
-    let (core0, core1) = (line(1), line(2));
-    let mid = 0.5 * (core0 + core1);
-    let core_sides = [(core0, true), (core1, true), (core0, false), (core1, false)];
+    // A wall run's bays as (from, to) along its line and the line's coordinate `c`, each
+    // bay in two halves.
+    let spans = |w: &WallRun| -> Vec<(f64, f64, f64)> {
+        let (along, across) = if w.along_x { (&line_x as &dyn Fn(usize) -> f64, &line_y as &dyn Fn(usize) -> f64) } else { (&line_y as &dyn Fn(usize) -> f64, &line_x as &dyn Fn(usize) -> f64) };
+        w.bays.clone().map(|i| (along(i), along(i + 1), across(w.line))).collect()
+    };
     let wall = |u0: f64, u1: f64, c: f64, along_x: bool, z0: f64, z1: f64, kind: &str, group: String, material: &str| {
         let hw = 0.5 * L::WALL;
         if along_x {
@@ -461,43 +585,59 @@ pub fn frame10() -> Structure {
         }
     };
     let hf = 0.5 * L::FOOTING;
-    for &(c, along_x) in &core_sides {
-        for (u0, u1) in [(core0 + hf, mid), (mid, core1 - hf)] {
-            chunks.push(footing(wall(u0, u1, c, along_x, 0.0, base, "footing", "footing".into(), "footing-anchor")));
+    for w in walls.iter().filter(|w| w.storeys.start == 0) {
+        for (a, b, c) in spans(w) {
+            let mid = 0.5 * (a + b);
+            for (u0, u1) in [(a + hf, mid), (mid, b - hf)] {
+                chunks.push(footing(wall(u0, u1, c, w.along_x, 0.0, base, "footing", "footing".into(), "footing-anchor")));
+            }
         }
     }
-    for s in 0..L::STOREYS {
+    for s in 0..storeys {
         let (z1, floor) = (top(s), format!("storey-{}", s + 1));
         let z0 = if s == 0 { base } else { top(s - 1) };
         let zb = z1 - L::BEAM_DEPTH;
-        for j in 0..n {
-            for i in 0..n {
-                let (x, y) = (line(i), line(j));
+        for j in 0..=by {
+            for i in 0..=bx {
+                let (x, y) = (line_x(i), line_y(j));
                 chunks.push(block([x - hc, y - hc, z0], [x + hc, y + hc, zb], rc, "column", floor.clone()));
                 chunks.push(block([x - hc, y - hc, zb], [x + hc, y + hc, z1], rc, "joint", floor.clone()));
             }
         }
-        // Beams along x (on each y line) and along y (on each x line), two halves a span.
-        for k in 0..n {
-            for i in 0..L::BAYS {
-                let (a, b) = (line(i) + hc, line(i + 1) - hc);
-                let m = 0.5 * (a + b);
-                for (u0, u1) in [(a, m), (m, b)] {
-                    let c = line(k);
-                    chunks.push(block([u0, c - hw, zb], [u1, c + hw, z1], rc, "beam", floor.clone()));
-                    chunks.push(block([c - hw, u0, zb], [c + hw, u1, z1], rc, "beam", floor.clone()));
+        // Beams along x (on each y line) and along y (on each x line), two halves a span
+        // (a square frame's interleaved, an x beam's half then the y beam's).
+        for k in 0..=bx.max(by) {
+            for i in 0..bx.max(by) {
+                for half in 0..2 {
+                    if k <= by && i < bx {
+                        let (a, b) = (line_x(i) + hc, line_x(i + 1) - hc);
+                        let m = 0.5 * (a + b);
+                        let (u0, u1) = if half == 0 { (a, m) } else { (m, b) };
+                        let c = line_y(k);
+                        chunks.push(block([u0, c - hw, zb], [u1, c + hw, z1], rc, "beam", floor.clone()));
+                    }
+                    if k <= bx && i < by {
+                        let (a, b) = (line_y(i) + hc, line_y(i + 1) - hc);
+                        let m = 0.5 * (a + b);
+                        let (u0, u1) = if half == 0 { (a, m) } else { (m, b) };
+                        let c = line_x(k);
+                        chunks.push(block([c - hw, u0, zb], [c + hw, u1, z1], rc, "beam", floor.clone()));
+                    }
                 }
             }
         }
-        for &(c, along_x) in &core_sides {
-            for (u0, u1) in [(core0 + hc, mid), (mid, core1 - hc)] {
-                chunks.push(wall(u0, u1, c, along_x, z0, zb, "wall", floor.clone(), rc));
+        for w in walls.iter().filter(|w| w.storeys.contains(&s)) {
+            for (a, b, c) in spans(w) {
+                let mid = 0.5 * (a + b);
+                for (u0, u1) in [(a + hc, mid), (mid, b - hc)] {
+                    chunks.push(wall(u0, u1, c, w.along_x, z0, zb, "wall", floor.clone(), rc));
+                }
             }
         }
         // Slabs between the beams, four quarters a bay, flush with the beams' tops.
-        for j in 0..L::BAYS {
-            for i in 0..L::BAYS {
-                let (x0, x1, y0, y1) = (line(i) + hw, line(i + 1) - hw, line(j) + hw, line(j + 1) - hw);
+        for j in 0..by {
+            for i in 0..bx {
+                let (x0, x1, y0, y1) = (line_x(i) + hw, line_x(i + 1) - hw, line_y(j) + hw, line_y(j + 1) - hw);
                 let (xm, ym) = (0.5 * (x0 + x1), 0.5 * (y0 + y1));
                 for (a, b) in [(x0, xm), (xm, x1)] {
                     for (c, d) in [(y0, ym), (ym, y1)] {
@@ -507,16 +647,7 @@ pub fn frame10() -> Structure {
             }
         }
     }
-    let bonds = between_free(&chunks, auto_bonds(&chunks, joint_of));
-    let corner = line(0);
-    Structure {
-        key: "wy_frame10",
-        title: "10-floor concrete frame",
-        chunks,
-        bonds,
-        aim: Aim { target: [corner - hc, corner, base + 0.5 * (L::STOREY - L::BEAM_DEPTH)], direction: [1.0, 0.0, 0.0] },
-        ball: BALLS[0],
-    }
+    chunks
 }
 
 /// The round tower's dimensions (m).
@@ -594,6 +725,7 @@ pub fn round_tower() -> Structure {
             Aim { target: [L::COLUMN_AT * a.cos() - L::COLUMN, L::COLUMN_AT * a.sin(), base + 0.5 * L::STOREY], direction: [1.0, 0.0, 0.0] }
         },
         ball: BALLS[0],
+        charges: Vec::new(),
     }
 }
 
@@ -652,5 +784,6 @@ pub fn brick_tower() -> Structure {
         bonds,
         aim: Aim { target: [-s, 0.0, base + 0.25 * L::COURSES as f64 * L::COURSE], direction: [1.0, 0.0, 0.0] },
         ball: BALLS[0],
+        charges: Vec::new(),
     }
 }

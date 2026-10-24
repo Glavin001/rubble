@@ -19,8 +19,9 @@
 const VIDEO_HZ = 60;
 
 export function createDirector(lab) {
-  // Shots since the scene loaded: {tick, origin, direction, settings}, or {tick, fire: true,
-  // settings} for the stress modes' ball along the structure's line of attack.
+  // Shots since the scene loaded: {tick, origin, direction, settings}, {tick, fire: true,
+  // settings} for the stress modes' ball along the structure's line of attack, or {tick,
+  // detonate: name} for a pack's demolition charges ('' every charge, each at its delay).
   let shots = [];
   let busy = false;
   // Fractional physics ticks owed (ticks per video frame need not be whole).
@@ -44,6 +45,7 @@ export function createDirector(lab) {
   }
   // The pending shot (a ray in the lab's frame) fired now, as live play does.
   function fire(shot) {
+    if (shot.detonate !== undefined) return lab.stress.detonate(shot.detonate);
     lab.applyShotSettings(shot.settings);
     if (shot.fire) return lab.stress.fire();
     if (lab.stressOn) return lab.stress.shootRay(shot.origin, shot.direction);
@@ -93,8 +95,10 @@ export function createDirector(lab) {
   // Script segments: {n (video frames at 60 fps), slow?, caption?, cam?: {orbit: [yaw,
   // pitch, dist], to?: [yaw, pitch, dist] (eased across the segment), or rel / relTo
   // (offsets from the scene's orbit: [yaw + a, pitch + b, distance × c]), spin? (rad per
-  // frame), target?: [x, y, z]}, act?: 'fire' (the scene's row shot) | {shoot: [u, v]}
-  // (through the viewport) | {ray: [origin, direction]}, view?: {bonds, color}, mass?,
+  // frame), target?: [x, y, z]}, act?: 'fire' (the row shot; in the stress modes the ball
+  // along the structure's line of attack) | {shoot: [u, v]}
+  // (through the viewport) | {ray: [origin, direction]} | {detonate: name} (a pack's
+  // charges; '' sets off every one at its delay), view?: {bonds, color}, mass?,
   // speed? (shot scales, powers of two as the sliders)}.
   async function record(script, opts = {}) {
     await lab.pause();
@@ -109,7 +113,12 @@ export function createDirector(lab) {
         if (seg.view) lab.setView(seg.view);
         if (seg.mass !== undefined || seg.speed !== undefined) lab.applyShotSettings({ ...lab.shotSettings(), ...(seg.mass !== undefined && { mass: seg.mass }), ...(seg.speed !== undefined && { speed: seg.speed }) });
         if (seg.cam) spin = 0;
-        if (seg.act === 'fire' && lab.stressOn) {
+        if (seg.act?.detonate !== undefined) {
+          // A Topple pack's charges, cut between frames (stress modes).
+          const shot = { tick: tick(), detonate: seg.act.detonate };
+          if (!lab.stressOn || !fire(shot)) throw new Error(`take: no charge ${JSON.stringify(seg.act.detonate)} to set off`);
+          shots.push(shot);
+        } else if (seg.act === 'fire' && lab.stressOn) {
           // The stress modes' ball along the structure's line of attack (a Wrecking Yard pack's).
           const shot = { tick: tick(), fire: true, settings: lab.shotSettings() };
           if (!fire(shot)) throw new Error('take: this scene has no line of attack to fire along');
@@ -197,6 +206,8 @@ export function createDirector(lab) {
     record, replay,
     get busy() { return busy; },
     get shots() { return shots.length; },
+    // A pack's charges set off ('' every one), for replays.
+    logDetonate(name) { shots.push({ tick: tick(), detonate: name }); },
     // The stress modes' ball fired along the line of attack, for replays.
     logFire() { shots.push({ tick: tick(), fire: true, settings: lab.shotSettings() }); },
     // A live shot (click or the row's ball), for replays.

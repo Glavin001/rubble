@@ -389,6 +389,46 @@ impl GpuWorld {
         Ok(i)
     }
 
+    /// Cut bonds between frames (a demolition charge, `stress_ref::wrecking::Charge`): the
+    /// bonds `bonds` of structure `structure` break now, at the end of the frame stepped
+    /// last, and the clusters they held split on the host as the punch's breaks are
+    /// (`STRESS_IMPACT_PUNCH=1`): the last frame's GPU splits followed, the engine's motion
+    /// taken, the split, the solver's tables rebuilt and the bodies written back to the
+    /// engine (forward: nothing is stepped again). The clusters made of `debris` chunks
+    /// alone get `kick` (m/s) added to their velocity first. Needs the resident engine
+    /// (`with_resident_engine`). Returns the bonds cut (those still connected).
+    pub fn cut_bonds(&mut self, gpu: &Gpu, structure: usize, bonds: &[usize], debris: &[usize], kick: [f64; 3]) -> Result<usize, String> {
+        if self.resident_engine.is_none() {
+            return Err("cutting bonds needs the resident engine".into());
+        }
+        let n = self.solver.mirror.bonds.get(structure).map_or(0, |b| b.len());
+        if let Some(&b) = bonds.iter().find(|&&b| b >= n) {
+            return Err(format!("structure {structure} has no bond {b}"));
+        }
+        self.flush_pending(gpu)?;
+        self.solver.download(gpu);
+        self.resident_sync_motion();
+        let live: Vec<(usize, usize)> = bonds.iter().filter(|&&b| self.solver.mirror.bonds[structure][b].connected()).map(|&b| (structure, b)).collect();
+        if live.is_empty() {
+            return Ok(0);
+        }
+        self.solver.mirror.break_bonds(&live);
+        if kick != [0.0; 3] {
+            let m = &mut self.solver.mirror;
+            let thrown: Vec<usize> = (0..m.clusters.len()).filter(|&ci| !m.clusters[ci].anchored && m.clusters[ci].structure == structure && m.clusters[ci].chunks.iter().all(|c| debris.contains(c))).collect();
+            for ci in thrown {
+                m.clusters[ci].velocity += Vec3::from_array(kick);
+            }
+        }
+        self.solver.rebuild(gpu, 0.0)?;
+        for cl in &mut self.solver.mirror.clusters {
+            cl.driven = true;
+        }
+        self.with_shell_mut(|w| w.coupled_write_back(&[]));
+        self.last_resident = true;
+        Ok(live.len())
+    }
+
     /// Coupled mode: impact islands on (the default) or off (the engine drives every
     /// body and its contacts reach the stress solve only as loads; `World::impact_islands`).
     /// A capability profile's solver switches (`stress_ref::capability`): its per-tick

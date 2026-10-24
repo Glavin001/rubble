@@ -42,6 +42,7 @@
 //! colliders filtered out of every pair. Capacity is therefore consumed by every
 //! rebuilt body; `RubbleEngine::with_capacity` sizes it.
 
+pub mod demolition;
 pub mod scenes;
 #[cfg(feature = "gpu")]
 pub mod ingest_check;
