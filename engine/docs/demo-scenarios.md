@@ -48,7 +48,7 @@ runs in a browser.
 | `wy_frame10_ball` | S4 S5 | The collapse climbs and the core stands | The subject is small in frame; pastel debris |
 | `wy_round_tower_sphere` | S4 | Floors drop, the core stands | As above |
 | `bo_viaduct_pier` | S2 S1 | Spans hinge down whole, then break on the road | No vehicles on it (S2 without V3/V4); the camera is far; stress solver only |
-| `topple_detonate` | S1 | The charges fire; it repeats exactly | **In Chrome it crushes in place; it only topples natively on Metal.** No cars on the street |
+| `topple_detonate` | S1 | The charges fire; it leans out as one mass for about 4 s and lands across the street, in Chrome as natively; it repeats exactly | It lands as one long piece, not storey-sized slabs. No cars on the street |
 | `rr_storefront_car` | V5 | A local break; the shop stands | A ball stands in for the car; the façade renders as a blank pale wall |
 | `ft_glass_tower_jet` | S3 | The cut and the collapse | A ball stands in for the aircraft; no tilt; a parked ball floats over the rubble at the end |
 | `lab_house_*`, `lab_cuboid_grid_ball` | S4 S7 | Scale | Rubble's own mode does not repeat exactly at scale |

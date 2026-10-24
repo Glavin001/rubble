@@ -55,10 +55,10 @@ test('the Wrecking Yard, Bridge Out, Topple, Ram Raid and Fly-through packs (bui
  assert.deepEqual(PACK_SAMPLES.map(s=>[s.key,s.group]),[['wy_frame10','Wrecking Yard'],['wy_round_tower','Wrecking Yard'],['wy_brick_tower','Wrecking Yard'],['bo_viaduct','Bridge Out'],['topple_tower','Topple'],
   ['rr_storefront_row','Ram Raid'],['ft_apartment_block','Fly-through'],['ft_glass_tower','Fly-through']]);
  const pieces=PACK_SAMPLES.map(s=>buildPackScene(packSampleJson(s.key).buffer).pieces);
- assert.deepEqual(pieces,[1264,337,1444,347,420,1203,1355,1332]);
+ assert.deepEqual(pieces,[1264,337,1444,347,425,1203,1355,1332]);
  // Topple's pack carries its charges (defaults.charges: node pairs, firing order).
  const charges=PACK_SAMPLES.map(s=>(JSON.parse(new TextDecoder().decode(packSampleJson(s.key))).defaults.charges??[]).map(c=>[c.name,c.bonds.length]));
- assert.deepEqual(charges,[[],[],[],[],[['street-side columns',6],['back-row footings',11]],[],[],[]]);
+ assert.deepEqual(charges,[[],[],[],[],[['street-side columns',6],['back-row footings',26]],[],[],[]]);
  assert.throws(()=>packSampleJson('house'),/Unknown bundled scene/);
 });
 
