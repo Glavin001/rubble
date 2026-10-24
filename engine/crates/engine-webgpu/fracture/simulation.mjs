@@ -414,7 +414,7 @@ return {
  // Bodies per guidance state {off, armed, steering, done}, and why the done
  // ones ended (engine-schema GuideEnd; a GPU readback).
  async guideStates(){
-   const [off,armed,steering,done,,pushed,arrived,landed,short,slow,leftOut,noZone]=Plan.guideStateCounts(new Uint8Array(await readBuffer(bufs[GUIDE_BODIES],0,bodyCount*64)));
+   const [off,armed,steering,done,,pushed,arrived,landed,short,slow,leftOut,noZone]=Plan.guideStateCounts(new Uint8Array(await readBuffer(bufs[GUIDE_BODIES],0,bodyCount*Plan.guideRecordBytes())));
    return {off,armed,steering,done,ended:{pushed,arrived,landed,short,slow,leftOut,noZone}};
  },
  // Pieces each zone has taken so far (a GPU readback).

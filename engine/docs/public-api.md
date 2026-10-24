@@ -547,9 +547,16 @@ physics**: it adds momentum, so it is off unless the world asks for it.
   - More zones than `max_zones` is an error.
 - **How it stays invisible.** A guided body is planned once, when it becomes
   free (no joints, nothing pushing it for `settle_steps`).
+  - **Aim points:** per zone, a seeded point inside it, then points two
+    thirds, a third and none of the way from the point of the zone nearest
+    the body's unguided landing toward it. The body takes the first it can
+    reach, so a burst spreads over the zone and a body that can only just
+    reach it lands at its near edge. Each is met at the time that needs the
+    least of the budget (for a zone on a fast car that is near the landing,
+    not the arc's closest approach in mid-air).
   - **Zone choice:** each reachable zone scores `weight · (1 − s)²`, where `s`
-    is the fraction of the budget the body needs. The body then picks a zone
-    by a seeded draw and aims at its own seeded point inside it.
+    is the fraction of the budget its easiest aim point needs. The body then
+    picks a zone by a seeded draw.
   - **Launch kick:** spread over `kick_steps` steps, at most `launch_kick` of
     the launch speed and `launch_cone` of direction change. It is applied only
     within `launch_window` of the break, where the break's chaos hides it.
@@ -571,7 +578,7 @@ physics**: it adds momentum, so it is off unless the world asks for it.
 - **Cost is bounded.** Per step:
   - one scan of the bodies (one word for an unguided body);
   - at most `plan_budget` plans, one 64-lane workgroup each, with the lanes
-    splitting the zones (24 arc samples per zone);
+    splitting the zones (four aim points of 32 arc samples per zone);
   - a single-workgroup select and commit.
 
   A large burst is planned over several steps instead of spiking one. A body
@@ -579,12 +586,17 @@ physics**: it adds momentum, so it is off unless the world asks for it.
   and quota claims resolve in body order, so results are deterministic.
 
   Measured with `guide_bench` on an M-series GPU, 256 zones, every guided body
-  freed in the same step (`RUBBLE_GPU_TIMING=1`): the guidance passes add a
-  median 0.03–0.05 ms per step, with single steps up to about 0.25 ms. That
-  holds at 10k and 100k bodies, whether 0, 5k or all 100k are guided.
+  freed in the same step (`RUBBLE_GPU_TIMING=1`), the guide phase takes about
+  0.13 ms per step at 10k bodies and 0.32–0.36 ms at 100k while the queue drains
+  (256 plans a step, each weighing four aim points per zone). It was 0.03–0.05 ms
+  with one seeded aim point per zone, which missed zones on fast-moving anchors.
 - **Reads (blocking, for tools and tests).** `body_guidance(id)` returns a
-  body's state, zone, held acceleration and hit time; `guidance_claims()`
-  returns each zone's claimed bodies.
+  body's state, zone, held acceleration, hit time and why its guidance ended
+  (`GuideEnd`); `guidance_claims()` returns each zone's claimed bodies.
+- **Demos.** The fracture lab's Directed debris (Near Miss rings, city props)
+  and `vehicle.html?scene=gauntlet`: a drivable truck down a shelled street,
+  with a ring around the truck, an arc behind it and the parked cars' roofs as
+  zones. Both use the same passes through `RigidStep` / the lab planner.
 - **C ABI:** `RbWorldDef::enable_guidance`, `rbWorld_SetGuidance`,
   `rbWorld_SetGuidanceZones`, `rbWorld_ResetGuidanceClaims`,
   `rbBody_SetGuided` and `rbDestructible_SetGuided`. Values are in the world's

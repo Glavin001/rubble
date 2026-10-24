@@ -2473,16 +2473,17 @@ impl WgpuSim {
             return;
         }
         let g = self.guide.as_ref().expect("active guidance");
-        let mut p = g.params;
-        p.time = self.steps_done as f32 * self.params.dt;
-        p.dt = self.params.dt;
-        p.gravity_y = self.params.gravity_y;
-        p.zone_count = g.zones;
-        p.body_count = self.body_count;
-        p.plan_budget = g.cap.plan_budget;
-        p.max_zones = g.cap.max_zones;
-        p.block_count = self.body_count.div_ceil(64).max(1);
-        p.joint_count = self.joint_count;
+        let p = g.params.for_step(
+            guidance::GuideStep {
+                time: self.steps_done as f32 * self.params.dt,
+                dt: self.params.dt,
+                gravity_y: self.params.gravity_y,
+                zones: g.zones,
+                bodies: self.body_count,
+                joints: self.joint_count,
+            },
+            g.cap,
+        );
         self.write_binding(guidance::GUIDE_PARAMS_BINDING, 0, std::slice::from_ref(&p));
     }
 

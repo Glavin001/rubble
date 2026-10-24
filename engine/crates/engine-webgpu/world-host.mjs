@@ -80,7 +80,7 @@ export function motionLayout(c) {
   return { characterBase, queryBase, projectileBase, slots, bytes: slots * 16 };
 }
 
-export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_VEHICLE_CAPACITY, motionCap = DEFAULT_MOTION_CAPACITY, softCap = null, wgslBase = './generated/wgsl/', status = () => {} }) {
+export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_VEHICLE_CAPACITY, motionCap = DEFAULT_MOTION_CAPACITY, softCap = null, guidance = null, wgslBase = './generated/wgsl/', status = () => {} }) {
   // engine_exec::rigid_plan in wasm: buffer sizes, host uploads and the step's
   // commands, the same graph WgpuSim and MetalSim replay (canonical contacts).
   const vcap = { ...DEFAULT_VEHICLE_CAPACITY, ...vehicleCap };
@@ -89,7 +89,9 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
   const plan = new RigidStep(
     Uint32Array.of(userCap.maxBodies, userCap.maxColliders, userCap.maxContacts, userCap.maxJoints,
       userCap.maxCandidates, userCap.maxColors, userCap.maxCommands, userCap.maxHull),
-    capWords(vcap), scap ? softCapWords(scap) : undefined);
+    capWords(vcap), scap ? softCapWords(scap) : undefined,
+    // Directed debris (bindings 37-41) only when asked for: {maxZones, planBudget}.
+    guidance ? Uint32Array.of(guidance.maxZones ?? 256, guidance.planBudget ?? 256) : undefined);
   // One tyre joint per vehicle wheel slot rides on top of the user joints.
   const cap = { ...userCap, maxJoints: userCap.maxJoints + vcap.maxWheels };
   const vlayout = vehicleLayout(vcap);
@@ -493,6 +495,33 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     return { characters, projectiles, events };
   };
 
+  // ---- directed debris (engine_schema::guidance; needs createWorld's `guidance`) ----
+  const GUIDE = { ZONES: 38, BODIES: 39, SCRATCH: 40 };
+  /** Settings (GuidanceSettings, camelCase) and zones (ZoneDesc list, anchors are body indices). */
+  world.setGuidance = (settings, zones) => {
+    plan.set_guidance(JSON.stringify(settings));
+    const bytes = plan.set_guidance_zones(JSON.stringify(zones), world.bodyCount);
+    if (bytes.length) device.queue.writeBuffer(bufs[GUIDE.ZONES], 0, bytes);
+  };
+  /** Guide bodies first..first+count toward zones whose tags meet `tagMask` (0: stop). */
+  world.setGuided = (first, count, tagMask) => {
+    if (count > 0) device.queue.writeBuffer(bufs[GUIDE.BODIES], first * RigidStep.guide_record_bytes(), RigidStep.guide_records(count, tagMask));
+  };
+  /** Forget every body's guidance and the zones' claims (scene reset). */
+  world.clearGuidance = () => {
+    if (!bufs[GUIDE.SCRATCH]) return;
+    for (const b of [GUIDE.BODIES, GUIDE.SCRATCH]) device.queue.writeBuffer(bufs[b], 0, new Uint8Array(bufs[b].size));
+  };
+  /** Bodies per guidance state and end reason (RigidStep.guide_state_counts). */
+  world.guideStates = async () => {
+    const w = await readWords(bufs[GUIDE.BODIES], 0, world.bodyCount * RigidStep.guide_record_bytes());
+    const c = RigidStep.guide_state_counts(new Uint8Array(w.buffer));
+    const ended = ['none', 'pushed', 'arrived', 'landed', 'short', 'slow', 'leftOut', 'noZone'];
+    return { off: c[0], armed: c[1], steering: c[2], done: c[3], ended: Object.fromEntries(ended.map((k, i) => [k, c[4 + i]])) };
+  };
+  /** Pieces each zone has claimed. */
+  world.guideClaims = async (zones) => Array.from(await readWords(bufs[GUIDE.SCRATCH], RigidStep.guide_claims_offset(), zones * 4));
+
   // ---- per-step replay of the rigid_plan commands ----
   const PFIELDS = ['dt', 'gravityY', 'iterations', 'flags', 'alpha', 'gamma', 'betaLin', 'betaAng', 'kStart', 'kMaxN',
     'kMaxT', 'contactOffset', 'sleepLin', 'sleepAng', 'sleepTime', 'residualExit', 'trustLin', 'trustAng', 'pivotFloor', 'gridCellSize'];
@@ -528,6 +557,8 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
       motionBits, world.projectileCount, world.characters.length, world.queryCount);
     // Host words (binding 21), host uniform (binding 6), counter block (copy source).
     const host = plan.host_upload(counts);
+    const guide = plan.guide_params(counts);
+    if (guide.length) device.queue.writeBuffer(bufs[37], 0, guide);
     const uniformBytes = host.length - 256 - 80;
     device.queue.writeBuffer(upload, 0, host.subarray(0, 256));
     device.queue.writeBuffer(upload, 256, host.subarray(256, 256 + uniformBytes));
@@ -652,6 +683,7 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
       world.soft.restore(snap.softHost);
     }
     world.hasFilters = snap.hasFilters;
+    world.clearGuidance();
     plan.reset();
     world.steps = 0;
     world.last = { contact: 0, candidate: 0, awake: 0, color: 0, manifold: 0, overflow: 0 };

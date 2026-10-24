@@ -782,17 +782,17 @@ impl Planner {
     }
 
     fn guide_step_params(&self) -> GuideParamsGpu {
-        let mut g = self.guide_params;
-        g.time = self.steps as f32 * self.params.dt;
-        g.dt = self.params.dt;
-        g.gravity_y = self.params.gravity_y;
-        g.zone_count = self.guide_zones;
-        g.body_count = self.body_count;
-        g.plan_budget = GUIDE_CAP.plan_budget;
-        g.max_zones = GUIDE_CAP.max_zones;
-        g.block_count = self.body_count.div_ceil(256).max(1);
-        g.joint_count = self.joint_count;
-        g
+        self.guide_params.for_step(
+            engine_schema::guidance::GuideStep {
+                time: self.steps as f32 * self.params.dt,
+                dt: self.params.dt,
+                gravity_y: self.params.gravity_y,
+                zones: self.guide_zones,
+                bodies: self.body_count,
+                joints: self.joint_count,
+            },
+            GUIDE_CAP,
+        )
     }
 
     /// Enable, disable or retune directed debris (encoded from the next tick).

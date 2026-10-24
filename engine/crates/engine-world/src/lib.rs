@@ -45,13 +45,13 @@ pub use destruction::{
     StrengthModel,
 };
 pub use error::{StaleHandle, Unsupported};
-pub use guidance::{
-    BodyGuidance, GuidanceCapacity, GuidanceSettings, GuidanceZone, GuideState, ZoneAnchor,
-    ZoneShape,
-};
 pub use events::{
     coalesce, BodyEvents, BodyMoveEvent, CoalescedFrame, DestructionEvent, Frame, RayBatchId,
     RayBatchResult, SkinId, SkinOutput, SoftOutput, VehicleOutput,
+};
+pub use guidance::{
+    BodyGuidance, GuidanceCapacity, GuidanceSettings, GuidanceZone, GuideEnd, GuideState,
+    ZoneAnchor, ZoneShape,
 };
 pub use handles::{BodyId, JointId, ShapeId};
 pub use joints::{

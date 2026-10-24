@@ -983,6 +983,11 @@ impl Plan {
     pub fn guide_state_counts(records: &[u8]) -> Vec<u32> {
         Planner::guide_state_counts(records).to_vec()
     }
+    /// Bytes of one body's guidance record in buffer 39.
+    #[wasm_bindgen(js_name = guideRecordBytes)]
+    pub fn guide_record_bytes() -> u32 {
+        std::mem::size_of::<engine_schema::guidance::GuideBodyGpu>() as u32
+    }
     /// `[byte offset, byte length]` of the zone claim counters in buffer 40.
     #[wasm_bindgen(js_name = guideClaimsRange)]
     pub fn guide_claims_range(&self) -> Vec<u32> {

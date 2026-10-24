@@ -47,6 +47,13 @@
       <span><kbd>W</kbd><kbd>S</kbd> drive/brake · <kbd>A</kbd><kbd>D</kbd> steer · <kbd>Space</kbd> handbrake</span>
       <span><kbd>X</kbd> sever a wheel · <kbd>P</kbd> sever a part · <kbd>B</kbd> cannonball · <kbd>R</kbd> reset · <kbd>C</kbd> camera · <kbd>Tab</kbd> switch vehicle</span>
     </div>
+    <div class="row" id="gauntletUi" hidden>
+      <label><input type="checkbox" id="guideOn" checked /> Directed debris</label>
+      <select id="guideStrength"><option value="0">subtle</option><option value="1" selected>cinematic</option><option value="2">exaggerated</option></select>
+      <label><input type="checkbox" id="shellOn" checked /> Shelling</label>
+      <span class="muted"><kbd>F</kbd> shell now</span>
+    </div>
+    <div id="guideStats" class="muted" hidden></div>
     <div id="status" class="muted">starting…</div>
     <div id="err"></div>
   </div>
@@ -63,7 +70,7 @@
   </div>
   <script type="module">
     import { createWorld, sceneCapacity } from './world-host.mjs';
-    import { L, M, WHEEL_RIM_MATERIAL, bitsf, centerOfMass } from './vehicle.mjs';
+    import { L, M, WHEEL_RIM_MATERIAL, bitsf, centerOfMass, Gauntlet } from './vehicle.mjs';
     import { createBuggyRenderer, BUGGY_SHADE_WGSL } from './buggy-render.mjs';
     import { duneBuggySoft, calibratedSettings } from './soft.mjs';
 
@@ -86,12 +93,13 @@
       tanklab: 'Lab: tank over rubble, logs and a ledge',
       buggies: 'Dune buggies: jumps, walls, cannon (parts break off under load)',
       vibeland: 'vibe-land garage: all seven, jumps, walls, cannon',
+      gauntlet: 'Gauntlet: drive a shelled street (directed debris)',
     };
     const scene = qs.get('scene') || 'playground';
     if (!SCENES[scene]) throw new Error(`unknown scene ${scene}`);
     const presets = await (await fetch('./generated/vehicle_presets.json', { cache: 'no-store' })).json();
     const byName = Object.fromEntries(presets.map((p) => [p.name, p]));
-    const presetName = qs.get('preset') || (scene === 'destruction' ? 'destructible_sedan' : scene === 'carry' ? 'monster_truck' : scene === 'tanklab' ? 'tank' : scene === 'buggies' || scene === 'vibeland' ? 'dune_buggy' : 'sedan');
+    const presetName = qs.get('preset') || (scene === 'destruction' ? 'destructible_sedan' : scene === 'carry' || scene === 'gauntlet' ? 'monster_truck' : scene === 'tanklab' ? 'tank' : scene === 'buggies' || scene === 'vibeland' ? 'dune_buggy' : 'sedan');
     if (!byName[presetName]) throw new Error(`unknown preset ${presetName}; have ${Object.keys(byName).join(', ')}`);
     // ?tracks=shells: the tank as it was before track pods (wheel shells, belly 1 m up),
     // for side-by-side comparisons.
@@ -157,7 +165,7 @@
 
     // ---------------------------------------------------------------- scene
     const nTraffic = scene === 'traffic' ? Math.max(1, Math.min(60, Number(qs.get('vehicles')) || 48)) : 0;
-    const est = scene === 'traffic' ? 4000 + nTraffic * 40 : 6000;
+    const est = scene === 'traffic' ? 4000 + nTraffic * 40 : scene === 'gauntlet' ? 9000 : 6000;
     const cap = sceneCapacity(est, est * 2);
     const vehicleCap = { maxVehicles: 64, maxWheels: 1024, maxCurvePoints: 8192, maxDiffs: 256, maxAntiRolls: 256, maxParts: 512, maxRays: 64 };
     // ?build=hybrid (buggies scene): node-beam frames with bolted parts on joints
@@ -166,7 +174,7 @@
     const SOFT_HZ = 240;
     const STEPS_PER_FRAME = hybrid ? Math.round(SOFT_HZ / 60) : 1;
     if (hybrid) cap.maxJoints = 1024;
-    const world = await createWorld(device, { cap, vehicleCap, ...(hybrid ? { softCap: {} } : {}), status: (s) => { statusEl.textContent = s; } });
+    const world = await createWorld(device, { cap, vehicleCap, ...(hybrid ? { softCap: {} } : {}), ...(scene === 'gauntlet' ? { guidance: {} } : {}), status: (s) => { statusEl.textContent = s; } });
     // The bridge needs 20 iterations to converge its bending within a fast crossing
     // (tests/vehicle.rs BRIDGE_ITERATIONS).
     world.params.iterations = scene === 'bridge' ? 20 : 8;
@@ -250,6 +258,9 @@
       return [x * d + v[0] * s + c[0] * 2 * w, y * d + v[1] * s + c[1] * 2 * w, z * d + v[2] * s + c[2] * 2 * w];
     }
 
+    // Gauntlet: the street's shelling state and its facade blocks (bodies first..first+count).
+    const street = scene === 'gauntlet' ? new Gauntlet() : null;
+    const blocks = { first: 0, count: 0, parked: [] };
     let rng = 7;
     let bridgeBolts = 0; // breakable joints in the scene (bridge)
     // ?spawn=x,z,yaw places the player vehicle (yaw in radians about +Y).
@@ -315,6 +326,22 @@
         const lineup = ['dune_buggy', 'vibe_trophy', 'vibe_rally', 'vibe_monster', 'vibe_derby', 'vibe_sprint', 'vibe_semi'];
         lineup.forEach((name, i) => addVehicle(name, [-24 + i * 8, name === 'vibe_monster' ? 1.2 : 0.8, -16], 0));
       }
+    } else if (scene === 'gauntlet') {
+      // engine-vehicle-wasm gauntlet.rs: masonry facades on both sides of a street,
+      // static cores behind them and parked cars at the kerbs. Facade blocks stay
+      // static (held by the frame) until a blast launches them (fireShell).
+      const g = JSON.parse(street.layout());
+      addVehicle(presetName, g.spawn, 0);
+      for (const c of g.cores) staticBox(c.p, c.half);
+      blocks.first = world.bodyCount;
+      for (const b of g.blocks) {
+        const body = world.addBody({ p: b.p, flags: 0 });
+        const c = world.addCollider({ body, shape: 2, material: MAT_PROP, params: [...b.half, Math.hypot(...b.half)] });
+        world.colliderInfo[c].dynamic = true; // a launched block sizes the grid cell
+      }
+      blocks.count = g.blocks.length;
+      blocks.layout = g.blocks;
+      for (const c of g.parked) blocks.parked.push(addVehicle('sedan', c.p, c.yaw, { forward: 0, steer: 0, handbrake: 1 }));
     } else if (scene !== 'traffic') {
       // Two-way coupling labs: each mirrors a test in tests/vehicle.rs.
       const MAT_SKID = 3;
@@ -437,6 +464,63 @@
     }
     for (const v of vehicles) if (v.ai) world.vehicles.setInput(world.backend, v.h, v.ai);
     const initial = world.snapshot();
+    // ---------------------------------------------------------------- directed debris (gauntlet)
+    const guideOn = document.getElementById('guideOn'), guideStrength = document.getElementById('guideStrength');
+    const shellOn = document.getElementById('shellOn'), guideStatsEl = document.getElementById('guideStats');
+    if (street) {
+      document.getElementById('gauntletUi').hidden = false;
+      guideStatsEl.hidden = false;
+      if (qs.get('guide') === '0') guideOn.checked = false;
+      if (qs.get('strength')) guideStrength.value = qs.get('strength');
+      guideOn.onchange = guideStrength.onchange = () => { applyGuidance(); guideOn.blur(); guideStrength.blur(); };
+    }
+    let guideZoneCount = 0;
+    // The player chassis' height over the ground once it has settled (the zones
+    // around it lie on the ground); a guess until then.
+    let chassisRest = 0;
+    function applyGuidance(rearm = true) {
+      if (!street) return;
+      const chassis = world.vehicles.chassisBody(vehicles[0].h);
+      const zones = JSON.parse(street.zones(chassis, chassisRest || 0.8, Uint32Array.from(blocks.parked.map((h) => world.vehicles.chassisBody(h)))));
+      guideZoneCount = zones.length;
+      world.setGuidance(JSON.parse(Gauntlet.settings(Number(guideStrength.value), guideOn.checked)), zones);
+      if (rearm) world.setGuided(blocks.first, blocks.count, 1);
+    }
+    applyGuidance();
+    let lastShell = 0;
+    // Blast the facade ahead of the player car (gauntlet.rs Gauntlet::blast).
+    function fireShell() {
+      if (!street || !lastChassis) return;
+      lastShell = world.steps;
+      const out = street.blast(lastChassis.p[0], lastChassis.p[2], lastChassis.v[2]);
+      for (let k = 0, o = 4; k < out[3]; k++, o += 7) {
+        // The static block becomes dynamic at its launch velocity and spin.
+        const b = blocks.layout[out[o]], body = blocks.first + out[o];
+        const words = new Uint32Array(world.bodyWords.buffer, body * 112, 28).slice();
+        const f = new Float32Array(words.buffer);
+        f[3] = 1 / b.mass; f.set(boxInv(b.mass, ...b.half), 8); words[11] = 1 | 8;
+        f.set(out.subarray(o + 1, o + 4), 12); f[15] = 0; f.set(out.subarray(o + 4, o + 7), 16); words[19] = world.steps;
+        world.backend.writeBody(body, words);
+      }
+      return { centre: [out[0], out[1], out[2]], blocks: out[3] };
+    }
+    let guideBusy = false, guideStatsStep = -1;
+    function pollGuide() {
+      if (street && !chassisRest && world.steps > 90 && lastChassis) {
+        chassisRest = lastChassis.p[1];
+        applyGuidance(false);
+      }
+      if (!street || guideBusy || world.steps - guideStatsStep < 30) return;
+      guideStatsStep = world.steps;
+      guideBusy = true;
+      Promise.all([world.guideStates(), world.guideClaims(guideZoneCount)]).then(([s, claims]) => {
+        guideBusy = false;
+        const cars = claims.slice(2).reduce((a, b) => a + b, 0);
+        guideStatsEl.textContent = guideOn.checked
+          ? `steering ${s.steering} · steered so far ${s.done} (arrived ${s.ended.arrived}, knocked off course ${s.ended.pushed}) · aimed: around car ${claims[0]}, behind ${claims[1]}, parked cars ${cars}`
+          : 'directed debris off: blocks fly as thrown';
+      }).catch(fail);
+    }
     // The controlled vehicle (Tab cycles; __record act 'player:<i>').
     let player = 0;
     statusEl.textContent = `scene ready · ${world.bodyCount} bodies · ${world.vehicles.vehicleCount} vehicles`;
@@ -686,6 +770,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       else if (e.code === 'KeyZ') severWheel(false);
       else if (e.code === 'KeyP') severPart();
       else if (e.code === 'KeyB') fireCannon();
+      else if (e.code === 'KeyF') fireShell();
     });
     addEventListener('keyup', (e) => keys.delete(e.code));
     addEventListener('blur', () => keys.clear());
@@ -748,6 +833,9 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     }
     function resetScene() {
       world.restore(initial);
+      street?.reset();
+      applyGuidance();
+      lastShell = 0;
       bolts = { broken: 0, lastForce: 0 };
       boltPollStep = -1;
       mounts.last = null;
@@ -924,6 +1012,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     };
     const boltText = () => bridgeBolts ? ` · bolts broken ${bolts.broken}/${bridgeBolts}${bolts.broken ? ` (last at ${(bolts.lastForce / 1000).toFixed(0)} kN)` : ''}` : '';
     function updateHud() {
+      pollGuide();
       pollBolts();
       pollMounts();
       const st = lastState;
@@ -1016,6 +1105,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       updateCamera(dt, false);
       const enc = device.createCommandEncoder();
       const frozen = stopAt > 0 && world.steps >= stopAt;
+      if (street && shellOn.checked && !frozen && lastChassis && lastChassis.p[2] > -12 && lastChassis.p[2] < 150 && world.steps - lastShell >= 70) fireShell();
       if (!frozen) for (let k = 0; k < STEPS_PER_FRAME; k++) world.encodeStep(enc);
       drawScene(enc);
       const rb = rbFree.pop();
@@ -1156,6 +1246,57 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     };
     window.__vehicleState = () => lastState;
     window.__cannon = (p, v) => fireCannonAt(p, v);
+    // Gauntlet A/B take: from a reset, drive down the street at `cruise` m/s holding
+    // its lane, shelling every `every` steps, with directed debris on or off. Each
+    // launched block's first touchdown (sampled every 6 steps) is measured from
+    // the car at that moment: `landings` histograms the plan-view distances (m),
+    // `near` counts those within `near` m and `close` those within 2 m.
+    window.__gauntletTake = async ({ steps = 720, guided = true, strength = 1, cruise = 11, every = 70, near = 6 } = {}) => {
+      if (!street) throw new Error('not the gauntlet scene');
+      guideOn.checked = guided; guideStrength.value = String(strength);
+      resetScene();
+      manual = true;
+      const chassis = world.vehicles.chassisBody(vehicles[0].h);
+      const n = world.bodyCount * 112;
+      const buf = device.createBuffer({ size: n, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      const landed = new Map(); // block -> distance from the car at touchdown
+      let shells = 0;
+      const trace = [];
+      for (let s = 0; s < steps; s += 6) {
+        const enc = device.createCommandEncoder();
+        enc.copyBufferToBuffer(world.bufs[0], 0, buf, 0, n);
+        device.queue.submit([enc.finish()]);
+        await buf.mapAsync(GPUMapMode.READ);
+        const f = new Float32Array(buf.getMappedRange().slice(0));
+        buf.unmap();
+        const c = chassis * 28;
+        lastChassis = { p: [f[c], f[c + 1], f[c + 2]], q: [f[c + 4], f[c + 5], f[c + 6], f[c + 7]], v: [f[c + 12], f[c + 13], f[c + 14]] };
+        for (let i = 0; i < blocks.count; i++) {
+          const o = (blocks.first + i) * 28;
+          if (landed.has(i) || f[o + 3] === 0 || f[o + 1] > 0.6) continue;
+          landed.set(i, Math.hypot(f[o] - f[c], f[o + 2] - f[c + 2]));
+        }
+        const fw = qrot(lastChassis.q, [0, 0, 1]);
+        const speed = fw[0] * lastChassis.v[0] + fw[2] * lastChassis.v[2];
+        if (s % 60 === 0) trace.push([Math.round(lastChassis.p[0] * 10) / 10, Math.round(lastChassis.p[2]), Math.round(speed * 10) / 10]);
+        const steerIn = Math.max(-1, Math.min(1, 0.25 * (lastChassis.p[0] + 2.5) + 2.5 * fw[0]));
+        const e = cruise - speed;
+        world.vehicles.setInput(world.backend, player, { forward: Math.max(0, Math.min(1, e * 0.4)), steer: steerIn, brake: e < -1 ? Math.min(1, -e * 0.2) : 0, handbrake: 0 });
+        if (lastChassis.p[2] > -12 && lastChassis.p[2] < 150 && world.steps - lastShell >= every) { fireShell(); shells++; }
+        // One submit per step: each step stages its own host uploads.
+        for (let k = 0; k < 6; k++) {
+          const step = device.createCommandEncoder();
+          world.encodeStep(step);
+          device.queue.submit([step.finish()]);
+        }
+      }
+      buf.destroy();
+      manual = false;
+      const states = await world.guideStates();
+      const d = [...landed.values()];
+      const landings = [2, 4, 6, 8, 12, 20, Infinity].map((r, k, a) => d.filter((x) => x < r && x >= (a[k - 1] ?? 0)).length);
+      return { guided, strength, shells, landed: d.length, near: d.filter((x) => x < near).length, close: d.filter((x) => x < 2).length, landings, z: lastChassis.p[2], trace, states, claims: await world.guideClaims(guideZoneCount) };
+    };
     // Parts / wheels broken off under load over every buggy, and the latest break.
     window.__mounts = () => {
       const n = buggyMesh ? buggyMesh.broken() : { parts: 0, wheels: 0 };

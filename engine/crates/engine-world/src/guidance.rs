@@ -13,8 +13,10 @@
 
 use crate::error::StaleHandle;
 use crate::{BodyId, DestructibleId, World};
+pub use engine_schema::guidance::{
+    GuidanceCapacity, GuidanceSettings, GuideEnd, GuideState, ZoneShape,
+};
 use engine_schema::guidance::{GuideBodyGpu, GuideZoneGpu, ZoneDesc};
-pub use engine_schema::guidance::{GuidanceCapacity, GuidanceSettings, GuideState, ZoneShape};
 
 /// What a zone is attached to.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -74,6 +76,8 @@ pub struct BodyGuidance {
     pub acceleration: [f32; 3],
     /// World time (s) the plan reaches its aim point.
     pub hit_time: f32,
+    /// Why its guidance ended (`GuideEnd::None` while armed or steering).
+    pub end: GuideEnd,
 }
 
 impl World {
@@ -176,6 +180,7 @@ impl World {
                 .filter(|&z| z != u32::MAX),
             acceleration: r.accel,
             hit_time: r.hit_time,
+            end: GuideEnd::of(&r),
         })
     }
 

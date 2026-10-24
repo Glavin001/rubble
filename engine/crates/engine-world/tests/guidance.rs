@@ -488,6 +488,73 @@ fn a_zone_on_a_moving_body_is_led() {
 }
 
 #[test]
+fn a_fast_car_gathers_debris_coming_down_beside_it() {
+    // Gauntlet's case: a car at 10 m/s with a ring zone all around it, and
+    // blocks blasted across the street from a facade 6 m up. Their arcs pass
+    // high over where the car is earlier, so the hit is timed where each arc
+    // comes down to the ring's height, not at its closest approach in 3D.
+    let speed = 10.0;
+    let flight = (2.6 + (2.6f32 * 2.6 + 120.0).sqrt()) / 10.0;
+    let mut w = guided_world(false);
+    let car = w
+        .create_body(&BodyDef {
+            body_type: BodyType::Kinematic,
+            position: [-2.5, 0.5, -speed * flight],
+            linear_velocity: [0.0, 0.0, speed],
+            ..BodyDef::default()
+        })
+        .unwrap();
+    w.create_box_shape(car, &ShapeDef::default(), [0.9, 0.5, 2.0])
+        .unwrap();
+    // Natural touchdowns from 3 m behind to 7 m ahead of the car.
+    let ahead = [-3.0, -1.5, 0.0, 1.5, 3.0, 4.5, 6.0, 7.0];
+    let blocks: Vec<BodyId> = ahead
+        .iter()
+        .map(|&a| {
+            let b = chunk(&mut w, [8.0, 6.0, a], [-6.5, 2.6, 0.0]);
+            w.body_set_guided(b, true).unwrap();
+            b
+        })
+        .collect();
+    let ring = GuidanceZone {
+        offset: [0.0, -0.5, 0.0],
+        anchor_relative: true,
+        ..GuidanceZone::new(
+            ZoneAnchor::Body(car),
+            ZoneShape::Ring {
+                inner: 2.5,
+                outer: 6.0,
+                height: 0.0,
+            },
+        )
+    };
+    let settings = GuidanceSettings {
+        launch_kick: 0.12,
+        launch_cone: 6.0f32.to_radians(),
+        accel_max_g: 0.08,
+        min_flight: 0.5,
+        ..GuidanceSettings::default()
+    };
+    enable(&mut w, settings, &[ring]);
+    let t = record(&mut w, 150);
+    for (&b, &a) in blocks.iter().zip(&ahead) {
+        let land = crossing(&t, b, 0.0).unwrap();
+        let k = t
+            .iter()
+            .position(|s| s[b.index() as usize].position[1] < 0.0)
+            .unwrap();
+        let c = t[k][car.index() as usize].position;
+        let d = ((land[0] - c[0]).powi(2) + (land[2] - c[2]).powi(2)).sqrt();
+        let g = w.body_guidance(b).unwrap();
+        assert_ne!(g.end, GuideEnd::NoZone, "block {a} m ahead found no zone");
+        assert!(
+            (2.2..=6.3).contains(&d),
+            "block {a} m ahead came down {d} m from the car ({land:?}, car {c:?})"
+        );
+    }
+}
+
+#[test]
 fn guidance_ends_at_the_first_contact() {
     let natural = natural_landing();
     let mut w = guided_world(true);

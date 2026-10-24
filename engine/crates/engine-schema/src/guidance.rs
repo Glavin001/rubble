@@ -149,6 +149,33 @@ pub struct GuideParamsGpu {
     pub _pad: u32,
 }
 
+/// What a host knows about a step, for [`GuideParamsGpu::for_step`].
+#[derive(Clone, Copy, Debug)]
+pub struct GuideStep {
+    pub time: f32,
+    pub dt: f32,
+    pub gravity_y: f32,
+    pub zones: u32,
+    pub bodies: u32,
+    pub joints: u32,
+}
+
+impl GuideParamsGpu {
+    /// These settings' params for one step (every host fills them the same way).
+    pub fn for_step(mut self, s: GuideStep, cap: GuidanceCapacity) -> Self {
+        self.time = s.time;
+        self.dt = s.dt;
+        self.gravity_y = s.gravity_y;
+        self.zone_count = s.zones;
+        self.body_count = s.bodies;
+        self.plan_budget = cap.plan_budget;
+        self.max_zones = cap.max_zones;
+        self.block_count = s.bodies.div_ceil(GUIDE_BLOCK).max(1);
+        self.joint_count = s.joints;
+        self
+    }
+}
+
 pub const ZONE_POINT: u32 = 0;
 pub const ZONE_SPHERE: u32 = 1;
 pub const ZONE_BOX: u32 = 2;
@@ -178,7 +205,7 @@ pub struct GuideZoneGpu {
     pub angle_to: f32,
 }
 
-/// `GuideBody` (64 B).
+/// `GuideBody` (80 B).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
 pub struct GuideBodyGpu {
@@ -194,6 +221,9 @@ pub struct GuideBodyGpu {
     pub since_plan: u32,
     pub tag_mask: u32,
     pub flags: u32,
+    /// Its aim point in the zone's frame (re-plans keep it).
+    pub aim: [f32; 3],
+    pub _pad: u32,
 }
 
 impl GuideBodyGpu {
@@ -221,12 +251,13 @@ pub struct GuideSlotGpu {
     pub hit_time: f32,
     pub kick: [f32; 3],
     pub _pad1: f32,
-    pub _pad2: [f32; 4],
+    pub aim: [f32; 3],
+    pub _pad2: f32,
 }
 
 const _: () = assert!(std::mem::size_of::<GuideParamsGpu>() == 96);
 const _: () = assert!(std::mem::size_of::<GuideZoneGpu>() == 80);
-const _: () = assert!(std::mem::size_of::<GuideBodyGpu>() == 64);
+const _: () = assert!(std::mem::size_of::<GuideBodyGpu>() == 80);
 const _: () = assert!(std::mem::size_of::<GuideSlotGpu>() == 64);
 
 /// Tuning of directed debris, in physical units (`World::set_guidance`, the

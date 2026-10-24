@@ -13,7 +13,7 @@ await init({ module_or_path: wasmUrl.protocol === 'file:' ? (await import('node:
 export const L = JSON.parse(wasm.layout_constants());
 export const { BODY_VEHICLE, JOINT_FLAG_TYRE, JOINT_BYTES, WHEEL_RIM_MATERIAL } = L;
 /** engine_exec::rigid_plan for browser hosts, and D6 joint records (world-host.mjs). */
-export const { RigidStep, ball_joint_words: ballJointWords } = wasm;
+export const { RigidStep, ball_joint_words: ballJointWords, Gauntlet } = wasm;
 /** Character / projectile pool and continuous-collision constants (engine-schema). */
 export const M = JSON.parse(wasm.motion_constants());
 /** A character record (Uint32Array, 16 slots) from a CharacterDesc JSON. */

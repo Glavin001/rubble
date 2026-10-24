@@ -93,8 +93,14 @@ uint why(uint flags, uint reason) { return (flags & ~(15u << WHY_SHIFT)) | (reas
 // A push this close to the ground plane (m) is a landing.
 static const float LANDED_HEIGHT = 0.5;
 static const uint GFLAG_CANDIDATE = 2u;
+// Aim points a plan weighs per zone: a seeded point of the zone, then points
+// two thirds, a third and none of the way from the point nearest the body's
+// unguided landing toward it. The body takes the first in reach, so a burst
+// spreads over the whole zone, and a body that can only just reach it still
+// lands at its near edge.
+static const uint AIM_TRIES = 4u;
 
-// Matches engine-webgpu `GuideBodyGpu` (64 B).
+// Matches engine-schema `GuideBodyGpu` (80 B).
 struct GuideBody
 {
     uint state;
@@ -109,6 +115,8 @@ struct GuideBody
     uint sincePlan;
     uint tagMask;
     uint flags;
+    float3 aim;     // its aim point in the zone's frame (re-plans keep it)
+    uint _pad;
 };
 
 // One plan per selected candidate, in rank order (64 B).
@@ -122,7 +130,8 @@ struct GuideSlot
     float hitTime;
     float3 kick;
     float _pad1;
-    float4 _pad2;
+    float3 aim;
+    float _pad2;
 };
 
 BIND(0) RWStructuredBuffer<BodyState> gBodies;
@@ -226,31 +235,109 @@ struct AimLine
     float3 v;
 };
 
-AimLine aimLine(GuideZone z, float3 local)
+// A zone's frame now: where its origin is, how fast it moves and its yaw.
+struct ZoneFrame
 {
-    AimLine a;
-    float3 origin = z.center;
-    float3 vel = float3(0.0, 0.0, 0.0);
+    float3 origin;
+    float3 vel;
+    float c;
+    float s;
+};
+
+ZoneFrame zoneFrame(GuideZone z)
+{
+    ZoneFrame f;
+    f.origin = z.center;
+    f.vel = float3(0.0, 0.0, 0.0);
     float yaw = z.yaw;
     if (z.anchor != NO_ANCHOR)
     {
         BodyState b = gBodies[z.anchor];
-        origin = b.position;
-        vel = b.linearVel;
+        f.origin = b.position;
+        f.vel = b.linearVel;
         if (z.frame == ZONE_FRAME_ANCHOR)
         {
             float3 fwd = quatRotate(b.orientation, float3(0.0, 0.0, 1.0));
             yaw += atan2(fwd.x, fwd.z);
         }
     }
-    a.p0 = origin + rotateYaw(cos(yaw), sin(yaw), z.offset + local);
-    a.v = vel;
+    f.c = cos(yaw);
+    f.s = sin(yaw);
+    return f;
+}
+
+AimLine aimLine(GuideZone z, ZoneFrame f, float3 local)
+{
+    AimLine a;
+    a.p0 = f.origin + rotateYaw(f.c, f.s, z.offset + local);
+    a.v = f.vel;
     return a;
+}
+
+// The point of the zone's shape nearest `l` (both in its frame). In a ring's
+// hole the nearest direction blends toward a seeded one (by `h`) the nearer
+// `l` is to the centre, where every direction is about as near.
+float3 clampToShape(GuideZone z, float3 l, uint h)
+{
+    if (z.shape == ZONE_SPHERE)
+    {
+        float r = length(l);
+        return r > z.extent.x ? l * (z.extent.x / r) : l;
+    }
+    if (z.shape == ZONE_BOX) return clamp(l, -z.extent, z.extent);
+    if (z.shape == ZONE_RING || z.shape == ZONE_ARC)
+    {
+        float ri = z.extent.x;
+        float ro = max(z.extent.y, ri);
+        float r = length(l.xz);
+        float2 dir = l.xz;
+        if (r < ri)
+        {
+            float a0 = 6.2831853 * unitFloat(pcgHash(h ^ 0x5BD1E995u));
+            dir = l.xz / max(ri, 1e-6) + (1.0 - r / max(ri, 1e-6)) * float2(sin(a0), cos(a0));
+        }
+        float ang = length(dir) > 1e-6 ? atan2(dir.x, dir.y) : 0.0;
+        if (z.shape == ZONE_ARC)
+        {
+            // Into [from, from + 2π), then to the nearer end when past `to`.
+            float span = z.angleTo - z.angleFrom;
+            float a = ang - z.angleFrom;
+            a -= 6.2831853 * floor(a / 6.2831853);
+            if (a > span) a = (a - span < 6.2831853 - a) ? span : 0.0;
+            ang = z.angleFrom + a;
+        }
+        r = clamp(r, ri, ro);
+        return float3(sin(ang) * r, clamp(l.y, 0.0, z.extent.z), cos(ang) * r);
+    }
+    return float3(0.0, 0.0, 0.0);
+}
+
+// Where the body's unguided arc meets the zone, in the zone's frame: as it
+// comes down through the zone's height, or at its top when it never gets
+// that low again (a raised zone).
+float3 naturalLocal(GuideZone z, ZoneFrame f, float3 p0, float3 v0, float gy, float lo, float hi)
+{
+    float baseY = f.origin.y + z.offset.y;
+    float a = -0.5 * gy;
+    float dvy = f.vel.y - v0.y;
+    float d0y = baseY - p0.y;
+    float disc = dvy * dvy - 4.0 * a * d0y;
+    float t = clamp(-v0.y / max(-gy, 1e-6), lo, hi);
+    if (a > 1e-6 && disc >= 0.0) t = clamp((-dvy + sqrt(disc)) / (2.0 * a), lo, hi);
+    float3 p = p0 + v0 * t + float3(0.0, 0.5 * gy * t * t, 0.0);
+    return rotateYaw(f.c, -f.s, p - (f.origin + f.vel * t)) - z.offset;
 }
 
 uint aimSeed(uint body, uint generation, uint zone)
 {
     return pcgHash(body * 0x9E3779B9u ^ pcgHash(zone ^ (generation * 0x85EBCA77u) ^ GP.seed));
+}
+
+// Aim point `t` of a zone (0 is `aimSeed`'s).
+uint aimSeedTry(uint body, uint generation, uint zone, uint t)
+{
+    uint s = aimSeed(body, generation, zone);
+    return t == 0u ? s : pcgHash(s ^ (t * 0x9E3779B9u));
 }
 
 bool zoneOpen(GuideZone z, uint zi, uint tagMask)
@@ -271,32 +358,49 @@ float3 missAt(float3 d0, float3 dv, float3 acc, float t)
     return d0 + dv * t - 0.5 * acc * (t * t);
 }
 
-// Closest approach of the arc to the moving aim point over [lo, hi].
-float closestTime(float3 d0, float3 dv, float3 acc, float lo, float hi)
+// How far the steering can move the arc by time t: the kick lands over the
+// next kickFrames steps and the acceleration from the next step, so their
+// lever arms are that much shorter than t.
+float reachAt(float t, float k, float amax, float kickLag, float dt)
+{
+    float tk = max(t - kickLag, 0.0);
+    float ta = max(t - dt, 0.0);
+    return k * tk + 0.5 * amax * ta * ta;
+}
+
+// The share of the steering budget a hit at time t needs (> 1: out of reach).
+float effortAt(float3 d0, float3 dv, float3 acc, float t, float k, float amax, float kickLag, float dt)
+{
+    float r = reachAt(t, k, amax, kickLag, dt);
+    return r > 1e-6 ? length(missAt(d0, dv, acc, t)) / r : 3.4e38;
+}
+
+// When to meet the moving aim point, in [lo, hi]: the time that needs the
+// least of the steering budget (the least visible plan). Reach grows with
+// time, so this is neither the arc's closest approach (for a fast-moving aim,
+// often in mid-air above it) nor simply where it lands.
+float easiestTime(float3 d0, float3 dv, float3 acc, float lo, float hi, float k, float amax, float kickLag, float dt)
 {
     float best = lo;
-    float bestD = 3.4e38;
+    float bestE = 3.4e38;
     float step = (hi - lo) / 15.0;
     for (uint j = 0u; j < 16u; j++)
     {
         float t = lo + step * float(j);
-        float3 d = missAt(d0, dv, acc, t);
-        float dd = dot(d, d);
-        if (dd < bestD)
+        float e = effortAt(d0, dv, acc, t, k, amax, kickLag, dt);
+        if (e < bestE)
         {
-            bestD = dd;
+            bestE = e;
             best = t;
         }
     }
     float a = max(lo, best - step);
     float b = min(hi, best + step);
-    for (uint k = 0u; k < 8u; k++)
+    for (uint n = 0u; n < 8u; n++)
     {
         float m1 = a + (b - a) * 0.381966;
         float m2 = a + (b - a) * 0.618034;
-        float3 d1 = missAt(d0, dv, acc, m1);
-        float3 d2 = missAt(d0, dv, acc, m2);
-        if (dot(d1, d1) < dot(d2, d2)) b = m2; else a = m1;
+        if (effortAt(d0, dv, acc, m1, k, amax, kickLag, dt) < effortAt(d0, dv, acc, m2, k, amax, kickLag, dt)) b = m2; else a = m1;
     }
     return 0.5 * (a + b);
 }
@@ -509,6 +613,7 @@ groupshared float planTotal[PLAN_LANES];
 groupshared uint planZone[PLAN_LANES];
 groupshared float4 planKick[PLAN_LANES];   // xyz kick, w time to the aim point
 groupshared float4 planAccel[PLAN_LANES];
+groupshared float4 planAim[PLAN_LANES];
 
 void replanSlot(uint rank, uint i, BodyState b, GuideBody g)
 {
@@ -525,7 +630,7 @@ void replanSlot(uint rank, uint i, BodyState b, GuideBody g)
     if (t > dt && g.zone < GP.zoneCount)
     {
         GuideZone z = gZones[g.zone];
-        AimLine aim = aimLine(z, sampleShape(z, aimSeed(i, g.generation, g.zone)));
+        AimLine aim = aimLine(z, zoneFrame(z), g.aim);
         float3 grav = float3(0.0, GP.gravityY, 0.0);
         float3 miss = aim.p0 + aim.v * t - arcAt(b.position, b.linearVel, grav + g.accel, t);
         float3 want = g.accel + 2.0 * miss / (t * t);
@@ -571,40 +676,66 @@ void guide_plan(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID, u
     float3 pickDir = float3(0.0, 0.0, 0.0);
     float pickS = 0.0;
     float pickT = 0.0;
+    float3 pickAim = float3(0.0, 0.0, 0.0);
     uint n = fresh ? min(GP.zoneCount, GP.maxZones) : 0u;
     for (uint zi = lane; zi < n; zi += PLAN_LANES)
     {
         GuideZone z = gZones[zi];
         if (!zoneOpen(z, zi, g.tagMask)) continue;
         uint seed = aimSeed(i, g.generation, zi);
-        AimLine aim = aimLine(z, sampleShape(z, seed));
-        float3 d0 = aim.p0 - p0;
-        float3 dv = aim.v - v0;
-        float t = closestTime(d0, dv, grav, min(GP.tMin, tg), tg);
-        if (t < GP.tMin) continue;
-        float3 miss = missAt(d0, dv, grav, t);
-        float tk = max(t - kickLag, 0.0);
-        float ta = max(t - dt, 0.0);
-        float reach = k * tk + 0.5 * amax * ta * ta;
-        float dist = length(miss);
-        if (reach <= 1e-6 || dist > reach) continue;
-        // Each budget is used in the same fraction, so the kick stays inside
-        // its cone and the acceleration inside its limit.
-        float s = dist / reach;
-        float score = z.weight * (1.0 - s) * (1.0 - s) + 1e-12;
+        ZoneFrame frame = zoneFrame(z);
+        float3 nearest = clampToShape(z, naturalLocal(z, frame, p0, v0, GP.gravityY, min(GP.tMin, tg), tg), seed);
+        // The first of the zone's aim points in reach; the zone is scored by
+        // the easiest of them.
+        float easiest = 2.0;
+        uint inReach = 0u;
+        float bestS = 2.0;
+        float bestT = 0.0;
+        float3 bestDir = float3(0.0, 0.0, 0.0);
+        float3 bestAim = float3(0.0, 0.0, 0.0);
+        for (uint at = 0u; at < AIM_TRIES; at++)
+        {
+            float f = 1.0 - float(at) / float(AIM_TRIES - 1u);
+            float3 local = clampToShape(z, lerp(nearest, sampleShape(z, aimSeedTry(i, g.generation, zi, at)), f), seed);
+            AimLine aim = aimLine(z, frame, local);
+            float3 d0 = aim.p0 - p0;
+            float3 dv = aim.v - v0;
+            float t = easiestTime(d0, dv, grav, min(GP.tMin, tg), tg, k, amax, kickLag, dt);
+            if (t < GP.tMin) continue;
+            float3 miss = missAt(d0, dv, grav, t);
+            float reach = reachAt(t, k, amax, kickLag, dt);
+            float dist = length(miss);
+            if (reach <= 1e-6 || dist > reach) continue;
+            // Each budget is used in the same fraction, so the kick stays inside
+            // its cone and the acceleration inside its limit.
+            float s = dist / reach;
+            easiest = min(easiest, s);
+            inReach += 1u;
+            if (inReach == 1u)
+            {
+                bestS = s;
+                bestT = t;
+                bestDir = dist > 1e-9 ? miss / dist : float3(0.0, 0.0, 0.0);
+                bestAim = local;
+            }
+        }
+        if (inReach == 0u) continue;
+        float score = z.weight * (1.0 - easiest) * (1.0 - easiest) + 1e-12;
         total += score;
         if (unitFloat(pcgHash(seed ^ 0x68E31DA4u)) * total < score)
         {
             pick = zi;
-            pickDir = dist > 1e-9 ? miss / dist : float3(0.0, 0.0, 0.0);
-            pickS = s;
-            pickT = t;
+            pickDir = bestDir;
+            pickS = bestS;
+            pickT = bestT;
+            pickAim = bestAim;
         }
     }
     planTotal[lane] = total;
     planZone[lane] = pick;
     planKick[lane] = float4(pickDir * (pickS * k), pickT);
     planAccel[lane] = float4(pickDir * (pickS * amax), 0.0);
+    planAim[lane] = float4(pickAim, 0.0);
     GROUP_SYNC();
     if (lane != 0u || !active) return;
     if (replan)
@@ -617,6 +748,7 @@ void guide_plan(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID, u
     GuideSlot slot = gGuideSlots[rank];
     slot.zone = NO_ZONE;
     slot.replan = 0u;
+    slot.aim = float3(0.0, 0.0, 0.0);
     slot.accel = float3(0.0, 0.0, 0.0);
     slot.kick = float3(0.0, 0.0, 0.0);
     slot.hitTime = 0.0;
@@ -643,6 +775,7 @@ void guide_plan(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID, u
         slot.zone = planZone[chosen];
         slot.kick = planKick[chosen].xyz / float(max(GP.kickFrames, 1u));
         slot.accel = planAccel[chosen].xyz;
+        slot.aim = planAim[chosen].xyz;
         slot.hitTime = GP.time + planKick[chosen].w;
     }
     gGuideSlots[rank] = slot;
@@ -705,6 +838,7 @@ void guide_commit(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID)
                 g.kickLeft = GP.kickFrames;
                 g.hitTime = s.hitTime;
                 g.sincePlan = 0u;
+                g.aim = s.aim;
             }
             if (last)
             {
