@@ -769,6 +769,10 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, advance: Advance) -> Result<
     if let Some(n) = fixed {
         // Frame-locked: every frame asked for, however far the GPU is behind.
         for _ in 0..n {
+            // Charges due: cut between this frame and the last, as live play does.
+            for c in charges_due(l.world.frame, dt) {
+                l.world.detonate(gpu, &c).map_err(|e| format!("charge {}: {e}", c.name))?;
+            }
             l.world.step_frame(gpu)?;
             stepped += 1;
         }

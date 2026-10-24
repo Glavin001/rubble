@@ -23,13 +23,15 @@ const take = (state, script) => ({ page: 'fracture/index.html', setup: setup(sta
 
 export const LAB_TAKES = {
   // Topple (stress_ref::topple), threshold profile: the charges cut the street-side
-  // columns, then the back line; the tower leans over the street as one mass and lands.
+  // columns, then the back line. Natively (Metal) the tower then leans over the street as
+  // one mass and lands across it; in Chrome's WebGPU the back line crushes faster than it
+  // tips and it comes down almost in place (README, Topple), as this take records.
   topple_detonate: take({ scene: 'topple_tower', bonds: 'threshold' }, [
     { n: 50, caption: 'A 10-storey tower beside a street: 420 bonded chunks, charges on the ground storey', cam: { rel: [0.9, 0.0, 1.0], relTo: [1.1, 0.0, 0.95] } },
     { n: 1, act: { detonate: '' }, caption: 'Charges: the street-side columns, then the back line 0.25 s later' },
     { n: 120, caption: 'Charges: the street-side columns, then the back line 0.25 s later', cam: { rel: [1.1, 0.0, 0.95], relTo: [1.3, 0.02, 1.0] } },
-    { n: 300, slow: 2, caption: 'Half speed: it leans over the street as one mass', cam: { rel: [1.3, 0.02, 1.0], relTo: [1.6, 0.05, 1.05] } },
-    { n: 200, caption: 'Real time: it lands across the street', cam: { rel: [1.6, 0.05, 1.05], relTo: [1.9, 0.12, 1.1] } },
+    { n: 300, slow: 2, caption: 'Half speed: the back line crushes and the tower comes down storey by storey', cam: { rel: [1.3, 0.02, 1.0], relTo: [1.6, 0.05, 1.05] } },
+    { n: 200, caption: 'Real time: a rubble pile at the foot of the street', cam: { rel: [1.6, 0.05, 1.05], relTo: [1.9, 0.12, 1.1] } },
   ]),
   // Bridge Out (stress_ref::viaduct): the 50 t ball into the hinge pier under
   // blast_parity; the two drop-in spans swing down whole and break on the road below.
