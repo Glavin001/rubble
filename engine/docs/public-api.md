@@ -412,16 +412,18 @@ Blast's terms, reachable as a `BodyId`.
 
 **`StrengthModel`** picks how bonds fail. The same API serves all three:
 
-- **`Threshold`** is the default and fully GPU-resident (`GpuFracture`).
-  Contact and impact load is compared against bond capacity, with strike
-  prediction, and splits go into pre-allocated body slots.
+- **`Threshold`** is the fracture lab's `threshold` mode, fully GPU-resident
+  (`GpuFracture`, shipped in D1b). Each bonded cluster is one body. Contact and
+  impact loads are compared against bond capacity, with strike prediction for
+  bodies marked as projectiles (`body_set_projectile`), and splits go into body
+  slots reserved when the destructible is placed.
 - **`Stress(StressSettings)`** is Blast-parity: a quasi-static stress solve
   with `compression`, `tension` and `shear` limits, each with an elastic and a
   fatal value, plus an iteration budget. It is the charter baseline profile
   `blast_parity`. It is host-coupled until island frames move to the GPU.
 - **`Bonds`** turns each bond into a breakable AVBD bond joint, the fracture
   lab's default. It supports yield and bend limits, and every fragment is its
-  own body. Scheduled in D1, next to `Threshold`.
+  own body. It shipped in D1a.
 
 #### Render contract
 
@@ -702,7 +704,7 @@ today; each feature below gets a World call and an ABI call instead. Status:
 | Destructibles from GLB, pack and cuboid houses; strength scale; layouts | `rbCreateDestructibleAsset*` | ✅ |
 | Bonds that settle under self-weight before they can break (the lab's preload) | `preload_destructible_asset`, `rbWorld_PreloadDestructibleAsset` (the lab's procedure, checked against the Metal lab: the masonry arch never sleeps within 600 steps in either, so both give up there) | ✅ |
 | The lab's solver settings (120 Hz, 8 iterations, contact and sleep flags) | `DestructibleAssetDesc::solver`, `World::set_solver`, `rbWorld_UseDestructibleAssetSolver` | ✅ |
-| Fracture lab `threshold` mode (GPU splitter) | D1b, `StrengthModel::Threshold` | 🔜 |
+| Fracture lab `threshold` mode (GPU splitter) | `StrengthModel::Threshold`, `RB_STRENGTH_THRESHOLD`; `body_set_projectile`, `rbBody_SetProjectile`; `solver_for`, `rbWorld_UseDestructibleAssetSolverFor`; `rbWorld_GetDestructibleAssetGround` (D1b) | ✅ |
 | Fracture lab `stress` mode (blast_parity) | D5, `StrengthModel::Stress` | 🔜 |
 | Picking (camera ray) | `rbWorld_CastRays` | ✅ |
 | Grab and drag | a kinematic mouse body (`body_set_target_transform` each frame) plus a weld with `linear_stiffness` or a spherical joint | ✅ (composed; a dedicated mouse joint later) |
@@ -717,9 +719,7 @@ design frame (metres, Y up), the format of `vehicle_presets.json` and the
 soft descriptors; spawn transforms and velocities use the world's
 coordinates. `tests/demo_parity.rs` covers each row through the ABI.
 
-Next, in order: D1b (`threshold`),
-the rest of P3 (damping, gravity scale, motion locks, bullets) and D5
-(`stress`).
+Next: D5 (`stress`), then the rest of P3 (bullets).
 
 **P1.5: Box3D alignment (shipped).** `rubble::World` now has this shape:
 
@@ -825,16 +825,69 @@ Details are under P2 below.
   `Stress` models. Converting the limits would be a lossy decision, so it is
   not made silently.
 
-**D1b: the `Threshold` model in `World` (next).**
+**D1b: the `Threshold` model in `World` (shipped).** The fracture lab's
+`threshold` mode (stress-rubble `ThresholdWorld`) runs inside `World`, on the
+world's own device and `WgpuSim`. It sits behind engine-world's `stress`
+feature, which is on by default and adds path dependencies on the stress
+oracle's `stress-gpu`, `stress-ref` and `stress-rubble`.
 
-- **Build.** `GpuFracture` / `FractureTables` sharing the world's device,
-  with pre-allocated piece slots taken from `WorldCapacity`.
-- **Events.** `Split` events come from the GPU split log rather than from
-  host connectivity.
-- **Chunk transforms.** `chunk_local` becomes each chunk's pose in its
-  cluster.
-- **Device features.** It needs the stress solver's device features, such as
-  passthrough shaders on Metal, which `GpuContext` will request.
+- **Assets.** `from_glb`, `cuboid_house` and `from_pack` also import the same
+  source as the lab's stress modes do (`DestructibleAssetDesc::stress`, a
+  `StressSource`). That import supplies each chunk's material, volume and
+  support, each bond's tensile capacity and area, and the strike geometry.
+  Nothing is converted at load. A threshold instance's chunks are the stress
+  scene's chunks: the level's fragments in the asset's order (with their glTF
+  nodes), then the ground anchors the import adds. A failed import is reported
+  when a threshold destructible is placed, never at load.
+- **Placing.** One body per bonded cluster is cooked exactly as the lab cooks
+  it (stress-rubble `Cooker`), and its body record is written as the lab
+  writes it. Every other piece a split can make gets a reserved body slot up
+  front. The fracture tables and the contact ingest are built from World's
+  colliders, and the plan hints are fixed as the lab fixes them.
+- **Stepping.** Each step records `ingest.begin_frame`, World's own
+  `step_encode`, then `ingest.substep`, `merge` and `fracture.encode_frame`,
+  in one submission. The step's readback carries the fracture counters, chunk
+  owners, bond states and body frames. Readbacks are never dropped while a
+  threshold destructible exists.
+- **Adoption.** When a step split a body, the pieces' reserved slots become
+  live `BodyId`s. Every changed body takes the GPU's centre of mass and
+  principal axes as its solver frame from the next step on, with mass and
+  inertia summed from its chunks. The step then reports `BondsBroken` and
+  `Split` (the children partition the parent; one body per actor). Every
+  piece's origin stays the instance frame, so `chunk_local` is the identity
+  and the render contract holds.
+- **Projectiles.** `body_set_projectile(body, Some(Projectile))` adds a body
+  with one sphere or box shape to strike prediction and gives its contacts
+  the lab's shot loads. Other non-chunk colliders load chunks as static
+  geometry does (the lab's ground).
+- **Settings.** `solver_for(StrengthModel::Threshold)` gives the lab's
+  threshold engine settings: never asleep, zero-gap contact, world inertia,
+  4 iterations, 60 Hz. `StressSource::ground_height` gives the lab's ground
+  plane.
+- **Limits (fail loudly).**
+  - The world must use `ContactStorage::Canonical`, the rows the ingest reads.
+  - Reserved slots count against `max_bodies`.
+  - At most 64 projectiles (the strike table).
+  - At most 2^20 chunks or body slots (the fracture's scans).
+  - The impact pulse pool is sized from `max_contacts`.
+  - A fracture error bit fails the frame.
+  - Pieces belong to their destructible: `destroy_body` on one is refused.
+- **Cost.** Each step reads back 4 bytes per chunk, 4 per bond and 32 per
+  body slot of each threshold destructible. That is about 0.5 MB per step at
+  10k chunks.
+- **Parity.** `engine-world/tests/threshold.rs` places the masonry arch and
+  the cuboid house, fires the lab's shot, and runs the lab's
+  `ThresholdWorld` on the same scene. The first break comes in the same frame
+  with the same bond count in both. Afterwards the totals follow body-slot
+  order: the arch breaks 87 bonds in World against the lab's 92, both ending
+  at 17 bodies; the house ends at 93 bodies against 103. Each new piece
+  starts where its parent was. `engine-ffi/tests/threshold.rs` runs both
+  scenes through the C ABI in Unreal coordinates.
+- **Shaders.** The kernels run as WGSL on World's device, as in the browser.
+  A device opened with `PASSTHROUGH_SHADERS` on Metal runs the Metal
+  libraries instead.
+- **Not yet.** Snapshots of threshold state; damage descriptors (D2);
+  fracture-command replay (D3).
 
 **D1 (original list):**
 
