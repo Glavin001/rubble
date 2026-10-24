@@ -115,6 +115,11 @@ pub struct ThresholdWorld {
     strikes: Vec<fracture::Shot>,
     /// Each table bond's (structure, bond) in the mirror.
     pub bond_source: Vec<(usize, usize)>,
+    /// Whether a shot's strike is predicted at the end of the frame before it and its
+    /// breaks made before the engine steps (forward only: the shot meets the pieces). Off,
+    /// bonds break only on the contact loads after a step ([`Self::set_strike_prediction`];
+    /// `STRESS_THRESHOLD_STRIKE=0` starts it off).
+    predict_strikes: bool,
 }
 
 const RING: usize = 4;
@@ -333,7 +338,8 @@ impl ThresholdWorld {
             .map(|sh| fracture::Shot { body: sh.body, bound: (1.01 * shot_radius + 1e-3) as f32, face: shot_radius as f32, mass: shot_mass as f32, modulus: e_shot as f32, launch: 0 })
             .collect();
         // `STRESS_THRESHOLD_STRIKE=0` (a measurement): contact loads only, no strikes.
-        if !std::env::var("STRESS_THRESHOLD_STRIKE").is_ok_and(|v| v == "0") {
+        let predict_strikes = !std::env::var("STRESS_THRESHOLD_STRIKE").is_ok_and(|v| v == "0");
+        if predict_strikes {
             fracture.set_shots(gpu, &strikes)?;
         }
         // Nothing reads rubble's counters back each step, and a plan from counters read a
@@ -348,7 +354,7 @@ impl ThresholdWorld {
             })
             .collect();
         let mirror = world.solver.clone();
-        Ok(ThresholdWorld { profile, mirror, scene: scene.clone(), engine, ingest, fracture, tables: t, chunk_of, frame_dt: scene.sim.frame_dt, frame: 0, shots, fired: 0, ring, ring_next: 0, last: ThresholdStats::default(), initial_bodies: m.clusters.len() as u32, phases: Vec::new(), ground_modulus, projectile_modulus: projectile.youngs_modulus, shot_radius, strikes, bond_source })
+        Ok(ThresholdWorld { profile, mirror, scene: scene.clone(), engine, ingest, fracture, tables: t, chunk_of, frame_dt: scene.sim.frame_dt, frame: 0, shots, fired: 0, ring, ring_next: 0, last: ThresholdStats::default(), initial_bodies: m.clusters.len() as u32, phases: Vec::new(), ground_modulus, projectile_modulus: projectile.youngs_modulus, shot_radius, strikes, bond_source, predict_strikes })
     }
 
     /// Launch a shot (`desc`: the stress frame, its pose and velocity): its record written
@@ -392,11 +398,23 @@ impl ThresholdWorld {
             stress_ref::scene::ImpactorShape::Sphere { radius } => 1.01 * radius + 1e-3,
             stress_ref::scene::ImpactorShape::Box { half_extents } => 1.01 * Vec3::from_array(half_extents).norm() + 1e-3,
         } as f32;
-        if !std::env::var("STRESS_THRESHOLD_STRIKE").is_ok_and(|v| v == "0") {
+        if self.predict_strikes {
             // The table is a few hundred bytes; its count is unchanged.
             let _ = self.fracture.set_shots(gpu, &self.strikes);
         }
         true
+    }
+
+    /// Strike prediction on or off (on by default): off, a shot's breaks come only from the
+    /// contact loads after the step that meets the wall, so the engine's contact sees the
+    /// wall whole.
+    pub fn set_strike_prediction(&mut self, gpu: &Gpu, on: bool) -> Result<(), String> {
+        self.predict_strikes = on;
+        self.fracture.set_shots(gpu, if on { &self.strikes } else { &[] })
+    }
+
+    pub fn strike_prediction(&self) -> bool {
+        self.predict_strikes
     }
 
     /// One frame: rubble's step, its contacts ingested, the loads, breaks and splits. One

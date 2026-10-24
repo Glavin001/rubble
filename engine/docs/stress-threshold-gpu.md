@@ -206,6 +206,13 @@ each (exit: the ball's speed at the end; bodies: the structures' bodies):
 - `bench_split` (ignored): the split alone on 100k chunks.
 - `stress-rubble/tests/fracture_models.rs`: the load path and the local impact on the GPU
   against their host twins, and their behaviour (above).
+- `stress-rubble/tests/strike_through.rs`: the lab's ball against its cuboid house wall at
+  18 m/s, with strike prediction on and off (`ThresholdWorld::set_strike_prediction`,
+  `GpuWorld::set_strike_prediction`).
+  - Off, the ball rebounds off the whole wall in every mode, even when bonds break after.
+  - On, it goes through: `blast_parity`, `threshold` and `load_path`.
+  - `impact_local`: the ball stops at the wall below its ballistic limit and goes through
+    above it.
 
 | Split on 100k chunks | Wall time, submit to done |
 |---|---|
