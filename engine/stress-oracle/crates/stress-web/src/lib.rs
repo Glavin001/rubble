@@ -102,6 +102,9 @@ thread_local! {
     static VIEW: Cell<(bool, ColorMode)> = const { Cell::new((false, ColorMode::Material)) };
     /// The capability profile of the next `stress_load` (`stress_set_profile`).
     static PROFILE: Cell<Profile> = const { Cell::new(Profile::BlastParity) };
+    // Strike prediction as the lab set it (`stress_set_strike_prediction`), None: the
+    // profile's own (`Profile::predicts_strikes`). Kept across loads of one profile.
+    static STRIKE: Cell<Option<bool>> = const { Cell::new(None) };
     /// The physics frame rate of the next `stress_load` (`stress_set_physics_hz`); 0 keeps
     /// the scene's own.
     static PHYSICS_HZ: Cell<f64> = const { Cell::new(0.0) };
@@ -295,8 +298,33 @@ pub fn stress_set_bond_strength_scale(scale: f64) {
 #[wasm_bindgen]
 pub fn stress_set_profile(name: String) -> Result<(), JsValue> {
     let p = Profile::parse(&name).ok_or_else(|| JsValue::from_str(&format!("no profile {name}")))?;
+    if p != PROFILE.get() {
+        STRIKE.set(None);
+    }
     PROFILE.set(p);
     Ok(())
+}
+
+/// Strike prediction on or off, now (the loaded world) and for the next loads of this
+/// profile: a shot's breaks predicted at the end of the frame before it reaches a
+/// structure and made before the engine steps, so the shot meets the pieces (forward
+/// only, no re-simulation). Off, the engine's contact meets the whole structure first and
+/// the shot rebounds; bonds break only on the contact loads after the step.
+#[wasm_bindgen]
+pub fn stress_set_strike_prediction(on: bool) -> Result<(), JsValue> {
+    STRIKE.set(Some(on));
+    let err = |e: String| JsValue::from_str(&e);
+    DEVICE.with_borrow(|d| -> Result<(), JsValue> {
+        let Some(d) = d.as_ref() else { return Ok(()) };
+        WORLD.with_borrow_mut(|w| w.as_mut().map_or(Ok(()), |l| l.world.set_strike_prediction(on))).map_err(err)?;
+        TWORLD.with_borrow_mut(|w| w.as_mut().map_or(Ok(()), |l| l.world.set_strike_prediction(&d.gpu, on))).map_err(err)
+    })
+}
+
+/// Whether the loaded world predicts strikes (the profile's own unless the lab set it).
+#[wasm_bindgen]
+pub fn stress_strike_prediction() -> bool {
+    WORLD.with_borrow(|w| w.as_ref().map(|l| l.world.predict_strikes)).or_else(|| TWORLD.with_borrow(|w| w.as_ref().map(|l| l.world.strike_prediction()))).unwrap_or_else(|| STRIKE.get().unwrap_or(PROFILE.get().predicts_strikes()))
 }
 
 /// The physics frame rate (Hz) of the next `stress_load`: one resident frame per
@@ -489,6 +517,9 @@ fn load(level: u8) -> Result<(), String> {
             let gpu = &d.gpu;
             let s = SHOOTING.get().expect("shooting set");
             let mut world = stress_rubble::threshold::ThresholdWorld::with_profile(gpu, &scene, s.radius, s.mass, profile)?;
+            if let Some(on) = STRIKE.get() {
+                world.set_strike_prediction(gpu, on)?;
+            }
             let shots = world.shot_impactors();
             let renderer = Renderer::for_target(gpu, &world.mirror, &shots, d.config.width, d.config.height, d.view_format);
             world.attach_view(gpu, &renderer);
@@ -512,6 +543,9 @@ fn load(level: u8) -> Result<(), String> {
         world.redo_fractured_frames = false;
         world.set_impact_islands(true);
         world.apply_profile(profile);
+        if let Some(on) = STRIKE.get() {
+            world.set_strike_prediction(on)?;
+        }
         let shots = shot_meshes(&world);
         // Meshes for every chunk and for the shots to come.
         let (mut renderer, totals) = world.view_with(gpu, |mirror, _| {
@@ -641,6 +675,7 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, elapsed_ms: f64) -> Result<(
         "ballSpeed": s.map_or(0.0, |s| engine_fracture::plan::default_shot_speed(s.extent, s.speed)),
         "frameHz": 1.0 / dt,
         "profile": PROFILE.get().name(),
+        "strikePrediction": l.world.strike_prediction(),
         // As the GPU last finished them (a frame or two behind).
         "frames": l.world.frame,
         "statsFrame": st.frame,
@@ -724,6 +759,7 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
             let want_stats = stepped > 0 || STATS.with_borrow(|s| s == "{}");
             let renderer = &l.renderer;
             let totals = l.totals;
+            let strike_prediction = l.world.predict_strikes;
             let (view_ms, draw_ms, stats) = l.world.view_with(gpu, |mirror, imps| {
                 let view_ms = t_view.elapsed().as_secs_f64() * 1e3;
                 let t_draw = web_time::Instant::now();
@@ -748,6 +784,7 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
                         "lastShot": imps.last().map(|i| serde_json::json!({"position": i.pose.position.to_array(), "velocity": i.velocity.to_array()})),
                         "frameHz": 1.0 / dt,
                         "profile": PROFILE.get().name(),
+                        "strikePrediction": strike_prediction,
                         // Rigid bodies the structures are now (each split's children).
                         "bodies": mirror.clusters.len(),
                     })

@@ -212,6 +212,20 @@ level, camera and shot rule, so the three can be compared:
 | **Stress solver · local impact** | The threshold mode's GPU world (profile `impact_local`) with an analytic local impact model for strikes: Hertz contact, a ballistic limit from crushing and plug shear, back-face spall, strain-rate strength. Below the limit a shot craters or spalls the wall; at or above it the plug comes out and leaves with the shot (Recht and Ipson's residual speed), before rubble steps. Contacts as the threshold mode | As **Stress solver** |
 | **Learned impact** | **Compute only** — lean MGN-T forward (H=48, P=64, ~139k random weights) on the house-1story pack graph. Does not break bonds or drive rubble; the HUD shows **ms/forward** so browser WebGPU latency can be compared to the native Metal M0 finding | This page's WebGPU device; Slang → WGSL (`slang/kernels/learned_impact.slang` → `generated/wgsl/learned_impact.wgsl`) |
 
+**Strike prediction (stress modes).** The checkbox beside **Bonds**. On, each shot's strike
+is predicted at the end of the frame before it reaches a structure, and the bonds the strike
+breaks are broken before rubble steps, so the shot meets the pieces and carries on through
+(forward only, no re-simulation). Which bonds break is the strike model's call, not the
+stress solve's:
+- `threshold`, `load_path` and the blast_parity solver: the Hertz force's share against each
+  bond's tensile capacity;
+- `local impact`: its ballistic limit and plug cone.
+
+Off, rubble meets the whole structure first and the shot rebounds, whatever breaks after.
+Each mode starts with its own setting: on for threshold, load path and local impact, off for
+the blast_parity stress solver. Switching it applies at once.
+`stress-rubble/tests/strike_through.rs` checks both on the cuboid house.
+
 **Browser support (stress modes).** The stress-solver modes wait on the GPU from Rust.
 Chrome and Edge 137+ suspend the wasm stack there with WebAssembly JavaScript Promise
 Integration (JSPI). Other WebGPU browsers (Safari, including iPhone) load an Asyncify build of

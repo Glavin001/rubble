@@ -2,7 +2,7 @@
 // WebGPU device and canvas (engine/stress-oracle/crates/stress-web). This file loads the
 // module, forwards input (camera-input.mjs, as the page's renderer) and drives one frame per
 // animation frame; the physics, camera, shot rule and drawing are the Rust's.
-import init,{stress_init,stress_set_glb,stress_set_cuboid,stress_set_pack,stress_error,stress_stats,stress_set_running,stress_running,stress_resize,stress_drag,stress_zoom,stress_shoot,stress_set_view_mode,stress_mouse_look,stress_travel,stress_set_shot_mass_scale,stress_set_shot_speed_scale,stress_set_shot_radius_scale,stress_set_bond_strength_scale,stress_set_profile,stress_set_view,stress_set_physics_hz,stress_panic} from '../generated/stress-web/stress_web.js';
+import init,{stress_init,stress_set_glb,stress_set_cuboid,stress_set_pack,stress_error,stress_stats,stress_set_running,stress_running,stress_resize,stress_drag,stress_zoom,stress_shoot,stress_set_view_mode,stress_mouse_look,stress_travel,stress_set_shot_mass_scale,stress_set_shot_speed_scale,stress_set_shot_radius_scale,stress_set_bond_strength_scale,stress_set_profile,stress_set_view,stress_set_physics_hz,stress_panic,stress_set_strike_prediction,stress_strike_prediction} from '../generated/stress-web/stress_web.js';
 // Chrome and Edge 137+ suspend the wasm stack natively (JSPI). Elsewhere (Safari) the
 // Asyncify build of the same Rust does, driven by gpu-wait.mjs, which picks the build.
 import {JSPI,bindAsyncify,asyncifyPromising} from './gpu-wait.mjs';
@@ -42,6 +42,11 @@ export async function createStressMode(canvas){
   // The capability profile of the next load: blast_parity, threshold (the v0 mode),
   // load_path or impact_local.
   setProfile(name){stress_set_profile(name)},
+  // Strike prediction (forward only): a shot's breaks made before the engine steps, so it
+  // meets the pieces instead of rebounding off the whole structure. Now and for the next
+  // loads of this profile; switching profile goes back to its own.
+  get strikePrediction(){return stress_strike_prediction()},
+  setStrikePrediction(on){stress_set_strike_prediction(on)},
   // The physics frame rate of the next load (Hz; 0 keeps the scene's).
   setPhysicsHz(hz){stress_set_physics_hz(hz)},
   // The lab's view: the bond graph, and the colour mode (0 materials, 1 body state,
