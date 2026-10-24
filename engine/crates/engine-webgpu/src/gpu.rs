@@ -128,6 +128,8 @@ pub struct WgpuSim {
     contact_events: bool,
     /// Explosions queued for the next step (`write_explosions`).
     explosion_count: u32,
+    /// Some body has motion locks (`set_motion_locks`).
+    motion_locks: bool,
     /// The last `step*` call ran the GPU step (false: skipped, nothing awake).
     last_step_ran: bool,
     sleep_island_rounds: u32,
@@ -706,6 +708,7 @@ impl WgpuSim {
             pose_output,
             contact_events: false,
             explosion_count: 0,
+            motion_locks: false,
             last_step_ran: false,
             sleep_island_rounds: 8,
             last_counters: StepCounters::default(),
@@ -1440,6 +1443,24 @@ impl WgpuSim {
         broken
     }
 
+    /// Re-express one side of a joint in its body's new solver frame (the
+    /// body's centre of mass moved): that side's anchor and orientation, and
+    /// for side B the rest orientation too. Solver state is untouched.
+    pub fn set_joint_frame(&mut self, id: u32, side_b: bool, anchor: [f32; 3], rot: [f32; 4]) {
+        let base = Self::joint_offset(id);
+        let (a, r) = if side_b {
+            (std::mem::offset_of!(Joint, anchor_b), std::mem::offset_of!(Joint, frame_b))
+        } else {
+            (std::mem::offset_of!(Joint, anchor_a), std::mem::offset_of!(Joint, frame_a))
+        };
+        self.queue.write_buffer(&self.bufs[5], base + a as u64, bytemuck::cast_slice(&anchor));
+        self.queue.write_buffer(&self.bufs[5], base + r as u64, bytemuck::cast_slice(&rot));
+        if side_b {
+            let rest = std::mem::offset_of!(Joint, rest_start) as u64;
+            self.queue.write_buffer(&self.bufs[5], base + rest, bytemuck::cast_slice(&rot));
+        }
+    }
+
     /// Update a drive's targets in place without touching solver state.
     pub fn set_joint_drive(&mut self, id: u32, velocity: f32, target: f32) {
         let off = Self::joint_offset(id) + std::mem::offset_of!(Joint, drive_target) as u64;
@@ -1497,6 +1518,12 @@ impl WgpuSim {
             }
         }
         Ok(())
+    }
+
+    /// Run the motion-lock passes each step (World turns them on while any
+    /// body has locks).
+    pub fn set_motion_locks(&mut self, enabled: bool) {
+        self.motion_locks = enabled;
     }
 
     /// Run the `contact_events` pass each step (World turns it on while any
@@ -2160,6 +2187,7 @@ impl WgpuSim {
             tail_ok: self.capacity.max_bodies <= crate::WGSL_LOOP_CAP * 8,
             pose_output: self.pose_output,
             contact_events: self.contact_events,
+            motion_locks: self.motion_locks,
         }
     }
 

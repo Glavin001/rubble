@@ -187,7 +187,7 @@ loop {
   | `gravity_scale` | P3 |
   | `sleep_threshold` | P3 (global today) |
   | `motion_locks` | P3 |
-  | `is_bullet` | P3 (port the Metal CCD sweep) |
+  | `is_bullet` | ✅ `BODY_CCD` (#52's continuous collision) |
   | `enable_sleep` | Available |
   | `is_awake` | Available |
   | `is_enabled` | P1.5 (park) |
@@ -719,7 +719,7 @@ design frame (metres, Y up), the format of `vehicle_presets.json` and the
 soft descriptors; spawn transforms and velocities use the world's
 coordinates. `tests/demo_parity.rs` covers each row through the ABI.
 
-Next: D5 (`stress`), then the rest of P3 (bullets).
+Next: D5 (`stress`).
 
 **P1.5: Box3D alignment (shipped).** `rubble::World` now has this shape:
 
@@ -1003,12 +1003,28 @@ Unreal is the first client.
   which gives Box3D's inertial target exactly; only awake bodies that use
   them get one, and they neither wake bodies nor keep an asleep world
   stepping. Per-body `sleep_threshold` is still to do.
-- ✅ `motion_locks` (shipped 2026-10-24): six free body-flag bits; prediction
-  zeroes locked velocity and gravity and the primal solve replaces locked
-  rows and columns with identity, so other axes solve consistently. C:
-  `RB_LOCK_*` bits, permuted for Unreal axes.
-- `is_bullet`: port the Metal CCD classify and sweep passes to the shared
-  plan.
+- ✅ `motion_locks` (shipped 2026-10-24): body-flag bits 9..14 (above
+  `BODY_CCD`) read by two passes scheduled only while some body has locks:
+  `lock_predict` after prediction and `lock_project` after the solve each
+  remove the locked components (world axes) of the body's displacement and
+  rotation since the step start, so the inertial target respects the locks
+  and the locked axes are exact at the end of every step. The hot kernels
+  (`predictOne`, `primalApply`) are untouched: an earlier in-kernel version
+  shifted Metal and wgpu fast-math codegen for every body and failed the
+  Metal parity tests. C: `RB_LOCK_*` bits, permuted for Unreal axes.
+- ✅ `is_bullet` (2026-10-24): World sets `BODY_CCD`, #52's continuous
+  collision (uncapped reach, the fast list, a time-of-impact contact and
+  start pose); C `RbBodyDef::is_bullet`. Sensors take no time of impact and
+  no post-solve sweep check, so bullets pass through them.
+- ✅ Characters (2026-10-24): #52's capsule movers (`char_move`: walk,
+  step up, stick to the floor, slopes, jump, moving support, push weight)
+  through `World::create_character(CharacterDef)`, `character_set_input`
+  (velocity, jump once), `character_teleport`, `destroy_character` (slot
+  reused after quarantine); every frame reports `Frame::characters` and
+  `character_events` (landed, support lost, crushed) from one readback copy
+  of the records, no blocking read. The inner kinematic capsule is a World
+  body of its own, left out of body moves. C: `rbWorld_CreateCharacter`,
+  `rbCharacter_*`, `RbFrame::characters` / `character_events`.
 - `allow_fast_rotation`.
 
 **P4: contact, hit and sensor events.** Contact begin/end and hit events
@@ -1067,6 +1083,19 @@ queries with `QueryFilter`, moved off the vehicle ray pool. Then capsule
   have one, impulse per area times each collider's cross-section, full
   inside the radius and fading over the falloff, waking what it reaches.
 
+- *Shipped (2026-10-24):* `World::cast(CastDef)` (C `rbWorld_Cast`): ray,
+  sphere and upright-capsule casts, closest hit, on #52's in-step
+  `query_batch` (grid walk, exact shapes, category mask, an ignored body).
+  It needs no vehicle pool. It runs before the step moves anything, so it
+  sees the poses the step starts from. Up to 256 per step; results in
+  `Frame::cast_results` / `RbFrame::casts`, and a frame with casts is never
+  dropped. Projectiles: `World::spawn_projectile(ProjectileDef)` (C
+  `rbWorld_SpawnProjectile`), #52's piercing ballistic casts. Energy pays
+  for each shape's thickness, and hits push dynamic bodies. Stopped
+  projectiles' slots are reused, and the pool is released once all have
+  stopped, so a quiet world can sleep again. Results arrive as
+  `Frame::projectiles` and `projectile_events` (passed with the thickness
+  crossed, or stopped).
 - *Shipped first cut:* `World::cast_rays` (C: `rbWorld_CastRays`) queues
   closest-hit rays for the next step. They trace on the GPU against that
   step's final poses (they share the vehicle ray pool, whose ray count only

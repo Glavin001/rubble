@@ -68,6 +68,19 @@ typedef enum RbDestructionType {
   RB_CONNECTION_BROKE = 6,
 } RbDestructionType;
 
+typedef enum RbGroundState {
+  RB_ON_GROUND = 0,
+  RB_ON_STEEP_GROUND = 1,
+  RB_IN_AIR = 2,
+} RbGroundState;
+
+typedef enum RbCharacterEventType {
+  RB_CHARACTER_LANDED = 0,
+  RB_CHARACTER_SUPPORT_LOST = 1,
+  // Squeezed between surfaces it could not resolve.
+  RB_CHARACTER_CRUSHED = 2,
+} RbCharacterEventType;
+
 typedef enum RbBodyType {
   RB_STATIC_BODY = 0,
   RB_KINEMATIC_BODY = 1,
@@ -93,6 +106,13 @@ typedef enum RbVehicleDamageType {
   // The part stays on but its function is lost.
   RB_DISABLE_PART = 3,
 } RbVehicleDamageType;
+
+typedef enum RbCastShape {
+  RB_CAST_RAY = 0,
+  RB_CAST_SPHERE = 1,
+  // Upright capsule: `radius`, `half_height`.
+  RB_CAST_CAPSULE = 2,
+} RbCastShape;
 
 // An opaque world.
 typedef struct RbWorld RbWorld;
@@ -329,6 +349,65 @@ typedef struct RbOverlapResult {
   uint32_t shape_count;
 } RbOverlapResult;
 
+// A character handle. 0 is null.
+typedef uint64_t RbCharacterId;
+
+// A character as a step left it (`RbFrame::characters`).
+typedef struct RbCharacterOutput {
+  RbCharacterId character;
+  // Capsule centre.
+  struct RbVec3 position;
+  struct RbVec3 velocity;
+  enum RbGroundState ground;
+  struct RbVec3 ground_normal;
+  // The body it stands on (0: none).
+  RbBodyId ground_body;
+  struct RbVec3 ground_velocity;
+  // Weight it put on a dynamic support this step.
+  struct RbVec3 push;
+  uint64_t user_data;
+} RbCharacterOutput;
+
+typedef struct RbCharacterEvent {
+  RbCharacterId character;
+  enum RbCharacterEventType type_;
+  RbBodyId ground_body;
+  uint64_t user_data;
+} RbCharacterEvent;
+
+// A cast's closest hit (`hit.hit` false: none).
+typedef struct RbCastResult {
+  uint64_t cast;
+  struct RbRayHit hit;
+} RbCastResult;
+
+// A projectile handle. 0 is null.
+typedef uint64_t RbProjectileId;
+
+// A projectile as a step left it: every one in flight, and each the frame
+// it stops (`RbFrame::projectiles`).
+typedef struct RbProjectileOutput {
+  RbProjectileId projectile;
+  struct RbVec3 position;
+  struct RbVec3 velocity;
+  bool alive;
+  // Kinetic energy left.
+  float energy;
+  uint32_t hits;
+  uint64_t user_data;
+} RbProjectileOutput;
+
+// A projectile went through a shape (`thickness` crossed) or stopped in it
+// (`stopped`, `thickness` 0).
+typedef struct RbProjectileEvent {
+  RbProjectileId projectile;
+  RbShapeId shape;
+  RbBodyId body;
+  bool stopped;
+  float thickness;
+  uint64_t user_data;
+} RbProjectileEvent;
+
 // Results of one step, or of several folded together (`rbWorld_Poll`).
 // Pointers stay valid until the next poll.
 typedef struct RbFrame {
@@ -369,6 +448,19 @@ typedef struct RbFrame {
   // Overlap queries queued with `rbWorld_OverlapAABB` before these steps.
   const struct RbOverlapResult *overlaps;
   uint32_t overlap_count;
+  // Every character (the latest state of each).
+  const struct RbCharacterOutput *characters;
+  uint32_t character_count;
+  const struct RbCharacterEvent *character_events;
+  uint32_t character_event_count;
+  // Casts queued with `rbWorld_Cast` before these steps.
+  const struct RbCastResult *casts;
+  uint32_t cast_count;
+  // Every projectile in flight, and each one that stopped.
+  const struct RbProjectileOutput *projectiles;
+  uint32_t projectile_count;
+  const struct RbProjectileEvent *projectile_events;
+  uint32_t projectile_event_count;
 } RbFrame;
 
 // A ray to cast: from `origin` along `translation` (its length is the range).
@@ -393,6 +485,8 @@ typedef struct RbBodyDef {
   // `RB_LOCK_*` bits: axes (world, host frame) it may not move along or
   // turn about.
   uint32_t motion_locks;
+  // Continuous collision: never tunnels (projectiles, debris).
+  bool is_bullet;
   uint64_t user_data;
   uint32_t internal_value;
 } RbBodyDef;
@@ -642,6 +736,85 @@ typedef struct RbDebugDraw {
   bool draw_shapes;
   bool draw_body_transforms;
 } RbDebugDraw;
+
+// A capsule character controller (`rbDefaultCharacterDef`): an upright
+// capsule that walks, climbs steps, sticks to the floor, jumps and rides
+// moving support, run on the GPU inside the step. Its inner kinematic capsule
+// pushes dynamic bodies lighter than `mass * push_ratio`.
+typedef struct RbCharacterDef {
+  // Capsule centre.
+  struct RbVec3 position;
+  // Capsule radius, and half the distance between its sphere centres.
+  float radius;
+  float half_height;
+  // Gap kept to every surface.
+  float skin;
+  // Steepest walkable ground (degrees).
+  float max_slope_deg;
+  // Highest step climbed while walking, and how far down it sticks to
+  // the floor.
+  float step_up;
+  float step_down;
+  float jump_speed;
+  // How fast horizontal velocity follows the input in the air (1/s).
+  float air_control;
+  // kg.
+  float mass;
+  float push_ratio;
+  // Most overlap removed per step, so a pinned character works free
+  // without being launched.
+  float max_recovery;
+  float gravity_scale;
+  // Shape categories it walks against.
+  uint16_t mask_bits;
+  // Put its weight on dynamic bodies it stands on.
+  bool push_weight;
+  uint64_t user_data;
+  uint32_t internal_value;
+} RbCharacterDef;
+
+// A ray or shape cast answered inside the next step before it moves
+// anything (against the previous step's poses) and exact shapes, closest hit
+// (`rbDefaultCastDef`). The result arrives in that step's frame
+// (`RbFrame::casts`, matched by the id).
+typedef struct RbCastDef {
+  struct RbVec3 origin;
+  // Need not be normalised.
+  struct RbVec3 direction;
+  float max_distance;
+  enum RbCastShape shape;
+  float radius;
+  float half_height;
+  // Shapes whose categories meet these bits are hit.
+  uint16_t mask_bits;
+  // Never hit (0: none), such as the caster's own body.
+  RbBodyId ignore_body;
+  uint32_t internal_value;
+} RbCastDef;
+
+// A bullet-class projectile: its ballistic arc is cast inside every step
+// (no rigid body). Crossing a shape costs `penetration_cost` energy per unit
+// length of its thickness; with energy left it carries on beyond.
+typedef struct RbProjectileDef {
+  struct RbVec3 position;
+  struct RbVec3 velocity;
+  // 0: a ray; > 0: a sphere.
+  float radius;
+  // kg.
+  float mass;
+  // Energy per unit length (J/m, or kg cm/s² — J per cm ×100 — in Unreal
+  // units: a force).
+  float penetration_cost;
+  // Linear drag (1/s).
+  float drag;
+  uint32_t max_hits_per_step;
+  uint16_t mask_bits;
+  RbBodyId ignore_body;
+  // Hits push dynamic bodies.
+  bool push_bodies;
+  uint64_t user_data;
+  uint32_t internal_value;
+} RbProjectileDef;
 
 #ifdef __cplusplus
 extern "C" {
@@ -1111,7 +1284,8 @@ enum RbResult rbWorld_OverlapAABB(struct RbWorld *world,
                                   uint16_t mask_bits,
                                   uint64_t *out_query);
 
-struct RbExplosionDef rbDefaultExplosionDef(void);
+// Defaults in `coordinates`' units.
+struct RbExplosionDef rbDefaultExplosionDef(enum RbCoordinates coordinates);
 
 // A radial impulse at the start of the next step (Box3D `b3World_Explode`);
 // bodies it reaches wake. Up to 16 per step.
@@ -1120,6 +1294,55 @@ enum RbResult rbWorld_Explode(struct RbWorld *world, const struct RbExplosionDef
 // Draw every shape at its body's last polled pose, coloured by state
 // (static, awake, asleep) unless a material colour is set.
 enum RbResult rbWorld_DebugDraw(struct RbWorld *world, const struct RbDebugDraw *draw);
+
+// Defaults in `coordinates`' units.
+struct RbCharacterDef rbDefaultCharacterDef(enum RbCoordinates coordinates);
+
+enum RbResult rbWorld_CreateCharacter(struct RbWorld *world,
+                                      const struct RbCharacterDef *def,
+                                      RbCharacterId *out);
+
+// Remove a character; its handle is refused from now on.
+enum RbResult rbCharacter_Destroy(struct RbWorld *world, RbCharacterId character);
+
+bool rbCharacter_IsValid(const struct RbWorld *world, RbCharacterId character);
+
+// Desired horizontal velocity from the next step on, and whether to jump
+// once (when standing).
+enum RbResult rbCharacter_SetInput(struct RbWorld *world,
+                                   RbCharacterId character,
+                                   struct RbVec3 velocity,
+                                   bool jump);
+
+// Move a character's capsule centre before the next step.
+enum RbResult rbCharacter_Teleport(struct RbWorld *world,
+                                   RbCharacterId character,
+                                   struct RbVec3 position);
+
+// Its inner kinematic capsule (to ignore in casts).
+enum RbResult rbCharacter_GetBody(struct RbWorld *world, RbCharacterId character, RbBodyId *out);
+
+// The character as of the last polled frame; `*out_known` false before its
+// first frame.
+enum RbResult rbCharacter_GetState(struct RbWorld *world,
+                                   RbCharacterId character,
+                                   struct RbCharacterOutput *out,
+                                   bool *out_known);
+
+// Defaults in `coordinates`' units.
+struct RbCastDef rbDefaultCastDef(enum RbCoordinates coordinates);
+
+// Queue a cast for the next step (closest hit). Up to 256 per step.
+enum RbResult rbWorld_Cast(struct RbWorld *world, const struct RbCastDef *def, uint64_t *out_cast);
+
+// Defaults in `coordinates`' units.
+struct RbProjectileDef rbDefaultProjectileDef(enum RbCoordinates coordinates);
+
+// Fire a projectile from the next step on (slots of stopped ones are
+// reused). Up to 256 in flight.
+enum RbResult rbWorld_SpawnProjectile(struct RbWorld *world,
+                                      const struct RbProjectileDef *def,
+                                      RbProjectileId *out);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -83,7 +83,7 @@ pub enum BodyFlags {
 /// in the solve and starts the body's iterate at that pose.
 pub const BODY_CCD: u32 = 256; // 64 BODY_PARTICLE, 128 BODY_FOLLOW (engine-softbody)
 /// Motion locks in `BodyState::flags` (world axes): bits 9..11 linear x, y,
-/// z; 12..14 angular x, y, z (above `BODY_CCD`).
+/// z; 12..14 angular x, y, z (the `lock_predict` / `lock_project` passes).
 pub const BODY_LOCK_SHIFT: u32 = 9;
 
 #[repr(u32)]

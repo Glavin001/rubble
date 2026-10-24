@@ -28,6 +28,7 @@ mod events;
 mod handles;
 mod joints;
 mod math;
+mod motion;
 mod queries;
 mod readback;
 mod rig;
@@ -58,6 +59,11 @@ pub use joints::{
     RevoluteJointDef, SphericalJointDef, Spring, WeldJointDef,
 };
 pub use math::Transform;
+pub use motion::{
+    CastDef, CastHit, CastId, CastResult, CastShape, CharacterDef, CharacterDesc, CharacterEvent,
+    CharacterEventKind, CharacterId, CharacterOutput, GroundState, ProjectileDef, ProjectileEvent,
+    ProjectileEventKind, ProjectileId, ProjectileOutput,
+};
 pub use queries::{ExplosionDef, OverlapResult, QueryFilter, QueryId};
 pub use readback::Backpressure;
 pub use rig::{SoftBeam, VehicleDamage};
@@ -194,6 +200,8 @@ enum Owner {
     /// A threshold destructible's piece (or a slot reserved for one): its shapes and
     /// lifetime belong to the destructible.
     Piece,
+    /// A character's inner capsule: reported through `Frame::characters`.
+    Character,
 }
 
 /// What an extra readback copy holds.
@@ -216,6 +224,12 @@ enum Extra {
     /// A threshold destructible's state after this step.
     #[cfg(feature = "stress")]
     Fracture(threshold::FractureRead),
+    /// Every character record.
+    Characters,
+    /// The scene-query records, for these casts.
+    Casts(Vec<CastId>),
+    /// Every projectile record.
+    Projectiles,
 }
 
 #[derive(Clone, Debug)]
@@ -252,6 +266,7 @@ struct BodySlot {
     damping: (f32, f32),
     gravity_scale: f32,
     locks: u32,
+    bullet: bool,
 }
 
 impl BodySlot {
@@ -287,6 +302,9 @@ struct JointSlot {
     alive: bool,
     bodies: [u32; 2],
     user_data: u64,
+    /// Both frames in the bodies' origin frames, to re-express them when a
+    /// body's centre of mass moves.
+    origin_frames: [JointFrame; 2],
 }
 
 /// Steps a released body or collider slot waits before reuse: neither contact
@@ -371,6 +389,7 @@ pub struct World {
     contact_storage: ContactStorage,
     /// Threshold destructibles (`StrengthModel::Threshold`).
     fracture: threshold::Fracture,
+    motion: motion::MotionState,
 }
 
 impl World {
@@ -435,6 +454,7 @@ impl World {
             queries: Default::default(),
             hit_event_threshold: def.hit_event_threshold,
             contact_storage: contacts,
+            motion: Default::default(),
             resync: false,
             vehicles: Vec::new(),
             soft_outputs: Vec::new(),
@@ -550,6 +570,7 @@ impl World {
                 damping: (d.linear_damping, d.angular_damping),
                 gravity_scale: d.gravity_scale,
                 locks: d.motion_locks.bits(),
+                bullet: d.is_bullet && d.body_type == BodyType::Dynamic,
             };
             let state = body_state(&slot);
             match self.reusable_body_slot() {
@@ -579,6 +600,12 @@ impl World {
             for ((k, _), index) in fresh.iter().zip(range) {
                 ids[*k] = BodyId::new(index, 1);
             }
+        }
+        if defs
+            .iter()
+            .any(|d| d.motion_locks.bits() != 0 && d.body_type == BodyType::Dynamic)
+        {
+            self.sim.set_motion_locks(true);
         }
         Ok(ids)
     }
@@ -764,10 +791,15 @@ impl World {
     }
 
     /// Lock axes (world frame) the body may not move along or turn about
-    /// (Box3D `b3Body_SetMotionLocks`).
+    /// (Box3D `b3Body_SetMotionLocks`): its displacement and rotation since
+    /// each step's start lose their locked components (the `lock_predict` and
+    /// `lock_project` passes, scheduled only while some body has locks).
     pub fn body_set_motion_locks(&mut self, id: BodyId, locks: MotionLocks) -> anyhow::Result<()> {
         let i = self.live_body(id)?;
         self.bodies[i].locks = locks.bits();
+        if locks.bits() != 0 {
+            self.sim.set_motion_locks(true);
+        }
         self.command(id, GpuCommand::set_locks(id.index(), locks.bits()))
     }
 
@@ -1207,6 +1239,10 @@ impl World {
         self.dirty = true;
         desc.body_a = a as u32;
         desc.body_b = b as u32;
+        let origin_frames = [
+            joint_frame_origin(self.bodies[a].frame(), desc.frame_a),
+            joint_frame_origin(self.bodies[b].frame(), desc.frame_b),
+        ];
         let index = self.sim.add_joint_desc(&desc);
         let i = index as usize;
         if self.joints.len() <= i {
@@ -1215,6 +1251,7 @@ impl World {
                 alive: false,
                 bodies: [0, 0],
                 user_data: 0,
+                origin_frames: [JointFrame::at(Vec3::ZERO); 2],
             };
             self.joints.resize(i + 1, empty);
         }
@@ -1223,6 +1260,7 @@ impl World {
         slot.alive = true;
         slot.bodies = [a as u32, b as u32];
         slot.user_data = user_data;
+        slot.origin_frames = origin_frames;
         let id = JointId::new(index, slot.generation);
         self.bodies[a].joints.push(index);
         if b != a {
@@ -1474,6 +1512,7 @@ impl World {
         if contact_events {
             self.sim.clear_contact_events();
         }
+        let casts = self.motion_before_step();
         if !rays.is_empty() {
             // Forces the step to run, so its frame carries the hits.
             self.sim.write_ray_queries(&rays)?;
@@ -1510,6 +1549,7 @@ impl World {
             let block = self.backpressure == Backpressure::Block
                 || !batches.is_empty()
                 || !query_ids.is_empty()
+                || !casts.is_empty()
                 || contact_events
                 || fracture;
             if !self.readback.has_free() && block {
@@ -1561,6 +1601,7 @@ impl World {
                         size,
                     });
                 }
+                extras.extend(motion::extras(&self.sim, &self.motion, casts));
                 let slot = self.readback.encode(&self.sim, &mut enc, step, &extras);
                 self.resync = false;
                 mapped = Some(slot);
@@ -1717,6 +1758,8 @@ impl World {
         }
         self.last_counters = Some(c);
         let ring = self.sim.ring_events(&raw.ring);
+        let (character_events, projectile_events, lost_motion) =
+            self.motion_events(step, &raw.ring);
         let mut destruction = Vec::new();
         for b in ring.joint_breaks {
             if let Some(slot) = self.joints.get(b.joint as usize) {
@@ -1797,7 +1840,7 @@ impl World {
             if r.woke() {
                 slot.last_asleep = false;
             }
-            if slot.owner == Owner::SoftNode {
+            if matches!(slot.owner, Owner::SoftNode | Owner::Character) {
                 continue;
             }
             moves.push(BodyMoveEvent {
@@ -1817,6 +1860,9 @@ impl World {
         let mut contact_events = ContactEvents::default();
         let mut sensor_events = SensorEvents::default();
         let mut overlap_results = Vec::new();
+        let mut characters = Vec::new();
+        let mut cast_results = Vec::new();
+        let mut projectiles = Vec::new();
         let mut lost_contacts = 0;
         for (kind, bytes) in &raw.extras {
             match kind {
@@ -1831,6 +1877,9 @@ impl World {
                 Extra::Contacts => {
                     (contact_events, sensor_events, lost_contacts) = self.decode_contacts(bytes);
                 }
+                Extra::Characters => characters = self.decode_characters(step, bytes),
+                Extra::Casts(ids) => cast_results = self.decode_casts(ids, bytes),
+                Extra::Projectiles => projectiles = self.decode_projectiles(step, bytes),
                 Extra::RayHits(batches) => {
                     let hits = self.sim.decode_ray_hits(&slots(bytes));
                     for (batch, first, count) in batches {
@@ -1882,7 +1931,13 @@ impl World {
             contact_events,
             sensor_events,
             overlap_results,
-            lost_events: ring.lost + lost_contacts,
+            characters,
+            character_events,
+            cast_results,
+            projectiles,
+            projectile_events,
+            // One ring: its overflow is counted once, however many readers.
+            lost_events: ring.lost.max(lost_motion) + lost_contacts,
             dropped: false,
             resynced: resync.is_some(),
             counters: Some(c),
@@ -2197,6 +2252,26 @@ impl World {
             for s in self.bodies[b].shapes.clone() {
                 self.rewrite_shape(s as usize)?;
             }
+            // Joints are kept in solver frames: re-express this body's side.
+            // (A plastic weld's accumulated bend restarts from its rest.)
+            for j in self.bodies[b].joints.clone() {
+                let slot = &self.joints[j as usize];
+                if !slot.alive {
+                    continue;
+                }
+                let (bodies, frames) = (slot.bodies, slot.origin_frames);
+                for side in 0..2 {
+                    if bodies[side] as usize == b {
+                        let f = joint_frame(next, frames[side]);
+                        self.sim.set_joint_frame(
+                            j,
+                            side == 1,
+                            f.anchor.to_array(),
+                            f.rot.to_array(),
+                        );
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -2226,6 +2301,7 @@ impl World {
                 damping: (0.0, 0.0),
                 gravity_scale: 1.0,
                 locks: 0,
+                bullet: false,
             });
         }
     }
@@ -2270,7 +2346,8 @@ fn body_state(slot: &BodySlot) -> BodyState {
             let mut s = BodyState::static_plane_support();
             s.position = solver.position;
             s.orientation = solver.rotation;
-            s.flags = engine_schema::BodyFlags::Kinematic as u32 | engine_schema::BodyFlags::Awake as u32;
+            s.flags =
+                engine_schema::BodyFlags::Kinematic as u32 | engine_schema::BodyFlags::Awake as u32;
             s
         }
         BodyType::Static => {
@@ -2280,7 +2357,12 @@ fn body_state(slot: &BodySlot) -> BodyState {
             s
         }
     };
-    b.flags |= slot.locks << engine_schema::BODY_LOCK_SHIFT;
+    if slot.bullet {
+        b.flags |= engine_schema::BODY_CCD;
+    }
+    if slot.body_type == BodyType::Dynamic {
+        b.flags |= slot.locks << engine_schema::BODY_LOCK_SHIFT;
+    }
     b.initial_pos = b.position;
     b.initial_rot = b.orientation;
     b.linear_vel = slot.velocity.0;
@@ -2290,6 +2372,15 @@ fn body_state(slot: &BodySlot) -> BodyState {
             | engine_schema::BodyFlags::Sleeping as u32;
     }
     b
+}
+
+/// The inverse of `joint_frame`: a solver-frame joint frame in the body's
+/// origin frame.
+fn joint_frame_origin(frame: SolverFrame, f: JointFrame) -> JointFrame {
+    JointFrame {
+        anchor: frame.center + frame.axes * f.anchor,
+        rot: (frame.axes * f.rot).normalize(),
+    }
 }
 
 fn joint_frame(frame: SolverFrame, f: JointFrame) -> JointFrame {

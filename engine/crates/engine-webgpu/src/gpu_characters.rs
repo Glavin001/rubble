@@ -46,36 +46,44 @@ impl WgpuSim {
     pub fn add_character(&mut self, desc: &CharacterDesc, pos: [f32; 3]) -> CharacterHandle {
         let index = self.characters.len() as u32;
         assert!(index < self.char_cap.max_characters, "more than {} characters", self.char_cap.max_characters);
-        let body = self.add_body(BodyState {
-            position: pos,
-            inv_mass: 0.0,
-            orientation: [0.0, 0.0, 0.0, 1.0],
-            inv_inertia: [0.0; 3],
-            flags: BodyFlags::Kinematic as u32 | BodyFlags::Awake as u32,
-            linear_vel: [0.0; 3],
-            sleep_timer: 0.0,
-            angular_vel: [0.0; 3],
-            generation: 0,
-            initial_pos: pos,
-            initial_pad: 0.0,
-            initial_rot: [0.0, 0.0, 0.0, 1.0],
-        });
-        let collider = self.add_collider(Collider {
-            body,
-            shape: ShapeType::Capsule as u32,
-            material: 0,
-            generation: 0,
-            local_pos: [0.0; 3],
-            density: 0.0,
-            local_rot: [0.0, 0.0, 0.0, 1.0],
-            params: [desc.radius, desc.half_height, 0.0, desc.radius + desc.half_height],
-        });
+        let body = self.add_body(character_body_state(pos));
+        let collider = self.add_collider(character_collider(body, desc));
         self.characters.push((body, collider));
         let slot = self.char_cap.character_base() + index * CHAR_STRIDE;
         self.write_char_slots(slot, &desc.record(body, pos));
         self.write_character_header();
         self.wake_pending = true;
         CharacterHandle(index)
+    }
+
+    /// Turn character `h` off: its record stops moving (no `CF_ENABLED`) and
+    /// its inner capsule becomes `parked` with collider `retired`, so nothing
+    /// touches it. `respawn_character` brings the slot back.
+    pub fn disable_character(&mut self, h: CharacterHandle, parked: BodyState, retired: Collider) {
+        let (body, collider) = self.characters[h.0 as usize];
+        let slot = self.char_cap.character_base() + h.0 * CHAR_STRIDE + C_CFG;
+        self.write_char_slots(slot, &[[body, 0, 0, 0]]);
+        self.write_bodies(body, &[parked]);
+        self.set_collider(collider, retired);
+    }
+
+    /// Reuse a disabled character's slot (and its inner capsule body and
+    /// collider) for a new character standing at `pos`.
+    pub fn respawn_character(&mut self, h: CharacterHandle, desc: &CharacterDesc, pos: [f32; 3]) {
+        let (body, collider) = self.characters[h.0 as usize];
+        self.write_bodies(body, &[character_body_state(pos)]);
+        self.set_collider(collider, character_collider(body, desc));
+        let slot = self.char_cap.character_base() + h.0 * CHAR_STRIDE;
+        self.write_char_slots(slot, &desc.record(body, pos));
+        self.wake_pending = true;
+    }
+
+    /// Move character `h` to `pos` (capsule centre), keeping its velocity.
+    pub fn teleport_character(&mut self, h: CharacterHandle, pos: [f32; 3]) {
+        let slot = self.char_cap.character_base() + h.0 * CHAR_STRIDE + C_POS;
+        let f = |v: f32| v.to_bits();
+        self.write_char_slots(slot, &[[f(pos[0]), f(pos[1]), f(pos[2]), 0]]);
+        self.wake_pending = true;
     }
 
     /// The character's input for the next steps (desired horizontal velocity,
@@ -124,6 +132,42 @@ impl WgpuSim {
         self.wake_pending = true;
     }
 
+    /// Stop answering queries, without forcing a step (`set_queries` wakes).
+    pub fn clear_queries(&mut self) {
+        self.query_count = 0;
+        self.write_character_header();
+    }
+
+    /// Where the character records, the query records and the projectile
+    /// records live in binding 33 (buffer, byte offset, bytes), for readback
+    /// copies of every live one.
+    pub fn character_record_range(&self) -> (&wgpu::Buffer, u64, u64) {
+        let n = u64::from(self.character_count() * CHAR_STRIDE);
+        (&self.bufs[33], u64::from(self.char_cap.character_base()) * 16, n * 16)
+    }
+
+    pub fn query_record_range(&self) -> (&wgpu::Buffer, u64, u64) {
+        let n = u64::from(self.query_count * QUERY_STRIDE);
+        (&self.bufs[33], u64::from(self.char_cap.query_base()) * 16, n * 16)
+    }
+
+    pub fn projectile_record_range(&self) -> (&wgpu::Buffer, u64, u64) {
+        let n = u64::from(self.projectile_count * PROJ_STRIDE);
+        (&self.bufs[33], u64::from(self.char_cap.projectile_base()) * 16, n * 16)
+    }
+
+    pub fn character_capacity(&self) -> CharacterCapacity {
+        self.char_cap
+    }
+
+    pub fn query_count(&self) -> u32 {
+        self.query_count
+    }
+
+    pub fn projectile_count(&self) -> u32 {
+        self.projectile_count
+    }
+
     /// Results of the queries the last step answered (`None`: no hit).
     pub fn query_results(&self) -> Vec<Option<QueryHit>> {
         if self.query_count == 0 {
@@ -153,6 +197,18 @@ impl WgpuSim {
         self.write_character_header();
         self.wake_pending = true;
         index
+    }
+
+    /// Fire a projectile into slot `index` (one that has stopped, or the next
+    /// new one).
+    pub fn respawn_projectile(&mut self, index: u32, desc: &ProjectileDesc) {
+        assert!(index <= self.projectile_count, "projectile slot {index} past the live ones");
+        if index == self.projectile_count {
+            self.spawn_projectile(desc);
+            return;
+        }
+        self.write_char_slots(self.char_cap.projectile_base() + index * PROJ_STRIDE, &desc.slots());
+        self.wake_pending = true;
     }
 
     pub fn clear_projectiles(&mut self) {
@@ -209,8 +265,17 @@ impl WgpuSim {
     /// Character and projectile events since the last call (event ring).
     pub fn poll_motion_events(&mut self) -> Vec<MotionEvent> {
         let words = self.read_words(21, u64::from(EVENT_RING_BASE), (4 + 4 * EVENT_RING_CAPACITY) as usize);
+        self.motion_events_from(&words).0
+    }
+
+    /// Character and projectile events in a copy of the event ring
+    /// (`event_ring_range`) since the last call, and how many were overwritten
+    /// before they were read.
+    pub fn motion_events_from(&mut self, words: &[u32]) -> (Vec<MotionEvent>, u32) {
         let cursor = words[0];
-        let mut n = self.motion_events_seen.max(cursor.saturating_sub(EVENT_RING_CAPACITY));
+        let first = cursor.saturating_sub(EVENT_RING_CAPACITY);
+        let lost = first.saturating_sub(self.motion_events_seen);
+        let mut n = self.motion_events_seen.max(first);
         let mut out = Vec::new();
         while n < cursor {
             let r = 4 + 4 * (n % EVENT_RING_CAPACITY) as usize;
@@ -230,6 +295,37 @@ impl WgpuSim {
             n += 1;
         }
         self.motion_events_seen = cursor;
-        out
+        (out, lost)
+    }
+}
+
+/// A character's inner kinematic capsule at `pos`.
+fn character_body_state(pos: [f32; 3]) -> BodyState {
+    BodyState {
+        position: pos,
+        inv_mass: 0.0,
+        orientation: [0.0, 0.0, 0.0, 1.0],
+        inv_inertia: [0.0; 3],
+        flags: BodyFlags::Kinematic as u32 | BodyFlags::Awake as u32,
+        linear_vel: [0.0; 3],
+        sleep_timer: 0.0,
+        angular_vel: [0.0; 3],
+        generation: 0,
+        initial_pos: pos,
+        initial_pad: 0.0,
+        initial_rot: [0.0, 0.0, 0.0, 1.0],
+    }
+}
+
+fn character_collider(body: u32, desc: &CharacterDesc) -> Collider {
+    Collider {
+        body,
+        shape: ShapeType::Capsule as u32,
+        material: 0,
+        generation: 0,
+        local_pos: [0.0; 3],
+        density: 0.0,
+        local_rot: [0.0, 0.0, 0.0, 1.0],
+        params: [desc.radius, desc.half_height, 0.0, desc.radius + desc.half_height],
     }
 }
