@@ -533,6 +533,66 @@ impl ConvexHull {
     }
 }
 
+impl ConvexHull {
+    /// Decode the hull packed at `base` in `records` (the inverse of
+    /// [`ConvexHull::pack`]: vertices, face planes and loops, edges and the
+    /// closed flag, bit for bit).
+    pub fn unpack(records: &[[u32; 4]], base: u32) -> Result<Self, HullError> {
+        let words: Vec<u32> = records
+            .get(base as usize..)
+            .ok_or(HullError::ArenaFull)?
+            .iter()
+            .flatten()
+            .copied()
+            .collect();
+        let head = *words.first().ok_or(HullError::ArenaFull)?;
+        let (v, f, e) = (
+            (head & 0xFF) as usize,
+            ((head >> 8) & 0xFF) as usize,
+            ((head >> 16) & 0xFF) as usize,
+        );
+        let closed = (head >> 24) & HULL_FLAG_CLOSED != 0;
+        let (loop_word, edge_word) = (words[1] as usize, words[2] as usize);
+        let face_word = (4 + v + f) * 4;
+        if words.len() < edge_word + e {
+            return Err(HullError::ArenaFull);
+        }
+        let f3 = |at: usize| {
+            Vec3::new(
+                f32::from_bits(words[at]),
+                f32::from_bits(words[at + 1]),
+                f32::from_bits(words[at + 2]),
+            )
+        };
+        let byte = |word: usize, i: usize| ((words[word + i / 4] >> ((i % 4) * 8)) & 0xFF) as u8;
+        let vertices = (0..v).map(|i| f3((4 + i) * 4)).collect();
+        let faces = (0..f)
+            .map(|k| {
+                let at = (4 + v + k) * 4;
+                let span = words[face_word + k];
+                let (start, len) = ((span & 0xFFFF) as usize, (span >> 16) as usize);
+                HullFace {
+                    normal: f3(at),
+                    d: f32::from_bits(words[at + 3]),
+                    indices: (0..len).map(|n| byte(loop_word, start + n)).collect(),
+                }
+            })
+            .collect();
+        let edges = (0..e)
+            .map(|k| {
+                let w = words[edge_word + k];
+                [w as u8, (w >> 8) as u8, (w >> 16) as u8, (w >> 24) as u8]
+            })
+            .collect();
+        Ok(Self {
+            vertices,
+            faces,
+            edges,
+            closed,
+        })
+    }
+}
+
 /// Collider `params` for a convex hull at `base` with a uniform `scale`.
 /// `params.w` is the bounding radius used for grid sizing and sleep heuristics.
 pub fn convex_collider_params(base: u32, scale: f32, bounding_radius: f32) -> [f32; 4] {

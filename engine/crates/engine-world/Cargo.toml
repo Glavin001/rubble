@@ -13,6 +13,7 @@ engine-schema.workspace = true
 engine-webgpu.workspace = true
 engine-vehicle.workspace = true
 engine-softbody.workspace = true
+engine-fracture.workspace = true
 engine-gpu-wait.workspace = true
 wgpu.workspace = true
 glam.workspace = true

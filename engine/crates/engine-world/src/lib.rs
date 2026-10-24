@@ -19,6 +19,7 @@
 //! See `engine/docs/public-api.md` and `engine/docs/api-review.md`.
 
 mod defs;
+mod destruction;
 mod error;
 mod events;
 mod handles;
@@ -27,6 +28,10 @@ mod math;
 mod readback;
 
 pub use defs::{BodyDef, BodyType, Geometry, MassData, MotionLocks, ShapeDef, SurfaceMaterial};
+pub use destruction::{
+    ActorInfo, Anchors, BondDesc, ChunkDesc, DestructibleAssetDesc, DestructibleAssetId,
+    DestructibleDef, DestructibleId, DestructibleStats, StrengthModel,
+};
 pub use error::{StaleHandle, Unsupported};
 pub use events::{
     coalesce, BodyEvents, BodyMoveEvent, CoalescedFrame, DestructionEvent, Frame, SkinId,
@@ -185,6 +190,8 @@ struct BodySlot {
     removed_at: Option<u64>,
     /// Current mass properties (None: static, or dynamic without mass yet).
     mass: Option<MassData>,
+    /// Principal moments the solver uses (with the frame's axes).
+    principal: Vec3,
     /// Solver frames over time, `(first step, frame)`, so frames still in
     /// flight convert with the frame they were simulated in.
     frames: Vec<(u64, SolverFrame)>,
@@ -288,6 +295,10 @@ pub struct World {
     /// Soft bodies whose nodes each frame reports.
     soft_outputs: Vec<SoftHandle>,
     skins: Vec<(SoftHandle, engine_webgpu::SoftSkinner)>,
+    assets: Vec<std::sync::Arc<DestructibleAssetDesc>>,
+    destructibles: Vec<destruction::DestructibleSlot>,
+    /// Bond joint index -> (destructible slot, bond index).
+    bond_owner: std::collections::HashMap<u32, (u32, u32)>,
     backpressure: Backpressure,
     user_data: u64,
     step: u64,
@@ -356,6 +367,9 @@ impl World {
             vehicles: Vec::new(),
             soft_outputs: Vec::new(),
             skins: Vec::new(),
+            assets: Vec::new(),
+            destructibles: Vec::new(),
+            bond_owner: std::collections::HashMap::new(),
         })
     }
 
@@ -433,6 +447,7 @@ impl World {
                 joints: Vec::new(),
                 removed_at: None,
                 mass: None,
+                principal: Vec3::ONE,
                 frames: Vec::new(),
                 written_step: self.step,
                 origin: Transform::new(d.position, rotation),
@@ -915,11 +930,23 @@ impl World {
                 || self.joints.iter().any(|j| !j.alive),
             "WorldCapacity::max_joints reached"
         );
+        desc.frame_a = joint_frame(self.bodies[a].frame(), desc.frame_a);
+        desc.frame_b = joint_frame(self.bodies[b].frame(), desc.frame_b);
+        Ok(self.add_joint_solver(desc, a, b, def.user_data()))
+    }
+
+    /// Register a joint whose frames are already in the bodies' solver frames
+    /// (destructible bonds come that way from their asset).
+    pub(crate) fn add_joint_solver(
+        &mut self,
+        mut desc: JointDesc,
+        a: usize,
+        b: usize,
+        user_data: u64,
+    ) -> JointId {
         self.dirty = true;
         desc.body_a = a as u32;
         desc.body_b = b as u32;
-        desc.frame_a = joint_frame(self.bodies[a].frame(), desc.frame_a);
-        desc.frame_b = joint_frame(self.bodies[b].frame(), desc.frame_b);
         let index = self.sim.add_joint_desc(&desc);
         let i = index as usize;
         if self.joints.len() <= i {
@@ -935,13 +962,13 @@ impl World {
         debug_assert!(!slot.alive, "the sim reused a live joint slot");
         slot.alive = true;
         slot.bodies = [a as u32, b as u32];
-        slot.user_data = def.user_data();
+        slot.user_data = user_data;
         let id = JointId::new(index, slot.generation);
         self.bodies[a].joints.push(index);
         if b != a {
             self.bodies[b].joints.push(index);
         }
-        Ok(id)
+        id
     }
 
     /// Destroy a joint, broken or not (Box3D `b3DestroyJoint`).
@@ -1366,6 +1393,7 @@ impl World {
                 .into_iter()
                 .map(DestructionEvent::PieceDetached),
         );
+        let destruction = self.destruction_events(destruction);
         let resync = raw
             .extras
             .iter()
@@ -1529,6 +1557,7 @@ impl World {
 
     fn release_joint(&mut self, index: u32) {
         self.sim.remove_joint(index);
+        self.bond_owner.remove(&index);
         let slot = &mut self.joints[index as usize];
         slot.alive = false;
         slot.generation = slot.generation.wrapping_add(1).max(1);
@@ -1690,25 +1719,40 @@ impl World {
 
     /// Give body `b` new mass properties, keeping its origin where it is.
     fn set_mass(&mut self, b: usize, mass: Option<MassData>) -> anyhow::Result<()> {
-        self.dirty = true;
-        let old = self.bodies[b].frame();
-        let next = match &mass {
+        let (next, moments) = match &mass {
             Some(m) => {
                 let (moments, axes) = math::principal(m.tensor());
                 anyhow::ensure!(
                     moments.min_element() >= 0.0,
                     "inertia tensor is not positive semi-definite"
                 );
-                SolverFrame {
+                let frame = SolverFrame {
                     center: Vec3::from(m.center),
                     axes,
-                }
+                };
+                (frame, moments)
             }
-            None => SolverFrame::IDENTITY,
+            None => (SolverFrame::IDENTITY, Vec3::ONE),
         };
+        self.set_mass_frame(b, mass, next, moments)
+    }
+
+    /// Give body `b` mass properties with an exact solver frame (centre of
+    /// mass and principal axes in the body frame) and principal moments, as an
+    /// asset gives them; the body origin stays where it is.
+    pub(crate) fn set_mass_frame(
+        &mut self,
+        b: usize,
+        mass: Option<MassData>,
+        next: SolverFrame,
+        moments: Vec3,
+    ) -> anyhow::Result<()> {
+        self.dirty = true;
+        let old = self.bodies[b].frame();
         let step = self.step;
         let slot = &mut self.bodies[b];
         slot.mass = mass;
+        slot.principal = moments;
         if slot.frames.last().map(|f| f.0) == Some(step) {
             slot.frames.pop();
         }
@@ -1722,7 +1766,7 @@ impl World {
         } else {
             // A live body re-centres on the GPU, without a readback.
             let (offset, rotation) = old.delta_to(&next);
-            let (inv_mass, inv_inertia) = inverse_mass(slot.body_type, mass.as_ref());
+            let (inv_mass, inv_inertia) = inverse_mass(slot);
             self.sim.push_body_commands(&[GpuCommand::set_mass_frame(
                 b as u32,
                 offset.to_array(),
@@ -1752,6 +1796,7 @@ impl World {
                 joints: Vec::new(),
                 removed_at: None,
                 mass: None,
+                principal: Vec3::ONE,
                 frames: Vec::new(),
                 written_step: 0,
                 origin: Transform::IDENTITY,
@@ -1774,14 +1819,12 @@ fn wake_flag(cmd: GpuCommand, wake: bool) -> GpuCommand {
 }
 
 /// Inverse mass and inverse principal inertia for the GPU body record.
-fn inverse_mass(body_type: BodyType, mass: Option<&MassData>) -> (f32, [f32; 3]) {
-    if body_type != BodyType::Dynamic {
+fn inverse_mass(slot: &BodySlot) -> (f32, [f32; 3]) {
+    if slot.body_type != BodyType::Dynamic {
         return (0.0, [0.0; 3]);
     }
-    let (m, moments) = match mass {
-        Some(md) => (md.mass, math::principal(md.tensor()).0),
-        None => (1.0, Vec3::ONE),
-    };
+    let m = slot.mass.map_or(1.0, |m| m.mass);
+    let moments = slot.principal;
     let inv = |x: f32| if x > 0.0 { 1.0 / x } else { 0.0 };
     (inv(m), [inv(moments.x), inv(moments.y), inv(moments.z)])
 }
@@ -1791,10 +1834,8 @@ fn body_state(slot: &BodySlot) -> BodyState {
     let solver = slot.frame().to_solver(slot.origin);
     let mut b = match slot.body_type {
         BodyType::Dynamic => {
-            let (mass, inertia) = match &slot.mass {
-                Some(m) => (m.mass, math::principal(m.tensor()).0),
-                None => (1.0, Vec3::ONE),
-            };
+            let mass = slot.mass.map_or(1.0, |m| m.mass);
+            let inertia = slot.principal;
             BodyState::dynamic(
                 Vec3::from(solver.position),
                 Quat::from_array(solver.rotation),

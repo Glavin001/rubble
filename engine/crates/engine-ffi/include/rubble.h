@@ -45,6 +45,11 @@ typedef enum RbDestructionType {
   RB_MOUNT_BROKE = 1,
   RB_BEAM_BROKE = 2,
   RB_PIECE_DETACHED = 3,
+  // Bonds of a destructible broke: `destructible`, `bonds` / `bond_count`.
+  RB_BONDS_BROKEN = 4,
+  // An actor of a destructible came apart: `destructible`, `parent`,
+  // `children` / `child_count`.
+  RB_SPLIT = 5,
 } RbDestructionType;
 
 typedef enum RbBodyType {
@@ -130,6 +135,19 @@ typedef uint32_t RbVehicleId;
 // A soft body (index).
 typedef uint32_t RbSoftId;
 
+// A placed destructible (packed handle). 0 is null.
+typedef uint64_t RbDestructibleId;
+
+// A connected group of chunks of a destructible (one rigid actor).
+typedef struct RbActor {
+  const uint32_t *chunks;
+  // The body of each chunk (same order as `chunks`).
+  const RbBodyId *bodies;
+  uint32_t chunk_count;
+  bool anchored;
+  float mass;
+} RbActor;
+
 // Something broke (`RbFrame::destruction`). Fields by `type_`:
 // joint: `joint`, `force`, `torque`, `user_data`; mount: `vehicle`, `index`,
 // `is_wheel`, `force`, `torque`; beam: `soft`, `index`, `force`; piece:
@@ -149,6 +167,12 @@ typedef struct RbDestructionEvent {
   const uint32_t *nodes;
   uint32_t node_count;
   uint64_t user_data;
+  RbDestructibleId destructible;
+  const uint32_t *bonds;
+  uint32_t bond_count;
+  struct RbActor parent;
+  const struct RbActor *children;
+  uint32_t child_count;
 } RbDestructionEvent;
 
 typedef struct RbWheelState {
@@ -319,6 +343,23 @@ typedef struct RbVehicleInput {
   float handbrake;
 } RbVehicleInput;
 
+// A destructible asset (index).
+typedef uint32_t RbDestructibleAssetId;
+
+// A placed destructible (`rbDefaultDestructibleDef`). Assets are authored in
+// Rubble's frame (Y up, metres); `transform` places them in the world's.
+typedef struct RbDestructibleDef {
+  RbDestructibleAssetId asset;
+  struct RbTransform transform;
+  float strength_scale;
+  // Keep the asset's world bonds (anchors).
+  bool anchored;
+  bool start_asleep;
+  float friction;
+  uint64_t user_data;
+  uint32_t internal_value;
+} RbDestructibleDef;
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -460,6 +501,46 @@ enum RbResult rbCreateSoftVehicleTruck(struct RbWorld *world,
                                        const char *truck,
                                        struct RbTransform transform,
                                        RbSoftId *out);
+
+// A destructible asset from one hierarchy level of a Shardwright fracture
+// GLB (bytes are copied).
+enum RbResult rbCreateDestructibleAssetFromGlb(struct RbWorld *world,
+                                               const uint8_t *bytes,
+                                               size_t length,
+                                               uint8_t level,
+                                               RbDestructibleAssetId *out);
+
+// A destructible asset from a vibe-city / blast-stress JSON pack.
+enum RbResult rbCreateDestructibleAssetFromPack(struct RbWorld *world,
+                                                const uint8_t *bytes,
+                                                size_t length,
+                                                RbDestructibleAssetId *out);
+
+struct RbDestructibleDef rbDefaultDestructibleDef(void);
+
+enum RbResult rbCreateDestructible(struct RbWorld *world,
+                                   const struct RbDestructibleDef *def,
+                                   RbDestructibleId *out);
+
+enum RbResult rbDestroyDestructible(struct RbWorld *world, RbDestructibleId id);
+
+enum RbResult rbDestructible_GetChunkCount(struct RbWorld *world,
+                                           RbDestructibleId id,
+                                           uint32_t *out);
+
+// The body a chunk belongs to now. Render contract: chunk world transform =
+// body transform (the instance frame for every piece) times a fixed per-chunk
+// transform (identity in the bonds model).
+enum RbResult rbDestructible_GetChunkBody(struct RbWorld *world,
+                                          RbDestructibleId id,
+                                          uint32_t chunk,
+                                          RbBodyId *out);
+
+// The glTF node that renders a chunk (-1: none).
+enum RbResult rbDestructible_GetChunkNode(struct RbWorld *world,
+                                          RbDestructibleId id,
+                                          uint32_t chunk,
+                                          int32_t *out);
 
 // Drive a soft vehicle (its rigid core's wheels and its steering hydros).
 enum RbResult rbSoft_SetInput(struct RbWorld *world, RbSoftId soft, struct RbVehicleInput input);

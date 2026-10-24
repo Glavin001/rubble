@@ -741,7 +741,47 @@ the moves, with soft node and skin output added in their place. Also shipped:
 versioned 0.x and unstable until D1 ships. It is generated from the Rust API.
 Details are under P2 below.
 
-**D1: destructibles in `World`.**
+**D1a: destructibles with the `Bonds` model (shipped).**
+
+- **Assets.** `DestructibleAssetDesc` holds chunks (principal pose, mass,
+  inertia, shapes, fragment, glTF node) and bonds (anchors, rest, frame,
+  capacities, stiffness).
+  - Loaders: `from_glb(bytes, level)`, `from_pack`, `cuboid_house` and
+    `from_scene` for any fracture-lab scene. The lab's parked projectiles are
+    excluded.
+  - Lossless `ConvexHull::unpack` decodes the packed hulls the scenes carry.
+  - `create_destructible_asset` validates the descriptor.
+- **Placing.** `create_destructible` makes one body per chunk. Every body's
+  origin is the instance frame and its solver frame is the chunk's exact
+  principal frame. Bonds become breakable bond joints, and world bonds attach
+  to a static anchor body.
+- **Events.** `BondsBroken` and `Split` arrive in each frame. A split carries
+  the parent actor by value, and the children partition it (chunks, bodies,
+  anchored, mass).
+- **Queries.** `destructible_chunk_body`, `destructible_chunk_local`
+  (identity), `destructible_chunk_node`, `destructible_actor_of`,
+  `destructible_stats`, `destroy_destructible`.
+- **C ABI.** `rbCreateDestructibleAssetFromGlb` / `FromPack`,
+  `rbCreateDestructible`, chunk body, node and count queries, and
+  `RB_BONDS_BROKEN` and `RB_SPLIT` events with `RbActor` lists.
+- **Finding: pack bonds don't break under `Bonds`.** Pack assets load and
+  simulate, but their bond capacities are stress-solver limits, which the lab
+  treats as unbreakable bond joints. They break only under the `Threshold` and
+  `Stress` models. Converting the limits would be a lossy decision, so it is
+  not made silently.
+
+**D1b: the `Threshold` model in `World` (next).**
+
+- **Build.** `GpuFracture` / `FractureTables` sharing the world's device,
+  with pre-allocated piece slots taken from `WorldCapacity`.
+- **Events.** `Split` events come from the GPU split log rather than from
+  host connectivity.
+- **Chunk transforms.** `chunk_local` becomes each chunk's pose in its
+  cluster.
+- **Device features.** It needs the stress solver's device features, such as
+  passthrough shaders on Metal, which `GpuContext` will request.
+
+**D1 (original list):**
 
 - `DestructibleAssetDesc` with loaders: GLB, packs, and the procedural
   cuboid, row and grid builders.

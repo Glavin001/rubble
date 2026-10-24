@@ -2,7 +2,7 @@
 //! joint events) plus Rubble's destruction stream and per-frame outputs for
 //! vehicles, soft bodies and skinned meshes.
 
-use crate::{BodyId, JointId, Transform};
+use crate::{ActorInfo, BodyId, DestructibleId, JointId, Transform};
 use engine_schema::{MountBreak, StepCounters};
 use engine_softbody::{BeamBreak, PieceDetached, SoftHandle};
 use engine_vehicle::{VehicleHandle, VehicleState};
@@ -47,6 +47,18 @@ pub enum DestructionEvent {
     BeamBroke(BeamBreak),
     /// A soft-body piece (a door, a bumper) came loose.
     PieceDetached(PieceDetached),
+    /// Bonds of a destructible broke this step (bond indices into its asset).
+    BondsBroken {
+        destructible: DestructibleId,
+        bonds: Vec<u32>,
+    },
+    /// An actor (connected chunks) of a destructible came apart. The parent
+    /// is described by value: its chunks have already moved to the children.
+    Split {
+        destructible: DestructibleId,
+        parent: ActorInfo,
+        children: Vec<ActorInfo>,
+    },
 }
 
 /// A vehicle's state after the step: speeds, engine, gear, and per wheel the

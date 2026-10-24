@@ -1,5 +1,111 @@
 //! The C ABI end to end, called the way a C host calls it.
 
+#[test]
+fn destructibles_break_and_split_through_the_abi() {
+    unsafe {
+        let mut def = rbDefaultWorldDef();
+        def.max_bodies = 16_384;
+        def.max_colliders = 32_768;
+        def.max_contacts = 262_144;
+        def.max_joints = 32_768;
+        def.max_candidates = 524_288;
+        def.max_hull_vertices = 1 << 20;
+        let mut w = ptr::null_mut();
+        ok(rbCreateWorld(&def, &mut w));
+        ground(w, false);
+        // Packs load too (their bonds carry stress-solver limits, unbreakable
+        // under the bonds model); the arch GLB's bonds break.
+        let pack = include_bytes!("../../../stress-oracle/packs/house-1story.json");
+        let mut pack_asset = 0;
+        ok(rbCreateDestructibleAssetFromPack(
+            w,
+            pack.as_ptr(),
+            pack.len(),
+            &mut pack_asset,
+        ));
+        let glb = include_bytes!("../../engine-webgpu/fracture/assets/masonry-arch.glb");
+        let mut asset = 0;
+        ok(rbCreateDestructibleAssetFromGlb(
+            w,
+            glb.as_ptr(),
+            glb.len(),
+            1,
+            &mut asset,
+        ));
+        let mut ddef = rbDefaultDestructibleDef();
+        ddef.asset = asset;
+        let mut d = 0;
+        ok(rbCreateDestructible(w, &ddef, &mut d));
+        let mut chunks = 0;
+        ok(rbDestructible_GetChunkCount(w, d, &mut chunks));
+        assert!(chunks > 10);
+        let mut body = 0;
+        ok(rbDestructible_GetChunkBody(w, d, 0, &mut body));
+        assert!(rbBody_IsValid(w, body));
+        // A heavy ball through the middle of the structure.
+        let desc = rubble::DestructibleAssetDesc::from_glb(glb, 1).unwrap();
+        let n = desc.chunks.len() as f32;
+        let c = desc.chunks.iter().fold([0.0f32; 3], |a, ch| {
+            [
+                a[0] + ch.pose.position[0] / n,
+                a[1] + ch.pose.position[1] / n,
+                a[2] + ch.pose.position[2] / n,
+            ]
+        });
+        let mut bd = rbDefaultBodyDef();
+        bd.type_ = RbBodyType::RB_DYNAMIC_BODY;
+        bd.transform.p = RbVec3 {
+            x: c[0] - 20.0,
+            y: c[1],
+            z: c[2],
+        };
+        bd.linear_velocity = RbVec3 {
+            x: 60.0,
+            y: 0.0,
+            z: 0.0,
+        };
+        let mut ball = 0;
+        ok(rbCreateBody(w, &bd, &mut ball));
+        let mut sd = rbDefaultShapeDef();
+        sd.density = 2000.0 / (4.0 / 3.0 * std::f32::consts::PI * 0.216);
+        let mut s = 0;
+        ok(rbCreateSphereShape(
+            w,
+            ball,
+            &sd,
+            RbVec3::default(),
+            0.6,
+            &mut s,
+        ));
+        let (mut bonds, mut splits) = (0u32, 0u32);
+        for _ in 0..120 {
+            ok(rbWorld_Step(w));
+            let f = poll_all(w);
+            if !f.has_frame {
+                continue;
+            }
+            for e in std::slice::from_raw_parts(f.destruction, f.destruction_count as usize) {
+                match e.type_ {
+                    RbDestructionType::RB_BONDS_BROKEN => {
+                        assert_eq!(e.destructible, d);
+                        bonds += e.bond_count;
+                    }
+                    RbDestructionType::RB_SPLIT => {
+                        splits += 1;
+                        let kids = std::slice::from_raw_parts(e.children, e.child_count as usize);
+                        let n: u32 = kids.iter().map(|k| k.chunk_count).sum();
+                        assert_eq!(n, e.parent.chunk_count, "children partition the parent");
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(bonds > 0 && splits > 0, "bonds {bonds}, splits {splits}");
+        ok(rbDestroyDestructible(w, d));
+        rbDestroyWorld(w);
+    }
+}
+
 use rubble_ffi::coords::RbCoordinates;
 use rubble_ffi::*;
 use std::ffi::CStr;

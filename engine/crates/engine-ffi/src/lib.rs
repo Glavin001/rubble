@@ -43,6 +43,10 @@ pub type RbVehicleId = u32;
 pub type RbSoftId = u32;
 /// A skinned soft-body mesh (index).
 pub type RbSkinId = u32;
+/// A placed destructible (packed handle). 0 is null.
+pub type RbDestructibleId = u64;
+/// A destructible asset (index).
+pub type RbDestructibleAssetId = u32;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -316,6 +320,35 @@ pub enum RbDestructionType {
     RB_MOUNT_BROKE = 1,
     RB_BEAM_BROKE = 2,
     RB_PIECE_DETACHED = 3,
+    /// Bonds of a destructible broke: `destructible`, `bonds` / `bond_count`.
+    RB_BONDS_BROKEN = 4,
+    /// An actor of a destructible came apart: `destructible`, `parent`,
+    /// `children` / `child_count`.
+    RB_SPLIT = 5,
+}
+
+/// A connected group of chunks of a destructible (one rigid actor).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RbActor {
+    pub chunks: *const u32,
+    /// The body of each chunk (same order as `chunks`).
+    pub bodies: *const RbBodyId,
+    pub chunk_count: u32,
+    pub anchored: bool,
+    pub mass: f32,
+}
+
+impl RbActor {
+    fn empty() -> Self {
+        Self {
+            chunks: std::ptr::null(),
+            bodies: std::ptr::null(),
+            chunk_count: 0,
+            anchored: false,
+            mass: 0.0,
+        }
+    }
 }
 
 /// Something broke (`RbFrame::destruction`). Fields by `type_`:
@@ -339,6 +372,12 @@ pub struct RbDestructionEvent {
     pub nodes: *const u32,
     pub node_count: u32,
     pub user_data: u64,
+    pub destructible: RbDestructibleId,
+    pub bonds: *const u32,
+    pub bond_count: u32,
+    pub parent: RbActor,
+    pub children: *const RbActor,
+    pub child_count: u32,
 }
 
 #[repr(C)]
@@ -445,6 +484,11 @@ struct FrameStore {
     soft_nodes: Vec<Vec<RbVec3>>,
     skins: Vec<RbSkinOutput>,
     skin_data: Vec<(Vec<RbVec3>, Vec<RbVec3>)>,
+    /// Backing for bond lists, chunk lists, body lists and child arrays (the
+    /// heap buffers do not move when these outer vectors grow).
+    u32_lists: Vec<Vec<u32>>,
+    body_lists: Vec<Vec<RbBodyId>>,
+    actor_lists: Vec<Vec<RbActor>>,
 }
 
 /// An opaque world.
@@ -661,6 +705,12 @@ impl RbWorld {
                 nodes: std::ptr::null(),
                 node_count: 0,
                 user_data: 0,
+                destructible: 0,
+                bonds: std::ptr::null(),
+                bond_count: 0,
+                parent: RbActor::empty(),
+                children: std::ptr::null(),
+                child_count: 0,
             };
             match e {
                 DestructionEvent::JointBroke {
@@ -694,6 +744,44 @@ impl RbWorld {
                     ev.mass = p.mass;
                     s.piece_nodes.push(p.nodes.clone());
                     ev.node_count = p.nodes.len() as u32;
+                }
+                DestructionEvent::BondsBroken {
+                    destructible,
+                    bonds,
+                } => {
+                    ev.type_ = RbDestructionType::RB_BONDS_BROKEN;
+                    ev.destructible = destructible.to_bits();
+                    let list = bonds.clone();
+                    ev.bonds = list.as_ptr();
+                    ev.bond_count = list.len() as u32;
+                    s.u32_lists.push(list);
+                }
+                DestructionEvent::Split {
+                    destructible,
+                    parent,
+                    children,
+                } => {
+                    ev.type_ = RbDestructionType::RB_SPLIT;
+                    ev.destructible = destructible.to_bits();
+                    let mut actor = |a: &ActorInfo| {
+                        let chunks = a.chunks.clone();
+                        let bodies: Vec<RbBodyId> = a.bodies.iter().map(|b| b.to_bits()).collect();
+                        let out = RbActor {
+                            chunks: chunks.as_ptr(),
+                            bodies: bodies.as_ptr(),
+                            chunk_count: chunks.len() as u32,
+                            anchored: a.anchored,
+                            mass: a.mass,
+                        };
+                        s.u32_lists.push(chunks);
+                        s.body_lists.push(bodies);
+                        out
+                    };
+                    ev.parent = actor(parent);
+                    let kids: Vec<RbActor> = children.iter().map(&mut actor).collect();
+                    ev.children = kids.as_ptr();
+                    ev.child_count = kids.len() as u32;
+                    s.actor_lists.push(kids);
                 }
             }
             s.destruction.push(ev);
@@ -1593,6 +1681,178 @@ pub unsafe extern "C" fn rbCreateSoftVehicleTruck(
             w.world
                 .add_soft_vehicle(&desc, t.position, t.rotation, &SpawnOptions::default())?;
         write(out, h.0)
+    })
+}
+
+// ----- destructibles ------------------------------------------------------
+
+/// A destructible asset from one hierarchy level of a Shardwright fracture
+/// GLB (bytes are copied).
+#[no_mangle]
+pub unsafe extern "C" fn rbCreateDestructibleAssetFromGlb(
+    world: *mut RbWorld,
+    bytes: *const u8,
+    length: usize,
+    level: u8,
+    out: *mut RbDestructibleAssetId,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        if bytes.is_null() {
+            return Err(invalid("null bytes"));
+        }
+        let data = std::slice::from_raw_parts(bytes, length);
+        let desc = DestructibleAssetDesc::from_glb(data, level)?;
+        let id = w.world.create_destructible_asset(&desc)?;
+        write(out, id.0)
+    })
+}
+
+/// A destructible asset from a vibe-city / blast-stress JSON pack.
+#[no_mangle]
+pub unsafe extern "C" fn rbCreateDestructibleAssetFromPack(
+    world: *mut RbWorld,
+    bytes: *const u8,
+    length: usize,
+    out: *mut RbDestructibleAssetId,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        if bytes.is_null() {
+            return Err(invalid("null bytes"));
+        }
+        let desc = DestructibleAssetDesc::from_pack(std::slice::from_raw_parts(bytes, length))?;
+        let id = w.world.create_destructible_asset(&desc)?;
+        write(out, id.0)
+    })
+}
+
+/// A placed destructible (`rbDefaultDestructibleDef`). Assets are authored in
+/// Rubble's frame (Y up, metres); `transform` places them in the world's.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RbDestructibleDef {
+    pub asset: RbDestructibleAssetId,
+    pub transform: RbTransform,
+    pub strength_scale: f32,
+    /// Keep the asset's world bonds (anchors).
+    pub anchored: bool,
+    pub start_asleep: bool,
+    pub friction: f32,
+    pub user_data: u64,
+    pub internal_value: u32,
+}
+
+#[no_mangle]
+pub extern "C" fn rbDefaultDestructibleDef() -> RbDestructibleDef {
+    RbDestructibleDef {
+        asset: 0,
+        transform: RbTransform::default(),
+        strength_scale: 1.0,
+        anchored: true,
+        start_asleep: true,
+        friction: SurfaceMaterial::default().friction,
+        user_data: 0,
+        internal_value: COOKIE,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rbCreateDestructible(
+    world: *mut RbWorld,
+    def: *const RbDestructibleDef,
+    out: *mut RbDestructibleId,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let d = read(def, "null destructible def")?;
+        check_cookie(
+            d.internal_value,
+            "destructible def not from rbDefaultDestructibleDef",
+        )?;
+        let base = DestructibleDef::new(DestructibleAssetId(d.asset));
+        let def = DestructibleDef {
+            transform: w.transform_in(d.transform),
+            strength_scale: d.strength_scale,
+            anchors: if d.anchored {
+                Anchors::AssetWorldBonds
+            } else {
+                Anchors::None
+            },
+            asleep: d.start_asleep,
+            shape: ShapeDef {
+                material: SurfaceMaterial {
+                    friction: d.friction,
+                    ..SurfaceMaterial::default()
+                },
+                ..base.shape.clone()
+            },
+            user_data: d.user_data,
+            ..base
+        };
+        let id = w.world.create_destructible(&def)?;
+        write(out, id.to_bits())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rbDestroyDestructible(
+    world: *mut RbWorld,
+    id: RbDestructibleId,
+) -> RbResult {
+    guard_args(|| {
+        world_mut(world)?
+            .world
+            .destroy_destructible(DestructibleId::from_bits(id))
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rbDestructible_GetChunkCount(
+    world: *mut RbWorld,
+    id: RbDestructibleId,
+    out: *mut u32,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let stats = w.world.destructible_stats(DestructibleId::from_bits(id))?;
+        write(out, stats.chunks)
+    })
+}
+
+/// The body a chunk belongs to now. Render contract: chunk world transform =
+/// body transform (the instance frame for every piece) times a fixed per-chunk
+/// transform (identity in the bonds model).
+#[no_mangle]
+pub unsafe extern "C" fn rbDestructible_GetChunkBody(
+    world: *mut RbWorld,
+    id: RbDestructibleId,
+    chunk: u32,
+    out: *mut RbBodyId,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let b = w
+            .world
+            .destructible_chunk_body(DestructibleId::from_bits(id), chunk)?;
+        write(out, b.to_bits())
+    })
+}
+
+/// The glTF node that renders a chunk (-1: none).
+#[no_mangle]
+pub unsafe extern "C" fn rbDestructible_GetChunkNode(
+    world: *mut RbWorld,
+    id: RbDestructibleId,
+    chunk: u32,
+    out: *mut i32,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let n = w
+            .world
+            .destructible_chunk_node(DestructibleId::from_bits(id), chunk)?;
+        write(out, n.map_or(-1, |n| n as i32))
     })
 }
 

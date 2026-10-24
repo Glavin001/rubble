@@ -4,8 +4,6 @@
 //! handle is refused instead of reaching whatever reuses the slot. Generation
 //! 0 is never issued, so a zeroed handle is null.
 
-use engine_schema::Handle;
-
 macro_rules! handle {
     ($(#[$doc:meta])* $name:ident) => {
         $(#[$doc])*
@@ -44,12 +42,14 @@ macro_rules! handle {
                 Self(bits)
             }
 
-            pub fn handle(self) -> Handle {
-                Handle::new(self.index(), self.generation())
+            pub fn handle(self) -> engine_schema::Handle {
+                engine_schema::Handle::new(self.index(), self.generation())
             }
         }
     };
 }
+
+pub(crate) use handle;
 
 handle!(
     /// A rigid body.
