@@ -50,6 +50,7 @@
     <div class="row" id="gauntletUi" hidden>
       <label><input type="checkbox" id="guideOn" checked /> Directed debris</label>
       <select id="guideStrength"><option value="0">subtle</option><option value="1" selected>cinematic</option><option value="2">exaggerated</option></select>
+      <label id="movingRow" hidden><input type="checkbox" id="movingOn" /> Moving targets</label>
       <label><input type="checkbox" id="shellOn" checked /> <span id="shellLabel">Shelling</span></label>
       <span class="muted"><kbd>F</kbd> <span id="shellKey">shell now</span></span>
     </div>
@@ -266,7 +267,7 @@
     const range = scene === 'meteors';
     const blocks = { first: 0, count: 0, parked: [] };
     // Meteor range: launched meteors and their touchdown markers.
-    const meteors = { first: 0, count: 36, markerFirst: 0, markers: 60, next: 0, nextMarker: 0, volley: 0, flying: [], landed: [], score: [[0, 0], [0, 0]] };
+    const meteors = { pads: [], moving: qs.get('targets') === 'moving', first: 0, count: 36, markerFirst: 0, markers: 60, next: 0, nextMarker: 0, volley: 0, flying: [], landed: [], score: [[0, 0], [0, 0]] };
     let rng = 7;
     let bridgeBolts = 0; // breakable joints in the scene (bridge)
     // ?spawn=x,z,yaw places the player vehicle (yaw in radians about +Y).
@@ -337,7 +338,12 @@
       // steered. The car only anchors the camera, between the lanes.
       const g = JSON.parse(MeteorRange.range());
       addVehicle(presetName, [0, 2.2, 18], 0);
-      for (const p of g.pads) staticBox([p.p[0], p.half[1], p.p[2]], p.half, [0, 0, 0, 1], MAT_PAD);
+      // Pads are kinematic, so they can slide as carts (moving targets).
+      for (const p of g.pads) {
+        const body = world.addBody({ p: [p.p[0], p.half[1], p.p[2]], flags: M.BODY_KINEMATIC | 8 });
+        world.addCollider({ body, shape: 2, material: MAT_PAD, params: [...p.half, Math.hypot(...p.half)] });
+        meteors.pads.push({ body, lane: p.lane, pad: meteors.pads.filter((x) => x.lane === p.lane).length, y: p.half[1], z: p.p[2] });
+      }
       // Parked meteors (static until launched) and touchdown markers (collide with nothing).
       meteors.first = world.bodyCount;
       for (let i = 0; i < meteors.count; i++) {
@@ -493,7 +499,13 @@
     const guideOn = document.getElementById('guideOn'), guideStrength = document.getElementById('guideStrength');
     const shellOn = document.getElementById('shellOn'), guideStatsEl = document.getElementById('guideStats');
     if (street || range) {
-      if (range) { document.getElementById('shellLabel').textContent = 'Volleys'; document.getElementById('shellKey').textContent = 'volley now'; }
+      if (range) {
+        document.getElementById('shellLabel').textContent = 'Volleys'; document.getElementById('shellKey').textContent = 'volley now';
+        const mv = document.getElementById('movingOn');
+        document.getElementById('movingRow').hidden = false;
+        mv.checked = meteors.moving;
+        mv.onchange = () => { meteors.moving = mv.checked; mv.blur(); resetScene(); };
+      }
       document.getElementById('gauntletUi').hidden = false;
       guideStatsEl.hidden = false;
       if (qs.get('guide') === '0') guideOn.checked = false;
@@ -506,7 +518,14 @@
     let chassisRest = 0;
     function applyGuidance(rearm = true) {
       if (range) {
-        const zones = JSON.parse(MeteorRange.zones());
+        // Carts start where their motion has them at time 0.
+        for (const p of meteors.pads) {
+          const words = new Uint32Array(world.bodyWords.buffer, p.body * 112, 28).slice();
+          new Float32Array(words.buffer).set([MeteorRange.pad_x(p.lane, p.pad, 0, meteors.moving), p.y, p.z], 0);
+          world.backend.writeBody(p.body, words);
+        }
+        const steeredPads = Uint32Array.from(meteors.pads.filter((p) => p.lane === 0).map((p) => p.body));
+        const zones = JSON.parse(MeteorRange.zones(steeredPads, meteors.moving));
         guideZoneCount = zones.length;
         world.setGuidance(JSON.parse(Gauntlet.settings(Number(guideStrength.value), guideOn.checked)), zones);
         return;
@@ -525,7 +544,8 @@
     function fireVolley() {
       lastShell = world.steps;
       const r = meteors.radius, m = meteors.mass, inv = 2.5 / (m * r * r);
-      for (const l of JSON.parse(MeteorRange.volley(meteors.volley++, world.params.gravityY))) {
+      const t = world.steps * world.params.dt;
+      for (const l of JSON.parse(MeteorRange.volley(meteors.volley++, world.params.gravityY, t, meteors.moving))) {
         const body = meteors.first + (meteors.next++ % meteors.count);
         const words = new Uint32Array(world.bodyWords.buffer, body * 112, 28).slice();
         const f = new Float32Array(words.buffer);
@@ -535,7 +555,7 @@
         world.setGuided(body, 1, l.tags);
         meteors.flying = meteors.flying.filter((x) => x.body !== body);
         meteors.landed = meteors.landed.filter((x) => x.body !== body);
-        meteors.flying.push({ body, lane: l.lane, pad: l.pad, prev: null });
+        meteors.flying.push({ body, lane: l.lane, pad: l.pad, prev: null, prevStep: 0, t0: t });
       }
     }
     // Touchdowns since the last call (meteors' first crossing of their resting
@@ -550,9 +570,13 @@
         if (x.prev && x.prev[1] > rest && p[1] <= rest) {
           const s = (x.prev[1] - rest) / (x.prev[1] - p[1]);
           const at = [0, 1, 2].map((k) => x.prev[k] + s * (p[k] - x.prev[k]));
-          const hit = MeteorRange.on_pad(x.lane, x.pad, at[0], at[1], at[2]);
+          const t = (x.prevStep + s * (world.steps - x.prevStep)) * world.params.dt;
+          const hit = MeteorRange.on_pad(x.lane, x.pad, at[0], at[1], at[2], t, meteors.moving);
           meteors.score[x.lane][0] += hit ? 1 : 0;
-          meteors.log?.push({ lane: x.lane, pad: x.pad, at, hit, body: x.body });
+          // Did the cart turn around while this meteor was in the air?
+          const dir = (u) => Math.sign(MeteorRange.pad_x(x.lane, x.pad, u + 0.01, true) - MeteorRange.pad_x(x.lane, x.pad, u, true));
+          const turned = meteors.moving && dir(x.t0) !== dir(t);
+          meteors.log?.push({ lane: x.lane, pad: x.pad, at, hit, turned, body: x.body });
           meteors.score[x.lane][1] += 1;
           const k = meteors.nextMarker++ % meteors.markers;
           const mk = meteors.markerFirst + k, ci = meteors.markerCollider + k;
@@ -564,7 +588,7 @@
           world.backend.writeCollider(ci, cw);
           meteors.flying.splice(meteors.flying.indexOf(x), 1);
           meteors.landed.push({ body: x.body, step: world.steps });
-        } else x.prev = p;
+        } else { x.prev = p; x.prevStep = world.steps; }
       }
       // Park meteors 1.5 s after they come down, so the range stays clear.
       while (meteors.landed.length && world.steps - meteors.landed[0].step > 90) {
@@ -574,6 +598,21 @@
       }
     }
     const initialWords = (body) => initial.bodies.slice(body * 28, body * 28 + 28);
+    // Moving targets: each step, every cart's velocity carries it to where
+    // pad_x has it a step later (exact, so the carts never drift).
+    if (range) {
+      const encode = world.encodeStep;
+      world.encodeStep = (enc) => {
+        if (meteors.moving) {
+          const dt = world.params.dt, t = world.steps * dt;
+          for (const p of meteors.pads) {
+            const v = (MeteorRange.pad_x(p.lane, p.pad, t + dt, true) - MeteorRange.pad_x(p.lane, p.pad, t, true)) / dt;
+            world.setKinematicVelocity(p.body, [v, 0, 0]);
+          }
+        }
+        encode(enc);
+      };
+    }
     function fireShell() {
       if (range) return fireVolley();
       if (!street || !lastChassis) return;
@@ -1410,9 +1449,10 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     window.__world = world;
     // Meteor range take: from a reset, `volleys` volleys two seconds apart with
     // steering on or off; returns each lane's [on target, landed].
-    window.__meteorTake = async ({ volleys = 10, guided = true, strength = 1 } = {}) => {
+    window.__meteorTake = async ({ volleys = 10, guided = true, strength = 1, moving = false } = {}) => {
       if (!range) throw new Error('not the meteor range');
       guideOn.checked = guided; guideStrength.value = String(strength);
+      meteors.moving = moving; document.getElementById('movingOn').checked = moving;
       resetScene();
       manual = true;
       meteors.log = [];
