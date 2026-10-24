@@ -28,6 +28,7 @@ mod events;
 mod handles;
 mod joints;
 mod math;
+mod queries;
 mod readback;
 mod rig;
 mod threshold;
@@ -57,8 +58,9 @@ pub use joints::{
     RevoluteJointDef, SphericalJointDef, Spring, WeldJointDef,
 };
 pub use math::Transform;
+pub use queries::{ExplosionDef, OverlapResult, QueryFilter, QueryId};
 pub use readback::Backpressure;
-pub use rig::VehicleDamage;
+pub use rig::{SoftBeam, VehicleDamage};
 pub use threshold::{Projectile, StressSource};
 
 pub use engine_schema::convex::{CollisionFilter as Filter, ConvexHull};
@@ -209,6 +211,8 @@ enum Extra {
     RayHits(Vec<(RayBatchId, u32, u32)>),
     /// This step's touching pairs of event-enabled shapes.
     Contacts,
+    /// The overlap query region, for these queries.
+    Overlaps(Vec<QueryId>),
     /// A threshold destructible's state after this step.
     #[cfg(feature = "stress")]
     Fracture(threshold::FractureRead),
@@ -362,6 +366,7 @@ pub struct World {
     /// The adapter this world runs on (for helper worlds on its device).
     adapter: wgpu::AdapterInfo,
     contacts: contacts::ContactTracker,
+    queries: queries::QueryQueue,
     hit_event_threshold: f32,
     contact_storage: ContactStorage,
     /// Threshold destructibles (`StrengthModel::Threshold`).
@@ -427,6 +432,7 @@ impl World {
             last_counters: None,
             adapter,
             contacts: Default::default(),
+            queries: Default::default(),
             hit_event_threshold: def.hit_event_threshold,
             contact_storage: contacts,
             resync: false,
@@ -1455,6 +1461,15 @@ impl World {
         let rays = std::mem::take(&mut self.pending_rays);
         let batches = std::mem::take(&mut self.pending_batches);
         self.push_damping()?;
+        let explosions = std::mem::take(&mut self.queries.explosions);
+        if !explosions.is_empty() {
+            self.sim.write_explosions(&explosions)?;
+        }
+        let boxes = std::mem::take(&mut self.queries.boxes);
+        let query_ids = std::mem::take(&mut self.queries.ids);
+        if !boxes.is_empty() {
+            self.sim.write_overlap_queries(&boxes)?;
+        }
         let contact_events = self.contacts.enabled_shapes > 0;
         if contact_events {
             self.sim.clear_contact_events();
@@ -1494,6 +1509,7 @@ impl World {
             // Nor are fracture states: a split must be adopted in the step it happened.
             let block = self.backpressure == Backpressure::Block
                 || !batches.is_empty()
+                || !query_ids.is_empty()
                 || contact_events
                 || fracture;
             if !self.readback.has_free() && block {
@@ -1525,6 +1541,16 @@ impl World {
                 #[cfg(feature = "stress")]
                 if fracture {
                     extras.extend(self.fracture.extras());
+                }
+                if !query_ids.is_empty() {
+                    self.sim.encode_overlap_queries(&mut enc);
+                    let (buffer, offset, size) = self.sim.overlap_result_range();
+                    extras.push(readback::Extra {
+                        kind: Extra::Overlaps(query_ids),
+                        buffer,
+                        offset,
+                        size,
+                    });
                 }
                 if contact_events {
                     let (buffer, offset, size) = self.sim.contact_event_range();
@@ -1790,12 +1816,18 @@ impl World {
         let mut ray_results = Vec::new();
         let mut contact_events = ContactEvents::default();
         let mut sensor_events = SensorEvents::default();
+        let mut overlap_results = Vec::new();
         let mut lost_contacts = 0;
         for (kind, bytes) in &raw.extras {
             match kind {
                 Extra::Resync => {}
                 #[cfg(feature = "stress")]
                 Extra::Fracture(_) => {}
+                Extra::Overlaps(ids) => {
+                    let (results, lost) = self.decode_overlaps(ids, bytes);
+                    overlap_results = results;
+                    lost_contacts += lost;
+                }
                 Extra::Contacts => {
                     (contact_events, sensor_events, lost_contacts) = self.decode_contacts(bytes);
                 }
@@ -1849,6 +1881,7 @@ impl World {
             ray_results,
             contact_events,
             sensor_events,
+            overlap_results,
             lost_events: ring.lost + lost_contacts,
             dropped: false,
             resynced: resync.is_some(),
@@ -2233,13 +2266,11 @@ fn body_state(slot: &BodySlot) -> BodyState {
         }
         BodyType::Kinematic => {
             // Infinite mass that moves at its set velocity (the kernels'
-            // BODY_KINEMATIC).
+            // `bodyIsKinematic`: BODY_KINEMATIC without BODY_DYNAMIC).
             let mut s = BodyState::static_plane_support();
             s.position = solver.position;
             s.orientation = solver.rotation;
-            s.flags = engine_schema::BodyFlags::Dynamic as u32
-                | engine_schema::BodyFlags::Kinematic as u32
-                | engine_schema::BodyFlags::Awake as u32;
+            s.flags = engine_schema::BodyFlags::Kinematic as u32 | engine_schema::BodyFlags::Awake as u32;
             s
         }
         BodyType::Static => {

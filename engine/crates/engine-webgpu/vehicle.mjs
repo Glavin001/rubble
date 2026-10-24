@@ -14,6 +14,11 @@ export const L = JSON.parse(wasm.layout_constants());
 export const { BODY_VEHICLE, JOINT_FLAG_TYRE, JOINT_BYTES, WHEEL_RIM_MATERIAL } = L;
 /** engine_exec::rigid_plan for browser hosts, and D6 joint records (world-host.mjs). */
 export const { RigidStep, ball_joint_words: ballJointWords } = wasm;
+/** Character / projectile pool and continuous-collision constants (engine-schema). */
+export const M = JSON.parse(wasm.motion_constants());
+/** A character record (Uint32Array, 16 slots) from a CharacterDesc JSON. */
+export const characterRecord = (descJson, innerBody, x, y, z) => wasm.character_record(descJson, innerBody, x, y, z);
+export const characterDefault = () => JSON.parse(wasm.character_default());
 /** The whole wasm module (soft.mjs builds on the same instance). */
 export { wasm };
 const OP = JSON.parse(wasm.op_codes());
@@ -25,6 +30,8 @@ export const bitsf = (u) => { u32b[0] = u >>> 0; return f32b[0]; };
 
 /** Pool sizes a descriptor needs. */
 export const requirements = (desc) => JSON.parse(wasm.requirements(JSON.stringify(desc)));
+/** Design-space centre of mass (where addVehicle puts the chassis body's origin). */
+export const centerOfMass = (desc) => Array.from(wasm.center_of_mass(JSON.stringify(desc)));
 
 export const DEFAULT_VEHICLE_CAPACITY = {
   maxVehicles: 64, maxWheels: 512, maxCurvePoints: 4096, maxDiffs: 256, maxAntiRolls: 256, maxParts: 512, maxRays: 1024,

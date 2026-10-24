@@ -676,3 +676,164 @@ fn mass_data_and_getters_through_the_abi() {
         rbDestroyWorld(w);
     }
 }
+
+#[test]
+fn soft_beams_for_the_beam_view() {
+    unsafe {
+        let w = world(true);
+        ground(w);
+        let desc =
+            json(|b, c, n| rbGetSoftVehiclePresetJson(c"procedural_car".as_ptr(), 0.0, b, c, n));
+        let desc = CString::new(desc).unwrap();
+        let mut s = 0;
+        ok(rbCreateSoftVehicle(
+            w,
+            desc.as_ptr(),
+            ptr::null(),
+            at(0.0, 1.0, 0.0),
+            v3(0.0, 0.0, 0.0),
+            &mut s,
+        ));
+        ok(rbSoft_EnableOutput(w, s, true));
+        let f = steps(w, 10);
+        let nodes = (*f.soft).node_count;
+        let mut count = 0;
+        ok(rbSoft_GetBeams(w, s, ptr::null_mut(), 0, &mut count));
+        assert!(count > 50, "{count} beams");
+        let mut beams = vec![RbSoftBeam::default(); count as usize];
+        ok(rbSoft_GetBeams(w, s, beams.as_mut_ptr(), count, &mut count));
+        assert!(beams.iter().all(|b| b.node_a < nodes && b.node_b < nodes));
+        assert!(beams.iter().all(|b| b.spawn_length > 0.0 && !b.broken));
+        assert!(beams.iter().any(|b| b.visible));
+        rbDestroyWorld(w);
+    }
+}
+
+#[test]
+fn grab_and_drag_with_a_kinematic_mouse_body() {
+    unsafe {
+        let w = world(false);
+        ground(w);
+        let mut bd = rbDefaultBodyDef();
+        bd.type_ = RbBodyType::RB_DYNAMIC_BODY;
+        bd.transform.p = v3(0.0, 0.5, 0.0);
+        let mut b = 0;
+        ok(rbCreateBody(w, &bd, &mut b));
+        let mut s = 0;
+        ok(rbCreateBoxShape(
+            w,
+            b,
+            &rbDefaultShapeDef(),
+            v3(0.5, 0.5, 0.5),
+            RbTransform::default(),
+            &mut s,
+        ));
+        // The mouse: a kinematic body at the grab point, jointed to the box.
+        let mut md = rbDefaultBodyDef();
+        md.type_ = RbBodyType::RB_KINEMATIC_BODY;
+        md.transform.p = v3(0.0, 0.5, 0.0);
+        let mut mouse = 0;
+        ok(rbCreateBody(w, &md, &mut mouse));
+        let mut jd = rbDefaultSphericalJointDef();
+        jd.base.body_a = mouse;
+        jd.base.body_b = b;
+        let mut j = 0;
+        ok(rbCreateSphericalJoint(w, &jd, &mut j));
+        // Drag up 2 m over a second.
+        for k in 1..=60 {
+            let t = at(0.0, 0.5 + 2.0 * k as f32 / 60.0, 0.0);
+            ok(rbBody_SetTargetTransform(w, mouse, t));
+            ok(rbWorld_Step(w));
+        }
+        steps(w, 1);
+        let mut t = RbTransform::default();
+        ok(rbBody_GetTransform(w, b, &mut t));
+        assert!((t.p.y - 2.5).abs() < 0.1, "the box came along: {t:?}");
+        // Let go.
+        ok(rbDestroyJoint(w, j));
+        steps(w, 120);
+        ok(rbBody_GetTransform(w, b, &mut t));
+        assert!((t.p.y - 0.5).abs() < 0.06, "and dropped: {t:?}");
+        rbDestroyWorld(w);
+    }
+}
+
+#[test]
+fn overlap_queries_and_explosions_in_unreal_units() {
+    unsafe {
+        let mut def = rbDefaultWorldDef();
+        def.coordinates = RbCoordinates::RB_COORDINATES_UNREAL;
+        def.gravity = v3(0.0, 0.0, -981.0);
+        let mut w = ptr::null_mut();
+        ok(rbCreateWorld(&def, &mut w));
+        let mut g = 0;
+        ok(rbCreateBody(w, &rbDefaultBodyDef(), &mut g));
+        let mut floor = 0;
+        ok(rbCreatePlaneShape(
+            w,
+            g,
+            &rbDefaultShapeDef(),
+            v3(0.0, 0.0, 1.0),
+            0.0,
+            &mut floor,
+        ));
+        let make = |x: f32, y: f32| {
+            let mut bd = rbDefaultBodyDef();
+            bd.type_ = RbBodyType::RB_DYNAMIC_BODY;
+            bd.transform.p = v3(x, y, 50.0);
+            let mut b = 0;
+            ok(rbCreateBody(w, &bd, &mut b));
+            let mut sd = rbDefaultShapeDef();
+            sd.density = 0.0005;
+            let mut s = 0;
+            ok(rbCreateBoxShape(
+                w,
+                b,
+                &sd,
+                v3(50.0, 50.0, 50.0),
+                RbTransform::default(),
+                &mut s,
+            ));
+            (b, s)
+        };
+        let (east, east_shape) = make(300.0, 0.0);
+        let (_far, far_shape) = make(3000.0, 0.0);
+        steps(w, 2);
+        // A box around the east crate only (above the floor).
+        let mut q = 0;
+        ok(rbWorld_OverlapAABB(
+            w,
+            v3(150.0, -150.0, 10.0),
+            v3(450.0, 150.0, 200.0),
+            0xFFFF,
+            0xFFFF,
+            &mut q,
+        ));
+        let f = steps(w, 1);
+        assert_eq!(f.overlap_count, 1);
+        let r = &*f.overlaps;
+        assert_eq!(r.query, q);
+        let shapes = std::slice::from_raw_parts(r.shapes, r.shape_count as usize);
+        assert_eq!(shapes, &[east_shape], "{shapes:?}");
+        assert!(!shapes.contains(&far_shape));
+        // An explosion at the origin pushes the east crate along +X.
+        let mut e = rbDefaultExplosionDef();
+        e.position = v3(0.0, 0.0, 50.0);
+        e.radius = 400.0;
+        e.falloff = 200.0;
+        e.impulse_per_area = 0.2; // kg cm/s per cm²
+        ok(rbWorld_Explode(w, &e));
+        steps(w, 1);
+        let (mut lin, mut ang) = (RbVec3::default(), RbVec3::default());
+        ok(rbBody_GetVelocity(w, east, &mut lin, &mut ang));
+        // 500 kg, bounding radius 86.6 cm: pi r² = 23562 cm² at 0.2 gives
+        // 4712 kg cm/s, so 9.42 cm/s.
+        let expected = 0.2 * std::f32::consts::PI * (3.0f32 * 50.0 * 50.0) / 500.0;
+        assert!(
+            (lin.x - expected).abs() < 0.03 * expected,
+            "pushed along +X: {lin:?} vs {expected}"
+        );
+        assert!(lin.y.abs() < 1e-3, "{lin:?}");
+        rbDestroyWorld(w);
+    }
+}

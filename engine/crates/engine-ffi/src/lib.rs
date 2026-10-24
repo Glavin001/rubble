@@ -512,6 +512,15 @@ pub struct RbContactEndEvent {
     pub shape_b: RbShapeId,
 }
 
+/// An overlap query's shapes (`RbFrame::overlaps`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RbOverlapResult {
+    pub query: u64,
+    pub shapes: *const RbShapeId,
+    pub shape_count: u32,
+}
+
 /// A shape entered or left a sensor.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -590,6 +599,9 @@ pub struct RbFrame {
     pub sensor_begin_count: u32,
     pub sensor_end: *const RbSensorEvent,
     pub sensor_end_count: u32,
+    /// Overlap queries queued with `rbWorld_OverlapAABB` before these steps.
+    pub overlaps: *const RbOverlapResult,
+    pub overlap_count: u32,
 }
 
 impl RbFrame {
@@ -625,6 +637,8 @@ impl RbFrame {
             sensor_begin_count: 0,
             sensor_end: std::ptr::null(),
             sensor_end_count: 0,
+            overlaps: std::ptr::null(),
+            overlap_count: 0,
         }
     }
 }
@@ -648,6 +662,8 @@ struct FrameStore {
     hits: Vec<RbContactBeginEvent>,
     sensor_begin: Vec<RbSensorEvent>,
     sensor_end: Vec<RbSensorEvent>,
+    overlaps: Vec<RbOverlapResult>,
+    overlap_shapes: Vec<Vec<RbShapeId>>,
     /// Backing for bond lists, chunk lists, body lists and child arrays (the
     /// heap buffers do not move when these outer vectors grow).
     u32_lists: Vec<Vec<u32>>,
@@ -1117,6 +1133,18 @@ impl RbWorld {
         };
         s.sensor_begin = c.sensor_events.begin.iter().map(sensor_out).collect();
         s.sensor_end = c.sensor_events.end.iter().map(sensor_out).collect();
+        for r in &c.overlap_results {
+            let shapes: Vec<RbShapeId> = r.shapes.iter().map(|s| s.to_bits()).collect();
+            s.overlaps.push(RbOverlapResult {
+                query: r.query.0,
+                shapes: std::ptr::null(),
+                shape_count: shapes.len() as u32,
+            });
+            s.overlap_shapes.push(shapes);
+        }
+        for (out, shapes) in s.overlaps.iter_mut().zip(&s.overlap_shapes) {
+            out.shapes = shapes.as_ptr();
+        }
         let counters = c.counters;
         RbFrame {
             has_frame: true,
@@ -1149,6 +1177,8 @@ impl RbWorld {
             sensor_begin_count: s.sensor_begin.len() as u32,
             sensor_end: s.sensor_end.as_ptr(),
             sensor_end_count: s.sensor_end.len() as u32,
+            overlaps: s.overlaps.as_ptr(),
+            overlap_count: s.overlaps.len() as u32,
         }
     }
 }

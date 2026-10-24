@@ -322,6 +322,13 @@ typedef struct RbSensorEvent {
   RbShapeId visitor_shape;
 } RbSensorEvent;
 
+// An overlap query's shapes (`RbFrame::overlaps`).
+typedef struct RbOverlapResult {
+  uint64_t query;
+  const RbShapeId *shapes;
+  uint32_t shape_count;
+} RbOverlapResult;
+
 // Results of one step, or of several folded together (`rbWorld_Poll`).
 // Pointers stay valid until the next poll.
 typedef struct RbFrame {
@@ -359,6 +366,9 @@ typedef struct RbFrame {
   uint32_t sensor_begin_count;
   const struct RbSensorEvent *sensor_end;
   uint32_t sensor_end_count;
+  // Overlap queries queued with `rbWorld_OverlapAABB` before these steps.
+  const struct RbOverlapResult *overlaps;
+  uint32_t overlap_count;
 } RbFrame;
 
 // A ray to cast: from `origin` along `translation` (its length is the range).
@@ -549,6 +559,21 @@ typedef struct RbMountLoad {
   float peak_ratio;
 } RbMountLoad;
 
+// One beam of a soft body (`rbSoft_GetBeams`).
+typedef struct RbSoftBeam {
+  // Node ordinals (index `RbSoftOutput::nodes`).
+  uint32_t node_a;
+  uint32_t node_b;
+  // Rest length now (plastic deformation moves it) and at spawn.
+  float rest_length;
+  float spawn_length;
+  // Signed axial force (+ = compression).
+  float force;
+  bool broken;
+  bool yielded;
+  bool visible;
+} RbSoftBeam;
+
 // A soft body's damage so far.
 typedef struct RbSoftDamage {
   // Beams that have yielded at least once, broken, and in total.
@@ -570,6 +595,18 @@ typedef struct RbProjectile {
   float youngs_modulus;
   float poisson_ratio;
 } RbProjectile;
+
+// A radial impulse (Box3D `b3ExplosionDef`).
+typedef struct RbExplosionDef {
+  struct RbVec3 position;
+  // Full strength within this distance of a shape's surface.
+  float radius;
+  // Then fading linearly to zero over this distance.
+  float falloff;
+  // Impulse per unit of a shape's cross-section.
+  float impulse_per_area;
+  uint16_t mask_bits;
+} RbExplosionDef;
 
 typedef struct RbColor {
   float r;
@@ -997,6 +1034,14 @@ enum RbResult rbWorld_SetSoftSettingsJson(struct RbWorld *world, const char *jso
 // Let soft bodies' skins collide with this rigid shape (walls, poles).
 enum RbResult rbSoft_AddObstacle(struct RbWorld *world, RbShapeId shape);
 
+// Every beam (**blocks** on a readback; for beam views and damage maps).
+// Writes up to `capacity`; `*out_count` gets the total.
+enum RbResult rbSoft_GetBeams(struct RbWorld *world,
+                              RbSoftId soft,
+                              struct RbSoftBeam *out,
+                              uint32_t capacity,
+                              uint32_t *out_count);
+
 // Damage (**blocks** on a readback; for HUDs and scoring).
 enum RbResult rbSoft_GetDamage(struct RbWorld *world, RbSoftId soft, struct RbSoftDamage *out);
 
@@ -1053,6 +1098,24 @@ enum RbResult rbCreatePlaneShape(struct RbWorld *world,
                                  struct RbVec3 normal,
                                  float offset,
                                  RbShapeId *out);
+
+// Shapes whose bounds overlap the box `min..max` at the next step's final
+// poses (Box3D `b3World_OverlapAABB`; sensors are not reported), filtered as
+// Box3D's query filter: a shape is reported when its categories meet
+// `mask_bits` and its mask meets `category_bits`. The result arrives in that
+// step's frame (`RbFrame::overlaps`, matched by `*out_query`).
+enum RbResult rbWorld_OverlapAABB(struct RbWorld *world,
+                                  struct RbVec3 min,
+                                  struct RbVec3 max,
+                                  uint16_t category_bits,
+                                  uint16_t mask_bits,
+                                  uint64_t *out_query);
+
+struct RbExplosionDef rbDefaultExplosionDef(void);
+
+// A radial impulse at the start of the next step (Box3D `b3World_Explode`);
+// bodies it reaches wake. Up to 16 per step.
+enum RbResult rbWorld_Explode(struct RbWorld *world, const struct RbExplosionDef *def);
 
 // Draw every shape at its body's last polled pose, coloured by state
 // (static, awake, asleep) unless a material colour is set.

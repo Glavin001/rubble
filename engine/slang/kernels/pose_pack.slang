@@ -1,6 +1,6 @@
 // Render poses for hosts: after the step, every body's pose in a compact 32-byte
-// record (binding 33), and a list of the bodies whose pose or sleep state changed
-// this step (bindings 34-35). The pass only reads physics state (gBodies) and
+// record (binding 34), and a list of the bodies whose pose or sleep state changed
+// this step (bindings 35-36). The pass only reads physics state (gBodies) and
 // writes its own buffers, so a step with it computes exactly what a step without
 // it computes. Sleeping bodies cost one read and no write.
 #include "../physics/common.slang"
@@ -25,10 +25,10 @@ static const uint MOVED_WOKE = 1u << 29;
 static const uint MOVED_FIRST = 1u << 30;
 
 BIND(0) RWStructuredBuffer<BodyState> gBodies;
-BIND(33) RWStructuredBuffer<PoseRecord> gPoses;
+BIND(34) RWStructuredBuffer<PoseRecord> gPoses;
 // [0] records appended this step (the host zeroes it), [1] bodies to scan.
-BIND(34) RWStructuredBuffer<AUint> gMovedHeader;
-BIND(35) RWStructuredBuffer<PoseRecord> gMoved;
+BIND(35) RWStructuredBuffer<AUint> gMovedHeader;
+BIND(36) RWStructuredBuffer<PoseRecord> gMoved;
 
 uint dispatchIndex(uint3 tid) { return tid.x + tid.y * (32768u * 64u); }
 

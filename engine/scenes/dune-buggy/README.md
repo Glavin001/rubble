@@ -1,4 +1,17 @@
-# vibe-land's dune buggy
+# vibe-land's dune buggy (and its garage catalog)
+
+The whole catalog bakes from here. `bake-physics.mjs <model>` and `bake-mesh.mjs` cover
+`buggy`, `trophy`, `rally`, `monster`, `derby`, `sprint` and `semi`; the presets are
+`dune_buggy` and `vibe_<model>`. The rest of this page describes the buggy, which is also
+the only model with a hybrid (soft-frame) build. The other models differ in:
+
+* `parts.mjs`'s body rules: one ordered part list, each model keeping the parts it has;
+* panel colliders: the box fitted to each panel's corner points;
+* the semi's trailer: its own vehicle, `vibe_semi_trailer`, whose parts follow its body
+  and wheels.
+
+Joint contacts under vibe-land's 1 cm² solver floor are kept in the mount ratings: a
+mount is rated as a whole, and a small far contact is what gives it its moment capacity.
 
 vibe-land's garage "Sand rail" (`buggy` in its vehicle catalog), ported to Rubble as the
 `dune_buggy` vehicle preset and the `vehicle.html?scene=buggies` demo.

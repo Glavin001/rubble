@@ -699,7 +699,7 @@ today; each feature below gets a World call and an ABI call instead. Status:
 | Vehicle damage: detach or disable wheels and parts, functional state, mount loads | `vehicle_damage`, `rbVehicle_Damage`, `rbVehicle_SetFunctionalState`, `rbVehicle_GetMountLoads` | ✅ |
 | Soft vehicles: `.truck`, JBeam, procedural car, dune buggy, descriptors as JSON; spawn velocity and `rigid_core` | `rbCreateSoftVehicle`, `rbCreateSoftVehicleJBeam`, `rbCreateSoftVehicleTruck`, `rbGetSoftVehiclePresetJson` | ✅ |
 | Soft settings (`rigid_mode`, threshold, sweeps) and soft obstacles | `rbGetCalibratedSoftSettingsJson`, `rbWorld_SetSoftSettingsJson`, `rbSoft_AddObstacle` | ✅ |
-| Soft damage (yielded and broken beams, plastic work, rigid or soft mode) | `soft_damage`, `rbSoft_GetDamage` | ✅ (per-beam view 🔜) |
+| Soft damage (yielded and broken beams, plastic work, rigid or soft mode) and the beam view | `soft_damage`, `rbSoft_GetDamage`; `soft_beams`, `rbSoft_GetBeams` (node ordinals, rest lengths, force, broken, yielded, visible) | ✅ |
 | Soft skinning, node output, beam breaks and torn-off pieces | `rbSoft_BindSkin`, `RbFrame` | ✅ |
 | Destructibles from GLB, pack and cuboid houses; strength scale; layouts | `rbCreateDestructibleAsset*` | ✅ |
 | Bonds that settle under self-weight before they can break (the lab's preload) | `preload_destructible_asset`, `rbWorld_PreloadDestructibleAsset` (the lab's procedure, checked against the Metal lab: the masonry arch never sleeps within 600 steps in either, so both give up there) | ✅ |
@@ -707,7 +707,7 @@ today; each feature below gets a World call and an ABI call instead. Status:
 | Fracture lab `threshold` mode (GPU splitter) | `StrengthModel::Threshold`, `RB_STRENGTH_THRESHOLD`; `body_set_projectile`, `rbBody_SetProjectile`; `solver_for`, `rbWorld_UseDestructibleAssetSolverFor`; `rbWorld_GetDestructibleAssetGround` (D1b) | ✅ |
 | Fracture lab `stress` mode (blast_parity) | D5, `StrengthModel::Stress` | 🔜 |
 | Picking (camera ray) | `rbWorld_CastRays` | ✅ |
-| Grab and drag | a kinematic mouse body (`body_set_target_transform` each frame) plus a weld with `linear_stiffness` or a spherical joint | ✅ (composed; a dedicated mouse joint later) |
+| Grab and drag | a kinematic mouse body (`rbBody_SetTargetTransform` each frame) jointed to the grabbed body (spherical, or a weld with `linear_stiffness`); tested through the ABI | ✅ (a dedicated mouse joint later) |
 | Scripted crusher, moving slabs | kinematic bodies: `BodyType::Kinematic`, `RB_KINEMATIC_BODY`, set velocity or `rbBody_SetTargetTransform` | ✅ |
 | Collider debug view | `World::draw`; `rbWorld_DebugDraw` (C callbacks) | ✅ |
 | Fixed rate, several steps per frame, pause, single step, sleep skip | `step`, `rbWorld_Step`, `rbWorld_Poll(coalesce)` | ✅ |
@@ -988,10 +988,12 @@ Unreal is the first client.
 **P3: Box3D body features (new Slang, opt-in, defaults lossless).**
 
 - ✅ Kinematic bodies and `set_target_transform`, which push dynamic bodies
-  and carry them by friction (shipped 2026-10-24). They are dynamic in the
-  graph with zero inverse mass and `BODY_KINEMATIC`: prediction places them
-  at exactly `x0 + v dt`, the solve and velocity extraction skip them, and
-  contacts see an infinite mass. The target command computes the velocity on
+  and carry them by friction (shipped 2026-10-24). They carry
+  `BODY_KINEMATIC` without `BODY_DYNAMIC`, with zero inverse mass (the CCD
+  branch's model, `engine/docs/ccd.md`): prediction places them at exactly
+  `x0 + v dt` and the solver never moves them. Contacts, bounds, the
+  broadphase, wakes, CCD and characters treat a moving one as a mover with
+  infinite mass, and a stopped one costs what a static costs. The target command computes the velocity on
   the GPU from the pose at the step start, so animation tracking never
   drifts. Without the flag every kernel path is unchanged.
 - A full gravity vector, keeping the Y-only path bit-identical.
@@ -1053,6 +1055,16 @@ The design (2026-10-24):
 **P5: queries and mover.** Batched asynchronous ray, shape-cast and overlap
 queries with `QueryFilter`, moved off the vehicle ray pool. Then capsule
 `cast_mover` and `collide_mover`.
+
+- *Shipped (2026-10-24):* `World::overlap_aabb(min, max, QueryFilter)`
+  (C `rbWorld_OverlapAABB`), Box3D's bounds overlap: a pass over colliders
+  after the step, with bounds refreshed to its final poses (as ray queries
+  do; lossless, tested), up to 32 queries and 8192 results per step,
+  sensors not reported; results in `Frame::overlap_results` /
+  `RbFrame::overlaps`. And `World::explode(ExplosionDef)` (C
+  `rbWorld_Explode`), Box3D's radial impulse: an early pass in steps that
+  have one, impulse per area times each collider's cross-section, full
+  inside the radius and fading over the falloff, waking what it reaches.
 
 - *Shipped first cut:* `World::cast_rays` (C: `rbWorld_CastRays`) queues
   closest-hit rays for the next step. They trace on the GPU against that

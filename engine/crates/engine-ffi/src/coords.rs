@@ -210,6 +210,21 @@ impl Coords {
         [p[0].abs(), p[1].abs(), p[2].abs()]
     }
 
+    /// An axis-aligned box's corners in: the map reflects axes, so the
+    /// corners are re-sorted per component.
+    pub fn box_in(&self, min: [f32; 3], max: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+        let (a, b) = (self.position_in(min), self.position_in(max));
+        (
+            [a[0].min(b[0]), a[1].min(b[1]), a[2].min(b[2])],
+            [a[0].max(b[0]), a[1].max(b[1]), a[2].max(b[2])],
+        )
+    }
+
+    /// Impulse per area (N s / m², or kg cm / s per cm²): ×100 in from cm.
+    pub fn impulse_per_area_in(&self, x: f32) -> f32 {
+        x / self.scale(-1)
+    }
+
     /// Inertia tensors (rows; kg·m² or kg·cm²): `I = Mᵀ I_host M` in, the
     /// reverse out. Quadratic in the axis map, so the reflection's sign cancels.
     pub fn inertia_in(&self, t: [[f32; 3]; 3]) -> [[f32; 3]; 3] {

@@ -4,6 +4,7 @@
 
 pub mod render;
 pub mod sim;
+pub mod volley;
 
 pub mod kernels {
     pub struct Kernel {

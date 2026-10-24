@@ -83,7 +83,7 @@ function replay(enc,words,begin,descriptor){
 
 // The renderer draws a copy of the bodies taken at the end of each step,
 // so a step split across frames is never seen half-solved.
-const renderBodies=device.createBuffer({label:'render bodies',size:Math.max(BODY_BYTES,bodyCount*BODY_BYTES),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
+const renderBodies=device.createBuffer({label:'render bodies',size:Math.max(BODY_BYTES,bodyCount*BODY_BYTES),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
 const writeRender=()=>device.queue.writeBuffer(renderBodies,0,plan.bodyBytes(),0,bodyCount*BODY_BYTES);
 writeRender();
 const copyRender=enc=>enc.copyBufferToBuffer(bufs[0],0,renderBodies,0,bodyCount*BODY_BYTES);
@@ -117,10 +117,19 @@ function readTickStamps(passes){
   }).catch(()=>{}).finally(()=>{tickTimer.busy=false});
 }
 
+// Test hook (captureSteps): every step's bodies, copied at its end, and every
+// launch, in order; read with takeCaptured once the steps are submitted.
+let capture=null;
+function captureStep(enc){
+  if(!capture)return;
+  const buf=device.createBuffer({size:bodyCount*BODY_BYTES,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
+  enc.copyBufferToBuffer(bufs[0],0,buf,0,bodyCount*BODY_BYTES);capture.push({buf});
+}
+
 function submitPhysics(reuseManifolds=false){
   const enc=device.createCommandEncoder(),timed=timeThisTick();
   replay(enc,plan.encodeStep(reuseManifolds),null,timed?tickStamps(0):undefined);
-  copyRender(enc);
+  copyRender(enc);captureStep(enc);
   if(timed)resolveTickStamps(enc,1);
   device.queue.submit([enc.finish()]);
   if(timed)readTickStamps(1);
@@ -136,7 +145,7 @@ function encodeSlices(){
   };
   begin.split=name=>name==='start'||SLICE_AFTER.has(name);
   replay(enc,plan.encodeStep(false),begin);
-  copyRender(enc);
+  copyRender(enc);captureStep(enc);
   if(timed)resolveTickStamps(enc,passes);
   slicePasses=timed?passes:0;
   out.push(enc.finish());
@@ -297,8 +306,25 @@ return {
  // Shot speed: a multiple of the scene's (shotSpeed m/s), for the shots fired from now on.
  setProjectileSpeedScale(k){plan.setProjectileSpeedScale(k)},
  get shotSpeed(){return plan.shotSpeed()},
+ // Continuous collision for the shots fired from now on (engine/docs/ccd.md).
+ setProjectileCcd(on){plan.setProjectileCcd(!!on)},
+ // Test hook: capture every step's bodies and every launch (see captureStep).
+ captureSteps(on){capture=on?[]:null},
+ // The captured entries, in order: {bodies: Float32Array} per step, {launch: id}
+ // per shot (a launch between a sliced step's slices lands inside that step).
+ async takeCaptured(){
+   const list=capture??[];capture=capture&&[];
+   await device.queue.onSubmittedWorkDone();
+   const out=[];
+   for(const e of list){
+     if(e.launch!==undefined){out.push(e);continue}
+     await e.buf.mapAsync(GPUMapMode.READ);out.push({bodies:new Float32Array(e.buf.getMappedRange().slice(0))});e.buf.destroy();
+   }
+   return out;
+ },
  launch(origin,direction,{speed,arc}={}){
    const {id,bytes,offsets}=plan.launch(Float64Array.from(origin),Float64Array.from(direction),speed,arc),data=Uint8Array.from(bytes);
+   capture?.push({launch:id,sliced:slices!==null});
    for(const o of offsets)device.queue.writeBuffer(bufs[0],o,data);
    device.queue.writeBuffer(renderBodies,offsets[0],data);
    last=plan.counters;return id;

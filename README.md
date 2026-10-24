@@ -60,9 +60,13 @@ The API is **0.x and unstable**; the full design and the phase plan are in
     pieces (`Split` gives the parent and its children);
   - `vehicles`, `soft`, `skins`: per-frame vehicle wheels, soft-body nodes and skinned
     vertices;
-  - `ray_results`: rays queued with `cast_rays`, traced against that step's poses.
-- Body commands (impulses, forces, velocity, teleport, mass) are queued and applied on
-  the GPU at the start of the next step, so they never stall either.
+  - `ray_results`: rays queued with `cast_rays`, traced against that step's poses;
+  - `contact_events` and `sensor_events`: shapes that started or stopped touching, hits
+    above a speed threshold (for sounds, effects and damage), and shapes entering or
+    leaving sensors, for shapes that opt in.
+- Body commands (impulses, forces, velocity, teleport, mass, kinematic targets) are
+  queued and applied on the GPU at the start of the next step, so they never stall
+  either.
 - A world with nothing awake skips its steps.
 
 ### Rust
@@ -112,14 +116,23 @@ Run it: `cd engine && cargo run -p engine-world --release --example quickstart`
 
 Beyond the basics:
 
+- **Bodies:** static, dynamic and kinematic (`body_set_target_transform` moves a
+  kinematic body to an animated pose each step, pushing and carrying what it touches),
+  with damping, gravity scale and motion locks.
 - **Shapes:** `create_sphere_shape`, `create_capsule_shape`, `create_box_shape`,
-  `create_hull_shape`, with materials, filters and an exact mass frame (the body origin
-  is separate from its centre of mass).
+  `create_hull_shape` and ground planes, with materials, filters, an exact mass frame
+  (the body origin is separate from its centre of mass), contact and hit events, and
+  sensors (no response, overlap events). Level geometry is convex-decomposed at the
+  source.
 - **Joints:** typed `RevoluteJointDef`, `PrismaticJointDef`, `SphericalJointDef`,
   `WeldJointDef`, `DistanceJointDef` and `FilterJointDef`, breakable by force and torque.
-- **Assemblies and vehicles:** `create_assembly` and `create_vehicle` compose rigid,
-  soft and destructible parts with mounts and joints, and report each named connection
-  that breaks.
+- **Vehicles and soft bodies:** every preset or a JSON descriptor, gears, telemetry
+  and damage (detach or disable wheels and parts); soft vehicles from `.truck`, JBeam or
+  presets, with skinning, damage and a beam view. `create_assembly` and `create_vehicle`
+  compose rigid, soft and destructible parts with mounts and joints.
+- **Destruction:** destructibles from Shardwright GLBs, packs or procedural houses,
+  breaking by bond strength, with the fracture lab's self-weight preload and solver
+  settings available.
 - **Queries and tooling:** `cast_rays` (asynchronous) and `cast_ray_blocking`;
   `World::draw` with a `DebugDraw` implementation draws every collider.
 
