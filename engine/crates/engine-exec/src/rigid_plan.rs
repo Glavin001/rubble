@@ -383,6 +383,7 @@ pub fn encode_step(
         // Each CCD body's nearest time of impact, then its winning pair
         // (rows 2-3); the narrowphase leaves that pair to ccd_emit.
         e.w("ccd_toi", 64);
+        e.w("ccd_pick_key", 64);
         e.w("ccd_pick", 64);
         // Sleepers in a fast CCD body's path wake before the narrowphase.
         e.d("ccd_wake", n_bodies);
@@ -700,6 +701,7 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "ccd_register",
     "broadphase_fast",
     "ccd_toi",
+    "ccd_pick_key",
     "ccd_pick",
     "ccd_wake",
     "ccd_mark",
@@ -1433,7 +1435,7 @@ mod tests {
         assert!(at("apply_impulses") < at("build_aabbs"));
         assert!(at("broadphase_clear") < at("ccd_register") && at("ccd_register") < at("broadphase_insert"));
         assert!(at("broadphase_query") < at("broadphase_fast"));
-        assert!(at("broadphase_fast") < at("ccd_toi") && at("ccd_toi") < at("ccd_pick"));
+        assert!(at("broadphase_fast") < at("ccd_toi") && at("ccd_toi") < at("ccd_pick_key") && at("ccd_pick_key") < at("ccd_pick"));
         let np = ccd.iter().position(|n| n.starts_with("narrowphase")).unwrap();
         assert!(at("ccd_pick") < np);
         let emit = ccd.iter().position(|n| n.starts_with("ccd_emit")).unwrap();

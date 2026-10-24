@@ -255,12 +255,15 @@ frame stages, `ThresholdWorld::fracture.contact_timing` / `load_path_timing`):
 - All of it lossless: every deterministic regime's digest is unchanged (`--set shots`, all
   three profiles, pass on and off).
 
-Determinism: the two-wall shot with the pass on is not repeatable, before these changes as
-after (load path: exit 8.10, 8.42 or 9.15 m/s; threshold: 392 or 409 bonds), while each
-step's end state (every body, every contact row) can match bit for bit and the next step
-still differ. Likely rubble's CCD: `ccd_pick` keeps the lowest candidate index among pairs
-at the same time of impact, and the candidates are appended with atomics, so their order is
-not fixed; coplanar pieces after a split make such ties common. The pass itself picks each
+Determinism: the two-wall shot with the pass on was not repeatable (load path: exit 8.10,
+8.42 or 9.15 m/s; threshold: 392 or 409 bonds). Every body and contact row could match
+bit for bit at a step's end and the next step still differ: rubble's CCD kept the lowest
+candidate index among pairs at a CCD body's least time of impact, and the candidates are
+appended with atomics, in no fixed order; coplanar pieces after a split tie often. rubble's
+`ccd_pick_key` now keeps the least other collider among them first (carry word 0, before
+`ccd_mark` writes it), and `ccd_pick` the candidate index only between a compound CCD
+body's colliders meeting the same one. The shot now repeats (8 of 8 runs; the test's
+`runs_repeat_bit_for_bit` takes one and two walls for each profile). The pass picks each
 strike by its contact's identity (colliders, feature, side), not by its row.
 
 Against the reference (4.1 kg ball, 0.2 m anchored wall, 0.25 s, 2026-10-24; the shots TOI

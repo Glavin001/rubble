@@ -503,14 +503,20 @@ fn agrees_with_the_explicit_reference_where_it_is_clear() {
     }
 }
 
+/// Runs repeat bit for bit: one wall and a row of two (the ball meets the first wall's
+/// pieces and the second wall at one time of impact on coplanar faces: rubble's CCD picks
+/// among them by collider, not by its candidates' order, `ccd_pick_key`), and the house.
 #[test]
 fn runs_repeat_bit_for_bit() {
     let gpu = Gpu::new().expect("GPU");
     for profile in SOLVERS {
-        let wall = prepared(shot_wall(2, true), profile);
-        let a = run(&gpu, &wall, &ball(250.0), 1, profile, true, 30);
-        let b = run(&gpu, &wall, &ball(250.0), 1, profile, true, 30);
-        assert_eq!((a.digest, a.broken, a.strikes), (b.digest, b.broken, b.strikes), "{}", profile.name());
+        for walls in [1, 2] {
+            let scene = prepared(stress_rubble::scenes::shot_row(walls, 2, true), profile);
+            let runs: Vec<Run> = (0..3).map(|_| run(&gpu, &scene, &ball(250.0), 1, profile, true, 30)).collect();
+            for r in &runs[1..] {
+                assert_eq!((r.digest, r.broken, r.strikes, r.path.speed.to_bits()), (runs[0].digest, runs[0].broken, runs[0].strikes, runs[0].path.speed.to_bits()), "{} with {walls} walls", profile.name());
+            }
+        }
     }
     let home = prepared(house(), Profile::LoadPath);
     let a = run(&gpu, &home, &lab_ball(&home, 18.0), 0, Profile::LoadPath, true, 60);

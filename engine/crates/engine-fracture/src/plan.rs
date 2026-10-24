@@ -119,6 +119,7 @@ pub const KERNELS: &[(&str, &str)] = &[
     ("ccd_register", "ccd_register"),
     ("broadphase_fast", "broadphase_fast"),
     ("ccd_toi", "ccd_toi"),
+    ("ccd_pick_key", "ccd_pick_key"),
     ("ccd_pick", "ccd_pick"),
     ("ccd_mark", "ccd_mark"),
     ("ccd_wake", "ccd_wake"),
@@ -1046,6 +1047,7 @@ impl Planner {
             // Each CCD body's nearest time of impact and its winning pair; the
             // narrowphase leaves that pair to ccd_emit.
             self.work("ccd_toi", 64, 0);
+            self.work("ccd_pick_key", 64, 0);
             self.work("ccd_pick", 64, 0);
             // Sleepers in a fast CCD body's path wake before the narrowphase.
             self.disp("ccd_wake", n_bodies, 0);
