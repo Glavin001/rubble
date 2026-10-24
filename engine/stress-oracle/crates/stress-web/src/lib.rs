@@ -888,6 +888,7 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, advance: Advance) -> Result<
         // The lab's translation of the scene as built (`Scene::placement`, the asset frame):
         // takes aim at built coordinates through it.
         "placement": s.map_or([0.0; 3], |s| s.placement),
+        "strikes": l.world.strike_count(),
         "launchesArmed": LAUNCHER.with_borrow(|l| l.pending()) + LAUNCH.with_borrow(|q| q.len()),
         "ballMass": s.map_or(0.0, |s| s.mass),
         "ballRadius": s.map_or(0.0, |s| s.radius),

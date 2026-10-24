@@ -848,7 +848,8 @@ void fr_view_bonds(uint3 id: SV_DispatchThreadID)
 //                      its bounds within the frame;
 //   fr_strike_entry    one thread per chunk of a struck body: the first time the shot meets
 //                      its box, and its distance to the shot's path;
-//   fr_strike_nearest  the struck chunk: the nearest to the path (ties: the lowest);
+//   fr_strike_nearest  the struck chunk: the nearest to the path (ties: the lowest), by the
+//                      distance fr_strike_entry kept;
 //   fr_strike_force    one thread per struck body: the contact point and the Hertz force;
 //   fr_strike_breaks   one thread per bond.
 
@@ -1034,6 +1035,11 @@ void fr_strike_entry(uint3 id: SV_DispatchThreadID)
     float3 r = cc - hit;
     float along = dot(r, d);
     float dist = length(r - d * along) + abs(along) * 1e-3;
+    // Kept for fr_strike_nearest (the chunk's split staging, free until the split): it
+    // matches the minimum by its bits, and a second computation of the same expression
+    // need not give the same bits under fast math (the WGSL builds: Dawn's and naga's
+    // Metal compiles), which then found no entry chunk and lost every strike there.
+    frames[stage(k)] = float4(dist, 0.0, 0.0, 0.0);
     atom[at + 7].min(asuint(dist));
 }
 
@@ -1048,13 +1054,8 @@ void fr_strike_nearest(uint3 id: SV_DispatchThreadID)
     uint shot;
     if (!struck(b, shot))
         return;
-    float4 s0 = frames[strike_at(b)];
-    float4 s1 = frames[strike_at(b) + 1];
-    float3 d = s1.xyz / max(length(s1.xyz), 1e-12);
-    Quat q;
-    float3 r = chunk_box_world(k, q) - (s0.xyz + s1.xyz * s1.w);
-    float along = dot(r, d);
-    float dist = length(r - d * along) + abs(along) * 1e-3;
+    // Its distance to the path as fr_strike_entry computed it.
+    float dist = frames[stage(k)].x;
     uint at = a_strike() + 9 * b;
     if (asuint(dist) == atom[at + 7].load())
         atom[at + 8].min(k);

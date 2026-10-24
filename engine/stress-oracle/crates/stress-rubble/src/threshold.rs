@@ -728,6 +728,11 @@ impl ThresholdWorld {
         if bonds { 2 * self.tables.bond_count() } else { 0 }
     }
 
+    /// The spheres strike prediction checks: the shots', then the launched islands'.
+    pub fn strike_count(&self) -> usize {
+        self.strikes.len()
+    }
+
     /// Shots launched so far.
     pub fn fired(&self) -> usize {
         self.fired

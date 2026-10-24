@@ -5,7 +5,8 @@
 //!   cargo run --release -p stress-rubble --features gpu --example vehicles -- [SCENE] [FRAMES]
 //!
 //! SCENE a `stress_ref::vehicles::SCENES` key (default `vh_car_barrier`); FRAMES at 60 Hz
-//! (default 180). `STRESS_PROFILE=blast_parity` for the other profile (default threshold).
+//! (default 180). `STRESS_PROFILE=blast_parity` for the other profile (default threshold);
+//! `STRESS_LAUNCH=car`: that launch only (default every one).
 //!
 //! Every `EVERY` frames: bonds broken (the structure's, each vehicle's), bodies, and each
 //! vehicle's centre and speed (its chunks' mean). At the end, per vehicle and part kind,
@@ -90,12 +91,19 @@ fn main() {
         let t = std::time::Instant::now();
         for _ in 0..frames {
             if w.frame == AT {
-                launcher.arm("", w.frame, w.frame_dt);
+                launcher.arm(&std::env::var("STRESS_LAUNCH").unwrap_or_default(), w.frame, w.frame_dt);
             }
             for l in launcher.due(w.frame) {
                 w.launch_island(&gpu, 0, &l).expect("launch");
             }
             w.step_frame(&gpu).expect("frame");
+            if std::env::var("STRESS_STRIKE_TRACE").is_ok() {
+                let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+                let body = w.fracture.chunk_bodies(&gpu);
+                let (rec, words) = w.fracture.strike_records(&gpu);
+                let b = body[100] as usize;
+                println!("frame {}: building slot {b}: {:?} words {:?}", w.frame, rec[b], words[b]);
+            }
             if w.frame % EVERY == 0 {
                 let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
                 let st = w.poll(&gpu);
@@ -130,7 +138,7 @@ fn main() {
         let t = std::time::Instant::now();
         for _ in 0..frames {
             if w.frame == AT {
-                launcher.arm("", w.frame, scene.sim.frame_dt);
+                launcher.arm(&std::env::var("STRESS_LAUNCH").unwrap_or_default(), w.frame, scene.sim.frame_dt);
             }
             for l in launcher.due(w.frame) {
                 w.launch_island(&gpu, 0, &l.chunks, l.velocity, l.angular_velocity).expect("launch");
