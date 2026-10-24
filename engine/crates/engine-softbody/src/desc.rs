@@ -214,6 +214,13 @@ pub struct RefNodes {
 /// complete raycast vehicle, ball-jointed to `nodes`. Its wheels, drivetrain and
 /// parts (with their `MountDesc`s) are used as given; node masses are not shared
 /// with it. Positions are in the soft vehicle's desc space.
+///
+/// The core's body origin (its centre of mass in the solver) is placed at the
+/// centre of mass of the core vehicle (parts and wheels), the nodes and the bolted
+/// parts together: in rigid mode the core carries all of that mass, so its inertia and gravity
+/// act about the point the whole car does. The vehicle's own
+/// `center_of_mass_offset` shifts that point (a handling assist, as the rigid
+/// presets use); `auto_center_of_mass` is ignored.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct SoftCore {

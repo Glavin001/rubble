@@ -22,6 +22,7 @@ public static const uint BODY_SLEEPING = 4u;
 public static const uint BODY_AWAKE = 8u;
 public static const uint BODY_VEHICLE = 32u; // 16 is BODY_WAKE_PENDING
 public static const uint BODY_PARTICLE = 64u;
+public static const uint BODY_FOLLOW = 128u;
 
 public struct Collider
 {
@@ -131,6 +132,7 @@ public struct Joint
 };
 
 public static const uint JOINT_FLAG_BROKEN = 1u;
+public static const uint JOINT_FLAG_IDLE = 65536u;
 public static const uint JOINT_FLAG_COLLIDE = 2u;
 public static const uint JOINT_FLAG_RADIAL = 4u;
 public static const uint JOINT_FLAG_CONE = 8u;
