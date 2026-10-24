@@ -187,7 +187,7 @@ loop {
   | `gravity_scale` | P3 |
   | `sleep_threshold` | P3 (global today) |
   | `motion_locks` | P3 |
-  | `is_bullet` | P3 (port the Metal CCD sweep) |
+  | `is_bullet` | ✅ `BODY_CCD` (#52's continuous collision) |
   | `enable_sleep` | Available |
   | `is_awake` | Available |
   | `is_enabled` | P1.5 (park) |
@@ -765,7 +765,7 @@ today; each feature below gets a World call and an ABI call instead. Status:
 | Ground plane (legacy scenes, fracture lab) | `Geometry::Plane` on static bodies, `rbCreatePlaneShape` (at most 8) | ✅ |
 | Projectiles, cannons, rams (teleport plus velocity) | `rbBody_SetTransform`, `rbBody_SetLinearVelocity`, create and destroy | ✅ |
 | Body velocity and awake state for HUDs and colouring | `rbBody_GetVelocity` (blocking), `rbBody_IsAwake` | ✅ |
-| Hand-set mass and inertia from C | `body_set_mass_data` in Rust; `rbBody_SetMassData` | 🔜 |
+| Hand-set mass and inertia from C | `body_set_mass_data`, `rbBody_SetMassData` / `rbBody_GetMassData` (tensor converted for Unreal) | ✅ |
 | Runtime gravity | `rbWorld_SetGravity` | ✅ |
 | Joints: ball, cone and twist limits, hinge limits, slider, weld, spring, distance and tether, motors, servo, breakable | typed joint defs | ✅ |
 | Live motor speed and servo target (motor toggle, servo sweep) | `joint_set_drive`, `rbJoint_SetDrive` | ✅ |
@@ -777,7 +777,7 @@ today; each feature below gets a World call and an ABI call instead. Status:
 | Vehicle damage: detach or disable wheels and parts, functional state, mount loads | `vehicle_damage`, `rbVehicle_Damage`, `rbVehicle_SetFunctionalState`, `rbVehicle_GetMountLoads` | ✅ |
 | Soft vehicles: `.truck`, JBeam, procedural car, dune buggy, descriptors as JSON; spawn velocity and `rigid_core` | `rbCreateSoftVehicle`, `rbCreateSoftVehicleJBeam`, `rbCreateSoftVehicleTruck`, `rbGetSoftVehiclePresetJson` | ✅ |
 | Soft settings (`rigid_mode`, threshold, sweeps) and soft obstacles | `rbGetCalibratedSoftSettingsJson`, `rbWorld_SetSoftSettingsJson`, `rbSoft_AddObstacle` | ✅ |
-| Soft damage (yielded and broken beams, plastic work, rigid or soft mode) | `soft_damage`, `rbSoft_GetDamage` | ✅ (per-beam view 🔜) |
+| Soft damage (yielded and broken beams, plastic work, rigid or soft mode) and the beam view | `soft_damage`, `rbSoft_GetDamage`; `soft_beams`, `rbSoft_GetBeams` (node ordinals, rest lengths, force, broken, yielded, visible) | ✅ |
 | Soft skinning, node output, beam breaks and torn-off pieces | `rbSoft_BindSkin`, `RbFrame` | ✅ |
 | Destructibles from GLB, pack and cuboid houses; strength scale; layouts | `rbCreateDestructibleAsset*` | ✅ |
 | Bonds that settle under self-weight before they can break (the lab's preload) | `preload_destructible_asset`, `rbWorld_PreloadDestructibleAsset` (the lab's procedure, checked against the Metal lab: the masonry arch never sleeps within 600 steps in either, so both give up there) | ✅ |
@@ -785,19 +785,19 @@ today; each feature below gets a World call and an ABI call instead. Status:
 | Fracture lab `threshold` mode (GPU splitter) | D1b, `StrengthModel::Threshold` | 🔜 |
 | Fracture lab `stress` mode (blast_parity) | D5, `StrengthModel::Stress` | 🔜 |
 | Picking (camera ray) | `rbWorld_CastRays` | ✅ |
-| Grab and drag | a kinematic mouse body (`body_set_target_transform` each frame) plus a weld with `linear_stiffness` or a spherical joint | ✅ (composed; a dedicated mouse joint later) |
+| Grab and drag | a kinematic mouse body (`rbBody_SetTargetTransform` each frame) jointed to the grabbed body (spherical, or a weld with `linear_stiffness`); tested through the ABI | ✅ (a dedicated mouse joint later) |
 | Scripted crusher, moving slabs | kinematic bodies: `BodyType::Kinematic`, `RB_KINEMATIC_BODY`, set velocity or `rbBody_SetTargetTransform` | ✅ |
 | Collider debug view | `World::draw`; `rbWorld_DebugDraw` (C callbacks) | ✅ |
 | Fixed rate, several steps per frame, pause, single step, sleep skip | `step`, `rbWorld_Step`, `rbWorld_Poll(coalesce)` | ✅ |
 | Reset | destroy and recreate the world, or remove and re-add; snapshot and restore is P6 | ✅ (P6 later) |
-| Per-kernel GPU timings | `profile_ms`, `rbWorld_GetProfile` | 🔜 |
+| GPU step timings | `profile_ms`, `rbWorld_GetProfileMs` (per-kernel breakdown later) | ✅ |
 
 Descriptors and settings cross the ABI as JSON in the engine's units and
 design frame (metres, Y up), the format of `vehicle_presets.json` and the
 soft descriptors; spawn transforms and velocities use the world's
 coordinates. `tests/demo_parity.rs` covers each row through the ABI.
 
-Next, in order: P4 (contact, hit and sensor events), D1b (`threshold`),
+Next, in order: D1b (`threshold`),
 the rest of P3 (damping, gravity scale, motion locks, bullets) and D5
 (`stress`).
 
@@ -1024,13 +1024,45 @@ Unreal is the first client.
   the GPU from the pose at the step start, so animation tracking never
   drifts. Without the flag every kernel path is unchanged.
 - A full gravity vector, keeping the Y-only path bit-identical.
-- `gravity_scale`, linear and angular damping, and per-body `sleep_threshold`.
-- `motion_locks`.
-- `is_bullet`: port the Metal CCD classify and sweep passes to the shared
-  plan.
+- ✅ `gravity_scale` and linear and angular damping (shipped 2026-10-24): a
+  per-step command at the start of the step, `v' = v / (1 + h c) + h (s - 1) g`,
+  which gives Box3D's inertial target exactly; only awake bodies that use
+  them get one, and they neither wake bodies nor keep an asleep world
+  stepping. Per-body `sleep_threshold` is still to do.
+- ✅ `motion_locks` (shipped 2026-10-24): body-flag bits 9..14 (above
+  `BODY_CCD`) read by two passes scheduled only while some body has locks:
+  `lock_predict` after prediction and `lock_project` after the solve each
+  remove the locked components (world axes) of the body's displacement and
+  rotation since the step start, so the inertial target respects the locks
+  and the locked axes are exact at the end of every step. The hot kernels
+  (`predictOne`, `primalApply`) are untouched: an earlier in-kernel version
+  shifted Metal and wgpu fast-math codegen for every body and failed the
+  Metal parity tests. C: `RB_LOCK_*` bits, permuted for Unreal axes.
+- ✅ `is_bullet` (2026-10-24): World sets `BODY_CCD`, #52's continuous
+  collision (uncapped reach, the fast list, a time-of-impact contact and
+  start pose); C `RbBodyDef::is_bullet`. Sensors take no time of impact and
+  no post-solve sweep check, so bullets pass through them.
+- ✅ Characters (2026-10-24): #52's capsule movers (`char_move`: walk,
+  step up, stick to the floor, slopes, jump, moving support, push weight)
+  through `World::create_character(CharacterDef)`, `character_set_input`
+  (velocity, jump once), `character_teleport`, `destroy_character` (slot
+  reused after quarantine); every frame reports `Frame::characters` and
+  `character_events` (landed, support lost, crushed) from one readback copy
+  of the records, no blocking read. The inner kinematic capsule is a World
+  body of its own, left out of body moves. C: `rbWorld_CreateCharacter`,
+  `rbCharacter_*`, `RbFrame::characters` / `character_events`.
 - `allow_fast_rotation`.
 
-**P4: contact, hit and sensor events (next, after P3 shipped).**
+**P4: contact, hit and sensor events.** Contact begin/end and hit events
+shipped 2026-10-24 (World `Frame::contact_events`, C `RbFrame::contact_begin`,
+`contact_end`, `hits`; tested in persistent and canonical storage and through
+the ABI in Unreal units). Sensors shipped the same day: `is_sensor` shapes
+have no response (the events pass zeroes their manifold and solver pair, so
+the CSR graph and islands skip them) and, with `enable_sensor_events`, report
+`SensorBegin` / `SensorEnd` (World `Frame::sensor_events`, C
+`RbFrame::sensor_begin` / `sensor_end`). Sensors do not detect sensors.
+Compact contact storage refuses sensors (its solver pairs are packed before
+the pass).
 
 The design (2026-10-24):
 
@@ -1067,6 +1099,29 @@ The design (2026-10-24):
 queries with `QueryFilter`, moved off the vehicle ray pool. Then capsule
 `cast_mover` and `collide_mover`.
 
+- *Shipped (2026-10-24):* `World::overlap_aabb(min, max, QueryFilter)`
+  (C `rbWorld_OverlapAABB`), Box3D's bounds overlap: a pass over colliders
+  after the step, with bounds refreshed to its final poses (as ray queries
+  do; lossless, tested), up to 32 queries and 8192 results per step,
+  sensors not reported; results in `Frame::overlap_results` /
+  `RbFrame::overlaps`. And `World::explode(ExplosionDef)` (C
+  `rbWorld_Explode`), Box3D's radial impulse: an early pass in steps that
+  have one, impulse per area times each collider's cross-section, full
+  inside the radius and fading over the falloff, waking what it reaches.
+
+- *Shipped (2026-10-24):* `World::cast(CastDef)` (C `rbWorld_Cast`): ray,
+  sphere and upright-capsule casts, closest hit, on #52's in-step
+  `query_batch` (grid walk, exact shapes, category mask, an ignored body).
+  It needs no vehicle pool. It runs before the step moves anything, so it
+  sees the poses the step starts from. Up to 256 per step; results in
+  `Frame::cast_results` / `RbFrame::casts`, and a frame with casts is never
+  dropped. Projectiles: `World::spawn_projectile(ProjectileDef)` (C
+  `rbWorld_SpawnProjectile`), #52's piercing ballistic casts. Energy pays
+  for each shape's thickness, and hits push dynamic bodies. Stopped
+  projectiles' slots are reused, and the pool is released once all have
+  stopped, so a quiet world can sleep again. Results arrive as
+  `Frame::projectiles` and `projectile_events` (passed with the thickness
+  crossed, or stopped).
 - *Shipped first cut:* `World::cast_rays` (C: `rbWorld_CastRays`) queues
   closest-hit rays for the next step. They trace on the GPU against that
   step's final poses (they share the vehicle ray pool, whose ray count only

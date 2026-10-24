@@ -168,6 +168,15 @@ const WORLD_ENTRIES: &[&str] = &[
     "guide_rank",
     "guide_plan",
     "guide_commit",
+    // Contact events (P4), canonical and persistent storage.
+    "contact_events",
+    "contact_events_persistent",
+    // Overlap queries (P5) and explosions.
+    "overlap_query",
+    "explode",
+    // Motion locks (P3).
+    "lock_predict",
+    "lock_project",
 ];
 
 const CHARACTER_ENTRIES: &[&str] = &["char_move", "char_post", "query_batch", "projectile_step"];

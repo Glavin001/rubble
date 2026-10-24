@@ -342,6 +342,7 @@ impl MetalSim {
             command_count: 0,
             guidance: false,
             guide_slots: 0,
+            explosion_count: 0,
         }
     }
 

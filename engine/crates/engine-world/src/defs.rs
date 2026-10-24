@@ -32,6 +32,36 @@ pub struct MotionLocks {
     pub angular_z: bool,
 }
 
+impl MotionLocks {
+    /// The kernels' six lock bits (linear x, y, z, angular x, y, z).
+    pub fn bits(&self) -> u32 {
+        [
+            self.linear_x,
+            self.linear_y,
+            self.linear_z,
+            self.angular_x,
+            self.angular_y,
+            self.angular_z,
+        ]
+        .iter()
+        .enumerate()
+        .map(|(k, &on)| (on as u32) << k)
+        .sum()
+    }
+
+    pub fn from_bits(bits: u32) -> Self {
+        let on = |k: u32| bits & (1 << k) != 0;
+        Self {
+            linear_x: on(0),
+            linear_y: on(1),
+            linear_z: on(2),
+            angular_x: on(3),
+            angular_y: on(4),
+            angular_z: on(5),
+        }
+    }
+}
+
 /// A rigid body (`World::create_body`), Box3D `b3BodyDef`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BodyDef {
@@ -43,18 +73,19 @@ pub struct BodyDef {
     /// Of the centre of mass.
     pub linear_velocity: [f32; 3],
     pub angular_velocity: [f32; 3],
-    /// Not yet supported (0).
+    /// Box3D damping (1/s): `v /= 1 + h c` each step.
     pub linear_damping: f32,
-    /// Not yet supported (0).
     pub angular_damping: f32,
-    /// Not yet supported (1).
+    /// Multiplies gravity for this body.
     pub gravity_scale: f32,
     /// m/s below which the body may sleep. Not yet per body (the world's
     /// `AvbdParams::sleep_lin` applies); any value is refused.
     pub sleep_threshold: Option<f32>,
-    /// Not yet supported (all false).
+    /// Axes (world frame) the body may not move along or turn about.
     pub motion_locks: MotionLocks,
-    /// Continuous collision against everything (not yet supported on wgpu).
+    /// Continuous collision (the kernels' `BODY_CCD`): uncapped contact
+    /// reach, the fast broadphase list and a time-of-impact contact, so a
+    /// fast body never tunnels (projectiles, debris, vehicles at speed).
     pub is_bullet: bool,
     /// Not yet per body (sleep is per world); `false` is refused.
     pub enable_sleep: bool,
@@ -103,21 +134,16 @@ impl BodyDef {
     }
 
     pub(crate) fn validate(&self) -> anyhow::Result<()> {
-        let d = Self::default();
-        if self.linear_damping != d.linear_damping || self.angular_damping != d.angular_damping {
-            return unsupported("body damping (planned P3)");
-        }
-        if self.gravity_scale != d.gravity_scale {
-            return unsupported("gravity_scale (planned P3)");
-        }
+        anyhow::ensure!(
+            self.linear_damping >= 0.0 && self.angular_damping >= 0.0,
+            "negative damping"
+        );
+        anyhow::ensure!(
+            self.gravity_scale.is_finite(),
+            "gravity_scale must be finite"
+        );
         if self.sleep_threshold.is_some() || !self.enable_sleep {
             return unsupported("per-body sleep settings (planned P3; sleep is per world)");
-        }
-        if self.motion_locks != d.motion_locks {
-            return unsupported("motion_locks (planned P3)");
-        }
-        if self.is_bullet {
-            return unsupported("bullet bodies on wgpu (planned P3)");
         }
         if self.allow_fast_rotation {
             return unsupported("allow_fast_rotation (planned P3)");
@@ -260,12 +286,6 @@ impl Default for ShapeDef {
 impl ShapeDef {
     pub(crate) fn validate(&self) -> anyhow::Result<()> {
         self.material.validate()?;
-        if self.is_sensor || self.enable_sensor_events {
-            return unsupported("sensor shapes (planned P4)");
-        }
-        if self.enable_contact_events || self.enable_hit_events {
-            return unsupported("contact and hit events (planned P4)");
-        }
         anyhow::ensure!(self.density >= 0.0, "negative density");
         Ok(())
     }
