@@ -3,7 +3,9 @@
 // Explicit MLS-MPM on a sparse grid of 4³-cell blocks inside one active region.
 // Per substep:
 //   mpm_clear       empty the block hash and the counters
-//   mpm_touch       insert every block a particle's 3³ stencil reaches
+//   mpm_touch       insert every block a particle's 3³ stencil reaches (a new
+//                   block clears its cells)
+//   mpm_write_args  workgroup counts of the per-block kernels (one per block)
 //   mpm_count       count particles per cell (the cell of their stencil's base node)
 //   mpm_scan_cells  per block: cell starts and the block's total
 //   mpm_scan_blocks block starts (one workgroup)
@@ -88,6 +90,8 @@ BIND(43) RWStructuredBuffer<AUint> gMpmCells;
 BIND(44) RWStructuredBuffer<uint> gMpmSorted;
 // Per node (block · 64 + local): after P2G (m·v, m), after mpm_grid (v, m).
 BIND(45) RWStructuredBuffer<float4> gMpmGrid;
+// Indirect dispatch of the per-block kernels: (blocks, 1, 1).
+BIND(46) RWStructuredBuffer<uint> gMpmArgs;
 
 groupshared uint gsMpmScan[256];
 
@@ -122,7 +126,13 @@ void mpmInsertBlock(uint key, MpmParams p)
                 AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_BLOCKS);
                 b = MPM_NO_BLOCK;
             }
-            else ASTORE(gMpmBlocks[4u * b], key);
+            else
+            {
+                ASTORE(gMpmBlocks[4u * b], key);
+                // Its cells start empty (read from mpm_count on).
+                for (uint w = 0u; w < 4u * MPM_BLOCK_NODES; w++)
+                    ASTORE(gMpmCells[4u * b * MPM_BLOCK_NODES + w], 0u);
+            }
             ASTORE(gMpmHash[2u * s + 1u], b);
             return;
         }
@@ -180,7 +190,6 @@ void mpm_clear(uint3 tid : SV_DispatchThreadID)
     uint i = mpmIndex(tid);
     MpmParams p = mpmParams();
     if (i < 2u * p.counts.y) ASTORE(gMpmHash[i], 0u);
-    if (i < 4u * p.counts.z * MPM_BLOCK_NODES) ASTORE(gMpmCells[i], 0u);
     if (i == 0u)
     {
         ASTORE(gMpmCounters[MPM_C_BLOCKS], 0u);
@@ -203,6 +212,16 @@ void mpm_touch(uint3 tid : SV_DispatchThreadID)
     for (int by = lo.y; by <= hi.y; by++)
     for (int bx = lo.x; bx <= hi.x; bx++)
         mpmInsertBlock(mpmBlockKey(int3(bx, by, bz)), p);
+}
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void mpm_write_args(uint3 tid : SV_DispatchThreadID)
+{
+    MpmParams p = mpmParams();
+    gMpmArgs[0] = min(ALOAD(gMpmCounters[MPM_C_BLOCKS]), p.counts.z);
+    gMpmArgs[1] = 1u;
+    gMpmArgs[2] = 1u;
 }
 
 [shader("compute")]

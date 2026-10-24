@@ -14,8 +14,10 @@ pub const MPM_BLOCKS_BINDING: usize = 42;
 pub const MPM_CELLS_BINDING: usize = 43;
 pub const MPM_SORTED_BINDING: usize = 44;
 pub const MPM_GRID_BINDING: usize = 45;
+/// Indirect workgroup counts of the per-block kernels.
+pub const MPM_ARGS_BINDING: usize = 46;
 /// One past the last terrain binding.
-pub const MPM_BINDING_END: usize = 46;
+pub const MPM_BINDING_END: usize = 47;
 
 /// `MpmParams.dims.w` without a bed heightfield.
 pub const MPM_NO_BED: u32 = u32::MAX;

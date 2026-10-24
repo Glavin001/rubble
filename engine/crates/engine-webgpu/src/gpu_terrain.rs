@@ -30,7 +30,12 @@ pub(crate) fn terrain_buffer(device: &wgpu::Device, binding: usize, bytes: u64) 
         size: bytes.max(256),
         usage: wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::COPY_DST
-            | wgpu::BufferUsages::COPY_SRC,
+            | wgpu::BufferUsages::COPY_SRC
+            | if binding == MPM_ARGS_BINDING {
+                wgpu::BufferUsages::INDIRECT
+            } else {
+                wgpu::BufferUsages::empty()
+            },
         mapped_at_creation: false,
     })
 }
@@ -39,6 +44,12 @@ impl WgpuSim {
     /// Size the terrain buffers for `config` (and drop any particles).
     pub fn terrain_enable(&mut self, config: &TerrainConfig) -> anyhow::Result<()> {
         config.validate()?;
+        // Per-block kernels run one workgroup per block in a single dispatch row.
+        anyhow::ensure!(
+            config.max_blocks <= 65535,
+            "max_blocks {} exceeds the 65535 workgroups of one indirect dispatch",
+            config.max_blocks
+        );
         let blocks = u64::from(config.max_blocks);
         let particles = u64::from(config.max_particles);
         let slots = u64::from(hash_slots(config.max_blocks));
@@ -56,6 +67,7 @@ impl WgpuSim {
             (MPM_CELLS_BINDING, nodes * 16),
             (MPM_SORTED_BINDING, particles * 4),
             (MPM_GRID_BINDING, nodes * 16),
+            (MPM_ARGS_BINDING, 16),
         ];
         let limits = self.device.limits();
         for &(binding, bytes) in &sizes {
@@ -190,8 +202,7 @@ impl WgpuSim {
             bytemuck::cast_slice(&[0u32; 4]),
         );
         let particles = u64::from(params.counts[0]);
-        let nodes = u64::from(cfg.max_blocks) * 64;
-        let clear = (2 * u64::from(params.counts[1])).max(4 * nodes);
+        let clear = 2 * u64::from(params.counts[1]);
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -205,14 +216,15 @@ impl WgpuSim {
             for _ in 0..substeps {
                 self.disp(&mut pass, "mpm_clear", clear, None);
                 self.disp(&mut pass, "mpm_touch", particles, None);
+                self.disp(&mut pass, "mpm_write_args", 1, None);
                 self.disp(&mut pass, "mpm_count", particles, None);
-                self.disp(&mut pass, "mpm_scan_cells", nodes, None);
+                self.disp_terrain_blocks(&mut pass, "mpm_scan_cells");
                 self.disp(&mut pass, "mpm_scan_blocks", 64, None);
                 self.disp(&mut pass, "mpm_scatter", particles, None);
-                self.disp(&mut pass, "mpm_cell_sort", nodes, None);
+                self.disp_terrain_blocks(&mut pass, "mpm_cell_sort");
                 self.disp(&mut pass, "mpm_payload", particles, None);
-                self.disp(&mut pass, "mpm_p2g", nodes, None);
-                self.disp(&mut pass, "mpm_grid", nodes, None);
+                self.disp_terrain_blocks(&mut pass, "mpm_p2g");
+                self.disp_terrain_blocks(&mut pass, "mpm_grid");
                 self.disp(&mut pass, "mpm_g2p", particles, None);
             }
         }
@@ -251,6 +263,14 @@ impl WgpuSim {
             blocks: c[0],
             max_speed: f32::from_bits(c[2]),
         })
+    }
+
+    /// One workgroup (64 threads) per block in use, counted on the GPU.
+    fn disp_terrain_blocks<'a>(&'a self, pass: &mut wgpu::ComputePass<'a>, name: &str) {
+        let p = &self.pipes[name];
+        pass.set_pipeline(&p.pipeline);
+        pass.set_bind_group(0, &p.bind, &[]);
+        pass.dispatch_workgroups_indirect(&self.bufs[MPM_ARGS_BINDING], 0);
     }
 
     /// The active region's particles (blocking readback).

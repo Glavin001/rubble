@@ -165,6 +165,7 @@ const WORLD_ENTRIES: &[&str] = &[
     // Deformable terrain MPM (slang/kernels/terrain_mpm.slang).
     "mpm_clear",
     "mpm_touch",
+    "mpm_write_args",
     "mpm_count",
     "mpm_scan_cells",
     "mpm_scan_blocks",
