@@ -27,6 +27,19 @@ ENGINE="$(cd "$(dirname "$0")/.." && pwd)"
 WEB="$ENGINE/crates/engine-webgpu"
 OUT="${OUT:-$ENGINE/web-dist}"
 TOOLS="${RUBBLE_TOOLS:-$HOME/.cache/rubble-tools}"
+# step NAME: start a timed step; the summary at the end lists each step's seconds.
+STEP_NAME=""
+STEP_START=$SECONDS
+STEP_TIMES=()
+step() {
+  if [[ -n "$STEP_NAME" ]]; then
+    STEP_TIMES+=("$(printf '%5ds  %s' $((SECONDS - STEP_START)) "$STEP_NAME")")
+  fi
+  STEP_NAME="$1"
+  STEP_START=$SECONDS
+  if [[ -n "$1" ]]; then echo "==> $1"; fi
+}
+
 CACHE="${RUBBLE_BUILD_CACHE:-}"
 if [[ -z "$CACHE" && -n "${VERCEL:-}" ]]; then CACHE="$ENGINE/../node_modules/.cache/rubble-build"; fi
 if [[ -n "$CACHE" ]]; then
@@ -76,6 +89,7 @@ if [[ -f "$HOME/.cargo/env" ]]; then
   # shellcheck source=/dev/null
   . "$HOME/.cargo/env"
 fi
+step "Tools (wasm32 target, slangc, wasm-pack)"
 if ! rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown; then
   echo "==> rustup target add wasm32-unknown-unknown"
   rustup target add wasm32-unknown-unknown
@@ -133,16 +147,16 @@ for glb in "$WEB"/fracture/assets/*.glb; do
 done
 
 cd "$ENGINE"
-echo "==> WGSL kernels, vehicle presets and vehicle wasm (wgsl_export)"
+step "WGSL kernels, vehicle presets and vehicle wasm (wgsl_export)"
 # Without the `gpu` feature: the exporter only needs the WGSL tables, not native wgpu.
 cargo run --release -p engine-webgpu --no-default-features --bin wgsl_export
-echo "==> Fracture lab wasm"
+step "Fracture lab wasm"
 wasm-pack build crates/engine-fracture-wasm --release --target web \
   --out-dir ../engine-webgpu/generated/fracture-wasm --no-typescript
-echo "==> Stress-solver wasm (the Fracture lab's stress bond mode)"
+step "Stress-solver wasm (the Fracture lab's stress bond mode)"
 CARGO_PROFILE_RELEASE_DEBUG=0 wasm-pack build stress-oracle/crates/stress-web --release --target web \
   --out-dir ../../../crates/engine-webgpu/generated/stress-web --no-typescript
-echo "==> Stress-solver wasm, Asyncify build (browsers without JSPI: Safari)"
+step "Stress-solver wasm, Asyncify build (browsers without JSPI: Safari)"
 # The solver waits on GPU maps through the import rubble-gpu-wait.yield_to_browser
 # (engine-gpu-wait). Chrome suspends the stack there with JSPI; elsewhere this build's
 # Asyncify unwinds it (fracture/gpu-wait.mjs). Only that import may unwind. Indirect calls
@@ -176,10 +190,10 @@ STRESS_ASYNCIFY="$(mktemp -d)/asyncify"
 cached asyncify "$( (cat "$STRESS_WASM"; echo "$BINARYEN_VERSION ${ASYNCIFY_ARGS[*]}") | key)" \
   "$STRESS_ASYNCIFY" asyncify
 cp "$STRESS_ASYNCIFY/stress_web_bg.asyncify.wasm" "${STRESS_WASM%.wasm}.asyncify.wasm"
-echo "==> Scene snapshots (scene_export, host build)"
+step "Scene snapshots (scene_export, host build)"
 cargo run --release -p engine-scenes --no-default-features --bin scene_export
 
-echo "==> vibe-city scene packs (engine/scenes/vibe-city, bun)"
+step "vibe-city scene packs (engine/scenes/vibe-city, bun)"
 if command -v bun >/dev/null 2>&1; then BUN=(bun); else BUN=(npx --yes bun@1.2.4); fi
 VIBE="$ENGINE/scenes/vibe-city"
 vibe_city() { (cd "$VIBE" && "${BUN[@]}" install --frozen-lockfile && "${BUN[@]}" run export.ts); }
@@ -187,10 +201,10 @@ vibe_city() { (cd "$VIBE" && "${BUN[@]}" install --frozen-lockfile && "${BUN[@]}
 # the packages bun.lock pins.
 vibe_key="$( (cd "$VIBE" && git ls-files -z | sort -z | xargs -0 cat; "${BUN[@]}" --version) | key)"
 cached vibe-city "$vibe_key" "$WEB/generated/vibe-city" vibe_city
-echo "==> Dune buggy render mesh (engine/scenes/dune-buggy, bun)"
+step "Dune buggy render mesh (engine/scenes/dune-buggy, bun)"
 (cd "$ENGINE/scenes/dune-buggy" && "${BUN[@]}" install --frozen-lockfile && "${BUN[@]}" run bake-mesh.mjs)
 
-echo "==> Assembling $OUT"
+step "Assembling $OUT"
 rm -rf "$OUT"
 mkdir -p "$OUT"
 cp "$WEB"/index.html "$WEB"/demo.html "$WEB"/vehicle.html "$WEB"/softbody.html "$OUT"/
@@ -202,3 +216,6 @@ rm -rf "$OUT"/generated/*/.gitignore "$OUT"/generated/*/package.json
 echo "==> Done: $OUT ($(du -sh "$OUT" | cut -f1))"
 
 if [[ -n "$CACHE" ]]; then echo "==> Build cache: $(du -sh "$CACHE" | cut -f1)"; fi
+step ""
+echo "==> Step times (total ${SECONDS}s)"
+printf '%s\n' "${STEP_TIMES[@]}"
