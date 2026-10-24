@@ -341,6 +341,7 @@ impl MetalSim {
             soft: Default::default(),
             command_count: 0,
             explosion_count: 0,
+            post_stabilize: self.params.flags & engine_schema::FLAG_POST_STAB != 0,
         }
     }
 

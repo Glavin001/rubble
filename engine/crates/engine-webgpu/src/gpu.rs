@@ -2234,6 +2234,7 @@ impl WgpuSim {
             soft: self.soft_counts(),
             command_count: self.command_count,
             explosion_count: self.explosion_count,
+            post_stabilize: self.params.flags & engine_schema::FLAG_POST_STAB != 0,
         }
     }
 

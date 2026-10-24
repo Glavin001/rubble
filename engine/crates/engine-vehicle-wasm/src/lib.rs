@@ -636,6 +636,7 @@ impl RigidStep {
             soft,
             command_count: 0,
             explosion_count: 0,
+            post_stabilize: self.params.flags & engine_schema::FLAG_POST_STAB != 0,
             // counts[18]: bit 0 CCD bodies, bit 1 kinematic bodies, bit 2 impulse
             // records this step; counts[19] projectiles, counts[20] characters,
             // counts[21] queries.
