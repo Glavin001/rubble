@@ -30,6 +30,8 @@ export const bitsf = (u) => { u32b[0] = u >>> 0; return f32b[0]; };
 
 /** Pool sizes a descriptor needs. */
 export const requirements = (desc) => JSON.parse(wasm.requirements(JSON.stringify(desc)));
+/** Design-space centre of mass (where addVehicle puts the chassis body's origin). */
+export const centerOfMass = (desc) => Array.from(wasm.center_of_mass(JSON.stringify(desc)));
 
 export const DEFAULT_VEHICLE_CAPACITY = {
   maxVehicles: 64, maxWheels: 512, maxCurvePoints: 4096, maxDiffs: 256, maxAntiRolls: 256, maxParts: 512, maxRays: 1024,

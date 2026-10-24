@@ -64,3 +64,25 @@ test('the mesh and the dune_buggy preset agree on parts and wheels', () => {
     assert.ok(Math.sign(buggy.wheels[i].position[2]) === -Math.sign(hub[2]), `${id} end`);
   });
 });
+
+test('every vibe-land model mesh matches its preset', () => {
+  const presets = read('../generated/vehicle_presets.json');
+  const byName = Object.fromEntries(presets.map((p) => [p.name, p]));
+  for (const model of ['buggy', 'trophy', 'rally', 'monster', 'derby', 'sprint', 'semi']) {
+    const m = read(`../generated/dune-buggy/${model}-mesh.json`);
+    const preset = byName[model === 'buggy' ? 'dune_buggy' : `vibe_${model}`];
+    assert.ok(preset, `${model} preset exported`);
+    assert.deepEqual(m.parts, preset.parts.map((p) => p.name), `${model}: parts`);
+    assert.ok(m.parts.length <= 32);
+    for (const inst of m.instances) {
+      assert.ok(inst.template >= 0 && inst.template < m.templates.length, `${model} ${inst.name}`);
+      if (inst.part < 0) assert.equal(model, 'semi', `${model} ${inst.name}: only the semi has trailer parts`);
+      else assert.ok(inst.part < m.parts.length, `${model} ${inst.name}`);
+    }
+    // Parents come before their children.
+    preset.parts.forEach((p, i) => { if (p.mount?.parent != null) assert.ok(p.mount.parent < i, `${model} ${p.name}`); });
+  }
+  const semi = read('../generated/dune-buggy/semi-mesh.json');
+  assert.deepEqual([...new Set(semi.instances.filter((i) => i.trailerWheel !== undefined).map((i) => i.trailerWheel))].sort(), [0, 1]);
+  assert.ok(byName.vibe_semi_trailer && byName.vibe_semi_trailer.wheels.length === 2);
+});

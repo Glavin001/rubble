@@ -120,13 +120,14 @@ pub const WD_SUSP: u32 = 32;
 pub const WD_SLIDE: u32 = 64;
 pub const WD_BUMP: u32 = 128;
 pub const WD_PENDING_ADD: u32 = 256; // host attached this wheel slot; GPU adds its mass
-pub const PART_STRIDE: u32 = 6;
+pub const PART_STRIDE: u32 = 7;
 pub const P_CFG: u32 = 0; // uint4(colliderStart, colliderCount, role, roleWheelMask)
 pub const P_MASS: u32 = 1; // mass, Ixx, Iyy, Izz (about part COM, chassis axes)
 pub const P_COM: u32 = 2; // localCom.xyz, asfloat(state)
 pub const P_PARK: u32 = 3; // uint4(parkedBody, vehicle, pad, pad)
 pub const P_MOUNT: u32 = 4; // mount anchor (chassis space).xyz, breakForce
 pub const P_LOAD: u32 = 5; // breakTorque, lastForce, lastTorque, peak load ratio (vehicle_loads)
+pub const P_TREE: u32 = 6; // uint4(parent part (NO_INDEX = chassis), carrier part once carried off (NO_INDEX), pad, pad)
 pub const PR_BODY: u32 = 0;
 pub const PR_ENGINE: u32 = 1;
 pub const PR_DRIVESHAFT: u32 = 2;
@@ -275,6 +276,7 @@ pub const LAYOUT: &[(&str, u32)] = &[
     ("P_PARK", P_PARK),
     ("P_MOUNT", P_MOUNT),
     ("P_LOAD", P_LOAD),
+    ("P_TREE", P_TREE),
     ("PR_BODY", PR_BODY),
     ("PR_ENGINE", PR_ENGINE),
     ("PR_DRIVESHAFT", PR_DRIVESHAFT),

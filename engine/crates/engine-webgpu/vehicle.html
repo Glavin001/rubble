@@ -63,7 +63,7 @@
   </div>
   <script type="module">
     import { createWorld, sceneCapacity } from './world-host.mjs';
-    import { L, M, WHEEL_RIM_MATERIAL, bitsf } from './vehicle.mjs';
+    import { L, M, WHEEL_RIM_MATERIAL, bitsf, centerOfMass } from './vehicle.mjs';
     import { createBuggyRenderer, BUGGY_SHADE_WGSL } from './buggy-render.mjs';
     import { duneBuggySoft, calibratedSettings } from './soft.mjs';
 
@@ -85,12 +85,13 @@
       bridge: 'Lab: plank bridge with breakable bolts',
       tanklab: 'Lab: tank over rubble, logs and a ledge',
       buggies: 'Dune buggies: jumps, walls, cannon (parts break off under load)',
+      vibeland: 'vibe-land garage: all seven, jumps, walls, cannon',
     };
     const scene = qs.get('scene') || 'playground';
     if (!SCENES[scene]) throw new Error(`unknown scene ${scene}`);
     const presets = await (await fetch('./generated/vehicle_presets.json', { cache: 'no-store' })).json();
     const byName = Object.fromEntries(presets.map((p) => [p.name, p]));
-    const presetName = qs.get('preset') || (scene === 'destruction' ? 'destructible_sedan' : scene === 'carry' ? 'monster_truck' : scene === 'tanklab' ? 'tank' : scene === 'buggies' ? 'dune_buggy' : 'sedan');
+    const presetName = qs.get('preset') || (scene === 'destruction' ? 'destructible_sedan' : scene === 'carry' ? 'monster_truck' : scene === 'tanklab' ? 'tank' : scene === 'buggies' || scene === 'vibeland' ? 'dune_buggy' : 'sedan');
     if (!byName[presetName]) throw new Error(`unknown preset ${presetName}; have ${Object.keys(byName).join(', ')}`);
     // ?tracks=shells: the tank as it was before track pods (wheel shells, belly 1 m up),
     // for side-by-side comparisons.
@@ -107,11 +108,11 @@
     const sceneSel = document.getElementById('sceneSel');
     const presetSel = document.getElementById('presetSel');
     for (const [id, t] of Object.entries(SCENES)) sceneSel.add(new Option(t, id, false, id === scene));
-    for (const p of presets) presetSel.add(new Option(p.name.replaceAll('_', ' '), p.name, false, p.name === presetName));
+    for (const p of presets) if (!p.name.endsWith('_trailer')) presetSel.add(new Option(p.name.replaceAll('_', ' '), p.name, false, p.name === presetName));
     const go = (k, v) => { const u = new URL(location.href); u.searchParams.set(k, v); if (k === 'scene') u.searchParams.delete('preset'); location.href = u.href; };
     sceneSel.onchange = () => go('scene', sceneSel.value);
     presetSel.onchange = () => go('preset', presetSel.value);
-    if (scene === 'buggies' || (byName[presetName].parts || []).some((p, i) => i > 0 && p.mount?.break_force > 0)) {
+    if (scene === 'buggies' || scene === 'vibeland' || (byName[presetName].parts || []).some((p, i) => i > 0 && p.mount?.break_force > 0)) {
       const label = document.createElement('label');
       label.className = 'muted'; label.htmlFor = 'strengthSel'; label.textContent = 'Mounts';
       const sel = document.createElement('select');
@@ -119,7 +120,7 @@
       for (const [k, t] of [[1, 'rated'], [0.5, '½ strength'], [0.25, '¼ strength'], [0.1, 'fragile']]) sel.add(new Option(t, k, false, Number(qs.get('strength') || 1) === k));
       sel.onchange = () => go('strength', sel.value);
       presetSel.parentElement.append(label, sel);
-      if (scene === 'buggies') {
+      if (scene === 'buggies' || scene === 'vibeland') {
         const bl = document.createElement('label');
         bl.className = 'muted'; bl.htmlFor = 'buildSel'; bl.textContent = 'Frame';
         const bs = document.createElement('select');
@@ -161,7 +162,7 @@
     const vehicleCap = { maxVehicles: 64, maxWheels: 1024, maxCurvePoints: 8192, maxDiffs: 256, maxAntiRolls: 256, maxParts: 512, maxRays: 64 };
     // ?build=hybrid (buggies scene): node-beam frames with bolted parts on joints
     // (engine_softbody::buggy), stepped as the soft-body demo: 240 Hz, 4 steps a frame.
-    const hybrid = scene === 'buggies' && qs.get('build') === 'hybrid';
+    const hybrid = (scene === 'buggies' || scene === 'vibeland') && qs.get('build') === 'hybrid';
     const SOFT_HZ = 240;
     const STEPS_PER_FRAME = hybrid ? Math.round(SOFT_HZ / 60) : 1;
     if (hybrid) cap.maxJoints = 1024;
@@ -225,10 +226,29 @@
         vehicles.push({ h, name, ai, soft: s, softDesc: desc });
         return h;
       }
-      const h = world.vehicles.addVehicle(world.backend, withStrength(byName[name]), p, qAxis([0, 1, 0], yaw));
-      vehicles.push({ h, name, ai });
+      const q = qAxis([0, 1, 0], yaw);
+      const h = world.vehicles.addVehicle(world.backend, withStrength(byName[name]), p, q);
+      const v = { h, name, ai };
+      vehicles.push(v);
+      if (name === 'vibe_semi') {
+        // Its flatbed: a vehicle of its own, placed so the two hitch points meet
+        // (both design spaces share the origin), joined there by a ball joint.
+        const trailer = byName.vibe_semi_trailer;
+        const oc = world.vehicles.entries[h].origin, ot = centerOfMass(trailer);
+        const d = qrotJs(q, ot.map((x, k) => x - oc[k]));
+        const t = world.vehicles.addVehicle(world.backend, trailer, p.map((x, k) => x + d[k]), q);
+        const hitch = [0, 1.12, -2.3]; // presets::VIBE_SEMI_HITCH
+        world.addBallJoint({ bodyA: world.vehicles.chassisBody(h), bodyB: world.vehicles.chassisBody(t),
+          anchorA: hitch.map((x, k) => x - oc[k]), anchorB: hitch.map((x, k) => x - ot[k]) });
+        v.trailer = t;
+      }
       return h;
     };
+    function qrotJs(q, v) {
+      const [x, y, z, w] = q, d = 2 * (x * v[0] + y * v[1] + z * v[2]), s = w * w - (x * x + y * y + z * z);
+      const c = [y * v[2] - z * v[1], z * v[0] - x * v[2], x * v[1] - y * v[0]];
+      return [x * d + v[0] * s + c[0] * 2 * w, y * d + v[1] * s + c[1] * 2 * w, z * d + v[2] * s + c[2] * 2 * w];
+    }
 
     let rng = 7;
     let bridgeBolts = 0; // breakable joints in the scene (bridge)
@@ -264,8 +284,8 @@
         addVehicle('kart', [6, 1.5, -6], 2.0);
         addVehicle('six_wheel_truck', [18, 3, 22], -1.2);
       }
-    } else if (scene === 'buggies') {
-      // Dune buggy arena: every part of a buggy breaks off when its mount is
+    } else if (scene === 'buggies' || scene === 'vibeland') {
+      // Arena for vibe-land's vehicles: every part breaks off when its mount is
       // overloaded (MountDesc; engine/scenes/dune-buggy rates them from the
       // recipe's measured joints).
       addVehicle(presetName, [spawnAt[0] ?? 0, 1.5, spawnAt[1] ?? 0], spawnAt[2] ?? 0);
@@ -284,11 +304,17 @@
       for (const [x, z] of [[20, 40], [-30, 50]]) {
         for (let y = 0; y < 4; y++) for (let i = 0; i < 4 - (y >> 1); i++) dynBox([x + (i - 1.5) * 1.05, 0.5 + y * 1.0, z], [0.5, 0.5, 0.5], 40);
       }
-      // Parked buggies: targets for the cannon (B) and for ramming.
-      for (const [x, z, yaw] of [[12, -12, 1.57], [-12, -12, -1.57], [30, 20, 0.6], [-30, 15, -2.2]]) addVehicle('dune_buggy', [x, 1.5, z], yaw);
-      // A heavy ball dropped on the first one's engine and fuel tank as the scene
-      // starts (it faces +X: its tail is at -X).
-      dynBall([10.8, 9, -12], 0.7, 900);
+      if (scene === 'buggies') {
+        // Parked buggies: targets for the cannon (B) and for ramming.
+        for (const [x, z, yaw] of [[12, -12, 1.57], [-12, -12, -1.57], [30, 20, 0.6], [-30, 15, -2.2]]) addVehicle('dune_buggy', [x, 1.5, z], yaw);
+        // A heavy ball dropped on the first one's engine and fuel tank as the scene
+        // starts (it faces +X: its tail is at -X).
+        dynBall([10.8, 9, -12], 0.7, 900);
+      } else {
+        // The catalog, parked in a row behind the start (Tab drives the next one).
+        const lineup = ['dune_buggy', 'vibe_trophy', 'vibe_rally', 'vibe_monster', 'vibe_derby', 'vibe_sprint', 'vibe_semi'];
+        lineup.forEach((name, i) => addVehicle(name, [-24 + i * 8, name === 'vibe_monster' ? 1.2 : 0.8, -16], 0));
+      }
     } else if (scene !== 'traffic') {
       // Two-way coupling labs: each mirrors a test in tests/vehicle.rs.
       const MAT_SKID = 3;
@@ -580,10 +606,23 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     const bind = (p, entries) => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: entries.map(([b, buf]) => ({ binding: b, resource: { buffer: buf } })) });
     // Dune buggies: the baked mesh replaces their collider boxes and wheel cylinders
     // (?colliders=1 draws those too, to check the fit).
-    const buggyMesh = vehicles.some((v) => v.name === 'dune_buggy')
-      ? await createBuggyRenderer({ device, format, world, frameBuf, L, shadeWgsl: LIGHT_WGSL })
-      : null;
-    for (const v of vehicles) if (v.name === 'dune_buggy') { if (v.soft !== undefined) buggyMesh.addHybrid(v.soft, v.softDesc); else buggyMesh.add(v.h); }
+    // vibe-land's vehicles: one mesh renderer per model in the scene, used as one.
+    const modelOf = (name) => (name === 'dune_buggy' ? 'buggy' : name.startsWith('vibe_') && !name.endsWith('_trailer') ? name.slice(5) : null);
+    const meshes = {};
+    for (const v of vehicles) {
+      const m = modelOf(v.name);
+      if (!m) continue;
+      meshes[m] ??= await createBuggyRenderer({ device, format, world, frameBuf, L, shadeWgsl: LIGHT_WGSL, model: m });
+      if (v.soft !== undefined) meshes[m].addHybrid(v.soft, v.softDesc); else meshes[m].add(v.h, { trailer: v.trailer });
+    }
+    const meshList = Object.values(meshes);
+    const buggyMesh = meshList.length ? {
+      draw: (rp) => meshList.forEach((r) => r.draw(rp)),
+      covered: () => meshList.flatMap((r) => r.covered()),
+      encodeReadback: (enc) => meshList.map((r) => r.encodeReadback(enc)),
+      consume: (rbs) => Promise.all(meshList.map((r, i) => r.consume(rbs?.[i]))),
+      broken: () => meshList.reduce((n, r) => { const b = r.broken(); return { parts: n.parts + b.parts, wheels: n.wheels + b.wheels }; }, { parts: 0, wheels: 0 }),
+    } : null;
     const hideWords = new Uint32Array((HIDE_VEHICLES + 64 + 31) >> 5);
     if (buggyMesh && qs.get('colliders') !== '1') {
       const setBit = (i) => { hideWords[i >> 5] |= 1 << (i & 31); };
