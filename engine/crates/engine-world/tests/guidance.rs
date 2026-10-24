@@ -487,6 +487,75 @@ fn a_zone_on_a_moving_body_is_led() {
     );
 }
 
+/// A cart that drives along +Z and turns back 1.2 s into a ~2.85 s flight,
+/// with a point zone beside it. Returns how far the debris came down from
+/// the zone's aim at that moment.
+fn reversing_cart_miss(known_path: bool) -> f32 {
+    let natural = natural_landing();
+    let (speed, turn, flight) = (3.0, 1.2, 2.85);
+    // Where the cart starts so that it is 2 m past the natural landing when
+    // the debris comes down.
+    let z0 = natural[2] + 2.0 - speed * turn + speed * (flight - turn);
+    let mut w = guided_world(false);
+    let cart = w
+        .create_body(&BodyDef {
+            body_type: BodyType::Kinematic,
+            position: [natural[0] - 1.5, 0.0, z0],
+            linear_velocity: [0.0, 0.0, speed],
+            ..BodyDef::default()
+        })
+        .unwrap();
+    w.create_box_shape(cart, &ShapeDef::default(), [0.9, 0.5, 2.0])
+        .unwrap();
+    let b = chunk(&mut w, LAUNCH_P, LAUNCH_V);
+    w.body_set_guided(b, true).unwrap();
+    let at = |t: f32| {
+        let z = if t < turn {
+            z0 + speed * t
+        } else {
+            z0 + speed * (2.0 * turn - t)
+        };
+        [natural[0] - 1.5, 0.0, z]
+    };
+    let zone = GuidanceZone {
+        offset: [-1.5, 0.0, 0.0],
+        motion: if known_path {
+            ZoneMotion::Path {
+                keys: [0.0, turn, turn + 4.0].map(|t| (at(t), t)).to_vec(),
+            }
+        } else {
+            ZoneMotion::Velocity
+        },
+        ..GuidanceZone::new(ZoneAnchor::Body(cart), ZoneShape::Point)
+    };
+    enable(&mut w, GuidanceSettings::default(), &[zone]);
+    let mut t = Vec::new();
+    for k in 0..240 {
+        if k == (turn / DT).round() as u32 {
+            w.body_set_linear_velocity(cart, [0.0, 0.0, -speed]).unwrap();
+        }
+        t.extend(record(&mut w, 1));
+    }
+    let land = crossing(&t, b, 0.0).unwrap();
+    let k = t
+        .iter()
+        .position(|s| s[b.index() as usize].position[1] < 0.0)
+        .unwrap();
+    let c = t[k][cart.index() as usize].position;
+    dist(land, [c[0] - 1.5, 0.0, c[2]])
+}
+
+#[test]
+fn a_known_path_meets_a_target_that_turns_back_mid_flight() {
+    // Velocity extrapolation aims far past the turn, and the jerk-limited
+    // re-plans cannot pull the arc back in time; the path plans the turn in
+    // from launch.
+    let blind = reversing_cart_miss(false);
+    let planned = reversing_cart_miss(true);
+    assert!(blind > 2.0, "without the path it still came down {blind} m from the aim");
+    assert!(planned < 0.6, "with the path it came down {planned} m from the aim");
+}
+
 #[test]
 fn a_fast_car_gathers_debris_coming_down_beside_it() {
     // Gauntlet's case: a car at 10 m/s with a ring zone all around it, and
@@ -688,6 +757,20 @@ fn guidance_needs_a_capacity_and_validates_zones() {
         },
     );
     assert!(w.set_guidance_zones(&[ring]).is_err());
+    // A path takes 1 to GUIDE_PATH_KEYS keys in time order.
+    let path = |keys: Vec<([f32; 3], f32)>| GuidanceZone {
+        motion: ZoneMotion::Path { keys },
+        ..z.clone()
+    };
+    assert!(w.set_guidance_zones(&[path(vec![([0.0; 3], 0.0), ([1.0; 3], 2.0)])]).is_ok());
+    let err = w
+        .set_guidance_zones(&[path((0..=GUIDE_PATH_KEYS).map(|k| ([0.0; 3], k as f32)).collect())])
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("keys"), "{err:#}");
+    assert!(w.set_guidance_zones(&[path(vec![])]).is_err());
+    assert!(w
+        .set_guidance_zones(&[path(vec![([0.0; 3], 1.0), ([1.0; 3], 1.0)])])
+        .is_err());
     assert!(w
         .set_guidance(&GuidanceSettings {
             participation: 1.5,

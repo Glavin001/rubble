@@ -7,9 +7,12 @@
 //!
 //! With moving targets every pad is a kinematic cart sliding across its lane
 //! (`pad_x`, the same in both lanes); the steered zones ride on the carts, and
-//! unsteered meteors still land off where their cart will be.
+//! unsteered meteors still land off where their cart will be. With known
+//! routes the zones also carry each cart's path for the next few seconds
+//! (`ZoneMotion::Path`), so the planner sees a turn coming; the page uploads
+//! them again before every volley.
 
-use engine_schema::guidance::{ZoneDesc, ZoneShape};
+use engine_schema::guidance::{ZoneDesc, ZoneMotion, ZoneShape, GUIDE_PATH_KEYS};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -32,6 +35,8 @@ const MISS: (f32, f32) = (1.6, 4.0);
 pub const CART_SPEED: f32 = 2.0;
 pub const CART_SWING: f32 = 6.0;
 const CART_PHASE: f32 = 2.3;
+/// How far ahead (s) a known route reaches: past every flight's landing.
+const ROUTE_AHEAD: f32 = 8.0;
 
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct Pad {
@@ -77,10 +82,29 @@ pub fn pad_x(lane: u32, pad: u32, t: f32, moving: bool) -> f32 {
     x + CART_SWING * (4.0 * (u.fract() - 0.5).abs() - 1.0)
 }
 
+/// Pad `pad`'s route from time `t` to `t + ROUTE_AHEAD`: its position now,
+/// at each turn and at the end (the triangle wave's corners, so the straight
+/// segments between them are exact).
+pub fn route(lane: u32, pad: u32, t: f32) -> Vec<([f32; 3], f32)> {
+    let leg = 2.0 * CART_SWING / CART_SPEED;
+    let shift = CART_PHASE * pad as f32;
+    let at = |u: f32| ([pad_x(lane, pad, u, true), 0.0, PADS[pad as usize][1]], u);
+    let mut keys = vec![at(t)];
+    let mut n = ((t + shift) / leg).floor() + 1.0;
+    while n * leg - shift < t + ROUTE_AHEAD {
+        keys.push(at(n * leg - shift));
+        n += 1.0;
+    }
+    keys.push(at(t + ROUTE_AHEAD));
+    debug_assert!(keys.len() <= GUIDE_PATH_KEYS);
+    keys
+}
+
 /// One zone per pad of the steered lane: a disc where the meteor's centre is
 /// as it touches the pad (tag bit k for pad k). Moving pads carry their zone
-/// (`pad_bodies`: the steered lane's pad bodies, pad centres 0.02 m up).
-pub fn zones(pad_bodies: &[u32], moving: bool) -> Vec<ZoneDesc> {
+/// (`pad_bodies`: the steered lane's pad bodies, pad centres 0.02 m up);
+/// with `routes` the zones know each cart's route from time `t`.
+pub fn zones(pad_bodies: &[u32], moving: bool, routes: bool, t: f32) -> Vec<ZoneDesc> {
     PADS.iter()
         .enumerate()
         .map(|(k, p)| ZoneDesc {
@@ -99,6 +123,13 @@ pub fn zones(pad_bodies: &[u32], moving: bool) -> Vec<ZoneDesc> {
                 height: 0.0,
             },
             tags: 1 << k,
+            motion: if moving && routes {
+                ZoneMotion::Path {
+                    keys: route(0, k as u32, t),
+                }
+            } else {
+                ZoneMotion::Velocity
+            },
             ..ZoneDesc::default()
         })
         .map(|mut z| {
@@ -168,9 +199,10 @@ impl MeteorRange {
     }
 
     /// The steered lane's zones (`ZoneDesc` JSON); `pad_bodies` are that
-    /// lane's pad bodies (carried zones when `moving`).
-    pub fn zones(pad_bodies: &[u32], moving: bool) -> String {
-        serde_json::to_string(&zones(pad_bodies, moving)).unwrap()
+    /// lane's pad bodies (carried zones when `moving`), with each cart's
+    /// route from time `t` when `routes`.
+    pub fn zones(pad_bodies: &[u32], moving: bool, routes: bool, t: f32) -> String {
+        serde_json::to_string(&zones(pad_bodies, moving, routes, t)).unwrap()
     }
 
     /// Volley `k` launched at time `t` (`Launch` JSON array).
@@ -215,9 +247,24 @@ mod tests {
                 assert!(!on_pad(b.lane, b.pad, land, t + FLIGHT, moving), "{land:?}");
             }
         }
-        for moving in [false, true] {
-            for z in zones(&[1, 2, 3], moving) {
-                z.to_gpu().unwrap();
+        for (moving, routes) in [(false, false), (true, false), (true, true)] {
+            for t in [0.0, 3.7, 11.0] {
+                for z in zones(&[1, 2, 3], moving, routes, t) {
+                    z.to_gpu().unwrap();
+                }
+            }
+        }
+        // A route's straight segments follow the cart exactly.
+        for pad in 0..3 {
+            for t0 in [0.0, 2.5, 9.1] {
+                let keys = route(0, pad, t0);
+                for k in 0..=80 {
+                    let t = t0 + ROUTE_AHEAD * k as f32 / 80.0;
+                    let s = keys.windows(2).find(|w| t <= w[1].1).unwrap();
+                    let u = (t - s[0].1) / (s[1].1 - s[0].1);
+                    let x = s[0].0[0] + u * (s[1].0[0] - s[0].0[0]);
+                    assert!((x - pad_x(0, pad, t, true)).abs() < 1e-3, "pad {pad} t {t}");
+                }
             }
         }
         // Carts slide at CART_SPEED within their swing.

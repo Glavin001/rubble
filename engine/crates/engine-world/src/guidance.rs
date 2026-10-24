@@ -14,7 +14,7 @@
 use crate::error::StaleHandle;
 use crate::{BodyId, DestructibleId, World};
 pub use engine_schema::guidance::{
-    GuidanceCapacity, GuidanceSettings, GuideEnd, GuideState, ZoneShape,
+    GuidanceCapacity, GuidanceSettings, GuideEnd, GuideState, ZoneMotion, ZoneShape, GUIDE_PATH_KEYS,
 };
 use engine_schema::guidance::{GuideBodyGpu, GuideZoneGpu, ZoneDesc};
 
@@ -48,6 +48,9 @@ pub struct GuidanceZone {
     pub active: Option<(f32, f32)>,
     /// Matched against a body's tag mask ([`World::body_set_guided_tags`]).
     pub tags: u32,
+    /// What the planner knows of how the zone will move (default: it keeps
+    /// its anchor's velocity). A known turn is only hit when given here.
+    pub motion: ZoneMotion,
 }
 
 impl GuidanceZone {
@@ -62,6 +65,7 @@ impl GuidanceZone {
             quota: None,
             active: None,
             tags: 1,
+            motion: ZoneMotion::Velocity,
         }
     }
 }
@@ -121,6 +125,7 @@ impl World {
             quota: z.quota,
             active: z.active,
             tags: z.tags,
+            motion: z.motion.clone(),
         }
         .to_gpu()
         .map_err(anyhow::Error::msg)

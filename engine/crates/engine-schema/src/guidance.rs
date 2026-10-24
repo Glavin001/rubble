@@ -184,8 +184,10 @@ pub const ZONE_ARC: u32 = 4;
 pub const ZONE_NO_ANCHOR: u32 = u32::MAX;
 pub const ZONE_FRAME_WORLD: u32 = 0;
 pub const ZONE_FRAME_ANCHOR: u32 = 1;
+/// Most keys a zone path holds (`ZoneMotion::Path`); more is an error.
+pub const GUIDE_PATH_KEYS: usize = 8;
 
-/// `GuideZone` (80 B).
+/// `GuideZone` (224 B).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
 pub struct GuideZoneGpu {
@@ -203,6 +205,12 @@ pub struct GuideZoneGpu {
     pub frame: u32,
     pub angle_from: f32,
     pub angle_to: f32,
+    /// Known acceleration of the zone's origin (`ZoneMotion::Accelerating`).
+    pub accel: [f32; 3],
+    /// Keys in `path` (0: no path).
+    pub path_count: u32,
+    /// (position, world time) keys, times increasing.
+    pub path: [[f32; 4]; GUIDE_PATH_KEYS],
 }
 
 /// `GuideBody` (80 B).
@@ -256,7 +264,7 @@ pub struct GuideSlotGpu {
 }
 
 const _: () = assert!(std::mem::size_of::<GuideParamsGpu>() == 96);
-const _: () = assert!(std::mem::size_of::<GuideZoneGpu>() == 80);
+const _: () = assert!(std::mem::size_of::<GuideZoneGpu>() == 224);
 const _: () = assert!(std::mem::size_of::<GuideBodyGpu>() == 80);
 const _: () = assert!(std::mem::size_of::<GuideSlotGpu>() == 64);
 
@@ -424,6 +432,28 @@ pub enum ZoneShape {
     },
 }
 
+/// How a zone will move, as far as its author knows. The planner aims at
+/// where the zone is at each body's hit time, so a known turn is planned for
+/// at launch rather than chased by re-plans (whose acceleration changes are
+/// jerk-limited, and so too slow to follow a target that reverses).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum ZoneMotion {
+    /// It keeps its anchor body's current velocity (a fixed zone stays put).
+    #[default]
+    Velocity,
+    /// Its anchor's velocity plus this constant acceleration (m/s²): a car
+    /// braking or speeding up, a body falling.
+    Accelerating { accel: [f32; 3] },
+    /// Known positions at world times (s), in time order, joined by straight
+    /// segments and extended past both ends along the end segments: a car's
+    /// route, an NPC's patrol. A fixed zone sits on the path; an anchored one
+    /// moves from its body's position as the path does from its position now,
+    /// so the zone stays on the body if the body drifts off the path. Upload
+    /// keys that cover the next few seconds (at most `GUIDE_PATH_KEYS`).
+    Path { keys: Vec<([f32; 3], f32)> },
+}
+
 /// One zone with its anchor resolved to a body index (hosts map handles).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -446,6 +476,7 @@ pub struct ZoneDesc {
     pub active: Option<(f32, f32)>,
     /// Matched against a body's tag mask.
     pub tags: u32,
+    pub motion: ZoneMotion,
 }
 
 impl Default for ZoneDesc {
@@ -461,6 +492,7 @@ impl Default for ZoneDesc {
             quota: None,
             active: None,
             tags: 1,
+            motion: ZoneMotion::Velocity,
         }
     }
 }
@@ -506,6 +538,36 @@ impl ZoneDesc {
         ensure(self.weight >= 0.0, "zone weight must be non-negative")?;
         ensure(t_end >= t_start, "zone active window ends before it starts")?;
         ensure(self.quota != Some(0), "a zone quota of 0 takes nothing: remove the zone")?;
+        let mut accel = [0.0; 3];
+        let mut path = [[0.0; 4]; GUIDE_PATH_KEYS];
+        let mut path_count = 0;
+        match &self.motion {
+            ZoneMotion::Velocity => {}
+            ZoneMotion::Accelerating { accel: a } => {
+                ensure(a.iter().all(|v| v.is_finite()), "zone acceleration must be finite")?;
+                accel = *a;
+            }
+            ZoneMotion::Path { keys } => {
+                if keys.is_empty() || keys.len() > GUIDE_PATH_KEYS {
+                    return Err(format!(
+                        "a zone path takes 1 to {GUIDE_PATH_KEYS} keys, not {}",
+                        keys.len()
+                    ));
+                }
+                ensure(
+                    keys.iter().all(|(p, t)| t.is_finite() && p.iter().all(|v| v.is_finite())),
+                    "zone path keys must be finite",
+                )?;
+                ensure(
+                    keys.windows(2).all(|w| w[1].1 > w[0].1),
+                    "zone path key times must increase",
+                )?;
+                for (k, (p, t)) in keys.iter().enumerate() {
+                    path[k] = [p[0], p[1], p[2], *t];
+                }
+                path_count = keys.len() as u32;
+            }
+        }
         Ok(GuideZoneGpu {
             center: if self.anchor_body.is_some() {
                 [0.0; 3]
@@ -529,6 +591,9 @@ impl ZoneDesc {
             },
             angle_from,
             angle_to,
+            accel,
+            path_count,
+            path,
         })
     }
 }

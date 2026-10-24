@@ -54,6 +54,7 @@ static const uint ZONE_ARC = 4u;
 static const uint ZONE_FRAME_ANCHOR = 1u;
 static const uint NO_ANCHOR = 0xFFFFFFFFu;
 static const uint NO_ZONE = 0xFFFFFFFFu;
+static const uint PATH_KEYS = 8u; // engine-schema GUIDE_PATH_KEYS
 
 // Matches engine-webgpu `GuideZoneGpu` (80 B).
 struct GuideZone
@@ -72,6 +73,9 @@ struct GuideZone
     uint frame;     // 0 world, 1 anchor-relative (anchor yaw)
     float angleFrom;
     float angleTo;
+    float3 accel;   // known acceleration of the origin (ZoneMotion::Accelerating)
+    uint pathCount; // keys in path (0: none)
+    float4 path[PATH_KEYS]; // xyz position, w world time (increasing)
 };
 
 static const uint GUIDE_OFF = 0u;
@@ -228,27 +232,57 @@ float3 sampleShape(GuideZone z, uint h)
     return float3(0.0, 0.0, 0.0);
 }
 
-// A body's aim point moves in a straight line with its anchor: P(t) = P0 + V·t.
+// Zone `zi`'s path position at world time `tau`: straight segments between
+// keys, extended past both ends along the end segments. Reads only the keys
+// (the plan weighs it dozens of times per aim point).
+float3 pathAt(uint zi, float tau)
+{
+    uint n = gZones[zi].pathCount;
+    if (n <= 1u) return gZones[zi].path[0].xyz;
+    uint k = 0u;
+    for (uint j = 1u; j + 1u < n; j++)
+    {
+        if (tau >= gZones[zi].path[j].w) k = j;
+    }
+    float4 a = gZones[zi].path[k];
+    float4 b = gZones[zi].path[k + 1u];
+    return lerp(a.xyz, b.xyz, (tau - a.w) / max(b.w - a.w, 1e-6));
+}
+
+// Where a body's aim point will be t seconds from now. It moves with its
+// zone: P(t) = P0 + V·t + ½·A·t², or along the zone's path (`zone` set).
 struct AimLine
 {
-    float3 p0;
+    float3 p0;   // with a path: minus the path's position now
     float3 v;
+    float3 acc;
+    uint zone;   // a zone with a path, or NO_ZONE
 };
 
-// A zone's frame now: where its origin is, how fast it moves and its yaw.
+float3 aimAt(AimLine a, float t)
+{
+    if (a.zone != NO_ZONE) return a.p0 + pathAt(a.zone, GP.time + t);
+    return a.p0 + a.v * t + 0.5 * a.acc * (t * t);
+}
+
+// A zone's frame now: where its origin is, how it moves and its yaw.
 struct ZoneFrame
 {
     float3 origin;
     float3 vel;
+    float3 acc;
+    uint path; // the zone's index when it has a path, else NO_ZONE
     float c;
     float s;
 };
 
-ZoneFrame zoneFrame(GuideZone z)
+ZoneFrame zoneFrame(GuideZone z, uint zi)
 {
     ZoneFrame f;
-    f.origin = z.center;
+    f.origin = z.pathCount > 0u ? pathAt(zi, GP.time) : z.center;
     f.vel = float3(0.0, 0.0, 0.0);
+    f.acc = z.accel;
+    f.path = z.pathCount > 0u ? zi : NO_ZONE;
     float yaw = z.yaw;
     if (z.anchor != NO_ANCHOR)
     {
@@ -271,6 +305,9 @@ AimLine aimLine(GuideZone z, ZoneFrame f, float3 local)
     AimLine a;
     a.p0 = f.origin + rotateYaw(f.c, f.s, z.offset + local);
     a.v = f.vel;
+    a.acc = f.acc;
+    a.zone = f.path;
+    if (f.path != NO_ZONE) a.p0 -= pathAt(f.path, GP.time);
     return a;
 }
 
@@ -325,7 +362,8 @@ float3 naturalLocal(GuideZone z, ZoneFrame f, float3 p0, float3 v0, float gy, fl
     float t = clamp(-v0.y / max(-gy, 1e-6), lo, hi);
     if (a > 1e-6 && disc >= 0.0) t = clamp((-dvy + sqrt(disc)) / (2.0 * a), lo, hi);
     float3 p = p0 + v0 * t + float3(0.0, 0.5 * gy * t * t, 0.0);
-    return rotateYaw(f.c, -f.s, p - (f.origin + f.vel * t)) - z.offset;
+    AimLine o = aimLine(z, f, -z.offset); // the zone's origin
+    return rotateYaw(f.c, -f.s, p - aimAt(o, t)) - z.offset;
 }
 
 uint aimSeed(uint body, uint generation, uint zone)
@@ -352,10 +390,10 @@ float3 arcAt(float3 p0, float3 v0, float3 acc, float t)
     return p0 + v0 * t + 0.5 * acc * (t * t);
 }
 
-// The miss vector at time t: aim minus arc = d0 + dv·t - ½·acc·t².
-float3 missAt(float3 d0, float3 dv, float3 acc, float t)
+// The miss vector at time t: the aim point minus the unguided arc.
+float3 missAt(AimLine a, float3 p0, float3 v0, float3 grav, float t)
 {
-    return d0 + dv * t - 0.5 * acc * (t * t);
+    return aimAt(a, t) - arcAt(p0, v0, grav, t);
 }
 
 // How far the steering can move the arc by time t: the kick lands over the
@@ -369,17 +407,17 @@ float reachAt(float t, float k, float amax, float kickLag, float dt)
 }
 
 // The share of the steering budget a hit at time t needs (> 1: out of reach).
-float effortAt(float3 d0, float3 dv, float3 acc, float t, float k, float amax, float kickLag, float dt)
+float effortAt(AimLine a, float3 p0, float3 v0, float3 grav, float t, float k, float amax, float kickLag, float dt)
 {
     float r = reachAt(t, k, amax, kickLag, dt);
-    return r > 1e-6 ? length(missAt(d0, dv, acc, t)) / r : 3.4e38;
+    return r > 1e-6 ? length(missAt(a, p0, v0, grav, t)) / r : 3.4e38;
 }
 
 // When to meet the moving aim point, in [lo, hi]: the time that needs the
 // least of the steering budget (the least visible plan). Reach grows with
 // time, so this is neither the arc's closest approach (for a fast-moving aim,
 // often in mid-air above it) nor simply where it lands.
-float easiestTime(float3 d0, float3 dv, float3 acc, float lo, float hi, float k, float amax, float kickLag, float dt)
+float easiestTime(AimLine aim, float3 p0, float3 v0, float3 grav, float lo, float hi, float k, float amax, float kickLag, float dt)
 {
     float best = lo;
     float bestE = 3.4e38;
@@ -387,7 +425,7 @@ float easiestTime(float3 d0, float3 dv, float3 acc, float lo, float hi, float k,
     for (uint j = 0u; j < 16u; j++)
     {
         float t = lo + step * float(j);
-        float e = effortAt(d0, dv, acc, t, k, amax, kickLag, dt);
+        float e = effortAt(aim, p0, v0, grav, t, k, amax, kickLag, dt);
         if (e < bestE)
         {
             bestE = e;
@@ -400,7 +438,7 @@ float easiestTime(float3 d0, float3 dv, float3 acc, float lo, float hi, float k,
     {
         float m1 = a + (b - a) * 0.381966;
         float m2 = a + (b - a) * 0.618034;
-        if (effortAt(d0, dv, acc, m1, k, amax, kickLag, dt) < effortAt(d0, dv, acc, m2, k, amax, kickLag, dt)) b = m2; else a = m1;
+        if (effortAt(aim, p0, v0, grav, m1, k, amax, kickLag, dt) < effortAt(aim, p0, v0, grav, m2, k, amax, kickLag, dt)) b = m2; else a = m1;
     }
     return 0.5 * (a + b);
 }
@@ -630,9 +668,9 @@ void replanSlot(uint rank, uint i, BodyState b, GuideBody g)
     if (t > dt && g.zone < GP.zoneCount)
     {
         GuideZone z = gZones[g.zone];
-        AimLine aim = aimLine(z, zoneFrame(z), g.aim);
+        AimLine aim = aimLine(z, zoneFrame(z, g.zone), g.aim);
         float3 grav = float3(0.0, GP.gravityY, 0.0);
-        float3 miss = aim.p0 + aim.v * t - arcAt(b.position, b.linearVel, grav + g.accel, t);
+        float3 miss = missAt(aim, b.position, b.linearVel, grav + g.accel, t);
         float3 want = g.accel + 2.0 * miss / (t * t);
         float lw = length(want);
         if (lw > GP.accelMax) want *= GP.accelMax / lw;
@@ -683,7 +721,7 @@ void guide_plan(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID, u
         GuideZone z = gZones[zi];
         if (!zoneOpen(z, zi, g.tagMask)) continue;
         uint seed = aimSeed(i, g.generation, zi);
-        ZoneFrame frame = zoneFrame(z);
+        ZoneFrame frame = zoneFrame(z, zi);
         float3 nearest = clampToShape(z, naturalLocal(z, frame, p0, v0, GP.gravityY, min(GP.tMin, tg), tg), seed);
         // The first of the zone's aim points in reach; the zone is scored by
         // the easiest of them.
@@ -698,11 +736,9 @@ void guide_plan(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID, u
             float f = 1.0 - float(at) / float(AIM_TRIES - 1u);
             float3 local = clampToShape(z, lerp(nearest, sampleShape(z, aimSeedTry(i, g.generation, zi, at)), f), seed);
             AimLine aim = aimLine(z, frame, local);
-            float3 d0 = aim.p0 - p0;
-            float3 dv = aim.v - v0;
-            float t = easiestTime(d0, dv, grav, min(GP.tMin, tg), tg, k, amax, kickLag, dt);
+            float t = easiestTime(aim, p0, v0, grav, min(GP.tMin, tg), tg, k, amax, kickLag, dt);
             if (t < GP.tMin) continue;
-            float3 miss = missAt(d0, dv, grav, t);
+            float3 miss = missAt(aim, p0, v0, grav, t);
             float reach = reachAt(t, k, amax, kickLag, dt);
             float dist = length(miss);
             if (reach <= 1e-6 || dist > reach) continue;

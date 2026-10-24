@@ -764,6 +764,13 @@ typedef struct RbGuidanceSettings {
   uint32_t internal_value;
 } RbGuidanceSettings;
 
+// A known position of a zone at a world time (`RbGuidanceZone::path`).
+typedef struct RbZonePathKey {
+  struct RbVec3 position;
+  // World time (s).
+  float time;
+} RbZonePathKey;
+
 // One zone (`rbDefaultGuidanceZone`).
 typedef struct RbGuidanceZone {
   // 0: a fixed zone at `position`; otherwise the zone follows this body.
@@ -789,6 +796,16 @@ typedef struct RbGuidanceZone {
   float active_from;
   float active_to;
   uint32_t tags;
+  // Known acceleration of the zone (length/s²), on top of its anchor's
+  // velocity. Ignored when it has a path.
+  struct RbVec3 accel;
+  // Keys in `path` (0: none; at most 8).
+  uint32_t path_count;
+  // Where the zone will be (times increasing), joined by straight segments
+  // and extended past both ends: a route or patrol, so debris planned now
+  // meets it after a turn. An anchored zone moves from its body as the
+  // path moves from where it is now.
+  struct RbZonePathKey path[8];
   uint32_t internal_value;
 } RbGuidanceZone;
 

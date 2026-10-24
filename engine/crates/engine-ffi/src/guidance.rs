@@ -3,6 +3,9 @@
 //! Needs `RbWorldDef::enable_guidance`.
 
 use super::*;
+use rubble::ZoneMotion;
+
+const _: () = assert!(rubble::GUIDE_PATH_KEYS == 8);
 
 /// Tuning (`rbDefaultGuidanceSettings`). Speeds and jerk in the world's
 /// length unit; times in seconds; angles in radians.
@@ -51,6 +54,15 @@ pub enum RbZoneShape {
     RB_ZONE_ARC = 4,
 }
 
+/// A known position of a zone at a world time (`RbGuidanceZone::path`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RbZonePathKey {
+    pub position: RbVec3,
+    /// World time (s).
+    pub time: f32,
+}
+
 /// One zone (`rbDefaultGuidanceZone`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -78,6 +90,16 @@ pub struct RbGuidanceZone {
     pub active_from: f32,
     pub active_to: f32,
     pub tags: u32,
+    /// Known acceleration of the zone (length/s²), on top of its anchor's
+    /// velocity. Ignored when it has a path.
+    pub accel: RbVec3,
+    /// Keys in `path` (0: none; at most 8).
+    pub path_count: u32,
+    /// Where the zone will be (times increasing), joined by straight segments
+    /// and extended past both ends: a route or patrol, so debris planned now
+    /// meets it after a turn. An anchored zone moves from its body as the
+    /// path moves from where it is now.
+    pub path: [RbZonePathKey; 8],
     pub internal_value: u32,
 }
 
@@ -122,6 +144,9 @@ pub extern "C" fn rbDefaultGuidanceZone() -> RbGuidanceZone {
         active_from: 1.0,
         active_to: 0.0,
         tags: 1,
+        accel: RbVec3::default(),
+        path_count: 0,
+        path: [RbZonePathKey::default(); 8],
         internal_value: COOKIE,
     }
 }
@@ -210,6 +235,24 @@ pub unsafe extern "C" fn rbWorld_SetGuidanceZones(
                     to: arc_angle_in(&c, z.angle_to),
                 },
             };
+            let motion = if z.path_count > 0 {
+                let n = (z.path_count as usize).min(9);
+                if n > 8 {
+                    return Err(invalid("a zone path takes at most 8 keys"));
+                }
+                ZoneMotion::Path {
+                    keys: z.path[..n]
+                        .iter()
+                        .map(|k| (c.position_in(k.position.a()), k.time))
+                        .collect(),
+                }
+            } else if z.accel != RbVec3::default() {
+                ZoneMotion::Accelerating {
+                    accel: c.linear_in(z.accel.a()),
+                }
+            } else {
+                ZoneMotion::Velocity
+            };
             out.push(GuidanceZone {
                 anchor: if z.anchor_body == 0 {
                     ZoneAnchor::World(c.position_in(z.position.a()))
@@ -224,6 +267,7 @@ pub unsafe extern "C" fn rbWorld_SetGuidanceZones(
                 quota: (z.quota > 0).then_some(z.quota),
                 active: (z.active_from <= z.active_to).then_some((z.active_from, z.active_to)),
                 tags: z.tags,
+                motion,
             });
         }
         w.world.set_guidance_zones(&out)

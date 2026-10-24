@@ -51,6 +51,7 @@
       <label><input type="checkbox" id="guideOn" checked /> Directed debris</label>
       <select id="guideStrength"><option value="0">subtle</option><option value="1" selected>cinematic</option><option value="2">exaggerated</option></select>
       <label id="movingRow" hidden><input type="checkbox" id="movingOn" /> Moving targets</label>
+      <label id="routesRow" hidden title="Steering knows each cart's route, turns included"><input type="checkbox" id="routesOn" checked /> Known routes</label>
       <label><input type="checkbox" id="shellOn" checked /> <span id="shellLabel">Shelling</span></label>
       <span class="muted"><kbd>F</kbd> <span id="shellKey">shell now</span></span>
     </div>
@@ -267,7 +268,7 @@
     const range = scene === 'meteors';
     const blocks = { first: 0, count: 0, parked: [] };
     // Meteor range: launched meteors and their touchdown markers.
-    const meteors = { pads: [], moving: qs.get('targets') === 'moving', first: 0, count: 36, markerFirst: 0, markers: 60, next: 0, nextMarker: 0, volley: 0, flying: [], landed: [], score: [[0, 0], [0, 0]] };
+    const meteors = { pads: [], moving: qs.get('targets') === 'moving', routes: qs.get('routes') !== '0', first: 0, count: 36, markerFirst: 0, markers: 60, next: 0, nextMarker: 0, volley: 0, flying: [], landed: [], score: [[0, 0], [0, 0]] };
     let rng = 7;
     let bridgeBolts = 0; // breakable joints in the scene (bridge)
     // ?spawn=x,z,yaw places the player vehicle (yaw in radians about +Y).
@@ -504,7 +505,12 @@
         const mv = document.getElementById('movingOn');
         document.getElementById('movingRow').hidden = false;
         mv.checked = meteors.moving;
-        mv.onchange = () => { meteors.moving = mv.checked; mv.blur(); resetScene(); };
+        const rt = document.getElementById('routesOn');
+        const showRoutes = () => { document.getElementById('routesRow').hidden = !meteors.moving; };
+        rt.checked = meteors.routes;
+        showRoutes();
+        mv.onchange = () => { meteors.moving = mv.checked; mv.blur(); showRoutes(); resetScene(); };
+        rt.onchange = () => { meteors.routes = rt.checked; rt.blur(); resetScene(); };
       }
       document.getElementById('gauntletUi').hidden = false;
       guideStatsEl.hidden = false;
@@ -519,13 +525,13 @@
     function applyGuidance(rearm = true) {
       if (range) {
         // Carts start where their motion has them at time 0.
-        for (const p of meteors.pads) {
+        for (const p of rearm ? meteors.pads : []) {
           const words = new Uint32Array(world.bodyWords.buffer, p.body * 112, 28).slice();
           new Float32Array(words.buffer).set([MeteorRange.pad_x(p.lane, p.pad, 0, meteors.moving), p.y, p.z], 0);
           world.backend.writeBody(p.body, words);
         }
         const steeredPads = Uint32Array.from(meteors.pads.filter((p) => p.lane === 0).map((p) => p.body));
-        const zones = JSON.parse(MeteorRange.zones(steeredPads, meteors.moving));
+        const zones = JSON.parse(MeteorRange.zones(steeredPads, meteors.moving, meteors.routes, world.steps * world.params.dt));
         guideZoneCount = zones.length;
         world.setGuidance(JSON.parse(Gauntlet.settings(Number(guideStrength.value), guideOn.checked)), zones);
         return;
@@ -545,6 +551,8 @@
       lastShell = world.steps;
       const r = meteors.radius, m = meteors.mass, inv = 2.5 / (m * r * r);
       const t = world.steps * world.params.dt;
+      // Known routes cover the next few seconds: refresh them for this volley.
+      if (meteors.moving && meteors.routes) applyGuidance(false);
       for (const l of JSON.parse(MeteorRange.volley(meteors.volley++, world.params.gravityY, t, meteors.moving))) {
         const body = meteors.first + (meteors.next++ % meteors.count);
         const words = new Uint32Array(world.bodyWords.buffer, body * 112, 28).slice();
@@ -1449,10 +1457,11 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     window.__world = world;
     // Meteor range take: from a reset, `volleys` volleys two seconds apart with
     // steering on or off; returns each lane's [on target, landed].
-    window.__meteorTake = async ({ volleys = 10, guided = true, strength = 1, moving = false } = {}) => {
+    window.__meteorTake = async ({ volleys = 10, guided = true, strength = 1, moving = false, routes = true } = {}) => {
       if (!range) throw new Error('not the meteor range');
       guideOn.checked = guided; guideStrength.value = String(strength);
       meteors.moving = moving; document.getElementById('movingOn').checked = moving;
+      meteors.routes = routes; document.getElementById('routesOn').checked = routes;
       resetScene();
       manual = true;
       meteors.log = [];
@@ -1464,7 +1473,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
         if (s % 6 === 5) await trackMeteors();
       }
       manual = false;
-      return { guided, strength, steered: meteors.score[0], unsteered: meteors.score[1], log: meteors.log };
+      return { guided, strength, moving, routes, steered: meteors.score[0], unsteered: meteors.score[1], log: meteors.log };
     };
     renderParts();
     requestAnimationFrame(frame);

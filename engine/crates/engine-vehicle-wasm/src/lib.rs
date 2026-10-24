@@ -825,7 +825,7 @@ impl RigidStep {
             let size = |b: u64| b.max(256) as f64;
             out[gd::GUIDE_PARAMS_BINDING] = size(std::mem::size_of::<gd::GuideParamsGpu>() as u64);
             out[gd::GUIDE_ZONES_BINDING] =
-                size(u64::from(g.cap.max_zones) * std::mem::size_of::<gd::GuideZoneGpu>() as u64);
+                size(u64::from(g.cap.max_zones) * std::mem::size_of::<engine_schema::guidance::GuideZoneGpu>() as u64);
             out[gd::GUIDE_BODIES_BINDING] =
                 size(n * std::mem::size_of::<gd::GuideBodyGpu>() as u64);
             out[gd::GUIDE_SCRATCH_BINDING] = size(g.cap.scratch_words(self.cap.max_bodies) * 4);
@@ -871,7 +871,7 @@ impl RigidStep {
                 g.cap.max_zones
             )));
         }
-        let mut out = Vec::with_capacity(zones.len() * 80);
+        let mut out = Vec::with_capacity(zones.len() * std::mem::size_of::<engine_schema::guidance::GuideZoneGpu>());
         for (k, z) in zones.iter().enumerate() {
             if let Some(b) = z.anchor_body {
                 if b >= body_count {

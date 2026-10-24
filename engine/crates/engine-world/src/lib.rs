@@ -55,7 +55,7 @@ pub use events::{
 };
 pub use guidance::{
     BodyGuidance, GuidanceCapacity, GuidanceSettings, GuidanceZone, GuideEnd, GuideState,
-    ZoneAnchor, ZoneShape,
+    ZoneAnchor, ZoneMotion, ZoneShape, GUIDE_PATH_KEYS,
 };
 pub use handles::{BodyId, JointId, ShapeId};
 pub use joints::{

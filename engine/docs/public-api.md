@@ -544,7 +544,23 @@ physics**: it adds momentum, so it is off unless the world asks for it.
     zone with the body's heading (vehicle +Z forward, +X left).
   - Each zone has a `weight`, an optional `quota`, an `active` time window and
     `tags` matched against each body's tag mask.
-  - More zones than `max_zones` is an error.
+  - **Known motion** (`motion: ZoneMotion`). By default a zone keeps its
+    anchor's current velocity, which misses a target that turns before the
+    debris lands: re-plans are held to `max_jerk`, too slow to follow a
+    reversal. `Accelerating { accel }` adds a known constant acceleration
+    (a braking car). `Path { keys }` gives up to `GUIDE_PATH_KEYS` (8)
+    (position, world time) keys, joined by straight segments and extended past
+    both ends: a car's route, a patrol. The plan then aims at where the zone
+    will be at the hit time, turns included, with the same kick and held
+    acceleration limits. An anchored zone moves from its body as the path
+    moves from where it is now, so it stays on the body if the body drifts
+    off the path. Upload keys covering the next few seconds; refresh them as
+    the route goes on. Anchor-relative zones keep the body's current heading.
+    In `engine-world/tests/guidance.rs` a target that turns back 1.2 s into
+    a 2.85 s flight is missed by 3.6 m with velocity extrapolation and hit
+    within 0.04 m with its path.
+  - More zones than `max_zones` is an error, and so are path keys out of
+    time order or more than 8.
 - **How it stays invisible.** A guided body is planned once, when it becomes
   free (no joints, nothing pushing it for `settle_steps`).
   - **Aim points:** per zone, a seeded point inside it, then points two
@@ -590,15 +606,22 @@ physics**: it adds momentum, so it is off unless the world asks for it.
   0.13 ms per step at 10k bodies and 0.32–0.36 ms at 100k while the queue drains
   (256 plans a step, each weighing four aim points per zone). It was 0.03–0.05 ms
   with one seeded aim point per zone, which missed zones on fast-moving anchors.
+  Zones without a path cost the same; paths cost only where used. With every
+  one of the 256 zones on an 8-key path (`GUIDE_BENCH_PATHS=1`), the guide
+  phase takes about 0.9 ms at 100k while the queue drains (0.07 ms at 10k).
 - **Reads (blocking, for tools and tests).** `body_guidance(id)` returns a
   body's state, zone, held acceleration, hit time and why its guidance ended
   (`GuideEnd`); `guidance_claims()` returns each zone's claimed bodies.
-- **Demos.** The fracture lab's Directed debris (Near Miss rings, city props)
-  and `vehicle.html?scene=gauntlet`: a drivable truck down a shelled street,
-  with a ring around the truck, an arc behind it and the parked cars' roofs as
-  zones. Both use the same passes through `RigidStep` / the lab planner.
+- **Demos.** The fracture lab's Directed debris (Near Miss rings, city props);
+  `vehicle.html?scene=gauntlet`, a drivable truck down a shelled street, with
+  a ring around the truck, an arc behind it and the parked cars' roofs as
+  zones; and `vehicle.html?scene=meteors`, the same volleys into a steered and
+  an unsteered lane of target pads (`&targets=moving` puts the pads on carts
+  that turn back every 6 s; *Known routes* gives the steered zones the carts'
+  paths). All use the same passes through `RigidStep` / the lab planner.
 - **C ABI:** `RbWorldDef::enable_guidance`, `rbWorld_SetGuidance`,
-  `rbWorld_SetGuidanceZones`, `rbWorld_ResetGuidanceClaims`,
+  `rbWorld_SetGuidanceZones` (with `RbGuidanceZone::accel` and `path`),
+  `rbWorld_ResetGuidanceClaims`,
   `rbBody_SetGuided` and `rbDestructible_SetGuided`. Values are in the world's
   coordinates; Unreal yaw and arc angles convert exactly.
 - **Code:** `slang/kernels/guide_step.slang`, `engine-world/src/guidance.rs`

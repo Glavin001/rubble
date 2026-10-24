@@ -9,9 +9,12 @@
 //! cargo run -p engine-webgpu --release --bin guide_bench [-- bodies steps zones guided]
 //!
 //! `guided` (default: all) arms only the first bodies: debris in a big world.
+//! `GUIDE_BENCH_PATHS=1` gives every zone a full path (`GUIDE_PATH_KEYS`
+//! keys), the most a plan weighs per zone.
 
 use engine_schema::guidance::{
-    GuideBodyGpu, GuideParamsGpu, GuideZoneGpu, GuidanceCapacity, ZONE_NO_ANCHOR, ZONE_RING,
+    GuideBodyGpu, GuideParamsGpu, GuideZoneGpu, GuidanceCapacity, GUIDE_PATH_KEYS, ZONE_NO_ANCHOR,
+    ZONE_RING,
 };
 use engine_schema::{BodyState, Collider, ShapeType, WorldCapacity};
 use engine_webgpu::{ContactStorage, SimOptions, WgpuSim};
@@ -61,11 +64,21 @@ fn build(n: u32, zones: u32, guided: bool, armed: u32) -> WgpuSim {
     sim.add_bodies(&bodies);
     sim.add_colliders(&cols);
     let extent = side as f32 * 2.0;
+    let paths = std::env::var("GUIDE_BENCH_PATHS").is_ok_and(|v| v == "1");
     let zone_list: Vec<GuideZoneGpu> = (0..zones)
         .map(|k| {
             let a = k as f32 * 0.7;
+            let center = [extent * 0.5 + 40.0 + 15.0 * a.cos(), 0.0, extent * 0.5 + 15.0 * a.sin()];
+            // Zig-zags 2 m either side of the centre, a key per second.
+            let mut path = [[0.0; 4]; GUIDE_PATH_KEYS];
+            for (j, key) in path.iter_mut().enumerate() {
+                let side = if j % 2 == 0 { -2.0 } else { 2.0 };
+                *key = [center[0] + side, 0.0, center[2], j as f32];
+            }
             GuideZoneGpu {
-                center: [extent * 0.5 + 40.0 + 15.0 * a.cos(), 0.0, extent * 0.5 + 15.0 * a.sin()],
+                center,
+                path_count: if paths { GUIDE_PATH_KEYS as u32 } else { 0 },
+                path,
                 shape: ZONE_RING,
                 extent: [1.0, 3.0, 0.0],
                 anchor: ZONE_NO_ANCHOR,
