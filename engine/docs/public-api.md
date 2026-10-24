@@ -187,7 +187,7 @@ loop {
   | `gravity_scale` | P3 |
   | `sleep_threshold` | P3 (global today) |
   | `motion_locks` | P3 |
-  | `is_bullet` | P3 (port the Metal CCD sweep) |
+  | `is_bullet` | ✅ `BODY_CCD` (#52's continuous collision) |
   | `enable_sleep` | Available |
   | `is_awake` | Available |
   | `is_enabled` | P1.5 (park) |
@@ -412,16 +412,18 @@ Blast's terms, reachable as a `BodyId`.
 
 **`StrengthModel`** picks how bonds fail. The same API serves all three:
 
-- **`Threshold`** is the default and fully GPU-resident (`GpuFracture`).
-  Contact and impact load is compared against bond capacity, with strike
-  prediction, and splits go into pre-allocated body slots.
+- **`Threshold`** is the fracture lab's `threshold` mode, fully GPU-resident
+  (`GpuFracture`, shipped in D1b). Each bonded cluster is one body. Contact and
+  impact loads are compared against bond capacity, with strike prediction for
+  bodies marked as projectiles (`body_set_projectile`), and splits go into body
+  slots reserved when the destructible is placed.
 - **`Stress(StressSettings)`** is Blast-parity: a quasi-static stress solve
   with `compression`, `tension` and `shear` limits, each with an elastic and a
   fatal value, plus an iteration budget. It is the charter baseline profile
   `blast_parity`. It is host-coupled until island frames move to the GPU.
 - **`Bonds`** turns each bond into a breakable AVBD bond joint, the fracture
   lab's default. It supports yield and bend limits, and every fragment is its
-  own body. Scheduled in D1, next to `Threshold`.
+  own body. It shipped in D1a.
 
 #### Render contract
 
@@ -685,7 +687,7 @@ today; each feature below gets a World call and an ABI call instead. Status:
 | Ground plane (legacy scenes, fracture lab) | `Geometry::Plane` on static bodies, `rbCreatePlaneShape` (at most 8) | ✅ |
 | Projectiles, cannons, rams (teleport plus velocity) | `rbBody_SetTransform`, `rbBody_SetLinearVelocity`, create and destroy | ✅ |
 | Body velocity and awake state for HUDs and colouring | `rbBody_GetVelocity` (blocking), `rbBody_IsAwake` | ✅ |
-| Hand-set mass and inertia from C | `body_set_mass_data` in Rust; `rbBody_SetMassData` | 🔜 |
+| Hand-set mass and inertia from C | `body_set_mass_data`, `rbBody_SetMassData` / `rbBody_GetMassData` (tensor converted for Unreal) | ✅ |
 | Runtime gravity | `rbWorld_SetGravity` | ✅ |
 | Joints: ball, cone and twist limits, hinge limits, slider, weld, spring, distance and tether, motors, servo, breakable | typed joint defs | ✅ |
 | Live motor speed and servo target (motor toggle, servo sweep) | `joint_set_drive`, `rbJoint_SetDrive` | ✅ |
@@ -697,29 +699,27 @@ today; each feature below gets a World call and an ABI call instead. Status:
 | Vehicle damage: detach or disable wheels and parts, functional state, mount loads | `vehicle_damage`, `rbVehicle_Damage`, `rbVehicle_SetFunctionalState`, `rbVehicle_GetMountLoads` | ✅ |
 | Soft vehicles: `.truck`, JBeam, procedural car, dune buggy, descriptors as JSON; spawn velocity and `rigid_core` | `rbCreateSoftVehicle`, `rbCreateSoftVehicleJBeam`, `rbCreateSoftVehicleTruck`, `rbGetSoftVehiclePresetJson` | ✅ |
 | Soft settings (`rigid_mode`, threshold, sweeps) and soft obstacles | `rbGetCalibratedSoftSettingsJson`, `rbWorld_SetSoftSettingsJson`, `rbSoft_AddObstacle` | ✅ |
-| Soft damage (yielded and broken beams, plastic work, rigid or soft mode) | `soft_damage`, `rbSoft_GetDamage` | ✅ (per-beam view 🔜) |
+| Soft damage (yielded and broken beams, plastic work, rigid or soft mode) and the beam view | `soft_damage`, `rbSoft_GetDamage`; `soft_beams`, `rbSoft_GetBeams` (node ordinals, rest lengths, force, broken, yielded, visible) | ✅ |
 | Soft skinning, node output, beam breaks and torn-off pieces | `rbSoft_BindSkin`, `RbFrame` | ✅ |
 | Destructibles from GLB, pack and cuboid houses; strength scale; layouts | `rbCreateDestructibleAsset*` | ✅ |
 | Bonds that settle under self-weight before they can break (the lab's preload) | `preload_destructible_asset`, `rbWorld_PreloadDestructibleAsset` (the lab's procedure, checked against the Metal lab: the masonry arch never sleeps within 600 steps in either, so both give up there) | ✅ |
 | The lab's solver settings (120 Hz, 8 iterations, contact and sleep flags) | `DestructibleAssetDesc::solver`, `World::set_solver`, `rbWorld_UseDestructibleAssetSolver` | ✅ |
-| Fracture lab `threshold` mode (GPU splitter) | D1b, `StrengthModel::Threshold` | 🔜 |
+| Fracture lab `threshold` mode (GPU splitter) | `StrengthModel::Threshold`, `RB_STRENGTH_THRESHOLD`; `body_set_projectile`, `rbBody_SetProjectile`; `solver_for`, `rbWorld_UseDestructibleAssetSolverFor`; `rbWorld_GetDestructibleAssetGround` (D1b) | ✅ |
 | Fracture lab `stress` mode (blast_parity) | D5, `StrengthModel::Stress` | 🔜 |
 | Picking (camera ray) | `rbWorld_CastRays` | ✅ |
-| Grab and drag | a kinematic mouse body (`body_set_target_transform` each frame) plus a weld with `linear_stiffness` or a spherical joint | ✅ (composed; a dedicated mouse joint later) |
+| Grab and drag | a kinematic mouse body (`rbBody_SetTargetTransform` each frame) jointed to the grabbed body (spherical, or a weld with `linear_stiffness`); tested through the ABI | ✅ (a dedicated mouse joint later) |
 | Scripted crusher, moving slabs | kinematic bodies: `BodyType::Kinematic`, `RB_KINEMATIC_BODY`, set velocity or `rbBody_SetTargetTransform` | ✅ |
 | Collider debug view | `World::draw`; `rbWorld_DebugDraw` (C callbacks) | ✅ |
 | Fixed rate, several steps per frame, pause, single step, sleep skip | `step`, `rbWorld_Step`, `rbWorld_Poll(coalesce)` | ✅ |
 | Reset | destroy and recreate the world, or remove and re-add; snapshot and restore is P6 | ✅ (P6 later) |
-| Per-kernel GPU timings | `profile_ms`, `rbWorld_GetProfile` | 🔜 |
+| GPU step timings | `profile_ms`, `rbWorld_GetProfileMs` (per-kernel breakdown later) | ✅ |
 
 Descriptors and settings cross the ABI as JSON in the engine's units and
 design frame (metres, Y up), the format of `vehicle_presets.json` and the
 soft descriptors; spawn transforms and velocities use the world's
 coordinates. `tests/demo_parity.rs` covers each row through the ABI.
 
-Next, in order: P4 (contact, hit and sensor events), D1b (`threshold`),
-the rest of P3 (damping, gravity scale, motion locks, bullets) and D5
-(`stress`).
+Next: D5 (`stress`).
 
 **P1.5: Box3D alignment (shipped).** `rubble::World` now has this shape:
 
@@ -825,16 +825,70 @@ Details are under P2 below.
   `Stress` models. Converting the limits would be a lossy decision, so it is
   not made silently.
 
-**D1b: the `Threshold` model in `World` (next).**
+**D1b: the `Threshold` model in `World` (shipped).** The fracture lab's
+`threshold` mode (stress-rubble `ThresholdWorld`) runs inside `World`, on the
+world's own device and `WgpuSim`. It sits behind engine-world's `stress`
+feature, which is on by default and adds path dependencies on the stress
+oracle's `stress-gpu`, `stress-ref` and `stress-rubble`.
 
-- **Build.** `GpuFracture` / `FractureTables` sharing the world's device,
-  with pre-allocated piece slots taken from `WorldCapacity`.
-- **Events.** `Split` events come from the GPU split log rather than from
-  host connectivity.
-- **Chunk transforms.** `chunk_local` becomes each chunk's pose in its
-  cluster.
-- **Device features.** It needs the stress solver's device features, such as
-  passthrough shaders on Metal, which `GpuContext` will request.
+- **Assets.** `from_glb`, `cuboid_house` and `from_pack` also import the same
+  source as the lab's stress modes do (`DestructibleAssetDesc::stress`, a
+  `StressSource`). That import supplies each chunk's material, volume and
+  support, each bond's tensile capacity and area, and the strike geometry.
+  Nothing is converted at load. A threshold instance's chunks are the stress
+  scene's chunks: the level's fragments in the asset's order (with their glTF
+  nodes), then the ground anchors the import adds. A failed import is reported
+  when a threshold destructible is placed, never at load.
+- **Placing.** One body per bonded cluster is cooked exactly as the lab cooks
+  it (stress-rubble `Cooker`), and its body record is written as the lab
+  writes it. Every other piece a split can make gets a reserved body slot up
+  front. The fracture tables and the contact ingest are built from World's
+  colliders, and the plan hints are fixed as the lab fixes them.
+- **Stepping.** Each step records `ingest.begin_frame`, World's own
+  `step_encode`, then `ingest.substep`, `merge` and `fracture.encode_frame`,
+  in one submission. The step's readback carries the fracture counters, chunk
+  owners, bond states and body frames. Readbacks are never dropped while a
+  threshold destructible exists.
+- **Adoption.** When a step split a body, the pieces' reserved slots become
+  live `BodyId`s. Every changed body takes the GPU's centre of mass and
+  principal axes as its solver frame from the next step on, with mass and
+  inertia summed from its chunks. The step then reports `BondsBroken` and
+  `Split` (the children partition the parent; one body per actor). Every
+  piece's origin stays the instance frame, so `chunk_local` is the identity
+  and the render contract holds.
+- **Projectiles.** `body_set_projectile(body, Some(Projectile))` adds a body
+  with one sphere or box shape to strike prediction and gives its contacts
+  the lab's shot loads. Other non-chunk colliders load chunks as static
+  geometry does (the lab's ground).
+- **Settings.** `solver_for(StrengthModel::Threshold)` gives the lab's
+  threshold engine settings: never asleep, zero-gap contact, world inertia,
+  4 iterations, 60 Hz. `StressSource::ground_height` gives the lab's ground
+  plane.
+- **Limits (fail loudly).**
+  - The world must use `ContactStorage::Canonical`, the rows the ingest reads.
+  - Reserved slots count against `max_bodies`.
+  - At most 64 projectiles (the strike table).
+  - At most 2^20 chunks or body slots (the fracture's scans).
+  - The impact pulse pool is sized from `max_contacts`.
+  - A fracture error bit fails the frame.
+  - Pieces belong to their destructible: `destroy_body` on one is refused.
+- **Cost.** Each step reads back 4 bytes per chunk, 4 per bond and 32 per
+  body slot of each threshold destructible. That is about 0.5 MB per step at
+  10k chunks.
+- **Parity.** `engine-world/tests/threshold.rs` places the masonry arch and
+  the cuboid house, fires the lab's shot, and runs the lab's
+  `ThresholdWorld` on the same scene. The first break comes in the same frame
+  with the same bond count in both. Afterwards the totals follow body-slot
+  order (the lab parks 16 shots between its clusters and its spare slots).
+  The arch breaks 87 bonds in World against the lab's 92, both ending at 17
+  bodies; the house ends at 104 bodies against 95 (50 bonds against 21). Each
+  new piece starts where its parent was. `engine-ffi/tests/threshold.rs` runs both
+  scenes through the C ABI in Unreal coordinates.
+- **Shaders.** The kernels run as WGSL on World's device, as in the browser.
+  A device opened with `PASSTHROUGH_SHADERS` on Metal runs the Metal
+  libraries instead.
+- **Not yet.** Snapshots of threshold state; damage descriptors (D2);
+  fracture-command replay (D3).
 
 **D1 (original list):**
 
@@ -944,13 +998,45 @@ Unreal is the first client.
   the GPU from the pose at the step start, so animation tracking never
   drifts. Without the flag every kernel path is unchanged.
 - A full gravity vector, keeping the Y-only path bit-identical.
-- `gravity_scale`, linear and angular damping, and per-body `sleep_threshold`.
-- `motion_locks`.
-- `is_bullet`: port the Metal CCD classify and sweep passes to the shared
-  plan.
+- ✅ `gravity_scale` and linear and angular damping (shipped 2026-10-24): a
+  per-step command at the start of the step, `v' = v / (1 + h c) + h (s - 1) g`,
+  which gives Box3D's inertial target exactly; only awake bodies that use
+  them get one, and they neither wake bodies nor keep an asleep world
+  stepping. Per-body `sleep_threshold` is still to do.
+- ✅ `motion_locks` (shipped 2026-10-24): body-flag bits 9..14 (above
+  `BODY_CCD`) read by two passes scheduled only while some body has locks:
+  `lock_predict` after prediction and `lock_project` after the solve each
+  remove the locked components (world axes) of the body's displacement and
+  rotation since the step start, so the inertial target respects the locks
+  and the locked axes are exact at the end of every step. The hot kernels
+  (`predictOne`, `primalApply`) are untouched: an earlier in-kernel version
+  shifted Metal and wgpu fast-math codegen for every body and failed the
+  Metal parity tests. C: `RB_LOCK_*` bits, permuted for Unreal axes.
+- ✅ `is_bullet` (2026-10-24): World sets `BODY_CCD`, #52's continuous
+  collision (uncapped reach, the fast list, a time-of-impact contact and
+  start pose); C `RbBodyDef::is_bullet`. Sensors take no time of impact and
+  no post-solve sweep check, so bullets pass through them.
+- ✅ Characters (2026-10-24): #52's capsule movers (`char_move`: walk,
+  step up, stick to the floor, slopes, jump, moving support, push weight)
+  through `World::create_character(CharacterDef)`, `character_set_input`
+  (velocity, jump once), `character_teleport`, `destroy_character` (slot
+  reused after quarantine); every frame reports `Frame::characters` and
+  `character_events` (landed, support lost, crushed) from one readback copy
+  of the records, no blocking read. The inner kinematic capsule is a World
+  body of its own, left out of body moves. C: `rbWorld_CreateCharacter`,
+  `rbCharacter_*`, `RbFrame::characters` / `character_events`.
 - `allow_fast_rotation`.
 
-**P4: contact, hit and sensor events (next, after P3 shipped).**
+**P4: contact, hit and sensor events.** Contact begin/end and hit events
+shipped 2026-10-24 (World `Frame::contact_events`, C `RbFrame::contact_begin`,
+`contact_end`, `hits`; tested in persistent and canonical storage and through
+the ABI in Unreal units). Sensors shipped the same day: `is_sensor` shapes
+have no response (the events pass zeroes their manifold and solver pair, so
+the CSR graph and islands skip them) and, with `enable_sensor_events`, report
+`SensorBegin` / `SensorEnd` (World `Frame::sensor_events`, C
+`RbFrame::sensor_begin` / `sensor_end`). Sensors do not detect sensors.
+Compact contact storage refuses sensors (its solver pairs are packed before
+the pass).
 
 The design (2026-10-24):
 
@@ -987,6 +1073,29 @@ The design (2026-10-24):
 queries with `QueryFilter`, moved off the vehicle ray pool. Then capsule
 `cast_mover` and `collide_mover`.
 
+- *Shipped (2026-10-24):* `World::overlap_aabb(min, max, QueryFilter)`
+  (C `rbWorld_OverlapAABB`), Box3D's bounds overlap: a pass over colliders
+  after the step, with bounds refreshed to its final poses (as ray queries
+  do; lossless, tested), up to 32 queries and 8192 results per step,
+  sensors not reported; results in `Frame::overlap_results` /
+  `RbFrame::overlaps`. And `World::explode(ExplosionDef)` (C
+  `rbWorld_Explode`), Box3D's radial impulse: an early pass in steps that
+  have one, impulse per area times each collider's cross-section, full
+  inside the radius and fading over the falloff, waking what it reaches.
+
+- *Shipped (2026-10-24):* `World::cast(CastDef)` (C `rbWorld_Cast`): ray,
+  sphere and upright-capsule casts, closest hit, on #52's in-step
+  `query_batch` (grid walk, exact shapes, category mask, an ignored body).
+  It needs no vehicle pool. It runs before the step moves anything, so it
+  sees the poses the step starts from. Up to 256 per step; results in
+  `Frame::cast_results` / `RbFrame::casts`, and a frame with casts is never
+  dropped. Projectiles: `World::spawn_projectile(ProjectileDef)` (C
+  `rbWorld_SpawnProjectile`), #52's piercing ballistic casts. Energy pays
+  for each shape's thickness, and hits push dynamic bodies. Stopped
+  projectiles' slots are reused, and the pool is released once all have
+  stopped, so a quiet world can sleep again. Results arrive as
+  `Frame::projectiles` and `projectile_events` (passed with the thickness
+  crossed, or stopped).
 - *Shipped first cut:* `World::cast_rays` (C: `rbWorld_CastRays`) queues
   closest-hit rays for the next step. They trace on the GPU against that
   step's final poses (they share the vehicle ray pool, whose ray count only

@@ -224,6 +224,7 @@ fn a_rigid_vehicle_carries_mounted_and_destructible_parts() {
             }],
             preload: None,
             solver: None,
+            stress: None,
         };
         w.create_destructible_asset(&desc).unwrap()
     };

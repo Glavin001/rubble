@@ -21,7 +21,7 @@ failure on the calling thread.
 | Area | Rules |
 |---|---|
 | Handles | `uint64_t`, where 0 is null. A stale handle returns `RB_STALE_HANDLE`. |
-| Definitions | Get one from `rbDefault*Def()` and change only the fields you need. A definition made any other way returns `RB_INVALID_ARGUMENT`. |
+| Definitions | Get one from `rbDefault*Def()` and change only the fields you need. A definition made any other way returns `RB_INVALID_ARGUMENT`. Defaults with lengths in them take the world's coordinates (`rbDefaultCharacterDef(RB_COORDINATES_UNREAL)` gives a 30 cm capsule). |
 | Stepping | `rbWorld_Step` never waits. `rbWorld_Poll` returns results: either one step at a time or folded together (`coalesce`). Pointers in an `RbFrame` stay valid until the next poll. |
 | Units and axes | Set `RbWorldDef::coordinates` to `RB_COORDINATES_UNREAL` for Unreal's Z-up, left-handed centimetres. The boundary converts vectors, rotations, pseudovectors (angular velocity and torque change sign), joint angles, units and triangle winding exactly. The rules are in `src/coords.rs`. |
 

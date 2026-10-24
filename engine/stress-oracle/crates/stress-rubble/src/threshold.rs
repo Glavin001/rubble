@@ -553,7 +553,7 @@ impl RubbleEngine {
 }
 
 /// A rotation matrix's quaternion.
-fn rotation_quat(m: &stress_ref::math::Mat3) -> Quat {
+pub fn rotation_quat(m: &stress_ref::math::Mat3) -> Quat {
     let r = |i: usize, j: usize| m.m[i][j];
     let glam_m = glam::DMat3::from_cols(glam::DVec3::new(r(0, 0), r(1, 0), r(2, 0)), glam::DVec3::new(r(0, 1), r(1, 1), r(2, 1)), glam::DVec3::new(r(0, 2), r(1, 2), r(2, 2)));
     let q = glam::DQuat::from_mat3(&glam_m).normalize();

@@ -89,7 +89,7 @@ fn axes() -> Quat {
 
 /// glam quaternion `[x, y, z, w]` of an oracle-frame rotation `q` (body to oracle
 /// world), as a rotation from the same body frame to rubble's world.
-fn rot_to_rubble(q: Quat) -> [f32; 4] {
+pub fn rot_to_rubble(q: Quat) -> [f32; 4] {
     let r = (axes() * q).normalized();
     [r.x as f32, r.y as f32, r.z as f32, r.w as f32]
 }
@@ -144,18 +144,36 @@ pub(crate) struct Entry {
 }
 
 /// A body's colliders and mass properties in its principal frame.
-struct Cooked {
-    mass: f64,
-    moments: Vec3,
-    com: Vec3,
-    principal: Quat,
-    colliders: Vec<Collider>,
-    chunks: Vec<Option<(usize, usize)>>,
+pub struct Cooked {
+    pub mass: f64,
+    pub moments: Vec3,
+    /// Centre of mass and principal rotation in the frame the body's shapes are given in.
+    pub com: Vec3,
+    pub principal: Quat,
+    /// Collider records (`body` 0), in the principal frame.
+    pub colliders: Vec<Collider>,
+    /// Each collider's chunk.
+    pub chunks: Vec<Option<(usize, usize)>>,
     thin: f64,
     /// Each collider's shape in the body's frame before the principal axes (for a
     /// cluster, the structure's frame), as the GPU needs it to make bodies of a split's
     /// children itself (`Part`).
-    parts: Vec<Part>,
+    pub parts: Vec<Part>,
+}
+
+/// Cooks engine bodies as [`RubbleEngine`] does (`cook_with`), for a host that places
+/// the colliders in its own rubble world (rubble's `World`): identical hulls are cooked
+/// once into the host's arena.
+#[derive(Default)]
+pub struct Cooker {
+    hulls: HullCache,
+}
+
+impl Cooker {
+    /// `b`'s colliders, parts and mass properties; its hulls go into `arena`.
+    pub fn cook(&mut self, b: &EngineBody, arena: &mut HullArena) -> Cooked {
+        cook_with(b, arena, &mut self.hulls)
+    }
 }
 
 /// One collider's shape in the frame its body's shapes are given in (a cluster's: the

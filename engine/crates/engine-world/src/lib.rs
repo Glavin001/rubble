@@ -19,6 +19,7 @@
 //! See `engine/docs/public-api.md` and `engine/docs/api-review.md`.
 
 mod assembly;
+mod contacts;
 mod debug_draw;
 mod defs;
 mod destruction;
@@ -27,8 +28,11 @@ mod events;
 mod handles;
 mod joints;
 mod math;
+mod motion;
+mod queries;
 mod readback;
 mod rig;
+mod threshold;
 
 pub use assembly::{
     AssemblyDef, AssemblyId, ConnectionDef, ConnectionKind, PartDef, PartHandle, PartModel,
@@ -45,8 +49,9 @@ pub use destruction::{
 };
 pub use error::{StaleHandle, Unsupported};
 pub use events::{
-    coalesce, BodyEvents, BodyMoveEvent, CoalescedFrame, DestructionEvent, Frame, RayBatchId,
-    RayBatchResult, SkinId, SkinOutput, SoftOutput, VehicleOutput,
+    coalesce, BodyEvents, BodyMoveEvent, CoalescedFrame, ContactBeginEvent, ContactEndEvent,
+    ContactEvents, DestructionEvent, Frame, RayBatchId, RayBatchResult, SensorEvent, SensorEvents,
+    SkinId, SkinOutput, SoftOutput, VehicleOutput,
 };
 pub use handles::{BodyId, JointId, ShapeId};
 pub use joints::{
@@ -54,8 +59,15 @@ pub use joints::{
     RevoluteJointDef, SphericalJointDef, Spring, WeldJointDef,
 };
 pub use math::Transform;
+pub use motion::{
+    CastDef, CastHit, CastId, CastResult, CastShape, CharacterDef, CharacterDesc, CharacterEvent,
+    CharacterEventKind, CharacterId, CharacterOutput, GroundState, ProjectileDef, ProjectileEvent,
+    ProjectileEventKind, ProjectileId, ProjectileOutput,
+};
+pub use queries::{ExplosionDef, OverlapResult, QueryFilter, QueryId};
 pub use readback::Backpressure;
-pub use rig::VehicleDamage;
+pub use rig::{SoftBeam, VehicleDamage};
+pub use threshold::{Projectile, StressSource};
 
 pub use engine_schema::convex::{CollisionFilter as Filter, ConvexHull};
 pub use engine_schema::{
@@ -115,6 +127,10 @@ pub struct WorldDef {
     /// Steps whose results can be in flight at once.
     pub readback_frames: u32,
     pub backpressure: Backpressure,
+    /// Contact begins at or above this approach speed (m/s) on shapes with
+    /// `enable_hit_events` are also reported as hits (Box3D
+    /// `hitEventThreshold`).
+    pub hit_event_threshold: f32,
 }
 
 impl Default for WorldDef {
@@ -131,6 +147,7 @@ impl Default for WorldDef {
             features: EngineFeatures::default(),
             env_overrides: false,
             readback_frames: 3,
+            hit_event_threshold: 1.0,
             backpressure: Backpressure::Block,
         }
     }
@@ -180,6 +197,11 @@ enum Owner {
     Vehicle,
     /// A soft-body particle: reported through `Frame::soft`, not as moves.
     SoftNode,
+    /// A threshold destructible's piece (or a slot reserved for one): its shapes and
+    /// lifetime belong to the destructible.
+    Piece,
+    /// A character's inner capsule: reported through `Frame::characters`.
+    Character,
 }
 
 /// What an extra readback copy holds.
@@ -195,6 +217,19 @@ enum Extra {
     /// The ray-query pool after this step's traces: batches by `(id, first,
     /// count)` into it.
     RayHits(Vec<(RayBatchId, u32, u32)>),
+    /// This step's touching pairs of event-enabled shapes.
+    Contacts,
+    /// The overlap query region, for these queries.
+    Overlaps(Vec<QueryId>),
+    /// A threshold destructible's state after this step.
+    #[cfg(feature = "stress")]
+    Fracture(threshold::FractureRead),
+    /// Every character record.
+    Characters,
+    /// The scene-query records, for these casts.
+    Casts(Vec<CastId>),
+    /// Every projectile record.
+    Projectiles,
 }
 
 #[derive(Clone, Debug)]
@@ -226,9 +261,18 @@ struct BodySlot {
     last_asleep: bool,
     /// The solver pose last delivered, for the resync diff.
     last_solver: Option<Transform>,
+    /// Damping (linear, angular) and gravity scale, sent each step as a
+    /// command while they differ from (0, 0, 1).
+    damping: (f32, f32),
+    gravity_scale: f32,
+    locks: u32,
+    bullet: bool,
 }
 
 impl BodySlot {
+    fn tuned(&self) -> bool {
+        self.damping != (0.0, 0.0) || self.gravity_scale != 1.0
+    }
     fn frame(&self) -> SolverFrame {
         self.frames.last().map_or(SolverFrame::IDENTITY, |f| f.1)
     }
@@ -258,6 +302,9 @@ struct JointSlot {
     alive: bool,
     bodies: [u32; 2],
     user_data: u64,
+    /// Both frames in the bodies' origin frames, to re-express them when a
+    /// body's centre of mass moves.
+    origin_frames: [JointFrame; 2],
 }
 
 /// Steps a released body or collider slot waits before reuse: neither contact
@@ -336,6 +383,13 @@ pub struct World {
     last_counters: Option<StepCounters>,
     /// The adapter this world runs on (for helper worlds on its device).
     adapter: wgpu::AdapterInfo,
+    contacts: contacts::ContactTracker,
+    queries: queries::QueryQueue,
+    hit_event_threshold: f32,
+    contact_storage: ContactStorage,
+    /// Threshold destructibles (`StrengthModel::Threshold`).
+    fracture: threshold::Fracture,
+    motion: motion::MotionState,
 }
 
 impl World {
@@ -396,6 +450,11 @@ impl World {
             last_input_step: None,
             last_counters: None,
             adapter,
+            contacts: Default::default(),
+            queries: Default::default(),
+            hit_event_threshold: def.hit_event_threshold,
+            contact_storage: contacts,
+            motion: Default::default(),
             resync: false,
             vehicles: Vec::new(),
             soft_outputs: Vec::new(),
@@ -408,6 +467,7 @@ impl World {
             pending_rays: Vec::new(),
             pending_batches: Vec::new(),
             next_ray_batch: 0,
+            fracture: Default::default(),
         })
     }
 
@@ -507,6 +567,10 @@ impl World {
                 last_transform: None,
                 last_asleep: asleep,
                 last_solver: None,
+                damping: (d.linear_damping, d.angular_damping),
+                gravity_scale: d.gravity_scale,
+                locks: d.motion_locks.bits(),
+                bullet: d.is_bullet && d.body_type == BodyType::Dynamic,
             };
             let state = body_state(&slot);
             match self.reusable_body_slot() {
@@ -537,6 +601,12 @@ impl World {
                 ids[*k] = BodyId::new(index, 1);
             }
         }
+        if defs
+            .iter()
+            .any(|d| d.motion_locks.bits() != 0 && d.body_type == BodyType::Dynamic)
+        {
+            self.sim.set_motion_locks(true);
+        }
         Ok(ids)
     }
 
@@ -545,6 +615,12 @@ impl World {
     /// after two steps.
     pub fn destroy_body(&mut self, id: BodyId) -> anyhow::Result<()> {
         let i = self.live_body(id)?;
+        if self.bodies[i].owner == Owner::Piece {
+            anyhow::bail!(
+                "body {} is a threshold destructible's piece; destroy the destructible instead",
+                id.index()
+            );
+        }
         if self.bodies[i].owner != Owner::User {
             anyhow::bail!(
                 "body {} belongs to a vehicle or soft body; remove that instead",
@@ -559,6 +635,7 @@ impl World {
             self.release_shape(s);
         }
         let index = id.index();
+        self.fracture.body_destroyed(index);
         self.sim.cancel_body_commands(index);
         let p = graveyard(index);
         let mut parked = BodyState::static_plane_support();
@@ -678,6 +755,84 @@ impl World {
             id,
             GpuCommand::set_kinematic_target(id.index(), s.position, s.rotation),
         )
+    }
+
+    /// Box3D damping (1/s): velocities shrink by `1 / (1 + h c)` each step.
+    pub fn body_set_damping(
+        &mut self,
+        id: BodyId,
+        linear: f32,
+        angular: f32,
+    ) -> anyhow::Result<()> {
+        let i = self.live_body(id)?;
+        anyhow::ensure!(linear >= 0.0 && angular >= 0.0, "negative damping");
+        self.bodies[i].damping = (linear, angular);
+        Ok(())
+    }
+
+    pub fn body_damping(&self, id: BodyId) -> anyhow::Result<(f32, f32)> {
+        Ok(self.bodies[self.live_body(id)?].damping)
+    }
+
+    /// Multiply gravity for this body (it wakes).
+    pub fn body_set_gravity_scale(&mut self, id: BodyId, scale: f32) -> anyhow::Result<()> {
+        let i = self.live_body(id)?;
+        anyhow::ensure!(scale.is_finite(), "gravity_scale must be finite");
+        if self.bodies[i].gravity_scale == scale {
+            return Ok(());
+        }
+        self.bodies[i].gravity_scale = scale;
+        // A body resting under the old scale may have slept: it moves again.
+        self.command(id, GpuCommand::wake(id.index()))
+    }
+
+    pub fn body_gravity_scale(&self, id: BodyId) -> anyhow::Result<f32> {
+        Ok(self.bodies[self.live_body(id)?].gravity_scale)
+    }
+
+    /// Lock axes (world frame) the body may not move along or turn about
+    /// (Box3D `b3Body_SetMotionLocks`): its displacement and rotation since
+    /// each step's start lose their locked components (the `lock_predict` and
+    /// `lock_project` passes, scheduled only while some body has locks).
+    pub fn body_set_motion_locks(&mut self, id: BodyId, locks: MotionLocks) -> anyhow::Result<()> {
+        let i = self.live_body(id)?;
+        self.bodies[i].locks = locks.bits();
+        if locks.bits() != 0 {
+            self.sim.set_motion_locks(true);
+        }
+        self.command(id, GpuCommand::set_locks(id.index(), locks.bits()))
+    }
+
+    pub fn body_motion_locks(&self, id: BodyId) -> anyhow::Result<MotionLocks> {
+        Ok(MotionLocks::from_bits(
+            self.bodies[self.live_body(id)?].locks,
+        ))
+    }
+
+    /// This step's damping and gravity-scale commands: awake dynamic bodies
+    /// whose values differ from (0, 0, 1). They neither wake bodies nor
+    /// count as input, so an asleep world still skips its steps.
+    fn push_damping(&mut self) -> anyhow::Result<()> {
+        let p = self.sim.params();
+        let h = p.dt;
+        let mut cmds = Vec::new();
+        for (i, b) in self.bodies.iter().enumerate() {
+            if !b.alive || b.body_type != BodyType::Dynamic || b.last_asleep || !b.tuned() {
+                continue;
+            }
+            let add = [0.0, h * (b.gravity_scale - 1.0) * p.gravity_y, 0.0];
+            let cmd = GpuCommand::damp(
+                i as u32,
+                add,
+                1.0 / (1.0 + h * b.damping.0),
+                1.0 / (1.0 + h * b.damping.1),
+            );
+            cmds.push(cmd.without_wake());
+        }
+        if cmds.is_empty() {
+            return Ok(());
+        }
+        self.sim.push_body_commands(&cmds)
     }
 
     /// Teleport the body origin (velocities kept; the body wakes).
@@ -869,6 +1024,10 @@ impl World {
             "shapes on vehicle-owned bodies"
         );
         def.validate()?;
+        if def.is_sensor && self.contact_storage == ContactStorage::Compact {
+            // Compact solver pairs are packed before the events pass runs.
+            return unsupported("sensor shapes with ContactStorage::Compact");
+        }
         if matches!(geometry, Geometry::Plane { .. }) {
             anyhow::ensure!(
                 self.bodies[b].body_type == BodyType::Static,
@@ -887,6 +1046,8 @@ impl World {
         let mut collider =
             self.collider(body.index(), frame, &geometry, def.density, material, None)?;
         def.filter.apply(&mut collider);
+        collider.material |= contacts::event_bits(def);
+        self.contacts_shape_added(def);
         let collider_index = self.place_collider(collider)?;
         let slot = ShapeSlot {
             generation: 1,
@@ -918,6 +1079,48 @@ impl World {
             self.set_mass(b, mass)?;
         }
         Ok(ShapeId::new(index, self.shapes[index as usize].generation))
+    }
+
+    /// A shape whose collider record the caller built (a threshold destructible's
+    /// cooked chunk parts): placed as is, with `geometry` for queries and rewrites.
+    /// Returns the shape slot and the collider.
+    #[cfg_attr(not(feature = "stress"), allow(dead_code))]
+    pub(crate) fn add_shape_record(
+        &mut self,
+        b: usize,
+        def: &ShapeDef,
+        geometry: Geometry,
+        collider: Collider,
+    ) -> anyhow::Result<(u32, u32)> {
+        self.dirty = true;
+        self.contacts_shape_added(def);
+        let collider_index = self.place_collider(collider)?;
+        let slot = ShapeSlot {
+            generation: 1,
+            alive: true,
+            body: b as u32,
+            collider: collider_index,
+            geometry,
+            def: def.clone(),
+        };
+        let index = match self.free_shapes.pop() {
+            Some(i) => {
+                let generation = self.shapes[i as usize].generation;
+                self.shapes[i as usize] = ShapeSlot { generation, ..slot };
+                i
+            }
+            None => {
+                self.shapes.push(slot);
+                self.shapes.len() as u32 - 1
+            }
+        };
+        if self.collider_shape.len() <= collider_index as usize {
+            self.collider_shape
+                .resize(collider_index as usize + 1, u32::MAX);
+        }
+        self.collider_shape[collider_index as usize] = index;
+        self.bodies[b].shapes.push(index);
+        Ok((index, collider_index))
     }
 
     /// Destroy a shape (Box3D `b3DestroyShape`).
@@ -1036,6 +1239,10 @@ impl World {
         self.dirty = true;
         desc.body_a = a as u32;
         desc.body_b = b as u32;
+        let origin_frames = [
+            joint_frame_origin(self.bodies[a].frame(), desc.frame_a),
+            joint_frame_origin(self.bodies[b].frame(), desc.frame_b),
+        ];
         let index = self.sim.add_joint_desc(&desc);
         let i = index as usize;
         if self.joints.len() <= i {
@@ -1044,6 +1251,7 @@ impl World {
                 alive: false,
                 bodies: [0, 0],
                 user_data: 0,
+                origin_frames: [JointFrame::at(Vec3::ZERO); 2],
             };
             self.joints.resize(i + 1, empty);
         }
@@ -1052,6 +1260,7 @@ impl World {
         slot.alive = true;
         slot.bodies = [a as u32, b as u32];
         slot.user_data = user_data;
+        slot.origin_frames = origin_frames;
         let id = JointId::new(index, slot.generation);
         self.bodies[a].joints.push(index);
         if b != a {
@@ -1289,9 +1498,29 @@ impl World {
         }
         let rays = std::mem::take(&mut self.pending_rays);
         let batches = std::mem::take(&mut self.pending_batches);
+        self.push_damping()?;
+        let explosions = std::mem::take(&mut self.queries.explosions);
+        if !explosions.is_empty() {
+            self.sim.write_explosions(&explosions)?;
+        }
+        let boxes = std::mem::take(&mut self.queries.boxes);
+        let query_ids = std::mem::take(&mut self.queries.ids);
+        if !boxes.is_empty() {
+            self.sim.write_overlap_queries(&boxes)?;
+        }
+        let contact_events = self.contacts.enabled_shapes > 0;
+        if contact_events {
+            self.sim.clear_contact_events();
+        }
+        let casts = self.motion_before_step();
         if !rays.is_empty() {
             // Forces the step to run, so its frame carries the hits.
             self.sim.write_ray_queries(&rays)?;
+        }
+        let fracture = self.fracture.active();
+        #[cfg(feature = "stress")]
+        if fracture && self.fracture_projectiles_dirty() {
+            self.sync_projectiles()?;
         }
         let mut enc = self
             .sim
@@ -1299,14 +1528,30 @@ impl World {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("world step"),
             });
+        #[cfg(feature = "stress")]
+        if fracture {
+            self.encode_fracture_begin(&mut enc);
+        }
         self.sim
             .step_encode(&mut enc)
             .map_err(|e| anyhow::anyhow!("step: {e:?}"))?;
         let ran = self.sim.last_step_ran();
+        #[cfg(feature = "stress")]
+        if fracture && ran {
+            // Loads, breaks and splits from this step's contacts, before the next step.
+            self.encode_fracture(&mut enc);
+        }
         let mut mapped = None;
         if ran {
             // Ray results are never dropped: a frame with queries waits for a slot.
-            let block = self.backpressure == Backpressure::Block || !batches.is_empty();
+            // Nor are contact events: a lost frame would break begin/end pairing.
+            // Nor are fracture states: a split must be adopted in the step it happened.
+            let block = self.backpressure == Backpressure::Block
+                || !batches.is_empty()
+                || !query_ids.is_empty()
+                || !casts.is_empty()
+                || contact_events
+                || fracture;
             if !self.readback.has_free() && block {
                 self.wait_oldest()?;
             }
@@ -1333,6 +1578,30 @@ impl World {
                         size: u64::from(count) * 16,
                     });
                 }
+                #[cfg(feature = "stress")]
+                if fracture {
+                    extras.extend(self.fracture.extras());
+                }
+                if !query_ids.is_empty() {
+                    self.sim.encode_overlap_queries(&mut enc);
+                    let (buffer, offset, size) = self.sim.overlap_result_range();
+                    extras.push(readback::Extra {
+                        kind: Extra::Overlaps(query_ids),
+                        buffer,
+                        offset,
+                        size,
+                    });
+                }
+                if contact_events {
+                    let (buffer, offset, size) = self.sim.contact_event_range();
+                    extras.push(readback::Extra {
+                        kind: Extra::Contacts,
+                        buffer,
+                        offset,
+                        size,
+                    });
+                }
+                extras.extend(motion::extras(&self.sim, &self.motion, casts));
                 let slot = self.readback.encode(&self.sim, &mut enc, step, &extras);
                 self.resync = false;
                 mapped = Some(slot);
@@ -1436,6 +1705,11 @@ impl World {
                 }
             }
         }
+        if let Some(last) = frames.last_mut() {
+            let (ends, sensor_ends) = self.take_pending_contact_ends();
+            last.contact_events.end.extend(ends);
+            last.sensor_events.end.extend(sensor_ends);
+        }
         Ok(frames)
     }
 
@@ -1479,8 +1753,13 @@ impl World {
             );
             self.sim.set_plan_hints(c.contact_count, c.color_count);
         }
+        if let Some((contacts, colors)) = self.fracture.fixed_plan {
+            self.sim.set_plan_hints(contacts, colors);
+        }
         self.last_counters = Some(c);
         let ring = self.sim.ring_events(&raw.ring);
+        let (character_events, projectile_events, lost_motion) =
+            self.motion_events(step, &raw.ring);
         let mut destruction = Vec::new();
         for b in ring.joint_breaks {
             if let Some(slot) = self.joints.get(b.joint as usize) {
@@ -1509,7 +1788,21 @@ impl World {
                 .into_iter()
                 .map(DestructionEvent::PieceDetached),
         );
-        let destruction = self.destruction_events(destruction);
+        let mut destruction = self.destruction_events(destruction);
+        #[cfg(feature = "stress")]
+        {
+            let reads: Vec<(threshold::FractureRead, &[u8])> = raw
+                .extras
+                .iter()
+                .filter_map(|(k, b)| match k {
+                    Extra::Fracture(r) => Some((*r, b.as_slice())),
+                    _ => None,
+                })
+                .collect();
+            if !reads.is_empty() {
+                destruction.extend(self.fracture_frame(step, &reads)?);
+            }
+        }
         let destruction = self.connection_events(destruction);
         let resync = raw
             .extras
@@ -1547,7 +1840,7 @@ impl World {
             if r.woke() {
                 slot.last_asleep = false;
             }
-            if slot.owner == Owner::SoftNode {
+            if matches!(slot.owner, Owner::SoftNode | Owner::Character) {
                 continue;
             }
             moves.push(BodyMoveEvent {
@@ -1564,9 +1857,29 @@ impl World {
         let mut skins: Vec<SkinOutput> = Vec::new();
         let mut record: Option<(VehicleHandle, Vec<[u32; 4]>)> = None;
         let mut ray_results = Vec::new();
+        let mut contact_events = ContactEvents::default();
+        let mut sensor_events = SensorEvents::default();
+        let mut overlap_results = Vec::new();
+        let mut characters = Vec::new();
+        let mut cast_results = Vec::new();
+        let mut projectiles = Vec::new();
+        let mut lost_contacts = 0;
         for (kind, bytes) in &raw.extras {
             match kind {
                 Extra::Resync => {}
+                #[cfg(feature = "stress")]
+                Extra::Fracture(_) => {}
+                Extra::Overlaps(ids) => {
+                    let (results, lost) = self.decode_overlaps(ids, bytes);
+                    overlap_results = results;
+                    lost_contacts += lost;
+                }
+                Extra::Contacts => {
+                    (contact_events, sensor_events, lost_contacts) = self.decode_contacts(bytes);
+                }
+                Extra::Characters => characters = self.decode_characters(step, bytes),
+                Extra::Casts(ids) => cast_results = self.decode_casts(ids, bytes),
+                Extra::Projectiles => projectiles = self.decode_projectiles(step, bytes),
                 Extra::RayHits(batches) => {
                     let hits = self.sim.decode_ray_hits(&slots(bytes));
                     for (batch, first, count) in batches {
@@ -1615,7 +1928,16 @@ impl World {
             soft,
             skins,
             ray_results,
-            lost_events: ring.lost,
+            contact_events,
+            sensor_events,
+            overlap_results,
+            characters,
+            character_events,
+            cast_results,
+            projectiles,
+            projectile_events,
+            // One ring: its overflow is counted once, however many readers.
+            lost_events: ring.lost.max(lost_motion) + lost_contacts,
             dropped: false,
             resynced: resync.is_some(),
             counters: Some(c),
@@ -1694,6 +2016,7 @@ impl World {
     }
 
     fn release_shape(&mut self, index: u32) {
+        self.contacts_shape_removed(index);
         let s = &mut self.shapes[index as usize];
         s.alive = false;
         s.generation = s.generation.wrapping_add(1).max(1);
@@ -1850,6 +2173,7 @@ impl World {
             hull_params,
         )?;
         slot.def.filter.apply(&mut c);
+        c.material |= contacts::event_bits(&slot.def);
         self.sim.set_collider(slot.collider, c);
         Ok(())
     }
@@ -1928,6 +2252,26 @@ impl World {
             for s in self.bodies[b].shapes.clone() {
                 self.rewrite_shape(s as usize)?;
             }
+            // Joints are kept in solver frames: re-express this body's side.
+            // (A plastic weld's accumulated bend restarts from its rest.)
+            for j in self.bodies[b].joints.clone() {
+                let slot = &self.joints[j as usize];
+                if !slot.alive {
+                    continue;
+                }
+                let (bodies, frames) = (slot.bodies, slot.origin_frames);
+                for side in 0..2 {
+                    if bodies[side] as usize == b {
+                        let f = joint_frame(next, frames[side]);
+                        self.sim.set_joint_frame(
+                            j,
+                            side == 1,
+                            f.anchor.to_array(),
+                            f.rot.to_array(),
+                        );
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -1954,6 +2298,10 @@ impl World {
                 last_transform: None,
                 last_asleep: false,
                 last_solver: None,
+                damping: (0.0, 0.0),
+                gravity_scale: 1.0,
+                locks: 0,
+                bullet: false,
             });
         }
     }
@@ -1998,7 +2346,8 @@ fn body_state(slot: &BodySlot) -> BodyState {
             let mut s = BodyState::static_plane_support();
             s.position = solver.position;
             s.orientation = solver.rotation;
-            s.flags = engine_schema::BodyFlags::Kinematic as u32 | engine_schema::BodyFlags::Awake as u32;
+            s.flags =
+                engine_schema::BodyFlags::Kinematic as u32 | engine_schema::BodyFlags::Awake as u32;
             s
         }
         BodyType::Static => {
@@ -2008,6 +2357,12 @@ fn body_state(slot: &BodySlot) -> BodyState {
             s
         }
     };
+    if slot.bullet {
+        b.flags |= engine_schema::BODY_CCD;
+    }
+    if slot.body_type == BodyType::Dynamic {
+        b.flags |= slot.locks << engine_schema::BODY_LOCK_SHIFT;
+    }
     b.initial_pos = b.position;
     b.initial_rot = b.orientation;
     b.linear_vel = slot.velocity.0;
@@ -2017,6 +2372,15 @@ fn body_state(slot: &BodySlot) -> BodyState {
             | engine_schema::BodyFlags::Sleeping as u32;
     }
     b
+}
+
+/// The inverse of `joint_frame`: a solver-frame joint frame in the body's
+/// origin frame.
+fn joint_frame_origin(frame: SolverFrame, f: JointFrame) -> JointFrame {
+    JointFrame {
+        anchor: frame.center + frame.axes * f.anchor,
+        rot: (frame.axes * f.rot).normalize(),
+    }
 }
 
 fn joint_frame(frame: SolverFrame, f: JointFrame) -> JointFrame {

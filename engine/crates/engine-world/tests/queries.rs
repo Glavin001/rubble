@@ -160,3 +160,127 @@ fn debug_draw_visits_every_shape() {
     assert_eq!(c.meshes, 1);
     assert_eq!(c.transforms, 22);
 }
+
+fn crate_at(w: &mut World, at: [f32; 3], def: &ShapeDef) -> ShapeId {
+    let b = w.create_body(&BodyDef::dynamic(at)).unwrap();
+    w.create_box_shape(b, def, [0.5; 3]).unwrap()
+}
+
+#[test]
+fn overlap_queries_find_the_shapes_in_a_box() {
+    let mut w = world();
+    let near = crate_at(&mut w, [0.0, 0.5, 0.0], &ShapeDef::default());
+    let also = crate_at(&mut w, [1.5, 0.5, 0.0], &ShapeDef::default());
+    let _far = crate_at(&mut w, [10.0, 0.5, 0.0], &ShapeDef::default());
+    let hidden = crate_at(
+        &mut w,
+        [0.0, 0.5, 1.5],
+        &ShapeDef {
+            filter: Filter {
+                categories: 2,
+                mask: 0xFFFF,
+                group: 0,
+            },
+            ..ShapeDef::default()
+        },
+    );
+    let s = w
+        .create_body(&BodyDef {
+            position: [0.0, 2.0, 0.0],
+            ..BodyDef::default()
+        })
+        .unwrap();
+    let sensor = w
+        .create_box_shape(
+            s,
+            &ShapeDef {
+                is_sensor: true,
+                ..ShapeDef::default()
+            },
+            [0.5; 3],
+        )
+        .unwrap();
+    w.step_sync().unwrap();
+    // Above the ground slab's top (y = 0), so only the crates count.
+    let filter = QueryFilter {
+        categories: 0xFFFF,
+        mask: 0xFFFF & !2,
+    };
+    let q = w
+        .overlap_aabb([-1.0, 0.2, -1.0], [2.0, 3.0, 2.0], filter)
+        .unwrap();
+    let f = w.step_sync().unwrap();
+    let r = f.overlap_results.iter().find(|r| r.query == q).unwrap();
+    assert!(
+        r.shapes.contains(&near) && r.shapes.contains(&also),
+        "{r:?}"
+    );
+    assert!(!r.shapes.contains(&hidden), "filtered out: {r:?}");
+    assert!(
+        !r.shapes.contains(&sensor),
+        "sensors are not reported: {r:?}"
+    );
+    assert_eq!(r.shapes.len(), 2, "{r:?}");
+    assert!(w.step_sync().unwrap().overlap_results.is_empty());
+}
+
+#[test]
+fn overlap_queries_do_not_change_the_simulation() {
+    let mut with = world();
+    let mut without = world();
+    pile(&mut with);
+    pile(&mut without);
+    for _ in 0..120 {
+        with.overlap_aabb([-2.0; 3], [2.0; 3], QueryFilter::default())
+            .unwrap();
+        with.step().unwrap();
+        without.step().unwrap();
+        with.poll().unwrap();
+        without.poll().unwrap();
+    }
+    with.poll_blocking().unwrap();
+    without.poll_blocking().unwrap();
+    let bytes =
+        |w: &World| bytemuck::cast_slice::<BodyState, u8>(&w.sim().download_bodies()).to_vec();
+    assert!(bytes(&with) == bytes(&without));
+}
+
+#[test]
+fn explosions_push_nearby_bodies_outward_and_wake_them() {
+    let mut w = world();
+    let bodies: Vec<BodyId> = [
+        [2.0, 0.5, 0.0],
+        [-2.0, 0.5, 0.0],
+        [0.0, 0.5, 2.0],
+        [12.0, 0.5, 0.0],
+    ]
+    .iter()
+    .map(|&p| {
+        let b = w.create_body(&BodyDef::dynamic(p)).unwrap();
+        w.create_box_shape(b, &ShapeDef::default(), [0.5; 3])
+            .unwrap();
+        b
+    })
+    .collect();
+    for _ in 0..240 {
+        w.step().unwrap();
+        w.poll().unwrap();
+    }
+    w.poll_blocking().unwrap();
+    assert!(!w.body_is_awake(bodies[0]).unwrap(), "settled asleep");
+    w.explode(&ExplosionDef {
+        position: [0.0, 0.5, 0.0],
+        radius: 2.0,
+        falloff: 3.0,
+        impulse_per_area: 20.0,
+        ..ExplosionDef::default()
+    })
+    .unwrap();
+    w.step_sync().unwrap();
+    let v = |b| w.read_body_state(b).unwrap().linear_velocity;
+    assert!(v(bodies[0])[0] > 1.0, "pushed +x: {:?}", v(bodies[0]));
+    assert!(v(bodies[1])[0] < -1.0, "pushed -x: {:?}", v(bodies[1]));
+    assert!(v(bodies[2])[2] > 1.0, "pushed +z: {:?}", v(bodies[2]));
+    let far = v(bodies[3]);
+    assert!(far.iter().all(|x| x.abs() < 1e-6), "out of reach: {far:?}");
+}

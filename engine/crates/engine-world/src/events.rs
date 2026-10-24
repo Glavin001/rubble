@@ -87,6 +87,49 @@ pub struct SoftOutput {
     pub nodes: Vec<[f32; 3]>,
 }
 
+/// Two shapes started touching (either has `enable_contact_events`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContactBeginEvent {
+    pub shape_a: crate::ShapeId,
+    pub shape_b: crate::ShapeId,
+    /// The deepest contact point and the normal from A to B (world).
+    pub point: [f32; 3],
+    pub normal: [f32; 3],
+    /// Closing speed along the normal at that point, before the solve (m/s).
+    pub approach_speed: f32,
+}
+
+/// Two shapes stopped touching (or one was destroyed while touching).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContactEndEvent {
+    pub shape_a: crate::ShapeId,
+    pub shape_b: crate::ShapeId,
+}
+
+/// Contact begin and end events, and hits: begins at or above
+/// `WorldDef::hit_event_threshold` on shapes with `enable_hit_events`
+/// (impact sounds, effects, damage).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ContactEvents {
+    pub begin: Vec<ContactBeginEvent>,
+    pub end: Vec<ContactEndEvent>,
+    pub hits: Vec<ContactBeginEvent>,
+}
+
+/// A shape entered or left a sensor (`ShapeDef::is_sensor` with
+/// `enable_sensor_events`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SensorEvent {
+    pub sensor_shape: crate::ShapeId,
+    pub visitor_shape: crate::ShapeId,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SensorEvents {
+    pub begin: Vec<SensorEvent>,
+    pub end: Vec<SensorEvent>,
+}
+
 /// A batch of queued ray casts ([`crate::World::cast_rays`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RayBatchId(pub u64);
@@ -130,6 +173,22 @@ pub struct Frame {
     pub skins: Vec<SkinOutput>,
     /// Ray batches queued before this step.
     pub ray_results: Vec<RayBatchResult>,
+    /// Shapes that started or stopped touching this step, and hits.
+    pub contact_events: ContactEvents,
+    /// Shapes that entered or left sensors this step.
+    pub sensor_events: SensorEvents,
+    /// Overlap queries queued before this step.
+    pub overlap_results: Vec<crate::OverlapResult>,
+    /// Every character, as this step left it.
+    pub characters: Vec<crate::CharacterOutput>,
+    /// Characters that landed, lost their support or were crushed.
+    pub character_events: Vec<crate::CharacterEvent>,
+    /// Casts queued before this step.
+    pub cast_results: Vec<crate::CastResult>,
+    /// Every projectile in flight, and each one that stopped this step.
+    pub projectiles: Vec<crate::ProjectileOutput>,
+    /// Shapes projectiles went through or stopped in.
+    pub projectile_events: Vec<crate::ProjectileEvent>,
     /// Records overwritten in the GPU event ring before they were read (more
     /// than it holds between two frames). Never silently zero.
     pub lost_events: u32,
@@ -161,6 +220,19 @@ pub struct CoalescedFrame {
     pub skins: Vec<SkinOutput>,
     /// Every ray batch's results.
     pub ray_results: Vec<RayBatchResult>,
+    /// Every step's contact events, in step order.
+    pub contact_events: ContactEvents,
+    pub sensor_events: SensorEvents,
+    /// Every overlap query's results.
+    pub overlap_results: Vec<crate::OverlapResult>,
+    /// The latest state per character and per projectile.
+    pub characters: Vec<crate::CharacterOutput>,
+    pub projectiles: Vec<crate::ProjectileOutput>,
+    /// Every step's character and projectile events and cast results, in
+    /// step order.
+    pub character_events: Vec<crate::CharacterEvent>,
+    pub cast_results: Vec<crate::CastResult>,
+    pub projectile_events: Vec<crate::ProjectileEvent>,
     pub lost_events: u32,
     /// Any folded step's readback was dropped (a later one resynced it).
     pub dropped: bool,
@@ -179,6 +251,8 @@ pub fn coalesce(frames: Vec<Frame>) -> CoalescedFrame {
     let mut vehicles = BTreeMap::new();
     let mut soft = BTreeMap::new();
     let mut skins = BTreeMap::new();
+    let mut characters = BTreeMap::new();
+    let mut projectiles = BTreeMap::new();
     for f in frames {
         for m in f.body_events.moves {
             moves
@@ -210,6 +284,21 @@ pub fn coalesce(frames: Vec<Frame>) -> CoalescedFrame {
             skins.insert(s.skin, s);
         }
         out.ray_results.extend(f.ray_results);
+        out.contact_events.begin.extend(f.contact_events.begin);
+        out.contact_events.end.extend(f.contact_events.end);
+        out.contact_events.hits.extend(f.contact_events.hits);
+        out.sensor_events.begin.extend(f.sensor_events.begin);
+        out.sensor_events.end.extend(f.sensor_events.end);
+        out.overlap_results.extend(f.overlap_results);
+        for c in f.characters {
+            characters.insert(c.character, c);
+        }
+        for p in f.projectiles {
+            projectiles.insert(p.projectile, p);
+        }
+        out.character_events.extend(f.character_events);
+        out.cast_results.extend(f.cast_results);
+        out.projectile_events.extend(f.projectile_events);
         out.lost_events += f.lost_events;
         out.dropped |= f.dropped;
         if f.counters.is_some() {
@@ -220,6 +309,8 @@ pub fn coalesce(frames: Vec<Frame>) -> CoalescedFrame {
     out.vehicles = vehicles.into_values().collect();
     out.soft = soft.into_values().collect();
     out.skins = skins.into_values().collect();
+    out.characters = characters.into_values().collect();
+    out.projectiles = projectiles.into_values().collect();
     out
 }
 
