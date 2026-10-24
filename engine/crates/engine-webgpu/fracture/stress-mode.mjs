@@ -39,7 +39,8 @@ export async function createStressMode(canvas){
   setShotSpeedScale(scale){stress_set_shot_speed_scale(scale)},
   setShotRadiusScale(scale){stress_set_shot_radius_scale(scale)},
   setBondStrengthScale(scale){stress_set_bond_strength_scale(scale)},
-  // The capability profile of the next load: blast_parity, or threshold (the v0 mode).
+  // The capability profile of the next load: blast_parity, threshold (the v0 mode),
+  // load_path or impact_local.
   setProfile(name){stress_set_profile(name)},
   // The physics frame rate of the next load (Hz; 0 keeps the scene's).
   setPhysicsHz(hz){stress_set_physics_hz(hz)},

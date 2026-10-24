@@ -270,5 +270,5 @@ fn one_chip_off_a_large_body() {
     let bodies = f.chunk_bodies(&gpu);
     assert_eq!(bodies[0], 1, "the chip takes the first free slot");
     assert!(bodies[1..].iter().all(|&b| b == 0), "the rest keeps the body");
-    assert_eq!(f.counters(&gpu), stress_gpu::fracture::Counters { broken: 0, pieces: 1, error: 0, split_frames: 1 });
+    assert_eq!(f.counters(&gpu), stress_gpu::fracture::Counters { broken: 0, pieces: 1, error: 0, split_frames: 1, ..Default::default() });
 }

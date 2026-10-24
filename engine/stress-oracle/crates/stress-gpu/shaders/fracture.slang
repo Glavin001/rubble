@@ -39,6 +39,7 @@
 
 import common;
 import impact;
+import joint;
 import rigid_frame;
 
 struct FractureParams
@@ -59,6 +60,23 @@ struct FractureParams
     float strike_speed;  // a slower closing is no strike (world_coupling.rs `tiered_impact_speed`)
     uint shot_count;     // the shots (`shots`), parked ones included
     float pad3;
+    // The load and strike models (stress-ref `capability::LoadModel`, `StrikeModel`).
+    uint load_model;     // 0 threshold (`fr_breaks`), 1 load path (`fr_lp_*`)
+    uint strike_model;   // 0 Hertz (`fr_strike_breaks`), 1 analytic (`fr_il_*`)
+    uint fracture_work;  // the analytic model's: a perforating shot gives up the ballistic limit's energy
+    uint sweeps;         // the load path's sweeps a frame (even)
+    float gx;            // gravity (the stress frame)
+    float gy;
+    float gz;
+    float lp_c1;         // the load path's recurrence (stress-ref load_path.rs `momentum_coefficients`)
+    float lp_c2;
+    uint ext_chunks;     // `ext` offsets (float4s): the chunks' records, their bonds' list, the materials
+    uint ext_adj;
+    uint ext_mat;
+    uint il_passes;      // the thickness's passes (even)
+    float lp_scale;      // fixed-point scale of the load path's per-body sums
+    float pad4;
+    float pad5;
 };
 
 struct ScanParams
@@ -96,7 +114,8 @@ struct ScanParams
 [[vk::binding(9, 0)]] RWStructuredBuffer<uint4> collider_info;
 [[vk::binding(10, 0)]] StructuredBuffer<Record> manifolds;
 [[vk::binding(11, 0)]] StructuredBuffer<uint> sort;
-// Per chunk its load (x: |force|), then its carried pulses (impact.slang).
+// Per chunk its load (x: |force|), then its carried pulses (impact.slang), then (the load
+// path's) per chunk its force and moment (world, about its centre) as 2 float4.
 [[vk::binding(12, 0)]] RWStructuredBuffer<float4> loads;
 // The split kernels' indirect sizes (3 words each, `ARG_*`), copied to the buffer the
 // dispatches read.
@@ -123,6 +142,12 @@ uint w_free_rank() { return w_free() + params.body_count; }
 uint w_free_list() { return w_free_rank() + params.body_count; }
 // Per chunk, for each half of the pool: where its carried pulses start and how many.
 uint w_pulses() { return w_free_list() + params.body_count + 2 * 1025; }
+// Per chunk: the launch (`shots`) whose analytic strike broke it out (plug, scab, crater),
+// 0 for none (`fr_il_mark`).
+uint w_marks() { return w_pulses() + 4 * params.chunk_count; }
+// Per chunk: the struck body slot + 1 whose plug it came out in this frame, 0 for none
+// (`fr_il_mark` sets it, `fr_il_carry` clears it).
+uint w_carry() { return w_marks() + params.chunk_count; }
 
 // `atom` layout.
 uint a_parent() { return 0; }
@@ -142,9 +167,17 @@ uint a_strike() { return a_counters() + 16; }
 static const uint C_FRAME_BROKEN = 0; // bonds broken this frame (fr_gate clears it)
 static const uint C_BROKEN = 1;       // bonds broken in all
 static const uint C_PIECES = 2;       // new bodies in all
-static const uint C_ERROR = 3;        // bits: 1 no free slot, 2 a mass sum out of range, 4 a union did not settle, 8 a pulse found no room
+static const uint C_ERROR = 3;        // bits: 1 no free slot, 2 a mass sum out of range, 4 a union did not settle, 8 a pulse found no room,
+                                      // 16 a strike's thickness did not settle, 32 a load-path block was not positive definite
 static const uint C_SPLIT_FRAMES = 4;
-static const uint C_POOL_TOP = 5;     // + the half: pulses claimed in it this frame
+static const uint C_POOL_TOP = 5;     // + the half: pulses claimed in it this frame (5, 6)
+// The analytic strikes' outcomes, in all (`fr_il_strike`), and the load path's largest
+// failure index since the last read (float bits, `fr_lp_breaks`).
+static const uint C_IL_BOUNCE = 7;
+static const uint C_IL_CRATER = 8;
+static const uint C_IL_SPALL = 9;
+static const uint C_IL_PERFORATE = 10;
+static const uint C_LP_PEAK = 11;
 
 // `loads` layout: per chunk 1 float4 (its load), then the two halves of the pulse pool
 // (`pool_cap` pulses of 3 float4 each). A frame reads its chunks' carried pulses from one
@@ -153,6 +186,7 @@ static const uint C_POOL_TOP = 5;     // + the half: pulses claimed in it this f
 // order), and the pool's size follows the engine's contact records (fracture.rs), not a
 // per-chunk count.
 uint l_pool(uint half) { return params.chunk_count + 3 * params.pool_cap * half; }
+uint l_vec() { return params.chunk_count + 6 * params.pool_cap; }
 
 // Indirect sizes (`args`, 3 words each).
 static const uint ARG_CHUNKS = 0;
@@ -219,6 +253,11 @@ void fr_loads(uint3 id: SV_DispatchThreadID)
     work[w_pulses() + 4 * k + 2 * to] = base;
     work[w_pulses() + 4 * k + 2 * to + 1] = kept;
     loads[k] = float4(length(f_total), 0.0, 0.0, 0.0);
+    if (params.load_model == 1)
+    {
+        loads[l_vec() + 2 * k] = float4(f_total, 0.0);
+        loads[l_vec() + 2 * k + 1] = float4(t_total, 0.0);
+    }
 }
 
 [shader("compute")]
@@ -721,7 +760,8 @@ struct ViewParams
 // Per chunk 3 float4 (the strike's): (box centre (structure frame), bounding radius); (half
 // extents, plane-strain modulus E'); box rotation (structure frame).
 [[vk::binding(21, 0)]] StructuredBuffer<float4> geometry;
-// Per shot 2 float4: (engine body as bits, bounding radius, face radius, mass); (E', -, -, -).
+// Per shot 2 float4: (engine body as bits, bounding radius, face radius, mass); (E', its
+// launch as bits (1, 2, ...: which shot in flight it is, `fr_il_mark`), -, -).
 [[vk::binding(22, 0)]] StructuredBuffer<float4> shots;
 
 static const float3 MOVING = float3(1.0, 0.45, 0.12);
@@ -1105,6 +1145,906 @@ void fr_strike_breaks(uint3 id: SV_DispatchThreadID)
     float area = asfloat(bond.w);
     float reach = f.w * min(1.0, area / (6.28318530718 * max(dist * dist, 1e-12)));
     if (reach > asfloat(bond.z))
+    {
+        work[w_alive() + i] = 0;
+        atom[a_dirty() + b].or(1u);
+        atom[a_counters() + C_FRAME_BROKEN].add(1u);
+        atom[a_counters() + C_BROKEN].add(1u);
+    }
+}
+
+
+// ---- Load path (stress-ref load_path.rs, `capability::LoadModel::LoadPath`) ----
+//
+// The bond graph's quasi-static equilibrium `K x = f`, each chunk's small displacement
+// `x = (u, theta)` (structure frame) carried from frame to frame, solved by `sweeps` sweeps
+// a frame of block Jacobi accelerated by Chebyshev's recurrence at its limit (`d = c1 d +
+// c2 D^-1 r`, `x += d`). The loads: gravity, the engine's contact forces and moments
+// (`fr_loads`), and on an unsupported dynamic body the d'Alembert loads of its rigid
+// acceleration (inertia relief: its loads balance). Supports hold still; so does an
+// unsupported body's lowest chunk. Then every intact bond's force is checked against its
+// strengths (joint.slang `failure_indices`): tension, shear, compression, buckling.
+//
+//   fr_lp_clear        one thread per body: its sums;
+//   fr_lp_sum          one thread per chunk: its load (structure frame), its body's sums
+//                      (force and moment about its centre of mass, 64-bit fixed point), its
+//                      body's lowest chunk and whether it is supported;
+//   fr_lp_relief       one thread per chunk: the relieved load, whether it holds still;
+//   fr_lp_block        one thread per chunk: its diagonal block's Cholesky factor;
+//   fr_lp_sweep_even, fr_lp_sweep_odd
+//                      one thread per chunk: a sweep from one copy of `x` to the other;
+//   fr_lp_breaks       one thread per bond.
+//
+// `ext` (read only; `fracture.rs` `ExtTables`): per bond 10 float4 (centroid, normal, t1,
+// then its JointBond's 7), then from `ext_chunks` per chunk 4 float4 ((first, count) of its
+// bonds in `ext_adj` as bits; the analytic strike's material: (density, tensile,
+// compressive, shear); (DIF reference rate, exponent, transition rate, high exponent);
+// (DIF max (0: none), Poisson's ratio, Young's modulus, -)), the bonds' list from
+// `ext_adj` (4 to a float4, as bits), the JointMaterials from `ext_mat` (5 float4 each).
+[[vk::binding(23, 0)]] StructuredBuffer<float4> ext;
+// Per chunk 14 float4: `x` twice (2 each), the step `d` (2), its load (2: force and fixed
+// flag, moment), its block's factor (6: 21 floats); then per body slot 2 float4, the
+// analytic strike's record (`fr_il_strike`).
+[[vk::binding(24, 0)]] RWStructuredBuffer<float4> lp;
+
+static const uint LP_CHUNK = 14;
+uint lp_x(uint k, uint copy) { return LP_CHUNK * k + 2 * copy; }
+uint lp_d(uint k) { return LP_CHUNK * k + 4; }
+uint lp_f(uint k) { return LP_CHUNK * k + 6; }
+uint lp_l(uint k) { return LP_CHUNK * k + 8; }
+uint lp_body(uint b) { return LP_CHUNK * params.chunk_count + 2 * b; }
+
+// `atom`: per body slot 14 words of the load path's sums (force, moment: 3 x 64 bits each;
+// lowest chunk; supported), then per body slot 4 words of the analytic strike: its
+// thickness's two copies, its plug's mass (64-bit fixed point, `scale_m`).
+uint a_lp(uint b) { return a_strike() + 9 * params.body_count + 14 * b; }
+uint a_il(uint b) { return a_strike() + 23 * params.body_count + 4 * b; }
+// Per shot (`MAX_SHOTS`): the earliest strike time of this frame's strikes (float bits).
+uint a_first(uint shot) { return a_strike() + 27 * params.body_count + shot; }
+
+// `add64` for terms up to 2^62 (a load's): the magnitude split into two words exactly (it
+// has 24 significant bits), negated as a 64-bit integer.
+void add64w(uint at, float value, float scale)
+{
+    float x = round(value * scale);
+    if (!(abs(x) < 4.0e18))
+    {
+        atom[a_counters() + C_ERROR].or(2u);
+        x = 0.0;
+    }
+    float u = abs(x);
+    float h = floor(u * (1.0 / 4294967296.0));
+    uint lo = uint(u - h * 4294967296.0);
+    uint hi = uint(h);
+    if (x < 0.0)
+    {
+        lo = ~lo + 1u;
+        hi = ~hi + (lo == 0u ? 1u : 0u);
+    }
+    uint old;
+    old = atom[at].add(lo);
+    uint carry = old + lo < old ? 1u : 0u;
+    hi += carry;
+    if (hi != 0)
+        atom[at + 1].add(hi);
+}
+
+float3 read64w3(uint at, float scale)
+{
+    return float3(read64(at, scale), read64(at + 2, scale), read64(at + 4, scale));
+}
+
+struct LpBond
+{
+    float3 centroid;
+    float3 n;
+    float3 t1;
+    float3 t2;
+    JointBond law;
+};
+
+LpBond lp_bond(uint i)
+{
+    uint o = 10 * i;
+    LpBond b;
+    b.centroid = ext[o].xyz;
+    b.n = ext[o + 1].xyz;
+    b.t1 = ext[o + 2].xyz;
+    b.t2 = cross(b.n, b.t1);
+    b.law.geom0 = ext[o + 3];
+    b.law.geom1 = ext[o + 4];
+    b.law.stiff0 = ext[o + 5];
+    b.law.stiff1 = ext[o + 6];
+    b.law.rebar0 = ext[o + 7];
+    b.law.rebar1 = ext[o + 8];
+    b.law.ids = asuint(ext[o + 9]);
+    return b;
+}
+
+JointMaterial lp_material(uint m)
+{
+    uint o = params.ext_mat + 5 * m;
+    JointMaterial j;
+    j.strength = ext[o];
+    j.energy = ext[o + 1];
+    j.dif = ext[o + 2];
+    j.misc = ext[o + 3];
+    j.kind_flags = asuint(ext[o + 4]);
+    return j;
+}
+
+uint adj_bond(uint at)
+{
+    return asuint(ext[params.ext_adj + at / 4][at % 4]);
+}
+
+// Bond `i`'s generalised force (local: shear t1, t2, axial; bending t1, t2, torsion),
+// tension positive, from the `x` copy `c` (load_path.rs `Network::force`).
+void lp_force(LpBond b, uint ka, uint kb, uint c, out float3 q_lin, out float3 q_ang)
+{
+    float3 ra = b.centroid - chunks[4 * ka].xyz;
+    float3 rb = b.centroid - chunks[4 * kb].xyz;
+    float4 xa0 = lp[lp_x(ka, c)];
+    float4 xa1 = lp[lp_x(ka, c) + 1];
+    float4 xb0 = lp[lp_x(kb, c)];
+    float4 xb1 = lp[lp_x(kb, c) + 1];
+    float3 delta = (xb0.xyz + cross(xb1.xyz, rb)) - (xa0.xyz + cross(xa1.xyz, ra));
+    float3 phi = xb1.xyz - xa1.xyz;
+    float4 k0 = b.law.stiff0; // kn, ks, kb_t1, kb_t2
+    float kt = b.law.stiff1.x;
+    q_lin = float3(k0.y * dot(delta, b.t1), k0.y * dot(delta, b.t2), k0.x * dot(delta, b.n));
+    q_ang = float3(k0.z * dot(phi, b.t1), k0.w * dot(phi, b.t2), kt * dot(phi, b.n));
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_lp_clear(uint3 id: SV_DispatchThreadID)
+{
+    uint b = id.x;
+    if (b >= params.body_count)
+        return;
+    uint at = a_lp(b);
+    for (uint w = 0; w < 12; w++)
+        atom[at + w].store(0u);
+    atom[at + 12].store(NONE);
+    atom[at + 13].store(0u);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_lp_sum(uint3 id: SV_DispatchThreadID)
+{
+    uint k = id.x;
+    if (k >= params.chunk_count)
+        return;
+    uint slot = body_of(k);
+    Quat q;
+    float3 origin;
+    structure_pose(slot, BODY_WORDS * slot, q, origin);
+    Quat qi = conj(q);
+    float4 c0 = chunks[4 * k];
+    float3 f = rotate(qi, loads[l_vec() + 2 * k].xyz) + c0.w * rotate(qi, float3(params.gx, params.gy, params.gz));
+    float3 t = rotate(qi, loads[l_vec() + 2 * k + 1].xyz);
+    lp[lp_f(k)] = float4(f, 0.0);
+    lp[lp_f(k) + 1] = float4(t, 0.0);
+    float3 r = c0.xyz - frames[2 * slot].xyz;
+    float3 m = t + cross(r, f);
+    uint at = a_lp(slot);
+    for (uint a = 0; a < 3; a++)
+    {
+        add64w(at + 2 * a, f[a], params.lp_scale);
+        add64w(at + 6 + 2 * a, m[a], params.lp_scale);
+    }
+    atom[at + 12].min(k);
+    if ((info[k] & INFO_SUPPORT) != 0)
+        atom[at + 13].store(1u);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_lp_relief(uint3 id: SV_DispatchThreadID)
+{
+    uint k = id.x;
+    if (k >= params.chunk_count)
+        return;
+    uint slot = body_of(k);
+    uint at = a_lp(slot);
+    bool supported = atom[at + 13].load() != 0;
+    bool fixed = (info[k] & INFO_SUPPORT) != 0 || (!supported && atom[at + 12].load() == k);
+    float4 f = lp[lp_f(k)];
+    float4 t = lp[lp_f(k) + 1];
+    uint b = BODY_WORDS * slot;
+    float inv_mass = bodies[b].w;
+    if (!supported && inv_mass > 0.0)
+    {
+        float3 force = read64w3(at, params.lp_scale);
+        float3 moment = read64w3(at + 6, params.lp_scale);
+        // The body's inverse inertia (principal, its record's) in the structure frame.
+        Quat p = quat_of(frames[2 * slot + 1]);
+        float3 alpha = rotate(p, bodies[b + 2].xyz * rotate(conj(p), moment));
+        float3 acc = force * inv_mass;
+        float4 c0 = chunks[4 * k];
+        float4 c1 = chunks[4 * k + 1];
+        float4 c2 = chunks[4 * k + 2];
+        float3 r = c0.xyz - frames[2 * slot].xyz;
+        f.xyz -= c0.w * (acc + cross(alpha, r));
+        // The chunk's own inertia about its centre: (xx, yy, zz, xy), (xz, yz).
+        float3 ia = float3(c1.x * alpha.x + c1.w * alpha.y + c2.x * alpha.z, c1.w * alpha.x + c1.y * alpha.y + c2.y * alpha.z, c2.x * alpha.x + c2.y * alpha.y + c1.z * alpha.z);
+        t.xyz -= ia;
+    }
+    f.w = fixed ? 1.0 : 0.0;
+    lp[lp_f(k)] = f;
+    lp[lp_f(k) + 1] = t;
+}
+
+// Packed lower-triangular index.
+uint tri(uint i, uint j) { return i * (i + 1) / 2 + j; }
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_lp_block(uint3 id: SV_DispatchThreadID)
+{
+    uint k = id.x;
+    if (k >= params.chunk_count || lp[lp_f(k)].w != 0.0)
+        return;
+    float d[6][6];
+    for (uint p = 0; p < 6; p++)
+        for (uint q = 0; q < 6; q++)
+            d[p][q] = 0.0;
+    float4 range = ext[params.ext_chunks + 4 * k];
+    uint first = asuint(range.x);
+    uint count = asuint(range.y);
+    for (uint e = 0; e < count; e++)
+    {
+        uint i = adj_bond(first + e);
+        if (work[w_alive() + i] == 0)
+            continue;
+        LpBond b = lp_bond(i);
+        float3 r = b.centroid - chunks[4 * k].xyz;
+        float kl[6] = { b.law.stiff0.y, b.law.stiff0.y, b.law.stiff0.x, b.law.stiff0.z, b.law.stiff0.w, b.law.stiff1.x };
+        float3 rows[3] = { b.t1, b.t2, b.n };
+        float j[6][6];
+        for (uint a = 0; a < 3; a++)
+        {
+            float3 c = cross(r, rows[a]);
+            j[a][0] = rows[a].x; j[a][1] = rows[a].y; j[a][2] = rows[a].z;
+            j[a][3] = c.x; j[a][4] = c.y; j[a][5] = c.z;
+            j[3 + a][0] = 0.0; j[3 + a][1] = 0.0; j[3 + a][2] = 0.0;
+            j[3 + a][3] = rows[a].x; j[3 + a][4] = rows[a].y; j[3 + a][5] = rows[a].z;
+        }
+        for (uint p2 = 0; p2 < 6; p2++)
+            for (uint q2 = 0; q2 < 6; q2++)
+            {
+                float s = 0.0;
+                for (uint a2 = 0; a2 < 6; a2++)
+                    s += j[a2][p2] * kl[a2] * j[a2][q2];
+                d[p2][q2] += s;
+            }
+    }
+    float l[21];
+    for (uint z0 = 0; z0 < 21; z0++)
+        l[z0] = 0.0;
+    bool ok = true;
+    for (uint i2 = 0; i2 < 6; i2++)
+        for (uint j2 = 0; j2 <= i2; j2++)
+        {
+            float s = d[i2][j2];
+            for (uint p3 = 0; p3 < j2; p3++)
+                s -= l[tri(i2, p3)] * l[tri(j2, p3)];
+            if (i2 == j2)
+            {
+                ok = ok && s > 0.0;
+                l[tri(i2, i2)] = sqrt(max(s, 1e-30));
+            }
+            else
+                l[tri(i2, j2)] = s / l[tri(j2, j2)];
+        }
+    if (!ok)
+    {
+        // Holds still (as a chunk with no bonds would), reported.
+        lp[lp_f(k)].w = 1.0;
+        atom[a_counters() + C_ERROR].or(32u);
+        return;
+    }
+    for (uint w = 0; w < 6; w++)
+        lp[lp_l(k) + w] = float4(l[4 * w], 4 * w + 1 < 21 ? l[4 * w + 1] : 0.0, 4 * w + 2 < 21 ? l[4 * w + 2] : 0.0, 4 * w + 3 < 21 ? l[4 * w + 3] : 0.0);
+}
+
+void lp_sweep(uint k, uint from)
+{
+    uint to = 1 - from;
+    float4 x0 = lp[lp_x(k, from)];
+    float4 x1 = lp[lp_x(k, from) + 1];
+    float4 f = lp[lp_f(k)];
+    if (f.w != 0.0)
+    {
+        lp[lp_x(k, to)] = x0;
+        lp[lp_x(k, to) + 1] = x1;
+        lp[lp_d(k)] = float4(0.0);
+        lp[lp_d(k) + 1] = float4(0.0);
+        return;
+    }
+    float r[6] = { f.x, f.y, f.z, 0.0, 0.0, 0.0 };
+    float3 t = lp[lp_f(k) + 1].xyz;
+    r[3] = t.x; r[4] = t.y; r[5] = t.z;
+    float4 range = ext[params.ext_chunks + 4 * k];
+    uint first = asuint(range.x);
+    uint count = asuint(range.y);
+    for (uint e = 0; e < count; e++)
+    {
+        uint i = adj_bond(first + e);
+        if (work[w_alive() + i] == 0)
+            continue;
+        uint4 bond = bonds[i];
+        LpBond b = lp_bond(i);
+        float3 q_lin;
+        float3 q_ang;
+        lp_force(b, bond.x, bond.y, from, q_lin, q_ang);
+        float3 fb = b.t1 * q_lin.x + b.t2 * q_lin.y + b.n * q_lin.z;
+        float3 mb = b.t1 * q_ang.x + b.t2 * q_ang.y + b.n * q_ang.z;
+        float3 arm = b.centroid - chunks[4 * k].xyz;
+        float3 lf = k == bond.x ? fb : -fb;
+        float3 lm = (k == bond.x ? mb : -mb) + cross(arm, lf);
+        r[0] += lf.x; r[1] += lf.y; r[2] += lf.z;
+        r[3] += lm.x; r[4] += lm.y; r[5] += lm.z;
+    }
+    float l[21];
+    for (uint z0 = 0; z0 < 21; z0++)
+        l[z0] = 0.0;
+    for (uint w = 0; w < 6; w++)
+    {
+        float4 v = lp[lp_l(k) + w];
+        l[4 * w] = v.x;
+        if (4 * w + 1 < 21) l[4 * w + 1] = v.y;
+        if (4 * w + 2 < 21) l[4 * w + 2] = v.z;
+        if (4 * w + 3 < 21) l[4 * w + 3] = v.w;
+    }
+    float y[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    for (uint i2 = 0; i2 < 6; i2++)
+    {
+        float s = r[i2];
+        for (uint p = 0; p < i2; p++)
+            s -= l[tri(i2, p)] * y[p];
+        y[i2] = s / l[tri(i2, i2)];
+    }
+    float z[6] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+    for (int i3 = 5; i3 >= 0; i3--)
+    {
+        float s = y[i3];
+        for (int p2 = i3 + 1; p2 < 6; p2++)
+            s -= l[tri(uint(p2), uint(i3))] * z[p2];
+        z[i3] = s / l[tri(uint(i3), uint(i3))];
+    }
+    float4 d0 = lp[lp_d(k)];
+    float4 d1 = lp[lp_d(k) + 1];
+    d0.xyz = params.lp_c1 * d0.xyz + params.lp_c2 * float3(z[0], z[1], z[2]);
+    d1.xyz = params.lp_c1 * d1.xyz + params.lp_c2 * float3(z[3], z[4], z[5]);
+    lp[lp_d(k)] = d0;
+    lp[lp_d(k) + 1] = d1;
+    lp[lp_x(k, to)] = float4(x0.xyz + d0.xyz, 0.0);
+    lp[lp_x(k, to) + 1] = float4(x1.xyz + d1.xyz, 0.0);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_lp_sweep_even(uint3 id: SV_DispatchThreadID)
+{
+    if (id.x < params.chunk_count)
+        lp_sweep(id.x, 0);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_lp_sweep_odd(uint3 id: SV_DispatchThreadID)
+{
+    if (id.x < params.chunk_count)
+        lp_sweep(id.x, 1);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_lp_breaks(uint3 id: SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= params.bond_count || work[w_alive() + i] == 0)
+        return;
+    uint4 bond = bonds[i];
+    LpBond b = lp_bond(i);
+    float3 q_lin;
+    float3 q_ang;
+    lp_force(b, bond.x, bond.y, 0, q_lin, q_ang);
+    Measures m = stress_measures(b.law, q_lin, q_ang);
+    float4 idx = failure_indices(lp_material(b.law.ids.x), b.law, m, b.law.geom1.w);
+    float worst = max(max(idx.x, idx.y), max(idx.z, idx.w));
+    atom[a_counters() + C_LP_PEAK].max(asuint(max(worst, 0.0)));
+    if (worst >= 1.0)
+    {
+        work[w_alive() + i] = 0;
+        atom[a_dirty() + body_of(bond.x)].or(1u);
+        atom[a_counters() + C_FRAME_BROKEN].add(1u);
+        atom[a_counters() + C_BROKEN].add(1u);
+    }
+}
+
+// ---- Local impact (stress-ref impact_local.rs, `capability::StrikeModel::Analytic`) ----
+//
+// In place of `fr_strike_breaks`, after `fr_strike_force`:
+//   fr_il_first_reset, fr_il_first
+//                      each shot's earliest strike this frame: only the first body on its
+//                      path takes a strike in a frame;
+//   fr_il_begin        one thread per struck body: the thickness run starts at the entry
+//                      chunk's far side (along the path, its box widened by the shot's
+//                      radius);
+//   fr_il_extend_even, fr_il_extend_odd
+//                      `il_passes` passes, one thread per chunk of a struck body: a chunk
+//                      whose interval starts within the run extends it (each pass reads one
+//                      copy and writes the other, so a pass's result does not depend on the
+//                      threads' order); the run must stop growing within the passes;
+//   fr_il_strike       one thread per struck body: the closed forms (impact_local.rs
+//                      `strike`), the outcome counted and recorded; a perforating shot's
+//                      fracture work, or the contact of one that does not get through
+//                      (inelastic: the shot comes to rest on the face), as impulses between
+//                      the shot and the wall;
+//   fr_il_mark         one thread per chunk of a struck body: the launch's mark on what the
+//                      outcome breaks out (a later strike of that launch on it is the
+//                      engine's: the shot pushes its own plug, it does not strike it again);
+//   fr_il_breaks       one thread per bond of a struck body: it breaks when it crosses the
+//                      plug's or the scab's boundary or touches the crater
+//                      (impact_local.rs `breaks`);
+//   fr_il_carry        after the split, one thread per chunk of a plug: the shot and its plug
+//                      leave together, their momentum along the path kept.
+
+static const float IL_CONE_TAN = 1.0;
+static const uint IL_DAMAGE = 1;
+static const uint IL_CRATER = 2;
+static const uint IL_SPALL = 4;
+static const uint IL_PERFORATE = 8;
+
+// The line `p + d t` through chunk `k`'s box widened by `pad`: (t0, t1), t0 > t1 if it
+// misses.
+float2 il_interval(uint k, float3 p, float3 d, float pad)
+{
+    Quat q;
+    float3 cc = chunk_box_world(k, q);
+    Quat box = normalized(quat_mul(q, quat_of(geometry[3 * k + 2])));
+    float3 half = geometry[3 * k + 1].xyz;
+    float inf = float_bits(0x7f800000u);
+    float t0 = -inf;
+    float t1 = inf;
+    for (uint ax = 0; ax < 3; ax++)
+    {
+        float3 e = float3(0.0);
+        e[ax] = 1.0;
+        float3 axis = rotate(box, e);
+        float o = dot(p - cc, axis);
+        float dv = dot(d, axis);
+        float ext_ = half[ax] + pad;
+        if (abs(dv) < 1e-9)
+        {
+            if (abs(o) > ext_)
+                return float2(1.0, 0.0);
+            continue;
+        }
+        float ta = (-ext_ - o) / dv;
+        float tb = (ext_ - o) / dv;
+        t0 = max(t0, min(ta, tb));
+        t1 = min(t1, max(ta, tb));
+    }
+    return float2(t0, t1);
+}
+
+// The struck body's path: from the contact point along the closing direction.
+void il_path(uint b, out float3 contact, out float3 d, out float speed)
+{
+    uint st = strike_at(b);
+    float3 rel = frames[st + 1].xyz;
+    speed = length(rel);
+    d = rel / max(speed, 1e-12);
+    contact = frames[st + 2].xyz;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_il_first_reset(uint3 id: SV_DispatchThreadID)
+{
+    if (id.x < params.shot_count)
+        atom[a_first(id.x)].store(0x7f800000u);
+}
+
+// One thread per struck body: its strike time into its shot's earliest (a time is not
+// negative: its bits order as the floats do).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_il_first(uint3 id: SV_DispatchThreadID)
+{
+    uint b = id.x;
+    if (b >= params.body_count || params.shot_count == 0)
+        return;
+    uint shot;
+    if (!struck(b, shot))
+        return;
+    atom[a_first(shot)].min(atom[a_strike() + 9 * b + 6].load());
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_il_begin(uint3 id: SV_DispatchThreadID)
+{
+    uint b = id.x;
+    if (b >= params.body_count || params.shot_count == 0)
+        return;
+    uint shot;
+    if (!struck(b, shot))
+        return;
+    // A shot strikes the first body on its path in a frame; one further on waits for the
+    // next frame, and the speed the first strike leaves it (no strike charged twice).
+    if (atom[a_strike() + 9 * b + 6].load() != atom[a_first(shot)].load())
+    {
+        frames[strike_at(b)].w = 0.0;
+        return;
+    }
+    float3 contact;
+    float3 d;
+    float speed;
+    il_path(b, contact, d, speed);
+    uint entry = atom[a_strike() + 9 * b + 8].load();
+    float2 t = il_interval(entry, contact, d, shots[2 * shot].z);
+    uint end = asuint(max(t.y, 0.0));
+    atom[a_il(b)].store(end);
+    atom[a_il(b) + 1].store(end);
+    atom[a_il(b) + 2].store(0u);
+    atom[a_il(b) + 3].store(0u);
+}
+
+void il_extend(uint k, uint from)
+{
+    if (k >= params.chunk_count || params.shot_count == 0)
+        return;
+    uint b = body_of(k);
+    uint shot;
+    if (!struck(b, shot))
+        return;
+    float3 contact;
+    float3 d;
+    float speed;
+    il_path(b, contact, d, speed);
+    float pad = shots[2 * shot].z;
+    float end = asfloat(atom[a_il(b) + from].load());
+    uint to = a_il(b) + 1 - from;
+    atom[to].max(asuint(end));
+    float2 t = il_interval(k, contact, d, pad);
+    // Touching within a millimetre (and a 50th of the shot's radius): chunks of one wall
+    // share faces; a gap wider than that is another wall.
+    if (t.x <= t.y && t.x <= end + 1e-3 + 0.02 * pad && t.y > end)
+        atom[to].max(asuint(t.y));
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_il_extend_even(uint3 id: SV_DispatchThreadID)
+{
+    il_extend(id.x, 0);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_il_extend_odd(uint3 id: SV_DispatchThreadID)
+{
+    il_extend(id.x, 1);
+}
+
+// An impulse `j` along the path (the stress frame's `d`) from the shot (body `sb`) onto
+// body `b` at `contact`: the shot slows by `j / m_shot`, the body takes it at the contact
+// (linear and angular, through its inverse inertia; nothing for an anchored body). Both
+// pose regions.
+void il_impulse(uint b, uint sb, float m_shot, float3 contact, float3 d, float j)
+{
+    float3 jr = to_rubble(d) * j;
+    uint at = BODY_WORDS * b;
+    float inv_mass = bodies[at].w;
+    float3 dv = jr * inv_mass;
+    float3 dw = float3(0.0);
+    if (inv_mass > 0.0)
+    {
+        Quat q = quat_of(bodies[at + 1]);
+        float3 r = to_rubble(contact) - bodies[at].xyz;
+        dw = rotate(q, bodies[at + 2].xyz * rotate(conj(q), cross(r, jr)));
+    }
+    for (uint region = 0; region < 2; region++)
+    {
+        uint s_at = BODY_WORDS * (sb + region * params.max_bodies) + 3;
+        bodies[s_at].xyz -= jr / m_shot;
+        uint w_at = BODY_WORDS * (b + region * params.max_bodies);
+        bodies[w_at + 3].xyz += dv;
+        bodies[w_at + 4].xyz += dw;
+    }
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_il_strike(uint3 id: SV_DispatchThreadID)
+{
+    uint b = id.x;
+    if (b >= params.body_count || params.shot_count == 0)
+        return;
+    uint shot;
+    if (!struck(b, shot))
+        return;
+    uint at = a_strike() + 9 * b;
+    float t_in = asfloat(atom[at + 6].load());
+    uint entry = atom[at + 8].load();
+    float3 contact;
+    float3 d;
+    float speed;
+    il_path(b, contact, d, speed);
+    float4 info = shots[2 * shot];
+    float r = max(info.z, 1e-3);
+    float m_imp = info.w;
+    float e_imp = shots[2 * shot + 1].x;
+    float inv_mass = bodies[BODY_WORDS * b].w;
+    float m = inv_mass == 0.0 ? m_imp : m_imp / (1.0 + m_imp * inv_mass);
+    // The launch's own debris (its plug, scab or crater, `fr_il_mark`): the shot pushes what
+    // it broke out, the engine's contact; struck once.
+    uint launch = asuint(shots[2 * shot + 1].y);
+    if (launch != 0 && work[w_marks() + entry] == launch)
+    {
+        lp[lp_body(b)] = float4(0.0);
+        lp[lp_body(b) + 1] = float4(0.0);
+        return;
+    }
+    uint e0 = asuint(atom[a_il(b)].load());
+    uint e1 = asuint(atom[a_il(b) + 1].load());
+    if (e0 != e1)
+        atom[a_counters() + C_ERROR].or(16u);
+    float h = max(asfloat(e0) - r, 1e-6);
+    // Already touching at the frame's start: the strike was met before (one strike per
+    // contact; the engine's contact carries on from it).
+    if (!(t_in > 0.0))
+    {
+        lp[lp_body(b)] = float4(h, 0.0, 0.0, 0.0);
+        lp[lp_body(b) + 1] = float4(0.0);
+        return;
+    }
+    // The entry chunk's material (impact_local.rs `Target`).
+    uint o = params.ext_chunks + 4 * entry;
+    float4 mat0 = ext[o + 1]; // density, tensile, compressive, shear
+    JointMaterial dm;
+    dm.strength = float4(0.0);
+    dm.energy = float4(0.0);
+    dm.dif = ext[o + 2];
+    float4 mat3 = ext[o + 3]; // DIF max, Poisson's ratio, Young's modulus
+    dm.misc = float4(mat3.x, 0.0, 0.0, 0.0);
+    dm.kind_flags = uint4(0u);
+    float nu = mat3.y;
+    float e_target = mat3.z / (1.0 - nu * nu);
+    float e_star = 1.0 / (1.0 / e_imp + 1.0 / e_target);
+    float v = max(speed, 1e-3);
+    float pi = 3.14159265358979;
+    // Hertz.
+    float h0 = pow(15.0 * m * v * v / (16.0 * e_star * sqrt(r)), 0.4);
+    float t_c = 2.94 * h0 / v;
+    float force = 4.0 / 3.0 * e_star * sqrt(r) * pow(h0, 1.5);
+    float a = sqrt(r * h0);
+    float p0 = 3.0 * force / (2.0 * pi * a * a);
+    float ring = (1.0 - 2.0 * nu) * p0 / 3.0;
+    // Rate.
+    float k = mat3.x > 0.0 ? dif_factor(dm, v / h) : 1.0;
+    float ft = k * mat0.y;
+    float fc = k * mat0.z;
+    float tau = k * mat0.w;
+    bool damage = p0 > fc || ring > ft;
+    // Ballistic limit.
+    float area = pi * r * r;
+    float e_bl = min(fc * area * h, 0.5 * pi * (2.0 * r + IL_CONE_TAN * h) * h * h * tau);
+    float v_bl = sqrt(2.0 * e_bl / m);
+    bool perforate = damage && v >= v_bl;
+    float r2 = r + IL_CONE_TAN * h;
+    float plug = mat0.x * pi * h / 3.0 * (r * r + r * r2 + r2 * r2);
+    float v_res = perforate ? m_imp / (m_imp + plug) * sqrt(max(v * v - v_bl * v_bl, 0.0)) : 0.0;
+    // Crater.
+    float depth = damage && !perforate ? min(0.5 * m * v * v / (fc * area), h) : 0.0;
+    bool crater = depth > a;
+    // Spall.
+    float c = sqrt(e_target / mat0.x);
+    float z_t = mat0.x * c;
+    float rho_p = m_imp / (4.0 / 3.0 * pi * r * r * r);
+    float z_p = rho_p * sqrt(e_imp / rho_p);
+    float mean_pressure = force / (pi * a * a);
+    float source = min(min(z_t * v * z_p / (z_p + z_t), mean_pressure), fc);
+    float source_radius = mean_pressure > fc ? max(a, r) : a;
+    float pulse = c * t_c;
+    float back = source * min(source_radius / h, 1.0) * min(2.0 * h / pulse, 1.0);
+    bool spall = damage && !perforate && back > ft;
+    float scab = spall ? 0.5 * min(pulse, h) : 0.0;
+    uint outcome = (damage ? IL_DAMAGE : 0u) | (crater ? IL_CRATER : 0u) | (spall ? IL_SPALL : 0u) | (perforate ? IL_PERFORATE : 0u);
+    lp[lp_body(b)] = float4(h, v_bl, v_res, asfloat(outcome));
+    lp[lp_body(b) + 1] = float4(crater ? depth : 0.0, scab, a, e_bl);
+    if (perforate)
+        atom[a_counters() + C_IL_PERFORATE].add(1u);
+    else if (spall)
+        atom[a_counters() + C_IL_SPALL].add(1u);
+    else if (crater)
+        atom[a_counters() + C_IL_CRATER].add(1u);
+    else
+        atom[a_counters() + C_IL_BOUNCE].add(1u);
+    uint sb = asuint(info.x);
+    if (perforate)
+    {
+        // Fracture work: the closing speed after the plug's ballistic limit's energy is
+        // spent, `1/2 m (v^2 - v'^2) = E_bl`, by an impulse between the shot and the wall
+        // (the shot and its plug leave together after the split: `fr_il_carry`).
+        if (params.fracture_work != 0)
+            il_impulse(b, sb, m_imp, contact, d, m * (v - sqrt(max(v * v - 2.0 * e_bl / m, 0.0))));
+    }
+    else if (damage)
+    {
+        // Not through: the strike is resolved here, inelastically (what crushed, spalled or
+        // cracked took the energy): the shot comes to rest against the wall's face, and its
+        // momentum along the path goes into the wall. It is moved on to the face (where it
+        // is at `t_in`), so a frame's travel longer than the wall cannot pass through it.
+        il_impulse(b, sb, m_imp, contact, d, m * v);
+        float3 step = to_rubble(d) * (v * clamp(t_in, 0.0, params.dt));
+        for (uint region = 0; region < 2; region++)
+            bodies[BODY_WORDS * (sb + region * params.max_bodies)].xyz += step;
+    }
+}
+
+struct IlPlace
+{
+    float along;
+    float radial;
+    bool entry;
+};
+
+IlPlace il_place(uint k, uint entry, float3 contact, float3 d)
+{
+    uint slot = body_of(k);
+    Quat q;
+    float3 origin;
+    structure_pose(slot, BODY_WORDS * slot, q, origin);
+    float3 c = origin + rotate(q, chunks[4 * k].xyz);
+    float3 rel = c - contact;
+    IlPlace p;
+    p.along = dot(rel, d);
+    p.radial = length(rel - d * p.along);
+    p.entry = k == entry;
+    return p;
+}
+
+bool il_plug(uint outcome, float r, float h, IlPlace p)
+{
+    return (outcome & IL_PERFORATE) != 0 && (p.entry || (p.along >= 0.0 && p.along <= h && p.radial <= r + IL_CONE_TAN * p.along));
+}
+
+bool il_scab(uint outcome, float r, float h, float scab, IlPlace p)
+{
+    return (outcome & IL_SPALL) != 0 && p.along >= h - scab && p.along <= h && p.radial <= r + IL_CONE_TAN * h;
+}
+
+bool il_crater(uint outcome, float r, float depth, float a, IlPlace p)
+{
+    return (outcome & IL_CRATER) != 0 && p.along >= 0.0 && p.along <= depth && p.radial <= max(r, a);
+}
+
+// One thread per chunk of a struck body: the launch's mark on every chunk the outcome breaks
+// out (in the plug, the scab or the crater).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_il_mark(uint3 id: SV_DispatchThreadID)
+{
+    uint k = id.x;
+    if (k >= params.chunk_count || params.shot_count == 0)
+        return;
+    uint b = body_of(k);
+    uint shot;
+    if (!struck(b, shot))
+        return;
+    float4 s0 = lp[lp_body(b)];
+    float4 s1 = lp[lp_body(b) + 1];
+    uint outcome = asuint(s0.w);
+    if ((outcome & (IL_CRATER | IL_SPALL | IL_PERFORATE)) == 0)
+        return;
+    float3 contact;
+    float3 d;
+    float speed;
+    il_path(b, contact, d, speed);
+    uint entry = atom[a_strike() + 9 * b + 8].load();
+    float r = max(shots[2 * shot].z, 1e-3);
+    IlPlace p = il_place(k, entry, contact, d);
+    bool plug = il_plug(outcome, r, s0.x, p);
+    // The chunks its path crosses within the wall (their boxes widened by the shot's
+    // bounding radius, as `fr_strike_entry` takes them): the strike has met them; a graze of
+    // the hole's rim is the engine's contact, not another strike.
+    float bound = shots[2 * shot].y;
+    float2 t = il_interval(k, contact - d * bound, d, bound);
+    bool path = t.x <= t.y && t.x <= s0.x + 2.0 * bound && t.y >= 0.0;
+    if (plug || path || il_scab(outcome, r, s0.x, s1.y, p) || il_crater(outcome, r, s1.x, s1.z, p))
+        work[w_marks() + k] = asuint(shots[2 * shot + 1].y);
+    if (plug)
+    {
+        work[w_carry() + k] = b + 1;
+        add64(a_il(b) + 2, chunks[4 * k].w, params.scale_m);
+    }
+}
+
+// After the split, one thread per chunk that came out in a plug this frame: the shot and
+// the plug leave together (Recht and Ipson's premise), at the velocity that keeps their
+// momentum along the path, `m v' / (m + M_plug)` relative to the wall (`v'` the shot's
+// closing speed after the fracture work; `M_plug` the plug's chunks' mass). The exchange
+// happens at the strike's time `t_in` within the coming step, not at its start: the shot is
+// moved on by `(v' - v_r) t_in` along the path, where it would be at the step's end. Every
+// thread of a plug writes the same values.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_il_carry(uint3 id: SV_DispatchThreadID)
+{
+    uint k = id.x;
+    if (k >= params.chunk_count || params.shot_count == 0)
+        return;
+    uint c = work[w_carry() + k];
+    if (c == 0)
+        return;
+    work[w_carry() + k] = 0;
+    uint b0 = c - 1;
+    uint shot;
+    if (!struck(b0, shot))
+        return;
+    float3 contact;
+    float3 d;
+    float speed;
+    il_path(b0, contact, d, speed);
+    float3 dr = to_rubble(d);
+    uint sb = asuint(shots[2 * shot].x);
+    float m_s = shots[2 * shot].w;
+    float plug_mass = read64(a_il(b0) + 2, params.scale_m);
+    float3 v_wall = bodies[BODY_WORDS * b0 + 3].xyz;
+    float3 v_shot = bodies[BODY_WORDS * sb + 3].xyz;
+    float closing = dot(v_shot - v_wall, dr);
+    float v_r = m_s * closing / (m_s + plug_mass);
+    float3 shot_v = v_shot + dr * (v_r - closing);
+    float3 plug_v = v_wall + dr * v_r;
+    float t_in = clamp(asfloat(atom[a_strike() + 9 * b0 + 6].load()), 0.0, params.dt);
+    float3 shot_p = bodies[BODY_WORDS * sb].xyz + dr * ((closing - v_r) * t_in);
+    uint pb = body_of(k);
+    for (uint region = 0; region < 2; region++)
+    {
+        uint s_at = BODY_WORDS * (sb + region * params.max_bodies);
+        bodies[s_at].xyz = shot_p;
+        bodies[s_at + 3].xyz = shot_v;
+        bodies[BODY_WORDS * (pb + region * params.max_bodies) + 3].xyz = plug_v;
+    }
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_il_breaks(uint3 id: SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= params.bond_count || params.shot_count == 0 || work[w_alive() + i] == 0)
+        return;
+    uint4 bond = bonds[i];
+    uint b = body_of(bond.x);
+    uint shot;
+    if (!struck(b, shot))
+        return;
+    float4 s0 = lp[lp_body(b)];
+    float4 s1 = lp[lp_body(b) + 1];
+    uint outcome = asuint(s0.w);
+    if ((outcome & (IL_CRATER | IL_SPALL | IL_PERFORATE)) == 0)
+        return;
+    float3 contact;
+    float3 d;
+    float speed;
+    il_path(b, contact, d, speed);
+    uint entry = atom[a_strike() + 9 * b + 8].load();
+    float r = max(shots[2 * shot].z, 1e-3);
+    float h = s0.x;
+    IlPlace pa = il_place(bond.x, entry, contact, d);
+    IlPlace pb = il_place(bond.y, entry, contact, d);
+    bool cut = il_plug(outcome, r, h, pa) != il_plug(outcome, r, h, pb)
+        || il_scab(outcome, r, h, s1.y, pa) != il_scab(outcome, r, h, s1.y, pb)
+        || il_crater(outcome, r, s1.x, s1.z, pa) || il_crater(outcome, r, s1.x, s1.z, pb);
+    if (cut)
     {
         work[w_alive() + i] = 0;
         atom[a_dirty() + b].or(1u);

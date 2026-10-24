@@ -262,6 +262,22 @@ pub mod shaders {
             ("fr_strike_nearest", (64, 1, 1)),
             ("fr_strike_force", (64, 1, 1)),
             ("fr_strike_breaks", (64, 1, 1)),
+            ("fr_lp_clear", (64, 1, 1)),
+            ("fr_lp_sum", (64, 1, 1)),
+            ("fr_lp_relief", (64, 1, 1)),
+            ("fr_lp_block", (64, 1, 1)),
+            ("fr_lp_sweep_even", (64, 1, 1)),
+            ("fr_lp_sweep_odd", (64, 1, 1)),
+            ("fr_lp_breaks", (64, 1, 1)),
+            ("fr_il_first_reset", (64, 1, 1)),
+            ("fr_il_first", (64, 1, 1)),
+            ("fr_il_begin", (64, 1, 1)),
+            ("fr_il_extend_even", (64, 1, 1)),
+            ("fr_il_extend_odd", (64, 1, 1)),
+            ("fr_il_strike", (64, 1, 1)),
+            ("fr_il_mark", (64, 1, 1)),
+            ("fr_il_breaks", (64, 1, 1)),
+            ("fr_il_carry", (64, 1, 1)),
         ]
     );
 

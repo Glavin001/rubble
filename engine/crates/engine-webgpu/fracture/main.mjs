@@ -24,8 +24,10 @@ let workDone=[{done:true},{done:true}];
 let currentRates=null,layout=null,maxHullVertices,procedural=null,assetBytes=null,packBytes=null;
 // Bond mode (the Bonds menu): 'none' (pieces sleep until hit), 'd6' (breakable D6
 // joints, AVBD welds), 'stress' (GPU stress solver on its own canvas), 'threshold' (the
-// same, with the v0 rule: a bond breaks on contact force alone, no solve), or 'learned'
-// (lean MGN-T forward on this page's WebGPU — compute/timing only; rubble stays unbonded).
+// same, with the v0 rule: a bond breaks on contact force alone, no solve), 'load_path' and
+// 'impact_local' (the same GPU world with a load path, or with the analytic local impact
+// model for strikes), or 'learned' (lean MGN-T forward on this page's WebGPU — compute/timing
+// only; rubble stays unbonded).
 const bondMode=()=>$('bond-mode').value;
 // The controls panel collapses for a full view (remembered per viewer; phones start
 // collapsed). Collapsed, a quick button mirrors Start / Pause.
@@ -42,7 +44,8 @@ $('panel-toggle').onclick=()=>setPanel(document.body.classList.contains('collaps
  new MutationObserver(sync).observe(release,{childList:true,characterData:true,subtree:true,attributes:true,attributeFilter:['disabled']});sync();quick.onclick=()=>release.click()}
 
 // The stress solver's modes, and the capability profile each runs (stress-web).
-const STRESS_PROFILES={stress:'blast_parity',threshold:'threshold'};
+const STRESS_PROFILES={stress:'blast_parity',threshold:'threshold',load_path:'load_path',impact_local:'impact_local'};
+const PROFILE_NOTES={threshold:'simple threshold (v0): a bond breaks when a contact force beats its strength',load_path:'load path: gravity and contacts carried through the bonds, each checked for tension, shear, compression and bending',impact_local:'local impact: a shot holes, spalls or craters the wall by its ballistic limit, before the engine steps'};
 const stressMode=()=>bondMode() in STRESS_PROFILES;
 // The stress-solver modes wait on the GPU from Rust: through WebAssembly JavaScript Promise
 // Integration where the browser has it, else (Safari) through the Asyncify build
@@ -192,7 +195,7 @@ async function loadStress(level){
  const st=stress.stats;stressHud={t:performance.now(),frames:0,renders:0};
  $('fragments').textContent=st.chunks;$('bonds').textContent=st.bonds;$('hulls').textContent=st.hulls;$('awake').textContent='0';$('contacts').textContent='—';
  $('release').textContent='Start simulation';$('fire').hidden=true;
- setStatus(`Stress solver · ${st.chunks} chunks · ${st.bonds} bonds · ${profile==='threshold'?'simple threshold (v0): a bond breaks when a contact force beats its strength':profile}, resident GPU frame at ${Math.round(st.frameHz)} Hz${cuboid||pack?'':' · one copy'}${stressWarning(st)} · click the model to shoot`);
+ setStatus(`Stress solver · ${st.chunks} chunks · ${st.bonds} bonds · ${PROFILE_NOTES[profile]??profile}, resident GPU frame at ${Math.round(st.frameHz)} Hz${cuboid||pack?'':' · one copy'}${stressWarning(st)} · click the model to shoot`);
 }
 async function importBytes(bytes,name,sampleKey="",entry={}){
  assetBytes=bytes;layout=entry.layout??null;maxHullVertices=entry.maxHullVertices;procedural=null;

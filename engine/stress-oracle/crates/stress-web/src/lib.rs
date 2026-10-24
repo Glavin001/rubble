@@ -288,8 +288,10 @@ pub fn stress_set_bond_strength_scale(scale: f64) {
     }
 }
 
-/// The capability profile of the next `stress_load`: `blast_parity` (the default) or
-/// `threshold` (the v0 stress mode: bonds break on contact force alone, no solve).
+/// The capability profile of the next `stress_load`: `blast_parity` (the default),
+/// `threshold` (the v0 stress mode: bonds break on contact force alone, no solve),
+/// `load_path` (the fracture world with a load path: gravity and contacts carried through
+/// the bonds) or `impact_local` (the fracture world with the analytic local impact model).
 #[wasm_bindgen]
 pub fn stress_set_profile(name: String) -> Result<(), JsValue> {
     let p = Profile::parse(&name).ok_or_else(|| JsValue::from_str(&format!("no profile {name}")))?;
@@ -480,12 +482,13 @@ fn load(level: u8) -> Result<(), String> {
     scene.sim.methods = stress_ref::scene::Methods::established();
     profile.apply_scene(&mut scene);
     scene.materials.entry("projectile".into()).or_insert_with(stress_ref::builders::elastic_steel);
-    if profile == Profile::Threshold && THRESHOLD_GPU.get() {
+    // The load path and the analytic strike exist only on the GPU-resident fracture world.
+    if (profile == Profile::Threshold && THRESHOLD_GPU.get()) || profile.fracture_world_only() {
         return DEVICE.with_borrow(|d| {
             let d = d.as_ref().ok_or("stress_init first")?;
             let gpu = &d.gpu;
             let s = SHOOTING.get().expect("shooting set");
-            let mut world = stress_rubble::threshold::ThresholdWorld::new(gpu, &scene, s.radius, s.mass)?;
+            let mut world = stress_rubble::threshold::ThresholdWorld::with_profile(gpu, &scene, s.radius, s.mass, profile)?;
             let shots = world.shot_impactors();
             let renderer = Renderer::for_target(gpu, &world.mirror, &shots, d.config.width, d.config.height, d.view_format);
             world.attach_view(gpu, &renderer);
@@ -650,12 +653,16 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, elapsed_ms: f64) -> Result<(
         "errors": st.error,
         "engineOverflow": st.engine_overflow,
         "compactions": 0,
+        // `impact_local`: the analytic strikes by outcome; `load_path`: its largest failure
+        // index (1: a bond's strength).
+        "strikes": { "bounce": st.bounces, "crater": st.craters, "spall": st.spalls, "perforate": st.perforations },
+        "peakUtilization": st.peak_utilization,
     });
     STATS.set(stats.to_string());
     if st.error != 0 || st.engine_overflow != 0 {
         // Paused: one report, not one a frame.
         RUNNING.set(false);
-        return Err(format!("threshold world: fracture errors {:#x}, engine overflow {:#x} (fracture: 1 no free body slot, 2 a mass sum out of range, 4 a union did not settle, 8 the impact pulse pool is full; engine: 1 contacts, 2 candidate pairs, 64 manifolds)", st.error, st.engine_overflow));
+        return Err(format!("threshold world: fracture errors {:#x}, engine overflow {:#x} (fracture: 1 no free body slot, 2 a mass sum out of range, 4 a union did not settle, 8 the impact pulse pool is full, 16 a strike's thickness ran past its passes, 32 a load-path block was not positive definite; engine: 1 contacts, 2 candidate pairs, 64 manifolds)", st.error, st.engine_overflow));
     }
     Ok(())
 }
