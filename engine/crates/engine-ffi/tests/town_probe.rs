@@ -143,14 +143,16 @@ fn town_pack_loads_steps_and_breaks() {
             bd.transform.p = to_w(p, u);
             bd.transform.q.w = 1.0;
             bd.linear_velocity = to_w(v, u);
+            bd.is_bullet = std::env::var("TOWN_BULLET").is_ok();
             let mut ball = 0;
             ok(rbCreateBody(w, &bd, &mut ball));
             let mut sd = rbDefaultShapeDef();
             sd.density = if unreal { density * 1e-6 } else { density };
             ok(rbCreateSphereShape(w, ball, &sd, RbVec3::default(), r * u, &mut s));
+            ball
         };
-        shoot(RbVec3 { x: -51.2, y: 2.5, z: 40.0 }, RbVec3 { x: 0.0, y: 0.0, z: -45.0 }, 0.6, 7800.0);
-        shoot(RbVec3 { x: -34.2, y: 50.0, z: 15.5 }, RbVec3 { x: 0.0, y: -50.0, z: 0.0 }, 1.2, 3000.0);
+        let shots = [shoot(RbVec3 { x: -51.2, y: 2.5, z: 40.0 }, RbVec3 { x: 0.0, y: 0.0, z: -45.0 }, 0.6, 7800.0),
+        shoot(RbVec3 { x: -34.2, y: 50.0, z: 15.5 }, RbVec3 { x: 0.0, y: -50.0, z: 0.0 }, 1.2, 3000.0)];
         // TOWN_TRACE: per step, the fastest chunk (from its centre's move) once one passes 25 m/s.
         if std::env::var("TOWN_TRACE").is_ok() {
             let mut prev = centres(w);
@@ -176,6 +178,11 @@ fn town_pack_loads_steps_and_breaks() {
                         best = v;
                         at = k;
                     }
+                }
+                if n % 15 == 0 && n < 120 {
+                    let mut t = [RbTransform::default(); 2];
+                    ok(rbWorld_GetTransforms(w, shots.as_ptr(), 2, t.as_mut_ptr()));
+                    println!("step {n}: ball {:?}, meteor {:?}, bonds broken so far {broken}", [t[0].p.x, t[0].p.y, t[0].p.z].map(|x| x / unit), [t[1].p.x, t[1].p.y, t[1].p.z].map(|x| x / unit));
                 }
                 if best > 25.0 {
                     let c = now[at];
