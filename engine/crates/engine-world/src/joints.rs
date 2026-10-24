@@ -104,6 +104,16 @@ pub struct WeldJointDef {
     /// `None`: rigid. Otherwise penalty stiffnesses (N/m, N·m/rad).
     pub linear_stiffness: Option<f32>,
     pub angular_stiffness: Option<f32>,
+    /// A plastic weld: it bends instead of breaking.
+    pub plastic: Option<Plastic>,
+}
+
+/// Plastic yield of a weld: past `yield_torque` (N·m) the rest pose follows
+/// the bodies; past `break_bend` radians of accumulated bend it breaks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Plastic {
+    pub yield_torque: f32,
+    pub break_bend: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -246,6 +256,9 @@ impl JointDef {
                         w.linear_stiffness.unwrap_or(JOINT_BIG),
                         w.angular_stiffness.unwrap_or(JOINT_BIG),
                     );
+                }
+                if let Some(p) = w.plastic {
+                    d = d.with_yield(p.yield_torque, p.break_bend);
                 }
                 d
             }

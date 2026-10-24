@@ -334,6 +334,7 @@ impl World {
                         base,
                         linear_stiffness: None,
                         angular_stiffness: None,
+                        plastic: None,
                     })
                 }
                 ConnectionKind::Joint(j) => {

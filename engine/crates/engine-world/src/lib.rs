@@ -28,6 +28,7 @@ mod handles;
 mod joints;
 mod math;
 mod readback;
+mod rig;
 
 pub use assembly::{
     AssemblyDef, AssemblyId, ConnectionDef, ConnectionKind, PartDef, PartHandle, PartModel,
@@ -49,17 +50,21 @@ pub use events::{
 pub use handles::{BodyId, JointId, ShapeId};
 pub use joints::{
     DistanceJointDef, FilterJointDef, JointBase, JointDef, PrismaticJointDef, RevoluteJointDef,
-    SphericalJointDef, Spring, WeldJointDef,
+    Plastic, SphericalJointDef, Spring, WeldJointDef,
 };
 pub use math::Transform;
 pub use readback::Backpressure;
+pub use rig::VehicleDamage;
 
 pub use engine_schema::convex::{CollisionFilter as Filter, ConvexHull};
 pub use engine_schema::{
     AvbdParams, Dof, JointDesc, JointFrame, Motion, StepCounters, WorldCapacity,
 };
-pub use engine_softbody::{SoftCapacity, SoftHandle, SoftVehicleDesc, SpawnOptions};
-pub use engine_vehicle::{VehicleCapacity, VehicleDesc, VehicleHandle, VehicleInput, VehicleState};
+pub use engine_softbody::{SoftCapacity, SoftDamage, SoftHandle, SoftSettings, SoftVehicleDesc, SpawnOptions};
+pub use engine_vehicle::{
+    FunctionalState, GearRequest, MountLoad, VehicleCapacity, VehicleDesc, VehicleHandle, VehicleInput,
+    VehicleState, WheelState,
+};
 pub use engine_webgpu::{ContactStorage, EngineFeatures, WgpuSim};
 
 use engine_schema::convex::HullArena;

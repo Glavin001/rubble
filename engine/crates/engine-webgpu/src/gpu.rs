@@ -2113,6 +2113,11 @@ impl WgpuSim {
         }
     }
 
+    /// The world was built with a soft-body arena.
+    pub fn has_soft(&self) -> bool {
+        self.soft.is_some()
+    }
+
     pub fn soft_host(&self) -> &SoftHost {
         self.soft
             .as_ref()

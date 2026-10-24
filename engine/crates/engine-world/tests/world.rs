@@ -650,6 +650,7 @@ fn unsupported_fields_are_refused_not_ignored() {
         base,
         linear_stiffness: None,
         angular_stiffness: None,
+        plastic: None,
     };
     assert!(unsupported(
         w.create_joint(&JointDef::Weld(weld)).unwrap_err()

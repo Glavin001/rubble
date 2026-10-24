@@ -18,6 +18,8 @@
 
 #![allow(non_camel_case_types, clippy::missing_safety_doc)]
 
+mod controls;
+pub use controls::*;
 pub mod coords;
 
 use coords::{Coords, RbCoordinates};
@@ -274,6 +276,10 @@ pub struct RbWeldJointDef {
     /// 0: rigid. Otherwise penalty stiffnesses.
     pub linear_stiffness: f32,
     pub angular_stiffness: f32,
+    /// Plastic weld (0: off): past `yield_torque` it bends instead of
+    /// holding; past `break_bend` radians of accumulated bend it breaks.
+    pub yield_torque: f32,
+    pub break_bend: f32,
     pub internal_value: u32,
 }
 
@@ -299,6 +305,10 @@ pub struct RbVehicleInput {
     pub steer: f32,
     pub brake: f32,
     pub handbrake: f32,
+    /// False: automatic gearbox. True: request `gear` (0 neutral, negative
+    /// reverse; manual transmissions).
+    pub manual_gear: bool,
+    pub gear: i32,
 }
 
 /// A body whose pose or sleep state changed (`RbFrame::moves`).
@@ -399,6 +409,19 @@ pub struct RbWheelState {
     pub in_contact: bool,
     pub contact_point: RbVec3,
     pub contact_normal: RbVec3,
+    /// Suspension, longitudinal and lateral tyre forces.
+    pub suspension_force: f32,
+    pub longitudinal_force: f32,
+    pub lateral_force: f32,
+    pub slip_ratio: f32,
+    /// Slip angle (rad).
+    pub slip_angle: f32,
+    pub sliding: bool,
+    /// Fell off (`rbVehicle_Damage` or a broken mount).
+    pub detached: bool,
+    pub disabled: bool,
+    pub radius: f32,
+    pub width: f32,
 }
 
 #[repr(C)]
@@ -406,8 +429,19 @@ pub struct RbWheelState {
 pub struct RbVehicleOutput {
     pub vehicle: RbVehicleId,
     pub forward_speed: f32,
+    /// Sideways speed (positive: right).
+    pub lateral_speed: f32,
     pub engine_rpm: f32,
     pub gear: i32,
+    /// 0..1 (1: engaged).
+    pub clutch: f32,
+    pub engine_connected: bool,
+    /// Chassis mass now (drops as parts come off).
+    pub mass: f32,
+    /// Parts severed so far, and mounts broken under load.
+    pub parts_lost: u32,
+    pub parts_broken: u32,
+    pub wheels_broken: u32,
     pub wheels: *const RbWheelState,
     pub wheel_count: u32,
 }
@@ -545,6 +579,9 @@ pub struct RbWorld {
     store: FrameStore,
     /// Frames polled but not yet handed out one by one.
     pending: VecDeque<Frame>,
+    /// Joints whose drive is a length (prismatic, distance); the rest drive
+    /// angles (`rbJoint_SetDrive`).
+    linear_joints: std::collections::HashSet<u64>,
 }
 
 thread_local! {
@@ -871,14 +908,31 @@ impl RbWorld {
                     in_contact: w.in_contact,
                     contact_point: RbVec3::of(coords.position_out(w.contact_point)),
                     contact_normal: RbVec3::of(coords.direction_out(w.contact_normal)),
+                    suspension_force: coords.force_out(w.suspension_force),
+                    longitudinal_force: coords.force_out(w.longitudinal_force),
+                    lateral_force: coords.force_out(w.lateral_force),
+                    slip_ratio: w.slip_ratio,
+                    slip_angle: w.slip_angle_deg.to_radians(),
+                    sliding: w.sliding,
+                    detached: w.detached,
+                    disabled: w.disabled,
+                    radius: coords.length_out(w.radius),
+                    width: coords.length_out(w.width),
                 })
                 .collect();
             s.wheels.push(wheels);
             s.vehicles.push(RbVehicleOutput {
                 vehicle: v.vehicle.0,
                 forward_speed: coords.length_out(v.state.forward_speed),
+                lateral_speed: coords.length_out(v.state.lateral_speed),
                 engine_rpm: v.state.engine_rpm,
                 gear: v.state.gear,
+                clutch: v.state.clutch,
+                engine_connected: v.state.engine_connected,
+                mass: v.state.mass,
+                parts_lost: v.state.parts_lost,
+                parts_broken: v.state.parts_broken,
+                wheels_broken: v.state.wheels_broken,
                 wheels: std::ptr::null(),
                 wheel_count: v.state.wheels.len() as u32,
             });
@@ -1072,6 +1126,7 @@ pub unsafe extern "C" fn rbCreateWorld(def: *const RbWorldDef, out: *mut *mut Rb
             coords,
             store: FrameStore::default(),
             pending: VecDeque::new(),
+            linear_joints: Default::default(),
         });
         write(out, Box::into_raw(boxed))
     })
@@ -1625,6 +1680,8 @@ pub extern "C" fn rbDefaultWeldJointDef() -> RbWeldJointDef {
         base: rbDefaultJointBase(),
         linear_stiffness: 0.0,
         angular_stiffness: 0.0,
+        yield_torque: 0.0,
+        break_bend: 0.0,
         internal_value: COOKIE,
     }
 }
@@ -1652,6 +1709,9 @@ unsafe fn create_joint(
         let w = world_mut(world)?;
         let def = build(w)?;
         let id = w.world.create_joint(&def)?;
+        if matches!(def, JointDef::Prismatic(_) | JointDef::Distance(_)) {
+            w.linear_joints.insert(id.to_bits());
+        }
         write(out, id.to_bits())
     })
 }
@@ -1762,6 +1822,14 @@ pub unsafe extern "C" fn rbCreateWeldJoint(
             linear_stiffness: (d.linear_stiffness > 0.0).then_some(d.linear_stiffness),
             angular_stiffness: (d.angular_stiffness > 0.0)
                 .then(|| c.torque_in(d.angular_stiffness)),
+            plastic: (d.yield_torque > 0.0).then(|| Plastic {
+                yield_torque: c.torque_in(d.yield_torque),
+                break_bend: if d.break_bend > 0.0 {
+                    d.break_bend
+                } else {
+                    f32::INFINITY
+                },
+            }),
         }))
     })
 }
@@ -1852,7 +1920,11 @@ fn vehicle_input(input: RbVehicleInput) -> VehicleInput {
         steer: input.steer,
         brake: input.brake,
         handbrake: input.handbrake,
-        ..VehicleInput::default()
+        gear: if input.manual_gear {
+            engine_vehicle::GearRequest::Gear(input.gear)
+        } else {
+            engine_vehicle::GearRequest::Auto
+        },
     }
 }
 

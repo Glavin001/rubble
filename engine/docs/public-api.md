@@ -670,6 +670,56 @@ The tests are in `engine-world/tests/{world,bridge_acceptance}.rs` and
 Each phase lands with byte-equality tests against raw `WgpuSim` for worlds
 that do not use its features.
 
+### MVP: demo parity for Unreal (in progress)
+
+The bar, set by the user on 2026-10-24: everything the shipped web pages do
+(`demo.html`, `vehicle.html`, `softbody.html` and the fracture lab) can be
+done from Unreal through the C ABI, as is. The pages drive raw GPU records
+today; each feature below gets a World call and an ABI call instead. Status:
+✅ shipped, ⏳ next (this order), 🔜 later in the MVP.
+
+| Page feature | World / ABI | Status |
+|---|---|---|
+| Static and dynamic bodies, initial velocity, sleep, user data | `create_body`, `rbCreateBody` | ✅ |
+| Sphere, capsule, box, hull and compound bodies; filters; friction and restitution | `create_*_shape`, `rbCreate*Shape` | ✅ |
+| Ground plane (legacy scenes) | a static box slab is equivalent for every page scene; `Geometry::Plane` later | 🔜 |
+| Projectiles, cannons, rams (teleport plus velocity) | `rbBody_SetTransform`, `rbBody_SetLinearVelocity`, create and destroy | ✅ |
+| Body velocity and awake state for HUDs and colouring | `rbBody_GetVelocity` (blocking), `rbBody_IsAwake` | ✅ |
+| Hand-set mass and inertia from C | `body_set_mass_data` in Rust; `rbBody_SetMassData` | 🔜 |
+| Runtime gravity | `rbWorld_SetGravity` | ✅ |
+| Joints: ball, cone and twist limits, hinge limits, slider, weld, spring, distance and tether, motors, servo, breakable | typed joint defs | ✅ |
+| Live motor speed and servo target (motor toggle, servo sweep) | `joint_set_drive`, `rbJoint_SetDrive` | ✅ |
+| Plastic welds (`with_yield`) | `WeldJointDef::plastic`, `RbWeldJointDef::yield_torque` / `break_bend` | ✅ |
+| Shape edits (friction, filter) | `rbShape_SetFriction`, `rbShape_SetFilter` | ✅ |
+| Every vehicle preset; descriptors edited by the host (mount strength, track pods) | `rbCreateVehiclePreset`, `rbGetVehiclePresetJson`, `rbCreateVehicleFromJson` (the serde `VehicleDesc`) | ✅ |
+| Vehicle input with gear requests | `RbVehicleInput::manual_gear` / `gear` | ✅ |
+| Telemetry: speed, rpm, gear, clutch, parts lost, per-wheel contact, slip, suspension force, detached | `RbVehicleOutput`, `RbWheelState` (every frame) | ✅ |
+| Vehicle damage: detach or disable wheels and parts, functional state, mount loads | `vehicle_damage`, `rbVehicle_Damage`, `rbVehicle_SetFunctionalState`, `rbVehicle_GetMountLoads` | ✅ |
+| Soft vehicles: `.truck`, JBeam, procedural car, dune buggy, descriptors as JSON; spawn velocity and `rigid_core` | `rbCreateSoftVehicle`, `rbCreateSoftVehicleJBeam`, `rbCreateSoftVehicleTruck`, `rbGetSoftVehiclePresetJson` | ✅ |
+| Soft settings (`rigid_mode`, threshold, sweeps) and soft obstacles | `rbGetCalibratedSoftSettingsJson`, `rbWorld_SetSoftSettingsJson`, `rbSoft_AddObstacle` | ✅ |
+| Soft damage (yielded and broken beams, plastic work, rigid or soft mode) | `soft_damage`, `rbSoft_GetDamage` | ✅ (per-beam view 🔜) |
+| Soft skinning, node output, beam breaks and torn-off pieces | `rbSoft_BindSkin`, `RbFrame` | ✅ |
+| Destructibles from GLB, pack and cuboid houses; strength scale; layouts | `rbCreateDestructibleAsset*` | ✅ |
+| Bonds that settle under self-weight before they can break (the lab's preload) | `DestructibleDef::preload` | ⏳ (check against the lab) |
+| Fracture lab `threshold` mode (GPU splitter) | D1b, `StrengthModel::Threshold` | 🔜 |
+| Fracture lab `stress` mode (blast_parity) | D5, `StrengthModel::Stress` | 🔜 |
+| Picking (camera ray) | `rbWorld_CastRays` | ✅ |
+| Grab and drag | kinematic mouse body plus a soft joint (P3) | 🔜 |
+| Scripted crusher, moving slabs | kinematic bodies (P3) | 🔜 |
+| Collider debug view | `World::draw`; `rbWorld_DebugDraw` (C callbacks) | ✅ |
+| Fixed rate, several steps per frame, pause, single step, sleep skip | `step`, `rbWorld_Step`, `rbWorld_Poll(coalesce)` | ✅ |
+| Reset | destroy and recreate the world, or remove and re-add; snapshot and restore is P6 | ✅ (P6 later) |
+| Per-kernel GPU timings | `profile_ms`, `rbWorld_GetProfile` | 🔜 |
+
+Descriptors and settings cross the ABI as JSON in the engine's units and
+design frame (metres, Y up), the format of `vehicle_presets.json` and the
+soft descriptors; spawn transforms and velocities use the world's
+coordinates. `tests/demo_parity.rs` covers each row through the ABI.
+
+Next, in order: the self-weight preload check, then P3 (kinematic bodies,
+which also give grab and drag), D1b (`threshold`), P4 (contact, hit and
+sensor events) and D5 (`stress`).
+
 **P1.5: Box3D alignment (shipped).** `rubble::World` now has this shape:
 
 - **Definitions:** `WorldDef`, and `BodyDef` with Box3D's fields and a static
