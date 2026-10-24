@@ -568,6 +568,8 @@ void ccd_toi(uint3 tid : SV_DispatchThreadID)
     BodyState ba = gBodies[ca.body];
     BodyState bb = gBodies[cb.body];
     if (!bodyIsCcd(ba) && !bodyIsCcd(bb)) return;
+    // Sensors have no response: no time of impact against them.
+    if (((ca.material | cb.material) & COLLIDER_SENSOR) != 0u) return;
     bool fastIsA = ccdFastIsA(ba, ca.body, bb, cb.body);
     uint fastBody = fastIsA ? ca.body : cb.body;
     BodyState bf = fastIsA ? ba : bb;
@@ -605,6 +607,8 @@ void ccd_pick(uint3 tid : SV_DispatchThreadID)
     BodyState ba = gBodies[ca.body];
     BodyState bb = gBodies[cb.body];
     if (!bodyIsCcd(ba) && !bodyIsCcd(bb)) return;
+    // Nor a post-solve sweep check (validate, clamp, respond) against them.
+    if (((ca.material | cb.material) & COLLIDER_SENSOR) != 0u) return;
     bool fastIsA = ccdFastIsA(ba, ca.body, bb, cb.body);
     uint slot = ccdSlotOf(fastIsA ? ca.body : cb.body, fastIsA ? ba : bb);
     if (slot == CCD_NO_PAIR) return;

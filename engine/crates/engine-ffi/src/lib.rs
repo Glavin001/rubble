@@ -176,6 +176,8 @@ pub struct RbWorldDef {
     /// waiting when all are.
     pub readback_frames: u32,
     pub drop_frames: bool,
+    /// Begins at or above this approach speed are hits (world units/s).
+    pub hit_event_threshold: f32,
     pub user_data: u64,
     pub internal_value: u32,
 }
@@ -189,9 +191,26 @@ pub struct RbBodyDef {
     pub linear_velocity: RbVec3,
     pub angular_velocity: RbVec3,
     pub is_awake: bool,
+    /// Box3D damping (1/s).
+    pub linear_damping: f32,
+    pub angular_damping: f32,
+    pub gravity_scale: f32,
+    /// `RB_LOCK_*` bits: axes (world, host frame) it may not move along or
+    /// turn about.
+    pub motion_locks: u32,
+    /// Continuous collision: never tunnels (projectiles, debris).
+    pub is_bullet: bool,
     pub user_data: u64,
     pub internal_value: u32,
 }
+
+/// Motion-lock bits (`RbBodyDef::motion_locks`, `rbBody_SetMotionLocks`).
+pub const RB_LOCK_LINEAR_X: u32 = 1;
+pub const RB_LOCK_LINEAR_Y: u32 = 2;
+pub const RB_LOCK_LINEAR_Z: u32 = 4;
+pub const RB_LOCK_ANGULAR_X: u32 = 8;
+pub const RB_LOCK_ANGULAR_Y: u32 = 16;
+pub const RB_LOCK_ANGULAR_Z: u32 = 32;
 
 /// A shape (`rbDefaultShapeDef`).
 #[repr(C)]
@@ -206,6 +225,17 @@ pub struct RbShapeDef {
     pub mask_bits: u16,
     pub group_index: i16,
     pub update_body_mass: bool,
+    /// Report when this shape starts and stops touching another
+    /// (`RbFrame::contact_begin` / `contact_end`).
+    pub enable_contact_events: bool,
+    /// Also report hard begins (`RbFrame::hits`, at or above
+    /// `RbWorldDef::hit_event_threshold`).
+    pub enable_hit_events: bool,
+    /// No contact response: other shapes pass through. With
+    /// `enable_sensor_events`, it reports shapes entering and leaving
+    /// (`RbFrame::sensor_begin` / `sensor_end`). Not with compact contacts.
+    pub is_sensor: bool,
+    pub enable_sensor_events: bool,
     pub user_data: u64,
     pub internal_value: u32,
 }
@@ -463,6 +493,44 @@ pub struct RbSkinOutput {
     pub vertex_count: u32,
 }
 
+/// Two shapes started touching (`RbFrame::contact_begin`, and `hits`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RbContactBeginEvent {
+    pub shape_a: RbShapeId,
+    pub shape_b: RbShapeId,
+    /// The deepest contact point and the normal from A to B.
+    pub point: RbVec3,
+    pub normal: RbVec3,
+    /// Closing speed along the normal, before the solve.
+    pub approach_speed: f32,
+}
+
+/// Two shapes stopped touching, or one was destroyed while touching.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RbContactEndEvent {
+    pub shape_a: RbShapeId,
+    pub shape_b: RbShapeId,
+}
+
+/// An overlap query's shapes (`RbFrame::overlaps`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RbOverlapResult {
+    pub query: u64,
+    pub shapes: *const RbShapeId,
+    pub shape_count: u32,
+}
+
+/// A shape entered or left a sensor.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RbSensorEvent {
+    pub sensor_shape: RbShapeId,
+    pub visitor_shape: RbShapeId,
+}
+
 /// A ray to cast: from `origin` along `translation` (its length is the range).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -521,6 +589,21 @@ pub struct RbFrame {
     /// Ray batches queued with `rbWorld_CastRays` before these steps.
     pub rays: *const RbRayBatchResult,
     pub ray_count: u32,
+    /// Contact events of shapes with `enable_contact_events`, in step order.
+    pub contact_begin: *const RbContactBeginEvent,
+    pub contact_begin_count: u32,
+    pub contact_end: *const RbContactEndEvent,
+    pub contact_end_count: u32,
+    pub hits: *const RbContactBeginEvent,
+    pub hit_count: u32,
+    /// Shapes that entered or left sensors with `enable_sensor_events`.
+    pub sensor_begin: *const RbSensorEvent,
+    pub sensor_begin_count: u32,
+    pub sensor_end: *const RbSensorEvent,
+    pub sensor_end_count: u32,
+    /// Overlap queries queued with `rbWorld_OverlapAABB` before these steps.
+    pub overlaps: *const RbOverlapResult,
+    pub overlap_count: u32,
 }
 
 impl RbFrame {
@@ -546,6 +629,18 @@ impl RbFrame {
             skin_count: 0,
             rays: std::ptr::null(),
             ray_count: 0,
+            contact_begin: std::ptr::null(),
+            contact_begin_count: 0,
+            contact_end: std::ptr::null(),
+            contact_end_count: 0,
+            hits: std::ptr::null(),
+            hit_count: 0,
+            sensor_begin: std::ptr::null(),
+            sensor_begin_count: 0,
+            sensor_end: std::ptr::null(),
+            sensor_end_count: 0,
+            overlaps: std::ptr::null(),
+            overlap_count: 0,
         }
     }
 }
@@ -564,6 +659,13 @@ struct FrameStore {
     skin_data: Vec<(Vec<RbVec3>, Vec<RbVec3>)>,
     rays: Vec<RbRayBatchResult>,
     ray_hits: Vec<Vec<RbRayHit>>,
+    contact_begin: Vec<RbContactBeginEvent>,
+    contact_end: Vec<RbContactEndEvent>,
+    hits: Vec<RbContactBeginEvent>,
+    sensor_begin: Vec<RbSensorEvent>,
+    sensor_end: Vec<RbSensorEvent>,
+    overlaps: Vec<RbOverlapResult>,
+    overlap_shapes: Vec<Vec<RbShapeId>>,
     /// Backing for bond lists, chunk lists, body lists and child arrays (the
     /// heap buffers do not move when these outer vectors grow).
     u32_lists: Vec<Vec<u32>>,
@@ -741,6 +843,10 @@ impl RbWorld {
                 group: d.group_index,
             },
             update_body_mass: d.update_body_mass,
+            enable_contact_events: d.enable_contact_events,
+            enable_hit_events: d.enable_hit_events,
+            is_sensor: d.is_sensor,
+            enable_sensor_events: d.enable_sensor_events,
             user_data: d.user_data,
             ..ShapeDef::default()
         })
@@ -1005,6 +1111,42 @@ impl RbWorld {
         for (out, hits) in s.rays.iter_mut().zip(&s.ray_hits) {
             out.hits = hits.as_ptr();
         }
+        let begin_out = |e: &ContactBeginEvent| RbContactBeginEvent {
+            shape_a: e.shape_a.to_bits(),
+            shape_b: e.shape_b.to_bits(),
+            point: RbVec3::of(coords.position_out(e.point)),
+            normal: RbVec3::of(coords.direction_out(e.normal)),
+            approach_speed: coords.length_out(e.approach_speed),
+        };
+        s.contact_begin = c.contact_events.begin.iter().map(begin_out).collect();
+        s.hits = c.contact_events.hits.iter().map(begin_out).collect();
+        s.contact_end = c
+            .contact_events
+            .end
+            .iter()
+            .map(|e| RbContactEndEvent {
+                shape_a: e.shape_a.to_bits(),
+                shape_b: e.shape_b.to_bits(),
+            })
+            .collect();
+        let sensor_out = |e: &SensorEvent| RbSensorEvent {
+            sensor_shape: e.sensor_shape.to_bits(),
+            visitor_shape: e.visitor_shape.to_bits(),
+        };
+        s.sensor_begin = c.sensor_events.begin.iter().map(sensor_out).collect();
+        s.sensor_end = c.sensor_events.end.iter().map(sensor_out).collect();
+        for r in &c.overlap_results {
+            let shapes: Vec<RbShapeId> = r.shapes.iter().map(|s| s.to_bits()).collect();
+            s.overlaps.push(RbOverlapResult {
+                query: r.query.0,
+                shapes: std::ptr::null(),
+                shape_count: shapes.len() as u32,
+            });
+            s.overlap_shapes.push(shapes);
+        }
+        for (out, shapes) in s.overlaps.iter_mut().zip(&s.overlap_shapes) {
+            out.shapes = shapes.as_ptr();
+        }
         let counters = c.counters;
         RbFrame {
             has_frame: true,
@@ -1027,6 +1169,18 @@ impl RbWorld {
             skin_count: s.skins.len() as u32,
             rays: s.rays.as_ptr(),
             ray_count: s.rays.len() as u32,
+            contact_begin: s.contact_begin.as_ptr(),
+            contact_begin_count: s.contact_begin.len() as u32,
+            contact_end: s.contact_end.as_ptr(),
+            contact_end_count: s.contact_end.len() as u32,
+            hits: s.hits.as_ptr(),
+            hit_count: s.hits.len() as u32,
+            sensor_begin: s.sensor_begin.as_ptr(),
+            sensor_begin_count: s.sensor_begin.len() as u32,
+            sensor_end: s.sensor_end.as_ptr(),
+            sensor_end_count: s.sensor_end.len() as u32,
+            overlaps: s.overlaps.as_ptr(),
+            overlap_count: s.overlaps.len() as u32,
         }
     }
 }
@@ -1075,6 +1229,7 @@ pub extern "C" fn rbDefaultWorldDef() -> RbWorldDef {
         enable_soft_bodies: false,
         readback_frames: 3,
         drop_frames: false,
+        hit_event_threshold: 1.0,
         user_data: 0,
         internal_value: COOKIE,
     }
@@ -1113,6 +1268,7 @@ pub unsafe extern "C" fn rbCreateWorld(def: *const RbWorldDef, out: *mut *mut Rb
             soft: d.enable_soft_bodies.then(SoftCapacity::default),
             solver,
             readback_frames: d.readback_frames,
+            hit_event_threshold: coords.length_in(d.hit_event_threshold),
             backpressure: if d.drop_frames {
                 Backpressure::Drop
             } else {
@@ -1242,6 +1398,11 @@ pub extern "C" fn rbDefaultBodyDef() -> RbBodyDef {
         linear_velocity: RbVec3::default(),
         angular_velocity: RbVec3::default(),
         is_awake: true,
+        linear_damping: 0.0,
+        angular_damping: 0.0,
+        gravity_scale: 1.0,
+        motion_locks: 0,
+        is_bullet: false,
         user_data: 0,
         internal_value: COOKIE,
     }
@@ -1288,6 +1449,11 @@ pub unsafe extern "C" fn rbCreateBodies(
                 linear_velocity: w.coords.linear_in(d.linear_velocity.a()),
                 angular_velocity: w.coords.angular_velocity_in(d.angular_velocity.a()),
                 is_awake: d.is_awake,
+                linear_damping: d.linear_damping,
+                angular_damping: d.angular_damping,
+                gravity_scale: d.gravity_scale,
+                motion_locks: MotionLocks::from_bits(w.coords.locks_in(d.motion_locks)),
+                is_bullet: d.is_bullet,
                 user_data: d.user_data,
                 ..BodyDef::default()
             });
@@ -1490,6 +1656,10 @@ pub extern "C" fn rbDefaultShapeDef() -> RbShapeDef {
         mask_bits: d.filter.mask,
         group_index: d.filter.group,
         update_body_mass: true,
+        enable_contact_events: false,
+        enable_hit_events: false,
+        is_sensor: false,
+        enable_sensor_events: false,
         user_data: 0,
         internal_value: COOKIE,
     }

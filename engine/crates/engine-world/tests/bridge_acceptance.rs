@@ -284,7 +284,6 @@ fn bodies_added_to_a_running_world_are_hit_by_rays() {
 /// running world" (af24d153 on feat/vibe-land-backend), not yet on main: a raw
 /// WgpuSim misses the box the same way.
 #[test]
-#[ignore = "rubble gap: a collider added asleep to a running world gets no ray bounds (fix af24d153 unmerged)"]
 fn bodies_added_asleep_to_a_running_world_are_hit_by_rays() {
     rays_find_a_late_body(false);
 }

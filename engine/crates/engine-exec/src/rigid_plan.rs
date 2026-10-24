@@ -72,6 +72,12 @@ pub struct StepModes {
     /// Append `pose_pack` after the sleep commit: compact render poses and the
     /// list of bodies that moved (bindings 34-36, after BIND_COUNT; read-only on physics state).
     pub pose_output: bool,
+    /// Append `contact_events` after contact persistence: list touching pairs
+    /// of event-flagged colliders (read-only on physics state).
+    pub contact_events: bool,
+    /// Some body has motion locks: `lock_predict` after `predict_bodies` and
+    /// `lock_project` after the solve.
+    pub motion_locks: bool,
 }
 
 /// Scene sizes and last step's counters this step is planned from.
@@ -101,6 +107,8 @@ pub struct StepInputs {
     pub soft: SoftCounts,
     /// Host commands in binding 8 (`apply_commands` runs first when non-zero).
     pub command_count: u32,
+    /// Queued explosions (`explode` runs after the commands when non-zero).
+    pub explosion_count: u32,
 }
 
 /// Largest particle colour `soft_primal_fused` (one 256-lane workgroup) takes;
@@ -215,6 +223,7 @@ pub fn resolve_entry(name: &str, persistent: bool) -> &str {
         "convex_manifold" => "convex_manifold_persistent",
         "ccd_emit" => "ccd_emit_persistent",
         "reuse_all_manifolds" => "reuse_all_manifolds_persistent",
+        "contact_events" => "contact_events_persistent",
         // The one vehicle kernel that reads contacts (vehicle_step_persistent.slang).
         "vehicle_loads" => "vehicle_loads_persistent",
         _ => name,
@@ -301,6 +310,9 @@ pub fn encode_step(
     if i.command_count > 0 {
         // Host commands land before anything reads body state this step.
         e.d("apply_commands", u64::from(i.command_count));
+    }
+    if i.explosion_count > 0 {
+        e.d("explode", n_bodies);
     }
     let vehicles = i.vehicle_count > 0;
     let mo = i.motion;
@@ -467,6 +479,9 @@ pub fn encode_step(
     if early_pair_pack {
         e.w("pack_solver_contacts", 66);
     }
+    if m.contact_events {
+        e.w("contact_events", 66);
+    }
     if i.joint_count > 0 {
         e.d("warmstart_joints", n_joints);
     }
@@ -520,6 +535,9 @@ pub fn encode_step(
         e.d("ccd_unhold", n_bodies);
     }
     e.d("predict_bodies", n_bodies);
+    if m.motion_locks {
+        e.d("lock_predict", n_bodies);
+    }
     if mo.ccd && !reuse_manifolds {
         // Struck bodies' trust regions for this step (ccd_step.slang).
         e.d("ccd_trust", u64::from(engine_schema::CCD_PAIR_CAP));
@@ -626,6 +644,9 @@ pub fn encode_step(
         e.d("ccd_clamp", u64::from(CCD_BODY_CAP));
         e.phase("ccdValidate");
     }
+    if m.motion_locks {
+        e.d("lock_project", n_bodies);
+    }
     e.d("extract_velocity_sleep", n_bodies);
     if vehicles {
         // Mount loads from the final λ and solved velocities; overloaded parts
@@ -730,6 +751,7 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "persist_list_copy_persistent",
     "persist_manifolds_persistent",
     "pack_solver_pairs_persistent",
+    "contact_events_persistent",
     "warmstart_joints",
     "build_awake_list",
     "csr_clear",
@@ -1135,6 +1157,7 @@ mod tests {
             motion: MotionInputs::default(),
             soft: SoftCounts::default(),
             command_count: 0,
+            explosion_count: 0,
         }
     }
 
