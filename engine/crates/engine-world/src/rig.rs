@@ -88,7 +88,10 @@ impl World {
     /// ratio since spawn (blocking readback; for damage HUDs and tuning).
     pub fn vehicle_mount_loads(&self, vehicle: VehicleHandle) -> anyhow::Result<Vec<MountLoad>> {
         self.live_vehicle(vehicle)?;
-        Ok(self.sim.vehicle_host().read_mount_loads(&self.sim, vehicle))
+        Ok(self
+            .sim
+            .vehicle_host()
+            .read_mount_loads(&*self.sim, vehicle))
     }
 
     /// Soft-solver settings for every soft body (the world needs a soft

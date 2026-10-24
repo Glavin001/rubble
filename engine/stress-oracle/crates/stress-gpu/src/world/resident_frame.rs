@@ -56,7 +56,12 @@ impl GpuWorld {
     /// The world coupled to `engine` with the resident quasi-static frame available
     /// (`with_engine` otherwise): the engine shares the stress solver's device.
     pub fn with_resident_engine<T: ResidentEngine + 'static>(gpu: &Gpu, scene: &Scene, engine: T) -> Result<GpuWorld, String> {
-        let shared = Rc::new(RefCell::new(engine));
+        Self::with_shared_resident_engine(gpu, scene, Rc::new(RefCell::new(engine)))
+    }
+
+    /// `with_resident_engine` with an engine the caller keeps a handle to (a host that
+    /// lends the engine its sim for each call, and adopts the bodies it makes).
+    pub fn with_shared_resident_engine<T: ResidentEngine + 'static>(gpu: &Gpu, scene: &Scene, shared: Rc<RefCell<T>>) -> Result<GpuWorld, String> {
         let mut w = GpuWorld::with_engine_contact(gpu, scene, Box::new(SharedEngine(shared.clone())), true)?;
         w.solver.quiet_quasi_static = false;
         w.resident_engine = Some(shared);

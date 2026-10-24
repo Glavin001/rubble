@@ -32,6 +32,7 @@ mod motion;
 mod queries;
 mod readback;
 mod rig;
+mod stress;
 mod threshold;
 
 pub use assembly::{
@@ -67,6 +68,7 @@ pub use motion::{
 pub use queries::{ExplosionDef, OverlapResult, QueryFilter, QueryId};
 pub use readback::Backpressure;
 pub use rig::{SoftBeam, VehicleDamage};
+pub use stress::{ImpactorDef, ImpactorShape};
 pub use threshold::{Projectile, StressSource};
 
 pub use engine_schema::convex::{CollisionFilter as Filter, ConvexHull};
@@ -340,9 +342,43 @@ fn retired_collider(body: u32) -> Collider {
     c
 }
 
+/// The world's sim, which a hosted stress engine borrows for each of its calls
+/// (`stress.rs`); every other use finds it home.
+struct SimHome(Option<WgpuSim>);
+
+impl SimHome {
+    #[allow(dead_code)]
+    fn take(&mut self) -> WgpuSim {
+        self.0.take().expect("the world's sim is home")
+    }
+
+    #[allow(dead_code)]
+    fn put(&mut self, sim: WgpuSim) {
+        assert!(self.0.is_none(), "the world's sim is home already");
+        self.0 = Some(sim);
+    }
+}
+
+impl std::ops::Deref for SimHome {
+    type Target = WgpuSim;
+    fn deref(&self) -> &WgpuSim {
+        self.0
+            .as_ref()
+            .expect("the world's sim is lent to its stress engine")
+    }
+}
+
+impl std::ops::DerefMut for SimHome {
+    fn deref_mut(&mut self) -> &mut WgpuSim {
+        self.0
+            .as_mut()
+            .expect("the world's sim is lent to its stress engine")
+    }
+}
+
 /// A simulated world.
 pub struct World {
-    sim: WgpuSim,
+    sim: SimHome,
     hulls: HullArena,
     bodies: Vec<BodySlot>,
     free_bodies: Vec<u32>,
@@ -389,6 +425,8 @@ pub struct World {
     contact_storage: ContactStorage,
     /// Threshold destructibles (`StrengthModel::Threshold`).
     fracture: threshold::Fracture,
+    /// The stress destructible (`StrengthModel::Stress`).
+    stress: stress::StressHost,
     motion: motion::MotionState,
 }
 
@@ -429,7 +467,7 @@ impl World {
         sim.set_params(params);
         let readback = ReadbackRing::new(&sim, def.readback_frames);
         Ok(Self {
-            sim,
+            sim: SimHome(Some(sim)),
             hulls: HullArena::new(),
             bodies: Vec::new(),
             free_bodies: Vec::new(),
@@ -468,6 +506,7 @@ impl World {
             pending_batches: Vec::new(),
             next_ray_batch: 0,
             fracture: Default::default(),
+            stress: Default::default(),
         })
     }
 
@@ -617,7 +656,7 @@ impl World {
         let i = self.live_body(id)?;
         if self.bodies[i].owner == Owner::Piece {
             anyhow::bail!(
-                "body {} is a threshold destructible's piece; destroy the destructible instead",
+                "body {} is a destructible's piece; destroy the destructible instead",
                 id.index()
             );
         }
@@ -1532,10 +1571,25 @@ impl World {
         if fracture {
             self.encode_fracture_begin(&mut enc);
         }
-        self.sim
-            .step_encode(&mut enc)
-            .map_err(|e| anyhow::anyhow!("step: {e:?}"))?;
-        let ran = self.sim.last_step_ran();
+        // A stress destructible's frame steps the world (`stress.rs`).
+        let stress = self.stress.active();
+        #[cfg(feature = "stress")]
+        if stress {
+            self.sim.queue().submit([enc.finish()]);
+            self.stress_frame()?;
+            enc = self
+                .sim
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("world step readback"),
+                });
+        }
+        if !stress {
+            self.sim
+                .step_encode(&mut enc)
+                .map_err(|e| anyhow::anyhow!("step: {e:?}"))?;
+        }
+        let ran = stress || self.sim.last_step_ran();
         #[cfg(feature = "stress")]
         if fracture && ran {
             // Loads, breaks and splits from this step's contacts, before the next step.
@@ -1551,7 +1605,8 @@ impl World {
                 || !query_ids.is_empty()
                 || !casts.is_empty()
                 || contact_events
-                || fracture;
+                || fracture
+                || stress;
             if !self.readback.has_free() && block {
                 self.wait_oldest()?;
             }
@@ -1802,6 +1857,7 @@ impl World {
             if !reads.is_empty() {
                 destruction.extend(self.fracture_frame(step, &reads)?);
             }
+            destruction.extend(self.stress_events(step));
         }
         let destruction = self.connection_events(destruction);
         let resync = raw
@@ -2022,6 +2078,7 @@ impl World {
         s.generation = s.generation.wrapping_add(1).max(1);
         let (collider, body) = (s.collider, s.body);
         self.sim.set_collider(collider, retired_collider(body));
+        self.stress.note_collider(collider);
         self.collider_shape[collider as usize] = u32::MAX;
         self.free_colliders.push((collider, self.step));
         self.free_shapes.push(index);
@@ -2047,6 +2104,7 @@ impl World {
         if let Some(pos) = reusable {
             let (index, _) = self.free_colliders.swap_remove(pos);
             self.sim.set_collider(index, c);
+            self.stress.note_collider(index);
             return Ok(index);
         }
         let cap = self.sim.capacity().max_colliders;
@@ -2124,7 +2182,7 @@ impl World {
             Geometry::Plane { normal, offset } => {
                 // The kernels read planes in world space: place this one by
                 // the (static) body's pose now.
-                let b = engine_softbody::SoftBackend::host_body(&self.sim, body);
+                let b = engine_softbody::SoftBackend::host_body(&*self.sim, body);
                 let q = Quat::from_array(b.orientation);
                 let n = (q * Vec3::from(*normal)).normalize();
                 let origin = Vec3::from(b.position) - q * frame.center;
@@ -2175,6 +2233,7 @@ impl World {
         slot.def.filter.apply(&mut c);
         c.material |= contacts::event_bits(&slot.def);
         self.sim.set_collider(slot.collider, c);
+        self.stress.note_collider(slot.collider);
         Ok(())
     }
 

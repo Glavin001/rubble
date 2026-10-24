@@ -46,6 +46,14 @@
 //! world no longer has (a cluster that split) is retired: made static and its
 //! colliders filtered out of every pair. Capacity is therefore consumed by every
 //! rebuilt body; `RubbleEngine::with_capacity` sizes it.
+//!
+//! **Hosted** (`RubbleEngine::hosted`): the engine steps a sim it does not own (a
+//! `rubble::World`'s), lent to it for each call ([`SimSlot`]). The sim's other bodies
+//! and colliders are the host's (`Owner::Foreign`: static to the stress solve, but
+//! stepped with everything else); the host reuses retired slots instead of
+//! compacting, adopts the bodies the engine makes from its log (`take_host_log`), and
+//! owns the solver settings and statics. Save and restore are refused (destruction is
+//! forward-only).
 
 pub mod scenes;
 #[cfg(feature = "gpu")]
@@ -66,6 +74,46 @@ use engine_schema::{AvbdParams, BodyFlags, BodyState, Collider, ShapeType, World
 /// rubble's look-ahead contacts (world_step.slang `FLAG_SPEC_VELOCITY`).
 const FLAG_SPEC_VELOCITY: u32 = 1 << 14;
 use engine_webgpu::{SimSnapshot, WgpuSim};
+
+/// What a [`RubbleEngine`] steps with (its sim and hull arena): its own, or a host's lent
+/// to it for the duration of a call (`RubbleEngine::hosted`). Using the engine while a
+/// host's are not lent is a bug in the host, and panics.
+pub struct Lent<T>(Option<T>);
+
+impl<T> std::ops::Deref for Lent<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.0.as_ref().expect("rubble engine used while its host's sim is not lent")
+    }
+}
+
+impl<T> std::ops::DerefMut for Lent<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.0.as_mut().expect("rubble engine used while its host's sim is not lent")
+    }
+}
+
+/// A body the engine made or retired, for its host (`RubbleEngine::take_host_log`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum HostChange {
+    /// A body at `slot` (appended), with these colliders, one per entry of `chunks`.
+    Created { key: BodyKey, slot: u32, colliders: Range<u32>, chunks: Vec<Option<(usize, usize)>> },
+    /// A body retired in place: static, its colliders in no pair.
+    Retired { key: BodyKey, slot: u32, colliders: Range<u32> },
+}
+
+/// A live engine body as its host sees it (`RubbleEngine::host_body`).
+#[derive(Clone, Copy, Debug)]
+pub struct HostBody {
+    pub slot: u32,
+    pub fixed: bool,
+    /// Centre of mass and body frame -> principal rotation, in the oracle body frame.
+    pub com: Vec3,
+    pub principal: Quat,
+    pub inv_mass: f32,
+    pub inv_inertia: [f32; 3],
+}
+
 use stress_ref::engine::{BodyGeometry, BodyKey, BodyMotion, EngineBody, EngineContact, RigidEngine};
 use stress_ref::math::{Mat3, Pose, Quat, Vec3};
 
@@ -121,6 +169,8 @@ enum Owner {
     Ground,
     /// A body removed from the world (rubble cannot delete it).
     Retired,
+    /// The host's (`RubbleEngine::hosted`): static to the stress solve.
+    Foreign,
 }
 
 #[derive(Clone, Debug)]
@@ -412,8 +462,8 @@ struct Saved {
 
 /// rubble's GPU AVBD engine behind the oracle's [`RigidEngine`].
 pub struct RubbleEngine {
-    pub sim: WgpuSim,
-    arena: HullArena,
+    pub sim: Lent<WgpuSim>,
+    arena: Lent<HullArena>,
     /// Chunk hulls cooked so far (`HullCache`).
     hulls: HullCache,
     /// Each cooked chunk's parts (`Part`, the structure's frame), for the GPU's body
@@ -455,6 +505,11 @@ pub struct RubbleEngine {
     pub speculative_ccd: bool,
     /// CCD impactors as `BODY_CCD` bodies in one step, not substeps (`set_toi_ccd`).
     toi_ccd: bool,
+    /// Hosted (`hosted`): the bodies made and retired since the host last took them.
+    pub(crate) host_log: Option<Vec<HostChange>>,
+    /// Whether retired slots are reclaimed (`compact_due`; on by default, off when
+    /// hosted). Off, a run's body slots are exactly a hosted engine's (comparisons).
+    pub compaction: bool,
 }
 
 /// Room for a scene: the default, or more when the scene is larger. A split's children
@@ -564,8 +619,8 @@ impl RubbleEngine {
         let _ = speculative_ccd;
         // Small coupling scenes dispatch only the colours in use by default (engine 8ev).
         Ok(RubbleEngine {
-            sim,
-            arena: HullArena::new(),
+            sim: Lent(Some(sim)),
+            arena: Lent(Some(HullArena::new())),
             hulls: HullCache::new(),
             chunk_parts: HashMap::new(),
             bodies: HashMap::new(),
@@ -587,7 +642,111 @@ impl RubbleEngine {
             resident_offset: 0.01,
             speculative_ccd: std::env::var("STRESS_RUBBLE_SPECULATIVE_CCD").is_ok_and(|v| v == "1"),
             toi_ccd: std::env::var("STRESS_RUBBLE_TOI_CCD").is_ok_and(|v| v == "1"),
+            host_log: None,
+            compaction: true,
         })
+    }
+
+    /// The engine over a host's sim and hull arena (a `rubble::World`'s), lent to it now
+    /// and for every later call (`lend`, `take_back`). The sim's settings are the host's
+    /// (the lab's are `with_sim`'s; the host applies them); its bodies and colliders so
+    /// far, and any it adds later (`host_colliders`), are foreign.
+    pub fn hosted(sim: WgpuSim, arena: HullArena) -> RubbleEngine {
+        let mut e = RubbleEngine {
+            sim: Lent(Some(sim)),
+            arena: Lent(Some(arena)),
+            hulls: HullCache::new(),
+            chunk_parts: HashMap::new(),
+            bodies: HashMap::new(),
+            owners: Vec::new(),
+            cols: Vec::new(),
+            frozen: Vec::new(),
+            saved: None,
+            spare: None,
+            substeps: 1,
+            max_substeps: 256,
+            last_substeps: 0,
+            bodies_read: std::cell::RefCell::new(None),
+            #[cfg(feature = "gpu")]
+            ingest_check: None,
+            layout_version: 0,
+            collider_log: Vec::new(),
+            collider_log_floor: 0,
+            resident_reads: 0,
+            resident_offset: 0.01,
+            speculative_ccd: std::env::var("STRESS_RUBBLE_SPECULATIVE_CCD").is_ok_and(|v| v == "1"),
+            toi_ccd: std::env::var("STRESS_RUBBLE_TOI_CCD").is_ok_and(|v| v == "1"),
+            host_log: Some(Vec::new()),
+            compaction: false,
+        };
+        e.host_colliders(&[]);
+        e
+    }
+
+    /// Hosted: lend the host's sim and hull arena for a call.
+    pub fn lend(&mut self, sim: WgpuSim, arena: HullArena) {
+        assert!(self.sim.0.is_none() && self.arena.0.is_none(), "rubble engine: already lent");
+        self.sim.0 = Some(sim);
+        self.arena.0 = Some(arena);
+    }
+
+    /// Hosted: give the lent sim and hull arena back.
+    pub fn take_back(&mut self) -> (WgpuSim, HullArena) {
+        let sim = self.sim.0.take().expect("rubble engine: nothing lent");
+        let arena = self.arena.0.take().expect("rubble engine: nothing lent");
+        (sim, arena)
+    }
+
+    /// Hosted: the host changed its colliders `touched` (written, retired, reused) and
+    /// may have appended more; all are foreign from now on. Its body records may have
+    /// changed too (the cached read is dropped).
+    pub fn host_colliders(&mut self, touched: &[u32]) {
+        assert!(self.host_log.is_some(), "host_colliders on an engine that owns its sim");
+        self.bodies_changed();
+        let (start, end) = (self.owners.len() as u32, self.sim.collider_count());
+        for c in start..end {
+            self.cols.push(self.sim.collider(c));
+            self.owners.push(Owner::Foreign);
+        }
+        if end > start {
+            self.colliders_changed(start..end);
+        }
+        for &c in touched {
+            if c >= start {
+                continue;
+            }
+            debug_assert!(!matches!(self.owners[c as usize], Owner::Body { .. }), "the host wrote engine collider {c}");
+            self.owners[c as usize] = Owner::Foreign;
+            self.cols[c as usize] = self.sim.collider(c);
+            self.colliders_changed(c..c + 1);
+        }
+    }
+
+    /// Hosted: the bodies made and retired since the last call, in order.
+    pub fn take_host_log(&mut self) -> Vec<HostChange> {
+        self.host_log.as_mut().map(std::mem::take).unwrap_or_default()
+    }
+
+    /// A live body's slot and frame.
+    pub fn host_body(&self, key: BodyKey) -> Option<HostBody> {
+        let e = self.bodies.get(&key)?;
+        Some(HostBody { slot: e.id, fixed: e.fixed, com: e.com, principal: e.principal, inv_mass: e.inv_mass, inv_inertia: e.inv_inertia })
+    }
+
+    /// The chunk each of a live body's colliders is (structure, chunk).
+    pub fn body_chunks(&self, key: BodyKey) -> Vec<(usize, usize)> {
+        let Some(e) = self.bodies.get(&key) else { return Vec::new() };
+        e.colliders
+            .clone()
+            .filter_map(|c| match self.owners[c as usize] {
+                Owner::Body { chunk, .. } => chunk,
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub(crate) fn hosted_now(&self) -> bool {
+        self.host_log.is_some()
     }
 
     /// The engine boxed for `World::with_engine`; `None` without a GPU adapter.
@@ -648,7 +807,8 @@ impl RubbleEngine {
     /// and keeps the parent's slots, so without this a long fracture run fills the
     /// capacity, and every step walks the dead slots.
     pub fn compact_due(&self) -> bool {
-        if self.saved.is_some() {
+        // Hosted: the host reuses retired slots (compaction would renumber its own).
+        if self.saved.is_some() || self.hosted_now() || !self.compaction {
             return false;
         }
         // `STRESS_RUBBLE_COMPACT=always` (whenever anything is retired: a test of the
@@ -670,7 +830,7 @@ impl RubbleEngine {
     /// out changes (`layout_version` bumped with no known changes): the caller rebuilds
     /// any table built from them. False when nothing was retired or a frame is saved.
     pub fn compact_slots(&mut self) -> bool {
-        if self.saved.is_some() {
+        if self.saved.is_some() || self.hosted_now() {
             return false;
         }
         let (bodies, cols) = self.live_slots();
@@ -773,6 +933,9 @@ impl RubbleEngine {
         let cols: Vec<Collider> = c.colliders.iter().map(|col| Collider { body: id, ..*col }).collect();
         let key = b.key;
         let colliders = self.add_colliders(&cols, c.chunks.iter().map(|&chunk| Owner::Body { key, chunk }));
+        if let Some(log) = self.host_log.as_mut() {
+            log.push(HostChange::Created { key, slot: id, colliders: colliders.clone(), chunks: c.chunks.clone() });
+        }
         if c.colliders.iter().any(|col| col.shape == ShapeType::ConvexHull as u32) {
             self.sim.sync_hulls(&mut self.arena);
         }
@@ -814,6 +977,9 @@ impl RubbleEngine {
         self.sim.set_colliders(e.colliders.start, &self.cols[e.colliders.start as usize..e.colliders.end as usize]);
         self.colliders_changed(e.colliders.clone());
         self.frozen.retain(|k| *k != key);
+        if let Some(log) = self.host_log.as_mut() {
+            log.push(HostChange::Retired { key, slot: e.id, colliders: e.colliders.clone() });
+        }
     }
 
     /// Oracle motion of a body from its rubble state.
@@ -880,7 +1046,7 @@ impl RubbleEngine {
         // Velocity of a body's material point `p` (rubble frame) at the start of the
         // engine step.
         let point_velocity = |owner: Owner, body: u32, p: glam::Vec3| match owner {
-            Owner::Body { .. } => {
+            Owner::Body { .. } | Owner::Foreign => {
                 let s = &start[body as usize];
                 glam::Vec3::from_array(s.linear_vel) + glam::Vec3::from_array(s.angular_vel).cross(p - glam::Vec3::from_array(s.position))
             }
@@ -929,6 +1095,10 @@ impl RigidEngine for RubbleEngine {
     }
 
     fn add_ground(&mut self, height: f64) {
+        // Hosted: the host's statics are the ground.
+        if self.hosted_now() {
+            return;
+        }
         let id = self.sim.add_body(BodyState::static_plane_support());
         self.bodies_changed();
         let plane = Collider {
@@ -1014,7 +1184,8 @@ impl RigidEngine for RubbleEngine {
             n = n.max(need.min(self.max_substeps));
         }
         self.last_substeps = n;
-        let any_moving = self.bodies.iter().any(|(k, e)| e.inv_mass > 0.0 && !self.frozen.contains(k));
+        // Hosted: the host's own bodies move with the step.
+        let any_moving = self.hosted_now() || self.bodies.iter().any(|(k, e)| e.inv_mass > 0.0 && !self.frozen.contains(k));
         if !any_moving {
             return Vec::new();
         }
@@ -1106,6 +1277,8 @@ impl RigidEngine for RubbleEngine {
     }
 
     fn save(&mut self) {
+        // AGENTS.md: destruction is forward-only; a host's world is never rewound.
+        assert!(!self.hosted_now(), "a hosted rubble engine is never saved (destruction is forward-only: no redo, no correction pass)");
         let _timer = Timer(web_time::Instant::now(), "save");
         self.discard();
         let snapshot = match self.spare.take() {
