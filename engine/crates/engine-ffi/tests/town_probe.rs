@@ -1,5 +1,6 @@
 //! Probe (ignored): can a world carry Vibe Town's ScenePack (52k chunks) as one destructible?
-//! Options: TOWN_UNREAL (Unreal frame and units), TOWN_LAB_SOLVER, TOWN_TRACE (fastest chunk per step).
+//! Options: TOWN_UNREAL (Unreal frame and units), TOWN_LAB_SOLVER, TOWN_THRESHOLD (the threshold
+//! strength model and its solver), TOWN_BULLET, TOWN_TRACE (fastest chunk per step).
 //! RUBBLE_TOWN_PACK=/path/vibe-town.json cargo test -p engine-ffi --release --test town_probe -- --ignored --nocapture
 use rubble_ffi::*;
 use std::ptr;
@@ -18,10 +19,14 @@ fn town_pack_loads_steps_and_breaks() {
         let mut def = rbDefaultWorldDef();
         def.max_bodies = 1 << 17;
         def.max_colliders = 1 << 18;
-        def.max_contacts = 1 << 21;
+        def.max_contacts = if std::env::var("TOWN_THRESHOLD").is_ok() { 2_000_000 } else { 1 << 21 };
         def.max_candidates = 1 << 21;
         def.max_joints = 1 << 18;
         def.max_hull_vertices = 1 << 21;
+        let threshold = std::env::var("TOWN_THRESHOLD").is_ok();
+        if threshold {
+            def.contacts = RbContacts::RB_CONTACTS_CANONICAL;
+        }
         // TOWN_UNREAL: the world in Unreal's frame and units (Z up, cm), as the Unreal client runs it.
         let unreal = std::env::var("TOWN_UNREAL").is_ok();
         // Rubble's frame (Y up, m) to the world's.
@@ -39,7 +44,13 @@ fn town_pack_loads_steps_and_breaks() {
         let t = Instant::now();
         let mut asset = 0;
         ok(rbCreateDestructibleAssetFromPack(w, bytes.as_ptr(), bytes.len(), &mut asset));
-        if std::env::var("TOWN_LAB_SOLVER").is_ok() {
+        if threshold {
+            let mut dt = 0.0f32;
+            ok(rbWorld_UseDestructibleAssetSolverFor(w, asset, RbStrengthModel::RB_STRENGTH_THRESHOLD, &mut dt));
+            let (mut has, mut at) = (false, RbVec3::default());
+            ok(rbWorld_GetDestructibleAssetGround(w, asset, &mut has, &mut at));
+            println!("threshold solver: step {dt} s, ground {has} at {:?}", (at.x, at.y, at.z));
+        } else if std::env::var("TOWN_LAB_SOLVER").is_ok() {
             let mut dt = 0.0f32;
             ok(rbWorld_UseDestructibleAssetSolver(w, asset, &mut dt));
             println!("lab solver: step {dt} s");
@@ -53,6 +64,9 @@ fn town_pack_loads_steps_and_breaks() {
         let mut dd = rbDefaultDestructibleDef();
         dd.asset = asset;
         dd.start_asleep = std::env::var("TOWN_AWAKE").is_err();
+        if threshold {
+            dd.model = RbStrengthModel::RB_STRENGTH_THRESHOLD;
+        }
         dd.anchored = true;
         println!("default strength_scale {}", dd.strength_scale);
         if let Ok(v) = std::env::var("TOWN_STRENGTH") {
@@ -149,6 +163,9 @@ fn town_pack_loads_steps_and_breaks() {
             let mut sd = rbDefaultShapeDef();
             sd.density = if unreal { density * 1e-6 } else { density };
             ok(rbCreateSphereShape(w, ball, &sd, RbVec3::default(), r * u, &mut s));
+            if threshold {
+                ok(rbBody_SetProjectile(w, ball, &rbDefaultProjectile()));
+            }
             ball
         };
         let shots = [shoot(RbVec3 { x: -51.2, y: 2.5, z: 40.0 }, RbVec3 { x: 0.0, y: 0.0, z: -45.0 }, 0.6, 7800.0),
