@@ -1,7 +1,8 @@
 # Rubble public API
 
-Status: Phase 1 and the P1.5 Box3D alignment have shipped on
-`claude/public-api-world`, rebased on `main` `4a81b441`. It adds the crate `engine-world`, whose library name is `rubble`.
+Status: Phase 1, the P1.5 Box3D alignment and the P1.5b output fixes have
+shipped on `claude/public-api`, rebased on `main` `4a81b441`. The plan is
+revised from a prospective developer's review (see "Developer feedback"). It adds the crate `engine-world`, whose library name is `rubble`.
 This document records what Phase 1 delivered, sets out the **target API**,
 and plans the work that gets there.
 
@@ -305,6 +306,30 @@ loop {
   - `counters` holds the step's counts.
   - `dropped` marks a frame whose readback was skipped under backpressure.
 
+### Frame outputs and delivery (P1.5b)
+
+**Per-step contents.** Every `Frame` also carries:
+
+- `vehicles` (each vehicle's state);
+- `soft` (node positions of soft bodies with output enabled);
+- `skins` (skinned meshes).
+
+**Dropped frames.** `Backpressure::Drop` is lossless. The frame after a
+dropped one copies every published pose and reports each body that changed
+since the last delivered frame, including bodies that fell asleep in between.
+It sets `resynced`.
+
+**Coalesced delivery.** `poll_coalesced()` folds several steps into one result
+for hosts that step faster than they draw, such as 240 Hz soft scenes:
+
+- the latest transform;
+- the earliest previous transform;
+- the net sleep change;
+- events in order, each tagged with its step.
+
+**Shape geometry.** `shape_geometry` and `shape_mesh` return a shape's
+geometry, and a triangle mesh for box and hull shapes, in the body frame.
+
 ### Queries
 
 - **Batched queries:**
@@ -328,10 +353,23 @@ is in [`api-review.md`](api-review.md).
 
 #### Asset and instance
 
-**`DestructibleAsset`** is the immutable model, loaded from a Shardwright GLB:
+**`DestructibleAsset`** is the immutable model. It is built from a
+**`DestructibleAssetDesc`**, after Blast's `NvBlastAssetDesc`, and that
+descriptor is the API's one input. A desc holds:
+
+- chunks: hierarchy, hulls and mass;
+- bonds: patch geometry, capacities and world anchors;
+- materials.
+
+Loaders produce descriptors, so no source is special:
+
+- `DestructibleAssetDesc::from_glb(&bytes)` reads a Shardwright GLB;
+- `from_pack(&json)` reads the vibe-city and blast-stress packs;
+- `cuboid`, `row` and `grid` build the fracture lab's procedural scenes;
+- hosts can also fill a descriptor themselves.
 
 ```rust
-let asset = world.load_destructible_asset(&glb_bytes)?;
+let asset = world.create_destructible_asset(&DestructibleAssetDesc::from_glb(&glb)?)?;
 ```
 
 It holds:
@@ -341,7 +379,8 @@ It holds:
 - each bond's patch geometry and strength capacities, derived from the material
   library;
 - the materials;
-- the render mapping: chunk → glTF node, interior material, root proxy.
+- the render mapping: chunk → glTF node (in D1), with the interior material
+  and root proxy to follow.
 
 Invalid assets are refused. They are never repaired silently.
 
@@ -376,8 +415,19 @@ Blast's terms, reachable as a `BodyId`.
   with `compression`, `tension` and `shear` limits, each with an elastic and a
   fatal value, plus an iteration budget. It is the charter baseline profile
   `blast_parity`. It is host-coupled until island frames move to the GPU.
-- **`Bonds`** turns each bond into an AVBD joint, as in the fracture lab. It
-  supports yield and bend limits, and every fragment is its own body.
+- **`Bonds`** turns each bond into a breakable AVBD bond joint, the fracture
+  lab's default. It supports yield and bend limits, and every fragment is its
+  own body. Scheduled in D1, next to `Threshold`.
+
+#### Render contract
+
+- **Every piece body uses the destructible instance's frame as its body
+  origin.** Its centre of mass and principal axes are the body's solver frame,
+  which is the origin/centre-of-mass split P1.5 built.
+- A chunk's world transform is therefore always `body_transform *
+  chunk_local`, where `chunk_local` is fixed in the asset. A split never
+  requires a renderer to rebuild meshes.
+- Each child's centre of mass and axes come back in the split log.
 
 #### Damage as data
 
@@ -487,13 +537,61 @@ These are frame-latent by default; blocking variants exist for tools.
 enables a readback for heat maps and debugging. Computing these values is part
 of the solve; only reading them back costs anything.
 
-### Vehicles and soft bodies (Rubble-only)
+### Assemblies and vehicles (Rubble-only, planned V1)
 
-- **Vehicles:** `add_vehicle`, `set_vehicle_input`, `vehicle_state`.
-- **Soft bodies:** `add_soft_vehicle`, with skin output through
-  `SoftSkinner`.
-- Their bodies are reachable as `BodyId`s, but the vehicle or soft body owns
-  them.
+A vehicle is not a separate kind of object. It is an **assembly** of parts
+with a controller on top.
+
+**Parts.** Each part chooses a physical model:
+
+- `Rigid`: bodies and shapes;
+- `Soft`: a node-beam lattice that bends, yields and tears;
+- `Destructible`: a D1 instance that fractures.
+
+**Connections.** Each part also chooses how it attaches:
+
+- `Core` joints;
+- breakable `Mount`s;
+- `Bonds`;
+- any `JointDef`.
+
+**Vehicles.** A `VehicleDef` adds wheels, drivetrain and steering to an
+assembly whose rigid **core** carries them. That is how every vehicle kernel
+already works, and the hybrid dune buggy is a soft frame with bolted rigid
+parts:
+
+```rust
+world.add_vehicle(&VehicleDef {
+    chassis: PartDef::rigid(body, shapes),
+    parts: vec![
+        PartDef { name: "frame".into(), model: PartModel::Soft(lattice), attach: Attach::Core },
+        PartDef { name: "door_l".into(), model: PartModel::Rigid { .. }, attach: Attach::Mount { to: "frame".into(), break_force: 8e3, break_torque: 2e3 } },
+        PartDef { name: "hood".into(),  model: PartModel::Destructible(def), attach: Attach::Bonds { to: "frame".into() } },
+    ],
+    wheels, drivetrain, steering,
+})
+```
+
+- **Presets and imports:** the presets (`sedan`, `destructible_sedan`, the
+  dune buggy) and the JBeam and Rigs of Rods imports become `VehicleDef`
+  builders. `add_soft_vehicle` is folded in.
+- **Assemblies without a controller:** `create_assembly(&AssemblyDef)` covers
+  mechs, cranes, ragdolls and pre-rigged structures.
+- **Breakage reporting:** everything that breaks reports through
+  `destruction_events`, keyed by part.
+
+**Available today, P1.5b:**
+
+- `add_vehicle` (rigid) and `add_soft_vehicle`;
+- `set_vehicle_input` and `set_soft_vehicle_input`;
+- per-frame `Frame::vehicles` (wheel poses, suspension, spin, contact, rpm,
+  gear);
+- soft output through `soft_enable_output` (node positions per frame) and
+  `soft_bind_skin` (GPU-skinned vertices and normals per frame), usable by
+  hosts on any device;
+- `soft_damage`.
+
+Soft-body particles never appear as body moves.
 
 ### Rubble-specific guarantees
 
@@ -630,12 +728,29 @@ The original P1.5 list follows.
 - Add frame-latent getters, `request_body_states`, `step_sync`, `counters()`
   and `profile()`.
 
-**D1: destructibles in `World`, threshold model.** This follows P1.5, before
-the C ABI, because destruction is the reason to choose Rubble.
+**P1.5b: developer-feedback fixes (shipped).** Soft particles are kept out of
+the moves, with soft node and skin output added in their place. Also shipped:
 
-- `load_destructible_asset` (Shardwright GLB) and `create_destructible`, built
-  on `GpuFracture` / `FractureTables`, with pre-allocated slots taken from
-  `WorldCapacity`.
+- soft-vehicle input;
+- per-frame vehicle output;
+- lossless resync after dropped frames;
+- `poll_coalesced`;
+- `shape_geometry` and `shape_mesh`.
+
+**P2: C ABI (`engine-ffi`): next, then extended in every phase.** It is
+versioned 0.x and unstable until D1 ships. It is generated from the Rust API.
+Details are under P2 below.
+
+**D1: destructibles in `World`.**
+
+- `DestructibleAssetDesc` with loaders: GLB, packs, and the procedural
+  cuboid, row and grid builders.
+- `create_destructible`.
+- Two strength models: `Threshold`, built on `GpuFracture` /
+  `FractureTables` with pre-allocated slots taken from `WorldCapacity`, and
+  `Bonds`, using breakable bond joints.
+- The render contract: piece origin = instance frame, a fixed per-chunk
+  transform, and a chunk → glTF node map.
 - Body handles for the pieces.
 - `Split` and `BondsBroken` events read from the split log in the frame
   readback.
@@ -658,15 +773,35 @@ impulses and damage.
 host-coupled until R5 and island frames run on the GPU. Bond-utilization
 observables.
 
-**P2: C ABI (`engine-ffi`).** A cbindgen header mirrors P1.5 with Box3D
-naming (`rb` prefix). It has:
+**V1: assemblies and composable vehicles.** `AssemblyDef` and `VehicleDef`
+with rigid, soft and (after D1) destructible parts, and core, mount, bond and
+joint connections. The presets become builders. `add_soft_vehicle` is folded
+into `add_vehicle`.
+
+**P2 detail: C ABI (`engine-ffi`).** A cbindgen header mirrors the Rust API
+with Box3D naming (`rb` prefix). It has:
 
 - `rbDefault*Def()` functions;
 - `uint64_t` handles with `rbStore`/`rbLoad` and `RB_IS_NULL`;
 - event arrays valid until the next poll;
 - error results plus `rbGetLastError()`;
 - `catch_unwind` at the boundary;
-- the Z-up option.
+- flat array outputs (handles plus transforms) next to the object calls, for
+  Unreal, Unity and ECS hosts;
+- a **coordinate option** (Y-up right-handed metres, or Unreal's Z-up
+  left-handed centimetres), converted exactly at the boundary, with these
+  rules:
+  - **Polar vectors** (position, velocity, force, impulse, points, normals)
+    are mapped and scaled.
+  - **Pseudovectors** (angular velocity, torque, angular impulse) pick up an
+    extra sign flip under the left-handed reflection.
+  - **Quaternions** transform as rotations; joint angle limits and motor
+    directions flip sign.
+  - **Units:** lengths and speeds ×100; force and impulse carry the cm factor;
+    inertia ×10⁴; density ×10⁻⁶. Mass and angles are unchanged.
+  - **Meshes:** exported meshes flip their triangle winding.
+  - Each field's class is listed in the header, and a round-trip test covers
+    every field.
 
 Unreal is the first client.
 
@@ -709,6 +844,33 @@ queries with `QueryFilter`, moved off the vehicle ray pool. Then capsule
   flag, and the soft-body visual mesh.
 - Native-device interop through `wgpu-hal` (zero-copy, DX12).
 - Static mesh and height-field shapes, if the kernels gain them.
+
+### Developer feedback (2026-10-23)
+
+A prospective integrator raised nine points. All nine were accepted, some
+with refinements:
+
+1. **C ABI is too late.** It moved up to follow P1.5b and is extended in
+   every phase.
+2. **Soft nodes flood the moves.** Confirmed in the code: each particle is a
+   body slot. Fixed in P1.5b.
+3. **Wheels can't be drawn from the frame.** Fixed in P1.5b with per-frame
+   vehicle output.
+4. **`Drop` loses bodies that settle.** Fixed in P1.5b with a lossless
+   resync.
+5. **Several steps per display frame.** Fixed in P1.5b with
+   `poll_coalesced`. Per-step `poll` stays, because audio and netcode need
+   step precision.
+6. **Destructible render contract.** Taken into D1: piece origin = instance
+   frame, plus the chunk → node map.
+7. **The `Bonds` model and non-GLB sources are unscheduled.** Both are in
+   D1, with descriptor-first assets.
+8. **`shape_geometry`.** Shipped in P1.5b.
+9. **The Z-up spec needs detail.** Added to P2, including the pseudovector
+   rule the review missed.
+
+Separately, the review asked for one composable `add_vehicle`. That became
+V1, assemblies.
 
 ### Mapping from the original draft
 
