@@ -24,6 +24,7 @@ fn town_pack_loads_steps_and_breaks() {
         def.max_joints = 1 << 18;
         def.max_hull_vertices = 1 << 21;
         let threshold = std::env::var("TOWN_THRESHOLD").is_ok();
+        let columns: Option<f32> = std::env::var("TOWN_COLUMNS").ok().map(|v| v.parse().unwrap_or(45.0));
         if threshold {
             def.contacts = RbContacts::RB_CONTACTS_CANONICAL;
         }
@@ -133,6 +134,29 @@ fn town_pack_loads_steps_and_breaks() {
             }).collect()
         };
         let start = centres(w);
+        // Tower-187's roof: its highest chunk, re-read through its current body (splits move it).
+        // In Rubble's frame: (x, z, up), metres.
+        let rubble_xzy = |p: RbVec3| if unreal { [p.y / 100.0, -p.x / 100.0, p.z / 100.0] } else { [p.x, p.z, p.y] };
+        let roof = (0..chunks)
+            .filter(|&c| {
+                let [x, z, _] = rubble_xzy(poses[c as usize].p);
+                (83.0..97.5).contains(&x) && (55.5..70.0).contains(&z)
+            })
+            .max_by(|&a, &b| rubble_xzy(poses[a as usize].p)[2].total_cmp(&rubble_xzy(poses[b as usize].p)[2]));
+        let roof_height = |w: *mut RbWorld| -> f32 {
+            let c = roof.unwrap();
+            let mut b = 0;
+            ok(rbDestructible_GetChunkBody(w, d, c, &mut b));
+            let mut t = RbTransform::default();
+            ok(rbBody_GetTransform(w, b, &mut t));
+            let l = poses[c as usize].p;
+            let (q, v) = ([t.q.x, t.q.y, t.q.z], [l.x, l.y, l.z]);
+            let cr = |a: [f32; 3], b: [f32; 3]| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+            let u = cr(q, v);
+            let u2 = cr(q, u);
+            let p = [t.p.x, t.p.y, t.p.z];
+            (p[up] + v[up] + 2.0 * (t.q.w * u[up] + u2[up])) / unit
+        };
         let report = |w: *mut RbWorld, label: &str| {
             let now = centres(w);
             let (mut moved, mut far, mut rose, mut top) = (0, 0, 0, 0.0f32);
@@ -143,6 +167,9 @@ fn town_pack_loads_steps_and_breaks() {
                 let r = (b[up] - a[up]) / unit;
                 rose += (r > 2.0) as u32;
                 top = top.max(r);
+            }
+            if columns.is_some() {
+                println!("  {label}: tower-187 roof at {:.1} m", roof_height(w));
             }
             println!("  {label}: chunks moved >0.1 m {moved}, >5 m {far}; risen >2 m {rose}, most risen {top:.1} m");
         };
@@ -168,8 +195,17 @@ fn town_pack_loads_steps_and_breaks() {
             }
             ball
         };
-        let shots = [shoot(RbVec3 { x: -51.2, y: 2.5, z: 40.0 }, RbVec3 { x: 0.0, y: 0.0, z: -45.0 }, 0.6, 7800.0),
-        shoot(RbVec3 { x: -34.2, y: 50.0, z: 15.5 }, RbVec3 { x: 0.0, y: -50.0, z: 0.0 }, 1.2, 3000.0)];
+        // TOWN_COLUMNS: tower-187's four column rows shot from the side (-x) at column height,
+        // one ball a row (TOWN_COLUMNS=speed m/s, default 45); else the house shots.
+        let mut fired = Vec::new();
+        if let Some(speed) = columns {
+            let lift = if threshold { 0.5 } else { 0.0 };
+            for z in [56.9f32, 60.9, 64.9, 68.9] {
+                fired.push(shoot(RbVec3 { x: 76.0, y: 1.3 + 0.5 + lift, z: z - 0.365 }, RbVec3 { x: speed, y: 0.0, z: 0.0 }, 0.6, 7800.0));
+            }
+        }
+        let shots = if columns.is_some() { [fired[0], fired[1]] } else { [shoot(RbVec3 { x: -51.2, y: 2.5, z: 40.0 }, RbVec3 { x: 0.0, y: 0.0, z: -45.0 }, 0.6, 7800.0),
+        shoot(RbVec3 { x: -34.2, y: 50.0, z: 15.5 }, RbVec3 { x: 0.0, y: -50.0, z: 0.0 }, 1.2, 3000.0)] };
         // TOWN_TRACE: per step, the fastest chunk (from its centre's move) once one passes 25 m/s.
         if std::env::var("TOWN_TRACE").is_ok() {
             let mut prev = centres(w);
