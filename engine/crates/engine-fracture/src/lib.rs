@@ -5,6 +5,7 @@
 //! - `asset`: bounds-checked SHARDWRIGHT_fracture v1 GLB / FRAC reader.
 //! - `scene`, `cuboid`, `pairs`, `bonds`, `samples`: scene building. Hulls are
 //!   cooked by `engine-schema` into the packed hull ABI v2.
+//! - `guidance`: the Near Miss directed-debris preset (zones, outlines, counts).
 //! - `plan`: buffer sizes, host words and the ordered per-tick dispatch
 //!   schedule, which each host replays on its GPU API.
 //!
@@ -14,6 +15,7 @@ pub mod asset;
 pub mod bonds;
 pub mod cook;
 pub mod cuboid;
+pub mod guidance;
 pub mod math;
 pub mod pack;
 pub mod pairs;

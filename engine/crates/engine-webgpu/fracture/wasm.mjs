@@ -2,13 +2,13 @@
 // wasm by engine-fracture-wasm): GLB parsing, scene building, hull cooking and
 // the per-tick dispatch plan. The native Metal viewer runs the same Rust.
 // Build: see fracture/README.md (wasm-pack ... --out-dir ../engine-webgpu/generated/fracture-wasm).
-import init,{initSync,Asset,Scene,Plan,HullArena as RustArena,hullView as rustHullView,hullBase,samples,colliderWorldVertices,colliderWorldBounds,preloadDone,scaleBondSprings,Orbit,IndexedMesh,floorVertices} from '../generated/fracture-wasm/engine_fracture_wasm.js';
+import init,{initSync,Asset,Scene,Plan,nearMissSettings,HullArena as RustArena,hullView as rustHullView,hullBase,samples,colliderWorldVertices,colliderWorldBounds,preloadDone,scaleBondSprings,Orbit,IndexedMesh,floorVertices} from '../generated/fracture-wasm/engine_fracture_wasm.js';
 
 const wasmUrl=new URL('../generated/fracture-wasm/engine_fracture_wasm_bg.wasm',import.meta.url);
 if(globalThis.process?.versions?.node){const {readFileSync}=await import('node:fs');initSync({module:readFileSync(wasmUrl)})}
 else await init({module_or_path:wasmUrl});
 
-export {Plan,hullBase,preloadDone,scaleBondSprings,Orbit,IndexedMesh,floorVertices};
+export {Plan,nearMissSettings,hullBase,preloadDone,scaleBondSprings,Orbit,IndexedMesh,floorVertices};
 export const SAMPLES=samples();
 
 // A parsed fracture GLB: the Rust Asset plus the fields the lab shows.

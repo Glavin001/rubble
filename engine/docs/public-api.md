@@ -560,10 +560,14 @@ physics**: it adds momentum, so it is off unless the world asks for it.
   - **Defaults** (6 %, 3°, 0.1 s, 3 %·g) shift a 3 s flight's landing by
     about 4–5 m and a 0.5 s hop by a few centimetres. Hops shorter than
     `min_flight` are left alone.
-- **One arc only.** The first step a contact pushes the body (its velocity
-  differs from the ballistic update by more than `impact_dv`) ends guidance
-  for good. Look-ahead contacts with neighbours flying alongside do not count.
-  Bounces, cascades and secondary breaks are pure physics.
+- **One arc only.** A push is a step whose velocity differs from the
+  ballistic update by more than `impact_dv`. Look-ahead contacts with
+  neighbours flying alongside do not count.
+  - The first push on a steered body ends its guidance for good.
+  - A body still waiting for a plan that is bumped inside a debris cloud just
+    waits for a clean flight. Pushed within 0.5 m of the ground, or left slower
+    than `min_speed`, it has landed and is never guided.
+  - Bounces, cascades and secondary breaks are pure physics.
 - **Cost is bounded.** Per step:
   - one scan of the bodies (one word for an unguided body);
   - at most `plan_budget` plans, one 64-lane workgroup each, with the lanes

@@ -80,6 +80,18 @@ static const uint GUIDE_STEER = 2u;
 static const uint GUIDE_DONE = 3u;
 
 static const uint GFLAG_WAS_FREE = 1u;
+// Why a body's guidance ended (flags bits 8..11; engine-schema GuideEnd).
+static const uint WHY_SHIFT = 8u;
+static const uint WHY_PUSHED = 1u;      // pushed while steering
+static const uint WHY_ARRIVED = 2u;     // reached its planned hit time
+static const uint WHY_LANDED = 3u;      // landed before it was planned
+static const uint WHY_SHORT = 4u;       // its flight was too short
+static const uint WHY_SLOW = 5u;        // too slow when it became free
+static const uint WHY_LEFT_OUT = 6u;    // not chosen by `participation`
+static const uint WHY_NO_ZONE = 7u;     // no zone within its reach
+uint why(uint flags, uint reason) { return (flags & ~(15u << WHY_SHIFT)) | (reason << WHY_SHIFT); }
+// A push this close to the ground plane (m) is a landing.
+static const float LANDED_HEIGHT = 0.5;
 static const uint GFLAG_CANDIDATE = 2u;
 
 // Matches engine-webgpu `GuideBodyGpu` (64 B).
@@ -353,7 +365,7 @@ uint scanBody(uint i)
         if (!free || GP.time >= gGuide[i].hitTime)
         {
             gGuide[i].state = GUIDE_DONE;
-            gGuide[i].flags = gflags;
+            gGuide[i].flags = why(gflags, free ? WHY_ARRIVED : WHY_PUSHED);
             return 0u;
         }
         float3 dv = gGuide[i].accel * GP.dt;
@@ -375,8 +387,15 @@ uint scanBody(uint i)
     }
     else if (!free)
     {
-        // Pushed by something after its first free flight: it keeps its own arc.
-        if ((gflags & GFLAG_WAS_FREE) != 0u) gGuide[i].state = GUIDE_DONE;
+        // Bumped inside a debris cloud: wait for a clean flight. Pushed near
+        // the ground, or left slow, after flying: it landed, and keeps its own
+        // arcs from here (bounces stay pure physics).
+        bool landed = gBodies[i].position.y - GP.yGround < LANDED_HEIGHT || length(vel) < GP.minSpeed;
+        if ((gflags & GFLAG_WAS_FREE) != 0u && landed)
+        {
+            gGuide[i].state = GUIDE_DONE;
+            gflags = why(gflags, WHY_LANDED);
+        }
         gGuide[i].freeFrames = 0u;
     }
     else
@@ -393,6 +412,7 @@ uint scanBody(uint i)
             if (t < GP.tMin || !joins || length(vel) < GP.minSpeed)
             {
                 gGuide[i].state = GUIDE_DONE;
+                gflags = why(gflags, t < GP.tMin ? WHY_SHORT : !joins ? WHY_LEFT_OUT : WHY_SLOW);
             }
             else
             {
@@ -420,6 +440,10 @@ void guide_scan(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID, u
     }
 }
 
+// Barriers sit under loops bounded by this: the host rewrites its reads to
+// workgroupUniformLoad, which Chrome needs to see the bound as uniform.
+groupshared uint gsUniformLanes;
+
 // Ranks candidates across blocks, starting at the cursor block so a backlog
 // drains oldest-block-first, and keeps the first planBudget of them.
 [shader("compute")]
@@ -427,7 +451,9 @@ void guide_scan(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID, u
 void guide_select(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID)
 {
     uint local = lid.x;
-    uint nb = max(GP.blockCount, 1u);
+    if (local == 0u) gsUniformLanes = max(GP.blockCount, 1u);
+    GROUP_SYNC();
+    uint nb = gsUniformLanes;
     uint cursor = gGuideScratch[0] % nb;
     uint running = 0u;
     for (uint base = 0u; base < nb; base += GUIDE_BLOCK)
@@ -520,16 +546,14 @@ void guide_plan(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID, u
 {
     uint rank = groupIndex(gid);
     uint lane = lid.x;
-    // The whole group shares one slot, so these exits are uniform.
-    if (rank >= gGuideScratch[1]) return;
-    uint i = gGuideSlots[rank].body;
+    // No return before the barrier (WGSL needs it in uniform control flow):
+    // a slot past this step's selection, or a re-plan, just plans nothing.
+    bool active = rank < gGuideScratch[1];
+    uint i = active ? gGuideSlots[rank].body : 0u;
     GuideBody g = gGuide[i];
     BodyState b = gBodies[i];
-    if (g.state == GUIDE_STEER)
-    {
-        if (lane == 0u) replanSlot(rank, i, b, g);
-        return;
-    }
+    bool replan = active && g.state == GUIDE_STEER;
+    bool fresh = active && !replan;
 
     float3 grav = float3(0.0, GP.gravityY, 0.0);
     float3 p0 = b.position;
@@ -547,7 +571,7 @@ void guide_plan(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID, u
     float3 pickDir = float3(0.0, 0.0, 0.0);
     float pickS = 0.0;
     float pickT = 0.0;
-    uint n = min(GP.zoneCount, GP.maxZones);
+    uint n = fresh ? min(GP.zoneCount, GP.maxZones) : 0u;
     for (uint zi = lane; zi < n; zi += PLAN_LANES)
     {
         GuideZone z = gZones[zi];
@@ -582,7 +606,12 @@ void guide_plan(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID, u
     planKick[lane] = float4(pickDir * (pickS * k), pickT);
     planAccel[lane] = float4(pickDir * (pickS * amax), 0.0);
     GROUP_SYNC();
-    if (lane != 0u) return;
+    if (lane != 0u || !active) return;
+    if (replan)
+    {
+        replanSlot(rank, i, b, g);
+        return;
+    }
     float sum = 0.0;
     for (uint l = 0u; l < PLAN_LANES; l++) sum += planTotal[l];
     GuideSlot slot = gGuideSlots[rank];
@@ -662,6 +691,7 @@ void guide_commit(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID)
         else if (s.zone == NO_ZONE)
         {
             g.state = GUIDE_DONE;
+            g.flags = why(g.flags, WHY_NO_ZONE);
         }
         else
         {

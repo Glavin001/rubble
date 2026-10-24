@@ -35,7 +35,8 @@ pub struct RbGuidanceSettings {
     pub internal_value: u32,
 }
 
-/// `RbGuidanceZone::shape`.
+/// `RbGuidanceZone::shape` (constructed by C callers).
+#[allow(dead_code)]
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RbZoneShape {

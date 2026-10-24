@@ -28,6 +28,8 @@ export async function createRenderer(device,canvas,simulation,scene,onShoot=()=>
   return {count:data.length/10,group:device.createBindGroup({layout,entries:[{binding:0,resource:{buffer:simulation.renderBodyBuffer??simulation.bodyBuffer}},{binding:1,resource:{buffer}},{binding:2,resource:{buffer:uniform}},{binding:3,resource:{buffer:joints}}]})}};
  const indexed=new IndexedMesh(scene.vertices),indices=indexed.index();
  const mesh=stream(indexed.vertices()),projectiles=stream(scene.projectileVertices),lines=stream(scene.lines),roads=stream(scene.roadVertices),floor=stream(floorVertices(scene.extent));
+ // Directed-debris zone outlines (engine-fracture guidance.rs), drawn over the scene.
+ let zones=stream(new Float32Array(0));
  indexed.free();
  const index=device.createBuffer({size:Math.max(4,indices.byteLength),usage:GPUBufferUsage.INDEX|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(index,0,indices);
  const orbit=new Orbit(sceneHandle(scene));let depth,width=0,height=0;
@@ -45,6 +47,8 @@ export async function createRenderer(device,canvas,simulation,scene,onShoot=()=>
   resolve:device.createBuffer({size:16,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC}),
   read:device.createBuffer({size:16,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST}),busy:false,last:0,ms:null}:null;
  return {aim,
+ // Line-list vertices outlining the guidance zones (empty: none).
+ setZones(vertices){zones=stream(vertices)},
  // The camera's view mode (0 orbit, 1 first-person walk, 2 fly: engine-fracture ViewMode).
  get viewMode(){return orbit.mode},
  set viewMode(mode){orbit.setMode(mode|0,aspect());input.modeChanged()},
@@ -74,7 +78,8 @@ export async function createRenderer(device,canvas,simulation,scene,onShoot=()=>
   pass.setPipeline(solid);pass.setBindGroup(0,mesh.group);pass.setIndexBuffer(index,'uint32');pass.drawIndexed(indices.length,scene.copies||1);
   // The newest projectileCount balls (a shot past them reuses the oldest).
   if(simulation.shots){pass.setBindGroup(0,projectiles.group);pass.draw(Math.min(simulation.shots,scene.projectileCount)*projectiles.count/scene.projectileCount)}
-  if(showBonds&&lines.count){pass.setPipeline(wire);pass.setBindGroup(0,lines.group);pass.draw(lines.count,scene.copies||1)}pass.end();
+  if(showBonds&&lines.count){pass.setPipeline(wire);pass.setBindGroup(0,lines.group);pass.draw(lines.count,scene.copies||1)}
+  if(zones.count){pass.setPipeline(wire);pass.setBindGroup(0,zones.group);pass.draw(zones.count)}pass.end();
   if(timed){frameTimer.busy=true;frameTimer.last=performance.now();enc.resolveQuerySet(frameTimer.query,0,2,frameTimer.resolve,0);enc.copyBufferToBuffer(frameTimer.resolve,0,frameTimer.read,0,16)}
   device.queue.submit([enc.finish()]);
   if(timed)frameTimer.read.mapAsync(GPUMapMode.READ).then(()=>{const t=new BigUint64Array(frameTimer.read.getMappedRange());frameTimer.ms=Number(t[1]-t[0])/1e6;frameTimer.read.unmap()}).catch(()=>{}).finally(()=>{frameTimer.busy=false});

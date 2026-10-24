@@ -6,6 +6,8 @@
 //! Large streams cross as typed arrays; small records as plain JS objects.
 
 use engine_fracture::cuboid::{build_cuboid_house, CuboidOptions};
+use engine_fracture::guidance as near_miss;
+use engine_schema::guidance::{GuidanceSettings, ZoneDesc};
 use engine_fracture::plan::{self, Limits, Planner};
 use engine_fracture::samples::{self, Layout};
 use engine_fracture::scene::{self, Collider};
@@ -877,5 +879,71 @@ impl Plan {
     #[wasm_bindgen(js_name = contactBase)]
     pub fn contact_base(&self, previous: bool) -> u32 {
         self.0.contact_base(previous)
+    }
+}
+
+/// Directed debris, "Near Miss" (`engine_fracture::guidance`).
+#[wasm_bindgen]
+impl Scene {
+    /// One ring zone per bystander of the crowd downrange of a shot.
+    #[wasm_bindgen(js_name = nearMissZonesFor)]
+    pub fn near_miss_zones_for(&self, origin: &[f64], direction: &[f64]) -> Result<JsValue, JsError> {
+        let v3 = |v: &[f64]| -> Result<[f64; 3], JsError> {
+            v.try_into().map_err(|_| err("expected 3 numbers"))
+        };
+        to_js(&near_miss::zones_downrange(&self.0, v3(origin)?, v3(direction)?))
+    }
+    /// Line-list vertices outlining `zones` (drawn on body 0).
+    #[wasm_bindgen(js_name = zoneOutline)]
+    pub fn zone_outline(&self, zones: JsValue) -> Result<Vec<f32>, JsError> {
+        let zones: Vec<ZoneDesc> = from_js(zones)?;
+        let ground = self.0.bodies.first().map_or([0.0; 3], |b| b.p);
+        Ok(near_miss::outline_vertices(&zones, ground))
+    }
+    /// The scene's pieces in a body snapshot that lie near each zone.
+    #[wasm_bindgen(js_name = nearCounts)]
+    pub fn near_counts(&self, snapshot: &[f32], zones: JsValue) -> Result<Vec<u32>, JsError> {
+        let zones: Vec<ZoneDesc> = from_js(zones)?;
+        Ok(near_miss::near_counts(snapshot, 1, self.0.projectile_start, &zones))
+    }
+}
+
+/// The guidance settings of a Near Miss strength (`subtle`, `cinematic`, `exaggerated`).
+#[wasm_bindgen(js_name = nearMissSettings)]
+pub fn near_miss_settings(strength: JsValue) -> Result<JsValue, JsError> {
+    let strength: near_miss::Strength = from_js(strength)?;
+    to_js(&near_miss::settings(strength))
+}
+
+#[wasm_bindgen]
+impl Plan {
+    /// Enable, disable or retune directed debris: `partial` over the defaults.
+    #[wasm_bindgen(js_name = setGuidance)]
+    pub fn set_guidance(&mut self, partial: JsValue) -> Result<(), JsError> {
+        let settings: GuidanceSettings = merge(&GuidanceSettings::default(), partial)?;
+        self.0.set_guidance(&settings).map_err(err)
+    }
+    /// Validate `zones`; returns their records for buffer 37 (offset 0).
+    #[wasm_bindgen(js_name = setGuidanceZones)]
+    pub fn set_guidance_zones(&mut self, zones: JsValue) -> Result<Vec<u8>, JsError> {
+        let zones: Vec<ZoneDesc> = from_js(zones)?;
+        self.0.set_guidance_zones(&zones).map_err(err)
+    }
+    /// Every body's guidance record for buffer 38 (offset 0): the pieces armed
+    /// with `tagMask`, or all off for 0.
+    #[wasm_bindgen(js_name = guideRecords)]
+    pub fn guide_records(&self, tag_mask: u32) -> Vec<u8> {
+        self.0.guide_records(tag_mask)
+    }
+    /// Bodies per guidance state `[off, armed, steering, done]` in a readback of buffer 38.
+    #[wasm_bindgen(js_name = guideStateCounts)]
+    pub fn guide_state_counts(records: &[u8]) -> Vec<u32> {
+        Planner::guide_state_counts(records).to_vec()
+    }
+    /// `[byte offset, byte length]` of the zone claim counters in buffer 39.
+    #[wasm_bindgen(js_name = guideClaimsRange)]
+    pub fn guide_claims_range(&self) -> Vec<u32> {
+        let (o, n) = self.0.guide_claims_range();
+        vec![o, n]
     }
 }
