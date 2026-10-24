@@ -142,6 +142,45 @@ pub unsafe extern "C" fn rbShape_SetFriction(
     })
 }
 
+/// Turn a shape's contact begin / end events on or off.
+#[no_mangle]
+pub unsafe extern "C" fn rbShape_EnableContactEvents(
+    world: *mut RbWorld,
+    shape: RbShapeId,
+    enabled: bool,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        w.world
+            .shape_enable_contact_events(ShapeId::from_bits(shape), enabled)
+    })
+}
+
+/// Turn a shape's hit events on or off.
+#[no_mangle]
+pub unsafe extern "C" fn rbShape_EnableHitEvents(
+    world: *mut RbWorld,
+    shape: RbShapeId,
+    enabled: bool,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        w.world
+            .shape_enable_hit_events(ShapeId::from_bits(shape), enabled)
+    })
+}
+
+/// The approach speed (world units per second) at or above which a beginning
+/// touch raises a hit event, from frames polled next.
+#[no_mangle]
+pub unsafe extern "C" fn rbWorld_SetHitEventThreshold(world: *mut RbWorld, speed: f32) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let speed = w.coords.length_in(speed);
+        w.world.set_hit_event_threshold(speed)
+    })
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rbShape_SetFilter(
     world: *mut RbWorld,

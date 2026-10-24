@@ -2,7 +2,7 @@
 //! joint events) plus Rubble's destruction stream and per-frame outputs for
 //! vehicles, soft bodies and skinned meshes.
 
-use crate::{ActorInfo, AssemblyId, BodyId, DestructibleId, JointId, Transform};
+use crate::{ActorInfo, AssemblyId, BodyId, DestructibleId, JointId, ShapeId, Transform};
 use engine_schema::{MountBreak, StepCounters};
 use engine_softbody::{BeamBreak, PieceDetached, SoftHandle};
 use engine_vehicle::{VehicleHandle, VehicleState};
@@ -28,6 +28,60 @@ pub struct BodyMoveEvent {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BodyEvents {
     pub moves: Vec<BodyMoveEvent>,
+}
+
+/// Two shapes started touching (Box3D `b3ContactBeginTouchEvent`), for pairs
+/// where either shape has `ShapeDef::enable_contact_events`. `shape_a` is the
+/// lower handle (`ShapeId::to_bits`); `normal` points from `shape_a` to
+/// `shape_b`. `point` is the deepest contact (world, midway between the
+/// surfaces) and `approach_speed` the closing speed along `normal` there,
+/// from the bodies' velocities at the start of the step (positive: closing).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContactBeginEvent {
+    pub shape_a: ShapeId,
+    pub shape_b: ShapeId,
+    pub point: [f32; 3],
+    pub normal: [f32; 3],
+    pub approach_speed: f32,
+}
+
+/// Two shapes stopped touching, or one of them was destroyed while they
+/// touched (Box3D `b3ContactEndTouchEvent`). A destroyed shape's handle is
+/// already stale. Pairs whose bodies are both asleep (or static) keep
+/// touching: sleep ends nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContactEndEvent {
+    pub shape_a: ShapeId,
+    pub shape_b: ShapeId,
+}
+
+/// A begin at least `WorldDef::hit_event_threshold` fast, for pairs where
+/// either shape has `ShapeDef::enable_hit_events` (Box3D
+/// `b3ContactHitEvent`). Fields as in [`ContactBeginEvent`], plus each
+/// shape's `SurfaceMaterial::user_material_id`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContactHitEvent {
+    pub shape_a: ShapeId,
+    pub shape_b: ShapeId,
+    pub point: [f32; 3],
+    pub normal: [f32; 3],
+    pub approach_speed: f32,
+    pub user_material_ids: [u64; 2],
+}
+
+/// Touch changes in one step (P4): the touching pair set diffed against the
+/// previous step's. Sorted by `(shape_a, shape_b)`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ContactEvents {
+    pub begins: Vec<ContactBeginEvent>,
+    pub ends: Vec<ContactEndEvent>,
+    pub hits: Vec<ContactHitEvent>,
+}
+
+impl ContactEvents {
+    pub fn is_empty(&self) -> bool {
+        self.begins.is_empty() && self.ends.is_empty() && self.hits.is_empty()
+    }
 }
 
 /// Something broke.
@@ -121,6 +175,8 @@ pub struct Frame {
     /// nothing was written: nothing moved and nothing happened.
     pub ran: bool,
     pub body_events: BodyEvents,
+    /// Contact begins, ends and hits of shapes with contact or hit events.
+    pub contact_events: ContactEvents,
     pub destruction_events: Vec<DestructionEvent>,
     /// Every vehicle (rigid, or a soft vehicle's core).
     pub vehicles: Vec<VehicleOutput>,
@@ -131,7 +187,10 @@ pub struct Frame {
     /// Ray batches queued before this step.
     pub ray_results: Vec<RayBatchResult>,
     /// Records overwritten in the GPU event ring before they were read (more
-    /// than it holds between two frames). Never silently zero.
+    /// than it holds between two frames), plus touching manifolds past
+    /// `engine_schema::CONTACT_EVENT_CAP` in this step (such a frame reports
+    /// no contact ends: the pairs it could not see stay touching). Never
+    /// silently zero.
     pub lost_events: u32,
     /// This frame's readback was dropped (`Backpressure::Drop`): it carries
     /// nothing. The next delivered frame has `resynced` set and reports every
@@ -153,6 +212,9 @@ pub struct CoalescedFrame {
     /// Per body: the latest transform, the earliest previous transform, and
     /// the net sleep change across the steps.
     pub moves: Vec<BodyMoveEvent>,
+    /// Every step's contact events, in step order, with its step (steps
+    /// without any are left out).
+    pub contact_events: Vec<(u64, ContactEvents)>,
     /// Every destruction event, in step order, with its step.
     pub destruction_events: Vec<(u64, DestructionEvent)>,
     /// The latest output per vehicle, soft body and skin.
@@ -197,6 +259,9 @@ pub fn coalesce(frames: Vec<Frame>) -> CoalescedFrame {
                     }
                 })
                 .or_insert(m);
+        }
+        if !f.contact_events.is_empty() {
+            out.contact_events.push((f.step, f.contact_events));
         }
         out.destruction_events
             .extend(f.destruction_events.into_iter().map(|e| (f.step, e)));

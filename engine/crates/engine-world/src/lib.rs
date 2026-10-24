@@ -19,6 +19,7 @@
 //! See `engine/docs/public-api.md` and `engine/docs/api-review.md`.
 
 mod assembly;
+mod contacts;
 mod debug_draw;
 mod defs;
 mod destruction;
@@ -45,8 +46,9 @@ pub use destruction::{
 };
 pub use error::{StaleHandle, Unsupported};
 pub use events::{
-    coalesce, BodyEvents, BodyMoveEvent, CoalescedFrame, DestructionEvent, Frame, RayBatchId,
-    RayBatchResult, SkinId, SkinOutput, SoftOutput, VehicleOutput,
+    coalesce, BodyEvents, BodyMoveEvent, CoalescedFrame, ContactBeginEvent, ContactEndEvent,
+    ContactEvents, ContactHitEvent, DestructionEvent, Frame, RayBatchId, RayBatchResult, SkinId,
+    SkinOutput, SoftOutput, VehicleOutput,
 };
 pub use handles::{BodyId, JointId, ShapeId};
 pub use joints::{
@@ -60,7 +62,7 @@ pub use rig::VehicleDamage;
 pub use engine_schema::convex::{CollisionFilter as Filter, ConvexHull};
 pub use engine_schema::heightfield::{HeightField, HeightFieldError};
 pub use engine_schema::{
-    AvbdParams, Dof, JointDesc, JointFrame, Motion, StepCounters, WorldCapacity,
+    AvbdParams, Dof, JointDesc, JointFrame, Motion, StepCounters, WorldCapacity, CONTACT_EVENT_CAP,
 };
 pub use engine_softbody::{
     SoftCapacity, SoftDamage, SoftHandle, SoftSettings, SoftVehicleDesc, SpawnOptions,
@@ -116,6 +118,10 @@ pub struct WorldDef {
     /// Steps whose results can be in flight at once.
     pub readback_frames: u32,
     pub backpressure: Backpressure,
+    /// Approach speed (m/s) at or above which a touch that begins raises a
+    /// hit event, for shapes with `enable_hit_events` (Box3D
+    /// `hitEventThreshold`, 1 m/s).
+    pub hit_event_threshold: f32,
 }
 
 impl Default for WorldDef {
@@ -133,6 +139,7 @@ impl Default for WorldDef {
             env_overrides: false,
             readback_frames: 3,
             backpressure: Backpressure::Block,
+            hit_event_threshold: 1.0,
         }
     }
 }
@@ -196,6 +203,8 @@ enum Extra {
     /// The ray-query pool after this step's traces: batches by `(id, first,
     /// count)` into it.
     RayHits(Vec<(RayBatchId, u32, u32)>),
+    /// The contact-event region after this step's `contact_events` pass.
+    ContactEvents,
 }
 
 #[derive(Clone, Debug)]
@@ -251,6 +260,9 @@ struct ShapeSlot {
     collider: u32,
     geometry: Geometry,
     def: ShapeDef,
+    /// The first step that simulates this shape (frames of earlier steps
+    /// still in flight may name its collider for the shape it replaced).
+    created_step: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -340,6 +352,9 @@ pub struct World {
     last_counters: Option<StepCounters>,
     /// The adapter this world runs on (for helper worlds on its device).
     adapter: wgpu::AdapterInfo,
+    /// Touching pairs of event shapes, diffed each frame (P4).
+    contacts: contacts::ContactTracker,
+    hit_event_threshold: f32,
 }
 
 impl World {
@@ -413,6 +428,8 @@ impl World {
             pending_rays: Vec::new(),
             pending_batches: Vec::new(),
             next_ray_batch: 0,
+            contacts: contacts::ContactTracker::default(),
+            hit_event_threshold: def.hit_event_threshold,
         })
     }
 
@@ -459,6 +476,22 @@ impl World {
 
     pub fn solver(&self) -> AvbdParams {
         self.sim.params()
+    }
+
+    /// The approach speed (m/s) at or above which a beginning touch raises a
+    /// hit event (`WorldDef::hit_event_threshold`).
+    pub fn hit_event_threshold(&self) -> f32 {
+        self.hit_event_threshold
+    }
+
+    /// Change the hit threshold; it applies to frames polled from now on.
+    pub fn set_hit_event_threshold(&mut self, speed: f32) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            speed >= 0.0,
+            "hit event threshold must be at least 0 (got {speed})"
+        );
+        self.hit_event_threshold = speed;
+        Ok(())
     }
 
     pub fn set_gravity(&mut self, gravity: [f32; 3]) -> anyhow::Result<()> {
@@ -984,6 +1017,7 @@ impl World {
         let mut collider =
             self.collider(body.index(), frame, &geometry, def.density, material, None)?;
         def.filter.apply(&mut collider);
+        collider.material |= def.event_bits();
         let collider_index = self.place_collider(collider)?;
         let slot = ShapeSlot {
             generation: 1,
@@ -992,6 +1026,7 @@ impl World {
             collider: collider_index,
             geometry,
             def: def.clone(),
+            created_step: self.step,
         };
         let index = match self.free_shapes.pop() {
             Some(i) => {
@@ -1104,6 +1139,25 @@ impl World {
         material.validate()?;
         let s = self.live_shape(id)?;
         self.shapes[s].def.material = material;
+        self.rewrite_shape(s)
+    }
+
+    /// Turn a shape's contact begin / end events on or off (Box3D
+    /// `b3Shape_EnableContactEvents`).
+    pub fn shape_enable_contact_events(
+        &mut self,
+        id: ShapeId,
+        enabled: bool,
+    ) -> anyhow::Result<()> {
+        let s = self.live_shape(id)?;
+        self.shapes[s].def.enable_contact_events = enabled;
+        self.rewrite_shape(s)
+    }
+
+    /// Turn a shape's hit events on or off (Box3D `b3Shape_EnableHitEvents`).
+    pub fn shape_enable_hit_events(&mut self, id: ShapeId, enabled: bool) -> anyhow::Result<()> {
+        let s = self.live_shape(id)?;
+        self.shapes[s].def.enable_hit_events = enabled;
         self.rewrite_shape(s)
     }
 
@@ -1405,8 +1459,10 @@ impl World {
         let ran = self.sim.last_step_ran();
         let mut mapped = None;
         if ran {
-            // Ray results are never dropped: a frame with queries waits for a slot.
-            let block = self.backpressure == Backpressure::Block || !batches.is_empty();
+            // Ray results and contact events are never dropped: such a frame
+            // waits for a slot.
+            let events = self.sim.has_contact_events();
+            let block = self.backpressure == Backpressure::Block || !batches.is_empty() || events;
             if !self.readback.has_free() && block {
                 self.wait_oldest()?;
             }
@@ -1424,6 +1480,15 @@ impl World {
                     &self.soft_outputs,
                     &self.skins,
                 );
+                if events {
+                    let (buffer, offset, size) = self.sim.contact_event_range();
+                    extras.push(readback::Extra {
+                        kind: Extra::ContactEvents,
+                        buffer,
+                        offset,
+                        size,
+                    });
+                }
                 if !batches.is_empty() {
                     let (first, count) = self.sim.ray_query_slots();
                     extras.push(readback::Extra {
@@ -1519,10 +1584,17 @@ impl World {
             match *front {
                 Pending::Empty { step, dropped } => {
                     self.readback.pending.pop_front();
+                    // Nothing ran (or was read): the touching set stands, but
+                    // pairs of destroyed shapes end with this frame.
+                    let contact_events = ContactEvents {
+                        ends: self.contacts.take_pending(),
+                        ..ContactEvents::default()
+                    };
                     frames.push(Frame {
                         step,
                         ran: dropped,
                         dropped,
+                        contact_events,
                         ..Frame::default()
                     });
                 }
@@ -1611,6 +1683,22 @@ impl World {
         );
         let destruction = self.destruction_events(destruction);
         let destruction = self.connection_events(destruction);
+        // Before the moves below update sleep state: the diff needs whether
+        // each body was awake when this step began.
+        let (contact_events, contact_lost) = match raw
+            .extras
+            .iter()
+            .find(|(k, _)| matches!(k, Extra::ContactEvents))
+        {
+            Some((_, bytes)) => self.contact_events(step, bytes),
+            None => (
+                ContactEvents {
+                    ends: self.contacts.take_pending(),
+                    ..ContactEvents::default()
+                },
+                0,
+            ),
+        };
         let resync = raw
             .extras
             .iter()
@@ -1666,7 +1754,7 @@ impl World {
         let mut ray_results = Vec::new();
         for (kind, bytes) in &raw.extras {
             match kind {
-                Extra::Resync => {}
+                Extra::Resync | Extra::ContactEvents => {}
                 Extra::RayHits(batches) => {
                     let hits = self.sim.decode_ray_hits(&slots(bytes));
                     for (batch, first, count) in batches {
@@ -1710,12 +1798,13 @@ impl World {
             step,
             ran: true,
             body_events: BodyEvents { moves },
+            contact_events,
             destruction_events: destruction,
             vehicles,
             soft,
             skins,
             ray_results,
-            lost_events: ring.lost,
+            lost_events: ring.lost + contact_lost,
             dropped: false,
             resynced: resync.is_some(),
             counters: Some(c),
@@ -1752,6 +1841,56 @@ impl World {
             word |= 1 << 29; // WOKE
         }
         Some(engine_webgpu::PoseRecord { word, ..*r })
+    }
+
+    /// Decode a step's contact-event region and diff it into events; returns
+    /// them and the records the step lost to the capacity.
+    fn contact_events(&mut self, step: u64, bytes: &[u8]) -> (ContactEvents, u32) {
+        let words: Vec<u32> = bytes
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        let (records, lost) = engine_schema::decode_contact_events(&words);
+        let touches = records
+            .iter()
+            .filter_map(|r| {
+                let (a, body_a) = self.shape_at(r.collider_a, step)?;
+                let (b, body_b) = self.shape_at(r.collider_b, step)?;
+                Some(
+                    contacts::Touch {
+                        a,
+                        b,
+                        bodies: [body_a, body_b],
+                        point: r.point,
+                        normal: r.normal,
+                        approach_speed: r.approach_speed,
+                        c0n: r.c0n,
+                    }
+                    .ordered(),
+                )
+            })
+            .collect();
+        let bodies = &self.bodies;
+        let resting = |b: u32| {
+            bodies
+                .get(b as usize)
+                .is_none_or(|s| s.body_type == BodyType::Static || s.last_asleep)
+        };
+        let shapes = &self.shapes;
+        let flags = |id: ShapeId| shape_flags(shapes, id);
+        let events =
+            self.contacts
+                .diff(touches, lost > 0, resting, flags, self.hit_event_threshold);
+        (events, lost)
+    }
+
+    /// The user shape (and its body slot) that `collider` belonged to in
+    /// `step`, if any.
+    fn shape_at(&self, collider: u32, step: u64) -> Option<(ShapeId, u32)> {
+        let s = *self.collider_shape.get(collider as usize)?;
+        let slot = self.shapes.get(s as usize)?;
+        (slot.alive && slot.created_step <= step)
+            .then(|| (ShapeId::new(s, slot.generation), slot.body))
     }
 
     fn command(&mut self, id: BodyId, cmd: GpuCommand) -> anyhow::Result<()> {
@@ -1794,6 +1933,10 @@ impl World {
     }
 
     fn release_shape(&mut self, index: u32) {
+        let id = ShapeId::new(index, self.shapes[index as usize].generation);
+        let shapes = &self.shapes;
+        self.contacts
+            .shape_destroyed(id, |other| shape_flags(shapes, other));
         let s = &mut self.shapes[index as usize];
         s.alive = false;
         s.generation = s.generation.wrapping_add(1).max(1);
@@ -1979,6 +2122,7 @@ impl World {
             hull_params,
         )?;
         slot.def.filter.apply(&mut c);
+        c.material |= slot.def.event_bits();
         self.sim.set_collider(slot.collider, c);
         Ok(())
     }
@@ -2172,6 +2316,16 @@ fn xyz(bytes: &[u8]) -> Vec<[f32; 3]> {
             [v[0], v[1], v[2]]
         })
         .collect()
+}
+
+/// A live shape's event flags for the contact diff.
+fn shape_flags(shapes: &[ShapeSlot], id: ShapeId) -> Option<contacts::ShapeFlags> {
+    let s = shapes.get(id.index() as usize)?;
+    (s.alive && s.generation == id.generation()).then_some(contacts::ShapeFlags {
+        contact_events: s.def.enable_contact_events,
+        hit_events: s.def.enable_hit_events,
+        user_material_id: s.def.material.user_material_id,
+    })
 }
 
 /// The extra copies a step's readback carries.

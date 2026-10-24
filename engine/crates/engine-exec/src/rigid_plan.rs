@@ -104,6 +104,10 @@ pub struct StepInputs {
     pub soft: SoftCounts,
     /// Host commands in binding 8 (`apply_commands` runs first when non-zero).
     pub command_count: u32,
+    /// Some collider carries a contact or hit event flag
+    /// (`engine_schema::SHAPE_EVENT_FLAGS`): plan the `contact_events` pass.
+    /// Off, the step graph is unchanged.
+    pub contact_events: bool,
 }
 
 /// Largest particle colour `soft_primal_fused` (one 256-lane workgroup) takes;
@@ -214,6 +218,7 @@ pub fn resolve_entry(name: &str, persistent: bool) -> &str {
         "solve_primal_sparse_compact" => "solve_primal_sparse_persistent",
         "solve_primal_one_compact" => "solve_primal_one_persistent",
         "solve_dual_compact" => "solve_dual_persistent",
+        "contact_events" => "contact_events_persistent",
         "convex_classify" => "convex_classify_persistent",
         "convex_manifold" => "convex_manifold_persistent",
         "ccd_emit" => "ccd_emit_persistent",
@@ -469,6 +474,14 @@ pub fn encode_step(
     let early_pair_pack = m.persistent_contacts && !m.fused_persistence && !m.manifold_persistence;
     if early_pair_pack {
         e.w("pack_solver_contacts", 66);
+    }
+    if i.contact_events {
+        // P4: every manifold is final here (box, convex, heightfield and CCD
+        // stages, reused contacts completed by persistence) and bodies still
+        // hold their step-start velocities. One thread per manifold (slot 66).
+        e.d("contact_events_clear", 64);
+        e.w("contact_events", 66);
+        e.phase("contactEvents");
     }
     if i.joint_count > 0 {
         e.d("warmstart_joints", n_joints);
@@ -733,6 +746,8 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "persist_list_copy_persistent",
     "persist_manifolds_persistent",
     "pack_solver_pairs_persistent",
+    "contact_events_clear",
+    "contact_events_persistent",
     "warmstart_joints",
     "build_awake_list",
     "csr_clear",
@@ -1139,6 +1154,7 @@ mod tests {
             motion: MotionInputs::default(),
             soft: SoftCounts::default(),
             command_count: 0,
+            contact_events: false,
         }
     }
 
@@ -1259,6 +1275,7 @@ mod tests {
                 let mut i = inputs(10, 0);
                 i.joint_count = 3;
                 i.has_convex = true;
+                i.contact_events = true;
                 for whole in [false, true] {
                     for c in encode_step(&m, &i, whole, true) {
                         let k = match c {
@@ -1419,5 +1436,79 @@ mod tests {
         assert!(at("ccd_pick") < np);
         let emit = ccd.iter().position(|n| n.starts_with("ccd_emit")).unwrap();
         assert!(np < emit && emit < at("predict_bodies"));
+    }
+
+    #[test]
+    fn contact_events_are_planned_only_for_flagged_worlds() {
+        let names = |m: &StepModes, i: &StepInputs, whole: bool| -> Vec<&'static str> {
+            encode_step(m, i, whole, true)
+                .into_iter()
+                .filter_map(|c| match c {
+                    Cmd::Dispatch { kernel, .. } | Cmd::Indirect { kernel, .. } => Some(kernel),
+                    _ => None,
+                })
+                .collect()
+        };
+        for m in [fast(), StepModes::default()] {
+            for whole in [false, true] {
+                let mut i = inputs(10, 0);
+                i.has_height_field = true;
+                i.motion.ccd = true;
+                let plain = encode_step(&m, &i, whole, true);
+                assert!(
+                    !names(&m, &i, whole)
+                        .iter()
+                        .any(|k| k.starts_with("contact_events")),
+                    "a world without event shapes plans no contact_events pass"
+                );
+                i.contact_events = true;
+                let with = encode_step(&m, &i, whole, true);
+                // The same commands with the pass inserted: nothing else moves.
+                let stripped: Vec<Cmd> = with
+                    .iter()
+                    .copied()
+                    .filter(|c| {
+                        !matches!(
+                            c,
+                            Cmd::Dispatch {
+                                kernel: "contact_events_clear",
+                                ..
+                            } | Cmd::Indirect {
+                                kernel: "contact_events",
+                                ..
+                            } | Cmd::Phase {
+                                name: "contactEvents"
+                            }
+                        )
+                    })
+                    .collect();
+                assert_eq!(stripped, plain);
+                let n = names(&m, &i, whole);
+                let at = |k: &str| {
+                    n.iter()
+                        .position(|x| *x == k)
+                        .unwrap_or_else(|| panic!("{k} missing"))
+                };
+                let last_manifold_stage = n
+                    .iter()
+                    .rposition(|k| {
+                        k.starts_with("narrowphase")
+                            || k.starts_with("convex_")
+                            || k.starts_with("ccd_emit")
+                            || k.starts_with("reuse_all_manifolds")
+                            || k.starts_with("persist_")
+                    })
+                    .unwrap();
+                assert!(at("contact_events_clear") < at("contact_events"));
+                assert!(last_manifold_stage < at("contact_events_clear"));
+                assert!(at("contact_events") < at("predict_bodies"));
+                if !whole {
+                    assert!(
+                        at("convex_manifold") < at("contact_events"),
+                        "heightfield pairs are included"
+                    );
+                }
+            }
+        }
     }
 }
