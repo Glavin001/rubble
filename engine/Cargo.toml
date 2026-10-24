@@ -16,6 +16,8 @@ members = [
     "crates/engine-vehicle-wasm",
     "crates/engine-softbody",
     "crates/engine-gpu-wait",
+    "crates/engine-world",
+    "crates/engine-ffi",
 ]
 # The stress oracle is its own workspace (wgpu 30); engine-fracture depends on its crates by path.
 exclude = ["stress-oracle"]
@@ -52,6 +54,7 @@ engine-oracles = { path = "crates/engine-oracles" }
 engine-fracture = { path = "crates/engine-fracture" }
 engine-vehicle = { path = "crates/engine-vehicle" }
 engine-softbody = { path = "crates/engine-softbody" }
+engine-webgpu = { path = "crates/engine-webgpu" }
 
 [profile.release]
 lto = "thin"

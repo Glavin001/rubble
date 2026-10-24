@@ -140,6 +140,8 @@ const WORLD_ENTRIES: &[&str] = &[
     "soft_plastic",
     "soft_break_groups",
     "soft_sleep",
+    // Render poses for hosts (slang/kernels/pose_pack.slang).
+    "pose_pack",
 ];
 
 const VEHICLE_ENTRIES: &[&str] = &[
@@ -164,6 +166,9 @@ fn source_for(root: &std::path::Path, entry: &str) -> PathBuf {
     }
     if entry.starts_with("soft_") {
         return kernels.join("soft_step.slang");
+    }
+    if entry == "pose_pack" {
+        return kernels.join("pose_pack.slang");
     }
     if entry.starts_with("convex_") {
         return kernels.join(if entry.ends_with("_persistent") {

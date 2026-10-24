@@ -573,6 +573,7 @@ impl RigidStep {
             vehicle_count: vehicles,
             wheel_count: wheels,
             soft,
+            command_count: 0,
         }
     }
 

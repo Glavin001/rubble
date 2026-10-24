@@ -496,3 +496,18 @@ fn convexity_check_matches_f32_precision_of_the_input_frame() {
     let (v, sizes, idx) = offset_box(Vec3::ZERO, 0.25, 3e-6);
     assert!(matches!(ConvexHull::from_faces(&v, &sizes, &idx), Err(HullError::NonConvex)));
 }
+
+#[test]
+fn unpack_inverts_pack_bit_for_bit() {
+    let pts: Vec<Vec3> = (0..40)
+        .map(|i| {
+            let t = i as f32 * 0.7;
+            Vec3::new(t.sin() * (1.0 + 0.1 * t.cos()), (t * 1.3).cos(), (t * 0.4).sin() * 0.8)
+        })
+        .collect();
+    for hull in [ConvexHull::cuboid(Vec3::new(0.3, 0.5, 0.7)), ConvexHull::from_points(&pts).unwrap()] {
+        let mut out = vec![[0u32; 4]; 3];
+        let base = hull.pack(&mut out).unwrap();
+        assert_eq!(ConvexHull::unpack(&out, base).unwrap(), hull);
+    }
+}

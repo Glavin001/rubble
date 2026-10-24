@@ -6,11 +6,24 @@
 //! interactive gate; this crate is the apples-to-apples oracle path.
 
 #[cfg(feature = "gpu")]
+mod features;
+#[cfg(feature = "gpu")]
 mod gpu;
+#[cfg(feature = "gpu")]
+mod poses;
 #[cfg(feature = "gpu")]
 mod soft_skin;
 #[cfg(feature = "gpu")]
-pub use gpu::{default_device, SimSnapshot, SoftEvents, WgpuSim};
+pub use features::{
+    ContactStorage, EngineFeatures, GridLayout, ManifoldPersistence, SimOptions, WarmHash,
+};
+#[cfg(feature = "gpu")]
+pub use gpu::{
+    default_device, RingEvents, SimSnapshot, SoftEvents, WgpuSim, MOVED_BINDING, POSES_BINDING,
+    POSE_HEADER_BINDING, POSE_RECORD_BYTES,
+};
+#[cfg(feature = "gpu")]
+pub use poses::PoseRecord;
 #[cfg(feature = "gpu")]
 pub use soft_skin::SoftSkinner;
 
