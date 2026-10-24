@@ -98,6 +98,33 @@ pub struct ExtTables {
     pub materials: Vec<[[f32; 4]; 5]>,
 }
 
+/// Per entry of `adjacency` (`fracture.slang` `lp_sides`): what a load-path sweep takes of
+/// that bond for that chunk. Its arms are f32 differences of the f32 centroid and centres,
+/// as the kernels make them.
+fn sides(ext: &ExtTables, chunks: &[ChunkRecord], bonds: &[[u32; 4]]) -> Vec<[f32; 4]> {
+    let mut out = Vec::with_capacity(5 * ext.adjacency.len());
+    for (k, c) in ext.chunks.iter().enumerate() {
+        let (first, count) = (c[0][0].to_bits() as usize, c[0][1].to_bits() as usize);
+        for &i in &ext.adjacency[first..first + count] {
+            let (b, bond) = (&ext.bonds[i as usize], bonds[i as usize]);
+            let arm = |chunk: u32| {
+                let c = chunks[chunk as usize][0];
+                [b[0][0] - c[0], b[0][1] - c[1], b[0][2] - c[2]]
+            };
+            let (ra, rb) = (arm(bond[0]), arm(bond[1]));
+            let first_side = bond[0] as usize == k;
+            let other = if first_side { bond[1] } else { bond[0] };
+            let (stiff0, stiff1) = (b[5], b[6]);
+            out.push([ra[0], ra[1], ra[2], f32::from_bits(i)]);
+            out.push([rb[0], rb[1], rb[2], f32::from_bits(other)]);
+            out.push([b[2][0], b[2][1], b[2][2], stiff0[1]]);
+            out.push([b[1][0], b[1][1], b[1][2], stiff0[0]]);
+            out.push([stiff0[2], stiff0[3], stiff1[0], if first_side { 1.0 } else { 0.0 }]);
+        }
+    }
+    out
+}
+
 impl ExtTables {
     fn words(&self) -> (Vec<[f32; 4]>, u32, u32, u32) {
         let mut w: Vec<[f32; 4]> = self.bonds.iter().flatten().copied().collect();
@@ -316,12 +343,12 @@ impl Layout {
     pub fn a_first(&self) -> u32 {
         self.a_il() + 4 * self.b
     }
-    /// Per body slot 8 words of the in-step contact strike.
+    /// Per body slot 12 words of the in-step contact strike.
     pub fn a_cs(&self) -> u32 {
         self.a_first() + MAX_SHOTS as u32
     }
     pub fn atom_words(&self) -> u32 {
-        self.a_cs() + 8 * self.b
+        self.a_cs() + 12 * self.b
     }
     /// `lp` (float4s): per chunk [`LP_CHUNK`], then per body slot [`LP_BODY`].
     pub fn lp_words(&self) -> u32 {
@@ -340,7 +367,7 @@ pub const LP_BODY: u32 = 6;
 /// The shots strike prediction checks, at most.
 pub const MAX_SHOTS: usize = 64;
 const BODY_WORDS: u32 = 7;
-const ARGS: u64 = 8;
+const ARGS: u64 = 16;
 const ARG_CHUNKS: u64 = 0;
 const ARG_BONDS: u64 = 1;
 const ARG_BODIES: u64 = 2;
@@ -349,6 +376,12 @@ const ARG_SCAN_BODIES: u64 = 4;
 const ARG_ONE: u64 = 5;
 const ARG_CS_BODIES: u64 = 6;
 const ARG_CS_ROWS: u64 = 7;
+const ARG_CS_PICK: u64 = 8;
+const ARG_CS_LIST: u64 = 9;
+const ARG_CS_CHUNKS: u64 = 10;
+const ARG_CS_BONDS: u64 = 11;
+const ARG_CS_SLOTS: u64 = 12;
+const ARG_CS_SAVE: u64 = 13;
 
 /// The counters (`fracture.slang` `C_*`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -421,7 +454,7 @@ pub struct StrikeRecord {
     pub ballistic_energy: f32,
 }
 
-const BINDINGS: [Binding; 28] = [
+const BINDINGS: [Binding; 29] = [
     Binding::Uniform,   // params
     Binding::Storage,   // chunks
     Binding::Storage,   // bonds
@@ -450,9 +483,10 @@ const BINDINGS: [Binding; 28] = [
     Binding::StorageRw, // the engine's contact rows (contact fracture)
     Binding::Storage,   // the engine's counters
     Binding::StorageRw, // the contact rows' saved anchors (contact fracture)
+    Binding::Storage,   // the load path's bond sides
 ];
 
-const ENTRIES: [&str; 64] = [
+const ENTRIES: [&str; 69] = [
     "fr_loads",
     "fr_breaks",
     "fr_gate",
@@ -498,9 +532,12 @@ const ENTRIES: [&str; 64] = [
     "fr_il_mark",
     "fr_il_breaks",
     "fr_il_carry",
-    "fr_cs_reset",
+    "fr_cs_begin",
     "fr_cs_contacts",
-    "fr_cs_pick",
+    "fr_cs_pick_a",
+    "fr_cs_pick_b",
+    "fr_cs_pick_c",
+    "fr_cs_pick_d",
     "fr_cs_record",
     "fr_cs_hertz",
     "fr_cs_count",
@@ -508,8 +545,10 @@ const ENTRIES: [&str; 64] = [
     "fr_cs_collect",
     "fr_cs_gate",
     "fr_cs_solve",
+    "fr_cs_gate2",
     "fr_cs_save",
     "fr_cs_fix",
+    "fr_cs_clean",
     "fr_csl_begin",
     "fr_csl_extend_even",
     "fr_csl_extend_odd",
@@ -554,6 +593,34 @@ struct View {
     mode: u32,
 }
 
+fn cs_pass<'e>(encoder: &'e mut wgpu::CommandEncoder, at: Option<wgpu::ComputePassTimestampWrites<'_>>) -> wgpu::ComputePass<'e> {
+    encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("contact fracture"), timestamp_writes: at })
+}
+
+/// The in-step contact fracture's timestamps (`STRESS_CS_TIMING=1`).
+struct CsTiming {
+    queries: wgpu::QuerySet,
+    resolve: wgpu::Buffer,
+    read: wgpu::Buffer,
+}
+
+const CS_STAMPS: u32 = 6;
+/// The load path's frame stages' timestamps, after the in-step pass's.
+const LP_STAMPS: u32 = 6;
+
+impl CsTiming {
+    fn new(gpu: &Gpu) -> Option<CsTiming> {
+        if !std::env::var("STRESS_CS_TIMING").is_ok_and(|v| v == "1") || !gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            return None;
+        }
+        let n = CS_STAMPS + LP_STAMPS;
+        let queries = gpu.device.create_query_set(&wgpu::QuerySetDescriptor { label: Some("contact fracture timing"), ty: wgpu::QueryType::Timestamp, count: n });
+        let resolve = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("contact fracture timing"), size: 256 + 8 * LP_STAMPS as u64, usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false });
+        let read = storage_bytes(gpu, "contact fracture timing", 8 * n as u64, wgpu::BufferUsages::empty());
+        Some(CsTiming { queries, resolve, read })
+    }
+}
+
 pub struct GpuFracture {
     pub layout: Layout,
     kernels: Vec<Kernel>,
@@ -577,8 +644,11 @@ pub struct GpuFracture {
     pub shots: wgpu::Buffer,
     pub ext: wgpu::Buffer,
     pub lp: wgpu::Buffer,
+    lp_sides: wgpu::Buffer,
     /// Per engine contact row the in-step contact fracture's saved anchors (2 float4).
     cs_anchors: wgpu::Buffer,
+    /// `STRESS_CS_TIMING=1`: its stages' timestamps.
+    cs_timing: Option<CsTiming>,
     engine_counters: Option<wgpu::Buffer>,
     /// Bind groups per kernel (the scans: the new-piece scan's, then the free slots').
     binds: Vec<wgpu::BindGroup>,
@@ -733,6 +803,11 @@ impl GpuFracture {
             }
         }
         let lp = gpu.storage("fracture lp", &lp_words);
+        let side_words = if needs_ext || t.contact_sweeps > 0 && !t.ext.bonds.is_empty() { sides(&t.ext, &t.chunks, &t.bonds) } else { Vec::new() };
+        let lp_sides = storage_bytes(gpu, "fracture lp sides", 16 * side_words.len() as u64, wgpu::BufferUsages::empty());
+        if !side_words.is_empty() {
+            gpu.queue.write_buffer(&lp_sides, 0, bytemuck::cast_slice(&side_words));
+        }
         let kernels = ENTRIES.iter().map(|entry| gpu.compute(&shaders::FRACTURE, entry, &BINDINGS)).collect();
         let mut f = GpuFracture {
             layout,
@@ -755,7 +830,9 @@ impl GpuFracture {
             shots,
             ext,
             lp,
+            lp_sides,
             cs_anchors: storage_bytes(gpu, "fracture contact anchors", 32 * t.max_contacts as u64, wgpu::BufferUsages::empty()),
+            cs_timing: CsTiming::new(gpu),
             engine_counters: None,
             binds: Vec::new(),
             scan_binds: Vec::new(),
@@ -774,7 +851,7 @@ impl GpuFracture {
     /// The bind groups, against the engine's and the ingest's buffers as they are now.
     pub fn rebind(&mut self, gpu: &Gpu, engine: &EngineBuffers, ingest: &EngineIngest) {
         let group = |scan: &wgpu::Buffer, k: &Kernel| {
-            let buffers: [&wgpu::Buffer; 28] = [
+            let buffers: [&wgpu::Buffer; 29] = [
                 &self.params_buf,
                 &self.chunks,
                 &self.bonds,
@@ -803,6 +880,7 @@ impl GpuFracture {
                 engine.contacts,
                 engine.counters,
                 &self.cs_anchors,
+                &self.lp_sides,
             ];
             gpu.bind(&k.group, &buffers)
         };
@@ -856,8 +934,8 @@ impl GpuFracture {
             let group = |i: usize| {
                 let counters = self.engine_counters.as_ref().expect("engine bound");
                 let contacts = self.engine_contacts.as_ref().expect("engine bound");
-                let buffers: [&wgpu::Buffer; 28] = [
-                    &self.params_buf, &self.chunks, &self.bonds, &self.parts, &self.work, &self.atom, &self.frames, bodies, colliders, &ing[0], &ing[1], &ing[2], &self.loads, &self.sizes, &self.scan_new, &self.info, &v.params, &v.chunks, objects, lines, &v.shots, &self.geometry, &self.shots, &self.ext, &self.lp, contacts, counters, &self.cs_anchors,
+                let buffers: [&wgpu::Buffer; 29] = [
+                    &self.params_buf, &self.chunks, &self.bonds, &self.parts, &self.work, &self.atom, &self.frames, bodies, colliders, &ing[0], &ing[1], &ing[2], &self.loads, &self.sizes, &self.scan_new, &self.info, &v.params, &v.chunks, objects, lines, &v.shots, &self.geometry, &self.shots, &self.ext, &self.lp, contacts, counters, &self.cs_anchors, &self.lp_sides,
                 ];
                 gpu.bind(&self.kernels[i].group, &buffers)
             };
@@ -893,8 +971,39 @@ impl GpuFracture {
         self.params.step = step;
         gpu.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
         let (n, e, b) = (self.layout.n as usize, self.layout.e as usize, self.layout.b as usize);
+        if self.params.load_model == 1 && self.cs_timing.is_some() {
+            // `STRESS_CS_TIMING=1`: the load path's stages, a pass each.
+            let at = |i: u32| {
+                let t = self.cs_timing.as_ref().expect("timing");
+                wgpu::ComputePassTimestampWrites { query_set: &t.queries, beginning_of_pass_write_index: None, end_of_pass_write_index: Some(CS_STAMPS + i) }
+            };
+            drop(encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: Some(at(0)) }));
+            let stages: [&[&str]; 5] = [&["fr_loads"], &["fr_lp_clear", "fr_lp_sum", "fr_lp_relief"], &["fr_lp_block"], &[], &["fr_lp_breaks"]];
+            for (i, names) in stages.iter().enumerate() {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: Some(at(i as u32 + 1)) });
+                for name in names.iter() {
+                    let size = match *name {
+                        "fr_lp_clear" => b,
+                        "fr_lp_breaks" => e,
+                        _ => n,
+                    };
+                    self.direct(&mut pass, name, size);
+                }
+                if i == 3 {
+                    for s in 0..self.params.sweeps {
+                        self.direct(&mut pass, if s % 2 == 0 { "fr_lp_sweep_even" } else { "fr_lp_sweep_odd" }, n);
+                    }
+                }
+            }
+            let t = self.cs_timing.as_ref().expect("timing");
+            encoder.resolve_query_set(&t.queries, CS_STAMPS..CS_STAMPS + LP_STAMPS, &t.resolve, 256);
+            encoder.copy_buffer_to_buffer(&t.resolve, 256, &t.read, 8 * CS_STAMPS as u64, 8 * LP_STAMPS as u64);
+        }
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
+            if self.params.load_model == 1 && self.cs_timing.is_some() {
+                // Done above, timed.
+            } else {
             self.direct(&mut pass, "fr_loads", n);
             if self.params.load_model == 0 {
                 self.direct(&mut pass, "fr_breaks", e);
@@ -907,6 +1016,7 @@ impl GpuFracture {
                     self.direct(&mut pass, if s % 2 == 0 { "fr_lp_sweep_even" } else { "fr_lp_sweep_odd" }, n);
                 }
                 self.direct(&mut pass, "fr_lp_breaks", e);
+            }
             }
             if self.params.shot_count > 0 {
                 self.direct(&mut pass, "fr_strike_reset", b);
@@ -950,56 +1060,95 @@ impl GpuFracture {
         if self.params.cs_sweeps == 0 {
             return;
         }
-        let (n, e, b) = (self.layout.n as usize, self.layout.e as usize, self.layout.b as usize);
         let load_path = self.params.load_model == 1;
         let analytic = !load_path && self.params.strike_model == 1;
+        let stamp = |i: u32, end: bool| -> Option<wgpu::ComputePassTimestampWrites<'_>> {
+            self.cs_timing.as_ref().map(|t| wgpu::ComputePassTimestampWrites {
+                query_set: &t.queries,
+                beginning_of_pass_write_index: (!end).then_some(i),
+                end_of_pass_write_index: end.then_some(i),
+            })
+        };
+        // The detection, sized by the step's contact rows; then everything after it sized by
+        // what it found (`fr_cs_gate`): a step without a strike dispatches no group past here.
         {
-            let mut pass = encoder.begin_compute_pass(&Default::default());
-            self.direct(&mut pass, "fr_cs_reset", b.max(1));
+            let mut p = cs_pass(encoder, stamp(0, false));
+            self.direct(&mut p, "fr_cs_begin", 1);
         }
-        // The row kernels as many as the step's contact rows (`fr_cs_reset` sized them).
         encoder.copy_buffer_to_buffer(&self.sizes, 0, &self.args, 0, 12 * ARGS);
         {
-            let mut pass = encoder.begin_compute_pass(&Default::default());
-            self.indirect(&mut pass, "fr_cs_contacts", ARG_CS_ROWS, None);
-            self.indirect(&mut pass, "fr_cs_pick", ARG_CS_ROWS, None);
-            self.direct(&mut pass, "fr_cs_record", b);
-            if load_path {
-                self.direct(&mut pass, "fr_cs_count", n);
-                self.direct(&mut pass, "fr_cs_base", b);
-                self.direct(&mut pass, "fr_cs_collect", n);
-                self.direct(&mut pass, "fr_cs_gate", 1);
-            } else if analytic {
-                self.direct(&mut pass, "fr_csl_begin", b);
-                for p in 0..IL_PASSES {
-                    self.direct(&mut pass, if p % 2 == 0 { "fr_csl_extend_even" } else { "fr_csl_extend_odd" }, n);
-                }
-                self.direct(&mut pass, "fr_csl_strike", b);
-                self.direct(&mut pass, "fr_csl_mark", n);
-                self.direct(&mut pass, "fr_csl_breaks", e);
-            } else {
-                self.direct(&mut pass, "fr_cs_hertz", e);
-            }
+            let mut p = cs_pass(encoder, stamp(1, true));
+            self.indirect(&mut p, "fr_cs_contacts", ARG_CS_ROWS, None);
+            self.direct(&mut p, "fr_cs_gate", 1);
         }
-        if load_path {
-            encoder.copy_buffer_to_buffer(&self.sizes, 0, &self.args, 0, 12 * ARGS);
-            // A group per struck structure, all its sweeps in the one dispatch.
-            let mut pass = encoder.begin_compute_pass(&Default::default());
-            self.indirect(&mut pass, "fr_cs_solve", ARG_CS_BODIES, None);
-        }
+        encoder.copy_buffer_to_buffer(&self.sizes, 0, &self.args, 0, 12 * ARGS);
         {
-            let mut pass = encoder.begin_compute_pass(&Default::default());
-            self.indirect(&mut pass, "fr_cs_save", ARG_CS_ROWS, None);
-            self.direct(&mut pass, "fr_gate", 1);
+            // The profile's verdict.
+            let mut p = cs_pass(encoder, stamp(2, true));
+            for stage in ["fr_cs_pick_a", "fr_cs_pick_b", "fr_cs_pick_c", "fr_cs_pick_d"] {
+                self.indirect(&mut p, stage, ARG_CS_PICK, None);
+            }
+            self.indirect(&mut p, "fr_cs_record", ARG_CS_LIST, None);
+            if load_path {
+                self.indirect(&mut p, "fr_cs_count", ARG_CS_CHUNKS, None);
+                self.indirect(&mut p, "fr_cs_base", ARG_CS_LIST, None);
+                self.indirect(&mut p, "fr_cs_collect", ARG_CS_CHUNKS, None);
+                // A group per struck structure, all its sweeps in the one dispatch.
+                self.indirect(&mut p, "fr_cs_solve", ARG_CS_BODIES, None);
+            } else if analytic {
+                self.indirect(&mut p, "fr_csl_begin", ARG_CS_SLOTS, None);
+                for i in 0..IL_PASSES {
+                    self.indirect(&mut p, if i % 2 == 0 { "fr_csl_extend_even" } else { "fr_csl_extend_odd" }, ARG_CS_CHUNKS, None);
+                }
+                self.indirect(&mut p, "fr_csl_strike", ARG_CS_SLOTS, None);
+                self.indirect(&mut p, "fr_csl_mark", ARG_CS_CHUNKS, None);
+                self.indirect(&mut p, "fr_csl_breaks", ARG_CS_BONDS, None);
+            } else {
+                self.indirect(&mut p, "fr_cs_hertz", ARG_CS_BONDS, None);
+            }
+            self.direct(&mut p, "fr_cs_gate2", 1);
+        }
+        encoder.copy_buffer_to_buffer(&self.sizes, 0, &self.args, 0, 12 * ARGS);
+        {
+            let mut p = cs_pass(encoder, stamp(3, true));
+            self.indirect(&mut p, "fr_cs_save", ARG_CS_SAVE, None);
+            self.direct(&mut p, "fr_gate", 1);
         }
         self.record_split(encoder);
         {
-            let mut pass = encoder.begin_compute_pass(&Default::default());
-            self.indirect(&mut pass, "fr_cs_fix", ARG_CS_ROWS, None);
+            let mut p = cs_pass(encoder, stamp(4, false));
+            self.indirect(&mut p, "fr_cs_fix", ARG_CS_SAVE, None);
             if analytic {
-                self.direct(&mut pass, "fr_csl_carry", n);
+                self.indirect(&mut p, "fr_csl_carry", ARG_CS_CHUNKS, None);
             }
+            self.indirect(&mut p, "fr_cs_clean", ARG_CS_LIST, None);
         }
+        drop(cs_pass(encoder, stamp(5, true)));
+        if let Some(t) = &self.cs_timing {
+            encoder.resolve_query_set(&t.queries, 0..CS_STAMPS, &t.resolve, 0);
+            encoder.copy_buffer_to_buffer(&t.resolve, 0, &t.read, 0, 8 * CS_STAMPS as u64);
+        }
+    }
+
+    /// `STRESS_CS_TIMING=1` (a diagnostic, where the device has timestamp queries): the
+    /// in-step contact fracture's GPU time by stage in its last step (µs): the detection,
+    /// the verdict, the save and gate, the split, the fix and clean. Waits for the GPU.
+    pub fn contact_timing(&self, gpu: &Gpu) -> Option<[f64; 5]> {
+        let t = self.cs_timing.as_ref()?;
+        let w: Vec<u64> = gpu.read_range(&t.read, 0, CS_STAMPS as usize);
+        let period = gpu.queue.get_timestamp_period() as f64 * 1e-3;
+        let d = |a: usize, b: usize| w[b].saturating_sub(w[a]) as f64 * period;
+        Some([d(0, 1), d(1, 2), d(2, 3), d(3, 4), d(4, 5)])
+    }
+
+    /// `STRESS_CS_TIMING=1`: the load path's frame stages in the last frame (µs): the
+    /// loads, the sums and relief, the blocks, the sweeps, the breaks.
+    pub fn load_path_timing(&self, gpu: &Gpu) -> Option<[f64; 5]> {
+        let t = self.cs_timing.as_ref()?;
+        let w: Vec<u64> = gpu.read_range(&t.read, CS_STAMPS as usize, LP_STAMPS as usize);
+        let period = gpu.queue.get_timestamp_period() as f64 * 1e-3;
+        let d = |a: usize, b: usize| w[b].saturating_sub(w[a]) as f64 * period;
+        Some([d(0, 1), d(1, 2), d(2, 3), d(3, 4), d(4, 5)])
     }
 
     /// Where the coming step's contact rows start in the engine's contact buffer

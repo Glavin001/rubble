@@ -205,8 +205,16 @@ static const uint ARG_BODIES = 2;
 static const uint ARG_SCAN_CHUNKS = 3;
 static const uint ARG_SCAN_BODIES = 4;
 static const uint ARG_ONE = 5;
-static const uint ARG_CS_BODIES = 6;  // the contact fracture's solve: a group per struck structure (`fr_cs_gate`)
-static const uint ARG_CS_ROWS = 7;    // the contact fracture's row kernels: the step's contact rows (`fr_cs_reset`)
+// The in-step contact fracture's (`fr_cs_begin`, `fr_cs_gate`, `fr_cs_gate2`): without a
+// strike every kernel past the detection dispatches no group.
+static const uint ARG_CS_BODIES = 6;  // the load path's solve: a group per struck structure
+static const uint ARG_CS_ROWS = 7;    // the detection: the step's contact rows
+static const uint ARG_CS_PICK = 8;    // the step's contact rows when a structure is struck
+static const uint ARG_CS_LIST = 9;    // the struck structures
+static const uint ARG_CS_CHUNKS = 10; // every chunk when a structure is struck
+static const uint ARG_CS_BONDS = 11;  // every bond when a structure is struck
+static const uint ARG_CS_SLOTS = 12;  // every body slot when a structure is struck
+static const uint ARG_CS_SAVE = 13;   // the step's contact rows when a bond broke
 
 uint body_of(uint c) { return work[w_body() + c]; }
 bool dirty(uint body) { return atom[a_dirty() + body].load() != 0; }
@@ -1219,6 +1227,13 @@ void fr_strike_breaks(uint3 id: SV_DispatchThreadID)
 // Per contact row 2 float4: where each side on a chunk of a broken structure touches, in
 // the world (w 1; `fr_cs_save`), for `fr_cs_fix` after the split.
 [[vk::binding(27, 0)]] RWStructuredBuffer<float4> cs_anchors;
+// Per entry of `ext_adj` (a chunk's bond, in its chunk's order) 5 float4, what a sweep
+// takes of the bond (`fracture.rs` `sides`): (the bond's centroid less its first chunk's
+// centre, the bond as bits); (less its second chunk's, the other chunk as bits); (t1, ks);
+// (normal, kn); (kb_t1, kb_t2, kt, 1 when this chunk is the bond's first). The same values
+// `lp_bond` and `st_force` make, read in one place. (Declared in binding order: Slang's
+// Metal output numbers its buffers in the order of declaration.)
+[[vk::binding(28, 0)]] StructuredBuffer<float4> lp_sides;
 
 // An engine collider of a body (the ingest's `ColliderInfo` kind, coupling.slang `KIND_BODY`).
 static const uint KIND_BODY_COLLIDER = 2;
@@ -1444,10 +1459,27 @@ void fr_lp_block(uint3 id: SV_DispatchThreadID)
     }
 }
 
+// Chunk `k`'s intact bonds, counted.
+uint lp_intact(uint k)
+{
+    float4 range = ext[params.ext_chunks + 4 * k];
+    uint first = asuint(range.x);
+    uint count = asuint(range.y);
+    uint intact = 0;
+    for (uint e = 0; e < count; e++)
+        intact += work[w_alive() + adj_bond(first + e)] != 0 ? 1u : 0u;
+    return intact;
+}
+
 // Chunk `k`'s diagonal block over its intact bonds, Cholesky-factored into `lp_l(k)`;
-// false when not positive definite.
+// false when not positive definite. The factor keeps the count of the intact bonds it was
+// made over (+ 1, in its record's last word): a bond never heals, so while the count is
+// the same the bonds are, and so is the factor (made again, it would be the same bits).
 bool lp_factor(uint k)
 {
+    uint intact = lp_intact(k);
+    if (asuint(lp[lp_l(k) + 5].w) == intact + 1)
+        return true;
     float d[6][6];
     for (uint p = 0; p < 6; p++)
         for (uint q = 0; q < 6; q++)
@@ -1503,7 +1535,7 @@ bool lp_factor(uint k)
     if (!ok)
         return false;
     for (uint w = 0; w < 6; w++)
-        lp[lp_l(k) + w] = float4(l[4 * w], 4 * w + 1 < 21 ? l[4 * w + 1] : 0.0, 4 * w + 2 < 21 ? l[4 * w + 2] : 0.0, 4 * w + 3 < 21 ? l[4 * w + 3] : 0.0);
+        lp[lp_l(k) + w] = float4(l[4 * w], 4 * w + 1 < 21 ? l[4 * w + 1] : 0.0, 4 * w + 2 < 21 ? l[4 * w + 2] : 0.0, w == 5 ? asfloat(intact + 1) : l[4 * w + 3]);
     return true;
 }
 
@@ -1536,19 +1568,35 @@ void st_sweep(uint k, uint state, uint from, float c1, float c2)
     uint count = asuint(range.y);
     for (uint e = 0; e < count; e++)
     {
-        uint i = adj_bond(first + e);
-        if (work[w_alive() + i] == 0)
+        // The bond as `st_force` takes it, from its side's record (`lp_sides`).
+        float4 s0 = lp_sides[5 * (first + e)];
+        if (work[w_alive() + asuint(s0.w)] == 0)
             continue;
-        uint4 bond = bonds[i];
-        LpBond b = lp_bond(i);
-        float3 q_lin;
-        float3 q_ang;
-        st_force(b, bond.x, bond.y, state, from, q_lin, q_ang);
-        float3 fb = b.t1 * q_lin.x + b.t2 * q_lin.y + b.n * q_lin.z;
-        float3 mb = b.t1 * q_ang.x + b.t2 * q_ang.y + b.n * q_ang.z;
-        float3 arm = b.centroid - chunks[4 * k].xyz;
-        float3 lf = k == bond.x ? fb : -fb;
-        float3 lm = (k == bond.x ? mb : -mb) + cross(arm, lf);
+        float4 s1 = lp_sides[5 * (first + e) + 1];
+        float4 s2 = lp_sides[5 * (first + e) + 2];
+        float4 s3 = lp_sides[5 * (first + e) + 3];
+        float4 s4 = lp_sides[5 * (first + e) + 4];
+        bool first_side = s4.w != 0.0;
+        uint ka = first_side ? k : asuint(s1.w);
+        uint kb = first_side ? asuint(s1.w) : k;
+        float3 ra = s0.xyz;
+        float3 rb = s1.xyz;
+        float3 t1 = s2.xyz;
+        float3 n = s3.xyz;
+        float3 t2 = cross(n, t1);
+        float4 xa0 = lp[st_x(ka, state, from)];
+        float4 xa1 = lp[st_x(ka, state, from) + 1];
+        float4 xb0 = lp[st_x(kb, state, from)];
+        float4 xb1 = lp[st_x(kb, state, from) + 1];
+        float3 delta = (xb0.xyz + cross(xb1.xyz, rb)) - (xa0.xyz + cross(xa1.xyz, ra));
+        float3 phi = xb1.xyz - xa1.xyz;
+        float3 q_lin = float3(s2.w * dot(delta, t1), s2.w * dot(delta, t2), s3.w * dot(delta, n));
+        float3 q_ang = float3(s4.x * dot(phi, t1), s4.y * dot(phi, t2), s4.z * dot(phi, n));
+        float3 fb = t1 * q_lin.x + t2 * q_lin.y + n * q_lin.z;
+        float3 mb = t1 * q_ang.x + t2 * q_ang.y + n * q_ang.z;
+        float3 arm = first_side ? ra : rb;
+        float3 lf = first_side ? fb : -fb;
+        float3 lm = (first_side ? mb : -mb) + cross(arm, lf);
         r[0] += lf.x; r[1] += lf.y; r[2] += lf.z;
         r[3] += lm.x; r[4] += lm.y; r[5] += lm.z;
     }
@@ -1675,14 +1723,18 @@ static const uint IL_PERFORATE = 8;
 // effective mass along it, the striker's face radius, its Young's modulus, its engine body
 // as bits); (the struck chunk as bits, the Hertz rule's force `J / tau`, the striker's mass,
 // when within the step they meet).
-// `atom` per body slot 8 words: the largest strike impulse (float bits), the struck chunk
-// (NONE: not struck), the strike's contact side (`2 row + side`); the lowest chunk;
-// whether it is supported; its chunks: their count, their list's start, its fill.
-uint a_cs(uint b) { return a_first(0) + 64 + 8 * b; }
+// `atom` per body slot 12 words, all 0 for a body not struck (as the buffer starts, and as
+// `fr_cs_clean` leaves a struck one): the largest strike impulse (float bits), the struck
+// chunk + 1, the complement of the strike's collider (`cs_pick`); the complement of the
+// lowest chunk; whether it is supported; its chunks: their count, their list's start, its
+// fill; whether it is listed; the complements of the strike's other collider and of its
+// feature and side; its row and side (`2 row + side + 1`).
+static const uint CS_WORDS = 12;
+uint a_cs(uint b) { return a_first(0) + 64 + CS_WORDS * b; }
 
 bool cs_struck(uint b)
 {
-    return b < params.body_count && atom[a_cs(b) + 1].load() != NONE;
+    return b < params.body_count && atom[a_cs(b) + 1].load() != 0;
 }
 
 // What an analytic strike needs of its striker.
@@ -1707,7 +1759,7 @@ bool il_struck<let SRC : uint>(uint b)
 
 uint il_entry<let SRC : uint>(uint b)
 {
-    return SRC == 1 ? atom[a_cs(b) + 1].load() : atom[a_strike() + 9 * b + 8].load();
+    return SRC == 1 ? atom[a_cs(b) + 1].load() - 1 : atom[a_strike() + 9 * b + 8].load();
 }
 
 // The strike's time within the step (in-step: when the contact's two points meet).
@@ -2305,20 +2357,24 @@ void fr_csl_breaks(uint3 id: SV_DispatchThreadID)
 // breaks: the whole structure takes the contact and the striker rebounds. Forward only: no
 // rollback, no second solve, no detection of its own (rubble's contacts are the strikes).
 //
-//   fr_cs_reset        one thread per body: no strike; the row kernels' size;
-//   fr_cs_contacts, fr_cs_pick
-//                      one thread per contact row: its strikes' impulses (the largest per
-//                      structure kept), then the row and side of that one;
-//   fr_cs_record       one thread per struck structure: the strike's record, the structure
-//                      listed;
+//   fr_cs_begin        one thread: the step's sizes (the detection's: its contact rows);
+//   fr_cs_contacts     one thread per contact row: its strikes' impulses (the largest per
+//                      structure kept), each struck structure listed once;
+//   fr_cs_gate         one thread: the sizes of everything after (none without a strike);
+//   fr_cs_pick_a … _d  one thread per contact row, a pass each: of each structure's largest
+//                      strikes, the one of the least identity (colliders, feature, side), not
+//                      its row (rubble's rows are in no fixed order); then its row;
+//   fr_cs_record       one thread per struck structure: the strike's record;
 //   fr_cs_hertz        (threshold rule) one thread per bond;
-//   fr_cs_count, fr_cs_base, fr_cs_collect, fr_cs_gate, fr_cs_solve
+//   fr_cs_count, fr_cs_base, fr_cs_collect, fr_cs_solve
 //                      (load path) each struck structure's chunks listed, a group per struck
 //                      structure solves the strike's load and breaks its bonds;
+//   fr_cs_gate2        one thread: the contact rows' sizes when a bond broke (else none);
 //   fr_cs_save         one thread per contact row: where its sides on a broken structure's
 //                      chunks touch, in the world (before the split moves their bodies);
 //   fr_cs_fix          after the split, one thread per contact row: those sides' anchors on
-//                      their pieces' bodies, the row's warm start dropped.
+//                      their pieces' bodies, the row's warm start dropped;
+//   fr_cs_clean        one thread per struck structure: its words back to 0.
 
 // The contact rows this step has (rubble's `StepCounters::contactCount`).
 uint cs_rows()
@@ -2400,30 +2456,18 @@ bool cs_side(uint r, uint side, out uint k, out uint s, out uint ob, out uint co
 }
 
 [shader("compute")]
-[numthreads(64, 1, 1)]
-void fr_cs_reset(uint3 id: SV_DispatchThreadID)
+[numthreads(1, 1, 1)]
+void fr_cs_begin(uint3 id: SV_DispatchThreadID)
 {
-    uint b = id.x;
-    if (b == 0)
-    {
-        atom[a_counters() + C_CS_BODIES].store(0u);
-        atom[a_counters() + C_CS_CURSOR].store(0u);
-        // The row kernels sized by the step's contact rows, not the engine's capacity.
-        set_args(ARG_CS_ROWS, groups_of(cs_rows(), 64));
-    }
-    if (b >= params.body_count)
-        return;
-    uint at = a_cs(b);
-    atom[at].store(0u);
-    atom[at + 1].store(NONE);
-    atom[at + 2].store(NONE);
-    atom[at + 3].store(NONE);
-    for (uint w = 4; w < 8; w++)
-        atom[at + w].store(0u);
+    atom[a_counters() + C_CS_BODIES].store(0u);
+    atom[a_counters() + C_CS_CURSOR].store(0u);
+    // The detection sized by the step's contact rows, not the engine's capacity.
+    set_args(ARG_CS_ROWS, groups_of(cs_rows(), 64));
 }
 
 // One thread per contact row: each side's strike impulse into its structure's largest (an
-// impulse is positive: its bits order as the floats do).
+// impulse is positive: its bits order as the floats do); a struck structure listed once
+// (where in the list depends on the threads' order; nothing computed from it does).
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void fr_cs_contacts(uint3 id: SV_DispatchThreadID)
@@ -2437,16 +2481,44 @@ void fr_cs_contacts(uint3 id: SV_DispatchThreadID)
         float3 p, u;
         float v, m_eff, t_in;
         if (cs_side(r, side, k, s, ob, co, p, u, v, m_eff, t_in))
+        {
             atom[a_cs(s)].max(asuint(m_eff * v));
+            if (atom[a_cs(s) + 8].exchange(1u) == 0u)
+                work[w_cs_bodies() + atom[a_counters() + C_CS_BODIES].add(1u)] = s;
+        }
     }
 }
 
-// The row and side of each structure's largest strike (ties: the lowest).
+// One thread: everything after the detection sized by it. Without a strike (most steps)
+// none of it dispatches a group.
 [shader("compute")]
-[numthreads(64, 1, 1)]
-void fr_cs_pick(uint3 id: SV_DispatchThreadID)
+[numthreads(1, 1, 1)]
+void fr_cs_gate(uint3 id: SV_DispatchThreadID)
 {
-    uint r = id.x;
+    uint struck = atom[a_counters() + C_CS_BODIES].load();
+    bool any = struck > 0;
+    set_args(ARG_CS_PICK, any ? groups_of(cs_rows(), 64) : 0);
+    set_args(ARG_CS_LIST, groups_of(struck, 64));
+    set_args(ARG_CS_BODIES, struck);
+    set_args(ARG_CS_CHUNKS, any ? groups_of(params.chunk_count, 64) : 0);
+    set_args(ARG_CS_BONDS, any ? groups_of(params.bond_count, 64) : 0);
+    set_args(ARG_CS_SLOTS, any ? groups_of(params.body_count, 64) : 0);
+}
+
+// A strike row's identity, as rubble's warm start keys a contact (its order does not depend
+// on where the engine's atomic appends put the row): this side's collider, the other's, the
+// feature and the side (`2 feature + side`).
+uint3 cs_identity(uint r, uint side)
+{
+    uint4 ids = asuint(engine_contacts[cs_row(r)]);
+    return side == 0 ? uint3(ids.x, ids.y, 2 * ids.z) : uint3(ids.y, ids.x, 2 * ids.z + 1);
+}
+
+// Which of each structure's largest strikes is its strike: the least identity (ties in the
+// impulse are common: a face's points of one manifold, alike by symmetry), compared one word
+// a pass (`STAGE` 0, 1, 2; the complements' maxima), then (`STAGE` 3) its row.
+void cs_pick<let STAGE : uint>(uint r)
+{
     if (r >= cs_rows())
         return;
     for (uint side = 0; side < 2; side++)
@@ -2454,12 +2526,56 @@ void fr_cs_pick(uint3 id: SV_DispatchThreadID)
         uint k, s, ob, co;
         float3 p, u;
         float v, m_eff, t_in;
-        if (cs_side(r, side, k, s, ob, co, p, u, v, m_eff, t_in) && asuint(m_eff * v) == atom[a_cs(s)].load())
-            atom[a_cs(s) + 2].min(2 * r + side);
+        if (!cs_side(r, side, k, s, ob, co, p, u, v, m_eff, t_in) || asuint(m_eff * v) != atom[a_cs(s)].load())
+            continue;
+        uint3 id = cs_identity(r, side);
+        uint at = a_cs(s);
+        if (STAGE >= 1 && ~atom[at + 2].load() != id.x)
+            continue;
+        if (STAGE >= 2 && ~atom[at + 9].load() != id.y)
+            continue;
+        if (STAGE >= 3 && ~atom[at + 10].load() != id.z)
+            continue;
+        if (STAGE == 0)
+            atom[at + 2].max(~id.x);
+        else if (STAGE == 1)
+            atom[at + 9].max(~id.y);
+        else if (STAGE == 2)
+            atom[at + 10].max(~id.z);
+        else
+            atom[at + 11].store(2 * r + side + 1);
     }
 }
 
-// One thread per body: a struck structure's strike record (`lp`, `a_cs` above). The Hertz
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_cs_pick_a(uint3 id: SV_DispatchThreadID)
+{
+    cs_pick<0>(id.x);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_cs_pick_b(uint3 id: SV_DispatchThreadID)
+{
+    cs_pick<1>(id.x);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_cs_pick_c(uint3 id: SV_DispatchThreadID)
+{
+    cs_pick<2>(id.x);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_cs_pick_d(uint3 id: SV_DispatchThreadID)
+{
+    cs_pick<3>(id.x);
+}
+
+// One thread per struck structure: its strike record (`lp`, `a_cs` above). The Hertz
 // pulse (api.rs `hertz_duration`) of the impulse `J` between the striker's face (the
 // ingest's table: a shot's radius, a chunk's smallest half extent) and the struck chunk
 // (their moduli: the striker's as the table has it, the chunk's plane-strain one).
@@ -2467,12 +2583,10 @@ void fr_cs_pick(uint3 id: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void fr_cs_record(uint3 id: SV_DispatchThreadID)
 {
-    uint s = id.x;
-    if (s >= params.body_count)
+    if (id.x >= atom[a_counters() + C_CS_BODIES].load())
         return;
-    uint key = atom[a_cs(s) + 2].load();
-    if (key == NONE)
-        return;
+    uint s = work[w_cs_bodies() + id.x];
+    uint key = atom[a_cs(s) + 11].load() - 1;
     uint k, s2, ob, co;
     float3 p, u;
     float v, m_eff, t_in;
@@ -2488,10 +2602,8 @@ void fr_cs_record(uint3 id: SV_DispatchThreadID)
     lp[lp_body(s) + 3] = float4(from_rubble(u), v);
     lp[lp_body(s) + 4] = float4(m_eff, face, e_o, asfloat(ob));
     lp[lp_body(s) + 5] = float4(asfloat(k), j / tau, 1.0 / bodies[BODY_WORDS * ob].w, t_in);
-    atom[a_cs(s) + 1].store(k);
+    atom[a_cs(s) + 1].store(k + 1);
     atom[a_counters() + C_CS_STRIKES].add(1u);
-    uint at = atom[a_counters() + C_CS_BODIES].add(1u);
-    work[w_cs_bodies() + at] = s;
 }
 
 // The threshold rule on an in-step strike: as `fr_strike_breaks`.
@@ -2514,6 +2626,15 @@ void fr_cs_hertz(uint3 id: SV_DispatchThreadID)
         atom[a_counters() + C_BROKEN].add(1u);
         atom[a_counters() + C_CS_BREAKS].add(1u);
     }
+}
+
+// One thread: the contact rows' sizes for `fr_cs_save` and `fr_cs_fix` when a bond broke in
+// the step (else none).
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void fr_cs_gate2(uint3 id: SV_DispatchThreadID)
+{
+    set_args(ARG_CS_SAVE, atom[a_counters() + C_FRAME_BROKEN].load() > 0 ? groups_of(cs_rows(), 64) : 0);
 }
 
 // One thread per contact row: each side on a chunk of a structure that broke this step, where
@@ -2540,6 +2661,19 @@ void fr_cs_save(uint3 id: SV_DispatchThreadID)
         }
         cs_anchors[2 * r + side] = saved;
     }
+}
+
+// One thread per struck structure, the step's last: its words back to 0 (as for a body not
+// struck), so a step without a strike touches no body slot's.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_cs_clean(uint3 id: SV_DispatchThreadID)
+{
+    if (id.x >= atom[a_counters() + C_CS_BODIES].load())
+        return;
+    uint at = a_cs(work[w_cs_bodies() + id.x]);
+    for (uint w = 0; w < CS_WORDS; w++)
+        atom[at + w].store(0u);
 }
 
 // After the split, one thread per contact row: a saved side's anchor on its collider's body
@@ -2591,7 +2725,7 @@ void fr_cs_count(uint3 id: SV_DispatchThreadID)
     uint s = body_of(k);
     if (!cs_struck(s))
         return;
-    atom[a_cs(s) + 3].min(k);
+    atom[a_cs(s) + 3].max(~k);
     if ((info[k] & INFO_SUPPORT) != 0)
         atom[a_cs(s) + 4].store(1u);
     atom[a_cs(s) + 5].add(1u);
@@ -2601,9 +2735,9 @@ void fr_cs_count(uint3 id: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void fr_cs_base(uint3 id: SV_DispatchThreadID)
 {
-    uint s = id.x;
-    if (!cs_struck(s))
+    if (id.x >= atom[a_counters() + C_CS_BODIES].load())
         return;
+    uint s = work[w_cs_bodies() + id.x];
     atom[a_cs(s) + 6].store(atom[a_counters() + C_CS_CURSOR].add(atom[a_cs(s) + 5].load()));
 }
 
@@ -2622,20 +2756,13 @@ void fr_cs_collect(uint3 id: SV_DispatchThreadID)
     work[w_cs_list() + atom[a_cs(s) + 6].load() + atom[a_cs(s) + 7].add(1u)] = k;
 }
 
-[shader("compute")]
-[numthreads(1, 1, 1)]
-void fr_cs_gate(uint3 id: SV_DispatchThreadID)
-{
-    set_args(ARG_CS_BODIES, atom[a_counters() + C_CS_BODIES].load());
-}
-
 // Chunk `k`'s increment's load (of struck structure `s`): the strike's force and moment on
 // its chunk, less (a free structure) the d'Alembert loads of the rigid acceleration it
 // gives the whole body; its state from rest.
 void cs_load(uint k, uint s)
 {
     bool supported = atom[a_cs(s) + 4].load() != 0;
-    bool fixed = (info[k] & INFO_SUPPORT) != 0 || (!supported && atom[a_cs(s) + 3].load() == k);
+    bool fixed = (info[k] & INFO_SUPPORT) != 0 || (!supported && ~atom[a_cs(s) + 3].load() == k);
     float4 r0 = lp[lp_body(s) + 2];
     float4 r1 = lp[lp_body(s) + 3];
     Quat q;
@@ -2647,7 +2774,7 @@ void cs_load(uint k, uint s)
     float4 c0 = chunks[4 * k];
     float3 f = float3(0.0);
     float3 t = float3(0.0);
-    if (atom[a_cs(s) + 1].load() == k)
+    if (atom[a_cs(s) + 1].load() == k + 1)
     {
         f = force;
         t = cross(contact - c0.xyz, force);

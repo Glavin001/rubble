@@ -234,6 +234,35 @@ Momentum is not asserted: rubble's contact loses some even when nothing breaks (
 gravity, 17 % of the momentum lost, with the pass on or off; with CCD shots and the
 end-of-frame prediction, 13 % of a 250 m/s ball's). A finding for the engine.
 
+**Cost at scale** (2026-10-24, M3 Max, 60 Hz; 400 anchored 0.2 m walls, 88,000 chunks;
+GPU time from `STRESS_CS_TIMING=1`, which timestamps the pass's stages and the load path's
+frame stages, `ThresholdWorld::fracture.contact_timing` / `load_path_timing`):
+- A step without a strike runs the detection only (one thread per contact row, about
+  13 µs); everything after it is sized on the GPU (`fr_cs_gate`, `fr_cs_gate2`) and
+  dispatches no group, so nothing per body, chunk or bond runs. Struck structures are listed
+  as they are found and their words cleared after (`fr_cs_clean`), not every body slot each
+  step. What is left is about 30–80 µs of empty dispatches (about 4.5 µs each on Apple
+  GPUs).
+- A strike step: threshold about 90 µs, analytic about 230 µs, load path about 1.7 ms (its
+  256 sweeps in one workgroup: each chunk's residual is a chain of dependent loads at low
+  occupancy; holding `x` in group memory instead of device memory measured no faster and was
+  not kept).
+- The load path's frame: its blocks are factored again only when a chunk's intact-bond
+  count changes (bonds never heal, so the factor is the same bits): 233 → 66 µs a frame. Its
+  sweeps read each bond side's constants from one packed record (`lp_sides`: the same values
+  `lp_bond` and `st_force` make): 2.96 → 2.04 ms a frame (16 sweeps). Idle frame 5.79 →
+  4.99 ms.
+- All of it lossless: every deterministic regime's digest is unchanged (`--set shots`, all
+  three profiles, pass on and off).
+
+Determinism: the two-wall shot with the pass on is not repeatable, before these changes as
+after (load path: exit 8.10, 8.42 or 9.15 m/s; threshold: 392 or 409 bonds), while each
+step's end state (every body, every contact row) can match bit for bit and the next step
+still differ. Likely rubble's CCD: `ccd_pick` keeps the lowest candidate index among pairs
+at the same time of impact, and the candidates are appended with atomics, so their order is
+not fixed; coplanar pieces after a split make such ties common. The pass itself picks each
+strike by its contact's identity (colliders, feature, side), not by its row.
+
 Against the reference (4.1 kg ball, 0.2 m anchored wall, 0.25 s, 2026-10-24; the shots TOI
 CCD bodies in every column; "end of frame": the strike prediction instead of the pass):
 
