@@ -51,14 +51,21 @@ test('the house, its flat-hull skips and the layouts of the Scene menu',async()=
  assert.deepEqual(SAMPLES.map(s=>s.key),['house','cuboid','arch','row','grid','cuboidGrid','suburb','cuboids','cuboids2x']);
 });
 
-test('the Wrecking Yard, Bridge Out, Topple, Ram Raid, Fly-through and Skybridge packs (built in Rust) load as lab scenes',()=>{
- assert.deepEqual(PACK_SAMPLES.map(s=>[s.key,s.group]),[['wy_frame10','Wrecking Yard'],['wy_round_tower','Wrecking Yard'],['wy_brick_tower','Wrecking Yard'],['bo_viaduct','Bridge Out'],['topple_tower','Topple'],
-  ['rr_storefront_row','Ram Raid'],['ft_apartment_block','Fly-through'],['ft_glass_tower','Fly-through'],['sb_skybridge','Skybridge']]);
+test('the packs built in Rust (Wrecking Yard, Bridge Out, Topple, Ram Raid, Fly-through, Skybridge, Crash test) load as lab scenes',()=>{
+ assert.deepEqual(PACK_SAMPLES.map(s=>[s.key,s.group]),[['wy_frame10','Wrecking Yard'],['wy_round_tower','Wrecking Yard'],['wy_brick_tower','Wrecking Yard'],
+  ['bo_viaduct','Bridge Out'],['bo_viaduct_traffic','Bridge Out'],['topple_tower','Topple'],
+  ['rr_storefront_row','Ram Raid'],['rr_vehicles_storefront','Ram Raid'],['rr_vehicles_apartment','Ram Raid'],
+  ['ft_apartment_block','Fly-through'],['ft_glass_tower','Fly-through'],['ft_airliner_tower','Fly-through'],['ft_airliner_apartment','Fly-through'],
+  ['sb_skybridge','Skybridge'],['vh_car_barrier','Crash test'],['vh_bus_barrier','Crash test']]);
  const pieces=PACK_SAMPLES.map(s=>buildPackScene(packSampleJson(s.key).buffer).pieces);
- assert.deepEqual(pieces,[1264,337,1444,347,425,1203,1355,1332,992]);
+ assert.deepEqual(pieces,[1264,337,1444,347,871,425,1203,1341,1493,1355,1332,1368,1391,992,51,88]);
+ const defaults=key=>JSON.parse(new TextDecoder().decode(packSampleJson(key))).defaults;
  // Topple's and the Skybridge's packs carry their charges (defaults.charges: node pairs, firing order).
- const charges=PACK_SAMPLES.map(s=>(JSON.parse(new TextDecoder().decode(packSampleJson(s.key))).defaults.charges??[]).map(c=>[c.name,c.bonds.length]));
- assert.deepEqual(charges,[[],[],[],[],[['street-side columns',6],['back-row footings',26]],[],[],[],[['east connection',11],['west connection',2]]]);
+ assert.deepEqual(PACK_SAMPLES.map(s=>(defaults(s.key).charges??[]).map(c=>[c.name,c.bonds.length])),
+  [[],[],[],[],[],[['street-side columns',6],['back-row footings',26]],[],[],[],[],[],[],[],[['east connection',11],['west connection',2]],[],[]]);
+ // The vehicle scenes carry their launched bonded bodies (defaults.launches); the viaduct's traffic is parked.
+ assert.deepEqual(PACK_SAMPLES.map(s=>(defaults(s.key).launches??[]).map(l=>l.name)),
+  [[],[],[],[],[],[],[],['car','bus'],['car','bus'],[],[],['airliner'],['airliner'],[],['car'],['bus']]);
  assert.throws(()=>packSampleJson('house'),/Unknown bundled scene/);
 });
 
