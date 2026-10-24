@@ -144,6 +144,20 @@ pub struct Shot {
     /// the body's structure frame, moving with the body (its velocity there, spin
     /// included). A body's own chunks are never its strike's.
     pub at: Option<[f32; 3]>,
+    /// Some: the shot is this collider of its body (with `at` None), a box met by chunk
+    /// boxes exactly: `bound` is then its bounding radius (the broad phase only) and `face`
+    /// its Hertz face (a sphere's radius).
+    pub body_part: Option<ShotPart>,
+}
+
+/// A sphere or box collider of a shot's body, posed in the engine body's frame (rubble's,
+/// Y up).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShotPart {
+    pub centre: [f32; 3],
+    pub rotation: [f32; 4],
+    /// A box's half extents; None for a sphere (its radius is the shot's `face`).
+    pub half: Option<[f32; 3]>,
 }
 
 #[repr(C)]
@@ -451,7 +465,7 @@ impl GpuFracture {
         if !g.is_empty() {
             gpu.queue.write_buffer(&geometry, 0, bytemuck::cast_slice(&g));
         }
-        let shots = storage_bytes(gpu, "fracture strike shots", 48 * MAX_SHOTS as u64, wgpu::BufferUsages::empty());
+        let shots = storage_bytes(gpu, "fracture strike shots", 64 * MAX_SHOTS as u64, wgpu::BufferUsages::empty());
         let kernels = ENTRIES.iter().map(|entry| gpu.compute(&shaders::FRACTURE, entry, &BINDINGS)).collect();
         let mut f = GpuFracture {
             layout,
@@ -628,8 +642,12 @@ impl GpuFracture {
         let words: Vec<[f32; 4]> = shots
             .iter()
             .flat_map(|s| {
-                let at = s.at.map_or([0.0; 4], |p| [p[0], p[1], p[2], 1.0]);
-                [[f32::from_bits(s.body), s.bound, s.face, s.mass], [s.modulus, 0.0, 0.0, 0.0], at]
+                let (half, at, rotation) = match (s.at, s.body_part) {
+                    (_, Some(b)) => (b.half.unwrap_or([0.0; 3]), [b.centre[0], b.centre[1], b.centre[2], if b.half.is_some() { 2.0 } else { 3.0 }], b.rotation),
+                    (Some(p), None) => ([0.0; 3], [p[0], p[1], p[2], 1.0], [0.0, 0.0, 0.0, 1.0]),
+                    (None, None) => ([0.0; 3], [0.0; 4], [0.0, 0.0, 0.0, 1.0]),
+                };
+                [[f32::from_bits(s.body), s.bound, s.face, s.mass], [s.modulus, half[0], half[1], half[2]], at, rotation]
             })
             .collect();
         if !words.is_empty() {

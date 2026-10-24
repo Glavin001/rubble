@@ -723,9 +723,16 @@ struct ViewParams
 // Per chunk 3 float4 (the strike's): (box centre (structure frame), bounding radius); (half
 // extents, plane-strain modulus E'); box rotation (structure frame).
 [[vk::binding(21, 0)]] StructuredBuffer<float4> geometry;
-// Per shot 3 float4: (engine body as bits, bounding radius, face radius, mass); (E', -, -, -);
-// (a point of the body's structure frame, 1) for a sphere fixed in a launched island, else 0.
+// Per shot SHOT_WORDS float4: (engine body as bits, bounding radius, face radius, mass); (E',
+// box half extents); where it sits on its body: (a point of the body's structure frame, 1)
+// for a sphere fixed in a launched island, (a collider's centre in the engine body's frame,
+// 2 for a box, 3 for a sphere) for a collider of the body, else 0 (a sphere at the body);
+// the box's rotation in the engine body's frame.
 [[vk::binding(22, 0)]] StructuredBuffer<float4> shots;
+static const uint SHOT_WORDS = 4;
+static const float SHOT_FIXED = 1.0;
+static const float SHOT_BOX = 2.0;
+static const float SHOT_SPHERE = 3.0;
 
 static const float3 MOVING = float3(1.0, 0.45, 0.12);
 static const float3 AT_REST = float3(0.25, 0.45, 0.85);
@@ -852,10 +859,11 @@ void fr_view_bonds(uint3 id: SV_DispatchThreadID)
 //   fr_strike_reset    one thread per body: no bounds, no strike;
 //   fr_strike_bounds   one thread per chunk: its body's bounds (chunk centres +- bounding
 //                      radius);
-//   fr_strike_find     one thread per body: the first shot (in order) whose sphere reaches
-//                      its bounds within the frame;
+//   fr_strike_find     one thread per body: the first shot (in order) whose sphere (a box
+//                      shot's bounding sphere) reaches its bounds within the frame;
 //   fr_strike_entry    one thread per chunk of a struck body: the first time the shot meets
-//                      its box, and its distance to the shot's path;
+//                      its box (a box shot: the two boxes swept over the frame, exactly), and
+//                      its distance to the shot's path;
 //   fr_strike_nearest  the struck chunk: the nearest to the path (ties: the lowest), by the
 //                      distance fr_strike_entry kept;
 //   fr_strike_force    one thread per struck body: the contact point and the Hertz force;
@@ -918,6 +926,69 @@ void fr_strike_bounds(uint3 id: SV_DispatchThreadID)
     }
 }
 
+// Shot k at the frame's start (the stress frame): its centre, its velocity there (spin
+// included) and, for a box, its rotation.
+void shot_motion(uint k, out float3 c, out float3 vs, out Quat q)
+{
+    uint slot = asuint(shots[SHOT_WORDS * k].x);
+    uint sb = BODY_WORDS * slot;
+    c = from_rubble(bodies[sb].xyz);
+    vs = from_rubble(bodies[sb + 3].xyz);
+    q = rot_from_rubble(quat_of(bodies[sb + 1]));
+    float4 fixed_at = shots[SHOT_WORDS * k + 2];
+    if (fixed_at.w == 0.0)
+        return;
+    float3 p;
+    if (fixed_at.w == SHOT_FIXED)
+    {
+        // A sphere fixed in a launched island: at its point of the body's structure
+        // frame, moving with the body there.
+        Quat qs;
+        float3 os;
+        structure_pose(slot, sb, qs, os);
+        p = os + rotate(qs, fixed_at.xyz);
+    }
+    else
+    {
+        // A collider of the body: its centre and rotation in the engine body's frame.
+        Quat qb = quat_of(bodies[sb + 1]);
+        p = from_rubble(bodies[sb].xyz + rotate(qb, fixed_at.xyz));
+        q = normalized(rot_from_rubble(quat_mul(qb, quat_of(shots[SHOT_WORDS * k + 3]))));
+    }
+    vs = vs + cross(from_rubble(bodies[sb + 4].xyz), p - c);
+    c = p;
+}
+
+bool shot_is_box(uint k)
+{
+    return shots[SHOT_WORDS * k + 2].w == SHOT_BOX;
+}
+
+// A box's extent along unit `axis`: its support distance.
+float box_extent(Quat q, float3 half, float3 axis)
+{
+    return half.x * abs(dot(rotate(q, float3(1.0, 0.0, 0.0)), axis)) + half.y * abs(dot(rotate(q, float3(0.0, 1.0, 0.0)), axis)) + half.z * abs(dot(rotate(q, float3(0.0, 0.0, 1.0)), axis));
+}
+
+// Narrows [t_in, t_out] to when two boxes, `o` apart (shot centre less chunk centre) and
+// moving `rel` apart, overlap along unit `axis` (`ext`: their extents along it summed).
+void sweep_axis(float3 axis, float3 o, float3 rel, float ext, inout float t_in, inout float t_out)
+{
+    float inf = float_bits(0x7f800000u);
+    float p = dot(o, axis);
+    float dv = dot(rel, axis);
+    if (abs(dv) < 1e-12)
+    {
+        if (abs(p) > ext)
+            t_in = inf;
+        return;
+    }
+    float ta = (-ext - p) / dv;
+    float tb = (ext - p) / dv;
+    t_in = max(t_in, min(ta, tb));
+    t_out = min(t_out, max(ta, tb));
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void fr_strike_find(uint3 id: SV_DispatchThreadID)
@@ -934,25 +1005,15 @@ void fr_strike_find(uint3 id: SV_DispatchThreadID)
     float inf = float_bits(0x7f800000u);
     for (uint k = 0; k < params.shot_count; k++)
     {
-        float4 info = shots[3 * k];
+        float4 info = shots[SHOT_WORDS * k];
         uint slot = asuint(info.x);
         uint sb = BODY_WORDS * slot;
         if (bodies[sb].w == 0.0 || slot == b)
             continue; // parked, or the body's own
-        float3 c = from_rubble(bodies[sb].xyz);
-        float3 vs = from_rubble(bodies[sb + 3].xyz);
-        float4 fixed_at = shots[3 * k + 2];
-        if (fixed_at.w != 0.0)
-        {
-            // A sphere fixed in a launched island: at its point of the body's structure
-            // frame, moving with the body there.
-            Quat qs;
-            float3 os;
-            structure_pose(slot, sb, qs, os);
-            float3 p = os + rotate(qs, fixed_at.xyz);
-            vs = vs + cross(from_rubble(bodies[sb + 4].xyz), p - c);
-            c = p;
-        }
+        float3 c;
+        float3 vs;
+        Quat qs;
+        shot_motion(k, c, vs, qs);
         float3 rel = vs - v;
         float sp = length(rel);
         if (!(sp > params.strike_speed))
@@ -1008,7 +1069,7 @@ void fr_strike_entry(uint3 id: SV_DispatchThreadID)
     float3 from = s0.xyz;
     float3 rel = s1.xyz;
     float3 d = rel / max(length(rel), 1e-12);
-    float radius = shots[3 * shot].y;
+    float radius = shots[SHOT_WORDS * shot].y;
     Quat q;
     float3 cc = chunk_box_world(k, q);
     Quat box = normalized(quat_mul(q, quat_of(geometry[3 * k + 2])));
@@ -1016,6 +1077,38 @@ void fr_strike_entry(uint3 id: SV_DispatchThreadID)
     float inf = float_bits(0x7f800000u);
     float t_in = 0.0;
     float t_out = params.dt;
+    if (shot_is_box(shot))
+    {
+        // The shot's box against the chunk's, swept over the frame: overlapping on every
+        // separating axis (each box's faces and their edges' cross products) at once.
+        float3 c;
+        float3 vs;
+        Quat qs;
+        shot_motion(shot, c, vs, qs);
+        float3 hs = shots[SHOT_WORDS * shot + 1].yzw;
+        float3 o = from - cc;
+        for (uint i = 0; i < 3; i++)
+        {
+            float3 e = float3(0.0);
+            e[i] = 1.0;
+            float3 a = rotate(box, e);
+            float3 b = rotate(qs, e);
+            sweep_axis(a, o, rel, half[i] + box_extent(qs, hs, a), t_in, t_out);
+            sweep_axis(b, o, rel, box_extent(box, half, b) + hs[i], t_in, t_out);
+            for (uint j = 0; j < 3; j++)
+            {
+                float3 f = float3(0.0);
+                f[j] = 1.0;
+                float3 n = cross(a, rotate(qs, f));
+                float len = length(n);
+                if (len < 1e-6)
+                    continue; // parallel edges: the face axes cover them
+                n = n / len;
+                sweep_axis(n, o, rel, box_extent(box, half, n) + box_extent(qs, hs, n), t_in, t_out);
+            }
+        }
+    }
+    else
     for (uint ax = 0; ax < 3; ax++)
     {
         float3 e = float3(0.0);
@@ -1093,11 +1186,20 @@ void fr_strike_force(uint3 id: SV_DispatchThreadID)
     float3 rel = s1.xyz;
     float speed = length(rel);
     float3 d = rel / max(speed, 1e-12);
-    float4 info = shots[3 * shot];
+    float4 info = shots[SHOT_WORDS * shot];
     float radius = info.y;
+    if (shot_is_box(shot))
+    {
+        // The box's leading face along the path.
+        float3 c;
+        float3 vs;
+        Quat qs;
+        shot_motion(shot, c, vs, qs);
+        radius = box_extent(qs, shots[SHOT_WORDS * shot + 1].yzw, d);
+    }
     float face = max(info.z, 1e-3);
     float m_imp = info.w;
-    float e_imp = shots[3 * shot + 1].x;
+    float e_imp = shots[SHOT_WORDS * shot + 1].x;
     float3 contact = s0.xyz + rel * t_in + d * radius;
     float inv_mass = bodies[BODY_WORDS * b].w;
     bool anchored = inv_mass == 0.0;

@@ -63,8 +63,9 @@ impl PartialEq for StressSource {
 }
 
 /// A body whose contacts load threshold destructibles as a projectile's do (the lab's
-/// shots): its mass and its single sphere or box shape give the impact, and strike
-/// prediction checks it each step (`World::body_set_projectile`).
+/// shots): its mass and its sphere and box colliders give the impact, and strike
+/// prediction checks each of them each step (`World::body_set_projectile`), a box as a
+/// box. Any body with such colliders: a ball, a crate, a vehicle's chassis.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Projectile {
     /// Pa.
@@ -108,7 +109,7 @@ mod imp {
     use crate::math::SolverFrame;
     use crate::{BodyId, DestructibleAssetDesc, DestructibleId, Owner, Transform, World};
     use engine_schema::convex::ConvexHull;
-    use engine_schema::{AvbdParams, BodyState, FLAG_CONTACT_GAP, FLAG_WORLD_INERTIA};
+    use engine_schema::{AvbdParams, BodyState, ShapeType, FLAG_CONTACT_GAP, FLAG_WORLD_INERTIA};
     use glam::{DMat3, DQuat, DVec3, Vec3};
     use std::sync::Arc;
     use stress_gpu::fracture::{self, FractureTables, GpuFracture, INFO_SUPPORT};
@@ -372,7 +373,19 @@ mod imp {
             let b = self.live_body(body)?;
             if let Some(p) = &projectile {
                 // Its mass and shape are checked now (they are read again each sync).
-                self.projectile_shot(b as u32, p, 1.0)?;
+                let n = self.projectile_shots(b as u32, p, 1.0)?.len();
+                let others: usize = self
+                    .fracture
+                    .projectiles
+                    .iter()
+                    .filter(|q| q.0 != b as u32)
+                    .map(|q| self.projectile_shots(q.0, &q.2, 1.0).map_or(0, |s| s.len()))
+                    .sum();
+                anyhow::ensure!(
+                    others + n <= fracture::MAX_SHOTS,
+                    "at most {} projectile colliders (strike prediction's shot table)",
+                    fracture::MAX_SHOTS
+                );
             }
             let f = &mut self.fracture;
             f.projectiles.retain(|p| p.0 != b as u32);
@@ -391,50 +404,85 @@ mod imp {
             Ok(())
         }
 
-        /// A projectile's strike record and contact side, from its body as it is now.
-        fn projectile_shot(
+        /// A projectile's strike records and contact sides (one per sphere or box
+        /// collider of its body, a vehicle's own included), from its body as it is now.
+        fn projectile_shots(
             &self,
             b: u32,
             p: &Projectile,
             stiffness_scale: f64,
-        ) -> anyhow::Result<(fracture::Shot, u32, ColliderInfo)> {
+        ) -> anyhow::Result<Vec<(fracture::Shot, u32, ColliderInfo)>> {
             let slot = &self.bodies[b as usize];
             anyhow::ensure!(
                 slot.body_type == BodyType::Dynamic,
                 "projectile body {b} is not dynamic"
             );
+            // Its mass as set, or as its owner gave the GPU body (a vehicle's chassis).
             let mass = slot
                 .mass
                 .map(|m| m.mass)
+                .or_else(|| {
+                    let inv = engine_softbody::SoftBackend::host_body(&self.sim, b).inv_mass;
+                    (inv > 0.0).then(|| 1.0 / inv)
+                })
                 .filter(|m| *m > 0.0)
                 .ok_or_else(|| anyhow::anyhow!("projectile body {b} has no mass"))?;
-            let [s] = slot.shapes[..] else {
-                anyhow::bail!("projectile body {b} needs exactly one shape");
-            };
-            let shape = &self.shapes[s as usize];
-            let (face, bound) = match &shape.geometry {
-                Geometry::Sphere { radius, .. } => (*radius, 1.01 * radius + 1e-3),
-                Geometry::Box { half, .. } => (
-                    half.iter().copied().fold(f32::INFINITY, f32::min),
-                    1.01 * Vec3::from(*half).length() + 1e-3,
-                ),
-                _ => anyhow::bail!("projectile body {b}: only sphere and box projectiles"),
-            };
             let nu = p.poisson_ratio as f64;
             let e_plane = p.youngs_modulus as f64 * stiffness_scale / (1.0 - nu * nu);
-            let shot = fracture::Shot {
-                body: b,
-                bound,
-                face,
-                mass,
-                modulus: e_plane as f32,
-                at: None,
-            };
-            let info = ColliderInfo {
-                a: [NONE, b, KIND_BODY, 0],
-                b: [mass, p.youngs_modulus, face, 0.0],
-            };
-            Ok((shot, shape.collider, info))
+            let mut shots = Vec::new();
+            // The GPU's own records: each collider's pose in the engine body's frame,
+            // whoever made it (the world's shapes, a vehicle's parts).
+            for c in 0..self.sim.collider_count() {
+                let col = self.sim.collider(c);
+                if col.body != b || self.free_colliders.iter().any(|f| f.0 == c) {
+                    continue;
+                }
+                let (face, bound, body_part) = match col.shape {
+                    s if s == ShapeType::Sphere as u32 => {
+                        let r = col.params[0];
+                        // A ball centred on its body strikes as the lab's shots do.
+                        let part = (Vec3::from(col.local_pos).length() > 1e-6).then_some(
+                            fracture::ShotPart {
+                                centre: col.local_pos,
+                                rotation: [0.0, 0.0, 0.0, 1.0],
+                                half: None,
+                            },
+                        );
+                        (r, 1.01 * r + 1e-3, part)
+                    }
+                    s if s == ShapeType::Box as u32 => {
+                        let half = [col.params[0], col.params[1], col.params[2]];
+                        (
+                            half.iter().copied().fold(f32::INFINITY, f32::min),
+                            1.01 * Vec3::from(half).length() + 1e-3,
+                            Some(fracture::ShotPart {
+                                centre: col.local_pos,
+                                rotation: col.local_rot,
+                                half: Some(half),
+                            }),
+                        )
+                    }
+                    _ => anyhow::bail!(
+                        "projectile body {b}: only sphere and box colliders (collider {c})"
+                    ),
+                };
+                let shot = fracture::Shot {
+                    body: b,
+                    bound,
+                    face,
+                    mass,
+                    modulus: e_plane as f32,
+                    at: None,
+                    body_part,
+                };
+                let info = ColliderInfo {
+                    a: [NONE, b, KIND_BODY, 0],
+                    b: [mass, p.youngs_modulus, face, 0.0],
+                };
+                shots.push((shot, c, info));
+            }
+            anyhow::ensure!(!shots.is_empty(), "projectile body {b} has no collider");
+            Ok(shots)
         }
 
         /// Every threshold destructible's shot table and the projectiles' contact sides.
@@ -463,9 +511,10 @@ mod imp {
                 let mut shots = Vec::with_capacity(live.len());
                 let mut sides = Vec::with_capacity(live.len());
                 for (b, p) in &live {
-                    let (shot, collider, info) = self.projectile_shot(*b, p, scale)?;
-                    shots.push(shot);
-                    sides.push((collider, info));
+                    for (shot, collider, info) in self.projectile_shots(*b, p, scale)? {
+                        shots.push(shot);
+                        sides.push((collider, info));
+                    }
                 }
                 let t = self.fracture.slots[k].as_mut().expect("live slot");
                 let stride = std::mem::size_of::<ColliderInfo>() as u64;

@@ -301,7 +301,7 @@ impl ThresholdWorld {
         let e_shot = projectile.youngs_modulus * scene.sim.stiffness_scale / (1.0 - projectile.poisson_ratio * projectile.poisson_ratio);
         let strikes: Vec<fracture::Shot> = shots
             .iter()
-            .map(|sh| fracture::Shot { body: sh.body, bound: (1.01 * shot_radius + 1e-3) as f32, face: shot_radius as f32, mass: shot_mass as f32, modulus: e_shot as f32, at: None })
+            .map(|sh| fracture::Shot { body: sh.body, bound: (1.01 * shot_radius + 1e-3) as f32, face: shot_radius as f32, mass: shot_mass as f32, modulus: e_shot as f32, at: None, body_part: None })
             .collect();
         // `STRESS_THRESHOLD_STRIKE=0` (a measurement): contact loads only, no strikes.
         if !std::env::var("STRESS_THRESHOLD_STRIKE").is_ok_and(|v| v == "0") {
@@ -484,6 +484,7 @@ impl ThresholdWorld {
                     mass: mass as f32,
                     modulus: self.tables.geometry[k as usize][1][3],
                     at: Some([p.x as f32, p.y as f32, p.z as f32]),
+                    body_part: None,
                 });
             }
             if !std::env::var("STRESS_THRESHOLD_STRIKE").is_ok_and(|v| v == "0") {
