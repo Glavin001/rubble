@@ -146,6 +146,7 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     device.queue.writeBuffer(bufs[0], (cap.maxBodies + index) * 112, words);
   };
   const writeColliderRaw = (index, words) => {
+    world.colliderVersion = (world.colliderVersion || 0) + 1; // renderers' drawable lists
     world.colliderWords.set(words, index * 16);
     device.queue.writeBuffer(bufs[2], index * 64, words);
   };
@@ -481,6 +482,7 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     device.queue.writeBuffer(bufs[0], 0, snap.bodies);
     device.queue.writeBuffer(bufs[0], cap.maxBodies * 112, snap.bodies);
     device.queue.writeBuffer(bufs[2], 0, snap.colliders);
+    world.colliderVersion = (world.colliderVersion || 0) + 1;
     // Joints come back unbroken with their initial multipliers.
     world.jointCount = snap.jointCount;
     world.jointWords.set(snap.joints);
