@@ -13,6 +13,12 @@
 //! storey's height and how far it has moved toward the street (-y), and the share of the
 //! storeys' chunks on the largest body. At the end, per storey: the bodies its chunks are
 //! on and the largest one's share (a storey-sized slab is one body holding most of it).
+//!
+//! `TOPPLE_TRACE=1`: the bonds broken since the last report, by storey and kind.
+//! `TOPPLE_LOADS=1` (threshold): every frame, what the threshold rule compared (the storey
+//! chunks' contact loads over their weakest intact bonds, the highest three) and every bond
+//! between storey chunks that broke. `TOPPLE_DELAY` (s) sets the back-row charge's delay and
+//! `TOPPLE_KICK` scales the charges' kick (margin checks).
 use std::collections::BTreeMap;
 
 use stress_gpu::gpu::Gpu;
@@ -31,6 +37,15 @@ fn main() {
     let at: u64 = args.next().map_or(30, |f| f.parse().expect("DETONATE_AT"));
     let p = std::env::var("STRESS_PROFILE").ok().map(|v| Profile::parse(&v).unwrap_or_else(|| panic!("STRESS_PROFILE={v}: no such profile"))).unwrap_or(Profile::Threshold);
     let (scene, mut demolition) = stress_rubble::scenes::topple(p, frames as f64 / 60.0);
+    // Margin checks: the back-row charge's delay (`TOPPLE_DELAY`, s) and the charges' kick
+    // scaled (`TOPPLE_KICK`).
+    let knob = |n: &str| std::env::var(n).ok().and_then(|v| v.parse::<f64>().ok());
+    if let Some(d) = knob("TOPPLE_DELAY") {
+        demolition.charges.iter_mut().filter(|c| c.delay > 0.0).for_each(|c| c.delay = d);
+    }
+    if let Some(s) = knob("TOPPLE_KICK") {
+        demolition.charges.iter_mut().for_each(|c| c.kick = c.kick.map(|v| v * s));
+    }
     let chunks = &scene.bodies[0].chunks;
     let storey: Vec<Option<usize>> = chunks.iter().map(|c| c.groups.get(1).and_then(|g| g.strip_prefix("storey-")).and_then(|n| n.parse().ok())).collect();
     let top = storey.iter().flatten().copied().max().unwrap_or(1);
@@ -85,6 +100,7 @@ fn main() {
         let mut w = stress_rubble::threshold::ThresholdWorld::new(&gpu, &scene, ball.radius, ball.mass).expect("threshold world");
         let dt = w.frame_dt;
         let mut was_broken = vec![false; w.tables.bonds.len()];
+        let mut was_intact: Option<Vec<bool>> = None;
         for f in 0..frames {
             if w.frame == at {
                 demolition.arm("", w.frame, dt);
@@ -98,6 +114,35 @@ fn main() {
             let st = w.poll(&gpu);
             if st.error != 0 || st.engine_overflow != 0 {
                 panic!("frame {f}: fracture errors {:#x}, engine overflow {:#x}", st.error, st.engine_overflow);
+            }
+            if std::env::var("TOPPLE_LOADS").is_ok() {
+                // What fr_breaks compared this frame: each storey chunk's contact load over
+                // the weakest of its bonds intact before the frame (above 1 that bond
+                // broke), the highest three; and every bond between storey chunks that broke.
+                let loads: Vec<[f32; 4]> = gpu.read_range(&w.fracture.loads, 0, chunks.len());
+                let intact = w.fracture.bonds_intact(&gpu);
+                let before = was_intact.get_or_insert_with(|| vec![true; intact.len()]);
+                let mut weakest = vec![f32::INFINITY; chunks.len()];
+                for (i, b) in w.tables.bonds.iter().enumerate() {
+                    let (a, c) = (b[0] as usize, b[1] as usize);
+                    if before[i] && storey[a].is_some() && storey[c].is_some() {
+                        let cap = f32::from_bits(b[2]);
+                        weakest[a] = weakest[a].min(cap);
+                        weakest[c] = weakest[c].min(cap);
+                    }
+                }
+                let name = |c: usize| format!("{}{}@({:.1},{:.1})", chunks[c].groups.first().cloned().unwrap_or_default(), storey[c].unwrap_or(0), chunks[c].center[0], chunks[c].center[1]);
+                let mut u: Vec<(f32, usize)> = (0..chunks.len()).filter(|&k| weakest[k].is_finite()).map(|k| (loads[k][0] / weakest[k], k)).collect();
+                u.sort_by(|a, b| b.0.total_cmp(&a.0));
+                let total: f32 = (0..chunks.len()).filter(|&k| storey[k] == Some(1)).map(|k| loads[k][0]).sum();
+                println!("  loads f{}: storey 1 {:.2} MN; {}", f + 1, total / 1e6, u.iter().take(3).map(|&(r, k)| format!("{} {r:.2} ({:.2}/{:.2} MN)", name(k), loads[k][0] / 1e6, weakest[k] / 1e6)).collect::<Vec<_>>().join(", "));
+                for (i, b) in w.tables.bonds.iter().enumerate() {
+                    let (a, c) = (b[0] as usize, b[1] as usize);
+                    if before[i] && !intact[i] && storey[a].is_some() && storey[c].is_some() {
+                        println!("    broke {}-{} ({:.2} MN): loads {:.2}, {:.2} MN", name(a), name(c), f32::from_bits(b[2]) / 1e6, loads[a][0] / 1e6, loads[c][0] / 1e6);
+                    }
+                }
+                *before = intact;
             }
             if (f + 1) % every() == 0 || f + 1 == frames {
                 let pos: Vec<Vec3> = w.chunk_centres(&gpu).iter().map(|(c, _)| Vec3::from_array(*c)).collect();

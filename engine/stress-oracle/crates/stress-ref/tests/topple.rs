@@ -39,29 +39,34 @@ fn reach(chunks: &[ChunkDesc], bonds: &[&BondDesc], from: usize) -> HashSet<usiz
 /// each other 8. Each end wall (second storey up, one bay): halves 1, to the columns at
 /// their ends 2, to the beams over and under them 2 + 2. The back wall (ground storey, two
 /// bays): per bay halves 1, columns 2, beams 2, strip footings 2, the pads they reach 2.
+/// The back wall's outer leaves (per bay): halves 1, columns 2, the inner leaves 2, strip
+/// footings 2, pads 2, the kerb 2; and the back columns to the kerb, 1 each.
 #[test]
 fn counts_and_mass() {
     let s = topple::topple_tower();
     assert_eq!(s.chunks.len(), L::CHUNKS);
-    assert_eq!(L::CHUNKS, 420);
+    assert_eq!(L::CHUNKS, 425);
     let fixed = |k: &str| s.chunks.iter().filter(|c| c.support == Support::Fixed && kind(c) == k).count();
-    assert_eq!((fixed("footing"), fixed("street")), (L::LINES + L::STRIPS, L::TILES));
+    assert_eq!((fixed("footing"), fixed("street")), (L::LINES + L::STRIPS + 1, L::TILES));
     assert!(s.chunks.iter().all(|c| (c.support == Support::Fixed) == matches!(kind(c), "footing" | "street")));
-    assert_eq!(s.bonds.len(), L::STOREYS * (6 + 6 + 14 + 7 + 16 + 8) + 2 * (L::STOREYS - 1) * (1 + 2 + 2 + 2) + L::BAYS[0] * (1 + 2 + 2 + 2 + 2));
+    assert_eq!(s.bonds.len(), L::STOREYS * (6 + 6 + 14 + 7 + 16 + 8) + 2 * (L::STOREYS - 1) * (1 + 2 + 2 + 2) + L::BAYS[0] * (1 + 2 + 2 + 2 + 2) + L::BAYS[0] * (1 + 2 + 2 + 2 + 2 + 2) + (L::BAYS[0] + 1));
     // Concrete a storey: columns, joints, beams (7 spans), slabs (2 bays); the end walls
-    // (9 storeys) and the back wall (2 bays, the ground storey's).
+    // (9 storeys) and the back wall (2 bays, the ground storey's); the hinge line's extra
+    // depth (the ground storey's back columns, joints and wall).
     let (span, clear) = (F::BAY - F::BEAM_WIDTH, F::STOREY - F::BEAM_DEPTH);
     let storey = 6.0 * F::COLUMN * F::COLUMN * F::STOREY + 7.0 * (F::BAY - F::COLUMN) * F::BEAM_WIDTH * F::BEAM_DEPTH + 2.0 * span * span * F::SLAB;
     let wall = (F::BAY - F::COLUMN) * F::WALL * clear;
-    let expected = 2400.0 * (L::STOREYS as f64 * storey + (2.0 * (L::STOREYS - 1) as f64 + 2.0) * wall);
+    let hinge = 3.0 * F::COLUMN * (L::HINGE - F::COLUMN) * F::STOREY + 2.0 * (F::BAY - F::COLUMN) * clear * (L::HINGE - F::WALL);
+    let expected = 2400.0 * (L::STOREYS as f64 * storey + (2.0 * (L::STOREYS - 1) as f64 + 2.0) * wall + hinge);
     let total: f64 = s.chunks.iter().map(wrecking::mass).sum();
     assert!((total - expected).abs() < 1e-9 * expected, "{total} kg vs {expected} kg");
-    // About 1,000 t.
-    assert!((9.5e5..1.05e6).contains(&total), "{total}");
-    // Tall and slender: 35.5 m on a 6.5 m deep plan; the street along its -y side.
+    // About 1,060 t.
+    assert!((1.0e6..1.1e6).contains(&total), "{total}");
+    // Tall and slender: 35.5 m on a 7 m deep plan (the frame's 6.5 m and the hinge line's
+    // extra half metre behind it); the street along its -y side.
     let (lo, hi) = wrecking::bounds(&s.chunks.iter().filter(|c| c.support == Support::None).cloned().collect::<Vec<_>>());
     assert!((hi[2] - F::FOOTING_DEPTH - L::STOREYS as f64 * F::STOREY).abs() < 1e-9, "{}", hi[2]);
-    assert!((hi[1] - lo[1] - 6.5).abs() < 1e-12 && (hi[0] - lo[0] - 12.5).abs() < 1e-12);
+    assert!((hi[1] - lo[1] - (F::BAY + L::HINGE)).abs() < 1e-12 && (hi[0] - lo[0] - 12.5).abs() < 1e-12, "{lo:?} {hi:?}");
     let street: Vec<&ChunkDesc> = s.chunks.iter().filter(|c| kind(c) == "street").collect();
     assert!(street.iter().all(|c| c.center[1] + c.half_extents[1] <= lo[1] - L::SIDEWALK + 1e-9 && c.center[2] + c.half_extents[2] <= L::STREET_DEPTH + 1e-12));
 }
@@ -89,7 +94,7 @@ fn charges_cut_the_tower_free_to_tip() {
     assert_eq!(street.bonds.len(), 2 * street.debris.len());
     assert!(street.kick[1] < 0.0 && street.kick[0] == 0.0, "out over the street: {:?}", street.kick);
     let back = &s.charges[1];
-    assert_eq!(back.bonds.len(), (L::BAYS[0] + 1) + 2 * 2 * L::BAYS[0], "the back columns' pads, the back wall's strips and pads");
+    assert_eq!(back.bonds.len(), (L::BAYS[0] + 1) + 2 * 2 * 2 * L::BAYS[0] + (L::BAYS[0] + 1) + 2 * L::BAYS[0], "the back columns' pads, the back wall leaves' strips and pads, the kerb");
     for &i in &back.bonds {
         let (a, b) = (&s.chunks[s.bonds[i].a], &s.chunks[s.bonds[i].b]);
         let (up, down) = if a.support == Support::Fixed { (b, a) } else { (a, b) };
@@ -107,6 +112,50 @@ fn charges_cut_the_tower_free_to_tip() {
     let y: f64 = tower.iter().map(|&k| wrecking::mass(&s.chunks[k]) * s.chunks[k].center[1]).sum::<f64>() / mass;
     let line = 0.5 * L::BAYS[1] as f64 * F::BAY;
     assert!(y < line - 0.5 * F::COLUMN - 2.0, "centre of mass at y = {y}, the back line at {line}");
+}
+
+/// The hinge line the freed tower turns on: the back line's ground-storey columns and
+/// joints `HINGE` deep from the inner column face, its wall in two leaves as deep (the
+/// inner one flush with the frame, under the back beam); the footings under them reach
+/// the pads' street-side edge, in front of the edge the tower turns about. The kerb is a
+/// support from grade behind it, touching their back faces below the beams and bonded to
+/// them (the back-row charge cuts it free): it stops the base sliding back, and a turn
+/// toward the street about that edge only moves the hinge's back face away from it.
+#[test]
+fn hinge_line_and_kerb() {
+    let s = topple::topple_tower();
+    let line = 0.5 * L::BAYS[1] as f64 * F::BAY;
+    let (inner, face, outer) = (line - 0.5 * F::COLUMN, line + 0.5 * F::COLUMN, line - 0.5 * F::COLUMN + L::HINGE);
+    let span = |c: &ChunkDesc, ax: usize| (c.center[ax] - c.half_extents[ax], c.center[ax] + c.half_extents[ax]);
+    let near = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).abs() < 1e-12 && (a.1 - b.1).abs() < 1e-12;
+    let back = |c: &&ChunkDesc| c.support == Support::None && span(c, 1).1 > face - 1e-12;
+    let on = |k: &str, y: (f64, f64)| s.chunks.iter().filter(back).filter(|c| topple::ground(c, k) && near(span(c, 1), y)).count();
+    assert_eq!(on("column", (inner, outer)), L::BAYS[0] + 1);
+    assert_eq!(on("joint", (inner, outer)), L::BAYS[0] + 1);
+    assert_eq!((on("wall", (inner, face)), on("wall", (face, outer))), (2 * L::BAYS[0], 2 * L::BAYS[0]), "the wall's two leaves");
+    // Everything else keeps the frame's sections: the back beams over the inner leaves,
+    // and nothing else behind the back line's column faces.
+    assert_eq!(s.chunks.iter().filter(back).filter(|c| topple::ground(c, "beam") && near(span(c, 1), (inner, face))).count(), 2 * L::BAYS[0]);
+    let hinge: Vec<&ChunkDesc> = s.chunks.iter().filter(back).filter(|c| span(c, 1).1 > face + 1e-12).collect();
+    assert_eq!(hinge.len(), 2 * (L::BAYS[0] + 1) + 2 * L::BAYS[0]);
+    // The footings under the hinge: from the pads' street-side edge to its back face.
+    let under: Vec<&ChunkDesc> = s.chunks.iter().filter(|c| kind(c) == "footing" && c.groups[1] == "footing" && c.center[1] > 0.0).collect();
+    assert_eq!(under.len(), (L::BAYS[0] + 1) + L::STRIPS);
+    assert!(under.iter().all(|c| near(span(c, 1), (line - 0.5 * F::FOOTING, outer))));
+    // The kerb.
+    let kerbs: Vec<usize> = (0..s.chunks.len()).filter(|&k| s.chunks[k].groups.get(1).map(String::as_str) == Some("kerb")).collect();
+    assert_eq!(kerbs.len(), 1);
+    let kerb = &s.chunks[kerbs[0]];
+    assert_eq!((kind(kerb), kerb.support), ("footing", Support::Fixed));
+    assert!(near(span(kerb, 1), (outer, outer + L::KERB[0])));
+    let (z0, z1) = span(kerb, 2);
+    assert!(z0.abs() < 1e-12 && (z1 - F::FOOTING_DEPTH - L::KERB[1]).abs() < 1e-12 && z1 < F::FOOTING_DEPTH + F::STOREY - F::BEAM_DEPTH);
+    let (x0, x1) = span(kerb, 0);
+    assert!(hinge.iter().all(|c| span(c, 0).0 >= x0 && span(c, 0).1 <= x1), "along the whole hinge line");
+    let kerb_bonds: Vec<usize> = (0..s.bonds.len()).filter(|&i| s.bonds[i].a == kerbs[0] || s.bonds[i].b == kerbs[0]).collect();
+    assert_eq!(kerb_bonds.len(), (L::BAYS[0] + 1) + 2 * L::BAYS[0], "the back columns and outer leaves");
+    let back_row = &s.charges[1];
+    assert!(kerb_bonds.iter().all(|i| back_row.bonds.contains(i)), "the back-row charge cuts the kerb free");
 }
 
 /// The pack carries the charges as node pairs (`defaults.charges`) that name the same

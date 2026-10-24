@@ -40,23 +40,22 @@ export const LAB_TAKES = {
     { n: 180, caption: 'Real time', cam: { rel: [-0.3, 0.05, 0.95], relTo: [-0.6, 0.14, 0.8], lift: [0, -6] } },
   ]),
   // Topple (stress_ref::topple), threshold profile: the charges cut the street-side
-  // columns, then the back line. Natively (Metal) the tower then leans over the street as
-  // one mass and lands across it; in Chrome's WebGPU the back line crushes faster than it
-  // tips and it comes down almost in place (README, Topple), as this take records.
+  // columns, then the back line. The tower leans out over the street as one mass, turning
+  // on its hinge line (about 4 s to its front edge meeting the ground), and lands across
+  // the street at about 6.3 s, in Chrome as natively (README, Topple).
   topple_detonate: take({ scene: 'topple_tower', bonds: 'threshold' }, [
-    { n: 50, caption: 'A 10-storey tower beside a street: 420 bonded chunks, charges on the ground storey', cam: { rel: [0.9, 0.0, 1.15], relTo: [1.1, 0.0, 1.1], shift: [0, 0, -8] } },
+    { n: 50, caption: 'A 10-storey tower beside a street: 425 bonded chunks, charges on the ground storey', cam: { rel: [0.9, 0.0, 1.15], relTo: [1.1, 0.0, 1.1], shift: [0, 0, -8] } },
     { n: 1, act: { detonate: '' }, caption: 'Charges: the street-side columns, then the back line 0.25 s later' },
-    { n: 120, caption: 'Charges: the street-side columns, then the back line 0.25 s later', cam: { rel: [1.1, 0.0, 1.1], relTo: [1.3, 0.02, 1.1], shift: [0, 0, -8] } },
-    { n: 300, slow: 2, caption: 'Half speed: the back line crushes and the tower comes down storey by storey', cam: { rel: [1.3, 0.02, 1.1], relTo: [1.6, 0.05, 1.0], shift: [0, 0, -8] } },
-    { n: 200, caption: 'Real time: a rubble pile at the foot of the street', cam: { rel: [1.6, 0.05, 1.0], relTo: [1.8, 0.12, 0.85], shift: [0, 0, -8], lift: [0, -6] } },
+    { n: 120, caption: 'Charges: the street-side columns, then the back line 0.25 s later', cam: { rel: [1.1, 0.0, 1.1], relTo: [1.3, 0.02, 1.15], shift: [0, 0, -8] } },
+    { n: 150, caption: 'It leans out over the street as one mass, turning on its back line', cam: { rel: [1.3, 0.02, 1.15], relTo: [1.45, 0.04, 1.2], shift: [0, 0, -8] } },
+    { n: 240, slow: 2, caption: 'Half speed: it lands across the street; its base and street face break up', cam: { rel: [1.45, 0.04, 1.2], relTo: [1.6, 0.05, 1.2], shift: [0, 0, -8] } },
+    { n: 120, caption: 'Real time: the upper storeys lie across the street in one long piece', cam: { rel: [1.6, 0.05, 1.2], relTo: [1.85, 0.12, 1.1], shift: [0, 0, -8] } },
   ]),
   // Skybridge (stress_ref::skybridge) under blast_parity: one charge takes out the east
   // connection; the stress solve tears the west bearings, and the walkway hangs from the
   // west ledge on its keepers, east end down, until the ledge tears out of the facade; it
   // comes down on the plaza in its sections. The camera targets the walkway (lab frame:
-  // Y-up, the footprint centred). Dust is off: it adds a few specks here, and it is the one
-  // part of a stress take that is not drawn the same run to run (the frames then repeat
-  // bit for bit).
+  // Y-up, the footprint centred).
   sb_skybridge: take({ scene: 'sb_skybridge', bonds: 'stress' }, [
     { n: 50, caption: 'Skybridge between two towers: 992 bonded chunks', cam: { rel: [0.0, -0.1, 0.44], relTo: [0.08, -0.1, 0.41], target: [0, 10.5, -1.75] } },
     { n: 1, act: { detonate: 'east connection' }, caption: 'A charge takes out the east connection' },

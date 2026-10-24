@@ -343,7 +343,7 @@ like the Wrecking Yard (Scene menu group **Topple**).
 
 | Scene | What | Chunks · bonds |
 |---|---|---|
-| High-rise beside a street, with charges | The Wrecking Yard frame (`wrecking::rc_frame`) at 2 × 1 bays and 10 storeys: 12.5 × 6.5 m in plan, 35.5 m tall, about 1,000 t. Shear walls across both short ends from the second storey up, a ground-storey back wall on strip footings, pad footings. A 20 m street of 4 m slab tiles (supports) along its long street side (-y) | 420 · 714 |
+| High-rise beside a street, with charges | The Wrecking Yard frame (`wrecking::rc_frame`) at 2 × 1 bays and 10 storeys: 12.5 × 6.5 m in plan, 35.5 m tall, about 1,060 t. Shear walls across both short ends from the second storey up, pad footings. The back line's ground storey is its hinge line (below): 1 m deep columns, joints and wall (the wall in two 0.5 m leaves) on footings as deep, and a kerb behind it. A 20 m street of 4 m slab tiles (supports) along its long street side (-y) | 425 · 739 |
 
 **Charges.** The pack carries them as `defaults.charges`, in firing order:
 
@@ -365,8 +365,39 @@ The tower's two charges:
    street at 12 m/s, as a demolition's kicker charges do. A rigid column cut loose would
    otherwise stand where it was and carry the storeys above as before.
 2. **back-row footings** (0.25 s later, once the columns are clear): the back line's bonds
-   to its footings (3 columns, the back wall's 4 halves to their strips and pads). The tower
-   then stands on its back line alone, its weight over the empty street side.
+   to its supports (3 columns to their pads, the back wall's 8 leaves to their strips and
+   pads, the columns and outer leaves to the kerb). The tower then stands on its back line
+   alone, its weight over the empty street side.
+
+**The hinge line.** Once cut free, the whole tower (about 10 MN) bears on the back line by
+contact for seconds before it has turned far, and the threshold profile breaks a bond when
+the contact force on one of its chunks beats the bond's tensile capacity. The first layout,
+on the frame's own sections (a 0.3 m back wall, 0.25 m² column-joint bonds), sat on a knife
+edge:
+- the hinge's bonds ran at 0.8–1.0 of their capacity;
+- the rigid engine, at the profile's four iterations a frame, let the freed base creep back
+  off its footings at about 3 m/s². A pivot that does not slip needs a friction of about
+  0.14; the engine's is 0.5. At 64 iterations the base holds (a measurement, not adopted);
+- the base dropped off the back of its footings onto its crushed back line. Natively the
+  tower still leaned over; the stress kernels' WGSL build run natively changed the result
+  from 405 to 535 broken bonds, and in Chrome it came down nearly in place (704).
+
+`stress_ref::topple` builds the back line as a hinge (`ToppleLayout::HINGE`, `KERB`):
+- the ground storey's back columns, joints and wall are 1 m deep, from the frame's inner
+  column face outward. The wall is in two 0.5 m leaves, the inner one flush with the frame
+  under its 0.5 m back beam. Up to half the tower's weight lands on one chunk for a frame:
+  a single 1 m wall half ran at up to 0.96 of its 0.5 m wide bond to the beam. In leaves,
+  a chunk that takes such a peak lets go of a bond or two and stays bonded to its
+  neighbours.
+- the back pads and strips are as deep, and reach the pads' street-side edge, in front of
+  the edge the tower turns about;
+- a kerb (a support, 0.5 m above the footings) runs behind it and takes the base's push, as
+  a real felling's uncut hinge reinforcement does. A turn toward the street about the
+  hinge's street-side edge only moves the back face away from it.
+
+A wider back beam (1 m) also halved the walls' load against their capacity, but it broke two
+beam-slab bonds while the tower settled under `blast_parity`, so the beam keeps the frame's
+section.
 
 **Setting them off.** Use **Detonate charges** (stress modes, shown only for a scene with
 charges), or call stress-web `stress_detonate(name)` with an empty name for every charge,
@@ -386,48 +417,69 @@ stepping a frame again:
 **What it does.** Native, M3 Max:
 `cargo run --release -p stress-rubble --features gpu --example topple -- 480 30`
 sets the charges off before frame 30. Add `STRESS_PROFILE=blast_parity` for the other
-profile and `TOPPLE_TRACE=1` for the bonds broken by storey and kind. Both profiles stand
+profile, `TOPPLE_TRACE=1` for the bonds broken by storey and kind, and `TOPPLE_LOADS=1` for
+what the threshold rule compares each frame (the storey chunks' contact loads over their
+weakest bonds, and every bond that breaks). `TOPPLE_DELAY` (s) and `TOPPLE_KICK` (a scale)
+change the back-row charge's delay and the kick, for margin checks. Both profiles stand
 under self-weight, and both repeat exactly run to run.
 
-- **threshold**: the tower topples across the street.
-  - Frame 31: 6 bonds are cut. The columns are 2.7 m out by frame 45 and about 20 m out in
-    the end.
-  - Frame 46: 11 bonds are cut. The tower then leans out over the street as one body.
-    | Frame | Lean | Largest body |
-    |---|---|---|
-    | 105 | 3.9° | 92% of the storeys' chunks |
-    | 180 | 16° | 84% |
-    | 285 | 51° | 72% |
-  - Frame 330 (5.5 s): it lands with its top storey 21 m out over the street. The landing
-    breaks bonds from 300 to 402 by frame 375.
-  - The end: 405 of 714 bonds broken and 233 bodies.
-  - It does not break into storey-sized slabs. The landing strips the street face, and
-    storeys 3–10 stay one 188-chunk piece. This profile breaks a bond only when a *contact*
-    load on one of its chunks beats it, so the bonds between storeys on the far side and in
-    the end walls never see a load.
-  - The base also erodes while the tower leans: the free tower's weight on its back line is
-    a sustained contact load above those chunks' bond capacity.
-- **blast_parity**: the charges cut as above, but the tower does not topple.
-  - The cut of the street-side columns breaks 16 more bonds around them.
-  - Once the back row is cut, the quasi-static solve of the free tower breaks about 140 bonds in
-    storeys 1–5 within 15 frames, and the whole tower by frame 135. It collapses almost in
-    place: the top storey moves 6 m toward the street, and 680 of 714 bonds break.
-  - Walls along the long faces as well did not change this.
-- **In Chrome (threshold)** the lab's run diverged from the native one. The back line
-  crushed faster than the tower tipped, and the tower came down nearly vertically (704
-  bonds broken by 9 s). The outcome sits close to that crushing threshold, and Chrome's
-  WebGPU runs other shader code (WGSL rather than Metal), so treat the native run as the
-  reference.
+- **threshold**: the tower leans out over the street as one body and lands across it.
+  - Frame 31: 6 bonds are cut, and the columns are thrown about 20 m. Frame 46: 26 bonds
+    are cut.
+  - By frame 90 the three hinge columns' tops let go, and one inner wall leaf lets go of
+    the beam, a column and the next leaf. Each stays bonded to its neighbours (the leaf to
+    its outer leaf). Nothing else breaks while the tower leans:
+
+    | Frame | Lean | Bonds broken | Largest body |
+    |---|---|---|---|
+    | 120 | 2.6° | 38 | 100% of the storeys' chunks |
+    | 180 | 9.7° | 38 | 100% |
+    | 240 | 24° | 38 | 100% |
+    | 300 | 43° | 109 | 92% |
+    | 360 | 82° | 179 | 81% |
+
+  - At about 4.1 s (26°) its ground storey's street-side edge meets the ground (the 2.9 m
+    storey over its 6 m depth). Its base breaks up from there.
+  - Frame 375 (6.25 s): it lands, its top storey about 36 m out (beyond the street's far
+    edge). The end: 323 of 739 bonds broken and 169 bodies.
+  - It does not break into storey-sized slabs. The landing strips the street face and the
+    base, and storeys 2–10 stay one 250-chunk piece. This profile breaks a bond only when a
+    *contact* load on one of its chunks beats it, so the bonds between storeys on the far
+    side and in the end walls never see a load.
+  - **Margin.** The lean is the same with the stress kernels' WGSL build (one body to 24°,
+    36 bonds), and with the back-row delay at 0.1, 0.4 or 0.6 s, the kick at 0.5 or 1.5
+    times, or the charges set off at frame 31 or 37: one body, no bond broken above the
+    ground storey, to 21–27° in every case.
+- **blast_parity**: the charges cut as above, but the tower breaks up as it goes over.
+  - Within 15 frames of the back cut, the quasi-static solve of the freed tower breaks 136
+    bonds, most in storeys 1–3. The street half hangs off the back line, carried by the
+    end walls and the storey beams, and the profile models no rebar.
+  - The pieces go over toward the street: 690 of 739 bonds broken by frame 300, the top
+    storey 16 m out, no piece over 2% of the storeys' chunks.
+  - Walls along the long faces as well did not change this (the first layout).
+- **In Chrome (threshold)** the `topple_detonate` take topples as natively:
+  - 33 bonds broken (the charges' 32 and one hinge column's top) while it leans as one
+    body. Its base meets the ground at about 4.3 s and it lands at about 6.2 s.
+  - At frame 561, 310 bonds broken and 165 bodies.
+  - Read off a side view (foreshortened): about 8° at 3 s, 22° at 4 s and 37° at 5 s;
+    natively 9.7°, 24° and 43°.
+  - Two runs gave the same counts. With **Dust and debris** off, two runs' frames are
+    bit-identical. With it on (the take's default), the frames differ slightly (PSNR
+    43–51 dB) from the first dust, at about frame 270: the dust is not repeatable, the
+    physics is.
 
 **Checks** (in `engine/stress-oracle`):
 - `cargo test --release -p stress-ref --test topple`:
   - counts and mass from the layout;
+  - the hinge line: its sections and leaves, the footings under it, and the kerb (a
+    support behind it, bonded to it, cut by the back-row charge);
   - what each charge cuts; both together leave the tower one piece, bonded to no support,
     its centre of mass over the street side of its back line;
   - the charges survive both profiles' imports.
 - `cargo test --release -p stress-rubble --features gpu --test topple`:
-  - threshold: a second after the release the tower leans out as one body. In the end the
-    top storey is more than 15 m across the street, on the ground, and over 100 bonds past
+  - threshold: a second after the release the tower leans out as one body. It stays one
+    body, with no bond broken above the ground storey, past 15° of lean. In the end the
+    top storey is more than 25 m across the street, on the ground, and over 100 bonds past
     the charges' are broken.
   - blast_parity: the charges' bonds are broken before the next frame, the columns are
     thrown and the tower is free of its footings.
@@ -436,7 +488,8 @@ under self-weight, and both repeat exactly run to run.
 **Scripted takes and replay.** A take step `act: {detonate: name}` (`''` for every charge
 at its delay) sets the charges off, and the Detonate button's charges are logged. Either
 way, instant replay sets them off at the same frame (see "Takes, instant replay and slow
-motion"). The `topple_detonate` take (`takes/lab.mjs`) records the threshold run.
+motion"). The `topple_detonate` take (`takes/lab.mjs`) records the threshold run: the
+charges, the lean in real time, the landing at half speed.
 
 ### Ram Raid and Fly-through
 

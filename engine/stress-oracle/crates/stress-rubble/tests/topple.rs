@@ -2,8 +2,9 @@
 //! off on the GPU, between frames, as stress-web sets them off (`stress_detonate`).
 //!
 //! * threshold (the GPU-resident world): the charges cut their bonds (the thrown columns
-//!   out over the street), the tower leans out over the street as one body, then falls
-//!   across it and breaks up where it lands.
+//!   out over the street), the tower leans out over the street as one body on its hinge
+//!   line, nothing more broken until its front edge meets the ground, then falls across
+//!   the street and breaks up where it lands.
 //! * blast_parity (the resident GpuWorld): the charges cut their bonds between frames and
 //!   the tower comes free of its footings (the cut itself; what it does next is the
 //!   profile's: README, Topple).
@@ -35,7 +36,7 @@ fn centre(pos: &[Vec3], storey: &[Option<usize>], debris: &[usize], s: usize) ->
 #[test]
 fn charges_topple_the_tower_across_the_street_threshold() {
     let gpu = Gpu::new().expect("GPU");
-    let frames = 420;
+    let frames = 480;
     let (scene, mut demolition) = topple(Profile::Threshold, frames as f64 / 60.0);
     let storey = storeys(&scene);
     let top = storey.iter().flatten().copied().max().unwrap();
@@ -46,9 +47,14 @@ fn charges_topple_the_tower_across_the_street_threshold() {
     let start: Vec<Vec3> = w.chunk_centres(&gpu).iter().map(|(c, _)| Vec3::from_array(*c)).collect();
     let charge_bonds: usize = demolition.charges.iter().map(|c| c.bonds.len()).sum();
     let mut cut = Vec::new();
-    // The frame the last charge went off, and the lean a second after it.
+    // The frame the last charge went off, the lean a second after it, and the lean the
+    // tower reached as one body with no bond broken above the ground storey (where a
+    // hinge column's top or a wall leaf may let go under a passing peak, each still bonded
+    // to its neighbours, and a thrown column may graze a street-side joint).
     let mut released = None;
     let mut leaning = None;
+    let mut whole = 0.0f64;
+    let mut looking = true;
     for f in 0..frames {
         if w.frame == AT {
             assert!(demolition.arm("", w.frame, w.frame_dt));
@@ -66,6 +72,21 @@ fn charges_topple_the_tower_across_the_street_threshold() {
         if f as u64 + 1 == AT {
             // Standing until the charges: nothing broken, nothing moved.
             assert_eq!(st.broken, 0, "bonds broke before the charges");
+        }
+        if released.is_some_and(|r| w.frame > r && (w.frame - r) % 15 == 0) && looking {
+            let pos: Vec<Vec3> = w.chunk_centres(&gpu).iter().map(|(c, _)| Vec3::from_array(*c)).collect();
+            let body = w.fracture.chunk_bodies(&gpu);
+            let axis = centre(&pos, &storey, &debris, top) - centre(&pos, &storey, &debris, 2);
+            let lean = (-axis.y).atan2(axis.z).to_degrees();
+            let intact = w.fracture.bonds_intact(&gpu);
+            let above = w.tables.bonds.iter().zip(&intact).filter(|(b, ok)| !**ok && [b[0], b[1]].iter().any(|&c| storey[c as usize].is_some_and(|s| s > 1))).count();
+            if tower.iter().all(|&k| body[k] == body[tower[0]]) && above == 0 {
+                whole = whole.max(lean);
+            } else {
+                println!("one body, the hinge intact, to a lean of {whole:.1} deg (frame {}: broken {})", w.frame, st.broken);
+                // Stop looking: the front edge has met the ground.
+                looking = false;
+            }
         }
         if released.is_some_and(|r| w.frame == r + 60) {
             // A second after the tower came free: one body leaning out over the street.
@@ -89,6 +110,9 @@ fn charges_topple_the_tower_across_the_street_threshold() {
     assert_eq!(cut[0].1, AT);
     assert_eq!(cut.iter().map(|c| c.2).sum::<usize>(), charge_bonds, "every charge bond cut");
     assert!(leaning.is_some(), "the tower came free");
+    // The hinge holds: one body until the tower's front edge meets the ground (about 26
+    // deg: its 2.9 m ground storey over its 6 m depth).
+    assert!(whole > 15.0, "one body with the hinge intact only to {whole:.1} deg");
     let st = w.poll(&gpu);
     let pos: Vec<Vec3> = w.chunk_centres(&gpu).iter().map(|(c, _)| Vec3::from_array(*c)).collect();
     // The thrown columns out over the street; the top storey across it, on the ground.
@@ -96,7 +120,7 @@ fn charges_topple_the_tower_across_the_street_threshold() {
     let (top0, top1) = (centre(&start, &storey, &debris, top), centre(&pos, &storey, &debris, top));
     println!("{frames} frames: broken {} of {}, bodies {}, columns thrown at least {thrown:.1} m, top storey {:.1} m toward the street and at z {:.1} m", st.broken, scene.bodies[0].bonds.len(), st.bodies, top0.y - top1.y, top1.z);
     assert!(thrown > 3.0, "the street-side columns thrown out: {thrown} m");
-    assert!(top0.y - top1.y > 15.0, "the top storey across the street: {} m", top0.y - top1.y);
+    assert!(top0.y - top1.y > 25.0, "the top storey across the street: {} m", top0.y - top1.y);
     assert!(top1.z < 6.0, "the top storey on the ground: z {}", top1.z);
     assert!(st.broken as usize > charge_bonds + 100, "broken up where it landed: {} bonds", st.broken);
 }

@@ -158,7 +158,7 @@ pub const PACK_SAMPLES: &[PackSample] = &[
     PackSample {
         key: "topple_tower",
         group: TOPPLE,
-        menu: "High-rise beside a street, with charges · 420 chunks",
+        menu: "High-rise beside a street, with charges · 425 chunks",
         label: "topple tower",
     },
     PackSample {
