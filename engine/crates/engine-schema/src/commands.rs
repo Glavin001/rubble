@@ -27,6 +27,9 @@ pub enum CommandType {
     AngularImpulse = 14,
     /// Move the solver frame (centre of mass, principal axes) and set the mass.
     SetMassFrame = 15,
+    /// Kinematic bodies: `f0` = target position, `f1` = target rotation
+    /// (solver pose); the velocity that reaches them over the next step.
+    SetKinematicTarget = 16,
 }
 
 /// `GpuCommand::b` bit: a sleeping body ignores the command (Box3D `wake = false`).
@@ -162,6 +165,16 @@ impl GpuCommand {
     /// `offset` is the new centre in the old body frame, `rotation` the new
     /// principal axes relative to the old, then the inverse principal inertia
     /// and inverse mass.
+    pub fn set_kinematic_target(body: u32, position: [f32; 3], rotation: [f32; 4]) -> Self {
+        Self {
+            op: CommandType::SetKinematicTarget as u32,
+            a: body,
+            f0: [position[0], position[1], position[2], 0.0],
+            f1: rotation,
+            ..Self::zeroed()
+        }
+    }
+
     pub fn set_mass_frame(
         body: u32,
         offset: [f32; 3],

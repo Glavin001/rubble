@@ -774,6 +774,14 @@ enum RbResult rbBody_GetVelocity(struct RbWorld *world,
                                  struct RbVec3 *out_linear,
                                  struct RbVec3 *out_angular);
 
+// Move a kinematic body (`RB_KINEMATIC_BODY`) to `transform` over the next
+// step: the velocity that gets it there is computed on the GPU from where it
+// is when the step starts, so animation-driven bodies track without drift.
+// It pushes and carries dynamic bodies on the way.
+enum RbResult rbBody_SetTargetTransform(struct RbWorld *world,
+                                        RbBodyId body,
+                                        struct RbTransform transform);
+
 // Awake as of the last polled frame.
 enum RbResult rbBody_IsAwake(struct RbWorld *world, RbBodyId body, bool *out);
 

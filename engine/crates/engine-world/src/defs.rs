@@ -104,9 +104,6 @@ impl BodyDef {
 
     pub(crate) fn validate(&self) -> anyhow::Result<()> {
         let d = Self::default();
-        if self.body_type == BodyType::Kinematic {
-            return unsupported("kinematic bodies (planned P3)");
-        }
         if self.linear_damping != d.linear_damping || self.angular_damping != d.angular_damping {
             return unsupported("body damping (planned P3)");
         }

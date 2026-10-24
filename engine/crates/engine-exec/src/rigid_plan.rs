@@ -720,7 +720,7 @@ pub fn grid_cell(
             continue;
         }
         let body = c.body as usize;
-        if body >= bodies.len() || bodies[body].inv_mass <= 0.0 {
+        if body >= bodies.len() || !bodies[body].moves() {
             continue;
         }
         let r = if c.params[3] > 0.0 {

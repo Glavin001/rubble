@@ -72,6 +72,22 @@ pub unsafe extern "C" fn rbBody_GetVelocity(
     })
 }
 
+/// Move a kinematic body (`RB_KINEMATIC_BODY`) to `transform` over the next
+/// step: the velocity that gets it there is computed on the GPU from where it
+/// is when the step starts, so animation-driven bodies track without drift.
+/// It pushes and carries dynamic bodies on the way.
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_SetTargetTransform(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    transform: RbTransform,
+) -> RbResult {
+    body_command(world, body, |w, id| {
+        let t = w.transform_in(transform);
+        w.world.body_set_target_transform(id, t)
+    })
+}
+
 /// Awake as of the last polled frame.
 #[no_mangle]
 pub unsafe extern "C" fn rbBody_IsAwake(

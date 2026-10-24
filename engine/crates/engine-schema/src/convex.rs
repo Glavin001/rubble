@@ -1014,7 +1014,7 @@ pub fn hierarchical_grid(cols: &[crate::Collider], bodies: &[crate::BodyState]) 
     let dynamic_max = cols
         .iter()
         .filter(|c| c.shape != crate::ShapeType::Plane as u32)
-        .filter(|c| bodies.get(c.body as usize).is_some_and(|b| b.inv_mass > 0.0))
+        .filter(|c| bodies.get(c.body as usize).is_some_and(|b| b.moves()))
         .map(|c| level(2.0 * collider_radius(c) + 0.0004))
         .max()
         .unwrap_or(0);

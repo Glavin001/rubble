@@ -119,7 +119,15 @@ void emitEvent(uint type, uint id, uint a, uint b)
     ASTORE(gScratchAtomics[r + 3u], b);
 }
 
-bool bodyIsDynamic(BodyState b) { return b.invMass > 0.0 && (b.flags & BODY_DYNAMIC) != 0u; }
+// Kinematic bodies (BODY_KINEMATIC with BODY_DYNAMIC, zero inverse mass) move
+// in the graph like dynamic ones but follow their set velocity: prediction
+// places them, the solve and velocity extraction skip them, and contacts see
+// an infinite mass. Without the flag nothing changes.
+bool bodyIsKinematic(BodyState b) { return (b.flags & BODY_KINEMATIC) != 0u; }
+bool bodyIsDynamic(BodyState b)
+{
+    return (b.flags & BODY_DYNAMIC) != 0u && (b.invMass > 0.0 || bodyIsKinematic(b));
+}
 bool bodyIsSleeping(BodyState b) { return (b.flags & BODY_SLEEPING) != 0u; }
 
 // World-frame inverse inertia times v: R diag(invI) R^T v.
@@ -130,10 +138,10 @@ float3 invInertiaWorld(BodyState b, float3 v)
     return quatRotate(q, b.invInertia * local);
 }
 
-// The host's `wake`: dynamic bodies only, sleep timer reset.
+// The host's `wake`: dynamic and kinematic bodies, sleep timer reset.
 void wakeBody(inout BodyState b)
 {
-    if (b.invMass > 0.0)
+    if (b.invMass > 0.0 || bodyIsKinematic(b))
     {
         b.flags = (b.flags & ~BODY_SLEEPING) | BODY_AWAKE;
         b.sleepTimer = 0.0;
@@ -190,6 +198,19 @@ void applyCommandRun(uint first, uint n, uint body, float dt)
         else if (c.op == CMD_ANGULAR_IMPULSE && b.invMass > 0.0)
         {
             b.angularVel = b.angularVel + invInertiaWorld(b, c.f0.xyz);
+            wakeBody(b);
+        }
+        else if (c.op == CMD_SET_KINEMATIC_TARGET && bodyIsKinematic(b))
+        {
+            // The velocity that reaches the target pose over this step, from
+            // where the body is now (the inverse of prediction's integration).
+            float h = max(dt, 1e-8);
+            b.linearVel = (c.f0.xyz - b.position) / h;
+            float4 q1 = c.f1;
+            if (dot(b.orientation, q1) < 0.0) q1 = -q1;
+            float4 dq = quatMul(q1, quatConjugate(b.orientation));
+            float3 w = 2.0 * dq.xyz / h;
+            b.angularVel = dq.w < 0.0 ? -w : w;
             wakeBody(b);
         }
         else if (c.op == CMD_SET_MASS_FRAME)
@@ -287,6 +308,27 @@ void predictOne(uint i)
     // Sleeping/static: do not touch prev/pose (three-avbd mover compaction).
     if (!bodyIsDynamic(b) || bodyIsSleeping(b)) return;
     float dt = p.dt;
+    if (bodyIsKinematic(b))
+    {
+        // Exactly its set velocity: no gravity, no solve.
+        float3 kx0 = b.position;
+        float4 kq0 = b.orientation;
+        BODY_PREV(i).linearVel = b.linearVel;
+        b.position = b.position + b.linearVel * dt;
+        b.orientation = quatNormalize(
+            b.orientation + quatMul(float4(b.angularVel * dt, 0.0), b.orientation) * 0.5);
+        Aabb kbox;
+        kbox.mn = b.position;
+        kbox.mx = b.orientation.xyz;
+        kbox._pad0 = b.orientation.w;
+        kbox._pad1 = 0.0;
+        gAabbs[i] = kbox;
+        gBodies[i].position = b.position;
+        gBodies[i].orientation = b.orientation;
+        gBodies[i].initialPos = kx0;
+        gBodies[i].initialRot = kq0;
+        return;
+    }
     // Adaptive warm-start: (v - v_prev)/dt along up (three-avbd / VBD). gBodiesPrev still
     // holds the previous step's snapshot (incl. that step's incoming velocity).
     float3 prevVel = BODY_PREV(i).linearVel;
@@ -4805,7 +4847,9 @@ float3 bodyAngularVelocity(BodyState b, float dt)
 void primalApply(uint bodyIdx, Mat6 A, Vec6 rhs)
 {
     BodyState b = gBodies[bodyIdx];
-    if (!bodyIsDynamic(b) || bodyIsSleeping(b) || wakePending(b) || (b.flags & BODY_FOLLOW) != 0u) return;
+    if (!bodyIsDynamic(b) || bodyIsSleeping(b) || wakePending(b) || (b.flags & BODY_FOLLOW) != 0u ||
+        bodyIsKinematic(b))
+        return;
     AvbdParams p = PARAMS;
     uint floors = 0;
     Vec6 neg = rhs;
@@ -5232,7 +5276,7 @@ void record_stab_velocity(uint3 tid : SV_DispatchThreadID)
     }
     else if (i >= gCounters[0].bodyCount) return;
     BodyState b = gBodies[i];
-    if (!bodyIsDynamic(b) || bodyIsSleeping(b) || wakePending(b)) return;
+    if (!bodyIsDynamic(b) || bodyIsSleeping(b) || wakePending(b) || bodyIsKinematic(b)) return;
     gBodies[i].linearVel = bodyLinearVelocity(b, PARAMS.dt);
     gBodies[i].angularVel = bodyAngularVelocity(b, PARAMS.dt);
 }
@@ -5270,13 +5314,15 @@ void extract_velocity_sleep(uint3 tid : SV_DispatchThreadID)
     // Step-start pose x⁻ was saved on the body by prediction (initialPos/Rot).
     // Post-stabilization stored the velocity before its pass moved the body.
     float dt = max(p.dt, 1e-8);
-    if (!postStabilize())
+    // A kinematic body keeps its set velocity.
+    bool kinematic = bodyIsKinematic(b);
+    if (!postStabilize() && !kinematic)
     {
         b.linearVel = bodyLinearVelocity(b, p.dt);
         b.angularVel = bodyAngularVelocity(b, p.dt);
     }
 
-    if ((p.flags & FLAG_MAX_ROTATION) != 0u)
+    if ((p.flags & FLAG_MAX_ROTATION) != 0u && !kinematic)
     {
         float wMax = MAX_ROTATION / dt;
         float w = length(b.angularVel);
@@ -5292,7 +5338,7 @@ void extract_velocity_sleep(uint3 tid : SV_DispatchThreadID)
         for (uint c = firstColliderOfBody(i); c < n && gColliders[c].body == i; c++)
             extent = max(extent, colliderExtent(gColliders[c]));
         if (pointSpeedSleep()) slow = lin + ang * extent < p.sleepLin;
-        if ((p.flags & FLAG_STABILIZATION) != 0u)
+        if ((p.flags & FLAG_STABILIZATION) != 0u && !kinematic)
         {
             float band = STAB_SPEEDS * p.sleepLin;
             float speed = lin + ang * extent;
@@ -5496,7 +5542,7 @@ void ccd_classify(uint3 tid : SV_DispatchThreadID)
     if (i >= gCounters[0].bodyCount) return;
     BodyState b = gBodies[i];
     gCcdFlags[i] = 0;
-    if (!bodyIsDynamic(b) || bodyIsSleeping(b)) return;
+    if (!bodyIsDynamic(b) || bodyIsSleeping(b) || bodyIsKinematic(b)) return;
     AvbdParams p = PARAMS;
     float speed = length(b.linearVel);
     float aspeed = length(b.angularVel);
@@ -5557,7 +5603,7 @@ void recompute_inertia(uint3 tid : SV_DispatchThreadID)
     if (body >= gCounters[0].bodyCount) return;
     BodyState b = gBodies[body];
     // Vehicle chassis mass comes from the packer; their belt colliders reuse density.
-    if (!bodyIsDynamic(b) || (b.flags & BODY_VEHICLE) != 0u) return;
+    if (!bodyIsDynamic(b) || (b.flags & BODY_VEHICLE) != 0u || bodyIsKinematic(b)) return;
     float mass = 0.0;
     float3 com = float3(0, 0, 0);
     // Pass 1: mass / COM in body frame
