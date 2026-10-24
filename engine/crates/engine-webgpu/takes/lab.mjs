@@ -58,7 +58,7 @@ export const LAB_TAKES = {
   // part of a stress take that is not drawn the same run to run (the frames then repeat
   // bit for bit).
   sb_skybridge: take({ scene: 'sb_skybridge', bonds: 'stress' }, [
-    { n: 50, view: { fx: false }, caption: 'Skybridge between two towers: 992 bonded chunks', cam: { rel: [0.0, -0.1, 0.44], relTo: [0.08, -0.1, 0.41], target: [0, 10.5, -1.75] } },
+    { n: 50, caption: 'Skybridge between two towers: 992 bonded chunks', cam: { rel: [0.0, -0.1, 0.44], relTo: [0.08, -0.1, 0.41], target: [0, 10.5, -1.75] } },
     { n: 1, act: { detonate: 'east connection' }, caption: 'A charge takes out the east connection' },
     { n: 20, caption: 'A charge takes out the east connection', cam: { rel: [0.08, -0.1, 0.41], relTo: [0.1, -0.1, 0.4], target: [0, 10.5, -1.75] } },
     { n: 160, slow: 2, caption: 'Half speed: it hangs from the west end, then tears out', cam: { rel: [0.1, -0.1, 0.4], relTo: [0.25, -0.08, 0.4], target: [0, 10.5, -1.75] } },
