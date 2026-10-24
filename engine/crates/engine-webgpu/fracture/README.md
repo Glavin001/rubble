@@ -43,7 +43,7 @@ Each piece of logic has one source, used by both hosts:
 | Hull cooking and the hull arena (ABI v2) | `engine-schema` `convex.rs` | wasm `HullArena` | direct |
 | Per-tick host plan: buffer sizes, host words, step state, ordered dispatches | `engine-fracture` `plan.rs` | `simulation.mjs` replays it | `engine-viewer` `sim.rs` replays it |
 | Physics kernels | `slang/kernels/*.slang` (`ENGINE_WGSL` layout) | WGSL (`wgsl_export`) | MSL (`engine-viewer` `build.rs`, from the plan's entry list) |
-| Camera, shot rays, floor, indexed mesh | `engine-fracture` `view.rs` | wasm `Orbit` | direct |
+| Camera (orbit, first-person walk and fly), shot rays, floor, indexed mesh | `engine-fracture` `view.rs` | wasm `Orbit`, `camera-input.mjs` | direct (orbit) |
 | Draw shader | `slang/render/fracture_draw.slang` | WGSL (`wgsl_export`) | MSL |
 
 `engine-fracture-wasm` is the wasm-bindgen surface; `wasm.mjs` loads it and adapts
@@ -81,6 +81,21 @@ hulls and 454 bonds. The Scene selector also retains the 23-piece masonry arch.
 Both start at rest on the floor. Click to shoot an orange sphere; drag to orbit
 and scroll to zoom. Impacts wake sleeping pieces. Reset reloads 16 shots.
 Sphere trajectories compensate for gravity to aim near the clicked scene depth.
+
+**Camera** (the panel's Camera menu; `V` cycles it, remembered per viewer). Every bond
+mode shares the same camera (`engine-fracture` `view.rs` `ViewMode`, input in
+`camera-input.mjs`):
+
+| Mode | Look | Move | Shoot |
+|---|---|---|---|
+| Orbit | drag to orbit the scene centre | scroll to zoom | click: through the pointer |
+| First person · walk | click to lock the mouse, then mouse-look (drag without a mouse) | WASD / arrows on the floor at 1.7 m eye height; Shift sprints; scroll sets the speed | click: through the crosshair (tap: through the tap) |
+| First person · fly | as walk | as walk, along the look; Space / E up, C / Q down (stays above the floor) | as walk |
+
+Entering first person starts at the orbit's eye (walk: dropped to the floor) looking at
+the scene centre; Esc releases the mouse; back in orbit, the orbit view is as it was.
+The camera only moves the eye and the shots' origin: it never collides with or moves
+the pieces.
 
 Live counters update approximately once per second: **TPS** counts completed
 physics ticks (target 120), **FPS** counts submitted render frames, and **Sim
@@ -296,7 +311,7 @@ its own weight before it settles in the stress modes.
 - It runs the same Rust as the native reference (`stress-rubble` example
   `fracture_glb`): the level's Shardwright stress export, stress-ref's import, the
   resident GPU frame, and `stress_rubble::render`.
-- It uses the lab's orbit camera and shot rule (`engine-fracture` `view.rs`,
+- It uses the lab's camera (every view mode) and shot rule (`engine-fracture` `view.rs`,
   `plan::shot_velocity`).
 - It runs one copy of the structure; the samples' layouts of copies are the other modes'.
 - **JSPI or Asyncify.** The solver reads the GPU synchronously, so in the browser each read

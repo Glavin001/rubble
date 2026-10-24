@@ -54,6 +54,25 @@ let learned=null,learnedMs=0,learnedBusy=false;
 // told here.
 const viewMode=()=>Number($('view-mode').value);
 function applyView(){if(stressOn)stress?.setView($('show-bonds').checked,viewMode())}
+// The Camera menu (engine-fracture view.rs ViewMode: 0 orbit, 1 first-person walk, 2 fly),
+// remembered per viewer and kept across loads. V cycles it.
+const CAMERA_KEY='fracture-lab.camera';
+const CAMERA_HINTS=['CLICK TO SHOOT · DRAG TO ORBIT · SCROLL TO ZOOM · V CAMERA',
+ 'CLICK: LOCK MOUSE, THEN SHOOT · WASD WALK · SHIFT SPRINT · SCROLL SPEED · ESC FREES MOUSE · V CAMERA',
+ 'CLICK: LOCK MOUSE, THEN SHOOT · WASD FLY · SPACE/E UP · C/Q DOWN · SHIFT SPRINT · SCROLL SPEED · ESC FREES MOUSE · V CAMERA'];
+const cameraMode=()=>Number($('camera-mode').value);
+function applyCamera(){
+ const mode=cameraMode();if(renderer)renderer.viewMode=mode;if(stress)stress.viewMode=mode;
+ document.body.classList.toggle('first-person',mode!==0);$('hint').textContent=CAMERA_HINTS[mode];
+ try{localStorage.setItem(CAMERA_KEY,String(mode))}catch{}
+}
+{let stored=null;try{stored=localStorage.getItem(CAMERA_KEY)}catch{}
+ if(stored&&$('camera-mode').querySelector(`option[value="${stored}"]`))$('camera-mode').value=stored}
+$('camera-mode').onchange=()=>{applyCamera();$('camera-mode').blur()};
+addEventListener('keydown',e=>{
+ if(e.code!=='KeyV'||e.repeat||e.ctrlKey||e.metaKey||e.altKey||/^(INPUT|SELECT|TEXTAREA)$/.test(e.target?.tagName))return;
+ const options=$('camera-mode').options;$('camera-mode').value=options[(cameraMode()+1)%options.length].value;applyCamera()});
+applyCamera();
 // Ball mass: a power-of-two multiple of the scene's default ball, applied to the next shots.
 const massScale=()=>2**Number($('ball-mass').value);
 // Ball speed: a power-of-two multiple of the scene's launch speed, applied to the next shots.
@@ -134,7 +153,7 @@ async function loadLevel(level){
   next=radiusScale()===1?laid:withProjectileRadius(laid,radiusScale())}catch(e){if(scene)$('level').value=String(scene.level??0);throw e}
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;accumulator=0;
  scene=next;sim=await createSimulation(device,scene,setStatus);renderer=await createRenderer(device,$('view'),sim,scene,shoot);
- renderer.colorMode=viewMode();applyBallMass();applyBallSpeed();showBallRadius();
+ renderer.colorMode=viewMode();applyCamera();applyBallMass();applyBallSpeed();showBallRadius();
  if(bondMode()==='learned'){
   setStatus('Loading learned-impact kernels (Slang→WGSL)…');
   const {createLearnedImpact}=await import('./learned-impact.mjs');
@@ -167,7 +186,7 @@ async function loadStress(level){
  catch(e){$('view').hidden=false;$('stress-view').hidden=true;throw new Error(`Stress-solver mode unavailable: ${e?.message??e}. Rebuild it (README, Bond modes).`)}
  stressOn=true;
  const profile=STRESS_PROFILES[bondMode()];
- stress.setProfile(profile);stress.setPhysicsHz(physicsHz());stress.setBondStrengthScale(strengthScale());stress.setShotRadiusScale(radiusScale());applyView();
+ stress.viewMode=cameraMode();stress.setProfile(profile);stress.setPhysicsHz(physicsHz());stress.setBondStrengthScale(strengthScale());stress.setShotRadiusScale(radiusScale());applyView();
  if(cuboid)await stress.loadCuboid(layout);else if(pack)await stress.loadPack(packBytes);else await stress.load(assetBytes,level);
  await stress.frame(0);applyBallMass();applyBallSpeed();showBallRadius();
  const st=stress.stats;stressHud={t:performance.now(),frames:0,renders:0};
