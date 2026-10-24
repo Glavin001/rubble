@@ -49,8 +49,6 @@ struct Case {
     f: Mat3,
     mat: SandMaterial,
     log_jp: f32,
-    /// σ₂ ≤ √ε·σ₁: reconstruction within √ε·‖F‖ (engine-terrain `svd3`).
-    nearly_rank_one: bool,
 }
 
 fn cases() -> Vec<Case> {
@@ -71,6 +69,8 @@ fn cases() -> Vec<Case> {
             }
             // Near-singular, and every other one nearly rank 1.
             4 => {
+                // σ₂ ≤ √ε·σ₁: FᵀF cannot resolve the small plane; the trailing
+                // 2×2 SVD must.
                 let s1 = if i % 16 == 4 {
                     10f32.powf(rng.range(-7.0, -3.5))
                 } else {
@@ -105,12 +105,7 @@ fn cases() -> Vec<Case> {
             ..SandMaterial::default()
         };
         let log_jp = if i % 3 == 0 { rng.range(0.0, 0.2) } else { 0.0 };
-        out.push(Case {
-            f,
-            mat,
-            log_jp,
-            nearly_rank_one: i % 16 == 4,
-        });
+        out.push(Case { f, mat, log_jp });
     }
     // Input checks: NaN and ±inf in F.
     for bad in [f32::NAN, f32::INFINITY, -f32::INFINITY] {
@@ -120,7 +115,6 @@ fn cases() -> Vec<Case> {
             f,
             mat: SandMaterial::default(),
             log_jp: 0.0,
-            nearly_rank_one: false,
         });
     }
     out
@@ -259,24 +253,15 @@ fn gpu_material_matches_the_cpu_mirror() {
         } else {
             frob(rec - c.f) / scale
         };
-        if !c.nearly_rank_one {
-            gpu_rec = gpu_rec.max(rel);
-        }
-        let bound = if c.nearly_rank_one {
-            f32::EPSILON.sqrt()
-        } else {
-            1e-5
-        };
-        assert!(rel < bound, "GPU ‖UΣVᵀ − F‖/‖F‖ = {rel} for {:?}", c.f);
+        gpu_rec = gpu_rec.max(rel);
+        assert!(rel < 1e-5, "GPU ‖UΣVᵀ − F‖/‖F‖ = {rel} for {:?}", c.f);
         for m in [gpu.u, gpu.v] {
             assert!((m.determinant() - 1.0).abs() < 1e-5, "{m:?}");
         }
 
         let ds = (gpu.sigma - cpu.sigma).abs().max_element() / scale;
-        if !c.nearly_rank_one {
-            d_sigma = d_sigma.max(ds);
-        }
-        assert!(ds < bound, "sigma {:?} vs {:?}", gpu.sigma, cpu.sigma);
+        d_sigma = d_sigma.max(ds);
+        assert!(ds < 1e-5, "sigma {:?} vs {:?}", gpu.sigma, cpu.sigma);
 
         // U and V are unique (with the sign rule) only for distinct singular values.
         let s = cpu.sigma.abs();
@@ -311,9 +296,9 @@ fn gpu_material_matches_the_cpu_mirror() {
         );
     }
     eprintln!(
-        "mpm_material GPU vs CPU over {} cases: sigma {d_sigma:.2e} (rel ‖F‖, not nearly rank 1), U/V {d_uv:.2e} \
+        "mpm_material GPU vs CPU over {} cases: sigma {d_sigma:.2e} (rel ‖F‖), U/V {d_uv:.2e} \
          ({uv_compared} distinct), projection {d_proj:.2e} (rel), τ {d_tau:.2e} (strain); GPU \
-         reconstruction {gpu_rec:.2e} (not nearly rank 1)",
+         reconstruction {gpu_rec:.2e}",
         cases.len()
     );
 }

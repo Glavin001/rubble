@@ -100,6 +100,32 @@ void mpmRotatePair(float c, float s, inout float x, inout float y)
     y = c * y - s * t;
 }
 
+// (a, b) ← (c·a + s·b, c·b − s·a): columns a, b times the rotation G that turns
+// e_a towards e_b.
+void mpmRotateCols(float c, float s, inout float3 a, inout float3 b)
+{
+    float3 t = a;
+    a = c * t + s * b;
+    b = c * b - s * t;
+}
+
+// The rotation (c, s) with GᵀMG diagonal for the symmetric M = [[p, q], [q, r]]:
+// t = tan θ is the root of q·t² + (p − r)·t − q = 0 with |t| ≤ 1.
+void mpmSym2Jacobi(float p, float q, float r, out float c, out float s)
+{
+    if (q == 0.0)
+    {
+        c = 1.0;
+        s = 0.0;
+        return;
+    }
+    float h = p - r;
+    float root = sqrt(h * h + 4.0 * q * q);
+    float t = 2.0 * q / (h >= 0.0 ? h + root : h - root);
+    c = 1.0 / sqrt(1.0 + t * t);
+    s = t * c;
+}
+
 // The Givens rotation (c, s) that zeroes b against the pivot a, leaving the pivot
 // √(a² + b²) ≥ 0. No rotation when both are zero.
 void mpmGivens(float a, float b, out float c, out float s)
@@ -126,10 +152,9 @@ bool mpmSvdInputValid(float3x3 F)
 
 // F = U·diag(sigma)·Vᵀ by McAdams et al. (2011): Jacobi eigen-decomposition of FᵀF
 // with V accumulated as a quaternion, columns of B = F·V sorted by decreasing norm,
-// then QR of B by Givens rotations (U = G₁G₂G₃, R's diagonal is sigma). U and V are
-// rotations (det +1); |sigma| decreases, and only sigma.z is negative (det F < 0).
-// ‖UΣVᵀ − F‖ ≈ 1e-6·‖F‖, up to √ε·‖F‖ when F is nearly rank 1 (σ₂ ≲ √ε·σ₁), whose
-// small plane FᵀF cannot resolve in f32.
+// then QR of B by Givens rotations (U = G₁G₂G₃, R's diagonal is sigma), and a 2×2
+// SVD of R's trailing block. U and V are rotations (det +1); |sigma| decreases, and
+// only sigma.z is negative (det F < 0). ‖UΣVᵀ − F‖ ≈ 1e-6·‖F‖.
 void mpmSvd3(float3x3 F, out float3x3 U, out float3 sigma, out float3x3 V)
 {
     float3 f0 = mpmCol(F, 0u), f1 = mpmCol(F, 1u), f2 = mpmCol(F, 2u);
@@ -183,22 +208,47 @@ void mpmSvd3(float3x3 F, out float3x3 U, out float3 sigma, out float3x3 V)
     mpmRotatePair(c, s, b0.x, b0.y);
     mpmRotatePair(c, s, b1.x, b1.y);
     mpmRotatePair(c, s, b2.x, b2.y);
-    mpmRotatePair(c, s, u0.x, u1.x);
-    mpmRotatePair(c, s, u0.y, u1.y);
-    mpmRotatePair(c, s, u0.z, u1.z);
+    mpmRotateCols(c, s, u0, u1);
     mpmGivens(b0.x, b0.z, c, s);
     mpmRotatePair(c, s, b0.x, b0.z);
     mpmRotatePair(c, s, b1.x, b1.z);
     mpmRotatePair(c, s, b2.x, b2.z);
-    mpmRotatePair(c, s, u0.x, u2.x);
-    mpmRotatePair(c, s, u0.y, u2.y);
-    mpmRotatePair(c, s, u0.z, u2.z);
+    mpmRotateCols(c, s, u0, u2);
     mpmGivens(b1.y, b1.z, c, s);
     mpmRotatePair(c, s, b1.y, b1.z);
     mpmRotatePair(c, s, b2.y, b2.z);
-    mpmRotatePair(c, s, u1.x, u2.x);
-    mpmRotatePair(c, s, u1.y, u2.y);
-    mpmRotatePair(c, s, u1.z, u2.z);
+    mpmRotateCols(c, s, u1, u2);
+
+    // 2×2 SVD of the trailing block T = [[b1.y, b2.y], [b1.z, b2.z]]. B's entries
+    // are accurate to ε·‖F‖, so this resolves the plane of σ₂, σ₃ that FᵀF cannot
+    // when F is nearly rank 1. A left rotation makes T symmetric, then a two-sided
+    // Jacobi rotation diagonalises it.
+    mpmGivens(b1.y + b2.z, b1.z - b2.y, c, s);
+    mpmRotatePair(c, s, b1.y, b1.z);
+    mpmRotatePair(c, s, b2.y, b2.z);
+    mpmRotateCols(c, s, u1, u2);
+    mpmSym2Jacobi(b1.y, 0.5 * (b2.y + b1.z), b2.z, c, s);
+    mpmRotatePair(c, s, b1.y, b1.z);
+    mpmRotatePair(c, s, b2.y, b2.z);
+    mpmRotateCols(c, s, b1, b2);
+    mpmRotateCols(c, s, u1, u2);
+    mpmRotateCols(c, s, v1, v2);
+    // Restore the sign rule: |σ₂| ≥ |σ₃| and σ₂ ≥ 0, so σ₃ carries det F's sign.
+    if (abs(b1.y) < abs(b2.z))
+    {
+        mpmSwapCols(u1, u2);
+        mpmSwapCols(v1, v2);
+        float t = b1.y;
+        b1.y = b2.z;
+        b2.z = t;
+    }
+    if (b1.y < 0.0)
+    {
+        b1.y = -b1.y;
+        b2.z = -b2.z;
+        u1 = -u1;
+        u2 = -u2;
+    }
 
     U = mpmFromCols(u0, u1, u2);
     sigma = float3(b0.x, b1.y, b2.z);
@@ -219,15 +269,16 @@ bool mpmSandInputValid(float3 sigma, float logJp)
 }
 
 // Drucker–Prager return map in Hencky strain (Klár et al. 2016) with the log-volume
-// correction (Tampubolon et al. 2017, β = 1). ε = ln max(|σ|, 1e-4) − cohesion and
-// tr = Σε + logJp. Expansion (tr ≥ 0) projects to the cone's tip and logJp keeps the
-// volume; otherwise logJp is cleared and ε moves onto the cone along its deviator
-// when it lies outside. sigmaOut is positive.
+// correction (Tampubolon et al. 2017, β = 1): ε = ln max(|σ|, 1e-4) − cohesion +
+// logJp/3, so compression first consumes the volume a particle gained when it
+// separated, and tr = Σε. Expansion (tr ≥ 0) projects to the cone's tip and logJp
+// keeps tr; otherwise logJp is cleared and ε moves onto the cone along its
+// (traceless) deviator ε̂ when it lies outside. sigmaOut is positive.
 void mpmSandProject(float3 sigma, float logJp, float alpha, float cohesion, float lambda,
                     float mu, out float3 sigmaOut, out float logJpOut)
 {
-    float3 eps = log(max(abs(sigma), float3(MPM_SIGMA_FLOOR))) - cohesion;
-    float tr = eps.x + eps.y + eps.z + logJp;
+    float3 eps = log(max(abs(sigma), float3(MPM_SIGMA_FLOOR))) - cohesion + logJp / 3.0;
+    float tr = eps.x + eps.y + eps.z;
     if (tr >= 0.0)
     {
         sigmaOut = float3(exp(cohesion));

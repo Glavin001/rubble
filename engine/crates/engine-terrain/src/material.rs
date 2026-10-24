@@ -207,13 +207,31 @@ fn givens(a: f32, b: f32) -> (f32, f32) {
     }
 }
 
-/// Rotate rows (p, q) of the columns `b` and columns (p, q) of `u` by (c, s).
-macro_rules! qr_step {
-    ($c:expr, $s:expr, [$($b:ident),*], $p:ident, $q:ident, $up:ident, $uq:ident) => {
+/// (a, b) ← (c·a + s·b, c·b − s·a): columns a, b times the rotation that turns
+/// e_a towards e_b.
+fn rotate_cols(c: f32, s: f32, a: &mut Vec3, b: &mut Vec3) {
+    let t = *a;
+    *a = c * t + s * *b;
+    *b = c * *b - s * t;
+}
+
+/// The rotation (c, s) with GᵀMG diagonal for the symmetric M = [[p, q], [q, r]]:
+/// t = tan θ is the root of q·t² + (p − r)·t − q = 0 with |t| ≤ 1.
+fn sym2_jacobi(p: f32, q: f32, r: f32) -> (f32, f32) {
+    if q == 0.0 {
+        return (1.0, 0.0);
+    }
+    let h = p - r;
+    let root = (h * h + 4.0 * q * q).sqrt();
+    let t = 2.0 * q / if h >= 0.0 { h + root } else { h - root };
+    let c = 1.0 / (1.0 + t * t).sqrt();
+    (c, t * c)
+}
+
+/// Rotate rows (p, q) of the columns `b` by (c, s).
+macro_rules! rotate_rows {
+    ($c:expr, $s:expr, [$($b:ident),*], $p:ident, $q:ident) => {
         $(rotate_pair($c, $s, &mut $b.$p, &mut $b.$q);)*
-        rotate_pair($c, $s, &mut $up.x, &mut $uq.x);
-        rotate_pair($c, $s, &mut $up.y, &mut $uq.y);
-        rotate_pair($c, $s, &mut $up.z, &mut $uq.z);
     };
 }
 
@@ -221,11 +239,13 @@ macro_rules! qr_step {
 /// of 3×3 matrices with minimal branching and elementary floating point
 /// operations": [`SVD_SWEEPS`] Jacobi sweeps on FᵀF with V accumulated as a
 /// quaternion, the columns of B = F·V sorted by decreasing norm, then QR of B by
-/// Givens rotations (U = G₁G₂G₃; R's diagonal is sigma). Mirrors `mpmSvd3`.
+/// Givens rotations (U = G₁G₂G₃; R's diagonal is sigma), and a 2×2 SVD of R's
+/// trailing block. Mirrors `mpmSvd3`.
 ///
-/// ‖UΣVᵀ − F‖ is about 1e-6·‖F‖, except when F is nearly rank 1 (σ₂ ≲ √ε·σ₁,
-/// ε = f32::EPSILON): the two small singular values are then below FᵀF's
-/// rounding, their plane is unresolved, and the error grows to at most √ε·‖F‖.
+/// ‖UΣVᵀ − F‖ is about 1e-6·‖F‖. The trailing 2×2 SVD keeps that when F is nearly
+/// rank 1 (σ₂ ≲ √ε·σ₁): the two small singular values are then below FᵀF's
+/// rounding, so the Jacobi stage leaves their plane unresolved, but B holds it to
+/// ε·‖F‖.
 pub fn svd3(f: Mat3) -> Svd3 {
     let (f0, f1, f2) = (f.x_axis, f.y_axis, f.z_axis);
     let (mut s00, mut s11, mut s22) = (f0.dot(f0), f1.dot(f1), f2.dot(f2));
@@ -264,11 +284,37 @@ pub fn svd3(f: Mat3) -> Svd3 {
     let (mut u0, mut u1, mut u2) = (Vec3::X, Vec3::Y, Vec3::Z);
     // Rows (0,1), then (0,2), zero column 0 below the diagonal; rows (1,2) zero b1.z.
     let (c, s) = givens(b0.x, b0.y);
-    qr_step!(c, s, [b0, b1, b2], x, y, u0, u1);
+    rotate_rows!(c, s, [b0, b1, b2], x, y);
+    rotate_cols(c, s, &mut u0, &mut u1);
     let (c, s) = givens(b0.x, b0.z);
-    qr_step!(c, s, [b0, b1, b2], x, z, u0, u2);
+    rotate_rows!(c, s, [b0, b1, b2], x, z);
+    rotate_cols(c, s, &mut u0, &mut u2);
     let (c, s) = givens(b1.y, b1.z);
-    qr_step!(c, s, [b1, b2], y, z, u1, u2);
+    rotate_rows!(c, s, [b1, b2], y, z);
+    rotate_cols(c, s, &mut u1, &mut u2);
+
+    // 2×2 SVD of the trailing block [[b1.y, b2.y], [b1.z, b2.z]]: a left rotation
+    // makes it symmetric, then a two-sided Jacobi rotation diagonalises it.
+    let (c, s) = givens(b1.y + b2.z, b1.z - b2.y);
+    rotate_rows!(c, s, [b1, b2], y, z);
+    rotate_cols(c, s, &mut u1, &mut u2);
+    let (c, s) = sym2_jacobi(b1.y, 0.5 * (b2.y + b1.z), b2.z);
+    rotate_rows!(c, s, [b1, b2], y, z);
+    rotate_cols(c, s, &mut b1, &mut b2);
+    rotate_cols(c, s, &mut u1, &mut u2);
+    rotate_cols(c, s, &mut v1, &mut v2);
+    // Restore the sign rule: |σ₂| ≥ |σ₃| and σ₂ ≥ 0, so σ₃ carries det F's sign.
+    if b1.y.abs() < b2.z.abs() {
+        swap_cols(&mut u1, &mut u2);
+        swap_cols(&mut v1, &mut v2);
+        std::mem::swap(&mut b1.y, &mut b2.z);
+    }
+    if b1.y < 0.0 {
+        b1.y = -b1.y;
+        b2.z = -b2.z;
+        u1 = -u1;
+        u2 = -u2;
+    }
 
     Svd3 {
         u: Mat3::from_cols(u0, u1, u2),
@@ -319,10 +365,11 @@ pub fn friction_alpha(phi: f32) -> f32 {
 
 /// The Drucker–Prager return map in Hencky strain (Klár et al. 2016) with the
 /// log-volume correction (Tampubolon et al. 2017, β = 1). With
-/// ε = ln max(|σ|, [`SIGMA_FLOOR`]) − cohesion and tr = Σε + log Jp:
+/// ε = ln max(|σ|, [`SIGMA_FLOOR`]) − cohesion + log Jp / 3 (compression first
+/// consumes the volume gained when the particle separated) and tr = Σε:
 ///
 /// - tr ≥ 0 (expansion): the tip, σ = e^cohesion, and log Jp keeps tr;
-/// - otherwise log Jp is cleared, ε̂ = ε − tr/3 and
+/// - otherwise log Jp is cleared, ε̂ = ε − tr/3 (traceless) and
 ///   δγ = ‖ε̂‖ + (3λ + 2μ)/(2μ)·tr·α; when δγ > 0, ε moves by δγ along ε̂.
 ///
 /// Mirrors `mpmSandProject`.
@@ -339,8 +386,9 @@ pub fn sand_project(
         sigma.x.abs().max(floor.x).ln(),
         sigma.y.abs().max(floor.y).ln(),
         sigma.z.abs().max(floor.z).ln(),
-    ) - cohesion;
-    let tr = eps.x + eps.y + eps.z + log_jp;
+    ) - cohesion
+        + log_jp / 3.0;
+    let tr = eps.x + eps.y + eps.z;
     if tr >= 0.0 {
         return SandProjection {
             sigma: Vec3::splat(cohesion.exp()),
@@ -423,7 +471,7 @@ mod tests {
         }
         for _ in 0..500 {
             // Rank 1 or 2 plus a small perturbation (nearly rank 1 with σ₂ between
-            // 0 and 0.1 has its own test).
+            // 1e-7 and 0.1 has its own test).
             let (r1, r2) = (rng.rotation(), rng.rotation());
             let s3 = if rng.next() & 1 == 0 { 0.0 } else { 1e-6 };
             let s2 = if rng.next() & 3 == 0 {
@@ -506,9 +554,9 @@ mod tests {
     }
 
     #[test]
-    fn nearly_rank_one_svd_is_within_sqrt_epsilon() {
-        // σ₂, σ₃ ≤ √ε·σ₁: their eigenvalues in FᵀF are below its rounding, so the
-        // plane they span is unresolved and the error approaches √ε·‖F‖.
+    fn nearly_rank_one_svd_is_resolved() {
+        // σ₂, σ₃ ≤ √ε·σ₁: their eigenvalues in FᵀF are below its rounding; the
+        // trailing 2×2 SVD must still resolve their plane to f32 accuracy.
         let mut rng = Rng(19);
         let mut worst = 0.0f32;
         for _ in 0..20_000 {
@@ -519,7 +567,7 @@ mod tests {
             let rel = frob(u * Mat3::from_diagonal(sigma) * v.transpose() - f) / frob(f);
             worst = worst.max(rel);
         }
-        assert!(worst < f32::EPSILON.sqrt(), "{worst}");
+        assert!(worst < 4e-6, "{worst}");
         eprintln!("svd3 nearly rank 1: max relative reconstruction {worst:.2e}");
     }
 
@@ -636,6 +684,34 @@ mod tests {
         let p = sand_project(sigma, 0.0, alpha, c, lambda, mu);
         assert!((p.sigma - Vec3::splat(c.exp())).abs().max_element() < 1e-7);
         assert!((p.log_jp - (volume - 0.02 - 3.0 * c)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn compression_first_consumes_stored_volume() {
+        let (alpha, lambda, mu) = sand();
+        let stored = 0.06;
+        // Compressed by less than the stored volume: still at the tip, with the
+        // rest of the volume kept.
+        let half = Vec3::splat((-stored / 6.0f32).exp());
+        let p = sand_project(half, stored, alpha, 0.0, lambda, mu);
+        assert_eq!(p.sigma, Vec3::ONE);
+        assert!((p.log_jp - stored / 2.0).abs() < 1e-6, "{p:?}");
+        // Compressed by more: tr shifts by the stored volume, so the elastic
+        // compression is only the excess (isotropic, hence inside the cone).
+        let sigma = Vec3::splat((-2.0 * stored / 3.0f32).exp());
+        let p = sand_project(sigma, stored, alpha, 0.0, lambda, mu);
+        assert_eq!(p.log_jp, 0.0);
+        let tr = p.sigma.x.ln() + p.sigma.y.ln() + p.sigma.z.ln();
+        assert!((tr - (-2.0 * stored + stored)).abs() < 1e-6, "{tr}");
+        // A deviatoric part outside the cone is projected from the shifted strain.
+        let sigma = Vec3::new(0.8, 1.0, 1.1);
+        let p = sand_project(sigma, stored, alpha, 0.0, lambda, mu);
+        assert_eq!(p.log_jp, 0.0);
+        let eps = strain(p.sigma, 0.0);
+        assert!((eps - strain(sigma, 0.0)).length() > 0.1, "not projected");
+        let want = sigma.x.ln() + sigma.y.ln() + sigma.z.ln() + stored;
+        assert!((eps.x + eps.y + eps.z - want).abs() < 1e-6);
+        assert!(yield_fn(eps, alpha, lambda, mu).abs() < 1e-5);
     }
 
     #[test]
