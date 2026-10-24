@@ -144,15 +144,17 @@ are taken from them.
   C, and the stress term fused into P2G as −dt·V·(4/dx²)·τ (Hu et al. 2018).
 - **Sand.** A Drucker–Prager return map in Hencky (log) strain (Klár et al. 2016)
   with the log-volume correction (Tampubolon et al. 2017):
-  - ε = ln max(|σ|, 1e-4) − c, with cohesion c (0 for dry sand), and
-    tr = Σε + log Jp.
+  - ε = ln max(|σ|, 1e-4) − c + log Jp/3, with cohesion c (0 for dry sand), so
+    compression first consumes the volume a particle gained when it separated, and
+    tr = Σε (ε̂ = ε − tr/3 is traceless).
   - tr ≥ 0: project to the tip, and Jp keeps the volume.
   - Otherwise: δγ = ‖ε̂‖ + (3λ + 2μ)/(2μ)·tr·α, with α = √(2/3)·2 sin φ/(3 − sin φ).
     Project onto the cone when δγ > 0.
   - Stress τ = U·diag(2μ ln σ + λ Σ ln σ)·Uᵀ, with no division by small σ.
   - Klár's friction-angle hardening comes later, behind a flag.
 - **SVD.** A 3×3 quaternion Jacobi (McAdams et al. 2011) with a fixed number of
-  sweeps. It is sign-corrected (det U = det V = +1; σ₃ may be negative) and lives in
+  sweeps (6), then a 2×2 SVD of R's trailing block, which resolves nearly rank-1 F
+  (σ₂ ≲ √ε·σ₁) that FᵀF cannot in f32. It is sign-corrected (det U = det V = +1; σ₃ may be negative) and lives in
   its own function. Its NaN guards must not rely on IEEE behaviour that fast-math
   removes; engine-metal parity is checked.
 - **Sparse grid.** Blocks of 4³ cells in a fixed-capacity GPU hash

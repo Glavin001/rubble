@@ -31,6 +31,12 @@ pub use soft_skin::SoftSkinner;
 /// `soft_skin_faces`, `soft_skin_normals`), as `generated/wgsl/soft_skin.wgsl`.
 pub const SOFT_SKIN_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/wgsl/soft_skin.wgsl"));
 
+/// The MPM material probe (`slang/kernels/mpm_material_probe.slang`, entry
+/// `mpm_material_probe`): runs `physics/mpm_material.slang` on test cases so
+/// `tests/mpm_material.rs` can compare it with the engine-terrain CPU mirror.
+pub const MPM_MATERIAL_PROBE_WGSL: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/wgsl/mpm_material_probe.wgsl"));
+
 use engine_exec::{ExecError, PhaseTimingsMs, PhysicsBackend};
 use engine_schema::{AvbdParams, StepCounters, WorldCapacity};
 #[cfg(feature = "gpu")]
