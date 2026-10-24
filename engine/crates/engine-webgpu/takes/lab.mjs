@@ -5,7 +5,9 @@
 // powers of two).
 
 // The lab's page state for a take: its Scene menu key and the menus' values, then a load.
-const setup = ({ scene, bonds = 'none', hz = 0, radius = 0, strength = 0, level }) => `
+// `preset`: the stress modes' Ball menu (stress_ref::wrecking::BALLS: 0 the 10 t ball,
+// 1 the 50 t ball, 2 the 15 m demolition sphere), applied by reloading once it is listed.
+const setup = ({ scene, bonds = 'none', hz = 0, radius = 0, strength = 0, level, preset }) => `
   const $ = (id) => document.getElementById(id);
   $('bond-mode').value = ${JSON.stringify(bonds)};
   $('physics-hz').value = ${JSON.stringify(String(hz))};
@@ -13,12 +15,35 @@ const setup = ({ scene, bonds = 'none', hz = 0, radius = 0, strength = 0, level 
   $('bond-strength').value = ${JSON.stringify(String(strength))};
   await window.__FRACTURE_DEMO__.load(${JSON.stringify(scene)});
   ${level === undefined ? '' : `await window.__FRACTURE_DEMO__.selectLevel(${level});`}
+  ${preset === undefined ? '' : `$('ball-preset').value = ${JSON.stringify(String(preset))}; await window.__FRACTURE_DEMO__.selectLevel(0);`}
   const err = document.getElementById('status');
   if (err.classList.contains('error')) throw new Error(err.textContent);`;
 
 const take = (state, script) => ({ page: 'fracture/index.html', setup: setup(state), script });
 
 export const LAB_TAKES = {
+  // Wrecking Yard (stress_ref::wrecking): the 50 t ball into the 10-floor frame's corner
+  // column line under blast_parity; the collapse climbs while the core stands.
+  wy_frame10_ball: take({ scene: 'wy_frame10', bonds: 'stress', preset: 1 }, [
+    { n: 50, caption: '10-floor concrete frame: 1,264 bonded chunks under the GPU stress solver', cam: { rel: [0.35, 0.02, 1.0], relTo: [0.15, 0.0, 0.9] } },
+    { n: 1, act: 'fire', caption: 'A 50 t wrecking ball at 20 m/s into the corner columns' },
+    { n: 30, caption: 'A 50 t wrecking ball at 20 m/s into the corner columns' },
+    { n: 240, slow: 2, caption: 'Half speed: the ground storeys give way and the collapse climbs', cam: { rel: [0.15, 0.0, 0.9], relTo: [-0.35, 0.08, 0.95] } },
+    { n: 300, caption: 'The upper storeys, the core and the far bays stay standing', cam: { rel: [-0.35, 0.08, 0.95], relTo: [-0.9, 0.04, 0.85] } },
+  ]),
+  wy_frame10_xray: take({ scene: 'wy_frame10', bonds: 'stress', preset: 1 }, [
+    { n: 40, view: { bonds: true, color: 2 }, caption: 'X-ray: every bond of the frame, one colour per rigid body', cam: { rel: [0.35, 0.02, 1.0] } },
+    { n: 1, act: 'fire', caption: 'The same 50 t ball' },
+    { n: 330, slow: 2, caption: 'Half speed: failed bonds drop out; each piece that breaks away gets its own colour', cam: { rel: [0.35, 0.02, 1.0], relTo: [-0.3, 0.1, 1.0] } },
+  ]),
+  // The 15 m demolition sphere (277 t, rolling in at 12 m/s) through the round tower.
+  wy_round_tower_sphere: take({ scene: 'wy_round_tower', bonds: 'stress', preset: 2 }, [
+    { n: 40, caption: 'Round tower: eight floors on a core and a ring of columns', cam: { rel: [0.6, 0.0, 1.1], relTo: [0.5, 0.0, 1.05] } },
+    { n: 1, act: 'fire', caption: 'A 15 m demolition sphere rolls in' },
+    { n: 60, caption: 'A 15 m demolition sphere rolls in' },
+    { n: 240, slow: 2, caption: 'Half speed: the slabs drop floor by floor; the core stays', cam: { rel: [0.5, 0.0, 1.05], relTo: [-0.2, 0.1, 1.1] } },
+    { n: 180, caption: 'Real time', cam: { rel: [-0.2, 0.1, 1.1], relTo: [-0.6, 0.2, 1.3] } },
+  ]),
   // Threshold fracture of the baked veneer house: one heavy ball, the impact again at
   // quarter speed, then the settle.
   lab_house_threshold: take({ scene: 'house', bonds: 'threshold', level: 1 }, [

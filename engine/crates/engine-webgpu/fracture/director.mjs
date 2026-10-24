@@ -50,9 +50,14 @@ export function createDirector(lab) {
     lab.sim.launch(shot.origin, shot.direction);
     return true;
   }
+  // The scene's own orbit when the take starts: `rel` / `relTo` are offsets from it
+  // ([yaw + a, pitch + b, distance × c]), so a take frames any structure.
+  let base = null;
+  const relative = (r) => r && [base[0] + r[0], base[1] + r[1], base[2] * r[2]];
   function camera(cam, t) {
     if (!cam) return;
-    const [yaw, pitch, dist] = cam.to ? cam.orbit.map((v, k) => v + (cam.to[k] - v) * t) : cam.orbit;
+    const from = cam.orbit ?? relative(cam.rel), to = cam.to ?? relative(cam.relTo);
+    const [yaw, pitch, dist] = to ? from.map((v, k) => v + (to[k] - v) * t) : from;
     const set = lab.stressOn ? lab.stress : lab.renderer;
     set.setOrbit(yaw + (cam.spin || 0), pitch, dist, cam.target || []);
   }
@@ -86,7 +91,8 @@ export function createDirector(lab) {
   }
 
   // Script segments: {n (video frames at 60 fps), slow?, caption?, cam?: {orbit: [yaw,
-  // pitch, dist], to?: [yaw, pitch, dist] (eased across the segment), spin? (rad per
+  // pitch, dist], to?: [yaw, pitch, dist] (eased across the segment), or rel / relTo
+  // (offsets from the scene's orbit: [yaw + a, pitch + b, distance × c]), spin? (rad per
   // frame), target?: [x, y, z]}, act?: 'fire' (the scene's row shot) | {shoot: [u, v]}
   // (through the viewport) | {ray: [origin, direction]}, view?: {bonds, color}, mass?,
   // speed? (shot scales, powers of two as the sliders)}.
@@ -95,6 +101,7 @@ export function createDirector(lab) {
     busy = true;
     const t0 = performance.now();
     const out = compositor(opts);
+    base = (lab.stressOn ? lab.stress : lab.renderer).orbit;
     let caption = '', spin = 0;
     try {
       for (const seg of script) {

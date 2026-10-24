@@ -94,7 +94,7 @@ fn spawn(@builtin(global_invocation_id) id: vec3<u32>) {
     // A jump in velocity sheds; a teleport (a reload, a reset) does not.
     if (dv < 2.0 || dv > 150.0) { return; }
     let size = clamp(b.w, 0.1, 3.0);
-    let count = u32(clamp(dv * 0.35 * size, 1.0, 10.0));
+    let count = u32(clamp(dv * 0.2 * size, 1.0, 6.0));
     let dust = mix(o.color.rgb, vec3<f32>(0.66, 0.63, 0.58), 0.65);
     for (var j = 0u; j < count; j++) {
         let k = atomicAdd(&head, 1u) % N;
@@ -107,7 +107,7 @@ fn spawn(@builtin(global_invocation_id) id: vec3<u32>) {
             part = Particle(vec4<f32>(at, 1.5 + 1.5 * hash(i, j * 13u + 9u)), vec4<f32>(vel, 0.0), vec4<f32>(o.color.rgb * 0.75, 1.0));
         } else {
             let vel = v * 0.35 + d * (0.4 + 0.08 * dv) + vec3<f32>(0.0, 0.0, 0.4);
-            part = Particle(vec4<f32>(at, 2.5 + 2.0 * hash(i, j * 13u + 11u)), vec4<f32>(vel, 0.0), vec4<f32>(dust, 0.0));
+            part = Particle(vec4<f32>(at, 1.5 + 1.5 * hash(i, j * 13u + 11u)), vec4<f32>(vel, 0.0), vec4<f32>(dust, 0.0));
         }
         particles[k] = part;
     }
@@ -164,7 +164,7 @@ fn fx_vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> Fx
     let uv = corners[vi];
     let age = part.v.w;
     let chip = part.c.w > 0.5;
-    let size = select(0.25 + 1.4 * age / (age + 1.2), 0.06, chip);
+    let size = select(0.25 + 1.0 * age / (age + 1.2), 0.06, chip);
     let to_eye = normalize(camera.eye.xyz - part.p.xyz);
     var right = cross(vec3<f32>(0.0, 0.0, 1.0), to_eye);
     if (dot(right, right) < 1e-6) { right = vec3<f32>(1.0, 0.0, 0.0); }
@@ -174,7 +174,7 @@ fn fx_vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> Fx
     out.clip = camera.view_proj * vec4<f32>(world, 1.0);
     out.uv = uv;
     // Dust fades in over 0.15 s and out over its last second; chips stay solid.
-    let alpha = select(0.32 * clamp(age / 0.15, 0.0, 1.0) * clamp(part.p.w, 0.0, 1.0), 1.0, chip);
+    let alpha = select(0.14 * clamp(age / 0.15, 0.0, 1.0) * clamp(part.p.w, 0.0, 1.0), 1.0, chip);
     let haze = clamp(length(camera.eye.xyz - part.p.xyz) / (2.5 * camera.light.w), 0.0, 0.6);
     out.color = vec4<f32>(mix(part.c.rgb, vec3<f32>(0.70, 0.76, 0.84), haze * haze), alpha);
     return out;
