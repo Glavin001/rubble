@@ -61,7 +61,7 @@ Lumen lighting of GPU-only instances and ordinary shadows are confirmed.
 vibe-land's Vibe Town ScenePack: 70 buildings (houses, shops, a cinema, a library, five
 ten-storey towers), streets and props, 51,921 chunks and 132,529 bonds, one destructible.
 
-- **Setup:** `scripts/unreal/fetch-town.sh` (the pack) and `scripts/unreal/fetch-city-textures.sh`
+- **Setup:** `scripts/unreal/build-town.sh` (the pack: rubble's base town, `engine/scenes/town`, Git LFS, with the glass tower) and `scripts/unreal/fetch-city-textures.sh`
   (vibe-land's 2K Poly Haven arrays, CC0). Both copy from a vibe-land checkout; neither is
   committed.
 - **Drawing:** every chunk from the pack's own collider, with 27k boxes and 2,627 shared hulls in

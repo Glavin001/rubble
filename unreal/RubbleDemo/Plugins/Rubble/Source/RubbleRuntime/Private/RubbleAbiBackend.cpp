@@ -793,9 +793,9 @@ bool FRubbleAbiBackend::LoadAbi(const FRubbleSceneRequest& Request, FString& Err
 	const bool bSmash = Request.Family == ERubbleFamily::Rigid && (Request.Id == TEXT("wall") || Request.Id.StartsWith(TEXT("ring")) || Request.Id.StartsWith(TEXT("gables")));
 	const float Auto = Request.Family == ERubbleFamily::Fracture ? Request.Param(TEXT("autoshot"), 1.5f) : bSmash ? 1.0f : 0.0f;
 	AutoShotStep = Auto > 0.0f ? int64(Auto / Dt) : -1;
-	// The town's column volleys reach in a row at a time: enough balls for a few (projectiles
-	// count against the threshold model's 64, with the meteors).
-	if (!ParkBalls(IsTown() ? 40 : 12, Error))
+	// The town's column volleys: enough balls for four of 15 (projectiles count against the
+	// threshold model's 64, with the 6 meteors).
+	if (!ParkBalls(IsTown() ? 58 : 12, Error))
 	{
 		return false;
 	}
@@ -1155,7 +1155,7 @@ bool FRubbleAbiBackend::CreateTown(FString& Error)
 	TArray<uint8> Bytes;
 	if (!FFileHelper::LoadFileToArray(Bytes, *Path))
 	{
-		Error = FString::Printf(TEXT("no town pack at %s (scripts/unreal/fetch-town.sh copies it from vibe-land)"), *Path);
+		Error = FString::Printf(TEXT("no town pack at %s (scripts/unreal/build-town.sh writes it)"), *Path);
 		return false;
 	}
 	const double Start = FPlatformTime::Seconds();

@@ -123,6 +123,15 @@ namespace RubbleTownPack
 		const TArray<TSharedPtr<FJsonValue>>* NodeTypes = nullptr;
 		S->TryGetArrayField(TEXT("nodeTypes"), NodeTypes);
 		TMap<FString, TArray<int32>> Glazed; // glazed nodes by building
+		// Buildings with real glass (glazing nodes: the glass tower) draw it, not painted windows.
+		TSet<FString> Glass;
+		for (int32 i = 0; NodeGroups && NodeTypes && i < FMath::Min(NodeGroups->Num(), NodeTypes->Num()); ++i)
+		{
+			if ((*NodeTypes)[i]->AsString() == TEXT("glazing"))
+			{
+				Glass.Add((*NodeGroups)[i]->AsString());
+			}
+		}
 		Out.Nodes.SetNum(Nodes->Num());
 		for (int32 i = 0; i < Nodes->Num(); ++i)
 		{
@@ -162,7 +171,8 @@ namespace RubbleTownPack
 				return false;
 			}
 			N.bGlazed = NodeGroups && NodeTypes && NodeGroups->IsValidIndex(i) && NodeTypes->IsValidIndex(i)
-				&& (*NodeGroups)[i]->AsString().StartsWith(TEXT("tower@")) && (*NodeTypes)[i]->AsString() != TEXT("foundation");
+				&& (*NodeGroups)[i]->AsString().StartsWith(TEXT("tower@")) && (*NodeTypes)[i]->AsString() != TEXT("foundation")
+				&& !Glass.Contains((*NodeGroups)[i]->AsString());
 			if (N.bGlazed)
 			{
 				Glazed.FindOrAdd((*NodeGroups)[i]->AsString()).Add(i);

@@ -697,7 +697,8 @@ bool FRubbleTownDestroy::RunTest(const FString& Parameters)
  * RubbleShots/video/town_NNNN.png (scripts/unreal/video.sh encodes them). Engine time runs at a
  * fixed 1/30 s a frame, so the simulation plays at real speed in the film however slow a frame is
  * to make. Two shots: cannonballs and a meteor in Elm Park, then a tower's ground-storey columns
- * shot away from one side, a volley a second, until it topples (support loss).
+ * shot away from one side, a volley a second, until it topples onto the grocery beside it
+ * (support loss).
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRubbleVideoTown, "Rubble.Video.Town",
 	EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
@@ -709,7 +710,7 @@ bool FRubbleVideoTown::RunTest(const FString& Parameters)
 		return false;
 	}
 	constexpr double Fps = 30.0;
-	constexpr double Length = 17.0;
+	constexpr double Length = 20.0;
 	const FString Dir = ShotDir() / TEXT("video");
 	IFileManager::Get().DeleteDirectory(*Dir, false, true);
 	IFileManager::Get().MakeDirectory(*Dir, true);
@@ -728,16 +729,18 @@ bool FRubbleVideoTown::RunTest(const FString& Parameters)
 			S->Frame = 0;
 		}
 		const double At = S->Frame / Fps;
-		// Shot 1, Elm Park: a slow push toward two houses. Shot 2: tower A (tower-187) from its
-		// north-west, its ground storey's column rows shot from the west, a volley a second.
+		// Shot 1, Elm Park: a slow push toward two houses. Shot 2: the glass tower (build-town.sh,
+		// in tower-165's place) felled south onto the grocery (grocery-197) 7.8 m off its face: its
+		// three southern column rows shot from the west on its lowest four storeys, a volley a second.
 		const FVector HouseA(-1554, -5120, 250), HouseB(-1554, -3420, 0), Street(-4600, -8300, 380);
-		const FVector TowerA(-6289, 8995, 0);
 		const bool bTowers = At >= 6.5;
 		const float u = bTowers ? float((At - 6.5) / (Length - 6.5)) : float(At / 6.5);
 		const float Ease = u * u * (3.0f - 2.0f * u);
-		const FVector Eye = bTowers ? FMath::Lerp(FVector(-15500, 1500, 1500), FVector(-14500, 2600, 1100), Ease)
+		// It falls south (+X): watched side-on from the west, 65 m out and over the grocery
+		// between, framing the tower and the grocery it lands on.
+		const FVector Eye = bTowers ? FMath::Lerp(FVector(2600, 2300, 2100), FVector(2700, 2900, 1800), Ease)
 			: FMath::Lerp(Street, FVector(-3900, -7500, 520), Ease);
-		const FVector Target = bTowers ? TowerA + FVector(0, 0, 1000) : (HouseA + HouseB) * 0.5 + FVector(0, 0, 250);
+		const FVector Target = bTowers ? FVector(2700, 8900, 1000) : (HouseA + HouseB) * 0.5 + FVector(0, 0, 250);
 		if (ARubblePawn* Pawn = Cast<ARubblePawn>(GameWorld()->GetFirstPlayerController()->GetPawn()))
 		{
 			Pawn->LookFrom(Eye, Target);
@@ -754,13 +757,15 @@ bool FRubbleVideoTown::RunTest(const FString& Parameters)
 				case 1: Rubble()->Launch(Street + FVector(0, 0, -150), HouseA - Street); break;
 				case 2: Rubble()->Meteor(HouseB); break;
 				case 3:
-					// One ball down each of the four column rows (x 56.9..68.9 m in the pack), at
-					// 1.0 and 2.6 m, from 7 m west of the tower, heading east (+Y).
-					for (const double Row : { 56.9, 60.9, 64.9, 68.9 })
+					// One ball along each of the three southern column rows (pack z -20.1, -16.6,
+					// -13.1 m) at each storey's height (the ground storey twice), from 7 m west of the
+					// tower (pack x 77.65 m), heading east (+Y). The pack's footprint shift: x +0.03 m,
+					// z -0.365 m.
+					for (const double Row : { -20.1, -16.6, -13.1 })
 					{
-						for (const double Up : { 100.0, 260.0 })
+						for (const double Up : { 100.0, 260.0, 530.0, 830.0, 1130.0 })
 						{
-							Rubble()->Launch(FVector(-(Row - 0.365) * 100.0, 7600.0, Up), FVector(0, 1, 0));
+							Rubble()->Launch(FVector(-(Row - 0.365) * 100.0, (77.65 + 0.03) * 100.0, Up), FVector(0, 1, 0));
 						}
 					}
 					break;
