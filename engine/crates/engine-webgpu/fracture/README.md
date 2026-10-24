@@ -179,10 +179,85 @@ each named for what it is, then how many:
   grid.
 - **Suburbs (lots and roads):** veneer houses (48), cuboid houses (48, and a large
   suburb of 96).
+- **Wrecking Yard:** tall structures for heavy balls, built in Rust as scene packs
+  (`PACK_SAMPLES`; below).
 - **Vibe City presets:** generated scene packs, when they are built.
 - **Your file:** a dropped or chosen GLB.
 
-The native viewer numbers the same scenes 1–9 in this order.
+The native viewer numbers the same scenes 1–9 in this order (the Wrecking Yard is the
+web lab's).
+
+### Wrecking Yard
+
+Three structures for the heavy-ball beats (`stress_ref::wrecking`). Each is built in Rust and
+written as a scene pack, then loaded like any pack: `pack::build_pack_scene` for the
+lab's own modes, stress-web `stress_set_pack` for the stress modes. The page asks for the
+JSON with `packSampleJson(key)`; nothing is fetched.
+
+| Scene | What | Chunks · bonds |
+|---|---|---|
+| 10-floor concrete frame | 3 × 3 bays of 6 m, 3.5 m storeys. Columns, beam-column joints, beams (two chunks a span), slabs (four a bay) and a walled lift core in the central bay, on pad and strip footings | 1,264 · 2,408 |
+| Round tower on columns | Eight 8 m round floors on a 16-sided core and a ring of eight round columns: the red-sphere target | 337 · 648 |
+| Brick tower | A 4 m square brick shaft, 12 m tall, in running bond with interlocked corners | 1,444 · 4,290 |
+
+**Materials** are the calibrated ones (`material.rs`): concrete for the frame and the
+round tower, brick with mortar joints for the tower. Each pack carries the strengths and
+stiffness, and each node its mass at the calibrated density. The stress modes' authored
+import therefore gives the calibrated values, and the welds in the lab's D6 mode do too
+(the pack's Blast `limits`). The footings are the supports. The weight is carried as in
+every pack: the stress solve takes gravity from the first frame.
+
+**Ball presets** (stress modes; the **Ball** menu, which reloads the level):
+
+| Preset | Ball |
+|---|---|
+| 10 t wrecking ball | solid steel, r 0.67 m, 40 m/s |
+| 50 t wrecking ball | solid steel, r 1.15 m, 20 m/s |
+| 15 m demolition sphere | a 5 cm steel shell (277 t) that rolls in along the ground at 12 m/s |
+
+The table is `stress_ref::wrecking::BALLS`; stress-web's `stress_set_shot_preset` applies
+it. The mass, speed and radius sliders still scale it. **Fire the ball along the line of
+attack** launches it at the structure from 6 m out (`stress_fire`, `wrecking::launch`),
+as the row's wrecking-ball button does:
+- the frame's corner column line along the front facade, at the ground storey;
+- the round tower's -x column, with the core behind it;
+- the middle of the brick tower's -x wall, a quarter of the way up.
+
+Clicking still shoots the preset ball along the camera ray.
+
+**Checks.**
+- `cargo test --release -p stress-ref --test wrecking` (in `engine/stress-oracle`):
+  - chunk and bond counts and total mass from the layouts' geometry;
+  - the packs import back unchanged;
+  - each structure stands in the reference under its own weight.
+- `cargo test --release -p stress-rubble --features gpu --test wrecking_yard`: each
+  structure settles on the GPU in both stress modes, with no bond broken and under 1 cm of
+  movement in 2 s.
+- `cargo test --release -p engine-fracture --test pack_samples`: the menu entries build
+  as lab scenes.
+
+**Hero check** (native, M3 Max). Run:
+`cargo run --release -p stress-rubble --features gpu --example wrecking_yard -- wy_frame10 ball50t 600`.
+It prints bonds broken, fragments, ms per frame, and per storey when a tenth of its
+chunks had dropped a metre.
+
+The 50 t ball into the frame's corner column line under `blast_parity` gives a
+collapse that climbs:
+- storeys 1–2 drop by frame 90 (1.3 s after the shot at frame 10), and storeys 3–6 by
+  frame 120;
+- storeys 7–10, the core and the far bays stay standing;
+- 684 of 2,408 bonds break, leaving 340 fragments;
+- median 3.4 ms per frame after the shot, p95 7.8 ms, worst 34 ms;
+- the run repeats exactly.
+
+The 10 t ball only breaks the corner (77 bonds). The demolition sphere flattens the
+frame (over 2,300 bonds by frame 240). In the round tower, the 50 t ball and the sphere drop every floor's
+slabs and leave the core standing. The brick tower is holed through courses 6–24 and
+stays up above the hole.
+
+`threshold` breaks bonds on contact force alone, with no stress solve, so there it is
+local damage only. In Chrome, after 90 frames the 50 t ball had broken 4 of the frame's
+bonds, 18 of the round tower's and 15 of the brick tower's.
 
 ### Bond modes
 

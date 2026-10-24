@@ -43,3 +43,7 @@ required-features = ["view"]
 [[example]]
 name = "destruction_video"
 required-features = ["gpu"]
+
+[[example]]
+name = "wrecking_yard"
+required-features = ["gpu"]

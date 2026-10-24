@@ -93,3 +93,18 @@ pub fn later(mut s: Scene, frames: usize) -> Scene {
 pub fn house() -> Scene {
     stress_ref::scene_pack::import(&packs_dir().join("house-1story.json"), "house-1story", "structure").expect("house-1story pack")
 }
+
+/// A Wrecking Yard structure (`stress_ref::wrecking`) as the lab's stress modes load it
+/// (stress-web `load`): its scene pack under the profile's import options, the GPU's
+/// methods and the profile's scene switches, `seconds` of simulated time.
+pub fn wrecking_yard(key: &str, profile: stress_ref::capability::Profile, seconds: f64) -> Scene {
+    let pack = stress_ref::wrecking::pack(key).unwrap_or_else(|| panic!("no Wrecking Yard structure {key}"));
+    let (mut s, _) = stress_ref::scene_pack::import_value_with(&pack, key, "structure", key, profile.import_options()).unwrap_or_else(|e| panic!("{key}: {e}"));
+    s.sim.duration = seconds;
+    s.validate().unwrap_or_else(|e| panic!("{key}: {e}"));
+    let mut s = s.with_derived();
+    s.sim.methods = Methods::established();
+    profile.apply_scene(&mut s);
+    s.materials.entry("projectile".into()).or_insert_with(stress_ref::builders::elastic_steel);
+    s
+}

@@ -19,7 +19,8 @@
 const VIDEO_HZ = 60;
 
 export function createDirector(lab) {
-  // Shots since the scene loaded: {tick, origin, direction, settings}.
+  // Shots since the scene loaded: {tick, origin, direction, settings}, or {tick, fire: true,
+  // settings} for the stress modes' ball along the structure's line of attack.
   let shots = [];
   let busy = false;
   // Fractional physics ticks owed (ticks per video frame need not be whole).
@@ -44,6 +45,7 @@ export function createDirector(lab) {
   // The pending shot (a ray in the lab's frame) fired now, as live play does.
   function fire(shot) {
     lab.applyShotSettings(shot.settings);
+    if (shot.fire) return lab.stress.fire();
     if (lab.stressOn) return lab.stress.shootRay(shot.origin, shot.direction);
     lab.sim.launch(shot.origin, shot.direction);
     return true;
@@ -100,7 +102,12 @@ export function createDirector(lab) {
         if (seg.view) lab.setView(seg.view);
         if (seg.mass !== undefined || seg.speed !== undefined) lab.applyShotSettings({ ...lab.shotSettings(), ...(seg.mass !== undefined && { mass: seg.mass }), ...(seg.speed !== undefined && { speed: seg.speed }) });
         if (seg.cam) spin = 0;
-        if (seg.act) {
+        if (seg.act === 'fire' && lab.stressOn) {
+          // The stress modes' ball along the structure's line of attack (a Wrecking Yard pack's).
+          const shot = { tick: tick(), fire: true, settings: lab.shotSettings() };
+          if (!fire(shot)) throw new Error('take: this scene has no line of attack to fire along');
+          shots.push(shot);
+        } else if (seg.act) {
           const ray = seg.act === 'fire' ? lab.scene?.rowShot
             : seg.act.shoot ? lab.aim(...seg.act.shoot)
             : seg.act.ray ? { origin: seg.act.ray[0], direction: seg.act.ray[1] } : null;
@@ -183,6 +190,8 @@ export function createDirector(lab) {
     record, replay,
     get busy() { return busy; },
     get shots() { return shots.length; },
+    // The stress modes' ball fired along the line of attack, for replays.
+    logFire() { shots.push({ tick: tick(), fire: true, settings: lab.shotSettings() }); },
     // A live shot (click or the row's ball), for replays.
     logShot(origin, direction) { shots.push({ tick: tick(), origin: [...origin], direction: [...direction], settings: lab.shotSettings() }); },
     // A new load: the log starts over.

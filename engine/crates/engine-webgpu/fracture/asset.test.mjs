@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
-import {parseFractureGlb,buildScene,layoutScene,colliderVertices,SAMPLES} from './wasm.mjs';
+import {parseFractureGlb,buildScene,buildPackScene,layoutScene,colliderVertices,SAMPLES,PACK_SAMPLES,packSampleJson} from './wasm.mjs';
 const load=async file=>{const b=await readFile(new URL(`./assets/${file}`,import.meta.url));return b.buffer.slice(b.byteOffset,b.byteOffset+b.byteLength)};
 const arch=parseFractureGlb(await load('masonry-arch.glb'));
 
@@ -49,6 +49,13 @@ test('the house, its flat-hull skips and the layouts of the Scene menu',async()=
  assert.equal(suburb.copies,48);assert.ok(suburb.roadVertices.length>0&&suburb.roadVertices.length%60===0);
  assert.equal(grid.hullData.length,fine.hullData.length,'copies share one hull arena');
  assert.deepEqual(SAMPLES.map(s=>s.key),['house','cuboid','arch','row','grid','cuboidGrid','suburb','cuboids','cuboids2x']);
+});
+
+test('the Wrecking Yard packs (built in Rust) load as lab scenes',()=>{
+ assert.deepEqual(PACK_SAMPLES.map(s=>[s.key,s.group]),[['wy_frame10','Wrecking Yard'],['wy_round_tower','Wrecking Yard'],['wy_brick_tower','Wrecking Yard']]);
+ const pieces=PACK_SAMPLES.map(s=>buildPackScene(packSampleJson(s.key).buffer).pieces);
+ assert.deepEqual(pieces,[1264,337,1444]);
+ assert.throws(()=>packSampleJson('house'),/Unknown bundled scene/);
 });
 
 test('a 16-vertex bake enforces its hull limit with a clear error',async()=>{

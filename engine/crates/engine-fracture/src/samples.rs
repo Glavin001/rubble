@@ -73,8 +73,62 @@ impl Sample {
     }
 }
 
-/// The Scene menu's groups, in order.
-pub const GROUPS: &[&str] = &["One structure", "Rows and grids", "Suburbs (lots and roads)"];
+/// The Scene menu's groups, in order (the pack samples' last).
+pub const GROUPS: &[&str] = &[
+    "One structure",
+    "Rows and grids",
+    "Suburbs (lots and roads)",
+    WRECKING_YARD,
+];
+
+/// The Scene menu group of the Wrecking Yard structures.
+pub const WRECKING_YARD: &str = "Wrecking Yard";
+
+/// A Scene menu entry built in Rust as a scene pack (`stress_ref::wrecking`): the hosts
+/// load its JSON (`pack_sample_json`) as they load any pack (`pack::build_pack_scene`,
+/// stress-web `stress_set_pack`).
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackSample {
+    /// Also the pack's key (`stress_ref::wrecking::STRUCTURES`).
+    pub key: &'static str,
+    /// Scene menu group (`GROUPS`).
+    pub group: &'static str,
+    pub menu: &'static str,
+    pub label: &'static str,
+}
+
+/// The Scene menu's pack samples, in menu order (after `SAMPLES`).
+pub const PACK_SAMPLES: &[PackSample] = &[
+    PackSample {
+        key: "wy_frame10",
+        group: WRECKING_YARD,
+        menu: "10-floor concrete frame · 1,264 chunks",
+        label: "10-floor frame",
+    },
+    PackSample {
+        key: "wy_round_tower",
+        group: WRECKING_YARD,
+        menu: "Round tower on columns · 337 chunks",
+        label: "round tower",
+    },
+    PackSample {
+        key: "wy_brick_tower",
+        group: WRECKING_YARD,
+        menu: "Brick tower · 1,444 chunks",
+        label: "brick tower",
+    },
+];
+
+/// A pack sample's scene pack JSON.
+pub fn pack_sample_json(key: &str) -> Result<Vec<u8>> {
+    if !PACK_SAMPLES.iter().any(|s| s.key == key) {
+        bail!("Unknown bundled scene");
+    }
+    let pack =
+        stress_ref::wrecking::pack(key).ok_or_else(|| anyhow::anyhow!("no structure {key}"))?;
+    Ok(serde_json::to_vec(&pack)?)
+}
 
 /// The Scene menu, grouped (`GROUPS`) and in menu order.
 pub const SAMPLES: &[Sample] = &[

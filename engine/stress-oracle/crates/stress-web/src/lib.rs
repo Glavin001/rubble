@@ -70,6 +70,8 @@ struct Shooting {
     /// The lab's translation of the asset (`engine_fracture::Scene::placement`): a point of
     /// the lab's frame is the asset's plus this.
     placement: [f64; 3],
+    /// The ball rolls in on the ground when fired along the line of attack (`stress_fire`).
+    rolling: bool,
 }
 
 thread_local! {
@@ -96,6 +98,12 @@ thread_local! {
     static SPEED_SCALE: Cell<f64> = const { Cell::new(1.0) };
     /// The next load's ball radius as a multiple of the lab's (`stress_set_shot_radius_scale`).
     static RADIUS_SCALE: Cell<f64> = const { Cell::new(1.0) };
+    /// The ball preset of the next load (`stress_set_shot_preset`: an index into
+    /// `stress_ref::wrecking::BALLS`), or the scene's own ball.
+    static PRESET: Cell<Option<usize>> = const { Cell::new(None) };
+    /// The loaded pack's line of attack (`defaults.wreckingYard`, the stress frame), for
+    /// `stress_fire`.
+    static AIM: Cell<Option<stress_ref::wrecking::Aim>> = const { Cell::new(None) };
     /// The bonds' strengths as a multiple of the asset's (`stress_set_bond_strength_scale`).
     static STRENGTH_SCALE: Cell<f64> = const { Cell::new(1.0) };
     /// The view (`stress_set_view`): bond graph, colour mode.
@@ -280,6 +288,34 @@ pub fn stress_set_shot_radius_scale(scale: f64) {
     }
 }
 
+/// The ball presets (`stress_ref::wrecking::BALLS`), as JSON: `[{key, menu, mass, radius,
+/// speed, rolling}]` in menu order.
+#[wasm_bindgen]
+pub fn stress_shot_presets() -> String {
+    serde_json::to_string(stress_ref::wrecking::BALLS).expect("presets serialize")
+}
+
+/// The ball from the next load on: a preset's index (`stress_shot_presets`; its mass,
+/// radius and speed, the mass, speed and radius scales applied on top), or -1 (any
+/// other) for the scene's own ball.
+#[wasm_bindgen]
+pub fn stress_set_shot_preset(index: i32) {
+    PRESET.set(usize::try_from(index).ok().filter(|&k| k < stress_ref::wrecking::BALLS.len()));
+}
+
+/// Fire the ball along the loaded pack's line of attack (a Wrecking Yard structure's,
+/// `stress_ref::wrecking::launch`: at the target's height, or rolling in on the ground),
+/// launched at the next frame. False when the scene has no line of attack or all shots are
+/// fired.
+#[wasm_bindgen]
+pub fn stress_fire() -> bool {
+    let (Some(s), Some(aim)) = (SHOOTING.get(), AIM.get()) else { return false };
+    let speed = engine_fracture::plan::default_shot_speed(s.extent, s.speed) * SPEED_SCALE.get();
+    let ball = stress_ref::wrecking::Ball { key: "", menu: "", mass: s.mass * MASS_SCALE.get(), radius: s.radius, speed, rolling: s.rolling };
+    let k = FIRED.get();
+    queue_shot(stress_ref::wrecking::launch(&ball, &aim, &format!("shot{k}")))
+}
+
 /// The strength of every bond of the next `stress_load`, as a multiple of the asset's: the
 /// tensile, compressive and shear strengths of the bonds' materials (their fracture
 /// energies and stiffness stay).
@@ -405,10 +441,6 @@ pub fn stress_travel(forward: f64, right: f64, up: f64, sprint: bool, dt: f64) {
 #[wasm_bindgen]
 pub fn stress_shoot(u: f64, v: f64) -> bool {
     let Some(s) = SHOOTING.get() else { return false };
-    // The resident GpuWorld draws SHOTS balls; the threshold world reuses its oldest.
-    if FIRED.get() >= SHOTS && TWORLD.with_borrow(|w| w.is_none()) {
-        return false;
-    }
     let (w, h) = SIZE.get();
     let Some(ray) = CAMERA.with_borrow(|c| c.as_ref().map(|c| c.aim(u, v, w as f64 / h as f64, s.radius))) else { return false };
     shoot(s, ray)
@@ -449,20 +481,27 @@ fn shoot(s: Shooting, ray: engine_fracture::scene::Ray) -> bool {
     let speed = engine_fracture::plan::default_shot_speed(s.extent, s.speed) * SPEED_SCALE.get();
     let vel = engine_fracture::plan::shot_velocity(s.center, s.extent, s.radius, ray.origin, ray.direction, Some(speed), s.arc);
     let k = FIRED.get();
-    FIRED.set(k + 1);
-    PENDING.with_borrow_mut(|p| {
-        p.push(ImpactorDesc {
-            name: format!("shot{k}"),
-            shape: ImpactorShape::Sphere { radius: s.radius },
-            mass: s.mass * MASS_SCALE.get(),
-            position: zup(std::array::from_fn(|k| ray.origin[k] - s.placement[k])),
-            orientation: [1.0, 0.0, 0.0, 0.0],
-            velocity: zup(vel),
-            angular_velocity: [0.0; 3],
-            material: "projectile".into(),
-            crush: None,
-        })
-    });
+    queue_shot(ImpactorDesc {
+        name: format!("shot{k}"),
+        shape: ImpactorShape::Sphere { radius: s.radius },
+        mass: s.mass * MASS_SCALE.get(),
+        position: zup(std::array::from_fn(|k| ray.origin[k] - s.placement[k])),
+        orientation: [1.0, 0.0, 0.0, 0.0],
+        velocity: zup(vel),
+        angular_velocity: [0.0; 3],
+        material: "projectile".into(),
+        crush: None,
+    })
+}
+
+/// Queue a shot for the next frame and run. False when all shots are fired: the resident
+/// GpuWorld draws SHOTS balls; the threshold world reuses its oldest.
+fn queue_shot(desc: ImpactorDesc) -> bool {
+    if FIRED.get() >= SHOTS && TWORLD.with_borrow(|w| w.is_none()) {
+        return false;
+    }
+    FIRED.set(FIRED.get() + 1);
+    PENDING.with_borrow_mut(|p| p.push(desc));
     RUNNING.set(true);
     true
 }
@@ -490,6 +529,7 @@ fn load(level: u8) -> Result<(), String> {
     // oracle's input: the GLB's level, the cuboid houses in their layout, or the pack.
     let profile = PROFILE.get();
     let mut warnings = Vec::new();
+    let mut aim = None;
     let (lab, mut scene) = SOURCE.with_borrow(|source| -> Result<_, String> {
         Ok(match source {
             Source::Cuboid(layout) => {
@@ -508,16 +548,23 @@ fn load(level: u8) -> Result<(), String> {
                 let json: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| format!("scene pack: {e}"))?;
                 let (scene, notes) = stress_ref::scene_pack::import_value_with(&json, &info.key, "structure", &info.key, profile.import_options())?;
                 warnings = notes;
+                aim = stress_ref::wrecking::aim_of(&json);
                 (lab, scene)
             }
         })
     })?;
     WARNINGS.set(warnings);
+    AIM.set(aim);
     let mut camera = Orbit::new(&lab);
     let (w, h) = SIZE.get();
     camera.set_mode(VIEW_MODE.get(), w.max(1) as f64 / h.max(1) as f64);
     CAMERA.set(Some(camera));
-    SHOOTING.set(Some(Shooting { center: lab.center, extent: lab.extent, radius: lab.projectile_radius * RADIUS_SCALE.get(), mass: lab.projectile_mass, speed: lab.projectile_speed, arc: lab.projectile_arc, placement: lab.placement }));
+    // The preset's ball, else the scene's.
+    let (radius, mass, speed, rolling) = match PRESET.get().map(|k| stress_ref::wrecking::BALLS[k]) {
+        Some(b) => (b.radius, b.mass, Some(b.speed), b.rolling),
+        None => (lab.projectile_radius, lab.projectile_mass, lab.projectile_speed, false),
+    };
+    SHOOTING.set(Some(Shooting { center: lab.center, extent: lab.extent, radius: radius * RADIUS_SCALE.get(), mass, speed, arc: lab.projectile_arc, placement: lab.placement, rolling }));
     FIRED.set(0);
     RUNNING.set(false);
     STATS.set("{}".into());
@@ -731,6 +778,7 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, advance: Advance) -> Result<
         "bonds": l.totals.2,
         "shots": FIRED.get(),
         "warnings": WARNINGS.with_borrow(|w| w.clone()),
+        "canFire": AIM.get().is_some(),
         "ballMass": s.map_or(0.0, |s| s.mass),
         "ballRadius": s.map_or(0.0, |s| s.radius),
         "ballSpeed": s.map_or(0.0, |s| engine_fracture::plan::default_shot_speed(s.extent, s.speed)),
@@ -845,6 +893,7 @@ fn frame(advance: Advance) -> Result<(), String> {
                         "bonds": totals.2,
                         "shots": FIRED.get(),
                         "warnings": WARNINGS.with_borrow(|w| w.clone()),
+                        "canFire": AIM.get().is_some(),
                         "gpuWaits": engine_gpu_wait::WAITS.load(std::sync::atomic::Ordering::Relaxed),
                         "gpuYields": engine_gpu_wait::YIELDS.load(std::sync::atomic::Ordering::Relaxed),
                         "ballMass": SHOOTING.get().map_or(0.0, |s| s.mass),
