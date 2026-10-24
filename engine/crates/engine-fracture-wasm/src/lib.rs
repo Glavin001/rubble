@@ -430,6 +430,18 @@ impl Orbit {
     pub fn travel(&mut self, forward: f64, right: f64, up: f64, sprint: bool, dt: f64) {
         self.0.travel(forward, right, up, sprint, dt)
     }
+    /// Place the orbit camera (scripted takes): yaw, pitch (radians), distance (m) and,
+    /// unless `target` is empty, the target `[x, y, z]`. Switches to orbit mode.
+    #[wasm_bindgen(js_name = setOrbit)]
+    pub fn set_orbit(&mut self, yaw: f64, pitch: f64, distance: f64, target: &[f64]) {
+        let target = (target.len() == 3).then(|| [target[0], target[1], target[2]]);
+        self.0.set_orbit(yaw, pitch, distance, target)
+    }
+    /// `[yaw, pitch, distance, target x, y, z]`, as `setOrbit` takes them.
+    #[wasm_bindgen(js_name = orbitState)]
+    pub fn orbit_state(&self) -> Vec<f64> {
+        self.0.orbit_state().to_vec()
+    }
     /// Column-major view-projection for the draw shader.
     #[wasm_bindgen(js_name = viewProj)]
     pub fn view_proj(&self, aspect: f64) -> Vec<f32> {

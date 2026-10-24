@@ -3,6 +3,7 @@ import {createSimulation} from './simulation.mjs';
 import {preloadBonds} from './bonds.mjs';
 import {createRenderer} from './render.mjs';
 import {createRates} from './rates.mjs';
+import {createDirector} from './director.mjs';
 const $=id=>document.getElementById(id),status=$('status');
 let device,asset,scene,sim,renderer,running=false,released=false,loading=true,frame=Promise.resolve(),loadTail=Promise.resolve(),last=0,accumulator=0;
 // Heavier steps than this are split across frames (see simulation encodeSlices);
@@ -53,7 +54,7 @@ let learned=null,learnedMs=0,learnedBusy=false;
 // renderer reads them as it draws; the stress modes draw with their own (Rust, stress-web),
 // told here.
 const viewMode=()=>Number($('view-mode').value);
-function applyView(){if(stressOn)stress?.setView($('show-bonds').checked,viewMode())}
+function applyView(){if(stressOn){stress?.setView($('show-bonds').checked,viewMode());stress?.setFx($('fx').checked)}}
 // The Camera menu (engine-fracture view.rs ViewMode: 0 orbit, 1 first-person walk, 2 fly),
 // remembered per viewer and kept across loads. V cycles it.
 const CAMERA_KEY='fracture-lab.camera';
@@ -132,7 +133,7 @@ function serializeLoad(task){const result=loadTail.catch(()=>{}).then(async()=>{
 let shotQueue=Promise.resolve();
 function shoot(ray){
  if(loading||!sim)return;
- shotQueue=shotQueue.then(async()=>{await frame;if(loading||!sim)return;try{sim.launch(ray.origin,ray.direction);if(!running)rates.reset();released=true;running=true;accumulator=0;$('release').textContent='Pause'}catch(e){fail(e)}});
+ shotQueue=shotQueue.then(async()=>{await frame;if(loading||!sim)return;try{sim.launch(ray.origin,ray.direction);director.logShot(ray.origin,ray.direction);if(!running)rates.reset();released=true;running=true;accumulator=0;$('release').textContent='Pause'}catch(e){fail(e)}});
  return shotQueue;
 }
 async function loadLevel(level){
@@ -152,7 +153,7 @@ async function loadLevel(level){
   const laid=layoutScene(one,layout,!!procedural);
   next=radiusScale()===1?laid:withProjectileRadius(laid,radiusScale())}catch(e){if(scene)$('level').value=String(scene.level??0);throw e}
  renderer?.dispose();renderer=null;sim?.dispose();sim=null;released=false;accumulator=0;
- scene=next;sim=await createSimulation(device,scene,setStatus);renderer=await createRenderer(device,$('view'),sim,scene,shoot);
+ scene=next;director.reset();sim=await createSimulation(device,scene,setStatus);renderer=await createRenderer(device,$('view'),sim,scene,shoot);
  renderer.colorMode=viewMode();applyCamera();applyBallMass();applyBallSpeed();showBallRadius();
  if(bondMode()==='learned'){
   setStatus('Loading learned-impact kernels (Slang→WGSL)…');
@@ -182,9 +183,9 @@ async function loadStress(level){
  setStatus('Loading the stress solver (Rust and Slang on WebGPU)…');
  // The mode is on only once its module loaded: a failed import (an old build)
  // leaves the page in its own renderer with the error shown.
- try{if(!stress){const {createStressMode}=await import('./stress-mode.mjs');stress=await createStressMode($('stress-view'))}}
+ try{if(!stress){const {createStressMode}=await import('./stress-mode.mjs');stress=await createStressMode($('stress-view'),(o,d)=>director.logShot(o,d))}}
  catch(e){$('view').hidden=false;$('stress-view').hidden=true;throw new Error(`Stress-solver mode unavailable: ${e?.message??e}. Rebuild it (README, Bond modes).`)}
- stressOn=true;
+ stressOn=true;director.reset();
  const profile=STRESS_PROFILES[bondMode()];
  stress.viewMode=cameraMode();stress.setProfile(profile);stress.setPhysicsHz(physicsHz());stress.setBondStrengthScale(strengthScale());stress.setShotRadiusScale(radiusScale());applyView();
  if(cuboid)await stress.loadCuboid(layout);else if(pack)await stress.loadPack(packBytes);else await stress.load(assetBytes,level);
@@ -247,6 +248,7 @@ $('file').onchange=()=>{const f=$('file').files[0];if(f)serializeLoad(async()=>i
 $('level').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('view-mode').onchange=()=>{if(renderer)renderer.colorMode=viewMode();applyView()};
 $('show-bonds').onchange=applyView;
+$('fx').onchange=applyView;
 $('ball-mass').oninput=applyBallMass;
 $('ball-speed').oninput=applyBallSpeed;
 $('ball-radius').oninput=()=>{$('ball-radius-value').textContent=scaleLabel(radiusScale())};
@@ -295,14 +297,16 @@ function stressTick(now,elapsedMs){
   $('step-ms').textContent=stressHud.stepMs?`${stressHud.stepMs.toFixed(1)} ms/frame (stress + rubble)`:`target ${Math.round(st.frameHz)} frames/s`;
   $('frame-ms').textContent='frames / second';
   $('awake').textContent=st.moving??st.awake??'—';
-  if(stress.running||st.shots){$('release').textContent=stress.running?'Pause':'Resume';setStatus(`${st.shots} shots · ${st.frames} frames · ${st.fragments} fragments · ${st.bodies??'—'} bodies · ${st.brokenBonds} bonds broken · ${st.simSeconds.toFixed(1)} s${stressWarning(st)}`)}
+  if(stress.running||st.shots){$('release').textContent=stress.running?'Pause':'Resume';if(performance.now()>=noticeUntil)setStatus(`${st.shots} shots · ${st.frames} frames · ${st.fragments} fragments · ${st.bodies??'—'} bodies · ${st.brokenBonds} bonds broken · ${st.simSeconds.toFixed(1)} s${stressWarning(st)}`)}
  }catch(e){fail(e)}})();
  frame.finally(()=>requestAnimationFrame(tick));
 }
 function tick(now){
- if(stressOn&&!loading&&stress){const ms=last?Math.min(250,now-last):0;last=now;return stressTick(now,ms)}
+ // The director (a take or a replay) steps and draws on its own meanwhile.
+ if(held){last=0;requestAnimationFrame(tick);return}
+ if(stressOn&&!loading&&stress){const ms=last?Math.min(250,now-last):0;last=now;return stressTick(now,ms*timeScale())}
  const frameMs=last?now-last:FRAME_BUDGET_MS;
- const elapsed=last?Math.min(.04,(now-last)/1000):0;last=now;
+ const elapsed=(last?Math.min(.04,(now-last)/1000):0)*timeScale();last=now;
  // Damped control on a smoothed frame time: cut quickly when over budget,
  // raise slowly when under, so one heavy frame does not swing the rate.
  frameEma+=0.2*(frameMs-frameEma);
@@ -344,10 +348,48 @@ function tick(now){
   renderer.draw($('show-bonds').checked);
   if(work){await work;if(!document.hidden)for(let i=0;i<ticks;i++)rates.step(sim.timing)}
   if(running){const c=sim.counters;$("awake").textContent=c.awake;$("contacts").textContent=c.contact}
-  if(running){const c=sim.counters;setStatus(`${sim.shots} shots · ${sim.steps} steps · ${c.contact} contacts · ${c.awake} awake · ${(sim.steps/stepHz()).toFixed(1)} s`)}
+  if(running&&performance.now()>=noticeUntil){const c=sim.counters;setStatus(`${sim.shots} shots · ${sim.steps} steps · ${c.contact} contacts · ${c.awake} awake · ${(sim.steps/stepHz()).toFixed(1)} s`)}
   if(!document.hidden)rates.frame();
  }catch(e){fail(e)}})();frame.finally(()=>requestAnimationFrame(tick))}else requestAnimationFrame(tick);
 }
+// Takes and instant replay (director.mjs). While it holds the page, the tick loop idles.
+let held=false;
+// A replay's outcome stays on the status line this long before the live counters return.
+let noticeUntil=0;
+// Live slow motion (the Speed menu): simulated time per wall second; the step size is
+// unchanged, fewer steps run per frame.
+const timeScale=()=>Number($('time-scale').value);
+const shotSettings=()=>({mass:Number($('ball-mass').value),speed:Number($('ball-speed').value)});
+function hashFloats(f){let h=0x811c9dc5;const u=new Uint32Array(f.buffer,f.byteOffset,f.length);for(let i=0;i<u.length;i++){h^=u[i];h=Math.imul(h,0x01000193)}return(h>>>0).toString(16)}
+const director=createDirector({
+ get stressOn(){return stressOn},get stress(){return stress},get sim(){return sim},get renderer(){return renderer},get scene(){return scene},
+ canvas:()=>$(stressOn?'stress-view':'view'),stepHz,showBonds:()=>$('show-bonds').checked,
+ async pause(){held=true;await frame;await shotQueue;await frame},
+ resume(){held=false;last=0;accumulator=0;rates.reset();
+  if(stressOn){if(stress){stress.running=true;$('release').textContent='Pause'}}else if(sim){released=running=true;$('release').textContent='Pause'}},
+ reload:()=>serializeLoad(()=>loadLevel(Number($('level').value))),
+ aim:(u,v)=>stressOn?stress.aim(u,v):renderer.aimAt(u,v),
+ setView({bonds,color,fx}={}){if(bonds!==undefined)$('show-bonds').checked=!!bonds;if(fx!==undefined)$('fx').checked=!!fx;if(color!==undefined){$('view-mode').value=String(color);if(renderer)renderer.colorMode=viewMode()}applyView()},
+ shotSettings,applyShotSettings(s){$('ball-mass').value=String(s.mass);$('ball-speed').value=String(s.speed);applyBallMass();applyBallSpeed()},
+ stats(){if(stressOn){const st=stress.stats;return `${st.fragments??'—'} fragments · ${st.brokenBonds??0} bonds broken · ${st.bodies??'—'} bodies · ${(st.simSeconds??0).toFixed(2)} s`}
+  const c=sim.counters;return `${sim.shots} shots · ${c.awake} awake · ${c.contact} contacts · ${(sim.steps/stepHz()).toFixed(2)} s`},
+ // What a replay must reproduce: the stress modes' counters, or every body's pose and velocity.
+ async summary(){if(stressOn){const st=stress.stats;return {frames:st.frames,fragments:st.fragments,brokenBonds:st.brokenBonds,bodies:st.bodies}}
+  return {steps:sim.steps,shots:sim.shots,bodies:hashFloats(await sim.snapshot())}}});
+async function replay(){
+ if(director.busy||!director.shots)return;
+ $('replay').disabled=true;const was=status.textContent;
+ try{setStatus('Replay: re-running the scene from its load…');
+  const r=await director.replay({onProgress:p=>{status.textContent=`Replay ${Math.round(p*100)}%`}});
+  noticeUntil=performance.now()+6000;
+  if(r)setStatus(r.same?'Replay done: it reached the same state, carrying on live':`Replay done, but it ended in a different state (${JSON.stringify(r.after)} vs ${JSON.stringify(r.before)}): this mode did not repeat the run`);
+  else status.textContent=was}
+ catch(e){fail(e)}finally{$('replay').disabled=false}
+}
+$('replay').onclick=replay;
+addEventListener('keydown',e=>{if(e.code==='KeyR'&&!e.repeat&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&!/^(INPUT|SELECT|TEXTAREA)$/.test(e.target?.tagName))replay()});
+window.__record=(script,opts)=>director.record(script,opts);
+window.__replay=opts=>director.replay(opts);
 try{
  if(!navigator.gpu)throw new Error('WebGPU is unavailable. Open this localhost page in a WebGPU-enabled browser.');
  const adapter=await navigator.gpu.requestAdapter();if(!adapter)throw new Error('No WebGPU adapter available');

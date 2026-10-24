@@ -371,6 +371,40 @@ its own weight before it settles in the stress modes.
     (`BodyColors`), so a body keeps its colour from frame to frame and you can watch it
     break up.
 
+### Takes, instant replay and slow motion
+
+`director.mjs` sequences what every bond mode already does (steps, shots along rays, the
+orbit camera, the view); the physics is the mode's own.
+
+- **Speed** (the menu): real time, ½ or ¼. Slow motion steps fewer physics ticks per
+  displayed frame at the same step size, so the physics is unchanged.
+- **Instant replay** (the button, or R) re-runs the scene from its load, firing the same
+  shots (logged as rays, with the ball settings of the time) at the same ticks:
+  1. it catches up to half a second before the last shot without drawing much;
+  2. it plays 2.5 s at quarter speed while the camera swings back to the live view;
+  3. it catches up to where the run was, and play carries on live.
+
+  The replay never feeds back into the run: it is a fresh run. The status line reports
+  whether it reached the same state, which is:
+  - the stress modes' frame, fragment, body and broken-bond counts;
+  - in rubble's modes, a hash of every body's record.
+
+  The threshold and stress modes repeat exactly in recorded takes. Rubble's modes repeated
+  on one house (bit-identical body records). On the 7 × 7 cuboid grid (about 11k awake
+  bodies), three runs of the same take gave three different hashes, so a replay there is
+  reported as reaching a different state.
+- **`window.__record(script, opts)`** plays a take frame-locked and uploads each frame for
+  `record-takes.mjs` (`takes/lab.mjs` documents the segment fields: video frames, `slow`,
+  camera moves, shots, view). The stress modes step exactly the frames asked for
+  (`stress_frame_steps`), never dropping time to the wall clock.
+
+**Dust and debris** (View options, stress modes, on by default): dust puffs and chips
+where a chunk's velocity jumps (an impact, a break, a landing). They are computed on the
+GPU from the poses the renderer draws (`stress-rubble` `fx.rs`, `Renderer::set_fx`) and
+advance with simulated time, so they slow down in slow motion and freeze when paused.
+It is drawing only: the physics is the same either way (the recorded takes break the same
+bonds with it on or off). Native renderers leave it off.
+
 ### Breakable D6 joints (experimental)
 
 “Breakable D6 joints” turns each baked bond of the selected level into

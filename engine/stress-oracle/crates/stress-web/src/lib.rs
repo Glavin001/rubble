@@ -107,6 +107,8 @@ thread_local! {
     static PHYSICS_HZ: Cell<f64> = const { Cell::new(0.0) };
     static RUNNING: Cell<bool> = const { Cell::new(false) };
     static SIZE: Cell<(u32, u32)> = const { Cell::new((0, 0)) };
+    // Dust and chips from the fragments (render only; `stress_set_fx`).
+    static FX: Cell<bool> = const { Cell::new(true) };
     static STATS: RefCell<String> = RefCell::new("{}".into());
     /// The last frame's step, state copy and draw (ms).
     static PHASES: Cell<[f64; 3]> = const { Cell::new([0.0; 3]) };
@@ -315,6 +317,13 @@ pub fn stress_set_view(bond_graph: bool, color_mode: u32) {
     VIEW.set((bond_graph, ColorMode::from_index(color_mode)));
 }
 
+/// Draw dust and chips where fragments change speed sharply (impacts, breaks, landings),
+/// from the next frame. Render only: the physics is the same either way. On by default.
+#[wasm_bindgen]
+pub fn stress_set_fx(on: bool) {
+    FX.set(on);
+}
+
 /// Orbit the camera (first person: turn the look) by a pointer drag (CSS pixels), as the
 /// lab's other modes.
 #[wasm_bindgen]
@@ -334,6 +343,26 @@ pub fn stress_zoom(delta_y: f64) {
             c.zoom(delta_y);
         }
     });
+}
+
+/// Place the orbit camera (scripted takes): yaw, pitch (radians), distance (m) and,
+/// unless `target` is empty, the target `[x, y, z]` in the lab's frame
+/// (`Orbit::set_orbit`). Switches to orbit mode.
+#[wasm_bindgen]
+pub fn stress_set_orbit(yaw: f64, pitch: f64, distance: f64, target: &[f64]) {
+    let target = (target.len() == 3).then(|| [target[0], target[1], target[2]]);
+    CAMERA.with_borrow_mut(|c| {
+        if let Some(c) = c {
+            c.set_orbit(yaw, pitch, distance, target);
+        }
+    });
+}
+
+/// `[yaw, pitch, distance, target x, y, z]`, as [`stress_set_orbit`] takes them (empty
+/// before a load).
+#[wasm_bindgen]
+pub fn stress_orbit_state() -> Vec<f64> {
+    CAMERA.with_borrow(|c| c.as_ref().map_or(Vec::new(), |c| c.orbit_state().to_vec()))
 }
 
 /// The camera's view mode, as the lab's other modes (the Camera menu: 0 orbit, 1
@@ -382,6 +411,41 @@ pub fn stress_shoot(u: f64, v: f64) -> bool {
     }
     let (w, h) = SIZE.get();
     let Some(ray) = CAMERA.with_borrow(|c| c.as_ref().map(|c| c.aim(u, v, w as f64 / h as f64, s.radius))) else { return false };
+    shoot(s, ray)
+}
+
+/// The shot ray through viewport point (u, v in 0..1 from the top left), as
+/// [`stress_shoot`] aims: `[origin x, y, z, direction x, y, z]` in the lab's frame (empty
+/// before a load). With [`stress_shoot_ray`], a click's shot can be logged and fired again.
+#[wasm_bindgen]
+pub fn stress_aim(u: f64, v: f64) -> Vec<f64> {
+    let Some(s) = SHOOTING.get() else { return Vec::new() };
+    let (w, h) = SIZE.get();
+    CAMERA.with_borrow(|c| {
+        c.as_ref().map_or(Vec::new(), |c| {
+            let r = c.aim(u, v, w as f64 / h as f64, s.radius);
+            [r.origin, r.direction].concat()
+        })
+    })
+}
+
+/// Fire a projectile along a ray in the lab's frame (origin, then direction), by the
+/// same rule as [`stress_shoot`]: a shot that does not depend on the camera (replays and
+/// scripted takes). False when all shots are fired.
+#[wasm_bindgen]
+pub fn stress_shoot_ray(origin: &[f64], direction: &[f64]) -> bool {
+    let Some(s) = SHOOTING.get() else { return false };
+    if FIRED.get() >= SHOTS && TWORLD.with_borrow(|w| w.is_none()) {
+        return false;
+    }
+    if origin.len() != 3 || direction.len() != 3 {
+        return false;
+    }
+    shoot(s, engine_fracture::scene::Ray { origin: [origin[0], origin[1], origin[2]], direction: [direction[0], direction[1], direction[2]] })
+}
+
+/// Queue the shot along `ray` for the next frame (`stress_shoot`, `stress_shoot_ray`).
+fn shoot(s: Shooting, ray: engine_fracture::scene::Ray) -> bool {
     let speed = engine_fracture::plan::default_shot_speed(s.extent, s.speed) * SPEED_SCALE.get();
     let vel = engine_fracture::plan::shot_velocity(s.center, s.extent, s.radius, ray.origin, ray.direction, Some(speed), s.arc);
     let k = FIRED.get();
@@ -540,10 +604,30 @@ const IN_FLIGHT: u64 = 3;
 
 #[no_mangle]
 pub extern "C" fn stress_frame(elapsed_ms: f64) -> u32 {
-    match frame(elapsed_ms) {
+    match frame(Advance::Elapsed(elapsed_ms)) {
         Ok(()) => 1,
         Err(e) => fail(e),
     }
+}
+
+/// One animation frame that steps exactly `steps` physics frames (shots launched first),
+/// running or paused, then draws: the frame-locked recording of a take (`__record`), where
+/// each video frame advances a fixed amount of simulated time whatever the wall clock does.
+/// Called through `WebAssembly.promising`. Returns 1, or 0 with [`stress_error`].
+#[no_mangle]
+pub extern "C" fn stress_frame_steps(steps: u32) -> u32 {
+    match frame(Advance::Steps(steps)) {
+        Ok(()) => 1,
+        Err(e) => fail(e),
+    }
+}
+
+/// How far a frame advances the simulation: the frames that fall due in this much wall
+/// time while running (live), or exactly this many (frame-locked recording).
+#[derive(Clone, Copy)]
+enum Advance {
+    Elapsed(f64),
+    Steps(u32),
 }
 
 /// The lab's camera for the renderer: its view-projection and eye in the stress scene's
@@ -568,7 +652,7 @@ fn camera_view(width: u32, height: u32) -> ([[f32; 4]; 4], Vec3) {
 /// A frame of the threshold profile's GPU-resident world: the frames due (shots
 /// launched), the view written on the GPU and drawn, the counters as the GPU last
 /// finished them (never waited for). Nothing here reads the GPU.
-fn frame_threshold(d: &mut Device, l: &mut TLoaded, elapsed_ms: f64) -> Result<(), String> {
+fn frame_threshold(d: &mut Device, l: &mut TLoaded, advance: Advance) -> Result<(), String> {
     let gpu = &d.gpu;
     let (width, height) = SIZE.get();
     if (width, height) != (d.config.width, d.config.height) {
@@ -582,11 +666,23 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, elapsed_ms: f64) -> Result<(
     let dt = l.world.frame_dt;
     let mut stepped = 0;
     let t_step = web_time::Instant::now();
-    if RUNNING.get() {
-        l.behind = (l.behind + elapsed_ms * 1e-3).min(MAX_BEHIND_S.max(2.0 * dt));
+    let fixed = match advance {
+        Advance::Steps(n) => Some(n),
+        Advance::Elapsed(_) => None,
+    };
+    if RUNNING.get() || fixed.is_some() {
         for desc in PENDING.with_borrow_mut(std::mem::take) {
             l.world.launch(gpu, &desc);
         }
+    }
+    if let Some(n) = fixed {
+        // Frame-locked: every frame asked for, however far the GPU is behind.
+        for _ in 0..n {
+            l.world.step_frame(gpu)?;
+            stepped += 1;
+        }
+    } else if let (true, Advance::Elapsed(elapsed_ms)) = (RUNNING.get(), advance) {
+        l.behind = (l.behind + elapsed_ms * 1e-3).min(MAX_BEHIND_S.max(2.0 * dt));
         // At most `IN_FLIGHT` frames queued ahead of what the GPU has finished: when it
         // cannot keep up, the simulation runs slower than real time instead of the queue
         // (and with it the display's frames) backing up.
@@ -617,6 +713,8 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, elapsed_ms: f64) -> Result<(
         ColorMode::Bodies => 2,
     };
     let lines = l.world.encode_view(gpu, &mut encoder, &l.renderer, mode, bonds);
+    l.renderer.set_fx(gpu, FX.get());
+    l.renderer.set_fx_dt(stepped as f64 * dt);
     l.renderer.draw_resident(gpu, &mut encoder, &view, view_proj, eye, lines);
     gpu.queue.submit([encoder.finish()]);
     gpu.queue.present(texture);
@@ -660,10 +758,10 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, elapsed_ms: f64) -> Result<(
     Ok(())
 }
 
-fn frame(elapsed_ms: f64) -> Result<(), String> {
+fn frame(advance: Advance) -> Result<(), String> {
     let threshold = DEVICE.with_borrow_mut(|d| {
         TWORLD.with_borrow_mut(|w| match (d.as_mut(), w.as_mut()) {
-            (Some(d), Some(l)) => Some(frame_threshold(d, l, elapsed_ms)),
+            (Some(d), Some(l)) => Some(frame_threshold(d, l, advance)),
             _ => None,
         })
     });
@@ -687,18 +785,30 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
             let dt = l.world.scene.sim.frame_dt;
             let mut stepped = 0;
             let mut step_ms = 0.0;
-            if RUNNING.get() {
-                l.behind = (l.behind + elapsed_ms * 1e-3).min(MAX_BEHIND_S.max(2.0 * dt));
+            let due = match advance {
+                // Frame-locked: exactly the frames asked for, running or paused.
+                Advance::Steps(n) => Some(n),
+                Advance::Elapsed(elapsed_ms) if RUNNING.get() => {
+                    l.behind = (l.behind + elapsed_ms * 1e-3).min(MAX_BEHIND_S.max(2.0 * dt));
+                    let mut n = 0;
+                    while l.behind >= dt {
+                        l.behind -= dt;
+                        n += 1;
+                    }
+                    Some(n)
+                }
+                Advance::Elapsed(_) => None,
+            };
+            if let Some(n) = due {
                 let shots = PENDING.with_borrow_mut(std::mem::take);
                 for desc in &shots {
                     let imp = stress_ref::world::Impactor::from_desc(desc, &l.world.scene);
                     l.world.add_impactor(gpu, imp)?;
                 }
-                while l.behind >= dt {
+                for _ in 0..n {
                     let t = web_time::Instant::now();
                     l.world.step_frame(gpu)?;
                     step_ms += t.elapsed().as_secs_f64() * 1e3;
-                    l.behind -= dt;
                     stepped += 1;
                 }
             }
@@ -714,6 +824,8 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
             let view = texture.texture.create_view(&wgpu::TextureViewDescriptor { format: Some(d.view_format), ..Default::default() });
             let mut encoder = gpu.device.create_command_encoder(&Default::default());
             (l.renderer.bond_graph, l.renderer.colors) = VIEW.get();
+            l.renderer.set_fx(gpu, FX.get());
+            l.renderer.set_fx_dt(stepped as f64 * dt);
             let want_stats = stepped > 0 || STATS.with_borrow(|s| s == "{}");
             let renderer = &l.renderer;
             let totals = l.totals;

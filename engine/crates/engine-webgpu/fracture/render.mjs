@@ -45,6 +45,11 @@ export async function createRenderer(device,canvas,simulation,scene,onShoot=()=>
   resolve:device.createBuffer({size:16,usage:GPUBufferUsage.QUERY_RESOLVE|GPUBufferUsage.COPY_SRC}),
   read:device.createBuffer({size:16,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST}),busy:false,last:0,ms:null}:null;
  return {aim,
+ // The shot ray through a viewport point (u, v in 0..1 from the top left).
+ aimAt:(u,v)=>shotAt(u,v),
+ // The orbit camera (scripted takes): [yaw, pitch, distance, tx, ty, tz]; a target is optional.
+ setOrbit(yaw,pitch,distance,target=[]){orbit.setOrbit(yaw,pitch,distance,new Float64Array(target));input.modeChanged()},
+ get orbit(){return [...orbit.orbitState()]},
  // The camera's view mode (0 orbit, 1 first-person walk, 2 fly: engine-fracture ViewMode).
  get viewMode(){return orbit.mode},
  set viewMode(mode){orbit.setMode(mode|0,aspect());input.modeChanged()},

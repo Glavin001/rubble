@@ -72,11 +72,21 @@ checks the wrapper.
   `__setVehicleInput(h, input)`, `__chassisPoses()` (every vehicle's pose/up/speed),
   `__record(script, opts)` (frame-locked scripted drive uploading JPEG frames), `__world`.
 
-Demo videos: `node --experimental-websocket record-vehicle-demos.mjs [take ...] [--reel]`
-serves this directory, drives headless Chrome through the scripted takes (sedan ramps,
-motorcycle slalom, tank wall breach, monster truck vs crates, kart on ice, destruction,
-traffic) one physics step per 60 fps frame, and writes `recordings/<take>.mp4` plus a
-one-frame-per-second `<take>_sheet.jpg` for review (needs Chrome and ffmpeg).
+Demo videos: `node --experimental-websocket record-takes.mjs [take ...] [--page vehicle|lab] [--reel] [--list]`
+serves this directory, drives headless Chrome through scripted takes, and writes
+`recordings/<take>.mp4` plus a one-frame-per-second `<take>_sheet.jpg` for review (needs
+Chrome and ffmpeg). Any page that implements `__record(script, {name, upload, width})`
+can be recorded: each video frame advances a fixed amount of simulated time, whatever the
+wall clock does. The takes live in `takes/`:
+- `takes/vehicle.mjs`: vehicle.html (sedan ramps, motorcycle slalom, tank wall breach,
+  monster truck vs crates, kart on ice, destruction, traffic, the bridge), one physics step
+  per 60 fps frame;
+- `takes/lab.mjs`: the fracture lab (`fracture/director.mjs`), in any bond mode, with
+  slow-motion segments.
+
+`takes/harness.mjs` is the shared server, Chrome and ffmpeg plumbing.
+`record-vehicle-demos.mjs [take ...] [--reel]` still records the vehicle takes, to
+`recordings/vehicles_reel.mp4` for the reel.
 
 See [../../docs/vehicles.md](../../docs/vehicles.md).
 

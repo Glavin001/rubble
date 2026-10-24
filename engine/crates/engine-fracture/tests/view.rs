@@ -119,3 +119,31 @@ fn walk_and_fly_hand_over_the_eye() {
     assert_eq!(ViewMode::from_index(ViewMode::Fly.index()), ViewMode::Fly);
     assert_eq!(ViewMode::from_index(9), ViewMode::Orbit);
 }
+
+#[test]
+fn set_orbit_places_the_camera_as_a_drag_and_zoom_would() {
+    let mut c = camera();
+    c.set_mode(ViewMode::Fly, ASPECT);
+    c.set_orbit(1.1, 0.4, c.min_distance * 2.0, Some([1.0, 2.0, 3.0]));
+    assert_eq!(c.mode, ViewMode::Orbit);
+    assert_eq!(
+        c.orbit_state(),
+        [1.1, 0.4, c.min_distance * 2.0, 1.0, 2.0, 3.0]
+    );
+    // Still looking at its target, from that distance.
+    assert!(close(
+        c.forward(ASPECT),
+        engine_fracture::math::norm(sub(c.target, c.eye(ASPECT))),
+        1e-12
+    ));
+    assert!((length(sub(c.target, c.eye(ASPECT))) - c.min_distance * 2.0).abs() < 1e-9);
+    // Pitch keeps the drag's range and distance the zoom's; no target keeps the target.
+    c.set_orbit(0.0, 9.0, 0.0, None);
+    let [_, pitch, distance, x, y, z] = c.orbit_state();
+    assert_eq!(
+        (pitch, distance, [x, y, z]),
+        (1.3, c.min_distance, [1.0, 2.0, 3.0])
+    );
+    c.set_orbit(0.0, -9.0, 1e9, None);
+    assert_eq!(c.orbit_state()[1..3], [-0.1, c.extent * 8.0]);
+}

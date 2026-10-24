@@ -403,6 +403,23 @@ fn hull_triangles(vertices: &[Vec3], faces: &[(Vec<usize>, Vec3)], object: u32, 
 
 /// One chunk's flat-shaded triangles in its own frame (centred, chunk axes): each hull of
 /// a compound chunk at its offset, its convex hull, or its box when it has none.
+/// The centre of a mesh's bounding box (its object's frame) and the radius about it.
+fn mesh_bounds(vertices: &[Vertex]) -> [f32; 4] {
+    if vertices.is_empty() {
+        return [0.0; 4];
+    }
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for v in vertices {
+        for k in 0..3 {
+            lo[k] = lo[k].min(v.pos[k]);
+            hi[k] = hi[k].max(v.pos[k]);
+        }
+    }
+    let c: [f32; 3] = std::array::from_fn(|k| 0.5 * (lo[k] + hi[k]));
+    let r = (0..3).map(|k| (hi[k] - c[k]).powi(2)).sum::<f32>().sqrt();
+    [c[0], c[1], c[2], r]
+}
+
 fn chunk_mesh(ch: &stress_ref::structure::ChunkData, object: u32, out: &mut Vec<Vertex>) {
     if let Some(parts) = &ch.parts {
         for p in parts.iter() {
@@ -503,6 +520,13 @@ pub struct Renderer {
     lines: wgpu::Buffer,
     /// Line vertices `lines` holds (two per bond).
     line_capacity: usize,
+    /// Each object's mesh centre (object frame) and radius; 0 for the ground and the
+    /// impactors (they shed no fragment effects).
+    bounds: Vec<[f32; 4]>,
+    format: wgpu::TextureFormat,
+    /// Dust and chips ([`Self::set_fx`]), and the simulated time the next draw advances them.
+    fx: Option<crate::fx::Fx>,
+    fx_dt: std::cell::Cell<f32>,
 }
 
 const SAMPLES: u32 = 4;
@@ -525,6 +549,7 @@ impl Renderer {
         let mut verts: Vec<Vertex> = Vec::new();
         let mut chunk_object = Vec::new();
         let mut object = 1u32; // 0 is the ground
+        let mut bounds = vec![[0.0f32; 4]];
         // Ground: a large quad at z = 0 (the scene packs' grade).
         let g = 2000.0f32;
         let up = [0.0, 0.0, 1.0];
@@ -534,13 +559,16 @@ impl Renderer {
         for st in &solver.structures {
             let mut ids = Vec::with_capacity(st.chunks.len());
             for ch in &st.chunks {
+                let first = verts.len();
                 chunk_mesh(ch, object, &mut verts);
+                bounds.push(mesh_bounds(&verts[first..]));
                 ids.push(object);
                 object += 1;
             }
             chunk_object.push(ids);
         }
         let impactor_base = object;
+        bounds.resize(bounds.len() + impactors.len(), [0.0; 4]);
         for imp in impactors {
             match imp.shape {
                 ImpactorShape::Sphere { radius } => sphere_triangles(radius, object, &mut verts),
@@ -711,7 +739,27 @@ impl Renderer {
             line_bind,
             lines,
             line_capacity,
+            bounds,
+            format,
+            fx: None,
+            fx_dt: std::cell::Cell::new(0.0),
         }
+    }
+
+    /// Draw dust and chips where chunks change speed sharply (an impact, a break, a
+    /// landing), or not: render only, from the poses drawn (`fx.rs`). Off by default.
+    pub fn set_fx(&mut self, gpu: &Gpu, on: bool) {
+        if !on {
+            self.fx = None;
+        } else if self.fx.is_none() {
+            self.fx = Some(crate::fx::Fx::new(gpu, &self.camera, &self.objects, &self.bounds, self.format, SAMPLES));
+        }
+    }
+
+    /// The simulated time (s) the next draw advances the effects by: what the frame stepped
+    /// (0 when paused).
+    pub fn set_fx_dt(&self, dt: f64) {
+        self.fx_dt.set(dt as f32);
     }
 
     /// Triangles drawn per frame.
@@ -776,6 +824,9 @@ impl Renderer {
             light: [light.x as f32, light.y as f32, light.z as f32, self.fade as f32],
         };
         gpu.queue.write_buffer(&self.camera, 0, bytemuck::bytes_of(&uniform));
+        if let Some(fx) = &self.fx {
+            fx.encode(gpu, encoder, self.fx_dt.replace(0.0));
+        }
         let view = target;
         let bg = self.background;
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -799,6 +850,9 @@ impl Renderer {
         pass.set_bind_group(0, &self.bind, &[]);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.draw(0..self.vertex_count, 0..1);
+        if let Some(fx) = &self.fx {
+            fx.draw(&mut pass);
+        }
         if line_vertices > 0 {
             pass.set_pipeline(&self.line_pipeline);
             pass.set_bind_group(0, &self.line_bind, &[]);

@@ -48,6 +48,8 @@ pub mod ingest_check;
 #[cfg(feature = "gpu")]
 pub mod resident;
 #[cfg(feature = "gpu")]
+mod fx;
+#[cfg(feature = "gpu")]
 pub mod render;
 #[cfg(feature = "gpu")]
 pub mod threshold;

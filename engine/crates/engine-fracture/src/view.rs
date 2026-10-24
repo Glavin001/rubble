@@ -252,6 +252,26 @@ impl Orbit {
         }
     }
 
+    /// Place the orbit camera (scripted takes and replays): yaw and pitch in radians, as
+    /// a drag turns them, the distance in metres and, if given, the target. Switches to
+    /// orbit mode. Pitch keeps the drag's range and distance the zoom's.
+    pub fn set_orbit(&mut self, yaw: f64, pitch: f64, distance: f64, target: Option<[f64; 3]>) {
+        self.mode = ViewMode::Orbit;
+        self.yaw = yaw;
+        self.pitch = pitch.clamp(-0.1, 1.3);
+        self.distance = distance.min(self.extent * 8.0).max(self.min_distance);
+        if let Some(target) = target {
+            self.target = target;
+        }
+    }
+
+    /// The orbit camera as [`set_orbit`](Self::set_orbit) takes it: yaw, pitch, distance
+    /// and the target's x, y, z.
+    pub fn orbit_state(&self) -> [f64; 6] {
+        let [x, y, z] = self.target;
+        [self.yaw, self.pitch, self.distance, x, y, z]
+    }
+
     /// First-person travel for `dt` seconds, each axis in -1..1 (keys held):
     /// `forward` along the view, `right` across it, `up` along world +Y. Walking
     /// stays on the floor at [`EYE_HEIGHT`] (forward is horizontal, up is ignored);
