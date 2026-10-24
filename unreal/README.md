@@ -104,13 +104,20 @@ These remain:
    that woke.
 7. **No builders for the joint scenes** (ragdolls, chains, the motor field) and no crate
    preset.
-8. **No engine features on `RbWorldDef`** (`grid_levels`). At most 1024 statics wider than half
-   a grid cell are allowed (`OVERFLOW_LARGE_STATICS`).
+8. **Few engine features on `RbWorldDef`.** `reuse_contacts` is there now; `grid_levels` and the
+   page's other solver settings (sparse colour start, sleep thresholds, β/α) are not. At most
+   1024 statics wider than half a grid cell are allowed (`OVERFLOW_LARGE_STATICS`).
 9. **Capacities are guesswork.** Brick walls need about 30 contacts per body. A helper that sizes
    a `RbWorldDef`, or reports high-water marks, would help.
 10. **`coalesce` folds in the earliest previous pose.** To interpolate by an alpha within the
     latest step, the host needs that step's own previous pose. The plugin polls step by step.
+    (`rbWorld_ExportPoses` does carry the latest step's own previous poses.)
 11. **Hit events (P4).** Impact effects wait on them.
+12. **No scene builders on the ABI.** The page's rings and gables are ported to C++ from
+    `scene-builders.mjs`, with their solver settings; `engine-scenes` has the same builders in
+    Rust, unexposed. One ABI entry per scene would make a single source.
+13. **The GPU pose export is Metal only** (`rbCreateWorldOnMetal`, `rbWorld_ExportPoses`):
+    other RHIs draw through the readback path until the render-graph host (DESIGN.md, 1b).
 
 ## Layout
 

@@ -27,6 +27,26 @@ It has to work at Rubble's target of 100k+ rigid bodies and dozens to hundreds o
 | Phase 1a in Rust: a world on a Metal device and queue supplied by the host, with poses exported into buffers the host owns | `engine-webgpu` `metal_interop.rs`; `rbCreateWorldOnMetal`, `rbWorld_ExportPoses`, `rbBody_GetPoseIndex` | `engine-ffi` `tests/metal_export.rs` |
 | GPU Scene PoC: a compute pass writes instance transforms from a pose buffer in Rubble's layout | `URubbleInstancesComponent`, `RubbleGPUScene.usf`, `ARubbleGpuScenePoc` | `Rubble.Poc.GpuScene`, `Rubble.Poc.Scale` |
 | 100k boxes through the PoC: 12.2 ms a frame, game thread flat at 1.2 ms | DESIGN.md section 2 | `RUBBLE_POC_SIDE=317 … --only Rubble.Poc.Scale` |
+| **Phase 2:** the world on Unreal's Metal device (a queue of its own), poses exported into a ring of four Unreal-owned slots (`FRubbleGpuPoses`), small dynamic bodies drawn as GPU Scene instances; static and large bodies (`rubble.GpuScene.MaxExtentCm`, 150 cm) stay CPU-placed for Lumen | `RubbleGpuPoses`, `ARubblePrimitives` | `Rubble.Render` (20 tests) on the GPU path; screenshots equal the readback path's at the same step |
+| **Phase 3:** small fracture chunks (per-chunk bodies) as GPU Scene instances, shown on shatter | `ARubbleFracture` | bookkeeping (every chunk drawn once), house and arch screenshots |
+| Moves stay per event: GPU-drawn bodies report only sleep and wake | `rbBody_SetMoveReports` | `engine-ffi` `tests/abi.rs` |
+| Bodies whose centre of mass is off their origin draw right | `rbBody_GetPoseOffset` | `tests/metal_export.rs` |
+| The page's rings and gables (its builders, masses, friction, iterations, sleep, `reuseContacts`, capacity tiers) | `MockRigidScene.cpp` `WebRing`/`WebGables`, `RbWorldDef.reuse_contacts` | `Rubble.Render.Destruction` |
+
+`Rubble.Render.Destruction` on the M3 Max (`METAL_SM5`, 1280×720), GPU path:
+
+| Scene | Bodies | Frame | Rubble per step | Renderer CPU |
+|---|---|---|---|---|
+| `rigid:ring110k` | 110,453 | 70.8 ms | 17.3 ms (the page: ~10 ms) | 0.04 ms |
+| `rigid:ring` | 9,143 | 10.4 ms | 0.8 ms | 0.02 ms |
+| `rigid:gables` | 6,734 | 11.8 ms | 0.8 ms | 0.02 ms |
+| `rigid:pile` | 32,012 | 11.8 ms | 0.1 ms | 0.01 ms |
+| `rigid:wall` | 2,012 | 9.5 ms | 0.6 ms | 0.01 ms |
+| `fracture:house` | 131 chunks | 20.5 ms (p95 73 ms at the shatter) | 6.2 ms | 0.01 ms |
+| `fracture:arch` | 23 chunks | 12.1 ms | 0.6 ms | 0 ms |
+
+`ring110k` on the readback path: 189 ms. The rest of its frame is Rubble's step: the integration
+is no longer the bottleneck at this scale.
 
 Not yet verified by the PoC:
 
@@ -72,21 +92,9 @@ later, with the runs above.
 2. **Clean-ups to the GPU Scene write path** *(SM5 ok)*:
    - Move from the deprecated `GPUWriteParams` to `GPUSceneWriterUB`.
    - Keep an eye on `UpdatePrimitiveInstancesFromCompute`, which is experimental in 5.8.
-3. **Phase 2: the GPU Scene rigid renderer on real Rubble poses** *(SM5 ok)*:
-   - Unreal side of 1a:
-     - create the world with `rbCreateWorldOnMetal` on Unreal's `MTL::Device` and queue
-       (`IMetalDynamicRHI`);
-     - allocate the current and previous pose buffers on the render thread;
-     - pass their `MTLBuffer`s and offsets (`FMetalRHIBuffer::GetCurrentBuffer()`) to
-       `rbWorld_ExportPoses`.
-   - One `URubbleInstancesComponent` per bucket (box, sphere, capsule, each hull). The instance →
-     pose slot table comes from `rbBody_GetPoseIndex`.
-   - The Lumen hybrid: large bodies stay on CPU-visible instances fed by the compact readback.
-   - Gate: 100k bodies with under 0.2 ms of CPU, matching the readback client's picture.
-     `Rubble.Render` becomes the parity check.
-4. **Phase 3: destructibles as GPU Scene instances** *(SM5 ok)*:
-   - Needs chunk → body and chunk-local buffers on the GPU, and `rbDestructible_GetChunkLocal`
-     (README gap 2).
+   - One primitive per GPU chunk: fine for hundreds; a city of destructibles needs chunk meshes
+     merged per asset (DESIGN.md section 3).
+3. ~~Phase 2~~ and 4. ~~Phase 3~~: done (above).
 5. **Phase 4: soft cars**, after PoC 2. It needs:
    - the `soft_frames` kernel;
    - the editor commandlet that builds the vehicle skeletal meshes;
@@ -101,9 +109,13 @@ later, with the runs above.
 
 ## Rubble engine work this depends on (not in this branch)
 
-- **Simulation cost at the target** is the largest gap: about 110 ms a frame for 100k awake bodies,
-  and about 60 ms for 20 soft cars (DESIGN.md, "What this needs from Rubble"). Only lossless
-  optimisations are allowed (AGENTS.md).
+- **Simulation cost at the target** is the largest gap. `ring110k` takes 17.3 ms per step
+  through `rubble::World` here, against ~10 ms on the page's own host; 20 soft cars take about
+  60 ms a frame (DESIGN.md, "What this needs from Rubble"). Only lossless optimisations are
+  allowed (AGENTS.md).
+- **The page's scene builders on the ABI.** The rings and gables are ported from
+  `scene-builders.mjs` into C++; `engine-scenes` already has them in Rust, so exposing those
+  (with each scene's solver settings) would make one source for the web, Unreal and the tests.
 - **The README's C ABI gaps 1–11**, and the HLSL target and host-plan ABI for Phase 1b.
 
 ## Rules kept while doing this

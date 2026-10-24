@@ -209,6 +209,8 @@ void FRubbleRenderDestruction::GetTests(TArray<FString>& OutBeautifiedNames, TAr
 	static const TCHAR* Scenes[] = {
 		TEXT("rigid:ring110k"), TEXT("rigid:ring"), TEXT("rigid:gables"), TEXT("rigid:pile"), TEXT("rigid:wall"),
 		TEXT("fracture:house"), TEXT("fracture:suburb"), TEXT("fracture:arch"),
+		TEXT("vehicles:destruction"), TEXT("vehicles:playground"), TEXT("vehicles:traffic"),
+		TEXT("soft:wall"), TEXT("soft:headon"), TEXT("soft:tbone"), TEXT("soft:traffic"),
 	};
 	for (const TCHAR* S : Scenes)
 	{
