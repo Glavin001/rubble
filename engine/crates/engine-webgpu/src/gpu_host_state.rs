@@ -83,6 +83,13 @@ impl WgpuSim {
         &self.bufs[7]
     }
 
+    /// The step's broadphase candidate pairs (binding 10, `CandidatePair`: two colliders),
+    /// `StepCounters::candidate_count` of them once the broadphase has run (a hook of
+    /// `step_encode_with` at `"broadphase"` sees this step's).
+    pub fn candidate_buffer(&self) -> &wgpu::Buffer {
+        &self.bufs[10]
+    }
+
     /// First row of the last step's contacts in `contact_buffer` (the ping-pong half).
     pub fn last_contact_offset(&self) -> u32 {
         self.last_contact_offset

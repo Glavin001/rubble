@@ -87,6 +87,184 @@ finished. A slow stretch then slows the simulation instead of backing up the que
 
 **Shots.** There is no limit. Past the 16 parked spheres, each shot reuses the oldest.
 
+## Models: load path and local impact
+
+The fracture world runs three profiles (`capability::Profile`). Each is a pair of model
+flags (`LoadModel`, `StrikeModel`) with environment overrides for native runs:
+`STRESS_FRACTURE_LOAD`, `STRESS_LOAD_PATH_SWEEPS`, `STRESS_FRACTURE_STRIKE` and
+`STRESS_IMPACT_FRACTURE_WORK`. The `threshold` profile's kernels and results are
+unchanged: an A/B digest of two shot scenes matches main bit for bit.
+
+| Profile | After each step | A predicted strike |
+|---|---|---|
+| `threshold` | contact force against tensile capacity (`fr_breaks`) | Hertz force share against tensile capacity (`fr_strike_breaks`) |
+| `load_path` | the load path (`fr_lp_*`) | as `threshold` |
+| `impact_local` | as `threshold` | the local impact model (`fr_il_*`) |
+
+### Load path
+
+`stress-ref/src/load_path.rs` is the f64 twin, and the warm start at load.
+
+- **System.** The bond graph's linear quasi-static equilibrium `K x = f`:
+  - each chunk has a small rigid displacement;
+  - each bond is `BondGeometry::kinematics`' spring.
+- **Loads.**
+  - Gravity.
+  - The engine's contact forces and moments. `fr_loads` keeps their vectors, with each
+    impact's mean over the frame, as Blast takes it.
+  - Inertia relief on unsupported dynamic bodies: the d'Alembert loads of their rigid
+    acceleration, from 64-bit fixed-point sums per body, so the run is deterministic.
+- **Holds.** Supports stay still, and so does an unsupported body's lowest chunk.
+- **Solve.** Block Jacobi, the 6×6 diagonal blocks Cholesky-factored per frame,
+  accelerated by Chebyshev's recurrence at its limit.
+  - `d = c1 d + c2 D^-1 r`, then `x += d`.
+  - The step `d` and the displacements carry from frame to frame.
+  - 16 sweeps a frame, tuned to `[1e-6, 2]`.
+- **Why not restart each frame.** Restarting the recurrence, or conjugate gradients, each
+  frame loses the slow modes. On a slender cantilever they converge 8–18 times slower
+  (`load_path.rs` test).
+- **Breaks.** Each intact bond's force goes through joint.slang's `stress_measures` and
+  `failure_indices`: tension with bending, shear, compression and buckling.
+- **Bond model.** The profile uses the physical bond model (`Methods::blast_model` off).
+  Under Blast's capped section gains, a 0.1 m bond's section modulus is 20 times its
+  geometric one, and a cantilever never breaks at its root.
+
+### Local impact
+
+`stress-ref/src/impact_local.rs` holds the closed forms and their derivations, and is the
+f64 twin. The strike is evaluated once, before the engine steps.
+
+1. **Thickness.** `fr_il_extend` follows the chunks along the path, widened by the shot's
+   radius, for at most 8 passes; error bit 16 if it is still growing.
+2. **Closed forms** (`fr_il_strike`):
+   - Hertz contact;
+   - strain-rate DIF at `v / H`;
+   - ballistic limit `min(E_pen, E_plug)`;
+   - Recht–Ipson residual speed;
+   - crater depth;
+   - back-face spall, its source capped at the crushing strength.
+3. **Breaks** (`fr_il_breaks`). A bond breaks when it crosses the plug cone's or the scab's
+   boundary, or touches the crater.
+4. **Resolving the contact.** The fracture world steps the engine once a frame, with no
+   swept collision, so the strike resolves the contact itself:
+   - **Perforation.** The shot gives up `E_bl` through an impulse with the wall. After the
+     split, `fr_il_carry` sends the shot and its plug off together, keeping their
+     momentum (Recht and Ipson's premise), and moves the shot to where it is at the
+     step's end.
+   - **No perforation.** The shot comes to rest on the face, its momentum into the wall
+     (an inelastic contact).
+5. **One strike per shot per body.**
+   - A shot strikes only the first body on its path in a frame.
+   - It never strikes what it broke out, or a chunk its path already crossed
+     (`fr_il_mark`).
+6. **Repeats** (`tests/fracture_models.rs`):
+   - momentum on a free wall is kept to within 0.1 %;
+   - exit speeds from 1.25 to 2 times the ballistic limit are within 15 % of Recht–Ipson
+     (measured: 1–7 %).
+
+### In-step contact fracture
+
+`Profile::contact_fracture`: on by default in `load_path`, a flag elsewhere
+(`ThresholdWorld::with_contact_fracture`, `STRESS_CONTACT_FRACTURE`, the lab's checkbox).
+The forward-only answer to PhysX's internal correction pass: the strike is decided from the
+contact the engine is about to make, inside the step, with no rollback and no second solve.
+
+1. **Where it runs.** `WgpuSim::step_encode_with` encodes it where rubble's broad phase
+   ends: the step's bounds and candidate pairs are built, nothing is solved. Shots are
+   rubble CCD bodies (`RubbleEngine::set_toi_ccd`), so their bounds are swept over the
+   step and a strike is a candidate pair before it lands. Debris is found once its bounds
+   touch.
+2. **Detection** (`fr_cs_pairs`, `fr_cs_pick`, `fr_cs_pick2`). A pair of a structure's
+   chunk and another body's collider closing faster than the strike speed, meeting the
+   chunk's box within the step, is a strike. Each structure takes its first (earliest;
+   ties: lowest chunk, then lowest collider). The cost is a pass over the step's pairs.
+3. **Load** (`fr_cs_force`). The impulse that stops the striker against the whole
+   structure (`m_eff v`), at its Hertz peak (`pi J / (2 tau)`), at the contact point.
+4. **Solve** (`fr_cs_load` … `fr_cs_sweep_*`). The load path's increment from rest, by
+   superposition on the structure's own state:
+   - inertia relief on a free structure;
+   - 256 sweeps tuned to `[1e-4, 2]` (`IMPACT_LOWER`). A plate's strike load has to reach
+     its supports; with 64 sweeps it stayed bunched at the hit, 78 % off (the
+     `load_path.rs` test).
+   - One workgroup per struck structure (`fr_cs_solve`) runs the load, the blocks, every
+     sweep (a group barrier between) and the break test in one dispatch. As a dispatch per
+     sweep, the 256 empty indirect dispatches cost 2.3 ms on every step (about 9 µs each
+     on Apple GPUs). On a step without a strike, the solve dispatches no group.
+   - Cost (`stress_bench --solver fracture-gpu --set shots --config load_path`, M3 Max,
+     60 Hz, medians, `STRESS_CONTACT_FRACTURE` 1 against 0): idle house 3.0 against
+     2.9 ms; strike regimes 3.2–5.4 against 3.6–4.3 ms.
+5. **Breaks and split** (`fr_cs_breaks`, `fr_gate`, the split). Each bond's own failure
+   law, then the usual split before the narrow phase. rubble's contacts name colliders,
+   whose bodies the split re-points, and the pieces' generation stops a warm start from
+   the whole body. So the step's narrow phase and solve meet the pieces, and the striker
+   gets their momentum. Nothing breaks: the whole structure takes the contact and the
+   striker does not get through.
+
+Pieces of one structure have no candidate pair with each other in the step they split
+(the broad phase skips a body's own colliders); they meet from the next step.
+
+`stress-rubble/tests/contact_fracture.rs`:
+- the strike's load and the increment against their host twins;
+- walls a thousand times stronger take the strike whole and hold the ball;
+- the lab's ball goes through its cuboid house only with the pass;
+- a flying block's strike is found with no shot;
+- the pass agrees with the explicit reference where that is clear;
+- runs repeat bit for bit.
+
+Against the reference (4.1 kg ball, 0.2 m anchored wall, 0.25 s, 2026-10-24):
+
+| Speed | Reference | In-step pass |
+|---|---|---|
+| 15 m/s | stops at the face, 10 bonds | stops, 67 bonds |
+| 40 m/s | stops at the face, 9 bonds | **through**, 415 bonds |
+| 80 m/s | through, 58 bonds | through, 338 bonds |
+| 120 m/s | through, 106 bonds | through, 414 bonds |
+| 250 m/s | through, 89 bonds | through, 465 bonds |
+
+Open: the pass over-breaks, 4–40 times the reference's bonds.
+- The load is the rigid-structure upper bound, applied quasi-statically. The struck
+  chunk's own inertia is not in it, though it meets the striker first and takes part of
+  the impulse.
+- Pieces flying off faster than the strike speed strike the rest of the structure in turn.
+  On the lab's cuboid house at 18 m/s, 183 strikes broke 1,064 of its 1,549 bonds.
+- A converged solve (256 sweeps) did not reduce it, so the load model is what needs work.
+  It must be derived, not fitted to the reference.
+
+### Shots set
+
+`stress_bench --solver fracture-gpu --set shots --config <profile> --seconds 1`, M3 Max,
+60 Hz, frames waited for:
+
+| Regime | threshold | load_path | impact_local |
+|---|---|---|---|
+| 4.1 kg ball, 100 m/s, 0.2 m anchored wall | 4.1 ms; 119 bonds, 35 bodies; the ball passes at 100 m/s | 3.8 ms; as threshold | 2.4 ms; spall, 45 bonds, 3 bodies; the ball stops at the face |
+| the same at 250 m/s | 4.4 ms; 388 bonds, 140 bodies; passes at 250 m/s | 3.6 ms; as threshold | 2.2 ms; perforation, 28 bonds (the plug), exit 26.7 m/s |
+| two such walls, 250 m/s | 4.8 ms; 776 bonds; passes at 250 m/s | 4.2 ms; as threshold | 3.3 ms; the first holed, the second struck by the plug; exit 13.3 m/s |
+| 250 kg ball set on an 0.8 m cantilever plate's tip | 2.1 ms; nothing breaks | 3.2 ms; the root's three bonds break (frame 3) | 1.9 ms; nothing breaks |
+| house-1story idle | 2.6 ms | 2.2 ms; peak failure index 0.37 | 2.0 ms |
+
+Medians. The worst frames (36–54 ms) are each run's first frames.
+
+Against the reference (`--solver oracle --config realtime`, the explicit CPU world), 0.25 s
+each (exit: the ball's speed at the end; bodies: the structures' bodies):
+
+| Regime | oracle | threshold | load_path | impact_local |
+|---|---|---|---|---|
+| 100 m/s, one wall | exit 9.4 m/s, 15 bodies, 74 bonds | 100.0, 35, 119 | 100.0, 35, 119 | 2.3, 3, 45 |
+| 250 m/s, one wall | 49.7, 18, 89 | 250.0, 140, 388 | 250.0, 140, 388 | 25.0, 2, 28 |
+| 250 m/s, two walls | 8.2, 71, 291 | 250.0, 280, 776 | 250.0, 280, 776 | 10.0, 35, 111 |
+| 250 kg on the plate's tip | 2.3, 2, 3 (the root) | 0.0, 1, 0 | 1.7, 3, 6 (the root) | 0.0, 1, 0 |
+
+- **Threshold.** Its Hertz-force rule shatters the struck wall, and the ball passes at
+  full speed: it has no contact in the step.
+- **Load path.** It breaks the plate where the reference does.
+- **Local impact.** It holes or stops the ball as the reference does, but it under-breaks.
+  - The plug leaves as one piece where the reference's comminutes into many.
+  - Its whole mass rides with the ball, so the single-wall exit speed is half the
+    reference's.
+  - Open: the plug's breakup (the research's fragment sizing, R3a's open question). It
+    needs a model of how the plug's chunks share the ball's momentum.
+
 ## Tests and measurements
 
 - `stress-gpu/tests/fracture.rs`: the split against a host reference
@@ -94,6 +272,15 @@ finished. A slow stretch then slows the simulation instead of backing up the que
   shattered over three rounds. Every chunk's body and slot match exactly; mass, centre of
   mass, velocity transfer and collider poses match to f32.
 - `bench_split` (ignored): the split alone on 100k chunks.
+- `stress-rubble/tests/fracture_models.rs`: the load path and the local impact on the GPU
+  against their host twins, and their behaviour (above).
+- `stress-rubble/tests/strike_through.rs`: the lab's ball against its cuboid house wall at
+  18 m/s, with strike prediction on and off (`ThresholdWorld::set_strike_prediction`,
+  `GpuWorld::set_strike_prediction`).
+  - Off, the ball rebounds off the whole wall in every mode, even when bonds break after.
+  - On, it goes through: `blast_parity`, `threshold` and `load_path`.
+  - `impact_local`: the ball stops at the wall below its ballistic limit and goes through
+    above it.
 
 | Split on 100k chunks | Wall time, submit to done |
 |---|---|

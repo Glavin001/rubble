@@ -102,6 +102,16 @@ thread_local! {
     static VIEW: Cell<(bool, ColorMode)> = const { Cell::new((false, ColorMode::Material)) };
     /// The capability profile of the next `stress_load` (`stress_set_profile`).
     static PROFILE: Cell<Profile> = const { Cell::new(Profile::BlastParity) };
+    // Strike prediction as the lab set it (`stress_set_strike_prediction`), None: the
+    // profile's own (`Profile::predicts_strikes`). Kept across loads of one profile.
+    static STRIKE: Cell<Option<bool>> = const { Cell::new(None) };
+    // A change of it the loaded world has not taken yet: the next frame applies it (a
+    // frame holds the device and the world across its GPU waits).
+    static STRIKE_PENDING: Cell<bool> = const { Cell::new(false) };
+    // The in-step contact fracture as the lab set it (`stress_set_contact_fracture`), None:
+    // the profile's own (`Profile::contact_fracture`). Taken when a world is made; kept
+    // across loads of one profile.
+    static CONTACT: Cell<Option<bool>> = const { Cell::new(None) };
     /// The physics frame rate of the next `stress_load` (`stress_set_physics_hz`); 0 keeps
     /// the scene's own.
     static PHYSICS_HZ: Cell<f64> = const { Cell::new(0.0) };
@@ -288,13 +298,68 @@ pub fn stress_set_bond_strength_scale(scale: f64) {
     }
 }
 
-/// The capability profile of the next `stress_load`: `blast_parity` (the default) or
-/// `threshold` (the v0 stress mode: bonds break on contact force alone, no solve).
+/// The capability profile of the next `stress_load`: `blast_parity` (the default),
+/// `threshold` (the v0 stress mode: bonds break on contact force alone, no solve),
+/// `load_path` (the fracture world with a load path: gravity and contacts carried through
+/// the bonds) or `impact_local` (the fracture world with the analytic local impact model).
 #[wasm_bindgen]
 pub fn stress_set_profile(name: String) -> Result<(), JsValue> {
     let p = Profile::parse(&name).ok_or_else(|| JsValue::from_str(&format!("no profile {name}")))?;
+    if p != PROFILE.get() {
+        STRIKE.set(None);
+        CONTACT.set(None);
+    }
     PROFILE.set(p);
     Ok(())
+}
+
+/// Strike prediction on or off, now (the loaded world) and for the next loads of this
+/// profile: a shot's breaks predicted at the end of the frame before it reaches a
+/// structure and made before the engine steps, so the shot meets the pieces (forward
+/// only, no re-simulation). Off, the engine's contact meets the whole structure first and
+/// the shot rebounds; bonds break only on the contact loads after the step.
+#[wasm_bindgen]
+pub fn stress_set_strike_prediction(on: bool) {
+    STRIKE.set(Some(on));
+    // Taken by the loaded world at its next frame (`frame` holds the world across its GPU
+    // waits, so it is not touched here).
+    STRIKE_PENDING.set(true);
+}
+
+/// The in-step contact fracture on or off for the next load (the fracture world's
+/// profiles: threshold, load_path, impact_local): within rubble's step, a body about to
+/// strike a structure has the strike's load solved by the load path before the step
+/// solves, so its bonds break by their strength and the structure splits before the
+/// contact, or nothing breaks and the striker rebounds. Made with the world (its shots
+/// become CCD bodies): the lab reloads.
+#[wasm_bindgen]
+pub fn stress_set_contact_fracture(on: bool) {
+    CONTACT.set(Some(on));
+}
+
+/// Whether the loaded world runs the in-step contact fracture (false for a world without
+/// one: the GPU stress solver's).
+#[wasm_bindgen]
+pub fn stress_contact_fracture() -> bool {
+    TWORLD.with(|w| w.try_borrow().ok().and_then(|w| w.as_ref().map(|l| l.world.contact_fracture() > 0))).unwrap_or(false)
+}
+
+/// Whether the loaded world can run the in-step contact fracture (the fracture world).
+#[wasm_bindgen]
+pub fn stress_contact_fracture_available() -> bool {
+    TWORLD.with(|w| w.try_borrow().ok().is_some_and(|w| w.is_some()))
+}
+
+/// Whether strike prediction is on: as the lab set it, else the loaded world's (its
+/// profile's own).
+#[wasm_bindgen]
+pub fn stress_strike_prediction() -> bool {
+    if let Some(on) = STRIKE.get() {
+        return on;
+    }
+    let loaded = WORLD.with(|w| w.try_borrow().ok().and_then(|w| w.as_ref().map(|l| l.world.predict_strikes)));
+    let loaded = loaded.or_else(|| TWORLD.with(|w| w.try_borrow().ok().and_then(|w| w.as_ref().map(|l| l.world.strike_prediction()))));
+    loaded.unwrap_or_else(|| PROFILE.get().predicts_strikes())
 }
 
 /// The physics frame rate (Hz) of the next `stress_load`: one resident frame per
@@ -480,12 +545,17 @@ fn load(level: u8) -> Result<(), String> {
     scene.sim.methods = stress_ref::scene::Methods::established();
     profile.apply_scene(&mut scene);
     scene.materials.entry("projectile".into()).or_insert_with(stress_ref::builders::elastic_steel);
-    if profile == Profile::Threshold && THRESHOLD_GPU.get() {
+    // The load path and the analytic strike exist only on the GPU-resident fracture world.
+    if (profile == Profile::Threshold && THRESHOLD_GPU.get()) || profile.fracture_world_only() {
         return DEVICE.with_borrow(|d| {
             let d = d.as_ref().ok_or("stress_init first")?;
             let gpu = &d.gpu;
             let s = SHOOTING.get().expect("shooting set");
-            let mut world = stress_rubble::threshold::ThresholdWorld::new(gpu, &scene, s.radius, s.mass)?;
+            let mut world = stress_rubble::threshold::ThresholdWorld::with_contact_fracture(gpu, &scene, s.radius, s.mass, profile, CONTACT.get())?;
+            STRIKE_PENDING.set(false);
+            if let Some(on) = STRIKE.get() {
+                world.set_strike_prediction(gpu, on)?;
+            }
             let shots = world.shot_impactors();
             let renderer = Renderer::for_target(gpu, &world.mirror, &shots, d.config.width, d.config.height, d.view_format);
             world.attach_view(gpu, &renderer);
@@ -509,6 +579,10 @@ fn load(level: u8) -> Result<(), String> {
         world.redo_fractured_frames = false;
         world.set_impact_islands(true);
         world.apply_profile(profile);
+        STRIKE_PENDING.set(false);
+        if let Some(on) = STRIKE.get() {
+            world.set_strike_prediction(on)?;
+        }
         let shots = shot_meshes(&world);
         // Meshes for every chunk and for the shots to come.
         let (mut renderer, totals) = world.view_with(gpu, |mirror, _| {
@@ -570,6 +644,11 @@ fn camera_view(width: u32, height: u32) -> ([[f32; 4]; 4], Vec3) {
 /// finished them (never waited for). Nothing here reads the GPU.
 fn frame_threshold(d: &mut Device, l: &mut TLoaded, elapsed_ms: f64) -> Result<(), String> {
     let gpu = &d.gpu;
+    if STRIKE_PENDING.replace(false) {
+        if let Some(on) = STRIKE.get() {
+            l.world.set_strike_prediction(gpu, on)?;
+        }
+    }
     let (width, height) = SIZE.get();
     if (width, height) != (d.config.width, d.config.height) {
         d.config.width = width;
@@ -638,6 +717,10 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, elapsed_ms: f64) -> Result<(
         "ballSpeed": s.map_or(0.0, |s| engine_fracture::plan::default_shot_speed(s.extent, s.speed)),
         "frameHz": 1.0 / dt,
         "profile": PROFILE.get().name(),
+        "strikePrediction": l.world.strike_prediction(),
+        "contactFracture": l.world.contact_fracture() > 0,
+        "contactStrikes": st.contact_strikes,
+        "contactBreaks": st.contact_breaks,
         // As the GPU last finished them (a frame or two behind).
         "frames": l.world.frame,
         "statsFrame": st.frame,
@@ -650,12 +733,16 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, elapsed_ms: f64) -> Result<(
         "errors": st.error,
         "engineOverflow": st.engine_overflow,
         "compactions": 0,
+        // `impact_local`: the analytic strikes by outcome; `load_path`: its largest failure
+        // index (1: a bond's strength).
+        "strikes": { "bounce": st.bounces, "crater": st.craters, "spall": st.spalls, "perforate": st.perforations },
+        "peakUtilization": st.peak_utilization,
     });
     STATS.set(stats.to_string());
     if st.error != 0 || st.engine_overflow != 0 {
         // Paused: one report, not one a frame.
         RUNNING.set(false);
-        return Err(format!("threshold world: fracture errors {:#x}, engine overflow {:#x} (fracture: 1 no free body slot, 2 a mass sum out of range, 4 a union did not settle, 8 the impact pulse pool is full; engine: 1 contacts, 2 candidate pairs, 64 manifolds)", st.error, st.engine_overflow));
+        return Err(format!("threshold world: fracture errors {:#x}, engine overflow {:#x} (fracture: 1 no free body slot, 2 a mass sum out of range, 4 a union did not settle, 8 the impact pulse pool is full, 16 a strike's thickness ran past its passes, 32 a load-path block was not positive definite; engine: 1 contacts, 2 candidate pairs, 64 manifolds)", st.error, st.engine_overflow));
     }
     Ok(())
 }
@@ -675,6 +762,11 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
         WORLD.with_borrow_mut(|w| {
             let Some(l) = w.as_mut() else { return Ok(()) };
             let gpu = &d.gpu;
+            if STRIKE_PENDING.replace(false) {
+                if let Some(on) = STRIKE.get() {
+                    l.world.set_strike_prediction(on)?;
+                }
+            }
             let (width, height) = SIZE.get();
             if (width, height) != (d.config.width, d.config.height) {
                 d.config.width = width;
@@ -717,6 +809,7 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
             let want_stats = stepped > 0 || STATS.with_borrow(|s| s == "{}");
             let renderer = &l.renderer;
             let totals = l.totals;
+            let strike_prediction = l.world.predict_strikes;
             let (view_ms, draw_ms, stats) = l.world.view_with(gpu, |mirror, imps| {
                 let view_ms = t_view.elapsed().as_secs_f64() * 1e3;
                 let t_draw = web_time::Instant::now();
@@ -741,6 +834,7 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
                         "lastShot": imps.last().map(|i| serde_json::json!({"position": i.pose.position.to_array(), "velocity": i.velocity.to_array()})),
                         "frameHz": 1.0 / dt,
                         "profile": PROFILE.get().name(),
+                        "strikePrediction": strike_prediction,
                         // Rigid bodies the structures are now (each split's children).
                         "bodies": mirror.clusters.len(),
                     })

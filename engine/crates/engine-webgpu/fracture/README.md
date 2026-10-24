@@ -208,9 +208,38 @@ level, camera and shot rule, so the three can be compared:
 | **Breakable D6 joints** | Each bond a breakable AVBD weld (below) | rubble (this page's WGSL host) |
 | **Stress solver** | The GPU stress solver's bonds (`engine/stress-oracle`, profile `blast_parity`): rubble steps the bodies, its contacts load the bond graph, and a quasi-static stress cascade breaks bonds and splits fragments on the GPU | Rust on wasm with its own WebGPU device and canvas (`stress-oracle/crates/stress-web`) |
 | **Stress solver · simple threshold (v0)** | The same pipeline with no stress solve (profile `threshold`), forward only. A strike is predicted before rubble steps (its Hertz force against each bond's strength × area) and its island split first. After each step, a contact force beyond a bond's capacity breaks it. The breaks split fragments into new bodies on the GPU, exactly as the stress solver's do | As **Stress solver** |
+| **Stress solver · load path** | The threshold mode's GPU world (profile `load_path`) with a load path in place of the contact-force test: gravity and the contacts' forces and moments carried through the bond graph (a fixed number of warm-started relaxation sweeps a frame, as Blast's solver iterates), each bond checked against its tension, shear, compression and bending strengths. A weight on a cantilever breaks its root, not where it rests. Strikes as the threshold mode | As **Stress solver** |
+| **Stress solver · local impact** | The threshold mode's GPU world (profile `impact_local`) with an analytic local impact model for strikes: Hertz contact, a ballistic limit from crushing and plug shear, back-face spall, strain-rate strength. Below the limit a shot craters or spalls the wall; at or above it the plug comes out and leaves with the shot (Recht and Ipson's residual speed), before rubble steps. Contacts as the threshold mode | As **Stress solver** |
 | **Learned impact** | **Compute only** — lean MGN-T forward (H=48, P=64, ~139k random weights) on the house-1story pack graph. Does not break bonds or drive rubble; the HUD shows **ms/forward** so browser WebGPU latency can be compared to the native Metal M0 finding | This page's WebGPU device; Slang → WGSL (`slang/kernels/learned_impact.slang` → `generated/wgsl/learned_impact.wgsl`) |
 
-**Browser support (stress modes).** The two stress-solver modes wait on the GPU from Rust.
+**Strike prediction (stress modes).** The checkbox beside **Bonds**. On, each shot's strike
+is predicted at the end of the frame before it reaches a structure, and the bonds the strike
+breaks are broken before rubble steps, so the shot meets the pieces and carries on through
+(forward only, no re-simulation). Which bonds break is the strike model's call, not the
+stress solve's:
+- `threshold`, `load_path` and the blast_parity solver: the Hertz force's share against each
+  bond's tensile capacity;
+- `local impact`: its ballistic limit and plug cone.
+
+Off, rubble meets the whole structure first and the shot rebounds, whatever breaks after.
+Each mode starts with its own setting: on for threshold, load path and local impact, off for
+the blast_parity stress solver. Switching it applies at once.
+`stress-rubble/tests/strike_through.rs` checks both on the cuboid house.
+
+**In-step contact fracture (fracture-world stress modes).** The checkbox beside
+**Strike prediction**; on by default in **load path**, and it reloads the scene. Within
+rubble's step, where its broad phase ends, a body about to strike a structure has the
+strike's load solved by the load path before the step solves:
+- the bonds break by their own strength and the structure splits, so the striker meets the
+  pieces; or nothing breaks and the striker does not get through;
+- the load is the impulse that stops the striker against the whole structure, at its Hertz
+  peak: an upper bound, so it breaks more than the explicit reference does (see
+  `engine/docs/stress-threshold-gpu.md`);
+- with it on, strikes are not also predicted at the end of a frame (Strike prediction off).
+
+`stress-rubble/tests/contact_fracture.rs` checks it.
+
+**Browser support (stress modes).** The stress-solver modes wait on the GPU from Rust.
 Chrome and Edge 137+ suspend the wasm stack there with WebAssembly JavaScript Promise
 Integration (JSPI). Other WebGPU browsers (Safari, including iPhone) load an Asyncify build of
 the same Rust (`stress_web_bg.asyncify.wasm`), whose stack the page unwinds and rewinds
