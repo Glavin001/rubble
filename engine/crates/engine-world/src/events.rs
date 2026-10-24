@@ -2,7 +2,7 @@
 //! joint events) plus Rubble's destruction stream and per-frame outputs for
 //! vehicles, soft bodies and skinned meshes.
 
-use crate::{ActorInfo, BodyId, DestructibleId, JointId, Transform};
+use crate::{ActorInfo, AssemblyId, BodyId, DestructibleId, JointId, Transform};
 use engine_schema::{MountBreak, StepCounters};
 use engine_softbody::{BeamBreak, PieceDetached, SoftHandle};
 use engine_vehicle::{VehicleHandle, VehicleState};
@@ -47,6 +47,16 @@ pub enum DestructionEvent {
     BeamBroke(BeamBreak),
     /// A soft-body piece (a door, a bumper) came loose.
     PieceDetached(PieceDetached),
+    /// A connection of an assembly (or a composed vehicle) broke: a mount
+    /// sheared off, a joint past its break limit. The joint stays allocated
+    /// (broken) until `World::destroy_joint`.
+    ConnectionBroke {
+        assembly: AssemblyId,
+        connection: String,
+        joint: JointId,
+        force: f32,
+        torque: f32,
+    },
     /// Bonds of a destructible broke this step (bond indices into its asset).
     BondsBroken {
         destructible: DestructibleId,

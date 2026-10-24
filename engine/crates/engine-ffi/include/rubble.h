@@ -50,6 +50,9 @@ typedef enum RbDestructionType {
   // An actor of a destructible came apart: `destructible`, `parent`,
   // `children` / `child_count`.
   RB_SPLIT = 5,
+  // A connection of an assembly or composed vehicle broke: `assembly`,
+  // `name`, `joint`, `force`, `torque`.
+  RB_CONNECTION_BROKE = 6,
 } RbDestructionType;
 
 typedef enum RbBodyType {
@@ -173,6 +176,9 @@ typedef struct RbDestructionEvent {
   struct RbActor parent;
   const struct RbActor *children;
   uint32_t child_count;
+  uint64_t assembly;
+  // The connection's name (UTF-8, NUL-terminated).
+  const char *name;
 } RbDestructionEvent;
 
 typedef struct RbWheelState {

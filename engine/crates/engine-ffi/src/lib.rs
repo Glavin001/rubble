@@ -325,6 +325,9 @@ pub enum RbDestructionType {
     /// An actor of a destructible came apart: `destructible`, `parent`,
     /// `children` / `child_count`.
     RB_SPLIT = 5,
+    /// A connection of an assembly or composed vehicle broke: `assembly`,
+    /// `name`, `joint`, `force`, `torque`.
+    RB_CONNECTION_BROKE = 6,
 }
 
 /// A connected group of chunks of a destructible (one rigid actor).
@@ -378,6 +381,9 @@ pub struct RbDestructionEvent {
     pub parent: RbActor,
     pub children: *const RbActor,
     pub child_count: u32,
+    pub assembly: u64,
+    /// The connection's name (UTF-8, NUL-terminated).
+    pub name: *const c_char,
 }
 
 #[repr(C)]
@@ -489,6 +495,7 @@ struct FrameStore {
     u32_lists: Vec<Vec<u32>>,
     body_lists: Vec<Vec<RbBodyId>>,
     actor_lists: Vec<Vec<RbActor>>,
+    names: Vec<CString>,
 }
 
 /// An opaque world.
@@ -711,6 +718,8 @@ impl RbWorld {
                 parent: RbActor::empty(),
                 children: std::ptr::null(),
                 child_count: 0,
+                assembly: 0,
+                name: std::ptr::null(),
             };
             match e {
                 DestructionEvent::JointBroke {
@@ -744,6 +753,22 @@ impl RbWorld {
                     ev.mass = p.mass;
                     s.piece_nodes.push(p.nodes.clone());
                     ev.node_count = p.nodes.len() as u32;
+                }
+                DestructionEvent::ConnectionBroke {
+                    assembly,
+                    connection,
+                    joint,
+                    force,
+                    torque,
+                } => {
+                    ev.type_ = RbDestructionType::RB_CONNECTION_BROKE;
+                    ev.assembly = assembly.to_bits();
+                    ev.joint = joint.to_bits();
+                    ev.force = coords.length_out(*force);
+                    ev.torque = coords.length_out(coords.length_out(*torque));
+                    let name = CString::new(connection.replace('\0', " ")).unwrap_or_default();
+                    ev.name = name.as_ptr();
+                    s.names.push(name);
                 }
                 DestructionEvent::BondsBroken {
                     destructible,

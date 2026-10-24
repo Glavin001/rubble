@@ -18,6 +18,7 @@
 //!
 //! See `engine/docs/public-api.md` and `engine/docs/api-review.md`.
 
+mod assembly;
 mod defs;
 mod destruction;
 mod error;
@@ -27,6 +28,10 @@ mod joints;
 mod math;
 mod readback;
 
+pub use assembly::{
+    AssemblyDef, AssemblyId, ConnectionDef, ConnectionKind, PartDef, PartHandle, PartModel,
+    PartRef, VehicleBuild, VehicleDef, VehicleModel,
+};
 pub use defs::{BodyDef, BodyType, Geometry, MassData, MotionLocks, ShapeDef, SurfaceMaterial};
 pub use destruction::{
     ActorInfo, Anchors, BondDesc, ChunkDesc, DestructibleAssetDesc, DestructibleAssetId,
@@ -299,6 +304,9 @@ pub struct World {
     destructibles: Vec<destruction::DestructibleSlot>,
     /// Bond joint index -> (destructible slot, bond index).
     bond_owner: std::collections::HashMap<u32, (u32, u32)>,
+    assemblies: Vec<assembly::AssemblySlot>,
+    /// Connection joint index -> (assembly slot, connection index).
+    connection_owner: std::collections::HashMap<u32, (u32, u32)>,
     backpressure: Backpressure,
     user_data: u64,
     step: u64,
@@ -370,6 +378,8 @@ impl World {
             assets: Vec::new(),
             destructibles: Vec::new(),
             bond_owner: std::collections::HashMap::new(),
+            assemblies: Vec::new(),
+            connection_owner: std::collections::HashMap::new(),
         })
     }
 
@@ -1394,6 +1404,7 @@ impl World {
                 .map(DestructionEvent::PieceDetached),
         );
         let destruction = self.destruction_events(destruction);
+        let destruction = self.connection_events(destruction);
         let resync = raw
             .extras
             .iter()
@@ -1558,6 +1569,7 @@ impl World {
     fn release_joint(&mut self, index: u32) {
         self.sim.remove_joint(index);
         self.bond_owner.remove(&index);
+        self.connection_owner.remove(&index);
         let slot = &mut self.joints[index as usize];
         slot.alive = false;
         slot.generation = slot.generation.wrapping_add(1).max(1);

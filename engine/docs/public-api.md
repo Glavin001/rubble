@@ -813,7 +813,39 @@ impulses and damage.
 host-coupled until R5 and island frames run on the GPU. Bond-utilization
 observables.
 
-**V1: assemblies and composable vehicles.** `AssemblyDef` and `VehicleDef`
+**V1 (shipped, first cut).** These calls compose rigid, soft and
+destructible parts.
+
+**Calls.**
+
+- `create_assembly(&AssemblyDef)` places parts and connections; it suits
+  mechs, signs, doors and pre-rigged structures.
+- `create_vehicle(&VehicleDef)` builds a vehicle from:
+  - a core, `VehicleModel::Rigid(VehicleDesc)` or
+    `VehicleModel::Soft(SoftVehicleDesc, SpawnOptions)`;
+  - extra parts mounted onto `Chassis`, `VehiclePart(i)`, `SoftNode(i)`, any
+    named part, or a destructible's `Chunk`.
+- `assembly_part` and `assembly_connection` look up what was built.
+
+**Parts.** A part is `Rigid` (a body with shapes) or `Destructible` (a D1
+instance).
+
+**Connections.**
+
+- A connection is a breakable `Mount` or any typed `JointDef`.
+- Its frame is given once, in assembly or design space. Each body's joint
+  frame is derived from where that body starts.
+- A connection that breaks raises `ConnectionBroke { assembly, connection,
+  joint, force, torque }`, which is also `RB_CONNECTION_BROKE` in the ABI.
+
+**Next.**
+
+- Soft *parts* inside a rigid vehicle.
+- Folding the presets and the JBeam / Rigs of Rods imports into `VehicleDef`
+  builders.
+- Assemblies in the C ABI.
+
+**V1 (original plan): assemblies and composable vehicles.** `AssemblyDef` and `VehicleDef`
 with rigid, soft and (after D1) destructible parts, and core, mount, bond and
 joint connections. The presets become builders. `add_soft_vehicle` is folded
 into `add_vehicle`.
