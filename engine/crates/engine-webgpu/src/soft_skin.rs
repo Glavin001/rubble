@@ -6,14 +6,10 @@
 //! largest crumple strain around the vertex) and per-triangle normal/strain
 //! (w = −1 for a torn triangle). Nothing is read back to the CPU.
 
-use crate::WgpuSim;
+use crate::{WgpuSim, SOFT_SKIN_WGSL};
 use engine_softbody::SkinBinding;
 use glam::Vec3;
 use wgpu::util::DeviceExt;
-
-/// The skinning kernels as one WGSL module (entries `soft_skin_vertices`,
-/// `soft_skin_faces`, `soft_skin_normals`), as `generated/wgsl/soft_skin.wgsl`.
-pub const SOFT_SKIN_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/wgsl/soft_skin.wgsl"));
 
 pub struct SoftSkinner {
     pipelines: [wgpu::ComputePipeline; 3],

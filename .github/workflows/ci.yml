@@ -38,17 +38,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      # Both workspaces: the stress-solver wasm (engine/stress-oracle) is the longest compile.
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: engine
+          workspaces: |
+            engine
+            engine/stress-oracle
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - name: Cache slangc and wasm-pack
+      # wasm-pack cargo-installs the wasm-bindgen CLI pinned by the wasm crates (~1 min).
+      - name: Cache slangc, wasm-pack, Binaryen and wasm-bindgen
         uses: actions/cache@v4
         with:
-          path: ~/.cache/rubble-tools
-          key: rubble-tools-${{ runner.os }}-${{ hashFiles('engine/scripts/build-web.sh') }}
+          path: |
+            ~/.cache/rubble-tools
+            ~/.cache/.wasm-pack
+          key: rubble-tools-${{ runner.os }}-${{ hashFiles('engine/scripts/build-web.sh', 'engine/crates/*-wasm/Cargo.toml', 'engine/stress-oracle/crates/stress-web/Cargo.toml') }}
       # The same build as the Vercel preview: slangc → WGSL, wasm modules, scene snapshots.
       - name: Build the demo site
         run: bash engine/scripts/build-web.sh
