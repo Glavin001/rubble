@@ -68,6 +68,9 @@ fi
 if [[ "$ONLY" == Rubble.Town* ]]; then
   run town "$ONLY" game
 fi
+if [[ "$ONLY" == Rubble.Video* ]]; then
+  run video "$ONLY" game
+fi
 if [[ -z "$ONLY" || "$ONLY" == Rubble.Poc* ]]; then
   run poc "${ONLY:-Rubble.Poc.GpuScene}" game "-RubblePoc=gpuscene -RubblePocSide=${RUBBLE_POC_SIDE:-100}"
 fi

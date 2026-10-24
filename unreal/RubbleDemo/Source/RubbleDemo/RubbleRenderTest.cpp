@@ -13,6 +13,7 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "HAL/PlatformTime.h"
+#include "Misc/App.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/CommandLine.h"
 #include "Misc/FileHelper.h"
@@ -689,3 +690,83 @@ bool FRubbleTownDestroy::RunTest(const FString& Parameters)
 	return true;
 }
 #endif
+
+#if WITH_DEV_AUTOMATION_TESTS
+/**
+ * Rubble.Video.Town: a short film of Vibe Town wrecked, every frame saved to
+ * RubbleShots/video/town_NNNN.png (scripts/unreal/video.sh encodes them). Engine time runs at a
+ * fixed 1/30 s a frame, so the simulation plays at real speed in the film however slow a frame is
+ * to make. Two shots: cannonballs and a meteor in Elm Park, then meteors onto two towers.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRubbleVideoTown, "Rubble.Video.Town",
+	EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
+
+bool FRubbleVideoTown::RunTest(const FString& Parameters)
+{
+	if (!TestTrue(TEXT("the town loads"), Rubble() && Load(TEXT("fracture:town?autoshot=0"))))
+	{
+		return false;
+	}
+	constexpr double Fps = 30.0;
+	constexpr double Length = 13.0;
+	const FString Dir = ShotDir() / TEXT("video");
+	IFileManager::Get().DeleteDirectory(*Dir, false, true);
+	IFileManager::Get().MakeDirectory(*Dir, true);
+	struct FState
+	{
+		int32 Frame = -1;
+		int32 Fired = 0;
+	};
+	TSharedRef<FState> S = MakeShared<FState>();
+	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(4.0f));
+	ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([S, Dir, Fps, Length]() {
+		if (S->Frame < 0)
+		{
+			FApp::SetUseFixedTimeStep(true);
+			FApp::SetFixedDeltaTime(1.0 / Fps);
+			S->Frame = 0;
+		}
+		const double At = S->Frame / Fps;
+		// Shot 1, Elm Park: a slow push toward two houses. Shot 2: the towers from the west.
+		const FVector HouseA(-1554, -5120, 250), HouseB(-1554, -3420, 0), Street(-4600, -8300, 380);
+		const FVector TowerA(-6289, 8995, 0), TowerB(-6289, 13414, 0);
+		const bool bTowers = At >= 6.5;
+		const float u = bTowers ? float((At - 6.5) / (Length - 6.5)) : float(At / 6.5);
+		const float Ease = u * u * (3.0f - 2.0f * u);
+		const FVector Eye = bTowers ? FMath::Lerp(FVector(-15500, 2500, 3400), FVector(-13200, 4600, 2500), Ease)
+			: FMath::Lerp(Street, FVector(-3900, -7500, 520), Ease);
+		const FVector Target = bTowers ? (TowerA + TowerB) * 0.5 + FVector(0, 0, 1300) : (HouseA + HouseB) * 0.5 + FVector(0, 0, 250);
+		if (ARubblePawn* Pawn = Cast<ARubblePawn>(GameWorld()->GetFirstPlayerController()->GetPawn()))
+		{
+			Pawn->LookFrom(Eye, Target);
+		}
+		struct FCue { double At; int32 What; };
+		static const FCue Cues[] = { { 1.0, 1 }, { 1.4, 1 }, { 1.8, 1 }, { 2.8, 2 }, { 7.0, 3 }, { 9.0, 4 } };
+		for (int32 c = 0; c < UE_ARRAY_COUNT(Cues); ++c)
+		{
+			if (At >= Cues[c].At && !(S->Fired & (1 << c)))
+			{
+				S->Fired |= 1 << c;
+				switch (Cues[c].What)
+				{
+				case 1: Rubble()->Launch(Street + FVector(0, 0, -150), HouseA - Street); break;
+				case 2: Rubble()->Meteor(HouseB); break;
+				case 3: Rubble()->Meteor(TowerA); break;
+				case 4: Rubble()->Meteor(TowerB); break;
+				}
+			}
+		}
+		FScreenshotRequest::RequestScreenshot(Dir / FString::Printf(TEXT("town_%04d.png"), S->Frame), /*bShowUI=*/false, false);
+		if (++S->Frame < int32(Length * Fps))
+		{
+			return false;
+		}
+		FApp::SetUseFixedTimeStep(false);
+		UE_LOG(LogRubble, Display, TEXT("Rubble.Video.Town: %d frames in %s"), S->Frame, *Dir);
+		return true;
+	}));
+	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(0.5f));
+	return true;
+}
+#endif
+
