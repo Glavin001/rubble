@@ -80,9 +80,11 @@ fn main() {
         }
     };
     if p == Profile::Threshold {
-        let ball = stress_ref::wrecking::BALLS[0];
+        // The scene's own ball (the pack's, as the lab loads it): the parked shots' size and mass.
+        let ball = stress_ref::topple::topple_tower().ball;
         let mut w = stress_rubble::threshold::ThresholdWorld::new(&gpu, &scene, ball.radius, ball.mass).expect("threshold world");
         let dt = w.frame_dt;
+        let mut was_broken = vec![false; w.tables.bonds.len()];
         for f in 0..frames {
             if w.frame == at {
                 demolition.arm("", w.frame, dt);
@@ -101,6 +103,23 @@ fn main() {
                 let pos: Vec<Vec3> = w.chunk_centres(&gpu).iter().map(|(c, _)| Vec3::from_array(*c)).collect();
                 let body: Vec<u64> = w.fracture.chunk_bodies(&gpu).into_iter().map(u64::from).collect();
                 report(f, &pos, &body, st.broken as f64, st.bodies as f64);
+                if std::env::var("TOPPLE_TRACE").is_ok() {
+                    // The bonds broken since the last report, by storey and the kinds of
+                    // chunk they joined (the world's one structure: global chunk = chunk).
+                    let intact = w.fracture.bonds_intact(&gpu);
+                    let kind = |c: usize| chunks[c].groups.first().cloned().unwrap_or_default();
+                    let mut by: BTreeMap<String, usize> = BTreeMap::new();
+                    for (i, b) in w.tables.bonds.iter().enumerate() {
+                        let (a, c) = (b[0] as usize, b[1] as usize);
+                        if !intact[i] && !was_broken[i] {
+                            *by.entry(format!("s{} {}-{}", storey[a].or(storey[c]).unwrap_or(0), kind(a), kind(c))).or_default() += 1;
+                        }
+                        was_broken[i] = !intact[i];
+                    }
+                    if !by.is_empty() {
+                        println!("  {by:?}");
+                    }
+                }
                 if f + 1 == frames {
                     storeys_at_end(&pos, &body);
                 }
