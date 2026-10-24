@@ -117,12 +117,23 @@ self-weight" reading was wrong. Fixes:
 Now (`town_probe`, 3 runs each, and `Rubble.Town.Destroy`): stable, repeatable, the town settles
 back to sleep, at most 4,290 chunks awake.
 
-**Open: strikes break nothing (needs a decision).** Under the pack's limits (Blast's
-impulse/area over 1/60 s) a 22 t meteor at 50 m/s onto a house breaks no bond, in World and
-in the lab's own runner alike (`engine-viewer/tests/town_lab_meteor.rs`). `strength` 0.3 and 0.1
-break 0–1 bonds, 0.03 breaks 154: what limits it is less the limits than the force a strike
-delivers through AVBD's contacts in a step. Options: engine impact-fracture calibration for
-packs, the lab's stress model, or a pack re-export. `?strength=` stays 1 until decided.
+**The town runs the threshold strength model** (by decision, 2026-10-24; `?bonds=1` keeps the
+bond joints). It is World's D1b (`StrengthModel::Threshold`, PR #79, merged into this branch):
+the fracture lab's threshold mode on the world's own device.
+- The world uses canonical contacts, at most 2,097,120 (the contact ingest's dispatch; placing
+  fails above that). The asset's threshold solver steps at 60 Hz. The lab's ground (its grade,
+  50 cm up) is placed on Unreal's.
+- Cannonballs and meteors are projectiles (`rbBody_SetProjectile`): strike prediction loads the
+  town as the lab's shots do.
+- A cluster's chunks share one body: 281 bodies at rest for 51,921 chunks. Split events move
+  their instances to the child bodies (`ARubblePrimitives::Rebind`); every piece's origin is the
+  town's frame, so nothing jumps.
+- `Rubble.Town.Destroy`: 1.4 ms of physics a frame (44 ms under bond joints), frames 14 ms,
+  64 break events. Cannonballs hole the house walls; the meteors break pieces off the tower roofs
+  but rest on them.
+
+Under bond joints, strikes broke nothing: under the pack's limits a 22 t meteor at 50 m/s broke
+no bond, in World and in the lab's own runner (`engine-viewer/tests/town_lab_meteor.rs`).
 
 ## Blocked: Nanite and virtual shadow maps need macOS 15
 
