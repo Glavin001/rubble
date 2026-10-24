@@ -6,7 +6,8 @@ New 3D GPU rigid-body physics engine. **Not** an extension of the legacy `crates
 - **Host:** Rust (`crates/engine-*`)
 - **Proof target:** Apple Silicon Metal (MacBook M3 Max)
 - **Sleep:** required, island-scoped
-- **CCD:** stretch goal (`ccd_classify` / `ccd_sweep`)
+- **CCD:** uncapped look-ahead, the fast broadphase list and time-of-impact contacts for `BODY_CCD` bodies, GPU impulses and projectile casts ([docs/ccd.md](docs/ccd.md))
+- **Characters:** GPU kinematic capsule controllers (stairs, slopes, platforms, debris pushing) and in-step ray/shape queries ([docs/characters.md](docs/characters.md))
 
 See [TOOLCHAIN.md](TOOLCHAIN.md) for slangc and pinned inspiration revisions.
 For the browser demo and automated scale/correctness checks, see

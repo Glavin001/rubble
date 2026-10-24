@@ -21,7 +21,7 @@
 
 use std::cell::{Cell, RefCell};
 
-use engine_fracture::view::Orbit;
+use engine_fracture::view::{Orbit, ViewMode};
 use stress_gpu::gpu::Gpu;
 use stress_gpu::world::GpuWorld;
 use stress_ref::capability::Profile;
@@ -85,6 +85,8 @@ thread_local! {
     /// What the last load could not take from its input as given (`stress_stats`).
     static WARNINGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     static CAMERA: RefCell<Option<Orbit>> = const { RefCell::new(None) };
+    /// The camera's view mode, kept across loads (`stress_set_view_mode`).
+    static VIEW_MODE: Cell<ViewMode> = const { Cell::new(ViewMode::Orbit) };
     static SHOOTING: Cell<Option<Shooting>> = const { Cell::new(None) };
     static PENDING: RefCell<Vec<ImpactorDesc>> = const { RefCell::new(Vec::new()) };
     static FIRED: Cell<usize> = const { Cell::new(0) };
@@ -313,7 +315,8 @@ pub fn stress_set_view(bond_graph: bool, color_mode: u32) {
     VIEW.set((bond_graph, ColorMode::from_index(color_mode)));
 }
 
-/// Orbit the camera by a pointer drag (CSS pixels), as the lab's other modes.
+/// Orbit the camera (first person: turn the look) by a pointer drag (CSS pixels), as the
+/// lab's other modes.
 #[wasm_bindgen]
 pub fn stress_drag(dx: f64, dy: f64) {
     CAMERA.with_borrow_mut(|c| {
@@ -323,12 +326,46 @@ pub fn stress_drag(dx: f64, dy: f64) {
     });
 }
 
-/// Zoom by a wheel delta.
+/// Zoom by a wheel delta (the first-person modes: their travel speed).
 #[wasm_bindgen]
 pub fn stress_zoom(delta_y: f64) {
     CAMERA.with_borrow_mut(|c| {
         if let Some(c) = c {
             c.zoom(delta_y);
+        }
+    });
+}
+
+/// The camera's view mode, as the lab's other modes (the Camera menu: 0 orbit, 1
+/// first-person walk, 2 fly); kept for the next loads.
+#[wasm_bindgen]
+pub fn stress_set_view_mode(mode: u32) {
+    let mode = ViewMode::from_index(mode);
+    VIEW_MODE.set(mode);
+    let (w, h) = SIZE.get();
+    CAMERA.with_borrow_mut(|c| {
+        if let Some(c) = c {
+            c.set_mode(mode, w.max(1) as f64 / h.max(1) as f64);
+        }
+    });
+}
+
+/// First-person mouse-look by pointer-lock movement (CSS pixels).
+#[wasm_bindgen]
+pub fn stress_mouse_look(dx: f64, dy: f64) {
+    CAMERA.with_borrow_mut(|c| {
+        if let Some(c) = c {
+            c.mouse_look(dx, dy);
+        }
+    });
+}
+
+/// First-person travel for `dt` seconds (axes in -1..1: forward, right, up).
+#[wasm_bindgen]
+pub fn stress_travel(forward: f64, right: f64, up: f64, sprint: bool, dt: f64) {
+    CAMERA.with_borrow_mut(|c| {
+        if let Some(c) = c {
+            c.travel(forward, right, up, sprint, dt);
         }
     });
 }
@@ -412,7 +449,10 @@ fn load(level: u8) -> Result<(), String> {
         })
     })?;
     WARNINGS.set(warnings);
-    CAMERA.set(Some(Orbit::new(&lab)));
+    let mut camera = Orbit::new(&lab);
+    let (w, h) = SIZE.get();
+    camera.set_mode(VIEW_MODE.get(), w.max(1) as f64 / h.max(1) as f64);
+    CAMERA.set(Some(camera));
     SHOOTING.set(Some(Shooting { center: lab.center, extent: lab.extent, radius: lab.projectile_radius * RADIUS_SCALE.get(), mass: lab.projectile_mass, speed: lab.projectile_speed, arc: lab.projectile_arc, placement: lab.placement }));
     FIRED.set(0);
     RUNNING.set(false);

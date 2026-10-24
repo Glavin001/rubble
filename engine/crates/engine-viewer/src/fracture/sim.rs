@@ -23,6 +23,9 @@ pub struct Timing {
     pub wall_ms: f64,
     pub encode_ms: f64,
     pub wait_ms: f64,
+    /// The batch's GPU execution time per tick (its command buffer's
+    /// GPUStartTime..GPUEndTime).
+    pub gpu_ms: f64,
 }
 
 pub struct FractureSim {
@@ -33,6 +36,8 @@ pub struct FractureSim {
     pub plan: Planner,
     pub last: Counters,
     pub timing: Timing,
+    /// Dispatches in the last `profile_step` tick.
+    pub profile_dispatches: usize,
     in_flight: Option<CommandBuffer>,
     batch: (Instant, u32),
 }
@@ -109,6 +114,7 @@ impl FractureSim {
             plan,
             bufs,
             timing: Timing::default(),
+            profile_dispatches: 0,
             in_flight: None,
             batch: (Instant::now(), 1),
         };
@@ -273,6 +279,7 @@ impl FractureSim {
             wall_ms: encode,
             encode_ms: encode,
             wait_ms: 0.0,
+            gpu_ms: 0.0,
         };
         self.in_flight = Some(cb);
         self.batch = (start, count);
@@ -301,7 +308,102 @@ impl FractureSim {
         let n = count as f64;
         self.timing.wall_ms = (end - start).as_secs_f64() * 1000.0 / n;
         self.timing.wait_ms = (end - waited).as_secs_f64() * 1000.0 / n;
+        self.timing.gpu_ms = gpu_ms(&cb) / n;
         self.plan.overflow_error()
+    }
+
+    /// Diagnostic: one tick with each plan phase in its own command buffer,
+    /// waited; returns each phase's GPU time (ms, from the command buffers'
+    /// GPUStartTime/GPUEndTime). The splits add idle gaps, so the sum exceeds a
+    /// normal tick; the shares are what it is for.
+    pub fn profile_step(&mut self) -> anyhow::Result<Vec<(String, f64)>> {
+        self.wait()?;
+        let words = self.plan.encode_step(false).to_vec();
+        let commands = Command::decode(&words);
+        self.profile_dispatches = commands
+            .iter()
+            .filter(|c| matches!(c, Command::Dispatch { .. } | Command::Indirect { .. }))
+            .count();
+        let names = plan::phase_names();
+        write(&self.upload, 0, self.plan.host_upload());
+        let mut out: Vec<(String, f64)> = Vec::new();
+        let mut segment: Vec<Command> = Vec::new();
+        let mut first = true;
+        for c in commands {
+            match c {
+                Command::Phase { id } => {
+                    let cb = self.queue.new_command_buffer();
+                    if first {
+                        let blit = cb.new_blit_command_encoder();
+                        for c in &Command::decode(&words) {
+                            if let Command::Copy {
+                                src,
+                                src_offset,
+                                dst,
+                                dst_offset,
+                                size,
+                            } = *c
+                            {
+                                let (from, offset) = if src == HOST_UPLOAD {
+                                    (&self.upload, src_offset as u64)
+                                } else {
+                                    (&self.bufs[src as usize], src_offset as u64)
+                                };
+                                blit.copy_from_buffer(
+                                    from,
+                                    offset,
+                                    &self.bufs[dst as usize],
+                                    dst_offset as u64,
+                                    size as u64,
+                                );
+                            }
+                        }
+                        blit.end_encoding();
+                        first = false;
+                    }
+                    let desc = ComputePassDescriptor::new();
+                    desc.set_dispatch_type(MTLDispatchType::Serial);
+                    let e = cb.compute_command_encoder_with_descriptor(desc);
+                    for c in segment.drain(..) {
+                        match c {
+                            Command::Dispatch { kernel, x, y, pass } => {
+                                let k = self.bind(e, kernel, pass, false);
+                                e.dispatch_thread_groups(
+                                    MTLSize::new(x as u64, y as u64, 1),
+                                    threads(k),
+                                );
+                            }
+                            Command::Indirect { kernel, slot, pass } => {
+                                let k = self.bind(e, kernel, pass, true);
+                                e.dispatch_thread_groups_indirect(
+                                    &self.bufs[plan::ARGS_BUFFER as usize],
+                                    slot as u64 * 12,
+                                    threads(k),
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                    e.end_encoding();
+                    cb.commit();
+                    cb.wait_until_completed();
+                    let name = names.get(id as usize).copied().unwrap_or("?").to_string();
+                    match out.iter_mut().find(|(n, _)| *n == name) {
+                        Some(o) => o.1 += gpu_ms(cb),
+                        None => out.push((name, gpu_ms(cb))),
+                    }
+                }
+                Command::Copy { .. } => {}
+                c => segment.push(c),
+            }
+        }
+        self.plan.mark_submitted();
+        let token = self.plan.begin_read();
+        self.last = self.plan.finish_read(
+            token,
+            &read_words(&self.bufs[plan::COUNTERS_BUFFER as usize], 0, 20),
+        );
+        Ok(out)
     }
 
     /// Step `count` ticks one at a time, waiting for each (tests, probes).
@@ -376,6 +478,13 @@ impl FractureSim {
         let words = read_words(self.body_buffer(), 0, count * BODY_BYTES / 4);
         Ok(words.into_iter().map(f32::from_bits).collect())
     }
+}
+
+/// A completed command buffer's GPU execution time (ms).
+fn gpu_ms(cb: &CommandBufferRef) -> f64 {
+    use objc::{msg_send, sel, sel_impl};
+    let (a, b): (f64, f64) = unsafe { (msg_send![cb, GPUStartTime], msg_send![cb, GPUEndTime]) };
+    (b - a).max(0.0) * 1e3
 }
 
 fn threads(k: &Kernel) -> MTLSize {

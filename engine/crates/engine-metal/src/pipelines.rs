@@ -70,8 +70,6 @@ impl Pipelines {
             ("extract_velocity_sleep", msl!("extract_velocity_sleep")),
             ("sleep_island_gate", msl!("sleep_island_gate")),
             ("sleep_island_commit", msl!("sleep_island_commit")),
-            ("ccd_classify", msl!("ccd_classify")),
-            ("ccd_sweep", msl!("ccd_sweep")),
             ("recompute_inertia", msl!("recompute_inertia")),
             ("record_color_degrees", msl!("record_color_degrees")),
             ("reuse_all_manifolds", msl!("reuse_all_manifolds")),

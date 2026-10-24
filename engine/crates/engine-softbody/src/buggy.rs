@@ -186,6 +186,20 @@ pub fn dune_buggy_soft_with(k: &BuggyBeams) -> SoftVehicleDesc {
             .filter(|p| h.core_parts.contains(&p.name))
             .cloned(),
     );
+    // Parent indices name the rigid preset's parts: re-point them into the core's
+    // list (a parent left off the core makes the part hang on the core itself).
+    let names: Vec<String> = parts.iter().map(|p| p.name.clone()).collect();
+    for p in &mut parts {
+        p.mount.parent = p
+            .mount
+            .parent
+            .and_then(|i| {
+                names
+                    .iter()
+                    .position(|n| *n == rigid.parts[i as usize].name)
+            })
+            .map(|i| i as u32);
+    }
     core.parts = parts;
 
     let rigid_parts = h

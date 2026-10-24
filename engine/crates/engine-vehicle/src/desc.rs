@@ -284,11 +284,21 @@ pub struct MountDesc {
     /// Design-space point the moment is taken about (default: the part's
     /// centre of mass; a wheel's: its hardpoint).
     pub anchor: Option<[f32; 3]>,
+    /// Parts only: the part this one is bolted to (its index, lower than this
+    /// part's; default the chassis). While both are on the car this part's load
+    /// counts toward the parent's mount; when the parent leaves (severed, or its
+    /// mount broke) this part goes with it as one rigid piece.
+    pub parent: Option<u32>,
 }
 
 impl MountDesc {
     pub fn breakable(&self) -> bool {
         self.break_force > 0.0 || self.break_torque > 0.0
+    }
+
+    /// A mount on the chassis with these limits.
+    pub fn limits(break_force: f32, break_torque: f32) -> Self {
+        Self { break_force, break_torque, ..Default::default() }
     }
 }
 

@@ -2167,13 +2167,11 @@ fn body_state(slot: &BodySlot) -> BodyState {
         }
         BodyType::Kinematic => {
             // Infinite mass that moves at its set velocity (the kernels'
-            // BODY_KINEMATIC).
+            // `bodyIsKinematic`: BODY_KINEMATIC without BODY_DYNAMIC).
             let mut s = BodyState::static_plane_support();
             s.position = solver.position;
             s.orientation = solver.rotation;
-            s.flags = engine_schema::BodyFlags::Dynamic as u32
-                | engine_schema::BodyFlags::Kinematic as u32
-                | engine_schema::BodyFlags::Awake as u32;
+            s.flags = engine_schema::BodyFlags::Kinematic as u32 | engine_schema::BodyFlags::Awake as u32;
             s
         }
         BodyType::Static => {

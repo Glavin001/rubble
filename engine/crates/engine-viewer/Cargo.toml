@@ -28,3 +28,7 @@ serde_json.workspace = true
 [[bin]]
 name = "fracture_viewer"
 path = "src/bin/fracture_viewer.rs"
+
+[[bin]]
+name = "towers_capture"
+path = "src/bin/towers_capture.rs"
