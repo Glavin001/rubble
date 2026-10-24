@@ -611,3 +611,68 @@ fn damping_gravity_scale_and_locks_through_the_abi() {
         rbDestroyWorld(w);
     }
 }
+
+#[test]
+fn mass_data_and_getters_through_the_abi() {
+    unsafe {
+        let mut def = rbDefaultWorldDef();
+        def.coordinates = RbCoordinates::RB_COORDINATES_UNREAL;
+        def.gravity = v3(0.0, 0.0, -981.0);
+        let mut w = ptr::null_mut();
+        ok(rbCreateWorld(&def, &mut w));
+        let mut bd = rbDefaultBodyDef();
+        bd.type_ = RbBodyType::RB_DYNAMIC_BODY;
+        bd.user_data = 42;
+        let mut b = 0;
+        ok(rbCreateBody(w, &bd, &mut b));
+        // A 100 x 200 x 400 cm box of 0.0005 kg/cm³: 4000 kg.
+        let mut sd = rbDefaultShapeDef();
+        sd.density = 0.0005;
+        let mut s = 0;
+        ok(rbCreateBoxShape(
+            w,
+            b,
+            &sd,
+            v3(50.0, 100.0, 200.0),
+            RbTransform::default(),
+            &mut s,
+        ));
+        let mut m = RbMassData::default();
+        ok(rbBody_GetMassData(w, b, &mut m));
+        assert!((m.mass - 4000.0).abs() < 1.0, "{m:?}");
+        // I_xx = m (b² + c²) / 12 with b, c the y and z sizes (cm).
+        let ixx = 4000.0 * (200.0f32.powi(2) + 400.0f32.powi(2)) / 12.0;
+        assert!(
+            (m.rotational_inertia[0].x - ixx).abs() < 1e-3 * ixx,
+            "{m:?}"
+        );
+        let izz = 4000.0 * (100.0f32.powi(2) + 200.0f32.powi(2)) / 12.0;
+        assert!(
+            (m.rotational_inertia[2].z - izz).abs() < 1e-3 * izz,
+            "{m:?}"
+        );
+        let mut doubled = m;
+        doubled.mass *= 2.0;
+        for r in &mut doubled.rotational_inertia {
+            r.x *= 2.0;
+            r.y *= 2.0;
+            r.z *= 2.0;
+        }
+        ok(rbBody_SetMassData(w, b, doubled));
+        let mut again = RbMassData::default();
+        ok(rbBody_GetMassData(w, b, &mut again));
+        assert!((again.mass - 8000.0).abs() < 1.0);
+        assert!((again.rotational_inertia[0].x - 2.0 * ixx).abs() < 1e-3 * ixx);
+        let mut t = RbBodyType::RB_STATIC_BODY;
+        ok(rbBody_GetType(w, b, &mut t));
+        assert_eq!(t, RbBodyType::RB_DYNAMIC_BODY);
+        let mut u = 0;
+        ok(rbBody_GetUserData(w, b, &mut u));
+        assert_eq!(u, 42);
+        ok(rbWorld_Step(w));
+        let mut ms = -1.0;
+        ok(rbWorld_GetProfileMs(w, &mut ms));
+        assert!(ms >= 0.0);
+        rbDestroyWorld(w);
+    }
+}

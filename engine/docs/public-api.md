@@ -685,7 +685,7 @@ today; each feature below gets a World call and an ABI call instead. Status:
 | Ground plane (legacy scenes, fracture lab) | `Geometry::Plane` on static bodies, `rbCreatePlaneShape` (at most 8) | ✅ |
 | Projectiles, cannons, rams (teleport plus velocity) | `rbBody_SetTransform`, `rbBody_SetLinearVelocity`, create and destroy | ✅ |
 | Body velocity and awake state for HUDs and colouring | `rbBody_GetVelocity` (blocking), `rbBody_IsAwake` | ✅ |
-| Hand-set mass and inertia from C | `body_set_mass_data` in Rust; `rbBody_SetMassData` | 🔜 |
+| Hand-set mass and inertia from C | `body_set_mass_data`, `rbBody_SetMassData` / `rbBody_GetMassData` (tensor converted for Unreal) | ✅ |
 | Runtime gravity | `rbWorld_SetGravity` | ✅ |
 | Joints: ball, cone and twist limits, hinge limits, slider, weld, spring, distance and tether, motors, servo, breakable | typed joint defs | ✅ |
 | Live motor speed and servo target (motor toggle, servo sweep) | `joint_set_drive`, `rbJoint_SetDrive` | ✅ |
@@ -710,7 +710,7 @@ today; each feature below gets a World call and an ABI call instead. Status:
 | Collider debug view | `World::draw`; `rbWorld_DebugDraw` (C callbacks) | ✅ |
 | Fixed rate, several steps per frame, pause, single step, sleep skip | `step`, `rbWorld_Step`, `rbWorld_Poll(coalesce)` | ✅ |
 | Reset | destroy and recreate the world, or remove and re-add; snapshot and restore is P6 | ✅ (P6 later) |
-| Per-kernel GPU timings | `profile_ms`, `rbWorld_GetProfile` | 🔜 |
+| GPU step timings | `profile_ms`, `rbWorld_GetProfileMs` (per-kernel breakdown later) | ✅ |
 
 Descriptors and settings cross the ABI as JSON in the engine's units and
 design frame (metres, Y up), the format of `vehicle_presets.json` and the

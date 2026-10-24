@@ -508,6 +508,14 @@ typedef struct RbDestructibleDef {
   uint32_t internal_value;
 } RbDestructibleDef;
 
+// Mass, centre of mass (body frame) and rotational inertia about the centre
+// (body frame, rows), Box3D `b3MassData`.
+typedef struct RbMassData {
+  float mass;
+  struct RbVec3 center;
+  struct RbVec3 rotational_inertia[3];
+} RbMassData;
+
 // Functional overrides, ANDed with what the intact parts allow (bit i of a
 // mask: wheel i).
 typedef struct RbFunctionalState {
@@ -858,6 +866,19 @@ enum RbResult rbBody_SetGravityScale(struct RbWorld *world, RbBodyId body, float
 
 // `RB_LOCK_*` bits (host axes).
 enum RbResult rbBody_SetMotionLocks(struct RbWorld *world, RbBodyId body, uint32_t locks);
+
+// The body's mass data (zero for static and kinematic bodies).
+enum RbResult rbBody_GetMassData(struct RbWorld *world, RbBodyId body, struct RbMassData *out);
+
+// Override a dynamic body's mass data (Box3D `b3Body_SetMassData`).
+enum RbResult rbBody_SetMassData(struct RbWorld *world, RbBodyId body, struct RbMassData mass);
+
+enum RbResult rbBody_GetType(struct RbWorld *world, RbBodyId body, enum RbBodyType *out);
+
+enum RbResult rbBody_GetUserData(struct RbWorld *world, RbBodyId body, uint64_t *out);
+
+// GPU time of the last step that ran (ms; 0 where timestamps are off).
+enum RbResult rbWorld_GetProfileMs(struct RbWorld *world, double *out);
 
 // Awake as of the last polled frame.
 enum RbResult rbBody_IsAwake(struct RbWorld *world, RbBodyId body, bool *out);

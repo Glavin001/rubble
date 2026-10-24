@@ -127,6 +127,95 @@ pub unsafe extern "C" fn rbBody_SetMotionLocks(
     })
 }
 
+/// Mass, centre of mass (body frame) and rotational inertia about the centre
+/// (body frame, rows), Box3D `b3MassData`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RbMassData {
+    pub mass: f32,
+    pub center: RbVec3,
+    pub rotational_inertia: [RbVec3; 3],
+}
+
+/// The body's mass data (zero for static and kinematic bodies).
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_GetMassData(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    out: *mut RbMassData,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let m = w.world.body_mass_data(BodyId::from_bits(body))?;
+        let c = w.coords;
+        let out_data = m.map_or(RbMassData::default(), |m| {
+            let t = c.inertia_out(m.rotational_inertia);
+            RbMassData {
+                mass: m.mass,
+                center: RbVec3::of(c.position_out(m.center)),
+                rotational_inertia: t.map(RbVec3::of),
+            }
+        });
+        write(out, out_data)
+    })
+}
+
+/// Override a dynamic body's mass data (Box3D `b3Body_SetMassData`).
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_SetMassData(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    mass: RbMassData,
+) -> RbResult {
+    body_command(world, body, |w, id| {
+        let c = w.coords;
+        let data = MassData {
+            mass: mass.mass,
+            center: c.position_in(mass.center.a()),
+            rotational_inertia: c.inertia_in(mass.rotational_inertia.map(|r| r.a())),
+        };
+        w.world.body_set_mass_data(id, data)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_GetType(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    out: *mut RbBodyType,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let t = match w.world.body_type(BodyId::from_bits(body))? {
+            BodyType::Static => RbBodyType::RB_STATIC_BODY,
+            BodyType::Kinematic => RbBodyType::RB_KINEMATIC_BODY,
+            BodyType::Dynamic => RbBodyType::RB_DYNAMIC_BODY,
+        };
+        write(out, t)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_GetUserData(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    out: *mut u64,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        write(out, w.world.body_user_data(BodyId::from_bits(body))?)
+    })
+}
+
+/// GPU time of the last step that ran (ms; 0 where timestamps are off).
+#[no_mangle]
+pub unsafe extern "C" fn rbWorld_GetProfileMs(world: *mut RbWorld, out: *mut f64) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        write(out, w.world.profile_ms())
+    })
+}
+
 /// Awake as of the last polled frame.
 #[no_mangle]
 pub unsafe extern "C" fn rbBody_IsAwake(
