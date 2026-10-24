@@ -138,8 +138,6 @@ struct VehicleContext {
     vehicle: Option<VehicleHandle>,
     soft: Option<SoftHandle>,
     chassis: BodyId,
-    /// Vehicle design space -> world.
-    frame: Transform,
 }
 
 impl World {
@@ -190,7 +188,6 @@ impl World {
             vehicle,
             soft,
             chassis,
-            frame: design,
         };
         let assembly = self.build_assembly(
             design,

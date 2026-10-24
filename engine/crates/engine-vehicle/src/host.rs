@@ -732,9 +732,24 @@ impl VehicleHost {
     }
 
     pub fn read_ray_hits(&self, backend: &impl VehicleBackend) -> Vec<Option<RayHit>> {
-        let l = self.capacity.layout();
-        let data = backend.read_slots(l.ray_base, self.rays * RAY_STRIDE);
-        (0..self.rays as usize)
+        let (first, count) = self.ray_slots();
+        self.decode_ray_hits(&backend.read_slots(first, count))
+    }
+
+    /// The pool slots `(first, count)` holding the written rays and their hits,
+    /// for hosts that copy them with a step instead of reading them back.
+    pub fn ray_slots(&self) -> (u32, u32) {
+        (self.capacity.layout().ray_base, self.rays * RAY_STRIDE)
+    }
+
+    /// The most ray queries one batch holds.
+    pub fn max_rays(&self) -> u32 {
+        self.capacity.max_rays
+    }
+
+    /// Hits from a copy of [`Self::ray_slots`].
+    pub fn decode_ray_hits(&self, data: &[Slot]) -> Vec<Option<RayHit>> {
+        (0..data.len() / RAY_STRIDE as usize)
             .map(|i| {
                 let o0 = data[i * 4 + 2];
                 let o1 = data[i * 4 + 3];

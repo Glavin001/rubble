@@ -43,6 +43,8 @@ pub type RbVehicleId = u32;
 pub type RbSoftId = u32;
 /// A skinned soft-body mesh (index).
 pub type RbSkinId = u32;
+/// A queued ray batch (`rbWorld_CastRays`). 0 is null.
+pub type RbRayBatchId = u64;
 /// A placed destructible (packed handle). 0 is null.
 pub type RbDestructibleId = u64;
 /// A destructible asset (index).
@@ -427,6 +429,37 @@ pub struct RbSkinOutput {
     pub vertex_count: u32,
 }
 
+/// A ray to cast: from `origin` along `translation` (its length is the range).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RbRayInput {
+    pub origin: RbVec3,
+    pub translation: RbVec3,
+    /// Skipped by this ray (0: none).
+    pub ignore_body: RbBodyId,
+}
+
+/// One ray's closest hit (`hit` false: none).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RbRayHit {
+    pub hit: bool,
+    pub body: RbBodyId,
+    pub shape: RbShapeId,
+    pub point: RbVec3,
+    pub normal: RbVec3,
+    pub distance: f32,
+}
+
+/// A batch's hits, one per ray in the order queued (`RbFrame::rays`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RbRayBatchResult {
+    pub batch: RbRayBatchId,
+    pub hits: *const RbRayHit,
+    pub hit_count: u32,
+}
+
 /// Results of one step, or of several folded together (`rbWorld_Poll`).
 /// Pointers stay valid until the next poll.
 #[repr(C)]
@@ -451,6 +484,9 @@ pub struct RbFrame {
     pub soft_count: u32,
     pub skins: *const RbSkinOutput,
     pub skin_count: u32,
+    /// Ray batches queued with `rbWorld_CastRays` before these steps.
+    pub rays: *const RbRayBatchResult,
+    pub ray_count: u32,
 }
 
 impl RbFrame {
@@ -474,6 +510,8 @@ impl RbFrame {
             soft_count: 0,
             skins: std::ptr::null(),
             skin_count: 0,
+            rays: std::ptr::null(),
+            ray_count: 0,
         }
     }
 }
@@ -490,6 +528,8 @@ struct FrameStore {
     soft_nodes: Vec<Vec<RbVec3>>,
     skins: Vec<RbSkinOutput>,
     skin_data: Vec<(Vec<RbVec3>, Vec<RbVec3>)>,
+    rays: Vec<RbRayBatchResult>,
+    ray_hits: Vec<Vec<RbRayHit>>,
     /// Backing for bond lists, chunk lists, body lists and child arrays (the
     /// heap buffers do not move when these outer vectors grow).
     u32_lists: Vec<Vec<u32>>,
@@ -885,6 +925,32 @@ impl RbWorld {
             out.positions = p.as_ptr();
             out.normals = n.as_ptr();
         }
+        for r in &c.ray_results {
+            let hits: Vec<RbRayHit> = r
+                .hits
+                .iter()
+                .map(|h| match h {
+                    Some(h) => RbRayHit {
+                        hit: true,
+                        body: h.body.to_bits(),
+                        shape: h.shape.to_bits(),
+                        point: RbVec3::of(coords.position_out(h.point)),
+                        normal: RbVec3::of(coords.direction_out(h.normal)),
+                        distance: coords.length_out(h.distance),
+                    },
+                    None => RbRayHit::default(),
+                })
+                .collect();
+            s.rays.push(RbRayBatchResult {
+                batch: r.batch.0,
+                hits: std::ptr::null(),
+                hit_count: hits.len() as u32,
+            });
+            s.ray_hits.push(hits);
+        }
+        for (out, hits) in s.rays.iter_mut().zip(&s.ray_hits) {
+            out.hits = hits.as_ptr();
+        }
         let counters = c.counters;
         RbFrame {
             has_frame: true,
@@ -905,6 +971,8 @@ impl RbWorld {
             soft_count: s.soft.len() as u32,
             skins: s.skins.as_ptr(),
             skin_count: s.skins.len() as u32,
+            rays: s.rays.as_ptr(),
+            ray_count: s.rays.len() as u32,
         }
     }
 }
@@ -1074,6 +1142,38 @@ pub unsafe extern "C" fn rbWorld_GetTransforms(
             *o = t.map(|t| w.transform_out(t)).unwrap_or_default();
         }
         Ok(())
+    })
+}
+
+// ----- queries ---------------------------------------------------------------
+
+/// Queue ray casts (closest hit each) for the next step. They trace against
+/// that step's final poses on the GPU, and the hits arrive with its frame
+/// (`RbFrame::rays`, matched by `out_batch`) without stalling. A frame with
+/// queries is never dropped.
+#[no_mangle]
+pub unsafe extern "C" fn rbWorld_CastRays(
+    world: *mut RbWorld,
+    rays: *const RbRayInput,
+    count: u32,
+    out_batch: *mut RbRayBatchId,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        if count > 0 && rays.is_null() {
+            return Err(invalid("null array"));
+        }
+        let coords = w.coords;
+        let input: Vec<RayInput> = std::slice::from_raw_parts(rays, count as usize)
+            .iter()
+            .map(|r| RayInput {
+                origin: coords.position_in(r.origin.a()),
+                translation: coords.position_in(r.translation.a()),
+                ignore_body: (r.ignore_body != 0).then(|| BodyId::from_bits(r.ignore_body)),
+            })
+            .collect();
+        let id = w.world.cast_rays(&input)?;
+        write(out_batch, id.0)
     })
 }
 

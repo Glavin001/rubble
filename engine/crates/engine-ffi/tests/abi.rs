@@ -238,6 +238,43 @@ fn a_box_falls_rests_and_sleeps_through_the_abi() {
 }
 
 #[test]
+fn queued_rays_come_back_with_the_frame_in_host_units() {
+    unsafe {
+        let w = world(RbCoordinates::RB_COORDINATES_UNREAL);
+        let g = ground(w, true);
+        let down = |x: f32| RbRayInput {
+            origin: RbVec3 {
+                x,
+                y: 0.0,
+                z: 1000.0,
+            },
+            translation: RbVec3 {
+                x: 0.0,
+                y: 0.0,
+                z: -2000.0,
+            },
+            ignore_body: 0,
+        };
+        let rays = [down(0.0), down(9000.0)];
+        let mut batch = 0;
+        ok(rbWorld_CastRays(w, rays.as_ptr(), 2, &mut batch));
+        assert_ne!(batch, 0);
+        ok(rbWorld_Step(w));
+        let mut f: RbFrame = std::mem::zeroed();
+        ok(rbWorld_Poll(w, true, true, &mut f));
+        assert_eq!(f.ray_count, 1);
+        let r = &*f.rays;
+        assert_eq!(r.batch, batch);
+        let hits = std::slice::from_raw_parts(r.hits, r.hit_count as usize);
+        assert!(hits[0].hit && hits[0].body == g);
+        assert!((hits[0].distance - 1000.0).abs() < 0.5, "{:?}", hits[0]);
+        assert!((hits[0].point.z).abs() < 0.5 && hits[0].normal.z > 0.99);
+        assert!(!hits[1].hit, "past the ground's edge");
+        rbDestroyWorld(w);
+    }
+}
+
+#[test]
 fn unreal_coordinates_fall_along_minus_z_in_centimetres() {
     unsafe {
         let w = world(RbCoordinates::RB_COORDINATES_UNREAL);

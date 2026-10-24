@@ -901,11 +901,21 @@ Unreal is the first client.
 queries with `QueryFilter`, moved off the vehicle ray pool. Then capsule
 `cast_mover` and `collide_mover`.
 
+- *Shipped first cut:* `World::cast_rays` (C: `rbWorld_CastRays`) queues
+  closest-hit rays for the next step. They trace on the GPU against that
+  step's final poses (they share the vehicle ray pool, whose ray count only
+  `raycast_batch` reads, so bodies stay byte-identical; tested). Hits arrive
+  in `Frame::ray_results` / `RbFrame::rays` without a stall, and a frame
+  carrying queries is never dropped. An asleep world runs one step to answer.
+
 **P6: tooling.**
 
 - Recording and replay of inputs plus a per-frame GPU state hash, validated on
   replay.
 - A `DebugDraw` callback struct fed by one readback of colliders and poses.
+  *Shipped first cut:* `World::draw(&mut impl DebugDraw, DebugDrawOptions)`
+  draws every shape at its body's last polled pose, coloured by state or by
+  `SurfaceMaterial::custom_color`, with no extra readback.
 - `shift_origin`.
 
 **P8: rendering export.**

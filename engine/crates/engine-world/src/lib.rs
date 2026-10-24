@@ -19,6 +19,7 @@
 //! See `engine/docs/public-api.md` and `engine/docs/api-review.md`.
 
 mod assembly;
+mod debug_draw;
 mod defs;
 mod destruction;
 mod error;
@@ -32,6 +33,9 @@ pub use assembly::{
     AssemblyDef, AssemblyId, ConnectionDef, ConnectionKind, PartDef, PartHandle, PartModel,
     PartRef, VehicleBuild, VehicleDef, VehicleModel,
 };
+pub use debug_draw::{
+    DebugColor, DebugDraw, DebugDrawOptions, COLOR_ASLEEP, COLOR_AWAKE, COLOR_STATIC,
+};
 pub use defs::{BodyDef, BodyType, Geometry, MassData, MotionLocks, ShapeDef, SurfaceMaterial};
 pub use destruction::{
     ActorInfo, Anchors, BondDesc, ChunkDesc, DestructibleAssetDesc, DestructibleAssetId,
@@ -39,8 +43,8 @@ pub use destruction::{
 };
 pub use error::{StaleHandle, Unsupported};
 pub use events::{
-    coalesce, BodyEvents, BodyMoveEvent, CoalescedFrame, DestructionEvent, Frame, SkinId,
-    SkinOutput, SoftOutput, VehicleOutput,
+    coalesce, BodyEvents, BodyMoveEvent, CoalescedFrame, DestructionEvent, Frame, RayBatchId,
+    RayBatchResult, SkinId, SkinOutput, SoftOutput, VehicleOutput,
 };
 pub use handles::{BodyId, JointId, ShapeId};
 pub use joints::{
@@ -180,6 +184,9 @@ enum Extra {
     SoftNodes(SoftHandle),
     SkinPositions(SkinId),
     SkinNormals(SkinId),
+    /// The ray-query pool after this step's traces: batches by `(id, first,
+    /// count)` into it.
+    RayHits(Vec<(RayBatchId, u32, u32)>),
 }
 
 #[derive(Clone, Debug)]
@@ -307,6 +314,10 @@ pub struct World {
     assemblies: Vec<assembly::AssemblySlot>,
     /// Connection joint index -> (assembly slot, connection index).
     connection_owner: std::collections::HashMap<u32, (u32, u32)>,
+    /// Ray queries for the next step, and the batches they belong to.
+    pending_rays: Vec<engine_vehicle::Ray>,
+    pending_batches: Vec<(RayBatchId, u32, u32)>,
+    next_ray_batch: u64,
     backpressure: Backpressure,
     user_data: u64,
     step: u64,
@@ -380,6 +391,9 @@ impl World {
             bond_owner: std::collections::HashMap::new(),
             assemblies: Vec::new(),
             connection_owner: std::collections::HashMap::new(),
+            pending_rays: Vec::new(),
+            pending_batches: Vec::new(),
+            next_ray_batch: 0,
         })
     }
 
@@ -1153,42 +1167,49 @@ impl World {
     /// Batched ray casts, the closest hit of each (blocking). Asynchronous
     /// batched queries are planned (P5).
     pub fn cast_ray_blocking(&mut self, rays: &[RayInput]) -> Vec<Option<RayResult>> {
-        let rays: Vec<engine_vehicle::Ray> = rays
-            .iter()
-            .map(|r| {
-                let t = Vec3::from(r.translation);
-                engine_vehicle::Ray {
-                    origin: r.origin,
-                    dir: t.normalize_or_zero().to_array(),
-                    max_dist: t.length(),
-                    exclude_body: r.ignore_body.map(|b| b.index()),
-                }
-            })
-            .collect();
+        let rays: Vec<engine_vehicle::Ray> = rays.iter().map(engine_ray).collect();
         let hits = self.sim.raycast_batch(&rays);
-        hits.into_iter()
-            .map(|hit| {
-                let h = hit?;
-                let body = self.sim.collider_body(h.collider)?;
-                let slot = self.bodies.get(body as usize)?;
-                if !slot.alive {
-                    return None;
-                }
-                let shape = match self.collider_shape.get(h.collider as usize) {
-                    Some(&s) if s != u32::MAX => {
-                        ShapeId::new(s, self.shapes[s as usize].generation)
-                    }
-                    _ => ShapeId::NULL,
-                };
-                Some(RayResult {
-                    shape,
-                    body: BodyId::new(body, slot.generation),
-                    point: h.point,
-                    normal: h.normal,
-                    distance: h.distance,
-                })
-            })
-            .collect()
+        hits.into_iter().map(|h| self.ray_result(h)).collect()
+    }
+
+    /// Queue ray casts (closest hit each) for the next step: they trace
+    /// against that step's final poses on the GPU, and their results arrive
+    /// with its frame (`Frame::ray_results`) without stalling. Batches queued
+    /// before one step share its query pool (`VehicleCapacity::max_rays`).
+    pub fn cast_rays(&mut self, rays: &[RayInput]) -> anyhow::Result<RayBatchId> {
+        let first = self.pending_rays.len() as u32;
+        let max = self.sim.vehicle_host().max_rays();
+        anyhow::ensure!(
+            first as usize + rays.len() <= max as usize,
+            "{} ray queries this step exceed VehicleCapacity::max_rays ({max})",
+            first as usize + rays.len()
+        );
+        self.next_ray_batch += 1;
+        let id = RayBatchId(self.next_ray_batch);
+        self.pending_rays.extend(rays.iter().map(engine_ray));
+        self.pending_batches.push((id, first, rays.len() as u32));
+        self.dirty = true;
+        Ok(id)
+    }
+
+    fn ray_result(&self, hit: Option<engine_vehicle::RayHit>) -> Option<RayResult> {
+        let h = hit?;
+        let body = self.sim.collider_body(h.collider)?;
+        let slot = self.bodies.get(body as usize)?;
+        if !slot.alive {
+            return None;
+        }
+        let shape = match self.collider_shape.get(h.collider as usize) {
+            Some(&s) if s != u32::MAX => ShapeId::new(s, self.shapes[s as usize].generation),
+            _ => ShapeId::NULL,
+        };
+        Some(RayResult {
+            shape,
+            body: BodyId::new(body, slot.generation),
+            point: h.point,
+            normal: h.normal,
+            distance: h.distance,
+        })
     }
 
     // ----- stepping --------------------------------------------------------
@@ -1200,6 +1221,12 @@ impl World {
         let step = self.step;
         if std::mem::take(&mut self.dirty) {
             self.last_input_step = Some(step);
+        }
+        let rays = std::mem::take(&mut self.pending_rays);
+        let batches = std::mem::take(&mut self.pending_batches);
+        if !rays.is_empty() {
+            // Forces the step to run, so its frame carries the hits.
+            self.sim.write_ray_queries(&rays)?;
         }
         let mut enc = self
             .sim
@@ -1213,20 +1240,34 @@ impl World {
         let ran = self.sim.last_step_ran();
         let mut mapped = None;
         if ran {
-            if !self.readback.has_free() && self.backpressure == Backpressure::Block {
+            // Ray results are never dropped: a frame with queries waits for a slot.
+            let block = self.backpressure == Backpressure::Block || !batches.is_empty();
+            if !self.readback.has_free() && block {
                 self.wait_oldest()?;
             }
             if self.readback.has_free() {
                 for (_, skin) in &self.skins {
                     skin.encode(&mut enc);
                 }
-                let extras = extras(
+                if !batches.is_empty() {
+                    self.sim.encode_ray_queries(&mut enc);
+                }
+                let mut extras = extras(
                     &self.sim,
                     self.resync,
                     &self.vehicles,
                     &self.soft_outputs,
                     &self.skins,
                 );
+                if !batches.is_empty() {
+                    let (first, count) = self.sim.ray_query_slots();
+                    extras.push(readback::Extra {
+                        kind: Extra::RayHits(batches),
+                        buffer: self.sim.vehicle_pool_buffer(),
+                        offset: u64::from(first) * 16,
+                        size: u64::from(count) * 16,
+                    });
+                }
                 let slot = self.readback.encode(&self.sim, &mut enc, step, &extras);
                 self.resync = false;
                 mapped = Some(slot);
@@ -1457,9 +1498,20 @@ impl World {
         let mut soft = Vec::new();
         let mut skins: Vec<SkinOutput> = Vec::new();
         let mut record: Option<(VehicleHandle, Vec<[u32; 4]>)> = None;
+        let mut ray_results = Vec::new();
         for (kind, bytes) in &raw.extras {
             match kind {
                 Extra::Resync => {}
+                Extra::RayHits(batches) => {
+                    let hits = self.sim.decode_ray_hits(&slots(bytes));
+                    for (batch, first, count) in batches {
+                        let range = *first as usize..(*first + *count) as usize;
+                        ray_results.push(RayBatchResult {
+                            batch: *batch,
+                            hits: hits[range].iter().map(|h| self.ray_result(*h)).collect(),
+                        });
+                    }
+                }
                 Extra::VehicleRecord(v) => record = Some((*v, slots(bytes))),
                 Extra::VehicleWheels(v) => {
                     if let Some((rv, r)) = record.take() {
@@ -1497,6 +1549,7 @@ impl World {
             vehicles,
             soft,
             skins,
+            ray_results,
             lost_events: ring.lost,
             dropped: false,
             resynced: resync.is_some(),
@@ -1960,4 +2013,14 @@ fn extras<'a>(
         });
     }
     out
+}
+
+fn engine_ray(r: &RayInput) -> engine_vehicle::Ray {
+    let t = Vec3::from(r.translation);
+    engine_vehicle::Ray {
+        origin: r.origin,
+        dir: t.normalize_or_zero().to_array(),
+        max_dist: t.length(),
+        exclude_body: r.ignore_body.map(|b| b.index()),
+    }
 }

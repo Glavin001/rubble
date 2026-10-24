@@ -87,6 +87,18 @@ pub struct SoftOutput {
     pub nodes: Vec<[f32; 3]>,
 }
 
+/// A batch of queued ray casts ([`crate::World::cast_rays`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RayBatchId(pub u64);
+
+/// A ray batch's results, traced against the step's final poses.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RayBatchResult {
+    pub batch: RayBatchId,
+    /// One per ray, in the order queued.
+    pub hits: Vec<Option<crate::RayResult>>,
+}
+
 /// A skinned soft-body mesh ([`crate::World::soft_bind_skin`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SkinId(pub u32);
@@ -116,6 +128,8 @@ pub struct Frame {
     pub soft: Vec<SoftOutput>,
     /// Bound skins.
     pub skins: Vec<SkinOutput>,
+    /// Ray batches queued before this step.
+    pub ray_results: Vec<RayBatchResult>,
     /// Records overwritten in the GPU event ring before they were read (more
     /// than it holds between two frames). Never silently zero.
     pub lost_events: u32,
@@ -145,6 +159,8 @@ pub struct CoalescedFrame {
     pub vehicles: Vec<VehicleOutput>,
     pub soft: Vec<SoftOutput>,
     pub skins: Vec<SkinOutput>,
+    /// Every ray batch's results.
+    pub ray_results: Vec<RayBatchResult>,
     pub lost_events: u32,
     /// Any folded step's readback was dropped (a later one resynced it).
     pub dropped: bool,
@@ -193,6 +209,7 @@ pub fn coalesce(frames: Vec<Frame>) -> CoalescedFrame {
         for s in f.skins {
             skins.insert(s.skin, s);
         }
+        out.ray_results.extend(f.ray_results);
         out.lost_events += f.lost_events;
         out.dropped |= f.dropped;
         if f.counters.is_some() {

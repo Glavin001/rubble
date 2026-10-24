@@ -2444,6 +2444,52 @@ impl WgpuSim {
     }
 
     /// Batched scene ray casts against the current poses.
+    /// Write a batch of ray queries for [`Self::encode_ray_queries`] (no
+    /// readback). At most the vehicle pool's `max_rays`.
+    pub fn write_ray_queries(&mut self, rays: &[Ray]) -> anyhow::Result<()> {
+        let max = self.vehicle_host().max_rays();
+        anyhow::ensure!(
+            rays.len() as u32 <= max,
+            "{} ray queries exceed VehicleCapacity::max_rays ({max})",
+            rays.len()
+        );
+        self.with_vehicles(|h, sim| h.write_rays(sim, rays));
+        // The next step runs even if everything sleeps, so its frame carries
+        // the hits (a step with nothing awake changes nothing).
+        self.wake_pending = true;
+        Ok(())
+    }
+
+    /// Trace the written rays against the current poses, into `enc` (after a
+    /// step's dispatches). Hits land in [`Self::ray_query_slots`] of the pool.
+    pub fn encode_ray_queries(&self, enc: &mut wgpu::CommandEncoder) {
+        let rays = self.vehicle_host().ray_count();
+        if rays == 0 {
+            return;
+        }
+        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("ray queries"),
+            timestamp_writes: None,
+        });
+        self.disp(
+            &mut pass,
+            "build_aabbs",
+            u64::from(self.collider_count.max(1)),
+            None,
+        );
+        self.disp(&mut pass, "raycast_batch", u64::from(rays) * 64, None);
+    }
+
+    /// The pool slots `(first, count)` holding the written rays' hits.
+    pub fn ray_query_slots(&self) -> (u32, u32) {
+        self.vehicle_host().ray_slots()
+    }
+
+    /// Hits from a copy of [`Self::ray_query_slots`].
+    pub fn decode_ray_hits(&self, slots: &[[u32; 4]]) -> Vec<Option<RayHit>> {
+        self.vehicle_host().decode_ray_hits(slots)
+    }
+
     pub fn raycast_batch(&mut self, rays: &[Ray]) -> Vec<Option<RayHit>> {
         if rays.is_empty() {
             return Vec::new();

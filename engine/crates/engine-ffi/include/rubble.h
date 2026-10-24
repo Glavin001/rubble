@@ -217,6 +217,29 @@ typedef struct RbSkinOutput {
   uint32_t vertex_count;
 } RbSkinOutput;
 
+// A queued ray batch (`rbWorld_CastRays`). 0 is null.
+typedef uint64_t RbRayBatchId;
+
+// A shape handle. 0 is null.
+typedef uint64_t RbShapeId;
+
+// One ray's closest hit (`hit` false: none).
+typedef struct RbRayHit {
+  bool hit;
+  RbBodyId body;
+  RbShapeId shape;
+  struct RbVec3 point;
+  struct RbVec3 normal;
+  float distance;
+} RbRayHit;
+
+// A batch's hits, one per ray in the order queued (`RbFrame::rays`).
+typedef struct RbRayBatchResult {
+  RbRayBatchId batch;
+  const struct RbRayHit *hits;
+  uint32_t hit_count;
+} RbRayBatchResult;
+
 // Results of one step, or of several folded together (`rbWorld_Poll`).
 // Pointers stay valid until the next poll.
 typedef struct RbFrame {
@@ -239,7 +262,18 @@ typedef struct RbFrame {
   uint32_t soft_count;
   const struct RbSkinOutput *skins;
   uint32_t skin_count;
+  // Ray batches queued with `rbWorld_CastRays` before these steps.
+  const struct RbRayBatchResult *rays;
+  uint32_t ray_count;
 } RbFrame;
+
+// A ray to cast: from `origin` along `translation` (its length is the range).
+typedef struct RbRayInput {
+  struct RbVec3 origin;
+  struct RbVec3 translation;
+  // Skipped by this ray (0: none).
+  RbBodyId ignore_body;
+} RbRayInput;
 
 // A body (`rbDefaultBodyDef`).
 typedef struct RbBodyDef {
@@ -266,9 +300,6 @@ typedef struct RbShapeDef {
   uint64_t user_data;
   uint32_t internal_value;
 } RbShapeDef;
-
-// A shape handle. 0 is null.
-typedef uint64_t RbShapeId;
 
 // Fields every joint has (`rbDefaultJointBase`). Frames are measured from
 // each body's origin; z is the hinge, cone and twist axis, x the slide axis.
@@ -397,6 +428,15 @@ enum RbResult rbWorld_GetTransforms(struct RbWorld *world,
                                     const RbBodyId *bodies,
                                     uint32_t count,
                                     struct RbTransform *out);
+
+// Queue ray casts (closest hit each) for the next step. They trace against
+// that step's final poses on the GPU, and the hits arrive with its frame
+// (`RbFrame::rays`, matched by `out_batch`) without stalling. A frame with
+// queries is never dropped.
+enum RbResult rbWorld_CastRays(struct RbWorld *world,
+                               const struct RbRayInput *rays,
+                               uint32_t count,
+                               RbRayBatchId *out_batch);
 
 struct RbBodyDef rbDefaultBodyDef(void);
 
