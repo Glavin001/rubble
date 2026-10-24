@@ -212,6 +212,13 @@ pub fn op_codes() -> String {
     .to_string()
 }
 
+/// Design-space centre of mass of a descriptor: where `add_vehicle` puts the
+/// chassis body's origin (place a vehicle by a design point with it).
+#[wasm_bindgen]
+pub fn center_of_mass(desc_json: &str) -> Result<Vec<f32>, JsError> {
+    Ok(parse::<VehicleDesc>(desc_json)?.center_of_mass().to_vec())
+}
+
 /// Pool sizes a descriptor needs (JSON, camelCase).
 #[wasm_bindgen]
 pub fn requirements(desc_json: &str) -> Result<String, JsError> {

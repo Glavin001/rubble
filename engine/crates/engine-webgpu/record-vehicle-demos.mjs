@@ -122,6 +122,14 @@ const TAKES = {
       { n: 120, caption: 'Broken mounts are severed before the next step: forward-only, like joints', cam: { orbit: [0.6, 0.35, 11], spin: 0.008 } },
     ],
   },
+  vibeland: {
+    query: 'scene=vibeland&spawn=0,-4,3.1416',
+    script: [
+      { n: 90, input: { forward: 0, steer: 0, brake: 1 }, caption: "vibe-land's garage: seven vehicles from one parametric recipe", cam: { orbit: [3.14, 0.18, 26], spin: 0.004 } },
+      ...loop(7, (k) => ({ n: 75, act: `player:${k + 1}`, input: { forward: 0, steer: 0, brake: 1 }, caption: ['Sand rail', 'Baja trophy truck', 'Rally hatchback', 'Monster truck', 'Derby sedan', 'Sprint car', 'Semi and its hitched flatbed'][k], cam: { orbit: [2.6, 0.22, 9], spin: 0.008 } })),
+      { n: 180, input: { forward: 0.7, steer: 0, brake: 0 }, caption: 'The semi pulls its trailer', cam: 'chase' },
+    ],
+  },
   buggy_hybrid: {
     query: 'scene=buggies&build=hybrid',
     script: [
