@@ -41,7 +41,23 @@ Render graph (RDG), one GPU, one device:
                    base pass, VSM shadows, velocity (motion vectors from the previous pose)
 ```
 
-### 1. Rubble's kernels run in Unreal's render graph
+### 1. Rubble's buffers live on Unreal's GPU device
+
+The renderers in sections 2–4 are compute passes inside Unreal's render graph, so Rubble's pose,
+chunk and skin buffers must be on Unreal's device. There are two hosts, and the renderers don't
+care which one filled the buffers.
+
+- **Interim, and first: Rubble's wgpu on Unreal's Metal device.**
+  - The Metal RHI exposes `RHIGetDevice()` and `RHIRunOnQueue()`. wgpu-hal can wrap an existing
+    `MTL::Device`, queue and buffer.
+  - Unreal allocates the output buffers (RDG external buffers). Rubble writes into them through
+    imported wgpu buffers.
+  - Submissions go on Unreal's queue, so Metal's queue order replaces cross-device fences.
+  - The whole `rubble::World` API keeps working unchanged.
+- **End state: Rubble's plan replayed in the render graph,** described below. This needs
+  `World`'s uploads routed through a backend trait instead of wgpu, a large Rust change.
+
+#### The render-graph replayer (end state)
 
 Rubble already writes each step as a list of commands that no host owns:
 `engine_exec::rigid_plan::encode_step` and the fracture `Planner`. Every host replays that
@@ -59,57 +75,64 @@ replayer.
 - **Physics goes on async compute** where the platform supports it: step N+1 overlaps the
   rendering of frame N, and the renderer draws the last finished step, interpolated by alpha.
 
-Two alternatives, both rejected as the end state:
+Two alternatives to the replayer:
 
 - **Readback (today):** grows with bodies on the CPU.
-- **Rubble on its own wgpu device, sharing buffers with Unreal through wgpu-hal:** zero copy is
-  possible, but it costs cross-queue fences (`MTLSharedEvent` or D3D12 shared fences) every
-  frame, two schedulers fighting over one GPU, and reaching into Unreal's RHI internals. It is
-  kept only as a fallback if the HLSL path stalls. The renderers below read "a GPU buffer of
-  poses" and don't care which host filled it.
+- **Rubble on its own wgpu device and queue, sharing buffers:** cross-queue fences every frame
+  and two schedulers on one GPU. This is replaced by the interim host above, which shares
+  Unreal's device and queue.
 
-### 2. Rigid bodies: GPU-driven instancing
+### 2. Rigid bodies: written into Unreal's GPU Scene, rendered as ordinary instances
 
-- **One custom primitive with a Rubble vertex factory.** The vertex shader fetches the body's
-  pose by instance id from Rubble's pose buffer. It interpolates previous → current by the
-  clock's alpha and outputs motion vectors from the previous pose. Nothing about the pose is
-  written on the CPU.
-- **Buckets by mesh, LOD and material.** Unit box, sphere, capsule and each hull mesh live in one
-  vertex and index atlas.
-- **A cull-and-bucket compute pass:** frustum and HZB occlusion, distance LOD, then compaction
-  into per-bucket indirect draw arguments. Sleeping bodies cost a 32-byte read. At 100k that is
-  3.2 MB read and about 0.1 ms.
-- **Expected cost at 100k bodies:** a few dozen draws and 1–10M triangles, depending on hull
-  detail. Shadows draw them again through the same factory.
+Rubble bodies stay ordinary instanced static meshes as far as Unreal is concerned, so
+**Nanite, Nanite virtual-shadow-map caching, Lumen (distance fields and the surface cache follow
+GPU Scene transforms), motion vectors, culling and HLOD all apply unchanged.** Only the place
+the transforms come from changes:
 
-### 3. Destructibles: one draw per asset, not per chunk
+- **One instanced primitive per bucket** (mesh and material): the unit box, sphere, capsule,
+  each hull mesh. Each is created with GPU-only instance data (`FInstanceSceneDataBuffers`,
+  GPU-only), sized for the bucket's bodies.
+- **Each frame, a compute pass writes the instances' transforms** straight into GPU Scene through
+  `FSceneInterface::UpdatePrimitiveInstancesFromCompute` with an `FGPUSceneWriteDelegate`. This
+  API is public in 5.8, marked experimental since 5.6. Unreal's own NiagaraNanite and PCG GPU
+  instancing use it to drive Nanite instances from the GPU. The pass reads Rubble's pose buffer
+  (previous and current, 32 B per body), interpolates by the clock's alpha, and writes the
+  instance's local-to-world and previous local-to-world, which gives motion vectors.
+- **Nothing per body touches the CPU.** At 100k bodies the pass reads 3.2 MB and writes about
+  6 MB, on the order of 0.1–0.2 ms.
 
-- **Each asset's chunk meshes go into one vertex buffer,** each vertex tagged with its chunk.
-  The vertex shader computes chunk world = body pose[chunk → body] × chunk local, which is the
-  render contract.
-- **Chunk → body and chunk-local transforms are GPU buffers,** written by Rubble's split kernels
-  (the `fr_view_*` views). A split never touches the CPU and never rebuilds a mesh; chunks just
-  read another body's pose.
-- **Placed instances of one asset share the buffer.** Instance id gives the destructible's
-  offset, so 100k chunks across many buildings come to a handful of draws.
-- **The CPU still gets split, bond and hit events** for dust, debris, audio and gameplay. These
-  are compacted on the GPU and read back as a few KB.
+A custom vertex factory was the first draft. It was rejected because it loses Nanite and Lumen's
+full participation, and every future Unreal feature would need porting to it.
 
-### 4. Soft-body vehicles: skinned on the GPU, at render rate
+### 3. Destructibles: chunks as GPU Scene instances
 
-- **Rubble's own `soft_skin` kernel** (Slang, the same source as the browser) runs once per
-  rendered frame, not once per physics substep. It reads node positions in place and writes
-  position, normal, strain and torn flags into a skin buffer, much like Unreal's GPU skin cache.
-- **A skin vertex factory** reads that buffer by vertex id:
-  - torn triangles collapse in the vertex shader, so index buffers are never rebuilt;
-  - strain drives the dent and scratch mask;
-  - motion vectors come from the previous frame's skin buffer.
-- **Render LOD only:** near cars get the full flexbody mesh (`engine-softbody` `visual.rs`); far
-  cars get the collision skin (nodes plus triangles). The simulation is identical at every
-  distance, so this is a visual LOD, not a physics trade-off.
-- **Expected cost:** 200 cars × 20k vertices = 4M vertices skinned at three nodes each, about
-  1–2 ms a frame on an M3 Max. The current path would need tens of ms on the CPU plus the
-  uploads.
+- **Each chunk is an instance of its own chunk mesh,** written by the same pass as chunk
+  world = body pose[chunk → body] × chunk local. The chunk → body and chunk-local buffers are
+  GPU-resident and written by Rubble's split kernels. This is how Unreal renders Chaos geometry
+  collections with Nanite: one instance per piece, in GPU Scene.
+- **A destructible's chunks share one primitive.** Unique chunk meshes become one Nanite mesh
+  with one instance per chunk, or a mesh per chunk under one primitive per asset, so draw count
+  stays per asset, not per chunk. Nanite's cost grows with visible triangles, not instances.
+- **A split never touches the CPU;** chunks just read another body's pose. Split, bond and hit
+  events still reach the CPU, compacted, for dust, audio and gameplay.
+
+### 4. Soft-body vehicles: Unreal's Deformer Graph, with Rubble's skin kernel
+
+- **Each car is a skeletal mesh** carrying the detailed flexbody render mesh, with a
+  `UMeshDeformer` (Deformer Graph / Optimus). Its compute kernel is Rubble's `soft_skin`,
+  compiled to HLSL. The kernel reads the car's node positions from Rubble's buffer and writes
+  deformed positions and normals into the GPU skin cache.
+- **The car gets everything a skinned mesh gets:** ray-traced dynamic geometry for Lumen,
+  virtual shadow maps, motion vectors, the material system. Strain goes to a vertex-colour
+  output that drives the dent and scratch mask. Torn triangles collapse in the kernel, so index
+  buffers are never rebuilt.
+- **The kernel runs once per rendered frame,** not once per physics substep.
+- **Render LOD only:** near cars use the full flexbody mesh, far cars the collision skin. The
+  simulation is identical at every distance.
+- **Expected cost:** 200 cars × 20k vertices = 4M vertices at three nodes each, about 1–2 ms a
+  frame.
+- **Open question:** Nanite for deformed meshes depends on 5.8's Nanite-skinning support for
+  deformers. Without it, cars are non-Nanite skinned meshes, which still get the features above.
 
 ### 5. What the CPU still reads back
 
@@ -169,14 +192,17 @@ CPU: under 2 ms of Rubble work, all of it per event.
 
 ## Phases
 
-1. **Proof of the host: one rigid scene in RDG.** Slang → HLSL → global shaders, with a C++ plan
-   replayer. Gate: poses bit-equal to the wgpu host on the same GPU after N steps (the way
-   `pipelined_gate` tests hosts today).
-2. **The GPU-driven rigid renderer:** the vertex factory, cull and bucket pass, and indirect
-   draws. Gate: 100k bodies drawn with less than 0.2 ms of CPU.
-3. **The destructible renderer:** one draw per asset, with GPU chunk views.
-4. **Soft skinning in RDG, with the skin vertex factory and render LOD.** Gate: 200 cars drawn
-   with less than 0.5 ms of CPU.
+1. **Rubble on Unreal's device.** wgpu over Unreal's `MTL::Device` and queue, with the output
+   buffers allocated by Unreal and imported into wgpu. Gate: the same poses as Rubble on its own
+   device, and Unreal reading them in a render-graph pass with no CPU copy. The render-graph
+   replayer (Slang → HLSL, plan replay) follows separately; the HLSL target is needed for
+   phase 4 anyway.
+2. **The GPU Scene rigid renderer:** GPU-only instanced primitives per bucket, with poses
+   written by `UpdatePrimitiveInstancesFromCompute`. Gate: 100k bodies drawn with less than
+   0.2 ms of CPU, with Nanite and Lumen still working.
+3. **The destructible renderer:** chunks as GPU Scene instances, with GPU chunk views.
+4. **Soft skinning through Deformer Graph,** running Rubble's `soft_skin` in HLSL, with render
+   LOD. Gate: 200 cars drawn with less than 0.5 ms of CPU.
 5. **Async-compute overlap and budget profiling.** Run one GPU workload at a time while
    measuring.
 
