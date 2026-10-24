@@ -14,6 +14,7 @@ pub mod asset;
 pub mod bonds;
 pub mod cook;
 pub mod cuboid;
+pub mod glass_tower;
 pub mod math;
 pub mod pack;
 pub mod pairs;
