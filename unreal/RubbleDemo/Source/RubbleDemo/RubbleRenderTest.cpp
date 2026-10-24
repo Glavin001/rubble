@@ -518,7 +518,8 @@ bool FRubblePocScale::RunTest(const FString& Parameters)
 #if WITH_DEV_AUTOMATION_TESTS
 /**
  * Rubble.Town.Shots: Vibe Town (fracture:town, no auto shot) from fixed cameras, for the look:
- * a street in Elm Park, a house wall up close, Main Street toward the towers, and the aerial.
+ * a street in Elm Park, a house wall up close, the Market Quarter's street toward the towers, a
+ * shopfront and a tower's facade, and the aerial, with the world paused.
  * Poses are Unreal cm (Unreal X = -Rubble z, Y = Rubble x). Screenshots in RubbleShots/town.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRubbleTownShots, "Rubble.Town.Shots",
@@ -530,6 +531,8 @@ bool FRubbleTownShots::RunTest(const FString& Parameters)
 	{
 		return false;
 	}
+	// The look as built: no steps, so nothing settles between the shots.
+	Rubble()->bPaused = true;
 	struct FPose
 	{
 		const TCHAR* Name;
@@ -539,7 +542,11 @@ bool FRubbleTownShots::RunTest(const FString& Parameters)
 	static const FPose Poses[] = {
 		{ TEXT("elm_park_street"), FVector(-2600, -9800, 260), FVector(-1700, -7200, 300) },
 		{ TEXT("house_wall"), FVector(-2500, -7300, 220), FVector(-1870, -7260, 220) },
-		{ TEXT("main_street"), FVector(150, -3000, 400), FVector(-200, 6000, 1200) },
+		// The Market Quarter's street toward the towers, a shopfront (shop 4: its front at Rubble
+		// z = 7.4, Unreal X = -740) and tower 1's facade (z = -8).
+		{ TEXT("main_street"), FVector(0, 300, 260), FVector(-700, 9000, 900) },
+		{ TEXT("shopfront"), FVector(250, 2920, 170), FVector(-740, 2920, 230) },
+		{ TEXT("tower"), FVector(-600, 8000, 500), FVector(800, 8986, 1500) },
 		{ TEXT("aerial"), FVector(-14000, -9000, 7000), FVector(0, 0, 400) },
 	};
 	const FString Dir = ShotDir() / TEXT("town");
@@ -551,9 +558,8 @@ bool FRubbleTownShots::RunTest(const FString& Parameters)
 			{
 				if (ARubblePawn* RP = Cast<ARubblePawn>(Pawn))
 				{
-					RP->SetMode(ERubbleCamera::Fly);
+					RP->LookFrom(P.Eye, P.Target);
 				}
-				Pawn->SetActorLocationAndRotation(P.Eye, (P.Target - P.Eye).Rotation());
 				GameWorld()->GetFirstPlayerController()->SetControlRotation((P.Target - P.Eye).Rotation());
 			}
 			return true;
@@ -578,9 +584,8 @@ namespace
 		{
 			if (ARubblePawn* RP = Cast<ARubblePawn>(Pawn))
 			{
-				RP->SetMode(ERubbleCamera::Fly);
+				RP->LookFrom(Eye, Target);
 			}
-			Pawn->SetActorLocationAndRotation(Eye, (Target - Eye).Rotation());
 			GameWorld()->GetFirstPlayerController()->SetControlRotation((Target - Eye).Rotation());
 		}
 	}

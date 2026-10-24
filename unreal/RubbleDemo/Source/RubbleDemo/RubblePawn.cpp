@@ -122,6 +122,15 @@ bool ARubblePawn::HasPlayerVehicle() const
 		|| A->SoftBodies.ContainsByPredicate([](const FRubbleSoftVisual& V) { return V.bPlayer; });
 }
 
+void ARubblePawn::LookFrom(const FVector& Eye, const FVector& Target)
+{
+	SetMode(ERubbleCamera::Fly);
+	const FRotator View = (Target - Eye).Rotation();
+	Yaw = View.Yaw;
+	Pitch = View.Pitch;
+	SetActorLocationAndRotation(Eye, View);
+}
+
 void ARubblePawn::SetMode(ERubbleCamera InMode)
 {
 	CameraMode = InMode == ERubbleCamera::Chase && !HasPlayerVehicle() ? ERubbleCamera::Orbit : InMode;

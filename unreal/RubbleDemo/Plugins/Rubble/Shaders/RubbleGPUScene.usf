@@ -11,7 +11,7 @@ uint NumInstances;
 uint PrimitiveId;
 float Alpha;
 // Per instance: LocalRows float4s (translation, rotation, scale, then the custom data: one row
-// holding up to 4 floats, or 3 rows for the town surface's 11), and NumCustomFloats of them used.
+// holding up to 4 floats, or 4 rows for the town surface's 16), and NumCustomFloats of them used.
 uint LocalRows;
 uint NumCustomFloats;
 StructuredBuffer<float4> CurrentPoses;

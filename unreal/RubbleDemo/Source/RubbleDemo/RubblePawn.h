@@ -39,6 +39,8 @@ public:
 
 	ERubbleCamera Mode() const { return CameraMode; }
 	void SetMode(ERubbleCamera Mode);
+	/** The fly camera at Eye, looking at Target (scripted shots). */
+	void LookFrom(const FVector& Eye, const FVector& Target);
 	void ToggleMenu();
 	/** Fire along the camera's view (F) or through the cursor (left click). */
 	void Shoot(bool bAtCursor);

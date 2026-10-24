@@ -1,5 +1,6 @@
 #include "RubbleTownPack.h"
 
+#include "Algo/Find.h"
 #include "CompGeom/ConvexHull3.h"
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonReader.h"
@@ -70,8 +71,9 @@ namespace RubbleTownPack
 			return false;
 		}
 		const TSharedPtr<FJsonObject>& S = *Scenario;
-		// Materials by name (defaults.solver.materials).
-		TMap<FString, int32> MaterialOf;
+		// Materials by name (defaults.solver.materials). A name can repeat with other colours (a
+		// palette: the houses' painted siding comes in six); each building takes one of them.
+		TMap<FString, TArray<int32>> MaterialOf;
 		const TSharedPtr<FJsonObject>* Defaults = nullptr;
 		const TSharedPtr<FJsonObject>* Solver = nullptr;
 		const TArray<TSharedPtr<FJsonValue>>* Mats = nullptr;
@@ -91,7 +93,7 @@ namespace RubbleTownPack
 				M->TryGetNumberField(TEXT("metalness"), Mat.Metalness);
 				M->TryGetStringField(TEXT("textureKey"), Mat.TextureKey);
 				Mat.Kind = KindOf(Mat.Name);
-				MaterialOf.Add(Mat.Name, Out.Materials.Add(Mat));
+				MaterialOf.FindOrAdd(Mat.Name).Add(Out.Materials.Add(Mat));
 			}
 		}
 		if (Out.Materials.Num() == 0)
@@ -116,6 +118,11 @@ namespace RubbleTownPack
 		}
 		const TArray<TSharedPtr<FJsonValue>>* NodeMaterials = nullptr;
 		S->TryGetArrayField(TEXT("nodeMaterials"), NodeMaterials);
+		const TArray<TSharedPtr<FJsonValue>>* NodeGroups = nullptr;
+		S->TryGetArrayField(TEXT("nodeGroups"), NodeGroups);
+		const TArray<TSharedPtr<FJsonValue>>* NodeTypes = nullptr;
+		S->TryGetArrayField(TEXT("nodeTypes"), NodeTypes);
+		TMap<FString, TArray<int32>> Glazed; // glazed nodes by building
 		Out.Nodes.SetNum(Nodes->Num());
 		for (int32 i = 0; i < Nodes->Num(); ++i)
 		{
@@ -154,43 +161,162 @@ namespace RubbleTownPack
 				Error = FString::Printf(TEXT("node %d: no shape %d"), i, N.Hull);
 				return false;
 			}
+			N.bGlazed = NodeGroups && NodeTypes && NodeGroups->IsValidIndex(i) && NodeTypes->IsValidIndex(i)
+				&& (*NodeGroups)[i]->AsString().StartsWith(TEXT("tower@")) && (*NodeTypes)[i]->AsString() != TEXT("foundation");
+			if (N.bGlazed)
+			{
+				Glazed.FindOrAdd((*NodeGroups)[i]->AsString()).Add(i);
+			}
 			if (NodeMaterials && NodeMaterials->IsValidIndex(i))
 			{
-				if (const int32* M = MaterialOf.Find((*NodeMaterials)[i]->AsString()))
+				if (const TArray<int32>* M = MaterialOf.Find((*NodeMaterials)[i]->AsString()))
 				{
-					N.Material = *M;
+					const uint32 Group = NodeGroups && NodeGroups->IsValidIndex(i) ? GetTypeHash((*NodeGroups)[i]->AsString()) : 0u;
+					N.Material = (*M)[Group % uint32(M->Num())];
 				}
+			}
+		}
+		// Each glazed node's facades: the sides of its building's bounds (Unreal axes) its own
+		// bounds reach, within a few cm.
+		auto Bounds = [&Out](const FNode& N) {
+			FBox3f B(ForceInit);
+			if (N.bBox)
+			{
+				const FVector3f H = HalfToUnreal(N.HalfExtents);
+				B += ToUnreal(N.Centroid) - H;
+				B += ToUnreal(N.Centroid) + H;
+			}
+			else
+			{
+				for (const FVector3f& P : Out.Hulls[N.Hull])
+				{
+					B += ToUnreal(N.Centroid + P);
+				}
+			}
+			return B;
+		};
+		for (const TPair<FString, TArray<int32>>& G : Glazed)
+		{
+			FBox3f Building(ForceInit);
+			TArray<FBox3f> Own;
+			for (const int32 i : G.Value)
+			{
+				Building += Own.Add_GetRef(Bounds(Out.Nodes[i]));
+			}
+			constexpr float Near = 5.0f; // cm
+			for (int32 k = 0; k < G.Value.Num(); ++k)
+			{
+				const FBox3f& B = Own[k];
+				Out.Nodes[G.Value[k]].Facades = (B.Max.X > Building.Max.X - Near ? 1 : 0) | (B.Min.X < Building.Min.X + Near ? 2 : 0)
+					| (B.Max.Y > Building.Max.Y - Near ? 4 : 0) | (B.Min.Y < Building.Min.Y + Near ? 8 : 0);
 			}
 		}
 		return true;
 	}
 
+	namespace
+	{
+		TSharedPtr<FJsonObject> ParseObject(const TArray<uint8>& Json)
+		{
+			TSharedPtr<FJsonObject> Root;
+			const FUTF8ToTCHAR Text(reinterpret_cast<const ANSICHAR*>(Json.GetData()), Json.Num());
+			FJsonSerializer::Deserialize(TJsonReaderFactory<TCHAR>::Create(FString(Text.Length(), Text.Get())), Root);
+			return Root;
+		}
+
+		/** This client's look for a material vibe-land leaves untextured (or whose up faces it
+		 *  draws as concrete): a catalog id for its walls and one for its up faces, either empty
+		 *  to keep what the catalog gave. Matched on the pack material's name. */
+		struct FLook
+		{
+			const TCHAR* Name;
+			const TCHAR* Wall;
+			const TCHAR* Up;
+			/** The up layer keeps its own colour instead of taking the material's. */
+			bool bUpUntinted = false;
+		};
+		const FLook Looks[] = {
+			// Timber framing is what the houses' pitched roofs are made of.
+			{ TEXT("wood-frame"), TEXT("aged-timber"), TEXT("roof-slate"), true },
+			{ TEXT("ivory-trim"), TEXT("white-concrete"), TEXT("") },
+			{ TEXT("joinery"), TEXT("white-concrete"), TEXT("") },
+			{ TEXT("timber-joint"), TEXT("aged-timber"), TEXT("") },
+			{ TEXT("cladding"), TEXT("white-concrete"), TEXT("") },
+			{ TEXT("asphalt"), TEXT("concrete-floor-damaged"), TEXT("concrete-floor-damaged") },
+		};
+	}
+
 	void ApplyCatalog(const TArray<uint8>& CatalogJson, FPack& Pack)
 	{
-		TSharedPtr<FJsonObject> Root;
-		const FUTF8ToTCHAR Text(reinterpret_cast<const ANSICHAR*>(CatalogJson.GetData()), CatalogJson.Num());
+		const TSharedPtr<FJsonObject> Root = ParseObject(CatalogJson);
 		const TArray<TSharedPtr<FJsonValue>>* Materials = nullptr;
-		if (!FJsonSerializer::Deserialize(TJsonReaderFactory<TCHAR>::Create(FString(Text.Length(), Text.Get())), Root) || !Root || !Root->TryGetArrayField(TEXT("materials"), Materials))
+		if (!Root || !Root->TryGetArrayField(TEXT("materials"), Materials))
 		{
 			return;
 		}
-		TMap<FString, TPair<int32, float>> ById;
+		struct FEntry
+		{
+			int32 Layer;
+			float Metres;
+		};
+		TMap<FString, FEntry> ById;
+		TMap<FString, FString> IdByName;
 		for (const TSharedPtr<FJsonValue>& V : *Materials)
 		{
 			const TSharedPtr<FJsonObject> M = V->AsObject();
 			double Layer = -1.0, Metres = 1.0;
-			if (M->TryGetNumberField(TEXT("layer"), Layer))
+			if (!M->TryGetNumberField(TEXT("layer"), Layer))
 			{
-				M->TryGetNumberField(TEXT("metresPerTile"), Metres);
-				ById.Add(M->GetStringField(TEXT("id")), TPair<int32, float>(int32(Layer), float(Metres)));
+				continue;
+			}
+			M->TryGetNumberField(TEXT("metresPerTile"), Metres);
+			const FString Id = M->GetStringField(TEXT("id"));
+			ById.Add(Id, FEntry{ int32(Layer), FMath::Max(float(Metres), 0.01f) });
+			const TArray<TSharedPtr<FJsonValue>>* Names = nullptr;
+			if (M->TryGetArrayField(TEXT("names"), Names))
+			{
+				for (const TSharedPtr<FJsonValue>& N : *Names)
+				{
+					IdByName.FindOrAdd(N->AsString(), Id);
+				}
 			}
 		}
+		static const TCHAR* const OwnUp[] = { TEXT("metal"), TEXT("white-limestone"), TEXT("roof-slate"), TEXT("aged-timber") };
 		for (FMaterial& M : Pack.Materials)
 		{
-			if (const TPair<int32, float>* Hit = ById.Find(M.TextureKey))
+			FString Wall = ById.Contains(M.TextureKey) ? M.TextureKey : FString();
+			if (Wall.IsEmpty())
 			{
-				M.Layer = Hit->Key;
-				M.MetresPerTile = FMath::Max(Hit->Value, 0.01f);
+				if (const FString* Id = IdByName.Find(M.Name))
+				{
+					Wall = *Id;
+				}
+			}
+			FString Up;
+			if (!Wall.IsEmpty())
+			{
+				Up = Algo::FindByPredicate(OwnUp, [&Wall](const TCHAR* K) { return Wall == K; }) ? Wall : FString(TEXT("concrete-floor"));
+			}
+			if (M.Kind != ERubbleMaterial::Glass)
+			{
+				for (const FLook& L : Looks)
+				{
+					if (M.Name.Contains(L.Name))
+					{
+						Wall = *L.Wall ? FString(L.Wall) : Wall;
+						Up = *L.Up ? FString(L.Up) : Up.IsEmpty() ? Wall : Up;
+						M.bUpUntinted = L.bUpUntinted;
+						break;
+					}
+				}
+			}
+			if (const FEntry* W = ById.Find(Wall))
+			{
+				M.Layer = W->Layer;
+				M.MetresPerTile = W->Metres;
+				const FEntry* U = ById.Find(Up);
+				M.UpLayer = U ? U->Layer : W->Layer;
+				M.UpMetresPerTile = U ? U->Metres : W->Metres;
 			}
 		}
 	}

@@ -18,6 +18,13 @@ Generated into /Game/Rubble/Materials (never committed; this script is the sourc
                     one surface and a broken piece keeps its texture. Per-instance custom data:
                     0..2 tint (the material's colour), 3 layer (-1: tint only), 4 tiles per metre,
                     5..7 the chunk's position in its destructible (cm), 8..10 the instance's scale.
+                    Layer is a code: wall layer + 16 x up-facing layer; 0..2 then multiply the
+                    texture (the material's colour over the layer's mean), 11 is the up layer's
+                    tiles per metre and 12..15 the chunk's rotation in its destructible. Broad weathering and ground grime run across chunks.
+  M_RubbleTownGlass the town's glass: a dark reflective pane over rooms traced behind it (interior
+                    mapping), randomly lit. Layer code + 512 marks a glazed facade bay (the towers'
+                    walls), which the chunk material draws as a framed window over the same rooms.
+  M_RubbleTownGround grass and muddy leaves from the same arrays, for the ground around the town.
 
 Every material is flagged for instanced static meshes, which the renderers draw with.
 """
@@ -207,25 +214,120 @@ def spark():
     return m
 
 
-TOWN_CHUNK = """
-float3 n = normalize(LocalN);
+# Value noise and a hash, for the town's Custom nodes (HLSL has no free functions there, so they
+# live on a struct).
+TOWN_NOISE = """
+struct FTownNoise
+{
+    float H(float2 q) { return frac(sin(dot(q, float2(127.1, 311.7))) * 43758.5453); }
+    float H3(float3 q) { return frac(sin(dot(q, float3(12.9898, 78.233, 37.719))) * 43758.5453); }
+    float V(float2 q)
+    {
+        float2 i = floor(q);
+        float2 f = frac(q);
+        f = f * f * (3.0 - 2.0 * f);
+        return lerp(lerp(H(i), H(i + float2(1, 0)), f.x), lerp(H(i + float2(0, 1)), H(i + float2(1, 1)), f.x), f.y);
+    }
+    // Rooms behind a pane (interior mapping): the view ray from the pane at P (normal Nw, toward
+    // the camera V) is traced through a grid of rooms that starts at the pane along its facing
+    // axis, so the first room is right behind it. Each room is randomly lit, its walls, floor and
+    // ceiling shaded, darker in the corners and further back. Returns the room's light (for
+    // Emissive); Fres is the pane's Fresnel term.
+    float3 Interior(float3 P, float3 Nw, float3 V, float Room, float Storey, float Brightness, out float Fres)
+    {
+        float3 d = -V;
+        float3 an = abs(Nw);
+        float3 mask = (an.x >= an.y && an.x >= an.z) ? float3(1, 0, 0) : (an.y >= an.z ? float3(0, 1, 0) : float3(0, 0, 1));
+        float3 room = float3(Room, Room, Storey);
+        float3 origin = P * mask;
+        float3 p = P - origin + d * 0.5;
+        d = d + (step(0.0, d) * 2.0 - 1.0) * 1e-4;
+        float3 cell = floor(p / room);
+        float3 lo = cell * room;
+        float3 tt = (lo + step(0.0, d) * room - p) / d;
+        float tm = min(tt.x, min(tt.y, tt.z));
+        float3 q = (p + d * tm - lo) / room;
+        // The room's place along the facade, and the facade's own only coarsely: pieces of a
+        // fractured wall sit a few cm apart in depth and must show the same rooms.
+        float seed = H3(cell * (1.0 - mask) + floor(origin / 1000.0 + 0.5));
+        float3 col = lerp(float3(0.62, 0.56, 0.47), float3(0.45, 0.5, 0.55), frac(seed * 7.31));
+        if (tm == tt.z)
+        {
+            col = d.z < 0.0 ? float3(0.3, 0.2, 0.12) : float3(0.62, 0.6, 0.57);
+        }
+        float3 c = abs(q - 0.5) * 2.0;
+        float edge = max(max(c.x * (1.0 - mask.x), c.y * (1.0 - mask.y)), c.z);
+        col *= 0.55 + 0.45 * (1.0 - pow(saturate(edge), 6.0));
+        // About half the rooms have their lights on (warm); the rest show cool daylight.
+        float lit = seed > 0.5 ? 1.0 : 0.25;
+        float3 light = lerp(float3(0.75, 0.8, 0.9), float3(1.0, 0.82, 0.62), step(0.5, seed));
+        // A blind part-way down some panes.
+        float2 pane = (mask.x > 0.5) ? P.yz : (mask.y > 0.5 ? P.xz : P.xy);
+        float blind = step(0.72, frac(seed * 13.7)) * step(1.0 - 0.6 * frac(seed * 3.1), frac(pane.y / Storey));
+        col = lerp(col, float3(0.5, 0.47, 0.42), blind);
+        Fres = 0.04 + 0.96 * pow(1.0 - saturate(dot(Nw, V)), 5.0);
+        return col * light * lit * Brightness * (1.0 - Fres) * exp(-tm / 900.0);
+    }
+};
+FTownNoise N;
+"""
+
+
+def town_means():
+    """Each texture-array layer's mean albedo (linear) as an HLSL table, from texture-means.json
+    (written by scripts/unreal/fetch-city-textures.sh); mid grey when it is missing."""
+    import json
+    import os
+    path = os.path.join(unreal.Paths.project_content_dir(), "Rubble", "Town", "texture-means.json")
+    means = json.load(open(path))["meanLinear"] if os.path.exists(path) else [[0.5, 0.5, 0.5]] * 16
+    rows = ", ".join(f"float3({r:.4f}, {g:.4f}, {b:.4f})" for r, g, b in means)
+    return f"const float3 TOWN_MEANS[{len(means)}] = {{ {rows} }};\n"
+
+
+TOWN_CHUNK = TOWN_NOISE + """
+// The chunk's surface in its destructible's frame: the instance's local frame turned by the
+// chunk's rotation there (custom data 12..15) and offset by its place. A shared hull placed turned
+// then projects as its neighbours do.
+float3 qv = Rotation.xyz;
+float qw = Rotation.w;
+float3 lp = LocalP * Scale;
+float3 n0 = normalize(LocalN);
+float3 n = n0 + 2.0 * cross(qv, cross(qv, n0) + qw * n0);
+float3 p = lp + 2.0 * cross(qv, cross(qv, lp) + qw * lp) + Offset;
 float3 a = abs(n);
-float3 p = LocalP * Scale + Offset;
 float2 uv;
 float3 t, b;
 if (a.x >= a.y && a.x >= a.z) { uv = p.yz; t = float3(0, 1, 0); b = float3(0, 0, 1); }
 else if (a.y >= a.z) { uv = p.xz; t = float3(1, 0, 0); b = float3(0, 0, 1); }
 else { uv = p.xy; t = float3(1, 0, 0); b = float3(0, 1, 0); }
-uv = float2(uv.x, -uv.y) * (Tiles / 100.0);
+// The face's place in the destructible (cm), before tiling: the glazing's grid.
+float2 face = uv;
+// Faces that look up (slab tops, roof slopes, broken edges) take the up layer.
+float3 nw = normalize(WorldN);
+bool up = nw.z > 0.55;
+// Glazed: the facades the piece reaches, as bits (1 +X, 2 -X, 4 +Y, 8 -Y in its destructible).
+float glazed = floor(Layer / 512.0 + 0.001);
+float code = Layer - 512.0 * glazed;
+float untintedUp = floor(code / 256.0 + 0.001);
+code -= 256.0 * untintedUp;
 float3 albedo = Tint;
 float3 nl = n;
 float rough = 0.8;
 float metal = 0.0;
 float ao = 1.0;
+Emissive = float3(0, 0, 0);
 if (Layer > -0.5)
 {
-    float3 uvw = float3(uv, Layer);
+    float upLayer = floor(code / 16.0 + 0.001);
+    float wallLayer = code - 16.0 * upLayer;
+    float layer = up ? upLayer : wallLayer;
+    uv = float2(uv.x, -uv.y) * ((up ? UpTiles : Tiles) / 100.0);
+    float3 uvw = float3(uv, layer);
     albedo = Texture2DArraySample(Albedo, AlbedoSampler, uvw).rgb;
+    // Tinted to the material's colour (custom data 0..2): the texture times colour over the
+    // layer's mean, bounded, so it keeps its detail and averages to the colour.
+    float3 ratio = clamp(Tint / max(TOWN_MEANS[int(layer)], 1e-3), 0.25, 3.0);
+    albedo *= lerp(float3(1, 1, 1), ratio, (up && untintedUp > 0.5) ? 0.0 : TintStrength);
     // Normal-map compression keeps X and Y only (BC5): rebuild Z.
     float2 nxy = Texture2DArraySample(NormalMap, NormalMapSampler, uvw).xy * 2.0 - 1.0;
     float3 tn = float3(nxy, sqrt(saturate(1.0 - dot(nxy, nxy))));
@@ -236,81 +338,231 @@ if (Layer > -0.5)
     rough = arm.g;
     metal = arm.b;
 }
-Normal = nl;
+// Weathering in town space, so it runs across chunks: broad patches of tone and roughness, and
+// grime rising from the ground on walls.
+float macro = N.V(WorldP.xy / 900.0) * 0.6 + N.V(WorldP.xy / 230.0 + 17.0) * 0.4;
+albedo *= lerp(1.0 - Weathering, 1.0 + 0.5 * Weathering, macro);
+rough = saturate(rough + (macro - 0.5) * 0.15);
+if (!up)
+{
+    float grime = 1.0 - saturate(WorldP.z / 140.0);
+    albedo *= 1.0 - Grime * grime * grime;
+}
+// A glazed facade (a tower's walls): framed windows on a grid of bays and storeys in the
+// destructible's frame, so each window moves and breaks with its chunk, with rooms behind them.
+// Only faces pointing out of a facade the piece reaches: not a fracture facet or a recess.
+float4 bits = fmod(floor(glazed / float4(1, 2, 4, 8)), 2.0);
+float outward = max(max(bits.x * n.x, bits.y * -n.x), max(bits.z * n.y, bits.w * -n.y));
+if (glazed > 0.5 && outward > 0.985)
+{
+    float2 g = float2(frac(face.x / WindowBay), frac(face.y / StoreyHeight));
+    float2 w = abs(g - float2(0.5, 0.58));
+    float inside = step(w.x, 0.4) * step(w.y, 0.3);
+    float frame = step(w.x, 0.44) * step(w.y, 0.34) - inside;
+    if (inside > 0.5)
+    {
+        float fres;
+        Emissive = N.Interior(WorldP, nw, normalize(CameraVec), RoomSize, StoreyHeight, Brightness, fres);
+        albedo = float3(0.012, 0.016, 0.02);
+        nl = n;
+        rough = PaneRoughness;
+        metal = 0.0;
+        ao = 1.0;
+    }
+    else if (frame > 0.5)
+    {
+        albedo = float3(0.05, 0.055, 0.06);
+        rough = 0.35;
+        metal = 0.8;
+    }
+}
+// Back to the instance's frame, which the material's normal is in.
+Normal = nl - 2.0 * cross(qv, qw * nl - cross(qv, nl));
 Roughness = rough;
 Metallic = metal;
 Occlusion = ao;
 return albedo;
 """
 
+# Glass over rooms (FTownNoise::Interior), with Lumen reflecting the street in the pane on top.
+TOWN_GLASS = TOWN_NOISE + """
+float fres;
+float3 light = N.Interior(WorldP, normalize(WorldN), normalize(CameraVec), RoomSize, StoreyHeight, Brightness, fres);
+Fresnel = fres;
+return light;
+"""
 
-def town_chunk():
-    """M_RubbleTownChunk (see the module docstring). Falls back to tint-only chunks when the
-    copied texture arrays are missing."""
+# The open ground around the town: leafy grass, broken by patches of muddy leaves.
+TOWN_GROUND = TOWN_NOISE + """
+float2 uv = WorldP.xy / 100.0;
+float m = N.V(WorldP.xy / 1400.0) * 0.65 + N.V(WorldP.xy / 380.0 + 9.0) * 0.35;
+float mud = smoothstep(0.66, 0.8, m) * 0.85;
+float3 g = Texture2DArraySample(Albedo, AlbedoSampler, float3(uv / GrassMetres, GrassLayer)).rgb;
+float3 u = Texture2DArraySample(Albedo, AlbedoSampler, float3(uv / MudMetres, MudLayer)).rgb;
+float2 gn = Texture2DArraySample(NormalMap, NormalMapSampler, float3(uv / GrassMetres, GrassLayer)).xy * 2.0 - 1.0;
+float2 un = Texture2DArraySample(NormalMap, NormalMapSampler, float3(uv / MudMetres, MudLayer)).xy * 2.0 - 1.0;
+float2 nxy = lerp(gn, un, mud);
+Normal = normalize(float3(nxy.x, -nxy.y, sqrt(saturate(1.0 - dot(nxy, nxy)))));
+float3 ga = Texture2DArraySample(Arm, ArmSampler, float3(uv / GrassMetres, GrassLayer)).rgb;
+float3 ua = Texture2DArraySample(Arm, ArmSampler, float3(uv / MudMetres, MudLayer)).rgb;
+float3 arm = lerp(ga, ua, mud);
+Roughness = arm.g;
+Occlusion = arm.r;
+// The grass photograph is ochre: vibe-land's canopy tint turns it green, less so in the dry patches.
+float3 canopy = lerp(CanopyTint.rgb, float3(1, 1, 1), smoothstep(0.35, 0.6, m) * 0.5);
+return lerp(g * canopy, u, mud) * lerp(0.85, 1.1, m);
+"""
+
+
+def city_arrays():
+    """vibe-land's HD texture arrays, or None when scripts/unreal/fetch-city-textures.sh has not run."""
     arrays = {k: unreal.load_asset(f"/Game/VibeCity/Textures/T_City{k}HDArray") for k in ("Albedo", "Normal", "ARM")}
-    if not all(arrays.values()):
-        log("town chunk: no /Game/VibeCity texture arrays (scripts/unreal/fetch-city-textures.sh); skipped")
-        return None
+    return arrays if all(arrays.values()) else None
+
+
+def custom(m, code, x, y, inputs, outputs, description):
+    """A Custom node fed by inputs ({name: (expression, pin)}) with extra float outputs ({name: width})."""
+    widths = {1: unreal.CustomMaterialOutputType.CMOT_FLOAT1, 3: unreal.CustomMaterialOutputType.CMOT_FLOAT3}
+    c = expr(m, unreal.MaterialExpressionCustom, x, y, code=code, output_type=unreal.CustomMaterialOutputType.CMOT_FLOAT3, description=description)
+    ins = []
+    for name in inputs:
+        ci = unreal.CustomInput()
+        ci.set_editor_property("input_name", name)
+        ins.append(ci)
+    c.set_editor_property("inputs", ins)
+    outs = []
+    for name, width in outputs.items():
+        co = unreal.CustomOutput()
+        co.set_editor_property("output_name", name)
+        co.set_editor_property("output_type", widths[width])
+        outs.append(co)
+    c.set_editor_property("additional_outputs", outs)
+    for name, (source, pin) in inputs.items():
+        link(source, pin, c, name)
+    return c
+
+
+def texture_objects(m, arrays, x, y):
+    out = {}
+    for i, (key, name) in enumerate((("Albedo", "Albedo"), ("Normal", "NormalMap"), ("ARM", "Arm"))):
+        o = expr(m, unreal.MaterialExpressionTextureObject, x, y + 130 * i)
+        o.set_editor_property("texture", arrays[key])
+        out[name] = (o, "")
+    return out
+
+
+def world_normal(m, x, y):
+    return expr(m, unreal.MaterialExpressionVertexNormalWS, x, y)
+
+
+def town_chunk(arrays):
+    """M_RubbleTownChunk (see the module docstring)."""
     m = material("M_RubbleTownChunk")
     m.set_editor_property("tangent_space_normal", False)
-    data = [expr(m, unreal.MaterialExpressionPerInstanceCustomData, -1800, -700 + 90 * i, data_index=i, const_default_value=(-1.0 if i == 3 else 1.0 if i >= 8 or i == 4 else 0.0)) for i in range(11)]
+    defaults = {3: -1.0, 4: 1.0, 8: 1.0, 9: 1.0, 10: 1.0, 11: 1.0, 15: 1.0}
+    data = [expr(m, unreal.MaterialExpressionPerInstanceCustomData, -1800, -700 + 90 * i, data_index=i, const_default_value=defaults.get(i, 0.0)) for i in range(16)]
 
     def append3(i, x, y):
         ab = binary(m, unreal.MaterialExpressionAppendVector, data[i], data[i + 1], x, y)
         return binary(m, unreal.MaterialExpressionAppendVector, ab, data[i + 2], x + 120, y)
 
-    tint = append3(0, -1600, -700)
-    offset = append3(5, -1600, -250)
-    scale = append3(8, -1600, -100)
+    append4 = binary(m, unreal.MaterialExpressionAppendVector, append3(12, -1600, 1540), data[15], -1360, 1540)
     world = expr(m, unreal.MaterialExpressionWorldPosition, -1800, 150)
+    # Instance space: an instanced mesh's Local space is its component's, not the instance's.
     local_p = expr(m, unreal.MaterialExpressionTransformPosition, -1600, 150,
                    transform_source_type=unreal.MaterialPositionTransformSource.TRANSFORMPOSSOURCE_WORLD,
-                   transform_type=unreal.MaterialPositionTransformSource.TRANSFORMPOSSOURCE_LOCAL)
+                   transform_type=unreal.MaterialPositionTransformSource.TRANSFORMPOSSOURCE_INSTANCE)
     link(world, "", local_p, "")
-    normal_ws = expr(m, unreal.MaterialExpressionVertexNormalWS, -1800, 300)
+    normal_ws = world_normal(m, -1800, 300)
     local_n = expr(m, unreal.MaterialExpressionTransform, -1600, 300,
                    transform_source_type=unreal.MaterialVectorCoordTransformSource.TRANSFORMSOURCE_WORLD,
-                   transform_type=unreal.MaterialVectorCoordTransform.TRANSFORM_LOCAL)
+                   transform_type=unreal.MaterialVectorCoordTransform.TRANSFORM_INSTANCE)
     link(normal_ws, "", local_n, "")
-    objs = {}
-    for i, (key, name) in enumerate((("Albedo", "Albedo"), ("Normal", "NormalMap"), ("ARM", "Arm"))):
-        o = expr(m, unreal.MaterialExpressionTextureObject, -1600, 450 + 130 * i)
-        o.set_editor_property("texture", arrays[key])
-        objs[name] = o
-    custom = expr(m, unreal.MaterialExpressionCustom, -1100, 0, code=TOWN_CHUNK,
-                  output_type=unreal.CustomMaterialOutputType.CMOT_FLOAT3, description="TownChunk")
-    names = ["LocalP", "LocalN", "Scale", "Offset", "Tiles", "Layer", "Tint", "Albedo", "NormalMap", "Arm"]
-    inputs = []
-    for name in names:
-        ci = unreal.CustomInput()
-        ci.set_editor_property("input_name", name)
-        inputs.append(ci)
-    custom.set_editor_property("inputs", inputs)
-    outs = []
-    for name, kind in (("Normal", unreal.CustomMaterialOutputType.CMOT_FLOAT3), ("Roughness", unreal.CustomMaterialOutputType.CMOT_FLOAT1),
-                       ("Metallic", unreal.CustomMaterialOutputType.CMOT_FLOAT1), ("Occlusion", unreal.CustomMaterialOutputType.CMOT_FLOAT1)):
-        co = unreal.CustomOutput()
-        co.set_editor_property("output_name", name)
-        co.set_editor_property("output_type", kind)
-        outs.append(co)
-    custom.set_editor_property("additional_outputs", outs)
-    for name, source, pin in (("LocalP", local_p, ""), ("LocalN", local_n, ""), ("Scale", scale, ""), ("Offset", offset, ""),
-                              ("Tiles", data[4], ""), ("Layer", data[3], ""), ("Tint", tint, ""),
-                              ("Albedo", objs["Albedo"], ""), ("NormalMap", objs["NormalMap"], ""), ("Arm", objs["Arm"], "")):
-        link(source, pin, custom, name)
+    inputs = {
+        "LocalP": (local_p, ""), "LocalN": (local_n, ""), "WorldP": (world, ""), "WorldN": (normal_ws, ""),
+        "Scale": (append3(8, -1600, -100), ""), "Offset": (append3(5, -1600, -250), ""),
+        "Rotation": (append4, ""),
+        "Tiles": (data[4], ""), "UpTiles": (data[11], ""), "Layer": (data[3], ""), "Tint": (append3(0, -1600, -700), ""),
+        "TintStrength": (scalar(m, "TintStrength", 0.8, -1600, 900), ""),
+        "Weathering": (scalar(m, "Weathering", 0.18, -1600, 980), ""),
+        "Grime": (scalar(m, "Grime", 0.35, -1600, 1060), ""),
+        "CameraVec": (expr(m, unreal.MaterialExpressionCameraVectorWS, -1600, 1140), ""),
+        "RoomSize": (scalar(m, "RoomSize", 420.0, -1600, 1220), ""),
+        "StoreyHeight": (scalar(m, "StoreyHeight", 306.0, -1600, 1300), ""),
+        "Brightness": (scalar(m, "Brightness", 0.45, -1600, 1380), ""),
+        # The towers' bays (54.6 m of perimeter in 40 wall pieces) and storeys (30.6 m in ten).
+        "WindowBay": (scalar(m, "WindowBay", 137.0, -1600, 1460), ""),
+        "PaneRoughness": (scalar(m, "PaneRoughness", 0.3, -1600, 1620), ""),
+    }
+    inputs.update(texture_objects(m, arrays, -1600, 450))
+    c = custom(m, town_means() + TOWN_CHUNK, -1100, 0, inputs, {"Normal": 3, "Roughness": 1, "Metallic": 1, "Occlusion": 1, "Emissive": 3}, "TownChunk")
     to_world = expr(m, unreal.MaterialExpressionTransform, -700, 150,
-                    transform_source_type=unreal.MaterialVectorCoordTransformSource.TRANSFORMSOURCE_LOCAL,
+                    transform_source_type=unreal.MaterialVectorCoordTransformSource.TRANSFORMSOURCE_INSTANCE,
                     transform_type=unreal.MaterialVectorCoordTransform.TRANSFORM_WORLD)
-    link(custom, "Normal", to_world, "")
+    link(c, "Normal", to_world, "")
     normal = expr(m, unreal.MaterialExpressionNormalize, -500, 150)
     link(to_world, "", normal, "")
-    mel.connect_material_property(custom, "", MP.MP_BASE_COLOR)
+    mel.connect_material_property(c, "", MP.MP_BASE_COLOR)
     mel.connect_material_property(normal, "", MP.MP_NORMAL)
-    mel.connect_material_property(custom, "Roughness", MP.MP_ROUGHNESS)
-    mel.connect_material_property(custom, "Metallic", MP.MP_METALLIC)
-    mel.connect_material_property(custom, "Occlusion", MP.MP_AMBIENT_OCCLUSION)
+    mel.connect_material_property(c, "Roughness", MP.MP_ROUGHNESS)
+    mel.connect_material_property(c, "Metallic", MP.MP_METALLIC)
+    mel.connect_material_property(c, "Occlusion", MP.MP_AMBIENT_OCCLUSION)
+    mel.connect_material_property(c, "Emissive", MP.MP_EMISSIVE_COLOR)
     mel.recompile_material(m)
     return m
+
+
+def town_glass():
+    """M_RubbleTownGlass: dark reflective panes over lit rooms (TOWN_GLASS)."""
+    m = material("M_RubbleTownGlass")
+    inputs = {
+        "WorldP": (expr(m, unreal.MaterialExpressionWorldPosition, -1400, -200), ""),
+        "WorldN": (world_normal(m, -1400, -50), ""),
+        "CameraVec": (expr(m, unreal.MaterialExpressionCameraVectorWS, -1400, 100), ""),
+        "RoomSize": (scalar(m, "RoomSize", 420.0, -1400, 250), ""),
+        "StoreyHeight": (scalar(m, "StoreyHeight", 300.0, -1400, 330), ""),
+        "Brightness": (scalar(m, "Brightness", 0.45, -1400, 410), ""),
+    }
+    c = custom(m, TOWN_GLASS, -900, 0, inputs, {"Fresnel": 1}, "TownGlass")
+    mel.connect_material_property(vector(m, "PaneColor", (0.012, 0.016, 0.02, 1.0), -600, -250), "", MP.MP_BASE_COLOR)
+    mel.connect_material_property(c, "", MP.MP_EMISSIVE_COLOR)
+    mel.connect_material_property(scalar(m, "Roughness", 0.03, -600, 200), "", MP.MP_ROUGHNESS)
+    mel.connect_material_property(scalar(m, "Specular", 0.5, -600, 280), "", MP.MP_SPECULAR)
+    mel.recompile_material(m)
+    return m
+
+
+def town_ground(arrays):
+    """M_RubbleTownGround: the grass and mud layers of the town's texture arrays, world-projected."""
+    m = material("M_RubbleTownGround")
+    m.set_editor_property("used_with_instanced_static_meshes", False)
+    inputs = {
+        "WorldP": (expr(m, unreal.MaterialExpressionWorldPosition, -1400, -200), ""),
+        # The catalog's grass and mud-leaves layers (catalog.json) and their tile sizes.
+        "GrassLayer": (const(m, 10.0, -1400, -50), ""), "GrassMetres": (const(m, 2.0, -1400, 20), ""),
+        "MudLayer": (const(m, 11.0, -1400, 90), ""), "MudMetres": (const(m, 1.3, -1400, 160), ""),
+        "CanopyTint": (vector(m, "CanopyTint", (0.62, 0.95, 0.42, 1.0), -1400, 200), ""),
+    }
+    inputs.update(texture_objects(m, arrays, -1400, 250))
+    c = custom(m, TOWN_GROUND, -900, 0, inputs, {"Normal": 3, "Roughness": 1, "Occlusion": 1}, "TownGround")
+    mel.connect_material_property(c, "", MP.MP_BASE_COLOR)
+    mel.connect_material_property(c, "Normal", MP.MP_NORMAL)
+    mel.connect_material_property(c, "Roughness", MP.MP_ROUGHNESS)
+    mel.connect_material_property(c, "Occlusion", MP.MP_AMBIENT_OCCLUSION)
+    mel.recompile_material(m)
+    return m
+
+
+def town():
+    """The town's materials. Glass needs no textures; the rest fall back to tint-only chunks and
+    the yard's ground when the copied texture arrays are missing."""
+    town_glass()
+    arrays = city_arrays()
+    if not arrays:
+        log("town: no /Game/VibeCity texture arrays (scripts/unreal/fetch-city-textures.sh); chunk and ground skipped")
+        return
+    town_chunk(arrays)
+    town_ground(arrays)
 
 
 def nanite_meshes():
@@ -350,7 +602,7 @@ def main():
     dust()
     spark()
     nanite_meshes()
-    town_chunk()
+    town()
     eal.save_directory(ROOT, only_if_is_dirty=False, recursive=True)
     log("done: " + ", ".join(sorted(a.split("/")[-1].split(".")[0] for a in eal.list_assets(ROOT))))
 

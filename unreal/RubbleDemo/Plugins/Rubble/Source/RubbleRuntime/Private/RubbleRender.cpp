@@ -96,6 +96,18 @@ namespace RubbleRender
 		return HasGeneratedContent() ? LoadGenerated<UMaterialInterface>(TEXT("M_RubbleTownChunk")) : nullptr;
 	}
 
+	UMaterialInterface* TownSurface(ERubbleMaterial Material)
+	{
+		if (Material == ERubbleMaterial::Glass && HasGeneratedContent())
+		{
+			if (UMaterialInterface* Glass = LoadGenerated<UMaterialInterface>(TEXT("M_RubbleTownGlass")))
+			{
+				return Glass;
+			}
+		}
+		return TownChunk();
+	}
+
 	UMaterialInstanceDynamic* CarPaint(UObject* Outer, const FLinearColor& Paint)
 	{
 		UMaterialInterface* Parent = HasGeneratedContent() ? LoadGenerated<UMaterialInterface>(TEXT("M_RubbleCarPaint")) : nullptr;
@@ -108,8 +120,14 @@ namespace RubbleRender
 	{
 		if (HasGeneratedContent())
 		{
-			const TCHAR* Name = Stage == ERubbleStage::CrashHall ? TEXT("MI_GroundHall") : Stage == ERubbleStage::Lot ? TEXT("MI_GroundLot") : TEXT("MI_GroundYard");
+			const TCHAR* Name = Stage == ERubbleStage::CrashHall ? TEXT("MI_GroundHall") : Stage == ERubbleStage::Lot ? TEXT("MI_GroundLot")
+				: Stage == ERubbleStage::Town ? TEXT("M_RubbleTownGround") : TEXT("MI_GroundYard");
+			// The town's grass needs the copied texture arrays; without them it takes the yard's.
 			if (UMaterialInterface* M = LoadGenerated<UMaterialInterface>(Name))
+			{
+				return M;
+			}
+			if (UMaterialInterface* M = LoadGenerated<UMaterialInterface>(TEXT("MI_GroundYard")))
 			{
 				return M;
 			}

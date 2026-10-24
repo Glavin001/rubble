@@ -31,11 +31,14 @@ if [[ $BUILD == 1 ]]; then
 fi
 
 failed=0
+# Volumetric clouds and fog are off for speed unless RUBBLE_VOLUMETRICS=1 (the look shots want them).
+volumetrics="-RubbleNoVolumetrics"
+[[ "${RUBBLE_VOLUMETRICS:-0}" == 1 ]] && volumetrics=""
 run() { # run <name> <filter> <game|cmd> [extra game args]
   local name="$1" filter="$2" mode="$3" extra="${4:-} ${RUBBLE_TEST_ARGS:-}" log="$LOGS/$1.log"
   rm -f "$log"
   if [[ "$mode" == game ]]; then
-    "$APP/UnrealEditor" "$PROJECT" -game -windowed -ResX=1280 -ResY=720 -RubbleNoVolumetrics -notraceserver -unattended $extra \
+    "$APP/UnrealEditor" "$PROJECT" -game -windowed -ResX=1280 -ResY=720 $volumetrics -notraceserver -unattended $extra \
       "-ExecCmds=Automation RunTests $filter; Quit" "-TestExit=Automation Test Queue Empty" -abslog="$log" > /dev/null 2>&1 &
   else
     "$CMD" "$PROJECT" -nullrhi -unattended -nopause -nosplash -NoSound -notraceserver \

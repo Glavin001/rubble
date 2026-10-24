@@ -132,11 +132,20 @@ struct FRubbleShapeVisual
 	FTransform Local = FTransform::Identity;
 	ERubbleMaterial Material = ERubbleMaterial::Concrete;
 	FLinearColor Tint = FLinearColor::White;
-	/** A town chunk's surface (M_RubbleTownChunk): its texture-array layer (-1: tint only) and
-	 *  tile size. Off for every other shape. */
+	/** A town chunk's surface (M_RubbleTownChunk, or M_RubbleTownGlass for glass): its
+	 *  texture-array layer (-1: tint only) and tile size, and the layer its up-facing faces take
+	 *  (slab tops, roof slopes, broken edges); the shader tints the texture to the material's
+	 *  colour. Off for every other shape. */
 	bool bTownSurface = false;
 	int32 TextureLayer = -1;
 	float TilesPerMetre = 1.0f;
+	int32 UpLayer = -1;
+	float UpTilesPerMetre = 1.0f;
+	/** The up layer keeps its texture's own colour (a roof's slate under timber framing). */
+	bool bUpUntinted = false;
+	/** A glazed facade piece: its faces on the facades it reaches draw framed windows over
+	 *  rooms. Bits, in Unreal's axes: 1 +X, 2 -X, 4 +Y, 8 -Y (0: none). */
+	uint8 GlazedFacades = 0;
 };
 
 /** A rigid body drawn by its shapes (rigid scenes, scenery, projectiles, vehicle parts). */

@@ -4,6 +4,7 @@
 //   scenario.nodeColliders[i]  {kind: cuboid, halfExtents} | {kind: shape, shape: k} | {kind: convex_hull, points}
 //   scenario.shapeLibrary[k]   {kind: convex_hull, points}   (shared by many nodes)
 //   scenario.nodeMaterials[i]  a name in defaults.solver.materials (color, roughness, metalness)
+//   scenario.nodeGroups[i], nodeTypes[i]  the building a node belongs to and what it is
 // Points and half extents are in the node's frame (centred on its centroid, the pack's axes:
 // Rubble's frame, Y up, metres).
 
@@ -23,9 +24,13 @@ namespace RubbleTownPack
 		ERubbleMaterial Kind = ERubbleMaterial::Concrete;
 		/** vibe-land's material catalog id (shared/assets/materials/catalog.json), or empty. */
 		FString TextureKey;
-		/** From the catalog: the texture-array layer (-1: none) and the tile size. */
+		/** From the catalog: the texture-array layer (-1: none) and the tile size, and the layer its
+		 *  up-facing faces take. */
 		int32 Layer = -1;
 		float MetresPerTile = 1.0f;
+		int32 UpLayer = -1;
+		float UpMetresPerTile = 1.0f;
+		bool bUpUntinted = false;
 	};
 
 	struct FNode
@@ -36,6 +41,13 @@ namespace RubbleTownPack
 		int32 Hull = INDEX_NONE;
 		int32 Material = 0;
 		FVector3f Centroid = FVector3f::ZeroVector;
+		/** A glazed facade: a tower's walls, columns and slabs (nodeGroups tower@..., all but the
+		 *  foundation; its facade is fractured across all three). The pack models the towers
+		 *  without openings; this client draws windows on them. */
+		bool bGlazed = false;
+		/** For a glazed node: the facades its bounds reach, as bits in Unreal's axes (1 +X,
+		 *  2 -X, 4 +Y, 8 -Y): the sides of its building's bounds it lies on. */
+		uint8 Facades = 0;
 	};
 
 	struct FPack
@@ -50,8 +62,14 @@ namespace RubbleTownPack
 	/** Parse the pack's render fields. False and Error for a file that is not a v2 pack. */
 	bool Parse(const TArray<uint8>& Json, FPack& Out, FString& Error);
 
-	/** Look each material's textureKey up in vibe-land's catalog (its layer in the copied texture
-	 *  arrays and its tile size). Materials stay tint-only when the catalog is missing. */
+	/** Give each material its layers from vibe-land's catalog, as vibe-land's renderer does:
+	 *   - the wall layer: the catalog entry whose id is the material's textureKey, else the entry
+	 *     that lists the material's name;
+	 *   - the up-facing layer: the same for metal, limestone, slate and timber, worn concrete
+	 *     floor for the rest (cityTextures.ts layerCodeForTextureKey).
+	 *  Then the look this client adds where vibe-land draws a flat colour (LookFor in the .cpp):
+	 *  timber framing gets slate on its up faces (the roofs), painted trim and joinery painted
+	 *  plaster, asphalt dark worn concrete. Materials stay tint-only when the catalog is missing. */
 	void ApplyCatalog(const TArray<uint8>& CatalogJson, FPack& Pack);
 
 	/** A hull's triangle mesh in Unreal's frame (cm, Unreal winding), flat-shaded. */

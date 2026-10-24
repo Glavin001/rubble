@@ -17,9 +17,26 @@ namespace
 	/** Batches past this share of moving instances are rewritten whole, in one call. */
 	constexpr float WholeBatchShare = 0.25f;
 
-	/** M_RubbleTownChunk's custom data: tint, layer, tiles per metre, position in the
-	 *  destructible (cm), the instance's scale. */
-	constexpr int32 TownCustomFloats = 11;
+	/** M_RubbleTownChunk's custom data: tint, layer code, tiles per metre, position in the
+	 *  destructible (cm), the instance's scale, the up layer's tiles per metre, and its rotation
+	 *  in the destructible (a shared hull is placed turned). */
+	constexpr int32 TownCustomFloats = 16;
+
+	/** The wall layer and the up-facing layer in one float: wall + 16 x up, + 256 when the up
+	 *  layer is not tinted, + 512 x the glazed facades (-1: untextured). */
+	float LayerCode(const FRubbleShapeVisual& Shape)
+	{
+		if (Shape.TextureLayer < 0)
+		{
+			return -1.0f;
+		}
+		return float(Shape.TextureLayer + 16 * (Shape.UpLayer < 0 ? Shape.TextureLayer : Shape.UpLayer) + (Shape.bUpUntinted ? 256 : 0) + 512 * Shape.GlazedFacades);
+	}
+
+	float UpTiles(const FRubbleShapeVisual& Shape)
+	{
+		return Shape.UpLayer < 0 ? Shape.TilesPerMetre : Shape.UpTilesPerMetre;
+	}
 
 	void CustomData(const FRubbleShapeVisual& Shape, const FVector& Scale, bool bTown, TArray<float>& Out)
 	{
@@ -27,7 +44,9 @@ namespace
 		if (bTown)
 		{
 			const FVector At = Shape.Local.GetLocation();
-			Out.Append({ float(Shape.TextureLayer), Shape.TilesPerMetre, float(At.X), float(At.Y), float(At.Z), float(Scale.X), float(Scale.Y), float(Scale.Z) });
+			const FQuat Q = Shape.Local.GetRotation();
+			Out.Append({ LayerCode(Shape), Shape.TilesPerMetre, float(At.X), float(At.Y), float(At.Z), float(Scale.X), float(Scale.Y), float(Scale.Z), UpTiles(Shape),
+				float(Q.X), float(Q.Y), float(Q.Z), float(Q.W) });
 		}
 	}
 
@@ -80,7 +99,7 @@ int32 ARubblePrimitives::BatchFor(ERubbleShape Kind, int32 Mesh, ERubbleMaterial
 	UStaticMesh* StaticMesh = MeshFor(Kind, Mesh, Material, A, B, Assets, /*bNanite=*/false);
 	UInstancedStaticMeshComponent* ISM = NewObject<UInstancedStaticMeshComponent>(this);
 	ISM->SetStaticMesh(StaticMesh);
-	UMaterialInterface* Town = bTown ? RubbleRender::TownChunk() : nullptr;
+	UMaterialInterface* Town = bTown ? RubbleRender::TownSurface(Material) : nullptr;
 	ISM->SetMaterial(0, Town ? Town : RubbleRender::Surface(Material));
 	ISM->SetMobility(EComponentMobility::Movable);
 	ISM->SetCollisionEnabled(ECollisionEnabled::NoCollision);
@@ -189,7 +208,7 @@ void ARubblePrimitives::Rebuild(const FRubbleSceneAssets& Assets)
 			case ERubbleShape::Sphere: Scale = FVector(Shape.Radius / 50.0); break;
 			default: break;
 			}
-			const bool bTown = Shape.bTownSurface && RubbleRender::TownChunk();
+			const bool bTown = Shape.bTownSurface && RubbleRender::TownSurface(Shape.Material);
 			Ref.Batch = BatchFor(Shape.Kind, Shape.Mesh, Shape.Material, Shape.Radius, Shape.HalfHeight, Assets, bTown);
 			Ref.Local = FTransform(Shape.Local.GetRotation(), Shape.Local.GetLocation(), Scale);
 			if (NewTransforms.Num() <= Ref.Batch)
@@ -482,7 +501,7 @@ int32 ARubblePrimitives::GpuBatchFor(ERubbleShape Kind, int32 Mesh, ERubbleMater
 	}
 	URubbleInstancesComponent* C = NewObject<URubbleInstancesComponent>(this);
 	C->SetStaticMesh(MeshFor(Kind, Mesh, Material, A, B, Assets, /*bNanite=*/true));
-	UMaterialInterface* Town = bTown ? RubbleRender::TownChunk() : nullptr;
+	UMaterialInterface* Town = bTown ? RubbleRender::TownSurface(Material) : nullptr;
 	C->SetMaterial(0, Town ? Town : RubbleRender::Surface(Material));
 	C->SetCustomFloats(Town ? TownCustomFloats : 3);
 	C->SetCastShadow(true);
@@ -543,11 +562,13 @@ void ARubblePrimitives::GpuRows(const FRubbleShapeVisual& Shape, const FTransfor
 	Out.Add(FVector4f(Scale, 0.0f));
 	if (bTown)
 	{
-		// M_RubbleTownChunk's 11 floats, as the CPU instances carry them (CustomData above).
+		// M_RubbleTownChunk's 16 floats, as the CPU instances carry them (CustomData above).
 		const FVector3f At(Shape.Local.GetLocation());
-		Out.Add(FVector4f(Shape.Tint.R, Shape.Tint.G, Shape.Tint.B, float(Shape.TextureLayer)));
+		const FQuat4f R(Shape.Local.GetRotation());
+		Out.Add(FVector4f(Shape.Tint.R, Shape.Tint.G, Shape.Tint.B, LayerCode(Shape)));
 		Out.Add(FVector4f(Shape.TilesPerMetre, At.X, At.Y, At.Z));
-		Out.Add(FVector4f(Scale, 0.0f));
+		Out.Add(FVector4f(Scale, UpTiles(Shape)));
+		Out.Add(FVector4f(R.X, R.Y, R.Z, R.W));
 	}
 	else
 	{
@@ -570,7 +591,7 @@ void ARubblePrimitives::AddHybrid(const FRubbleBodyVisual& Body, TArrayView<cons
 	for (int32 s = 0; s < Body.NumShapes; ++s)
 	{
 		const FRubbleShapeVisual& Shape = Shapes[Body.FirstShape + s];
-		const bool bTown = Shape.bTownSurface && RubbleRender::TownChunk();
+		const bool bTown = Shape.bTownSurface && RubbleRender::TownSurface(Shape.Material);
 		FHybridRef Ref;
 		Ref.GpuBatch = GpuBatchFor(Shape.Kind, Shape.Mesh, Shape.Material, Shape.Radius, Shape.HalfHeight, Assets, bTown, /*bHybrid=*/true);
 		FGpuBatch& Batch = GpuBatches[Ref.GpuBatch];

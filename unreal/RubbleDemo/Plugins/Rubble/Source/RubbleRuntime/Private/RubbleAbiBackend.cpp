@@ -1125,9 +1125,13 @@ bool FRubbleAbiBackend::CreateTown(FString& Error)
 		Shape.Material = M.Kind;
 		Shape.Tint = M.Color;
 		Shape.Local = Xf(Pose);
-		Shape.bTownSurface = M.Kind != ERubbleMaterial::Glass;
+		Shape.bTownSurface = true;
 		Shape.TextureLayer = M.Layer;
 		Shape.TilesPerMetre = 1.0f / M.MetresPerTile;
+		Shape.UpLayer = M.UpLayer;
+		Shape.UpTilesPerMetre = 1.0f / M.UpMetresPerTile;
+		Shape.bUpUntinted = M.bUpUntinted;
+		Shape.GlazedFacades = N.bGlazed && M.Layer >= 0 ? N.Facades : 0;
 		if (N.bBox)
 		{
 			Shape.Kind = ERubbleShape::Box;
