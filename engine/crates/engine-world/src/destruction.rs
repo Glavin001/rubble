@@ -676,8 +676,11 @@ impl World {
                 }
             };
             let s = def.strength_scale;
+            // The bond's penalties run normal, u, v, about u, about v, about normal; the D6
+            // bond rows normal, u, v, about normal, about u, about v (as the lab's planner).
+            let p = bond.stiffness;
             let spec = BondSpec {
-                k: bond.stiffness,
+                k: [p[0], p[1], p[2], p[5], p[3], p[4]],
                 strength: bond.strength.map(|x| x * s),
             };
             let desc = JointDesc::bond(
