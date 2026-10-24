@@ -22,8 +22,12 @@ pub const MPM_COLUMNS_BINDING: usize = 47;
 pub const MPM_COUPLE_BINDING: usize = 48;
 /// Per coupling slot: the frame's reaction on the body and its proxy velocity.
 pub const MPM_COUPLED_BINDING: usize = 49;
+/// Ejecta parcels: (position, quanta), (velocity, mass; 0 once landed).
+pub const MPM_PARCELS_BINDING: usize = 50;
+/// Per heightfield sample: quanta deposited this frame.
+pub const MPM_DEPOSIT_BINDING: usize = 51;
 /// One past the last terrain binding.
-pub const MPM_BINDING_END: usize = 50;
+pub const MPM_BINDING_END: usize = 52;
 /// Colliders one block cell of the region lists (`MPM_CELL_COLLIDERS`).
 pub const MPM_CELL_COLLIDERS: u32 = 8;
 
@@ -32,6 +36,9 @@ pub const MPM_C_BLOCKS: usize = 0;
 pub const MPM_C_FLAGS: usize = 1;
 pub const MPM_C_MAX_SPEED: usize = 2;
 pub const MPM_C_PARTICLES: usize = 3;
+pub const MPM_C_PARCELS: usize = 5;
+pub const MPM_C_DEPOSITED: usize = 6;
+pub const MPM_C_ESCAPED: usize = 7;
 pub const MPM_COUNTER_WORDS: usize = 8;
 
 /// `MpmParams.dims.w` without a bed heightfield.
@@ -53,6 +60,19 @@ pub const MPM_OVERFLOW_PARTICLES: u32 = 32;
 pub const MPM_OVERFLOW_COUPLED: u32 = 64;
 pub const MPM_OVERFLOW_CELL: u32 = 128;
 pub const MPM_OVERFLOW_IMPULSES: u32 = 256;
+pub const MPM_OVERFLOW_PARCELS: u32 = 512;
+pub const MPM_OVERFLOW_FIELD: u32 = 1024;
+
+/// `MpmParticle::f[2][3]` bit: the particle left the region as a parcel.
+pub const MPM_PARTICLE_DEAD: u32 = 1;
+
+/// One ejecta parcel: position, quanta (u32 bits), velocity, mass (0 once landed).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
+pub struct MpmParcel {
+    pub xq: [f32; 4],
+    pub vm: [f32; 4],
+}
 
 /// Block coordinates are packed in 10 bits per axis.
 pub const MPM_MAX_BLOCKS_PER_AXIS: u32 = 1024;
@@ -79,7 +99,8 @@ pub struct MpmParams {
     /// spacing (m), density (kg/m³).
     pub column: [f32; 4],
     /// Frame duration (s; pads collider bounds by their motion), max coupled
-    /// colliders (u32 bits), unused, unused.
+    /// colliders, max parcels (0: leaving the region is an error), heightfield
+    /// samples parcels may deposit on (the last three u32 bits).
     pub couple: [f32; 4],
 }
 
@@ -94,7 +115,8 @@ pub struct MpmParticle {
     /// Rows of C, the APIC affine velocity.
     pub c: [[f32; 4]; 3],
     /// Rows of the deformation gradient F; `f[0][3]` is the rest volume,
-    /// `f[1][3]` the volume quanta (u32 bits; 0 for particles loaded by the host).
+    /// `f[1][3]` the volume quanta (u32 bits; 0 for particles loaded by the host),
+    /// `f[2][3]` flags (u32 bits; [`MPM_PARTICLE_DEAD`]: left as a parcel).
     pub f: [[f32; 4]; 3],
 }
 

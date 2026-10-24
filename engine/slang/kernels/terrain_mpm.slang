@@ -26,6 +26,13 @@
 // mpm_couple_emit appends one LINEAR_ANGULAR impulse record per dynamic body for
 // the rigid step that follows, which applies it at its start and ends the frame
 // at the proxy's velocity.
+// Ejecta (T4): a particle G2P would carry out of the region's box becomes a
+// ballistic parcel holding its quanta (mpm_g2p; the particle's slot is left
+// dead); mpm_parcels flies parcels under gravity: one landing over the region
+// comes back as a particle, one landing elsewhere on the heightfield adds its
+// quanta to the sample under it (mpm_deposit_raise, once per frame), one leaving
+// the field's footprint is counted as escaped. Activated quanta always equal
+// particles + parcels + deposited + escaped.
 // Activation (heightfield → particles) and bake (particles → heightfield) work on
 // the window of heightfield samples under the region: mpm_activate_count,
 // mpm_activate_scan, mpm_activate_emit, mpm_activate_lower; mpm_bake_bin,
@@ -52,7 +59,10 @@ static const uint MPM_C_BLOCKS = 0u;      // blocks inserted this substep
 static const uint MPM_C_FLAGS = 1u;       // MPM_OVERFLOW_* | MPM_OUTSIDE
 static const uint MPM_C_MAX_SPEED = 2u;   // max |v| after G2P (f32 bits; monotone for v ≥ 0)
 static const uint MPM_C_PARTICLES = 3u;   // particles in the region (host load, activation)
-static const uint MPM_C_BAKE_MAX = 4u;    // largest baked height (order-preserving bits)
+static const uint MPM_C_BAKE_MAX = 4u;    // largest baked or deposited height (order-preserving bits)
+static const uint MPM_C_PARCELS = 5u;     // parcels ever ejected this region (slots, live or not)
+static const uint MPM_C_DEPOSITED = 6u;   // quanta parcels have laid on the heightfield
+static const uint MPM_C_ESCAPED = 7u;     // quanta that left the heightfield's footprint
 static const uint MPM_OVERFLOW_BLOCKS = 1u;
 static const uint MPM_OVERFLOW_HASH = 2u;
 static const uint MPM_OUTSIDE = 4u;
@@ -62,6 +72,10 @@ static const uint MPM_OVERFLOW_PARTICLES = 32u; // activation would pass max par
 static const uint MPM_OVERFLOW_COUPLED = 64u;   // more rigid colliders in the region than coupling slots
 static const uint MPM_OVERFLOW_CELL = 128u;     // more colliders in one block cell than it lists
 static const uint MPM_OVERFLOW_IMPULSES = 256u; // the rigid step's impulse records were full
+static const uint MPM_OVERFLOW_PARCELS = 512u;  // more ejecta than parcel slots
+static const uint MPM_OVERFLOW_FIELD = 1024u;   // the bed heightfield has more samples than deposit slots
+// MpmParticle.f2.w bits.
+static const uint MPM_PARTICLE_DEAD = 1u;       // left as a parcel: no longer simulated
 // Colliders one block cell of the region lists.
 static const uint MPM_CELL_COLLIDERS = 8u;
 static const uint MPM_NO_SLOT = 0xFFFFFFFFu;
@@ -84,7 +98,9 @@ struct MpmParams
     float4 sand;    // λ, μ, friction (DP α, or sin φ for Mohr–Coulomb), cohesion (log strain)
     uint4 window;   // heightfield samples under the region: i0, j0, ni, nj
     float4 column;  // bed height (heightfield-local y), volume quantum (m³), lattice spacing, density
-    float4 couple;  // x = frame duration (s, bounds pad by motion), y = max coupled colliders (uint bits)
+    float4 couple;  // x = frame duration (s, bounds pad by motion), y = max coupled colliders (uint bits),
+                    // z = max parcels (uint bits; 0: material leaving the region is an error),
+                    // w = heightfield samples parcels may deposit on (uint bits)
 };
 
 // Per particle (128 B).
@@ -134,6 +150,10 @@ BIND(47) RWStructuredBuffer<AUint> gMpmColumns;
 // [0] coupled colliders; per region block cell c (x + X·(y + Y·z)):
 // [4 + c·(1 + MPM_CELL_COLLIDERS)] count, then coupling slots.
 BIND(48) RWStructuredBuffer<AUint> gMpmCouple;
+// Ejecta parcels: [2k] = (position, quanta bits), [2k + 1] = (velocity, mass; 0 once landed).
+BIND(50) RWStructuredBuffer<float4> gMpmParcels;
+// Per heightfield sample (j·nx + i): quanta deposited this frame.
+BIND(51) RWStructuredBuffer<AUint> gMpmDeposit;
 // Per coupling slot s: [4s] = (impulse on the body, collider bits), [4s + 1] =
 // (angular impulse about its centre, 0), summed over the frame's substeps;
 // [4s + 2], [4s + 3] = the body's proxy linear and angular velocity.
@@ -146,6 +166,8 @@ uint mpmIndex(uint3 tid) { return tid.x + tid.y * (32768u * 64u); }
 MpmParams mpmParams() { return gMpmParams[0]; }
 
 uint mpmParticleCount() { return ALOAD(gMpmCounters[MPM_C_PARTICLES]); }
+
+bool mpmParticleDead(MpmParticle q) { return (asuint(q.f2.w) & MPM_PARTICLE_DEAD) != 0u; }
 
 int3 mpmBaseNode(float3 x, MpmParams p)
 {
@@ -252,7 +274,9 @@ void mpm_touch(uint3 tid : SV_DispatchThreadID)
     uint i = mpmIndex(tid);
     MpmParams p = mpmParams();
     if (i >= mpmParticleCount()) return;
-    float3 x = gMpmParticles[i].xm.xyz;
+    MpmParticle q = gMpmParticles[i];
+    if (mpmParticleDead(q)) return;
+    float3 x = q.xm.xyz;
     if (!mpmInside(x, p)) { AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OUTSIDE); return; }
     int3 b = mpmBaseNode(x, p);
     int3 lo = b >> 2, hi = (b + 2) >> 2;
@@ -273,6 +297,10 @@ void mpm_write_args(uint3 tid : SV_DispatchThreadID)
     gMpmArgs[3] = (mpmParticleCount() + MPM_GROUP - 1u) / MPM_GROUP;
     gMpmArgs[4] = 1u;
     gMpmArgs[5] = 1u;
+    uint parcels = min(ALOAD(gMpmCounters[MPM_C_PARCELS]), asuint(p.couple.z));
+    gMpmArgs[6] = (parcels + MPM_GROUP - 1u) / MPM_GROUP;
+    gMpmArgs[7] = 1u;
+    gMpmArgs[8] = 1u;
 }
 
 [shader("compute")]
@@ -282,8 +310,9 @@ void mpm_count(uint3 tid : SV_DispatchThreadID)
     uint i = mpmIndex(tid);
     MpmParams p = mpmParams();
     if (i >= mpmParticleCount()) return;
-    float3 x = gMpmParticles[i].xm.xyz;
-    if (!mpmInside(x, p)) return;
+    MpmParticle q = gMpmParticles[i];
+    float3 x = q.xm.xyz;
+    if (mpmParticleDead(q) || !mpmInside(x, p)) return;
     uint c = mpmCellOf(mpmBaseNode(x, p), p);
     if (c != MPM_NO_BLOCK) AADD2(gMpmCells[4u * c], 1u);
 }
@@ -350,8 +379,9 @@ void mpm_scatter(uint3 tid : SV_DispatchThreadID)
     uint i = mpmIndex(tid);
     MpmParams p = mpmParams();
     if (i >= mpmParticleCount()) return;
-    float3 x = gMpmParticles[i].xm.xyz;
-    if (!mpmInside(x, p)) return;
+    MpmParticle q = gMpmParticles[i];
+    float3 x = q.xm.xyz;
+    if (mpmParticleDead(q) || !mpmInside(x, p)) return;
     uint c = mpmCellOf(mpmBaseNode(x, p), p);
     if (c == MPM_NO_BLOCK) return;
     uint k;
@@ -641,7 +671,7 @@ void mpm_g2p(uint3 tid : SV_DispatchThreadID)
     MpmParams p = mpmParams();
     if (i >= mpmParticleCount()) return;
     MpmParticle q = gMpmParticles[i];
-    if (!mpmInside(q.xm.xyz, p)) return;
+    if (mpmParticleDead(q) || !mpmInside(q.xm.xyz, p)) return;
     float dx = p.origin.w;
     float dt = p.step.x;
     int3 base = mpmBaseNode(q.xm.xyz, p);
@@ -673,10 +703,24 @@ void mpm_g2p(uint3 tid : SV_DispatchThreadID)
     q.f0.xyz = F[0];
     q.f1.xyz = F[1];
     q.f2.xyz = F[2];
-    gMpmParticles[i] = q;
     float speed = length(v);
     AMAX2(gMpmCounters[MPM_C_MAX_SPEED], asuint(speed));
     if (!(speed <= p.limits.x)) AOR2(gMpmCounters[MPM_C_FLAGS], MPM_CFL);
+    // Leaving the box: a parcel carries the material on (with ejecta enabled).
+    uint maxParcels = asuint(p.couple.z);
+    if (!mpmInside(q.xm.xyz, p) && maxParcels > 0u)
+    {
+        uint k;
+        AADD3(gMpmCounters[MPM_C_PARCELS], 1u, k);
+        if (k < maxParcels)
+        {
+            gMpmParcels[2u * k] = float4(q.xm.xyz, q.f1.w);
+            gMpmParcels[2u * k + 1u] = float4(v, q.xm.w);
+            q.f2.w = asfloat(asuint(q.f2.w) | MPM_PARTICLE_DEAD);
+        }
+        else AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_PARCELS);
+    }
+    gMpmParticles[i] = q;
 }
 
 // ---- activation and bake -----------------------------------------------------
@@ -880,6 +924,7 @@ void mpm_bake_bin(uint3 tid : SV_DispatchThreadID)
     Frame f = colliderFrame(col, gBodies[col.body]);
     HeightFieldRef hf = heightFieldOf(col);
     MpmParticle q = gMpmParticles[i];
+    if (mpmParticleDead(q)) return;
     float3 xl = frameToLocal(f, q.xm.xyz);
     int si = int(round((xl.x - hf.x0) / hf.dx)), sj = int(round((xl.z - hf.z0) / hf.dz));
     uint ti = uint(clamp(si - int(p.window.x), 0, int(p.window.z) - 1));
@@ -1085,4 +1130,134 @@ void mpm_couple_emit(uint3 tid : SV_DispatchThreadID)
 void mpm_couple_finish(uint3 tid : SV_DispatchThreadID)
 {
     ASTORE(gScratchAtomics[IMPULSE_FIRST], min(ALOAD(gScratchAtomics[IMPULSE_COUNT]), IMPULSE_CAP));
+}
+
+// ---- ejecta parcels -------------------------------------------------------------
+
+uint mpmOrderedBits(float h)
+{
+    uint b = asuint(h);
+    return (b & 0x80000000u) != 0u ? ~b : (b | 0x80000000u);
+}
+
+// Per parcel, per substep: ballistic flight (symplectic Euler, as particles), then
+// landing on the heightfield (bed collider): back into the region as a particle
+// when over its box, else deposited on the sample under it; off the field's
+// footprint, escaped.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_parcels(uint3 tid : SV_DispatchThreadID)
+{
+    uint k = mpmIndex(tid);
+    MpmParams p = mpmParams();
+    if (k >= min(ALOAD(gMpmCounters[MPM_C_PARCELS]), asuint(p.couple.z))) return;
+    float4 xq = gMpmParcels[2u * k], vm = gMpmParcels[2u * k + 1u];
+    if (vm.w <= 0.0) return;
+    float dt = p.step.x;
+    vm.y += dt * p.step.y;
+    xq.xyz += dt * vm.xyz;
+    uint quanta = asuint(xq.w);
+    bool landed = false;
+    if (p.dims.w != MPM_NO_BLOCK)
+    {
+        Collider col = gColliders[p.dims.w];
+        Frame f = colliderFrame(col, gBodies[col.body]);
+        HeightFieldRef hf = heightFieldOf(col);
+        float3 xl = frameToLocal(f, xq.xyz);
+        float h; float3 n;
+        if (!hfSurface(hf, xl.x, xl.z, h, n))
+        {
+            AADD2(gMpmCounters[MPM_C_ESCAPED], quanta);
+            landed = true;
+        }
+        else if (xl.y <= h)
+        {
+            landed = true;
+            if (mpmInside(xq.xyz, p))
+            {
+                uint slot;
+                AADD3(gMpmCounters[MPM_C_PARTICLES], 1u, slot);
+                if (slot < p.counts.x)
+                {
+                    MpmParticle q;
+                    float vol = float(quanta) * p.column.y;
+                    q.xm = float4(xq.xyz, vm.w);
+                    q.vj = float4(vm.xyz, 0.0);
+                    q.c0 = float4(0, 0, 0, 0);
+                    q.c1 = float4(0, 0, 0, 0);
+                    q.c2 = float4(0, 0, 0, 0);
+                    q.f0 = float4(1, 0, 0, vol > 0.0 ? vol : vm.w / max(p.column.w, 1e-30));
+                    q.f1 = float4(0, 1, 0, asfloat(quanta));
+                    q.f2 = float4(0, 0, 1, 0);
+                    gMpmParticles[slot] = q;
+                }
+                else AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_PARTICLES);
+            }
+            else
+            {
+                int si = clamp(int(round((xl.x - hf.x0) / hf.dx)), 0, int(hf.nx) - 1);
+                int sj = clamp(int(round((xl.z - hf.z0) / hf.dz)), 0, int(hf.nz) - 1);
+                uint at = uint(sj) * hf.nx + uint(si);
+                if (at < asuint(p.couple.w))
+                {
+                    AADD2(gMpmDeposit[at], quanta);
+                    AADD2(gMpmCounters[MPM_C_DEPOSITED], quanta);
+                }
+                else
+                {
+                    AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_FIELD);
+                    landed = false;
+                }
+            }
+        }
+    }
+    gMpmParcels[2u * k] = xq;
+    gMpmParcels[2u * k + 1u] = float4(vm.xyz, landed ? 0.0 : vm.w);
+}
+
+// Once per frame, per heightfield record: the quanta deposited on its samples,
+// as height, and the field's max height raised over them.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_deposit_raise(uint3 tid : SV_DispatchThreadID)
+{
+    uint r = mpmIndex(tid);
+    MpmParams p = mpmParams();
+    if (p.dims.w == MPM_NO_BLOCK) return;
+    Collider col = gColliders[p.dims.w];
+    HeightFieldRef hf = heightFieldOf(col);
+    if (r >= (min(hf.nx * hf.nz, asuint(p.couple.w)) + 3u) / 4u) return;
+    uint4 rec = gHulls[hf.base + 2u + r];
+    float area = mpmSampleArea(hf);
+    bool changed = false;
+    for (uint c = 0u; c < 4u; c++)
+    {
+        uint k = 4u * r + c;
+        if (k >= min(hf.nx * hf.nz, asuint(p.couple.w))) continue;
+        uint n;
+        AXCHG3(gMpmDeposit[k], 0u, n);
+        if (n == 0u) continue;
+        float h = asfloat(rec[c]) + float(n) * p.column.y / area;
+        rec[c] = asuint(h);
+        AMAX2(gMpmCounters[MPM_C_BAKE_MAX], mpmOrderedBits(h));
+        changed = true;
+    }
+    if (changed) gHulls[hf.base + 2u + r] = rec;
+}
+
+// After mpm_deposit_raise: the field's max height covers the deposits.
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void mpm_deposit_header(uint3 tid : SV_DispatchThreadID)
+{
+    MpmParams p = mpmParams();
+    if (p.dims.w == MPM_NO_BLOCK) return;
+    HeightFieldRef hf = heightFieldOf(gColliders[p.dims.w]);
+    uint b;
+    AXCHG3(gMpmCounters[MPM_C_BAKE_MAX], 0u, b);
+    if (b == 0u) return;
+    float top = asfloat((b & 0x80000000u) != 0u ? (b & 0x7FFFFFFFu) : ~b);
+    uint4 dims = gHulls[hf.base + 1u];
+    dims.w = asuint(max(asfloat(dims.w), top));
+    gHulls[hf.base + 1u] = dims;
 }

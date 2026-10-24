@@ -12,7 +12,8 @@ pub struct TerrainConfig {
     pub max_particles: u32,
     /// Sparse-grid blocks ([`crate::BLOCK_CELLS`]³ cells each) over all regions.
     pub max_blocks: u32,
-    /// Ballistic parcels in flight.
+    /// Ejecta parcels one region may throw (0: material leaving the region's box
+    /// is an error instead).
     pub max_parcels: u32,
     /// Particles seeded per cell when material is activated (per axis: the
     /// cell holds this many cubed).
@@ -32,6 +33,8 @@ pub struct TerrainConfig {
     /// Rigid colliders the active region may hold at once (each couples to the
     /// material and takes its reaction).
     pub max_coupled: u32,
+    /// Samples of the bed heightfield parcels may land on.
+    pub max_field_samples: u32,
 }
 
 impl Default for TerrainConfig {
@@ -48,6 +51,7 @@ impl Default for TerrainConfig {
             max_substeps: 512,
             max_columns: 1 << 16,
             max_coupled: 256,
+            max_field_samples: 1 << 20,
         }
     }
 }

@@ -34,8 +34,14 @@ pub struct TerrainStepReport {
     pub blocks: u32,
     /// Largest particle speed after the last substep (m/s).
     pub max_speed: f32,
-    /// Particles in the region.
+    /// Particle slots in the region (live, or left as parcels).
     pub particles: u32,
+    /// Parcels thrown so far (in flight or landed).
+    pub parcels: u32,
+    /// Quanta parcels have deposited on the heightfield.
+    pub deposited: u32,
+    /// Quanta that left the heightfield's footprint.
+    pub escaped: u32,
 }
 
 /// Quanta per lattice particle: a column's volume is rounded to s³/64 (s the
@@ -86,13 +92,15 @@ impl WgpuSim {
             (MPM_CELLS_BINDING, nodes * 16),
             (MPM_SORTED_BINDING, particles * 4),
             (MPM_GRID_BINDING, nodes * 16),
-            (MPM_ARGS_BINDING, 24),
+            (MPM_ARGS_BINDING, 36),
             (MPM_COLUMNS_BINDING, u64::from(config.max_columns) * 16),
             (
                 MPM_COUPLE_BINDING,
                 (4 + blocks * u64::from(1 + MPM_CELL_COLLIDERS)) * 4,
             ),
             (MPM_COUPLED_BINDING, u64::from(config.max_coupled) * 64),
+            (MPM_PARCELS_BINDING, u64::from(config.max_parcels) * 32),
+            (MPM_DEPOSIT_BINDING, u64::from(config.max_field_samples) * 4),
         ];
         let limits = self.device.limits();
         for &(binding, bytes) in &sizes {
@@ -112,7 +120,12 @@ impl WgpuSim {
                     MPM_MATERIAL_NONE,
                 ],
                 dims: [0, 0, 0, MPM_NO_BED],
-                couple: [0.0, f32::from_bits(config.max_coupled), 0.0, 0.0],
+                couple: [
+                    0.0,
+                    f32::from_bits(config.max_coupled),
+                    f32::from_bits(config.max_parcels),
+                    f32::from_bits(config.max_field_samples),
+                ],
                 ..MpmParams::default()
             },
             wave_speed: 0.0,
@@ -151,6 +164,13 @@ impl WgpuSim {
         Ok(())
     }
 
+    /// A new region throws its ejecta from slot 0 and counts afresh.
+    fn terrain_reset_ejecta(&self) {
+        for w in [MPM_C_PARCELS, MPM_C_DEPOSITED, MPM_C_ESCAPED] {
+            self.terrain_write_counter(w, 0);
+        }
+    }
+
     fn terrain_write_counter(&self, word: usize, value: u32) {
         self.queue.write_buffer(
             &self.bufs[MPM_COUNTERS_BINDING],
@@ -182,6 +202,7 @@ impl WgpuSim {
             );
         }
         self.terrain_write_counter(MPM_C_PARTICLES, n);
+        self.terrain_reset_ejecta();
         Ok(())
     }
 
@@ -224,6 +245,11 @@ impl WgpuSim {
         let (j0, nj) = range(z0, sz, nz, lo.z, hi.z);
         anyhow::ensure!(ni > 0 && nj > 0, "the region covers no heightfield samples");
         TerrainConfig::check(
+            "max_field_samples",
+            u64::from(nx) * u64::from(nz),
+            u64::from(cfg.max_field_samples),
+        )?;
+        TerrainConfig::check(
             "max_columns",
             u64::from(ni) * u64::from(nj),
             u64::from(cfg.max_columns),
@@ -248,6 +274,7 @@ impl WgpuSim {
             bytemuck::bytes_of(&params),
         );
         self.terrain_write_counter(MPM_C_PARTICLES, 0);
+        self.terrain_reset_ejecta();
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -354,6 +381,7 @@ impl WgpuSim {
             for _ in 0..substeps {
                 self.encode_terrain_substep(&mut pass, clear);
             }
+            self.encode_terrain_deposits(&mut pass);
         }
         self.queue.submit(Some(enc.finish()));
         self.terrain_report()
@@ -408,6 +436,17 @@ impl WgpuSim {
         self.disp_terrain_blocks(pass, "mpm_p2g");
         self.disp_terrain_blocks(pass, "mpm_grid");
         self.disp_terrain_particles(pass, "mpm_g2p");
+        self.disp_terrain_indirect(pass, "mpm_parcels", 24);
+    }
+
+    /// Once per frame: the parcels' deposits onto the heightfield.
+    fn encode_terrain_deposits<'a>(&'a self, pass: &mut wgpu::ComputePass<'a>) {
+        let records = self
+            .terrain
+            .as_ref()
+            .map_or(0, |t| u64::from(t.config.max_field_samples).div_ceil(4));
+        self.disp(pass, "mpm_deposit_raise", records, None);
+        self.disp(pass, "mpm_deposit_header", 1, None);
     }
 
     /// The counters after the last submission (blocking), as a report or the
@@ -434,6 +473,19 @@ impl WgpuSim {
             }
             .into());
         }
+        if flags & MPM_OVERFLOW_PARCELS != 0 {
+            return Err(TerrainError::LimitExceeded {
+                limit: "max_parcels",
+                requested: u64::from(c[MPM_C_PARCELS]),
+                allowed: u64::from(cfg.max_parcels),
+            }
+            .into());
+        }
+        anyhow::ensure!(
+            flags & MPM_OVERFLOW_FIELD == 0,
+            "the bed heightfield has more samples than max_field_samples ({})",
+            cfg.max_field_samples
+        );
         if flags & MPM_OVERFLOW_COUPLED != 0 {
             return Err(TerrainError::LimitExceeded {
                 limit: "max_coupled",
@@ -474,6 +526,9 @@ impl WgpuSim {
             blocks: c[MPM_C_BLOCKS],
             max_speed: f32::from_bits(c[MPM_C_MAX_SPEED]),
             particles: c[MPM_C_PARTICLES],
+            parcels: c[MPM_C_PARCELS].min(cfg.max_parcels),
+            deposited: c[MPM_C_DEPOSITED],
+            escaped: c[MPM_C_ESCAPED],
         })
     }
 
@@ -515,6 +570,7 @@ impl WgpuSim {
                 self.encode_terrain_substep(&mut pass, clear);
                 self.disp(&mut pass, "mpm_couple_gather", slots * 64, None);
             }
+            self.encode_terrain_deposits(&mut pass);
             self.disp(&mut pass, "mpm_couple_emit", slots, None);
             self.disp(&mut pass, "mpm_couple_finish", 1, None);
         }
@@ -548,6 +604,19 @@ impl WgpuSim {
     /// One thread per particle in the region, counted on the GPU.
     fn disp_terrain_particles<'a>(&'a self, pass: &mut wgpu::ComputePass<'a>, name: &str) {
         self.disp_terrain_indirect(pass, name, 12);
+    }
+
+    /// The region's parcels, in flight or landed (blocking readback).
+    pub fn terrain_parcels(&self) -> Vec<MpmParcel> {
+        let Some(t) = self.terrain.as_ref() else {
+            return Vec::new();
+        };
+        let n = self.read_binding::<u32>(MPM_COUNTERS_BINDING, 4 * MPM_C_PARCELS as u64, 1)[0]
+            .min(t.config.max_parcels);
+        if n == 0 {
+            return Vec::new();
+        }
+        self.read_binding(MPM_PARCELS_BINDING, 0, n as usize)
     }
 
     /// The active region's particles (blocking readback).

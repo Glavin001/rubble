@@ -187,6 +187,9 @@ const WORLD_ENTRIES: &[&str] = &[
     "mpm_couple_gather",
     "mpm_couple_emit",
     "mpm_couple_finish",
+    "mpm_parcels",
+    "mpm_deposit_raise",
+    "mpm_deposit_header",
 ];
 
 const CHARACTER_ENTRIES: &[&str] = &["char_move", "char_post", "query_batch", "projectile_step"];

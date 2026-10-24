@@ -190,9 +190,14 @@ fn limits_fail_by_name() {
     let err = s.terrain_step(1, 1.0e-3, 0.0).unwrap_err();
     assert!(err.to_string().contains("max_blocks"), "{err}");
 
-    // 5 m/s leaves the region (1.5 m from the centre) within 0.4 s.
+    // 5 m/s leaves the region (1.5 m from the centre) within 0.4 s; with no
+    // parcels to carry it on, that is an error.
     let mut s = sim();
-    s.terrain_enable(&config()).unwrap();
+    s.terrain_enable(&TerrainConfig {
+        max_parcels: 0,
+        ..config()
+    })
+    .unwrap();
     let (plan, ps) = cube(Vec3::ZERO, 0.25, |_| Vec3::new(5.0, 0.0, 0.0));
     s.terrain_load(&plan, &ps, None, 0.0).unwrap();
     let err = s.terrain_step(400, 1.0e-3, 0.0).unwrap_err();
@@ -448,5 +453,103 @@ fn a_sand_mound_flows_and_bakes_back_with_its_volume() {
     assert!(
         (v1 - v0).abs() < 1e-4 * v0.abs().max(1.0),
         "volume {v0} m³ before, {v1} m³ after"
+    );
+}
+
+/// Sand thrown out of the region flies as parcels and lands on the terrain
+/// around it: every quantum is accounted for (particles, parcels in flight,
+/// deposited, escaped), and the heightfield outside the region rises by
+/// exactly the deposited volume.
+#[test]
+fn ejecta_land_on_the_terrain_with_their_volume() {
+    use engine_terrain::{substeps_for, SandMaterial};
+    let mut s = sim();
+    let cfg = TerrainConfig {
+        max_particles: 1 << 18,
+        ..config()
+    };
+    s.terrain_enable(&cfg).unwrap();
+    let sand = SandMaterial::default();
+    s.terrain_set_material(Some(&sand)).unwrap();
+    let field = HeightField::new(65, 65, 0.125, 0.125, vec![0.0; 65 * 65]).unwrap();
+    let mut arena = HullArena::new();
+    let (_, bed) = s
+        .add_height_field(&mut arena, &field, Vec3::ZERO, Quat::IDENTITY, 0)
+        .unwrap();
+    let plan = RegionPlan::spanning(
+        &cfg,
+        Vec3::new(-0.6, -0.3, -0.6),
+        Vec3::new(0.6, 0.9, 0.6),
+        0.05,
+        0,
+        0,
+    )
+    .unwrap();
+    s.terrain_activate(
+        &plan,
+        bed,
+        &field,
+        Vec3::ZERO,
+        sand.density,
+        sand.friction_angle.tan(),
+    )
+    .unwrap();
+    let lowered = gpu_heights(&s, bed, &field);
+    let quanta = |ps: &[MpmParticle]| -> u64 {
+        ps.iter()
+            .filter(|p| p.f[2][3].to_bits() & engine_terrain::layout::MPM_PARTICLE_DEAD == 0)
+            .map(|p| u64::from(p.f[1][3].to_bits()))
+            .sum()
+    };
+    // Throw the layer up and out, as a blast would.
+    let mut ps = s.terrain_particles();
+    let total = quanta(&ps);
+    for p in &mut ps {
+        let r = Vec3::new(p.xm[0], 0.0, p.xm[2]);
+        let out = r.normalize_or_zero() * 3.0;
+        p.vj[0] = out.x;
+        p.vj[1] = 4.0;
+        p.vj[2] = out.z;
+    }
+    s.terrain_load(&plan, &ps, Some(bed), sand.friction_angle.tan())
+        .unwrap();
+    let (n, dt) = substeps_for(&cfg, 1.0 / 60.0, plan.dx, sand.p_wave_speed(), 8.0).unwrap();
+    let mut report = None;
+    for _ in 0..60 {
+        report = Some(s.terrain_step(n, dt, -9.81).unwrap());
+    }
+    let r = report.unwrap();
+    let in_flight: u64 = s
+        .terrain_parcels()
+        .iter()
+        .filter(|p| p.vm[3] > 0.0)
+        .map(|p| u64::from(p.xq[3].to_bits()))
+        .sum();
+    let live = quanta(&s.terrain_particles());
+    eprintln!(
+        "ejecta: {} parcels, {} quanta deposited, {} escaped, {in_flight} in flight, {live} still particles (of {total})",
+        r.parcels, r.deposited, r.escaped
+    );
+    assert!(r.deposited > 0, "nothing landed outside the region");
+    assert_eq!(
+        live + in_flight + u64::from(r.deposited) + u64::from(r.escaped),
+        total,
+        "quanta lost or made"
+    );
+    // The heights rose by the deposited quanta exactly (to f32).
+    let after = gpu_heights(&s, bed, &field);
+    let (dx, dz) = field.cell_size();
+    let q = f64::from(ps[0].f[0][3]) / f64::from(ps[0].f[1][3].to_bits());
+    // Parcels landing over the region come back as particles, so every height
+    // change since activation is a deposit.
+    let raised: f64 = after
+        .iter()
+        .zip(&lowered)
+        .map(|(a, b)| f64::from(a - b) * f64::from(dx * dz))
+        .sum();
+    assert!(
+        (raised / q - f64::from(r.deposited)).abs() < 1e-3 * f64::from(r.deposited),
+        "heights rose by {raised} m³, parcels deposited {} m³",
+        f64::from(r.deposited) * q
     );
 }
