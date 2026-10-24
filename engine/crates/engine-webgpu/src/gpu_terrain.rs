@@ -13,7 +13,9 @@
 use super::WgpuSim;
 use engine_schema::heightfield::HeightField;
 use engine_terrain::layout::*;
-use engine_terrain::{RegionPlan, SandMaterial, TerrainConfig, TerrainError, BLOCK_CELLS};
+use engine_terrain::{
+    RegionPlan, SandMaterial, TerrainConfig, TerrainError, YieldSurface, BLOCK_CELLS,
+};
 
 /// Host-side state of the terrain pool.
 pub(crate) struct TerrainState {
@@ -289,7 +291,7 @@ impl WgpuSim {
     }
 
     /// The loaded material's constitutive model: `None` carries no stress
-    /// (transfers only), `Some` is Drucker–Prager sand. Particles' masses are the
+    /// (transfers only), `Some` is sand with its yield surface. Particles' masses are the
     /// caller's (density × rest volume).
     pub fn terrain_set_material(&mut self, material: Option<&SandMaterial>) -> anyhow::Result<()> {
         let state = self.terrain_state()?;
@@ -301,8 +303,12 @@ impl WgpuSim {
             }
             Some(m) => {
                 m.validate()?;
-                state.params.counts[3] = MPM_MATERIAL_SAND;
-                state.params.sand = [m.lambda(), m.mu(), m.alpha(), m.cohesion];
+                let (kind, friction) = match m.yield_surface {
+                    YieldSurface::MohrCoulomb => (MPM_MATERIAL_SAND_MC, m.friction_angle.sin()),
+                    YieldSurface::DruckerPrager => (MPM_MATERIAL_SAND, m.alpha()),
+                };
+                state.params.counts[3] = kind;
+                state.params.sand = [m.lambda(), m.mu(), friction, m.cohesion];
                 state.wave_speed = m.p_wave_speed();
             }
         }

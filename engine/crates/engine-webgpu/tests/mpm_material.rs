@@ -4,7 +4,8 @@
 //! checks agree on NaN and ±inf.
 
 use engine_terrain::material::{
-    hencky_kirchhoff, sand_input_valid, sand_project, svd3, svd_input_valid, Svd3,
+    hencky_kirchhoff, sand_input_valid, sand_project, sand_project_mohr_coulomb, svd3,
+    svd_input_valid, Svd3, YieldSurface,
 };
 use engine_terrain::SandMaterial;
 use engine_webgpu::{default_device, MPM_MATERIAL_PROBE_WGSL};
@@ -42,6 +43,14 @@ impl Rng {
 
     fn matrix(&mut self, lo: f32, hi: f32) -> Mat3 {
         Mat3::from_cols_array(&std::array::from_fn(|_| self.range(lo, hi)))
+    }
+}
+
+/// The probe's friction word: α for Drucker–Prager, sin φ for Mohr–Coulomb.
+fn friction(m: &SandMaterial) -> f32 {
+    match m.yield_surface {
+        YieldSurface::DruckerPrager => m.alpha(),
+        YieldSurface::MohrCoulomb => m.friction_angle.sin(),
     }
 }
 
@@ -101,6 +110,11 @@ fn cases() -> Vec<Case> {
                 rng.range(0.0, 0.05)
             } else {
                 0.0
+            },
+            yield_surface: if i % 2 == 0 {
+                YieldSurface::MohrCoulomb
+            } else {
+                YieldSurface::DruckerPrager
             },
             ..SandMaterial::default()
         };
@@ -219,8 +233,13 @@ fn gpu_material_matches_the_cpu_mirror() {
                 c.f.x_axis.extend(0.0).to_array(),
                 c.f.y_axis.extend(0.0).to_array(),
                 c.f.z_axis.extend(0.0).to_array(),
-                [m.alpha(), m.cohesion, m.lambda(), m.mu()],
-                [c.log_jp, 0.0, 0.0, 0.0],
+                [friction(&m), m.cohesion, m.lambda(), m.mu()],
+                [
+                    c.log_jp,
+                    f32::from(u8::from(m.yield_surface == YieldSurface::MohrCoulomb)),
+                    0.0,
+                    0.0,
+                ],
             ]
         })
         .collect();
@@ -274,8 +293,25 @@ fn gpu_material_matches_the_cpu_mirror() {
 
         // Each later stage is compared on the GPU's own inputs, so a difference
         // is that stage's alone (ln σ amplifies SVD rounding where σ is small).
-        let (alpha, lambda, mu) = (c.mat.alpha(), c.mat.lambda(), c.mat.mu());
-        let p = sand_project(gpu.sigma, c.log_jp, alpha, c.mat.cohesion, lambda, mu);
+        let (lambda, mu) = (c.mat.lambda(), c.mat.mu());
+        let p = match c.mat.yield_surface {
+            YieldSurface::DruckerPrager => sand_project(
+                gpu.sigma,
+                c.log_jp,
+                c.mat.alpha(),
+                c.mat.cohesion,
+                lambda,
+                mu,
+            ),
+            YieldSurface::MohrCoulomb => sand_project_mohr_coulomb(
+                gpu.sigma,
+                c.log_jp,
+                c.mat.friction_angle.sin(),
+                c.mat.cohesion,
+                lambda,
+                mu,
+            ),
+        };
         let gpu_out = v3(r[7]);
         let dp = ((gpu_out - p.sigma).abs() / p.sigma)
             .max_element()

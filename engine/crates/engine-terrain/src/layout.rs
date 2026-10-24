@@ -34,6 +34,8 @@ pub const MPM_NO_BED: u32 = u32::MAX;
 pub const MPM_MATERIAL_NONE: u32 = 0;
 /// `MpmParams.counts.w`: Drucker–Prager sand.
 pub const MPM_MATERIAL_SAND: u32 = 1;
+/// `MpmParams.counts.w`: Mohr–Coulomb sand.
+pub const MPM_MATERIAL_SAND_MC: u32 = 2;
 
 /// Counter flags (`gMpmCounters[1]`).
 pub const MPM_OVERFLOW_BLOCKS: u32 = 1;
@@ -59,7 +61,8 @@ pub struct MpmParams {
     pub dims: [u32; 4],
     /// x: largest particle speed the substep's dt allows (CFL); y, z, w unused.
     pub limits: [f32; 4],
-    /// Sand: λ, μ, α (friction), cohesion (log strain).
+    /// Sand: λ, μ, friction (Drucker–Prager α, or sin φ for Mohr–Coulomb),
+    /// cohesion (log strain).
     pub sand: [f32; 4],
     /// Heightfield samples under the region: i0, j0, ni, nj.
     pub window: [u32; 4],

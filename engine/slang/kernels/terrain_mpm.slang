@@ -52,6 +52,7 @@ static const uint MPM_OVERFLOW_PARTICLES = 32u; // activation would pass max par
 // Material kinds (params u0.w).
 static const uint MPM_MATERIAL_NONE = 0u; // no stress: transfers only (tests)
 static const uint MPM_MATERIAL_SAND = 1u; // Drucker–Prager sand (mpm_material.slang)
+static const uint MPM_MATERIAL_SAND_MC = 2u; // Mohr–Coulomb sand
 
 struct MpmParams
 {
@@ -60,7 +61,7 @@ struct MpmParams
     uint4 counts;   // x = max particles, y = hash slots (power of two), z = max blocks, w = material
     uint4 dims;     // xyz = region size in cells, w = bed heightfield collider (MPM_NO_BLOCK: none)
     float4 limits;  // x = largest particle speed the substep's dt allows (CFL)
-    float4 sand;    // λ, μ, α (friction), cohesion (log strain)
+    float4 sand;    // λ, μ, friction (DP α, or sin φ for Mohr–Coulomb), cohesion (log strain)
     uint4 window;   // heightfield samples under the region: i0, j0, ni, nj
     float4 column;  // bed height (heightfield-local y), volume quantum (m³), lattice spacing, density
 };
@@ -362,11 +363,12 @@ void mpm_cell_sort(uint3 tid : SV_DispatchThreadID)
 }
 
 // Kirchhoff stress τ of particle q (zero for MPM_MATERIAL_NONE). Sand returns F
-// to the yield cone first (Klár et al. 2016), updating q's F and log Jp.
+// to its yield surface first (Mohr–Coulomb, or Klár et al.'s Drucker–Prager
+// cone), updating q's F and log Jp.
 float3x3 mpmStress(inout MpmParticle q, MpmParams p)
 {
     float3x3 zero = float3x3(0, 0, 0, 0, 0, 0, 0, 0, 0);
-    if (p.counts.w != MPM_MATERIAL_SAND) return zero;
+    if (p.counts.w != MPM_MATERIAL_SAND && p.counts.w != MPM_MATERIAL_SAND_MC) return zero;
     float3x3 F = float3x3(q.f0.xyz, q.f1.xyz, q.f2.xyz);
     if (!mpmSvdInputValid(F) || !mpmSandInputValid(float3(1, 1, 1), q.vj.w))
     {
@@ -378,7 +380,9 @@ float3x3 mpmStress(inout MpmParticle q, MpmParams p)
     mpmSvd3(F, U, sigma, V);
     float3 s;
     float logJp;
-    mpmSandProject(sigma, q.vj.w, p.sand.z, p.sand.w, p.sand.x, p.sand.y, s, logJp);
+    if (p.counts.w == MPM_MATERIAL_SAND_MC)
+        mpmSandProjectMohrCoulomb(sigma, q.vj.w, p.sand.z, p.sand.w, p.sand.x, p.sand.y, s, logJp);
+    else mpmSandProject(sigma, q.vj.w, p.sand.z, p.sand.w, p.sand.x, p.sand.y, s, logJp);
     F = mul(U, mul(float3x3(s.x, 0, 0, 0, s.y, 0, 0, 0, s.z), transpose(V)));
     q.f0.xyz = F[0];
     q.f1.xyz = F[1];

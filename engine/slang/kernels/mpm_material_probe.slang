@@ -10,8 +10,8 @@ struct MpmProbeCase
     float4 f0; // F's columns (xyz)
     float4 f1;
     float4 f2;
-    float4 material; // alpha, cohesion, lambda, mu
-    float4 state; // logJp
+    float4 material; // friction (DP alpha, or sin φ for Mohr–Coulomb), cohesion, lambda, mu
+    float4 state; // logJp, yield surface (0 Drucker–Prager, 1 Mohr–Coulomb)
 };
 
 // Matches `ProbeResult` (176 B).
@@ -48,8 +48,12 @@ void mpm_material_probe(uint3 tid : SV_DispatchThreadID)
     mpmSvd3(F, U, sigma, V);
     float3 sigmaOut;
     float logJpOut;
-    mpmSandProject(sigma, k.state.x, k.material.x, k.material.y, k.material.z, k.material.w,
-                   sigmaOut, logJpOut);
+    if (k.state.y > 0.5)
+        mpmSandProjectMohrCoulomb(sigma, k.state.x, k.material.x, k.material.y, k.material.z,
+                                  k.material.w, sigmaOut, logJpOut);
+    else
+        mpmSandProject(sigma, k.state.x, k.material.x, k.material.y, k.material.z, k.material.w,
+                       sigmaOut, logJpOut);
     float3x3 tau = mpmHenckyKirchhoff(U, sigmaOut, k.material.z, k.material.w);
     bool valid = mpmSvdInputValid(F) && mpmSandInputValid(sigma, k.state.x);
 

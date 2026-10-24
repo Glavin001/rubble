@@ -14,6 +14,6 @@ pub mod region;
 pub mod step;
 
 pub use config::{TerrainConfig, TerrainError};
-pub use material::SandMaterial;
+pub use material::{SandMaterial, YieldSurface};
 pub use region::{RegionPlan, BLOCK_CELLS};
 pub use step::substeps_for;

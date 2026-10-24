@@ -298,6 +298,58 @@ void mpmSandProject(float3 sigma, float logJp, float alpha, float cohesion, floa
     sigmaOut = exp(eps + cohesion);
 }
 
+// Mohr–Coulomb return map in Hencky strain, with the same volume correction,
+// tip and cohesion shift as mpmSandProject, so φ is the friction angle in every
+// stress state (a Drucker–Prager cone matches it only on one meridian). Flow is
+// non-dilatant (ψ = 0): the plastic strain is deviatoric, as Klár's projection.
+// With principal Kirchhoff stresses τᵢ = 2μεᵢ + λ tr ε (compression negative,
+// ε₁ ≥ ε₂ ≥ ε₃, the SVD's order) the yield function is
+//   f = (τ₁ − τ₃) + (τ₁ + τ₃)·sin φ ≤ 0.
+// A flow direction N with N·1 = 0 changes τ by 2μN, so the return onto the main
+// plane is closed form (Δγ = f/4μ along N = (1, 0, −1)); when it would reorder
+// the strains it returns onto the edge (τ₁ = τ₂ or τ₂ = τ₃) by a 2×2 solve. Under
+// compression an edge return always exists (both multipliers ≥ 0); they are
+// clamped at 0 only against rounding, for a state already on the edge.
+void mpmSandProjectMohrCoulomb(float3 sigma, float logJp, float sinPhi, float cohesion, float lambda,
+                               float mu, out float3 sigmaOut, out float logJpOut)
+{
+    float3 eps = log(max(abs(sigma), float3(MPM_SIGMA_FLOOR))) - cohesion + logJp / 3.0;
+    float tr = eps.x + eps.y + eps.z;
+    if (tr >= 0.0)
+    {
+        sigmaOut = float3(exp(cohesion));
+        logJpOut = tr;
+        return;
+    }
+    logJpOut = 0.0;
+    float3 tau = 2.0 * mu * eps + lambda * tr;
+    float3 gA = float3(1.0 + sinPhi, 0.0, -(1.0 - sinPhi));
+    float fA = dot(gA, tau);
+    if (fA <= 0.0)
+    {
+        sigmaOut = exp(eps + cohesion);
+        return;
+    }
+    float3 nA = float3(1.0, 0.0, -1.0);
+    float3 e = eps - (fA / (4.0 * mu)) * nA;
+    if (e.x < e.y || e.y < e.z)
+    {
+        // The edge the main-plane return crossed into: τ₁ = τ₂ (planes (1,3)
+        // and (2,3)) or τ₂ = τ₃ (planes (1,3) and (1,2)).
+        bool right = e.y > e.x;
+        float3 nB = right ? float3(0.0, 1.0, -1.0) : float3(1.0, -1.0, 0.0);
+        float3 gB = right ? float3(0.0, 1.0 + sinPhi, -(1.0 - sinPhi)) : float3(1.0 + sinPhi, -(1.0 - sinPhi), 0.0);
+        float fB = dot(gB, tau);
+        // [gA·nA gA·nB; gB·nA gB·nB]·2μ·(Δa, Δb) = (fA, fB).
+        float a11 = 2.0, a12 = dot(gA, nB), a21 = dot(gB, nA), a22 = 2.0;
+        float det = (a11 * a22 - a12 * a21) * 2.0 * mu;
+        float da = max((a22 * fA - a12 * fB) / det, 0.0);
+        float db = max((a11 * fB - a21 * fA) / det, 0.0);
+        e = eps - da * nA - db * nB;
+    }
+    sigmaOut = exp(e + cohesion);
+}
+
 // Kirchhoff stress of the Hencky (St. Venant–Kirchhoff in log strain) model:
 // τ = U·diag(2μ ln σ + λ Σ ln σ)·Uᵀ, for sigma > 0 (after mpmSandProject).
 float3x3 mpmHenckyKirchhoff(float3x3 U, float3 sigma, float lambda, float mu)

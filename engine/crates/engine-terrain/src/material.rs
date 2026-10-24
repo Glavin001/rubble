@@ -8,6 +8,8 @@
 //! - [`sand_project`] (`mpmSandProject`), the Drucker–Prager return map in Hencky
 //!   strain (Klár et al. 2016) with the log-volume correction (Tampubolon et al.
 //!   2017).
+//! - [`sand_project_mohr_coulomb`] (`mpmSandProjectMohrCoulomb`), the
+//!   Mohr–Coulomb return map in Hencky strain (the default yield surface).
 //! - [`hencky_kirchhoff`] (`mpmHenckyKirchhoff`), the Kirchhoff stress.
 //! - [`friction_alpha`] (`mpmFrictionAlpha`).
 
@@ -31,7 +33,19 @@ const SVD_GAMMA: f32 = 5.828_427;
 const COS_PI_8: f32 = 0.923_879_5;
 const SIN_PI_8: f32 = 0.382_683_43;
 
-/// Elastoplastic sand: Hencky elasticity bounded by a Drucker–Prager yield cone.
+/// The yield surface bounding sand's elastic stress.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum YieldSurface {
+    /// Mohr–Coulomb: φ is the friction angle in every stress state.
+    #[default]
+    MohrCoulomb,
+    /// Klár et al.'s Drucker–Prager cone, matching Mohr–Coulomb only on the
+    /// compression meridian (stronger elsewhere: in triaxial extension a 30°
+    /// cone acts like about 46°, so spreading flows stop short).
+    DruckerPrager,
+}
+
+/// Elastoplastic sand: Hencky elasticity bounded by a frictional yield surface.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SandMaterial {
     /// Bulk density (kg/m³).
@@ -45,6 +59,8 @@ pub struct SandMaterial {
     /// Cohesion as a log-strain offset of the cone's tip (0 for dry sand): the
     /// stretch the material holds before it separates.
     pub cohesion: f32,
+    /// Shape of the yield surface.
+    pub yield_surface: YieldSurface,
 }
 
 impl Default for SandMaterial {
@@ -58,6 +74,7 @@ impl Default for SandMaterial {
             poisson_ratio: 0.3,
             friction_angle: 30f32.to_radians(),
             cohesion: 0.0,
+            yield_surface: YieldSurface::MohrCoulomb,
         }
     }
 }
@@ -408,6 +425,75 @@ pub fn sand_project(
         sigma: Vec3::new(e.x.exp(), e.y.exp(), e.z.exp()),
         log_jp: 0.0,
     }
+}
+
+/// Mohr–Coulomb return map in Hencky strain with the same volume correction,
+/// tip and cohesion shift as [`sand_project`]; non-dilatant flow (ψ = 0).
+/// Principal Kirchhoff stresses τᵢ = 2μεᵢ + λ tr ε (compression negative,
+/// ε₁ ≥ ε₂ ≥ ε₃ as [`svd3`] orders σ) must satisfy
+/// f = (τ₁ − τ₃) + (τ₁ + τ₃)·sin φ ≤ 0. The return is closed form onto the main
+/// plane, and a 2×2 solve onto an edge (τ₁ = τ₂ or τ₂ = τ₃) when the main-plane
+/// return would reorder the strains (its multipliers clamped at 0 only against
+/// rounding, for a state already on the edge).
+/// Mirrors `mpmSandProjectMohrCoulomb`.
+pub fn sand_project_mohr_coulomb(
+    sigma: Vec3,
+    log_jp: f32,
+    sin_phi: f32,
+    cohesion: f32,
+    lambda: f32,
+    mu: f32,
+) -> SandProjection {
+    let floor = Vec3::splat(SIGMA_FLOOR);
+    let eps = Vec3::new(
+        sigma.x.abs().max(floor.x).ln(),
+        sigma.y.abs().max(floor.y).ln(),
+        sigma.z.abs().max(floor.z).ln(),
+    ) - cohesion
+        + log_jp / 3.0;
+    let tr = eps.x + eps.y + eps.z;
+    if tr >= 0.0 {
+        return SandProjection {
+            sigma: Vec3::splat(cohesion.exp()),
+            log_jp: tr,
+        };
+    }
+    let tau = 2.0 * mu * eps + Vec3::splat(lambda * tr);
+    let g_a = Vec3::new(1.0 + sin_phi, 0.0, -(1.0 - sin_phi));
+    let f_a = g_a.dot(tau);
+    let done = |e: Vec3| {
+        let e = e + cohesion;
+        SandProjection {
+            sigma: Vec3::new(e.x.exp(), e.y.exp(), e.z.exp()),
+            log_jp: 0.0,
+        }
+    };
+    if f_a <= 0.0 {
+        return done(eps);
+    }
+    let n_a = Vec3::new(1.0, 0.0, -1.0);
+    let mut e = eps - (f_a / (4.0 * mu)) * n_a;
+    if e.x < e.y || e.y < e.z {
+        let right = e.y > e.x;
+        let (n_b, g_b) = if right {
+            (
+                Vec3::new(0.0, 1.0, -1.0),
+                Vec3::new(0.0, 1.0 + sin_phi, -(1.0 - sin_phi)),
+            )
+        } else {
+            (
+                Vec3::new(1.0, -1.0, 0.0),
+                Vec3::new(1.0 + sin_phi, -(1.0 - sin_phi), 0.0),
+            )
+        };
+        let f_b = g_b.dot(tau);
+        let (a11, a12, a21, a22) = (2.0, g_a.dot(n_b), g_b.dot(n_a), 2.0);
+        let det = (a11 * a22 - a12 * a21) * 2.0 * mu;
+        let da = ((a22 * f_a - a12 * f_b) / det).max(0.0);
+        let db = ((a11 * f_b - a21 * f_a) / det).max(0.0);
+        e = eps - da * n_a - db * n_b;
+    }
+    done(e)
 }
 
 /// Kirchhoff stress of Hencky elasticity, τ = U·diag(2μ ln σ + λ Σ ln σ)·Uᵀ, for
@@ -761,6 +847,131 @@ mod tests {
         let diag = Vec3::new(tau.x_axis.x, tau.y_axis.y, tau.z_axis.z);
         assert!((diag - want).abs().max_element() <= 1e-6 * want.abs().max_element());
         assert_eq!(tau - Mat3::from_diagonal(diag), Mat3::ZERO);
+    }
+
+    /// Mohr–Coulomb yield function of an elastic strain (compression negative).
+    fn mc_yield(eps: Vec3, sin_phi: f32, lambda: f32, mu: f32) -> f32 {
+        let tau = 2.0 * mu * eps + Vec3::splat(lambda * (eps.x + eps.y + eps.z));
+        (tau.x - tau.z) + (tau.x + tau.z) * sin_phi
+    }
+
+    /// Sorted (decreasing) singular values near 1 (compressive log strains ~1e-2).
+    fn sorted_sigma(rng: &mut Rng, spread: f32) -> Vec3 {
+        let mut v = [
+            rng.range(1.0 - spread, 1.0),
+            rng.range(1.0 - spread, 1.0),
+            rng.range(1.0 - spread, 1.0),
+        ];
+        v.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        Vec3::from_array(v)
+    }
+
+    #[test]
+    fn mohr_coulomb_returns_onto_the_surface_keeping_trace_and_order() {
+        let (_, lambda, mu) = sand();
+        let mut rng = Rng(23);
+        let (mut yielded, mut edges) = (0, 0);
+        for _ in 0..20_000 {
+            let phi = rng.range(5.0, 45.0).to_radians();
+            let s = phi.sin();
+            let sigma = sorted_sigma(&mut rng, 0.02);
+            let e0 = strain(sigma, 0.0);
+            let tr0 = e0.x + e0.y + e0.z;
+            let p = sand_project_mohr_coulomb(sigma, 0.0, s, 0.0, lambda, mu);
+            if tr0 >= 0.0 {
+                continue;
+            }
+            let e = strain(p.sigma, 0.0);
+            let f = mc_yield(e, s, lambda, mu);
+            let scale = mu * e0.abs().max_element();
+            assert!(
+                f <= 2e-4 * scale,
+                "f = {f} (scale {scale}) for {sigma:?} → {:?}",
+                p.sigma
+            );
+            assert!(e.x + 2e-6 >= e.y && e.y + 2e-6 >= e.z, "order lost: {e:?}");
+            let tr = e.x + e.y + e.z;
+            assert!(
+                (tr - tr0).abs() <= 2e-6 + 1e-4 * tr0.abs(),
+                "trace {tr0} → {tr}"
+            );
+            if mc_yield(e0, s, lambda, mu) > 0.0 {
+                yielded += 1;
+                assert!(f >= -2e-4 * scale, "returned inside the surface: f = {f}");
+                if (e.x - e.y).abs() < 1e-6 || (e.y - e.z).abs() < 1e-6 {
+                    edges += 1;
+                }
+                let again = sand_project_mohr_coulomb(p.sigma, 0.0, s, 0.0, lambda, mu);
+                assert!(
+                    (again.sigma - p.sigma).abs().max_element() <= 2e-6,
+                    "not idempotent: {sigma:?} → {:?} → {:?} (φ {:.1}°, f {f}, scale {scale})",
+                    p.sigma,
+                    again.sigma,
+                    phi.to_degrees()
+                );
+            } else {
+                assert!(
+                    (p.sigma - sigma).abs().max_element() <= 1e-6,
+                    "inside, yet moved"
+                );
+            }
+        }
+        assert!(
+            yielded > 1000 && edges > 50,
+            "cases: {yielded} yielded, {edges} on an edge"
+        );
+    }
+
+    /// Klár's Drucker–Prager cone is fitted to Mohr–Coulomb on the compression
+    /// meridian (τ₁ = τ₂ > τ₃): there the two return maps agree. On the
+    /// extension meridian (τ₁ > τ₂ = τ₃) Mohr–Coulomb holds less shear.
+    #[test]
+    fn mohr_coulomb_matches_the_drucker_prager_fit_on_its_meridian_only() {
+        let (_, lambda, mu) = sand();
+        let mut rng = Rng(29);
+        for _ in 0..2_000 {
+            let phi = rng.range(10.0, 40.0).to_radians();
+            let (s, alpha) = (phi.sin(), friction_alpha(phi));
+            let a = rng.range(0.97, 0.995);
+            let b = rng.range(0.90, 0.97);
+            for (sigma, meridian) in [
+                (Vec3::new(a, a, b), "compression"),
+                (Vec3::new(a, b, b), "extension"),
+            ] {
+                let mc = sand_project_mohr_coulomb(sigma, 0.0, s, 0.0, lambda, mu);
+                let dp = sand_project(sigma, 0.0, alpha, 0.0, lambda, mu);
+                let dev = |p: &SandProjection| {
+                    let e = strain(p.sigma, 0.0);
+                    (e - (e.x + e.y + e.z) / 3.0).length()
+                };
+                if meridian == "compression" {
+                    assert!(
+                        (mc.sigma - dp.sigma).abs().max_element() <= 2e-6,
+                        "φ {:.1}°: MC {:?} vs DP {:?}",
+                        phi.to_degrees(),
+                        mc.sigma,
+                        dp.sigma
+                    );
+                } else if mc_yield(strain(sigma, 0.0), s, lambda, mu) > 0.0 {
+                    assert!(dev(&mc) < dev(&dp), "extension: MC should hold less shear");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mohr_coulomb_tip_and_stored_volume_match_the_cone() {
+        let (_, lambda, mu) = sand();
+        let s = 30f32.to_radians().sin();
+        // Expansion: the tip, logJp keeps the volume.
+        let p = sand_project_mohr_coulomb(Vec3::new(1.01, 1.0, 0.995), 0.0, s, 0.0, lambda, mu);
+        assert_eq!(p.sigma, Vec3::ONE);
+        assert!((p.log_jp - (1.01f32.ln() + 0.995f32.ln())).abs() < 1e-6);
+        // Stored volume is consumed first (as the cone does).
+        let sigma = Vec3::splat(0.99);
+        let p = sand_project_mohr_coulomb(sigma, 0.01, s, 0.0, lambda, mu);
+        let q = sand_project(sigma, 0.01, 0.3, 0.0, lambda, mu);
+        assert_eq!(p, q, "isotropic compression with stored volume");
     }
 
     #[test]
