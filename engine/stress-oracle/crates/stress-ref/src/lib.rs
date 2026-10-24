@@ -30,6 +30,7 @@ pub mod engine;
 pub mod hull;
 pub mod implicit;
 pub mod joint;
+pub mod launch;
 pub mod material;
 pub mod math;
 pub mod metrics;

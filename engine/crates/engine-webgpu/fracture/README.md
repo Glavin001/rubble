@@ -540,6 +540,64 @@ contact, so stacked debris cannot crush. A tilting upper block would need the fa
 columns and walls to hinge in compression while the near side goes, and these profiles
 do not produce that.
 
+### Launched bonded bodies
+
+A pack can carry **free islands**: chunks bonded to each other but, through no path of
+bonds, to a support. Both stress profiles already make each one its own rigid body (the
+reference world's clusters are the connected components of the bonds, and a component
+with no support is not anchored). A car, a bus or an aircraft is such an island: the
+structure's own chunks and bonds, so it collides with the rest of the structure and with
+itself, and its bonds break as any bond does. `stress_ref::launch` sets them moving.
+
+The pack carries its launches as `defaults.launches` (`launch::write`, read with
+`launch::launches_of`), Y-up, m/s:
+
+```json
+{"name": "car", "nodes": [node, ...], "velocity": {"x": 0, "y": 0, "z": 15},
+ "angularVelocity": {"x": 0, "y": 0, "z": 0}, "delay": 0,
+ "strikes": [{"centre": {"x": 0, "y": 0.6, "z": 2.0}, "radius": 0.9}]}
+```
+
+- `nodes` are the island's nodes (`group`, a `nodeGroups` name, may stand in for them).
+- `velocity` is the island's centre-of-mass velocity and `angularVelocity` its spin. Each body
+  the island is made of when it is released gets `v + w × (c − c_island)` at its centre `c`.
+- `delay` is in seconds after the launch is asked for. Until it is released the island is a
+  free body like any other: a car stands on its wheels, and an aircraft placed in the air
+  falls, so launch an airborne island at once.
+- `strikes` are spheres fixed in the island (its nose, an aircraft's wings), in the frame it
+  was built in. The threshold profile's strike prediction checks them as it checks a shot,
+  at the sphere's point of the body that holds the nearest island chunk, moving with that
+  body (spin included). A strike they will make within the next frame breaks the struck
+  body's bonds before the engine steps, so a fast island goes through a shop window as a
+  ball does instead of stopping dead on it. A body's own chunks are never its strike's.
+
+**Releasing them.** Use **Launch vehicles** (stress modes, shown only for a scene with
+launches), or call stress-web `stress_launch(name)`, with an empty name for every launch,
+each at its delay. `stress_launches()` lists them and `stats.launches` holds their names.
+The island is set moving between two frames, at the start of the next one, and never by
+stepping a frame again:
+- `threshold`: `ThresholdWorld::launch_island` writes the bodies' motion in both pose
+  regions (after one wait for the GPU's body state) and adds the strike spheres to the
+  prediction's shots (`stress-gpu` `fracture::Shot::at`; 64 shots in all, the 16 balls'
+  included).
+- `blast_parity`: `GpuWorld::launch_island` sets the clusters' motion as a charge's kick is
+  set, rebuilds the solver's tables and writes the bodies back to the engine. No strike is
+  predicted for an island here: its contacts load the stress solve after the engine's step,
+  as every contact does, so an island stops at what it hits as the profile's balls rebound.
+- `stress_rubble::launch::Launcher` schedules them for natively run hosts.
+
+A take step `act: {launch: name}` releases them, and the button's launches are logged, so
+instant replay releases them at the same frame.
+
+**Check scene.** `launch::ram_and_wall`: a concrete wall of 4 × 4 blocks on a footing and a
+free concrete ram (a T of five 0.5 m cubes, 1.5 t) launched at it at 30 m/s.
+- `cargo test --release -p stress-ref --test launch`: the launches' pack round trip (nodes or
+  group, Y-up), malformed launches named, and the ram imports as its own unanchored body.
+- `cargo test --release -p stress-rubble --features gpu --test launch`: in both profiles
+  the ram flies at its launch velocity (3.000 m in 6 frames, its fall included) and breaks
+  bonds of the wall and of itself (threshold: the wall in 5 bodies and the ram in 2;
+  blast_parity: 14 of the wall's bonds and 4 of the ram's).
+
 ### Bond modes
 
 The **Bonds** menu picks how the baked bonds hold the fragments, on the same asset,

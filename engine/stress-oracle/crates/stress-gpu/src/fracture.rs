@@ -139,6 +139,11 @@ pub struct Shot {
     pub mass: f32,
     /// Plane-strain modulus E'.
     pub modulus: f32,
+    /// None: the sphere is the body's (a ball, centred on its body). Some: a sphere fixed in
+    /// a launched bonded island (`stress_ref::launch::Strike`), its centre at this point of
+    /// the body's structure frame, moving with the body (its velocity there, spin
+    /// included). A body's own chunks are never its strike's.
+    pub at: Option<[f32; 3]>,
 }
 
 #[repr(C)]
@@ -445,7 +450,7 @@ impl GpuFracture {
         if !g.is_empty() {
             gpu.queue.write_buffer(&geometry, 0, bytemuck::cast_slice(&g));
         }
-        let shots = storage_bytes(gpu, "fracture strike shots", 32 * MAX_SHOTS as u64, wgpu::BufferUsages::empty());
+        let shots = storage_bytes(gpu, "fracture strike shots", 48 * MAX_SHOTS as u64, wgpu::BufferUsages::empty());
         let kernels = ENTRIES.iter().map(|entry| gpu.compute(&shaders::FRACTURE, entry, &BINDINGS)).collect();
         let mut f = GpuFracture {
             layout,
@@ -618,7 +623,13 @@ impl GpuFracture {
         if !shots.is_empty() && self.layout.n > 0 && self.geometry.size() < 48 * self.layout.n as u64 {
             return Err("fracture: shots set without strike geometry".into());
         }
-        let words: Vec<[f32; 4]> = shots.iter().flat_map(|s| [[f32::from_bits(s.body), s.bound, s.face, s.mass], [s.modulus, 0.0, 0.0, 0.0]]).collect();
+        let words: Vec<[f32; 4]> = shots
+            .iter()
+            .flat_map(|s| {
+                let at = s.at.map_or([0.0; 4], |p| [p[0], p[1], p[2], 1.0]);
+                [[f32::from_bits(s.body), s.bound, s.face, s.mass], [s.modulus, 0.0, 0.0, 0.0], at]
+            })
+            .collect();
         if !words.is_empty() {
             gpu.queue.write_buffer(&self.shots, 0, bytemuck::cast_slice(&words));
         }

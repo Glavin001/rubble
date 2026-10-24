@@ -1,8 +1,8 @@
 // Fracture lab takes (record-takes.mjs), run through fracture/director.mjs `__record`.
 // Segment fields: n (video frames at 60 fps), slow (1/slow speed, lossless), caption,
 // cam ({orbit: [yaw, pitch, dist], to?, spin?, target?}), act ('fire' | {shoot: [u, v]} |
-// {ray: [origin, direction]}), view ({bonds, color}), mass / speed (the shot sliders,
-// powers of two).
+// {ray: [origin, direction]} | {detonate: name} | {launch: name}: a pack's launched bonded
+// bodies, '' for all), view ({bonds, color}), mass / speed (the shot sliders, powers of two).
 
 // The lab's page state for a take: its Scene menu key and the menus' values, then a load.
 // `preset`: the stress modes' Ball menu (stress_ref::wrecking::BALLS: 0 the 10 t ball,
