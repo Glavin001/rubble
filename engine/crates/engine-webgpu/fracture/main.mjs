@@ -58,8 +58,8 @@ function applyView(){if(stressOn)stress?.setView($('show-bonds').checked,viewMod
 // remembered per viewer and kept across loads. V cycles it.
 const CAMERA_KEY='fracture-lab.camera';
 const CAMERA_HINTS=['CLICK TO SHOOT · DRAG TO ORBIT · SCROLL TO ZOOM · V CAMERA',
- 'CLICK TO LOCK MOUSE, AGAIN TO SHOOT · WASD WALK · SHIFT SPRINT · SCROLL SPEED · ESC RELEASE · V CAMERA',
- 'CLICK TO LOCK MOUSE, AGAIN TO SHOOT · WASD FLY · SPACE/E UP · C/Q DOWN · SHIFT SPRINT · SCROLL SPEED · ESC RELEASE · V CAMERA'];
+ 'CLICK: LOCK MOUSE, THEN SHOOT · WASD WALK · SHIFT SPRINT · SCROLL SPEED · ESC FREES MOUSE · V CAMERA',
+ 'CLICK: LOCK MOUSE, THEN SHOOT · WASD FLY · SPACE/E UP · C/Q DOWN · SHIFT SPRINT · SCROLL SPEED · ESC FREES MOUSE · V CAMERA'];
 const cameraMode=()=>Number($('camera-mode').value);
 function applyCamera(){
  const mode=cameraMode();if(renderer)renderer.viewMode=mode;if(stress)stress.viewMode=mode;

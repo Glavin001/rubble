@@ -8,12 +8,12 @@ const listeners=(target)=>{const map={};target.addEventListener=(t,f)=>{(map[t]?
 globalThis.HTMLElement??=class{};
 const win=listeners({});
 for(const k of ['addEventListener','removeEventListener'])globalThis[k]=win[k];
-globalThis.document={pointerLockElement:null,exitPointerLock(){this.pointerLockElement=null}};
+globalThis.document=listeners({pointerLockElement:null,exitPointerLock(){this.pointerLockElement=null;this.fire('pointerlockchange',{})}});
 const {attachCameraInput}=await import('./camera-input.mjs');
 
 function setup(mode){
  const canvas=listeners({getBoundingClientRect:()=>({left:0,top:0,width:200,height:100}),setPointerCapture(){},
-  requestPointerLock(){document.pointerLockElement=canvas}});
+  requestPointerLock(){document.pointerLockElement=canvas;document.fire('pointerlockchange',{})}});
  const calls=[],camera={mode,drag:(...a)=>calls.push(['drag',...a]),mouseLook:(...a)=>calls.push(['look',...a]),zoom:(...a)=>calls.push(['zoom',...a]),travel:(...a)=>calls.push(['travel',...a])};
  const shots=[];document.pointerLockElement=null;
  const input=attachCameraInput(canvas,camera,(u,v)=>shots.push([u,v]));
@@ -36,6 +36,8 @@ test('first person: the first click locks the mouse, then clicks shoot through t
  const {canvas,camera,calls,shots,input,pointer}=setup(1);
  pointer('pointerdown',10,10);pointer('pointerup',10,10);
  assert.equal(document.pointerLockElement,canvas);assert.deepEqual(shots,[]);
+ // The cursor's jump to the lock point is not a look.
+ canvas.fire('pointermove',{movementX:-10,movementY:-90});
  canvas.fire('pointermove',{movementX:3,movementY:-2});
  assert.deepEqual(calls,[['look',3,-2]]);
  pointer('pointerdown',10,10);
