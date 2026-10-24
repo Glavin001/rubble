@@ -40,6 +40,16 @@ typedef enum RbResult {
   RB_PANIC = 5,
 } RbResult;
 
+// Which of a body's moves frames report (`rbBody_SetMoveReports`).
+typedef enum RbMoveReports {
+  // Every step it moves (the default).
+  RB_MOVES_ALL = 0,
+  // Only when it falls asleep, wakes, or is first reported: for bodies the host draws from
+  // `rbWorld_ExportPoses`, so moves stay per event on the CPU.
+  RB_MOVES_SLEEP_WAKE = 1,
+  RB_MOVES_NONE = 2,
+} RbMoveReports;
+
 typedef enum RbDestructionType {
   RB_JOINT_BROKE = 0,
   RB_MOUNT_BROKE = 1,
@@ -109,6 +119,10 @@ typedef struct RbWorldDef {
   // waiting when all are.
   uint32_t readback_frames;
   bool drop_frames;
+  // Keep the contacts of pairs whose bodies have not moved instead of testing them again
+  // (three-avbd's `reuseContacts`, `FLAG_REUSE_CONTACTS`; demo.html turns it on for its brick
+  // and box scenes). Off by default.
+  bool reuse_contacts;
   uint64_t user_data;
   uint32_t internal_value;
 } RbWorldDef;
@@ -526,6 +540,53 @@ struct RbWorldDef rbDefaultWorldDef(void);
 
 enum RbResult rbCreateWorld(const struct RbWorldDef *def, struct RbWorld **out);
 
+// A world on the host renderer's Metal device (`MTLDevice*`; Unreal:
+// `IMetalDynamicRHI::RHIGetDevice`), submitting on `mtl_command_queue`, so
+// `rbWorld_ExportPoses` can write into the host's buffers. Give the world a queue of its own on
+// that device, made with room for many command buffers in flight
+// (`newCommandQueueWithMaxCommandBufferCount:`, 4096 as wgpu's own queues; Metal's default of 64
+// stalls fast soft scenes). Apple platforms only (elsewhere `RB_UNSUPPORTED`).
+enum RbResult rbCreateWorldOnMetal(const struct RbWorldDef *def,
+                                   void *mtl_device,
+                                   void *mtl_command_queue,
+                                   struct RbWorld **out);
+
+// Copy the latest step's render poses into the host's GPU buffers (`MTLBuffer*` on the
+// world's device, at byte offsets: hosts that sub-allocate pass their range). `current` gets
+// the latest step's poses, `previous` the poses before that step: `bytes` of 32-byte records
+// indexed by `rbBody_GetPoseIndex`, each `{ position xyz (f32), word, rotation xyzw (f32) }`
+// **in Rubble's frame** (Y up, metres; the renderer applies the host's axis map).
+//
+// The GPU copies are submitted on the world's queue now, and `out_ticket` names them. Read the
+// buffers only after `rbWorld_GetCompletedPoseExport` reaches the ticket, and don't export
+// into them again while the host's own GPU work still reads them: the host's buffers need not
+// be hazard-tracked, so a ring of a few is the usual pattern. Nothing is read back.
+enum RbResult rbWorld_ExportPoses(struct RbWorld *world,
+                                  void *current,
+                                  uint64_t current_offset,
+                                  void *previous,
+                                  uint64_t previous_offset,
+                                  uint64_t bytes,
+                                  uint64_t *out_ticket);
+
+// The latest `rbWorld_ExportPoses` ticket whose copies have finished on the GPU (0 for none).
+// Never waits.
+enum RbResult rbWorld_GetCompletedPoseExport(struct RbWorld *world, uint64_t *out_ticket);
+
+// Where a body's origin is relative to its exported pose record (`rbWorld_ExportPoses`):
+// origin = record × offset. Records are solver poses (centre of mass and its axes); the offset
+// is the identity when the centre of mass is the body's origin, and changes only when the
+// body's shapes change. In the world's coordinates and units, like the body's shape transforms.
+enum RbResult rbBody_GetPoseOffset(struct RbWorld *world, RbBodyId body, struct RbTransform *out);
+
+// Which of a body's moves `rbWorld_Poll` reports. The simulation is the same either way.
+enum RbResult rbBody_SetMoveReports(struct RbWorld *world,
+                                    RbBodyId body,
+                                    enum RbMoveReports reports);
+
+// A body's slot in the pose buffer and its exports.
+enum RbResult rbBody_GetPoseIndex(struct RbWorld *world, RbBodyId body, uint32_t *out);
+
 void rbDestroyWorld(struct RbWorld *world);
 
 // Advance one fixed step. Never waits on results (see `rbWorld_Poll`).
@@ -568,6 +629,8 @@ enum RbResult rbDestroyBody(struct RbWorld *world, RbBodyId body);
 bool rbBody_IsValid(struct RbWorld *world, RbBodyId body);
 
 // The body origin's pose as of the last polled frame.
+// The body origin's pose as of the last polled frame; before the body's first frame, the pose
+// it was created with (a destructible's chunk: where its asset and placement put it).
 enum RbResult rbBody_GetTransform(struct RbWorld *world, RbBodyId body, struct RbTransform *out);
 
 // Teleport the body origin (velocities kept).
@@ -742,6 +805,15 @@ enum RbResult rbDestructible_GetChunkBody(struct RbWorld *world,
                                           RbBodyId *out);
 
 // The glTF node that renders a chunk (-1: none).
+// A chunk's pose in its body's frame: its centre of mass and principal axes in the asset, in
+// the world's coordinates and units (every chunk body's origin is the destructible's frame).
+// Its collider (a pack node's box or hull) is centred on it: draw it at the body's transform ×
+// this pose.
+enum RbResult rbDestructible_GetChunkPose(struct RbWorld *world,
+                                          RbDestructibleId id,
+                                          uint32_t chunk,
+                                          struct RbTransform *out);
+
 enum RbResult rbDestructible_GetChunkNode(struct RbWorld *world,
                                           RbDestructibleId id,
                                           uint32_t chunk,

@@ -26,7 +26,7 @@ use coords::{Coords, RbCoordinates};
 use rubble::*;
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::ffi::{c_char, CStr, CString};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 pub const RB_VERSION_MAJOR: u32 = 0;
@@ -134,6 +134,18 @@ pub struct RbVersion {
     pub minor: u32,
 }
 
+/// Which of a body's moves frames report (`rbBody_SetMoveReports`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RbMoveReports {
+    /// Every step it moves (the default).
+    RB_MOVES_ALL = 0,
+    /// Only when it falls asleep, wakes, or is first reported: for bodies the host draws from
+    /// `rbWorld_ExportPoses`, so moves stay per event on the CPU.
+    RB_MOVES_SLEEP_WAKE = 1,
+    RB_MOVES_NONE = 2,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RbContacts {
@@ -176,6 +188,10 @@ pub struct RbWorldDef {
     /// waiting when all are.
     pub readback_frames: u32,
     pub drop_frames: bool,
+    /// Keep the contacts of pairs whose bodies have not moved instead of testing them again
+    /// (three-avbd's `reuseContacts`, `FLAG_REUSE_CONTACTS`; demo.html turns it on for its brick
+    /// and box scenes). Off by default.
+    pub reuse_contacts: bool,
     pub user_data: u64,
     pub internal_value: u32,
 }
@@ -582,6 +598,10 @@ pub struct RbWorld {
     /// Joints whose drive is a length (prismatic, distance); the rest drive
     /// angles (`rbJoint_SetDrive`).
     linear_joints: std::collections::HashSet<u64>,
+    /// Host GPU buffers imported for pose exports, by native handle (each imported once and
+    /// retained while the world lives).
+    #[cfg(target_vendor = "apple")]
+    imported: std::collections::HashMap<usize, wgpu::Buffer>,
 }
 
 thread_local! {
@@ -1075,60 +1095,193 @@ pub extern "C" fn rbDefaultWorldDef() -> RbWorldDef {
         enable_soft_bodies: false,
         readback_frames: 3,
         drop_frames: false,
+        reuse_contacts: false,
         user_data: 0,
         internal_value: COOKIE,
     }
 }
 
+fn world_def_of(d: &RbWorldDef) -> anyhow::Result<(WorldDef, Coords)> {
+    check_cookie(d.internal_value, "world def not from rbDefaultWorldDef")?;
+    let coords = Coords::new(d.coordinates);
+    let mut solver = AvbdParams {
+        dt: d.time_step,
+        iterations: d.iterations,
+        ..AvbdParams::default()
+    };
+    if d.reuse_contacts {
+        solver.flags |= engine_schema::FLAG_REUSE_CONTACTS;
+    }
+    let world_def = WorldDef {
+        gravity: coords.linear_in(d.gravity.a()),
+        enable_sleep: d.enable_sleep,
+        user_data: d.user_data,
+        capacity: WorldCapacity {
+            max_bodies: d.max_bodies,
+            max_colliders: d.max_colliders,
+            max_contacts: d.max_contacts,
+            max_joints: d.max_joints,
+            max_candidates: d.max_candidates,
+            max_colors: WorldCapacity::small().max_colors,
+            max_commands: d.max_commands,
+            max_hull_vertices: d.max_hull_vertices,
+        },
+        contacts: match d.contacts {
+            RbContacts::RB_CONTACTS_PERSISTENT => ContactStorage::Persistent,
+            RbContacts::RB_CONTACTS_COMPACT => ContactStorage::Compact,
+            RbContacts::RB_CONTACTS_CANONICAL => ContactStorage::Canonical,
+        },
+        soft: d.enable_soft_bodies.then(SoftCapacity::default),
+        solver,
+        readback_frames: d.readback_frames,
+        backpressure: if d.drop_frames {
+            Backpressure::Drop
+        } else {
+            Backpressure::Block
+        },
+        ..WorldDef::default()
+    };
+    Ok((world_def, coords))
+}
+
+unsafe fn create_world(def: *const RbWorldDef, gpu: GpuContext, out: *mut *mut RbWorld) -> anyhow::Result<()> {
+    let d = read(def, "null world def")?;
+    let (world_def, coords) = world_def_of(&d)?;
+    let world = World::new(gpu, &world_def)?;
+    let boxed = Box::new(RbWorld {
+        world,
+        coords,
+        store: FrameStore::default(),
+        pending: VecDeque::new(),
+        linear_joints: Default::default(),
+        #[cfg(target_vendor = "apple")]
+        imported: Default::default(),
+    });
+    write(out, Box::into_raw(boxed))
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rbCreateWorld(def: *const RbWorldDef, out: *mut *mut RbWorld) -> RbResult {
+    guard_args(|| create_world(def, GpuContext::Default, out))
+}
+
+/// A world on the host renderer's Metal device (`MTLDevice*`; Unreal:
+/// `IMetalDynamicRHI::RHIGetDevice`), submitting on `mtl_command_queue`, so
+/// `rbWorld_ExportPoses` can write into the host's buffers. Give the world a queue of its own on
+/// that device, made with room for many command buffers in flight
+/// (`newCommandQueueWithMaxCommandBufferCount:`, 4096 as wgpu's own queues; Metal's default of 64
+/// stalls fast soft scenes). Apple platforms only (elsewhere `RB_UNSUPPORTED`).
+#[no_mangle]
+pub unsafe extern "C" fn rbCreateWorldOnMetal(
+    def: *const RbWorldDef,
+    mtl_device: *mut c_void,
+    mtl_command_queue: *mut c_void,
+    out: *mut *mut RbWorld,
+) -> RbResult {
+    #[cfg(target_vendor = "apple")]
+    {
+        guard_args(|| {
+            let (info, device, queue) = engine_webgpu::metal_interop::shared_device(mtl_device, mtl_command_queue)?;
+            create_world(def, GpuContext::Shared { info, device, queue }, out)
+        })
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        let _ = (def, mtl_device, mtl_command_queue, out);
+        guard_args(|| Err(anyhow::Error::new(Unsupported("rbCreateWorldOnMetal needs an Apple platform"))))
+    }
+}
+
+/// Copy the latest step's render poses into the host's GPU buffers (`MTLBuffer*` on the
+/// world's device, at byte offsets: hosts that sub-allocate pass their range). `current` gets
+/// the latest step's poses, `previous` the poses before that step: `bytes` of 32-byte records
+/// indexed by `rbBody_GetPoseIndex`, each `{ position xyz (f32), word, rotation xyzw (f32) }`
+/// **in Rubble's frame** (Y up, metres; the renderer applies the host's axis map).
+///
+/// The GPU copies are submitted on the world's queue now, and `out_ticket` names them. Read the
+/// buffers only after `rbWorld_GetCompletedPoseExport` reaches the ticket, and don't export
+/// into them again while the host's own GPU work still reads them: the host's buffers need not
+/// be hazard-tracked, so a ring of a few is the usual pattern. Nothing is read back.
+#[no_mangle]
+pub unsafe extern "C" fn rbWorld_ExportPoses(
+    world: *mut RbWorld,
+    current: *mut c_void,
+    current_offset: u64,
+    previous: *mut c_void,
+    previous_offset: u64,
+    bytes: u64,
+    out_ticket: *mut u64,
+) -> RbResult {
     guard_args(|| {
-        let d = read(def, "null world def")?;
-        check_cookie(d.internal_value, "world def not from rbDefaultWorldDef")?;
-        let coords = Coords::new(d.coordinates);
-        let solver = AvbdParams {
-            dt: d.time_step,
-            iterations: d.iterations,
-            ..AvbdParams::default()
+        let w = world_mut(world)?;
+        #[cfg(target_vendor = "apple")]
+        {
+            anyhow::ensure!(!current.is_null() && !previous.is_null(), "null host buffer");
+            let device = w.world.device().clone();
+            for (ptr, label) in [(current, "host poses (current)"), (previous, "host poses (previous)")] {
+                if !w.imported.contains_key(&(ptr as usize)) {
+                    let b = engine_webgpu::metal_interop::import_buffer(&device, ptr, label)?;
+                    w.imported.insert(ptr as usize, b);
+                }
+            }
+            let cur = &w.imported[&(current as usize)];
+            let prev = &w.imported[&(previous as usize)];
+            let ticket = w.world.export_poses(cur, current_offset, prev, previous_offset, bytes)?;
+            write(out_ticket, ticket)
+        }
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            let _ = (w, current, current_offset, previous, previous_offset, bytes, out_ticket);
+            Err(anyhow::Error::new(Unsupported("rbWorld_ExportPoses imports Metal buffers (Apple platforms)")))
+        }
+    })
+}
+
+/// The latest `rbWorld_ExportPoses` ticket whose copies have finished on the GPU (0 for none).
+/// Never waits.
+#[no_mangle]
+pub unsafe extern "C" fn rbWorld_GetCompletedPoseExport(world: *mut RbWorld, out_ticket: *mut u64) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let t = w.world.completed_pose_export()?;
+        write(out_ticket, t)
+    })
+}
+
+/// Where a body's origin is relative to its exported pose record (`rbWorld_ExportPoses`):
+/// origin = record × offset. Records are solver poses (centre of mass and its axes); the offset
+/// is the identity when the centre of mass is the body's origin, and changes only when the
+/// body's shapes change. In the world's coordinates and units, like the body's shape transforms.
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_GetPoseOffset(world: *mut RbWorld, body: RbBodyId, out: *mut RbTransform) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let t = w.world.body_pose_offset(BodyId::from_bits(body))?;
+        write(out, w.transform_out(t))
+    })
+}
+
+/// Which of a body's moves `rbWorld_Poll` reports. The simulation is the same either way.
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_SetMoveReports(world: *mut RbWorld, body: RbBodyId, reports: RbMoveReports) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let r = match reports {
+            RbMoveReports::RB_MOVES_ALL => rubble::MoveReports::All,
+            RbMoveReports::RB_MOVES_SLEEP_WAKE => rubble::MoveReports::SleepWake,
+            RbMoveReports::RB_MOVES_NONE => rubble::MoveReports::None,
         };
-        let world_def = WorldDef {
-            gravity: coords.linear_in(d.gravity.a()),
-            enable_sleep: d.enable_sleep,
-            user_data: d.user_data,
-            capacity: WorldCapacity {
-                max_bodies: d.max_bodies,
-                max_colliders: d.max_colliders,
-                max_contacts: d.max_contacts,
-                max_joints: d.max_joints,
-                max_candidates: d.max_candidates,
-                max_colors: WorldCapacity::small().max_colors,
-                max_commands: d.max_commands,
-                max_hull_vertices: d.max_hull_vertices,
-            },
-            contacts: match d.contacts {
-                RbContacts::RB_CONTACTS_PERSISTENT => ContactStorage::Persistent,
-                RbContacts::RB_CONTACTS_COMPACT => ContactStorage::Compact,
-                RbContacts::RB_CONTACTS_CANONICAL => ContactStorage::Canonical,
-            },
-            soft: d.enable_soft_bodies.then(SoftCapacity::default),
-            solver,
-            readback_frames: d.readback_frames,
-            backpressure: if d.drop_frames {
-                Backpressure::Drop
-            } else {
-                Backpressure::Block
-            },
-            ..WorldDef::default()
-        };
-        let world = World::new(GpuContext::Default, &world_def)?;
-        let boxed = Box::new(RbWorld {
-            world,
-            coords,
-            store: FrameStore::default(),
-            pending: VecDeque::new(),
-            linear_joints: Default::default(),
-        });
-        write(out, Box::into_raw(boxed))
+        w.world.set_body_move_reports(BodyId::from_bits(body), r)
+    })
+}
+
+/// A body's slot in the pose buffer and its exports.
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_GetPoseIndex(world: *mut RbWorld, body: RbBodyId, out: *mut u32) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let i = w.world.body_pose_index(BodyId::from_bits(body))?;
+        write(out, i)
     })
 }
 
@@ -1193,8 +1346,12 @@ pub unsafe extern "C" fn rbWorld_GetTransforms(
         let ids = std::slice::from_raw_parts(bodies, count as usize);
         let outs = std::slice::from_raw_parts_mut(out, count as usize);
         for (id, o) in ids.iter().zip(outs) {
-            let t = w.world.body_transform(BodyId::from_bits(*id))?;
-            *o = t.map(|t| w.transform_out(t)).unwrap_or_default();
+            let id = BodyId::from_bits(*id);
+            let t = match w.world.body_transform(id)? {
+                Some(t) => t,
+                None => w.world.body_initial_transform(id)?,
+            };
+            *o = w.transform_out(t);
         }
         Ok(())
     })
@@ -1318,6 +1475,8 @@ pub unsafe extern "C" fn rbBody_IsValid(world: *mut RbWorld, body: RbBodyId) -> 
 }
 
 /// The body origin's pose as of the last polled frame.
+/// The body origin's pose as of the last polled frame; before the body's first frame, the pose
+/// it was created with (a destructible's chunk: where its asset and placement put it).
 #[no_mangle]
 pub unsafe extern "C" fn rbBody_GetTransform(
     world: *mut RbWorld,
@@ -1326,8 +1485,12 @@ pub unsafe extern "C" fn rbBody_GetTransform(
 ) -> RbResult {
     guard_args(|| {
         let w = world_mut(world)?;
-        let t = w.world.body_transform(BodyId::from_bits(body))?;
-        write(out, t.map(|t| w.transform_out(t)).unwrap_or_default())
+        let id = BodyId::from_bits(body);
+        let t = match w.world.body_transform(id)? {
+            Some(t) => t,
+            None => w.world.body_initial_transform(id)?,
+        };
+        write(out, w.transform_out(t))
     })
 }
 
@@ -2108,6 +2271,24 @@ pub unsafe extern "C" fn rbDestructible_GetChunkBody(
 }
 
 /// The glTF node that renders a chunk (-1: none).
+/// A chunk's pose in its body's frame: its centre of mass and principal axes in the asset, in
+/// the world's coordinates and units (every chunk body's origin is the destructible's frame).
+/// Its collider (a pack node's box or hull) is centred on it: draw it at the body's transform ×
+/// this pose.
+#[no_mangle]
+pub unsafe extern "C" fn rbDestructible_GetChunkPose(
+    world: *mut RbWorld,
+    id: RbDestructibleId,
+    chunk: u32,
+    out: *mut RbTransform,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let t = w.world.destructible_chunk_pose(DestructibleId::from_bits(id), chunk)?;
+        write(out, w.transform_out(t))
+    })
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rbDestructible_GetChunkNode(
     world: *mut RbWorld,

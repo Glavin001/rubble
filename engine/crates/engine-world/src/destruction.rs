@@ -158,6 +158,18 @@ impl DestructibleAssetDesc {
     pub fn from_pack(bytes: &[u8]) -> anyhow::Result<Self> {
         let (scene, info) = engine_fracture::pack::build_pack_scene(bytes)?;
         let mut desc = Self::from_scene(&scene)?;
+        // One body per pack node, in order (build_pack_scene), so chunk k is node k: hosts
+        // read each chunk's collider and material from the pack (rbDestructible_GetChunkNode).
+        anyhow::ensure!(
+            desc.chunks.len() == info.nodes,
+            "pack {}: {} chunks for {} nodes",
+            info.key,
+            desc.chunks.len(),
+            info.nodes
+        );
+        for (k, c) in desc.chunks.iter_mut().enumerate() {
+            c.node = Some(k as u32);
+        }
         desc.name = Some(info.title);
         Ok(desc)
     }
@@ -755,6 +767,19 @@ impl World {
             .get(chunk as usize)
             .ok_or_else(|| anyhow::anyhow!("chunk {chunk} out of range"))?
             .node)
+    }
+
+    /// A chunk's pose in its body's frame: its centre of mass and principal axes in the asset
+    /// (every chunk body's origin is the destructible's frame). Its collider (a pack node's
+    /// box or hull) is centred on it, so a host drawing from colliders places each at body
+    /// transform × this pose.
+    pub fn destructible_chunk_pose(&self, id: DestructibleId, chunk: u32) -> anyhow::Result<Transform> {
+        let d = &self.destructibles[self.live_destructible(id)?];
+        Ok(self.assets[d.asset as usize]
+            .chunks
+            .get(chunk as usize)
+            .ok_or_else(|| anyhow::anyhow!("chunk {chunk} out of range"))?
+            .pose)
     }
 
     /// The actor (connected chunks) a chunk is part of now.

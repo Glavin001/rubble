@@ -23,6 +23,12 @@ log.workspace = true
 env_logger.workspace = true
 naga = { version = "24", features = ["spv-in", "wgsl-in", "wgsl-out"] }
 
+# Building on a host renderer's Metal device and buffers (`metal_interop`): the same objc2
+# versions wgpu-hal uses.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+objc2 = "0.6"
+objc2-metal = "0.3"
+
 [features]
 # The wgpu world, its device and the soft-body skinner. Without it the crate builds the
 # Slang → WGSL tables only, which is all `wgsl_export` needs (the web build's host tool,
