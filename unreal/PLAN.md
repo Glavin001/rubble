@@ -79,6 +79,17 @@ ten-storey towers), streets and props, 51,921 chunks and 132,529 bonds, one dest
   - `rbDestructible_GetChunkPose`;
   - the pack node per chunk;
   - creation poses before a body's first frame.
+- **Look** (`M_RubbleTownChunk`, `M_RubbleTownGlass`, `M_RubbleTownGround`):
+  - each material's texture tinted to its colour, an up-facing layer (slab tops, slate on the
+    pitched roofs), a palette per building (the six siding colours), weathering and ground grime;
+  - glass over interior-mapped, randomly lit rooms; the towers (modelled without openings) get
+    framed windows on their outer faces, in each chunk's own frame so they break with it;
+  - grass to the fogged horizon, a warm late-afternoon sun, volumetric clouds;
+  - collapse dust tinted by what broke, sized by the bonds broken, lingering and drifting.
+- **Found while doing it:** the pack loader (`engine-fracture` `pack.rs`) does not read
+  `nodeColliders` of kind `shape` (`scenario.shapeLibrary`), so 24,561 of the town's chunks
+  (every tower wall among them) collide as their `nodeSizes` boxes while the renderer draws
+  their hulls. A loader fix, not done here.
 
 | | |
 |---|---|

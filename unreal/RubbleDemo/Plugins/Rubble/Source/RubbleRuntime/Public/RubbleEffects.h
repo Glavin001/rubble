@@ -54,8 +54,13 @@ private:
 	void OnFrame(const FRubbleFrame& Frame);
 	void OnScene(const FRubbleSceneAssets& Assets);
 	FParticle& Spawn(EKind Kind);
-	void Chips(const FVector& At, int32 Count, ERubbleMaterial Material, float Speed, float Size);
-	void DustPuffs(const FVector& At, int32 Count, float Radius);
+	/** Color (alpha > 0) overrides the material's chip colour. */
+	void Chips(const FVector& At, int32 Count, ERubbleMaterial Material, float Speed, float Size, const FLinearColor& Color = FLinearColor::Transparent);
+	/** Puffs of dust Radius cm across that grow, drift up and linger for Life seconds (a range
+	 *  around it); Color tints them (alpha 0: plain grey-beige dust). */
+	void DustPuffs(const FVector& At, int32 Count, float Radius, float Life = 4.0f, const FLinearColor& Color = FLinearColor::Transparent);
+	/** A collapse's cloud where Bonds bonds broke: puffs scaled with the break, lingering. */
+	void Collapse(const FVector& At, int32 Bonds, ERubbleMaterial Material, const FLinearColor& Color);
 	void Sparks(const FVector& At, const FVector& Normal, int32 Count);
 	FPool& PoolOf(EKind Kind) { return Pools[int32(Kind)]; }
 

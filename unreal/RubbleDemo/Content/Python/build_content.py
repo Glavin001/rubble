@@ -10,7 +10,8 @@ Generated into /Game/Rubble/Materials (never committed; this script is the sourc
                     is DefaultLit); vertex colour R is the soft body's strain (G = 0 marks a
                     skinned mesh), which turns paint into scratched, dented bare metal.
   M_RubbleGround    procedural asphalt / concrete (MI_GroundYard, MI_GroundHall, MI_GroundLot).
-  M_RubbleDust      translucent dust puffs, opacity from custom data 3.
+  M_RubbleDust      sun-lit translucent dust puffs: tint from custom data 0..2, opacity from 3,
+                    soft billowing edges, depth-faded against geometry.
   M_RubbleSpark     additive sparks, glow from custom data 3.
   M_RubbleTownChunk the town's chunks: vibe-land's 2K Poly Haven texture arrays (CC0, copied by
                     scripts/unreal/fetch-city-textures.sh), projected on each face's dominant axis
@@ -185,20 +186,35 @@ def ground():
 
 
 def dust():
+    """M_RubbleDust: a puff of dust on a sphere instance (DUST, defined after TOWN_NOISE): tinted
+    from custom data 0..2, opacity faded by 3; soft billowing edges from noise in the instance's
+    own (randomly turned) space, faded where it meets geometry, lit by the sun through the
+    translucency volume."""
     m = material("M_RubbleDust")
     m.set_editor_property("blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT)
-    m.set_editor_property("translucency_lighting_mode", unreal.TranslucencyLightingMode.TLM_VOLUMETRIC_NON_DIRECTIONAL)
-    mel.connect_material_property(vector(m, "Color", (0.55, 0.5, 0.44, 1.0), -600, -200), "", MP.MP_BASE_COLOR)
-    fade = expr(m, unreal.MaterialExpressionPerInstanceCustomData, -900, 100, data_index=3, const_default_value=1.0)
-    # Soft edges: fresnel against the view, so a sphere reads as a puff.
-    fresnel = expr(m, unreal.MaterialExpressionFresnel, -900, 250)
-    one = const(m, 1.0, -900, 400)
-    soft = binary(m, unreal.MaterialExpressionSubtract, one, fresnel, -700, 300)
-    puff = noise(m, 0.03, -900, 550, lo=0.4, hi=1.0, levels=2)
-    a = binary(m, unreal.MaterialExpressionMultiply, soft, puff, -550, 350)
-    b = binary(m, unreal.MaterialExpressionMultiply, a, fade, -400, 250)
-    c = binary(m, unreal.MaterialExpressionMultiply, b, scalar(m, "Density", 0.16, -550, 500), -250, 300)
-    mel.connect_material_property(c, "", MP.MP_OPACITY)
+    m.set_editor_property("translucency_lighting_mode", unreal.TranslucencyLightingMode.TLM_VOLUMETRIC_DIRECTIONAL)
+    data = [expr(m, unreal.MaterialExpressionPerInstanceCustomData, -1300, -400 + 90 * i, data_index=i, const_default_value=(1.0 if i == 3 else 0.5)) for i in range(4)]
+    rg = binary(m, unreal.MaterialExpressionAppendVector, data[0], data[1], -1100, -380)
+    tint = binary(m, unreal.MaterialExpressionAppendVector, rg, data[2], -950, -360)
+    mel.connect_material_property(tint, "", MP.MP_BASE_COLOR)
+    world = expr(m, unreal.MaterialExpressionWorldPosition, -1300, 0)
+    local_p = expr(m, unreal.MaterialExpressionTransformPosition, -1100, 0,
+                   transform_source_type=unreal.MaterialPositionTransformSource.TRANSFORMPOSSOURCE_WORLD,
+                   transform_type=unreal.MaterialPositionTransformSource.TRANSFORMPOSSOURCE_INSTANCE)
+    link(world, "", local_p, "")
+    inputs = {
+        "LocalP": (local_p, ""),
+        "Nw": (expr(m, unreal.MaterialExpressionVertexNormalWS, -1300, 150), ""),
+        "V": (expr(m, unreal.MaterialExpressionCameraVectorWS, -1300, 250), ""),
+        "T": (expr(m, unreal.MaterialExpressionTime, -1300, 350), ""),
+        "Fade": (data[3], ""),
+        "Density": (scalar(m, "Density", 1.1, -1300, 450), ""),
+    }
+    c = custom(m, DUST, -800, 100, inputs, {}, "Dust")
+    fade = expr(m, unreal.MaterialExpressionDepthFade, -500, 150)
+    fade.set_editor_property("fade_distance_default", 120.0)
+    link(c, "", fade, "Opacity")
+    mel.connect_material_property(fade, "", MP.MP_OPACITY)
     mel.recompile_material(m)
     return m
 
@@ -253,7 +269,8 @@ struct FTownNoise
         float3 col = lerp(float3(0.62, 0.56, 0.47), float3(0.45, 0.5, 0.55), frac(seed * 7.31));
         if (tm == tt.z)
         {
-            col = d.z < 0.0 ? float3(0.3, 0.2, 0.12) : float3(0.62, 0.6, 0.57);
+            // Floor, or a ceiling lit only from the room (darker than its walls).
+            col = d.z < 0.0 ? float3(0.3, 0.2, 0.12) : float3(0.4, 0.39, 0.37);
         }
         float3 c = abs(q - 0.5) * 2.0;
         float edge = max(max(c.x * (1.0 - mask.x), c.y * (1.0 - mask.y)), c.z);
@@ -270,6 +287,17 @@ struct FTownNoise
     }
 };
 FTownNoise N;
+"""
+
+
+DUST = TOWN_NOISE + """
+float facing = saturate(dot(normalize(Nw), normalize(V)));
+float edge = pow(facing, 1.4);
+float3 q = LocalP / 50.0;
+float t = T * 0.06;
+float n1 = N.V(q.xy * 2.1 + t) * 0.5 + N.V(q.yz * 4.3 - t * 1.3) * 0.3 + N.V(q.zx * 8.7 + t * 2.1) * 0.2;
+float billow = smoothstep(0.2, 0.8, n1 * 0.9 + edge * 0.6 - 0.15) * edge;
+return saturate(billow * Fade * Density);
 """
 
 
@@ -521,7 +549,7 @@ def town_glass():
         "CameraVec": (expr(m, unreal.MaterialExpressionCameraVectorWS, -1400, 100), ""),
         "RoomSize": (scalar(m, "RoomSize", 420.0, -1400, 250), ""),
         "StoreyHeight": (scalar(m, "StoreyHeight", 300.0, -1400, 330), ""),
-        "Brightness": (scalar(m, "Brightness", 0.45, -1400, 410), ""),
+        "Brightness": (scalar(m, "Brightness", 0.35, -1400, 410), ""),
     }
     c = custom(m, TOWN_GLASS, -900, 0, inputs, {"Fresnel": 1}, "TownGlass")
     mel.connect_material_property(vector(m, "PaneColor", (0.012, 0.016, 0.02, 1.0), -600, -250), "", MP.MP_BASE_COLOR)
@@ -541,7 +569,7 @@ def town_ground(arrays):
         # The catalog's grass and mud-leaves layers (catalog.json) and their tile sizes.
         "GrassLayer": (const(m, 10.0, -1400, -50), ""), "GrassMetres": (const(m, 2.0, -1400, 20), ""),
         "MudLayer": (const(m, 11.0, -1400, 90), ""), "MudMetres": (const(m, 1.3, -1400, 160), ""),
-        "CanopyTint": (vector(m, "CanopyTint", (0.62, 0.95, 0.42, 1.0), -1400, 200), ""),
+        "CanopyTint": (vector(m, "CanopyTint", (0.5, 0.95, 0.36, 1.0), -1400, 200), ""),
     }
     inputs.update(texture_objects(m, arrays, -1400, 250))
     c = custom(m, TOWN_GROUND, -900, 0, inputs, {"Normal": 3, "Roughness": 1, "Occlusion": 1}, "TownGround")

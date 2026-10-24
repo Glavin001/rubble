@@ -201,6 +201,7 @@ void FRubbleAbiBackend::DestroyWorld()
 	NewBodies.Reset();
 	NewShapes.Reset();
 	ChunkAt.Reset();
+	ChunkLook.Reset();
 	Balls.Reset();
 	NextBall = 0;
 	Meteors.Reset();
@@ -906,6 +907,11 @@ void FRubbleAbiBackend::Poll(TArray<FRubbleFrame>& Out)
 					{
 						E.Position = *At;
 					}
+					if (const TPair<ERubbleMaterial, FLinearColor>* Look = ChunkLook.Find(Actor->bodies[0]))
+					{
+						E.MaterialA = Look->Key;
+						E.Color = Look->Value;
+					}
 				}
 				break;
 			}
@@ -1160,6 +1166,7 @@ bool FRubbleAbiBackend::CreateTown(FString& Error)
 		V.bLumenVisible = true;
 		SceneAssets->Bodies.Add(V);
 		ChunkAt.Add(Body, (Xf(Pose) * V.Initial).GetLocation()); // where its breaks happen, for effects
+		ChunkLook.Add(Body, TPair<ERubbleMaterial, FLinearColor>(M.Kind, M.Color));
 		++Drawn;
 	}
 	UE_LOG(LogRubble, Display, TEXT("town: '%s', %u chunks (%d drawn, %d meshes, %d materials); physics %.0f ms, visuals %.0f ms"),

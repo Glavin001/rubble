@@ -335,7 +335,8 @@ namespace RubbleMock
 			{
 				// The ABI builds it from the pack; the layout is its stage and camera only.
 				Assets.Stage = ERubbleStage::Town;
-				Assets.GroundHalfExtentCm = 30000.0f;
+				// Out to the fog: the plane's edge is never seen.
+				Assets.GroundHalfExtentCm = 400000.0f;
 				Focus = FVector(0, 0, 600);
 				Distance = 16000.0f;
 			}

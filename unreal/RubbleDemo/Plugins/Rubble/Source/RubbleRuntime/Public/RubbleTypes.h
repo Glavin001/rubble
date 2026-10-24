@@ -320,6 +320,8 @@ struct FRubbleEvent
 	FName Part;
 	ERubbleMaterial MaterialA = ERubbleMaterial::Concrete;
 	ERubbleMaterial MaterialB = ERubbleMaterial::Concrete;
+	/** For breaks: the broken surface's colour (linear), when known; alpha 0 when not. */
+	FLinearColor Color = FLinearColor::Transparent;
 	FRubbleActorInfo Parent;
 	TArray<FRubbleActorInfo> Children;
 };

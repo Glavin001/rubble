@@ -7,7 +7,7 @@
 
 namespace
 {
-	constexpr int32 Capacity[3] = { 4000, 1500, 2000 };
+	constexpr int32 Capacity[3] = { 4000, 5000, 2000 };
 	constexpr int32 MaxSpawnPerFrame = 600;
 	constexpr double GravityCm = 981.0;
 	const FTransform Hidden(FQuat::Identity, FVector(0, 0, -100000.0), FVector::ZeroVector);
@@ -105,7 +105,7 @@ ARubbleEffects::FParticle& ARubbleEffects::Spawn(EKind Kind)
 	return Q;
 }
 
-void ARubbleEffects::Chips(const FVector& At, int32 Count, ERubbleMaterial Material, float Speed, float Size)
+void ARubbleEffects::Chips(const FVector& At, int32 Count, ERubbleMaterial Material, float Speed, float Size, const FLinearColor& Color)
 {
 	for (int32 i = 0; i < Count && SpawnedThisFrame < MaxSpawnPerFrame; ++i)
 	{
@@ -118,13 +118,16 @@ void ARubbleEffects::Chips(const FVector& At, int32 Count, ERubbleMaterial Mater
 		Q.Vel = Dir.GetSafeNormal() * Speed * Random.FRandRange(0.4f, 1.0f);
 		Q.Rot = FQuat(Random.VRand(), Random.FRandRange(0.0f, UE_PI));
 		Q.AngVel = Random.VRand() * Random.FRandRange(3.0f, 15.0f);
-		Q.Color = ChipColor(Material, Random);
+		Q.Color = Color.A > 0.0f ? Color * Random.FRandRange(0.7f, 1.05f) : ChipColor(Material, Random);
 		Q.Life = Random.FRandRange(6.0f, 12.0f);
 	}
 }
 
-void ARubbleEffects::DustPuffs(const FVector& At, int32 Count, float Radius)
+void ARubbleEffects::DustPuffs(const FVector& At, int32 Count, float Radius, float Life, const FLinearColor& Color)
 {
+	// Dust is the broken surface ground fine: its colour, paler and greyer.
+	const FLinearColor Plain(0.5f, 0.47f, 0.42f);
+	const FLinearColor Tint = Color.A > 0.0f ? FMath::Lerp(Color, Plain, 0.55f) : Plain;
 	for (int32 i = 0; i < Count && SpawnedThisFrame < MaxSpawnPerFrame; ++i)
 	{
 		FParticle& Q = Spawn(EKind::Dust);
@@ -132,8 +135,19 @@ void ARubbleEffects::DustPuffs(const FVector& At, int32 Count, float Radius)
 		Q.Vel = FVector(Random.FRandRange(-1.f, 1.f), Random.FRandRange(-1.f, 1.f), Random.FRandRange(0.2f, 1.0f)) * Radius * 0.8;
 		Q.Size0 = Radius * Random.FRandRange(0.2f, 0.4f) / 50.0f;
 		Q.Size1 = Radius * Random.FRandRange(0.9f, 1.6f) / 50.0f;
-		Q.Life = Random.FRandRange(2.5f, 5.0f);
+		Q.Life = Life * Random.FRandRange(0.6f, 1.25f);
+		Q.Color = Tint * Random.FRandRange(0.85f, 1.1f);
+		Q.Rot = FQuat(Random.VRand(), Random.FRandRange(0.0f, UE_PI)); // its noise turned
 	}
+}
+
+void ARubbleEffects::Collapse(const FVector& At, int32 Bonds, ERubbleMaterial Material, const FLinearColor& Color)
+{
+	// A break of a few bonds puffs; a storey's worth billows, wide and slow to settle.
+	const int32 N = FMath::Max(1, Bonds);
+	const float Radius = 180.0f + 10.0f * FMath::Min(N, 60);
+	DustPuffs(At, FMath::Clamp(4 + N / 2, 4, 30), Radius, 6.0f + 0.15f * FMath::Min(N, 60), Color);
+	Chips(At, FMath::Min(60, 2 * N), Material, 500.0f, 3.0f, Color);
 }
 
 void ARubbleEffects::Sparks(const FVector& At, const FVector& Normal, int32 Count)
@@ -163,7 +177,7 @@ void ARubbleEffects::OnFrame(const FRubbleFrame& Frame)
 			Chips(E.Position, 30, ERubbleMaterial::Brick, 600.0f, 4.0f);
 			break;
 		case ERubbleEventType::BondsBroken:
-			Chips(E.Position, FMath::Min(60, 2 * E.Count), ERubbleMaterial::Concrete, 500.0f, 3.0f);
+			Collapse(E.Position, E.Count, E.MaterialA, E.Color);
 			break;
 		case ERubbleEventType::Impact:
 			if (E.Magnitude > 300.0f)
@@ -249,11 +263,13 @@ void ARubbleEffects::Tick(float DeltaSeconds)
 			}
 			case EKind::Dust:
 			{
+				// Drag, a slow rise, and a drift downwind; it settles onto (not through) the ground.
 				Q.Vel *= FMath::Pow(0.4f, Dt);
-				Q.Vel.Z += 30.0 * Dt;
+				Q.Vel += FVector(12.0, 6.0, 30.0) * Dt;
 				Q.Pos += Q.Vel * Dt;
 				const float Size = FMath::Lerp(Q.Size0, Q.Size1, 1.0f - FMath::Square(1.0f - u));
-				P.Transforms[i] = FTransform(FQuat::Identity, Q.Pos, FVector(Size));
+				Q.Pos.Z = FMath::Max(Q.Pos.Z, Size * 25.0);
+				P.Transforms[i] = FTransform(Q.Rot, Q.Pos, FVector(Size));
 				Fade = FMath::Min(1.0f, 6.0f * u) * FMath::Pow(1.0f - u, 1.6f);
 				break;
 			}

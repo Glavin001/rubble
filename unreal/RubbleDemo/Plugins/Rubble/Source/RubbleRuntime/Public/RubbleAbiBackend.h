@@ -103,6 +103,8 @@ private:
 	TArray<FRubbleShapeVisual> NewShapes;
 	/** Last known position of chunk bodies, for where breaks happened (events carry no point). */
 	TMap<uint64, FVector> ChunkAt;
+	/** What a chunk body is made of, for the debris and dust of its breaks. */
+	TMap<uint64, TPair<ERubbleMaterial, FLinearColor>> ChunkLook;
 	FRubbleVehicleInput Input;
 	uint64 Steps = 0;
 	int64 AutoShotStep = -1;
