@@ -43,7 +43,7 @@ const SEAM: f64 = 1e-6;
 const BLAST_DT: f64 = 1.0 / 60.0;
 
 /// The yard's structures: (key, title), in menu order.
-pub const STRUCTURES: &[(&str, &str)] = &[("wy_frame10", "10-floor concrete frame"), ("wy_round_tower", "Round tower on columns"), ("wy_brick_tower", "Brick tower")];
+pub const STRUCTURES: &[(&str, &str)] = &[("wy_frame10", "10-floor concrete frame"), ("wy_round_tower", "Round tower on columns"), ("wy_brick_tower", "Brick tower"), ("bo_viaduct", "Highway viaduct")];
 
 /// A structure as the builders make it (Z-up): chunks (box or hull, `material` the pack's
 /// asset material, footings `Support::Fixed`), bonds (`material` the pack material's
@@ -152,6 +152,7 @@ pub fn structure(key: &str) -> Option<Structure> {
         "wy_frame10" => Some(frame10()),
         "wy_round_tower" => Some(round_tower()),
         "wy_brick_tower" => Some(brick_tower()),
+        "bo_viaduct" => Some(crate::viaduct::viaduct()),
         _ => None,
     }
 }
@@ -299,7 +300,7 @@ pub fn bounds(chunks: &[ChunkDesc]) -> ([f64; 3], [f64; 3]) {
 }
 
 /// A box chunk spanning `lo..hi`, of type `kind` in `group`.
-fn block(lo: [f64; 3], hi: [f64; 3], material: &str, kind: &str, group: String) -> ChunkDesc {
+pub(crate) fn block(lo: [f64; 3], hi: [f64; 3], material: &str, kind: &str, group: String) -> ChunkDesc {
     let c = Vec3::new(0.5 * (lo[0] + hi[0]), 0.5 * (lo[1] + hi[1]), 0.5 * (lo[2] + hi[2]));
     let h = Vec3::new(0.5 * (hi[0] - lo[0]), 0.5 * (hi[1] - lo[1]), 0.5 * (hi[2] - lo[2]));
     let mut ch = chunk(c, h, material);
@@ -319,13 +320,13 @@ fn hull_chunk(points: &[Vec3], material: &str, kind: &str, group: String) -> Chu
 }
 
 /// The bonds that hold something: none between two supports (both are fixed).
-fn between_free(chunks: &[ChunkDesc], mut bonds: Vec<BondDesc>) -> Vec<BondDesc> {
+pub(crate) fn between_free(chunks: &[ChunkDesc], mut bonds: Vec<BondDesc>) -> Vec<BondDesc> {
     bonds.retain(|b| chunks[b.a].support != Support::Fixed || chunks[b.b].support != Support::Fixed);
     bonds
 }
 
 /// A footing: the support (mass 0) a structure stands on.
-fn footing(mut c: ChunkDesc) -> ChunkDesc {
+pub(crate) fn footing(mut c: ChunkDesc) -> ChunkDesc {
     c.support = Support::Fixed;
     c
 }
@@ -387,7 +388,7 @@ fn face_bonds(chunks: &[ChunkDesc], joint: impl Fn(&ChunkDesc, &ChunkDesc) -> St
 
 /// The joint material between two chunks: mortar where a brick meets anything, else
 /// the concrete's.
-fn joint_of(a: &ChunkDesc, b: &ChunkDesc) -> String {
+pub(crate) fn joint_of(a: &ChunkDesc, b: &ChunkDesc) -> String {
     if a.material == "brick" || b.material == "brick" {
         "brick".into()
     } else {

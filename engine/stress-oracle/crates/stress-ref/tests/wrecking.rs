@@ -1,4 +1,5 @@
-//! Wrecking Yard structures (`stress_ref::wrecking`): their chunk and bond counts and
+//! Wrecking Yard structures (`stress_ref::wrecking`, and Bridge Out's viaduct,
+//! `stress_ref::viaduct`): their chunk and bond counts and
 //! total masses from the layouts' own geometry, the scene packs they are written as
 //! (imported back under the lab profiles' options: every chunk, bond and kilogram kept,
 //! nothing left out), and that each stands under its own weight in the reference.
@@ -7,6 +8,7 @@
 
 use stress_ref::capability::Profile;
 use stress_ref::scene::Support;
+use stress_ref::viaduct::{self, ViaductLayout};
 use stress_ref::wrecking::{self, BrickLayout, FrameLayout, RoundLayout, BALLS, STRUCTURES};
 
 /// Area of a regular n-gon of circumradius r.
@@ -75,6 +77,76 @@ fn brick_tower_counts_and_mass() {
     let expected = 1900.0 * (L::COURSES * L::PER_COURSE) as f64 * L::BRICK * L::WALL * L::COURSE;
     let total: f64 = s.chunks.iter().map(wrecking::mass).sum();
     assert!(rel(total, expected) < 1e-12, "{total} kg vs {expected} kg");
+}
+
+/// Per span: deck joints along 5 x 6 and across 6 x 5, parapets on the deck 12 and to
+/// each other 10. A seat pier: footing-column, 4 column joints, column-cap, 2 cap joints,
+/// 12 cap-bearing, 12 bearing-deck, the link to the spans' ends 12 and across itself 5.
+/// The hinge pier: footing-column, 4 column joints, column-cap, 2 cap joints, 6
+/// cap-bearing, 6 bearing-diaphragm, 5 across the diaphragm, 6 diaphragm-link, 5 across
+/// the link and its nibs to the spans 12. An abutment: 6 seat-bearing, 6 bearing-deck. The
+/// road: 30 slabs on their sub-bases, 2 x 10 joints along x and 3 x 9 along y (none
+/// between the sub-bases: both are supports).
+#[test]
+fn viaduct_counts_and_mass() {
+    let s = viaduct::viaduct();
+    type L = ViaductLayout;
+    assert_eq!(s.chunks.len(), L::CHUNKS);
+    assert_eq!(L::CHUNKS, 347);
+    // Supports: 3 pad footings, 2 abutments, the road's 30 sub-bases.
+    assert_eq!(s.chunks.iter().filter(|c| c.support == Support::Fixed).count(), 3 + 2 + 30);
+    let span = 30 + 30 + 12 + 10;
+    let seat = 1 + 4 + 1 + 2 + 12 + 12 + 12 + 5;
+    let hinge = 1 + 4 + 1 + 2 + 6 + 6 + 5 + 6 + 5 + 12;
+    let road = 30 + 20 + 27;
+    assert_eq!(s.bonds.len(), 4 * span + 2 * seat + hinge + 2 * 12 + road);
+    assert_eq!(s.bonds.len(), 575);
+    assert!(s.bonds.iter().all(|b| b.material == "reinforced-concrete"));
+    // Concrete volume: the deck (the spans' lengths: 15, 14.5, 14.5, 15 m) and its
+    // parapets, the columns, the caps (two seat caps, the hinge cap), the bearings (12 on
+    // each seat pier, 6 on the hinge pier and on each abutment), the links, the hinge's
+    // diaphragm and the road's slabs.
+    let deck: f64 = (0..L::SPANS).map(|k| L::span(k).1 - L::span(k).0).sum();
+    assert!(rel(deck, 59.0) < 1e-12, "{deck}");
+    let volume = deck * (L::WIDTH * L::DECK + 2.0 * L::PARAPET_WIDTH * L::PARAPET_HEIGHT)
+        + 3.0 * L::COLUMN * L::COLUMN * (L::cap_bottom() - L::FOOTING_DEPTH)
+        + (2.0 * L::SEAT_CAP + L::HINGE_CAP) * L::WIDTH * L::CAP_DEPTH
+        + (2 * 12 + 6 + 2 * 6) as f64 * L::BEARING.iter().product::<f64>()
+        + 2.0 * L::LINK * L::WIDTH * L::LINK_DEPTH
+        + L::HINGE_GAP * L::WIDTH * L::NIB
+        + L::DIAPHRAGM * L::WIDTH * (L::DECK - L::NIB)
+        + (L::ROAD_ALONG * L::ROAD_ACROSS) as f64 * L::ROAD_SLAB * L::ROAD_SLAB * L::ROAD_DEPTH;
+    let expected = 2400.0 * volume;
+    let total: f64 = s.chunks.iter().map(wrecking::mass).sum();
+    assert!(rel(total, expected) < 1e-12, "{total} kg vs {expected} kg");
+    // About 1,890 t.
+    assert!((1.85e6..1.95e6).contains(&total), "{total}");
+    // Every chunk at or above grade, the deck's top 10 m up, the road at grade under span 2.
+    assert!(s.chunks.iter().all(|c| c.center[2] - c.half_extents[2] >= -1e-12));
+    let (lo, hi) = wrecking::bounds(&s.chunks);
+    assert_eq!(lo[2], 0.0);
+    assert!((hi[2] - (L::DECK_TOP + L::PARAPET_HEIGHT)).abs() < 1e-12);
+    let road: Vec<_> = s.chunks.iter().filter(|c| c.groups[0] == "road").collect();
+    let (x0, x1) = L::span(1);
+    assert!(road.iter().all(|c| c.center[0] - c.half_extents[0] > x0 && c.center[0] + c.half_extents[0] < x1));
+    // The drop-in spans have no seat on the hinge pier: nothing under their ends there
+    // but air down to its cap's level.
+    let cap = |p: usize| s.chunks.iter().filter(move |c| c.groups[0] == "cap" && c.groups[1] == format!("pier-{p}"));
+    let hinge_x = L::line(L::HINGE_PIER);
+    assert!(cap(L::HINGE_PIER).all(|c| (c.center[0] - hinge_x).abs() + c.half_extents[0] < L::end_gap(L::HINGE_PIER)));
+    // The seat piers' caps reach a metre under each span's end.
+    for p in [1, 3] {
+        assert!(cap(p).all(|c| c.half_extents[0] - L::end_gap(p) >= 1.0 - 1e-12));
+    }
+    // Four spans on the probes, each its 82 bonded pairs and its six end chunks a side.
+    let probes = viaduct::span_probes(&s.chunks, &s.bonds);
+    assert_eq!(probes.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["span-1", "span-2", "span-3", "span-4"]);
+    assert!(probes.iter().all(|p| p.pairs.len() == span && p.west.len() == L::ACROSS && p.east.len() == L::ACROSS));
+    // The ball's line: across the deck (+y) into the hinge pier's column face, clear of
+    // its footing (the 50 t ball's bottom above the footing's top as it reaches the face).
+    assert_eq!(s.aim.direction, [0.0, 1.0, 0.0]);
+    assert_eq!(s.aim.target[0], hinge_x);
+    assert!(s.aim.target[2] - BALLS[1].radius > L::FOOTING_DEPTH);
 }
 
 /// Every structure stands at or above grade, its bonds join touching faces over an area,

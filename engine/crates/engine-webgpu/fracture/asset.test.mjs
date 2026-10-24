@@ -51,10 +51,10 @@ test('the house, its flat-hull skips and the layouts of the Scene menu',async()=
  assert.deepEqual(SAMPLES.map(s=>s.key),['house','cuboid','arch','row','grid','cuboidGrid','suburb','cuboids','cuboids2x']);
 });
 
-test('the Wrecking Yard packs (built in Rust) load as lab scenes',()=>{
- assert.deepEqual(PACK_SAMPLES.map(s=>[s.key,s.group]),[['wy_frame10','Wrecking Yard'],['wy_round_tower','Wrecking Yard'],['wy_brick_tower','Wrecking Yard']]);
+test('the Wrecking Yard and Bridge Out packs (built in Rust) load as lab scenes',()=>{
+ assert.deepEqual(PACK_SAMPLES.map(s=>[s.key,s.group]),[['wy_frame10','Wrecking Yard'],['wy_round_tower','Wrecking Yard'],['wy_brick_tower','Wrecking Yard'],['bo_viaduct','Bridge Out']]);
  const pieces=PACK_SAMPLES.map(s=>buildPackScene(packSampleJson(s.key).buffer).pieces);
- assert.deepEqual(pieces,[1264,337,1444]);
+ assert.deepEqual(pieces,[1264,337,1444,347]);
  assert.throws(()=>packSampleJson('house'),/Unknown bundled scene/);
 });
 

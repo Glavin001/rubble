@@ -181,6 +181,7 @@ each named for what it is, then how many:
   suburb of 96).
 - **Wrecking Yard:** tall structures for heavy balls, built in Rust as scene packs
   (`PACK_SAMPLES`; below).
+- **Bridge Out:** a highway viaduct for a pier hit, also a Rust-built pack (below).
 - **Vibe City presets:** generated scene packs, when they are built.
 - **Your file:** a dropped or chosen GLB.
 
@@ -258,6 +259,75 @@ stays up above the hole.
 `threshold` breaks bonds on contact force alone, with no stress solve, so there it is
 local damage only. In Chrome, after 90 frames the 50 t ball had broken 4 of the frame's
 bonds, 18 of the round tower's and 15 of the brick tower's.
+
+### Bridge Out
+
+A reinforced-concrete highway viaduct for the pier-hit beat (`stress_ref::viaduct`). It is
+built and loaded like the Wrecking Yard's structures, and it has its own Scene menu group.
+It has **347 chunks and 575 bonds** (about 1,890 t):
+- four 16 m spans of a 9 m wide, 0.9 m deep deck, its top 10 m above grade, in chunks of
+  about 2.5 × 1.5 m, with parapets;
+- three hammerhead piers (a 1.8 m column in five chunks on a pad footing, a pier cap in
+  three chunks, bearing seats) and two abutments;
+- a lower road crossing at grade under span 2: slabs bonded to a sub-base of supports.
+
+The deck is bonded across every span joint, but the piers differ:
+- **Piers 1 and 3 are seat piers.** The spans' ends rest 1 m over a 3 m cap on bearings,
+  joined by a link slab the top third of the deck deep.
+- **Pier 2, the one the ball hits, is a Gerber (half-joint) hinge.** Spans 2 and 3 are
+  drop-in spans. They hang by their bonds alone on the 0.15 m nibs of a 2 m link slab,
+  over a diaphragm, with no seat under their ends.
+
+Why the hinge pier: in `blast_parity` the struck structure is anchored, so the ball
+rebounds and the hit only breaks bonds. The pier's broken column chunks stay stacked
+under its cap. A span seated on that pier would stay up on contact at both ends and
+break at midspan. A drop-in span has nothing under its end once the nibs go. The nibs are
+thinner than the seat piers' links, so they break first, and each span swings down about
+its far seat as one slab.
+
+The ball (the 50 t preset by default) comes in across the deck (+y) at pier 2's column,
+one column chunk above its footing.
+
+**Checks:**
+- `cargo test --release -p stress-ref --test wrecking` covers the counts, the mass, grade
+  and the seats (`viaduct_counts_and_mass`), along with the shared pack and
+  reference-settle tests.
+- `cargo test --release -p stress-rubble --features gpu --test wrecking_yard viaduct`
+  covers two things:
+  - the settle in both stress modes;
+  - the 50 t pier hit in `blast_parity`, with each frame's splits followed as the lab's
+    view does. At frame 90 spans 2 and 3 are swinging down, still 90% intact, and spans 1
+    and 4 stand. At frame 150 spans 2 and 3 are on the ground and broken up.
+
+**Hero check:**
+`cargo run --release -p stress-rubble --features gpu --example wrecking_yard -- bo_viaduct ball50t 600`.
+For each span that moves, it also prints how far its two ends have dropped and how many
+of its bonded pairs are still at their distance.
+
+The 50 t ball under `blast_parity`, fired at frame 10:
+- **Frame 30:** the ball arrives at about frame 28, and 21 bonds break: pier 2's column,
+  its bearings, its diaphragm and half the nibs. The far ends' links and bearings at
+  piers 1 and 3 let go within a few frames.
+- **Frame 60:** spans 2 and 3 hinge down. Their pier-2 ends are 1.1 m down and their
+  seated ends 0.15 m, with 80 and 81 of 82 pairs intact.
+- **Frame 90:** the pier-2 ends are 5.2 m down and the seated ends 0.6 m, with 78 and 80 of
+  82 pairs intact.
+- **About frame 110:** the pier-2 ends land, span 2's on the lower road. The slabs break up
+  there (88 deck bonds in frames 101–110, and 20 of the road's bonds by frame 140), and
+  their seated ends slide off the seats.
+- **Frames 120–180:** pier 3 and then pier 1 give way, and spans 4 and 1 follow: a
+  progressive collapse. By frame 300, 446 bonds have broken (232 fragments); the abutments
+  and the road stay.
+
+The other balls, under `blast_parity`:
+- **10 t ball:** the same sequence. The spans stay whole in the air (78 and 80 of 82
+  pairs at frame 90) and break up when they land (frames 100–110). Spans 1 and 4 follow.
+- **Demolition sphere:** it takes pier 2 and both drop-in spans down by frame 60.
+  Spans 1 and 4 and piers 1 and 3 stay standing.
+
+Under `threshold` nothing comes down: the strike breaks the struck column chunk's 3 bonds
+(51 with the sphere). There is no stress solve, and the rest of the viaduct is one
+anchored, static body, so no span drops.
 
 ### Bond modes
 
