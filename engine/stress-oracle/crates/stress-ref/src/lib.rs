@@ -44,6 +44,7 @@ pub mod scene_pack;
 pub mod shardwright;
 pub mod scenes;
 pub mod showcases;
+pub mod skybridge;
 pub mod snapshot;
 pub mod solver;
 pub mod statics;

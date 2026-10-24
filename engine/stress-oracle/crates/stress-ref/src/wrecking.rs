@@ -52,6 +52,7 @@ pub const STRUCTURES: &[(&str, &str)] = &[
     ("rr_storefront_row", "Storefront row"),
     ("ft_apartment_block", "Apartment block"),
     ("ft_glass_tower", "Glass tower"),
+    ("sb_skybridge", "Skybridge between two towers"),
 ];
 
 /// A structure as the builders make it (Z-up): chunks (box or hull, `material` the pack's
@@ -234,6 +235,7 @@ pub fn structure(key: &str) -> Option<Structure> {
         "rr_storefront_row" => Some(crate::buildings::storefront_row()),
         "ft_apartment_block" => Some(crate::buildings::apartment_block()),
         "ft_glass_tower" => Some(crate::buildings::glass_tower()),
+        "sb_skybridge" => Some(crate::skybridge::skybridge()),
         _ => None,
     }
 }

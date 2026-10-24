@@ -185,6 +185,7 @@ each named for what it is, then how many:
 - **Topple:** a high-rise beside a street with demolition charges (below).
 - **Ram Raid** and **Fly-through:** the vehicle's storefront and the aircraft's two
   towers, built the same way (below).
+- **Skybridge:** two towers joined by a steel walkway, with charges (below).
 - **Vibe City presets:** generated scene packs, when they are built.
 - **Your file:** a dropped or chosen GLB.
 
@@ -539,6 +540,98 @@ the 10-floor frame too (577 bonds; about half the chunks of storeys 1–5 fall).
 contact, so stacked debris cannot crush. A tilting upper block would need the far side's
 columns and walls to hinge in compression while the near side goes, and these profiles
 do not produce that.
+
+### Skybridge
+
+Two towers joined by an enclosed steel walkway, for the beat where a span drops at one
+end, hangs from the other, then lets go: The Finals' skybridge failures (`demo-scenarios.md`
+S2 and S6). `stress_ref::skybridge`, built and loaded like the Wrecking Yard (Scene menu
+group **Skybridge**).
+
+| Scene | What | Chunks · bonds | Mass |
+|---|---|---|---|
+| Skybridge between two towers, with charges | Two 7-storey RC frames (`wrecking::rc_frame`, 2 × 2 bays, 12.5 m square, 25 m tall), 20 m apart face to face. At the fifth floor (14.5 m up) a 3.6 × 19.2 m Vierendeel walkway of S355 steel: bottom and top chords, posts at 2.4 m, a 0.2 m concrete deck, a 40 mm steel roof plate, 25 mm glass between the posts. Each end sits on two steel bearings on a concrete ledge cast onto the facade beam, with keepers beyond each bearing. A plaza of concrete slabs on a sub-base under it | 992 · 1,728 | 2,211 t (walkway 119 t) |
+
+**The connections are the weak joints.** The walkway's only bonds to the towers are its
+four bearings' bonds to the ledges (0.32 m² of concrete joint each). A 0.4 m seismic joint
+separates its ends from the facades, wide enough that it can swing down about one end's
+bearings clear of the other facade. Beyond each bearing, two keepers stand on the ledge,
+one each side of the chord and clear of it. They stop the bearing sliding off the ledge
+when the walkway swings. The walkway's four sections are `span-1` to `span-4` (west to
+east), with `deck` nodes, so the viaduct's span probes follow them.
+
+**Charges** (`defaults.charges`, as Topple's):
+1. **east connection** (at once): every bond of the east ledges, bearings and keepers (11).
+   They are thrown down and away from the facade at 3.6 m/s, so the walkway's east end has
+   nothing under it.
+2. **west connection** (0.2 s later): the west bearings' bonds to their ledges (2).
+
+What happens next is contact. The walkway rests on the west ledge by its bearings, kept on
+it by the keepers, and swings down about them, east end first. At about 12° its bottom
+chords come down on the ledge's outer edge. It then levers against the keepers and the
+ledge, the ledge tears out of the facade beam, and the walkway drops onto the plaza.
+
+- **`blast_parity`:** the east charge alone is enough. The stress solve sees the walkway
+  cantilevered off its west bearings and breaks their two bonds 10 frames later; the
+  ledges stand.
+- **`threshold`:** it breaks bonds on contact force alone, and a cantilever loads no bond,
+  so the walkway would stay up on its west bearings. The west charge lets it go.
+- **A ball does not give the beat.** Under `blast_parity` a strike loads the whole
+  anchored structure. The 10 t ball into the east ledge breaks 243 bonds in the frame it
+  hits, in both towers; the walkway drops flat and a tower comes down. The 50 t ball is
+  the same. The charges are the trigger.
+
+**What it does.** Native, M3 Max:
+`STRESS_WY_DETONATE="" cargo run --release -p stress-rubble --features gpu --example wrecking_yard -- sb_skybridge none 600`
+(from `engine/stress-oracle`). `STRESS_WY_DETONATE` sets off the named charge before frame
+10, or every charge at its delay when it is empty. BALL `none` fires no ball.
+`STRESS_WY_EVERY=10` reports every 10 frames; each report lists each section's west and
+east end drops and its intact pairs. Under `blast_parity`, with only `east connection`
+set off (the take) or with both:
+
+| Frame | What |
+|---|---|
+| 11 | The east connection is cut (11 bonds). |
+| 21 | The stress solve breaks the west bearings' 2 bonds. |
+| 21–63 | It hangs from the west ledge. At frame 60 the east end is 2.9 m down and the west end 0.14 m; at frame 70, 4.5 m and 0.26 m. Every section is one piece. |
+| 63 | The west ledge tears out of the facade beam: 8 bonds of the ledge, beam, slab and joint. |
+| 110 | The east end lands on the plaza, 13.2 m down; the deck and glass break. |
+| 150 | The west end lands; the plaza's slabs break under it (11 bonds). |
+| 600 | 146 of 1,728 bonds broken, 62 fragments. The towers stand: storeys 5–7 do not move. Falling debris knocks a few storey-1 and storey-2 members out of the west tower's facade. |
+
+Under `threshold`, with both charges, the beat is the same and a little slower. The west
+bearings are cut before frame 23. At frame 60 the east end is 4.2 m down and the west end
+0.18 m. The ledge goes at about frame 65, the east end lands at about frame 105 and the
+west end at about frame 160. 95 bonds are broken in the end.
+
+Both profiles stand under self-weight and repeat exactly run to run.
+
+**Checks** (in `engine/stress-oracle`):
+- `cargo test --release -p stress-ref --test skybridge`:
+  - the counts, the bonds by joint material against a brute-force count, and the mass,
+    all from the layout;
+  - the walkway's only bonds to the towers are its four bearings on their ledges;
+  - the seismic joint, and the swing clear of the far facade;
+  - what each charge cuts; both together leave the walkway one piece on the west ledges;
+  - the charges survive both profiles' imports.
+- `cargo test --release -p stress-ref --test wrecking` covers it with the other structures:
+  well formed, solid and held, the pack's round trip, and standing under its own weight in
+  the reference.
+- `cargo test --release -p stress-rubble --features gpu --test wrecking_yard skybridge`
+  sets the charges off before frame 10 in both stress modes:
+  - at frame 60 the walkway hangs: its east end more than 2.5 m down, its west end less
+    than 0.5 m, every section at least 90% intact;
+  - at frame 180 every section is down on the plaza at both ends, and the towers' top
+    storeys have not moved.
+
+  The same file's settle test covers it, as it does every structure.
+
+**Take.** `sb_skybridge` (`takes/lab.mjs`, `blast_parity`) sets off `east connection`
+and follows the walkway at half speed through the hang, the tear and the drop. Recorded in
+headless Chrome, the beat matches the native run. At the take's last frame (331), 150 bonds
+are broken and there are 59 fragments. Dust is off in this take. With it off, two
+recordings decode to identical frames. With it on, the counts still repeat, but the frames
+differ after the first landing.
 
 ### Bond modes
 

@@ -49,6 +49,21 @@ export const LAB_TAKES = {
     { n: 300, slow: 2, caption: 'Half speed: the back line crushes and the tower comes down storey by storey', cam: { rel: [1.3, 0.02, 1.0], relTo: [1.6, 0.05, 1.05] } },
     { n: 200, caption: 'Real time: a rubble pile at the foot of the street', cam: { rel: [1.6, 0.05, 1.05], relTo: [1.9, 0.12, 1.1] } },
   ]),
+  // Skybridge (stress_ref::skybridge) under blast_parity: one charge takes out the east
+  // connection; the stress solve tears the west bearings, and the walkway hangs from the
+  // west ledge on its keepers, east end down, until the ledge tears out of the facade; it
+  // comes down on the plaza in its sections. The camera targets the walkway (lab frame:
+  // Y-up, the footprint centred). Dust is off: it adds a few specks here, and it is the one
+  // part of a stress take that is not drawn the same run to run (the frames then repeat
+  // bit for bit).
+  sb_skybridge: take({ scene: 'sb_skybridge', bonds: 'stress' }, [
+    { n: 50, view: { fx: false }, caption: 'Skybridge between two towers: 992 bonded chunks', cam: { rel: [0.0, -0.1, 0.44], relTo: [0.08, -0.1, 0.41], target: [0, 10.5, -1.75] } },
+    { n: 1, act: { detonate: 'east connection' }, caption: 'A charge takes out the east connection' },
+    { n: 20, caption: 'A charge takes out the east connection', cam: { rel: [0.08, -0.1, 0.41], relTo: [0.1, -0.1, 0.4], target: [0, 10.5, -1.75] } },
+    { n: 160, slow: 2, caption: 'Half speed: it hangs from the west end, then tears out', cam: { rel: [0.1, -0.1, 0.4], relTo: [0.25, -0.08, 0.4], target: [0, 10.5, -1.75] } },
+    { n: 120, slow: 2, caption: 'Half speed: big sections come down on the plaza', cam: { rel: [0.25, -0.08, 0.4], relTo: [0.35, -0.03, 0.43], target: [0, 10.5, -1.75] } },
+    { n: 120, caption: 'Real time: the towers stand', cam: { rel: [0.35, -0.03, 0.43], relTo: [0.45, 0.04, 0.52], target: [0, 10.5, -1.75] } },
+  ]),
   // Bridge Out (stress_ref::viaduct): the 50 t ball into the hinge pier under
   // blast_parity; the two drop-in spans swing down whole and break on the road below.
   bo_viaduct_pier: take({ scene: 'bo_viaduct', bonds: 'stress', preset: 1 }, [

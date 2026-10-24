@@ -149,6 +149,93 @@ fn viaduct_pier_hit_drops_the_drop_in_spans() {
     }
 }
 
+/// The Skybridge's beat (`stress_ref::skybridge`) in both stress modes, its charges set
+/// off before frame 10 (each at its delay) as the lab's Detonate does, each frame's splits
+/// followed as the lab's view does:
+/// - At frame 60 (0.83 s later) the walkway hangs from its west end: the east end of its
+///   last section more than 2.5 m down, the west end of its first less than 0.5 m, every
+///   section still at least 90% intact (one piece).
+/// - At frame 180 every section has come down on the plaza at both ends (more than 12 m),
+///   while the towers' top storeys have not moved.
+#[test]
+fn skybridge_charges_hang_then_drop_the_walkway() {
+    const AT: usize = 10;
+    const HANG: usize = 60;
+    const DOWN: usize = 180;
+    let gpu = Gpu::new().expect("GPU");
+    for p in [Profile::BlastParity, Profile::Threshold] {
+        let key = "sb_skybridge";
+        let scene = wrecking_yard(key, p, DOWN as f64 / 60.0);
+        let mut demolition = stress_rubble::demolition::Demolition::of_pack(&stress_ref::wrecking::pack(key).expect("pack"));
+        let body = &scene.bodies[0];
+        let probes = stress_ref::viaduct::span_probes(&body.chunks, &body.bonds);
+        assert_eq!(probes.len(), 4);
+        let start: Vec<[f64; 3]> = body.chunks.iter().map(|c| c.center).collect();
+        let top: Vec<usize> = (0..start.len()).filter(|&k| body.chunks[k].groups.get(1).is_some_and(|g| g == "storey-7")).collect();
+        let dt = scene.sim.frame_dt;
+        let mut at: Vec<(Vec<stress_ref::viaduct::SpanState>, f64)> = Vec::new();
+        let mut record = |now: &[[f64; 3]]| {
+            let moved = top.iter().map(|&k| (Vec3::from_array(now[k]) - Vec3::from_array(start[k])).norm()).fold(0.0, f64::max);
+            at.push((probes.iter().map(|s| s.state(&start, now)).collect(), moved));
+        };
+        if p == Profile::Threshold {
+            let ball = stress_ref::wrecking::BALLS[0];
+            let mut w = stress_rubble::threshold::ThresholdWorld::new(&gpu, &scene, ball.radius, ball.mass).expect("threshold world");
+            for f in 0..DOWN {
+                if f == AT {
+                    demolition.arm("", f as u64, dt);
+                }
+                for c in demolition.due(f as u64) {
+                    w.detonate(&gpu, &c).expect("detonate");
+                }
+                w.step_frame(&gpu).expect("frame");
+                let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+                let st = w.poll(&gpu);
+                assert_eq!((st.error, st.engine_overflow), (0, 0), "frame {f}");
+                if f + 1 == HANG || f + 1 == DOWN {
+                    let now: Vec<[f64; 3]> = w.chunk_centres(&gpu).into_iter().map(|(c, _)| c).collect();
+                    record(&now);
+                }
+            }
+        } else {
+            let mut e = RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), stress_rubble::capacity_for(&scene)).expect("rubble engine");
+            let (iterations, substeps) = p.engine_policy();
+            e.set_policy(iterations, substeps);
+            let mut w = GpuWorld::with_resident_engine(&gpu, &scene, e).expect("resident world");
+            w.redo_fractured_frames = false;
+            w.set_impact_islands(true);
+            w.apply_profile(p);
+            for f in 0..DOWN {
+                if f == AT {
+                    demolition.arm("", f as u64, dt);
+                }
+                for c in demolition.due(f as u64) {
+                    let bonds = c.bond_indices(&scene.bodies[0].bonds).expect("charge bonds");
+                    w.cut_bonds(&gpu, 0, &bonds, &c.debris, c.kick).expect("detonate");
+                }
+                w.step_frame(&gpu).expect("frame");
+                w.sync(&gpu);
+                if f + 1 == HANG || f + 1 == DOWN {
+                    let o = w.observation();
+                    let now: Vec<[f64; 3]> = o.bodies.values().next().expect("the structure").iter().zip(&start).map(|(c, s)| [s[0] + c.displacement[0], s[1] + c.displacement[1], s[2] + c.displacement[2]]).collect();
+                    record(&now);
+                }
+            }
+        }
+        println!("{} frame {HANG}: {:?}\n{} frame {DOWN}: {:?}", p.name(), at[0], p.name(), at[1]);
+        let (hang, _) = &at[0];
+        assert!(hang[3].east_drop > 2.5 && hang[0].west_drop < 0.5, "{}: east end down {} m, west end {} m", p.name(), hang[3].east_drop, hang[0].west_drop);
+        for (k, s) in hang.iter().enumerate() {
+            assert!(s.intact * 10 >= s.pairs * 9, "{}: section {} {} of {} pairs intact while it hangs", p.name(), k + 1, s.intact, s.pairs);
+        }
+        let (down, moved) = &at[1];
+        for (k, s) in down.iter().enumerate() {
+            assert!(s.west_drop > 12.0 && s.east_drop > 12.0, "{}: section {} {s:?}", p.name(), k + 1);
+        }
+        assert!(*moved < 0.01, "{}: a top storey chunk moved {moved} m", p.name());
+    }
+}
+
 #[test]
 fn structures_settle_in_both_stress_modes() {
     let gpu = Gpu::new().expect("GPU");

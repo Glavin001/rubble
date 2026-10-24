@@ -156,7 +156,7 @@ fn viaduct_counts_and_mass() {
 #[test]
 fn structures_are_well_formed() {
     let keys: Vec<&str> = STRUCTURES.iter().map(|s| s.0).collect();
-    assert_eq!(keys, ["wy_frame10", "wy_round_tower", "wy_brick_tower", "bo_viaduct", "topple_tower", "rr_storefront_row", "ft_apartment_block", "ft_glass_tower"]);
+    assert_eq!(keys, ["wy_frame10", "wy_round_tower", "wy_brick_tower", "bo_viaduct", "topple_tower", "rr_storefront_row", "ft_apartment_block", "ft_glass_tower", "sb_skybridge"]);
     for &(key, title) in STRUCTURES {
         let s = wrecking::structure(key).expect(key);
         assert_eq!((s.key, s.title), (key, title));
