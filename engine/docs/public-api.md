@@ -682,7 +682,7 @@ today; each feature below gets a World call and an ABI call instead. Status:
 |---|---|---|
 | Static and dynamic bodies, initial velocity, sleep, user data | `create_body`, `rbCreateBody` | ✅ |
 | Sphere, capsule, box, hull and compound bodies; filters; friction and restitution | `create_*_shape`, `rbCreate*Shape` | ✅ |
-| Ground plane (legacy scenes) | a static box slab is equivalent for every page scene; `Geometry::Plane` later | 🔜 |
+| Ground plane (legacy scenes, fracture lab) | `Geometry::Plane` on static bodies, `rbCreatePlaneShape` (at most 8) | ✅ |
 | Projectiles, cannons, rams (teleport plus velocity) | `rbBody_SetTransform`, `rbBody_SetLinearVelocity`, create and destroy | ✅ |
 | Body velocity and awake state for HUDs and colouring | `rbBody_GetVelocity` (blocking), `rbBody_IsAwake` | ✅ |
 | Hand-set mass and inertia from C | `body_set_mass_data` in Rust; `rbBody_SetMassData` | 🔜 |
@@ -700,7 +700,8 @@ today; each feature below gets a World call and an ABI call instead. Status:
 | Soft damage (yielded and broken beams, plastic work, rigid or soft mode) | `soft_damage`, `rbSoft_GetDamage` | ✅ (per-beam view 🔜) |
 | Soft skinning, node output, beam breaks and torn-off pieces | `rbSoft_BindSkin`, `RbFrame` | ✅ |
 | Destructibles from GLB, pack and cuboid houses; strength scale; layouts | `rbCreateDestructibleAsset*` | ✅ |
-| Bonds that settle under self-weight before they can break (the lab's preload) | `DestructibleDef::preload` | ⏳ (check against the lab) |
+| Bonds that settle under self-weight before they can break (the lab's preload) | `preload_destructible_asset`, `rbWorld_PreloadDestructibleAsset` (the lab's procedure, checked against the Metal lab: the masonry arch never sleeps within 600 steps in either, so both give up there) | ✅ |
+| The lab's solver settings (120 Hz, 8 iterations, contact and sleep flags) | `DestructibleAssetDesc::solver`, `World::set_solver`, `rbWorld_UseDestructibleAssetSolver` | ✅ |
 | Fracture lab `threshold` mode (GPU splitter) | D1b, `StrengthModel::Threshold` | 🔜 |
 | Fracture lab `stress` mode (blast_parity) | D5, `StrengthModel::Stress` | 🔜 |
 | Picking (camera ray) | `rbWorld_CastRays` | ✅ |
@@ -716,7 +717,7 @@ design frame (metres, Y up), the format of `vehicle_presets.json` and the
 soft descriptors; spawn transforms and velocities use the world's
 coordinates. `tests/demo_parity.rs` covers each row through the ABI.
 
-Next, in order: the self-weight preload check, then P3 (kinematic bodies,
+Next, in order: P3 (kinematic bodies,
 which also give grab and drag), D1b (`threshold`), P4 (contact, hit and
 sensor events) and D5 (`stress`).
 

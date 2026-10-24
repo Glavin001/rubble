@@ -72,6 +72,55 @@ pub struct DestructibleAssetDesc {
     pub name: Option<String>,
     pub chunks: Vec<ChunkDesc>,
     pub bonds: Vec<BondDesc>,
+    /// Settled under its own weight ([`World::preload_destructible_asset`]):
+    /// instances start asleep at these poses.
+    pub preload: Option<Preload>,
+    /// The solver settings the source was tuned with (the fracture lab's:
+    /// 120 Hz, 8 iterations, its contact and sleep flags). A world built with
+    /// them (`WorldDef::solver`, and `gravity` from `gravity_y`) behaves as
+    /// the lab does; the asset works in any world.
+    pub solver: Option<engine_schema::AvbdParams>,
+}
+
+/// The fracture lab's scene parameters as world solver settings.
+pub fn lab_solver(p: &engine_fracture::scene::SceneParams) -> engine_schema::AvbdParams {
+    engine_schema::AvbdParams {
+        dt: p.dt,
+        gravity_y: p.gravity_y,
+        iterations: p.iterations,
+        flags: p.flags,
+        alpha: p.alpha,
+        gamma: p.gamma,
+        beta_lin: p.beta_lin,
+        beta_ang: p.beta_ang,
+        k_start: p.k_start,
+        k_max_n: p.k_max_n,
+        k_max_t: p.k_max_t,
+        contact_offset: p.contact_offset,
+        sleep_lin: p.sleep_lin,
+        sleep_ang: p.sleep_ang,
+        sleep_time: p.sleep_time,
+        residual_exit: p.residual_exit,
+        trust_lin: p.trust_lin,
+        trust_ang: p.trust_ang,
+        pivot_floor: p.pivot_floor,
+        grid_cell_size: p.grid_cell_size,
+        ..engine_schema::AvbdParams::default()
+    }
+}
+
+/// The fracture lab's bond preloading. Elastic bonds carry load only once
+/// they deform, so a structure released at its baked rest pose drops onto
+/// its springs and the transient overloads bonds that would hold it at rest.
+/// A preloaded asset was settled once under gravity with breaking off; every
+/// instance then starts asleep at the settled, statically loaded poses.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Preload {
+    /// Each chunk body's origin pose in the asset frame.
+    pub body_poses: Vec<Transform>,
+    pub steps: u32,
+    /// It fell asleep (else it gave up after 600 steps).
+    pub settled: bool,
 }
 
 impl DestructibleAssetDesc {
@@ -224,6 +273,8 @@ impl DestructibleAssetDesc {
             name: None,
             chunks,
             bonds,
+            preload: None,
+            solver: Some(lab_solver(&scene.params)),
         };
         desc.validate()?;
         Ok(desc)
@@ -360,6 +411,97 @@ pub(crate) struct DestructibleSlot {
 }
 
 impl World {
+    /// The fracture lab's bond preloading for an asset: settle one copy on a
+    /// ground plane (the asset frame's y = 0, as the lab's scenes stand) with
+    /// this world's solver settings and breaking off, until it sleeps (checked
+    /// every 60 steps, at most 600). Instances placed afterwards start asleep at
+    /// the settled poses. Runs in a helper world on this world's device and
+    /// blocks until done. Returns whether it settled.
+    pub fn preload_destructible_asset(&mut self, id: DestructibleAssetId) -> anyhow::Result<bool> {
+        let mut desc = self.destructible_asset(id)?.clone();
+        if desc.bonds.is_empty() {
+            return Ok(true);
+        }
+        desc.preload = None;
+        let shapes: usize = desc.chunks.iter().map(|c| c.shapes.len()).sum();
+        let hull_vertices: usize = desc
+            .chunks
+            .iter()
+            .flat_map(|c| &c.shapes)
+            .map(|g| match g {
+                Geometry::Hull { hull, .. } => hull.vertices.len(),
+                _ => 0,
+            })
+            .sum();
+        let n = desc.chunks.len() as u32;
+        let colliders = shapes as u32 + 8;
+        let contacts = (colliders * 64).max(32_768);
+        let def = crate::WorldDef {
+            capacity: engine_schema::WorldCapacity {
+                max_bodies: n + 8,
+                max_colliders: colliders,
+                max_contacts: contacts,
+                max_joints: desc.bonds.len() as u32 + 8,
+                max_candidates: contacts * 2,
+                max_colors: 32,
+                max_commands: 64,
+                max_hull_vertices: (hull_vertices as u32 + 64).max(1024),
+            },
+            ..crate::WorldDef::default()
+        };
+        let gpu = crate::GpuContext::Shared {
+            info: self.adapter.clone(),
+            device: self.sim.device().clone(),
+            queue: self.sim.queue().clone(),
+        };
+        let mut helper = World::new(gpu, &def)?;
+        let mut params = self.sim.params();
+        params.flags |= engine_fracture::scene::FLAG_BOND_PRELOAD;
+        helper.sim.set_params(params);
+        let ground = helper.create_body(&BodyDef::default())?;
+        helper.create_shape(
+            ground,
+            &ShapeDef::default(),
+            Geometry::Plane {
+                normal: [0.0, 1.0, 0.0],
+                offset: 0.0,
+            },
+        )?;
+        let asset = helper.create_destructible_asset(&desc)?;
+        let placed = helper.create_destructible(&DestructibleDef {
+            asleep: false,
+            ..DestructibleDef::new(asset)
+        })?;
+        let mut steps = 0u32;
+        let awake = loop {
+            for _ in 0..4 {
+                helper.step()?;
+            }
+            steps += 4;
+            let awake = helper
+                .poll_blocking()?
+                .last()
+                .and_then(|f| f.counters)
+                .map_or(0, |c| c.awake_count);
+            if Scene::preload_done(steps, awake) {
+                break awake;
+            }
+        };
+        let body_poses = (0..n)
+            .map(|k| {
+                let body = helper.destructible_chunk_body(placed, k)?;
+                Ok(helper.read_body_state(body)?.transform)
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        desc.preload = Some(Preload {
+            body_poses,
+            steps,
+            settled: awake == 0,
+        });
+        self.assets[id.0 as usize] = Arc::new(desc);
+        Ok(awake == 0)
+    }
+
     /// Register an asset (validated; shared by every instance of it).
     pub fn create_destructible_asset(
         &mut self,
@@ -396,15 +538,23 @@ impl World {
         let body_defs: Vec<BodyDef> = asset
             .chunks
             .iter()
-            .map(|c| BodyDef {
+            .enumerate()
+            .map(|(k, c)| {
+                let start = match &asset.preload {
+                    Some(p) => compose(instance, p.body_poses[k]),
+                    None => instance,
+                };
+                (c, start)
+            })
+            .map(|(c, start)| BodyDef {
                 body_type: if c.mass > 0.0 {
                     BodyType::Dynamic
                 } else {
                     BodyType::Static
                 },
-                position: instance.position,
-                rotation: instance.rotation,
-                is_awake: !def.asleep,
+                position: start.position,
+                rotation: start.rotation,
+                is_awake: !def.asleep && asset.preload.is_none(),
                 user_data: def.user_data,
                 ..BodyDef::default()
             })
@@ -453,6 +603,7 @@ impl World {
                     Geometry::Capsule { .. } => {
                         return unsupported("rotated capsule chunks");
                     }
+                    Geometry::Plane { .. } => return unsupported("plane chunks"),
                     Geometry::Box { half, transform } => Geometry::Box {
                         half: *half,
                         transform: compose(pose, *transform),

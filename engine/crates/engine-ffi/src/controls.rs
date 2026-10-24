@@ -519,6 +519,64 @@ pub unsafe extern "C" fn rbCreateDestructibleAssetCuboidHouse(
     })
 }
 
+/// The fracture lab's bond preloading: settle one copy of the asset on a
+/// ground plane at its frame's y = 0 with breaking off (blocks, up to 600
+/// steps); instances placed afterwards start asleep at the settled poses.
+#[no_mangle]
+pub unsafe extern "C" fn rbWorld_PreloadDestructibleAsset(
+    world: *mut RbWorld,
+    asset: RbDestructibleAssetId,
+    out_settled: *mut bool,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let settled = w
+            .world
+            .preload_destructible_asset(DestructibleAssetId(asset))?;
+        write(out_settled, settled)
+    })
+}
+
+/// Switch the world to the solver settings the asset was tuned with (the
+/// fracture lab's: 120 Hz, 8 iterations, its contact and sleep flags; gravity
+/// included). `*out_time_step` receives the new fixed step to step at.
+#[no_mangle]
+pub unsafe extern "C" fn rbWorld_UseDestructibleAssetSolver(
+    world: *mut RbWorld,
+    asset: RbDestructibleAssetId,
+    out_time_step: *mut f32,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let solver = w
+            .world
+            .destructible_asset(DestructibleAssetId(asset))?
+            .solver
+            .ok_or_else(|| anyhow::anyhow!("the asset carries no solver settings"))?;
+        w.world.set_solver(solver);
+        write(out_time_step, solver.dt)
+    })
+}
+
+/// An infinite ground plane on a static body: the half-space below
+/// `normal · x = offset` in the body frame. At most 8 per world.
+#[no_mangle]
+pub unsafe extern "C" fn rbCreatePlaneShape(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    def: *const RbShapeDef,
+    normal: RbVec3,
+    offset: f32,
+    out: *mut RbShapeId,
+) -> RbResult {
+    create_shape(world, body, def, out, |w| {
+        Ok(Geometry::Plane {
+            normal: w.coords.direction_in(normal.a()),
+            offset: w.coords.length_in(offset),
+        })
+    })
+}
+
 // ----- debug draw ------------------------------------------------------------------
 
 #[repr(C)]

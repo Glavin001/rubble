@@ -880,6 +880,29 @@ enum RbResult rbSoft_GetDamage(struct RbWorld *world, RbSoftId soft, struct RbSo
 enum RbResult rbCreateDestructibleAssetCuboidHouse(struct RbWorld *world,
                                                    RbDestructibleAssetId *out);
 
+// The fracture lab's bond preloading: settle one copy of the asset on a
+// ground plane at its frame's y = 0 with breaking off (blocks, up to 600
+// steps); instances placed afterwards start asleep at the settled poses.
+enum RbResult rbWorld_PreloadDestructibleAsset(struct RbWorld *world,
+                                               RbDestructibleAssetId asset,
+                                               bool *out_settled);
+
+// Switch the world to the solver settings the asset was tuned with (the
+// fracture lab's: 120 Hz, 8 iterations, its contact and sleep flags; gravity
+// included). `*out_time_step` receives the new fixed step to step at.
+enum RbResult rbWorld_UseDestructibleAssetSolver(struct RbWorld *world,
+                                                 RbDestructibleAssetId asset,
+                                                 float *out_time_step);
+
+// An infinite ground plane on a static body: the half-space below
+// `normal · x = offset` in the body frame. At most 8 per world.
+enum RbResult rbCreatePlaneShape(struct RbWorld *world,
+                                 RbBodyId body,
+                                 const struct RbShapeDef *def,
+                                 struct RbVec3 normal,
+                                 float offset,
+                                 RbShapeId *out);
+
 // Draw every shape at its body's last polled pose, coloured by state
 // (static, awake, asleep) unless a material colour is set.
 enum RbResult rbWorld_DebugDraw(struct RbWorld *world, const struct RbDebugDraw *draw);

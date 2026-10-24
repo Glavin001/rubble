@@ -337,3 +337,64 @@ fn cuboid_houses_load_and_debug_draw_calls_back() {
         rbDestroyWorld(w);
     }
 }
+
+#[test]
+fn the_fracture_lab_setup_works_in_unreal_units() {
+    unsafe {
+        let mut def = rbDefaultWorldDef();
+        def.coordinates = RbCoordinates::RB_COORDINATES_UNREAL;
+        def.gravity = v3(0.0, 0.0, -981.0);
+        def.max_bodies = 8192;
+        def.max_colliders = 8192;
+        def.max_joints = 8192;
+        def.max_contacts = 131_072;
+        def.max_candidates = 262_144;
+        def.max_hull_vertices = 1 << 20;
+        let mut w = ptr::null_mut();
+        ok(rbCreateWorld(&def, &mut w));
+        let mut g = 0;
+        ok(rbCreateBody(w, &rbDefaultBodyDef(), &mut g));
+        let mut plane = 0;
+        ok(rbCreatePlaneShape(
+            w,
+            g,
+            &rbDefaultShapeDef(),
+            v3(0.0, 0.0, 1.0),
+            0.0,
+            &mut plane,
+        ));
+        let glb = include_bytes!("../../engine-webgpu/fracture/assets/masonry-arch.glb");
+        let mut asset = 0;
+        ok(rbCreateDestructibleAssetFromGlb(
+            w,
+            glb.as_ptr(),
+            glb.len(),
+            1,
+            &mut asset,
+        ));
+        let mut dt = 0.0;
+        ok(rbWorld_UseDestructibleAssetSolver(w, asset, &mut dt));
+        assert!((dt - 1.0 / 120.0).abs() < 1e-6, "the lab's 120 Hz: {dt}");
+        let mut settled = true;
+        ok(rbWorld_PreloadDestructibleAsset(w, asset, &mut settled));
+        let mut dd = rbDefaultDestructibleDef();
+        dd.asset = asset;
+        let mut arch = 0;
+        ok(rbCreateDestructible(w, &dd, &mut arch));
+        let f = steps(w, 120);
+        let events = std::slice::from_raw_parts(f.destruction, f.destruction_count as usize);
+        assert!(
+            events
+                .iter()
+                .all(|e| e.type_ != RbDestructionType::RB_BONDS_BROKEN),
+            "it holds its own weight"
+        );
+        // A chunk stands above the plane (z up, centimetres).
+        let mut body = 0;
+        ok(rbDestructible_GetChunkBody(w, arch, 0, &mut body));
+        let mut t = RbTransform::default();
+        ok(rbBody_GetTransform(w, body, &mut t));
+        assert!(t.p.z.is_finite() && t.p.z > -5.0, "{t:?}");
+        rbDestroyWorld(w);
+    }
+}

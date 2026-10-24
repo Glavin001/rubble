@@ -217,3 +217,82 @@ fn destroying_a_destructible_removes_its_bodies() {
     assert!(!w.body_is_valid(chunk0));
     assert_eq!(w.body_count(), before);
 }
+
+#[test]
+fn a_box_rests_on_a_ground_plane() {
+    let mut w = World::new(GpuContext::Default, &WorldDef::default()).unwrap();
+    let g = w.create_body(&BodyDef::default()).unwrap();
+    let plane = Geometry::Plane {
+        normal: [0.0, 1.0, 0.0],
+        offset: 0.0,
+    };
+    w.create_shape(g, &ShapeDef::default(), plane.clone())
+        .unwrap();
+    let dynamic = w.create_body(&BodyDef::dynamic([0.0, 1.0, 0.0])).unwrap();
+    assert!(
+        w.create_shape(dynamic, &ShapeDef::default(), plane)
+            .is_err(),
+        "planes go on static bodies"
+    );
+    let b = w.create_body(&BodyDef::dynamic([3.0, 2.0, 0.0])).unwrap();
+    w.create_box_shape(b, &ShapeDef::default(), [0.5; 3])
+        .unwrap();
+    run(&mut w, 240);
+    let t = w.body_transform(b).unwrap().unwrap();
+    assert!((t.position[1] - 0.5).abs() < 0.05, "on the plane: {t:?}");
+}
+
+#[test]
+fn preloaded_assets_start_asleep_and_hold_their_own_weight() {
+    let glb = include_bytes!("../../engine-webgpu/fracture/assets/masonry-arch.glb");
+    let desc = DestructibleAssetDesc::from_glb(glb, 1).unwrap();
+    // The lab's solver settings, which the asset carries.
+    let solver = desc.solver.unwrap();
+    let def = WorldDef {
+        capacity: capacity(),
+        solver,
+        gravity: [0.0, solver.gravity_y, 0.0],
+        ..WorldDef::default()
+    };
+    let mut w = World::new(GpuContext::Default, &def).unwrap();
+    let g = w.create_body(&BodyDef::default()).unwrap();
+    let plane = Geometry::Plane {
+        normal: [0.0, 1.0, 0.0],
+        offset: 0.0,
+    };
+    w.create_shape(g, &ShapeDef::default(), plane).unwrap();
+    let asset = w.create_destructible_asset(&desc).unwrap();
+    // The lab's procedure: settle until asleep or give up at 600 steps (this
+    // arch keeps creeping on its springs in the lab too, so it gives up).
+    let settled = w.preload_destructible_asset(asset).unwrap();
+    let preload = w
+        .destructible_asset(asset)
+        .unwrap()
+        .preload
+        .clone()
+        .unwrap();
+    assert_eq!(settled, preload.settled);
+    assert!(preload.steps <= 600 && preload.body_poses.len() > 100);
+    let d = w.create_destructible(&DestructibleDef::new(asset)).unwrap();
+    let chunks = w.destructible_stats(d).unwrap().chunks;
+    let frames = run(&mut w, 300);
+    let broken: usize = frames
+        .iter()
+        .flat_map(|f| &f.destruction_events)
+        .map(|e| match e {
+            DestructionEvent::BondsBroken { bonds, .. } => bonds.len(),
+            _ => 0,
+        })
+        .sum();
+    assert_eq!(broken, 0, "no bond breaks under self-weight");
+    let awake = frames
+        .iter()
+        .filter_map(|f| f.counters)
+        .map(|c| c.awake_count)
+        .max()
+        .unwrap_or(0);
+    assert!(
+        awake < chunks / 10,
+        "the structure stays asleep: {awake} of {chunks} awake"
+    );
+}

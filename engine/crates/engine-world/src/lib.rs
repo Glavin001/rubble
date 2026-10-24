@@ -39,8 +39,9 @@ pub use debug_draw::{
 };
 pub use defs::{BodyDef, BodyType, Geometry, MassData, MotionLocks, ShapeDef, SurfaceMaterial};
 pub use destruction::{
-    ActorInfo, Anchors, BondDesc, ChunkDesc, DestructibleAssetDesc, DestructibleAssetId,
-    DestructibleDef, DestructibleId, DestructibleStats, StrengthModel,
+    lab_solver, ActorInfo, Anchors, BondDesc, ChunkDesc, DestructibleAssetDesc,
+    DestructibleAssetId, DestructibleDef, DestructibleId, DestructibleStats, Preload,
+    StrengthModel,
 };
 pub use error::{StaleHandle, Unsupported};
 pub use events::{
@@ -49,8 +50,8 @@ pub use events::{
 };
 pub use handles::{BodyId, JointId, ShapeId};
 pub use joints::{
-    DistanceJointDef, FilterJointDef, JointBase, JointDef, PrismaticJointDef, RevoluteJointDef,
-    Plastic, SphericalJointDef, Spring, WeldJointDef,
+    DistanceJointDef, FilterJointDef, JointBase, JointDef, Plastic, PrismaticJointDef,
+    RevoluteJointDef, SphericalJointDef, Spring, WeldJointDef,
 };
 pub use math::Transform;
 pub use readback::Backpressure;
@@ -60,10 +61,12 @@ pub use engine_schema::convex::{CollisionFilter as Filter, ConvexHull};
 pub use engine_schema::{
     AvbdParams, Dof, JointDesc, JointFrame, Motion, StepCounters, WorldCapacity,
 };
-pub use engine_softbody::{SoftCapacity, SoftDamage, SoftHandle, SoftSettings, SoftVehicleDesc, SpawnOptions};
+pub use engine_softbody::{
+    SoftCapacity, SoftDamage, SoftHandle, SoftSettings, SoftVehicleDesc, SpawnOptions,
+};
 pub use engine_vehicle::{
-    FunctionalState, GearRequest, MountLoad, VehicleCapacity, VehicleDesc, VehicleHandle, VehicleInput,
-    VehicleState, WheelState,
+    FunctionalState, GearRequest, MountLoad, VehicleCapacity, VehicleDesc, VehicleHandle,
+    VehicleInput, VehicleState, WheelState,
 };
 pub use engine_webgpu::{ContactStorage, EngineFeatures, WgpuSim};
 
@@ -331,6 +334,8 @@ pub struct World {
     dirty: bool,
     last_input_step: Option<u64>,
     last_counters: Option<StepCounters>,
+    /// The adapter this world runs on (for helper worlds on its device).
+    adapter: wgpu::AdapterInfo,
 }
 
 impl World {
@@ -351,14 +356,17 @@ impl World {
             features,
             pose_output: true,
         };
-        let mut sim = match gpu {
-            GpuContext::Default => WgpuSim::new_with_options(def.capacity.clone(), options)?,
+        let (info, device, queue) = match gpu {
+            GpuContext::Default => engine_webgpu::default_device()?,
             GpuContext::Shared {
                 info,
                 device,
                 queue,
-            } => WgpuSim::with_device_options(def.capacity.clone(), options, info, device, queue)?,
+            } => (info, device, queue),
         };
+        let adapter = info.clone();
+        let mut sim =
+            WgpuSim::with_device_options(def.capacity.clone(), options, info, device, queue)?;
         let mut params = def.solver;
         params.gravity_y = def.gravity[1];
         if !def.enable_sleep {
@@ -387,6 +395,7 @@ impl World {
             dirty: false,
             last_input_step: None,
             last_counters: None,
+            adapter,
             resync: false,
             vehicles: Vec::new(),
             soft_outputs: Vec::new(),
@@ -432,6 +441,19 @@ impl World {
     /// GPU time of the last step the host waited for (ms).
     pub fn profile_ms(&self) -> f64 {
         self.sim.timings_ms()
+    }
+
+    /// Replace the solver settings (step size, iterations, contact and
+    /// sleep tuning, flags), gravity included: for example a destructible
+    /// asset's `solver`, for the fracture lab's behaviour. Hosts step at the
+    /// new `dt`.
+    pub fn set_solver(&mut self, solver: AvbdParams) {
+        self.dirty = true;
+        self.sim.set_params(solver);
+    }
+
+    pub fn solver(&self) -> AvbdParams {
+        self.sim.params()
     }
 
     pub fn set_gravity(&mut self, gravity: [f32; 3]) -> anyhow::Result<()> {
@@ -821,6 +843,18 @@ impl World {
             "shapes on vehicle-owned bodies"
         );
         def.validate()?;
+        if matches!(geometry, Geometry::Plane { .. }) {
+            anyhow::ensure!(
+                self.bodies[b].body_type == BodyType::Static,
+                "planes go on static bodies"
+            );
+            let planes = self
+                .shapes
+                .iter()
+                .filter(|s| s.alive && matches!(s.geometry, Geometry::Plane { .. }))
+                .count();
+            anyhow::ensure!(planes < 8, "at most 8 planes per world");
+        }
         self.dirty = true;
         let material = self.intern_material(&def.material)?;
         let frame = self.bodies[b].frame();
@@ -1737,6 +1771,25 @@ impl World {
                     }
                 };
                 (ShapeType::ConvexHull, params, *transform)
+            }
+            Geometry::Plane { normal, offset } => {
+                // The kernels read planes in world space: place this one by
+                // the (static) body's pose now.
+                let b = engine_softbody::SoftBackend::host_body(&self.sim, body);
+                let q = Quat::from_array(b.orientation);
+                let n = (q * Vec3::from(*normal)).normalize();
+                let origin = Vec3::from(b.position) - q * frame.center;
+                let d = *offset + n.dot(origin);
+                return Ok(Collider {
+                    body,
+                    shape: ShapeType::Plane as u32,
+                    material,
+                    generation: 0,
+                    local_pos: [0.0; 3],
+                    density: 0.0,
+                    local_rot: identity,
+                    params: [n.x, n.y, n.z, d],
+                });
             }
         };
         let local = frame.local_to_solver(local);

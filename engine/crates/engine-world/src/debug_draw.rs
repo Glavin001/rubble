@@ -105,6 +105,8 @@ impl World {
                     Geometry::Box { half, transform } => {
                         draw.draw_box(place(*transform), *half, color);
                     }
+                    // Infinite grounds: hosts draw their own floor.
+                    Geometry::Plane { .. } => {}
                     Geometry::Hull { hull, transform } => {
                         let mut triangles = Vec::new();
                         for f in &hull.faces {
