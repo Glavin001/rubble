@@ -317,6 +317,47 @@ void apply_commands(uint3 tid : SV_DispatchThreadID)
     }
 }
 
+// predictOne for a body with motion locks: the same prediction with locked
+// velocity components and gravity zeroed (a separate function, so the
+// unlocked path compiles exactly as before on fast-math backends).
+void predictLocked(uint i, BodyState b, AvbdParams p)
+{
+    float dt = p.dt;
+    uint locks = bodyLocks(b);
+    float3 lin = lockedLinear(locks);
+    b.linearVel *= lin;
+    b.angularVel *= lockedAngular(locks);
+    float3 gravity = float3(0, p.gravityY, 0) * lin;
+    float3 prevVel = BODY_PREV(i).linearVel;
+    float3 accel = (b.linearVel - prevVel) / max(dt, 1e-8);
+    float accelExt = accel.y * sign(p.gravityY);
+    float accelWeight = clamp(accelExt / max(abs(p.gravityY), 1e-6), 0.0, 1.0);
+    float slow = length(b.linearVel) + length(b.angularVel) * 0.5;
+    bool startAtRest = slow < 0.1;
+    float3 inertialLin = b.position + b.linearVel * dt + gravity * (dt * dt);
+    float4 inertialAng = quatNormalize(
+        b.orientation + quatMul(float4(b.angularVel * dt, 0.0), b.orientation) * 0.5);
+    float3 x0 = b.position;
+    float4 q0 = b.orientation;
+    BODY_PREV(i).linearVel = b.linearVel;
+    if (!startAtRest && !wakePending(b))
+    {
+        b.position = b.position + b.linearVel * dt + gravity * (accelWeight * dt * dt);
+        b.orientation = quatNormalize(
+            b.orientation + quatMul(float4(b.angularVel * dt, 0.0), b.orientation) * 0.5);
+    }
+    Aabb box;
+    box.mn = inertialLin;
+    box.mx = float3(inertialAng.x, inertialAng.y, inertialAng.z);
+    box._pad0 = inertialAng.w;
+    box._pad1 = 0.0;
+    gAabbs[i] = box;
+    gBodies[i].position = b.position;
+    gBodies[i].orientation = b.orientation;
+    gBodies[i].initialPos = x0;
+    gBodies[i].initialRot = q0;
+}
+
 void predictOne(uint i)
 {
     AvbdParams p = PARAMS;
@@ -345,6 +386,11 @@ void predictOne(uint i)
         gBodies[i].initialRot = kq0;
         return;
     }
+    if (bodyLocks(b) != 0u)
+    {
+        predictLocked(i, b, p);
+        return;
+    }
     // Adaptive warm-start: (v - v_prev)/dt along up (three-avbd / VBD). gBodiesPrev still
     // holds the previous step's snapshot (incl. that step's incoming velocity).
     float3 prevVel = BODY_PREV(i).linearVel;
@@ -358,16 +404,8 @@ void predictOne(uint i)
     float slow = length(b.linearVel) + length(b.angularVel) * radius;
     bool startAtRest = slow < 0.1;
 
-    float3 gravity = float3(0, p.gravityY, 0);
-    uint locks = bodyLocks(b);
-    if (locks != 0u)
-    {
-        b.linearVel *= lockedLinear(locks);
-        b.angularVel *= lockedAngular(locks);
-        gravity *= lockedLinear(locks);
-    }
     // three-avbd inertial target + qadd (not exp-map).
-    float3 inertialLin = b.position + b.linearVel * dt + gravity * (dt * dt);
+    float3 inertialLin = b.position + b.linearVel * dt + float3(0, p.gravityY, 0) * (dt * dt);
     float4 inertialAng = quatNormalize(
         b.orientation + quatMul(float4(b.angularVel * dt, 0.0), b.orientation) * 0.5);
     // x⁻ snapshot for velocity extract (three-avbd initialPos). The previous-body
@@ -380,7 +418,7 @@ void predictOne(uint i)
     // A deferred wake keeps its pose this step (it is solved from the next).
     if (!startAtRest && !wakePending(b))
     {
-        b.position = b.position + b.linearVel * dt + gravity * (accelWeight * dt * dt);
+        b.position = b.position + b.linearVel * dt + float3(0, p.gravityY, 0) * (accelWeight * dt * dt);
         b.orientation = quatNormalize(
             b.orientation + quatMul(float4(b.angularVel * dt, 0.0), b.orientation) * 0.5);
     }
@@ -4869,31 +4907,60 @@ float3 bodyAngularVelocity(BodyState b, float dt)
     return dq.w < 0.0 ? -av : av;
 }
 
+// primalApply for a body with motion locks: locked rows and columns become
+// identity, so their deltas are zero and the free axes solve consistently. A
+// separate function, so the unlocked path compiles exactly as before on
+// fast-math backends.
+void primalApplyLocked(uint bodyIdx, Mat6 A, Vec6 rhs, BodyState b)
+{
+    AvbdParams p = PARAMS;
+    uint locks = bodyLocks(b);
+    uint floors = 0;
+    Vec6 neg = rhs;
+    for (int k = 0; k < 6; k++)
+    {
+        neg.v[k] = -rhs.v[k];
+        if ((locks & (1u << uint(k))) == 0u) continue;
+        for (int j = 0; j < 6; j++)
+        {
+            A.m[k * 6 + j] = 0.0;
+            A.m[j * 6 + k] = 0.0;
+        }
+        A.m[k * 6 + k] = 1.0;
+        neg.v[k] = 0.0;
+    }
+    Vec6 dz = solve6x6(A, neg, p.pivotFloor, floors);
+    if (floors > 0) AADD2(gCounters[0].pivotFloorHits, floors);
+    float3 dlin = float3(dz.v[0], dz.v[1], dz.v[2]) * lockedLinear(locks);
+    float3 dang = float3(dz.v[3], dz.v[4], dz.v[5]) * lockedAngular(locks);
+    float maxLin = p.trustLin * 0.5;
+    float len = length(dlin);
+    if (len > maxLin && len > 1e-12) dlin *= maxLin / len;
+    float alen = length(dang);
+    if (alen > p.trustAng && alen > 1e-12) dang *= p.trustAng / alen;
+    if (dlin.x != dlin.x || dlin.y != dlin.y || dlin.z != dlin.z) return;
+    if (dang.x != dang.x || dang.y != dang.y || dang.z != dang.z) return;
+    b.position += dlin;
+    b.orientation = quatNormalize(b.orientation + quatMul(float4(dang, 0.0), b.orientation) * 0.5);
+    gBodies[bodyIdx].position = b.position;
+    gBodies[bodyIdx].orientation = b.orientation;
+}
+
 void primalApply(uint bodyIdx, Mat6 A, Vec6 rhs)
 {
     BodyState b = gBodies[bodyIdx];
     if (!bodyIsDynamic(b) || bodyIsSleeping(b) || wakePending(b) || (b.flags & BODY_FOLLOW) != 0u ||
         bodyIsKinematic(b))
         return;
+    if (bodyLocks(b) != 0u)
+    {
+        primalApplyLocked(bodyIdx, A, rhs, b);
+        return;
+    }
     AvbdParams p = PARAMS;
     uint floors = 0;
     Vec6 neg = rhs;
     for (int k = 0; k < 6; k++) neg.v[k] = -rhs.v[k];
-    uint locks = bodyLocks(b);
-    if (locks != 0u)
-    {
-        for (int k = 0; k < 6; k++)
-        {
-            if ((locks & (1u << uint(k))) == 0u) continue;
-            for (int j = 0; j < 6; j++)
-            {
-                A.m[k * 6 + j] = 0.0;
-                A.m[j * 6 + k] = 0.0;
-            }
-            A.m[k * 6 + k] = 1.0;
-            neg.v[k] = 0.0;
-        }
-    }
     Vec6 dz = solve6x6(A, neg, p.pivotFloor, floors);
     if (floors > 0) AADD2(gCounters[0].pivotFloorHits, floors);
     float3 dlin = float3(dz.v[0], dz.v[1], dz.v[2]);
