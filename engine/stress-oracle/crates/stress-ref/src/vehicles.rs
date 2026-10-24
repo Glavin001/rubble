@@ -544,11 +544,71 @@ pub const SCENES: &[(&str, &str)] = &[
     ("ft_airliner_apartment", "Airliner into the apartment block"),
     ("bo_viaduct_traffic", "Highway viaduct with stalled traffic"),
     ("rr_drive_storefront", "Sedan and truck driven through the storefront row"),
+    ("bo_drive_viaduct", "Highway viaduct with traffic driving across"),
 ];
 
 /// How far out a driven vehicle starts (m from its nose to the facade): room for its
 /// wheels to bring it up to speed (the sedan reaches about 50 km/h at the facade).
 pub const DRIVE_RUN_UP: f64 = 30.0;
+
+/// Traffic driving on the viaduct (S2 + V3 + V5, the Bridge Out beat with real vehicles):
+/// rubble's raycast presets cruising both ways on the deck (lanes 2 m either side of its
+/// centre line), sedans and a six-wheel truck each way on the drop-in spans and the end
+/// spans, and a sedan and a truck on the lower road crossing under span 2 (along it). The
+/// hinge pier's charge (`hinge_charge`) drops the drop-in spans under them.
+fn viaduct_drives() -> Vec<crate::drive::Drive> {
+    use crate::viaduct::ViaductLayout as L;
+    let (deck, road) = (L::DECK_TOP, L::ROAD_BASE + L::ROAD_DEPTH);
+    let drive = |name: &str, vehicle: &str, at: [f64; 3], forward: [f64; 3], speed: f64| crate::drive::Drive {
+        name: name.into(),
+        vehicle: vehicle.into(),
+        at,
+        forward,
+        throttle: 0.6,
+        delay: 0.0,
+        speed: Some(speed),
+    };
+    let (east, west, north, south) = ([1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0]);
+    // Slow traffic (3-3.5 m/s): nothing reaches an abutment's end in 9 s.
+    vec![
+        // Eastbound (+x, lane y = -2): span 1, then span 2 (the drop-in west of the hinge).
+        drive("east-1", "sedan", [-28.0, -2.0, deck], east, 3.5),
+        drive("east-truck", "six_wheel_truck", [-16.0, -2.0, deck], east, 3.0),
+        drive("east-2", "sedan", [-8.0, -2.0, deck], east, 3.5),
+        // Westbound (-x, lane y = +2): span 4, then span 3.
+        drive("west-1", "sedan", [28.0, 2.0, deck], west, 3.5),
+        drive("west-truck", "six_wheel_truck", [16.0, 2.0, deck], west, 3.0),
+        drive("west-2", "sedan", [8.0, 2.0, deck], west, 3.5),
+        // The lower road under span 2 (x -11.5..-2.5, along y): under the deck by 3 s.
+        drive("road-1", "sedan", [-9.0, -12.0, road], north, 3.0),
+        drive("road-truck", "six_wheel_truck", [-5.0, 11.0, road], south, 2.5),
+    ]
+}
+
+/// The Bridge Out charge for a world API host (the threshold model): the hinge pier
+/// blown (every bond of its chunks) and the drop-in spans cut from their seats (every bond
+/// of spans 2 and 3 to anything else). Under `blast_parity` the ball does this: the pier
+/// goes and the spans' own weight breaks their links over the seat piers. The threshold
+/// model breaks a bond only under a contact's load, so a span bonded at one end hangs
+/// there rigidly, however it is loaded; the charge cuts what the stress solver would
+/// break. The spans then rest on their seats' bearings and swing down about them.
+fn hinge_charge(s: &crate::wrecking::Structure) -> crate::wrecking::Charge {
+    use crate::viaduct::ViaductLayout as L;
+    let group = |k: usize| s.chunks[k].groups.get(1).map(String::as_str).unwrap_or("");
+    let pier = format!("pier-{}", L::HINGE_PIER);
+    let drop_in = |g: &str| g == "span-2" || g == "span-3";
+    let bonds = s
+        .bonds
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| {
+            let (ga, gb) = (group(b.a), group(b.b));
+            ga == pier || gb == pier || (drop_in(ga) || drop_in(gb)) && ga != gb
+        })
+        .map(|(i, _)| i)
+        .collect();
+    crate::wrecking::Charge { name: "hinge pier".into(), delay: 0.0, bonds, debris: Vec::new(), kick: [0.0; 3] }
+}
 
 /// Stalled traffic on the viaduct (S2 + V3 + V4), none launched: cars and a bus parked on
 /// the two drop-in spans either side of the hinge pier (in lanes 2 m either side of the
@@ -617,6 +677,15 @@ pub fn scene(key: &str) -> Option<Scene> {
         "ft_airliner_tower" => Some(fly_through(key, title, crate::buildings::glass_tower(), 0.0)),
         "ft_airliner_apartment" => Some(fly_through(key, title, crate::buildings::apartment_block(), 0.0)),
         "bo_viaduct_traffic" => Some(compose(key, title, crate::viaduct::viaduct(), Vec::new(), &traffic())),
+        // Bridge Out driven: the viaduct with its traffic as raycast vehicles (a world API
+        // host creates them, `drive`), the ball the lab's.
+        "bo_drive_viaduct" => {
+            let mut viaduct = crate::viaduct::viaduct();
+            viaduct.charges = vec![hinge_charge(&viaduct)];
+            let mut s = compose(key, title, viaduct, Vec::new(), &[]);
+            s.drives = viaduct_drives();
+            Some(s)
+        }
         // V5 driven: the sedan (rubble's raycast preset, its wheels driving it) at the
         // middle shop's window from 30 m out, the six-wheel truck at the fourth shop's a
         // second later, both at full throttle up the street (+y) and level with the
@@ -630,14 +699,15 @@ pub fn scene(key: &str) -> Option<Scene> {
             let x = L::half_length();
             let face = -0.5 * L::DEPTH;
             let mut s = compose(key, title, crate::buildings::storefront_row(), street((-x, x), (face - 48.0, face), L::FOOTING_DEPTH), &[]);
-            // (name, preset, its nose ahead of its origin, its origin's height on its wheels.)
+            // (name, preset, its nose ahead of its centre of mass, its delay; on the street.)
             let drive = |name: &str, vehicle: &str, x: f64, nose: f64, delay: f64| crate::drive::Drive {
                 name: name.into(),
                 vehicle: vehicle.into(),
-                at: [x, face - DRIVE_RUN_UP - nose, L::FOOTING_DEPTH + 0.8],
+                at: [x, face - DRIVE_RUN_UP - nose, L::FOOTING_DEPTH],
                 forward: [0.0, 1.0, 0.0],
                 throttle: 1.0,
                 delay,
+                speed: None,
             };
             s.drives = vec![drive("sedan", "sedan", window(2), 2.2, 0.0), drive("truck", "six_wheel_truck", window(4), 3.4, 1.0)];
             Some(s)

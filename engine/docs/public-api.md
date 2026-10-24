@@ -870,6 +870,35 @@ oracle's `stress-gpu`, `stress-ref` and `stress-rubble`.
   `engine-world/tests/drive_through.rs` drives the sedan preset on its wheels
   into the Ram Raid storefront row. It gets 3 m and more into the shop.
   Without prediction the shop front stops it dead in the step it meets it.
+  Place a vehicle at `VehicleDesc::droop_height` over the ground (its wheels
+  at full droop, the centre of mass where `create_vehicle` puts the pose):
+  placed lower, its bump stops start inside the road and throw it up.
+- **Wheel loads (W5).** A raycast wheel standing on a chunk loads it: the
+  ingest reads each wheel's tyre forces from the vehicle pool
+  (`ingest_wheels`), as an impulse at its hit point over the step. The engine's
+  contact rows never see a wheel. Its closing speed is zero: the tyre and the
+  suspension pass on this force, so it is a sustained load and never a Hertz
+  pulse. `engine-world/tests/wheel_loads.rs` parks the six-wheel truck on the
+  viaduct with its bonds at a thousandth of their strength: the deck under it
+  breaks; with the wheel loads left out it does not, and at full strength the
+  deck carries it.
+- **Charges.** `destructible_cut_bonds(id, pairs)` cuts bonds between two
+  steps (a pack's `defaults.charges`), as if the last step had broken them:
+  the next step splits their bodies and reports them. It waits for the GPU.
+  `engine-world/tests/bridge_out.rs` cuts the viaduct's hinge-pier charge
+  under driven traffic: the drop-in spans come down with the four vehicles on
+  them. (The threshold model breaks a bond only under a contact's load, so a
+  span still bonded at a seat hangs there whatever it carries: the lab's ball
+  alone breaks what it meets. The charge cuts what `blast_parity`'s stress
+  solver breaks.)
+- **Scenarios.** `rubble::scenario::Scenario` (feature `stress`) is a scene
+  pack with drives (`defaults.drives`) as one world: the structure placed as
+  the lab places it, the lab's ground, each drive a preset vehicle on its
+  wheels, its chassis a projectile; shots as projectile balls, the pack's
+  charges cut between steps, a drive's cruising speed held by lifting the
+  throttle. It gives the vehicles' and balls' poses and each chunk's motion
+  since rest. The lab (stress-web), the showcase page (engine-world-wasm) and
+  the native tests run it.
 - **Settings.** `solver_for(StrengthModel::Threshold)` gives the lab's
   threshold engine settings: never asleep, zero-gap contact, world inertia,
   4 iterations, 60 Hz. `StressSource::ground_height` gives the lab's ground
@@ -877,8 +906,9 @@ oracle's `stress-gpu`, `stress-ref` and `stress-rubble`.
 - **Limits (fail loudly).**
   - The world must use `ContactStorage::Canonical`, the rows the ingest reads.
   - Reserved slots count against `max_bodies`.
-  - At most 64 projectile colliders (the strike table): a sedan has 22, its 2
-    body boxes and 20 rim spheres.
+  - At most 1024 projectile colliders (`fracture::MAX_SHOTS`, the strike
+    table's capacity; its kernels loop over the shots set, so room costs
+    nothing): a sedan has 22, its 2 body boxes and 20 rim spheres.
   - At most 2^20 chunks or body slots (the fracture's scans).
   - The impact pulse pool is sized from `max_contacts`.
   - A fracture error bit fails the frame.

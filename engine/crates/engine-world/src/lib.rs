@@ -31,6 +31,9 @@ mod math;
 mod queries;
 mod readback;
 mod rig;
+/// Scene packs with driven vehicles as one world (the showcase's and the lab's host).
+#[cfg(feature = "stress")]
+pub mod scenario;
 mod threshold;
 
 pub use assembly::{

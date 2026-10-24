@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>Rubble · Showcase</title>
+<style>
+:root{color-scheme:dark;font:14px/1.5 system-ui,sans-serif;color:#e6eef2;background:#091019}*{box-sizing:border-box}body{margin:0}
+canvas{position:absolute;left:360px;width:calc(100% - 360px);height:100dvh;display:block;touch-action:none;cursor:crosshair}
+aside{position:absolute;top:28px;left:28px;width:324px;max-height:calc(100dvh - 56px);overflow:auto;padding:24px;background:#111d29ed;border:1px solid #2b3c4a;border-radius:16px;box-shadow:0 12px 60px #0004;backdrop-filter:blur(16px);overscroll-behavior:contain}
+.eyebrow{font:11px ui-monospace,monospace;letter-spacing:.14em;text-transform:uppercase;color:#83a1b5}.brand{display:flex;align-items:center;gap:9px}.mark{width:17px;height:17px;background:#8be0c3;clip-path:polygon(0 0,100% 10%,80% 100%,5% 80%)}
+h1{font-size:29px;letter-spacing:-1px;line-height:1.15;margin:18px 0 10px}p{color:#a5b8c7;margin:10px 0 18px}
+select,button{font:inherit;border-radius:7px;border:1px solid #405463;padding:9px 12px;background:#20313f;color:#ecf4f8}select{width:100%;margin:6px 0 16px}button{cursor:pointer;width:100%;margin-top:8px}button:hover{filter:brightness(1.15)}button:disabled{opacity:.45;cursor:wait}
+button.primary{background:#9be8cc;color:#10241f;border-color:#9be8cc;font-weight:650}.actions{display:flex;gap:8px}.actions button{flex:1}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:18px 0}.stats strong{display:block;font:20px ui-monospace,monospace;color:#f0f5f8;font-variant-numeric:tabular-nums}.stats span{font-size:11px;color:#8aa1b2}
+.check{display:flex;align-items:center;gap:8px;margin:14px 0}.check select{margin:0}
+#drives{font:11px/1.7 ui-monospace,monospace;color:#a5b8c7;white-space:pre}
+.note{font-size:11px;line-height:1.6;color:#8fa6b7;margin:16px 0 0;border-top:1px solid #2b3b48;padding-top:14px}
+#status{position:absolute;left:380px;bottom:24px;max-width:calc(100% - 420px);color:#a4b9c9;background:#101b27e6;border-radius:7px;padding:9px 13px;font:12px ui-monospace,monospace;white-space:pre-wrap}.error{color:#ffb4a3!important}
+.badge{position:absolute;right:28px;top:28px;border:1px solid #294a48;border-radius:30px;padding:7px 13px;background:#132b29dd;color:#9aebce;font:11px ui-monospace,monospace}
+body.collapsed aside,body.collapsed .badge{display:none}body.collapsed canvas{left:0;width:100%}body.collapsed #status{left:16px}
+@media(max-width:720px){canvas{left:0;width:100%}aside{left:8px;right:8px;top:8px;width:auto;max-height:55dvh;padding:16px}.badge{display:none}#status{left:12px;bottom:12px;max-width:calc(100% - 24px)}}
+</style></head><body>
+<canvas id="view" aria-label="The scenario's view. Click to fire the ball, drag to orbit and scroll to zoom."></canvas>
+<aside id="panel"><div class="brand"><span class="mark"></span><span class="eyebrow">Rubble / world API</span></div><h1>Showcase</h1>
+<p>Raycast vehicles and bonded structures in one world: rubble's world API stepped in Rust on WebGPU. The vehicles are driven by their wheels; a wall breaks before the step that meets it.</p>
+<label class="eyebrow" for="scenario">Scenario</label><select id="scenario"></select>
+<div class="actions"><button class="primary" id="run" disabled>Pause</button><button id="restart" disabled>Restart</button></div>
+<button id="detonate" hidden disabled>Detonate charges</button>
+<button id="fire" hidden disabled>Fire the wrecking ball</button>
+<button id="replay" disabled title="Re-run the scenario from its load with the same shots and charges, then play the last moments at quarter speed from another angle, and carry on live (R)">Instant replay · ¼ speed (R)</button>
+<label class="check" title="Simulated time per second of wall time. Slow motion runs fewer steps per frame at the same step size, so the physics is unchanged">Speed <select id="time-scale"><option value="1" selected>Real time</option><option value="0.5">½ slow motion</option><option value="0.25">¼ slow motion</option></select></label>
+<div class="stats"><div><strong id="bonds-broken">—</strong><span>bonds broken</span></div><div><strong id="bodies">—</strong><span>pieces</span></div><div><strong id="contacts">—</strong><span>contacts</span></div></div>
+<div id="drives"></div>
+<p class="note">Scenarios are Rust (stress-ref scene packs, engine-world <code>scenario</code>). The structure is a Threshold destructible: a bond breaks when a contact's load beats its capacity; vehicles' wheels load what they stand on.</p>
+</aside><div class="badge">RUBBLE WORLD → WEBGPU</div><div id="status" role="status" aria-live="polite">Starting WebGPU…</div>
+<script type="importmap">{"imports":{"rubble-gpu-wait":"../fracture/gpu-wait.mjs"}}</script><script type="module" src="./main.mjs"></script></body></html>

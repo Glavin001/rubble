@@ -1,49 +1,30 @@
 //! Driven vehicles (a pack's `defaults.drives`, `stress_ref::drive`) in rubble's world API:
-//! the pack's structure as a `Threshold` destructible (the threshold profile's GPU fracture,
-//! inside `World`) and each drive as a raycast vehicle from the `engine-vehicle` presets,
-//! its wheels driving it from its delay on and its chassis a projectile, so strike
-//! prediction breaks the shop front before the step that meets it. One `World` on the
-//! page's device, drawn by the lab's renderer: the chunks from the GPU (`fracture` view
-//! kernels), the vehicles' boxes and wheels where the frame's readback put them.
+//! the scenario host (`rubble::scenario`: the pack's structure as a `Threshold`
+//! destructible, each drive a raycast vehicle from the `engine-vehicle` presets, shots as
+//! projectile balls, charges cut between steps) on the page's device, drawn by the lab's
+//! renderer: the chunks from the GPU (`fracture` view kernels), the vehicles' boxes and
+//! wheels and the balls where the last polled step put them.
 
-use rubble::{
-    BodyDef, DestructibleAssetDesc, DestructibleDef, DestructibleId, DestructionEvent, Geometry, GpuContext, Projectile, ShapeDef, StrengthModel, Transform, VehicleBuild, VehicleDef, VehicleInput, VehicleModel, World, WorldDef,
-};
-use engine_schema::ShapeType;
+use rubble::scenario::Scenario;
+use rubble::{GpuContext, StrengthModel, Transform};
 use stress_gpu::gpu::Gpu;
-use stress_ref::drive::Drive;
 use stress_ref::math::{Mat3, Vec3};
+use stress_ref::scene::ImpactorDesc;
 use stress_ref::solver::ReferenceSolver;
+use stress_ref::wrecking::PackCharge;
 use stress_rubble::render::{material_color, material_surface, ExtraMesh, Renderer};
 
-/// A driven vehicle: its drive, what the world built, and its drawn parts (in the
-/// renderer's extras, chassis colliders first, then its wheels).
-struct Car {
-    drive: Drive,
-    build: VehicleBuild,
-    /// Its chassis's box colliders, each posed in the chassis body's frame.
-    boxes: Vec<Transform>,
-    wheels: usize,
-}
-
 pub(crate) struct DLoaded {
-    world: World,
-    destructible: DestructibleId,
-    cars: Vec<Car>,
+    pub scenario: Scenario,
     pub renderer: Renderer,
     mirror: ReferenceSolver,
     extras: Vec<ExtraMesh>,
+    /// The extras' poses as of the last polled step (stress frame): each car's parts, then
+    /// the balls (unit spheres from `ball_extras` on, parked until fired).
+    poses: Vec<(Mat3, Vec3)>,
+    ball_extras: usize,
     pub behind: f64,
     pub totals: (usize, usize, usize),
-    pub frame: u64,
-    pub dt: f64,
-    /// The extras' poses as of the last polled frame (stress frame).
-    poses: Vec<(Mat3, Vec3)>,
-    broken: usize,
-    /// Each car's forward speed (km/h) as of the last polled frame.
-    kmh: Vec<f64>,
-    awake: u32,
-    contacts: u32,
 }
 
 /// Y-up (the pack's and the world's frame) to the stress scene's Z-up.
@@ -64,78 +45,40 @@ fn zup_rotation(q: [f32; 4]) -> Mat3 {
     m
 }
 
-fn compose(a: &Transform, b: &Transform) -> Transform {
-    let (qa, pa) = (glam::Quat::from_array(a.rotation), glam::Vec3::from(a.position));
-    let (qb, pb) = (glam::Quat::from_array(b.rotation), glam::Vec3::from(b.position));
-    Transform::new((pa + qa * pb).to_array(), (qa * qb).normalize().to_array())
+fn pose(t: &Transform) -> (Mat3, Vec3) {
+    (zup_rotation(t.rotation), zup(t.position))
 }
 
-/// The world for a pack with drives: its structure placed as the lab places it (the stress
-/// frame is the asset frame less `placement`), its ground, and each drive's vehicle.
-pub(crate) fn load(gpu: &Gpu, pack: &[u8], drives: &[Drive], width: u32, height: u32, format: wgpu::TextureFormat) -> Result<DLoaded, String> {
-    fn e(what: &str) -> impl Fn(anyhow::Error) -> String + '_ {
-        move |err| format!("{what}: {err:#}")
-    }
-    let asset = DestructibleAssetDesc::from_pack(pack).map_err(e("scene pack"))?;
+/// The balls drawn at most (the page's shots and the scenario's).
+fn balls() -> usize {
+    crate::SHOTS.min(Scenario::MAX_BALLS)
+}
+
+/// The scenario for a pack with drives on the page's device, and its renderer.
+pub(crate) fn load(gpu: &Gpu, pack: &[u8], width: u32, height: u32, format: wgpu::TextureFormat) -> Result<DLoaded, String> {
+    let context = GpuContext::Shared { info: gpu.adapter_info.clone(), device: gpu.device.clone(), queue: gpu.queue.clone() };
+    let scenario = Scenario::load(context, pack).map_err(|e| format!("{e:#}"))?;
+    // The renderer's mirror of the structure (its chunks' meshes and the view tables).
+    let asset = rubble::DestructibleAssetDesc::from_pack(pack).map_err(|e| format!("scene pack: {e:#}"))?;
     let stress = asset.stress.as_ref().ok_or("scene pack: no stress import")?;
     let solver = asset.solver_for(StrengthModel::Threshold).ok_or("scene pack: no threshold solver")?;
-    let scene = stress.threshold_scene(1.0, solver.dt).map_err(e("threshold scene"))?;
-    let chunks: usize = scene.bodies.iter().map(|b| b.chunks.len()).sum();
-    // The lab's threshold capacity (`ThresholdWorld::new`), and room for the vehicles' bodies.
-    let mut capacity = stress_rubble::capacity_for(&scene);
-    capacity.max_bodies = capacity.max_bodies.max(((chunks + 64 + 16 * drives.len()) as u32).next_power_of_two());
-    capacity.max_contacts = stress_rubble::threshold::contact_capacity(chunks, capacity.max_contacts, 1 << 30);
-    capacity.max_candidates = capacity.max_candidates.max(capacity.max_contacts);
-    let def = WorldDef {
-        capacity,
-        gravity: [0.0, solver.gravity_y, 0.0],
-        solver,
-        enable_sleep: false,
-        contacts: rubble::ContactStorage::Canonical,
-        ..WorldDef::default()
-    };
-    let context = GpuContext::Shared { info: gpu.adapter_info.clone(), device: gpu.device.clone(), queue: gpu.queue.clone() };
-    let mut world = World::new(context, &def).map_err(e("world"))?;
-    // Placed as the lab places it (`engine-world` tests/threshold.rs): the world's frame is
-    // then the pack's own, where the drives and the ground are given.
-    let offset = stress.placement().map(|x| -x as f32);
-    if let Some(h) = stress.ground_height() {
-        let g = world.create_body(&BodyDef::default()).map_err(e("ground"))?;
-        world.create_shape(g, &ShapeDef::default(), Geometry::Plane { normal: [0.0, 1.0, 0.0], offset: h }).map_err(e("ground"))?;
-    }
-    let a = world.create_destructible_asset(&asset).map_err(e("structure"))?;
-    let destructible = world
-        .create_destructible(&DestructibleDef { model: StrengthModel::Threshold, transform: Transform::new(offset, [0.0, 0.0, 0.0, 1.0]), asleep: false, ..DestructibleDef::new(a) })
-        .map_err(e("structure"))?;
-    let mut cars = Vec::new();
-    let mut extras = Vec::new();
-    let body = ExtraMesh::Box { half: [0.0; 3], color: material_color("sheet-steel"), surface: material_surface("sheet-steel") };
-    let tyre = (material_color("wheel"), material_surface("wheel"));
-    for d in drives {
-        let desc = engine_vehicle::presets::by_name(&d.vehicle).ok_or_else(|| format!("drive {}: no vehicle preset {}", d.name, d.vehicle))?;
-        // The pack's frame is Y-up; the vehicle's nose is its design frame's +z.
-        let (p, f) = (zup_inverse(d.at), zup_inverse(d.forward));
-        let yaw = f[0].atan2(f[2]) as f32;
-        let at = p.map(|x| x as f32);
-        let wheels: Vec<(f64, f64)> = desc.wheels.iter().map(|w| (w.radius as f64, 0.5 * w.width as f64)).collect();
-        let build = world
-            .create_vehicle(&VehicleDef { model: VehicleModel::Rigid(desc), transform: Transform::new(at, glam::Quat::from_rotation_y(yaw).to_array()), parts: vec![], connections: vec![], user_data: 0 })
-            .map_err(e(&format!("drive {}", d.name)))?;
-        world.body_set_projectile(build.chassis, Some(Projectile::default())).map_err(e(&format!("drive {}", d.name)))?;
-        let mut boxes = Vec::new();
-        for (shape, pose, params) in world.body_colliders(build.chassis).map_err(e(&format!("drive {}", d.name)))? {
-            if shape == ShapeType::Box {
-                let ExtraMesh::Box { color, surface, .. } = body else { unreachable!() };
-                extras.push(ExtraMesh::Box { half: [params[0] as f64, params[1] as f64, params[2] as f64], color, surface });
-                boxes.push(pose);
-            }
-        }
-        for &(radius, half_width) in &wheels {
-            extras.push(ExtraMesh::Cylinder { radius, half_width, color: tyre.0, surface: tyre.1 });
-        }
-        cars.push(Car { drive: d.clone(), build, boxes, wheels: wheels.len() });
-    }
+    let scene = stress.threshold_scene(1.0, solver.dt).map_err(|e| format!("threshold scene: {e:#}"))?;
     let mirror = stress_ref::world::World::new(&scene).solver;
+    let mut extras = Vec::new();
+    for car in &scenario.cars {
+        for (_, half) in &car.boxes {
+            extras.push(ExtraMesh::Box { half: half.map(|h| h as f64), color: material_color("sheet-steel"), surface: material_surface("sheet-steel") });
+        }
+        for &(radius, half_width, _) in &car.wheels {
+            extras.push(ExtraMesh::Cylinder { radius: radius as f64, half_width: half_width as f64, color: material_color("wheel"), surface: material_surface("wheel") });
+        }
+    }
+    // The shots' balls: unit spheres, posed scaled to each shot's radius.
+    let ball_extras = extras.len();
+    let shot = stress_rubble::render::SHOT;
+    for _ in 0..balls() {
+        extras.push(ExtraMesh::Sphere { radius: 1.0, color: [shot[0], shot[1], shot[2]], surface: shot[3] });
+    }
     let totals = (
         mirror.structures.iter().map(|s| s.chunks.len()).sum::<usize>(),
         mirror.structures.iter().flat_map(|s| &s.chunks).map(|c| c.parts.as_ref().map_or(1, |p| p.len())).sum::<usize>(),
@@ -143,15 +86,10 @@ pub(crate) fn load(gpu: &Gpu, pack: &[u8], drives: &[Drive], width: u32, height:
     );
     let poses = vec![(Mat3::IDENTITY, Vec3::new(0.0, 0.0, -1e4)); extras.len()];
     let renderer = Renderer::for_target_with(gpu, &mirror, &[], &extras, width, height, format);
-    let mut l = DLoaded { world, destructible, cars, renderer, mirror, extras, behind: 0.0, totals, frame: 0, dt: solver.dt as f64, poses, broken: 0, kmh: vec![0.0; drives.len()], awake: 0, contacts: 0 };
+    let mut l = DLoaded { scenario, renderer, mirror, extras, poses, ball_extras, behind: 0.0, totals };
     l.attach_view()?;
     l.read_poses();
     Ok(l)
-}
-
-/// The stress frame's Z-up to the pack's Y-up.
-fn zup_inverse(v: [f64; 3]) -> [f64; 3] {
-    [v[0], v[2], -v[1]]
 }
 
 impl DLoaded {
@@ -172,7 +110,8 @@ impl DLoaded {
             }
         }
         let view = stress_gpu::fracture::ViewTables { chunks, shot_bodies: Vec::new(), impactor_base };
-        self.world.destructible_set_view(self.destructible, &view).map_err(|e| format!("view: {e:#}"))
+        let s = &mut self.scenario;
+        s.world.destructible_set_view(s.destructible, &view).map_err(|e| format!("view: {e:#}"))
     }
 
     /// A renderer for a resized canvas.
@@ -181,71 +120,47 @@ impl DLoaded {
         self.attach_view()
     }
 
-    /// One physics frame: each vehicle's input (its throttle from its delay on, braked
-    /// before), then the world's step.
-    pub fn step(&mut self) -> Result<(), String> {
-        let t = self.frame as f64 * self.dt;
-        for car in &self.cars {
-            let Some(h) = car.build.vehicle else { continue };
-            let input = if t >= car.drive.delay { VehicleInput { forward: car.drive.throttle as f32, ..VehicleInput::default() } } else { VehicleInput { brake: 1.0, ..VehicleInput::default() } };
-            self.world.set_vehicle_input(h, input);
-        }
-        self.world.step().map_err(|e| format!("step: {e:#}"))?;
-        self.frame += 1;
-        Ok(())
+    pub fn frame(&self) -> u64 {
+        self.scenario.frame
     }
 
-    /// Wait for the steps' readbacks: the bonds they broke, the counters, and the
-    /// vehicles' poses for the next draw.
+    pub fn dt(&self) -> f64 {
+        self.scenario.dt
+    }
+
+    pub fn step(&mut self) -> Result<(), String> {
+        self.scenario.step().map_err(|e| format!("step: {e:#}"))
+    }
+
+    pub fn shoot(&mut self, desc: &ImpactorDesc) -> Result<(), String> {
+        self.scenario.shoot(desc).map_err(|e| format!("{e:#}"))
+    }
+
+    pub fn cut(&mut self, charge: &PackCharge) -> Result<usize, String> {
+        self.scenario.cut(charge).map_err(|e| format!("{e:#}"))
+    }
+
+    /// Wait for the steps' readbacks, then pose the vehicles and balls for the next draw.
     pub fn poll(&mut self) -> Result<(), String> {
-        let frames = self.world.poll_blocking().map_err(|e| format!("poll: {e:#}"))?;
-        let mut wheels = std::collections::HashMap::new();
-        for f in &frames {
-            for e in &f.destruction_events {
-                if let DestructionEvent::BondsBroken { bonds, .. } = e {
-                    self.broken += bonds.len();
-                }
-            }
-            if let Some(c) = &f.counters {
-                self.awake = c.awake_count;
-                self.contacts = c.contact_count;
-                if c.overflow_flags != 0 {
-                    return Err(format!("world: engine overflow {:#x} (1 contacts, 2 candidate pairs, 64 manifolds)", c.overflow_flags));
-                }
-            }
-            for v in &f.vehicles {
-                wheels.insert(v.vehicle, v.state.wheels.clone());
-                if let Some(k) = self.cars.iter().position(|c| c.build.vehicle == Some(v.vehicle)) {
-                    self.kmh[k] = 3.6 * v.state.forward_speed as f64;
-                }
-            }
-        }
-        self.read_poses_with(&wheels);
+        self.scenario.poll().map_err(|e| format!("poll: {e:#}"))?;
+        self.read_poses();
         Ok(())
     }
 
     fn read_poses(&mut self) {
-        self.read_poses_with(&Default::default());
-    }
-
-    fn read_poses_with(&mut self, wheels: &std::collections::HashMap<rubble::VehicleHandle, Vec<rubble::WheelState>>) {
         let mut k = 0;
-        for car in &self.cars {
-            let chassis = self.world.body_transform(car.build.chassis).ok().flatten();
-            for b in &car.boxes {
-                if let Some(c) = &chassis {
-                    let pose = compose(c, b);
-                    self.poses[k] = (zup_rotation(pose.rotation), zup(pose.position));
-                }
+        for parts in self.scenario.car_poses() {
+            for t in &parts {
+                self.poses[k] = pose(t);
                 k += 1;
             }
-            let states = car.build.vehicle.and_then(|h| wheels.get(&h));
-            for w in 0..car.wheels {
-                if let Some(s) = states.and_then(|s| s.get(w)).filter(|s| !s.detached) {
-                    self.poses[k] = (zup_rotation(s.rotation), zup(s.position));
-                }
-                k += 1;
+        }
+        for (i, (t, r)) in self.scenario.ball_poses().into_iter().enumerate().take(balls()) {
+            let (mut m, p) = pose(&t);
+            for row in &mut m.m {
+                *row = row.map(|x| x * r as f64);
             }
+            self.poses[self.ball_extras + i] = (m, p);
         }
     }
 
@@ -253,40 +168,40 @@ impl DLoaded {
     pub fn encode_view(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, mode: u32, bonds: bool) -> Result<u32, String> {
         let (objects, lines, _, _) = self.renderer.resident_targets();
         let capacity = self.renderer.line_capacity();
-        let n = self.world.destructible_encode_view(self.destructible, encoder, objects, lines, capacity, mode, bonds).map_err(|e| format!("view: {e:#}"))?;
+        let s = &mut self.scenario;
+        let n = s.world.destructible_encode_view(s.destructible, encoder, objects, lines, capacity, mode, bonds).map_err(|e| format!("view: {e:#}"))?;
         self.renderer.set_extras(gpu, &self.poses);
         Ok(n)
     }
 
     /// The page's stats (the keys the other stress modes report).
     pub fn stats(&self, step_ms: f64, stepped: u32) -> serde_json::Value {
-        let s = self.world.destructible_stats(self.destructible).ok();
+        let s = &self.scenario;
+        let d = s.world.destructible_stats(s.destructible).ok();
         serde_json::json!({
             "gpuResident": true,
             "worldApi": true,
-            "simSeconds": self.frame as f64 * self.dt,
+            "simSeconds": s.frame as f64 * s.dt,
             "stepMs": if stepped > 0 { step_ms / stepped as f64 } else { 0.0 },
             "chunks": self.totals.0,
             "hulls": self.totals.1,
             "bonds": self.totals.2,
-            "shots": 0,
+            "shots": s.balls.len(),
             "warnings": Vec::<String>::new(),
-            "canFire": false,
-            "charges": Vec::<String>::new(),
-            "chargesArmed": 0,
+            "canFire": s.balls.len() < balls(),
             "launches": Vec::<String>::new(),
             "launchesArmed": 0,
-            "drives": self.cars.iter().map(|c| c.drive.name.clone()).collect::<Vec<_>>(),
-            "driveKmh": self.kmh,
-            "frameHz": 1.0 / self.dt,
+            "drives": s.cars.iter().map(|c| c.drive.name.clone()).collect::<Vec<_>>(),
+            "driveKmh": s.speed_kmh(),
+            "frameHz": 1.0 / s.dt,
             "profile": "threshold",
-            "frames": self.frame,
-            "statsFrame": self.frame,
-            "bodies": s.map_or(0, |s| s.actors),
-            "fragments": s.map_or(0, |s| s.actors),
-            "brokenBonds": self.broken,
-            "awake": self.awake,
-            "contacts": self.contacts,
+            "frames": s.frame,
+            "statsFrame": s.frame,
+            "bodies": d.map_or(0, |d| d.actors),
+            "fragments": d.map_or(0, |d| d.actors),
+            "brokenBonds": s.broken,
+            "awake": s.awake,
+            "contacts": s.contacts,
             "errors": 0,
             "engineOverflow": 0,
             "compactions": 0,

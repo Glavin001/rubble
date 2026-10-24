@@ -55,11 +55,13 @@ fn drive(predict: bool) -> (f32, usize) {
         let (_, win) = L::shopfront(2);
         0.5 * (win.0 + win.1) as f32
     };
-    let start = [x + offset[0], ground + 0.75, 3.5 + 30.0 + offset[2]];
+    // On its wheels at full droop, so it settles onto its springs.
+    let sedan = engine_vehicle::presets::sedan();
+    let start = [x + offset[0], ground + sedan.droop_height(), 3.5 + 30.0 + offset[2]];
     // Facing -z (the sedan's forward is +z).
     let car = w
         .create_vehicle(&VehicleDef {
-            model: VehicleModel::Rigid(engine_vehicle::presets::sedan()),
+            model: VehicleModel::Rigid(sedan),
             transform: Transform::new(start, [0.0, 1.0, 0.0, 0.0]),
             parts: vec![],
             connections: vec![],
@@ -94,6 +96,26 @@ fn drive(predict: bool) -> (f32, usize) {
     (3.5 + offset[2] - deepest, broken)
 }
 
+/// How far a vehicle's front reaches toward -z (the pack's frame: toward the shops): the
+/// least z of its chassis boxes' corners.
+fn nose(w: &World, chassis: BodyId) -> f32 {
+    let t = w.read_body_state(chassis).unwrap().transform;
+    let (q, o) = (glam::Quat::from_array(t.rotation), glam::Vec3::from(t.position));
+    let mut z = f32::INFINITY;
+    for (shape, pose, params) in w.body_colliders(chassis).unwrap() {
+        if shape != engine_schema::ShapeType::Box {
+            continue;
+        }
+        let (qc, pc) = (glam::Quat::from_array(pose.rotation), glam::Vec3::from(pose.position));
+        for k in 0..8 {
+            let s = |bit: u32, h: f32| if k & bit == 0 { -h } else { h };
+            let c = glam::Vec3::new(s(1, params[0]), s(2, params[1]), s(4, params[2]));
+            z = z.min((o + q * (pc + qc * c)).z);
+        }
+    }
+    z
+}
+
 /// Strike prediction is what lets the car in: its boxes' strike breaks the window's bonds
 /// before the step that meets them. Without it the shop front stops the car dead in that
 /// step and only then breaks.
@@ -106,83 +128,33 @@ fn a_driven_car_breaks_into_a_shop() {
     assert!(into < 0.0 && broken < 20, "without prediction: {into} m in, {broken} bonds");
 }
 
-/// The Ram Raid pack with drives (`rr_drive_storefront`, `stress_ref::drive`), as the lab
-/// page builds it (stress-web `drive.rs`): the structure and its street as one threshold
-/// destructible placed as the lab places it, so the world's frame is the pack's, and each
-/// drive's preset there, driven from its delay on. Both get into their shops.
+/// The Ram Raid pack with drives (`rr_drive_storefront`, `stress_ref::drive`) through the
+/// pages' host (`rubble::scenario`): the structure and its street as one threshold
+/// destructible placed as the lab places it, so the world's frame is the pack's, its
+/// ground, and each drive's preset there, driven from its delay on. Both get in.
 #[test]
 fn the_drive_pack_drives_in() {
     let pack = engine_fracture::samples::pack_sample_json("rr_drive_storefront").unwrap();
-    let json: serde_json::Value = serde_json::from_slice(&pack).unwrap();
-    let drives = stress_ref::drive::drives_of(&json).unwrap();
-    assert_eq!(drives.len(), 2);
+    let mut s = rubble::scenario::Scenario::load(GpuContext::Default, &pack).unwrap();
+    assert_eq!(s.cars.len(), 2);
     let asset = DestructibleAssetDesc::from_pack(&pack).unwrap();
     let stress = asset.stress.as_ref().unwrap();
-    let solver = asset.solver_for(StrengthModel::Threshold).unwrap();
-    let offset = stress.placement().map(|x| -x as f32);
-    let mut w = World::new(
-        GpuContext::Default,
-        &WorldDef {
-            capacity: capacity(&asset),
-            gravity: [0.0, solver.gravity_y, 0.0],
-            solver,
-            enable_sleep: false,
-            contacts: ContactStorage::Canonical,
-            ..WorldDef::default()
-        },
-    )
-    .unwrap();
-    let a = w.create_destructible_asset(&asset).unwrap();
-    let id = w
-        .create_destructible(&DestructibleDef {
-            model: StrengthModel::Threshold,
-            transform: Transform::new(offset, [0.0, 0.0, 0.0, 1.0]),
-            asleep: false,
-            ..DestructibleDef::new(a)
-        })
-        .unwrap();
-    let mut cars = Vec::new();
-    for d in &drives {
-        let desc = engine_vehicle::presets::by_name(&d.vehicle).unwrap();
-        // Z-up to the pack's Y-up; the nose is the design frame's +z.
-        let (p, f) = ([d.at[0], d.at[2], -d.at[1]], [d.forward[0], d.forward[2], -d.forward[1]]);
-        let yaw = f[0].atan2(f[2]) as f32;
-        let b = w
-            .create_vehicle(&VehicleDef {
-                model: VehicleModel::Rigid(desc),
-                transform: Transform::new(p.map(|x| x as f32), glam::Quat::from_rotation_y(yaw).to_array()),
-                parts: vec![],
-                connections: vec![],
-                user_data: 0,
-            })
-            .unwrap();
-        w.body_set_projectile(b.chassis, Some(Projectile::default())).unwrap();
-        cars.push((d.clone(), b));
+    let h = stress.ground_height().unwrap() - stress.placement()[1] as f32;
+    for _ in 0..600 {
+        s.step().unwrap();
+        s.poll().unwrap();
     }
-    let mut broken = 0;
-    for n in 0..600 {
-        for (d, b) in &cars {
-            let input = if n as f32 * solver.dt >= d.delay as f32 {
-                VehicleInput { forward: d.throttle as f32, ..VehicleInput::default() }
-            } else {
-                VehicleInput { brake: 1.0, ..VehicleInput::default() }
-            };
-            w.set_vehicle_input(b.vehicle.unwrap(), input);
-        }
-        w.step().unwrap();
-        for f in w.poll_blocking().unwrap() {
-            for e in &f.destruction_events {
-                if let DestructionEvent::BondsBroken { bonds, .. } = e {
-                    broken += bonds.len();
-                }
-            }
-        }
+    let stats = s.world.destructible_stats(s.destructible).unwrap();
+    assert_eq!(stats.bonds - stats.bonds_intact, s.broken as u32, "events report every break");
+    // The shop fronts are at z = 3.5 and the backs at -3.5 (the pack's frame, Y up; the
+    // vehicles drive toward -z): each ends with its nose a metre and more into its shop,
+    // above the ground. (The truck's front wheels meet the stallrisers under the window,
+    // which a raycast wheel cannot climb: it swings in off them.)
+    for car in &s.cars {
+        let p = s.world.read_body_state(car.build.chassis).unwrap().transform.position;
+        let into = 3.5 - nose(&s.world, car.build.chassis);
+        assert!(into > 1.0 && p[2] > -3.5, "{}: its nose ends {into} m into its shop", car.drive.name);
+        assert!(p[1] > h, "{} ends at y = {} under the ground (y = {h})", car.drive.name, p[1]);
     }
-    // The shop fronts are at z = 3.5 (the pack's frame, Y up; the vehicles drive toward -z).
-    for (d, b) in &cars {
-        let z = w.read_body_state(b.chassis).unwrap().transform.position[2];
-        assert!(z < 3.5, "{} ends at z = {z}: not inside its shop", d.name);
-    }
-    assert!(broken > 40, "{broken} bonds");
-    let _ = id;
+    assert!(s.broken > 40, "{} bonds", s.broken);
 }

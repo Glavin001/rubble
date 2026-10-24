@@ -394,7 +394,7 @@ fn limits_fail_loudly() {
     .unwrap();
     let e = place(&mut w).unwrap_err().to_string();
     assert!(e.contains("max_bodies"), "{e}");
-    // Strike prediction's shot table holds 64 projectiles.
+    // Strike prediction's shot table holds `fracture::MAX_SHOTS` projectile colliders.
     let mut w = world_for(&asset, [0.0; 3]);
     let id = place(&mut w).unwrap();
     // Pieces belong to the destructible.
@@ -404,13 +404,17 @@ fn limits_fail_loudly() {
         .unwrap_err()
         .to_string()
         .contains("destroy the destructible"));
-    for k in 0..65 {
+    // Two bodies of more than half that many spheres each: the second is refused.
+    let half = stress_gpu::fracture::MAX_SHOTS / 2 + 1;
+    for k in 0..2 {
         let b = w
-            .create_body(&BodyDef::dynamic([k as f32, 50.0, 0.0]))
+            .create_body(&BodyDef::dynamic([4.0 * k as f32, 50.0, 0.0]))
             .unwrap();
-        w.create_sphere_shape(b, &ShapeDef::default(), [0.0; 3], 0.1)
-            .unwrap();
+        for i in 0..half {
+            w.create_sphere_shape(b, &ShapeDef::default(), [0.0, 0.01 * i as f32, 0.0], 0.1)
+                .unwrap();
+        }
         let r = w.body_set_projectile(b, Some(Projectile::default()));
-        assert_eq!(r.is_ok(), k < 64, "projectile {k}: {r:?}");
+        assert_eq!(r.is_ok(), k == 0, "projectile {k}: {r:?}");
     }
 }

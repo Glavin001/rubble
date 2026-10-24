@@ -28,7 +28,9 @@ fn pack_samples_build_as_lab_scenes() {
     assert!(order.windows(2).all(|w| w[0] <= w[1]), "{order:?}");
     for s in PACK_SAMPLES {
         let charges = stress_ref::wrecking::charges_of(&serde_json::from_slice(&pack_sample_json(s.key).unwrap()).unwrap());
-        assert_eq!(!charges.is_empty(), s.group == TOPPLE || s.group == SKYBRIDGE, "{}: Topple's and the Skybridge's structures and only they carry charges", s.key);
+        // (Driven Bridge Out's hinge-pier charge: a world API host's trigger, stress-ref `vehicles`.)
+        let charged = s.group == TOPPLE || s.group == SKYBRIDGE || s.key == "bo_drive_viaduct";
+        assert_eq!(!charges.is_empty(), charged, "{}: Topple's, the Skybridge's and driven Bridge Out's structures and only they carry charges", s.key);
         let structure = stress_ref::wrecking::structure(s.key).expect(s.key);
         let chunks = structure.chunks.len();
         let shown = s

@@ -716,11 +716,13 @@ pub enum ExtraMesh {
     Box { half: [f64; 3], color: [f32; 3], surface: f32 },
     /// A wheel: its axle along the mesh's x.
     Cylinder { radius: f64, half_width: f64, color: [f32; 3], surface: f32 },
+    /// A ball (its pose may scale it: a unit sphere drawn at any radius).
+    Sphere { radius: f64, color: [f32; 3], surface: f32 },
 }
 
 impl ExtraMesh {
     fn color(&self) -> [f32; 4] {
-        let (Self::Box { color, surface, .. } | Self::Cylinder { color, surface, .. }) = *self;
+        let (Self::Box { color, surface, .. } | Self::Cylinder { color, surface, .. } | Self::Sphere { color, surface, .. }) = *self;
         [color[0], color[1], color[2], surface]
     }
 }
@@ -928,6 +930,11 @@ impl Renderer {
             let (v, f) = match *m {
                 ExtraMesh::Box { half, .. } => box_faces(Vec3::from_array(half)),
                 ExtraMesh::Cylinder { radius, half_width, .. } => cylinder_faces(radius, half_width, 24),
+                ExtraMesh::Sphere { radius, .. } => {
+                    sphere_triangles(radius, object, &mut verts);
+                    object += 1;
+                    continue;
+                }
             };
             hull_triangles(&v, &f, object, &mut verts);
             object += 1;

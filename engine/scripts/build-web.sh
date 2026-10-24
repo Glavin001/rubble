@@ -155,6 +155,9 @@ cargo run --release -p engine-webgpu --no-default-features --bin wgsl_export
 step "Fracture lab wasm"
 wasm-pack build crates/engine-fracture-wasm --release --target web \
   --out-dir ../engine-webgpu/generated/fracture-wasm --no-typescript
+step "World API wasm (the showcase: engine-world-wasm)"
+CARGO_PROFILE_RELEASE_DEBUG=0 wasm-pack build crates/engine-world-wasm --release --target web \
+  --out-dir ../engine-webgpu/generated/world-wasm --no-typescript
 step "Stress-solver wasm (the Fracture lab's stress bond mode)"
 CARGO_PROFILE_RELEASE_DEBUG=0 wasm-pack build stress-oracle/crates/stress-web --release --target web \
   --out-dir ../../../crates/engine-webgpu/generated/stress-web --no-typescript

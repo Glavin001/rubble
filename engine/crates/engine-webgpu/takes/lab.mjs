@@ -60,13 +60,14 @@ const VEHICLE_TAKES = {
   ]),
   // V5 driven (stress_ref::drive): rubble's raycast sedan and six-wheel truck, in the world
   // API with the threshold model, driven by their wheels from 30 m out at full throttle;
-  // their chassis boxes strike the shop fronts (strike prediction), so they break in.
+  // their chassis boxes strike the shop fronts (strike prediction), so they break in. The
+  // truck's front wheels meet the stallriser (a raycast wheel cannot climb it): it slews in.
   rr_drive_storefront: take({ scene: 'rr_drive_storefront', bonds: 'threshold' }, [
     { n: 60, caption: 'A 1.3 t sedan, driven: engine, gearbox and wheels take it up the street at the middle shop', cam: { orbit: [-0.5, 0.18, 12], to: [-0.45, 0.16, 11], at: [0.55, -35.7, 1.2], atTo: [0.55, -33, 1.2] } },
     { n: 140, caption: 'Full throttle from a standstill: about 50 km/h at the shop front', cam: { orbit: [-0.45, 0.16, 11], to: [-0.6, 0.14, 10], at: [0.55, -33, 1.2], atTo: [0.55, -10, 1.2] } },
     { n: 240, slow: 4, caption: 'Quarter speed: its body strikes the window a step before it meets it, and it drives into the shop', cam: { orbit: [-0.6, 0.14, 10], to: [-1.0, 0.2, 10], at: [0.55, -10, 1.2], atTo: [0.55, -2, 1.3] } },
     { n: 60, caption: 'A 5.5 t six-wheel truck, a second behind, at the fourth shop', cam: { orbit: [-0.5, 0.18, 20], to: [-0.6, 0.16, 18], at: [11.5, -16, 1.8], atTo: [11.5, -8, 1.8] } },
-    { n: 240, slow: 4, caption: 'Quarter speed: the truck takes the shop front off its pier and swings in', cam: { orbit: [-0.6, 0.16, 18], to: [-1.1, 0.22, 16], at: [11.5, -8, 1.8], atTo: [11.5, -3, 2.0] } },
+    { n: 240, slow: 4, caption: 'Quarter speed: its front wheels meet the brick under the window; the truck breaks through and slews in', cam: { orbit: [-0.6, 0.16, 18], to: [-1.1, 0.22, 16], at: [11.5, -8, 1.8], atTo: [11.5, -3, 2.0] } },
     { n: 150, caption: 'Real time: both vehicles drove in on their own wheels', cam: { orbit: [-1.1, 0.22, 16], to: [-0.5, 0.3, 32], at: [11.5, -3, 2.0], atTo: [6, -3, 2.5] } },
   ]),
   // V5 into the apartment block's ground floor: the car at a brick-sill bay, then the bus.
@@ -152,6 +153,19 @@ export const LAB_TAKES = {
     { n: 25, caption: 'A 50 t wrecking ball into the middle pier' },
     { n: 240, slow: 2, caption: 'Half speed: the hinge lets go; the spans swing down with the traffic on them', cam: { rel: [0.3, 0.03, 0.42], relTo: [0.75, 0.1, 0.45] } },
     { n: 240, caption: 'They land on the road and its queue; the outer spans follow', cam: { rel: [0.75, 0.1, 0.45], relTo: [1.1, 0.16, 0.6] } },
+  ]),
+  // Bridge Out driven (stress_ref::vehicles `bo_drive_viaduct`): rubble's raycast sedans and
+  // six-wheel trucks cruising both ways over the viaduct and along the road under it, in
+  // the world API with the threshold model. The hinge pier's charge (cut between two steps)
+  // frees the drop-in spans from their seats; they come down with their traffic. (Under
+  // the threshold model the ball alone breaks only what it meets: bo_viaduct_traffic is the
+  // ball's beat, under blast_parity.)
+  bo_drive_viaduct: take({ scene: 'bo_drive_viaduct', bonds: 'threshold' }, [
+    { n: 120, caption: 'Traffic on a four-span viaduct, 10 m up: six vehicles driving across it, two on the road below', cam: { rel: [0.45, 0.05, 0.5], relTo: [0.32, 0.03, 0.42] } },
+    { n: 1, act: { detonate: 'hinge pier' }, caption: 'Charges blow the middle pier and cut the two drop-in spans loose' },
+    { n: 30, caption: 'Charges blow the middle pier and cut the two drop-in spans loose' },
+    { n: 240, slow: 2, caption: 'Half speed: the spans swing down about their seats with the traffic on them', cam: { rel: [0.32, 0.03, 0.42], relTo: [0.7, 0.1, 0.45] } },
+    { n: 270, caption: 'Real time: the traffic behind drives on into the gap', cam: { rel: [0.7, 0.1, 0.45], relTo: [1.05, 0.16, 0.6] } },
   ]),
   // Wrecking Yard (stress_ref::wrecking): the 50 t ball into the 10-floor frame's corner
   // column line under blast_parity; the collapse climbs while the core stands.

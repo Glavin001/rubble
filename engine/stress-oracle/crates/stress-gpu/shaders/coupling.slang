@@ -10,6 +10,10 @@
 //                   stress-rubble `contacts_of_step` and world_coupling.rs
 //                   `engine_contacts_to_impulses` compute them; records at fixed slots
 //                   (substep, row, side), so their order is the host's;
+//   ingest_wheels   one thread per raycast vehicle wheel slot (W5): a wheel on a chunk
+//                   loads it as a contact does, with the ground's force on its chassis
+//                   (the tyre's normal, longitudinal and lateral rows) reversed, at its hit
+//                   point, over the step; at fixed slots after the contact records;
 //   ingest_count, ingest_scan, ingest_scatter   the frame's records grouped by chunk
 //                   (a counting sort; atomics only on integer counts);
 //   ingest_merge    one thread per chunk: its records in slot order, merged per other
@@ -27,7 +31,11 @@ struct IngestParams
     uint record_count;  // records in the frame (substeps x 2 x max_rows)
     uint max_bodies;    // the engine's body capacity (its previous rows follow)
     float h;            // the substep's duration (s)
-    uint pad;
+    uint wheels;        // wheel slots after the contact records (`ingest_wheels`), 0: none
+    uint wheel_base;    // their first record slot
+    uint pad0;
+    uint pad1;
+    uint pad2;
 };
 
 // An engine body (engine-schema `BodyState`, 112 B).
@@ -113,11 +121,40 @@ struct Record
 // Per substep: the engine's contact rows it had (`ingest_rows`); the records of rows past
 // them are stale and not read (`record_live`).
 [[vk::binding(11, 0)]] RWStructuredBuffer<uint> row_counts;
+// The engine's vehicle pool (engine-schema `vehicle.rs`, `gVehicleData`): `ingest_wheels`.
+[[vk::binding(12, 0)]] StructuredBuffer<uint4> vehicle_pool;
+
+// The vehicle pool's layout (engine-schema `vehicle.rs`; float4 slots).
+static const uint VH_COUNTS = 0;  // uint4(maxVehicles, maxWheels, vehicleCount, wheelCount)
+static const uint VH_BASES = 1;   // uint4(vehicleBase, wheelBase, -, -)
+static const uint VEH_STRIDE = 44;
+static const uint V_CFG = 0;      // uint4(chassisBody, ...)
+static const uint V_MASS = 15;    // chassis mass, ...
+static const uint WHEEL_STRIDE = 48;
+static const uint W_CFG = 0;      // uint4(vehicle, ...)
+static const uint W_HP = 1;       // hardpoint.xyz, radius
+static const uint W_C0 = 12;      // uint4(groundBody, hitCollider, dynFlags, -)
+static const uint W_C2 = 14;      // contact normal.xyz
+static const uint W_C3 = 15;      // longitudinal direction.xyz
+static const uint W_C4 = 16;      // lateral direction.xyz
+static const uint W_F = 23;       // Fn, fL, fT (the last iteration's)
+static const uint W_HIT = 25;     // hit point (world).xyz
+static const uint WD_CONTACT = 1;
+static const uint WD_DETACHED = 8;
+static const uint WD_DISABLED = 16;
+
+// Record slot `i` of the frame's: the contact records' first, then the wheels'.
+uint record_slot(uint i)
+{
+    return i < params.record_count ? i : params.wheel_base + (i - params.record_count);
+}
 
 // Whether record `slot` belongs to a row of its substep (rows past the substep's count are
 // neither written nor read).
 bool record_live(uint slot)
 {
+    if (slot >= params.wheel_base)
+        return true; // every wheel slot is written each frame (`ingest_wheels`)
     uint per = 2 * params.max_rows;
     return (slot % per) / 2 < row_counts[slot / per];
 }
@@ -217,6 +254,59 @@ void ingest_rows(uint3 id: SV_DispatchThreadID)
     }
 }
 
+// A raycast wheel resting or rolling on a chunk loads it as a contact would (W5): the
+// tyre's rows are solved against the chunk's body (two-body rows), but the engine's
+// contact rows never see them. The force is the ground's on the chassis
+// (vehicle_step.slang `vehicleFinalize`: n Fn - t fL - s fT) reversed, at the wheel's hit
+// point, as an impulse over the step. Its closing speed is zero: the tyre and suspension
+// already filter the approach, and what they pass on is this force, so it is a sustained
+// load, never a Hertz pulse. The other side is the chassis (World's body codes are engine
+// bodies), its mass the chassis's and its radius the wheel's.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ingest_wheels(uint3 id: SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= params.wheels)
+        return;
+    uint slot = params.wheel_base + i;
+    Record none;
+    none.ids = uint4(NONE, NONE, slot, 0);
+    none.point = float4(0.0);
+    none.impulse = float4(0.0);
+    none.other = float4(0.0);
+    none.key = uint4(0);
+    records[slot] = none;
+    if (i >= vehicle_pool[VH_COUNTS].w)
+        return;
+    uint wr = vehicle_pool[VH_BASES].y + i * WHEEL_STRIDE;
+    uint4 dyn = vehicle_pool[wr + W_C0];
+    if ((dyn.z & WD_CONTACT) == 0 || (dyn.z & (WD_DETACHED | WD_DISABLED)) != 0)
+        return;
+    ColliderInfo mine = collider_info[dyn.y];
+    if (mine.a.x == NONE || mine.a.w == 0)
+        return;
+    float4 f = asfloat(vehicle_pool[wr + W_F]);
+    float3 n = asfloat(vehicle_pool[wr + W_C2].xyz);
+    float3 t = asfloat(vehicle_pool[wr + W_C3].xyz);
+    float3 s = asfloat(vehicle_pool[wr + W_C4].xyz);
+    float3 j = -(n * f.x - t * f.y - s * f.z) * params.h;
+    if (all(j == float3(0.0)) || any(isnan(j)) || any(isinf(j)))
+        return;
+    uint vr = vehicle_pool[VH_BASES].x + vehicle_pool[wr + W_CFG].x * VEH_STRIDE;
+    uint chassis = vehicle_pool[vr + V_CFG].x;
+    Record r;
+    r.ids = uint4(mine.a.x, chassis, slot, 1);
+    float3 jz = to_zup(j);
+    r.point = float4(to_zup(asfloat(vehicle_pool[wr + W_HIT].xyz)), length(jz));
+    r.impulse = float4(jz, 0.0);
+    // (The modulus only sizes an impact's pulse, which a wheel never makes.)
+    r.other = float4(asfloat(vehicle_pool[vr + V_MASS].x), mine.b.y, asfloat(vehicle_pool[wr + W_HP].w), 0.0);
+    // After every contact record of the frame (their substeps are smaller), by wheel.
+    r.key = uint4(NONE, dyn.y, chassis, i);
+    records[slot] = r;
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void ingest_clear(uint3 id: SV_DispatchThreadID)
@@ -229,9 +319,12 @@ void ingest_clear(uint3 id: SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void ingest_count(uint3 id: SV_DispatchThreadID)
 {
-    if (id.x >= params.record_count || !record_live(id.x))
+    if (id.x >= params.record_count + params.wheels)
         return;
-    Record r = records[id.x];
+    uint slot = record_slot(id.x);
+    if (!record_live(slot))
+        return;
+    Record r = records[slot];
     if (r.ids.w != 0)
         counts[r.ids.x].add(1u);
 }
@@ -273,14 +366,17 @@ void ingest_scan(uint3 thread: SV_GroupThreadID)
 [numthreads(64, 1, 1)]
 void ingest_scatter(uint3 id: SV_DispatchThreadID)
 {
-    if (id.x >= params.record_count || !record_live(id.x))
+    if (id.x >= params.record_count + params.wheels)
         return;
-    Record r = records[id.x];
+    uint slot = record_slot(id.x);
+    if (!record_live(slot))
+        return;
+    Record r = records[slot];
     if (r.ids.w == 0)
         return;
     uint n = params.chunk_count;
     uint at = counts[n + r.ids.x].add(1u);
-    sort[2 * n + 1 + sort[r.ids.x] + at] = id.x;
+    sort[2 * n + 1 + sort[r.ids.x] + at] = slot;
 }
 
 [shader("compute")]

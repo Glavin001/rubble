@@ -167,6 +167,14 @@ pub const PACK_SAMPLES: &[PackSample] = &[
         menu: "Highway viaduct with stalled traffic (7 cars, 2 buses) · 871 chunks",
         label: "viaduct with traffic",
     },
+    // Raycast vehicles driven across it (stress-ref `drive`; the threshold profile, in the
+    // world API).
+    PackSample {
+        key: "bo_drive_viaduct",
+        group: BRIDGE_OUT,
+        menu: "Highway viaduct, traffic driving across (6 on the deck, 2 below) · 347 chunks",
+        label: "viaduct with driven traffic",
+    },
     PackSample {
         key: "topple_tower",
         group: TOPPLE,

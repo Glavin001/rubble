@@ -582,11 +582,7 @@ fn shoot(s: Shooting, ray: engine_fracture::scene::Ray) -> bool {
 /// Queue a shot for the next frame and run. False when all shots are fired: the resident
 /// GpuWorld draws SHOTS balls; the threshold world reuses its oldest.
 fn queue_shot(desc: ImpactorDesc) -> bool {
-    // The world API's scenes take no shots yet: their impactors are the drives.
-    if DRIVING.get() {
-        return false;
-    }
-    if FIRED.get() >= SHOTS && TWORLD.with_borrow(|w| w.is_none()) {
+    if FIRED.get() >= SHOTS && (DRIVING.get() || TWORLD.with_borrow(|w| w.is_none())) {
         return false;
     }
     FIRED.set(FIRED.get() + 1);
@@ -707,7 +703,7 @@ fn load(level: u8) -> Result<(), String> {
         }
         return DEVICE.with_borrow(|d| {
             let d = d.as_ref().ok_or("stress_init first")?;
-            let l = drive::load(&d.gpu, &pack, &drives, d.config.width, d.config.height, d.view_format)?;
+            let l = drive::load(&d.gpu, &pack, d.config.width, d.config.height, d.view_format)?;
             DWORLD.with_borrow_mut(|w| *w = Some(l));
             DRIVING.set(true);
             Ok(())
@@ -966,12 +962,23 @@ fn frame_drive(d: &mut Device, l: &mut drive::DLoaded, advance: Advance) -> Resu
         d.surface.configure(&gpu.device, &d.config);
         l.resize(gpu, width, height, d.view_format)?;
     }
-    let dt = l.dt;
+    let dt = l.dt();
     let mut stepped = 0;
     let t_step = web_time::Instant::now();
+    // Shots fired since the last frame, and charges due: between this step and the last.
+    let before = |l: &mut drive::DLoaded| -> Result<(), String> {
+        for desc in PENDING.with_borrow_mut(std::mem::take) {
+            l.shoot(&desc)?;
+        }
+        for c in charges_due(l.frame(), dt) {
+            l.cut(&c)?;
+        }
+        Ok(())
+    };
     match advance {
         Advance::Steps(n) => {
             for _ in 0..n {
+                before(l)?;
                 l.step()?;
                 stepped += 1;
             }
@@ -979,6 +986,7 @@ fn frame_drive(d: &mut Device, l: &mut drive::DLoaded, advance: Advance) -> Resu
         Advance::Elapsed(elapsed_ms) if RUNNING.get() => {
             l.behind = (l.behind + elapsed_ms * 1e-3).min(MAX_BEHIND_S.max(2.0 * dt));
             while l.behind >= dt {
+                before(l)?;
                 l.step()?;
                 l.behind -= dt;
                 stepped += 1;
@@ -1008,6 +1016,8 @@ fn frame_drive(d: &mut Device, l: &mut drive::DLoaded, advance: Advance) -> Resu
     let draw_ms = t_draw.elapsed().as_secs_f64() * 1e3;
     PHASES.set([step_ms, 0.0, draw_ms]);
     let mut stats = l.stats(step_ms, stepped);
+    stats["charges"] = serde_json::json!(DEMOLITION.with_borrow(|d| d.names()));
+    stats["chargesArmed"] = serde_json::json!(DEMOLITION.with_borrow(|d| d.pending()) + DETONATE.with_borrow(|q| q.len()));
     let s = SHOOTING.get();
     stats["placement"] = serde_json::json!(s.map_or([0.0; 3], |s| s.placement));
     stats["warnings"] = serde_json::json!(WARNINGS.with_borrow(|w| w.clone()));

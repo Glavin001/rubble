@@ -688,6 +688,21 @@ pub enum WheelQuery {
 }
 
 impl VehicleDesc {
+    /// How high its centre of mass (where a pose puts the chassis: `pack`) stands over
+    /// level ground, along `up`, with every wheel just touching at full droop: where to
+    /// place it so it settles onto its springs with nothing else touching the ground.
+    pub fn droop_height(&self) -> f32 {
+        let d = self.centered();
+        let up = glam::Vec3::from_array(d.up).normalize();
+        d.wheels
+            .iter()
+            .map(|w| {
+                let dir = w.suspension_dir.map(glam::Vec3::from_array).unwrap_or(-up).normalize();
+                w.radius - (glam::Vec3::from_array(w.position) + dir * w.suspension_max).dot(up)
+            })
+            .fold(0.0, f32::max)
+    }
+
     /// True when some part (other than the root) or wheel can break off.
     pub fn breakable(&self) -> bool {
         self.parts.iter().skip(1).any(|p| p.mount.breakable()) || self.wheels.iter().any(|w| w.mount.breakable())

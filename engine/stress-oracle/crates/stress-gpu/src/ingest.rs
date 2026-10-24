@@ -49,7 +49,10 @@ struct IngestParams {
     record_count: u32,
     max_bodies: u32,
     h: f32,
-    pad: u32,
+    /// Wheel slots after the contact records (`ingest_wheels`), 0: none; their first slot.
+    wheels: u32,
+    wheel_base: u32,
+    pad: [u32; 3],
 }
 
 /// The engine's buffers the ingest reads.
@@ -60,7 +63,7 @@ pub struct EngineBuffers<'a> {
     pub counters: &'a wgpu::Buffer,
 }
 
-const BINDINGS: [Binding; 12] = [
+const BINDINGS: [Binding; 13] = [
     Binding::Uniform,   // params
     Binding::Storage,   // contacts
     Binding::Storage,   // colliders
@@ -73,6 +76,7 @@ const BINDINGS: [Binding; 12] = [
     Binding::StorageRw, // manifolds
     Binding::StorageRw, // counts
     Binding::StorageRw, // row counts (per substep)
+    Binding::Storage,   // vehicle pool (ingest_wheels)
 ];
 
 const BODY_BYTES: u64 = 112;
@@ -93,6 +97,7 @@ pub struct EngineIngest {
     scan: Kernel,
     scatter: Kernel,
     merge: Kernel,
+    wheel_kernel: Kernel,
     max_rows: u32,
     max_substeps: u32,
     max_bodies: u32,
@@ -105,6 +110,12 @@ pub struct EngineIngest {
     counts: wgpu::Buffer,
     /// Per substep, the engine's contact rows (`ingest_rows`; `record_live`).
     row_counts: wgpu::Buffer,
+    /// Raycast wheel slots (`with_wheels`): their records follow the contacts'.
+    max_wheels: u32,
+    /// Bound as the vehicle pool by the kernels that do not read one.
+    no_pool: wgpu::Buffer,
+    /// Whether this frame's wheels were recorded (`wheels`), for its `merge`.
+    wheels_recorded: std::cell::Cell<bool>,
 }
 
 impl EngineIngest {
@@ -112,8 +123,14 @@ impl EngineIngest {
     /// contact rows each, into `chunk_count` GPU chunks, for an engine of `max_bodies`
     /// bodies; `colliders` is the collider table (indexed by engine collider id).
     pub fn new(gpu: &Gpu, max_rows: u32, max_substeps: u32, max_bodies: u32, chunk_count: u32, colliders: &[ColliderInfo]) -> EngineIngest {
+        EngineIngest::with_wheels(gpu, max_rows, max_substeps, max_bodies, chunk_count, colliders, 0)
+    }
+
+    /// `new`, with room for the loads of `max_wheels` raycast wheel slots (the engine's
+    /// vehicle capacity; [`EngineIngest::wheels`]).
+    pub fn with_wheels(gpu: &Gpu, max_rows: u32, max_substeps: u32, max_bodies: u32, chunk_count: u32, colliders: &[ColliderInfo], max_wheels: u32) -> EngineIngest {
         let k = |e: &str| gpu.compute(&shaders::COUPLING, e, &BINDINGS);
-        let records = (2 * max_rows as u64 * max_substeps as u64).max(1);
+        let records = (2 * max_rows as u64 * max_substeps as u64 + max_wheels as u64).max(1);
         let storage = |label: &str, bytes: u64| {
             gpu.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
@@ -130,6 +147,7 @@ impl EngineIngest {
             scan: k("ingest_scan"),
             scatter: k("ingest_scatter"),
             merge: k("ingest_merge"),
+            wheel_kernel: k("ingest_wheels"),
             max_rows,
             max_substeps,
             max_bodies,
@@ -141,6 +159,9 @@ impl EngineIngest {
             manifolds: storage("ingest manifolds", std::mem::size_of::<Record>() as u64 * records),
             counts: storage("ingest counts", 4 * 2 * n),
             row_counts: storage("ingest row counts", 4 * 1024),
+            max_wheels,
+            no_pool: storage("ingest no vehicle pool", 16),
+            wheels_recorded: std::cell::Cell::new(false),
         }
     }
 
@@ -159,7 +180,7 @@ impl EngineIngest {
         if max_substeps <= self.max_substeps {
             return;
         }
-        let records = (2 * self.max_rows as u64 * max_substeps as u64).max(1);
+        let records = (2 * self.max_rows as u64 * max_substeps as u64 + self.max_wheels as u64).max(1);
         let storage = |label: &str, bytes: u64| {
             gpu.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
@@ -196,7 +217,17 @@ impl EngineIngest {
     }
 
     fn bind(&self, gpu: &Gpu, kernel: &Kernel, params: &wgpu::Buffer, e: &EngineBuffers) -> wgpu::BindGroup {
-        gpu.bind(&kernel.group, &[params, e.contacts, e.colliders, e.bodies, &self.start_bodies, e.counters, &self.collider_info, &self.records, &self.sort, &self.manifolds, &self.counts, &self.row_counts])
+        // Only `ingest_wheels` reads the vehicle pool (the layouts hold what each uses).
+        self.bind_with(gpu, kernel, params, e, &self.no_pool)
+    }
+
+    fn bind_with(&self, gpu: &Gpu, kernel: &Kernel, params: &wgpu::Buffer, e: &EngineBuffers, vehicle_pool: &wgpu::Buffer) -> wgpu::BindGroup {
+        gpu.bind(&kernel.group, &[params, e.contacts, e.colliders, e.bodies, &self.start_bodies, e.counters, &self.collider_info, &self.records, &self.sort, &self.manifolds, &self.counts, &self.row_counts, vehicle_pool])
+    }
+
+    /// The first wheel record slot: after every substep's contact records.
+    fn wheel_base(&self) -> u32 {
+        2 * self.max_rows * self.max_substeps
     }
 
     /// The frame's start: the engine's bodies as they are now (closing speeds use them).
@@ -213,7 +244,9 @@ impl EngineIngest {
             record_count: 2 * self.max_rows * self.max_substeps,
             max_bodies: self.max_bodies,
             h: h as f32,
-            pad: 0,
+            wheels: 0,
+            wheel_base: self.wheel_base(),
+            pad: [0; 3],
         };
         gpu.uniform("ingest params", &p)
     }
@@ -230,26 +263,54 @@ impl EngineIngest {
         pass.dispatch_workgroups(groups(self.max_rows as usize, 64), 1, 1);
     }
 
+    /// The loads of the engine's raycast wheels over its step of `h` s (W5,
+    /// `ingest_wheels`): each wheel on a chunk, from `vehicle_pool` (the engine's vehicle
+    /// pool, engine-schema `vehicle.rs`), for this frame's `merge`. Nothing without wheel
+    /// slots (`with_wheels`).
+    pub fn wheels(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, e: &EngineBuffers, vehicle_pool: &wgpu::Buffer, h: f64) {
+        if self.max_wheels == 0 {
+            return;
+        }
+        let mut p = self.base_params();
+        p.wheels = self.max_wheels;
+        p.h = h as f32;
+        let params = gpu.uniform("ingest params", &p);
+        let bind = self.bind_with(gpu, &self.wheel_kernel, &params, e, vehicle_pool);
+        let mut pass = encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&self.wheel_kernel.pipeline);
+        pass.set_bind_group(0, &bind, &[]);
+        pass.dispatch_workgroups(groups(self.max_wheels as usize, 64), 1, 1);
+        self.wheels_recorded.set(true);
+    }
+
+    fn base_params(&self) -> IngestParams {
+        IngestParams {
+            row_offset: 0,
+            max_rows: self.max_rows,
+            substep: 0,
+            chunk_count: self.chunk_count,
+            record_count: 0,
+            max_bodies: self.max_bodies,
+            h: 0.0,
+            wheels: 0,
+            wheel_base: self.wheel_base(),
+            pad: [0; 3],
+        }
+    }
+
     /// The frame's manifolds, from the records of `substeps` substeps (the rest of the
     /// slots cleared).
     pub fn merge(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, e: &EngineBuffers, substeps: u32) {
         // Only the substeps run are merged, and in each only its rows (`record_live`): the
         // rest of the records is never read, so nothing is cleared.
-        let mut params = IngestParams {
-            row_offset: 0,
-            max_rows: self.max_rows,
-            substep: 0,
-            chunk_count: self.chunk_count,
-            record_count: 2 * self.max_rows * substeps.max(1),
-            max_bodies: self.max_bodies,
-            h: 0.0,
-            pad: 0,
-        };
-        if substeps == 0 {
-            params.record_count = 0;
+        let mut params = self.base_params();
+        params.record_count = if substeps == 0 { 0 } else { 2 * self.max_rows * substeps };
+        // This frame's wheel records, if `wheels` wrote them.
+        if self.wheels_recorded.replace(false) {
+            params.wheels = self.max_wheels;
         }
+        let records = (params.record_count + params.wheels).max(2 * self.max_rows) as usize;
         let params = gpu.uniform("ingest params", &params);
-        let records = (2 * self.max_rows * substeps.max(1)) as usize;
         let n = self.chunk_count as usize;
         for (k, size) in [(&self.clear, groups(2 * n, 64)), (&self.count, groups(records, 64)), (&self.scan, 1), (&self.scatter, groups(records, 64)), (&self.merge, groups(n, 64))] {
             let bind = self.bind(gpu, k, &params, e);

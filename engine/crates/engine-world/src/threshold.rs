@@ -427,6 +427,52 @@ mod imp {
             Ok(if bonds { 2 * n } else { 0 })
         }
 
+        /// Cut a threshold destructible's bonds between steps (a demolition charge: a
+        /// pack's `defaults.charges`, stress-ref `wrecking::charges_of`), as if the last
+        /// step had broken them: the next step splits their bodies after it, as it splits
+        /// any step's breaks (forward: nothing is stepped again), and its frame reports them
+        /// as `BondsBroken`. `pairs` name each bond by the chunks it joins, in the stress
+        /// scene's order (a pack's nodes). Waits for the GPU (it reads the bonds' and
+        /// chunks' state as the last step left them). Returns the bonds cut (those not
+        /// already broken); an error names a pair no bond joins.
+        pub fn destructible_cut_bonds(
+            &mut self,
+            id: DestructibleId,
+            pairs: &[[usize; 2]],
+        ) -> anyhow::Result<usize> {
+            let k = self.threshold_slot(id)?;
+            let gpu = self.fracture.gpu.clone().expect("a threshold destructible's GPU");
+            let t = self.fracture.slots[k].as_mut().expect("live slot");
+            let index: std::collections::HashMap<(u32, u32), u32> = t
+                .tables
+                .bonds
+                .iter()
+                .enumerate()
+                .map(|(i, b)| ((b[0].min(b[1]), b[0].max(b[1])), i as u32))
+                .collect();
+            let mut cut = Vec::with_capacity(pairs.len());
+            for &[a, b] in pairs {
+                let (a, b) = (a as u32, b as u32);
+                let i = index
+                    .get(&(a.min(b), a.max(b)))
+                    .copied()
+                    .ok_or_else(|| anyhow::anyhow!("no bond joins chunks {a} and {b}"))?;
+                cut.push(i);
+            }
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+            let intact = t.fracture.bonds_intact(&gpu);
+            let bodies = t.fracture.chunk_bodies(&gpu);
+            let count = cut.iter().filter(|&&i| intact[i as usize]).count();
+            if count > 0 {
+                let total = t.fracture.counters(&gpu).broken;
+                t.fracture.break_bonds(&gpu, &cut, &intact, &bodies, &t.tables.bonds);
+                // The bonds broken in all (`C_BROKEN`) count the cut ones.
+                let at = 4 * (t.fracture.layout.a_counters() as u64 + 1);
+                gpu.queue.write_buffer(&t.fracture.atom, at, bytemuck::bytes_of(&(total + count as u32)));
+            }
+            Ok(count)
+        }
+
         fn threshold_slot(&self, id: DestructibleId) -> anyhow::Result<usize> {
             let d = &self.destructibles[self.live_destructible(id)?];
             d.threshold
@@ -436,7 +482,8 @@ mod imp {
 
         /// Mark a body as a projectile for threshold destructibles (`None` clears it): its
         /// contacts load chunks as the lab's shots do, and strike prediction checks each of
-        /// its sphere and box colliders each step. It needs mass. At most 64 colliders.
+        /// its sphere and box colliders each step. It needs mass. At most
+        /// `fracture::MAX_SHOTS` colliders in all.
         pub fn body_set_projectile(
             &mut self,
             body: BodyId,
@@ -957,13 +1004,15 @@ mod imp {
                     };
                 }
             }
-            let ingest = EngineIngest::new(
+            // Room for every raycast wheel's load (W5: the deck carries the traffic).
+            let ingest = EngineIngest::with_wheels(
                 &gpu,
                 capacity.max_contacts,
                 1,
                 capacity.max_bodies,
                 chunk_count as u32,
                 &table,
+                self.sim.vehicle_host().capacity.max_wheels,
             );
             let fracture = GpuFracture::new(&gpu, &t, &buffers(&self.sim), &ingest)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -1034,6 +1083,8 @@ mod imp {
             let step = self.sim.steps_done();
             for t in self.fracture.slots.iter_mut().flatten() {
                 t.ingest.substep(&gpu, enc, &e, offset, 0, dt);
+                // (With no vehicles every wheel slot is empty.)
+                t.ingest.wheels(&gpu, enc, &e, self.sim.vehicle_pool_buffer(), dt);
                 t.ingest.merge(&gpu, enc, &e, 1);
                 t.fracture.encode_frame(&gpu, enc, step);
             }

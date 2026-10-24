@@ -844,20 +844,40 @@ the middle shop's window, and the `six_wheel_truck` preset at the fourth shop's,
 behind. Each starts 30 m out and is driven at full throttle by its own engine, gearbox and
 wheels (the pack's `defaults.drives`, `stress_ref::drive`).
 - **How it runs.** stress-web runs the scene in rubble's world API (`World`), not in the
-  lab's threshold world. The structure is a `Threshold` destructible, the same GPU fracture
+  lab's threshold world, through `rubble::scenario` (the host the showcase page and the
+  native tests share). The structure is a `Threshold` destructible, the same GPU fracture
   as the threshold mode. Each vehicle's chassis is a projectile: its body boxes and its
-  wheels' rims strike the shop front in the frame before they meet it.
+  wheels' rims strike the shop front in the frame before they meet it. Each stands on its
+  wheels at full droop (`VehicleDesc::droop_height`), and its wheels load what they stand
+  on (the ingest's `ingest_wheels`).
 - **Drawing.** The lab's renderer draws the chunks from the GPU and the vehicles' boxes and
   wheels from each frame's readback.
-- **Profile.** It needs the threshold profile (Bonds · Stress solver · simple threshold). It
-  takes no shots, and Bond strength and Physics do not apply.
+- **Profile.** It needs the threshold profile (Bonds · Stress solver · simple threshold).
+  Bond strength and Physics do not apply. A click fires a projectile ball; Detonate sets
+  off a pack's charges (cut between two steps, `World::destructible_cut_bonds`).
 - **What happens.** Take `rr_drive_storefront`, in Chrome:
   - The sedan reaches about 50 km/h, breaks the window and stallriser and drives into the
     shop.
-  - The truck takes the fourth shop's front off its pier and swings in, nose first.
-  - 164 bonds are broken, the same in two recordings.
+  - The truck's front wheels meet the brick stallriser under the fourth shop's window (a
+    raycast wheel cannot climb it); it breaks through and slews in about 40°.
+  - 136 bonds are broken, the same in two recordings. (Before the spawn-height fix the
+    truck started inside the street and was thrown up out of it: its take broke 164.)
 - **What it doesn't do yet.** The vehicles are rigid: they don't crumple as the bonded ones
   do.
+
+**Bridge Out, driven** (`bo_drive_viaduct`, 347 chunks). The viaduct with eight raycast
+vehicles cruising at 3–3.5 m/s (a drive's `speed`: the host lifts off the throttle at it):
+two sedans and a six-wheel truck each way on the deck, a sedan and a truck along the road
+below. Detonate sets off the hinge pier's charge: every bond of that pier, and every bond
+holding the drop-in spans to anything else. The spans swing down about their seats with the
+four vehicles on them; the traffic behind drives on into the gap (take
+`bo_drive_viaduct`, 292 bonds). Under the threshold model the ball alone breaks only what it
+meets: a span still bonded at one seat hangs there, as no load reaches its links. The
+charge cuts what `blast_parity`'s stress solver breaks (`bo_viaduct_pier`).
+
+The same scenarios run on the **showcase** page (`../showcase/`): engine-world-wasm steps
+the world on its own device and hands each step's poses to this page's renderer
+(`render.mjs`), the chunks in their materials' colours. It needs JSPI (Chrome or Edge 137+).
 
 Recording these takes exposed a bug in strike prediction that was older than them. Under the
 WGSL builds' fast math (Chrome, and naga's Metal compile), the nearest struck chunk was

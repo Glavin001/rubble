@@ -233,8 +233,11 @@ impl Layout {
 }
 
 const SUMS: u32 = 20;
-/// The shots strike prediction checks, at most.
-pub const MAX_SHOTS: usize = 64;
+/// The shots strike prediction checks, at most: the shot table's capacity (64 B a shot).
+/// Its kernels loop over the shots set, never over this, so room costs nothing; a
+/// vehicle's chassis is a few dozen shots (each of its boxes and rim and shell spheres),
+/// so this holds a street's traffic.
+pub const MAX_SHOTS: usize = 1024;
 const BODY_WORDS: u32 = 7;
 const ARGS: u64 = 6;
 const ARG_CHUNKS: u64 = 0;

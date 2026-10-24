@@ -9,14 +9,20 @@
 //! packs' frame (Y-up, m):
 //!
 //! ```json
-//! {"name": "sedan", "vehicle": "sedan", "at": {"x": 0.55, "y": 1.25, "z": 33.5},
+//! {"name": "sedan", "vehicle": "sedan", "at": {"x": 0.55, "y": 0.5, "z": 33.5},
 //!  "forward": {"x": 0, "y": 0, "z": -1}, "throttle": 1, "delay": 0}
 //! ```
 //!
 //! * `vehicle` names an `engine-vehicle` preset (`sedan`, `six_wheel_truck`, ...).
-//! * `at` is the vehicle's design origin and `forward` the way its nose points (level).
+//! * `at` is the point on the ground under its centre of mass, and `forward` the way its
+//!   nose points (level). A host stands it there on its wheels at full droop
+//!   (`engine-vehicle` `VehicleDesc::droop_height`), so it settles onto its springs with
+//!   nothing else touching: each preset's own height, never one guessed for all.
 //! * `throttle` (0..1) is held from `delay` (s after the scene starts) on; until then the
 //!   vehicle stands braked.
+//! * `speed` (m/s, optional): traffic's cruising speed. The host lifts off the throttle
+//!   while the vehicle's forward speed is at or over it (its input, not its physics); without
+//!   it the throttle is held.
 
 use serde_json::{json, Value};
 
@@ -25,11 +31,28 @@ use serde_json::{json, Value};
 pub struct Drive {
     pub name: String,
     pub vehicle: String,
+    /// The ground under its centre of mass.
     pub at: [f64; 3],
     /// Unit, level.
     pub forward: [f64; 3],
     pub throttle: f64,
     pub delay: f64,
+    /// Cruising speed (m/s): no throttle at or over it. None: held.
+    pub speed: Option<f64>,
+}
+
+impl Drive {
+    /// The throttle at `t` s with the vehicle's forward speed `forward` (m/s): `None` to
+    /// stand braked (before its delay).
+    pub fn throttle_at(&self, t: f64, forward: f64) -> Option<f64> {
+        if t < self.delay {
+            None
+        } else if self.speed.is_some_and(|s| forward >= s) {
+            Some(0.0)
+        } else {
+            Some(self.throttle)
+        }
+    }
 }
 
 fn y_up(v: [f64; 3]) -> [f64; 3] {
@@ -56,7 +79,13 @@ pub fn write(pack: &mut Value, drives: &[Drive]) {
     }
     pack["defaults"]["drives"] = drives
         .iter()
-        .map(|d| json!({"name": d.name, "vehicle": d.vehicle, "at": xyz(d.at), "forward": xyz(d.forward), "throttle": d.throttle, "delay": d.delay}))
+        .map(|d| {
+            let mut v = json!({"name": d.name, "vehicle": d.vehicle, "at": xyz(d.at), "forward": xyz(d.forward), "throttle": d.throttle, "delay": d.delay});
+            if let Some(s) = d.speed {
+                v["speed"] = json!(s);
+            }
+            v
+        })
         .collect();
 }
 
@@ -79,7 +108,11 @@ pub fn drives_of(pack: &Value) -> Result<Vec<Drive>, String> {
             if !(0.0..=1.0).contains(&throttle) {
                 return Err(format!("drive {name}: throttle {throttle} outside 0..1"));
             }
-            Ok(Drive { name, vehicle, at, forward: [f[0] / len, f[1] / len, 0.0], throttle, delay: d["delay"].as_f64().unwrap_or(0.0) })
+            let speed = d["speed"].as_f64();
+            if speed.is_some_and(|s| !(s > 0.0)) {
+                return Err(format!("drive {name}: speed {speed:?} is not positive"));
+            }
+            Ok(Drive { name, vehicle, at, forward: [f[0] / len, f[1] / len, 0.0], throttle, delay: d["delay"].as_f64().unwrap_or(0.0), speed })
         })
         .collect()
 }

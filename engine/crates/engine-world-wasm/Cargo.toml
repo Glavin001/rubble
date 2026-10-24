@@ -1,0 +1,28 @@
+[package]
+name = "engine-world-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "wasm-bindgen bindings of rubble's world API for the browser showcase: scenarios (scene packs with driven vehicles, shots and charges) stepped in Rust, their poses handed to the page's renderer"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[dependencies]
+rubble = { package = "engine-world", path = "../engine-world" }
+engine-fracture.workspace = true
+engine-gpu-wait.workspace = true
+stress-gpu = { path = "../../stress-oracle/crates/stress-gpu" }
+stress-ref = { path = "../../stress-oracle/crates/stress-ref" }
+stress-rubble = { path = "../../stress-oracle/crates/stress-rubble", default-features = false, features = ["gpu"] }
+anyhow.workspace = true
+glam.workspace = true
+serde_json.workspace = true
+wgpu.workspace = true
+wasm-bindgen = "=0.2.129"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["console"] }
