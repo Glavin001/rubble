@@ -246,7 +246,12 @@ pub struct SoftRigidPart {
 impl SoftRigidPart {
     /// Volume-weighted centre of the colliders (desc space): the body origin.
     pub fn center(&self) -> glam::Vec3 {
-        let vol: f32 = self.colliders.iter().map(|c| c.shape.volume()).sum::<f32>().max(1e-9);
+        let vol: f32 = self
+            .colliders
+            .iter()
+            .map(|c| c.shape.volume())
+            .sum::<f32>()
+            .max(1e-9);
         self.colliders
             .iter()
             .map(|c| glam::Vec3::from_array(c.position) * (c.shape.volume() / vol))
@@ -255,14 +260,23 @@ impl SoftRigidPart {
 
     /// Principal inertia (body axes = desc axes) about [`Self::center`].
     pub fn inertia(&self) -> glam::Vec3 {
-        let vol: f32 = self.colliders.iter().map(|c| c.shape.volume()).sum::<f32>().max(1e-9);
+        let vol: f32 = self
+            .colliders
+            .iter()
+            .map(|c| c.shape.volume())
+            .sum::<f32>()
+            .max(1e-9);
         let o = self.center();
         let mut i = glam::Vec3::splat(1e-6);
         for c in &self.colliders {
             let m = self.mass * c.shape.volume() / vol;
             let d = glam::Vec3::from_array(c.position) - o;
             i += glam::Vec3::from_array(c.shape.inertia(m))
-                + m * glam::Vec3::new(d.y * d.y + d.z * d.z, d.x * d.x + d.z * d.z, d.x * d.x + d.y * d.y);
+                + m * glam::Vec3::new(
+                    d.y * d.y + d.z * d.z,
+                    d.x * d.x + d.z * d.z,
+                    d.x * d.x + d.y * d.y,
+                );
         }
         i
     }

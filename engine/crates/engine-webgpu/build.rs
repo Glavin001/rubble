@@ -128,6 +128,7 @@ const WORLD_ENTRIES: &[&str] = &[
     "soft_tri_planes",
     "soft_pairs",
     "soft_velocity",
+    "soft_contact_lists",
     "soft_collide_nodes",
     "soft_collide_tris",
     "soft_primal",

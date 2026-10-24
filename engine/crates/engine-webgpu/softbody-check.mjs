@@ -110,7 +110,7 @@ const CHECKS = {
           for (let r = 0; r < 8; r++) { const p = await w.profileStep(); for (const k in p) acc[k] = (acc[k] || 0) + p[k] / 8; }
           const tot = Object.values(acc).reduce((a, b) => a + b, 0);
           out.gpu = tot.toFixed(2);
-          out.top = Object.entries(acc).sort((a, b) => b[1] - a[1]).slice(0, 14).map(([k, v]) => k + ' ' + v.toFixed(3)).join(', ');
+          out.top = Object.entries(acc).sort((a, b) => b[1] - a[1]).slice(0, ${Number(process.env.BUDGET_TOP || 14)}).map(([k, v]) => k + ' ' + v.toFixed(3)).join(', ');
           return JSON.stringify(out);
         })()`);
         console.log(q, 'split', split);
