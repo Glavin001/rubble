@@ -90,6 +90,9 @@ if [[ -f "$HOME/.cargo/env" ]]; then
   . "$HOME/.cargo/env"
 fi
 step "Tools (wasm32 target, slangc, wasm-pack)"
+# From engine/: its rust-toolchain.toml (stable) is the one the build uses. The repo
+# root's pins a nightly with rustc-dev, which a rustup call there would install.
+cd "$ENGINE"
 if ! rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown; then
   echo "==> rustup target add wasm32-unknown-unknown"
   rustup target add wasm32-unknown-unknown
@@ -146,7 +149,6 @@ for glb in "$WEB"/fracture/assets/*.glb; do
   fi
 done
 
-cd "$ENGINE"
 step "WGSL kernels, vehicle presets and vehicle wasm (wgsl_export)"
 # Without the `gpu` feature: the exporter only needs the WGSL tables, not native wgpu.
 cargo run --release -p engine-webgpu --no-default-features --bin wgsl_export
