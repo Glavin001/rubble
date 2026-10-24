@@ -18,16 +18,22 @@ import { defaults, materials } from './src/buggy.mjs';
 import { LiveGeometry } from './src/live-geometry.mjs';
 import { createRigDefinition, cornerIds } from './src/vehicle-rig.mjs';
 import { VisualRig } from './src/visual-rig.mjs';
-import { classify, RUBBLE_PARTS, CORNERS, CLASSES } from './parts.mjs';
+import { classify, partsFor, CORNERS, CLASSES, MODELS } from './parts.mjs';
+import { vehicleById, trailerSpec } from './src/vehicle-catalog.mjs';
 import { buildFrameGraph } from './frame-graph.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const OUT = resolve(here, '../../crates/engine-webgpu/generated/dune-buggy');
-const PARAMS = { ...defaults, vehicle: 'buggy' };
 const r6 = (x) => Math.round(x * 1e6) / 1e6;
+mkdirSync(OUT, { recursive: true });
+for (const id of process.argv.length > 2 ? process.argv.slice(2) : MODELS) bake(id);
 
+/** One model: `<model>-mesh.{json,bin}` (the buggy also its rig fixtures). */
+function bake(MODEL) {
+const PARAMS = { ...defaults, ...vehicleById(MODEL).parameters, vehicle: MODEL };
 const live = new LiveGeometry();
 const model = live.build(PARAMS);
+const buggy = MODEL === 'buggy';
 
 // ---- primitives ----
 const templates = [];
@@ -57,12 +63,15 @@ for (const part of model.parts) {
 
 // ---- hybrid build: the frame graph's render bindings (bake-physics builds the
 // same graph from the same live build; masses do not change the bindings) ----
-const graph = buildFrameGraph(live, model, model.parts.map(() => 0), {});
+const graph = buggy ? buildFrameGraph(live, model, model.parts.map(() => 0), {}) : { bindings: [], nodes: [] };
+const classes = model.parts.map((p) => classify(p, MODEL));
+const partNames = partsFor(classes).map((p) => p.name);
+const spec = trailerSpec(PARAMS);
 
 // ---- instances ----
 const palette = Object.keys(materials);
-const instances = model.parts.map((p) => {
-  const c = classify(p);
+const instances = model.parts.map((p, i) => {
+  const c = classes[i];
   const e = p.matrix.elements;
   const m = p.motion;
   return {
@@ -71,14 +80,17 @@ const instances = model.parts.map((p) => {
     // Column-major 3×4 (Three.js elements without the last row).
     matrix: [e[0], e[1], e[2], e[4], e[5], e[6], e[8], e[9], e[10], e[12], e[13], e[14]].map(r6),
     material: palette.indexOf(p.material),
-    part: c.part,
+    part: c.cls === 'trailer' ? -1 : partNames.indexOf(c.name),
     cls: CLASSES.indexOf(c.cls),
     corner: c.corner ? CORNERS.indexOf(c.corner) : -1,
     role: m?.role ?? null,
     ...(m?.endpoints ? { endpoint: m.endpoints[0].map(r6) } : {}),
     ...(m?.radius ? { radius: r6(m.radius) } : {}),
     // Hybrid: a frame tube spans two nodes; other frame parts ride three.
-    ...(graph.bindings[model.parts.indexOf(p)] ? { bind: graph.bindings[model.parts.indexOf(p)] } : {}),
+    ...(graph.bindings[i] ? { bind: graph.bindings[i] } : {}),
+    // Semi: trailer parts ride the trailer vehicle; its wheels' parts (side l
+    // then r: vibe_semi_trailer's wheel order) spin about their hub.
+    ...(c.trailerWheel ? { trailerWheel: p.center[0] < 0 ? 0 : 1, hub: [(p.center[0] < 0 ? -1 : 1) * spec.halfTrack, spec.wheelRadius, spec.axleZ] } : {}),
   };
 });
 
@@ -92,7 +104,37 @@ const corners = Object.fromEntries(cornerIds.map((id) => {
 }));
 const rigDef = { corners, steering: { columnStart: rig.steering.columnStart, columnEnd: rig.steering.columnEnd, ratio: rig.steering.ratio } };
 
+if (buggy) writeFixtures(model, OUT);
+
+const bin = new Uint8Array(bytes);
+let off = 0;
+for (const c of chunks) { bin.set(c, off); off += c.byteLength; }
+writeFileSync(resolve(OUT, `${MODEL}-mesh.bin`), bin);
+writeFileSync(resolve(OUT, `${MODEL}-mesh.json`), JSON.stringify({
+  model: MODEL,
+  format: 'rubble-dune-buggy-mesh-1',
+  source: 'engine/scenes/dune-buggy (vibe-land buggy.mjs, live geometry)',
+  frame: 'recipe frame: metres, +Y up, -Z front, left at x < 0; Rubble = R(x, y, z) = (-x, y, -z)',
+  parameters: PARAMS,
+  vertexStride: 24,
+  // vibe-land paints the frame material (cage and body) in the model's catalog
+  // finish (VehicleVisual.configure: palette.frame ← config.finish).
+  palette: palette.map((name) => ({ name, color: name === 'frame' ? vehicleById(MODEL).color : materials[name].color, metalness: materials[name].metalness, roughness: materials[name].roughness })),
+  parts: partNames,
+  corners: CORNERS,
+  classes: CLASSES,
+  templates,
+  instances,
+  rig: rigDef,
+  // Hybrid frame nodes at rest (Rubble design frame), in engine_softbody::buggy order.
+  frameNodes: graph.nodes.map((n) => n.position),
+}));
+const tris = instances.reduce((s, i) => s + templates[i.template].indexCount / 3, 0);
+console.error(`${MODEL} mesh: ${templates.length} primitives (${(bytes / 1024).toFixed(0)} KiB), ${instances.length} parts, ${tris} triangles → ${OUT}`);
+}
+
 // ---- reference poses from the original rig (buggy-rig.mjs tests) ----
+function writeFixtures(model, OUT) {
 const visual = new VisualRig(model);
 const posed = model.parts.map((p, i) => [p, i]).filter(([p]) => p.motion && p.motion.role !== 'wheel' && p.motion.role !== 'hub');
 // One wheel and one hub part per corner stand for their groups (same matrix).
@@ -115,28 +157,5 @@ for (let k = 0; k < 12; k++) {
     coil: Object.fromEntries(cornerIds.map((id) => [id, r6(visual.states[id].coilLength)])),
   });
 }
-
-mkdirSync(OUT, { recursive: true });
-const bin = new Uint8Array(bytes);
-let off = 0;
-for (const c of chunks) { bin.set(c, off); off += c.byteLength; }
-writeFileSync(resolve(OUT, 'buggy-mesh.bin'), bin);
-writeFileSync(resolve(OUT, 'buggy-mesh.json'), JSON.stringify({
-  format: 'rubble-dune-buggy-mesh-1',
-  source: 'engine/scenes/dune-buggy (vibe-land buggy.mjs, live geometry)',
-  frame: 'recipe frame: metres, +Y up, -Z front, left at x < 0; Rubble = R(x, y, z) = (-x, y, -z)',
-  parameters: PARAMS,
-  vertexStride: 24,
-  palette: palette.map((name) => ({ name, color: materials[name].color, metalness: materials[name].metalness, roughness: materials[name].roughness })),
-  parts: RUBBLE_PARTS.map((p) => p.name),
-  corners: CORNERS,
-  classes: CLASSES,
-  templates,
-  instances,
-  rig: rigDef,
-  // Hybrid frame nodes at rest (Rubble design frame), in engine_softbody::buggy order.
-  frameNodes: graph.nodes.map((n) => n.position),
-}));
 writeFileSync(resolve(OUT, 'rig-fixtures.json'), JSON.stringify({ poses }));
-const tris = instances.reduce((s, i) => s + templates[i.template].indexCount / 3, 0);
-console.error(`buggy mesh: ${templates.length} primitives (${(bytes / 1024).toFixed(0)} KiB), ${instances.length} parts, ${tris} triangles → ${OUT}`);
+}

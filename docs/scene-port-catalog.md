@@ -40,8 +40,9 @@ existing cross-engine adapters (rubble, rapier, physx, jolt, three-avbd) run it.
 | stress-oracle b1–b9, s_* showcases (native only) | `engine/stress-oracle/crates/stress-ref` | PhysX stress-oracle |
 | Packs: brick-building, comp-wall-bay, house-1story, house-2story, rig-portal, rig-toppled, veneer-house-l0, villa-savoye (native stress only) | `engine/stress-oracle/packs/` | blast-stress-solver structures |
 | stress-rubble scenes: wall_ram, b5_v10/20/40, house_ram, house_idle, town(16), town_idle, veneer, wall_row, striker | `stress-rubble` | PhysX stress-physx |
-| Vehicle scenes: playground, destruction, buggies, traffic, slab, seesaw, carry, sidewall, bridge, tanklab | `vehicle.html` | rubble |
+| Vehicle scenes: playground, destruction, buggies, vibeland, traffic, slab, seesaw, carry, sidewall, bridge, tanklab | `vehicle.html` | rubble |
 | Dune buggy (vibe-land garage "Sand rail": recipe mesh, rig, measured joints → breakable part mounts) | `engine/scenes/dune-buggy`, `vehicle.html?scene=buggies`, preset `dune_buggy` | vibe-land `client/src/vehicles/dune` |
+| vibe-land garage catalog: trophy truck, rally, monster truck, derby sedan, sprint car, semi + trailer | `engine/scenes/dune-buggy`, `vehicle.html?scene=vibeland`, presets `vibe_*` | vibe-land `client/src/vehicles/dune` |
 | three-avbd paper/scale scenes, legacy scenes, convex piles, joints | `engine-scenes`, `demo.html` | three-avbd, legacy rubble |
 
 Gaps in this group: the oracle scenes and the 8 packs have no web page; shardwright_house L2/L3
