@@ -82,6 +82,9 @@ pub enum BodyFlags {
 /// and the nearest time of impact along its path places a speculative contact
 /// in the solve and starts the body's iterate at that pose.
 pub const BODY_CCD: u32 = 256; // 64 BODY_PARTICLE, 128 BODY_FOLLOW (engine-softbody)
+/// Motion locks in `BodyState::flags` (world axes): bits 9..11 linear x, y,
+/// z; 12..14 angular x, y, z (the `lock_predict` / `lock_project` passes).
+pub const BODY_LOCK_SHIFT: u32 = 9;
 
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -255,9 +258,6 @@ pub struct Manifold {
 /// joint count.)
 pub const EVENT_RING_BASE: u32 = 96;
 pub const EVENT_RING_CAPACITY: u32 = 1024;
-/// Total `u32` words of the scratch-atomics buffer (host words, lists, ring,
-/// continuous-collision lists, impulse records and carried CCD velocities).
-pub const SCRATCH_WORDS: u32 = CCD_PAIR_BASE + 2 * CCD_PAIR_CAP;
 
 /// Continuous-collision scratch (`ccd_step.slang`), after the oversized-static
 /// list: CCD body count, fast-collider count, impulse count, TOI fallbacks.
@@ -327,6 +327,36 @@ impl ImpulseRecord {
         Self { body, mode: IMPULSE_LINEAR_ANGULAR, j: linear, point: angular }
     }
 }
+/// Contact events (opt-in `contact_events` pass): after the large-static
+/// list, a header word counting the records appended this step (the host
+/// zeroes it), three spare words, then up to `CONTACT_EVENT_CAP` records of
+/// `CONTACT_EVENT_WORDS`: `[colliderA, colliderB, approach speed, 0]`,
+/// `[point, 0]`, `[normal, 0]`. Counts past the capacity are reported lost.
+/// (After the continuous-collision region.)
+pub const CONTACT_EVENT_BASE: u32 = CCD_PAIR_BASE + 2 * CCD_PAIR_CAP;
+pub const CONTACT_EVENT_CAP: u32 = 2048;
+pub const CONTACT_EVENT_WORDS: u32 = 12;
+/// `Collider.material` bits 12..15 (the index uses 0..11, the filter group
+/// 16..31): the shape reports contact events, hit events, or is a sensor.
+pub const COLLIDER_CONTACT_EVENTS: u32 = 1 << 12;
+pub const COLLIDER_HIT_EVENTS: u32 = 1 << 13;
+pub const COLLIDER_SENSOR: u32 = 1 << 14;
+/// Overlap queries (P5): after the contact events, `[query count, result
+/// count (the host zeroes it), 0, 0]`, then `QUERY_CAP` queries of 8 words
+/// `[min, category bits]`, `[max, mask bits]`, then up to `QUERY_RESULT_CAP`
+/// results of 2 words `[query, collider]`.
+pub const QUERY_BASE: u32 = CONTACT_EVENT_BASE + 4 + CONTACT_EVENT_WORDS * CONTACT_EVENT_CAP;
+pub const QUERY_CAP: u32 = 32;
+pub const QUERY_RESULT_BASE: u32 = QUERY_BASE + 4 + 8 * QUERY_CAP;
+pub const QUERY_RESULT_CAP: u32 = 8192;
+/// Explosions (P4 `explode`): `[count, 0, 0, 0]`, then `EXPLODE_CAP` records
+/// of 8 words `[centre, radius]`, `[falloff, impulse per area, mask bits, 0]`.
+pub const EXPLODE_BASE: u32 = QUERY_RESULT_BASE + 2 * QUERY_RESULT_CAP;
+pub const EXPLODE_CAP: u32 = 16;
+/// Total `u32` words of the scratch-atomics buffer (host words, lists, ring,
+/// continuous-collision lists, impulse records and carried CCD velocities,
+/// contact events, queries, explosions).
+pub const SCRATCH_WORDS: u32 = EXPLODE_BASE + 4 + 8 * EXPLODE_CAP;
 /// Scratch word of the oversized-static count (uniform grid; see `LARGE_STATIC_CAP`).
 pub const LARGE_STATIC_COUNT: u32 = 80;
 /// First scratch word of the oversized-static collider ids, after the event ring.
