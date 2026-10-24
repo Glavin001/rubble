@@ -588,7 +588,40 @@ pub fn replace_building(pack: &mut serde_json::Value, group: &str, tower: &Tower
         b["node0"] = json!(new_index[a]);
         b["node1"] = json!(new_index[o]);
     }
-    // The tower's materials, by name.
+    add_building(pack, tower, at, name)
+}
+
+/// The fracture lab's glass tower scene (a ScenePack v2): the town's glass tower and, 7.8 m off
+/// its south face, a two-storey glass pavilion it can be felled onto, as the Unreal town's tower
+/// stands by its grocery. Shots are the town's cannonballs (60 cm iron, 7 t).
+pub fn felling_scene_pack() -> serde_json::Value {
+    let tall = glass_tower(&GlassTowerOptions::default());
+    let small = glass_tower(&GlassTowerOptions { storeys: 2, half: 6.0, seed: 0x7061_7669, ..GlassTowerOptions::default() });
+    let gap = 7.8 + SKIN;
+    let mut pack = serde_json::json!({
+        "version": 2,
+        "key": "glass-tower",
+        "title": "Glass tower and pavilion",
+        "defaults": {
+            "solver": { "gravity": -9.81, "materials": [] },
+            "projectile": { "radius": 0.6, "mass": 7.0e3 },
+        },
+        "scenario": {
+            "nodes": [], "bonds": [], "nodeSizes": [], "nodeColliders": [], "nodeTypes": [],
+            "nodeMaterials": [], "nodePieces": [], "nodeGroups": [],
+        },
+    });
+    add_building(&mut pack, &tall, [0.0, 0.0, 0.0], "tower@glass-tower").expect("an empty pack takes a building");
+    let south = -(7.0 + SKIN) - gap - (6.0 + SKIN);
+    add_building(&mut pack, &small, [0.0, 0.0, south], "pavilion@glass-pavilion").expect("and another");
+    pack
+}
+
+/// Add `tower` to a ScenePack, its frame's origin at `at`, its nodes in group `name`; its
+/// materials join the pack's by name and its pieces are numbered after the pack's.
+pub fn add_building(pack: &mut serde_json::Value, tower: &Tower, at: [f64; 3], name: &str) -> anyhow::Result<()> {
+    use anyhow::anyhow;
+    use serde_json::{json, Value};
     let materials = pack["defaults"]["solver"]["materials"].as_array_mut().ok_or_else(|| anyhow!("pack has no defaults.solver.materials"))?;
     let slot: Vec<usize> = tower
         .materials
@@ -610,30 +643,32 @@ pub fn replace_building(pack: &mut serde_json::Value, group: &str, tower: &Tower
         })
         .collect();
     let names: Vec<String> = tower.materials.iter().map(|m| m.name.clone()).collect();
-    let sc = pack["scenario"].as_object_mut().expect("checked");
+    let sc = pack["scenario"].as_object_mut().ok_or_else(|| anyhow!("pack has no scenario"))?;
+    let base = sc["nodes"].as_array().map_or(0, |a| a.len());
     let piece0 = sc["nodePieces"].as_array().and_then(|a| a.iter().filter_map(Value::as_u64).max()).map_or(0, |m| m + 1);
     let xyz = |p: [f64; 3]| json!({"x": p[0], "y": p[1], "z": p[2]});
     let world = |p: [f64; 3]| [p[0] + at[0], p[1] + at[1], p[2] + at[2]];
+    let mut push = |k: &str, v: Value| -> anyhow::Result<()> {
+        sc.get_mut(k).and_then(Value::as_array_mut).ok_or_else(|| anyhow!("pack has no scenario.{k}"))?.push(v);
+        Ok(())
+    };
     for node in &tower.nodes {
-        sc.get_mut("nodes").unwrap().as_array_mut().unwrap().push(json!({
-            "centroid": xyz(world(node.centroid)), "mass": node.mass, "volume": node.volume, "m": slot[node.material],
-        }));
-        sc.get_mut("nodeSizes").unwrap().as_array_mut().unwrap().push(xyz(node.size));
-        sc.get_mut("nodeColliders").unwrap().as_array_mut().unwrap().push(match &node.collider {
+        push("nodes", json!({"centroid": xyz(world(node.centroid)), "mass": node.mass, "volume": node.volume, "m": slot[node.material]}))?;
+        push("nodeSizes", xyz(node.size))?;
+        push("nodeColliders", match &node.collider {
             Collider::Cuboid { half } => json!({"kind": "cuboid", "halfExtents": xyz(*half)}),
             Collider::Hull { points } => json!({"kind": "convex_hull", "points": points.iter().flatten().collect::<Vec<_>>()}),
-        });
-        sc.get_mut("nodeTypes").unwrap().as_array_mut().unwrap().push(json!(node.kind));
-        sc.get_mut("nodeMaterials").unwrap().as_array_mut().unwrap().push(json!(names[node.material]));
-        sc.get_mut("nodePieces").unwrap().as_array_mut().unwrap().push(json!(piece0 + node.piece as u64));
-        sc.get_mut("nodeGroups").unwrap().as_array_mut().unwrap().push(json!(name));
+        })?;
+        push("nodeTypes", json!(node.kind))?;
+        push("nodeMaterials", json!(names[node.material]))?;
+        push("nodePieces", json!(piece0 + node.piece as u64))?;
+        push("nodeGroups", json!(name))?;
     }
-    let bonds = sc.get_mut("bonds").unwrap().as_array_mut().unwrap();
     for b in &tower.bonds {
-        bonds.push(json!({
-            "node0": kept + b.a, "node1": kept + b.b,
+        push("bonds", json!({
+            "node0": base + b.a, "node1": base + b.b,
             "centroid": xyz(world(b.centroid)), "normal": xyz(b.normal), "area": b.area, "m": slot[b.material],
-        }));
+        }))?;
     }
     Ok(())
 }
@@ -641,6 +676,18 @@ pub fn replace_building(pack: &mut serde_json::Value, group: &str, tower: &Tower
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_felling_scene_is_a_pack_the_lab_loads() {
+        let pack = felling_scene_pack();
+        let bytes = serde_json::to_vec(&pack).unwrap();
+        let (scene, info) = crate::pack::build_pack_scene(&bytes).unwrap();
+        let tall = glass_tower(&GlassTowerOptions::default());
+        let small = glass_tower(&GlassTowerOptions { storeys: 2, half: 6.0, ..GlassTowerOptions::default() });
+        assert_eq!(info.nodes, tall.nodes.len() + small.nodes.len());
+        assert_eq!(info.bonds, tall.bonds.len() + small.bonds.len());
+        assert!(scene.bodies.len() > info.nodes, "a body per node and the ground");
+    }
 
     #[test]
     fn voronoi_cells_tile_the_pane() {

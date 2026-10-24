@@ -1,4 +1,4 @@
-import {parseFractureGlb,buildScene,buildCuboidHouse,buildPackScene,layoutScene,withoutJoints,withBondStrength,withProjectileRadius,withParams,buildTowersScene,towersVolley,SAMPLES} from './wasm.mjs';
+import {parseFractureGlb,buildScene,buildCuboidHouse,buildPackScene,layoutScene,withoutJoints,withBondStrength,withProjectileRadius,withParams,buildTowersScene,towersVolley,glassTowerPack,SAMPLES} from './wasm.mjs';
 import {createSimulation} from './simulation.mjs';
 import {preloadBonds} from './bonds.mjs';
 import {createRenderer} from './render.mjs';
@@ -244,7 +244,9 @@ const samples=Object.fromEntries(SAMPLES.map(s=>[s.key,{...s,procedural:s.file?n
 // Grouped as the catalogue groups them (engine-fracture samples.rs GROUPS).
 const optgroup=(label,options)=>{const g=document.createElement('optgroup');g.label=label;g.append(...options);return g};
 const sceneGroups=[...new Set(SAMPLES.map(s=>s.group))].map(label=>optgroup(label,SAMPLES.filter(s=>s.group===label).map(s=>new Option(s.menu,s.key,s.key==='house',s.key==='house'))));
-$('scene').replaceChildren(...sceneGroups,optgroup('Your file',[Object.assign(new Option('Custom GLB (choose or drop one below)',''),{disabled:true})]));
+// Generated in Rust (engine-fracture glass_tower.rs): a pack built on the spot, no file.
+samples['glass-tower']={key:'glass-tower',label:'glass tower and pavilion',generated:glassTowerPack};
+$('scene').replaceChildren(...sceneGroups,optgroup('Generated',[new Option('Glass tower · 10 storeys of shattering glass, a pavilion beside it','glass-tower')]),optgroup('Your file',[Object.assign(new Option('Custom GLB (choose or drop one below)',''),{disabled:true})]));
 // vibe-city /destructible-stress presets, generated into ../generated/vibe-city (optional).
 const VIBE_CITY='../generated/vibe-city/';
 try{const index=await (await fetch(`${VIBE_CITY}index.json`)).json();
@@ -263,16 +265,21 @@ try{const index=await (await fetch(`${VIBE_CITY}index.json`)).json();
 }catch{}
 const sample=(key=$('scene').value||'house')=>serializeLoad(async()=>{
  const entry=samples[key];if(!entry)throw new Error('Unknown bundled scene');
- if(entry.pack){
-  // A generated scene pack (engine/scenes/vibe-city, bun run export.ts): one level, bonds from the pack.
-  setStatus(`Fetching ${entry.label}…`);
-  const response=await fetch(entry.pack);
-  if(!response.ok)throw new Error('Scene pack missing: run bun run export.ts in engine/scenes/vibe-city.');
-  packBytes=await response.arrayBuffer();assetBytes=null;layout=null;procedural='pack';
+ if(entry.pack||entry.generated){
+  // A scene pack, one level with the pack's bonds: built in Rust (entry.generated), or
+  // generated into ../generated (engine/scenes/vibe-city, bun run export.ts).
+  if(entry.generated)packBytes=entry.generated().buffer;
+  else{
+   setStatus(`Fetching ${entry.label}…`);
+   const response=await fetch(entry.pack);
+   if(!response.ok)throw new Error('Scene pack missing: run bun run export.ts in engine/scenes/vibe-city.');
+   packBytes=await response.arrayBuffer();
+  }
+  assetBytes=null;layout=null;procedural='pack';
   // The towers block: breakable welds, CCD balls at 16× unless the panel says otherwise.
   if(entry.towers&&!towersBlock){$('bond-mode').value='d6';$('ball-speed').value='4';$('ball-ccd').checked=true}
-  towersBlock=!!entry.towers;asset?.handle.free();asset=null;$('scene').value=key;$('filename').textContent=entry.pack.split('/').pop();
-  $('level').replaceChildren(new Option(`Scene pack · ${entry.nodes} nodes · ${entry.bonds} bonds`,0));$('level').value='0';
+  towersBlock=!!entry.towers;asset?.handle.free();asset=null;$('scene').value=key;$('filename').textContent=entry.pack?entry.pack.split('/').pop():'generated in Rust (glass_tower.rs)';
+  $('level').replaceChildren(new Option(entry.nodes!=null?`Scene pack · ${entry.nodes} nodes · ${entry.bonds} bonds`:'Scene pack · generated',0));$('level').value='0';
   await loadLevel(0);return;
  }
  if(entry.procedural){

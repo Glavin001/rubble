@@ -76,6 +76,16 @@ fn shade(base: [f64; 3], i: usize) -> [f64; 3] {
     base.map(|c| (c * k).min(1.0))
 }
 
+/// A `#rrggbb` colour as linear-ish [0, 1] channels (as the key colours are given).
+fn hex_color(v: &Value) -> Option<[f64; 3]> {
+    let h = v.as_str()?.strip_prefix('#')?;
+    if h.len() != 6 {
+        return None;
+    }
+    let c = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).ok().map(|x| x as f64 / 255.0);
+    Some([c(0)?, c(2)?, c(4)?])
+}
+
 fn base_color(key: &str) -> [f64; 3] {
     let k = key.to_ascii_lowercase();
     if k.contains("brick") {
@@ -186,10 +196,15 @@ pub fn build_pack_scene(bytes: &[u8]) -> Result<(Scene, PackInfo)> {
         let at = add(centroid[i], shift);
         info.node_frames.push(at);
         let id = bodies.len() as u32;
+        // A node's material colour where the pack gives one, else the pack's key colour.
+        let own = nodes[i]["m"]
+            .as_u64()
+            .and_then(|m| materials.and_then(|ms| ms.get(m as usize)))
+            .and_then(|m| hex_color(&m["color"]));
         let tint = if support {
             SUPPORT_COLOR
         } else {
-            shade(color, i)
+            shade(own.unwrap_or(color), i)
         };
         let collider = colliders.and_then(|c| c.get(i));
         let kind = collider.and_then(|c| c["kind"].as_str()).unwrap_or("");
