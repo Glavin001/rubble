@@ -43,34 +43,51 @@ runs in a browser.
 
 ## Our takes (2026-10-24), scored on those beats
 
+17 lab takes, recorded in headless Chrome with `record-takes.mjs --page lab --check
+--repeat`. Every stress-mode take passes the checks and repeats frame for frame.
+
 | Take | Patterns | Works | Gaps |
 |---|---|---|---|
-| `wy_frame10_ball` | S4 S5 | The collapse climbs and the core stands | The subject is small in frame; pastel debris |
-| `wy_round_tower_sphere` | S4 | Floors drop, the core stands | As above |
-| `bo_viaduct_pier` | S2 S1 | Spans hinge down whole, then break on the road | No vehicles on it (S2 without V3/V4); the camera is far; stress solver only |
-| `topple_detonate` | S1 | The charges fire; it leans out as one mass for about 4 s and lands across the street, in Chrome as natively; it repeats exactly | It lands as one long piece, not storey-sized slabs. No cars on the street |
-| `rr_storefront_car` | V5 | A local break; the shop stands | A ball stands in for the car; the façade renders as a blank pale wall |
-| `ft_glass_tower_jet` | S3 | The cut and the collapse | A ball stands in for the aircraft; no tilt; a parked ball floats over the rubble at the end |
-| `lab_house_*`, `lab_cuboid_grid_ball` | S4 S7 | Scale | Rubble's own mode does not repeat exactly at scale |
-| `vh_car_barrier_crash`, `vh_bus_barrier_crash` | V1 V2 | Bonded car and bus slide into a rigid barrier: the front comes apart, wheels come off, the cabin holds; they repeat exactly | Wheels do not roll (the vehicles slide on them); vehicles render in their body slot's pastel colour |
-| `rr_storefront_car_bus` | V5 | The car goes through the shop window into the shop and crumples; the bus drives into the next shop with the fascia on its roof (442 bonds) | The apartment block (`rr_apartment_car_bus`) stops both: its brick infill is two 1.15 t panels a bay |
-| `ft_glass_tower_airliner`, `ft_apartment_airliner` | S3 | A bonded 35 t jet thrown in at 70 m/s: it punches through five storeys of the block's middle bays, its engines and nose fly off | Into the tower it stops in the first bays and slides down the facade; no upper block fails (threshold has no stress solve) |
-| `bo_viaduct_traffic` | S2 V3 V4 | The spans swing down carrying 5 cars and a bus and land on a queue of 2 cars and a bus; repeats exactly | The traffic loads the spans, so they break up sooner than without it |
+| `wy_frame10_ball` | S4 S5 S7 | 50 t ball into the corner columns: the collapse climbs, the core and upper storeys stand (483 bonds) | — |
+| `wy_frame10_xray` | S4 + X-ray | The bond graph drops out as bonds fail; one colour per body | — |
+| `wy_round_tower_sphere` | S4 | 15 m sphere: the floors drop, the core stands (645) | — |
+| `bo_viaduct_pier` | S2 S1 | Both drop-in spans hinge down whole and break on the road (459) | Stress solver only (threshold breaks a few bonds at the pier) |
+| `bo_viaduct_traffic` | S2 V3 V4 | The spans carry 5 cars and a bus down onto a queue of 2 cars and a bus (1,237) | The traffic's weight breaks the spans up sooner |
+| `topple_detonate` | S1 | The charges fire; it leans out as one mass for about 4 s and lands across the street, in Chrome as natively (310) | It lands as one long piece, not storey-sized slabs. No cars on the street yet |
+| `sb_skybridge` | S2 S6 | One charge: the walkway hangs from its west ledge, tears out and lands on the plaza in big sections; the towers stand (150) | Threshold needs both charges |
+| `rr_storefront_car_bus` | V5 V1 V2 | A bonded car through the shop window crumples inside; the bus drives into the next shop with the fascia on its roof (442) | — |
+| `rr_apartment_car_bus` | V5 | Both hit the apartment block's ground floor | Neither gets through: the brick infill is two 1.15 t panels a bay |
+| `rr_storefront_car` | V5 | Ball stand-in: a local break | Superseded by `rr_storefront_car_bus` |
+| `ft_apartment_airliner` | S3 | A bonded 35 t jet at 70 m/s punches through five storeys of the middle bays; engines and nose fly off; it falls back out (1,148) | — |
+| `ft_glass_tower_airliner` | S3 | The nose breaks up in the curtain wall and floors (710) | It stops in the first bays and slides down the facade; no upper block fails (threshold has no stress solve) |
+| `vh_car_barrier_crash`, `vh_bus_barrier_crash` | V1 V2 | Into a rigid barrier: the front comes apart, wheels come off, the cabin holds (45, 39) | Wheels do not roll: the vehicles slide on them |
+| `lab_house_*` | S4 S7 | The veneer house in threshold and stress modes | — |
+| `lab_cuboid_grid_ball` | S4 S7 | Scale: about 11k awake bodies | Rubble's own mode does not repeat exactly at this scale |
 
-**Look, across every take:** the frames are pale and low contrast. In the Materials view,
-free debris is tinted with its body's colour (pastel confetti). Brick and glass do not read
-as brick and glass. Subjects fill about a third of the frame.
+**Look:** true material colours (brick, tinted glass, concrete, a red body shell), sun
+shadows, a filmic tone curve, and dust and chips from real impacts only. The dust repeats
+exactly; vehicles, glass and metal shed chips, not dust.
+
+## Known engine limits the demos hit
+
+- **Strike loads in blast_parity.** A strike loads the whole anchored structure, so heavy
+  hits break bonds in every storey instead of along their path (the apartment block, the
+  glass tower).
+- **Static friction at the threshold profile's 4 rigid iterations.** Heavy bodies creep
+  where they should hold: the topple tower's base, the landed tower sliding. The topple
+  scene works around it with a kerb.
+- **No stress solve in threshold.** Loads only reach chunks in contact, so nothing fails
+  across a cut (the glass tower's upper block) and a landing tower does not break into
+  storeys.
+- **Rubble's own mode repeats on a house but not at the 7 × 7 grid's scale.**
 
 ## Next, in order of impact
 
-1. **The look:** true material colours for debris in takes, contrast and lighting,
-   framing. Fix the floating parked ball. Add automated checks on recorded takes.
-2. **Vehicles and aircraft as bonded bodies that crumple** (V1 V2 V5):
-   - a launched, bonded free body: a car, a bus, an airliner;
-   - the airliner thrown into the glass tower like a paper aeroplane: it crumples
-     through it (S3);
-   - cars driven through ground floors (V5);
-   - stalled traffic on the viaduct that rides the spans down (S2 + V3 + V4).
-3. **Topple that topples in Chrome** (S1) with a margin, not on a knife edge, then cars
-   on the street (V4).
-4. **A skybridge between two towers** (S2 + S6): it sags at its joints, hangs, then drops.
+1. **Parked cars under the topple tower and on the skybridge plaza** (S1 + V4): the
+   vehicles module is ready.
+2. **The airliner through the glass tower** (S3): a lighter curtain wall, or the stress
+   profile once its strikes stay local, so the upper block tilts away.
+3. **Rolling wheels and driven vehicles**: the combined host (plan Phase B/C), so a
+   vehicle drives in instead of being launched.
+4. **A reel per pattern**, for sharing: the strongest takes cut together at the beats
+   viewers replay.
