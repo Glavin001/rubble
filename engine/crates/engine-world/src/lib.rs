@@ -47,8 +47,8 @@ pub use destruction::{
 pub use error::{StaleHandle, Unsupported};
 pub use events::{
     coalesce, BodyEvents, BodyMoveEvent, CoalescedFrame, ContactBeginEvent, ContactEndEvent,
-    ContactEvents, DestructionEvent, Frame, RayBatchId, RayBatchResult, SkinId, SkinOutput,
-    SoftOutput, VehicleOutput,
+    ContactEvents, DestructionEvent, Frame, RayBatchId, RayBatchResult, SensorEvent, SensorEvents,
+    SkinId, SkinOutput, SoftOutput, VehicleOutput,
 };
 pub use handles::{BodyId, JointId, ShapeId};
 pub use joints::{
@@ -347,6 +347,7 @@ pub struct World {
     adapter: wgpu::AdapterInfo,
     contacts: contacts::ContactTracker,
     hit_event_threshold: f32,
+    contact_storage: ContactStorage,
 }
 
 impl World {
@@ -409,6 +410,7 @@ impl World {
             adapter,
             contacts: Default::default(),
             hit_event_threshold: def.hit_event_threshold,
+            contact_storage: contacts,
             resync: false,
             vehicles: Vec::new(),
             soft_outputs: Vec::new(),
@@ -882,6 +884,10 @@ impl World {
             "shapes on vehicle-owned bodies"
         );
         def.validate()?;
+        if def.is_sensor && self.contact_storage == ContactStorage::Compact {
+            // Compact solver pairs are packed before the events pass runs.
+            return unsupported("sensor shapes with ContactStorage::Compact");
+        }
         if matches!(geometry, Geometry::Plane { .. }) {
             anyhow::ensure!(
                 self.bodies[b].body_type == BodyType::Static,
@@ -1467,8 +1473,9 @@ impl World {
             }
         }
         if let Some(last) = frames.last_mut() {
-            let ends = self.take_pending_contact_ends();
+            let (ends, sensor_ends) = self.take_pending_contact_ends();
             last.contact_events.end.extend(ends);
+            last.sensor_events.end.extend(sensor_ends);
         }
         Ok(frames)
     }
@@ -1599,12 +1606,13 @@ impl World {
         let mut record: Option<(VehicleHandle, Vec<[u32; 4]>)> = None;
         let mut ray_results = Vec::new();
         let mut contact_events = ContactEvents::default();
+        let mut sensor_events = SensorEvents::default();
         let mut lost_contacts = 0;
         for (kind, bytes) in &raw.extras {
             match kind {
                 Extra::Resync => {}
                 Extra::Contacts => {
-                    (contact_events, lost_contacts) = self.decode_contacts(bytes);
+                    (contact_events, sensor_events, lost_contacts) = self.decode_contacts(bytes);
                 }
                 Extra::RayHits(batches) => {
                     let hits = self.sim.decode_ray_hits(&slots(bytes));
@@ -1655,6 +1663,7 @@ impl World {
             skins,
             ray_results,
             contact_events,
+            sensor_events,
             lost_events: ring.lost + lost_contacts,
             dropped: false,
             resynced: resync.is_some(),

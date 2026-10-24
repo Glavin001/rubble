@@ -260,9 +260,6 @@ impl Default for ShapeDef {
 impl ShapeDef {
     pub(crate) fn validate(&self) -> anyhow::Result<()> {
         self.material.validate()?;
-        if self.is_sensor || self.enable_sensor_events {
-            return unsupported("sensor shapes (planned P4)");
-        }
         anyhow::ensure!(self.density >= 0.0, "negative density");
         Ok(())
     }

@@ -116,6 +116,20 @@ pub struct ContactEvents {
     pub hits: Vec<ContactBeginEvent>,
 }
 
+/// A shape entered or left a sensor (`ShapeDef::is_sensor` with
+/// `enable_sensor_events`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SensorEvent {
+    pub sensor_shape: crate::ShapeId,
+    pub visitor_shape: crate::ShapeId,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SensorEvents {
+    pub begin: Vec<SensorEvent>,
+    pub end: Vec<SensorEvent>,
+}
+
 /// A batch of queued ray casts ([`crate::World::cast_rays`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RayBatchId(pub u64);
@@ -161,6 +175,8 @@ pub struct Frame {
     pub ray_results: Vec<RayBatchResult>,
     /// Shapes that started or stopped touching this step, and hits.
     pub contact_events: ContactEvents,
+    /// Shapes that entered or left sensors this step.
+    pub sensor_events: SensorEvents,
     /// Records overwritten in the GPU event ring before they were read (more
     /// than it holds between two frames). Never silently zero.
     pub lost_events: u32,
@@ -194,6 +210,7 @@ pub struct CoalescedFrame {
     pub ray_results: Vec<RayBatchResult>,
     /// Every step's contact events, in step order.
     pub contact_events: ContactEvents,
+    pub sensor_events: SensorEvents,
     pub lost_events: u32,
     /// Any folded step's readback was dropped (a later one resynced it).
     pub dropped: bool,
@@ -246,6 +263,8 @@ pub fn coalesce(frames: Vec<Frame>) -> CoalescedFrame {
         out.contact_events.begin.extend(f.contact_events.begin);
         out.contact_events.end.extend(f.contact_events.end);
         out.contact_events.hits.extend(f.contact_events.hits);
+        out.sensor_events.begin.extend(f.sensor_events.begin);
+        out.sensor_events.end.extend(f.sensor_events.end);
         out.lost_events += f.lost_events;
         out.dropped |= f.dropped;
         if f.counters.is_some() {

@@ -214,6 +214,11 @@ pub struct RbShapeDef {
     /// Also report hard begins (`RbFrame::hits`, at or above
     /// `RbWorldDef::hit_event_threshold`).
     pub enable_hit_events: bool,
+    /// No contact response: other shapes pass through. With
+    /// `enable_sensor_events`, it reports shapes entering and leaving
+    /// (`RbFrame::sensor_begin` / `sensor_end`). Not with compact contacts.
+    pub is_sensor: bool,
+    pub enable_sensor_events: bool,
     pub user_data: u64,
     pub internal_value: u32,
 }
@@ -492,6 +497,14 @@ pub struct RbContactEndEvent {
     pub shape_b: RbShapeId,
 }
 
+/// A shape entered or left a sensor.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RbSensorEvent {
+    pub sensor_shape: RbShapeId,
+    pub visitor_shape: RbShapeId,
+}
+
 /// A ray to cast: from `origin` along `translation` (its length is the range).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -557,6 +570,11 @@ pub struct RbFrame {
     pub contact_end_count: u32,
     pub hits: *const RbContactBeginEvent,
     pub hit_count: u32,
+    /// Shapes that entered or left sensors with `enable_sensor_events`.
+    pub sensor_begin: *const RbSensorEvent,
+    pub sensor_begin_count: u32,
+    pub sensor_end: *const RbSensorEvent,
+    pub sensor_end_count: u32,
 }
 
 impl RbFrame {
@@ -588,6 +606,10 @@ impl RbFrame {
             contact_end_count: 0,
             hits: std::ptr::null(),
             hit_count: 0,
+            sensor_begin: std::ptr::null(),
+            sensor_begin_count: 0,
+            sensor_end: std::ptr::null(),
+            sensor_end_count: 0,
         }
     }
 }
@@ -609,6 +631,8 @@ struct FrameStore {
     contact_begin: Vec<RbContactBeginEvent>,
     contact_end: Vec<RbContactEndEvent>,
     hits: Vec<RbContactBeginEvent>,
+    sensor_begin: Vec<RbSensorEvent>,
+    sensor_end: Vec<RbSensorEvent>,
     /// Backing for bond lists, chunk lists, body lists and child arrays (the
     /// heap buffers do not move when these outer vectors grow).
     u32_lists: Vec<Vec<u32>>,
@@ -788,6 +812,8 @@ impl RbWorld {
             update_body_mass: d.update_body_mass,
             enable_contact_events: d.enable_contact_events,
             enable_hit_events: d.enable_hit_events,
+            is_sensor: d.is_sensor,
+            enable_sensor_events: d.enable_sensor_events,
             user_data: d.user_data,
             ..ShapeDef::default()
         })
@@ -1070,6 +1096,12 @@ impl RbWorld {
                 shape_b: e.shape_b.to_bits(),
             })
             .collect();
+        let sensor_out = |e: &SensorEvent| RbSensorEvent {
+            sensor_shape: e.sensor_shape.to_bits(),
+            visitor_shape: e.visitor_shape.to_bits(),
+        };
+        s.sensor_begin = c.sensor_events.begin.iter().map(sensor_out).collect();
+        s.sensor_end = c.sensor_events.end.iter().map(sensor_out).collect();
         let counters = c.counters;
         RbFrame {
             has_frame: true,
@@ -1098,6 +1130,10 @@ impl RbWorld {
             contact_end_count: s.contact_end.len() as u32,
             hits: s.hits.as_ptr(),
             hit_count: s.hits.len() as u32,
+            sensor_begin: s.sensor_begin.as_ptr(),
+            sensor_begin_count: s.sensor_begin.len() as u32,
+            sensor_end: s.sensor_end.as_ptr(),
+            sensor_end_count: s.sensor_end.len() as u32,
         }
     }
 }
@@ -1565,6 +1601,8 @@ pub extern "C" fn rbDefaultShapeDef() -> RbShapeDef {
         update_body_mass: true,
         enable_contact_events: false,
         enable_hit_events: false,
+        is_sensor: false,
+        enable_sensor_events: false,
         user_data: 0,
         internal_value: COOKIE,
     }

@@ -622,13 +622,6 @@ fn unsupported_fields_are_refused_not_ignored() {
     };
     assert!(unsupported(w.create_body(&damped).unwrap_err()));
     let b = w.create_body(&BodyDef::dynamic([0.0; 3])).unwrap();
-    let sensor = ShapeDef {
-        is_sensor: true,
-        ..ShapeDef::default()
-    };
-    assert!(unsupported(
-        w.create_box_shape(b, &sensor, [0.5; 3]).unwrap_err()
-    ));
     let rolling = ShapeDef {
         material: SurfaceMaterial {
             rolling_resistance: 0.1,

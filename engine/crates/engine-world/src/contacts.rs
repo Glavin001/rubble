@@ -1,11 +1,13 @@
-//! Contact begin, end and hit events (P4): the GPU lists the touching pairs
-//! that involve an event-enabled shape each step (`contact_events.slang`);
-//! the host diffs that set against the previous one.
+//! Contact begin, end and hit events, and sensor overlaps (P4): the GPU lists
+//! the touching pairs that involve an event-enabled shape or a sensor each
+//! step (`contact_events` in world_step.slang, which also keeps sensor pairs
+//! out of the solve); the host diffs that set against the previous one.
 
-use crate::events::{ContactBeginEvent, ContactEndEvent, ContactEvents};
+use crate::events::{ContactBeginEvent, ContactEndEvent, ContactEvents, SensorEvent, SensorEvents};
 use crate::{ShapeDef, ShapeId, World};
 use engine_schema::{
-    COLLIDER_CONTACT_EVENTS, COLLIDER_HIT_EVENTS, CONTACT_EVENT_CAP, CONTACT_EVENT_WORDS,
+    COLLIDER_CONTACT_EVENTS, COLLIDER_HIT_EVENTS, COLLIDER_SENSOR, CONTACT_EVENT_CAP,
+    CONTACT_EVENT_WORDS,
 };
 use std::collections::BTreeMap;
 
@@ -17,11 +19,20 @@ pub(crate) struct Touch {
     bodies: [u32; 2],
 }
 
+/// A sensor overlap, keyed by (sensor collider, visitor collider).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Overlap {
+    event: SensorEvent,
+    bodies: [u32; 2],
+}
+
 #[derive(Default)]
 pub(crate) struct ContactTracker {
     touching: BTreeMap<(u32, u32), Touch>,
+    overlapping: BTreeMap<(u32, u32), Overlap>,
     /// Ends of pairs whose shape was destroyed, for the next frame.
     pending_end: Vec<ContactEndEvent>,
+    pending_sensor_end: Vec<SensorEvent>,
     /// Live shapes with contact or hit events: the pass runs while any do.
     pub(crate) enabled_shapes: u32,
 }
@@ -35,11 +46,16 @@ pub(crate) fn event_bits(def: &ShapeDef) -> u32 {
     if def.enable_hit_events {
         bits |= COLLIDER_HIT_EVENTS;
     }
+    if def.is_sensor {
+        bits |= COLLIDER_SENSOR;
+    }
     bits
 }
 
+/// The pass must run while this shape exists (sensors need it to stay out of
+/// the solve even without events).
 fn wants_events(def: &ShapeDef) -> bool {
-    def.enable_contact_events || def.enable_hit_events
+    def.enable_contact_events || def.enable_hit_events || def.is_sensor
 }
 
 impl World {
@@ -72,6 +88,17 @@ impl World {
                 });
             }
         }
+        let gone: Vec<(u32, u32)> = t
+            .overlapping
+            .keys()
+            .filter(|(s, v)| *s == collider || *v == collider)
+            .copied()
+            .collect();
+        for k in gone {
+            if let Some(o) = t.overlapping.remove(&k) {
+                t.pending_sensor_end.push(o.event);
+            }
+        }
         t.enabled_shapes -= 1;
         if t.enabled_shapes == 0 {
             self.sim.set_contact_events(false);
@@ -79,11 +106,20 @@ impl World {
     }
 
     /// Ends queued by destroyed shapes.
-    pub(crate) fn take_pending_contact_ends(&mut self) -> Vec<ContactEndEvent> {
-        std::mem::take(&mut self.contacts.pending_end)
+    pub(crate) fn take_pending_contact_ends(&mut self) -> (Vec<ContactEndEvent>, Vec<SensorEvent>) {
+        (
+            std::mem::take(&mut self.contacts.pending_end),
+            std::mem::take(&mut self.contacts.pending_sensor_end),
+        )
     }
 
-    fn shape_of_collider(&self, collider: u32) -> Option<(ShapeId, u32, bool)> {
+    fn asleep(&self, bodies: [u32; 2]) -> bool {
+        bodies
+            .iter()
+            .all(|&b| self.bodies.get(b as usize).is_none_or(|s| s.last_asleep))
+    }
+
+    fn shape_of_collider(&self, collider: u32) -> Option<(ShapeId, u32, bool, &ShapeDef)> {
         let &s = self.collider_shape.get(collider as usize)?;
         if s == u32::MAX {
             return None;
@@ -94,6 +130,7 @@ impl World {
                 ShapeId::new(s, slot.generation),
                 slot.body,
                 slot.def.enable_hit_events,
+                &slot.def,
             )
         })
     }
@@ -101,13 +138,14 @@ impl World {
     /// Diff this step's touching pairs (`bytes`: the region's header and
     /// records) against the last set. Returns the events and the records the
     /// region could not hold.
-    pub(crate) fn decode_contacts(&mut self, bytes: &[u8]) -> (ContactEvents, u32) {
+    pub(crate) fn decode_contacts(&mut self, bytes: &[u8]) -> (ContactEvents, SensorEvents, u32) {
         let words: &[u32] = bytemuck::cast_slice(bytes);
         let count = words[0];
         let held = count.min(CONTACT_EVENT_CAP) as usize;
         let lost = count - held as u32;
         let stride = CONTACT_EVENT_WORDS as usize;
         let mut now: BTreeMap<(u32, u32), (Touch, ContactBeginEvent, bool)> = BTreeMap::new();
+        let mut overlaps: BTreeMap<(u32, u32), Overlap> = BTreeMap::new();
         for k in 0..held {
             let r = &words[4 + k * stride..4 + (k + 1) * stride];
             let (ca, cb) = (r[0], r[1]);
@@ -115,6 +153,27 @@ impl World {
             else {
                 continue;
             };
+            if a.3.is_sensor || b.3.is_sensor {
+                // Sensors do not detect sensors; only sensors with events report.
+                let (sensor, visitor, key) = if a.3.is_sensor {
+                    (a, b, (ca, cb))
+                } else {
+                    (b, a, (cb, ca))
+                };
+                if !visitor.3.is_sensor && sensor.3.enable_sensor_events {
+                    overlaps.insert(
+                        key,
+                        Overlap {
+                            event: SensorEvent {
+                                sensor_shape: sensor.0,
+                                visitor_shape: visitor.0,
+                            },
+                            bodies: [sensor.1, visitor.1],
+                        },
+                    );
+                }
+                continue;
+            }
             let f = |i: usize| f32::from_bits(r[i]);
             let mut begin = ContactBeginEvent {
                 shape_a: a.0,
@@ -139,6 +198,24 @@ impl World {
             };
             now.insert(key, (touch, begin, a.2 || b.2));
         }
+        let mut sensors = SensorEvents::default();
+        let previous = std::mem::take(&mut self.contacts.overlapping);
+        for (key, o) in &previous {
+            if overlaps.contains_key(key) {
+                continue;
+            }
+            if self.asleep(o.bodies) {
+                self.contacts.overlapping.insert(*key, *o);
+            } else {
+                sensors.end.push(o.event);
+            }
+        }
+        for (key, o) in overlaps {
+            if !previous.contains_key(&key) {
+                sensors.begin.push(o.event);
+            }
+            self.contacts.overlapping.insert(key, o);
+        }
         let mut events = ContactEvents::default();
         let threshold = self.hit_event_threshold;
         let previous = std::mem::take(&mut self.contacts.touching);
@@ -147,11 +224,7 @@ impl World {
                 continue;
             }
             // Asleep pairs keep touching (their manifolds may not be rebuilt).
-            let asleep = touch
-                .bodies
-                .iter()
-                .all(|&b| self.bodies.get(b as usize).is_none_or(|s| s.last_asleep));
-            if asleep {
+            if self.asleep(touch.bodies) {
                 self.contacts.touching.insert(*key, *touch);
             } else {
                 events.end.push(ContactEndEvent {
@@ -169,6 +242,6 @@ impl World {
             }
             self.contacts.touching.insert(key, touch);
         }
-        (events, lost)
+        (events, sensors, lost)
     }
 }

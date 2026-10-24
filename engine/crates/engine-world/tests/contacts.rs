@@ -126,3 +126,85 @@ fn shapes_without_flags_report_nothing() {
     let e = run(&mut w, 120);
     assert!(e.begin.is_empty() && e.end.is_empty() && e.hits.is_empty());
 }
+
+fn sensor_pass_through(contacts: ContactStorage) {
+    let (mut w, _) = world(contacts);
+    // A static sensor volume between 3 m and 5 m; a box falls through it.
+    let s = w
+        .create_body(&BodyDef {
+            position: [0.0, 4.0, 0.0],
+            ..BodyDef::default()
+        })
+        .unwrap();
+    let sensor_def = ShapeDef {
+        is_sensor: true,
+        enable_sensor_events: true,
+        enable_contact_events: true,
+        ..ShapeDef::default()
+    };
+    let sensor = w.create_box_shape(s, &sensor_def, [2.0, 1.0, 2.0]).unwrap();
+    let quiet = w
+        .create_box_shape(
+            s,
+            &ShapeDef {
+                is_sensor: true,
+                ..ShapeDef::default()
+            },
+            [2.0, 1.0, 2.0],
+        )
+        .unwrap();
+    let b = w.create_body(&BodyDef::dynamic([0.0, 7.0, 0.0])).unwrap();
+    let falling = w.create_box_shape(b, &events_def(), [0.5; 3]).unwrap();
+    let (mut begins, mut ends, mut contact_begins) = (Vec::new(), Vec::new(), 0);
+    let mut landed_at = None;
+    for k in 0..240 {
+        w.step().unwrap();
+        for f in w.poll_blocking().unwrap() {
+            begins.extend(f.sensor_events.begin);
+            ends.extend(f.sensor_events.end);
+            contact_begins += f.contact_events.begin.len();
+            if !f.contact_events.begin.is_empty() && landed_at.is_none() {
+                landed_at = Some(k);
+            }
+        }
+    }
+    let e = [sensor, falling];
+    assert_eq!(begins.len(), 1, "{contacts:?}: entered once: {begins:?}");
+    assert_eq!(ends.len(), 1, "{contacts:?}: left once: {ends:?}");
+    assert_eq!([begins[0].sensor_shape, begins[0].visitor_shape], e);
+    assert_eq!([ends[0].sensor_shape, ends[0].visitor_shape], e);
+    assert!(
+        begins.iter().all(|b| b.sensor_shape != quiet),
+        "no events without the flag"
+    );
+    // The only contact is with the ground, reached in free fall from 7 m:
+    // t = sqrt(2 * 6.5 / 10) = 1.14 s, step 68 at 60 Hz.
+    assert_eq!(contact_begins, 1, "{contacts:?}: sensors make no contacts");
+    let k = landed_at.unwrap();
+    assert!(
+        (66..=71).contains(&k),
+        "{contacts:?}: not slowed: landed at step {k}"
+    );
+}
+
+#[test]
+fn sensors_report_overlaps_without_response_persistent() {
+    sensor_pass_through(ContactStorage::Persistent);
+}
+
+#[test]
+fn sensors_report_overlaps_without_response_canonical() {
+    sensor_pass_through(ContactStorage::Canonical);
+}
+
+#[test]
+fn compact_storage_refuses_sensors() {
+    let (mut w, _) = world(ContactStorage::Compact);
+    let b = w.create_body(&BodyDef::default()).unwrap();
+    let sensor = ShapeDef {
+        is_sensor: true,
+        ..ShapeDef::default()
+    };
+    let e = w.create_box_shape(b, &sensor, [1.0; 3]).unwrap_err();
+    assert!(e.downcast_ref::<Unsupported>().is_some(), "{e}");
+}

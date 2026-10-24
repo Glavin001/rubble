@@ -294,6 +294,12 @@ typedef struct RbContactEndEvent {
   RbShapeId shape_b;
 } RbContactEndEvent;
 
+// A shape entered or left a sensor.
+typedef struct RbSensorEvent {
+  RbShapeId sensor_shape;
+  RbShapeId visitor_shape;
+} RbSensorEvent;
+
 // Results of one step, or of several folded together (`rbWorld_Poll`).
 // Pointers stay valid until the next poll.
 typedef struct RbFrame {
@@ -326,6 +332,11 @@ typedef struct RbFrame {
   uint32_t contact_end_count;
   const struct RbContactBeginEvent *hits;
   uint32_t hit_count;
+  // Shapes that entered or left sensors with `enable_sensor_events`.
+  const struct RbSensorEvent *sensor_begin;
+  uint32_t sensor_begin_count;
+  const struct RbSensorEvent *sensor_end;
+  uint32_t sensor_end_count;
 } RbFrame;
 
 // A ray to cast: from `origin` along `translation` (its length is the range).
@@ -364,6 +375,11 @@ typedef struct RbShapeDef {
   // Also report hard begins (`RbFrame::hits`, at or above
   // `RbWorldDef::hit_event_threshold`).
   bool enable_hit_events;
+  // No contact response: other shapes pass through. With
+  // `enable_sensor_events`, it reports shapes entering and leaving
+  // (`RbFrame::sensor_begin` / `sensor_end`). Not with compact contacts.
+  bool is_sensor;
+  bool enable_sensor_events;
   uint64_t user_data;
   uint32_t internal_value;
 } RbShapeDef;

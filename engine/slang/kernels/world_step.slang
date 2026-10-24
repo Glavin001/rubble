@@ -5681,6 +5681,7 @@ void recompute_inertia(uint3 tid : SV_DispatchThreadID)
 // velocities, before the solve. Reads physics state only; the host diffs the
 // set step to step into begin, end and hit events (engine-world contacts.rs).
 static const uint COLLIDER_CONTACT_EVENTS = 0x1000u;
+static const uint COLLIDER_SENSOR = 0x4000u;
 static const uint CONTACT_EVENT_BASE = LARGE_STATIC_BASE + LARGE_STATIC_CAP;
 static const uint CONTACT_EVENT_CAP = 2048u;
 static const uint CONTACT_EVENT_WORDS = 12u;
@@ -5695,7 +5696,18 @@ void contact_events(uint3 tid : SV_DispatchThreadID)
     if (mf.contactCount == 0u) return;
     Collider ca = gColliders[mf.colliderA];
     Collider cb = gColliders[mf.colliderB];
-    if (((ca.material | cb.material) & COLLIDER_CONTACT_EVENTS) == 0u) return;
+    uint flags = ca.material | cb.material;
+    if ((flags & (COLLIDER_CONTACT_EVENTS | COLLIDER_SENSOR)) == 0u) return;
+    bool sensor = (flags & COLLIDER_SENSOR) != 0u;
+    if (sensor)
+    {
+        // Sensors have no response: the pair leaves the solve and the islands
+        // (the CSR graph skips empty manifolds and solver pairs).
+        gManifolds[mi].contactCount = 0u;
+#if defined(ENGINE_PERSISTENT_CONTACTS)
+        gSolverPairs[mi].countAndSphere &= ~SOLVER_COUNT_MASK;
+#endif
+    }
     float best = 3.402823e38;
     Contact deepest = (Contact)0;
     for (uint k = 0u; k < mf.contactCount; k++)
@@ -5727,6 +5739,7 @@ void contact_events(uint3 tid : SV_DispatchThreadID)
     ASTORE(gScratchAtomics[w + 0u], mf.colliderA);
     ASTORE(gScratchAtomics[w + 1u], mf.colliderB);
     ASTORE(gScratchAtomics[w + 2u], asuint(approach));
+    ASTORE(gScratchAtomics[w + 3u], sensor ? 1u : 0u);
     ASTORE(gScratchAtomics[w + 4u], asuint(point.x));
     ASTORE(gScratchAtomics[w + 5u], asuint(point.y));
     ASTORE(gScratchAtomics[w + 6u], asuint(point.z));
