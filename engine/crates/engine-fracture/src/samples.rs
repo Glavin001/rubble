@@ -83,6 +83,7 @@ pub const GROUPS: &[&str] = &[
     TOPPLE,
     RAM_RAID,
     FLY_THROUGH,
+    CRASH_TEST,
 ];
 
 /// The Scene menu group of the Wrecking Yard structures.
@@ -96,7 +97,10 @@ pub const FLY_THROUGH: &str = "Fly-through";
 pub const BRIDGE_OUT: &str = "Bridge Out";
 
 /// The Scene menu groups of the pack samples, in menu order (the last of `GROUPS`).
-pub const PACK_GROUPS: &[&str] = &[WRECKING_YARD, BRIDGE_OUT, TOPPLE, RAM_RAID, FLY_THROUGH];
+pub const PACK_GROUPS: &[&str] = &[WRECKING_YARD, BRIDGE_OUT, TOPPLE, RAM_RAID, FLY_THROUGH, CRASH_TEST];
+
+/// The Scene menu group of the bonded vehicles' crash tests (`stress_ref::vehicles`).
+pub const CRASH_TEST: &str = "Crash test";
 
 /// The Scene menu group of the structures brought down by their demolition charges
 /// (`stress_ref::topple`; the pack's `defaults.charges`).
@@ -166,6 +170,19 @@ pub const PACK_SAMPLES: &[PackSample] = &[
         group: FLY_THROUGH,
         menu: "11-storey glass tower · 1,332 chunks",
         label: "glass tower",
+    },
+    // Bonded vehicles launched at a rigid barrier (`stress_ref::vehicles`).
+    PackSample {
+        key: "vh_car_barrier",
+        group: CRASH_TEST,
+        menu: "Car into a barrier at 56 km/h · 51 chunks",
+        label: "car crash test",
+    },
+    PackSample {
+        key: "vh_bus_barrier",
+        group: CRASH_TEST,
+        menu: "Bus into a barrier at 56 km/h · 88 chunks",
+        label: "bus crash test",
     },
 ];
 

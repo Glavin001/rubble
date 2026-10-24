@@ -598,6 +598,88 @@ free concrete ram (a T of five 0.5 m cubes, 1.5 t) launched at it at 30 m/s.
   bonds of the wall and of itself (threshold: the wall in 5 bodies and the ram in 2;
   blast_parity: 14 of the wall's bonds and 4 of the ram's).
 
+### Bonded vehicles
+
+`stress_ref::vehicles` builds a car, a bus and an airliner as free bonded islands. Each part
+is a chunk or a few: a convex prism or loft, so a vehicle can be placed at any heading.
+Parts are bonded wherever their faces touch (`wrecking::face_bonds`), and the joint is chosen
+by `vehicles::joint`:
+- `glass` where a pane meets its frame;
+- `riveted` in an airframe;
+- `bolted` where a door, wheel, bonnet, boot lid, bumper, bolted wing or engine is attached;
+- `spot-weld` elsewhere in a road vehicle's welded shell.
+
+| Vehicle | What | Parts · bonds | Mass |
+|---|---|---|---|
+| `car` | A saloon, 4.5 × 1.8 × 1.45 m: floor, sills, subframes and rails; engine, firewall, bonnet, bolted wings; A-, B- and C-pillars, roof; four doors on their hinge and latch pillars; boot; bumpers; four wheels; windscreen, rear and side glass | 50 · 115 | 1.4 t |
+| `bus` | A single-deck bus, 12 × 2.5 × 3.2 m: underframes (the engine in the rear one), axles, floor; side panels below and above the windows, window pillars, glass; roof; front with windscreen, rear; four wheels | 87 · 214 | 10.4 t |
+| `airliner` | A regional jet (Embraer E175 class), 30 m long, 26 m span: an octagonal fuselage barrel in upper and lower halves, nose and tail cones, wings in four pieces a side, engines on pylons, fin and tailplane | 36 · 46 | 34.7 t |
+
+**Materials** (`wrecking::calibrated`, cited in `material.rs`). A vehicle's parts are solid
+chunks standing for thin metal shells, so the metal is smeared over each chunk: a smeared
+property is the metal's own value times its solidity, the metal's share of the volume or of
+the section.
+- `sheet-steel`: the body shell, HC340LA to EN 10268, 1.5% steel by volume (a 1.4 t car in its
+  4.5 × 1.8 × 1.45 m envelope). That gives E = 3.2 GPa, the parts' contact stiffness.
+- `spot-weld`, the welded shell's joints, at 0.3% steel by section:
+  - shear 0.375 MPa: about 6 kN a weld (AWS D8.9M and ISO 18278-2 tensile-shear tests) at a
+    40 mm pitch;
+  - tension 0.15 MPa: cross-tension is 0.4 of tensile-shear (ISO 14272);
+  - compression 0.37 MPa: the shell's progressive folding, a third of its squash load
+    (Wierzbicki & Abramowicz). Euro NCAP's 56 km/h stop over 0.6 m averages about 0.28 MPa
+    over the front section.
+- `bolted`: doors, wheels and bolted panels. Tension 0.14 MPa and shear 0.11 MPa are FMVSS 206's
+  11,000 N and 8,900 N door hinge and latch loads over a door's 0.08 m² edge face. This is
+  weaker than the welded shell in every mode: doors and wheels come off first.
+- `aluminium` and `riveted`: the airframe, 2024-T3 (MMPDS-01: F_tu 483, F_su 283,
+  F_cy 269 MPa, E 72.4 GPa).
+  - The airframe is 4% aluminium by volume, and its joints are 0.4% by section at a riveted
+    lap joint's efficiency of 0.7 (Niu).
+  - The joints hold 1.35 MPa in tension, 0.79 MPa in shear and 0.38 MPa in compression (the
+    thin shell crushing).
+- `wheel`: the shell's material, under its own name for its colour.
+
+Each part's mass is the vehicle's own (its curb mass shared out by part; the car's floor
+takes the rest), written as the pack's node masses, which both profiles import
+(`pack_masses`). A scene (`vehicles::compose`) places vehicles beside a structure. Each one
+is bonded within itself only, launched where it has a `Motion`, and its strike spheres go
+with it. Its chunks follow the structure's, so the structure's node indices are unchanged.
+
+**Wheels do not roll.** They are rigid parts of the vehicle, so a car launched on its wheels
+slides on them, braked by the ground's friction like a car on locked wheels.
+`vehicles::sliding_launch` gives the launch speed that arrives at a given speed. Measured,
+the car loses about 5 m/s² (0.5 g).
+
+**Crash test** (Scene menu group): the car or the bus slides 12 m into a rigid barrier (a
+support) and arrives at about 60 km/h (`vh_car_barrier`, 51 chunks; `vh_bus_barrier`, 88).
+Native, M3 Max (`cargo run --release -p stress-rubble --features gpu --example vehicles --
+vh_car_barrier 120`, `STRESS_PROFILE=blast_parity` for the other profile):
+- **threshold**: 37 of the car's 115 bonds break. Its front wheels and a wing come off and the
+  bonnet lifts, and 45 of its 50 parts stay one body: the cabin holds. In the bus, the
+  wheels, the rear axle and the bumper tear off, and the body (93% of its parts) holds.
+- **blast_parity**: the car's four wheels shear off at the barrier, and the rest stays one
+  body (4 bonds). With a 6 m run-up (16.4 m/s), the whole front and floor came apart instead
+  (52 bonds): how much breaks depends on how the contact meets the barrier. The pillars, roof,
+  doors and glass held in both runs.
+- In Chrome (takes `vh_car_barrier_crash` and `vh_bus_barrier_crash`) the threshold runs break
+  45 and 39 bonds.
+
+The bus rocks on its wheels in the reference world's own contact and loses them after half a
+second. On the GPU, both vehicles stand still in both stress modes.
+
+**Checks:**
+- `cargo test --release -p stress-ref --test vehicles`:
+  - each vehicle's parts, mass and size, as one free island with every joint as `joint` picks;
+  - the bolted joints weaker than the welds, each door on two 11 kN joints;
+  - the scenes' packs import as built in both profiles (masses, launches, free islands);
+  - the car stands on its wheels in the reference.
+- `cargo test --release -p stress-rubble --features gpu --test vehicles`:
+  - the car and the bus stand on their wheels for a second in both stress modes (no bond
+    broken, under 1 cm of movement);
+  - threshold: the car arrives at 56-60 km/h, stops, loses front parts and keeps its cabin;
+  - blast_parity: parts break off and the cabin's pillars, roof, doors and glass stay one body.
+- `pack_samples` builds the scenes as lab scenes.
+
 ### Bond modes
 
 The **Bonds** menu picks how the baked bonds hold the fragments, on the same asset,

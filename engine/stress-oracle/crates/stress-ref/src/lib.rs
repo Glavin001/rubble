@@ -52,4 +52,5 @@ pub mod structure;
 pub mod viaduct;
 pub mod world;
 pub mod topple;
+pub mod vehicles;
 pub mod wrecking;

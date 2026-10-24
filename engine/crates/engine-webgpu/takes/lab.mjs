@@ -22,7 +22,31 @@ const setup = ({ scene, bonds = 'none', hz = 0, radius = 0, strength = 0, level,
 
 const take = (state, script) => ({ page: 'fracture/index.html', setup: setup(state), script });
 
+// Bonded vehicles (stress_ref::vehicles), threshold profile: the launch released at the
+// take's frame ({launch: ''}), the camera following it in (`at` / `atTo`: the orbit's target
+// as built, Z-up).
+const VEHICLE_TAKES = {
+  // A crash test (V1 V2): the 1.4 t car slides 12 m on its locked wheels into a rigid
+  // barrier at about 60 km/h; its front comes apart and the cabin holds.
+  vh_car_barrier_crash: take({ scene: 'vh_car_barrier', bonds: 'threshold' }, [
+    { n: 40, caption: 'A 1.4 t car of 50 bonded parts: chassis, engine bay, doors, wheels, glass', cam: { orbit: [-0.75, 0.2, 9], to: [-0.6, 0.17, 8.5], at: [-14.25, 0, 0.6] } },
+    { n: 1, act: { launch: '' }, caption: 'Launched at 71 km/h: it slides 12 m on its locked wheels into a rigid barrier' },
+    { n: 36, caption: 'Launched at 71 km/h: it slides 12 m on its locked wheels into a rigid barrier', cam: { orbit: [-0.6, 0.17, 8.5], to: [-0.2, 0.14, 7.5], at: [-14.25, 0, 0.6], atTo: [-2.6, 0, 0.6] } },
+    { n: 200, slow: 4, caption: 'Quarter speed, 60 km/h into the barrier: the front comes apart, the cabin holds', cam: { orbit: [-0.2, 0.14, 7.5], to: [0.75, 0.3, 7], at: [-2.6, 0, 0.6] } },
+    { n: 120, caption: 'Real time', cam: { orbit: [0.75, 0.3, 7], to: [1.05, 0.38, 9], at: [-2.6, 0, 0.6] } },
+  ]),
+  // The 10.4 t bus into the barrier (V1 V4).
+  vh_bus_barrier_crash: take({ scene: 'vh_bus_barrier', bonds: 'threshold' }, [
+    { n: 40, caption: 'A 10.4 t bus of 87 bonded parts: underframes, axles, panels, pillars, glass', cam: { orbit: [-0.8, 0.2, 22], to: [-0.65, 0.18, 21], at: [-18.2, 0, 1.6] } },
+    { n: 1, act: { launch: '' }, caption: 'Launched at 71 km/h: it slides 12 m on its locked wheels into a rigid barrier' },
+    { n: 36, caption: 'Launched at 71 km/h: it slides 12 m on its locked wheels into a rigid barrier', cam: { orbit: [-0.65, 0.18, 21], to: [-0.3, 0.15, 18], at: [-18.2, 0, 1.6], atTo: [-6.5, 0, 1.6] } },
+    { n: 200, slow: 4, caption: 'Quarter speed: the wheels and the bumper tear off; the body holds', cam: { orbit: [-0.3, 0.15, 18], to: [0.7, 0.3, 17], at: [-6.5, 0, 1.6] } },
+    { n: 120, caption: 'Real time', cam: { orbit: [0.7, 0.3, 17], to: [1.0, 0.38, 21], at: [-6.5, 0, 1.6] } },
+  ]),
+};
+
 export const LAB_TAKES = {
+  ...VEHICLE_TAKES,
   // Ram Raid target (stress_ref::buildings): the 2 t car stand-in into a shopfront.
   rr_storefront_car: take({ scene: 'rr_storefront_row', bonds: 'stress', preset: 3 }, [
     { n: 40, caption: 'Five shops in brick, glass and concrete: 1,203 bonded chunks', cam: { rel: [0.3, -0.05, 0.6], relTo: [0.2, -0.05, 0.55] } },

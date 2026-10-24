@@ -58,12 +58,24 @@ export function createDirector(lab) {
   // ([yaw + a, pitch + b, distance × c]), so a take frames any structure.
   let base = null;
   const relative = (r) => r && [base[0] + r[0], base[1] + r[1], base[2] * r[2]];
+  // `at` / `atTo` (stress modes): the orbit's target as a point of the scene as it was built
+  // (the stress frame, Z-up: a Rust layout's own coordinates), eased from `at` to `atTo`
+  // across the segment: a camera that follows a launched vehicle in.
+  const built = (p) => {
+    const s = lab.stress.stats.placement || [0, 0, 0];
+    return [p[0] + s[0], p[2] + s[1], -p[1] + s[2]];
+  };
   function camera(cam, t) {
     if (!cam) return;
     const from = cam.orbit ?? relative(cam.rel), to = cam.to ?? relative(cam.relTo);
     const [yaw, pitch, dist] = to ? from.map((v, k) => v + (to[k] - v) * t) : from;
     const set = lab.stressOn ? lab.stress : lab.renderer;
-    set.setOrbit(yaw + (cam.spin || 0), pitch, dist, cam.target || []);
+    let target = cam.target || [];
+    if (cam.at && lab.stressOn) {
+      const a = built(cam.at), b = cam.atTo ? built(cam.atTo) : a;
+      target = a.map((v, k) => v + (b[k] - v) * t);
+    }
+    set.setOrbit(yaw + (cam.spin || 0), pitch, dist, target);
   }
 
   // A frame-composited JPEG (canvas + caption + stats line), PUT to the recorder.

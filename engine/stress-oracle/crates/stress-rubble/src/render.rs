@@ -341,7 +341,13 @@ impl CameraPose {
 
 /// The colour of a calibrated material (stress-ref material names).
 pub fn material_color(name: &str) -> [f32; 3] {
+    // A pack's chunk at its own mass is `<material>#mass<node>` (`scene_pack`).
+    let name = name.split('#').next().unwrap_or(name);
     match name {
+        // Vehicles (`stress_ref::vehicles`): a red body shell, black wheels, a white airframe.
+        "sheet-steel" => [0.72, 0.09, 0.08],
+        "wheel" => [0.10, 0.10, 0.11],
+        "aluminium" => [0.90, 0.91, 0.93],
         "brick" => [0.66, 0.33, 0.24],
         "stone" => [0.74, 0.70, 0.62],
         "glass" => [0.58, 0.74, 0.84],

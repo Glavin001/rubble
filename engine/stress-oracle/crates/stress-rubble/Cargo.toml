@@ -51,3 +51,7 @@ required-features = ["gpu"]
 [[example]]
 name = "topple"
 required-features = ["gpu"]
+
+[[example]]
+name = "vehicles"
+required-features = ["gpu"]

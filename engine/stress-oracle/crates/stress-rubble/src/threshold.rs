@@ -654,6 +654,21 @@ impl ThresholdWorld {
             .collect()
     }
 
+    /// Diagnostic read (waits): whether each bond of structure `structure` is intact, in the
+    /// scene's order (its body's `bonds`; one the world never had is not).
+    pub fn scene_bonds_intact(&self, gpu: &Gpu, structure: usize) -> Vec<bool> {
+        let intact = self.fracture.bonds_intact(gpu);
+        let offset = self.chunk_of.iter().position(|&(s, _)| s == structure).unwrap_or(0) as u32;
+        self.scene.bodies[structure]
+            .bonds
+            .iter()
+            .map(|b| {
+                let (a, c) = (offset + b.a as u32, offset + b.b as u32);
+                self.bond_of.get(&(a.min(c), a.max(c))).is_some_and(|&i| intact[i as usize])
+            })
+            .collect()
+    }
+
     /// The shots as impactors (their meshes, for a renderer's shot objects).
     /// Diagnostic read (waits): each shot's centre and velocity in the stress frame, and
     /// whether it is in flight (not parked).

@@ -885,6 +885,9 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, advance: Advance) -> Result<
         "charges": DEMOLITION.with_borrow(|d| d.names()),
         "chargesArmed": DEMOLITION.with_borrow(|d| d.pending()) + DETONATE.with_borrow(|q| q.len()),
         "launches": LAUNCHER.with_borrow(|l| l.names()),
+        // The lab's translation of the scene as built (`Scene::placement`, the asset frame):
+        // takes aim at built coordinates through it.
+        "placement": s.map_or([0.0; 3], |s| s.placement),
         "launchesArmed": LAUNCHER.with_borrow(|l| l.pending()) + LAUNCH.with_borrow(|q| q.len()),
         "ballMass": s.map_or(0.0, |s| s.mass),
         "ballRadius": s.map_or(0.0, |s| s.radius),
@@ -1013,6 +1016,7 @@ fn frame(advance: Advance) -> Result<(), String> {
                         "charges": DEMOLITION.with_borrow(|d| d.names()),
                         "chargesArmed": DEMOLITION.with_borrow(|d| d.pending()) + DETONATE.with_borrow(|q| q.len()),
                         "launches": LAUNCHER.with_borrow(|l| l.names()),
+                        "placement": SHOOTING.get().map_or([0.0; 3], |s| s.placement),
                         "launchesArmed": LAUNCHER.with_borrow(|l| l.pending()) + LAUNCH.with_borrow(|q| q.len()),
                         "gpuWaits": engine_gpu_wait::WAITS.load(std::sync::atomic::Ordering::Relaxed),
                         "gpuYields": engine_gpu_wait::YIELDS.load(std::sync::atomic::Ordering::Relaxed),

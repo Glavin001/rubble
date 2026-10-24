@@ -358,6 +358,122 @@ impl Material {
         }
     }
 
+    // ---- Vehicles (`vehicles.rs`). A vehicle's chunks are solid boxes and prisms standing
+    // for thin metal shells, so their metal is smeared over each chunk's gross volume and
+    // each joint's gross face: a smeared property is the metal's times its solidity (the
+    // metal's share of the volume or of the section). ----
+
+    /// The body shell of a road vehicle, cold-formed high-strength low-alloy sheet steel
+    /// (HC340LA to EN 10268: yield 340-420 MPa, tensile 410-510 MPa; E = 210 GPa,
+    /// 7850 kg/m^3), smeared over the chunk at a volume solidity of 1.5%: a 1.4 t car in its
+    /// 4.5 x 1.8 x 1.45 m envelope (and an 11 t bus in 12 x 2.5 x 3.2 m) is about 1.5% steel
+    /// by volume. Density 7850 x 0.015 = 118 kg/m^3 (the parts' masses are the vehicle's
+    /// own, `vehicles::Vehicle::masses`), E = 210 GPa x 0.015 = 3.2 GPa: the chunks' contact
+    /// stiffness. Its strengths are the spot-welded seams' ([`Material::spot_weld`]).
+    pub fn sheet_steel() -> Material {
+        Material { density: 7850.0 * 0.015, youngs_modulus: 210e9 * 0.015, poisson_ratio: 0.3, ..Material::spot_weld() }
+    }
+
+    /// A spot-welded seam of a vehicle's body shell, smeared over the gross section a
+    /// chunk face cuts through the body (steel area / gross area, the section solidity,
+    /// 0.3%: about 6-7e-3 m^2 of sills, pillars, rails, floor and roof panels in the
+    /// 2.3 m^2 section of a passenger car).
+    ///
+    /// * Shear (cohesion) 0.375 MPa: a resistance spot weld in 1.0-1.5 mm HSLA sheet
+    ///   (nugget 5 sqrt(t), about 5-6 mm) holds about 6 kN in tensile shear (the minimum
+    ///   tensile-shear loads of AWS D8.9M and ISO 18278-2 tests are of order 5-7 kN for
+    ///   this sheet), at a 40 mm pitch: 150 kN per metre of seam, or 6 kN / (0.04 m x
+    ///   1.2 mm) = 125 MPa over the sheet it joins; x 0.003 = 0.375 MPa.
+    /// * Tension 0.15 MPa: the cross-tension strength of a spot weld is 0.3-0.5 of its
+    ///   tensile-shear strength (ISO 14272 against ISO 14273 tests): 0.4 x 125 MPa x
+    ///   0.003.
+    /// * Compression 0.37 MPa: the seam does not govern; the shell crushes by progressive
+    ///   folding at its mean crushing stress, about a third of its squash load for thin
+    ///   steel sections (Wierzbicki & Abramowicz 1983): 355 MPa x 0.35 x 0.003. As a check,
+    ///   a 1.4 t car stopping from 56 km/h over 0.6 m of front crush (Euro NCAP's offset
+    ///   test) averages 280 kN over about 1 m^2 of front section, 0.28 MPa.
+    /// * E = 210 GPa x 0.003 = 0.63 GPa; a ductile bond (steel yields, then tears), its
+    ///   fracture energy steel's 200 kJ/m^2 (`Material::steel`) x 0.003 = 600 J/m^2.
+    pub fn spot_weld() -> Material {
+        Material {
+            density: 7850.0 * 0.015,
+            youngs_modulus: 210e9 * 0.003,
+            poisson_ratio: 0.3,
+            tensile_strength: 0.15e6,
+            compressive_strength: 0.37e6,
+            cohesion: 0.375e6,
+            friction: 0.3,
+            shear_cap: None,
+            fracture_energy: FractureEnergy { tension: 600.0, shear: 600.0, compression: 600.0 },
+            kind: BondKind::Ductile,
+            weibull_modulus: None,
+            dif: None,
+            static_fatigue: None,
+            damping_ratio: 0.02,
+        }
+    }
+
+    /// A bolted or hinged attachment of a vehicle (a door on its hinges and latch, a wheel
+    /// on its suspension, a bonnet, a bumper, a bolted wing, an engine on its mounts),
+    /// smeared over the face it is bonded on, weaker than the welded shell: doors and
+    /// wheels come off first.
+    ///
+    /// * Tension 0.14 MPa, shear 0.11 MPa: FMVSS 206 (49 CFR 571.206) requires a side
+    ///   door's hinge system to hold 11,000 N longitudinally and 8,900 N transversely, and
+    ///   its primary latch the same, each over one of the 0.08 m^2 edge faces a door is
+    ///   bonded on here (`vehicles::car`): 11,000 / 0.08 = 0.14 MPa, 8,900 / 0.08 =
+    ///   0.11 MPa. A wheel on its suspension takes the same per face (a car's 0.17 m^2 hub
+    ///   face holds about 24 kN, seven times its static load).
+    /// * Compression 0.3 MPa: a bolted face in compression bears on the shell behind it, so
+    ///   about the shell's crushing stress (`Material::spot_weld`).
+    /// * E 0.63 GPa (the shell's smeared modulus), ductile, 300 J/m^2.
+    pub fn bolted() -> Material {
+        Material { tensile_strength: 0.14e6, compressive_strength: 0.3e6, cohesion: 0.11e6, fracture_energy: FractureEnergy { tension: 300.0, shear: 300.0, compression: 300.0 }, ..Material::spot_weld() }
+    }
+
+    /// An airliner's airframe, aluminium alloy 2024-T3 sheet (MMPDS-01 Table 3.2.3.0(b),
+    /// A-basis, L direction: F_tu 483 MPa, F_ty 345 MPa, F_cy 269 MPa, F_su 283 MPa;
+    /// E 72.4 GPa, 2780 kg/m^3), smeared over the chunk at a volume solidity of 4%: a
+    /// regional jet of about 37 t in the 300-350 m^3 of its fuselage barrel and wings
+    /// (Embraer E175 class: 31.7 m long, 3.0 m fuselage, 26 m span, MTOW 37.5-40 t) is
+    /// about 4% aluminium by volume, structure, systems and fuel together. Density
+    /// 2780 x 0.04 = 111 kg/m^3 (the parts' masses are the aircraft's own), E = 72.4 GPa x
+    /// 0.04 = 2.9 GPa. Its strengths are the riveted joints' ([`Material::riveted`]).
+    pub fn aluminium() -> Material {
+        Material { density: 2780.0 * 0.04, youngs_modulus: 72.4e9 * 0.04, ..Material::riveted() }
+    }
+
+    /// A riveted joint of an airframe's skin, stringers and frames (2024-T3,
+    /// [`Material::aluminium`]), smeared over the gross section a chunk face cuts through
+    /// the airframe at a section solidity of 0.4% (a 3 m barrel's 1.6-2 mm skin with its
+    /// stringers and frames is about 4 mm of aluminium round its 9.4 m perimeter:
+    /// 0.04 m^2 in its 7 m^2 section), at a riveted lap joint's efficiency of 0.7 (the
+    /// joint's strength over the sheet's; Niu, *Airframe Structural Design*, 1988, ch. 7):
+    ///
+    /// * tension 483 MPa x 0.7 x 0.004 = 1.35 MPa; shear 283 MPa x 0.7 x 0.004 = 0.79 MPa;
+    /// * compression: the thin shell crushes, 269 MPa x 0.35 x 0.004 = 0.38 MPa (as
+    ///   `Material::spot_weld`);
+    /// * E = 72.4 GPa x 0.004 = 0.29 GPa; ductile; 2024-T3's tearing energy of about
+    ///   100 kJ/m^2 x 0.004 = 400 J/m^2.
+    pub fn riveted() -> Material {
+        Material {
+            density: 2780.0 * 0.04,
+            youngs_modulus: 72.4e9 * 0.004,
+            poisson_ratio: 0.33,
+            tensile_strength: 1.35e6,
+            compressive_strength: 0.38e6,
+            cohesion: 0.79e6,
+            friction: 0.3,
+            shear_cap: None,
+            fracture_energy: FractureEnergy { tension: 400.0, shear: 400.0, compression: 400.0 },
+            kind: BondKind::Ductile,
+            weibull_modulus: None,
+            dif: None,
+            static_fatigue: None,
+            damping_ratio: 0.02,
+        }
+    }
+
     /// A deterministic, rate-independent linear-elastic brittle material for analytic tests.
     pub fn analytic_test() -> Material {
         Material {
