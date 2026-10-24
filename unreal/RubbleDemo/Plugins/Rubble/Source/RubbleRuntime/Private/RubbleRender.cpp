@@ -142,6 +142,18 @@ namespace RubbleRender
 		return M.Get();
 	}
 
+	UStaticMesh* NaniteCube()
+	{
+		static TStrongObjectPtr<UStaticMesh> M(LoadObject<UStaticMesh>(nullptr, TEXT("/Game/Rubble/Meshes/SM_NaniteBox.SM_NaniteBox"), nullptr, LOAD_NoWarn | LOAD_Quiet));
+		return M ? M.Get() : EngineCube();
+	}
+
+	UStaticMesh* NaniteSphere()
+	{
+		static TStrongObjectPtr<UStaticMesh> M(LoadObject<UStaticMesh>(nullptr, TEXT("/Game/Rubble/Meshes/SM_NaniteSphere.SM_NaniteSphere"), nullptr, LOAD_NoWarn | LOAD_Quiet));
+		return M ? M.Get() : EngineSphere();
+	}
+
 	UStaticMesh* EngineCylinder()
 	{
 		static TStrongObjectPtr<UStaticMesh> M(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cylinder.Cylinder")));

@@ -11,6 +11,8 @@
 #include "CoreMinimal.h"
 #include "RubbleTypes.h"
 
+class FRubbleGpuPoses;
+
 class RUBBLERUNTIME_API IRubbleBackend
 {
 public:
@@ -45,4 +47,8 @@ public:
 	virtual void SideRam() = 0;
 	/** Reload the current scene from its initial state. */
 	virtual void Reset() = 0;
+
+	/** The poses on Unreal's GPU for the GPU Scene renderers (unreal/DESIGN.md), or null when
+	 *  this backend or platform has none: the readback renderers then draw everything. */
+	virtual FRubbleGpuPoses* GpuPoses() const { return nullptr; }
 };

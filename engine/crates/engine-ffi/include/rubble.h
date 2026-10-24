@@ -526,10 +526,12 @@ struct RbWorldDef rbDefaultWorldDef(void);
 
 enum RbResult rbCreateWorld(const struct RbWorldDef *def, struct RbWorld **out);
 
-// A world on the host renderer's Metal device and command queue (`MTLDevice*`,
-// `MTLCommandQueue*`; Unreal: `IMetalDynamicRHI::RHIGetDevice` and `RHIRunOnQueue`). Its
-// submissions go on that queue, ordered with the host's frames, and `rbWorld_ExportPoses`
-// can write into the host's buffers. Apple platforms only (elsewhere `RB_UNSUPPORTED`).
+// A world on the host renderer's Metal device (`MTLDevice*`; Unreal:
+// `IMetalDynamicRHI::RHIGetDevice`), submitting on `mtl_command_queue`, so
+// `rbWorld_ExportPoses` can write into the host's buffers. Give the world a queue of its own on
+// that device, made with room for many command buffers in flight
+// (`newCommandQueueWithMaxCommandBufferCount:`, 4096 as wgpu's own queues; Metal's default of 64
+// stalls fast soft scenes). Apple platforms only (elsewhere `RB_UNSUPPORTED`).
 enum RbResult rbCreateWorldOnMetal(const struct RbWorldDef *def,
                                    void *mtl_device,
                                    void *mtl_command_queue,
@@ -556,6 +558,12 @@ enum RbResult rbWorld_ExportPoses(struct RbWorld *world,
 // The latest `rbWorld_ExportPoses` ticket whose copies have finished on the GPU (0 for none).
 // Never waits.
 enum RbResult rbWorld_GetCompletedPoseExport(struct RbWorld *world, uint64_t *out_ticket);
+
+// Where a body's origin is relative to its exported pose record (`rbWorld_ExportPoses`):
+// origin = record × offset. Records are solver poses (centre of mass and its axes); the offset
+// is the identity when the centre of mass is the body's origin, and changes only when the
+// body's shapes change. In the world's coordinates and units, like the body's shape transforms.
+enum RbResult rbBody_GetPoseOffset(struct RbWorld *world, RbBodyId body, struct RbTransform *out);
 
 // A body's slot in the pose buffer and its exports.
 enum RbResult rbBody_GetPoseIndex(struct RbWorld *world, RbBodyId body, uint32_t *out);

@@ -4,6 +4,11 @@
 #include "Engine/GameInstance.h"
 #include "Engine/StaticMesh.h"
 #include "HAL/PlatformTime.h"
+#include "HAL/IConsoleManager.h"
+#include "RenderGraphBuilder.h"
+#include "RenderGraphUtils.h"
+#include "RubbleGpuPoses.h"
+#include "RubbleInstancesComponent.h"
 #include "RubbleRender.h"
 #include "RubbleSubsystem.h"
 
@@ -11,6 +16,8 @@ namespace
 {
 	/** Batches past this share of moving instances are rewritten whole, in one call. */
 	constexpr float WholeBatchShare = 0.25f;
+
+
 }
 
 ARubblePrimitives::ARubblePrimitives()
@@ -56,37 +63,7 @@ int32 ARubblePrimitives::BatchFor(ERubbleShape Kind, int32 Mesh, ERubbleMaterial
 	{
 		return *Found;
 	}
-	UStaticMesh* StaticMesh = nullptr;
-	switch (Kind)
-	{
-	case ERubbleShape::Box: StaticMesh = RubbleRender::EngineCube(); break;
-	case ERubbleShape::Sphere: StaticMesh = RubbleRender::EngineSphere(); break;
-	case ERubbleShape::Capsule:
-	{
-		FRubbleMeshData Capsule;
-		RubbleRender::CapsuleMesh(A, B, Capsule);
-		Capsule.Material = Material;
-		StaticMesh = RubbleRender::BuildMesh(this, Capsule);
-		break;
-	}
-	case ERubbleShape::Hull:
-	{
-		const uint64 MeshKey = uint64(Mesh) << 8 | uint8(Material);
-		if (TObjectPtr<UStaticMesh>* Built = BuiltMeshes.Find(MeshKey))
-		{
-			StaticMesh = *Built;
-		}
-		else if (Assets.Meshes.IsValidIndex(Mesh))
-		{
-			FRubbleMeshData Copy = Assets.Meshes[Mesh];
-			Copy.Material = Material;
-			Copy.TriangleMaterials.Reset();
-			StaticMesh = RubbleRender::BuildMesh(this, Copy);
-			BuiltMeshes.Add(MeshKey, StaticMesh);
-		}
-		break;
-	}
-	}
+	UStaticMesh* StaticMesh = MeshFor(Kind, Mesh, Material, A, B, Assets, /*bNanite=*/false);
 	UInstancedStaticMeshComponent* ISM = NewObject<UInstancedStaticMeshComponent>(this);
 	ISM->SetStaticMesh(StaticMesh);
 	ISM->SetMaterial(0, RubbleRender::Surface(Material));
@@ -104,6 +81,41 @@ int32 ARubblePrimitives::BatchFor(ERubbleShape Kind, int32 Mesh, ERubbleMaterial
 	return Index;
 }
 
+UStaticMesh* ARubblePrimitives::MeshFor(ERubbleShape Kind, int32 Mesh, ERubbleMaterial Material, float A, float B, const FRubbleSceneAssets& Assets, bool bNanite)
+{
+	switch (Kind)
+	{
+	case ERubbleShape::Box: return bNanite ? RubbleRender::NaniteCube() : RubbleRender::EngineCube();
+	case ERubbleShape::Sphere: return bNanite ? RubbleRender::NaniteSphere() : RubbleRender::EngineSphere();
+	case ERubbleShape::Capsule:
+	{
+		FRubbleMeshData Capsule;
+		RubbleRender::CapsuleMesh(A, B, Capsule);
+		Capsule.Material = Material;
+		return RubbleRender::BuildMesh(this, Capsule);
+	}
+	case ERubbleShape::Hull:
+	{
+		const uint64 MeshKey = uint64(Mesh) << 8 | uint8(Material);
+		if (TObjectPtr<UStaticMesh>* Built = BuiltMeshes.Find(MeshKey))
+		{
+			return *Built;
+		}
+		if (Assets.Meshes.IsValidIndex(Mesh))
+		{
+			FRubbleMeshData Copy = Assets.Meshes[Mesh];
+			Copy.Material = Material;
+			Copy.TriangleMaterials.Reset();
+			UStaticMesh* Built = RubbleRender::BuildMesh(this, Copy);
+			BuiltMeshes.Add(MeshKey, Built);
+			return Built;
+		}
+		return nullptr;
+	}
+	}
+	return nullptr;
+}
+
 void ARubblePrimitives::Rebuild(const FRubbleSceneAssets& Assets)
 {
 	for (FBatch& B : Batches)
@@ -115,6 +127,16 @@ void ARubblePrimitives::Rebuild(const FRubbleSceneAssets& Assets)
 	}
 	Batches.Reset();
 	BatchByKey.Reset();
+	for (FGpuBatch& B : GpuBatches)
+	{
+		if (B.Component)
+		{
+			B.Component->DestroyComponent();
+		}
+	}
+	GpuBatches.Reset();
+	GpuBatchByKey.Reset();
+	GpuBodies.Reset();
 	BuiltMeshes.Reset();
 	Refs.Reset();
 	BodyInstances.Reset();
@@ -130,6 +152,11 @@ void ARubblePrimitives::Rebuild(const FRubbleSceneAssets& Assets)
 		if (Body.NumShapes == 0)
 		{
 			continue; // drawn by another renderer (vehicle chassis, destructible proxy)
+		}
+		if (DrawsOnGpu(Body, Assets.Shapes, Assets))
+		{
+			AddGpuBody(Body, Assets.Shapes, Assets);
+			continue;
 		}
 		FBodyState State;
 		State.Previous = State.Current = Body.Initial;
@@ -170,12 +197,19 @@ void ARubblePrimitives::Rebuild(const FRubbleSceneAssets& Assets)
 		}
 		Batch.Component->MarkRenderStateDirty();
 	}
+	UE_LOG(LogRubble, Display, TEXT("primitives: %d instances through GPU Scene (%d batches), %d read back (%d batches)"),
+		NumGpuInstances(), GpuBatches.Num(), NumInstances() - NumGpuInstances(), Batches.Num());
 }
 
 void ARubblePrimitives::AddLiveBody(const FRubbleBodyVisual& Body, TArrayView<const FRubbleShapeVisual> Shapes)
 {
-	if (!SceneAssets || Body.NumShapes == 0 || BodyInstances.Contains(Body.Id.Index()))
+	if (!SceneAssets || Body.NumShapes == 0 || BodyInstances.Contains(Body.Id.Index()) || GpuBodies.Contains(Body.Id.Index()))
 	{
+		return;
+	}
+	if (DrawsOnGpu(Body, Shapes, *SceneAssets))
+	{
+		AddGpuBody(Body, Shapes, *SceneAssets);
 		return;
 	}
 	FBodyState State;
@@ -256,12 +290,16 @@ void ARubblePrimitives::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 	URubbleSubsystem* Rubble = GetGameInstance()->GetSubsystem<URubbleSubsystem>();
+	const double Start = FPlatformTime::Seconds();
+	if (const FRubbleGpuPoses* Poses = GpuPoses(); Poses && GpuBatches.Num())
+	{
+		WriteGpu(*Poses);
+	}
 	if (!Rubble || (Active.Num() == 0 && Settling.Num() == 0))
 	{
-		UpdateMs = 0.0;
+		UpdateMs = 1000.0 * (FPlatformTime::Seconds() - Start);
 		return;
 	}
-	const double Start = FPlatformTime::Seconds();
 	const double Alpha = Rubble->Alpha();
 	for (const uint32 b : Active)
 	{
@@ -319,12 +357,137 @@ void ARubblePrimitives::Tick(float DeltaSeconds)
 
 int32 ARubblePrimitives::NumInstances() const
 {
-	int32 N = 0;
+	int32 N = NumGpuInstances();
 	for (const FBatch& B : Batches)
 	{
 		N += B.Component ? B.Component->GetInstanceCount() : 0;
 	}
 	return N;
+}
+
+int32 ARubblePrimitives::NumGpuInstances() const
+{
+	int32 N = 0;
+	for (const FGpuBatch& B : GpuBatches)
+	{
+		N += B.PoseSlot.Num();
+	}
+	return N;
+}
+
+// ----- the GPU Scene path ----------------------------------------------------------------------
+
+FRubbleGpuPoses* ARubblePrimitives::GpuPoses() const
+{
+	const URubbleSubsystem* Rubble = GetGameInstance() ? GetGameInstance()->GetSubsystem<URubbleSubsystem>() : nullptr;
+	return Rubble && Rubble->Backend() ? Rubble->Backend()->GpuPoses() : nullptr;
+}
+
+bool ARubblePrimitives::DrawsOnGpu(const FRubbleBodyVisual& Body, TArrayView<const FRubbleShapeVisual> Shapes, const FRubbleSceneAssets& Assets) const
+{
+	const FRubbleGpuPoses* Poses = GpuPoses();
+	if (!Poses || Body.bStatic || !RubbleGpuSceneEnabled())
+	{
+		return false;
+	}
+	// Large bodies stay on CPU-visible instances so Lumen's world-space tracing sees them.
+	const float MaxCm = RubbleGpuSceneMaxExtentCm();
+	for (int32 s = 0; s < Body.NumShapes; ++s)
+	{
+		const FRubbleShapeVisual& Shape = Shapes[Body.FirstShape + s];
+		float Extent = 0.0f;
+		switch (Shape.Kind)
+		{
+		case ERubbleShape::Box: Extent = Shape.HalfExtents.GetMax(); break;
+		case ERubbleShape::Sphere: Extent = Shape.Radius; break;
+		case ERubbleShape::Capsule: Extent = Shape.Radius + Shape.HalfHeight; break;
+		case ERubbleShape::Hull:
+			if (Assets.Meshes.IsValidIndex(Shape.Mesh))
+			{
+				for (const FVector3f& P : Assets.Meshes[Shape.Mesh].Positions)
+				{
+					Extent = FMath::Max(Extent, P.GetAbsMax());
+				}
+			}
+			break;
+		}
+		if (Extent + Shape.Local.GetLocation().GetAbsMax() > MaxCm)
+		{
+			return false;
+		}
+	}
+	return Poses->PoseIndex(Body.Id) != MAX_uint32;
+}
+
+int32 ARubblePrimitives::GpuBatchFor(ERubbleShape Kind, int32 Mesh, ERubbleMaterial Material, float A, float B, const FRubbleSceneAssets& Assets)
+{
+	const uint32 Dims = Kind == ERubbleShape::Capsule ? GetTypeHash(FVector2f(A, B)) : 0u;
+	const uint64 Key = (uint64(Kind) << 56) ^ (uint64(uint8(Material)) << 48) ^ (uint64(uint32(Mesh + 1)) << 20) ^ Dims;
+	if (const int32* Found = GpuBatchByKey.Find(Key))
+	{
+		return *Found;
+	}
+	URubbleInstancesComponent* C = NewObject<URubbleInstancesComponent>(this);
+	C->SetStaticMesh(MeshFor(Kind, Mesh, Material, A, B, Assets, /*bNanite=*/true));
+	C->SetMaterial(0, RubbleRender::Surface(Material));
+	C->SetCastShadow(true);
+	// Where the instances can be: the bounds GPU culling starts from.
+	const double Half = FMath::Max(2.0 * Assets.GroundHalfExtentCm, 50000.0);
+	C->WorldBounds = FBox(FVector(-Half, -Half, -Half), FVector(Half, Half, Half));
+	C->SetupAttachment(RootComponent);
+	C->RegisterComponent();
+	FGpuBatch Batch;
+	Batch.Component = C;
+	const int32 Index = GpuBatches.Add(MoveTemp(Batch));
+	GpuBatchByKey.Add(Key, Index);
+	return Index;
+}
+
+void ARubblePrimitives::AddGpuBody(const FRubbleBodyVisual& Body, TArrayView<const FRubbleShapeVisual> Shapes, const FRubbleSceneAssets& Assets)
+{
+	const uint32 Slot = GpuPoses()->PoseIndex(Body.Id);
+	const FTransform Offset = GpuPoses()->PoseOffset(Body.Id);
+	for (int32 s = 0; s < Body.NumShapes; ++s)
+	{
+		const FRubbleShapeVisual& Shape = Shapes[Body.FirstShape + s];
+		FVector3f Scale(1.0f);
+		if (Shape.Kind == ERubbleShape::Box)
+		{
+			Scale = Shape.HalfExtents / 50.0f;
+		}
+		else if (Shape.Kind == ERubbleShape::Sphere)
+		{
+			Scale = FVector3f(Shape.Radius / 50.0f);
+		}
+		FGpuBatch& Batch = GpuBatches[GpuBatchFor(Shape.Kind, Shape.Mesh, Shape.Material, Shape.Radius, Shape.HalfHeight, Assets)];
+		// The instance in its pose record's frame: shape local x (origin relative to the record).
+		const FTransform InRecord = FTransform(Shape.Local.GetRotation(), Shape.Local.GetLocation()) * Offset;
+		const FQuat4f Q(InRecord.GetRotation());
+		Batch.PoseSlot.Add(Slot);
+		Batch.Local.Add(FVector4f(FVector3f(InRecord.GetLocation()), 0.0f));
+		Batch.Local.Add(FVector4f(Q.X, Q.Y, Q.Z, Q.W));
+		Batch.Local.Add(FVector4f(Scale, 0.0f));
+		Batch.Local.Add(FVector4f(Shape.Tint.R, Shape.Tint.G, Shape.Tint.B, 0.0f));
+		Batch.bDirty = true;
+	}
+	GpuBodies.Add(Body.Id.Index());
+}
+
+void ARubblePrimitives::WriteGpu(const FRubbleGpuPoses& Poses)
+{
+	for (FGpuBatch& Batch : GpuBatches)
+	{
+		if (Batch.PoseSlot.Num() == 0)
+		{
+			continue;
+		}
+		if (Batch.bDirty)
+		{
+			Batch.Component->SetInstanceTables(Batch.PoseSlot, Batch.Local);
+			Batch.bDirty = false;
+		}
+		Batch.Component->WriteFromGpuPoses(Poses);
+	}
 }
 
 bool ARubblePrimitives::BodyTransform(FRubbleBodyId Body, FTransform& Out) const

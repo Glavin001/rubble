@@ -1145,10 +1145,12 @@ pub unsafe extern "C" fn rbCreateWorld(def: *const RbWorldDef, out: *mut *mut Rb
     guard_args(|| create_world(def, GpuContext::Default, out))
 }
 
-/// A world on the host renderer's Metal device and command queue (`MTLDevice*`,
-/// `MTLCommandQueue*`; Unreal: `IMetalDynamicRHI::RHIGetDevice` and `RHIRunOnQueue`). Its
-/// submissions go on that queue, ordered with the host's frames, and `rbWorld_ExportPoses`
-/// can write into the host's buffers. Apple platforms only (elsewhere `RB_UNSUPPORTED`).
+/// A world on the host renderer's Metal device (`MTLDevice*`; Unreal:
+/// `IMetalDynamicRHI::RHIGetDevice`), submitting on `mtl_command_queue`, so
+/// `rbWorld_ExportPoses` can write into the host's buffers. Give the world a queue of its own on
+/// that device, made with room for many command buffers in flight
+/// (`newCommandQueueWithMaxCommandBufferCount:`, 4096 as wgpu's own queues; Metal's default of 64
+/// stalls fast soft scenes). Apple platforms only (elsewhere `RB_UNSUPPORTED`).
 #[no_mangle]
 pub unsafe extern "C" fn rbCreateWorldOnMetal(
     def: *const RbWorldDef,
@@ -1223,6 +1225,19 @@ pub unsafe extern "C" fn rbWorld_GetCompletedPoseExport(world: *mut RbWorld, out
         let w = world_mut(world)?;
         let t = w.world.completed_pose_export()?;
         write(out_ticket, t)
+    })
+}
+
+/// Where a body's origin is relative to its exported pose record (`rbWorld_ExportPoses`):
+/// origin = record × offset. Records are solver poses (centre of mass and its axes); the offset
+/// is the identity when the centre of mass is the body's origin, and changes only when the
+/// body's shapes change. In the world's coordinates and units, like the body's shape transforms.
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_GetPoseOffset(world: *mut RbWorld, body: RbBodyId, out: *mut RbTransform) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let t = w.world.body_pose_offset(BodyId::from_bits(body))?;
+        write(out, w.transform_out(t))
     })
 }
 

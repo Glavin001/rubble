@@ -1,6 +1,8 @@
 #include "RubbleAbiBackend.h"
 
 #include "HAL/PlatformFileManager.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "RubbleGlb.h"
@@ -185,6 +187,7 @@ bool FRubbleAbiBackend::CheckVersion(FString& Error)
 
 void FRubbleAbiBackend::DestroyWorld()
 {
+	Gpu.Reset(); // before the world: it waits for the world's last copies into Unreal's buffers
 	if (WorldPtr)
 	{
 		rbDestroyWorld(WorldPtr);
@@ -641,7 +644,31 @@ bool FRubbleAbiBackend::LoadAbi(const FRubbleSceneRequest& Request, FString& Err
 	// 9k); 32 here. Overflow is loud (rbWorld_Poll fails with the flag), never a silent drop.
 	W.max_contacts = FMath::Max(W.max_contacts, uint32(NumBodies * 32));
 	W.max_candidates = FMath::Max(W.max_candidates, uint32(NumBodies * 32));
-	if (rbCreateWorld(&W, &WorldPtr) != RB_OK)
+	// On Unreal's own GPU device when the platform allows (the GPU Scene renderers then read
+	// the poses in place); -RubbleReadback keeps the world on its own device, read back.
+	FString NoGpu;
+	if (!FParse::Param(FCommandLine::Get(), TEXT("RubbleReadback")) && FRubbleGpuPoses::Supported(NoGpu))
+	{
+		void* Device = nullptr;
+		void* Queue = nullptr;
+		if (!FRubbleGpuPoses::DeviceAndQueue(Device, Queue, Error))
+		{
+			return false;
+		}
+		const RbResult R = rbCreateWorldOnMetal(&W, Device, Queue, &WorldPtr);
+		FRubbleGpuPoses::ReleaseQueue(Queue); // the world holds its own reference
+		if (R != RB_OK)
+		{
+			Error = AbiError(TEXT("rbCreateWorldOnMetal"));
+			return false;
+		}
+		Gpu = MakeUnique<FRubbleGpuPoses>(WorldPtr, W.max_bodies);
+		if (!Gpu->IsValid())
+		{
+			Gpu.Reset();
+		}
+	}
+	else if (rbCreateWorld(&W, &WorldPtr) != RB_OK)
 	{
 		Error = AbiError(TEXT("rbCreateWorld"));
 		return false;

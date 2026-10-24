@@ -4,6 +4,7 @@
 #
 #   scripts/unreal/test.sh [--no-build] [--only Rubble.Clock]
 #   RUBBLE_POC_SIDE=317 scripts/unreal/test.sh --no-build --only Rubble.Poc.Scale   (~100k boxes)
+#   RUBBLE_TEST_ARGS=-RubbleReadback scripts/unreal/test.sh ...   (extra game arguments)
 #
 # Exit status: the number of failed test groups.
 set -uo pipefail
@@ -31,10 +32,10 @@ fi
 
 failed=0
 run() { # run <name> <filter> <game|cmd> [extra game args]
-  local name="$1" filter="$2" mode="$3" extra="${4:-}" log="$LOGS/$1.log"
+  local name="$1" filter="$2" mode="$3" extra="${4:-} ${RUBBLE_TEST_ARGS:-}" log="$LOGS/$1.log"
   rm -f "$log"
   if [[ "$mode" == game ]]; then
-    "$APP/UnrealEditor" "$PROJECT" -game -windowed -ResX=1280 -ResY=720 -RubbleNoVolumetrics -notraceserver $extra \
+    "$APP/UnrealEditor" "$PROJECT" -game -windowed -ResX=1280 -ResY=720 -RubbleNoVolumetrics -notraceserver -unattended $extra \
       "-ExecCmds=Automation RunTests $filter; Quit" "-TestExit=Automation Test Queue Empty" -abslog="$log" > /dev/null 2>&1 &
   else
     "$CMD" "$PROJECT" -nullrhi -unattended -nopause -nosplash -NoSound -notraceserver \

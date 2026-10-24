@@ -35,5 +35,8 @@ namespace RubbleRender
 
 	RUBBLERUNTIME_API UStaticMesh* EngineCube();     // 100 cm
 	RUBBLERUNTIME_API UStaticMesh* EngineSphere();   // 100 cm across
+	/** Nanite copies of the cube and sphere (build_content.py), or the engine's when not built. */
+	RUBBLERUNTIME_API UStaticMesh* NaniteCube();
+	RUBBLERUNTIME_API UStaticMesh* NaniteSphere();
 	RUBBLERUNTIME_API UStaticMesh* EngineCylinder(); // 100 cm across, 100 cm tall, along Z
 }

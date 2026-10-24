@@ -26,10 +26,30 @@ fn poses(buf: &Retained<ProtocolObject<dyn MTLBuffer>>, offset: usize, slot: u32
     unsafe { *(buf.contents().as_ptr().cast::<u8>().add(offset + slot as usize * 32).cast::<Pose>()) }
 }
 
+fn qmul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    [
+        a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+        a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+        a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+        a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
+    ]
+}
+
+fn qrot(q: [f32; 4], v: [f32; 3]) -> [f32; 3] {
+    let r = qmul(qmul(q, [v[0], v[1], v[2], 0.0]), [-q[0], -q[1], -q[2], q[3]]);
+    [r[0], r[1], r[2]]
+}
+
+/// a × b as poses: b applied in a's frame.
+fn compose(ap: [f32; 3], aq: [f32; 4], bp: [f32; 3], bq: [f32; 4]) -> ([f32; 3], [f32; 4]) {
+    let r = qrot(aq, bp);
+    ([ap[0] + r[0], ap[1] + r[1], ap[2] + r[2]], qmul(aq, bq))
+}
+
 #[test]
 fn poses_land_in_the_hosts_buffers() {
     let device = MTLCreateSystemDefaultDevice().expect("a Metal device");
-    let queue = device.newCommandQueue().expect("a queue");
+    let queue = device.newCommandQueueWithMaxCommandBufferCount(4096).expect("a queue");
     unsafe {
         let mut def = rbDefaultWorldDef();
         def.max_bodies = 4096;
@@ -54,6 +74,14 @@ fn poses_land_in_the_hosts_buffers() {
         ok(rbCreateBoxShape(w, boxy, &rbDefaultShapeDef(), RbVec3 { x: 0.5, y: 0.5, z: 0.5 }, RbTransform { q: RbQuat { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }, ..Default::default() }, &mut s));
         let mut slot = 0u32;
         ok(rbBody_GetPoseIndex(w, boxy, &mut slot));
+        // A body whose centre of mass is off its origin: its record is not its origin.
+        bd.transform.p = RbVec3 { x: -3.0, y: 2.0, z: 1.0 };
+        let mut off = 0;
+        ok(rbCreateBody(w, &bd, &mut off));
+        let shifted = RbTransform { p: RbVec3 { x: 0.8, y: 0.0, z: 0.3 }, q: RbQuat { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } };
+        ok(rbCreateBoxShape(w, off, &rbDefaultShapeDef(), RbVec3 { x: 0.4, y: 0.4, z: 0.4 }, shifted, &mut s));
+        let mut off_slot = 0u32;
+        ok(rbBody_GetPoseIndex(w, off, &mut off_slot));
 
         // The host's buffers: one shared allocation, the two ranges at offsets (as a renderer that
         // sub-allocates hands them out).
@@ -101,6 +129,21 @@ fn poses_land_in_the_hosts_buffers() {
                 let want = [t.p.x, t.p.y, t.p.z][k];
                 assert!((cur.p[k] - want).abs() < 1e-5, "frame {frame}: exported {:?} vs reported {:?}", cur.p, t.p);
             }
+            // Record × offset is the reported origin of the off-centre body.
+            let mut offset = RbTransform::default();
+            ok(rbBody_GetPoseOffset(w, off, &mut offset));
+            assert!((offset.p.x + 0.8).abs() < 1e-4 && (offset.p.z + 0.3).abs() < 1e-4, "the offset is the centre of mass's: {:?}", offset.p);
+            let mut want = RbTransform::default();
+            ok(rbBody_GetTransform(w, off, &mut want));
+            let r = poses(&host, cur_off as usize, off_slot);
+            let origin = compose(r.p, r.q, [offset.p.x, offset.p.y, offset.p.z], [offset.q.x, offset.q.y, offset.q.z, offset.q.w]);
+            for k in 0..3 {
+                let w_ = [want.p.x, want.p.y, want.p.z][k];
+                assert!((origin.0[k] - w_).abs() < 1e-4, "frame {frame}: record x offset {:?} vs origin {:?}", origin.0, want.p);
+            }
+            let wq = [want.q.x, want.q.y, want.q.z, want.q.w];
+            let dot: f32 = (0..4).map(|k| origin.1[k] * wq[k]).sum();
+            assert!(dot.abs() > 1.0 - 1e-5, "frame {frame}: rotation {:?} vs {:?}", origin.1, wq);
             if frame > 0 {
                 assert!(
                     (prev.p[1] - before_latest).abs() < 1e-5,

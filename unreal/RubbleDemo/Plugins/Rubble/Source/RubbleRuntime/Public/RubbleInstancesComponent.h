@@ -11,6 +11,7 @@
 #include "RubbleInstancesComponent.generated.h"
 
 class FRDGBuilder;
+class FRubbleGpuPoses;
 
 /** The buffers one frame's write reads, made on the render thread (RDG). */
 struct FRubbleInstanceBuffers
@@ -42,12 +43,35 @@ public:
 	/** Where the instances can be (culling bounds of the whole set, world space). */
 	FBox WorldBounds = FBox(FVector(-100000.0), FVector(100000.0));
 
-	/** Queue this frame's GPU write: Source makes the buffers on the render thread. */
-	void WriteFromPoses(float Alpha, FBufferSource Source);
+	/** Queue this frame's GPU write: Source makes the buffers on the render thread. False when
+	 *  nothing was queued (no scene proxy yet: Source is not called). */
+	bool WriteFromPoses(float Alpha, FBufferSource Source);
 
 	/** Whether the proxy Unreal made is a Nanite one (the mesh has Nanite data and Nanite is on). */
 	bool IsNaniteProxy() const;
 
+	/** The per-instance tables for WriteFromGpuPoses, one entry per instance: its pose slot
+	 *  (0xffffffff: hidden) and four float4s (translation, rotation, scale, tint) placing it in its
+	 *  pose record's frame. Uploaded once per change; sets the instance count. */
+	void SetInstanceTables(TArray<uint32> PoseSlot, TArray<FVector4f> Local);
+	/** Queue this frame's write from Rubble's poses on the GPU (the newest finished export). */
+	bool WriteFromGpuPoses(const FRubbleGpuPoses& Poses);
+
 private:
 	int32 NumInstances = 0;
+	struct FTableData
+	{
+		TArray<uint32> PoseSlot;
+		TArray<FVector4f> Local;
+		uint32 Version = 0;
+	};
+	struct FTables
+	{
+		TRefCountPtr<FRDGPooledBuffer> PoseSlot, Local; // render thread
+		uint32 Version = 0;                             // of the data in them
+	};
+	/** The latest tables; every write carries them, so a write Unreal drops (a proxy recreated)
+	 *  loses no upload. */
+	TSharedPtr<const FTableData, ESPMode::ThreadSafe> TableData;
+	TSharedPtr<FTables, ESPMode::ThreadSafe> Tables = MakeShared<FTables, ESPMode::ThreadSafe>();
 };

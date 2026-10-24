@@ -10,6 +10,7 @@
 #include "PrimitiveSceneDesc.h"
 #include "RenderGraphBuilder.h"
 #include "RenderGraphUtils.h"
+#include "RubbleGpuPoses.h"
 #include "RubbleShaders.h"
 #include "SceneInterface.h"
 
@@ -107,12 +108,12 @@ bool URubbleInstancesComponent::IsNaniteProxy() const
 	return Proxy && Proxy->IsNaniteMesh();
 }
 
-void URubbleInstancesComponent::WriteFromPoses(float Alpha, FBufferSource Source)
+bool URubbleInstancesComponent::WriteFromPoses(float Alpha, FBufferSource Source)
 {
 	UWorld* World = GetWorld();
 	if (!World || !World->Scene || NumInstances <= 0 || !GetSceneProxy())
 	{
-		return;
+		return false;
 	}
 	FPrimitiveSceneDesc PrimitiveDesc;
 	PrimitiveDesc.SceneProxy = GetSceneProxy();
@@ -134,4 +135,40 @@ void URubbleInstancesComponent::WriteFromPoses(float Alpha, FBufferSource Source
 			FComputeShaderUtils::AddPass(GraphBuilder, RDG_EVENT_NAME("RubbleGPUScene(%u)", Count), Shader, P,
 				FComputeShaderUtils::GetGroupCountWrapped(Count, FRubbleGPUSceneCS::ThreadGroupSize));
 		}));
+	return true;
+}
+
+void URubbleInstancesComponent::SetInstanceTables(TArray<uint32> PoseSlot, TArray<FVector4f> Local)
+{
+	check(Local.Num() == PoseSlot.Num() * 4);
+	TSharedPtr<FTableData, ESPMode::ThreadSafe> Data = MakeShared<FTableData, ESPMode::ThreadSafe>();
+	Data->Version = TableData ? TableData->Version + 1 : 1;
+	Data->PoseSlot = MoveTemp(PoseSlot);
+	Data->Local = MoveTemp(Local);
+	SetNumInstances(Data->PoseSlot.Num());
+	TableData = Data;
+}
+
+bool URubbleInstancesComponent::WriteFromGpuPoses(const FRubbleGpuPoses& Poses)
+{
+	const FRubbleGpuPoses::FView& View = Poses.Latest();
+	if (!View.bValid || !TableData || TableData->PoseSlot.Num() == 0)
+	{
+		return false;
+	}
+	return WriteFromPoses(View.Alpha, [Tables = Tables, Data = TableData, Current = View.Current, Previous = View.Previous](FRDGBuilder& G)
+	{
+		if (Tables->Version != Data->Version)
+		{
+			Tables->PoseSlot = G.ConvertToExternalBuffer(CreateStructuredBuffer(G, TEXT("Rubble.InstancePoseSlot"), Data->PoseSlot));
+			Tables->Local = G.ConvertToExternalBuffer(CreateStructuredBuffer(G, TEXT("Rubble.InstanceLocal"), Data->Local));
+			Tables->Version = Data->Version;
+		}
+		FRubbleInstanceBuffers Out;
+		Out.CurrentPoses = G.CreateSRV(G.RegisterExternalBuffer(Current));
+		Out.PreviousPoses = G.CreateSRV(G.RegisterExternalBuffer(Previous));
+		Out.InstanceBody = G.CreateSRV(G.RegisterExternalBuffer(Tables->PoseSlot));
+		Out.InstanceLocal = G.CreateSRV(G.RegisterExternalBuffer(Tables->Local));
+		return Out;
+	});
 }

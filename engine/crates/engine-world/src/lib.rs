@@ -495,6 +495,21 @@ impl World {
         Ok(exports.completed.load(std::sync::atomic::Ordering::Acquire))
     }
 
+    /// Where a body's origin is relative to its pose record in the pose buffer and its exports
+    /// ([`World::export_poses`]): origin = record × offset, that is
+    /// `origin.p = record.p + record.q * offset.p` and `origin.q = record.q * offset.q`. Records
+    /// are the solver's poses (centre of mass and its axes); the offset is the identity for a
+    /// body whose centre of mass is its origin. It changes only when the body's shapes change.
+    pub fn body_pose_offset(&self, id: BodyId) -> anyhow::Result<Transform> {
+        anyhow::ensure!(self.body_is_valid(id), "stale body handle");
+        let frame = self.bodies[id.index() as usize].frame_at(u64::MAX);
+        let q = frame.axes.conjugate();
+        Ok(Transform {
+            position: (-(q * frame.center)).to_array(),
+            rotation: q.normalize().to_array(),
+        })
+    }
+
     /// Where a body's pose is in the pose buffer and its exports (its GPU slot).
     pub fn body_pose_index(&self, id: BodyId) -> anyhow::Result<u32> {
         anyhow::ensure!(self.body_is_valid(id), "stale body handle");

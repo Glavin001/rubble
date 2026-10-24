@@ -13,6 +13,7 @@
 
 #include "CoreMinimal.h"
 #include "RubbleBackend.h"
+#include "RubbleGpuPoses.h"
 #include "RubbleMockBackend.h"
 
 struct RbWorld;
@@ -41,6 +42,7 @@ public:
 	/** Why a scene runs on the mock, or empty when the ABI builds it. */
 	static FString MockReason(const FRubbleSceneRequest& Request);
 	bool IsOnAbi() const { return !bMock; }
+	virtual FRubbleGpuPoses* GpuPoses() const override { return bMock ? nullptr : Gpu.Get(); }
 	RbWorld* World() const { return WorldPtr; }
 
 private:
@@ -81,6 +83,8 @@ private:
 	FString NameText = TEXT("rubble");
 	FRubbleSceneRequest Current;
 	RbWorld* WorldPtr = nullptr;
+	/** The world's poses on Unreal's GPU: set when the world runs on Unreal's device. */
+	TUniquePtr<FRubbleGpuPoses> Gpu;
 	TUniquePtr<FRubbleSceneAssets> SceneAssets;
 	double Dt = 1.0 / 60.0;
 	uint32 PlayerVehicle = MAX_uint32;

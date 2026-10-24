@@ -3,6 +3,8 @@
 #include "Components/StaticMeshComponent.h"
 #include "Engine/GameInstance.h"
 #include "Engine/StaticMesh.h"
+#include "RubbleGpuPoses.h"
+#include "RubbleInstancesComponent.h"
 #include "RubbleRender.h"
 #include "RubbleSubsystem.h"
 
@@ -71,6 +73,14 @@ void ARubbleFracture::Rebuild(const FRubbleSceneAssets& InAssets)
 			C->DestroyComponent();
 		}
 	}
+	for (URubbleInstancesComponent* C : GpuChunks)
+	{
+		if (C)
+		{
+			C->DestroyComponent();
+		}
+	}
+	GpuChunks.Reset();
 	ChunkMeshes.Reset();
 	ChunkComponents.Reset();
 	Proxies.Reset();
@@ -125,11 +135,46 @@ void ARubbleFracture::Rebuild(const FRubbleSceneAssets& InAssets)
 		}
 		UStaticMesh* ProxyMesh = RubbleRender::BuildMesh(this, Merged);
 		Proxies.Add(NewMeshComponent(this, ProxyMesh, D.Placement));
+		if (const FRubbleGpuPoses* Gpu = GpuPoses())
+		{
+			GpuChunks.SetNum(NumChunks);
+			const float MaxCm = RubbleGpuSceneMaxExtentCm();
+			for (const int32 c : D.Chunks)
+			{
+				const FRubbleChunkVisual& V = InAssets.Chunks[c];
+				const uint32 Slot = V.Body.IsNull() ? MAX_uint32 : Gpu->PoseIndex(V.Body);
+				if (Slot == MAX_uint32 || !ChunkMeshes[c] || ChunkMeshes[c]->GetBounds().SphereRadius > MaxCm)
+				{
+					continue;
+				}
+				// In the pose record's frame: rest x (the body's origin relative to its record).
+				const FTransform InRecord = FTransform(ChunkRest[c].GetRotation(), ChunkRest[c].GetLocation()) * Gpu->PoseOffset(V.Body);
+				const FQuat4f Q(InRecord.GetRotation());
+				URubbleInstancesComponent* G = NewObject<URubbleInstancesComponent>(this);
+				G->SetStaticMesh(ChunkMeshes[c]);
+				const double Half = FMath::Max(2.0 * InAssets.GroundHalfExtentCm, 50000.0);
+				G->WorldBounds = FBox(FVector(-Half), FVector(Half));
+				G->SetCastShadow(true);
+				G->SetVisibility(false);
+				G->SetupAttachment(RootComponent);
+				G->RegisterComponent();
+				G->SetInstanceTables({ Slot }, {
+					FVector4f(FVector3f(InRecord.GetLocation()), 0.0f),
+					FVector4f(Q.X, Q.Y, Q.Z, Q.W),
+					FVector4f(FVector3f(ChunkRest[c].GetScale3D()), 0.0f),
+					FVector4f(-1.0f, -1.0f, -1.0f, 0.0f) }); // no tint: the material's own colour (as a plain mesh)
+				GpuChunks[c] = G;
+			}
+		}
 		for (const int32 c : D.Chunks)
 		{
 			BodyChunks.FindOrAdd(ChunkBody[c]).Add(c);
 			Poses.Add(ChunkBody[c], { D.Placement, D.Placement });
 		}
+	}
+	if (NumChunks)
+	{
+		UE_LOG(LogRubble, Display, TEXT("fracture: %d chunks, %d through GPU Scene"), NumChunks, NumGpuChunks());
 	}
 }
 
@@ -147,6 +192,11 @@ void ARubbleFracture::Shatter(int32 Destructible)
 	Proxies[Destructible]->SetVisibility(false);
 	for (const int32 c : Assets->Destructibles[Destructible].Chunks)
 	{
+		if (GpuChunks.IsValidIndex(c) && GpuChunks[c])
+		{
+			GpuChunks[c]->SetVisibility(true);
+			continue;
+		}
 		const FBodyPose* Pose = Poses.Find(ChunkBody[c]);
 		const FTransform World = ChunkRest[c] * (Pose ? Pose->Current : Assets->Destructibles[Destructible].Placement);
 		ChunkComponents[c] = NewMeshComponent(this, ChunkMeshes[c], World);
@@ -229,6 +279,10 @@ void ARubbleFracture::Draw(uint32 Body, const FTransform& Pose)
 	}
 	for (const int32 c : *Chunks)
 	{
+		if (GpuChunks.IsValidIndex(c) && GpuChunks[c] && GpuChunks[c]->IsVisible())
+		{
+			continue; // written on the GPU
+		}
 		if (UStaticMeshComponent* C = ChunkComponents[c])
 		{
 			C->SetWorldTransform(ChunkRest[c] * Pose, false, nullptr, ETeleportType::TeleportPhysics);
@@ -248,6 +302,16 @@ void ARubbleFracture::Tick(float DeltaSeconds)
 	if (!Rubble || !Assets)
 	{
 		return;
+	}
+	if (const FRubbleGpuPoses* Gpu = GpuPoses())
+	{
+		for (URubbleInstancesComponent* G : GpuChunks)
+		{
+			if (G && G->IsVisible())
+			{
+				G->WriteFromGpuPoses(*Gpu);
+			}
+		}
 	}
 	const double Alpha = Rubble->Alpha();
 	for (const uint32 b : Active)
@@ -286,6 +350,21 @@ TArray<int32> ARubbleFracture::ChunkDrawCounts() const
 		{
 			++Counts[c];
 		}
+		if (GpuChunks.IsValidIndex(c) && GpuChunks[c] && GpuChunks[c]->IsVisible())
+		{
+			++Counts[c];
+		}
 	}
 	return Counts;
+}
+
+int32 ARubbleFracture::NumGpuChunks() const
+{
+	return GpuChunks.FilterByPredicate([](const URubbleInstancesComponent* C) { return C != nullptr; }).Num();
+}
+
+FRubbleGpuPoses* ARubbleFracture::GpuPoses() const
+{
+	const URubbleSubsystem* Rubble = GetGameInstance() ? GetGameInstance()->GetSubsystem<URubbleSubsystem>() : nullptr;
+	return Rubble && Rubble->Backend() && RubbleGpuSceneEnabled() ? Rubble->Backend()->GpuPoses() : nullptr;
 }

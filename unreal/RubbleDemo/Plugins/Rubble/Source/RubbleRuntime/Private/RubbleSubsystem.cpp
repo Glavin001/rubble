@@ -4,6 +4,7 @@
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
 #include "RubbleAbiBackend.h"
+#include "RubbleGpuPoses.h"
 #include "RubbleMockBackend.h"
 
 DEFINE_LOG_CATEGORY(LogRubble);
@@ -98,6 +99,10 @@ void URubbleSubsystem::Advance(double RealSeconds)
 	}
 	TArray<FRubbleFrame> Frames;
 	BackendImpl->Poll(Frames);
+	if (FRubbleGpuPoses* Gpu = BackendImpl->GpuPoses())
+	{
+		Gpu->Update(float(Clock.Alpha()));
+	}
 	Stats.BackendMs = 1000.0 * (FPlatformTime::Seconds() - Start);
 	Stats.Steps = Steps;
 	Stats.DroppedSeconds = Clock.Dropped - DroppedBefore;

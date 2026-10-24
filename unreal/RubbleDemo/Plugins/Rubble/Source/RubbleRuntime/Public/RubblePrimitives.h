@@ -1,6 +1,12 @@
 // Draws every body made of primitive shapes (boxes, spheres, capsules, hulls): one instanced mesh
-// per (shape kind or hull mesh, material), each shape one instance. Only bodies that moved are
-// touched; sleeping ones cost nothing. Poses are interpolated between steps by the clock's alpha.
+// per (shape kind or hull mesh, material), each shape one instance. Two paths:
+//  - GPU Scene (when the backend has poses on Unreal's GPU, FRubbleGpuPoses): small dynamic
+//    bodies are GPU-only instances whose transforms a compute pass writes every frame from
+//    Rubble's pose buffer. Nothing per body runs on the CPU. See unreal/DESIGN.md, section 2.
+//  - Readback: static bodies and large ones, so Lumen's distance fields and surface cache see
+//    them (the Lumen hybrid), and everything when there are no GPU poses. Only bodies that moved
+//    are touched; sleeping ones cost nothing.
+// Poses are interpolated between steps by the clock's alpha.
 
 #pragma once
 
@@ -10,6 +16,8 @@
 #include "RubblePrimitives.generated.h"
 
 class UInstancedStaticMeshComponent;
+class URubbleInstancesComponent;
+class FRubbleGpuPoses;
 class UStaticMesh;
 struct FRubbleFrame;
 struct FRubbleSceneAssets;
@@ -26,6 +34,8 @@ public:
 	virtual void Tick(float DeltaSeconds) override;
 
 	int32 NumInstances() const;
+	/** Instances drawn through GPU Scene from Rubble's GPU poses. */
+	int32 NumGpuInstances() const;
 	int32 NumDrawnBodies() const { return BodyInstances.Num(); }
 	int32 NumActiveBodies() const { return Active.Num(); }
 	/** The drawn transform of a body's first shape (tests). */
@@ -52,6 +62,26 @@ private:
 		TArray<FTransform> Transforms; // the drawn transforms, for whole-batch updates
 		int32 Dirty = 0;
 	};
+
+	/** A GPU Scene batch: its instance tables are handed to the component when they change; the
+	 *  transforms are written on the GPU every frame. */
+	struct FGpuBatch
+	{
+		TObjectPtr<URubbleInstancesComponent> Component;
+		TArray<uint32> PoseSlot;
+		TArray<FVector4f> Local; // four float4s per instance: translation, rotation, scale, tint
+		bool bDirty = true;
+	};
+	/** Whether a body is drawn through GPU Scene: dynamic, small, with a pose slot. */
+	bool DrawsOnGpu(const FRubbleBodyVisual& Body, TArrayView<const FRubbleShapeVisual> Shapes, const FRubbleSceneAssets& Assets) const;
+	void AddGpuBody(const FRubbleBodyVisual& Body, TArrayView<const FRubbleShapeVisual> Shapes, const FRubbleSceneAssets& Assets);
+	int32 GpuBatchFor(ERubbleShape Kind, int32 Mesh, ERubbleMaterial Material, float A, float B, const FRubbleSceneAssets& Assets);
+	UStaticMesh* MeshFor(ERubbleShape Kind, int32 Mesh, ERubbleMaterial Material, float A, float B, const FRubbleSceneAssets& Assets, bool bNanite);
+	void WriteGpu(const FRubbleGpuPoses& Poses);
+	FRubbleGpuPoses* GpuPoses() const;
+	TArray<FGpuBatch> GpuBatches;
+	TMap<uint64, int32> GpuBatchByKey;
+	TSet<uint32> GpuBodies; // body indices drawn by GPU batches
 
 	void Rebuild(const FRubbleSceneAssets& Assets);
 	void OnFrame(const FRubbleFrame& Frame);
