@@ -316,6 +316,25 @@ mod imp {
         pub nodes: Vec<Option<u32>>,
     }
 
+    impl ThresholdSlot {
+        /// A body slot's solver frame (centre of mass and principal axes in the asset
+        /// frame) from its GPU frame record (`fracture.slang` `frames[2 * slot]`: centre and
+        /// structure as bits; principal rotation, both in the structure's frame), and the
+        /// principal rotation in the structure frame.
+        fn record_frame(&self, [c0, c1]: [[f32; 4]; 2]) -> (SolverFrame, DQuat) {
+            let (sq, st) = self.structures[c0[3].to_bits() as usize];
+            let com = DVec3::new(c0[0] as f64, c0[1] as f64, c0[2] as f64);
+            let principal =
+                DQuat::from_xyzw(c1[0] as f64, c1[1] as f64, c1[2] as f64, c1[3] as f64)
+                    .normalize();
+            let frame = SolverFrame {
+                center: (st + sq * com).as_vec3(),
+                axes: (sq * principal).normalize().as_quat(),
+            };
+            (frame, principal)
+        }
+    }
+
     /// The world's threshold destructibles.
     #[derive(Default)]
     pub(crate) struct Fracture {
@@ -1151,13 +1170,8 @@ mod imp {
                     .copied()
                     .ok_or_else(|| anyhow::anyhow!("fracture frame {i} missing"))
             };
-            let (c0, c1) = (rec(2 * b as usize)?, rec(2 * b as usize + 1)?);
-            let structure = c0[3].to_bits() as usize;
-            let (sq, st) = t.structures[structure];
-            let com = DVec3::new(c0[0] as f64, c0[1] as f64, c0[2] as f64);
-            let principal =
-                DQuat::from_xyzw(c1[0] as f64, c1[1] as f64, c1[2] as f64, c1[3] as f64)
-                    .normalize();
+            let (frame, principal) =
+                t.record_frame([rec(2 * b as usize)?, rec(2 * b as usize + 1)?]);
             let anchored = chunks.iter().any(|&c| t.tables.info[c] & INFO_SUPPORT != 0);
             // The piece's mass and inertia about its centre, summed from its chunks (f64;
             // the GPU sums the same records in fixed point), in the stress frame.
@@ -1186,10 +1200,6 @@ mod imp {
             let pm = DMat3::from_quat(principal);
             let local = pm.transpose() * inertia * pm;
             let moments = DVec3::new(local.x_axis.x, local.y_axis.y, local.z_axis.z);
-            let frame = SolverFrame {
-                center: (st + sq * com).as_vec3(),
-                axes: (sq * principal).normalize().as_quat(),
-            };
             let body_type = if anchored || mass <= 0.0 {
                 BodyType::Static
             } else {
@@ -1206,6 +1216,23 @@ mod imp {
                 self.shapes[s as usize].body = b;
             }
             Ok(())
+        }
+
+        /// A threshold piece body's solver frame as the GPU has it now (blocking): for
+        /// `read_body_state`, which reads the GPU's live pose. A step whose readback is
+        /// not yet adopted may have split the body on the GPU, re-centring its pose on
+        /// its new centre of mass and principal axes; the host's frame history learns of
+        /// it only with that readback. `None` for a body no threshold destructible owns.
+        pub(crate) fn threshold_live_frame(&self, b: u32) -> Option<SolverFrame> {
+            let gpu = self.fracture.gpu.as_ref()?;
+            let t = self
+                .fracture
+                .slots
+                .iter()
+                .flatten()
+                .find(|t| t.owned.contains(&b))?;
+            let rec: Vec<[f32; 4]> = gpu.read_range(&t.fracture.frames, 2 * b as usize, 2);
+            Some(t.record_frame([rec[0], rec[1]]).0)
         }
 
         fn piece_info(&self, k: usize, chunks: &[u32], body: u32) -> ActorInfo {
