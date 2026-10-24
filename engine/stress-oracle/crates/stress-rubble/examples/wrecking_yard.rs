@@ -5,16 +5,21 @@
 //!
 //!   cargo run --release -p stress-rubble --features gpu --example wrecking_yard -- [STRUCTURE] [BALL] [FRAMES]
 //!
-//! STRUCTURE `wy_frame10` (default), `wy_round_tower`, `wy_brick_tower` or `bo_viaduct`; BALL `ball10t`,
-//! `ball50t` (default) or `sphere15m`; FRAMES at 60 Hz (default 600). The ball is fired at
-//! frame 10. `STRESS_PROFILE=threshold`: the threshold mode. `STRESS_SHOT_MASS=4`,
-//! `STRESS_SHOT_SPEED=2`: the ball's mass or speed times this (the lab's sliders).
+//! STRUCTURE `wy_frame10` (default), `wy_round_tower`, `wy_brick_tower`, `bo_viaduct`,
+//! `topple_tower`, `rr_storefront_row`, `ft_apartment_block` or `ft_glass_tower`; BALL
+//! `ball10t`, `ball50t` (default), `sphere15m`, `car2t` or `jet`; FRAMES at 60 Hz (default
+//! 600). The ball is fired at frame 10. `STRESS_PROFILE=threshold`: the threshold mode.
+//! `STRESS_SHOT_MASS=4`, `STRESS_SHOT_SPEED=2`: the ball's mass or speed times this (the
+//! lab's sliders).
 //!
-//! Every `EVERY` frames: bonds broken, fragments, ms per frame; then, per storey (the
-//! chunks' second group: `storey-N`, `floor-N`, `course-N`, the viaduct's `pier-N` and
-//! `span-N`), the frame at which a tenth of its chunks had dropped a metre and how many
-//! had at the end: a collapse that climbs shows later frames on higher storeys, and a
-//! standing core storeys with few dropped. For the viaduct, every `EVERY` frames, each
+//! Every `EVERY` frames: bonds broken, fragments, ms per frame and the top storey's
+//! displacement and lean; then, per storey (the chunks' `storey-N`, `floor-N` or `course-N`
+//! group, or the viaduct's `pier-N` and `span-N`), the frame at which a tenth of its
+//! chunks had dropped a metre and how many had at the end: a collapse that climbs shows
+//! later frames on higher storeys, and a standing core storeys with few dropped. Last, each
+//! storey's mean displacement (m) at the end, and its tilt (degrees, the mean horizontal
+//! drift over the drift of the storey below, per storey height): an upper block that tilts
+//! away as one drifts more the higher it is. For the viaduct, every `EVERY` frames, each
 //! span that has moved: how far its west and east ends have dropped (its deck chunks at
 //! each end) and how many of its bonded chunk pairs are still at their distance (within
 //! 5 cm). A span that comes down as one slab shows one end lower than the other and its
@@ -44,11 +49,34 @@ fn main() {
     ball.speed *= env("STRESS_SHOT_SPEED");
     let structure = wrecking::structure(&key).unwrap_or_else(|| panic!("no structure {key}"));
     let scene = stress_rubble::scenes::wrecking_yard(&key, p, frames as f64 / 60.0);
-    let shot = wrecking::launch(&ball, &structure.aim, "ball");
+    // `STRESS_WY_AIM_X=3`, `STRESS_WY_AIM_Z=12`: aim at this x or height instead (m, the
+    // same direction).
+    let mut aim = structure.aim;
+    for (k, var) in [(0, "STRESS_WY_AIM_X"), (2, "STRESS_WY_AIM_Z")] {
+        if let Ok(v) = std::env::var(var) {
+            aim.target[k] = v.parse().unwrap_or_else(|_| panic!("{var}"));
+        }
+    }
+    let shot = wrecking::launch(&ball, &aim, "ball");
     // Each chunk's storey (its group), in the scene's order.
-    let storey: Vec<String> = scene.bodies[0].chunks.iter().map(|c| c.groups.get(1).cloned().unwrap_or_else(|| "footing".into())).collect();
-    let centres: Vec<Vec3> = scene.bodies[0].chunks.iter().map(|c| Vec3::from_array(c.center)).collect();
-    let start: Vec<f64> = centres.iter().map(|c| c.z).collect();
+    let storey: Vec<String> = scene.bodies[0].chunks.iter().map(|c| c.groups.iter().find(|g| ["storey-", "floor-", "course-", "pier-", "span-"].iter().any(|p| g.starts_with(p))).cloned().unwrap_or_else(|| "footing".into())).collect();
+    let origin: Vec<[f64; 3]> = scene.bodies[0].chunks.iter().map(|c| c.center).collect();
+    let start: Vec<f64> = origin.iter().map(|c| c[2]).collect();
+    // Each chunk's displacement at the last report.
+    let mut moved: Vec<[f64; 3]> = vec![[0.0; 3]; origin.len()];
+    // The top storey's mean displacement and its tilt (the angle its chunks' mean
+    // horizontal drift makes over its height above the ground): an upper block that tilts
+    // away leans before it falls.
+    let number = |s: &str| s.rsplit('-').next().and_then(|n| n.parse::<usize>().ok()).unwrap_or(0);
+    let top_storey = storey.iter().map(|s| number(s)).max().unwrap_or(0);
+    let top_chunks: Vec<usize> = (0..storey.len()).filter(|&k| number(&storey[k]) == top_storey && storey[k] != "footing").collect();
+    let top_height = top_chunks.iter().map(|&k| origin[k][2]).sum::<f64>() / top_chunks.len().max(1) as f64;
+    let top_moved = |moved: &[[f64; 3]]| -> String {
+        let n = top_chunks.len().max(1) as f64;
+        let d = top_chunks.iter().fold([0.0; 3], |a, &k| [a[0] + moved[k][0] / n, a[1] + moved[k][1] / n, a[2] + moved[k][2] / n]);
+        format!("({:.2}, {:.2}, {:.2}) m, lean {:.1} deg", d[0], d[1], d[2], d[0].hypot(d[1]).atan2(top_height + d[2]).to_degrees())
+    };
+    let centres: Vec<Vec3> = origin.iter().map(|c| Vec3::from_array(*c)).collect();
     let spans = stress_ref::viaduct::span_probes(&scene.bodies[0].chunks, &scene.bodies[0].bonds);
     println!("{key}: {} chunks, {} bonds, {} ({:.0} t, r {:.2} m, {:.0} m/s{}), {}, {frames} frames", start.len(), scene.bodies[0].bonds.len(), ball.key, ball.mass / 1e3, ball.radius, ball.speed, if ball.rolling { ", rolling" } else { "" }, p.name());
     let gpu = Gpu::new().expect("GPU");
@@ -84,11 +112,13 @@ fn main() {
             let st = w.poll(&gpu);
             ms.push(t.elapsed().as_secs_f64() * 1e3);
             if (f + 1) % EVERY == 0 || f + 1 == frames {
-                let at: Vec<Vec3> = w.chunk_centres(&gpu).iter().map(|(c, _)| Vec3::from_array(*c)).collect();
+                let now = w.chunk_centres(&gpu);
+                moved = now.iter().zip(&origin).map(|((c, _), o)| [c[0] - o[0], c[1] - o[1], c[2] - o[2]]).collect();
+                let at: Vec<Vec3> = now.iter().map(|(c, _)| Vec3::from_array(*c)).collect();
                 let z: Vec<f64> = at.iter().map(|c| c.z).collect();
                 last = note(f, &z);
                 print_spans(&spans, &centres, &at);
-                println!("frame {:4}: broken {:5}, bodies {:5}, {:6.2} ms/frame (last {EVERY})", f + 1, st.broken, st.bodies, mean(&ms[ms.len().saturating_sub(EVERY)..]));
+                println!("frame {:4}: broken {:5}, bodies {:5}, {:6.2} ms/frame (last {EVERY}), top storey moved {}", f + 1, st.broken, st.bodies, mean(&ms[ms.len().saturating_sub(EVERY)..]), top_moved(&moved));
             }
             if st.error != 0 || st.engine_overflow != 0 {
                 panic!("frame {f}: fracture errors {:#x}, engine overflow {:#x}", st.error, st.engine_overflow);
@@ -134,11 +164,13 @@ fn main() {
             if (f + 1) % EVERY == 0 || f + 1 == frames {
                 w.sync(&gpu);
                 let o = w.observation();
-                let at: Vec<Vec3> = o.bodies.values().next().expect("the structure").iter().zip(&centres).map(|(c, c0)| *c0 + Vec3::from_array(c.displacement)).collect();
+                let chunks = o.bodies.values().next().expect("the structure");
+                moved = chunks.iter().map(|c| c.displacement).collect();
+                let at: Vec<Vec3> = chunks.iter().zip(&centres).map(|(c, c0)| *c0 + Vec3::from_array(c.displacement)).collect();
                 let z: Vec<f64> = at.iter().map(|c| c.z).collect();
                 last = note(f, &z);
                 print_spans(&spans, &centres, &at);
-                println!("frame {:4}: broken {:5}, fragments {:5}, {:6.2} ms/frame (last {EVERY})", f + 1, o.values["broken_bonds"], o.values["fragments"], mean(&ms[ms.len().saturating_sub(EVERY)..]));
+                println!("frame {:4}: broken {:5}, fragments {:5}, {:6.2} ms/frame (last {EVERY}), top storey moved {}", f + 1, o.values["broken_bonds"], o.values["fragments"], mean(&ms[ms.len().saturating_sub(EVERY)..]), top_moved(&moved));
             }
         }
     }
@@ -149,9 +181,28 @@ fn main() {
     let mut storeys: Vec<&String> = last.keys().collect();
     storeys.sort_by_key(|s| (s.rsplit('-').next().and_then(|n| n.parse::<usize>().ok()).unwrap_or(0), s.as_str()));
     println!("storey      dropped   first frame a tenth had dropped {DROP} m");
+    for s in &storeys {
+        let (d, n) = last[*s];
+        println!("{s:12} {d:4}/{n:<4}  {}", first.get(*s).map_or("-".into(), |f| format!("{}", f + 1)));
+    }
+    // Each storey's mean displacement and height; its tilt from the drift over the storey
+    // below.
+    // `STRESS_WY_KIND=core`: of the chunks of that type only (`groups[0]`).
+    let only = std::env::var("STRESS_WY_KIND").ok();
+    let kind = |k: usize| scene.bodies[0].chunks[k].groups.first().cloned().unwrap_or_default();
+    println!("storey      mean displacement (x, y, z) m       tilt over the storey below{}", only.as_ref().map_or(String::new(), |t| format!(" ({t} only)")));
+    let mut below: Option<([f64; 3], f64)> = None;
     for s in storeys {
-        let (d, n) = last[s];
-        println!("{s:12} {d:4}/{n:<4}  {}", first.get(s).map_or("-".into(), |f| format!("{}", f + 1)));
+        let ks: Vec<usize> = (0..storey.len()).filter(|&k| &storey[k] == s && only.as_ref().is_none_or(|t| kind(k) == *t)).collect();
+        if ks.is_empty() {
+            continue;
+        }
+        let n = ks.len().max(1) as f64;
+        let d = ks.iter().fold([0.0; 3], |a, &k| [a[0] + moved[k][0] / n, a[1] + moved[k][1] / n, a[2] + moved[k][2] / n]);
+        let z = ks.iter().map(|&k| origin[k][2] + moved[k][2]).sum::<f64>() / n;
+        let tilt = below.map_or("-".into(), |(b, zb): ([f64; 3], f64)| format!("{:5.1} deg", ((d[0] - b[0]).hypot(d[1] - b[1])).atan2(z - zb).to_degrees()));
+        println!("{s:12} ({:7.2}, {:7.2}, {:7.2})          {tilt}", d[0], d[1], d[2]);
+        below = Some((d, z));
     }
 }
 

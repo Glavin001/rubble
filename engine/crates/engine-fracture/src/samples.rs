@@ -81,22 +81,29 @@ pub const GROUPS: &[&str] = &[
     WRECKING_YARD,
     BRIDGE_OUT,
     TOPPLE,
+    RAM_RAID,
+    FLY_THROUGH,
 ];
 
 /// The Scene menu group of the Wrecking Yard structures.
 pub const WRECKING_YARD: &str = "Wrecking Yard";
+/// The Scene menu group of the vehicle's target (`stress_ref::buildings`).
+pub const RAM_RAID: &str = "Ram Raid";
+/// The Scene menu group of the aircraft's targets (`stress_ref::buildings`).
+pub const FLY_THROUGH: &str = "Fly-through";
 
 /// The Scene menu group of the bridge-failure structures (`stress_ref::viaduct`).
 pub const BRIDGE_OUT: &str = "Bridge Out";
 
 /// The Scene menu groups of the pack samples, in menu order (the last of `GROUPS`).
-pub const PACK_GROUPS: &[&str] = &[WRECKING_YARD, BRIDGE_OUT, TOPPLE];
+pub const PACK_GROUPS: &[&str] = &[WRECKING_YARD, BRIDGE_OUT, TOPPLE, RAM_RAID, FLY_THROUGH];
 
 /// The Scene menu group of the structures brought down by their demolition charges
 /// (`stress_ref::topple`; the pack's `defaults.charges`).
 pub const TOPPLE: &str = "Topple";
 
-/// A Scene menu entry built in Rust as a scene pack (`stress_ref::wrecking`): the hosts
+/// A Scene menu entry built in Rust as a scene pack (`stress_ref::wrecking`'s structures,
+/// with `stress_ref::buildings`' for the Ram Raid and Fly-through groups): the hosts
 /// load its JSON (`pack_sample_json`) as they load any pack (`pack::build_pack_scene`,
 /// stress-web `stress_set_pack`).
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -141,6 +148,24 @@ pub const PACK_SAMPLES: &[PackSample] = &[
         group: TOPPLE,
         menu: "High-rise beside a street, with charges · 420 chunks",
         label: "topple tower",
+    },
+    PackSample {
+        key: "rr_storefront_row",
+        group: RAM_RAID,
+        menu: "Storefront row (5 shops) · 1,203 chunks",
+        label: "storefront row",
+    },
+    PackSample {
+        key: "ft_apartment_block",
+        group: FLY_THROUGH,
+        menu: "7-storey apartment block · 1,355 chunks",
+        label: "apartment block",
+    },
+    PackSample {
+        key: "ft_glass_tower",
+        group: FLY_THROUGH,
+        menu: "11-storey glass tower · 1,332 chunks",
+        label: "glass tower",
     },
 ];
 

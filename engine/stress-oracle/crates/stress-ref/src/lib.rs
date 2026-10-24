@@ -22,6 +22,7 @@ pub mod avbd;
 pub mod blast;
 pub mod bond;
 pub mod builders;
+pub mod buildings;
 pub mod capability;
 pub mod cli;
 pub mod contact;

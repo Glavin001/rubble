@@ -43,7 +43,16 @@ const SEAM: f64 = 1e-6;
 const BLAST_DT: f64 = 1.0 / 60.0;
 
 /// The yard's structures: (key, title), in menu order.
-pub const STRUCTURES: &[(&str, &str)] = &[("wy_frame10", "10-floor concrete frame"), ("wy_round_tower", "Round tower on columns"), ("wy_brick_tower", "Brick tower"), ("bo_viaduct", "Highway viaduct"), ("topple_tower", "Topple: high-rise beside a street")];
+pub const STRUCTURES: &[(&str, &str)] = &[
+    ("wy_frame10", "10-floor concrete frame"),
+    ("wy_round_tower", "Round tower on columns"),
+    ("wy_brick_tower", "Brick tower"),
+    ("bo_viaduct", "Highway viaduct"),
+    ("topple_tower", "Topple: high-rise beside a street"),
+    ("rr_storefront_row", "Storefront row"),
+    ("ft_apartment_block", "Apartment block"),
+    ("ft_glass_tower", "Glass tower"),
+];
 
 /// A structure as the builders make it (Z-up): chunks (box or hull, `material` the pack's
 /// asset material, footings `Support::Fixed`), bonds (`material` the pack material's
@@ -166,6 +175,13 @@ pub const BALLS: &[Ball] = &[
         speed: 12.0,
         rolling: true,
     },
+    // Stand-ins for the vehicle and the aircraft (`buildings`) until the combined host
+    // drives real ones: spheres of their mass and speed, about their frontal size.
+    // A car or small van, 2 t at 15 m/s (54 km/h), its front about 1.8 m across.
+    Ball { key: "car2t", menu: "Vehicle stand-in · 2 t at 15 m/s", mass: 2_000.0, radius: 0.9, speed: 15.0, rolling: false },
+    // A regional jet's fuselage, 40 t at 80 m/s (288 km/h, a low-level approach speed),
+    // 4 m across.
+    Ball { key: "jet", menu: "Aircraft stand-in · 40 t at 80 m/s", mass: 40_000.0, radius: 2.0, speed: 80.0, rolling: false },
 ];
 
 /// A ball preset by key.
@@ -215,6 +231,9 @@ pub fn structure(key: &str) -> Option<Structure> {
         "wy_brick_tower" => Some(brick_tower()),
         "bo_viaduct" => Some(crate::viaduct::viaduct()),
         "topple_tower" => Some(crate::topple::topple_tower()),
+        "rr_storefront_row" => Some(crate::buildings::storefront_row()),
+        "ft_apartment_block" => Some(crate::buildings::apartment_block()),
+        "ft_glass_tower" => Some(crate::buildings::glass_tower()),
         _ => None,
     }
 }
@@ -248,10 +267,26 @@ fn xyz(v: [f64; 3]) -> Value {
 
 /// The calibrated material an asset material stands for (`scene_pack`'s mapping): its
 /// chunks' density and its joints' strengths and stiffness.
-fn calibrated(asset: &str) -> (Material, Material) {
+///
+/// * Glass (`Material::glass`): annealed soda-lime float glass. Density 2500 kg/m^3,
+///   E = 70 GPa, Poisson 0.22 (EN 572-1:2012 section 4; ASTM C1036); tensile (bending)
+///   strength 40 MPa, just under EN 572-1's characteristic 45 MPa for annealed float and
+///   1/25 of its compressive strength of about 1000 MPa (Haldimann, Luible & Overend,
+///   *Structural Use of Glass*, IABSE 2008, section 2.3); fracture energy 8 J/m^2
+///   (K_Ic = 0.75 MPa m^0.5, G = K^2 / E). Stiff and brittle (`BondKind::Brittle`), no
+///   rate effect, static fatigue n = 16 (Wiederhorn 1967). A pane's joints are the
+///   glass's own (`joint_of`): a pane breaks at its edge.
+/// * Structural steel (`Material::steel`): S355 to EN 10025-2. Density 7850 kg/m^3
+///   (EN 1991-1-1 Table A.4), E = 200 GPa (EN 1993-1-1 3.2.6 gives 210 GPa), yield
+///   355 MPa in tension and compression, shear yield f_y / sqrt(3) = 205 MPa
+///   (EN 1993-1-1 6.2.6), a ductile bond (`BondKind::Ductile`) with a fracture energy of
+///   200 kJ/m^2 (ductile tearing of structural steel, J_Ic of order 100-300 kJ/m^2).
+pub fn calibrated(asset: &str) -> (Material, Material) {
     match asset {
         "reinforced-concrete" | "footing-anchor" => (Material::concrete(), Material::concrete()),
         "brick" => (Material::brick(), Material::mortar()),
+        "glass" => (Material::glass(), Material::glass()),
+        "steel" => (Material::steel(), Material::steel()),
         other => panic!("no calibrated material for {other}"),
     }
 }
@@ -273,9 +308,23 @@ pub fn mass(c: &ChunkDesc) -> f64 {
     }
 }
 
+/// The Blast limits of a joint material (`engine-fracture` `pack.rs`, the lab's D6
+/// bonds): Blast's bond stress is an impulse over one 60 Hz step per area, so a strength
+/// of S Pa is a limit of S / 60.
+fn blast_limits(joint: &Material) -> Value {
+    json!({
+        "tensionFatal": joint.tensile_strength * BLAST_DT,
+        "compressionFatal": joint.compressive_strength * BLAST_DT,
+        "shearFatal": joint.cohesion * BLAST_DT,
+    })
+}
+
 /// The scene pack of a structure: nodes (centroid, mass, colliders, materials, types),
-/// bonds (the builders' patches) and the pack's materials (one per joint material, the
-/// calibrated strengths as both its elastic and fatal limits).
+/// bonds (the builders' patches) and the pack's materials (one per joint material: the
+/// calibrated strengths as both its elastic and fatal limits, and its Blast `limits` for
+/// the D6 mode). A structure of one joint material also carries those as the pack-wide
+/// `limits` that Blast-style readers take; one of several carries them per material only
+/// (`pack.rs` takes each bond's from its material and fails on a bond without them).
 pub fn to_pack(s: &Structure) -> Value {
     // Pack materials by joint material name, in order of first use.
     let mut index: BTreeMap<String, usize> = BTreeMap::new();
@@ -296,6 +345,7 @@ pub fn to_pack(s: &Structure) -> Value {
             "shearFatal": joint.cohesion,
             "elasticModulus": joint.youngs_modulus,
             "density": bulk.density,
+            "limits": blast_limits(&joint),
         }));
     }
     let nodes: Vec<Value> = s.chunks.iter().map(|c| json!({"centroid": xyz(c.center), "mass": mass(c), "volume": volume(c)})).collect();
@@ -311,22 +361,17 @@ pub fn to_pack(s: &Structure) -> Value {
     let bonds: Vec<Value> = s.bonds.iter().map(|b| json!({"node0": b.a, "node1": b.b, "centroid": xyz(b.centroid), "normal": xyz(b.normal), "area": b.area, "m": index[&b.material]})).collect();
     let (lo, hi) = bounds(&s.chunks);
     let height = hi[2] - lo[2];
-    // The pack-wide limits Blast-style readers take (`engine-fracture` `pack.rs`, the lab's
-    // D6 bonds): Blast's bond stress is an impulse over one 60 Hz step per area, so a
-    // strength of S Pa is a limit of S / 60. The structure's one joint material's.
-    let (_, joint) = calibrated(&s.bonds[0].material);
-    assert!(s.bonds.iter().all(|b| b.material == s.bonds[0].material), "one joint material a structure");
-    let limits = json!({
-        "tensionFatal": joint.tensile_strength * BLAST_DT,
-        "compressionFatal": joint.compressive_strength * BLAST_DT,
-        "shearFatal": joint.cohesion * BLAST_DT,
-    });
+    let one_joint = materials.len() == 1;
+    let mut solver = json!({"gravity": -9.81, "materialScale": 1, "materials": materials});
+    if one_joint {
+        solver["limits"] = blast_limits(&calibrated(&s.bonds[0].material).1);
+    }
     // The camera looks at the middle of the plan, half way up.
     let target = xyz([0.5 * (lo[0] + hi[0]), 0.5 * (lo[1] + hi[1]), 0.5 * height]);
     let mut defaults = json!({
         "camera": {"target": target, "distance": 2.2 * height},
         "projectile": {"radius": s.ball.radius, "mass": s.ball.mass, "speed": s.ball.speed, "ttlMs": 8000},
-        "solver": {"gravity": -9.81, "materialScale": 1, "materials": materials, "limits": limits},
+        "solver": solver,
         "wreckingYard": {"target": xyz(s.aim.target), "direction": xyz(s.aim.direction)},
     });
     if !s.charges.is_empty() {
@@ -466,13 +511,24 @@ fn face_bonds(chunks: &[ChunkDesc], joint: impl Fn(&ChunkDesc, &ChunkDesc) -> St
     bonds
 }
 
-/// The joint material between two chunks: mortar where a brick meets anything, else
-/// the concrete's.
+/// The joint material between two chunks, the one that governs where they meet:
+/// * mortar where a brick meets anything (masonry is laid in mortar, the weakest joint);
+/// * else the glass's where a pane meets its frame (a pane breaks at its edge, and no
+///   reinforcement runs into glass);
+/// * else the concrete's where concrete meets anything (steel is anchored in it);
+/// * steel's between two steel members (welded).
 pub(crate) fn joint_of(a: &ChunkDesc, b: &ChunkDesc) -> String {
-    if a.material == "brick" || b.material == "brick" {
+    let either = |m: &str| a.material == m || b.material == m;
+    if either("brick") {
         "brick".into()
-    } else {
+    } else if either("glass") {
+        "glass".into()
+    } else if either("reinforced-concrete") || either("footing-anchor") {
         "reinforced-concrete".into()
+    } else if a.material == "steel" && b.material == "steel" {
+        "steel".into()
+    } else {
+        panic!("no joint material between {} and {}", a.material, b.material)
     }
 }
 
