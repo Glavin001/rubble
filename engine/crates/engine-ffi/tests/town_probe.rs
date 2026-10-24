@@ -67,6 +67,7 @@ fn town_pack_loads_steps_and_breaks() {
         dd.start_asleep = std::env::var("TOWN_AWAKE").is_err();
         if threshold {
             dd.model = RbStrengthModel::RB_STRENGTH_THRESHOLD;
+            dd.support_loss = std::env::var("TOWN_SUPPORT_LOSS").is_ok();
         }
         dd.anchored = true;
         println!("default strength_scale {}", dd.strength_scale);
@@ -107,6 +108,16 @@ fn town_pack_loads_steps_and_breaks() {
                 for e in std::slice::from_raw_parts(f.destruction, f.destruction_count as usize) {
                     if e.type_ == RbDestructionType::RB_BONDS_BROKEN {
                         bonds += e.bond_count;
+                    }
+                    if e.type_ == RbDestructionType::RB_SPLIT {
+                        // Touch every array as a host would.
+                        let mut sum = 0u64;
+                        for a in std::iter::once(&e.parent).chain(std::slice::from_raw_parts(e.children, e.child_count as usize)) {
+                            for k in 0..a.chunk_count as usize {
+                                sum += *a.chunks.add(k) as u64 + *a.bodies.add(k);
+                            }
+                        }
+                        assert!(sum > 0 || e.child_count == 0);
                     }
                 }
             }

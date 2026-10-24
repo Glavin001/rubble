@@ -6,7 +6,7 @@
 //! TOWN_SHOTS: `x` (each column row along +x, default), `xz` (also each column line along +z);
 //! TOWN_SPEED (m/s, 45), TOWN_RADIUS (m, 0.6), TOWN_MASS (kg, 7000), TOWN_HEIGHT (m above the
 //! ground, 1.3), TOWN_HEIGHTS (a comma list, a volley at each), TOWN_SUPPORT_LOSS (the
-//! support-loss capability).
+//! support-loss capability), TOWN_VOLLEYS (the shots again each second, this many in all).
 #![cfg(feature = "stress")]
 
 use rubble::*;
@@ -75,17 +75,25 @@ fn tower_columns_shot_from_the_side() {
             shots.extend([84.0f32, 88.0, 92.0, 96.0].iter().map(|x| ([x + sx, h, 49.0 + sz], [0.0, 0.0, speed])));
         }
     }
-    for (at, v) in &shots {
-        let b = w.create_body(&BodyDef { linear_velocity: *v, is_bullet: true, ..BodyDef::dynamic(*at) }).unwrap();
-        w.create_sphere_shape(b, &ShapeDef { update_body_mass: false, ..ShapeDef::default() }, [0.0; 3], r).unwrap();
-        let i = 0.4 * m * r * r;
-        w.body_set_mass_data(b, MassData { mass: m, center: [0.0; 3], rotational_inertia: [[i, 0.0, 0.0], [0.0, i, 0.0], [0.0, 0.0, i]] }).unwrap();
-        w.body_set_projectile(b, Some(Projectile::default())).unwrap();
-    }
+    let fire = |w: &mut World, shots: &[([f32; 3], [f32; 3])]| {
+        for (at, v) in shots {
+            let b = w.create_body(&BodyDef { linear_velocity: *v, is_bullet: true, ..BodyDef::dynamic(*at) }).unwrap();
+            w.create_sphere_shape(b, &ShapeDef { update_body_mass: false, ..ShapeDef::default() }, [0.0; 3], r).unwrap();
+            let i = 0.4 * m * r * r;
+            w.body_set_mass_data(b, MassData { mass: m, center: [0.0; 3], rotational_inertia: [[i, 0.0, 0.0], [0.0, i, 0.0], [0.0, 0.0, i]] }).unwrap();
+            w.body_set_projectile(b, Some(Projectile::default())).unwrap();
+        }
+    };
+    fire(&mut w, &shots);
+    // TOWN_VOLLEYS: the same shots again each second, this many in all (each reaches further).
+    let volleys = env("TOWN_VOLLEYS", 1.0) as u32;
     println!("{} shots at {speed} m/s, r {r} m, {m} kg, {h} m up; tower-187: {} chunks, {} in the ground storey", shots.len(), tower.len(), ground_storey.len());
     let mut broken = 0;
     let hz = (1.0 / solver.dt).round() as u32;
     for second in 1..=8 {
+        if second < volleys + 1 && second > 1 {
+            fire(&mut w, &shots);
+        }
         for _ in 0..hz {
             w.step().unwrap();
             for f in w.poll_blocking().unwrap() {

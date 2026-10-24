@@ -328,8 +328,8 @@ mod imp {
         compressive: Vec<f32>,
         /// Per chunk: its bonds.
         bonds_of: Vec<Vec<u32>>,
-        /// |g| (m/s²).
-        gravity: f32,
+        /// Gravity in the stress frame (m/s²): the chunks' centres are in it.
+        gravity: [f32; 3],
         /// Bonds the pass has broken that no readback has shown broken yet.
         sent: Vec<bool>,
     }
@@ -906,7 +906,7 @@ mod imp {
                     sent: vec![false; compressive.len()],
                     compressive,
                     bonds_of,
-                    gravity: (g[0] * g[0] + g[1] * g[1] + g[2] * g[2]).sqrt() as f32,
+                    gravity: g.map(|x| x as f32),
                 });
             }
             let k = match self.fracture.slots.iter().position(|s| s.is_none()) {
@@ -1222,8 +1222,10 @@ mod imp {
                 }
                 let mass: Vec<f32> = chunks.iter().map(|&c| t.tables.chunks[c as usize][0][3]).collect();
                 let support: Vec<bool> = chunks.iter().map(|&c| t.tables.info[c as usize] & INFO_SUPPORT != 0).collect();
-                let piece = crate::support_loss::Piece { mass: &mass, support: &support, bonds: &piece_bonds };
-                over.extend(crate::support_loss::overloaded(&piece, sl.gravity).into_iter().map(|i| table_index[i as usize]));
+                // Chunk centres in their structure's stress frame (a piece is in one structure).
+                let centre: Vec<[f32; 3]> = chunks.iter().map(|&c| { let r = t.tables.chunks[c as usize][0]; [r[0], r[1], r[2]] }).collect();
+                let piece = crate::support_loss::Piece { mass: &mass, support: &support, centre: &centre, bonds: &piece_bonds };
+                over.extend(crate::support_loss::failing(&piece, sl.gravity).into_iter().map(|i| table_index[i as usize]));
             }
             for &b in &over {
                 sl.sent[b as usize] = true;
