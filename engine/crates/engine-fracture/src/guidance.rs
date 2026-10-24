@@ -151,24 +151,36 @@ pub fn outline_vertices(zones: &[ZoneDesc], ground: [f64; 3]) -> Vec<f32> {
 /// Floats per body in a body snapshot (`BODY_BYTES` / 4).
 const BODY_FLOATS: usize = 28;
 
-/// Pieces `first..last` of a body snapshot that lie near each ring zone: on
-/// the ground (below 1.5 m) within its outer radius in plan view.
+/// Pieces `first..last` of a body snapshot that lie near each zone: low
+/// (within 1.5 m of the zone's base) and within its outer radius in plan
+/// view. A zone on a body is placed where that body is in the snapshot.
 pub fn near_counts(snapshot: &[f32], first: u32, last: u32, zones: &[ZoneDesc]) -> Vec<u32> {
     let mut counts = vec![0u32; zones.len()];
+    let base = |z: &ZoneDesc| -> [f32; 3] {
+        let origin = match z.anchor_body {
+            Some(b) if (b as usize + 1) * BODY_FLOATS <= snapshot.len() => {
+                let o = b as usize * BODY_FLOATS;
+                [snapshot[o], snapshot[o + 1], snapshot[o + 2]]
+            }
+            _ => z.position,
+        };
+        [origin[0] + z.offset[0], origin[1] + z.offset[1], origin[2] + z.offset[2]]
+    };
+    let bases: Vec<[f32; 3]> = zones.iter().map(base).collect();
     for i in first as usize..(last as usize).min(snapshot.len() / BODY_FLOATS) {
         let p = &snapshot[i * BODY_FLOATS..i * BODY_FLOATS + 3];
-        if p[1] > 1.5 {
-            continue;
-        }
         for (k, z) in zones.iter().enumerate() {
+            let c = bases[k];
+            if p[1] - c[1] > 1.5 {
+                continue;
+            }
             let outer = match z.shape {
                 ZoneShape::Ring { outer, .. } | ZoneShape::Arc { outer, .. } => outer,
                 ZoneShape::Sphere { radius } => radius,
                 ZoneShape::Box { half_extents } => half_extents[0].max(half_extents[2]),
                 ZoneShape::Point => 0.5,
             };
-            let c = [z.position[0] + z.offset[0], z.position[2] + z.offset[2]];
-            let (dx, dz) = (p[0] - c[0], p[2] - c[1]);
+            let (dx, dz) = (p[0] - c[0], p[2] - c[2]);
             if dx * dx + dz * dz <= outer * outer {
                 counts[k] += 1;
             }

@@ -20,6 +20,7 @@ pub mod math;
 pub mod pack;
 pub mod pairs;
 pub mod plan;
+pub mod props;
 pub mod samples;
 pub mod scene;
 pub mod stress_export;

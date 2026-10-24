@@ -27,7 +27,7 @@ export async function createRenderer(device,canvas,simulation,scene,onShoot=()=>
  const stream=data=>{const buffer=device.createBuffer({size:Math.max(16,data.byteLength),usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});if(data.length)device.queue.writeBuffer(buffer,0,data);streams.push(buffer);
   return {count:data.length/10,group:device.createBindGroup({layout,entries:[{binding:0,resource:{buffer:simulation.renderBodyBuffer??simulation.bodyBuffer}},{binding:1,resource:{buffer}},{binding:2,resource:{buffer:uniform}},{binding:3,resource:{buffer:joints}}]})}};
  const indexed=new IndexedMesh(scene.vertices),indices=indexed.index();
- const mesh=stream(indexed.vertices()),projectiles=stream(scene.projectileVertices),lines=stream(scene.lines),roads=stream(scene.roadVertices),floor=stream(floorVertices(scene.extent));
+ const mesh=stream(indexed.vertices()),projectiles=stream(scene.projectileVertices),props=stream(scene.propVertices??new Float32Array(0)),lines=stream(scene.lines),roads=stream(scene.roadVertices),floor=stream(floorVertices(scene.extent));
  // Directed-debris zone outlines (engine-fracture guidance.rs), drawn over the scene.
  let zones=stream(new Float32Array(0));
  indexed.free();
@@ -93,6 +93,8 @@ struct O{@builtin(position)p:vec4f,@location(0)c:vec4f};
   if(roads.count){pass.setPipeline(decal);pass.setBindGroup(0,roads.group);pass.draw(roads.count)}
   pass.setPipeline(solid);pass.setBindGroup(0,mesh.group);pass.setIndexBuffer(index,'uint32');pass.drawIndexed(indices.length,scene.copies||1);
   // The newest projectileCount balls (a shot past them reuses the oldest).
+  // Street props (parked cars, pedestrians): their own bodies, drawn once.
+  if(props.count){pass.setBindGroup(0,props.group);pass.draw(props.count)}
   if(simulation.shots){pass.setBindGroup(0,projectiles.group);pass.draw(Math.min(simulation.shots,scene.projectileCount)*projectiles.count/scene.projectileCount)}
   if(trailVerts){const vp=orbit.viewProj(w/h);device.queue.writeBuffer(trailView,0,vp);device.queue.writeBuffer(trailView,64,new Float32Array([1/w,1/h,0,0]));pass.setPipeline(trailPipe);pass.setBindGroup(0,trailGroup);pass.draw(trailVerts,4)}
   if(showBonds&&lines.count){pass.setPipeline(wire);pass.setBindGroup(0,lines.group);pass.draw(lines.count,scene.copies||1)}

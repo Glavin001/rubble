@@ -910,6 +910,32 @@ impl Scene {
         };
         to_js(&near_miss::zones_downrange(&self.0, v3(origin)?, v3(direction)?))
     }
+    /// This scene with parked cars and pedestrians on the streets around its
+    /// block of towers (`engine_fracture::props`).
+    #[wasm_bindgen(js_name = withCity)]
+    pub fn with_city(&self) -> Scene {
+        Scene(engine_fracture::props::with_city(&self.0))
+    }
+    /// Zones on the scene's cars (land on the roof) and pedestrians (near misses).
+    #[wasm_bindgen(js_name = cityZones)]
+    pub fn city_zones(&self) -> Result<JsValue, JsError> {
+        to_js(&engine_fracture::props::city_zones(&self.0))
+    }
+    /// The street props' render stream (10 floats per vertex, drawn once).
+    #[wasm_bindgen(js_name = propVertices)]
+    pub fn prop_vertices(&self) -> Vec<f32> {
+        self.0.prop_vertices.clone()
+    }
+    /// A meteor onto the block's first tower: `{step, origin, dir, label, speed}`.
+    #[wasm_bindgen(js_name = meteorShot)]
+    pub fn meteor_shot(&self) -> Result<JsValue, JsError> {
+        to_js(&engine_fracture::towers::meteor(&self.0))
+    }
+    /// Base shots that topple tower `tower` outward over its street.
+    #[wasm_bindgen(js_name = toppleShots)]
+    pub fn topple_shots(&self, tower: u32, shots: u32, every: u32) -> Result<JsValue, JsError> {
+        to_js(&engine_fracture::towers::topple(&self.0, tower as usize, shots, every))
+    }
     /// Line-list vertices outlining `zones` (drawn on body 0).
     #[wasm_bindgen(js_name = zoneOutline)]
     pub fn zone_outline(&self, zones: JsValue) -> Result<Vec<f32>, JsError> {
