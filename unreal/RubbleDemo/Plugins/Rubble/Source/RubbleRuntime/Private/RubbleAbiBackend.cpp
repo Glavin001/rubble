@@ -1112,11 +1112,13 @@ bool FRubbleAbiBackend::CreateTown(FString& Error)
 	{
 		RbBodyId Body = 0;
 		int32 Node = -1;
-		RbTransform T, Pose;
-		// Every chunk body's origin is the destructible's frame; the chunk's collider is centred
-		// on its pose in that frame (rbDestructible_GetChunkPose).
+		RbTransform T, Pose, Frame;
+		// Every chunk body's origin is the destructible's frame. The node's collider is drawn in
+		// its node frame there (rbDestructible_GetChunkNodeFrame); its pose (centre of mass,
+		// principal axes) is where its breaks happen.
 		if (rbDestructible_GetChunkBody(WorldPtr, Id, c, &Body) != RB_OK || rbDestructible_GetChunkNode(WorldPtr, Id, c, &Node) != RB_OK
-			|| rbBody_GetTransform(WorldPtr, Body, &T) != RB_OK || rbDestructible_GetChunkPose(WorldPtr, Id, c, &Pose) != RB_OK)
+			|| rbBody_GetTransform(WorldPtr, Body, &T) != RB_OK || rbDestructible_GetChunkPose(WorldPtr, Id, c, &Pose) != RB_OK
+			|| rbDestructible_GetChunkNodeFrame(WorldPtr, Id, c, &Frame) != RB_OK)
 		{
 			Error = AbiError(TEXT("town chunk query"));
 			return false;
@@ -1130,7 +1132,7 @@ bool FRubbleAbiBackend::CreateTown(FString& Error)
 		FRubbleShapeVisual Shape;
 		Shape.Material = M.Kind;
 		Shape.Tint = M.Color;
-		Shape.Local = Xf(Pose);
+		Shape.Local = Xf(Frame);
 		Shape.bTownSurface = true;
 		Shape.TextureLayer = M.Layer;
 		Shape.TilesPerMetre = 1.0f / M.MetresPerTile;

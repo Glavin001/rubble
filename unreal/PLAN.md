@@ -86,10 +86,12 @@ ten-storey towers), streets and props, 51,921 chunks and 132,529 bonds, one dest
     framed windows on their outer faces, in each chunk's own frame so they break with it;
   - grass to the fogged horizon, a warm late-afternoon sun, volumetric clouds;
   - collapse dust tinted by what broke, sized by the bonds broken, lingering and drifting.
-- **Found while doing it:** the pack loader (`engine-fracture` `pack.rs`) does not read
-  `nodeColliders` of kind `shape` (`scenario.shapeLibrary`), so 24,561 of the town's chunks
-  (every tower wall among them) collide as their `nodeSizes` boxes while the renderer draws
-  their hulls. A loader fix, not done here.
+- **Fixed: library shapes.** The pack loader read no `nodeColliders` of kind `shape`
+  (`scenario.shapeLibrary`): 24,561 of the town's chunks (every tower wall among them), and the
+  lab's `house-1story`, `house-2story`, `villa-savoye` and `comp-wall-bay` nodes of that kind,
+  collided as their `nodeSizes` boxes. They are their library hulls now; an unknown collider
+  kind is an error. Hosts draw pack nodes at `rbDestructible_GetChunkNodeFrame` (a hull's
+  pose is its centre of mass on its principal axes). Town physics load: 2.0 s to 3.5 s.
 
 | | |
 |---|---|

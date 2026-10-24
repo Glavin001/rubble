@@ -44,6 +44,10 @@ pub struct PackInfo {
     pub nodes: usize,
     pub supports: usize,
     pub bonds: usize,
+    /// Each node's frame in the scene (the footprint shift applied; axes the scene's): where
+    /// its collider's points are. Its body's pose is the frame for a box, but a hull's body sits
+    /// at its centre of mass on its principal axes.
+    pub node_frames: Vec<V3>,
 }
 
 fn v3(v: &Value) -> Result<V3> {
@@ -104,6 +108,7 @@ pub fn build_pack_scene(bytes: &[u8]) -> Result<(Scene, PackInfo)> {
         .ok_or_else(|| anyhow!("pack has no scenario.bonds"))?;
     let sizes = sc["nodeSizes"].as_array();
     let colliders = sc["nodeColliders"].as_array();
+    let library = sc["shapeLibrary"].as_array();
     let meshes = json["nodeMeshes"].as_array();
     let key = json["key"].as_str().unwrap_or("pack").to_string();
     let limits = &json["defaults"]["solver"]["limits"];
@@ -179,6 +184,7 @@ pub fn build_pack_scene(bytes: &[u8]) -> Result<(Scene, PackInfo)> {
         let support = mass.is_nan() || mass <= 0.0;
         let half = half_of(i);
         let at = add(centroid[i], shift);
+        info.node_frames.push(at);
         let id = bodies.len() as u32;
         let tint = if support {
             SUPPORT_COLOR
@@ -223,12 +229,33 @@ pub fn build_pack_scene(bytes: &[u8]) -> Result<(Scene, PackInfo)> {
             });
             (point_list(&p["points"]), faces)
         };
+        // A `shape` collider names an entry of `scenario.shapeLibrary` (shared by many nodes,
+        // in each node's frame): that entry's hull or compound. An unknown kind is an error, never
+        // the node's box.
+        let parts_of = |c: &Value| -> Vec<(Vec<Vec3>, Option<(Vec<u32>, Vec<u32>)>)> {
+            match c["kind"].as_str().unwrap_or("") {
+                "compound" => c["parts"]
+                    .as_array()
+                    .map_or(vec![], |parts| parts.iter().map(part_of).collect()),
+                _ => vec![part_of(c)],
+            }
+        };
         let part_data: Vec<(Vec<Vec3>, Option<(Vec<u32>, Vec<u32>)>)> = match (kind, collider) {
-            ("convex_hull", Some(c)) => vec![part_of(c)],
-            ("compound", Some(c)) => c["parts"]
-                .as_array()
-                .map_or(vec![], |parts| parts.iter().map(part_of).collect()),
-            _ => vec![],
+            ("convex_hull" | "compound", Some(c)) => parts_of(c),
+            ("shape", Some(c)) => {
+                let k = c["shape"]
+                    .as_u64()
+                    .ok_or_else(|| anyhow!("node {i}: shape collider without a shape index"))?;
+                let entry = library
+                    .and_then(|l| l.get(k as usize))
+                    .ok_or_else(|| anyhow!("node {i}: shape {k} is not in scenario.shapeLibrary"))?;
+                match entry["kind"].as_str().unwrap_or("convex_hull") {
+                    "convex_hull" | "compound" => parts_of(entry),
+                    other => bail!("node {i}: shapeLibrary[{k}] has kind '{other}'"),
+                }
+            }
+            ("cuboid", _) | ("", None) => vec![],
+            (other, _) => bail!("node {i}: collider kind '{other}' is not supported"),
         };
         let parts: Vec<ConvexHull> = part_data
             .iter()

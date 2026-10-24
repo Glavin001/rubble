@@ -43,6 +43,9 @@ pub struct ChunkDesc {
     pub fragment: Option<u32>,
     /// The glTF node that renders this chunk, if any.
     pub node: Option<u32>,
+    /// For a pack chunk: its node's frame in the asset frame (the frame its pack collider's
+    /// points and half extents are in; `pose` is its centre of mass and principal axes).
+    pub node_frame: Option<Transform>,
 }
 
 /// One bond between two chunks, or between a chunk and the world.
@@ -167,8 +170,11 @@ impl DestructibleAssetDesc {
             desc.chunks.len(),
             info.nodes
         );
+        anyhow::ensure!(info.node_frames.len() == info.nodes, "pack {}: node frames", info.key);
         for (k, c) in desc.chunks.iter_mut().enumerate() {
             c.node = Some(k as u32);
+            let f = info.node_frames[k];
+            c.node_frame = Some(Transform::new([f[0] as f32, f[1] as f32, f[2] as f32], [0.0, 0.0, 0.0, 1.0]));
         }
         desc.name = Some(info.title);
         Ok(desc)
@@ -209,6 +215,7 @@ impl DestructibleAssetDesc {
                     shapes: Vec::new(),
                     fragment: None,
                     node: None,
+                    node_frame: None,
                 }
             })
             .collect();
@@ -770,9 +777,21 @@ impl World {
     }
 
     /// A chunk's pose in its body's frame: its centre of mass and principal axes in the asset
-    /// (every chunk body's origin is the destructible's frame). Its collider (a pack node's
-    /// box or hull) is centred on it, so a host drawing from colliders places each at body
-    /// transform × this pose.
+    /// (every chunk body's origin is the destructible's frame). A host drawing a pack node's
+    /// collider draws it at body transform × [`Self::destructible_chunk_node_frame`] instead:
+    /// a hull's points are in its node's frame, not this one.
+    /// The frame a pack chunk's node is drawn in, in its body's frame: the frame its pack
+    /// collider's points (or a box's centre and axes) are given in. A chunk not from a pack
+    /// has none: its pose.
+    pub fn destructible_chunk_node_frame(&self, id: DestructibleId, chunk: u32) -> anyhow::Result<Transform> {
+        let d = &self.destructibles[self.live_destructible(id)?];
+        let c = self.assets[d.asset as usize]
+            .chunks
+            .get(chunk as usize)
+            .ok_or_else(|| anyhow::anyhow!("chunk {chunk} out of range"))?;
+        Ok(c.node_frame.unwrap_or(c.pose))
+    }
+
     pub fn destructible_chunk_pose(&self, id: DestructibleId, chunk: u32) -> anyhow::Result<Transform> {
         let d = &self.destructibles[self.live_destructible(id)?];
         Ok(self.assets[d.asset as usize]

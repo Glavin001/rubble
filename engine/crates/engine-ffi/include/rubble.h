@@ -807,12 +807,20 @@ enum RbResult rbDestructible_GetChunkBody(struct RbWorld *world,
 // The glTF node that renders a chunk (-1: none).
 // A chunk's pose in its body's frame: its centre of mass and principal axes in the asset, in
 // the world's coordinates and units (every chunk body's origin is the destructible's frame).
-// Its collider (a pack node's box or hull) is centred on it: draw it at the body's transform ×
-// this pose.
+// To draw a pack node's collider, use rbDestructible_GetChunkNodeFrame: a hull's points are
+// in its node's frame, not this one.
 enum RbResult rbDestructible_GetChunkPose(struct RbWorld *world,
                                           RbDestructibleId id,
                                           uint32_t chunk,
                                           struct RbTransform *out);
+
+// The frame a pack chunk's node is given in, in its body's frame (world coordinates and
+// units): its pack collider's points, or a box's centre and axes, are in it. Draw the node's
+// collider at the body's transform × this frame. A chunk not from a pack: its pose.
+enum RbResult rbDestructible_GetChunkNodeFrame(struct RbWorld *world,
+                                               RbDestructibleId id,
+                                               uint32_t chunk,
+                                               struct RbTransform *out);
 
 enum RbResult rbDestructible_GetChunkNode(struct RbWorld *world,
                                           RbDestructibleId id,

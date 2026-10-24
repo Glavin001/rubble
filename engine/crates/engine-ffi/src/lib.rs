@@ -2273,8 +2273,8 @@ pub unsafe extern "C" fn rbDestructible_GetChunkBody(
 /// The glTF node that renders a chunk (-1: none).
 /// A chunk's pose in its body's frame: its centre of mass and principal axes in the asset, in
 /// the world's coordinates and units (every chunk body's origin is the destructible's frame).
-/// Its collider (a pack node's box or hull) is centred on it: draw it at the body's transform ×
-/// this pose.
+/// To draw a pack node's collider, use rbDestructible_GetChunkNodeFrame: a hull's points are
+/// in its node's frame, not this one.
 #[no_mangle]
 pub unsafe extern "C" fn rbDestructible_GetChunkPose(
     world: *mut RbWorld,
@@ -2285,6 +2285,23 @@ pub unsafe extern "C" fn rbDestructible_GetChunkPose(
     guard_args(|| {
         let w = world_mut(world)?;
         let t = w.world.destructible_chunk_pose(DestructibleId::from_bits(id), chunk)?;
+        write(out, w.transform_out(t))
+    })
+}
+
+/// The frame a pack chunk's node is given in, in its body's frame (world coordinates and
+/// units): its pack collider's points, or a box's centre and axes, are in it. Draw the node's
+/// collider at the body's transform × this frame. A chunk not from a pack: its pose.
+#[no_mangle]
+pub unsafe extern "C" fn rbDestructible_GetChunkNodeFrame(
+    world: *mut RbWorld,
+    id: RbDestructibleId,
+    chunk: u32,
+    out: *mut RbTransform,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let t = w.world.destructible_chunk_node_frame(DestructibleId::from_bits(id), chunk)?;
         write(out, w.transform_out(t))
     })
 }

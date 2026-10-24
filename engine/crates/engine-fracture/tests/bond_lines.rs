@@ -125,3 +125,35 @@ fn pack_v2_bonds_take_their_materials_limits() {
     }
     assert!((strong[0] / weak[0] - 4.0).abs() < 1e-9, "tension follows the material's");
 }
+
+/// Every pack in the repo loads (the loader refuses collider kinds it does not know), and a
+/// `shape` collider collides as its library hull: no pack node of kind `shape` is left a box.
+#[test]
+fn repo_packs_load_with_their_library_shapes() {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../stress-oracle/packs");
+    let mut seen = 0;
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "json") {
+            continue;
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        if !json["scenario"]["nodes"].is_array() {
+            continue; // not a scene pack (the oracle's other inputs)
+        }
+        let (scene, info) = build_pack_scene(&bytes).unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
+        let shapes = json["scenario"]["nodeColliders"]
+            .as_array()
+            .map_or(0, |c| c.iter().filter(|c| c["kind"] == "shape").count());
+        let hulls = scene
+            .colliders
+            .iter()
+            .filter(|c| c.shape == engine_schema::ShapeType::ConvexHull as u32)
+            .count();
+        assert!(hulls >= shapes, "{}: {shapes} shape colliders, {hulls} hulls", path.display());
+        assert_eq!(info.node_frames.len(), info.nodes, "{}", path.display());
+        seen += 1;
+    }
+    assert!(seen >= 5, "found {seen} packs in {dir}");
+}
