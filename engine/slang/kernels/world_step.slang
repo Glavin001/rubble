@@ -148,10 +148,10 @@ float3 invInertiaWorld(BodyState b, float3 v)
     return quatRotate(q, b.invInertia * local);
 }
 
-// The host's `wake`: dynamic bodies only, sleep timer reset.
+// The host's `wake`: dynamic and kinematic bodies, sleep timer reset.
 void wakeBody(inout BodyState b)
 {
-    if (b.invMass > 0.0)
+    if (b.invMass > 0.0 || bodyIsKinematic(b))
     {
         b.flags = (b.flags & ~BODY_SLEEPING) | BODY_AWAKE;
         b.sleepTimer = 0.0;
@@ -208,6 +208,19 @@ void applyCommandRun(uint first, uint n, uint body, float dt)
         else if (c.op == CMD_ANGULAR_IMPULSE && b.invMass > 0.0)
         {
             b.angularVel = b.angularVel + invInertiaWorld(b, c.f0.xyz);
+            wakeBody(b);
+        }
+        else if (c.op == CMD_SET_KINEMATIC_TARGET && bodyIsKinematic(b))
+        {
+            // The velocity that reaches the target pose over this step, from
+            // where the body is now (the inverse of prediction's integration).
+            float h = max(dt, 1e-8);
+            b.linearVel = (c.f0.xyz - b.position) / h;
+            float4 q1 = c.f1;
+            if (dot(b.orientation, q1) < 0.0) q1 = -q1;
+            float4 dq = quatMul(q1, quatConjugate(b.orientation));
+            float3 w = 2.0 * dq.xyz / h;
+            b.angularVel = dq.w < 0.0 ? -w : w;
             wakeBody(b);
         }
         else if (c.op == CMD_SET_MASS_FRAME)

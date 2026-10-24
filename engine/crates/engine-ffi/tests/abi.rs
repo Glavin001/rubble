@@ -334,11 +334,16 @@ fn definitions_must_come_from_their_default_functions() {
             rbCreateBody(w, ptr::null(), &mut b),
             RbResult::RB_INVALID_ARGUMENT
         );
+        // Kinematic bodies take target transforms; other bodies refuse them.
         let mut kinematic = rbDefaultBodyDef();
         kinematic.type_ = RbBodyType::RB_KINEMATIC_BODY;
+        ok(rbCreateBody(w, &kinematic, &mut b));
+        ok(rbBody_SetTargetTransform(w, b, RbTransform::default()));
+        let mut s = 0;
+        ok(rbCreateBody(w, &rbDefaultBodyDef(), &mut s));
         assert_eq!(
-            rbCreateBody(w, &kinematic, &mut b),
-            RbResult::RB_UNSUPPORTED
+            rbBody_SetTargetTransform(w, s, RbTransform::default()),
+            RbResult::RB_ERROR
         );
         let msg = CStr::from_ptr(rbGetLastError()).to_string_lossy();
         assert!(msg.contains("kinematic"), "{msg}");

@@ -104,9 +104,6 @@ impl BodyDef {
 
     pub(crate) fn validate(&self) -> anyhow::Result<()> {
         let d = Self::default();
-        if self.body_type == BodyType::Kinematic {
-            return unsupported("kinematic bodies (planned P3)");
-        }
         if self.linear_damping != d.linear_damping || self.angular_damping != d.angular_damping {
             return unsupported("body damping (planned P3)");
         }
@@ -217,6 +214,12 @@ pub enum Geometry {
         hull: ConvexHull,
         transform: crate::Transform,
     },
+    /// The half-space below `normal · x = offset` (body frame), on static
+    /// bodies only: an infinite ground. At most 8 per world.
+    Plane {
+        normal: [f32; 3],
+        offset: f32,
+    },
 }
 
 /// One shape of a body (Box3D `b3ShapeDef`).
@@ -317,6 +320,7 @@ pub(crate) fn geometry_mass(g: &Geometry, density: f32) -> (f32, Vec3, Mat3) {
                 rotate_tensor(r, Mat3::from_diagonal(m.inertia)),
             )
         }
+        Geometry::Plane { .. } => (0.0, Vec3::ZERO, Mat3::ZERO),
         Geometry::Hull { hull, transform } => {
             let h = hull.mass_properties(density);
             let r = Mat3::from_quat(transform.q());

@@ -233,8 +233,12 @@ loop {
     `create_box_shape` (a native fast path);
   - `create_hull_shape` and `create_transformed_hull_shape(hull, transform,
     scale)`;
-  - later: `create_mesh_shape` and `create_height_field_shape` (static only,
-    as in Box3D) and baked static compounds.
+  - later: `create_height_field_shape` (static only, as in Box3D) and baked
+    static compounds.
+  - **No triangle-mesh shapes** (decided 2026-10-24). Level geometry comes in
+    convex-decomposed at the source (several hull shapes on a static body),
+    the way Unreal's own collision is authored. Nothing is decomposed at
+    load time.
 
   Each takes `(BodyId, &ShapeDef, geometry)` and returns a `ShapeId`.
 - **`ShapeDef` fields:**
@@ -666,6 +670,57 @@ The tests are in `engine-world/tests/{world,bridge_acceptance}.rs` and
 Each phase lands with byte-equality tests against raw `WgpuSim` for worlds
 that do not use its features.
 
+### MVP: demo parity for Unreal (in progress)
+
+The bar, set by the user on 2026-10-24: everything the shipped web pages do
+(`demo.html`, `vehicle.html`, `softbody.html` and the fracture lab) can be
+done from Unreal through the C ABI, as is. The pages drive raw GPU records
+today; each feature below gets a World call and an ABI call instead. Status:
+✅ shipped, ⏳ next (this order), 🔜 later in the MVP.
+
+| Page feature | World / ABI | Status |
+|---|---|---|
+| Static and dynamic bodies, initial velocity, sleep, user data | `create_body`, `rbCreateBody` | ✅ |
+| Sphere, capsule, box, hull and compound bodies; filters; friction and restitution | `create_*_shape`, `rbCreate*Shape` | ✅ |
+| Ground plane (legacy scenes, fracture lab) | `Geometry::Plane` on static bodies, `rbCreatePlaneShape` (at most 8) | ✅ |
+| Projectiles, cannons, rams (teleport plus velocity) | `rbBody_SetTransform`, `rbBody_SetLinearVelocity`, create and destroy | ✅ |
+| Body velocity and awake state for HUDs and colouring | `rbBody_GetVelocity` (blocking), `rbBody_IsAwake` | ✅ |
+| Hand-set mass and inertia from C | `body_set_mass_data` in Rust; `rbBody_SetMassData` | 🔜 |
+| Runtime gravity | `rbWorld_SetGravity` | ✅ |
+| Joints: ball, cone and twist limits, hinge limits, slider, weld, spring, distance and tether, motors, servo, breakable | typed joint defs | ✅ |
+| Live motor speed and servo target (motor toggle, servo sweep) | `joint_set_drive`, `rbJoint_SetDrive` | ✅ |
+| Plastic welds (`with_yield`) | `WeldJointDef::plastic`, `RbWeldJointDef::yield_torque` / `break_bend` | ✅ |
+| Shape edits (friction, filter) | `rbShape_SetFriction`, `rbShape_SetFilter` | ✅ |
+| Every vehicle preset; descriptors edited by the host (mount strength, track pods) | `rbCreateVehiclePreset`, `rbGetVehiclePresetJson`, `rbCreateVehicleFromJson` (the serde `VehicleDesc`) | ✅ |
+| Vehicle input with gear requests | `RbVehicleInput::manual_gear` / `gear` | ✅ |
+| Telemetry: speed, rpm, gear, clutch, parts lost, per-wheel contact, slip, suspension force, detached | `RbVehicleOutput`, `RbWheelState` (every frame) | ✅ |
+| Vehicle damage: detach or disable wheels and parts, functional state, mount loads | `vehicle_damage`, `rbVehicle_Damage`, `rbVehicle_SetFunctionalState`, `rbVehicle_GetMountLoads` | ✅ |
+| Soft vehicles: `.truck`, JBeam, procedural car, dune buggy, descriptors as JSON; spawn velocity and `rigid_core` | `rbCreateSoftVehicle`, `rbCreateSoftVehicleJBeam`, `rbCreateSoftVehicleTruck`, `rbGetSoftVehiclePresetJson` | ✅ |
+| Soft settings (`rigid_mode`, threshold, sweeps) and soft obstacles | `rbGetCalibratedSoftSettingsJson`, `rbWorld_SetSoftSettingsJson`, `rbSoft_AddObstacle` | ✅ |
+| Soft damage (yielded and broken beams, plastic work, rigid or soft mode) | `soft_damage`, `rbSoft_GetDamage` | ✅ (per-beam view 🔜) |
+| Soft skinning, node output, beam breaks and torn-off pieces | `rbSoft_BindSkin`, `RbFrame` | ✅ |
+| Destructibles from GLB, pack and cuboid houses; strength scale; layouts | `rbCreateDestructibleAsset*` | ✅ |
+| Bonds that settle under self-weight before they can break (the lab's preload) | `preload_destructible_asset`, `rbWorld_PreloadDestructibleAsset` (the lab's procedure, checked against the Metal lab: the masonry arch never sleeps within 600 steps in either, so both give up there) | ✅ |
+| The lab's solver settings (120 Hz, 8 iterations, contact and sleep flags) | `DestructibleAssetDesc::solver`, `World::set_solver`, `rbWorld_UseDestructibleAssetSolver` | ✅ |
+| Fracture lab `threshold` mode (GPU splitter) | D1b, `StrengthModel::Threshold` | 🔜 |
+| Fracture lab `stress` mode (blast_parity) | D5, `StrengthModel::Stress` | 🔜 |
+| Picking (camera ray) | `rbWorld_CastRays` | ✅ |
+| Grab and drag | a kinematic mouse body (`body_set_target_transform` each frame) plus a weld with `linear_stiffness` or a spherical joint | ✅ (composed; a dedicated mouse joint later) |
+| Scripted crusher, moving slabs | kinematic bodies: `BodyType::Kinematic`, `RB_KINEMATIC_BODY`, set velocity or `rbBody_SetTargetTransform` | ✅ |
+| Collider debug view | `World::draw`; `rbWorld_DebugDraw` (C callbacks) | ✅ |
+| Fixed rate, several steps per frame, pause, single step, sleep skip | `step`, `rbWorld_Step`, `rbWorld_Poll(coalesce)` | ✅ |
+| Reset | destroy and recreate the world, or remove and re-add; snapshot and restore is P6 | ✅ (P6 later) |
+| Per-kernel GPU timings | `profile_ms`, `rbWorld_GetProfile` | 🔜 |
+
+Descriptors and settings cross the ABI as JSON in the engine's units and
+design frame (metres, Y up), the format of `vehicle_presets.json` and the
+soft descriptors; spawn transforms and velocities use the world's
+coordinates. `tests/demo_parity.rs` covers each row through the ABI.
+
+Next, in order: P4 (contact, hit and sensor events), D1b (`threshold`),
+the rest of P3 (damping, gravity scale, motion locks, bullets) and D5
+(`stress`).
+
 **P1.5: Box3D alignment (shipped).** `rubble::World` now has this shape:
 
 - **Definitions:** `WorldDef`, and `BodyDef` with Box3D's fields and a static
@@ -879,8 +934,15 @@ Unreal is the first client.
 
 **P3: Box3D body features (new Slang, opt-in, defaults lossless).**
 
-- Kinematic bodies and `set_target_transform`, which must push dynamic bodies
-  and carry friction.
+- ✅ Kinematic bodies and `set_target_transform`, which push dynamic bodies
+  and carry them by friction (shipped 2026-10-24). They carry
+  `BODY_KINEMATIC` without `BODY_DYNAMIC`, with zero inverse mass (the CCD
+  branch's model, `engine/docs/ccd.md`): prediction places them at exactly
+  `x0 + v dt` and the solver never moves them. Contacts, bounds, the
+  broadphase, wakes, CCD and characters treat a moving one as a mover with
+  infinite mass, and a stopped one costs what a static costs. The target command computes the velocity on
+  the GPU from the pose at the step start, so animation tracking never
+  drifts. Without the flag every kernel path is unchanged.
 - A full gravity vector, keeping the Y-only path bit-identical.
 - `gravity_scale`, linear and angular damping, and per-body `sleep_threshold`.
 - `motion_locks`.
@@ -888,14 +950,38 @@ Unreal is the first client.
   plan.
 - `allow_fast_rotation`.
 
-**P4: contact, hit and sensor events.**
+**P4: contact, hit and sensor events (next, after P3 shipped).**
 
-- Opt-in per shape. Pairs are flagged on the GPU, and begin/end come from a
-  "matched last step" bit that must work with `carry_rest` and manifold reuse.
-- Hit events above `hit_event_threshold` carry the approach speed and the
-  material ids, and are filtered on the GPU.
-- Sensor shapes (no response) get begin and end overlap events.
-- `explode`.
+The design (2026-10-24):
+
+- **Flags.** Per shape, in the free bits 12..15 of `Collider.material`:
+  contact events, hit events and sensor. Material indices stay below 64 and
+  the filter group keeps bits 16..31, so the 64 B collider record does not
+  grow. `materialIndex()` masks the low 12 bits; no existing record sets the
+  new bits.
+- **GPU pass.** An opt-in `contact_events` pass right after narrowphase,
+  added to the step graph only when a world has event-enabled shapes, so
+  other hosts and worlds replay the same commands. One thread per manifold:
+  if either collider is flagged and its deepest contact is touching
+  (`c0N <= 0`), it appends `{colliderA, colliderB, approach speed, point,
+  normal}` to a fixed-capacity region after the large-static list in the
+  scratch buffer (binding 21, `CONTACT_EVENT_CAP` records). The approach
+  speed uses the bodies' step-start velocities at the deepest point, before
+  the solve changes them. Overflow increments a counter that the frame
+  reports (`lost_events`); it is never silent.
+- **Host diff.** `World` reads the region with each frame's readback and
+  diffs the sorted pair set against the last one: `ContactBegin`
+  (shapes, point, normal, approach speed), `ContactEnd`, and `Hit` (a begin
+  whose approach speed is at least `hit_event_threshold`, for shapes with
+  hit events). A pair whose two bodies are both asleep stays in the set
+  (no end on sleep, as Box3D), and destroying a touching shape ends its
+  pairs. Exact for every contact storage mode, because it never depends on
+  how contacts are matched across steps. Frames that carry contact events
+  are never dropped.
+- **Sensors (second step).** Sensor shapes keep their overlaps out of the
+  solver: narrowphase marks their contacts inactive, the pass reports them
+  as overlaps, and the host emits `SensorBegin` and `SensorEnd`.
+- `explode` (D2's radial damage reuses it).
 
 **P5: queries and mover.** Batched asynchronous ray, shape-cast and overlap
 queries with `QueryFilter`, moved off the vehicle ray pool. Then capsule

@@ -6,7 +6,7 @@
 use super::*;
 use engine_schema::commands::{CommandType, GpuCommand, CMD_RUN_MEMBER};
 
-const BODY_COMMANDS: [u32; 8] = [
+const BODY_COMMANDS: [u32; 9] = [
     CommandType::WakeBody as u32,
     CommandType::TeleportBody as u32,
     CommandType::SetVelocity as u32,
@@ -15,6 +15,7 @@ const BODY_COMMANDS: [u32; 8] = [
     CommandType::AddForceAt as u32,
     CommandType::AngularImpulse as u32,
     CommandType::SetMassFrame as u32,
+    CommandType::SetKinematicTarget as u32,
 ];
 
 /// Every GPU buffer and the host mirror of a [`WgpuSim`] at one instant

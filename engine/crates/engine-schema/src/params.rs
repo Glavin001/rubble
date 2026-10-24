@@ -22,7 +22,7 @@ pub const FLAG_WORLD_INERTIA: u32 = 64;
 
 /// Giles/Diaz/Yuksel AVBD parameters (avbd-demo3d `Solver::defaultParams`).
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable, Serialize, Deserialize)]
 pub struct AvbdParams {
     pub dt: f32,
     pub gravity_y: f32,
