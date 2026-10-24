@@ -99,6 +99,11 @@ pub struct StepInputs {
     pub soft: SoftCounts,
     /// Host commands in binding 8 (`apply_commands` runs first when non-zero).
     pub command_count: u32,
+    /// Directed debris (`guide_step.slang`, bindings 36-40) runs before
+    /// prediction. Off: the passes are not encoded.
+    pub guidance: bool,
+    /// Plan slots per step (`GuidanceCapacity::plan_budget`).
+    pub guide_slots: u32,
 }
 
 /// Largest particle colour `soft_primal_fused` (one 256-lane workgroup) takes;
@@ -433,6 +438,19 @@ pub fn encode_step(
     // Per-colour max CSR degree for degree-aware primal lanes (s[20]).
     e.w("record_color_degrees", 67);
     e.d("write_color_args", 64);
+    if i.guidance {
+        // After the graph (free flight = no contacts or joints this step) and
+        // before prediction, which carries the steered velocities.
+        // guide_scan and the single-group passes use 256-lane groups, the plan
+        // one 64-lane group per slot (hosts size groups as threads / 64).
+        let blocks = n_bodies.div_ceil(256);
+        e.d("guide_scan", blocks * 64);
+        e.d("guide_select", 64);
+        e.d("guide_rank", n_bodies);
+        e.d("guide_plan", u64::from(i.guide_slots) * 64);
+        e.d("guide_commit", 64);
+        e.phase("guide");
+    }
     e.d("predict_bodies", n_bodies);
     if vehicles {
         e.d("vehicle_prepare", u64::from(i.vehicle_count));
@@ -681,6 +699,9 @@ pub fn kernel_source(entry: &str) -> &'static str {
     }
     if entry == "pose_pack" {
         return "pose_pack.slang";
+    }
+    if engine_schema::guidance::GUIDE_ENTRIES.contains(&entry) {
+        return "guide_step.slang";
     }
     if entry.starts_with("convex_") {
         return if entry.ends_with("_persistent") {
@@ -995,6 +1016,8 @@ mod tests {
             wheel_count: 0,
             soft: SoftCounts::default(),
             command_count: 0,
+            guidance: false,
+            guide_slots: 0,
         }
     }
 

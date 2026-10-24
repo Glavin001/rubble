@@ -581,6 +581,8 @@ impl RigidStep {
             wheel_count: wheels,
             soft,
             command_count: 0,
+            guidance: false,
+            guide_slots: 0,
         }
     }
 

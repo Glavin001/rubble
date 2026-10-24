@@ -24,6 +24,7 @@ mod defs;
 mod destruction;
 mod error;
 mod events;
+mod guidance;
 mod handles;
 mod joints;
 mod math;
@@ -44,6 +45,10 @@ pub use destruction::{
     StrengthModel,
 };
 pub use error::{StaleHandle, Unsupported};
+pub use guidance::{
+    BodyGuidance, GuidanceCapacity, GuidanceSettings, GuidanceZone, GuideState, ZoneAnchor,
+    ZoneShape,
+};
 pub use events::{
     coalesce, BodyEvents, BodyMoveEvent, CoalescedFrame, DestructionEvent, Frame, RayBatchId,
     RayBatchResult, SkinId, SkinOutput, SoftOutput, VehicleOutput,
@@ -115,6 +120,8 @@ pub struct WorldDef {
     /// Steps whose results can be in flight at once.
     pub readback_frames: u32,
     pub backpressure: Backpressure,
+    /// Directed debris buffers ([`World::set_guidance`]); `None`: off.
+    pub guidance: Option<GuidanceCapacity>,
 }
 
 impl Default for WorldDef {
@@ -132,6 +139,7 @@ impl Default for WorldDef {
             env_overrides: false,
             readback_frames: 3,
             backpressure: Backpressure::Block,
+            guidance: None,
         }
     }
 }
@@ -355,6 +363,7 @@ impl World {
             soft: def.soft,
             features,
             pose_output: true,
+            guidance: def.guidance,
         };
         let (info, device, queue) = match gpu {
             GpuContext::Default => engine_webgpu::default_device()?,
@@ -560,6 +569,7 @@ impl World {
         }
         let index = id.index();
         self.sim.cancel_body_commands(index);
+        self.sim.clear_guide_body(index);
         let p = graveyard(index);
         let mut parked = BodyState::static_plane_support();
         parked.position = p;

@@ -714,6 +714,11 @@ impl World {
     }
 
     /// The body chunk `chunk` currently belongs to.
+    /// Every chunk's body, in chunk order.
+    pub(crate) fn destructible_bodies(&self, id: DestructibleId) -> anyhow::Result<Vec<BodyId>> {
+        Ok(self.destructibles[self.live_destructible(id)?].chunk_bodies.clone())
+    }
+
     pub fn destructible_chunk_body(
         &self,
         id: DestructibleId,

@@ -525,6 +525,70 @@ These are frame-latent by default; blocking variants exist for tools.
 - **The defaults are lossless:** `Fail` loudly, and no debris removal.
 - Removing debris is lossy, so it is opt-in, and every removal is reported.
 
+#### Directed debris (opt-in gameplay force, shipped)
+
+Authored zones that debris tends to land in: around an NPC, on a parked car,
+in a third-floor window. Players should see only physics. **This is not
+physics**: it adds momentum, so it is off unless the world asks for it.
+
+- **Opt in twice.** `WorldDef::guidance: Some(GuidanceCapacity { max_zones,
+  plan_budget })` reserves the buffers (`plan_budget` at most 256), and
+  `set_guidance(&GuidanceSettings)` enables it. Then guide bodies with `body_set_guided(id, true)`,
+  `body_set_guided_tags(id, mask)` or `destructible_set_guided(id, mask)`.
+  A world that does neither encodes no guidance passes, and its steps are
+  bitwise the same as before.
+- **Zones** (`set_guidance_zones`): `Point`, `Sphere`, `Box`, `Ring` (an
+  annulus: debris around a subject, not on it) or `Arc` (behind or beside it).
+  - A zone sits at a world point or on a body. A body anchor moves the zone
+    with that body and leads it by its velocity; `anchor_relative` turns the
+    zone with the body's heading (vehicle +Z forward, +X left).
+  - Each zone has a `weight`, an optional `quota`, an `active` time window and
+    `tags` matched against each body's tag mask.
+  - More zones than `max_zones` is an error.
+- **How it stays invisible.** A guided body is planned once, when it becomes
+  free (no joints, nothing pushing it for `settle_steps`).
+  - **Zone choice:** each reachable zone scores `weight · (1 − s)²`, where `s`
+    is the fraction of the budget the body needs. The body then picks a zone
+    by a seeded draw and aims at its own seeded point inside it.
+  - **Launch kick:** spread over `kick_steps` steps, at most `launch_kick` of
+    the launch speed and `launch_cone` of direction change. It is applied only
+    within `launch_window` of the break, where the break's chaos hides it.
+  - **Held acceleration:** at most `accel_max_g · g`, constant for the whole
+    flight. Gravity plus a constant acceleration is still an exact parabola,
+    so the arc never bends or homes in. Only zones anchored to a moving body
+    are re-planned, every `replan_interval`, within `max_jerk`.
+  - **Defaults** (6 %, 3°, 0.1 s, 3 %·g) shift a 3 s flight's landing by
+    about 4–5 m and a 0.5 s hop by a few centimetres. Hops shorter than
+    `min_flight` are left alone.
+- **One arc only.** The first step a contact pushes the body (its velocity
+  differs from the ballistic update by more than `impact_dv`) ends guidance
+  for good. Look-ahead contacts with neighbours flying alongside do not count.
+  Bounces, cascades and secondary breaks are pure physics.
+- **Cost is bounded.** Per step:
+  - one scan of the bodies (one word for an unguided body);
+  - at most `plan_budget` plans, one 64-lane workgroup each, with the lanes
+    splitting the zones (24 arc samples per zone);
+  - a single-workgroup select and commit.
+
+  A large burst is planned over several steps instead of spiking one. A body
+  planned after its launch window gets the held acceleration only. Selection
+  and quota claims resolve in body order, so results are deterministic.
+
+  Measured with `guide_bench` on an M-series GPU, 256 zones, every guided body
+  freed in the same step (`RUBBLE_GPU_TIMING=1`): the guidance passes add a
+  median 0.03–0.05 ms per step, with single steps up to about 0.25 ms. That
+  holds at 10k and 100k bodies, whether 0, 5k or all 100k are guided.
+- **Reads (blocking, for tools and tests).** `body_guidance(id)` returns a
+  body's state, zone, held acceleration and hit time; `guidance_claims()`
+  returns each zone's claimed bodies.
+- **C ABI:** `RbWorldDef::enable_guidance`, `rbWorld_SetGuidance`,
+  `rbWorld_SetGuidanceZones`, `rbWorld_ResetGuidanceClaims`,
+  `rbBody_SetGuided` and `rbDestructible_SetGuided`. Values are in the world's
+  coordinates; Unreal yaw and arc angles convert exactly.
+- **Code:** `slang/kernels/guide_step.slang`, `engine-world/src/guidance.rs`
+  and `engine-world/tests/guidance.rs`. It runs on the wgpu hosts (`World`
+  and `WgpuSim`); the Metal and CUDA benchmark hosts do not encode it.
+
 #### Rendering
 
 - **Pose buffer:** `destructible_pose_buffer(id)` holds a per-chunk transform

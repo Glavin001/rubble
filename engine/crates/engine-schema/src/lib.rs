@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 pub mod commands;
 pub mod mass;
 pub mod convex;
+pub mod guidance;
 pub mod handles;
 pub mod joint;
 pub mod params;

@@ -72,6 +72,19 @@ typedef enum RbVehicleDamageType {
   RB_DISABLE_PART = 3,
 } RbVehicleDamageType;
 
+// `RbGuidanceZone::shape`.
+typedef enum RbZoneShape {
+  RB_ZONE_POINT = 0,
+  // `size.x` = radius.
+  RB_ZONE_SPHERE = 1,
+  // `size` = half extents (zone frame).
+  RB_ZONE_BOX = 2,
+  // `size` = (inner radius, outer radius, height up).
+  RB_ZONE_RING = 3,
+  // As a ring, between `angle_from` and `angle_to`.
+  RB_ZONE_ARC = 4,
+} RbZoneShape;
+
 // An opaque world.
 typedef struct RbWorld RbWorld;
 
@@ -105,6 +118,9 @@ typedef struct RbWorldDef {
   enum RbContacts contacts;
   // Reserve a soft-body arena (needs `RB_CONTACTS_CANONICAL`).
   bool enable_soft_bodies;
+  // Reserve directed-debris buffers (`rbWorld_SetGuidance`; 256 zones,
+  // 256 plans per step).
+  bool enable_guidance;
   // Steps whose results can be in flight; drop (and resync) instead of
   // waiting when all are.
   uint32_t readback_frames;
@@ -512,6 +528,63 @@ typedef struct RbDebugDraw {
   bool draw_body_transforms;
 } RbDebugDraw;
 
+// Tuning (`rbDefaultGuidanceSettings`). Speeds and jerk in the world's
+// length unit; times in seconds; angles in radians.
+typedef struct RbGuidanceSettings {
+  bool enabled;
+  // Launch kick budget, a fraction of the launch speed.
+  float launch_kick;
+  // Largest launch direction change (radians).
+  float launch_cone;
+  // Seconds after a body becomes free in which the kick is allowed.
+  float launch_window;
+  uint32_t kick_steps;
+  // Largest held acceleration, a fraction of |gravity|.
+  float accel_max_g;
+  // Length/s³: re-plans toward moving anchors change the acceleration at most this fast.
+  float max_jerk;
+  float min_flight;
+  float max_flight;
+  // Any point on the ground plane flight times are measured to.
+  struct RbVec3 ground_point;
+  uint32_t settle_steps;
+  float replan_interval;
+  float participation;
+  float min_speed;
+  // A velocity change this far off the ballistic update ends free flight.
+  float impact_dv;
+  uint32_t seed;
+  uint32_t internal_value;
+} RbGuidanceSettings;
+
+// One zone (`rbDefaultGuidanceZone`).
+typedef struct RbGuidanceZone {
+  // 0: a fixed zone at `position`; otherwise the zone follows this body.
+  RbBodyId anchor_body;
+  struct RbVec3 position;
+  // Turn the zone with the anchor body's heading.
+  bool anchor_relative;
+  // Rotation about up (radians, the host's sense).
+  float yaw;
+  // From the anchor, in the zone frame.
+  struct RbVec3 offset;
+  enum RbZoneShape shape;
+  struct RbVec3 size;
+  // Arc angles about up from the zone frame's forward (radians, the host's
+  // sense; under `RB_COORDINATES_UNREAL` forward is +X and positive turns
+  // toward +Y).
+  float angle_from;
+  float angle_to;
+  float weight;
+  // 0: unlimited.
+  uint32_t quota;
+  // World time window (s); `active_from > active_to`: always open.
+  float active_from;
+  float active_to;
+  uint32_t tags;
+  uint32_t internal_value;
+} RbGuidanceZone;
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -914,6 +987,30 @@ enum RbResult rbCreatePlaneShape(struct RbWorld *world,
 // Draw every shape at its body's last polled pose, coloured by state
 // (static, awake, asleep) unless a material colour is set.
 enum RbResult rbWorld_DebugDraw(struct RbWorld *world, const struct RbDebugDraw *draw);
+
+struct RbGuidanceSettings rbDefaultGuidanceSettings(void);
+
+struct RbGuidanceZone rbDefaultGuidanceZone(void);
+
+// Enable, disable or retune directed debris.
+enum RbResult rbWorld_SetGuidance(struct RbWorld *world, const struct RbGuidanceSettings *settings);
+
+// Replace the zone list (`count` zones; at most the world's zone capacity).
+enum RbResult rbWorld_SetGuidanceZones(struct RbWorld *world,
+                                       const struct RbGuidanceZone *zones,
+                                       uint32_t count);
+
+// Zero every zone's claim counter.
+enum RbResult rbWorld_ResetGuidanceClaims(struct RbWorld *world);
+
+// Guide a body toward zones whose tags intersect `tag_mask` (0: stop).
+enum RbResult rbBody_SetGuided(struct RbWorld *world, RbBodyId body, uint32_t tag_mask);
+
+// Guide every chunk of a destructible (`tag_mask` 0: stop). Set it before a
+// strike to choose the zones that strike's debris may use.
+enum RbResult rbDestructible_SetGuided(struct RbWorld *world,
+                                       RbDestructibleId id,
+                                       uint32_t tag_mask);
 
 #ifdef __cplusplus
 }  // extern "C"
