@@ -133,8 +133,13 @@ Beyond the basics:
 - **Destruction:** destructibles from Shardwright GLBs, packs or procedural houses,
   breaking by bond strength, with the fracture lab's self-weight preload and solver
   settings available.
-- **Queries and tooling:** `cast_rays` (asynchronous) and `cast_ray_blocking`;
-  `World::draw` with a `DebugDraw` implementation draws every collider.
+- **Characters and projectiles:** `create_character` gives a GPU capsule mover that
+  walks, climbs steps, jumps and rides moving support, reported every frame.
+  `spawn_projectile` gives piercing ballistic projectiles; energy pays for the
+  thickness of each shape they cross, and they push what they hit.
+- **Queries and tooling:** `cast` (ray, sphere or capsule; closest hit, answered in
+  the next step), `cast_rays` (batched) and `cast_ray_blocking`, `overlap_aabb` and
+  `explode`. `World::draw`, with a `DebugDraw` implementation, draws every collider.
 
 ### C and C++ (Unreal, Unity, Godot, custom engines)
 

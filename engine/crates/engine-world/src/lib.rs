@@ -28,6 +28,7 @@ mod events;
 mod handles;
 mod joints;
 mod math;
+mod motion;
 mod queries;
 mod readback;
 mod rig;
@@ -57,6 +58,11 @@ pub use joints::{
     RevoluteJointDef, SphericalJointDef, Spring, WeldJointDef,
 };
 pub use math::Transform;
+pub use motion::{
+    CastDef, CastHit, CastId, CastResult, CastShape, CharacterDef, CharacterDesc, CharacterEvent,
+    CharacterEventKind, CharacterId, CharacterOutput, GroundState, ProjectileDef, ProjectileEvent,
+    ProjectileEventKind, ProjectileId, ProjectileOutput,
+};
 pub use queries::{ExplosionDef, OverlapResult, QueryFilter, QueryId};
 pub use readback::Backpressure;
 pub use rig::{SoftBeam, VehicleDamage};
@@ -189,6 +195,8 @@ enum Owner {
     Vehicle,
     /// A soft-body particle: reported through `Frame::soft`, not as moves.
     SoftNode,
+    /// A character's inner capsule: reported through `Frame::characters`.
+    Character,
 }
 
 /// What an extra readback copy holds.
@@ -208,6 +216,12 @@ enum Extra {
     Contacts,
     /// The overlap query region, for these queries.
     Overlaps(Vec<QueryId>),
+    /// Every character record.
+    Characters,
+    /// The scene-query records, for these casts.
+    Casts(Vec<CastId>),
+    /// Every projectile record.
+    Projectiles,
 }
 
 #[derive(Clone, Debug)]
@@ -365,6 +379,7 @@ pub struct World {
     queries: queries::QueryQueue,
     hit_event_threshold: f32,
     contact_storage: ContactStorage,
+    motion: motion::MotionState,
 }
 
 impl World {
@@ -429,6 +444,7 @@ impl World {
             queries: Default::default(),
             hit_event_threshold: def.hit_event_threshold,
             contact_storage: contacts,
+            motion: Default::default(),
             resync: false,
             vehicles: Vec::new(),
             soft_outputs: Vec::new(),
@@ -1436,6 +1452,7 @@ impl World {
         if contact_events {
             self.sim.clear_contact_events();
         }
+        let casts = self.motion_before_step();
         if !rays.is_empty() {
             // Forces the step to run, so its frame carries the hits.
             self.sim.write_ray_queries(&rays)?;
@@ -1457,6 +1474,7 @@ impl World {
             let block = self.backpressure == Backpressure::Block
                 || !batches.is_empty()
                 || !query_ids.is_empty()
+                || !casts.is_empty()
                 || contact_events;
             if !self.readback.has_free() && block {
                 self.wait_oldest()?;
@@ -1503,6 +1521,7 @@ impl World {
                         size,
                     });
                 }
+                extras.extend(motion::extras(&self.sim, &self.motion, casts));
                 let slot = self.readback.encode(&self.sim, &mut enc, step, &extras);
                 self.resync = false;
                 mapped = Some(slot);
@@ -1656,6 +1675,8 @@ impl World {
         }
         self.last_counters = Some(c);
         let ring = self.sim.ring_events(&raw.ring);
+        let (character_events, projectile_events, lost_motion) =
+            self.motion_events(step, &raw.ring);
         let mut destruction = Vec::new();
         for b in ring.joint_breaks {
             if let Some(slot) = self.joints.get(b.joint as usize) {
@@ -1722,7 +1743,7 @@ impl World {
             if r.woke() {
                 slot.last_asleep = false;
             }
-            if slot.owner == Owner::SoftNode {
+            if matches!(slot.owner, Owner::SoftNode | Owner::Character) {
                 continue;
             }
             moves.push(BodyMoveEvent {
@@ -1742,6 +1763,9 @@ impl World {
         let mut contact_events = ContactEvents::default();
         let mut sensor_events = SensorEvents::default();
         let mut overlap_results = Vec::new();
+        let mut characters = Vec::new();
+        let mut cast_results = Vec::new();
+        let mut projectiles = Vec::new();
         let mut lost_contacts = 0;
         for (kind, bytes) in &raw.extras {
             match kind {
@@ -1754,6 +1778,9 @@ impl World {
                 Extra::Contacts => {
                     (contact_events, sensor_events, lost_contacts) = self.decode_contacts(bytes);
                 }
+                Extra::Characters => characters = self.decode_characters(step, bytes),
+                Extra::Casts(ids) => cast_results = self.decode_casts(ids, bytes),
+                Extra::Projectiles => projectiles = self.decode_projectiles(step, bytes),
                 Extra::RayHits(batches) => {
                     let hits = self.sim.decode_ray_hits(&slots(bytes));
                     for (batch, first, count) in batches {
@@ -1805,7 +1832,13 @@ impl World {
             contact_events,
             sensor_events,
             overlap_results,
-            lost_events: ring.lost + lost_contacts,
+            characters,
+            character_events,
+            cast_results,
+            projectiles,
+            projectile_events,
+            // One ring: its overflow is counted once, however many readers.
+            lost_events: ring.lost.max(lost_motion) + lost_contacts,
             dropped: false,
             resynced: resync.is_some(),
             counters: Some(c),

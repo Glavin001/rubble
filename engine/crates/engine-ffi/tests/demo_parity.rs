@@ -817,7 +817,7 @@ fn overlap_queries_and_explosions_in_unreal_units() {
         assert_eq!(shapes, &[east_shape], "{shapes:?}");
         assert!(!shapes.contains(&far_shape));
         // An explosion at the origin pushes the east crate along +X.
-        let mut e = rbDefaultExplosionDef();
+        let mut e = rbDefaultExplosionDef(RbCoordinates::RB_COORDINATES_UNREAL);
         e.position = v3(0.0, 0.0, 50.0);
         e.radius = 400.0;
         e.falloff = 200.0;
@@ -834,6 +834,134 @@ fn overlap_queries_and_explosions_in_unreal_units() {
             "pushed along +X: {lin:?} vs {expected}"
         );
         assert!(lin.y.abs() < 1e-3, "{lin:?}");
+        rbDestroyWorld(w);
+    }
+}
+
+#[test]
+fn characters_casts_and_projectiles_in_unreal_units() {
+    unsafe {
+        let unreal = RbCoordinates::RB_COORDINATES_UNREAL;
+        let mut def = rbDefaultWorldDef();
+        def.coordinates = unreal;
+        def.gravity = v3(0.0, 0.0, -981.0);
+        let mut w = ptr::null_mut();
+        ok(rbCreateWorld(&def, &mut w));
+        let static_box = |p: RbVec3, half: RbVec3| {
+            let mut bd = rbDefaultBodyDef();
+            bd.transform.p = p;
+            let mut b = 0;
+            ok(rbCreateBody(w, &bd, &mut b));
+            let mut s = 0;
+            ok(rbCreateBoxShape(
+                w,
+                b,
+                &rbDefaultShapeDef(),
+                half,
+                RbTransform::default(),
+                &mut s,
+            ));
+            (b, s)
+        };
+        let (ground_body, ground_shape) = static_box(v3(0.0, 0.0, -50.0), v3(4000.0, 4000.0, 50.0));
+        let (_, wall_shape) = static_box(v3(1000.0, 0.0, 200.0), v3(5.0, 200.0, 200.0));
+
+        // A default character (30 cm radius, 60 cm half height) lands and walks.
+        let mut cd = rbDefaultCharacterDef(unreal);
+        assert!((cd.radius - 30.0).abs() < 1e-4 && (cd.jump_speed - 500.0).abs() < 1e-3);
+        cd.position = v3(0.0, 0.0, 150.0);
+        cd.user_data = 11;
+        let mut c = 0;
+        ok(rbWorld_CreateCharacter(w, &cd, &mut c));
+        assert!(rbCharacter_IsValid(w, c));
+        let mut landed = 0;
+        for _ in 0..60 {
+            let f = steps(w, 1);
+            let events =
+                std::slice::from_raw_parts(f.character_events, f.character_event_count as usize);
+            landed += events
+                .iter()
+                .filter(|e| {
+                    e.type_ == RbCharacterEventType::RB_CHARACTER_LANDED && e.character == c
+                })
+                .count();
+        }
+        assert_eq!(landed, 1);
+        let mut s = std::mem::zeroed::<RbCharacterOutput>();
+        let mut known = false;
+        ok(rbCharacter_GetState(w, c, &mut s, &mut known));
+        assert!(known && s.ground == RbGroundState::RB_ON_GROUND && s.user_data == 11);
+        assert_eq!(s.ground_body, ground_body);
+        assert!(
+            (s.position.z - 90.0).abs() < 3.0,
+            "stands on the floor: {:?}",
+            s.position
+        );
+        ok(rbCharacter_SetInput(w, c, v3(200.0, 0.0, 0.0), false));
+        steps(w, 60);
+        ok(rbCharacter_GetState(w, c, &mut s, &mut known));
+        assert!(
+            (s.position.x - 200.0).abs() < 25.0 && s.position.y.abs() < 1.0,
+            "walked forward: {:?}",
+            s.position
+        );
+        assert!((s.velocity.x - 200.0).abs() < 5.0, "{:?}", s.velocity);
+
+        // A sphere cast down from above the character, ignoring its capsule,
+        // reaches the floor.
+        let mut body = 0;
+        ok(rbCharacter_GetBody(w, c, &mut body));
+        let mut cast = rbDefaultCastDef(unreal);
+        cast.origin = v3(s.position.x, s.position.y, 500.0);
+        cast.direction = v3(0.0, 0.0, -1.0);
+        cast.max_distance = 1000.0;
+        cast.shape = RbCastShape::RB_CAST_SPHERE;
+        cast.radius = 10.0;
+        cast.ignore_body = body;
+        let mut id = 0;
+        ok(rbWorld_Cast(w, &cast, &mut id));
+        let f = steps(w, 1);
+        assert_eq!(f.cast_count, 1);
+        let r = &*f.casts;
+        assert!(
+            r.cast == id && r.hit.hit && r.hit.shape == ground_shape,
+            "{r:?}"
+        );
+        assert!((r.hit.distance - 490.0).abs() < 1.0, "{r:?}");
+        assert!((r.hit.normal.z - 1.0).abs() < 1e-3, "{r:?}");
+
+        // 10 g at 400 m/s (800 J) through a 10 cm wall costing 2000 J/m.
+        let mut pd = rbDefaultProjectileDef(unreal);
+        pd.position = v3(800.0, 0.0, 200.0);
+        pd.velocity = v3(40_000.0, 0.0, 0.0);
+        pd.mass = 0.01;
+        pd.penetration_cost = 2000.0 * 100.0; // J/m in kg cm/s²
+        pd.user_data = 5;
+        let mut p = 0;
+        ok(rbWorld_SpawnProjectile(w, &pd, &mut p));
+        let f = steps(w, 1);
+        let events =
+            std::slice::from_raw_parts(f.projectile_events, f.projectile_event_count as usize);
+        assert_eq!(events.len(), 1, "{events:?}");
+        let e = events[0];
+        assert!(
+            e.projectile == p && e.shape == wall_shape && !e.stopped && e.user_data == 5,
+            "{e:?}"
+        );
+        assert!((e.thickness - 10.0).abs() < 0.1, "{e:?}");
+        let out = &*f.projectiles;
+        // 800 J less 200 J, in kg cm²/s².
+        assert!(
+            out.alive && (out.energy - 600.0 * 1e4).abs() < 0.01 * 600.0 * 1e4,
+            "{out:?}"
+        );
+
+        ok(rbCharacter_Destroy(w, c));
+        assert!(!rbCharacter_IsValid(w, c));
+        assert_eq!(
+            rbCharacter_SetInput(w, c, v3(0.0, 0.0, 0.0), true),
+            RbResult::RB_STALE_HANDLE
+        );
         rbDestroyWorld(w);
     }
 }
