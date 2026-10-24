@@ -66,6 +66,20 @@ pub enum TerrainError {
     InvalidConfig(&'static str),
     #[error("invalid region request: {0}")]
     InvalidRequest(&'static str),
+    /// A crater source outside the range its published scaling covers.
+    #[error("crater source `{quantity}` = {value} is outside the scaled range [{min}, {max}]")]
+    SourceOutOfRange {
+        quantity: &'static str,
+        value: f64,
+        min: f64,
+        max: f64,
+    },
+    /// The initial excavation field carries more kinetic energy than the
+    /// source delivers: its core radius is too small.
+    #[error(
+        "excavation field energy {field_j} J exceeds the source's {source_j} J: enlarge the core radius"
+    )]
+    FieldEnergy { field_j: f64, source_j: f64 },
 }
 
 impl TerrainConfig {
