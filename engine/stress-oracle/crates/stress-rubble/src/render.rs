@@ -791,6 +791,8 @@ pub struct Renderer {
     /// Dust and chips ([`Self::set_fx`]), and the simulated time the next draw advances them.
     fx: Option<crate::fx::Fx>,
     fx_dt: std::cell::Cell<f32>,
+    /// The next draw's effects shed nothing (`set_fx_quiet`).
+    fx_quiet: std::cell::Cell<bool>,
 }
 
 const SAMPLES: u32 = 4;
@@ -837,7 +839,9 @@ impl Renderer {
                 let first = verts.len();
                 chunk_mesh(ch, object, &mut verts);
                 let b = mesh_bounds(&verts[first..]);
-                bounds.push(b);
+                // Vehicles, glass and metal break into chips, not dust: a negative radius.
+                let dustless = matches!(material_class(&ch.material), "sheet-steel" | "wheel" | "aluminium" | "aluminum" | "glass" | "steel");
+                bounds.push(if dustless { [b[0], b[1], b[2], -b[3]] } else { b });
                 let state = &solver.chunks[s][c];
                 if state.active && !state.removed {
                     let p = solver.chunk_position(s, c);
@@ -1169,6 +1173,7 @@ impl Renderer {
             format,
             fx: None,
             fx_dt: std::cell::Cell::new(0.0),
+            fx_quiet: std::cell::Cell::new(false),
         }
     }
 
@@ -1186,6 +1191,13 @@ impl Renderer {
     /// (0 when paused).
     pub fn set_fx_dt(&self, dt: f64) {
         self.fx_dt.set(dt as f32);
+    }
+
+    /// Something was set moving since the last draw (a launched vehicle): its jump in
+    /// velocity is not an impact, so the next draw sheds no dust or chips (the effects still
+    /// age, and the comparison moves on).
+    pub fn set_fx_quiet(&self) {
+        self.fx_quiet.set(true);
     }
 
     /// Triangles drawn per frame.
@@ -1264,7 +1276,7 @@ impl Renderer {
             self.sun_written.set(Some(sun));
         }
         if let Some(fx) = &self.fx {
-            fx.encode(gpu, encoder, self.fx_dt.replace(0.0));
+            fx.encode(gpu, encoder, self.fx_dt.replace(0.0), self.fx_quiet.replace(false));
         }
         {
             // The sun's depth: every chunk and shot (not the ground, the first vertices).

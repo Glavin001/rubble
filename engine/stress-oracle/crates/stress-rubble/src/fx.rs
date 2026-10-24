@@ -56,6 +56,12 @@ struct Params {
     seed: u32,
     // Particle slots per object: object i owns [i * slots, (i + 1) * slots).
     slots: u32,
+    // 1: something was set moving between frames (a launch), so this frame's velocity
+    // jumps are not impacts: they update the comparison and shed nothing.
+    quiet: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 const N: u32 = PARTICLES_N;
@@ -87,7 +93,11 @@ fn spawn(@builtin(global_invocation_id) id: vec3<u32>) {
     if (i >= params.objects) { return; }
     let b = bounds[i];
     let o = objects[i];
-    if (b.w <= 0.0 || params.dt <= 0.0) { return; }
+    // A negative radius: an object that sheds chips but no dust (a vehicle's sheet steel and
+    // wheels, glass, metal).
+    let radius = abs(b.w);
+    let chips_only = b.w < 0.0;
+    if (radius <= 0.0 || params.dt <= 0.0) { return; }
     if (dot(o.r0.xyz, o.r0.xyz) == 0.0) {
         // Not drawn (removed, or not yet placed).
         prev[i].p.w = 0.0;
@@ -106,9 +116,11 @@ fn spawn(@builtin(global_invocation_id) id: vec3<u32>) {
     let dv = length(v - last.v.xyz);
     // A jump in velocity sheds; a teleport (a reload, a reset) does not.
     var count = 0u;
-    if (dv >= 2.0 && dv <= 150.0) {
-        let size = clamp(b.w, 0.1, 3.0);
+    if (dv >= 2.0 && dv <= 150.0 && params.quiet == 0u) {
+        let size = clamp(radius, 0.1, 3.0);
         count = min(u32(clamp(dv * 0.2 * size, 1.0, 6.0)), params.slots);
+        // Sheet steel, glass and metal: a few low chips, not a spray.
+        if (chips_only) { count = max(1u, count / 2u); }
     }
     prev[i] = Prev(vec4<f32>(c, 1.0), vec4<f32>(v, bitcast<f32>(ring + count)));
     let dust = mix(o.color.rgb, vec3<f32>(0.66, 0.63, 0.58), 0.65);
@@ -116,11 +128,12 @@ fn spawn(@builtin(global_invocation_id) id: vec3<u32>) {
         // This object's own slots, in turn.
         let k = i * params.slots + (ring + j) % params.slots;
         let d = hash_dir(i, j * 13u);
-        let chip = hash(i, j * 13u + 3u) < 0.35;
+        let chip = chips_only || hash(i, j * 13u + 3u) < 0.35;
         var part: Particle;
-        let at = c + d * b.w * 0.6 * hash(i, j * 13u + 5u);
+        let at = c + d * radius * 0.6 * hash(i, j * 13u + 5u);
         if (chip) {
-            let vel = v * 0.6 + d * (1.0 + 0.25 * dv) + vec3<f32>(0.0, 0.0, 1.5);
+            let spread = select(1.0 + 0.25 * dv, 0.5 + 0.1 * dv, chips_only);
+            let vel = v * 0.6 + d * spread + vec3<f32>(0.0, 0.0, select(1.5, 0.8, chips_only));
             part = Particle(vec4<f32>(at, 1.5 + 1.5 * hash(i, j * 13u + 9u)), vec4<f32>(vel, 0.0), vec4<f32>(o.color.rgb * 0.75, 1.0));
         } else {
             let vel = v * 0.35 + d * (0.4 + 0.08 * dv) + vec3<f32>(0.0, 0.0, 0.4);
@@ -220,6 +233,8 @@ struct Params {
     objects: u32,
     seed: u32,
     slots: u32,
+    quiet: u32,
+    _pad: [u32; 3],
 }
 
 /// The particle buffers and pipelines (see the module docs).
@@ -450,7 +465,9 @@ impl Fx {
 
     /// Shed from what moved over `dt` s of simulated time, and age the particles by it.
     /// After the objects buffer holds this frame's poses; nothing when `dt` is 0.
-    pub(crate) fn encode(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, dt: f32) {
+    /// `quiet`: something was set moving between frames (a launch); this frame's velocity
+    /// jumps are not impacts.
+    pub(crate) fn encode(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, dt: f32, quiet: bool) {
         if dt <= 0.0 {
             return;
         }
@@ -464,6 +481,8 @@ impl Fx {
                 objects: self.objects,
                 seed,
                 slots: self.slots,
+                quiet: quiet as u32,
+                _pad: [0; 3],
             }),
         );
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {

@@ -799,6 +799,8 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, advance: Advance) -> Result<
     }
     let dt = l.world.frame_dt;
     let mut stepped = 0;
+    // A launch set something moving: the effects must not read that as an impact.
+    let mut launched = false;
     let t_step = web_time::Instant::now();
     let fixed = match advance {
         Advance::Steps(n) => Some(n),
@@ -819,6 +821,7 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, advance: Advance) -> Result<
             // Launches due: set moving between this frame and the last.
             for x in launches_due(l.world.frame, dt) {
                 l.world.launch_island(gpu, 0, &x).map_err(|e| format!("launch {}: {e}", x.name))?;
+                launched = true;
             }
             l.world.step_frame(gpu)?;
             stepped += 1;
@@ -841,6 +844,7 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, advance: Advance) -> Result<
             // Launches due: set moving between this frame and the last.
             for x in launches_due(l.world.frame, dt) {
                 l.world.launch_island(gpu, 0, &x).map_err(|e| format!("launch {}: {e}", x.name))?;
+                launched = true;
             }
             l.world.step_frame(gpu)?;
             l.behind -= dt;
@@ -861,6 +865,9 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, advance: Advance) -> Result<
     let lines = l.world.encode_view(gpu, &mut encoder, &l.renderer, mode, bonds);
     l.renderer.set_fx(gpu, FX.get());
     l.renderer.set_fx_dt(stepped as f64 * dt);
+    if launched {
+        l.renderer.set_fx_quiet();
+    }
     l.renderer.draw_resident(gpu, &mut encoder, &view, view_proj, eye, lines);
     gpu.queue.submit([encoder.finish()]);
     gpu.queue.present(texture);
@@ -939,6 +946,7 @@ fn frame(advance: Advance) -> Result<(), String> {
             }
             let dt = l.world.scene.sim.frame_dt;
             let mut stepped = 0;
+            let mut launched = false;
             let mut step_ms = 0.0;
             let due = match advance {
                 // Frame-locked: exactly the frames asked for, running or paused.
@@ -970,6 +978,7 @@ fn frame(advance: Advance) -> Result<(), String> {
                     // Launches due: set moving between this frame and the last.
                     for x in launches_due(l.world.frame, dt) {
                         l.world.launch_island(gpu, 0, &x.chunks, x.velocity, x.angular_velocity).map_err(|e| format!("launch {}: {e}", x.name))?;
+                        launched = true;
                     }
                     l.world.step_frame(gpu)?;
                     step_ms += t.elapsed().as_secs_f64() * 1e3;
@@ -990,6 +999,12 @@ fn frame(advance: Advance) -> Result<(), String> {
             (l.renderer.bond_graph, l.renderer.colors) = VIEW.get();
             l.renderer.set_fx(gpu, FX.get());
             l.renderer.set_fx_dt(stepped as f64 * dt);
+            if launched {
+                l.renderer.set_fx_quiet();
+            }
+    if launched {
+        l.renderer.set_fx_quiet();
+    }
             let want_stats = stepped > 0 || STATS.with_borrow(|s| s == "{}");
             let renderer = &l.renderer;
             let totals = l.totals;
