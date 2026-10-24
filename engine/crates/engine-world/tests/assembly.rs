@@ -222,6 +222,8 @@ fn a_rigid_vehicle_carries_mounted_and_destructible_parts() {
                 strength: [1e5, 1e6, 1e5, 1e4],
                 stiffness: [1e7; 6],
             }],
+            preload: None,
+            solver: None,
         };
         w.create_destructible_asset(&desc).unwrap()
     };

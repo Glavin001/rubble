@@ -61,6 +61,17 @@ typedef enum RbBodyType {
   RB_DYNAMIC_BODY = 2,
 } RbBodyType;
 
+typedef enum RbVehicleDamageType {
+  // The wheel falls off as a free body.
+  RB_DETACH_WHEEL = 0,
+  // The wheel stays on but stops gripping, driving and steering.
+  RB_DISABLE_WHEEL = 1,
+  // The part becomes a free body.
+  RB_DETACH_PART = 2,
+  // The part stays on but its function is lost.
+  RB_DISABLE_PART = 3,
+} RbVehicleDamageType;
+
 // An opaque world.
 typedef struct RbWorld RbWorld;
 
@@ -190,13 +201,37 @@ typedef struct RbWheelState {
   bool in_contact;
   struct RbVec3 contact_point;
   struct RbVec3 contact_normal;
+  // Suspension, longitudinal and lateral tyre forces.
+  float suspension_force;
+  float longitudinal_force;
+  float lateral_force;
+  float slip_ratio;
+  // Slip angle (rad).
+  float slip_angle;
+  bool sliding;
+  // Fell off (`rbVehicle_Damage` or a broken mount).
+  bool detached;
+  bool disabled;
+  float radius;
+  float width;
 } RbWheelState;
 
 typedef struct RbVehicleOutput {
   RbVehicleId vehicle;
   float forward_speed;
+  // Sideways speed (positive: right).
+  float lateral_speed;
   float engine_rpm;
   int32_t gear;
+  // 0..1 (1: engaged).
+  float clutch;
+  bool engine_connected;
+  // Chassis mass now (drops as parts come off).
+  float mass;
+  // Parts severed so far, and mounts broken under load.
+  uint32_t parts_lost;
+  uint32_t parts_broken;
+  uint32_t wheels_broken;
   const struct RbWheelState *wheels;
   uint32_t wheel_count;
 } RbVehicleOutput;
@@ -357,6 +392,10 @@ typedef struct RbWeldJointDef {
   // 0: rigid. Otherwise penalty stiffnesses.
   float linear_stiffness;
   float angular_stiffness;
+  // Plastic weld (0: off): past `yield_torque` it bends instead of
+  // holding; past `break_bend` radians of accumulated bend it breaks.
+  float yield_torque;
+  float break_bend;
   uint32_t internal_value;
 } RbWeldJointDef;
 
@@ -378,6 +417,10 @@ typedef struct RbVehicleInput {
   float steer;
   float brake;
   float handbrake;
+  // False: automatic gearbox. True: request `gear` (0 neutral, negative
+  // reverse; manual transmissions).
+  bool manual_gear;
+  int32_t gear;
 } RbVehicleInput;
 
 // A destructible asset (index).
@@ -396,6 +439,78 @@ typedef struct RbDestructibleDef {
   uint64_t user_data;
   uint32_t internal_value;
 } RbDestructibleDef;
+
+// Functional overrides, ANDed with what the intact parts allow (bit i of a
+// mask: wheel i).
+typedef struct RbFunctionalState {
+  uint32_t wheel_mask;
+  uint32_t drive_mask;
+  uint32_t steer_mask;
+  uint32_t brake_mask;
+  bool engine_connected;
+} RbFunctionalState;
+
+// One breakable mount's load against its limits.
+typedef struct RbMountLoad {
+  uint32_t index;
+  // A wheel's mount (else a part's).
+  bool wheel;
+  float force;
+  float torque;
+  float break_force;
+  float break_torque;
+  // Largest max(force / break_force, torque / break_torque) since spawn.
+  float peak_ratio;
+} RbMountLoad;
+
+// A soft body's damage so far.
+typedef struct RbSoftDamage {
+  // Beams that have yielded at least once, broken, and in total.
+  uint32_t bent;
+  uint32_t broken;
+  uint32_t beams;
+  // Energy the deformation absorbed.
+  float plastic_work;
+  // Largest permanent beam strain, |L/L0 - 1|.
+  float max_beam_strain;
+  // Riding its rigid core right now (rigid mode).
+  bool rigid;
+} RbSoftDamage;
+
+typedef struct RbColor {
+  float r;
+  float g;
+  float b;
+  float a;
+} RbColor;
+
+// Callbacks for `rbWorld_DebugDraw` (null entries are skipped). Everything
+// is in the world's coordinates; `context` is passed back unchanged.
+typedef struct RbDebugDraw {
+  void *context;
+  void (*draw_box)(void *context,
+                   struct RbTransform transform,
+                   struct RbVec3 half,
+                   struct RbColor color);
+  void (*draw_sphere)(void *context, struct RbVec3 center, float radius, struct RbColor color);
+  void (*draw_capsule)(void *context,
+                       struct RbVec3 p0,
+                       struct RbVec3 p1,
+                       float radius,
+                       struct RbColor color);
+  // A convex hull: `vertices` in its own frame placed by `transform`,
+  // `indices` a triangle list in the world's winding.
+  void (*draw_mesh)(void *context,
+                    struct RbTransform transform,
+                    const struct RbVec3 *vertices,
+                    uint32_t vertex_count,
+                    const uint32_t *indices,
+                    uint32_t index_count,
+                    struct RbColor color);
+  void (*draw_transform)(void *context, struct RbTransform transform);
+  bool draw_shapes;
+  bool draw_body_transforms;
+} RbDebugDraw;
 
 #ifdef __cplusplus
 extern "C" {
@@ -454,6 +569,50 @@ bool rbBody_IsValid(struct RbWorld *world, RbBodyId body);
 
 // The body origin's pose as of the last polled frame.
 enum RbResult rbBody_GetTransform(struct RbWorld *world, RbBodyId body, struct RbTransform *out);
+
+// Teleport the body origin (velocities kept).
+enum RbResult rbBody_SetTransform(struct RbWorld *world,
+                                  RbBodyId body,
+                                  struct RbTransform transform);
+
+enum RbResult rbBody_SetLinearVelocity(struct RbWorld *world, RbBodyId body, struct RbVec3 v);
+
+enum RbResult rbBody_SetAngularVelocity(struct RbWorld *world, RbBodyId body, struct RbVec3 v);
+
+// A force at a world point for the next step.
+enum RbResult rbBody_ApplyForce(struct RbWorld *world,
+                                RbBodyId body,
+                                struct RbVec3 force,
+                                struct RbVec3 point,
+                                bool wake);
+
+enum RbResult rbBody_ApplyForceToCenter(struct RbWorld *world,
+                                        RbBodyId body,
+                                        struct RbVec3 force,
+                                        bool wake);
+
+enum RbResult rbBody_ApplyTorque(struct RbWorld *world,
+                                 RbBodyId body,
+                                 struct RbVec3 torque,
+                                 bool wake);
+
+enum RbResult rbBody_ApplyLinearImpulse(struct RbWorld *world,
+                                        RbBodyId body,
+                                        struct RbVec3 impulse,
+                                        struct RbVec3 point,
+                                        bool wake);
+
+enum RbResult rbBody_ApplyLinearImpulseToCenter(struct RbWorld *world,
+                                                RbBodyId body,
+                                                struct RbVec3 impulse,
+                                                bool wake);
+
+enum RbResult rbBody_ApplyAngularImpulse(struct RbWorld *world,
+                                         RbBodyId body,
+                                         struct RbVec3 impulse,
+                                         bool wake);
+
+enum RbResult rbBody_SetAwake(struct RbWorld *world, RbBodyId body, bool awake);
 
 struct RbShapeDef rbDefaultShapeDef(void);
 
@@ -604,6 +763,149 @@ enum RbResult rbSoft_BindSkin(struct RbWorld *world,
                               const uint32_t *triangles,
                               uint32_t triangle_count,
                               RbSkinId *out);
+
+// Change gravity (the world's coordinates and units).
+enum RbResult rbWorld_SetGravity(struct RbWorld *world, struct RbVec3 gravity);
+
+// A body's velocities now. **Blocks** on a GPU readback: for tools and
+// occasional queries, not per-frame use (moves carry poses every frame).
+enum RbResult rbBody_GetVelocity(struct RbWorld *world,
+                                 RbBodyId body,
+                                 struct RbVec3 *out_linear,
+                                 struct RbVec3 *out_angular);
+
+// Awake as of the last polled frame.
+enum RbResult rbBody_IsAwake(struct RbWorld *world, RbBodyId body, bool *out);
+
+// Change a joint's drive in place: the motor speed and the spring or servo
+// target. Revolute and spherical joints take rad/s and rad; prismatic and
+// distance joints take speed and length.
+enum RbResult rbJoint_SetDrive(struct RbWorld *world,
+                               RbJointId joint,
+                               float velocity,
+                               float target);
+
+enum RbResult rbShape_SetFriction(struct RbWorld *world,
+                                  RbShapeId shape,
+                                  float friction,
+                                  float restitution);
+
+enum RbResult rbShape_SetFilter(struct RbWorld *world,
+                                RbShapeId shape,
+                                uint16_t category_bits,
+                                uint16_t mask_bits,
+                                int16_t group_index);
+
+// A preset's descriptor as JSON (to edit, then `rbCreateVehicleFromJson`).
+enum RbResult rbGetVehiclePresetJson(const char *name,
+                                     char *buffer,
+                                     size_t capacity,
+                                     size_t *out_length);
+
+// A vehicle from a `VehicleDesc` as JSON (the presets' format).
+enum RbResult rbCreateVehicleFromJson(struct RbWorld *world,
+                                      const char *json,
+                                      struct RbTransform transform,
+                                      RbVehicleId *out);
+
+// Sever or switch off a wheel or part (by its index in the descriptor).
+enum RbResult rbVehicle_Damage(struct RbWorld *world,
+                               RbVehicleId vehicle,
+                               enum RbVehicleDamageType type_,
+                               uint32_t index);
+
+struct RbFunctionalState rbDefaultFunctionalState(void);
+
+enum RbResult rbVehicle_SetFunctionalState(struct RbWorld *world,
+                                           RbVehicleId vehicle,
+                                           struct RbFunctionalState state);
+
+// Mount loads (**blocks** on a readback; for damage HUDs and tuning).
+// Writes up to `capacity`; `*out_count` gets the total.
+enum RbResult rbVehicle_GetMountLoads(struct RbWorld *world,
+                                      RbVehicleId vehicle,
+                                      struct RbMountLoad *out,
+                                      uint32_t capacity,
+                                      uint32_t *out_count);
+
+// A built-in soft vehicle's descriptor as JSON: `"procedural_car"` (the
+// softbody page's hatchback; `strength` scales its beams) or `"dune_buggy"`
+// (soft frame with bolted rigid parts; `strength` scales its mounts). 0 or
+// less: the default.
+enum RbResult rbGetSoftVehiclePresetJson(const char *name,
+                                         float strength,
+                                         char *buffer,
+                                         size_t capacity,
+                                         size_t *out_length);
+
+// A soft vehicle from a `SoftVehicleDesc` as JSON. `options` is a
+// `SpawnOptions` JSON (`rigid_core`, node radius, suspension) or null for
+// the defaults; `velocity` is the initial velocity of every node.
+enum RbResult rbCreateSoftVehicle(struct RbWorld *world,
+                                  const char *desc_json,
+                                  const char *options_json,
+                                  struct RbTransform transform,
+                                  struct RbVec3 velocity,
+                                  RbSoftId *out);
+
+// A soft vehicle from BeamNG JBeam files (`names[i]` and `contents[i]`,
+// `count` of them) and an optional part configuration (`.pc` text or null).
+enum RbResult rbCreateSoftVehicleJBeam(struct RbWorld *world,
+                                       const char *const *names,
+                                       const char *const *contents,
+                                       uint32_t count,
+                                       const char *config,
+                                       const char *options_json,
+                                       struct RbTransform transform,
+                                       struct RbVec3 velocity,
+                                       RbSoftId *out);
+
+// The demos' soft-solver settings for a step rate (`SoftSettings` JSON):
+// edit `rigid_mode`, `threshold_scale`, `sweeps` and the rest, then
+// `rbWorld_SetSoftSettingsJson`.
+enum RbResult rbGetCalibratedSoftSettingsJson(float hz,
+                                              char *buffer,
+                                              size_t capacity,
+                                              size_t *out_length);
+
+enum RbResult rbWorld_SetSoftSettingsJson(struct RbWorld *world, const char *json);
+
+// Let soft bodies' skins collide with this rigid shape (walls, poles).
+enum RbResult rbSoft_AddObstacle(struct RbWorld *world, RbShapeId shape);
+
+// Damage (**blocks** on a readback; for HUDs and scoring).
+enum RbResult rbSoft_GetDamage(struct RbWorld *world, RbSoftId soft, struct RbSoftDamage *out);
+
+// The fracture lab's procedural cuboid house (box chunks, default options).
+enum RbResult rbCreateDestructibleAssetCuboidHouse(struct RbWorld *world,
+                                                   RbDestructibleAssetId *out);
+
+// The fracture lab's bond preloading: settle one copy of the asset on a
+// ground plane at its frame's y = 0 with breaking off (blocks, up to 600
+// steps); instances placed afterwards start asleep at the settled poses.
+enum RbResult rbWorld_PreloadDestructibleAsset(struct RbWorld *world,
+                                               RbDestructibleAssetId asset,
+                                               bool *out_settled);
+
+// Switch the world to the solver settings the asset was tuned with (the
+// fracture lab's: 120 Hz, 8 iterations, its contact and sleep flags; gravity
+// included). `*out_time_step` receives the new fixed step to step at.
+enum RbResult rbWorld_UseDestructibleAssetSolver(struct RbWorld *world,
+                                                 RbDestructibleAssetId asset,
+                                                 float *out_time_step);
+
+// An infinite ground plane on a static body: the half-space below
+// `normal · x = offset` in the body frame. At most 8 per world.
+enum RbResult rbCreatePlaneShape(struct RbWorld *world,
+                                 RbBodyId body,
+                                 const struct RbShapeDef *def,
+                                 struct RbVec3 normal,
+                                 float offset,
+                                 RbShapeId *out);
+
+// Draw every shape at its body's last polled pose, coloured by state
+// (static, awake, asleep) unless a material colour is set.
+enum RbResult rbWorld_DebugDraw(struct RbWorld *world, const struct RbDebugDraw *draw);
 
 #ifdef __cplusplus
 }  // extern "C"

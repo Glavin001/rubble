@@ -195,6 +195,20 @@ impl Coords {
     pub fn force_in(&self, x: f32) -> f32 {
         x / self.scale(1)
     }
+    pub fn force_out(&self, x: f32) -> f32 {
+        x * self.scale(1)
+    }
+    pub fn torque_out(&self, x: f32) -> f32 {
+        x * self.scale(2)
+    }
+    /// Energy (J: kg·m²/s²).
+    pub fn energy_out(&self, x: f32) -> f32 {
+        x * self.scale(2)
+    }
+    pub fn extents_out(&self, v: [f32; 3]) -> [f32; 3] {
+        let p = self.polar_out(v, 1);
+        [p[0].abs(), p[1].abs(), p[2].abs()]
+    }
 
     /// Triangle winding for exported meshes.
     pub fn triangle_out(&self, t: [u32; 3]) -> [u32; 3] {
