@@ -1837,7 +1837,8 @@ impl World {
             cast_results,
             projectiles,
             projectile_events,
-            lost_events: ring.lost + lost_contacts + lost_motion,
+            // One ring: its overflow is counted once, however many readers.
+            lost_events: ring.lost.max(lost_motion) + lost_contacts,
             dropped: false,
             resynced: resync.is_some(),
             counters: Some(c),
