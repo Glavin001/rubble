@@ -208,3 +208,52 @@ fn car_drives_through_the_shop_window_threshold() {
     assert!(deepest - face > 2.0, "into the shop: {} m", deepest - face);
     assert!(shop > 10 && own > 5, "both break: shopfront {shop}, car {own}");
 }
+
+/// S3 (threshold): the airliner thrown at the apartment block at 70 m/s flies in level,
+/// tears through its middle bays (hundreds of bonds within a second of contact) and breaks
+/// up itself (its nose comes off).
+#[test]
+fn airliner_tears_into_the_apartment_block_threshold() {
+    let gpu = Gpu::new().expect("GPU");
+    let key = "ft_airliner_apartment";
+    let vs = stress_ref::vehicles::scene(key).unwrap();
+    let pack = vs.to_pack();
+    let scene = pack_scene(&pack, key, Profile::Threshold, 2.0);
+    let mut launcher = Launcher::of_pack(&pack).unwrap();
+    let ball = stress_ref::wrecking::BALLS[0];
+    let mut w = stress_rubble::threshold::ThresholdWorld::new(&gpu, &scene, ball.radius, ball.mass).expect("threshold world");
+    let jet = vs.vehicles[0].1.clone();
+    let building = stress_ref::buildings::apartment_block().chunks.len();
+    let mean = |w: &stress_rubble::threshold::ThresholdWorld| -> Vec3 {
+        let c = w.chunk_centres(&gpu);
+        jet.iter().fold(Vec3::ZERO, |a, &k| a + Vec3::from_array(c[k].0)) * (1.0 / jet.len() as f64)
+    };
+    let start = mean(&w);
+    let mut level = None;
+    // Released at once (it is in the air); 40 m at 70 m/s is 34 frames.
+    assert!(launcher.arm("airliner", 0, w.frame_dt));
+    for l in launcher.due(0) {
+        w.launch_island(&gpu, 0, &l).expect("launch");
+    }
+    for _ in 0..90 {
+        w.step_frame(&gpu).expect("frame");
+        if w.frame == 30 {
+            // In flight, before contact: on its line, at its height.
+            let c = mean(&w);
+            level = Some(((c.y - start.y) / 0.5, c.z - start.z));
+        }
+    }
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    let intact = w.scene_bonds_intact(&gpu, 0);
+    let bonds = &scene.bodies[0].bonds;
+    let broken = |pick: &dyn Fn(usize) -> bool| (0..bonds.len()).filter(|&b| pick(bonds[b].a) && pick(bonds[b].b) && !intact[b]).count();
+    let (block, own) = (broken(&|k| k < building), broken(&|k| jet.contains(&k)));
+    let body = w.fracture.chunk_bodies(&gpu);
+    let main = largest(&jet, &body);
+    let off: Vec<String> = jet.iter().filter(|k| !main.contains(k)).map(|&k| kind(&scene, k)).collect();
+    let (speed, drop) = level.unwrap();
+    println!("airliner: {speed:.1} m/s and {drop:.2} m from its height in flight; broken: block {block}, airliner {own}; off it: {off:?}");
+    assert!((speed - stress_ref::vehicles::AIRLINER_SPEED).abs() < 1.0 && drop.abs() < 0.5, "flies in level at 70 m/s");
+    assert!(block > 300, "tears through the block: {block} bonds");
+    assert!(own > 3 && off.iter().any(|k| k == "nose"), "breaks up itself: {off:?}");
+}

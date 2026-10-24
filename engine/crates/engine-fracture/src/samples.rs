@@ -184,6 +184,19 @@ pub const PACK_SAMPLES: &[PackSample] = &[
         menu: "11-storey glass tower · 1,332 chunks",
         label: "glass tower",
     },
+    // The same targets with a bonded airliner thrown at them (`stress_ref::vehicles`).
+    PackSample {
+        key: "ft_airliner_tower",
+        group: FLY_THROUGH,
+        menu: "Glass tower and an airliner at 70 m/s · 1,368 chunks",
+        label: "glass tower with an airliner",
+    },
+    PackSample {
+        key: "ft_airliner_apartment",
+        group: FLY_THROUGH,
+        menu: "Apartment block and an airliner at 70 m/s · 1,391 chunks",
+        label: "apartment block with an airliner",
+    },
     // Bonded vehicles launched at a rigid barrier (`stress_ref::vehicles`).
     PackSample {
         key: "vh_car_barrier",

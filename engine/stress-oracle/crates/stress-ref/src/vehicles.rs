@@ -508,12 +508,37 @@ fn ram_raid(key: &'static str, title: &'static str, base: Structure, face: f64, 
     compose(key, title, base, street(street_x, (near - 24.0, near), top), &placed)
 }
 
+/// The airliner's speed into the Fly-through buildings: 70 m/s (252 km/h, about an E175's
+/// approach speed).
+pub const AIRLINER_SPEED: f64 = 70.0;
+
+/// How far the airliner's nose starts from the facade (m): 0.57 s of flight.
+pub const AIRLINER_STANDOFF: f64 = 40.0;
+
+/// The airliner thrown at a structure along its line of attack (`Structure::aim`, +y), its
+/// fuselage axis at the aim's height, its nose `AIRLINER_STANDOFF` m out: launched at
+/// `AIRLINER_SPEED` with the lift that brings it to the facade level under gravity (a
+/// thrown paper aeroplane: nothing holds it up), released at once.
+fn fly_through(key: &'static str, title: &'static str, base: Structure, offset: f64) -> Scene {
+    let mut aim = base.aim;
+    aim.target[0] += offset;
+    let heading = aim.direction[1].atan2(aim.direction[0]);
+    let nose = 0.5 * AirlinerLayout::LENGTH;
+    let back = AIRLINER_STANDOFF + nose;
+    let at = [aim.target[0] - back * heading.cos(), aim.target[1] - back * heading.sin(), aim.target[2]];
+    let flight = AIRLINER_STANDOFF / AIRLINER_SPEED;
+    let lift = 0.5 * 9.81 * flight;
+    compose(key, title, base, Vec::new(), &[(airliner("airliner"), Placement { at, heading }, Some(along(heading, AIRLINER_SPEED, lift, 0.0)))])
+}
+
 /// The scenes with vehicles: (key, title), in menu order.
 pub const SCENES: &[(&str, &str)] = &[
     ("vh_car_barrier", "Car into a crash barrier"),
     ("vh_bus_barrier", "Bus into a crash barrier"),
     ("rr_vehicles_storefront", "Car and bus through the storefront row"),
     ("rr_vehicles_apartment", "Car and bus through the apartment block"),
+    ("ft_airliner_tower", "Airliner into the glass tower"),
+    ("ft_airliner_apartment", "Airliner into the apartment block"),
 ];
 
 /// A scene with vehicles by key.
@@ -551,6 +576,10 @@ pub fn scene(key: &str) -> Option<Scene> {
             let face = L::line_y(0) - 0.5 * L::INFILL;
             Some(ram_raid(key, title, crate::buildings::apartment_block(), face, L::FOOTING_DEPTH, (-x, x), L::line_y(0) - 0.5 * L::FOOTING, vec![(car("car"), bay(0), 0.5 * CarLayout::LENGTH), (bus("bus"), bay(3), 0.5 * BusLayout::LENGTH + 0.2)]))
         }
+        // S3: the airliner into the glass tower's sixth storey and the apartment block's
+        // fourth, along their lines of attack.
+        "ft_airliner_tower" => Some(fly_through(key, title, crate::buildings::glass_tower(), 0.0)),
+        "ft_airliner_apartment" => Some(fly_through(key, title, crate::buildings::apartment_block(), 0.0)),
         _ => None,
     }
 }

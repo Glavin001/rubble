@@ -701,6 +701,48 @@ threshold car stand-in now breaks 129 of the storefront's bonds by frame 100 (na
 `cargo test --release -p stress-rubble --features gpu --test vehicles car_drives`: the car
 alone goes more than 2 m past the facade, and both the shopfront and the car break.
 
+**Fly-through with the airliner** (S3, Scene menu group Fly-through). The airliner flies
+along the building's line of attack (`defaults.wreckingYard`, +y), its fuselage axis at the
+aim's height:
+- `ft_airliner_tower` (1,368 chunks): the glass tower's sixth storey, between two slabs;
+- `ft_airliner_apartment` (1,391 chunks): the apartment block's fourth storey.
+
+It is thrown like a paper aeroplane: its nose 40 m out, at 70 m/s, with the lift that brings it
+to the facade's height under gravity (2.8 m/s up: its path is within 2.3° of level and 0.2 m
+of the aim's height). It is released at once, since nothing holds it up before it is released.
+Its strike spheres are its nose, both wing roots and both engines. A struck body takes one
+strike a frame: the first sphere in order that reaches its bounds, usually the nose. So the
+wings meet the building by contact loads.
+
+No kinematic flight up to first contact. Holding a body on a path and releasing it at
+contact would need the engine to drive the island's motion until the routing check sees the
+contact coming. That is forward-only in principle, but neither world has a kinematic island,
+so it is not done here.
+
+What happens, threshold, recorded in Chrome (takes `ft_glass_tower_airliner` and
+`ft_apartment_airliner`, which replace the 40 t ball stand-in's `ft_glass_tower_jet`):
+- **Glass tower.** The nose breaks up in the curtain wall and the floors around the cut. The
+  jet stops within the tower's first bays: natively it gets 8 m in on WGSL and 14 m on Metal,
+  and it stops at the core and the slab pieces it pushes. In Chrome it pitches up and slides down the
+  facade. Natively its nose, three wing pieces and an engine break off. 710 bonds break by 7 s. The tower
+  stands: the upper block does not fail across the cut band. The threshold profile has no
+  stress solve, and the README's earlier note on this tower stands.
+- **Apartment block.** It punches through the middle bays of five storeys, so you can see
+  through the block. Its engines, nose and wing pieces fly off. The bays above the hole hang
+  on, and the jet falls back out in front. 1,148 bonds break by 7 s.
+- **blast_parity** (native): the jet shatters on contact (all 46 of its bonds) and the tower
+  comes down whole (2,566 bonds by frame 240). Its pieces are thrown up out of the tower, 86 m
+  in 4 s, an artefact of the quasi-static solve of a free island stopped in one frame. That
+  is why the takes are threshold.
+- The airliner breaks less than a real one would. The threshold rule breaks a bond when a
+  chunk's contact load beats its tension capacity. A riveted barrel section holds 9.5 MN in
+  tension (1.35 MPa over 7 m²), and the crushing of the thin shell in compression is not a
+  failure mode the profile has.
+
+`cargo test --release -p stress-rubble --features gpu --test vehicles airliner`: the jet
+flies in level at 70 m/s (within 0.5 m of its height), breaks over 300 of the apartment
+block's bonds and loses its nose.
+
 **Checks:**
 - `cargo test --release -p stress-ref --test vehicles`:
   - each vehicle's parts, mass and size, as one free island with every joint as `joint` picks;

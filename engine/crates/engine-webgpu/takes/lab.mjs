@@ -79,13 +79,22 @@ export const LAB_TAKES = {
     { n: 30, caption: 'A 2 t car stand-in at 15 m/s into a shop window' },
     { n: 180, slow: 2, caption: 'Half speed: the window and the stallriser go; the shop stands', cam: { rel: [0.2, -0.05, 0.55], relTo: [-0.3, 0.0, 0.6] } },
   ]),
-  // Fly-through target: the 40 t jet stand-in at 80 m/s into the glass tower's mid-height.
-  ft_glass_tower_jet: take({ scene: 'ft_glass_tower', bonds: 'stress', preset: 4 }, [
-    { n: 40, caption: 'An 11-storey glass tower: concrete core, steel mullions, glass panes', cam: { rel: [0.4, 0.0, 1.0], relTo: [0.3, 0.0, 0.95] } },
-    { n: 1, act: 'fire', caption: 'A 40 t stand-in for an aircraft at 80 m/s' },
-    { n: 10, caption: 'A 40 t stand-in for an aircraft at 80 m/s' },
-    { n: 240, slow: 2, caption: 'Half speed: the curtain wall and the floors around the cut fail', cam: { rel: [0.3, 0.0, 0.95], relTo: [-0.3, 0.08, 1.0] } },
-    { n: 180, caption: 'Real time', cam: { rel: [-0.3, 0.08, 1.0], relTo: [-0.7, 0.15, 1.15] } },
+  // Fly-through (S3): a bonded 35 t regional jet (stress_ref::vehicles::airliner) thrown at
+  // the building at 70 m/s along its line of attack, released 40 m out (threshold); the
+  // camera follows it in. Replaces the 40 t ball stand-in.
+  ft_glass_tower_airliner: take({ scene: 'ft_airliner_tower', bonds: 'threshold' }, [
+    { n: 1, act: { launch: 'airliner' }, caption: 'A 35 t, 30 m regional jet of 36 bonded parts, thrown at 252 km/h', cam: { orbit: [-0.6, 0.1, 40], at: [0, -61.2, 20.3] } },
+    { n: 18, caption: 'A 35 t, 30 m regional jet of 36 bonded parts, thrown at 252 km/h', cam: { orbit: [-0.6, 0.1, 40], to: [-0.7, 0.1, 40], at: [0, -61.2, 20.3], atTo: [0, -39.2, 20.3] } },
+    { n: 100, slow: 4, caption: 'Quarter speed: it meets the facade at 70 m/s', cam: { orbit: [-0.7, 0.1, 40], to: [-1.15, 0.12, 46], at: [0, -39.2, 20.3], atTo: [0, -8, 20.3] } },
+    { n: 200, slow: 2, caption: 'Half speed: the nose breaks up in the curtain wall; the jet pitches up and slides down the facade', cam: { orbit: [-1.15, 0.12, 46], to: [-0.75, 0.2, 85], at: [0, -8, 20.3], atTo: [0, 0, 20.3] } },
+    { n: 300, caption: 'Real time: a slot of broken panes and floors; the tower stands (no stress solve in threshold)', cam: { orbit: [-0.75, 0.2, 85], to: [-0.35, 0.25, 95], at: [0, 0, 20.3], atTo: [0, 0, 16.2] } },
+  ]),
+  ft_apartment_airliner: take({ scene: 'ft_airliner_apartment', bonds: 'threshold' }, [
+    { n: 1, act: { launch: 'airliner' }, caption: 'A 35 t, 30 m regional jet thrown at the apartment block at 252 km/h', cam: { orbit: [-0.6, 0.1, 40], at: [0, -61.2, 11.0] } },
+    { n: 18, caption: 'A 35 t, 30 m regional jet thrown at the apartment block at 252 km/h', cam: { orbit: [-0.6, 0.1, 40], to: [-0.7, 0.1, 40], at: [0, -61.2, 11.0], atTo: [0, -39.2, 11.0] } },
+    { n: 100, slow: 4, caption: 'Quarter speed: it meets the facade at 70 m/s', cam: { orbit: [-0.7, 0.1, 40], to: [-1.15, 0.12, 46], at: [0, -39.2, 11.0], atTo: [0, -8, 11.0] } },
+    { n: 200, slow: 2, caption: 'Half speed: it punches through the middle bays, five storeys of them', cam: { orbit: [-1.15, 0.12, 46], to: [-0.75, 0.2, 70], at: [0, -8, 11.0], atTo: [0, 0, 11.0] } },
+    { n: 300, caption: 'Real time: the bays above the hole hang on; the jet falls back out', cam: { orbit: [-0.75, 0.2, 70], to: [-0.35, 0.25, 80], at: [0, 0, 11.0], atTo: [0, 0, 8.8] } },
   ]),
   // Topple (stress_ref::topple), threshold profile: the charges cut the street-side
   // columns, then the back line. Natively (Metal) the tower then leans over the street as
