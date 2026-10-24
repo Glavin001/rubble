@@ -224,6 +224,9 @@ impl Coords {
     pub fn impulse_per_area_in(&self, x: f32) -> f32 {
         x / self.scale(-1)
     }
+    pub fn impulse_per_area_out(&self, x: f32) -> f32 {
+        x * self.scale(-1)
+    }
 
     /// Inertia tensors (rows; kg·m² or kg·cm²): `I = Mᵀ I_host M` in, the
     /// reverse out. Quadratic in the axis map, so the reflection's sign cancels.

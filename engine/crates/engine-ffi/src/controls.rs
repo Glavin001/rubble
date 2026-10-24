@@ -814,14 +814,16 @@ pub struct RbExplosionDef {
     pub mask_bits: u16,
 }
 
+/// Defaults in `coordinates`' units.
 #[no_mangle]
-pub extern "C" fn rbDefaultExplosionDef() -> RbExplosionDef {
+pub extern "C" fn rbDefaultExplosionDef(coordinates: RbCoordinates) -> RbExplosionDef {
+    let c = Coords::new(coordinates);
     let d = ExplosionDef::default();
     RbExplosionDef {
         position: RbVec3::default(),
-        radius: d.radius,
-        falloff: d.falloff,
-        impulse_per_area: d.impulse_per_area,
+        radius: c.length_out(d.radius),
+        falloff: c.length_out(d.falloff),
+        impulse_per_area: c.impulse_per_area_out(d.impulse_per_area),
         mask_bits: d.mask,
     }
 }
