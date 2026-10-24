@@ -143,6 +143,22 @@ frame from a pose buffer in Rubble's layout and frame. Checked on an M3 Max with
 - they cast shadows;
 - Lumen lights them: with GI off, their shadowed faces lose the ground's bounce.
 
+**At 100k** (`RUBBLE_POC_SIDE=317 scripts/unreal/test.sh --no-build --only Rubble.Poc.Scale`;
+M3 Max, `METAL_SM5`, 1280×720, the whole field in view, 300 frames, no frame cap):
+
+| Boxes | Frame | Game thread | GPU | Base pass | Velocity pass |
+|---|---|---|---|---|---|
+| 10,000 | 12.6 ms | 1.5 ms | 8.3 ms | 0.5 ms | — |
+| 100,489 | 12.2 ms (82 FPS) | 1.2 ms | 11.8 ms | 3.0 ms | 2.2 ms |
+
+- **No CPU work per box:** the game thread does not grow with the count.
+- **Our own GPU passes are too small to time:** Metal's `ProfileGPU` shows the pose and GPU Scene
+  write passes at 0.000 ms. They move about 30 MB at 100k.
+- **The growth is Unreal drawing 100k ordinary (non-Nanite) meshes twice,** in the base pass and
+  the velocity pass. Nanite replaces both with one visibility-buffer raster.
+- **The rest of the frame does not depend on the count:** Lumen's screen probes, the radiance
+  cache and depth of field.
+
 Nanite could not be checked on this machine, because it needs macOS 15+ (above). The Nanite
 proxy path (`FRubbleNaniteProxy`) is built, and the test checks it wherever the platform supports
 Nanite.

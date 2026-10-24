@@ -14,6 +14,14 @@ void FRubbleGPUSceneCS::ModifyCompilationEnvironment(const FGlobalShaderPermutat
 
 IMPLEMENT_GLOBAL_SHADER(FRubbleGPUSceneCS, "/Plugin/Rubble/RubbleGPUScene.usf", "WriteInstancesCS", SF_Compute);
 
+void FRubblePocAnimateCS::ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+{
+	FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+	OutEnvironment.SetDefine(TEXT("THREAD_GROUP_SIZE"), ThreadGroupSize);
+}
+
+IMPLEMENT_GLOBAL_SHADER(FRubblePocAnimateCS, "/Plugin/Rubble/RubblePocAnimate.usf", "AnimatePosesCS", SF_Compute);
+
 class FRubbleShadersModule : public IModuleInterface
 {
 public:

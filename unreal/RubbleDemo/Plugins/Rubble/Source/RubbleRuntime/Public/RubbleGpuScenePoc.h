@@ -1,7 +1,8 @@
 // Proof of concept for the GPU Scene path (no Rubble): thousands of Nanite boxes whose transforms
 // a compute pass writes into GPU Scene each frame from a pose buffer in Rubble's record format
 // (32 B, Rubble's frame). Verifies Nanite, virtual shadow maps and Lumen lighting before Rubble's
-// own buffers feed it. Run with -RubblePoc=gpuscene.
+// own buffers feed it. A GPU pass stands in for Rubble's step, so nothing per box runs on the
+// CPU. Run with -RubblePoc=gpuscene, and -RubblePocSide=N for N x N boxes (default 100).
 
 #pragma once
 
@@ -27,10 +28,11 @@ public:
 	int32 Side = 100; // Side x Side boxes
 	bool UsesNaniteMesh() const { return bNaniteMesh; }
 
+	/** Render-thread state: the per-instance tables, uploaded once. */
+	struct FGpu;
+
 private:
-	TArray<FVector4f> Current, Previous;
-	TArray<uint32> Body;
-	TArray<FVector4f> Local;
+	TSharedPtr<FGpu, ESPMode::ThreadSafe> Gpu;
 	float Time = 0.0f;
 	bool bNaniteMesh = false;
 };

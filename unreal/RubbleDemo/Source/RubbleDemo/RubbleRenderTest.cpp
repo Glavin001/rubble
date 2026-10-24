@@ -332,3 +332,94 @@ bool FRubblePocGpuScene::RunTest(const FString& Parameters)
 	return true;
 }
 #endif
+
+#if WITH_DEV_AUTOMATION_TESTS
+#include "RenderTimer.h"
+#include "DynamicRHI.h"
+
+namespace
+{
+	/** Frame timings sampled over the frames, logged as means and 95th percentiles (ms). */
+	struct FRubbleFrameSamples
+	{
+		TArray<double> Frame, Game, Render, Gpu;
+
+		void Add()
+		{
+			const double Ms = FPlatformTime::GetSecondsPerCycle() * 1000.0;
+			Frame.Add(FApp::GetDeltaTime() * 1000.0);
+			Game.Add(GGameThreadTime * Ms);
+			Render.Add(GRenderThreadTime * Ms);
+			Gpu.Add(RHIGetGPUFrameCycles() * Ms);
+		}
+
+		static FString Describe(const TCHAR* Name, TArray<double> V)
+		{
+			if (V.Num() == 0)
+			{
+				return FString(Name) + TEXT(" -");
+			}
+			V.Sort();
+			double Sum = 0.0;
+			for (double X : V)
+			{
+				Sum += X;
+			}
+			return FString::Printf(TEXT("%s %.2f ms (p95 %.2f)"), Name, Sum / V.Num(), V[FMath::Min(V.Num() - 1, int32(V.Num() * 0.95))]);
+		}
+
+		FString Report() const
+		{
+			return FString::Join(TArray<FString>{Describe(TEXT("frame"), Frame), Describe(TEXT("game"), Game),
+				Describe(TEXT("render"), Render), Describe(TEXT("gpu"), Gpu)}, TEXT(", "));
+		}
+	};
+}
+
+/**
+ * Rubble.Poc.Scale (run with -RubblePoc=gpuscene -RubblePocSide=N): frame, game-thread,
+ * render-thread and GPU times with N x N GPU-written boxes in view, plus a GPU profile of the
+ * frame (ProfileGPU, in the log) that times the Rubble passes themselves.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRubblePocScale, "Rubble.Poc.Scale",
+	EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
+
+bool FRubblePocScale::RunTest(const FString& Parameters)
+{
+	ARubbleGpuScenePoc* Poc = Find<ARubbleGpuScenePoc>();
+	if (!TestNotNull(TEXT("the PoC actor (-RubblePoc=gpuscene)"), Poc))
+	{
+		return false;
+	}
+	GEngine->Exec(GameWorld(), TEXT("t.MaxFPS 0"));
+	GEngine->Exec(GameWorld(), TEXT("r.VSync 0"));
+	if (APawn* Pawn = GameWorld()->GetFirstPlayerController()->GetPawn())
+	{
+		if (ARubblePawn* RP = Cast<ARubblePawn>(Pawn))
+		{
+			RP->SetMode(ERubbleCamera::Fly);
+		}
+		// The whole field in view, from a corner.
+		const double Half = Poc->Side * 75.0;
+		Pawn->SetActorLocationAndRotation(FVector(-Half * 1.15, -Half * 1.15, Half * 0.55), FRotator(-24, 45, 0));
+	}
+	const int32 Count = Poc->Instances->GetNumInstances();
+	TSharedRef<FRubbleFrameSamples> Samples = MakeShared<FRubbleFrameSamples>();
+	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(4.0f));
+	ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([Samples]() {
+		Samples->Add();
+		return Samples->Frame.Num() >= 300;
+	}));
+	ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([this, Samples, Count]() {
+		const FString Line = FString::Printf(TEXT("GPU Scene PoC, %d boxes, %s: %s"), Count,
+			*LexToString(GMaxRHIShaderPlatform), *Samples->Report());
+		UE_LOG(LogTemp, Display, TEXT("%s"), *Line);
+		AddInfo(Line);
+		FScreenshotRequest::RequestScreenshot(ShotDir() / FString::Printf(TEXT("poc/scale_%d.png"), Count), false, false);
+		GEngine->Exec(GameWorld(), TEXT("ProfileGPU"));
+		return true;
+	}));
+	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(1.0f));
+	return true;
+}
+#endif

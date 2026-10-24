@@ -31,3 +31,21 @@ class RUBBLESHADERS_API FRubbleGPUSceneCS : public FGlobalShader
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<float4>, InstanceLocal)
 	END_SHADER_PARAMETER_STRUCT()
 };
+
+/** The GPU Scene PoC's stand-in for a Rubble step: a field of moving boxes as pose records. */
+class RUBBLESHADERS_API FRubblePocAnimateCS : public FGlobalShader
+{
+	DECLARE_EXPORTED_GLOBAL_SHADER(FRubblePocAnimateCS, RUBBLESHADERS_API);
+	SHADER_USE_PARAMETER_STRUCT(FRubblePocAnimateCS, FGlobalShader);
+
+	static constexpr uint32 ThreadGroupSize = 64;
+
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, RUBBLESHADERS_API)
+		SHADER_PARAMETER(uint32, NumBodies)
+		SHADER_PARAMETER(uint32, Side)
+		SHADER_PARAMETER(float, Time)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float4>, OutPoses)
+	END_SHADER_PARAMETER_STRUCT()
+};
