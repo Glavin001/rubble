@@ -455,6 +455,50 @@ bool rbBody_IsValid(struct RbWorld *world, RbBodyId body);
 // The body origin's pose as of the last polled frame.
 enum RbResult rbBody_GetTransform(struct RbWorld *world, RbBodyId body, struct RbTransform *out);
 
+// Teleport the body origin (velocities kept).
+enum RbResult rbBody_SetTransform(struct RbWorld *world,
+                                  RbBodyId body,
+                                  struct RbTransform transform);
+
+enum RbResult rbBody_SetLinearVelocity(struct RbWorld *world, RbBodyId body, struct RbVec3 v);
+
+enum RbResult rbBody_SetAngularVelocity(struct RbWorld *world, RbBodyId body, struct RbVec3 v);
+
+// A force at a world point for the next step.
+enum RbResult rbBody_ApplyForce(struct RbWorld *world,
+                                RbBodyId body,
+                                struct RbVec3 force,
+                                struct RbVec3 point,
+                                bool wake);
+
+enum RbResult rbBody_ApplyForceToCenter(struct RbWorld *world,
+                                        RbBodyId body,
+                                        struct RbVec3 force,
+                                        bool wake);
+
+enum RbResult rbBody_ApplyTorque(struct RbWorld *world,
+                                 RbBodyId body,
+                                 struct RbVec3 torque,
+                                 bool wake);
+
+enum RbResult rbBody_ApplyLinearImpulse(struct RbWorld *world,
+                                        RbBodyId body,
+                                        struct RbVec3 impulse,
+                                        struct RbVec3 point,
+                                        bool wake);
+
+enum RbResult rbBody_ApplyLinearImpulseToCenter(struct RbWorld *world,
+                                                RbBodyId body,
+                                                struct RbVec3 impulse,
+                                                bool wake);
+
+enum RbResult rbBody_ApplyAngularImpulse(struct RbWorld *world,
+                                         RbBodyId body,
+                                         struct RbVec3 impulse,
+                                         bool wake);
+
+enum RbResult rbBody_SetAwake(struct RbWorld *world, RbBodyId body, bool awake);
+
 struct RbShapeDef rbDefaultShapeDef(void);
 
 // A box of half extents `half`, placed by `local` in the body frame.

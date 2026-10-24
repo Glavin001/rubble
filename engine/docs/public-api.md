@@ -233,8 +233,12 @@ loop {
     `create_box_shape` (a native fast path);
   - `create_hull_shape` and `create_transformed_hull_shape(hull, transform,
     scale)`;
-  - later: `create_mesh_shape` and `create_height_field_shape` (static only,
-    as in Box3D) and baked static compounds.
+  - later: `create_height_field_shape` (static only, as in Box3D) and baked
+    static compounds.
+  - **No triangle-mesh shapes** (decided 2026-10-24). Level geometry comes in
+    convex-decomposed at the source (several hull shapes on a static body),
+    the way Unreal's own collision is authored. Nothing is decomposed at
+    load time.
 
   Each takes `(BodyId, &ShapeDef, geometry)` and returns a `ShapeId`.
 - **`ShapeDef` fields:**

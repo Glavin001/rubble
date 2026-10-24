@@ -1276,79 +1276,150 @@ pub unsafe extern "C" fn rbBody_GetTransform(
     })
 }
 
-macro_rules! body_command {
-    ($(#[$doc:meta])* $name:ident ( $($arg:ident : $ty:ty),* ) => |$w:ident, $id:ident| $body:expr) => {
-        $(#[$doc])*
-        #[no_mangle]
-        pub unsafe extern "C" fn $name(world: *mut RbWorld, body: RbBodyId $(, $arg: $ty)*) -> RbResult {
-            guard_args(|| {
-                let $w = world_mut(world)?;
-                let $id = BodyId::from_bits(body);
-                $body
-            })
-        }
-    };
+/// A command on one body (the shared shape of every `rbBody_*` command).
+unsafe fn body_command(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    f: impl FnOnce(&mut RbWorld, BodyId) -> anyhow::Result<()>,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        f(w, BodyId::from_bits(body))
+    })
 }
 
-body_command!(
-    /// Teleport the body origin (velocities kept).
-    rbBody_SetTransform(transform: RbTransform) => |w, id| {
+/// Teleport the body origin (velocities kept).
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_SetTransform(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    transform: RbTransform,
+) -> RbResult {
+    body_command(world, body, |w, id| {
         let t = w.transform_in(transform);
         w.world.body_set_transform(id, t)
-    }
-);
-body_command!(
-    rbBody_SetLinearVelocity(v: RbVec3) => |w, id| {
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_SetLinearVelocity(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    v: RbVec3,
+) -> RbResult {
+    body_command(world, body, |w, id| {
         let v = w.coords.linear_in(v.a());
         w.world.body_set_linear_velocity(id, v)
-    }
-);
-body_command!(
-    rbBody_SetAngularVelocity(v: RbVec3) => |w, id| {
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_SetAngularVelocity(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    v: RbVec3,
+) -> RbResult {
+    body_command(world, body, |w, id| {
         let v = w.coords.angular_velocity_in(v.a());
         w.world.body_set_angular_velocity(id, v)
-    }
-);
-body_command!(
-    /// A force at a world point for the next step.
-    rbBody_ApplyForce(force: RbVec3, point: RbVec3, wake: bool) => |w, id| {
-        let (f, p) = (w.coords.linear_in(force.a()), w.coords.position_in(point.a()));
+    })
+}
+
+/// A force at a world point for the next step.
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_ApplyForce(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    force: RbVec3,
+    point: RbVec3,
+    wake: bool,
+) -> RbResult {
+    body_command(world, body, |w, id| {
+        let (f, p) = (
+            w.coords.linear_in(force.a()),
+            w.coords.position_in(point.a()),
+        );
         w.world.body_apply_force(id, f, p, wake)
-    }
-);
-body_command!(
-    rbBody_ApplyForceToCenter(force: RbVec3, wake: bool) => |w, id| {
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_ApplyForceToCenter(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    force: RbVec3,
+    wake: bool,
+) -> RbResult {
+    body_command(world, body, |w, id| {
         let f = w.coords.linear_in(force.a());
         w.world.body_apply_force_to_center(id, f, wake)
-    }
-);
-body_command!(
-    rbBody_ApplyTorque(torque: RbVec3, wake: bool) => |w, id| {
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_ApplyTorque(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    torque: RbVec3,
+    wake: bool,
+) -> RbResult {
+    body_command(world, body, |w, id| {
         let t = w.coords.angular_in(torque.a());
         w.world.body_apply_torque(id, t, wake)
-    }
-);
-body_command!(
-    rbBody_ApplyLinearImpulse(impulse: RbVec3, point: RbVec3, wake: bool) => |w, id| {
-        let (j, p) = (w.coords.linear_in(impulse.a()), w.coords.position_in(point.a()));
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_ApplyLinearImpulse(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    impulse: RbVec3,
+    point: RbVec3,
+    wake: bool,
+) -> RbResult {
+    body_command(world, body, |w, id| {
+        let (j, p) = (
+            w.coords.linear_in(impulse.a()),
+            w.coords.position_in(point.a()),
+        );
         w.world.body_apply_linear_impulse(id, j, p, wake)
-    }
-);
-body_command!(
-    rbBody_ApplyLinearImpulseToCenter(impulse: RbVec3, wake: bool) => |w, id| {
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_ApplyLinearImpulseToCenter(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    impulse: RbVec3,
+    wake: bool,
+) -> RbResult {
+    body_command(world, body, |w, id| {
         let j = w.coords.linear_in(impulse.a());
         w.world.body_apply_linear_impulse_to_center(id, j, wake)
-    }
-);
-body_command!(
-    rbBody_ApplyAngularImpulse(impulse: RbVec3, wake: bool) => |w, id| {
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_ApplyAngularImpulse(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    impulse: RbVec3,
+    wake: bool,
+) -> RbResult {
+    body_command(world, body, |w, id| {
         let l = w.coords.angular_in(impulse.a());
         w.world.body_apply_angular_impulse(id, l, wake)
-    }
-);
-body_command!(
-    rbBody_SetAwake(awake: bool) => |w, id| w.world.body_set_awake(id, awake)
-);
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_SetAwake(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    awake: bool,
+) -> RbResult {
+    body_command(world, body, |w, id| w.world.body_set_awake(id, awake))
+}
 
 // ----- shapes ----------------------------------------------------------------
 
