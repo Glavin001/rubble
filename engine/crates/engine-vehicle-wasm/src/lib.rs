@@ -635,6 +635,7 @@ impl RigidStep {
             wheel_count: wheels,
             soft,
             command_count: 0,
+            explosion_count: 0,
             // counts[18]: bit 0 CCD bodies, bit 1 kinematic bodies, bit 2 impulse
             // records this step; counts[19] projectiles, counts[20] characters,
             // counts[21] queries.

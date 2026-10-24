@@ -223,6 +223,15 @@ void applyCommandRun(uint first, uint n, uint body, float dt)
             b.angularVel = dq.w < 0.0 ? -w : w;
             wakeBody(b);
         }
+        else if (c.op == CMD_DAMP && b.invMass > 0.0)
+        {
+            b.linearVel = b.linearVel * c.f0.w + c.f0.xyz;
+            b.angularVel = b.angularVel * c.f1.x;
+        }
+        else if (c.op == CMD_SET_LOCKS)
+        {
+            b.flags = (b.flags & ~BODY_LOCK_MASK) | ((asuint(c.f0.x) << BODY_LOCK_SHIFT) & BODY_LOCK_MASK);
+        }
         else if (c.op == CMD_SET_MASS_FRAME)
         {
             // The body origin stays put: the solver pose moves to the new
@@ -803,7 +812,8 @@ bool collidersFilteredOut(uint i, uint j)
     return ((fa & 0xFFFFu) & (fb >> 16)) == 0u || ((fb & 0xFFFFu) & (fa >> 16)) == 0u;
 }
 
-uint materialIndex(Collider c) { return c.material & 0xFFFFu; }
+// Bits 12..15 are shape flags (COLLIDER_CONTACT_EVENTS and friends).
+uint materialIndex(Collider c) { return c.material & 0x0FFFu; }
 
 // Look-ahead pairs are tested with their relative sweep: each box is swept by
 // its own v·h for the broadphase, so pieces carried along together (debris in
@@ -5974,6 +5984,244 @@ void recompute_inertia(uint3 tid : SV_DispatchThreadID)
         I.z > 1e-8 ? 1.0 / I.z : 0.0);
     // Shift body origin note: we keep authoring frame; COM offset absorbed into colliders later if needed.
     gBodies[body] = b;
+}
+
+// ----- contact events (P4) ----------------------------------------------------
+// Opt-in pass (hosts add it while any shape reports contact events), right after
+// contact persistence. One thread per manifold: a pair with a flagged collider
+// whose deepest contact touches this step (gap within the contact offset, or
+// closed by its approach within the step) is listed with
+// that point, the A-to-B normal and the closing speed there from the step-start
+// velocities, before the solve. Reads physics state only; the host diffs the
+// set step to step into begin, end and hit events (engine-world contacts.rs).
+static const uint COLLIDER_CONTACT_EVENTS = 0x1000u;
+static const uint COLLIDER_SENSOR = 0x4000u;
+// After the continuous-collision region (engine-schema CONTACT_EVENT_BASE).
+static const uint CONTACT_EVENT_BASE = CCD_PAIR_BASE + 2u * CCD_PAIR_CAP;
+static const uint CONTACT_EVENT_CAP = 2048u;
+static const uint CONTACT_EVENT_WORDS = 12u;
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void contact_events(uint3 tid : SV_DispatchThreadID)
+{
+    uint mi = dispatchIndex(tid);
+    if (mi >= ALOAD(gCounters[0].manifoldCount)) return;
+    Manifold mf = gManifolds[mi];
+    if (mf.contactCount == 0u) return;
+    Collider ca = gColliders[mf.colliderA];
+    Collider cb = gColliders[mf.colliderB];
+    uint flags = ca.material | cb.material;
+    if ((flags & (COLLIDER_CONTACT_EVENTS | COLLIDER_SENSOR)) == 0u) return;
+    bool sensor = (flags & COLLIDER_SENSOR) != 0u;
+    if (sensor)
+    {
+        // Sensors have no response: the pair leaves the solve and the islands
+        // (the CSR graph skips empty manifolds and solver pairs).
+        gManifolds[mi].contactCount = 0u;
+#if defined(ENGINE_PERSISTENT_CONTACTS)
+        gSolverPairs[mi].countAndSphere &= ~SOLVER_COUNT_MASK;
+#endif
+    }
+    float best = 3.402823e38;
+    Contact deepest = (Contact)0;
+    for (uint k = 0u; k < mf.contactCount; k++)
+    {
+        // Absolute index after persistence; READ_CONTACT is the storage mode's.
+        Contact c = READ_CONTACT(mf.contactStart + k);
+        if (c.alive == 0u) continue;
+        float gap = contactGapMode() ? c.c0N : c.c0N - PARAMS.contactOffset;
+        if (gap < best)
+        {
+            best = gap;
+            deepest = c;
+        }
+    }
+    if (best > 3.0e38) return;
+    BodyState ba = gBodies[ca.body];
+    BodyState bb = gBodies[cb.body];
+    float3 rA = quatRotate(ba.orientation, deepest.anchorA);
+    float3 rB = quatRotate(bb.orientation, deepest.anchorB);
+    float3 vA = ba.linearVel + cross(ba.angularVel, rA);
+    float3 vB = bb.linearVel + cross(bb.angularVel, rB);
+    float3 n = mf.normal;
+    float approach = dot(vA - vB, n);
+    // Touching this step: within the contact offset, or closing that gap
+    // within the step (a fast or continuous-collision impact reports its begin
+    // on the impact step, at the speed before the solve).
+    if (best > PARAMS.contactOffset + max(approach, 0.0) * PARAMS.dt) return;
+    float3 point = 0.5 * (ba.position + rA + bb.position + rB);
+    uint slot;
+    AADD3(gScratchAtomics[CONTACT_EVENT_BASE], 1u, slot);
+    if (slot >= CONTACT_EVENT_CAP) return;
+    uint w = CONTACT_EVENT_BASE + 4u + CONTACT_EVENT_WORDS * slot;
+    ASTORE(gScratchAtomics[w + 0u], mf.colliderA);
+    ASTORE(gScratchAtomics[w + 1u], mf.colliderB);
+    ASTORE(gScratchAtomics[w + 2u], asuint(approach));
+    ASTORE(gScratchAtomics[w + 3u], sensor ? 1u : 0u);
+    ASTORE(gScratchAtomics[w + 4u], asuint(point.x));
+    ASTORE(gScratchAtomics[w + 5u], asuint(point.y));
+    ASTORE(gScratchAtomics[w + 6u], asuint(point.z));
+    ASTORE(gScratchAtomics[w + 8u], asuint(n.x));
+    ASTORE(gScratchAtomics[w + 9u], asuint(n.y));
+    ASTORE(gScratchAtomics[w + 10u], asuint(n.z));
+}
+
+// ----- overlap queries (P5) and explosions -------------------------------------
+// Fixed regions after the contact events (engine-schema QUERY_* / EXPLODE_*).
+static const uint QUERY_BASE = CONTACT_EVENT_BASE + 4u + CONTACT_EVENT_WORDS * CONTACT_EVENT_CAP;
+static const uint QUERY_CAP = 32u;
+static const uint QUERY_RESULT_BASE = QUERY_BASE + 4u + 8u * QUERY_CAP;
+static const uint QUERY_RESULT_CAP = 8192u;
+static const uint EXPLODE_BASE = QUERY_RESULT_BASE + 2u * QUERY_RESULT_CAP;
+
+// A collider's filter: category bits in the low half, mask bits in the high
+// half of `generation`; 0 = everything.
+uint colliderCategories(Collider c) { return c.generation == 0u ? 0xFFFFu : (c.generation & 0xFFFFu); }
+uint colliderMask(Collider c) { return c.generation == 0u ? 0xFFFFu : (c.generation >> 16u); }
+
+// Shapes whose bounds overlap each queued box (Box3D b3World_OverlapAABB,
+// with its query filter; sensors are not reported). One thread per collider,
+// after build_aabbs refreshed the bounds for the step's final poses. Reads
+// physics state only.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void overlap_query(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (i >= gCounters[0].colliderCount) return;
+    Collider col = gColliders[i];
+    if ((col.material & COLLIDER_SENSOR) != 0u) return;
+    if (col.shape == SHAPE_PLANE) return;
+    Aabb box = gAabbs[HOST_S(1) + i];
+    uint n = min(ALOAD(gScratchAtomics[QUERY_BASE]), QUERY_CAP);
+    for (uint q = 0u; q < n; q++)
+    {
+        uint w = QUERY_BASE + 4u + 8u * q;
+        float3 mn = float3(asfloat(ALOAD(gScratchAtomics[w])), asfloat(ALOAD(gScratchAtomics[w + 1u])),
+                           asfloat(ALOAD(gScratchAtomics[w + 2u])));
+        uint categories = ALOAD(gScratchAtomics[w + 3u]);
+        float3 mx = float3(asfloat(ALOAD(gScratchAtomics[w + 4u])), asfloat(ALOAD(gScratchAtomics[w + 5u])),
+                           asfloat(ALOAD(gScratchAtomics[w + 6u])));
+        uint mask = ALOAD(gScratchAtomics[w + 7u]);
+        if ((colliderCategories(col) & mask) == 0u || (colliderMask(col) & categories) == 0u) continue;
+        if (any(box.mx < mn) || any(box.mn > mx)) continue;
+        uint slot;
+        AADD3(gScratchAtomics[QUERY_BASE + 1u], 1u, slot);
+        if (slot >= QUERY_RESULT_CAP) return;
+        ASTORE(gScratchAtomics[QUERY_RESULT_BASE + 2u * slot], q);
+        ASTORE(gScratchAtomics[QUERY_RESULT_BASE + 2u * slot + 1u], i);
+    }
+}
+
+// Radial impulses (Box3D b3World_Explode), at the start of a step that has
+// them: every collider of a dynamic body within radius + falloff of a queued
+// explosion takes impulse-per-area x its cross-section (pi r^2 of its bounding
+// radius), full strength inside the radius and fading linearly to zero over
+// the falloff, pushed away from the centre at the collider's centre. The body
+// wakes. One thread per body (colliders are sorted by body).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void explode(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (i >= gCounters[0].bodyCount) return;
+    BodyState b = gBodies[i];
+    if ((b.flags & BODY_DYNAMIC) == 0u || b.invMass <= 0.0 || bodyIsKinematic(b)) return;
+    uint n = min(ALOAD(gScratchAtomics[EXPLODE_BASE]), 16u);
+    bool hit = false;
+    uint count = gCounters[0].colliderCount;
+    for (uint c = firstColliderOfBody(i); c < count && gColliders[c].body == i; c++)
+    {
+        Collider col = gColliders[c];
+        if ((col.material & COLLIDER_SENSOR) != 0u) continue;
+        float3 centre = b.position + quatRotate(b.orientation, col.localPos);
+        float r = col.params.w;
+        for (uint e = 0u; e < n; e++)
+        {
+            uint w = EXPLODE_BASE + 4u + 8u * e;
+            float3 at = float3(asfloat(ALOAD(gScratchAtomics[w])), asfloat(ALOAD(gScratchAtomics[w + 1u])),
+                               asfloat(ALOAD(gScratchAtomics[w + 2u])));
+            float radius = asfloat(ALOAD(gScratchAtomics[w + 3u]));
+            float falloff = asfloat(ALOAD(gScratchAtomics[w + 4u]));
+            float perArea = asfloat(ALOAD(gScratchAtomics[w + 5u]));
+            uint mask = ALOAD(gScratchAtomics[w + 6u]);
+            if ((colliderCategories(col) & mask) == 0u) continue;
+            float3 off = centre - at;
+            float dist = length(off);
+            float d = max(dist - r, 0.0);
+            float scale = d <= radius ? 1.0 : (falloff > 0.0 ? max(0.0, 1.0 - (d - radius) / falloff) : 0.0);
+            if (scale <= 0.0) continue;
+            float3 dir = dist > 1e-6 ? off / dist : float3(0.0, 1.0, 0.0);
+            float3 j = dir * (scale * perArea * 3.14159265 * r * r);
+            b.linearVel = b.linearVel + j * b.invMass;
+            b.angularVel = b.angularVel + invInertiaWorld(b, cross(centre - b.position, j));
+            hit = true;
+        }
+    }
+    if (!hit) return;
+    b.flags = (b.flags & ~BODY_SLEEPING) | BODY_AWAKE;
+    b.sleepTimer = 0.0;
+    gBodies[i].linearVel = b.linearVel;
+    gBodies[i].angularVel = b.angularVel;
+    gBodies[i].flags = b.flags;
+    gBodies[i].sleepTimer = b.sleepTimer;
+}
+// ----- motion locks (P3) ------------------------------------------------------
+// Scheduled only while some body has locks (World), so no other step changes:
+// lock_predict after predict_bodies, lock_project after the solve. Each
+// projects a locked body's pose onto its free axes, measured from the step
+// start (initialPos / initialRot): the locked components of its displacement
+// and of its rotation (world axes) are removed. The prediction and the
+// inertial target the solve pulls toward respect the locks; the final
+// projection makes the locked axes exact at the end of every step.
+uint bodyLocks(BodyState b) { return (b.flags & BODY_LOCK_MASK) >> BODY_LOCK_SHIFT; }
+float3 lockKeep(uint bits) { return float3((bits & 1u) == 0u ? 1.0 : 0.0, (bits & 2u) == 0u ? 1.0 : 0.0, (bits & 4u) == 0u ? 1.0 : 0.0); }
+
+float3 lockPosition(float3 x, float3 x0, uint locks) { return x0 + (x - x0) * lockKeep(locks); }
+
+float4 lockRotation(float4 q, float4 q0, uint locks)
+{
+    if (dot(q, q0) < 0.0) q = -q;
+    float4 dq = quatMul(q, quatConjugate(q0)); // world-frame rotation since step start
+    float3 v = dq.xyz * lockKeep(locks >> 3u);
+    float w = sqrt(max(1.0 - dot(v, v), 0.0));
+    return quatNormalize(quatMul(float4(v, w), q0));
+}
+
+bool lockedBody(BodyState b) { return bodyIsDynamic(b) && !bodyIsSleeping(b) && bodyLocks(b) != 0u; }
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void lock_predict(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (i >= gCounters[0].bodyCount) return;
+    BodyState b = gBodies[i];
+    if (!lockedBody(b)) return;
+    uint locks = bodyLocks(b);
+    gBodies[i].position = lockPosition(b.position, b.initialPos, locks);
+    gBodies[i].orientation = lockRotation(b.orientation, b.initialRot, locks);
+    // The inertial target predict_bodies left in gAabbs[i].
+    Aabb box = gAabbs[i];
+    float4 target = lockRotation(float4(box.mx, box._pad0), b.initialRot, locks);
+    box.mn = lockPosition(box.mn, b.initialPos, locks);
+    box.mx = target.xyz;
+    box._pad0 = target.w;
+    gAabbs[i] = box;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void lock_project(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (i >= gCounters[0].bodyCount) return;
+    BodyState b = gBodies[i];
+    if (!lockedBody(b)) return;
+    uint locks = bodyLocks(b);
+    gBodies[i].position = lockPosition(b.position, b.initialPos, locks);
+    gBodies[i].orientation = lockRotation(b.orientation, b.initialRot, locks);
 }
 
 #include "ccd_step.slang"
