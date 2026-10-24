@@ -1,7 +1,7 @@
 use anyhow::Result;
-use engine_slang_build::{compile, compile_with_defines, find_slangc, SlangTarget};
+use engine_slang_build::{compile, compile_with_defines, find_slangc, par_map, SlangTarget};
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Same world_step entries as `engine-metal`, minus `broadphase_grid` (thin wrapper;
 /// slangc SIGSEGV on SPIR-V — runtime aliases to `broadphase_query`).
@@ -145,6 +145,10 @@ const WORLD_ENTRIES: &[&str] = &[
     "soft_wake",
     "soft_begin",
     "soft_bounds",
+    "soft_tri_planes",
+    "soft_pairs",
+    "soft_velocity",
+    "soft_contact_lists",
     "soft_collide_nodes",
     "soft_collide_tris",
     "soft_primal",
@@ -207,15 +211,73 @@ fn source_for(root: &std::path::Path, entry: &str) -> PathBuf {
     }
 }
 
+/// What a compile leaves besides the files in OUT_DIR: the `cargo:warning` lines and
+/// the entries whose WGSL compiled (for `direct_wgsl.rs`, which names OUT_DIR paths).
+struct Compiled {
+    warnings: Vec<String>,
+    wgsl_ok: Vec<String>,
+}
+
 fn main() -> Result<()> {
     engine_slang_build::report_slangc_for_cargo();
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
     let slang_root = manifest.join("../../slang");
-    let out = PathBuf::from(env::var("OUT_DIR")?).join("spirv");
-    std::fs::create_dir_all(&out)?;
+    let out_dir = PathBuf::from(env::var("OUT_DIR")?);
     println!("cargo:rerun-if-changed={}", slang_root.display());
+    println!("cargo:rerun-if-env-changed=RUBBLE_SLANG_CACHE");
     let _ = find_slangc()?;
 
+    // `RUBBLE_SLANG_CACHE`: a directory keeping these outputs between builds, keyed by
+    // everything they depend on (see `cache_key`). The SPIR-V and WGSL do not depend on
+    // the cargo target, so the host and wasm32 builds share an entry.
+    let cache = match env::var_os("RUBBLE_SLANG_CACHE") {
+        Some(dir) => Some(PathBuf::from(dir).join(cache_key(&manifest, &slang_root)?)),
+        None => None,
+    };
+    let compiled = match cache.as_deref().filter(|d| d.join("wgsl_ok.txt").is_file()) {
+        Some(hit) => {
+            for sub in ["spirv", "wgsl"] {
+                copy_dir(&hit.join(sub), &out_dir.join(sub))?;
+            }
+            std::fs::copy(
+                hit.join("spirv_entries.txt"),
+                out_dir.join("spirv_entries.txt"),
+            )?;
+            Compiled {
+                warnings: read_records(&hit.join("warnings.txt"))?,
+                wgsl_ok: read_records(&hit.join("wgsl_ok.txt"))?,
+            }
+        }
+        None => {
+            let compiled = compile_all(&slang_root, &out_dir)?;
+            if let Some(dir) = &cache {
+                store(dir, &out_dir, &compiled)?;
+            }
+            compiled
+        }
+    };
+    for w in &compiled.warnings {
+        println!("cargo:warning={w}");
+    }
+    let wgsl_dir = out_dir.join("wgsl");
+    let mut table = String::from("pub static DIRECT_WGSL: &[(&str, &str)] = &[\n");
+    for entry in &compiled.wgsl_ok {
+        table.push_str(&format!(
+            "    ({entry:?}, include_str!({:?})),\n",
+            wgsl_dir.join(format!("{entry}.wgsl")).display().to_string()
+        ));
+    }
+    table.push_str("];\n");
+    std::fs::write(out_dir.join("direct_wgsl.rs"), table)?;
+    Ok(())
+}
+
+/// Every slangc compile of this crate into `out_dir` (`spirv/`, `spirv_entries.txt`,
+/// `wgsl/`).
+fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
+    let out = out_dir.join("spirv");
+    std::fs::create_dir_all(&out)?;
+    let mut warnings = Vec::new();
     let abi = slang_root.join("kernels/abi_probe.slang");
     compile(
         &abi,
@@ -227,74 +289,73 @@ fn main() -> Result<()> {
 
     let mut ok = vec!["abi_roundtrip".to_string()];
     let mut failed = Vec::new();
-    for entry in WORLD_ENTRIES {
+    let spirv = par_map(WORLD_ENTRIES, |entry| {
         let dest = out.join(format!("{entry}.spv"));
-        match compile(
-            &source_for(&slang_root, entry),
+        compile(
+            &source_for(slang_root, entry),
             entry,
             SlangTarget::Spirv,
             &dest,
             &[],
-        ) {
+        )
+    });
+    for (entry, result) in WORLD_ENTRIES.iter().zip(spirv) {
+        match result {
             Ok(()) => ok.push((*entry).to_string()),
             Err(e) => {
-                println!("cargo:warning=SPIR-V skip {entry}: {e}");
+                warnings.push(format!("SPIR-V skip {entry}: {e}"));
                 failed.push((*entry).to_string());
             }
         }
     }
-    // Alias for phase-graph name used by Metal.
+    // Alias for phase-graph name used by Metal. Not conditional on the alias being
+    // absent: a reused OUT_DIR already holds it, and the entry list must not change.
     let query = out.join("broadphase_query.spv");
     let grid = out.join("broadphase_grid.spv");
-    if query.is_file() && !grid.is_file() {
+    if query.is_file() {
         std::fs::copy(&query, &grid)?;
         ok.push("broadphase_grid".to_string());
     }
 
-    let list_path = PathBuf::from(env::var("OUT_DIR")?).join("spirv_entries.txt");
-    std::fs::write(&list_path, ok.join("\n") + "\n")?;
+    std::fs::write(out_dir.join("spirv_entries.txt"), ok.join("\n") + "\n")?;
     if !failed.is_empty() {
-        println!(
-            "cargo:warning=SPIR-V failed for {} entries: {}",
+        warnings.push(format!(
+            "SPIR-V failed for {} entries: {}",
             failed.len(),
             failed.join(", ")
-        );
+        ));
     }
 
     // Direct Slang → WGSL. `ENGINE_WGSL` switches atomic slots to Atomic<uint>
     // (physics/atomics.slang); the WGSL is embedded so wasm32 needs no filesystem.
-    let wgsl_dir = PathBuf::from(env::var("OUT_DIR")?).join("wgsl");
+    let wgsl_dir = out_dir.join("wgsl");
     std::fs::create_dir_all(&wgsl_dir)?;
-    let mut table = String::from("pub static DIRECT_WGSL: &[(&str, &str)] = &[\n");
+    let mut wgsl_ok = Vec::new();
     let mut wgsl_failed = Vec::new();
-    for entry in WORLD_ENTRIES
+    let wgsl_entries: Vec<&str> = WORLD_ENTRIES
         .iter()
-        .chain(std::iter::once(&"broadphase_grid"))
-    {
-        let dest = wgsl_dir.join(format!("{entry}.wgsl"));
-        match compile_with_defines(
-            &source_for(&slang_root, entry),
+        .copied()
+        .chain(std::iter::once("broadphase_grid"))
+        .collect();
+    let wgsl = par_map(&wgsl_entries, |entry| {
+        compile_with_defines(
+            &source_for(slang_root, entry),
             entry,
             SlangTarget::Wgsl,
-            &dest,
+            &wgsl_dir.join(format!("{entry}.wgsl")),
             &[],
             &[("ENGINE_WGSL", "1")],
-        ) {
-            Ok(()) => table.push_str(&format!(
-                "    ({entry:?}, include_str!({:?})),\n",
-                dest.display().to_string()
-            )),
+        )
+    });
+    for (entry, result) in wgsl_entries.iter().zip(wgsl) {
+        match result {
+            Ok(()) => wgsl_ok.push((*entry).to_string()),
             Err(e) => {
-                println!("cargo:warning=WGSL skip {entry}: {e}");
+                warnings.push(format!("WGSL skip {entry}: {e}"));
                 wgsl_failed.push(*entry);
             }
         }
     }
-    table.push_str("];\n");
-    std::fs::write(
-        PathBuf::from(env::var("OUT_DIR")?).join("direct_wgsl.rs"),
-        table,
-    )?;
     // Soft-body skinning: one standalone WGSL module, three entries.
     let skin = wgsl_dir.join("soft_skin.wgsl");
     let status = std::process::Command::new(find_slangc()?)
@@ -308,10 +369,91 @@ fn main() -> Result<()> {
         .status()?;
     anyhow::ensure!(status.success(), "slangc failed for soft_skin.slang");
     if !wgsl_failed.is_empty() {
-        println!(
-            "cargo:warning=direct WGSL failed: {}",
-            wgsl_failed.join(", ")
-        );
+        warnings.push(format!("direct WGSL failed: {}", wgsl_failed.join(", ")));
+    }
+    Ok(Compiled { warnings, wgsl_ok })
+}
+
+/// A hash of everything the outputs depend on: slangc's version, every file under
+/// `slang/` (path and bytes), this script and engine-slang-build (which pass the
+/// arguments). Equal keys mean slangc gets identical inputs, so a hit is the same bytes.
+fn cache_key(manifest: &Path, slang_root: &Path) -> Result<String> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let version = std::process::Command::new(find_slangc()?)
+        .arg("-version")
+        .output()?;
+    (version.stdout, version.stderr).hash(&mut h);
+    let mut files = Vec::new();
+    list_files(slang_root, &mut files)?;
+    files.sort();
+    for f in &files {
+        (f.strip_prefix(slang_root)?, std::fs::read(f)?).hash(&mut h);
+    }
+    for f in ["build.rs", "../engine-slang-build/src/lib.rs"] {
+        std::fs::read(manifest.join(f))?.hash(&mut h);
+    }
+    Ok(format!("engine-webgpu-{:016x}", h.finish()))
+}
+
+fn list_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            list_files(&path, files)?;
+        } else {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn copy_dir(from: &Path, to: &Path) -> Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        std::fs::copy(entry.path(), to.join(entry.file_name()))?;
+    }
+    Ok(())
+}
+
+/// Records are separated by U+001E, since a warning can span lines.
+fn read_records(path: &Path) -> Result<Vec<String>> {
+    let text = std::fs::read_to_string(path)?;
+    Ok(text
+        .split('\u{1e}')
+        .filter(|r| !r.is_empty())
+        .map(String::from)
+        .collect())
+}
+
+/// Write the entry under a temporary name and rename it, so a build that stops
+/// half way never leaves an entry that looks complete.
+fn store(dir: &Path, out_dir: &Path, compiled: &Compiled) -> Result<()> {
+    let tmp = dir.with_extension(format!("tmp{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    for sub in ["spirv", "wgsl"] {
+        copy_dir(&out_dir.join(sub), &tmp.join(sub))?;
+    }
+    std::fs::copy(
+        out_dir.join("spirv_entries.txt"),
+        tmp.join("spirv_entries.txt"),
+    )?;
+    std::fs::write(tmp.join("warnings.txt"), compiled.warnings.join("\u{1e}"))?;
+    std::fs::write(tmp.join("wgsl_ok.txt"), compiled.wgsl_ok.join("\u{1e}"))?;
+    if std::fs::rename(&tmp, dir).is_err() {
+        // Another build stored the same key first.
+        std::fs::remove_dir_all(&tmp)?;
+    }
+    // Keep only this key: entries for older slang/ trees would only grow the cache.
+    if let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) {
+        for entry in std::fs::read_dir(parent)? {
+            let entry = entry?;
+            let other = entry.file_name();
+            if other != name && other.to_string_lossy().starts_with("engine-webgpu-") {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
     }
     Ok(())
 }

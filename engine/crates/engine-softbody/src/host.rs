@@ -370,7 +370,8 @@ impl SoftHost {
         let mut rigid_parts = Vec::new();
         for part in &desc.rigid_parts {
             let o = part.center();
-            let mut b = BodyState::dynamic(place.apply(o), place.rotation, part.mass, part.inertia());
+            let mut b =
+                BodyState::dynamic(place.apply(o), place.rotation, part.mass, part.inertia());
             b.linear_vel = opts.velocity;
             b.initial_pos = b.position;
             b.initial_rot = b.orientation;
@@ -381,11 +382,20 @@ impl SoftHost {
                 .iter()
                 .map(|c| {
                     let (shape, params) = match c.shape {
-                        engine_vehicle::ShapeDesc::Box { half } => (ShapeType::Box, [half[0], half[1], half[2], Vec3::from_array(half).length()]),
-                        engine_vehicle::ShapeDesc::Sphere { radius } => (ShapeType::Sphere, [radius, 0.0, 0.0, radius]),
-                        engine_vehicle::ShapeDesc::Capsule { radius, half_length } => {
-                            (ShapeType::Capsule, [radius, half_length, 0.0, radius + half_length])
+                        engine_vehicle::ShapeDesc::Box { half } => (
+                            ShapeType::Box,
+                            [half[0], half[1], half[2], Vec3::from_array(half).length()],
+                        ),
+                        engine_vehicle::ShapeDesc::Sphere { radius } => {
+                            (ShapeType::Sphere, [radius, 0.0, 0.0, radius])
                         }
+                        engine_vehicle::ShapeDesc::Capsule {
+                            radius,
+                            half_length,
+                        } => (
+                            ShapeType::Capsule,
+                            [radius, half_length, 0.0, radius + half_length],
+                        ),
                     };
                     let mut col = Collider {
                         body,
@@ -398,7 +408,11 @@ impl SoftHost {
                         params,
                     };
                     // No contact with its own vehicle's nodes, core or parts: the joints hold it.
-                    engine_schema::convex::CollisionFilter { group, ..Default::default() }.apply(&mut col);
+                    engine_schema::convex::CollisionFilter {
+                        group,
+                        ..Default::default()
+                    }
+                    .apply(&mut col);
                     col
                 })
                 .collect();
@@ -408,7 +422,8 @@ impl SoftHost {
                 .iter()
                 .map(|a| {
                     let local = Vec3::from_array(desc.nodes[a.node as usize].position) - o;
-                    let jd = JointDesc::ball(body, first_body + a.node, local, Vec3::ZERO).with_break(a.break_force, a.break_torque);
+                    let jd = JointDesc::ball(body, first_body + a.node, local, Vec3::ZERO)
+                        .with_break(a.break_force, a.break_torque);
                     backend.joint_from_desc(&jd)
                 })
                 .collect();
@@ -524,9 +539,10 @@ impl SoftHost {
             | u32::from(st.breaking) * SOFT_BREAKING
             | u32::from(st.sleep_sync) * SOFT_SLEEP_SYNC
             | u32::from(c.contacts) * SOFT_CONTACTS
-            | u32::from(st.rigid_mode) * SOFT_RIGID_MODE;
+            | u32::from(st.rigid_mode) * SOFT_RIGID_MODE
+            | u32::from(st.bdf2) * SOFT_BDF2;
         let list_count: u32 = self.list_len();
-        let header: [Slot; 9] = [
+        let header: [Slot; 10] = [
             [c.bodies, c.beams, c.colors, list_count],
             [l.body_base, l.beam_base, l.list_base, l.adj_base],
             [l.color_base, l.group_base, c.groups + 1, flags],
@@ -550,7 +566,13 @@ impl SoftHost {
                 st.contact_friction.to_bits(),
                 l.tri_rest_base,
             ],
-            [l.body_color_base, l.body_color_stride, 0, 0],
+            [
+                l.body_color_base,
+                l.body_color_stride,
+                l.tri_plane_base,
+                l.body_pair_base,
+            ],
+            [l.bdf_base, l.contact_list_base, 0, 0],
         ];
         backend.write_soft_slots(0, &header);
     }
@@ -575,8 +597,13 @@ impl SoftHost {
                     continue;
                 }
                 let start = adj.len() as u32;
+                // Beams as (beam, the other end's body) pairs: the solve loads the
+                // beam and the neighbour's position together.
                 for &b in &e.adjacency[i] {
+                    let (pa, pb) = e.beam_ends[b as usize];
+                    let other = if pa == i as u32 { pb } else { pa };
                     adj.push(e.first_beam + b);
+                    adj.push(e.first_body + other);
                 }
                 for &t in &e.tri_adjacency[i] {
                     adj.push(e.first_tri + t);

@@ -602,6 +602,30 @@ and `BUDGET_SPLIT=1` adds GPU time per kernel (`?gputime`, `world.profileStep()`
 | Traffic, 20 cars (most soft, crashing) | 10 | 6–10 | 86–100% real time at 60 fps |
 | Traffic, 100 cars | 12.5 | 7–9.5 | 67% real time |
 
+After s21 (lane-split sweep, triangle planes, tight promotion), Chrome, 240 Hz × 10:
+
+| Scene | ms / step | GPU ms / step | Notes |
+|---|---|---|---|
+| Yard, player driving | 1.9–2.1 | 2.2 | 120 fps fits: 2 steps + 1.4 ms render at 1728×1000 @2× |
+| Traffic derby, 20 cars (piles, all soft) | 5.5 | 5.2 | 100% real time at 60 fps |
+| Traffic derby, 100 cars (all soft) | 5.9 | 6.3 | 75–80% real time |
+| Traffic cruising, 100 cars (`ai=cruise`) | 5.4 | 4.7 | 41 of 100 rigid |
+| Parked, 100 cars (`ai=0`) | 2.9 | 3.1 | 95 rigid and asleep; 5 rest against blocks |
+
+After s22 (one soft pass per iteration, pair lists), Chrome, 240 Hz × 10, GPU ms / step:
+
+| Scene | ms / step | GPU ms / step |
+|---|---|---|
+| One soft car into a wall | 2.1 | 2.3 |
+| One always-soft car driving (`rigid=0`) | 2.2 | 2.6 |
+| Yard, player driving | 1.9 | 2.3 |
+| Traffic cruising, 100 cars | 4.7 | 3.5 |
+| Traffic derby, 100 cars | 4.7 | 4.4 |
+| Parked, 100 cars | 2.8 | 3.0 |
+
+Before s22, GPU time per kernel for 100 cruising cars was led by `vehicle_iterate` (1.0 ms), the
+particle sweep (0.9 ms), node collision (0.7 ms) and the rigid colour solve (0.5 ms).
+
 Traffic still varies run to run with the AI and the crashes. The slowest soft car's
 sweep sets each iteration's time, about 0.2 ms, with `vehicle_iterate`, rigid primal
 and node collision behind it.

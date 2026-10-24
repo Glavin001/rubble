@@ -85,7 +85,8 @@ const CHECKS = {
   // Frame budget (opt-in: BUDGET=1): physics ms per step at the fine and coarse
   // rates, rendering ms per frame, in the yard after the cars have settled.
   ...Object.fromEntries([['budget_240x10', 'scene=yard&hz=240&iters=10'], ['budget_60x8', 'scene=yard&hz=60&iters=8'], ['budget_yard_drive', 'scene=yard&drive=1'],
-    ['budget_traffic20', 'scene=traffic&cars=20'], ['budget_traffic50', 'scene=traffic&cars=50'], ['budget_traffic100', 'scene=traffic&cars=100']].map(([k, q]) => [k, {
+    ['budget_one_wall', 'scene=wall'], ['budget_one_soft_drive', 'scene=yard&rigid=0&drive=1'],
+    ['budget_parked100', 'scene=traffic&cars=100&ai=0'], ['budget_cruise100', 'scene=traffic&cars=100&ai=cruise'], ['budget_traffic20', 'scene=traffic&cars=20'], ['budget_traffic50', 'scene=traffic&cars=50'], ['budget_traffic100', 'scene=traffic&cars=100']].map(([k, q]) => [k, {
     query: process.env.BUDGET_SPLIT ? q + '&gputime' : q,
     optIn: 'BUDGET',
     run: async (page) => {
@@ -94,6 +95,7 @@ const CHECKS = {
       await page.eval(`window.__step(240, ${input})`);
       const step = await page.eval(`(async () => { const t = performance.now(); await window.__step(240, ${input}); return (performance.now() - t) / 240; })()`);
       const render = await page.eval(`window.__renderBench(60)`);
+      if (process.env.BUDGET_SPLIT) console.log(q, 'skin ms/frame', (await page.eval(`window.__skinBench(60)`)).toFixed(2), 'render ms/frame', render.toFixed(2));
       const info = await page.eval(`JSON.stringify({ counts: Array.from(window.__world.lastCounts), h: window.__world.dispatchHistogram() })`);
       if (process.env.BUDGET_VERBOSE) console.log(q, info);
       const live = await page.eval(`window.__live(4000)`);
@@ -109,15 +111,32 @@ const CHECKS = {
           for (let r = 0; r < 8; r++) { const p = await w.profileStep(); for (const k in p) acc[k] = (acc[k] || 0) + p[k] / 8; }
           const tot = Object.values(acc).reduce((a, b) => a + b, 0);
           out.gpu = tot.toFixed(2);
-          out.top = Object.entries(acc).sort((a, b) => b[1] - a[1]).slice(0, 14).map(([k, v]) => k + ' ' + v.toFixed(3)).join(', ');
+          out.top = Object.entries(acc).sort((a, b) => b[1] - a[1]).slice(0, ${Number(process.env.BUDGET_TOP || 14)}).map(([k, v]) => k + ' ' + v.toFixed(3)).join(', ');
           return JSON.stringify(out);
         })()`);
         console.log(q, 'split', split);
       }
       const modes = await page.eval(`window.__world.readSoftModes().then((m) => Array.from(m).join(''))`);
       console.log(q, 'modes', modes);
+      const awake = await page.eval(`window.__step(1).then((r) => JSON.stringify({ awake: r.counters && r.counters.awake, bodies: window.__world.bodyCount, coreSleep: window.__world.soft.entries.filter((e) => e.core).length }))`);
+      console.log(q, 'awake', awake);
       console.log(q, 'cpu encode ms/step', cpu[0].toFixed(3), 'finish+submit ms/64', cpu[1].toFixed(2));
       return { ok: true, msg: `${q}: physics ${step.toFixed(2)} ms/step, render ${render.toFixed(2)} ms/frame; live ${live.fps.toFixed(0)} fps, ${(live.realTime * 100).toFixed(0)}% real time` };
+    },
+  }])),
+  // Rigid-mode diagnosis (opt-in: DIAG=1): rigid cars in traffic as settings change.
+  ...Object.fromEntries([['diag_rigid', 'scene=traffic&cars=20'], ['diag_rigid_parked', 'scene=traffic&cars=20&ai=0']].map(([k, q]) => [k, {
+    query: q,
+    optIn: 'DIAG',
+    run: async (page) => {
+      const rigid = () => page.eval(`window.__world.readSoftModes().then((m) => Array.from(m).filter((x) => x === 1).length)`);
+      const out = [];
+      await page.step(480); out.push('base ' + await rigid());
+      await page.eval(`window.__world.setSoftSettings({ plasticity: false })`);
+      await page.step(480); out.push('no plasticity ' + await rigid());
+      await page.eval(`window.__world.setSoftSettings({ plasticity: true, contacts: false })`);
+      await page.step(480); out.push('no soft contacts ' + await rigid());
+      return { ok: true, msg: out.join(', ') };
     },
   }])),
   // The limbo bar shears the roof off: a piece-detached event names it.
@@ -239,6 +258,8 @@ const CHECKS = {
     },
   },
 };
+// VIEW=WxHxDPR (default 1280x720x1): e.g. VIEW=1728x1000x2 for a Retina laptop window.
+const [VIEW_W, VIEW_H, VIEW_DPR] = (process.env.VIEW || '1280x720x1').split('x').map(Number);
 const names = only.length ? only : Object.keys(CHECKS).filter((k) => !CHECKS[k].optIn || process.env[CHECKS[k].optIn]);
 
 const TYPES = { '.html': 'text/html', '.mjs': 'text/javascript', '.js': 'text/javascript', '.json': 'application/json', '.wgsl': 'text/plain', '.wasm': 'application/wasm' };
@@ -256,7 +277,7 @@ const profile = mkdtempSync(join(tmpdir(), 'softbody-chrome-'));
 const debugPort = 9300 + Math.floor(Math.random() * 500);
 const chrome = spawn(CHROME, [
   '--headless=new', `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profile}`,
-  '--enable-unsafe-webgpu', ...(process.env.BUDGET_SPLIT ? ['--enable-webgpu-developer-features'] : []), '--window-size=1280,720', '--no-first-run', '--no-default-browser-check',
+  '--enable-unsafe-webgpu', ...(process.env.BUDGET_SPLIT ? ['--enable-webgpu-developer-features'] : []), `--window-size=${VIEW_W},${VIEW_H}`, '--no-first-run', '--no-default-browser-check',
   '--disable-background-timer-throttling', '--disable-renderer-backgrounding', 'about:blank',
 ], { stdio: 'ignore' });
 const cleanup = () => { try { chrome.kill('SIGKILL'); } catch {} try { rmSync(profile, { recursive: true, force: true, maxRetries: 3 }); } catch {} };
@@ -284,7 +305,7 @@ const evaluate = async (expression) => {
   return r.result?.result?.value;
 };
 await send('Runtime.enable');
-await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 720, deviceScaleFactor: 1, mobile: false });
+await send('Emulation.setDeviceMetricsOverride', { width: VIEW_W, height: VIEW_H, deviceScaleFactor: VIEW_DPR, mobile: false });
 
 const page = {
   step: (n, input = null) => evaluate(`window.__step(${n}, ${JSON.stringify(input)})`),

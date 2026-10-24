@@ -11,6 +11,11 @@
 //   soft_skin_normals   per vertex: normalised sum of its triangles' normals and
 //                       the largest strain around it
 //
+// After the first run (SkinParams.skipSleeping), vertices whose frame particles
+// all sleep, and triangles of three such vertices, keep their last output: a
+// sleeping body has not moved. A host that moves a body must wake it (the
+// engine's own writes do).
+//
 // Records: binding (2 × uint4 per vertex: c, x, y, flags | coords xyz, rest
 // edge as float bits), rest position (float4 per vertex), triangle (uint4: a, b,
 // c, user), adjacency (vertex count + 1 starts, then triangle indices).
@@ -36,7 +41,9 @@ struct SkinParams
     uint vertices;
     uint triangles;
     float tearRatio; // frame stretch that tears (1.8)
-    float pad;
+    // 1: skip vertices whose frame particles all sleep (and triangles of three
+    // such), keeping the last frame's output; hosts set it after the first run.
+    uint skipSleeping;
 };
 
 [[vk::binding(0, 0)]] StructuredBuffer<BodyState> gBodies;
@@ -48,6 +55,7 @@ struct SkinParams
 [[vk::binding(6, 0)]] RWStructuredBuffer<float4> gSkinFace;  // normal, w = strain or −1 (torn)
 [[vk::binding(7, 0)]] RWStructuredBuffer<float4> gSkinNormal; // normal, w = max strain around
 [[vk::binding(8, 0)]] ConstantBuffer<SkinParams> gSkin;
+[[vk::binding(9, 0)]] RWStructuredBuffer<uint> gSkinAsleep; // per vertex, this frame
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -56,6 +64,11 @@ void soft_skin_vertices(uint3 tid : SV_DispatchThreadID)
     uint v = tid.x;
     if (v >= gSkin.vertices) return;
     uint4 b0 = gSkinBind[v * 2u];
+    // A sleeping body has not moved since it was last skinned.
+    bool asleep = gSkin.skipSleeping != 0u && (gBodies[b0.x].flags & 4u) != 0u
+        && (gBodies[b0.y].flags & 4u) != 0u && (gBodies[b0.z].flags & 4u) != 0u;
+    gSkinAsleep[v] = asleep ? 1u : 0u;
+    if (asleep) return;
     float4 b1 = asfloat(gSkinBind[v * 2u + 1u]);
     float3 c = gBodies[b0.x].position;
     float3 ex = gBodies[b0.y].position - c;
@@ -73,6 +86,7 @@ void soft_skin_faces(uint3 tid : SV_DispatchThreadID)
     uint t = tid.x;
     if (t >= gSkin.triangles) return;
     uint4 f = gSkinTris[t];
+    if (gSkinAsleep[f.x] != 0u && gSkinAsleep[f.y] != 0u && gSkinAsleep[f.z] != 0u) return;
     float4 a = gSkinPos[f.x];
     float4 b = gSkinPos[f.y];
     float4 c = gSkinPos[f.z];

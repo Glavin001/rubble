@@ -21,7 +21,11 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const HEADER_SLOTS: u32 = 9;
+pub const HEADER_SLOTS: u32 = 10;
+/// Slots per soft body in the pair list (a count and up to 31 bodies).
+pub const SOFT_PAIR_STRIDE: u32 = 8;
+/// Slots per particle in the contact list (a count and up to 15 contacts).
+pub const CONTACT_LIST_STRIDE: u32 = 4;
 /// Soft body record: [firstBody, particles, firstBeam, beams], [steer, group,
 /// core, ordinal base], [firstTri, tris, δ, 0], then rigid mode: [mode, quiet
 /// steps, flags | core joint count << 8, first core joint], the core's soft-mode
@@ -69,6 +73,8 @@ pub const BEAM_YIELDED: u32 = 1 << 7;
 pub const SOFT_PLASTICITY: u32 = 1;
 /// Quiet soft bodies ride their core rigidly (`SoftSettings::rigid_mode`).
 pub const SOFT_RIGID_MODE: u32 = 16;
+/// Particles integrate with BDF2 (`SoftSettings::bdf2`).
+pub const SOFT_BDF2: u32 = 32;
 pub const SOFT_BREAKING: u32 = 2;
 pub const SOFT_SLEEP_SYNC: u32 = 4;
 /// Node–triangle and triangle–obstacle contacts.
@@ -141,6 +147,20 @@ pub struct SoftLayout {
     /// per slot, `body_color_stride` slots per body (one workgroup per body).
     pub body_color_base: u32,
     pub body_color_stride: u32,
+    /// Per triangle, 2 slots written each step before node contacts: (unit normal,
+    /// area; 0 = torn or degenerate) and (first vertex, cull radius).
+    pub tri_plane_base: u32,
+    /// Per soft body, `SOFT_PAIR_STRIDE` slots written each step by `soft_pairs`:
+    /// a count, then the soft bodies (itself included, ascending) whose bounds
+    /// come within reach of its own (count `u32::MAX`: too many, walk them all).
+    pub body_pair_base: u32,
+    /// Per particle (ordinal): its position one step back (w = 1 when valid),
+    /// for BDF2.
+    pub bdf_base: u32,
+    /// Per particle (ordinal), `CONTACT_LIST_STRIDE` slots written each step by
+    /// `soft_contact_lists`: a count, then its soft contacts on the triangle side
+    /// (count `u32::MAX`: too many, walk its triangles).
+    pub contact_list_base: u32,
     pub total_slots: u32,
 }
 
@@ -152,8 +172,9 @@ impl SoftCapacity {
         let color_base = group_base + self.max_groups;
         let list_base = color_base + self.max_colors;
         let adj_base = list_base + self.max_particles;
-        // Every beam appears in the adjacency of both particles, every triangle in three.
-        let adj_slots = (2 * self.max_beams + 3 * self.max_triangles).div_ceil(4);
+        // Every beam appears in the adjacency of both particles (two words each:
+        // the beam and the other end), every triangle in three.
+        let adj_slots = (4 * self.max_beams + 3 * self.max_triangles).div_ceil(4);
         let cheb_base = adj_base + adj_slots;
         let tri_base = cheb_base + 3 * self.max_particles;
         let tri_rest_base = tri_base + self.max_triangles;
@@ -162,6 +183,13 @@ impl SoftCapacity {
         let flag_base = node_slot_base + NODE_SLOT_STRIDE * self.max_particles;
         let obstacle_base = flag_base + self.max_particles;
         let aabb_base = obstacle_base + self.max_obstacles;
+        let rigid_base = aabb_base + 2 * self.max_bodies;
+        let body_color_base = rigid_base + 2 * self.max_particles;
+        let body_color_stride = self.max_colors.div_ceil(2);
+        let tri_plane_base = body_color_base + self.max_bodies * body_color_stride;
+        let body_pair_base = tri_plane_base + 2 * self.max_triangles;
+        let bdf_base = body_pair_base + SOFT_PAIR_STRIDE * self.max_bodies;
+        let contact_list_base = bdf_base + self.max_particles;
         SoftLayout {
             body_base,
             beam_base,
@@ -177,13 +205,14 @@ impl SoftCapacity {
             flag_base,
             obstacle_base,
             aabb_base,
-            rigid_base: aabb_base + 2 * self.max_bodies,
-            body_color_base: aabb_base + 2 * self.max_bodies + 2 * self.max_particles,
-            body_color_stride: self.max_colors.div_ceil(2),
-            total_slots: aabb_base
-                + 2 * self.max_bodies
-                + 2 * self.max_particles
-                + self.max_bodies * self.max_colors.div_ceil(2),
+            rigid_base,
+            body_color_base,
+            body_color_stride,
+            tri_plane_base,
+            body_pair_base,
+            bdf_base,
+            contact_list_base,
+            total_slots: contact_list_base + CONTACT_LIST_STRIDE * self.max_particles,
         }
     }
 
@@ -230,6 +259,11 @@ pub struct SoftSettings {
     /// bodies couple to the rigid passes only through their core joints, so
     /// extra sweeps converge them at about half the cost of extra iterations.
     pub sweeps: u32,
+    /// Second-order BDF2 for the particles instead of backward Euler (BDF1):
+    /// far less numerical damping of the structure's vibration at a given step
+    /// (experimental; validate with `soft_calibrate`). Backward Euler wherever a
+    /// particle has no previous step (spawn, wake).
+    pub bdf2: bool,
 }
 
 impl Default for SoftSettings {
@@ -250,6 +284,7 @@ impl Default for SoftSettings {
             sweeps: 1,
             rigid_mode: false,
             rigid_quiet: 0.5,
+            bdf2: false,
         }
     }
 }
@@ -266,12 +301,22 @@ mod tests {
         assert_eq!(l.beam_base - l.body_base, BODY_STRIDE * c.max_bodies);
         assert_eq!(l.group_base - l.beam_base, 4 * c.max_beams);
         assert_eq!(
-            l.adj_base + (2 * c.max_beams + 3 * c.max_triangles).div_ceil(4),
+            l.adj_base + (4 * c.max_beams + 3 * c.max_triangles).div_ceil(4),
             l.cheb_base
         );
         assert_eq!(l.rigid_base + 2 * c.max_particles, l.body_color_base);
         assert_eq!(
             l.body_color_base + c.max_bodies * l.body_color_stride,
+            l.tri_plane_base
+        );
+        assert_eq!(l.tri_plane_base + 2 * c.max_triangles, l.body_pair_base);
+        assert_eq!(
+            l.body_pair_base + SOFT_PAIR_STRIDE * c.max_bodies,
+            l.bdf_base
+        );
+        assert_eq!(l.bdf_base + c.max_particles, l.contact_list_base);
+        assert_eq!(
+            l.contact_list_base + CONTACT_LIST_STRIDE * c.max_particles,
             l.total_slots
         );
         // The default pool stays well under WebGPU's 128 MiB binding limit.

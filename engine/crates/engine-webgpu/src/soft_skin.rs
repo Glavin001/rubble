@@ -6,14 +6,10 @@
 //! largest crumple strain around the vertex) and per-triangle normal/strain
 //! (w = −1 for a torn triangle). Nothing is read back to the CPU.
 
-use crate::WgpuSim;
+use crate::{WgpuSim, SOFT_SKIN_WGSL};
 use engine_softbody::SkinBinding;
 use glam::Vec3;
 use wgpu::util::DeviceExt;
-
-/// The skinning kernels as one WGSL module (entries `soft_skin_vertices`,
-/// `soft_skin_faces`, `soft_skin_normals`), as `generated/wgsl/soft_skin.wgsl`.
-pub const SOFT_SKIN_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/wgsl/soft_skin.wgsl"));
 
 pub struct SoftSkinner {
     pipelines: [wgpu::ComputePipeline; 3],
@@ -23,6 +19,10 @@ pub struct SoftSkinner {
     pub faces: wgpu::Buffer,
     vertices: u32,
     triangles: u32,
+    params: wgpu::Buffer,
+    /// Holds 1: copied into `SkinParams.skipSleeping` after the first encode.
+    one: wgpu::Buffer,
+    first: std::cell::Cell<bool>,
 }
 
 impl SoftSkinner {
@@ -113,8 +113,14 @@ impl SoftSkinner {
         let params = init(
             "skin-params",
             bytemuck::cast_slice(&[nv as u32, nt as u32, 1.8f32.to_bits(), 0]),
-            wgpu::BufferUsages::UNIFORM,
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         );
+        let asleep = init(
+            "skin-asleep",
+            &pad(bytemuck::cast_slice(&vec![0u32; nv.max(1)])),
+            storage,
+        );
+        let one = init("skin-one", bytemuck::cast_slice(&[1u32]), wgpu::BufferUsages::COPY_SRC);
         let group = |p: &wgpu::ComputePipeline, list: &[(u32, &wgpu::Buffer)]| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
@@ -136,6 +142,7 @@ impl SoftSkinner {
                     (1, &bind),
                     (5, &positions),
                     (8, &params),
+                    (9, &asleep),
                 ],
             ),
             group(
@@ -146,6 +153,7 @@ impl SoftSkinner {
                     (5, &positions),
                     (6, &faces),
                     (8, &params),
+                    (9, &asleep),
                 ],
             ),
             group(
@@ -161,6 +169,9 @@ impl SoftSkinner {
             faces,
             vertices: nv as u32,
             triangles: nt as u32,
+            params,
+            one,
+            first: std::cell::Cell::new(true),
         }
     }
 
@@ -177,6 +188,11 @@ impl SoftSkinner {
             pass.set_pipeline(&self.pipelines[i]);
             pass.set_bind_group(0, &self.groups[i], &[]);
             pass.dispatch_workgroups(n.div_ceil(64).max(1), 1, 1);
+        }
+        drop(pass);
+        // Every vertex skinned once: from now on sleeping ones keep their output.
+        if self.first.replace(false) {
+            enc.copy_buffer_to_buffer(&self.one, 0, &self.params, 12, 4);
         }
     }
 

@@ -10,6 +10,12 @@
 # Needs Rust (stable, with the wasm32-unknown-unknown target) and Git LFS assets. slangc
 # and wasm-pack are used from PATH (or $SLANGC) when present, otherwise the pinned
 # releases are downloaded into $RUBBLE_TOOLS (default ~/.cache/rubble-tools).
+#
+# RUBBLE_BUILD_CACHE=<dir> keeps work between builds: cargo's target dir (both
+# workspaces), slangc's outputs, the vibe-city packs and the Asyncify build, each keyed
+# by its inputs so a hit is the same bytes. On Vercel it is node_modules/.cache/rubble-build:
+# Vercel's static builder keeps every **/node_modules/** between builds (and a branch's
+# first build starts from production's cache).
 set -euo pipefail
 
 SLANG_VERSION=2026.19   # engine/TOOLCHAIN.md
@@ -21,11 +27,72 @@ ENGINE="$(cd "$(dirname "$0")/.." && pwd)"
 WEB="$ENGINE/crates/engine-webgpu"
 OUT="${OUT:-$ENGINE/web-dist}"
 TOOLS="${RUBBLE_TOOLS:-$HOME/.cache/rubble-tools}"
+# step NAME: start a timed step; the summary at the end lists each step's seconds.
+STEP_NAME=""
+STEP_START=$SECONDS
+STEP_TIMES=()
+step() {
+  if [[ -n "$STEP_NAME" ]]; then
+    STEP_TIMES+=("$(printf '%5ds  %s' $((SECONDS - STEP_START)) "$STEP_NAME")")
+  fi
+  STEP_NAME="$1"
+  STEP_START=$SECONDS
+  if [[ -n "$1" ]]; then echo "==> $1"; fi
+}
+
+CACHE="${RUBBLE_BUILD_CACHE:-}"
+if [[ -z "$CACHE" && -n "${VERCEL:-}" ]]; then CACHE="$ENGINE/../node_modules/.cache/rubble-build"; fi
+if [[ -n "$CACHE" ]]; then
+  mkdir -p "$CACHE"
+  CACHE="$(cd "$CACHE" && pwd)"
+  export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$CACHE/cargo-target}"
+  # Cargo never deletes stale artifacts (old dependency versions, a new toolchain), and
+  # Vercel's build cache holds 1 GB. Past the cap, start the target dir over: one cold
+  # build, then it fits again.
+  CAP_MB="${RUBBLE_TARGET_CAP_MB:-1600}"
+  if [[ -d "$CARGO_TARGET_DIR" ]] \
+    && (( $(du -sm "$CARGO_TARGET_DIR" | cut -f1) > CAP_MB )); then
+    echo "==> $CARGO_TARGET_DIR is over ${CAP_MB} MB: starting it over"
+    rm -rf "$CARGO_TARGET_DIR"
+  fi
+  export RUBBLE_SLANG_CACHE="$CACHE/slang"
+  echo "==> Build cache: $CACHE"
+fi
+
+# cached NAME KEY DIR CMD...: with a build cache, a kept DIR for (NAME, KEY) is copied
+# back instead of running CMD; otherwise CMD runs and DIR is kept for next time.
+cached() {
+  local name="$1" key="$2" dir="$3"
+  shift 3
+  local entry="$CACHE/$name/$key"
+  if [[ -n "$CACHE" && -d "$entry" ]]; then
+    echo "    (cached: $name $key)"
+    rm -rf "$dir"
+    mkdir -p "$(dirname "$dir")"
+    cp -R "$entry" "$dir"
+    return
+  fi
+  "$@"
+  if [[ -n "$CACHE" ]]; then
+    rm -rf "$CACHE/$name"
+    mkdir -p "$CACHE/$name"
+    cp -R "$dir" "$entry.tmp"
+    mv "$entry.tmp" "$entry"
+  fi
+}
+# A short content hash of stdin.
+key() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi | cut -c1-16
+}
 
 if [[ -f "$HOME/.cargo/env" ]]; then
   # shellcheck source=/dev/null
   . "$HOME/.cargo/env"
 fi
+step "Tools (wasm32 target, slangc, wasm-pack)"
+# From engine/: its rust-toolchain.toml (stable) is the one the build uses. The repo
+# root's pins a nightly with rustc-dev, which a rustup call there would install.
+cd "$ENGINE"
 if ! rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown; then
   echo "==> rustup target add wasm32-unknown-unknown"
   rustup target add wasm32-unknown-unknown
@@ -82,16 +149,16 @@ for glb in "$WEB"/fracture/assets/*.glb; do
   fi
 done
 
-cd "$ENGINE"
-echo "==> WGSL kernels, vehicle presets and vehicle wasm (wgsl_export)"
-cargo run --release -p engine-webgpu --bin wgsl_export
-echo "==> Fracture lab wasm"
+step "WGSL kernels, vehicle presets and vehicle wasm (wgsl_export)"
+# Without the `gpu` feature: the exporter only needs the WGSL tables, not native wgpu.
+cargo run --release -p engine-webgpu --no-default-features --bin wgsl_export
+step "Fracture lab wasm"
 wasm-pack build crates/engine-fracture-wasm --release --target web \
   --out-dir ../engine-webgpu/generated/fracture-wasm --no-typescript
-echo "==> Stress-solver wasm (the Fracture lab's stress bond mode)"
+step "Stress-solver wasm (the Fracture lab's stress bond mode)"
 CARGO_PROFILE_RELEASE_DEBUG=0 wasm-pack build stress-oracle/crates/stress-web --release --target web \
   --out-dir ../../../crates/engine-webgpu/generated/stress-web --no-typescript
-echo "==> Stress-solver wasm, Asyncify build (browsers without JSPI: Safari)"
+step "Stress-solver wasm, Asyncify build (browsers without JSPI: Safari)"
 # The solver waits on GPU maps through the import rubble-gpu-wait.yield_to_browser
 # (engine-gpu-wait). Chrome suspends the stack there with JSPI; elsewhere this build's
 # Asyncify unwinds it (fracture/gpu-wait.mjs). Only that import may unwind. Indirect calls
@@ -114,20 +181,32 @@ if [[ ! -x "$WASM_OPT" ]]; then
 fi
 STRESS_WASM="$ENGINE/crates/engine-webgpu/generated/stress-web/stress_web_bg.wasm"
 # The features rustc's wasm32 target emits, all in Safari 15+ (nothing newer may appear).
-"$WASM_OPT" "$STRESS_WASM" --enable-bulk-memory --enable-sign-ext --enable-mutable-globals \
-  --enable-nontrapping-float-to-int --enable-multivalue --enable-reference-types --asyncify \
-  --pass-arg=asyncify-imports@rubble-gpu-wait.yield_to_browser '--pass-arg=asyncify-removelist@*externref*' -O2 \
-  -o "${STRESS_WASM%.wasm}.asyncify.wasm"
-echo "==> Scene snapshots (scene_export, host build)"
+ASYNCIFY_ARGS=(--enable-bulk-memory --enable-sign-ext --enable-mutable-globals
+  --enable-nontrapping-float-to-int --enable-multivalue --enable-reference-types --asyncify
+  --pass-arg=asyncify-imports@rubble-gpu-wait.yield_to_browser '--pass-arg=asyncify-removelist@*externref*' -O2)
+asyncify() {
+  mkdir -p "$STRESS_ASYNCIFY"
+  "$WASM_OPT" "$STRESS_WASM" "${ASYNCIFY_ARGS[@]}" -o "$STRESS_ASYNCIFY/stress_web_bg.asyncify.wasm"
+}
+STRESS_ASYNCIFY="$(mktemp -d)/asyncify"
+cached asyncify "$( (cat "$STRESS_WASM"; echo "$BINARYEN_VERSION ${ASYNCIFY_ARGS[*]}") | key)" \
+  "$STRESS_ASYNCIFY" asyncify
+cp "$STRESS_ASYNCIFY/stress_web_bg.asyncify.wasm" "${STRESS_WASM%.wasm}.asyncify.wasm"
+step "Scene snapshots (scene_export, host build)"
 cargo run --release -p engine-scenes --no-default-features --bin scene_export
 
-echo "==> vibe-city scene packs (engine/scenes/vibe-city, bun)"
+step "vibe-city scene packs (engine/scenes/vibe-city, bun)"
 if command -v bun >/dev/null 2>&1; then BUN=(bun); else BUN=(npx --yes bun@1.2.4); fi
-(cd "$ENGINE/scenes/vibe-city" && "${BUN[@]}" install --frozen-lockfile && "${BUN[@]}" run export.ts)
-echo "==> Dune buggy render mesh (engine/scenes/dune-buggy, bun)"
+VIBE="$ENGINE/scenes/vibe-city"
+vibe_city() { (cd "$VIBE" && "${BUN[@]}" install --frozen-lockfile && "${BUN[@]}" run export.ts); }
+# The export is deterministic (seeded Math.random) and reads only its tracked files and
+# the packages bun.lock pins.
+vibe_key="$( (cd "$VIBE" && git ls-files -z | sort -z | xargs -0 cat; "${BUN[@]}" --version) | key)"
+cached vibe-city "$vibe_key" "$WEB/generated/vibe-city" vibe_city
+step "Dune buggy render mesh (engine/scenes/dune-buggy, bun)"
 (cd "$ENGINE/scenes/dune-buggy" && "${BUN[@]}" install --frozen-lockfile && "${BUN[@]}" run bake-mesh.mjs)
 
-echo "==> Assembling $OUT"
+step "Assembling $OUT"
 rm -rf "$OUT"
 mkdir -p "$OUT"
 cp "$WEB"/index.html "$WEB"/demo.html "$WEB"/vehicle.html "$WEB"/softbody.html "$WEB"/motion.html "$OUT"/
@@ -137,3 +216,8 @@ cp -R "$WEB"/fracture "$OUT"/fracture
 find "$OUT" \( -name '*.test.mjs' -o -name '.gitignore' -o -name '*-check.mjs' \) -delete
 rm -rf "$OUT"/generated/*/.gitignore "$OUT"/generated/*/package.json
 echo "==> Done: $OUT ($(du -sh "$OUT" | cut -f1))"
+
+if [[ -n "$CACHE" ]]; then echo "==> Build cache: $(du -sh "$CACHE" | cut -f1)"; fi
+step ""
+echo "==> Step times (total ${SECONDS}s)"
+printf '%s\n' "${STEP_TIMES[@]}"

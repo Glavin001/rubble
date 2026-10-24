@@ -89,7 +89,7 @@ test('the step plan lists every soft kernel and sizes binding 32', () => {
   const cap = Uint32Array.of(4096, 8192, 65536, 64, 131072, 32, 64, 64);
   const plan = new RigidStep(cap, capWords(DEFAULT_VEHICLE_CAPACITY), softCapWords(DEFAULT_SOFT_CAPACITY));
   const kernels = JSON.parse(plan.kernels());
-  for (const k of ['soft_wake', 'soft_begin', 'soft_bounds', 'soft_collide_nodes', 'soft_collide_tris', 'soft_primal', 'soft_primal_fused', 'soft_chebyshev', 'soft_dual', 'soft_plastic', 'soft_break_groups', 'soft_sleep']) {
+  for (const k of ['soft_wake', 'soft_begin', 'soft_bounds', 'soft_collide_nodes', 'soft_collide_tris', 'soft_tri_planes', 'soft_pairs', 'soft_primal_bodies', 'soft_dual', 'soft_plastic', 'soft_break_groups', 'soft_sleep']) {
     assert.ok(kernels.includes(k), `${k} missing from the plan's kernels`);
   }
   const sizes = plan.buffer_sizes();

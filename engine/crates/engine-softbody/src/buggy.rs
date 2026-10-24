@@ -95,10 +95,17 @@ pub fn dune_buggy_soft() -> SoftVehicleDesc {
 }
 
 pub fn dune_buggy_soft_with(k: &BuggyBeams) -> SoftVehicleDesc {
-    let asset: Asset = serde_json::from_str(include_str!("../../engine-vehicle/assets/dune_buggy.json")).expect("dune_buggy.json");
+    let asset: Asset =
+        serde_json::from_str(include_str!("../../engine-vehicle/assets/dune_buggy.json"))
+            .expect("dune_buggy.json");
     let h = asset.hybrid;
     let rigid = presets::dune_buggy();
-    let group_id = |g: &str| h.soft_groups.iter().position(|x| x == g).map_or(0, |i| i as u32 + 1);
+    let group_id = |g: &str| {
+        h.soft_groups
+            .iter()
+            .position(|x| x == g)
+            .map_or(0, |i| i as u32 + 1)
+    };
 
     let nodes = h
         .nodes
@@ -120,7 +127,11 @@ pub fn dune_buggy_soft_with(k: &BuggyBeams) -> SoftVehicleDesc {
         .iter()
         .map(|b| {
             let crumple = b.cls.as_deref() == Some("crumple") || b.group.is_some();
-            let (deform, strength) = if crumple { (k.crumple_deform, k.crumple_strength) } else { (k.cell_deform, k.cell_strength) };
+            let (deform, strength) = if crumple {
+                (k.crumple_deform, k.crumple_strength)
+            } else {
+                (k.cell_deform, k.cell_strength)
+            };
             match b.kind.as_str() {
                 // A detachable piece's mounts: elastic up to the rated mount
                 // (shared among its beams), then the whole group lets go.
@@ -158,10 +169,22 @@ pub fn dune_buggy_soft_with(k: &BuggyBeams) -> SoftVehicleDesc {
         name: "core".into(),
         role: PartRole::Body,
         mass: h.core_root_mass,
-        colliders: vec![PartColliderDesc { shape: ShapeDesc::Box { half: [0.12, 0.04, 0.5] }, position: [0.0, 0.5, 0.0], ..Default::default() }],
+        colliders: vec![PartColliderDesc {
+            shape: ShapeDesc::Box {
+                half: [0.12, 0.04, 0.5],
+            },
+            position: [0.0, 0.5, 0.0],
+            ..Default::default()
+        }],
         mount: MountDesc::default(),
     }];
-    parts.extend(rigid.parts.iter().filter(|p| h.core_parts.contains(&p.name)).cloned());
+    parts.extend(
+        rigid
+            .parts
+            .iter()
+            .filter(|p| h.core_parts.contains(&p.name))
+            .cloned(),
+    );
     core.parts = parts;
 
     let rigid_parts = h
@@ -176,7 +199,11 @@ pub fn dune_buggy_soft_with(k: &BuggyBeams) -> SoftVehicleDesc {
                 attach: r
                     .nodes
                     .iter()
-                    .map(|&node| SoftAttach { node, break_force: r.break_force * k.mount_scale, break_torque: 0.0 })
+                    .map(|&node| SoftAttach {
+                        node,
+                        break_force: r.break_force * k.mount_scale,
+                        break_torque: 0.0,
+                    })
                     .collect(),
             }
         })
@@ -188,7 +215,13 @@ pub fn dune_buggy_soft_with(k: &BuggyBeams) -> SoftVehicleDesc {
         .iter()
         .map(|&g| SoftPart {
             name: g.into(),
-            nodes: h.nodes.iter().enumerate().filter(|(_, n)| n.group == g).map(|(i, _)| i as u32).collect(),
+            nodes: h
+                .nodes
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| n.group == g)
+                .map(|(i, _)| i as u32)
+                .collect(),
         })
         .collect();
 
@@ -197,7 +230,10 @@ pub fn dune_buggy_soft_with(k: &BuggyBeams) -> SoftVehicleDesc {
         parts,
         nodes,
         beams,
-        core: Some(SoftCore { vehicle: core, nodes: h.core_nodes }),
+        core: Some(SoftCore {
+            vehicle: core,
+            nodes: h.core_nodes,
+        }),
         rigid_parts,
         ..Default::default()
     }
@@ -211,13 +247,23 @@ mod tests {
     fn hybrid_buggy_is_whole() {
         let d = dune_buggy_soft();
         let core = d.core.as_ref().unwrap();
-        assert_eq!(core.vehicle.parts.len(), 4, "root + engine, gearbox, steering column");
+        assert_eq!(
+            core.vehicle.parts.len(),
+            4,
+            "root + engine, gearbox, steering column"
+        );
         assert_eq!(core.nodes.len(), 8, "the lower wishbone pivots");
         assert_eq!(d.rigid_parts.len(), 10);
-        assert!(d.rigid_parts.iter().all(|p| p.attach.len() == 3 && p.mass > 0.0 && !p.colliders.is_empty()));
+        assert!(d
+            .rigid_parts
+            .iter()
+            .all(|p| p.attach.len() == 3 && p.mass > 0.0 && !p.colliders.is_empty()));
         // Every beam references real nodes; the graph is one connected piece.
         let n = d.nodes.len();
-        assert!(d.beams.iter().all(|b| (b.a as usize) < n && (b.b as usize) < n && b.a != b.b));
+        assert!(d
+            .beams
+            .iter()
+            .all(|b| (b.a as usize) < n && (b.b as usize) < n && b.a != b.b));
         let mut parent: Vec<usize> = (0..n).collect();
         fn root(p: &mut Vec<usize>, mut i: usize) -> usize {
             while p[i] != i {
@@ -227,15 +273,27 @@ mod tests {
             i
         }
         for b in &d.beams {
-            let (x, y) = (root(&mut parent, b.a as usize), root(&mut parent, b.b as usize));
+            let (x, y) = (
+                root(&mut parent, b.a as usize),
+                root(&mut parent, b.b as usize),
+            );
             parent[x] = y;
         }
         let r0 = root(&mut parent, 0);
-        assert!((0..n).all(|i| root(&mut parent, i) == r0), "frame graph is connected");
+        assert!(
+            (0..n).all(|i| root(&mut parent, i) == r0),
+            "frame graph is connected"
+        );
         // The three detachable pieces hang on breakable mount beams.
         for g in 1..=3 {
             let mounts: Vec<&SoftBeam> = d.beams.iter().filter(|b| b.break_group == g).collect();
-            assert!(!mounts.is_empty() && mounts.iter().all(|b| b.strength.is_finite() && b.strength > 0.0), "group {g}");
+            assert!(
+                !mounts.is_empty()
+                    && mounts
+                        .iter()
+                        .all(|b| b.strength.is_finite() && b.strength > 0.0),
+                "group {g}"
+            );
         }
         // Named parts cover every node exactly once.
         let names: Vec<&str> = d.parts.iter().map(|p| p.name.as_str()).collect();
@@ -244,11 +302,15 @@ mod tests {
         assert_eq!(d.parts.iter().map(|p| p.nodes.len()).sum::<usize>(), n);
         // The whole buggy weighs what the rigid one does.
         let rigid = presets::dune_buggy();
-        let m_rigid: f32 = rigid.parts.iter().map(|p| p.mass).sum::<f32>() + rigid.wheels.iter().map(|w| w.mass).sum::<f32>();
+        let m_rigid: f32 = rigid.parts.iter().map(|p| p.mass).sum::<f32>()
+            + rigid.wheels.iter().map(|w| w.mass).sum::<f32>();
         let m = d.total_mass()
             + d.rigid_parts.iter().map(|p| p.mass).sum::<f32>()
             + core.vehicle.parts.iter().map(|p| p.mass).sum::<f32>()
             + core.vehicle.wheels.iter().map(|w| w.mass).sum::<f32>();
-        assert!((m - m_rigid).abs() < 0.03 * m_rigid, "hybrid {m} kg vs rigid {m_rigid} kg");
+        assert!(
+            (m - m_rigid).abs() < 0.03 * m_rigid,
+            "hybrid {m} kg vs rigid {m_rigid} kg"
+        );
     }
 }

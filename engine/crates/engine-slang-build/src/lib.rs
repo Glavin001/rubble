@@ -88,6 +88,34 @@ fn which(bin: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(s))
 }
 
+/// `f` over `items` on every core, results in input order. Build scripts compile
+/// hundreds of entries at about a second of `slangc` each; one at a time that is minutes.
+pub fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(items.len().max(1));
+    let next = AtomicUsize::new(0);
+    let results: Mutex<Vec<Option<R>>> = Mutex::new((0..items.len()).map(|_| None).collect());
+    std::thread::scope(|s| {
+        for _ in 0..threads {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(item) = items.get(i) else { break };
+                let r = f(item);
+                results.lock().unwrap()[i] = Some(r);
+            });
+        }
+    });
+    results
+        .into_inner()
+        .unwrap()
+        .into_iter()
+        .map(Option::unwrap)
+        .collect()
+}
+
 pub fn compile(
     source: &Path,
     entry: &str,

@@ -23,7 +23,14 @@ fn capacity() -> WorldCapacity {
     }
 }
 
-fn add_box(sim: &mut WgpuSim, pos: [f32; 3], half: [f32; 3], rot: [f32; 4], inv_mass: f32, inv_i: [f32; 3]) -> u32 {
+fn add_box(
+    sim: &mut WgpuSim,
+    pos: [f32; 3],
+    half: [f32; 3],
+    rot: [f32; 4],
+    inv_mass: f32,
+    inv_i: [f32; 3],
+) -> u32 {
     let body = sim.add_body(BodyState {
         position: pos,
         inv_mass,
@@ -46,7 +53,12 @@ fn add_box(sim: &mut WgpuSim, pos: [f32; 3], half: [f32; 3], rot: [f32; 4], inv_
         local_pos: [0.0; 3],
         density: 0.0,
         local_rot: [0.0, 0.0, 0.0, 1.0],
-        params: [half[0], half[1], half[2], (half[0] * half[0] + half[1] * half[1] + half[2] * half[2]).sqrt()],
+        params: [
+            half[0],
+            half[1],
+            half[2],
+            (half[0] * half[0] + half[1] * half[1] + half[2] * half[2]).sqrt(),
+        ],
     });
     body
 }
@@ -54,7 +66,12 @@ fn add_box(sim: &mut WgpuSim, pos: [f32; 3], half: [f32; 3], rot: [f32; 4], inv_
 /// A free sphere of `mass` at `pos` moving at `vel`.
 fn ball(sim: &mut WgpuSim, pos: [f32; 3], radius: f32, mass: f32, vel: [f32; 3]) -> u32 {
     let i = 0.4 * mass * radius * radius;
-    let mut b = BodyState::dynamic(glam::Vec3::from_array(pos), glam::Quat::IDENTITY, mass, glam::Vec3::splat(i));
+    let mut b = BodyState::dynamic(
+        glam::Vec3::from_array(pos),
+        glam::Quat::IDENTITY,
+        mass,
+        glam::Vec3::splat(i),
+    );
     b.linear_vel = vel;
     let body = sim.add_body(b);
     sim.add_collider(Collider {
@@ -83,20 +100,37 @@ enum Storage {
 }
 
 fn world_with(storage: Storage) -> WgpuSim {
-    world_on(match storage {
-        Storage::Canonical => WgpuSim::new_with_compact_contacts(capacity(), false),
-        Storage::Compact => WgpuSim::new_with_compact_contacts(capacity(), true),
-        Storage::Persistent => WgpuSim::new_with_persistent_contacts(capacity()),
-    }
-    .expect("wgpu"))
+    world_on(
+        match storage {
+            Storage::Canonical => WgpuSim::new_with_compact_contacts(capacity(), false),
+            Storage::Compact => WgpuSim::new_with_compact_contacts(capacity(), true),
+            Storage::Persistent => WgpuSim::new_with_persistent_contacts(capacity()),
+        }
+        .expect("wgpu"),
+    )
 }
 
 fn world_on(mut sim: WgpuSim) -> WgpuSim {
     let mut p = AvbdParams::default();
     p.iterations = 10;
     sim.set_params(p);
-    sim.set_material(0, Material { friction: 1.0, restitution: 0.0, contact_offset: 0.01, _pad: 0.0 });
-    add_box(&mut sim, [0.0, -5.0, 0.0], [400.0, 5.0, 400.0], [0.0, 0.0, 0.0, 1.0], 0.0, [0.0; 3]);
+    sim.set_material(
+        0,
+        Material {
+            friction: 1.0,
+            restitution: 0.0,
+            contact_offset: 0.01,
+            _pad: 0.0,
+        },
+    );
+    add_box(
+        &mut sim,
+        [0.0, -5.0, 0.0],
+        [400.0, 5.0, 400.0],
+        [0.0, 0.0, 0.0, 1.0],
+        0.0,
+        [0.0; 3],
+    );
     sim
 }
 
@@ -107,11 +141,17 @@ fn run(sim: &mut WgpuSim, steps: u32) {
 }
 
 fn part_loads(sim: &WgpuSim, v: VehicleHandle) -> Vec<MountLoad> {
-    sim.vehicle_mount_loads(v).into_iter().filter(|l| !l.wheel).collect()
+    sim.vehicle_mount_loads(v)
+        .into_iter()
+        .filter(|l| !l.wheel)
+        .collect()
 }
 
 fn wheel_loads(sim: &WgpuSim, v: VehicleHandle) -> Vec<MountLoad> {
-    sim.vehicle_mount_loads(v).into_iter().filter(|l| l.wheel).collect()
+    sim.vehicle_mount_loads(v)
+        .into_iter()
+        .filter(|l| l.wheel)
+        .collect()
 }
 
 /// The destructible sedan with every mount finite but far out of reach, so the
@@ -119,10 +159,18 @@ fn wheel_loads(sim: &WgpuSim, v: VehicleHandle) -> Vec<MountLoad> {
 fn measured_sedan() -> VehicleDesc {
     let mut d = presets::destructible_sedan();
     for p in d.parts.iter_mut().skip(1) {
-        p.mount = MountDesc { break_force: 1e12, break_torque: 1e12, anchor: None };
+        p.mount = MountDesc {
+            break_force: 1e12,
+            break_torque: 1e12,
+            anchor: None,
+        };
     }
     for w in &mut d.wheels {
-        w.mount = MountDesc { break_force: 1e12, break_torque: 1e12, anchor: None };
+        w.mount = MountDesc {
+            break_force: 1e12,
+            break_torque: 1e12,
+            anchor: None,
+        };
     }
     d
 }
@@ -131,22 +179,39 @@ fn measured_sedan() -> VehicleDesc {
 fn a_resting_part_mount_carries_the_part_weight() {
     let mut sim = world();
     let d = measured_sedan();
-    let v = sim.add_vehicle(&d, [0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]).unwrap();
+    let v = sim
+        .add_vehicle(&d, [0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0])
+        .unwrap();
     run(&mut sim, 240);
     let loads = part_loads(&sim, v);
     for (p, l) in d.parts.iter().zip(&loads).skip(1) {
         let w = p.mass * G;
-        eprintln!("{:>14}: mount {:8.1} N (weight {:8.1}), moment {:8.1} N·m", p.name, l.force, w, l.torque);
+        eprintln!(
+            "{:>14}: mount {:8.1} N (weight {:8.1}), moment {:8.1} N·m",
+            p.name, l.force, w, l.torque
+        );
         // Bodywork touches nothing at rest: its mount carries its weight.
-        assert!((l.force - w).abs() < 0.05 * w + 1.0, "{}: {} vs weight {}", p.name, l.force, w);
+        assert!(
+            (l.force - w).abs() < 0.05 * w + 1.0,
+            "{}: {} vs weight {}",
+            p.name,
+            l.force,
+            w
+        );
     }
     // Each wheel mount carries the weight on that corner (tyre force minus the
     // wheel's own weight): together, the sprung weight.
     let total: f32 = wheel_loads(&sim, v).iter().map(|l| l.force).sum();
     let sprung = d.parts.iter().map(|p| p.mass).sum::<f32>() * G;
-    assert!((total - sprung).abs() < 0.05 * sprung, "wheel mounts {total} vs sprung weight {sprung}");
+    assert!(
+        (total - sprung).abs() < 0.05 * sprung,
+        "wheel mounts {total} vs sprung weight {sprung}"
+    );
     let st = sim.vehicle_state(v);
-    assert_eq!((st.parts_broken, st.wheels_broken, st.parts_lost), (0, 0, 0));
+    assert_eq!(
+        (st.parts_broken, st.wheels_broken, st.parts_lost),
+        (0, 0, 0)
+    );
 }
 
 #[test]
@@ -154,12 +219,17 @@ fn default_mounts_never_break() {
     // Presets without mounts are unbreakable however hard they are hit.
     let mut sim = world();
     let d = presets::destructible_sedan();
-    let v = sim.add_vehicle(&d, [0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]).unwrap();
+    let v = sim
+        .add_vehicle(&d, [0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0])
+        .unwrap();
     run(&mut sim, 120);
     ball(&mut sim, [0.0, 0.6, 8.0], 0.5, 800.0, [0.0, 0.0, -30.0]);
     run(&mut sim, 120);
     let st = sim.vehicle_state(v);
-    assert_eq!((st.parts_broken, st.wheels_broken, st.parts_lost), (0, 0, 0));
+    assert_eq!(
+        (st.parts_broken, st.wheels_broken, st.parts_lost),
+        (0, 0, 0)
+    );
     assert!(sim.poll_mount_breaks().is_empty());
 }
 
@@ -175,15 +245,35 @@ fn heavy_ball_snaps_the_struck_mount_only(storage: Storage) {
     let mut sim = world_with(storage);
     let mut d = measured_sedan();
     // Front bumper on a 40 kN mount; everything else out of reach.
-    let bumper = d.parts.iter().position(|p| p.name == "bumper_front").unwrap();
-    d.parts[bumper].mount = MountDesc { break_force: 40e3, break_torque: 40e3, anchor: None };
-    let v = sim.add_vehicle(&d, [0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]).unwrap();
+    let bumper = d
+        .parts
+        .iter()
+        .position(|p| p.name == "bumper_front")
+        .unwrap();
+    d.parts[bumper].mount = MountDesc {
+        break_force: 40e3,
+        break_torque: 40e3,
+        anchor: None,
+    };
+    let v = sim
+        .add_vehicle(&d, [0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0])
+        .unwrap();
     run(&mut sim, 180);
-    assert_eq!(sim.vehicle_state(v).parts_broken, 0, "resting: nothing breaks");
+    assert_eq!(
+        sim.vehicle_state(v).parts_broken,
+        0,
+        "resting: nothing breaks"
+    );
     // 300 kg at 6 m/s straight into the front bumper, at its height: 0.1 m a
     // step, so the blow lands on the 0.2 m bumper, not the frame behind it.
     let at = world_point(&sim, v, d.parts[bumper].colliders[0].position);
-    ball(&mut sim, [at[0], at[1], at[2] + 1.0], 0.35, 300.0, [0.0, 0.0, -6.0]);
+    ball(
+        &mut sim,
+        [at[0], at[1], at[2] + 1.0],
+        0.35,
+        300.0,
+        [0.0, 0.0, -6.0],
+    );
     let mut peak = 0.0f32;
     for _ in 0..90 {
         sim.step().unwrap();
@@ -191,15 +281,28 @@ fn heavy_ball_snaps_the_struck_mount_only(storage: Storage) {
     }
     let st = sim.vehicle_state(v);
     let breaks = sim.poll_mount_breaks();
-    eprintln!("bumper peak {peak:.0} N; broken {:#b}; events {breaks:?}", st.parts_broken);
+    eprintln!(
+        "bumper peak {peak:.0} N; broken {:#b}; events {breaks:?}",
+        st.parts_broken
+    );
     assert_eq!(st.parts_broken, 1 << bumper, "only the bumper broke");
-    assert_eq!(st.parts_lost & (1 << bumper), 1 << bumper, "and left the car");
+    assert_eq!(
+        st.parts_lost & (1 << bumper),
+        1 << bumper,
+        "and left the car"
+    );
     assert_eq!(breaks.len(), 1);
-    assert_eq!((breaks[0].vehicle, breaks[0].index, breaks[0].wheel), (v.0, bumper as u32, false));
+    assert_eq!(
+        (breaks[0].vehicle, breaks[0].index, breaks[0].wheel),
+        (v.0, bumper as u32, false)
+    );
     assert!(breaks[0].force > 40e3 || breaks[0].torque > 40e3);
     // The severed bumper is a free body now.
     let body = sim.vehicle_host().part_body(v, bumper as u32);
-    assert!(sim.read_body(body).position[1] > -100.0, "bumper body activated");
+    assert!(
+        sim.read_body(body).position[1] > -100.0,
+        "bumper body activated"
+    );
 }
 
 /// A design-space point of `v` in the world (the chassis has not turned).
@@ -215,7 +318,16 @@ fn world_point(sim: &WgpuSim, v: VehicleHandle, p: [f32; 3]) -> [f32; 3] {
 fn peaks(sim: &WgpuSim, v: VehicleHandle, d: &VehicleDesc) -> Vec<(String, f32)> {
     sim.vehicle_mount_loads(v)
         .iter()
-        .map(|l| (if l.wheel { format!("wheel {}", l.index) } else { d.parts[l.index as usize].name.clone() }, l.peak_ratio))
+        .map(|l| {
+            (
+                if l.wheel {
+                    format!("wheel {}", l.index)
+                } else {
+                    d.parts[l.index as usize].name.clone()
+                },
+                l.peak_ratio,
+            )
+        })
         .collect()
 }
 
@@ -225,18 +337,39 @@ fn dune_buggy_settles_drives_and_jumps_without_shedding_parts() {
     let d = presets::dune_buggy();
     // A kicker ramp 25 m ahead and a landing area beyond it.
     let q = glam::Quat::from_axis_angle(glam::Vec3::X, -0.25).to_array();
-    add_box(&mut sim, [0.0, 0.5, 25.0], [3.0, 0.3, 3.0], q, 0.0, [0.0; 3]);
-    let v = sim.add_vehicle(&d, [0.0, 0.6, 0.0], [0.0, 0.0, 0.0, 1.0]).unwrap();
+    add_box(
+        &mut sim,
+        [0.0, 0.5, 25.0],
+        [3.0, 0.3, 3.0],
+        q,
+        0.0,
+        [0.0; 3],
+    );
+    let v = sim
+        .add_vehicle(&d, [0.0, 0.6, 0.0], [0.0, 0.0, 0.0, 1.0])
+        .unwrap();
     run(&mut sim, 180);
     let st = sim.vehicle_state(v);
     assert_eq!(st.contacts, 4, "all four wheels down");
-    sim.set_vehicle_input(v, VehicleInput { forward: 1.0, ..Default::default() });
+    sim.set_vehicle_input(
+        v,
+        VehicleInput {
+            forward: 1.0,
+            ..Default::default()
+        },
+    );
     let mut top = 0.0f32;
     for _ in 0..360 {
         sim.step().unwrap();
         top = top.max(sim.vehicle_state(v).forward_speed);
     }
-    sim.set_vehicle_input(v, VehicleInput { brake: 1.0, ..Default::default() });
+    sim.set_vehicle_input(
+        v,
+        VehicleInput {
+            brake: 1.0,
+            ..Default::default()
+        },
+    );
     run(&mut sim, 180);
     let st = sim.vehicle_state(v);
     for (name, r) in peaks(&sim, v, &d) {
@@ -244,29 +377,53 @@ fn dune_buggy_settles_drives_and_jumps_without_shedding_parts() {
     }
     eprintln!("top speed {top:.1} m/s");
     assert!(top > 12.0, "drives ({top} m/s)");
-    assert_eq!((st.parts_broken, st.wheels_broken), (0, 0), "a jump sheds nothing");
+    assert_eq!(
+        (st.parts_broken, st.wheels_broken),
+        (0, 0),
+        "a jump sheds nothing"
+    );
 }
 
 #[test]
 fn a_cannonball_tears_the_struck_part_off_the_dune_buggy() {
     let mut sim = world();
     let d = presets::dune_buggy();
-    let v = sim.add_vehicle(&d, [0.0, 0.6, 0.0], [0.0, 0.0, 0.0, 1.0]).unwrap();
+    let v = sim
+        .add_vehicle(&d, [0.0, 0.6, 0.0], [0.0, 0.0, 0.0, 1.0])
+        .unwrap();
     run(&mut sim, 180);
     // The left mirror stands out from the cage (+X is left): a 100 kg ball at
     // 10 m/s (0.17 m a step: it meets the mirror before the cage) from outside.
     let mirror = d.parts.iter().position(|p| p.name == "mirror_l").unwrap();
-    let housing = d.parts[mirror].colliders.iter().max_by(|a, b| a.position[0].total_cmp(&b.position[0])).unwrap().position;
+    let housing = d.parts[mirror]
+        .colliders
+        .iter()
+        .max_by(|a, b| a.position[0].total_cmp(&b.position[0]))
+        .unwrap()
+        .position;
     let at = world_point(&sim, v, housing);
-    ball(&mut sim, [at[0] + 1.0, at[1], at[2]], 0.2, 100.0, [-10.0, 0.0, 0.0]);
+    ball(
+        &mut sim,
+        [at[0] + 1.0, at[1], at[2]],
+        0.2,
+        100.0,
+        [-10.0, 0.0, 0.0],
+    );
     run(&mut sim, 60);
     let st = sim.vehicle_state(v);
     for (name, r) in peaks(&sim, v, &d) {
         eprintln!("{name:>16}: peak {:.3} of its limit", r);
     }
     let breaks = sim.poll_mount_breaks();
-    eprintln!("broken parts {:#b} wheels {:#b}: {breaks:?}", st.parts_broken, st.wheels_broken);
-    assert_eq!(st.parts_broken, 1 << mirror, "the struck mirror came off, and only it");
+    eprintln!(
+        "broken parts {:#b} wheels {:#b}: {breaks:?}",
+        st.parts_broken, st.wheels_broken
+    );
+    assert_eq!(
+        st.parts_broken,
+        1 << mirror,
+        "the struck mirror came off, and only it"
+    );
     assert_eq!(st.wheels_broken, 0);
     assert_eq!(breaks.len(), 1);
 }
@@ -291,16 +448,41 @@ fn dune_buggy_crash_probe() {
         d
     };
     let d = measured();
-    let names: Vec<String> = d.parts.iter().map(|p| p.name.clone()).chain((0..4).map(|i| format!("wheel {i}"))).collect();
+    let names: Vec<String> = d
+        .parts
+        .iter()
+        .map(|p| p.name.clone())
+        .chain((0..4).map(|i| format!("wheel {i}")))
+        .collect();
     let mut table: Vec<(String, Vec<f32>)> = Vec::new();
-    let collect = |sim: &WgpuSim, v: VehicleHandle| -> Vec<f32> { sim.vehicle_mount_loads(v).iter().map(|l| l.peak_ratio * 1e6).collect() };
+    let collect = |sim: &WgpuSim, v: VehicleHandle| -> Vec<f32> {
+        sim.vehicle_mount_loads(v)
+            .iter()
+            .map(|l| l.peak_ratio * 1e6)
+            .collect()
+    };
     // 1. Full throttle into a concrete wall from 40 m.
     {
         let mut sim = world();
-        add_box(&mut sim, [0.0, 1.0, 40.0], [6.0, 1.0, 0.5], [0.0, 0.0, 0.0, 1.0], 0.0, [0.0; 3]);
-        let v = sim.add_vehicle(&d, [0.0, 0.6, 0.0], [0.0, 0.0, 0.0, 1.0]).unwrap();
+        add_box(
+            &mut sim,
+            [0.0, 1.0, 40.0],
+            [6.0, 1.0, 0.5],
+            [0.0, 0.0, 0.0, 1.0],
+            0.0,
+            [0.0; 3],
+        );
+        let v = sim
+            .add_vehicle(&d, [0.0, 0.6, 0.0], [0.0, 0.0, 0.0, 1.0])
+            .unwrap();
         run(&mut sim, 60);
-        sim.set_vehicle_input(v, VehicleInput { forward: 1.0, ..Default::default() });
+        sim.set_vehicle_input(
+            v,
+            VehicleInput {
+                forward: 1.0,
+                ..Default::default()
+            },
+        );
         let mut top = 0.0f32;
         for _ in 0..360 {
             sim.step().unwrap();
@@ -311,26 +493,59 @@ fn dune_buggy_crash_probe() {
     // 2. Head-on: two buggies at full throttle from 30 m apart.
     {
         let mut sim = world();
-        let a = sim.add_vehicle(&d, [0.0, 0.6, 0.0], [0.0, 0.0, 0.0, 1.0]).unwrap();
-        let b = sim.add_vehicle(&d, [0.2, 0.6, 50.0], glam::Quat::from_rotation_y(std::f32::consts::PI).to_array()).unwrap();
+        let a = sim
+            .add_vehicle(&d, [0.0, 0.6, 0.0], [0.0, 0.0, 0.0, 1.0])
+            .unwrap();
+        let b = sim
+            .add_vehicle(
+                &d,
+                [0.2, 0.6, 50.0],
+                glam::Quat::from_rotation_y(std::f32::consts::PI).to_array(),
+            )
+            .unwrap();
         run(&mut sim, 60);
-        sim.set_vehicle_input(a, VehicleInput { forward: 1.0, ..Default::default() });
-        sim.set_vehicle_input(b, VehicleInput { forward: 1.0, ..Default::default() });
+        sim.set_vehicle_input(
+            a,
+            VehicleInput {
+                forward: 1.0,
+                ..Default::default()
+            },
+        );
+        sim.set_vehicle_input(
+            b,
+            VehicleInput {
+                forward: 1.0,
+                ..Default::default()
+            },
+        );
         run(&mut sim, 300);
         table.push(("head-on".into(), collect(&sim, a)));
     }
     // 3. Cannonballs (400 kg, r 0.6, as vehicle.html) at 25 and 45 m/s: front and side.
     for (label, speed, from, dir) in [
-        ("cannon front 25", 25.0f32, [0.0, 0.8, 8.0], [0.0, 0.0, -1.0]),
+        (
+            "cannon front 25",
+            25.0f32,
+            [0.0, 0.8, 8.0],
+            [0.0, 0.0, -1.0],
+        ),
         ("cannon side 25", 25.0, [8.0, 0.9, 0.0], [-1.0, 0.0, 0.0]),
         ("cannon front 45", 45.0, [0.0, 0.8, 10.0], [0.0, 0.0, -1.0]),
         ("cannon side 45", 45.0, [10.0, 0.9, 0.0], [-1.0, 0.0, 0.0]),
         ("cannon wheel 45", 45.0, [10.0, 0.45, 1.6], [-1.0, 0.0, 0.0]),
     ] {
         let mut sim = world();
-        let v = sim.add_vehicle(&d, [0.0, 0.6, 0.0], [0.0, 0.0, 0.0, 1.0]).unwrap();
+        let v = sim
+            .add_vehicle(&d, [0.0, 0.6, 0.0], [0.0, 0.0, 0.0, 1.0])
+            .unwrap();
         run(&mut sim, 90);
-        ball(&mut sim, from, 0.6, 400.0, [dir[0] * speed, dir[1] * speed, dir[2] * speed]);
+        ball(
+            &mut sim,
+            from,
+            0.6,
+            400.0,
+            [dir[0] * speed, dir[1] * speed, dir[2] * speed],
+        );
         run(&mut sim, 90);
         table.push((label.into(), collect(&sim, v)));
     }
@@ -338,10 +553,25 @@ fn dune_buggy_crash_probe() {
     {
         let mut sim = world();
         let q = glam::Quat::from_axis_angle(glam::Vec3::X, -0.3).to_array();
-        add_box(&mut sim, [0.0, 0.55, 25.0], [3.5, 0.3, 4.0], q, 0.0, [0.0; 3]);
-        let v = sim.add_vehicle(&d, [0.0, 0.6, 0.0], [0.0, 0.0, 0.0, 1.0]).unwrap();
+        add_box(
+            &mut sim,
+            [0.0, 0.55, 25.0],
+            [3.5, 0.3, 4.0],
+            q,
+            0.0,
+            [0.0; 3],
+        );
+        let v = sim
+            .add_vehicle(&d, [0.0, 0.6, 0.0], [0.0, 0.0, 0.0, 1.0])
+            .unwrap();
         run(&mut sim, 60);
-        sim.set_vehicle_input(v, VehicleInput { forward: 1.0, ..Default::default() });
+        sim.set_vehicle_input(
+            v,
+            VehicleInput {
+                forward: 1.0,
+                ..Default::default()
+            },
+        );
         run(&mut sim, 360);
         table.push(("jump".into(), collect(&sim, v)));
     }
