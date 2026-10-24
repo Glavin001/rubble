@@ -570,14 +570,31 @@ impl VehicleHost {
     }
 
     pub fn read_state(&self, backend: &impl VehicleBackend, h: VehicleHandle) -> VehicleState {
+        let [(vs, vn), (ws, wn)] = self.state_slots(h);
+        let v = backend.read_slots(vs, vn);
+        let wheels = backend.read_slots(ws, wn);
+        self.decode_state(h, &v, &wheels)
+    }
+
+    /// The pool slot ranges `(first, count)` [`Self::decode_state`] reads for
+    /// `h`: its vehicle record, then its wheels. A host that copies them with
+    /// each step decodes the state without a blocking read.
+    pub fn state_slots(&self, h: VehicleHandle) -> [(u32, u32); 2] {
         let l = self.capacity.layout();
         let e = &self.entries[h.0 as usize];
-        let v = backend.read_slots(l.vehicle_base + e.slots.vehicle * VEH_STRIDE, VEH_STRIDE);
+        [
+            (l.vehicle_base + e.slots.vehicle * VEH_STRIDE, VEH_STRIDE),
+            (l.wheel_base + e.slots.wheel_base * WHEEL_STRIDE, e.wheels_used * WHEEL_STRIDE),
+        ]
+    }
+
+    /// The state of `h` from copies of its [`Self::state_slots`].
+    pub fn decode_state(&self, h: VehicleHandle, v: &[Slot], wheels: &[Slot]) -> VehicleState {
+        let e = &self.entries[h.0 as usize];
         let o0 = v[V_O0 as usize];
         let o1 = v[V_O1 as usize];
         let o2 = v[V_O2 as usize];
         let o3 = v[V_O3 as usize];
-        let wheels = backend.read_slots(l.wheel_base + e.slots.wheel_base * WHEEL_STRIDE, e.wheels_used * WHEEL_STRIDE);
         let mut out = VehicleState {
             forward_speed: f32::from_bits(o0[0]),
             engine_rpm: f32::from_bits(o0[1]),

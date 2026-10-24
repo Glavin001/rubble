@@ -2248,6 +2248,28 @@ impl WgpuSim {
         self.vehicle_host().read_state(self, v)
     }
 
+    /// The vehicle pool (binding 31), for hosts that copy vehicle state with
+    /// each step ([`Self::vehicle_state_slots`]).
+    pub fn vehicle_pool_buffer(&self) -> &wgpu::Buffer {
+        &self.bufs[31]
+    }
+
+    /// The 16-byte pool slots `(first, count)` holding `v`'s state: its record,
+    /// then its wheels.
+    pub fn vehicle_state_slots(&self, v: VehicleHandle) -> [(u32, u32); 2] {
+        self.vehicle_host().state_slots(v)
+    }
+
+    /// `v`'s state from copies of its [`Self::vehicle_state_slots`].
+    pub fn decode_vehicle_state(
+        &self,
+        v: VehicleHandle,
+        vehicle: &[[u32; 4]],
+        wheels: &[[u32; 4]],
+    ) -> VehicleState {
+        self.vehicle_host().decode_state(v, vehicle, wheels)
+    }
+
     /// Vehicle events since the previous call (severing, functional changes,
     /// contact and slide transitions).
     pub fn poll_vehicle_events(&mut self) -> Vec<VehicleEvent> {

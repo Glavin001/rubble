@@ -28,7 +28,10 @@ mod readback;
 
 pub use defs::{BodyDef, BodyType, Geometry, MassData, MotionLocks, ShapeDef, SurfaceMaterial};
 pub use error::{StaleHandle, Unsupported};
-pub use events::{BodyEvents, BodyMoveEvent, DestructionEvent, Frame};
+pub use events::{
+    coalesce, BodyEvents, BodyMoveEvent, CoalescedFrame, DestructionEvent, Frame, SkinId,
+    SkinOutput, SoftOutput, VehicleOutput,
+};
 pub use handles::{BodyId, JointId, ShapeId};
 pub use joints::{
     DistanceJointDef, FilterJointDef, JointBase, JointDef, PrismaticJointDef, RevoluteJointDef,
@@ -120,6 +123,14 @@ pub struct BodyStateRead {
     pub awake: bool,
 }
 
+/// A shape's triangle mesh in its body's frame ([`World::shape_mesh`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShapeMesh {
+    pub vertices: Vec<[f32; 3]>,
+    /// Counter-clockwise seen from outside.
+    pub triangles: Vec<[u32; 3]>,
+}
+
 /// A ray hit ([`World::cast_ray_blocking`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RayResult {
@@ -145,6 +156,20 @@ enum Owner {
     User,
     /// A vehicle's chassis, wheel or part, or a soft body's core.
     Vehicle,
+    /// A soft-body particle: reported through `Frame::soft`, not as moves.
+    SoftNode,
+}
+
+/// What an extra readback copy holds.
+#[derive(Clone, Debug)]
+enum Extra {
+    /// Every body's published pose: the frame after a dropped one diffs it.
+    Resync,
+    VehicleRecord(VehicleHandle),
+    VehicleWheels(VehicleHandle),
+    SoftNodes(SoftHandle),
+    SkinPositions(SkinId),
+    SkinNormals(SkinId),
 }
 
 #[derive(Clone, Debug)]
@@ -172,6 +197,8 @@ struct BodySlot {
     /// Latest frame-reported state.
     last_transform: Option<Transform>,
     last_asleep: bool,
+    /// The solver pose last delivered, for the resync diff.
+    last_solver: Option<Transform>,
 }
 
 impl BodySlot {
@@ -254,7 +281,13 @@ pub struct World {
     joints: Vec<JointSlot>,
     /// Interned surface materials (GPU slot = index).
     materials: Vec<[u32; 3]>,
-    readback: ReadbackRing,
+    readback: ReadbackRing<Extra>,
+    /// A frame was dropped: the next delivered one carries a full pose diff.
+    resync: bool,
+    vehicles: Vec<VehicleHandle>,
+    /// Soft bodies whose nodes each frame reports.
+    soft_outputs: Vec<SoftHandle>,
+    skins: Vec<(SoftHandle, engine_webgpu::SoftSkinner)>,
     backpressure: Backpressure,
     user_data: u64,
     step: u64,
@@ -319,6 +352,10 @@ impl World {
             dirty: false,
             last_input_step: None,
             last_counters: None,
+            resync: false,
+            vehicles: Vec::new(),
+            soft_outputs: Vec::new(),
+            skins: Vec::new(),
         })
     }
 
@@ -403,6 +440,7 @@ impl World {
                 asleep,
                 last_transform: None,
                 last_asleep: asleep,
+                last_solver: None,
             };
             let state = body_state(&slot);
             match self.reusable_body_slot() {
@@ -813,6 +851,41 @@ impl World {
         Ok(self.shapes[self.live_shape(id)?].def.filter)
     }
 
+    /// The shape's geometry in its body's frame (from the body origin).
+    pub fn shape_geometry(&self, id: ShapeId) -> anyhow::Result<&Geometry> {
+        Ok(&self.shapes[self.live_shape(id)?].geometry)
+    }
+
+    /// A triangle mesh of a box or hull shape in its body's frame: vertices and
+    /// counter-clockwise (outward) triangles, for renderers of hull bodies.
+    /// Spheres and capsules return `None` (draw them as primitives).
+    pub fn shape_mesh(&self, id: ShapeId) -> anyhow::Result<Option<ShapeMesh>> {
+        let (hull, transform) = match self.shape_geometry(id)? {
+            Geometry::Box { half, transform } => {
+                (ConvexHull::cuboid(Vec3::from(*half)), *transform)
+            }
+            Geometry::Hull { hull, transform } => (hull.clone(), *transform),
+            _ => return Ok(None),
+        };
+        let (q, p) = (transform.q(), transform.p());
+        let vertices = hull
+            .vertices
+            .iter()
+            .map(|v| (p + q * *v).to_array())
+            .collect();
+        let mut triangles = Vec::new();
+        for f in &hull.faces {
+            for k in 1..f.indices.len().saturating_sub(1) {
+                let i = |n: usize| u32::from(f.indices[n]);
+                triangles.push([i(0), i(k), i(k + 1)]);
+            }
+        }
+        Ok(Some(ShapeMesh {
+            vertices,
+            triangles,
+        }))
+    }
+
     pub fn shape_set_filter(&mut self, id: ShapeId, filter: Filter) -> anyhow::Result<()> {
         let s = self.live_shape(id)?;
         self.shapes[s].def.filter = filter;
@@ -919,6 +992,7 @@ impl World {
             .add_vehicle(desc, position, rotation)
             .map_err(|e| anyhow::anyhow!("add_vehicle: {e}"))?;
         self.adopt_owned(before);
+        self.vehicles.push(h);
         Ok(h)
     }
 
@@ -946,7 +1020,89 @@ impl World {
             .add_soft_vehicle(desc, position, rotation, options)
             .map_err(|e| anyhow::anyhow!("add_soft_vehicle: {e}"))?;
         self.adopt_owned(before);
+        let e = &self.sim.soft_host().entries[h.0 as usize];
+        let (first, n) = (e.first_body, e.particles);
+        let core = e.core.map(|c| c.0);
+        for i in first..first + n {
+            self.bodies[i as usize].owner = Owner::SoftNode;
+        }
+        if let Some(v) = core {
+            self.vehicles.push(v);
+        }
         Ok(h)
+    }
+
+    /// Drive a soft vehicle: its rigid core's wheels and drivetrain take
+    /// `input`, its steering hydros take `input.steer`.
+    pub fn set_soft_vehicle_input(
+        &mut self,
+        soft: SoftHandle,
+        input: VehicleInput,
+    ) -> anyhow::Result<()> {
+        let entry = self
+            .sim
+            .soft_host()
+            .entries
+            .get(soft.0 as usize)
+            .ok_or_else(|| anyhow::anyhow!("no soft body {}", soft.0))?;
+        let core = entry.core.map(|c| c.0);
+        self.dirty = true;
+        if let Some(v) = core {
+            self.sim.set_vehicle_input(v, input);
+        }
+        self.sim.set_soft_steer(soft, input.steer);
+        Ok(())
+    }
+
+    /// The vehicle driving a soft body's rigid core, if it has wheels.
+    pub fn soft_vehicle(&self, soft: SoftHandle) -> Option<VehicleHandle> {
+        self.sim
+            .soft_host()
+            .entries
+            .get(soft.0 as usize)?
+            .core
+            .map(|c| c.0)
+    }
+
+    /// Report this soft body's node positions in every frame (`Frame::soft`).
+    pub fn soft_enable_output(&mut self, soft: SoftHandle, enabled: bool) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            (soft.0 as usize) < self.sim.soft_host().entries.len(),
+            "no soft body {}",
+            soft.0
+        );
+        self.soft_outputs.retain(|&h| h != soft);
+        if enabled {
+            self.soft_outputs.push(soft);
+        }
+        Ok(())
+    }
+
+    /// Skin a render mesh onto a soft body (optionally one named part): each
+    /// frame then carries its deformed vertices and normals (`Frame::skins`),
+    /// computed on the GPU by the same Slang kernel the demos use.
+    pub fn soft_bind_skin(
+        &mut self,
+        soft: SoftHandle,
+        vertices: &[[f32; 3]],
+        triangles: &[[u32; 3]],
+        part: Option<&str>,
+    ) -> anyhow::Result<SkinId> {
+        let verts: Vec<Vec3> = vertices.iter().map(|v| Vec3::from(*v)).collect();
+        let bindings = self
+            .sim
+            .soft_host()
+            .bind_mesh(soft, &verts, part)
+            .map_err(|e| anyhow::anyhow!("bind_mesh: {e}"))?;
+        let skinner = engine_webgpu::SoftSkinner::new(&self.sim, &bindings, &verts, triangles);
+        self.skins.push((soft, skinner));
+        Ok(SkinId(self.skins.len() as u32 - 1))
+    }
+
+    /// A soft body's damage so far (blocking readback): beams bent and broken,
+    /// plastic work, per-node deformation.
+    pub fn soft_damage(&self, soft: SoftHandle) -> engine_softbody::SoftDamage {
+        self.sim.read_soft_damage(soft)
     }
 
     /// The handle of a body a vehicle or soft body owns (chassis, wheels).
@@ -1024,9 +1180,21 @@ impl World {
                 self.wait_oldest()?;
             }
             if self.readback.has_free() {
-                let slot = self.readback.encode(&self.sim, &mut enc, step);
-                mapped = Some((slot, self.sim.body_count()));
+                for (_, skin) in &self.skins {
+                    skin.encode(&mut enc);
+                }
+                let extras = extras(
+                    &self.sim,
+                    self.resync,
+                    &self.vehicles,
+                    &self.soft_outputs,
+                    &self.skins,
+                );
+                let slot = self.readback.encode(&self.sim, &mut enc, step, &extras);
+                self.resync = false;
+                mapped = Some(slot);
             } else {
+                self.resync = true;
                 let dropped = Pending::Empty {
                     step,
                     dropped: true,
@@ -1042,8 +1210,8 @@ impl World {
             self.readback.pending.push_back(skipped);
         }
         self.sim.queue().submit([enc.finish()]);
-        if let Some((slot, bodies)) = mapped {
-            self.readback.map(slot, bodies);
+        if let Some(slot) = mapped {
+            self.readback.map(slot);
         }
         let _ = self.sim.device().poll(wgpu::PollType::Poll);
         self.step += 1;
@@ -1055,6 +1223,13 @@ impl World {
     pub fn poll(&mut self) -> anyhow::Result<Vec<Frame>> {
         let _ = self.sim.device().poll(wgpu::PollType::Poll);
         self.collect(false)
+    }
+
+    /// Every ready frame folded into one (several steps per display frame):
+    /// latest transforms, earliest previous transforms, all events in order.
+    /// Never blocks.
+    pub fn poll_coalesced(&mut self) -> anyhow::Result<CoalescedFrame> {
+        Ok(coalesce(self.poll()?))
     }
 
     /// Wait for every step taken so far and return their frames.
@@ -1143,7 +1318,7 @@ impl World {
         Ok(())
     }
 
-    fn frame(&mut self, step: u64, raw: readback::Readback) -> anyhow::Result<Frame> {
+    fn frame(&mut self, step: u64, raw: readback::Readback<Extra>) -> anyhow::Result<Frame> {
         let c = raw.counters;
         // Counters describe the world as it is now when they are the newest
         // step's, or when nothing was awake and nothing was written since:
@@ -1191,7 +1366,21 @@ impl World {
                 .into_iter()
                 .map(DestructionEvent::PieceDetached),
         );
-        let mut records = raw.moved;
+        let resync = raw
+            .extras
+            .iter()
+            .find(|(k, _)| matches!(k, Extra::Resync))
+            .map(|(_, b)| b.clone());
+        let mut records: Vec<engine_webgpu::PoseRecord> = match &resync {
+            // After a dropped frame: every body whose published pose or sleep
+            // state differs from what was last delivered.
+            Some(bytes) => bytes
+                .chunks_exact(32)
+                .enumerate()
+                .filter_map(|(i, c)| self.resync_record(i as u32, &bytemuck::pod_read_unaligned(c)))
+                .collect(),
+            None => raw.moved,
+        };
         records.sort_by_key(|r| r.body());
         let mut moves = Vec::with_capacity(records.len());
         for r in &records {
@@ -1206,11 +1395,15 @@ impl World {
             let transform = slot.frame_at(step).to_origin(solver);
             let previous = if r.first() { None } else { slot.last_transform };
             slot.last_transform = Some(transform);
+            slot.last_solver = Some(solver);
             if r.slept() {
                 slot.last_asleep = true;
             }
             if r.woke() {
                 slot.last_asleep = false;
+            }
+            if slot.owner == Owner::SoftNode {
+                continue;
             }
             moves.push(BodyMoveEvent {
                 body: BodyId::new(r.body(), slot.generation),
@@ -1221,15 +1414,87 @@ impl World {
                 user_data: slot.user_data,
             });
         }
+        let mut vehicles = Vec::new();
+        let mut soft = Vec::new();
+        let mut skins: Vec<SkinOutput> = Vec::new();
+        let mut record: Option<(VehicleHandle, Vec<[u32; 4]>)> = None;
+        for (kind, bytes) in &raw.extras {
+            match kind {
+                Extra::Resync => {}
+                Extra::VehicleRecord(v) => record = Some((*v, slots(bytes))),
+                Extra::VehicleWheels(v) => {
+                    if let Some((rv, r)) = record.take() {
+                        debug_assert_eq!(rv, *v);
+                        let state = self.sim.decode_vehicle_state(*v, &r, &slots(bytes));
+                        vehicles.push(VehicleOutput { vehicle: *v, state });
+                    }
+                }
+                Extra::SoftNodes(h) => soft.push(SoftOutput {
+                    soft: *h,
+                    nodes: bytes
+                        .chunks_exact(32)
+                        .map(|c| {
+                            bytemuck::pod_read_unaligned::<engine_webgpu::PoseRecord>(c).position
+                        })
+                        .collect(),
+                }),
+                Extra::SkinPositions(id) => skins.push(SkinOutput {
+                    skin: *id,
+                    positions: xyz(bytes),
+                    normals: Vec::new(),
+                }),
+                Extra::SkinNormals(id) => {
+                    if let Some(s) = skins.iter_mut().find(|s| s.skin == *id) {
+                        s.normals = xyz(bytes);
+                    }
+                }
+            }
+        }
         Ok(Frame {
             step,
             ran: true,
             body_events: BodyEvents { moves },
             destruction_events: destruction,
+            vehicles,
+            soft,
+            skins,
             lost_events: ring.lost,
             dropped: false,
+            resynced: resync.is_some(),
             counters: Some(c),
         })
+    }
+
+    /// The record a resync reports for body `i`, if it changed since the last
+    /// delivered frame (or was never delivered).
+    fn resync_record(
+        &self,
+        i: u32,
+        r: &engine_webgpu::PoseRecord,
+    ) -> Option<engine_webgpu::PoseRecord> {
+        const SLEEPING: u32 = 1;
+        const PUBLISHED: u32 = 2;
+        let slot = self.bodies.get(i as usize)?;
+        if !slot.alive || r.word & PUBLISHED == 0 {
+            return None;
+        }
+        let asleep = r.word & SLEEPING != 0;
+        let same_pose = slot.last_solver.is_some_and(|l| {
+            bytemuck::bytes_of(&l.position) == bytemuck::bytes_of(&r.position)
+                && bytemuck::bytes_of(&l.rotation) == bytemuck::bytes_of(&r.rotation)
+        });
+        if same_pose && asleep == slot.last_asleep {
+            return None;
+        }
+        let mut word = i;
+        if slot.last_transform.is_none() {
+            word |= 1 << 30; // FIRST
+        } else if asleep && !slot.last_asleep {
+            word |= 1 << 28; // SLEPT
+        } else if !asleep && slot.last_asleep {
+            word |= 1 << 29; // WOKE
+        }
+        Some(engine_webgpu::PoseRecord { word, ..*r })
     }
 
     fn command(&mut self, id: BodyId, cmd: GpuCommand) -> anyhow::Result<()> {
@@ -1494,6 +1759,7 @@ impl World {
                 asleep: false,
                 last_transform: None,
                 last_asleep: false,
+                last_solver: None,
             });
         }
     }
@@ -1561,4 +1827,84 @@ fn joint_frame(frame: SolverFrame, f: JointFrame) -> JointFrame {
         anchor: Vec3::from(t.position),
         rot: Quat::from_array(t.rotation),
     }
+}
+
+fn slots(bytes: &[u8]) -> Vec<[u32; 4]> {
+    bytes
+        .chunks_exact(16)
+        .map(bytemuck::pod_read_unaligned)
+        .collect()
+}
+
+fn xyz(bytes: &[u8]) -> Vec<[f32; 3]> {
+    bytes
+        .chunks_exact(16)
+        .map(|c| {
+            let v: [f32; 4] = bytemuck::pod_read_unaligned(c);
+            [v[0], v[1], v[2]]
+        })
+        .collect()
+}
+
+/// The extra copies a step's readback carries.
+fn extras<'a>(
+    sim: &'a WgpuSim,
+    resync: bool,
+    vehicles: &[VehicleHandle],
+    soft: &[SoftHandle],
+    skins: &'a [(SoftHandle, engine_webgpu::SoftSkinner)],
+) -> Vec<readback::Extra<'a, Extra>> {
+    let mut out = Vec::new();
+
+    let pose = engine_webgpu::POSE_RECORD_BYTES;
+    if resync {
+        out.push(readback::Extra {
+            kind: Extra::Resync,
+            buffer: sim.pose_buffer(),
+            offset: 0,
+            size: u64::from(sim.body_count()) * pose,
+        });
+    }
+    for &v in vehicles {
+        let [(vs, vn), (ws, wn)] = sim.vehicle_state_slots(v);
+        let pool = sim.vehicle_pool_buffer();
+        out.push(readback::Extra {
+            kind: Extra::VehicleRecord(v),
+            buffer: pool,
+            offset: u64::from(vs) * 16,
+            size: u64::from(vn) * 16,
+        });
+        out.push(readback::Extra {
+            kind: Extra::VehicleWheels(v),
+            buffer: pool,
+            offset: u64::from(ws) * 16,
+            size: u64::from(wn) * 16,
+        });
+    }
+    for &h in soft {
+        let e = &sim.soft_host().entries[h.0 as usize];
+        out.push(readback::Extra {
+            kind: Extra::SoftNodes(h),
+            buffer: sim.pose_buffer(),
+            offset: u64::from(e.first_body) * pose,
+            size: u64::from(e.particles) * pose,
+        });
+    }
+    for (k, (_, skin)) in skins.iter().enumerate() {
+        let size = u64::from(skin.vertex_count()) * 16;
+        let id = SkinId(k as u32);
+        out.push(readback::Extra {
+            kind: Extra::SkinPositions(id),
+            buffer: &skin.positions,
+            offset: 0,
+            size,
+        });
+        out.push(readback::Extra {
+            kind: Extra::SkinNormals(id),
+            buffer: &skin.normals,
+            offset: 0,
+            size,
+        });
+    }
+    out
 }
