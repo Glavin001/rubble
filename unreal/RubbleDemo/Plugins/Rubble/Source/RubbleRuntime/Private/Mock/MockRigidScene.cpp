@@ -220,6 +220,12 @@ namespace RubbleMock
 
 			void Wall(FBodyBuilder& B, const FVector& Center, int32 Cols, int32 Rows, const FVector& Half, bool bRunning);
 			void Ring(FBodyBuilder& B, float Radius, int32 Rows, const FVector& Half);
+			// demo.html's builders (engine-webgpu/scene-builders.mjs), in this frame.
+			static FVector WebPoint(double X, double Y, double Z);
+			int32 WebBrick(FBodyBuilder& B, double X, double Y, double Z, double Yaw);
+			void WebBall(FBodyBuilder& B, double X, double Y, double Z, double Radius, double Density);
+			void WebRing(FBodyBuilder& B, double Radius, int32 Courses, int32 Tier, int32 Rows);
+			void WebGables(FBodyBuilder& B, int32 Columns, int32 Rows, int32 Base);
 			void Gables(FBodyBuilder& B, float Scale);
 			void Pyramid(FBodyBuilder& B, int32 Levels, float Half, const FVector& At);
 			void DropGrid(FBodyBuilder& B, int32 Nx, int32 Ny, int32 Nz, float Half, float Spacing, float Height, bool bSlanted);
@@ -254,6 +260,80 @@ namespace RubbleMock
 					const FQuat Q(FVector::UpVector, A);
 					B.Box(P, Half, Q, ERubbleMaterial::Brick, BrickTint(World.Random), false);
 				}
+			}
+		}
+
+		// demo.html's scenes are in the engine's frame (Y up, metres) with the ground's top at y = 0.5;
+		// here Z is up, the ground at 0, centimetres: X = -z, Y = x, Z = y - 0.5.
+		FVector FRigidScene::WebPoint(double X, double Y, double Z)
+		{
+			return FVector(-Z, X, Y - 0.5) * 100.0;
+		}
+
+		int32 FRigidScene::WebBrick(FBodyBuilder& B, double X, double Y, double Z, double Yaw)
+		{
+			// The page's 1 x 0.5 x 0.5 m brick of 0.25 kg, long along its x, yawed about up
+			// (brickQuaternion: -yaw about +Y there, +yaw about +Z here).
+			const int32 Body = B.Box(WebPoint(X, Y, Z), FVector(25, 50, 25), FQuat(FVector::UpVector, Yaw), ERubbleMaterial::Brick, BrickTint(World.Random), false, true);
+			B.Assets.Bodies[Body].Mass = 0.25f;
+			return Body;
+		}
+
+		void FRigidScene::WebBall(FBodyBuilder& B, double X, double Y, double Z, double Radius, double Density)
+		{
+			// Rolling along the page's +z at 30 m/s without slipping (rollingAngularVelocity).
+			const int32 Body = B.Sphere(WebPoint(X, Y, Z), float(Radius * 100.0), ERubbleMaterial::Steel, FLinearColor(0.55f, 0.57f, 0.6f), true);
+			FRubbleBodyVisual& V = B.Assets.Bodies[Body];
+			V.Mass = float(Density * 4.0 / 3.0 * UE_DOUBLE_PI * Radius * Radius * Radius);
+			V.InitialVelocity = FVector(-3000.0, 0.0, 0.0);
+			V.InitialAngularVelocity = FVector(0.0, -30.0 / Radius, 0.0);
+		}
+
+		void FRigidScene::WebRing(FBodyBuilder& B, double Radius, int32 Courses, int32 Tier, int32 Rows)
+		{
+			for (int32 c = 0; c < Courses; ++c)
+			{
+				const int32 Depth = FMath::Max(1, Rows - c / Tier);
+				for (int32 j = 0; j < Depth; ++j)
+				{
+					const double R = Radius + 0.25 + 0.52 * j;
+					const int32 N = FMath::FloorToInt32(2.0 * UE_DOUBLE_PI * (R - 0.25) / 1.02);
+					for (int32 i = 0; i < N; ++i)
+					{
+						const double A = (i + (c % 2) * 0.5) / N * 2.0 * UE_DOUBLE_PI;
+						WebBrick(B, R * FMath::Cos(A), 0.75 + 0.5 * c, R * FMath::Sin(A), A + UE_DOUBLE_HALF_PI);
+					}
+				}
+			}
+			const double BallR = Courses / 5.0;
+			WebBall(B, 0.0, 0.5 + BallR, -(Radius + 0.52 * Rows + BallR + 2.0), BallR, 10.0);
+		}
+
+		void FRigidScene::WebGables(FBodyBuilder& B, int32 Columns, int32 Rows, int32 Base)
+		{
+			const double PitchX = Base + 2, PitchY = 5;
+			for (int32 cx = 0; cx < Columns; ++cx)
+			{
+				for (int32 cy = 0; cy < Rows; ++cy)
+				{
+					const double X0 = (cx - (Columns - 1) / 2.0) * PitchX;
+					const double Z = (cy - (Rows - 1) / 2.0) * PitchY;
+					for (int32 k = 0; k < Base; ++k)
+					{
+						const int32 M = Base - k;
+						for (int32 i = 0; i < M; ++i)
+						{
+							WebBrick(B, X0 + (i - (M - 1) / 2.0) * 1.01, 0.75 + 0.5 * k, Z, 0.0);
+						}
+					}
+				}
+			}
+			const double BallR = Base / 7.0;
+			for (const double cx : { Columns / 2.0 - 2.0, Columns / 2.0 + 1.0 })
+			{
+				const double X = (cx - (Columns - 1) / 2.0) * PitchX;
+				const double Z = -((Rows - 1) / 2.0) * PitchY - BallR - 12.0;
+				WebBall(B, X, 0.5 + BallR, Z, BallR, 50.0);
 			}
 		}
 
@@ -451,16 +531,37 @@ namespace RubbleMock
 			}
 			else if (Id == TEXT("ring") || Id == TEXT("ring110k"))
 			{
+				// demo.html's rings (scene-builders.mjs buildRing), its 4 iterations, friction 0.5,
+				// no sleep (sleepTime 1e6), and its camera.
 				const bool bBig = Id == TEXT("ring110k");
-				Ring(B, bBig ? 3000.0f : 800.0f, bBig ? 110 : 30, FVector(12, 24, 8));
-				Shot(1.0f, FVector(-(bBig ? 6000 : 2400), 0, 250), FVector(0, 0, 150));
-				A.CameraEye = bBig ? FVector(-4000, -14000, 6000) : FVector(-1400, -3200, 2200);
-				A.CameraTarget = FVector(0, 0, bBig ? 1200 : 500);
+				if (bBig)
+				{
+					WebRing(B, 80.0f, 40, 4, 10);
+				}
+				else
+				{
+					WebRing(B, 12.0f, 20, 2, 10);
+				}
+				A.SolverIterations = 4;
+				A.Friction = 0.5f;
+				A.bSleep = false;
+				A.CameraEye = bBig ? WebPoint(140, 60, 40) : WebPoint(32, 22, 14);
+				A.CameraTarget = bBig ? WebPoint(0, 12, 0) : WebPoint(0, 5, 0);
 				A.GroundHalfExtentCm = bBig ? 9000 : 2200;
 			}
-			else if (Id == TEXT("gables") || Id == TEXT("gables506k"))
+			else if (Id == TEXT("gables"))
 			{
-				const bool bBig = Id == TEXT("gables506k");
+				// demo.html's gables (buildGables(4, 8, 20)): 3 iterations, friction 0.5.
+				WebGables(B, 4, 8, 20);
+				A.SolverIterations = 3;
+				A.Friction = 0.5f;
+				A.CameraEye = WebPoint(0, 28, -40);
+				A.CameraTarget = WebPoint(0, 6, 0);
+				A.GroundHalfExtentCm = 4400;
+			}
+			else if (Id == TEXT("gables506k"))
+			{
+				const bool bBig = true;
 				Gables(B, bBig ? 8.7f : 1.0f);
 				Shot(1.0f, FVector(-3000 * (bBig ? 4 : 1), 0, 300), FVector(-500, 0, 200));
 				A.CameraEye = bBig ? FVector(-12000, -2000, 8000) : FVector(-4000, -600, 2800);
@@ -623,6 +724,9 @@ namespace RubbleMock
 				Error = FString::Printf(TEXT("no rigid scene '%s'"), *Id);
 				return false;
 			}
+			// demo.html runs these with reuseContacts (flags: 1).
+			A.bReuseContacts = Id == TEXT("ring") || Id == TEXT("ring110k") || Id == TEXT("gables") || Id == TEXT("gables506k")
+				|| Id == TEXT("pyramid") || Id == TEXT("pile") || Id == TEXT("columns");
 			World.BuildSupports();
 			for (int32 i = 0; i < 16; ++i)
 			{

@@ -24,6 +24,8 @@ namespace
 		TEXT("Draw small dynamic bodies and chunks through GPU Scene from Rubble's GPU poses when the backend has them (read at scene load)."));
 	TAutoConsoleVariable<float> CVarGpuSceneMaxExtentCm(TEXT("rubble.GpuScene.MaxExtentCm"), 150.0f,
 		TEXT("Bodies and chunks larger than this (cm from their origin) stay CPU-placed, so Lumen's distance fields and surface cache see them."));
+	TAutoConsoleVariable<int32> CVarGpuSceneAllMoves(TEXT("rubble.GpuScene.AllMoves"), 0,
+		TEXT("Keep reporting every move of bodies drawn from GPU poses (normally only their sleep and wake changes reach the CPU)."));
 }
 
 bool RubbleGpuSceneEnabled()
@@ -276,4 +278,12 @@ FTransform FRubbleGpuPoses::PoseOffset(FRubbleBodyId Body) const
 		return FTransform::Identity;
 	}
 	return FTransform(FQuat(T.q.x, T.q.y, T.q.z, T.q.w), FVector(T.p.x, T.p.y, T.p.z));
+}
+
+void FRubbleGpuPoses::DrawnOnGpu(FRubbleBodyId Body) const
+{
+	if (World && CVarGpuSceneAllMoves.GetValueOnGameThread() == 0)
+	{
+		rbBody_SetMoveReports(World, Body.Bits, RB_MOVES_SLEEP_WAKE);
+	}
 }

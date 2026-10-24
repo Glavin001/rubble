@@ -471,6 +471,7 @@ void ARubblePrimitives::AddGpuBody(const FRubbleBodyVisual& Body, TArrayView<con
 		Batch.bDirty = true;
 	}
 	GpuBodies.Add(Body.Id.Index());
+	GpuPoses()->DrawnOnGpu(Body.Id);
 }
 
 void ARubblePrimitives::WriteGpu(const FRubbleGpuPoses& Poses)

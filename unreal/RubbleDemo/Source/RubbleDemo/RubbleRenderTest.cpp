@@ -18,7 +18,9 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Parse.h"
 #include "Misc/Paths.h"
+#include "DynamicRHI.h"
 #include "RubbleFracture.h"
+#include "RubbleGpuPoses.h"
 #include "RubblePawn.h"
 #include "RubblePrimitives.h"
 #include "RubbleSoftBodies.h"
@@ -192,6 +194,90 @@ void FRubbleRenderPerf::GetTests(TArray<FString>& OutBeautifiedNames, TArray<FSt
 		OutBeautifiedNames.Add(Name);
 		OutTestCommands.Add(S);
 	}
+}
+
+/**
+ * The destruction scenes at scale: frame, renderer, backend and GPU times over 6 s (the auto
+ * shot lands inside it), the most moves in a frame, how much the GPU Scene path draws, and a
+ * screenshot after the shot. Lines go to RubbleShots/destruction.txt.
+ */
+IMPLEMENT_COMPLEX_AUTOMATION_TEST(FRubbleRenderDestruction, "Rubble.Render.Destruction",
+	EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
+
+void FRubbleRenderDestruction::GetTests(TArray<FString>& OutBeautifiedNames, TArray<FString>& OutTestCommands) const
+{
+	static const TCHAR* Scenes[] = {
+		TEXT("rigid:ring110k"), TEXT("rigid:ring"), TEXT("rigid:gables"), TEXT("rigid:pile"), TEXT("rigid:wall"),
+		TEXT("fracture:house"), TEXT("fracture:suburb"), TEXT("fracture:arch"),
+	};
+	for (const TCHAR* S : Scenes)
+	{
+		FString Name = S;
+		Name.ReplaceInline(TEXT(":"), TEXT("_"));
+		OutBeautifiedNames.Add(Name);
+		OutTestCommands.Add(S);
+	}
+}
+
+bool FRubbleRenderDestruction::RunTest(const FString& Scene)
+{
+	if (!TestTrue(*FString::Printf(TEXT("%s loads"), *Scene), Rubble() && Load(*Scene)))
+	{
+		return false;
+	}
+	GEngine->Exec(GameWorld(), TEXT("t.MaxFPS 0"));
+	struct FSample
+	{
+		TArray<double> Frame, Update, Backend, Gpu;
+		double Last = 0.0;
+		int32 MaxMoves = 0;
+		int64 Steps = 0;
+		bool bShot = false;
+	};
+	TSharedRef<FSample> S = MakeShared<FSample>();
+	const double Start = FPlatformTime::Seconds();
+	FString File = Scene;
+	File.ReplaceInline(TEXT(":"), TEXT("_"));
+	const FString Shot = ShotDir() / TEXT("destruction") / (File + TEXT(".png"));
+	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(1.0f));
+	ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([S, Start, Scene, Shot]() {
+		const double Now = FPlatformTime::Seconds();
+		if (S->Last > 0.0)
+		{
+			S->Frame.Add(1000.0 * (Now - S->Last));
+			if (const ARubblePrimitives* P = Find<ARubblePrimitives>())
+			{
+				S->Update.Add(P->LastUpdateMs());
+			}
+			S->Backend.Add(Rubble()->Stats().BackendMs);
+			S->Gpu.Add(RHIGetGPUFrameCycles() * FPlatformTime::GetSecondsPerCycle() * 1000.0);
+			S->MaxMoves = FMath::Max(S->MaxMoves, Rubble()->Stats().Moves);
+			S->Steps += Rubble()->Stats().Steps;
+		}
+		S->Last = Now;
+		if (!S->bShot && Now - Start > 4.0)
+		{
+			FScreenshotRequest::RequestScreenshot(Shot, /*bShowUI=*/true, /*bAddFilenameSuffix=*/false);
+			S->bShot = true;
+		}
+		if (Now - Start < 7.0)
+		{
+			return false;
+		}
+		auto Mean = [](const TArray<double>& V) { double T = 0; for (double x : V) T += x; return V.Num() ? T / V.Num() : 0.0; };
+		auto P95 = [](TArray<double> V) { V.Sort(); return V.Num() ? V[FMath::Min(V.Num() - 1, int32(0.95 * V.Num()))] : 0.0; };
+		const ARubblePrimitives* P = Find<ARubblePrimitives>();
+		const ARubbleFracture* F = Find<ARubbleFracture>();
+		const FString Line = FString::Printf(TEXT("Rubble.Destruction %s gpu_poses=%d bodies=%d gpu_instances=%d gpu_chunks=%d frames=%d frame_ms_mean=%.2f frame_ms_p95=%.2f gpu_ms_mean=%.2f renderer_ms_mean=%.2f backend_ms_mean=%.2f steps_per_frame=%.2f backend_ms_per_step=%.2f max_moves=%d"),
+			*Scene, Rubble()->Backend()->GpuPoses() != nullptr, Rubble()->Assets()->Bodies.Num(), P ? P->NumGpuInstances() : 0, F ? F->NumGpuChunks() : 0,
+			S->Frame.Num(), Mean(S->Frame), P95(S->Frame), Mean(S->Gpu), Mean(S->Update), Mean(S->Backend),
+			S->Frame.Num() ? double(S->Steps) / S->Frame.Num() : 0.0, S->Steps ? Mean(S->Backend) * S->Frame.Num() / double(S->Steps) : 0.0, S->MaxMoves);
+		UE_LOG(LogRubble, Display, TEXT("%s"), *Line);
+		FFileHelper::SaveStringToFile(Line + LINE_TERMINATOR, *(ShotDir() / TEXT("destruction.txt")), FFileHelper::EEncodingOptions::AutoDetect, &IFileManager::Get(), FILEWRITE_Append);
+		return true;
+	}));
+	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(0.3f));
+	return true;
 }
 
 bool FRubbleRenderPerf::RunTest(const FString& Scene)

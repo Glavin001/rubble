@@ -37,7 +37,7 @@ pub use assembly::{
 pub use debug_draw::{
     DebugColor, DebugDraw, DebugDrawOptions, COLOR_ASLEEP, COLOR_AWAKE, COLOR_STATIC,
 };
-pub use defs::{BodyDef, BodyType, Geometry, MassData, MotionLocks, ShapeDef, SurfaceMaterial};
+pub use defs::{BodyDef, BodyType, Geometry, MassData, MotionLocks, MoveReports, ShapeDef, SurfaceMaterial};
 pub use destruction::{
     lab_solver, ActorInfo, Anchors, BondDesc, ChunkDesc, DestructibleAssetDesc,
     DestructibleAssetId, DestructibleDef, DestructibleId, DestructibleStats, Preload,
@@ -226,6 +226,8 @@ struct BodySlot {
     last_asleep: bool,
     /// The solver pose last delivered, for the resync diff.
     last_solver: Option<Transform>,
+    /// Which moves frames report.
+    moves: MoveReports,
 }
 
 impl BodySlot {
@@ -611,6 +613,7 @@ impl World {
                 last_transform: None,
                 last_asleep: asleep,
                 last_solver: None,
+                moves: MoveReports::All,
             };
             let state = body_state(&slot);
             match self.reusable_body_slot() {
@@ -687,6 +690,13 @@ impl World {
 
     pub fn body_type(&self, id: BodyId) -> anyhow::Result<BodyType> {
         Ok(self.bodies[self.live_body(id)?].body_type)
+    }
+
+    /// Which of the body's moves frames report (default [`MoveReports::All`]).
+    pub fn set_body_move_reports(&mut self, id: BodyId, reports: MoveReports) -> anyhow::Result<()> {
+        let i = self.live_body(id)?;
+        self.bodies[i].moves = reports;
+        Ok(())
     }
 
     pub fn body_user_data(&self, id: BodyId) -> anyhow::Result<u64> {
@@ -1659,6 +1669,14 @@ impl World {
             if slot.owner == Owner::SoftNode {
                 continue;
             }
+            let report = match slot.moves {
+                MoveReports::All => true,
+                MoveReports::SleepWake => r.slept() || r.woke() || r.first(),
+                MoveReports::None => false,
+            };
+            if !report {
+                continue;
+            }
             moves.push(BodyMoveEvent {
                 body: BodyId::new(r.body(), slot.generation),
                 transform,
@@ -2063,6 +2081,7 @@ impl World {
                 last_transform: None,
                 last_asleep: false,
                 last_solver: None,
+                moves: MoveReports::All,
             });
         }
     }

@@ -134,6 +134,18 @@ pub struct RbVersion {
     pub minor: u32,
 }
 
+/// Which of a body's moves frames report (`rbBody_SetMoveReports`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RbMoveReports {
+    /// Every step it moves (the default).
+    RB_MOVES_ALL = 0,
+    /// Only when it falls asleep, wakes, or is first reported: for bodies the host draws from
+    /// `rbWorld_ExportPoses`, so moves stay per event on the CPU.
+    RB_MOVES_SLEEP_WAKE = 1,
+    RB_MOVES_NONE = 2,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RbContacts {
@@ -176,6 +188,10 @@ pub struct RbWorldDef {
     /// waiting when all are.
     pub readback_frames: u32,
     pub drop_frames: bool,
+    /// Keep the contacts of pairs whose bodies have not moved instead of testing them again
+    /// (three-avbd's `reuseContacts`, `FLAG_REUSE_CONTACTS`; demo.html turns it on for its brick
+    /// and box scenes). Off by default.
+    pub reuse_contacts: bool,
     pub user_data: u64,
     pub internal_value: u32,
 }
@@ -1079,6 +1095,7 @@ pub extern "C" fn rbDefaultWorldDef() -> RbWorldDef {
         enable_soft_bodies: false,
         readback_frames: 3,
         drop_frames: false,
+        reuse_contacts: false,
         user_data: 0,
         internal_value: COOKIE,
     }
@@ -1087,11 +1104,14 @@ pub extern "C" fn rbDefaultWorldDef() -> RbWorldDef {
 fn world_def_of(d: &RbWorldDef) -> anyhow::Result<(WorldDef, Coords)> {
     check_cookie(d.internal_value, "world def not from rbDefaultWorldDef")?;
     let coords = Coords::new(d.coordinates);
-    let solver = AvbdParams {
+    let mut solver = AvbdParams {
         dt: d.time_step,
         iterations: d.iterations,
         ..AvbdParams::default()
     };
+    if d.reuse_contacts {
+        solver.flags |= engine_schema::FLAG_REUSE_CONTACTS;
+    }
     let world_def = WorldDef {
         gravity: coords.linear_in(d.gravity.a()),
         enable_sleep: d.enable_sleep,
@@ -1238,6 +1258,20 @@ pub unsafe extern "C" fn rbBody_GetPoseOffset(world: *mut RbWorld, body: RbBodyI
         let w = world_mut(world)?;
         let t = w.world.body_pose_offset(BodyId::from_bits(body))?;
         write(out, w.transform_out(t))
+    })
+}
+
+/// Which of a body's moves `rbWorld_Poll` reports. The simulation is the same either way.
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_SetMoveReports(world: *mut RbWorld, body: RbBodyId, reports: RbMoveReports) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let r = match reports {
+            RbMoveReports::RB_MOVES_ALL => rubble::MoveReports::All,
+            RbMoveReports::RB_MOVES_SLEEP_WAKE => rubble::MoveReports::SleepWake,
+            RbMoveReports::RB_MOVES_NONE => rubble::MoveReports::None,
+        };
+        w.world.set_body_move_reports(BodyId::from_bits(body), r)
     })
 }
 

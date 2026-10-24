@@ -40,6 +40,16 @@ typedef enum RbResult {
   RB_PANIC = 5,
 } RbResult;
 
+// Which of a body's moves frames report (`rbBody_SetMoveReports`).
+typedef enum RbMoveReports {
+  // Every step it moves (the default).
+  RB_MOVES_ALL = 0,
+  // Only when it falls asleep, wakes, or is first reported: for bodies the host draws from
+  // `rbWorld_ExportPoses`, so moves stay per event on the CPU.
+  RB_MOVES_SLEEP_WAKE = 1,
+  RB_MOVES_NONE = 2,
+} RbMoveReports;
+
 typedef enum RbDestructionType {
   RB_JOINT_BROKE = 0,
   RB_MOUNT_BROKE = 1,
@@ -109,6 +119,10 @@ typedef struct RbWorldDef {
   // waiting when all are.
   uint32_t readback_frames;
   bool drop_frames;
+  // Keep the contacts of pairs whose bodies have not moved instead of testing them again
+  // (three-avbd's `reuseContacts`, `FLAG_REUSE_CONTACTS`; demo.html turns it on for its brick
+  // and box scenes). Off by default.
+  bool reuse_contacts;
   uint64_t user_data;
   uint32_t internal_value;
 } RbWorldDef;
@@ -564,6 +578,11 @@ enum RbResult rbWorld_GetCompletedPoseExport(struct RbWorld *world, uint64_t *ou
 // is the identity when the centre of mass is the body's origin, and changes only when the
 // body's shapes change. In the world's coordinates and units, like the body's shape transforms.
 enum RbResult rbBody_GetPoseOffset(struct RbWorld *world, RbBodyId body, struct RbTransform *out);
+
+// Which of a body's moves `rbWorld_Poll` reports. The simulation is the same either way.
+enum RbResult rbBody_SetMoveReports(struct RbWorld *world,
+                                    RbBodyId body,
+                                    enum RbMoveReports reports);
 
 // A body's slot in the pose buffer and its exports.
 enum RbResult rbBody_GetPoseIndex(struct RbWorld *world, RbBodyId body, uint32_t *out);

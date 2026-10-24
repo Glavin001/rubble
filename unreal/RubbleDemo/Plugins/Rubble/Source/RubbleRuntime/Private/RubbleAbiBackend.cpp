@@ -274,6 +274,7 @@ bool FRubbleAbiBackend::CreateBodies(const FRubbleSceneAssets& Layout, FString& 
 		// Settled stacks start asleep, as the page's settled scenes do; contact wakes them.
 		D.is_awake = V.bAwake;
 		D.linear_velocity = Vec(V.InitialVelocity);
+		D.angular_velocity = Vec(V.InitialAngularVelocity);
 		D.user_data = uint64(SceneAssets->Bodies.Num() + FromLayout.Num());
 		Defs.Add(D);
 		FromLayout.Add(b);
@@ -299,10 +300,14 @@ bool FRubbleAbiBackend::CreateBodies(const FRubbleSceneAssets& Layout, FString& 
 			SD.density = Density(Shape.Material);
 			if (V.Mass > 0.0f && Shape.Kind == ERubbleShape::Box)
 			{
-				// A moving obstacle of a given mass (the 1,500 kg ram, the 18 t truck).
+				// A body of a given mass (the 1,500 kg ram, the 18 t truck, the page's 0.25 kg bricks).
 				SD.density = V.Mass / (8.0f * Shape.HalfExtents.X * Shape.HalfExtents.Y * Shape.HalfExtents.Z);
 			}
-			SD.friction = 0.6f;
+			else if (V.Mass > 0.0f && Shape.Kind == ERubbleShape::Sphere)
+			{
+				SD.density = V.Mass / (4.0f / 3.0f * UE_PI * FMath::Cube(Shape.Radius));
+			}
+			SD.friction = Layout.Friction > 0.0f ? Layout.Friction : 0.6f;
 			RbShapeId Made = 0;
 			RbResult R = RB_OK;
 			switch (Shape.Kind)
@@ -632,6 +637,12 @@ bool FRubbleAbiBackend::LoadAbi(const FRubbleSceneRequest& Request, FString& Err
 		W.max_joints = FMath::Max(W.max_joints, uint32(Layout.SoftBodies.Num() * 16 + 4096));
 	}
 	W.time_step = float(Dt);
+	if (Layout.SolverIterations > 0)
+	{
+		W.iterations = uint32(Layout.SolverIterations);
+	}
+	W.enable_sleep = Layout.bSleep;
+	W.reuse_contacts = Layout.bReuseContacts;
 	if (Request.Family == ERubbleFamily::Fracture)
 	{
 		NumBodies += 4096;
@@ -644,6 +655,15 @@ bool FRubbleAbiBackend::LoadAbi(const FRubbleSceneRequest& Request, FString& Err
 	// 9k); 32 here. Overflow is loud (rbWorld_Poll fails with the flag), never a silent drop.
 	W.max_contacts = FMath::Max(W.max_contacts, uint32(NumBodies * 32));
 	W.max_candidates = FMath::Max(W.max_candidates, uint32(NumBodies * 32));
+	if (Request.Family == ERubbleFamily::Rigid)
+	{
+		// demo.html's sceneCap: power-of-two tiers, contacts and candidates capped at 2^21.
+		const uint32 Tier = FMath::RoundUpToPowerOfTwo(uint32(FMath::Max(NumBodies, 4096)));
+		W.max_bodies = FMath::Max(W.max_bodies, Tier);
+		W.max_colliders = FMath::Max(W.max_colliders, FMath::RoundUpToPowerOfTwo(FMath::Max(Tier * 2, 8192u)));
+		W.max_contacts = FMath::Min(FMath::RoundUpToPowerOfTwo(FMath::Max(Tier * 16, 32768u)), 1u << 21);
+		W.max_candidates = FMath::Min(FMath::RoundUpToPowerOfTwo(FMath::Max(Tier * 32, 65536u)), 1u << 21);
+	}
 	// On Unreal's own GPU device when the platform allows (the GPU Scene renderers then read
 	// the poses in place); -RubbleReadback keeps the world on its own device, read back.
 	FString NoGpu;

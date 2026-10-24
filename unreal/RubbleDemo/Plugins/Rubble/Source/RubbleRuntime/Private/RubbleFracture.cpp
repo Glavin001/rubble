@@ -164,6 +164,7 @@ void ARubbleFracture::Rebuild(const FRubbleSceneAssets& InAssets)
 					FVector4f(FVector3f(ChunkRest[c].GetScale3D()), 0.0f),
 					FVector4f(-1.0f, -1.0f, -1.0f, 0.0f) }); // no tint: the material's own colour (as a plain mesh)
 				GpuChunks[c] = G;
+				Gpu->DrawnOnGpu(V.Body); // its wake still reaches OnFrame, which shatters the proxy
 			}
 		}
 		for (const int32 c : D.Chunks)

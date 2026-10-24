@@ -183,6 +183,49 @@ unsafe fn poll_all(w: *mut RbWorld) -> RbFrame {
     f
 }
 
+/// A body reporting only sleep and wake (RB_MOVES_SLEEP_WAKE) falls and sleeps exactly as one
+/// reporting every move, but its frames carry only its first report and its sleep.
+#[test]
+fn move_reports_filter_frames_not_the_simulation() {
+    unsafe {
+        let w = world(RbCoordinates::RB_COORDINATES_Y_UP_METRES);
+        ground(w, false);
+        let mut bodies = [0u64; 2];
+        for (k, x) in [-2.0f32, 2.0].into_iter().enumerate() {
+            let mut def = rbDefaultBodyDef();
+            def.type_ = RbBodyType::RB_DYNAMIC_BODY;
+            def.transform.p = RbVec3 { x, y: 3.0, z: 0.0 };
+            ok(rbCreateBody(w, &def, &mut bodies[k]));
+            let mut s = 0;
+            ok(rbCreateBoxShape(w, bodies[k], &rbDefaultShapeDef(), RbVec3 { x: 0.5, y: 0.5, z: 0.5 }, RbTransform::default(), &mut s));
+        }
+        let (all, quiet) = (bodies[0], bodies[1]);
+        ok(rbBody_SetMoveReports(w, quiet, RbMoveReports::RB_MOVES_SLEEP_WAKE));
+        let (mut all_moves, mut quiet_moves, mut quiet_slept) = (0, 0, false);
+        for _ in 0..400 {
+            ok(rbWorld_Step(w));
+            let f = poll_all(w);
+            if f.has_frame {
+                for m in std::slice::from_raw_parts(f.moves, f.move_count as usize) {
+                    if m.body == all {
+                        all_moves += 1;
+                    } else if m.body == quiet {
+                        quiet_moves += 1;
+                        quiet_slept |= m.fell_asleep;
+                    }
+                }
+            }
+        }
+        assert!(all_moves > 20, "the default reports every move ({all_moves})");
+        assert!(quiet_slept && quiet_moves <= 3, "sleep and wake only ({quiet_moves} moves)");
+        let (mut a, mut q) = (RbTransform::default(), RbTransform::default());
+        ok(rbBody_GetTransform(w, all, &mut a));
+        ok(rbBody_GetTransform(w, quiet, &mut q));
+        assert!((a.p.y - q.p.y).abs() < 1e-4, "both rest the same: {a:?} {q:?}");
+        rbDestroyWorld(w);
+    }
+}
+
 #[test]
 fn a_box_falls_rests_and_sleeps_through_the_abi() {
     unsafe {

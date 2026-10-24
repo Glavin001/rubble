@@ -144,8 +144,10 @@ struct FRubbleBodyVisual
 	bool bStatic = false;
 	/** Starts awake (dropped grids) or asleep until something hits it (the pages' settled stacks). */
 	bool bAwake = false;
-	/** A moving obstacle (a ram, a shunting truck, a crusher block): its start velocity and mass. */
+	/** A moving obstacle (a ram, a shunting truck, a crusher block, an impactor ball): its start
+	 *  velocity (cm/s), spin (rad/s) and mass (kg; 0: the material's density). */
 	FVector InitialVelocity = FVector::ZeroVector;
+	FVector InitialAngularVelocity = FVector::ZeroVector;
 	float Mass = 0.0f;
 };
 
@@ -234,6 +236,13 @@ struct FRubbleSceneAssets
 	float GroundHalfExtentCm = 10000.0f;
 	FVector CameraEye = FVector(-3000.0, -1500.0, 1500.0);
 	FVector CameraTarget = FVector::ZeroVector;
+	/** The page's solver settings for the scene: iterations (0: the world default), friction
+	 *  (0: the client default) and whether resting bodies sleep. */
+	int32 SolverIterations = 0;
+	float Friction = 0.0f;
+	bool bSleep = true;
+	/** The page's reuseContacts (flags: 1): keep the contacts of pairs that have not moved. */
+	bool bReuseContacts = false;
 
 	TArray<FRubbleMeshData> Meshes;
 	TArray<FRubbleShapeVisual> Shapes;

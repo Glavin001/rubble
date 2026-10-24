@@ -65,6 +65,11 @@ public:
 	 *  records are solver poses (centre of mass), so a shape draws at Local x Offset x record. */
 	FTransform PoseOffset(FRubbleBodyId Body) const;
 
+	/** A body is drawn from these poses: its frames then report only its sleep and wake changes
+	 *  (rbBody_SetMoveReports), so moves stay per event on the CPU (rubble.GpuScene.AllMoves 1
+	 *  keeps every move). */
+	void DrawnOnGpu(FRubbleBodyId Body) const;
+
 	/** Exports skipped because every slot was busy (the GPU running behind), for the HUD. */
 	uint64 SkippedExports() const { return Skipped; }
 
