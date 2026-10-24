@@ -105,6 +105,9 @@ thread_local! {
     // Strike prediction as the lab set it (`stress_set_strike_prediction`), None: the
     // profile's own (`Profile::predicts_strikes`). Kept across loads of one profile.
     static STRIKE: Cell<Option<bool>> = const { Cell::new(None) };
+    // A change of it the loaded world has not taken yet: the next frame applies it (a
+    // frame holds the device and the world across its GPU waits).
+    static STRIKE_PENDING: Cell<bool> = const { Cell::new(false) };
     /// The physics frame rate of the next `stress_load` (`stress_set_physics_hz`); 0 keeps
     /// the scene's own.
     static PHYSICS_HZ: Cell<f64> = const { Cell::new(0.0) };
@@ -311,20 +314,23 @@ pub fn stress_set_profile(name: String) -> Result<(), JsValue> {
 /// only, no re-simulation). Off, the engine's contact meets the whole structure first and
 /// the shot rebounds; bonds break only on the contact loads after the step.
 #[wasm_bindgen]
-pub fn stress_set_strike_prediction(on: bool) -> Result<(), JsValue> {
+pub fn stress_set_strike_prediction(on: bool) {
     STRIKE.set(Some(on));
-    let err = |e: String| JsValue::from_str(&e);
-    DEVICE.with_borrow(|d| -> Result<(), JsValue> {
-        let Some(d) = d.as_ref() else { return Ok(()) };
-        WORLD.with_borrow_mut(|w| w.as_mut().map_or(Ok(()), |l| l.world.set_strike_prediction(on))).map_err(err)?;
-        TWORLD.with_borrow_mut(|w| w.as_mut().map_or(Ok(()), |l| l.world.set_strike_prediction(&d.gpu, on))).map_err(err)
-    })
+    // Taken by the loaded world at its next frame (`frame` holds the world across its GPU
+    // waits, so it is not touched here).
+    STRIKE_PENDING.set(true);
 }
 
-/// Whether the loaded world predicts strikes (the profile's own unless the lab set it).
+/// Whether strike prediction is on: as the lab set it, else the loaded world's (its
+/// profile's own).
 #[wasm_bindgen]
 pub fn stress_strike_prediction() -> bool {
-    WORLD.with_borrow(|w| w.as_ref().map(|l| l.world.predict_strikes)).or_else(|| TWORLD.with_borrow(|w| w.as_ref().map(|l| l.world.strike_prediction()))).unwrap_or_else(|| STRIKE.get().unwrap_or(PROFILE.get().predicts_strikes()))
+    if let Some(on) = STRIKE.get() {
+        return on;
+    }
+    let loaded = WORLD.with(|w| w.try_borrow().ok().and_then(|w| w.as_ref().map(|l| l.world.predict_strikes)));
+    let loaded = loaded.or_else(|| TWORLD.with(|w| w.try_borrow().ok().and_then(|w| w.as_ref().map(|l| l.world.strike_prediction()))));
+    loaded.unwrap_or_else(|| PROFILE.get().predicts_strikes())
 }
 
 /// The physics frame rate (Hz) of the next `stress_load`: one resident frame per
@@ -517,6 +523,7 @@ fn load(level: u8) -> Result<(), String> {
             let gpu = &d.gpu;
             let s = SHOOTING.get().expect("shooting set");
             let mut world = stress_rubble::threshold::ThresholdWorld::with_profile(gpu, &scene, s.radius, s.mass, profile)?;
+            STRIKE_PENDING.set(false);
             if let Some(on) = STRIKE.get() {
                 world.set_strike_prediction(gpu, on)?;
             }
@@ -543,6 +550,7 @@ fn load(level: u8) -> Result<(), String> {
         world.redo_fractured_frames = false;
         world.set_impact_islands(true);
         world.apply_profile(profile);
+        STRIKE_PENDING.set(false);
         if let Some(on) = STRIKE.get() {
             world.set_strike_prediction(on)?;
         }
@@ -607,6 +615,11 @@ fn camera_view(width: u32, height: u32) -> ([[f32; 4]; 4], Vec3) {
 /// finished them (never waited for). Nothing here reads the GPU.
 fn frame_threshold(d: &mut Device, l: &mut TLoaded, elapsed_ms: f64) -> Result<(), String> {
     let gpu = &d.gpu;
+    if STRIKE_PENDING.replace(false) {
+        if let Some(on) = STRIKE.get() {
+            l.world.set_strike_prediction(gpu, on)?;
+        }
+    }
     let (width, height) = SIZE.get();
     if (width, height) != (d.config.width, d.config.height) {
         d.config.width = width;
@@ -717,6 +730,11 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
         WORLD.with_borrow_mut(|w| {
             let Some(l) = w.as_mut() else { return Ok(()) };
             let gpu = &d.gpu;
+            if STRIKE_PENDING.replace(false) {
+                if let Some(on) = STRIKE.get() {
+                    l.world.set_strike_prediction(on)?;
+                }
+            }
             let (width, height) = SIZE.get();
             if (width, height) != (d.config.width, d.config.height) {
                 d.config.width = width;
