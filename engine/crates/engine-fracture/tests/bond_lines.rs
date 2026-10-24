@@ -88,3 +88,40 @@ fn scene_packs() {
         lines_follow_joints(&scene, &path.display().to_string());
     }
 }
+
+/// ScenePack v2 gives fatal limits per material (`defaults.solver.materials[m]`, the bond's `m`),
+/// with no pack-wide `limits`: each bond's strength follows its material's, finite, and scales
+/// with them (a weaker material, a weaker bond of the same area).
+#[test]
+fn pack_v2_bonds_take_their_materials_limits() {
+    let pack = |m: u32| {
+        serde_json::json!({
+            "version": 2, "key": "v2-limits",
+            "defaults": { "solver": { "materials": [
+                { "name": "strong", "tensionFatal": 4.0e6, "compressionFatal": 2.0e7, "shearFatal": 6.0e6 },
+                { "name": "weak", "tensionFatal": 1.0e6, "compressionFatal": 5.0e6, "shearFatal": 1.5e6 }
+            ] } },
+            "scenario": {
+                "nodes": [
+                    { "centroid": { "x": 0.0, "y": 0.5, "z": 0.0 }, "mass": 10.0, "volume": 1.0 },
+                    { "centroid": { "x": 1.0, "y": 0.5, "z": 0.0 }, "mass": 10.0, "volume": 1.0 }
+                ],
+                "nodeSizes": [ { "x": 1.0, "y": 1.0, "z": 1.0 }, { "x": 1.0, "y": 1.0, "z": 1.0 } ],
+                "bonds": [ { "node0": 0, "node1": 1, "centroid": { "x": 0.5, "y": 0.5, "z": 0.0 },
+                             "normal": { "x": 1.0, "y": 0.0, "z": 0.0 }, "area": 1.0, "m": m } ]
+            }
+        })
+        .to_string()
+    };
+    let strength = |m: u32| {
+        let (scene, _) = build_pack_scene(pack(m).as_bytes()).unwrap();
+        assert_eq!(scene.joints.len(), 1);
+        scene.joints[0].strength
+    };
+    let (strong, weak) = (strength(0), strength(1));
+    assert!(strong.iter().all(|s| s.is_finite()), "finite: {strong:?}");
+    for k in 0..3 {
+        assert!(weak[k] < strong[k], "component {k}: weak {} vs strong {}", weak[k], strong[k]);
+    }
+    assert!((strong[0] / weak[0] - 4.0).abs() < 1e-9, "tension follows the material's");
+}

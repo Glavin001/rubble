@@ -113,6 +113,23 @@ pub fn build_pack_scene(bytes: &[u8]) -> Result<(Scene, PackInfo)> {
         limit("compressionFatal"),
         limit("shearFatal"),
     );
+    // ScenePack v2 gives the limits per material (`defaults.solver.materials[m]`, a bond's
+    // `m`); a pack-wide `limits` block, when present, still applies to every bond.
+    let materials = json["defaults"]["solver"]["materials"].as_array();
+    let bond_limits = |b: &Value| -> (f64, f64, f64) {
+        if !limits.is_null() {
+            return (l_tension, l_compression, l_shear);
+        }
+        let m = b["m"].as_u64().and_then(|m| materials.and_then(|ms| ms.get(m as usize)));
+        match m {
+            Some(m) => (
+                f(m, "tensionFatal").unwrap_or(f64::INFINITY),
+                f(m, "compressionFatal").unwrap_or(f64::INFINITY),
+                f(m, "shearFatal").unwrap_or(f64::INFINITY),
+            ),
+            None => (l_tension, l_compression, l_shear),
+        }
+    };
     let color = base_color(&key);
 
     let centroid: Vec<V3> = nodes
@@ -443,6 +460,7 @@ pub fn build_pack_scene(bytes: &[u8]) -> Result<(Scene, PackInfo)> {
         let mut n = norm(v3(&b["normal"])?);
         let c = add(v3(&b["centroid"])?, shift);
         let area = f(b, "area").unwrap_or(0.0).max(1e-8);
+        let (l_tension, l_compression, l_shear) = bond_limits(b);
         let (mut a, mut o) = (i0, i1);
         if map[a].support {
             if map[o].support {
