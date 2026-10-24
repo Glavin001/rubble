@@ -30,6 +30,9 @@ naga = { version = "24", features = ["spv-in", "wgsl-in", "wgsl-out"] }
 default = ["gpu"]
 gpu = ["dep:wgpu", "dep:pollster"]
 
+[dev-dependencies]
+engine-terrain.workspace = true
+
 [build-dependencies]
 engine-slang-build.workspace = true
 anyhow.workspace = true

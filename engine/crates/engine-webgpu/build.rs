@@ -373,6 +373,16 @@ fn compile_all(slang_root: &Path, out_dir: &Path) -> Result<Compiled> {
         .arg(slang_root.join("kernels/soft_skin.slang"))
         .status()?;
     anyhow::ensure!(status.success(), "slangc failed for soft_skin.slang");
+    // MPM material probe (tests/mpm_material.rs): standalone, with its own bindings,
+    // so it stays out of the world's pipeline table.
+    compile_with_defines(
+        &slang_root.join("kernels/mpm_material_probe.slang"),
+        "mpm_material_probe",
+        SlangTarget::Wgsl,
+        &wgsl_dir.join("mpm_material_probe.wgsl"),
+        &[],
+        &[("ENGINE_WGSL", "1")],
+    )?;
     if !wgsl_failed.is_empty() {
         warnings.push(format!("direct WGSL failed: {}", wgsl_failed.join(", ")));
     }
