@@ -33,6 +33,15 @@ pub type Dof = [f64; 6];
 pub const LOWER: f64 = 1e-6;
 pub const UPPER: f64 = 2.0;
 
+/// The lower end for a strike's increment, solved from rest within one step (the in-step
+/// contact fracture, fracture.slang `fr_cs_*`, `capability::CONTACT_SWEEPS` sweeps). A
+/// strike's load has to reach the structure's supports (a wall bends as a plate): on a
+/// 10 x 2 x 11 wall with a point load at its middle, 256 sweeps with this lower end come
+/// within 2.4 % of the direct solve everywhere; 64 sweeps with 1e-2 left 78 % (the load
+/// still bunched at the hit, its bonds over-loaded: measured 2026-10-24, the test
+/// below).
+pub const IMPACT_LOWER: f64 = 1e-4;
+
 /// The coefficients `(c1, c2)` of Chebyshev's recurrence at its limit (the optimal
 /// stationary second-order iteration for `[lower, UPPER]`; Saad, Alg. 12.1 as its `rho`
 /// converges): each sweep `d = c1 d + c2 D^-1 r`, `x += d`, with `d` carried from sweep to
@@ -527,6 +536,56 @@ mod tests {
         let pin = fixed.iter().position(|&p| p).expect("a pin");
         let reaction = lin(&r[pin]).norm() + ang(&r[pin]).norm();
         assert!(reaction <= 1e-6 * 500.0, "the pin carries {reaction:e}");
+    }
+
+    /// A strike's increment, solved from rest in one step (the in-step contact fracture's
+    /// `IMPACT_LOWER` and `CONTACT_SWEEPS`), on a wall anchored at its base (10 x 2 x 11
+    /// chunks of 0.1 m) with a point load at its middle: the bonds of the struck chunk and
+    /// its neighbours (the near field, where a strike breaks bonds) and every bond in the
+    /// wall reach the direct solve's forces to 3 % of the largest.
+    #[test]
+    fn a_strike_increment_converges_in_one_step_near_the_hit() {
+        use crate::builders::{auto_bonds, body, grid, grid_index, new_scene, oracle_concrete};
+        let mut scene = new_scene("wall", "a wall for a point load");
+        scene.materials.insert("concrete".into(), oracle_concrete(None));
+        let counts = [10, 2, 11];
+        let mut chunks = grid(Vec3::new(-0.5, 0.0, 0.0), counts, Vec3::splat(0.1), "concrete");
+        for i in 0..counts[0] {
+            for j in 0..counts[1] {
+                chunks[grid_index(counts, i, j, 0)].support = crate::scene::Support::Fixed;
+            }
+        }
+        let bonds = auto_bonds(&chunks, |_, _| "concrete".into());
+        scene.bodies.push(body("wall", chunks, bonds));
+        let sv = ReferenceSolver::new(&scene.with_derived());
+        let net = network_of(&sv);
+        let hit = grid_index(counts, 5, 0, 5);
+        let mut f = vec![[0.0; 6]; net.chunks.len()];
+        f[hit][1] = 5e5; // into the wall
+        let fixed = net.fixed();
+        let alive = vec![true; net.bonds.len()];
+        let mut exact = vec![[0.0; 6]; net.chunks.len()];
+        let (_, rel) = net.solve(&f, &fixed, &alive, &mut exact, 1e-12, 20_000);
+        assert!(rel <= 1e-12);
+        let mut x = vec![[0.0; 6]; net.chunks.len()];
+        let mut d = vec![[0.0; 6]; net.chunks.len()];
+        assert!(net.sweep(&f, &fixed, &alive, &mut x, &mut d, crate::capability::CONTACT_SWEEPS, IMPACT_LOWER));
+        let size = |q: &Local6| q.lin.norm() + q.ang.norm() / 0.05;
+        let scale = (0..net.bonds.len()).map(|i| size(&net.force(i, &exact))).fold(0.0, f64::max);
+        let near: Vec<usize> = (0..net.bonds.len()).filter(|&i| (net.bonds[i].centroid - net.chunks[hit].centre).norm() < 0.16).collect();
+        let near_scale = near.iter().map(|&i| size(&net.force(i, &exact))).fold(0.0, f64::max);
+        let (mut near_err, mut far_err) = (0.0f64, 0.0f64);
+        for i in 0..net.bonds.len() {
+            let (a, b) = (net.force(i, &exact), net.force(i, &x));
+            let e = (a.lin - b.lin).norm() + (a.ang - b.ang).norm() / 0.05;
+            if near.contains(&i) {
+                near_err = near_err.max(e / near_scale);
+            }
+            far_err = far_err.max(e / scale);
+        }
+        println!("near field (bonds {}): {near_err:.2e} of its largest; anywhere: {far_err:.2e} of the largest", near.len());
+        assert!(near_err <= 0.03, "near field {near_err:e}");
+        assert!(far_err <= 0.03, "far field {far_err:e}");
     }
 
     #[test]

@@ -226,6 +226,19 @@ Each mode starts with its own setting: on for threshold, load path and local imp
 the blast_parity stress solver. Switching it applies at once.
 `stress-rubble/tests/strike_through.rs` checks both on the cuboid house.
 
+**In-step contact fracture (fracture-world stress modes).** The checkbox beside
+**Strike prediction**; on by default in **load path**, and it reloads the scene. Within
+rubble's step, where its broad phase ends, a body about to strike a structure has the
+strike's load solved by the load path before the step solves:
+- the bonds break by their own strength and the structure splits, so the striker meets the
+  pieces; or nothing breaks and the striker does not get through;
+- the load is the impulse that stops the striker against the whole structure, at its Hertz
+  peak: an upper bound, so it breaks more than the explicit reference does (see
+  `engine/docs/stress-threshold-gpu.md`);
+- with it on, strikes are not also predicted at the end of a frame (Strike prediction off).
+
+`stress-rubble/tests/contact_fracture.rs` checks it.
+
 **Browser support (stress modes).** The stress-solver modes wait on the GPU from Rust.
 Chrome and Edge 137+ suspend the wasm stack there with WebAssembly JavaScript Promise
 Integration (JSPI). Other WebGPU browsers (Safari, including iPhone) load an Asyncify build of

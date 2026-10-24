@@ -137,7 +137,9 @@ fn gpu_world(gpu: &Gpu, profile: Profile, predict: bool, speed: f64) -> Path {
 fn fracture_world(gpu: &Gpu, profile: Profile, predict: bool, speed: f64) -> Path {
     let scene = house(profile);
     let (desc, wall_x) = ball(&scene, speed);
-    let mut w = ThresholdWorld::with_profile(gpu, &scene, RADIUS, MASS, profile).expect("fracture world");
+    // The end-of-frame strike prediction alone (the in-step contact fracture off: its own
+    // tests are tests/contact_fracture.rs).
+    let mut w = ThresholdWorld::with_contact_fracture(gpu, &scene, RADIUS, MASS, profile, Some(false)).expect("fracture world");
     w.set_strike_prediction(gpu, predict).expect("strike prediction");
     assert!(w.launch(gpu, &desc));
     let mut path = Path::new(wall_x);

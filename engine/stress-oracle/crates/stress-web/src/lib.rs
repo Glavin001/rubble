@@ -108,6 +108,10 @@ thread_local! {
     // A change of it the loaded world has not taken yet: the next frame applies it (a
     // frame holds the device and the world across its GPU waits).
     static STRIKE_PENDING: Cell<bool> = const { Cell::new(false) };
+    // The in-step contact fracture as the lab set it (`stress_set_contact_fracture`), None:
+    // the profile's own (`Profile::contact_fracture`). Taken when a world is made; kept
+    // across loads of one profile.
+    static CONTACT: Cell<Option<bool>> = const { Cell::new(None) };
     /// The physics frame rate of the next `stress_load` (`stress_set_physics_hz`); 0 keeps
     /// the scene's own.
     static PHYSICS_HZ: Cell<f64> = const { Cell::new(0.0) };
@@ -303,6 +307,7 @@ pub fn stress_set_profile(name: String) -> Result<(), JsValue> {
     let p = Profile::parse(&name).ok_or_else(|| JsValue::from_str(&format!("no profile {name}")))?;
     if p != PROFILE.get() {
         STRIKE.set(None);
+        CONTACT.set(None);
     }
     PROFILE.set(p);
     Ok(())
@@ -319,6 +324,30 @@ pub fn stress_set_strike_prediction(on: bool) {
     // Taken by the loaded world at its next frame (`frame` holds the world across its GPU
     // waits, so it is not touched here).
     STRIKE_PENDING.set(true);
+}
+
+/// The in-step contact fracture on or off for the next load (the fracture world's
+/// profiles: threshold, load_path, impact_local): within rubble's step, a body about to
+/// strike a structure has the strike's load solved by the load path before the step
+/// solves, so its bonds break by their strength and the structure splits before the
+/// contact, or nothing breaks and the striker rebounds. Made with the world (its shots
+/// become CCD bodies): the lab reloads.
+#[wasm_bindgen]
+pub fn stress_set_contact_fracture(on: bool) {
+    CONTACT.set(Some(on));
+}
+
+/// Whether the loaded world runs the in-step contact fracture (false for a world without
+/// one: the GPU stress solver's).
+#[wasm_bindgen]
+pub fn stress_contact_fracture() -> bool {
+    TWORLD.with(|w| w.try_borrow().ok().and_then(|w| w.as_ref().map(|l| l.world.contact_fracture() > 0))).unwrap_or(false)
+}
+
+/// Whether the loaded world can run the in-step contact fracture (the fracture world).
+#[wasm_bindgen]
+pub fn stress_contact_fracture_available() -> bool {
+    TWORLD.with(|w| w.try_borrow().ok().is_some_and(|w| w.is_some()))
 }
 
 /// Whether strike prediction is on: as the lab set it, else the loaded world's (its
@@ -522,7 +551,7 @@ fn load(level: u8) -> Result<(), String> {
             let d = d.as_ref().ok_or("stress_init first")?;
             let gpu = &d.gpu;
             let s = SHOOTING.get().expect("shooting set");
-            let mut world = stress_rubble::threshold::ThresholdWorld::with_profile(gpu, &scene, s.radius, s.mass, profile)?;
+            let mut world = stress_rubble::threshold::ThresholdWorld::with_contact_fracture(gpu, &scene, s.radius, s.mass, profile, CONTACT.get())?;
             STRIKE_PENDING.set(false);
             if let Some(on) = STRIKE.get() {
                 world.set_strike_prediction(gpu, on)?;
@@ -689,6 +718,9 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, elapsed_ms: f64) -> Result<(
         "frameHz": 1.0 / dt,
         "profile": PROFILE.get().name(),
         "strikePrediction": l.world.strike_prediction(),
+        "contactFracture": l.world.contact_fracture() > 0,
+        "contactStrikes": st.contact_strikes,
+        "contactBreaks": st.contact_breaks,
         // As the GPU last finished them (a frame or two behind).
         "frames": l.world.frame,
         "statsFrame": st.frame,

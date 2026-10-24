@@ -97,6 +97,10 @@ pub enum StrikeModel {
 /// The load path's sweeps a frame in the `LoadPath` profile.
 pub const LOAD_PATH_SWEEPS: u32 = 16;
 
+/// The in-step contact fracture's sweeps for a strike's load (`Profile::contact_fracture`;
+/// load_path.rs `IMPACT_LOWER` says why so many).
+pub const CONTACT_SWEEPS: u32 = 256;
+
 /// The model features `BlastParity` turns off (`SimFeatures` names).
 pub const BLAST_PARITY_FEATURES_OFF: [&str; 8] = ["softening", "weibull", "crack_contact", "rate_effects", "static_fatigue", "buckling", "rebar", "damping"];
 
@@ -181,6 +185,39 @@ impl Profile {
     /// `ThresholdWorld`): its models exist only there.
     pub fn fracture_world_only(self) -> bool {
         matches!(self, Profile::LoadPath | Profile::ImpactLocal)
+    }
+
+    /// The fracture world's in-step contact fracture: its sweeps for a strike's load, 0
+    /// off. Within the engine's step, where its broadphase ends, a structure a body is
+    /// about to strike (one of the step's candidate pairs, closing faster than the strike
+    /// speed) has the strike's load solved by the load path before the step solves: its
+    /// bonds break by their own strength and it splits, so the step meets the pieces; or
+    /// nothing breaks and the striker rebounds. On in `load_path` (which then does not
+    /// predict strikes at the end of a frame), off elsewhere; native runs override it with
+    /// `STRESS_CONTACT_FRACTURE=0|1` and `STRESS_CONTACT_SWEEPS=N` (even).
+    pub fn contact_fracture(self) -> Result<u32, String> {
+        let mut sweeps = match self {
+            Profile::LoadPath => CONTACT_SWEEPS,
+            _ => 0,
+        };
+        let var = |name: &str| std::env::var(name).ok();
+        let n = match var("STRESS_CONTACT_SWEEPS") {
+            Some(v) => v.parse::<u32>().map_err(|_| format!("STRESS_CONTACT_SWEEPS={v}: not a count"))?,
+            None => CONTACT_SWEEPS,
+        };
+        if n == 0 || n % 2 != 0 {
+            return Err(format!("contact fracture: {n} sweeps; it takes an even count of at least 2"));
+        }
+        match var("STRESS_CONTACT_FRACTURE").as_deref() {
+            None => {}
+            Some("0") => sweeps = 0,
+            Some("1") => sweeps = n,
+            Some(v) => return Err(format!("STRESS_CONTACT_FRACTURE={v}: 0 or 1")),
+        }
+        if sweeps > 0 {
+            sweeps = n;
+        }
+        Ok(sweeps)
     }
 
     /// The fracture world's models under the profile, then the environment's overrides

@@ -278,6 +278,16 @@ pub mod shaders {
             ("fr_il_mark", (64, 1, 1)),
             ("fr_il_breaks", (64, 1, 1)),
             ("fr_il_carry", (64, 1, 1)),
+            ("fr_cs_reset", (64, 1, 1)),
+            ("fr_cs_pairs", (64, 1, 1)),
+            ("fr_cs_pick", (64, 1, 1)),
+            ("fr_cs_pick2", (64, 1, 1)),
+            ("fr_cs_force", (64, 1, 1)),
+            ("fr_cs_count", (64, 1, 1)),
+            ("fr_cs_base", (64, 1, 1)),
+            ("fr_cs_collect", (64, 1, 1)),
+            ("fr_cs_gate", (1, 1, 1)),
+            ("fr_cs_solve", (256, 1, 1)),
         ]
     );
 

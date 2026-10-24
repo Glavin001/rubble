@@ -174,7 +174,7 @@ async function loadLevel(level){
   // static equilibrium (bonds carrying their load) rather than at zero force.
   // Breakable bonds are experimental (opt-in): see README "Breakable bonds".
   if(stressMode())return loadStress(level);
-  stressOn=false;$('view').hidden=false;$('stress-view').hidden=true;if(stress)stress.running=false;$('strike-prediction').disabled=true;
+  stressOn=false;$('view').hidden=false;$('stress-view').hidden=true;if(stress)stress.running=false;$('strike-prediction').disabled=true;$('contact-fracture').disabled=true;
   learned?.dispose();learned=null;learnedMs=0;
   const raw=procedural==='pack'?buildPackScene(packBytes):procedural?buildCuboidHouse():buildScene(asset,level,{maxHullVertices});
   const built=physicsHz()?withParams(raw,{dt:1/physicsHz()}):raw;
@@ -233,6 +233,7 @@ async function loadStress(level){
  $('fragments').textContent=st.chunks;$('bonds').textContent=st.bonds;$('hulls').textContent=st.hulls;$('awake').textContent='0';$('contacts').textContent='—';
  $('release').textContent='Start simulation';$('fire').hidden=true;
  $('strike-prediction').checked=stress.strikePrediction;$('strike-prediction').disabled=false;
+ $('contact-fracture').checked=stress.contactFracture;$('contact-fracture').disabled=!stress.contactFractureAvailable;
  setStatus(`Stress solver · ${st.chunks} chunks · ${st.bonds} bonds · ${PROFILE_NOTES[profile]??profile}, resident GPU frame at ${Math.round(st.frameHz)} Hz${cuboid||pack?'':' · one copy'}${stressWarning(st)} · click the model to shoot`);
 }
 async function importBytes(bytes,name,sampleKey="",entry={}){
@@ -309,6 +310,7 @@ $('level').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('view-mode').onchange=()=>{if(renderer)renderer.colorMode=viewMode();applyView()};
 $('show-bonds').onchange=applyView;
 $('strike-prediction').onchange=()=>{if(stressOn&&stress)stress.setStrikePrediction($('strike-prediction').checked)};
+$('contact-fracture').onchange=()=>{if(stressOn&&stress){stress.setContactFracture($('contact-fracture').checked);serializeLoad(()=>loadLevel(Number($('level').value)))}};
 $('ball-mass').oninput=applyBallMass;
 $('ball-speed').oninput=applyBallSpeed;
 $('ball-ccd').onchange=applyBallCcd;
