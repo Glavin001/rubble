@@ -203,6 +203,60 @@ pub fn layout_constants() -> String {
     serde_json::Value::Object(m).to_string()
 }
 
+/// Character / query / projectile pool layout (`character_layout.slang`), the
+/// continuous-collision words and flags a browser host writes (impulse records,
+/// CCD and kinematic body flags, the event ring), as a JSON object.
+#[wasm_bindgen]
+pub fn motion_constants() -> String {
+    use engine_schema as s;
+    let mut m: serde_json::Map<String, serde_json::Value> =
+        s::character::LAYOUT.iter().map(|&(n, v)| (n.into(), v.into())).collect();
+    for (n, v) in [
+        ("BODY_CCD", s::BODY_CCD),
+        ("BODY_KINEMATIC", s::BodyFlags::Kinematic as u32),
+        ("FLAG_SPEC_VELOCITY", s::FLAG_SPEC_VELOCITY),
+        ("IMPULSE_BASE", s::IMPULSE_BASE),
+        ("IMPULSE_COUNT", s::IMPULSE_COUNT),
+        ("IMPULSE_FIRST", s::IMPULSE_FIRST),
+        ("IMPULSE_WORDS", s::IMPULSE_WORDS),
+        ("IMPULSE_CAP", s::IMPULSE_CAP),
+        ("IMPULSE_AT_POINT", s::IMPULSE_AT_POINT),
+        ("IMPULSE_SET_VELOCITY", s::IMPULSE_SET_VELOCITY),
+        ("CCD_FALLBACKS", s::CCD_FALLBACKS),
+        ("CCD_BODY_CAP", s::CCD_BODY_CAP),
+        ("CCD_PAIR_CAP", s::CCD_PAIR_CAP),
+        ("FAST_CAP", s::FAST_CAP),
+        ("SCRATCH_WORDS", s::SCRATCH_WORDS),
+        ("EVENT_RING_BASE", s::EVENT_RING_BASE),
+        ("EVENT_RING_CAPACITY", s::EVENT_RING_CAPACITY),
+        ("NO_INDEX", s::character::NO_INDEX),
+    ] {
+        m.insert(n.into(), v.into());
+    }
+    serde_json::Value::Object(m).to_string()
+}
+
+/// A character's record (16 float4 slots as words) from a `CharacterDesc` JSON
+/// (snake_case fields; missing ones take the defaults).
+#[wasm_bindgen]
+pub fn character_record(desc_json: &str, inner_body: u32, x: f32, y: f32, z: f32) -> Result<Vec<u32>, JsError> {
+    let mut v: serde_json::Value = parse(desc_json)?;
+    let mut base = serde_json::to_value(engine_schema::character::CharacterDesc::default()).map_err(err)?;
+    if let (Some(b), Some(o)) = (base.as_object_mut(), v.as_object_mut()) {
+        for (k, val) in o.iter() {
+            b.insert(k.clone(), val.clone());
+        }
+    }
+    let d: engine_schema::character::CharacterDesc = serde_json::from_value(base).map_err(err)?;
+    Ok(d.record(inner_body, [x, y, z]).iter().flatten().copied().collect())
+}
+
+/// Default character descriptor (JSON).
+#[wasm_bindgen]
+pub fn character_default() -> String {
+    serde_json::to_string(&engine_schema::character::CharacterDesc::default()).unwrap()
+}
+
 /// Op codes of the stream (JSON object, `OP_*` names).
 #[wasm_bindgen]
 pub fn op_codes() -> String {
@@ -210,6 +264,13 @@ pub fn op_codes() -> String {
         "OP_WRITE_BODY": OP_WRITE_BODY, "OP_WRITE_COLLIDER": OP_WRITE_COLLIDER, "OP_WRITE_SLOTS": OP_WRITE_SLOTS,
         "OP_WRITE_BYTES": OP_WRITE_BYTES, "OP_WRITE_SOFT_SLOTS": OP_WRITE_SOFT_SLOTS})
     .to_string()
+}
+
+/// Design-space centre of mass of a descriptor: where `add_vehicle` puts the
+/// chassis body's origin (place a vehicle by a design point with it).
+#[wasm_bindgen]
+pub fn center_of_mass(desc_json: &str) -> Result<Vec<f32>, JsError> {
+    Ok(parse::<VehicleDesc>(desc_json)?.center_of_mass().to_vec())
 }
 
 /// Pool sizes a descriptor needs (JSON, camelCase).
@@ -539,7 +600,7 @@ impl RigidStep {
         let c = |i: usize| counts.get(i).copied().unwrap_or(0);
         // counts[5..15]: soft counts (WasmSoftHost::counts), counts[15]: collision filters
         // in use, counts[16]: the soft dual pass has work, counts[17]: particle
-        // sweeps per iteration.
+        // sweeps per iteration, counts[18..22]: motion (below).
         let soft = rp::SoftCounts {
             bodies: c(5),
             beams: c(6),
@@ -574,6 +635,22 @@ impl RigidStep {
             wheel_count: wheels,
             soft,
             command_count: 0,
+            // counts[18]: bit 0 CCD bodies, bit 1 kinematic bodies, bit 2 impulse
+            // records this step; counts[19] projectiles, counts[20] characters,
+            // counts[21] queries.
+            motion: {
+                let bits = c(18);
+                rp::MotionInputs {
+                    ccd: bits & 1 != 0,
+                    kinematic: bits & 2 != 0,
+                    impulses: bits & 4 != 0,
+                    look_ahead: self.params.flags & engine_schema::FLAG_SPEC_VELOCITY != 0,
+                    projectiles: c(19),
+                    characters: c(20),
+                    queries: c(21),
+                    fast_list_off: false,
+                }
+            },
         }
     }
 
@@ -640,22 +717,27 @@ impl RigidStep {
         // fused particle sweep (small colours) and one dispatch per colour.
         // After the first step, colours and colouring rounds past last step's
         // counts run in the tail kernels.
-        // Several soft bodies: one workgroup per body.
-        for (n, prefix, max_color, done, bodies) in [
-            (1u32, true, 1u32, 0u32, 1u32),
-            (4096, false, 1, 0, 1),
-            (4096, false, 4096, 0, 1),
-            (4096, false, 1, 1, 1),
-            (4096, false, 1, 0, 2),
+        // Several soft bodies: one workgroup per body. The motion passes (CCD,
+        // kinematics, impulses, projectiles, characters, queries) off and on.
+        for (n, prefix, max_color, done, bodies, motion) in [
+            (1u32, true, 1u32, 0u32, 1u32, 0u32),
+            (4096, false, 1, 0, 1, 0),
+            (4096, false, 4096, 0, 1, 0),
+            (4096, false, 1, 1, 1, 0),
+            (4096, false, 1, 0, 2, 0),
             // No soft bodies: vehicle_iterate as its own pass (rigid vehicle worlds).
-            (4096, false, 1, 0, 0),
-            (4096, false, 1, 1, 0),
+            (4096, false, 1, 0, 0, 0),
+            (4096, false, 1, 1, 0, 0),
+            (4096, false, 1, 0, 1, 7),
+            (4096, false, 1, 0, 0, 7),
         ] {
             let mut i = s.inputs(&[
-                n, n, 1, 1, 1, bodies, 1, 1, max_color, 1, 1, 1, 1, 1, 1, 1, 1,
+                n, n, 1, 1, 1, bodies, 1, 1, max_color, 1, 1, 1, 1, 1, 1, 1, 1, 1, motion, motion,
+                motion, motion,
             ]);
             i.sleep_time = 0.5;
             i.steps_done = done;
+            i.motion.look_ahead = motion != 0;
             for c in engine_exec::rigid_plan::encode_step(&s.modes(), &i, false, prefix) {
                 match c {
                     engine_exec::rigid_plan::Cmd::Dispatch { kernel, .. }

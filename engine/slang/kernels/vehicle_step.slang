@@ -118,401 +118,7 @@ float curvePeak(uint h)
     return count == 0u ? 1.0 : m;
 }
 
-// ---------------------------------------------------------------------------
-// Ray casts against world colliders (shared by wheels and raycast_batch)
-//
-// A cast whose origin is already inside a shape reports where the line entered
-// it (t ≤ 0) and the surface normal there, not a made-up t = 0 along -d: a wheel
-// mount inside a crate must see the crate's real face, which the tyre cone then
-// accepts (geometry under the tyre) or leaves to the wheel shell (beside it).
-// ---------------------------------------------------------------------------
-bool raySphere(float3 o, float3 d, float3 c, float r, out float t, out float3 n)
-{
-    t = 0.0; n = -d;
-    float3 oc = o - c;
-    float b = dot(oc, d);
-    float cc = dot(oc, oc) - r * r;
-    float h = b * b - cc;
-    if (cc > 0.0 && (h < 0.0 || b > 0.0)) return false;
-    t = -b - sqrt(max(h, 0.0)); // origin inside (cc ≤ 0): the entry behind it, t ≤ 0
-    float3 p = o + d * t - c;
-    n = dot(p, p) > 1e-12 ? normalize(p) : -d;
-    return true;
-}
-
-bool rayObb(float3 o, float3 d, BoxObb box, out float t, out float3 n)
-{
-    t = 0.0; n = -d;
-    float3 rel = o - box.center;
-    float3 lo = float3(dot(rel, box.axis0), dot(rel, box.axis1), dot(rel, box.axis2));
-    float3 ld = float3(dot(d, box.axis0), dot(d, box.axis1), dot(d, box.axis2));
-    float tNear = -1e30;
-    float tFar = 1e30;
-    int nearAxis = -1;
-    float nearSign = 0.0;
-    for (int k = 0; k < 3; k++)
-    {
-        float h = box.half[k];
-        if (abs(ld[k]) < 1e-9)
-        {
-            if (abs(lo[k]) > h) return false;
-            continue;
-        }
-        float inv = 1.0 / ld[k];
-        float t0 = (-h - lo[k]) * inv;
-        float t1 = (h - lo[k]) * inv;
-        float s = -1.0;
-        if (t0 > t1) { float tmp = t0; t0 = t1; t1 = tmp; s = 1.0; }
-        if (t0 > tNear) { tNear = t0; nearAxis = k; nearSign = s; }
-        tFar = min(tFar, t1);
-        if (tNear > tFar) return false;
-    }
-    if (tFar < 0.0 || nearAxis < 0) return false;
-    t = tNear; // origin inside: the entry behind it, t < 0
-    float3 ax = nearAxis == 0 ? box.axis0 : (nearAxis == 1 ? box.axis1 : box.axis2);
-    n = ax * nearSign;
-    return true;
-}
-
-// Ray vs box of half extents `h` rounded by `rad` (sphere sweep vs OBB), box space.
-// Inigo Quilez's rounded-box intersector; returns t (< 0 = miss).
-float roundedBoxT(float3 ro, float3 rd, float3 h, float rad)
-{
-    float3 safeD = float3(abs(rd.x) < 1e-9 ? 1e-9 : rd.x, abs(rd.y) < 1e-9 ? 1e-9 : rd.y, abs(rd.z) < 1e-9 ? 1e-9 : rd.z);
-    float3 m = 1.0 / safeD;
-    float3 nn = m * ro;
-    float3 k = abs(m) * (h + rad);
-    float3 t1 = -nn - k;
-    float3 t2 = -nn + k;
-    float tN = max(max(t1.x, t1.y), t1.z);
-    float tF = min(min(t2.x, t2.y), t2.z);
-    if (tN > tF || tF < 0.0) return -1.0;
-    float t = tN;
-    float3 pos = ro + t * rd;
-    float3 sg = float3(pos.x < 0.0 ? -1.0 : 1.0, pos.y < 0.0 ? -1.0 : 1.0, pos.z < 0.0 ? -1.0 : 1.0);
-    float3 o = ro * sg;
-    float3 dd0 = rd * sg;
-    pos *= sg;
-    pos -= h;
-    pos = max(pos.xyz, pos.yzx);
-    if (min(min(pos.x, pos.y), pos.z) < 0.0) return t;
-    float3 oc = o - h;
-    float3 dd = dd0 * dd0;
-    float3 oo = oc * oc;
-    float3 od = oc * dd0;
-    float ra2 = rad * rad;
-    t = 1e20;
-    {
-        float b = od.x + od.y + od.z;
-        float c = oo.x + oo.y + oo.z - ra2;
-        float hh = b * b - c;
-        if (hh > 0.0) t = -b - sqrt(hh);
-    }
-    {
-        float a = dd.y + dd.z; float b = od.y + od.z; float c = oo.y + oo.z - ra2;
-        float hh = b * b - a * c;
-        if (hh > 0.0 && a > 1e-12) { hh = (-b - sqrt(hh)) / a; if (hh > 0.0 && hh < t && abs(o.x + dd0.x * hh) < h.x) t = hh; }
-    }
-    {
-        float a = dd.z + dd.x; float b = od.z + od.x; float c = oo.z + oo.x - ra2;
-        float hh = b * b - a * c;
-        if (hh > 0.0 && a > 1e-12) { hh = (-b - sqrt(hh)) / a; if (hh > 0.0 && hh < t && abs(o.y + dd0.y * hh) < h.y) t = hh; }
-    }
-    {
-        float a = dd.x + dd.y; float b = od.x + od.y; float c = oo.x + oo.y - ra2;
-        float hh = b * b - a * c;
-        if (hh > 0.0 && a > 1e-12) { hh = (-b - sqrt(hh)) / a; if (hh > 0.0 && hh < t && abs(o.z + dd0.z * hh) < h.z) t = hh; }
-    }
-    return t > 1e19 ? -1.0 : t;
-}
-
-bool sweepObb(float3 o, float3 d, BoxObb box, float rad, out float t, out float3 n)
-{
-    t = 0.0; n = -d;
-    float3 rel = o - box.center;
-    float3 lo = float3(dot(rel, box.axis0), dot(rel, box.axis1), dot(rel, box.axis2));
-    float3 ld = float3(dot(d, box.axis0), dot(d, box.axis1), dot(d, box.axis2));
-    // Origin already inside the rounded box: cast from a point behind it (beyond
-    // the box's bounding radius) to find where the line entered, t < 0.
-    float3 q = abs(lo) - box.half;
-    float back = 0.0;
-    if (length(max(q, float3(0, 0, 0))) + min(max(q.x, max(q.y, q.z)), 0.0) < rad)
-        back = 2.0 * (length(box.half) + rad);
-    float tt = roundedBoxT(lo - ld * back, ld, box.half, rad);
-    if (tt < 0.0) return false;
-    t = tt - back;
-    float3 p = lo + ld * t;
-    float3 ln = float3(p.x < 0.0 ? -1.0 : 1.0, p.y < 0.0 ? -1.0 : 1.0, p.z < 0.0 ? -1.0 : 1.0)
-        * max(abs(p) - box.half, float3(0, 0, 0));
-    if (dot(ln, ln) < 1e-12)
-    {
-        float3 a = abs(p) - box.half;
-        ln = a.x > a.y && a.x > a.z ? float3(p.x < 0.0 ? -1.0 : 1.0, 0, 0)
-            : (a.y > a.z ? float3(0, p.y < 0.0 ? -1.0 : 1.0, 0) : float3(0, 0, p.z < 0.0 ? -1.0 : 1.0));
-    }
-    ln = normalize(ln);
-    n = box.axis0 * ln.x + box.axis1 * ln.y + box.axis2 * ln.z;
-    return true;
-}
-
-bool rayCapsuleOutside(float3 o, float3 d, float3 c, float3 axis, float halfLen, float r, out float t, out float3 n)
-{
-    // Closest approach between the ray and the segment, then a sphere test there.
-    float3 pa = c - axis * halfLen;
-    float3 ba = axis * (2.0 * halfLen);
-    float3 oa = o - pa;
-    float baba = dot(ba, ba);
-    float bard = dot(ba, d);
-    float baoa = dot(ba, oa);
-    float rdoa = dot(d, oa);
-    float oaoa = dot(oa, oa);
-    float a = baba - bard * bard;
-    float b = baba * rdoa - baoa * bard;
-    float cc = baba * oaoa - baoa * baoa - r * r * baba;
-    float h = b * b - a * cc;
-    t = 0.0; n = -d;
-    if (h >= 0.0 && a > 1e-12)
-    {
-        float tt = (-b - sqrt(h)) / a;
-        float y = baoa + tt * bard;
-        if (y > 0.0 && y < baba && tt >= 0.0)
-        {
-            t = tt;
-            float3 p = o + d * t;
-            n = normalize(p - (pa + ba * (y / baba)));
-            return true;
-        }
-    }
-    float tA, tB;
-    float3 nA, nB;
-    bool hA = raySphere(o, d, pa, r, tA, nA);
-    bool hB = raySphere(o, d, pa + ba, r, tB, nB);
-    if (hA && (!hB || tA <= tB)) { t = tA; n = nA; return true; }
-    if (hB) { t = tB; n = nB; return true; }
-    return false;
-}
-
-bool rayCapsule(float3 o0, float3 d, float3 c, float3 axis, float halfLen, float r, out float t, out float3 n)
-{
-    // Origin inside: cast from behind the capsule and report the entry (t < 0).
-    float s0 = clamp(dot(o0 - c, axis), -halfLen, halfLen);
-    float3 off = o0 - (c + axis * s0);
-    float back = dot(off, off) < r * r ? 2.0 * (halfLen + r) : 0.0;
-    float3 o = o0 - d * back;
-    bool hit = rayCapsuleOutside(o, d, c, axis, halfLen, r, t, n);
-    t -= back;
-    return hit;
-}
-
-// Sweep a sphere of radius `rad` (0 = ray) from o along d against a collider.
-bool rayCollider(uint ci, float3 o, float3 d, float rad, out float t, out float3 n)
-{
-    t = 0.0; n = -d;
-    Collider col = gColliders[ci];
-    BodyState b = gBodies[col.body];
-    float3 c = transformPoint(b.position, b.orientation, col.localPos);
-    if (col.shape == SHAPE_SPHERE) return raySphere(o, d, c, col.params.x + rad, t, n);
-    if (col.shape == SHAPE_BOX)
-        return rad > 0.0 ? sweepObb(o, d, worldObbFromCache(ci), rad, t, n) : rayObb(o, d, worldObbFromCache(ci), t, n);
-    if (col.shape == SHAPE_CAPSULE)
-    {
-        float4 q = quatMul(b.orientation, col.localRot);
-        return rayCapsule(o, d, c, quatRotate(q, float3(0, 1, 0)), col.params.y, col.params.x + rad, t, n);
-    }
-    if (col.shape == SHAPE_PLANE)
-    {
-        float3 pn = normalize(col.params.xyz);
-        float denom = dot(pn, d);
-        float dist = dot(pn, o) - col.params.w - rad;
-        n = pn;
-        if (denom >= -1e-9)
-        {
-            // Parallel or leaving: behind the plane the whole line is inside.
-            t = -1e9;
-            return dist <= 0.0;
-        }
-        t = -dist / denom; // origin behind the plane: t ≤ 0
-        n = pn;
-        return true;
-    }
-    // Convex hulls (fracture path): bounding sphere.
-    return raySphere(o, d, c, col.params.w + rad, t, n);
-}
-
-bool segmentHitsAabb(float3 mn, float3 mx, Aabb ab)
-{
-    return !(mx.x < ab.mn.x || ab.mx.x < mn.x || mx.y < ab.mn.y || ab.mx.y < mn.y ||
-             mx.z < ab.mn.z || ab.mx.z < mn.z);
-}
-
-// Whether a hit can carry the tyre: its normal lies within the tyre cone around
-// the suspension axis (coneCos; ≤ -1 accepts every hit) and, for a sphere cast
-// hit above the full-bump position (t < lmin), the contact also lies inside that
-// cone seen from the wheel centre at full bump. Hits beside the tyre (crate
-// faces, kerb walls, a mount inside a crate) belong to the wheel shell, and must
-// not hide the support further down the suspension travel.
-bool tyreAccepts(float3 o, float3 d, float t, float3 n, float rad, float coneCos, float lmin)
-{
-    if (dot(n, d) > 0.0) n = -n;
-    if (dot(n, -d) < coneCos) return false;
-    if (rad > 0.0 && t < lmin)
-    {
-        float3 v = (o + d * t - n * rad) - (o + d * lmin);
-        float lv = length(v);
-        if (lv > 1e-4 && dot(v / lv, d) < coneCos) return false;
-    }
-    return true;
-}
-
-// Negative collision group of the body a query starts from (0 = none): a soft
-// vehicle's rigid core shares it with its node spheres, so its wheels ignore
-// their own bodywork. Set per query before scanning.
-static int gRayExcludeGroup = 0;
-
-int bodyNegativeGroup(uint body)
-{
-    uint c = firstColliderOfBody(body);
-    if (c >= gCounters[0].colliderCount || gColliders[c].body != body) return 0;
-    int g = int(gColliders[c].material) >> 16;
-    return g < 0 ? g : 0;
-}
-
-bool rayIgnores(Collider col, uint excludeBody)
-{
-    if (col.body == excludeBody) return true;
-    return gRayExcludeGroup != 0 && (int(col.material) >> 16) == gRayExcludeGroup;
-}
-
-// One workgroup per query: lanes stride the colliders, then a min-reduction.
-groupshared float gsRayT[64];
-groupshared uint gsRayC[64];
-
-void rayLaneScan(uint lane, bool live, float3 o, float3 d, float maxT, uint excludeBody, float rad,
-    float coneCos, float lmin)
-{
-    float bestT = 1e30;
-    uint bestC = NO_INDEX;
-    uint nCols = live ? gCounters[0].colliderCount : 0u;
-    float3 e = o + d * maxT;
-    float3 mn = min(o, e) - rad;
-    float3 mx = max(o, e) + rad;
-    uint base = HOST_S(1);
-    for (uint ci = lane; ci < nCols; ci += 64u)
-    {
-        Collider col = gColliders[ci];
-        if (rayIgnores(col, excludeBody)) continue;
-        if (col.shape != SHAPE_PLANE && !segmentHitsAabb(mn, mx, gAabbs[base + ci])) continue;
-        float t;
-        float3 n;
-        if (rayCollider(ci, o, d, rad, t, n) && t <= maxT && t < bestT && tyreAccepts(o, d, t, n, rad, coneCos, lmin))
-        {
-            bestT = t;
-            bestC = ci;
-        }
-    }
-    gsRayT[lane] = bestT;
-    gsRayC[lane] = bestC;
-}
-
-void rayTestCollider(uint ci, float3 o, float3 d, float maxT, uint excludeBody, float rad,
-    float coneCos, float lmin, float3 mn, float3 mx, uint base, inout float bestT, inout uint bestC)
-{
-    Collider col = gColliders[ci];
-    if (rayIgnores(col, excludeBody)) return;
-    if (col.shape != SHAPE_PLANE && !segmentHitsAabb(mn, mx, gAabbs[base + ci])) return;
-    float t;
-    float3 n;
-    if (rayCollider(ci, o, d, rad, t, n) && t <= maxT && t < bestT && tyreAccepts(o, d, t, n, rad, coneCos, lmin))
-    {
-        bestT = t;
-        bestC = ci;
-    }
-}
-
-// Same query through this step's broadphase grid (valid between broadphase_query
-// and the contact hash, which reuses gConstraintIds): lanes take the cells under
-// the swept segment (padded by one cell, the largest small radius), then the
-// plane / large-dynamic / large-static lists and the endpoint probes. Duplicates
-// from hash aliasing only re-test a collider. Falls back to the full scan when
-// the segment spans too many cells.
-static const uint RAY_GRID_MAX_CELLS = 512u;
-
-void rayLaneScanGrid(uint lane, bool live, float3 o, float3 d, float maxT, uint excludeBody, float rad,
-    float coneCos, float lmin)
-{
-    float bestT = 1e30;
-    uint bestC = NO_INDEX;
-    float3 e = o + d * maxT;
-    float3 mn = min(o, e) - rad;
-    float3 mx = max(o, e) + rad;
-    uint base = HOST_S(1);
-    float cs = max(PARAMS.gridCellSize, 0.5);
-    int3 lo = int3(floor((mn - cs) / cs));
-    int3 hi = int3(floor((mx + cs) / cs));
-    int3 span = hi - lo + int3(1, 1, 1);
-    uint nCells = live ? uint(span.x * span.y * span.z) : 0u;
-    if (nCells > RAY_GRID_MAX_CELLS)
-    {
-        uint nCols = gCounters[0].colliderCount;
-        for (uint ci = lane; ci < nCols; ci += 64u)
-            rayTestCollider(ci, o, d, maxT, excludeBody, rad, coneCos, lmin, mn, mx, base, bestT, bestC);
-    }
-    else
-    {
-        uint tables = gridSplit() ? 2u : 1u;
-        uint total = nCells * tables;
-        for (uint k = lane; k < total; k += 64u)
-        {
-            uint table = k / max(nCells, 1u);
-            uint idx = k - table * nCells;
-            int3 cell = lo + int3(int(idx % uint(span.x)), int((idx / uint(span.x)) % uint(span.y)),
-                int(idx / uint(span.x * span.y)));
-            uint link = ALOAD(gConstraintIds[table * gridHashSize() + gridHash(cell.x, cell.y, cell.z)]);
-            uint guard = 0u;
-            while (link != 0xFFFFFFFFu && guard < 4096u)
-            {
-                uint cur = link & GRID_COLLIDER_MASK;
-                link = gridSplit() ? asuint(gAabbs[base + cur]._pad1) : gColorLists[cur];
-                guard++;
-                rayTestCollider(cur, o, d, maxT, excludeBody, rad, coneCos, lmin, mn, mx, base, bestT, bestC);
-            }
-        }
-        if (live)
-        {
-            uint nPlanes = min(ALOAD(gScratchAtomics[42]), 8u);
-            uint nLarge = min(ALOAD(gScratchAtomics[25]), 16u);
-            uint nStatic = largeStaticCount();
-            uint nList = nPlanes + nLarge + nStatic + 2u;
-            uint nColliders = gCounters[0].colliderCount;
-            for (uint k = lane; k < nList; k += 64u)
-            {
-                uint ci;
-                if (k < nPlanes) ci = ALOAD(gScratchAtomics[43u + k]);
-                else if (k < nPlanes + nLarge) ci = ALOAD(gScratchAtomics[LEGACY_LARGE_BASE + k - nPlanes]);
-                else if (k < nPlanes + nLarge + nStatic) ci = largeStaticCollider(k - nPlanes - nLarge);
-                else ci = k + 2u == nList ? 0u : nColliders - 1u;
-                if (ci < nColliders)
-                    rayTestCollider(ci, o, d, maxT, excludeBody, rad, coneCos, lmin, mn, mx, base, bestT, bestC);
-            }
-        }
-    }
-    gsRayT[lane] = bestT;
-    gsRayC[lane] = bestC;
-}
-
-void rayReduce(uint lane)
-{
-    GROUP_SYNC();
-    for (uint s = 32u; s > 0u; s >>= 1)
-    {
-        if (lane < s && gsRayT[lane + s] < gsRayT[lane])
-        {
-            gsRayT[lane] = gsRayT[lane + s];
-            gsRayC[lane] = gsRayC[lane + s];
-        }
-        GROUP_SYNC();
-    }
-}
+#include "scene_query.slang"
 
 // ---------------------------------------------------------------------------
 // Wheel frame helpers
@@ -727,6 +333,70 @@ void detachPart(uint vr, uint chassis, uint p, bool spawnBody)
     }
     VSet(pr + P_COM, float4(com.xyz, asfloat(spawnBody ? PS_DETACHED : PS_DISABLED)));
     gBodies[chassis].generation = HOST_S(17);
+
+    // Parts bolted to this one (P_TREE parent, transitively) leave with it as one
+    // rigid piece: their colliders join its body (or go with it), their mass
+    // leaves the chassis and joins that body. Children have higher indices.
+    uint4 pool2 = VU(vr + V_POOL2);
+    uint local = p - pool2.x;
+    uint moving = 1u << local;
+    float mTotal = mass.x;
+    float3 mCom = mass.x * com.xyz;
+    for (uint ci = local + 1u; ci < pool2.y && ci < 32u; ci++)
+    {
+        uint cr = partRec(pool2.x + ci);
+        float4 ccom = VD(cr + P_COM);
+        uint parent = VU(cr + P_TREE).x;
+        if (asuint(ccom.w) != PS_ATTACHED || parent >= 32u || (moving & (1u << parent)) == 0u) continue;
+        moving |= 1u << ci;
+        float4 cm = VD(cr + P_MASS);
+        chassisRemoveMass(chassis, vr, cm.x, cm.yzw, ccom.xyz);
+        uint4 cc = VU(cr + P_CFG);
+        for (uint k = 0u; k < cc.y; k++)
+        {
+            uint col = cc.x + k;
+            gColliders[col].body = target;
+            gColliders[col].localPos = gColliders[col].localPos - offset;
+            gColliders[col].generation = spawnBody ? chassis + 1u : 0u;
+        }
+        if (spawnBody)
+        {
+            float4 park = VD(cr + P_PARK);
+            VSet(cr + P_PARK, float4(park.xy, SEVER_GRACE, park.w));
+        }
+        mTotal += cm.x;
+        mCom += cm.x * ccom.xyz;
+        VSetU(cr + P_TREE, uint4(parent, local, 0u, 0u));
+        VSet(cr + P_COM, float4(ccom.xyz, asfloat(spawnBody ? PS_DETACHED : PS_DISABLED)));
+    }
+    if (!spawnBody || moving == (1u << local)) return;
+    // One rigid piece: its origin moves to the combined centre of mass (chassis
+    // axes, the body's at detach), with that point's velocity, and inertia
+    // about it; colliders keep their places. The parent's P_COM records the
+    // piece's origin (renderers re-base the piece's parts on it).
+    float3 centre = mCom / mTotal;
+    float3 shift = centre - com.xyz;
+    float3 inertia = float3(0, 0, 0);
+    for (uint ci = local; ci < pool2.y && ci < 32u; ci++)
+    {
+        if ((moving & (1u << ci)) == 0u) continue;
+        uint cr = partRec(pool2.x + ci);
+        float4 cm = VD(cr + P_MASS);
+        float3 d = VD(cr + P_COM).xyz - centre;
+        float3 d2 = d * d;
+        inertia += cm.yzw + cm.x * float3(d2.y + d2.z, d2.x + d2.z, d2.x + d2.y);
+        uint4 cc = VU(cr + P_CFG);
+        for (uint k = 0u; k < cc.y; k++) gColliders[cc.x + k].localPos = gColliders[cc.x + k].localPos - shift;
+    }
+    BodyState b = gBodies[target];
+    b.position = transformPoint(c.position, c.orientation, centre);
+    b.initialPos = b.position;
+    b.linearVel = c.linearVel + cross(c.angularVel, b.position - c.position);
+    b.invMass = 1.0 / mTotal;
+    b.invInertia = 1.0 / inertia;
+    gBodies[target] = b;
+    BODY_PREV(target).linearVel = b.linearVel;
+    VSet(pr + P_COM, float4(centre, asfloat(PS_DETACHED)));
 }
 
 [shader("compute")]
@@ -998,7 +668,7 @@ void wheel_query(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         bool hadHit = (VU(wr + W_C0).z & WD_CONTACT) != 0u && VD(wr + W_LHIT).w > 0.5;
         if (interval > 1u && hadHit && ((HOST_S(17) + w) % interval) != 0u) probe = false;
     }
-    gRayExcludeGroup = (live && HOST_S(30) != 0u) ? bodyNegativeGroup(chassis) : 0;
+    gRayExcludeGroup = (live && (HOST_S(30) & 3u) != 0u) ? bodyNegativeGroup(chassis) : 0;
     // Query mode in the vehicle header: 0 = broadphase grid walk, 1 = full scan.
     if (VU(VH_MISC).w == 1u) rayLaneScan(lane, probe, o, d, maxT, chassis, sweep, coneCos, lmin);
     else rayLaneScanGrid(lane, probe, o, d, maxT, chassis, sweep, coneCos, lmin);
@@ -2574,21 +2244,34 @@ void vehicle_loads(uint3 tid : SV_DispatchThreadID)
     float3 gL = quatRotate(qi, float3(0.0, p.gravityY * (gScale != 0.0 ? gScale : 1.0), 0.0));
 
     uint4 brk = VU(vr + V_BRK);
-    for (uint pi = 1u; pi < nP; pi++)
+    // Children (higher indices) first: a part's mount also carries what its
+    // attached children's mounts pass into it (force, and moment about the origin).
+    float3 childF[MAX_VEHICLE_PARTS], childM[MAX_VEHICLE_PARTS];
+    for (uint k = 0u; k < MAX_VEHICLE_PARTS; k++) { childF[k] = float3(0, 0, 0); childM[k] = float3(0, 0, 0); }
+    for (uint step = 1u; step < nP; step++)
     {
+        uint pi = nP - step;
         uint pr = partRec(pool2.x + pi);
         float4 com = VD(pr + P_COM);
         if (asuint(com.w) != PS_ATTACHED) continue;
         float4 mount = VD(pr + P_MOUNT);
         float4 load = VD(pr + P_LOAD);
-        if (mount.w >= 1e29 && load.x >= 1e29) continue;
+        uint parent = VU(pr + P_TREE).x;
+        if (mount.w >= 1e29 && load.x >= 1e29 && parent >= 32u) continue;
         float4 mass = VD(pr + P_MASS);
         float3 r = com.xyz;
         float3 ap = aL + cross(alL, r) + cross(wL, cross(wL, r));
-        float3 fm = mass.x * (ap - gL) - partF[pi];
+        float3 fm = mass.x * (ap - gL) - partF[pi] + childF[pi];
         float3 tauCom = mass.yzw * alL + cross(wL, mass.yzw * wL);
         float3 mContactCom = partM[pi] - cross(r, partF[pi]);
-        float3 tm = tauCom - cross(mount.xyz - r, fm) - mContactCom;
+        float3 mChildCom = childM[pi] - cross(r, childF[pi]);
+        float3 tm = tauCom - cross(mount.xyz - r, fm) - mContactCom + mChildCom;
+        if (parent < 32u)
+        {
+            childF[parent] += fm;
+            childM[parent] += tm + cross(mount.xyz, fm);
+        }
+        if (mount.w >= 1e29 && load.x >= 1e29) continue;
         float F = length(fm), Tq = length(tm);
         float ratio = max(F / mount.w, Tq / load.x);
         VSet(pr + P_LOAD, float4(load.x, F, Tq, max(load.w, ratio)));

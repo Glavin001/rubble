@@ -163,6 +163,7 @@ fn measured_sedan() -> VehicleDesc {
             break_force: 1e12,
             break_torque: 1e12,
             anchor: None,
+            parent: None,
         };
     }
     for w in &mut d.wheels {
@@ -170,6 +171,7 @@ fn measured_sedan() -> VehicleDesc {
             break_force: 1e12,
             break_torque: 1e12,
             anchor: None,
+            parent: None,
         };
     }
     d
@@ -254,6 +256,7 @@ fn heavy_ball_snaps_the_struck_mount_only(storage: Storage) {
         break_force: 40e3,
         break_torque: 40e3,
         anchor: None,
+        parent: None,
     };
     let v = sim
         .add_vehicle(&d, [0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0])
@@ -382,6 +385,81 @@ fn dune_buggy_settles_drives_and_jumps_without_shedding_parts() {
         (0, 0),
         "a jump sheds nothing"
     );
+}
+
+#[test]
+fn every_vibe_land_model_drives_and_jumps_without_shedding_parts() {
+    for d in [
+        presets::vibe_trophy(),
+        presets::vibe_rally(),
+        presets::vibe_monster(),
+        presets::vibe_derby(),
+        presets::vibe_sprint(),
+        presets::vibe_semi(),
+    ] {
+        let mut sim = world();
+        let q = glam::Quat::from_axis_angle(glam::Vec3::X, -0.25).to_array();
+        add_box(
+            &mut sim,
+            [0.0, 0.5, 25.0],
+            [3.0, 0.3, 3.0],
+            q,
+            0.0,
+            [0.0; 3],
+        );
+        let lift = if d.name == "vibe_monster" { 1.0 } else { 0.6 };
+        let v = sim
+            .add_vehicle(&d, [0.0, lift, 0.0], [0.0, 0.0, 0.0, 1.0])
+            .unwrap();
+        run(&mut sim, 180);
+        sim.set_vehicle_input(
+            v,
+            VehicleInput {
+                forward: 1.0,
+                ..Default::default()
+            },
+        );
+        run(&mut sim, 360);
+        sim.set_vehicle_input(
+            v,
+            VehicleInput {
+                brake: 1.0,
+                ..Default::default()
+            },
+        );
+        run(&mut sim, 180);
+        let st = sim.vehicle_state(v);
+        let worst = peaks(&sim, v, &d)
+            .into_iter()
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .unwrap();
+        eprintln!(
+            "{:>13}: broken parts {:#b} wheels {:#b}; heaviest mount {} at {:.2} of its limit",
+            d.name, st.parts_broken, st.wheels_broken, worst.0, worst.1
+        );
+        // The recipe hangs these by one joint (a cantilever): the sprint's nerf
+        // bars meet the frame only at the front (their rear return stops short of
+        // the rail), the semi's stacks each stand on one bracket. A hard landing
+        // can bend them off; nothing else may come off.
+        let fragile: &[&str] = match d.name.as_str() {
+            "vibe_sprint" => &["nerf_l", "nerf_r"],
+            "vibe_semi" => &["stack_l", "stack_r"],
+            _ => &[],
+        };
+        let allowed = d
+            .parts
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| fragile.contains(&p.name.as_str()))
+            .fold(0u32, |m, (i, _)| m | (1 << i));
+        assert_eq!(
+            st.parts_broken & !allowed,
+            0,
+            "{}: a jump sheds nothing else",
+            d.name
+        );
+        assert_eq!(st.wheels_broken, 0, "{}: no wheel comes off", d.name);
+    }
 }
 
 #[test]
@@ -587,4 +665,77 @@ fn dune_buggy_crash_probe() {
         }
         eprintln!();
     }
+}
+
+/// The destructible sedan with its front bumper bolted to the hood (not the
+/// chassis), every mount measured but out of reach.
+fn sedan_with_bumper_on_hood() -> (VehicleDesc, usize, usize) {
+    let mut d = measured_sedan();
+    let hood = d.parts.iter().position(|p| p.name == "hood").unwrap();
+    let bumper = d
+        .parts
+        .iter()
+        .position(|p| p.name == "bumper_front")
+        .unwrap();
+    assert!(hood < bumper);
+    d.parts[bumper].mount.parent = Some(hood as u32);
+    (d, hood, bumper)
+}
+
+#[test]
+fn a_child_part_loads_its_parents_mount() {
+    let mut sim = world();
+    let (d, hood, bumper) = sedan_with_bumper_on_hood();
+    let v = sim
+        .add_vehicle(&d, [0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0])
+        .unwrap();
+    run(&mut sim, 240);
+    let loads = part_loads(&sim, v);
+    let (wh, wb) = (d.parts[hood].mass * G, d.parts[bumper].mass * G);
+    eprintln!(
+        "hood mount {:.0} N (hood {wh:.0} + bumper {wb:.0}); bumper mount {:.0} N",
+        loads[hood].force, loads[bumper].force
+    );
+    // The bumper's mount carries its own weight, the hood's carries both.
+    assert!((loads[bumper].force - wb).abs() < 0.05 * wb + 1.0);
+    assert!((loads[hood].force - (wh + wb)).abs() < 0.05 * (wh + wb) + 1.0);
+}
+
+#[test]
+fn a_severed_parent_takes_its_children_with_it() {
+    let mut sim = world();
+    let (d, hood, bumper) = sedan_with_bumper_on_hood();
+    let v = sim
+        .add_vehicle(&d, [0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0])
+        .unwrap();
+    run(&mut sim, 120);
+    let mass0 = sim.vehicle_state(v).mass;
+    sim.detach_part(v, hood as u32);
+    run(&mut sim, 60);
+    let st = sim.vehicle_state(v);
+    let lost = (1 << hood) | (1 << bumper);
+    assert_eq!(
+        st.parts_lost & lost,
+        lost,
+        "hood and the bumper bolted to it left the car"
+    );
+    let (mh, mb) = (d.parts[hood].mass, d.parts[bumper].mass);
+    assert!(
+        (mass0 - st.mass - (mh + mb)).abs() < 1.0,
+        "chassis lost both masses: {mass0} → {}",
+        st.mass
+    );
+    // One piece: the hood's body carries both masses; the bumper's own stays parked.
+    let piece = sim.read_body(sim.vehicle_host().part_body(v, hood as u32));
+    assert!(
+        (1.0 / piece.inv_mass - (mh + mb)).abs() < 0.5,
+        "piece mass {}",
+        1.0 / piece.inv_mass
+    );
+    let parked = sim.read_body(sim.vehicle_host().part_body(v, bumper as u32));
+    assert!(
+        parked.position[1] < -1000.0,
+        "the bumper's own body was never used"
+    );
+    assert!(piece.position[1] > -100.0 && piece.position.iter().all(|x| x.is_finite()));
 }

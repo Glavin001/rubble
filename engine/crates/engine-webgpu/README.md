@@ -80,6 +80,26 @@ one-frame-per-second `<take>_sheet.jpg` for review (needs Chrome and ffmpeg).
 
 See [../../docs/vehicles.md](../../docs/vehicles.md).
 
+## Motion demo (CCD, characters, bullets)
+
+`motion.html` runs the continuous-collision, character and projectile kernels
+through `world-host.mjs` (same `wgsl_export` step as the vehicle demo):
+
+- `?scene=ccd&speed=60|140|250`: balls at a 0.05/0.2/1 m slab and a brick wall,
+  CCD off and on side by side, plus a debris shower through a slab.
+- `?scene=character`: a capsule character on stairs, slopes, a moving platform
+  and an elevator, with crates to push (WASD, Space to jump).
+- `?scene=bullets`: bullets piercing five walls (energy per metre of wall),
+  pushing the targets behind them.
+- Hooks: `__step(n)`, `__check()` (the scene's scripted checks), `__world`.
+
+`node motion-check.mjs [ccd|character|bullets|demo|ring|vehicle|lab]` runs every scene's checks in
+headless Chrome and saves screenshots to `recordings/`; `lab` fires a 300 m/s
+ball at the fracture lab's arch with and without CCD balls (needs the lab's
+wasm); `demo`, `ring` and `vehicle` run `demo.html` and `vehicle.html` with their
+CCD balls (`?ccd=0` turns them off on both pages). See [../../docs/ccd.md](../../docs/ccd.md) and
+[../../docs/characters.md](../../docs/characters.md).
+
 ## Browser verification
 
 After changing Slang, regenerate the ignored WGSL assets:

@@ -96,6 +96,8 @@ pub struct MetalSim {
     body_count: u32,
     collider_count: u32,
     host_bodies: Vec<BodyState>,
+    /// CCD / kinematic bodies uploaded (the motion passes of the step graph).
+    motion: rigid_plan::MotionInputs,
     host_cols: Vec<Collider>,
     grid_levels: u32,
     sleep_island_rounds: u32,
@@ -205,6 +207,7 @@ impl MetalSim {
             body_count: 0,
             collider_count: 0,
             host_bodies: Vec::new(),
+            motion: rigid_plan::MotionInputs::default(),
             host_cols: Vec::new(),
             grid_levels: 0,
             sleep_island_rounds: 8,
@@ -252,6 +255,8 @@ impl MetalSim {
             bytes,
         );
         self.host_bodies.extend_from_slice(bodies);
+        self.motion.ccd |= bodies.iter().any(|b| b.flags & engine_schema::BODY_CCD != 0);
+        self.motion.kinematic |= bodies.iter().any(|b| b.flags & 3 == 2);
         self.body_count += count;
         start..self.body_count
     }
@@ -329,6 +334,10 @@ impl MetalSim {
             last: self.last_counters,
             vehicle_count: 0,
             wheel_count: 0,
+            motion: rigid_plan::MotionInputs {
+                look_ahead: self.params.flags & engine_schema::FLAG_SPEC_VELOCITY != 0,
+                ..self.motion
+            },
             soft: Default::default(),
             command_count: 0,
         }

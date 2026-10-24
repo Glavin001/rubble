@@ -29,7 +29,8 @@ pub struct PhaseTimingsMs {
     pub cpu_submit: f64,
 }
 
-/// Canonical phase order. CCD is optional and does not reorder primal/dual.
+/// Canonical phase order (legacy Metal schedule). Continuous collision lives in
+/// `rigid_plan::encode_step` (ccd_toi / ccd_emit), not here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     ApplyCommands,
@@ -46,8 +47,6 @@ pub enum Phase {
     SolvePrimalColor,
     SolveDual,
     ExtractVelocitySleep,
-    CcdClassify,
-    CcdSweep,
 }
 
 pub const PHASE_GRAPH: &[Phase] = &[
@@ -66,8 +65,6 @@ pub const PHASE_GRAPH: &[Phase] = &[
     Phase::SolveDual,
     Phase::ExtractVelocitySleep,
 ];
-
-pub const CCD_PHASES: &[Phase] = &[Phase::CcdClassify, Phase::CcdSweep];
 
 pub trait PhysicsBackend {
     fn name(&self) -> &'static str;
@@ -97,7 +94,5 @@ pub fn entry_name(phase: Phase) -> &'static str {
         Phase::SolvePrimalColor => "solve_primal_color",
         Phase::SolveDual => "solve_dual",
         Phase::ExtractVelocitySleep => "extract_velocity_sleep",
-        Phase::CcdClassify => "ccd_classify",
-        Phase::CcdSweep => "ccd_sweep",
     }
 }

@@ -121,6 +121,7 @@ impl WgpuSim {
         self.host_bodies[first as usize..(first + count) as usize].copy_from_slice(bodies);
         self.manifolds_valid = false;
         self.wake_pending = true;
+        self.note_motion_flags(bodies);
     }
 
     /// Queue body commands for the next step, without reading anything back:

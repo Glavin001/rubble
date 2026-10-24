@@ -935,10 +935,12 @@ Unreal is the first client.
 **P3: Box3D body features (new Slang, opt-in, defaults lossless).**
 
 - ✅ Kinematic bodies and `set_target_transform`, which push dynamic bodies
-  and carry them by friction (shipped 2026-10-24). They are dynamic in the
-  graph with zero inverse mass and `BODY_KINEMATIC`: prediction places them
-  at exactly `x0 + v dt`, the solve and velocity extraction skip them, and
-  contacts see an infinite mass. The target command computes the velocity on
+  and carry them by friction (shipped 2026-10-24). They carry
+  `BODY_KINEMATIC` without `BODY_DYNAMIC`, with zero inverse mass (the CCD
+  branch's model, `engine/docs/ccd.md`): prediction places them at exactly
+  `x0 + v dt` and the solver never moves them. Contacts, bounds, the
+  broadphase, wakes, CCD and characters treat a moving one as a mover with
+  infinite mass, and a stopped one costs what a static costs. The target command computes the velocity on
   the GPU from the pose at the step start, so animation tracking never
   drifts. Without the flag every kernel path is unchanged.
 - A full gravity vector, keeping the Y-only path bit-identical.

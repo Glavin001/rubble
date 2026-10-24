@@ -23,6 +23,7 @@ public static const uint BODY_AWAKE = 8u;
 public static const uint BODY_VEHICLE = 32u; // 16 is BODY_WAKE_PENDING
 public static const uint BODY_PARTICLE = 64u;
 public static const uint BODY_FOLLOW = 128u;
+public static const uint BODY_CCD = 256u;
 
 public struct Collider
 {
@@ -210,6 +211,11 @@ public static const uint CCD_CANDIDATE_MISS = 32u;
 public static const uint OVERFLOW_BP_CHAIN = 128u; // linked-list BP hit per-slot walk cap
 public static const uint OVERFLOW_WARM_HASH = 256u; // record warm hash probe limit exhausted
 public static const uint OVERFLOW_LARGE_STATICS = 512u; // more oversized statics than LARGE_STATIC_CAP
+public static const uint OVERFLOW_FAST_LIST = 1024u; // more fast (long-sweep) colliders than FAST_CAP
+public static const uint OVERFLOW_LARGE_DYNAMICS = 2048u; // uniform grid: more than 16 dynamics wider than a cell
+public static const uint OVERFLOW_CCD_BODIES = 4096u; // more awake CCD bodies than CCD_BODY_CAP
+public static const uint OVERFLOW_IMPULSES = 8192u; // more impulse records than IMPULSE_CAP
+public static const uint OVERFLOW_CCD_PAIRS = 32768u; // more CCD candidate pairs than CCD_PAIR_CAP
 
 public struct GpuCommand
 {
