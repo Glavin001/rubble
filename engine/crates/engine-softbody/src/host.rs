@@ -524,9 +524,10 @@ impl SoftHost {
             | u32::from(st.breaking) * SOFT_BREAKING
             | u32::from(st.sleep_sync) * SOFT_SLEEP_SYNC
             | u32::from(c.contacts) * SOFT_CONTACTS
-            | u32::from(st.rigid_mode) * SOFT_RIGID_MODE;
+            | u32::from(st.rigid_mode) * SOFT_RIGID_MODE
+            | u32::from(st.bdf2) * SOFT_BDF2;
         let list_count: u32 = self.list_len();
-        let header: [Slot; 9] = [
+        let header: [Slot; 10] = [
             [c.bodies, c.beams, c.colors, list_count],
             [l.body_base, l.beam_base, l.list_base, l.adj_base],
             [l.color_base, l.group_base, c.groups + 1, flags],
@@ -550,7 +551,13 @@ impl SoftHost {
                 st.contact_friction.to_bits(),
                 l.tri_rest_base,
             ],
-            [l.body_color_base, l.body_color_stride, 0, 0],
+            [
+                l.body_color_base,
+                l.body_color_stride,
+                l.tri_plane_base,
+                l.body_pair_base,
+            ],
+            [l.bdf_base, 0, 0, 0],
         ];
         backend.write_soft_slots(0, &header);
     }

@@ -525,7 +525,7 @@ impl RigidStep {
         // 32 colours × iterations per step otherwise.
         engine_exec::rigid_plan::StepModes {
             sparse_start: 32,
-            color_headroom: Some(4),
+            color_headroom: Some(2),
             color_round_headroom: Some(2),
             tail_ok: self.cap.max_bodies <= (1 << 16) * 8,
             ..Default::default()
@@ -646,6 +646,9 @@ impl RigidStep {
             (4096, false, 4096, 0, 1),
             (4096, false, 1, 1, 1),
             (4096, false, 1, 0, 2),
+            // No soft bodies: vehicle_iterate as its own pass (rigid vehicle worlds).
+            (4096, false, 1, 0, 0),
+            (4096, false, 1, 1, 0),
         ] {
             let mut i = s.inputs(&[
                 n, n, 1, 1, 1, bodies, 1, 1, max_color, 1, 1, 1, 1, 1, 1, 1, 1,

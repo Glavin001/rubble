@@ -9,6 +9,8 @@
 //! cargo run -p engine-webgpu --release --bin soft_calibrate
 //! # a custom sweep: step rate × iterations, Chebyshev ρ, particle sweeps per iteration, no fit
 //! SETTINGS=120x10,120x20,240x10 CHEB=0 SWEEPS=2 FIT=0 cargo run -p engine-webgpu --release --bin soft_calibrate
+//! # candidates with BDF2 particles
+//! SETTINGS=120x10,240x10 BDF2=1 FIT=0 cargo run -p engine-webgpu --release --bin soft_calibrate
 //! ```
 use engine_schema::{BodyState, Collider, Material, ShapeType, WorldCapacity};
 use engine_softbody::calibrate::*;
@@ -56,6 +58,8 @@ fn world(s: Setting) -> WgpuSim {
             .filter(|_| !s.reference)
             .map_or(d.sweeps, |v| v as u32),
         plasticity: std::env::var("PLASTIC").as_deref() != Ok("0") || s.reference,
+        // BDF2=1: candidates integrate the particles with BDF2 (the reference stays BDF1).
+        bdf2: std::env::var("BDF2").as_deref() == Ok("1") && !s.reference,
         ..d
     });
     sim.set_material(

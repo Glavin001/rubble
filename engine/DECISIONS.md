@@ -436,3 +436,27 @@ s20. **The browser step is latency-bound; every fix keeps the results identical.
 - `assembleVehicle` sizes its per-wheel scratch arrays to the vehicle: 4 when it has at most 4 wheels, else `MAX_VEHICLE_WHEELS`. These thread-private arrays live in memory and the spin solve walks them on every Newton step, so a driving car's `vehicle_iterate` cost about 0.4 ms per iteration in Chrome.
 - Self-collision runs its rest-pose exclusion after the cheap plane and prism culls, not before.
 - Obstacles are bounded by their oriented box, not their bounding sphere. A 140 m arena wall's 70 m radius kept every traffic car soft.
+
+s21. **Rigid-mode promotion is tight, and particle work spreads across lanes.**
+- Promotion margin: soft contacts only form inside bounds already padded by twice the step's travel, so promotion adds only the two skins and 0.1 m, plus a moving obstacle's own travel. Promotion still happens the step before any contact force. The old 0.5 m + 0.15 s × speed margin added nothing.
+- Rigid contact edges: an edge promotes only if it can push this step, meaning its start gap closes under twice the step's approach along the normal, or it carries force. Speculative ground contacts under a moving car's sills kept every driving car soft.
+- Lane-split sweep: a colour holds a few dozen of a car's particles. Each particle now gets up to 16 lanes, with its beams and contact triangles strided over them and the 3×3 blocks summed in workgroup memory. The math is the same; only the float summation order changes.
+- Triangle planes: `soft_tri_planes` stores each triangle's normal, area, first vertex and cull radius before node contacts, so a node rejects a far triangle from two reads. The values are identical to those computed from the vertices.
+- Determinism: crash outcomes were already not bit-deterministic. Cross-body contacts read other bodies' particles while they move within a colour, so tbone breaks 10–29 beams between runs of one build. Rigid mode now matches always-soft within that spread.
+
+s22. **One soft pass per iteration, and soft-body pair lists.**
+- Per-body sweep for every soft scene: the plan always uses `soft_primal_bodies`, now for a single car too. The one-workgroup fused kernel had no lane split, and one car crashing into a wall took 3.3 ms per step. It now takes 2.1.
+- Vehicles beside the sweep: workgroups past the soft bodies run `vehicle_iterate` in the same dispatch. Both read only the cores' iterate, solved before the pass, and neither reads what the other writes. Running vehicles before the dual pass is exact, since the dual pass touches contact and joint multipliers only. One exception: a wheel standing on another car's particle reads that particle mid-sweep, as cross-body contacts already do.
+- Pair lists: `soft_pairs` lists, per soft body, the bodies whose bounds come within both skins + 0.3 m. Node contacts, a triangle's nodes and rigid-mode promotion walk that list instead of every body, a superset of what each tests. A body with more than 31 neighbours walks every body. Node collision went from 0.74 to 0.11 ms per step at 100 cars cruising, and from 1.44 to 0.19 in the derby. Ties between equal-score triangles go to the lower index, so the visiting order cannot change a result.
+- Node lanes: node collision runs 8 lanes per node, each over every 8th candidate triangle.
+- Colour headroom: the browser plan now dispatches last step's rigid colours + 2, with the tail covering the rest.
+- `wgsl_export` now fails when a soft entry did not compile. A Slang error once left stale modules in place and measurements quietly ran old kernels.
+
+s23. **BDF2 particles are an experimental setting, off by default; they don't buy a coarser step.** `SoftSettings::bdf2` integrates particles with BDF2 instead of backward Euler:
+- inertial target (4/3)xₙ − (1/3)xₙ₋₁ + (2h/3)((4/3)vₙ − (1/3)vₙ₋₁) + (4/9)h²g, weighted (9/4)m/h²;
+- velocity (3x − 4xₙ + xₙ₋₁)/2h;
+- a particle falls back to backward Euler for the step after it has no history, a contact, or a beam yield or break. Without the fallback, BDF2 extrapolated the pre-impact velocity and crashes exploded.
+
+`soft_calibrate` results against 960 Hz × 30 (tap 42 Hz, 30/60 km/h crush max 22.8/50.2 cm):
+- 240 Hz × 10 with BDF2: tap 36 Hz (24 Hz under backward Euler). The 30 km/h crush improves to max 24.8 cm (from 36.9), but the 60 km/h crush worsens to max 209 cm (from 132).
+- 120 Hz × 10 is still out with either integrator: the 1 m drop bends 38–43 beams. Those errors come from unconverged impacts, not damping.

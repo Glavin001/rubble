@@ -439,7 +439,10 @@ pub fn encode_step(
         if i.soft.contacts {
             // Soft contacts at the initial guess, frozen for the step.
             e.d("soft_bounds", u64::from(i.soft.bodies));
-            e.d("soft_collide_nodes", u64::from(i.soft.particles.max(1)));
+            e.d("soft_pairs", u64::from(i.soft.bodies));
+            e.d("soft_tri_planes", u64::from(i.soft.triangles.max(1)));
+            // SOFT_NODE_LANES (8) lanes per node.
+            e.d("soft_collide_nodes", u64::from(i.soft.particles.max(1)) * 8);
             e.d("soft_collide_tris", u64::from(i.soft.triangles.max(1)));
         }
         // Rigid mode: promote / demote before the solve (soft_step.slang).
@@ -481,25 +484,21 @@ pub fn encode_step(
                 // Chebyshev pass index across every sweep of the step (ω has
                 // converged long before the pass-parameter table runs out).
                 let pass = (u32::from(iter) * sweeps + k).min(95);
-                if i.soft.bodies > 1 {
-                    // One workgroup per soft body (`soft_primal_bodies`): the sweep
-                    // of every body at once, one dispatch at any vehicle count.
-                    // Hosts size workgroups as threads / 64.
-                    e.dp("soft_primal_bodies", u64::from(i.soft.bodies) * 64, pass);
-                } else if i.soft.max_color <= SOFT_FUSED_MAX_COLOR {
-                    // Every colour fits one workgroup pass: the whole sweep (and the
-                    // Chebyshev step) in one dispatch, same order. Exactly one 256-lane
-                    // workgroup: hosts size dispatches as threads / 64, so ask for 64.
-                    e.dp("soft_primal_fused", 64, pass);
+                // One workgroup per soft body (`soft_primal_bodies`): every body's
+                // sweep at once, its particles' beams and contacts over the lanes,
+                // one dispatch at any vehicle count. On the iteration's last sweep,
+                // workgroups past the bodies run vehicle_iterate (256 vehicles each)
+                // beside it. Hosts size workgroups as threads / 64.
+                let vehicle_groups = if vehicles && k + 1 == sweeps {
+                    u64::from(i.vehicle_count).div_ceil(256)
                 } else {
-                    // Particle colours (spawn colouring; colour k of every vehicle at once).
-                    for color in 0..i.soft.colors {
-                        e.dp("soft_primal", u64::from(i.soft.max_color.max(1)), color);
-                    }
-                    if i.soft.chebyshev {
-                        e.dp("soft_chebyshev", u64::from(i.soft.particles.max(1)), pass);
-                    }
-                }
+                    0
+                };
+                e.dp(
+                    "soft_primal_bodies",
+                    (u64::from(i.soft.bodies) + vehicle_groups) * 64,
+                    pass,
+                );
             }
             e.phase("soft_primal");
         } else {
@@ -509,7 +508,7 @@ pub fn encode_step(
         if soft && i.soft.dual {
             e.d("soft_dual", u64::from(i.soft.beams.max(1)));
         }
-        if vehicles {
+        if vehicles && !soft {
             e.d("vehicle_iterate", u64::from(i.vehicle_count));
         }
         e.phase("dual");
@@ -528,6 +527,8 @@ pub fn encode_step(
         e.d("vehicle_post", u64::from(i.vehicle_count));
     }
     if soft {
+        // BDF2 velocities and history (a no-op under backward Euler).
+        e.d("soft_velocity", u64::from(i.soft.particles.max(1)));
         e.d("soft_sleep", u64::from(i.soft.bodies));
     }
     e.d("write_sleep_args", 64);
@@ -622,6 +623,9 @@ pub const SOFT_ENTRIES: &[&str] = &[
     "soft_wake",
     "soft_begin",
     "soft_bounds",
+    "soft_tri_planes",
+    "soft_pairs",
+    "soft_velocity",
     "soft_collide_nodes",
     "soft_collide_tris",
     "soft_primal",
@@ -1138,67 +1142,57 @@ mod tests {
             at("soft_begin") < at("soft_collide_nodes")
                 && at("soft_collide_nodes") < at("soft_collide_tris")
         );
-        assert!(at("soft_collide_tris") < at("soft_primal_fused"));
-        assert_eq!(
-            names.iter().filter(|n| **n == "soft_primal_fused").count(),
-            i.iterations as usize,
-            "one fused sweep per iteration"
-        );
+        assert!(at("soft_collide_tris") < at("soft_primal_bodies"));
         assert!(!names.contains(&"soft_dual"), "no-op dual pass skipped");
+        let sweeps = |inp: &StepInputs| -> Vec<u64> {
+            encode_step(&fast(), inp, false, true)
+                .into_iter()
+                .filter_map(|c| match c {
+                    Cmd::Dispatch {
+                        kernel: "soft_primal_bodies",
+                        threads,
+                        ..
+                    } => Some(threads),
+                    Cmd::Dispatch {
+                        kernel: "soft_primal" | "soft_primal_fused" | "soft_chebyshev",
+                        ..
+                    } => panic!("per-colour sweep planned"),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            sweeps(&i),
+            vec![64; i.iterations as usize],
+            "one sweep per iteration"
+        );
         let mut two = i;
         two.soft.sweeps = 2;
-        let fused = encode_step(&fast(), &two, false, true)
-            .into_iter()
-            .filter(|c| {
-                matches!(
-                    c,
-                    Cmd::Dispatch {
-                        kernel: "soft_primal_fused",
-                        ..
-                    }
-                )
-            })
-            .count();
-        assert_eq!(fused, 2 * i.iterations as usize, "two sweeps per iteration");
-        // Several bodies: one workgroup per body, one dispatch per sweep.
+        assert_eq!(
+            sweeps(&two).len(),
+            2 * i.iterations as usize,
+            "two sweeps per iteration"
+        );
+        // Several bodies and vehicles: one workgroup per body, vehicle_iterate in
+        // workgroups past them on the last sweep (no separate dispatch).
         let mut many = i;
         many.soft.bodies = 20;
-        many.soft.max_color = 20 * SOFT_FUSED_MAX_COLOR;
-        let per_body: Vec<_> = encode_step(&fast(), &many, false, true)
-            .into_iter()
-            .filter_map(|c| match c {
-                Cmd::Dispatch {
-                    kernel: k @ ("soft_primal_bodies" | "soft_primal" | "soft_primal_fused"),
-                    threads,
-                    ..
-                } => Some((k, threads)),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(per_body.len(), i.iterations as usize);
-        assert!(per_body
+        many.vehicle_count = 300;
+        assert_eq!(sweeps(&many), vec![(20 + 2) * 64; i.iterations as usize]);
+        assert!(!encode_step(&fast(), &many, false, true)
             .iter()
-            .all(|&(k, t)| k == "soft_primal_bodies" && t == 20 * 64));
+            .any(|c| matches!(
+                c,
+                Cmd::Dispatch {
+                    kernel: "vehicle_iterate",
+                    ..
+                }
+            )));
         assert!(
             at("soft_plastic") < at("soft_break_groups")
                 && at("soft_break_groups") < at("extract_velocity_sleep")
         );
         assert!(at("extract_velocity_sleep") < at("soft_sleep"));
-        // Colours too large for one workgroup: one dispatch per colour, then Chebyshev.
-        i.soft.max_color = SOFT_FUSED_MAX_COLOR + 1;
-        let n = encode_step(&fast(), &i, false, true)
-            .into_iter()
-            .filter(|c| {
-                matches!(
-                    c,
-                    Cmd::Dispatch {
-                        kernel: "soft_primal",
-                        ..
-                    }
-                )
-            })
-            .count();
-        assert_eq!(n, (i.soft.colors * i.iterations) as usize);
     }
 
     #[test]
