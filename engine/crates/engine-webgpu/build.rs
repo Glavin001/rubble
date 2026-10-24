@@ -162,6 +162,18 @@ const WORLD_ENTRIES: &[&str] = &[
     "soft_sleep",
     // Render poses for hosts (slang/kernels/pose_pack.slang).
     "pose_pack",
+    // Deformable terrain MPM (slang/kernels/terrain_mpm.slang).
+    "mpm_clear",
+    "mpm_touch",
+    "mpm_count",
+    "mpm_scan_cells",
+    "mpm_scan_blocks",
+    "mpm_scatter",
+    "mpm_cell_sort",
+    "mpm_payload",
+    "mpm_p2g",
+    "mpm_grid",
+    "mpm_g2p",
 ];
 
 const CHARACTER_ENTRIES: &[&str] = &["char_move", "char_post", "query_batch", "projectile_step"];
@@ -194,6 +206,9 @@ fn source_for(root: &std::path::Path, entry: &str) -> PathBuf {
     }
     if entry == "pose_pack" {
         return kernels.join("pose_pack.slang");
+    }
+    if entry.starts_with("mpm_") {
+        return kernels.join("terrain_mpm.slang");
     }
     if entry.starts_with("convex_") {
         return kernels.join(if entry.ends_with("_persistent") {

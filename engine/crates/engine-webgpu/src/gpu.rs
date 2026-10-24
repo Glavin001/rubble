@@ -124,6 +124,8 @@ pub struct WgpuSim {
     command_count: u32,
     /// Run `pose_pack` each step (render poses and the moved-body list).
     pose_output: bool,
+    /// Deformable-terrain MPM pool (`terrain_enable`).
+    terrain: Option<terrain::TerrainState>,
     /// The last `step*` call ran the GPU step (false: skipped, nothing awake).
     last_step_ran: bool,
     sleep_island_rounds: u32,
@@ -539,6 +541,12 @@ impl WgpuSim {
                 mapped_at_creation: false,
             }));
         }
+        // Deformable-terrain MPM buffers (terrain_mpm.slang): placeholders until
+        // `terrain_enable` sizes them from a TerrainConfig.
+        for binding in engine_terrain::layout::MPM_PARAMS_BINDING..engine_terrain::layout::MPM_BINDING_END {
+            debug_assert_eq!(bufs.len(), binding);
+            bufs.push(terrain_buffer(&device, binding, 256));
+        }
         // Pass table slots (256-byte aligned so dynamic offsets are legal).
         queue.write_buffer(&bufs[22], 0, &rigid_plan::pass_table());
 
@@ -699,6 +707,7 @@ impl WgpuSim {
             joint_count: 0,
             command_count: 0,
             pose_output,
+            terrain: None,
             last_step_ran: false,
             sleep_island_rounds: 8,
             last_counters: StepCounters::default(),
@@ -2918,6 +2927,10 @@ impl VehicleBackend for WgpuSim {
 
 #[path = "gpu_host_state.rs"]
 mod host_state;
+#[path = "gpu_terrain.rs"]
+mod terrain;
+pub use terrain::TerrainStepReport;
+pub(crate) use terrain::terrain_buffer;
 #[path = "gpu_characters.rs"]
 mod characters;
 pub use characters::{CharacterHandle, MotionEvent};
