@@ -146,6 +146,9 @@ struct FRubbleShapeVisual
 	/** A glazed facade piece: its faces on the facades it reaches draw framed windows over
 	 *  rooms. Bits, in Unreal's axes: 1 +X, 2 -X, 4 +Y, 8 -Y (0: none). */
 	uint8 GlazedFacades = 0;
+	/** The destructible chunk this shape draws (the town's threshold pieces): Split events move it
+	 *  to a child body. INDEX_NONE: it stays on its body. */
+	int32 Chunk = INDEX_NONE;
 };
 
 /** A rigid body drawn by its shapes (rigid scenes, scenery, projectiles, vehicle parts). */
@@ -161,6 +164,9 @@ struct FRubbleBodyVisual
 	/** Drawn on CPU-visible instances even when GPU poses are available, so Lumen's distance
 	 *  fields and surface cache see it (the town's chunks: intact buildings must bounce light). */
 	bool bLumenVisible = false;
+	/** Its chunks may move to other bodies (Split events re-bind Chunk shapes): drawn on CPU
+	 *  instances, never as a GPU or hybrid body. */
+	bool bSplits = false;
 	/** A moving obstacle (a ram, a shunting truck, a crusher block, an impactor ball): its start
 	 *  velocity (cm/s), spin (rad/s) and mass (kg; 0: the material's density). */
 	FVector InitialVelocity = FVector::ZeroVector;

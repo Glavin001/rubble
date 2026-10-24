@@ -656,6 +656,7 @@ bool FRubbleAbiBackend::LoadAbi(const FRubbleSceneRequest& Request, FString& Err
 		W.max_joints = FMath::Max(W.max_joints, 32768u);
 		W.max_hull_vertices = FMath::Max(W.max_hull_vertices, 1u << 20);
 	}
+	bTownThreshold = Request.Family == ERubbleFamily::Fracture && Request.Id == TEXT("town") && Request.Param(TEXT("bonds"), 0.0f) < 0.5f;
 	if (Request.Family == ERubbleFamily::Fracture && Request.Id == TEXT("town"))
 	{
 		// Vibe Town: ~52k chunks, ~133k bonds, ~25k hull chunks of up to 42 points.
@@ -669,6 +670,13 @@ bool FRubbleAbiBackend::LoadAbi(const FRubbleSceneRequest& Request, FString& Err
 	// 9k); 32 here. Overflow is loud (rbWorld_Poll fails with the flag), never a silent drop.
 	W.max_contacts = FMath::Max(W.max_contacts, FMath::Min(uint32(NumBodies * 32), 1u << 22));
 	W.max_candidates = FMath::Max(W.max_candidates, FMath::Min(uint32(NumBodies * 32), 1u << 22));
+	if (bTownThreshold)
+	{
+		// The threshold model reads canonical contact rows, at most 2,097,120 of them (its
+		// contact ingest's dispatch; rbCreateDestructible fails above that).
+		W.contacts = RB_CONTACTS_CANONICAL;
+		W.max_contacts = FMath::Min(W.max_contacts, 2000000u);
+	}
 	if (Request.Family == ERubbleFamily::Rigid)
 	{
 		// demo.html's sceneCap: power-of-two tiers, contacts and candidates capped at 2^21.
@@ -874,6 +882,10 @@ void FRubbleAbiBackend::Poll(TArray<FRubbleFrame>& Out)
 			{
 				*At = Move.Transform.GetLocation();
 			}
+			if (FTransform* Pose = TownBodyPose.Find(M.body))
+			{
+				*Pose = Move.Transform;
+			}
 		}
 		for (uint32 i = 0; i < F.destruction_count; ++i)
 		{
@@ -897,6 +909,77 @@ void FRubbleAbiBackend::Poll(TArray<FRubbleFrame>& Out)
 				break;
 			case RB_BONDS_BROKEN:
 			case RB_SPLIT:
+				if (bTownThreshold)
+				{
+					// Breaks reach the effects with the splits, where the pieces are.
+					if (D.type_ == RB_SPLIT && D.child_count && D.children[0].chunk_count)
+					{
+						E.Type = ERubbleEventType::Split;
+						auto Actor = [](const RbActor& A) {
+							FRubbleActorInfo Out;
+							Out.Body = FRubbleBodyId(A.chunk_count ? A.bodies[0] : 0);
+							Out.Chunks.Reserve(A.chunk_count);
+							for (uint32 k = 0; k < A.chunk_count; ++k)
+							{
+								Out.Chunks.Add(int32(A.chunks[k]));
+							}
+							Out.Mass = A.mass;
+							Out.bAnchored = A.anchored;
+							return Out;
+						};
+						E.Parent = Actor(D.parent);
+						if (TownChunkBody.IsValidIndex(D.children[0].chunks[0]))
+						{
+							// The body that held the pieces until now (the renderers move its instances).
+							E.Parent.Body = FRubbleBodyId(TownChunkBody[D.children[0].chunks[0]]);
+						}
+						for (uint32 k = 0; k < D.child_count; ++k)
+						{
+							E.Children.Add(Actor(D.children[k]));
+							const RbActor& Child = D.children[k];
+							for (uint32 j = 0; j < Child.chunk_count; ++j)
+							{
+								if (TownChunkBody.IsValidIndex(Child.chunks[j]))
+								{
+									const uint64 Was = TownChunkBody[Child.chunks[j]];
+									TownChunkBody[Child.chunks[j]] = Child.bodies[j];
+									if (!TownBodyPose.Contains(Child.bodies[j]))
+									{
+										// A new piece starts where its parent was.
+										TownBodyPose.Add(Child.bodies[j], TownBodyPose.FindRef(Was));
+									}
+								}
+							}
+						}
+						// Where it broke: the smallest child (the piece that came away; the largest is
+						// what still stands). The collapse is sized by what came away.
+						uint32 Smallest = 0, Largest = 0, Detached = 0;
+						for (uint32 k = 0; k < D.child_count; ++k)
+						{
+							Smallest = D.children[k].chunk_count < D.children[Smallest].chunk_count ? k : Smallest;
+							Largest = D.children[k].chunk_count > D.children[Largest].chunk_count ? k : Largest;
+						}
+						for (uint32 k = 0; k < D.child_count; ++k)
+						{
+							Detached += k == Largest ? 0 : D.children[k].chunk_count;
+						}
+						const uint32 Chunk = D.children[Smallest].chunks[0];
+						E.Position = TownChunkAt(Chunk);
+						if (TownChunkLook.IsValidIndex(Chunk))
+						{
+							E.MaterialA = TownChunkLook[Chunk].Key;
+							E.Color = TownChunkLook[Chunk].Value;
+						}
+						R.Events.Add(E);
+						FRubbleEvent Collapse = E;
+						Collapse.Type = ERubbleEventType::BondsBroken;
+						Collapse.Count = FMath::Max(int32(Detached), 1);
+						Collapse.Parent = FRubbleActorInfo();
+						Collapse.Children.Reset();
+						R.Events.Add(Collapse);
+					}
+					continue;
+				}
 			{
 				// Bonds model: chunk bodies never change, so a split is an effect, not a re-binding
 				// for the renderer (Destructible stays INDEX_NONE). Where: the first child's chunk.
@@ -1080,11 +1163,15 @@ bool FRubbleAbiBackend::CreateTown(FString& Error)
 		Error = AbiError(TEXT("rbCreateDestructibleAssetFromPack"));
 		return false;
 	}
-	// The solver the pack is tuned with (the fracture lab's: 120 Hz, 8 iterations, its contact,
-	// inertia, sleep and post-stabilization flags). Under World's defaults (60 Hz, none of those
-	// flags) a struck town gains energy and throws its chunks kilometres (unreal/PLAN.md).
+	// The solver the pack is tuned with for its model: the fracture lab's threshold mode (60 Hz),
+	// or for bond joints the lab's rigid settings (120 Hz, 8 iterations, its contact, inertia,
+	// sleep and post-stabilization flags). Under World's defaults (60 Hz, none of those flags) a
+	// struck town gains energy and throws its chunks kilometres (unreal/PLAN.md).
 	float TimeStep = 0.0f;
-	if (rbWorld_UseDestructibleAssetSolver(WorldPtr, Asset, &TimeStep) != RB_OK)
+	const RbResult Solver = bTownThreshold
+		? rbWorld_UseDestructibleAssetSolverFor(WorldPtr, Asset, RB_STRENGTH_THRESHOLD, &TimeStep)
+		: rbWorld_UseDestructibleAssetSolver(WorldPtr, Asset, &TimeStep);
+	if (Solver != RB_OK)
 	{
 		Error = AbiError(TEXT("the town's solver"));
 		return false;
@@ -1092,6 +1179,23 @@ bool FRubbleAbiBackend::CreateTown(FString& Error)
 	Dt = TimeStep;
 	RbDestructibleDef D = rbDefaultDestructibleDef();
 	D.asset = Asset;
+	if (bTownThreshold)
+	{
+		D.model = RB_STRENGTH_THRESHOLD;
+		// The lab's ground is where the stress scene stands (its grade, 50 cm up): placed on
+		// Unreal's ground at z = 0.
+		bool bHasGround = false;
+		RbVec3 Ground{ 0, 0, 0 };
+		if (rbWorld_GetDestructibleAssetGround(WorldPtr, Asset, &bHasGround, &Ground) != RB_OK)
+		{
+			Error = AbiError(TEXT("the town's ground"));
+			return false;
+		}
+		if (bHasGround)
+		{
+			D.transform = Xf(FTransform(FVector(0.0, 0.0, -Ground.z)));
+		}
+	}
 	D.anchored = true;     // its buried footings and road subgrade are fixed
 	D.start_asleep = true; // a standing town, until something hits it
 	// ?strength= scales every bond (1: the pack's own limits). See unreal/PLAN.md: at 1 the town
@@ -1120,6 +1224,14 @@ bool FRubbleAbiBackend::CreateTown(FString& Error)
 	TArray<int32> MeshOfHull;
 	MeshOfHull.Init(INDEX_NONE, Pack.Hulls.Num());
 	int32 Drawn = 0;
+	// Threshold: a cluster's chunks share its body until a split; one visual per body.
+	TArray<uint64> BodyOrder;
+	TMap<uint64, TArray<FRubbleShapeVisual>> ShapesOfBody;
+	TMap<uint64, FTransform> InitialOfBody;
+	TownChunkBody.Init(0, bTownThreshold ? Count : 0);
+	TownChunkLocal.Init(FVector::ZeroVector, bTownThreshold ? Count : 0);
+	TownChunkLook.Init(TPair<ERubbleMaterial, FLinearColor>(ERubbleMaterial::Concrete, FLinearColor::Transparent), bTownThreshold ? Count : 0);
+	TownBodyPose.Reset();
 	for (uint32 c = 0; c < Count; ++c)
 	{
 		RbBodyId Body = 0;
@@ -1172,6 +1284,22 @@ bool FRubbleAbiBackend::CreateTown(FString& Error)
 			Shape.Kind = ERubbleShape::Hull;
 			Shape.Mesh = MeshOfHull[N.Hull];
 		}
+		if (bTownThreshold)
+		{
+			Shape.Chunk = int32(c);
+			if (!ShapesOfBody.Contains(Body))
+			{
+				BodyOrder.Add(Body);
+				InitialOfBody.Add(Body, Xf(T));
+			}
+			ShapesOfBody.FindOrAdd(Body).Add(Shape);
+			TownChunkBody[c] = Body;
+			TownChunkLocal[c] = Xf(Pose).GetLocation();
+			TownChunkLook[c] = TPair<ERubbleMaterial, FLinearColor>(M.Kind, M.Color);
+			TownBodyPose.Add(Body, Xf(T));
+			++Drawn;
+			continue;
+		}
 		FRubbleBodyVisual V;
 		V.Id = FRubbleBodyId(Body);
 		V.Initial = Xf(T);
@@ -1183,9 +1311,35 @@ bool FRubbleAbiBackend::CreateTown(FString& Error)
 		ChunkLook.Add(Body, TPair<ERubbleMaterial, FLinearColor>(M.Kind, M.Color));
 		++Drawn;
 	}
+	for (const uint64 Body : BodyOrder)
+	{
+		FRubbleBodyVisual V;
+		V.Id = FRubbleBodyId(Body);
+		V.Initial = InitialOfBody[Body];
+		V.FirstShape = SceneAssets->Shapes.Num();
+		V.NumShapes = ShapesOfBody[Body].Num();
+		V.bLumenVisible = true;
+		V.bSplits = true;
+		SceneAssets->Shapes.Append(ShapesOfBody[Body]);
+		SceneAssets->Bodies.Add(V);
+	}
+	if (bTownThreshold)
+	{
+		UE_LOG(LogRubble, Display, TEXT("town: threshold model, %d bodies at rest"), BodyOrder.Num());
+	}
 	UE_LOG(LogRubble, Display, TEXT("town: '%s', %u chunks (%d drawn, %d meshes, %d materials); physics %.0f ms, visuals %.0f ms"),
 		*Pack.Title, Count, Drawn, SceneAssets->Meshes.Num(), Pack.Materials.Num(), 1000.0 * (Physics - Start), 1000.0 * (FPlatformTime::Seconds() - Physics));
 	return true;
+}
+
+FVector FRubbleAbiBackend::TownChunkAt(uint32 Chunk) const
+{
+	if (!TownChunkBody.IsValidIndex(Chunk))
+	{
+		return FVector::ZeroVector;
+	}
+	const FTransform* Pose = TownBodyPose.Find(TownChunkBody[Chunk]);
+	return Pose ? Pose->TransformPosition(TownChunkLocal[Chunk]) : TownChunkLocal[Chunk];
 }
 
 bool FRubbleAbiBackend::ParkBalls(int32 Count, FString& Error)
@@ -1210,6 +1364,16 @@ bool FRubbleAbiBackend::ParkBalls(int32 Count, FString& Error)
 		{
 			Error = AbiError(TEXT("parked ball"));
 			return false;
+		}
+		// Threshold: its contacts load the town as the lab's shots do (strike prediction).
+		if (bTownThreshold)
+		{
+			const RbProjectile P = rbDefaultProjectile();
+			if (rbBody_SetProjectile(WorldPtr, Ball, &P) != RB_OK)
+			{
+				Error = AbiError(TEXT("ball projectile"));
+				return false;
+			}
 		}
 		Balls.Add(Ball);
 		FRubbleBodyVisual V;
@@ -1244,6 +1408,15 @@ bool FRubbleAbiBackend::ParkBalls(int32 Count, FString& Error)
 			{
 				Error = AbiError(TEXT("parked meteor"));
 				return false;
+			}
+			if (bTownThreshold)
+			{
+				const RbProjectile P = rbDefaultProjectile();
+				if (rbBody_SetProjectile(WorldPtr, Rock, &P) != RB_OK)
+				{
+					Error = AbiError(TEXT("meteor projectile"));
+					return false;
+				}
 			}
 			Meteors.Add(Rock);
 			FRubbleBodyVisual V;

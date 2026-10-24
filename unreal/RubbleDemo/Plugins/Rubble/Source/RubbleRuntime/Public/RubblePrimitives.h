@@ -19,6 +19,7 @@ class UInstancedStaticMeshComponent;
 class URubbleInstancesComponent;
 class FRubbleGpuPoses;
 class UStaticMesh;
+struct FRubbleEvent;
 struct FRubbleFrame;
 struct FRubbleSceneAssets;
 
@@ -56,8 +57,7 @@ private:
 	{
 		FTransform Previous;
 		FTransform Current;
-		int32 First = 0; // into Refs
-		int32 Num = 0;
+		TArray<int32> Refs; // into Refs (a split moves some to other bodies)
 	};
 	struct FBatch
 	{
@@ -120,6 +120,8 @@ private:
 	void OnFrame(const FRubbleFrame& Frame);
 	int32 BatchFor(ERubbleShape Kind, int32 Mesh, ERubbleMaterial Material, float A, float B, const FRubbleSceneAssets& Assets, bool bTown);
 	void Apply(int32 BodyIndex, const FTransform& Pose);
+	/** A Split: each child body draws its chunks' instances, from where the parent was. */
+	void Rebind(const FRubbleEvent& Split);
 	/** A body that appears mid-scene (a projectile): its instances are added one by one. */
 	void AddLiveBody(const FRubbleBodyVisual& Body, TArrayView<const FRubbleShapeVisual> Shapes);
 	const FRubbleSceneAssets* SceneAssets = nullptr;
@@ -129,6 +131,7 @@ private:
 	TMap<uint64, TObjectPtr<UStaticMesh>> BuiltMeshes;
 	TArray<FInstanceRef> Refs;
 	TMap<uint32, FBodyState> BodyInstances; // by body index
+	TMap<int32, int32> ChunkRefs; // a Chunk shape's ref, by chunk
 	TSet<uint32> Active;   // moving: drawn every tick at the interpolated pose
 	TSet<uint32> Settling; // moved in an earlier frame but not the latest: one last draw at rest
 	FDelegateHandle FrameHandle, SceneHandle;

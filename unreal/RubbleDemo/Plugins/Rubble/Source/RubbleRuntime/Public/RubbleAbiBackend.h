@@ -64,6 +64,17 @@ private:
 	TArray<uint64> Meteors;
 	int32 NextMeteor = 0;
 	bool IsTown() const { return Current.Family == ERubbleFamily::Fracture && Current.Id == TEXT("town"); }
+	/** The town under the threshold strength model (the default; ?bonds=1 keeps the breakable
+	 *  bond joints, every chunk a body). */
+	bool bTownThreshold = false;
+	/** The threshold town, by chunk: its body, its centre in that body's frame, its look. Splits
+	 *  move chunks to new bodies. */
+	TArray<uint64> TownChunkBody;
+	TArray<FVector> TownChunkLocal;
+	TArray<TPair<ERubbleMaterial, FLinearColor>> TownChunkLook;
+	/** The threshold town's bodies' last poses (every piece's origin is the town's frame). */
+	TMap<uint64, FTransform> TownBodyPose;
+	FVector TownChunkAt(uint32 Chunk) const;
 
 	/** Soft cars: the procedural car spawned per layout car, skinned with a fitted shell. */
 	bool CreateSoftCars(const FRubbleSceneAssets& Layout, FString& Error);

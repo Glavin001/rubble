@@ -176,6 +176,7 @@ void ARubblePrimitives::Rebuild(const FRubbleSceneAssets& Assets)
 	BuiltMeshes.Reset();
 	Refs.Reset();
 	BodyInstances.Reset();
+	ChunkRefs.Reset();
 	Active.Reset();
 	Settling.Reset();
 	SceneAssets = &Assets;
@@ -196,7 +197,6 @@ void ARubblePrimitives::Rebuild(const FRubbleSceneAssets& Assets)
 		}
 		FBodyState State;
 		State.Previous = State.Current = Body.Initial;
-		State.First = Refs.Num();
 		for (int32 s = 0; s < Body.NumShapes; ++s)
 		{
 			const FRubbleShapeVisual& Shape = Assets.Shapes[Body.FirstShape + s];
@@ -218,11 +218,14 @@ void ARubblePrimitives::Rebuild(const FRubbleSceneAssets& Assets)
 			}
 			Ref.Instance = NewTransforms[Ref.Batch].Add(Ref.Local * Body.Initial);
 			CustomData(Shape, Scale, bTown, NewCustom[Ref.Batch]);
-			Refs.Add(Ref);
+			if (Shape.Chunk != INDEX_NONE)
+			{
+				ChunkRefs.Add(Shape.Chunk, Refs.Num());
+			}
+			State.Refs.Add(Refs.Add(Ref));
 		}
-		State.Num = Body.NumShapes;
-		BodyInstances.Add(Body.Id.Index(), State);
-		if (Body.bLumenVisible)
+		BodyInstances.Add(Body.Id.Index(), MoveTemp(State));
+		if (Body.bLumenVisible && !Body.bSplits)
 		{
 			AddHybrid(Body, Assets.Shapes, Assets);
 		}
@@ -256,8 +259,6 @@ void ARubblePrimitives::AddLiveBody(const FRubbleBodyVisual& Body, TArrayView<co
 	}
 	FBodyState State;
 	State.Previous = State.Current = Body.Initial;
-	State.First = Refs.Num();
-	State.Num = Body.NumShapes;
 	for (int32 s = 0; s < Body.NumShapes; ++s)
 	{
 		const FRubbleShapeVisual& Shape = Shapes[Body.FirstShape + s];
@@ -279,9 +280,9 @@ void ARubblePrimitives::AddLiveBody(const FRubbleBodyVisual& Body, TArrayView<co
 		Batch.Transforms[Ref.Instance] = Ref.Local * Body.Initial;
 		const float Tint[3] = { Shape.Tint.R, Shape.Tint.G, Shape.Tint.B };
 		Batch.Component->SetCustomData(Ref.Instance, TArrayView<const float>(Tint, 3), true);
-		Refs.Add(Ref);
+		State.Refs.Add(Refs.Add(Ref));
 	}
-	BodyInstances.Add(Body.Id.Index(), State);
+	BodyInstances.Add(Body.Id.Index(), MoveTemp(State));
 }
 
 void ARubblePrimitives::OnFrame(const FRubbleFrame& Frame)
@@ -289,6 +290,14 @@ void ARubblePrimitives::OnFrame(const FRubbleFrame& Frame)
 	for (const FRubbleBodyVisual& B : Frame.NewBodies)
 	{
 		AddLiveBody(B, Frame.NewShapes);
+	}
+	// Splits first: this frame's moves may belong to bodies a split made.
+	for (const FRubbleEvent& E : Frame.Events)
+	{
+		if (E.Type == ERubbleEventType::Split && ChunkRefs.Num())
+		{
+			Rebind(E);
+		}
 	}
 	// Bodies moving before this frame and not in it are now at rest: one last draw there.
 	TSet<uint32> Moved;
@@ -338,12 +347,50 @@ void ARubblePrimitives::OnFrame(const FRubbleFrame& Frame)
 void ARubblePrimitives::Apply(int32 BodyIndex, const FTransform& Pose)
 {
 	const FBodyState& State = BodyInstances[BodyIndex];
-	for (int32 r = 0; r < State.Num; ++r)
+	for (const int32 r : State.Refs)
 	{
-		const FInstanceRef& Ref = Refs[State.First + r];
+		const FInstanceRef& Ref = Refs[r];
 		FBatch& Batch = Batches[Ref.Batch];
 		Batch.Transforms[Ref.Instance] = Ref.Local * Pose;
 		++Batch.Dirty;
+	}
+}
+
+void ARubblePrimitives::Rebind(const FRubbleEvent& Split)
+{
+	const uint32 Parent = Split.Parent.Body.Index();
+	const FBodyState* From = BodyInstances.Find(Parent);
+	// Every piece's origin is the destructible's frame: a child starts at its parent's pose.
+	const FTransform At = From ? From->Current : FTransform::Identity;
+	TArray<TPair<uint32, TArray<int32>>> Children;
+	bool bParentKept = false;
+	for (const FRubbleActorInfo& Child : Split.Children)
+	{
+		TArray<int32> ChildRefs;
+		for (const int32 c : Child.Chunks)
+		{
+			if (const int32* r = ChunkRefs.Find(c))
+			{
+				ChildRefs.Add(*r);
+			}
+		}
+		bParentKept |= Child.Body.Index() == Parent;
+		Children.Emplace(Child.Body.Index(), MoveTemp(ChildRefs));
+	}
+	if (!bParentKept)
+	{
+		BodyInstances.Remove(Parent);
+		Active.Remove(Parent);
+		Settling.Remove(Parent);
+	}
+	for (TPair<uint32, TArray<int32>>& C : Children)
+	{
+		FBodyState& State = BodyInstances.FindOrAdd(C.Key);
+		if (State.Refs.Num() == 0 && C.Key != Parent)
+		{
+			State.Previous = State.Current = At;
+		}
+		State.Refs = MoveTemp(C.Value);
 	}
 }
 
@@ -385,9 +432,9 @@ void ARubblePrimitives::Tick(float DeltaSeconds)
 	}
 	auto WriteBody = [this, &Touched](uint32 b) {
 		const FBodyState& State = BodyInstances[b];
-		for (int32 r = 0; r < State.Num; ++r)
+		for (const int32 r : State.Refs)
 		{
-			const FInstanceRef& Ref = Refs[State.First + r];
+			const FInstanceRef& Ref = Refs[r];
 			FBatch& Batch = Batches[Ref.Batch];
 			if (Batch.Dirty > 0)
 			{
@@ -607,9 +654,9 @@ void ARubblePrimitives::AddHybrid(const FRubbleBodyVisual& Body, TArrayView<cons
 void ARubblePrimitives::SetHybridAwake(uint32 BodyIndex, FHybrid& H, bool bAwake, const FTransform* RestPose, TSet<int32>& TouchedBatches)
 {
 	const FBodyState& State = BodyInstances[BodyIndex];
-	for (int32 r = 0; r < State.Num; ++r)
+	for (int32 r = 0; r < State.Refs.Num(); ++r)
 	{
-		const FInstanceRef& Ref = Refs[State.First + r];
+		const FInstanceRef& Ref = Refs[State.Refs[r]];
 		FBatch& Batch = Batches[Ref.Batch];
 		// Awake: the CPU instance is parked out of sight (tiny, far below); at rest, it is drawn.
 		const FTransform Drawn = bAwake ? FTransform(FQuat::Identity, FVector(0, 0, -1.0e6), FVector(1.0e-4)) : Ref.Local * (RestPose ? *RestPose : State.Current);
@@ -658,10 +705,10 @@ void ARubblePrimitives::WriteGpu(const FRubbleGpuPoses& Poses)
 bool ARubblePrimitives::BodyTransform(FRubbleBodyId Body, FTransform& Out) const
 {
 	const FBodyState* State = BodyInstances.Find(Body.Index());
-	if (!State || State->Num == 0)
+	if (!State || State->Refs.Num() == 0)
 	{
 		return false;
 	}
-	const FInstanceRef& Ref = Refs[State->First];
+	const FInstanceRef& Ref = Refs[State->Refs[0]];
 	return Batches[Ref.Batch].Component->GetInstanceTransform(Ref.Instance, Out, false);
 }
