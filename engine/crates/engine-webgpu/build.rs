@@ -142,6 +142,9 @@ const WORLD_ENTRIES: &[&str] = &[
     "soft_sleep",
     // Render poses for hosts (slang/kernels/pose_pack.slang).
     "pose_pack",
+    // Contact events (P4), canonical and persistent storage.
+    "contact_events",
+    "contact_events_persistent",
 ];
 
 const VEHICLE_ENTRIES: &[&str] = &[

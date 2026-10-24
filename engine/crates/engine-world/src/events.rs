@@ -87,6 +87,35 @@ pub struct SoftOutput {
     pub nodes: Vec<[f32; 3]>,
 }
 
+/// Two shapes started touching (either has `enable_contact_events`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContactBeginEvent {
+    pub shape_a: crate::ShapeId,
+    pub shape_b: crate::ShapeId,
+    /// The deepest contact point and the normal from A to B (world).
+    pub point: [f32; 3],
+    pub normal: [f32; 3],
+    /// Closing speed along the normal at that point, before the solve (m/s).
+    pub approach_speed: f32,
+}
+
+/// Two shapes stopped touching (or one was destroyed while touching).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContactEndEvent {
+    pub shape_a: crate::ShapeId,
+    pub shape_b: crate::ShapeId,
+}
+
+/// Contact begin and end events, and hits: begins at or above
+/// `WorldDef::hit_event_threshold` on shapes with `enable_hit_events`
+/// (impact sounds, effects, damage).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ContactEvents {
+    pub begin: Vec<ContactBeginEvent>,
+    pub end: Vec<ContactEndEvent>,
+    pub hits: Vec<ContactBeginEvent>,
+}
+
 /// A batch of queued ray casts ([`crate::World::cast_rays`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RayBatchId(pub u64);
@@ -130,6 +159,8 @@ pub struct Frame {
     pub skins: Vec<SkinOutput>,
     /// Ray batches queued before this step.
     pub ray_results: Vec<RayBatchResult>,
+    /// Shapes that started or stopped touching this step, and hits.
+    pub contact_events: ContactEvents,
     /// Records overwritten in the GPU event ring before they were read (more
     /// than it holds between two frames). Never silently zero.
     pub lost_events: u32,
@@ -161,6 +192,8 @@ pub struct CoalescedFrame {
     pub skins: Vec<SkinOutput>,
     /// Every ray batch's results.
     pub ray_results: Vec<RayBatchResult>,
+    /// Every step's contact events, in step order.
+    pub contact_events: ContactEvents,
     pub lost_events: u32,
     /// Any folded step's readback was dropped (a later one resynced it).
     pub dropped: bool,
@@ -210,6 +243,9 @@ pub fn coalesce(frames: Vec<Frame>) -> CoalescedFrame {
             skins.insert(s.skin, s);
         }
         out.ray_results.extend(f.ray_results);
+        out.contact_events.begin.extend(f.contact_events.begin);
+        out.contact_events.end.extend(f.contact_events.end);
+        out.contact_events.hits.extend(f.contact_events.hits);
         out.lost_events += f.lost_events;
         out.dropped |= f.dropped;
         if f.counters.is_some() {

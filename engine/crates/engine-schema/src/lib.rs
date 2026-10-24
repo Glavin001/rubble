@@ -246,8 +246,22 @@ pub struct Manifold {
 /// joint count.)
 pub const EVENT_RING_BASE: u32 = 96;
 pub const EVENT_RING_CAPACITY: u32 = 1024;
-/// Total `u32` words of the scratch-atomics buffer (host words, lists, ring).
-pub const SCRATCH_WORDS: u32 = LARGE_STATIC_BASE + LARGE_STATIC_CAP;
+/// Contact events (opt-in `contact_events` pass): after the large-static
+/// list, a header word counting the records appended this step (the host
+/// zeroes it), three spare words, then up to `CONTACT_EVENT_CAP` records of
+/// `CONTACT_EVENT_WORDS`: `[colliderA, colliderB, approach speed, 0]`,
+/// `[point, 0]`, `[normal, 0]`. Counts past the capacity are reported lost.
+pub const CONTACT_EVENT_BASE: u32 = LARGE_STATIC_BASE + LARGE_STATIC_CAP;
+pub const CONTACT_EVENT_CAP: u32 = 2048;
+pub const CONTACT_EVENT_WORDS: u32 = 12;
+/// `Collider.material` bits 12..15 (the index uses 0..11, the filter group
+/// 16..31): the shape reports contact events, hit events, or is a sensor.
+pub const COLLIDER_CONTACT_EVENTS: u32 = 1 << 12;
+pub const COLLIDER_HIT_EVENTS: u32 = 1 << 13;
+pub const COLLIDER_SENSOR: u32 = 1 << 14;
+/// Total `u32` words of the scratch-atomics buffer (host words, lists, ring,
+/// contact events).
+pub const SCRATCH_WORDS: u32 = CONTACT_EVENT_BASE + 4 + CONTACT_EVENT_WORDS * CONTACT_EVENT_CAP;
 /// Scratch word of the oversized-static count (uniform grid; see `LARGE_STATIC_CAP`).
 pub const LARGE_STATIC_COUNT: u32 = 80;
 /// First scratch word of the oversized-static collider ids, after the event ring.

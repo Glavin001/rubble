@@ -398,3 +398,72 @@ fn the_fracture_lab_setup_works_in_unreal_units() {
         rbDestroyWorld(w);
     }
 }
+
+#[test]
+fn contact_and_hit_events_arrive_in_unreal_units() {
+    unsafe {
+        let mut def = rbDefaultWorldDef();
+        def.coordinates = RbCoordinates::RB_COORDINATES_UNREAL;
+        def.gravity = v3(0.0, 0.0, -981.0);
+        def.hit_event_threshold = 100.0; // 1 m/s
+        let mut w = ptr::null_mut();
+        ok(rbCreateWorld(&def, &mut w));
+        let mut g = 0;
+        ok(rbCreateBody(w, &rbDefaultBodyDef(), &mut g));
+        let mut plane = 0;
+        ok(rbCreatePlaneShape(
+            w,
+            g,
+            &rbDefaultShapeDef(),
+            v3(0.0, 0.0, 1.0),
+            0.0,
+            &mut plane,
+        ));
+        let mut bd = rbDefaultBodyDef();
+        bd.type_ = RbBodyType::RB_DYNAMIC_BODY;
+        bd.transform.p = v3(0.0, 0.0, 250.0);
+        let mut b = 0;
+        ok(rbCreateBody(w, &bd, &mut b));
+        let mut sd = rbDefaultShapeDef();
+        sd.density = 0.0005;
+        sd.enable_contact_events = true;
+        sd.enable_hit_events = true;
+        let mut s = 0;
+        ok(rbCreateBoxShape(
+            w,
+            b,
+            &sd,
+            v3(50.0, 50.0, 50.0),
+            RbTransform::default(),
+            &mut s,
+        ));
+        let (mut begins, mut hits) = (Vec::new(), Vec::new());
+        for _ in 0..120 {
+            ok(rbWorld_Step(w));
+            let mut f: RbFrame = std::mem::zeroed();
+            ok(rbWorld_Poll(w, true, false, &mut f));
+            if f.contact_begin_count > 0 {
+                begins.extend_from_slice(std::slice::from_raw_parts(
+                    f.contact_begin,
+                    f.contact_begin_count as usize,
+                ));
+            }
+            if f.hit_count > 0 {
+                hits.extend_from_slice(std::slice::from_raw_parts(f.hits, f.hit_count as usize));
+            }
+        }
+        assert_eq!(begins.len(), 1, "{begins:?}");
+        let e = begins[0];
+        assert!(e.shape_a == s || e.shape_b == s);
+        let up = if e.shape_a == plane { 1.0 } else { -1.0 };
+        assert!(e.normal.z * up > 0.9, "z up: {e:?}");
+        assert_eq!(hits.len(), 1);
+        // Fell 2 m: about 630 cm/s.
+        assert!(
+            (hits[0].approach_speed - 630.0).abs() < 80.0,
+            "{:?}",
+            hits[0]
+        );
+        rbDestroyWorld(w);
+    }
+}

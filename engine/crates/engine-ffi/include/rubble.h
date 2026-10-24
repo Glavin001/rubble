@@ -109,6 +109,8 @@ typedef struct RbWorldDef {
   // waiting when all are.
   uint32_t readback_frames;
   bool drop_frames;
+  // Begins at or above this approach speed are hits (world units/s).
+  float hit_event_threshold;
   uint64_t user_data;
   uint32_t internal_value;
 } RbWorldDef;
@@ -275,6 +277,23 @@ typedef struct RbRayBatchResult {
   uint32_t hit_count;
 } RbRayBatchResult;
 
+// Two shapes started touching (`RbFrame::contact_begin`, and `hits`).
+typedef struct RbContactBeginEvent {
+  RbShapeId shape_a;
+  RbShapeId shape_b;
+  // The deepest contact point and the normal from A to B.
+  struct RbVec3 point;
+  struct RbVec3 normal;
+  // Closing speed along the normal, before the solve.
+  float approach_speed;
+} RbContactBeginEvent;
+
+// Two shapes stopped touching, or one was destroyed while touching.
+typedef struct RbContactEndEvent {
+  RbShapeId shape_a;
+  RbShapeId shape_b;
+} RbContactEndEvent;
+
 // Results of one step, or of several folded together (`rbWorld_Poll`).
 // Pointers stay valid until the next poll.
 typedef struct RbFrame {
@@ -300,6 +319,13 @@ typedef struct RbFrame {
   // Ray batches queued with `rbWorld_CastRays` before these steps.
   const struct RbRayBatchResult *rays;
   uint32_t ray_count;
+  // Contact events of shapes with `enable_contact_events`, in step order.
+  const struct RbContactBeginEvent *contact_begin;
+  uint32_t contact_begin_count;
+  const struct RbContactEndEvent *contact_end;
+  uint32_t contact_end_count;
+  const struct RbContactBeginEvent *hits;
+  uint32_t hit_count;
 } RbFrame;
 
 // A ray to cast: from `origin` along `translation` (its length is the range).
@@ -332,6 +358,12 @@ typedef struct RbShapeDef {
   uint16_t mask_bits;
   int16_t group_index;
   bool update_body_mass;
+  // Report when this shape starts and stops touching another
+  // (`RbFrame::contact_begin` / `contact_end`).
+  bool enable_contact_events;
+  // Also report hard begins (`RbFrame::hits`, at or above
+  // `RbWorldDef::hit_event_threshold`).
+  bool enable_hit_events;
   uint64_t user_data;
   uint32_t internal_value;
 } RbShapeDef;

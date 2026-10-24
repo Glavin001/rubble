@@ -704,7 +704,8 @@ bool collidersFilteredOut(uint i, uint j)
     return ((fa & 0xFFFFu) & (fb >> 16)) == 0u || ((fb & 0xFFFFu) & (fa >> 16)) == 0u;
 }
 
-uint materialIndex(Collider c) { return c.material & 0xFFFFu; }
+// Bits 12..15 are shape flags (COLLIDER_CONTACT_EVENTS and friends).
+uint materialIndex(Collider c) { return c.material & 0x0FFFu; }
 
 // Look-ahead pairs are tested with their relative sweep: each box is swept by
 // its own v·h for the broadphase, so pieces carried along together (debris in
@@ -5670,4 +5671,66 @@ void recompute_inertia(uint3 tid : SV_DispatchThreadID)
         I.z > 1e-8 ? 1.0 / I.z : 0.0);
     // Shift body origin note: we keep authoring frame; COM offset absorbed into colliders later if needed.
     gBodies[body] = b;
+}
+
+// ----- contact events (P4) ----------------------------------------------------
+// Opt-in pass (hosts add it while any shape reports contact events), right after
+// contact persistence. One thread per manifold: a pair with a flagged collider
+// whose deepest contact touches (gap within the contact offset) is listed with
+// that point, the A-to-B normal and the closing speed there from the step-start
+// velocities, before the solve. Reads physics state only; the host diffs the
+// set step to step into begin, end and hit events (engine-world contacts.rs).
+static const uint COLLIDER_CONTACT_EVENTS = 0x1000u;
+static const uint CONTACT_EVENT_BASE = LARGE_STATIC_BASE + LARGE_STATIC_CAP;
+static const uint CONTACT_EVENT_CAP = 2048u;
+static const uint CONTACT_EVENT_WORDS = 12u;
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void contact_events(uint3 tid : SV_DispatchThreadID)
+{
+    uint mi = dispatchIndex(tid);
+    if (mi >= ALOAD(gCounters[0].manifoldCount)) return;
+    Manifold mf = gManifolds[mi];
+    if (mf.contactCount == 0u) return;
+    Collider ca = gColliders[mf.colliderA];
+    Collider cb = gColliders[mf.colliderB];
+    if (((ca.material | cb.material) & COLLIDER_CONTACT_EVENTS) == 0u) return;
+    float best = 3.402823e38;
+    Contact deepest = (Contact)0;
+    for (uint k = 0u; k < mf.contactCount; k++)
+    {
+        // Absolute index after persistence; READ_CONTACT is the storage mode's.
+        Contact c = READ_CONTACT(mf.contactStart + k);
+        if (c.alive == 0u) continue;
+        float gap = contactGapMode() ? c.c0N : c.c0N - PARAMS.contactOffset;
+        if (gap < best)
+        {
+            best = gap;
+            deepest = c;
+        }
+    }
+    if (best > PARAMS.contactOffset) return;
+    BodyState ba = gBodies[ca.body];
+    BodyState bb = gBodies[cb.body];
+    float3 rA = quatRotate(ba.orientation, deepest.anchorA);
+    float3 rB = quatRotate(bb.orientation, deepest.anchorB);
+    float3 vA = ba.linearVel + cross(ba.angularVel, rA);
+    float3 vB = bb.linearVel + cross(bb.angularVel, rB);
+    float3 n = mf.normal;
+    float approach = dot(vA - vB, n);
+    float3 point = 0.5 * (ba.position + rA + bb.position + rB);
+    uint slot;
+    AADD3(gScratchAtomics[CONTACT_EVENT_BASE], 1u, slot);
+    if (slot >= CONTACT_EVENT_CAP) return;
+    uint w = CONTACT_EVENT_BASE + 4u + CONTACT_EVENT_WORDS * slot;
+    ASTORE(gScratchAtomics[w + 0u], mf.colliderA);
+    ASTORE(gScratchAtomics[w + 1u], mf.colliderB);
+    ASTORE(gScratchAtomics[w + 2u], asuint(approach));
+    ASTORE(gScratchAtomics[w + 4u], asuint(point.x));
+    ASTORE(gScratchAtomics[w + 5u], asuint(point.y));
+    ASTORE(gScratchAtomics[w + 6u], asuint(point.z));
+    ASTORE(gScratchAtomics[w + 8u], asuint(n.x));
+    ASTORE(gScratchAtomics[w + 9u], asuint(n.y));
+    ASTORE(gScratchAtomics[w + 10u], asuint(n.z));
 }

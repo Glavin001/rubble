@@ -717,7 +717,7 @@ design frame (metres, Y up), the format of `vehicle_presets.json` and the
 soft descriptors; spawn transforms and velocities use the world's
 coordinates. `tests/demo_parity.rs` covers each row through the ABI.
 
-Next, in order: P4 (contact, hit and sensor events), D1b (`threshold`),
+Next, in order: P4 sensors, D1b (`threshold`),
 the rest of P3 (damping, gravity scale, motion locks, bullets) and D5
 (`stress`).
 
@@ -948,7 +948,10 @@ Unreal is the first client.
   plan.
 - `allow_fast_rotation`.
 
-**P4: contact, hit and sensor events (next, after P3 shipped).**
+**P4: contact, hit and sensor events.** Contact begin/end and hit events
+shipped 2026-10-24 (World `Frame::contact_events`, C `RbFrame::contact_begin`,
+`contact_end`, `hits`; tested in persistent and canonical storage and through
+the ABI in Unreal units). Sensors are next.
 
 The design (2026-10-24):
 

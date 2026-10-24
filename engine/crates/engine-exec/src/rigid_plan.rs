@@ -72,6 +72,9 @@ pub struct StepModes {
     /// Append `pose_pack` after the sleep commit: compact render poses and the
     /// list of bodies that moved (bindings 33-35; read-only on physics state).
     pub pose_output: bool,
+    /// Append `contact_events` after contact persistence: list touching pairs
+    /// of event-flagged colliders (read-only on physics state).
+    pub contact_events: bool,
 }
 
 /// Scene sizes and last step's counters this step is planned from.
@@ -176,6 +179,7 @@ pub fn resolve_entry(name: &str, persistent: bool) -> &str {
         "convex_classify" => "convex_classify_persistent",
         "convex_manifold" => "convex_manifold_persistent",
         "reuse_all_manifolds" => "reuse_all_manifolds_persistent",
+        "contact_events" => "contact_events_persistent",
         // The one vehicle kernel that reads contacts (vehicle_step_persistent.slang).
         "vehicle_loads" => "vehicle_loads_persistent",
         _ => name,
@@ -384,6 +388,9 @@ pub fn encode_step(
     let early_pair_pack = m.persistent_contacts && !m.fused_persistence && !m.manifold_persistence;
     if early_pair_pack {
         e.w("pack_solver_contacts", 66);
+    }
+    if m.contact_events {
+        e.w("contact_events", 66);
     }
     if i.joint_count > 0 {
         e.d("warmstart_joints", n_joints);
@@ -603,6 +610,7 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "persist_list_copy_persistent",
     "persist_manifolds_persistent",
     "pack_solver_pairs_persistent",
+    "contact_events_persistent",
     "warmstart_joints",
     "build_awake_list",
     "csr_clear",

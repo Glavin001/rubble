@@ -19,6 +19,7 @@
 //! See `engine/docs/public-api.md` and `engine/docs/api-review.md`.
 
 mod assembly;
+mod contacts;
 mod debug_draw;
 mod defs;
 mod destruction;
@@ -45,8 +46,9 @@ pub use destruction::{
 };
 pub use error::{StaleHandle, Unsupported};
 pub use events::{
-    coalesce, BodyEvents, BodyMoveEvent, CoalescedFrame, DestructionEvent, Frame, RayBatchId,
-    RayBatchResult, SkinId, SkinOutput, SoftOutput, VehicleOutput,
+    coalesce, BodyEvents, BodyMoveEvent, CoalescedFrame, ContactBeginEvent, ContactEndEvent,
+    ContactEvents, DestructionEvent, Frame, RayBatchId, RayBatchResult, SkinId, SkinOutput,
+    SoftOutput, VehicleOutput,
 };
 pub use handles::{BodyId, JointId, ShapeId};
 pub use joints::{
@@ -115,6 +117,10 @@ pub struct WorldDef {
     /// Steps whose results can be in flight at once.
     pub readback_frames: u32,
     pub backpressure: Backpressure,
+    /// Contact begins at or above this approach speed (m/s) on shapes with
+    /// `enable_hit_events` are also reported as hits (Box3D
+    /// `hitEventThreshold`).
+    pub hit_event_threshold: f32,
 }
 
 impl Default for WorldDef {
@@ -131,6 +137,7 @@ impl Default for WorldDef {
             features: EngineFeatures::default(),
             env_overrides: false,
             readback_frames: 3,
+            hit_event_threshold: 1.0,
             backpressure: Backpressure::Block,
         }
     }
@@ -195,6 +202,8 @@ enum Extra {
     /// The ray-query pool after this step's traces: batches by `(id, first,
     /// count)` into it.
     RayHits(Vec<(RayBatchId, u32, u32)>),
+    /// This step's touching pairs of event-enabled shapes.
+    Contacts,
 }
 
 #[derive(Clone, Debug)]
@@ -336,6 +345,8 @@ pub struct World {
     last_counters: Option<StepCounters>,
     /// The adapter this world runs on (for helper worlds on its device).
     adapter: wgpu::AdapterInfo,
+    contacts: contacts::ContactTracker,
+    hit_event_threshold: f32,
 }
 
 impl World {
@@ -396,6 +407,8 @@ impl World {
             last_input_step: None,
             last_counters: None,
             adapter,
+            contacts: Default::default(),
+            hit_event_threshold: def.hit_event_threshold,
             resync: false,
             vehicles: Vec::new(),
             soft_outputs: Vec::new(),
@@ -887,6 +900,8 @@ impl World {
         let mut collider =
             self.collider(body.index(), frame, &geometry, def.density, material, None)?;
         def.filter.apply(&mut collider);
+        collider.material |= contacts::event_bits(def);
+        self.contacts_shape_added(def);
         let collider_index = self.place_collider(collider)?;
         let slot = ShapeSlot {
             generation: 1,
@@ -1289,6 +1304,10 @@ impl World {
         }
         let rays = std::mem::take(&mut self.pending_rays);
         let batches = std::mem::take(&mut self.pending_batches);
+        let contact_events = self.contacts.enabled_shapes > 0;
+        if contact_events {
+            self.sim.clear_contact_events();
+        }
         if !rays.is_empty() {
             // Forces the step to run, so its frame carries the hits.
             self.sim.write_ray_queries(&rays)?;
@@ -1306,7 +1325,9 @@ impl World {
         let mut mapped = None;
         if ran {
             // Ray results are never dropped: a frame with queries waits for a slot.
-            let block = self.backpressure == Backpressure::Block || !batches.is_empty();
+            // Nor are contact events: a lost frame would break begin/end pairing.
+            let block =
+                self.backpressure == Backpressure::Block || !batches.is_empty() || contact_events;
             if !self.readback.has_free() && block {
                 self.wait_oldest()?;
             }
@@ -1331,6 +1352,15 @@ impl World {
                         buffer: self.sim.vehicle_pool_buffer(),
                         offset: u64::from(first) * 16,
                         size: u64::from(count) * 16,
+                    });
+                }
+                if contact_events {
+                    let (buffer, offset, size) = self.sim.contact_event_range();
+                    extras.push(readback::Extra {
+                        kind: Extra::Contacts,
+                        buffer,
+                        offset,
+                        size,
                     });
                 }
                 let slot = self.readback.encode(&self.sim, &mut enc, step, &extras);
@@ -1435,6 +1465,10 @@ impl World {
                     frames.push(self.frame(step, raw)?);
                 }
             }
+        }
+        if let Some(last) = frames.last_mut() {
+            let ends = self.take_pending_contact_ends();
+            last.contact_events.end.extend(ends);
         }
         Ok(frames)
     }
@@ -1564,9 +1598,14 @@ impl World {
         let mut skins: Vec<SkinOutput> = Vec::new();
         let mut record: Option<(VehicleHandle, Vec<[u32; 4]>)> = None;
         let mut ray_results = Vec::new();
+        let mut contact_events = ContactEvents::default();
+        let mut lost_contacts = 0;
         for (kind, bytes) in &raw.extras {
             match kind {
                 Extra::Resync => {}
+                Extra::Contacts => {
+                    (contact_events, lost_contacts) = self.decode_contacts(bytes);
+                }
                 Extra::RayHits(batches) => {
                     let hits = self.sim.decode_ray_hits(&slots(bytes));
                     for (batch, first, count) in batches {
@@ -1615,7 +1654,8 @@ impl World {
             soft,
             skins,
             ray_results,
-            lost_events: ring.lost,
+            contact_events,
+            lost_events: ring.lost + lost_contacts,
             dropped: false,
             resynced: resync.is_some(),
             counters: Some(c),
@@ -1694,6 +1734,7 @@ impl World {
     }
 
     fn release_shape(&mut self, index: u32) {
+        self.contacts_shape_removed(index);
         let s = &mut self.shapes[index as usize];
         s.alive = false;
         s.generation = s.generation.wrapping_add(1).max(1);
@@ -1850,6 +1891,7 @@ impl World {
             hull_params,
         )?;
         slot.def.filter.apply(&mut c);
+        c.material |= contacts::event_bits(&slot.def);
         self.sim.set_collider(slot.collider, c);
         Ok(())
     }

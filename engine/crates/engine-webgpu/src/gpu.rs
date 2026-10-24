@@ -124,6 +124,8 @@ pub struct WgpuSim {
     command_count: u32,
     /// Run `pose_pack` each step (render poses and the moved-body list).
     pose_output: bool,
+    /// Run `contact_events` each step (`set_contact_events`).
+    contact_events: bool,
     /// The last `step*` call ran the GPU step (false: skipped, nothing awake).
     last_step_ran: bool,
     sleep_island_rounds: u32,
@@ -236,6 +238,7 @@ fn persistent_entry(name: &str) -> &str {
         "convex_manifold" => "convex_manifold_persistent",
         "reuse_all_manifolds" => "reuse_all_manifolds_persistent",
         "vehicle_loads" => "vehicle_loads_persistent",
+        "contact_events" => "contact_events_persistent",
         _ => name,
     }
 }
@@ -670,6 +673,7 @@ impl WgpuSim {
             joint_count: 0,
             command_count: 0,
             pose_output,
+            contact_events: false,
             last_step_ran: false,
             sleep_island_rounds: 8,
             last_counters: StepCounters::default(),
@@ -1368,6 +1372,28 @@ impl WgpuSim {
         Ok(())
     }
 
+    /// Run the `contact_events` pass each step (World turns it on while any
+    /// shape reports contact events).
+    pub fn set_contact_events(&mut self, enabled: bool) {
+        self.contact_events = enabled;
+    }
+
+    /// Zero the contact-event count before a step (records are appended).
+    pub fn clear_contact_events(&self) {
+        let offset = u64::from(engine_schema::CONTACT_EVENT_BASE) * 4;
+        self.queue.write_buffer(&self.bufs[21], offset, bytemuck::cast_slice(&[0u32; 4]));
+    }
+
+    /// The contact-event region (header and records): buffer, byte offset, size.
+    pub fn contact_event_range(&self) -> (&wgpu::Buffer, u64, u64) {
+        let words = 4 + engine_schema::CONTACT_EVENT_WORDS * engine_schema::CONTACT_EVENT_CAP;
+        (
+            &self.bufs[21],
+            u64::from(engine_schema::CONTACT_EVENT_BASE) * 4,
+            u64::from(words) * 4,
+        )
+    }
+
     pub(crate) fn pose_output_enabled(&self) -> bool {
         self.pose_output
     }
@@ -1872,6 +1898,7 @@ impl WgpuSim {
             color_round_headroom: self.color_round_headroom,
             tail_ok: self.capacity.max_bodies <= crate::WGSL_LOOP_CAP * 8,
             pose_output: self.pose_output,
+            contact_events: self.contact_events,
         }
     }
 

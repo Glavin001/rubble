@@ -263,9 +263,6 @@ impl ShapeDef {
         if self.is_sensor || self.enable_sensor_events {
             return unsupported("sensor shapes (planned P4)");
         }
-        if self.enable_contact_events || self.enable_hit_events {
-            return unsupported("contact and hit events (planned P4)");
-        }
         anyhow::ensure!(self.density >= 0.0, "negative density");
         Ok(())
     }

@@ -2369,7 +2369,7 @@ void vehicle_prepare(uint3 tid : SV_DispatchThreadID)
         VSet(wr + W_C4, float4(s, alphaSlip));
         float4 tire = VD(wr + W_TIRE);
         uint hit = VU(wr + W_C0).y;
-        float surf = gMaterials[gColliders[hit].material].friction;
+        float surf = gMaterials[gColliders[hit].material & 0x0FFFu].friction;
         // Bound by the curve's falling branch: below the peak slip the AVBD row's
         // penalty already supplies the elastic slip stiffness, so a rolling tyre
         // that starts to slip mid-step keeps its peak grip instead of μ(0) = 0.
