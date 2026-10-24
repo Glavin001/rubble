@@ -1,4 +1,4 @@
-import {parseFractureGlb,buildScene,buildCuboidHouse,buildPackScene,layoutScene,withoutJoints,withBondStrength,withProjectileRadius,withParams,SAMPLES} from './wasm.mjs';
+import {parseFractureGlb,buildScene,buildCuboidHouse,buildPackScene,layoutScene,withoutJoints,withBondStrength,withProjectileRadius,withParams,SAMPLES,PACK_SAMPLES,packSampleJson} from './wasm.mjs';
 import {createSimulation} from './simulation.mjs';
 import {preloadBonds} from './bonds.mjs';
 import {createRenderer} from './render.mjs';
@@ -141,7 +141,7 @@ async function loadLevel(level){
   // static equilibrium (bonds carrying their load) rather than at zero force.
   // Breakable bonds are experimental (opt-in): see README "Breakable bonds".
   if(stressMode())return loadStress(level);
-  stressOn=false;$('view').hidden=false;$('stress-view').hidden=true;if(stress)stress.running=false;
+  stressOn=false;$('view').hidden=false;$('stress-view').hidden=true;$('ball-preset-row').hidden=true;$('fire').textContent='Fire the wrecking ball through the row';if(stress)stress.running=false;
   learned?.dispose();learned=null;learnedMs=0;
   const raw=procedural==='pack'?buildPackScene(packBytes):procedural?buildCuboidHouse():buildScene(asset,level,{maxHullVertices});
   const built=physicsHz()?withParams(raw,{dt:1/physicsHz()}):raw;
@@ -185,13 +185,16 @@ async function loadStress(level){
  try{if(!stress){const {createStressMode}=await import('./stress-mode.mjs');stress=await createStressMode($('stress-view'))}}
  catch(e){$('view').hidden=false;$('stress-view').hidden=true;throw new Error(`Stress-solver mode unavailable: ${e?.message??e}. Rebuild it (README, Bond modes).`)}
  stressOn=true;
+ // The ball presets (stress-web, stress_ref::wrecking::BALLS), listed once.
+ if($('ball-preset').options.length===1)$('ball-preset').append(...stress.shotPresets.map((b,i)=>new Option(b.menu,i)));
+ $('ball-preset-row').hidden=false;stress.setShotPreset(Number($('ball-preset').value));
  const profile=STRESS_PROFILES[bondMode()];
  stress.viewMode=cameraMode();stress.setProfile(profile);stress.setPhysicsHz(physicsHz());stress.setBondStrengthScale(strengthScale());stress.setShotRadiusScale(radiusScale());applyView();
  if(cuboid)await stress.loadCuboid(layout);else if(pack)await stress.loadPack(packBytes);else await stress.load(assetBytes,level);
  await stress.frame(0);applyBallMass();applyBallSpeed();showBallRadius();
  const st=stress.stats;stressHud={t:performance.now(),frames:0,renders:0};
  $('fragments').textContent=st.chunks;$('bonds').textContent=st.bonds;$('hulls').textContent=st.hulls;$('awake').textContent='0';$('contacts').textContent='—';
- $('release').textContent='Start simulation';$('fire').hidden=true;
+ $('release').textContent='Start simulation';$('fire').hidden=!st.canFire;$('fire').textContent='Fire the ball along the line of attack';
  setStatus(`Stress solver · ${st.chunks} chunks · ${st.bonds} bonds · ${profile==='threshold'?'simple threshold (v0): a bond breaks when a contact force beats its strength':profile}, resident GPU frame at ${Math.round(st.frameHz)} Hz${cuboid||pack?'':' · one copy'}${stressWarning(st)} · click the model to shoot`);
 }
 async function importBytes(bytes,name,sampleKey="",entry={}){
@@ -207,7 +210,10 @@ const samples=Object.fromEntries(SAMPLES.map(s=>[s.key,{...s,procedural:s.file?n
 // Grouped as the catalogue groups them (engine-fracture samples.rs GROUPS).
 const optgroup=(label,options)=>{const g=document.createElement('optgroup');g.label=label;g.append(...options);return g};
 const sceneGroups=[...new Set(SAMPLES.map(s=>s.group))].map(label=>optgroup(label,SAMPLES.filter(s=>s.group===label).map(s=>new Option(s.menu,s.key,s.key==='house',s.key==='house'))));
-$('scene').replaceChildren(...sceneGroups,optgroup('Your file',[Object.assign(new Option('Custom GLB (choose or drop one below)',''),{disabled:true})]));
+// Scene packs built in Rust (engine-fracture samples.rs PACK_SAMPLES: the Wrecking Yard), loaded as any pack.
+for(const s of PACK_SAMPLES)samples[s.key]={...s,pack:true,builtin:true};
+const packGroups=[...new Set(PACK_SAMPLES.map(s=>s.group))].map(label=>optgroup(label,PACK_SAMPLES.filter(s=>s.group===label).map(s=>new Option(s.menu,s.key))));
+$('scene').replaceChildren(...sceneGroups,...packGroups,optgroup('Your file',[Object.assign(new Option('Custom GLB (choose or drop one below)',''),{disabled:true})]));
 // vibe-city /destructible-stress presets, generated into ../generated/vibe-city (optional).
 const VIBE_CITY='../generated/vibe-city/';
 try{const index=await (await fetch(`${VIBE_CITY}index.json`)).json();
@@ -221,12 +227,14 @@ try{const index=await (await fetch(`${VIBE_CITY}index.json`)).json();
 const sample=(key=$('scene').value||'house')=>serializeLoad(async()=>{
  const entry=samples[key];if(!entry)throw new Error('Unknown bundled scene');
  if(entry.pack){
-  // A generated scene pack (engine/scenes/vibe-city, bun run export.ts): one level, bonds from the pack.
-  setStatus(`Fetching ${entry.label}…`);
-  const response=await fetch(entry.pack);
-  if(!response.ok)throw new Error('Scene pack missing: run bun run export.ts in engine/scenes/vibe-city.');
-  packBytes=await response.arrayBuffer();assetBytes=null;layout=null;procedural='pack';asset?.handle.free();asset=null;$('scene').value=key;$('filename').textContent=entry.pack.split('/').pop();
-  $('level').replaceChildren(new Option(`Scene pack · ${entry.nodes} nodes · ${entry.bonds} bonds`,0));$('level').value='0';
+  // A scene pack, built in Rust (the Wrecking Yard) or generated (engine/scenes/vibe-city, bun run export.ts): one level, bonds from the pack.
+  if(entry.builtin)packBytes=packSampleJson(key).buffer;
+  else{setStatus(`Fetching ${entry.label}…`);
+   const response=await fetch(entry.pack);
+   if(!response.ok)throw new Error('Scene pack missing: run bun run export.ts in engine/scenes/vibe-city.');
+   packBytes=await response.arrayBuffer()}
+  assetBytes=null;layout=null;procedural='pack';asset?.handle.free();asset=null;$('scene').value=key;$('filename').textContent=entry.builtin?`${entry.label} (built in Rust)`:entry.pack.split('/').pop();
+  $('level').replaceChildren(new Option(entry.builtin?entry.menu:`Scene pack · ${entry.nodes} nodes · ${entry.bonds} bonds`,0));$('level').value='0';
   await loadLevel(0);return;
  }
  if(entry.procedural){
@@ -241,7 +249,8 @@ const sample=(key=$('scene').value||'house')=>serializeLoad(async()=>{
  await importBytes(await response.arrayBuffer(),entry.file,key,entry);
 });
 $('sample').onclick=()=>sample();
-$('fire').onclick=()=>scene?.rowShot&&shoot(scene.rowShot);
+$('fire').onclick=()=>{if(stressOn){stress?.fire();return}scene?.rowShot&&shoot(scene.rowShot)};
+$('ball-preset').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('scene').onchange=()=>sample($('scene').value);
 $('file').onchange=()=>{const f=$('file').files[0];if(f)serializeLoad(async()=>importBytes(await f.arrayBuffer(),f.name))};
 $('level').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));

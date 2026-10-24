@@ -2,7 +2,7 @@
 // WebGPU device and canvas (engine/stress-oracle/crates/stress-web). This file loads the
 // module, forwards input (camera-input.mjs, as the page's renderer) and drives one frame per
 // animation frame; the physics, camera, shot rule and drawing are the Rust's.
-import init,{stress_init,stress_set_glb,stress_set_cuboid,stress_set_pack,stress_error,stress_stats,stress_set_running,stress_running,stress_resize,stress_drag,stress_zoom,stress_shoot,stress_set_view_mode,stress_mouse_look,stress_travel,stress_set_shot_mass_scale,stress_set_shot_speed_scale,stress_set_shot_radius_scale,stress_set_bond_strength_scale,stress_set_profile,stress_set_view,stress_set_physics_hz,stress_panic} from '../generated/stress-web/stress_web.js';
+import init,{stress_init,stress_set_glb,stress_set_cuboid,stress_set_pack,stress_error,stress_stats,stress_set_running,stress_running,stress_resize,stress_drag,stress_zoom,stress_shoot,stress_set_view_mode,stress_mouse_look,stress_travel,stress_set_shot_mass_scale,stress_set_shot_speed_scale,stress_set_shot_radius_scale,stress_set_bond_strength_scale,stress_set_profile,stress_set_view,stress_set_physics_hz,stress_panic,stress_shot_presets,stress_set_shot_preset,stress_fire} from '../generated/stress-web/stress_web.js';
 // Chrome and Edge 137+ suspend the wasm stack natively (JSPI). Elsewhere (Safari) the
 // Asyncify build of the same Rust does, driven by gpu-wait.mjs, which picks the build.
 import {JSPI,bindAsyncify,asyncifyPromising} from './gpu-wait.mjs';
@@ -39,6 +39,11 @@ export async function createStressMode(canvas){
   setShotSpeedScale(scale){stress_set_shot_speed_scale(scale)},
   setShotRadiusScale(scale){stress_set_shot_radius_scale(scale)},
   setBondStrengthScale(scale){stress_set_bond_strength_scale(scale)},
+  // The ball presets ([{key, menu, mass, radius, speed, rolling}]); the next load's ball
+  // (an index, or -1 for the scene's); fire it along the pack's line of attack (stats.canFire).
+  get shotPresets(){return JSON.parse(stress_shot_presets())},
+  setShotPreset(index){stress_set_shot_preset(index)},
+  fire(){return stress_fire()},
   // The capability profile of the next load: blast_parity, or threshold (the v0 mode).
   setProfile(name){stress_set_profile(name)},
   // The physics frame rate of the next load (Hz; 0 keeps the scene's).

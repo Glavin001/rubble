@@ -481,6 +481,18 @@ pub fn samples() -> Result<JsValue, JsError> {
     to_js(SAMPLES)
 }
 
+/// The Scene menu's scene packs built in Rust (the Wrecking Yard; `samples::PACK_SAMPLES`).
+#[wasm_bindgen(js_name = packSamples)]
+pub fn pack_samples() -> Result<JsValue, JsError> {
+    to_js(engine_fracture::samples::PACK_SAMPLES)
+}
+
+/// A pack sample's scene pack JSON bytes (what the lab loads as any scene pack).
+#[wasm_bindgen(js_name = packSampleJson)]
+pub fn pack_sample_json(key: &str) -> Result<Vec<u8>, JsError> {
+    engine_fracture::samples::pack_sample_json(key).map_err(err)
+}
+
 /// Hull arena with an engine-wide vertex limit (tests, GPU conformance suites).
 #[wasm_bindgen]
 pub struct HullArena(engine_schema::convex::HullArena);
