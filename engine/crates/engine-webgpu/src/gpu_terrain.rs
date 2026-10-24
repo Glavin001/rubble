@@ -32,7 +32,7 @@ pub(crate) struct TerrainState {
 pub struct TerrainStepReport {
     /// Blocks the last substep used.
     pub blocks: u32,
-    /// Largest particle speed after the last substep (m/s).
+    /// Largest particle speed over the frame's substeps (m/s).
     pub max_speed: f32,
     /// Particle slots in the region (live, or left as parcels).
     pub particles: u32,
@@ -42,6 +42,8 @@ pub struct TerrainStepReport {
     pub deposited: u32,
     /// Quanta that left the heightfield's footprint.
     pub escaped: u32,
+    /// Parcels still in flight after the last substep.
+    pub airborne: u32,
 }
 
 /// Quanta per lattice particle: a column's volume is rounded to s³/64 (s the
@@ -193,6 +195,8 @@ impl WgpuSim {
         let n = u32::try_from(particles.len()).unwrap_or(u32::MAX);
         TerrainConfig::check("max_particles", u64::from(n), u64::from(cfg.max_particles))?;
         Self::terrain_set_region(state, plan, bed, bed_friction)?;
+        // No activation window: the bed is the field's surface everywhere.
+        state.params.window = [0; 4];
         state.window_records = 0;
         if !particles.is_empty() {
             self.queue.write_buffer(
@@ -318,6 +322,7 @@ impl WgpuSim {
             self.disp_terrain_particles(&mut pass, "mpm_bake_bin");
             self.disp(&mut pass, "mpm_bake_raise", records, None);
             self.disp(&mut pass, "mpm_bake_header", 1, None);
+            self.encode_terrain_deposits(&mut pass);
         }
         self.queue.submit(Some(enc.finish()));
         Ok(())
@@ -451,10 +456,23 @@ impl WgpuSim {
     /// The counters after the last submission (blocking), as a report or the
     /// error any flag names; flags are reported once.
     fn terrain_report(&mut self) -> anyhow::Result<TerrainStepReport> {
-        let state = self.terrain_state()?;
-        let (cfg, params) = (state.config, state.params);
         let c: Vec<u32> = self.read_binding(MPM_COUNTERS_BINDING, 0, MPM_COUNTER_WORDS);
         self.terrain_write_counter(MPM_C_FLAGS, 0);
+        self.terrain_check(&c)
+    }
+
+    /// The report a copy of the terrain counters (`MPM_COUNTER_WORDS` words of
+    /// [`Self::terrain_counters_buffer`]) carries, or the error a flag names.
+    pub fn terrain_check(&self, c: &[u32]) -> anyhow::Result<TerrainStepReport> {
+        let state = self
+            .terrain
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("terrain is not enabled (call terrain_enable)"))?;
+        let (cfg, params) = (state.config, state.params);
+        anyhow::ensure!(
+            c.len() >= MPM_COUNTER_WORDS,
+            "terrain counters are {MPM_COUNTER_WORDS} words"
+        );
         let flags = c[MPM_C_FLAGS];
         if flags & MPM_OVERFLOW_PARTICLES != 0 {
             return Err(TerrainError::LimitExceeded {
@@ -528,7 +546,83 @@ impl WgpuSim {
             parcels: c[MPM_C_PARCELS].min(cfg.max_parcels),
             deposited: c[MPM_C_DEPOSITED],
             escaped: c[MPM_C_ESCAPED],
+            airborne: c[MPM_C_AIRBORNE],
         })
+    }
+
+    /// The terrain counters (`MPM_COUNTER_WORDS` u32 words), for hosts that copy
+    /// them into their own readback ([`Self::terrain_check`] reads the copy).
+    pub fn terrain_counters_buffer(&self) -> &wgpu::Buffer {
+        &self.bufs[MPM_COUNTERS_BINDING]
+    }
+
+    /// The hull arena (binding 18): a heightfield's samples are the f32 words
+    /// from its collider's base + 2, row-major, for hosts that copy them into
+    /// their readback.
+    pub fn hull_arena_buffer(&self) -> &wgpu::Buffer {
+        &self.bufs[18]
+    }
+
+    /// Encode a coupled terrain frame into `enc`, ahead of the rigid step the
+    /// host encodes next ([`Self::step_encode`]), for pipelined hosts: no
+    /// submission, no readback. The step applies the reactions; the host copies
+    /// [`Self::terrain_counters_buffer`] into its readback after it and then
+    /// encodes [`Self::terrain_encode_flags_clear`].
+    pub fn terrain_encode_coupled(
+        &mut self,
+        enc: &mut wgpu::CommandEncoder,
+        substeps: u32,
+        dt: f32,
+    ) -> anyhow::Result<()> {
+        let gravity = self.params.gravity_y;
+        let state = self.terrain_state()?;
+        state.params.couple[0] = substeps as f32 * dt;
+        let cfg = state.config;
+        self.terrain_write_params(substeps, dt, gravity)?;
+        let colliders = u64::from(self.collider_count);
+        let clear = 2 * u64::from(self.terrain.as_ref().map_or(0, |t| t.params.counts[1]));
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("terrain coupled"),
+                timestamp_writes: None,
+            });
+            self.disp(
+                &mut pass,
+                "mpm_couple_clear",
+                u64::from(cfg.max_blocks),
+                None,
+            );
+            self.disp(&mut pass, "mpm_couple_bin", colliders, None);
+            for _ in 0..substeps {
+                self.encode_terrain_substep(&mut pass, clear);
+                self.disp(
+                    &mut pass,
+                    "mpm_couple_gather",
+                    u64::from(cfg.max_coupled) * 64,
+                    None,
+                );
+            }
+            self.encode_terrain_deposits(&mut pass);
+            self.disp(
+                &mut pass,
+                "mpm_couple_emit",
+                u64::from(cfg.max_coupled),
+                None,
+            );
+            self.disp(&mut pass, "mpm_couple_finish", 1, None);
+        }
+        self.terrain_impulses_pending = true;
+        self.wake_pending = true;
+        Ok(())
+    }
+
+    /// After the host's copy of the counters: their flags start the next frame clear.
+    pub fn terrain_encode_flags_clear(&self, enc: &mut wgpu::CommandEncoder) {
+        enc.clear_buffer(
+            &self.bufs[MPM_COUNTERS_BINDING],
+            4 * MPM_C_FLAGS as u64,
+            Some(4),
+        );
     }
 
     /// One frame of terrain and rigid bodies, coupled (explicit, staggered): the
@@ -606,6 +700,49 @@ impl WgpuSim {
     /// One thread per particle in the region, counted on the GPU.
     fn disp_terrain_particles<'a>(&'a self, pass: &mut wgpu::ComputePass<'a>, name: &str) {
         self.disp_terrain_indirect(pass, name, 12);
+    }
+
+    /// Start a km/s impact or explosion at `point` (on the surface): every live
+    /// particle of the region takes `field`'s excavation velocity (added to its
+    /// own). The source's shock stage is replaced by this outcome; the MPM
+    /// computes excavation, ejection, rim uplift and collapse. Runs on the GPU.
+    pub fn terrain_apply_source(
+        &mut self,
+        field: &engine_terrain::ZModel,
+        point: glam::Vec3,
+    ) -> anyhow::Result<()> {
+        let state = self.terrain_state()?;
+        anyhow::ensure!(point.is_finite(), "source point must be finite");
+        state.params.source = [
+            [point.x, point.y, point.z, field.z as f32],
+            [
+                field.flow_center_depth as f32,
+                field.core_radius as f32,
+                field.alpha as f32,
+                0.0,
+            ],
+        ];
+        let params = state.params;
+        self.queue.write_buffer(
+            &self.bufs[MPM_PARAMS_BINDING],
+            0,
+            bytemuck::bytes_of(&params),
+        );
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("terrain source"),
+            });
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("terrain source"),
+                timestamp_writes: None,
+            });
+            self.disp(&mut pass, "mpm_write_args", 1, None);
+            self.disp_terrain_particles(&mut pass, "mpm_source");
+        }
+        self.queue.submit(Some(enc.finish()));
+        Ok(())
     }
 
     /// The region's parcels, in flight or landed (blocking readback).

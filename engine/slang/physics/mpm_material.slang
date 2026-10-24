@@ -48,6 +48,17 @@ void mpmQuatToCols(float4 q, out float3 c0, out float3 c1, out float3 c2)
     c2 = float3(2.0 * (x * z + w * y), 2.0 * (y * z - w * x), 1.0 - 2.0 * (x * x + y * y));
 }
 
+// √(a² + b²) without squaring tiny or huge values (a 1e-23 squared underflows to
+// 0 in f32, and h = p − r is exactly 0 when singular values repeat).
+float mpmHypot(float a, float b)
+{
+    float x = abs(a), y = abs(b);
+    float hi = max(x, y), lo = min(x, y);
+    if (hi == 0.0) return 0.0;
+    float r = lo / hi;
+    return hi * sqrt(1.0 + r * r);
+}
+
 // One Jacobi conjugation S ← GᵀSG of the symmetric S on the pair (p, q), with k the
 // third axis; the entries are passed permuted to (p, q, k). G turns e_p towards e_q
 // by θ. Its half angle (ch, sh) is McAdams' approximation tan(θ/2) ≈ s_pq / 2(s_pp −
@@ -63,6 +74,11 @@ void mpmJacobiPair(inout float spp, inout float sqq, inout float spq, inout floa
         ch = 1.0;
         return;
     }
+    // Only the ratio matters: scale to the larger first, so the squares
+    // neither underflow nor overflow.
+    float m = max(abs(ch), abs(sh));
+    ch /= m;
+    sh /= m;
     if (MPM_SVD_GAMMA * sh * sh < ch * ch)
     {
         float w = 1.0 / sqrt(ch * ch + sh * sh);
@@ -120,7 +136,7 @@ void mpmSym2Jacobi(float p, float q, float r, out float c, out float s)
         return;
     }
     float h = p - r;
-    float root = sqrt(h * h + 4.0 * q * q);
+    float root = mpmHypot(h, 2.0 * q);
     float t = 2.0 * q / (h >= 0.0 ? h + root : h - root);
     c = 1.0 / sqrt(1.0 + t * t);
     s = t * c;
@@ -130,7 +146,7 @@ void mpmSym2Jacobi(float p, float q, float r, out float c, out float s)
 // √(a² + b²) ≥ 0. No rotation when both are zero.
 void mpmGivens(float a, float b, out float c, out float s)
 {
-    float r = sqrt(a * a + b * b);
+    float r = mpmHypot(a, b);
     if (r > 0.0)
     {
         c = a / r;

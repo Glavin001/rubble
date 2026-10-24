@@ -121,6 +121,32 @@ fn cases() -> Vec<Case> {
         let log_jp = if i % 3 == 0 { rng.range(0.0, 0.2) } else { 0.0 };
         out.push(Case { f, mat, log_jp });
     }
+    // Sand at rest: a rotation by microradians (repeated singular values; the
+    // trailing 2×2 block's off-diagonal squared underflows), and a bed particle's
+    // F (rows, bit for bit) whose stress once came out NaN on the GPU.
+    for k in 0..64 {
+        let axis = Vec3::new(
+            rng.range(-1.0, 1.0),
+            rng.range(-1.0, 1.0),
+            rng.range(-1.0, 1.0),
+        );
+        let angle = 10f32.powf(rng.range(-7.0, -4.0));
+        out.push(Case {
+            f: Mat3::from_axis_angle(axis.normalize_or(Vec3::X), angle),
+            mat: SandMaterial::default(),
+            log_jp: if k % 2 == 0 { 3.7e-5 } else { 0.0 },
+        });
+    }
+    let rows: [[u32; 3]; 3] = [
+        [0x3f800000, 0x368594c2, 0x36d338d8],
+        [0xb68594a0, 0x3f800001, 0xb7cef85d],
+        [0xb6d2e165, 0x37cef067, 0x3f7fffff],
+    ];
+    out.push(Case {
+        f: Mat3::from_cols_array_2d(&rows.map(|r| r.map(f32::from_bits))).transpose(),
+        mat: SandMaterial::default(),
+        log_jp: f32::from_bits(0x381bc050),
+    });
     // Input checks: NaN and ±inf in F.
     for bad in [f32::NAN, f32::INFINITY, -f32::INFINITY] {
         let mut f = Mat3::IDENTITY;

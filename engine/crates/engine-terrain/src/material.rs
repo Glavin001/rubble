@@ -165,6 +165,19 @@ pub fn sand_input_valid(sigma: Vec3, log_jp: f32) -> bool {
     sigma.to_array().iter().all(|x| x.abs() <= INPUT_LIMIT) && log_jp.abs() <= INPUT_LIMIT
 }
 
+/// √(a² + b²) without squaring tiny or huge values (a 1e-23 squared underflows
+/// to 0 in f32, and h = p − r is exactly 0 when singular values repeat). Mirrors
+/// `mpmHypot`.
+fn hypot(a: f32, b: f32) -> f32 {
+    let (x, y) = (a.abs(), b.abs());
+    let (hi, lo) = (x.max(y), x.min(y));
+    if hi == 0.0 {
+        return 0.0;
+    }
+    let r = lo / hi;
+    hi * (1.0 + r * r).sqrt()
+}
+
 /// One Jacobi conjugation S ← GᵀSG on the pair (p, q), entries permuted to
 /// (p, q, k); G turns e_p towards e_q. Returns McAdams' approximate half angle
 /// (cos, sin), or π/8 where that approximation would exceed π/8. A pair already
@@ -180,6 +193,11 @@ fn jacobi_pair(
     if sh == 0.0 {
         return (1.0, 0.0);
     }
+    // Only the ratio matters: scale to the larger first, so the squares neither
+    // underflow nor overflow.
+    let m = ch.abs().max(sh.abs());
+    ch /= m;
+    sh /= m;
     if SVD_GAMMA * sh * sh < ch * ch {
         let w = 1.0 / (ch * ch + sh * sh).sqrt();
         ch *= w;
@@ -216,7 +234,7 @@ fn rotate_pair(c: f32, s: f32, x: &mut f32, y: &mut f32) {
 /// The Givens rotation that zeroes `b` against the pivot `a`, leaving the pivot
 /// √(a² + b²) ≥ 0. No rotation when both are zero.
 fn givens(a: f32, b: f32) -> (f32, f32) {
-    let r = (a * a + b * b).sqrt();
+    let r = hypot(a, b);
     if r > 0.0 {
         (a / r, b / r)
     } else {
@@ -239,7 +257,7 @@ fn sym2_jacobi(p: f32, q: f32, r: f32) -> (f32, f32) {
         return (1.0, 0.0);
     }
     let h = p - r;
-    let root = (h * h + 4.0 * q * q).sqrt();
+    let root = hypot(h, 2.0 * q);
     let t = 2.0 * q / if h >= 0.0 { h + root } else { h - root };
     let c = 1.0 / (1.0 + t * t).sqrt();
     (c, t * c)
@@ -597,8 +615,47 @@ mod tests {
             out.push(rng.matrix(-2.0, 2.0) * 1e-3);
             // MPM-like: near a rotation, slightly strained.
             out.push(rng.rotation() * (Mat3::IDENTITY + rng.matrix(-0.05, 0.05)));
+            // Sand at rest: a rotation by microradians, singular values equal to
+            // rounding (the trailing 2×2 block has p = r and an off-diagonal whose
+            // square underflows).
+            let axis = Vec3::new(
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+                rng.range(-1.0, 1.0),
+            );
+            let angle = 10f32.powf(rng.range(-7.0, -4.0));
+            out.push(
+                Mat3::from_axis_angle(axis.normalize_or(Vec3::X), angle) * rng.range(0.999, 1.001),
+            );
         }
+        // A bed particle's F (rows, bit for bit) whose SVD once came out NaN on the
+        // GPU: its trailing block had p = r exactly.
+        let rows: [[u32; 3]; 3] = [
+            [0x3f800000, 0x368594c2, 0x36d338d8],
+            [0xb68594a0, 0x3f800001, 0xb7cef85d],
+            [0xb6d2e165, 0x37cef067, 0x3f7fffff],
+        ];
+        out.push(Mat3::from_cols_array_2d(&rows.map(|r| r.map(f32::from_bits))).transpose());
         out
+    }
+
+    #[test]
+    fn the_symmetric_2x2_rotation_is_finite_for_repeated_values() {
+        for q in [1e-23f32, -1e-23, 1e-30, 1e-38, 3e-45, 1e-3, 1e18] {
+            for p in [1.0f32, 1.0000001, 0.0, 1e-20] {
+                let (c, s) = sym2_jacobi(p, q, p);
+                assert!(
+                    c.is_finite() && s.is_finite(),
+                    "p = r = {p}, q = {q}: ({c}, {s})"
+                );
+                assert!((c * c + s * s - 1.0).abs() < 1e-6, "({c}, {s})");
+                // θ = ±π/4 diagonalises [[p, q], [q, p]].
+                assert!((c - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+                assert_eq!(s > 0.0, q > 0.0);
+            }
+        }
+        let (c, s) = givens(1e-30, 1e-31);
+        assert!((c * c + s * s - 1.0).abs() < 1e-6 && c > 0.99, "({c}, {s})");
     }
 
     #[test]

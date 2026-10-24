@@ -39,6 +39,7 @@ pub const MPM_C_PARTICLES: usize = 3;
 pub const MPM_C_PARCELS: usize = 5;
 pub const MPM_C_DEPOSITED: usize = 6;
 pub const MPM_C_ESCAPED: usize = 7;
+pub const MPM_C_AIRBORNE: usize = 9;
 pub const MPM_COUNTER_WORDS: usize = 12;
 
 /// `MpmParams.dims.w` without a bed heightfield.
@@ -102,6 +103,9 @@ pub struct MpmParams {
     /// colliders, max parcels (0: leaving the region is an error), heightfield
     /// samples parcels may deposit on (the last three u32 bits).
     pub couple: [f32; 4],
+    /// Z-model source: surface point (world), Z; flow-centre depth, core
+    /// radius, strength α, unused.
+    pub source: [[f32; 4]; 2],
 }
 
 /// One particle (128 B).

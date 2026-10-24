@@ -56,13 +56,14 @@ static const uint MPM_NO_BLOCK = 0xFFFFFFFFu;
 // gMpmCounters words.
 static const uint MPM_C_BLOCKS = 0u;      // blocks inserted this substep
 static const uint MPM_C_FLAGS = 1u;       // MPM_OVERFLOW_* | MPM_OUTSIDE
-static const uint MPM_C_MAX_SPEED = 2u;   // max |v| after G2P (f32 bits; monotone for v ≥ 0)
+static const uint MPM_C_MAX_SPEED = 2u;   // max |v| after G2P over the frame's substeps (f32 bits; monotone for v ≥ 0)
 static const uint MPM_C_PARTICLES = 3u;   // particles in the region (host load, activation)
 static const uint MPM_C_BAKE_MAX = 4u;    // largest baked or deposited height (order-preserving bits)
 static const uint MPM_C_PARCELS = 5u;     // parcels ever ejected this region (slots, live or not)
 static const uint MPM_C_DEPOSITED = 6u;   // quanta parcels have laid on the heightfield
 static const uint MPM_C_ESCAPED = 7u;     // quanta that left the heightfield's footprint
 static const uint MPM_C_SORTED = 8u;      // sorted slots claimed by blocks this substep
+static const uint MPM_C_AIRBORNE = 9u;    // parcels still in flight after this substep
 static const uint MPM_OVERFLOW_BLOCKS = 1u;
 static const uint MPM_OVERFLOW_HASH = 2u;
 static const uint MPM_OUTSIDE = 4u;
@@ -101,6 +102,8 @@ struct MpmParams
     float4 couple;  // x = frame duration (s, bounds pad by motion), y = max coupled colliders (uint bits),
                     // z = max parcels (uint bits; 0: material leaving the region is an error),
                     // w = heightfield samples parcels may deposit on (uint bits)
+    float4 source0; // Z-model source: surface point (world), Z
+    float4 source1; // flow-centre depth, core radius, strength α, unused
 };
 
 // Per particle (128 B).
@@ -290,8 +293,8 @@ void mpm_clear(uint3 tid : SV_DispatchThreadID)
     if (i == 0u)
     {
         ASTORE(gMpmCounters[MPM_C_BLOCKS], 0u);
-        ASTORE(gMpmCounters[MPM_C_MAX_SPEED], 0u);
         ASTORE(gMpmCounters[MPM_C_SORTED], 0u);
+        ASTORE(gMpmCounters[MPM_C_AIRBORNE], 0u);
     }
 }
 
@@ -631,6 +634,36 @@ void mpmRigidContact(uint n, uint b, float m, MpmParams p, inout float3 v)
 
 // Grid velocity: momentum over mass, gravity, then the bed (the heightfield
 // under the region) as a separating Coulomb contact.
+// Whether a grid node at xl (the bed's local frame) lies in the rigid bed, and
+// the bed's outward normal there. With an activation window open, the rigid
+// bed is the window's lowered floor and, around it, the ground left as it was:
+// a node under that ground faces the pit through the window's side (a wall),
+// never up through the ground's own surface, which would let the region's
+// material squeeze out sideways beneath it. Without a window: the field's
+// surface.
+bool mpmBedNormal(HeightFieldRef hf, float3 xl, MpmParams p, out float3 nl)
+{
+    nl = float3(0, 1, 0);
+    if (p.window.z == 0u || p.window.w == 0u)
+    {
+        float h;
+        return hfSurface(hf, xl.x, xl.z, h, nl) && (xl.y - h) * nl.y <= 0.0;
+    }
+    int si = clamp(int(round((xl.x - hf.x0) / hf.dx)), 0, int(hf.nx) - 1);
+    int sj = clamp(int(round((xl.z - hf.z0) / hf.dz)), 0, int(hf.nz) - 1);
+    int2 lo = int2(p.window.xy), hi = int2(p.window.xy + p.window.zw) - 1;
+    float wx = si < lo.x ? 1.0 : (si > hi.x ? -1.0 : 0.0);
+    float wz = sj < lo.y ? 1.0 : (sj > hi.y ? -1.0 : 0.0);
+    if (wx == 0.0 && wz == 0.0) return xl.y <= hfHeight(hf, uint(si), uint(sj));
+    float h;
+    if (xl.y < hfHeight(hf, uint(si), uint(sj)))
+    {
+        nl = normalize(float3(wx, 0.0, wz));
+        return true;
+    }
+    return hfSurface(hf, xl.x, xl.z, h, nl) && (xl.y - h) * nl.y <= 0.0;
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void mpm_grid(uint3 tid : SV_DispatchThreadID)
@@ -654,8 +687,8 @@ void mpm_grid(uint3 tid : SV_DispatchThreadID)
         Frame f = colliderFrame(col, gBodies[col.body]);
         HeightFieldRef hf = heightFieldOf(col);
         float3 xl = frameToLocal(f, xw);
-        float h; float3 nl;
-        if (hfSurface(hf, xl.x, xl.z, h, nl) && (xl.y - h) * nl.y <= 0.0)
+        float3 nl;
+        if (mpmBedNormal(hf, xl, p, nl))
         {
             float3 nw = quatRotate(f.q, nl);
             float vn = dot(v, nw);
@@ -924,8 +957,10 @@ void mpm_activate_lower(uint3 tid : SV_DispatchThreadID)
     }
 }
 
-// Per particle: its quanta onto the window sample it stands over (the nearest
-// one, clamped to the window: none leaves it).
+// Per particle: its quanta onto the heightfield sample it stands over (the
+// nearest): a window sample's column, or, outside the window (material that
+// flowed past it inside the region's box), the field's deposit accumulator, as
+// a landed parcel. Off the field's footprint, escaped.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void mpm_bake_bin(uint3 tid : SV_DispatchThreadID)
@@ -940,9 +975,25 @@ void mpm_bake_bin(uint3 tid : SV_DispatchThreadID)
     if (mpmParticleDead(q)) return;
     float3 xl = frameToLocal(f, q.xm.xyz);
     int si = int(round((xl.x - hf.x0) / hf.dx)), sj = int(round((xl.z - hf.z0) / hf.dz));
-    uint ti = uint(clamp(si - int(p.window.x), 0, int(p.window.z) - 1));
-    uint tj = uint(clamp(sj - int(p.window.y), 0, int(p.window.w) - 1));
-    AADD2(gMpmColumns[4u * (tj * p.window.z + ti) + 3u], asuint(q.f1.w));
+    uint quanta = asuint(q.f1.w);
+    if (si < 0 || sj < 0 || si >= int(hf.nx) || sj >= int(hf.nz))
+    {
+        AADD2(gMpmCounters[MPM_C_ESCAPED], quanta);
+        return;
+    }
+    int ti = si - int(p.window.x), tj = sj - int(p.window.y);
+    if (ti >= 0 && tj >= 0 && ti < int(p.window.z) && tj < int(p.window.w))
+    {
+        AADD2(gMpmColumns[4u * (uint(tj) * p.window.z + uint(ti)) + 3u], quanta);
+        return;
+    }
+    uint at = uint(sj) * hf.nx + uint(si);
+    if (at < asuint(p.couple.w))
+    {
+        AADD2(gMpmDeposit[at], quanta);
+        AADD2(gMpmCounters[MPM_C_DEPOSITED], quanta);
+    }
+    else AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_FIELD);
 }
 
 [shader("compute")]
@@ -988,7 +1039,12 @@ void mpm_couple_clear(uint3 tid : SV_DispatchThreadID)
     uint c = mpmIndex(tid);
     MpmParams p = mpmParams();
     uint3 blocks = p.dims.xyz / MPM_BLOCK;
-    if (c == 0u) ASTORE(gMpmCouple[0], 0u);
+    if (c == 0u)
+    {
+        ASTORE(gMpmCouple[0], 0u);
+        // Once per frame: the frame's top speed, over all its substeps.
+        ASTORE(gMpmCounters[MPM_C_MAX_SPEED], 0u);
+    }
     if (c < blocks.x * blocks.y * blocks.z) ASTORE(gMpmCouple[4u + c * (1u + MPM_CELL_COLLIDERS)], 0u);
 }
 
@@ -1224,6 +1280,7 @@ void mpm_parcels(uint3 tid : SV_DispatchThreadID)
             }
         }
     }
+    if (!landed) AADD2(gMpmCounters[MPM_C_AIRBORNE], 1u);
     gMpmParcels[2u * k] = xq;
     gMpmParcels[2u * k + 1u] = float4(vm.xyz, landed ? 0.0 : vm.w);
 }
@@ -1273,4 +1330,39 @@ void mpm_deposit_header(uint3 tid : SV_DispatchThreadID)
     uint4 dims = gHulls[hf.base + 1u];
     dims.w = asuint(max(asfloat(dims.w), top));
     gHulls[hf.base + 1u] = dims;
+}
+
+// ---- km/s sources (T4) -------------------------------------------------------------
+
+// Maxwell's Z-model excavation velocity at offset d from the source's surface
+// point (+y up, the target below): radial from the flow centre a depth below, with
+// the tangential part that makes the flow divergence-free, speed α·r^−Z; inside
+// the core a uniform radial expansion. Mirrors engine-terrain ZModel::velocity.
+float3 mpmZModelVelocity(float3 d0, float z, float depth, float core, float alpha)
+{
+    float3 d = d0 + float3(0.0, depth, 0.0);
+    float r = length(d);
+    if (r < core) return d * (alpha * pow(core, -z) / core);
+    float c = -d.y / r;
+    float f = (z - 2.0) / (1.0 + c);
+    float h = d.x * d.x + d.z * d.z;
+    float3 tangential = float3(c * d.x / r, h / (r * r), c * d.z / r) * f;
+    return (d / r + tangential) * (alpha * pow(r, -z));
+}
+
+// Per live particle: the source's excavation velocity added (the shock and
+// contact stage replaced by its outcome; the MPM computes the rest).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_source(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = mpmIndex(tid);
+    if (i >= mpmParticleCount()) return;
+    MpmParams p = mpmParams();
+    MpmParticle q = gMpmParticles[i];
+    if (mpmParticleDead(q)) return;
+    float3 d = q.xm.xyz - p.source0.xyz;
+    if (d.y > 0.0) return; // the field is the target's (y ≤ 0)
+    q.vj.xyz += mpmZModelVelocity(d, p.source0.w, p.source1.x, p.source1.y, p.source1.z);
+    gMpmParticles[i] = q;
 }
