@@ -17,6 +17,7 @@ members = [
     "crates/engine-softbody",
     "crates/engine-gpu-wait",
     "crates/engine-world",
+    "crates/engine-ffi",
 ]
 # The stress oracle is its own workspace (wgpu 30); engine-fracture depends on its crates by path.
 exclude = ["stress-oracle"]
