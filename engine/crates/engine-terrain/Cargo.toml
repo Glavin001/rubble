@@ -1,0 +1,10 @@
+[package]
+name = "engine-terrain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Deformable terrain: the MPM active-region lifecycle, its engine-wide limits and the volume ledger (engine/docs/deformable-terrain.md)"
+
+[dependencies]
+glam.workspace = true
+thiserror.workspace = true
