@@ -793,7 +793,9 @@ bool FRubbleAbiBackend::LoadAbi(const FRubbleSceneRequest& Request, FString& Err
 	const bool bSmash = Request.Family == ERubbleFamily::Rigid && (Request.Id == TEXT("wall") || Request.Id.StartsWith(TEXT("ring")) || Request.Id.StartsWith(TEXT("gables")));
 	const float Auto = Request.Family == ERubbleFamily::Fracture ? Request.Param(TEXT("autoshot"), 1.5f) : bSmash ? 1.0f : 0.0f;
 	AutoShotStep = Auto > 0.0f ? int64(Auto / Dt) : -1;
-	if (!ParkBalls(12, Error))
+	// The town's column volleys reach in a row at a time: enough balls for a few (projectiles
+	// count against the threshold model's 64, with the meteors).
+	if (!ParkBalls(IsTown() ? 40 : 12, Error))
 	{
 		return false;
 	}
@@ -1182,6 +1184,9 @@ bool FRubbleAbiBackend::CreateTown(FString& Error)
 	if (bTownThreshold)
 	{
 		D.model = RB_STRENGTH_THRESHOLD;
+		// Support loss: weight carried down to the footings, so a tower whose columns are shot
+		// away on one side topples (?supportloss=0: the threshold model as the lab runs it).
+		D.support_loss = Current.Param(TEXT("supportloss"), 1.0f) > 0.5f;
 		// The lab's ground is where the stress scene stands (its grade, 50 cm up): placed on
 		// Unreal's ground at z = 0.
 		bool bHasGround = false;
