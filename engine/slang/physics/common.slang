@@ -28,10 +28,13 @@ static const uint BODY_AWAKE = 8u;
 static const uint BODY_VEHICLE = 32u; // 16 is BODY_WAKE_PENDING
 // Soft-body particle (3-DOF node): solved by soft_step.slang, not the rigid colours.
 static const uint BODY_PARTICLE = 64u;
+// Rides another body's pose (a soft body's bolted part in rigid mode, placed by
+// soft_mode): in the graph and colours, but the rigid primal leaves it alone.
+static const uint BODY_FOLLOW = 128u;
 // Continuous collision (ccd_step.slang): uncapped look-ahead reach, the fast
 // broadphase list and time-of-impact contacts. While registered for a step,
 // initialPad holds asfloat(CCD slot); vehicle chassis cannot be CCD bodies.
-static const uint BODY_CCD = 128u;
+static const uint BODY_CCD = 256u;
 // Kinematic bodies (BODY_KINEMATIC, no BODY_DYNAMIC): moved by their given
 // velocity each step, infinite mass; contacts see their motion.
 
@@ -144,6 +147,7 @@ struct Joint
 };
 
 static const uint JOINT_FLAG_BROKEN = 1u;
+static const uint JOINT_FLAG_IDLE = 65536u;
 static const uint JOINT_FLAG_COLLIDE = 2u;
 static const uint JOINT_FLAG_RADIAL = 4u;
 static const uint JOINT_FLAG_CONE = 8u;

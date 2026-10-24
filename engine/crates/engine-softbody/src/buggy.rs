@@ -162,9 +162,10 @@ pub fn dune_buggy_soft_with(k: &BuggyBeams) -> SoftVehicleDesc {
 
     // The core: the rigid buggy's wheels and drive, its drivetrain parts, and a
     // root carrying the moving suspension (a small box low in the floor).
+    // Its centre of mass is the whole car's (core and frame, SoftCore), with the
+    // rigid preset's handling offset (vibe-land's 0.2 m below the computed centre).
     let mut core = rigid.clone();
     core.name = "dune_buggy_core".into();
-    core.center_of_mass_offset = [0.0; 3];
     let mut parts = vec![PartDesc {
         name: "core".into(),
         role: PartRole::Body,

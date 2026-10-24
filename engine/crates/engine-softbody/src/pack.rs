@@ -141,6 +141,29 @@ pub fn frame_nodes(desc: &SoftVehicleDesc) -> Vec<u32> {
         .collect()
 }
 
+/// Body origin of an authored core (see [`SoftCore`]): the centre of mass of the
+/// core vehicle, the non-fixed nodes and the bolted parts, plus the vehicle's
+/// `center_of_mass_offset`.
+pub fn authored_core_origin(desc: &SoftVehicleDesc, core: &engine_vehicle::VehicleDesc) -> Vec3 {
+    let mut own = core.clone();
+    own.auto_center_of_mass = true;
+    own.center_of_mass_offset = [0.0; 3];
+    let mc: f32 = core.parts.iter().map(|p| p.mass).sum::<f32>()
+        + core.wheels.iter().map(|w| w.mass).sum::<f32>();
+    let mut m = mc;
+    let mut s = Vec3::from_array(own.center_of_mass()) * mc;
+    for n in desc.nodes.iter().filter(|n| !n.fixed) {
+        let nm = n.mass.max(1.0e-3);
+        m += nm;
+        s += Vec3::from_array(n.position) * nm;
+    }
+    for p in &desc.rigid_parts {
+        m += p.mass;
+        s += p.center() * p.mass;
+    }
+    s / m.max(1e-6) + Vec3::from_array(core.center_of_mass_offset)
+}
+
 pub fn pack_soft(
     desc: &SoftVehicleDesc,
     place: Placement,
@@ -152,11 +175,17 @@ pub fn pack_soft(
     let mut masses: Vec<f32> = desc.nodes.iter().map(|nd| nd.mass.max(1.0e-3)).collect();
     let core = match &desc.core {
         // An authored core: a whole vehicle, jointed to its nodes as given.
-        Some(c) if opts.rigid_core => Some(CorePlan {
-            vehicle: c.vehicle.clone(),
-            origin: Vec3::from_array(c.vehicle.center_of_mass()),
-            frame_nodes: c.nodes.clone(),
-        }),
+        Some(c) if opts.rigid_core => {
+            let origin = authored_core_origin(desc, &c.vehicle);
+            let mut vehicle = c.vehicle.clone();
+            vehicle.auto_center_of_mass = false;
+            vehicle.center_of_mass_offset = origin.to_array();
+            Some(CorePlan {
+                vehicle,
+                origin,
+                frame_nodes: c.nodes.clone(),
+            })
+        }
         _ if opts.rigid_core && !desc.wheels.is_empty() => Some(core_plan(desc, &mut masses, opts)),
         _ => None,
     };

@@ -39,6 +39,11 @@ pub const JOINT_FLAG_TYRE: u32 = 1 << 6;
 /// Set by `solve_dual` on the final iteration while the multipliers are still
 /// changing; the joint's bodies may not fall asleep until it clears.
 pub const JOINT_FLAG_UNSETTLED: u32 = 1 << 7;
+/// Switched off but kept in the constraint graph (CSR and colouring), so it can
+/// be switched back on mid-step and solve that same step: a soft body's core
+/// joints and its bolted parts' joints while it rides its core (rigid mode).
+/// Every pass that skips a broken joint skips an idle one, except the graph build.
+pub const JOINT_FLAG_IDLE: u32 = 1 << 16;
 pub const JOINT_DRIVE_DOF_SHIFT: u32 = 8;
 pub const JOINT_PRESET_SHIFT: u32 = 24;
 

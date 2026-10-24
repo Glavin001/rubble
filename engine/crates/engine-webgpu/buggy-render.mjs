@@ -47,7 +47,26 @@ const hex = (c) => [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16) / 255);
  * @param {string} o.shadeWgsl   WGSL defining qrot() and shade(c, n, w) against `frame`
  * @param {string} [o.base]      URL of generated/dune-buggy/
  */
-export async function createBuggyRenderer({ device, format, world, frameBuf, L, shadeWgsl, base = './generated/dune-buggy/' }) {
+// Default lighting for the mesh: `qrot` and `shade(colour, normal, world)`,
+// reading only the frame uniform's view, eye and light (any page whose Frame
+// starts with those can pass it, or its own).
+export const BUGGY_SHADE_WGSL = /* wgsl */`
+fn qrot(q: vec4f, v: vec3f) -> vec3f {
+  let u = q.xyz;
+  return u * (2.0 * dot(u, v)) + v * (q.w * q.w - dot(u, u)) + cross(u, v) * (2.0 * q.w);
+}
+fn shade(c: vec3f, n: vec3f, w: vec3f) -> vec3f {
+  let l = normalize(frame.light.xyz);
+  let diff = max(dot(n, l), 0.0);
+  let v = normalize(frame.eye.xyz - w);
+  let spec = pow(max(dot(reflect(-l, n), v), 0.0), 32.0) * 0.25;
+  let sky = 0.5 + 0.5 * n.y;
+  let fog = clamp(length(frame.eye.xyz - w) / 260.0, 0.0, 1.0);
+  return mix(c * (0.22 + 0.18 * sky + 0.75 * diff) + spec, vec3f(0.55, 0.62, 0.72), fog * fog);
+}
+`;
+
+export async function createBuggyRenderer({ device, format, world, frameBuf, L, shadeWgsl = BUGGY_SHADE_WGSL, sampleCount = 1, base = './generated/dune-buggy/' }) {
   const [mesh, bin] = await Promise.all([
     fetch(base + 'buggy-mesh.json', { cache: 'no-store' }).then((r) => { if (!r.ok) throw new Error(`buggy-mesh.json: HTTP ${r.status}`); return r.json(); }),
     fetch(base + 'buggy-mesh.bin', { cache: 'no-store' }).then((r) => { if (!r.ok) throw new Error(`buggy-mesh.bin: HTTP ${r.status}`); return r.arrayBuffer(); }),
@@ -207,6 +226,7 @@ struct Out { @builtin(position) clip: vec4f, @location(0) n: vec3f, @location(1)
     // Recipe primitives mix windings (the spring's mirrored frame): shade both faces.
     primitive: { cullMode: 'none' },
     depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
+    multisample: { count: sampleCount },
   });
 
   // ---- wheel-record readback for the rig (pipelined, a few frames deep) ----

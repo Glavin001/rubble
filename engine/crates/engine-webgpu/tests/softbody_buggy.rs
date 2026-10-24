@@ -4,7 +4,7 @@
 //! bend in front and keep its safety cell in a wall crash, and shed a bolted
 //! part that is struck.
 
-use engine_schema::{BodyState, Collider, Material, ShapeType, WorldCapacity, JOINT_FLAG_BROKEN};
+use engine_schema::{BodyState, Collider, Material, ShapeType, WorldCapacity};
 use engine_softbody::buggy::dune_buggy_soft;
 use engine_softbody::{SoftCapacity, SoftHandle, SpawnOptions};
 use engine_vehicle::{VehicleCapacity, VehicleInput};
@@ -54,6 +54,11 @@ fn static_box(sim: &mut WgpuSim, pos: [f32; 3], half: [f32; 3]) {
 }
 
 fn world() -> WgpuSim {
+    world_mode(false)
+}
+
+/// The test world, with rigid mode (`SoftSettings::rigid_mode`) on or off.
+fn world_mode(rigid: bool) -> WgpuSim {
     let mut sim = WgpuSim::new_with_soft(
         capacity(),
         VehicleCapacity::default(),
@@ -61,7 +66,10 @@ fn world() -> WgpuSim {
     )
     .expect("wgpu");
     sim.set_params(engine_softbody::soft_scene_params(HZ, 10));
-    sim.set_soft_settings(engine_softbody::SoftSettings::calibrated_for(HZ));
+    sim.set_soft_settings(engine_softbody::SoftSettings {
+        rigid_mode: rigid,
+        ..engine_softbody::SoftSettings::calibrated_for(HZ)
+    });
     sim.set_material(
         0,
         Material {
@@ -111,15 +119,9 @@ fn broken(sim: &WgpuSim, h: SoftHandle) -> usize {
 /// Bolted parts whose joints have all broken (loose), by name.
 fn loose_parts(sim: &WgpuSim, h: SoftHandle) -> Vec<String> {
     let e = sim.soft_host().entry(h);
-    let joints = sim.download_joints();
-    e.rigid_parts
-        .iter()
-        .zip(&e.desc.rigid_parts)
-        .filter(|((_, r), _)| {
-            r.clone()
-                .all(|j| joints[j as usize].flags & JOINT_FLAG_BROKEN != 0)
-        })
-        .map(|(_, p)| p.name.clone())
+    e.loose_parts(&sim.download_joints())
+        .into_iter()
+        .map(|k| e.desc.rigid_parts[k].name.clone())
         .collect()
 }
 
@@ -247,9 +249,20 @@ fn hybrid_buggy_bends_and_loses_its_front_wheels_in_a_wall_crash() {
 
 #[test]
 fn a_struck_seat_tears_off_its_mounts() {
-    let mut sim = world();
+    for rigid in [false, true] {
+        struck_seat(rigid);
+    }
+}
+
+fn struck_seat(rigid: bool) {
+    let mut sim = world_mode(rigid);
     let h = spawn(&mut sim, [0.0, 0.05, 0.0], [0.0; 3]);
     run(&mut sim, 480);
+    assert_eq!(
+        sim.read_soft_rigid(h),
+        rigid,
+        "parked: rigid exactly when rigid mode is on"
+    );
     let e = sim.soft_host().entry(h).clone();
     let k = e
         .desc
@@ -279,10 +292,14 @@ fn a_struck_seat_tears_off_its_mounts() {
         local_rot: [0.0, 0.0, 0.0, 1.0],
         params: [0.6, 0.0, 0.0, 0.6],
     });
-    run(&mut sim, 240);
+    // The blow (0.25 s): the struck seat tears off, the other may lose some of
+    // its joints but stays on (hanging by one, it can let go later: in both
+    // modes it loses two of its three joints at the same step,
+    // seat_strike_break_probe).
+    run(&mut sim, 60);
     let loose = loose_parts(&sim, h);
     eprintln!(
-        "loose {loose:?}; yielded {} broken {}",
+        "rigid mode {rigid}: loose {loose:?}; yielded {} broken {}",
         yielded(&sim, h),
         broken(&sim, h)
     );
@@ -298,9 +315,16 @@ fn a_struck_seat_tears_off_its_mounts() {
 
 #[test]
 fn a_head_on_cannonball_tears_off_a_front_piece_reported_by_name() {
-    let mut sim = world();
+    for rigid in [false, true] {
+        head_on_cannonball(rigid);
+    }
+}
+
+fn head_on_cannonball(rigid: bool) {
+    let mut sim = world_mode(rigid);
     let h = spawn(&mut sim, [0.0, 0.05, 0.0], [0.0; 3]);
     run(&mut sim, 480);
+    assert_eq!(sim.read_soft_rigid(h), rigid);
     sim.poll_soft_events();
     // The demo's cannonball (400 kg, r 0.6) at 30 m/s, head on at bumper height.
     let body = sim.add_body({
@@ -333,7 +357,7 @@ fn a_head_on_cannonball_tears_off_a_front_piece_reported_by_name() {
         .filter(|p| p.soft_body == h)
         .map(|p| &p.parts)
         .collect();
-    eprintln!("pieces {named:?}");
+    eprintln!("rigid mode {rigid}: pieces {named:?}");
     // The front bumper and the nose (panel on its standoffs) are the pieces in front.
     assert!(
         named
@@ -344,6 +368,74 @@ fn a_head_on_cannonball_tears_off_a_front_piece_reported_by_name() {
     assert!(
         named.iter().all(|p| !p.contains(&"frame".to_string())),
         "the frame stays the car"
+    );
+}
+
+/// A 50 km/h wall crash after a 20 m run-up: frame crush, safety-cell
+/// distortion, beams and wheels lost, rigid mode on or off.
+fn runup_wall_crash(rigid: bool) -> (bool, bool, f32, f32, usize, u32) {
+    let mut sim = world_mode(rigid);
+    static_box(&mut sim, [0.0, 1.0, 24.0], [5.0, 1.0, 0.5]);
+    let h = spawn(&mut sim, [0.0, 0.05, 0.0], [0.0, 0.0, 14.0]);
+    let before = positions(&sim, h);
+    run(&mut sim, 240); // 1 s, about 13 m: still clear of the wall
+    let was_rigid = sim.read_soft_rigid(h);
+    run(&mut sim, 480);
+    let after = positions(&sim, h);
+    let e = sim.soft_host().entry(h).clone();
+    let frame: Vec<usize> = (0..after.len())
+        .filter(|&i| e.desc.nodes[i].name.starts_with("frame:"))
+        .collect();
+    let extent = |p: &[Vec3]| {
+        frame.iter().map(|&i| p[i].z).fold(f32::MIN, f32::max)
+            - frame.iter().map(|&i| p[i].z).fold(f32::MAX, f32::min)
+    };
+    let cell: Vec<usize> = frame
+        .iter()
+        .copied()
+        .filter(|&i| before[i].y > 1.3)
+        .collect();
+    let cell_change = cell
+        .iter()
+        .flat_map(|&i| cell.iter().map(move |&j| (i, j)))
+        .map(|(i, j)| ((after[i] - after[j]).length() - (before[i] - before[j]).length()).abs())
+        .fold(0.0f32, f32::max);
+    let st = sim.vehicle_state(e.core.unwrap().0);
+    (
+        was_rigid,
+        sim.read_soft_rigid(h),
+        extent(&before) - extent(&after),
+        cell_change,
+        yielded(&sim, h),
+        st.wheels_broken,
+    )
+}
+
+#[test]
+fn hybrid_buggy_crashes_the_same_in_rigid_mode() {
+    let soft = runup_wall_crash(false);
+    let rigid = runup_wall_crash(true);
+    for (name, r) in [("always soft", soft), ("rigid mode", rigid)] {
+        eprintln!("{name}: rigid before {} after {}; crush {:.3} m, cell {:.3} m, yielded {}, wheels {:#b}", r.0, r.1, r.2, r.3, r.4, r.5);
+    }
+    assert!(!soft.0 && rigid.0, "rigid mode: rigid on the run-up");
+    assert!(!rigid.1, "soft after the wall");
+    assert!(rigid.4 > 0, "the frame bent");
+    assert!(
+        rigid.3 < 0.05,
+        "the safety cell holds its shape ({} m)",
+        rigid.3
+    );
+    assert!(
+        (soft.2 - rigid.2).abs() < 0.03,
+        "same crush within 3 cm ({} vs {})",
+        soft.2,
+        rigid.2
+    );
+    assert_eq!(
+        soft.5 & 0b11,
+        rigid.5 & 0b11,
+        "the same front wheels torn off"
     );
 }
 
@@ -426,5 +518,131 @@ fn hybrid_buggy_crash_probe() {
             loose_parts(&sim, h),
             st.wheels_broken
         );
+    }
+}
+
+/// Probe (run by hand): when and how hard each bolted-part joint breaks in the
+/// seat strike, by mode.
+#[test]
+#[ignore]
+fn seat_strike_break_probe() {
+    for rigid in [false, true] {
+        let mut sim = world_mode(rigid);
+        let h = spawn(&mut sim, [0.0, 0.05, 0.0], [0.0; 3]);
+        run(&mut sim, 480);
+        let e = sim.soft_host().entry(h).clone();
+        let k = e
+            .desc
+            .rigid_parts
+            .iter()
+            .position(|p| p.name == "seat_l")
+            .unwrap();
+        let seat = sim.read_body(e.rigid_parts[k].0).position;
+        let body = sim.add_body({
+            let mut b = BodyState::dynamic(
+                Vec3::new(seat[0] + 2.0, seat[1] + 0.25, seat[2]),
+                glam::Quat::IDENTITY,
+                400.0,
+                Vec3::splat(57.6),
+            );
+            b.linear_vel = [-25.0, 0.0, 0.0];
+            b
+        });
+        sim.add_collider(Collider {
+            body,
+            shape: ShapeType::Sphere as u32,
+            material: 0,
+            generation: 0,
+            local_pos: [0.0; 3],
+            density: 0.0,
+            local_rot: [0.0, 0.0, 0.0, 1.0],
+            params: [0.6, 0.0, 0.0, 0.6],
+        });
+        sim.poll_joint_breaks();
+        for step in 0..240 {
+            let was = sim.read_soft_rigid(h);
+            sim.step().unwrap();
+            let now = sim.read_soft_rigid(h);
+            if was != now {
+                eprintln!("rigid {rigid}: step {step} mode {was} -> {now}");
+            }
+            for b in sim.poll_joint_breaks() {
+                if let Some((p, _)) = e
+                    .rigid_parts
+                    .iter()
+                    .enumerate()
+                    .find(|(_, (_, r))| r.contains(&b.joint))
+                {
+                    eprintln!(
+                        "rigid {rigid}: step {step} {} joint {} broke at {:.0} N",
+                        e.desc.rigid_parts[p].name, b.joint, b.force
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Probe (run by hand): sleep state of the parked buggy, by mode, and the
+/// front bumper's mount beams' peak load in the head-on cannonball.
+#[test]
+#[ignore]
+fn head_on_state_probe() {
+    for rigid in [false, true] {
+        let mut sim = world_mode(rigid);
+        let h = spawn(&mut sim, [0.0, 0.05, 0.0], [0.0; 3]);
+        run(&mut sim, 480);
+        let e = sim.soft_host().entry(h).clone();
+        let core = e.core.unwrap().1;
+        let asleep = |sim: &WgpuSim, b: u32| sim.read_body(b).flags & 4 != 0;
+        let parts_asleep = (0..e.particles)
+            .filter(|&k| asleep(&sim, e.first_body + k))
+            .count();
+        eprintln!(
+            "rigid {rigid}: core asleep {} particles asleep {parts_asleep}/{}",
+            asleep(&sim, core),
+            e.particles
+        );
+        let body = sim.add_body({
+            let mut b = BodyState::dynamic(
+                Vec3::new(0.0, 0.85, 4.5),
+                glam::Quat::IDENTITY,
+                400.0,
+                Vec3::splat(57.6),
+            );
+            b.linear_vel = [0.0, 0.0, -30.0];
+            b
+        });
+        sim.add_collider(Collider {
+            body,
+            shape: ShapeType::Sphere as u32,
+            material: 0,
+            generation: 0,
+            local_pos: [0.0; 3],
+            density: 0.0,
+            local_rot: [0.0, 0.0, 0.0, 1.0],
+            params: [0.6, 0.0, 0.0, 0.6],
+        });
+        let group = 1 + e
+            .desc
+            .beams
+            .iter()
+            .filter_map(|b| (b.break_group != 0).then_some(b.break_group))
+            .min()
+            .unwrap_or(1)
+            - 1;
+        let mut peak = 0.0f32;
+        for step in 0..60 {
+            sim.step().unwrap();
+            let beams = sim.read_soft_beams(h);
+            for (k, b) in beams.iter().enumerate() {
+                if e.desc.beams[k].break_group == group && !b.broken() {
+                    peak = peak.max(b.force.abs() / e.desc.beams[k].strength);
+                }
+            }
+            if step % 10 == 9 {
+                eprintln!("rigid {rigid}: step {step} front-bumper mount peak load/strength {peak:.2}, rigid now {}", sim.read_soft_rigid(h));
+            }
+        }
     }
 }
