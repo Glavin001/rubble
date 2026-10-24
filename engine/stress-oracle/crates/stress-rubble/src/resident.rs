@@ -42,7 +42,7 @@ impl ResidentEngine for RubbleEngine {
                     let p = other(Some(key));
                     ColliderInfo { a: [gpu_chunk.unwrap_or(NONE), body_code(key), KIND_BODY, gpu_chunk.is_some() as u32], b: [p[0], p[1], p[2], 0.0] }
                 }
-                Owner::Ground | Owner::Retired => {
+                Owner::Ground | Owner::Retired | Owner::Foreign => {
                     let p = other(None);
                     ColliderInfo { a: [NONE, NONE, KIND_STATIC, 0], b: [p[0], p[1], p[2], 0.0] }
                 }
@@ -76,7 +76,8 @@ impl ResidentEngine for RubbleEngine {
                 n = n.max(need.min(self.max_substeps));
             }
         }
-        if !self.bodies.iter().any(|(k, e)| e.inv_mass > 0.0 && !self.frozen.contains(k)) {
+        // Hosted: the host's own bodies move with the step.
+        if !self.hosted_now() && !self.bodies.iter().any(|(k, e)| e.inv_mass > 0.0 && !self.frozen.contains(k)) {
             return 0;
         }
         // `STRESS_RUBBLE_MAX_SUBSTEPS=n` (a measurement of the CCD policy, not adopted):
@@ -191,6 +192,9 @@ impl ResidentEngine for RubbleEngine {
             self.sim.mirror_colliders(e.colliders.start, &self.cols[e.colliders.start as usize..e.colliders.end as usize]);
             self.colliders_changed(e.colliders.clone());
             self.frozen.retain(|k| k != key);
+            if let Some(log) = self.host_log.as_mut() {
+                log.push(crate::HostChange::Retired { key: *key, slot: e.id, colliders: e.colliders.clone() });
+            }
         }
         // The children, made at the next slots in order (`create_body`'s bookkeeping).
         let bodies: Vec<engine_schema::BodyState> = adopted.iter().map(|a| bytemuck::cast(a.body)).collect();
@@ -207,6 +211,9 @@ impl ResidentEngine for RubbleEngine {
             col = range.end;
             self.cols.extend(a.colliders.iter().map(|c| bytemuck::cast::<_, engine_schema::Collider>(*c)));
             self.owners.extend(a.chunks.iter().map(|&chunk| Owner::Body { key: a.key, chunk: Some(chunk) }));
+            if let Some(log) = self.host_log.as_mut() {
+                log.push(crate::HostChange::Created { key: a.key, slot: a.slot, colliders: range.clone(), chunks: a.chunks.iter().map(|&c| Some(c)).collect() });
+            }
             self.bodies.insert(
                 a.key,
                 crate::Entry {

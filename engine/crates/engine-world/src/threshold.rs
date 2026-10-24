@@ -236,7 +236,70 @@ mod imp {
         /// The stress scene as the threshold mode runs it (the lab's `stress_load`): bond
         /// strengths scaled, `dt` as its frame, the profile applied.
         pub fn threshold_scene(&self, strength_scale: f32, dt: f32) -> anyhow::Result<Scene> {
+            self.prepared_scene(
+                self.scene()?.clone(),
+                strength_scale,
+                dt,
+                Profile::Threshold,
+            )
+        }
+
+        /// The stress scene as the stress mode runs it in a world (the lab's
+        /// `stress_load` with the blast_parity profile): placed by `instance` (the asset
+        /// frame in the world, baked into the scene's poses and ground, so the stress
+        /// frame is the world's turned Z up), the world's gravity, bond strengths scaled,
+        /// `dt` as its frame.
+        pub fn stress_scene(
+            &self,
+            strength_scale: f32,
+            dt: f32,
+            gravity_y: f32,
+            instance: Transform,
+        ) -> anyhow::Result<Scene> {
             let mut scene = self.scene()?.clone();
+            let r = to_y_up();
+            let (ip, iq) = (instance.p().as_dvec3(), instance.q().as_dquat().normalize());
+            let placement = DVec3::from(self.placement);
+            // Asset frame = placement + R(stress); world = instance(asset); the world's
+            // stress frame = R^-1(world).
+            let point = |p: [f64; 3]| -> [f64; 3] {
+                (r.inverse() * (ip + iq * (placement + r * DVec3::from(p)))).to_array()
+            };
+            let turn = |v: [f64; 3]| -> [f64; 3] {
+                (r.inverse() * (iq * (r * DVec3::from(v)))).to_array()
+            };
+            let orient = |o: [f64; 4]| -> [f64; 4] {
+                let q = DQuat::from_xyzw(o[1], o[2], o[3], o[0]);
+                let q = (r.inverse() * iq * r * q).normalize();
+                [q.w, q.x, q.y, q.z]
+            };
+            for b in &mut scene.bodies {
+                b.position = point(b.position);
+                b.orientation = orient(b.orientation);
+                b.linear_velocity = turn(b.linear_velocity);
+                b.angular_velocity = turn(b.angular_velocity);
+            }
+            for i in &mut scene.impactors {
+                i.position = point(i.position);
+                i.orientation = orient(i.orientation);
+                i.velocity = turn(i.velocity);
+                i.angular_velocity = turn(i.angular_velocity);
+            }
+            // The ground stays level (the world's floor): through the placed ground point.
+            if let Some(g) = scene.ground.as_mut() {
+                g.height = point([0.0, 0.0, g.height])[2];
+            }
+            scene.gravity = [0.0, 0.0, gravity_y as f64];
+            self.prepared_scene(scene, strength_scale, dt, Profile::BlastParity)
+        }
+
+        fn prepared_scene(
+            &self,
+            mut scene: Scene,
+            strength_scale: f32,
+            dt: f32,
+            profile: Profile,
+        ) -> anyhow::Result<Scene> {
             let k = strength_scale as f64;
             if k != 1.0 {
                 let used: std::collections::BTreeSet<String> = scene
@@ -260,7 +323,7 @@ mod imp {
                 .map_err(|e| anyhow::anyhow!("stress scene: {e}"))?;
             let mut scene = scene.with_derived();
             scene.sim.methods = stress_ref::scene::Methods::established();
-            Profile::Threshold.apply_scene(&mut scene);
+            profile.apply_scene(&mut scene);
             scene
                 .materials
                 .entry("projectile".into())
@@ -272,8 +335,19 @@ mod imp {
         /// `ThresholdWorld::step_frame`): never asleep, zero-gap contact, world inertia,
         /// the profile's iterations, the scene's frame and contact offset.
         pub(crate) fn threshold_solver(&self) -> Option<AvbdParams> {
+            self.lab_solver(Profile::Threshold)
+        }
+
+        /// The lab's engine settings for the stress mode (`RubbleEngine` with the
+        /// blast_parity profile's policy): as `threshold_solver`, with that profile's
+        /// iterations.
+        pub(crate) fn stress_solver(&self) -> Option<AvbdParams> {
+            self.lab_solver(Profile::BlastParity)
+        }
+
+        fn lab_solver(&self, profile: Profile) -> Option<AvbdParams> {
             let scene = self.scene().ok()?;
-            let (iterations, _) = Profile::Threshold.engine_policy();
+            let (iterations, _) = profile.engine_policy();
             let mut p = AvbdParams {
                 gravity_y: scene.gravity[2] as f32,
                 flags: FLAG_CONTACT_GAP | FLAG_WORLD_INERTIA,
@@ -505,6 +579,10 @@ mod imp {
             index: usize,
         ) -> anyhow::Result<()> {
             let source = asset.stress.as_ref().ok_or_else(|| anyhow::anyhow!("StrengthModel::Threshold needs an asset with the stress oracle's input (from_glb, cuboid_house or from_pack)"))?;
+            anyhow::ensure!(
+                !self.stress.active(),
+                "StrengthModel::Threshold and StrengthModel::Stress destructibles cannot share a world (each steps it its own way)"
+            );
             // The ingest reads rubble's canonical contact rows, as the lab's engine keeps them.
             anyhow::ensure!(
                 self.contact_storage == crate::ContactStorage::Canonical,
@@ -517,18 +595,7 @@ mod imp {
             let m = &world.solver;
             let chunk_count: usize = m.structures.iter().map(|s| s.chunks.len()).sum();
             let capacity = self.sim.capacity();
-            let gpu = match &self.fracture.gpu {
-                Some(g) => g.clone(),
-                None => {
-                    let g = Gpu::from_device(
-                        self.adapter.clone(),
-                        self.sim.device().clone(),
-                        self.sim.queue().clone(),
-                    );
-                    self.fracture.gpu = Some(g.clone());
-                    g
-                }
-            };
+            let gpu = self.fracture_gpu();
             let instance = def.transform;
             let (ip, iq) = (
                 DVec3::from(instance.p().as_dvec3()),
@@ -1272,6 +1339,22 @@ mod imp {
                 self.fracture.fixed_plan = None;
             }
             Ok(())
+        }
+
+        /// The stress oracle's view of the world's device (made once).
+        pub(crate) fn fracture_gpu(&mut self) -> Gpu {
+            match &self.fracture.gpu {
+                Some(g) => g.clone(),
+                None => {
+                    let g = Gpu::from_device(
+                        self.adapter.clone(),
+                        self.sim.device().clone(),
+                        self.sim.queue().clone(),
+                    );
+                    self.fracture.gpu = Some(g.clone());
+                    g
+                }
+            }
         }
 
         pub(crate) fn fracture_projectiles_dirty(&self) -> bool {

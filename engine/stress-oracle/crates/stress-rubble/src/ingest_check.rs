@@ -80,7 +80,7 @@ impl RubbleEngine {
                     });
                     ColliderInfo { a: [index, body_code(key), KIND_BODY, chunk.is_some() as u32], b: [0.0; 4] }
                 }
-                Owner::Ground | Owner::Retired => ColliderInfo { a: [NONE, NONE, KIND_STATIC, 0], b: [0.0; 4] },
+                Owner::Ground | Owner::Retired | Owner::Foreign => ColliderInfo { a: [NONE, NONE, KIND_STATIC, 0], b: [0.0; 4] },
             })
             .collect();
         (table, chunks)

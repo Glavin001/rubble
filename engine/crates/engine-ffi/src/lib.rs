@@ -2211,6 +2211,12 @@ pub enum RbStrengthModel {
     /// The fracture lab's GPU threshold splitter: bonded clusters are bodies that
     /// split on the GPU (its `threshold` mode). Projectiles: `rbBody_SetProjectile`.
     RB_STRENGTH_THRESHOLD = 1,
+    /// The fracture lab's stress solver, the blast_parity profile (its `stress`
+    /// mode): bonded clusters are bodies, bonds break past their material limits
+    /// under the solved stresses, and impactors launched at it
+    /// (`rbDestructible_LaunchImpactor`) take part in impact islands. One per
+    /// world, none beside `RB_STRENGTH_THRESHOLD`; its frame steps the world.
+    RB_STRENGTH_STRESS = 2,
 }
 
 /// A placed destructible (`rbDefaultDestructibleDef`). Assets are authored in
@@ -2288,7 +2294,115 @@ fn strength_model(m: RbStrengthModel) -> StrengthModel {
     match m {
         RbStrengthModel::RB_STRENGTH_BONDS => StrengthModel::Bonds,
         RbStrengthModel::RB_STRENGTH_THRESHOLD => StrengthModel::Threshold,
+        RbStrengthModel::RB_STRENGTH_STRESS => StrengthModel::Stress,
     }
+}
+
+/// An impactor's shape (`RbImpactorDef::shape`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RbImpactorShape {
+    /// A sphere of `RbImpactorDef::radius`.
+    RB_IMPACTOR_SPHERE = 0,
+    /// A box of `RbImpactorDef::half_extents`.
+    RB_IMPACTOR_BOX = 1,
+}
+
+/// A body launched at a stress destructible (`rbDefaultImpactorDef`,
+/// `rbDestructible_LaunchImpactor`), as the fracture lab launches its shots: of
+/// the lab's projectile material (steel), in the world's coordinates; mass in kg.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RbImpactorDef {
+    pub shape: RbImpactorShape,
+    pub radius: f32,
+    pub half_extents: RbVec3,
+    pub mass: f32,
+    pub transform: RbTransform,
+    pub linear_velocity: RbVec3,
+    pub angular_velocity: RbVec3,
+    pub internal_value: u32,
+}
+
+/// Defaults in `coordinates`' units.
+#[no_mangle]
+pub extern "C" fn rbDefaultImpactorDef(coordinates: RbCoordinates) -> RbImpactorDef {
+    let c = Coords::new(coordinates);
+    let d = ImpactorDef::default();
+    let radius = match d.shape {
+        ImpactorShape::Sphere { radius } => radius,
+        ImpactorShape::Box { half_extents } => half_extents[0],
+    };
+    RbImpactorDef {
+        shape: RbImpactorShape::RB_IMPACTOR_SPHERE,
+        radius: c.length_out(radius),
+        half_extents: RbVec3::of(c.extents_out([radius; 3])),
+        mass: d.mass,
+        transform: RbTransform::default(),
+        linear_velocity: RbVec3::default(),
+        angular_velocity: RbVec3::default(),
+        internal_value: COOKIE,
+    }
+}
+
+/// Launch an impactor at a stress destructible (`RB_STRENGTH_STRESS`). It takes
+/// part in the next step; `*out_index` names it for
+/// `rbDestructible_GetImpactorBody`.
+#[no_mangle]
+pub unsafe extern "C" fn rbDestructible_LaunchImpactor(
+    world: *mut RbWorld,
+    id: RbDestructibleId,
+    def: *const RbImpactorDef,
+    out_index: *mut u32,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let d = read(def, "null impactor def")?;
+        check_cookie(
+            d.internal_value,
+            "impactor def not from rbDefaultImpactorDef",
+        )?;
+        let c = w.coords;
+        let t = w.transform_in(d.transform);
+        let def = ImpactorDef {
+            shape: match d.shape {
+                RbImpactorShape::RB_IMPACTOR_SPHERE => ImpactorShape::Sphere {
+                    radius: c.length_in(d.radius),
+                },
+                RbImpactorShape::RB_IMPACTOR_BOX => ImpactorShape::Box {
+                    half_extents: c.extents_in(d.half_extents.a()),
+                },
+            },
+            mass: d.mass,
+            position: t.position,
+            rotation: t.rotation,
+            linear_velocity: c.linear_in(d.linear_velocity.a()),
+            angular_velocity: c.angular_velocity_in(d.angular_velocity.a()),
+        };
+        let i = w
+            .world
+            .destructible_launch_impactor(DestructibleId::from_bits(id), &def)?;
+        write(out_index, i)
+    })
+}
+
+/// The body of a launched impactor (null until the engine has made it, by the
+/// end of the step after its launch at the latest). It moves like any body;
+/// destroying the destructible removes it.
+#[no_mangle]
+pub unsafe extern "C" fn rbDestructible_GetImpactorBody(
+    world: *mut RbWorld,
+    id: RbDestructibleId,
+    index: u32,
+    out: *mut RbBodyId,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let b = w
+            .world
+            .destructible_impactor_body(DestructibleId::from_bits(id), index)?;
+        write(out, b.map_or(0, |b| b.to_bits()))
+    })
 }
 
 #[no_mangle]
