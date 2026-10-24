@@ -26,6 +26,7 @@ pub const MPM_MATERIAL_NONE: u32 = 0;
 pub const MPM_OVERFLOW_BLOCKS: u32 = 1;
 pub const MPM_OVERFLOW_HASH: u32 = 2;
 pub const MPM_OUTSIDE: u32 = 4;
+pub const MPM_CFL: u32 = 8;
 
 /// Block coordinates are packed in 10 bits per axis.
 pub const MPM_MAX_BLOCKS_PER_AXIS: u32 = 1024;
@@ -41,6 +42,8 @@ pub struct MpmParams {
     pub counts: [u32; 4],
     /// Region size in cells, bed heightfield collider (or [`MPM_NO_BED`]).
     pub dims: [u32; 4],
+    /// x: largest particle speed the substep's dt allows (CFL); y, z, w unused.
+    pub limits: [f32; 4],
 }
 
 /// One particle (128 B).

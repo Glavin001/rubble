@@ -11,6 +11,8 @@ use engine_terrain::{RegionPlan, TerrainConfig, TerrainError, BLOCK_CELLS};
 pub(crate) struct TerrainState {
     config: TerrainConfig,
     params: MpmParams,
+    /// Elastic (P-) wave speed of the loaded material (0 without stress).
+    wave_speed: f32,
 }
 
 /// What a run of substeps reported (one readback at the end).
@@ -75,6 +77,7 @@ impl WgpuSim {
                 dims: [0, 0, 0, MPM_NO_BED],
                 ..MpmParams::default()
             },
+            wave_speed: 0.0,
         });
         Ok(())
     }
@@ -144,6 +147,15 @@ impl WgpuSim {
         state.params.step[1] = gravity;
         // Nodes lighter than this carry no velocity (f32 momentum over mass).
         state.params.step[2] = 1.0e-12;
+        // CFL: courant·dx per substep, less what the elastic wave takes.
+        let courant_speed = state.config.courant * state.params.origin[3] / dt;
+        state.params.limits[0] = courant_speed - state.wave_speed;
+        anyhow::ensure!(
+            state.params.limits[0] > 0.0,
+            "terrain dt {dt} s is above the CFL bound for the material's wave speed ({} m/s): use \
+             engine_terrain::substeps_for",
+            state.wave_speed
+        );
         let params = state.params;
         let cfg = state.config;
         self.queue.write_buffer(
@@ -202,6 +214,13 @@ impl WgpuSim {
         anyhow::ensure!(
             flags & MPM_OUTSIDE == 0,
             "terrain material left the active region (one cell inside its box): enlarge the region's margin"
+        );
+        anyhow::ensure!(
+            flags & MPM_CFL == 0,
+            "terrain material moved faster ({} m/s) than the substep's CFL bound ({} m/s): take \
+             more substeps (engine_terrain::substeps_for with a higher max_speed)",
+            f32::from_bits(c[2]),
+            params.limits[0]
         );
         Ok(TerrainStepReport {
             blocks: c[0],

@@ -21,6 +21,12 @@ pub struct TerrainConfig {
     pub cells_per_radius: f32,
     /// Smallest cell size a region may use (m).
     pub min_cell_size: f32,
+    /// Courant number of the explicit substeps: no material point moves, and
+    /// no elastic wave travels, more than this fraction of a cell per substep.
+    pub courant: f32,
+    /// Substeps one call may run (a frame needing more fails, rather than
+    /// taking longer substeps than CFL allows).
+    pub max_substeps: u32,
 }
 
 impl Default for TerrainConfig {
@@ -33,6 +39,8 @@ impl Default for TerrainConfig {
             particles_per_cell_axis: 2,
             cells_per_radius: 16.0,
             min_cell_size: 0.01,
+            courant: 0.3,
+            max_substeps: 512,
         }
     }
 }
@@ -77,6 +85,11 @@ impl TerrainConfig {
             !(self.min_cell_size.is_finite() && self.min_cell_size > 0.0),
             "min_cell_size must be finite and positive",
         )?;
+        bad(
+            !(self.courant > 0.0 && self.courant <= 1.0),
+            "courant must be in (0, 1]",
+        )?;
+        bad(self.max_substeps == 0, "max_substeps must be at least 1")?;
         Ok(())
     }
 

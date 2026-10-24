@@ -190,11 +190,19 @@ fn limits_fail_by_name() {
     let err = s.terrain_step(1, 1.0e-3, 0.0).unwrap_err();
     assert!(err.to_string().contains("max_blocks"), "{err}");
 
+    // 5 m/s leaves the region (1.5 m from the centre) within 0.4 s.
     let mut s = sim();
     s.terrain_enable(&config()).unwrap();
-    // Fast enough to leave the 1.5 m region within a step.
+    let (plan, ps) = cube(Vec3::ZERO, 0.25, |_| Vec3::new(5.0, 0.0, 0.0));
+    s.terrain_load(&plan, &ps, None, 0.0).unwrap();
+    let err = s.terrain_step(400, 1.0e-3, 0.0).unwrap_err();
+    assert!(err.to_string().contains("left the active region"), "{err}");
+
+    // 200 m/s moves 3.2 cells per 1 ms substep: past the Courant bound (0.3).
+    let mut s = sim();
+    s.terrain_enable(&config()).unwrap();
     let (plan, ps) = cube(Vec3::ZERO, 0.25, |_| Vec3::new(200.0, 0.0, 0.0));
     s.terrain_load(&plan, &ps, None, 0.0).unwrap();
-    let err = s.terrain_step(20, 1.0e-3, 0.0).unwrap_err();
-    assert!(err.to_string().contains("left the active region"), "{err}");
+    let err = s.terrain_step(1, 1.0e-3, 0.0).unwrap_err();
+    assert!(err.to_string().contains("CFL"), "{err}");
 }

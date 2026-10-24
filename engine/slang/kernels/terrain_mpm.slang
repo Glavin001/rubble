@@ -34,6 +34,7 @@ static const uint MPM_C_MAX_SPEED = 2u;   // max |v| after G2P (f32 bits; monoto
 static const uint MPM_OVERFLOW_BLOCKS = 1u;
 static const uint MPM_OVERFLOW_HASH = 2u;
 static const uint MPM_OUTSIDE = 4u;
+static const uint MPM_CFL = 8u;           // a particle outran the substep's speed bound
 
 // Material kinds (params u0.w).
 static const uint MPM_MATERIAL_NONE = 0u; // no stress: transfers only (tests)
@@ -44,6 +45,7 @@ struct MpmParams
     float4 step;    // x = dt, y = gravity (along y), z = node mass threshold, w = bed friction μ
     uint4 counts;   // x = particles, y = hash slots (power of two), z = max blocks, w = material
     uint4 dims;     // xyz = region size in cells, w = bed heightfield collider (MPM_NO_BLOCK: none)
+    float4 limits;  // x = largest particle speed the substep's dt allows (CFL)
 };
 
 // Per particle (128 B).
@@ -468,5 +470,7 @@ void mpm_g2p(uint3 tid : SV_DispatchThreadID)
     q.f1.xyz = F[1];
     q.f2.xyz = F[2];
     gMpmParticles[i] = q;
-    AMAX2(gMpmCounters[MPM_C_MAX_SPEED], asuint(length(v)));
+    float speed = length(v);
+    AMAX2(gMpmCounters[MPM_C_MAX_SPEED], asuint(speed));
+    if (!(speed <= p.limits.x)) AOR2(gMpmCounters[MPM_C_FLAGS], MPM_CFL);
 }
