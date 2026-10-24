@@ -150,8 +150,19 @@ impl BodyState {
         }
     }
 
+    /// Moves under the solver or its set velocity (the kernels'
+    /// `bodyIsDynamic`): dynamic with mass, or kinematic.
     pub fn is_dynamic(&self) -> bool {
-        self.inv_mass > 0.0 && (self.flags & BodyFlags::Dynamic as u32) != 0
+        (self.flags & BodyFlags::Dynamic as u32) != 0 && (self.inv_mass > 0.0 || self.is_kinematic())
+    }
+
+    pub fn is_kinematic(&self) -> bool {
+        self.flags & BodyFlags::Kinematic as u32 != 0
+    }
+
+    /// Moves at all (mass or kinematic flag): host-side broadphase sizing.
+    pub fn moves(&self) -> bool {
+        self.inv_mass > 0.0 || self.is_kinematic()
     }
 
     pub fn is_sleeping(&self) -> bool {

@@ -244,6 +244,9 @@ static const uint CMD_ANGULAR_IMPULSE = 14u; // f0 = angular impulse (N m s)
 // New solver frame relative to the old one: f0.xyz = centre offset (old body
 // frame), f1 = rotation, f2 = (inverse principal inertia, inverse mass).
 static const uint CMD_SET_MASS_FRAME = 15u;
+// Kinematic bodies: f0.xyz = target position, f1 = target rotation (solver
+// pose); sets the velocity that reaches them over this step.
+static const uint CMD_SET_KINEMATIC_TARGET = 16u;
 // GpuCommand.b bits of run commands.
 static const uint CMD_NO_WAKE = 1u;   // skip the command if the body is asleep
 static const uint CMD_AT_CENTER = 2u; // impulse through the centre of mass

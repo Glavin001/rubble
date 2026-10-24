@@ -486,7 +486,7 @@ impl World {
         let mut fresh: Vec<(usize, BodyState)> = Vec::new();
         for (k, d) in defs.iter().enumerate() {
             let rotation = Quat::from_array(d.rotation).normalize().to_array();
-            let asleep = !d.is_awake && d.body_type == BodyType::Dynamic;
+            let asleep = !d.is_awake && d.body_type != BodyType::Static;
             let slot = BodySlot {
                 generation: 1,
                 alive: true,
@@ -650,8 +650,34 @@ impl World {
     /// Recompute the mass properties from the body's shapes.
     pub fn body_apply_mass_from_shapes(&mut self, id: BodyId) -> anyhow::Result<()> {
         let i = self.live_body(id)?;
+        anyhow::ensure!(
+            self.bodies[i].body_type == BodyType::Dynamic,
+            "mass on a non-dynamic body"
+        );
         let mass = self.shapes_mass(i);
         self.set_mass(i, mass)
+    }
+
+    /// Move a kinematic body to `transform` (its origin) over the next step
+    /// (Box3D `b3Body_SetTargetTransform`): the velocity that gets it there is
+    /// computed on the GPU from where it actually is when the step starts, so
+    /// a body driven by animation every frame tracks it without drift. It
+    /// pushes and carries dynamic bodies on the way.
+    pub fn body_set_target_transform(
+        &mut self,
+        id: BodyId,
+        transform: Transform,
+    ) -> anyhow::Result<()> {
+        let i = self.live_body(id)?;
+        anyhow::ensure!(
+            self.bodies[i].body_type == BodyType::Kinematic,
+            "target transforms are for kinematic bodies"
+        );
+        let s = self.bodies[i].frame().to_solver(transform);
+        self.command(
+            id,
+            GpuCommand::set_kinematic_target(id.index(), s.position, s.rotation),
+        )
     }
 
     /// Teleport the body origin (velocities kept; the body wakes).
@@ -1966,7 +1992,18 @@ fn body_state(slot: &BodySlot) -> BodyState {
                 inertia,
             )
         }
-        _ => {
+        BodyType::Kinematic => {
+            // Infinite mass that moves at its set velocity (the kernels'
+            // BODY_KINEMATIC).
+            let mut s = BodyState::static_plane_support();
+            s.position = solver.position;
+            s.orientation = solver.rotation;
+            s.flags = engine_schema::BodyFlags::Dynamic as u32
+                | engine_schema::BodyFlags::Kinematic as u32
+                | engine_schema::BodyFlags::Awake as u32;
+            s
+        }
+        BodyType::Static => {
             let mut s = BodyState::static_plane_support();
             s.position = solver.position;
             s.orientation = solver.rotation;
