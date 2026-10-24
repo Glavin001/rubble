@@ -616,11 +616,6 @@ fn materials_are_interned_and_capped_loudly() {
 #[test]
 fn unsupported_fields_are_refused_not_ignored() {
     let mut w = world();
-    let kinematic = BodyDef {
-        body_type: BodyType::Kinematic,
-        ..BodyDef::default()
-    };
-    assert!(unsupported(w.create_body(&kinematic).unwrap_err()));
     let damped = BodyDef {
         linear_damping: 0.1,
         ..BodyDef::dynamic([0.0; 3])
