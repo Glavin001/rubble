@@ -45,10 +45,12 @@ export async function createSoftSkinner(device, bodies, { bindings, rest, triang
   new Uint32Array(params, 0, 2).set([nv, nt]);
   new Float32Array(params, 8, 1)[0] = 1.8;
   const paramsB = buf(new Uint8Array(params), GPUBufferUsage.UNIFORM);
+  const asleepB = buf(new Uint32Array(nv), S);
+  let first = true;
   const group = (p, list) => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: list.map(([binding, buffer]) => ({ binding, resource: { buffer } })) });
   const groups = [
-    group(pipes[0], [[0, bodies], [1, bindB], [5, positions], [8, paramsB]]),
-    group(pipes[1], [[2, restB], [3, trisB], [5, positions], [6, faces], [8, paramsB]]),
+    group(pipes[0], [[0, bodies], [1, bindB], [5, positions], [8, paramsB], [9, asleepB]]),
+    group(pipes[1], [[2, restB], [3, trisB], [5, positions], [6, faces], [8, paramsB], [9, asleepB]]),
     group(pipes[2], [[4, adjB], [6, faces], [7, normals], [8, paramsB]]),
   ];
   return {
@@ -58,7 +60,9 @@ export async function createSoftSkinner(device, bodies, { bindings, rest, triang
       const pass = enc.beginComputePass({ label: 'soft_skin' });
       [nv, nt, nv].forEach((n, i) => { pass.setPipeline(pipes[i]); pass.setBindGroup(0, groups[i]); pass.dispatchWorkgroups(Math.max(1, Math.ceil(n / 64))); });
       pass.end();
+      // Every vertex skinned once: from now on sleeping ones keep their output.
+      if (first) { first = false; device.queue.writeBuffer(paramsB, 12, Uint32Array.of(1)); }
     },
-    destroy() { [bindB, restB, trisB, adjB, positions, faces, normals, paramsB].forEach((b) => b.destroy()); },
+    destroy() { [bindB, restB, trisB, adjB, positions, faces, normals, paramsB, asleepB].forEach((b) => b.destroy()); },
   };
 }

@@ -482,7 +482,7 @@ struct Out { @builtin(position) clip: vec4f, @location(0) n: vec3f, @location(1)
 const HIDE = vec4f(0.0, 0.0, 2.0, 1.0);
 
 @vertex fn vsCol(@location(0) corner: vec3f, @location(1) normal: vec3f, @builtin(instance_index) inst: u32) -> Out {
-  let ci = inst + 1u;
+  let ci = colIdx[inst];
   let col = cols[ci];
   let b = bodies[col.body];
   var o: Out;
@@ -561,6 +561,7 @@ const HIDE = vec4f(0.0, 0.0, 2.0, 1.0);
 // stretched past 1.8× its rest edge is torn; a triangle with a torn corner is
 // dropped (all three corners decide alike), so a tear opens instead of spiking.
 @group(0) @binding(8) var<storage, read> flexTris: array<u32>;
+@group(0) @binding(11) var<storage, read> colIdx: array<u32>; // drawable colliders (vsCol instances)
 fn flexVertex(v: u32, torn: ptr<function, bool>, strain: ptr<function, f32>) -> vec3f {
   let b0 = flex[v * 2u];
   let b1 = bitcast<vec4f>(flex[v * 2u + 1u]);
@@ -727,12 +728,29 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     });
     const bind = (p, entries) => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: entries.map(([b, r]) => ({ binding: b, resource: r instanceof GPUBuffer ? { buffer: r } : r })) });
     const SH = [[9, shadowView], [10, shadowSampler]];
-    const colBind = bind(colPipe, [[0, world.bufs[0]], [1, frameBuf], [2, world.bufs[2]], ...SH]);
+    // Collider instances: only drawable ones (not soft-body node spheres, rigid
+    // cores or wheel rims, hidden anyway), rebuilt when the colliders change.
+    let colBind = null, colShadowBind = null, colIdxBuf = null, colIdxN = 0, colIdxVersion = -1;
+    const refreshColliders = () => {
+      if (colBind && world.colliderVersion === colIdxVersion) return;
+      colIdxVersion = world.colliderVersion;
+      const w = world.colliderWords, list = [];
+      for (let i = 1; i < world.colliderCount; i++) {
+        const mat = w[i * 16 + 2];
+        if (mat === WHEEL_RIM_MATERIAL || ((mat | 0) >> 16) < 0) continue;
+        list.push(i);
+      }
+      colIdxN = list.length;
+      colIdxBuf?.destroy();
+      colIdxBuf = device.createBuffer({ size: Math.max(16, list.length * 4), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      if (list.length) device.queue.writeBuffer(colIdxBuf, 0, Uint32Array.from(list));
+      colBind = bind(colPipe, [[0, world.bufs[0]], [1, frameBuf], [2, world.bufs[2]], [11, colIdxBuf], ...SH]);
+      colShadowBind = bind(colShadow, [[0, world.bufs[0]], [1, frameBuf], [2, world.bufs[2]], [11, colIdxBuf]]);
+    };
     const wheelBind = bind(wheelPipe, [[1, frameBuf], [3, world.bufs[31]], ...SH]);
     const groundBind = bind(groundPipe, [[0, world.bufs[0]], [1, frameBuf], ...SH]);
     const skyBind = bind(skyPipe, [[1, frameBuf]]);
     const colShadow = shadowPipe('vsCol', vtx6), wheelShadow = shadowPipe('vsWheel', vtx6), flexShadow = shadowPipe('vsFlex', []);
-    const colShadowBind = bind(colShadow, [[0, world.bufs[0]], [1, frameBuf], [2, world.bufs[2]]]);
     const wheelShadowBind = bind(wheelShadow, [[1, frameBuf], [3, world.bufs[31]]]);
     let flexShadowBind = null;
     // The procedural car's detailed mesh (car-render.mjs); imports keep the flexbody skin.
@@ -1217,7 +1235,8 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       if (flexMode) carR.compute(enc, FX ? fxDt : 0);
       // Sun shadow map.
       const sp = enc.beginRenderPass({ colorAttachments: [], depthStencilAttachment: { view: shadowView, depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' } });
-      sp.setPipeline(colShadow); sp.setBindGroup(0, colShadowBind); sp.setVertexBuffer(0, cubeVbo); sp.draw(36, world.colliderCount - 1);
+      refreshColliders();
+      if (colIdxN) { sp.setPipeline(colShadow); sp.setBindGroup(0, colShadowBind); sp.setVertexBuffer(0, cubeVbo); sp.draw(36, colIdxN); }
       if (world.vehicles.wheelCount) { sp.setPipeline(wheelShadow); sp.setBindGroup(0, wheelShadowBind); sp.setVertexBuffer(0, cylVbo); sp.draw(cyl.length / 6, world.vehicles.wheelCount); }
       if (flexMode) {
         carR.drawShadow(sp);
@@ -1233,7 +1252,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       });
       rp.setPipeline(skyPipe); rp.setBindGroup(0, skyBind); rp.draw(3);
       rp.setPipeline(groundPipe); rp.setBindGroup(0, groundBind); rp.setVertexBuffer(0, groundVbo); rp.draw(6);
-      rp.setPipeline(colPipe); rp.setBindGroup(0, colBind); rp.setVertexBuffer(0, cubeVbo); rp.draw(36, world.colliderCount - 1);
+      if (colIdxN) { rp.setPipeline(colPipe); rp.setBindGroup(0, colBind); rp.setVertexBuffer(0, cubeVbo); rp.draw(36, colIdxN); }
       if (flexMode) {
         carR.drawOpaque(rp);
         if (flexCount) {
@@ -1376,6 +1395,18 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       await new Promise((r) => setTimeout(r, ms));
       manual = true;
       return { fps: fpsShow, realTime };
+    };
+    // Skinning cost alone (the car mesh compute passes), ms per frame.
+    window.__skinBench = async (n = 60) => {
+      manual = true;
+      const t = performance.now();
+      for (let i = 0; i < n; i++) {
+        const enc = device.createCommandEncoder();
+        carR.compute(enc, 0);
+        device.queue.submit([enc.finish()]);
+        await device.queue.onSubmittedWorkDone();
+      }
+      return (performance.now() - t) / n;
     };
     // Rendering cost: n frames drawn and waited on (no physics), ms per frame.
     window.__renderBench = async (n = 60) => {

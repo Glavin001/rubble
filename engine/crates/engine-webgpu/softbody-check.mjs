@@ -95,6 +95,7 @@ const CHECKS = {
       await page.eval(`window.__step(240, ${input})`);
       const step = await page.eval(`(async () => { const t = performance.now(); await window.__step(240, ${input}); return (performance.now() - t) / 240; })()`);
       const render = await page.eval(`window.__renderBench(60)`);
+      if (process.env.BUDGET_SPLIT) console.log(q, 'skin ms/frame', (await page.eval(`window.__skinBench(60)`)).toFixed(2), 'render ms/frame', render.toFixed(2));
       const info = await page.eval(`JSON.stringify({ counts: Array.from(window.__world.lastCounts), h: window.__world.dispatchHistogram() })`);
       if (process.env.BUDGET_VERBOSE) console.log(q, info);
       const live = await page.eval(`window.__live(4000)`);

@@ -457,6 +457,9 @@ export function createCarRenderer(device, { format, sampleCount, bodies, frameBu
   r.compute = (enc, dt = 0) => {
     if (!r.groups) return;
     r.skinner.encode(enc);
+    // Effects never started (dt 0 so far): nothing to spawn or move.
+    if (dt > 0) r.fxLive = true;
+    if (!r.fxLive) return;
     new Uint32Array(tick)[0] = ++seed;
     new Float32Array(tick)[1] = dt;
     device.queue.writeBuffer(r.countsB, 8, tick);
