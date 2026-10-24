@@ -15,6 +15,13 @@ stress-gpu = { path = "../stress-gpu" }
 engine-gpu-wait = { path = "../../../crates/engine-gpu-wait" }
 stress-rubble = { path = "../stress-rubble", default-features = false, features = ["gpu"] }
 engine-fracture = { path = "../../../crates/engine-fracture" }
+# Driven vehicles (a pack's `defaults.drives`): rubble's world API with the Threshold
+# model, its raycast vehicle presets and its GPU records.
+rubble = { package = "engine-world", path = "../../../crates/engine-world" }
+engine-vehicle = { path = "../../../crates/engine-vehicle" }
+engine-schema = { path = "../../../crates/engine-schema" }
+glam = { version = "0.29", features = ["bytemuck"] }
+anyhow = "1"
 wgpu = "30"
 wasm-bindgen = "=0.2.129"
 wasm-bindgen-futures = "0.4"

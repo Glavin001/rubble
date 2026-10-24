@@ -662,6 +662,38 @@ impl World {
         Ok(!self.bodies[self.live_body(id)?].last_asleep)
     }
 
+    /// The GPU's collider records of a body, whoever made them (its shapes, a
+    /// vehicle's parts and wheels' rims): each one's shape and its pose in the body
+    /// frame (`Collider::params`: sphere radius; capsule radius, half length; box half
+    /// extents). For drawing what is simulated.
+    pub fn body_colliders(
+        &self,
+        id: BodyId,
+    ) -> anyhow::Result<Vec<(engine_schema::ShapeType, Transform, [f32; 4])>> {
+        use engine_schema::ShapeType;
+        let b = self.live_body(id)? as u32;
+        let frame = self.bodies[b as usize].frame();
+        let mut out = Vec::new();
+        for c in 0..self.sim.collider_count() {
+            let col = self.sim.collider(c);
+            if col.body != b || self.free_colliders.iter().any(|f| f.0 == c) {
+                continue;
+            }
+            let shape = match col.shape {
+                0 => ShapeType::Sphere,
+                1 => ShapeType::Capsule,
+                2 => ShapeType::Box,
+                3 => ShapeType::ConvexHull,
+                _ => ShapeType::Plane,
+            };
+            // The record is posed in the body's solver frame.
+            let p = frame.center + frame.axes * glam::Vec3::from(col.local_pos);
+            let q = frame.axes * glam::Quat::from_array(col.local_rot);
+            out.push((shape, Transform::new(p.to_array(), q.to_array()), col.params));
+        }
+        Ok(out)
+    }
+
     /// Centre of mass in the body frame.
     pub fn body_local_center(&self, id: BodyId) -> anyhow::Result<[f32; 3]> {
         Ok(self.bodies[self.live_body(id)?].frame().center.to_array())

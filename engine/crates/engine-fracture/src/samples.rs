@@ -192,6 +192,14 @@ pub const PACK_SAMPLES: &[PackSample] = &[
         menu: "Apartment block, a car and a bus · 1,493 chunks",
         label: "apartment block with vehicles",
     },
+    // Driven, not launched: rubble's raycast sedan and truck on their wheels (`stress_ref::drive`;
+    // the stress modes' threshold profile, in the world API).
+    PackSample {
+        key: "rr_drive_storefront",
+        group: RAM_RAID,
+        menu: "Storefront row, a sedan and a truck driven in · 1,204 chunks",
+        label: "storefront row with driven vehicles",
+    },
     PackSample {
         key: "ft_apartment_block",
         group: FLY_THROUGH,

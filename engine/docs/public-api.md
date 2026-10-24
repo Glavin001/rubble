@@ -858,10 +858,18 @@ oracle's `stress-gpu`, `stress-ref` and `stress-rubble`.
   and the render contract holds. The blocking `read_body_state` converts a
   piece's live GPU pose with the GPU's live frame record, since a step whose
   readback is still pending may already have split it again.
-- **Projectiles.** `body_set_projectile(body, Some(Projectile))` adds a body
-  with one sphere or box shape to strike prediction and gives its contacts
-  the lab's shot loads. Other non-chunk colliders load chunks as static
-  geometry does (the lab's ground).
+- **Projectiles.** `body_set_projectile(body, Some(Projectile))` adds every
+  sphere and box collider of a body to strike prediction and gives their
+  contacts the lab's shot loads. That covers a vehicle's chassis: its body
+  boxes and its wheels' rim spheres, read from the GPU's collider records, with
+  its mass from the GPU body. A box strikes as a box: the shot's box and each
+  chunk's box are swept over the frame on every separating axis (the
+  `fracture.slang` strike kernels), never as a bounding sphere. A sphere
+  centred on its body strikes as the lab's ball does. Other non-chunk
+  colliders load chunks as static geometry does (the lab's ground).
+  `engine-world/tests/drive_through.rs` drives the sedan preset on its wheels
+  into the Ram Raid storefront row. It gets 3 m and more into the shop.
+  Without prediction the shop front stops it dead in the step it meets it.
 - **Settings.** `solver_for(StrengthModel::Threshold)` gives the lab's
   threshold engine settings: never asleep, zero-gap contact, world inertia,
   4 iterations, 60 Hz. `StressSource::ground_height` gives the lab's ground
@@ -869,7 +877,8 @@ oracle's `stress-gpu`, `stress-ref` and `stress-rubble`.
 - **Limits (fail loudly).**
   - The world must use `ContactStorage::Canonical`, the rows the ingest reads.
   - Reserved slots count against `max_bodies`.
-  - At most 64 projectiles (the strike table).
+  - At most 64 projectile colliders (the strike table): a sedan has 22, its 2
+    body boxes and 20 rim spheres.
   - At most 2^20 chunks or body slots (the fracture's scans).
   - The impact pulse pool is sized from `max_contacts`.
   - A fracture error bit fails the frame.

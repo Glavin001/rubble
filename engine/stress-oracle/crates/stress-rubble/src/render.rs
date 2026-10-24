@@ -709,6 +709,40 @@ fn box_faces(h: Vec3) -> (Vec<Vec3>, Vec<(Vec<usize>, Vec3)>) {
     (verts, faces)
 }
 
+/// A mesh the stress scene does not hold, drawn where the host poses it each frame
+/// ([`Renderer::set_extras`]): a raycast vehicle's body boxes and wheels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ExtraMesh {
+    Box { half: [f64; 3], color: [f32; 3], surface: f32 },
+    /// A wheel: its axle along the mesh's x.
+    Cylinder { radius: f64, half_width: f64, color: [f32; 3], surface: f32 },
+}
+
+impl ExtraMesh {
+    fn color(&self) -> [f32; 4] {
+        let (Self::Box { color, surface, .. } | Self::Cylinder { color, surface, .. }) = *self;
+        [color[0], color[1], color[2], surface]
+    }
+}
+
+/// A cylinder's faces (`hull_triangles`): its axis along x, `segs` sides.
+fn cylinder_faces(radius: f64, half_width: f64, segs: usize) -> (Vec<Vec3>, Vec<(Vec<usize>, Vec3)>) {
+    let mut verts = Vec::with_capacity(2 * segs);
+    for side in [-1.0, 1.0] {
+        for j in 0..segs {
+            let a = 2.0 * std::f64::consts::PI * j as f64 / segs as f64;
+            verts.push(Vec3::new(side * half_width, radius * a.cos(), radius * a.sin()));
+        }
+    }
+    let mut faces = vec![((0..segs).collect(), Vec3::new(-1.0, 0.0, 0.0)), ((segs..2 * segs).collect(), Vec3::new(1.0, 0.0, 0.0))];
+    for j in 0..segs {
+        let k = (j + 1) % segs;
+        let a = 2.0 * std::f64::consts::PI * (j as f64 + 0.5) / segs as f64;
+        faces.push((vec![j, k, segs + k, segs + j], Vec3::new(0.0, a.cos(), a.sin())));
+    }
+    (verts, faces)
+}
+
 fn sphere_triangles(radius: f64, object: u32, out: &mut Vec<Vertex>) {
     let (rings, segs) = (12usize, 20usize);
     let point = |i: usize, j: usize| {
@@ -765,6 +799,9 @@ pub struct Renderer {
     /// Object index of each chunk, by structure.
     chunk_object: Vec<Vec<u32>>,
     impactor_base: u32,
+    /// The extra meshes' first object and their colours ([`Self::set_extras`]).
+    extra_base: u32,
+    extra_colors: Vec<[f32; 4]>,
     object_count: usize,
     /// Distance (m) over which the ground grid fades; the haze grows over eight times it.
     pub fade: f64,
@@ -801,16 +838,24 @@ const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 impl Renderer {
     /// Meshes for every chunk of `solver` (their hulls, or boxes) and every impactor.
     pub fn new(gpu: &Gpu, solver: &ReferenceSolver, impactors: &[Impactor], width: u32, height: u32) -> Renderer {
-        Self::with_format(gpu, solver, impactors, width, height, FORMAT, true)
+        Self::with_format(gpu, solver, impactors, &[], width, height, FORMAT, true)
     }
 
     /// A renderer that draws into the caller's `format` target (`draw`), without the
     /// offscreen image.
     pub fn for_target(gpu: &Gpu, solver: &ReferenceSolver, impactors: &[Impactor], width: u32, height: u32, format: wgpu::TextureFormat) -> Renderer {
-        Self::with_format(gpu, solver, impactors, width, height, format, false)
+        Self::with_format(gpu, solver, impactors, &[], width, height, format, false)
     }
 
-    fn with_format(gpu: &Gpu, solver: &ReferenceSolver, impactors: &[Impactor], width: u32, height: u32, format: wgpu::TextureFormat, offscreen: bool) -> Renderer {
+    /// [`Self::for_target`] with `extras` drawn after the impactors, where
+    /// [`Self::set_extras`] poses them.
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_target_with(gpu: &Gpu, solver: &ReferenceSolver, impactors: &[Impactor], extras: &[ExtraMesh], width: u32, height: u32, format: wgpu::TextureFormat) -> Renderer {
+        Self::with_format(gpu, solver, impactors, extras, width, height, format, false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_format(gpu: &Gpu, solver: &ReferenceSolver, impactors: &[Impactor], extras: &[ExtraMesh], width: u32, height: u32, format: wgpu::TextureFormat, offscreen: bool) -> Renderer {
         let device = &gpu.device;
         let mut verts: Vec<Vertex> = Vec::new();
         let mut chunk_object = Vec::new();
@@ -874,6 +919,17 @@ impl Renderer {
                     hull_triangles(&v, &f, object, &mut verts);
                 }
             }
+            object += 1;
+        }
+        // The extras shed no effects either (bounds 0).
+        let extra_base = object;
+        bounds.resize(bounds.len() + extras.len(), [0.0; 4]);
+        for m in extras {
+            let (v, f) = match *m {
+                ExtraMesh::Box { half, .. } => box_faces(Vec3::from_array(half)),
+                ExtraMesh::Cylinder { radius, half_width, .. } => cylinder_faces(radius, half_width, 24),
+            };
+            hull_triangles(&v, &f, object, &mut verts);
             object += 1;
         }
         let object_count = object as usize;
@@ -1156,6 +1212,8 @@ impl Renderer {
             row,
             chunk_object,
             impactor_base,
+            extra_base,
+            extra_colors: extras.iter().map(ExtraMesh::color).collect(),
             object_count,
             fade: 120.0,
             // sRGB (0.71, 0.78, 0.86) and (0.38, 0.55, 0.78).
@@ -1198,6 +1256,15 @@ impl Renderer {
     /// age, and the comparison moves on).
     pub fn set_fx_quiet(&self) {
         self.fx_quiet.set(true);
+    }
+
+    /// Pose the extra meshes for the next draw, each as its rotation and position in the
+    /// stress frame (Z up), in the order they were given.
+    pub fn set_extras(&self, gpu: &Gpu, poses: &[(Mat3, Vec3)]) {
+        let objs: Vec<Object> = poses.iter().zip(&self.extra_colors).map(|((r, t), c)| Object { rows: rows(*r, *t), color: *c }).collect();
+        if !objs.is_empty() {
+            gpu.queue.write_buffer(&self.objects, (self.extra_base as usize * std::mem::size_of::<Object>()) as u64, bytemuck::cast_slice(&objs));
+        }
     }
 
     /// Triangles drawn per frame.

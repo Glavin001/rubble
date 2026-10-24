@@ -381,9 +381,62 @@ mod imp {
     }
 
     impl World {
+        /// The GPU's tables for drawing a threshold destructible's chunks with the fracture
+        /// lab's renderer (stress-rubble `Renderer`, on this world's device): each chunk's
+        /// renderer object, its render centre and rotation in its structure's frame, and its
+        /// colour (`fracture::ViewTables`, chunks in the stress scene's order).
+        pub fn destructible_set_view(
+            &mut self,
+            id: DestructibleId,
+            view: &fracture::ViewTables,
+        ) -> anyhow::Result<()> {
+            let k = self.threshold_slot(id)?;
+            let gpu = self.fracture.gpu.clone().expect("a threshold destructible's GPU");
+            let t = self.fracture.slots[k].as_mut().expect("live slot");
+            anyhow::ensure!(
+                view.chunks.len() == t.chunk_body.len(),
+                "{} view chunks for {} chunks",
+                view.chunks.len(),
+                t.chunk_body.len()
+            );
+            t.fracture.set_view(&gpu, view);
+            Ok(())
+        }
+
+        /// The renderer's chunk objects (and, with `bonds`, its bond lines) from the
+        /// pieces as the GPU has them, recorded into `encoder` after the steps (then
+        /// `Renderer::draw_resident`). Returns the bond lines' vertices. Nothing is read
+        /// back. `mode`: 0 materials, 1 body state, 2 bodies, 3 materials untinted.
+        #[allow(clippy::too_many_arguments)]
+        pub fn destructible_encode_view(
+            &mut self,
+            id: DestructibleId,
+            encoder: &mut wgpu::CommandEncoder,
+            objects: &wgpu::Buffer,
+            lines: &wgpu::Buffer,
+            line_capacity: usize,
+            mode: u32,
+            bonds: bool,
+        ) -> anyhow::Result<u32> {
+            let k = self.threshold_slot(id)?;
+            let gpu = self.fracture.gpu.clone().expect("a threshold destructible's GPU");
+            let t = self.fracture.slots[k].as_mut().expect("live slot");
+            let n = t.tables.bond_count();
+            let bonds = bonds && 2 * n as usize <= line_capacity;
+            t.fracture.encode_view(&gpu, encoder, objects, lines, mode, bonds);
+            Ok(if bonds { 2 * n } else { 0 })
+        }
+
+        fn threshold_slot(&self, id: DestructibleId) -> anyhow::Result<usize> {
+            let d = &self.destructibles[self.live_destructible(id)?];
+            d.threshold
+                .map(|k| k as usize)
+                .ok_or_else(|| anyhow::anyhow!("destructible {id:?} is not a Threshold one"))
+        }
+
         /// Mark a body as a projectile for threshold destructibles (`None` clears it): its
-        /// contacts load chunks as the lab's shots do, and strike prediction checks it
-        /// each step. It needs mass and one sphere or box shape. At most 64.
+        /// contacts load chunks as the lab's shots do, and strike prediction checks each of
+        /// its sphere and box colliders each step. It needs mass. At most 64 colliders.
         pub fn body_set_projectile(
             &mut self,
             body: BodyId,

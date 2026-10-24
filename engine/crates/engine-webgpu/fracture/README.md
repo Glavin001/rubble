@@ -838,6 +838,27 @@ car, then the bus, the camera following each in):
   sill, and that bond holds 1.6 MN (40 MPa over a 20 mm by 2 m edge), so the pane cannot
   shatter. It is the buildings' glazing model, not changed here.
 
+**Ram Raid, driven** (`rr_drive_storefront`, 1,204 chunks). Same storefront row and street,
+but the vehicles are not chunks. They are rubble's raycast vehicles: the `sedan` preset at
+the middle shop's window, and the `six_wheel_truck` preset at the fourth shop's, a second
+behind. Each starts 30 m out and is driven at full throttle by its own engine, gearbox and
+wheels (the pack's `defaults.drives`, `stress_ref::drive`).
+- **How it runs.** stress-web runs the scene in rubble's world API (`World`), not in the
+  lab's threshold world. The structure is a `Threshold` destructible, the same GPU fracture
+  as the threshold mode. Each vehicle's chassis is a projectile: its body boxes and its
+  wheels' rims strike the shop front in the frame before they meet it.
+- **Drawing.** The lab's renderer draws the chunks from the GPU and the vehicles' boxes and
+  wheels from each frame's readback.
+- **Profile.** It needs the threshold profile (Bonds · Stress solver · simple threshold). It
+  takes no shots, and Bond strength and Physics do not apply.
+- **What happens.** Take `rr_drive_storefront`, in Chrome:
+  - The sedan reaches about 50 km/h, breaks the window and stallriser and drives into the
+    shop.
+  - The truck takes the fourth shop's front off its pier and swings in, nose first.
+  - 164 bonds are broken, the same in two recordings.
+- **What it doesn't do yet.** The vehicles are rigid: they don't crumple as the bonded ones
+  do.
+
 Recording these takes exposed a bug in strike prediction that was older than them. Under the
 WGSL builds' fast math (Chrome, and naga's Metal compile), the nearest struck chunk was
 matched by the bits of a recomputed distance. That found no chunk, so every strike was

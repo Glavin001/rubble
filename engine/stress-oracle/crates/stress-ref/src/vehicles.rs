@@ -388,6 +388,8 @@ pub struct Scene {
     pub launches: Vec<Launch>,
     /// Each vehicle's name and its chunks (ascending).
     pub vehicles: Vec<(String, Vec<usize>)>,
+    /// Raycast vehicles driven at the structure (`drive`): not chunks of it.
+    pub drives: Vec<crate::drive::Drive>,
 }
 
 impl Scene {
@@ -399,6 +401,7 @@ impl Scene {
             node["mass"] = m.into();
         }
         crate::launch::write(&mut pack, &self.launches);
+        crate::drive::write(&mut pack, &self.drives);
         pack
     }
 }
@@ -444,7 +447,7 @@ pub fn compose(key: &'static str, title: &'static str, base: Structure, supports
         }
         placed.push((v.name.clone(), ids));
     }
-    Scene { structure: s, masses, launches, vehicles: placed }
+    Scene { structure: s, masses, launches, vehicles: placed, drives: Vec::new() }
 }
 
 /// A launch along `heading` at `speed` (m/s), with `lift` (m/s) up.
@@ -540,7 +543,12 @@ pub const SCENES: &[(&str, &str)] = &[
     ("ft_airliner_tower", "Airliner into the glass tower"),
     ("ft_airliner_apartment", "Airliner into the apartment block"),
     ("bo_viaduct_traffic", "Highway viaduct with stalled traffic"),
+    ("rr_drive_storefront", "Sedan and truck driven through the storefront row"),
 ];
+
+/// How far out a driven vehicle starts (m from its nose to the facade): room for its
+/// wheels to bring it up to speed (the sedan reaches about 50 km/h at the facade).
+pub const DRIVE_RUN_UP: f64 = 30.0;
 
 /// Stalled traffic on the viaduct (S2 + V3 + V4), none launched: cars and a bus parked on
 /// the two drop-in spans either side of the hinge pier (in lanes 2 m either side of the
@@ -609,6 +617,31 @@ pub fn scene(key: &str) -> Option<Scene> {
         "ft_airliner_tower" => Some(fly_through(key, title, crate::buildings::glass_tower(), 0.0)),
         "ft_airliner_apartment" => Some(fly_through(key, title, crate::buildings::apartment_block(), 0.0)),
         "bo_viaduct_traffic" => Some(compose(key, title, crate::viaduct::viaduct(), Vec::new(), &traffic())),
+        // V5 driven: the sedan (rubble's raycast preset, its wheels driving it) at the
+        // middle shop's window from 30 m out, the six-wheel truck at the fourth shop's a
+        // second later, both at full throttle up the street (+y) and level with the
+        // footings' tops. Not chunks: a world API host creates them (`drive`).
+        "rr_drive_storefront" => {
+            use crate::buildings::StorefrontLayout as L;
+            let window = |i: usize| {
+                let (_, w) = L::shopfront(i);
+                0.5 * (w.0 + w.1)
+            };
+            let x = L::half_length();
+            let face = -0.5 * L::DEPTH;
+            let mut s = compose(key, title, crate::buildings::storefront_row(), street((-x, x), (face - 48.0, face), L::FOOTING_DEPTH), &[]);
+            // (name, preset, its nose ahead of its origin, its origin's height on its wheels.)
+            let drive = |name: &str, vehicle: &str, x: f64, nose: f64, delay: f64| crate::drive::Drive {
+                name: name.into(),
+                vehicle: vehicle.into(),
+                at: [x, face - DRIVE_RUN_UP - nose, L::FOOTING_DEPTH + 0.8],
+                forward: [0.0, 1.0, 0.0],
+                throttle: 1.0,
+                delay,
+            };
+            s.drives = vec![drive("sedan", "sedan", window(2), 2.2, 0.0), drive("truck", "six_wheel_truck", window(4), 3.4, 1.0)];
+            Some(s)
+        }
         _ => None,
     }
 }

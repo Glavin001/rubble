@@ -43,7 +43,7 @@ runs in a browser.
 
 ## Our takes (2026-10-24), scored on those beats
 
-17 lab takes, recorded in headless Chrome with `record-takes.mjs --page lab --check
+18 lab takes, recorded in headless Chrome with `record-takes.mjs --page lab --check
 --repeat`. Every stress-mode take passes the checks and repeats frame for frame.
 
 | Take | Patterns | Works | Gaps |
@@ -58,6 +58,7 @@ runs in a browser.
 | `rr_storefront_car_bus` | V5 V1 V2 | A bonded car through the shop window crumples inside; the bus drives into the next shop with the fascia on its roof (442) | — |
 | `rr_apartment_car_bus` | V5 | Both hit the apartment block's ground floor | Neither gets through: the brick infill is two 1.15 t panels a bay |
 | `rr_storefront_car` | V5 | Ball stand-in: a local break | Superseded by `rr_storefront_car_bus` |
+| `rr_drive_storefront` | V5 V4 | Driven, not launched: rubble's raycast sedan and six-wheel truck, in the world API (`World`, the `Threshold` model), accelerate on their own wheels from 30 m out. The sedan breaks the window at about 50 km/h and drives into the shop; the truck takes the fourth shop's front off its pier and swings in (164) | The vehicles are rigid: no crumple yet (soft bodies, plan Phase D) |
 | `ft_apartment_airliner` | S3 | A bonded 35 t jet at 70 m/s punches through five storeys of the middle bays; engines and nose fly off; it falls back out (1,148) | — |
 | `ft_glass_tower_airliner` | S3 | The nose breaks up in the curtain wall and floors (710) | It stops in the first bays and slides down the facade; no upper block fails (threshold has no stress solve) |
 | `vh_car_barrier_crash`, `vh_bus_barrier_crash` | V1 V2 | Into a rigid barrier: the front comes apart, wheels come off, the cabin holds (45, 39) | Wheels do not roll: the vehicles slide on them |
@@ -87,7 +88,11 @@ exactly; vehicles, glass and metal shed chips, not dust.
    vehicles module is ready.
 2. **The airliner through the glass tower** (S3): a lighter curtain wall, or the stress
    profile once its strikes stay local, so the upper block tilts away.
-3. **Rolling wheels and driven vehicles**: the combined host (plan Phase B/C), so a
-   vehicle drives in instead of being launched.
+3. **Driven vehicles: done for the storefront** (`rr_drive_storefront`). Threshold fracture
+   runs in `World` (D1b), and a chassis's boxes strike exactly. stress-web steps such a
+   `World` on the page. Next:
+   - drives for the viaduct (traffic driving onto the spans) and the apartment block;
+   - a vehicle you steer from the page;
+   - soft-body hero cars that crumple (plan Phase D).
 4. **A reel per pattern**, for sharing: the strongest takes cut together at the beats
    viewers replay.

@@ -105,3 +105,84 @@ fn a_driven_car_breaks_into_a_shop() {
     let (into, broken) = drive(false);
     assert!(into < 0.0 && broken < 20, "without prediction: {into} m in, {broken} bonds");
 }
+
+/// The Ram Raid pack with drives (`rr_drive_storefront`, `stress_ref::drive`), as the lab
+/// page builds it (stress-web `drive.rs`): the structure and its street as one threshold
+/// destructible placed as the lab places it, so the world's frame is the pack's, and each
+/// drive's preset there, driven from its delay on. Both get into their shops.
+#[test]
+fn the_drive_pack_drives_in() {
+    let pack = engine_fracture::samples::pack_sample_json("rr_drive_storefront").unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&pack).unwrap();
+    let drives = stress_ref::drive::drives_of(&json).unwrap();
+    assert_eq!(drives.len(), 2);
+    let asset = DestructibleAssetDesc::from_pack(&pack).unwrap();
+    let stress = asset.stress.as_ref().unwrap();
+    let solver = asset.solver_for(StrengthModel::Threshold).unwrap();
+    let offset = stress.placement().map(|x| -x as f32);
+    let mut w = World::new(
+        GpuContext::Default,
+        &WorldDef {
+            capacity: capacity(&asset),
+            gravity: [0.0, solver.gravity_y, 0.0],
+            solver,
+            enable_sleep: false,
+            contacts: ContactStorage::Canonical,
+            ..WorldDef::default()
+        },
+    )
+    .unwrap();
+    let a = w.create_destructible_asset(&asset).unwrap();
+    let id = w
+        .create_destructible(&DestructibleDef {
+            model: StrengthModel::Threshold,
+            transform: Transform::new(offset, [0.0, 0.0, 0.0, 1.0]),
+            asleep: false,
+            ..DestructibleDef::new(a)
+        })
+        .unwrap();
+    let mut cars = Vec::new();
+    for d in &drives {
+        let desc = engine_vehicle::presets::by_name(&d.vehicle).unwrap();
+        // Z-up to the pack's Y-up; the nose is the design frame's +z.
+        let (p, f) = ([d.at[0], d.at[2], -d.at[1]], [d.forward[0], d.forward[2], -d.forward[1]]);
+        let yaw = f[0].atan2(f[2]) as f32;
+        let b = w
+            .create_vehicle(&VehicleDef {
+                model: VehicleModel::Rigid(desc),
+                transform: Transform::new(p.map(|x| x as f32), glam::Quat::from_rotation_y(yaw).to_array()),
+                parts: vec![],
+                connections: vec![],
+                user_data: 0,
+            })
+            .unwrap();
+        w.body_set_projectile(b.chassis, Some(Projectile::default())).unwrap();
+        cars.push((d.clone(), b));
+    }
+    let mut broken = 0;
+    for n in 0..600 {
+        for (d, b) in &cars {
+            let input = if n as f32 * solver.dt >= d.delay as f32 {
+                VehicleInput { forward: d.throttle as f32, ..VehicleInput::default() }
+            } else {
+                VehicleInput { brake: 1.0, ..VehicleInput::default() }
+            };
+            w.set_vehicle_input(b.vehicle.unwrap(), input);
+        }
+        w.step().unwrap();
+        for f in w.poll_blocking().unwrap() {
+            for e in &f.destruction_events {
+                if let DestructionEvent::BondsBroken { bonds, .. } = e {
+                    broken += bonds.len();
+                }
+            }
+        }
+    }
+    // The shop fronts are at z = 3.5 (the pack's frame, Y up; the vehicles drive toward -z).
+    for (d, b) in &cars {
+        let z = w.read_body_state(b.chassis).unwrap().transform.position[2];
+        assert!(z < 3.5, "{} ends at z = {z}: not inside its shop", d.name);
+    }
+    assert!(broken > 40, "{broken} bonds");
+    let _ = id;
+}

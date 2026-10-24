@@ -30,6 +30,8 @@ use stress_ref::scene::{ImpactorDesc, ImpactorShape};
 use stress_rubble::render::{ColorMode, Renderer};
 use wasm_bindgen::prelude::*;
 
+mod drive;
+
 /// Shots per load, as the lab's other modes (`Planner::launch`).
 const SHOTS: usize = 16;
 
@@ -80,6 +82,10 @@ thread_local! {
     /// The threshold profile's GPU-resident world (`stress_rubble::threshold`), when the
     /// load chose it (`stress_set_threshold_gpu`).
     static TWORLD: RefCell<Option<TLoaded>> = const { RefCell::new(None) };
+    /// A pack with driven vehicles (`defaults.drives`) in rubble's world API (`drive`).
+    static DWORLD: RefCell<Option<drive::DLoaded>> = const { RefCell::new(None) };
+    /// Whether the loaded scene is `DWORLD`'s (read by input that must not borrow it).
+    static DRIVING: Cell<bool> = const { Cell::new(false) };
     /// The threshold profile on the GPU-resident world (default) or the resident GpuWorld.
     static THRESHOLD_GPU: Cell<bool> = const { Cell::new(true) };
     /// What the next load builds (`stress_set_glb`, `stress_set_cuboid`, `stress_set_pack`).
@@ -576,6 +582,10 @@ fn shoot(s: Shooting, ray: engine_fracture::scene::Ray) -> bool {
 /// Queue a shot for the next frame and run. False when all shots are fired: the resident
 /// GpuWorld draws SHOTS balls; the threshold world reuses its oldest.
 fn queue_shot(desc: ImpactorDesc) -> bool {
+    // The world API's scenes take no shots yet: their impactors are the drives.
+    if DRIVING.get() {
+        return false;
+    }
     if FIRED.get() >= SHOTS && TWORLD.with_borrow(|w| w.is_none()) {
         return false;
     }
@@ -604,6 +614,8 @@ pub extern "C" fn stress_load(level: u32) -> u32 {
 fn load(level: u8) -> Result<(), String> {
     WORLD.with_borrow_mut(|w| *w = None);
     TWORLD.with_borrow_mut(|w| *w = None);
+    DWORLD.with_borrow_mut(|w| *w = None);
+    DRIVING.set(false);
     // The lab's own scene (its camera, centre, extent and projectile) and the stress
     // oracle's input: the GLB's level, the cuboid houses in their layout, or the pack.
     let profile = PROFILE.get();
@@ -611,6 +623,8 @@ fn load(level: u8) -> Result<(), String> {
     let mut aim = None;
     let mut demolition = stress_rubble::demolition::Demolition::default();
     let mut launcher = stress_rubble::launch::Launcher::default();
+    let mut drives = Vec::new();
+    let mut pack = Vec::new();
     let (lab, mut scene) = SOURCE.with_borrow(|source| -> Result<_, String> {
         Ok(match source {
             Source::Cuboid(layout) => {
@@ -632,6 +646,10 @@ fn load(level: u8) -> Result<(), String> {
                 aim = stress_ref::wrecking::aim_of(&json);
                 demolition = stress_rubble::demolition::Demolition::of_pack(&json);
                 launcher = stress_rubble::launch::Launcher::of_pack(&json).map_err(|e| format!("scene pack: {e}"))?;
+                drives = stress_ref::drive::drives_of(&json).map_err(|e| format!("scene pack: {e}"))?;
+                if !drives.is_empty() {
+                    pack = bytes.clone();
+                }
                 (lab, scene)
             }
         })
@@ -678,6 +696,23 @@ fn load(level: u8) -> Result<(), String> {
     scene.sim.methods = stress_ref::scene::Methods::established();
     profile.apply_scene(&mut scene);
     scene.materials.entry("projectile".into()).or_insert_with(stress_ref::builders::elastic_steel);
+    if !drives.is_empty() {
+        // Driven vehicles: rubble's world API with the threshold model, as the pack is (the
+        // lab's strength and rate settings are its own modes').
+        if profile != Profile::Threshold {
+            return Err("this scene's vehicles are driven in rubble's world API, with the threshold profile: choose Bonds · Stress solver · simple threshold".into());
+        }
+        if STRENGTH_SCALE.get() != 1.0 || PHYSICS_HZ.get() > 0.0 {
+            WARNINGS.with_borrow_mut(|w| w.push("driven scenes run the pack's own bond strengths and rate (Bond strength and Physics are not applied)".into()));
+        }
+        return DEVICE.with_borrow(|d| {
+            let d = d.as_ref().ok_or("stress_init first")?;
+            let l = drive::load(&d.gpu, &pack, &drives, d.config.width, d.config.height, d.view_format)?;
+            DWORLD.with_borrow_mut(|w| *w = Some(l));
+            DRIVING.set(true);
+            Ok(())
+        });
+    }
     if profile == Profile::Threshold && THRESHOLD_GPU.get() {
         return DEVICE.with_borrow(|d| {
             let d = d.as_ref().ok_or("stress_init first")?;
@@ -920,7 +955,79 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, advance: Advance) -> Result<
     Ok(())
 }
 
+/// A frame of a scene with driven vehicles (`drive`): the frames due, each vehicle's input
+/// and the world's step, then their readbacks waited for and the world drawn.
+fn frame_drive(d: &mut Device, l: &mut drive::DLoaded, advance: Advance) -> Result<(), String> {
+    let gpu = &d.gpu;
+    let (width, height) = SIZE.get();
+    if (width, height) != (d.config.width, d.config.height) {
+        d.config.width = width;
+        d.config.height = height;
+        d.surface.configure(&gpu.device, &d.config);
+        l.resize(gpu, width, height, d.view_format)?;
+    }
+    let dt = l.dt;
+    let mut stepped = 0;
+    let t_step = web_time::Instant::now();
+    match advance {
+        Advance::Steps(n) => {
+            for _ in 0..n {
+                l.step()?;
+                stepped += 1;
+            }
+        }
+        Advance::Elapsed(elapsed_ms) if RUNNING.get() => {
+            l.behind = (l.behind + elapsed_ms * 1e-3).min(MAX_BEHIND_S.max(2.0 * dt));
+            while l.behind >= dt {
+                l.step()?;
+                l.behind -= dt;
+                stepped += 1;
+            }
+        }
+        Advance::Elapsed(_) => {}
+    }
+    if stepped > 0 {
+        l.poll()?;
+    }
+    let step_ms = t_step.elapsed().as_secs_f64() * 1e3;
+    let (view_proj, eye) = camera_view(width, height);
+    let texture = match d.surface.get_current_texture() {
+        wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+        _ => return Ok(()),
+    };
+    let view = texture.texture.create_view(&wgpu::TextureViewDescriptor { format: Some(d.view_format), ..Default::default() });
+    let t_draw = web_time::Instant::now();
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    let (bonds, colors) = VIEW.get();
+    let lines = l.encode_view(gpu, &mut encoder, colors.index(), bonds)?;
+    l.renderer.set_fx(gpu, FX.get());
+    l.renderer.set_fx_dt(stepped as f64 * dt);
+    l.renderer.draw_resident(gpu, &mut encoder, &view, view_proj, eye, lines);
+    gpu.queue.submit([encoder.finish()]);
+    gpu.queue.present(texture);
+    let draw_ms = t_draw.elapsed().as_secs_f64() * 1e3;
+    PHASES.set([step_ms, 0.0, draw_ms]);
+    let mut stats = l.stats(step_ms, stepped);
+    let s = SHOOTING.get();
+    stats["placement"] = serde_json::json!(s.map_or([0.0; 3], |s| s.placement));
+    stats["warnings"] = serde_json::json!(WARNINGS.with_borrow(|w| w.clone()));
+    STATS.set(stats.to_string());
+    Ok(())
+}
+
 fn frame(advance: Advance) -> Result<(), String> {
+    let driving = DEVICE.with_borrow_mut(|d| {
+        DWORLD.with_borrow_mut(|w| match (d.as_mut(), w.as_mut()) {
+            (Some(d), Some(l)) => Some(frame_drive(d, l, advance)),
+            _ => None,
+        })
+    });
+    if let Some(r) = driving {
+        if r.is_err() {
+            RUNNING.set(false);
+        }
+        return r;
+    }
     let threshold = DEVICE.with_borrow_mut(|d| {
         TWORLD.with_borrow_mut(|w| match (d.as_mut(), w.as_mut()) {
             (Some(d), Some(l)) => Some(frame_threshold(d, l, advance)),
