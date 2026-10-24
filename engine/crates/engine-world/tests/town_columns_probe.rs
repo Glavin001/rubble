@@ -5,7 +5,8 @@
 //!     --test town_columns_probe -- --ignored --nocapture
 //! TOWN_SHOTS: `x` (each column row along +x, default), `xz` (also each column line along +z);
 //! TOWN_SPEED (m/s, 45), TOWN_RADIUS (m, 0.6), TOWN_MASS (kg, 7000), TOWN_HEIGHT (m above the
-//! ground, 1.3).
+//! ground, 1.3), TOWN_HEIGHTS (a comma list, a volley at each), TOWN_SUPPORT_LOSS (the
+//! support-loss capability).
 #![cfg(feature = "stress")]
 
 use rubble::*;
@@ -55,6 +56,7 @@ fn tower_columns_shot_from_the_side() {
         .create_destructible(&DestructibleDef {
             model: StrengthModel::Threshold,
             transform: Transform::new([0.0, -ground, 0.0], [0.0, 0.0, 0.0, 1.0]),
+            support_loss: std::env::var("TOWN_SUPPORT_LOSS").is_ok(),
             ..DestructibleDef::new(a)
         })
         .unwrap();
@@ -83,7 +85,7 @@ fn tower_columns_shot_from_the_side() {
     println!("{} shots at {speed} m/s, r {r} m, {m} kg, {h} m up; tower-187: {} chunks, {} in the ground storey", shots.len(), tower.len(), ground_storey.len());
     let mut broken = 0;
     let hz = (1.0 / solver.dt).round() as u32;
-    for second in 1..=6 {
+    for second in 1..=8 {
         for _ in 0..hz {
             w.step().unwrap();
             for f in w.poll_blocking().unwrap() {
