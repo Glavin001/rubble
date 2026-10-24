@@ -10,6 +10,7 @@
 #include "RubbleEffects.h"
 #include "RubbleEnvironment.h"
 #include "RubbleFracture.h"
+#include "RubbleGpuScenePoc.h"
 #include "RubblePawn.h"
 #include "RubblePrimitives.h"
 #include "RubbleSoftBodies.h"
@@ -38,6 +39,18 @@ void ARubbleGameMode::StartPlay()
 	World->SpawnActor<ARubbleSoftBodies>();
 	World->SpawnActor<ARubbleEffects>();
 
+	// -RubblePoc=gpuscene: the GPU Scene proof of concept (Nanite instances written by a compute
+	// pass) on an empty yard.
+	FString Poc;
+	if (FParse::Value(FCommandLine::Get(), TEXT("RubblePoc="), Poc) && Poc == TEXT("gpuscene"))
+	{
+		FRubbleSceneRequest Ground;
+		FString PocError;
+		FRubbleSceneRequest::Parse(TEXT("rigid:legacy-ground"), Ground, PocError);
+		GetGameInstance()->GetSubsystem<URubbleSubsystem>()->LoadScene(Ground, PocError);
+		World->SpawnActor<ARubbleGpuScenePoc>();
+		return;
+	}
 	FString Scene = DefaultScene;
 	FParse::Value(FCommandLine::Get(), TEXT("RubbleDemo="), Scene, /*bShouldStopOnSeparator=*/false);
 	FRubbleSceneRequest Request;

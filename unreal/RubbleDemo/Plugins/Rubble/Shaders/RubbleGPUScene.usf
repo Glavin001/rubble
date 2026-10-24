@@ -1,0 +1,95 @@
+// Rubble bodies into Unreal's GPU Scene: one instance per body shape, its transform built from
+// Rubble's pose buffers in place (no CPU per body). Pose records are in Rubble's frame (Y up,
+// right-handed, metres); the axis map is the C ABI's (engine-ffi coords.rs): Unreal X = -Rubble Z,
+// Y = Rubble X, Z = Rubble Y, x100; a rotation maps as (det(M) M q.xyz, w), det(M) = -1.
+
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/ComputeShaderUtils.ush"
+#include "/Engine/Private/GPUScene/GPUSceneWriter.ush"
+
+uint NumInstances;
+uint PrimitiveId;
+float Alpha;
+StructuredBuffer<float4> CurrentPoses;
+StructuredBuffer<float4> PreviousPoses;
+StructuredBuffer<uint> InstanceBody;
+StructuredBuffer<float4> InstanceLocal;
+
+float3 ToUnrealPosition(float3 P) { return float3(-P.z, P.x, P.y) * 100.0; }
+float4 ToUnrealRotation(float4 Q) { return float4(Q.z, -Q.x, -Q.y, Q.w); }
+
+float4 QuatMul(float4 A, float4 B) // A * B: rotate by B, then by A
+{
+	return float4(A.w * B.xyz + B.w * A.xyz + cross(A.xyz, B.xyz), A.w * B.w - dot(A.xyz, B.xyz));
+}
+
+float3 QuatRotate(float4 Q, float3 V)
+{
+	const float3 T = 2.0 * cross(Q.xyz, V);
+	return V + Q.w * T + cross(Q.xyz, T);
+}
+
+float4 QuatSlerp(float4 A, float4 B, float T)
+{
+	float D = dot(A, B);
+	if (D < 0.0) { B = -B; D = -D; }
+	if (D > 0.9995) { return normalize(lerp(A, B, T)); }
+	const float Theta = acos(D);
+	return (sin((1.0 - T) * Theta) * A + sin(T * Theta) * B) / sin(Theta);
+}
+
+// Row-vector matrix (Unreal shaders: mul(v, M)): rows are the scaled rotated axes, then translation.
+float4x4 MakeMatrix(float3 Position, float4 Q, float3 Scale)
+{
+	float4x4 M;
+	M[0] = float4(QuatRotate(Q, float3(1, 0, 0)) * Scale.x, 0);
+	M[1] = float4(QuatRotate(Q, float3(0, 1, 0)) * Scale.y, 0);
+	M[2] = float4(QuatRotate(Q, float3(0, 0, 1)) * Scale.z, 0);
+	M[3] = float4(Position, 1);
+	return M;
+}
+
+float4x4 InstanceToWorld(float4 PoseA, float4 PoseB, float3 LocalT, float4 LocalQ, float3 LocalS)
+{
+	const float3 BodyP = ToUnrealPosition(PoseA.xyz);
+	const float4 BodyQ = ToUnrealRotation(PoseB);
+	return MakeMatrix(BodyP + QuatRotate(BodyQ, LocalT), QuatMul(BodyQ, LocalQ), LocalS);
+}
+
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void WriteInstancesCS(uint3 GroupId : SV_GroupID, uint GroupIndex : SV_GroupIndex)
+{
+	const uint LocalInstanceId = GetUnWrappedDispatchThreadId(GroupId, GroupIndex, THREAD_GROUP_SIZE).x;
+	if (LocalInstanceId >= NumInstances)
+	{
+		return;
+	}
+	FPrimitiveSceneData PrimitiveData = GetPrimitiveData(PrimitiveId);
+	const uint InstanceId = PrimitiveData.InstanceSceneDataOffset + LocalInstanceId;
+	const uint Body = InstanceBody[LocalInstanceId];
+	if (Body == 0xffffffffu)
+	{
+		WriteInstancePrimitiveIdAndFlags(InstanceId, PrimitiveId, INSTANCE_SCENE_DATA_FLAG_HIDDEN);
+		return;
+	}
+	// Per instance: translation, rotation, scale, tint (four float4s).
+	const float4 L0 = InstanceLocal[LocalInstanceId * 4 + 0];
+	const float4 L1 = InstanceLocal[LocalInstanceId * 4 + 1];
+	const float4 L2 = InstanceLocal[LocalInstanceId * 4 + 2];
+	const float4 L3 = InstanceLocal[LocalInstanceId * 4 + 3];
+	const float4 CurA = CurrentPoses[Body * 2 + 0], CurB = CurrentPoses[Body * 2 + 1];
+	const float4 PrevA = PreviousPoses[Body * 2 + 0], PrevB = PreviousPoses[Body * 2 + 1];
+	// Drawn between the last two steps by the clock's alpha; the previous step's pose gives the
+	// motion vectors.
+	const float4 DrawA = float4(lerp(PrevA.xyz, CurA.xyz, Alpha), 0);
+	const float4 DrawB = QuatSlerp(PrevB, CurB, Alpha);
+	const float4x4 LocalToWorld = InstanceToWorld(DrawA, DrawB, L0.xyz, L1, L2.xyz);
+	const float4x4 PrevLocalToWorld = InstanceToWorld(PrevA, PrevB, L0.xyz, L1, L2.xyz);
+
+	const uint Flags = INSTANCE_SCENE_DATA_FLAG_HAS_CUSTOM_DATA | INSTANCE_SCENE_DATA_FLAG_HAS_DYNAMIC_DATA;
+	InitializeInstanceSceneDataWS(InstanceId, PrimitiveId, LocalInstanceId, Flags, 3, 0.0f,
+		DFFromTileOffset(MakeLWCMatrix(float3(0, 0, 0), LocalToWorld)));
+	FInstancePayloadDataOffsets Payload = GetInstancePayloadDataOffsets(PrimitiveId, Flags, LocalInstanceId);
+	WriteInstanceDynamicDataWS(Payload, PrimitiveId, DFFromTileOffset(MakeLWCMatrix(float3(0, 0, 0), PrevLocalToWorld)));
+	WriteInstanceCustomData(Payload, 0, float4(L3.xyz, 0));
+}

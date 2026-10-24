@@ -238,3 +238,97 @@ bool FRubbleRenderPerf::RunTest(const FString& Scene)
 }
 
 #endif
+
+#if WITH_DEV_AUTOMATION_TESTS
+#include "RubbleGpuScenePoc.h"
+#include "RubbleInstancesComponent.h"
+#include "RenderUtils.h"
+#include "RHIGlobals.h"
+
+/**
+ * Rubble.Poc.GpuScene (run with -RubblePoc=gpuscene): 10k boxes whose transforms a compute pass
+ * writes into GPU Scene are drawn by Nanite, and are lit by Lumen with virtual shadows.
+ * Screenshots: lit (Lumen on), lit with Lumen off (the difference is Lumen's lighting on them),
+ * and Nanite's triangle view (only Nanite geometry is coloured by cluster).
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRubblePocGpuScene, "Rubble.Poc.GpuScene",
+	EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
+
+bool FRubblePocGpuScene::RunTest(const FString& Parameters)
+{
+	ARubbleGpuScenePoc* Poc = Find<ARubbleGpuScenePoc>();
+	if (!TestNotNull(TEXT("the PoC actor (-RubblePoc=gpuscene)"), Poc))
+	{
+		return false;
+	}
+	TestTrue(TEXT("the Nanite box asset is there (build-content.sh)"), Poc->UsesNaniteMesh());
+	TestEqual(TEXT("10k GPU-only instances"), Poc->Instances->GetNumInstances(), Poc->Side * Poc->Side);
+	// Look at the field from above and the side.
+	if (APlayerController* PC = GameWorld()->GetFirstPlayerController())
+	{
+		if (APawn* Pawn = PC->GetPawn())
+		{
+			if (ARubblePawn* RP = Cast<ARubblePawn>(Pawn))
+			{
+				RP->SetMode(ERubbleCamera::Fly);
+			}
+			Pawn->SetActorLocationAndRotation(FVector(-9000, -6000, 4500), FRotator(-22, 32, 0));
+		}
+	}
+	const FString Dir = ShotDir() / TEXT("poc");
+	auto Shot = [Dir](const TCHAR* Name) {
+		return [Dir, Name]() { FScreenshotRequest::RequestScreenshot(Dir / FString(Name) + TEXT(".png"), false, false); return true; };
+	};
+	auto Exec = [](const TCHAR* Cmd) {
+		return [Cmd]() { GEngine->Exec(GameWorld(), Cmd); return true; };
+	};
+	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(3.0f));
+	ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([this, Poc]() {
+		TestTrue(TEXT("the GPU Scene instances have a scene proxy"), Poc->Instances->GetSceneProxy() != nullptr);
+		if (DoesPlatformSupportNanite(GMaxRHIShaderPlatform))
+		{
+			TestTrue(TEXT("Unreal made a Nanite scene proxy for the GPU Scene instances"), Poc->Instances->IsNaniteProxy());
+		}
+		else
+		{
+			// Mac needs METAL_SM6 for Nanite, and UE 5.8 enables SM6 only on macOS 15+ (MetalRHI.cpp).
+			AddWarning(FString::Printf(TEXT("%s does not support Nanite: only the non-Nanite GPU Scene path was checked"),
+				*LexToString(GMaxRHIShaderPlatform)));
+		}
+		return true;
+	}));
+	ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand(Shot(TEXT("lit_lumen_vsm"))));
+	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(0.5f));
+	ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand(Exec(TEXT("r.DynamicGlobalIlluminationMethod 0"))));
+	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(1.0f));
+	ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand(Shot(TEXT("lit_no_gi"))));
+	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(0.5f));
+	ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand(Exec(TEXT("r.DynamicGlobalIlluminationMethod 1"))));
+	ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand(Exec(TEXT("r.Nanite.Visualize Triangles"))));
+	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(1.0f));
+	ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand(Shot(TEXT("nanite_triangles"))));
+	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(0.5f));
+	ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand(Exec(TEXT("r.Nanite.Visualize Overview"))));
+	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(1.0f));
+	ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand(Shot(TEXT("nanite_overview"))));
+	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(0.5f));
+	ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand(Exec(TEXT("r.Nanite.Visualize Off"))));
+	// Close up, low sun side: Lumen's bounce from the ground shows on the boxes' shadowed faces.
+	ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([]() {
+		if (APawn* Pawn = GameWorld()->GetFirstPlayerController()->GetPawn())
+		{
+			Pawn->SetActorLocationAndRotation(FVector(-2200, -2200, 350), FRotator(-12, 40, 0));
+		}
+		return true;
+	}));
+	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(2.0f));
+	ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand(Shot(TEXT("close_lumen"))));
+	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(0.5f));
+	ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand(Exec(TEXT("r.DynamicGlobalIlluminationMethod 0"))));
+	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(1.0f));
+	ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand(Shot(TEXT("close_no_gi"))));
+	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(0.5f));
+	ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand(Exec(TEXT("r.DynamicGlobalIlluminationMethod 1"))));
+	return true;
+}
+#endif

@@ -201,6 +201,23 @@ def spark():
     return m
 
 
+def nanite_meshes():
+    """Nanite copies of the engine's basic shapes (runtime-built meshes cannot be Nanite)."""
+    root = "/Game/Rubble/Meshes"
+    if not eal.does_directory_exist(root):
+        eal.make_directory(root)
+    for src, name in [("/Engine/BasicShapes/Cube", "SM_NaniteBox"), ("/Engine/BasicShapes/Sphere", "SM_NaniteSphere")]:
+        dst = f"{root}/{name}"
+        if eal.does_asset_exist(dst):
+            eal.delete_asset(dst)
+        mesh = eal.duplicate_asset(src, dst)
+        settings = mesh.get_editor_property("nanite_settings")
+        settings.set_editor_property("enabled", True)
+        mesh.set_editor_property("nanite_settings", settings)
+        eal.save_asset(dst, only_if_is_dirty=False)
+    log("nanite meshes: SM_NaniteBox, SM_NaniteSphere")
+
+
 def main():
     if not eal.does_directory_exist(ROOT):
         eal.make_directory(ROOT)
@@ -220,6 +237,7 @@ def main():
     instance("MI_GroundLot", g, {"Roughness": 0.9}, {"BaseColor": (0.09, 0.085, 0.08, 1)})
     dust()
     spark()
+    nanite_meshes()
     eal.save_directory(ROOT, only_if_is_dirty=False, recursive=True)
     log("done: " + ", ".join(sorted(a.split("/")[-1].split(".")[0] for a in eal.list_assets(ROOT))))
 

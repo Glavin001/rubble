@@ -16,6 +16,13 @@
 - **Every Unreal platform.** Mac (Metal), Windows (D3D12, Vulkan), Linux (Vulkan), consoles and
   mobile. Anything API-specific is a stepping stone, not the design.
 
+**Platform floor for Nanite.** In UE 5.8, Nanite, virtual shadow maps and hardware ray tracing need
+the SM6 shader platform: D3D12 or Vulkan SM6 on Windows and Linux, and `METAL_SM6` on Mac.
+`METAL_SM6` needs an M2 or later GPU **and macOS 15 or later**. On older systems `MetalRHI.cpp`
+falls back to `METAL_SM5` ("SM6 is enabled but is not supported on this system"), which has no
+Nanite. Lumen (software) still runs on `METAL_SM5`. Our design adds no limit beyond Unreal's
+own.
+
 ## The rule this sets
 
 **Per-body and per-vertex data never touches the CPU.** At 100k bodies, 60 ns of CPU work
@@ -125,6 +132,20 @@ and 100k moving distance fields would not fit in a frame. So:
   ordinary, CPU-visible instance data and take part in Lumen fully. They are few, so the CPU
   cost is small: their poses come from the compact readback.
 - **Small debris**, the bulk of the 100k, use GPU-only instances written by the compute pass.
+
+**Proof of concept (`ARubbleGpuScenePoc`, test `Rubble.Poc.GpuScene`, run with
+`-RubblePoc=gpuscene`).** 10k boxes with GPU-only instance data. A compute pass
+(`RubbleGPUScene.usf`, through `UpdatePrimitiveInstancesFromCompute`) writes their transforms every
+frame from a pose buffer in Rubble's layout and frame. Checked on an M3 Max with macOS 14.4
+(`METAL_SM5`):
+
+- the instances draw and move from the GPU-written transforms;
+- they cast shadows;
+- Lumen lights them: with GI off, their shadowed faces lose the ground's bounce.
+
+Nanite could not be checked on this machine, because it needs macOS 15+ (above). The Nanite
+proxy path (`FRubbleNaniteProxy`) is built, and the test checks it wherever the platform supports
+Nanite.
 
 ### 3. Destructibles: chunks as GPU Scene instances
 

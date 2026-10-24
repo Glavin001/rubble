@@ -6,6 +6,6 @@ public class RubbleDemo : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.NoPCHs;
 		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "RubbleRuntime" });
-		PrivateDependencyModuleNames.AddRange(new string[] { "InputCore", "EnhancedInput", "Slate", "SlateCore" });
+		PrivateDependencyModuleNames.AddRange(new string[] { "InputCore", "EnhancedInput", "Slate", "SlateCore", "RenderCore", "RHI" });
 	}
 }

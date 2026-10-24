@@ -29,11 +29,11 @@ if [[ $BUILD == 1 ]]; then
 fi
 
 failed=0
-run() { # run <name> <filter> <game|cmd>
-  local name="$1" filter="$2" mode="$3" log="$LOGS/$1.log"
+run() { # run <name> <filter> <game|cmd> [extra game args]
+  local name="$1" filter="$2" mode="$3" extra="${4:-}" log="$LOGS/$1.log"
   rm -f "$log"
   if [[ "$mode" == game ]]; then
-    "$APP/UnrealEditor" "$PROJECT" -game -windowed -ResX=1280 -ResY=720 -RubbleNoVolumetrics -notraceserver \
+    "$APP/UnrealEditor" "$PROJECT" -game -windowed -ResX=1280 -ResY=720 -RubbleNoVolumetrics -notraceserver $extra \
       "-ExecCmds=Automation RunTests $filter; Quit" "-TestExit=Automation Test Queue Empty" -abslog="$log" > /dev/null 2>&1 &
   else
     "$CMD" "$PROJECT" -nullrhi -unattended -nopause -nosplash -NoSound -notraceserver \
@@ -59,5 +59,8 @@ if [[ -z "$ONLY" || "$ONLY" == Rubble.Clock* || "$ONLY" == Rubble.Mock* || "$ONL
 fi
 if [[ -z "$ONLY" || "$ONLY" == Rubble.Render* ]]; then
   run render "${ONLY:-Rubble.Render}" game
+fi
+if [[ -z "$ONLY" || "$ONLY" == Rubble.Poc* ]]; then
+  run poc "${ONLY:-Rubble.Poc}" game "-RubblePoc=gpuscene"
 fi
 exit "$failed"

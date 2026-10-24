@@ -12,6 +12,11 @@
 	"Installed": false,
 	"Modules": [
 		{
+			"Name": "RubbleShaders",
+			"Type": "Runtime",
+			"LoadingPhase": "PostConfigInit"
+		},
+		{
 			"Name": "RubbleRuntime",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
