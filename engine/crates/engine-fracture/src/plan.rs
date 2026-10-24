@@ -121,10 +121,12 @@ pub const KERNELS: &[(&str, &str)] = &[
     ("ccd_toi", "ccd_toi"),
     ("ccd_pick", "ccd_pick"),
     ("ccd_mark", "ccd_mark"),
+    ("ccd_wake", "ccd_wake"),
     ("ccd_emit", "ccd_emit_persistent"),
     ("ccd_respond", "ccd_respond"),
     ("ccd_respond_apply", "ccd_respond_apply"),
     ("ccd_trust", "ccd_trust"),
+    ("ccd_unhold", "ccd_unhold"),
     ("ccd_validate", "ccd_validate"),
     ("ccd_clamp", "ccd_clamp"),
     ("joint_hash_clear", "joint_hash_clear"),
@@ -404,6 +406,8 @@ pub struct Planner {
     projectile_ccd: bool,
     /// A CCD shot was fired since the last reset (its flag stays on the body).
     ccd_fired: bool,
+    /// Some scene body carries BODY_CCD (the CCD passes run from the start).
+    scene_ccd: bool,
     sleep_rounds: u32,
     color_headroom: Option<u32>,
     color_round_headroom: Option<u32>,
@@ -531,7 +535,9 @@ impl Planner {
             has_convex: scene.colliders.iter().any(|c| c.shape == SHAPE_CONVEX),
             has_filters: scene.colliders.iter().any(Collider::has_filter),
             projectile_ccd: false,
-            ccd_fired: false,
+            // A scene body that carries BODY_CCD needs the CCD passes from the start.
+            scene_ccd: scene.bodies.iter().any(|b| b.flags & engine_schema::BODY_CCD != 0),
+            ccd_fired: scene.bodies.iter().any(|b| b.flags & engine_schema::BODY_CCD != 0),
             sleep_rounds: params.sleep_rounds.min(16),
             color_headroom: budget.color_headroom.unwrap_or(Some(COLOR_HEADROOM)),
             color_round_headroom: budget
@@ -743,7 +749,7 @@ impl Planner {
         self.warm_cycle = -1;
         self.parity = 0;
         self.shots = 0;
-        self.ccd_fired = false;
+        self.ccd_fired = self.scene_ccd;
         self.initialized = false;
         self.last = Counters {
             awake: self.body_count.saturating_sub(1),
@@ -1041,6 +1047,8 @@ impl Planner {
             // narrowphase leaves that pair to ccd_emit.
             self.work("ccd_toi", 64, 0);
             self.work("ccd_pick", 64, 0);
+            // Sleepers in a fast CCD body's path wake before the narrowphase.
+            self.disp("ccd_wake", n_bodies, 0);
             self.disp("ccd_mark", engine_schema::CCD_BODY_CAP, 0);
         }
         self.phase("broadphase");
@@ -1177,6 +1185,10 @@ impl Planner {
         self.disp("scatter_color_tiles", n_bodies, 0);
         self.work("record_color_degrees", 67, 0);
         self.disp("write_color_args", 64, 0);
+        if self.ccd_step() {
+            // Bodies a fast CCD body woke this step are solved this step.
+            self.disp("ccd_unhold", n_bodies, 0);
+        }
         if self.listed_passes {
             self.work("predict_bodies", 67, 1); // awake list (slot 67: awake count)
         } else {

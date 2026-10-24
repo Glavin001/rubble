@@ -255,6 +255,25 @@ fn run_shot(sim: &mut FractureSim, scene: &Scene, pieces: &[Piece], shot: &Shot,
             }
             let d = segment_hull_distance(b0, b1, &verts);
             if d <= 1e-6 {
+                if std::env::var("TOWER_DEBUG").is_ok() {
+                    // CCD's state for this step: the ball's slot, and whether the
+                    // (ball, piece) pair was in the post-solve check's list.
+                    use engine_schema::{CCD_BASE, CCD_BODY_BASE, CCD_CARRY_BASE, CCD_CARRY_WORDS, CCD_PAIR_BASE, CCD_PAIR_COUNT};
+                    let words = |at: u32, k: usize| unsafe { std::slice::from_raw_parts((sim.bufs[21].contents() as *const u32).add(at as usize), k).to_vec() };
+                    let ns = words(CCD_BASE, 1)[0] as usize;
+                    let np = words(CCD_PAIR_COUNT, 1)[0] as usize;
+                    let list = words(CCD_PAIR_BASE, 2 * np.min(131072));
+                    let bc = scene.colliders.iter().position(|c| c.body as usize == id).unwrap() as u32;
+                    let listed = list.chunks(2).any(|c| (c[0] == bc && c[1] == p.collider as u32) || (c[1] == bc && c[0] == p.collider as u32));
+                    for k in 0..ns {
+                        let sl = words(CCD_BODY_BASE + 4 * k as u32, 4);
+                        if sl[0] as usize != id { continue; }
+                        let c = words(CCD_CARRY_BASE + CCD_CARRY_WORDS * k as u32, 32);
+                        println!("    DEBUG step {step} piece {} flags prev {:#x} now {:#x}: listed {listed} ({np} pairs), toi {} partner {} validate {} static {} clamped {} held {}",
+                            p.body, prev[p.body * 28 + 11].to_bits(), now[p.body * 28 + 11].to_bits(),
+                            f32::from_bits(sl[1]), c[7], f32::from_bits(c[8]), f32::from_bits(c[10]), c[11], c[15]);
+                    }
+                }
                 out.phase_throughs += 1;
                 if out.first.is_none() {
                     out.first = Some(format!(

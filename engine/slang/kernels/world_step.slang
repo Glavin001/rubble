@@ -2250,8 +2250,12 @@ void emitManifoldRows(
         // over the wall); ccd_respond exchanges the momentum, and the
         // post-solve sweep check (ccd_validate) stops any crossing of a still
         // body. A CCD body's other contacts start as usual too.
-        bool heldA = !bodyIsDynamic(ba) || bodyIsSleeping(ba) || wakePending(ba);
-        bool heldB = !bodyIsDynamic(bb) || bodyIsSleeping(bb) || wakePending(bb);
+        // A body a fast CCD body strikes is solved this step even if it starts
+        // it asleep (this contact wakes it; ccd_unhold lifts the deferral): a
+        // rigid row between a 200 t ball and a 20 kg brick both solved took
+        // 5-9 m/s off the ball per brick that the brick never received.
+        bool heldA = !bodyIsDynamic(ba) || ((bodyIsSleeping(ba) || wakePending(ba)) && !ccdUnholds(bb));
+        bool heldB = !bodyIsDynamic(bb) || ((bodyIsSleeping(bb) || wakePending(bb)) && !ccdUnholds(ba));
         if (toi && row.c0N >= 0.0 && (heldA || heldB)) row.kN = PARAMS.kMaxN;
         STORE_NEW_CONTACT(curOff + cStart + k, mslot, row);
     }
@@ -2623,6 +2627,9 @@ uint wokenFlags(uint flags)
     return (flags & ~BODY_SLEEPING) | BODY_AWAKE | pending;
 }
 bool wakePending(BodyState b) { return (b.flags & BODY_WAKE_PENDING) != 0u; }
+// A CCD body moving more than four contact offsets a step: the bodies it is
+// paired with are solved in the step they wake (ccd_unhold).
+bool ccdUnholds(BodyState b) { return bodyIsCcd(b) && length(b.linearVel) * PARAMS.dt > 4.0 * PARAMS.contactOffset; }
 static const float STAB_SPEEDS = 3.0;
 // Set by the primal kernels from the pass value (bit 8): the stabilization pass.
 static bool gStabilize = false;

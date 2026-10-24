@@ -363,6 +363,8 @@ pub fn encode_step(
         // (rows 2-3); the narrowphase leaves that pair to ccd_emit.
         e.w("ccd_toi", 64);
         e.w("ccd_pick", 64);
+        // Sleepers in a fast CCD body's path wake before the narrowphase.
+        e.d("ccd_wake", n_bodies);
         e.d("ccd_mark", u64::from(CCD_BODY_CAP));
         e.phase("ccdToi");
     }
@@ -504,6 +506,10 @@ pub fn encode_step(
     // Per-colour max CSR degree for degree-aware primal lanes (s[20]).
     e.w("record_color_degrees", 67);
     e.d("write_color_args", 64);
+    if mo.ccd && !reuse_manifolds {
+        // Bodies a fast CCD body woke this step are solved this step (ccd_step.slang).
+        e.d("ccd_unhold", n_bodies);
+    }
     e.d("predict_bodies", n_bodies);
     if mo.ccd && !reuse_manifolds {
         // Struck bodies' trust regions for this step (ccd_step.slang).
@@ -657,10 +663,12 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "broadphase_fast",
     "ccd_toi",
     "ccd_pick",
+    "ccd_wake",
     "ccd_mark",
     "ccd_respond",
     "ccd_respond_apply",
     "ccd_trust",
+    "ccd_unhold",
     "ccd_validate",
     "ccd_clamp",
     "ccd_emit_persistent",

@@ -578,7 +578,7 @@
       ...(compactContacts ? ['clear_solver_contacts', 'pack_solver_contacts', 'persist_manifolds_compact', 'solve_primal_color_compact', 'solve_dual_compact'] : []),
       'solve_dual', 'extract_velocity_sleep', 'write_sleep_args', 'sleep_island_gate', 'sleep_island_commit',
       ...(jointCount > 0 ? ['joint_hash_clear', 'joint_hash_insert', 'warmstart_joints', 'csr_degree_joints', 'csr_scatter_joints'] : []),
-      ...(ccdBalls ? ['ccd_register', 'broadphase_fast', 'ccd_toi', 'ccd_pick', 'ccd_mark', ccdEmit, 'ccd_respond', 'ccd_respond_apply', 'ccd_trust', 'ccd_validate', 'ccd_clamp'] : []),
+      ...(ccdBalls ? ['ccd_register', 'broadphase_fast', 'ccd_toi', 'ccd_pick', 'ccd_wake', 'ccd_mark', ccdEmit, 'ccd_respond', 'ccd_respond_apply', 'ccd_trust', 'ccd_unhold', 'ccd_validate', 'ccd_clamp'] : []),
     ];
 
     function bindingsOf(wgsl) {
@@ -1334,6 +1334,7 @@ struct VsOut {
         // narrowphase leaves that pair to ccd_emit.
         dispWork(pass, 'ccd_toi', 64);
         dispWork(pass, 'ccd_pick', 64);
+        disp(pass, 'ccd_wake', nBodies);
         disp(pass, 'ccd_mark', M.CCD_BODY_CAP);
       }
       nextPhase();
@@ -1415,6 +1416,8 @@ struct VsOut {
       }
       disp(pass, 'write_color_args', 64);
       if (graphProfile) nextPhase();
+      // Bodies a fast CCD body woke this step are solved this step (ccd_step.slang).
+      if (sceneCcd) disp(pass, 'ccd_unhold', nBodies);
       disp(pass, 'predict_bodies', nBodies);
       // Struck bodies' trust regions for this step (ccd_step.slang).
       if (sceneCcd) disp(pass, 'ccd_trust', M.CCD_PAIR_CAP);

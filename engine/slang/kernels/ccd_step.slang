@@ -799,7 +799,14 @@ void ccd_validate(uint3 tid : SV_DispatchThreadID)
         float3 xo0; float4 qo0; stepStartPose(bo, xo0, qo0);
         // A body that cannot move this step (static, kinematic, asleep or held,
         // its wake deferred): any real crossing.
-        bool fixedThisStep = !bodyIsDynamic(bo) || bodyIsSleeping(bo) || wakePending(bo);
+        // Or one the solve did not move (no row moved it: a piece past the
+        // first impact a 1,152 m/s ball reached within its step, woken by
+        // ccd_wake but not yet pushed): it behaved as a fixed one did, so the
+        // ball stops at its surface, not with its centre at it.
+        float4 qoNow = dot(bo.orientation, bo.initialRot) < 0.0 ? -bo.orientation : bo.orientation;
+        bool stayedStill = bodyMovingOrKinematic(bo) && !wakePending(bo)
+            && length(bo.position - bo.initialPos) < 1e-3 && dot(qoNow, bo.initialRot) > 1.0 - 1e-6;
+        bool fixedThisStep = !bodyIsDynamic(bo) || bodyIsSleeping(bo) || wakePending(bo) || stayedStill;
         // An awake body (moved or not): only the CCD body's centre entering it,
         // along their relative motion, counts. A centre inside a piece is a
         // pass-through in the making (it comes out the far side once the piece
@@ -824,6 +831,11 @@ void ccd_validate(uint3 tid : SV_DispatchThreadID)
         if (fixedThisStep)
             status = gjkCast(cf, float3(0, 0, 0), qf, co, po - pf, qo, float3(0, 0, 0), d, 1.0, eps, mu, n);
         bool centreOnly = status == CAST_OVERLAP;
+        // An awake body the CCD body is shoving along (it moved at least half as
+        // far this step): the ball is pushing it, not passing it. Pulling the
+        // ball back there froze it for a tick at each brick it ploughed (a
+        // visible stutter) while its velocity carried on.
+        if (!fixedThisStep && 2.0 * length(bo.position - xo0) >= length(bf.position - xf0)) continue;
         if (centreOnly)
         {
             if (!segmentEnters(co, po, qo, pf, d, mu)) continue;
@@ -833,7 +845,13 @@ void ccd_validate(uint3 tid : SV_DispatchThreadID)
         // Only a real crossing: deeper than a quarter of the thinner body's
         // smallest half extent (contact depth, rolling and resting sink stay
         // the solve's; a centre crossing is far past it).
-        float depth = max(2.0 * PARAMS.contactOffset, 0.25 * min(colliderThickness(cf), colliderThickness(co)));
+        // Against a dynamic piece, a quarter of the CCD body's own thickness if
+        // held, half if awake but still (its centre still never reaches it): the thinner body's let a 3 cm roof plate or
+        // fence picket stop a 1.6 m ball at 4 mm of contact sink, a pull-back
+        // nearly every tick in rubble (stop motion). Static geometry: as tight.
+        float depth = bodyIsDynamic(bo)
+            ? max(2.0 * PARAMS.contactOffset, (stayedStill ? 0.5 : 0.25) * colliderThickness(cf))
+            : max(2.0 * PARAMS.contactOffset, 0.25 * min(colliderThickness(cf), colliderThickness(co)));
         if (!centreOnly && (1.0 - mu) * dot(d, n) <= depth) continue;
         AMIN2(gScratchAtomics[CCD_CARRY_BASE + CCD_CARRY_WORDS * slot + 8u], asuint(mu));
         // First contact with a body that cannot move (static, kinematic).
@@ -887,6 +905,97 @@ bool ccdClampedVelocity(uint body, BodyState b, out float3 v)
     if (ALOAD(gScratchAtomics[r + 11u]) == 0u) return false;
     v = asfloat(uint3(ALOAD(gScratchAtomics[r + 12u]), ALOAD(gScratchAtomics[r + 13u]), ALOAD(gScratchAtomics[r + 14u])));
     return true;
+}
+
+// Whether body `b` lies within `reach` × the CCD collider's radius, plus its own
+// extent, of the swept segment this step of some CCD body moving more than four
+// contact offsets a step (ccdUnholds).
+bool ccdNearFastSweepAt(uint body, BodyState b, float reach, bool atStart)
+{
+    float own = 0.0;
+    uint nc = gCounters[0].colliderCount;
+    for (uint c = firstColliderOfBody(body); c < nc && gColliders[c].body == body; c++)
+        own = max(own, colliderExtent(gColliders[c]));
+    uint n = ccdBodyCount();
+    for (uint k = 0u; k < n; k++)
+    {
+        uint fast = ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * k]);
+        BodyState bf = gBodies[fast];
+        if (!ccdUnholds(bf)) continue;
+        float r = 0.0;
+        for (uint c = firstColliderOfBody(fast); c < nc && gColliders[c].body == fast; c++)
+            r = max(r, colliderExtent(gColliders[c]));
+        float3 a = atStart ? bf.position : bf.initialPos;
+        float3 d = bf.linearVel * PARAMS.dt;
+        float t = clamp(dot(b.position - a, d) / max(dot(d, d), 1e-20), 0.0, 1.0);
+        if (length(a + d * t - b.position) <= reach * r + own) return true;
+    }
+    return false;
+}
+
+// Before predict_bodies a CCD body's pose is its step start; after it, its
+// initialPos is (predict saved it and moved the body).
+bool ccdNearFastSweepStart(uint body, BodyState b, float reach) { return ccdNearFastSweepAt(body, b, reach, true); }
+
+// Sleepers in a fast CCD body's path wake before the narrowphase (after
+// ccd_pick), so they get their contacts and are solved this step. Left asleep,
+// a ball reaching a sleeping piece past its first impact had no contact with it,
+// the post-solve check stopped the ball at it as at a wall, and the next tick
+// at the next one: in rubble the ball stalled every tick (stop motion). Within
+// 1.25 radii of the CCD collider of its swept segment, plus the piece's own size.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ccd_wake(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (!sceneHasCcd() || i >= gCounters[0].bodyCount) return;
+    BodyState b = gBodies[i];
+    if (!bodyIsDynamic(b) || !bodyIsSleeping(b)) return;
+    // Step start: initialPos is not yet this step's (predict saves it).
+    if (!ccdNearFastSweepStart(i, b, 1.25)) return;
+    gBodies[i].flags = (b.flags & ~(BODY_SLEEPING | BODY_WAKE_PENDING)) | BODY_AWAKE;
+    gBodies[i].sleepTimer = 0.0;
+}
+
+// Woken near a fast CCD body: solved this step (before predict_bodies). A body
+// the narrowphase wakes keeps still for the rest of its step (FLAG_DEFER_WAKE:
+// solved without its supports, a woken brick in a pile started with a kick).
+// But where a fast CCD body ploughs in, those bodies stood like a fixed wall
+// for that step: the bricks it struck were backed by neighbours woken in the
+// same step and held still, so a 200 t ball took its impulse off them (99% of
+// the momentum it lost in a suburb of brick houses went into held bodies) and
+// was deflected, often upward over the wall. So a body whose wake is deferred
+// is solved this step when it is within reach of a CCD body moving more than
+// four contact offsets a step: three of the CCD collider's radii, plus its own,
+// from the CCD body's swept segment this step. A CCD slot whose impact partner
+// is released no longer treats it as held (ccd_respond: the solve exchanges the
+// momentum). Pure function of the step-start state: every thread agrees.
+bool ccdReleasesHeld(uint body, BodyState b)
+{
+    if (!wakePending(b) || bodyIsSleeping(b) || !bodyIsDynamic(b)) return false;
+    return ccdNearFastSweepStart(body, b, 3.0);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void ccd_unhold(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (!sceneHasCcd() || i >= gCounters[0].bodyCount) return;
+    BodyState b = gBodies[i];
+    if (ccdReleasesHeld(i, b)) gBodies[i].flags = b.flags & ~BODY_WAKE_PENDING;
+    if (i < ccdBodyCount())
+    {
+        uint r = CCD_CARRY_BASE + CCD_CARRY_WORDS * i;
+        if ((ALOAD(gScratchAtomics[CCD_BODY_BASE + 4u * i + 3u]) & CCD_RESPOND) != 0u)
+        {
+            uint other = ALOAD(gScratchAtomics[r + 7u]);
+            // Read before any thread clears the partner's flag: its own thread
+            // clears only the deferred-wake bit, which ccdReleasesHeld tests.
+            BodyState bo = gBodies[other];
+            if (ccdReleasesHeld(other, bo) || (!bodyIsSleeping(bo) && !wakePending(bo))) ASTORE(gScratchAtomics[r + 15u], 0u);
+        }
+    }
 }
 
 // Trust region of the bodies a CCD body can strike (after predict_bodies,
@@ -1292,6 +1401,10 @@ void ccd_emit(uint3 tid : SV_DispatchThreadID)
             mf.count = 1;
         }
     }
+    // Diagnostics (ball traces): the TOI normal, fast → other, in the slot's
+    // carry words 29-31 (nothing in the step reads them).
+    uint slotF = ccdSlotOf(fastIsA ? ca.body : cb.body, bf);
+    if (slotF != CCD_NO_PAIR) ccdStoreVec(CCD_CARRY_BASE + CCD_CARRY_WORDS * slotF + 29u, n);
     // Pair order: rows run A → B.
     if (!fastIsA) mf = flipManifold(mf);
     emitToiManifold(pair, ba, bb, ca, cb, mf, fastIsA ? r * t : float3(0, 0, 0), fastIsA ? float3(0, 0, 0) : r * t);

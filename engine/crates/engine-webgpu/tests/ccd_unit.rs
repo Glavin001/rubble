@@ -92,7 +92,8 @@ fn inside_box(p: [f32; 3], b: &BodyState, h: f32) -> bool {
 /// - head on: total momentum kept to 1% and the box leaves at the perfectly
 ///   inelastic speed;
 /// - off centre (0.05 m inside the box's edge): momentum kept to 1% up to the
-///   speeds the solve converges at (awake 120 m/s, asleep 200 m/s). Faster,
+///   speeds the solve converges at (120 m/s; a sleeping box in the ball's
+///   path is woken and solved like an awake one). Faster,
 ///   the struck box spins at up to a turn a step and the ten-iteration solve
 ///   loses some of the re-contact's momentum (a plain ball does the same):
 ///   momentum then never grows;
@@ -126,7 +127,9 @@ fn the_impact_conserves_momentum_and_never_adds_energy() {
                     println!("{label}: momentum {p_end:.1} of {p0:.1}, peak KE {:.3} of start, box {box_v:.1} m/s (inelastic {:.1})", ke_max / ke0, p0 / (mb + mo));
                     assert!(ke_max <= ke0 * 1.001, "{label}: energy grew to {} of the start", ke_max / ke0);
                     assert!(p_max <= p0 * 1.01, "{label}: momentum grew to {p_max} of {p0}");
-                    let converged = offset == 0.0 || v <= if asleep { 200.0 } else { 120.0 };
+                    // A sleeping box in a fast CCD ball's path wakes before the
+                    // narrowphase (ccd_wake) and is solved like an awake one.
+                    let converged = offset == 0.0 || v <= 120.0;
                     if converged {
                         assert!((p_end - p0).abs() < 0.01 * p0, "{label}: momentum {p_end} vs {p0}");
                     }
