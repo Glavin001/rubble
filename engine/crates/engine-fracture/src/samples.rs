@@ -83,6 +83,7 @@ pub const GROUPS: &[&str] = &[
     TOPPLE,
     RAM_RAID,
     FLY_THROUGH,
+    SKYBRIDGE,
 ];
 
 /// The Scene menu group of the Wrecking Yard structures.
@@ -96,11 +97,22 @@ pub const FLY_THROUGH: &str = "Fly-through";
 pub const BRIDGE_OUT: &str = "Bridge Out";
 
 /// The Scene menu groups of the pack samples, in menu order (the last of `GROUPS`).
-pub const PACK_GROUPS: &[&str] = &[WRECKING_YARD, BRIDGE_OUT, TOPPLE, RAM_RAID, FLY_THROUGH];
+pub const PACK_GROUPS: &[&str] = &[
+    WRECKING_YARD,
+    BRIDGE_OUT,
+    TOPPLE,
+    RAM_RAID,
+    FLY_THROUGH,
+    SKYBRIDGE,
+];
 
 /// The Scene menu group of the structures brought down by their demolition charges
 /// (`stress_ref::topple`; the pack's `defaults.charges`).
 pub const TOPPLE: &str = "Topple";
+
+/// The Scene menu group of the skybridge between two towers (`stress_ref::skybridge`),
+/// dropped by its charges.
+pub const SKYBRIDGE: &str = "Skybridge";
 
 /// A Scene menu entry built in Rust as a scene pack (`stress_ref::wrecking`'s structures,
 /// with `stress_ref::buildings`' for the Ram Raid and Fly-through groups): the hosts
@@ -166,6 +178,12 @@ pub const PACK_SAMPLES: &[PackSample] = &[
         group: FLY_THROUGH,
         menu: "11-storey glass tower · 1,332 chunks",
         label: "glass tower",
+    },
+    PackSample {
+        key: "sb_skybridge",
+        group: SKYBRIDGE,
+        menu: "Skybridge between two towers, with charges · 992 chunks",
+        label: "skybridge",
     },
 ];
 
