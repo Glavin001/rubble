@@ -372,28 +372,30 @@ fn collapse(a: f32) -> Outcome {
 /// 1 (Lube's linear regime) and 3 (Lube's a^½ regime), against the envelope of
 /// the published laboratory fits plus a discretisation allowance (module docs).
 ///
-/// Ignored: the solver disagrees with the published runout (measured
-/// 2026-10-24 at d535321d, r0 = 16·dx, dx = 0.05 m; 187 s for the three cases).
+/// Ignored: below a ≈ 1.7 the solver's runout is short of the published fits
+/// (r0 = 16·dx, dx = 0.05 m, bed friction tan φ; about 190 s for the three cases).
 ///
-/// | a   | runout measured | band (fits)              | h∞/r0 measured | band (fits)          |
-/// |-----|-----------------|--------------------------|----------------|----------------------|
-/// | 0.5 | 0.373           | 0.495–0.835 (0.62–0.71)  | 0.499          | 0.438–0.562 (0.50)   |
-/// | 1   | 0.747           | 1.115–1.545 (1.24–1.42)  | 0.744          | 0.567–0.962 (0.63–0.90) |
-/// | 3   | 2.244           | 2.621–4.385 (2.75–4.26)  | 0.746          | 0.567–1.119 (0.63–1.06) |
+/// | a   | runout, Drucker–Prager (d535321d) | runout, Mohr–Coulomb (d1a70046) | band (fits)             | h∞/r0 (MC) | band (fits)             |
+/// |-----|-------------|-------------|--------------------------|-------|--------------------------|
+/// | 0.5 | 0.373       | 0.373       | 0.495–0.835 (0.62–0.71)  | 0.499 | 0.438–0.562 (0.50)       |
+/// | 1   | 0.747       | 0.872       | 1.115–1.545 (1.24–1.42)  | 0.730 | 0.567–0.962 (0.63–0.90)  |
+/// | 3   | 2.244       | 2.744       | 2.621–4.385 (2.75–4.26)  | 0.726 | 0.567–1.119 (0.63–1.06)  |
 ///
-/// The final heights agree (and match Lajeunesse's plateau of 0.74 above the
-/// critical ratio). The runouts are short: about 0.75·a below a = 1.7 against
-/// Lube's 1.24·a (60% of it), and 1.30·a^½ at a = 3 against 1.6·a^½ (81%).
-/// The deposit edge is not a measurement artefact: the farthest particle lies
-/// within a cell of it (r_max 1.075, 1.380, 2.619 m against edges 1.10, 1.40,
-/// 2.60 m). Refining a = 1 to r0 = 24·dx moved its runout only from 0.747 to
-/// 0.792. The material and solver are not changed to fit: the gap is left for
-/// the solver's owners to explain. At a = 0.5 the deposit is what a
-/// quasi-static pile would leave: a truncated cone of the column's volume with
-/// 30° flanks runs out 0.40·r0, against 0.373 measured; laboratory deposits
-/// spread further, to flanks well below the angle of repose.
+/// Heights agree throughout. The Drucker–Prager cone (fitted on the compression
+/// meridian, too strong in the extension a spreading column is in) ran every
+/// case short; Mohr–Coulomb puts a = 3 on Lube's and Warnett's fits (2.77, 2.75)
+/// and moves a = 1 from 60% to 70% of Lube's. At a = 0.5 the deposit is the
+/// quasi-static cone of the column at 30° (0.40·r0 by geometry), where the
+/// laboratory deposits spread to flanks below repose. The deposit edge is not a
+/// measurement artefact (the farthest particle lies within a cell of it), and
+/// refining a = 1 to r0 = 24·dx moved the Drucker–Prager runout only from 0.747
+/// to 0.792. As a diagnostic only, a bed friction of 0.35 (about 19°) instead of
+/// tan 30° puts a = 1 at 1.31 and a = 0.5 at 0.497: the remaining gap is in how
+/// strongly basal friction stops the thin, spreading front, where Lube et al.
+/// (2005) found the laboratory runouts nearly independent of friction. The
+/// material and solver are not changed to fit.
 #[test]
-#[ignore = "runout ~60-80% of the published fits; see the doc comment"]
+#[ignore = "runout below a = 1.7 is 60-70% of the published fits; see the doc comment"]
 fn granular_column_collapse_follows_published_scaling() {
     let runout_allowance = 2.0 / CELLS_PER_R0;
     let height_allowance = 1.0 / CELLS_PER_R0;
