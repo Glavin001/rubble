@@ -1052,5 +1052,6 @@ impl RigidStep {
 }
 
 pub mod gauntlet;
+pub mod meteors;
 #[cfg(test)]
 mod tests;

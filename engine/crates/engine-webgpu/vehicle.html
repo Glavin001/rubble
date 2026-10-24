@@ -50,8 +50,8 @@
     <div class="row" id="gauntletUi" hidden>
       <label><input type="checkbox" id="guideOn" checked /> Directed debris</label>
       <select id="guideStrength"><option value="0">subtle</option><option value="1" selected>cinematic</option><option value="2">exaggerated</option></select>
-      <label><input type="checkbox" id="shellOn" checked /> Shelling</label>
-      <span class="muted"><kbd>F</kbd> shell now</span>
+      <label><input type="checkbox" id="shellOn" checked /> <span id="shellLabel">Shelling</span></label>
+      <span class="muted"><kbd>F</kbd> <span id="shellKey">shell now</span></span>
     </div>
     <div id="guideStats" class="muted" hidden></div>
     <div id="status" class="muted">starting…</div>
@@ -69,8 +69,8 @@
     <div id="wheels"></div>
   </div>
   <script type="module">
-    import { createWorld, sceneCapacity } from './world-host.mjs';
-    import { L, M, WHEEL_RIM_MATERIAL, bitsf, centerOfMass, Gauntlet } from './vehicle.mjs';
+    import { createWorld, sceneCapacity, colliderWords } from './world-host.mjs';
+    import { L, M, WHEEL_RIM_MATERIAL, bitsf, centerOfMass, Gauntlet, MeteorRange } from './vehicle.mjs';
     import { createBuggyRenderer, BUGGY_SHADE_WGSL } from './buggy-render.mjs';
     import { duneBuggySoft, calibratedSettings } from './soft.mjs';
 
@@ -94,6 +94,7 @@
       buggies: 'Dune buggies: jumps, walls, cannon (parts break off under load)',
       vibeland: 'vibe-land garage: all seven, jumps, walls, cannon',
       gauntlet: 'Gauntlet: drive a shelled street (directed debris)',
+      meteors: 'Meteor range: steered vs unsteered lanes (directed debris)',
     };
     const scene = qs.get('scene') || 'playground';
     if (!SCENES[scene]) throw new Error(`unknown scene ${scene}`);
@@ -174,7 +175,7 @@
     const SOFT_HZ = 240;
     const STEPS_PER_FRAME = hybrid ? Math.round(SOFT_HZ / 60) : 1;
     if (hybrid) cap.maxJoints = 1024;
-    const world = await createWorld(device, { cap, vehicleCap, ...(hybrid ? { softCap: {} } : {}), ...(scene === 'gauntlet' ? { guidance: {} } : {}), status: (s) => { statusEl.textContent = s; } });
+    const world = await createWorld(device, { cap, vehicleCap, ...(hybrid ? { softCap: {} } : {}), ...(scene === 'gauntlet' || scene === 'meteors' ? { guidance: {} } : {}), status: (s) => { statusEl.textContent = s; } });
     // The bridge needs 20 iterations to converge its bending within a fast crossing
     // (tests/vehicle.rs BRIDGE_ITERATIONS).
     world.params.iterations = scene === 'bridge' ? 20 : 8;
@@ -188,6 +189,8 @@
     const sleepQ = qs.get('sleep');
     if (sleepQ === 'off') world.params.sleepTime = 1e6;
     const MAT_GROUND = 0, MAT_PROP = 1, MAT_ICE = 2;
+    // Meteor range colours (the renderer keys static bodies on these).
+    const MAT_PAD = 4, MAT_HIT = 5, MAT_MISS = 6;
     world.setMaterial(MAT_GROUND, 1.0);
     world.setMaterial(MAT_PROP, 0.6);
     world.setMaterial(MAT_ICE, 0.08);
@@ -260,7 +263,10 @@
 
     // Gauntlet: the street's shelling state and its facade blocks (bodies first..first+count).
     const street = scene === 'gauntlet' ? new Gauntlet() : null;
+    const range = scene === 'meteors';
     const blocks = { first: 0, count: 0, parked: [] };
+    // Meteor range: launched meteors and their touchdown markers.
+    const meteors = { first: 0, count: 36, markerFirst: 0, markers: 60, next: 0, nextMarker: 0, volley: 0, flying: [], landed: [], score: [[0, 0], [0, 0]] };
     let rng = 7;
     let bridgeBolts = 0; // breakable joints in the scene (bridge)
     // ?spawn=x,z,yaw places the player vehicle (yaw in radians about +Y).
@@ -326,6 +332,25 @@
         const lineup = ['dune_buggy', 'vibe_trophy', 'vibe_rally', 'vibe_monster', 'vibe_derby', 'vibe_sprint', 'vibe_semi'];
         lineup.forEach((name, i) => addVehicle(name, [-24 + i * 8, name === 'vibe_monster' ? 1.2 : 0.8, -16], 0));
       }
+    } else if (scene === 'meteors') {
+      // engine-vehicle-wasm meteors.rs: two lanes of target pads; the left one is
+      // steered. The car only anchors the camera, between the lanes.
+      const g = JSON.parse(MeteorRange.range());
+      addVehicle(presetName, [0, 2.2, 18], 0);
+      for (const p of g.pads) staticBox([p.p[0], p.half[1], p.p[2]], p.half, [0, 0, 0, 1], MAT_PAD);
+      // Parked meteors (static until launched) and touchdown markers (collide with nothing).
+      meteors.first = world.bodyCount;
+      for (let i = 0; i < meteors.count; i++) {
+        const body = world.addBody({ p: [-3000 - i * 3, -3000, -3000], flags: 0 });
+        world.addCollider({ body, shape: 0, material: MAT_PROP, params: [g.radius, 0, 0, g.radius] });
+      }
+      meteors.markerFirst = world.bodyCount;
+      for (let i = 0; i < meteors.markers; i++) {
+        const body = world.addBody({ p: [-3000 - i * 3, -3000, -2000], flags: 0 });
+        const c = world.addColliderWords(colliderWords({ body, shape: 2, material: MAT_MISS, generation: 0x8000, localPos: [0, 0, 0], density: 0, localRot: [0, 0, 0, 1], params: [0.25, 0.06, 0.25, 0.36] }));
+        if (i === 0) meteors.markerCollider = c;
+      }
+      meteors.radius = g.radius; meteors.mass = g.mass;
     } else if (scene === 'gauntlet') {
       // engine-vehicle-wasm gauntlet.rs: masonry facades on both sides of a street,
       // static cores behind them and parked cars at the kerbs. Facade blocks stay
@@ -467,7 +492,8 @@
     // ---------------------------------------------------------------- directed debris (gauntlet)
     const guideOn = document.getElementById('guideOn'), guideStrength = document.getElementById('guideStrength');
     const shellOn = document.getElementById('shellOn'), guideStatsEl = document.getElementById('guideStats');
-    if (street) {
+    if (street || range) {
+      if (range) { document.getElementById('shellLabel').textContent = 'Volleys'; document.getElementById('shellKey').textContent = 'volley now'; }
       document.getElementById('gauntletUi').hidden = false;
       guideStatsEl.hidden = false;
       if (qs.get('guide') === '0') guideOn.checked = false;
@@ -479,6 +505,12 @@
     // around it lie on the ground); a guess until then.
     let chassisRest = 0;
     function applyGuidance(rearm = true) {
+      if (range) {
+        const zones = JSON.parse(MeteorRange.zones());
+        guideZoneCount = zones.length;
+        world.setGuidance(JSON.parse(Gauntlet.settings(Number(guideStrength.value), guideOn.checked)), zones);
+        return;
+      }
       if (!street) return;
       const chassis = world.vehicles.chassisBody(vehicles[0].h);
       const zones = JSON.parse(street.zones(chassis, chassisRest || 0.8, Uint32Array.from(blocks.parked.map((h) => world.vehicles.chassisBody(h)))));
@@ -489,7 +521,61 @@
     applyGuidance();
     let lastShell = 0;
     // Blast the facade ahead of the player car (gauntlet.rs Gauntlet::blast).
+    // Meteor range: launch the next volley into both lanes (meteors.rs volley).
+    function fireVolley() {
+      lastShell = world.steps;
+      const r = meteors.radius, m = meteors.mass, inv = 2.5 / (m * r * r);
+      for (const l of JSON.parse(MeteorRange.volley(meteors.volley++, world.params.gravityY))) {
+        const body = meteors.first + (meteors.next++ % meteors.count);
+        const words = new Uint32Array(world.bodyWords.buffer, body * 112, 28).slice();
+        const f = new Float32Array(words.buffer);
+        f.set(l.p, 0); f[3] = 1 / m; f.set([0, 0, 0, 1], 4); f.set([inv, inv, inv], 8); words[11] = 1 | 8;
+        f.set(l.v, 12); f[15] = 0; f.set([0, 0, 0], 16); words[19] = world.steps; f.set(l.p, 20); f.set([0, 0, 0, 1], 24);
+        world.backend.writeBody(body, words);
+        world.setGuided(body, 1, l.tags);
+        meteors.flying = meteors.flying.filter((x) => x.body !== body);
+        meteors.landed = meteors.landed.filter((x) => x.body !== body);
+        meteors.flying.push({ body, lane: l.lane, pad: l.pad, prev: null });
+      }
+    }
+    // Touchdowns since the last call (meteors' first crossing of their resting
+    // height, interpolated between reads): marked on the ground and scored.
+    async function trackMeteors() {
+      if (!meteors.flying.length) return;
+      const f = new Float32Array((await world.readBodies(meteors.first, meteors.count)).buffer);
+      const rest = meteors.radius + 0.05;
+      for (const x of [...meteors.flying]) {
+        const o = (x.body - meteors.first) * 28;
+        const p = [f[o], f[o + 1], f[o + 2]];
+        if (x.prev && x.prev[1] > rest && p[1] <= rest) {
+          const s = (x.prev[1] - rest) / (x.prev[1] - p[1]);
+          const at = [0, 1, 2].map((k) => x.prev[k] + s * (p[k] - x.prev[k]));
+          const hit = MeteorRange.on_pad(x.lane, x.pad, at[0], at[1], at[2]);
+          meteors.score[x.lane][0] += hit ? 1 : 0;
+          meteors.log?.push({ lane: x.lane, pad: x.pad, at, hit, body: x.body });
+          meteors.score[x.lane][1] += 1;
+          const k = meteors.nextMarker++ % meteors.markers;
+          const mk = meteors.markerFirst + k, ci = meteors.markerCollider + k;
+          const words = new Uint32Array(world.bodyWords.buffer, mk * 112, 28).slice();
+          new Float32Array(words.buffer).set([at[0], 0.07, at[2]], 0);
+          world.backend.writeBody(mk, words);
+          const cw = world.colliderWords.slice(ci * 16, ci * 16 + 16);
+          cw[2] = hit ? MAT_HIT : MAT_MISS;
+          world.backend.writeCollider(ci, cw);
+          meteors.flying.splice(meteors.flying.indexOf(x), 1);
+          meteors.landed.push({ body: x.body, step: world.steps });
+        } else x.prev = p;
+      }
+      // Park meteors 1.5 s after they come down, so the range stays clear.
+      while (meteors.landed.length && world.steps - meteors.landed[0].step > 90) {
+        const { body } = meteors.landed.shift();
+        if (meteors.flying.some((x) => x.body === body)) continue; // relaunched
+        world.backend.writeBody(body, initialWords(body));
+      }
+    }
+    const initialWords = (body) => initial.bodies.slice(body * 28, body * 28 + 28);
     function fireShell() {
+      if (range) return fireVolley();
       if (!street || !lastChassis) return;
       lastShell = world.steps;
       const out = street.blast(lastChassis.p[0], lastChassis.p[2], lastChassis.v[2]);
@@ -506,6 +592,17 @@
     }
     let guideBusy = false, guideStatsStep = -1;
     function pollGuide() {
+      if (range && !guideBusy && world.steps - guideStatsStep >= 6) {
+        guideStatsStep = world.steps;
+        guideBusy = true;
+        trackMeteors().then(() => {
+          guideBusy = false;
+          const [a, b] = meteors.score;
+          guideStatsEl.innerHTML = `<b>On target</b> · steered lane (left, x &gt; 0): <b>${a[0]}/${a[1]}</b> · unsteered lane (right): <b>${b[0]}/${b[1]}</b>`
+            + (guideOn.checked ? '' : ' · steering off');
+        }).catch(fail);
+        return;
+      }
       if (street && !chassisRest && world.steps > 90 && lastChassis) {
         chassisRest = lastChassis.p[1];
         applyGuidance(false);
@@ -573,6 +670,10 @@ struct Out { @builtin(position) clip: vec4f, @location(0) n: vec3f, @location(1)
     if (col.localPos.y > 0.15) { o.c = o.c * 1.15; }
   } else if (!dyn) {
     o.c = select(vec3f(0.55, 0.56, 0.6), vec3f(0.62, 0.8, 0.95), col.material == 2u);
+    // Meteor range: target pads, and touchdown markers on target / off it.
+    if (col.material == 4u) { o.c = vec3f(1.0, 0.55, 0.12); }
+    if (col.material == 5u) { o.c = vec3f(0.2, 0.9, 0.3); }
+    if (col.material == 6u) { o.c = vec3f(0.95, 0.15, 0.15); }
   } else if (col.shape == 0u) {
     o.c = vec3f(0.2, 0.22, 0.25);
   } else {
@@ -723,8 +824,9 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     let depth = null;
 
     // ---------------------------------------------------------------- camera
-    let camMode = 'chase';
-    let orbit = { yaw: 0.6, pitch: 0.35, dist: 16 };
+    // The meteor range opens on both lanes from behind the launch side.
+    let camMode = scene === 'meteors' ? 'orbit' : 'chase';
+    let orbit = scene === 'meteors' ? { yaw: Math.PI, pitch: 0.75, dist: 52 } : { yaw: 0.6, pitch: 0.35, dist: 16 };
     let camEye = [0, 6, -14], camTarget = [0, 1, 0];
     let drag = null;
     canvas.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, y: e.clientY }; });
@@ -834,6 +936,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     function resetScene() {
       world.restore(initial);
       street?.reset();
+      if (range) Object.assign(meteors, { next: 0, nextMarker: 0, volley: 0, flying: [], landed: [], score: [[0, 0], [0, 0]] });
       applyGuidance();
       lastShell = 0;
       bolts = { broken: 0, lastForce: 0 };
@@ -1105,6 +1208,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       updateCamera(dt, false);
       const enc = device.createCommandEncoder();
       const frozen = stopAt > 0 && world.steps >= stopAt;
+      if (range && shellOn.checked && !frozen && world.steps - lastShell >= 120) fireVolley();
       if (street && shellOn.checked && !frozen && lastChassis && lastChassis.p[2] > -12 && lastChassis.p[2] < 150 && world.steps - lastShell >= 70) fireShell();
       if (!frozen) for (let k = 0; k < STEPS_PER_FRAME; k++) world.encodeStep(enc);
       drawScene(enc);
@@ -1304,6 +1408,24 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     };
     window.__setVehicleInput = (h, input) => world.vehicles.setInput(world.backend, h, input);
     window.__world = world;
+    // Meteor range take: from a reset, `volleys` volleys two seconds apart with
+    // steering on or off; returns each lane's [on target, landed].
+    window.__meteorTake = async ({ volleys = 10, guided = true, strength = 1 } = {}) => {
+      if (!range) throw new Error('not the meteor range');
+      guideOn.checked = guided; guideStrength.value = String(strength);
+      resetScene();
+      manual = true;
+      meteors.log = [];
+      for (let s = 0; s < volleys * 120 + 240; s++) {
+        if (s % 120 === 0 && s < volleys * 120) fireVolley();
+        const enc = device.createCommandEncoder();
+        world.encodeStep(enc);
+        device.queue.submit([enc.finish()]);
+        if (s % 6 === 5) await trackMeteors();
+      }
+      manual = false;
+      return { guided, strength, steered: meteors.score[0], unsteered: meteors.score[1], log: meteors.log };
+    };
     renderParts();
     requestAnimationFrame(frame);
   </script>

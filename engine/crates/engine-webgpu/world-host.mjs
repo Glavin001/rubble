@@ -317,6 +317,8 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     rb.unmap(); rb.destroy();
     return w;
   };
+  /** Body records first..first+count (Uint32Array, 28 words each). */
+  world.readBodies = (first, count) => readWords(bufs[0], first * 112, count * 112);
   // Soft body `h`'s beam records (16 words each: engine_softbody::model::Beam).
   world.readSoftBeams = async (h) => {
     const e = world.soft.entries[h];
