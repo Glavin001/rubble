@@ -60,7 +60,15 @@ fn tower_columns_shot_from_the_side() {
             ..DestructibleDef::new(a)
         })
         .unwrap();
-    let tower: Vec<usize> = (0..asset.chunks.len()).filter(|&i| group(i) == "tower@tower-187").collect();
+    // TOWN_TOWER: the tower's group (tower@tower-187); TOWN_FROM: the side shot from (-x, +x,
+    // -z, +z; default -x); TOWN_TARGET: a building it should fall on (its first chunk is watched).
+    let tower_name = std::env::var("TOWN_TOWER").unwrap_or_else(|_| "tower@tower-187".into());
+    let from = std::env::var("TOWN_FROM").unwrap_or_else(|_| "-x".into());
+    let tower: Vec<usize> = (0..asset.chunks.len()).filter(|&i| group(i) == tower_name).collect();
+    let x_of = |i: usize| sc["nodes"][i]["centroid"]["x"].as_f64().unwrap() as f32;
+    let z_of = |i: usize| sc["nodes"][i]["centroid"]["z"].as_f64().unwrap() as f32;
+    let target_name = std::env::var("TOWN_TARGET").ok();
+    let target: Vec<usize> = target_name.as_ref().map_or(Vec::new(), |t| (0..asset.chunks.len()).filter(|&i| &group(i) == t).collect());
     let roof = *tower.iter().max_by(|&&a, &&b| y_of(a).total_cmp(&y_of(b))).unwrap() as u32;
     let ground_storey: Vec<usize> = tower.iter().copied().filter(|&i| y_of(i) < 3.4 && kind(i) != "foundation").collect();
     let (speed, r, m, h) = (env("TOWN_SPEED", 45.0), env("TOWN_RADIUS", 0.6), env("TOWN_MASS", 7000.0), env("TOWN_HEIGHT", 1.3));
@@ -68,11 +76,30 @@ fn tower_columns_shot_from_the_side() {
     let (sx, sz) = (0.03f32, -0.365f32);
     // TOWN_HEIGHTS: a comma list of heights in place of TOWN_HEIGHT (a volley at each).
     let heights: Vec<f32> = std::env::var("TOWN_HEIGHTS").map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect()).unwrap_or_else(|_| vec![h]);
+    // The column lines (pack frame) and the tower's footprint.
+    let columns: Vec<usize> = tower.iter().copied().filter(|&i| kind(i) == "column" && y_of(i) < 3.4).collect();
+    let mut xs: Vec<f32> = columns.iter().map(|&i| (x_of(i) * 10.0).round() / 10.0).collect();
+    let mut zs: Vec<f32> = columns.iter().map(|&i| (z_of(i) * 10.0).round() / 10.0).collect();
+    xs.sort_by(f32::total_cmp);
+    xs.dedup();
+    zs.sort_by(f32::total_cmp);
+    zs.dedup();
+    let (x0, x1) = (xs[0] - 7.0, xs[xs.len() - 1] + 7.0);
+    let (z0, z1) = (zs[0] - 5.0, zs[zs.len() - 1] + 5.0);
+    let (mut xs, mut zs) = (xs, zs);
+    // TOWN_LINES: shoot only the first n lines (from the low end), e.g. one side's rows.
+    if let Some(n) = std::env::var("TOWN_LINES").ok().and_then(|v| v.parse::<usize>().ok()) {
+        xs.truncate(n);
+        zs.truncate(n);
+    }
+    println!("{tower_name}: column lines x {xs:?}, z {zs:?}; shot from {from}");
     let mut shots: Vec<([f32; 3], [f32; 3])> = Vec::new();
     for &h in &heights {
-        shots.extend([56.9f32, 60.9, 64.9, 68.9].iter().map(|z| ([76.0 + sx, h, z + sz], [speed, 0.0, 0.0])));
-        if std::env::var("TOWN_SHOTS").as_deref() == Ok("xz") {
-            shots.extend([84.0f32, 88.0, 92.0, 96.0].iter().map(|x| ([x + sx, h, 49.0 + sz], [0.0, 0.0, speed])));
+        match from.as_str() {
+            "-x" => shots.extend(zs.iter().map(|z| ([x0 + sx, h, z + sz], [speed, 0.0, 0.0]))),
+            "+x" => shots.extend(zs.iter().map(|z| ([x1 + sx, h, z + sz], [-speed, 0.0, 0.0]))),
+            "-z" => shots.extend(xs.iter().map(|x| ([x + sx, h, z0 + sz], [0.0, 0.0, speed]))),
+            _ => shots.extend(xs.iter().map(|x| ([x + sx, h, z1 + sz], [0.0, 0.0, -speed]))),
         }
     }
     let fire = |w: &mut World, shots: &[([f32; 3], [f32; 3])]| {
@@ -107,12 +134,23 @@ fn tower_columns_shot_from_the_side() {
         let actor = w.destructible_actor_of(d, roof).unwrap();
         let body = w.destructible_chunk_body(d, roof).unwrap();
         let y = w.body_transform(body).unwrap().map_or(0.0, |t| t.position[1]);
+        // The roof chunk's centre (body x its pose), in the pack's frame.
+        let roof_at = w.body_transform(body).unwrap().map(|t| {
+            let pose = w.destructible_chunk_pose(d, roof).unwrap();
+            let p = glam::Quat::from_array(t.rotation) * glam::Vec3::from(pose.position) + glam::Vec3::from(t.position);
+            [p.x, p.y + ground, p.z]
+        });
+        println!("  roof centre {:.1?}", roof_at);
         let on: std::collections::HashSet<u32> = actor.chunks.iter().copied().collect();
         let mut holding: BTreeMap<String, usize> = BTreeMap::new();
         for &i in &ground_storey {
             if on.contains(&(i as u32)) {
                 *holding.entry(kind(i)).or_default() += 1;
             }
+        }
+        if let Some(&c) = target.first() {
+            let a = w.destructible_actor_of(d, c as u32).unwrap();
+            println!("  {}: its first chunk's actor {} of {} chunks, anchored {}", target_name.as_deref().unwrap_or(""), a.chunks.len(), target.len(), a.anchored);
         }
         println!("t {second} s: bonds broken {broken}; roof's actor {} chunks, anchored {}, its body moved {:.2} m up; ground storey still on it: {holding:?}", actor.chunks.len(), actor.anchored, y - (-ground));
     }

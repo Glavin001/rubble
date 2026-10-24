@@ -6,8 +6,11 @@
 //! breaks. The breaks feed the next frame's, so a collapse cascades forward, a frame at a time.
 //!
 //! Tipping: the support bonds that carry load make the piece's footprint. A piece whose centre
-//! of mass, along gravity, lies outside that footprint cannot stand: every one of those bonds
-//! breaks (a weld left as a hinge would hold it hanging), and it falls over its stumps.
+//! of mass, along gravity, lies outside that footprint cannot stand. The members on those
+//! supports (its last columns and walls) stay standing on them, and the piece above lets go of
+//! them: their bonds into it break, so it rests on their tops by contact alone and rolls over
+//! them. (Breaking the supports instead drops the piece, members and all, flat; a weld left as a
+//! hinge would hold it hanging.)
 //!
 //! The load path is a flow, not a solve: a chunk hands its weight, and what reached it from
 //! above, to the neighbours one bond nearer an anchor (breadth first from the supports), in
@@ -30,8 +33,9 @@ pub struct Piece<'a> {
 
 /// What the pass breaks in a piece under gravity `g` (m/s², its vector): the bonds (indices
 /// into `Piece::bonds`) its weight overloads; or, when its centre of mass is outside the
-/// footprint of its loaded support bonds, every one of those (it topples). A piece with no
-/// support carries nothing: it falls.
+/// footprint of its loaded support bonds, the bonds from the members on those supports into
+/// the rest of the piece (it topples over them). A piece with no support carries nothing: it
+/// falls.
 pub fn failing(piece: &Piece, g: [f32; 3]) -> Vec<u32> {
     let magnitude = (g[0] * g[0] + g[1] * g[1] + g[2] * g[2]).sqrt();
     let (over, carried) = flow(piece, magnitude);
@@ -69,10 +73,21 @@ pub fn failing(piece: &Piece, g: [f32; 3]) -> Vec<u32> {
         [acc[0] + p[0] * m, acc[1] + p[1] * m]
     });
     if inside(&hull(points), com) {
-        over
-    } else {
-        feet
+        return over;
     }
+    // The members standing on the feet, and their bonds to anything but supports and each other.
+    let mut member = vec![false; piece.mass.len()];
+    for &i in &feet {
+        let (a, b, _) = piece.bonds[i as usize];
+        member[if piece.support[a as usize] { b } else { a } as usize] = true;
+    }
+    (0..piece.bonds.len() as u32)
+        .filter(|&i| {
+            let (a, b, _) = piece.bonds[i as usize];
+            let (a, b) = (a as usize, b as usize);
+            (member[a] != member[b]) && !piece.support[a] && !piece.support[b]
+        })
+        .collect()
 }
 
 /// The bonds (indices into `Piece::bonds`) the piece's weight overloads under gravity `g`
@@ -280,13 +295,13 @@ mod tests {
         // Two legs on one side: its centre (x = 2) is off the line x = 4 they make.
         let (m, s, c, b) = table(&[[4.0, 0.0], [4.0, 4.0]]);
         let piece = Piece { mass: &m, support: &s, centre: &c, bonds: &b };
-        assert_eq!(failing(&piece, g), vec![2, 3], "both feet break: it topples");
+        assert_eq!(failing(&piece, g), vec![0, 1], "the slab lets go of both legs, which stay on their feet: it topples");
         // Three legs round the centre still hold it.
         let (m, s, c, b) = table(&[[0.0, 0.0], [4.0, 0.0], [4.0, 4.0]]);
         let piece = Piece { mass: &m, support: &s, centre: &c, bonds: &b };
         assert!(failing(&piece, g).is_empty(), "the centre (2, 2) is on the triangle's edge");
         let (m, s, c, b) = table(&[[1.0, 0.0], [4.0, 0.0], [4.0, 4.0]]);
         let piece = Piece { mass: &m, support: &s, centre: &c, bonds: &b };
-        assert_eq!(failing(&piece, g), vec![3, 4, 5], "(2, 2) is outside (1,0)-(4,0)-(4,4)");
+        assert_eq!(failing(&piece, g), vec![0, 1, 2], "(2, 2) is outside (1,0)-(4,0)-(4,4)");
     }
 }
