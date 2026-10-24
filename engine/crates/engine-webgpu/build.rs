@@ -97,9 +97,24 @@ const WORLD_ENTRIES: &[&str] = &[
     "sleep_island_commit",
     "record_stab_velocity",
     "extract_velocity_sleep",
-    "ccd_classify",
-    "ccd_sweep",
     "recompute_inertia",
+    // Continuous collision and step-start impulses (ccd_step.slang).
+    "apply_impulses",
+    "ccd_register",
+    "broadphase_fast",
+    "ccd_toi",
+    "ccd_pick",
+    "ccd_wake",
+    "ccd_mark",
+    "ccd_respond",
+    "ccd_respond_apply",
+    "ccd_trust",
+    "ccd_unhold",
+    "ccd_validate",
+    "ccd_clamp",
+    "ccd_emit",
+    "ccd_emit_persistent",
+    "ccd_emit_copy_persistent",
     "record_color_degrees",
     "reuse_all_manifolds",
     "reuse_all_manifolds_persistent",
@@ -121,6 +136,11 @@ const WORLD_ENTRIES: &[&str] = &[
     "vehicle_loads_persistent",
     "vehicle_post",
     "raycast_batch",
+    // Characters, in-step queries, projectiles (slang/kernels/character_step.slang).
+    "char_move",
+    "char_post",
+    "query_batch",
+    "projectile_step",
     // Soft bodies (slang/kernels/soft_step.slang).
     "soft_wake",
     "soft_begin",
@@ -142,7 +162,15 @@ const WORLD_ENTRIES: &[&str] = &[
     "soft_sleep",
     // Render poses for hosts (slang/kernels/pose_pack.slang).
     "pose_pack",
+    // Contact events (P4), canonical and persistent storage.
+    "contact_events",
+    "contact_events_persistent",
+    // Overlap queries (P5) and explosions.
+    "overlap_query",
+    "explode",
 ];
+
+const CHARACTER_ENTRIES: &[&str] = &["char_move", "char_post", "query_batch", "projectile_step"];
 
 const VEHICLE_ENTRIES: &[&str] = &[
     "vehicle_input",
@@ -163,6 +191,9 @@ fn source_for(root: &std::path::Path, entry: &str) -> PathBuf {
     }
     if VEHICLE_ENTRIES.contains(&entry) {
         return kernels.join("vehicle_step.slang");
+    }
+    if CHARACTER_ENTRIES.contains(&entry) {
+        return kernels.join("character_step.slang");
     }
     if entry.starts_with("soft_") {
         return kernels.join("soft_step.slang");

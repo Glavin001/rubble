@@ -12,6 +12,7 @@ typealias AUint = Atomic<uint>;
 #define AADD3(x, v, o) o = (x).add(v)
 #define AOR2(x, v) (x).or(v)
 #define AMAX2(x, v) (x).max(v)
+#define AMIN2(x, v) (x).min(v)
 #define AXCHG3(x, v, o) o = (x).exchange(v)
 // WGSL only exposes atomicCompareExchangeWeak. A spurious fail returns old==cmp
 // without storing; callers that treat old==cmp as success then drop hash inserts
@@ -42,6 +43,7 @@ typealias AUint = uint;
 #define AADD3(x, v, o) do { (o) = (x); (x) += (v); } while (false)
 #define AOR2(x, v) (x) |= (v)
 #define AMAX2(x, v) (x) = max((x), (v))
+#define AMIN2(x, v) (x) = min((x), (v))
 #define AXCHG3(x, v, o) do { (o) = (x); (x) = (v); } while (false)
 #define ACAS4(x, cmp, v, o) do { (o) = (x); if ((o) == (cmp)) (x) = (v); } while (false)
 #define GROUP_SYNC()
@@ -55,6 +57,7 @@ typealias AUint = uint;
 #define AADD3(x, v, o) InterlockedAdd(x, v, o)
 #define AOR2(x, v) InterlockedOr(x, v)
 #define AMAX2(x, v) InterlockedMax(x, v)
+#define AMIN2(x, v) InterlockedMin(x, v)
 #define AXCHG3(x, v, o) InterlockedExchange(x, v, o)
 #define ACAS4(x, cmp, v, o) InterlockedCompareExchange(x, cmp, v, o)
 #define GROUP_SYNC() AllMemoryBarrierWithGroupSync()

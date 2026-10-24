@@ -49,6 +49,11 @@ export const buildPairScene=({a='box',b='box',count=4096}={})=>sceneObject(Scene
 // Copies of one house: {columns, rows} grid/row, {suburb:true}, or null.
 export const layoutScene=(one,layout,procedural=false)=>sceneObject(sceneHandle(one).layout(layout??null,procedural));
 export const withoutJoints=scene=>sceneObject(sceneHandle(scene).withoutJoints());
+// The CCD showcase (engine-fracture towers.rs): `columns × rows` copies of a pack
+// scene (one tower), `gap` m streets, a `radius` m `mass` kg ball; and its volley,
+// [{step, origin, dir, label}] relative to the step it starts at.
+export const buildTowersScene=(one,{columns=2,rows=2,gap=6,radius,mass}={})=>sceneObject(sceneHandle(one).towers(columns,rows,gap,radius,mass));
+export const towersVolley=(scene,{raking=8,base=16,every=45}={})=>sceneHandle(scene).volley(raking,base,every);
 export const withBondStrength=(scene,scale)=>sceneObject(sceneHandle(scene).withBondStrength(scale));
 export const withProjectileRadius=(scene,scale)=>sceneObject(sceneHandle(scene).withProjectileRadius(scale));
 export const withCapacity=(scene,partial)=>sceneObject(sceneHandle(scene).withCapacity(partial));

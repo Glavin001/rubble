@@ -1,0 +1,751 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Cache-Control" content="no-store" />
+  <title>Rubble motion — CCD, characters, projectiles (WebGPU AVBD)</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #10131a; color: #dfe4ee; font: 13px/1.4 ui-sans-serif, system-ui, sans-serif; overflow: hidden; }
+    canvas { width: 100%; height: 100%; display: block; touch-action: none; }
+    .panel { position: fixed; background: rgba(16, 19, 26, 0.8); border: 1px solid #2c3346; border-radius: 8px; padding: 10px 12px; backdrop-filter: blur(4px); }
+    #hud { top: 12px; left: 12px; width: 24rem; max-width: calc(100vw - 48px); }
+    #hud h1 { font-size: 15px; margin: 0 0 6px; font-weight: 650; }
+    .row { display: flex; align-items: center; gap: 8px; margin: 4px 0; flex-wrap: wrap; }
+    .muted { color: #8d96aa; }
+    select, button { background: #1d2333; color: #dfe4ee; border: 1px solid #3a4360; border-radius: 5px; padding: 3px 8px; font: inherit; cursor: pointer; }
+    button:hover { border-color: #6c7aa6; }
+    #err { color: #ff8e8e; white-space: pre-wrap; }
+    #stats { right: 12px; top: 12px; width: 22rem; font-variant-numeric: tabular-nums; max-height: 70vh; overflow: auto; }
+    table { border-collapse: collapse; width: 100%; }
+    td, th { padding: 2px 4px; text-align: left; border-bottom: 1px solid #262d40; }
+    .ok { color: #7fe08f; } .bad { color: #ff8e8e; } .warn { color: #ffcf6e; }
+    kbd { background: #252c3d; border: 1px solid #3a4360; border-radius: 3px; padding: 0 4px; font-size: 11px; }
+    #log { margin-top: 6px; max-height: 9rem; overflow: auto; font: 11px ui-monospace, monospace; color: #b5bdd0; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div id="hud" class="panel">
+    <h1>Rubble motion · CCD, characters, projectiles</h1>
+    <div class="row">
+      <label class="muted" for="sceneSel">Scene</label><select id="sceneSel"></select>
+      <label class="muted" for="speedSel">Shot</label><select id="speedSel"></select>
+      <label class="muted"><input type="checkbox" id="lookahead" checked /> look-ahead</label>
+    </div>
+    <div class="row muted" id="help"></div>
+    <div id="status" class="muted">starting…</div>
+    <div id="err"></div>
+  </div>
+  <div id="stats" class="panel"><div id="statsBody"></div><div id="log"></div></div>
+  <script type="module">
+    import { createWorld, sceneCapacity } from './world-host.mjs';
+    import { M } from './vehicle.mjs';
+
+    const statusEl = document.getElementById('status');
+    const errEl = document.getElementById('err');
+    const fail = (e) => { errEl.textContent = String((e && e.stack) || e); statusEl.textContent = 'stopped'; window.__failed = String(e); };
+    addEventListener('unhandledrejection', (e) => { fail(e.reason); e.preventDefault(); });
+    addEventListener('error', (e) => fail(e.error || e.message));
+
+    const qs = new URLSearchParams(location.search);
+    const SCENES = {
+      ccd: 'Tunnelling gallery: CCD off vs on',
+      character: 'Character playground',
+      bullets: 'Bullets through walls',
+    };
+    const scene = SCENES[qs.get('scene')] ? qs.get('scene') : 'ccd';
+    const SPEEDS = [60, 140, 250];
+    const shotSpeed = Number(qs.get('speed')) || 250;
+    const lookAhead = qs.get('lookahead') !== '0';
+    const sceneSel = document.getElementById('sceneSel');
+    for (const [id, t] of Object.entries(SCENES)) sceneSel.add(new Option(t, id, false, id === scene));
+    const speedSel = document.getElementById('speedSel');
+    for (const v of SPEEDS) speedSel.add(new Option(`${v} m/s`, v, false, v === shotSpeed));
+    document.getElementById('lookahead').checked = lookAhead;
+    const go = (k, v) => { const u = new URL(location.href); u.searchParams.set(k, v); location.href = u.href; };
+    sceneSel.onchange = () => go('scene', sceneSel.value);
+    speedSel.onchange = () => go('speed', speedSel.value);
+    document.getElementById('lookahead').onchange = (e) => go('lookahead', e.target.checked ? '1' : '0');
+    document.getElementById('help').innerHTML = {
+      ccd: '<span><kbd>F</kbd> fire a volley · <kbd>R</kbd> reset · drag to orbit · scroll to zoom</span>',
+      character: '<span><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> walk · <kbd>Space</kbd> jump · <kbd>F</kbd> bullet · <kbd>B</kbd> CCD rocket · <kbd>R</kbd> reset · drag to look</span>',
+      bullets: '<span><kbd>F</kbd> fire · <kbd>R</kbd> reset · drag to orbit</span>',
+    }[scene];
+
+    if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
+    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+    if (!adapter) throw new Error('no WebGPU adapter');
+    const device = await adapter.requestDevice({
+      requiredLimits: {
+        maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage,
+        maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+        maxBufferSize: adapter.limits.maxBufferSize,
+      },
+    });
+    device.lost.then((i) => fail('device lost: ' + i.message));
+    device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
+    const canvas = document.getElementById('c');
+    const context = canvas.getContext('webgpu');
+    const format = navigator.gpu.getPreferredCanvasFormat();
+    const configure = () => {
+      const dpr = Math.min(devicePixelRatio || 1, 2);
+      canvas.width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+      canvas.height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+      context.configure({ device, format, alphaMode: 'opaque' });
+    };
+    configure();
+    addEventListener('resize', configure);
+
+    // ---------------------------------------------------------------- world
+    const cap = sceneCapacity(4000, 8000);
+    const world = await createWorld(device, { cap, status: (s) => { statusEl.textContent = s; } });
+    const DT = 1 / 60;
+    world.params.dt = DT;
+    world.params.iterations = 10;
+    world.params.gravityY = -10;
+    world.params.flags = lookAhead ? M.FLAG_SPEC_VELOCITY : 0;
+    const MAT_GROUND = 0, MAT_PROP = 1;
+    world.setMaterial(MAT_GROUND, 0.9);
+    world.setMaterial(MAT_PROP, 0.6);
+
+    const qAxis = (ax, ang) => { const s = Math.sin(ang / 2); return [ax[0] * s, ax[1] * s, ax[2] * s, Math.cos(ang / 2)]; };
+    const boxInv = (m, hx, hy, hz) => [3 / (m * (hy * hy + hz * hz)), 3 / (m * (hx * hx + hz * hz)), 3 / (m * (hx * hx + hy * hy))];
+    const staticBox = (p, half, q = [0, 0, 0, 1], material = MAT_PROP) => {
+      const body = world.addBody({ p, q, flags: 0 });
+      world.addCollider({ body, shape: 2, material, params: [...half, Math.hypot(...half)] });
+      return body;
+    };
+    const kinematicBox = (p, half, q = [0, 0, 0, 1]) => {
+      const body = world.addBody({ p, q, flags: M.BODY_KINEMATIC | 8 });
+      world.addCollider({ body, shape: 2, material: MAT_GROUND, params: [...half, Math.hypot(...half)] });
+      return body;
+    };
+    const dynBox = (p, half, mass, q = [0, 0, 0, 1], flags = 0) => {
+      const body = world.addBody({ p, q, invMass: 1 / mass, invI: boxInv(mass, ...half), flags: 1 | 8 | flags });
+      world.addCollider({ body, shape: 2, material: MAT_PROP, params: [...half, Math.hypot(...half)] });
+      return body;
+    };
+    const dynBall = (p, r, mass, v = [0, 0, 0], flags = 0) => {
+      const i = 2.5 / (mass * r * r);
+      const body = world.addBody({ p, invMass: 1 / mass, invI: [i, i, i], flags: 1 | 8 | flags, v });
+      world.addCollider({ body, shape: 0, material: MAT_PROP, params: [r, 0, 0, r] });
+      return body;
+    };
+    // Ground slab: collider 0, drawn as the grid plane.
+    staticBox([0, -5, 0], [400, 5, 400], [0, 0, 0, 1], MAT_GROUND);
+
+    // Scene state the HUD and the checks read.
+    const S = { lanes: [], shower: null, player: -1, npcs: [], platform: null, lift: null, walls: [], targets: [], log: [] };
+    const say = (m) => { S.log.unshift(`${world.steps}: ${m}`); S.log.length = Math.min(S.log.length, 40); };
+
+    if (scene === 'ccd') {
+      // Each lane: a control ball (no CCD) and a CCD ball (BODY_CCD), 2 m apart,
+      // fired along +z at a wall whose near face is at z = 30.
+      const WALL_Z = 30;
+      var BALL_R = 0.15;
+      const laneDefs = [
+        { name: '5 cm slab', x: -16, build: (x) => staticBox([x, 1.5, WALL_Z + 0.025], [2.5, 1.5, 0.025]), depth: 0.05 },
+        { name: '20 cm slab', x: -8, build: (x) => staticBox([x, 1.5, WALL_Z + 0.1], [2.5, 1.5, 0.1]), depth: 0.2 },
+        { name: '1 m wall', x: 0, build: (x) => staticBox([x, 1.5, WALL_Z + 0.5], [2.5, 1.5, 0.5]), depth: 1.0 },
+        { name: 'brick wall (grid)', x: 8, build: (x) => {
+          for (let iy = 0; iy < 15; iy++) for (let ix = 0; ix < 25; ix++) staticBox([x - 2.4 + ix * 0.2, 0.1 + iy * 0.2, WALL_Z + 0.1], [0.1, 0.1, 0.1]);
+        }, depth: 0.2 },
+        { name: 'brick wall (dynamic)', x: 16, dynamic: true, build: (x) => {
+          const bricks = [];
+          for (let iy = 0; iy < 12; iy++) for (let ix = 0; ix < 20; ix++) {
+            const p = [x - 1.9 + ix * 0.2, 0.1 + iy * 0.2, WALL_Z + 0.1];
+            bricks.push({ body: dynBox(p, [0.1, 0.1, 0.1], 4), p });
+          }
+          return bricks;
+        }, depth: 0.2 },
+      ];
+      for (const L of laneDefs) {
+        const bricks = L.build(L.x);
+        // Dynamic wall: the bricks in each ball's path. A ball that passes the
+        // wall without moving them tunnelled; one that knocked them out smashed through.
+        if (L.dynamic) for (const [side, dx] of [['control', -1.0], ['ccd', 1.0]])
+          L[side + 'Bricks'] = bricks.filter((b) => Math.abs(b.p[0] - (L.x + dx)) < 0.25).map((b) => b.body);
+        // Parked far below until fired (static until then).
+        const ball = (dx, ccd) => {
+          const body = world.addBody({ p: [L.x + dx, -500, 0], invMass: 1 / 5, invI: [250, 250, 250], flags: ccd ? M.BODY_CCD : 0 });
+          world.addCollider({ body, shape: 0, material: MAT_PROP, params: [BALL_R, 0, 0, BALL_R] });
+          return body;
+        };
+        S.lanes.push({ ...L, wallZ: WALL_Z, control: ball(-1.0, false), ccd: ball(1.0, true), result: { control: '—', ccd: '—' }, tally: { control: 0, ccd: 0, shots: 0 } });
+      }
+      // Debris shower: 0.1 m chunks at 40 m/s onto a 0.2 m slab, CCD off (left) / on (right).
+      staticBox([-6, 0.1 + 6, -14], [2.5, 0.1, 2.5], [0, 0, 0, 1], MAT_GROUND);
+      staticBox([6, 0.1 + 6, -14], [2.5, 0.1, 2.5], [0, 0, 0, 1], MAT_GROUND);
+      S.shower = { control: [], ccd: [] };
+      for (const [side, x0, ccd] of [['control', -6, false], ['ccd', 6, true]]) {
+        for (let i = 0; i < 49; i++) {
+          const body = world.addBody({ p: [x0 + (i % 7) * 0.6 - 1.8, -600, -14 + Math.floor(i / 7) * 0.6 - 1.8], invMass: 1 / 0.3, invI: boxInv(0.3, 0.05, 0.05, 0.05), flags: ccd ? M.BODY_CCD : 0 });
+          world.addCollider({ body, shape: 2, material: MAT_PROP, params: [0.05, 0.05, 0.05, 0.0866] });
+          S.shower[side].push({ body, x: x0 + (i % 7) * 0.6 - 1.8, z: -14 + Math.floor(i / 7) * 0.6 - 1.8, y: 9 + 0.13 * (i % 5) });
+        }
+      }
+    } else if (scene === 'character') {
+      // Stairs: six 0.3 m steps (0.5 m run) from x = 4.
+      for (let k = 0; k < 6; k++) {
+        const top = 0.3 * (k + 1);
+        staticBox([4 + 0.5 * k + 3, top / 2, 6], [3, top / 2, 2]);
+      }
+      // A walkable 30° ramp and a 55° slide.
+      staticBox([-6, 1.0, 8], [3, 0.2, 2], qAxis([0, 0, 1], -Math.PI / 6));
+      staticBox([-6, 2.2, 14], [2.4, 0.2, 2], qAxis([0, 0, 1], -55 * Math.PI / 180));
+      // Moving platform (kinematic) and a lift.
+      S.platform = kinematicBox([10, 0.25, -6], [2, 0.25, 2]);
+      S.lift = kinematicBox([-10, 0.25, -4], [1.6, 0.25, 1.6]);
+      staticBox([-10, 2.5, -7], [2, 2.5, 1]);
+      // Light crates (push through) and a heavy crate (blocks).
+      for (let i = 0; i < 5; i++) dynBox([2 + i * 0.7, 0.25, -3], [0.25, 0.25, 0.25], 8);
+      dynBox([2, 0.6, -8], [0.6, 0.6, 0.6], 2500);
+      // Seesaw plank on a pivot.
+      staticBox([-2, 0.25, -14], [0.15, 0.25, 1.2]);
+      dynBox([-2, 0.6, -14], [2.5, 0.06, 0.8], 25);
+      // Brick wall for CCD rockets and a debris pile.
+      for (let iy = 0; iy < 10; iy++) for (let ix = 0; ix < 16; ix++) dynBox([14 + ix * 0.4 - 3, 0.1 + iy * 0.2, 14], [0.2, 0.1, 0.1], 6);
+      for (let i = 0; i < 120; i++) dynBox([-12 + (i % 6) * 0.3, 0.15 + Math.floor(i / 36) * 0.3, 4 + (Math.floor(i / 6) % 6) * 0.3], [0.12, 0.12, 0.12], 2);
+      // The player and three NPCs.
+      S.player = world.addCharacter({ radius: 0.3, half_height: 0.6 }, [0, 1.0, 0]);
+      for (let k = 0; k < 3; k++) S.npcs.push({ h: world.addCharacter({ radius: 0.28, half_height: 0.55 }, [-4 + 2 * k, 1.0, -2]), phase: k * 2.1 });
+      // Rockets: parked CCD balls.
+      S.rockets = [];
+      for (let i = 0; i < 8; i++) {
+        const body = world.addBody({ p: [-3000 - i * 5, -3000, -3000], invMass: 1 / 4, invI: [250, 250, 250], flags: M.BODY_CCD });
+        world.addCollider({ body, shape: 0, material: MAT_PROP, params: [0.12, 0, 0, 0.12] });
+        S.rockets.push(body);
+      }
+    } else {
+      // Five 5 cm walls, then three dynamic targets.
+      for (let k = 0; k < 5; k++) S.walls.push(staticBox([0, 1.5, 10 + 2 * k + 0.025], [2, 1.5, 0.025]));
+      for (let k = 0; k < 3; k++) S.targets.push(dynBox([(k - 1) * 1.2, 0.4, 24], [0.4, 0.4, 0.4], 3));
+    }
+    const initial = world.snapshot();
+    statusEl.textContent = `scene ready · ${world.bodyCount} bodies · ${world.colliderCount} colliders`;
+
+    // ---------------------------------------------------------------- body writes
+    const bodyRecord = (body) => new Uint32Array(world.bodyWords.buffer, body * 112, 28).slice();
+    function launch(body, p, v, keepCcd = true) {
+      const words = bodyRecord(body);
+      const f = new Float32Array(words.buffer);
+      const ccd = words[11] & M.BODY_CCD;
+      f.set(p, 0); f.set([0, 0, 0, 1], 4); words[11] = 1 | 8 | (keepCcd ? ccd : 0);
+      f.set(v, 12); f[15] = 0; f.set([0, 0, 0], 16); words[19] = world.steps;
+      f.set(p, 20); f.set([0, 0, 0, 1], 24);
+      world.backend.writeBody(body, words);
+    }
+    function park(body, p) {
+      const words = bodyRecord(body);
+      const f = new Float32Array(words.buffer);
+      const ccd = words[11] & M.BODY_CCD;
+      f.set(p, 0); f.set([0, 0, 0, 1], 4); words[11] = ccd; f.set([0, 0, 0], 12); f.set([0, 0, 0], 16); f.set(p, 20);
+      world.backend.writeBody(body, words);
+    }
+    function fireVolley() {
+      for (const L of S.lanes) {
+        L.fired = world.steps;
+        L.result = { control: 'flying', ccd: 'flying' };
+        L.tally.shots++;
+        launch(L.control, [L.x - 1.0, 1.4, 4], [0, 0, shotSpeed]);
+        launch(L.ccd, [L.x + 1.0, 1.4, 4], [0, 0, shotSpeed]);
+      }
+      if (S.shower) {
+        for (const side of ['control', 'ccd']) for (const c of S.shower[side]) launch(c.body, [c.x, c.y, c.z], [0, -40, 0]);
+        S.shower.fired = world.steps;
+      }
+      say(`volley at ${shotSpeed} m/s`);
+    }
+
+    // ---------------------------------------------------------------- renderer
+    const SHADER = /* wgsl */`
+struct Body { position: vec3f, invMass: f32, orientation: vec4f, invInertia: vec3f, flags: u32,
+  linearVel: vec3f, sleepTimer: f32, angularVel: vec3f, generation: u32, initialPos: vec3f, initialPad: f32, initialRot: vec4f };
+struct Collider { body: u32, shape: u32, material: u32, generation: u32, localPos: vec3f, density: f32, localRot: vec4f, params: vec4f };
+struct Frame { viewProj: mat4x4f, eye: vec4f, light: vec4f };
+@group(0) @binding(0) var<storage, read> bodies: array<Body>;
+@group(0) @binding(1) var<uniform> frame: Frame;
+@group(0) @binding(2) var<storage, read> cols: array<Collider>;
+@group(0) @binding(3) var<storage, read> pool: array<vec4f>;
+
+fn qrot(q: vec4f, v: vec3f) -> vec3f {
+  let u = q.xyz;
+  return u * (2.0 * dot(u, v)) + v * (q.w * q.w - dot(u, u)) + cross(u, v) * (2.0 * q.w);
+}
+fn hash(n: u32) -> f32 { var x = n * 747796405u + 2891336453u; x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u; return f32((x >> 22u) ^ x) / 4294967295.0; }
+fn shade(c: vec3f, n: vec3f, w: vec3f) -> vec3f {
+  let l = normalize(frame.light.xyz);
+  let diff = max(dot(n, l), 0.0);
+  let v = normalize(frame.eye.xyz - w);
+  let spec = pow(max(dot(reflect(-l, n), v), 0.0), 32.0) * 0.25;
+  let sky = 0.5 + 0.5 * n.y;
+  let fog = clamp(length(frame.eye.xyz - w) / 220.0, 0.0, 1.0);
+  return mix(c * (0.22 + 0.18 * sky + 0.75 * diff) + spec, vec3f(0.55, 0.62, 0.72), fog * fog);
+}
+
+struct Out { @builtin(position) clip: vec4f, @location(0) n: vec3f, @location(1) c: vec3f, @location(2) w: vec3f,
+  @location(3) center: vec3f, @location(4) r: f32, @location(5) axis: vec3f, @location(6) hh: f32 };
+
+@vertex fn vsCol(@location(0) corner: vec3f, @location(1) normal: vec3f, @builtin(instance_index) inst: u32) -> Out {
+  let ci = inst + 1u;
+  let col = cols[ci];
+  let b = bodies[col.body];
+  var o: Out;
+  o.r = 0.0; o.hh = 0.0;
+  let hidden = b.position.y < -100.0;
+  var half = col.params.xyz;
+  if (col.shape == 0u) { half = vec3f(col.params.x); o.r = col.params.x; }
+  if (col.shape == 1u) { half = vec3f(col.params.x, col.params.y + col.params.x, col.params.x); o.r = col.params.x; o.hh = col.params.y; }
+  let q = b.orientation;
+  let lq = col.localRot;
+  let local = col.localPos + qrot(lq, corner * half * 2.02);
+  let w = b.position + qrot(q, local);
+  o.w = w;
+  o.center = b.position + qrot(q, col.localPos);
+  o.axis = qrot(q, qrot(lq, vec3f(0.0, 1.0, 0.0)));
+  o.n = qrot(q, qrot(lq, normal));
+  o.clip = select(frame.viewProj * vec4f(w, 1.0), vec4f(0.0, 0.0, 2.0, 1.0), hidden);
+  let dyn = b.invMass > 0.0 && (b.flags & 1u) != 0u;
+  let kin = (b.flags & 3u) == 2u;
+  let ccd = (b.flags & 64u) != 0u;
+  if (col.shape == 1u && kin) {
+    o.c = vec3f(0.2, 0.75, 0.95);               // characters
+  } else if (kin) {
+    o.c = vec3f(0.35, 0.45, 0.85);              // kinematic platforms
+  } else if (ccd) {
+    o.c = vec3f(0.95, 0.25, 0.2);               // CCD bodies
+  } else if (!dyn && col.shape == 0u) {
+    o.c = vec3f(0.12, 0.12, 0.14);              // parked balls
+  } else if (!dyn) {
+    o.c = vec3f(0.6, 0.61, 0.65);
+  } else if (col.shape == 0u) {
+    o.c = vec3f(0.15, 0.16, 0.18);              // control balls (no CCD)
+  } else {
+    let h = hash(col.body);
+    o.c = mix(vec3f(0.85, 0.55, 0.25), vec3f(0.9, 0.78, 0.4), h);
+    if ((b.flags & 4u) != 0u) { o.c = o.c * 0.7; }
+  }
+  return o;
+}
+
+fn capsuleHit(ro: vec3f, rd: vec3f, pa: vec3f, pb: vec3f, r: f32) -> f32 {
+  let ba = pb - pa; let oa = ro - pa;
+  let baba = dot(ba, ba); let bard = dot(ba, rd); let baoa = dot(ba, oa); let rdoa = dot(rd, oa); let oaoa = dot(oa, oa);
+  let a = baba - bard * bard; let b = baba * rdoa - baoa * bard; let c = baba * oaoa - baoa * baoa - r * r * baba;
+  var h = b * b - a * c;
+  if (h >= 0.0 && a > 1e-9) {
+    let t = (-b - sqrt(h)) / a;
+    let y = baoa + t * bard;
+    if (y > 0.0 && y < baba) { return t; }
+    let oc = select(ro - pb, oa, y <= 0.0);
+    let b2 = dot(rd, oc); let c2 = dot(oc, oc) - r * r;
+    h = b2 * b2 - c2;
+    if (h > 0.0) { return -b2 - sqrt(h); }
+  }
+  return -1.0;
+}
+
+@fragment fn fsCol(i: Out) -> @location(0) vec4f {
+  var n = normalize(i.n);
+  if (i.r > 0.0) {
+    let rd = normalize(i.w - frame.eye.xyz);
+    let pa = i.center - i.axis * i.hh;
+    let pb = i.center + i.axis * i.hh;
+    let t = capsuleHit(frame.eye.xyz, rd, pa, pb, i.r);
+    if (t < 0.0) { discard; }
+    let p = frame.eye.xyz + rd * t;
+    let s = clamp(dot(p - pa, i.axis), 0.0, 2.0 * i.hh);
+    n = normalize(p - (pa + i.axis * s));
+  }
+  return vec4f(shade(i.c, n, i.w), 1.0);
+}
+
+// Projectiles: tracers from the pool records (alive ones only).
+@vertex fn vsShot(@location(0) corner: vec3f, @location(1) normal: vec3f, @builtin(instance_index) inst: u32) -> Out {
+  let rec = ${world.mlayout.projectileBase}u + inst * ${M.PROJ_STRIDE}u;
+  let p = pool[rec];
+  let v = pool[rec + 1u];
+  let alive = (bitcast<u32>(pool[rec + 2u].x) & 1u) != 0u;
+  var o: Out;
+  let dir = normalize(v.xyz + vec3f(0.0, 1e-6, 0.0));
+  let len = clamp(length(v.xyz) * 0.004, 0.2, 3.0);
+  // A stretched box along the velocity.
+  let up = select(vec3f(0.0, 1.0, 0.0), vec3f(1.0, 0.0, 0.0), abs(dir.y) > 0.9);
+  let x = normalize(cross(up, dir)); let y = cross(dir, x);
+  let w = p.xyz + x * corner.x * 0.06 + y * corner.y * 0.06 - dir * (corner.z + 0.5) * len;
+  o.w = w; o.n = qrot(vec4f(0.0, 0.0, 0.0, 1.0), normal); o.c = vec3f(1.0, 0.85, 0.3);
+  o.center = p.xyz; o.r = 0.0; o.axis = dir; o.hh = 0.0;
+  o.clip = select(vec4f(0.0, 0.0, 2.0, 1.0), frame.viewProj * vec4f(w, 1.0), alive);
+  return o;
+}
+@fragment fn fsShot(i: Out) -> @location(0) vec4f { return vec4f(i.c, 1.0); }
+
+@vertex fn vsGround(@location(0) p: vec3f) -> Out {
+  var o: Out;
+  o.w = p; o.n = vec3f(0.0, 1.0, 0.0); o.c = vec3f(0.3); o.center = p; o.r = 0.0; o.axis = vec3f(0.0); o.hh = 0.0;
+  o.clip = frame.viewProj * vec4f(p, 1.0) + vec4f(0.0) * bodies[0].position.x;
+  return o;
+}
+@fragment fn fsGround(i: Out) -> @location(0) vec4f {
+  let g = abs(fract(i.w.xz / 2.0) - 0.5);
+  let line = smoothstep(0.47, 0.5, max(g.x, g.y));
+  let checker = step(0.0, sin(i.w.x * 0.785) * sin(i.w.z * 0.785));
+  let base = mix(vec3f(0.26, 0.29, 0.27), vec3f(0.3, 0.33, 0.31), checker);
+  return vec4f(shade(mix(base, vec3f(0.45, 0.48, 0.46), line * 0.6), vec3f(0.0, 1.0, 0.0), i.w), 1.0);
+}
+`;
+    const mod = device.createShaderModule({ label: 'motion-render', code: SHADER });
+    const info = await mod.getCompilationInfo();
+    const err = info.messages.find((m) => m.type === 'error');
+    if (err) throw new Error(`render shader: ${err.message} @${err.lineNum}`);
+
+    const cube = [];
+    for (const [u, v, w] of [[0, 1, 2], [1, 2, 0], [2, 0, 1]]) for (const s of [-1, 1]) {
+      const n = [0, 0, 0]; n[w] = s;
+      const cs = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([a, b]) => { const p = [0, 0, 0]; p[u] = a * 0.5; p[v] = b * 0.5; p[w] = s * 0.5; return p; });
+      const tris = s > 0 ? [[0, 1, 2], [0, 2, 3]] : [[0, 2, 1], [0, 3, 2]];
+      for (const t of tris) for (const k of t) cube.push(...cs[k], ...n);
+    }
+    const G = 400;
+    const groundTri = [[-G, -G], [G, -G], [G, G], [-G, -G], [G, G], [-G, G]].flatMap(([x, z]) => [x, 0.001, z]);
+    const vbo = (arr) => { const b = device.createBuffer({ size: arr.length * 4, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST }); device.queue.writeBuffer(b, 0, new Float32Array(arr)); return b; };
+    const cubeVbo = vbo(cube), groundVbo = vbo(groundTri);
+    const frameBuf = device.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const vtx6 = [{ arrayStride: 24, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }, { shaderLocation: 1, offset: 12, format: 'float32x3' }] }];
+    const depthStencil = { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' };
+    const pipe = (vs, fs, buffers, cull = 'back') => device.createRenderPipeline({
+      layout: 'auto', vertex: { module: mod, entryPoint: vs, buffers }, fragment: { module: mod, entryPoint: fs, targets: [{ format }] },
+      primitive: { cullMode: cull }, depthStencil,
+    });
+    const colPipe = pipe('vsCol', 'fsCol', vtx6, 'none');
+    const shotPipe = pipe('vsShot', 'fsShot', vtx6, 'none');
+    const groundPipe = pipe('vsGround', 'fsGround', [{ arrayStride: 12, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }] }], 'none');
+    const bind = (p, entries) => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: entries.map(([b, buf]) => ({ binding: b, resource: { buffer: buf } })) });
+    const colBind = bind(colPipe, [[0, world.bufs[0]], [1, frameBuf], [2, world.bufs[2]]]);
+    const shotBind = bind(shotPipe, [[1, frameBuf], [3, world.bufs[33]]]);
+    const groundBind = bind(groundPipe, [[0, world.bufs[0]], [1, frameBuf]]);
+    let depth = null;
+
+    // ---------------------------------------------------------------- camera / input
+    const cam = { yaw: scene === 'ccd' ? 2.75 : scene === 'bullets' ? 2.3 : 0.6, pitch: scene === 'ccd' ? 0.42 : 0.4, dist: scene === 'ccd' ? 30 : scene === 'bullets' ? 18 : 9, target: [0, 1, scene === 'ccd' ? 24 : scene === 'bullets' ? 16 : 0] };
+    let drag = null;
+    canvas.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, y: e.clientY }; });
+    addEventListener('pointerup', () => { drag = null; });
+    addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      cam.yaw -= (e.clientX - drag.x) * 0.005;
+      cam.pitch = Math.max(-0.1, Math.min(1.4, cam.pitch + (e.clientY - drag.y) * 0.005));
+      drag = { x: e.clientX, y: e.clientY };
+    });
+    canvas.addEventListener('wheel', (e) => { e.preventDefault(); cam.dist = Math.max(3, Math.min(160, cam.dist * Math.exp(e.deltaY * 0.001))); }, { passive: false });
+    const sub3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    const norm3 = (a) => { const l = Math.hypot(...a) || 1; return a.map((x) => x / l); };
+    const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    const eyeOf = () => {
+      const cp = Math.cos(cam.pitch);
+      return [cam.target[0] + cam.dist * cp * Math.sin(cam.yaw), cam.target[1] + cam.dist * Math.sin(cam.pitch), cam.target[2] + cam.dist * cp * Math.cos(cam.yaw)];
+    };
+    function viewProj(eye, at, aspect) {
+      const z = norm3(sub3(eye, at)), x = norm3(cross3([0, 1, 0], z)), y = cross3(z, x);
+      const view = [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0,
+        -(x[0] * eye[0] + x[1] * eye[1] + x[2] * eye[2]), -(y[0] * eye[0] + y[1] * eye[1] + y[2] * eye[2]), -(z[0] * eye[0] + z[1] * eye[1] + z[2] * eye[2]), 1];
+      const f = 1 / Math.tan(Math.PI / 6), near = 0.05, far = 900;
+      const proj = [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, far / (near - far), -1, 0, 0, (near * far) / (near - far), 0];
+      const o = new Float32Array(16);
+      for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) o[c * 4 + r] = proj[r] * view[c * 4] + proj[4 + r] * view[c * 4 + 1] + proj[8 + r] * view[c * 4 + 2] + proj[12 + r] * view[c * 4 + 3];
+      return o;
+    }
+    const keys = new Set();
+    let jumpSeq = 0;
+    addEventListener('keydown', (e) => {
+      if (e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT') return;
+      keys.add(e.code);
+      if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
+      if (e.repeat) return;
+      if (e.code === 'KeyR') resetScene();
+      else if (e.code === 'KeyF') fire();
+      else if (e.code === 'KeyB') rocket();
+      else if (e.code === 'Space') jumpSeq++;
+    });
+    addEventListener('keyup', (e) => keys.delete(e.code));
+    addEventListener('blur', () => keys.clear());
+    const key = (...c) => c.some((k) => keys.has(k));
+
+    let rocketNext = 0;
+    function fire() {
+      if (scene === 'ccd') return fireVolley();
+      if (scene === 'bullets') {
+        for (let k = 0; k < 3; k++) world.spawnProjectile({ p: [(k - 1) * 1.2, 0.5, 0], v: [0, 0.6, 900], mass: 0.01, cost: 5000 });
+        say('3 bullets at 900 m/s (5,000 J/m to cross a wall)');
+        return;
+      }
+      const c = S.motion?.characters[S.player];
+      if (!c) return;
+      const eye = eyeOf();
+      const dir = norm3(sub3(cam.target, eye));
+      const from = [c.position[0], c.position[1] + 0.6, c.position[2]];
+      world.spawnProjectile({ p: from, v: dir.map((d) => d * 600), mass: 0.012, cost: 20000, excludeBody: world.characters[S.player].body });
+      say('bullet at 600 m/s');
+    }
+    function rocket() {
+      if (scene !== 'character' || !S.motion) return;
+      const c = S.motion.characters[S.player];
+      const eye = eyeOf();
+      const dir = norm3(sub3(cam.target, eye));
+      const body = S.rockets[rocketNext++ % S.rockets.length];
+      launch(body, [c.position[0] + dir[0] * 1.2, c.position[1] + 0.8 + dir[1] * 1.2, c.position[2] + dir[2] * 1.2], dir.map((d) => d * 150));
+      say('CCD rocket at 150 m/s');
+    }
+    function resetScene() {
+      world.restore(initial);
+      for (const L of S.lanes) { L.result = { control: '—', ccd: '—' }; L.tally = { control: 0, ccd: 0, shots: 0 }; }
+      S.log.length = 0;
+      jumpSeq = 0;
+    }
+
+    // ---------------------------------------------------------------- per-step logic
+    let lastKinFlip = 0;
+    function driveScene() {
+      if (scene !== 'character') return;
+      // Player: WASD relative to the camera.
+      const fwd = (key('KeyW', 'ArrowUp') ? 1 : 0) - (key('KeyS', 'ArrowDown') ? 1 : 0);
+      const side = (key('KeyD', 'ArrowRight') ? 1 : 0) - (key('KeyA', 'ArrowLeft') ? 1 : 0);
+      const fx = -Math.sin(cam.yaw), fz = -Math.cos(cam.yaw);
+      const speed = key('ShiftLeft') ? 6 : 3.5;
+      let vx = (fx * fwd - fz * side), vz = (fz * fwd + fx * side);
+      const l = Math.hypot(vx, vz) || 1;
+      if (fwd || side) { vx = (vx / l) * speed; vz = (vz / l) * speed; } else { vx = 0; vz = 0; }
+      if (!S.scripted) world.setCharacterInput(S.player, [vx, 0, vz], jumpSeq);
+      // NPCs walk circles.
+      const t = world.steps * DT;
+      for (const n of S.npcs) world.setCharacterInput(n.h, [2 * Math.cos(t * 0.6 + n.phase), 0, 2 * Math.sin(t * 0.6 + n.phase)], 0);
+      // Platform back and forth (3 s each way); the lift up and down.
+      if (world.steps - lastKinFlip >= 180 || world.steps === 0) {
+        const dir = Math.floor(world.steps / 180) % 2 ? -1 : 1;
+        world.setKinematicVelocity(S.platform, [1.5 * dir, 0, 0]);
+        world.setKinematicVelocity(S.lift, [0, 1.0 * dir, 0]);
+        lastKinFlip = world.steps;
+      }
+    }
+    function stepOnce(enc) {
+      driveScene();
+      world.encodeStep(enc);
+    }
+
+    // ---------------------------------------------------------------- readback
+    const tracked = () => {
+      const ids = [];
+      for (const L of S.lanes) ids.push(L.control, L.ccd, ...(L.controlBricks || []), ...(L.ccdBricks || []));
+      if (S.shower) for (const side of ['control', 'ccd']) for (const c of S.shower[side]) ids.push(c.body);
+      for (const t of S.targets) ids.push(t);
+      return ids;
+    };
+    const trackedIds = tracked();
+    const RB = 3;
+    const rbBytes = 80 + trackedIds.length * 112;
+    const rbFree = Array.from({ length: RB }, () => device.createBuffer({ size: Math.max(rbBytes, 96), usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
+    const bodyState = new Map();
+    let lastCounters = null;
+    function encodeReadback(enc, rb) {
+      enc.copyBufferToBuffer(world.bufs[7], 0, rb, 0, 80);
+      trackedIds.forEach((id, k) => enc.copyBufferToBuffer(world.bufs[0], id * 112, rb, 80 + k * 112, 112));
+    }
+    function decode(rb) {
+      const all = new Uint32Array(rb.getMappedRange().slice(0, rbBytes));
+      rb.unmap();
+      const c = all.subarray(0, 20);
+      lastCounters = { contact: c[2], candidate: c[4], awake: c[5], overflow: c[7] };
+      world.setLastCounters(c);
+      if (c[7]) say(`overflow flags 0x${c[7].toString(16)}`);
+      const f = new Float32Array(all.buffer);
+      trackedIds.forEach((id, k) => {
+        const o = 20 + k * 28;
+        bodyState.set(id, { p: [f[o], f[o + 1], f[o + 2]], v: [f[o + 12], f[o + 13], f[o + 14]], flags: all[o + 11] });
+      });
+      judge();
+    }
+    // Lanes: a ball past the wall's far face tunnelled; one stopped short of it held.
+    function judge() {
+      for (const L of S.lanes) {
+        if (L.fired === undefined) continue;
+        for (const side of ['control', 'ccd']) {
+          const st = bodyState.get(L[side]);
+          if (!st || L.result[side] !== 'flying') continue;
+          const far = L.wallZ + L.depth;
+          const r = 0.15;
+          if (st.p[2] - r > far + 0.05) {
+            const moved = (L[side + 'Bricks'] || []).some((b) => { const q = bodyState.get(b); return q && q.p[2] > L.wallZ + 0.15; });
+            L.result[side] = L.dynamic && moved ? 'smashed through' : 'TUNNELLED';
+            if (side === 'ccd' && L.result[side] === 'TUNNELLED') say(`${L.name}: CCD ball tunnelled`);
+          }
+          else if (world.steps - L.fired > 30 && st.p[2] < far) { L.result[side] = st.p[2] + r <= L.wallZ + 0.03 ? 'stopped at wall' : 'embedded'; }
+        }
+      }
+      if (S.shower && S.shower.fired !== undefined) {
+        for (const side of ['control', 'ccd']) S.shower[side + 'Through'] = S.shower[side].filter((c) => (bodyState.get(c.body)?.p[1] ?? 99) < 5.9 && (bodyState.get(c.body)?.p[1] ?? 99) > -100).length;
+      }
+    }
+
+    // ---------------------------------------------------------------- HUD
+    const statsBody = document.getElementById('statsBody');
+    const logEl = document.getElementById('log');
+    const cls = (r) => r === 'TUNNELLED' ? 'bad' : r === 'flying' || r === '—' ? 'muted' : r === 'embedded' ? 'warn' : 'ok';
+    function updateHud() {
+      let h = '';
+      if (scene === 'ccd') {
+        h += `<table><tr><th>wall</th><th>CCD off</th><th>CCD on</th></tr>`;
+        for (const L of S.lanes) h += `<tr><td>${L.name}</td><td class="${cls(L.result.control)}">${L.result.control}</td><td class="${cls(L.result.ccd)}">${L.result.ccd}</td></tr>`;
+        h += `</table>`;
+        if (S.shower?.fired !== undefined) h += `<div class="row">40 m/s debris through the slab: <span class="bad">off ${S.shower.controlThrough ?? 0}/49</span> · <span class="ok">on ${S.shower.ccdThrough ?? 0}/49</span></div>`;
+        h += `<div class="muted">0.1 m balls at ${shotSpeed} m/s (${(shotSpeed * DT).toFixed(2)} m per step) · look-ahead ${lookAhead ? 'on' : 'off'}</div>`;
+      } else if (S.motion) {
+        const c = S.motion.characters[S.player];
+        if (c) h += `<div>player: <b class="${c.ground === 'ground' ? 'ok' : c.ground === 'steep' ? 'warn' : ''}">${c.ground}</b> · (${c.position.map((x) => x.toFixed(2)).join(', ')}) · ${Math.hypot(c.velocity[0], c.velocity[2]).toFixed(2)} m/s${c.flags & 1 ? ' · stepped up' : ''}${c.push[1] < 0 ? ` · ${(-c.push[1]).toFixed(0)} N on body ${c.groundBody}` : ''}</div>`;
+        const alive = S.motion.projectiles.filter((p) => p.alive).length;
+        h += `<div class="muted">${world.characters.length} characters · ${alive}/${S.motion.projectiles.length} projectiles in flight</div>`;
+      }
+      if (lastCounters) h += `<div class="muted">bodies ${world.bodyCount} · contacts ${lastCounters.contact} · awake ${lastCounters.awake}${lastCounters.overflow ? ` · <span class="bad">overflow 0x${lastCounters.overflow.toString(16)}</span>` : ''}</div>`;
+      statsBody.innerHTML = h;
+      logEl.textContent = S.log.join('\n');
+    }
+    let motionPoll = 0;
+    function pollMotion() {
+      if (world.steps - motionPoll < 4) return;
+      motionPoll = world.steps;
+      world.readMotion().then(handleMotion).catch(fail);
+    }
+    function handleMotion(m) {
+      if (!m) return;
+      S.motion = m;
+      for (const e of m.events) {
+        if (e.type === 'projectileHit') say(`projectile ${e.id} hit collider ${e.a}${e.b < 0 ? ' and stopped' : ` (${e.b.toFixed(2)} m through)`}`);
+        else if (e.type !== 'projectileStopped') say(`character ${e.id} ${e.type}`);
+      }
+    }
+
+    function updateCamera(dt) {
+      if (scene === 'character' && S.motion?.characters[S.player]) {
+        const p = S.motion.characters[S.player].position;
+        const k = Math.min(1, dt * 8);
+        cam.target = cam.target.map((x, i) => x + ([p[0], p[1] + 0.8, p[2]][i] - x) * k);
+      }
+      if (!depth || depth.width !== canvas.width || depth.height !== canvas.height) {
+        depth?.destroy();
+        depth = device.createTexture({ size: [canvas.width, canvas.height], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT });
+      }
+      const eye = eyeOf();
+      frameF.set(viewProj(eye, cam.target, canvas.width / canvas.height), 0);
+      frameF.set([...eye, 0], 16);
+      frameF.set([0.4, 0.85, 0.3, 0], 20);
+      device.queue.writeBuffer(frameBuf, 0, frameF);
+    }
+    function drawScene(enc) {
+      const rp = enc.beginRenderPass({
+        colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.55, 0.62, 0.72, 1], loadOp: 'clear', storeOp: 'store' }],
+        depthStencilAttachment: { view: depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
+      });
+      rp.setPipeline(groundPipe); rp.setBindGroup(0, groundBind); rp.setVertexBuffer(0, groundVbo); rp.draw(6);
+      rp.setPipeline(colPipe); rp.setBindGroup(0, colBind); rp.setVertexBuffer(0, cubeVbo); rp.draw(36, world.colliderCount - 1);
+      if (world.projectileCount) { rp.setPipeline(shotPipe); rp.setBindGroup(0, shotBind); rp.setVertexBuffer(0, cubeVbo); rp.draw(36, world.projectileCount); }
+      rp.end();
+    }
+
+    // ---------------------------------------------------------------- loop
+    let lastT = performance.now();
+    let fpsAcc = 0, fpsN = 0, fpsShow = 0;
+    const frameF = new Float32Array(24);
+    let manual = false;
+    let autoFire = qs.get('autofire') !== '0';
+    function frame(now) {
+      const dt = Math.min(0.05, (now - lastT) / 1000);
+      lastT = now;
+      fpsAcc += dt; fpsN++;
+      if (fpsAcc > 0.5) { fpsShow = fpsN / fpsAcc; fpsAcc = 0; fpsN = 0; }
+      if (rbFree.length === 0 || manual) { if (manual) { updateCamera(dt); const e = device.createCommandEncoder(); drawScene(e); device.queue.submit([e.finish()]); } requestAnimationFrame(frame); return; }
+      // Demo cadence: a volley every 3 s in the gallery, a burst every 2 s on the range.
+      if (autoFire && scene === 'ccd' && world.steps % 180 === 20) fireVolley();
+      if (autoFire && scene === 'bullets' && world.steps % 120 === 20) fire();
+      updateCamera(dt);
+      const enc = device.createCommandEncoder();
+      stepOnce(enc);
+      drawScene(enc);
+      const rb = rbFree.pop();
+      encodeReadback(enc, rb);
+      device.queue.submit([enc.finish()]);
+      rb.mapAsync(GPUMapMode.READ).then(() => { decode(rb); rbFree.push(rb); updateHud(); }).catch(fail);
+      pollMotion();
+      statusEl.textContent = `step ${world.steps} · ${fpsShow.toFixed(0)} fps`;
+      requestAnimationFrame(frame);
+    }
+
+    // ---------------------------------------------------------------- automation
+    // __step(n): n physics steps without rendering; returns counters and tracked bodies.
+    window.__step = async (n = 1) => {
+      manual = true;
+      for (let i = 0; i < n; i++) {
+        const enc = device.createCommandEncoder();
+        stepOnce(enc);
+        device.queue.submit([enc.finish()]);
+        // Counters feed the next step's plan (warm hash, colour headroom).
+        if (i % 8 === 7 || i === n - 1) {
+          while (rbFree.length === 0) await new Promise((r) => setTimeout(r, 2));
+          const rb = rbFree.pop();
+          const e2 = device.createCommandEncoder();
+          encodeReadback(e2, rb);
+          device.queue.submit([e2.finish()]);
+          await rb.mapAsync(GPUMapMode.READ);
+          decode(rb);
+          rbFree.push(rb);
+        }
+      }
+      handleMotion(await world.readMotion());
+      updateHud();
+      updateCamera(0);
+      const e3 = device.createCommandEncoder();
+      drawScene(e3);
+      device.queue.submit([e3.finish()]);
+      return { steps: world.steps, counters: lastCounters };
+    };
+    // __check(): the scene's end-to-end script, run frame-locked; returns metrics.
+    window.__check = async () => {
+      manual = true;
+      autoFire = false;
+      if (scene === 'ccd') {
+        await window.__step(5);
+        fireVolley();
+        await window.__step(90);
+        const lanes = S.lanes.map((L) => {
+          const st = (side) => bodyState.get(L[side]);
+          return { name: L.name, control: L.result.control, ccd: L.result.ccd, controlZ: st('control').p[2], ccdZ: st('ccd').p[2] };
+        });
+        return { scene, speed: shotSpeed, lookAhead, lanes, showerThrough: { control: S.shower.controlThrough, ccd: S.shower.ccdThrough }, counters: lastCounters };
+      }
+      if (scene === 'bullets') {
+        await window.__step(5);
+        fire();
+        await window.__step(10);
+        const hits = S.log.filter((l) => l.includes('hit collider'));
+        return { scene, projectiles: S.motion.projectiles, hitLines: hits, targets: S.targets.map((t) => bodyState.get(t)) };
+      }
+      // Character: walk to the stairs and up them, jump on top, ride the platform.
+      S.scripted = true;
+      const ground = [];
+      const walk = async (v, n) => { world.setCharacterInput(S.player, v, jumpSeq); for (let i = 0; i < n; i += 4) { await window.__step(4); ground.push(S.motion.characters[S.player].ground); } };
+      await walk([0, 0, 0], 30);
+      // From (0, 0) to the stairs' lane (z = 6), then up the stairs along +x.
+      await walk([0, 0, 3], 120);
+      const atLane = S.motion.characters[S.player].position.slice();
+      await walk([3, 0, 0], 200);
+      const top = S.motion.characters[S.player];
+      jumpSeq++;
+      await walk([0, 0, 0], 60);
+      return { scene, atLane, top: { position: top.position, ground: top.ground }, grounds: ground, events: S.log.slice(0, 12), counters: lastCounters };
+    };
+    window.__world = world;
+    window.__scene = S;
+    window.__ready = true;
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>

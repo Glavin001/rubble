@@ -5,6 +5,24 @@ use crate::{ShapeId, SoftHandle, VehicleHandle, World};
 use engine_softbody::SoftSettings;
 use engine_vehicle::{FunctionalState, MountLoad};
 
+/// One beam of a soft body, for beam views and damage maps.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SoftBeam {
+    /// Node ordinals within the soft body (as in `SoftOutput::nodes`).
+    pub node_a: u32,
+    pub node_b: u32,
+    /// Rest length now (plastic deformation moves it) and at spawn (m).
+    pub rest_length: f32,
+    pub spawn_length: f32,
+    /// Signed axial force at the end of the last step (N; + = compression).
+    pub force: f32,
+    pub broken: bool,
+    /// Yielded (bent) at least once.
+    pub yielded: bool,
+    /// Drawn in the source (`.truck` hidden beams are not).
+    pub visible: bool,
+}
+
 /// A vehicle's mounted thing to sever or switch off.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VehicleDamage {
@@ -95,6 +113,26 @@ impl World {
             .map_err(|e| anyhow::anyhow!("soft obstacle: {e}"))?;
         self.dirty = true;
         Ok(())
+    }
+
+    /// Every beam of a soft body (blocking readback; for beam views).
+    pub fn soft_beams(&self, soft: SoftHandle) -> anyhow::Result<Vec<SoftBeam>> {
+        self.live_soft(soft)?;
+        let first = self.sim.soft_host().entries[soft.0 as usize].first_body;
+        let beams = self.sim.read_soft_beams(soft);
+        Ok(beams
+            .iter()
+            .map(|b| SoftBeam {
+                node_a: b.a - first,
+                node_b: b.b - first,
+                rest_length: b.rest,
+                spawn_length: b.rest0,
+                force: b.force,
+                broken: b.flags & engine_softbody::layout::BEAM_BROKEN != 0,
+                yielded: b.flags & engine_softbody::layout::BEAM_YIELDED != 0,
+                visible: b.flags & engine_softbody::layout::BEAM_INVISIBLE == 0,
+            })
+            .collect())
     }
 
     /// Is this soft body riding its rigid core (rigid mode) right now?

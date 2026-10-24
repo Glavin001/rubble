@@ -7,6 +7,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat3, Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
+pub mod character;
 pub mod commands;
 pub mod mass;
 pub mod convex;
@@ -74,6 +75,16 @@ pub enum BodyFlags {
     Sleeping = 4,
     Awake = 8,
 }
+
+/// `BodyState::flags` bit: continuous collision for this body (`world_step.slang`
+/// BODY_CCD). With look-ahead contacts on (`FLAG_SPEC_VELOCITY`) the body's
+/// reach is not capped, a sweep longer than a grid cell takes the fast list,
+/// and the nearest time of impact along its path places a speculative contact
+/// in the solve and starts the body's iterate at that pose.
+pub const BODY_CCD: u32 = 256; // 64 BODY_PARTICLE, 128 BODY_FOLLOW (engine-softbody)
+/// Motion locks in `BodyState::flags` (world axes): bits 9..11 linear x, y,
+/// z; 12..14 angular x, y, z (above `BODY_CCD`).
+pub const BODY_LOCK_SHIFT: u32 = 9;
 
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,14 +161,15 @@ impl BodyState {
         }
     }
 
-    /// Moves under the solver or its set velocity (the kernels'
-    /// `bodyIsDynamic`): dynamic with mass, or kinematic.
+    /// Moved by the solver (the kernels' `bodyIsDynamic`): dynamic with mass.
     pub fn is_dynamic(&self) -> bool {
-        (self.flags & BodyFlags::Dynamic as u32) != 0 && (self.inv_mass > 0.0 || self.is_kinematic())
+        self.inv_mass > 0.0 && (self.flags & BodyFlags::Dynamic as u32) != 0
     }
 
+    /// Moved by its set velocity, never by the solver (the kernels'
+    /// `bodyIsKinematic`): `Kinematic` without `Dynamic`, zero inverse mass.
     pub fn is_kinematic(&self) -> bool {
-        self.flags & BodyFlags::Kinematic as u32 != 0
+        self.flags & (BodyFlags::Kinematic as u32 | BodyFlags::Dynamic as u32) == BodyFlags::Kinematic as u32
     }
 
     /// Moves at all (mass or kinematic flag): host-side broadphase sizing.
@@ -246,8 +258,105 @@ pub struct Manifold {
 /// joint count.)
 pub const EVENT_RING_BASE: u32 = 96;
 pub const EVENT_RING_CAPACITY: u32 = 1024;
-/// Total `u32` words of the scratch-atomics buffer (host words, lists, ring).
-pub const SCRATCH_WORDS: u32 = LARGE_STATIC_BASE + LARGE_STATIC_CAP;
+
+/// Continuous-collision scratch (`ccd_step.slang`), after the oversized-static
+/// list: CCD body count, fast-collider count, impulse count, TOI fallbacks.
+pub const CCD_BASE: u32 = LARGE_STATIC_BASE + LARGE_STATIC_CAP;
+pub const CCD_BODY_COUNT: u32 = CCD_BASE;
+pub const FAST_COUNT: u32 = CCD_BASE + 1;
+pub const IMPULSE_COUNT: u32 = CCD_BASE + 2;
+/// TOI casts that left their pair to look-ahead this step (GJK budget).
+pub const CCD_FALLBACKS: u32 = CCD_BASE + 3;
+/// Host impulse records this step (`apply_impulses`' late pass starts after them).
+pub const IMPULSE_FIRST: u32 = CCD_BASE + 4;
+/// Awake `BODY_CCD` bodies a step can hold; more set `OVERFLOW_CCD_BODIES`.
+pub const CCD_BODY_CAP: u32 = 1024;
+/// Four words per CCD body: body, min TOI bits, winning candidate, flags.
+pub const CCD_BODY_BASE: u32 = CCD_BASE + 8;
+/// Colliders whose sweep is longer than a grid cell (fast list); more set
+/// `OVERFLOW_FAST_LIST`.
+pub const FAST_CAP: u32 = 16384;
+pub const FAST_BASE: u32 = CCD_BODY_BASE + 4 * CCD_BODY_CAP;
+/// Impulse records a step applies (`apply_impulses`); more set `OVERFLOW_IMPULSES`.
+pub const IMPULSE_CAP: u32 = 1024;
+pub const IMPULSE_WORDS: u32 = 8;
+pub const IMPULSE_BASE: u32 = FAST_BASE + FAST_CAP;
+/// Per CCD slot (`ccd_mark` → `ccd_respond`): the CCD body's step-start velocity,
+/// its winning candidate, its dynamic TOI partner's step-start velocity and the
+/// partner (words 0-7, 9) — the impact's momentum exchange along the TOI normal;
+/// the post-solve sweep check's first contact, first static contact, clamped
+/// flag and the velocity the clamp leaves (words 8, 10, 11, 12-14); the impact
+/// response's flag and the striker's and partner's velocity changes (16-28).
+pub const CCD_CARRY_BASE: u32 = IMPULSE_BASE + IMPULSE_WORDS * IMPULSE_CAP;
+pub const CCD_CARRY_WORDS: u32 = 32;
+/// Candidate pairs involving a CCD body this step (colliders A, B), listed by
+/// `ccd_pick` for the post-solve sweep check (the candidate buffer is reused by
+/// the constraint graph after the narrowphase); the count is `CCD_PAIR_COUNT`.
+pub const CCD_PAIR_COUNT: u32 = CCD_BASE + 5;
+/// Largest |v|·h of this step's CCD bodies (f32 bits; `ccd_trust`).
+pub const CCD_MAX_REACH: u32 = CCD_BASE + 6;
+pub const CCD_PAIR_CAP: u32 = 131072;
+pub const CCD_PAIR_BASE: u32 = CCD_CARRY_BASE + CCD_CARRY_WORDS * CCD_BODY_CAP;
+/// Impulse record modes (low 8 bits of `mode`; the rest is the record's sum
+/// order key): an impulse at a world point (dynamic bodies), or a kinematic
+/// body's new velocity (`j` linear, `point` angular).
+pub const IMPULSE_AT_POINT: u32 = 0;
+pub const IMPULSE_SET_VELOCITY: u32 = 1;
+/// A linear impulse `j` through the centre of mass and an angular impulse
+/// (world, N·m·s) in `point`.
+pub const IMPULSE_LINEAR_ANGULAR: u32 = 2;
+
+/// One `apply_impulses` record (`[body, mode, J.xyz, point.xyz]`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub struct ImpulseRecord {
+    pub body: u32,
+    pub mode: u32,
+    pub j: [f32; 3],
+    pub point: [f32; 3],
+}
+
+impl ImpulseRecord {
+    pub fn at_point(body: u32, j: [f32; 3], point: [f32; 3]) -> Self {
+        Self { body, mode: IMPULSE_AT_POINT, j, point }
+    }
+    pub fn set_velocity(body: u32, linear: [f32; 3], angular: [f32; 3]) -> Self {
+        Self { body, mode: IMPULSE_SET_VELOCITY, j: linear, point: angular }
+    }
+    pub fn linear_angular(body: u32, linear: [f32; 3], angular: [f32; 3]) -> Self {
+        Self { body, mode: IMPULSE_LINEAR_ANGULAR, j: linear, point: angular }
+    }
+}
+/// Contact events (opt-in `contact_events` pass): after the large-static
+/// list, a header word counting the records appended this step (the host
+/// zeroes it), three spare words, then up to `CONTACT_EVENT_CAP` records of
+/// `CONTACT_EVENT_WORDS`: `[colliderA, colliderB, approach speed, 0]`,
+/// `[point, 0]`, `[normal, 0]`. Counts past the capacity are reported lost.
+/// (After the continuous-collision region.)
+pub const CONTACT_EVENT_BASE: u32 = CCD_PAIR_BASE + 2 * CCD_PAIR_CAP;
+pub const CONTACT_EVENT_CAP: u32 = 2048;
+pub const CONTACT_EVENT_WORDS: u32 = 12;
+/// `Collider.material` bits 12..15 (the index uses 0..11, the filter group
+/// 16..31): the shape reports contact events, hit events, or is a sensor.
+pub const COLLIDER_CONTACT_EVENTS: u32 = 1 << 12;
+pub const COLLIDER_HIT_EVENTS: u32 = 1 << 13;
+pub const COLLIDER_SENSOR: u32 = 1 << 14;
+/// Overlap queries (P5): after the contact events, `[query count, result
+/// count (the host zeroes it), 0, 0]`, then `QUERY_CAP` queries of 8 words
+/// `[min, category bits]`, `[max, mask bits]`, then up to `QUERY_RESULT_CAP`
+/// results of 2 words `[query, collider]`.
+pub const QUERY_BASE: u32 = CONTACT_EVENT_BASE + 4 + CONTACT_EVENT_WORDS * CONTACT_EVENT_CAP;
+pub const QUERY_CAP: u32 = 32;
+pub const QUERY_RESULT_BASE: u32 = QUERY_BASE + 4 + 8 * QUERY_CAP;
+pub const QUERY_RESULT_CAP: u32 = 8192;
+/// Explosions (P4 `explode`): `[count, 0, 0, 0]`, then `EXPLODE_CAP` records
+/// of 8 words `[centre, radius]`, `[falloff, impulse per area, mask bits, 0]`.
+pub const EXPLODE_BASE: u32 = QUERY_RESULT_BASE + 2 * QUERY_RESULT_CAP;
+pub const EXPLODE_CAP: u32 = 16;
+/// Total `u32` words of the scratch-atomics buffer (host words, lists, ring,
+/// continuous-collision lists, impulse records and carried CCD velocities,
+/// contact events, queries, explosions).
+pub const SCRATCH_WORDS: u32 = EXPLODE_BASE + 4 + 8 * EXPLODE_CAP;
 /// Scratch word of the oversized-static count (uniform grid; see `LARGE_STATIC_CAP`).
 pub const LARGE_STATIC_COUNT: u32 = 80;
 /// First scratch word of the oversized-static collider ids, after the event ring.
@@ -388,6 +497,20 @@ pub const OVERFLOW_WARM_HASH: u32 = 256;
 /// More oversized statics than `LARGE_STATIC_CAP`: some are found only by the
 /// endpoint probes.
 pub const OVERFLOW_LARGE_STATICS: u32 = 512;
+/// More fast (long-sweep) colliders than `FAST_CAP`, or a sweep crossing more
+/// grid cells than the fast query walks.
+pub const OVERFLOW_FAST_LIST: u32 = 1024;
+/// Uniform grid: more than 16 dynamics wider than a cell (the 17th is never found).
+pub const OVERFLOW_LARGE_DYNAMICS: u32 = 2048;
+/// More awake `BODY_CCD` bodies than `CCD_BODY_CAP`.
+pub const OVERFLOW_CCD_BODIES: u32 = 4096;
+/// More impulse records than `IMPULSE_CAP` in one step.
+pub const OVERFLOW_IMPULSES: u32 = 8192;
+/// More candidate pairs of CCD bodies than `CCD_PAIR_CAP` (the post-solve sweep
+/// check would miss some).
+pub const OVERFLOW_CCD_PAIRS: u32 = 32768;
+/// A character gathered more colliders than `character::CHAR_MAX_CANDIDATES`.
+pub const OVERFLOW_CHAR_CANDIDATES: u32 = 16384;
 /// Oversized-static list (statics wider than half a grid cell, uniform grid):
 /// this many collider ids in the scratch-atomics buffer at `LARGE_STATIC_BASE`.
 pub const LARGE_STATIC_CAP: u32 = 1024;
@@ -437,5 +560,6 @@ mod tests {
         assert_eq!(size_of::<StepCounters>(), 80);
         assert_eq!(size_of::<Joint>(), 288);
         assert_eq!(align_of::<BodyState>(), 4);
+        assert_eq!(size_of::<ImpulseRecord>(), 4 * IMPULSE_WORDS as usize);
     }
 }

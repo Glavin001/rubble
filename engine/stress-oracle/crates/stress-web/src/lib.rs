@@ -167,7 +167,7 @@ pub async fn stress_init(canvas: web_sys::HtmlCanvasElement) -> Result<(), JsVal
     let instance = wgpu::Instance::new(desc);
     let surface = instance.create_surface(wgpu::SurfaceTarget::Canvas(canvas)).map_err(|e| JsValue::from_str(&format!("canvas surface: {e}")))?;
     let gpu = Gpu::with_instance(&instance, Some(&surface)).await.map_err(|e| JsValue::from_str(&e))?;
-    let caps = surface.get_capabilities(&gpu.adapter);
+    let caps = surface.get_capabilities(gpu.surface_adapter());
     let format = caps.formats.first().copied().ok_or_else(|| JsValue::from_str("the canvas offers no format"))?.remove_srgb_suffix();
     let view_format = format.add_srgb_suffix();
     let config = wgpu::SurfaceConfiguration {

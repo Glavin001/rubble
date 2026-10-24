@@ -12,8 +12,9 @@
 //! a renderer never rebuilds meshes when pieces split.
 //!
 //! Strength models: `Bonds` (breakable AVBD bond joints; every chunk is a
-//! body; the fracture lab's model) ships now. `Threshold` (the GPU-resident
-//! splitter, `GpuFracture`) is the next step and is refused until then.
+//! body; the fracture lab's model) and `Threshold` (the lab's GPU-resident
+//! splitter, `GpuFracture`: bonded clusters are bodies that split on the GPU;
+//! `crate::threshold`, with the `stress` feature).
 
 use crate::defs::{BodyDef, BodyType, Geometry, MassData, ShapeDef};
 use crate::error::unsupported;
@@ -80,6 +81,10 @@ pub struct DestructibleAssetDesc {
     /// them (`WorldDef::solver`, and `gravity` from `gravity_y`) behaves as
     /// the lab does; the asset works in any world.
     pub solver: Option<engine_schema::AvbdParams>,
+    /// The stress oracle's import of the same source, for the stress-solver models
+    /// (`StrengthModel::Threshold`). The loaders fill it with the `stress` feature;
+    /// its chunks (and their indices in a placed instance) are the oracle's.
+    pub stress: Option<crate::StressSource>,
 }
 
 /// The fracture lab's scene parameters as world solver settings.
@@ -129,6 +134,14 @@ impl DestructibleAssetDesc {
         let asset = engine_fracture::parse_fracture_glb(bytes)?;
         let scene = engine_fracture::build_scene(&asset, level, None)?;
         let mut desc = Self::from_scene(&scene)?;
+        #[cfg(feature = "stress")]
+        {
+            desc.stress = Some(crate::StressSource::from_glb(
+                &asset,
+                level,
+                scene.placement,
+            ));
+        }
         let nodes: HashMap<u32, (u32, Option<u32>)> = scene
             .body_of
             .iter()
@@ -158,13 +171,42 @@ impl DestructibleAssetDesc {
     pub fn from_pack(bytes: &[u8]) -> anyhow::Result<Self> {
         let (scene, info) = engine_fracture::pack::build_pack_scene(bytes)?;
         let mut desc = Self::from_scene(&scene)?;
+        #[cfg(feature = "stress")]
+        {
+            desc.stress = Some(crate::StressSource::from_pack(
+                bytes,
+                &info.key,
+                scene.placement,
+            ));
+        }
         desc.name = Some(info.title);
         Ok(desc)
     }
 
     /// A procedural house of boxes (the fracture lab's cuboid scenes).
     pub fn cuboid_house(options: &engine_fracture::cuboid::CuboidOptions) -> anyhow::Result<Self> {
-        Self::from_scene(&engine_fracture::cuboid::build_cuboid_house(options)?)
+        let scene = engine_fracture::cuboid::build_cuboid_house(options)?;
+        #[allow(unused_mut)]
+        let mut desc = Self::from_scene(&scene)?;
+        #[cfg(feature = "stress")]
+        {
+            desc.stress = Some(crate::StressSource::cuboid_house(options, scene.placement));
+        }
+        Ok(desc)
+    }
+
+    /// The solver settings the source was tuned with for `model`: the lab's for
+    /// `Bonds` ([`Self::solver`]); for `Threshold`, the lab's threshold mode's
+    /// (never asleep, zero-gap contact, world inertia, 4 iterations, the stress
+    /// scene's 60 Hz frame).
+    pub fn solver_for(&self, model: StrengthModel) -> Option<engine_schema::AvbdParams> {
+        match model {
+            StrengthModel::Bonds => self.solver,
+            #[cfg(feature = "stress")]
+            StrengthModel::Threshold => self.stress.as_ref().and_then(|s| s.threshold_solver()),
+            #[cfg(not(feature = "stress"))]
+            StrengthModel::Threshold => None,
+        }
     }
 
     /// Any fracture-lab scene (`engine_fracture::Scene`): body 0 is its
@@ -275,6 +317,7 @@ impl DestructibleAssetDesc {
             bonds,
             preload: None,
             solver: Some(lab_solver(&scene.params)),
+            stress: None,
         };
         desc.validate()?;
         Ok(desc)
@@ -321,8 +364,12 @@ pub enum StrengthModel {
     /// compression, shear and bending capacities.
     #[default]
     Bonds,
-    /// The GPU-resident threshold splitter (`GpuFracture`): bonded clusters
-    /// are single bodies that split on the GPU. Not yet in `World`.
+    /// The fracture lab's `threshold` mode, GPU-resident (`GpuFracture`):
+    /// bonded clusters are single bodies; contact and impact loads (with
+    /// strike prediction for projectiles, `World::body_set_projectile`) break
+    /// bonds whose tensile capacity they exceed, and bodies split on the GPU
+    /// into slots reserved at placement. Needs the asset's stress source and
+    /// the `stress` feature.
     Threshold,
 }
 
@@ -408,6 +455,27 @@ pub(crate) struct DestructibleSlot {
     pub bond_intact: Vec<bool>,
     /// Chunk -> actor label (the lowest chunk index in its component).
     pub actor: Vec<u32>,
+    pub model: StrengthModel,
+    /// The threshold model's fracture slot (`World::fracture`).
+    pub threshold: Option<u32>,
+}
+
+impl DestructibleSlot {
+    fn empty() -> Self {
+        Self {
+            generation: 0,
+            alive: false,
+            asset: 0,
+            user_data: 0,
+            chunk_bodies: Vec::new(),
+            anchor_body: None,
+            bond_joints: Vec::new(),
+            bond_intact: Vec::new(),
+            actor: Vec::new(),
+            model: StrengthModel::Bonds,
+            threshold: None,
+        }
+    }
 }
 
 impl World {
@@ -525,15 +593,15 @@ impl World {
     /// Place a destructible: one body per chunk (body origin = the instance
     /// frame), its shapes, and its bonds.
     pub fn create_destructible(&mut self, def: &DestructibleDef) -> anyhow::Result<DestructibleId> {
-        if def.model == StrengthModel::Threshold {
-            return unsupported("the Threshold strength model in World (D1b: GpuFracture)");
-        }
         def.shape.validate()?;
         let asset = self
             .assets
             .get(def.asset.0 as usize)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("unknown destructible asset {}", def.asset.0))?;
+        if def.model == StrengthModel::Threshold {
+            return self.create_threshold_destructible(def, asset);
+        }
         let instance = def.transform;
         let body_defs: Vec<BodyDef> = asset
             .chunks
@@ -631,17 +699,7 @@ impl World {
         let index = match self.destructibles.iter().position(|d| !d.alive) {
             Some(i) => i,
             None => {
-                self.destructibles.push(DestructibleSlot {
-                    generation: 0,
-                    alive: false,
-                    asset: 0,
-                    user_data: 0,
-                    chunk_bodies: Vec::new(),
-                    anchor_body: None,
-                    bond_joints: Vec::new(),
-                    bond_intact: Vec::new(),
-                    actor: Vec::new(),
-                });
+                self.destructibles.push(DestructibleSlot::empty());
                 self.destructibles.len() - 1
             }
         };
@@ -687,15 +745,63 @@ impl World {
         slot.bond_intact = bond_joints.iter().map(|j| j.is_some()).collect();
         slot.bond_joints = bond_joints;
         slot.actor = vec![0; n];
+        slot.model = StrengthModel::Bonds;
+        slot.threshold = None;
         let id = DestructibleId::new(index as u32, slot.generation);
         let actors = self.actors(index);
         self.destructibles[index].actor = actors;
         Ok(id)
     }
 
+    #[cfg(feature = "stress")]
+    fn create_threshold_destructible(
+        &mut self,
+        def: &DestructibleDef,
+        asset: Arc<DestructibleAssetDesc>,
+    ) -> anyhow::Result<DestructibleId> {
+        let index = match self.destructibles.iter().position(|d| !d.alive) {
+            Some(i) => i,
+            None => {
+                self.destructibles.push(DestructibleSlot::empty());
+                self.destructibles.len() - 1
+            }
+        };
+        self.create_threshold(def, asset, index)?;
+        let slot = &mut self.destructibles[index];
+        slot.generation = slot.generation.wrapping_add(1).max(1);
+        slot.alive = true;
+        slot.asset = def.asset.0;
+        slot.user_data = def.user_data;
+        slot.anchor_body = None;
+        slot.actor = crate::threshold::actor_labels(
+            &slot
+                .chunk_bodies
+                .iter()
+                .map(|b| b.index())
+                .collect::<Vec<_>>(),
+        );
+        Ok(DestructibleId::new(index as u32, slot.generation))
+    }
+
+    #[cfg(not(feature = "stress"))]
+    fn create_threshold_destructible(
+        &mut self,
+        _def: &DestructibleDef,
+        _asset: Arc<DestructibleAssetDesc>,
+    ) -> anyhow::Result<DestructibleId> {
+        unsupported("StrengthModel::Threshold without the engine-world `stress` feature")
+    }
+
     /// Remove a destructible: its bodies, shapes and bonds.
     pub fn destroy_destructible(&mut self, id: DestructibleId) -> anyhow::Result<()> {
         let i = self.live_destructible(id)?;
+        #[cfg(feature = "stress")]
+        if let Some(k) = self.destructibles[i].threshold.take() {
+            let slot = &mut self.destructibles[i];
+            slot.alive = false;
+            slot.chunk_bodies.clear();
+            return self.destroy_threshold(k as usize);
+        }
         let slot = &mut self.destructibles[i];
         slot.alive = false;
         let bodies = std::mem::take(&mut slot.chunk_bodies);
@@ -727,9 +833,9 @@ impl World {
     }
 
     /// The chunk's fixed transform relative to its body (render contract:
-    /// chunk world transform = body transform * this). Identity in the
-    /// `Bonds` model, where every body origin is the instance frame and chunk
-    /// meshes are authored in the asset frame.
+    /// chunk world transform = body transform * this). Identity in both
+    /// models: every body origin is the instance frame (in `Threshold`, every
+    /// piece's too) and chunk meshes are authored in the asset frame.
     pub fn destructible_chunk_local(
         &self,
         id: DestructibleId,
@@ -750,6 +856,10 @@ impl World {
         chunk: u32,
     ) -> anyhow::Result<Option<u32>> {
         let d = &self.destructibles[self.live_destructible(id)?];
+        #[cfg(feature = "stress")]
+        if let Some(k) = d.threshold {
+            return self.threshold_chunk_node(k as usize, chunk);
+        }
         Ok(self.assets[d.asset as usize]
             .chunks
             .get(chunk as usize)
@@ -765,6 +875,10 @@ impl World {
     ) -> anyhow::Result<ActorInfo> {
         let i = self.live_destructible(id)?;
         let d = &self.destructibles[i];
+        #[cfg(feature = "stress")]
+        if let Some(k) = d.threshold {
+            return self.threshold_actor(k as usize, chunk);
+        }
         let label = *d
             .actor
             .get(chunk as usize)
