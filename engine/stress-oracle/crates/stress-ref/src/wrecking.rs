@@ -236,13 +236,15 @@ pub fn structure(key: &str) -> Option<Structure> {
         "ft_apartment_block" => Some(crate::buildings::apartment_block()),
         "ft_glass_tower" => Some(crate::buildings::glass_tower()),
         "sb_skybridge" => Some(crate::skybridge::skybridge()),
-        _ => None,
+        // The scenes with vehicles (`vehicles`): their structure, vehicles included.
+        other => crate::vehicles::scene(other).map(|s| s.structure),
     }
 }
 
 /// A structure's scene pack, by key.
 pub fn pack(key: &str) -> Option<Value> {
-    structure(key).map(|s| to_pack(&s))
+    // A scene with vehicles carries their masses and launches (`vehicles::Scene::to_pack`).
+    crate::vehicles::pack(key).or_else(|| structure(key).map(|s| to_pack(&s)))
 }
 
 /// The line of attack a pack carries (`defaults.wreckingYard`), in the stress scene's
@@ -283,12 +285,22 @@ fn xyz(v: [f64; 3]) -> Value {
 ///   355 MPa in tension and compression, shear yield f_y / sqrt(3) = 205 MPa
 ///   (EN 1993-1-1 6.2.6), a ductile bond (`BondKind::Ductile`) with a fracture energy of
 ///   200 kJ/m^2 (ductile tearing of structural steel, J_Ic of order 100-300 kJ/m^2).
+/// * Vehicles' (`vehicles`), smeared over their chunks (each metal's own values times its
+///   solidity, cited in `material.rs`): `sheet-steel` (a road vehicle's body shell,
+///   HC340LA to EN 10268) with `spot-weld` seams, and `bolted` attachments (doors, wheels,
+///   bonnets, bumpers: FMVSS 206's hinge and latch loads), weaker than the seams;
+///   `aluminium` (an airliner's 2024-T3 airframe, MMPDS-01) with `riveted` joints.
 pub fn calibrated(asset: &str) -> (Material, Material) {
     match asset {
         "reinforced-concrete" | "footing-anchor" => (Material::concrete(), Material::concrete()),
         "brick" => (Material::brick(), Material::mortar()),
         "glass" => (Material::glass(), Material::glass()),
         "steel" => (Material::steel(), Material::steel()),
+        // Vehicles (`vehicles`): the smeared body shell, its spot-welded seams and its
+        // bolted parts; the smeared airframe and its riveted joints.
+        "sheet-steel" | "spot-weld" => (Material::sheet_steel(), Material::spot_weld()),
+        "bolted" | "wheel" => (Material::sheet_steel(), Material::bolted()),
+        "aluminium" | "riveted" => (Material::aluminium(), Material::riveted()),
         other => panic!("no calibrated material for {other}"),
     }
 }
@@ -436,7 +448,7 @@ pub(crate) fn block(lo: [f64; 3], hi: [f64; 3], material: &str, kind: &str, grou
 }
 
 /// A hull chunk of `points` (world, Z-up), centred on their mean.
-fn hull_chunk(points: &[Vec3], material: &str, kind: &str, group: String) -> ChunkDesc {
+pub(crate) fn hull_chunk(points: &[Vec3], material: &str, kind: &str, group: String) -> ChunkDesc {
     let c = points.iter().fold(Vec3::ZERO, |a, p| a + *p) * (1.0 / points.len() as f64);
     let local: Vec<Vec3> = points.iter().map(|p| *p - c).collect();
     let half = local.iter().fold(Vec3::ZERO, |a, p| a.component_max(p.abs()));
@@ -461,7 +473,7 @@ pub(crate) fn footing(mut c: ChunkDesc) -> ChunkDesc {
 /// Bonds between every pair of hull (or box) chunks with faces touching over an area:
 /// the largest shared patch of each pair (`hull::contact_patch`), named by the chunks'
 /// joint material (`joint`).
-fn face_bonds(chunks: &[ChunkDesc], joint: impl Fn(&ChunkDesc, &ChunkDesc) -> String) -> Vec<BondDesc> {
+pub(crate) fn face_bonds(chunks: &[ChunkDesc], joint: impl Fn(&ChunkDesc, &ChunkDesc) -> String) -> Vec<BondDesc> {
     let hulls: Vec<ConvexHull> = chunks
         .iter()
         .map(|c| {

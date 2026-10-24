@@ -84,6 +84,7 @@ pub const GROUPS: &[&str] = &[
     RAM_RAID,
     FLY_THROUGH,
     SKYBRIDGE,
+    CRASH_TEST,
 ];
 
 /// The Scene menu group of the Wrecking Yard structures.
@@ -104,7 +105,11 @@ pub const PACK_GROUPS: &[&str] = &[
     RAM_RAID,
     FLY_THROUGH,
     SKYBRIDGE,
+    CRASH_TEST,
 ];
+
+/// The Scene menu group of the bonded vehicles' crash tests (`stress_ref::vehicles`).
+pub const CRASH_TEST: &str = "Crash test";
 
 /// The Scene menu group of the structures brought down by their demolition charges
 /// (`stress_ref::topple`; the pack's `defaults.charges`).
@@ -155,6 +160,13 @@ pub const PACK_SAMPLES: &[PackSample] = &[
         menu: "Highway viaduct, four spans · 347 chunks",
         label: "viaduct",
     },
+    // The viaduct with stalled traffic on it and under it (`stress_ref::vehicles`).
+    PackSample {
+        key: "bo_viaduct_traffic",
+        group: BRIDGE_OUT,
+        menu: "Highway viaduct with stalled traffic (7 cars, 2 buses) · 871 chunks",
+        label: "viaduct with traffic",
+    },
     PackSample {
         key: "topple_tower",
         group: TOPPLE,
@@ -166,6 +178,19 @@ pub const PACK_SAMPLES: &[PackSample] = &[
         group: RAM_RAID,
         menu: "Storefront row (5 shops) · 1,203 chunks",
         label: "storefront row",
+    },
+    // The same targets with a bonded car and bus to launch at them (`stress_ref::vehicles`).
+    PackSample {
+        key: "rr_vehicles_storefront",
+        group: RAM_RAID,
+        menu: "Storefront row, a car and a bus · 1,341 chunks",
+        label: "storefront row with vehicles",
+    },
+    PackSample {
+        key: "rr_vehicles_apartment",
+        group: RAM_RAID,
+        menu: "Apartment block, a car and a bus · 1,493 chunks",
+        label: "apartment block with vehicles",
     },
     PackSample {
         key: "ft_apartment_block",
@@ -179,11 +204,37 @@ pub const PACK_SAMPLES: &[PackSample] = &[
         menu: "11-storey glass tower · 1,332 chunks",
         label: "glass tower",
     },
+    // The same targets with a bonded airliner thrown at them (`stress_ref::vehicles`).
+    PackSample {
+        key: "ft_airliner_tower",
+        group: FLY_THROUGH,
+        menu: "Glass tower and an airliner at 70 m/s · 1,368 chunks",
+        label: "glass tower with an airliner",
+    },
+    PackSample {
+        key: "ft_airliner_apartment",
+        group: FLY_THROUGH,
+        menu: "Apartment block and an airliner at 70 m/s · 1,391 chunks",
+        label: "apartment block with an airliner",
+    },
     PackSample {
         key: "sb_skybridge",
         group: SKYBRIDGE,
         menu: "Skybridge between two towers, with charges · 992 chunks",
         label: "skybridge",
+    },
+    // Bonded vehicles launched at a rigid barrier (`stress_ref::vehicles`).
+    PackSample {
+        key: "vh_car_barrier",
+        group: CRASH_TEST,
+        menu: "Car into a barrier at 56 km/h · 51 chunks",
+        label: "car crash test",
+    },
+    PackSample {
+        key: "vh_bus_barrier",
+        group: CRASH_TEST,
+        menu: "Bus into a barrier at 56 km/h · 88 chunks",
+        label: "bus crash test",
     },
 ];
 

@@ -9,11 +9,15 @@ use engine_fracture::samples::{pack_sample_json, GROUPS, PACK_GROUPS, PACK_SAMPL
 
 #[test]
 fn pack_samples_build_as_lab_scenes() {
-    let keys: Vec<&str> = PACK_SAMPLES.iter().map(|s| s.key).collect();
-    let structures: Vec<&str> = stress_ref::wrecking::STRUCTURES
+    let mut keys: Vec<&str> = PACK_SAMPLES.iter().map(|s| s.key).collect();
+    // The structures and the scenes with vehicles (`stress_ref::vehicles`), each once.
+    let mut structures: Vec<&str> = stress_ref::wrecking::STRUCTURES
         .iter()
+        .chain(stress_ref::vehicles::SCENES)
         .map(|s| s.0)
         .collect();
+    keys.sort_unstable();
+    structures.sort_unstable();
     assert_eq!(keys, structures);
     assert!(GROUPS.ends_with(PACK_GROUPS), "the pack samples' groups come last");
     // Each group's entries together, in the groups' order.
@@ -90,11 +94,15 @@ fn pack_samples_build_as_lab_scenes() {
             .filter(|b| b.inv_mass > 0.0)
             .map(|b| 1.0 / b.inv_mass as f64)
             .sum();
-        let built: f64 = structure
-            .chunks
-            .iter()
-            .map(stress_ref::wrecking::mass)
-            .sum();
+        // A scene's vehicles weigh their own (`vehicles::Scene::masses`).
+        let built: f64 = match stress_ref::vehicles::scene(s.key) {
+            Some(v) => v.masses.iter().sum(),
+            None => structure
+                .chunks
+                .iter()
+                .map(stress_ref::wrecking::mass)
+                .sum(),
+        };
         assert!(
             (mass - built).abs() < 1e-4 * built,
             "{}: {mass} kg vs {built} kg",

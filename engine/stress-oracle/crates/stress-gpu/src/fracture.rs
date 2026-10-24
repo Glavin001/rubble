@@ -139,6 +139,11 @@ pub struct Shot {
     pub mass: f32,
     /// Plane-strain modulus E'.
     pub modulus: f32,
+    /// None: the sphere is the body's (a ball, centred on its body). Some: a sphere fixed in
+    /// a launched bonded island (`stress_ref::launch::Strike`), its centre at this point of
+    /// the body's structure frame, moving with the body (its velocity there, spin
+    /// included). A body's own chunks are never its strike's.
+    pub at: Option<[f32; 3]>,
 }
 
 #[repr(C)]
@@ -446,7 +451,7 @@ impl GpuFracture {
         if !g.is_empty() {
             gpu.queue.write_buffer(&geometry, 0, bytemuck::cast_slice(&g));
         }
-        let shots = storage_bytes(gpu, "fracture strike shots", 32 * MAX_SHOTS as u64, wgpu::BufferUsages::empty());
+        let shots = storage_bytes(gpu, "fracture strike shots", 48 * MAX_SHOTS as u64, wgpu::BufferUsages::empty());
         let kernels = ENTRIES.iter().map(|entry| gpu.compute(&shaders::FRACTURE, entry, &BINDINGS)).collect();
         let mut f = GpuFracture {
             layout,
@@ -620,7 +625,13 @@ impl GpuFracture {
         if !shots.is_empty() && self.layout.n > 0 && self.geometry.size() < 48 * self.layout.n as u64 {
             return Err("fracture: shots set without strike geometry".into());
         }
-        let words: Vec<[f32; 4]> = shots.iter().flat_map(|s| [[f32::from_bits(s.body), s.bound, s.face, s.mass], [s.modulus, 0.0, 0.0, 0.0]]).collect();
+        let words: Vec<[f32; 4]> = shots
+            .iter()
+            .flat_map(|s| {
+                let at = s.at.map_or([0.0; 4], |p| [p[0], p[1], p[2], 1.0]);
+                [[f32::from_bits(s.body), s.bound, s.face, s.mass], [s.modulus, 0.0, 0.0, 0.0], at]
+            })
+            .collect();
         if !words.is_empty() {
             gpu.queue.write_buffer(&self.shots, 0, bytemuck::cast_slice(&words));
         }
@@ -709,6 +720,17 @@ impl GpuFracture {
     pub fn bonds_intact(&self, gpu: &Gpu) -> Vec<bool> {
         let w: Vec<u32> = gpu.read_range(&self.work, self.layout.w_alive() as usize, self.layout.e as usize);
         w.into_iter().map(|x| x != 0).collect()
+    }
+
+    /// Diagnostic read: each body slot's strike of the last frame (`fracture.slang`
+    /// `strike_at`: the shot's centre and its number + 1, 0 for none; its velocity relative
+    /// to the body and its entry time; the contact point and force) and its strike words
+    /// (`a_strike`: bounds, entry time, distance, entry chunk).
+    pub fn strike_records(&self, gpu: &Gpu) -> (Vec<[[f32; 4]; 3]>, Vec<[u32; 9]>) {
+        let at = 2 * self.layout.b as usize + 9 * self.layout.n as usize;
+        let f: Vec<[f32; 4]> = gpu.read_range(&self.frames, at, 3 * self.layout.b as usize);
+        let w: Vec<u32> = gpu.read_range(&self.atom, self.layout.a_strike() as usize, 9 * self.layout.b as usize);
+        (f.chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect(), w.chunks_exact(9).map(|p| std::array::from_fn(|i| p[i])).collect())
     }
 
     /// Diagnostic read: each engine body slot's frame (centre of mass and principal

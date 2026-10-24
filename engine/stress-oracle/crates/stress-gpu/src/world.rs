@@ -429,6 +429,48 @@ impl GpuWorld {
         Ok(live.len())
     }
 
+    /// Launch a free bonded island between frames (a pack's `defaults.launches`,
+    /// `stress_ref::launch`): every free cluster of structure `structure` made of `chunks`
+    /// alone gets the island's rigid motion (`velocity + angular x (c - c_island)` at its
+    /// centre of mass `c`, the spin `angular`), as `cut_bonds` sets a charge's kick: the
+    /// last frame's GPU splits followed, the engine's motion taken, the solver's tables
+    /// rebuilt and the bodies written back to the engine (forward: nothing is stepped
+    /// again). No strike is predicted for the island: its contacts load the stress solve
+    /// after the engine's step, as every contact does. Needs the resident engine. Returns the
+    /// clusters set moving; an error when none is made of these chunks alone.
+    pub fn launch_island(&mut self, gpu: &Gpu, structure: usize, chunks: &[usize], velocity: [f64; 3], angular: [f64; 3]) -> Result<usize, String> {
+        if self.resident_engine.is_none() {
+            return Err("launching needs the resident engine".into());
+        }
+        self.flush_pending(gpu)?;
+        self.solver.download(gpu);
+        self.resident_sync_motion();
+        let m = &mut self.solver.mirror;
+        let set: std::collections::HashSet<usize> = chunks.iter().copied().collect();
+        let moving: Vec<usize> = (0..m.clusters.len()).filter(|&ci| !m.clusters[ci].anchored && m.clusters[ci].structure == structure && m.clusters[ci].chunks.iter().all(|c| set.contains(c))).collect();
+        if moving.is_empty() {
+            return Err(format!("structure {structure}: no free cluster is made of these {} chunks alone", chunks.len()));
+        }
+        let mass: f64 = moving.iter().map(|&ci| m.clusters[ci].mass).sum();
+        let com = moving.iter().fold(Vec3::ZERO, |a, &ci| a + m.clusters[ci].com_world() * m.clusters[ci].mass) * (1.0 / mass);
+        let (v, w) = (Vec3::from_array(velocity), Vec3::from_array(angular));
+        for &ci in &moving {
+            let cl = &mut m.clusters[ci];
+            cl.velocity = v + w.cross(cl.com_world() - com);
+            cl.angular_velocity = w;
+            cl.activity = stress_ref::solver::Activity::Active;
+        }
+        // Their motion written to the engine (the others' stays the engine's own).
+        let keys: Vec<BodyKey> = moving.iter().map(|&ci| BodyKey::Cluster(m.clusters[ci].id)).collect();
+        self.solver.rebuild(gpu, 0.0)?;
+        for cl in &mut self.solver.mirror.clusters {
+            cl.driven = true;
+        }
+        self.with_shell_mut(|w| w.coupled_write_back(&keys));
+        self.last_resident = true;
+        Ok(moving.len())
+    }
+
     /// Coupled mode: impact islands on (the default) or off (the engine drives every
     /// body and its contacts reach the stress solve only as loads; `World::impact_islands`).
     /// A capability profile's solver switches (`stress_ref::capability`): its per-tick

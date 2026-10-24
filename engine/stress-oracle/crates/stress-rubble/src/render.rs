@@ -562,6 +562,10 @@ fn material_class(name: &str) -> &str {
 /// materials), sRGB: the shader converts it to linear.
 pub fn material_color(name: &str) -> [f32; 3] {
     match material_class(name) {
+        // Vehicles (`stress_ref::vehicles`): a red body shell, black wheels; the airframe is
+        // aluminium (below).
+        "sheet-steel" => [0.55, 0.06, 0.05],
+        "wheel" => [0.06, 0.06, 0.07],
         "brick" => [0.52, 0.30, 0.25],
         "stone" => [0.70, 0.66, 0.58],
         // Tinted float glass: dark blue-green; the sky's reflection lightens it.

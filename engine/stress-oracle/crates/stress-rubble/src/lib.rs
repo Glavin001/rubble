@@ -43,6 +43,7 @@
 //! rebuilt body; `RubbleEngine::with_capacity` sizes it.
 
 pub mod demolition;
+pub mod launch;
 pub mod scenes;
 #[cfg(feature = "gpu")]
 pub mod ingest_check;

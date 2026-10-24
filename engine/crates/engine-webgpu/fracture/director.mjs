@@ -24,7 +24,8 @@ const TAKE_COLOR = 3;
 export function createDirector(lab) {
   // Shots since the scene loaded: {tick, origin, direction, settings}, {tick, fire: true,
   // settings} for the stress modes' ball along the structure's line of attack, or {tick,
-  // detonate: name} for a pack's demolition charges ('' every charge, each at its delay).
+  // detonate: name} for a pack's demolition charges ('' every charge, each at its delay), or
+  // {tick, launch: name} for a pack's launched bonded bodies ('' every one, each at its delay).
   let shots = [];
   let busy = false;
   // Fractional physics ticks owed (ticks per video frame need not be whole).
@@ -49,6 +50,7 @@ export function createDirector(lab) {
   // The pending shot (a ray in the lab's frame) fired now, as live play does.
   function fire(shot) {
     if (shot.detonate !== undefined) return lab.stress.detonate(shot.detonate);
+    if (shot.launch !== undefined) return lab.stress.launch(shot.launch);
     lab.applyShotSettings(shot.settings);
     if (shot.fire) return lab.stress.fire();
     if (lab.stressOn) return lab.stress.shootRay(shot.origin, shot.direction);
@@ -62,6 +64,13 @@ export function createDirector(lab) {
   // frame) moves it, to centre one building of a scene.
   let base = null;
   const relative = (r) => r && [base[0] + r[0], base[1] + r[1], base[2] * r[2]];
+  // `at` / `atTo` (stress modes): the orbit's target as a point of the scene as it was built
+  // (the stress frame, Z-up: a Rust layout's own coordinates), eased from `at` to `atTo`
+  // across the segment: a camera that follows a launched vehicle in.
+  const built = (p) => {
+    const s = lab.stress.stats.placement || [0, 0, 0];
+    return [p[0] + s[0], p[2] + s[1], -p[1] + s[2]];
+  };
   function camera(cam, t) {
     if (!cam) return;
     const from = cam.orbit ?? relative(cam.rel), to = cam.to ?? relative(cam.relTo);
@@ -69,7 +78,11 @@ export function createDirector(lab) {
     const set = lab.stressOn ? lab.stress : lab.renderer;
     const lift = Array.isArray(cam.lift) ? cam.lift[0] + (cam.lift[1] - cam.lift[0]) * t : cam.lift;
     const shift = cam.shift || [0, 0, 0];
-    const target = cam.target || ((lift !== undefined || cam.shift) && base.length >= 6 ? [base[3] + shift[0], base[4] + shift[1] + (lift || 0), base[5] + shift[2]] : []);
+    let target = cam.target || ((lift !== undefined || cam.shift) && base.length >= 6 ? [base[3] + shift[0], base[4] + shift[1] + (lift || 0), base[5] + shift[2]] : []);
+    if (cam.at && lab.stressOn) {
+      const a = built(cam.at), b = cam.atTo ? built(cam.atTo) : a;
+      target = a.map((v, k) => v + (b[k] - v) * t);
+    }
     set.setOrbit(yaw + (cam.spin || 0), pitch, dist, target);
     return [yaw + (cam.spin || 0), pitch, dist, ...target];
   }
@@ -141,7 +154,8 @@ export function createDirector(lab) {
   // shift?: [x, y, z] (the scene's target moved, lab frame)}, act?: 'fire' (the row shot; in the stress modes the ball
   // along the structure's line of attack) | {shoot: [u, v]}
   // (through the viewport) | {ray: [origin, direction]} | {detonate: name} (a pack's
-  // charges; '' sets off every one at its delay), view?: {bonds, color}, mass?,
+  // charges; '' sets off every one at its delay) | {launch: name} (a pack's launched bonded
+  // bodies: a car, a bus, an aircraft; '' every one at its delay), view?: {bonds, color}, mass?,
   // speed? (shot scales, powers of two as the sliders)}.
   async function record(script, opts = {}) {
     await lab.pause();
@@ -166,6 +180,11 @@ export function createDirector(lab) {
           // A Topple pack's charges, cut between frames (stress modes).
           const shot = { tick: tick(), detonate: seg.act.detonate };
           if (!lab.stressOn || !fire(shot)) throw new Error(`take: no charge ${JSON.stringify(seg.act.detonate)} to set off`);
+          shots.push(shot);
+        } else if (seg.act?.launch !== undefined) {
+          // A pack's launched bonded bodies, set moving between frames (stress modes).
+          const shot = { tick: tick(), launch: seg.act.launch };
+          if (!lab.stressOn || !fire(shot)) throw new Error(`take: no launch ${JSON.stringify(seg.act.launch)} to release`);
           shots.push(shot);
         } else if (seg.act === 'fire' && lab.stressOn) {
           // The stress modes' ball along the structure's line of attack (a Wrecking Yard pack's).
@@ -259,6 +278,8 @@ export function createDirector(lab) {
     get shots() { return shots.length; },
     // A pack's charges set off ('' every one), for replays.
     logDetonate(name) { shots.push({ tick: tick(), detonate: name }); },
+    // A pack's launched bonded bodies released ('' every one), for replays.
+    logLaunch(name) { shots.push({ tick: tick(), launch: name }); },
     // The stress modes' ball fired along the line of attack, for replays.
     logFire() { shots.push({ tick: tick(), fire: true, settings: lab.shotSettings() }); },
     // A live shot (click or the row's ball), for replays.

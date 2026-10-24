@@ -109,6 +109,11 @@ thread_local! {
     /// Charges asked for (`stress_detonate`) and not yet set off: the next frame sets them
     /// off at its world's frame (the world may be held by a suspended frame now).
     static DETONATE: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// The loaded pack's launched bonded bodies (`defaults.launches`) and the ones asked for.
+    static LAUNCHER: RefCell<stress_rubble::launch::Launcher> = RefCell::new(Default::default());
+    /// Launches asked for (`stress_launch`) and not yet armed: the next frame arms them at
+    /// its world's frame.
+    static LAUNCH: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// The bonds' strengths as a multiple of the asset's (`stress_set_bond_strength_scale`).
     static STRENGTH_SCALE: Cell<f64> = const { Cell::new(1.0) };
     /// The view (`stress_set_view`): bond graph, colour mode.
@@ -344,6 +349,40 @@ pub fn stress_detonate(name: String) -> bool {
     known
 }
 
+/// The loaded pack's launched bonded bodies (`defaults.launches`, `stress_ref::launch`), as
+/// JSON: `[{name, delay, chunks}]` in the pack's order; empty for a scene without any.
+#[wasm_bindgen]
+pub fn stress_launches() -> String {
+    LAUNCHER.with_borrow(|l| serde_json::Value::from(l.launches.iter().map(|x| serde_json::json!({"name": x.name, "delay": x.delay, "chunks": x.chunks.len()})).collect::<Vec<_>>()).to_string())
+}
+
+/// Launch the loaded pack's bonded body `name`, or with an empty name every one, each its
+/// delay after the next frame starts: its island is set moving between two frames, before
+/// the frame steps (`ThresholdWorld::launch_island`, `GpuWorld::launch_island`; never by
+/// stepping one again). Runs the simulation. False when the scene has no launch of that
+/// name.
+#[wasm_bindgen]
+pub fn stress_launch(name: String) -> bool {
+    let known = LAUNCHER.with_borrow(|l| l.launches.iter().any(|x| name.is_empty() || x.name == name));
+    if known {
+        LAUNCH.with_borrow_mut(|q| q.push(name));
+        RUNNING.set(true);
+    }
+    known
+}
+
+/// The launches asked for since the last frame, released from `frame` (each its delay
+/// later), and those due before it.
+fn launches_due(frame: u64, dt: f64) -> Vec<stress_ref::launch::Launch> {
+    let asked = LAUNCH.with_borrow_mut(std::mem::take);
+    LAUNCHER.with_borrow_mut(|l| {
+        for name in asked {
+            l.arm(&name, frame, dt);
+        }
+        l.due(frame)
+    })
+}
+
 /// The charges asked for since the last frame, set off from `frame` (the world's frames
 /// stepped), and those due before it.
 fn charges_due(frame: u64, dt: f64) -> Vec<stress_ref::wrecking::PackCharge> {
@@ -571,6 +610,7 @@ fn load(level: u8) -> Result<(), String> {
     let mut warnings = Vec::new();
     let mut aim = None;
     let mut demolition = stress_rubble::demolition::Demolition::default();
+    let mut launcher = stress_rubble::launch::Launcher::default();
     let (lab, mut scene) = SOURCE.with_borrow(|source| -> Result<_, String> {
         Ok(match source {
             Source::Cuboid(layout) => {
@@ -591,6 +631,7 @@ fn load(level: u8) -> Result<(), String> {
                 warnings = notes;
                 aim = stress_ref::wrecking::aim_of(&json);
                 demolition = stress_rubble::demolition::Demolition::of_pack(&json);
+                launcher = stress_rubble::launch::Launcher::of_pack(&json).map_err(|e| format!("scene pack: {e}"))?;
                 (lab, scene)
             }
         })
@@ -599,6 +640,8 @@ fn load(level: u8) -> Result<(), String> {
     AIM.set(aim);
     DEMOLITION.set(demolition);
     DETONATE.with_borrow_mut(|q| q.clear());
+    LAUNCHER.set(launcher);
+    LAUNCH.with_borrow_mut(|q| q.clear());
     let mut camera = Orbit::new(&lab);
     let (w, h) = SIZE.get();
     camera.set_mode(VIEW_MODE.get(), w.max(1) as f64 / h.max(1) as f64);
@@ -773,6 +816,10 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, advance: Advance) -> Result<
             for c in charges_due(l.world.frame, dt) {
                 l.world.detonate(gpu, &c).map_err(|e| format!("charge {}: {e}", c.name))?;
             }
+            // Launches due: set moving between this frame and the last.
+            for x in launches_due(l.world.frame, dt) {
+                l.world.launch_island(gpu, 0, &x).map_err(|e| format!("launch {}: {e}", x.name))?;
+            }
             l.world.step_frame(gpu)?;
             stepped += 1;
         }
@@ -790,6 +837,10 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, advance: Advance) -> Result<
             // Charges due: cut between this frame and the last (they wait for the GPU).
             for c in charges_due(l.world.frame, dt) {
                 l.world.detonate(gpu, &c).map_err(|e| format!("charge {}: {e}", c.name))?;
+            }
+            // Launches due: set moving between this frame and the last.
+            for x in launches_due(l.world.frame, dt) {
+                l.world.launch_island(gpu, 0, &x).map_err(|e| format!("launch {}: {e}", x.name))?;
             }
             l.world.step_frame(gpu)?;
             l.behind -= dt;
@@ -829,6 +880,12 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, advance: Advance) -> Result<
         "canFire": AIM.get().is_some(),
         "charges": DEMOLITION.with_borrow(|d| d.names()),
         "chargesArmed": DEMOLITION.with_borrow(|d| d.pending()) + DETONATE.with_borrow(|q| q.len()),
+        "launches": LAUNCHER.with_borrow(|l| l.names()),
+        // The lab's translation of the scene as built (`Scene::placement`, the asset frame):
+        // takes aim at built coordinates through it.
+        "placement": s.map_or([0.0; 3], |s| s.placement),
+        "strikes": l.world.strike_count(),
+        "launchesArmed": LAUNCHER.with_borrow(|l| l.pending()) + LAUNCH.with_borrow(|q| q.len()),
         "ballMass": s.map_or(0.0, |s| s.mass),
         "ballRadius": s.map_or(0.0, |s| s.radius),
         "ballSpeed": s.map_or(0.0, |s| engine_fracture::plan::default_shot_speed(s.extent, s.speed)),
@@ -910,6 +967,10 @@ fn frame(advance: Advance) -> Result<(), String> {
                         let bonds = c.bond_indices(&l.world.scene.bodies[0].bonds).map_err(|e| format!("charge {}: {e}", c.name))?;
                         l.world.cut_bonds(gpu, 0, &bonds, &c.debris, c.kick).map_err(|e| format!("charge {}: {e}", c.name))?;
                     }
+                    // Launches due: set moving between this frame and the last.
+                    for x in launches_due(l.world.frame, dt) {
+                        l.world.launch_island(gpu, 0, &x.chunks, x.velocity, x.angular_velocity).map_err(|e| format!("launch {}: {e}", x.name))?;
+                    }
                     l.world.step_frame(gpu)?;
                     step_ms += t.elapsed().as_secs_f64() * 1e3;
                     stepped += 1;
@@ -951,6 +1012,9 @@ fn frame(advance: Advance) -> Result<(), String> {
                         "canFire": AIM.get().is_some(),
                         "charges": DEMOLITION.with_borrow(|d| d.names()),
                         "chargesArmed": DEMOLITION.with_borrow(|d| d.pending()) + DETONATE.with_borrow(|q| q.len()),
+                        "launches": LAUNCHER.with_borrow(|l| l.names()),
+                        "placement": SHOOTING.get().map_or([0.0; 3], |s| s.placement),
+                        "launchesArmed": LAUNCHER.with_borrow(|l| l.pending()) + LAUNCH.with_borrow(|q| q.len()),
                         "gpuWaits": engine_gpu_wait::WAITS.load(std::sync::atomic::Ordering::Relaxed),
                         "gpuYields": engine_gpu_wait::YIELDS.load(std::sync::atomic::Ordering::Relaxed),
                         "ballMass": SHOOTING.get().map_or(0.0, |s| s.mass),

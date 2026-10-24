@@ -184,7 +184,9 @@ each named for what it is, then how many:
 - **Bridge Out:** a highway viaduct for a pier hit, also a Rust-built pack (below).
 - **Topple:** a high-rise beside a street with demolition charges (below).
 - **Ram Raid** and **Fly-through:** the vehicle's storefront and the aircraft's two
-  towers, built the same way (below).
+  towers, built the same way (below), and the same buildings with a bonded car and bus or
+  airliner to launch at them.
+- **Crash test:** a bonded car or bus launched at a rigid barrier (Bonded vehicles, below).
 - **Skybridge:** two towers joined by a steel walkway, with charges (below).
 - **Vibe City presets:** generated scene packs, when they are built.
 - **Your file:** a dropped or chosen GLB.
@@ -685,6 +687,239 @@ headless Chrome, the beat matches the native run. At the take's last frame (331)
 are broken and there are 59 fragments. Dust is off in this take. With it off, two
 recordings decode to identical frames. With it on, the counts still repeat, but the frames
 differ after the first landing.
+
+### Launched bonded bodies
+
+A pack can carry **free islands**: chunks bonded to each other but, through no path of
+bonds, to a support. Both stress profiles already make each one its own rigid body (the
+reference world's clusters are the connected components of the bonds, and a component
+with no support is not anchored). A car, a bus or an aircraft is such an island: the
+structure's own chunks and bonds, so it collides with the rest of the structure and with
+itself, and its bonds break as any bond does. `stress_ref::launch` sets them moving.
+
+The pack carries its launches as `defaults.launches` (`launch::write`, read with
+`launch::launches_of`), Y-up, m/s:
+
+```json
+{"name": "car", "nodes": [node, ...], "velocity": {"x": 0, "y": 0, "z": 15},
+ "angularVelocity": {"x": 0, "y": 0, "z": 0}, "delay": 0,
+ "strikes": [{"centre": {"x": 0, "y": 0.6, "z": 2.0}, "radius": 0.9}]}
+```
+
+- `nodes` are the island's nodes (`group`, a `nodeGroups` name, may stand in for them).
+- `velocity` is the island's centre-of-mass velocity and `angularVelocity` its spin. Each body
+  the island is made of when it is released gets `v + w × (c − c_island)` at its centre `c`.
+- `delay` is in seconds after the launch is asked for. Until it is released the island is a
+  free body like any other: a car stands on its wheels, and an aircraft placed in the air
+  falls, so launch an airborne island at once.
+- `strikes` are spheres fixed in the island (its nose, an aircraft's wings), in the frame it
+  was built in. The threshold profile's strike prediction checks them as it checks a shot,
+  at the sphere's point of the body that holds the nearest island chunk, moving with that
+  body (spin included). A strike they will make within the next frame breaks the struck
+  body's bonds before the engine steps, so a fast island goes through a shop window as a
+  ball does instead of stopping dead on it. A body's own chunks are never its strike's.
+
+**Releasing them.** Use **Launch vehicles** (stress modes, shown only for a scene with
+launches), or call stress-web `stress_launch(name)`, with an empty name for every launch,
+each at its delay. `stress_launches()` lists them and `stats.launches` holds their names.
+The island is set moving between two frames, at the start of the next one, and never by
+stepping a frame again:
+- `threshold`: `ThresholdWorld::launch_island` writes the bodies' motion in both pose
+  regions (after one wait for the GPU's body state) and adds the strike spheres to the
+  prediction's shots (`stress-gpu` `fracture::Shot::at`; 64 shots in all, the 16 balls'
+  included).
+- `blast_parity`: `GpuWorld::launch_island` sets the clusters' motion as a charge's kick is
+  set, rebuilds the solver's tables and writes the bodies back to the engine. No strike is
+  predicted for an island here: its contacts load the stress solve after the engine's step,
+  as every contact does, so an island stops at what it hits as the profile's balls rebound.
+- `stress_rubble::launch::Launcher` schedules them for natively run hosts.
+
+A take step `act: {launch: name}` releases them, and the button's launches are logged, so
+instant replay releases them at the same frame.
+
+**Check scene.** `launch::ram_and_wall`: a concrete wall of 4 × 4 blocks on a footing and a
+free concrete ram (a T of five 0.5 m cubes, 1.5 t) launched at it at 30 m/s.
+- `cargo test --release -p stress-ref --test launch`: the launches' pack round trip (nodes or
+  group, Y-up), malformed launches named, and the ram imports as its own unanchored body.
+- `cargo test --release -p stress-rubble --features gpu --test launch`: in both profiles
+  the ram flies at its launch velocity (3.000 m in 6 frames, its fall included) and breaks
+  bonds of the wall and of itself (threshold: the wall in 5 bodies and the ram in 2;
+  blast_parity: 14 of the wall's bonds and 4 of the ram's).
+
+### Bonded vehicles
+
+`stress_ref::vehicles` builds a car, a bus and an airliner as free bonded islands. Each part
+is a chunk or a few: a convex prism or loft, so a vehicle can be placed at any heading.
+Parts are bonded wherever their faces touch (`wrecking::face_bonds`), and the joint is chosen
+by `vehicles::joint`:
+- `glass` where a pane meets its frame;
+- `riveted` in an airframe;
+- `bolted` where a door, wheel, bonnet, boot lid, bumper, bolted wing or engine is attached;
+- `spot-weld` elsewhere in a road vehicle's welded shell.
+
+| Vehicle | What | Parts · bonds | Mass |
+|---|---|---|---|
+| `car` | A saloon, 4.5 × 1.8 × 1.45 m: floor, sills, subframes and rails; engine, firewall, bonnet, bolted wings; A-, B- and C-pillars, roof; four doors on their hinge and latch pillars; boot; bumpers; four wheels; windscreen, rear and side glass | 50 · 115 | 1.4 t |
+| `bus` | A single-deck bus, 12 × 2.5 × 3.2 m: underframes (the engine in the rear one), axles, floor; side panels below and above the windows, window pillars, glass; roof; front with windscreen, rear; four wheels | 87 · 214 | 10.4 t |
+| `airliner` | A regional jet (Embraer E175 class), 30 m long, 26 m span: an octagonal fuselage barrel in upper and lower halves, nose and tail cones, wings in four pieces a side, engines on pylons, fin and tailplane | 36 · 46 | 34.7 t |
+
+**Materials** (`wrecking::calibrated`, cited in `material.rs`). A vehicle's parts are solid
+chunks standing for thin metal shells, so the metal is smeared over each chunk: a smeared
+property is the metal's own value times its solidity, the metal's share of the volume or of
+the section.
+- `sheet-steel`: the body shell, HC340LA to EN 10268, 1.5% steel by volume (a 1.4 t car in its
+  4.5 × 1.8 × 1.45 m envelope). That gives E = 3.2 GPa, the parts' contact stiffness.
+- `spot-weld`, the welded shell's joints, at 0.3% steel by section:
+  - shear 0.375 MPa: about 6 kN a weld (AWS D8.9M and ISO 18278-2 tensile-shear tests) at a
+    40 mm pitch;
+  - tension 0.15 MPa: cross-tension is 0.4 of tensile-shear (ISO 14272);
+  - compression 0.37 MPa: the shell's progressive folding, a third of its squash load
+    (Wierzbicki & Abramowicz). Euro NCAP's 56 km/h stop over 0.6 m averages about 0.28 MPa
+    over the front section.
+- `bolted`: doors, wheels and bolted panels. Tension 0.14 MPa and shear 0.11 MPa are FMVSS 206's
+  11,000 N and 8,900 N door hinge and latch loads over a door's 0.08 m² edge face. This is
+  weaker than the welded shell in every mode: doors and wheels come off first.
+- `aluminium` and `riveted`: the airframe, 2024-T3 (MMPDS-01: F_tu 483, F_su 283,
+  F_cy 269 MPa, E 72.4 GPa).
+  - The airframe is 4% aluminium by volume, and its joints are 0.4% by section at a riveted
+    lap joint's efficiency of 0.7 (Niu).
+  - The joints hold 1.35 MPa in tension, 0.79 MPa in shear and 0.38 MPa in compression (the
+    thin shell crushing).
+- `wheel`: the shell's material, under its own name for its colour.
+
+Each part's mass is the vehicle's own (its curb mass shared out by part; the car's floor
+takes the rest), written as the pack's node masses, which both profiles import
+(`pack_masses`). A scene (`vehicles::compose`) places vehicles beside a structure. Each one
+is bonded within itself only, launched where it has a `Motion`, and its strike spheres go
+with it. Its chunks follow the structure's, so the structure's node indices are unchanged.
+
+**Wheels do not roll.** They are rigid parts of the vehicle, so a car launched on its wheels
+slides on them, braked by the ground's friction like a car on locked wheels.
+`vehicles::sliding_launch` gives the launch speed that arrives at a given speed. Measured,
+the car loses about 5 m/s² (0.5 g).
+
+**Crash test** (Scene menu group): the car or the bus slides 12 m into a rigid barrier (a
+support) and arrives at about 60 km/h (`vh_car_barrier`, 51 chunks; `vh_bus_barrier`, 88).
+Native, M3 Max (`cargo run --release -p stress-rubble --features gpu --example vehicles --
+vh_car_barrier 120`, `STRESS_PROFILE=blast_parity` for the other profile):
+- **threshold**: 37 of the car's 115 bonds break. Its front wheels and a wing come off and the
+  bonnet lifts, and 45 of its 50 parts stay one body: the cabin holds. In the bus, the
+  wheels, the rear axle and the bumper tear off, and the body (93% of its parts) holds.
+- **blast_parity**: the car's four wheels shear off at the barrier, and the rest stays one
+  body (4 bonds). With a 6 m run-up (16.4 m/s), the whole front and floor came apart instead
+  (52 bonds): how much breaks depends on how the contact meets the barrier. The pillars, roof,
+  doors and glass held in both runs.
+- In Chrome (takes `vh_car_barrier_crash` and `vh_bus_barrier_crash`) the threshold runs break
+  45 and 39 bonds.
+
+The bus rocks on its wheels in the reference world's own contact and loses them after half a
+second. On the GPU, both vehicles stand still in both stress modes.
+
+**Ram Raid with vehicles** (V5, Scene menu group Ram Raid). Both buildings stand on 0.5 m
+footings above grade, so each scene adds a street: one support slab, level with the
+footings' tops, which the vehicles drive on. Each vehicle starts 12 m out and hits at about
+54 km/h, one launch each (`car`, `bus`).
+- `rr_vehicles_storefront` (1,341 chunks): the car is aimed at the middle shop's window and
+  the bus at the fourth shop's.
+- `rr_vehicles_apartment` (1,493 chunks): the car is aimed at front bay 0's brick sill and
+  window, the bus at bay 3's.
+
+Threshold, recorded in Chrome (takes `rr_storefront_car_bus` and `rr_apartment_car_bus`: the
+car, then the bus, the camera following each in):
+- **Storefront.** The car's strike breaks the stallriser and the panes before it reaches them.
+  It goes through the window into the shop (natively, 8.9 m in by frame 100) and crumples
+  against the interior and the back wall. The bus breaks the window, the piers and the fascia
+  and drives into the shop with the fascia on its roof. 442 bonds are broken, the same in
+  three recordings.
+- **Apartment block.** Its infill is coarse: a bay's brick sill is two 1.15 t panels. The car
+  breaks the sill loose but does not get through, and the bus breaks the infill under the
+  first-floor beam and is thrown back. 90 bonds are broken, the same in three recordings.
+- At the glazed entrance the car stops dead on the pane. A pane is one chunk bonded at its
+  sill, and that bond holds 1.6 MN (40 MPa over a 20 mm by 2 m edge), so the pane cannot
+  shatter. It is the buildings' glazing model, not changed here.
+
+Recording these takes exposed a bug in strike prediction that was older than them. Under the
+WGSL builds' fast math (Chrome, and naga's Metal compile), the nearest struck chunk was
+matched by the bits of a recomputed distance. That found no chunk, so every strike was
+dropped: the car stopped on the shop window in Chrome. `fr_strike_entry` now keeps the
+distance and `fr_strike_nearest` reads it. Metal's results are unchanged. In Chrome, the
+threshold car stand-in now breaks 129 of the storefront's bonds by frame 100 (native WGSL
+133, Metal 104) where it broke 11 before.
+
+`cargo test --release -p stress-rubble --features gpu --test vehicles car_drives`: the car
+alone goes more than 2 m past the facade, and both the shopfront and the car break.
+
+**Fly-through with the airliner** (S3, Scene menu group Fly-through). The airliner flies
+along the building's line of attack (`defaults.wreckingYard`, +y), its fuselage axis at the
+aim's height:
+- `ft_airliner_tower` (1,368 chunks): the glass tower's sixth storey, between two slabs;
+- `ft_airliner_apartment` (1,391 chunks): the apartment block's fourth storey.
+
+It is thrown like a paper aeroplane: its nose 40 m out, at 70 m/s, with the lift that brings it
+to the facade's height under gravity (2.8 m/s up: its path is within 2.3° of level and 0.2 m
+of the aim's height). It is released at once, since nothing holds it up before it is released.
+Its strike spheres are its nose, both wing roots and both engines. A struck body takes one
+strike a frame: the first sphere in order that reaches its bounds, usually the nose. So the
+wings meet the building by contact loads.
+
+No kinematic flight up to first contact. Holding a body on a path and releasing it at
+contact would need the engine to drive the island's motion until the routing check sees the
+contact coming. That is forward-only in principle, but neither world has a kinematic island,
+so it is not done here.
+
+What happens, threshold, recorded in Chrome (takes `ft_glass_tower_airliner` and
+`ft_apartment_airliner`, which replace the 40 t ball stand-in's `ft_glass_tower_jet`):
+- **Glass tower.** The nose breaks up in the curtain wall and the floors around the cut. The
+  jet stops within the tower's first bays: natively it gets 8 m in on WGSL and 14 m on Metal,
+  and it stops at the core and the slab pieces it pushes. In Chrome it pitches up and slides down the
+  facade. Natively its nose, three wing pieces and an engine break off. 710 bonds break by 7 s. The tower
+  stands: the upper block does not fail across the cut band. The threshold profile has no
+  stress solve, and the README's earlier note on this tower stands.
+- **Apartment block.** It punches through the middle bays of five storeys, so you can see
+  through the block. Its engines, nose and wing pieces fly off. The bays above the hole hang
+  on, and the jet falls back out in front. 1,148 bonds break by 7 s.
+- **blast_parity** (native): the jet shatters on contact (all 46 of its bonds) and the tower
+  comes down whole (2,566 bonds by frame 240). Its pieces are thrown up out of the tower, 86 m
+  in 4 s, an artefact of the quasi-static solve of a free island stopped in one frame. That
+  is why the takes are threshold.
+- The airliner breaks less than a real one would. The threshold rule breaks a bond when a
+  chunk's contact load beats its tension capacity. A riveted barrel section holds 9.5 MN in
+  tension (1.35 MPa over 7 m²), and the crushing of the thin shell in compression is not a
+  failure mode the profile has.
+
+`cargo test --release -p stress-rubble --features gpu --test vehicles airliner`: the jet
+flies in level at 70 m/s (within 0.5 m of its height), breaks over 300 of the apartment
+block's bonds and loses its nose.
+
+**Bridge Out with traffic** (S2 + V3 + V4, `bo_viaduct_traffic`, 871 chunks). The viaduct has
+stalled traffic, none of it launched:
+- on drop-in span 2, three cars;
+- on drop-in span 3, a bus and two cars, in lanes 2 m either side of the deck's centre line;
+- on the lower road under span 2, two cars and a bus queued along it.
+
+Each vehicle stands on the deck's or the road's top, bonded to nothing but itself. The take
+`bo_viaduct_traffic` (blast_parity, the 50 t ball into the hinge pier, as `bo_viaduct_pier`):
+- the hinge lets go and both spans swing down with their cars and bus on them;
+- span 2 lands on the road's queue, crushing the bus and a car under it;
+- the outer spans follow.
+
+1,237 bonds break by 7.3 s, the same in three recordings. The traffic loads the spans as it
+rocks: at frame 90, spans 2 and 3 keep 61 and 58 of their 82 pairs, against 78 and 80
+without traffic. Natively, the spans' pier-2 ends are 8.7 and 8.9 m down by frame 90. The
+traffic stands still for a second in both stress modes before the hit (`tests/vehicles.rs`).
+
+**Checks:**
+- `cargo test --release -p stress-ref --test vehicles`:
+  - each vehicle's parts, mass and size, as one free island with every joint as `joint` picks;
+  - the bolted joints weaker than the welds, each door on two 11 kN joints;
+  - the scenes' packs import as built in both profiles (masses, launches, free islands);
+  - the car stands on its wheels in the reference.
+- `cargo test --release -p stress-rubble --features gpu --test vehicles`:
+  - the car and the bus stand on their wheels for a second in both stress modes (no bond
+    broken, under 1 cm of movement);
+  - threshold: the car arrives at 56-60 km/h, stops, loses front parts and keeps its cabin;
+  - blast_parity: parts break off and the cabin's pillars, roof, doors and glass stay one body.
+- `pack_samples` builds the scenes as lab scenes.
 
 ### Bond modes
 

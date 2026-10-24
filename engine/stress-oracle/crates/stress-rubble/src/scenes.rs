@@ -109,6 +109,19 @@ pub fn wrecking_yard(key: &str, profile: stress_ref::capability::Profile, second
     s
 }
 
+/// Any scene pack as the lab's stress modes load it (stress-web `load`, as
+/// [`wrecking_yard`] loads a built-in one), named `key`, `seconds` of simulated time.
+pub fn pack_scene(pack: &serde_json::Value, key: &str, profile: stress_ref::capability::Profile, seconds: f64) -> Scene {
+    let (mut s, _) = stress_ref::scene_pack::import_value_with(pack, key, "structure", key, profile.import_options()).unwrap_or_else(|e| panic!("{key}: {e}"));
+    s.sim.duration = seconds;
+    s.validate().unwrap_or_else(|e| panic!("{key}: {e}"));
+    let mut s = s.with_derived();
+    s.sim.methods = Methods::established();
+    profile.apply_scene(&mut s);
+    s.materials.entry("projectile".into()).or_insert_with(stress_ref::builders::elastic_steel);
+    s
+}
+
 /// The Topple tower (`stress_ref::topple`) as the lab's stress modes load it
 /// ([`wrecking_yard`]), and its charges.
 pub fn topple(profile: stress_ref::capability::Profile, seconds: f64) -> (Scene, crate::demolition::Demolition) {

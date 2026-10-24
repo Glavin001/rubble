@@ -299,7 +299,7 @@ impl ThresholdWorld {
         let e_shot = projectile.youngs_modulus * scene.sim.stiffness_scale / (1.0 - projectile.poisson_ratio * projectile.poisson_ratio);
         let strikes: Vec<fracture::Shot> = shots
             .iter()
-            .map(|sh| fracture::Shot { body: sh.body, bound: (1.01 * shot_radius + 1e-3) as f32, face: shot_radius as f32, mass: shot_mass as f32, modulus: e_shot as f32 })
+            .map(|sh| fracture::Shot { body: sh.body, bound: (1.01 * shot_radius + 1e-3) as f32, face: shot_radius as f32, mass: shot_mass as f32, modulus: e_shot as f32, at: None })
             .collect();
         // `STRESS_THRESHOLD_STRIKE=0` (a measurement): contact loads only, no strikes.
         if !std::env::var("STRESS_THRESHOLD_STRIKE").is_ok_and(|v| v == "0") {
@@ -404,6 +404,90 @@ impl ThresholdWorld {
     /// structure: [`Self::cut_bonds`] of its bonds, debris and kick.
     pub fn detonate(&mut self, gpu: &Gpu, charge: &stress_ref::wrecking::PackCharge) -> Result<usize, String> {
         self.cut_bonds(gpu, 0, &charge.bonds, &charge.debris, charge.kick)
+    }
+
+    /// Launch a free bonded island of structure `structure` now, between frames (a pack's
+    /// `defaults.launches`, `stress_ref::launch`): every body made of the launch's chunks
+    /// alone gets the island's rigid motion, `velocity + w x (c - c_island)` at its centre
+    /// `c` and the spin `w` (the stress frame), set in both pose regions, awake; the next
+    /// frame steps it (forward: nothing is stepped again). Its strike spheres join the
+    /// strike prediction's shots, fixed in the body that holds the island's chunk nearest
+    /// each centre (with the island's mass and that chunk's plane-strain modulus). Waits for
+    /// the GPU. Returns the bodies set moving; an error names a chunk the structure does not
+    /// have, an island with no body of its own (bonded to something else), or a strike past
+    /// the prediction's shots.
+    pub fn launch_island(&mut self, gpu: &Gpu, structure: usize, launch: &stress_ref::launch::Launch) -> Result<usize, String> {
+        let offset = self.chunk_of.iter().position(|&(s, _)| s == structure).ok_or_else(|| format!("no structure {structure}"))? as u32;
+        let count = self.chunk_of.iter().filter(|&&(s, _)| s == structure).count();
+        if let Some(&c) = launch.chunks.iter().find(|&&c| c >= count) {
+            return Err(format!("launch {}: no chunk {c} in structure {structure}", launch.name));
+        }
+        let chunks: Vec<u32> = launch.chunks.iter().map(|&c| offset + c as u32).collect();
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        let owner = self.fracture.chunk_bodies(gpu);
+        let mut members: HashMap<u32, usize> = HashMap::new();
+        for &b in &owner {
+            *members.entry(b).or_default() += 1;
+        }
+        let mut count: HashMap<u32, usize> = HashMap::new();
+        for &c in &chunks {
+            *count.entry(owner[c as usize]).or_default() += 1;
+        }
+        let mut moving: Vec<u32> = count.into_iter().filter(|(b, n)| members[b] == *n).map(|(b, _)| b).collect();
+        moving.sort_unstable();
+        let stride = std::mem::size_of::<BodyState>() as u64;
+        let max = self.engine.sim.capacity().max_bodies as u64;
+        let records: Vec<BodyState> = moving.iter().map(|&b| gpu.read_range::<BodyState>(self.engine.sim.body_buffer(), b as usize, 1)[0]).collect();
+        if moving.is_empty() || records.iter().any(|r| r.inv_mass <= 0.0) {
+            return Err(format!("launch {}: its chunks are not free bodies of their own", launch.name));
+        }
+        // The island's centre of mass (the stress frame).
+        let mass: f64 = records.iter().map(|r| 1.0 / r.inv_mass as f64).sum();
+        let com = records.iter().fold(Vec3::ZERO, |a, r| a + crate::from_rubble(r.position) * (1.0 / r.inv_mass as f64)) * (1.0 / mass);
+        let (v, w) = (Vec3::from_array(launch.velocity), Vec3::from_array(launch.angular_velocity));
+        for (&b, r) in moving.iter().zip(&records) {
+            let c = crate::from_rubble(r.position);
+            let vb = to_rubble(v + w.cross(c - com));
+            let wb = to_rubble(w);
+            for region in [0, max] {
+                let mut rec: BodyState = gpu.read_range::<BodyState>(self.engine.sim.body_buffer(), (region + b as u64) as usize, 1)[0];
+                rec.linear_vel = vb;
+                rec.angular_vel = wb;
+                rec.flags |= engine_schema::BodyFlags::Awake as u32;
+                gpu.queue.write_buffer(self.engine.sim.body_buffer(), (region + b as u64) * stride, bytemuck::bytes_of(&rec));
+            }
+        }
+        if !launch.strikes.is_empty() {
+            if self.strikes.len() + launch.strikes.len() > fracture::MAX_SHOTS {
+                return Err(format!("launch {}: {} strike spheres past the prediction's {} shots", launch.name, launch.strikes.len(), fracture::MAX_SHOTS - self.strikes.len()));
+            }
+            for s in &launch.strikes {
+                let p = Vec3::from_array(s.centre);
+                let k = *chunks
+                    .iter()
+                    .min_by(|&&a, &&b| {
+                        let d = |k: u32| {
+                            let c = self.tables.geometry[k as usize][0];
+                            (Vec3::new(c[0] as f64, c[1] as f64, c[2] as f64) - p).norm2()
+                        };
+                        d(a).total_cmp(&d(b)).then(a.cmp(&b))
+                    })
+                    .expect("an island has chunks");
+                let r = s.radius as f32;
+                self.strikes.push(fracture::Shot {
+                    body: owner[k as usize],
+                    bound: 1.01 * r + 1e-3,
+                    face: r,
+                    mass: mass as f32,
+                    modulus: self.tables.geometry[k as usize][1][3],
+                    at: Some([p.x as f32, p.y as f32, p.z as f32]),
+                });
+            }
+            if !std::env::var("STRESS_THRESHOLD_STRIKE").is_ok_and(|v| v == "0") {
+                self.fracture.set_shots(gpu, &self.strikes)?;
+            }
+        }
+        Ok(moving.len())
     }
 
     /// The kicks due before this frame: each body made of a kick's chunks alone (its
@@ -570,6 +654,21 @@ impl ThresholdWorld {
             .collect()
     }
 
+    /// Diagnostic read (waits): whether each bond of structure `structure` is intact, in the
+    /// scene's order (its body's `bonds`; one the world never had is not).
+    pub fn scene_bonds_intact(&self, gpu: &Gpu, structure: usize) -> Vec<bool> {
+        let intact = self.fracture.bonds_intact(gpu);
+        let offset = self.chunk_of.iter().position(|&(s, _)| s == structure).unwrap_or(0) as u32;
+        self.scene.bodies[structure]
+            .bonds
+            .iter()
+            .map(|b| {
+                let (a, c) = (offset + b.a as u32, offset + b.b as u32);
+                self.bond_of.get(&(a.min(c), a.max(c))).is_some_and(|&i| intact[i as usize])
+            })
+            .collect()
+    }
+
     /// The shots as impactors (their meshes, for a renderer's shot objects).
     /// Diagnostic read (waits): each shot's centre and velocity in the stress frame, and
     /// whether it is in flight (not parked).
@@ -627,6 +726,11 @@ impl ThresholdWorld {
         let bonds = bonds && 2 * self.tables.bond_count() as usize <= renderer.line_capacity();
         self.fracture.encode_view(gpu, encoder, objects, lines, mode, bonds);
         if bonds { 2 * self.tables.bond_count() } else { 0 }
+    }
+
+    /// The spheres strike prediction checks: the shots', then the launched islands'.
+    pub fn strike_count(&self) -> usize {
+        self.strikes.len()
     }
 
     /// Shots launched so far.

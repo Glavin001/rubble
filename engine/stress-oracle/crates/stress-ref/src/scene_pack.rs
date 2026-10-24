@@ -64,6 +64,11 @@ fn map_material(asset: &str) -> Result<(&'static str, &'static str), String> {
         // Facade and glazing clips are metal connectors.
         "steel" | "facade-clip" | "glazing-clip" => ("steel", "steel"),
         "wood-frame" => ("timber", "timber"),
+        // Vehicles (`vehicles`): smeared shells and their joints.
+        "sheet-steel" | "spot-weld" => ("sheet-steel", "spot-weld"),
+        "bolted" => ("sheet-steel", "bolted"),
+        "wheel" => ("wheel", "bolted"),
+        "aluminium" | "riveted" => ("aluminium", "riveted"),
         other => return Err(format!("no calibrated material for asset material '{other}'")),
     })
 }
@@ -77,6 +82,12 @@ pub(crate) fn material_preset(name: &str) -> Material {
         "glass" => Material::glass(),
         "steel" => Material::steel(),
         "timber" => Material::timber(),
+        "sheet-steel" => Material::sheet_steel(),
+        "spot-weld" => Material::spot_weld(),
+        "bolted" => Material::bolted(),
+        "wheel" => Material::sheet_steel(),
+        "aluminium" => Material::aluminium(),
+        "riveted" => Material::riveted(),
         _ => unreachable!("mapped names only"),
     }
 }

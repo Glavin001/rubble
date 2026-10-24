@@ -1,9 +1,10 @@
 // Fracture lab takes (record-takes.mjs), run through fracture/director.mjs `__record`.
 // Segment fields: n (video frames at 60 fps), slow (1/slow speed, lossless), caption,
-// cam ({orbit: [yaw, pitch, dist], to?, spin?, target?} or {rel, relTo?, lift?, shift?}:
-// fracture/director.mjs), act ('fire' | {shoot: [u, v]} | {ray: [origin, direction]}),
-// view ({bonds, color}: color 3, materials untinted, unless a segment says otherwise),
-// mass / speed (the shot sliders, powers of two).
+// cam ({orbit: [yaw, pitch, dist], to?, spin?, target?} or {rel, relTo?, lift?, shift?}, and
+// at / atTo: a target in build coordinates; fracture/director.mjs), act ('fire' | {shoot:
+// [u, v]} | {ray: [origin, direction]} | {detonate: name} | {launch: name}: a pack's launched
+// bonded bodies, '' for all), view ({bonds, color}: color 3, materials untinted, unless a
+// segment says otherwise), mass / speed (the shot sliders, powers of two).
 
 // The lab's page state for a take: its Scene menu key and the menus' values, then a load.
 // `preset`: the stress modes' Ball menu (stress_ref::wrecking::BALLS: 0 the 10 t ball,
@@ -23,7 +24,56 @@ const setup = ({ scene, bonds = 'none', hz = 0, radius = 0, strength = 0, level,
 
 const take = (state, script) => ({ page: 'fracture/index.html', setup: setup(state), script });
 
+// Bonded vehicles (stress_ref::vehicles), threshold profile: the launch released at the
+// take's frame ({launch: ''}), the camera following it in (`at` / `atTo`: the orbit's target
+// as built, Z-up).
+const VEHICLE_TAKES = {
+  // A crash test (V1 V2): the 1.4 t car slides 12 m on its locked wheels into a rigid
+  // barrier at about 60 km/h; its front comes apart and the cabin holds.
+  vh_car_barrier_crash: take({ scene: 'vh_car_barrier', bonds: 'threshold' }, [
+    { n: 40, caption: 'A 1.4 t car of 50 bonded parts: chassis, engine bay, doors, wheels, glass', cam: { orbit: [-0.75, 0.2, 9], to: [-0.6, 0.17, 8.5], at: [-14.25, 0, 0.6] } },
+    { n: 1, act: { launch: '' }, caption: 'Launched at 71 km/h: it slides 12 m on its locked wheels into a rigid barrier' },
+    { n: 36, caption: 'Launched at 71 km/h: it slides 12 m on its locked wheels into a rigid barrier', cam: { orbit: [-0.6, 0.17, 8.5], to: [-0.2, 0.14, 7.5], at: [-14.25, 0, 0.6], atTo: [-2.6, 0, 0.6] } },
+    { n: 200, slow: 4, caption: 'Quarter speed, 60 km/h into the barrier: the front comes apart, the cabin holds', cam: { orbit: [-0.2, 0.14, 7.5], to: [0.75, 0.3, 7], at: [-2.6, 0, 0.6] } },
+    { n: 120, caption: 'Real time', cam: { orbit: [0.75, 0.3, 7], to: [1.05, 0.38, 9], at: [-2.6, 0, 0.6] } },
+  ]),
+  // The 10.4 t bus into the barrier (V1 V4).
+  vh_bus_barrier_crash: take({ scene: 'vh_bus_barrier', bonds: 'threshold' }, [
+    { n: 40, caption: 'A 10.4 t bus of 87 bonded parts: underframes, axles, panels, pillars, glass', cam: { orbit: [-0.8, 0.2, 22], to: [-0.65, 0.18, 21], at: [-18.2, 0, 1.6] } },
+    { n: 1, act: { launch: '' }, caption: 'Launched at 71 km/h: it slides 12 m on its locked wheels into a rigid barrier' },
+    { n: 36, caption: 'Launched at 71 km/h: it slides 12 m on its locked wheels into a rigid barrier', cam: { orbit: [-0.65, 0.18, 21], to: [-0.3, 0.15, 18], at: [-18.2, 0, 1.6], atTo: [-6.5, 0, 1.6] } },
+    { n: 200, slow: 4, caption: 'Quarter speed: the wheels and the bumper tear off; the body holds', cam: { orbit: [-0.3, 0.15, 18], to: [0.7, 0.3, 17], at: [-6.5, 0, 1.6] } },
+    { n: 120, caption: 'Real time', cam: { orbit: [0.7, 0.3, 17], to: [1.0, 0.38, 21], at: [-6.5, 0, 1.6] } },
+  ]),
+  // Ram Raid (V5): the car, then the bus, driven at the storefront row from a street level
+  // with its footings; each slides 12 m and hits at about 54 km/h.
+  rr_storefront_car_bus: take({ scene: 'rr_vehicles_storefront', bonds: 'threshold' }, [
+    { n: 40, caption: 'Five brick shops on a street; a 1.4 t car lines up on the middle shop window', cam: { orbit: [-0.45, 0.16, 12], to: [-0.4, 0.14, 11], at: [0.55, -17.75, 1.2] } },
+    { n: 1, act: { launch: 'car' }, caption: 'The car: launched at 69 km/h, 12 m out' },
+    { n: 42, caption: 'The car: launched at 69 km/h, 12 m out', cam: { orbit: [-0.4, 0.14, 11], to: [-0.8, 0.12, 10], at: [0.55, -17.75, 1.2], atTo: [0.55, -4.5, 1.4] } },
+    { n: 200, slow: 4, caption: 'Quarter speed: through the shop window into the shop; the car crumples', cam: { orbit: [-0.8, 0.12, 10], to: [-0.45, 0.2, 10], at: [0.55, -4.5, 1.4], atTo: [0.55, -1.5, 1.4] } },
+    { n: 30, caption: 'Now the bus: 10.4 t, at the fourth shop', cam: { orbit: [-0.35, 0.16, 20], to: [-0.3, 0.15, 19], at: [11.5, -21.7, 1.8] } },
+    { n: 1, act: { launch: 'bus' }, caption: 'The bus: launched at 69 km/h, 12 m out' },
+    { n: 42, caption: 'The bus: launched at 69 km/h, 12 m out', cam: { orbit: [-0.3, 0.15, 19], to: [-0.75, 0.15, 17], at: [11.5, -21.7, 1.8], atTo: [11.5, -7.5, 2.2] } },
+    { n: 200, slow: 4, caption: 'Quarter speed: the window, piers and fascia give; the bus drives into the shop', cam: { orbit: [-0.75, 0.15, 17], to: [-1.2, 0.22, 17], at: [11.5, -7.5, 2.2] } },
+    { n: 120, caption: 'Real time', cam: { orbit: [-1.2, 0.22, 17], to: [-0.6, 0.3, 30], at: [11.5, -7.5, 2.2], atTo: [5, -3, 2.5] } },
+  ]),
+  // V5 into the apartment block's ground floor: the car at a brick-sill bay, then the bus.
+  rr_apartment_car_bus: take({ scene: 'rr_vehicles_apartment', bonds: 'threshold' }, [
+    { n: 40, caption: 'A 7-storey apartment block; a 1.4 t car lines up on a ground-floor bay', cam: { orbit: [-0.45, 0.16, 13], to: [-0.4, 0.14, 12], at: [-9, -20.4, 1.2] } },
+    { n: 1, act: { launch: 'car' }, caption: 'The car: launched at 69 km/h, 12 m out' },
+    { n: 42, caption: 'The car: launched at 69 km/h, 12 m out', cam: { orbit: [-0.4, 0.14, 12], to: [-0.85, 0.14, 11], at: [-9, -20.4, 1.2], atTo: [-9, -7.5, 1.4] } },
+    { n: 160, slow: 4, caption: 'Quarter speed: the brick sill gives, but the car does not get through', cam: { orbit: [-0.85, 0.14, 11], to: [-1.25, 0.22, 12], at: [-9, -7.5, 1.4] } },
+    { n: 30, caption: 'Now the bus: 10.4 t, at the next bay but one', cam: { orbit: [0.35, 0.16, 20], to: [0.3, 0.15, 19], at: [9, -24.3, 1.8] } },
+    { n: 1, act: { launch: 'bus' }, caption: 'The bus: launched at 69 km/h, 12 m out' },
+    { n: 42, caption: 'The bus: launched at 69 km/h, 12 m out', cam: { orbit: [0.3, 0.15, 19], to: [0.75, 0.15, 17], at: [9, -24.3, 1.8], atTo: [9, -10, 2.2] } },
+    { n: 200, slow: 4, caption: 'Quarter speed: the infill breaks under the first-floor beam; the bus is thrown back', cam: { orbit: [0.75, 0.15, 17], to: [1.2, 0.22, 18], at: [9, -10, 2.2] } },
+    { n: 120, caption: 'Real time', cam: { orbit: [1.2, 0.22, 18], to: [0.5, 0.3, 34], at: [9, -10, 2.2], atTo: [0, -6, 4] } },
+  ]),
+};
+
 export const LAB_TAKES = {
+  ...VEHICLE_TAKES,
   // Ram Raid target (stress_ref::buildings): the 2 t car stand-in into a shopfront.
   rr_storefront_car: take({ scene: 'rr_storefront_row', bonds: 'stress', preset: 3 }, [
     { n: 40, caption: 'Five shops in brick, glass and concrete: 1,203 bonded chunks', cam: { rel: [0.32, -0.05, 0.55], relTo: [0.22, -0.05, 0.5] } },
@@ -31,13 +81,22 @@ export const LAB_TAKES = {
     { n: 30, caption: 'A 2 t car stand-in at 15 m/s into a shop window' },
     { n: 180, slow: 2, caption: 'Half speed: the window and the stallriser go; the shop stands', cam: { rel: [0.22, -0.05, 0.5], relTo: [-0.25, 0.0, 0.55] } },
   ]),
-  // Fly-through target: the 40 t jet stand-in at 80 m/s into the glass tower's mid-height.
-  ft_glass_tower_jet: take({ scene: 'ft_glass_tower', bonds: 'stress', preset: 4 }, [
-    { n: 40, caption: 'An 11-storey glass tower: concrete core, steel mullions, glass panes', cam: { rel: [0.4, 0.0, 1.0], relTo: [0.3, 0.0, 0.95] } },
-    { n: 1, act: 'fire', caption: 'A 40 t stand-in for an aircraft at 80 m/s' },
-    { n: 24, slow: 4, caption: 'Quarter speed: a 40 t stand-in for an aircraft at 80 m/s' },
-    { n: 240, slow: 2, caption: 'Half speed: the curtain wall and the floors around the cut fail', cam: { rel: [0.3, 0.0, 0.95], relTo: [-0.3, 0.05, 0.95] } },
-    { n: 180, caption: 'Real time', cam: { rel: [-0.3, 0.05, 0.95], relTo: [-0.6, 0.14, 0.8], lift: [0, -6] } },
+  // Fly-through (S3): a bonded 35 t regional jet (stress_ref::vehicles::airliner) thrown at
+  // the building at 70 m/s along its line of attack, released 40 m out (threshold); the
+  // camera follows it in. Replaces the 40 t ball stand-in.
+  ft_glass_tower_airliner: take({ scene: 'ft_airliner_tower', bonds: 'threshold' }, [
+    { n: 1, act: { launch: 'airliner' }, caption: 'A 35 t, 30 m regional jet of 36 bonded parts, thrown at 252 km/h', cam: { orbit: [-0.6, 0.1, 40], at: [0, -61.2, 20.3] } },
+    { n: 18, caption: 'A 35 t, 30 m regional jet of 36 bonded parts, thrown at 252 km/h', cam: { orbit: [-0.6, 0.1, 40], to: [-0.7, 0.1, 40], at: [0, -61.2, 20.3], atTo: [0, -39.2, 20.3] } },
+    { n: 100, slow: 4, caption: 'Quarter speed: it meets the facade at 70 m/s', cam: { orbit: [-0.7, 0.1, 40], to: [-1.15, 0.12, 46], at: [0, -39.2, 20.3], atTo: [0, -8, 20.3] } },
+    { n: 200, slow: 2, caption: 'Half speed: the nose breaks up in the curtain wall; the jet pitches up and slides down the facade', cam: { orbit: [-1.15, 0.12, 46], to: [-0.75, 0.2, 85], at: [0, -8, 20.3], atTo: [0, 0, 20.3] } },
+    { n: 300, caption: 'Real time: a slot of broken panes and floors; the tower stands (no stress solve in threshold)', cam: { orbit: [-0.75, 0.2, 85], to: [-0.35, 0.25, 95], at: [0, 0, 20.3], atTo: [0, 0, 16.2] } },
+  ]),
+  ft_apartment_airliner: take({ scene: 'ft_airliner_apartment', bonds: 'threshold' }, [
+    { n: 1, act: { launch: 'airliner' }, caption: 'A 35 t, 30 m regional jet thrown at the apartment block at 252 km/h', cam: { orbit: [-0.6, 0.1, 40], at: [0, -61.2, 11.0] } },
+    { n: 18, caption: 'A 35 t, 30 m regional jet thrown at the apartment block at 252 km/h', cam: { orbit: [-0.6, 0.1, 40], to: [-0.7, 0.1, 40], at: [0, -61.2, 11.0], atTo: [0, -39.2, 11.0] } },
+    { n: 100, slow: 4, caption: 'Quarter speed: it meets the facade at 70 m/s', cam: { orbit: [-0.7, 0.1, 40], to: [-1.15, 0.12, 46], at: [0, -39.2, 11.0], atTo: [0, -8, 11.0] } },
+    { n: 200, slow: 2, caption: 'Half speed: it punches through the middle bays, five storeys of them', cam: { orbit: [-1.15, 0.12, 46], to: [-0.75, 0.2, 70], at: [0, -8, 11.0], atTo: [0, 0, 11.0] } },
+    { n: 300, caption: 'Real time: the bays above the hole hang on; the jet falls back out', cam: { orbit: [-0.75, 0.2, 70], to: [-0.35, 0.25, 80], at: [0, 0, 11.0], atTo: [0, 0, 8.8] } },
   ]),
   // Topple (stress_ref::topple), threshold profile: the charges cut the street-side
   // columns, then the back line. The tower leans out over the street as one mass, turning
@@ -72,6 +131,16 @@ export const LAB_TAKES = {
     { n: 25, caption: 'A 50 t wrecking ball into the middle pier' },
     { n: 220, slow: 2, caption: 'Half speed: the hinge lets go and both spans swing down whole', cam: { rel: [0.3, -0.04, 0.5], relTo: [0.5, 0.0, 0.5] } },
     { n: 240, caption: 'They break on the road below; the outer piers follow', cam: { rel: [0.5, 0.0, 0.5], relTo: [0.75, 0.06, 0.6] } },
+  ]),
+  // Bridge Out with traffic (S2 + V3 + V4, stress_ref::vehicles): 7 cars and 2 buses
+  // stalled on the two drop-in spans and on the road under span 2; the same 50 t ball into
+  // the hinge pier under blast_parity. The spans carry the traffic down onto the road.
+  bo_viaduct_traffic: take({ scene: 'bo_viaduct_traffic', bonds: 'stress', preset: 1 }, [
+    { n: 50, caption: 'Stalled traffic: 7 cars and 2 buses on the drop-in spans and the road below', cam: { rel: [0.45, 0.05, 0.5], relTo: [0.3, 0.03, 0.42] } },
+    { n: 1, act: 'fire', caption: 'A 50 t wrecking ball into the middle pier' },
+    { n: 25, caption: 'A 50 t wrecking ball into the middle pier' },
+    { n: 240, slow: 2, caption: 'Half speed: the hinge lets go; the spans swing down with the traffic on them', cam: { rel: [0.3, 0.03, 0.42], relTo: [0.75, 0.1, 0.45] } },
+    { n: 240, caption: 'They land on the road and its queue; the outer spans follow', cam: { rel: [0.75, 0.1, 0.45], relTo: [1.1, 0.16, 0.6] } },
   ]),
   // Wrecking Yard (stress_ref::wrecking): the 50 t ball into the 10-floor frame's corner
   // column line under blast_parity; the collapse climbs while the core stands.
