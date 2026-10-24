@@ -21,6 +21,8 @@
 mod controls;
 pub use controls::*;
 pub mod coords;
+mod motion;
+pub use motion::*;
 
 use coords::{Coords, RbCoordinates};
 use rubble::*;
@@ -604,6 +606,19 @@ pub struct RbFrame {
     /// Overlap queries queued with `rbWorld_OverlapAABB` before these steps.
     pub overlaps: *const RbOverlapResult,
     pub overlap_count: u32,
+    /// Every character (the latest state of each).
+    pub characters: *const RbCharacterOutput,
+    pub character_count: u32,
+    pub character_events: *const RbCharacterEvent,
+    pub character_event_count: u32,
+    /// Casts queued with `rbWorld_Cast` before these steps.
+    pub casts: *const RbCastResult,
+    pub cast_count: u32,
+    /// Every projectile in flight, and each one that stopped.
+    pub projectiles: *const RbProjectileOutput,
+    pub projectile_count: u32,
+    pub projectile_events: *const RbProjectileEvent,
+    pub projectile_event_count: u32,
 }
 
 impl RbFrame {
@@ -641,6 +656,16 @@ impl RbFrame {
             sensor_end_count: 0,
             overlaps: std::ptr::null(),
             overlap_count: 0,
+            characters: std::ptr::null(),
+            character_count: 0,
+            character_events: std::ptr::null(),
+            character_event_count: 0,
+            casts: std::ptr::null(),
+            cast_count: 0,
+            projectiles: std::ptr::null(),
+            projectile_count: 0,
+            projectile_events: std::ptr::null(),
+            projectile_event_count: 0,
         }
     }
 }
@@ -666,6 +691,7 @@ struct FrameStore {
     sensor_end: Vec<RbSensorEvent>,
     overlaps: Vec<RbOverlapResult>,
     overlap_shapes: Vec<Vec<RbShapeId>>,
+    motion: Option<motion::MotionStore>,
     /// Backing for bond lists, chunk lists, body lists and child arrays (the
     /// heap buffers do not move when these outer vectors grow).
     u32_lists: Vec<Vec<u32>>,
@@ -1147,6 +1173,7 @@ impl RbWorld {
         for (out, shapes) in s.overlaps.iter_mut().zip(&s.overlap_shapes) {
             out.shapes = shapes.as_ptr();
         }
+        let m = s.motion.insert(motion::MotionStore::new(coords, &c));
         let counters = c.counters;
         RbFrame {
             has_frame: true,
@@ -1181,6 +1208,16 @@ impl RbWorld {
             sensor_end_count: s.sensor_end.len() as u32,
             overlaps: s.overlaps.as_ptr(),
             overlap_count: s.overlaps.len() as u32,
+            characters: m.characters.as_ptr(),
+            character_count: m.characters.len() as u32,
+            character_events: m.character_events.as_ptr(),
+            character_event_count: m.character_events.len() as u32,
+            casts: m.casts.as_ptr(),
+            cast_count: m.casts.len() as u32,
+            projectiles: m.projectiles.as_ptr(),
+            projectile_count: m.projectiles.len() as u32,
+            projectile_events: m.projectile_events.as_ptr(),
+            projectile_event_count: m.projectile_events.len() as u32,
         }
     }
 }

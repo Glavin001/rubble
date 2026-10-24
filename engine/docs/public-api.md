@@ -962,9 +962,15 @@ Unreal is the first client.
   collision (uncapped reach, the fast list, a time-of-impact contact and
   start pose); C `RbBodyDef::is_bullet`. Sensors take no time of impact and
   no post-solve sweep check, so bullets pass through them.
-- Next: World on #52's in-step scene queries (shape casts and overlaps,
-  replacing the bounds-only `overlap_aabb`) and its character controllers
-  (`cast_mover` / `collide_mover`), and its piercing projectiles.
+- ✅ Characters (2026-10-24): #52's capsule movers (`char_move`: walk,
+  step up, stick to the floor, slopes, jump, moving support, push weight)
+  through `World::create_character(CharacterDef)`, `character_set_input`
+  (velocity, jump once), `character_teleport`, `destroy_character` (slot
+  reused after quarantine); every frame reports `Frame::characters` and
+  `character_events` (landed, support lost, crushed) from one readback copy
+  of the records, no blocking read. The inner kinematic capsule is a World
+  body of its own, left out of body moves. C: `rbWorld_CreateCharacter`,
+  `rbCharacter_*`, `RbFrame::characters` / `character_events`.
 - `allow_fast_rotation`.
 
 **P4: contact, hit and sensor events.** Contact begin/end and hit events
@@ -1023,6 +1029,19 @@ queries with `QueryFilter`, moved off the vehicle ray pool. Then capsule
   have one, impulse per area times each collider's cross-section, full
   inside the radius and fading over the falloff, waking what it reaches.
 
+- *Shipped (2026-10-24):* `World::cast(CastDef)` (C `rbWorld_Cast`): ray,
+  sphere and upright-capsule casts, closest hit, on #52's in-step
+  `query_batch` (grid walk, exact shapes, category mask, an ignored body).
+  It needs no vehicle pool. It runs before the step moves anything, so it
+  sees the poses the step starts from. Up to 256 per step; results in
+  `Frame::cast_results` / `RbFrame::casts`, and a frame with casts is never
+  dropped. Projectiles: `World::spawn_projectile(ProjectileDef)` (C
+  `rbWorld_SpawnProjectile`), #52's piercing ballistic casts. Energy pays
+  for each shape's thickness, and hits push dynamic bodies. Stopped
+  projectiles' slots are reused, and the pool is released once all have
+  stopped, so a quiet world can sleep again. Results arrive as
+  `Frame::projectiles` and `projectile_events` (passed with the thickness
+  crossed, or stopped).
 - *Shipped first cut:* `World::cast_rays` (C: `rbWorld_CastRays`) queues
   closest-hit rays for the next step. They trace on the GPU against that
   step's final poses (they share the vehicle ray pool, whose ray count only

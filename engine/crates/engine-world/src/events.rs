@@ -179,6 +179,16 @@ pub struct Frame {
     pub sensor_events: SensorEvents,
     /// Overlap queries queued before this step.
     pub overlap_results: Vec<crate::OverlapResult>,
+    /// Every character, as this step left it.
+    pub characters: Vec<crate::CharacterOutput>,
+    /// Characters that landed, lost their support or were crushed.
+    pub character_events: Vec<crate::CharacterEvent>,
+    /// Casts queued before this step.
+    pub cast_results: Vec<crate::CastResult>,
+    /// Every projectile in flight, and each one that stopped this step.
+    pub projectiles: Vec<crate::ProjectileOutput>,
+    /// Shapes projectiles went through or stopped in.
+    pub projectile_events: Vec<crate::ProjectileEvent>,
     /// Records overwritten in the GPU event ring before they were read (more
     /// than it holds between two frames). Never silently zero.
     pub lost_events: u32,
@@ -215,6 +225,14 @@ pub struct CoalescedFrame {
     pub sensor_events: SensorEvents,
     /// Every overlap query's results.
     pub overlap_results: Vec<crate::OverlapResult>,
+    /// The latest state per character and per projectile.
+    pub characters: Vec<crate::CharacterOutput>,
+    pub projectiles: Vec<crate::ProjectileOutput>,
+    /// Every step's character and projectile events and cast results, in
+    /// step order.
+    pub character_events: Vec<crate::CharacterEvent>,
+    pub cast_results: Vec<crate::CastResult>,
+    pub projectile_events: Vec<crate::ProjectileEvent>,
     pub lost_events: u32,
     /// Any folded step's readback was dropped (a later one resynced it).
     pub dropped: bool,
@@ -233,6 +251,8 @@ pub fn coalesce(frames: Vec<Frame>) -> CoalescedFrame {
     let mut vehicles = BTreeMap::new();
     let mut soft = BTreeMap::new();
     let mut skins = BTreeMap::new();
+    let mut characters = BTreeMap::new();
+    let mut projectiles = BTreeMap::new();
     for f in frames {
         for m in f.body_events.moves {
             moves
@@ -270,6 +290,15 @@ pub fn coalesce(frames: Vec<Frame>) -> CoalescedFrame {
         out.sensor_events.begin.extend(f.sensor_events.begin);
         out.sensor_events.end.extend(f.sensor_events.end);
         out.overlap_results.extend(f.overlap_results);
+        for c in f.characters {
+            characters.insert(c.character, c);
+        }
+        for p in f.projectiles {
+            projectiles.insert(p.projectile, p);
+        }
+        out.character_events.extend(f.character_events);
+        out.cast_results.extend(f.cast_results);
+        out.projectile_events.extend(f.projectile_events);
         out.lost_events += f.lost_events;
         out.dropped |= f.dropped;
         if f.counters.is_some() {
@@ -280,6 +309,8 @@ pub fn coalesce(frames: Vec<Frame>) -> CoalescedFrame {
     out.vehicles = vehicles.into_values().collect();
     out.soft = soft.into_values().collect();
     out.skins = skins.into_values().collect();
+    out.characters = characters.into_values().collect();
+    out.projectiles = projectiles.into_values().collect();
     out
 }
 
