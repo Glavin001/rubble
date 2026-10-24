@@ -26,7 +26,7 @@ const F_ABS = 1;    // the dynamic slot is the whole local matrix (beams, spring
 const F_WHEEL = 2;  // travels with its wheel's free body once detached
 const F_RIG = 4;    // posed by the rig (dynamic slot)
 // Instance modes (Inst.slot.z).
-const M_VEHICLE = 0, M_BODY = 2, M_TUBE = 3, M_FRAME = 4;
+const M_VEHICLE = 0, M_BODY = 2, M_TUBE = 3, M_FRAME = 4, M_WHEELPOSE = 5;
 // 4 × vec4f rest columns, vec4f colour, 3 × vec4u, 4 × vec4f extra matrix.
 const INST_WORDS = 48;
 const BUGGY_WORDS = 8;
@@ -47,10 +47,11 @@ const hex = (c) => [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16) / 255);
  * @param {string} o.shadeWgsl   WGSL defining qrot() and shade(c, n, w) against `frame`
  * @param {string} [o.base]      URL of generated/dune-buggy/
  */
-export async function createBuggyRenderer({ device, format, world, frameBuf, L, shadeWgsl, base = './generated/dune-buggy/' }) {
+export async function createBuggyRenderer({ device, format, world, frameBuf, L, shadeWgsl, model = 'buggy', base = './generated/dune-buggy/' }) {
+  const file = `${model}-mesh`;
   const [mesh, bin] = await Promise.all([
-    fetch(base + 'buggy-mesh.json', { cache: 'no-store' }).then((r) => { if (!r.ok) throw new Error(`buggy-mesh.json: HTTP ${r.status}`); return r.json(); }),
-    fetch(base + 'buggy-mesh.bin', { cache: 'no-store' }).then((r) => { if (!r.ok) throw new Error(`buggy-mesh.bin: HTTP ${r.status}`); return r.arrayBuffer(); }),
+    fetch(base + file + '.json', { cache: 'no-store' }).then((r) => { if (!r.ok) throw new Error(`${file}.json: HTTP ${r.status}`); return r.json(); }),
+    fetch(base + file + '.bin', { cache: 'no-store' }).then((r) => { if (!r.ok) throw new Error(`${file}.bin: HTTP ${r.status}`); return r.arrayBuffer(); }),
   ]);
   const geo = device.createBuffer({ size: bin.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
   device.queue.writeBuffer(geo, 0, bin);
@@ -63,7 +64,7 @@ export async function createBuggyRenderer({ device, format, world, frameBuf, L, 
   const absInstances = [];
   const slotOf = mesh.instances.map((inst) => {
     switch (inst.role) {
-      case null: case undefined: return SLOT_STATIC;
+      case null: case undefined: case 'trailer': case 'trailerWheel': return SLOT_STATIC;
       case 'steering': return SLOT_STEERING;
       case 'hub': case 'wheel': return SLOT_CORNER + 2 * inst.corner;
       case 'knuckle': return SLOT_CORNER + 2 * inst.corner + 1;
@@ -126,12 +127,16 @@ struct Out { @builtin(position) clip: vec4f, @location(0) n: vec3f, @location(1)
       n = (dm * vec4f(nrm, 0.0)).xyz;
     }
   } else {
-    let pr = vdata[2u].z + (vdata[vr + ${L.V_POOL2}u].x + inst.info.y) * ${L.PART_STRIDE}u;
-    let com = vdata[pr + ${L.P_COM}u];
-    let state = com.w;
+    let partBase = vdata[2u].z + vdata[vr + ${L.V_POOL2}u].x * ${L.PART_STRIDE}u;
+    let pr = partBase + inst.info.y * ${L.PART_STRIDE}u;
+    let state = vdata[pr + ${L.P_COM}u].w;
     if (state == ${L.PS_DETACHED}u) {
-      body = vdata[pr + ${L.P_PARK}u].x;
-      p = p - bitcast<vec3f>(com.xyz);
+      // On its own body, or carried off on the part it was bolted to (P_TREE.y):
+      // that body's origin is its P_COM.
+      let carrier = vdata[pr + ${L.P_TREE}u].y;
+      let cr = select(pr, partBase + carrier * ${L.PART_STRIDE}u, carrier < 32u);
+      body = vdata[cr + ${L.P_PARK}u].x;
+      p = p - bitcast<vec3f>(vdata[cr + ${L.P_COM}u].xyz);
     } else if (state != ${L.PS_ATTACHED}u) {
       hidden = true;
     }
@@ -168,6 +173,22 @@ struct Out { @builtin(position) clip: vec4f, @location(0) n: vec3f, @location(1)
     o.w = mix(pa, pb, u) + qrot(q, vec3f(pos.x * r, pos.y * r, 0.0));
     o.n = qrot(q, nrm);
     hidden = false;
+  } else if (mode == ${M_WHEELPOSE}u) {
+    // A trailer wheel's part: about its hub, at the wheel's pose (steer, spin), or
+    // on its free body once it came off. extra = recipe → wheel-local; slot.w = the
+    // wheel's record, nodes.x its vehicle.
+    let tvr = vdata[1u].x + inst.nodes.x * ${L.VEH_STRIDE}u;
+    let wr = vdata[1u].y + (vdata[tvr + ${L.V_CFG}u].y + inst.slot.w) * ${L.WHEEL_STRIDE}u;
+    let wd = vdata[wr + ${L.W_C0}u].z;
+    var wp = vf(wr + ${L.W_O_POS}u).xyz;
+    var wq = vf(wr + ${L.W_O_ROT}u);
+    if ((wd & ${L.WD_DETACHED}u) != 0u) {
+      let pb = bodies[vdata[wr + ${L.W_PARK}u].x];
+      wp = pb.position; wq = pb.orientation;
+    }
+    o.w = wp + qrot(wq, (extra * vec4f(pos, 1.0)).xyz);
+    o.n = qrot(wq, (extra * vec4f(nrm, 0.0)).xyz);
+    hidden = (wd & ${L.WD_DISABLED}u) != 0u;
   } else if (mode == ${M_FRAME}u) {
     // Riding three nodes: extra = design → their rest frame (origin node 0).
     let p0 = bodies[inst.nodes.x].position;
@@ -315,14 +336,30 @@ struct Out { @builtin(position) clip: vec4f, @location(0) n: vec3f, @location(1)
   return {
     mesh,
     get count() { return buggies.length; },
-    /** Draw rigid vehicle `h` (a dune_buggy preset) with the mesh. */
-    add(h) {
+    /** Draw rigid vehicle `h` (this model's preset) with the mesh; a semi's
+     * `trailer` is its hitched trailer vehicle. */
+    add(h, { trailer } = {}) {
       const desc = world.vehicles.entries[h].desc;
       if (desc.parts.length !== mesh.parts.length || desc.parts.some((p, i) => p.name !== mesh.parts[i]))
-        throw new Error(`vehicle ${h} (${desc.name}) is not the baked dune buggy`);
+        throw new Error(`vehicle ${h} (${desc.name}) is not the baked ${model}`);
+      const hasTrailer = mesh.instances.some((x) => x.trailerWheel !== undefined);
+      if (hasTrailer && trailer === undefined) throw new Error(`${model}: pass its trailer vehicle`);
       const g = buggyOf(h);
-      g.bind = (i) => ({ mode: M_VEHICLE, part: mesh.instances[i].part });
-      g.covers = () => [vehicleBodies(g.entry)];
+      const te = trailer === undefined ? null : world.vehicles.entries[trailer];
+      g.bind = (i) => {
+        const inst = mesh.instances[i];
+        if (inst.trailerWheel !== undefined) {
+          // Recipe → about the hub → Rubble wheel-local axes.
+          return { mode: M_WHEELPOSE, part: 0, body: inst.trailerWheel, nodes: [trailer, 0, 0, 0], extra: mul(mul(R, translation(inst.hub.map((x) => -x))), restOf(i)) };
+        }
+        if (inst.part < 0) {
+          // The trailer body (its origin: the trailer preset's centre of mass).
+          return { mode: M_BODY, part: 0, body: te.chassis, extra: mul(mul(translation(te.origin.map((x) => -x)), R), restOf(i)) };
+        }
+        return { mode: M_VEHICLE, part: inst.part };
+      };
+      g.covers = () => [vehicleBodies(g.entry), ...(te ? [vehicleBodies(te)] : [])];
+      g.trailer = trailer;
       buggies.push(g);
       rebuild();
     },
@@ -374,7 +411,7 @@ struct Out { @builtin(position) clip: vec4f, @location(0) n: vec3f, @location(1)
      * whose generic collider shapes this mesh replaces, and the vehicle handles
      * whose generic wheels it replaces. */
     covered() {
-      return buggies.map((g) => ({ vehicle: g.h, bodies: g.covers() }));
+      return buggies.flatMap((g) => [{ vehicle: g.h, bodies: g.covers() }, ...(g.trailer !== undefined ? [{ vehicle: g.trailer, bodies: [] }] : [])]);
     },
     /** Queue the wheel-record copies after a step (pass the frame's encoder). */
     encodeReadback(enc) {

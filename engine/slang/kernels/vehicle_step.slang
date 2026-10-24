@@ -727,6 +727,70 @@ void detachPart(uint vr, uint chassis, uint p, bool spawnBody)
     }
     VSet(pr + P_COM, float4(com.xyz, asfloat(spawnBody ? PS_DETACHED : PS_DISABLED)));
     gBodies[chassis].generation = HOST_S(17);
+
+    // Parts bolted to this one (P_TREE parent, transitively) leave with it as one
+    // rigid piece: their colliders join its body (or go with it), their mass
+    // leaves the chassis and joins that body. Children have higher indices.
+    uint4 pool2 = VU(vr + V_POOL2);
+    uint local = p - pool2.x;
+    uint moving = 1u << local;
+    float mTotal = mass.x;
+    float3 mCom = mass.x * com.xyz;
+    for (uint ci = local + 1u; ci < pool2.y && ci < 32u; ci++)
+    {
+        uint cr = partRec(pool2.x + ci);
+        float4 ccom = VD(cr + P_COM);
+        uint parent = VU(cr + P_TREE).x;
+        if (asuint(ccom.w) != PS_ATTACHED || parent >= 32u || (moving & (1u << parent)) == 0u) continue;
+        moving |= 1u << ci;
+        float4 cm = VD(cr + P_MASS);
+        chassisRemoveMass(chassis, vr, cm.x, cm.yzw, ccom.xyz);
+        uint4 cc = VU(cr + P_CFG);
+        for (uint k = 0u; k < cc.y; k++)
+        {
+            uint col = cc.x + k;
+            gColliders[col].body = target;
+            gColliders[col].localPos = gColliders[col].localPos - offset;
+            gColliders[col].generation = spawnBody ? chassis + 1u : 0u;
+        }
+        if (spawnBody)
+        {
+            float4 park = VD(cr + P_PARK);
+            VSet(cr + P_PARK, float4(park.xy, SEVER_GRACE, park.w));
+        }
+        mTotal += cm.x;
+        mCom += cm.x * ccom.xyz;
+        VSetU(cr + P_TREE, uint4(parent, local, 0u, 0u));
+        VSet(cr + P_COM, float4(ccom.xyz, asfloat(spawnBody ? PS_DETACHED : PS_DISABLED)));
+    }
+    if (!spawnBody || moving == (1u << local)) return;
+    // One rigid piece: its origin moves to the combined centre of mass (chassis
+    // axes, the body's at detach), with that point's velocity, and inertia
+    // about it; colliders keep their places. The parent's P_COM records the
+    // piece's origin (renderers re-base the piece's parts on it).
+    float3 centre = mCom / mTotal;
+    float3 shift = centre - com.xyz;
+    float3 inertia = float3(0, 0, 0);
+    for (uint ci = local; ci < pool2.y && ci < 32u; ci++)
+    {
+        if ((moving & (1u << ci)) == 0u) continue;
+        uint cr = partRec(pool2.x + ci);
+        float4 cm = VD(cr + P_MASS);
+        float3 d = VD(cr + P_COM).xyz - centre;
+        float3 d2 = d * d;
+        inertia += cm.yzw + cm.x * float3(d2.y + d2.z, d2.x + d2.z, d2.x + d2.y);
+        uint4 cc = VU(cr + P_CFG);
+        for (uint k = 0u; k < cc.y; k++) gColliders[cc.x + k].localPos = gColliders[cc.x + k].localPos - shift;
+    }
+    BodyState b = gBodies[target];
+    b.position = transformPoint(c.position, c.orientation, centre);
+    b.initialPos = b.position;
+    b.linearVel = c.linearVel + cross(c.angularVel, b.position - c.position);
+    b.invMass = 1.0 / mTotal;
+    b.invInertia = 1.0 / inertia;
+    gBodies[target] = b;
+    BODY_PREV(target).linearVel = b.linearVel;
+    VSet(pr + P_COM, float4(centre, asfloat(PS_DETACHED)));
 }
 
 [shader("compute")]
@@ -2529,21 +2593,34 @@ void vehicle_loads(uint3 tid : SV_DispatchThreadID)
     float3 gL = quatRotate(qi, float3(0.0, p.gravityY * (gScale != 0.0 ? gScale : 1.0), 0.0));
 
     uint4 brk = VU(vr + V_BRK);
-    for (uint pi = 1u; pi < nP; pi++)
+    // Children (higher indices) first: a part's mount also carries what its
+    // attached children's mounts pass into it (force, and moment about the origin).
+    float3 childF[MAX_VEHICLE_PARTS], childM[MAX_VEHICLE_PARTS];
+    for (uint k = 0u; k < MAX_VEHICLE_PARTS; k++) { childF[k] = float3(0, 0, 0); childM[k] = float3(0, 0, 0); }
+    for (uint step = 1u; step < nP; step++)
     {
+        uint pi = nP - step;
         uint pr = partRec(pool2.x + pi);
         float4 com = VD(pr + P_COM);
         if (asuint(com.w) != PS_ATTACHED) continue;
         float4 mount = VD(pr + P_MOUNT);
         float4 load = VD(pr + P_LOAD);
-        if (mount.w >= 1e29 && load.x >= 1e29) continue;
+        uint parent = VU(pr + P_TREE).x;
+        if (mount.w >= 1e29 && load.x >= 1e29 && parent >= 32u) continue;
         float4 mass = VD(pr + P_MASS);
         float3 r = com.xyz;
         float3 ap = aL + cross(alL, r) + cross(wL, cross(wL, r));
-        float3 fm = mass.x * (ap - gL) - partF[pi];
+        float3 fm = mass.x * (ap - gL) - partF[pi] + childF[pi];
         float3 tauCom = mass.yzw * alL + cross(wL, mass.yzw * wL);
         float3 mContactCom = partM[pi] - cross(r, partF[pi]);
-        float3 tm = tauCom - cross(mount.xyz - r, fm) - mContactCom;
+        float3 mChildCom = childM[pi] - cross(r, childF[pi]);
+        float3 tm = tauCom - cross(mount.xyz - r, fm) - mContactCom + mChildCom;
+        if (parent < 32u)
+        {
+            childF[parent] += fm;
+            childM[parent] += tm + cross(mount.xyz, fm);
+        }
+        if (mount.w >= 1e29 && load.x >= 1e29) continue;
         float F = length(fm), Tq = length(tm);
         float ratio = max(F / mount.w, Tq / load.x);
         VSet(pr + P_LOAD, float4(load.x, F, Tq, max(load.w, ratio)));
