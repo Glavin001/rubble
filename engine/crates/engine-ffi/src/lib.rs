@@ -191,9 +191,24 @@ pub struct RbBodyDef {
     pub linear_velocity: RbVec3,
     pub angular_velocity: RbVec3,
     pub is_awake: bool,
+    /// Box3D damping (1/s).
+    pub linear_damping: f32,
+    pub angular_damping: f32,
+    pub gravity_scale: f32,
+    /// `RB_LOCK_*` bits: axes (world, host frame) it may not move along or
+    /// turn about.
+    pub motion_locks: u32,
     pub user_data: u64,
     pub internal_value: u32,
 }
+
+/// Motion-lock bits (`RbBodyDef::motion_locks`, `rbBody_SetMotionLocks`).
+pub const RB_LOCK_LINEAR_X: u32 = 1;
+pub const RB_LOCK_LINEAR_Y: u32 = 2;
+pub const RB_LOCK_LINEAR_Z: u32 = 4;
+pub const RB_LOCK_ANGULAR_X: u32 = 8;
+pub const RB_LOCK_ANGULAR_Y: u32 = 16;
+pub const RB_LOCK_ANGULAR_Z: u32 = 32;
 
 /// A shape (`rbDefaultShapeDef`).
 #[repr(C)]
@@ -1351,6 +1366,10 @@ pub extern "C" fn rbDefaultBodyDef() -> RbBodyDef {
         linear_velocity: RbVec3::default(),
         angular_velocity: RbVec3::default(),
         is_awake: true,
+        linear_damping: 0.0,
+        angular_damping: 0.0,
+        gravity_scale: 1.0,
+        motion_locks: 0,
         user_data: 0,
         internal_value: COOKIE,
     }
@@ -1397,6 +1416,10 @@ pub unsafe extern "C" fn rbCreateBodies(
                 linear_velocity: w.coords.linear_in(d.linear_velocity.a()),
                 angular_velocity: w.coords.angular_velocity_in(d.angular_velocity.a()),
                 is_awake: d.is_awake,
+                linear_damping: d.linear_damping,
+                angular_damping: d.angular_damping,
+                gravity_scale: d.gravity_scale,
+                motion_locks: MotionLocks::from_bits(w.coords.locks_in(d.motion_locks)),
                 user_data: d.user_data,
                 ..BodyDef::default()
             });

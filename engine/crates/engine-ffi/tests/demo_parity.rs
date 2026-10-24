@@ -551,3 +551,63 @@ fn sensors_report_through_the_abi() {
         rbDestroyWorld(w);
     }
 }
+
+#[test]
+fn damping_gravity_scale_and_locks_through_the_abi() {
+    unsafe {
+        let mut def = rbDefaultWorldDef();
+        def.coordinates = RbCoordinates::RB_COORDINATES_UNREAL;
+        def.gravity = v3(0.0, 0.0, -981.0);
+        let mut w = ptr::null_mut();
+        ok(rbCreateWorld(&def, &mut w));
+        let make = |w: *mut RbWorld, x: f32, edit: &dyn Fn(&mut RbBodyDef)| {
+            let mut bd = rbDefaultBodyDef();
+            bd.type_ = RbBodyType::RB_DYNAMIC_BODY;
+            bd.transform.p = v3(x, 0.0, 1000.0);
+            edit(&mut bd);
+            let mut b = 0;
+            ok(rbCreateBody(w, &bd, &mut b));
+            let mut sd = rbDefaultShapeDef();
+            sd.density = 0.0005;
+            let mut s = 0;
+            ok(rbCreateBoxShape(
+                w,
+                b,
+                &sd,
+                v3(50.0, 50.0, 50.0),
+                RbTransform::default(),
+                &mut s,
+            ));
+            b
+        };
+        let normal = make(w, 0.0, &|_| {});
+        let locked = make(w, 300.0, &|d| d.motion_locks = RB_LOCK_LINEAR_Z);
+        let light = make(w, 600.0, &|d| d.gravity_scale = 0.5);
+        let damped = make(w, 900.0, &|_| {});
+        ok(rbBody_SetDamping(w, damped, 5.0, 0.0));
+        for _ in 0..30 {
+            ok(rbWorld_Step(w));
+        }
+        let mut f: RbFrame = std::mem::zeroed();
+        ok(rbWorld_Poll(w, true, true, &mut f));
+        let z = |b| {
+            let mut t = RbTransform::default();
+            ok(rbBody_GetTransform(w, b, &mut t));
+            1000.0 - t.p.z
+        };
+        let drop = z(normal);
+        assert!(drop > 100.0, "fell {drop} cm");
+        assert!(
+            z(locked).abs() < 0.01,
+            "locked along Unreal Z: {}",
+            z(locked)
+        );
+        assert!(
+            (z(light) / drop - 0.5).abs() < 0.02,
+            "half gravity: {}",
+            z(light)
+        );
+        assert!(z(damped) < 0.9 * drop, "damped: {}", z(damped));
+        rbDestroyWorld(w);
+    }
+}

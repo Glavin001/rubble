@@ -14,6 +14,19 @@
 
 #define RB_VERSION_MINOR 1
 
+// Motion-lock bits (`RbBodyDef::motion_locks`, `rbBody_SetMotionLocks`).
+#define RB_LOCK_LINEAR_X 1
+
+#define RB_LOCK_LINEAR_Y 2
+
+#define RB_LOCK_LINEAR_Z 4
+
+#define RB_LOCK_ANGULAR_X 8
+
+#define RB_LOCK_ANGULAR_Y 16
+
+#define RB_LOCK_ANGULAR_Z 32
+
 // The host's coordinate convention.
 typedef enum RbCoordinates {
   // Rubble's own: Y up, right-handed, metres (no conversion).
@@ -354,6 +367,13 @@ typedef struct RbBodyDef {
   struct RbVec3 linear_velocity;
   struct RbVec3 angular_velocity;
   bool is_awake;
+  // Box3D damping (1/s).
+  float linear_damping;
+  float angular_damping;
+  float gravity_scale;
+  // `RB_LOCK_*` bits: axes (world, host frame) it may not move along or
+  // turn about.
+  uint32_t motion_locks;
   uint64_t user_data;
   uint32_t internal_value;
 } RbBodyDef;
@@ -829,6 +849,15 @@ enum RbResult rbBody_GetVelocity(struct RbWorld *world,
 enum RbResult rbBody_SetTargetTransform(struct RbWorld *world,
                                         RbBodyId body,
                                         struct RbTransform transform);
+
+// Box3D damping (1/s): velocities shrink by `1 / (1 + h c)` each step.
+enum RbResult rbBody_SetDamping(struct RbWorld *world, RbBodyId body, float linear, float angular);
+
+// Multiply gravity for this body (it wakes).
+enum RbResult rbBody_SetGravityScale(struct RbWorld *world, RbBodyId body, float scale);
+
+// `RB_LOCK_*` bits (host axes).
+enum RbResult rbBody_SetMotionLocks(struct RbWorld *world, RbBodyId body, uint32_t locks);
 
 // Awake as of the last polled frame.
 enum RbResult rbBody_IsAwake(struct RbWorld *world, RbBodyId body, bool *out);

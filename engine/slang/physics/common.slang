@@ -31,6 +31,9 @@ static const uint BODY_PARTICLE = 64u;
 // Rides another body's pose (a soft body's bolted part in rigid mode, placed by
 // soft_mode): in the graph and colours, but the rigid primal leaves it alone.
 static const uint BODY_FOLLOW = 128u;
+// Motion locks (world axes): bits 8..10 linear x, y, z; 11..13 angular x, y, z.
+static const uint BODY_LOCK_SHIFT = 8u;
+static const uint BODY_LOCK_MASK = 0x3F00u;
 
 struct Collider
 {
@@ -247,6 +250,11 @@ static const uint CMD_SET_MASS_FRAME = 15u;
 // Kinematic bodies: f0.xyz = target position, f1 = target rotation (solver
 // pose); sets the velocity that reaches them over this step.
 static const uint CMD_SET_KINEMATIC_TARGET = 16u;
+// Damping and gravity scale for one step (Box3D): v = f0.w * v + f0.xyz,
+// w = f1.x * w (World sends them every step for bodies that use them).
+static const uint CMD_DAMP = 17u;
+// Motion locks: f0.x = the six lock bits (BODY_LOCK_SHIFT order).
+static const uint CMD_SET_LOCKS = 18u;
 // GpuCommand.b bits of run commands.
 static const uint CMD_NO_WAKE = 1u;   // skip the command if the body is asleep
 static const uint CMD_AT_CENTER = 2u; // impulse through the centre of mass

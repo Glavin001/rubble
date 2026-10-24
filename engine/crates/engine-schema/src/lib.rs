@@ -75,6 +75,10 @@ pub enum BodyFlags {
     Awake = 8,
 }
 
+/// Motion locks in `BodyState::flags` (world axes): bits 8..10 linear x, y,
+/// z; 11..13 angular x, y, z.
+pub const BODY_LOCK_SHIFT: u32 = 8;
+
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ShapeType {

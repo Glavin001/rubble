@@ -88,6 +88,45 @@ pub unsafe extern "C" fn rbBody_SetTargetTransform(
     })
 }
 
+/// Box3D damping (1/s): velocities shrink by `1 / (1 + h c)` each step.
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_SetDamping(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    linear: f32,
+    angular: f32,
+) -> RbResult {
+    body_command(world, body, |w, id| {
+        w.world.body_set_damping(id, linear, angular)
+    })
+}
+
+/// Multiply gravity for this body (it wakes).
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_SetGravityScale(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    scale: f32,
+) -> RbResult {
+    body_command(world, body, |w, id| {
+        w.world.body_set_gravity_scale(id, scale)
+    })
+}
+
+/// `RB_LOCK_*` bits (host axes).
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_SetMotionLocks(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    locks: u32,
+) -> RbResult {
+    body_command(world, body, |w, id| {
+        let bits = w.coords.locks_in(locks);
+        w.world
+            .body_set_motion_locks(id, MotionLocks::from_bits(bits))
+    })
+}
+
 /// Awake as of the last polled frame.
 #[no_mangle]
 pub unsafe extern "C" fn rbBody_IsAwake(

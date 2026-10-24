@@ -124,6 +124,13 @@ void emitEvent(uint type, uint id, uint a, uint b)
 // places them, the solve and velocity extraction skip them, and contacts see
 // an infinite mass. Without the flag nothing changes.
 bool bodyIsKinematic(BodyState b) { return (b.flags & BODY_KINEMATIC) != 0u; }
+// Motion locks: 1 keeps an axis free, 0 locks it (world axes).
+uint bodyLocks(BodyState b) { return (b.flags & BODY_LOCK_MASK) >> BODY_LOCK_SHIFT; }
+float3 lockedLinear(uint locks)
+{
+    return float3((locks & 1u) != 0u ? 0.0 : 1.0, (locks & 2u) != 0u ? 0.0 : 1.0, (locks & 4u) != 0u ? 0.0 : 1.0);
+}
+float3 lockedAngular(uint locks) { return lockedLinear(locks >> 3u); }
 bool bodyIsDynamic(BodyState b)
 {
     return (b.flags & BODY_DYNAMIC) != 0u && (b.invMass > 0.0 || bodyIsKinematic(b));
@@ -212,6 +219,15 @@ void applyCommandRun(uint first, uint n, uint body, float dt)
             float3 w = 2.0 * dq.xyz / h;
             b.angularVel = dq.w < 0.0 ? -w : w;
             wakeBody(b);
+        }
+        else if (c.op == CMD_DAMP && b.invMass > 0.0)
+        {
+            b.linearVel = b.linearVel * c.f0.w + c.f0.xyz;
+            b.angularVel = b.angularVel * c.f1.x;
+        }
+        else if (c.op == CMD_SET_LOCKS)
+        {
+            b.flags = (b.flags & ~BODY_LOCK_MASK) | ((asuint(c.f0.x) << BODY_LOCK_SHIFT) & BODY_LOCK_MASK);
         }
         else if (c.op == CMD_SET_MASS_FRAME)
         {
@@ -342,8 +358,16 @@ void predictOne(uint i)
     float slow = length(b.linearVel) + length(b.angularVel) * radius;
     bool startAtRest = slow < 0.1;
 
+    float3 gravity = float3(0, p.gravityY, 0);
+    uint locks = bodyLocks(b);
+    if (locks != 0u)
+    {
+        b.linearVel *= lockedLinear(locks);
+        b.angularVel *= lockedAngular(locks);
+        gravity *= lockedLinear(locks);
+    }
     // three-avbd inertial target + qadd (not exp-map).
-    float3 inertialLin = b.position + b.linearVel * dt + float3(0, p.gravityY, 0) * (dt * dt);
+    float3 inertialLin = b.position + b.linearVel * dt + gravity * (dt * dt);
     float4 inertialAng = quatNormalize(
         b.orientation + quatMul(float4(b.angularVel * dt, 0.0), b.orientation) * 0.5);
     // x⁻ snapshot for velocity extract (three-avbd initialPos). The previous-body
@@ -356,7 +380,7 @@ void predictOne(uint i)
     // A deferred wake keeps its pose this step (it is solved from the next).
     if (!startAtRest && !wakePending(b))
     {
-        b.position = b.position + b.linearVel * dt + float3(0, p.gravityY, 0) * (accelWeight * dt * dt);
+        b.position = b.position + b.linearVel * dt + gravity * (accelWeight * dt * dt);
         b.orientation = quatNormalize(
             b.orientation + quatMul(float4(b.angularVel * dt, 0.0), b.orientation) * 0.5);
     }
@@ -4855,6 +4879,21 @@ void primalApply(uint bodyIdx, Mat6 A, Vec6 rhs)
     uint floors = 0;
     Vec6 neg = rhs;
     for (int k = 0; k < 6; k++) neg.v[k] = -rhs.v[k];
+    uint locks = bodyLocks(b);
+    if (locks != 0u)
+    {
+        for (int k = 0; k < 6; k++)
+        {
+            if ((locks & (1u << uint(k))) == 0u) continue;
+            for (int j = 0; j < 6; j++)
+            {
+                A.m[k * 6 + j] = 0.0;
+                A.m[j * 6 + k] = 0.0;
+            }
+            A.m[k * 6 + k] = 1.0;
+            neg.v[k] = 0.0;
+        }
+    }
     Vec6 dz = solve6x6(A, neg, p.pivotFloor, floors);
     if (floors > 0) AADD2(gCounters[0].pivotFloorHits, floors);
     float3 dlin = float3(dz.v[0], dz.v[1], dz.v[2]);

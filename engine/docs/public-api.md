@@ -942,8 +942,15 @@ Unreal is the first client.
   the GPU from the pose at the step start, so animation tracking never
   drifts. Without the flag every kernel path is unchanged.
 - A full gravity vector, keeping the Y-only path bit-identical.
-- `gravity_scale`, linear and angular damping, and per-body `sleep_threshold`.
-- `motion_locks`.
+- ✅ `gravity_scale` and linear and angular damping (shipped 2026-10-24): a
+  per-step command at the start of the step, `v' = v / (1 + h c) + h (s - 1) g`,
+  which gives Box3D's inertial target exactly; only awake bodies that use
+  them get one, and they neither wake bodies nor keep an asleep world
+  stepping. Per-body `sleep_threshold` is still to do.
+- ✅ `motion_locks` (shipped 2026-10-24): six free body-flag bits; prediction
+  zeroes locked velocity and gravity and the primal solve replaces locked
+  rows and columns with identity, so other axes solve consistently. C:
+  `RB_LOCK_*` bits, permuted for Unreal axes.
 - `is_bullet`: port the Metal CCD classify and sweep passes to the shared
   plan.
 - `allow_fast_rotation`.

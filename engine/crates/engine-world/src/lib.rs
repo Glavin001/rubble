@@ -235,9 +235,17 @@ struct BodySlot {
     last_asleep: bool,
     /// The solver pose last delivered, for the resync diff.
     last_solver: Option<Transform>,
+    /// Damping (linear, angular) and gravity scale, sent each step as a
+    /// command while they differ from (0, 0, 1).
+    damping: (f32, f32),
+    gravity_scale: f32,
+    locks: u32,
 }
 
 impl BodySlot {
+    fn tuned(&self) -> bool {
+        self.damping != (0.0, 0.0) || self.gravity_scale != 1.0
+    }
     fn frame(&self) -> SolverFrame {
         self.frames.last().map_or(SolverFrame::IDENTITY, |f| f.1)
     }
@@ -522,6 +530,9 @@ impl World {
                 last_transform: None,
                 last_asleep: asleep,
                 last_solver: None,
+                damping: (d.linear_damping, d.angular_damping),
+                gravity_scale: d.gravity_scale,
+                locks: d.motion_locks.bits(),
             };
             let state = body_state(&slot);
             match self.reusable_body_slot() {
@@ -693,6 +704,79 @@ impl World {
             id,
             GpuCommand::set_kinematic_target(id.index(), s.position, s.rotation),
         )
+    }
+
+    /// Box3D damping (1/s): velocities shrink by `1 / (1 + h c)` each step.
+    pub fn body_set_damping(
+        &mut self,
+        id: BodyId,
+        linear: f32,
+        angular: f32,
+    ) -> anyhow::Result<()> {
+        let i = self.live_body(id)?;
+        anyhow::ensure!(linear >= 0.0 && angular >= 0.0, "negative damping");
+        self.bodies[i].damping = (linear, angular);
+        Ok(())
+    }
+
+    pub fn body_damping(&self, id: BodyId) -> anyhow::Result<(f32, f32)> {
+        Ok(self.bodies[self.live_body(id)?].damping)
+    }
+
+    /// Multiply gravity for this body (it wakes).
+    pub fn body_set_gravity_scale(&mut self, id: BodyId, scale: f32) -> anyhow::Result<()> {
+        let i = self.live_body(id)?;
+        anyhow::ensure!(scale.is_finite(), "gravity_scale must be finite");
+        if self.bodies[i].gravity_scale == scale {
+            return Ok(());
+        }
+        self.bodies[i].gravity_scale = scale;
+        // A body resting under the old scale may have slept: it moves again.
+        self.command(id, GpuCommand::wake(id.index()))
+    }
+
+    pub fn body_gravity_scale(&self, id: BodyId) -> anyhow::Result<f32> {
+        Ok(self.bodies[self.live_body(id)?].gravity_scale)
+    }
+
+    /// Lock axes (world frame) the body may not move along or turn about
+    /// (Box3D `b3Body_SetMotionLocks`).
+    pub fn body_set_motion_locks(&mut self, id: BodyId, locks: MotionLocks) -> anyhow::Result<()> {
+        let i = self.live_body(id)?;
+        self.bodies[i].locks = locks.bits();
+        self.command(id, GpuCommand::set_locks(id.index(), locks.bits()))
+    }
+
+    pub fn body_motion_locks(&self, id: BodyId) -> anyhow::Result<MotionLocks> {
+        Ok(MotionLocks::from_bits(
+            self.bodies[self.live_body(id)?].locks,
+        ))
+    }
+
+    /// This step's damping and gravity-scale commands: awake dynamic bodies
+    /// whose values differ from (0, 0, 1). They neither wake bodies nor
+    /// count as input, so an asleep world still skips its steps.
+    fn push_damping(&mut self) -> anyhow::Result<()> {
+        let p = self.sim.params();
+        let h = p.dt;
+        let mut cmds = Vec::new();
+        for (i, b) in self.bodies.iter().enumerate() {
+            if !b.alive || b.body_type != BodyType::Dynamic || b.last_asleep || !b.tuned() {
+                continue;
+            }
+            let add = [0.0, h * (b.gravity_scale - 1.0) * p.gravity_y, 0.0];
+            let cmd = GpuCommand::damp(
+                i as u32,
+                add,
+                1.0 / (1.0 + h * b.damping.0),
+                1.0 / (1.0 + h * b.damping.1),
+            );
+            cmds.push(cmd.without_wake());
+        }
+        if cmds.is_empty() {
+            return Ok(());
+        }
+        self.sim.push_body_commands(&cmds)
     }
 
     /// Teleport the body origin (velocities kept; the body wakes).
@@ -1310,6 +1394,7 @@ impl World {
         }
         let rays = std::mem::take(&mut self.pending_rays);
         let batches = std::mem::take(&mut self.pending_batches);
+        self.push_damping()?;
         let contact_events = self.contacts.enabled_shapes > 0;
         if contact_events {
             self.sim.clear_contact_events();
@@ -2005,6 +2090,9 @@ impl World {
                 last_transform: None,
                 last_asleep: false,
                 last_solver: None,
+                damping: (0.0, 0.0),
+                gravity_scale: 1.0,
+                locks: 0,
             });
         }
     }
@@ -2061,6 +2149,7 @@ fn body_state(slot: &BodySlot) -> BodyState {
             s
         }
     };
+    b.flags |= slot.locks << engine_schema::BODY_LOCK_SHIFT;
     b.initial_pos = b.position;
     b.initial_rot = b.orientation;
     b.linear_vel = slot.velocity.0;

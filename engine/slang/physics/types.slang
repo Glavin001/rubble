@@ -23,6 +23,8 @@ public static const uint BODY_AWAKE = 8u;
 public static const uint BODY_VEHICLE = 32u; // 16 is BODY_WAKE_PENDING
 public static const uint BODY_PARTICLE = 64u;
 public static const uint BODY_FOLLOW = 128u;
+public static const uint BODY_LOCK_SHIFT = 8u;
+public static const uint BODY_LOCK_MASK = 0x3F00u;
 
 public struct Collider
 {
@@ -240,6 +242,8 @@ public static const uint CMD_ADD_FORCE_AT = 13u;
 public static const uint CMD_ANGULAR_IMPULSE = 14u;
 public static const uint CMD_SET_MASS_FRAME = 15u;
 public static const uint CMD_SET_KINEMATIC_TARGET = 16u;
+public static const uint CMD_DAMP = 17u;
+public static const uint CMD_SET_LOCKS = 18u;
 public static const uint CMD_NO_WAKE = 1u;
 public static const uint CMD_AT_CENTER = 2u;
 public static const uint CMD_LINEAR_ONLY = 4u;

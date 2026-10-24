@@ -210,6 +210,38 @@ impl Coords {
         [p[0].abs(), p[1].abs(), p[2].abs()]
     }
 
+    /// Motion-lock bits (linear x, y, z, then angular x, y, z, in host axes)
+    /// to Rubble's axes: a permutation, so signs do not matter.
+    pub fn locks_in(&self, bits: u32) -> u32 {
+        self.locks_map(bits, false)
+    }
+
+    pub fn locks_out(&self, bits: u32) -> u32 {
+        self.locks_map(bits, true)
+    }
+
+    fn locks_map(&self, bits: u32, out: bool) -> u32 {
+        if !self.unreal() {
+            return bits;
+        }
+        let map = m();
+        let mut result = 0;
+        for engine in 0..3 {
+            // The host axis that Rubble axis `engine` maps to.
+            let col = map.col(engine);
+            let host = (0..3)
+                .max_by(|&a, &b| col[a].abs().total_cmp(&col[b].abs()))
+                .unwrap();
+            for block in [0, 3] {
+                let (from, to) = if out { (engine, host) } else { (host, engine) };
+                if bits & (1 << (block + from)) != 0 {
+                    result |= 1 << (block + to);
+                }
+            }
+        }
+        result
+    }
+
     /// Triangle winding for exported meshes.
     pub fn triangle_out(&self, t: [u32; 3]) -> [u32; 3] {
         if self.unreal() {
@@ -302,5 +334,20 @@ mod tests {
     fn winding_flips_for_unreal() {
         let c = Coords::new(RbCoordinates::RB_COORDINATES_UNREAL);
         assert_eq!(c.triangle_out([0, 1, 2]), [0, 2, 1]);
+    }
+
+    #[test]
+    fn locks_follow_the_axes() {
+        let c = Coords::new(RbCoordinates::RB_COORDINATES_UNREAL);
+        // Unreal Z (up) is Rubble Y; Unreal X is Rubble Z; Unreal Y is Rubble X.
+        assert_eq!(c.locks_in(4), 2);
+        assert_eq!(c.locks_in(1), 4);
+        assert_eq!(c.locks_in(2), 1);
+        assert_eq!(c.locks_in(32), 16);
+        for bits in 0..64 {
+            assert_eq!(c.locks_out(c.locks_in(bits)), bits);
+        }
+        let y_up = Coords::new(RbCoordinates::RB_COORDINATES_Y_UP_METRES);
+        assert_eq!(y_up.locks_in(37), 37);
     }
 }
