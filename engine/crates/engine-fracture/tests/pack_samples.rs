@@ -1,10 +1,10 @@
-//! The Scene menu's pack samples (the Wrecking Yard, `stress_ref::wrecking`): each is a
+//! The Scene menu's pack samples (the Wrecking Yard and Bridge Out, `stress_ref::wrecking`): each is a
 //! structure the stress oracle builds, its JSON builds as a lab scene (one body per chunk,
 //! the footings static, a breakable weld per bond at the calibrated strengths), and its
 //! menu entry counts its chunks.
 
 use engine_fracture::pack::{build_pack_scene, BLAST_DT};
-use engine_fracture::samples::{pack_sample_json, GROUPS, PACK_SAMPLES, WRECKING_YARD};
+use engine_fracture::samples::{pack_sample_json, GROUPS, PACK_GROUPS, PACK_SAMPLES};
 
 #[test]
 fn pack_samples_build_as_lab_scenes() {
@@ -14,9 +14,14 @@ fn pack_samples_build_as_lab_scenes() {
         .map(|s| s.0)
         .collect();
     assert_eq!(keys, structures);
-    assert_eq!(GROUPS.last(), Some(&WRECKING_YARD));
+    assert!(GROUPS.ends_with(PACK_GROUPS), "the pack samples' groups come last");
+    // Each group's entries together, in the groups' order.
+    let order: Vec<usize> = PACK_SAMPLES
+        .iter()
+        .map(|s| PACK_GROUPS.iter().position(|g| *g == s.group).expect(s.group))
+        .collect();
+    assert!(order.windows(2).all(|w| w[0] <= w[1]), "{order:?}");
     for s in PACK_SAMPLES {
-        assert_eq!(s.group, WRECKING_YARD);
         let structure = stress_ref::wrecking::structure(s.key).expect(s.key);
         let chunks = structure.chunks.len();
         let shown = s

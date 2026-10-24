@@ -5,15 +5,20 @@
 //!
 //!   cargo run --release -p stress-rubble --features gpu --example wrecking_yard -- [STRUCTURE] [BALL] [FRAMES]
 //!
-//! STRUCTURE `wy_frame10` (default), `wy_round_tower` or `wy_brick_tower`; BALL `ball10t`,
+//! STRUCTURE `wy_frame10` (default), `wy_round_tower`, `wy_brick_tower` or `bo_viaduct`; BALL `ball10t`,
 //! `ball50t` (default) or `sphere15m`; FRAMES at 60 Hz (default 600). The ball is fired at
 //! frame 10. `STRESS_PROFILE=threshold`: the threshold mode. `STRESS_SHOT_MASS=4`,
 //! `STRESS_SHOT_SPEED=2`: the ball's mass or speed times this (the lab's sliders).
 //!
 //! Every `EVERY` frames: bonds broken, fragments, ms per frame; then, per storey (the
-//! chunks' `storey-N`, `floor-N` or `course-N` group), the frame at which a tenth of its
-//! chunks had dropped a metre and how many had at the end: a collapse that climbs shows
-//! later frames on higher storeys, and a standing core storeys with few dropped.
+//! chunks' second group: `storey-N`, `floor-N`, `course-N`, the viaduct's `pier-N` and
+//! `span-N`), the frame at which a tenth of its chunks had dropped a metre and how many
+//! had at the end: a collapse that climbs shows later frames on higher storeys, and a
+//! standing core storeys with few dropped. For the viaduct, every `EVERY` frames, each
+//! span that has moved: how far its west and east ends have dropped (its deck chunks at
+//! each end) and how many of its bonded chunk pairs are still at their distance (within
+//! 5 cm). A span that comes down as one slab shows one end lower than the other and its
+//! pairs intact until it lands.
 use std::collections::BTreeMap;
 
 use stress_gpu::gpu::Gpu;
@@ -41,8 +46,10 @@ fn main() {
     let scene = stress_rubble::scenes::wrecking_yard(&key, p, frames as f64 / 60.0);
     let shot = wrecking::launch(&ball, &structure.aim, "ball");
     // Each chunk's storey (its group), in the scene's order.
-    let storey: Vec<String> = scene.bodies[0].chunks.iter().map(|c| c.groups.iter().find(|g| g.starts_with("storey-") || g.starts_with("floor-") || g.starts_with("course-")).cloned().unwrap_or_else(|| "footing".into())).collect();
-    let start: Vec<f64> = scene.bodies[0].chunks.iter().map(|c| c.center[2]).collect();
+    let storey: Vec<String> = scene.bodies[0].chunks.iter().map(|c| c.groups.get(1).cloned().unwrap_or_else(|| "footing".into())).collect();
+    let centres: Vec<Vec3> = scene.bodies[0].chunks.iter().map(|c| Vec3::from_array(c.center)).collect();
+    let start: Vec<f64> = centres.iter().map(|c| c.z).collect();
+    let spans = stress_ref::viaduct::span_probes(&scene.bodies[0].chunks, &scene.bodies[0].bonds);
     println!("{key}: {} chunks, {} bonds, {} ({:.0} t, r {:.2} m, {:.0} m/s{}), {}, {frames} frames", start.len(), scene.bodies[0].bonds.len(), ball.key, ball.mass / 1e3, ball.radius, ball.speed, if ball.rolling { ", rolling" } else { "" }, p.name());
     let gpu = Gpu::new().expect("GPU");
     // First frame each storey had a tenth of its chunks dropped.
@@ -77,8 +84,10 @@ fn main() {
             let st = w.poll(&gpu);
             ms.push(t.elapsed().as_secs_f64() * 1e3);
             if (f + 1) % EVERY == 0 || f + 1 == frames {
-                let z: Vec<f64> = w.chunk_centres(&gpu).iter().map(|(c, _)| c[2]).collect();
+                let at: Vec<Vec3> = w.chunk_centres(&gpu).iter().map(|(c, _)| Vec3::from_array(*c)).collect();
+                let z: Vec<f64> = at.iter().map(|c| c.z).collect();
                 last = note(f, &z);
+                print_spans(&spans, &centres, &at);
                 println!("frame {:4}: broken {:5}, bodies {:5}, {:6.2} ms/frame (last {EVERY})", f + 1, st.broken, st.bodies, mean(&ms[ms.len().saturating_sub(EVERY)..]));
             }
             if st.error != 0 || st.engine_overflow != 0 {
@@ -125,8 +134,10 @@ fn main() {
             if (f + 1) % EVERY == 0 || f + 1 == frames {
                 w.sync(&gpu);
                 let o = w.observation();
-                let z: Vec<f64> = o.bodies.values().next().expect("the structure").iter().zip(&start).map(|(c, z0)| z0 + c.displacement[2]).collect();
+                let at: Vec<Vec3> = o.bodies.values().next().expect("the structure").iter().zip(&centres).map(|(c, c0)| *c0 + Vec3::from_array(c.displacement)).collect();
+                let z: Vec<f64> = at.iter().map(|c| c.z).collect();
                 last = note(f, &z);
+                print_spans(&spans, &centres, &at);
                 println!("frame {:4}: broken {:5}, fragments {:5}, {:6.2} ms/frame (last {EVERY})", f + 1, o.values["broken_bonds"], o.values["fragments"], mean(&ms[ms.len().saturating_sub(EVERY)..]));
             }
         }
@@ -136,11 +147,24 @@ fn main() {
     println!("after the shot: median {:.2} ms/frame, p95 {:.2}, worst {:.2}", sorted[sorted.len() / 2], sorted[sorted.len() * 95 / 100], sorted[sorted.len() - 1]);
     // Storeys in height order.
     let mut storeys: Vec<&String> = last.keys().collect();
-    storeys.sort_by_key(|s| s.rsplit('-').next().and_then(|n| n.parse::<usize>().ok()).unwrap_or(0));
+    storeys.sort_by_key(|s| (s.rsplit('-').next().and_then(|n| n.parse::<usize>().ok()).unwrap_or(0), s.as_str()));
     println!("storey      dropped   first frame a tenth had dropped {DROP} m");
     for s in storeys {
         let (d, n) = last[s];
         println!("{s:12} {d:4}/{n:<4}  {}", first.get(s).map_or("-".into(), |f| format!("{}", f + 1)));
+    }
+}
+
+/// Each span (`stress_ref::viaduct::span_probes`) that has moved: its ends' drops and its
+/// intact pairs.
+fn print_spans(spans: &[stress_ref::viaduct::SpanProbe], start: &[Vec3], at: &[Vec3]) {
+    let (start, at): (Vec<[f64; 3]>, Vec<[f64; 3]>) = (start.iter().map(|v| v.to_array()).collect(), at.iter().map(|v| v.to_array()).collect());
+    for s in spans {
+        let st = s.state(&start, &at);
+        if st.west_drop.abs().max(st.east_drop.abs()) < 0.05 {
+            continue;
+        }
+        println!("  {}: west end down {:5.2} m, east end {:5.2} m, pairs intact {}/{}", s.name, st.west_drop, st.east_drop, st.intact, st.pairs);
     }
 }
 
