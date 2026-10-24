@@ -201,6 +201,8 @@ pub struct Frame {
     pub resynced: bool,
     /// The step's counters (awake bodies, contacts, colours, overflow flags).
     pub counters: Option<StepCounters>,
+    /// The open terrain region after this step's MPM substeps.
+    pub terrain: Option<engine_webgpu::TerrainStepReport>,
 }
 
 /// Several steps' frames folded into one, for hosts that step more often than

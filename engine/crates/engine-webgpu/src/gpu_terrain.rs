@@ -295,6 +295,8 @@ impl WgpuSim {
             self.disp(&mut pass, "mpm_activate_lower", records, None);
         }
         self.queue.submit(Some(enc.finish()));
+        let body = self.collider(collider).body;
+        self.mark_surface_moved(body);
         Ok(())
     }
 
@@ -308,6 +310,7 @@ impl WgpuSim {
             "terrain_bake needs a region opened by terrain_activate"
         );
         let records = u64::from(state.window_records);
+        let bed = state.params.dims[3];
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -325,6 +328,10 @@ impl WgpuSim {
             self.encode_terrain_deposits(&mut pass);
         }
         self.queue.submit(Some(enc.finish()));
+        if bed != MPM_NO_BED {
+            let body = self.collider(bed).body;
+            self.mark_surface_moved(body);
+        }
         Ok(())
     }
 

@@ -1411,18 +1411,25 @@ impl WgpuSim {
         col.params = engine_schema::heightfield::height_field_collider_params(base, field);
         self.set_colliders(collider, std::slice::from_ref(&col));
         self.sync_hulls(arena);
-        // Contact reuse (FLAG_REUSE_CONTACTS) keeps a pair's manifold until either
-        // body's generation passes the step it was made in, and a static body's
-        // never changes: mark the terrain as moved this step, so no manifold made
-        // against the old surface is reused.
-        let at = u64::from(col.body) * std::mem::size_of::<BodyState>() as u64
+        self.mark_surface_moved(col.body);
+        Ok(())
+    }
+
+    /// A static body's surface changed under its contacts (a heightfield edit,
+    /// or terrain activation and bake on the GPU). Contact reuse
+    /// (FLAG_REUSE_CONTACTS) keeps a pair's manifold until either body's
+    /// generation passes the step it was made in, and a static body's never
+    /// changes: mark it as moved this step, so no manifold made against the old
+    /// surface is reused.
+    pub(crate) fn mark_surface_moved(&mut self, body: u32) {
+        let at = u64::from(body) * std::mem::size_of::<BodyState>() as u64
             + std::mem::offset_of!(BodyState, generation) as u64;
         self.queue
             .write_buffer(&self.bufs[0], at, bytemuck::bytes_of(&self.steps_done));
-        if let Some(b) = self.host_bodies.get_mut(col.body as usize) {
+        if let Some(b) = self.host_bodies.get_mut(body as usize) {
             b.generation = self.steps_done;
         }
-        Ok(())
+        self.wake_pending = true;
     }
 
     pub fn joint_count(&self) -> u32 {

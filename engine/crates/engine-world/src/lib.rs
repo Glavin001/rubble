@@ -30,6 +30,7 @@ mod joints;
 mod math;
 mod readback;
 mod rig;
+mod terrain;
 
 pub use assembly::{
     AssemblyDef, AssemblyId, ConnectionDef, ConnectionKind, PartDef, PartHandle, PartModel,
@@ -58,6 +59,12 @@ pub use joints::{
 pub use math::Transform;
 pub use readback::Backpressure;
 pub use rig::VehicleDamage;
+pub use terrain::TerrainDef;
+pub use engine_terrain::{
+    CraterPrediction, CraterTarget, ExplosionSource, ImpactSource, RegionPlan, SandMaterial,
+    TerrainConfig, TerrainError, YieldSurface,
+};
+pub use engine_webgpu::TerrainStepReport;
 
 pub use engine_schema::convex::{CollisionFilter as Filter, ConvexHull};
 pub use engine_schema::heightfield::{HeightField, HeightFieldError};
@@ -205,6 +212,10 @@ enum Extra {
     RayHits(Vec<(RayBatchId, u32, u32)>),
     /// The contact-event region after this step's `contact_events` pass.
     ContactEvents,
+    /// The terrain counters after this step's MPM substeps.
+    TerrainCounters,
+    /// A baked heightfield's samples, for the host mirror.
+    TerrainHeights(ShapeId),
 }
 
 #[derive(Clone, Debug)]
@@ -355,6 +366,8 @@ pub struct World {
     /// Touching pairs of event shapes, diffed each frame (P4).
     contacts: contacts::ContactTracker,
     hit_event_threshold: f32,
+    /// Deformable terrain, once enabled.
+    terrain: Option<terrain::TerrainHost>,
 }
 
 impl World {
@@ -430,6 +443,7 @@ impl World {
             next_ray_batch: 0,
             contacts: contacts::ContactTracker::default(),
             hit_event_threshold: def.hit_event_threshold,
+            terrain: None,
         })
     }
 
@@ -925,6 +939,7 @@ impl World {
         values: &[f32],
     ) -> anyhow::Result<()> {
         let s = self.live_shape(id)?;
+        self.terrain_before_edit(id)?;
         let Geometry::HeightField { field, transform } = &self.shapes[s].geometry else {
             anyhow::bail!("shape {} is not a heightfield", id.to_bits());
         };
@@ -1453,6 +1468,8 @@ impl World {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("world step"),
             });
+        // The terrain's substeps go first: the rigid step applies their reactions.
+        let terrain = self.terrain_encode(&mut enc)?;
         self.sim
             .step_encode(&mut enc)
             .map_err(|e| anyhow::anyhow!("step: {e:?}"))?;
@@ -1473,6 +1490,7 @@ impl World {
                 if !batches.is_empty() {
                     self.sim.encode_ray_queries(&mut enc);
                 }
+                let copies = self.terrain_extras(terrain);
                 let mut extras = extras(
                     &self.sim,
                     self.resync,
@@ -1498,7 +1516,12 @@ impl World {
                         size: u64::from(count) * 16,
                     });
                 }
+                extras.extend(Self::terrain_extra_copies(&self.sim, copies));
                 let slot = self.readback.encode(&self.sim, &mut enc, step, &extras);
+                if terrain {
+                    // Copied: the next frame's flags start clear.
+                    self.sim.terrain_encode_flags_clear(&mut enc);
+                }
                 self.resync = false;
                 mapped = Some(slot);
             } else {
@@ -1752,6 +1775,7 @@ impl World {
         let mut skins: Vec<SkinOutput> = Vec::new();
         let mut record: Option<(VehicleHandle, Vec<[u32; 4]>)> = None;
         let mut ray_results = Vec::new();
+        let mut terrain = None;
         for (kind, bytes) in &raw.extras {
             match kind {
                 Extra::Resync | Extra::ContactEvents => {}
@@ -1792,6 +1816,8 @@ impl World {
                         s.normals = xyz(bytes);
                     }
                 }
+                Extra::TerrainCounters => terrain = Some(self.terrain_counters(step, bytes)?),
+                Extra::TerrainHeights(id) => self.terrain_heights(*id, bytes),
             }
         }
         Ok(Frame {
@@ -1808,6 +1834,7 @@ impl World {
             dropped: false,
             resynced: resync.is_some(),
             counters: Some(c),
+            terrain,
         })
     }
 
