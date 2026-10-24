@@ -642,6 +642,8 @@ bool FRubbleAbiBackend::LoadAbi(const FRubbleSceneRequest& Request, FString& Err
 		W.max_joints = FMath::Max(W.max_joints, uint32(Layout.SoftBodies.Num() * 16 + 4096));
 	}
 	W.time_step = float(Dt);
+	// Hits from 1 m/s (the threshold is in the world's units, cm/s here).
+	W.hit_event_threshold = 100.0f;
 	if (Layout.SolverIterations > 0)
 	{
 		W.iterations = uint32(Layout.SolverIterations);
@@ -1078,6 +1080,16 @@ bool FRubbleAbiBackend::CreateTown(FString& Error)
 		Error = AbiError(TEXT("rbCreateDestructibleAssetFromPack"));
 		return false;
 	}
+	// The solver the pack is tuned with (the fracture lab's: 120 Hz, 8 iterations, its contact,
+	// inertia, sleep and post-stabilization flags). Under World's defaults (60 Hz, none of those
+	// flags) a struck town gains energy and throws its chunks kilometres (unreal/PLAN.md).
+	float TimeStep = 0.0f;
+	if (rbWorld_UseDestructibleAssetSolver(WorldPtr, Asset, &TimeStep) != RB_OK)
+	{
+		Error = AbiError(TEXT("the town's solver"));
+		return false;
+	}
+	Dt = TimeStep;
 	RbDestructibleDef D = rbDefaultDestructibleDef();
 	D.asset = Asset;
 	D.anchored = true;     // its buried footings and road subgrade are fixed
@@ -1188,6 +1200,8 @@ bool FRubbleAbiBackend::ParkBalls(int32 Count, FString& Error)
 		B.type_ = RB_DYNAMIC_BODY;
 		B.transform = Xf(FTransform(ParkedAt(i)));
 		B.is_awake = false;
+		// The town's thin roofs and slabs (20 cm) are less than a 45 m/s ball's step: swept (CCD).
+		B.is_bullet = IsTown();
 		RbBodyId Ball = 0;
 		RbShapeDef SD = rbDefaultShapeDef();
 		SD.density = 0.0078f;
@@ -1221,6 +1235,7 @@ bool FRubbleAbiBackend::ParkBalls(int32 Count, FString& Error)
 			B.type_ = RB_DYNAMIC_BODY;
 			B.transform = Xf(FTransform(At));
 			B.is_awake = false;
+			B.is_bullet = true; // 50 m/s through 20 cm roofs and slabs
 			RbBodyId Rock = 0;
 			RbShapeDef SD = rbDefaultShapeDef();
 			SD.density = 0.003f;

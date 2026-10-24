@@ -99,23 +99,30 @@ ten-storey towers), streets and props, 51,921 chunks and 132,529 bonds, one dest
 | At rest | 16–18 ms a frame (render thread 15 ms: 2,633 batches without Nanite) |
 | All 52k chunks awake | 34–75 ms per Rubble step |
 
-**Open: the town's bond strengths under World's bond model (needs a decision).** The town was
-tuned for vibe-land's stress solver. Under `rubble::World` (bonds as breakable joints), the
-`town_probe` runs (a 7 t ball at 45 m/s into a house, then a 22 t meteor onto the next) show:
+**Fixed: the town's explosions were the solver, not its bonds.** Under World's default solver
+(60 Hz, no lab flags) a struck town gained energy: chunks still bonded vibrated at 30–90 m/s,
+then the town came apart and threw chunks up to 4.8 km in 10 s, at random (1–3 runs in 3, in
+metres or centimetres, hull or box colliders alike). The earlier "progressive collapse under
+self-weight" reading was wrong. Fixes:
+- the town runs the solver its pack is tuned with (`rbWorld_UseDestructibleAssetSolver`: 120 Hz,
+  8 iterations, the lab's contact, inertia, sleep and post-stabilization flags);
+- World's step plan now runs post-stabilization (`FLAG_POST_STAB`): without
+  `record_stab_velocity` a body's velocity was never updated under the lab's flags (no gravity,
+  no response to contacts), which also affected the house and arch scenes;
+- World's bond joints take their angular penalties in the D6 row order (bending and twist
+  were swapped);
+- cannonballs and meteors are CCD bullets (20 cm roofs and slabs are thinner than their step);
+- hits from 1 m/s (the threshold is in cm/s here).
 
-| `strength_scale` | Result |
-|---|---|
-| 1 (the pack's own) | A progressive collapse: about 250 bonds broken after 3 s and about 9,500 a second by 8 s, the whole town awake by 9 s. Bond preload does not settle in 600 steps and does not stop it. |
-| 1.1 | The same, starting about 3 s later |
-| 1.25, 1.5, 2, 4 | Nothing breaks, not even under the meteor; about 3k bodies wake |
+Now (`town_probe`, 3 runs each, and `Rubble.Town.Destroy`): stable, repeatable, the town settles
+back to sleep, at most 4,290 chunks awake.
 
-So impacts barely break bonds. What fails is self-weight in bonds that are right at their limit.
-Also, the street surfacing is one dynamic group that touches every building, so the town is a
-single sleep island: once it moves, nothing re-sleeps. Making the streets static exceeds the
-1,024 large statics (`Overflow(512)`, README gap 8).
-
-The options are engine fracture calibration for packs, a re-export of the pack, or the lab's stress
-model. The scene's `?strength=` parameter (default 1, the pack's own) stays as is until decided.
+**Open: strikes break nothing (needs a decision).** Under the pack's limits (Blast's
+impulse/area over 1/60 s) a 22 t meteor at 50 m/s onto a house breaks no bond, in World and
+in the lab's own runner alike (`engine-viewer/tests/town_lab_meteor.rs`). `strength` 0.3 and 0.1
+break 0–1 bonds, 0.03 breaks 154: what limits it is less the limits than the force a strike
+delivers through AVBD's contacts in a step. Options: engine impact-fracture calibration for
+packs, the lab's stress model, or a pack re-export. `?strength=` stays 1 until decided.
 
 ## Blocked: Nanite and virtual shadow maps need macOS 15
 
