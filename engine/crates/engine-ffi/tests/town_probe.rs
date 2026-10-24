@@ -43,7 +43,7 @@ fn town_pack_loads_steps_and_breaks() {
         }
         let mut dd = rbDefaultDestructibleDef();
         dd.asset = asset;
-        dd.start_asleep = true;
+        dd.start_asleep = std::env::var("TOWN_AWAKE").is_err();
         dd.anchored = true;
         println!("default strength_scale {}", dd.strength_scale);
         if let Ok(v) = std::env::var("TOWN_STRENGTH") {
@@ -64,38 +64,51 @@ fn town_pack_loads_steps_and_breaks() {
         ok(rbDestructible_GetChunkBody(w, d, chunks / 2, &mut b));
         ok(rbBody_GetTransform(w, b, &mut t));
         ok(rbDestructible_GetChunkPose(w, d, chunks / 2, &mut local));
-        assert!(t.p.x.abs() + t.p.y.abs() + t.p.z.abs() < 1e-6, "chunk body at the destructible's frame: {:?}", t.p);
+        if std::env::var("TOWN_PRELOAD").is_err() {
+            // (A preload starts each body at its settled pose instead.)
+            assert!(t.p.x.abs() + t.p.y.abs() + t.p.z.abs() < 1e-6, "chunk body at the destructible's frame: {:?}", t.p);
+        }
         assert!(local.p.x.abs() + local.p.z.abs() > 1.0, "chunk {} local {:?}", chunks / 2, local.p);
         let step = |w: *mut RbWorld, n: u32, label: &str| {
             let t = Instant::now();
             let mut moves = 0;
             let mut events = 0;
+            let mut bonds = 0u32;
             for _ in 0..n {
                 ok(rbWorld_Step(w));
                 let mut f = std::mem::zeroed::<RbFrame>();
                 ok(rbWorld_Poll(w, true, true, &mut f));
                 moves = moves.max(f.move_count);
                 events += f.destruction_count;
+                for e in std::slice::from_raw_parts(f.destruction, f.destruction_count as usize) {
+                    if e.type_ == RbDestructionType::RB_BONDS_BROKEN {
+                        bonds += e.bond_count;
+                    }
+                }
             }
-            println!("{label}: {n} steps, {:.2} ms/step, max moves {moves}, destruction events {events}", t.elapsed().as_secs_f64() * 1e3 / n as f64);
+            println!("{label}: {n} steps, {:.2} ms/step, max moves {moves}, destruction events {events}, bonds broken {bonds}", t.elapsed().as_secs_f64() * 1e3 / n as f64);
         };
         step(w, 120, "at rest");
-        // 2 t balls at 40 m/s square into Elm Park cottage walls (cottage-82's south wall at
-        // x -72.6, z 18.7, and its neighbours').
-        for x in [-72.6f32, -70.0, -75.0] {
+        // The Unreal test's hits: a 7 t ball at 45 m/s into house-85's wall, then a 22 t meteor
+        // straight down onto house-89 at 50 m/s.
+        let mut shoot = |p: RbVec3, v: RbVec3, r: f32, density: f32| {
             let mut bd = rbDefaultBodyDef();
             bd.type_ = RbBodyType::RB_DYNAMIC_BODY;
-            bd.transform.p = RbVec3 { x, y: 2.5, z: 40.0 };
+            bd.transform.p = p;
             bd.transform.q.w = 1.0;
-            bd.linear_velocity = RbVec3 { x: 0.0, y: 0.0, z: -40.0 };
+            bd.linear_velocity = v;
             let mut ball = 0;
             ok(rbCreateBody(w, &bd, &mut ball));
             let mut sd = rbDefaultShapeDef();
-            sd.density = 4000.0;
-            ok(rbCreateSphereShape(w, ball, &sd, RbVec3::default(), 0.6, &mut s));
+            sd.density = density;
+            ok(rbCreateSphereShape(w, ball, &sd, RbVec3::default(), r, &mut s));
+        };
+        shoot(RbVec3 { x: -51.2, y: 2.5, z: 40.0 }, RbVec3 { x: 0.0, y: 0.0, z: -45.0 }, 0.6, 7800.0);
+        shoot(RbVec3 { x: -34.2, y: 50.0, z: 15.5 }, RbVec3 { x: 0.0, y: -50.0, z: 0.0 }, 1.2, 3000.0);
+        for second in 0..10 {
+            step(w, 60, &format!("second {second}"));
         }
-        step(w, 120, "shots in flight");
-        step(w, 240, "after the shots");
+
         rbDestroyWorld(w);
     }
 }

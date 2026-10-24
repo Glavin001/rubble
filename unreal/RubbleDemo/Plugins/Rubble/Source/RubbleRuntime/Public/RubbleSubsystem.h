@@ -60,6 +60,7 @@ public:
 	void SetVehicleInput(const FRubbleVehicleInput& Input);
 	void Launch(const FVector& Origin, const FVector& Direction);
 	void SideRam();
+	void Meteor(const FVector& Target);
 	void Reset();
 
 	/** Paused worlds take no steps. TimeScale < 1 is slow motion (fewer steps, same step size). */

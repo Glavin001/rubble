@@ -145,6 +145,14 @@ void URubbleSubsystem::Launch(const FVector& Origin, const FVector& Direction)
 	}
 }
 
+void URubbleSubsystem::Meteor(const FVector& Target)
+{
+	if (BackendImpl && bHasScene)
+	{
+		BackendImpl->Meteor(Target);
+	}
+}
+
 void URubbleSubsystem::SideRam()
 {
 	if (BackendImpl && bHasScene)

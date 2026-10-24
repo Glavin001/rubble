@@ -11,6 +11,15 @@ namespace RubbleMock
 {
 	namespace
 	{
+		FRubbleDemoDesc Fracture(const TCHAR* Id, const TCHAR* Title);
+
+		FRubbleDemoDesc Town()
+		{
+			FRubbleDemoDesc D = Fracture(TEXT("town"), TEXT("Vibe Town: 70 buildings, 52k chunks (vibe-land)"));
+			D.Params.Add({ TEXT("strength"), TEXT("Bond strength (x the pack's)"), 1.0f, 0.25f, 4.0f });
+			return D;
+		}
+
 		FRubbleDemoDesc Fracture(const TCHAR* Id, const TCHAR* Title)
 		{
 			FRubbleDemoDesc D;
@@ -35,7 +44,7 @@ namespace RubbleMock
 			Fracture(TEXT("suburb"), TEXT("Suburb: a street of houses")),
 			Fracture(TEXT("cuboids"), TEXT("Cuboids")),
 			Fracture(TEXT("cuboids2x"), TEXT("Cuboids ×2")),
-			Fracture(TEXT("town"), TEXT("Vibe Town: 70 buildings, 52k chunks (vibe-land)")),
+			Town(),
 		};
 	}
 

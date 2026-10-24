@@ -257,7 +257,7 @@ namespace RubbleMenu
 			+ SOverlay::Slot().HAlign(HAlign_Center).VAlign(VAlign_Bottom).Padding(12)
 			[
 				SNew(STextBlock).Font(Font(10)).ColorAndOpacity(FLinearColor(1, 1, 1, 0.7f)).ShadowOffset(FVector2D(1, 1))
-				.Text(FText::FromString(TEXT("Tab scenes   F/click shoot   WASD move or drive   right-drag orbit   wheel zoom   C camera   K cinematic   T side ram   R reset   Z slow motion   P pause   G effects   H hud")))
+				.Text(FText::FromString(TEXT("Tab scenes   F/click shoot   WASD move or drive   right-drag orbit   wheel zoom   C camera   K cinematic   T side ram   M meteor   R reset   Z slow motion   P pause   G effects   H hud")))
 			];
 	}
 }

@@ -152,6 +152,8 @@ void ARubblePrimitives::Rebuild(const FRubbleSceneAssets& Assets)
 	GpuBatches.Reset();
 	GpuBatchByKey.Reset();
 	GpuBodies.Reset();
+	Hybrids.Reset();
+	HybridRefs.Reset();
 	BuiltMeshes.Reset();
 	Refs.Reset();
 	BodyInstances.Reset();
@@ -201,6 +203,10 @@ void ARubblePrimitives::Rebuild(const FRubbleSceneAssets& Assets)
 		}
 		State.Num = Body.NumShapes;
 		BodyInstances.Add(Body.Id.Index(), State);
+		if (Body.bLumenVisible)
+		{
+			AddHybrid(Body, Assets.Shapes, Assets);
+		}
 	}
 	for (int32 b = 0; b < NewTransforms.Num(); ++b)
 	{
@@ -268,6 +274,7 @@ void ARubblePrimitives::OnFrame(const FRubbleFrame& Frame)
 	// Bodies moving before this frame and not in it are now at rest: one last draw there.
 	TSet<uint32> Moved;
 	Moved.Reserve(Frame.Moves.Num());
+	TSet<int32> TouchedBatches;
 	for (const FRubbleMove& M : Frame.Moves)
 	{
 		FBodyState* State = BodyInstances.Find(M.Body.Index());
@@ -275,9 +282,27 @@ void ARubblePrimitives::OnFrame(const FRubbleFrame& Frame)
 		{
 			continue;
 		}
+		if (FHybrid* H = Hybrids.Find(M.Body.Index()))
+		{
+			// Only its sleep and wake arrive: swap between the CPU and the GPU instance.
+			State->Previous = State->Current = M.Transform;
+			if (M.bWoke && !H->bAwake)
+			{
+				SetHybridAwake(M.Body.Index(), *H, true, nullptr, TouchedBatches);
+			}
+			else if (M.bFellAsleep || !H->bAwake)
+			{
+				SetHybridAwake(M.Body.Index(), *H, false, &M.Transform, TouchedBatches);
+			}
+			continue;
+		}
 		State->Previous = M.bHasPrevious ? M.Previous : M.Transform;
 		State->Current = M.Transform;
 		Moved.Add(M.Body.Index());
+	}
+	for (const int32 b : TouchedBatches)
+	{
+		Batches[b].Component->MarkRenderStateDirty();
 	}
 	for (const uint32 b : Active)
 	{
@@ -387,7 +412,17 @@ int32 ARubblePrimitives::NumGpuInstances() const
 	int32 N = 0;
 	for (const FGpuBatch& B : GpuBatches)
 	{
-		N += B.PoseSlot.Num();
+		N += B.bHybrid ? 0 : B.PoseSlot.Num();
+	}
+	return N;
+}
+
+int32 ARubblePrimitives::NumAwakeHybrids() const
+{
+	int32 N = 0;
+	for (const TPair<uint32, FHybrid>& H : Hybrids)
+	{
+		N += H.Value.bAwake ? 1 : 0;
 	}
 	return N;
 }
@@ -436,17 +471,20 @@ bool ARubblePrimitives::DrawsOnGpu(const FRubbleBodyVisual& Body, TArrayView<con
 	return Poses->PoseIndex(Body.Id) != MAX_uint32;
 }
 
-int32 ARubblePrimitives::GpuBatchFor(ERubbleShape Kind, int32 Mesh, ERubbleMaterial Material, float A, float B, const FRubbleSceneAssets& Assets)
+int32 ARubblePrimitives::GpuBatchFor(ERubbleShape Kind, int32 Mesh, ERubbleMaterial Material, float A, float B, const FRubbleSceneAssets& Assets, bool bTown, bool bHybrid)
 {
 	const uint32 Dims = Kind == ERubbleShape::Capsule ? GetTypeHash(FVector2f(A, B)) : 0u;
-	const uint64 Key = (uint64(Kind) << 56) ^ (uint64(uint8(Material)) << 48) ^ (uint64(uint32(Mesh + 1)) << 20) ^ Dims;
+	const uint64 Key = (uint64(Kind) << 56) ^ (uint64(uint8(Material)) << 48) ^ (uint64(uint32(Mesh + 1)) << 20) ^ Dims
+		^ (bTown ? (1ull << 63) : 0ull) ^ (bHybrid ? (1ull << 62) : 0ull);
 	if (const int32* Found = GpuBatchByKey.Find(Key))
 	{
 		return *Found;
 	}
 	URubbleInstancesComponent* C = NewObject<URubbleInstancesComponent>(this);
 	C->SetStaticMesh(MeshFor(Kind, Mesh, Material, A, B, Assets, /*bNanite=*/true));
-	C->SetMaterial(0, RubbleRender::Surface(Material));
+	UMaterialInterface* Town = bTown ? RubbleRender::TownChunk() : nullptr;
+	C->SetMaterial(0, Town ? Town : RubbleRender::Surface(Material));
+	C->SetCustomFloats(Town ? TownCustomFloats : 3);
 	C->SetCastShadow(true);
 	// Where the instances can be: the bounds GPU culling starts from.
 	const double Half = FMath::Max(2.0 * Assets.GroundHalfExtentCm, 50000.0);
@@ -455,6 +493,7 @@ int32 ARubblePrimitives::GpuBatchFor(ERubbleShape Kind, int32 Mesh, ERubbleMater
 	C->RegisterComponent();
 	FGpuBatch Batch;
 	Batch.Component = C;
+	Batch.bHybrid = bHybrid;
 	const int32 Index = GpuBatches.Add(MoveTemp(Batch));
 	GpuBatchByKey.Add(Key, Index);
 	return Index;
@@ -477,18 +516,95 @@ void ARubblePrimitives::AddGpuBody(const FRubbleBodyVisual& Body, TArrayView<con
 			Scale = FVector3f(Shape.Radius / 50.0f);
 		}
 		FGpuBatch& Batch = GpuBatches[GpuBatchFor(Shape.Kind, Shape.Mesh, Shape.Material, Shape.Radius, Shape.HalfHeight, Assets)];
-		// The instance in its pose record's frame: shape local x (origin relative to the record).
-		const FTransform InRecord = FTransform(Shape.Local.GetRotation(), Shape.Local.GetLocation()) * Offset;
-		const FQuat4f Q(InRecord.GetRotation());
 		Batch.PoseSlot.Add(Slot);
-		Batch.Local.Add(FVector4f(FVector3f(InRecord.GetLocation()), 0.0f));
-		Batch.Local.Add(FVector4f(Q.X, Q.Y, Q.Z, Q.W));
-		Batch.Local.Add(FVector4f(Scale, 0.0f));
-		Batch.Local.Add(FVector4f(Shape.Tint.R, Shape.Tint.G, Shape.Tint.B, 0.0f));
+		GpuRows(Shape, Offset, false, Batch.Local);
 		Batch.bDirty = true;
 	}
 	GpuBodies.Add(Body.Id.Index());
 	GpuPoses()->DrawnOnGpu(Body.Id);
+}
+
+void ARubblePrimitives::GpuRows(const FRubbleShapeVisual& Shape, const FTransform& Offset, bool bTown, TArray<FVector4f>& Out)
+{
+	FVector3f Scale(1.0f);
+	if (Shape.Kind == ERubbleShape::Box)
+	{
+		Scale = Shape.HalfExtents / 50.0f;
+	}
+	else if (Shape.Kind == ERubbleShape::Sphere)
+	{
+		Scale = FVector3f(Shape.Radius / 50.0f);
+	}
+	// The instance in its pose record's frame: shape local x (origin relative to the record).
+	const FTransform InRecord = FTransform(Shape.Local.GetRotation(), Shape.Local.GetLocation()) * Offset;
+	const FQuat4f Q(InRecord.GetRotation());
+	Out.Add(FVector4f(FVector3f(InRecord.GetLocation()), 0.0f));
+	Out.Add(FVector4f(Q.X, Q.Y, Q.Z, Q.W));
+	Out.Add(FVector4f(Scale, 0.0f));
+	if (bTown)
+	{
+		// M_RubbleTownChunk's 11 floats, as the CPU instances carry them (CustomData above).
+		const FVector3f At(Shape.Local.GetLocation());
+		Out.Add(FVector4f(Shape.Tint.R, Shape.Tint.G, Shape.Tint.B, float(Shape.TextureLayer)));
+		Out.Add(FVector4f(Shape.TilesPerMetre, At.X, At.Y, At.Z));
+		Out.Add(FVector4f(Scale, 0.0f));
+	}
+	else
+	{
+		Out.Add(FVector4f(Shape.Tint.R, Shape.Tint.G, Shape.Tint.B, 0.0f));
+	}
+}
+
+void ARubblePrimitives::AddHybrid(const FRubbleBodyVisual& Body, TArrayView<const FRubbleShapeVisual> Shapes, const FRubbleSceneAssets& Assets)
+{
+	FRubbleGpuPoses* Poses = GpuPoses();
+	const uint32 Slot = Poses && RubbleGpuSceneEnabled() ? Poses->PoseIndex(Body.Id) : MAX_uint32;
+	if (Slot == MAX_uint32)
+	{
+		return; // no GPU poses: the CPU instance draws it, moving or not
+	}
+	const FTransform Offset = Poses->PoseOffset(Body.Id);
+	FHybrid H;
+	H.PoseSlot = Slot;
+	H.FirstRef = HybridRefs.Num();
+	for (int32 s = 0; s < Body.NumShapes; ++s)
+	{
+		const FRubbleShapeVisual& Shape = Shapes[Body.FirstShape + s];
+		const bool bTown = Shape.bTownSurface && RubbleRender::TownChunk();
+		FHybridRef Ref;
+		Ref.GpuBatch = GpuBatchFor(Shape.Kind, Shape.Mesh, Shape.Material, Shape.Radius, Shape.HalfHeight, Assets, bTown, /*bHybrid=*/true);
+		FGpuBatch& Batch = GpuBatches[Ref.GpuBatch];
+		Ref.GpuIndex = Batch.PoseSlot.Add(MAX_uint32); // hidden until it wakes
+		GpuRows(Shape, Offset, bTown, Batch.Local);
+		Batch.bDirty = true;
+		HybridRefs.Add(Ref);
+	}
+	Hybrids.Add(Body.Id.Index(), H);
+	Poses->DrawnOnGpu(Body.Id); // its frames now carry only its sleep and wake
+}
+
+void ARubblePrimitives::SetHybridAwake(uint32 BodyIndex, FHybrid& H, bool bAwake, const FTransform* RestPose, TSet<int32>& TouchedBatches)
+{
+	const FBodyState& State = BodyInstances[BodyIndex];
+	for (int32 r = 0; r < State.Num; ++r)
+	{
+		const FInstanceRef& Ref = Refs[State.First + r];
+		FBatch& Batch = Batches[Ref.Batch];
+		// Awake: the CPU instance is parked out of sight (tiny, far below); at rest, it is drawn.
+		const FTransform Drawn = bAwake ? FTransform(FQuat::Identity, FVector(0, 0, -1.0e6), FVector(1.0e-4)) : Ref.Local * (RestPose ? *RestPose : State.Current);
+		Batch.Transforms[Ref.Instance] = Drawn;
+		Batch.Component->UpdateInstanceTransform(Ref.Instance, Drawn, /*bWorldSpace=*/false, /*bMarkRenderStateDirty=*/false, /*bTeleport=*/true);
+		TouchedBatches.Add(Ref.Batch);
+		const FHybridRef& G = HybridRefs[H.FirstRef + r];
+		FGpuBatch& Gpu = GpuBatches[G.GpuBatch];
+		if (H.bAwake != bAwake)
+		{
+			Gpu.PoseSlot[G.GpuIndex] = bAwake ? H.PoseSlot : MAX_uint32;
+			Gpu.Awake += bAwake ? 1 : -1;
+			Gpu.bDirty = true;
+		}
+	}
+	H.bAwake = bAwake;
 }
 
 void ARubblePrimitives::WriteGpu(const FRubbleGpuPoses& Poses)
@@ -503,8 +619,18 @@ void ARubblePrimitives::WriteGpu(const FRubbleGpuPoses& Poses)
 		{
 			Batch.Component->SetInstanceTables(Batch.PoseSlot, Batch.Local);
 			Batch.bDirty = false;
+			Batch.bWritePending = true;
 		}
-		Batch.Component->WriteFromGpuPoses(Poses);
+		// Hybrid batches: only while something in them moves, plus the write that follows a
+		// change (it hides what fell asleep). GPU Scene keeps the last write until then.
+		if (Batch.bHybrid && Batch.Awake == 0 && !Batch.bWritePending)
+		{
+			continue;
+		}
+		if (Batch.Component->WriteFromGpuPoses(Poses))
+		{
+			Batch.bWritePending = false;
+		}
 	}
 }
 

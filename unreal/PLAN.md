@@ -56,6 +56,54 @@ Not yet verified by the PoC:
 
 Lumen lighting of GPU-only instances and ordinary shadows are confirmed.
 
+## The town demo (`fracture:town`, in progress)
+
+vibe-land's Vibe Town ScenePack: 70 buildings (houses, shops, a cinema, a library, five
+ten-storey towers), streets and props, 51,921 chunks and 132,529 bonds, one destructible.
+
+- **Setup:** `scripts/unreal/fetch-town.sh` (the pack) and `scripts/unreal/fetch-city-textures.sh`
+  (vibe-land's 2K Poly Haven arrays, CC0). Both copy from a vibe-land checkout; neither is
+  committed.
+- **Drawing:** every chunk from the pack's own collider, with 27k boxes and 2,627 shared hulls in
+  2,633 instanced batches. `M_RubbleTownChunk` projects the texture arrays in chunk space plus the
+  chunk's place in the town.
+  - **The hybrid:** resting chunks are Lumen-visible CPU instances. A chunk that wakes moves to a
+    GPU Scene instance drawn from Rubble's poses, and back when it sleeps. Moves are sleep and wake
+    only, so a frame carries at most about 1.8k moves while 46k chunks move.
+- **Controls:** F / click fires a 60 cm iron ball at 45 m/s; M drops a 1.2 m meteor (about 22 t)
+  at 50 m/s.
+- **Tests:** `Rubble.Town.Shots` (fixed cameras) and `Rubble.Town.Destroy` (cannon, meteors,
+  timeline).
+- **Rubble fixes made for it:**
+  - v2 packs' per-material bond limits (before this, every bond was unbreakable);
+  - `rbDestructible_GetChunkPose`;
+  - the pack node per chunk;
+  - creation poses before a body's first frame.
+
+| | |
+|---|---|
+| Load | 3.5 s |
+| At rest | 16–18 ms a frame (render thread 15 ms: 2,633 batches without Nanite) |
+| All 52k chunks awake | 34–75 ms per Rubble step |
+
+**Open: the town's bond strengths under World's bond model (needs a decision).** The town was
+tuned for vibe-land's stress solver. Under `rubble::World` (bonds as breakable joints), the
+`town_probe` runs (a 7 t ball at 45 m/s into a house, then a 22 t meteor onto the next) show:
+
+| `strength_scale` | Result |
+|---|---|
+| 1 (the pack's own) | A progressive collapse: about 250 bonds broken after 3 s and about 9,500 a second by 8 s, the whole town awake by 9 s. Bond preload does not settle in 600 steps and does not stop it. |
+| 1.1 | The same, starting about 3 s later |
+| 1.25, 1.5, 2, 4 | Nothing breaks, not even under the meteor; about 3k bodies wake |
+
+So impacts barely break bonds. What fails is self-weight in bonds that are right at their limit.
+Also, the street surfacing is one dynamic group that touches every building, so the town is a
+single sleep island: once it moves, nothing re-sleeps. Making the streets static exceeds the
+1,024 large statics (`Overflow(512)`, README gap 8).
+
+The options are engine fracture calibration for packs, a re-export of the pack, or the lab's stress
+model. The scene's `?strength=` parameter (default 1, the pack's own) stays as is until decided.
+
 ## Blocked: Nanite and virtual shadow maps need macOS 15
 
 UE 5.8 enables `METAL_SM6`, which Nanite, virtual shadow maps and hardware ray tracing need, only

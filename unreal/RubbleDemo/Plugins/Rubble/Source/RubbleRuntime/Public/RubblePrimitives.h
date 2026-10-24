@@ -34,8 +34,11 @@ public:
 	virtual void Tick(float DeltaSeconds) override;
 
 	int32 NumInstances() const;
-	/** Instances drawn through GPU Scene from Rubble's GPU poses. */
+	/** Instances drawn through GPU Scene from Rubble's GPU poses (not counting hybrids). */
 	int32 NumGpuInstances() const;
+	/** Hybrid bodies (the town's chunks) awake now, drawn from GPU poses. */
+	int32 NumAwakeHybrids() const;
+	int32 NumHybrids() const { return Hybrids.Num(); }
 	int32 NumDrawnBodies() const { return BodyInstances.Num(); }
 	int32 NumActiveBodies() const { return Active.Num(); }
 	/** The drawn transform of a body's first shape (tests). */
@@ -69,13 +72,43 @@ private:
 	{
 		TObjectPtr<URubbleInstancesComponent> Component;
 		TArray<uint32> PoseSlot;
-		TArray<FVector4f> Local; // four float4s per instance: translation, rotation, scale, tint
+		TArray<FVector4f> Local; // the component's RowsPerInstance() float4s per instance
 		bool bDirty = true;
+		/** A hybrid batch (below): written only while some instance is awake, and once after a
+		 *  change so the instances that fell asleep are hidden. */
+		bool bHybrid = false;
+		int32 Awake = 0;
+		bool bWritePending = true;
 	};
+	/**
+	 * A hybrid body (bLumenVisible with GPU poses: the town's chunks): at rest it is a CPU-visible
+	 * instance, so Lumen sees it; while awake a GPU Scene instance drawn from Rubble's poses, so
+	 * nothing per body runs on the CPU. Its frames report only sleep and wake (rbBody_SetMoveReports):
+	 * waking swaps it to the GPU instance, falling asleep puts the CPU instance at the pose the
+	 * sleep reported.
+	 */
+	struct FHybridRef
+	{
+		int32 GpuBatch = 0;
+		int32 GpuIndex = 0;
+	};
+	struct FHybrid
+	{
+		uint32 PoseSlot = 0;
+		int32 FirstRef = 0; // into HybridRefs, one per shape (parallel to the body's Refs)
+		bool bAwake = false;
+	};
+	TMap<uint32, FHybrid> Hybrids; // by body index
+	TArray<FHybridRef> HybridRefs;
+	void AddHybrid(const FRubbleBodyVisual& Body, TArrayView<const FRubbleShapeVisual> Shapes, const FRubbleSceneAssets& Assets);
+	void SetHybridAwake(uint32 BodyIndex, FHybrid& H, bool bAwake, const FTransform* RestPose, TSet<int32>& TouchedBatches);
+	/** A GPU instance's table rows: translation, rotation, scale (in its pose record's frame),
+	 *  then its custom data (a tint, or the town surface's 11 floats). */
+	static void GpuRows(const FRubbleShapeVisual& Shape, const FTransform& Offset, bool bTown, TArray<FVector4f>& Out);
 	/** Whether a body is drawn through GPU Scene: dynamic, small, with a pose slot. */
 	bool DrawsOnGpu(const FRubbleBodyVisual& Body, TArrayView<const FRubbleShapeVisual> Shapes, const FRubbleSceneAssets& Assets) const;
 	void AddGpuBody(const FRubbleBodyVisual& Body, TArrayView<const FRubbleShapeVisual> Shapes, const FRubbleSceneAssets& Assets);
-	int32 GpuBatchFor(ERubbleShape Kind, int32 Mesh, ERubbleMaterial Material, float A, float B, const FRubbleSceneAssets& Assets);
+	int32 GpuBatchFor(ERubbleShape Kind, int32 Mesh, ERubbleMaterial Material, float A, float B, const FRubbleSceneAssets& Assets, bool bTown = false, bool bHybrid = false);
 	UStaticMesh* MeshFor(ERubbleShape Kind, int32 Mesh, ERubbleMaterial Material, float A, float B, const FRubbleSceneAssets& Assets, bool bNanite);
 	void WriteGpu(const FRubbleGpuPoses& Poses);
 	FRubbleGpuPoses* GpuPoses() const;

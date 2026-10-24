@@ -37,6 +37,7 @@ public:
 	virtual void SetVehicleInput(const FRubbleVehicleInput& Input) override;
 	virtual void Launch(const FVector& Origin, const FVector& Direction) override;
 	virtual void SideRam() override;
+	virtual void Meteor(const FVector& Target) override;
 	virtual void Reset() override;
 
 	/** Why a scene runs on the mock, or empty when the ABI builds it. */
@@ -59,6 +60,10 @@ private:
 	static FVector ParkedAt(int32 Index);
 	TArray<uint64> Balls;
 	int32 NextBall = 0;
+	/** The town's meteors, parked as the balls are. */
+	TArray<uint64> Meteors;
+	int32 NextMeteor = 0;
+	bool IsTown() const { return Current.Family == ERubbleFamily::Fracture && Current.Id == TEXT("town"); }
 
 	/** Soft cars: the procedural car spawned per layout car, skinned with a fitted shell. */
 	bool CreateSoftCars(const FRubbleSceneAssets& Layout, FString& Error);

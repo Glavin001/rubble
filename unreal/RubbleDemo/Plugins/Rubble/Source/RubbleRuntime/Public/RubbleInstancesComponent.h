@@ -39,6 +39,10 @@ public:
 
 	/** Instances to allocate (recreates the render state when it grows). */
 	void SetNumInstances(int32 Count);
+	/** Per-instance custom data floats (3: a tint; 11: the town surface). Set before the first
+	 *  instances; each instance's table row then carries ceil(Floats / 4) custom data float4s. */
+	void SetCustomFloats(int32 Floats) { CustomFloats = Floats; }
+	int32 RowsPerInstance() const { return 3 + FMath::DivideAndRoundUp(CustomFloats, 4); }
 	int32 GetNumInstances() const { return NumInstances; }
 	/** Where the instances can be (culling bounds of the whole set, world space). */
 	FBox WorldBounds = FBox(FVector(-100000.0), FVector(100000.0));
@@ -51,14 +55,15 @@ public:
 	bool IsNaniteProxy() const;
 
 	/** The per-instance tables for WriteFromGpuPoses, one entry per instance: its pose slot
-	 *  (0xffffffff: hidden) and four float4s (translation, rotation, scale, tint) placing it in its
-	 *  pose record's frame. Uploaded once per change; sets the instance count. */
+	 *  (0xffffffff: hidden) and RowsPerInstance() float4s (translation, rotation, scale, custom
+	 *  data) placing it in its pose record's frame. Uploaded once per change; sets the count. */
 	void SetInstanceTables(TArray<uint32> PoseSlot, TArray<FVector4f> Local);
 	/** Queue this frame's write from Rubble's poses on the GPU (the newest finished export). */
 	bool WriteFromGpuPoses(const FRubbleGpuPoses& Poses);
 
 private:
 	int32 NumInstances = 0;
+	int32 CustomFloats = 3;
 	struct FTableData
 	{
 		TArray<uint32> PoseSlot;

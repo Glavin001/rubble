@@ -42,6 +42,8 @@ public:
 	void ToggleMenu();
 	/** Fire along the camera's view (F) or through the cursor (left click). */
 	void Shoot(bool bAtCursor);
+	/** M: a meteor where the view meets the ground. */
+	void CallMeteor();
 
 	UPROPERTY(VisibleAnywhere)
 	TObjectPtr<UCameraComponent> Camera;

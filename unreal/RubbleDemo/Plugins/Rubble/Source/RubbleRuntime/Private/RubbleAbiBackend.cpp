@@ -203,6 +203,8 @@ void FRubbleAbiBackend::DestroyWorld()
 	ChunkAt.Reset();
 	Balls.Reset();
 	NextBall = 0;
+	Meteors.Reset();
+	NextMeteor = 0;
 	SoftCars.Reset();
 	SoftCarOfSkin.Reset();
 	SoftCarOfSoft.Reset();
@@ -1074,6 +1076,9 @@ bool FRubbleAbiBackend::CreateTown(FString& Error)
 	D.asset = Asset;
 	D.anchored = true;     // its buried footings and road subgrade are fixed
 	D.start_asleep = true; // a standing town, until something hits it
+	// ?strength= scales every bond (1: the pack's own limits). See unreal/PLAN.md: at 1 the town
+	// does not hold its own weight once disturbed under World's bond model.
+	D.strength_scale = Current.Param(TEXT("strength"), 1.0f);
 	RbDestructibleId Id = 0;
 	uint32 Count = 0;
 	if (rbCreateDestructible(WorldPtr, &D, &Id) != RB_OK || rbDestructible_GetChunkCount(WorldPtr, Id, &Count) != RB_OK)
@@ -1150,6 +1155,7 @@ bool FRubbleAbiBackend::CreateTown(FString& Error)
 		V.NumShapes = 1;
 		V.bLumenVisible = true;
 		SceneAssets->Bodies.Add(V);
+		ChunkAt.Add(Body, (Xf(Pose) * V.Initial).GetLocation()); // where its breaks happen, for effects
 		++Drawn;
 	}
 	UE_LOG(LogRubble, Display, TEXT("town: '%s', %u chunks (%d drawn, %d meshes, %d materials); physics %.0f ms, visuals %.0f ms"),
@@ -1161,7 +1167,8 @@ bool FRubbleAbiBackend::ParkBalls(int32 Count, FString& Error)
 {
 	// Parked high above the scene, asleep: a shot moves one into place (rbBody_SetTransform) and
 	// gives it its speed, so balls are reused rather than created per shot.
-	const float Radius = Current.Family == ERubbleFamily::Rigid ? 50.0f : 25.0f;
+	// The town's cannon: vibe-land's cannonball scale (a 60 cm iron ball).
+	const float Radius = IsTown() ? 60.0f : Current.Family == ERubbleFamily::Rigid ? 50.0f : 25.0f;
 	for (int32 i = 0; i < Count; ++i)
 	{
 		RbBodyDef B = rbDefaultBodyDef();
@@ -1191,7 +1198,59 @@ bool FRubbleAbiBackend::ParkBalls(int32 Count, FString& Error)
 		S.Tint = FLinearColor(0.55f, 0.56f, 0.58f);
 		SceneAssets->Shapes.Add(S);
 	}
+	if (IsTown())
+	{
+		// Meteors: 1.2 m basalt (about 22 t), parked beside the balls.
+		for (int32 i = 0; i < 6; ++i)
+		{
+			const FVector At = ParkedAt(Count + i) + FVector(0, 2000, 0);
+			RbBodyDef B = rbDefaultBodyDef();
+			B.type_ = RB_DYNAMIC_BODY;
+			B.transform = Xf(FTransform(At));
+			B.is_awake = false;
+			RbBodyId Rock = 0;
+			RbShapeDef SD = rbDefaultShapeDef();
+			SD.density = 0.003f;
+			RbShapeId Shape = 0;
+			if (rbCreateBody(WorldPtr, &B, &Rock) != RB_OK || rbCreateSphereShape(WorldPtr, Rock, &SD, RbVec3{ 0, 0, 0 }, 120.0f, &Shape) != RB_OK)
+			{
+				Error = AbiError(TEXT("parked meteor"));
+				return false;
+			}
+			Meteors.Add(Rock);
+			FRubbleBodyVisual V;
+			V.Id = FRubbleBodyId(Rock);
+			V.Initial = FTransform(At);
+			V.FirstShape = SceneAssets->Shapes.Num();
+			V.NumShapes = 1;
+			SceneAssets->Bodies.Add(V);
+			FRubbleShapeVisual S;
+			S.Kind = ERubbleShape::Sphere;
+			S.Radius = 120.0f;
+			S.Material = ERubbleMaterial::Concrete;
+			S.Tint = FLinearColor(0.08f, 0.07f, 0.065f);
+			SceneAssets->Shapes.Add(S);
+		}
+	}
 	return true;
+}
+
+void FRubbleAbiBackend::Meteor(const FVector& Target)
+{
+	if (bMock || !WorldPtr || Meteors.Num() == 0)
+	{
+		return;
+	}
+	const RbBodyId Rock = Meteors[NextMeteor];
+	NextMeteor = (NextMeteor + 1) % Meteors.Num();
+	// Straight down from 50 m at 50 m/s: it lands on Target.
+	const FVector Velocity(0.0, 0.0, -5000.0);
+	const FVector From = Target - Velocity * 1.0;
+	if (rbBody_SetTransform(WorldPtr, Rock, Xf(FTransform(From))) != RB_OK || rbBody_SetLinearVelocity(WorldPtr, Rock, Vec(Velocity)) != RB_OK
+		|| rbBody_SetAngularVelocity(WorldPtr, Rock, RbVec3{ 0.5f, 1.0f, 0.2f }) != RB_OK || rbBody_SetAwake(WorldPtr, Rock, true) != RB_OK)
+	{
+		UE_LOG(LogRubble, Error, TEXT("%s"), *AbiError(TEXT("meteor")));
+	}
 }
 
 FVector FRubbleAbiBackend::ParkedAt(int32 i)
@@ -1215,7 +1274,7 @@ void FRubbleAbiBackend::Launch(const FVector& Origin, const FVector& Direction)
 		const RbBodyId Ball = Balls[NextBall];
 		NextBall = (NextBall + 1) % Balls.Num();
 		if (rbBody_SetTransform(WorldPtr, Ball, Xf(FTransform(Origin))) != RB_OK
-			|| rbBody_SetLinearVelocity(WorldPtr, Ball, Vec(Direction.GetSafeNormal() * 3500.0)) != RB_OK
+			|| rbBody_SetLinearVelocity(WorldPtr, Ball, Vec(Direction.GetSafeNormal() * (IsTown() ? 4500.0 : 3500.0))) != RB_OK
 			|| rbBody_SetAngularVelocity(WorldPtr, Ball, RbVec3{ 0, 0, 0 }) != RB_OK
 			|| rbBody_SetAwake(WorldPtr, Ball, true) != RB_OK)
 		{

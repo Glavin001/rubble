@@ -73,7 +73,7 @@ FPrimitiveSceneProxy* URubbleInstancesComponent::CreateStaticMeshSceneProxy(Nani
 		FInstanceSceneDataBuffers::FAccessTag Tag(PointerHash(this));
 		FInstanceSceneDataBuffers::FWriteView View = Buffers.BeginWriteAccess(Tag);
 		Buffers.SetPrimitiveLocalToWorld(GetComponentTransform().ToMatrixWithScale(), Tag);
-		View.NumCustomDataFloats = 3; // tint
+		View.NumCustomDataFloats = CustomFloats;
 		View.InstanceLocalBounds.SetNum(1);
 		View.InstanceLocalBounds[0] = GetStaticMesh()->GetBounds();
 		View.Flags.bHasPerInstanceCustomData = true;
@@ -118,8 +118,9 @@ bool URubbleInstancesComponent::WriteFromPoses(float Alpha, FBufferSource Source
 	FPrimitiveSceneDesc PrimitiveDesc;
 	PrimitiveDesc.SceneProxy = GetSceneProxy();
 	const uint32 Count = uint32(NumInstances);
+	const uint32 Rows = uint32(RowsPerInstance()), Floats = uint32(CustomFloats);
 	World->Scene->UpdatePrimitiveInstancesFromCompute(&PrimitiveDesc,
-		FGPUSceneWriteDelegate::CreateLambda([Count, Alpha, Source = MoveTemp(Source)](FRDGBuilder& GraphBuilder, const FGPUSceneWriteDelegateParams& Params)
+		FGPUSceneWriteDelegate::CreateLambda([Count, Rows, Floats, Alpha, Source = MoveTemp(Source)](FRDGBuilder& GraphBuilder, const FGPUSceneWriteDelegateParams& Params)
 		{
 			const FRubbleInstanceBuffers Buffers = Source(GraphBuilder);
 			FRubbleGPUSceneCS::FParameters* P = GraphBuilder.AllocParameters<FRubbleGPUSceneCS::FParameters>();
@@ -127,6 +128,8 @@ bool URubbleInstancesComponent::WriteFromPoses(float Alpha, FBufferSource Source
 			P->NumInstances = Count;
 			P->PrimitiveId = Params.PersistentPrimitiveId;
 			P->Alpha = Alpha;
+			P->LocalRows = Rows;
+			P->NumCustomFloats = Floats;
 			P->CurrentPoses = Buffers.CurrentPoses;
 			P->PreviousPoses = Buffers.PreviousPoses;
 			P->InstanceBody = Buffers.InstanceBody;
@@ -140,7 +143,7 @@ bool URubbleInstancesComponent::WriteFromPoses(float Alpha, FBufferSource Source
 
 void URubbleInstancesComponent::SetInstanceTables(TArray<uint32> PoseSlot, TArray<FVector4f> Local)
 {
-	check(Local.Num() == PoseSlot.Num() * 4);
+	check(Local.Num() == PoseSlot.Num() * RowsPerInstance());
 	TSharedPtr<FTableData, ESPMode::ThreadSafe> Data = MakeShared<FTableData, ESPMode::ThreadSafe>();
 	Data->Version = TableData ? TableData->Version + 1 : 1;
 	Data->PoseSlot = MoveTemp(PoseSlot);

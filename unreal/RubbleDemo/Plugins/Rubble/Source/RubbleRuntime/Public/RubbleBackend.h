@@ -45,6 +45,8 @@ public:
 	virtual void Launch(const FVector& Origin, const FVector& Direction) = 0;
 	/** The soft-body page's T: the parked side ram. */
 	virtual void SideRam() = 0;
+	/** A meteor onto Target (the town's M): a heavy stone falling from high above it. */
+	virtual void Meteor(const FVector& Target) {}
 	/** Reload the current scene from its initial state. */
 	virtual void Reset() = 0;
 

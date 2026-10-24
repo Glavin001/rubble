@@ -568,3 +568,119 @@ bool FRubbleTownShots::RunTest(const FString& Parameters)
 	return true;
 }
 #endif
+
+#if WITH_DEV_AUTOMATION_TESTS
+namespace
+{
+	void ParkCamera(const FVector& Eye, const FVector& Target)
+	{
+		if (APawn* Pawn = GameWorld()->GetFirstPlayerController()->GetPawn())
+		{
+			if (ARubblePawn* RP = Cast<ARubblePawn>(Pawn))
+			{
+				RP->SetMode(ERubbleCamera::Fly);
+			}
+			Pawn->SetActorLocationAndRotation(Eye, (Target - Eye).Rotation());
+			GameWorld()->GetFirstPlayerController()->SetControlRotation((Target - Eye).Rotation());
+		}
+	}
+}
+
+/**
+ * Rubble.Town.Destroy: Vibe Town wrecked from a street in Elm Park (three cannonballs into a
+ * house, a meteor onto the next) and then from the Market Quarter (a meteor onto a ten-storey
+ * tower). Frames every half second or so in RubbleShots/town/destroy_*.png; frame, game, render
+ * thread, backend times and moves to RubbleShots/town/destroy.txt.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRubbleTownDestroy, "Rubble.Town.Destroy",
+	EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
+
+bool FRubbleTownDestroy::RunTest(const FString& Parameters)
+{
+	if (!TestTrue(TEXT("the town loads"), Rubble() && Load(TEXT("fracture:town?autoshot=0"))))
+	{
+		return false;
+	}
+	GEngine->Exec(GameWorld(), TEXT("t.MaxFPS 0"));
+	struct FTimeline
+	{
+		double Start = 0.0, Last = 0.0;
+		int32 Next = 0, Shot = 0;
+		TArray<double> Frame, Game, Render, Backend;
+		int32 MaxMoves = 0, MaxEvents = 0, Events = 0, MaxAwake = 0;
+	};
+	TSharedRef<FTimeline> T = MakeShared<FTimeline>();
+	const FString Dir = ShotDir() / TEXT("town");
+	const FVector StreetEye(-4200, -7900, 450), HouseA(-1554, -5120, 250), HouseB(-1554, -3420, 0);
+	const FVector TowerEye(-15000, 3000, 3200), Tower(-6289, 8995, 0);
+	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(4.0f));
+	ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([T, Dir, StreetEye, HouseA, HouseB, TowerEye, Tower]() {
+		const double Now = FPlatformTime::Seconds();
+		if (T->Start == 0.0)
+		{
+			T->Start = T->Last = Now;
+			ParkCamera(StreetEye, (HouseA + HouseB) * 0.5 + FVector(0, 0, 200));
+			return false;
+		}
+		const double At = Now - T->Start;
+		T->Frame.Add(1000.0 * (Now - T->Last));
+		T->Last = Now;
+		const double Ms = FPlatformTime::GetSecondsPerCycle() * 1000.0;
+		T->Game.Add(GGameThreadTime * Ms);
+		T->Render.Add(GRenderThreadTime * Ms);
+		T->Backend.Add(Rubble()->Stats().BackendMs);
+		T->MaxMoves = FMath::Max(T->MaxMoves, Rubble()->Stats().Moves);
+		T->MaxEvents = FMath::Max(T->MaxEvents, Rubble()->Stats().Events);
+		T->Events += Rubble()->Stats().Events;
+		if (const ARubblePrimitives* Prims = Find<ARubblePrimitives>())
+		{
+			T->MaxAwake = FMath::Max(T->MaxAwake, Prims->NumAwakeHybrids());
+		}
+		// The script: (time s, what).
+		struct FCue { double At; int32 What; };
+		static const FCue Cues[] = {
+			{ 1.0, 1 }, { 1.4, 1 }, { 1.8, 1 }, { 2.6, 2 },          // cannon x3, meteor onto house B
+			{ 1.2, 10 }, { 2.0, 10 }, { 3.0, 10 }, { 4.0, 10 }, { 5.5, 10 }, { 7.5, 10 },
+			{ 9.0, 3 },                                                  // to the towers
+			{ 10.5, 4 },                                                 // meteor onto a tower
+			{ 11.0, 10 }, { 12.0, 10 }, { 13.5, 10 }, { 16.0, 10 },
+		};
+		for (const FCue& C : Cues)
+		{
+			if (At < C.At || (T->Next & (1 << int32(&C - Cues))))
+			{
+				continue;
+			}
+			T->Next |= 1 << int32(&C - Cues);
+			switch (C.What)
+			{
+			case 1: Rubble()->Launch(StreetEye + FVector(0, 0, -150), HouseA - StreetEye); break;
+			case 2: Rubble()->Meteor(HouseB); break;
+			case 3: ParkCamera(TowerEye, Tower + FVector(0, 0, 1500)); break;
+			case 4: Rubble()->Meteor(Tower); break;
+			case 10:
+				UE_LOG(LogRubble, Display, TEXT("town destroy t=%.1f s: %d awake, %d moves, %.1f ms backend, %d events this frame"), At,
+					Find<ARubblePrimitives>() ? Find<ARubblePrimitives>()->NumAwakeHybrids() : 0, Rubble()->Stats().Moves, Rubble()->Stats().BackendMs, Rubble()->Stats().Events);
+				FScreenshotRequest::RequestScreenshot(Dir / FString::Printf(TEXT("destroy_%02d.png"), T->Shot++), /*bShowUI=*/true, false);
+				break;
+			}
+		}
+		if (At < 17.0)
+		{
+			return false;
+		}
+		auto Mean = [](const TArray<double>& V) { double S = 0; for (double x : V) S += x; return V.Num() ? S / V.Num() : 0.0; };
+		auto P95 = [](TArray<double> V) { V.Sort(); return V.Num() ? V[FMath::Min(V.Num() - 1, int32(0.95 * V.Num()))] : 0.0; };
+		auto Max = [](const TArray<double>& V) { double M = 0; for (double x : V) M = FMath::Max(M, x); return M; };
+		const ARubblePrimitives* P = Find<ARubblePrimitives>();
+		const FString Line = FString::Printf(TEXT("Rubble.Town.Destroy frames=%d frame_ms_mean=%.2f p95=%.2f max=%.1f game_ms=%.2f render_ms=%.2f backend_ms_mean=%.2f backend_ms_max=%.1f max_moves=%d events=%d max_events_frame=%d hybrids=%d awake_at_end=%d max_awake=%d"),
+			T->Frame.Num(), Mean(T->Frame), P95(T->Frame), Max(T->Frame), Mean(T->Game), Mean(T->Render), Mean(T->Backend), Max(T->Backend), T->MaxMoves, T->Events, T->MaxEvents,
+			P ? P->NumHybrids() : 0, P ? P->NumAwakeHybrids() : 0, T->MaxAwake);
+		UE_LOG(LogRubble, Display, TEXT("%s"), *Line);
+		FFileHelper::SaveStringToFile(Line + LINE_TERMINATOR, *(Dir / TEXT("destroy.txt")));
+		return true;
+	}));
+	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(0.3f));
+	return true;
+}
+#endif

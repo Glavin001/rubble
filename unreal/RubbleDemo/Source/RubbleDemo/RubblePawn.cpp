@@ -185,6 +185,7 @@ void ARubblePawn::CreateInput()
 		{ TEXT("Click"), EKeys::LeftMouseButton },
 		{ TEXT("Ball"), EKeys::B },
 		{ TEXT("Ram"), EKeys::T },
+		{ TEXT("Meteor"), EKeys::M },
 		{ TEXT("Reset"), EKeys::R },
 		{ TEXT("Menu"), EKeys::Tab },
 		{ TEXT("Camera"), EKeys::C },
@@ -252,6 +253,7 @@ void ARubblePawn::SetupPlayerInputComponent(UInputComponent* InputComponent)
 			Shoot(true);
 		}
 	});
+	In->BindActionValueLambda(A(TEXT("Meteor")), ETriggerEvent::Started, [this](const FInputActionValue&) { CallMeteor(); });
 	In->BindActionValueLambda(A(TEXT("Ram")), ETriggerEvent::Started, [this](const FInputActionValue&) {
 		if (URubbleSubsystem* R = Rubble())
 		{
@@ -323,6 +325,20 @@ void ARubblePawn::ToggleMenu()
 		GEngine->GameViewport->RemoveViewportWidgetContent(Menu.ToSharedRef());
 		Menu.Reset();
 	}
+}
+
+void ARubblePawn::CallMeteor()
+{
+	URubbleSubsystem* R = Rubble();
+	if (!R)
+	{
+		return;
+	}
+	// Where the view meets the ground (or 80 m ahead when looking at the sky).
+	const FVector Origin = Camera->GetComponentLocation();
+	const FVector Dir = Camera->GetForwardVector();
+	const FVector Target = Dir.Z < -0.02 ? Origin + Dir * (-Origin.Z / Dir.Z) : Origin + Dir * 8000.0;
+	R->Meteor(FVector(Target.X, Target.Y, FMath::Max(Target.Z, 0.0)));
 }
 
 void ARubblePawn::Shoot(bool bAtCursor)
