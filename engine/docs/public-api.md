@@ -1,7 +1,7 @@
 # Rubble public API
 
-Status: Phase 1 has shipped on `claude/public-api-world`, rebased on `main`
-`4a81b441`. It adds the crate `engine-world`, whose library name is `rubble`.
+Status: Phase 1 and the P1.5 Box3D alignment have shipped on
+`claude/public-api-world`, rebased on `main` `4a81b441`. It adds the crate `engine-world`, whose library name is `rubble`.
 This document records what Phase 1 delivered, sets out the **target API**,
 and plans the work that gets there.
 
@@ -568,8 +568,40 @@ The tests are in `engine-world/tests/{world,bridge_acceptance}.rs` and
 Each phase lands with byte-equality tests against raw `WgpuSim` for worlds
 that do not use its features.
 
-**P1.5: Box3D alignment.** This comes next, before anything depends on
-Phase 1's shapes.
+**P1.5: Box3D alignment (shipped).** `rubble::World` now has this shape:
+
+- **Definitions:** `WorldDef`, and `BodyDef` with Box3D's fields and a static
+  default.
+- **First-class shapes:** `ShapeId` and `create_{sphere,capsule,box,
+  transformed_box,hull,transformed_hull}_shape`; `destroy_shape` reuses
+  colliders after a quarantine.
+- **Surface materials:** `SurfaceMaterial`, interned into the 64-slot table,
+  with a loud error on the 65th distinct one.
+- **Mass and frames:** `MassData`, `body_set_mass_data` and
+  `body_apply_mass_from_shapes`.
+  - The body origin is separate from the centre of mass and principal axes.
+    Transforms are reported at the origin.
+  - A live body re-centres on the GPU through a new `SetMassFrame` command,
+    with no readback.
+- **Box3D commands:** separate linear and angular velocity, force at a point,
+  torque, impulse at a point or at the centre, angular impulse, and a
+  `wake = false` flag that leaves sleeping bodies alone.
+- **Typed joints:** revolute, prismatic, spherical, weld, distance and filter
+  definitions, with Box3D axes (revolute turns about frame z), plus `Custom`
+  for Rubble's full joint model. Springs take physical stiffness.
+- **Grouped events:** `Frame { body_events.moves, destruction_events }`.
+- **Getters and helpers:** frame-latent getters, `read_body_state`,
+  `step_sync`, `create_bodies` (batch), `cast_ray_blocking` with shape ids.
+- **Errors:** `Unsupported` and `StaleHandle` can be matched with downcast.
+
+Deferred from P1.5:
+
+- joint threshold events (which need a GPU check);
+- `body_enable` / `body_disable`;
+- `request_body_states`;
+- device access, observables and `high_water()`.
+
+The original P1.5 list follows.
 
 - Rename the types:
   - `WorldConfig` becomes `WorldDef`;

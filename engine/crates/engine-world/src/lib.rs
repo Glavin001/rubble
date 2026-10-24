@@ -1,50 +1,56 @@
-//! Rubble's public world API: one handle for rigid bodies, joints, vehicles and
-//! soft bodies simulated on the GPU, for game engines and simulations.
+//! Rubble's public world API: rigid bodies, shapes, joints, vehicles and soft
+//! bodies simulated on the GPU. The object model follows Box3D (definitions
+//! with defaults, generational ids, shapes attached to bodies, body origin
+//! separate from the centre of mass, events grouped per step); where a
+//! GPU-resident engine must differ, it does so explicitly:
 //!
-//! - **Handles** ([`BodyId`], [`JointId`]) carry a generation: removing an
-//!   object invalidates every copy of its handle.
-//! - **Descriptors** ([`BodyDef`], [`ShapeDef`], [`JointDef`], [`MaterialDef`])
-//!   have defaults and are copied on create.
-//! - **Body commands** (`set_velocity`, `apply_impulse`, `add_force`, `teleport`,
-//!   `wake`) are queued and applied on the GPU at the start of the next step,
-//!   in submission order per body. Nothing is read back to apply them.
-//! - **Results** come back asynchronously: [`World::step`] never waits on a
-//!   readback, and [`World::poll`] returns each finished step's [`Frame`] (the
-//!   bodies that moved, with their previous pose for interpolation, and the
-//!   events: joint, beam and mount breaks, soft pieces, sleep and wake).
-//! - **Capacities** are fixed at creation and fail loudly when exceeded.
-//! - **Determinism:** a world gives the same results run to run on the same
-//!   build and GPU. Its physics is exactly a [`WgpuSim`]'s: the pose output and
-//!   readback only read state.
+//! - **Asynchronous results.** [`World::step`] never waits on a readback;
+//!   [`World::poll`] returns each finished step's [`Frame`]. Getters such as
+//!   [`World::body_transform`] return the last polled frame; nothing hides a
+//!   GPU readback. [`World::step_sync`] gives Box3D-style immediacy.
+//! - **Commands, not writes.** Velocities, forces, impulses and teleports are
+//!   queued and applied on the GPU at the start of the next step, in
+//!   submission order per body.
+//! - **Loud limits.** Capacities are fixed at creation and fail with clear
+//!   errors; unsupported definition fields return [`Unsupported`].
+//! - **Lossless.** A world computes exactly what the raw [`WgpuSim`] computes.
+//! - **Deterministic** on the same build and GPU.
 //!
-//! The step is a fixed `dt` ([`WorldConfig::solver`]); hosts accumulate
-//! real time and interpolate between [`MovedBody::previous`] and `pose`.
+//! See `engine/docs/public-api.md` and `engine/docs/api-review.md`.
 
 mod defs;
+mod error;
 mod events;
 mod handles;
+mod joints;
+mod math;
 mod readback;
 
-pub use defs::{
-    BodyDef, BodyKind, JointDef, MassSpec, MaterialDef, Shape, ShapeDef, MASS_ORIGIN_TOLERANCE,
-    PRINCIPAL_TOLERANCE,
+pub use defs::{BodyDef, BodyType, Geometry, MassData, MotionLocks, ShapeDef, SurfaceMaterial};
+pub use error::{StaleHandle, Unsupported};
+pub use events::{BodyEvents, BodyMoveEvent, DestructionEvent, Frame};
+pub use handles::{BodyId, JointId, ShapeId};
+pub use joints::{
+    DistanceJointDef, FilterJointDef, JointBase, JointDef, PrismaticJointDef, RevoluteJointDef,
+    SphericalJointDef, Spring, WeldJointDef,
 };
-pub use events::{Event, Frame, MovedBody, Pose};
-pub use handles::{BodyId, JointId, MaterialId};
+pub use math::Transform;
 pub use readback::Backpressure;
 
-pub use engine_schema::convex::{CollisionFilter, ConvexHull};
-pub use engine_schema::{AvbdParams, JointDesc, StepCounters, WorldCapacity};
-pub use engine_softbody::{SoftCapacity, SoftHandle, SoftVehicleDesc, SpawnOptions};
-pub use engine_vehicle::{
-    Ray, VehicleCapacity, VehicleDesc, VehicleHandle, VehicleInput, VehicleState,
+pub use engine_schema::convex::{CollisionFilter as Filter, ConvexHull};
+pub use engine_schema::{
+    AvbdParams, Dof, JointDesc, JointFrame, Motion, StepCounters, WorldCapacity,
 };
+pub use engine_softbody::{SoftCapacity, SoftHandle, SoftVehicleDesc, SpawnOptions};
+pub use engine_vehicle::{VehicleCapacity, VehicleDesc, VehicleHandle, VehicleInput, VehicleState};
 pub use engine_webgpu::{ContactStorage, EngineFeatures, WgpuSim};
 
 use engine_schema::convex::HullArena;
 use engine_schema::{BodyState, Collider, GpuCommand, ShapeType};
 use engine_webgpu::SimOptions;
+use error::unsupported;
 use glam::{Quat, Vec3};
+use math::SolverFrame;
 use readback::{Pending, ReadbackRing};
 
 /// The GPU a world runs on.
@@ -52,8 +58,8 @@ use readback::{Pending, ReadbackRing};
 pub enum GpuContext {
     /// A high-performance adapter the world opens itself.
     Default,
-    /// The host's device (a renderer's), so the world's buffers can be read in
-    /// place by the host's own passes.
+    /// The host's device (a renderer's), so its passes can read the world's
+    /// buffers in place.
     Shared {
         info: wgpu::AdapterInfo,
         device: wgpu::Device,
@@ -61,18 +67,22 @@ pub enum GpuContext {
     },
 }
 
-/// Everything fixed at creation.
+/// A world (Box3D `b3WorldDef`, plus what a GPU world fixes at creation).
 #[derive(Clone, Debug)]
-pub struct WorldConfig {
+pub struct WorldDef {
+    /// m/s². Only gravity along Y is supported for now (planned P3).
+    pub gravity: [f32; 3],
+    /// Bodies may fall asleep (Box3D `enableSleep`).
+    pub enable_sleep: bool,
+    pub user_data: u64,
+    /// Rubble: fixed capacities; overflow fails the step.
     pub capacity: WorldCapacity,
     pub contacts: ContactStorage,
     pub vehicles: VehicleCapacity,
     /// A soft-body arena (needs [`ContactStorage::Canonical`]).
     pub soft: Option<SoftCapacity>,
-    /// m/s². Only gravity along Y is supported for now; anything else is refused.
-    pub gravity: [f32; 3],
-    /// Step size, iterations, sleep thresholds and solver constants. Its
-    /// `gravity_y` is replaced by `gravity`.
+    /// Step size, iterations, sleep thresholds and solver constants
+    /// (`gravity_y` comes from `gravity`).
     pub solver: AvbdParams,
     pub features: EngineFeatures,
     /// Apply the `ENGINE_*` benchmark variables over `features` and `contacts`.
@@ -82,14 +92,16 @@ pub struct WorldConfig {
     pub backpressure: Backpressure,
 }
 
-impl Default for WorldConfig {
+impl Default for WorldDef {
     fn default() -> Self {
         Self {
+            gravity: [0.0, AvbdParams::default().gravity_y, 0.0],
+            enable_sleep: true,
+            user_data: 0,
             capacity: WorldCapacity::small(),
             contacts: ContactStorage::Persistent,
             vehicles: VehicleCapacity::default(),
             soft: None,
-            gravity: [0.0, AvbdParams::default().gravity_y, 0.0],
             solver: AvbdParams::default(),
             features: EngineFeatures::default(),
             env_overrides: false,
@@ -99,12 +111,39 @@ impl Default for WorldConfig {
     }
 }
 
-/// What a body slot holds.
+/// A body's state read straight from the GPU ([`World::read_body_state`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BodyStateRead {
+    pub transform: Transform,
+    pub linear_velocity: [f32; 3],
+    pub angular_velocity: [f32; 3],
+    pub awake: bool,
+}
+
+/// A ray hit ([`World::cast_ray_blocking`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RayResult {
+    /// Null for a vehicle's or soft body's own colliders.
+    pub shape: ShapeId,
+    pub body: BodyId,
+    pub point: [f32; 3],
+    pub normal: [f32; 3],
+    pub distance: f32,
+}
+
+/// A ray for [`World::cast_ray_blocking`]: it runs the full length of
+/// `translation`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RayInput {
+    pub origin: [f32; 3],
+    pub translation: [f32; 3],
+    pub ignore_body: Option<BodyId>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Owner {
-    /// Made by `create_body`; removable.
     User,
-    /// A vehicle's chassis, wheel or part, or a soft body's core: owned by it.
+    /// A vehicle's chassis, wheel or part, or a soft body's core.
     Vehicle,
 }
 
@@ -113,12 +152,50 @@ struct BodySlot {
     generation: u32,
     alive: bool,
     owner: Owner,
+    body_type: BodyType,
     user_data: u64,
-    colliders: Vec<u32>,
+    name: Option<String>,
+    shapes: Vec<u32>,
     joints: Vec<u32>,
-    /// Removed at this step; the slot is reused two steps later, once neither
-    /// contact history half can refer to its old colliders.
     removed_at: Option<u64>,
+    /// Current mass properties (None: static, or dynamic without mass yet).
+    mass: Option<MassData>,
+    /// Solver frames over time, `(first step, frame)`, so frames still in
+    /// flight convert with the frame they were simulated in.
+    frames: Vec<(u64, SolverFrame)>,
+    /// The step the body was last fully uploaded before: while
+    /// `written_step == world.step`, the GPU state is exactly that upload.
+    written_step: u64,
+    origin: Transform,
+    velocity: ([f32; 3], [f32; 3]),
+    asleep: bool,
+    /// Latest frame-reported state.
+    last_transform: Option<Transform>,
+    last_asleep: bool,
+}
+
+impl BodySlot {
+    fn frame(&self) -> SolverFrame {
+        self.frames.last().map_or(SolverFrame::IDENTITY, |f| f.1)
+    }
+
+    fn frame_at(&self, step: u64) -> SolverFrame {
+        self.frames
+            .iter()
+            .rev()
+            .find(|f| f.0 <= step)
+            .map_or(SolverFrame::IDENTITY, |f| f.1)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ShapeSlot {
+    generation: u32,
+    alive: bool,
+    body: u32,
+    collider: u32,
+    geometry: Geometry,
+    def: ShapeDef,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -126,12 +203,13 @@ struct JointSlot {
     generation: u32,
     alive: bool,
     bodies: [u32; 2],
+    user_data: u64,
 }
 
-/// Steps a removed slot waits before reuse (the two contact ping-pong halves).
+/// Steps a released body or collider slot waits before reuse: neither contact
+/// history half may still refer to its old colliders.
 const QUARANTINE_STEPS: u64 = 2;
 
-/// A parked (removed) body's pose: a sparse lattice far below the world.
 fn graveyard(slot: u32) -> [f32; 3] {
     [
         (slot % 1024) as f32 * 8.0,
@@ -140,7 +218,7 @@ fn graveyard(slot: u32) -> [f32; 3] {
     ]
 }
 
-/// A retired collider: a tiny sphere that collides with nothing.
+/// A collider that collides with nothing: a tiny filtered-out sphere.
 fn retired_collider(body: u32) -> Collider {
     let mut c = Collider {
         body,
@@ -152,7 +230,7 @@ fn retired_collider(body: u32) -> Collider {
         local_rot: [0.0, 0.0, 0.0, 1.0],
         params: [1e-3, 0.0, 0.0, 1e-3],
     };
-    CollisionFilter {
+    Filter {
         categories: 0,
         mask: 1,
         group: 0,
@@ -167,71 +245,80 @@ pub struct World {
     hulls: HullArena,
     bodies: Vec<BodySlot>,
     free_bodies: Vec<u32>,
+    shapes: Vec<ShapeSlot>,
+    free_shapes: Vec<u32>,
+    /// Retired colliders: `(collider, released at step)`.
+    free_colliders: Vec<(u32, u64)>,
+    /// Collider index -> shape slot (u32::MAX: not a user shape).
+    collider_shape: Vec<u32>,
     joints: Vec<JointSlot>,
-    materials: u16,
+    /// Interned surface materials (GPU slot = index).
+    materials: Vec<[u32; 3]>,
     readback: ReadbackRing,
     backpressure: Backpressure,
-    /// Last pose reported per body slot (interpolation source).
-    last_pose: Vec<Option<Pose>>,
+    user_data: u64,
     step: u64,
-    /// The newest step that ran on the GPU (its counters refresh the sim's).
     newest_ran: Option<u64>,
-    /// Frames read while waiting for a free readback slot, for the next poll.
     ready_frames: Vec<Frame>,
-    /// Something was written (a body, joint, command or vehicle input) since the
-    /// last step.
     dirty: bool,
-    /// The last step that applied host writes.
     last_input_step: Option<u64>,
+    last_counters: Option<StepCounters>,
 }
 
 impl World {
-    pub fn new(gpu: GpuContext, config: WorldConfig) -> anyhow::Result<Self> {
-        anyhow::ensure!(
-            config.gravity[0] == 0.0 && config.gravity[2] == 0.0,
-            "gravity {:?}: only gravity along Y is supported for now",
-            config.gravity
-        );
-        let (contacts, features) = if config.env_overrides {
+    pub fn new(gpu: GpuContext, def: &WorldDef) -> anyhow::Result<Self> {
+        if def.gravity[0] != 0.0 || def.gravity[2] != 0.0 {
+            return unsupported("gravity off the Y axis (planned P3)");
+        }
+        let (contacts, features) = if def.env_overrides {
             let env = SimOptions::from_env();
             (env.contacts, env.features)
         } else {
-            (config.contacts, config.features)
+            (def.contacts, def.features.clone())
         };
         let options = SimOptions {
             contacts,
-            vehicles: config.vehicles,
-            soft: config.soft,
+            vehicles: def.vehicles,
+            soft: def.soft,
             features,
             pose_output: true,
         };
         let mut sim = match gpu {
-            GpuContext::Default => WgpuSim::new_with_options(config.capacity, options)?,
+            GpuContext::Default => WgpuSim::new_with_options(def.capacity.clone(), options)?,
             GpuContext::Shared {
                 info,
                 device,
                 queue,
-            } => WgpuSim::with_device_options(config.capacity, options, info, device, queue)?,
+            } => WgpuSim::with_device_options(def.capacity.clone(), options, info, device, queue)?,
         };
-        let mut params = config.solver;
-        params.gravity_y = config.gravity[1];
+        let mut params = def.solver;
+        params.gravity_y = def.gravity[1];
+        if !def.enable_sleep {
+            params.sleep_time = f32::MAX;
+        }
         sim.set_params(params);
-        let readback = ReadbackRing::new(&sim, config.readback_frames);
+        let readback = ReadbackRing::new(&sim, def.readback_frames);
         Ok(Self {
             sim,
             hulls: HullArena::new(),
             bodies: Vec::new(),
             free_bodies: Vec::new(),
+            shapes: Vec::new(),
+            free_shapes: Vec::new(),
+            free_colliders: Vec::new(),
+            collider_shape: Vec::new(),
             joints: Vec::new(),
-            materials: 1,
+            // Slot 0 is the sim's default material (friction 0.5).
+            materials: vec![SurfaceMaterial::default().key()],
             readback,
-            backpressure: config.backpressure,
-            last_pose: Vec::new(),
+            backpressure: def.backpressure,
+            user_data: def.user_data,
             step: 0,
             newest_ran: None,
             ready_frames: Vec::new(),
             dirty: false,
             last_input_step: None,
+            last_counters: None,
         })
     }
 
@@ -248,250 +335,534 @@ impl World {
         self.sim.queue()
     }
 
+    pub fn user_data(&self) -> u64 {
+        self.user_data
+    }
+
     /// Steps taken so far.
     pub fn step_count(&self) -> u64 {
         self.step
     }
 
-    // ----- materials -------------------------------------------------------
-
-    /// A new surface material (64 in all, the default included).
-    pub fn create_material(&mut self, def: MaterialDef) -> anyhow::Result<MaterialId> {
-        self.dirty = true;
-        anyhow::ensure!(self.materials < 64, "all 64 material slots are in use");
-        let id = MaterialId(self.materials);
-        self.materials += 1;
-        self.sim.set_material(u32::from(id.0), def.into());
-        Ok(id)
+    /// The last polled step's counters.
+    pub fn counters(&self) -> Option<StepCounters> {
+        self.last_counters
     }
 
-    /// Change a material (the default, `MaterialId::DEFAULT`, included).
-    pub fn set_material(&mut self, id: MaterialId, def: MaterialDef) -> anyhow::Result<()> {
+    /// GPU time of the last step the host waited for (ms).
+    pub fn profile_ms(&self) -> f64 {
+        self.sim.timings_ms()
+    }
+
+    pub fn set_gravity(&mut self, gravity: [f32; 3]) -> anyhow::Result<()> {
+        if gravity[0] != 0.0 || gravity[2] != 0.0 {
+            return unsupported("gravity off the Y axis (planned P3)");
+        }
+        let mut p = self.sim.params();
+        p.gravity_y = gravity[1];
+        self.sim.set_params(p);
         self.dirty = true;
-        anyhow::ensure!(id.0 < self.materials, "unknown material {}", id.0);
-        self.sim.set_material(u32::from(id.0), def.into());
         Ok(())
     }
 
     // ----- bodies ----------------------------------------------------------
 
-    /// A body made of `shapes` (at least one).
-    pub fn create_body(&mut self, def: &BodyDef, shapes: &[ShapeDef]) -> anyhow::Result<BodyId> {
-        self.dirty = true;
-        anyhow::ensure!(!shapes.is_empty(), "a body needs at least one shape");
-        for s in shapes {
-            anyhow::ensure!(
-                s.material.0 < self.materials,
-                "unknown material {}",
-                s.material.0
-            );
-        }
-        let state = self.body_state(def, shapes)?;
-        let slot = self.reusable_slot();
-        let index = match slot {
-            Some(i) => {
-                self.sim.write_bodies(i, &[state]);
-                self.sim.forget_pose(i);
-                i
-            }
-            None => {
-                anyhow::ensure!(
-                    self.sim.body_count() < self.sim.capacity().max_bodies,
-                    "WorldCapacity::max_bodies ({}) reached",
-                    self.sim.capacity().max_bodies
-                );
-                self.sim.add_body(state)
-            }
-        };
-        let mut colliders = Vec::with_capacity(shapes.len());
-        for s in shapes {
-            colliders.push(self.collider(index, s)?);
-        }
-        let mut ids = match slot {
-            Some(i) => std::mem::take(&mut self.bodies[i as usize].colliders),
-            None => Vec::new(),
-        };
-        // Reuse the slot's retired colliders, then append.
-        let reused = ids.len().min(colliders.len());
-        for (k, c) in colliders[..reused].iter().enumerate() {
-            self.sim.set_collider(ids[k], *c);
-        }
-        if colliders.len() > reused {
-            let free = self.sim.capacity().max_colliders - self.sim.collider_count();
-            anyhow::ensure!(
-                (colliders.len() - reused) as u32 <= free,
-                "WorldCapacity::max_colliders ({}) reached",
-                self.sim.capacity().max_colliders
-            );
-            let range = self.sim.add_colliders(&colliders[reused..]);
-            ids.extend(range);
-        }
-        // Extra retired colliders stay with the slot (still retired) for later reuse.
-        let generation = match slot {
-            Some(i) => self.bodies[i as usize].generation,
-            None => 1,
-        };
-        let entry = BodySlot {
-            generation,
-            alive: true,
-            owner: Owner::User,
-            user_data: def.user_data,
-            colliders: ids,
-            joints: Vec::new(),
-            removed_at: None,
-        };
-        let i = index as usize;
-        if i < self.bodies.len() {
-            self.bodies[i] = entry;
-        } else {
-            debug_assert_eq!(i, self.bodies.len());
-            self.bodies.push(entry);
-        }
-        if self.last_pose.len() <= i {
-            self.last_pose.resize(i + 1, None);
-        }
-        self.last_pose[i] = None;
-        Ok(BodyId::new(index, generation))
+    /// A body without shapes (Box3D `b3CreateBody`); attach shapes with
+    /// `create_*_shape`. A dynamic body without shapes has unit mass and
+    /// inertia until shapes or `body_set_mass_data` give it more.
+    pub fn create_body(&mut self, def: &BodyDef) -> anyhow::Result<BodyId> {
+        Ok(self.create_bodies(std::slice::from_ref(def))?[0])
     }
 
-    /// Remove a body and the joints attached to it. Its handle (and every copy)
-    /// becomes invalid at once; its slot is reused after two steps.
-    pub fn remove_body(&mut self, id: BodyId) -> anyhow::Result<()> {
+    /// Many bodies in one upload (Jolt's batch add): prefer it at 10k+ bodies.
+    pub fn create_bodies(&mut self, defs: &[BodyDef]) -> anyhow::Result<Vec<BodyId>> {
+        for d in defs {
+            d.validate()?;
+        }
         self.dirty = true;
+        let mut ids = vec![BodyId::NULL; defs.len()];
+        let mut fresh: Vec<(usize, BodyState)> = Vec::new();
+        for (k, d) in defs.iter().enumerate() {
+            let rotation = Quat::from_array(d.rotation).normalize().to_array();
+            let asleep = !d.is_awake && d.body_type == BodyType::Dynamic;
+            let slot = BodySlot {
+                generation: 1,
+                alive: true,
+                owner: Owner::User,
+                body_type: d.body_type,
+                user_data: d.user_data,
+                name: d.name.clone(),
+                shapes: Vec::new(),
+                joints: Vec::new(),
+                removed_at: None,
+                mass: None,
+                frames: Vec::new(),
+                written_step: self.step,
+                origin: Transform::new(d.position, rotation),
+                velocity: (d.linear_velocity, d.angular_velocity),
+                asleep,
+                last_transform: None,
+                last_asleep: asleep,
+            };
+            let state = body_state(&slot);
+            match self.reusable_body_slot() {
+                Some(i) => {
+                    let generation = self.bodies[i as usize].generation;
+                    self.bodies[i as usize] = BodySlot { generation, ..slot };
+                    self.sim.write_bodies(i, &[state]);
+                    self.sim.forget_pose(i);
+                    ids[k] = BodyId::new(i, generation);
+                }
+                None => {
+                    // `bodies` mirrors the sim's slots, so this push and the
+                    // batch upload below land on the same index.
+                    fresh.push((k, state));
+                    self.bodies.push(slot);
+                }
+            }
+        }
+        if !fresh.is_empty() {
+            let cap = self.sim.capacity().max_bodies;
+            if self.sim.body_count() + fresh.len() as u32 > cap {
+                self.bodies.truncate(self.sim.body_count() as usize);
+                anyhow::bail!("WorldCapacity::max_bodies ({cap}) reached");
+            }
+            let states: Vec<BodyState> = fresh.iter().map(|f| f.1).collect();
+            let range = self.sim.add_bodies(&states);
+            for ((k, _), index) in fresh.iter().zip(range) {
+                ids[*k] = BodyId::new(index, 1);
+            }
+        }
+        Ok(ids)
+    }
+
+    /// Destroy a body, its shapes and its joints (Box3D `b3DestroyBody`).
+    /// Every copy of its handle becomes invalid at once; its slot is reused
+    /// after two steps.
+    pub fn destroy_body(&mut self, id: BodyId) -> anyhow::Result<()> {
         let i = self.live_body(id)?;
-        anyhow::ensure!(
-            self.bodies[i].owner == Owner::User,
-            "body {} belongs to a vehicle or soft body; remove that instead",
-            id.index()
-        );
+        if self.bodies[i].owner != Owner::User {
+            anyhow::bail!(
+                "body {} belongs to a vehicle or soft body; remove that instead",
+                id.index()
+            );
+        }
+        self.dirty = true;
         for j in std::mem::take(&mut self.bodies[i].joints) {
             self.release_joint(j);
+        }
+        for s in std::mem::take(&mut self.bodies[i].shapes) {
+            self.release_shape(s);
         }
         let index = id.index();
         self.sim.cancel_body_commands(index);
         let p = graveyard(index);
-        let parked = BodyState {
-            position: p,
-            inv_mass: 0.0,
-            orientation: [0.0, 0.0, 0.0, 1.0],
-            inv_inertia: [0.0; 3],
-            flags: 0,
-            linear_vel: [0.0; 3],
-            sleep_timer: 0.0,
-            angular_vel: [0.0; 3],
-            generation: 0,
-            initial_pos: p,
-            initial_pad: 0.0,
-            initial_rot: [0.0, 0.0, 0.0, 1.0],
-        };
+        let mut parked = BodyState::static_plane_support();
+        parked.position = p;
+        parked.initial_pos = p;
         self.sim.write_bodies(index, &[parked]);
-        for &c in &self.bodies[i].colliders {
-            self.sim.set_collider(c, retired_collider(index));
-        }
         let slot = &mut self.bodies[i];
         slot.alive = false;
         slot.generation = slot.generation.wrapping_add(1).max(1);
         slot.removed_at = Some(self.step);
-        slot.user_data = 0;
         self.free_bodies.push(index);
-        self.last_pose[i] = None;
         Ok(())
     }
 
-    /// Whether `id` refers to a live body.
-    pub fn is_valid(&self, id: BodyId) -> bool {
+    pub fn body_is_valid(&self, id: BodyId) -> bool {
         self.live_body(id).is_ok()
     }
 
-    pub fn user_data(&self, id: BodyId) -> anyhow::Result<u64> {
-        Ok(self.bodies[self.live_body(id)?].user_data)
-    }
-
-    /// The pose last reported for a body (`None` before its first frame).
-    pub fn pose(&self, id: BodyId) -> anyhow::Result<Option<Pose>> {
-        Ok(self.last_pose[self.live_body(id)?])
-    }
-
-    /// Bodies alive now.
     pub fn body_count(&self) -> usize {
         self.bodies.iter().filter(|b| b.alive).count()
     }
 
-    /// Overwrite a body's velocity (and wake it).
-    pub fn set_velocity(
-        &mut self,
-        id: BodyId,
-        linear: [f32; 3],
-        angular: [f32; 3],
-    ) -> anyhow::Result<()> {
-        self.command(id, GpuCommand::set_velocity(id.index(), linear, angular))
+    pub fn body_type(&self, id: BodyId) -> anyhow::Result<BodyType> {
+        Ok(self.bodies[self.live_body(id)?].body_type)
     }
 
-    /// An instantaneous impulse (N s) at a world point (and wake the body).
-    pub fn apply_impulse(
+    pub fn body_user_data(&self, id: BodyId) -> anyhow::Result<u64> {
+        Ok(self.bodies[self.live_body(id)?].user_data)
+    }
+
+    pub fn body_name(&self, id: BodyId) -> anyhow::Result<Option<&str>> {
+        Ok(self.bodies[self.live_body(id)?].name.as_deref())
+    }
+
+    pub fn body_shapes(&self, id: BodyId) -> anyhow::Result<Vec<ShapeId>> {
+        let b = &self.bodies[self.live_body(id)?];
+        Ok(b.shapes
+            .iter()
+            .map(|&s| ShapeId::new(s, self.shapes[s as usize].generation))
+            .collect())
+    }
+
+    /// The body origin's pose as of the last polled frame (`None` before the
+    /// body's first frame). Frame-latent by design: no hidden readback.
+    pub fn body_transform(&self, id: BodyId) -> anyhow::Result<Option<Transform>> {
+        Ok(self.bodies[self.live_body(id)?].last_transform)
+    }
+
+    /// Whether the body was awake as of the last polled frame.
+    pub fn body_is_awake(&self, id: BodyId) -> anyhow::Result<bool> {
+        Ok(!self.bodies[self.live_body(id)?].last_asleep)
+    }
+
+    /// Centre of mass in the body frame.
+    pub fn body_local_center(&self, id: BodyId) -> anyhow::Result<[f32; 3]> {
+        Ok(self.bodies[self.live_body(id)?].frame().center.to_array())
+    }
+
+    pub fn body_mass_data(&self, id: BodyId) -> anyhow::Result<Option<MassData>> {
+        Ok(self.bodies[self.live_body(id)?].mass)
+    }
+
+    /// The body's state read straight from the GPU (blocking; for tools and
+    /// tests, not per-frame use).
+    pub fn read_body_state(&self, id: BodyId) -> anyhow::Result<BodyStateRead> {
+        let i = self.live_body(id)?;
+        let b = self.sim.read_body(id.index());
+        let solver = Transform::new(b.position, b.orientation);
+        Ok(BodyStateRead {
+            transform: self.bodies[i].frame().to_origin(solver),
+            linear_velocity: b.linear_vel,
+            angular_velocity: b.angular_vel,
+            awake: b.flags & engine_schema::BodyFlags::Sleeping as u32 == 0,
+        })
+    }
+
+    /// Set the mass properties explicitly (Box3D `b3Body_SetMassData`); the
+    /// body origin stays where it is.
+    pub fn body_set_mass_data(&mut self, id: BodyId, mass: MassData) -> anyhow::Result<()> {
+        let i = self.live_body(id)?;
+        anyhow::ensure!(
+            self.bodies[i].body_type == BodyType::Dynamic,
+            "mass data on a non-dynamic body"
+        );
+        anyhow::ensure!(mass.mass > 0.0, "mass must be positive");
+        self.set_mass(i, Some(mass))
+    }
+
+    /// Recompute the mass properties from the body's shapes.
+    pub fn body_apply_mass_from_shapes(&mut self, id: BodyId) -> anyhow::Result<()> {
+        let i = self.live_body(id)?;
+        let mass = self.shapes_mass(i);
+        self.set_mass(i, mass)
+    }
+
+    /// Teleport the body origin (velocities kept; the body wakes).
+    pub fn body_set_transform(&mut self, id: BodyId, transform: Transform) -> anyhow::Result<()> {
+        let i = self.live_body(id)?;
+        let s = self.bodies[i].frame().to_solver(transform);
+        self.command(id, GpuCommand::teleport(id.index(), s.position, s.rotation))
+    }
+
+    /// Velocity of the centre of mass.
+    pub fn body_set_linear_velocity(&mut self, id: BodyId, v: [f32; 3]) -> anyhow::Result<()> {
+        self.command(id, GpuCommand::set_linear_velocity(id.index(), v))
+    }
+
+    pub fn body_set_angular_velocity(&mut self, id: BodyId, w: [f32; 3]) -> anyhow::Result<()> {
+        self.command(id, GpuCommand::set_angular_velocity(id.index(), w))
+    }
+
+    /// Both velocities at once.
+    pub fn body_set_velocity(
+        &mut self,
+        id: BodyId,
+        v: [f32; 3],
+        w: [f32; 3],
+    ) -> anyhow::Result<()> {
+        self.command(id, GpuCommand::set_velocity(id.index(), v, w))
+    }
+
+    /// A force (N) at a world point for the next step (Box3D clears forces
+    /// after each step too). `wake = false` leaves a sleeping body alone.
+    pub fn body_apply_force(
+        &mut self,
+        id: BodyId,
+        force: [f32; 3],
+        point: [f32; 3],
+        wake: bool,
+    ) -> anyhow::Result<()> {
+        let cmd = GpuCommand::add_force_at(id.index(), force, point);
+        self.command(id, wake_flag(cmd, wake))
+    }
+
+    pub fn body_apply_force_to_center(
+        &mut self,
+        id: BodyId,
+        force: [f32; 3],
+        wake: bool,
+    ) -> anyhow::Result<()> {
+        let cmd = GpuCommand::add_force(id.index(), force, [0.0; 3]);
+        self.command(id, wake_flag(cmd, wake))
+    }
+
+    pub fn body_apply_torque(
+        &mut self,
+        id: BodyId,
+        torque: [f32; 3],
+        wake: bool,
+    ) -> anyhow::Result<()> {
+        let cmd = GpuCommand::add_force(id.index(), [0.0; 3], torque);
+        self.command(id, wake_flag(cmd, wake))
+    }
+
+    /// An impulse (N s) at a world point.
+    pub fn body_apply_linear_impulse(
         &mut self,
         id: BodyId,
         impulse: [f32; 3],
         point: [f32; 3],
+        wake: bool,
     ) -> anyhow::Result<()> {
-        self.command(id, GpuCommand::apply_impulse(id.index(), impulse, point))
+        let cmd = GpuCommand::apply_impulse(id.index(), impulse, point);
+        self.command(id, wake_flag(cmd, wake))
     }
 
-    /// A force (N) through the centre of mass and a torque (N m) for the next
-    /// step only (and wake the body). Submit again every step it should act.
-    pub fn add_force(
+    pub fn body_apply_linear_impulse_to_center(
         &mut self,
         id: BodyId,
-        force: [f32; 3],
-        torque: [f32; 3],
+        impulse: [f32; 3],
+        wake: bool,
     ) -> anyhow::Result<()> {
-        self.command(id, GpuCommand::add_force(id.index(), force, torque))
+        let cmd = GpuCommand::apply_impulse_at_center(id.index(), impulse);
+        self.command(id, wake_flag(cmd, wake))
     }
 
-    /// Move a body without sweeping (respawn, pooling); velocities are kept.
-    pub fn teleport(
+    pub fn body_apply_angular_impulse(
         &mut self,
         id: BodyId,
-        position: [f32; 3],
-        rotation: [f32; 4],
+        impulse: [f32; 3],
+        wake: bool,
     ) -> anyhow::Result<()> {
-        self.command(id, GpuCommand::teleport(id.index(), position, rotation))
+        let cmd = GpuCommand::angular_impulse(id.index(), impulse);
+        self.command(id, wake_flag(cmd, wake))
     }
 
-    pub fn wake(&mut self, id: BodyId) -> anyhow::Result<()> {
+    /// Wake a body (and so its island). Putting a body to sleep on demand is
+    /// not supported.
+    pub fn body_set_awake(&mut self, id: BodyId, awake: bool) -> anyhow::Result<()> {
+        if !awake {
+            return unsupported("forcing a body to sleep");
+        }
         self.command(id, GpuCommand::wake(id.index()))
+    }
+
+    // ----- shapes ----------------------------------------------------------
+
+    pub fn create_sphere_shape(
+        &mut self,
+        body: BodyId,
+        def: &ShapeDef,
+        center: [f32; 3],
+        radius: f32,
+    ) -> anyhow::Result<ShapeId> {
+        self.create_shape(body, def, Geometry::Sphere { center, radius })
+    }
+
+    /// Along local +Y between `center ± half_len`.
+    pub fn create_capsule_shape(
+        &mut self,
+        body: BodyId,
+        def: &ShapeDef,
+        center: [f32; 3],
+        radius: f32,
+        half_len: f32,
+    ) -> anyhow::Result<ShapeId> {
+        self.create_shape(
+            body,
+            def,
+            Geometry::Capsule {
+                center,
+                radius,
+                half_len,
+            },
+        )
+    }
+
+    /// A box centred on the body origin (Box3D builds boxes as hulls; Rubble
+    /// keeps a native box collider).
+    pub fn create_box_shape(
+        &mut self,
+        body: BodyId,
+        def: &ShapeDef,
+        half: [f32; 3],
+    ) -> anyhow::Result<ShapeId> {
+        self.create_transformed_box_shape(body, def, half, Transform::IDENTITY)
+    }
+
+    pub fn create_transformed_box_shape(
+        &mut self,
+        body: BodyId,
+        def: &ShapeDef,
+        half: [f32; 3],
+        transform: Transform,
+    ) -> anyhow::Result<ShapeId> {
+        self.create_shape(body, def, Geometry::Box { half, transform })
+    }
+
+    pub fn create_hull_shape(
+        &mut self,
+        body: BodyId,
+        def: &ShapeDef,
+        hull: &ConvexHull,
+    ) -> anyhow::Result<ShapeId> {
+        self.create_transformed_hull_shape(body, def, hull, Transform::IDENTITY)
+    }
+
+    pub fn create_transformed_hull_shape(
+        &mut self,
+        body: BodyId,
+        def: &ShapeDef,
+        hull: &ConvexHull,
+        transform: Transform,
+    ) -> anyhow::Result<ShapeId> {
+        let geometry = Geometry::Hull {
+            hull: hull.clone(),
+            transform,
+        };
+        self.create_shape(body, def, geometry)
+    }
+
+    /// Any geometry (the `create_*_shape` calls end here).
+    pub fn create_shape(
+        &mut self,
+        body: BodyId,
+        def: &ShapeDef,
+        geometry: Geometry,
+    ) -> anyhow::Result<ShapeId> {
+        let b = self.live_body(body)?;
+        anyhow::ensure!(
+            self.bodies[b].owner == Owner::User,
+            "shapes on vehicle-owned bodies"
+        );
+        def.validate()?;
+        self.dirty = true;
+        let material = self.intern_material(&def.material)?;
+        let frame = self.bodies[b].frame();
+        let mut collider =
+            self.collider(body.index(), frame, &geometry, def.density, material, None)?;
+        def.filter.apply(&mut collider);
+        let collider_index = self.place_collider(collider)?;
+        let slot = ShapeSlot {
+            generation: 1,
+            alive: true,
+            body: body.index(),
+            collider: collider_index,
+            geometry,
+            def: def.clone(),
+        };
+        let index = match self.free_shapes.pop() {
+            Some(i) => {
+                let generation = self.shapes[i as usize].generation;
+                self.shapes[i as usize] = ShapeSlot { generation, ..slot };
+                i
+            }
+            None => {
+                self.shapes.push(slot);
+                self.shapes.len() as u32 - 1
+            }
+        };
+        if self.collider_shape.len() <= collider_index as usize {
+            self.collider_shape
+                .resize(collider_index as usize + 1, u32::MAX);
+        }
+        self.collider_shape[collider_index as usize] = index;
+        self.bodies[b].shapes.push(index);
+        if def.update_body_mass && self.bodies[b].body_type == BodyType::Dynamic {
+            let mass = self.shapes_mass(b);
+            self.set_mass(b, mass)?;
+        }
+        Ok(ShapeId::new(index, self.shapes[index as usize].generation))
+    }
+
+    /// Destroy a shape (Box3D `b3DestroyShape`).
+    pub fn destroy_shape(&mut self, id: ShapeId, update_body_mass: bool) -> anyhow::Result<()> {
+        let s = self.live_shape(id)?;
+        let b = self.shapes[s].body as usize;
+        self.dirty = true;
+        self.bodies[b].shapes.retain(|&x| x != s as u32);
+        self.release_shape(s as u32);
+        if update_body_mass && self.bodies[b].body_type == BodyType::Dynamic {
+            let mass = self.shapes_mass(b);
+            self.set_mass(b, mass)?;
+        }
+        Ok(())
+    }
+
+    pub fn shape_is_valid(&self, id: ShapeId) -> bool {
+        self.live_shape(id).is_ok()
+    }
+
+    pub fn shape_body(&self, id: ShapeId) -> anyhow::Result<BodyId> {
+        let b = self.shapes[self.live_shape(id)?].body;
+        Ok(BodyId::new(b, self.bodies[b as usize].generation))
+    }
+
+    pub fn shape_user_data(&self, id: ShapeId) -> anyhow::Result<u64> {
+        Ok(self.shapes[self.live_shape(id)?].def.user_data)
+    }
+
+    pub fn shape_surface_material(&self, id: ShapeId) -> anyhow::Result<SurfaceMaterial> {
+        Ok(self.shapes[self.live_shape(id)?].def.material)
+    }
+
+    pub fn shape_filter(&self, id: ShapeId) -> anyhow::Result<Filter> {
+        Ok(self.shapes[self.live_shape(id)?].def.filter)
+    }
+
+    pub fn shape_set_filter(&mut self, id: ShapeId, filter: Filter) -> anyhow::Result<()> {
+        let s = self.live_shape(id)?;
+        self.shapes[s].def.filter = filter;
+        self.rewrite_shape(s)
+    }
+
+    pub fn shape_set_surface_material(
+        &mut self,
+        id: ShapeId,
+        material: SurfaceMaterial,
+    ) -> anyhow::Result<()> {
+        material.validate()?;
+        let s = self.live_shape(id)?;
+        self.shapes[s].def.material = material;
+        self.rewrite_shape(s)
     }
 
     // ----- joints ----------------------------------------------------------
 
     pub fn create_joint(&mut self, def: &JointDef) -> anyhow::Result<JointId> {
-        self.dirty = true;
-        let a = self.live_body(def.body_a)?;
-        let b = self.live_body(def.body_b)?;
+        let (ida, idb) = def.bodies();
+        let a = self.live_body(ida)?;
+        let b = self.live_body(idb)?;
+        let mut desc = def.desc()?;
         anyhow::ensure!(
             self.sim.joint_count() < self.sim.capacity().max_joints
                 || self.joints.iter().any(|j| !j.alive),
             "WorldCapacity::max_joints reached"
         );
-        let mut desc = def.desc;
+        self.dirty = true;
         desc.body_a = a as u32;
         desc.body_b = b as u32;
+        desc.frame_a = joint_frame(self.bodies[a].frame(), desc.frame_a);
+        desc.frame_b = joint_frame(self.bodies[b].frame(), desc.frame_b);
         let index = self.sim.add_joint_desc(&desc);
         let i = index as usize;
         if self.joints.len() <= i {
-            self.joints.resize(
-                i + 1,
-                JointSlot {
-                    generation: 1,
-                    alive: false,
-                    bodies: [0, 0],
-                },
-            );
+            let empty = JointSlot {
+                generation: 1,
+                alive: false,
+                bodies: [0, 0],
+                user_data: 0,
+            };
+            self.joints.resize(i + 1, empty);
         }
         let slot = &mut self.joints[i];
         debug_assert!(!slot.alive, "the sim reused a live joint slot");
         slot.alive = true;
         slot.bodies = [a as u32, b as u32];
+        slot.user_data = def.user_data();
         let id = JointId::new(index, slot.generation);
         self.bodies[a].joints.push(index);
         if b != a {
@@ -500,10 +871,10 @@ impl World {
         Ok(id)
     }
 
-    /// Remove a joint (broken or not): the bodies collide again if it kept them apart.
-    pub fn remove_joint(&mut self, id: JointId) -> anyhow::Result<()> {
-        self.dirty = true;
+    /// Destroy a joint, broken or not (Box3D `b3DestroyJoint`).
+    pub fn destroy_joint(&mut self, id: JointId) -> anyhow::Result<()> {
         let i = self.live_joint(id)?;
+        self.dirty = true;
         let [a, b] = self.joints[i].bodies;
         for body in [a, b] {
             self.bodies[body as usize].joints.retain(|&j| j != i as u32);
@@ -512,26 +883,29 @@ impl World {
         Ok(())
     }
 
-    pub fn is_joint_valid(&self, id: JointId) -> bool {
+    pub fn joint_is_valid(&self, id: JointId) -> bool {
         self.live_joint(id).is_ok()
     }
 
-    /// Set a drive's target velocity and position in place.
-    pub fn set_joint_drive(
+    pub fn joint_user_data(&self, id: JointId) -> anyhow::Result<u64> {
+        Ok(self.joints[self.live_joint(id)?].user_data)
+    }
+
+    /// Change a joint's drive (motor speed, spring target) in place.
+    pub fn joint_set_drive(
         &mut self,
         id: JointId,
         velocity: f32,
         target: f32,
     ) -> anyhow::Result<()> {
-        self.dirty = true;
         let i = self.live_joint(id)?;
+        self.dirty = true;
         self.sim.set_joint_drive(i as u32, velocity, target);
         Ok(())
     }
 
-    // ----- vehicles and soft bodies ---------------------------------------
+    // ----- vehicles and soft bodies (Rubble) -------------------------------
 
-    /// A raycast vehicle (chassis, wheels, breakable parts) at a chassis pose.
     pub fn add_vehicle(
         &mut self,
         desc: &VehicleDesc,
@@ -558,7 +932,6 @@ impl World {
         self.sim.vehicle_state(vehicle)
     }
 
-    /// A soft-body vehicle (needs `WorldConfig::soft`).
     pub fn add_soft_vehicle(
         &mut self,
         desc: &SoftVehicleDesc,
@@ -576,7 +949,7 @@ impl World {
         Ok(h)
     }
 
-    /// The body handle of a slot a vehicle or soft body owns (chassis, wheels).
+    /// The handle of a body a vehicle or soft body owns (chassis, wheels).
     pub fn owned_body(&self, index: u32) -> Option<BodyId> {
         let b = self.bodies.get(index as usize)?;
         (b.alive && b.owner == Owner::Vehicle).then(|| BodyId::new(index, b.generation))
@@ -584,14 +957,19 @@ impl World {
 
     // ----- queries ---------------------------------------------------------
 
-    /// Batched ray casts (blocking; directions need not be normalised). Each hit
-    /// carries the body it struck.
-    pub fn raycast(&mut self, rays: &[Ray]) -> Vec<Option<RayHit>> {
-        let rays: Vec<Ray> = rays
+    /// Batched ray casts, the closest hit of each (blocking). Asynchronous
+    /// batched queries are planned (P5).
+    pub fn cast_ray_blocking(&mut self, rays: &[RayInput]) -> Vec<Option<RayResult>> {
+        let rays: Vec<engine_vehicle::Ray> = rays
             .iter()
-            .map(|r| Ray {
-                dir: Vec3::from(r.dir).normalize_or_zero().to_array(),
-                ..*r
+            .map(|r| {
+                let t = Vec3::from(r.translation);
+                engine_vehicle::Ray {
+                    origin: r.origin,
+                    dir: t.normalize_or_zero().to_array(),
+                    max_dist: t.length(),
+                    exclude_body: r.ignore_body.map(|b| b.index()),
+                }
             })
             .collect();
         let hits = self.sim.raycast_batch(&rays);
@@ -600,7 +978,17 @@ impl World {
                 let h = hit?;
                 let body = self.sim.collider_body(h.collider)?;
                 let slot = self.bodies.get(body as usize)?;
-                slot.alive.then(|| RayHit {
+                if !slot.alive {
+                    return None;
+                }
+                let shape = match self.collider_shape.get(h.collider as usize) {
+                    Some(&s) if s != u32::MAX => {
+                        ShapeId::new(s, self.shapes[s as usize].generation)
+                    }
+                    _ => ShapeId::NULL,
+                };
+                Some(RayResult {
+                    shape,
                     body: BodyId::new(body, slot.generation),
                     point: h.point,
                     normal: h.normal,
@@ -612,9 +1000,9 @@ impl World {
 
     // ----- stepping --------------------------------------------------------
 
-    /// Advance one fixed step. Queued commands apply first. Never waits on a
-    /// readback (unless every readback slot is in flight and
-    /// `Backpressure::Block`); collect results with [`World::poll`].
+    /// Advance one fixed step (queued commands first). Never waits on a
+    /// readback unless every readback slot is in flight and
+    /// `Backpressure::Block`; collect results with [`World::poll`].
     pub fn step(&mut self) -> anyhow::Result<()> {
         let step = self.step;
         if std::mem::take(&mut self.dirty) {
@@ -639,17 +1027,19 @@ impl World {
                 let slot = self.readback.encode(&self.sim, &mut enc, step);
                 mapped = Some((slot, self.sim.body_count()));
             } else {
-                self.readback.pending.push_back(Pending::Empty {
+                let dropped = Pending::Empty {
                     step,
                     dropped: true,
-                });
+                };
+                self.readback.pending.push_back(dropped);
             }
             self.newest_ran = Some(step);
         } else {
-            self.readback.pending.push_back(Pending::Empty {
+            let skipped = Pending::Empty {
                 step,
                 dropped: false,
-            });
+            };
+            self.readback.pending.push_back(skipped);
         }
         self.sim.queue().submit([enc.finish()]);
         if let Some((slot, bodies)) = mapped {
@@ -661,7 +1051,7 @@ impl World {
     }
 
     /// The frames of every step whose results are ready, oldest first. Never
-    /// blocks. A capacity overflow in any step is returned as an error.
+    /// blocks. A capacity overflow in any step is an error.
     pub fn poll(&mut self) -> anyhow::Result<Vec<Frame>> {
         let _ = self.sim.device().poll(wgpu::PollType::Poll);
         self.collect(false)
@@ -672,27 +1062,35 @@ impl World {
         self.collect(true)
     }
 
-    /// Every live body's current pose (blocking): to resynchronise after a
-    /// dropped frame, or to initialise a renderer.
-    pub fn read_poses(&mut self) -> Vec<(BodyId, Pose)> {
-        self.poll_blocking().ok();
+    /// Step, wait, and return this step's frame (Box3D-style immediacy for
+    /// tools, tests and simple hosts). Earlier unpolled frames are kept for
+    /// the next `poll`.
+    pub fn step_sync(&mut self) -> anyhow::Result<Frame> {
+        self.step()?;
+        let mut frames = self.poll_blocking()?;
+        let last = frames.pop().expect("the step's frame");
+        self.ready_frames = frames;
+        Ok(last)
+    }
+
+    /// Every live body's current origin pose (blocking): to resynchronise after
+    /// a dropped frame, or to initialise a renderer.
+    pub fn read_transforms(&mut self) -> anyhow::Result<Vec<(BodyId, Transform)>> {
+        let held = self.poll_blocking()?;
+        self.ready_frames.extend(held);
         let records = self.sim.read_poses(0, self.sim.body_count());
-        records
+        Ok(records
             .iter()
             .enumerate()
             .filter_map(|(i, r)| {
                 let slot = self.bodies.get(i)?;
                 slot.alive.then(|| {
-                    (
-                        BodyId::new(i as u32, slot.generation),
-                        Pose {
-                            position: r.position,
-                            rotation: r.rotation,
-                        },
-                    )
+                    let solver = Transform::new(r.position, r.rotation);
+                    let id = BodyId::new(i as u32, slot.generation);
+                    (id, slot.frame().to_origin(solver))
                 })
             })
-            .collect()
+            .collect())
     }
 
     // ----- internals -------------------------------------------------------
@@ -724,7 +1122,6 @@ impl World {
     }
 
     fn wait_oldest(&mut self) -> anyhow::Result<()> {
-        // Frames read here are delivered by the next poll, in order.
         let mut held = Vec::new();
         while !self.readback.has_free() {
             let Some(front) = self.readback.pending.pop_front() else {
@@ -748,9 +1145,9 @@ impl World {
 
     fn frame(&mut self, step: u64, raw: readback::Readback) -> anyhow::Result<Frame> {
         let c = raw.counters;
-        // Counters describe the world as it is now when they are the newest step's,
-        // or when nothing was awake and nothing was written since: then every
-        // later step left it unchanged, and the sim may skip asleep steps.
+        // Counters describe the world as it is now when they are the newest
+        // step's, or when nothing was awake and nothing was written since:
+        // every later step left it unchanged, so the sim may skip asleep steps.
         let quiet_since = self.last_input_step.is_none_or(|s| s <= step);
         if self.newest_ran == Some(step) || (c.awake_count == 0 && quiet_since) {
             self.sim
@@ -764,62 +1161,71 @@ impl World {
             );
             self.sim.set_plan_hints(c.contact_count, c.color_count);
         }
+        self.last_counters = Some(c);
         let ring = self.sim.ring_events(&raw.ring);
-        let mut events = Vec::new();
+        let mut destruction = Vec::new();
         for b in ring.joint_breaks {
             if let Some(slot) = self.joints.get(b.joint as usize) {
-                events.push(Event::JointBroke {
+                destruction.push(DestructionEvent::JointBroke {
                     joint: JointId::new(b.joint, slot.generation),
                     force: b.force,
                     torque: b.torque,
+                    user_data: slot.user_data,
                 });
             }
         }
-        events.extend(ring.mount_breaks.into_iter().map(Event::MountBroke));
-        events.extend(ring.soft.breaks.into_iter().map(Event::BeamBroke));
-        events.extend(ring.soft.pieces.into_iter().map(Event::PieceDetached));
+        destruction.extend(
+            ring.mount_breaks
+                .into_iter()
+                .map(DestructionEvent::MountBroke),
+        );
+        destruction.extend(
+            ring.soft
+                .breaks
+                .into_iter()
+                .map(DestructionEvent::BeamBroke),
+        );
+        destruction.extend(
+            ring.soft
+                .pieces
+                .into_iter()
+                .map(DestructionEvent::PieceDetached),
+        );
         let mut records = raw.moved;
         records.sort_by_key(|r| r.body());
-        let mut moved = Vec::with_capacity(records.len());
+        let mut moves = Vec::with_capacity(records.len());
         for r in &records {
             let i = r.body() as usize;
-            let Some(slot) = self.bodies.get(i) else {
+            let Some(slot) = self.bodies.get_mut(i) else {
                 continue;
             };
             if !slot.alive {
                 continue;
             }
-            let body = BodyId::new(r.body(), slot.generation);
-            let pose = Pose {
-                position: r.position,
-                rotation: r.rotation,
-            };
-            let previous = if r.first() { None } else { self.last_pose[i] };
-            self.last_pose[i] = Some(pose);
+            let solver = Transform::new(r.position, r.rotation);
+            let transform = slot.frame_at(step).to_origin(solver);
+            let previous = if r.first() { None } else { slot.last_transform };
+            slot.last_transform = Some(transform);
             if r.slept() {
-                events.push(Event::BodySlept {
-                    body,
-                    user_data: slot.user_data,
-                });
+                slot.last_asleep = true;
             }
             if r.woke() {
-                events.push(Event::BodyWoke {
-                    body,
-                    user_data: slot.user_data,
-                });
+                slot.last_asleep = false;
             }
-            moved.push(MovedBody {
-                body,
-                pose,
+            moves.push(BodyMoveEvent {
+                body: BodyId::new(r.body(), slot.generation),
+                transform,
                 previous,
+                fell_asleep: r.slept(),
+                woke: r.woke(),
                 user_data: slot.user_data,
             });
         }
         Ok(Frame {
             step,
             ran: true,
-            moved,
-            events,
+            body_events: BodyEvents { moves },
+            destruction_events: destruction,
             lost_events: ring.lost,
             dropped: false,
             counters: Some(c),
@@ -827,8 +1233,8 @@ impl World {
     }
 
     fn command(&mut self, id: BodyId, cmd: GpuCommand) -> anyhow::Result<()> {
-        self.dirty = true;
         self.live_body(id)?;
+        self.dirty = true;
         self.sim.push_body_commands(&[cmd])
     }
 
@@ -836,7 +1242,15 @@ impl World {
         let i = id.index() as usize;
         match self.bodies.get(i) {
             Some(b) if b.alive && b.generation == id.generation() => Ok(i),
-            _ => anyhow::bail!("stale or invalid body handle {id:?}"),
+            _ => Err(StaleHandle("body", id.to_bits()).into()),
+        }
+    }
+
+    fn live_shape(&self, id: ShapeId) -> anyhow::Result<usize> {
+        let i = id.index() as usize;
+        match self.shapes.get(i) {
+            Some(s) if s.alive && s.generation == id.generation() => Ok(i),
+            _ => Err(StaleHandle("shape", id.to_bits()).into()),
         }
     }
 
@@ -844,7 +1258,7 @@ impl World {
         let i = id.index() as usize;
         match self.joints.get(i) {
             Some(j) if j.alive && j.generation == id.generation() => Ok(i),
-            _ => anyhow::bail!("stale or invalid joint handle {id:?}"),
+            _ => Err(StaleHandle("joint", id.to_bits()).into()),
         }
     }
 
@@ -855,8 +1269,18 @@ impl World {
         slot.generation = slot.generation.wrapping_add(1).max(1);
     }
 
-    /// A removed slot whose quarantine has passed.
-    fn reusable_slot(&mut self) -> Option<u32> {
+    fn release_shape(&mut self, index: u32) {
+        let s = &mut self.shapes[index as usize];
+        s.alive = false;
+        s.generation = s.generation.wrapping_add(1).max(1);
+        let (collider, body) = (s.collider, s.body);
+        self.sim.set_collider(collider, retired_collider(body));
+        self.collider_shape[collider as usize] = u32::MAX;
+        self.free_colliders.push((collider, self.step));
+        self.free_shapes.push(index);
+    }
+
+    fn reusable_body_slot(&mut self) -> Option<u32> {
         let now = self.step;
         let pos = self.free_bodies.iter().position(|&i| {
             self.bodies[i as usize]
@@ -866,104 +1290,275 @@ impl World {
         Some(self.free_bodies.swap_remove(pos))
     }
 
-    /// Register bodies a vehicle or soft body added (`before..body_count`).
+    /// Reuse a retired collider past quarantine, or append one.
+    fn place_collider(&mut self, c: Collider) -> anyhow::Result<u32> {
+        let now = self.step;
+        let reusable = self
+            .free_colliders
+            .iter()
+            .position(|&(_, t)| now >= t + QUARANTINE_STEPS);
+        if let Some(pos) = reusable {
+            let (index, _) = self.free_colliders.swap_remove(pos);
+            self.sim.set_collider(index, c);
+            return Ok(index);
+        }
+        let cap = self.sim.capacity().max_colliders;
+        anyhow::ensure!(
+            self.sim.collider_count() < cap,
+            "WorldCapacity::max_colliders ({cap}) reached"
+        );
+        Ok(self.sim.add_collider(c))
+    }
+
+    fn intern_material(&mut self, m: &SurfaceMaterial) -> anyhow::Result<u32> {
+        let key = m.key();
+        if let Some(i) = self.materials.iter().position(|k| *k == key) {
+            return Ok(i as u32);
+        }
+        anyhow::ensure!(
+            self.materials.len() < 64,
+            "more than 64 distinct surface materials (friction, restitution, contact offset)"
+        );
+        let i = self.materials.len() as u32;
+        self.materials.push(key);
+        self.sim.set_material(i, m.gpu());
+        Ok(i)
+    }
+
+    /// The GPU collider for a shape. `hull_params` reuses an existing hull's
+    /// arena entry instead of inserting the hull again.
+    fn collider(
+        &mut self,
+        body: u32,
+        frame: SolverFrame,
+        g: &Geometry,
+        density: f32,
+        material: u32,
+        hull_params: Option<[f32; 4]>,
+    ) -> anyhow::Result<Collider> {
+        let identity = [0.0, 0.0, 0.0, 1.0];
+        let (shape, params, local) = match g {
+            Geometry::Sphere { center, radius } => (
+                ShapeType::Sphere,
+                [*radius, 0.0, 0.0, *radius],
+                Transform::new(*center, identity),
+            ),
+            Geometry::Capsule {
+                center,
+                radius,
+                half_len,
+            } => (
+                ShapeType::Capsule,
+                [*radius, *half_len, 0.0, *radius + *half_len],
+                Transform::new(*center, identity),
+            ),
+            Geometry::Box { half, transform } => {
+                let h = Vec3::from(*half);
+                (ShapeType::Box, [h.x, h.y, h.z, h.length()], *transform)
+            }
+            Geometry::Hull { hull, transform } => {
+                let params = match hull_params {
+                    Some(p) => p,
+                    None => {
+                        let base = self
+                            .hulls
+                            .insert(hull)
+                            .map_err(|e| anyhow::anyhow!("hull arena: {e:?}"))?;
+                        self.sim.sync_hulls(&mut self.hulls);
+                        engine_schema::convex::convex_collider_params(
+                            base,
+                            1.0,
+                            hull.bounding_radius(),
+                        )
+                    }
+                };
+                (ShapeType::ConvexHull, params, *transform)
+            }
+        };
+        let local = frame.local_to_solver(local);
+        Ok(Collider {
+            body,
+            shape: shape as u32,
+            material,
+            generation: 0,
+            local_pos: local.position,
+            density,
+            local_rot: local.rotation,
+            params,
+        })
+    }
+
+    /// Rewrite a shape's collider (its material, filter or solver-frame pose).
+    fn rewrite_shape(&mut self, s: usize) -> anyhow::Result<()> {
+        self.dirty = true;
+        let slot = self.shapes[s].clone();
+        let frame = self.bodies[slot.body as usize].frame();
+        let material = self.intern_material(&slot.def.material)?;
+        let hull_params = match slot.geometry {
+            Geometry::Hull { .. } => Some(self.sim.collider_record(slot.collider).params),
+            _ => None,
+        };
+        let mut c = self.collider(
+            slot.body,
+            frame,
+            &slot.geometry,
+            slot.def.density,
+            material,
+            hull_params,
+        )?;
+        slot.def.filter.apply(&mut c);
+        self.sim.set_collider(slot.collider, c);
+        Ok(())
+    }
+
+    fn shapes_mass(&self, b: usize) -> Option<MassData> {
+        let parts: Vec<_> = self.bodies[b]
+            .shapes
+            .iter()
+            .map(|&s| {
+                let s = &self.shapes[s as usize];
+                defs::geometry_mass(&s.geometry, s.def.density)
+            })
+            .collect();
+        defs::combine(&parts)
+    }
+
+    /// Give body `b` new mass properties, keeping its origin where it is.
+    fn set_mass(&mut self, b: usize, mass: Option<MassData>) -> anyhow::Result<()> {
+        self.dirty = true;
+        let old = self.bodies[b].frame();
+        let next = match &mass {
+            Some(m) => {
+                let (moments, axes) = math::principal(m.tensor());
+                anyhow::ensure!(
+                    moments.min_element() >= 0.0,
+                    "inertia tensor is not positive semi-definite"
+                );
+                SolverFrame {
+                    center: Vec3::from(m.center),
+                    axes,
+                }
+            }
+            None => SolverFrame::IDENTITY,
+        };
+        let step = self.step;
+        let slot = &mut self.bodies[b];
+        slot.mass = mass;
+        if slot.frames.last().map(|f| f.0) == Some(step) {
+            slot.frames.pop();
+        }
+        if next != slot.frame() {
+            slot.frames.push((step, next));
+        }
+        if slot.written_step == step {
+            // Nothing has simulated since the upload: rewrite it.
+            let state = body_state(slot);
+            self.sim.write_bodies(b as u32, &[state]);
+        } else {
+            // A live body re-centres on the GPU, without a readback.
+            let (offset, rotation) = old.delta_to(&next);
+            let (inv_mass, inv_inertia) = inverse_mass(slot.body_type, mass.as_ref());
+            self.sim.push_body_commands(&[GpuCommand::set_mass_frame(
+                b as u32,
+                offset.to_array(),
+                rotation.to_array(),
+                inv_inertia,
+                inv_mass,
+            )])?;
+        }
+        if next != old {
+            for s in self.bodies[b].shapes.clone() {
+                self.rewrite_shape(s as usize)?;
+            }
+        }
+        Ok(())
+    }
+
     fn adopt_owned(&mut self, before: u32) {
-        for i in before..self.sim.body_count() {
-            debug_assert_eq!(i as usize, self.bodies.len());
+        for _ in before..self.sim.body_count() {
             self.bodies.push(BodySlot {
                 generation: 1,
                 alive: true,
                 owner: Owner::Vehicle,
+                body_type: BodyType::Dynamic,
                 user_data: 0,
-                colliders: Vec::new(),
+                name: None,
+                shapes: Vec::new(),
                 joints: Vec::new(),
                 removed_at: None,
+                mass: None,
+                frames: Vec::new(),
+                written_step: 0,
+                origin: Transform::IDENTITY,
+                velocity: ([0.0; 3], [0.0; 3]),
+                asleep: false,
+                last_transform: None,
+                last_asleep: false,
             });
         }
-        self.last_pose.resize(self.bodies.len(), None);
-    }
-
-    fn body_state(&self, def: &BodyDef, shapes: &[ShapeDef]) -> anyhow::Result<BodyState> {
-        let pos = Vec3::from(def.position);
-        let rot = Quat::from_array(def.rotation).normalize();
-        let mut b = match def.kind {
-            BodyKind::Static => {
-                let mut s = BodyState::static_plane_support();
-                s.position = pos.to_array();
-                s.orientation = rot.to_array();
-                s
-            }
-            BodyKind::Dynamic => {
-                let (mass, inertia) = match def.mass {
-                    MassSpec::Explicit { mass, inertia } => (mass, Vec3::from(inertia)),
-                    MassSpec::FromShapes => defs::shapes_mass(shapes)?,
-                    MassSpec::Mass(m) => {
-                        let (m0, i0) = defs::shapes_mass(shapes)?;
-                        (m, i0 * (m / m0))
-                    }
-                };
-                anyhow::ensure!(mass > 0.0, "a dynamic body needs a positive mass");
-                BodyState::dynamic(pos, rot, mass, inertia)
-            }
-        };
-        b.initial_pos = b.position;
-        b.initial_rot = b.orientation;
-        b.linear_vel = def.linear_velocity;
-        b.angular_vel = def.angular_velocity;
-        if def.asleep && def.kind == BodyKind::Dynamic {
-            b.flags = (b.flags & !(engine_schema::BodyFlags::Awake as u32))
-                | engine_schema::BodyFlags::Sleeping as u32;
-        }
-        Ok(b)
-    }
-
-    fn collider(&mut self, body: u32, s: &ShapeDef) -> anyhow::Result<Collider> {
-        let (shape, params) = match &s.shape {
-            Shape::Sphere { radius } => (ShapeType::Sphere, [*radius, 0.0, 0.0, *radius]),
-            Shape::Box { half } => {
-                let h = Vec3::from(*half);
-                (ShapeType::Box, [h.x, h.y, h.z, h.length()])
-            }
-            Shape::Capsule { radius, half_len } => (
-                ShapeType::Capsule,
-                [*radius, *half_len, 0.0, *radius + *half_len],
-            ),
-            Shape::Convex(hull) => {
-                let base = self
-                    .hulls
-                    .insert(hull)
-                    .map_err(|e| anyhow::anyhow!("hull arena: {e:?}"))?;
-                self.sim.sync_hulls(&mut self.hulls);
-                (
-                    ShapeType::ConvexHull,
-                    engine_schema::convex::convex_collider_params(
-                        base,
-                        1.0,
-                        hull.bounding_radius(),
-                    ),
-                )
-            }
-        };
-        let mut c = Collider {
-            body,
-            shape: shape as u32,
-            material: u32::from(s.material.0),
-            generation: 0,
-            local_pos: s.local_position,
-            density: s.density,
-            local_rot: s.local_rotation,
-            params,
-        };
-        s.filter.apply(&mut c);
-        Ok(c)
     }
 }
 
-/// A ray hit on a body.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RayHit {
-    pub body: BodyId,
-    pub point: [f32; 3],
-    pub normal: [f32; 3],
-    pub distance: f32,
+fn wake_flag(cmd: GpuCommand, wake: bool) -> GpuCommand {
+    if wake {
+        cmd
+    } else {
+        cmd.without_wake()
+    }
+}
+
+/// Inverse mass and inverse principal inertia for the GPU body record.
+fn inverse_mass(body_type: BodyType, mass: Option<&MassData>) -> (f32, [f32; 3]) {
+    if body_type != BodyType::Dynamic {
+        return (0.0, [0.0; 3]);
+    }
+    let (m, moments) = match mass {
+        Some(md) => (md.mass, math::principal(md.tensor()).0),
+        None => (1.0, Vec3::ONE),
+    };
+    let inv = |x: f32| if x > 0.0 { 1.0 / x } else { 0.0 };
+    (inv(m), [inv(moments.x), inv(moments.y), inv(moments.z)])
+}
+
+/// The GPU record for a body's upload.
+fn body_state(slot: &BodySlot) -> BodyState {
+    let solver = slot.frame().to_solver(slot.origin);
+    let mut b = match slot.body_type {
+        BodyType::Dynamic => {
+            let (mass, inertia) = match &slot.mass {
+                Some(m) => (m.mass, math::principal(m.tensor()).0),
+                None => (1.0, Vec3::ONE),
+            };
+            BodyState::dynamic(
+                Vec3::from(solver.position),
+                Quat::from_array(solver.rotation),
+                mass,
+                inertia,
+            )
+        }
+        _ => {
+            let mut s = BodyState::static_plane_support();
+            s.position = solver.position;
+            s.orientation = solver.rotation;
+            s
+        }
+    };
+    b.initial_pos = b.position;
+    b.initial_rot = b.orientation;
+    b.linear_vel = slot.velocity.0;
+    b.angular_vel = slot.velocity.1;
+    if slot.asleep {
+        b.flags = (b.flags & !(engine_schema::BodyFlags::Awake as u32))
+            | engine_schema::BodyFlags::Sleeping as u32;
+    }
+    b
+}
+
+fn joint_frame(frame: SolverFrame, f: JointFrame) -> JointFrame {
+    let local = Transform::new(f.anchor.to_array(), f.rot.to_array());
+    let t = frame.local_to_solver(local);
+    JointFrame {
+        anchor: Vec3::from(t.position),
+        rot: Quat::from_array(t.rotation),
+    }
 }

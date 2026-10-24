@@ -6,12 +6,15 @@
 use super::*;
 use engine_schema::commands::{CommandType, GpuCommand, CMD_RUN_MEMBER};
 
-const BODY_COMMANDS: [u32; 5] = [
+const BODY_COMMANDS: [u32; 8] = [
     CommandType::WakeBody as u32,
     CommandType::TeleportBody as u32,
     CommandType::SetVelocity as u32,
     CommandType::AttachForce as u32,
     CommandType::ApplyImpulse as u32,
+    CommandType::AddForceAt as u32,
+    CommandType::AngularImpulse as u32,
+    CommandType::SetMassFrame as u32,
 ];
 
 /// Every GPU buffer and the host mirror of a [`WgpuSim`] at one instant
@@ -148,6 +151,12 @@ impl WgpuSim {
             );
         }
         for c in cmds {
+            if c.op == CommandType::SetMassFrame as u32 {
+                // Broadphase cell sizing reads which bodies are dynamic.
+                let b = &mut self.host_bodies[c.a as usize];
+                b.inv_mass = c.f2[3];
+                b.inv_inertia = [c.f2[0], c.f2[1], c.f2[2]];
+            }
             if c.op == CommandType::TeleportBody as u32 {
                 // The broadphase cell sizing reads host poses.
                 let b = &mut self.host_bodies[c.a as usize];
@@ -159,6 +168,11 @@ impl WgpuSim {
         self.command_count = self.pending_commands.len() as u32;
         self.manifolds_valid = false;
         Ok(())
+    }
+
+    /// Collider `id` as last written (host mirror).
+    pub fn collider_record(&self, id: u32) -> Collider {
+        self.host_cols[id as usize]
     }
 
     /// The body collider `id` belongs to (host mirror).

@@ -148,6 +148,8 @@ void applyCommandRun(uint first, uint n, uint body, float dt)
     for (uint k = 0u; k < n; k++)
     {
         GpuCommand c = gCommands[first + k];
+        // Box3D's `wake = false`: a sleeping body ignores the command.
+        if ((c.b & CMD_NO_WAKE) != 0u && (b.flags & BODY_SLEEPING) != 0u) continue;
         if (c.op == CMD_WAKE_BODY)
         {
             wakeBody(b);
@@ -160,14 +162,14 @@ void applyCommandRun(uint first, uint n, uint body, float dt)
         }
         else if (c.op == CMD_SET_VELOCITY)
         {
-            b.linearVel = c.f0.xyz;
-            b.angularVel = c.f1.xyz;
+            if ((c.b & CMD_ANGULAR_ONLY) == 0u) b.linearVel = c.f0.xyz;
+            if ((c.b & CMD_LINEAR_ONLY) == 0u) b.angularVel = c.f1.xyz;
             wakeBody(b);
         }
         else if (c.op == CMD_APPLY_IMPULSE && b.invMass > 0.0)
         {
             float3 j = c.f0.xyz;
-            float3 r = c.f1.xyz - b.position;
+            float3 r = (c.b & CMD_AT_CENTER) != 0u ? float3(0.0, 0.0, 0.0) : c.f1.xyz - b.position;
             b.linearVel = b.linearVel + j * b.invMass;
             b.angularVel = b.angularVel + invInertiaWorld(b, cross(r, j));
             wakeBody(b);
@@ -177,6 +179,31 @@ void applyCommandRun(uint first, uint n, uint body, float dt)
             b.linearVel = b.linearVel + c.f0.xyz * (b.invMass * dt);
             b.angularVel = b.angularVel + invInertiaWorld(b, c.f1.xyz * dt);
             wakeBody(b);
+        }
+        else if (c.op == CMD_ADD_FORCE_AT && b.invMass > 0.0)
+        {
+            float3 f = c.f0.xyz;
+            b.linearVel = b.linearVel + f * (b.invMass * dt);
+            b.angularVel = b.angularVel + invInertiaWorld(b, cross(c.f1.xyz - b.position, f) * dt);
+            wakeBody(b);
+        }
+        else if (c.op == CMD_ANGULAR_IMPULSE && b.invMass > 0.0)
+        {
+            b.angularVel = b.angularVel + invInertiaWorld(b, c.f0.xyz);
+            wakeBody(b);
+        }
+        else if (c.op == CMD_SET_MASS_FRAME)
+        {
+            // The body origin stays put: the solver pose moves to the new
+            // centre and principal axes; the centre's velocity picks up w x d.
+            float3 d = quatRotate(b.orientation, c.f0.xyz);
+            b.position = b.position + d;
+            b.linearVel = b.linearVel + cross(b.angularVel, d);
+            b.orientation = quatNormalize(quatMul(b.orientation, c.f1));
+            b.invInertia = c.f2.xyz;
+            b.invMass = c.f2.w;
+            b.initialPos = b.position;
+            b.initialRot = b.orientation;
         }
     }
     gBodies[body] = b;

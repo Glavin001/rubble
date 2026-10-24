@@ -21,7 +21,22 @@ pub enum CommandType {
     AttachForce = 11,
     /// Impulse `f0` (N s) at world point `f1`.
     ApplyImpulse = 12,
+    /// Force `f0` (N) at world point `f1`, for one step.
+    AddForceAt = 13,
+    /// Angular impulse `f0` (N m s).
+    AngularImpulse = 14,
+    /// Move the solver frame (centre of mass, principal axes) and set the mass.
+    SetMassFrame = 15,
 }
+
+/// `GpuCommand::b` bit: a sleeping body ignores the command (Box3D `wake = false`).
+pub const CMD_NO_WAKE: u32 = 1;
+/// `GpuCommand::b` bit on `ApplyImpulse`: through the centre of mass.
+pub const CMD_AT_CENTER: u32 = 2;
+/// `GpuCommand::b` bit on `SetVelocity`: set the linear part only.
+pub const CMD_LINEAR_ONLY: u32 = 4;
+/// `GpuCommand::b` bit on `SetVelocity`: set the angular part only.
+pub const CMD_ANGULAR_ONLY: u32 = 8;
 
 /// `GpuCommand::c` of a command applied by the head of its body's run (the
 /// head carries the run length; 0 is a lone command, one thread each).
@@ -93,6 +108,81 @@ impl GpuCommand {
             f1: [torque[0], torque[1], torque[2], 0.0],
             ..Self::zeroed()
         }
+    }
+
+    /// Set the linear velocity, keeping the angular.
+    pub fn set_linear_velocity(body: u32, v: [f32; 3]) -> Self {
+        Self {
+            b: CMD_LINEAR_ONLY,
+            ..Self::set_velocity(body, v, [0.0; 3])
+        }
+    }
+
+    /// Set the angular velocity, keeping the linear.
+    pub fn set_angular_velocity(body: u32, w: [f32; 3]) -> Self {
+        Self {
+            b: CMD_ANGULAR_ONLY,
+            ..Self::set_velocity(body, [0.0; 3], w)
+        }
+    }
+
+    /// Force (N) at world `point` for the next step only.
+    pub fn add_force_at(body: u32, force: [f32; 3], point: [f32; 3]) -> Self {
+        Self {
+            op: CommandType::AddForceAt as u32,
+            a: body,
+            f0: [force[0], force[1], force[2], 0.0],
+            f1: [point[0], point[1], point[2], 0.0],
+            ..Self::zeroed()
+        }
+    }
+
+    /// Impulse `j` (N s) through the centre of mass.
+    pub fn apply_impulse_at_center(body: u32, j: [f32; 3]) -> Self {
+        Self {
+            op: CommandType::ApplyImpulse as u32,
+            a: body,
+            b: CMD_AT_CENTER,
+            f0: [j[0], j[1], j[2], 0.0],
+            ..Self::zeroed()
+        }
+    }
+
+    /// Angular impulse (N m s): dw = I_world^-1 L.
+    pub fn angular_impulse(body: u32, l: [f32; 3]) -> Self {
+        Self {
+            op: CommandType::AngularImpulse as u32,
+            a: body,
+            f0: [l[0], l[1], l[2], 0.0],
+            ..Self::zeroed()
+        }
+    }
+
+    /// Re-centre a body on new mass properties without moving its origin:
+    /// `offset` is the new centre in the old body frame, `rotation` the new
+    /// principal axes relative to the old, then the inverse principal inertia
+    /// and inverse mass.
+    pub fn set_mass_frame(
+        body: u32,
+        offset: [f32; 3],
+        rotation: [f32; 4],
+        inv_inertia: [f32; 3],
+        inv_mass: f32,
+    ) -> Self {
+        Self {
+            op: CommandType::SetMassFrame as u32,
+            a: body,
+            f0: [offset[0], offset[1], offset[2], 0.0],
+            f1: rotation,
+            f2: [inv_inertia[0], inv_inertia[1], inv_inertia[2], inv_mass],
+            ..Self::zeroed()
+        }
+    }
+
+    /// This command, ignored by a sleeping body instead of waking it.
+    pub fn without_wake(mut self) -> Self {
+        self.b |= CMD_NO_WAKE;
+        self
     }
 
     pub fn reparent(

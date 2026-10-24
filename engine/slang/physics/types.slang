@@ -234,6 +234,13 @@ public static const uint CMD_DESTROY_JOINT = 10u;
 public static const uint CMD_ADD_FORCE = 11u;
 public static const uint CMD_APPLY_IMPULSE = 12u;
 public static const uint CMD_RUN_MEMBER = 0xFFFFFFFFu;
+public static const uint CMD_ADD_FORCE_AT = 13u;
+public static const uint CMD_ANGULAR_IMPULSE = 14u;
+public static const uint CMD_SET_MASS_FRAME = 15u;
+public static const uint CMD_NO_WAKE = 1u;
+public static const uint CMD_AT_CENTER = 2u;
+public static const uint CMD_LINEAR_ONLY = 4u;
+public static const uint CMD_ANGULAR_ONLY = 8u;
 
 public struct Aabb
 {
