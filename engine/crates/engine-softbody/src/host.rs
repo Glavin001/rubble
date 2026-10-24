@@ -40,7 +40,9 @@ pub struct SoftEntry {
     pub group: i16,
     pub core: Option<(VehicleHandle, u32)>,
     pub core_joints: std::ops::Range<u32>,
-    /// Per rigid part (`desc.rigid_parts`): its body and its joints.
+    /// Per rigid part (`desc.rigid_parts`): its body and its joints to its nodes
+    /// (one per `attach`). In rigid mode an attached part rides the core like the
+    /// particles (`soft_mode`), its joints idle.
     pub rigid_parts: Vec<(u32, std::ops::Range<u32>)>,
     pub desc: SoftVehicleDesc,
     pub masses: Vec<f32>,
@@ -63,6 +65,24 @@ pub struct SoftEntry {
     /// (the whole vehicle), for `soft_mode` to swap.
     pub core_soft_mass: [f32; 4],
     pub core_rigid_mass: [f32; 4],
+}
+
+impl SoftEntry {
+    /// Attachments (joints) of rigid part `part` still holding.
+    pub fn part_attached(&self, part: usize, joints: &[engine_schema::Joint]) -> usize {
+        self.rigid_parts[part]
+            .1
+            .clone()
+            .filter(|&j| joints[j as usize].flags & engine_schema::JOINT_FLAG_BROKEN == 0)
+            .count()
+    }
+
+    /// Rigid parts whose attachments have all broken (loose bodies now).
+    pub fn loose_parts(&self, joints: &[engine_schema::Joint]) -> Vec<usize> {
+        (0..self.rigid_parts.len())
+            .filter(|&k| self.part_attached(k, joints) == 0)
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -349,6 +369,18 @@ impl SoftHost {
                 );
                 total += m;
             }
+            // Bolted parts ride the core in rigid mode too.
+            for part in &desc.rigid_parts {
+                let r = cq * (place.apply(part.center()) - cpos);
+                inertia += part.inertia()
+                    + part.mass
+                        * Vec3::new(
+                            r.y * r.y + r.z * r.z,
+                            r.x * r.x + r.z * r.z,
+                            r.x * r.x + r.y * r.y,
+                        );
+                total += part.mass;
+            }
             rigid_props = Some((
                 [
                     cb.inv_mass,
@@ -367,6 +399,12 @@ impl SoftHost {
         }
 
         // Rigid parts: free bodies held to their nodes by breakable ball joints.
+        if desc.rigid_parts.len() as u32 > MAX_RIGID_PARTS {
+            return Err(format!(
+                "{} rigid parts exceed {MAX_RIGID_PARTS} per soft body",
+                desc.rigid_parts.len()
+            ));
+        }
         let mut rigid_parts = Vec::new();
         for part in &desc.rigid_parts {
             let o = part.center();
@@ -430,6 +468,21 @@ impl SoftHost {
             let start = backend.joint_count();
             backend.append_joints(&joints);
             rigid_parts.push((body, start..backend.joint_count()));
+        }
+        // Part records for soft_mode (the pose in the core frame is captured on
+        // the GPU while soft).
+        let recs: Vec<Slot> = rigid_parts
+            .iter()
+            .flat_map(|(body, j)| {
+                [
+                    [*body, j.start, j.end - j.start, 0],
+                    [0; 4],
+                    [0, 0, 0, 1.0f32.to_bits()],
+                ]
+            })
+            .collect();
+        if !recs.is_empty() {
+            backend.write_soft_slots(l.part_base + PART_STRIDE * MAX_RIGID_PARTS * s, &recs);
         }
 
         let beam_ends: Vec<(u32, u32)> = packed
@@ -504,7 +557,11 @@ impl SoftHost {
                 e.first_tri,
                 e.tris,
                 e.desc.collision_range.max(0.005).to_bits(),
-                0,
+                if e.core.is_some() {
+                    e.rigid_parts.len() as u32
+                } else {
+                    0
+                },
             ],
         ];
         backend.write_soft_slots(l.body_base + BODY_STRIDE * s, &rec);
@@ -572,7 +629,7 @@ impl SoftHost {
                 l.tri_plane_base,
                 l.body_pair_base,
             ],
-            [l.bdf_base, l.contact_list_base, 0, 0],
+            [l.bdf_base, l.contact_list_base, l.part_base, 0],
         ];
         backend.write_soft_slots(0, &header);
     }

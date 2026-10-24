@@ -125,8 +125,40 @@ How the frame graph is built:
   shape within a millimetre.
 * A cannonball into the open side tears the struck seat off its rails.
 
+It ships in rigid mode (decision s25). While it only drives, it rides its core and
+handles as the rigid buggy does. `tests/buggy_parity.rs` drives the rigid preset and
+the hybrid through one course at 240 Hz × 10:
+
+| Build | 0–15 m/s | Speed at 6 s | Step-steer yaw | Slalom vs rigid | Rest suspension |
+|---|---|---|---|---|---|
+| Rigid `dune_buggy` | 2.73 s | 23.21 m/s | 1.174 rad/s | — | 0.284 m |
+| Hybrid, rigid mode | 2.72 s | 23.21 m/s | 1.188 rad/s | 1.6 cm RMS | 0.283 m |
+| Hybrid, always soft | 3.11 s | 22.02 m/s | 1.006 rad/s | 51 cm RMS | 0.283 m |
+
+What makes rigid mode match:
+* **Core origin.** The core's body origin is the whole car's centre of mass
+  (`pack::authored_core_origin`), with the rigid preset's −0.2 m handling offset.
+* **Bolted parts.** In rigid mode they ride the core like the particles, and their mass
+  is part of the core's. A contact on one turns the car soft, and the part is a free
+  body on breakable joints again.
+
+`tests/buggy_destruction.rs` crashes it in rigid mode:
+* **Rollover** off a kicker under one side: the cage bends, the cell holds within
+  2.4 cm.
+* **T-bone** by another buggy at 50 km/h: both frames bend, the struck wheel tears off
+  each car, and neither frame passes through the other.
+* **4 m drop:** lands on the springs and bump stops with no damage.
+* **Engine strike:** a 400 kg ball into the engine tears it out and cuts the drive.
+
+`softbody_buggy.rs` runs the wall crash, the seat strike and the head-on cannonball
+in both modes.
+
 `vehicle.html?scene=buggies&build=hybrid` runs it in the browser (240 Hz, 4 steps a
-frame). `buggy-render.mjs` skins each frame tube along its node chain.
+frame; rigid mode on unless `?rigid=0`, mounts scaled by `?strength=`).
+`softbody.html?car=buggy` (the car selector) puts it through every crash scene in
+place of the procedural sedan. On the curb rollover it does not trip: its frame
+clears the 25 cm curb and its wheels climb it, as the rigid buggy's do.
+`buggy-render.mjs` skins each frame tube along its node chain.
 
 ### Step placement
 
@@ -692,7 +724,7 @@ Rigid mode (`SoftSettings::rigid_mode`, on in the demo, `?rigid=0` off) is the d
 * **Turning soft.** The `soft_mode` pass runs once per body each step, after the
   contact passes and before the solve. The body turns soft in the same step on
   either trigger:
-  * any contact edge on one of its particles;
+  * any contact edge on one of its particles or attached bolted parts;
   * its bounds nearing another soft body or an obstacle, with a margin of 0.5 m plus
     0.15 s of travel.
 * **Readback.** `WgpuSim::read_soft_rigid(h)` and `world.readSoftModes()` report

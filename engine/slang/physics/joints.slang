@@ -69,7 +69,8 @@ bool jointLinAllLocked(Joint j) { return (j.motion & 0x3Fu) == 0u && (j.flags & 
 bool jointIsBond(Joint j) { return (j.flags & JOINT_FLAG_BOND) != 0u; }
 float jointRowPenalty(Joint j, uint slot, float kStart) { return jointIsBond(j) ? jointGetPenalty(j, slot) : max(jointGetPenalty(j, slot), kStart); }
 bool jointAngAllLocked(Joint j) { return ((j.motion >> 6u) & 0x3Fu) == 0u; }
-bool jointBroken(Joint j) { return (j.flags & JOINT_FLAG_BROKEN) != 0u; }
+// Broken, or idle (JOINT_FLAG_IDLE: in the graph but switched off).
+bool jointBroken(Joint j) { return (j.flags & (JOINT_FLAG_BROKEN | JOINT_FLAG_IDLE)) != 0u; }
 
 float jointWrap(float a) { return a - JOINT_TWO_PI * round(a / JOINT_TWO_PI); }
 

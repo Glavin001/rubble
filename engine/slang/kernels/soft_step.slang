@@ -1543,8 +1543,26 @@ void softQuietReset(uint s)
     if (st.y != 0u) gSoftData[softModeSlot(s)] = asfloat(uint4(st.x, 0u, st.z, st.w));
 }
 
-// Core mass properties and core joints for a mode (soft: the core alone, joined
-// to the axle nodes; rigid: the whole vehicle, joints off).
+// Bolted part k of soft body s (layout.rs PART_STRIDE): [body, first joint,
+// joints, 0], its position and orientation in the core's frame.
+uint softPartBase() { return SU(9u).z; }
+uint softPartCount(uint s) { return softBodyRec2(s).w; }
+uint softPartSlot(uint s, uint k) { return softPartBase() + 3u * (32u * s + k); }
+
+// A bolted part still on: some joint to its nodes holds.
+bool softPartAttached(uint4 rec)
+{
+    for (uint j = rec.y; j < rec.y + rec.z; j++)
+        if ((gJoints[j].flags & JOINT_FLAG_BROKEN) == 0u) return true;
+    return false;
+}
+
+// Core mass properties and joints for a mode. Soft: the core alone, joined to
+// its frame nodes; each bolted part a free body on its node joints. Rigid: the
+// core carries the whole car (frame and attached parts), its node joints and the
+// parts' joints idle, and the parts ride it (BODY_FOLLOW, placed by soft_mode).
+// Joints switch with JOINT_FLAG_IDLE: they stay in this step's graph, so a car
+// turning soft solves them this same step.
 void softSetMode(uint s, uint core, uint4 st, bool rigid)
 {
     float4 m = SD(softBodyBase() + 6u * s + (rigid ? 5u : 4u));
@@ -1554,8 +1572,58 @@ void softSetMode(uint s, uint core, uint4 st, bool rigid)
     for (uint j = st.w; j < st.w + nj; j++)
     {
         uint f = gJoints[j].flags;
-        gJoints[j].flags = rigid ? (f | JOINT_FLAG_BROKEN) : (f & ~JOINT_FLAG_BROKEN);
+        gJoints[j].flags = rigid ? (f | JOINT_FLAG_IDLE) : (f & ~JOINT_FLAG_IDLE);
     }
+    for (uint k = 0u; k < softPartCount(s); k++)
+    {
+        uint4 rec = SU(softPartSlot(s, k));
+        // A loose part (every joint broken) stays a free body.
+        bool ride = rigid && softPartAttached(rec);
+        uint bf = gBodies[rec.x].flags;
+        gBodies[rec.x].flags = ride ? (bf | BODY_FOLLOW) : (bf & ~BODY_FOLLOW);
+        for (uint j = rec.y; j < rec.y + rec.z; j++)
+        {
+            uint f = gJoints[j].flags;
+            gJoints[j].flags = ride ? (f | JOINT_FLAG_IDLE) : (f & ~JOINT_FLAG_IDLE);
+        }
+    }
+}
+
+// Bolted parts, each step after the mode is decided: while soft, capture each
+// one's pose in the core's frame at the step start; while rigid, place it at
+// the core's predicted pose (as soft_begin places the particles). Its velocity
+// comes from that motion (extract_velocity), so it carries the core's when the
+// car turns soft.
+void softPartsFollow(uint s, uint core, bool rigid)
+{
+    BodyState c = gBodies[core];
+    for (uint k = 0u; k < softPartCount(s); k++)
+    {
+        uint slot = softPartSlot(s, k);
+        uint4 rec = SU(slot);
+        BodyState b = gBodies[rec.x];
+        if (rigid)
+        {
+            if ((b.flags & BODY_FOLLOW) == 0u) continue;
+            gBodies[rec.x].position = c.position + quatRotate(c.orientation, SD(slot + 1u).xyz);
+            gBodies[rec.x].orientation = quatNormalize(quatMul(c.orientation, SD(slot + 2u)));
+        }
+        else
+        {
+            float4 qi = quatConjugate(c.initialRot);
+            gSoftData[slot + 1u] = float4(quatRotate(qi, b.initialPos - c.initialPos), 0.0);
+            gSoftData[slot + 2u] = quatMul(qi, b.initialRot);
+        }
+    }
+}
+
+// A body's live contact edges (see softContactEdgeLive).
+bool softBodyContactLive(uint b, uint nJ)
+{
+    uint hi = SOLVE_INDEX(b + 1u);
+    for (uint e = SOLVE_INDEX(b); e < hi; e++)
+        if (SOLVE_ID(e) >= nJ && softContactEdgeLive(SOLVE_ID(e) - nJ)) return true;
+    return false;
 }
 
 // A rigid contact edge (solver edge `id`, past the joints) that can push this
@@ -1614,14 +1682,12 @@ void soft_mode(uint3 tid : SV_DispatchThreadID)
     uint4 r = softBodyRec(s);
     bool trigger = !enabled;
     uint nJ = gCounters[0].jointCount;
-    for (uint k = 0u; k < r.y && !trigger; k++)
+    for (uint k = 0u; k < r.y && !trigger; k++) trigger = softBodyContactLive(r.x + k, nJ);
+    // A blow to an attached bolted part.
+    for (uint k = 0u; k < softPartCount(s) && !trigger; k++)
     {
-        uint b = r.x + k;
-        uint hi = SOLVE_INDEX(b + 1u);
-        for (uint e = SOLVE_INDEX(b); e < hi; e++)
-        {
-            if (SOLVE_ID(e) >= nJ && softContactEdgeLive(SOLVE_ID(e) - nJ)) { trigger = true; break; }
-        }
+        uint4 rec = SU(softPartSlot(s, k));
+        if (softPartAttached(rec)) trigger = softBodyContactLive(rec.x, nJ);
     }
     if (!trigger && softContactsOn())
     {
@@ -1669,6 +1735,7 @@ void soft_mode(uint3 tid : SV_DispatchThreadID)
         softSetMode(s, core, st, true);
     }
     gSoftData[softModeSlot(s)] = asfloat(uint4(mode, quiet, st.z, st.w));
+    softPartsFollow(s, core, mode == 1u);
 }
 
 // Dual update per beam: the finite-stiffness ramp k ← min(k*, k + β|C|), and the
