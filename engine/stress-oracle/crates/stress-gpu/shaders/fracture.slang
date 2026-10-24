@@ -692,7 +692,9 @@ void fr_body_clear(uint3 id: SV_DispatchThreadID)
 //                   rows and translation, the stress frame) from its body, and its colour by
 //                   `view.mode`: 0 its material (a free body's mixed with its slot's colour),
 //                   1 its body's state (moving orange, at rest blue, static grey), 2 its body
-//                   slot's colour (stable: a split's largest piece keeps its slot);
+//                   slot's colour (stable: a split's largest piece keeps its slot), 3 its
+//                   material, untinted; the colour's alpha is its material's surface
+//                   (render.rs `material_surface`) in modes 0 and 3, else 1 (matte);
 //   fr_view_shots   one thread per shot: its sphere at its body (hidden while parked);
 //   fr_view_bonds   one thread per bond: its line between its chunks' centres, or nothing
 //                   once it broke (both ends at one point).
@@ -711,7 +713,7 @@ struct ViewParams
 
 [[vk::binding(16, 0)]] ConstantBuffer<ViewParams> view;
 // Per chunk 3 float4: (object as bits, render centre (structure frame)); its rotation
-// (structure frame); (material colour, -).
+// (structure frame); (material colour, surface (render.rs `material_surface`)).
 [[vk::binding(17, 0)]] StructuredBuffer<float4> view_chunks;
 // The renderer's objects (4 float4: 3 rows, colour) and bond-line vertices (7 floats).
 [[vk::binding(18, 0)]] RWStructuredBuffer<float4> objects;
@@ -777,6 +779,9 @@ void fr_view_chunks(uint3 id: SV_DispatchThreadID)
     float3 base = view_chunks[3 * k + 2].xyz;
     bool fixed = bodies[b].w == 0.0;
     float3 color;
+    float surface = 1.0;
+    if (view.mode == 0 || view.mode == 3)
+        surface = max(view_chunks[3 * k + 2].w, 1.0);
     if (view.mode == 1)
     {
         float speed = max(length(bodies[b + 3].xyz), length(bodies[b + 4].xyz));
@@ -784,9 +789,11 @@ void fr_view_chunks(uint3 id: SV_DispatchThreadID)
     }
     else if (view.mode == 2)
         color = slot_color(slot);
+    else if (view.mode == 3)
+        color = base;
     else
         color = fixed ? base : 0.45 * base + 0.55 * slot_color(slot);
-    write_object(asuint(v0.w), normalized(quat_mul(q, quat_of(view_chunks[3 * k + 1]))), origin + rotate(q, v0.xyz), float4(color, 1.0));
+    write_object(asuint(v0.w), normalized(quat_mul(q, quat_of(view_chunks[3 * k + 1]))), origin + rotate(q, v0.xyz), float4(color, surface));
 }
 
 [shader("compute")]
@@ -804,7 +811,8 @@ void fr_view_shots(uint3 id: SV_DispatchThreadID)
             objects[4 * o + w] = float4(0.0);
         return;
     }
-    write_object(o, rot_from_rubble(quat_of(bodies[b + 1])), from_rubble(bodies[b].xyz), float4(0.18, 0.19, 0.22, 1.0));
+    // render.rs `SHOT`: dark, metal.
+    write_object(o, rot_from_rubble(quat_of(bodies[b + 1])), from_rubble(bodies[b].xyz), float4(0.30, 0.31, 0.34, 4.0));
 }
 
 void write_line_vertex(uint v, float3 p)

@@ -3,13 +3,19 @@
 //! state: every chunk drawn as its own convex hull (or box) at the pose the solver gives it
 //! (cluster rotation, hidden rotation, chunk rotation; `World::chunk_box`), the impactors,
 //! and a ground plane.
-//! Lambert shading under a key light and a sky/ground ambient, 4x MSAA, written in WGSL
+//! Lambert shading under a sun (with shadows) and a sky/ground ambient, 4x MSAA, written in WGSL
 //! directly (no Slang). Frames are read back as RGBA (sRGB) for an overlay drawn on the
 //! host (`Overlay`) and piped into ffmpeg (`FfmpegSink`).
 //!
 //! Colours: a chunk takes its material's colour while its cluster still stands on a
 //! support; once its cluster is free (debris, a toppled piece) the colour is mixed with a
-//! palette colour hashed from the cluster id, so each fragment reads as one piece.
+//! palette colour hashed from the cluster id, so each fragment reads as one piece
+//! ([`ColorMode::Material`]), or keeps its material's ([`ColorMode::Untinted`]).
+//! Colours are authored in sRGB and shaded in linear light: a sun with a shadow map
+//! (`shadow_vs`, 3x3 PCF) over a sky and ground-bounce ambient, a filmic tone curve, haze
+//! towards the horizon and a sky gradient behind. Glass reflects the sky and lets part of
+//! what is behind it through (alpha to coverage over the 4x MSAA samples: no sorting);
+//! steel has a highlight.
 //!
 //! Views (the fracture lab's): `colors` picks what a chunk is painted by ([`ColorMode`]):
 //! the material (above), its body's state as the lab's own renderer does (moving orange, at
@@ -38,6 +44,16 @@ struct Camera {
     view_proj: mat4x4<f32>,
     eye: vec4<f32>,
     light: vec4<f32>,
+    // The sky at the horizon (the haze and the background) and at the zenith (linear).
+    horizon: vec4<f32>,
+    zenith: vec4<f32>,
+    inverse_view_proj: mat4x4<f32>,
+};
+// The sun's shadow map (fixed for a renderer): world to its clip space, and (texel (uv),
+// texel (m), depth per metre, on).
+struct Sun {
+    view_proj: mat4x4<f32>,
+    shadow: vec4<f32>,
 };
 struct Object {
     r0: vec4<f32>,
@@ -47,12 +63,15 @@ struct Object {
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(1) var<storage, read> objects: array<Object>;
+@group(0) @binding(4) var<uniform> sun: Sun;
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) world: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec4<f32>,
+    // Each object's own shade of its colour (0.9..1.1), so units of one material read apart.
+    @location(3) @interpolate(flat) shade: f32,
 };
 
 @vertex
@@ -66,9 +85,72 @@ fn vs(@location(0) pos: vec3<f32>, @location(1) normal: vec3<f32>, @location(2) 
     out.world = world;
     out.normal = n;
     out.color = o.color;
+    var h = object * 747796405u + 2891336453u;
+    h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;
+    out.shade = 0.9 + 0.2 * f32((h >> 22u) ^ h) / 4294967295.0;
     return out;
 }
 
+// The shadow map's depth pass: every object but the ground and glass (it casts none).
+@vertex
+fn shadow_vs(@location(0) pos: vec3<f32>, @location(1) normal: vec3<f32>, @location(2) object: u32) -> @builtin(position) vec4<f32> {
+    let o = objects[object];
+    let kind = u32(round(o.color.a));
+    if (object == 0u || kind == 3u) {
+        return vec4<f32>(2.0, 2.0, 2.0, 1.0);
+    }
+    let p = vec4<f32>(pos, 1.0);
+    let world = vec3<f32>(dot(o.r0, p), dot(o.r1, p), dot(o.r2, p));
+    return sun.view_proj * vec4<f32>(world, 1.0);
+}
+"#;
+
+/// The shaded pass's fragment stage (with the shadow map bound): the shared structs and
+/// vertex stages above, then this.
+const SHADE: &str = r#"
+@group(0) @binding(2) var shadow_map: texture_depth_2d;
+@group(0) @binding(3) var shadow_sampler: sampler_comparison;
+
+// The sun's light reaching `world` (1 lit, 0 in shadow): 3x3 PCF in the shadow map.
+fn sunlight(world: vec3<f32>, n: vec3<f32>) -> f32 {
+    if (sun.shadow.w < 0.5) {
+        return 1.0;
+    }
+    // Offset along the normal by about a texel, against acne on surfaces facing the sun.
+    let p = sun.view_proj * vec4<f32>(world + n * (1.5 * sun.shadow.y), 1.0);
+    let ndc = p.xyz / p.w;
+    let uv = vec2<f32>(0.5 * ndc.x + 0.5, 0.5 - 0.5 * ndc.y);
+    if (any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || ndc.z > 1.0) {
+        return 1.0;
+    }
+    var lit = 0.0;
+    for (var i = -1; i <= 1; i++) {
+        for (var j = -1; j <= 1; j++) {
+            lit += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2<f32>(f32(i), f32(j)) * sun.shadow.x, ndc.z - 0.03 * sun.shadow.z);
+        }
+    }
+    return lit / 9.0;
+}
+
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    return pow(max(c, vec3<f32>(0.0)), vec3<f32>(2.2));
+}
+
+// The sky seen along `d` (linear): the horizon colour blending to the zenith's.
+fn sky(d: vec3<f32>) -> vec3<f32> {
+    return mix(camera.horizon.rgb, camera.zenith.rgb, clamp(d.z, 0.0, 1.0));
+}
+
+// Light to the tone curve's input: a sunlit concrete face lands at about sRGB 0.75.
+const EXPOSURE: f32 = 0.8;
+
+// A filmic shoulder (Narkowicz's ACES fit): deeper shadows, highlights that roll off.
+fn tonemap(x: vec3<f32>) -> vec3<f32> {
+    return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// Colours are authored in sRGB (`material_color`); the target is sRGB, so the shading is
+// linear. color.a picks the surface: 1 matte, 2 the ground, 3 glass, 4 metal.
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
     var n = normalize(in.normal);
@@ -76,30 +158,73 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if (dot(n, to_eye) < 0.0) {
         n = -n;
     }
-    var base = in.color.rgb;
+    let kind = u32(round(in.color.a));
+    var base = srgb_to_linear(in.color.rgb);
+    if (kind == 1u || kind == 4u) {
+        base = base * in.shade;
+    }
     let dist = length(camera.eye.xyz - in.world);
     // The ground grid's screen-space widths, outside the branch (WGSL takes derivatives
     // only in uniform control flow).
     let g = in.world.xy;
     let w1 = fwidth(g);
     let w5 = fwidth(g / 5.0);
-    if (in.color.a > 1.5) {
+    if (kind == 2u) {
         // Ground: a 1 m grid with 5 m major lines, faded with distance.
         let f1 = abs(fract(g + 0.5) - 0.5) / w1;
         let l1 = 1.0 - clamp(min(f1.x, f1.y), 0.0, 1.0);
         let f5 = abs(fract(g / 5.0 + 0.5) - 0.5) / w5;
         let l5 = 1.0 - clamp(min(f5.x, f5.y), 0.0, 1.0);
         let fade = clamp(1.0 - dist / camera.light.w, 0.0, 1.0);
-        base = mix(base, base * 0.78, max(0.5 * l1, l5) * fade);
+        base = mix(base, base * 0.72, max(0.5 * l1, l5) * fade);
     }
     let l = normalize(camera.light.xyz);
-    let diffuse = max(dot(n, l), 0.0);
-    let sky = mix(vec3<f32>(0.33, 0.31, 0.29), vec3<f32>(0.52, 0.58, 0.68), 0.5 + 0.5 * n.z);
-    var c = base * (sky + vec3<f32>(1.0, 0.96, 0.88) * 0.85 * diffuse);
-    // Aerial perspective toward the sky colour.
-    let haze = clamp(dist / (2.5 * camera.light.w), 0.0, 0.6);
-    c = mix(c, vec3<f32>(0.70, 0.76, 0.84), haze * haze);
-    return vec4<f32>(c, 1.0);
+    let sun = vec3<f32>(1.0, 0.94, 0.85) * 1.8 * max(dot(n, l), 0.0) * sunlight(in.world, n);
+    // Ambient: the sky above, a warm bounce from the ground below.
+    let ambient = mix(vec3<f32>(0.20, 0.17, 0.14), vec3<f32>(0.34, 0.40, 0.50), 0.5 + 0.5 * n.z);
+    var c = base * (ambient + sun);
+    var alpha = 1.0;
+    let ndv = max(dot(n, to_eye), 0.0);
+    let h = normalize(l + to_eye);
+    if (kind == 3u) {
+        // Glass: tinted, reflecting the sky (Schlick's Fresnel) and the sun; part
+        // see-through (alpha to coverage: no sorting).
+        let fresnel = 0.06 + 0.94 * pow(1.0 - ndv, 5.0);
+        let r = reflect(-to_eye, n);
+        c = base * (0.6 * ambient + 0.4 * sun) + sky(r) * (0.25 + 0.75 * fresnel) + sun * 1.6 * pow(max(dot(n, h), 0.0), 160.0);
+        alpha = 0.55 + 0.4 * fresnel;
+    } else if (kind == 4u) {
+        // Metal: a broad tinted highlight.
+        c = c + base * sun * 1.2 * pow(max(dot(n, h), 0.0), 24.0);
+    }
+    // Aerial perspective toward the horizon: none close up, a quarter at 350 m.
+    let haze = 1.0 - exp(-max(dist - 40.0, 0.0) / (8.0 * camera.light.w));
+    c = mix(tonemap(EXPOSURE * c), camera.horizon.rgb, haze);
+    return vec4<f32>(c, alpha);
+}
+
+// The sky behind everything: one triangle over the screen at the far plane.
+struct SkyOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) ndc: vec2<f32>,
+};
+
+@vertex
+fn sky_vs(@builtin(vertex_index) vi: u32) -> SkyOut {
+    let xy = vec2<f32>(f32((vi << 1u) & 2u) * 2.0 - 1.0, f32(vi & 2u) * 2.0 - 1.0);
+    var out: SkyOut;
+    out.clip = vec4<f32>(xy, 0.9999, 1.0);
+    out.ndc = xy;
+    return out;
+}
+
+@fragment
+fn sky_fs(in: SkyOut) -> @location(0) vec4<f32> {
+    let far = camera.inverse_view_proj * vec4<f32>(in.ndc, 1.0, 1.0);
+    let d = normalize(far.xyz / far.w - camera.eye.xyz);
+    let l = normalize(camera.light.xyz);
+    let glow = vec3<f32>(1.0, 0.85, 0.65) * (0.35 * pow(max(dot(d, l), 0.0), 48.0) + 0.08 * pow(max(dot(d, l), 0.0), 4.0));
+    return vec4<f32>(sky(d) + glow, 1.0);
 }
 "#;
 
@@ -142,15 +267,29 @@ pub enum ColorMode {
     Sleep,
     /// One colour per body (cluster), kept as it breaks ([`BodyColors`]).
     Bodies,
+    /// The material's colour for every chunk, free or not (the recorded takes': debris
+    /// reads as concrete, brick or glass).
+    Untinted,
 }
 
 impl ColorMode {
-    /// 0 material, 1 sleep state, 2 bodies; anything else is material.
+    /// 0 material, 1 sleep state, 2 bodies, 3 untinted materials; anything else is material.
     pub fn from_index(i: u32) -> Self {
         match i {
             1 => Self::Sleep,
             2 => Self::Bodies,
+            3 => Self::Untinted,
             _ => Self::Material,
+        }
+    }
+
+    /// The inverse of [`Self::from_index`] (`fr_view_chunks`' `view.mode`).
+    pub fn index(self) -> u32 {
+        match self {
+            Self::Material => 0,
+            Self::Sleep => 1,
+            Self::Bodies => 2,
+            Self::Untinted => 3,
         }
     }
 }
@@ -235,6 +374,17 @@ mod tests {
         assert!(![c0, c1, c3, c4].contains(&b.color(6)));
     }
 
+    /// A pack's per-chunk materials (`glass#mass12`) take their class's colour and surface.
+    #[test]
+    fn pack_materials_take_their_class() {
+        assert_eq!(material_color("glass#mass12"), material_color("glass"));
+        assert_eq!(material_surface("glass#mass12"), 3.0);
+        assert_eq!(material_surface("steel#mass3"), 4.0);
+        assert_eq!(material_color("brick#mass0"), material_color("brick"));
+        assert_ne!(material_color("brick"), material_color("concrete"));
+        assert_eq!(material_surface("concrete#mass1"), 1.0);
+    }
+
     #[test]
     fn slot_colors_are_distinct() {
         let colors: Vec<[f32; 3]> = (0..64).map(slot_color).collect();
@@ -301,6 +451,69 @@ struct CameraUniform {
     eye: [f32; 4],
     /// Key light direction (towards the light) and, in `w`, the fade distance (m).
     light: [f32; 4],
+    /// The sky at the horizon and at the zenith (linear RGB).
+    horizon: [f32; 4],
+    zenith: [f32; 4],
+    inverse_view_proj: [[f32; 4]; 4],
+}
+
+/// The sun's shadow map: world to its clip space; (texel in uv, texel in metres, depth
+/// per metre, 1 on). Written when the renderer is made or `shadows` changes.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+struct SunUniform {
+    view_proj: [[f32; 4]; 4],
+    shadow: [f32; 4],
+}
+
+/// The sun's shadow map (texels a side).
+const SHADOW_SIZE: u32 = 2048;
+/// The direction towards the sun (Z up): from the south-east, 41 degrees up.
+const SUN: [f64; 3] = [-0.45, -0.60, 0.66];
+
+/// The inverse of a 4x4 matrix (columns; the same either way round), by cofactors.
+fn invert4(m: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    let a: [f64; 16] = std::array::from_fn(|i| m[i / 4][i % 4] as f64);
+    let mut inv = [0.0f64; 16];
+    inv[0] = a[5] * a[10] * a[15] - a[5] * a[11] * a[14] - a[9] * a[6] * a[15] + a[9] * a[7] * a[14] + a[13] * a[6] * a[11] - a[13] * a[7] * a[10];
+    inv[4] = -a[4] * a[10] * a[15] + a[4] * a[11] * a[14] + a[8] * a[6] * a[15] - a[8] * a[7] * a[14] - a[12] * a[6] * a[11] + a[12] * a[7] * a[10];
+    inv[8] = a[4] * a[9] * a[15] - a[4] * a[11] * a[13] - a[8] * a[5] * a[15] + a[8] * a[7] * a[13] + a[12] * a[5] * a[11] - a[12] * a[7] * a[9];
+    inv[12] = -a[4] * a[9] * a[14] + a[4] * a[10] * a[13] + a[8] * a[5] * a[14] - a[8] * a[6] * a[13] - a[12] * a[5] * a[10] + a[12] * a[6] * a[9];
+    inv[1] = -a[1] * a[10] * a[15] + a[1] * a[11] * a[14] + a[9] * a[2] * a[15] - a[9] * a[3] * a[14] - a[13] * a[2] * a[11] + a[13] * a[3] * a[10];
+    inv[5] = a[0] * a[10] * a[15] - a[0] * a[11] * a[14] - a[8] * a[2] * a[15] + a[8] * a[3] * a[14] + a[12] * a[2] * a[11] - a[12] * a[3] * a[10];
+    inv[9] = -a[0] * a[9] * a[15] + a[0] * a[11] * a[13] + a[8] * a[1] * a[15] - a[8] * a[3] * a[13] - a[12] * a[1] * a[11] + a[12] * a[3] * a[9];
+    inv[13] = a[0] * a[9] * a[14] - a[0] * a[10] * a[13] - a[8] * a[1] * a[14] + a[8] * a[2] * a[13] + a[12] * a[1] * a[10] - a[12] * a[2] * a[9];
+    inv[2] = a[1] * a[6] * a[15] - a[1] * a[7] * a[14] - a[5] * a[2] * a[15] + a[5] * a[3] * a[14] + a[13] * a[2] * a[7] - a[13] * a[3] * a[6];
+    inv[6] = -a[0] * a[6] * a[15] + a[0] * a[7] * a[14] + a[4] * a[2] * a[15] - a[4] * a[3] * a[14] - a[12] * a[2] * a[7] + a[12] * a[3] * a[6];
+    inv[10] = a[0] * a[5] * a[15] - a[0] * a[7] * a[13] - a[4] * a[1] * a[15] + a[4] * a[3] * a[13] + a[12] * a[1] * a[7] - a[12] * a[3] * a[5];
+    inv[14] = -a[0] * a[5] * a[14] + a[0] * a[6] * a[13] + a[4] * a[1] * a[14] - a[4] * a[2] * a[13] - a[12] * a[1] * a[6] + a[12] * a[2] * a[5];
+    inv[3] = -a[1] * a[6] * a[11] + a[1] * a[7] * a[10] + a[5] * a[2] * a[11] - a[5] * a[3] * a[10] - a[9] * a[2] * a[7] + a[9] * a[3] * a[6];
+    inv[7] = a[0] * a[6] * a[11] - a[0] * a[7] * a[10] - a[4] * a[2] * a[11] + a[4] * a[3] * a[10] + a[8] * a[2] * a[7] - a[8] * a[3] * a[6];
+    inv[11] = -a[0] * a[5] * a[11] + a[0] * a[7] * a[9] + a[4] * a[1] * a[11] - a[4] * a[3] * a[9] - a[8] * a[1] * a[7] + a[8] * a[3] * a[5];
+    inv[15] = a[0] * a[5] * a[10] - a[0] * a[6] * a[9] - a[4] * a[1] * a[10] + a[4] * a[2] * a[9] + a[8] * a[1] * a[6] - a[8] * a[2] * a[5];
+    let det = a[0] * inv[0] + a[1] * inv[4] + a[2] * inv[8] + a[3] * inv[12];
+    let k = if det.abs() > 1e-30 { 1.0 / det } else { 0.0 };
+    std::array::from_fn(|c| std::array::from_fn(|r| (inv[4 * c + r] * k) as f32))
+}
+
+/// An orthographic view of the sphere (`centre`, `radius`) from the sun (columns, depth
+/// 0..1 over the sphere's diameter and as far again towards the sun).
+fn sun_view_proj(centre: Vec3, radius: f64) -> [[f32; 4]; 4] {
+    let l = Vec3::from_array(SUN).normalized();
+    let f = -l;
+    let s = f.cross(Vec3::new(0.0, 0.0, 1.0)).normalized();
+    let u = s.cross(f);
+    let eye = centre + l * (2.0 * radius);
+    let depth = 4.0 * radius;
+    // Rows of the orthographic view-projection: x and y over [-r, r], depth over [0, 4r]
+    // along f from the eye.
+    let rows = [
+        [s.x / radius, s.y / radius, s.z / radius, -s.dot(eye) / radius],
+        [u.x / radius, u.y / radius, u.z / radius, -u.dot(eye) / radius],
+        [f.x / depth, f.y / depth, f.z / depth, -f.dot(eye) / depth],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+    std::array::from_fn(|c| std::array::from_fn(|r| rows[r][c] as f32))
 }
 
 /// A camera orbiting `target` (Z up): `yaw` (rad, from +x), `pitch` above the horizon,
@@ -339,18 +552,46 @@ impl CameraPose {
     }
 }
 
-/// The colour of a calibrated material (stress-ref material names).
+/// A chunk's material class: its material's name without a pack's per-chunk suffix
+/// (`stress_ref::scene_pack` names a chunk material of its own mass `glass#mass12`).
+fn material_class(name: &str) -> &str {
+    name.split('#').next().unwrap_or(name)
+}
+
+/// The colour of a calibrated material (stress-ref material names, and the packs' chunk
+/// materials), sRGB: the shader converts it to linear.
 pub fn material_color(name: &str) -> [f32; 3] {
-    match name {
-        "brick" => [0.66, 0.33, 0.24],
-        "stone" => [0.74, 0.70, 0.62],
-        "glass" => [0.58, 0.74, 0.84],
-        "steel" => [0.50, 0.53, 0.58],
-        "timber" => [0.66, 0.50, 0.32],
-        "mortar" => [0.80, 0.78, 0.74],
-        _ => [0.80, 0.79, 0.76],
+    match material_class(name) {
+        "brick" => [0.52, 0.30, 0.25],
+        "stone" => [0.70, 0.66, 0.58],
+        // Tinted float glass: dark blue-green; the sky's reflection lightens it.
+        "glass" => [0.20, 0.33, 0.37],
+        "steel" => [0.36, 0.38, 0.42],
+        "aluminium" | "aluminum" => [0.70, 0.72, 0.75],
+        "timber" => [0.54, 0.42, 0.30],
+        "mortar" => [0.74, 0.72, 0.68],
+        // Foundations: concrete cast against the ground, darker.
+        "footing-anchor" | "footing" => [0.50, 0.49, 0.46],
+        // Concrete (reinforced or not) and anything else.
+        _ => [0.64, 0.62, 0.58],
     }
 }
+
+/// The surface a material is shaded as (the object colour's alpha in the shader): 1 matte,
+/// 3 glass (reflective, part see-through, casts no shadow), 4 metal (a broad highlight).
+/// 2 is the ground.
+pub fn material_surface(name: &str) -> f32 {
+    match material_class(name) {
+        "glass" => 3.0,
+        "steel" | "aluminium" | "aluminum" => 4.0,
+        _ => 1.0,
+    }
+}
+
+/// The ground's colour (sRGB): weathered asphalt and dirt.
+const GROUND: [f32; 4] = [0.35, 0.33, 0.30, 2.0];
+/// A shot's colour (sRGB) and surface (metal).
+pub const SHOT: [f32; 4] = [0.30, 0.31, 0.34, 4.0];
 
 /// A palette colour for a fragment (cluster id).
 fn fragment_color(id: u64) -> [f32; 3] {
@@ -491,10 +732,26 @@ pub struct Renderer {
     pub height: u32,
     pipeline: wgpu::RenderPipeline,
     bind: wgpu::BindGroup,
+    /// The sky behind the scene (same bind group).
+    sky_pipeline: wgpu::RenderPipeline,
+    /// The sun's shadow map: its depth pass and the map it fills.
+    shadow_pipeline: wgpu::RenderPipeline,
+    shadow_bind: wgpu::BindGroup,
+    shadow_map: wgpu::TextureView,
+    /// The sphere the shadow map covers: the structures as loaded, with a margin.
+    shadow_centre: Vec3,
+    shadow_radius: f64,
+    /// The sun's uniform ([`SunUniform`]) and what it holds.
+    sun: wgpu::Buffer,
+    sun_written: std::cell::Cell<Option<SunUniform>>,
+    /// Draw the sun's shadows (on by default).
+    pub shadows: bool,
     camera: wgpu::Buffer,
     objects: wgpu::Buffer,
     vertices: wgpu::Buffer,
     vertex_count: u32,
+    /// The ground's vertices (the first in `vertices`).
+    ground_vertices: u32,
     msaa: wgpu::TextureView,
     /// Offscreen (`new`): the resolved image and its readback, for `render`.
     resolve: Option<wgpu::Texture>,
@@ -505,9 +762,12 @@ pub struct Renderer {
     chunk_object: Vec<Vec<u32>>,
     impactor_base: u32,
     object_count: usize,
-    /// Distance (m) over which the ground grid fades.
+    /// Distance (m) over which the ground grid fades; the haze grows over eight times it.
     pub fade: f64,
+    /// The sky at the horizon (the haze and the background), linear RGB.
     pub background: [f64; 3],
+    /// The sky overhead, linear RGB.
+    pub zenith: [f64; 3],
     /// Draw the ground plane (off for a scene without ground).
     pub ground: bool,
     /// What a chunk is painted by.
@@ -550,23 +810,52 @@ impl Renderer {
         let mut chunk_object = Vec::new();
         let mut object = 1u32; // 0 is the ground
         let mut bounds = vec![[0.0f32; 4]];
-        // Ground: a large quad at z = 0 (the scene packs' grade).
-        let g = 2000.0f32;
+        // Ground: 4 km square at z = 0 (the scene packs' grade), in 50 m cells. One quad that
+        // size reached far behind the camera, and its depth, interpolated across it, came
+        // out wrong by more than a debris piece's thickness for some views: pieces lying on
+        // the ground and the street's slabs vanished under it for a frame.
+        let (g, cells) = (2000.0f32, 80usize);
         let up = [0.0, 0.0, 1.0];
-        for p in [[-g, -g], [g, -g], [g, g], [-g, -g], [g, g], [-g, g]] {
-            verts.push(Vertex { pos: [p[0], p[1], 0.0], normal: up, object: 0 });
+        let at = |k: usize| -g + 2.0 * g * k as f32 / cells as f32;
+        for i in 0..cells {
+            for j in 0..cells {
+                let (x0, x1, y0, y1) = (at(i), at(i + 1), at(j), at(j + 1));
+                for p in [[x0, y0], [x1, y0], [x1, y1], [x0, y0], [x1, y1], [x0, y1]] {
+                    verts.push(Vertex { pos: [p[0], p[1], 0.0], normal: up, object: 0 });
+                }
+            }
         }
-        for st in &solver.structures {
+        let ground_vertices = verts.len() as u32;
+        let (mut lo, mut hi) = (Vec3::new(f64::MAX, f64::MAX, f64::MAX), Vec3::new(f64::MIN, f64::MIN, f64::MIN));
+        for (s, st) in solver.structures.iter().enumerate() {
             let mut ids = Vec::with_capacity(st.chunks.len());
-            for ch in &st.chunks {
+            for (c, ch) in st.chunks.iter().enumerate() {
                 let first = verts.len();
                 chunk_mesh(ch, object, &mut verts);
-                bounds.push(mesh_bounds(&verts[first..]));
+                let b = mesh_bounds(&verts[first..]);
+                bounds.push(b);
+                let state = &solver.chunks[s][c];
+                if state.active && !state.removed {
+                    let p = solver.chunk_position(s, c);
+                    let r = b[3] as f64 + Vec3::new(b[0] as f64, b[1] as f64, b[2] as f64).norm();
+                    for k in 0..3 {
+                        lo[k] = lo[k].min(p[k] - r);
+                        hi[k] = hi[k].max(p[k] + r);
+                    }
+                }
                 ids.push(object);
                 object += 1;
             }
             chunk_object.push(ids);
         }
+        // The shadow map covers the structures as loaded and the ground round them, with
+        // room for debris to spread.
+        let (shadow_centre, shadow_radius) = if lo.x <= hi.x {
+            let c = (lo + hi) * 0.5;
+            (Vec3::new(c.x, c.y, 0.5 * hi.z.max(0.0)), (0.5 * (hi - lo).norm() * 1.35 + 4.0).max(10.0))
+        } else {
+            (Vec3::ZERO, 10.0)
+        };
         let impactor_base = object;
         bounds.resize(bounds.len() + impactors.len(), [0.0; 4]);
         for imp in impactors {
@@ -597,7 +886,14 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("render"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) });
+        let sun = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("render sun"),
+            size: std::mem::size_of::<SunUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("render"), source: wgpu::ShaderSource::Wgsl(format!("{SHADER}{SHADE}").into()) });
+        let shadow_module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("render shadow"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("render"),
             entries: &[
@@ -613,12 +909,85 @@ impl Renderer {
                     ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison), count: None },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
             ],
+        });
+        let shadow_map = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("render shadow map"),
+                size: wgpu::Extent3d { width: SHADOW_SIZE, height: SHADOW_SIZE, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth32Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&Default::default());
+        let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("render shadow"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
         });
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("render"),
             layout: &layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: camera.as_entire_binding() }, wgpu::BindGroupEntry { binding: 1, resource: objects.as_entire_binding() }],
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: camera.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: objects.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&shadow_map) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&shadow_sampler) },
+                wgpu::BindGroupEntry { binding: 4, resource: sun.as_entire_binding() },
+            ],
+        });
+        // The shadow pass binds the camera and the objects only: the map is its target.
+        let shadow_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("render shadow"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+            ],
+        });
+        let shadow_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("render shadow"),
+            layout: &shadow_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: camera.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: objects.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: sun.as_entire_binding() },
+            ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("render"), bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
         let attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Uint32];
@@ -639,8 +1008,49 @@ impl Renderer {
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
-            multisample: wgpu::MultisampleState { count: SAMPLES, ..Default::default() },
+            // Glass writes alpha below 1: its coverage of the samples (see-through, unsorted).
+            multisample: wgpu::MultisampleState { count: SAMPLES, alpha_to_coverage_enabled: true, ..Default::default() },
             fragment: Some(wgpu::FragmentState { module: &module, entry_point: Some("fs"), compilation_options: Default::default(), targets: &[Some(format.into())] }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("render sky"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState { module: &module, entry_point: Some("sky_vs"), compilation_options: Default::default(), buffers: &[] },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState { count: SAMPLES, ..Default::default() },
+            fragment: Some(wgpu::FragmentState { module: &module, entry_point: Some("sky_fs"), compilation_options: Default::default(), targets: &[Some(format.into())] }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let shadow_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("render shadow"), bind_group_layouts: &[Some(&shadow_layout)], immediate_size: 0 });
+        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("render shadow"),
+            layout: Some(&shadow_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shadow_module,
+                entry_point: Some("shadow_vs"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<Vertex>() as u64, step_mode: wgpu::VertexStepMode::Vertex, attributes: &attributes })],
+            },
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: Default::default(),
+                bias: wgpu::DepthBiasState { constant: 2, slope_scale: 1.5, clamp: 0.0 },
+            }),
+            multisample: Default::default(),
+            fragment: None,
             multiview_mask: None,
             cache: None,
         });
@@ -717,10 +1127,20 @@ impl Renderer {
             height,
             pipeline,
             bind,
+            sky_pipeline,
+            shadow_pipeline,
+            shadow_bind,
+            shadow_map,
+            shadow_centre,
+            shadow_radius,
+            sun,
+            sun_written: std::cell::Cell::new(None),
+            shadows: true,
             camera,
             objects,
             vertices,
             vertex_count: verts.len() as u32,
+            ground_vertices,
             msaa,
             resolve,
             depth,
@@ -730,7 +1150,9 @@ impl Renderer {
             impactor_base,
             object_count,
             fade: 120.0,
-            background: [0.70, 0.76, 0.84],
+            // sRGB (0.71, 0.78, 0.86) and (0.38, 0.55, 0.78).
+            background: [0.47, 0.57, 0.71],
+            zenith: [0.12, 0.26, 0.58],
             ground: true,
             colors: ColorMode::Material,
             body_colors: RefCell::default(),
@@ -810,22 +1232,56 @@ impl Renderer {
     /// object and the camera. `line_vertices`: the bond lines' vertices to draw (0: none).
     #[allow(clippy::too_many_arguments)]
     pub fn draw_resident(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, view_proj: [[f32; 4]; 4], eye: Vec3, line_vertices: u32) {
-        let ground = if self.ground { Object { rows: rows(Mat3::IDENTITY, Vec3::ZERO), color: [0.56, 0.58, 0.55, 2.0] } } else { Object { rows: [[0.0; 4]; 3], color: [0.0; 4] } };
+        let ground = if self.ground { Object { rows: rows(Mat3::IDENTITY, Vec3::ZERO), color: GROUND } } else { Object { rows: [[0.0; 4]; 3], color: [0.0; 4] } };
         gpu.queue.write_buffer(&self.objects, 0, bytemuck::bytes_of(&ground));
         self.pass(gpu, encoder, target, view_proj, eye, line_vertices.min(self.line_capacity as u32));
     }
 
     /// The camera, then the geometry and `line_vertices` of the bond lines into `target`.
     fn pass(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, view_proj: [[f32; 4]; 4], eye: Vec3, line_vertices: u32) {
-        let light = Vec3::new(-0.45, -0.55, 0.70).normalized();
+        let light = Vec3::from_array(SUN).normalized();
+        let (bg, zen) = (self.background, self.zenith);
+        let r = self.shadow_radius;
         let uniform = CameraUniform {
             view_proj,
             eye: [eye.x as f32, eye.y as f32, eye.z as f32, 1.0],
             light: [light.x as f32, light.y as f32, light.z as f32, self.fade as f32],
+            horizon: [bg[0] as f32, bg[1] as f32, bg[2] as f32, 1.0],
+            zenith: [zen[0] as f32, zen[1] as f32, zen[2] as f32, 1.0],
+            inverse_view_proj: invert4(view_proj),
         };
         gpu.queue.write_buffer(&self.camera, 0, bytemuck::bytes_of(&uniform));
+        let sun = SunUniform {
+            view_proj: sun_view_proj(self.shadow_centre, r),
+            shadow: [1.0 / SHADOW_SIZE as f32, (2.0 * r / SHADOW_SIZE as f64) as f32, (1.0 / (4.0 * r)) as f32, if self.shadows { 1.0 } else { 0.0 }],
+        };
+        if self.sun_written.get() != Some(sun) {
+            gpu.queue.write_buffer(&self.sun, 0, bytemuck::bytes_of(&sun));
+            self.sun_written.set(Some(sun));
+        }
         if let Some(fx) = &self.fx {
             fx.encode(gpu, encoder, self.fx_dt.replace(0.0));
+        }
+        {
+            // The sun's depth: every chunk and shot (not the ground, the first vertices).
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("render shadow"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadow_map,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            if self.shadows && self.vertex_count > self.ground_vertices {
+                pass.set_pipeline(&self.shadow_pipeline);
+                pass.set_bind_group(0, &self.shadow_bind, &[]);
+                pass.set_vertex_buffer(0, self.vertices.slice(..));
+                pass.draw(self.ground_vertices..self.vertex_count, 0..1);
+            }
         }
         let view = target;
         let bg = self.background;
@@ -846,8 +1302,10 @@ impl Renderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind, &[]);
+        pass.set_pipeline(&self.sky_pipeline);
+        pass.draw(0..3, 0..1);
+        pass.set_pipeline(&self.pipeline);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.draw(0..self.vertex_count, 0..1);
         if let Some(fx) = &self.fx {
@@ -865,9 +1323,11 @@ impl Renderer {
     /// into `target` (resolved from the multisampled image; the renderer's size and format).
     #[allow(clippy::too_many_arguments)]
     pub fn draw(&self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, solver: &ReferenceSolver, impactors: &[Impactor], view_proj: [[f32; 4]; 4], eye: Vec3) {
-        let mut objs = vec![Object { rows: rows(Mat3::IDENTITY, Vec3::ZERO), color: [0.56, 0.58, 0.55, 2.0] }; self.object_count];
-        if !self.ground {
-            objs[0] = Object { rows: [[0.0; 4]; 3], color: [0.0; 4] };
+        // Hidden (zero rows) unless placed below: a shot slot not yet fired draws nothing,
+        // not its sphere at the origin.
+        let mut objs = vec![Object { rows: [[0.0; 4]; 3], color: [0.0; 4] }; self.object_count];
+        if self.ground {
+            objs[0] = Object { rows: rows(Mat3::IDENTITY, Vec3::ZERO), color: GROUND };
         }
         let mut body_colors = self.body_colors.borrow_mut();
         if self.colors == ColorMode::Bodies {
@@ -890,19 +1350,22 @@ impl Renderer {
                     ColorMode::Sleep if cl.velocity.norm() > REST_SPEED || cl.angular_velocity.norm() > REST_SPEED => MOVING,
                     ColorMode::Sleep => AT_REST,
                     ColorMode::Bodies => body_colors.color(cl.id),
+                    ColorMode::Untinted => base,
                     ColorMode::Material if cl.anchored => base,
                     ColorMode::Material => {
                         let f = fragment_color(cl.id);
                         std::array::from_fn(|i| 0.45 * base[i] + 0.55 * f[i])
                     }
                 };
-                objs[k] = Object { rows: rows(r, solver.chunk_position(s, c)), color: [color[0], color[1], color[2], 1.0] };
+                // The material's surface in the material views; matte in the others.
+                let surface = if matches!(self.colors, ColorMode::Material | ColorMode::Untinted) { material_surface(&ch.material) } else { 1.0 };
+                objs[k] = Object { rows: rows(r, solver.chunk_position(s, c)), color: [color[0], color[1], color[2], surface] };
             }
         }
         for (i, imp) in impactors.iter().enumerate() {
             let k = self.impactor_base as usize + i;
             if k < self.object_count {
-                objs[k] = Object { rows: rows(imp.pose.rotation.to_mat3(), imp.pose.position), color: [0.18, 0.19, 0.22, 1.0] };
+                objs[k] = Object { rows: rows(imp.pose.rotation.to_mat3(), imp.pose.position), color: SHOT };
             }
         }
         gpu.queue.write_buffer(&self.objects, 0, bytemuck::cast_slice(&objs));

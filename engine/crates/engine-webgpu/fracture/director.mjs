@@ -14,9 +14,12 @@
 // run: it is a fresh one. The status reports whether it reached the same state.
 //
 // lab: {stressOn, stress, sim, renderer, scene, canvas, stepHz, showBonds, pause,
-//   resume, reload, setStatus, stats, shotSettings, applyShotSettings, shoot}
+//   resume, reload, setStatus, stats, counters, shotSettings, applyShotSettings, shoot}
 
 const VIDEO_HZ = 60;
+// The View menu's colour mode a take starts in: 3, the materials untinted (debris keeps its
+// material's colour; the lab's default Materials view tints free bodies by body).
+const TAKE_COLOR = 3;
 
 export function createDirector(lab) {
   // Shots since the scene loaded: {tick, origin, direction, settings}, {tick, fire: true,
@@ -53,7 +56,10 @@ export function createDirector(lab) {
     return true;
   }
   // The scene's own orbit when the take starts: `rel` / `relTo` are offsets from it
-  // ([yaw + a, pitch + b, distance × c]), so a take frames any structure.
+  // ([yaw + a, pitch + b, distance × c]), so a take frames any structure. `lift` (m, or
+  // [from, to] eased with the move) raises the orbit's target above the scene's (the
+  // lab frame's +Y): a tall subject framed above the caption; `shift` ([x, y, z], lab
+  // frame) moves it, to centre one building of a scene.
   let base = null;
   const relative = (r) => r && [base[0] + r[0], base[1] + r[1], base[2] * r[2]];
   function camera(cam, t) {
@@ -61,41 +67,78 @@ export function createDirector(lab) {
     const from = cam.orbit ?? relative(cam.rel), to = cam.to ?? relative(cam.relTo);
     const [yaw, pitch, dist] = to ? from.map((v, k) => v + (to[k] - v) * t) : from;
     const set = lab.stressOn ? lab.stress : lab.renderer;
-    set.setOrbit(yaw + (cam.spin || 0), pitch, dist, cam.target || []);
+    const lift = Array.isArray(cam.lift) ? cam.lift[0] + (cam.lift[1] - cam.lift[0]) * t : cam.lift;
+    const shift = cam.shift || [0, 0, 0];
+    const target = cam.target || ((lift !== undefined || cam.shift) && base.length >= 6 ? [base[3] + shift[0], base[4] + shift[1] + (lift || 0), base[5] + shift[2]] : []);
+    set.setOrbit(yaw + (cam.spin || 0), pitch, dist, target);
+    return [yaw + (cam.spin || 0), pitch, dist, ...target];
   }
 
   // A frame-composited JPEG (canvas + caption + stats line), PUT to the recorder.
   function compositor(opts) {
-    const canvas = lab.canvas();
-    const W = Math.min(opts.width || 1280, canvas.width), H = Math.round((W * canvas.height) / canvas.width / 2) * 2;
-    const out = new OffscreenCanvas(W, H), g = out.getContext('2d');
+    // Sized at the first frame, once the view has taken its recording size.
+    let W = 0, H = 0, out = null, g = null;
     const pending = new Set();
+    // The view alone (no caption), small, for the take check: each frame's mean absolute
+    // difference (0..255) from the last frame and from the one before (frozen or flickering
+    // frames), exact, before any encoding.
+    const probe = new OffscreenCanvas(160, 90), pg = probe.getContext('2d', { willReadFrequently: true });
+    let last = null, before = null;
+    const meanDiff = (a, b) => { if (!b) return null; let d = 0; for (let i = 0; i < a.length; i += 4) d += Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]); return d / (0.75 * a.length); };
     let n = 0;
+    // Captions or stats lines too wide for the frame (the check reports them).
+    const overflow = new Set();
+    let frameView = {};
     return {
-      async frame(caption) {
-        g.drawImage(lab.canvas(), 0, 0, W, H);
+      overflow,
+      async frame(caption, stats) {
+        const canvas = lab.canvas();
+        if (!out) {
+          W = Math.min(opts.width || 1280, canvas.width);
+          H = Math.round((W * canvas.height) / canvas.width / 2) * 2;
+          out = new OffscreenCanvas(W, H);
+          g = out.getContext('2d');
+        }
+        g.drawImage(canvas, 0, 0, W, H);
+        pg.drawImage(canvas, 0, 0, 160, 90);
+        const px = pg.getImageData(0, 0, 160, 90).data;
+        const view = { d1: meanDiff(px, last), d2: meanDiff(px, before) };
+        before = last;
+        last = px;
         if (caption !== '') {
+          // The box fits the longer of the two lines (at least 760 px), within the frame.
+          g.font = '600 22px system-ui, sans-serif';
+          const wc = g.measureText(caption).width;
+          g.font = '16px ui-monospace, monospace';
+          const ws = g.measureText(stats).width;
+          const room = W - 48;
+          if (wc > room) overflow.add(caption);
+          if (ws > room) overflow.add(stats);
           g.fillStyle = 'rgba(10,14,22,0.62)';
-          g.fillRect(12, H - 74, Math.min(W - 24, 760), 62);
+          g.fillRect(12, H - 74, Math.min(W - 24, Math.max(760, Math.ceil(Math.max(wc, ws)) + 24)), 62);
           g.fillStyle = '#fff';
           g.font = '600 22px system-ui, sans-serif';
-          g.fillText(caption, 24, H - 46);
+          g.fillText(caption, 24, H - 46, room);
           g.font = '16px ui-monospace, monospace';
-          g.fillText(lab.stats(), 24, H - 22);
+          g.fillText(stats, 24, H - 22, room);
         }
         const blob = await out.convertToBlob({ type: 'image/jpeg', quality: 0.88 });
+        frameView = view;
         const p = fetch(`${opts.upload || '/rec'}/${opts.name || 'take'}/f${String(n++).padStart(5, '0')}.jpg`, { method: 'PUT', body: blob }).then(() => pending.delete(p));
         pending.add(p);
         if (pending.size > 16) await Promise.race(pending);
       },
       async done() { await Promise.all(pending); return n; },
+      // The last frame's view differences ({d1, d2}).
+      view() { return frameView; },
     };
   }
 
   // Script segments: {n (video frames at 60 fps), slow?, caption?, cam?: {orbit: [yaw,
   // pitch, dist], to?: [yaw, pitch, dist] (eased across the segment), or rel / relTo
   // (offsets from the scene's orbit: [yaw + a, pitch + b, distance × c]), spin? (rad per
-  // frame), target?: [x, y, z]}, act?: 'fire' (the row shot; in the stress modes the ball
+  // frame), target?: [x, y, z], lift?: m or [from, to] (the scene's target raised),
+  // shift?: [x, y, z] (the scene's target moved, lab frame)}, act?: 'fire' (the row shot; in the stress modes the ball
   // along the structure's line of attack) | {shoot: [u, v]}
   // (through the viewport) | {ray: [origin, direction]} | {detonate: name} (a pack's
   // charges; '' sets off every one at its delay), view?: {bonds, color}, mass?,
@@ -104,10 +147,16 @@ export function createDirector(lab) {
     await lab.pause();
     busy = true;
     const t0 = performance.now();
+    // The take fills the window (the recorder's 16:9), not the view beside the panel.
+    const wasFull = await lab.fullFrame(true);
     const out = compositor(opts);
     base = (lab.stressOn ? lab.stress : lab.renderer).orbit;
-    let caption = '', spin = 0;
+    let caption = '', spin = 0, camAt = null;
+    // Each video frame's counters (`lab.counters()`), for the take check (record-takes --check).
+    const log = [];
     try {
+      // Takes show true material colours (View: Materials, untinted) unless a segment says otherwise.
+      lab.setView({ color: TAKE_COLOR });
       for (const seg of script) {
         if (seg.caption !== undefined) caption = seg.caption;
         if (seg.view) lab.setView(seg.view);
@@ -134,15 +183,17 @@ export function createDirector(lab) {
         }
         const n = seg.n || 0;
         for (let i = 0; i < n; i++) {
-          if (seg.cam) { camera({ ...seg.cam, spin: spin }, n > 1 ? i / (n - 1) : 1); spin += seg.cam.spin || 0; }
+          if (seg.cam) { camAt = camera({ ...seg.cam, spin: spin }, n > 1 ? i / (n - 1) : 1); spin += seg.cam.spin || 0; }
           await videoFrame(seg.slow || 1);
-          await out.frame(caption);
+          await out.frame(caption, lab.stats());
+          log.push({ ...lab.counters(), ...out.view(), cam: camAt });
         }
       }
       const frames = await out.done();
-      return { frames, seconds: (performance.now() - t0) / 1000, summary: await lab.summary() };
+      return { frames, seconds: (performance.now() - t0) / 1000, summary: await lab.summary(), log, overflow: [...out.overflow] };
     } finally {
       busy = false;
+      await lab.fullFrame(wasFull);
       lab.resume();
     }
   }

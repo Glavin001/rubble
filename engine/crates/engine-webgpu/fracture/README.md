@@ -660,9 +660,12 @@ second within 5–18 m/s (`plan::default_shot_speed`). rubble has no swept colli
 very fast, small ball can pass through thin pieces.
 
 **View.** The **View** menu picks what the pieces are coloured by: **Materials** (the
-default), **Sleep state** (awake orange, asleep blue, static grey) or **Bodies** (one colour
-per rigid body). In rubble's modes every piece is its own body, so Bodies gives each piece a
-colour. The stress modes' Bodies view follows splits (see Stress solver, View options).
+default), **Sleep state** (awake orange, asleep blue, static grey), **Bodies** (one colour
+per rigid body) or **Materials, untinted**. In rubble's modes every piece is its own body, so
+Bodies gives each piece a colour. The stress modes' Bodies view follows splits (see Stress
+solver, View options). In the stress modes, Materials tints a free body with a colour of its
+own; Materials, untinted keeps every piece its material's colour, debris too (the recorded
+takes use it).
 
 **Bond graph.** "Inspect bond graph" draws each bond as a line, hidden once the bond breaks.
 In **Breakable D6 joints** line k is the engine's joint k (every builder emits them in the
@@ -852,7 +855,26 @@ where a chunk's velocity jumps (an impact, a break, a landing). They are compute
 GPU from the poses the renderer draws (`stress-rubble` `fx.rs`, `Renderer::set_fx`) and
 advance with simulated time, so they slow down in slow motion and freeze when paused.
 It is drawing only: the physics is the same either way (the recorded takes break the same
-bonds with it on or off). Native renderers leave it off.
+bonds with it on or off). Native renderers leave it off. It is deterministic: each piece owns
+a fixed range of particle slots, so two recordings of a take decode to the same frames, dust
+and all (`record-takes.mjs --check --repeat`).
+
+**The stress modes' look** (`stress-rubble` `render.rs`, shared with the native offscreen
+`render()`): colours are authored in sRGB and shaded in linear light under a sun with a
+shadow map, a sky and ground-bounce ambient and a filmic tone curve, with haze towards the
+horizon and a sky gradient behind. Glass is tinted, reflects the sky and lets part of what is
+behind it through (alpha to coverage over the 4x MSAA samples, no sorting); steel has a
+highlight; each piece takes its own small shade of its material's colour, so the units of a
+brick wall read apart. The ground is a grid of 50 m cells: one 4 km quad came out at the wrong
+depth for some views, and pieces lying on it vanished under it for a frame.
+
+**Checking takes.** `record-takes.mjs --check` fails a take on: a frame count that disagrees
+(the script, the page, the uploads, the MP4); black or near-uniform frames; page or WebGPU
+errors; bonds broken, the physics frame or simulated time going back; a frozen frame (the
+physics and the camera moved, the view did not) or a flickering one (unlike both its
+neighbours, which match); and a caption wider than the frame. `--repeat` also records each
+take twice and fails it unless the two decode to the same frames. Takes record full-window at
+the recorder's 16:9, with the panel hidden.
 
 ### Breakable D6 joints (experimental)
 

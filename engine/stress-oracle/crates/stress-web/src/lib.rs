@@ -385,7 +385,7 @@ pub fn stress_set_physics_hz(hz: f64) {
 /// The lab's view, from the next frame drawn: the bond graph (each intact bond a line
 /// between its chunks' centres) and the colour mode (the View menu, `ColorMode::from_index`):
 /// 0 materials, 1 body state (moving orange, at rest blue, static grey: the coupled engine
-/// keeps bodies awake, so "at rest" means slow), 2 one colour per body, kept as it breaks.
+/// keeps bodies awake, so "at rest" means slow), 2 one colour per body, kept as it breaks, 3 materials untinted (debris too).
 #[wasm_bindgen]
 pub fn stress_set_view(bond_graph: bool, color_mode: u32) {
     // Only noted: a frame may hold the world across a GPU wait (JSPI) while the page calls
@@ -806,11 +806,7 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, advance: Advance) -> Result<
     let t_draw = web_time::Instant::now();
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
     let (bonds, colors) = VIEW.get();
-    let mode = match colors {
-        ColorMode::Material => 0,
-        ColorMode::Sleep => 1,
-        ColorMode::Bodies => 2,
-    };
+    let mode = colors.index();
     let lines = l.world.encode_view(gpu, &mut encoder, &l.renderer, mode, bonds);
     l.renderer.set_fx(gpu, FX.get());
     l.renderer.set_fx_dt(stepped as f64 * dt);

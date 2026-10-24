@@ -385,8 +385,18 @@ const director=createDirector({
  aim:(u,v)=>stressOn?stress.aim(u,v):renderer.aimAt(u,v),
  setView({bonds,color,fx}={}){if(bonds!==undefined)$('show-bonds').checked=!!bonds;if(fx!==undefined)$('fx').checked=!!fx;if(color!==undefined){$('view-mode').value=String(color);if(renderer)renderer.colorMode=viewMode()}applyView()},
  shotSettings,applyShotSettings(s){$('ball-mass').value=String(s.mass);$('ball-speed').value=String(s.speed);applyBallMass();applyBallSpeed()},
- stats(){if(stressOn){const st=stress.stats;return `${st.fragments??'—'} fragments · ${st.brokenBonds??0} bonds broken · ${st.bodies??'—'} bodies · ${(st.simSeconds??0).toFixed(2)} s`}
+ stats(){if(stressOn){const st=stress.stats;
+  // The GPU-resident world's counters arrive a frame or two late: none yet reads '—', not 0.
+  const known=v=>st.gpuResident&&!st.statsFrame?'—':(v??'—');
+  return `${known(st.fragments)} fragments · ${st.brokenBonds??0} bonds broken · ${known(st.bodies)} bodies · ${(st.simSeconds??0).toFixed(2)} s`}
   const c=sim.counters;return `${sim.shots} shots · ${c.awake} awake · ${c.contact} contacts · ${(sim.steps/stepHz()).toFixed(2)} s`},
+ // A recorded take's frame: the view over the whole window (the panel hidden, as collapsed)
+ // or back as it was. Returns whether it was full before.
+ async fullFrame(on){const was=document.body.classList.contains('collapsed');document.body.classList.toggle('collapsed',on);
+  await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));return was},
+ // The counters a recorded take logs per video frame (the take check: they never go back).
+ counters(){if(stressOn){const st=stress.stats;return {frames:st.frames??0,statsFrame:st.statsFrame??st.frames??0,simSeconds:st.simSeconds??0,brokenBonds:st.brokenBonds??0,fragments:st.fragments??0,bodies:st.bodies??0,chunks:st.chunks??0,lastShot:st.lastShot??null}}
+  return {frames:sim.steps,simSeconds:sim.steps/stepHz(),shots:sim.shots}},
  // What a replay must reproduce: the stress modes' counters, or every body's pose and velocity.
  async summary(){if(stressOn){const st=stress.stats;return {frames:st.frames,fragments:st.fragments,brokenBonds:st.brokenBonds,bodies:st.bodies}}
   return {steps:sim.steps,shots:sim.shots,bodies:hashFloats(await sim.snapshot())}}});

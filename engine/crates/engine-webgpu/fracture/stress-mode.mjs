@@ -63,7 +63,7 @@ export async function createStressMode(canvas,onShot=()=>{}){
   // The physics frame rate of the next load (Hz; 0 keeps the scene's).
   setPhysicsHz(hz){stress_set_physics_hz(hz)},
   // The lab's view: the bond graph, and the colour mode (0 materials, 1 body state,
-  // 2 one colour per body, kept as it breaks).
+  // 2 one colour per body, kept as it breaks, 3 materials untinted).
   setView(bonds,colorMode){stress_set_view(bonds,colorMode)},
   // Dust and chips from the fragments (render only).
   setFx(on){stress_set_fx(!!on)},

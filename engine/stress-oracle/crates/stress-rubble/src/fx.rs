@@ -8,17 +8,29 @@
 //! and skid on the ground). They draw as camera-facing quads in the renderer's pass.
 //! A frame that advances no simulated time (paused, or a slow-motion frame between
 //! physics frames) freezes them.
+//!
+//! Deterministic: each object owns a fixed range of particle slots (a ring of its own, its
+//! head kept with its last pose), so which slot a particle takes, its random numbers and
+//! the draw order follow the object's index and history, never the order GPU threads run
+//! in. Two recordings of a take give the same frames.
 
 use stress_gpu::gpu::Gpu;
 
-/// Particles alive at once (a ring: the newest replace the oldest).
+/// Particles alive at once, at least: each object gets an equal share of the slots (a ring
+/// of its own: its newest replace its oldest), and never fewer than [`MIN_SLOTS`].
 pub const PARTICLES: u32 = 1 << 16;
+/// Slots per object at least (the most one frame sheds).
+pub const MIN_SLOTS: u32 = 6;
 
 const COMMON: &str = r#"
+// render.rs `CameraUniform`.
 struct Camera {
     view_proj: mat4x4<f32>,
     eye: vec4<f32>,
     light: vec4<f32>,
+    horizon: vec4<f32>,
+    zenith: vec4<f32>,
+    inverse_view_proj: mat4x4<f32>,
 };
 struct Object {
     r0: vec4<f32>,
@@ -32,7 +44,8 @@ struct Particle {
     v: vec4<f32>,
     c: vec4<f32>,
 };
-// A chunk's centre (w: 1 once seen) and velocity at the last frame.
+// A chunk's centre (w: 1 once seen) and velocity at the last frame; v.w holds (as bits)
+// the next of its particle slots to use.
 struct Prev {
     p: vec4<f32>,
     v: vec4<f32>,
@@ -41,7 +54,8 @@ struct Params {
     dt: f32,
     objects: u32,
     seed: u32,
-    _pad: u32,
+    // Particle slots per object: object i owns [i * slots, (i + 1) * slots).
+    slots: u32,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 const N: u32 = PARTICLES_N;
@@ -53,7 +67,6 @@ const COMPUTE: &str = r#"
 @group(0) @binding(2) var<storage, read> bounds: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read_write> prev: array<Prev>;
 @group(0) @binding(4) var<storage, read_write> particles: array<Particle>;
-@group(0) @binding(5) var<storage, read_write> head: atomic<u32>;
 @group(0) @binding(6) var<uniform> params: Params;
 
 fn hash(a: u32, b: u32) -> f32 {
@@ -83,21 +96,25 @@ fn spawn(@builtin(global_invocation_id) id: vec3<u32>) {
     let q = vec4<f32>(b.xyz, 1.0);
     let c = vec3<f32>(dot(o.r0, q), dot(o.r1, q), dot(o.r2, q));
     let last = prev[i];
+    let ring = bitcast<u32>(last.v.w);
     if (last.p.w < 0.5) {
         // First seen: no velocity to compare with yet.
-        prev[i] = Prev(vec4<f32>(c, 1.0), vec4<f32>(0.0));
+        prev[i] = Prev(vec4<f32>(c, 1.0), vec4<f32>(0.0, 0.0, 0.0, bitcast<f32>(ring)));
         return;
     }
     let v = (c - last.p.xyz) / params.dt;
-    prev[i] = Prev(vec4<f32>(c, 1.0), vec4<f32>(v, 0.0));
     let dv = length(v - last.v.xyz);
     // A jump in velocity sheds; a teleport (a reload, a reset) does not.
-    if (dv < 2.0 || dv > 150.0) { return; }
-    let size = clamp(b.w, 0.1, 3.0);
-    let count = u32(clamp(dv * 0.2 * size, 1.0, 6.0));
+    var count = 0u;
+    if (dv >= 2.0 && dv <= 150.0) {
+        let size = clamp(b.w, 0.1, 3.0);
+        count = min(u32(clamp(dv * 0.2 * size, 1.0, 6.0)), params.slots);
+    }
+    prev[i] = Prev(vec4<f32>(c, 1.0), vec4<f32>(v, bitcast<f32>(ring + count)));
     let dust = mix(o.color.rgb, vec3<f32>(0.66, 0.63, 0.58), 0.65);
     for (var j = 0u; j < count; j++) {
-        let k = atomicAdd(&head, 1u) % N;
+        // This object's own slots, in turn.
+        let k = i * params.slots + (ring + j) % params.slots;
         let d = hash_dir(i, j * 13u);
         let chip = hash(i, j * 13u + 3u) < 0.35;
         var part: Particle;
@@ -175,8 +192,12 @@ fn fx_vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> Fx
     out.uv = uv;
     // Dust fades in over 0.15 s and out over its last second; chips stay solid.
     let alpha = select(0.14 * clamp(age / 0.15, 0.0, 1.0) * clamp(part.p.w, 0.0, 1.0), 1.0, chip);
-    let haze = clamp(length(camera.eye.xyz - part.p.xyz) / (2.5 * camera.light.w), 0.0, 0.6);
-    out.color = vec4<f32>(mix(part.c.rgb, vec3<f32>(0.70, 0.76, 0.84), haze * haze), alpha);
+    // Colours are sRGB (the objects'); lit as render.rs lights a surface half turned to
+    // the sun, through the same tone curve and haze, so dust and chips match the pieces.
+    let lit = pow(max(part.c.rgb, vec3<f32>(0.0)), vec3<f32>(2.2)) * select(1.2, 1.05, chip);
+    let toned = clamp((lit * (2.51 * lit + 0.03)) / (lit * (2.43 * lit + 0.59) + 0.14), vec3<f32>(0.0), vec3<f32>(1.0));
+    let haze = 1.0 - exp(-max(length(camera.eye.xyz - part.p.xyz) - 40.0, 0.0) / (8.0 * camera.light.w));
+    out.color = vec4<f32>(mix(toned, camera.horizon.rgb, haze), alpha);
     return out;
 }
 
@@ -198,7 +219,7 @@ struct Params {
     dt: f32,
     objects: u32,
     seed: u32,
-    _pad: u32,
+    slots: u32,
 }
 
 /// The particle buffers and pipelines (see the module docs).
@@ -210,6 +231,9 @@ pub(crate) struct Fx {
     draw_bind: wgpu::BindGroup,
     params: wgpu::Buffer,
     objects: u32,
+    /// Slots per object, and all of them (`objects * slots`).
+    slots: u32,
+    particles: u32,
     seed: std::cell::Cell<u32>,
 }
 
@@ -241,8 +265,10 @@ impl Fx {
             usage: wgpu::BufferUsages::STORAGE,
         });
         let prev = storage("fx prev", (bounds.len().max(1) * 32) as u64);
-        let particles = storage("fx particles", PARTICLES as u64 * 48);
-        let head = storage("fx head", 4);
+        let objects_n = (bounds.len() as u32).max(1);
+        let slots = (PARTICLES / objects_n).max(MIN_SLOTS);
+        let particle_count = (objects_n * slots).div_ceil(64) * 64;
+        let particles = storage("fx particles", particle_count as u64 * 48);
         let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("fx params"),
             size: std::mem::size_of::<Params>() as u64,
@@ -251,7 +277,7 @@ impl Fx {
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("fx"),
-            source: wgpu::ShaderSource::Wgsl(source(COMPUTE).into()),
+            source: wgpu::ShaderSource::Wgsl(source(COMPUTE, particle_count).into()),
         });
         let all =
             wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE;
@@ -278,7 +304,6 @@ impl Fx {
                 entry(2, ro, compute),
                 entry(3, rw, compute),
                 entry(4, rw, compute),
-                entry(5, rw, compute),
                 entry(6, wgpu::BufferBindingType::Uniform, compute),
             ],
         });
@@ -307,10 +332,6 @@ impl Fx {
                     resource: particles.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: head.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
                     binding: 6,
                     resource: params.as_entire_binding(),
                 },
@@ -334,7 +355,7 @@ impl Fx {
         let (spawn, update) = (pipeline("spawn"), pipeline("update"));
         let draw_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("fx draw"),
-            source: wgpu::ShaderSource::Wgsl(source(DRAW).into()),
+            source: wgpu::ShaderSource::Wgsl(source(DRAW, particle_count).into()),
         });
         let draw_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("fx draw"),
@@ -421,6 +442,8 @@ impl Fx {
             draw_bind,
             params,
             objects: bounds.len() as u32,
+            slots,
+            particles: particle_count,
             seed: std::cell::Cell::new(1),
         }
     }
@@ -440,7 +463,7 @@ impl Fx {
                 dt,
                 objects: self.objects,
                 seed,
-                _pad: 0,
+                slots: self.slots,
             }),
         );
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -451,18 +474,18 @@ impl Fx {
         pass.set_pipeline(&self.spawn);
         pass.dispatch_workgroups(self.objects.div_ceil(64).max(1), 1, 1);
         pass.set_pipeline(&self.update);
-        pass.dispatch_workgroups(PARTICLES / 64, 1, 1);
+        pass.dispatch_workgroups(self.particles / 64, 1, 1);
     }
 
     /// Draw the live particles into the renderer's pass (after the opaque geometry).
     pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_pipeline(&self.draw);
         pass.set_bind_group(0, &self.draw_bind, &[]);
-        pass.draw(0..6, 0..PARTICLES);
+        pass.draw(0..6, 0..self.particles);
     }
 }
 
 /// A shader stage's source: the shared structs, then `body`.
-fn source(body: &str) -> String {
-    format!("{COMMON}{body}").replace("PARTICLES_N", &format!("{PARTICLES}u"))
+fn source(body: &str, particles: u32) -> String {
+    format!("{COMMON}{body}").replace("PARTICLES_N", &format!("{particles}u"))
 }

@@ -310,7 +310,8 @@ struct ViewParams {
 /// What the view kernels draw from (`fracture.slang` `fr_view_*`), set once per renderer.
 pub struct ViewTables {
     /// Per chunk 3 float4: (renderer object as bits, render centre (structure frame));
-    /// rotation (structure frame, x, y, z, w); (material colour, -).
+    /// rotation (structure frame, x, y, z, w); (material colour, surface: render.rs
+    /// `material_surface`).
     pub chunks: Vec<[[f32; 4]; 3]>,
     /// The shots' engine bodies.
     pub shot_bodies: Vec<u32>,
@@ -542,7 +543,8 @@ impl GpuFracture {
 
     /// The renderer's objects (`objects`: chunks and shots) and, with `bonds`, its bond
     /// lines (`lines`, 2 vertices per bond) from the engine's bodies as they are: recorded
-    /// into `encoder` after the frame's work. `mode`: 0 materials, 1 body state, 2 bodies.
+    /// into `encoder` after the frame's work. `mode`: 0 materials, 1 body state, 2 bodies,
+    /// 3 materials untinted.
     pub fn encode_view(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, objects: &wgpu::Buffer, lines: &wgpu::Buffer, mode: u32, bonds: bool) {
         let Some(v) = self.view.as_mut() else { return };
         if v.mode != mode {

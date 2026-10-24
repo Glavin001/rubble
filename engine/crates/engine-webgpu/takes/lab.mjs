@@ -1,8 +1,9 @@
 // Fracture lab takes (record-takes.mjs), run through fracture/director.mjs `__record`.
 // Segment fields: n (video frames at 60 fps), slow (1/slow speed, lossless), caption,
-// cam ({orbit: [yaw, pitch, dist], to?, spin?, target?}), act ('fire' | {shoot: [u, v]} |
-// {ray: [origin, direction]}), view ({bonds, color}), mass / speed (the shot sliders,
-// powers of two).
+// cam ({orbit: [yaw, pitch, dist], to?, spin?, target?} or {rel, relTo?, lift?, shift?}:
+// fracture/director.mjs), act ('fire' | {shoot: [u, v]} | {ray: [origin, direction]}),
+// view ({bonds, color}: color 3, materials untinted, unless a segment says otherwise),
+// mass / speed (the shot sliders, powers of two).
 
 // The lab's page state for a take: its Scene menu key and the menus' values, then a load.
 // `preset`: the stress modes' Ball menu (stress_ref::wrecking::BALLS: 0 the 10 t ball,
@@ -25,29 +26,29 @@ const take = (state, script) => ({ page: 'fracture/index.html', setup: setup(sta
 export const LAB_TAKES = {
   // Ram Raid target (stress_ref::buildings): the 2 t car stand-in into a shopfront.
   rr_storefront_car: take({ scene: 'rr_storefront_row', bonds: 'stress', preset: 3 }, [
-    { n: 40, caption: 'Five shops in brick, glass and concrete: 1,203 bonded chunks', cam: { rel: [0.3, -0.05, 0.6], relTo: [0.2, -0.05, 0.55] } },
+    { n: 40, caption: 'Five shops in brick, glass and concrete: 1,203 bonded chunks', cam: { rel: [0.32, -0.05, 0.55], relTo: [0.22, -0.05, 0.5] } },
     { n: 1, act: 'fire', caption: 'A 2 t car stand-in at 15 m/s into a shop window' },
     { n: 30, caption: 'A 2 t car stand-in at 15 m/s into a shop window' },
-    { n: 180, slow: 2, caption: 'Half speed: the window and the stallriser go; the shop stands', cam: { rel: [0.2, -0.05, 0.55], relTo: [-0.3, 0.0, 0.6] } },
+    { n: 180, slow: 2, caption: 'Half speed: the window and the stallriser go; the shop stands', cam: { rel: [0.22, -0.05, 0.5], relTo: [-0.25, 0.0, 0.55] } },
   ]),
   // Fly-through target: the 40 t jet stand-in at 80 m/s into the glass tower's mid-height.
   ft_glass_tower_jet: take({ scene: 'ft_glass_tower', bonds: 'stress', preset: 4 }, [
     { n: 40, caption: 'An 11-storey glass tower: concrete core, steel mullions, glass panes', cam: { rel: [0.4, 0.0, 1.0], relTo: [0.3, 0.0, 0.95] } },
     { n: 1, act: 'fire', caption: 'A 40 t stand-in for an aircraft at 80 m/s' },
-    { n: 10, caption: 'A 40 t stand-in for an aircraft at 80 m/s' },
-    { n: 240, slow: 2, caption: 'Half speed: the curtain wall and the floors around the cut fail', cam: { rel: [0.3, 0.0, 0.95], relTo: [-0.3, 0.08, 1.0] } },
-    { n: 180, caption: 'Real time', cam: { rel: [-0.3, 0.08, 1.0], relTo: [-0.7, 0.15, 1.15] } },
+    { n: 24, slow: 4, caption: 'Quarter speed: a 40 t stand-in for an aircraft at 80 m/s' },
+    { n: 240, slow: 2, caption: 'Half speed: the curtain wall and the floors around the cut fail', cam: { rel: [0.3, 0.0, 0.95], relTo: [-0.3, 0.05, 0.95] } },
+    { n: 180, caption: 'Real time', cam: { rel: [-0.3, 0.05, 0.95], relTo: [-0.6, 0.14, 0.8], lift: [0, -6] } },
   ]),
   // Topple (stress_ref::topple), threshold profile: the charges cut the street-side
   // columns, then the back line. Natively (Metal) the tower then leans over the street as
   // one mass and lands across it; in Chrome's WebGPU the back line crushes faster than it
   // tips and it comes down almost in place (README, Topple), as this take records.
   topple_detonate: take({ scene: 'topple_tower', bonds: 'threshold' }, [
-    { n: 50, caption: 'A 10-storey tower beside a street: 420 bonded chunks, charges on the ground storey', cam: { rel: [0.9, 0.0, 1.0], relTo: [1.1, 0.0, 0.95] } },
+    { n: 50, caption: 'A 10-storey tower beside a street: 420 bonded chunks, charges on the ground storey', cam: { rel: [0.9, 0.0, 1.15], relTo: [1.1, 0.0, 1.1], shift: [0, 0, -8] } },
     { n: 1, act: { detonate: '' }, caption: 'Charges: the street-side columns, then the back line 0.25 s later' },
-    { n: 120, caption: 'Charges: the street-side columns, then the back line 0.25 s later', cam: { rel: [1.1, 0.0, 0.95], relTo: [1.3, 0.02, 1.0] } },
-    { n: 300, slow: 2, caption: 'Half speed: the back line crushes and the tower comes down storey by storey', cam: { rel: [1.3, 0.02, 1.0], relTo: [1.6, 0.05, 1.05] } },
-    { n: 200, caption: 'Real time: a rubble pile at the foot of the street', cam: { rel: [1.6, 0.05, 1.05], relTo: [1.9, 0.12, 1.1] } },
+    { n: 120, caption: 'Charges: the street-side columns, then the back line 0.25 s later', cam: { rel: [1.1, 0.0, 1.1], relTo: [1.3, 0.02, 1.1], shift: [0, 0, -8] } },
+    { n: 300, slow: 2, caption: 'Half speed: the back line crushes and the tower comes down storey by storey', cam: { rel: [1.3, 0.02, 1.1], relTo: [1.6, 0.05, 1.0], shift: [0, 0, -8] } },
+    { n: 200, caption: 'Real time: a rubble pile at the foot of the street', cam: { rel: [1.6, 0.05, 1.0], relTo: [1.8, 0.12, 0.85], shift: [0, 0, -8], lift: [0, -6] } },
   ]),
   // Skybridge (stress_ref::skybridge) under blast_parity: one charge takes out the east
   // connection; the stress solve tears the west bearings, and the walkway hangs from the
@@ -67,50 +68,50 @@ export const LAB_TAKES = {
   // Bridge Out (stress_ref::viaduct): the 50 t ball into the hinge pier under
   // blast_parity; the two drop-in spans swing down whole and break on the road below.
   bo_viaduct_pier: take({ scene: 'bo_viaduct', bonds: 'stress', preset: 1 }, [
-    { n: 50, caption: 'Four-span concrete viaduct, 10 m up: 347 bonded chunks under the GPU stress solver', cam: { rel: [0.4, 0.0, 0.9], relTo: [0.25, -0.02, 0.8] } },
+    { n: 50, caption: 'Four-span concrete viaduct, 10 m up: 347 bonded chunks under the GPU stress solver', cam: { rel: [0.4, -0.02, 0.6], relTo: [0.3, -0.04, 0.5] } },
     { n: 1, act: 'fire', caption: 'A 50 t wrecking ball into the middle pier' },
     { n: 25, caption: 'A 50 t wrecking ball into the middle pier' },
-    { n: 220, slow: 2, caption: 'Half speed: the hinge lets go and both spans swing down whole', cam: { rel: [0.25, -0.02, 0.8], relTo: [0.7, 0.05, 0.85] } },
-    { n: 240, caption: 'They break on the road below; the outer piers follow', cam: { rel: [0.7, 0.05, 0.85], relTo: [1.1, 0.12, 1.0] } },
+    { n: 220, slow: 2, caption: 'Half speed: the hinge lets go and both spans swing down whole', cam: { rel: [0.3, -0.04, 0.5], relTo: [0.5, 0.0, 0.5] } },
+    { n: 240, caption: 'They break on the road below; the outer piers follow', cam: { rel: [0.5, 0.0, 0.5], relTo: [0.75, 0.06, 0.6] } },
   ]),
   // Wrecking Yard (stress_ref::wrecking): the 50 t ball into the 10-floor frame's corner
   // column line under blast_parity; the collapse climbs while the core stands.
   wy_frame10_ball: take({ scene: 'wy_frame10', bonds: 'stress', preset: 1 }, [
-    { n: 50, caption: '10-floor concrete frame: 1,264 bonded chunks under the GPU stress solver', cam: { rel: [0.35, 0.02, 1.0], relTo: [0.15, 0.0, 0.9] } },
+    { n: 50, caption: '10-floor concrete frame: 1,264 bonded chunks under the GPU stress solver', cam: { rel: [0.35, 0.02, 1.2], relTo: [0.15, 0.0, 1.12], lift: -1 } },
     { n: 1, act: 'fire', caption: 'A 50 t wrecking ball at 20 m/s into the corner columns' },
     { n: 30, caption: 'A 50 t wrecking ball at 20 m/s into the corner columns' },
-    { n: 240, slow: 2, caption: 'Half speed: the ground storeys give way and the collapse climbs', cam: { rel: [0.15, 0.0, 0.9], relTo: [-0.35, 0.08, 0.95] } },
-    { n: 300, caption: 'The upper storeys, the core and the far bays stay standing', cam: { rel: [-0.35, 0.08, 0.95], relTo: [-0.9, 0.04, 0.85] } },
+    { n: 240, slow: 2, caption: 'Half speed: the ground storeys give way and the collapse climbs', cam: { rel: [0.15, 0.0, 1.12], relTo: [-0.35, 0.06, 1.15], lift: -1 } },
+    { n: 300, caption: 'The upper storeys, the core and the far bays stay standing', cam: { rel: [-0.35, 0.06, 1.15], relTo: [-0.9, 0.04, 1.15], lift: -1 } },
   ]),
   wy_frame10_xray: take({ scene: 'wy_frame10', bonds: 'stress', preset: 1 }, [
-    { n: 40, view: { bonds: true, color: 2 }, caption: 'X-ray: every bond of the frame, one colour per rigid body', cam: { rel: [0.35, 0.02, 1.0] } },
+    { n: 40, view: { bonds: true, color: 2 }, caption: 'X-ray: every bond of the frame, one colour per rigid body', cam: { rel: [0.35, 0.02, 1.2], lift: -1 } },
     { n: 1, act: 'fire', caption: 'The same 50 t ball' },
-    { n: 330, slow: 2, caption: 'Half speed: failed bonds drop out; each piece that breaks away gets its own colour', cam: { rel: [0.35, 0.02, 1.0], relTo: [-0.3, 0.1, 1.0] } },
+    { n: 330, slow: 2, caption: 'Half speed: failed bonds drop out; each piece that breaks away gets its own colour', cam: { rel: [0.35, 0.02, 1.2], relTo: [-0.3, 0.08, 1.18], lift: -1 } },
   ]),
   // The 15 m demolition sphere (277 t, rolling in at 12 m/s) through the round tower.
   wy_round_tower_sphere: take({ scene: 'wy_round_tower', bonds: 'stress', preset: 2 }, [
-    { n: 40, caption: 'Round tower: eight floors on a core and a ring of columns', cam: { rel: [0.6, 0.0, 1.1], relTo: [0.5, 0.0, 1.05] } },
+    { n: 40, caption: 'Round tower: eight floors on a core and a ring of columns', cam: { rel: [0.6, 0.0, 1.15], relTo: [0.5, 0.0, 1.1], lift: -2 } },
     { n: 1, act: 'fire', caption: 'A 15 m demolition sphere rolls in' },
     { n: 60, caption: 'A 15 m demolition sphere rolls in' },
-    { n: 240, slow: 2, caption: 'Half speed: the slabs drop floor by floor; the core stays', cam: { rel: [0.5, 0.0, 1.05], relTo: [-0.2, 0.1, 1.1] } },
-    { n: 180, caption: 'Real time', cam: { rel: [-0.2, 0.1, 1.1], relTo: [-0.6, 0.2, 1.3] } },
+    { n: 240, slow: 2, caption: 'Half speed: the slabs drop floor by floor; the core stays', cam: { rel: [0.5, 0.0, 1.1], relTo: [-0.2, 0.08, 1.1], lift: -2 } },
+    { n: 180, caption: 'Real time', cam: { rel: [-0.2, 0.08, 1.1], relTo: [-0.5, 0.14, 1.15], lift: -2 } },
   ]),
   // Threshold fracture of the baked veneer house: one heavy ball, the impact again at
   // quarter speed, then the settle.
   lab_house_threshold: take({ scene: 'house', bonds: 'threshold', level: 1 }, [
-    { n: 50, caption: 'Veneer house, Shardwright bake: bonds break when a contact force beats their strength', cam: { orbit: [0.25, 0.22, 16], to: [0.4, 0.2, 15] } },
+    { n: 50, caption: 'Veneer house, Shardwright bake: bonds break when a contact force beats their strength', cam: { orbit: [0.3, 0.22, 13], to: [0.4, 0.2, 15] } },
     { n: 1, act: { shoot: [0.5, 0.6] }, mass: 5, speed: 2, caption: 'A 32x ball at 4x speed' },
-    { n: 14, caption: 'Incoming' },
-    { n: 160, slow: 4, caption: 'Quarter speed: the wall lets go in large pieces first, then they break again', cam: { orbit: [0.4, 0.2, 15], to: [0.95, 0.26, 14] } },
-    { n: 180, caption: 'Real time: the roof comes down on the debris', cam: { orbit: [0.95, 0.26, 14], to: [1.6, 0.35, 18] } },
+    { n: 14, caption: 'Incoming', cam: { orbit: [0.4, 0.2, 15], to: [0.45, 0.2, 12] } },
+    { n: 160, slow: 4, caption: 'Quarter speed: the wall lets go in large pieces first, then they break again', cam: { orbit: [0.45, 0.2, 12], to: [0.95, 0.26, 11] } },
+    { n: 180, caption: 'Real time: the roof comes down on the debris', cam: { orbit: [0.95, 0.26, 11], to: [1.5, 0.32, 13] } },
   ]),
   // The quasi-static stress solver (blast_parity) with the bond graph drawn: the load
   // path before and after the shot.
   lab_house_stress_xray: take({ scene: 'house', bonds: 'stress' }, [
-    { n: 60, view: { bonds: true, color: 2 }, caption: 'Stress solver (blast_parity): every bond, and one colour per rigid body', cam: { orbit: [0.4, 0.3, 24], to: [0.6, 0.3, 22] } },
+    { n: 60, view: { bonds: true, color: 2 }, caption: 'Stress solver (blast_parity): every bond, and one colour per rigid body', cam: { orbit: [0.4, 0.3, 16], to: [0.6, 0.3, 22] } },
     { n: 1, act: { shoot: [0.5, 0.6] }, mass: 5, caption: 'A 32x ball into the front wall' },
-    { n: 160, slow: 2, caption: 'Half speed: bonds that fail drop out of the graph; each new body gets its own colour', cam: { orbit: [0.6, 0.3, 22], to: [1.1, 0.35, 22] } },
-    { n: 120, view: { bonds: false, color: 0 }, caption: 'Materials view', cam: { orbit: [1.1, 0.35, 22], to: [1.5, 0.3, 26] } },
+    { n: 160, slow: 2, caption: 'Half speed: bonds that fail drop out of the graph; each new body gets its own colour', cam: { orbit: [0.6, 0.3, 22], to: [1.1, 0.33, 14] } },
+    { n: 120, view: { bonds: false, color: 3 }, caption: 'Materials view', cam: { orbit: [1.1, 0.33, 14], to: [1.5, 0.3, 15] } },
   ]),
   // The lab's wrecking ball (200 t at 40 m/s) through the 7 x 7 grid of cuboid houses.
   lab_cuboid_grid_ball: take({ scene: 'cuboidGrid' }, [

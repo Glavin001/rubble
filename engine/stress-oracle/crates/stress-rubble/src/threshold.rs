@@ -613,7 +613,7 @@ impl ThresholdWorld {
             chunks.push([
                 [ch.center.x as f32, ch.center.y as f32, ch.center.z as f32, f32::from_bits(chunk_object[s][c])],
                 [q.x as f32, q.y as f32, q.z as f32, q.w as f32],
-                [col[0], col[1], col[2], 0.0],
+                [col[0], col[1], col[2], crate::render::material_surface(&ch.material)],
             ]);
         }
         let shot_bodies = self.shots.iter().map(|s| s.body).collect();
