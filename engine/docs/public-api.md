@@ -879,9 +879,10 @@ oracle's `stress-gpu`, `stress-ref` and `stress-rubble`.
   the cuboid house, fires the lab's shot, and runs the lab's
   `ThresholdWorld` on the same scene. The first break comes in the same frame
   with the same bond count in both. Afterwards the totals follow body-slot
-  order: the arch breaks 87 bonds in World against the lab's 92, both ending
-  at 17 bodies; the house ends at 93 bodies against 103. Each new piece
-  starts where its parent was. `engine-ffi/tests/threshold.rs` runs both
+  order (the lab parks 16 shots between its clusters and its spare slots).
+  The arch breaks 87 bonds in World against the lab's 92, both ending at 17
+  bodies; the house ends at 104 bodies against 95 (50 bonds against 21). Each
+  new piece starts where its parent was. `engine-ffi/tests/threshold.rs` runs both
   scenes through the C ABI in Unreal coordinates.
 - **Shaders.** The kernels run as WGSL on World's device, as in the browser.
   A device opened with `PASSTHROUGH_SHADERS` on Metal runs the Metal
