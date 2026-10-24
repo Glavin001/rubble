@@ -133,6 +133,77 @@ Known limits:
   plus its radius at each end; a shot that does not come back out over the field
   stops in it.
 
+## T2 kernel design (2026-10-24)
+
+From a survey of open GPU MPM codes: Taichi's MLS-MPM examples, taichi_elements,
+Claymore, Genesis, NVIDIA Newton's implicit MPM, dimforge's wgsparkl and sparkl,
+EA's pbmpm and WebGPU-Ocean. Read to understand the methods; no code or outputs
+are taken from them.
+
+- **Discretisation.** Explicit MLS-MPM: quadratic B-splines, the APIC affine matrix
+  C, and the stress term fused into P2G as −dt·V·(4/dx²)·τ (Hu et al. 2018).
+- **Sand.** A Drucker–Prager return map in Hencky (log) strain (Klár et al. 2016)
+  with the log-volume correction (Tampubolon et al. 2017):
+  - ε = ln max(|σ|, 1e-4) − c, with cohesion c (0 for dry sand), and
+    tr = Σε + log Jp.
+  - tr ≥ 0: project to the tip, and Jp keeps the volume.
+  - Otherwise: δγ = ‖ε̂‖ + (3λ + 2μ)/(2μ)·tr·α, with α = √(2/3)·2 sin φ/(3 − sin φ).
+    Project onto the cone when δγ > 0.
+  - Stress τ = U·diag(2μ ln σ + λ Σ ln σ)·Uᵀ, with no division by small σ.
+  - Klár's friction-angle hardening comes later, behind a flag.
+- **SVD.** A 3×3 quaternion Jacobi (McAdams et al. 2011) with a fixed number of
+  sweeps. It is sign-corrected (det U = det V = +1; σ₃ may be negative) and lives in
+  its own function. Its NaN guards must not rely on IEEE behaviour that fast-math
+  removes; engine-metal parity is checked.
+- **Sparse grid.** Blocks of 4³ cells in a fixed-capacity GPU hash
+  (`TerrainConfig::max_blocks`), rebuilt every substep from the blocks the particles'
+  stencils reach. Overflow sets a flag and the step fails with a `TerrainError`;
+  blocks are never dropped.
+- **Binning.** A deterministic counting sort of particles by (block, cell), with
+  particle id breaking ties (prefix sums, as in the rigid solver's stable colour
+  packing). P2G then sums in a fixed order, so runs and backends (WGSL, Metal,
+  SPIR-V) agree.
+- **P2G is a gather, with no grid atomics.**
+  - One workgroup per active block, one thread per node.
+  - A shared tile holds the block and its halo. Each node accumulates the particles
+    whose stencil covers it, in sorted order, and is written once.
+  - The tile fits WebGPU's default 16 KiB of workgroup memory, checked when the
+    pipeline is created.
+  - Fixed-point grid atomics, used by the WebGPU ports, were rejected: their scale
+    trades range against resolution, and overflow wraps silently.
+- **Grid update.**
+  - Nodes with mass above a threshold get normalised velocity plus gravity.
+  - The bed is a separating Coulomb contact on grid velocity against the heightfield
+    under the region: the normal approach is removed and the tangential part is
+    clamped by the friction cone (the nodal form of Newton and Genesis).
+  - Material reaching the region's box raises a region-overflow flag (an error that
+    asks for a larger margin) until ejection to parcels exists (T4).
+- **G2P.** Velocity and C come from the grid, then x += dt·v and F ← (I + dt·C)F. The
+  next P2G applies the return map to F.
+- **Time step.**
+  - Each substep satisfies CFL on the P-wave speed plus the flow:
+    dt = k·dx/(c + |v|max), with c = √((λ + 2μ)/ρ).
+  - The host schedules substeps from the material's wave speed; the GPU checks the
+    actual |v|max. A violation, or more than a configured maximum of substeps,
+    fails with an error. Nothing clamps dt or velocity.
+  - **Cost of physical stiffness.** Sand's Young's modulus (10–100 MPa) gives
+    c ≈ 100–250 m/s, so dx = 0.1 m needs dt ≈ 0.1–0.3 ms: about 50–170 substeps per
+    60 Hz frame. Softening E would be a lossy trade, so it is only measured and
+    reported, not adopted. An implicit step (Newton's approach, after Daviet &
+    Bertails-Descoubes 2016) is the alternative for large steps.
+- **Volume is integer.** Each particle carries its volume as a whole number of quanta.
+  Activation, bake and the ledger sum quanta with u32 atomics, so conservation is
+  exact and independent of order.
+- **Activation.**
+  - Inside the region, the heightfield is lowered to the region's bed (the bottom
+    of its box). The material between the bed and the old surface becomes
+    particles: particles_per_cell_axis³ per cell, at deterministic offsets.
+  - The bed stays a heightfield, so rigid bodies over the region stand on it until
+    two-way coupling (T3).
+- **Bake.** When the region's kinetic energy stays below ε for a dwell time, each
+  particle's quanta are added to the heightfield column it stands over, and the
+  particles are freed.
+
 ## Validation targets
 
 Tests come from physics and published laws, never from another program's outputs.
