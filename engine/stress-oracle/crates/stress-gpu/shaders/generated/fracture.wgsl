@@ -35,6 +35,7 @@ struct FractureParams_std140_0
     @align(16) cs_c2_0 : f32,
     @align(4) cs_row_offset_0 : u32,
     @align(8) pad7_0 : f32,
+    @align(4) pad8_0 : f32,
 };
 
 @binding(0) @group(0) var<uniform> params_0 : FractureParams_std140_0;

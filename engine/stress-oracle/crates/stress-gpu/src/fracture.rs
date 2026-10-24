@@ -229,7 +229,11 @@ struct FractureParams {
     cs_c2: f32,
     cs_row_offset: u32,
     pad7: f32,
+    pad8: f32,
 }
+
+// WebGPU binds a uniform at its size rounded up to 16 bytes; Metal does not check it.
+const _: () = assert!(std::mem::size_of::<FractureParams>() % 16 == 0);
 
 /// A shot, for strike prediction (`fracture.slang` `shots`).
 #[derive(Clone, Copy, Debug)]

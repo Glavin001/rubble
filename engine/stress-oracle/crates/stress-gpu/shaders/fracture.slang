@@ -79,7 +79,8 @@ struct FractureParams
     float cs_c1;         // its recurrence (load_path.rs `momentum_coefficients(IMPACT_LOWER)`)
     float cs_c2;
     uint cs_row_offset;  // this step's first contact row (rubble's contacts' parity)
-    float pad7;
+    float pad7;          // to a multiple of 16 bytes (a uniform's size on WebGPU)
+    float pad8;
 };
 
 struct ScanParams

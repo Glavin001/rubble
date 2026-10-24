@@ -39,6 +39,7 @@ struct FractureParams_0
     float cs_c2_0;
     uint cs_row_offset_0;
     float pad7_0;
+    float pad8_0;
 };
 
 struct Record_natural_0
