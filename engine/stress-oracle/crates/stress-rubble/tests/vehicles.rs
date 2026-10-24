@@ -169,3 +169,42 @@ fn car_crumples_at_the_front_blast_parity() {
         assert!(!off.iter().any(|k| k == cabin), "the cabin stays together: a {cabin} broke off");
     }
 }
+
+/// V5 (threshold): the car launched alone at the storefront row's middle shop window goes
+/// through it into the shop (its strike breaks the window's stallriser and panes before
+/// it meets them), and both the shopfront and the car break.
+#[test]
+fn car_drives_through_the_shop_window_threshold() {
+    let gpu = Gpu::new().expect("GPU");
+    let key = "rr_vehicles_storefront";
+    let vs = stress_ref::vehicles::scene(key).unwrap();
+    let pack = vs.to_pack();
+    let scene = pack_scene(&pack, key, Profile::Threshold, 2.0);
+    let mut launcher = Launcher::of_pack(&pack).unwrap();
+    let ball = stress_ref::wrecking::BALLS[0];
+    let mut w = stress_rubble::threshold::ThresholdWorld::new(&gpu, &scene, ball.radius, ball.mass).expect("threshold world");
+    let car = vs.vehicles.iter().find(|v| v.0 == "car").unwrap().1.clone();
+    // The storefront's own chunks come first (then the street, then the vehicles).
+    let building = stress_ref::buildings::storefront_row().chunks.len();
+    for _ in 0..100 {
+        if w.frame == AT {
+            assert!(launcher.arm("car", w.frame, w.frame_dt));
+        }
+        for l in launcher.due(w.frame) {
+            w.launch_island(&gpu, 0, &l).expect("launch");
+        }
+        w.step_frame(&gpu).expect("frame");
+    }
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+    let pos: Vec<Vec3> = w.chunk_centres(&gpu).iter().map(|(c, _)| Vec3::from_array(*c)).collect();
+    let intact = w.scene_bonds_intact(&gpu, 0);
+    let bonds = &scene.bodies[0].bonds;
+    let broken = |pick: &dyn Fn(usize) -> bool| (0..bonds.len()).filter(|&b| pick(bonds[b].a) && pick(bonds[b].b) && !intact[b]).count();
+    let (shop, own) = (broken(&|k| k < building), broken(&|k| car.contains(&k)));
+    // The facade's outer face is at y = -3.5.
+    let face = -0.5 * stress_ref::buildings::StorefrontLayout::DEPTH;
+    let deepest = car.iter().map(|&k| pos[k].y).fold(f64::NEG_INFINITY, f64::max);
+    println!("car through the shop window: its furthest part {:.1} m inside the facade; broken: shopfront {shop}, car {own}", deepest - face);
+    assert!(deepest - face > 2.0, "into the shop: {} m", deepest - face);
+    assert!(shop > 10 && own > 5, "both break: shopfront {shop}, car {own}");
+}

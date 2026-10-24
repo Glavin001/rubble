@@ -159,6 +159,19 @@ pub const PACK_SAMPLES: &[PackSample] = &[
         menu: "Storefront row (5 shops) · 1,203 chunks",
         label: "storefront row",
     },
+    // The same targets with a bonded car and bus to launch at them (`stress_ref::vehicles`).
+    PackSample {
+        key: "rr_vehicles_storefront",
+        group: RAM_RAID,
+        menu: "Storefront row, a car and a bus · 1,341 chunks",
+        label: "storefront row with vehicles",
+    },
+    PackSample {
+        key: "rr_vehicles_apartment",
+        group: RAM_RAID,
+        menu: "Apartment block, a car and a bus · 1,493 chunks",
+        label: "apartment block with vehicles",
+    },
     PackSample {
         key: "ft_apartment_block",
         group: FLY_THROUGH,

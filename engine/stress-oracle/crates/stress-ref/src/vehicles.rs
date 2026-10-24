@@ -488,8 +488,33 @@ pub const RUN_UP: f64 = 12.0;
 /// The speed vehicles hit at in the crash tests: 56 km/h, Euro NCAP's (m/s).
 pub const CRASH_SPEED: f64 = 15.6;
 
+/// A street (a support, bonded to nothing) over `x` and `y` (Z-up), `top` m high: the
+/// road a vehicle drives on up to a building whose ground floor stands on footings above
+/// grade. One slab, so a sliding wheel meets no seam.
+fn street(x: (f64, f64), y: (f64, f64), top: f64) -> Vec<ChunkDesc> {
+    vec![footing(block([x.0, y.0, 0.0], [x.1, y.1, top], "footing-anchor", "street", "street".into()))]
+}
+
+/// The speed the cars and buses hit buildings at: 54 km/h (m/s).
+pub const RAM_SPEED: f64 = 15.0;
+
+/// Road vehicles driven at a building's street front (+y, the facade at `face`), on a
+/// street level with its footings' tops (`top`), each nose `RUN_UP` m out: (vehicle, the x
+/// it is aimed at, its nose's distance from its origin).
+fn ram_raid(key: &'static str, title: &'static str, base: Structure, face: f64, top: f64, street_x: (f64, f64), near: f64, vehicles: Vec<(Vehicle, f64, f64)>) -> Scene {
+    let heading = std::f64::consts::FRAC_PI_2;
+    let speed = sliding_launch(RAM_SPEED, RUN_UP);
+    let placed: Vec<(Vehicle, Placement, Option<Motion>)> = vehicles.into_iter().map(|(v, x, nose)| (v, Placement { at: [x, face - RUN_UP - nose, top], heading }, Some(along(heading, speed, 0.0, 0.0)))).collect();
+    compose(key, title, base, street(street_x, (near - 24.0, near), top), &placed)
+}
+
 /// The scenes with vehicles: (key, title), in menu order.
-pub const SCENES: &[(&str, &str)] = &[("vh_car_barrier", "Car into a crash barrier"), ("vh_bus_barrier", "Bus into a crash barrier")];
+pub const SCENES: &[(&str, &str)] = &[
+    ("vh_car_barrier", "Car into a crash barrier"),
+    ("vh_bus_barrier", "Bus into a crash barrier"),
+    ("rr_vehicles_storefront", "Car and bus through the storefront row"),
+    ("rr_vehicles_apartment", "Car and bus through the apartment block"),
+];
 
 /// A scene with vehicles by key.
 pub fn scene(key: &str) -> Option<Scene> {
@@ -503,6 +528,28 @@ pub fn scene(key: &str) -> Option<Scene> {
         "vh_bus_barrier" => {
             let nose = 0.5 * BusLayout::LENGTH + 0.2;
             Some(compose(key, title, crash_site(key, title), vec![barrier(0.0, [1.5, 4.0, 3.0])], &[(bus("bus"), Placement { at: [-RUN_UP - nose, 0.0, 0.0], heading: 0.0 }, Some(along(0.0, speed(RUN_UP), 0.0, 0.0)))]))
+        }
+        // V5: the car at the middle shop's window, the bus at the fourth shop's, from a
+        // street level with the footings (the shop fronts stand on 0.5 m strip footings).
+        "rr_vehicles_storefront" => {
+            use crate::buildings::StorefrontLayout as L;
+            let window = |i: usize| {
+                let (_, w) = L::shopfront(i);
+                0.5 * (w.0 + w.1)
+            };
+            let x = L::half_length();
+            Some(ram_raid(key, title, crate::buildings::storefront_row(), -0.5 * L::DEPTH, L::FOOTING_DEPTH, (-x, x), -0.5 * L::DEPTH, vec![(car("car"), window(2), 0.5 * CarLayout::LENGTH), (bus("bus"), window(4), 0.5 * BusLayout::LENGTH + 0.2)]))
+        }
+        // V5: the car into front bay 0's ground floor (its brick sill and window), the bus
+        // into bay 3's (sill, jambs, window, the first floor's beam over them). (At the
+        // glazed entrance the car stops dead on the pane: a pane's bond at its sill holds
+        // 1.6 MN.) The street stops short of the pad footings (1 m) on the front grid line.
+        "rr_vehicles_apartment" => {
+            use crate::buildings::ApartmentLayout as L;
+            let bay = |i: usize| 0.5 * (L::line_x(i) + L::line_x(i + 1));
+            let x = L::line_x(L::BAYS_X) + 0.5 * L::FOOTING;
+            let face = L::line_y(0) - 0.5 * L::INFILL;
+            Some(ram_raid(key, title, crate::buildings::apartment_block(), face, L::FOOTING_DEPTH, (-x, x), L::line_y(0) - 0.5 * L::FOOTING, vec![(car("car"), bay(0), 0.5 * CarLayout::LENGTH), (bus("bus"), bay(3), 0.5 * BusLayout::LENGTH + 0.2)]))
         }
         _ => None,
     }

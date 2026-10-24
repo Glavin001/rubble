@@ -667,6 +667,40 @@ vh_car_barrier 120`, `STRESS_PROFILE=blast_parity` for the other profile):
 The bus rocks on its wheels in the reference world's own contact and loses them after half a
 second. On the GPU, both vehicles stand still in both stress modes.
 
+**Ram Raid with vehicles** (V5, Scene menu group Ram Raid). Both buildings stand on 0.5 m
+footings above grade, so each scene adds a street: one support slab, level with the
+footings' tops, which the vehicles drive on. Each vehicle starts 12 m out and hits at about
+54 km/h, one launch each (`car`, `bus`).
+- `rr_vehicles_storefront` (1,341 chunks): the car is aimed at the middle shop's window and
+  the bus at the fourth shop's.
+- `rr_vehicles_apartment` (1,493 chunks): the car is aimed at front bay 0's brick sill and
+  window, the bus at bay 3's.
+
+Threshold, recorded in Chrome (takes `rr_storefront_car_bus` and `rr_apartment_car_bus`: the
+car, then the bus, the camera following each in):
+- **Storefront.** The car's strike breaks the stallriser and the panes before it reaches them.
+  It goes through the window into the shop (natively, 8.9 m in by frame 100) and crumples
+  against the interior and the back wall. The bus breaks the window, the piers and the fascia
+  and drives into the shop with the fascia on its roof. 442 bonds are broken, the same in
+  three recordings.
+- **Apartment block.** Its infill is coarse: a bay's brick sill is two 1.15 t panels. The car
+  breaks the sill loose but does not get through, and the bus breaks the infill under the
+  first-floor beam and is thrown back. 90 bonds are broken, the same in three recordings.
+- At the glazed entrance the car stops dead on the pane. A pane is one chunk bonded at its
+  sill, and that bond holds 1.6 MN (40 MPa over a 20 mm by 2 m edge), so the pane cannot
+  shatter. It is the buildings' glazing model, not changed here.
+
+Recording these takes exposed a bug in strike prediction that was older than them. Under the
+WGSL builds' fast math (Chrome, and naga's Metal compile), the nearest struck chunk was
+matched by the bits of a recomputed distance. That found no chunk, so every strike was
+dropped: the car stopped on the shop window in Chrome. `fr_strike_entry` now keeps the
+distance and `fr_strike_nearest` reads it. Metal's results are unchanged. In Chrome, the
+threshold car stand-in now breaks 129 of the storefront's bonds by frame 100 (native WGSL
+133, Metal 104) where it broke 11 before.
+
+`cargo test --release -p stress-rubble --features gpu --test vehicles car_drives`: the car
+alone goes more than 2 m past the facade, and both the shopfront and the car break.
+
 **Checks:**
 - `cargo test --release -p stress-ref --test vehicles`:
   - each vehicle's parts, mass and size, as one free island with every joint as `joint` picks;

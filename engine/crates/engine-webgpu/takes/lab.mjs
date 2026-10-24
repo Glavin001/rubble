@@ -43,6 +43,31 @@ const VEHICLE_TAKES = {
     { n: 200, slow: 4, caption: 'Quarter speed: the wheels and the bumper tear off; the body holds', cam: { orbit: [-0.3, 0.15, 18], to: [0.7, 0.3, 17], at: [-6.5, 0, 1.6] } },
     { n: 120, caption: 'Real time', cam: { orbit: [0.7, 0.3, 17], to: [1.0, 0.38, 21], at: [-6.5, 0, 1.6] } },
   ]),
+  // Ram Raid (V5): the car, then the bus, driven at the storefront row from a street level
+  // with its footings; each slides 12 m and hits at about 54 km/h.
+  rr_storefront_car_bus: take({ scene: 'rr_vehicles_storefront', bonds: 'threshold' }, [
+    { n: 40, caption: 'Five brick shops on a street; a 1.4 t car lines up on the middle shop window', cam: { orbit: [-0.45, 0.16, 12], to: [-0.4, 0.14, 11], at: [0.55, -17.75, 1.2] } },
+    { n: 1, act: { launch: 'car' }, caption: 'The car: launched at 69 km/h, 12 m out' },
+    { n: 42, caption: 'The car: launched at 69 km/h, 12 m out', cam: { orbit: [-0.4, 0.14, 11], to: [-0.8, 0.12, 10], at: [0.55, -17.75, 1.2], atTo: [0.55, -4.5, 1.4] } },
+    { n: 200, slow: 4, caption: 'Quarter speed: through the shop window into the shop; the car crumples', cam: { orbit: [-0.8, 0.12, 10], to: [-0.45, 0.2, 10], at: [0.55, -4.5, 1.4], atTo: [0.55, -1.5, 1.4] } },
+    { n: 30, caption: 'Now the bus: 10.4 t, at the fourth shop', cam: { orbit: [-0.35, 0.16, 20], to: [-0.3, 0.15, 19], at: [11.5, -21.7, 1.8] } },
+    { n: 1, act: { launch: 'bus' }, caption: 'The bus: launched at 69 km/h, 12 m out' },
+    { n: 42, caption: 'The bus: launched at 69 km/h, 12 m out', cam: { orbit: [-0.3, 0.15, 19], to: [-0.75, 0.15, 17], at: [11.5, -21.7, 1.8], atTo: [11.5, -7.5, 2.2] } },
+    { n: 200, slow: 4, caption: 'Quarter speed: the window, piers and fascia give; the bus drives into the shop', cam: { orbit: [-0.75, 0.15, 17], to: [-1.2, 0.22, 17], at: [11.5, -7.5, 2.2] } },
+    { n: 120, caption: 'Real time', cam: { orbit: [-1.2, 0.22, 17], to: [-0.6, 0.3, 30], at: [11.5, -7.5, 2.2], atTo: [5, -3, 2.5] } },
+  ]),
+  // V5 into the apartment block's ground floor: the car at a brick-sill bay, then the bus.
+  rr_apartment_car_bus: take({ scene: 'rr_vehicles_apartment', bonds: 'threshold' }, [
+    { n: 40, caption: 'A 7-storey apartment block; a 1.4 t car lines up on a ground-floor bay', cam: { orbit: [-0.45, 0.16, 13], to: [-0.4, 0.14, 12], at: [-9, -20.4, 1.2] } },
+    { n: 1, act: { launch: 'car' }, caption: 'The car: launched at 69 km/h, 12 m out' },
+    { n: 42, caption: 'The car: launched at 69 km/h, 12 m out', cam: { orbit: [-0.4, 0.14, 12], to: [-0.85, 0.14, 11], at: [-9, -20.4, 1.2], atTo: [-9, -7.5, 1.4] } },
+    { n: 160, slow: 4, caption: 'Quarter speed: the brick sill gives, but the car does not get through', cam: { orbit: [-0.85, 0.14, 11], to: [-1.25, 0.22, 12], at: [-9, -7.5, 1.4] } },
+    { n: 30, caption: 'Now the bus: 10.4 t, at the next bay but one', cam: { orbit: [0.35, 0.16, 20], to: [0.3, 0.15, 19], at: [9, -24.3, 1.8] } },
+    { n: 1, act: { launch: 'bus' }, caption: 'The bus: launched at 69 km/h, 12 m out' },
+    { n: 42, caption: 'The bus: launched at 69 km/h, 12 m out', cam: { orbit: [0.3, 0.15, 19], to: [0.75, 0.15, 17], at: [9, -24.3, 1.8], atTo: [9, -10, 2.2] } },
+    { n: 200, slow: 4, caption: 'Quarter speed: the infill breaks under the first-floor beam; the bus is thrown back', cam: { orbit: [0.75, 0.15, 17], to: [1.2, 0.22, 18], at: [9, -10, 2.2] } },
+    { n: 120, caption: 'Real time', cam: { orbit: [1.2, 0.22, 18], to: [0.5, 0.3, 34], at: [9, -10, 2.2], atTo: [0, -6, 4] } },
+  ]),
 };
 
 export const LAB_TAKES = {
