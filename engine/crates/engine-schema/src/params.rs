@@ -11,6 +11,11 @@ pub const FLAG_REUSE_CONTACTS: u32 = 1;
 /// `contact_offset` deep (three-avbd).
 pub const FLAG_CONTACT_GAP: u32 = 32;
 
+/// `AvbdParams::flags` bit: look-ahead (speculative) contacts sized to each
+/// body's motion this step (`world_step.slang` FLAG_SPEC_VELOCITY). Bodies
+/// flagged `BODY_CCD` get uncapped reach and time-of-impact contacts.
+pub const FLAG_SPEC_VELOCITY: u32 = 16384;
+
 /// `AvbdParams::flags` bit: the primal inertial block uses the world inertia
 /// `R·diag(I)·Rᵀ`. Without it (three-avbd) principal moments act on world axes.
 pub const FLAG_WORLD_INERTIA: u32 = 64;

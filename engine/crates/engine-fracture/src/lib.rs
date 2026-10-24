@@ -23,6 +23,7 @@ pub mod plan;
 pub mod samples;
 pub mod scene;
 pub mod stress_export;
+pub mod towers;
 pub mod view;
 
 pub use asset::{parse_fracture_glb, FractureAsset};

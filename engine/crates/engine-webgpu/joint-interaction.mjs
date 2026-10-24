@@ -7,7 +7,7 @@
 
 const BODY_STRIDE = 112;
 
-export function installJointControls({ device, bodyBuffer, jointBuffer, snap, maxBodies, canvas, camera }) {
+export function installJointControls({ device, bodyBuffer, jointBuffer, snap, maxBodies, canvas, camera, projectileFlags = 1 | 8 }) {
   const meta = snap.meta;
   const L = meta.jointLayout;
   const scratch = new ArrayBuffer(16);
@@ -129,7 +129,7 @@ export function installJointControls({ device, bodyBuffer, jointBuffer, snap, ma
     const p = eye.map((c, k) => c + dir[k] * 2);
     const vel = dir.map((c) => c * 30);
     [p[0], p[1], p[2], 1 / mass, 0, 0, 0, 1, 1 / inertia, 1 / inertia, 1 / inertia].forEach((x, k) => v.setFloat32(k * 4, x, true));
-    v.setUint32(44, 1 | 8, true);
+    v.setUint32(44, projectileFlags, true);
     vel.forEach((x, k) => v.setFloat32(48 + k * 4, x, true));
     [p[0], p[1], p[2], 0, 0, 0, 0, 1].forEach((x, k) => v.setFloat32(80 + k * 4, x, true));
     device.queue.writeBuffer(bodyBuffer, meta.projectile * BODY_STRIDE, rec);

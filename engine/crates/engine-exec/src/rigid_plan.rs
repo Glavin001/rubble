@@ -70,7 +70,7 @@ pub struct StepModes {
     /// The sparse tail's single-workgroup loop can cover the body capacity.
     pub tail_ok: bool,
     /// Append `pose_pack` after the sleep commit: compact render poses and the
-    /// list of bodies that moved (bindings 33-35; read-only on physics state).
+    /// list of bodies that moved (bindings 34-36, after BIND_COUNT; read-only on physics state).
     pub pose_output: bool,
 }
 
@@ -95,11 +95,13 @@ pub struct StepInputs {
     /// Vehicle controller pool in use (`vehicle_step.slang`; 0 = no vehicle passes).
     pub vehicle_count: u32,
     pub wheel_count: u32,
+    /// Continuous collision and step-start motion (`ccd_step.slang`).
+    pub motion: MotionInputs,
     /// Soft bodies in use (`soft_step.slang`; zero bodies = no soft passes).
     pub soft: SoftCounts,
     /// Host commands in binding 8 (`apply_commands` runs first when non-zero).
     pub command_count: u32,
-    /// Directed debris (`guide_step.slang`, bindings 36-40) runs before
+    /// Directed debris (`guide_step.slang`, bindings 37-41) runs before
     /// prediction. Off: the passes are not encoded.
     pub guidance: bool,
     /// Plan slots per step (`GuidanceCapacity::plan_budget`).
@@ -141,6 +143,42 @@ pub struct SoftCounts {
     pub sweeps: u32,
 }
 
+/// What the continuous-collision, impulse, projectile and character passes
+/// need this step (all off: the step graph is unchanged).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MotionInputs {
+    /// Some body carries `BODY_CCD` (registration, TOI casts, TOI manifolds).
+    pub ccd: bool,
+    /// Some body is kinematic (`BODY_KINEMATIC`).
+    pub kinematic: bool,
+    /// `FLAG_SPEC_VELOCITY` is set (swept bounds: the fast list may fill).
+    pub look_ahead: bool,
+    /// The host queued impulse records, or projectiles may write some.
+    pub impulses: bool,
+    /// Projectile records in the character/projectile pool (`projectile_step`).
+    pub projectiles: u32,
+    /// Character controllers in the pool (`character_step.slang`).
+    pub characters: u32,
+    /// In-step scene query records (`query_batch`).
+    pub queries: u32,
+    /// Measurement control: never schedule the fast list (long sweeps then
+    /// stay in the 27-cell stencil, as before the CCD audit's row 1).
+    pub fast_list_off: bool,
+}
+
+/// Whether a step dispatches `broadphase_fast` (host word 30 bit 4 tells the
+/// kernels, which divert long sweeps to the fast list only then).
+pub fn fast_list_scheduled(mo: &MotionInputs) -> bool {
+    (mo.ccd || mo.look_ahead || mo.kinematic) && !mo.fast_list_off
+}
+
+/// `apply_impulses` threads (one per record slot).
+pub const IMPULSE_CAP: u32 = engine_schema::IMPULSE_CAP;
+/// `ccd_mark` threads (one per CCD body slot).
+pub const CCD_BODY_CAP: u32 = engine_schema::CCD_BODY_CAP;
+/// `broadphase_fast` workgroups (they stride the fast list).
+pub const FAST_GROUPS: u64 = engine_schema::FAST_CAP as u64;
+
 /// JP rounds dispatched this step; later rounds run in `color_bodies_tail`.
 pub fn color_rounds_dispatched(m: &StepModes, last: &StepCounters) -> u32 {
     match m.color_round_headroom {
@@ -180,6 +218,7 @@ pub fn resolve_entry(name: &str, persistent: bool) -> &str {
         "solve_dual_compact" => "solve_dual_persistent",
         "convex_classify" => "convex_classify_persistent",
         "convex_manifold" => "convex_manifold_persistent",
+        "ccd_emit" => "ccd_emit_persistent",
         "reuse_all_manifolds" => "reuse_all_manifolds_persistent",
         // The one vehicle kernel that reads contacts (vehicle_step_persistent.slang).
         "vehicle_loads" => "vehicle_loads_persistent",
@@ -269,6 +308,12 @@ pub fn encode_step(
         e.d("apply_commands", u64::from(i.command_count));
     }
     let vehicles = i.vehicle_count > 0;
+    let mo = i.motion;
+    // GPU impulses first (CCD audit row 4): scripted loads and projectile hits
+    // change velocities before bounds are swept.
+    if mo.impulses || mo.projectiles > 0 {
+        e.d("apply_impulses", u64::from(IMPULSE_CAP));
+    }
     if vehicles {
         e.d("vehicle_input", u64::from(i.vehicle_count));
     }
@@ -287,14 +332,36 @@ pub fn encode_step(
             "broadphase_clear",
             u64::from(i.grid_hash_words) * if m.grid_split { 2 } else { 1 },
         );
+        if mo.ccd {
+            e.d("ccd_register", n_bodies);
+        }
         e.d("broadphase_insert", n_cols);
         e.d("broadphase_query", n_cols);
+        if fast_list_scheduled(&mo) {
+            // Sweeps longer than a cell query along their path (row 1).
+            e.phase("broadphaseGrid");
+            e.d("broadphase_fast", FAST_GROUPS * 64);
+            e.phase("ccdFast");
+        }
         if vehicles {
             // One workgroup per wheel, cast at x⁻ through this step's grid (the
             // contact hash reuses its heads later in the step); then, before
             // the constraint graph, link wheels standing on dynamic bodies.
             e.d("wheel_query", u64::from(i.wheel_count) * 64);
             e.d("vehicle_link", u64::from(i.wheel_count.max(1)));
+        }
+        // Projectiles, queries and characters walk the same grid, in the same
+        // window. Projectile hits push bodies through a second (late)
+        // apply_impulses pass over the records they appended.
+        if mo.projectiles > 0 {
+            e.d("projectile_step", u64::from(mo.projectiles) * 64);
+            e.dp("apply_impulses", u64::from(IMPULSE_CAP), 1);
+        }
+        if mo.queries > 0 {
+            e.d("query_batch", u64::from(mo.queries) * 64);
+        }
+        if mo.characters > 0 {
+            e.d("char_move", u64::from(mo.characters) * 64);
         }
     }
     e.d(work_args, 64);
@@ -304,6 +371,16 @@ pub fn encode_step(
         // candidates (slot 64) after the carried resting pairs join them.
         e.w("carry_rest_pairs", 72);
         e.d(work_args, 64);
+    }
+    if mo.ccd && !reuse_manifolds {
+        // Each CCD body's nearest time of impact, then its winning pair
+        // (rows 2-3); the narrowphase leaves that pair to ccd_emit.
+        e.w("ccd_toi", 64);
+        e.w("ccd_pick", 64);
+        // Sleepers in a fast CCD body's path wake before the narrowphase.
+        e.d("ccd_wake", n_bodies);
+        e.d("ccd_mark", u64::from(CCD_BODY_CAP));
+        e.phase("ccdToi");
     }
     let reuse = i.reuse_contacts;
     if reuse_manifolds {
@@ -349,6 +426,11 @@ pub fn encode_step(
             e.w("convex_sat_small", 74);
             e.w("convex_sat_large", 75);
             e.w("convex_manifold", 76);
+        }
+        if mo.ccd {
+            e.phase("narrowphaseMain");
+            e.w(if m.copy_reuse { "ccd_emit_copy_persistent" } else { "ccd_emit" }, 64);
+            e.phase("ccdEmit");
         }
     }
     e.phase("narrowphase");
@@ -438,6 +520,10 @@ pub fn encode_step(
     // Per-colour max CSR degree for degree-aware primal lanes (s[20]).
     e.w("record_color_degrees", 67);
     e.d("write_color_args", 64);
+    if mo.ccd && !reuse_manifolds {
+        // Bodies a fast CCD body woke this step are solved this step (ccd_step.slang).
+        e.d("ccd_unhold", n_bodies);
+    }
     if i.guidance {
         // After the graph (free flight = no contacts or joints this step) and
         // before prediction, which carries the steered velocities.
@@ -452,6 +538,10 @@ pub fn encode_step(
         e.phase("guide");
     }
     e.d("predict_bodies", n_bodies);
+    if mo.ccd && !reuse_manifolds {
+        // Struck bodies' trust regions for this step (ccd_step.slang).
+        e.d("ccd_trust", u64::from(engine_schema::CCD_PAIR_CAP));
+    }
     if vehicles {
         e.d("vehicle_prepare", u64::from(i.vehicle_count));
     }
@@ -547,6 +637,13 @@ pub fn encode_step(
         e.d("soft_break_groups", u64::from(i.soft.beams.max(1)));
         e.phase("soft_plastic");
     }
+    if mo.ccd && !reuse_manifolds {
+        // Post-solve sweep check: no CCD body ends the step past a surface.
+        e.phase("solveMain");
+        e.d("ccd_validate", u64::from(engine_schema::CCD_PAIR_CAP));
+        e.d("ccd_clamp", u64::from(CCD_BODY_CAP));
+        e.phase("ccdValidate");
+    }
     e.d("extract_velocity_sleep", n_bodies);
     if vehicles {
         // Mount loads from the final λ and solved velocities; overloaded parts
@@ -558,6 +655,10 @@ pub fn encode_step(
         // BDF2 velocities and history (a no-op under backward Euler).
         e.d("soft_velocity", u64::from(i.soft.particles.max(1)));
         e.d("soft_sleep", u64::from(i.soft.bodies) * 64);
+    }
+    if mo.characters > 0 {
+        // One lane walks the characters in order (weights on shared supports).
+        e.d("char_post", 64);
     }
     e.d("write_sleep_args", 64);
     // A sleep time beyond any run's length cannot produce candidates, so the
@@ -572,9 +673,16 @@ pub fn encode_step(
         }
     }
     e.w("sleep_island_commit", 67);
+    if mo.ccd && !reuse_manifolds {
+        // CCD impacts on dynamic bodies: the momentum exchange (ccd_step.slang).
+        e.phase("sleepMain");
+        e.d("ccd_respond", u64::from(CCD_BODY_CAP));
+        e.d("ccd_respond_apply", u64::from(CCD_BODY_CAP));
+        e.phase("ccdRespond");
+    }
     e.phase("sleep");
     if m.pose_output {
-        // Reads the final body state; writes only the pose buffers (33-35).
+        // Reads the final body state; writes only the pose buffers (34-36).
         e.d("pose_pack", n_bodies);
         e.phase("pose");
     }
@@ -585,6 +693,25 @@ pub fn encode_step(
 /// emit, resolved with [`resolve_entry`]). Native hosts compile exactly these.
 pub const PERSISTENT_ENTRIES: &[&str] = &[
     "apply_commands_persistent",
+    "apply_impulses",
+    "ccd_register",
+    "broadphase_fast",
+    "ccd_toi",
+    "ccd_pick",
+    "ccd_wake",
+    "ccd_mark",
+    "ccd_respond",
+    "ccd_respond_apply",
+    "ccd_trust",
+    "ccd_unhold",
+    "ccd_validate",
+    "ccd_clamp",
+    "ccd_emit_persistent",
+    "ccd_emit_copy_persistent",
+    "char_move",
+    "char_post",
+    "query_batch",
+    "projectile_step",
     "vehicle_input",
     "wheel_query",
     "vehicle_link",
@@ -652,6 +779,8 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "sleep_island_commit",
 ];
 
+/// Character, query and projectile entries (`character_step.slang`).
+pub const CHARACTER_ENTRIES: &[&str] = &["char_move", "char_post", "query_batch", "projectile_step"];
 /// Soft-body entries (`soft_step.slang`).
 pub const SOFT_ENTRIES: &[&str] = &[
     "soft_wake",
@@ -693,6 +822,9 @@ pub fn kernel_source(entry: &str) -> &'static str {
     }
     if VEHICLE_ENTRIES.contains(&entry) {
         return "vehicle_step.slang";
+    }
+    if CHARACTER_ENTRIES.contains(&entry) {
+        return "character_step.slang";
     }
     if SOFT_ENTRIES.contains(&entry) {
         return "soft_step.slang";
@@ -774,8 +906,10 @@ pub fn pair_warm_key(a: u32, b: u32) -> u32 {
     }
 }
 
-/// GPU bindings every rigid host allocates (`BIND(0..30)` in world_step.slang).
-pub const BIND_COUNT: usize = 33;
+/// GPU bindings every rigid host allocates (`BIND(0..30)` in world_step.slang,
+/// 31 the vehicle pool, 32 the soft-body arena, 33 the character / query /
+/// projectile pool).
+pub const BIND_COUNT: usize = 34;
 /// Pass-uniform slot stride (binding 22, dynamic offsets).
 pub const PASS_ALIGN: u64 = 256;
 
@@ -961,6 +1095,11 @@ pub fn host_words(c: &WorldCapacity, m: &StepModes, i: &StepInputs, h: &HostStat
     // Bit 0: category/mask/group filters. Bit 1: vehicle sever grace (severed
     // parts ignore their chassis by collider generation) unless filters are on.
     s[30] = u32::from(h.has_filters) | (u32::from(!h.has_filters && i.vehicle_count > 0) << 1);
+    // Bit 2: CCD bodies (ccd_step.slang sceneHasCcd); bit 3: kinematic bodies;
+    // bit 4: broadphase_fast is scheduled (encode_step's condition).
+    let mo = i.motion;
+    s[30] |= (u32::from(mo.ccd) << 2) | (u32::from(mo.kinematic) << 3)
+        | (u32::from(fast_list_scheduled(&mo)) << 4);
     s
 }
 
@@ -1014,6 +1153,7 @@ mod tests {
             },
             vehicle_count: 0,
             wheel_count: 0,
+            motion: MotionInputs::default(),
             soft: SoftCounts::default(),
             command_count: 0,
             guidance: false,
@@ -1268,5 +1408,35 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn motion_passes_are_scheduled_only_when_needed() {
+        let names = |i: &StepInputs| -> Vec<&'static str> {
+            encode_step(&fast(), i, false, false)
+                .into_iter()
+                .filter_map(|c| match c {
+                    Cmd::Dispatch { kernel, .. } | Cmd::Indirect { kernel, .. } => Some(kernel),
+                    _ => None,
+                })
+                .collect()
+        };
+        let plain = names(&inputs(10, 0));
+        for k in ["apply_impulses", "ccd_register", "broadphase_fast", "ccd_toi", "ccd_pick", "ccd_emit"] {
+            assert!(!plain.contains(&k), "{k} scheduled without CCD");
+        }
+        let mut i = inputs(10, 0);
+        i.motion.ccd = true;
+        i.motion.impulses = true;
+        let ccd = names(&i);
+        let at = |k: &str| ccd.iter().position(|n| *n == k).unwrap_or_else(|| panic!("{k} missing"));
+        assert!(at("apply_impulses") < at("build_aabbs"));
+        assert!(at("broadphase_clear") < at("ccd_register") && at("ccd_register") < at("broadphase_insert"));
+        assert!(at("broadphase_query") < at("broadphase_fast"));
+        assert!(at("broadphase_fast") < at("ccd_toi") && at("ccd_toi") < at("ccd_pick"));
+        let np = ccd.iter().position(|n| n.starts_with("narrowphase")).unwrap();
+        assert!(at("ccd_pick") < np);
+        let emit = ccd.iter().position(|n| n.starts_with("ccd_emit")).unwrap();
+        assert!(np < emit && emit < at("predict_bodies"));
     }
 }

@@ -1,15 +1,15 @@
 //! Directed debris ABI (`slang/kernels/guide_step.slang`): the per-step
 //! parameters, the authored zones, the per-body guidance record and the plan
-//! slots. Bindings follow the render-pose buffers (33-35).
+//! slots. Bindings follow the render-pose buffers (34-36).
 
 use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
 
-pub const GUIDE_PARAMS_BINDING: usize = 36;
-pub const GUIDE_ZONES_BINDING: usize = 37;
-pub const GUIDE_BODIES_BINDING: usize = 38;
-pub const GUIDE_SCRATCH_BINDING: usize = 39;
-pub const GUIDE_SLOTS_BINDING: usize = 40;
+pub const GUIDE_PARAMS_BINDING: usize = 37;
+pub const GUIDE_ZONES_BINDING: usize = 38;
+pub const GUIDE_BODIES_BINDING: usize = 39;
+pub const GUIDE_SCRATCH_BINDING: usize = 40;
+pub const GUIDE_SLOTS_BINDING: usize = 41;
 
 /// The guidance entries (`guide_step.slang`), in step order.
 pub const GUIDE_ENTRIES: &[&str] = &[

@@ -222,6 +222,18 @@ impl Scene {
             procedural,
         )))
     }
+    /// `columns × rows` copies of this pack scene (one tower), `gap` metres of
+    /// street between them, firing a `radius` m, `mass` kg ball (default: the
+    /// pack's); the joints are kept (engine-fracture `towers.rs`).
+    pub fn towers(&self, columns: u32, rows: u32, gap: f64, radius: Option<f64>, mass: Option<f64>) -> Scene {
+        let ball = radius.zip(mass);
+        Scene(engine_fracture::towers::towers_grid(&self.0, columns, rows, gap, ball))
+    }
+    /// The towers showcase's volley for this block: `[{step, origin, dir, label}]`,
+    /// `raking` glancing shots then `base` at the lower floors, `every` ticks apart.
+    pub fn volley(&self, raking: u32, base: u32, every: u32) -> Result<JsValue, JsError> {
+        to_js(&engine_fracture::towers::volley(&self.0, raking, base, every))
+    }
     /// The scene with the balls' radius times `scale` (their mass stays).
     #[wasm_bindgen(js_name = withProjectileRadius)]
     pub fn with_projectile_radius(&self, scale: f64) -> Result<Scene, JsError> {
@@ -851,6 +863,11 @@ impl Plan {
     pub fn set_projectile_speed_scale(&mut self, scale: f64) -> Result<(), JsError> {
         self.0.set_projectile_speed_scale(scale).map_err(err)
     }
+    /// Continuous collision (time-of-impact contacts) for the shots fired from now on.
+    #[wasm_bindgen(js_name = setProjectileCcd)]
+    pub fn set_projectile_ccd(&mut self, on: bool) {
+        self.0.set_projectile_ccd(on)
+    }
     /// The scene's shot speed (m/s) before the scale.
     #[wasm_bindgen(js_name = shotSpeed)]
     pub fn shot_speed(&self) -> f64 {
@@ -923,24 +940,24 @@ impl Plan {
         let settings: GuidanceSettings = merge(&GuidanceSettings::default(), partial)?;
         self.0.set_guidance(&settings).map_err(err)
     }
-    /// Validate `zones`; returns their records for buffer 37 (offset 0).
+    /// Validate `zones`; returns their records for buffer 38 (offset 0).
     #[wasm_bindgen(js_name = setGuidanceZones)]
     pub fn set_guidance_zones(&mut self, zones: JsValue) -> Result<Vec<u8>, JsError> {
         let zones: Vec<ZoneDesc> = from_js(zones)?;
         self.0.set_guidance_zones(&zones).map_err(err)
     }
-    /// Every body's guidance record for buffer 38 (offset 0): the pieces armed
+    /// Every body's guidance record for buffer 39 (offset 0): the pieces armed
     /// with `tagMask`, or all off for 0.
     #[wasm_bindgen(js_name = guideRecords)]
     pub fn guide_records(&self, tag_mask: u32) -> Vec<u8> {
         self.0.guide_records(tag_mask)
     }
-    /// Bodies per guidance state `[off, armed, steering, done]` in a readback of buffer 38.
+    /// Bodies per guidance state `[off, armed, steering, done]` in a readback of buffer 39.
     #[wasm_bindgen(js_name = guideStateCounts)]
     pub fn guide_state_counts(records: &[u8]) -> Vec<u32> {
         Planner::guide_state_counts(records).to_vec()
     }
-    /// `[byte offset, byte length]` of the zone claim counters in buffer 39.
+    /// `[byte offset, byte length]` of the zone claim counters in buffer 40.
     #[wasm_bindgen(js_name = guideClaimsRange)]
     pub fn guide_claims_range(&self) -> Vec<u32> {
         let (o, n) = self.0.guide_claims_range();

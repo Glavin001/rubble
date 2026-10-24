@@ -72,7 +72,7 @@ typedef enum RbVehicleDamageType {
   RB_DISABLE_PART = 3,
 } RbVehicleDamageType;
 
-// `RbGuidanceZone::shape`.
+// `RbGuidanceZone::shape` (constructed by C callers).
 typedef enum RbZoneShape {
   RB_ZONE_POINT = 0,
   // `size.x` = radius.

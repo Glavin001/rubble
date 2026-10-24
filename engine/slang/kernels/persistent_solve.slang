@@ -3,6 +3,7 @@
 #define ENGINE_PERSISTENT_CONTACTS 1
 #define apply_commands apply_commands_persistent
 #define narrowphase narrowphase_persistent
+#define ccd_emit ccd_emit_persistent
 #define reuse_all_manifolds reuse_all_manifolds_persistent
 #define contact_hash_insert contact_hash_insert_persistent
 #define contact_hash_insert_manifolds contact_hash_insert_manifolds_persistent

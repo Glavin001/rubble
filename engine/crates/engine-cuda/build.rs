@@ -61,6 +61,7 @@ fn main() -> Result<()> {
         kernels.join("world_step.slang"),
         kernels.join("convex_step.slang"),
         kernels.join("vehicle_step.slang"),
+        kernels.join("character_step.slang"),
         root.join("physics/contact_storage.slang"),
     ])?;
 
