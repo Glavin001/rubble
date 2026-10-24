@@ -1,10 +1,10 @@
-//! The Scene menu's pack samples (the Wrecking Yard, `stress_ref::wrecking`): each is a
-//! structure the stress oracle builds, its JSON builds as a lab scene (one body per chunk,
-//! the footings static, a breakable weld per bond at the calibrated strengths), and its
-//! menu entry counts its chunks.
+//! The Scene menu's pack samples (the Wrecking Yard and Topple, `stress_ref::wrecking`):
+//! each is a structure the stress oracle builds, its JSON builds as a lab scene (one body
+//! per chunk, the footings static, a breakable weld per bond at the calibrated strengths),
+//! and its menu entry counts its chunks. Topple's carry their charges.
 
 use engine_fracture::pack::{build_pack_scene, BLAST_DT};
-use engine_fracture::samples::{pack_sample_json, GROUPS, PACK_SAMPLES, WRECKING_YARD};
+use engine_fracture::samples::{pack_sample_json, GROUPS, PACK_SAMPLES, TOPPLE, WRECKING_YARD};
 
 #[test]
 fn pack_samples_build_as_lab_scenes() {
@@ -14,9 +14,11 @@ fn pack_samples_build_as_lab_scenes() {
         .map(|s| s.0)
         .collect();
     assert_eq!(keys, structures);
-    assert_eq!(GROUPS.last(), Some(&WRECKING_YARD));
+    assert!(GROUPS.ends_with(&[WRECKING_YARD, TOPPLE]), "the pack samples' groups last");
     for s in PACK_SAMPLES {
-        assert_eq!(s.group, WRECKING_YARD);
+        assert!([WRECKING_YARD, TOPPLE].contains(&s.group), "{}: {}", s.key, s.group);
+        let charges = stress_ref::wrecking::charges_of(&serde_json::from_slice(&pack_sample_json(s.key).unwrap()).unwrap());
+        assert_eq!(!charges.is_empty(), s.group == TOPPLE, "{}: Topple's structures and only they carry charges", s.key);
         let structure = stress_ref::wrecking::structure(s.key).expect(s.key);
         let chunks = structure.chunks.len();
         let shown = s

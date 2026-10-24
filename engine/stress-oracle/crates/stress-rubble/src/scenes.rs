@@ -108,3 +108,11 @@ pub fn wrecking_yard(key: &str, profile: stress_ref::capability::Profile, second
     s.materials.entry("projectile".into()).or_insert_with(stress_ref::builders::elastic_steel);
     s
 }
+
+/// The Topple tower (`stress_ref::topple`) as the lab's stress modes load it
+/// ([`wrecking_yard`]), and its charges.
+pub fn topple(profile: stress_ref::capability::Profile, seconds: f64) -> (Scene, crate::demolition::Demolition) {
+    let key = "topple_tower";
+    let pack = stress_ref::wrecking::pack(key).expect("the Topple tower");
+    (wrecking_yard(key, profile, seconds), crate::demolition::Demolition::of_pack(&pack))
+}

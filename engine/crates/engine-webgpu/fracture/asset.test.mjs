@@ -51,10 +51,13 @@ test('the house, its flat-hull skips and the layouts of the Scene menu',async()=
  assert.deepEqual(SAMPLES.map(s=>s.key),['house','cuboid','arch','row','grid','cuboidGrid','suburb','cuboids','cuboids2x']);
 });
 
-test('the Wrecking Yard packs (built in Rust) load as lab scenes',()=>{
- assert.deepEqual(PACK_SAMPLES.map(s=>[s.key,s.group]),[['wy_frame10','Wrecking Yard'],['wy_round_tower','Wrecking Yard'],['wy_brick_tower','Wrecking Yard']]);
+test('the Wrecking Yard and Topple packs (built in Rust) load as lab scenes',()=>{
+ assert.deepEqual(PACK_SAMPLES.map(s=>[s.key,s.group]),[['wy_frame10','Wrecking Yard'],['wy_round_tower','Wrecking Yard'],['wy_brick_tower','Wrecking Yard'],['topple_tower','Topple']]);
  const pieces=PACK_SAMPLES.map(s=>buildPackScene(packSampleJson(s.key).buffer).pieces);
- assert.deepEqual(pieces,[1264,337,1444]);
+ assert.deepEqual(pieces,[1264,337,1444,420]);
+ // Topple's pack carries its charges (defaults.charges: node pairs, firing order).
+ const charges=PACK_SAMPLES.map(s=>(JSON.parse(new TextDecoder().decode(packSampleJson(s.key))).defaults.charges??[]).map(c=>[c.name,c.bonds.length]));
+ assert.deepEqual(charges,[[],[],[],[['street-side columns',6],['back-row footings',11]]]);
  assert.throws(()=>packSampleJson('house'),/Unknown bundled scene/);
 });
 

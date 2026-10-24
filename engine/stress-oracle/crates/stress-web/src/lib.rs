@@ -104,6 +104,11 @@ thread_local! {
     /// The loaded pack's line of attack (`defaults.wreckingYard`, the stress frame), for
     /// `stress_fire`.
     static AIM: Cell<Option<stress_ref::wrecking::Aim>> = const { Cell::new(None) };
+    /// The loaded pack's demolition charges (`defaults.charges`) and the ones set off.
+    static DEMOLITION: RefCell<stress_rubble::demolition::Demolition> = RefCell::new(Default::default());
+    /// Charges asked for (`stress_detonate`) and not yet set off: the next frame sets them
+    /// off at its world's frame (the world may be held by a suspended frame now).
+    static DETONATE: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// The bonds' strengths as a multiple of the asset's (`stress_set_bond_strength_scale`).
     static STRENGTH_SCALE: Cell<f64> = const { Cell::new(1.0) };
     /// The view (`stress_set_view`): bond graph, colour mode.
@@ -314,6 +319,41 @@ pub fn stress_fire() -> bool {
     queue_shot(stress_ref::wrecking::launch(&ball, &aim, &format!("shot{k}")))
 }
 
+/// The loaded pack's demolition charges (`defaults.charges`, `stress_ref::wrecking`), as
+/// JSON: `[{name, delay, bonds}]` in firing order (`bonds` how many each cuts); empty for
+/// a scene without any.
+#[wasm_bindgen]
+pub fn stress_charges() -> String {
+    DEMOLITION.with_borrow(|d| serde_json::Value::from(d.charges.iter().map(|c| serde_json::json!({"name": c.name, "delay": c.delay, "bonds": c.bonds.len()})).collect::<Vec<_>>()).to_string())
+}
+
+/// Set off the loaded pack's charge `name`, or with an empty name every charge, each its
+/// delay after the next frame starts: its bonds are cut between two frames, before the
+/// frame steps (never by stepping one again), and the debris it throws gets its kick
+/// (`ThresholdWorld::cut_bonds`, `GpuWorld::cut_bonds`). Runs the simulation. False when
+/// the scene has no charge of that name.
+#[wasm_bindgen]
+pub fn stress_detonate(name: String) -> bool {
+    let known = DEMOLITION.with_borrow(|d| d.charges.iter().any(|c| name.is_empty() || c.name == name));
+    if known {
+        DETONATE.with_borrow_mut(|q| q.push(name));
+        RUNNING.set(true);
+    }
+    known
+}
+
+/// The charges asked for since the last frame, set off from `frame` (the world's frames
+/// stepped), and those due before it.
+fn charges_due(frame: u64, dt: f64) -> Vec<stress_ref::wrecking::PackCharge> {
+    let asked = DETONATE.with_borrow_mut(std::mem::take);
+    DEMOLITION.with_borrow_mut(|d| {
+        for name in asked {
+            d.arm(&name, frame, dt);
+        }
+        d.due(frame)
+    })
+}
+
 /// The strength of every bond of the next `stress_load`, as a multiple of the asset's: the
 /// tensile, compressive and shear strengths of the bonds' materials (their fracture
 /// energies and stiffness stay).
@@ -466,6 +506,7 @@ fn load(level: u8) -> Result<(), String> {
     let profile = PROFILE.get();
     let mut warnings = Vec::new();
     let mut aim = None;
+    let mut demolition = stress_rubble::demolition::Demolition::default();
     let (lab, mut scene) = SOURCE.with_borrow(|source| -> Result<_, String> {
         Ok(match source {
             Source::Cuboid(layout) => {
@@ -485,12 +526,15 @@ fn load(level: u8) -> Result<(), String> {
                 let (scene, notes) = stress_ref::scene_pack::import_value_with(&json, &info.key, "structure", &info.key, profile.import_options())?;
                 warnings = notes;
                 aim = stress_ref::wrecking::aim_of(&json);
+                demolition = stress_rubble::demolition::Demolition::of_pack(&json);
                 (lab, scene)
             }
         })
     })?;
     WARNINGS.set(warnings);
     AIM.set(aim);
+    DEMOLITION.set(demolition);
+    DETONATE.with_borrow_mut(|q| q.clear());
     let mut camera = Orbit::new(&lab);
     let (w, h) = SIZE.get();
     camera.set_mode(VIEW_MODE.get(), w.max(1) as f64 / h.max(1) as f64);
@@ -643,6 +687,10 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, elapsed_ms: f64) -> Result<(
                 l.behind = 0.0;
                 break;
             }
+            // Charges due: cut between this frame and the last (they wait for the GPU).
+            for c in charges_due(l.world.frame, dt) {
+                l.world.detonate(gpu, &c).map_err(|e| format!("charge {}: {e}", c.name))?;
+            }
             l.world.step_frame(gpu)?;
             l.behind -= dt;
             stepped += 1;
@@ -681,6 +729,8 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, elapsed_ms: f64) -> Result<(
         "shots": FIRED.get(),
         "warnings": WARNINGS.with_borrow(|w| w.clone()),
         "canFire": AIM.get().is_some(),
+        "charges": DEMOLITION.with_borrow(|d| d.names()),
+        "chargesArmed": DEMOLITION.with_borrow(|d| d.pending()) + DETONATE.with_borrow(|q| q.len()),
         "ballMass": s.map_or(0.0, |s| s.mass),
         "ballRadius": s.map_or(0.0, |s| s.radius),
         "ballSpeed": s.map_or(0.0, |s| engine_fracture::plan::default_shot_speed(s.extent, s.speed)),
@@ -744,6 +794,11 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
                 }
                 while l.behind >= dt {
                     let t = web_time::Instant::now();
+                    // Charges due: cut between this frame and the last.
+                    for c in charges_due(l.world.frame, dt) {
+                        let bonds = c.bond_indices(&l.world.scene.bodies[0].bonds).map_err(|e| format!("charge {}: {e}", c.name))?;
+                        l.world.cut_bonds(gpu, 0, &bonds, &c.debris, c.kick).map_err(|e| format!("charge {}: {e}", c.name))?;
+                    }
                     l.world.step_frame(gpu)?;
                     step_ms += t.elapsed().as_secs_f64() * 1e3;
                     l.behind -= dt;
@@ -782,6 +837,8 @@ fn frame(elapsed_ms: f64) -> Result<(), String> {
                         "shots": FIRED.get(),
                         "warnings": WARNINGS.with_borrow(|w| w.clone()),
                         "canFire": AIM.get().is_some(),
+                        "charges": DEMOLITION.with_borrow(|d| d.names()),
+                        "chargesArmed": DEMOLITION.with_borrow(|d| d.pending()) + DETONATE.with_borrow(|q| q.len()),
                         "gpuWaits": engine_gpu_wait::WAITS.load(std::sync::atomic::Ordering::Relaxed),
                         "gpuYields": engine_gpu_wait::YIELDS.load(std::sync::atomic::Ordering::Relaxed),
                         "ballMass": SHOOTING.get().map_or(0.0, |s| s.mass),

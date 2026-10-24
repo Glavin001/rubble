@@ -79,10 +79,15 @@ pub const GROUPS: &[&str] = &[
     "Rows and grids",
     "Suburbs (lots and roads)",
     WRECKING_YARD,
+    TOPPLE,
 ];
 
 /// The Scene menu group of the Wrecking Yard structures.
 pub const WRECKING_YARD: &str = "Wrecking Yard";
+
+/// The Scene menu group of the structures brought down by their demolition charges
+/// (`stress_ref::topple`; the pack's `defaults.charges`).
+pub const TOPPLE: &str = "Topple";
 
 /// A Scene menu entry built in Rust as a scene pack (`stress_ref::wrecking`): the hosts
 /// load its JSON (`pack_sample_json`) as they load any pack (`pack::build_pack_scene`,
@@ -117,6 +122,12 @@ pub const PACK_SAMPLES: &[PackSample] = &[
         group: WRECKING_YARD,
         menu: "Brick tower · 1,444 chunks",
         label: "brick tower",
+    },
+    PackSample {
+        key: "topple_tower",
+        group: TOPPLE,
+        menu: "High-rise beside a street, with charges · 420 chunks",
+        label: "topple tower",
     },
 ];
 

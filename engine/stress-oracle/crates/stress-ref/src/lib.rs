@@ -48,4 +48,5 @@ pub mod solver;
 pub mod statics;
 pub mod structure;
 pub mod world;
+pub mod topple;
 pub mod wrecking;
