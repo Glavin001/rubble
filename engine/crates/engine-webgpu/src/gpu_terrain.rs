@@ -429,7 +429,6 @@ impl WgpuSim {
         self.disp(pass, "mpm_write_args", 1, None);
         self.disp_terrain_particles(pass, "mpm_count");
         self.disp_terrain_blocks(pass, "mpm_scan_cells");
-        self.disp(pass, "mpm_scan_blocks", 64, None);
         self.disp_terrain_particles(pass, "mpm_scatter");
         self.disp_terrain_blocks(pass, "mpm_cell_sort");
         self.disp_terrain_particles(pass, "mpm_payload");
@@ -590,6 +589,9 @@ impl WgpuSim {
         name: &str,
         offset: u64,
     ) {
+        if !self.wg_allows(name) {
+            return;
+        }
         let p = &self.pipes[name];
         pass.set_pipeline(&p.pipeline);
         pass.set_bind_group(0, &p.bind, &[]);

@@ -39,7 +39,7 @@ pub const MPM_C_PARTICLES: usize = 3;
 pub const MPM_C_PARCELS: usize = 5;
 pub const MPM_C_DEPOSITED: usize = 6;
 pub const MPM_C_ESCAPED: usize = 7;
-pub const MPM_COUNTER_WORDS: usize = 8;
+pub const MPM_COUNTER_WORDS: usize = 12;
 
 /// `MpmParams.dims.w` without a bed heightfield.
 pub const MPM_NO_BED: u32 = u32::MAX;

@@ -168,7 +168,6 @@ const WORLD_ENTRIES: &[&str] = &[
     "mpm_write_args",
     "mpm_count",
     "mpm_scan_cells",
-    "mpm_scan_blocks",
     "mpm_scatter",
     "mpm_cell_sort",
     "mpm_payload",

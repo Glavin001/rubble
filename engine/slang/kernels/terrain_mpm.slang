@@ -7,8 +7,7 @@
 //                   block clears its cells)
 //   mpm_write_args  workgroup counts of the per-block kernels (one per block)
 //   mpm_count       count particles per cell (the cell of their stencil's base node)
-//   mpm_scan_cells  per block: cell starts and the block's total
-//   mpm_scan_blocks block starts (one workgroup)
+//   mpm_scan_cells  per block: cell starts, and the block's range claimed
 //   mpm_scatter     particle ids into their cell's range
 //   mpm_cell_sort   each cell's range by particle id (the sums' fixed order)
 //   mpm_payload     per particle: mass, momentum and the affine term, in sorted order
@@ -63,6 +62,7 @@ static const uint MPM_C_BAKE_MAX = 4u;    // largest baked or deposited height (
 static const uint MPM_C_PARCELS = 5u;     // parcels ever ejected this region (slots, live or not)
 static const uint MPM_C_DEPOSITED = 6u;   // quanta parcels have laid on the heightfield
 static const uint MPM_C_ESCAPED = 7u;     // quanta that left the heightfield's footprint
+static const uint MPM_C_SORTED = 8u;      // sorted slots claimed by blocks this substep
 static const uint MPM_OVERFLOW_BLOCKS = 1u;
 static const uint MPM_OVERFLOW_HASH = 2u;
 static const uint MPM_OUTSIDE = 4u;
@@ -185,6 +185,11 @@ void mpmInsertBlock(uint key, MpmParams p)
     uint s = mpmHashSlot(key, slots);
     for (uint probe = 0u; probe < slots; probe++)
     {
+        // Most particles find their block already there: read before the CAS
+        // (thousands of particles inserting one key serialised on it).
+        uint seen = ALOAD(gMpmHash[2u * s]);
+        if (seen == key + 1u) return;
+        if (seen != 0u) { s = (s + 1u) & (slots - 1u); continue; }
         uint old;
         ACAS4(gMpmHash[2u * s], 0u, key + 1u, old);
         if (old == 0u)
@@ -237,6 +242,28 @@ uint mpmCellOf(int3 g, MpmParams p)
     return b * MPM_BLOCK_NODES + l.x + 4u * l.y + 16u * l.z;
 }
 
+// The 2×2×2 blocks from block coordinates k0 (each MPM_NO_BLOCK if absent), so a
+// 3³ stencil's 27 nodes cost 8 hash lookups instead of 27.
+void mpmBlockCube(int3 k0, MpmParams p, out uint blk[8])
+{
+    for (uint i = 0u; i < 8u; i++)
+    {
+        int3 k = k0 + int3(int(i & 1u), int((i >> 1) & 1u), int(i >> 2));
+        blk[i] = any(k < int3(0, 0, 0)) ? MPM_NO_BLOCK : mpmFindBlock(mpmBlockKey(k), p);
+    }
+}
+
+// Cell (node) index of g from the cube of blocks at k0 (g's block within it).
+uint mpmCellInCube(int3 g, int3 k0, uint blk[8])
+{
+    int3 d = (g >> 2) - k0;
+    if (any(g < int3(0, 0, 0)) || any(d < int3(0, 0, 0)) || any(d > int3(1, 1, 1))) return MPM_NO_BLOCK;
+    uint b = blk[uint(d.x) + 2u * uint(d.y) + 4u * uint(d.z)];
+    if (b == MPM_NO_BLOCK) return MPM_NO_BLOCK;
+    uint3 l = uint3(g & 3);
+    return b * MPM_BLOCK_NODES + l.x + 4u * l.y + 16u * l.z;
+}
+
 // A particle one cell inside the region box (its stencil stays on the grid).
 bool mpmInside(float3 x, MpmParams p)
 {
@@ -264,6 +291,7 @@ void mpm_clear(uint3 tid : SV_DispatchThreadID)
     {
         ASTORE(gMpmCounters[MPM_C_BLOCKS], 0u);
         ASTORE(gMpmCounters[MPM_C_MAX_SPEED], 0u);
+        ASTORE(gMpmCounters[MPM_C_SORTED], 0u);
     }
 }
 
@@ -340,35 +368,15 @@ void mpm_scan_cells(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     }
     if (!live) return;
     ASTORE(gMpmCells[4u * c + 1u], gsMpmScan[l] - n);
-    if (l == MPM_BLOCK_NODES - 1u) ASTORE(gMpmBlocks[4u * b + 1u], gsMpmScan[l]);
-}
-
-// One workgroup of 256: exclusive scan of the block totals (each lane a chunk).
-[shader("compute")]
-[numthreads(256, 1, 1)]
-void mpm_scan_blocks(uint3 lid : SV_GroupThreadID)
-{
-    uint l = lid.x;
-    MpmParams p = mpmParams();
-    uint blocks = min(ALOAD(gMpmCounters[MPM_C_BLOCKS]), p.counts.z);
-    uint chunk = (blocks + 255u) / 256u;
-    uint first = l * chunk, last = min(first + chunk, blocks);
-    uint sum = 0u;
-    for (uint b = first; b < last; b++) sum += ALOAD(gMpmBlocks[4u * b + 1u]);
-    gsMpmScan[l] = sum;
-    GROUP_SYNC();
-    for (uint d = 1u; d < 256u; d <<= 1u)
+    if (l == MPM_BLOCK_NODES - 1u)
     {
-        uint add = l >= d ? gsMpmScan[l - d] : 0u;
-        GROUP_SYNC();
-        gsMpmScan[l] += add;
-        GROUP_SYNC();
-    }
-    uint start = gsMpmScan[l] - sum;
-    for (uint b = first; b < last; b++)
-    {
+        // The block's range in gMpmSorted. Where it lands does not change any
+        // sum (P2G adds by cell and particle id), so an atomic claim does.
+        uint total = gsMpmScan[l];
+        uint start;
+        AADD3(gMpmCounters[MPM_C_SORTED], total, start);
+        ASTORE(gMpmBlocks[4u * b + 1u], total);
         ASTORE(gMpmBlocks[4u * b + 2u], start);
-        start += ALOAD(gMpmBlocks[4u * b + 1u]);
     }
 }
 
@@ -456,10 +464,7 @@ void mpm_payload(uint3 tid : SV_DispatchThreadID)
 {
     uint s = mpmIndex(tid);
     MpmParams p = mpmParams();
-    uint blocks = min(ALOAD(gMpmCounters[MPM_C_BLOCKS]), p.counts.z);
-    if (blocks == 0u) return;
-    uint total = ALOAD(gMpmBlocks[4u * (blocks - 1u) + 2u]) + ALOAD(gMpmBlocks[4u * (blocks - 1u) + 1u]);
-    if (s >= total) return;
+    if (s >= ALOAD(gMpmCounters[MPM_C_SORTED])) return;
     uint id = gMpmSorted[s];
     MpmParticle q = gMpmParticles[id];
     float m = q.xm.w;
@@ -494,11 +499,15 @@ void mpm_p2g(uint3 tid : SV_DispatchThreadID)
     float dx = p.origin.w;
     float3 mv = float3(0, 0, 0);
     float m = 0.0;
+    // Bases g − 2 .. g lie in the blocks from (g − 2) >> 2.
+    int3 k0 = (g - 2) >> 2;
+    uint blk[8];
+    mpmBlockCube(k0, p, blk);
     for (uint o = 0u; o < 27u; o++)
     {
         uint3 off = uint3(o % 3u, (o / 3u) % 3u, o / 9u);
         int3 base = g - int3(off);
-        uint c = mpmCellOf(base, p);
+        uint c = mpmCellInCube(base, k0, blk);
         if (c == MPM_NO_BLOCK) continue;
         uint first, count;
         mpmCellRange(c, first, count);
@@ -679,10 +688,14 @@ void mpm_g2p(uint3 tid : SV_DispatchThreadID)
     float3 wx = mpmWeights(fx.x), wy = mpmWeights(fx.y), wz = mpmWeights(fx.z);
     float3 v = float3(0, 0, 0);
     float3x3 B = float3x3(0, 0, 0, 0, 0, 0, 0, 0, 0);
+    // Nodes base .. base + 2 lie in the blocks from base >> 2.
+    int3 k0 = base >> 2;
+    uint blk[8];
+    mpmBlockCube(k0, p, blk);
     for (uint o = 0u; o < 27u; o++)
     {
         uint3 off = uint3(o % 3u, (o / 3u) % 3u, o / 9u);
-        uint c = mpmCellOf(base + int3(off), p);
+        uint c = mpmCellInCube(base + int3(off), k0, blk);
         if (c == MPM_NO_BLOCK) continue;
         float w = mpmWeightAt(wx, off.x) * mpmWeightAt(wy, off.y) * mpmWeightAt(wz, off.z);
         float3 vi = gMpmGrid[2u * c].xyz;
