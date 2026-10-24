@@ -138,13 +138,14 @@ static const uint WD_BUMP = 128u;
 static const uint WD_PENDING_ADD = 256u; // host attached this wheel slot; GPU adds its mass
 
 // ---- Parts (chassis collider groups with a functional role) ----
-static const uint PART_STRIDE = 6u;
+static const uint PART_STRIDE = 7u;
 static const uint P_CFG = 0u;      // uint4(colliderStart, colliderCount, role, roleWheelMask)
 static const uint P_MASS = 1u;     // mass, Ixx, Iyy, Izz (about part COM, chassis axes)
 static const uint P_COM = 2u;      // localCom.xyz, asfloat(state)
 static const uint P_PARK = 3u;     // uint4(parkedBody, vehicle, pad, pad)
 static const uint P_MOUNT = 4u;    // mount anchor (chassis space).xyz, breakForce
 static const uint P_LOAD = 5u;     // breakTorque, lastForce, lastTorque, peak load ratio (vehicle_loads)
+static const uint P_TREE = 6u;     // uint4(parent part (NO_INDEX = chassis), carrier part once carried off (NO_INDEX), pad, pad)
 
 static const uint PR_BODY = 0u;
 static const uint PR_ENGINE = 1u;

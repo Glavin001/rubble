@@ -45,7 +45,31 @@ pub struct Renderer {
     /// 0: materials; 1: sleep state (awake orange, asleep blue, static grey); 2: bodies
     /// (one colour per body).
     pub color_mode: u32,
+    trail: RenderPipelineState,
+    trail_buf: Option<Buffer>,
+    trail_verts: u64,
+    last_draw: Option<CommandBuffer>,
 }
+
+/// Line pipeline for projectile trails: (x, y, z, r, g, b, a) per vertex, line
+/// list, drawn as four instances a pixel apart so they read at any scale.
+const TRAIL_MSL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+struct TrailOut { float4 pos [[position]]; float4 col; };
+struct TrailView { float4x4 vp; float4 px; };
+vertex TrailOut trail_vs(uint vid [[vertex_id]], uint iid [[instance_id]],
+                         const device float* v [[buffer(0)]], constant TrailView& view [[buffer(1)]]) {
+    TrailOut o;
+    float3 p = float3(v[vid * 7], v[vid * 7 + 1], v[vid * 7 + 2]);
+    o.pos = view.vp * float4(p, 1.0);
+    float2 off = float2(float(iid & 1u), float(iid >> 1u)) - 0.5;
+    o.pos.xy += off * view.px.xy * 2.0 * o.pos.w;
+    o.col = float4(v[vid * 7 + 3], v[vid * 7 + 4], v[vid * 7 + 5], v[vid * 7 + 6]);
+    return o;
+}
+fragment float4 trail_fs(TrailOut i [[stage_in]]) { return i.col; }
+"#;
 
 fn buffer<T>(device: &Device, data: &[T]) -> Buffer {
     let bytes = std::mem::size_of_val(data).max(4) as u64;
@@ -95,7 +119,33 @@ impl Renderer {
             device.new_depth_stencil_state(&d)
         };
         let (unique, index) = index_mesh(&scene.vertices);
+        let trail = {
+            let lib = device
+                .new_library_with_source(TRAIL_MSL, &opts)
+                .map_err(|e| anyhow::anyhow!("trail: {e}"))?;
+            let desc = RenderPipelineDescriptor::new();
+            let vs = lib
+                .get_function("trail_vs", None)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let fs = lib
+                .get_function("trail_fs", None)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            desc.set_vertex_function(Some(&vs));
+            desc.set_fragment_function(Some(&fs));
+            desc.color_attachments()
+                .object_at(0)
+                .unwrap()
+                .set_pixel_format(format);
+            desc.set_depth_attachment_pixel_format(MTLPixelFormat::Depth32Float);
+            device
+                .new_render_pipeline_state(&desc)
+                .map_err(|e| anyhow::anyhow!("pipeline trail: {e}"))?
+        };
         Ok(Self {
+            trail,
+            trail_buf: None,
+            trail_verts: 0,
+            last_draw: None,
             solid: pipeline("fs")?,
             ground: pipeline("ground")?,
             wire: pipeline("wire")?,
@@ -127,6 +177,26 @@ impl Renderer {
         })
     }
 
+    /// Trail line segments for the next frames: 7 floats per vertex (position,
+    /// rgba), two vertices per segment.
+    pub fn set_trails(&mut self, device: &Device, verts: &[f32]) {
+        self.trail_verts = verts.len() as u64 / 7;
+        if self.trail_verts == 0 {
+            return;
+        }
+        let bytes = std::mem::size_of_val(verts) as u64;
+        if self.trail_buf.as_ref().is_none_or(|b| b.length() < bytes) {
+            self.trail_buf = Some(device.new_buffer(
+                bytes.max(1 << 16) * 2,
+                MTLResourceOptions::StorageModeShared,
+            ));
+        }
+        let buf = self.trail_buf.as_ref().unwrap();
+        unsafe {
+            std::ptr::copy_nonoverlapping(verts.as_ptr(), buf.contents() as *mut f32, verts.len())
+        };
+    }
+
     /// Draw into the window's next drawable and present it.
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
@@ -154,6 +224,23 @@ impl Renderer {
         );
         cb.present_drawable(drawable);
         cb.commit();
+        self.last_draw = Some(cb.to_owned());
+    }
+
+    /// GPU time (ms) of the previous frame's draw, once it has completed.
+    pub fn last_draw_gpu_ms(&self) -> Option<f64> {
+        use objc::{msg_send, sel, sel_impl};
+        let cb = self.last_draw.as_ref()?;
+        if cb.status() != MTLCommandBufferStatus::Completed {
+            return None;
+        }
+        let (a, b): (f64, f64) = unsafe {
+            (
+                msg_send![cb.as_ref(), GPUStartTime],
+                msg_send![cb.as_ref(), GPUEndTime],
+            )
+        };
+        Some((b - a).max(0.0) * 1e3)
     }
 
     /// Encode one frame into `target` (a drawable or an offscreen texture).
@@ -237,6 +324,26 @@ impl Renderer {
                 // The newest `projectile_slots` (each shot past them reuses the oldest).
                 shots.min(self.projectile_slots) as u64 * self.projectile_per_slot,
             );
+        }
+        if self.trail_verts > 0 {
+            #[repr(C)]
+            struct TrailView {
+                vp: [f32; 16],
+                px: [f32; 4],
+            }
+            let tv = TrailView {
+                vp: view_proj,
+                px: [1.0 / w as f32, 1.0 / h as f32, 0.0, 0.0],
+            };
+            e.set_render_pipeline_state(&self.trail);
+            e.set_depth_stencil_state(&self.depth_less);
+            e.set_vertex_buffer(0, self.trail_buf.as_deref(), 0);
+            e.set_vertex_bytes(
+                1,
+                std::mem::size_of::<TrailView>() as u64,
+                &tv as *const TrailView as *const _,
+            );
+            e.draw_primitives_instanced(MTLPrimitiveType::Line, 0, self.trail_verts, 4);
         }
         if show_bonds && self.counts[1] > 0 {
             bind(&self.wire, &self.depth_always, &self.lines);

@@ -124,6 +124,12 @@ pub struct WgpuSim {
     command_count: u32,
     /// Run `pose_pack` each step (render poses and the moved-body list).
     pose_output: bool,
+    /// Run `contact_events` each step (`set_contact_events`).
+    contact_events: bool,
+    /// Explosions queued for the next step (`write_explosions`).
+    explosion_count: u32,
+    /// Some body has motion locks (`set_motion_locks`).
+    motion_locks: bool,
     /// The last `step*` call ran the GPU step (false: skipped, nothing awake).
     last_step_ran: bool,
     sleep_island_rounds: u32,
@@ -146,6 +152,8 @@ pub struct WgpuSim {
     grid_levels: u32,
     /// (collider count, base cell, levels): recomputed only when colliders change.
     grid_cache: Option<(u32, f32, u32)>,
+    /// Colliders were added after step 0; see `build_all_bounds`.
+    bounds_dirty: bool,
     /// Any collider carries a collision filter (HOST_S(21)).
     has_filters: bool,
     /// The last step's manifolds still describe the scene (whole-step reuse).
@@ -169,10 +177,35 @@ pub struct WgpuSim {
     soft: Option<SoftHost>,
     /// Event ring read cursor (`poll_joint_breaks`).
     events_seen: u32,
+    /// Some body carries `BODY_CCD` (the continuous-collision passes run).
+    has_ccd: bool,
+    /// Some body is kinematic: its motion needs every step (no asleep skip).
+    has_kinematic: bool,
+    /// Impulse records for the next step (`apply_impulses`).
+    impulse_queue: Vec<ImpulseRecord>,
+    /// The step being encoded applies impulse records.
+    impulses_this_step: bool,
+    /// Character / query / projectile pool (binding 33).
+    char_cap: engine_schema::character::CharacterCapacity,
+    /// Characters: (inner kinematic body, inner collider).
+    characters: Vec<(u32, u32)>,
+    query_count: u32,
+    projectile_count: u32,
+    /// Event ring read cursor of `poll_motion_events`.
+    motion_events_seen: u32,
+    /// Measurement control (`set_fast_list`): long sweeps stay in the grid.
+    fast_list_off: bool,
     /// Event ring read cursor (`poll_beam_breaks`).
     beam_events_seen: u32,
     /// Event ring read cursor (`poll_mount_breaks`).
     mount_events_seen: u32,
+}
+
+/// Motion bookkeeping of uploaded bodies: CCD and kinematic flags.
+pub(crate) fn body_motion_flags(bodies: &[BodyState]) -> (bool, bool) {
+    let ccd = bodies.iter().any(|b| b.flags & BODY_CCD != 0);
+    let kin = bodies.iter().any(|b| b.flags & (BodyFlags::Kinematic as u32 | BodyFlags::Dynamic as u32) == BodyFlags::Kinematic as u32);
+    (ccd, kin)
 }
 
 /// Must agree with Slang dispatchIndex: 2^21 threads per row, with no truncation.
@@ -236,6 +269,7 @@ fn persistent_entry(name: &str) -> &str {
         "convex_manifold" => "convex_manifold_persistent",
         "reuse_all_manifolds" => "reuse_all_manifolds_persistent",
         "vehicle_loads" => "vehicle_loads_persistent",
+        "contact_events" => "contact_events_persistent",
         _ => name,
     }
 }
@@ -462,6 +496,8 @@ impl WgpuSim {
         sizes[9] +=
             u64::from(4 * (vehicle_capacity.max_vehicles + vehicle_capacity.max_wheels)) * 32;
         sizes[31] = vehicle_capacity.bytes().max(16);
+        let char_cap = engine_schema::character::CharacterCapacity::default();
+        sizes[33] = char_cap.bytes().max(16);
         let limits = device.limits();
         for (i, &bytes) in sizes.iter().enumerate() {
             check_limits(&limits, i, bytes)?;
@@ -670,6 +706,9 @@ impl WgpuSim {
             joint_count: 0,
             command_count: 0,
             pose_output,
+            contact_events: false,
+            explosion_count: 0,
+            motion_locks: false,
             last_step_ran: false,
             sleep_island_rounds: 8,
             last_counters: StepCounters::default(),
@@ -685,6 +724,7 @@ impl WgpuSim {
             has_convex: false,
             grid_levels: 0,
             grid_cache: None,
+            bounds_dirty: false,
             has_filters: false,
             manifolds_valid: false,
             hull_records_capacity: hull_records,
@@ -693,9 +733,20 @@ impl WgpuSim {
             vehicles: Some(VehicleHost::new(vehicle_capacity, aabb_tail)),
             soft: None,
             events_seen: 0,
+            has_ccd: false,
+            has_kinematic: false,
+            impulse_queue: Vec::new(),
+            impulses_this_step: false,
+            char_cap,
+            characters: Vec::new(),
+            query_count: 0,
+            projectile_count: 0,
+            motion_events_seen: 0,
+            fast_list_off: false,
             beam_events_seen: 0,
             mount_events_seen: 0,
         };
+        sim.write_character_header();
         // Kernel fixtures in the unit tests set the modes they exercise on top
         // of the pre-P0 controls; integration tests run the shipped defaults.
         #[cfg(test)]
@@ -712,7 +763,9 @@ impl WgpuSim {
         self.color_headroom = None;
     }
 
-    pub(crate) fn use_control_modes(&mut self) {
+    /// The browser host's step modes (rigid_plan::StepModes::default): the
+    /// control path for checks that must match world-host.mjs.
+    pub fn use_control_modes(&mut self) {
         self.manifold_hash_insert = false;
         self.warm_record_hash = false;
         self.reuse_copy = false;
@@ -777,11 +830,80 @@ impl WgpuSim {
             self.host_bodies.extend_from_slice(bodies);
             self.body_count += count;
             self.manifolds_valid = false;
+            self.note_motion_flags(bodies);
             // A body added to a world that fell asleep must still step: the
             // all-asleep skip only knows the last step's awake count.
             self.wake_pending = true;
         }
         start..self.body_count
+    }
+
+    pub(crate) fn note_motion_flags(&mut self, bodies: &[BodyState]) {
+        let (ccd, kin) = body_motion_flags(bodies);
+        self.has_ccd |= ccd;
+        self.has_kinematic |= kin;
+    }
+
+    /// Queue an impulse `j` (N·s) at world point `point` on a dynamic body, applied
+    /// on the GPU at the start of the next step (`apply_impulses`): no body
+    /// upload, so manifold reuse stays on. Records on one body are summed in
+    /// queue order; the body wakes.
+    pub fn apply_impulse(&mut self, body: u32, j: [f32; 3], point: [f32; 3]) {
+        self.queue_impulses(&[ImpulseRecord::at_point(body, j, point)]);
+    }
+
+    /// Queue a linear impulse through the body's centre of mass and an angular
+    /// impulse (world, N·m·s), applied on the GPU at the next step's start.
+    pub fn apply_linear_angular_impulse(&mut self, body: u32, linear: [f32; 3], angular: [f32; 3]) {
+        self.queue_impulses(&[ImpulseRecord::linear_angular(body, linear, angular)]);
+    }
+
+    /// Set a kinematic body's velocity (linear m/s, angular rad/s) from the next
+    /// step on, on the GPU: the body moves by it each step (contacts carry what
+    /// rides on it) until changed.
+    pub fn set_kinematic_velocity(&mut self, body: u32, linear: [f32; 3], angular: [f32; 3]) {
+        self.queue_impulses(&[ImpulseRecord::set_velocity(body, linear, angular)]);
+    }
+
+    /// Queue impulse records for the next step. Panics past `IMPULSE_CAP` records
+    /// in one step (an explicit limit, never a silent drop).
+    pub fn queue_impulses(&mut self, records: &[ImpulseRecord]) {
+        assert!(
+            self.impulse_queue.len() + records.len() <= IMPULSE_CAP as usize,
+            "more than {IMPULSE_CAP} impulse records in one step"
+        );
+        for r in records {
+            assert!(r.body < self.body_count, "impulse on body {} of {}", r.body, self.body_count);
+        }
+        self.impulse_queue.extend_from_slice(records);
+        self.wake_pending = true;
+    }
+
+    /// Upload the queued impulse records and their count (scratch words), before
+    /// the step's uniforms (which schedule `apply_impulses` from it).
+    fn upload_impulses(&mut self) {
+        let n = self.impulse_queue.len() as u32;
+        self.impulses_this_step = n > 0;
+        if n > 0 {
+            // Mode word: mode | queue index << 8 (the per-body sum order).
+            let keyed: Vec<ImpulseRecord> = self
+                .impulse_queue
+                .iter()
+                .enumerate()
+                .map(|(k, r)| ImpulseRecord { mode: (r.mode & 255) | ((k as u32) << 8), ..*r })
+                .collect();
+            self.queue.write_buffer(&self.bufs[21], u64::from(IMPULSE_BASE) * 4, bytemuck::cast_slice(&keyed));
+            // IMPULSE_COUNT and IMPULSE_FIRST are adjacent words.
+            self.queue.write_buffer(&self.bufs[21], u64::from(IMPULSE_COUNT) * 4, bytemuck::bytes_of(&n));
+            self.queue.write_buffer(&self.bufs[21], u64::from(IMPULSE_FIRST) * 4, bytemuck::bytes_of(&n));
+        }
+        self.impulse_queue.clear();
+    }
+
+    /// TOI casts that fell back to look-ahead in the last step (GJK budget):
+    /// a diagnostic read of the scratch word.
+    pub fn ccd_fallbacks(&self) -> u32 {
+        self.read_buffer_range::<u32>(21, u64::from(CCD_FALLBACKS) * 4, 1)[0]
     }
 
     pub fn add_collider(&mut self, col: Collider) -> u32 {
@@ -790,6 +912,7 @@ impl WgpuSim {
 
     /// Append collider records in one contiguous upload, preserving body indices.
     pub fn add_colliders(&mut self, colliders: &[Collider]) -> std::ops::Range<u32> {
+        self.bounds_dirty |= self.steps_done > 0 && !colliders.is_empty();
         let start = self.collider_count;
         let count = u32::try_from(colliders.len()).expect("collider batch exceeds u32 index space");
         assert!(
@@ -886,6 +1009,11 @@ impl WgpuSim {
         self.manifolds_valid = false;
     }
 
+    /// The host's copy of a collider record.
+    pub fn collider(&self, id: u32) -> Collider {
+        self.host_cols[id as usize]
+    }
+
     /// Replace a collider (e.g. swap a fractured chunk's hull or its filter).
     /// Release the old hull's arena reference yourself once nothing uses it.
     pub fn set_collider(&mut self, id: u32, col: Collider) {
@@ -911,6 +1039,7 @@ impl WgpuSim {
             self.host_bodies.extend_from_slice(bodies);
             self.body_count += count;
             self.manifolds_valid = false;
+            self.note_motion_flags(bodies);
         }
         let col_start = self.collider_count;
         let count = u32::try_from(colliders.len()).expect("collider batch exceeds u32 index space");
@@ -955,6 +1084,7 @@ impl WgpuSim {
         self.host_bodies[first as usize..(first + count) as usize].copy_from_slice(bodies);
         self.manifolds_valid = false;
         self.wake_pending = true;
+        self.note_motion_flags(bodies);
     }
 
     /// A body a GPU kernel retired in place (no mass, motion or flags; stress-gpu
@@ -1005,6 +1135,9 @@ impl WgpuSim {
     /// the separating-axis cache, hints keyed by id, are cleared. Returns the old → new
     /// maps (`u32::MAX`: dropped). For appenders that retire slots instead of reusing
     /// them (stress-rubble's fracture splits).
+    /// Characters, projectiles and queued impulses are renumbered too (a
+    /// character's inner capsule must be kept; a dropped ground or hit reads
+    /// as none, a queued impulse on a dropped body is discarded).
     pub fn compact(&mut self, keep_bodies: &[u32], keep_colliders: &[u32]) -> (Vec<u32>, Vec<u32>) {
         assert!(
             self.joint_count == 0 && self.vehicle_count() == 0,
@@ -1123,6 +1256,7 @@ impl WgpuSim {
         self.grid_cache = None;
         self.manifolds_valid = false;
         self.wake_pending = true;
+        self.remap_motion(&body_map, &col_map);
         (body_map, col_map)
     }
 
@@ -1309,6 +1443,24 @@ impl WgpuSim {
         broken
     }
 
+    /// Re-express one side of a joint in its body's new solver frame (the
+    /// body's centre of mass moved): that side's anchor and orientation, and
+    /// for side B the rest orientation too. Solver state is untouched.
+    pub fn set_joint_frame(&mut self, id: u32, side_b: bool, anchor: [f32; 3], rot: [f32; 4]) {
+        let base = Self::joint_offset(id);
+        let (a, r) = if side_b {
+            (std::mem::offset_of!(Joint, anchor_b), std::mem::offset_of!(Joint, frame_b))
+        } else {
+            (std::mem::offset_of!(Joint, anchor_a), std::mem::offset_of!(Joint, frame_a))
+        };
+        self.queue.write_buffer(&self.bufs[5], base + a as u64, bytemuck::cast_slice(&anchor));
+        self.queue.write_buffer(&self.bufs[5], base + r as u64, bytemuck::cast_slice(&rot));
+        if side_b {
+            let rest = std::mem::offset_of!(Joint, rest_start) as u64;
+            self.queue.write_buffer(&self.bufs[5], base + rest, bytemuck::cast_slice(&rot));
+        }
+    }
+
     /// Update a drive's targets in place without touching solver state.
     pub fn set_joint_drive(&mut self, id: u32, velocity: f32, target: f32) {
         let off = Self::joint_offset(id) + std::mem::offset_of!(Joint, drive_target) as u64;
@@ -1366,6 +1518,126 @@ impl WgpuSim {
             }
         }
         Ok(())
+    }
+
+    /// Run the motion-lock passes each step (World turns them on while any
+    /// body has locks).
+    pub fn set_motion_locks(&mut self, enabled: bool) {
+        self.motion_locks = enabled;
+    }
+
+    /// Run the `contact_events` pass each step (World turns it on while any
+    /// shape reports contact events).
+    pub fn set_contact_events(&mut self, enabled: bool) {
+        self.contact_events = enabled;
+    }
+
+    /// Queue explosions for the next step (`explode` runs after the
+    /// commands): `(centre, radius, falloff, impulse per area, mask bits)`.
+    /// The step runs even if everything sleeps.
+    pub fn write_explosions(&mut self, explosions: &[([f32; 3], f32, f32, f32, u32)]) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            explosions.len() as u32 <= engine_schema::EXPLODE_CAP,
+            "{} explosions in one step exceed {}",
+            explosions.len(),
+            engine_schema::EXPLODE_CAP
+        );
+        let mut words = vec![explosions.len() as u32, 0, 0, 0];
+        for (c, radius, falloff, per_area, mask) in explosions {
+            words.extend([c[0].to_bits(), c[1].to_bits(), c[2].to_bits(), radius.to_bits()]);
+            words.extend([falloff.to_bits(), per_area.to_bits(), *mask, 0]);
+        }
+        let offset = u64::from(engine_schema::EXPLODE_BASE) * 4;
+        self.queue.write_buffer(&self.bufs[21], offset, bytemuck::cast_slice(&words));
+        self.explosion_count = explosions.len() as u32;
+        self.wake_pending = true;
+        Ok(())
+    }
+
+    /// Queue overlap queries (boxes, with their filter) for
+    /// [`Self::encode_overlap_queries`]: `(min, max, category bits, mask bits)`.
+    pub fn write_overlap_queries(&mut self, queries: &[([f32; 3], [f32; 3], u32, u32)]) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            queries.len() as u32 <= engine_schema::QUERY_CAP,
+            "{} overlap queries in one step exceed {}",
+            queries.len(),
+            engine_schema::QUERY_CAP
+        );
+        let mut words = vec![queries.len() as u32, 0, 0, 0];
+        for (mn, mx, categories, mask) in queries {
+            words.extend([mn[0].to_bits(), mn[1].to_bits(), mn[2].to_bits(), *categories]);
+            words.extend([mx[0].to_bits(), mx[1].to_bits(), mx[2].to_bits(), *mask]);
+        }
+        let offset = u64::from(engine_schema::QUERY_BASE) * 4;
+        self.queue.write_buffer(&self.bufs[21], offset, bytemuck::cast_slice(&words));
+        self.wake_pending = true;
+        Ok(())
+    }
+
+    /// After a step: refresh the bounds to its final poses and run the queued
+    /// overlap queries (reads physics state only).
+    pub fn encode_overlap_queries(&self, enc: &mut wgpu::CommandEncoder) {
+        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("overlap queries"),
+            timestamp_writes: None,
+        });
+        let n = u64::from(self.collider_count.max(1));
+        self.disp(&mut pass, "build_aabbs", n, None);
+        self.disp(&mut pass, "overlap_query", n, None);
+    }
+
+    /// The overlap results region: `[query count, result count, 0, 0]`, the
+    /// queries, then the results. Buffer, byte offset, size.
+    pub fn overlap_result_range(&self) -> (&wgpu::Buffer, u64, u64) {
+        let words = engine_schema::EXPLODE_BASE - engine_schema::QUERY_BASE;
+        (
+            &self.bufs[21],
+            u64::from(engine_schema::QUERY_BASE) * 4,
+            u64::from(words) * 4,
+        )
+    }
+
+    /// Zero the contact-event count before a step (records are appended).
+    pub fn clear_contact_events(&self) {
+        let offset = u64::from(engine_schema::CONTACT_EVENT_BASE) * 4;
+        self.queue.write_buffer(&self.bufs[21], offset, bytemuck::cast_slice(&[0u32; 4]));
+    }
+
+    /// The contact-event region (header and records): buffer, byte offset, size.
+    pub fn contact_event_range(&self) -> (&wgpu::Buffer, u64, u64) {
+        let words = 4 + engine_schema::CONTACT_EVENT_WORDS * engine_schema::CONTACT_EVENT_CAP;
+        (
+            &self.bufs[21],
+            u64::from(engine_schema::CONTACT_EVENT_BASE) * 4,
+            u64::from(words) * 4,
+        )
+    }
+
+    /// Diagnostic: run this step's graph only up to the end of the broadphase
+    /// (bounds, grid, fast list) and return its candidate pairs (lower collider
+    /// first). The step is not taken. The CSR build reuses the candidate buffer
+    /// later in a step, so this is the only point where the pairs are readable.
+    pub fn debug_broadphase_pairs(&mut self) -> Vec<(u32, u32)> {
+        self.refresh_cell();
+        self.write_host_uniforms_ex(false);
+        let cmds = rigid_plan::encode_step(&self.step_modes(), &self.step_inputs(), false, false);
+        let cut = cmds
+            .iter()
+            .position(|c| matches!(c, rigid_plan::Cmd::Phase { name: "broadphase" }))
+            .expect("broadphase phase marker");
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("broadphase-only") });
+        self.encode_dispatches(&mut enc, &cmds[..cut]);
+        self.queue.submit([enc.finish()]);
+        let c = self.read_counters();
+        let n = c.candidate_count.min(self.capacity.max_candidates) as usize;
+        let words: Vec<u32> = self.read_buffer_range(10, 0, n * 4);
+        (0..n).map(|k| (words[4 * k].min(words[4 * k + 1]), words[4 * k].max(words[4 * k + 1]))).collect()
+    }
+
+    /// Diagnostic read of `count` words of a binding from word `first` (waits
+    /// for the GPU). For tests and probes; never on a host's hot path.
+    pub fn read_words(&self, binding: usize, first: u64, count: usize) -> Vec<u32> {
+        self.read_buffer_range(binding, first * 4, count)
     }
 
     pub(crate) fn pose_output_enabled(&self) -> bool {
@@ -1438,6 +1710,20 @@ impl WgpuSim {
         self.spec_reach_max = reach;
     }
 
+    /// Measurement control: `false` never schedules the fast broadphase list or
+    /// the oversize ownership, so long sweeps use the 27-cell stencil as before
+    /// the CCD audit (they then miss pairs; see tests/broadphase_oracle.rs).
+    pub fn set_fast_list(&mut self, on: bool) {
+        self.fast_list_off = !on;
+    }
+
+    /// Force the hierarchical grid on or off (`None`: convex scenes use it), as
+    /// `ENGINE_GRID_LEVELS=on|off` does.
+    pub fn set_grid_levels(&mut self, mode: Option<bool>) {
+        self.grid_levels_mode = mode;
+        self.grid_cache = None;
+    }
+
     pub fn step(&mut self) -> Result<StepCounters, ExecError> {
         self.step_inner(false)
     }
@@ -1477,7 +1763,7 @@ impl WgpuSim {
         self.counted_steps = self.steps_done;
         // Wheel queries walk this step's broadphase grid, so vehicle worlds
         // never reuse a whole step's manifolds.
-        self.manifolds_valid = counters.overflow_flags == 0 && self.vehicle_count() == 0;
+        self.manifolds_valid = counters.overflow_flags == 0 && self.vehicle_count() == 0 && self.characters.is_empty();
         if counters.overflow_flags != 0 {
             return Err(ExecError::Overflow(counters.overflow_flags));
         }
@@ -1488,7 +1774,9 @@ impl WgpuSim {
     /// carry every previous manifold forward (persistence re-evaluates C0). Falls
     /// back to a full step when the scene changed since the last step.
     pub fn step_reuse_manifolds(&mut self) -> Result<StepCounters, ExecError> {
-        let reuse = self.manifolds_valid;
+        // CCD scenes re-run collision every step: a reused step would keep last
+        // step's time-of-impact contacts and skip ccd_register (stale TOI slots).
+        let reuse = self.manifolds_valid && !self.has_ccd;
         self.step_inner(reuse)
     }
 
@@ -1497,6 +1785,7 @@ impl WgpuSim {
     }
 
     fn step_core(&mut self, reuse_manifolds: bool, read: bool) -> Result<StepCounters, ExecError> {
+        self.build_all_bounds_if_dirty();
         let wall = web_time::Instant::now();
         // Skip only when the counters describe the latest step: pipelined steps
         // leave them stale until `drain`.
@@ -1508,6 +1797,8 @@ impl WgpuSim {
             && self.body_count > 0
             && !self.wake_pending
             && !vehicles_dirty
+            && !self.has_kinematic
+            && self.projectile_count == 0
         {
             self.steps_done += 1;
             self.counted_steps = self.steps_done;
@@ -1522,6 +1813,7 @@ impl WgpuSim {
         let t_cell = host_t.map(|t| t.elapsed().as_secs_f64() * 1e3);
         self.last_step_ran = true;
         self.flush_commands();
+        self.upload_impulses();
         self.write_host_uniforms_ex(!read);
         if let (Some(t), Some(c)) = (host_t, t_cell) {
             eprintln!(
@@ -1535,9 +1827,13 @@ impl WgpuSim {
         } else {
             self.capacity.max_contacts
         };
+        let prof = std::env::var("RUBBLE_STEP_PROFILE").is_ok().then(web_time::Instant::now);
         let modes = self.step_modes();
         let inputs = self.step_inputs();
         let cmds = rigid_plan::encode_step(&modes, &inputs, reuse_manifolds, !read);
+        if let Some(t) = prof {
+            eprintln!("rubble step profile: inputs+plan {:.3} ms since start {:.3}", t.elapsed().as_secs_f64() * 1e3, wall.elapsed().as_secs_f64() * 1e3);
+        }
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1651,17 +1947,11 @@ impl WgpuSim {
             let t: Vec<u64> =
                 bytemuck::cast_slice(&slice.get_mapped_range().expect("mapped")).to_vec();
             let period = self.queue.get_timestamp_period() as f64 * 1e-6;
-            let parts: Vec<String> = names
-                .iter()
-                .enumerate()
-                .map(|(i, n)| {
-                    format!(
-                        "{n} {:.2}",
-                        t[2 * i + 1].saturating_sub(t[2 * i]) as f64 * period
-                    )
-                })
-                .collect();
-            eprintln!("rubble step GPU ms: {}", parts.join(", "));
+            let parts: Vec<String> = names.iter().enumerate().map(|(i, n)| format!("{n} {:.2}", t[2 * i + 1].saturating_sub(t[2 * i]) as f64 * period)).collect();
+            let begin = t.iter().step_by(2).copied().filter(|&x| x > 0).min().unwrap_or(0);
+            let end = t.iter().skip(1).step_by(2).copied().max().unwrap_or(0);
+            let span = end.saturating_sub(begin) as f64 * period;
+            eprintln!("rubble step GPU ms: span {span:.2}, {}", parts.join(", "));
             return self.finish_step(read, wall);
         }
         self.encode_dispatches(&mut enc, &cmds);
@@ -1681,8 +1971,20 @@ impl WgpuSim {
             label: Some("step"),
             timestamp_writes: None,
         });
+        let split = std::env::var("RUBBLE_PASS_PER_PHASE").is_ok_and(|v| v == "1");
+        // `RUBBLE_SKIP_KERNELS=a,b` (diagnostic, A/B timing): leave those out.
+        let skip = std::env::var("RUBBLE_SKIP_KERNELS").unwrap_or_default();
+        let skipped = |k: &str| !skip.is_empty() && skip.split(',').any(|s| s == k);
         for c in cmds {
             match *c {
+                rigid_plan::Cmd::Dispatch { kernel, .. } | rigid_plan::Cmd::Indirect { kernel, .. } if skipped(kernel) => continue,
+                _ => {}
+            }
+            match *c {
+                rigid_plan::Cmd::Phase { .. } if split => {
+                    drop(pass);
+                    pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("step"), timestamp_writes: None });
+                }
                 rigid_plan::Cmd::Copy { .. } | rigid_plan::Cmd::Phase { .. } => {}
                 rigid_plan::Cmd::Dispatch {
                     kernel,
@@ -1711,6 +2013,8 @@ impl WgpuSim {
     /// once. The step's host writes (its uniforms) take effect at that submission, before
     /// its commands, as they would at its own.
     pub fn step_encode(&mut self, enc: &mut wgpu::CommandEncoder) -> Result<(), ExecError> {
+        // Its own submission, ahead of the caller's encoder.
+        self.build_all_bounds_if_dirty();
         let wall = web_time::Instant::now();
         let vehicles_dirty = self.vehicles.as_ref().is_some_and(|v| v.dirty);
         if self.steps_done > 0
@@ -1720,6 +2024,8 @@ impl WgpuSim {
             && self.body_count > 0
             && !self.wake_pending
             && !vehicles_dirty
+            && !self.has_kinematic
+            && self.projectile_count == 0
         {
             self.steps_done += 1;
             self.counted_steps = self.steps_done;
@@ -1730,6 +2036,7 @@ impl WgpuSim {
         self.refresh_cell();
         self.last_step_ran = true;
         self.flush_commands();
+        self.upload_impulses();
         self.write_host_uniforms_ex(true);
         self.wake_pending = false;
         self.last_contact_offset = if self.contacts_parity == 0 {
@@ -1776,21 +2083,28 @@ impl WgpuSim {
         if let Some(v) = self.vehicles.as_mut() {
             v.dirty = false;
         }
+        self.impulses_this_step = false;
         if !read {
             self.contacts_parity ^= 1;
             self.steps_done = self.steps_done.saturating_add(1);
             self.command_count = 0;
+            self.explosion_count = 0;
             self.last_timings.total_gpu = wall.elapsed().as_secs_f64() * 1000.0;
             return Ok(self.last_counters);
         }
+        let t_read = web_time::Instant::now();
         let counters = self.read_counters();
+        if std::env::var("RUBBLE_STEP_PROFILE").is_ok() {
+            eprintln!("rubble step profile: read {:.3} ms, total {:.3} ms", t_read.elapsed().as_secs_f64() * 1e3, wall.elapsed().as_secs_f64() * 1e3);
+        }
         self.contacts_parity ^= 1;
         self.steps_done = self.steps_done.saturating_add(1);
         self.command_count = 0;
+        self.explosion_count = 0;
         self.last_timings.total_gpu = wall.elapsed().as_secs_f64() * 1000.0;
         self.last_counters = counters;
         self.counted_steps = self.steps_done;
-        self.manifolds_valid = counters.overflow_flags == 0 && self.vehicle_count() == 0;
+        self.manifolds_valid = counters.overflow_flags == 0 && self.vehicle_count() == 0 && self.characters.is_empty();
         if counters.overflow_flags != 0 {
             return Err(ExecError::Overflow(counters.overflow_flags));
         }
@@ -1872,6 +2186,8 @@ impl WgpuSim {
             color_round_headroom: self.color_round_headroom,
             tail_ok: self.capacity.max_bodies <= crate::WGSL_LOOP_CAP * 8,
             pose_output: self.pose_output,
+            contact_events: self.contact_events,
+            motion_locks: self.motion_locks,
         }
     }
 
@@ -1905,8 +2221,19 @@ impl WgpuSim {
             last: self.last_counters,
             vehicle_count: self.vehicle_count(),
             wheel_count: self.vehicles.as_ref().map_or(0, |v| v.wheel_count()),
+            motion: rigid_plan::MotionInputs {
+                ccd: self.has_ccd,
+                kinematic: self.has_kinematic,
+                look_ahead: self.params.flags & FLAG_SPEC_VELOCITY != 0,
+                impulses: self.impulses_this_step,
+                projectiles: self.projectile_count,
+                characters: self.characters.len() as u32,
+                queries: self.query_count,
+                fast_list_off: self.fast_list_off,
+            },
             soft: self.soft_counts(),
             command_count: self.command_count,
+            explosion_count: self.explosion_count,
         }
     }
 
@@ -1977,6 +2304,49 @@ impl WgpuSim {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
+    /// Bounds for every collider, sleeping ones included: the full
+    /// `build_aabbs` pass step 0 runs. After step 0 the kernel keeps a
+    /// sleeping body's previous AABB/OBB, and a collider added to a running
+    /// world while its body sleeps has none, so rays and the broadphase never
+    /// see it (a pre-fractured structure rebuilt into a running world). Run
+    /// once after colliders are added past step 0; a sleeping body that
+    /// already had bounds gets the same bounds again from the same pose.
+    fn build_all_bounds_if_dirty(&mut self) {
+        if !self.bounds_dirty {
+            return;
+        }
+        self.bounds_dirty = false;
+        let inputs = self.step_inputs();
+        let mut s = rigid_plan::host_words(
+            &self.capacity,
+            &self.step_modes(),
+            &inputs,
+            &rigid_plan::HostState {
+                contacts_parity: self.contacts_parity,
+                grid_levels: self.grid_levels,
+                has_filters: self.has_filters,
+                record_hash: self.record_hash(),
+                np_defer_limit: self.np_defer_limit,
+                persist_list_limit: self.persist_list_limit,
+            },
+        );
+        // The step-0 full pass: every collider, asleep or not.
+        s[17] = 0;
+        s[19] = 0;
+        self.queue.write_buffer(&self.bufs[21], 0, bytemuck::cast_slice(&s));
+        let host = rigid_plan::host_uniforms(&self.params, &s);
+        self.queue.write_buffer(&self.bufs[6], 0, bytes_of(&host));
+        // build_aabbs reads the collider count from the counter block, which
+        // only a step would otherwise refresh (raycast_batch writes it too).
+        self.queue.write_buffer(&self.bufs[7], 0, bytes_of(&rigid_plan::step_counters(&inputs)));
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("bounds") });
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("bounds"), timestamp_writes: None });
+            self.disp(&mut pass, "build_aabbs", u64::from(self.collider_count.max(1)), None);
+        }
+        self.queue.submit([enc.finish()]);
+    }
+
     fn write_host_uniforms(&self) {
         self.write_host_uniforms_ex(false);
     }
@@ -2458,6 +2828,7 @@ impl WgpuSim {
             "{} ray queries exceed VehicleCapacity::max_rays ({max})",
             rays.len()
         );
+        self.build_all_bounds_if_dirty();
         self.with_vehicles(|h, sim| h.write_rays(sim, rays));
         // The next step runs even if everything sleeps, so its frame carries
         // the hits (a step with nothing awake changes nothing).
@@ -2499,6 +2870,7 @@ impl WgpuSim {
         if rays.is_empty() {
             return Vec::new();
         }
+        self.build_all_bounds_if_dirty();
         self.with_vehicles(|h, sim| h.write_rays(sim, rays));
         self.write_host_uniforms();
         let mut enc = self
@@ -2649,6 +3021,9 @@ impl VehicleBackend for WgpuSim {
 
 #[path = "gpu_host_state.rs"]
 mod host_state;
+#[path = "gpu_characters.rs"]
+mod characters;
+pub use characters::{CharacterHandle, MotionEvent};
 pub use host_state::SimSnapshot;
 
 #[cfg(test)]

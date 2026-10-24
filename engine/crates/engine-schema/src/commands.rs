@@ -30,6 +30,11 @@ pub enum CommandType {
     /// Kinematic bodies: `f0` = target position, `f1` = target rotation
     /// (solver pose); the velocity that reaches them over the next step.
     SetKinematicTarget = 16,
+    /// One step of damping and gravity scale: `v = f0.w v + f0.xyz`,
+    /// `w = f1.x w`.
+    Damp = 17,
+    /// Motion locks: `f0.x` = the six lock bits.
+    SetLocks = 18,
 }
 
 /// `GpuCommand::b` bit: a sleeping body ignores the command (Box3D `wake = false`).
@@ -165,6 +170,25 @@ impl GpuCommand {
     /// `offset` is the new centre in the old body frame, `rotation` the new
     /// principal axes relative to the old, then the inverse principal inertia
     /// and inverse mass.
+    pub fn damp(body: u32, add: [f32; 3], linear: f32, angular: f32) -> Self {
+        Self {
+            op: CommandType::Damp as u32,
+            a: body,
+            f0: [add[0], add[1], add[2], linear],
+            f1: [angular, 0.0, 0.0, 0.0],
+            ..Self::zeroed()
+        }
+    }
+
+    pub fn set_locks(body: u32, locks: u32) -> Self {
+        Self {
+            op: CommandType::SetLocks as u32,
+            a: body,
+            f0: [f32::from_bits(locks), 0.0, 0.0, 0.0],
+            ..Self::zeroed()
+        }
+    }
+
     pub fn set_kinematic_target(body: u32, position: [f32; 3], rotation: [f32; 4]) -> Self {
         Self {
             op: CommandType::SetKinematicTarget as u32,

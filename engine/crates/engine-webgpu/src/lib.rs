@@ -21,8 +21,8 @@ pub use features::{
 };
 #[cfg(feature = "gpu")]
 pub use gpu::{
-    default_device, RingEvents, SimSnapshot, SoftEvents, WgpuSim, MOVED_BINDING, POSES_BINDING,
-    POSE_HEADER_BINDING, POSE_RECORD_BYTES,
+    default_device, CharacterHandle, MotionEvent, RingEvents, SimSnapshot, SoftEvents, WgpuSim, MOVED_BINDING,
+    POSES_BINDING, POSE_HEADER_BINDING, POSE_RECORD_BYTES,
 };
 #[cfg(feature = "gpu")]
 pub use poses::PoseRecord;
@@ -837,8 +837,6 @@ mod tests {
             "extract_velocity_sleep",
             "record_stab_velocity",
             "sleep_island_commit",
-            "ccd_classify",
-            "ccd_sweep",
             "recompute_inertia",
         ];
         let shaders = WebGpuWorld::compile_shaders_report();

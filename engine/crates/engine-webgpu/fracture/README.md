@@ -184,6 +184,19 @@ each named for what it is, then how many:
 
 The native viewer numbers the same scenes 1–9 in this order.
 
+### Fractured towers · 2×2 city block (CCD showcase)
+
+Under Vibe City presets when the generated packs are present. Four copies of
+`fracturedTower` (14,844 pieces) with their breakable welds at 0.2× strength
+and the pack's 1 m, 30 t ball; the scene sets Bonds to breakable D6, Ball
+speed to 16× and CCD balls on. **Fire the volley** fires the scripted 24 shots
+(`engine-fracture/src/towers.rs`, the same as the Metal viewer's `fracture_viewer
+towers --volley`): eight raking shots at 20–45° off a face that clip a tower and
+carry on into the next, then sixteen at the lower floors until the towers fall
+into each other. Ball trails show every ball's path (cyan with CCD, red
+without); untick CCD balls and fire again to see plain balls pass through
+walls. See engine/docs/ccd.md, "The towers showcase".
+
 ### Bond modes
 
 The **Bonds** menu picks how the baked bonds hold the fragments, on the same asset,

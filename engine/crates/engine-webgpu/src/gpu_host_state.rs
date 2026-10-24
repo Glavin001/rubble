@@ -6,7 +6,7 @@
 use super::*;
 use engine_schema::commands::{CommandType, GpuCommand, CMD_RUN_MEMBER};
 
-const BODY_COMMANDS: [u32; 9] = [
+const BODY_COMMANDS: [u32; 11] = [
     CommandType::WakeBody as u32,
     CommandType::TeleportBody as u32,
     CommandType::SetVelocity as u32,
@@ -16,6 +16,8 @@ const BODY_COMMANDS: [u32; 9] = [
     CommandType::AngularImpulse as u32,
     CommandType::SetMassFrame as u32,
     CommandType::SetKinematicTarget as u32,
+    CommandType::Damp as u32,
+    CommandType::SetLocks as u32,
 ];
 
 /// Every GPU buffer and the host mirror of a [`WgpuSim`] at one instant
@@ -121,6 +123,7 @@ impl WgpuSim {
         self.host_bodies[first as usize..(first + count) as usize].copy_from_slice(bodies);
         self.manifolds_valid = false;
         self.wake_pending = true;
+        self.note_motion_flags(bodies);
     }
 
     /// Queue body commands for the next step, without reading anything back:

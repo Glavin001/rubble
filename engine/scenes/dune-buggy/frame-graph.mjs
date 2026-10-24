@@ -50,10 +50,10 @@ function tubeOf(part, key) {
  */
 export function buildFrameGraph(live, model, masses, mounts) {
   const keyOf = new Map([...live.templates].map(([k, g]) => [g, k]));
-  const cls = model.parts.map(classify);
+  const cls = model.parts.map((p) => classify(p, "buggy"));
   const frameish = (i) => ['cell', 'crumple', 'panel'].includes(cls[i].cls);
   const groupOf = (i) => {
-    const name = RUBBLE_PARTS[cls[i].part].name;
+    const name = cls[i].name;
     return GROUPS.includes(name) ? name : 'frame';
   };
 

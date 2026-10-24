@@ -5,7 +5,7 @@
   "description": "vibe-land's dune buggy, baked into a Rubble vehicle preset and render mesh",
   "scripts": {
     "bake:mesh": "bun run bake-mesh.mjs",
-    "bake:physics": "bun run bake-physics.mjs"
+    "bake:physics": "for m in buggy trophy rally monster derby sprint semi; do bun run bake-physics.mjs $m || exit 1; done"
   },
   "dependencies": {
     "manifold-3d": "3.5.1",

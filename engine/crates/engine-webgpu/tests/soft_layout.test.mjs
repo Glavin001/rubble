@@ -93,7 +93,7 @@ test('the step plan lists every soft kernel and sizes binding 32', () => {
     assert.ok(kernels.includes(k), `${k} missing from the plan's kernels`);
   }
   const sizes = plan.buffer_sizes();
-  assert.equal(sizes.length, 33);
+  assert.equal(sizes.length, 34);
   assert.equal(sizes[32], new SoftHost({}).layout.bytes);
   // Without a soft arena the plan emits no soft passes.
   const bare = new RigidStep(cap, capWords(DEFAULT_VEHICLE_CAPACITY));
