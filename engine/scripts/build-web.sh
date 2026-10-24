@@ -18,7 +18,6 @@
 # first build starts from production's cache).
 set -euo pipefail
 
-SLANG_VERSION=2026.19   # engine/TOOLCHAIN.md
 WASM_PACK_VERSION=0.14.0
 # Binaryen's wasm-opt makes the stress solver's Asyncify build (browsers without JSPI).
 BINARYEN_VERSION=123
@@ -102,25 +101,7 @@ os="$(uname -s)"
 arch="$(uname -m)"
 
 # slangc: Slang → SPIR-V for wgsl_export (and the build scripts of the WebGPU crates).
-if [[ -z "${SLANGC:-}" ]] && ! command -v slangc >/dev/null 2>&1 \
-  && [[ ! -x "$HOME/.local/bin/slangc" ]]; then
-  case "$os-$arch" in
-    Linux-x86_64) asset="slang-$SLANG_VERSION-linux-x86_64-glibc-2.27.tar.gz" ;;
-    Linux-aarch64) asset="slang-$SLANG_VERSION-linux-aarch64.tar.gz" ;;
-    Darwin-arm64) asset="slang-$SLANG_VERSION-macos-aarch64.tar.gz" ;;
-    Darwin-x86_64) asset="slang-$SLANG_VERSION-macos-x86_64.tar.gz" ;;
-    *) echo "no slangc release for $os-$arch; install slangc $SLANG_VERSION" >&2; exit 1 ;;
-  esac
-  dir="$TOOLS/slang-$SLANG_VERSION"
-  if [[ ! -x "$dir/bin/slangc" ]]; then
-    echo "==> Downloading $asset"
-    mkdir -p "$dir"
-    curl -fsSL "https://github.com/shader-slang/slang/releases/download/v$SLANG_VERSION/$asset" \
-      | tar -xz -C "$dir"
-  fi
-  export SLANGC="$dir/bin/slangc"
-fi
-echo "==> slangc: ${SLANGC:-$(command -v slangc || echo "$HOME/.local/bin/slangc")}"
+. "$ENGINE/scripts/slangc.sh"
 
 # wasm-pack: the vehicle and fracture wasm modules.
 if ! command -v wasm-pack >/dev/null 2>&1; then

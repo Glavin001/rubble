@@ -95,6 +95,8 @@ impl Default for RbQuat {
     }
 }
 
+/// A position and rotation. A zero rotation (all four components 0, as in
+/// `(RbTransform){0}`) is read as identity.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RbTransform {
