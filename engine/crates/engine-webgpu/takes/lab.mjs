@@ -6,7 +6,8 @@
 
 // The lab's page state for a take: its Scene menu key and the menus' values, then a load.
 // `preset`: the stress modes' Ball menu (stress_ref::wrecking::BALLS: 0 the 10 t ball,
-// 1 the 50 t ball, 2 the 15 m demolition sphere), applied by reloading once it is listed.
+// 1 the 50 t ball, 2 the 15 m demolition sphere, 3 the 2 t car stand-in, 4 the 40 t jet
+// stand-in), applied by reloading once it is listed.
 const setup = ({ scene, bonds = 'none', hz = 0, radius = 0, strength = 0, level, preset }) => `
   const $ = (id) => document.getElementById(id);
   $('bond-mode').value = ${JSON.stringify(bonds)};
@@ -22,6 +23,21 @@ const setup = ({ scene, bonds = 'none', hz = 0, radius = 0, strength = 0, level,
 const take = (state, script) => ({ page: 'fracture/index.html', setup: setup(state), script });
 
 export const LAB_TAKES = {
+  // Ram Raid target (stress_ref::buildings): the 2 t car stand-in into a shopfront.
+  rr_storefront_car: take({ scene: 'rr_storefront_row', bonds: 'stress', preset: 3 }, [
+    { n: 40, caption: 'Five shops in brick, glass and concrete: 1,203 bonded chunks', cam: { rel: [0.3, -0.05, 0.6], relTo: [0.2, -0.05, 0.55] } },
+    { n: 1, act: 'fire', caption: 'A 2 t car stand-in at 15 m/s into a shop window' },
+    { n: 30, caption: 'A 2 t car stand-in at 15 m/s into a shop window' },
+    { n: 180, slow: 2, caption: 'Half speed: the window and the stallriser go; the shop stands', cam: { rel: [0.2, -0.05, 0.55], relTo: [-0.3, 0.0, 0.6] } },
+  ]),
+  // Fly-through target: the 40 t jet stand-in at 80 m/s into the glass tower's mid-height.
+  ft_glass_tower_jet: take({ scene: 'ft_glass_tower', bonds: 'stress', preset: 4 }, [
+    { n: 40, caption: 'An 11-storey glass tower: concrete core, steel mullions, glass panes', cam: { rel: [0.4, 0.0, 1.0], relTo: [0.3, 0.0, 0.95] } },
+    { n: 1, act: 'fire', caption: 'A 40 t stand-in for an aircraft at 80 m/s' },
+    { n: 10, caption: 'A 40 t stand-in for an aircraft at 80 m/s' },
+    { n: 240, slow: 2, caption: 'Half speed: the curtain wall and the floors around the cut fail', cam: { rel: [0.3, 0.0, 0.95], relTo: [-0.3, 0.08, 1.0] } },
+    { n: 180, caption: 'Real time', cam: { rel: [-0.3, 0.08, 1.0], relTo: [-0.7, 0.15, 1.15] } },
+  ]),
   // Topple (stress_ref::topple), threshold profile: the charges cut the street-side
   // columns, then the back line. Natively (Metal) the tower then leans over the street as
   // one mass and lands across it; in Chrome's WebGPU the back line crushes faster than it
