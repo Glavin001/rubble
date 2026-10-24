@@ -605,6 +605,57 @@ pub unsafe extern "C" fn rbSoft_AddObstacle(world: *mut RbWorld, shape: RbShapeI
     })
 }
 
+/// One beam of a soft body (`rbSoft_GetBeams`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RbSoftBeam {
+    /// Node ordinals (index `RbSoftOutput::nodes`).
+    pub node_a: u32,
+    pub node_b: u32,
+    /// Rest length now (plastic deformation moves it) and at spawn.
+    pub rest_length: f32,
+    pub spawn_length: f32,
+    /// Signed axial force (+ = compression).
+    pub force: f32,
+    pub broken: bool,
+    pub yielded: bool,
+    pub visible: bool,
+}
+
+/// Every beam (**blocks** on a readback; for beam views and damage maps).
+/// Writes up to `capacity`; `*out_count` gets the total.
+#[no_mangle]
+pub unsafe extern "C" fn rbSoft_GetBeams(
+    world: *mut RbWorld,
+    soft: RbSoftId,
+    out: *mut RbSoftBeam,
+    capacity: u32,
+    out_count: *mut u32,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let beams = w.world.soft_beams(SoftHandle(soft))?;
+        let c = w.coords;
+        write(out_count, beams.len() as u32)?;
+        if capacity > 0 && out.is_null() {
+            return Err(invalid("null beam array"));
+        }
+        for (k, b) in beams.iter().take(capacity as usize).enumerate() {
+            *out.add(k) = RbSoftBeam {
+                node_a: b.node_a,
+                node_b: b.node_b,
+                rest_length: c.length_out(b.rest_length),
+                spawn_length: c.length_out(b.spawn_length),
+                force: c.force_out(b.force),
+                broken: b.broken,
+                yielded: b.yielded,
+                visible: b.visible,
+            };
+        }
+        Ok(())
+    })
+}
+
 /// A soft body's damage so far.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]

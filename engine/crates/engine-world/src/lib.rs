@@ -57,7 +57,7 @@ pub use joints::{
 };
 pub use math::Transform;
 pub use readback::Backpressure;
-pub use rig::VehicleDamage;
+pub use rig::{SoftBeam, VehicleDamage};
 
 pub use engine_schema::convex::{CollisionFilter as Filter, ConvexHull};
 pub use engine_schema::{

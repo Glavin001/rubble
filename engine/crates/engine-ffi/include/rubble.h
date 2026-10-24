@@ -539,6 +539,21 @@ typedef struct RbMountLoad {
   float peak_ratio;
 } RbMountLoad;
 
+// One beam of a soft body (`rbSoft_GetBeams`).
+typedef struct RbSoftBeam {
+  // Node ordinals (index `RbSoftOutput::nodes`).
+  uint32_t node_a;
+  uint32_t node_b;
+  // Rest length now (plastic deformation moves it) and at spawn.
+  float rest_length;
+  float spawn_length;
+  // Signed axial force (+ = compression).
+  float force;
+  bool broken;
+  bool yielded;
+  bool visible;
+} RbSoftBeam;
+
 // A soft body's damage so far.
 typedef struct RbSoftDamage {
   // Beams that have yielded at least once, broken, and in total.
@@ -978,6 +993,14 @@ enum RbResult rbWorld_SetSoftSettingsJson(struct RbWorld *world, const char *jso
 
 // Let soft bodies' skins collide with this rigid shape (walls, poles).
 enum RbResult rbSoft_AddObstacle(struct RbWorld *world, RbShapeId shape);
+
+// Every beam (**blocks** on a readback; for beam views and damage maps).
+// Writes up to `capacity`; `*out_count` gets the total.
+enum RbResult rbSoft_GetBeams(struct RbWorld *world,
+                              RbSoftId soft,
+                              struct RbSoftBeam *out,
+                              uint32_t capacity,
+                              uint32_t *out_count);
 
 // Damage (**blocks** on a readback; for HUDs and scoring).
 enum RbResult rbSoft_GetDamage(struct RbWorld *world, RbSoftId soft, struct RbSoftDamage *out);
