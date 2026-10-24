@@ -177,18 +177,21 @@ pub fn strike(i: &Impact, t: &Target) -> Strike {
 }
 
 /// Where a chunk's centre sits relative to the strike: `along` the path from the contact
-/// point, `radial` distance from the path, and whether it is the entry chunk.
+/// point, `radial` distance from the path, whether it is the entry chunk, and whether the
+/// shot overlaps its box on its way through the wall (`crossed`).
 #[derive(Clone, Copy, Debug)]
 pub struct Place {
     pub along: f64,
     pub radial: f64,
     pub entry: bool,
+    pub crossed: bool,
 }
 
-/// The zones a strike's outcome breaks out: the plug (perforation), the scab (spall),
-/// the crushed region (crater).
+/// The zones a strike's outcome breaks out: the plug (perforation: the cone, and every
+/// chunk the shot crosses, since a perforation goes through what is in its path, in whole
+/// chunks), the scab (spall), the crushed region (crater).
 pub fn in_plug(s: &Strike, radius: f64, thickness: f64, p: &Place) -> bool {
-    s.perforate && (p.entry || (p.along >= 0.0 && p.along <= thickness && p.radial <= radius + CONE_TAN * p.along))
+    s.perforate && (p.entry || p.crossed || (p.along >= 0.0 && p.along <= thickness && p.radial <= radius + CONE_TAN * p.along))
 }
 
 pub fn in_scab(s: &Strike, radius: f64, thickness: f64, p: &Place) -> bool {
@@ -302,9 +305,20 @@ mod tests {
     fn a_plug_bond_crosses_the_cone() {
         let s = strike(&steel_ball(0.05, 1000.0, 0.2), &concrete());
         assert!(s.perforate);
-        let inside = Place { along: 0.05, radial: 0.0, entry: false };
-        let outside = Place { along: 0.05, radial: 0.5, entry: false };
+        let inside = Place { along: 0.05, radial: 0.0, entry: false, crossed: false };
+        let outside = Place { along: 0.05, radial: 0.5, entry: false, crossed: false };
         assert!(breaks(&s, 0.05, 0.2, &inside, &outside));
-        assert!(!breaks(&s, 0.05, 0.2, &inside, &Place { along: 0.15, radial: 0.0, entry: false }));
+        assert!(!breaks(&s, 0.05, 0.2, &inside, &Place { along: 0.15, radial: 0.0, entry: false, crossed: false }));
+    }
+
+    /// A chunk whose centre is outside the cone but whose box the shot crosses goes with the
+    /// plug when the shot perforates (it would stand in the hole), and stays when it does not.
+    #[test]
+    fn a_perforation_takes_every_chunk_in_its_path() {
+        let rim = Place { along: 0.05, radial: 0.12, entry: false, crossed: true };
+        let held = strike(&steel_ball(0.05, 1000.0, 0.2), &concrete());
+        assert!(held.perforate && in_plug(&held, 0.05, 0.2, &rim));
+        let stopped = strike(&steel_ball(0.05, 0.05, 0.2), &concrete());
+        assert!(!in_plug(&stopped, 0.05, 0.2, &rim));
     }
 }

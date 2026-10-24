@@ -1213,8 +1213,8 @@ void fr_strike_breaks(uint3 id: SV_DispatchThreadID)
 // Per chunk 22 float4: the load path's state (`x` twice (2 each), the step `d` (2), its
 // load (2: force and fixed flag, moment)), its block's factor (6: 21 floats), then the
 // in-step contact fracture's increment (`fr_cs_*`: its `x` twice, `d`, load, as the load
-// path's); then per body slot 6 float4: the analytic strike's record (`fr_il_strike`, 2),
-// the in-step contact strike's (`fr_cs_record`, 4).
+// path's); then per body slot 7 float4: the analytic strike's record (`fr_il_strike`, 2),
+// the in-step contact strike's (`fr_cs_record`, 5).
 [[vk::binding(24, 0)]] RWStructuredBuffer<float4> lp;
 // The engine's step (the in-step contact fracture, encoded within rubble's step where its
 // contacts are made and kept): its contact rows (rubble's `Contact`, 8 float4 each: the
@@ -1250,7 +1250,7 @@ uint lp_x(uint k, uint copy) { return st_x(k, LP_STATE, copy); }
 uint lp_d(uint k) { return st_d(k, LP_STATE); }
 uint lp_f(uint k) { return st_f(k, LP_STATE); }
 uint lp_l(uint k) { return LP_CHUNK * k + 8; }
-uint lp_body(uint b) { return LP_CHUNK * params.chunk_count + 6 * b; }
+uint lp_body(uint b) { return LP_CHUNK * params.chunk_count + 7 * b; }
 
 // `atom`: per body slot 14 words of the load path's sums (force, moment: 3 x 64 bits each;
 // lowest chunk; supported), then per body slot 4 words of the analytic strike: its
@@ -1722,7 +1722,8 @@ static const uint IL_PERFORATE = 8;
 // direction the striker pushes in (stress frame), its closing speed); (the strike's
 // effective mass along it, the striker's face radius, its Young's modulus, its engine body
 // as bits); (the struck chunk as bits, the Hertz rule's force `J / tau`, the striker's mass,
-// when within the step they meet).
+// when within the step they meet); (the striker's collider, its launch (a shot's, else 0),
+// as bits).
 // `atom` per body slot 12 words, all 0 for a body not struck (as the buffer starts, and as
 // `fr_cs_clean` leaves a struck one): the largest strike impulse (float bits), the struck
 // chunk + 1, the complement of the strike's collider (`cs_pick`); the complement of the
@@ -1794,12 +1795,13 @@ IlStriker il_striker<let SRC : uint>(uint b)
         float4 r2 = lp[lp_body(b) + 4];
         float4 r3 = lp[lp_body(b) + 5];
         s.body = asuint(r2.w);
-        s.bound = r2.y;
+        // The punch list's sphere (world_coupling.rs `predict_punch`), as the shots' table.
+        s.bound = 1.01 * r2.y + 1e-3;
         s.radius = r2.y;
         s.mass = r3.z;
         s.m_eff = r2.x;
         s.modulus = r2.z;
-        s.launch = 0;
+        s.launch = asuint(lp[lp_body(b) + 6].y);
         return s;
     }
     uint shot = uint(frames[strike_at(b)].w) - 1;
@@ -2074,9 +2076,13 @@ struct IlPlace
     float along;
     float radial;
     bool entry;
+    bool crossed;
 };
 
-IlPlace il_place(uint k, uint entry, float3 contact, float3 d)
+// Where chunk `k`'s centre sits relative to a strike at `contact` along `d`; and whether the
+// striker (a sphere of radius `r`, touching the face at `contact`) overlaps its box on its
+// way through the wall's thickness `h` (`il_crossed`).
+IlPlace il_place(uint k, uint entry, float3 contact, float3 d, float r, float h)
 {
     uint slot = body_of(k);
     Quat q;
@@ -2088,12 +2094,45 @@ IlPlace il_place(uint k, uint entry, float3 contact, float3 d)
     p.along = dot(rel, d);
     p.radial = length(rel - d * p.along);
     p.entry = k == entry;
+    p.crossed = il_crossed(k, contact - d * r, d, h + 2.0 * r, r);
     return p;
 }
 
+// Whether a sphere of radius `r` whose centre runs from `a` along `d` for `length` overlaps
+// chunk `k`'s box (the segment comes nearer the box than `r`, by more than a part in 10^4:
+// a box it only touches is not crossed). The squared distance from a point of the segment
+// to the box is convex along it: its least value by a ternary search (fixed passes).
+bool il_crossed(uint k, float3 a, float3 d, float length, float r)
+{
+    Quat q;
+    float3 cc = chunk_box_world(k, q);
+    Quat box = normalized(quat_mul(q, quat_of(geometry[3 * k + 2])));
+    float3 half = geometry[3 * k + 1].xyz;
+    float3 al = rotate(conj(box), a - cc);
+    float3 ul = rotate(conj(box), d);
+    float lo = 0.0;
+    float hi = length;
+    for (uint pass = 0; pass < 40; pass++)
+    {
+        float m1 = lo + (hi - lo) / 3.0;
+        float m2 = hi - (hi - lo) / 3.0;
+        float3 e1 = max(abs(al + ul * m1) - half, float3(0.0));
+        float3 e2 = max(abs(al + ul * m2) - half, float3(0.0));
+        if (dot(e1, e1) <= dot(e2, e2))
+            hi = m2;
+        else
+            lo = m1;
+    }
+    float3 e = max(abs(al + ul * (0.5 * (lo + hi))) - half, float3(0.0));
+    return dot(e, e) < 0.9998 * r * r;
+}
+
+// The plug: the cone (impact_local.rs `in_plug`), and every chunk the striker crosses on its
+// way through (a perforation goes through what is in its path, whole chunks: one whose
+// centre is outside the cone but whose box the striker overlaps would stand in the hole).
 bool il_plug(uint outcome, float r, float h, IlPlace p)
 {
-    return (outcome & IL_PERFORATE) != 0 && (p.entry || (p.along >= 0.0 && p.along <= h && p.radial <= r + IL_CONE_TAN * p.along));
+    return (outcome & IL_PERFORATE) != 0 && (p.entry || p.crossed || (p.along >= 0.0 && p.along <= h && p.radial <= r + IL_CONE_TAN * p.along));
 }
 
 bool il_scab(uint outcome, float r, float h, float scab, IlPlace p)
@@ -2106,8 +2145,9 @@ bool il_crater(uint outcome, float r, float depth, float a, IlPlace p)
     return (outcome & IL_CRATER) != 0 && p.along >= 0.0 && p.along <= depth && p.radial <= max(r, a);
 }
 
-// One thread per chunk of a struck body: (prediction) the launch's mark on every chunk the
-// outcome breaks out (in the plug, the scab or the crater); the plug's chunks for the carry.
+// One thread per chunk of a struck body: a shot's launch's mark on every chunk the outcome
+// breaks out (in the plug, the scab or the crater) or its path crosses; the plug's chunks
+// for the carry.
 void il_mark<let SRC : uint>(uint k)
 {
     if (k >= params.chunk_count)
@@ -2127,9 +2167,9 @@ void il_mark<let SRC : uint>(uint k)
     uint entry = il_entry<SRC>(b);
     IlStriker sk = il_striker<SRC>(b);
     float r = max(sk.radius, 1e-3);
-    IlPlace p = il_place(k, entry, contact, d);
+    IlPlace p = il_place(k, entry, contact, d, r, s0.x);
     bool plug = il_plug(outcome, r, s0.x, p);
-    if (SRC == 0)
+    if (sk.launch != 0)
     {
         // The chunks its path crosses within the wall (their boxes widened by the shot's
         // bounding radius, as `fr_strike_entry` takes them): the strike has met them; a
@@ -2151,9 +2191,9 @@ void il_mark<let SRC : uint>(uint k)
 // leave together (Recht and Ipson's premise), at the velocity that keeps their momentum
 // along the path, `m v' / (m + M_plug)` relative to the wall (`v'` the striker's closing
 // speed after the fracture work; `M_plug` the plug's chunks' mass). The exchange happens at
-// the strike's time `t_in` within the step, not at its start: the striker is moved on by
-// `(v' - v_r) t_in` along the path, where it would be at the step's end. Every thread of a
-// plug writes the same values.
+// the strike's time `t_in` within the step, not at its start: the striker, closing at the
+// strike's speed `v` until then, is moved on by `(v - v_r) t_in` along the path, where it
+// would be at the step's end. Every thread of a plug writes the same values.
 void il_carry<let SRC : uint>(uint k)
 {
     if (k >= params.chunk_count)
@@ -2180,8 +2220,10 @@ void il_carry<let SRC : uint>(uint k)
     float v_r = m_s * closing / (m_s + plug_mass);
     float3 shot_v = v_shot + dr * (v_r - closing);
     float3 plug_v = v_wall + dr * v_r;
+    // Before the strike the striker closed at the strike's speed (`il_path`), not at the
+    // speed the fracture work left it.
     float t_in = clamp(il_t_in<SRC>(b0), 0.0, params.dt);
-    float3 shot_p = bodies[BODY_WORDS * sb].xyz + dr * ((closing - v_r) * t_in);
+    float3 shot_p = bodies[BODY_WORDS * sb].xyz + dr * ((speed - v_r) * t_in);
     uint pb = body_of(k);
     for (uint region = 0; region < 2; region++)
     {
@@ -2212,8 +2254,8 @@ void il_breaks<let SRC : uint>(uint i)
     uint entry = il_entry<SRC>(b);
     float r = max(il_striker<SRC>(b).radius, 1e-3);
     float h = s0.x;
-    IlPlace pa = il_place(bond.x, entry, contact, d);
-    IlPlace pb = il_place(bond.y, entry, contact, d);
+    IlPlace pa = il_place(bond.x, entry, contact, d, r, h);
+    IlPlace pb = il_place(bond.y, entry, contact, d, r, h);
     bool cut = il_plug(outcome, r, h, pa) != il_plug(outcome, r, h, pb)
         || il_scab(outcome, r, h, s1.y, pa) != il_scab(outcome, r, h, s1.y, pb)
         || il_crater(outcome, r, s1.x, s1.z, pa) || il_crater(outcome, r, s1.x, s1.z, pb);
@@ -2426,6 +2468,11 @@ bool cs_side(uint r, uint side, out uint k, out uint s, out uint ob, out uint co
     ob = asuint(colliders[4 * co].x);
     if (ob == s || ob >= params.max_bodies)
         return false;
+    // A shot meeting what its own analytic strike broke out or went through (`il_mark`): its
+    // contact is the engine's, not another strike (it pushes its plug, it grazes its hole).
+    uint launch = collider_info[2 * co + 1].w;
+    if (launch != 0 && work[w_marks() + k] == launch)
+        return false;
     uint bs = BODY_WORDS * s;
     uint bo = BODY_WORDS * ob;
     float inv_o = bodies[bo].w;
@@ -2602,6 +2649,7 @@ void fr_cs_record(uint3 id: SV_DispatchThreadID)
     lp[lp_body(s) + 3] = float4(from_rubble(u), v);
     lp[lp_body(s) + 4] = float4(m_eff, face, e_o, asfloat(ob));
     lp[lp_body(s) + 5] = float4(asfloat(k), j / tau, 1.0 / bodies[BODY_WORDS * ob].w, t_in);
+    lp[lp_body(s) + 6] = float4(asfloat(co), asfloat(other.w), 0.0, 0.0);
     atom[a_cs(s) + 1].store(k + 1);
     atom[a_counters() + C_CS_STRIKES].add(1u);
 }

@@ -362,8 +362,8 @@ const SUMS: u32 = 20;
 const LP_CHUNK: u32 = 22;
 const CS_STATE: usize = 14;
 /// float4s per body slot in `lp` (`fracture.slang` `lp_body`): the analytic strike's record
-/// (2), the in-step contact strike's (4).
-pub const LP_BODY: u32 = 6;
+/// (2), the in-step contact strike's (5).
+pub const LP_BODY: u32 = 7;
 /// The shots strike prediction checks, at most.
 pub const MAX_SHOTS: usize = 64;
 const BODY_WORDS: u32 = 7;

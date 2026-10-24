@@ -444,7 +444,9 @@ impl ThresholdWorld {
         for region in [0, max] {
             gpu.queue.write_buffer(self.engine.sim.body_buffer(), (region + sh.body as u64) * stride, bytemuck::bytes_of(&record));
         }
-        let info = ColliderInfo { a: [NONE, sh.body, KIND_BODY, 0], b: [desc.mass as f32, self.projectile_modulus as f32, r as f32, 0.0] };
+        // b.w: the launch (as bits; the in-step contact fracture's marks, as the shots
+        // table's `launch` for the end-of-frame prediction's).
+        let info = ColliderInfo { a: [NONE, sh.body, KIND_BODY, 0], b: [desc.mass as f32, self.projectile_modulus as f32, r as f32, f32::from_bits(self.fired as u32)] };
         gpu.queue.write_buffer(&self.ingest.collider_info, std::mem::size_of::<ColliderInfo>() as u64 * sh.collider as u64, bytemuck::bytes_of(&info));
         let k = (self.fired - 1) % self.shots.len();
         self.strikes[k].launch = self.fired as u32;
