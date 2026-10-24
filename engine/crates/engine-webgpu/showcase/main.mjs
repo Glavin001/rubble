@@ -33,10 +33,11 @@ const loadSelected=why(WebAssembly.promising?WebAssembly.promising(wasm.showcase
 const load=key=>{showcase_select(key);return loadSelected()};
 const stepFrames=why(WebAssembly.promising?WebAssembly.promising(wasm.showcase_frame):()=>false);
 
-// Advance `steps` steps (0: none), then upload the poses and draw.
-async function advance(steps){
+// Advance `steps` steps (0: none), then upload the poses `alpha` of the way from the step
+// before the last to it (a frame between steps: slow motion, a fast display) and draw.
+async function advance(steps,alpha=0){
  if(steps>0&&!await stepFrames(steps))throw new Error(showcase_error());
- const poses=showcase_poses();device.queue.writeBuffer(poseBuffer,0,poses);renderer.draw(false);
+ const poses=showcase_poses(alpha);device.queue.writeBuffer(poseBuffer,0,poses);renderer.draw(false);
 }
 
 // The scenario `next`: its world (Rust), its render scene (the pack's meshes, then the
@@ -52,7 +53,7 @@ async function build(next,run){
  // The pack's render scene (camera, floor), every mesh from the Rust (coloured by material).
  const built=buildPackScene(showcase_pack(next).buffer);
  scene={handle:built.handle,...built.handle.meta(),hullData:built.hullData,vertices:showcase_vertices(),lines:built.lines,projectileVertices:built.projectileVertices,roadVertices:built.roadVertices};
- const poses=showcase_poses();
+ const poses=showcase_poses(0);
  poseBuffer?.destroy();poseBuffer=device.createBuffer({size:poses.byteLength,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
  device.queue.writeBuffer(poseBuffer,0,poses);
  renderer?.dispose();renderer=await createRenderer(device,canvas,{bodyBuffer:poseBuffer,shots:0},scene,shoot);
@@ -70,7 +71,7 @@ function shoot(ray){if(!scene||held)return;after(()=>{if(showcase_shoot_ray(new 
 // The lab's director over this page: a stress-mode-like view of the scenario.
 const view={
  get stats(){const s=stats();return {...s,statsFrame:s.frames,fragments:s.bodies}},
- frameSteps:n=>advance(n),
+ frameSteps:(n,alpha)=>advance(n,alpha),
  detonate:name=>showcase_detonate(name),
  launch:()=>false,
  fire:()=>showcase_fire(),
@@ -110,7 +111,7 @@ function tick(t){
     let steps=0;
     if(running&&last){credit+=Math.min(0.1,(t-last)/1000)*stats().frameHz*timeScale();steps=Math.floor(credit);credit-=steps}
     last=t;
-    await advance(steps);hud();
+    await advance(steps,credit);hud();
    }catch(e){fail(e);running=false;$('run').textContent='Run'}
   })();
   frame.finally(()=>requestAnimationFrame(tick));

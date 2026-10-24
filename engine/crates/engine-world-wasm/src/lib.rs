@@ -51,6 +51,11 @@ struct Loaded {
     pending: Vec<ImpactorDesc>,
     /// The render scene's vertices, each chunk coloured by its material.
     structure: Vec<f32>,
+    /// The pose buffer's bodies as of the last polled step, and as of the step before it
+    /// (none until a step is taken): a frame drawn between two steps is drawn between them
+    /// ([`showcase_poses`]).
+    curr: Vec<Transform>,
+    prev: Option<Vec<Transform>>,
 }
 
 thread_local! {
@@ -178,7 +183,9 @@ fn load(key: &str) -> anyhow::Result<Loaded> {
     let p = &json["defaults"]["projectile"];
     let ball = (p["radius"].as_f64().unwrap_or(0.5), p["mass"].as_f64().unwrap_or(1000.0), p["speed"].as_f64().unwrap_or(20.0));
     let to_render = inverse(&scenario.instance);
-    Ok(Loaded { demolition: Demolition::new(scenario.charges.clone()), scenario, rest, to_render, ball, aim: stress_ref::wrecking::aim_of(&json), pending: Vec::new(), structure })
+    let mut l = Loaded { demolition: Demolition::new(scenario.charges.clone()), scenario, rest, to_render, ball, aim: stress_ref::wrecking::aim_of(&json), pending: Vec::new(), structure, curr: Vec::new(), prev: None };
+    l.curr = render_poses(&l);
+    Ok(l)
 }
 
 /// The first body the extras take in the pose buffer: after the render scene's bodies.
@@ -231,7 +238,7 @@ pub fn showcase_frame(steps: u32) -> bool {
 }
 
 fn frame(l: &mut Loaded, steps: u32) -> anyhow::Result<()> {
-    for _ in 0..steps {
+    for i in 0..steps {
         for desc in std::mem::take(&mut l.pending) {
             l.scenario.shoot(&desc)?;
         }
@@ -239,44 +246,71 @@ fn frame(l: &mut Loaded, steps: u32) -> anyhow::Result<()> {
             l.scenario.cut(&c)?;
         }
         l.scenario.step()?;
+        // The poses a step before the last, to draw between (several steps a frame).
+        if i + 2 == steps {
+            l.scenario.poll()?;
+            l.curr = render_poses(l);
+        }
     }
     if steps > 0 {
         l.scenario.poll()?;
+        let now = render_poses(l);
+        l.prev = Some(std::mem::replace(&mut l.curr, now));
     }
     Ok(())
 }
 
-/// The pose buffer as of the last polled step (`POSE_FLOATS` floats a body, the draw
-/// shader's layout): the render scene's bodies (the ground and the projectiles at rest,
-/// each chunk where its piece is), then the extras ([`showcase_extra_vertices`]' order;
-/// balls not fired parked under the ground).
+/// The pose buffer (`POSE_FLOATS` floats a body, the draw shader's layout) at `alpha`
+/// (0..1) of the way from the step before the last polled one to it: a frame between two
+/// steps (slow motion, or a display faster than the step rate) draws the bodies between
+/// them, as the steps' own poses at 0 and 1. Render only: the physics never sees it. A
+/// body that was not drawn at the step before (a ball fired since) is drawn where it is.
 #[wasm_bindgen]
-pub fn showcase_poses() -> Vec<f32> {
+pub fn showcase_poses(alpha: f32) -> Vec<f32> {
     LOADED.with_borrow(|l| {
         let Some(l) = l.as_ref() else { return Vec::new() };
-        let s = &l.scenario;
-        let mut poses: Vec<Transform> = l.rest.clone();
-        // The pack's nodes are the render scene's bodies 1..=n, in order.
-        let to_world = s.instance;
-        for (chunk, rest) in poses.iter_mut().skip(1).enumerate() {
-            let Ok(motion) = s.chunk_motion(chunk as u32) else { break };
-            // T0^-1 (T T0^-1) T0 R: the chunk's motion since rest, in the asset frame.
-            *rest = compose(&l.to_render, &compose(&motion, &compose(&to_world, rest)));
-        }
-        for parts in s.car_poses() {
-            poses.extend(parts.iter().map(|t| compose(&l.to_render, t)));
-        }
-        let balls = s.ball_poses();
-        for k in 0..Scenario::MAX_BALLS {
-            poses.push(balls.get(k).map_or(Transform::new(PARKED, [0.0, 0.0, 0.0, 1.0]), |(t, _)| compose(&l.to_render, t)));
-        }
-        let mut out = vec![0.0f32; POSE_FLOATS * poses.len()];
-        for (k, t) in poses.iter().enumerate() {
+        let a = alpha.clamp(0.0, 1.0);
+        let mut out = vec![0.0f32; POSE_FLOATS * l.curr.len()];
+        for (k, t) in l.curr.iter().enumerate() {
+            let t = match l.prev.as_ref().and_then(|p| p.get(k)) {
+                Some(p) if p.position != PARKED && t.position != PARKED => between(p, t, a),
+                _ => *t,
+            };
             out[POSE_FLOATS * k..POSE_FLOATS * k + 3].copy_from_slice(&t.position);
             out[POSE_FLOATS * k + 4..POSE_FLOATS * k + 8].copy_from_slice(&t.rotation);
         }
         out
     })
+}
+
+/// `a` of the way from `p` to `q`: position along the line, rotation along the arc.
+fn between(p: &Transform, q: &Transform, a: f32) -> Transform {
+    let x = glam::Vec3::from(p.position).lerp(glam::Vec3::from(q.position), a);
+    let r = glam::Quat::from_array(p.rotation).slerp(glam::Quat::from_array(q.rotation), a);
+    Transform::new(x.to_array(), r.normalize().to_array())
+}
+
+/// The pose buffer's bodies as of the last polled step: the render scene's (the ground and
+/// the projectiles at rest, each chunk where its piece is), then the extras
+/// ([`showcase_vertices`]' order; balls not fired parked under the ground).
+fn render_poses(l: &Loaded) -> Vec<Transform> {
+    let s = &l.scenario;
+    let mut poses: Vec<Transform> = l.rest.clone();
+    // The pack's nodes are the render scene's bodies 1..=n, in order.
+    let to_world = s.instance;
+    for (chunk, rest) in poses.iter_mut().skip(1).enumerate() {
+        let Ok(motion) = s.chunk_motion(chunk as u32) else { break };
+        // T0^-1 (T T0^-1) T0 R: the chunk's motion since rest, in the asset frame.
+        *rest = compose(&l.to_render, &compose(&motion, &compose(&to_world, rest)));
+    }
+    for parts in s.car_poses() {
+        poses.extend(parts.iter().map(|t| compose(&l.to_render, t)));
+    }
+    let balls = s.ball_poses();
+    for k in 0..Scenario::MAX_BALLS {
+        poses.push(balls.get(k).map_or(Transform::new(PARKED, [0.0, 0.0, 0.0, 1.0]), |(t, _)| compose(&l.to_render, t)));
+    }
+    poses
 }
 
 /// Fire the pack's ball along a ray in the render scene's frame (the camera's aim): from
@@ -452,6 +486,24 @@ fn vertex(p: [f32; 3], n: [f32; 3], color: [f32; 3], id: f32, out: &mut Vec<f32>
 
 #[cfg(test)]
 mod tests {
+    use rubble::Transform;
+
+    /// A frame between two steps draws each body between its two poses: the steps' own
+    /// poses at 0 and 1, the shorter way round.
+    #[test]
+    fn between_steps_is_between_the_poses() {
+        let p = Transform::new([0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]);
+        let h = std::f32::consts::FRAC_PI_4;
+        // A quarter turn about y, written as the negated quaternion (the same rotation).
+        let q = Transform::new([2.0, 1.0, 0.0], [0.0, -h.sin(), 0.0, -h.cos()]);
+        assert_eq!(super::between(&p, &q, 0.0).position, p.position);
+        assert_eq!(super::between(&p, &q, 1.0).position, q.position);
+        let m = super::between(&p, &q, 0.5);
+        assert!((glam::Vec3::from(m.position) - glam::Vec3::new(1.0, 1.0, 0.0)).length() < 1e-6);
+        let turn = glam::Quat::from_array(m.rotation).to_axis_angle();
+        assert!((turn.1 - std::f32::consts::FRAC_PI_4).abs() < 1e-4, "{turn:?}");
+    }
+
     /// The render frame's bookkeeping (natively): at rest every chunk's pose is its render
     /// body's, and the vehicles stand where the pack puts them in the asset frame.
     #[test]

@@ -26,6 +26,7 @@ fn run(charge: bool) -> (Drops, usize) {
     assert_eq!((s.cars.len(), s.charges.len()), (8, 1), "eight drives and the hinge pier's charge");
     let n = s.cars.len();
     let (mut settled, mut low) = (vec![0.0f32; n], vec![f32::INFINITY; n]);
+    let chunks = s.world.destructible_stats(s.destructible).unwrap().chunks;
     for step in 0..540 {
         if charge && step == 120 {
             let c = s.charges[0].clone();
@@ -33,6 +34,13 @@ fn run(charge: bool) -> (Drops, usize) {
         }
         s.step().unwrap();
         s.poll().unwrap();
+        // Every chunk has a pose as of every polled step, a piece split off in it too
+        // (its parent's: it was drawn at its rest pose for that step, floating where the
+        // structure had stood).
+        for c in 0..chunks {
+            let body = s.world.destructible_chunk_body(s.destructible, c).unwrap();
+            assert!(s.world.body_transform(body).unwrap().is_some(), "step {step}: chunk {c} (body {body:?}) has no pose");
+        }
         for (k, car) in s.cars.iter().enumerate() {
             let y = s.world.read_body_state(car.build.chassis).unwrap().transform.position[1];
             // Settled on its springs half a second in (it starts at full droop).
@@ -65,4 +73,33 @@ fn the_drop_in_spans_take_their_traffic_down() {
         let d = drops.iter().find(|x| x.0 == name).unwrap().1;
         assert!(d > 5.0, "{name} came down {d} m with its span: {drops:?}");
     }
+}
+
+/// The chassis poses and bonds broken after 4 s, the charge cut 2 s in, the host polling
+/// every `batch` steps.
+fn batched(batch: u64) -> (Vec<[f32; 3]>, usize) {
+    let pack = engine_fracture::samples::pack_sample_json("bo_drive_viaduct").unwrap();
+    let mut s = Scenario::load(GpuContext::Default, &pack).unwrap();
+    for step in 0..240u64 {
+        if step == 120 {
+            let c = s.charges[0].clone();
+            s.cut(&c).unwrap();
+        }
+        s.step().unwrap();
+        if (step + 1) % batch == 0 {
+            s.poll().unwrap();
+        }
+    }
+    s.poll().unwrap();
+    (s.cars.iter().map(|c| s.world.read_body_state(c.build.chassis).unwrap().transform.position).collect(), s.broken)
+}
+
+/// A run is the same physics however its host batches steps between polls (a take polls
+/// every step, a replay's catch-up every eight): the cruise controls read each step's
+/// speed, never a stale one.
+#[test]
+fn batching_steps_does_not_change_the_run() {
+    let (every, broken) = batched(1);
+    assert!(broken > 50, "{broken} bonds");
+    assert_eq!(batched(8), (every, broken));
 }

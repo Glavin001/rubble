@@ -433,6 +433,9 @@ Blast's terms, reachable as a `BodyId`.
 - A chunk's world transform is therefore always `body_transform *
   chunk_local`, where `chunk_local` is fixed in the asset. A split never
   requires a renderer to rebuild meshes.
+- A piece split off in a step has a `body_transform` from that step's frame on:
+  its parent's, since the split comes after the step's poses and the piece has
+  not moved off its parent yet.
 - Each child's centre of mass and axes come back in the split log.
 
 #### Damage as data

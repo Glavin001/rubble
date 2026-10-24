@@ -34,9 +34,10 @@ export function createDirector(lab) {
   const tickHz = () => lab.stressOn ? lab.stress.stats.frameHz : lab.stepHz();
   const tick = () => lab.stressOn ? (lab.stress.stats.frames ?? 0) : lab.sim.steps;
 
-  // Advance `ticks` physics ticks and draw (stress: one call steps and draws).
+  // Advance `ticks` physics ticks and draw (stress: one call steps and draws, at `credit`
+  // of the way to the next tick where the mode draws between ticks).
   async function advance(ticks, draw = true) {
-    if (lab.stressOn) { await lab.stress.frameSteps(ticks); return; }
+    if (lab.stressOn) { await lab.stress.frameSteps(ticks, credit); return; }
     for (let done = 0; done < ticks; done += 4) await lab.sim.step(Math.min(4, ticks - done));
     if (draw) lab.renderer.draw(lab.showBonds());
   }
@@ -255,7 +256,7 @@ export function createDirector(lab) {
         credit += hz / (VIDEO_HZ * slow);
         const ticks = Math.min(until - tick(), Math.floor(credit + 1e-9));
         credit -= ticks;
-        if (ticks) await advance(ticks); else if (lab.stressOn) await lab.stress.frameSteps(0); else lab.renderer.draw(lab.showBonds());
+        if (ticks) await advance(ticks); else if (lab.stressOn) await lab.stress.frameSteps(0, credit); else lab.renderer.draw(lab.showBonds());
         onProgress(0.3 + 0.6 * Math.min(1, i / frames));
         const wait = t0 + ((i + 1) * 1000) / VIDEO_HZ - performance.now();
         if (wait > 0) await new Promise((r) => setTimeout(r, wait));

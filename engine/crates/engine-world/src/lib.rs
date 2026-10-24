@@ -1852,6 +1852,12 @@ impl World {
                 user_data: slot.user_data,
             });
         }
+        #[cfg(feature = "stress")]
+        for (piece, parent) in std::mem::take(&mut self.fracture.split_from) {
+            if self.bodies[piece as usize].last_transform.is_none() {
+                self.bodies[piece as usize].last_transform = self.bodies[parent as usize].last_transform;
+            }
+        }
         let mut vehicles = Vec::new();
         let mut soft = Vec::new();
         let mut skins: Vec<SkinOutput> = Vec::new();

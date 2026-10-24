@@ -347,6 +347,11 @@ mod imp {
         /// The plan hints the lab fixes (`set_plan_hints`): the contact capacity, every
         /// colour its own dispatch.
         pub fixed_plan: Option<(u32, u32)>,
+        /// Pieces adopted in the frame being polled, each with the body it split from. A
+        /// split comes after the step's poses, so the piece has no pose of its own until
+        /// the next frame; until then it is where its parent is (every piece's origin is
+        /// the instance frame, and it has not moved off its parent yet).
+        pub split_from: Vec<(u32, u32)>,
     }
 
     impl Fracture {
@@ -1255,6 +1260,12 @@ mod imp {
             }
             for &b in &changed {
                 self.reframe_piece(k, b, step + 1, frames)?;
+            }
+            let t = self.fracture.slots[k].as_ref().expect("live slot");
+            for &b in &spare_taken {
+                if let Some(&c) = moved.iter().find(|&&c| t.chunk_body[c as usize] == b) {
+                    self.fracture.split_from.push((b, before[c as usize]));
+                }
             }
             // Splits: each parent's chunks before, grouped by where they are now.
             let t = self.fracture.slots[k].as_ref().expect("live slot");

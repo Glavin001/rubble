@@ -52,6 +52,8 @@ pub struct Scenario {
     pub contacts: u32,
     /// Each car's forward speed (m/s) as of the last polled step: its cruise control's.
     speed: Vec<f64>,
+    /// The step last polled (`frame` then).
+    polled: u64,
     /// Each car's chassis and wheels as of the last polled step (until then, as made).
     chassis: Vec<Transform>,
     wheels: Vec<Vec<Transform>>,
@@ -145,6 +147,7 @@ impl Scenario {
             awake: 0,
             contacts: 0,
             speed: vec![0.0; n],
+            polled: 0,
             chassis: Vec::with_capacity(n),
             wheels: Vec::with_capacity(n),
         };
@@ -158,8 +161,14 @@ impl Scenario {
     }
 
     /// One step: each vehicle's input (its throttle from its delay on, up to its cruising
-    /// speed as of the last polled step; braked before), then the world's step.
+    /// speed as of the step before; braked before), then the world's step. A cruise
+    /// control reads the last step's speed whenever the host polls (it waits for it), so
+    /// a run is the same physics however its steps are batched (live play, a take, a
+    /// replay's catch-up).
     pub fn step(&mut self) -> anyhow::Result<()> {
+        if self.polled != self.frame && self.cars.iter().any(|c| c.drive.speed.is_some()) {
+            self.poll()?;
+        }
         let t = self.frame as f64 * self.dt;
         for (car, &v) in self.cars.iter().zip(&self.speed) {
             let Some(h) = car.build.vehicle else { continue };
@@ -178,6 +187,7 @@ impl Scenario {
     /// vehicles' speeds and poses. An engine overflow is an error.
     pub fn poll(&mut self) -> anyhow::Result<()> {
         let frames = self.world.poll_blocking()?;
+        self.polled = self.frame;
         let mut wheels: std::collections::HashMap<VehicleHandle, Vec<crate::WheelState>> = Default::default();
         for f in &frames {
             for e in &f.destruction_events {
