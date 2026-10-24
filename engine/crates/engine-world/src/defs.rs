@@ -237,10 +237,15 @@ pub struct ShapeDef {
     /// kg/m³.
     pub density: f32,
     pub filter: CollisionFilter,
-    /// Overlap events without collision response (planned P4).
+    /// Overlap events without collision response (planned P4, second step).
     pub is_sensor: bool,
     pub enable_sensor_events: bool,
+    /// Report begin and end of touch with other shapes (`Frame::contact_events`;
+    /// either shape of a pair enables it). Off by default: a world without
+    /// event shapes runs no event pass.
     pub enable_contact_events: bool,
+    /// Report touches that begin at least `WorldDef::hit_event_threshold` fast
+    /// (either shape of a pair enables it).
     pub enable_hit_events: bool,
     /// Recompute the body's mass properties from its shapes (Box3D default).
     pub update_body_mass: bool,
@@ -269,13 +274,22 @@ impl ShapeDef {
     pub(crate) fn validate(&self) -> anyhow::Result<()> {
         self.material.validate()?;
         if self.is_sensor || self.enable_sensor_events {
-            return unsupported("sensor shapes (planned P4)");
-        }
-        if self.enable_contact_events || self.enable_hit_events {
-            return unsupported("contact and hit events (planned P4)");
+            return unsupported("sensor shapes (planned P4, second step)");
         }
         anyhow::ensure!(self.density >= 0.0, "negative density");
         Ok(())
+    }
+
+    /// The collider's shape flags (`Collider::material` bits 12..15).
+    pub(crate) fn event_bits(&self) -> u32 {
+        let mut bits = 0;
+        if self.enable_contact_events {
+            bits |= engine_schema::SHAPE_CONTACT_EVENTS;
+        }
+        if self.enable_hit_events {
+            bits |= engine_schema::SHAPE_HIT_EVENTS;
+        }
+        bits
     }
 }
 

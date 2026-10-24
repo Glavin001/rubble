@@ -238,6 +238,104 @@ fn a_box_falls_rests_and_sleeps_through_the_abi() {
 }
 
 #[test]
+fn contact_and_hit_events_arrive_in_host_units() {
+    unsafe {
+        // Unreal units: a box dropped 100 cm hits at √(2gh) = 443 cm/s.
+        let mut def = rbDefaultWorldDef();
+        def.coordinates = RbCoordinates::RB_COORDINATES_UNREAL;
+        def.gravity = RbVec3 {
+            x: 0.0,
+            y: 0.0,
+            z: -981.0,
+        };
+        def.hit_event_threshold = 100.0;
+        let mut w = ptr::null_mut();
+        ok(rbCreateWorld(&def, &mut w));
+        ground(w, true);
+        let mut bd = rbDefaultBodyDef();
+        bd.type_ = RbBodyType::RB_DYNAMIC_BODY;
+        bd.transform.p = RbVec3 {
+            x: 0.0,
+            y: 0.0,
+            z: 125.0,
+        };
+        let mut b = 0;
+        ok(rbCreateBody(w, &bd, &mut b));
+        let mut sd = rbDefaultShapeDef();
+        sd.density = 0.001;
+        sd.enable_contact_events = true;
+        sd.enable_hit_events = true;
+        sd.user_material_id = 9;
+        let mut s = 0;
+        ok(rbCreateBoxShape(
+            w,
+            b,
+            &sd,
+            RbVec3 {
+                x: 25.0,
+                y: 25.0,
+                z: 25.0,
+            },
+            RbTransform::default(),
+            &mut s,
+        ));
+        let (mut begins, mut hits) = (Vec::new(), Vec::new());
+        for _ in 0..90 {
+            ok(rbWorld_Step(w));
+            let mut f: RbFrame = std::mem::zeroed();
+            ok(rbWorld_Poll(w, true, false, &mut f));
+            if f.has_frame {
+                begins.extend_from_slice(slice(f.contact_begins, f.contact_begin_count));
+                hits.extend_from_slice(slice(f.contact_hits, f.contact_hit_count));
+                assert_eq!(f.contact_end_count, 0);
+            }
+        }
+        let f = poll_all(w);
+        begins.extend_from_slice(slice(f.contact_begins, f.contact_begin_count));
+        hits.extend_from_slice(slice(f.contact_hits, f.contact_hit_count));
+        assert_eq!(begins.len(), 1, "{begins:?}");
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        let h = hits[0];
+        // The ground's shape was made first: the lower handle, shape A.
+        assert!(h.shape_b == s && h.shape_a != 0 && h.shape_a < s, "{h:?}");
+        let ground_shape = h.shape_a;
+        assert_eq!((h.user_material_id_a, h.user_material_id_b), (0, 9));
+        let v = (2.0f32 * 981.0 * 100.0).sqrt();
+        assert!(
+            (h.approach_speed - v).abs() < 981.0 / 60.0 + 0.02 * v,
+            "approach {} cm/s, √(2gh) = {v}",
+            h.approach_speed
+        );
+        assert!(
+            h.normal.z > 0.99,
+            "ground to box: up Unreal Z, {:?}",
+            h.normal
+        );
+        assert!(h.point.z.abs() < 10.0, "at the ground: {:?}", h.point);
+        assert_eq!(begins[0].step, h.step);
+        // Destroying the box ends the touch.
+        ok(rbDestroyBody(w, b));
+        ok(rbWorld_Step(w));
+        let f = poll_all(w);
+        let ends = slice(f.contact_ends, f.contact_end_count);
+        assert_eq!(ends.len(), 1);
+        assert_eq!((ends[0].shape_a, ends[0].shape_b), (ground_shape, s));
+        // The threshold changes at run time (in host units); negative is refused.
+        ok(rbWorld_SetHitEventThreshold(w, v + 100.0));
+        assert_ne!(rbWorld_SetHitEventThreshold(w, -1.0), RbResult::RB_OK);
+        rbDestroyWorld(w);
+    }
+}
+
+unsafe fn slice<'a, T>(p: *const T, n: u32) -> &'a [T] {
+    if n == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(p, n as usize)
+    }
+}
+
+#[test]
 fn queued_rays_come_back_with_the_frame_in_host_units() {
     unsafe {
         let w = world(RbCoordinates::RB_COORDINATES_UNREAL);

@@ -34,6 +34,7 @@ pub struct SimSnapshot {
     has_convex: bool,
     has_height_field: bool,
     has_filters: bool,
+    has_contact_events: bool,
     grid_levels: u32,
     grid_cache: Option<(u32, f32, u32)>,
     manifolds_valid: bool,
@@ -299,6 +300,7 @@ impl WgpuSim {
             has_convex: self.has_convex,
             has_height_field: self.has_height_field,
             has_filters: self.has_filters,
+            has_contact_events: self.has_contact_events,
             grid_levels: self.grid_levels,
             grid_cache: self.grid_cache,
             manifolds_valid: self.manifolds_valid,
@@ -341,6 +343,7 @@ impl WgpuSim {
         self.has_convex = s.has_convex;
         self.has_height_field = s.has_height_field;
         self.has_filters = s.has_filters;
+        self.has_contact_events = s.has_contact_events;
         self.grid_levels = s.grid_levels;
         self.grid_cache = s.grid_cache;
         self.manifolds_valid = s.manifolds_valid;

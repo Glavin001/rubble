@@ -401,6 +401,8 @@ impl CudaSim {
             joint_hash_slots: engine_schema::joint_hash_size(0),
             has_convex: false,
             has_height_field: false,
+            // No event shapes on CUDA (the World API runs on wgpu).
+            contact_events: false,
             reuse_contacts: record,
             max_colors: self.capacity.max_colors,
             iterations: self.params.iterations,

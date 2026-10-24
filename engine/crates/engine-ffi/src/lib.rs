@@ -176,6 +176,9 @@ pub struct RbWorldDef {
     /// waiting when all are.
     pub readback_frames: u32,
     pub drop_frames: bool,
+    /// Approach speed at or above which a beginning touch raises a hit event
+    /// (world units per second; Box3D `hitEventThreshold`).
+    pub hit_event_threshold: f32,
     pub user_data: u64,
     pub internal_value: u32,
 }
@@ -206,6 +209,12 @@ pub struct RbShapeDef {
     pub mask_bits: u16,
     pub group_index: i16,
     pub update_body_mass: bool,
+    /// Report begin and end of touch (`RbFrame::contact_begins` / `_ends`);
+    /// either shape of a pair enables it.
+    pub enable_contact_events: bool,
+    /// Report touches that begin at least `hit_event_threshold` fast
+    /// (`RbFrame::contact_hits`); either shape of a pair enables it.
+    pub enable_hit_events: bool,
     pub user_data: u64,
     pub internal_value: u32,
 }
@@ -463,6 +472,47 @@ pub struct RbSkinOutput {
     pub vertex_count: u32,
 }
 
+/// Two shapes started touching (`RbFrame::contact_begins`). `shape_a` is the
+/// lower handle; `normal` points from `shape_a` to `shape_b`; `point` is the
+/// deepest contact; `approach_speed` the closing speed along `normal` there
+/// at the start of the step (world units per second, positive: closing).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RbContactBeginEvent {
+    /// The step it happened in.
+    pub step: u64,
+    pub shape_a: RbShapeId,
+    pub shape_b: RbShapeId,
+    pub point: RbVec3,
+    pub normal: RbVec3,
+    pub approach_speed: f32,
+}
+
+/// Two shapes stopped touching, or one was destroyed while they touched
+/// (`RbFrame::contact_ends`; a destroyed shape's handle is already stale).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RbContactEndEvent {
+    pub step: u64,
+    pub shape_a: RbShapeId,
+    pub shape_b: RbShapeId,
+}
+
+/// A touch that began at least `hit_event_threshold` fast
+/// (`RbFrame::contact_hits`), with each shape's `user_material_id`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RbContactHitEvent {
+    pub step: u64,
+    pub shape_a: RbShapeId,
+    pub shape_b: RbShapeId,
+    pub point: RbVec3,
+    pub normal: RbVec3,
+    pub approach_speed: f32,
+    pub user_material_id_a: u64,
+    pub user_material_id_b: u64,
+}
+
 /// A ray to cast: from `origin` along `translation` (its length is the range).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -521,6 +571,13 @@ pub struct RbFrame {
     /// Ray batches queued with `rbWorld_CastRays` before these steps.
     pub rays: *const RbRayBatchResult,
     pub ray_count: u32,
+    /// Contact events of shapes that enable them, in step order.
+    pub contact_begins: *const RbContactBeginEvent,
+    pub contact_begin_count: u32,
+    pub contact_ends: *const RbContactEndEvent,
+    pub contact_end_count: u32,
+    pub contact_hits: *const RbContactHitEvent,
+    pub contact_hit_count: u32,
 }
 
 impl RbFrame {
@@ -546,6 +603,12 @@ impl RbFrame {
             skin_count: 0,
             rays: std::ptr::null(),
             ray_count: 0,
+            contact_begins: std::ptr::null(),
+            contact_begin_count: 0,
+            contact_ends: std::ptr::null(),
+            contact_end_count: 0,
+            contact_hits: std::ptr::null(),
+            contact_hit_count: 0,
         }
     }
 }
@@ -564,6 +627,9 @@ struct FrameStore {
     skin_data: Vec<(Vec<RbVec3>, Vec<RbVec3>)>,
     rays: Vec<RbRayBatchResult>,
     ray_hits: Vec<Vec<RbRayHit>>,
+    contact_begins: Vec<RbContactBeginEvent>,
+    contact_ends: Vec<RbContactEndEvent>,
+    contact_hits: Vec<RbContactHitEvent>,
     /// Backing for bond lists, chunk lists, body lists and child arrays (the
     /// heap buffers do not move when these outer vectors grow).
     u32_lists: Vec<Vec<u32>>,
@@ -741,6 +807,8 @@ impl RbWorld {
                 group: d.group_index,
             },
             update_body_mass: d.update_body_mass,
+            enable_contact_events: d.enable_contact_events,
+            enable_hit_events: d.enable_hit_events,
             user_data: d.user_data,
             ..ShapeDef::default()
         })
@@ -1005,6 +1073,37 @@ impl RbWorld {
         for (out, hits) in s.rays.iter_mut().zip(&s.ray_hits) {
             out.hits = hits.as_ptr();
         }
+        let v = |a: [f32; 3]| RbVec3::of(coords.position_out(a));
+        let n = |a: [f32; 3]| RbVec3::of(coords.direction_out(a));
+        for (step, e) in &c.contact_events {
+            let step = *step;
+            s.contact_begins
+                .extend(e.begins.iter().map(|b| RbContactBeginEvent {
+                    step,
+                    shape_a: b.shape_a.to_bits(),
+                    shape_b: b.shape_b.to_bits(),
+                    point: v(b.point),
+                    normal: n(b.normal),
+                    approach_speed: coords.length_out(b.approach_speed),
+                }));
+            s.contact_ends
+                .extend(e.ends.iter().map(|x| RbContactEndEvent {
+                    step,
+                    shape_a: x.shape_a.to_bits(),
+                    shape_b: x.shape_b.to_bits(),
+                }));
+            s.contact_hits
+                .extend(e.hits.iter().map(|h| RbContactHitEvent {
+                    step,
+                    shape_a: h.shape_a.to_bits(),
+                    shape_b: h.shape_b.to_bits(),
+                    point: v(h.point),
+                    normal: n(h.normal),
+                    approach_speed: coords.length_out(h.approach_speed),
+                    user_material_id_a: h.user_material_ids[0],
+                    user_material_id_b: h.user_material_ids[1],
+                }));
+        }
         let counters = c.counters;
         RbFrame {
             has_frame: true,
@@ -1027,6 +1126,12 @@ impl RbWorld {
             skin_count: s.skins.len() as u32,
             rays: s.rays.as_ptr(),
             ray_count: s.rays.len() as u32,
+            contact_begins: s.contact_begins.as_ptr(),
+            contact_begin_count: s.contact_begins.len() as u32,
+            contact_ends: s.contact_ends.as_ptr(),
+            contact_end_count: s.contact_ends.len() as u32,
+            contact_hits: s.contact_hits.as_ptr(),
+            contact_hit_count: s.contact_hits.len() as u32,
         }
     }
 }
@@ -1075,6 +1180,8 @@ pub extern "C" fn rbDefaultWorldDef() -> RbWorldDef {
         enable_soft_bodies: false,
         readback_frames: 3,
         drop_frames: false,
+        // In the default (metre) coordinates; scale it with the units.
+        hit_event_threshold: WorldDef::default().hit_event_threshold,
         user_data: 0,
         internal_value: COOKIE,
     }
@@ -1118,6 +1225,7 @@ pub unsafe extern "C" fn rbCreateWorld(def: *const RbWorldDef, out: *mut *mut Rb
             } else {
                 Backpressure::Block
             },
+            hit_event_threshold: coords.length_in(d.hit_event_threshold),
             ..WorldDef::default()
         };
         let world = World::new(GpuContext::Default, &world_def)?;
@@ -1490,6 +1598,8 @@ pub extern "C" fn rbDefaultShapeDef() -> RbShapeDef {
         mask_bits: d.filter.mask,
         group_index: d.filter.group,
         update_body_mass: true,
+        enable_contact_events: d.enable_contact_events,
+        enable_hit_events: d.enable_hit_events,
         user_data: 0,
         internal_value: COOKIE,
     }

@@ -154,6 +154,9 @@ pub struct WgpuSim {
     grid_cache: Option<(u32, f32, u32)>,
     /// Any collider carries a collision filter (HOST_S(21)).
     has_filters: bool,
+    /// Any collider carries a contact or hit event flag: the step plans the
+    /// `contact_events` pass (P4).
+    has_contact_events: bool,
     /// The last step's manifolds still describe the scene (whole-step reuse).
     manifolds_valid: bool,
     /// Records the hull buffer (binding 18) holds; grows on demand.
@@ -267,6 +270,7 @@ fn persistent_entry(name: &str) -> &str {
         "convex_manifold" => "convex_manifold_persistent",
         "reuse_all_manifolds" => "reuse_all_manifolds_persistent",
         "vehicle_loads" => "vehicle_loads_persistent",
+        "contact_events" => "contact_events_persistent",
         _ => name,
     }
 }
@@ -728,6 +732,7 @@ impl WgpuSim {
             grid_levels: 0,
             grid_cache: None,
             has_filters: false,
+            has_contact_events: false,
             manifolds_valid: false,
             hull_records_capacity: hull_records,
             wake_pending: false,
@@ -932,6 +937,7 @@ impl WgpuSim {
             self.has_filters |= colliders
                 .iter()
                 .any(engine_schema::convex::CollisionFilter::is_set);
+            self.has_contact_events |= colliders.iter().any(has_event_flags);
             self.manifolds_valid = false;
             self.queue.write_buffer(
                 &self.bufs[2],
@@ -1062,6 +1068,7 @@ impl WgpuSim {
             self.has_filters |= colliders
                 .iter()
                 .any(engine_schema::convex::CollisionFilter::is_set);
+            self.has_contact_events |= colliders.iter().any(has_event_flags);
             self.manifolds_valid = false;
             self.host_cols.extend_from_slice(colliders);
             self.collider_count += count;
@@ -1123,6 +1130,9 @@ impl WgpuSim {
         let cleared = self.host_cols[first as usize..end]
             .iter()
             .any(CollisionFilter::is_set);
+        let events_cleared = self.host_cols[first as usize..end]
+            .iter()
+            .any(has_event_flags);
         self.host_cols[first as usize..end].copy_from_slice(cols);
         self.has_convex |= cols.iter().any(|c| c.shape == ShapeType::ConvexHull as u32);
         self.has_height_field |= cols.iter().any(|c| c.shape == ShapeType::HeightField as u32);
@@ -1130,6 +1140,11 @@ impl WgpuSim {
             self.has_filters = true;
         } else if cleared {
             self.has_filters = self.host_cols.iter().any(CollisionFilter::is_set);
+        }
+        if cols.iter().any(has_event_flags) {
+            self.has_contact_events = true;
+        } else if events_cleared {
+            self.has_contact_events = self.host_cols.iter().any(has_event_flags);
         }
         self.grid_cache = None;
         self.manifolds_valid = false;
@@ -1262,6 +1277,7 @@ impl WgpuSim {
         self.has_filters = cols
             .iter()
             .any(engine_schema::convex::CollisionFilter::is_set);
+        self.has_contact_events = cols.iter().any(has_event_flags);
         self.host_cols = cols;
         self.grid_cache = None;
         self.manifolds_valid = false;
@@ -1291,6 +1307,9 @@ impl WgpuSim {
         let cleared = self.host_cols[first as usize..end]
             .iter()
             .any(CollisionFilter::is_set);
+        let events_cleared = self.host_cols[first as usize..end]
+            .iter()
+            .any(has_event_flags);
         self.host_cols[first as usize..end].copy_from_slice(cols);
         self.has_convex |= cols.iter().any(|c| c.shape == ShapeType::ConvexHull as u32);
         self.has_height_field |= cols.iter().any(|c| c.shape == ShapeType::HeightField as u32);
@@ -1298,6 +1317,11 @@ impl WgpuSim {
             self.has_filters = true;
         } else if cleared {
             self.has_filters = self.host_cols.iter().any(CollisionFilter::is_set);
+        }
+        if cols.iter().any(has_event_flags) {
+            self.has_contact_events = true;
+        } else if events_cleared {
+            self.has_contact_events = self.host_cols.iter().any(has_event_flags);
         }
         self.grid_cache = None;
         self.manifolds_valid = false;
@@ -2165,6 +2189,7 @@ impl WgpuSim {
             joint_hash_slots: engine_schema::joint_hash_size(self.joint_count),
             has_convex: self.has_convex,
             has_height_field: self.has_height_field,
+            contact_events: self.has_contact_events,
             reuse_contacts: self.reuse_on(),
             max_colors: self.capacity.max_colors,
             iterations: self.params.iterations,
@@ -2641,6 +2666,39 @@ impl WgpuSim {
         )
     }
 
+    /// Whether any collider carries a contact or hit event flag
+    /// (`engine_schema::SHAPE_EVENT_FLAGS`), so each step runs the
+    /// `contact_events` pass.
+    pub fn has_contact_events(&self) -> bool {
+        self.has_contact_events
+    }
+
+    /// The contact-event region (binding 21 from `CONTACT_EVENT_BASE`: the
+    /// append count, then the records): buffer, byte offset and byte size, for
+    /// hosts that copy it into their readback with each step. Decode a copy
+    /// with `engine_schema::decode_contact_events`.
+    pub fn contact_event_range(&self) -> (&wgpu::Buffer, u64, u64) {
+        (
+            &self.bufs[21],
+            u64::from(CONTACT_EVENT_BASE) * 4,
+            u64::from(1 + CONTACT_EVENT_WORDS * CONTACT_EVENT_CAP) * 4,
+        )
+    }
+
+    /// The last step's contact-event records and how many it lost to
+    /// `CONTACT_EVENT_CAP` (waits for the GPU; for tests and tools: a host
+    /// copies `contact_event_range` with its step instead).
+    pub fn read_contact_events(&self) -> (Vec<engine_schema::ContactEventRecord>, u32) {
+        let count: Vec<u32> = self.read_buffer_range(21, u64::from(CONTACT_EVENT_BASE) * 4, 1);
+        let n = count[0].min(CONTACT_EVENT_CAP) as usize;
+        let words: Vec<u32> = self.read_buffer_range(
+            21,
+            u64::from(CONTACT_EVENT_BASE) * 4,
+            1 + n * CONTACT_EVENT_WORDS as usize,
+        );
+        engine_schema::decode_contact_events(&words)
+    }
+
     /// Every event in a copy of the event ring (`event_ring_range`) since the last
     /// poll: joint, mount and beam breaks and the soft pieces those cut loose. It
     /// advances the same cursors as `poll_joint_breaks`, `poll_mount_breaks` and
@@ -2963,4 +3021,9 @@ pub struct SoftEvents {
     /// Records overwritten in the event ring before this poll (bodies were
     /// resynchronised from a readback).
     pub lost: u32,
+}
+
+/// The collider carries a contact or hit event flag (bits 12..15 of `material`).
+fn has_event_flags(c: &Collider) -> bool {
+    c.material & engine_schema::SHAPE_EVENT_FLAGS != 0
 }

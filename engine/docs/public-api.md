@@ -718,7 +718,7 @@ design frame (metres, Y up), the format of `vehicle_presets.json` and the
 soft descriptors; spawn transforms and velocities use the world's
 coordinates. `tests/demo_parity.rs` covers each row through the ABI.
 
-Next, in order: P4 (contact, hit and sensor events), D1b (`threshold`),
+Next, in order: P4's sensors (contact and hit events shipped), D1b (`threshold`),
 the rest of P3 (damping, gravity scale, motion locks, bullets) and D5
 (`stress`).
 
@@ -951,7 +951,35 @@ Unreal is the first client.
   plan.
 - `allow_fast_rotation`.
 
-**P4: contact, hit and sensor events (next, after P3 shipped).**
+**P4: contact, hit and sensor events (contact and hit events shipped
+2026-10-24; sensors next).**
+
+*Shipped:* `ShapeDef::enable_contact_events` / `enable_hit_events`
+(`shape_enable_*_events`), `WorldDef::hit_event_threshold` (1 m/s, as
+Box3D; `set_hit_event_threshold`), and `Frame::contact_events` with
+`ContactBeginEvent`, `ContactEndEvent` and `ContactHitEvent` (pairs in
+canonical order, lower handle first, the normal from `shape_a` to
+`shape_b`; `CoalescedFrame` keeps them per step). C ABI:
+`RbShapeDef::enable_contact_events` / `enable_hit_events`,
+`RbWorldDef::hit_event_threshold`, `RbFrame::contact_begins` / `_ends` /
+`_hits` (host units), `rbShape_EnableContactEvents`,
+`rbShape_EnableHitEvents`, `rbWorld_SetHitEventThreshold`. The pass runs
+after contact persistence (so reused contacts are complete and the convex,
+heightfield and CCD manifolds are in), reads only, and leaves bodies
+byte-identical; `CONTACT_EVENT_CAP` is 16384 records a step (a 640 KiB
+readback copy per frame, only in worlds with event shapes). Vehicle and
+soft-body colliders are not shapes, so their touches are not reported yet.
+Deviation from
+the design below: *touching* is Box3D's (the deepest point within the
+contact offset, the speculative distance), not `c0N <= 0`. Both contact
+modes rest at `c0N = 0` by construction, so a box set down at rest depth on
+a static box read `c0N = +1e-9` every step and never touched. Tests:
+`engine-world/tests/contact_events.rs` (drops onto a plane and a
+heightfield at eight heights, approach speed within `g·dt + 2%` of
+√(2gh) in every storage mode and in zero-gap mode; threshold, sliding off
+a ledge, rest and sleep, destroy, overflow, flags leave friction alone),
+`engine-webgpu/tests/contact_events.rs`, the plan test in `rigid_plan.rs`
+and the ABI test.
 
 The design (2026-10-24):
 

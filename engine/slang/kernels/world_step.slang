@@ -620,6 +620,14 @@ static const uint CCD_PAIR_COUNT = CCD_BASE + 5u;
 static const uint CCD_MAX_REACH = CCD_BASE + 6u;
 static const uint CCD_PAIR_CAP = 131072u;
 static const uint CCD_PAIR_BASE = CCD_CARRY_BASE + CCD_CARRY_WORDS * CCD_BODY_CAP;
+// Contact-event region (engine-schema CONTACT_EVENT_*), after every other
+// list: an append count, then CONTACT_EVENT_CAP records of CONTACT_EVENT_WORDS.
+static const uint CONTACT_EVENT_BASE = CCD_PAIR_BASE + 2u * CCD_PAIR_CAP;
+static const uint CONTACT_EVENT_CAP = 16384u;
+static const uint CONTACT_EVENT_WORDS = 10u;
+static const uint SHAPE_CONTACT_EVENTS = 0x1000u;
+static const uint SHAPE_HIT_EVENTS = 0x2000u;
+static const uint SHAPE_EVENT_FLAGS = SHAPE_CONTACT_EVENTS | SHAPE_HIT_EVENTS;
 static const uint CCD_NO_PAIR = 0xFFFFFFFFu;
 static const uint CCD_TOI_NONE = 0x7F800000u; // +inf
 
@@ -813,7 +821,11 @@ bool collidersFilteredOut(uint i, uint j)
     return ((fa & 0xFFFFu) & (fb >> 16)) == 0u || ((fb & 0xFFFFu) & (fa >> 16)) == 0u;
 }
 
-uint materialIndex(Collider c) { return c.material & 0xFFFFu; }
+// Collider.material bits 0..11: the material index (below 64); bits 12..15:
+// shape flags (engine-schema SHAPE_*: contact events, hit events, sensor),
+// read only by the opt-in contact_events pass; bits 16..31: the filter group.
+static const uint MATERIAL_INDEX_MASK = 0x0FFFu;
+uint materialIndex(Collider c) { return c.material & MATERIAL_INDEX_MASK; }
 
 // Look-ahead pairs are tested with their relative sweep: each box is swept by
 // its own v·h for the broadphase, so pieces carried along together (debris in
@@ -5992,6 +6004,91 @@ void recompute_inertia(uint3 tid : SV_DispatchThreadID)
         I.z > 1e-8 ? 1.0 / I.z : 0.0);
     // Shift body origin note: we keep authoring frame; COM offset absorbed into colliders later if needed.
     gBodies[body] = b;
+}
+
+// ---- Contact events (P4; opt-in: the host plans these two passes only when
+// a collider carries SHAPE_EVENT_FLAGS, so other worlds replay the same step).
+
+// Reset the append count before this step's manifolds report.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void contact_events_clear(uint3 tid : SV_DispatchThreadID)
+{
+    if (dispatchIndex(tid) == 0u) ASTORE(gScratchAtomics[CONTACT_EVENT_BASE], 0u);
+}
+
+void contactEventStore(uint at, uint word, uint v)
+{
+    ASTORE(gScratchAtomics[CONTACT_EVENT_BASE + 1u + at * CONTACT_EVENT_WORDS + word], v);
+}
+
+// One thread per manifold, after the narrowphase stages (box, convex,
+// heightfield and CCD manifolds) and contact persistence, before the solve:
+// a manifold of a flagged collider whose deepest contact touches appends
+// {colliderA, colliderB, approach speed, point, normal, c0N}. The approach
+// speed is the closing speed along the normal (A to B) at that contact, from
+// the bodies' step-start velocities. Past CONTACT_EVENT_CAP the append is
+// counted, not written (the host reports it as lost).
+//
+// Touching is Box3D's: the deepest point's gap is within the speculative
+// distance (contactOffset), so a touch begins in the step that resolves the
+// impact, at the closing speed. Not `c0N <= 0`: both contact modes rest at
+// c0N = 0 (three-avbd a margin deep, FLAG_CONTACT_GAP at zero gap), so a body
+// set down at rest depth sat on that threshold (a box on a static box read
+// c0N = +1e-9 every step and never touched). The look-ahead's longer
+// detection reach does not count.
+bool contactEventTouching(float c0N)
+{
+    float gap = contactGapMode() ? c0N : c0N - PARAMS.contactOffset;
+    return gap < PARAMS.contactOffset;
+}
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void contact_events(uint3 tid : SV_DispatchThreadID)
+{
+    uint m = dispatchIndex(tid);
+    if (m >= min(ALOAD(gCounters[0].manifoldCount), HOST_S(10))) return;
+    Manifold mf = gManifolds[m];
+    if (mf.contactCount == 0u) return;
+    Collider ca = gColliders[mf.colliderA];
+    Collider cb = gColliders[mf.colliderB];
+    if (((ca.material | cb.material) & SHAPE_EVENT_FLAGS) == 0u) return;
+    bool found = false;
+    Contact deepest = (Contact)0;
+    for (uint k = 0u; k < mf.contactCount; k++)
+    {
+        uint at = mf.contactStart + k;
+        if (CONTACT_STATE(at) == 0u) continue;
+        Contact c = READ_CONTACT(at);
+        if (!found || c.c0N < deepest.c0N)
+        {
+            deepest = c;
+            found = true;
+        }
+    }
+    if (!found || !contactEventTouching(deepest.c0N)) return;
+    BodyState ba = gBodies[ca.body];
+    BodyState bb = gBodies[cb.body];
+    float3 pA = ba.position + quatRotate(ba.orientation, deepest.anchorA);
+    float3 pB = bb.position + quatRotate(bb.orientation, deepest.anchorB);
+    float3 p = 0.5 * (pA + pB);
+    float3 va = ba.linearVel + cross(ba.angularVel, p - ba.position);
+    float3 vb = bb.linearVel + cross(bb.angularVel, p - bb.position);
+    float3 n = deepest.normal;
+    float approach = dot(va - vb, n);
+    uint slot;
+    AADD3(gScratchAtomics[CONTACT_EVENT_BASE], 1u, slot);
+    if (slot >= CONTACT_EVENT_CAP) return;
+    contactEventStore(slot, 0u, mf.colliderA);
+    contactEventStore(slot, 1u, mf.colliderB);
+    contactEventStore(slot, 2u, asuint(approach));
+    contactEventStore(slot, 3u, asuint(p.x));
+    contactEventStore(slot, 4u, asuint(p.y));
+    contactEventStore(slot, 5u, asuint(p.z));
+    contactEventStore(slot, 6u, asuint(n.x));
+    contactEventStore(slot, 7u, asuint(n.y));
+    contactEventStore(slot, 8u, asuint(n.z));
+    contactEventStore(slot, 9u, asuint(deepest.c0N));
 }
 
 #include "ccd_step.slang"

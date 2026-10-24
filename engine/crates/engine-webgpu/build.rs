@@ -25,6 +25,10 @@ const WORLD_ENTRIES: &[&str] = &[
     "persist_contacts_persistent",
     "persist_manifolds_persistent",
     "pack_solver_pairs_persistent",
+    // Contact and hit events (P4, opt-in).
+    "contact_events_clear",
+    "contact_events",
+    "contact_events_persistent",
     "solve_primal_color_persistent",
     "solve_primal_one_persistent",
     "solve_dual_persistent",

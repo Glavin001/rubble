@@ -109,6 +109,9 @@ typedef struct RbWorldDef {
   // waiting when all are.
   uint32_t readback_frames;
   bool drop_frames;
+  // Approach speed at or above which a beginning touch raises a hit event
+  // (world units per second; Box3D `hitEventThreshold`).
+  float hit_event_threshold;
   uint64_t user_data;
   uint32_t internal_value;
 } RbWorldDef;
@@ -275,6 +278,41 @@ typedef struct RbRayBatchResult {
   uint32_t hit_count;
 } RbRayBatchResult;
 
+// Two shapes started touching (`RbFrame::contact_begins`). `shape_a` is the
+// lower handle; `normal` points from `shape_a` to `shape_b`; `point` is the
+// deepest contact; `approach_speed` the closing speed along `normal` there
+// at the start of the step (world units per second, positive: closing).
+typedef struct RbContactBeginEvent {
+  // The step it happened in.
+  uint64_t step;
+  RbShapeId shape_a;
+  RbShapeId shape_b;
+  struct RbVec3 point;
+  struct RbVec3 normal;
+  float approach_speed;
+} RbContactBeginEvent;
+
+// Two shapes stopped touching, or one was destroyed while they touched
+// (`RbFrame::contact_ends`; a destroyed shape's handle is already stale).
+typedef struct RbContactEndEvent {
+  uint64_t step;
+  RbShapeId shape_a;
+  RbShapeId shape_b;
+} RbContactEndEvent;
+
+// A touch that began at least `hit_event_threshold` fast
+// (`RbFrame::contact_hits`), with each shape's `user_material_id`.
+typedef struct RbContactHitEvent {
+  uint64_t step;
+  RbShapeId shape_a;
+  RbShapeId shape_b;
+  struct RbVec3 point;
+  struct RbVec3 normal;
+  float approach_speed;
+  uint64_t user_material_id_a;
+  uint64_t user_material_id_b;
+} RbContactHitEvent;
+
 // Results of one step, or of several folded together (`rbWorld_Poll`).
 // Pointers stay valid until the next poll.
 typedef struct RbFrame {
@@ -300,6 +338,13 @@ typedef struct RbFrame {
   // Ray batches queued with `rbWorld_CastRays` before these steps.
   const struct RbRayBatchResult *rays;
   uint32_t ray_count;
+  // Contact events of shapes that enable them, in step order.
+  const struct RbContactBeginEvent *contact_begins;
+  uint32_t contact_begin_count;
+  const struct RbContactEndEvent *contact_ends;
+  uint32_t contact_end_count;
+  const struct RbContactHitEvent *contact_hits;
+  uint32_t contact_hit_count;
 } RbFrame;
 
 // A ray to cast: from `origin` along `translation` (its length is the range).
@@ -332,6 +377,12 @@ typedef struct RbShapeDef {
   uint16_t mask_bits;
   int16_t group_index;
   bool update_body_mass;
+  // Report begin and end of touch (`RbFrame::contact_begins` / `_ends`);
+  // either shape of a pair enables it.
+  bool enable_contact_events;
+  // Report touches that begin at least `hit_event_threshold` fast
+  // (`RbFrame::contact_hits`); either shape of a pair enables it.
+  bool enable_hit_events;
   uint64_t user_data;
   uint32_t internal_value;
 } RbShapeDef;
@@ -822,6 +873,16 @@ enum RbResult rbShape_SetFriction(struct RbWorld *world,
                                   RbShapeId shape,
                                   float friction,
                                   float restitution);
+
+// Turn a shape's contact begin / end events on or off.
+enum RbResult rbShape_EnableContactEvents(struct RbWorld *world, RbShapeId shape, bool enabled);
+
+// Turn a shape's hit events on or off.
+enum RbResult rbShape_EnableHitEvents(struct RbWorld *world, RbShapeId shape, bool enabled);
+
+// The approach speed (world units per second) at or above which a beginning
+// touch raises a hit event, from frames polled next.
+enum RbResult rbWorld_SetHitEventThreshold(struct RbWorld *world, float speed);
 
 enum RbResult rbShape_SetFilter(struct RbWorld *world,
                                 RbShapeId shape,
