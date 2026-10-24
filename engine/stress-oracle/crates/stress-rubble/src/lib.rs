@@ -138,9 +138,9 @@ pub(crate) struct Entry {
     ccd: bool,
     /// Smallest half extent (sphere: radius) of its shapes (m).
     thin: f64,
-    /// The shapes its colliders were last placed from (`move_shapes`); `None` for a body
-    /// the GPU made itself (resident splits).
-    shapes: Option<std::sync::Arc<Vec<stress_ref::engine::BoxShape>>>,
+    /// The shapes' poses its colliders were last placed at (`move_shapes`); `None`: as
+    /// built, undeformed (its `cols`).
+    poses: Option<std::sync::Arc<Vec<Pose>>>,
 }
 
 /// A body's colliders and mass properties in its principal frame.
@@ -774,38 +774,43 @@ impl RubbleEngine {
                 inv_inertia: state.inv_inertia,
                 ccd: b.ccd,
                 thin: c.thin,
-                shapes: match &b.geometry {
-                    BodyGeometry::Boxes(shapes) => Some(shapes.clone()),
-                    BodyGeometry::Sphere { .. } => None,
-                },
+                poses: None,
             },
         );
+        if b.poses.is_some() {
+            self.move_shapes(b);
+        }
     }
 
-    /// Place a body's colliders at its shapes' new poses (same shapes, moved: the
+    /// Place a body's colliders at its shapes' current poses (`EngineBody::poses`: the
     /// chunks' deformation), as `cook_with` places them, about the centre of mass and
-    /// principal axes the body was built with. Its mass properties stay the build's (the
-    /// deformations are small strains).
+    /// principal axes the body was built with from the undeformed shapes; with none, back
+    /// where it was built. Its mass properties stay the build's (the deformations are small
+    /// strains). Only the engine's copy moves: `cols` keeps the undeformed placement
+    /// (`collider_rest`, which the resident frame moves from), and the collider table, which
+    /// says what each collider is, stands.
     fn move_shapes(&mut self, b: &EngineBody) {
         let BodyGeometry::Boxes(shapes) = &b.geometry else { return };
         let Some(e) = self.bodies.get(&b.key) else { return };
         let (range, com, to_body) = (e.colliders.clone(), e.com, e.principal.conjugate());
         assert_eq!(range.len(), shapes.len(), "one collider per shape");
-        for (k, s) in shapes.iter().enumerate() {
-            let i = range.start as usize + k;
-            let origin = match &s.hull {
-                Some(points) if self.cols[i].shape == ShapeType::ConvexHull as u32 => {
-                    let h = hull_entry(points, s.chunk, &mut self.arena, &mut self.hulls).expect("cooked at the build");
-                    s.local.position + s.local.rotation.rotate(Vec3::new(h.offset.x as f64, h.offset.y as f64, h.offset.z as f64))
-                }
-                _ => s.local.position,
-            };
-            self.cols[i].local_pos = gv(to_body.rotate(origin - com)).to_array();
-            self.cols[i].local_rot = glam_quat((to_body * s.local.rotation).normalized()).to_array();
+        let mut moved = self.cols[range.start as usize..range.end as usize].to_vec();
+        if let Some(poses) = &b.poses {
+            assert_eq!(poses.len(), shapes.len(), "one pose per shape");
+            for ((s, pose), col) in shapes.iter().zip(poses.iter()).zip(&mut moved) {
+                let origin = match &s.hull {
+                    Some(points) if col.shape == ShapeType::ConvexHull as u32 => {
+                        let h = hull_entry(points, s.chunk, &mut self.arena, &mut self.hulls).expect("cooked at the build");
+                        pose.position + pose.rotation.rotate(Vec3::new(h.offset.x as f64, h.offset.y as f64, h.offset.z as f64))
+                    }
+                    _ => pose.position,
+                };
+                col.local_pos = gv(to_body.rotate(origin - com)).to_array();
+                col.local_rot = glam_quat((to_body * pose.rotation).normalized()).to_array();
+            }
         }
-        self.sim.set_colliders(range.start, &self.cols[range.start as usize..range.end as usize]);
-        self.colliders_changed(range);
-        self.bodies.get_mut(&b.key).expect("present").shapes = Some(shapes.clone());
+        self.sim.set_colliders(range.start, &moved);
+        self.bodies.get_mut(&b.key).expect("present").poses = b.poses.clone();
     }
 
     /// Retire a body: static where it stands, its colliders in no pair.
@@ -976,9 +981,10 @@ impl RigidEngine for RubbleEngine {
         // place, the body and its contacts kept.
         let mut moved: Vec<&EngineBody> = bodies
             .iter()
-            .filter(|b| match (&b.geometry, self.bodies.get(&b.key).and_then(|e| e.shapes.as_ref())) {
-                (BodyGeometry::Boxes(shapes), Some(placed)) => !std::sync::Arc::ptr_eq(shapes, placed),
-                _ => false,
+            .filter(|b| match (&b.poses, self.bodies.get(&b.key).map(|e| &e.poses)) {
+                (Some(now), Some(Some(placed))) => !std::sync::Arc::ptr_eq(now, placed),
+                (now, Some(placed)) => now.is_some() != placed.is_some(),
+                (_, None) => false,
             })
             .collect();
         moved.sort_by_key(|b| b.key);
@@ -1256,6 +1262,7 @@ mod tests {
             pose: Pose::default(),
             velocity: Vec3::ZERO,
             angular_velocity: Vec3::ZERO,
+            poses: None,
         };
         let c = cook(&b, &mut HullArena::new());
         assert!((c.com - Vec3::new(0.05, 0.05, 0.0)).norm() < 1e-12);

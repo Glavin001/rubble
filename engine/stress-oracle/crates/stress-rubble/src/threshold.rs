@@ -154,6 +154,7 @@ impl ThresholdWorld {
                 pose: park(i),
                 velocity: Vec3::ZERO,
                 angular_velocity: Vec3::ZERO,
+                poses: None,
             });
         }
         engine.sync_bodies(&bodies);

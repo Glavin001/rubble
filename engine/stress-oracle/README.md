@@ -567,10 +567,10 @@ them progressively (1, 1, 2, 10, 13, 15 broken bonds over the first 0.1 s, one p
   same input gave 12 broken bonds in one run and at least 18 in another (2026-10-24).
   Judge such cases by the gate's ensemble (`stress-rubble`
   `integrated::sudden_support_loss_is_promoted_at_its_event`), not single runs.
-* **The GPU-resident frame keeps the engine's shapes undeformed**
-  (`World::engine_shapes_deformed` off; IMPROVEMENTS.md "Engine shapes follow the
-  chunks' deformation"), so a piece freed from a deforming structure can wedge
-  between its undeformed faces there, as b8 did in the host-coupled frame before.
+* **A GPU split's fragments keep undeformed shapes for one frame** in the resident frame
+  (IMPROVEMENTS.md "Engine shapes follow the chunks' deformation"): the host follows
+  the last frame's GPU splits while the next frame's substeps run, so the shape pass
+  moves the new bodies' colliders from the frame after.
 * **Lateral release / Poisson coupling**: the chunk network has no Poisson effect, so
   spall breaks whole planes where the continuum keeps corner ligaments (b6), and peak
   panel displacement is 20-24% above OpenCourant (b9).

@@ -121,7 +121,7 @@ fn anchored_wall_punch_through_without_rewind() {
 /// pieces fell through the frame's anchored parts): engine shapes built undeformed held a
 /// freed top-beam piece flush between the frame's anchored halves, where the stress solve
 /// had a widening gap, and it wedged and broke. With the shapes following the chunks'
-/// deformation (`World::shape_poses`) it gives 13-17 (median 13).
+/// deformation (`World::shape_poses`) it gives 13-17 (median 14).
 #[test]
 fn sudden_support_loss_is_promoted_at_its_event() {
     use stress_gpu::gate::{ensemble_gate, is_chaotic, perturbations, perturbed_by, reference_set};

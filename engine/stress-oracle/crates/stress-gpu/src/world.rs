@@ -174,6 +174,8 @@ pub struct GpuWorld {
     /// The scene has compound chunks (`has_compound`): frames with impact islands fail.
     compound: bool,
     resident: Option<resident_frame::ResidentState>,
+    /// The resident frame's shape pass (`shapes.rs`), made at its first frame.
+    resident_shapes: Option<crate::shapes::ShapeDeform>,
     /// The collider table's lookups of the current layout (resident_frame.rs).
     table_lookup: Option<resident_frame::TableLookup>,
     /// A frame's GPU splits the engine has adopted but the host's mirror and layout not yet
@@ -318,6 +320,7 @@ impl GpuWorld {
             impactors_stale: false,
             compound: false,
             resident: None,
+            resident_shapes: None,
             table_lookup: None,
             pending_splits: Vec::new(),
             pending_write_back: false,
@@ -410,16 +413,14 @@ impl GpuWorld {
             // come in the frame after it).
             self.route_next = true;
         }
-        // The profile's resident frame runs the GPU's split path. It keeps the engine's
-        // shapes undeformed (`World::engine_shapes_deformed`; not implemented there yet).
+        // The profile's resident frame runs the GPU's split path.
         if profile.resident() {
-            self.shell.engine_shapes_deformed = false;
             crate::GPU_FRAME_PROFILE.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
     /// Coupled mode: the engine's shapes follow the chunks' deformation
-    /// (`World::engine_shapes_deformed`).
+    /// (`World::engine_shapes_deformed`), in the resident frame on the GPU (`shapes.rs`).
     pub fn set_engine_shapes_deformed(&mut self, on: bool) {
         self.shell.engine_shapes_deformed = on;
     }
@@ -520,7 +521,12 @@ impl GpuWorld {
     fn step_frame_coupled(&mut self, gpu: &Gpu) -> Result<(), String> {
         if self.resident_now() {
             self.last_resident = true;
-            return self.resident_frame(gpu);
+            // The frame's shape pass moves the engine's shapes (`deform_shapes`): a
+            // write-back in it (a split's) leaves them as they are.
+            self.shell.engine_poses_held = self.shell.engine_shapes_deformed;
+            let r = self.resident_frame(gpu);
+            self.shell.engine_poses_held = false;
+            return r;
         }
         let fdt = self.scene.sim.frame_dt;
         // `STRESS_IMPACT_PUNCH=1` (a model under measurement): a routed frame breaks the

@@ -43,3 +43,7 @@ required-features = ["view"]
 [[example]]
 name = "destruction_video"
 required-features = ["gpu"]
+
+[[example]]
+name = "shape_deform_cost"
+required-features = ["gpu"]
