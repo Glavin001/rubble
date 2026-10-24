@@ -64,7 +64,7 @@
   <script type="module">
     import { createWorld, sceneCapacity } from './world-host.mjs';
     import { L, WHEEL_RIM_MATERIAL, bitsf } from './vehicle.mjs';
-    import { createBuggyRenderer } from './buggy-render.mjs';
+    import { createBuggyRenderer, BUGGY_SHADE_WGSL } from './buggy-render.mjs';
     import { duneBuggySoft, calibratedSettings } from './soft.mjs';
 
     const statusEl = document.getElementById('status');
@@ -171,7 +171,9 @@
     world.params.iterations = scene === 'bridge' ? 20 : 8;
     if (hybrid) {
       Object.assign(world.params, { dt: 1 / SOFT_HZ, iterations: 10, gravityY: -9.81, betaLin: 1e7 });
-      world.setSoftSettings(calibratedSettings(SOFT_HZ));
+      // Rigid mode (on unless ?rigid=0): a buggy that only drives rides its core
+      // (drives exactly as the rigid buggy); any contact turns it soft that step.
+      world.setSoftSettings({ ...calibratedSettings(SOFT_HZ), rigid_mode: qs.get('rigid') !== '0' });
       world.setMaterial(9, 0.8); // node spheres
     }
     const sleepQ = qs.get('sleep');
@@ -411,21 +413,7 @@
 
     // ---------------------------------------------------------------- renderer
     // Lighting shared with the dune buggy mesh (buggy-render.mjs); needs `frame`.
-    const LIGHT_WGSL = /* wgsl */`
-fn qrot(q: vec4f, v: vec3f) -> vec3f {
-  let u = q.xyz;
-  return u * (2.0 * dot(u, v)) + v * (q.w * q.w - dot(u, u)) + cross(u, v) * (2.0 * q.w);
-}
-fn shade(c: vec3f, n: vec3f, w: vec3f) -> vec3f {
-  let l = normalize(frame.light.xyz);
-  let diff = max(dot(n, l), 0.0);
-  let v = normalize(frame.eye.xyz - w);
-  let spec = pow(max(dot(reflect(-l, n), v), 0.0), 32.0) * 0.25;
-  let sky = 0.5 + 0.5 * n.y;
-  let fog = clamp(length(frame.eye.xyz - w) / 260.0, 0.0, 1.0);
-  return mix(c * (0.22 + 0.18 * sky + 0.75 * diff) + spec, vec3f(0.55, 0.62, 0.72), fog * fog);
-}
-`;
+    const LIGHT_WGSL = BUGGY_SHADE_WGSL;
     // Hide bitset: bodies first, then vehicles from bit HIDE_VEHICLES.
     const HIDE_VEHICLES = Math.ceil(world.cap.maxBodies / 32) * 32;
     const SHADER = /* wgsl */`

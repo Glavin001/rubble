@@ -2972,7 +2972,7 @@ void warmstart_joints(uint3 tid : SV_DispatchThreadID)
     if (i >= n) return;
     Joint j = gJoints[i];
     // Broken joints are inert; the vehicle kernels own tyre joints.
-    if ((j.flags & (JOINT_FLAG_BROKEN | JOINT_FLAG_TYRE)) != 0u) return;
+    if ((j.flags & (JOINT_FLAG_BROKEN | JOINT_FLAG_IDLE | JOINT_FLAG_TYRE)) != 0u) return;
     AvbdParams p = PARAMS;
     BodyState ja = gBodies[j.bodyA];
     BodyState jb = gBodies[j.bodyB];
@@ -4761,7 +4761,7 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
         else
         {
             uint jflags = gJoints[id].flags;
-            if ((jflags & JOINT_FLAG_BROKEN) != 0u) continue;
+            if ((jflags & (JOINT_FLAG_BROKEN | JOINT_FLAG_IDLE)) != 0u) continue;
             if ((jflags & JOINT_FLAG_TYRE) != 0u)
             {
                 // Wheel on this body: its share of the tyre rows, assembled by the
@@ -4805,7 +4805,7 @@ float3 bodyAngularVelocity(BodyState b, float dt)
 void primalApply(uint bodyIdx, Mat6 A, Vec6 rhs)
 {
     BodyState b = gBodies[bodyIdx];
-    if (!bodyIsDynamic(b) || bodyIsSleeping(b) || wakePending(b)) return;
+    if (!bodyIsDynamic(b) || bodyIsSleeping(b) || wakePending(b) || (b.flags & BODY_FOLLOW) != 0u) return;
     AvbdParams p = PARAMS;
     uint floors = 0;
     Vec6 neg = rhs;
@@ -5153,7 +5153,7 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
         uint jflags = gJoints[i].flags;
         // Broken joints are inert, the vehicle kernels own tyre joints, and a
         // joint whose ends both rest (asleep or static) keeps its λ and k.
-        bool live = (jflags & (JOINT_FLAG_BROKEN | JOINT_FLAG_TYRE)) == 0u
+        bool live = (jflags & (JOINT_FLAG_BROKEN | JOINT_FLAG_IDLE | JOINT_FLAG_TYRE)) == 0u
             && (bodyMoving(gBodies[gJoints[i].bodyA]) || bodyMoving(gBodies[gJoints[i].bodyB]));
         // On the final iteration (PASS_U != 0) λ is this step's converged
         // constraint force: breaking is decided there (bonds never while a host

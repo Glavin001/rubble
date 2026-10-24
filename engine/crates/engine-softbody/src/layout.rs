@@ -17,6 +17,8 @@
 //! flagBase + o           particle ordinal o: x ≠ 0 when in a soft contact this step
 //! obstacleBase + k       thin obstacle k (static sphere / capsule): [collider, 0, 0, 0]
 //! aabbBase + 2·s         soft body s bounds this step: min, max
+//! partBase + 3·(32·s+k)  soft body s's bolted part k: [body, firstJoint, joints, 0],
+//!                        its position and orientation in the core frame
 //! ```
 
 use serde::{Deserialize, Serialize};
@@ -27,7 +29,7 @@ pub const SOFT_PAIR_STRIDE: u32 = 8;
 /// Slots per particle in the contact list (a count and up to 15 contacts).
 pub const CONTACT_LIST_STRIDE: u32 = 4;
 /// Soft body record: [firstBody, particles, firstBeam, beams], [steer, group,
-/// core, ordinal base], [firstTri, tris, δ, 0], then rigid mode: [mode, quiet
+/// core, ordinal base], [firstTri, tris, δ, bolted parts], then rigid mode: [mode, quiet
 /// steps, flags | core joint count << 8, first core joint], the core's soft-mode
 /// [1/m, 1/I xyz] and rigid-mode [1/m, 1/I xyz] (f32).
 pub const BODY_STRIDE: u32 = 6;
@@ -85,6 +87,14 @@ pub const ENTRY_CONTACTER: u32 = 1 << 16;
 
 /// Body flag marking a particle (3-DOF node) in `gBodies`.
 pub const BODY_PARTICLE: u32 = 64;
+/// Body flag: rides another body's pose, skipped by the rigid primal (a bolted
+/// part in rigid mode, placed by `soft_mode`).
+pub const BODY_FOLLOW: u32 = 128;
+/// Bolted rigid parts per soft body (`SoftVehicleDesc::rigid_parts`).
+pub const MAX_RIGID_PARTS: u32 = 32;
+/// Slots per bolted part record: [body, first joint, joints, 0], its position
+/// and orientation in the core's frame (captured each step while soft).
+pub const PART_STRIDE: u32 = 3;
 
 /// "No index" marker in `gSoftData` slots (FLT_MAX bits: an all-ones NaN pattern
 /// cannot be a WGSL constant).
@@ -161,6 +171,8 @@ pub struct SoftLayout {
     /// `soft_contact_lists`: a count, then its soft contacts on the triangle side
     /// (count `u32::MAX`: too many, walk its triangles).
     pub contact_list_base: u32,
+    /// Bolted parts: `MAX_RIGID_PARTS` records of `PART_STRIDE` slots per soft body.
+    pub part_base: u32,
     pub total_slots: u32,
 }
 
@@ -190,6 +202,7 @@ impl SoftCapacity {
         let body_pair_base = tri_plane_base + 2 * self.max_triangles;
         let bdf_base = body_pair_base + SOFT_PAIR_STRIDE * self.max_bodies;
         let contact_list_base = bdf_base + self.max_particles;
+        let part_base = contact_list_base + CONTACT_LIST_STRIDE * self.max_particles;
         SoftLayout {
             body_base,
             beam_base,
@@ -212,7 +225,8 @@ impl SoftCapacity {
             body_pair_base,
             bdf_base,
             contact_list_base,
-            total_slots: contact_list_base + CONTACT_LIST_STRIDE * self.max_particles,
+            part_base,
+            total_slots: part_base + PART_STRIDE * MAX_RIGID_PARTS * self.max_bodies,
         }
     }
 
@@ -317,6 +331,10 @@ mod tests {
         assert_eq!(l.bdf_base + c.max_particles, l.contact_list_base);
         assert_eq!(
             l.contact_list_base + CONTACT_LIST_STRIDE * c.max_particles,
+            l.part_base
+        );
+        assert_eq!(
+            l.part_base + PART_STRIDE * MAX_RIGID_PARTS * c.max_bodies,
             l.total_slots
         );
         // The default pool stays well under WebGPU's 128 MiB binding limit.

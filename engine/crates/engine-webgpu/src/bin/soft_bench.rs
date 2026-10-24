@@ -6,6 +6,8 @@
 //! N procedural node–beam cars (102 particles, 572 beams, 4 raycast wheels each)
 //! drive in a grid at 240 Hz × 10 iterations, all awake and deforming-capable.
 //! Reports wall time per step and per 60 fps frame (4 steps), after warm-up.
+//! `CAR=buggy`: the hybrid dune buggy (152 nodes, 861 beams, 10 bolted parts)
+//! instead, and with `--rigid` the rigid `dune_buggy` preset it is built from.
 use engine_schema::{BodyState, Collider, Material, ShapeType, WorldCapacity};
 use engine_softbody::procedural::{car_truck, CarParams};
 use engine_softbody::truck::load_truck;
@@ -24,7 +26,12 @@ fn main() -> anyhow::Result<()> {
     } else {
         counts
     };
-    let desc = engine_softbody::procedural::car_desc(&CarParams::default()).0;
+    let buggy = std::env::var("CAR").as_deref() == Ok("buggy");
+    let desc = if buggy {
+        engine_softbody::buggy::dune_buggy_soft()
+    } else {
+        engine_softbody::procedural::car_desc(&CarParams::default()).0
+    };
     for &n in &counts {
         let cap = WorldCapacity {
             max_bodies: 49152,
@@ -106,14 +113,20 @@ fn main() -> anyhow::Result<()> {
         });
         let cols = (n as f32).sqrt().ceil() as usize;
         let mut cores = Vec::new();
+        let mut handles = Vec::new();
         for i in 0..n {
             let (x, z) = ((i % cols) as f32 * 6.0, (i / cols) as f32 * 9.0);
             if rigid {
                 // Baseline: the rigid sedan preset, same count, no soft bodies.
+                let preset = if buggy {
+                    engine_vehicle::presets::dune_buggy()
+                } else {
+                    engine_vehicle::presets::sedan()
+                };
                 cores.push(
                     sim.add_vehicle(
-                        &engine_vehicle::presets::sedan(),
-                        [x, 1.0, z],
+                        &preset,
+                        [x, if buggy { 0.6 } else { 1.0 }, z],
                         [0.0, 0.0, 0.0, 1.0],
                     )
                     .map_err(anyhow::Error::msg)?,
@@ -129,6 +142,7 @@ fn main() -> anyhow::Result<()> {
                 )
                 .map_err(anyhow::Error::msg)?;
             cores.push(sim.soft_host().entry(h).core.unwrap().0);
+            handles.push(h);
         }
         for &c in &cores {
             sim.set_vehicle_input(
@@ -161,8 +175,12 @@ fn main() -> anyhow::Result<()> {
         let c = sim.soft_host().counts();
         let rc = sim.last_counters();
         eprintln!(
-            "  rigid colours {} awake {} contacts {}",
-            rc.color_count, rc.awake_count, rc.contact_count
+            "  rigid colours {} awake {} contacts {} · soft bodies in rigid mode {}/{}",
+            rc.color_count,
+            rc.awake_count,
+            rc.contact_count,
+            handles.iter().filter(|&&h| sim.read_soft_rigid(h)).count(),
+            handles.len()
         );
         println!(
             "{}{n:>3} cars: {:>5} particles, {:>6} beams, {:>2} particle colours · pipelined {ms:5.2} ms/step ({:5.1} ms per 60 fps frame) · synchronous {sync_ms:5.2} ms/step · {}",
