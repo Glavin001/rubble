@@ -42,11 +42,12 @@ fn resident(gpu: &Gpu, scene: &stress_ref::scene::Scene) -> GpuWorld {
     w
 }
 
-/// Unlaunched, a second on their wheels: no bond broken, nothing moved more than 1 cm.
+/// Unlaunched, a second on their wheels (the viaduct's stalled traffic on its deck and the
+/// road below too): no bond broken, nothing moved more than 1 cm.
 #[test]
 fn vehicles_stand_on_their_wheels_in_both_stress_modes() {
     let gpu = Gpu::new().expect("GPU");
-    for key in ["vh_car_barrier", "vh_bus_barrier"] {
+    for key in ["vh_car_barrier", "vh_bus_barrier", "bo_viaduct_traffic"] {
         let pack = stress_ref::vehicles::pack(key).unwrap();
         let frames = 60;
         let scene = pack_scene(&pack, key, Profile::Threshold, 1.0);

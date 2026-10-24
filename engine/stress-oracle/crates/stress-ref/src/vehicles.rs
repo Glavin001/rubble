@@ -539,7 +539,35 @@ pub const SCENES: &[(&str, &str)] = &[
     ("rr_vehicles_apartment", "Car and bus through the apartment block"),
     ("ft_airliner_tower", "Airliner into the glass tower"),
     ("ft_airliner_apartment", "Airliner into the apartment block"),
+    ("bo_viaduct_traffic", "Highway viaduct with stalled traffic"),
 ];
+
+/// Stalled traffic on the viaduct (S2 + V3 + V4), none launched: cars and a bus parked on
+/// the two drop-in spans either side of the hinge pier (in lanes 2 m either side of the
+/// deck's centre line, on the deck's top), and cars and a bus on the lower road crossing
+/// under span 2 (heading along it, on its slabs). The ball takes the hinge pier out and
+/// the spans carry them down onto the road.
+fn traffic() -> Vec<(Vehicle, Placement, Option<Motion>)> {
+    use crate::viaduct::ViaductLayout as L;
+    use std::f64::consts::{FRAC_PI_2, PI};
+    let deck = L::DECK_TOP;
+    let road = L::ROAD_BASE + L::ROAD_DEPTH;
+    let at = |x: f64, y: f64, z: f64, heading: f64| Placement { at: [x, y, z], heading };
+    vec![
+        // Span 2 (west of the hinge, x -15.5..-1): three cars.
+        (car("car-1"), at(-12.0, -2.0, deck, 0.0), None),
+        (car("car-2"), at(-5.5, -2.0, deck, 0.0), None),
+        (car("car-3"), at(-9.0, 2.0, deck, PI), None),
+        // Span 3 (east of it, x 1..15.5): a bus and two cars.
+        (bus("bus-1"), at(8.0, -2.0, deck, 0.0), None),
+        (car("car-4"), at(4.5, 2.0, deck, PI), None),
+        (car("car-5"), at(11.5, 2.0, deck, PI), None),
+        // The lower road under span 2 (x -11.5..-2.5, along y): two cars and a bus queued.
+        (car("car-6"), at(-9.0, -6.0, road, FRAC_PI_2), None),
+        (car("car-7"), at(-5.0, 1.0, road, -FRAC_PI_2), None),
+        (bus("bus-2"), at(-9.0, 4.5, road, FRAC_PI_2), None),
+    ]
+}
 
 /// A scene with vehicles by key.
 pub fn scene(key: &str) -> Option<Scene> {
@@ -580,6 +608,7 @@ pub fn scene(key: &str) -> Option<Scene> {
         // fourth, along their lines of attack.
         "ft_airliner_tower" => Some(fly_through(key, title, crate::buildings::glass_tower(), 0.0)),
         "ft_airliner_apartment" => Some(fly_through(key, title, crate::buildings::apartment_block(), 0.0)),
+        "bo_viaduct_traffic" => Some(compose(key, title, crate::viaduct::viaduct(), Vec::new(), &traffic())),
         _ => None,
     }
 }

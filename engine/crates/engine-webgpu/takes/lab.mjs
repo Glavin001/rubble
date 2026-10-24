@@ -116,6 +116,16 @@ export const LAB_TAKES = {
     { n: 220, slow: 2, caption: 'Half speed: the hinge lets go and both spans swing down whole', cam: { rel: [0.25, -0.02, 0.8], relTo: [0.7, 0.05, 0.85] } },
     { n: 240, caption: 'They break on the road below; the outer piers follow', cam: { rel: [0.7, 0.05, 0.85], relTo: [1.1, 0.12, 1.0] } },
   ]),
+  // Bridge Out with traffic (S2 + V3 + V4, stress_ref::vehicles): 7 cars and 2 buses
+  // stalled on the two drop-in spans and on the road under span 2; the same 50 t ball into
+  // the hinge pier under blast_parity. The spans carry the traffic down onto the road.
+  bo_viaduct_traffic: take({ scene: 'bo_viaduct_traffic', bonds: 'stress', preset: 1 }, [
+    { n: 50, caption: 'Stalled traffic: 7 cars and 2 buses on the drop-in spans and the road below', cam: { rel: [0.45, 0.05, 0.5], relTo: [0.3, 0.03, 0.42] } },
+    { n: 1, act: 'fire', caption: 'A 50 t wrecking ball into the middle pier' },
+    { n: 25, caption: 'A 50 t wrecking ball into the middle pier' },
+    { n: 240, slow: 2, caption: 'Half speed: the hinge lets go; the spans swing down with the traffic on them', cam: { rel: [0.3, 0.03, 0.42], relTo: [0.75, 0.1, 0.45] } },
+    { n: 240, caption: 'They land on the road and its queue; the outer spans follow', cam: { rel: [0.75, 0.1, 0.45], relTo: [1.1, 0.16, 0.6] } },
+  ]),
   // Wrecking Yard (stress_ref::wrecking): the 50 t ball into the 10-floor frame's corner
   // column line under blast_parity; the collapse climbs while the core stands.
   wy_frame10_ball: take({ scene: 'wy_frame10', bonds: 'stress', preset: 1 }, [

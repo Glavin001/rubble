@@ -147,6 +147,13 @@ pub const PACK_SAMPLES: &[PackSample] = &[
         menu: "Highway viaduct, four spans · 347 chunks",
         label: "viaduct",
     },
+    // The viaduct with stalled traffic on it and under it (`stress_ref::vehicles`).
+    PackSample {
+        key: "bo_viaduct_traffic",
+        group: BRIDGE_OUT,
+        menu: "Highway viaduct with stalled traffic (7 cars, 2 buses) · 871 chunks",
+        label: "viaduct with traffic",
+    },
     PackSample {
         key: "topple_tower",
         group: TOPPLE,

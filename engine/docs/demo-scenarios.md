@@ -52,6 +52,10 @@ runs in a browser.
 | `rr_storefront_car` | V5 | A local break; the shop stands | A ball stands in for the car; the façade renders as a blank pale wall |
 | `ft_glass_tower_jet` | S3 | The cut and the collapse | A ball stands in for the aircraft; no tilt; a parked ball floats over the rubble at the end |
 | `lab_house_*`, `lab_cuboid_grid_ball` | S4 S7 | Scale | Rubble's own mode does not repeat exactly at scale |
+| `vh_car_barrier_crash`, `vh_bus_barrier_crash` | V1 V2 | Bonded car and bus slide into a rigid barrier: the front comes apart, wheels come off, the cabin holds; they repeat exactly | Wheels do not roll (the vehicles slide on them); vehicles render in their body slot's pastel colour |
+| `rr_storefront_car_bus` | V5 | The car goes through the shop window into the shop and crumples; the bus drives into the next shop with the fascia on its roof (442 bonds) | The apartment block (`rr_apartment_car_bus`) stops both: its brick infill is two 1.15 t panels a bay |
+| `ft_glass_tower_airliner`, `ft_apartment_airliner` | S3 | A bonded 35 t jet thrown in at 70 m/s: it punches through five storeys of the block's middle bays, its engines and nose fly off | Into the tower it stops in the first bays and slides down the facade; no upper block fails (threshold has no stress solve) |
+| `bo_viaduct_traffic` | S2 V3 V4 | The spans swing down carrying 5 cars and a bus and land on a queue of 2 cars and a bus; repeats exactly | The traffic loads the spans, so they break up sooner than without it |
 
 **Look, across every take:** the frames are pale and low contrast. In the Materials view,
 free debris is tinted with its body's colour (pastel confetti). Brick and glass do not read

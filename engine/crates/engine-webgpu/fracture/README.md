@@ -184,7 +184,9 @@ each named for what it is, then how many:
 - **Bridge Out:** a highway viaduct for a pier hit, also a Rust-built pack (below).
 - **Topple:** a high-rise beside a street with demolition charges (below).
 - **Ram Raid** and **Fly-through:** the vehicle's storefront and the aircraft's two
-  towers, built the same way (below).
+  towers, built the same way (below), and the same buildings with a bonded car and bus or
+  airliner to launch at them.
+- **Crash test:** a bonded car or bus launched at a rigid barrier (Bonded vehicles, below).
 - **Vibe City presets:** generated scene packs, when they are built.
 - **Your file:** a dropped or chosen GLB.
 
@@ -742,6 +744,23 @@ What happens, threshold, recorded in Chrome (takes `ft_glass_tower_airliner` and
 `cargo test --release -p stress-rubble --features gpu --test vehicles airliner`: the jet
 flies in level at 70 m/s (within 0.5 m of its height), breaks over 300 of the apartment
 block's bonds and loses its nose.
+
+**Bridge Out with traffic** (S2 + V3 + V4, `bo_viaduct_traffic`, 871 chunks). The viaduct has
+stalled traffic, none of it launched:
+- on drop-in span 2, three cars;
+- on drop-in span 3, a bus and two cars, in lanes 2 m either side of the deck's centre line;
+- on the lower road under span 2, two cars and a bus queued along it.
+
+Each vehicle stands on the deck's or the road's top, bonded to nothing but itself. The take
+`bo_viaduct_traffic` (blast_parity, the 50 t ball into the hinge pier, as `bo_viaduct_pier`):
+- the hinge lets go and both spans swing down with their cars and bus on them;
+- span 2 lands on the road's queue, crushing the bus and a car under it;
+- the outer spans follow.
+
+1,237 bonds break by 7.3 s, the same in three recordings. The traffic loads the spans as it
+rocks: at frame 90, spans 2 and 3 keep 61 and 58 of their 82 pairs, against 78 and 80
+without traffic. Natively, the spans' pier-2 ends are 8.7 and 8.9 m down by frame 90. The
+traffic stands still for a second in both stress modes before the hit (`tests/vehicles.rs`).
 
 **Checks:**
 - `cargo test --release -p stress-ref --test vehicles`:
