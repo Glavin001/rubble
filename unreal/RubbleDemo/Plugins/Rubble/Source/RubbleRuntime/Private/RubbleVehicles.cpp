@@ -82,6 +82,23 @@ void ARubbleVehicles::BuildBody(USceneComponent* Root, const FRubbleVehicleVisua
 	UMaterialInterface* Glass = RubbleRender::Surface(ERubbleMaterial::Glass);
 	UMaterialInterface* Trim = RubbleRender::Surface(ERubbleMaterial::Rubber);
 	UMaterialInterface* Steel = RubbleRender::Surface(ERubbleMaterial::Steel);
+	if (V.Parts.Num())
+	{
+		// The descriptor's own bodywork: each collider box drawn in paint (rubber for tyres).
+		for (const FRubbleShapeVisual& S : V.Parts)
+		{
+			UMaterialInterface* M = S.Material == ERubbleMaterial::CarPaint ? Paint : RubbleRender::Surface(S.Material);
+			if (S.Kind == ERubbleShape::Box)
+			{
+				Part(Root, Cube, FTransform(S.Local.GetRotation(), S.Local.GetLocation(), FVector(S.HalfExtents) / 50.0), M);
+			}
+			else if (S.Kind == ERubbleShape::Sphere)
+			{
+				Part(Root, RubbleRender::EngineSphere(), FTransform(S.Local.GetRotation(), S.Local.GetLocation(), FVector(S.Radius / 50.0)), M);
+			}
+		}
+		return;
+	}
 	const FVector H(V.ChassisHalfExtents);
 	auto Box = [&](const FVector& Center, const FVector& Half, UMaterialInterface* M, const FRotator& R = FRotator::ZeroRotator) {
 		Part(Root, Cube, FTransform(R, Center, Half / 50.0), M);
@@ -272,8 +289,19 @@ void ARubbleVehicles::OnFrame(const FRubbleFrame& Frame)
 		const FVector Forward = FVector::CrossProduct(Right, FVector::UpVector).GetSafeNormal(1e-6, FVector::ForwardVector);
 		const FVector Up = FVector::CrossProduct(Forward, Right).GetSafeNormal();
 		const FRubbleVehicleVisual* Def = VehicleDefs.IsValidIndex(P.Key) ? &VehicleDefs[P.Key] : nullptr;
-		const double Lift = Def && Def->Wheels.Num() ? -Def->Wheels[0].LocalHub.Z : 30.0;
-		const FTransform Pose(FMatrix(Forward, Right, Up, FVector::ZeroVector).ToQuat(), Sum / N + Up * Lift);
+		const FQuat Rot = FMatrix(Forward, Right, Up, FVector::ZeroVector).ToQuat();
+		// The chassis origin: the hubs' centre, less where the descriptor puts that centre.
+		FVector LocalCentre(0, 0, -30.0);
+		if (Def && Def->Wheels.Num())
+		{
+			LocalCentre = FVector::ZeroVector;
+			for (const FRubbleWheelDef& W : Def->Wheels)
+			{
+				LocalCentre += FVector(W.LocalHub);
+			}
+			LocalCentre /= Def->Wheels.Num();
+		}
+		const FTransform Pose(Rot, Sum / N - Rot.RotateVector(LocalCentre));
 		P.Value.Previous = P.Value.Root->GetComponentTransform().Equals(FTransform::Identity) ? Pose : P.Value.Current;
 		P.Value.Current = Pose;
 	}
@@ -335,6 +363,11 @@ bool ARubbleVehicles::PlayerTransform(FTransform& Out) const
 		if (P.Value.bPlayer)
 		{
 			Out = P.Value.Root->GetComponentTransform();
+			// The chase camera wants the heading the vehicle drives along.
+			if (VehicleDefs.IsValidIndex(P.Key) && VehicleDefs[P.Key].bForwardIsMinusX)
+			{
+				Out.SetRotation(Out.GetRotation() * FQuat(FVector::UpVector, UE_PI));
+			}
 			return true;
 		}
 	}

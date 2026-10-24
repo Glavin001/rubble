@@ -46,7 +46,7 @@ renderers (primitives, fracture, vehicles, soft bodies, effects, environment)
 URubbleSubsystem: fixed-step clock, merge, input
    ^ IRubbleBackend
 FRubbleAbiBackend --> librubble_ffi (rubble.h, Unreal coordinates)
-   | scenes the ABI cannot build yet
+   | the few scenes the ABI cannot build yet
 FRubbleMockBackend (stand-in motion; the HUD says "mock: <reason>")
 ```
 
@@ -65,51 +65,49 @@ FRubbleMockBackend (stand-in motion; the HUD says "mock: <reason>")
 | Family | On the C ABI | Still on the mock, and why |
 |---|---|---|
 | Rigid | Every stack, ring, gable, pile, grid and scatter scene | `joints`, `ragdolls`, `hingechains10k`, `motorfield10k`: their builders are not on the ABI |
-| Vehicles | Every scene, using the presets | — |
-| Fracture | `house`, `arch` (Shardwright GLBs at level 0, as the lab loads them; Bonds model) | The cuboid, row and grid scenes: procedural destructibles are not on the ABI |
-| Soft-body cars | — | All: the ABI takes Rigs of Rods `.truck` text only |
+| Vehicles | Every scene. Presets are drawn from their descriptors (`rbGetVehiclePresetJson`) | — |
+| Soft-body cars | Every crash test, the yard and the traffic derby. The demo's `procedural_car` (`rbGetSoftVehiclePresetJson`) uses the calibrated 240 Hz settings, rigid shapes are soft obstacles, and a fitted shell is bound with `rbSoft_BindSkin` | `crates`: no lattice-crate preset |
+| Fracture | `house`, `arch`: Shardwright GLBs at level 0, with the lab's own solver and bond preload | The cuboid, row and grid scenes: `rbCreateDestructibleAssetCuboidHouse` exists, but nothing reports chunk geometry to draw them with |
+
+The ground is an infinite plane (`rbCreatePlaneShape`). Shots reuse parked balls through the
+body commands.
 
 ## C ABI gaps found integrating it (for the public API)
 
-1. **Vehicles have no chassis or geometry query.** `rbCreateVehiclePreset` returns an index
-   only. The plugin places the body from the wheels and takes the wheel radius from the contact
-   distance. Spare and detachable wheels also appear in the moves, parked at Rubble y = -5000 m,
-   so a renderer has to know to hide them. Needed: a `rbVehicle_GetInfo` returning the chassis body, chassis extents (or a render
-   mesh), and the wheels' radius, width and rest hubs; the part bodies for destructible presets
-   would help too.
-2. **No procedural soft car, and no flexbody mesh.** The demo's car is
-   `engine_softbody::procedural::car_desc`/`car_truck`. Needed: an `rbCreateSoftVehicleProcedural`
-   (or the `.truck` text it makes), and the detailed render mesh from `visual.rs` with UVs and
-   parts, to pass to `rbSoft_BindSkin`.
-3. **No body commands on the ABI.** The Rust API has set transform, set velocity, impulse and
-   wake. Without them a shot creates a new ball every time (nothing is parked or reused), and
-   props such as the seesaw cannot be driven.
-4. **The destructible render contract is not reported for GLB assets.**
-   `rbDestructible_GetChunkBody` and the docs describe chunk world = body × chunk local, with
-   chunk local the identity in the Bonds model ("meshes authored in the asset frame"). A
+PR #66 and PR #67 closed several earlier gaps: body commands, kinematic bodies, soft-vehicle
+presets, the cuboid house, plane shapes, vehicle descriptors and the lab's solver settings.
+These remain:
+
+1. **`rbSoft_BindSkin` binds in the vehicle's own frame, not the world.** The header says
+   "world coordinates at spawn", but `SoftHost::bind_mesh` binds against the descriptor's node
+   positions. A world-space mesh binds to the wrong nodes and stays where it was spawned. The
+   plugin passes the descriptor frame. Fix either the docs or the binding (transform by the
+   spawn pose).
+2. **The destructible render contract is not reported for GLB assets.** The docs say chunk
+   world = body × chunk local, with chunk local the identity in the Bonds model, but a
    Shardwright GLB's chunk meshes are local to the fragment. Rubble places each one at the
-   fragment's centre of mass (the glTF node translation) plus a per-asset placement:
-   `build_scene` centres the selected level in X and Z and lifts it onto the ground, from the
-   collision hulls' bounds. The plugin recomputes that placement from the render meshes, which
-   is correct to about half a millimetre. Needed: an `rbDestructible_GetChunkLocal` that returns
-   the real per-chunk transform (fragment pose plus placement), so hosts never re-derive it.
-   Also, the GLB `level` the lab uses is 0 (the arch's 23 stones). The quickstart and the ABI
-   test use 1, which for the arch subdivides only one stone.
-5. **Destruction events carry no point or normal.** Dust and sparks are placed at the chunks that
-   woke this frame.
-6. **No scene builders on the ABI.** The joint scenes and `DestructibleAssetDesc::cuboid_house`
-   and its family are missing. `rbCreateDestructibleAssetFromDesc` (descriptor first) would cover
-   the lab's procedural scenes.
-7. **No engine features on `RbWorldDef`.** `grid_levels` is the one that matters most.
-   Separately, at most 1024 statics wider than half a grid cell are allowed
-   (`OVERFLOW_LARGE_STATICS`), so a ground made of tiles overflows; this one is a single box.
-8. **Capacities are guesswork.** Brick walls need about 30 contacts per body. A helper that sizes
-   a `RbWorldDef` from body counts, or reports high-water marks, would help.
-9. **`coalesce` folds in the earliest previous pose.** That suits motion vectors, but to
-   interpolate by an alpha within the latest step the host needs the latest step's previous pose.
-   The plugin therefore polls step by step and merges the steps itself.
-10. **Hit events (P4) and kinematic bodies (P3).** These are already planned; impact effects and
-   animated props wait on them.
+   fragment's centre of mass (the glTF node translation) plus `build_scene`'s per-asset
+   placement, which centres the level in X and Z and lifts it onto the ground. The plugin
+   re-derives that placement from the render meshes, correct to about 0.5 mm. Needed:
+   `rbDestructible_GetChunkLocal`. Also, the GLB `level` the lab uses is 0; the quickstart
+   and the ABI tests use 1, which for the arch subdivides only one stone.
+3. **No chunk geometry for procedural destructibles** (the cuboid house). Debug draw shows the
+   boxes but not which body each belongs to.
+4. **Vehicles still have no chassis body id.** The descriptor gives the shape, but the pose
+   comes from the wheels. Parked spare wheels appear in the moves at y = -5000 m.
+5. **No flexbody render mesh for the procedural car** (`engine-softbody/src/visual.rs`). The
+   plugin fits its own shell to the node cage.
+6. **Destruction events carry no point or normal.** Dust and sparks are placed at the chunks
+   that woke.
+7. **No builders for the joint scenes** (ragdolls, chains, the motor field) and no crate
+   preset.
+8. **No engine features on `RbWorldDef`** (`grid_levels`). At most 1024 statics wider than half
+   a grid cell are allowed (`OVERFLOW_LARGE_STATICS`).
+9. **Capacities are guesswork.** Brick walls need about 30 contacts per body. A helper that sizes
+   a `RbWorldDef`, or reports high-water marks, would help.
+10. **`coalesce` folds in the earliest previous pose.** To interpolate by an alpha within the
+    latest step, the host needs that step's own previous pose. The plugin polls step by step.
+11. **Hit events (P4).** Impact effects wait on them.
 
 ## Layout
 

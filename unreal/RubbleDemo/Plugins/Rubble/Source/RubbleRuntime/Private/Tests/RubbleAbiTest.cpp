@@ -67,7 +67,10 @@ bool FRubbleAbiStackTest::RunTest(const FString& Parameters)
 	{
 		const FVector* P = Last.Find(V.Id.Bits);
 		const FVector At = P ? *P : V.Initial.GetLocation();
-		Top = FMath::Max(Top, At.Z);
+		if (At.Z < 1.0e5) // not a parked ball
+		{
+			Top = FMath::Max(Top, At.Z);
+		}
 	}
 	TestTrue(*FString::Printf(TEXT("the stack stands: top box at %.1f cm (built at 950)"), Top), Top > 900.0 && Top < 1000.0);
 	return true;
@@ -95,7 +98,7 @@ bool FRubbleAbiScenesTest::RunTest(const FString& Parameters)
 			continue;
 		}
 		++OnAbi;
-		int32 Bad = 0, Below = 0, Moves = 0, Wheels = 0;
+		int32 Bad = 0, Below = 0, Moves = 0, Wheels = 0, Skins = 0, SkinBad = 0;
 		Run(B, 2.0, [&](const FRubbleFrame& F) {
 			for (const FRubbleMove& M : F.Moves)
 			{
@@ -107,9 +110,22 @@ bool FRubbleAbiScenesTest::RunTest(const FString& Parameters)
 				Below += Z < -200.0 && Z > -100000.0 ? 1 : 0;
 			}
 			Wheels += F.Wheels.Num();
+			for (const FRubbleSoftSkin& S : F.Skins)
+			{
+				++Skins;
+				const FRubbleSceneAssets& A = B.Assets();
+				const bool bSized = A.SoftBodies.IsValidIndex(S.Soft) && S.Positions.Num() == A.Meshes[A.SoftBodies[S.Soft].Mesh].Positions.Num();
+				SkinBad += bSized && !S.Positions.ContainsByPredicate([](const FVector3f& P) { return P.ContainsNaN(); }) ? 0 : 1;
+			}
 		});
 		TestEqual(*FString::Printf(TEXT("%s: no NaN (%d moves)"), *R.ToString(), Moves), Bad, 0);
 		TestEqual(*FString::Printf(TEXT("%s: nothing falls through the ground"), *R.ToString()), Below, 0);
+		if (D.Family == ERubbleFamily::Soft)
+		{
+			TestTrue(*FString::Printf(TEXT("%s: skins arrive (%d)"), *R.ToString(), Skins), Skins > 0);
+			TestEqual(*FString::Printf(TEXT("%s: every skin whole and finite"), *R.ToString()), SkinBad, 0);
+			TestTrue(*FString::Printf(TEXT("%s: soft wheels placed"), *R.ToString()), Wheels > 0);
+		}
 		if (D.Family == ERubbleFamily::Vehicles)
 		{
 			TestTrue(*FString::Printf(TEXT("%s: wheels reported"), *R.ToString()), Wheels > 0);
@@ -186,6 +202,57 @@ bool FRubbleAbiArchDrawnTest::RunTest(const FString& Parameters)
 	TestTrue(*FString::Printf(TEXT("the chunks span the arch (%s)"), *All.GetSize().ToString()), All.GetSize().Y > 300.0 && All.GetSize().Z > 250.0);
 	TestTrue(*FString::Printf(TEXT("it stands on the ground (lowest %.1f cm)"), All.Min.Z), FMath::Abs(All.Min.Z) < 2.0);
 	TestTrue(TEXT("the lab's 23 stones"), A.Chunks.Num() == 23);
+	return true;
+}
+#endif
+
+#if WITH_DEV_AUTOMATION_TESTS
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRubbleAbiSoftSkinTest, "Rubble.Abi.SoftSkinOnWheels",
+	EAutomationTestFlags::EngineFilter | EAutomationTestFlags::ClientContext | EAutomationTestFlags::EditorContext | EAutomationTestFlags::CommandletContext)
+
+bool FRubbleAbiSoftSkinTest::RunTest(const FString& Parameters)
+{
+	// The skin wraps the car its wheels belong to: their centres agree, before and after a crash.
+	FRubbleAbiBackend B;
+	if (!Load(*this, B, TEXT("soft:wall")))
+	{
+		return false;
+	}
+	FVector SkinCentre = FVector::ZeroVector, WheelCentre = FVector::ZeroVector, FirstWheels = FVector::ZeroVector;
+	FBox SkinBox(ForceInit);
+	int32 Frames = 0, SkinFrames = 0;
+	Run(B, 1.5, [&](const FRubbleFrame& F) {
+		++Frames;
+		for (const FRubbleSoftSkin& S : F.Skins)
+		{
+			++SkinFrames;
+			SkinBox = FBox(ForceInit);
+			for (const FVector3f& P : S.Positions)
+			{
+				SkinBox += FVector(P);
+			}
+			SkinCentre = SkinBox.GetCenter();
+		}
+		if (F.Wheels.Num())
+		{
+			WheelCentre = FVector::ZeroVector;
+			for (const FRubbleWheelVisual& W : F.Wheels)
+			{
+				WheelCentre += W.Hub.GetLocation();
+			}
+			WheelCentre /= F.Wheels.Num();
+			if (FirstWheels.IsZero())
+			{
+				FirstWheels = WheelCentre;
+			}
+		}
+	});
+	const FRubbleSoftVisual& V = B.Assets().SoftBodies[0];
+	AddInfo(FString::Printf(TEXT("spawn %s velocity %s; %d frames, %d with skins; skin box %s; wheels first %s now %s"),
+		*V.Spawn.GetLocation().ToString(), *V.Velocity.ToString(), Frames, SkinFrames, *SkinBox.ToString(), *FirstWheels.ToString(), *WheelCentre.ToString()));
+	TestTrue(TEXT("skins arrive"), SkinFrames > 0);
+	TestTrue(*FString::Printf(TEXT("the skin is around the wheels (%.0f cm apart in plan)"), FVector::Dist2D(SkinCentre, WheelCentre)), FVector::Dist2D(SkinCentre, WheelCentre) < 150.0);
+	TestTrue(*FString::Printf(TEXT("the car drove at the wall (%.0f cm)"), FVector::Dist2D(FirstWheels, WheelCentre)), FVector::Dist2D(FirstWheels, WheelCentre) > 300.0);
 	return true;
 }
 #endif

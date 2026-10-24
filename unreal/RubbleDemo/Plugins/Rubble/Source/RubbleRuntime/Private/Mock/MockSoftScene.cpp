@@ -555,6 +555,25 @@ namespace RubbleMock
 			{
 				Balls.Add(B.ParkedBall(20.0f));
 			}
+			// What a real backend needs to spawn the same scene: each body's start pose and
+			// velocity, and the moving obstacles' velocity and mass.
+			for (const FSoft& S : Softs)
+			{
+				FRubbleSoftVisual& V = Assets.SoftBodies[S.Visual];
+				V.Spawn = FTransform(S.Rot, S.Pos);
+				V.Velocity = S.Vel;
+				V.bCar = S.bWheels;
+				V.bAI = S.bAI;
+			}
+			for (const FObb& O : Obstacles)
+			{
+				if (O.Mass > 0.0f && Assets.Bodies.IsValidIndex(O.Body))
+				{
+					Assets.Bodies[O.Body].InitialVelocity = O.Vel;
+					Assets.Bodies[O.Body].Mass = O.Mass;
+					Assets.Bodies[O.Body].bAwake = true;
+				}
+			}
 			const FVector Focus = Softs.Num() ? Softs[0].Pos : FVector::ZeroVector;
 			Assets.CameraTarget = Focus + FVector(400, 0, 80);
 			Assets.CameraEye = Focus + FVector(-200, -900, 350);

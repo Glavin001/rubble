@@ -144,6 +144,9 @@ struct FRubbleBodyVisual
 	bool bStatic = false;
 	/** Starts awake (dropped grids) or asleep until something hits it (the pages' settled stacks). */
 	bool bAwake = false;
+	/** A moving obstacle (a ram, a shunting truck, a crusher block): its start velocity and mass. */
+	FVector InitialVelocity = FVector::ZeroVector;
+	float Mass = 0.0f;
 };
 
 /** A destructible chunk: chunk world = its body's transform x Rest (the D1 render contract). */
@@ -194,12 +197,23 @@ struct FRubbleVehicleVisual
 	FLinearColor Paint = FLinearColor(0.6f, 0.05f, 0.04f);
 	TArray<FRubbleWheelDef> Wheels;
 	bool bPlayer = false;
+	/** The vehicle's own bodywork in its chassis frame (from its descriptor); empty: a placeholder
+	 *  by Style. */
+	TArray<FRubbleShapeVisual> Parts;
+	/** The chassis frame's +X points backwards (a descriptor driving along Rubble +Z). */
+	bool bForwardIsMinusX = false;
 };
 
 /** A soft-body vehicle: its render mesh's topology; each frame's FRubbleSoftSkin moves its vertices. */
 struct FRubbleSoftVisual
 {
 	int32 Soft = 0;
+	/** Where it starts and how fast (crash tests start at speed). */
+	FTransform Spawn = FTransform::Identity;
+	FVector Velocity = FVector::ZeroVector;
+	/** A car (wheels, the procedural car), not a crate. */
+	bool bCar = true;
+	bool bAI = false;
 	int32 Mesh = INDEX_NONE; // topology, UVs and materials; positions are the rest pose
 	FLinearColor Paint = FLinearColor(0.05f, 0.18f, 0.55f);
 	TArray<FRubbleWheelDef> Wheels;

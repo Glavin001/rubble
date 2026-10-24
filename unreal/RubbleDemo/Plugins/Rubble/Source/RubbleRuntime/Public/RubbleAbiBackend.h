@@ -49,6 +49,32 @@ private:
 	/** The bodies of a mock layout, created for real; returns false on an ABI error. */
 	bool CreateBodies(const FRubbleSceneAssets& Layout, FString& Error);
 	bool CreateDestructible(const TCHAR* Glb, const FTransform& Placement, FString& Error);
+	/** Balls for the shots, parked asleep; Launch reuses them through the body commands. */
+	bool ParkBalls(int32 Count, FString& Error);
+	static FVector ParkedAt(int32 Index);
+	TArray<uint64> Balls;
+	int32 NextBall = 0;
+
+	/** Soft cars: the procedural car spawned per layout car, skinned with a fitted shell. */
+	bool CreateSoftCars(const FRubbleSceneAssets& Layout, FString& Error);
+	struct FSoftCar
+	{
+		uint32 Soft = 0;
+		uint32 Skin = 0;
+		int32 Visual = 0;
+		bool bAI = false;
+		TArray<TPair<int32, int32>> WheelNodes; // axle node pairs
+		TArray<float> WheelRadius;
+		TArray<float> Spin;
+		TArray<FVector> LastHub;
+		TArray<TArray<int32>> Neighbours; // per skin vertex
+		TArray<TArray<float>> RestLength;
+		TArray<uint32> Triangles;
+	};
+	TArray<FSoftCar> SoftCars;
+	TMap<uint32, int32> SoftCarOfSkin;
+	TMap<uint32, int32> SoftCarOfSoft;
+	int32 PlayerSoft = INDEX_NONE;
 
 	FRubbleMockBackend Mock;
 	bool bMock = true;

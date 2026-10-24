@@ -5,6 +5,9 @@
 #include "Misc/Paths.h"
 #include "RubbleGlb.h"
 #include "RubbleSubsystem.h"
+#include "Dom/JsonObject.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 
 THIRD_PARTY_INCLUDES_START
 #include "rubble.h"
@@ -50,6 +53,106 @@ namespace
 		}
 	}
 
+	/** A JSON string from an rbGet*Json call (size query, then fill). */
+	template <typename F>
+	bool AbiJson(F&& Call, FString& Out)
+	{
+		size_t Length = 0;
+		if (Call(nullptr, 0, &Length) != RB_OK)
+		{
+			return false;
+		}
+		TArray<ANSICHAR> Buffer;
+		Buffer.SetNumZeroed(int32(Length) + 1);
+		if (Call(Buffer.GetData(), size_t(Buffer.Num()), &Length) != RB_OK)
+		{
+			return false;
+		}
+		Out = UTF8_TO_TCHAR(Buffer.GetData());
+		return true;
+	}
+
+	/** Rubble's frame (Y up, metres) to Unreal's: the ABI's axis map (engine-ffi coords.rs). */
+	FVector PointOf(const TArray<TSharedPtr<FJsonValue>>& A, double Scale = 100.0)
+	{
+		return A.Num() >= 3 ? FVector(-A[2]->AsNumber(), A[0]->AsNumber(), A[1]->AsNumber()) * Scale : FVector::ZeroVector;
+	}
+	FQuat RotationOf(const TArray<TSharedPtr<FJsonValue>>& Q)
+	{
+		// A rotation maps as (det(M) M q.xyz, w) with det(M) = -1.
+		return Q.Num() >= 4 ? FQuat(Q[2]->AsNumber(), -Q[0]->AsNumber(), -Q[1]->AsNumber(), Q[3]->AsNumber()).GetNormalized() : FQuat::Identity;
+	}
+
+	/** The preset's bodywork boxes and wheels, from its descriptor (rbGetVehiclePresetJson). */
+	bool PresetVisual(const char* Name, FRubbleVehicleVisual& V)
+	{
+		FString Json;
+		TSharedPtr<FJsonObject> Root;
+		if (!AbiJson([Name](char* B, size_t C, size_t* N) { return rbGetVehiclePresetJson(Name, B, C, N); }, Json)
+			|| !FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Json), Root) || !Root.IsValid())
+		{
+			return false;
+		}
+		V.Parts.Reset();
+		V.Wheels.Reset();
+		const TArray<TSharedPtr<FJsonValue>>* Parts = nullptr;
+		if (Root->TryGetArrayField(TEXT("parts"), Parts))
+		{
+			for (const TSharedPtr<FJsonValue>& Part : *Parts)
+			{
+				const FString PartName = Part->AsObject()->GetStringField(TEXT("name"));
+				const TArray<TSharedPtr<FJsonValue>>* Colliders = nullptr;
+				if (!Part->AsObject()->TryGetArrayField(TEXT("colliders"), Colliders))
+				{
+					continue;
+				}
+				for (const TSharedPtr<FJsonValue>& C : *Colliders)
+				{
+					const TSharedPtr<FJsonObject> Col = C->AsObject();
+					const TSharedPtr<FJsonObject>* Shape = nullptr;
+					if (!Col->TryGetObjectField(TEXT("shape"), Shape))
+					{
+						continue;
+					}
+					FRubbleShapeVisual S;
+					S.Local = FTransform(RotationOf(Col->GetArrayField(TEXT("rotation"))), PointOf(Col->GetArrayField(TEXT("position"))));
+					S.Material = PartName.Contains(TEXT("wheel")) || PartName.Contains(TEXT("tyre")) ? ERubbleMaterial::Rubber : ERubbleMaterial::CarPaint;
+					const FString Type = (*Shape)->GetStringField(TEXT("type"));
+					if (Type == TEXT("box"))
+					{
+						const TArray<TSharedPtr<FJsonValue>>& H = (*Shape)->GetArrayField(TEXT("half"));
+						S.Kind = ERubbleShape::Box;
+						S.HalfExtents = FVector3f(H[2]->AsNumber(), H[0]->AsNumber(), H[1]->AsNumber()) * 100.0f;
+					}
+					else if (Type == TEXT("sphere"))
+					{
+						S.Kind = ERubbleShape::Sphere;
+						S.Radius = float((*Shape)->GetNumberField(TEXT("radius")) * 100.0);
+					}
+					else
+					{
+						continue; // capsules and hulls: drawn by the placeholder's proportions
+					}
+					V.Parts.Add(S);
+				}
+			}
+		}
+		const TArray<TSharedPtr<FJsonValue>>* Wheels = nullptr;
+		if (Root->TryGetArrayField(TEXT("wheels"), Wheels))
+		{
+			for (const TSharedPtr<FJsonValue>& W : *Wheels)
+			{
+				FRubbleWheelDef D;
+				D.LocalHub = FVector3f(PointOf(W->AsObject()->GetArrayField(TEXT("position"))));
+				D.Radius = float(W->AsObject()->GetNumberField(TEXT("radius")) * 100.0);
+				D.Width = float(W->AsObject()->GetNumberField(TEXT("width")) * 100.0);
+				V.Wheels.Add(D);
+			}
+		}
+		V.bForwardIsMinusX = true; // presets drive along Rubble +Z, which is Unreal -X
+		return V.Parts.Num() > 0;
+	}
+
 	FString AbiError(const TCHAR* What)
 	{
 		return FString::Printf(TEXT("%s: %s"), What, UTF8_TO_TCHAR(rbGetLastError()));
@@ -93,6 +196,12 @@ void FRubbleAbiBackend::DestroyWorld()
 	NewBodies.Reset();
 	NewShapes.Reset();
 	ChunkAt.Reset();
+	Balls.Reset();
+	NextBall = 0;
+	SoftCars.Reset();
+	SoftCarOfSkin.Reset();
+	SoftCarOfSoft.Reset();
+	PlayerSoft = INDEX_NONE;
 }
 
 FString FRubbleAbiBackend::MockReason(const FRubbleSceneRequest& R)
@@ -100,7 +209,7 @@ FString FRubbleAbiBackend::MockReason(const FRubbleSceneRequest& R)
 	switch (R.Family)
 	{
 	case ERubbleFamily::Soft:
-		return TEXT("soft-body cars need the procedural car on the ABI (it takes .truck text only)");
+		return R.Id == TEXT("crates") ? TEXT("the lattice crates have no preset on the ABI") : FString();
 	case ERubbleFamily::Rigid:
 		for (const TCHAR* Scripted : { TEXT("joints"), TEXT("ragdolls"), TEXT("ragdolls10k"), TEXT("hingechains10k"), TEXT("motorfield10k") })
 		{
@@ -161,6 +270,7 @@ bool FRubbleAbiBackend::CreateBodies(const FRubbleSceneAssets& Layout, FString& 
 		D.transform = Xf(V.Initial);
 		// Settled stacks start asleep, as the page's settled scenes do; contact wakes them.
 		D.is_awake = V.bAwake;
+		D.linear_velocity = Vec(V.InitialVelocity);
 		D.user_data = uint64(SceneAssets->Bodies.Num() + FromLayout.Num());
 		Defs.Add(D);
 		FromLayout.Add(b);
@@ -184,6 +294,11 @@ bool FRubbleAbiBackend::CreateBodies(const FRubbleSceneAssets& Layout, FString& 
 			SceneAssets->Shapes.Add(Shape);
 			RbShapeDef SD = rbDefaultShapeDef();
 			SD.density = Density(Shape.Material);
+			if (V.Mass > 0.0f && Shape.Kind == ERubbleShape::Box)
+			{
+				// A moving obstacle of a given mass (the 1,500 kg ram, the 18 t truck).
+				SD.density = V.Mass / (8.0f * Shape.HalfExtents.X * Shape.HalfExtents.Y * Shape.HalfExtents.Z);
+			}
 			SD.friction = 0.6f;
 			RbShapeId Made = 0;
 			RbResult R = RB_OK;
@@ -206,6 +321,12 @@ bool FRubbleAbiBackend::CreateBodies(const FRubbleSceneAssets& Layout, FString& 
 			if (R != RB_OK)
 			{
 				Error = AbiError(TEXT("create shape"));
+				return false;
+			}
+			// Soft-body scenes: their skins collide with every rigid shape (walls, poles, rams).
+			if (Current.Family == ERubbleFamily::Soft && rbSoft_AddObstacle(WorldPtr, Made) != RB_OK)
+			{
+				Error = AbiError(TEXT("rbSoft_AddObstacle"));
 				return false;
 			}
 		}
@@ -236,6 +357,20 @@ bool FRubbleAbiBackend::CreateDestructible(const TCHAR* File, const FTransform& 
 	{
 		Error = AbiError(TEXT("rbCreateDestructibleAssetFromGlb"));
 		return false;
+	}
+	// The fracture lab's setup: the solver settings the asset was tuned with (120 Hz, 8
+	// iterations), and its bonds preloaded by settling one copy, so the structure starts at rest.
+	float TimeStep = 0.0f;
+	bool bSettled = false;
+	if (rbWorld_UseDestructibleAssetSolver(WorldPtr, Asset, &TimeStep) != RB_OK || rbWorld_PreloadDestructibleAsset(WorldPtr, Asset, &bSettled) != RB_OK)
+	{
+		Error = AbiError(TEXT("the lab's solver and preload"));
+		return false;
+	}
+	Dt = TimeStep;
+	if (!bSettled)
+	{
+		UE_LOG(LogRubble, Warning, TEXT("%s: the preload did not settle in 600 steps"), File);
 	}
 	RbDestructibleDef D = rbDefaultDestructibleDef();
 	D.asset = Asset;
@@ -316,6 +451,147 @@ bool FRubbleAbiBackend::CreateDestructible(const TCHAR* File, const FTransform& 
 	return true;
 }
 
+bool FRubbleAbiBackend::CreateSoftCars(const FRubbleSceneAssets& Layout, FString& Error)
+{
+	// The solver settings the demos use at this step rate.
+	FString Settings;
+	const float Hz = float(1.0 / Dt);
+	if (!AbiJson([Hz](char* B, size_t C, size_t* N) { return rbGetCalibratedSoftSettingsJson(Hz, B, C, N); }, Settings)
+		|| rbWorld_SetSoftSettingsJson(WorldPtr, TCHAR_TO_UTF8(*Settings)) != RB_OK)
+	{
+		Error = AbiError(TEXT("soft settings"));
+		return false;
+	}
+	FString Desc;
+	TSharedPtr<FJsonObject> Root;
+	if (!AbiJson([](char* B, size_t C, size_t* N) { return rbGetSoftVehiclePresetJson("procedural_car", 0.0f, B, C, N); }, Desc)
+		|| !FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Desc), Root) || !Root.IsValid())
+	{
+		Error = AbiError(TEXT("the procedural car's descriptor"));
+		return false;
+	}
+	// Its node cage in Unreal axes (descriptor frame), and which way it faces: its steered
+	// wheels are at the front.
+	TArray<FVector> Nodes;
+	for (const TSharedPtr<FJsonValue>& N : Root->GetArrayField(TEXT("nodes")))
+	{
+		Nodes.Add(PointOf(N->AsObject()->GetArrayField(TEXT("position"))));
+	}
+	TArray<TPair<int32, int32>> Axles;
+	TArray<float> Radii;
+	double FrontX = 0.0;
+	for (const TSharedPtr<FJsonValue>& W : Root->GetArrayField(TEXT("wheels")))
+	{
+		const TSharedPtr<FJsonObject> O = W->AsObject();
+		const int32 A = int32(O->GetNumberField(TEXT("node1"))), B = int32(O->GetNumberField(TEXT("node2")));
+		Axles.Add({ A, B });
+		Radii.Add(float(O->GetNumberField(TEXT("radius")) * 100.0));
+		if (O->GetBoolField(TEXT("steerable")) && Nodes.IsValidIndex(A))
+		{
+			FrontX += Nodes[A].X;
+		}
+	}
+	// The layout's cars face +X; the descriptor's front may be -X: then it is turned to match.
+	const FQuat Turn = FrontX < 0.0 ? FQuat(FVector::UpVector, UE_PI) : FQuat::Identity;
+	FBox Cage(ForceInit);
+	for (const FVector& N : Nodes)
+	{
+		Cage += Turn.RotateVector(N);
+	}
+	const FTCHARToUTF8 DescUtf8(*Desc);
+	for (const FRubbleSoftVisual& V : Layout.SoftBodies)
+	{
+		if (!V.bCar)
+		{
+			continue;
+		}
+		// Fit the layout's car shell (front +X) to the cage, so the skin wraps the simulated car.
+		FRubbleMeshData& Mesh = SceneAssets->Meshes[V.Mesh];
+		FBox Shell(ForceInit);
+		for (const FVector3f& P : Mesh.Positions)
+		{
+			Shell += FVector(P);
+		}
+		const FVector Scale = Cage.GetSize() / Shell.GetSize().ComponentMax(FVector(1.0));
+		for (FVector3f& P : Mesh.Positions)
+		{
+			P = FVector3f(Cage.Min + (FVector(P) - Shell.Min) * Scale);
+		}
+		// Spawned a few centimetres up: the layout's origin is at its sag below the ground.
+		const FTransform Spawn(V.Spawn.GetRotation(), V.Spawn.GetLocation() + FVector(0, 0, 10));
+		const FTransform AbiSpawn(Spawn.GetRotation() * Turn, Spawn.GetLocation());
+		RbSoftId Soft = 0;
+		if (rbCreateSoftVehicle(WorldPtr, DescUtf8.Get(), nullptr, Xf(AbiSpawn), Vec(V.Velocity), &Soft) != RB_OK
+			|| rbSoft_EnableOutput(WorldPtr, Soft, true) != RB_OK)
+		{
+			Error = AbiError(TEXT("rbCreateSoftVehicle"));
+			return false;
+		}
+		// In the car's own (descriptor) frame, not the world: rbSoft_BindSkin documents "world
+		// coordinates at spawn", but SoftHost::bind_mesh binds against the descriptor's node
+		// positions, so a world-space mesh binds to the wrong nodes (README, C ABI gaps).
+		TArray<RbVec3> World;
+		const FQuat Unturn = Turn.Inverse();
+		for (const FVector3f& P : Mesh.Positions)
+		{
+			World.Add(Vec(Unturn.RotateVector(FVector(P))));
+		}
+		RbSkinId Skin = 0;
+		if (rbSoft_BindSkin(WorldPtr, Soft, World.GetData(), uint32(World.Num()), Mesh.Indices.GetData(), uint32(Mesh.NumTriangles()), &Skin) != RB_OK)
+		{
+			Error = AbiError(TEXT("rbSoft_BindSkin"));
+			return false;
+		}
+		FSoftCar Car;
+		Car.Soft = Soft;
+		Car.Skin = Skin;
+		Car.Visual = SceneAssets->SoftBodies.Num();
+		Car.bAI = V.bAI;
+		Car.WheelNodes = Axles;
+		Car.WheelRadius = Radii;
+		Car.Spin.Init(0.0f, Axles.Num());
+		Car.LastHub.Init(FVector::ZeroVector, Axles.Num());
+		Car.Triangles = Mesh.Indices;
+		// Rest edge lengths around each vertex: strain and tears are measured against them.
+		Car.Neighbours.SetNum(Mesh.Positions.Num());
+		Car.RestLength.SetNum(Mesh.Positions.Num());
+		for (int32 t = 0; t + 2 < Mesh.Indices.Num(); t += 3)
+		{
+			for (int32 k = 0; k < 3; ++k)
+			{
+				const int32 a = Mesh.Indices[t + k], b = Mesh.Indices[t + (k + 1) % 3];
+				if (!Car.Neighbours[a].Contains(b))
+				{
+					const float L = FVector3f::Dist(Mesh.Positions[a], Mesh.Positions[b]);
+					Car.Neighbours[a].Add(b);
+					Car.RestLength[a].Add(L);
+					Car.Neighbours[b].Add(a);
+					Car.RestLength[b].Add(L);
+				}
+			}
+		}
+		FRubbleSoftVisual Out = V;
+		Out.Soft = Car.Visual;
+		Out.Wheels.Reset();
+		for (const float R : Radii)
+		{
+			FRubbleWheelDef D;
+			D.Radius = R;
+			D.Width = 20.0f;
+			Out.Wheels.Add(D);
+		}
+		if (V.bPlayer)
+		{
+			PlayerSoft = SoftCars.Num();
+		}
+		SoftCarOfSkin.Add(Skin, SoftCars.Num());
+		SoftCarOfSoft.Add(Soft, SoftCars.Num());
+		SoftCars.Add(MoveTemp(Car));
+		SceneAssets->SoftBodies.Add(Out);
+	}
+	return true;
+}
+
 bool FRubbleAbiBackend::LoadAbi(const FRubbleSceneRequest& Request, FString& Error)
 {
 	if (!CheckVersion(Error))
@@ -329,6 +605,8 @@ bool FRubbleAbiBackend::LoadAbi(const FRubbleSceneRequest& Request, FString& Err
 	}
 	const FRubbleSceneAssets& Layout = Mock.Assets();
 	DestroyWorld();
+	Dt = 1.0 / 60.0;
+	Current = Request;
 	SceneAssets = MakeUnique<FRubbleSceneAssets>();
 	SceneAssets->Stage = Layout.Stage;
 	SceneAssets->GroundHalfExtentCm = Layout.GroundHalfExtentCm;
@@ -340,6 +618,16 @@ bool FRubbleAbiBackend::LoadAbi(const FRubbleSceneRequest& Request, FString& Err
 	RbWorldDef W = rbDefaultWorldDef();
 	W.coordinates = RB_COORDINATES_UNREAL;
 	W.gravity = RbVec3{ 0.0f, 0.0f, -981.0f };
+	if (Request.Family == ERubbleFamily::Soft)
+	{
+		// Soft scenes step at 240 Hz (softbody.html) with canonical contacts and a soft arena; a
+		// procedural car is a few hundred node bodies.
+		Dt = 1.0 / 240.0;
+		W.enable_soft_bodies = true;
+		W.contacts = RB_CONTACTS_CANONICAL;
+		NumBodies += Layout.SoftBodies.Num() * 600;
+		W.max_joints = FMath::Max(W.max_joints, uint32(Layout.SoftBodies.Num() * 16 + 4096));
+	}
 	W.time_step = float(Dt);
 	if (Request.Family == ERubbleFamily::Fracture)
 	{
@@ -359,25 +647,25 @@ bool FRubbleAbiBackend::LoadAbi(const FRubbleSceneRequest& Request, FString& Err
 		return false;
 	}
 
-	// Ground: one static box with its top at Z = 0, as wide as the stage and 4 m thick. (One:
-	// statics wider than half a grid cell are listed separately, at most 1024 of them, so tiling
-	// the ground overflows; OVERFLOW_LARGE_STATICS.)
+	// Ground: an infinite plane at Z = 0 (rbCreatePlaneShape: no large static in the broadphase).
 	if (Layout.GroundHalfExtentCm > 0.0f)
 	{
 		RbBodyDef G = rbDefaultBodyDef();
-		G.transform = Xf(FTransform(FVector(0, 0, -200)));
 		RbBodyId Ground = 0;
 		RbShapeDef SD = rbDefaultShapeDef();
 		SD.friction = 0.8f;
 		RbShapeId Shape = 0;
-		const float H = FMath::Max(2000.0f, Layout.GroundHalfExtentCm);
-		if (rbCreateBody(WorldPtr, &G, &Ground) != RB_OK || rbCreateBoxShape(WorldPtr, Ground, &SD, RbVec3{ H, H, 200.0f }, Xf(FTransform::Identity), &Shape) != RB_OK)
+		if (rbCreateBody(WorldPtr, &G, &Ground) != RB_OK || rbCreatePlaneShape(WorldPtr, Ground, &SD, RbVec3{ 0, 0, 1 }, 0.0f, &Shape) != RB_OK)
 		{
 			Error = AbiError(TEXT("ground"));
 			return false;
 		}
 	}
 	if (!CreateBodies(Layout, Error))
+	{
+		return false;
+	}
+	if (Request.Family == ERubbleFamily::Soft && !CreateSoftCars(Layout, Error))
 	{
 		return false;
 	}
@@ -397,6 +685,8 @@ bool FRubbleAbiBackend::LoadAbi(const FRubbleSceneRequest& Request, FString& Err
 				return false;
 			}
 			FRubbleVehicleVisual Out = V;
+			// The preset's own bodywork and wheels: drawn as the engine simulates them.
+			PresetVisual(PresetOf(V.Style, V.bPlayer && Request.Id == TEXT("destruction")), Out);
 			Out.Vehicle = SceneAssets->Vehicles.Num();
 			Out.Chassis = FRubbleBodyId(); // the ABI does not name the chassis body: placed from the wheels
 			VehicleVisual.Add(Id, Out.Vehicle);
@@ -427,6 +717,10 @@ bool FRubbleAbiBackend::LoadAbi(const FRubbleSceneRequest& Request, FString& Err
 	const bool bSmash = Request.Family == ERubbleFamily::Rigid && (Request.Id == TEXT("wall") || Request.Id.StartsWith(TEXT("ring")) || Request.Id.StartsWith(TEXT("gables")));
 	const float Auto = Request.Family == ERubbleFamily::Fracture ? Request.Param(TEXT("autoshot"), 1.5f) : bSmash ? 1.0f : 0.0f;
 	AutoShotStep = Auto > 0.0f ? int64(Auto / Dt) : -1;
+	if (!ParkBalls(12, Error))
+	{
+		return false;
+	}
 	UE_LOG(LogRubble, Display, TEXT("rubble: %s built on the C ABI (%d bodies, %d vehicles, %d chunks)"), *Request.ToString(), SceneAssets->Bodies.Num(), SceneAssets->Vehicles.Num(), SceneAssets->Chunks.Num());
 	return true;
 }
@@ -446,6 +740,13 @@ void FRubbleAbiBackend::Step()
 	for (const uint32 V : AiVehicles)
 	{
 		rbVehicle_SetInput(WorldPtr, V, RbVehicleInput{ 0.35f, 0.2f, 0.0f, 0.0f });
+	}
+	for (const FSoftCar& Car : SoftCars)
+	{
+		if (Car.bAI)
+		{
+			rbSoft_SetInput(WorldPtr, Car.Soft, RbVehicleInput{ 0.4f, 0.25f, 0.0f, 0.0f });
+		}
 	}
 	if (AutoShotStep >= 0 && int64(Steps) == AutoShotStep)
 	{
@@ -577,6 +878,89 @@ void FRubbleAbiBackend::Poll(TArray<FRubbleFrame>& Out)
 				R.Wheels.Add(WV);
 			}
 		}
+		for (uint32 k = 0; k < F.skin_count; ++k)
+		{
+			const RbSkinOutput& SkinOut = F.skins[k];
+			const int32* CarIndex = SoftCarOfSkin.Find(SkinOut.skin);
+			if (!CarIndex)
+			{
+				continue;
+			}
+			const FSoftCar& Car = SoftCars[*CarIndex];
+			FRubbleSoftSkin& Skin = R.Skins.AddDefaulted_GetRef();
+			Skin.Soft = Car.Visual;
+			Skin.Positions.SetNumUninitialized(SkinOut.vertex_count);
+			Skin.Normals.SetNumUninitialized(SkinOut.vertex_count);
+			for (uint32 v = 0; v < SkinOut.vertex_count; ++v)
+			{
+				Skin.Positions[v] = FVector3f(SkinOut.positions[v].x, SkinOut.positions[v].y, SkinOut.positions[v].z);
+				Skin.Normals[v] = FVector3f(SkinOut.normals[v].x, SkinOut.normals[v].y, SkinOut.normals[v].z);
+			}
+			// Strain: the largest stretch or squash of the edges around a vertex; an edge past
+			// 1.8 times its rest length tears its triangles (soft_skin's rule).
+			Skin.Strain.SetNumZeroed(SkinOut.vertex_count);
+			for (int32 v = 0; v < Car.Neighbours.Num() && v < int32(SkinOut.vertex_count); ++v)
+			{
+				float Worst = 0.0f;
+				for (int32 j = 0; j < Car.Neighbours[v].Num(); ++j)
+				{
+					const float L = FVector3f::Dist(Skin.Positions[v], Skin.Positions[Car.Neighbours[v][j]]);
+					Worst = FMath::Max(Worst, FMath::Abs(L / FMath::Max(Car.RestLength[v][j], 0.01f) - 1.0f));
+				}
+				// Below 5% is the skinning's own give, not damage.
+				Skin.Strain[v] = FMath::Clamp((Worst - 0.05f) * 1.5f, 0.0f, 1.0f);
+			}
+			Skin.TornTriangles.Init(false, Car.Triangles.Num() / 3);
+			for (int32 t = 0; t + 2 < Car.Triangles.Num(); t += 3)
+			{
+				for (int32 e = 0; e < 3; ++e)
+				{
+					const int32 a = Car.Triangles[t + e], b = Car.Triangles[t + (e + 1) % 3];
+					const int32 j = Car.Neighbours[a].IndexOfByKey(b);
+					if (j != INDEX_NONE && FVector3f::Dist(Skin.Positions[a], Skin.Positions[b]) > 1.8f * Car.RestLength[a][j] + 2.0f)
+					{
+						Skin.TornTriangles[t / 3] = true;
+					}
+				}
+			}
+		}
+		for (uint32 k = 0; k < F.soft_count; ++k)
+		{
+			const RbSoftOutput& SoftOut = F.soft[k];
+			const int32* CarIndex = SoftCarOfSoft.Find(SoftOut.soft);
+			if (!CarIndex)
+			{
+				continue;
+			}
+			FSoftCar& Car = SoftCars[*CarIndex];
+			for (int32 w = 0; w < Car.WheelNodes.Num(); ++w)
+			{
+				const uint32 A = uint32(Car.WheelNodes[w].Key), B = uint32(Car.WheelNodes[w].Value);
+				if (A >= SoftOut.node_count || B >= SoftOut.node_count)
+				{
+					continue;
+				}
+				const FVector PA = Vec(SoftOut.nodes[A]), PB = Vec(SoftOut.nodes[B]);
+				const FVector Hub = 0.5 * (PA + PB);
+				const FVector Axle = (PB - PA).GetSafeNormal(1e-6, FVector::RightVector);
+				const FVector Up = (FVector::UpVector - Axle * FVector::DotProduct(FVector::UpVector, Axle)).GetSafeNormal(1e-6, FVector::UpVector);
+				const FVector Fwd = FVector::CrossProduct(Axle, Up);
+				// Spin from how far the hub rolled along its heading this step.
+				if (!Car.LastHub[w].IsZero())
+				{
+					Car.Spin[w] = FMath::Fmod(Car.Spin[w] + float(FVector::DotProduct(Hub - Car.LastHub[w], Fwd)) / FMath::Max(Car.WheelRadius[w], 1.0f), UE_TWO_PI);
+				}
+				Car.LastHub[w] = Hub;
+				FRubbleWheelVisual WV;
+				WV.Vehicle = Car.Visual;
+				WV.bSoft = true;
+				WV.Wheel = w;
+				WV.Hub = FTransform(FMatrix(Fwd, Axle, Up, FVector::ZeroVector).ToQuat(), Hub);
+				WV.SpinRad = Car.Spin[w];
+				WV.Radius = Car.WheelRadius[w];
+				R.Wheels.Add(WV);
+			}
+		}
 		if (NewBodies.Num())
 		{
 			R.NewBodies = MoveTemp(NewBodies);
@@ -595,10 +979,57 @@ void FRubbleAbiBackend::SetVehicleInput(const FRubbleVehicleInput& In)
 		return;
 	}
 	Input = In;
+	const RbVehicleInput Drive{ In.Throttle, In.Steer, In.Brake, In.bHandbrake ? 1.0f : 0.0f };
 	if (WorldPtr && PlayerVehicle != MAX_uint32)
 	{
-		rbVehicle_SetInput(WorldPtr, PlayerVehicle, RbVehicleInput{ In.Throttle, In.Steer, In.Brake, In.bHandbrake ? 1.0f : 0.0f });
+		rbVehicle_SetInput(WorldPtr, PlayerVehicle, Drive);
 	}
+	if (WorldPtr && SoftCars.IsValidIndex(PlayerSoft) && !SoftCars[PlayerSoft].bAI)
+	{
+		rbSoft_SetInput(WorldPtr, SoftCars[PlayerSoft].Soft, Drive);
+	}
+}
+
+bool FRubbleAbiBackend::ParkBalls(int32 Count, FString& Error)
+{
+	// Parked high above the scene, asleep: a shot moves one into place (rbBody_SetTransform) and
+	// gives it its speed, so balls are reused rather than created per shot.
+	const float Radius = Current.Family == ERubbleFamily::Rigid ? 50.0f : 25.0f;
+	for (int32 i = 0; i < Count; ++i)
+	{
+		RbBodyDef B = rbDefaultBodyDef();
+		B.type_ = RB_DYNAMIC_BODY;
+		B.transform = Xf(FTransform(ParkedAt(i)));
+		B.is_awake = false;
+		RbBodyId Ball = 0;
+		RbShapeDef SD = rbDefaultShapeDef();
+		SD.density = 0.0078f;
+		RbShapeId Shape = 0;
+		if (rbCreateBody(WorldPtr, &B, &Ball) != RB_OK || rbCreateSphereShape(WorldPtr, Ball, &SD, RbVec3{ 0, 0, 0 }, Radius, &Shape) != RB_OK)
+		{
+			Error = AbiError(TEXT("parked ball"));
+			return false;
+		}
+		Balls.Add(Ball);
+		FRubbleBodyVisual V;
+		V.Id = FRubbleBodyId(Ball);
+		V.Initial = FTransform(ParkedAt(i));
+		V.FirstShape = SceneAssets->Shapes.Num();
+		V.NumShapes = 1;
+		SceneAssets->Bodies.Add(V);
+		FRubbleShapeVisual S;
+		S.Kind = ERubbleShape::Sphere;
+		S.Radius = Radius;
+		S.Material = ERubbleMaterial::Steel;
+		S.Tint = FLinearColor(0.55f, 0.56f, 0.58f);
+		SceneAssets->Shapes.Add(S);
+	}
+	return true;
+}
+
+FVector FRubbleAbiBackend::ParkedAt(int32 i)
+{
+	return FVector(i * 300.0, 0.0, 1.0e6);
 }
 
 void FRubbleAbiBackend::Launch(const FVector& Origin, const FVector& Direction)
@@ -610,6 +1041,19 @@ void FRubbleAbiBackend::Launch(const FVector& Origin, const FVector& Direction)
 	}
 	if (!WorldPtr)
 	{
+		return;
+	}
+	if (Balls.Num())
+	{
+		const RbBodyId Ball = Balls[NextBall];
+		NextBall = (NextBall + 1) % Balls.Num();
+		if (rbBody_SetTransform(WorldPtr, Ball, Xf(FTransform(Origin))) != RB_OK
+			|| rbBody_SetLinearVelocity(WorldPtr, Ball, Vec(Direction.GetSafeNormal() * 3500.0)) != RB_OK
+			|| rbBody_SetAngularVelocity(WorldPtr, Ball, RbVec3{ 0, 0, 0 }) != RB_OK
+			|| rbBody_SetAwake(WorldPtr, Ball, true) != RB_OK)
+		{
+			UE_LOG(LogRubble, Error, TEXT("%s"), *AbiError(TEXT("launch")));
+		}
 		return;
 	}
 	// A 25 cm steel ball at 35 m/s, as the pages' F.
