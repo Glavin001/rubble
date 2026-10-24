@@ -406,7 +406,8 @@ pub fn scale_bond_springs(
     ))
 }
 
-/// Orbit camera and click-to-shoot rays (shared with the Metal viewer).
+/// The lab's camera (orbit, first-person walk and fly) and click-to-shoot rays (shared
+/// with the Metal viewer).
 #[wasm_bindgen]
 pub struct Orbit(engine_fracture::view::Orbit);
 
@@ -416,11 +417,30 @@ impl Orbit {
     pub fn new(scene: &Scene) -> Orbit {
         Orbit(engine_fracture::view::Orbit::new(&scene.0))
     }
+    /// The view mode (the Camera menu: 0 orbit, 1 walk, 2 fly).
+    #[wasm_bindgen(getter)]
+    pub fn mode(&self) -> u32 {
+        self.0.mode.index()
+    }
+    #[wasm_bindgen(js_name = setMode)]
+    pub fn set_mode(&mut self, mode: u32, aspect: f64) {
+        self.0
+            .set_mode(engine_fracture::view::ViewMode::from_index(mode), aspect)
+    }
     pub fn drag(&mut self, dx: f64, dy: f64) {
         self.0.drag(dx, dy)
     }
+    /// Pointer-lock movement (CSS pixels): first-person mouse-look.
+    #[wasm_bindgen(js_name = mouseLook)]
+    pub fn mouse_look(&mut self, dx: f64, dy: f64) {
+        self.0.mouse_look(dx, dy)
+    }
     pub fn zoom(&mut self, delta_y: f64) {
         self.0.zoom(delta_y)
+    }
+    /// First-person travel for `dt` seconds (axes in -1..1: forward, right, up).
+    pub fn travel(&mut self, forward: f64, right: f64, up: f64, sprint: bool, dt: f64) {
+        self.0.travel(forward, right, up, sprint, dt)
     }
     /// Column-major view-projection for the draw shader.
     #[wasm_bindgen(js_name = viewProj)]

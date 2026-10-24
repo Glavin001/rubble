@@ -69,6 +69,9 @@ pub struct StepModes {
     pub color_round_headroom: Option<u32>,
     /// The sparse tail's single-workgroup loop can cover the body capacity.
     pub tail_ok: bool,
+    /// Append `pose_pack` after the sleep commit: compact render poses and the
+    /// list of bodies that moved (bindings 34-36, after BIND_COUNT; read-only on physics state).
+    pub pose_output: bool,
 }
 
 /// Scene sizes and last step's counters this step is planned from.
@@ -96,6 +99,8 @@ pub struct StepInputs {
     pub motion: MotionInputs,
     /// Soft bodies in use (`soft_step.slang`; zero bodies = no soft passes).
     pub soft: SoftCounts,
+    /// Host commands in binding 8 (`apply_commands` runs first when non-zero).
+    pub command_count: u32,
 }
 
 /// Largest particle colour `soft_primal_fused` (one 256-lane workgroup) takes;
@@ -293,6 +298,10 @@ pub fn encode_step(
         });
     }
 
+    if i.command_count > 0 {
+        // Host commands land before anything reads body state this step.
+        e.d("apply_commands", u64::from(i.command_count));
+    }
     let vehicles = i.vehicle_count > 0;
     let mo = i.motion;
     // GPU impulses first (CCD audit row 4): scripted loads and projectile hits
@@ -654,12 +663,18 @@ pub fn encode_step(
         e.phase("ccdRespond");
     }
     e.phase("sleep");
+    if m.pose_output {
+        // Reads the final body state; writes only the pose buffers (34-36).
+        e.d("pose_pack", n_bodies);
+        e.phase("pose");
+    }
     e.0
 }
 
 /// Entries a persistent-contact host replays (every name `encode_step` can
 /// emit, resolved with [`resolve_entry`]). Native hosts compile exactly these.
 pub const PERSISTENT_ENTRIES: &[&str] = &[
+    "apply_commands_persistent",
     "apply_impulses",
     "ccd_register",
     "broadphase_fast",
@@ -795,6 +810,9 @@ pub fn kernel_source(entry: &str) -> &'static str {
     }
     if SOFT_ENTRIES.contains(&entry) {
         return "soft_step.slang";
+    }
+    if entry == "pose_pack" {
+        return "pose_pack.slang";
     }
     if entry.starts_with("convex_") {
         return if entry.ends_with("_persistent") {
@@ -1017,6 +1035,7 @@ pub fn host_words(c: &WorldCapacity, m: &StepModes, i: &StepInputs, h: &HostStat
     let prev = if h.contacts_parity == 0 { max_c } else { 0 };
     let prev_n = i.last.contact_count.min(max_c).max(256);
     let mut s = [0u32; 64];
+    s[0] = i.command_count;
     s[1] = c.max_bodies;
     s[2] = c.max_candidates;
     s[3] = max_c;
@@ -1115,6 +1134,7 @@ mod tests {
             wheel_count: 0,
             motion: MotionInputs::default(),
             soft: SoftCounts::default(),
+            command_count: 0,
         }
     }
 
@@ -1133,6 +1153,7 @@ mod tests {
             color_headroom: Some(4),
             color_round_headroom: Some(2),
             tail_ok: true,
+            pose_output: false,
             ..StepModes::default()
         }
     }

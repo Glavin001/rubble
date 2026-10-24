@@ -234,6 +234,7 @@ impl CudaSim {
             color_headroom: (!control("ENGINE_COLOR_HEADROOM", &["full"])).then_some(4),
             color_round_headroom: (!control("ENGINE_COLOR_ROUND_HEADROOM", &["full"])).then_some(2),
             tail_ok: capacity.max_bodies <= (1 << 16) * 8,
+            pose_output: false,
             ..StepModes::default()
         };
         let indirect = vec![0u32; (sizes[INDIRECT_BINDING as usize] / 4) as usize];
@@ -418,6 +419,7 @@ impl CudaSim {
                 ..self.motion
             },
             soft: Default::default(),
+            command_count: 0,
         }
     }
 

@@ -1,8 +1,9 @@
 import {Orbit,IndexedMesh,floorVertices,sceneHandle} from './wasm.mjs';
+import {attachCameraInput} from './camera-input.mjs';
 // WebGPU draw of the fracture lab. The shader is the shared Slang draw shader
 // (slang/render/fracture_draw.slang, exported to WGSL), reading live poses
-// from the body buffer; the orbit camera, shot rays, floor and indexed mesh
-// come from engine-fracture (view.rs). The Metal viewer draws the same way.
+// from the body buffer; the camera (orbit, first-person walk and fly), shot
+// rays, floor and indexed mesh come from engine-fracture (view.rs). The Metal viewer draws the same way.
 export async function createRenderer(device,canvas,simulation,scene,onShoot=()=>{}){
  const context=canvas.getContext('webgpu'),format=navigator.gpu.getPreferredCanvasFormat();context.configure({device,format,alphaMode:'opaque'});
  const response=await fetch('../generated/wgsl/fracture_draw.wgsl');
@@ -29,18 +30,14 @@ export async function createRenderer(device,canvas,simulation,scene,onShoot=()=>
  const mesh=stream(indexed.vertices()),projectiles=stream(scene.projectileVertices),lines=stream(scene.lines),roads=stream(scene.roadVertices),floor=stream(floorVertices(scene.extent));
  indexed.free();
  const index=device.createBuffer({size:Math.max(4,indices.byteLength),usage:GPUBufferUsage.INDEX|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(index,0,indices);
- const orbit=new Orbit(sceneHandle(scene));let depth,width=0,height=0,drag;
+ const orbit=new Orbit(sceneHandle(scene));let depth,width=0,height=0;
+ const aspect=()=>canvas.clientWidth/Math.max(1,canvas.clientHeight);
+ const shotAt=(u,v)=>orbit.aim(u,v,aspect(),scene.projectileRadius);
  function aim(clientX,clientY){
   const rect=canvas.getBoundingClientRect();
-  return orbit.aim((clientX-rect.left)/rect.width,(clientY-rect.top)/rect.height,canvas.clientWidth/canvas.clientHeight,scene.projectileRadius);
+  return shotAt((clientX-rect.left)/rect.width,(clientY-rect.top)/rect.height);
  }
- const down=e=>{if(e.button!==0)return;drag={start:[e.clientX,e.clientY],last:[e.clientX,e.clientY],moved:false};canvas.setPointerCapture(e.pointerId)};
- const move=e=>{if(!drag)return;if(Math.hypot(e.clientX-drag.start[0],e.clientY-drag.start[1])>5)drag.moved=true;
-  if(drag.moved)orbit.drag(e.clientX-drag.last[0],e.clientY-drag.last[1]);drag.last=[e.clientX,e.clientY]};
- const up=e=>{if(!drag)return;const shoot=!drag.moved;drag=null;if(shoot)onShoot(aim(e.clientX,e.clientY))};
- const cancel=()=>drag=null;
- const wheel=e=>{e.preventDefault();orbit.zoom(e.deltaY)};
- canvas.addEventListener('pointerdown',down);canvas.addEventListener('pointermove',move);canvas.addEventListener('pointerup',up);canvas.addEventListener('pointercancel',cancel);canvas.addEventListener('wheel',wheel,{passive:false});
+ const input=attachCameraInput(canvas,orbit,(u,v)=>onShoot(shotAt(u,v)));
  // Ball trails (setTrails): line segments, 8 floats per vertex (xyz, pad, rgba),
  // drawn four times a pixel apart so they read at any size.
  const trailModule=device.createShaderModule({code:`struct V{vp:mat4x4f,px:vec4f};@group(0)@binding(0)var<uniform> v:V;@group(0)@binding(1)var<storage,read> t:array<vec4f>;
@@ -64,6 +61,9 @@ struct O{@builtin(position)p:vec4f,@location(0)c:vec4f};
    trailGroup=device.createBindGroup({layout:trailPipe.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:trailView}},{binding:1,resource:{buffer:trailBuf}}]})}
   device.queue.writeBuffer(trailBuf,0,data);
  },
+ // The camera's view mode (0 orbit, 1 first-person walk, 2 fly: engine-fracture ViewMode).
+ get viewMode(){return orbit.mode},
+ set viewMode(mode){orbit.setMode(mode|0,aspect());input.modeChanged()},
  // GPU ms of the latest sampled frame's render pass, or null if unsupported.
  get gpuFrameMs(){return frameTimer?.ms??null},
  // 0: materials; 1: sleep state (awake orange, asleep blue, static grey).
@@ -80,6 +80,7 @@ struct O{@builtin(position)p:vec4f,@location(0)c:vec4f};
  draw(showBonds){
   const dpr=Math.min(devicePixelRatio,2),w=Math.max(1,Math.round(canvas.clientWidth*dpr)),h=Math.max(1,Math.round(canvas.clientHeight*dpr));
   if(w!==width||h!==height){width=canvas.width=w;height=canvas.height=h;depth?.destroy();depth=device.createTexture({size:[w,h],format:'depth24plus',usage:GPUTextureUsage.RENDER_ATTACHMENT});}
+  input.update();
   device.queue.writeBuffer(uniform,0,orbit.viewProj(w/h));device.queue.writeBuffer(uniform,64,new Uint32Array([scene.instanceStride||0,colorMode,jointsPerCopy,0]));
   const timed=!stamps&&frameTimer&&!frameTimer.busy&&performance.now()-frameTimer.last>250;
   const writes=stamps??(timed?{querySet:frameTimer.query,beginningOfPassWriteIndex:0,endOfPassWriteIndex:1}:null);
@@ -94,5 +95,5 @@ struct O{@builtin(position)p:vec4f,@location(0)c:vec4f};
   if(timed){frameTimer.busy=true;frameTimer.last=performance.now();enc.resolveQuerySet(frameTimer.query,0,2,frameTimer.resolve,0);enc.copyBufferToBuffer(frameTimer.resolve,0,frameTimer.read,0,16)}
   device.queue.submit([enc.finish()]);
   if(timed)frameTimer.read.mapAsync(GPUMapMode.READ).then(()=>{const t=new BigUint64Array(frameTimer.read.getMappedRange());frameTimer.ms=Number(t[1]-t[0])/1e6;frameTimer.read.unmap()}).catch(()=>{}).finally(()=>{frameTimer.busy=false});
- },dispose(){for(const b of [uniform,index,trailView,...streams])b.destroy();trailBuf?.destroy();if(joints!==simulation.jointBuffer)joints.destroy();orbit.free();if(frameTimer){frameTimer.query.destroy();frameTimer.resolve.destroy();frameTimer.read.destroy()}depth?.destroy();canvas.removeEventListener('pointerdown',down);canvas.removeEventListener('pointermove',move);canvas.removeEventListener('pointerup',up);canvas.removeEventListener('pointercancel',cancel);canvas.removeEventListener('wheel',wheel)}};
+ },dispose(){input.dispose();for(const b of [uniform,index,trailView,...streams])b.destroy();trailBuf?.destroy();if(joints!==simulation.jointBuffer)joints.destroy();orbit.free();if(frameTimer){frameTimer.query.destroy();frameTimer.resolve.destroy();frameTimer.read.destroy()}depth?.destroy()}};
 }

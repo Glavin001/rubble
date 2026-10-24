@@ -247,6 +247,23 @@ static const uint CMD_WAKE_BODY = 3u;
 static const uint CMD_TELEPORT = 4u;
 static const uint CMD_SET_VELOCITY = 5u;
 static const uint CMD_REPARENT = 8u;
+static const uint CMD_ADD_FORCE = 11u;    // f0 = force (N), f1 = torque (N m), one step
+static const uint CMD_APPLY_IMPULSE = 12u; // f0 = impulse (N s), f1 = world point
+// GpuCommand.c: 0 = a lone command (one thread each, the original stream);
+static const uint CMD_ADD_FORCE_AT = 13u;  // f0 = force (N) at world point f1, one step
+static const uint CMD_ANGULAR_IMPULSE = 14u; // f0 = angular impulse (N m s)
+// New solver frame relative to the old one: f0.xyz = centre offset (old body
+// frame), f1 = rotation, f2 = (inverse principal inertia, inverse mass).
+static const uint CMD_SET_MASS_FRAME = 15u;
+// GpuCommand.b bits of run commands.
+static const uint CMD_NO_WAKE = 1u;   // skip the command if the body is asleep
+static const uint CMD_AT_CENTER = 2u; // impulse through the centre of mass
+static const uint CMD_LINEAR_ONLY = 4u;  // set velocity: linear part only
+static const uint CMD_ANGULAR_ONLY = 8u; // set velocity: angular part only
+// n > 0 = the first of n commands on body `a`, applied in order by one thread
+// as a host read-modify-write would (both body rows written, dynamic bodies
+// woken with their sleep timer reset); CMD_RUN_MEMBER = applied by its run head.
+static const uint CMD_RUN_MEMBER = 0xFFFFFFFFu;
 
 struct Aabb
 {

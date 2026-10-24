@@ -339,6 +339,7 @@ impl MetalSim {
                 ..self.motion
             },
             soft: Default::default(),
+            command_count: 0,
         }
     }
 
