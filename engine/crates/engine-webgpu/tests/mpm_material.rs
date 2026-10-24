@@ -1,17 +1,20 @@
 //! `physics/mpm_material.slang` on the GPU (through `mpm_material_probe`) against
-//! its engine-terrain CPU mirror: the SVD, the sand return map and the Kirchhoff
-//! stress agree within f32 tolerance on random deformation gradients, and the input
-//! checks agree on NaN and ±inf.
+//! its engine-terrain CPU mirror: the SVD, the material update (the sand return
+//! maps, cohesive Mohr–Coulomb soil and rock damage) and the Kirchhoff stress agree
+//! within f32 tolerance on random deformation gradients, and the input checks agree
+//! on NaN and ±inf.
 
 use engine_terrain::material::{
-    hencky_kirchhoff, sand_input_valid, sand_project, sand_project_mohr_coulomb, svd3,
-    svd_input_valid, Svd3, YieldSurface,
+    hencky_kirchhoff, principal_kirchhoff, rock_damage, sand_input_valid, sand_project,
+    sand_project_mohr_coulomb, soil_project_mohr_coulomb, svd3, svd_input_valid, Svd3,
+    YieldSurface,
 };
-use engine_terrain::SandMaterial;
+use engine_terrain::{RockMaterial, SandMaterial};
 use engine_webgpu::{default_device, MPM_MATERIAL_PROBE_WGSL};
 use glam::{Mat3, Quat, Vec3};
 
-/// `MpmProbeCase`: F's columns, (alpha, cohesion, lambda, mu), (logJp, 0, 0, 0).
+/// `MpmProbeCase`: F's columns, (friction or f_t, cohesion word or E·G_f/f_t,
+/// lambda, mu), (logJp, model, damage, dx).
 type ProbeCase = [[f32; 4]; 5];
 /// `MpmProbeResult`: U, V, sigma (+ valid), (sigmaOut, logJpOut), τ.
 type ProbeResult = [[f32; 4]; 11];
@@ -46,17 +49,62 @@ impl Rng {
     }
 }
 
-/// The probe's friction word: α for Drucker–Prager, sin φ for Mohr–Coulomb.
-fn friction(m: &SandMaterial) -> f32 {
-    match m.yield_surface {
-        YieldSurface::DruckerPrager => m.alpha(),
-        YieldSurface::MohrCoulomb => m.friction_angle.sin(),
+/// What a case runs after the SVD.
+#[derive(Clone, Copy)]
+enum Model {
+    /// Sand or soil: Drucker–Prager (cohesion as its apex stretch), dry
+    /// Mohr–Coulomb, or cohesive Mohr–Coulomb (stress space), as the engine
+    /// picks them (`terrain_set_material`).
+    Sand(SandMaterial),
+    /// Rock with its damage before the update and the cell size.
+    Rock {
+        rock: RockMaterial,
+        damage: f32,
+        dx: f32,
+    },
+}
+
+impl Model {
+    /// The probe's material and model words.
+    fn words(&self) -> ([f32; 4], f32, f32, f32) {
+        match *self {
+            Model::Sand(m) => {
+                let (code, friction, cohesion) = match m.yield_surface {
+                    YieldSurface::DruckerPrager => (0.0, m.alpha(), m.apex_strain()),
+                    YieldSurface::MohrCoulomb if m.cohesion == 0.0 => {
+                        (1.0, m.friction_angle.sin(), 0.0)
+                    }
+                    YieldSurface::MohrCoulomb => {
+                        (2.0, m.friction_angle.sin(), m.cohesion_cos_phi())
+                    }
+                };
+                ([friction, cohesion, m.lambda(), m.mu()], code, 0.0, 0.0)
+            }
+            Model::Rock { rock, damage, dx } => (
+                [
+                    rock.tensile_strength,
+                    rock.band_stress(),
+                    rock.lambda(),
+                    rock.mu(),
+                ],
+                3.0,
+                damage,
+                dx,
+            ),
+        }
+    }
+
+    fn lame(&self) -> (f32, f32) {
+        match self {
+            Model::Sand(m) => (m.lambda(), m.mu()),
+            Model::Rock { rock, .. } => (rock.lambda(), rock.mu()),
+        }
     }
 }
 
 struct Case {
     f: Mat3,
-    mat: SandMaterial,
+    model: Model,
     log_jp: f32,
 }
 
@@ -102,15 +150,10 @@ fn cases() -> Vec<Case> {
                 _ => rng.matrix(-2.0, 2.0) * 1e3,
             },
         };
-        let mat = SandMaterial {
+        let mut mat = SandMaterial {
             youngs_modulus: rng.range(1e6, 1e8),
             poisson_ratio: rng.range(0.2, 0.4),
             friction_angle: rng.range(0.0, 45.0).to_radians(),
-            cohesion: if i % 5 == 0 {
-                rng.range(0.0, 0.05)
-            } else {
-                0.0
-            },
             yield_surface: if i % 2 == 0 {
                 YieldSurface::MohrCoulomb
             } else {
@@ -118,8 +161,55 @@ fn cases() -> Vec<Case> {
             },
             ..SandMaterial::default()
         };
+        // Cohesive (soil) cases: an apex stretch of up to 0.05 (as the log-strain
+        // offsets before), c = apex·(3λ + 2μ)·tan φ.
+        let apex = rng.range(0.0, 0.05);
+        if i % 5 == 0 || i % 5 == 2 {
+            mat.friction_angle = mat.friction_angle.max(1f32.to_radians());
+            mat.cohesion = apex * (3.0 * mat.lambda() + 2.0 * mat.mu()) * mat.friction_angle.tan();
+        }
         let log_jp = if i % 3 == 0 { rng.range(0.0, 0.2) } else { 0.0 };
-        out.push(Case { f, mat, log_jp });
+        out.push(Case {
+            f,
+            model: Model::Sand(mat),
+            log_jp,
+        });
+    }
+    // Rock: strains around its tensile strain (f_t/E ≈ 1e-4 to 1e-3), well past
+    // it, and the general families above; intact, partly and fully damaged.
+    for i in 0..2048u32 {
+        let rock = RockMaterial {
+            youngs_modulus: rng.range(5e9, 7e10),
+            poisson_ratio: rng.range(0.15, 0.3),
+            tensile_strength: rng.range(1e6, 1.5e7),
+            fracture_energy: rng.range(30.0, 200.0),
+            ..RockMaterial::default()
+        };
+        let ft_strain = rock.tensile_strength / rock.youngs_modulus;
+        let f = match i % 4 {
+            0 | 1 => {
+                let k = if i % 4 == 0 { 3.0 } else { 30.0 };
+                let d = Vec3::new(
+                    (k * ft_strain * rng.range(-1.0, 1.0)).exp(),
+                    (k * ft_strain * rng.range(-1.0, 1.0)).exp(),
+                    (k * ft_strain * rng.range(-1.0, 1.0)).exp(),
+                );
+                rng.rotation() * Mat3::from_diagonal(d) * rng.rotation().transpose()
+            }
+            2 => rng.rotation() * (Mat3::IDENTITY + rng.matrix(-0.05, 0.05)),
+            _ => rng.matrix(-2.0, 2.0),
+        };
+        let damage = match i % 3 {
+            0 => 0.0,
+            1 => rng.range(0.0, 1.0),
+            _ => 1.0,
+        };
+        let dx = rng.range(0.05, 0.95) * rock.max_cell_size();
+        out.push(Case {
+            f,
+            model: Model::Rock { rock, damage, dx },
+            log_jp: 0.0,
+        });
     }
     // Sand at rest: a rotation by microradians (repeated singular values; the
     // trailing 2×2 block's off-diagonal squared underflows), and a bed particle's
@@ -133,7 +223,7 @@ fn cases() -> Vec<Case> {
         let angle = 10f32.powf(rng.range(-7.0, -4.0));
         out.push(Case {
             f: Mat3::from_axis_angle(axis.normalize_or(Vec3::X), angle),
-            mat: SandMaterial::default(),
+            model: Model::Sand(SandMaterial::default()),
             log_jp: if k % 2 == 0 { 3.7e-5 } else { 0.0 },
         });
     }
@@ -144,7 +234,7 @@ fn cases() -> Vec<Case> {
     ];
     out.push(Case {
         f: Mat3::from_cols_array_2d(&rows.map(|r| r.map(f32::from_bits))).transpose(),
-        mat: SandMaterial::default(),
+        model: Model::Sand(SandMaterial::default()),
         log_jp: f32::from_bits(0x381bc050),
     });
     // Input checks: NaN and ±inf in F.
@@ -153,7 +243,7 @@ fn cases() -> Vec<Case> {
         f.z_axis.y = bad;
         out.push(Case {
             f,
-            mat: SandMaterial::default(),
+            model: Model::Sand(SandMaterial::default()),
             log_jp: 0.0,
         });
     }
@@ -254,18 +344,13 @@ fn gpu_material_matches_the_cpu_mirror() {
     let packed: Vec<ProbeCase> = cases
         .iter()
         .map(|c| {
-            let m = c.mat;
+            let (material, code, damage, dx) = c.model.words();
             [
                 c.f.x_axis.extend(0.0).to_array(),
                 c.f.y_axis.extend(0.0).to_array(),
                 c.f.z_axis.extend(0.0).to_array(),
-                [friction(&m), m.cohesion, m.lambda(), m.mu()],
-                [
-                    c.log_jp,
-                    f32::from(u8::from(m.yield_surface == YieldSurface::MohrCoulomb)),
-                    0.0,
-                    0.0,
-                ],
+                material,
+                [c.log_jp, code, damage, dx],
             ]
         })
         .collect();
@@ -274,6 +359,7 @@ fn gpu_material_matches_the_cpu_mirror() {
 
     let (mut d_sigma, mut d_uv, mut d_proj, mut d_tau, mut gpu_rec) =
         (0f32, 0f32, 0f32, 0f32, 0f32);
+    let (mut d_damage, mut soil_cases, mut rock_cases, mut rock_damaged) = (0f32, 0, 0, 0);
     let mut uv_compared = 0;
     for (c, r) in cases.iter().zip(&results) {
         let cpu_valid = svd_input_valid(c.f);
@@ -319,36 +405,63 @@ fn gpu_material_matches_the_cpu_mirror() {
 
         // Each later stage is compared on the GPU's own inputs, so a difference
         // is that stage's alone (ln σ amplifies SVD rounding where σ is small).
-        let (lambda, mu) = (c.mat.lambda(), c.mat.mu());
-        let p = match c.mat.yield_surface {
-            YieldSurface::DruckerPrager => sand_project(
-                gpu.sigma,
-                c.log_jp,
-                c.mat.alpha(),
-                c.mat.cohesion,
-                lambda,
-                mu,
-            ),
-            YieldSurface::MohrCoulomb => sand_project_mohr_coulomb(
-                gpu.sigma,
-                c.log_jp,
-                c.mat.friction_angle.sin(),
-                c.mat.cohesion,
-                lambda,
-                mu,
-            ),
-        };
+        let (lambda, mu) = c.model.lame();
         let gpu_out = v3(r[7]);
-        let dp = ((gpu_out - p.sigma).abs() / p.sigma)
-            .max_element()
-            .max((r[7][3] - p.log_jp).abs());
-        d_proj = d_proj.max(dp);
-        assert!(dp < 1e-5, "projection {:?} vs {p:?}", r[7]);
+        let gpu_tau = Mat3::from_cols(v3(r[8]), v3(r[9]), v3(r[10]));
+        let tau = match c.model {
+            Model::Rock { rock, damage, dx } => {
+                let p = rock_damage(
+                    gpu.sigma,
+                    damage,
+                    lambda,
+                    mu,
+                    rock.tensile_strength,
+                    rock.band_stress(),
+                    dx,
+                );
+                let dd = (r[7][3] - p.damage).abs();
+                d_damage = d_damage.max(dd);
+                rock_cases += 1;
+                rock_damaged += usize::from(p.damage > damage);
+                assert!(dd < 5e-5, "damage {} vs {p:?}", r[7][3]);
+                principal_kirchhoff(gpu.u, p.tau)
+            }
+            Model::Sand(m) => {
+                let p = match m.yield_surface {
+                    YieldSurface::DruckerPrager => {
+                        sand_project(gpu.sigma, c.log_jp, m.alpha(), m.apex_strain(), lambda, mu)
+                    }
+                    YieldSurface::MohrCoulomb if m.cohesion == 0.0 => sand_project_mohr_coulomb(
+                        gpu.sigma,
+                        c.log_jp,
+                        m.friction_angle.sin(),
+                        0.0,
+                        lambda,
+                        mu,
+                    ),
+                    YieldSurface::MohrCoulomb => {
+                        soil_cases += 1;
+                        soil_project_mohr_coulomb(
+                            gpu.sigma,
+                            c.log_jp,
+                            m.friction_angle.sin(),
+                            m.cohesion_cos_phi(),
+                            lambda,
+                            mu,
+                        )
+                    }
+                };
+                let dp = ((gpu_out - p.sigma).abs() / p.sigma)
+                    .max_element()
+                    .max((r[7][3] - p.log_jp).abs());
+                d_proj = d_proj.max(dp);
+                assert!(dp < 1e-5, "projection {:?} vs {p:?}", r[7]);
+                hencky_kirchhoff(gpu.u, gpu_out, lambda, mu)
+            }
+        };
 
         // τ compared as a strain: |Δτ| / (3λ + 2μ), relative to the strain when
         // it exceeds 1.
-        let tau = hencky_kirchhoff(gpu.u, gpu_out, lambda, mu);
-        let gpu_tau = Mat3::from_cols(v3(r[8]), v3(r[9]), v3(r[10]));
         let modulus = 3.0 * lambda + 2.0 * mu;
         let dt = frob(gpu_tau - tau) / modulus.max(frob(tau));
         d_tau = d_tau.max(dt);
@@ -359,8 +472,13 @@ fn gpu_material_matches_the_cpu_mirror() {
     }
     eprintln!(
         "mpm_material GPU vs CPU over {} cases: sigma {d_sigma:.2e} (rel ‖F‖), U/V {d_uv:.2e} \
-         ({uv_compared} distinct), projection {d_proj:.2e} (rel), τ {d_tau:.2e} (strain); GPU \
-         reconstruction {gpu_rec:.2e}",
+         ({uv_compared} distinct), projection {d_proj:.2e} (rel; {soil_cases} cohesive), \
+         damage {d_damage:.2e} ({rock_cases} rock, {rock_damaged} damaged), τ {d_tau:.2e} \
+         (strain); GPU reconstruction {gpu_rec:.2e}",
         cases.len()
+    );
+    assert!(
+        soil_cases > 500 && rock_damaged > 500,
+        "too few soil or damaging rock cases"
     );
 }

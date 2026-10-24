@@ -1,5 +1,6 @@
 // Test probe for physics/mpm_material.slang: one thread per case runs the SVD, the
-// sand return map and the Kirchhoff stress, so engine-webgpu
+// material update (a sand or soil return map, or rock damage) and the Kirchhoff
+// stress, so engine-webgpu
 // `tests/mpm_material.rs` can compare them with the engine-terrain CPU mirror.
 // Not part of any step.
 #include "../physics/mpm_material.slang"
@@ -10,8 +11,10 @@ struct MpmProbeCase
     float4 f0; // F's columns (xyz)
     float4 f1;
     float4 f2;
-    float4 material; // friction (DP alpha, or sin φ for Mohr–Coulomb), cohesion, lambda, mu
-    float4 state; // logJp, yield surface (0 Drucker–Prager, 1 Mohr–Coulomb)
+    float4 material; // sand/soil: friction (DP alpha, or sin φ), cohesion word; rock: f_t,
+                     // E·G_f/f_t; then lambda, mu
+    float4 state; // logJp, model (0 Drucker–Prager, 1 Mohr–Coulomb, 2 cohesive soil, 3 rock),
+                  // damage, dx
 };
 
 // Matches `ProbeResult` (176 B).
@@ -24,8 +27,8 @@ struct MpmProbeResult
     float4 v1;
     float4 v2;
     float4 sigma; // xyz; w = 1 when both input checks pass
-    float4 projected; // sigmaOut (xyz), logJpOut (w)
-    float4 tau0; // τ's columns from U and sigmaOut
+    float4 projected; // sigmaOut (xyz), logJpOut (w); rock: sigma, damage out
+    float4 tau0; // τ's columns
     float4 tau1;
     float4 tau2;
 };
@@ -48,13 +51,28 @@ void mpm_material_probe(uint3 tid : SV_DispatchThreadID)
     mpmSvd3(F, U, sigma, V);
     float3 sigmaOut;
     float logJpOut;
-    if (k.state.y > 0.5)
-        mpmSandProjectMohrCoulomb(sigma, k.state.x, k.material.x, k.material.y, k.material.z,
-                                  k.material.w, sigmaOut, logJpOut);
+    float3x3 tau;
+    if (k.state.y > 2.5)
+    {
+        float3 t;
+        mpmRockDamage(sigma, k.state.z, k.material.z, k.material.w, k.material.x, k.material.y,
+                      k.state.w, t, logJpOut);
+        sigmaOut = sigma;
+        tau = mpmPrincipalKirchhoff(U, t);
+    }
     else
-        mpmSandProject(sigma, k.state.x, k.material.x, k.material.y, k.material.z, k.material.w,
-                       sigmaOut, logJpOut);
-    float3x3 tau = mpmHenckyKirchhoff(U, sigmaOut, k.material.z, k.material.w);
+    {
+        if (k.state.y > 1.5)
+            mpmSoilProjectMohrCoulomb(sigma, k.state.x, k.material.x, k.material.y, k.material.z,
+                                      k.material.w, sigmaOut, logJpOut);
+        else if (k.state.y > 0.5)
+            mpmSandProjectMohrCoulomb(sigma, k.state.x, k.material.x, k.material.y, k.material.z,
+                                      k.material.w, sigmaOut, logJpOut);
+        else
+            mpmSandProject(sigma, k.state.x, k.material.x, k.material.y, k.material.z, k.material.w,
+                           sigmaOut, logJpOut);
+        tau = mpmHenckyKirchhoff(U, sigmaOut, k.material.z, k.material.w);
+    }
     bool valid = mpmSvdInputValid(F) && mpmSandInputValid(sigma, k.state.x);
 
     MpmProbeResult r;

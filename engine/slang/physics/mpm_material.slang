@@ -1,6 +1,7 @@
-// MPM sand material (deformable terrain T2; engine/docs/deformable-terrain.md,
-// "T2 kernel design"): the 3×3 SVD of a deformation gradient, the Drucker–Prager
-// return map in Hencky strain and the Kirchhoff stress. Functions only; the MLS-MPM
+// MPM materials (deformable terrain T2 and T5; engine/docs/deformable-terrain.md,
+// "T2 kernel design", "T5 materials"): the 3×3 SVD of a deformation gradient, the
+// sand return maps in Hencky strain (Drucker–Prager, Mohr–Coulomb), cohesive
+// Mohr–Coulomb soil, rock damage and the Kirchhoff stress. Functions only; the MLS-MPM
 // kernels include this file. engine-terrain `material.rs` is the CPU mirror, step
 // for step, and engine-webgpu `tests/mpm_material.rs` checks the two agree.
 //
@@ -364,6 +365,95 @@ void mpmSandProjectMohrCoulomb(float3 sigma, float logJp, float sinPhi, float co
         e = eps - da * nA - db * nB;
     }
     sigmaOut = exp(e + cohesion);
+}
+
+// Mohr–Coulomb return map for cohesive soil (T5), cohesion c in stress space,
+// with the volume correction above (ε = ln max(|σ|, 1e-4) + logJp/3, tr = Σε) and
+// non-dilatant flow (ψ = 0). cCosPhi = c·cos φ (Pa); sinPhi > 0 when it is
+// nonzero (the host validates it). The tension cutoff is the apex, the
+// hydrostatic tension c·cot φ, of volumetric strain trA = 3c·cot φ/(3λ + 2μ):
+// tr ≥ trA returns to it and logJp keeps tr − trA. Otherwise
+//   f = (τ₁ − τ₃) + (τ₁ + τ₃)·sin φ − 2c·cos φ ≤ 0
+// with the main-plane and edge returns of mpmSandProjectMohrCoulomb. The engine
+// runs this for cohesive soil only (dry sand keeps mpmSandProjectMohrCoulomb).
+void mpmSoilProjectMohrCoulomb(float3 sigma, float logJp, float sinPhi, float cCosPhi, float lambda,
+                               float mu, out float3 sigmaOut, out float logJpOut)
+{
+    float3 eps = log(max(abs(sigma), float3(MPM_SIGMA_FLOOR))) + logJp / 3.0;
+    float tr = eps.x + eps.y + eps.z;
+    float trApex = 3.0 * cCosPhi / (sinPhi * (3.0 * lambda + 2.0 * mu));
+    if (tr >= trApex)
+    {
+        sigmaOut = float3(exp(trApex / 3.0));
+        logJpOut = tr - trApex;
+        return;
+    }
+    logJpOut = 0.0;
+    float3 tau = 2.0 * mu * eps + lambda * tr;
+    float k = 2.0 * cCosPhi;
+    float3 gA = float3(1.0 + sinPhi, 0.0, -(1.0 - sinPhi));
+    float fA = dot(gA, tau) - k;
+    if (fA <= 0.0)
+    {
+        sigmaOut = exp(eps);
+        return;
+    }
+    float3 nA = float3(1.0, 0.0, -1.0);
+    float3 e = eps - (fA / (4.0 * mu)) * nA;
+    if (e.x < e.y || e.y < e.z)
+    {
+        bool right = e.y > e.x;
+        float3 nB = right ? float3(0.0, 1.0, -1.0) : float3(1.0, -1.0, 0.0);
+        float3 gB = right ? float3(0.0, 1.0 + sinPhi, -(1.0 - sinPhi)) : float3(1.0 + sinPhi, -(1.0 - sinPhi), 0.0);
+        float fB = dot(gB, tau) - k;
+        float a11 = 2.0, a12 = dot(gA, nB), a21 = dot(gB, nA), a22 = 2.0;
+        float det = (a11 * a22 - a12 * a21) * 2.0 * mu;
+        float da = max((a22 * fA - a12 * fB) / det, 0.0);
+        float db = max((a11 * fB - a21 * fA) / det, 0.0);
+        e = eps - da * nA - db * nB;
+    }
+    sigmaOut = exp(e);
+}
+
+// Rankine damage of rock with crack-band exponential softening (T5; in the
+// spirit of Wolper et al. 2019). With ε = ln max(|σ|, 1e-4) (ε₁ ≥ ε₂ ≥ ε₃) the
+// undamaged principal Kirchhoff stresses are τ̄ = 2μ ε + λ tr ε. When τ̄₁ passes
+// the tensile strength ft the damage it implies is
+//   d(τ̄₁) = 1 − (ft/τ̄₁)·exp(−(τ̄₁ − ft)/σs),  σs = bandStress/dx − ft/2
+// (bandStress = E·G_f/(2ft): the crack band is h = 2dx, the cells a crack opens
+// across with quadratic B-splines), and the damage never decreases. Uniaxially
+// the stress is ft·exp(−(τ̄₁ − ft)/σs) past the peak, and a broken particle has
+// dissipated G_f/h per unit volume, so G_f per crack area at any dx. Positive
+// τ̄ᵢ are scaled by (1 − d); compressive ones are kept (closed cracks carry
+// them). The host keeps 2dx below 2·E·G_f/ft² (σs > 0). No divisions by small
+// values: τ̄₁ > ft > 0 and σs > 0.
+void mpmRockDamage(float3 sigma, float damage, float lambda, float mu, float tensileStrength,
+                   float bandStress, float dx, out float3 tauOut, out float damageOut)
+{
+    float3 e = log(max(abs(sigma), float3(MPM_SIGMA_FLOOR)));
+    float tr = e.x + e.y + e.z;
+    float3 te = 2.0 * mu * e + lambda * tr;
+    float d = damage;
+    if (te.x > tensileStrength)
+    {
+        float soft = bandStress / dx - 0.5 * tensileStrength;
+        float fresh = 1.0 - tensileStrength / te.x * exp(-(te.x - tensileStrength) / soft);
+        d = max(d, fresh);
+    }
+    float keep = 1.0 - d;
+    tauOut = float3(te.x > 0.0 ? keep * te.x : te.x, te.y > 0.0 ? keep * te.y : te.y,
+                    te.z > 0.0 ? keep * te.z : te.z);
+    damageOut = d;
+}
+
+// τ = U·diag(t)·Uᵀ for principal Kirchhoff stresses t in U's columns.
+float3x3 mpmPrincipalKirchhoff(float3x3 U, float3 t)
+{
+    float3 u0 = mpmCol(U, 0u), u1 = mpmCol(U, 1u), u2 = mpmCol(U, 2u);
+    float3 t0 = u0 * (t.x * u0.x) + u1 * (t.y * u1.x) + u2 * (t.z * u2.x);
+    float3 t1 = u0 * (t.x * u0.y) + u1 * (t.y * u1.y) + u2 * (t.z * u2.y);
+    float3 t2 = u0 * (t.x * u0.z) + u1 * (t.y * u1.z) + u2 * (t.z * u2.z);
+    return mpmFromCols(t0, t1, t2);
 }
 
 // Kirchhoff stress of the Hencky (St. Venant–Kirchhoff in log strain) model:

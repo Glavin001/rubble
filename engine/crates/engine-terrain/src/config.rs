@@ -66,6 +66,13 @@ pub enum TerrainError {
     },
     #[error("cell size {requested} m is below `min_cell_size` ({allowed} m)")]
     CellTooSmall { requested: f32, allowed: f32 },
+    /// A rock's crack band does not fit the cell: softening over a band of
+    /// cells this large would have to snap back (`RockMaterial::max_cell_size`).
+    #[error(
+        "cell size {cell} m is not below the rock's crack-band limit E·G_f/f_t² = {max} m (its \
+         crack band is 2 cells): refine the region, or give the rock parameters for this scale"
+    )]
+    CrackBand { cell: f32, max: f32 },
     #[error("invalid terrain config: {0}")]
     InvalidConfig(&'static str),
     #[error("invalid region request: {0}")]
