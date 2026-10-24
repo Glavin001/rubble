@@ -5,7 +5,7 @@
 // --experimental-websocket.
 import { createServer } from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { extname, join, normalize } from 'node:path';
 
@@ -65,11 +65,23 @@ export async function openHarness(root, { width = 1280, height = 720 } = {}) {
   await new Promise((r) => ws.addEventListener('open', r));
   let nextId = 0;
   const waiting = new Map();
+  // The page's errors since the last `takeErrors()`: uncaught exceptions, console errors,
+  // and the browser's own error and WebGPU log entries (validation errors, a lost device).
+  let errors = [];
+  const report = (text) => { errors.push(text); console.error('[page]', text); };
   ws.addEventListener('message', (e) => {
     const m = JSON.parse(e.data);
     if (m.id && waiting.has(m.id)) { waiting.get(m.id)(m); waiting.delete(m.id); }
-    if (m.method === 'Runtime.exceptionThrown') console.error('[page]', m.params.exceptionDetails.exception?.description || m.params.exceptionDetails.text);
-    if (m.method === 'Runtime.consoleAPICalled' && m.params.type === 'error') console.error('[page]', m.params.args.map((a) => a.value ?? a.description).join(' '));
+    if (m.method === 'Runtime.exceptionThrown') report(m.params.exceptionDetails.exception?.description || m.params.exceptionDetails.text);
+    if (m.method === 'Runtime.consoleAPICalled' && m.params.type === 'error') report(m.params.args.map((a) => a.value ?? a.description).join(' '));
+    if (m.method === 'Runtime.consoleAPICalled' && m.params.type === 'warning') {
+      const text = m.params.args.map((a) => a.value ?? a.description).join(' ');
+      if (/webgpu|wgpu|gpu ?device|validation/i.test(text)) report(text);
+    }
+    if (m.method === 'Log.entryAdded') {
+      const { level, text, source } = m.params.entry;
+      if (level === 'error' && source !== 'network' || /webgpu/i.test(text)) report(`${source}: ${text}`);
+    }
   });
   const send = (method, params = {}) => new Promise((r) => { const id = ++nextId; waiting.set(id, r); ws.send(JSON.stringify({ id, method, params })); });
   const evaluate = async (expression, awaitPromise = false) => {
@@ -78,10 +90,15 @@ export async function openHarness(root, { width = 1280, height = 720 } = {}) {
     return r.result?.result?.value;
   };
   await send('Runtime.enable');
+  await send('Log.enable');
   await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
 
   return {
     base, frames, send, evaluate,
+    // The page errors collected since the last call (and clears them).
+    takeErrors() { const e = errors; errors = []; return e; },
+    // How many frames were uploaded for take `name`.
+    uploaded(name) { return existsSync(join(frames, name)) ? readdirSync(join(frames, name)).filter((f) => f.endsWith('.jpg')).length : 0; },
     // Navigate to `path` (relative to root, with its query) and wait until `ready` (a JS
     // expression) is truthy; throws with the page's error text (`errorExpr`) otherwise.
     async open(path, ready, { timeoutMs = 120_000, errorExpr = '""' } = {}) {
