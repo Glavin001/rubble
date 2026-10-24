@@ -85,7 +85,7 @@ private:
 
 	void Rebuild(const FRubbleSceneAssets& Assets);
 	void OnFrame(const FRubbleFrame& Frame);
-	int32 BatchFor(ERubbleShape Kind, int32 Mesh, ERubbleMaterial Material, float A, float B, const FRubbleSceneAssets& Assets);
+	int32 BatchFor(ERubbleShape Kind, int32 Mesh, ERubbleMaterial Material, float A, float B, const FRubbleSceneAssets& Assets, bool bTown);
 	void Apply(int32 BodyIndex, const FTransform& Pose);
 	/** A body that appears mid-scene (a projectile): its instances are added one by one. */
 	void AddLiveBody(const FRubbleBodyVisual& Body, TArrayView<const FRubbleShapeVisual> Shapes);

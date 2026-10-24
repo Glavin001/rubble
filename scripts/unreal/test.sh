@@ -62,6 +62,9 @@ fi
 if [[ -z "$ONLY" || "$ONLY" == Rubble.Render* ]]; then
   run render "${ONLY:-Rubble.Render}" game
 fi
+if [[ "$ONLY" == Rubble.Town* ]]; then
+  run town "$ONLY" game
+fi
 if [[ -z "$ONLY" || "$ONLY" == Rubble.Poc* ]]; then
   run poc "${ONLY:-Rubble.Poc.GpuScene}" game "-RubblePoc=gpuscene -RubblePocSide=${RUBBLE_POC_SIDE:-100}"
 fi

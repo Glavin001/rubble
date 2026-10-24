@@ -20,6 +20,9 @@ namespace RubbleRender
 	 * flat colour each, tints ignored) so the app still runs.
 	 */
 	RUBBLERUNTIME_API UMaterialInterface* Surface(ERubbleMaterial Material);
+	/** M_RubbleTownChunk (build_content.py: textured town chunks, 11 custom data floats), or null
+	 *  when it was not generated. */
+	RUBBLERUNTIME_API UMaterialInterface* TownChunk();
 	/** Car paint (clear coat, damage mask from vertex colour R) as a dynamic instance of Paint. */
 	RUBBLERUNTIME_API UMaterialInstanceDynamic* CarPaint(UObject* Outer, const FLinearColor& Paint);
 	RUBBLERUNTIME_API UMaterialInterface* Ground(ERubbleStage Stage);

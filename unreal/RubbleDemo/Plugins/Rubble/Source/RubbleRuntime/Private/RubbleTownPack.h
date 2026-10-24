@@ -21,6 +21,11 @@ namespace RubbleTownPack
 		float Roughness = 0.8f;
 		float Metalness = 0.0f;
 		ERubbleMaterial Kind = ERubbleMaterial::Concrete;
+		/** vibe-land's material catalog id (shared/assets/materials/catalog.json), or empty. */
+		FString TextureKey;
+		/** From the catalog: the texture-array layer (-1: none) and the tile size. */
+		int32 Layer = -1;
+		float MetresPerTile = 1.0f;
 	};
 
 	struct FNode
@@ -44,6 +49,10 @@ namespace RubbleTownPack
 
 	/** Parse the pack's render fields. False and Error for a file that is not a v2 pack. */
 	bool Parse(const TArray<uint8>& Json, FPack& Out, FString& Error);
+
+	/** Look each material's textureKey up in vibe-land's catalog (its layer in the copied texture
+	 *  arrays and its tile size). Materials stay tint-only when the catalog is missing. */
+	void ApplyCatalog(const TArray<uint8>& CatalogJson, FPack& Pack);
 
 	/** A hull's triangle mesh in Unreal's frame (cm, Unreal winding), flat-shaded. */
 	bool HullMesh(const TArray<FVector3f>& RubblePoints, FRubbleMeshData& Out);

@@ -12,6 +12,12 @@ Generated into /Game/Rubble/Materials (never committed; this script is the sourc
   M_RubbleGround    procedural asphalt / concrete (MI_GroundYard, MI_GroundHall, MI_GroundLot).
   M_RubbleDust      translucent dust puffs, opacity from custom data 3.
   M_RubbleSpark     additive sparks, glow from custom data 3.
+  M_RubbleTownChunk the town's chunks: vibe-land's 2K Poly Haven texture arrays (CC0, copied by
+                    scripts/unreal/fetch-city-textures.sh), projected on each face's dominant axis
+                    in the chunk's own frame offset by its place in the town, so an intact wall is
+                    one surface and a broken piece keeps its texture. Per-instance custom data:
+                    0..2 tint (the material's colour), 3 layer (-1: tint only), 4 tiles per metre,
+                    5..7 the chunk's position in its destructible (cm), 8..10 the instance's scale.
 
 Every material is flagged for instanced static meshes, which the renderers draw with.
 """
@@ -201,6 +207,112 @@ def spark():
     return m
 
 
+TOWN_CHUNK = """
+float3 n = normalize(LocalN);
+float3 a = abs(n);
+float3 p = LocalP * Scale + Offset;
+float2 uv;
+float3 t, b;
+if (a.x >= a.y && a.x >= a.z) { uv = p.yz; t = float3(0, 1, 0); b = float3(0, 0, 1); }
+else if (a.y >= a.z) { uv = p.xz; t = float3(1, 0, 0); b = float3(0, 0, 1); }
+else { uv = p.xy; t = float3(1, 0, 0); b = float3(0, 1, 0); }
+uv = float2(uv.x, -uv.y) * (Tiles / 100.0);
+float3 albedo = Tint;
+float3 nl = n;
+float rough = 0.8;
+float metal = 0.0;
+float ao = 1.0;
+if (Layer > -0.5)
+{
+    float3 uvw = float3(uv, Layer);
+    albedo = Texture2DArraySample(Albedo, AlbedoSampler, uvw).rgb;
+    // Normal-map compression keeps X and Y only (BC5): rebuild Z.
+    float2 nxy = Texture2DArraySample(NormalMap, NormalMapSampler, uvw).xy * 2.0 - 1.0;
+    float3 tn = float3(nxy, sqrt(saturate(1.0 - dot(nxy, nxy))));
+    // DirectX normal maps: green points down the image, which is -b here.
+    nl = normalize(t * tn.x - b * tn.y + n * tn.z);
+    float3 arm = Texture2DArraySample(Arm, ArmSampler, uvw).rgb;
+    ao = arm.r;
+    rough = arm.g;
+    metal = arm.b;
+}
+Normal = nl;
+Roughness = rough;
+Metallic = metal;
+Occlusion = ao;
+return albedo;
+"""
+
+
+def town_chunk():
+    """M_RubbleTownChunk (see the module docstring). Falls back to tint-only chunks when the
+    copied texture arrays are missing."""
+    arrays = {k: unreal.load_asset(f"/Game/VibeCity/Textures/T_City{k}HDArray") for k in ("Albedo", "Normal", "ARM")}
+    if not all(arrays.values()):
+        log("town chunk: no /Game/VibeCity texture arrays (scripts/unreal/fetch-city-textures.sh); skipped")
+        return None
+    m = material("M_RubbleTownChunk")
+    m.set_editor_property("tangent_space_normal", False)
+    data = [expr(m, unreal.MaterialExpressionPerInstanceCustomData, -1800, -700 + 90 * i, data_index=i, const_default_value=(-1.0 if i == 3 else 1.0 if i >= 8 or i == 4 else 0.0)) for i in range(11)]
+
+    def append3(i, x, y):
+        ab = binary(m, unreal.MaterialExpressionAppendVector, data[i], data[i + 1], x, y)
+        return binary(m, unreal.MaterialExpressionAppendVector, ab, data[i + 2], x + 120, y)
+
+    tint = append3(0, -1600, -700)
+    offset = append3(5, -1600, -250)
+    scale = append3(8, -1600, -100)
+    world = expr(m, unreal.MaterialExpressionWorldPosition, -1800, 150)
+    local_p = expr(m, unreal.MaterialExpressionTransformPosition, -1600, 150,
+                   transform_source_type=unreal.MaterialPositionTransformSource.TRANSFORMPOSSOURCE_WORLD,
+                   transform_type=unreal.MaterialPositionTransformSource.TRANSFORMPOSSOURCE_LOCAL)
+    link(world, "", local_p, "")
+    normal_ws = expr(m, unreal.MaterialExpressionVertexNormalWS, -1800, 300)
+    local_n = expr(m, unreal.MaterialExpressionTransform, -1600, 300,
+                   transform_source_type=unreal.MaterialVectorCoordTransformSource.TRANSFORMSOURCE_WORLD,
+                   transform_type=unreal.MaterialVectorCoordTransform.TRANSFORM_LOCAL)
+    link(normal_ws, "", local_n, "")
+    objs = {}
+    for i, (key, name) in enumerate((("Albedo", "Albedo"), ("Normal", "NormalMap"), ("ARM", "Arm"))):
+        o = expr(m, unreal.MaterialExpressionTextureObject, -1600, 450 + 130 * i)
+        o.set_editor_property("texture", arrays[key])
+        objs[name] = o
+    custom = expr(m, unreal.MaterialExpressionCustom, -1100, 0, code=TOWN_CHUNK,
+                  output_type=unreal.CustomMaterialOutputType.CMOT_FLOAT3, description="TownChunk")
+    names = ["LocalP", "LocalN", "Scale", "Offset", "Tiles", "Layer", "Tint", "Albedo", "NormalMap", "Arm"]
+    inputs = []
+    for name in names:
+        ci = unreal.CustomInput()
+        ci.set_editor_property("input_name", name)
+        inputs.append(ci)
+    custom.set_editor_property("inputs", inputs)
+    outs = []
+    for name, kind in (("Normal", unreal.CustomMaterialOutputType.CMOT_FLOAT3), ("Roughness", unreal.CustomMaterialOutputType.CMOT_FLOAT1),
+                       ("Metallic", unreal.CustomMaterialOutputType.CMOT_FLOAT1), ("Occlusion", unreal.CustomMaterialOutputType.CMOT_FLOAT1)):
+        co = unreal.CustomOutput()
+        co.set_editor_property("output_name", name)
+        co.set_editor_property("output_type", kind)
+        outs.append(co)
+    custom.set_editor_property("additional_outputs", outs)
+    for name, source, pin in (("LocalP", local_p, ""), ("LocalN", local_n, ""), ("Scale", scale, ""), ("Offset", offset, ""),
+                              ("Tiles", data[4], ""), ("Layer", data[3], ""), ("Tint", tint, ""),
+                              ("Albedo", objs["Albedo"], ""), ("NormalMap", objs["NormalMap"], ""), ("Arm", objs["Arm"], "")):
+        link(source, pin, custom, name)
+    to_world = expr(m, unreal.MaterialExpressionTransform, -700, 150,
+                    transform_source_type=unreal.MaterialVectorCoordTransformSource.TRANSFORMSOURCE_LOCAL,
+                    transform_type=unreal.MaterialVectorCoordTransform.TRANSFORM_WORLD)
+    link(custom, "Normal", to_world, "")
+    normal = expr(m, unreal.MaterialExpressionNormalize, -500, 150)
+    link(to_world, "", normal, "")
+    mel.connect_material_property(custom, "", MP.MP_BASE_COLOR)
+    mel.connect_material_property(normal, "", MP.MP_NORMAL)
+    mel.connect_material_property(custom, "Roughness", MP.MP_ROUGHNESS)
+    mel.connect_material_property(custom, "Metallic", MP.MP_METALLIC)
+    mel.connect_material_property(custom, "Occlusion", MP.MP_AMBIENT_OCCLUSION)
+    mel.recompile_material(m)
+    return m
+
+
 def nanite_meshes():
     """Nanite copies of the engine's basic shapes (runtime-built meshes cannot be Nanite)."""
     root = "/Game/Rubble/Meshes"
@@ -238,6 +350,7 @@ def main():
     dust()
     spark()
     nanite_meshes()
+    town_chunk()
     eal.save_directory(ROOT, only_if_is_dirty=False, recursive=True)
     log("done: " + ", ".join(sorted(a.split("/")[-1].split(".")[0] for a in eal.list_assets(ROOT))))
 

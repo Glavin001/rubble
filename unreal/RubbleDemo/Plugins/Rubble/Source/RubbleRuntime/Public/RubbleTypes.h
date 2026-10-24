@@ -132,6 +132,11 @@ struct FRubbleShapeVisual
 	FTransform Local = FTransform::Identity;
 	ERubbleMaterial Material = ERubbleMaterial::Concrete;
 	FLinearColor Tint = FLinearColor::White;
+	/** A town chunk's surface (M_RubbleTownChunk): its texture-array layer (-1: tint only) and
+	 *  tile size. Off for every other shape. */
+	bool bTownSurface = false;
+	int32 TextureLayer = -1;
+	float TilesPerMetre = 1.0f;
 };
 
 /** A rigid body drawn by its shapes (rigid scenes, scenery, projectiles, vehicle parts). */

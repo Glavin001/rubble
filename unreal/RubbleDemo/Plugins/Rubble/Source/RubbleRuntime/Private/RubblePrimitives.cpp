@@ -17,6 +17,20 @@ namespace
 	/** Batches past this share of moving instances are rewritten whole, in one call. */
 	constexpr float WholeBatchShare = 0.25f;
 
+	/** M_RubbleTownChunk's custom data: tint, layer, tiles per metre, position in the
+	 *  destructible (cm), the instance's scale. */
+	constexpr int32 TownCustomFloats = 11;
+
+	void CustomData(const FRubbleShapeVisual& Shape, const FVector& Scale, bool bTown, TArray<float>& Out)
+	{
+		Out.Append({ Shape.Tint.R, Shape.Tint.G, Shape.Tint.B });
+		if (bTown)
+		{
+			const FVector At = Shape.Local.GetLocation();
+			Out.Append({ float(Shape.TextureLayer), Shape.TilesPerMetre, float(At.X), float(At.Y), float(At.Z), float(Scale.X), float(Scale.Y), float(Scale.Z) });
+		}
+	}
+
 
 }
 
@@ -54,11 +68,11 @@ void ARubblePrimitives::EndPlay(const EEndPlayReason::Type Reason)
 	Super::EndPlay(Reason);
 }
 
-int32 ARubblePrimitives::BatchFor(ERubbleShape Kind, int32 Mesh, ERubbleMaterial Material, float A, float B, const FRubbleSceneAssets& Assets)
+int32 ARubblePrimitives::BatchFor(ERubbleShape Kind, int32 Mesh, ERubbleMaterial Material, float A, float B, const FRubbleSceneAssets& Assets, bool bTown)
 {
 	// Capsules of each size get their own mesh (a scaled capsule is not a capsule).
 	const uint32 Dims = Kind == ERubbleShape::Capsule ? GetTypeHash(FVector2f(A, B)) : 0u;
-	const uint64 Key = (uint64(Kind) << 56) ^ (uint64(uint8(Material)) << 48) ^ (uint64(uint32(Mesh + 1)) << 20) ^ Dims;
+	const uint64 Key = (uint64(Kind) << 56) ^ (uint64(uint8(Material)) << 48) ^ (uint64(uint32(Mesh + 1)) << 20) ^ Dims ^ (bTown ? (1ull << 63) : 0ull);
 	if (const int32* Found = BatchByKey.Find(Key))
 	{
 		return *Found;
@@ -66,10 +80,11 @@ int32 ARubblePrimitives::BatchFor(ERubbleShape Kind, int32 Mesh, ERubbleMaterial
 	UStaticMesh* StaticMesh = MeshFor(Kind, Mesh, Material, A, B, Assets, /*bNanite=*/false);
 	UInstancedStaticMeshComponent* ISM = NewObject<UInstancedStaticMeshComponent>(this);
 	ISM->SetStaticMesh(StaticMesh);
-	ISM->SetMaterial(0, RubbleRender::Surface(Material));
+	UMaterialInterface* Town = bTown ? RubbleRender::TownChunk() : nullptr;
+	ISM->SetMaterial(0, Town ? Town : RubbleRender::Surface(Material));
 	ISM->SetMobility(EComponentMobility::Movable);
 	ISM->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	ISM->NumCustomDataFloats = 3; // tint
+	ISM->NumCustomDataFloats = Town ? TownCustomFloats : 3; // tint (and the town surface's projection)
 	ISM->SetCastShadow(true);
 	ISM->bAffectDistanceFieldLighting = false;
 	ISM->SetupAttachment(RootComponent);
@@ -172,7 +187,8 @@ void ARubblePrimitives::Rebuild(const FRubbleSceneAssets& Assets)
 			case ERubbleShape::Sphere: Scale = FVector(Shape.Radius / 50.0); break;
 			default: break;
 			}
-			Ref.Batch = BatchFor(Shape.Kind, Shape.Mesh, Shape.Material, Shape.Radius, Shape.HalfHeight, Assets);
+			const bool bTown = Shape.bTownSurface && RubbleRender::TownChunk();
+			Ref.Batch = BatchFor(Shape.Kind, Shape.Mesh, Shape.Material, Shape.Radius, Shape.HalfHeight, Assets, bTown);
 			Ref.Local = FTransform(Shape.Local.GetRotation(), Shape.Local.GetLocation(), Scale);
 			if (NewTransforms.Num() <= Ref.Batch)
 			{
@@ -180,7 +196,7 @@ void ARubblePrimitives::Rebuild(const FRubbleSceneAssets& Assets)
 				NewCustom.SetNum(Ref.Batch + 1);
 			}
 			Ref.Instance = NewTransforms[Ref.Batch].Add(Ref.Local * Body.Initial);
-			NewCustom[Ref.Batch].Append({ Shape.Tint.R, Shape.Tint.G, Shape.Tint.B });
+			CustomData(Shape, Scale, bTown, NewCustom[Ref.Batch]);
 			Refs.Add(Ref);
 		}
 		State.Num = Body.NumShapes;
@@ -191,9 +207,10 @@ void ARubblePrimitives::Rebuild(const FRubbleSceneAssets& Assets)
 		FBatch& Batch = Batches[b];
 		Batch.Transforms = NewTransforms[b];
 		Batch.Component->AddInstances(NewTransforms[b], /*bShouldReturnIndices=*/false, /*bWorldSpace=*/false);
+		const int32 Floats = Batch.Component->NumCustomDataFloats;
 		for (int32 i = 0; i < NewTransforms[b].Num(); ++i)
 		{
-			Batch.Component->SetCustomData(i, TArrayView<const float>(&NewCustom[b][3 * i], 3), false);
+			Batch.Component->SetCustomData(i, TArrayView<const float>(&NewCustom[b][Floats * i], Floats), false);
 		}
 		Batch.Component->MarkRenderStateDirty();
 	}
@@ -229,7 +246,7 @@ void ARubblePrimitives::AddLiveBody(const FRubbleBodyVisual& Body, TArrayView<co
 			Scale = FVector(Shape.Radius / 50.0);
 		}
 		FInstanceRef Ref;
-		Ref.Batch = BatchFor(Shape.Kind, Shape.Mesh, Shape.Material, Shape.Radius, Shape.HalfHeight, *SceneAssets);
+		Ref.Batch = BatchFor(Shape.Kind, Shape.Mesh, Shape.Material, Shape.Radius, Shape.HalfHeight, *SceneAssets, false);
 		Ref.Local = FTransform(Shape.Local.GetRotation(), Shape.Local.GetLocation(), Scale);
 		FBatch& Batch = Batches[Ref.Batch];
 		Ref.Instance = Batch.Component->AddInstance(Ref.Local * Body.Initial, false);

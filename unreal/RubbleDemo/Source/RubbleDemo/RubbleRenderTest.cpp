@@ -19,6 +19,7 @@
 #include "Misc/Parse.h"
 #include "Misc/Paths.h"
 #include "DynamicRHI.h"
+#include "RenderTimer.h"
 #include "RubbleFracture.h"
 #include "RubbleGpuPoses.h"
 #include "RubblePawn.h"
@@ -230,7 +231,7 @@ bool FRubbleRenderDestruction::RunTest(const FString& Scene)
 	GEngine->Exec(GameWorld(), TEXT("t.MaxFPS 0"));
 	struct FSample
 	{
-		TArray<double> Frame, Update, Backend, Gpu;
+		TArray<double> Frame, Update, Backend, Gpu, Game, Render;
 		double Last = 0.0;
 		int32 MaxMoves = 0;
 		int64 Steps = 0;
@@ -255,6 +256,8 @@ bool FRubbleRenderDestruction::RunTest(const FString& Scene)
 			S->Gpu.Add(RHIGetGPUFrameCycles() * FPlatformTime::GetSecondsPerCycle() * 1000.0);
 			S->MaxMoves = FMath::Max(S->MaxMoves, Rubble()->Stats().Moves);
 			S->Steps += Rubble()->Stats().Steps;
+			S->Game.Add(GGameThreadTime * FPlatformTime::GetSecondsPerCycle() * 1000.0);
+			S->Render.Add(GRenderThreadTime * FPlatformTime::GetSecondsPerCycle() * 1000.0);
 		}
 		S->Last = Now;
 		if (!S->bShot && Now - Start > 4.0)
@@ -270,9 +273,9 @@ bool FRubbleRenderDestruction::RunTest(const FString& Scene)
 		auto P95 = [](TArray<double> V) { V.Sort(); return V.Num() ? V[FMath::Min(V.Num() - 1, int32(0.95 * V.Num()))] : 0.0; };
 		const ARubblePrimitives* P = Find<ARubblePrimitives>();
 		const ARubbleFracture* F = Find<ARubbleFracture>();
-		const FString Line = FString::Printf(TEXT("Rubble.Destruction %s gpu_poses=%d bodies=%d gpu_instances=%d gpu_chunks=%d frames=%d frame_ms_mean=%.2f frame_ms_p95=%.2f gpu_ms_mean=%.2f renderer_ms_mean=%.2f backend_ms_mean=%.2f steps_per_frame=%.2f backend_ms_per_step=%.2f max_moves=%d"),
+		const FString Line = FString::Printf(TEXT("Rubble.Destruction %s gpu_poses=%d bodies=%d gpu_instances=%d gpu_chunks=%d frames=%d frame_ms_mean=%.2f frame_ms_p95=%.2f game_ms_mean=%.2f render_thread_ms_mean=%.2f gpu_ms_mean=%.2f renderer_ms_mean=%.2f backend_ms_mean=%.2f steps_per_frame=%.2f backend_ms_per_step=%.2f max_moves=%d"),
 			*Scene, Rubble()->Backend()->GpuPoses() != nullptr, Rubble()->Assets()->Bodies.Num(), P ? P->NumGpuInstances() : 0, F ? F->NumGpuChunks() : 0,
-			S->Frame.Num(), Mean(S->Frame), P95(S->Frame), Mean(S->Gpu), Mean(S->Update), Mean(S->Backend),
+			S->Frame.Num(), Mean(S->Frame), P95(S->Frame), Mean(S->Game), Mean(S->Render), Mean(S->Gpu), Mean(S->Update), Mean(S->Backend),
 			S->Frame.Num() ? double(S->Steps) / S->Frame.Num() : 0.0, S->Steps ? Mean(S->Backend) * S->Frame.Num() / double(S->Steps) : 0.0, S->MaxMoves);
 		UE_LOG(LogRubble, Display, TEXT("%s"), *Line);
 		FFileHelper::SaveStringToFile(Line + LINE_TERMINATOR, *(ShotDir() / TEXT("destruction.txt")), FFileHelper::EEncodingOptions::AutoDetect, &IFileManager::Get(), FILEWRITE_Append);
@@ -508,6 +511,60 @@ bool FRubblePocScale::RunTest(const FString& Parameters)
 		return true;
 	}));
 	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(1.0f));
+	return true;
+}
+#endif
+
+#if WITH_DEV_AUTOMATION_TESTS
+/**
+ * Rubble.Town.Shots: Vibe Town (fracture:town, no auto shot) from fixed cameras, for the look:
+ * a street in Elm Park, a house wall up close, Main Street toward the towers, and the aerial.
+ * Poses are Unreal cm (Unreal X = -Rubble z, Y = Rubble x). Screenshots in RubbleShots/town.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRubbleTownShots, "Rubble.Town.Shots",
+	EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
+
+bool FRubbleTownShots::RunTest(const FString& Parameters)
+{
+	if (!TestTrue(TEXT("the town loads"), Rubble() && Load(TEXT("fracture:town?autoshot=0"))))
+	{
+		return false;
+	}
+	struct FPose
+	{
+		const TCHAR* Name;
+		FVector Eye;
+		FVector Target;
+	};
+	static const FPose Poses[] = {
+		{ TEXT("elm_park_street"), FVector(-2600, -9800, 260), FVector(-1700, -7200, 300) },
+		{ TEXT("house_wall"), FVector(-2500, -7300, 220), FVector(-1870, -7260, 220) },
+		{ TEXT("main_street"), FVector(150, -3000, 400), FVector(-200, 6000, 1200) },
+		{ TEXT("aerial"), FVector(-14000, -9000, 7000), FVector(0, 0, 400) },
+	};
+	const FString Dir = ShotDir() / TEXT("town");
+	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(4.0f));
+	for (const FPose& P : Poses)
+	{
+		ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([P]() {
+			if (APawn* Pawn = GameWorld()->GetFirstPlayerController()->GetPawn())
+			{
+				if (ARubblePawn* RP = Cast<ARubblePawn>(Pawn))
+				{
+					RP->SetMode(ERubbleCamera::Fly);
+				}
+				Pawn->SetActorLocationAndRotation(P.Eye, (P.Target - P.Eye).Rotation());
+				GameWorld()->GetFirstPlayerController()->SetControlRotation((P.Target - P.Eye).Rotation());
+			}
+			return true;
+		}));
+		ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(1.5f));
+		ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([Dir, P]() {
+			FScreenshotRequest::RequestScreenshot(Dir / FString(P.Name) + TEXT(".png"), /*bShowUI=*/false, false);
+			return true;
+		}));
+		ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(0.4f));
+	}
 	return true;
 }
 #endif

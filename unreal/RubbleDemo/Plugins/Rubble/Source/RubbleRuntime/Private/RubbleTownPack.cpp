@@ -89,6 +89,7 @@ namespace RubbleTownPack
 				}
 				M->TryGetNumberField(TEXT("roughness"), Mat.Roughness);
 				M->TryGetNumberField(TEXT("metalness"), Mat.Metalness);
+				M->TryGetStringField(TEXT("textureKey"), Mat.TextureKey);
 				Mat.Kind = KindOf(Mat.Name);
 				MaterialOf.Add(Mat.Name, Out.Materials.Add(Mat));
 			}
@@ -162,6 +163,36 @@ namespace RubbleTownPack
 			}
 		}
 		return true;
+	}
+
+	void ApplyCatalog(const TArray<uint8>& CatalogJson, FPack& Pack)
+	{
+		TSharedPtr<FJsonObject> Root;
+		const FUTF8ToTCHAR Text(reinterpret_cast<const ANSICHAR*>(CatalogJson.GetData()), CatalogJson.Num());
+		const TArray<TSharedPtr<FJsonValue>>* Materials = nullptr;
+		if (!FJsonSerializer::Deserialize(TJsonReaderFactory<TCHAR>::Create(FString(Text.Length(), Text.Get())), Root) || !Root || !Root->TryGetArrayField(TEXT("materials"), Materials))
+		{
+			return;
+		}
+		TMap<FString, TPair<int32, float>> ById;
+		for (const TSharedPtr<FJsonValue>& V : *Materials)
+		{
+			const TSharedPtr<FJsonObject> M = V->AsObject();
+			double Layer = -1.0, Metres = 1.0;
+			if (M->TryGetNumberField(TEXT("layer"), Layer))
+			{
+				M->TryGetNumberField(TEXT("metresPerTile"), Metres);
+				ById.Add(M->GetStringField(TEXT("id")), TPair<int32, float>(int32(Layer), float(Metres)));
+			}
+		}
+		for (FMaterial& M : Pack.Materials)
+		{
+			if (const TPair<int32, float>* Hit = ById.Find(M.TextureKey))
+			{
+				M.Layer = Hit->Key;
+				M.MetresPerTile = FMath::Max(Hit->Value, 0.01f);
+			}
+		}
 	}
 
 	bool HullMesh(const TArray<FVector3f>& RubblePoints, FRubbleMeshData& Out)

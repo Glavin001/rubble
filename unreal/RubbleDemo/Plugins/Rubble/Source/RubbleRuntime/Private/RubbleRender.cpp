@@ -91,6 +91,11 @@ namespace RubbleRender
 		return Fallback(FallbackColor(Material), FName(*FString::Printf(TEXT("RubbleFallback_%d"), int32(Material))));
 	}
 
+	UMaterialInterface* TownChunk()
+	{
+		return HasGeneratedContent() ? LoadGenerated<UMaterialInterface>(TEXT("M_RubbleTownChunk")) : nullptr;
+	}
+
 	UMaterialInstanceDynamic* CarPaint(UObject* Outer, const FLinearColor& Paint)
 	{
 		UMaterialInterface* Parent = HasGeneratedContent() ? LoadGenerated<UMaterialInterface>(TEXT("M_RubbleCarPaint")) : nullptr;

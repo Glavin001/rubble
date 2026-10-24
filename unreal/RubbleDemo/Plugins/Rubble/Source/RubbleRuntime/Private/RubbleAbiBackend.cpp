@@ -1088,6 +1088,11 @@ bool FRubbleAbiBackend::CreateTown(FString& Error)
 		Error = FString::Printf(TEXT("%s: %s"), *Path, *Error);
 		return false;
 	}
+	TArray<uint8> Catalog;
+	if (FFileHelper::LoadFileToArray(Catalog, *(FPaths::GetPath(Path) / TEXT("catalog.json"))))
+	{
+		RubbleTownPack::ApplyCatalog(Catalog, Pack);
+	}
 	// One mesh per hull (the library's shared shapes and any node's own), built on first use.
 	TArray<int32> MeshOfHull;
 	MeshOfHull.Init(INDEX_NONE, Pack.Hulls.Num());
@@ -1115,6 +1120,9 @@ bool FRubbleAbiBackend::CreateTown(FString& Error)
 		Shape.Material = M.Kind;
 		Shape.Tint = M.Color;
 		Shape.Local = Xf(Pose);
+		Shape.bTownSurface = M.Kind != ERubbleMaterial::Glass;
+		Shape.TextureLayer = M.Layer;
+		Shape.TilesPerMetre = 1.0f / M.MetresPerTile;
 		if (N.bBox)
 		{
 			Shape.Kind = ERubbleShape::Box;
