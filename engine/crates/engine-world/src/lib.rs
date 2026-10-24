@@ -32,6 +32,7 @@ mod motion;
 mod queries;
 mod readback;
 mod rig;
+mod threshold;
 
 pub use assembly::{
     AssemblyDef, AssemblyId, ConnectionDef, ConnectionKind, PartDef, PartHandle, PartModel,
@@ -66,6 +67,7 @@ pub use motion::{
 pub use queries::{ExplosionDef, OverlapResult, QueryFilter, QueryId};
 pub use readback::Backpressure;
 pub use rig::{SoftBeam, VehicleDamage};
+pub use threshold::{Projectile, StressSource};
 
 pub use engine_schema::convex::{CollisionFilter as Filter, ConvexHull};
 pub use engine_schema::{
@@ -195,6 +197,9 @@ enum Owner {
     Vehicle,
     /// A soft-body particle: reported through `Frame::soft`, not as moves.
     SoftNode,
+    /// A threshold destructible's piece (or a slot reserved for one): its shapes and
+    /// lifetime belong to the destructible.
+    Piece,
     /// A character's inner capsule: reported through `Frame::characters`.
     Character,
 }
@@ -216,6 +221,9 @@ enum Extra {
     Contacts,
     /// The overlap query region, for these queries.
     Overlaps(Vec<QueryId>),
+    /// A threshold destructible's state after this step.
+    #[cfg(feature = "stress")]
+    Fracture(threshold::FractureRead),
     /// Every character record.
     Characters,
     /// The scene-query records, for these casts.
@@ -379,6 +387,8 @@ pub struct World {
     queries: queries::QueryQueue,
     hit_event_threshold: f32,
     contact_storage: ContactStorage,
+    /// Threshold destructibles (`StrengthModel::Threshold`).
+    fracture: threshold::Fracture,
     motion: motion::MotionState,
 }
 
@@ -457,6 +467,7 @@ impl World {
             pending_rays: Vec::new(),
             pending_batches: Vec::new(),
             next_ray_batch: 0,
+            fracture: Default::default(),
         })
     }
 
@@ -604,6 +615,12 @@ impl World {
     /// after two steps.
     pub fn destroy_body(&mut self, id: BodyId) -> anyhow::Result<()> {
         let i = self.live_body(id)?;
+        if self.bodies[i].owner == Owner::Piece {
+            anyhow::bail!(
+                "body {} is a threshold destructible's piece; destroy the destructible instead",
+                id.index()
+            );
+        }
         if self.bodies[i].owner != Owner::User {
             anyhow::bail!(
                 "body {} belongs to a vehicle or soft body; remove that instead",
@@ -618,6 +635,7 @@ impl World {
             self.release_shape(s);
         }
         let index = id.index();
+        self.fracture.body_destroyed(index);
         self.sim.cancel_body_commands(index);
         let p = graveyard(index);
         let mut parked = BodyState::static_plane_support();
@@ -1063,6 +1081,48 @@ impl World {
         Ok(ShapeId::new(index, self.shapes[index as usize].generation))
     }
 
+    /// A shape whose collider record the caller built (a threshold destructible's
+    /// cooked chunk parts): placed as is, with `geometry` for queries and rewrites.
+    /// Returns the shape slot and the collider.
+    #[cfg_attr(not(feature = "stress"), allow(dead_code))]
+    pub(crate) fn add_shape_record(
+        &mut self,
+        b: usize,
+        def: &ShapeDef,
+        geometry: Geometry,
+        collider: Collider,
+    ) -> anyhow::Result<(u32, u32)> {
+        self.dirty = true;
+        self.contacts_shape_added(def);
+        let collider_index = self.place_collider(collider)?;
+        let slot = ShapeSlot {
+            generation: 1,
+            alive: true,
+            body: b as u32,
+            collider: collider_index,
+            geometry,
+            def: def.clone(),
+        };
+        let index = match self.free_shapes.pop() {
+            Some(i) => {
+                let generation = self.shapes[i as usize].generation;
+                self.shapes[i as usize] = ShapeSlot { generation, ..slot };
+                i
+            }
+            None => {
+                self.shapes.push(slot);
+                self.shapes.len() as u32 - 1
+            }
+        };
+        if self.collider_shape.len() <= collider_index as usize {
+            self.collider_shape
+                .resize(collider_index as usize + 1, u32::MAX);
+        }
+        self.collider_shape[collider_index as usize] = index;
+        self.bodies[b].shapes.push(index);
+        Ok((index, collider_index))
+    }
+
     /// Destroy a shape (Box3D `b3DestroyShape`).
     pub fn destroy_shape(&mut self, id: ShapeId, update_body_mass: bool) -> anyhow::Result<()> {
         let s = self.live_shape(id)?;
@@ -1457,25 +1517,41 @@ impl World {
             // Forces the step to run, so its frame carries the hits.
             self.sim.write_ray_queries(&rays)?;
         }
+        let fracture = self.fracture.active();
+        #[cfg(feature = "stress")]
+        if fracture && self.fracture_projectiles_dirty() {
+            self.sync_projectiles()?;
+        }
         let mut enc = self
             .sim
             .device()
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("world step"),
             });
+        #[cfg(feature = "stress")]
+        if fracture {
+            self.encode_fracture_begin(&mut enc);
+        }
         self.sim
             .step_encode(&mut enc)
             .map_err(|e| anyhow::anyhow!("step: {e:?}"))?;
         let ran = self.sim.last_step_ran();
+        #[cfg(feature = "stress")]
+        if fracture && ran {
+            // Loads, breaks and splits from this step's contacts, before the next step.
+            self.encode_fracture(&mut enc);
+        }
         let mut mapped = None;
         if ran {
             // Ray results are never dropped: a frame with queries waits for a slot.
             // Nor are contact events: a lost frame would break begin/end pairing.
+            // Nor are fracture states: a split must be adopted in the step it happened.
             let block = self.backpressure == Backpressure::Block
                 || !batches.is_empty()
                 || !query_ids.is_empty()
                 || !casts.is_empty()
-                || contact_events;
+                || contact_events
+                || fracture;
             if !self.readback.has_free() && block {
                 self.wait_oldest()?;
             }
@@ -1501,6 +1577,10 @@ impl World {
                         offset: u64::from(first) * 16,
                         size: u64::from(count) * 16,
                     });
+                }
+                #[cfg(feature = "stress")]
+                if fracture {
+                    extras.extend(self.fracture.extras());
                 }
                 if !query_ids.is_empty() {
                     self.sim.encode_overlap_queries(&mut enc);
@@ -1673,6 +1753,9 @@ impl World {
             );
             self.sim.set_plan_hints(c.contact_count, c.color_count);
         }
+        if let Some((contacts, colors)) = self.fracture.fixed_plan {
+            self.sim.set_plan_hints(contacts, colors);
+        }
         self.last_counters = Some(c);
         let ring = self.sim.ring_events(&raw.ring);
         let (character_events, projectile_events, lost_motion) =
@@ -1705,7 +1788,21 @@ impl World {
                 .into_iter()
                 .map(DestructionEvent::PieceDetached),
         );
-        let destruction = self.destruction_events(destruction);
+        let mut destruction = self.destruction_events(destruction);
+        #[cfg(feature = "stress")]
+        {
+            let reads: Vec<(threshold::FractureRead, &[u8])> = raw
+                .extras
+                .iter()
+                .filter_map(|(k, b)| match k {
+                    Extra::Fracture(r) => Some((*r, b.as_slice())),
+                    _ => None,
+                })
+                .collect();
+            if !reads.is_empty() {
+                destruction.extend(self.fracture_frame(step, &reads)?);
+            }
+        }
         let destruction = self.connection_events(destruction);
         let resync = raw
             .extras
@@ -1770,6 +1867,8 @@ impl World {
         for (kind, bytes) in &raw.extras {
             match kind {
                 Extra::Resync => {}
+                #[cfg(feature = "stress")]
+                Extra::Fracture(_) => {}
                 Extra::Overlaps(ids) => {
                     let (results, lost) = self.decode_overlaps(ids, bytes);
                     overlap_results = results;

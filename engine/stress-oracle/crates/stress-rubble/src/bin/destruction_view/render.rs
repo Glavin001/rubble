@@ -134,13 +134,13 @@ const SPHERE_VERTICES: u32 = 16 * 10 * 6;
 impl Renderer {
     pub fn new(window: Arc<Window>, instance: &wgpu::Instance, surface: wgpu::Surface<'static>, gpu: &Gpu, record: Option<&str>) -> Result<Renderer, String> {
         let size = window.inner_size();
-        let mut config = surface.get_default_config(&gpu.adapter, size.width.max(1), size.height.max(1)).ok_or("no surface configuration")?;
+        let mut config = surface.get_default_config(gpu.surface_adapter(), size.width.max(1), size.height.max(1)).ok_or("no surface configuration")?;
         let _ = instance;
         // A linear (non-sRGB) target: the shaders' colours are display values.
-        if let Some(f) = surface.get_capabilities(&gpu.adapter).formats.iter().copied().find(|f| *f == config.format.remove_srgb_suffix()) {
+        if let Some(f) = surface.get_capabilities(gpu.surface_adapter()).formats.iter().copied().find(|f| *f == config.format.remove_srgb_suffix()) {
             config.format = f;
         }
-        if surface.get_capabilities(&gpu.adapter).usages.contains(wgpu::TextureUsages::COPY_SRC) {
+        if surface.get_capabilities(gpu.surface_adapter()).usages.contains(wgpu::TextureUsages::COPY_SRC) {
             config.usage |= wgpu::TextureUsages::COPY_SRC;
         }
         surface.configure(&gpu.device, &config);
