@@ -22,6 +22,15 @@ const setup = ({ scene, bonds = 'none', hz = 0, radius = 0, strength = 0, level,
 const take = (state, script) => ({ page: 'fracture/index.html', setup: setup(state), script });
 
 export const LAB_TAKES = {
+  // Bridge Out (stress_ref::viaduct): the 50 t ball into the hinge pier under
+  // blast_parity; the two drop-in spans swing down whole and break on the road below.
+  bo_viaduct_pier: take({ scene: 'bo_viaduct', bonds: 'stress', preset: 1 }, [
+    { n: 50, caption: 'Four-span concrete viaduct, 10 m up: 347 bonded chunks under the GPU stress solver', cam: { rel: [0.4, 0.0, 0.9], relTo: [0.25, -0.02, 0.8] } },
+    { n: 1, act: 'fire', caption: 'A 50 t wrecking ball into the middle pier' },
+    { n: 25, caption: 'A 50 t wrecking ball into the middle pier' },
+    { n: 220, slow: 2, caption: 'Half speed: the hinge lets go and both spans swing down whole', cam: { rel: [0.25, -0.02, 0.8], relTo: [0.7, 0.05, 0.85] } },
+    { n: 240, caption: 'They break on the road below; the outer piers follow', cam: { rel: [0.7, 0.05, 0.85], relTo: [1.1, 0.12, 1.0] } },
+  ]),
   // Wrecking Yard (stress_ref::wrecking): the 50 t ball into the 10-floor frame's corner
   // column line under blast_parity; the collapse climbs while the core stands.
   wy_frame10_ball: take({ scene: 'wy_frame10', bonds: 'stress', preset: 1 }, [
