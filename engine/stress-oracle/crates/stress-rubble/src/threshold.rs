@@ -25,6 +25,23 @@ use crate::{to_rubble, Owner, RubbleEngine};
 /// The shots a world holds (the fracture lab's 16).
 pub const SHOTS: usize = 16;
 
+/// How a fracture world is made, beyond its profile ([`ThresholdWorld::with_options`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FractureOptions {
+    /// The in-step contact fracture on or off (`None`: the profile's own,
+    /// `Profile::contact_fracture`).
+    pub contact: Option<bool>,
+    /// The shots as rubble TOI CCD bodies (`RubbleEngine::set_toi_ccd`; `None`: when the
+    /// in-step contact fracture is on). Off, a shot faster than a wall's thickness per step
+    /// can pass through it with no contact.
+    pub toi_ccd: Option<bool>,
+}
+
+/// Where in rubble's step the in-step contact fracture is encoded (`rigid_plan` phase):
+/// after the narrowphase, the time-of-impact contacts and the warm start; before the
+/// constraint graph, the colouring and the solve.
+pub const CONTACT_PHASE: &str = "warm";
+
 /// Carried impact pulses each half of the pool holds: two per contact the engine can hold
 /// (a pulse comes from one and lasts its Hertz duration). A frame reserves room for each
 /// chunk's carried pulses and one per manifold. `STRESS_PULSE_POOL` multiplies it (a
@@ -150,14 +167,22 @@ impl ThresholdWorld {
     }
 
     /// [`Self::with_profile`] with the in-step contact fracture on or off (`None`: the
-    /// profile's own, `Profile::contact_fracture`). On, a body about to strike a structure
-    /// within a step has the strike's load solved by the load path inside that step (where
-    /// rubble's broadphase ends, before its narrowphase and solve): the bonds break by
-    /// their own strength and the structure splits, or nothing breaks and the striker
-    /// rebounds. The shots are then rubble CCD bodies (time-of-impact contacts:
-    /// `RubbleEngine::set_toi_ccd`), and strikes are not also predicted at the end of a
-    /// frame (`set_strike_prediction` turns that on again).
+    /// profile's own, `Profile::contact_fracture`). On, rubble's own contacts of each step
+    /// are the strikes: inside the step, after its contacts are made and before it solves
+    /// them ([`CONTACT_PHASE`]), a contact closing on a structure faster than
+    /// `strike_speed` is judged by the profile's stress solver (the threshold rule, the
+    /// load path or the analytic strike): the bonds break by its verdict and the structure
+    /// splits, and the step solves the striker's contact with the pieces; or nothing breaks
+    /// and the striker rebounds. The shots are then rubble CCD bodies (time-of-impact
+    /// contacts: `RubbleEngine::set_toi_ccd`), and strikes are not also predicted at the
+    /// end of a frame (`set_strike_prediction` turns that on again).
     pub fn with_contact_fracture(gpu: &Gpu, scene: &Scene, shot_radius: f64, shot_mass: f64, profile: Profile, contact: Option<bool>) -> Result<ThresholdWorld, String> {
+        ThresholdWorld::with_options(gpu, scene, shot_radius, shot_mass, profile, FractureOptions { contact, toi_ccd: None })
+    }
+
+    /// [`Self::with_contact_fracture`] with [`FractureOptions`].
+    pub fn with_options(gpu: &Gpu, scene: &Scene, shot_radius: f64, shot_mass: f64, profile: Profile, options: FractureOptions) -> Result<ThresholdWorld, String> {
+        let contact = options.contact;
         if !matches!(profile, Profile::Threshold | Profile::LoadPath | Profile::ImpactLocal) {
             return Err(format!("the fracture world runs threshold, load_path or impact_local, not {}", profile.name()));
         }
@@ -179,9 +204,9 @@ impl ThresholdWorld {
         let mut engine = RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), capacity.clone()).map_err(|e| format!("rubble: {e}"))?;
         let (iterations, substeps) = profile.engine_policy();
         engine.set_policy(iterations, substeps);
-        if contact_sweeps > 0 {
-            // The shots sweep their bounds over the step (a strike is a candidate pair
-            // before it lands) and meet what they strike at its time of impact.
+        if options.toi_ccd.unwrap_or(contact_sweeps > 0) {
+            // The shots meet what they strike at its time of impact: a contact in the step
+            // they reach it (no tunnelling past a wall within a step).
             engine.set_toi_ccd(true);
         }
         if let Some(g) = &scene.ground {
@@ -247,7 +272,7 @@ impl ThresholdWorld {
         let mut t = FractureTables {
             max_bodies: engine.sim.capacity().max_bodies,
             contact_sweeps,
-            max_candidates: engine.sim.capacity().max_candidates,
+            max_contacts: engine.sim.capacity().max_contacts,
             pool_cap: pool_cap(capacity.max_contacts),
             // The load path takes each impact's mean over the frame (a load, as Blast's
             // solver takes it); the contact test its peak.
@@ -304,7 +329,7 @@ impl ThresholdWorld {
         // Each cluster's body frame (its structure's frame: a cluster's shapes are its
         // chunks at their structure-frame poses) and its bonds (and, for the load path and
         // the analytic strike, each bond's frame, law and material).
-        let ext_needed = load_model != LoadModel::Threshold || strike_model != StrikeModel::Hertz || contact_sweeps > 0;
+        let ext_needed = load_model != LoadModel::Threshold || strike_model != StrikeModel::Hertz;
         let mut materials = stress_gpu::joint::MaterialTable::default();
         let mut bond_data: Vec<&stress_ref::solver::RtBond> = Vec::new();
         let mut bond_source = Vec::new();
@@ -370,7 +395,6 @@ impl ThresholdWorld {
         // `STRESS_THRESHOLD_STRIKE=0` (a measurement): contact loads only, no strikes. With the
         // in-step contact fracture, strikes are its, not predicted at the end of a frame.
         let predict_strikes = contact_sweeps == 0 && !std::env::var("STRESS_THRESHOLD_STRIKE").is_ok_and(|v| v == "0");
-        fracture.set_candidates(gpu, engine.sim.candidate_buffer(), &engine.engine_buffers_now(), &ingest);
         if predict_strikes {
             fracture.set_shots(gpu, &strikes)?;
         }
@@ -491,9 +515,11 @@ impl ThresholdWorld {
             gpu.queue.submit([done.finish()]);
             self.engine.sim.step_submit().map_err(|e| format!("rubble step failed: {e:?}"))?;
         } else if self.contact_sweeps > 0 {
-            // The in-step contact fracture where the step's broadphase ends.
+            // The in-step contact fracture where the step's contacts are made and kept,
+            // before its solve.
+            self.fracture.set_contact_rows(gpu, self.engine.sim.next_contact_offset());
             let fracture = &mut self.fracture;
-            self.engine.sim.step_encode_with(&mut enc, "broadphase", &mut |e| fracture.encode_contact_fracture(e)).map_err(|e| format!("rubble step failed: {e:?}"))?;
+            self.engine.sim.step_encode_with(&mut enc, CONTACT_PHASE, &mut |e| fracture.encode_contact_fracture(e)).map_err(|e| format!("rubble step failed: {e:?}"))?;
         } else {
             self.engine.sim.step_encode(&mut enc).map_err(|e| format!("rubble step failed: {e:?}"))?;
         }
@@ -592,6 +618,11 @@ impl ThresholdWorld {
     /// The shots as impactors (their meshes, for a renderer's shot objects).
     /// Diagnostic read (waits): each shot's centre and velocity in the stress frame, and
     /// whether it is in flight (not parked).
+    /// Engine body slot of shot `k`.
+    pub fn shot_body(&self, k: usize) -> u32 {
+        self.shots[k].body
+    }
+
     pub fn shot_states(&self, gpu: &Gpu) -> Vec<([f64; 3], [f64; 3], bool)> {
         let bodies: Vec<BodyState> = gpu.read_range(self.engine.sim.body_buffer(), 0, self.tables.body_count() as usize);
         let z = |v: [f32; 3]| [v[0] as f64, -v[2] as f64, v[1] as f64];

@@ -327,11 +327,11 @@ pub fn stress_set_strike_prediction(on: bool) {
 }
 
 /// The in-step contact fracture on or off for the next load (the fracture world's
-/// profiles: threshold, load_path, impact_local): within rubble's step, a body about to
-/// strike a structure has the strike's load solved by the load path before the step
-/// solves, so its bonds break by their strength and the structure splits before the
-/// contact, or nothing breaks and the striker rebounds. Made with the world (its shots
-/// become CCD bodies): the lab reloads.
+/// profiles: threshold, load_path, impact_local): within rubble's step, after its contacts
+/// are made and before it solves them, a contact closing on a structure is judged by the
+/// profile's own stress solver, so its bonds break by that verdict and the structure splits
+/// before the contact is solved, or nothing breaks and the striker is stopped. Made with
+/// the world (its shots become CCD bodies): the lab reloads.
 #[wasm_bindgen]
 pub fn stress_set_contact_fracture(on: bool) {
     CONTACT.set(Some(on));

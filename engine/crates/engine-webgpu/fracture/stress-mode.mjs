@@ -47,9 +47,10 @@ export async function createStressMode(canvas){
   // loads of this profile; switching profile goes back to its own.
   get strikePrediction(){return stress_strike_prediction()},
   setStrikePrediction(on){stress_set_strike_prediction(on)},
-  // In-step contact fracture (the fracture world's modes): within the physics step, a
-  // strike's load goes through the load path before the step solves; bonds break by
-  // their strength, or the striker rebounds. For the next load (the lab reloads).
+  // In-step contact fracture (the fracture world's modes): within the physics step, its
+  // contacts are the strikes, judged by the mode's own stress solver before the step
+  // solves; bonds break by its verdict, or the striker is stopped. For the next load (the
+  // lab reloads).
   get contactFracture(){return stress_contact_fracture()},
   get contactFractureAvailable(){return stress_contact_fracture_available()},
   setContactFracture(on){stress_set_contact_fracture(on)},

@@ -164,64 +164,96 @@ f64 twin. The strike is evaluated once, before the engine steps.
 
 ### In-step contact fracture
 
-`Profile::contact_fracture`: on by default in `load_path`, a flag elsewhere
-(`ThresholdWorld::with_contact_fracture`, `STRESS_CONTACT_FRACTURE`, the lab's checkbox).
-The forward-only answer to PhysX's internal correction pass: the strike is decided from the
-contact the engine is about to make, inside the step, with no rollback and no second solve.
+`Profile::contact_fracture`: on by default in `load_path`, a flag in `threshold` and
+`impact_local` (`ThresholdWorld::with_options`, `STRESS_CONTACT_FRACTURE`, the lab's
+checkbox). The forward-only answer to PhysX's internal correction pass: the strike is
+judged from the contact the engine has just made, inside the step, by the profile's own
+stress solver, with no rollback, no second solve and no detection of its own.
 
-1. **Where it runs.** `WgpuSim::step_encode_with` encodes it where rubble's broad phase
-   ends: the step's bounds and candidate pairs are built, nothing is solved. Shots are
-   rubble CCD bodies (`RubbleEngine::set_toi_ccd`), so their bounds are swept over the
-   step and a strike is a candidate pair before it lands. Debris is found once its bounds
-   touch.
-2. **Detection** (`fr_cs_pairs`, `fr_cs_pick`, `fr_cs_pick2`). A pair of a structure's
-   chunk and another body's collider closing faster than the strike speed, meeting the
-   chunk's box within the step, is a strike. Each structure takes its first (earliest;
-   ties: lowest chunk, then lowest collider). The cost is a pass over the step's pairs.
-3. **Load** (`fr_cs_force`). The impulse that stops the striker against the whole
-   structure (`m_eff v`), at its Hertz peak (`pi J / (2 tau)`), at the contact point.
-4. **Solve** (`fr_cs_load` … `fr_cs_sweep_*`). The load path's increment from rest, by
-   superposition on the structure's own state:
-   - inertia relief on a free structure;
-   - 256 sweeps tuned to `[1e-4, 2]` (`IMPACT_LOWER`). A plate's strike load has to reach
-     its supports; with 64 sweeps it stayed bunched at the hit, 78 % off (the
-     `load_path.rs` test).
-   - One workgroup per struck structure (`fr_cs_solve`) runs the load, the blocks, every
-     sweep (a group barrier between) and the break test in one dispatch. As a dispatch per
-     sweep, the 256 empty indirect dispatches cost 2.3 ms on every step (about 9 µs each
-     on Apple GPUs). On a step without a strike, the solve dispatches no group.
-   - Cost (`stress_bench --solver fracture-gpu --set shots --config load_path`, M3 Max,
-     60 Hz, medians, `STRESS_CONTACT_FRACTURE` 1 against 0): idle house 3.0 against
-     2.9 ms; strike regimes 3.2–5.4 against 3.6–4.3 ms.
-5. **Breaks and split** (`fr_cs_breaks`, `fr_gate`, the split). Each bond's own failure
-   law, then the usual split before the narrow phase. rubble's contacts name colliders,
-   whose bodies the split re-points, and the pieces' generation stops a warm start from
-   the whole body. So the step's narrow phase and solve meet the pieces, and the striker
-   gets their momentum. Nothing breaks: the whole structure takes the contact and the
-   striker does not get through.
+1. **Where it runs.** `WgpuSim::step_encode_with` encodes it at rubble's `"warm"` phase
+   (`threshold::CONTACT_PHASE`): the narrow phase, the time-of-impact contacts and the warm
+   start are done; the constraint graph, the colouring and the solve are not. Shots are
+   rubble TOI CCD bodies (`RubbleEngine::set_toi_ccd`), so a shot that reaches a wall within
+   the step has its contact there (`ccd_emit`), however fast.
+2. **Detection** (`fr_cs_contacts`, `fr_cs_pick`, `fr_cs_record`). rubble's contact rows
+   of the step (`WgpuSim::next_contact_offset`, `StepCounters::contactCount`) are read
+   where the engine left them. A row with a structure's chunk on one side and a dynamic body
+   of its own on the other, its two material points closing faster than the strike speed
+   (5 m/s, spin included), is a strike. Its impulse `J = m_eff v`: `m_eff` along the contact
+   normal with both bodies' rotation, through each side's lever arm (a time-of-impact row's
+   anchors are its bodies' at the time of impact). Each struck structure takes its largest
+   (ties: the lowest row and side). When within the step the two meet: the gap along the
+   normal at the step's start over the closing speed. One thread per contact row; no extra
+   geometry.
+3. **The profile's verdict.**
+   - `threshold` (`StrikeModel::Hertz`, `fr_cs_hertz`): a bond breaks when its share of
+     the strike's Hertz force, `F min(1, A / (2 pi d^2))` with `F = J / tau`, beats its
+     tensile capacity: the end-of-frame prediction's rule (`strike_share_breaks`).
+   - `load_path` (`LoadModel::LoadPath`, `fr_cs_count` … `fr_cs_solve`): the strike's load,
+     the Hertz peak `pi J / (2 tau)` at the contact, solved through the structure as an
+     increment from rest on its own state (inertia relief on a free structure; 256 sweeps
+     tuned to `[1e-4, 2]`, `IMPACT_LOWER`; one workgroup per struck structure, every sweep
+     in one dispatch); each bond's own failure law.
+   - `impact_local` (`StrikeModel::Analytic`, `fr_csl_*`): the analytic strike's kernels on
+     this strike (`il_*<1>`): the thickness along the path, the closed forms, the outcome;
+     the striker's fracture work or its inelastic stop, and after the split its plug's
+     carry, at the strike's time within the step.
+4. **Split and contacts** (`fr_cs_save`, `fr_gate`, the split, `fr_cs_fix`). Before the
+   split, each contact row's side on a chunk of a broken structure keeps where it touches,
+   in the world. The split moves the colliders to the pieces' bodies; after it, those sides'
+   anchors are re-expressed on the pieces (the same world points) and the rows start cold
+   (no multipliers, unit penalties, as rubble's `makeContactRow`). The step then builds its
+   graph and solves the striker's contact with the pieces. Nothing breaks: the whole
+   structure takes the contact and the striker is stopped (rubble's contact is inelastic).
 
-Pieces of one structure have no candidate pair with each other in the step they split
-(the broad phase skips a body's own colliders); they meet from the next step.
+Pieces of one structure have no contact rows with each other in the step they split; they
+meet from the next step.
 
-`stress-rubble/tests/contact_fracture.rs`:
-- the strike's load and the increment against their host twins;
-- walls a thousand times stronger take the strike whole and hold the ball;
-- the lab's ball goes through its cuboid house only with the pass;
+Debris is not a CCD body. A block faster than about a wall's thickness per step is already
+through the wall when rubble's narrow phase finds it (its contact normal then points
+sideways, closing slowly): that is rubble's tunnelling, before any fracture, and the
+in-step pass sees what the narrow phase gives it.
+
+`stress-rubble/tests/contact_fracture.rs`, for each of `threshold`, `load_path`,
+`impact_local`:
+- a wall a thousand times stronger takes the strike whole and holds the ball;
+- at 250 m/s the ball goes through the wall the solver breaks with the pass, and is held by
+  the same wall without it (shots CCD either way, no end-of-frame prediction);
+- the verdict is the solver's own: the threshold rule broke exactly the 57 bonds its share
+  condemns (60 m/s); the analytic outcome and ballistic limit equal the host's
+  `impact_local::strike` at 30, 100 and 250 m/s; the load path's strike load and
+  increment equal their host twins' (peak 1,421,850 N against 1,421,849.9 N);
 - a flying block's strike is found with no shot;
-- the pass agrees with the explicit reference where that is clear;
+- the kinetic energy never exceeds the ball's after a free wall splits (re-anchored
+  contacts push nothing apart), and a grounded wall's far bottom course stays at rest
+  (fastest 0.006 m/s threshold, 0.030 m/s load path);
 - runs repeat bit for bit.
 
-Against the reference (4.1 kg ball, 0.2 m anchored wall, 0.25 s, 2026-10-24):
+Momentum is not asserted: rubble's contact loses some even when nothing breaks (measured
+2026-10-24: a 300 kg ball at 15 m/s into a free 528 kg wall a thousand times stronger, no
+gravity, 17 % of the momentum lost, with the pass on or off; with CCD shots and the
+end-of-frame prediction, 13 % of a 250 m/s ball's). A finding for the engine.
 
-| Speed | Reference | In-step pass |
-|---|---|---|
-| 15 m/s | stops at the face, 10 bonds | stops, 67 bonds |
-| 40 m/s | stops at the face, 9 bonds | **through**, 415 bonds |
-| 80 m/s | through, 58 bonds | through, 338 bonds |
-| 120 m/s | through, 106 bonds | through, 414 bonds |
-| 250 m/s | through, 89 bonds | through, 465 bonds |
+Against the reference (4.1 kg ball, 0.2 m anchored wall, 0.25 s, 2026-10-24; the shots TOI
+CCD bodies in every column; "end of frame": the strike prediction instead of the pass):
 
-Open: the pass over-breaks, 4–40 times the reference's bonds.
+| Speed | Reference | threshold, end of frame | threshold, in step | load_path, in step | impact_local, either |
+|---|---|---|---|---|---|
+| 15 m/s | stops, 10 bonds | stops, 5 | stops, 5 | stops, 56 | stops, 0 |
+| 40 m/s | stops, 9 bonds | stops, 35 | **through** 9.8 m/s, 34 | **through** 9.8, 199 | stops, 0 |
+| 80 m/s | through, 58 bonds | through 22.3, 97 | through 27.9, 97 | through 31.9, 314 | **stops**, 45 |
+| 120 m/s | through 16.6 m/s, 106 bonds | through 31.9, 153 | through 56.9, 153 | through 54.3, 389 | **stops**, 45 |
+| 250 m/s | through 49.6 m/s, 89 bonds | through 43.7, 388 | through 103.5, 387 | through 103.7, 464 | through 21.7, 31 |
+
+The pass puts each solver's verdict where it belongs, inside the step that meets the wall;
+how close it comes to the reference is the solver's own fidelity. `impact_local` gives the
+same outcomes in the step as at the end of a frame (its ballistic limit for this wall is
+151 m/s). Cost (`stress_bench --solver fracture-gpu --set shots`, M3 Max, 60 Hz, medians,
+`STRESS_CONTACT_FRACTURE` 1 against 0): a fixed 0.2–0.5 ms a step, mostly the in-step
+split's empty indirect dispatches (about 9 µs each on Apple GPUs), not growing with the
+bodies; strike regimes 0.1–0.8 ms over that.
+
+Open: the load path's verdict over-breaks, 4–40 times the reference's bonds.
 - The load is the rigid-structure upper bound, applied quasi-statically. The struck
   chunk's own inertia is not in it, though it meets the striker first and takes part of
   the impulse.

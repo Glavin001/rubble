@@ -227,15 +227,21 @@ the blast_parity stress solver. Switching it applies at once.
 `stress-rubble/tests/strike_through.rs` checks both on the cuboid house.
 
 **In-step contact fracture (fracture-world stress modes).** The checkbox beside
-**Strike prediction**; on by default in **load path**, and it reloads the scene. Within
-rubble's step, where its broad phase ends, a body about to strike a structure has the
-strike's load solved by the load path before the step solves:
-- the bonds break by their own strength and the structure splits, so the striker meets the
-  pieces; or nothing breaks and the striker does not get through;
-- the load is the impulse that stops the striker against the whole structure, at its Hertz
-  peak: an upper bound, so it breaks more than the explicit reference does (see
-  `engine/docs/stress-threshold-gpu.md`);
-- with it on, strikes are not also predicted at the end of a frame (Strike prediction off).
+**Strike prediction**; on by default in **load path**, available in **threshold** and
+**local impact** too, and it reloads the scene. Within rubble's step, after its contacts are
+made and before it solves them, rubble's own contacts are the strikes: a contact closing on a
+structure faster than 5 m/s is judged by the mode's own stress solver:
+- **threshold**: a bond breaks when its share of the strike's Hertz force beats its tensile
+  capacity;
+- **load path**: the strike's load is solved through the structure and each bond breaks by
+  its own strengths (an upper-bound load: it breaks more than the explicit reference does,
+  see `engine/docs/stress-threshold-gpu.md`);
+- **local impact**: the analytic outcome (bounce, crater, spall, perforation), the ball's
+  momentum with it.
+
+What breaks splits before the step solves, so the ball meets the pieces; or nothing breaks
+and the ball is stopped. With it on, strikes are not also predicted at the end of a frame
+(Strike prediction off).
 
 `stress-rubble/tests/contact_fracture.rs` checks it.
 

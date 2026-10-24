@@ -1,44 +1,55 @@
 //! The in-step contact fracture (`Profile::contact_fracture`; stress-gpu fracture.slang
-//! `fr_cs_*`): within rubble's step, where its broadphase ends, a body about to strike a
-//! structure has the strike's load solved by the load path before the step solves; the
-//! bonds break by their own strength and the structure splits, or nothing breaks and the
-//! striker does not get through. Forward only: no rollback, no second solve.
+//! `fr_cs_*`): inside rubble's step, after its contacts are made and before it solves them,
+//! rubble's own contacts are the strikes. A contact closing on a structure faster than
+//! `strike_speed` is judged by the profile's stress solver (the threshold rule, the load
+//! path, the analytic strike); the bonds break by its verdict and the structure splits, the
+//! moved contacts are re-anchored to the pieces, and the step solves the striker against
+//! them. Or nothing breaks, the whole structure takes the contact and the striker rebounds.
+//! Forward only: no rollback, no second solve, no detection of its own.
 //!
-//! - Against its host twins: the strike's load (the Hertz peak of the impulse that stops
-//!   the striker against the whole structure) and the load path's increment.
-//! - Must not break: a wall a thousand times stronger takes the strike whole, and the
-//!   ball does not get through, on a box wall and on the lab's cuboid house.
-//! - The lab's cuboid house at the lab's 18 m/s: through with the pass, not without it.
-//! - A strike by debris (no shot): a flying concrete block against a wall.
-//! - Against the explicit reference (the CPU oracle, `realtime` configuration): where the
-//!   reference is clear (stopped at 15 m/s, through at 120 and 250 m/s) the pass agrees.
-//!   Between, it is not yet faithful: it over-breaks (measured 2026-10-24 on this wall:
-//!   67 bonds at 15 m/s against the reference's 10, 415 at 40 m/s against 9, where the
-//!   reference stops the ball and the pass lets it through). The strike's load is the
-//!   rigid-structure upper bound, applied quasi-statically (engine/docs/
-//!   stress-threshold-gpu.md, "In-step contact fracture").
+//! For each solver (`threshold`, `load_path`, `impact_local`):
+//! - Must bounce: a wall a thousand times stronger takes the strike whole, nothing breaks,
+//!   and the ball does not get through: rubble's contact stops it (it is inelastic).
+//! - Through: the ball goes through a wall the solver breaks, with the pass; without it
+//!   (and no end-of-frame prediction) the same ball is stopped by the same wall.
+//! - The verdict is the solver's own: the threshold rule breaks exactly the bonds its share
+//!   condemns; the analytic strike's outcome and ballistic limit are its host twin's; the
+//!   load path's strike load and increment are its host twins'.
+//! - A strike by debris (a flying block, no shot) is found and judged.
+//! - After the split no energy comes from nowhere (the ball's kinetic energy is never
+//!   exceeded). Momentum is not checked: rubble's contact loses some even when nothing
+//!   breaks (measured 2026-10-24: a 300 kg ball at 15 m/s into a free 528 kg wall a
+//!   thousand times stronger, no gravity: 17 %), with the pass on or off.
 //! - Runs repeat bit for bit.
+//!
+//! And: pieces resting on the ground stay at rest after the split (their contacts
+//! re-anchored); the load path agrees with the explicit reference where the reference is
+//! clear (stopped at 15 m/s, through at 120 and 250 m/s). Between, its strike load (the
+//! rigid-structure upper bound, applied quasi-statically) over-breaks
+//! (engine/docs/stress-threshold-gpu.md).
 //!
 //!   cargo test --release -p stress-rubble --features gpu --test contact_fracture
 #![cfg(feature = "gpu")]
 
 use stress_gpu::gpu::Gpu;
 use stress_ref::capability::{Profile, CONTACT_SWEEPS};
+use stress_ref::impact_local::{self, Impact, Target};
 use stress_ref::load_path::{Dof, IMPACT_LOWER};
 use stress_ref::scene::{ImpactorDesc, Methods, Scene};
 use stress_rubble::scenes::{shot_at, shot_wall};
-use stress_rubble::threshold::ThresholdWorld;
+use stress_rubble::threshold::{FractureOptions, ThresholdWorld};
 
 const R: f64 = 0.05;
+const SOLVERS: [Profile; 3] = [Profile::Threshold, Profile::LoadPath, Profile::ImpactLocal];
 
 fn steel_mass(r: f64) -> f64 {
     7850.0 * 4.0 / 3.0 * std::f64::consts::PI * r.powi(3)
 }
 
-fn prepared(scene: Scene) -> Scene {
+fn prepared(scene: Scene, profile: Profile) -> Scene {
     let mut scene = scene.with_derived();
     scene.sim.methods = Methods::established();
-    Profile::LoadPath.apply_scene(&mut scene);
+    profile.apply_scene(&mut scene);
     scene.materials.entry("projectile".into()).or_insert_with(stress_ref::builders::elastic_steel);
     scene
 }
@@ -79,14 +90,17 @@ struct Path {
     wall: f64,
     reached: f64,
     turned_back: bool,
+    /// Its last velocity along the path.
+    speed: f64,
 }
 
 impl Path {
     fn new(wall: f64) -> Path {
-        Path { wall, reached: f64::NEG_INFINITY, turned_back: false }
+        Path { wall, reached: f64::NEG_INFINITY, turned_back: false, speed: 0.0 }
     }
 
     fn record(&mut self, x: f64, v: f64) {
+        self.speed = v;
         if v < -0.5 {
             self.turned_back = true;
         }
@@ -100,6 +114,11 @@ impl Path {
     fn through(&self) -> bool {
         self.reached > self.wall + 1.0
     }
+
+    /// Not through, and no longer moving on into the wall.
+    fn held(&self) -> bool {
+        !self.through() && self.speed < 0.5
+    }
 }
 
 struct Run {
@@ -110,16 +129,25 @@ struct Run {
     digest: u64,
 }
 
-/// `desc` fired along `axis` at `scene` (prepared), `frames` frames, the in-step contact
-/// fracture `contact` (the old end-of-frame strike prediction off).
-fn run(gpu: &Gpu, scene: &Scene, desc: &ImpactorDesc, axis: usize, contact: bool, frames: usize) -> Run {
+/// The fracture world of `scene` under `profile`, the in-step contact fracture `contact`,
+/// the end-of-frame strike prediction off, the shots TOI CCD bodies either way (a 250 m/s
+/// ball crosses a 0.2 m wall in a step: without them it would pass with no contact),
+/// `desc` launched.
+fn world(gpu: &Gpu, scene: &Scene, desc: &ImpactorDesc, profile: Profile, contact: bool) -> ThresholdWorld {
     let radius = match desc.shape {
         stress_ref::scene::ImpactorShape::Sphere { radius } => radius,
         _ => unreachable!(),
     };
-    let mut w = ThresholdWorld::with_contact_fracture(gpu, scene, radius, desc.mass, Profile::LoadPath, Some(contact)).expect("fracture world");
+    let options = FractureOptions { contact: Some(contact), toi_ccd: Some(true) };
+    let mut w = ThresholdWorld::with_options(gpu, scene, radius, desc.mass, profile, options).expect("fracture world");
     w.set_strike_prediction(gpu, false).expect("no end-of-frame prediction");
     assert!(w.launch(gpu, desc));
+    w
+}
+
+/// `desc` fired along `axis` at `scene` (prepared for `profile`), `frames` frames.
+fn run(gpu: &Gpu, scene: &Scene, desc: &ImpactorDesc, axis: usize, profile: Profile, contact: bool, frames: usize) -> Run {
+    let mut w = world(gpu, scene, desc, profile, contact);
     let (lo, _) = bounds(scene);
     let mut path = Path::new(lo[axis]);
     for _ in 0..frames {
@@ -150,32 +178,34 @@ fn lab_ball(scene: &Scene, speed: f64) -> ImpactorDesc {
     shot_at(0.4, 500.0, [lo[0] - 1.9, 0.5 * (lo[1] + hi[1]), 1.2], [speed, 0.0, 0.0])
 }
 
-/// The strike's load and the load path's increment on the GPU against the host: the
-/// Hertz peak of the impulse that stops the ball against the anchored wall
-/// (`pi m v / (2 tau)`, `tau` api.rs `hertz_duration`), and every bond's force under the
-/// GPU's increment against the host's sweeps from rest on the same loads (f32).
+/// Frames until the pass's first strike (at most `limit`); whether there was one.
+fn until_struck(gpu: &Gpu, w: &mut ThresholdWorld, limit: usize) -> bool {
+    for _ in 0..limit {
+        w.step_frame(gpu).expect("frame");
+        if w.fracture.counters(gpu).contact_strikes > 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// The strike's record is rubble's contact: the ball's mass (the wall is anchored, the
+/// contact through the ball's centre: no rotation), its closing speed, the Hertz pulse
+/// (`pi m v / (2 tau)`, `tau` api.rs `hertz_duration`, the shot's modulus as the ingest's
+/// table has it and the chunk's plane-strain one); and the load path's increment on the
+/// GPU against the host's sweeps from rest on the same loads (f32).
 #[test]
 fn contact_strike_matches_its_host_twins() {
     let gpu = Gpu::new().expect("GPU");
-    let scene = prepared(shot_wall(2, true));
+    let scene = prepared(shot_wall(2, true), Profile::LoadPath);
     let speed = 60.0;
     let mass = steel_mass(R);
-    let mut w = ThresholdWorld::with_contact_fracture(&gpu, &scene, R, mass, Profile::LoadPath, Some(true)).expect("fracture world");
+    let mut w = world(&gpu, &scene, &ball(speed), Profile::LoadPath, true);
     assert_eq!(w.contact_fracture(), CONTACT_SWEEPS);
-    assert!(!w.strike_prediction(), "strikes are the in-step pass's, not predicted at the end of a frame");
-    assert!(w.launch(&gpu, &ball(speed)));
     let wall = w.tables.chunk_body[0] as usize;
-    for _ in 0..30 {
-        w.step_frame(&gpu).expect("frame");
-        if w.fracture.counters(&gpu).contact_strikes > 0 {
-            break;
-        }
-    }
+    assert!(until_struck(&gpu, &mut w, 30));
     assert_eq!(w.fracture.counters(&gpu).contact_strikes, 1, "one strike");
     let rec = w.fracture.contact_strikes(&gpu)[wall];
-    // The host's load: the ball's mass (the wall is anchored), its speed (gravity's frame
-    // or two turns the path by a millionth), Hertz's modulus of the shot (its Young's
-    // modulus, as the ingest's table has it) and the chunk's plane-strain one.
     let p = scene.material("projectile");
     let c = scene.material("concrete");
     let e_chunk = c.youngs_modulus * scene.sim.stiffness_scale / (1.0 - c.poisson_ratio * c.poisson_ratio);
@@ -183,7 +213,10 @@ fn contact_strike_matches_its_host_twins() {
     let tau = stress_ref::api::hertz_duration(mass, R, e_star, speed);
     let peak = std::f64::consts::PI * mass * speed / (2.0 * tau);
     println!("strike: {rec:?}; host peak {peak:.1} N");
-    assert!((rec.force as f64 - peak).abs() <= 1e-3 * peak, "peak {} against {peak}", rec.force);
+    assert!((rec.m_eff as f64 - mass).abs() <= 1e-5 * mass, "effective mass {} against the ball's {mass}", rec.m_eff);
+    assert!((rec.speed as f64 - speed).abs() <= 1e-3 * speed, "closing speed {}", rec.speed);
+    assert!((rec.peak as f64 - peak).abs() <= 1e-4 * peak, "peak {} against {peak}", rec.peak);
+    assert!(((rec.hertz as f64) - mass * speed / tau).abs() <= 1e-4 * mass * speed / tau, "Hertz force {}", rec.hertz);
     assert!((rec.direction[1] as f64 - 1.0).abs() < 1e-4, "along the path");
     // The increment: the host's sweeps from rest on the GPU's loads and holds.
     let net = w.load_path_network();
@@ -209,43 +242,115 @@ fn contact_strike_matches_its_host_twins() {
     assert!(scale > 0.0 && worst <= 2e-3 * scale, "GPU increment differs from the host's by {worst:e} (of {scale:e})");
 }
 
-/// A wall a thousand times stronger: the strike is solved, nothing breaks, the ball does
-/// not get through (a box wall at 120 m/s, the lab's cuboid house at 18 m/s).
+/// Must bounce, whichever solver: a wall a thousand times stronger takes the 120 m/s
+/// strike whole; nothing breaks and the ball is held (rubble's contact stops it).
 #[test]
-fn a_strong_enough_wall_takes_the_strike_whole() {
+fn every_solver_holds_a_strong_wall() {
     let gpu = Gpu::new().expect("GPU");
-    let wall = prepared(stronger(shot_wall(2, true), 1000.0));
-    let a = run(&gpu, &wall, &ball(120.0), 1, true, 30);
-    println!("box wall: {:?}, broken {}, strikes {}", a.path, a.broken, a.strikes);
-    assert!(a.strikes > 0 && a.broken == 0 && !a.path.through(), "box wall: the strike solved, nothing broken, the ball held");
-    let home = prepared(stronger(house(), 1000.0));
-    let b = run(&gpu, &home, &lab_ball(&home, 18.0), 0, true, 90);
-    println!("cuboid house: {:?}, broken {}, strikes {}", b.path, b.broken, b.strikes);
-    assert!(b.strikes > 0 && b.broken == 0 && !b.path.through(), "cuboid house: the strike solved, nothing broken, the ball held");
+    for profile in SOLVERS {
+        let wall = prepared(stronger(shot_wall(2, true), 1000.0), profile);
+        let r = run(&gpu, &wall, &ball(120.0), 1, profile, true, 30);
+        println!("{}: {:?}, broken {}, strikes {}", profile.name(), r.path, r.broken, r.strikes);
+        assert!(r.strikes > 0, "{}: the strike is judged", profile.name());
+        assert_eq!(r.broken, 0, "{}: nothing breaks", profile.name());
+        assert!(r.path.held(), "{}: the ball is held", profile.name());
+    }
 }
 
-/// The lab's cuboid house and ball at the lab's 18 m/s: through the wall with the in-step
-/// pass (its strike broke the bonds, before the step), not without it (no prediction
-/// either: the step meets the whole wall).
+/// Through, whichever solver: at 250 m/s each breaks the 0.2 m wall within the step the
+/// ball reaches it, and the ball goes on through the pieces; without the pass (and no
+/// end-of-frame prediction) the same ball is held by the same wall: the step meets it
+/// whole, whatever breaks after.
 #[test]
-fn the_lab_ball_goes_through_the_house_only_with_the_pass() {
+fn every_solver_lets_the_ball_through_a_wall_it_breaks_only_in_the_step() {
     let gpu = Gpu::new().expect("GPU");
-    let home = prepared(house());
-    let on = run(&gpu, &home, &lab_ball(&home, 18.0), 0, true, 90);
-    let off = run(&gpu, &home, &lab_ball(&home, 18.0), 0, false, 90);
-    println!("on: {:?}, strikes {}, contact breaks {}; off: {:?}", on.path, on.strikes, on.contact_breaks, off.path);
-    assert!(on.strikes > 0 && on.contact_breaks > 0 && on.path.through(), "with the pass: struck, broken, through");
-    assert_eq!(off.strikes, 0);
-    assert!(!off.path.through(), "without it the ball does not get through");
+    for profile in SOLVERS {
+        let wall = prepared(shot_wall(2, true), profile);
+        let on = run(&gpu, &wall, &ball(250.0), 1, profile, true, 30);
+        let off = run(&gpu, &wall, &ball(250.0), 1, profile, false, 30);
+        println!("{}: on {:?} strikes {} breaks {}; off {:?}", profile.name(), on.path, on.strikes, on.contact_breaks, off.path);
+        assert!(on.strikes > 0 && on.contact_breaks > 0 && on.path.through(), "{}: struck, broken in the step, through", profile.name());
+        assert_eq!(off.strikes, 0);
+        assert!(off.path.held(), "{}: without the pass the ball is held", profile.name());
+    }
 }
 
-/// Debris strikes too, with no shot: a free concrete block (2 x 2 x 2 chunks of 0.1 m) at
-/// 8 m/s into a 0.4 m wall is a strike the pass solves; against a wall a thousand times
-/// stronger nothing breaks.
+/// The threshold rule's verdict in the step is its own: the bonds it breaks are exactly
+/// those whose share of the strike's Hertz force (`F min(1, A / (2 pi d^2))`, the anchored
+/// wall's chunk boxes where they are) beats their tensile capacity (f32: a bond within
+/// 1e-4 of its capacity may go either way).
+#[test]
+fn the_threshold_rule_breaks_exactly_the_bonds_its_share_condemns() {
+    let gpu = Gpu::new().expect("GPU");
+    let scene = prepared(shot_wall(2, true), Profile::Threshold);
+    let mut w = world(&gpu, &scene, &ball(60.0), Profile::Threshold, true);
+    assert!(until_struck(&gpu, &mut w, 30));
+    let wall = w.tables.chunk_body[0] as usize;
+    let rec = w.fracture.contact_strikes(&gpu)[wall];
+    let intact = w.fracture.bonds_intact(&gpu);
+    let c = w.fracture.counters(&gpu);
+    let centre = |k: u32| {
+        let g = w.tables.geometry[k as usize][0];
+        [g[0] as f64, g[1] as f64, g[2] as f64]
+    };
+    let (mut condemned, mut borderline) = (Vec::new(), 0);
+    for (i, b) in w.tables.bonds.iter().enumerate() {
+        let (pa, pb) = (centre(b[0]), centre(b[1]));
+        let d2: f64 = (0..3).map(|k| (0.5 * (pa[k] + pb[k]) - rec.contact[k] as f64).powi(2)).sum();
+        let area = f32::from_bits(b[3]) as f64;
+        let reach = rec.hertz as f64 * (area / (2.0 * std::f64::consts::PI * d2.max(1e-12))).min(1.0);
+        let ratio = reach / f32::from_bits(b[2]) as f64;
+        if (ratio - 1.0).abs() < 1e-4 {
+            borderline += 1;
+        } else if ratio > 1.0 {
+            condemned.push(i);
+        }
+    }
+    println!("Hertz force {:.1} N: {} condemned, {borderline} borderline, {} broken in the step", rec.hertz, condemned.len(), c.contact_breaks);
+    assert!(!condemned.is_empty());
+    assert!(condemned.iter().all(|&i| !intact[i]), "every condemned bond broke");
+    assert!((c.contact_breaks as usize).abs_diff(condemned.len()) <= borderline, "and only those");
+}
+
+/// The analytic strike's verdict in the step is its own: on the step's strike (its
+/// effective mass, closing speed, the striker's face and modulus as the record has them,
+/// the GPU's thickness along the path), the host's closed forms give the same outcome and
+/// ballistic limit, below and above it.
+#[test]
+fn the_analytic_strike_judges_as_its_host_twin() {
+    let gpu = Gpu::new().expect("GPU");
+    let scene = prepared(shot_wall(2, true), Profile::ImpactLocal);
+    let m = scene.material("concrete");
+    let target = Target { density: m.density, youngs_modulus: m.youngs_modulus * scene.sim.stiffness_scale, poisson_ratio: m.poisson_ratio, tensile: m.tensile_strength, compressive: m.compressive_strength, shear: m.cohesion.min(m.shear_cap.unwrap_or(f64::INFINITY)), dif: m.dif };
+    let mut outcomes = Vec::new();
+    for speed in [30.0, 100.0, 250.0] {
+        let mut w = world(&gpu, &scene, &ball(speed), Profile::ImpactLocal, true);
+        assert!(until_struck(&gpu, &mut w, 30), "{speed} m/s: struck");
+        let wall = w.tables.chunk_body[0] as usize;
+        let rec = w.fracture.contact_strikes(&gpu)[wall];
+        let out = w.fracture.strike_records(&gpu)[wall];
+        let host = impact_local::strike(
+            &Impact { mass: rec.mass as f64, reduced_mass: rec.m_eff as f64, radius: rec.face as f64, shot_modulus: rec.modulus as f64, speed: rec.speed as f64, thickness: out.thickness as f64 },
+            &target,
+        );
+        let host_outcome = (host.damage as u32) | (host.crater as u32) << 1 | (host.spall as u32) << 2 | (host.perforate as u32) << 3;
+        println!("{speed} m/s: thickness {:.4}, v_bl {:.2} (host {:.2}), outcome {:#x} (host {host_outcome:#x})", out.thickness, out.ballistic_speed, host.ballistic_speed, out.outcome);
+        assert!((out.thickness as f64 - 0.2).abs() < 1e-3, "the wall's thickness along the path");
+        assert_eq!(out.outcome, host_outcome, "{speed} m/s: the outcome");
+        assert!((out.ballistic_speed as f64 - host.ballistic_speed).abs() <= 1e-3 * host.ballistic_speed, "{speed} m/s: the ballistic limit");
+        outcomes.push(out.outcome);
+    }
+    assert!(outcomes[0] & 8 == 0 && outcomes[2] & 8 != 0, "below the limit no hole, above it one");
+}
+
+/// Debris strikes too, with no shot, whichever solver: a free concrete block (2 x 2 x 2
+/// chunks of 0.1 m) at 8 m/s into a 0.4 m wall is a strike; against a wall a thousand
+/// times stronger nothing breaks. (Debris is not a CCD body: much faster, a block crosses
+/// the wall within a step and rubble's narrowphase finds it already through.)
 #[test]
 fn a_flying_block_strikes_a_wall() {
     let gpu = Gpu::new().expect("GPU");
-    let with_block = |k: f64| {
+    let with_block = |k: f64, profile: Profile| {
         use stress_ref::builders::{auto_bonds, body, grid};
         use stress_ref::math::Vec3;
         let mut s = shot_wall(4, true);
@@ -254,24 +359,129 @@ fn a_flying_block_strikes_a_wall() {
         let mut block = body("block", chunks, bonds);
         block.linear_velocity = [0.0, 8.0, 0.0];
         s.bodies.push(block);
-        prepared(stronger(s, k))
+        prepared(stronger(s, k), profile)
     };
-    for (k, breaks) in [(1.0, true), (1000.0, false)] {
-        let scene = with_block(k);
-        let mut w = ThresholdWorld::with_contact_fracture(&gpu, &scene, R, 1.0, Profile::LoadPath, Some(true)).expect("fracture world");
-        for _ in 0..20 {
-            w.step_frame(&gpu).expect("frame");
+    for profile in SOLVERS {
+        for k in [1.0, 1000.0] {
+            let scene = with_block(k, profile);
+            let mut w = ThresholdWorld::with_contact_fracture(&gpu, &scene, R, 1.0, profile, Some(true)).expect("fracture world");
+            w.set_strike_prediction(&gpu, false).expect("no prediction");
+            for _ in 0..20 {
+                w.step_frame(&gpu).expect("frame");
+            }
+            let c = w.fracture.counters(&gpu);
+            println!("{} strength x{k}: strikes {}, contact breaks {}, broken {}", profile.name(), c.contact_strikes, c.contact_breaks, c.broken);
+            assert!(c.contact_strikes > 0, "{}: the block's strike is one of the step's contacts", profile.name());
+            assert_eq!(c.error, 0);
+            if k > 1.0 {
+                assert_eq!(c.contact_breaks, 0, "{}: the strong wall holds", profile.name());
+            }
         }
-        let c = w.fracture.counters(&gpu);
-        println!("strength x{k}: strikes {}, contact breaks {}, broken {}", c.contact_strikes, c.contact_breaks, c.broken);
-        assert!(c.contact_strikes > 0, "the block's strike is found among the step's pairs");
-        assert_eq!(c.contact_breaks > 0, breaks);
-        assert_eq!(c.error, 0);
     }
 }
 
-/// Where the explicit reference is clear, the pass agrees: the 4.1 kg ball stops at the
-/// 0.2 m wall at 15 m/s and goes through at 120 and 250 m/s, in both.
+/// The kinetic energy (J) of every body.
+fn energy(gpu: &Gpu, w: &ThresholdWorld) -> f64 {
+    let bodies: Vec<engine_schema::BodyState> = gpu.read_range(w.engine.sim.body_buffer(), 0, w.tables.body_count() as usize);
+    let mut ke = 0.0;
+    for b in bodies.iter().filter(|b| b.inv_mass > 0.0) {
+        let m = 1.0 / b.inv_mass as f64;
+        let v = b.linear_vel.map(|x| x as f64);
+        ke += 0.5 * m * (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        // The spin about the principal axes (the body's frame; the angular velocity is the
+        // world's).
+        let q = stress_ref::math::Quat { w: b.orientation[3] as f64, x: b.orientation[0] as f64, y: b.orientation[1] as f64, z: b.orientation[2] as f64 };
+        let wl = q.conjugate().rotate(stress_ref::math::Vec3::new(b.angular_vel[0] as f64, b.angular_vel[1] as f64, b.angular_vel[2] as f64)).to_array();
+        for k in 0..3 {
+            if b.inv_inertia[k] > 0.0 {
+                ke += 0.5 * wl[k] * wl[k] / b.inv_inertia[k] as f64;
+            }
+        }
+    }
+    ke
+}
+
+/// After the step's split nothing comes from nowhere, whichever solver: into a free wall
+/// (no gravity, no ground) the ball's kinetic energy is never exceeded, through the strike,
+/// the split, the re-anchored contacts and the frames after (anchors left on the old bodies
+/// would push the pieces apart).
+#[test]
+fn a_struck_free_wall_makes_no_energy() {
+    let gpu = Gpu::new().expect("GPU");
+    for profile in SOLVERS {
+        let mut scene = shot_wall(2, false);
+        scene.gravity = [0.0; 3];
+        let scene = prepared(scene, profile);
+        let mass = steel_mass(R);
+        let speed = 250.0;
+        let mut w = world(&gpu, &scene, &ball(speed), profile, true);
+        let ke0 = 0.5 * mass * speed * speed;
+        let mut worst = 0.0f64;
+        for _ in 0..30 {
+            w.step_frame(&gpu).expect("frame");
+            worst = worst.max(energy(&gpu, &w));
+        }
+        let c = w.fracture.counters(&gpu);
+        println!("{}: strikes {} breaks {}, largest kinetic energy {worst:.1} of {ke0:.1}", profile.name(), c.contact_strikes, c.contact_breaks);
+        assert!(c.contact_strikes > 0 && c.contact_breaks > 0, "{}: struck and broken", profile.name());
+        assert!(worst <= 1.001 * ke0, "{}: kinetic energy {worst} exceeds the ball's {ke0}", profile.name());
+    }
+}
+
+/// The struck pieces keep their contacts: a free wall standing on the ground, struck
+/// through its middle; the split moves its chunks' colliders to new bodies within the step,
+/// and the rows of the ones resting on the ground are re-anchored to them, so the bottom
+/// course far from the hole stays at rest (wrong anchors would throw it).
+#[test]
+fn pieces_on_the_ground_stay_at_rest_after_the_split() {
+    let gpu = Gpu::new().expect("GPU");
+    for profile in [Profile::Threshold, Profile::LoadPath] {
+        let mut scene = shot_wall(2, false);
+        scene.ground = Some(stress_ref::scene::GroundDesc { height: 0.0, friction: 0.6, material: "concrete".into() });
+        let scene = prepared(scene, profile);
+        let mut w = world(&gpu, &scene, &ball(250.0), profile, true);
+        assert!(until_struck(&gpu, &mut w, 30));
+        let c = w.fracture.counters(&gpu);
+        assert!(c.contact_breaks > 0 && c.pieces > 0, "{}: the strike split the wall", profile.name());
+        for _ in 0..3 {
+            w.step_frame(&gpu).expect("frame");
+        }
+        // The bottom course's chunks at the wall's ends (more than 0.3 m from the hole).
+        let bodies: Vec<engine_schema::BodyState> = gpu.read_range(w.engine.sim.body_buffer(), 0, w.tables.body_count() as usize);
+        let owner = w.fracture.chunk_bodies(&gpu);
+        let mut fastest = 0.0f32;
+        for (k, g) in w.tables.geometry.iter().enumerate() {
+            let c = g[0];
+            if c[2] < 0.1 && (c[0] - 0.05).abs() > 0.3 {
+                let b = &bodies[owner[k] as usize];
+                fastest = fastest.max((b.linear_vel[0].powi(2) + b.linear_vel[1].powi(2) + b.linear_vel[2].powi(2)).sqrt());
+            }
+        }
+        println!("{}: pieces {}, the far bottom course's fastest {fastest:.3} m/s", profile.name(), c.pieces);
+        assert!(fastest < 0.5, "{}: the far bottom course moves at {fastest} m/s", profile.name());
+    }
+}
+
+/// The lab's cuboid house and ball at the lab's 18 m/s under the load path: through the
+/// wall with the in-step pass, not without it; a house a thousand times stronger holds it.
+#[test]
+fn the_lab_ball_goes_through_the_house_only_with_the_pass() {
+    let gpu = Gpu::new().expect("GPU");
+    let home = prepared(house(), Profile::LoadPath);
+    let on = run(&gpu, &home, &lab_ball(&home, 18.0), 0, Profile::LoadPath, true, 90);
+    let off = run(&gpu, &home, &lab_ball(&home, 18.0), 0, Profile::LoadPath, false, 90);
+    println!("on: {:?}, strikes {}, contact breaks {}; off: {:?}", on.path, on.strikes, on.contact_breaks, off.path);
+    assert!(on.strikes > 0 && on.contact_breaks > 0 && on.path.through(), "with the pass: struck, broken, through");
+    assert_eq!(off.strikes, 0);
+    assert!(!off.path.through(), "without it the ball does not get through");
+    let strong = prepared(stronger(house(), 1000.0), Profile::LoadPath);
+    let held = run(&gpu, &strong, &lab_ball(&strong, 18.0), 0, Profile::LoadPath, true, 90);
+    println!("strong house: {:?}, broken {}, strikes {}", held.path, held.broken, held.strikes);
+    assert!(held.strikes > 0 && held.broken == 0 && !held.path.through(), "a strong house holds the ball");
+}
+
+/// Where the explicit reference is clear, the load path's pass agrees: the 4.1 kg ball
+/// stops at the 0.2 m wall at 15 m/s and goes through at 120 and 250 m/s, in both.
 #[test]
 fn agrees_with_the_explicit_reference_where_it_is_clear() {
     let gpu = Gpu::new().expect("GPU");
@@ -286,7 +496,7 @@ fn agrees_with_the_explicit_reference_where_it_is_clear() {
             let i = &o.impactors[0];
             reference.record(i.pose.position.y, i.velocity.y);
         }
-        let pass = run(&gpu, &prepared(shot_wall(2, true)), &ball(speed), 1, true, 15);
+        let pass = run(&gpu, &prepared(shot_wall(2, true), Profile::LoadPath), &ball(speed), 1, Profile::LoadPath, true, 15);
         println!("{speed} m/s: reference {reference:?} broken {}; pass {:?} broken {}", o.observation().values["broken_bonds"], pass.path, pass.broken);
         assert_eq!(reference.through(), through, "the reference at {speed} m/s");
         assert_eq!(pass.path.through(), through, "the pass at {speed} m/s");
@@ -296,8 +506,14 @@ fn agrees_with_the_explicit_reference_where_it_is_clear() {
 #[test]
 fn runs_repeat_bit_for_bit() {
     let gpu = Gpu::new().expect("GPU");
-    let home = prepared(house());
-    let a = run(&gpu, &home, &lab_ball(&home, 18.0), 0, true, 60);
-    let b = run(&gpu, &home, &lab_ball(&home, 18.0), 0, true, 60);
+    for profile in SOLVERS {
+        let wall = prepared(shot_wall(2, true), profile);
+        let a = run(&gpu, &wall, &ball(250.0), 1, profile, true, 30);
+        let b = run(&gpu, &wall, &ball(250.0), 1, profile, true, 30);
+        assert_eq!((a.digest, a.broken, a.strikes), (b.digest, b.broken, b.strikes), "{}", profile.name());
+    }
+    let home = prepared(house(), Profile::LoadPath);
+    let a = run(&gpu, &home, &lab_ball(&home, 18.0), 0, Profile::LoadPath, true, 60);
+    let b = run(&gpu, &home, &lab_ball(&home, 18.0), 0, Profile::LoadPath, true, 60);
     assert_eq!((a.digest, a.broken, a.strikes), (b.digest, b.broken, b.strikes));
 }

@@ -72,12 +72,13 @@ pub struct FractureTables {
     /// The load path's warm start: each chunk's displacement (translation, rotation;
     /// structure frame). Empty: from rest.
     pub lp_init: Vec<[[f32; 4]; 2]>,
-    /// The in-step contact fracture's sweeps (even), its solve of a strike's load; 0 off
-    /// (`capability::Profile::contact_fracture`). Needs `ext`.
+    /// The in-step contact fracture: on when above 0, and the load path's sweeps (even) of a
+    /// strike's load (`capability::Profile::contact_fracture`). The load path's and the
+    /// analytic strike's need `ext`; the threshold rule's `geometry`.
     pub contact_sweeps: u32,
-    /// The engine's candidate pairs at most (its `max_candidates`): the in-step contact
-    /// fracture reads that many at most.
-    pub max_candidates: u32,
+    /// The engine's contact rows a step holds at most (its `max_contacts`): the in-step
+    /// contact fracture reads that many at most.
+    pub max_contacts: u32,
 }
 
 /// What the load path and the analytic strike read (`fracture.slang` `ext`).
@@ -199,10 +200,10 @@ struct FractureParams {
     il_passes: u32,
     lp_scale: f32,
     cs_sweeps: u32,
-    cs_pair_cap: u32,
+    cs_row_cap: u32,
     cs_c1: f32,
     cs_c2: f32,
-    pad6: f32,
+    cs_row_offset: u32,
     pad7: f32,
 }
 
@@ -322,9 +323,9 @@ impl Layout {
     pub fn atom_words(&self) -> u32 {
         self.a_cs() + 8 * self.b
     }
-    /// `lp` (float4s): per chunk [`LP_CHUNK`], then per body slot 4.
+    /// `lp` (float4s): per chunk [`LP_CHUNK`], then per body slot [`LP_BODY`].
     pub fn lp_words(&self) -> u32 {
-        LP_CHUNK * self.n + 4 * self.b
+        LP_CHUNK * self.n + LP_BODY * self.b
     }
 }
 
@@ -333,6 +334,9 @@ const SUMS: u32 = 20;
 /// its block's factor (8..14), the contact fracture's increment (14..22).
 const LP_CHUNK: u32 = 22;
 const CS_STATE: usize = 14;
+/// float4s per body slot in `lp` (`fracture.slang` `lp_body`): the analytic strike's record
+/// (2), the in-step contact strike's (4).
+pub const LP_BODY: u32 = 6;
 /// The shots strike prediction checks, at most.
 pub const MAX_SHOTS: usize = 64;
 const BODY_WORDS: u32 = 7;
@@ -344,6 +348,7 @@ const ARG_SCAN_CHUNKS: u64 = 3;
 const ARG_SCAN_BODIES: u64 = 4;
 const ARG_ONE: u64 = 5;
 const ARG_CS_BODIES: u64 = 6;
+const ARG_CS_ROWS: u64 = 7;
 
 /// The counters (`fracture.slang` `C_*`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -374,15 +379,32 @@ impl Counters {
     }
 }
 
-/// An in-step contact strike's record (`fr_cs_force`), per body slot struck in the last
-/// step that had one: the contact point (the stress frame), the load's peak force (N), its
-/// direction, the striker collider.
+/// An in-step contact strike's record (`fr_cs_record`), per body slot struck in the last
+/// step that had one: the contact point and the direction the striker pushes in (the
+/// stress frame), its closing speed, the strike's effective mass and impulse `J = m_eff v`,
+/// the load path's peak force `pi J / (2 tau)` and the threshold rule's Hertz force `J /
+/// tau`, the striker's face radius, modulus, mass and body, the struck chunk, and when within
+/// the step the two meet (s).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ContactStrike {
     pub contact: [f32; 3],
-    pub force: f32,
+    pub peak: f32,
     pub direction: [f32; 3],
-    pub collider: u32,
+    pub speed: f32,
+    pub m_eff: f32,
+    pub face: f32,
+    pub modulus: f32,
+    pub body: u32,
+    pub chunk: u32,
+    pub hertz: f32,
+    pub mass: f32,
+    pub t_in: f32,
+}
+
+impl ContactStrike {
+    pub fn impulse(&self) -> f32 {
+        self.m_eff * self.speed
+    }
 }
 
 /// An analytic strike's record (`fr_il_strike`), per body slot struck this frame.
@@ -399,7 +421,7 @@ pub struct StrikeRecord {
     pub ballistic_energy: f32,
 }
 
-const BINDINGS: [Binding; 27] = [
+const BINDINGS: [Binding; 28] = [
     Binding::Uniform,   // params
     Binding::Storage,   // chunks
     Binding::Storage,   // bonds
@@ -425,11 +447,12 @@ const BINDINGS: [Binding; 27] = [
     Binding::Storage,   // strike shots
     Binding::Storage,   // ext (load path, analytic strike)
     Binding::StorageRw, // lp
-    Binding::Storage,   // the engine's candidate pairs (contact fracture)
+    Binding::StorageRw, // the engine's contact rows (contact fracture)
     Binding::Storage,   // the engine's counters
+    Binding::StorageRw, // the contact rows' saved anchors (contact fracture)
 ];
 
-const ENTRIES: [&str; 55] = [
+const ENTRIES: [&str; 64] = [
     "fr_loads",
     "fr_breaks",
     "fr_gate",
@@ -476,15 +499,24 @@ const ENTRIES: [&str; 55] = [
     "fr_il_breaks",
     "fr_il_carry",
     "fr_cs_reset",
-    "fr_cs_pairs",
+    "fr_cs_contacts",
     "fr_cs_pick",
-    "fr_cs_pick2",
-    "fr_cs_force",
+    "fr_cs_record",
+    "fr_cs_hertz",
     "fr_cs_count",
     "fr_cs_base",
     "fr_cs_collect",
     "fr_cs_gate",
     "fr_cs_solve",
+    "fr_cs_save",
+    "fr_cs_fix",
+    "fr_csl_begin",
+    "fr_csl_extend_even",
+    "fr_csl_extend_odd",
+    "fr_csl_strike",
+    "fr_csl_mark",
+    "fr_csl_breaks",
+    "fr_csl_carry",
 ];
 
 #[repr(C)]
@@ -545,9 +577,8 @@ pub struct GpuFracture {
     pub shots: wgpu::Buffer,
     pub ext: wgpu::Buffer,
     pub lp: wgpu::Buffer,
-    /// The engine's candidate pairs (`set_candidates`; a placeholder until then) and
-    /// counters.
-    candidates: wgpu::Buffer,
+    /// Per engine contact row the in-step contact fracture's saved anchors (2 float4).
+    cs_anchors: wgpu::Buffer,
     engine_counters: Option<wgpu::Buffer>,
     /// Bind groups per kernel (the scans: the new-piece scan's, then the free slots').
     binds: Vec<wgpu::BindGroup>,
@@ -560,6 +591,7 @@ pub struct GpuFracture {
     view: Option<View>,
     engine_bodies: Option<wgpu::Buffer>,
     engine_colliders: Option<wgpu::Buffer>,
+    engine_contacts: Option<wgpu::Buffer>,
     ingest_buffers: Option<[wgpu::Buffer; 3]>,
 }
 
@@ -597,8 +629,8 @@ impl GpuFracture {
         if t.contact_sweeps % 2 != 0 {
             return Err(format!("fracture: {} contact-fracture sweeps; an even count", t.contact_sweeps));
         }
-        if t.contact_sweeps > 0 && (t.ext.bonds.len() != e as usize || t.ext.chunks.len() != n as usize) {
-            return Err("fracture: the in-step contact fracture needs the load path's tables".into());
+        if t.contact_sweeps > 0 && t.geometry.len() != n as usize {
+            return Err("fracture: the in-step contact fracture needs the strike geometry".into());
         }
         let (cs_c1, cs_c2) = stress_ref::load_path::momentum_coefficients(stress_ref::load_path::IMPACT_LOWER);
         let (sweeps, lp_c1, lp_c2) = match t.load_model {
@@ -640,7 +672,7 @@ impl GpuFracture {
             il_passes: IL_PASSES,
             lp_scale: LP_SCALE,
             cs_sweeps: t.contact_sweeps,
-            cs_pair_cap: t.max_candidates,
+            cs_row_cap: t.max_contacts,
             cs_c1: cs_c1 as f32,
             cs_c2: cs_c2 as f32,
             ..Default::default()
@@ -723,7 +755,7 @@ impl GpuFracture {
             shots,
             ext,
             lp,
-            candidates: storage_bytes(gpu, "fracture candidates placeholder", 16, wgpu::BufferUsages::empty()),
+            cs_anchors: storage_bytes(gpu, "fracture contact anchors", 32 * t.max_contacts as u64, wgpu::BufferUsages::empty()),
             engine_counters: None,
             binds: Vec::new(),
             scan_binds: Vec::new(),
@@ -732,6 +764,7 @@ impl GpuFracture {
             view: None,
             engine_bodies: None,
             engine_colliders: None,
+            engine_contacts: None,
             ingest_buffers: None,
         };
         f.rebind(gpu, engine, ingest);
@@ -741,7 +774,7 @@ impl GpuFracture {
     /// The bind groups, against the engine's and the ingest's buffers as they are now.
     pub fn rebind(&mut self, gpu: &Gpu, engine: &EngineBuffers, ingest: &EngineIngest) {
         let group = |scan: &wgpu::Buffer, k: &Kernel| {
-            let buffers: [&wgpu::Buffer; 27] = [
+            let buffers: [&wgpu::Buffer; 28] = [
                 &self.params_buf,
                 &self.chunks,
                 &self.bonds,
@@ -767,8 +800,9 @@ impl GpuFracture {
                 &self.shots,
                 &self.ext,
                 &self.lp,
-                &self.candidates,
+                engine.contacts,
                 engine.counters,
+                &self.cs_anchors,
             ];
             gpu.bind(&k.group, &buffers)
         };
@@ -781,6 +815,7 @@ impl GpuFracture {
         }
         self.engine_bodies = Some(engine.bodies.clone());
         self.engine_counters = Some(engine.counters.clone());
+        self.engine_contacts = Some(engine.contacts.clone());
         self.engine_colliders = Some(engine.colliders.clone());
         self.ingest_buffers = Some([ingest.collider_info.clone(), ingest.manifolds.clone(), ingest.sort.clone()]);
     }
@@ -820,8 +855,9 @@ impl GpuFracture {
             let ing = self.ingest_buffers.as_ref().expect("ingest bound");
             let group = |i: usize| {
                 let counters = self.engine_counters.as_ref().expect("engine bound");
-                let buffers: [&wgpu::Buffer; 27] = [
-                    &self.params_buf, &self.chunks, &self.bonds, &self.parts, &self.work, &self.atom, &self.frames, bodies, colliders, &ing[0], &ing[1], &ing[2], &self.loads, &self.sizes, &self.scan_new, &self.info, &v.params, &v.chunks, objects, lines, &v.shots, &self.geometry, &self.shots, &self.ext, &self.lp, &self.candidates, counters,
+                let contacts = self.engine_contacts.as_ref().expect("engine bound");
+                let buffers: [&wgpu::Buffer; 28] = [
+                    &self.params_buf, &self.chunks, &self.bonds, &self.parts, &self.work, &self.atom, &self.frames, bodies, colliders, &ing[0], &ing[1], &ing[2], &self.loads, &self.sizes, &self.scan_new, &self.info, &v.params, &v.chunks, objects, lines, &v.shots, &self.geometry, &self.shots, &self.ext, &self.lp, contacts, counters, &self.cs_anchors,
                 ];
                 gpu.bind(&self.kernels[i].group, &buffers)
             };
@@ -903,53 +939,98 @@ impl GpuFracture {
     }
 
     /// The in-step contact fracture (`fracture.slang` `fr_cs_*`), encoded within the
-    /// engine's step where its broadphase ends (`WgpuSim::step_encode_with` at
-    /// `"broadphase"`): the step's strikes found among its candidate pairs, each struck
-    /// structure's strike load solved by the load path, its bonds broken by their
-    /// strength and the structure split, before the step's narrowphase and solve.
-    /// Nothing is read back; without a strike its solve and split dispatch nothing.
-    /// Needs [`Self::set_candidates`] and `contact_sweeps`.
+    /// engine's step where its contacts are made and kept (`WgpuSim::step_encode_with` at
+    /// `"warm"`, its rows from [`Self::set_contact_rows`]): this step's contacts closing
+    /// faster than `strike_speed` on a structure are its strikes, each struck structure's
+    /// largest judged by the profile's stress solver (the threshold rule, the load path or
+    /// the analytic strike), what breaks split, and the rows of the moved colliders
+    /// re-anchored to their pieces, before the step solves. Nothing is read back; without a
+    /// strike the solve and the split dispatch nothing.
     pub fn encode_contact_fracture(&mut self, encoder: &mut wgpu::CommandEncoder) {
         if self.params.cs_sweeps == 0 {
             return;
         }
-        let b = self.layout.b as usize;
-        let n = self.layout.n as usize;
+        let (n, e, b) = (self.layout.n as usize, self.layout.e as usize, self.layout.b as usize);
+        let load_path = self.params.load_model == 1;
+        let analytic = !load_path && self.params.strike_model == 1;
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             self.direct(&mut pass, "fr_cs_reset", b.max(1));
-            let pairs = self.params.cs_pair_cap as usize;
-            self.direct(&mut pass, "fr_cs_pairs", pairs);
-            self.direct(&mut pass, "fr_cs_pick", pairs);
-            self.direct(&mut pass, "fr_cs_pick2", pairs);
-            self.direct(&mut pass, "fr_cs_force", b);
-            self.direct(&mut pass, "fr_cs_count", n);
-            self.direct(&mut pass, "fr_cs_base", b);
-            self.direct(&mut pass, "fr_cs_collect", n);
-            self.direct(&mut pass, "fr_cs_gate", 1);
         }
+        // The row kernels as many as the step's contact rows (`fr_cs_reset` sized them).
         encoder.copy_buffer_to_buffer(&self.sizes, 0, &self.args, 0, 12 * ARGS);
         {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            self.indirect(&mut pass, "fr_cs_contacts", ARG_CS_ROWS, None);
+            self.indirect(&mut pass, "fr_cs_pick", ARG_CS_ROWS, None);
+            self.direct(&mut pass, "fr_cs_record", b);
+            if load_path {
+                self.direct(&mut pass, "fr_cs_count", n);
+                self.direct(&mut pass, "fr_cs_base", b);
+                self.direct(&mut pass, "fr_cs_collect", n);
+                self.direct(&mut pass, "fr_cs_gate", 1);
+            } else if analytic {
+                self.direct(&mut pass, "fr_csl_begin", b);
+                for p in 0..IL_PASSES {
+                    self.direct(&mut pass, if p % 2 == 0 { "fr_csl_extend_even" } else { "fr_csl_extend_odd" }, n);
+                }
+                self.direct(&mut pass, "fr_csl_strike", b);
+                self.direct(&mut pass, "fr_csl_mark", n);
+                self.direct(&mut pass, "fr_csl_breaks", e);
+            } else {
+                self.direct(&mut pass, "fr_cs_hertz", e);
+            }
+        }
+        if load_path {
+            encoder.copy_buffer_to_buffer(&self.sizes, 0, &self.args, 0, 12 * ARGS);
             // A group per struck structure, all its sweeps in the one dispatch.
             let mut pass = encoder.begin_compute_pass(&Default::default());
             self.indirect(&mut pass, "fr_cs_solve", ARG_CS_BODIES, None);
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            self.indirect(&mut pass, "fr_cs_save", ARG_CS_ROWS, None);
             self.direct(&mut pass, "fr_gate", 1);
         }
         self.record_split(encoder);
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            self.indirect(&mut pass, "fr_cs_fix", ARG_CS_ROWS, None);
+            if analytic {
+                self.direct(&mut pass, "fr_csl_carry", n);
+            }
+        }
     }
 
-    /// The engine's candidate pairs, for the in-step contact fracture (its buffer must stay
-    /// while this lives; again after the engine replaces it).
-    pub fn set_candidates(&mut self, gpu: &Gpu, candidates: &wgpu::Buffer, engine: &EngineBuffers, ingest: &EngineIngest) {
-        self.candidates = candidates.clone();
-        self.rebind(gpu, engine, ingest);
+    /// Where the coming step's contact rows start in the engine's contact buffer
+    /// (`WgpuSim::next_contact_offset`), for the in-step contact fracture.
+    pub fn set_contact_rows(&mut self, gpu: &Gpu, offset: u32) {
+        if self.params.cs_row_offset != offset {
+            self.params.cs_row_offset = offset;
+            gpu.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
+        }
     }
 
     /// Diagnostic read: each body slot's in-step contact strike record (meaningful for a
     /// body struck in the last step that had a strike).
     pub fn contact_strikes(&self, gpu: &Gpu) -> Vec<ContactStrike> {
-        let w: Vec<[f32; 4]> = gpu.read_range(&self.lp, (LP_CHUNK * self.layout.n) as usize, 4 * self.layout.b as usize);
-        w.chunks_exact(4).map(|c| ContactStrike { contact: [c[2][0], c[2][1], c[2][2]], force: c[2][3], direction: [c[3][0], c[3][1], c[3][2]], collider: c[3][3].to_bits() }).collect()
+        let w: Vec<[f32; 4]> = gpu.read_range(&self.lp, (LP_CHUNK * self.layout.n) as usize, (LP_BODY * self.layout.b) as usize);
+        w.chunks_exact(LP_BODY as usize)
+            .map(|c| ContactStrike {
+                contact: [c[2][0], c[2][1], c[2][2]],
+                peak: c[2][3],
+                direction: [c[3][0], c[3][1], c[3][2]],
+                speed: c[3][3],
+                m_eff: c[4][0],
+                face: c[4][1],
+                modulus: c[4][2],
+                body: c[4][3].to_bits(),
+                chunk: c[5][0].to_bits(),
+                hertz: c[5][1],
+                mass: c[5][2],
+                t_in: c[5][3],
+            })
+            .collect()
     }
 
     /// Diagnostic read: each chunk's in-step contact increment (translation, rotation;
@@ -1066,8 +1147,8 @@ impl GpuFracture {
     /// Diagnostic read: each body slot's analytic strike record (meaningful for a body
     /// struck in the last frame).
     pub fn strike_records(&self, gpu: &Gpu) -> Vec<StrikeRecord> {
-        let w: Vec<[f32; 4]> = gpu.read_range(&self.lp, (LP_CHUNK * self.layout.n) as usize, 4 * self.layout.b as usize);
-        w.chunks_exact(4)
+        let w: Vec<[f32; 4]> = gpu.read_range(&self.lp, (LP_CHUNK * self.layout.n) as usize, (LP_BODY * self.layout.b) as usize);
+        w.chunks_exact(LP_BODY as usize)
             .map(|c| StrikeRecord {
                 thickness: c[0][0],
                 ballistic_speed: c[0][1],

@@ -95,6 +95,17 @@ impl WgpuSim {
         self.last_contact_offset
     }
 
+    /// First row of the next step's contacts in `contact_buffer`: what
+    /// [`Self::last_contact_offset`] is once that step is encoded (a hook within it reads
+    /// its rows there).
+    pub fn next_contact_offset(&self) -> u32 {
+        if self.contacts_parity == 0 {
+            0
+        } else {
+            self.capacity.max_contacts
+        }
+    }
+
     pub fn capacity(&self) -> WorldCapacity {
         self.capacity.clone()
     }
