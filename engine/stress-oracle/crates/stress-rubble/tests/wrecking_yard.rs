@@ -1,4 +1,5 @@
-//! The Wrecking Yard structures (`stress_ref::wrecking`) stand and settle on the GPU in
+//! The Wrecking Yard structures (`stress_ref::wrecking::STRUCTURES`, the Ram Raid and
+//! Fly-through buildings of `stress_ref::buildings` among them) stand and settle on the GPU in
 //! both of the lab's stress modes before anything hits them, set up as stress-web sets
 //! them up: `blast_parity` on the resident GpuWorld (impact islands on), `threshold` on
 //! the GPU-resident threshold world. Two seconds at 60 Hz with no shot: no bond breaks,

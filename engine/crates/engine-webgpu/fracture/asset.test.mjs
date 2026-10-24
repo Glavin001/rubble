@@ -51,10 +51,11 @@ test('the house, its flat-hull skips and the layouts of the Scene menu',async()=
  assert.deepEqual(SAMPLES.map(s=>s.key),['house','cuboid','arch','row','grid','cuboidGrid','suburb','cuboids','cuboids2x']);
 });
 
-test('the Wrecking Yard packs (built in Rust) load as lab scenes',()=>{
- assert.deepEqual(PACK_SAMPLES.map(s=>[s.key,s.group]),[['wy_frame10','Wrecking Yard'],['wy_round_tower','Wrecking Yard'],['wy_brick_tower','Wrecking Yard']]);
+test('the Wrecking Yard, Ram Raid and Fly-through packs (built in Rust) load as lab scenes',()=>{
+ assert.deepEqual(PACK_SAMPLES.map(s=>[s.key,s.group]),[['wy_frame10','Wrecking Yard'],['wy_round_tower','Wrecking Yard'],['wy_brick_tower','Wrecking Yard'],
+  ['rr_storefront_row','Ram Raid'],['ft_apartment_block','Fly-through'],['ft_glass_tower','Fly-through']]);
  const pieces=PACK_SAMPLES.map(s=>buildPackScene(packSampleJson(s.key).buffer).pieces);
- assert.deepEqual(pieces,[1264,337,1444]);
+ assert.deepEqual(pieces,[1264,337,1444,1203,1355,1332]);
  assert.throws(()=>packSampleJson('house'),/Unknown bundled scene/);
 });
 

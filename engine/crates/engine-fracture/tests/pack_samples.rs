@@ -1,10 +1,10 @@
-//! The Scene menu's pack samples (the Wrecking Yard, `stress_ref::wrecking`): each is a
-//! structure the stress oracle builds, its JSON builds as a lab scene (one body per chunk,
-//! the footings static, a breakable weld per bond at the calibrated strengths), and its
-//! menu entry counts its chunks.
+//! The Scene menu's pack samples (the Wrecking Yard, Ram Raid and Fly-through groups,
+//! `stress_ref::wrecking`): each is a structure the stress oracle builds, its JSON builds
+//! as a lab scene (one body per chunk, the footings static, a breakable weld per bond at
+//! the calibrated strengths of its joint material), and its menu entry counts its chunks.
 
 use engine_fracture::pack::{build_pack_scene, BLAST_DT};
-use engine_fracture::samples::{pack_sample_json, GROUPS, PACK_SAMPLES, WRECKING_YARD};
+use engine_fracture::samples::{pack_sample_json, GROUPS, PACK_GROUPS, PACK_SAMPLES};
 
 #[test]
 fn pack_samples_build_as_lab_scenes() {
@@ -14,9 +14,20 @@ fn pack_samples_build_as_lab_scenes() {
         .map(|s| s.0)
         .collect();
     assert_eq!(keys, structures);
-    assert_eq!(GROUPS.last(), Some(&WRECKING_YARD));
+    assert_eq!(&GROUPS[GROUPS.len() - PACK_GROUPS.len()..], PACK_GROUPS);
+    let groups: Vec<&str> = PACK_SAMPLES.iter().map(|s| s.group).collect();
+    assert_eq!(
+        groups,
+        [
+            "Wrecking Yard",
+            "Wrecking Yard",
+            "Wrecking Yard",
+            "Ram Raid",
+            "Fly-through",
+            "Fly-through"
+        ]
+    );
     for s in PACK_SAMPLES {
-        assert_eq!(s.group, WRECKING_YARD);
         let structure = stress_ref::wrecking::structure(s.key).expect(s.key);
         let chunks = structure.chunks.len();
         let shown = s
@@ -56,20 +67,25 @@ fn pack_samples_build_as_lab_scenes() {
             "{}: a weld per bond",
             s.key
         );
-        // The welds' tension capacity is the calibrated strength over the bond's area.
-        let joint = if s.key == "wy_brick_tower" {
-            stress_ref::material::Material::mortar()
-        } else {
-            stress_ref::material::Material::concrete()
-        };
+        // The welds' capacities are their joint material's calibrated strengths over the
+        // bond's area (each bond its own material's, in a structure of several).
         for (j, b) in scene.joints.iter().zip(&structure.bonds) {
-            let expected = joint.tensile_strength * b.area;
-            let got = j.strength[0];
-            assert!(
-                (got - expected).abs() <= 1e-6 * expected.max(1.0) + 1e-9 / BLAST_DT,
-                "{}: {got} N vs {expected} N",
-                s.key
-            );
+            let (_, joint) = stress_ref::wrecking::calibrated(&b.material);
+            let strengths = [
+                joint.tensile_strength,
+                joint.compressive_strength,
+                joint.cohesion,
+            ];
+            for (k, strength) in strengths.iter().enumerate() {
+                let expected = strength * b.area;
+                let got = j.strength[k];
+                assert!(
+                    (got - expected).abs() <= 1e-6 * expected.max(1.0) + 1e-9 / BLAST_DT,
+                    "{}: {} bond, capacity {k}: {got} N vs {expected} N",
+                    s.key,
+                    b.material
+                );
+            }
         }
         // About the structure's mass (the lab's bodies are f32).
         let mass: f64 = scene.bodies[1..=info.nodes]
@@ -89,4 +105,49 @@ fn pack_samples_build_as_lab_scenes() {
         );
     }
     assert!(pack_sample_json("house").is_err());
+}
+
+/// A pack whose materials carry their own limits gives each bond its material's; a bond
+/// whose material has none fails the load with a clear error unless pack-wide limits are
+/// there for it to take, and incomplete limits fail too.
+#[test]
+fn per_material_limits_are_per_bond_or_an_error() {
+    let load = |pack: &serde_json::Value| build_pack_scene(&serde_json::to_vec(pack).unwrap());
+    let mut pack: serde_json::Value =
+        serde_json::from_slice(&pack_sample_json("rr_storefront_row").unwrap()).unwrap();
+    let solver = &pack["defaults"]["solver"];
+    assert!(
+        solver["limits"].is_null(),
+        "several joint materials: no pack-wide limits"
+    );
+    assert_eq!(solver["materials"].as_array().unwrap().len(), 3);
+    let bonds = pack["scenario"]["bonds"].as_array().unwrap().clone();
+    let (scene, _) = load(&pack).unwrap();
+    for (j, b) in scene.joints.iter().zip(&bonds) {
+        let m = &pack["defaults"]["solver"]["materials"][b["m"].as_u64().unwrap() as usize];
+        let expected =
+            m["limits"]["tensionFatal"].as_f64().unwrap() * b["area"].as_f64().unwrap() / BLAST_DT;
+        assert!(
+            (j.strength[0] - expected).abs() <= 1e-6 * expected,
+            "{} N vs {expected} N",
+            j.strength[0]
+        );
+    }
+    // Incomplete limits: an error naming what is missing.
+    let mut incomplete = pack.clone();
+    incomplete["defaults"]["solver"]["materials"][0]["limits"] =
+        serde_json::json!({"tensionFatal": 1.0});
+    let err = format!("{:#}", load(&incomplete).unwrap_err());
+    assert!(err.contains("no compressionFatal"), "{err}");
+    // A material without limits, and no pack-wide ones: an error naming the bond.
+    pack["defaults"]["solver"]["materials"][0]["limits"] = serde_json::Value::Null;
+    let err = format!("{:#}", load(&pack).unwrap_err());
+    assert!(err.contains("has none"), "{err}");
+    // With pack-wide limits, such a bond takes those.
+    pack["defaults"]["solver"]["limits"] =
+        serde_json::json!({"tensionFatal": 7.0, "compressionFatal": 8.0, "shearFatal": 9.0});
+    let (scene, _) = load(&pack).unwrap();
+    let first = bonds.iter().position(|b| b["m"] == 0).unwrap();
+    let expected = 7.0 * bonds[first]["area"].as_f64().unwrap() / BLAST_DT;
+    assert!((scene.joints[first].strength[0] - expected).abs() <= 1e-6 * expected);
 }

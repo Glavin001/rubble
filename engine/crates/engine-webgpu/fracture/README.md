@@ -181,6 +181,8 @@ each named for what it is, then how many:
   suburb of 96).
 - **Wrecking Yard:** tall structures for heavy balls, built in Rust as scene packs
   (`PACK_SAMPLES`; below).
+- **Ram Raid** and **Fly-through:** the vehicle's storefront and the aircraft's two
+  towers, built the same way (below).
 - **Vibe City presets:** generated scene packs, when they are built.
 - **Your file:** a dropped or chosen GLB.
 
@@ -214,6 +216,8 @@ every pack: the stress solve takes gravity from the first frame.
 | 10 t wrecking ball | solid steel, r 0.67 m, 40 m/s |
 | 50 t wrecking ball | solid steel, r 1.15 m, 20 m/s |
 | 15 m demolition sphere | a 5 cm steel shell (277 t) that rolls in along the ground at 12 m/s |
+| Vehicle stand-in | 2 t, r 0.9 m, 15 m/s (54 km/h): the Ram Raid's click ball |
+| Aircraft stand-in | 40 t, r 2 m, 80 m/s: the Fly-through's click ball |
 
 The table is `stress_ref::wrecking::BALLS`; stress-web's `stress_set_shot_preset` applies
 it. The mass, speed and radius sliders still scale it. **Fire the ball along the line of
@@ -258,6 +262,109 @@ stays up above the hole.
 `threshold` breaks bonds on contact force alone, with no stress solve, so there it is
 local damage only. In Chrome, after 90 frames the 50 t ball had broken 4 of the frame's
 bonds, 18 of the round tower's and 15 of the brick tower's.
+
+### Ram Raid and Fly-through
+
+The targets of the vehicle and aircraft beats (`stress_ref::buildings`), built and loaded
+as the Wrecking Yard's are, in their own Scene menu groups. Until the combined host drives
+a real vehicle or aircraft, a ball preset stands in for each (the table above).
+
+| Scene | What | Chunks · bonds | Mass |
+|---|---|---|---|
+| Storefront row (Ram Raid) | Five two-storey shops, 5.5 × 7 m each, in one 27.8 m terrace. Brick party walls, gables, back wall and upper facade in running bond (1 × 0.5 m units, 0.3 m walls), two upper windows a shop under concrete lintels; on the ground storey a glazed door and a two-pane shop window between brick piers, on a brick stallriser, under a concrete fascia; 0.2 m concrete first-floor slab and roof on the walls; concrete strip footings | 1,203 · 3,464 | 498 t |
+| 7-storey apartment block (Fly-through) | A 24.5 × 12.5 m RC frame, 4 × 2 bays of 6 m, 3 m storeys (0.45 m columns and beam-column joints, 0.45 × 0.5 m beams, 0.2 m slabs, as the 10-floor frame is cut). Every perimeter bay is filled with 0.25 m brick panels round a 2 × 1.3 m window under a concrete lintel; a glazed entrance on the ground floor | 1,355 · 2,874 | 1,920 t |
+| 11-storey glass tower (Fly-through) | 12 m square, 40 m tall. 0.25 m slabs (32 cells a floor) on a 5 m walled core (0.3 m walls) and eight 0.45 m perimeter columns, in a curtain wall: 25 mm panes in six 2 m bays a side between steel mullions (80 × 160 mm), steel transoms at the slab edges, corner posts | 1,332 · 2,856 | 1,842 t |
+
+Every chunk is a box, so the bonds are `auto_bonds` between touching faces, with the joint
+material of whichever governs (`wrecking::joint_of`): mortar wherever brick meets
+anything, glass where a pane meets its frame, concrete where concrete meets anything
+(steel is anchored in it), steel between steel members. Glazing carries none of the
+building's load, so it lacks some joints (`buildings::glazing_joints`):
+- a pane in a masonry or concrete opening is bonded at its sill only (setting blocks);
+  it is not bonded at its head (clearance) or its sides (a sealed frame with a movement
+  gap). Bonded at its sides, it took the piers' settlement in shear and broke under its
+  own weight in the reference;
+- a curtain-wall pane is bonded only at its sides, to its mullions and posts (structural
+  silicone);
+- each storey's curtain wall hangs from its own slab edge over a 20 mm open stack joint
+  (`TowerLayout::STACK_JOINT`). Without the gap, the rings of curtain wall stacked on each
+  other as rigid tubes: once the floors below fell away, they held the tower's upper
+  block up on glass.
+
+**Materials.** `wrecking::calibrated` adds glass and structural steel to concrete,
+footing and brick:
+- glass is annealed soda-lime float (`Material::glass`, EN 572-1): 2,500 kg/m³,
+  E = 70 GPa, 40 MPa tension, 1,000 MPa compression, 40 MPa shear, brittle, 8 J/m²;
+- steel is S355 (`Material::steel`, EN 10025-2 / EN 1993-1-1): 7,850 kg/m³,
+  E = 200 GPa, 355 MPa tension and compression, 205 MPa shear (f_y/√3), ductile.
+
+The sources are cited in `calibrated`'s comment. Glass bonds are of the glass,
+the rest as in the yard. There is no rebar in glass or steel joints.
+
+**Blast limits per material.** The D6 mode's Blast `limits` were pack-wide, and these
+packs mix two or three joint materials. So each pack material carries its own `limits`
+(its calibrated strengths over the 60 Hz step), and `pack.rs` gives each bond its
+material's. A pack of one joint material, which covers every Wrecking Yard structure,
+still has the pack-wide `limits` too, so its packs load unchanged. A bond whose material
+has no `limits` in a pack without pack-wide ones is a load error naming the bond.
+Incomplete `limits` are a load error naming the material (`tests/pack_samples.rs`).
+
+The D6 welds' springs still use one modulus (`PACK_YOUNGS`) for every material. Their
+capacities follow the material; their stiffness ratios follow geometry only.
+
+**Lines of attack** (`defaults.wreckingYard`, along +y into the street front):
+- the storefront: the middle shop's window, 1.25 m up (a car's bonnet);
+- the apartment block: the front's middle column at mid-height (the fourth storey);
+- the glass tower: the front's middle mullion at mid-height (the sixth storey).
+
+**Checks.** The Wrecking Yard's checks cover these too:
+- `tests/wrecking.rs` pins the chunk and bond counts and cross-checks the bonds against
+  a brute-force count of touching faces under the glazing rules, by joint material. It
+  checks the total mass from the layout's volumes, that the boxes are solid (no overlap)
+  and stand at or above grade, and that every chunk is bonded through to a footing. It
+  checks the `storey-N` groups and the aim, that the packs import with each bond's own
+  calibrated material, and that each building stands in the reference;
+- `tests/wrecking_yard.rs` (GPU) shows each one settle in `blast_parity` and
+  `threshold`: no bond broken, under 2 mm of movement in 2 s.
+
+**Hits** (native, M3 Max, `blast_parity` unless stated). Run:
+`cargo run --release -p stress-rubble --features gpu --example wrecking_yard -- KEY BALL 600`.
+The example also prints each storey's mean displacement and tilt at the end, and the top
+storey's drift on every line, so a tilting upper block shows. `STRESS_WY_KIND=core`
+limits the table to one node type, and `STRESS_WY_AIM_X` / `STRESS_WY_AIM_Z` move the
+target. Results:
+- **Storefront, vehicle stand-in.** The ball smashes the middle shop window: 20 bonds
+  break and the two panes and the stallrisers come out (7 fragments). The piers, fascia
+  and upper storey stand. Under `threshold`: 111 bonds, 29 bodies, still local.
+- **Apartment block.**
+  - The vehicle stand-in at the fourth storey breaks 2 bonds.
+  - A 10 t ball at 20 m/s breaks 95 bonds round the struck column (8 chunks of storeys
+    3–4 fall), and the block stands.
+  - The 10 t preset (40 m/s) breaks 261 and the block holds for 2 s. Then a progressive
+    collapse brings all of it down by frame 480.
+  - The aircraft stand-in breaks 2,261 bonds within 20 frames of contact, in every
+    storey, and the block falls at once.
+- **Glass tower.**
+  - The 10 t ball goes through the sixth storey's curtain wall into the core: 159 bonds
+    at contact, 278 by frame 180. Then a progressive collapse starts, and from frame 240
+    everything comes down (2,540 bonds by frame 600).
+  - The aircraft stand-in breaks 1,965 bonds at contact, and the tower is flat by frame
+    240.
+  - **No preset makes a mid-height cut tilt the upper block.** The storeys under the
+    impact fail first, and the upper block drops straight down: its top storey drifts
+    under 0.3 m sideways while falling 16–23 m. It tips over only once it lands on the
+    debris.
+  - Under `threshold` (no stress solve), the aircraft stand-in breaks 347 bonds at
+    contact. Falling debris brings that to 922 by frame 480, and a quarter of the chunks
+    of storeys 1–7 fall. The top four storeys stay where they were, on what remains.
+
+A strike in `blast_parity` loads the whole island it hits. A fast, heavy one, such as
+the aircraft stand-in, therefore breaks bonds in every storey within the contact frame,
+not just along the impactor's path. The same 10 t ball at mid-height partly collapses
+the 10-floor frame too (577 bonds; about half the chunks of storeys 1–5 fall). Broken pieces are rigid in
+contact, so stacked debris cannot crush. A tilting upper block would need the far side's
+columns and walls to hinge in compression while the near side goes, and these profiles
+do not produce that.
 
 ### Bond modes
 

@@ -15,6 +15,11 @@
 //! Bond capacities come from the pack's Blast limits. blast-stress-solver measures bond
 //! stress as impulse / area (`computeBondStress`), with impulses accumulated over one
 //! solver step of `BLAST_DT`; a limit L therefore holds a force of L * area / BLAST_DT.
+//! The limits are pack-wide (`defaults.solver.limits`, Blast's own), or per material: a
+//! pack whose materials (`defaults.solver.materials`) carry their own `limits` (in the
+//! same units as the pack-wide ones) gives each bond those of its material (`m`). A bond
+//! with none there (no `m`, or a material without `limits`) is an error unless the pack
+//! also has pack-wide limits for it to take.
 //! Bending uses the same law: the angular term reads M * 2 / len per area, so the moment
 //! capacity is L_tension * area * len / 2 / BLAST_DT (len = node centroid distance).
 //! Blast has no bond stiffness (it holds actors rigid); springs use one modulus
@@ -93,6 +98,37 @@ struct NodeBody {
 }
 
 /// Build a lab scene from scene-pack JSON bytes.
+/// Each pack material's own Blast fatal limits (tension, compression, shear) where it
+/// carries `limits`, by material index; `limits` missing one of the three is an error.
+fn material_limits(json: &Value) -> Result<Vec<Option<[f64; 3]>>> {
+    let Some(materials) = json["defaults"]["solver"]["materials"].as_array() else {
+        return Ok(Vec::new());
+    };
+    materials
+        .iter()
+        .enumerate()
+        .map(|(k, m)| {
+            let l = &m["limits"];
+            if l.is_null() {
+                return Ok(None);
+            }
+            let get = |key: &str| {
+                f(l, key).ok_or_else(|| {
+                    anyhow!(
+                        "pack material {k} ({}): its limits have no {key}",
+                        m["name"].as_str().unwrap_or("?")
+                    )
+                })
+            };
+            Ok(Some([
+                get("tensionFatal")?,
+                get("compressionFatal")?,
+                get("shearFatal")?,
+            ]))
+        })
+        .collect()
+}
+
 pub fn build_pack_scene(bytes: &[u8]) -> Result<(Scene, PackInfo)> {
     let json: Value = serde_json::from_slice(bytes).context("scene pack is not JSON")?;
     let sc = &json["scenario"];
@@ -108,11 +144,14 @@ pub fn build_pack_scene(bytes: &[u8]) -> Result<(Scene, PackInfo)> {
     let key = json["key"].as_str().unwrap_or("pack").to_string();
     let limits = &json["defaults"]["solver"]["limits"];
     let limit = |k: &str| f(limits, k).unwrap_or(f64::INFINITY);
-    let (l_tension, l_compression, l_shear) = (
+    let pack_limits = [
         limit("tensionFatal"),
         limit("compressionFatal"),
         limit("shearFatal"),
-    );
+    ];
+    let pack_wide = limits.is_object();
+    let material_limits = material_limits(&json)?;
+    let per_material = material_limits.iter().any(Option::is_some);
     let color = base_color(&key);
 
     let centroid: Vec<V3> = nodes
@@ -440,6 +479,17 @@ pub fn build_pack_scene(bytes: &[u8]) -> Result<(Scene, PackInfo)> {
         if i0 >= map.len() || i1 >= map.len() || i0 == i1 {
             continue;
         }
+        let own = b["m"]
+            .as_u64()
+            .and_then(|m| material_limits.get(m as usize).copied().flatten());
+        let [l_tension, l_compression, l_shear] = match own {
+            Some(l) => l,
+            None if per_material && !pack_wide => bail!(
+                "bond {i0}-{i1}: the pack's materials carry their own limits, but this bond's material (m = {}) has none and the pack has no pack-wide limits",
+                b["m"]
+            ),
+            None => pack_limits,
+        };
         let mut n = norm(v3(&b["normal"])?);
         let c = add(v3(&b["centroid"])?, shift);
         let area = f(b, "area").unwrap_or(0.0).max(1e-8);
