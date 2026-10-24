@@ -18,8 +18,14 @@ pub const MPM_GRID_BINDING: usize = 45;
 pub const MPM_ARGS_BINDING: usize = 46;
 /// Per heightfield sample under the region: quanta, particles, first particle, baked quanta.
 pub const MPM_COLUMNS_BINDING: usize = 47;
+/// Coupled colliders and the region's block cells listing them.
+pub const MPM_COUPLE_BINDING: usize = 48;
+/// Per coupling slot: the frame's reaction on the body and its proxy velocity.
+pub const MPM_COUPLED_BINDING: usize = 49;
 /// One past the last terrain binding.
-pub const MPM_BINDING_END: usize = 48;
+pub const MPM_BINDING_END: usize = 50;
+/// Colliders one block cell of the region lists (`MPM_CELL_COLLIDERS`).
+pub const MPM_CELL_COLLIDERS: u32 = 8;
 
 /// Counter words (`gMpmCounters`).
 pub const MPM_C_BLOCKS: usize = 0;
@@ -44,6 +50,9 @@ pub const MPM_OUTSIDE: u32 = 4;
 pub const MPM_CFL: u32 = 8;
 pub const MPM_INVALID: u32 = 16;
 pub const MPM_OVERFLOW_PARTICLES: u32 = 32;
+pub const MPM_OVERFLOW_COUPLED: u32 = 64;
+pub const MPM_OVERFLOW_CELL: u32 = 128;
+pub const MPM_OVERFLOW_IMPULSES: u32 = 256;
 
 /// Block coordinates are packed in 10 bits per axis.
 pub const MPM_MAX_BLOCKS_PER_AXIS: u32 = 1024;
@@ -69,6 +78,9 @@ pub struct MpmParams {
     /// Bed height (heightfield-local y), volume quantum (m³), particle lattice
     /// spacing (m), density (kg/m³).
     pub column: [f32; 4],
+    /// Frame duration (s; pads collider bounds by their motion), max coupled
+    /// colliders (u32 bits), unused, unused.
+    pub couple: [f32; 4],
 }
 
 /// One particle (128 B).

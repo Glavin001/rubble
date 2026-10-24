@@ -15,6 +15,17 @@
 //   mpm_p2g         per grid node: gather from the particles whose stencil covers it
 //   mpm_grid        velocity, gravity, the heightfield bed
 //   mpm_g2p         per particle: velocity, C, position and F from the grid
+// Rigid coupling (T3, explicit and staggered): mpm_couple_clear and mpm_couple_bin
+// list, once per frame, the rigid colliders overlapping the region in its block
+// cells; mpm_grid then holds every grid node inside one to the body's surface
+// velocity (a separating Coulomb contact) and records the node's momentum change;
+// mpm_couple_gather sums each body's reaction (minus those changes) per substep in
+// a fixed order and moves the body's proxy velocity by it (and gravity), so the
+// material meets a body that slows as it pushes back (a body held at its
+// frame-start velocity drove the sand for the whole frame and was thrown up);
+// mpm_couple_emit appends one LINEAR_ANGULAR impulse record per dynamic body for
+// the rigid step that follows, which applies it at its start and ends the frame
+// at the proxy's velocity.
 // Activation (heightfield → particles) and bake (particles → heightfield) work on
 // the window of heightfield samples under the region: mpm_activate_count,
 // mpm_activate_scan, mpm_activate_emit, mpm_activate_lower; mpm_bake_bin,
@@ -48,6 +59,15 @@ static const uint MPM_OUTSIDE = 4u;
 static const uint MPM_CFL = 8u;           // a particle outran the substep's speed bound
 static const uint MPM_INVALID = 16u;      // a particle's F or plastic state is not finite
 static const uint MPM_OVERFLOW_PARTICLES = 32u; // activation would pass max particles (nothing changed)
+static const uint MPM_OVERFLOW_COUPLED = 64u;   // more rigid colliders in the region than coupling slots
+static const uint MPM_OVERFLOW_CELL = 128u;     // more colliders in one block cell than it lists
+static const uint MPM_OVERFLOW_IMPULSES = 256u; // the rigid step's impulse records were full
+// Colliders one block cell of the region lists.
+static const uint MPM_CELL_COLLIDERS = 8u;
+static const uint MPM_NO_SLOT = 0xFFFFFFFFu;
+// apply_impulses' mode for a linear impulse through the centre and an angular
+// impulse (ccd_step.slang IMPULSE_LINEAR_ANGULAR).
+static const uint MPM_IMPULSE_LINEAR_ANGULAR = 2u;
 
 // Material kinds (params u0.w).
 static const uint MPM_MATERIAL_NONE = 0u; // no stress: transfers only (tests)
@@ -64,6 +84,7 @@ struct MpmParams
     float4 sand;    // λ, μ, friction (DP α, or sin φ for Mohr–Coulomb), cohesion (log strain)
     uint4 window;   // heightfield samples under the region: i0, j0, ni, nj
     float4 column;  // bed height (heightfield-local y), volume quantum (m³), lattice spacing, density
+    float4 couple;  // x = frame duration (s, bounds pad by motion), y = max coupled colliders (uint bits)
 };
 
 // Per particle (128 B).
@@ -101,7 +122,8 @@ BIND(42) RWStructuredBuffer<AUint> gMpmBlocks;
 // Per cell (block · 64 + local): [4c] = count, [4c + 1] = start in its block, [4c + 2] = cursor.
 BIND(43) RWStructuredBuffer<AUint> gMpmCells;
 BIND(44) RWStructuredBuffer<uint> gMpmSorted;
-// Per node (block · 64 + local): after P2G (m·v, m), after mpm_grid (v, m).
+// Per node n (block · 64 + local): [2n] after P2G (m·v, m), after mpm_grid (v, m);
+// [2n + 1] the rigid contact mpm_grid applied: (momentum change, coupling slot bits).
 BIND(45) RWStructuredBuffer<float4> gMpmGrid;
 // Indirect dispatch: [0..3) per-block kernels (blocks, 1, 1), [3..6) per-particle
 // kernels (⌈particles/64⌉, 1, 1).
@@ -109,6 +131,13 @@ BIND(46) RWStructuredBuffer<uint> gMpmArgs;
 // Per window sample: [4t] = quanta, [4t + 1] = particles, [4t + 2] = first particle,
 // [4t + 3] = quanta baked onto it.
 BIND(47) RWStructuredBuffer<AUint> gMpmColumns;
+// [0] coupled colliders; per region block cell c (x + X·(y + Y·z)):
+// [4 + c·(1 + MPM_CELL_COLLIDERS)] count, then coupling slots.
+BIND(48) RWStructuredBuffer<AUint> gMpmCouple;
+// Per coupling slot s: [4s] = (impulse on the body, collider bits), [4s + 1] =
+// (angular impulse about its centre, 0), summed over the frame's substeps;
+// [4s + 2], [4s + 3] = the body's proxy linear and angular velocity.
+BIND(49) RWStructuredBuffer<float4> gMpmCoupled;
 
 groupshared uint gsMpmScan[256];
 
@@ -455,7 +484,110 @@ void mpm_p2g(uint3 tid : SV_DispatchThreadID)
             mv += w * (q.mv.xyz + mul(A, dpos));
         }
     }
-    gMpmGrid[n] = float4(mv, m);
+    gMpmGrid[2u * n] = float4(mv, m);
+    gMpmGrid[2u * n + 1u] = float4(0, 0, 0, asfloat(MPM_NO_SLOT));
+}
+
+// Signed distance from world point x to collider c (negative inside) and the
+// outward normal there. Exact inside, which is all the grid contact uses; boxes and
+// hulls by their face planes.
+float mpmColliderSdf(Collider c, BodyState b, float3 x, out float3 n)
+{
+    Frame f = colliderFrame(c, b);
+    float3 xl = frameToLocal(f, x);
+    float d;
+    float3 nl;
+    if (c.shape == SHAPE_SPHERE || c.shape == SHAPE_CAPSULE)
+    {
+        float half = c.shape == SHAPE_CAPSULE ? c.params.y : 0.0;
+        float3 core = float3(0.0, clamp(xl.y, -half, half), 0.0);
+        float3 r = xl - core;
+        float len = length(r);
+        nl = len > 1e-12 ? r / len : float3(0, 1, 0);
+        d = len - c.params.x;
+    }
+    else
+    {
+        HullRef h = hullOf(c);
+        d = -1e30;
+        nl = float3(0, 1, 0);
+        for (uint k = 0u; k < h.nf; k++)
+        {
+            float4 pl = hullPlane(h, k);
+            float s = dot(pl.xyz, xl) - pl.w;
+            if (s > d) { d = s; nl = pl.xyz; }
+        }
+    }
+    n = quatRotate(f.q, nl);
+    return d;
+}
+
+// Bounds of collider c on body b padded by its motion over the frame and a cell.
+void mpmColliderBounds(Collider c, BodyState b, MpmParams p, out float3 lo, out float3 hi)
+{
+    float3 x = transformPoint(b.position, b.orientation, c.localPos);
+    float r = c.params.w;
+    float pad = (length(b.linearVel) + length(b.angularVel) * r) * p.couple.x + p.origin.w;
+    lo = x - (r + pad);
+    hi = x + (r + pad);
+}
+
+// Region block cell of block coordinates k (region-local), or MPM_NO_BLOCK.
+uint mpmLatticeCell(int3 k, MpmParams p)
+{
+    int3 blocks = int3(p.dims.xyz / MPM_BLOCK);
+    if (any(k < int3(0, 0, 0)) || any(k >= blocks)) return MPM_NO_BLOCK;
+    return uint(k.x + blocks.x * (k.y + blocks.y * k.z));
+}
+
+// Node n (world position from its block) inside a coupled collider: hold it to
+// the body's surface velocity (separating, Coulomb friction p.step.w) and record
+// the momentum change for that body's reaction.
+void mpmRigidContact(uint n, uint b, float m, MpmParams p, inout float3 v)
+{
+    uint key = ALOAD(gMpmBlocks[4u * b]);
+    int3 kb = int3(int(key & 1023u), int((key >> 10) & 1023u), int(key >> 20));
+    uint cell = mpmLatticeCell(kb, p);
+    if (cell == MPM_NO_BLOCK) return;
+    uint base = 4u + cell * (1u + MPM_CELL_COLLIDERS);
+    uint count = min(ALOAD(gMpmCouple[base]), MPM_CELL_COLLIDERS);
+    if (count == 0u) return;
+    uint l = n % MPM_BLOCK_NODES;
+    int3 g = kb * 4 + int3(int(l & 3u), int((l >> 2) & 3u), int(l >> 4));
+    float3 xw = p.origin.xyz + float3(g) * p.origin.w;
+    float best = 0.0;
+    uint bestSlot = MPM_NO_SLOT, bestCollider = 0xFFFFFFFFu;
+    float3 bestN = float3(0, 1, 0);
+    for (uint k = 0u; k < count; k++)
+    {
+        uint slot = ALOAD(gMpmCouple[base + 1u + k]);
+        uint ci = asuint(gMpmCoupled[4u * slot].w);
+        Collider col = gColliders[ci];
+        float3 nn;
+        float d = mpmColliderSdf(col, gBodies[col.body], xw, nn);
+        // Deepest wins; ties go to the lower collider (order-independent).
+        if (d < best || (d == best && d < 0.0 && ci < bestCollider))
+        {
+            best = d;
+            bestSlot = slot;
+            bestCollider = ci;
+            bestN = nn;
+        }
+    }
+    if (bestSlot == MPM_NO_SLOT) return;
+    BodyState body = gBodies[gColliders[bestCollider].body];
+    float3 vb = gMpmCoupled[4u * bestSlot + 2u].xyz
+        + cross(gMpmCoupled[4u * bestSlot + 3u].xyz, xw - body.position);
+    float3 rel = v - vb;
+    float vn = dot(rel, bestN);
+    if (vn >= 0.0) return;
+    float3 vt = rel - bestN * vn;
+    float st = length(vt);
+    float mu = p.step.w;
+    float3 relNew = st <= -mu * vn ? float3(0, 0, 0) : vt * (1.0 + mu * vn / st);
+    float3 vNew = vb + relNew;
+    gMpmGrid[2u * n + 1u] = float4(m * (vNew - v), asfloat(bestSlot));
+    v = vNew;
 }
 
 // Grid velocity: momentum over mass, gravity, then the bed (the heightfield
@@ -468,8 +600,8 @@ void mpm_grid(uint3 tid : SV_DispatchThreadID)
     MpmParams p = mpmParams();
     uint b = n / MPM_BLOCK_NODES;
     if (b >= min(ALOAD(gMpmCounters[MPM_C_BLOCKS]), p.counts.z)) return;
-    float4 node = gMpmGrid[n];
-    if (node.w <= p.step.z) { gMpmGrid[n] = float4(0, 0, 0, node.w); return; }
+    float4 node = gMpmGrid[2u * n];
+    if (node.w <= p.step.z) { gMpmGrid[2u * n] = float4(0, 0, 0, node.w); return; }
     float3 v = node.xyz / node.w;
     v.y += p.step.x * p.step.y;
     if (p.dims.w != MPM_NO_BLOCK)
@@ -497,7 +629,8 @@ void mpm_grid(uint3 tid : SV_DispatchThreadID)
             }
         }
     }
-    gMpmGrid[n] = float4(v, node.w);
+    mpmRigidContact(n, b, node.w, p, v);
+    gMpmGrid[2u * n] = float4(v, node.w);
 }
 
 [shader("compute")]
@@ -522,7 +655,7 @@ void mpm_g2p(uint3 tid : SV_DispatchThreadID)
         uint c = mpmCellOf(base + int3(off), p);
         if (c == MPM_NO_BLOCK) continue;
         float w = mpmWeightAt(wx, off.x) * mpmWeightAt(wy, off.y) * mpmWeightAt(wz, off.z);
-        float3 vi = gMpmGrid[c].xyz;
+        float3 vi = gMpmGrid[2u * c].xyz;
         float3 dpos = (float3(off) - fx) * dx;
         v += w * vi;
         B += float3x3(vi * dpos.x, vi * dpos.y, vi * dpos.z) * w;
@@ -786,4 +919,170 @@ void mpm_bake_header(uint3 tid : SV_DispatchThreadID)
     }
     ASTORE(gMpmCounters[MPM_C_PARTICLES], 0u);
     ASTORE(gMpmCounters[MPM_C_BAKE_MAX], 0u);
+}
+
+// ---- rigid coupling -----------------------------------------------------------
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_couple_clear(uint3 tid : SV_DispatchThreadID)
+{
+    uint c = mpmIndex(tid);
+    MpmParams p = mpmParams();
+    uint3 blocks = p.dims.xyz / MPM_BLOCK;
+    if (c == 0u) ASTORE(gMpmCouple[0], 0u);
+    if (c < blocks.x * blocks.y * blocks.z) ASTORE(gMpmCouple[4u + c * (1u + MPM_CELL_COLLIDERS)], 0u);
+}
+
+// Per rigid collider: a coupling slot and a place in every block cell of the
+// region its padded bounds reach (planes and heightfields are the bed's).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_couple_bin(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = mpmIndex(tid);
+    if (i >= gCounters[0].colliderCount) return;
+    MpmParams p = mpmParams();
+    Collider col = gColliders[i];
+    if (col.shape == SHAPE_PLANE || col.shape == SHAPE_HEIGHTFIELD) return;
+    BodyState b = gBodies[col.body];
+    float3 lo, hi;
+    mpmColliderBounds(col, b, p, lo, hi);
+    float block = p.origin.w * float(MPM_BLOCK);
+    int3 k0 = int3(floor((lo - p.origin.xyz) / block));
+    int3 k1 = int3(floor((hi - p.origin.xyz) / block));
+    int3 blocks = int3(p.dims.xyz / MPM_BLOCK);
+    k0 = max(k0, int3(0, 0, 0));
+    k1 = min(k1, blocks - 1);
+    if (any(k1 < k0)) return;
+    uint slot;
+    AADD3(gMpmCouple[0], 1u, slot);
+    if (slot >= asuint(p.couple.y))
+    {
+        AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_COUPLED);
+        return;
+    }
+    gMpmCoupled[4u * slot] = float4(0, 0, 0, asfloat(i));
+    gMpmCoupled[4u * slot + 1u] = float4(0, 0, 0, 0);
+    gMpmCoupled[4u * slot + 2u] = float4(b.linearVel, 0);
+    gMpmCoupled[4u * slot + 3u] = float4(b.angularVel, 0);
+    for (int z = k0.z; z <= k1.z; z++)
+    for (int y = k0.y; y <= k1.y; y++)
+    for (int x = k0.x; x <= k1.x; x++)
+    {
+        uint base = 4u + mpmLatticeCell(int3(x, y, z), p) * (1u + MPM_CELL_COLLIDERS);
+        uint at;
+        AADD3(gMpmCouple[base], 1u, at);
+        if (at < MPM_CELL_COLLIDERS) ASTORE(gMpmCouple[base + 1u + at], slot);
+        else AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_CELL);
+    }
+}
+
+groupshared float3 gsMpmJ[64];
+groupshared float3 gsMpmL[64];
+
+// One workgroup per coupling slot (dynamic bodies): the substep's reaction on
+// the body, minus the momentum its contacts gave the grid nodes, in a fixed order
+// (blocks in lattice order, a lane per node, then a tree sum).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_couple_gather(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
+{
+    uint slot = gid.x;
+    uint l = lid.x;
+    MpmParams p = mpmParams();
+    bool live = slot < min(ALOAD(gMpmCouple[0]), asuint(p.couple.y));
+    float3 J = float3(0, 0, 0), L = float3(0, 0, 0);
+    if (live)
+    {
+        uint ci = asuint(gMpmCoupled[4u * slot].w);
+        Collider col = gColliders[ci];
+        BodyState b = gBodies[col.body];
+        if (bodyIsDynamic(b))
+        {
+            float3 lo, hi;
+            mpmColliderBounds(col, b, p, lo, hi);
+            float block = p.origin.w * float(MPM_BLOCK);
+            int3 blocks = int3(p.dims.xyz / MPM_BLOCK);
+            int3 k0 = max(int3(floor((lo - p.origin.xyz) / block)), int3(0, 0, 0));
+            int3 k1 = min(int3(floor((hi - p.origin.xyz) / block)), blocks - 1);
+            for (int z = k0.z; z <= k1.z; z++)
+            for (int y = k0.y; y <= k1.y; y++)
+            for (int x = k0.x; x <= k1.x; x++)
+            {
+                uint bk = mpmFindBlock(mpmBlockKey(int3(x, y, z)), p);
+                if (bk == MPM_NO_BLOCK) continue;
+                float4 rec = gMpmGrid[2u * (bk * MPM_BLOCK_NODES + l) + 1u];
+                if (asuint(rec.w) != slot) continue;
+                int3 g = int3(x, y, z) * 4 + int3(int(l & 3u), int((l >> 2) & 3u), int(l >> 4));
+                float3 xw = p.origin.xyz + float3(g) * p.origin.w;
+                J -= rec.xyz;
+                L -= cross(xw - b.position, rec.xyz);
+            }
+        }
+    }
+    gsMpmJ[l] = J;
+    gsMpmL[l] = L;
+    GROUP_SYNC();
+    for (uint d = 32u; d > 0u; d >>= 1u)
+    {
+        if (l < d)
+        {
+            gsMpmJ[l] += gsMpmJ[l + d];
+            gsMpmL[l] += gsMpmL[l + d];
+        }
+        GROUP_SYNC();
+    }
+    if (live && l == 0u)
+    {
+        float4 a = gMpmCoupled[4u * slot], c = gMpmCoupled[4u * slot + 1u];
+        gMpmCoupled[4u * slot] = float4(a.xyz + gsMpmJ[0], a.w);
+        gMpmCoupled[4u * slot + 1u] = float4(c.xyz + gsMpmL[0], 0.0);
+        BodyState b = gBodies[gColliders[asuint(a.w)].body];
+        if (bodyIsDynamic(b))
+        {
+            float3 local = quatRotate(quatConjugate(b.orientation), gsMpmL[0]);
+            float3 dw = quatRotate(b.orientation, local * b.invInertia);
+            float3 dv = gsMpmJ[0] * b.invMass + float3(0.0, p.step.x * p.step.y, 0.0);
+            gMpmCoupled[4u * slot + 2u] += float4(dv, 0.0);
+            gMpmCoupled[4u * slot + 3u] += float4(dw, 0.0);
+        }
+    }
+}
+
+// Per coupling slot of a dynamic body: its frame's reaction as one impulse record
+// (linear through the centre, angular about it) for the rigid step, keyed after
+// the host's records (by collider) so a body's records sum in a fixed order.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_couple_emit(uint3 tid : SV_DispatchThreadID)
+{
+    uint slot = mpmIndex(tid);
+    MpmParams p = mpmParams();
+    if (slot >= min(ALOAD(gMpmCouple[0]), asuint(p.couple.y))) return;
+    float4 a = gMpmCoupled[4u * slot], c = gMpmCoupled[4u * slot + 1u];
+    uint ci = asuint(a.w);
+    uint body = gColliders[ci].body;
+    if (!bodyIsDynamic(gBodies[body]) || (all(a.xyz == float3(0, 0, 0)) && all(c.xyz == float3(0, 0, 0)))) return;
+    uint r;
+    AADD3(gScratchAtomics[IMPULSE_COUNT], 1u, r);
+    if (r >= IMPULSE_CAP) { AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_IMPULSES); return; }
+    uint w = IMPULSE_BASE + IMPULSE_WORDS * r;
+    ASTORE(gScratchAtomics[w], body);
+    ASTORE(gScratchAtomics[w + 1u], ((0x300000u + ci) << 8) | MPM_IMPULSE_LINEAR_ANGULAR);
+    ASTORE(gScratchAtomics[w + 2u], asuint(a.x));
+    ASTORE(gScratchAtomics[w + 3u], asuint(a.y));
+    ASTORE(gScratchAtomics[w + 4u], asuint(a.z));
+    ASTORE(gScratchAtomics[w + 5u], asuint(c.x));
+    ASTORE(gScratchAtomics[w + 6u], asuint(c.y));
+    ASTORE(gScratchAtomics[w + 7u], asuint(c.z));
+}
+
+// After mpm_couple_emit: the step's post-projectile pass applies only records past
+// these (IMPULSE_FIRST), so the reactions are applied once, at the step's start.
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void mpm_couple_finish(uint3 tid : SV_DispatchThreadID)
+{
+    ASTORE(gScratchAtomics[IMPULSE_FIRST], min(ALOAD(gScratchAtomics[IMPULSE_COUNT]), IMPULSE_CAP));
 }

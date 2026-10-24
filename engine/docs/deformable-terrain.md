@@ -142,14 +142,21 @@ are taken from them.
 
 - **Discretisation.** Explicit MLS-MPM: quadratic B-splines, the APIC affine matrix
   C, and the stress term fused into P2G as −dt·V·(4/dx²)·τ (Hu et al. 2018).
-- **Sand.** A Drucker–Prager return map in Hencky (log) strain (Klár et al. 2016)
-  with the log-volume correction (Tampubolon et al. 2017):
+- **Sand.** A frictional return map in Hencky (log) strain with the log-volume
+  correction (Tampubolon et al. 2017). The yield surface is Mohr–Coulomb by default
+  (2026-10-24, after the column-collapse validation below); Klár et al.'s (2016)
+  Drucker–Prager cone stays available. Both:
   - ε = ln max(|σ|, 1e-4) − c + log Jp/3, with cohesion c (0 for dry sand), so
     compression first consumes the volume a particle gained when it separated, and
     tr = Σε (ε̂ = ε − tr/3 is traceless).
   - tr ≥ 0: project to the tip, and Jp keeps the volume.
-  - Otherwise: δγ = ‖ε̂‖ + (3λ + 2μ)/(2μ)·tr·α, with α = √(2/3)·2 sin φ/(3 − sin φ).
-    Project onto the cone when δγ > 0.
+  - Otherwise, Mohr–Coulomb: principal Kirchhoff stresses τᵢ = 2μεᵢ + λ tr ε
+    (ε₁ ≥ ε₂ ≥ ε₃) satisfy (τ₁ − τ₃) + (τ₁ + τ₃) sin φ ≤ 0. Flow is non-dilatant
+    (ψ = 0), so the return is closed form onto the main plane (Δγ = f/4μ) and a 2×2
+    solve onto an edge.
+  - Or the cone: δγ = ‖ε̂‖ + (3λ + 2μ)/(2μ)·tr·α, with α = √(2/3)·2 sin φ/(3 − sin φ).
+    Project onto the cone when δγ > 0. It equals Mohr–Coulomb on the compression
+    meridian only; in triaxial extension a 30° cone acts like about 46°.
   - Stress τ = U·diag(2μ ln σ + λ Σ ln σ)·Uᵀ, with no division by small σ.
   - Klár's friction-angle hardening comes later, behind a flag.
 - **SVD.** A 3×3 quaternion Jacobi (McAdams et al. 2011) with a fixed number of
@@ -205,6 +212,63 @@ are taken from them.
 - **Bake.** When the region's kinetic energy stays below ε for a dwell time, each
   particle's quanta are added to the heightfield column it stands over, and the
   particles are freed.
+
+## T2 and T3 status (2026-10-24)
+
+**T2 (granular MPM core)** is in `slang/kernels/terrain_mpm.slang`, the host
+`engine-webgpu/src/gpu_terrain.rs` and `engine-terrain`:
+- transfers, sand, CFL substeps;
+- indirect dispatch over the blocks and particles in use;
+- GPU activation from the heightfield, and bake back into it, in whole volume quanta.
+
+Tests (`tests/terrain_mpm.rs`, `tests/mpm_material.rs`, `engine-terrain`):
+- a uniform motion is carried exactly;
+- free fall;
+- linear momentum is conserved to 1e-6 of the mass;
+- runs are bit-identical;
+- material stops on the bed;
+- limits fail by name;
+- activate-then-bake with no motion is the identity to 1e-5 m;
+- volume is kept through flow and bake;
+- the GPU material matches its CPU mirror.
+
+Column collapse against the laboratory fits (`tests/terrain_collapse.rs`, ignored):
+- **Heights** agree in every case.
+- **Runout with Mohr–Coulomb:**
+  - a = 3: on Lube's and Warnett's fits (2.74 against 2.75–2.77);
+  - a = 1: 70% of Lube's;
+  - a = 0.5: 60%, a quasi-static cone at φ. The Drucker–Prager cone ran every case
+    short.
+- **The open gap** below a ≈ 1.7 is how strongly basal friction stops the thin
+  spreading front. Lowering the bed friction to 0.35 closes it, but the
+  laboratory runouts are nearly independent of friction (Lube et al. 2005). It is
+  documented, not tuned.
+
+**T3 (two-way rigid coupling)** is `WgpuSim::step_with_terrain`, explicit and
+staggered, all on the GPU:
+1. Once per frame, the rigid colliders overlapping the region are listed in its block
+   cells. Their bounds are padded by their motion over the frame, and
+   `TerrainConfig::max_coupled` and 8 per cell are limits that error.
+2. Each substep holds every grid node inside a collider (signed distance; boxes and
+   hulls by their face planes) to the body's surface velocity, as a separating
+   Coulomb contact, and records the node's momentum change.
+3. One workgroup per body sums the reaction in a fixed order. It moves the body's
+   proxy velocity by that reaction (over its mass and inertia) plus gravity.
+4. The frame's total becomes one `LINEAR_ANGULAR` impulse record, which the rigid
+   step applies at its start.
+
+Without the proxy, a body held at its frame-start velocity drove the sand for the
+whole frame and was thrown up 0.45 m; with it, a 54 kg box set on 27 cm of sand
+rests 2.6 mm in, at 0.2 mm/s. A box striking a sand block conserves the pair's
+momentum to 2e-5. The design question of T3 (does resting stability need an
+implicit AVBD coupling block?) is answered no for this case.
+
+Not yet:
+- hit events as the activation trigger;
+- coupling for bodies that rotate fast within a frame (poses are the frame's start);
+- the browser path (`mpm_grid` binds 9 storage buffers, past WebGPU's default 8);
+- the host's copy of an edited heightfield (it goes stale until a readback);
+- performance (about 1,900 dispatches per 60 Hz frame at physical stiffness).
 
 ## Validation targets
 

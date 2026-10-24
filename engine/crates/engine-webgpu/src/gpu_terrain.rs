@@ -88,6 +88,11 @@ impl WgpuSim {
             (MPM_GRID_BINDING, nodes * 16),
             (MPM_ARGS_BINDING, 24),
             (MPM_COLUMNS_BINDING, u64::from(config.max_columns) * 16),
+            (
+                MPM_COUPLE_BINDING,
+                (4 + blocks * u64::from(1 + MPM_CELL_COLLIDERS)) * 4,
+            ),
+            (MPM_COUPLED_BINDING, u64::from(config.max_coupled) * 64),
         ];
         let limits = self.device.limits();
         for &(binding, bytes) in &sizes {
@@ -107,6 +112,7 @@ impl WgpuSim {
                     MPM_MATERIAL_NONE,
                 ],
                 dims: [0, 0, 0, MPM_NO_BED],
+                couple: [0.0, f32::from_bits(config.max_coupled), 0.0, 0.0],
                 ..MpmParams::default()
             },
             wave_speed: 0.0,
@@ -316,16 +322,55 @@ impl WgpuSim {
     }
 
     /// Run `substeps` MPM substeps of `dt` under `gravity` (m/s² along y), in one
-    /// submission. Fails if any substep (or the activation before it) overflowed
-    /// a limit or a particle left the region (its state is then the GPU's as of
-    /// the failure).
+    /// submission, with no rigid coupling. Fails if any substep (or the
+    /// activation before it) overflowed a limit or a particle left the region
+    /// (its state is then the GPU's as of the failure).
     pub fn terrain_step(
         &mut self,
         substeps: u32,
         dt: f32,
         gravity: f32,
     ) -> anyhow::Result<TerrainStepReport> {
+        self.terrain_write_params(substeps, dt, gravity)?;
+        let cfg = self.terrain_state()?.config;
+        let clear = 2 * u64::from(self.terrain.as_ref().map_or(0, |t| t.params.counts[1]));
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("terrain"),
+            });
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("terrain"),
+                timestamp_writes: None,
+            });
+            // No colliders listed: the grid holds no rigid contacts.
+            self.disp(
+                &mut pass,
+                "mpm_couple_clear",
+                u64::from(cfg.max_blocks),
+                None,
+            );
+            for _ in 0..substeps {
+                self.encode_terrain_substep(&mut pass, clear);
+            }
+        }
+        self.queue.submit(Some(enc.finish()));
+        self.terrain_report()
+    }
+
+    /// The substeps' parameters (dt, gravity, the CFL speed bound), uploaded.
+    fn terrain_write_params(&mut self, substeps: u32, dt: f32, gravity: f32) -> anyhow::Result<()> {
         let state = self.terrain_state()?;
+        anyhow::ensure!(
+            substeps > 0 && dt > 0.0,
+            "terrain substeps need a positive count and dt"
+        );
+        TerrainConfig::check(
+            "max_substeps",
+            u64::from(substeps),
+            u64::from(state.config.max_substeps),
+        )?;
         state.params.step[0] = dt;
         state.params.step[1] = gravity;
         // Nodes lighter than this carry no velocity (f32 momentum over mass).
@@ -340,42 +385,37 @@ impl WgpuSim {
             state.wave_speed
         );
         let params = state.params;
-        let cfg = state.config;
         self.queue.write_buffer(
             &self.bufs[MPM_PARAMS_BINDING],
             0,
             bytemuck::bytes_of(&params),
         );
-        let clear = 2 * u64::from(params.counts[1]);
-        let mut enc = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("terrain"),
-            });
-        {
-            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("terrain"),
-                timestamp_writes: None,
-            });
-            for _ in 0..substeps {
-                self.disp(&mut pass, "mpm_clear", clear, None);
-                self.disp(&mut pass, "mpm_write_args", 1, None);
-                self.disp_terrain_particles(&mut pass, "mpm_touch");
-                self.disp(&mut pass, "mpm_write_args", 1, None);
-                self.disp_terrain_particles(&mut pass, "mpm_count");
-                self.disp_terrain_blocks(&mut pass, "mpm_scan_cells");
-                self.disp(&mut pass, "mpm_scan_blocks", 64, None);
-                self.disp_terrain_particles(&mut pass, "mpm_scatter");
-                self.disp_terrain_blocks(&mut pass, "mpm_cell_sort");
-                self.disp_terrain_particles(&mut pass, "mpm_payload");
-                self.disp_terrain_blocks(&mut pass, "mpm_p2g");
-                self.disp_terrain_blocks(&mut pass, "mpm_grid");
-                self.disp_terrain_particles(&mut pass, "mpm_g2p");
-            }
-        }
-        self.queue.submit(Some(enc.finish()));
+        Ok(())
+    }
+
+    /// One MPM substep's dispatches (`clear`: hash words to empty).
+    fn encode_terrain_substep<'a>(&'a self, pass: &mut wgpu::ComputePass<'a>, clear: u64) {
+        self.disp(pass, "mpm_clear", clear, None);
+        self.disp(pass, "mpm_write_args", 1, None);
+        self.disp_terrain_particles(pass, "mpm_touch");
+        self.disp(pass, "mpm_write_args", 1, None);
+        self.disp_terrain_particles(pass, "mpm_count");
+        self.disp_terrain_blocks(pass, "mpm_scan_cells");
+        self.disp(pass, "mpm_scan_blocks", 64, None);
+        self.disp_terrain_particles(pass, "mpm_scatter");
+        self.disp_terrain_blocks(pass, "mpm_cell_sort");
+        self.disp_terrain_particles(pass, "mpm_payload");
+        self.disp_terrain_blocks(pass, "mpm_p2g");
+        self.disp_terrain_blocks(pass, "mpm_grid");
+        self.disp_terrain_particles(pass, "mpm_g2p");
+    }
+
+    /// The counters after the last submission (blocking), as a report or the
+    /// error any flag names; flags are reported once.
+    fn terrain_report(&mut self) -> anyhow::Result<TerrainStepReport> {
+        let state = self.terrain_state()?;
+        let (cfg, params) = (state.config, state.params);
         let c: Vec<u32> = self.read_binding(MPM_COUNTERS_BINDING, 0, MPM_COUNTER_WORDS);
-        // Flags are reported once.
         self.terrain_write_counter(MPM_C_FLAGS, 0);
         let flags = c[MPM_C_FLAGS];
         if flags & MPM_OVERFLOW_PARTICLES != 0 {
@@ -394,6 +434,22 @@ impl WgpuSim {
             }
             .into());
         }
+        if flags & MPM_OVERFLOW_COUPLED != 0 {
+            return Err(TerrainError::LimitExceeded {
+                limit: "max_coupled",
+                requested: u64::from(cfg.max_coupled) + 1,
+                allowed: u64::from(cfg.max_coupled),
+            }
+            .into());
+        }
+        anyhow::ensure!(
+            flags & MPM_OVERFLOW_CELL == 0,
+            "more than {MPM_CELL_COLLIDERS} rigid colliders overlap one terrain block (4 cells across)"
+        );
+        anyhow::ensure!(
+            flags & MPM_OVERFLOW_IMPULSES == 0,
+            "the rigid step's impulse records are full: terrain reactions were not all applied"
+        );
         anyhow::ensure!(
             flags & MPM_OVERFLOW_HASH == 0,
             "terrain block hash full ({} slots)",
@@ -419,6 +475,57 @@ impl WgpuSim {
             max_speed: f32::from_bits(c[MPM_C_MAX_SPEED]),
             particles: c[MPM_C_PARTICLES],
         })
+    }
+
+    /// One frame of terrain and rigid bodies, coupled (explicit, staggered): the
+    /// MPM substeps hold the material to the rigid colliders in the region as
+    /// they stood at the frame's start, and each dynamic body's reaction becomes
+    /// an impulse the rigid step then applies at its start. `substeps` of `dt`
+    /// should cover the rigid step's dt; gravity is the rigid world's. Forward
+    /// only: nothing is re-stepped.
+    pub fn step_with_terrain(
+        &mut self,
+        substeps: u32,
+        dt: f32,
+    ) -> anyhow::Result<(engine_schema::StepCounters, TerrainStepReport)> {
+        let gravity = self.params.gravity_y;
+        let state = self.terrain_state()?;
+        state.params.couple[0] = substeps as f32 * dt;
+        let cfg = state.config;
+        // The host's records first: the coupling appends after them.
+        self.upload_impulses();
+        let colliders = u64::from(self.collider_count);
+        let cells = u64::from(cfg.max_blocks);
+        let slots = u64::from(cfg.max_coupled);
+        self.terrain_write_params(substeps, dt, gravity)?;
+        let clear = 2 * u64::from(self.terrain.as_ref().map_or(0, |t| t.params.counts[1]));
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("terrain coupled"),
+            });
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("terrain coupled"),
+                timestamp_writes: None,
+            });
+            self.disp(&mut pass, "mpm_couple_clear", cells, None);
+            self.disp(&mut pass, "mpm_couple_bin", colliders, None);
+            for _ in 0..substeps {
+                self.encode_terrain_substep(&mut pass, clear);
+                self.disp(&mut pass, "mpm_couple_gather", slots * 64, None);
+            }
+            self.disp(&mut pass, "mpm_couple_emit", slots, None);
+            self.disp(&mut pass, "mpm_couple_finish", 1, None);
+        }
+        self.queue.submit(Some(enc.finish()));
+        self.terrain_impulses_pending = true;
+        self.wake_pending = true;
+        let counters = self
+            .step()
+            .map_err(|e| anyhow::anyhow!("rigid step: {e:?}"))?;
+        let report = self.terrain_report()?;
+        Ok((counters, report))
     }
 
     fn disp_terrain_indirect<'a>(

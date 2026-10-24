@@ -126,6 +126,8 @@ pub struct WgpuSim {
     pose_output: bool,
     /// Deformable-terrain MPM pool (`terrain_enable`).
     terrain: Option<terrain::TerrainState>,
+    /// The terrain's coupled frame appended impulse records for this step.
+    terrain_impulses_pending: bool,
     /// The last `step*` call ran the GPU step (false: skipped, nothing awake).
     last_step_ran: bool,
     sleep_island_rounds: u32,
@@ -708,6 +710,7 @@ impl WgpuSim {
             command_count: 0,
             pose_output,
             terrain: None,
+            terrain_impulses_pending: false,
             last_step_ran: false,
             sleep_island_rounds: 8,
             last_counters: StepCounters::default(),
@@ -882,7 +885,8 @@ impl WgpuSim {
     /// the step's uniforms (which schedule `apply_impulses` from it).
     fn upload_impulses(&mut self) {
         let n = self.impulse_queue.len() as u32;
-        self.impulses_this_step = n > 0;
+        // Terrain coupling appended its reaction records on the GPU after these.
+        self.impulses_this_step = n > 0 || self.terrain_impulses_pending;
         if n > 0 {
             // Mode word: mode | queue index << 8 (the per-body sum order).
             let keyed: Vec<ImpulseRecord> = self
@@ -2038,6 +2042,7 @@ impl WgpuSim {
             v.dirty = false;
         }
         self.impulses_this_step = false;
+        self.terrain_impulses_pending = false;
         if !read {
             self.contacts_parity ^= 1;
             self.steps_done = self.steps_done.saturating_add(1);

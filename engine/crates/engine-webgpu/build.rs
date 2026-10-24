@@ -182,6 +182,11 @@ const WORLD_ENTRIES: &[&str] = &[
     "mpm_bake_bin",
     "mpm_bake_raise",
     "mpm_bake_header",
+    "mpm_couple_clear",
+    "mpm_couple_bin",
+    "mpm_couple_gather",
+    "mpm_couple_emit",
+    "mpm_couple_finish",
 ];
 
 const CHARACTER_ENTRIES: &[&str] = &["char_move", "char_post", "query_batch", "projectile_step"];

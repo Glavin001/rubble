@@ -29,6 +29,9 @@ pub struct TerrainConfig {
     pub max_substeps: u32,
     /// Heightfield samples one region may activate.
     pub max_columns: u32,
+    /// Rigid colliders the active region may hold at once (each couples to the
+    /// material and takes its reaction).
+    pub max_coupled: u32,
 }
 
 impl Default for TerrainConfig {
@@ -44,6 +47,7 @@ impl Default for TerrainConfig {
             courant: 0.3,
             max_substeps: 512,
             max_columns: 1 << 16,
+            max_coupled: 256,
         }
     }
 }
@@ -94,6 +98,10 @@ impl TerrainConfig {
         )?;
         bad(self.max_substeps == 0, "max_substeps must be at least 1")?;
         bad(self.max_columns == 0, "max_columns must be at least 1")?;
+        bad(
+            self.max_coupled == 0 || self.max_coupled > 65535,
+            "max_coupled must lie in [1, 65535]",
+        )?;
         Ok(())
     }
 
