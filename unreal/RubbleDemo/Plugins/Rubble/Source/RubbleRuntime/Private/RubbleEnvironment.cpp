@@ -224,6 +224,12 @@ void ARubbleEnvironment::ApplyStage(const FRubbleSceneAssets& Assets)
 		SunYaw = -30.0f;
 		break;
 	}
+	case ERubbleStage::Town:
+		// The town brings its own streets and pavements: open ground and an afternoon sun low
+		// enough for long shadows down the streets.
+		SunPitch = -28.0f;
+		SunYaw = -55.0f;
+		break;
 	}
 	// The lot is mostly seen from above, ground filling the view: auto exposure would lift it to
 	// white, so it is biased down there.

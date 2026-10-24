@@ -296,3 +296,29 @@ fn preloaded_assets_start_asleep_and_hold_their_own_weight() {
         "the structure stays asleep: {awake} of {chunks} awake"
     );
 }
+
+/// A ScenePack's chunks name their pack nodes (chunk k is node k), so a host can draw each from
+/// the pack's own collider and material.
+#[test]
+fn pack_chunks_name_their_nodes() {
+    let pack = br#"{"version": 2, "key": "nodes",
+        "scenario": {
+            "nodes": [
+                {"centroid": {"x": 0, "y": 0.5, "z": 0}, "mass": 10, "volume": 1},
+                {"centroid": {"x": 1, "y": 0.5, "z": 0}, "mass": 10, "volume": 1},
+                {"centroid": {"x": 2, "y": 0.5, "z": 0}, "mass": 10, "volume": 1}
+            ],
+            "nodeSizes": [{"x": 1, "y": 1, "z": 1}, {"x": 1, "y": 1, "z": 1}, {"x": 1, "y": 1, "z": 1}],
+            "bonds": [{"node0": 0, "node1": 1, "centroid": {"x": 0.5, "y": 0.5, "z": 0},
+                       "normal": {"x": 1, "y": 0, "z": 0}, "area": 1}]
+        }}"#;
+    let desc = rubble::DestructibleAssetDesc::from_pack(pack).unwrap();
+    assert_eq!(desc.chunks.len(), 3);
+    for (k, c) in desc.chunks.iter().enumerate() {
+        assert_eq!(c.node, Some(k as u32), "chunk {k}");
+        // The chunk's pose (rbDestructible_GetChunkPose) is its node's centroid, with the
+        // footprint centred on x = z = 0 (x from -0.5..2.5: shifted by -1).
+        let p = c.pose.position;
+        assert!((p[0] - (k as f32 - 1.0)).abs() < 1e-6 && (p[1] - 0.5).abs() < 1e-6 && p[2].abs() < 1e-6, "chunk {k} at {p:?}");
+    }
+}

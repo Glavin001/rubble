@@ -144,6 +144,9 @@ struct FRubbleBodyVisual
 	bool bStatic = false;
 	/** Starts awake (dropped grids) or asleep until something hits it (the pages' settled stacks). */
 	bool bAwake = false;
+	/** Drawn on CPU-visible instances even when GPU poses are available, so Lumen's distance
+	 *  fields and surface cache see it (the town's chunks: intact buildings must bounce light). */
+	bool bLumenVisible = false;
 	/** A moving obstacle (a ram, a shunting truck, a crusher block, an impactor ball): its start
 	 *  velocity (cm/s), spin (rad/s) and mass (kg; 0: the material's density). */
 	FVector InitialVelocity = FVector::ZeroVector;
@@ -228,6 +231,7 @@ enum class ERubbleStage : uint8
 	Yard,      // tarmac yard: rigid scenes and vehicles
 	CrashHall, // crash-test hall: soft-body cars
 	Lot,       // city lot: fracture
+	Town,      // open ground for a whole town (its streets are part of the scene)
 };
 
 struct FRubbleSceneAssets

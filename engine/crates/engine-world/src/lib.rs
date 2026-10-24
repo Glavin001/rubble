@@ -721,6 +721,12 @@ impl World {
         Ok(self.bodies[self.live_body(id)?].last_transform)
     }
 
+    /// The body origin's pose when it was created (a destructible's chunk: where its asset and
+    /// placement put it). Hosts place what they draw with it before the first frame arrives.
+    pub fn body_initial_transform(&self, id: BodyId) -> anyhow::Result<Transform> {
+        Ok(self.bodies[self.live_body(id)?].origin)
+    }
+
     /// Whether the body was awake as of the last polled frame.
     pub fn body_is_awake(&self, id: BodyId) -> anyhow::Result<bool> {
         Ok(!self.bodies[self.live_body(id)?].last_asleep)

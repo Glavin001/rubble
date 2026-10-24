@@ -386,7 +386,7 @@ FRubbleGpuPoses* ARubblePrimitives::GpuPoses() const
 bool ARubblePrimitives::DrawsOnGpu(const FRubbleBodyVisual& Body, TArrayView<const FRubbleShapeVisual> Shapes, const FRubbleSceneAssets& Assets) const
 {
 	const FRubbleGpuPoses* Poses = GpuPoses();
-	if (!Poses || Body.bStatic || !RubbleGpuSceneEnabled())
+	if (!Poses || Body.bStatic || Body.bLumenVisible || !RubbleGpuSceneEnabled())
 	{
 		return false;
 	}

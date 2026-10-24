@@ -6,6 +6,8 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "RubbleGlb.h"
+#include "RubbleTownPack.h"
+#include "HAL/PlatformTime.h"
 #include "RubbleSubsystem.h"
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonReader.h"
@@ -223,7 +225,7 @@ FString FRubbleAbiBackend::MockReason(const FRubbleSceneRequest& R)
 		}
 		return FString();
 	case ERubbleFamily::Fracture:
-		return R.Id == TEXT("house") || R.Id == TEXT("arch") ? FString() : TEXT("procedural destructibles (cuboids, rows, grids) are not on the ABI");
+		return R.Id == TEXT("house") || R.Id == TEXT("arch") || R.Id == TEXT("town") ? FString() : TEXT("procedural destructibles (cuboids, rows, grids) are not on the ABI");
 	default:
 		return FString();
 	}
@@ -649,12 +651,19 @@ bool FRubbleAbiBackend::LoadAbi(const FRubbleSceneRequest& Request, FString& Err
 		W.max_joints = FMath::Max(W.max_joints, 32768u);
 		W.max_hull_vertices = FMath::Max(W.max_hull_vertices, 1u << 20);
 	}
+	if (Request.Family == ERubbleFamily::Fracture && Request.Id == TEXT("town"))
+	{
+		// Vibe Town: ~52k chunks, ~133k bonds, ~25k hull chunks of up to 42 points.
+		NumBodies += 64000;
+		W.max_joints = FMath::Max(W.max_joints, 1u << 18);
+		W.max_hull_vertices = FMath::Max(W.max_hull_vertices, 1u << 21);
+	}
 	W.max_bodies = FMath::Max(W.max_bodies, uint32(NumBodies * 1.25));
 	W.max_colliders = FMath::Max(W.max_colliders, uint32(NumBodies * 2));
 	// Bricks touch all their neighbours: demo.html budgets ~29 contacts a body (ring: 262,144 for
 	// 9k); 32 here. Overflow is loud (rbWorld_Poll fails with the flag), never a silent drop.
-	W.max_contacts = FMath::Max(W.max_contacts, uint32(NumBodies * 32));
-	W.max_candidates = FMath::Max(W.max_candidates, uint32(NumBodies * 32));
+	W.max_contacts = FMath::Max(W.max_contacts, FMath::Min(uint32(NumBodies * 32), 1u << 22));
+	W.max_candidates = FMath::Max(W.max_candidates, FMath::Min(uint32(NumBodies * 32), 1u << 22));
 	if (Request.Family == ERubbleFamily::Rigid)
 	{
 		// demo.html's sceneCap: power-of-two tiers, contacts and candidates capped at 2^21.
@@ -750,7 +759,14 @@ bool FRubbleAbiBackend::LoadAbi(const FRubbleSceneRequest& Request, FString& Err
 		break;
 	}
 	case ERubbleFamily::Fracture:
-		if (!CreateDestructible(Request.Id == TEXT("house") ? TEXT("veneer-house.glb") : TEXT("masonry-arch.glb"), FTransform::Identity, Error))
+		if (Request.Id == TEXT("town"))
+		{
+			if (!CreateTown(Error))
+			{
+				return false;
+			}
+		}
+		else if (!CreateDestructible(Request.Id == TEXT("house") ? TEXT("veneer-house.glb") : TEXT("masonry-arch.glb"), FTransform::Identity, Error))
 		{
 			return false;
 		}
@@ -1035,6 +1051,102 @@ void FRubbleAbiBackend::SetVehicleInput(const FRubbleVehicleInput& In)
 	{
 		rbSoft_SetInput(WorldPtr, SoftCars[PlayerSoft].Soft, Drive);
 	}
+}
+
+bool FRubbleAbiBackend::CreateTown(FString& Error)
+{
+	FString Path = FPaths::ProjectContentDir() / TEXT("Rubble/Town/vibe-town.json");
+	FParse::Value(FCommandLine::Get(), TEXT("RubbleTownPack="), Path);
+	TArray<uint8> Bytes;
+	if (!FFileHelper::LoadFileToArray(Bytes, *Path))
+	{
+		Error = FString::Printf(TEXT("no town pack at %s (scripts/unreal/fetch-town.sh copies it from vibe-land)"), *Path);
+		return false;
+	}
+	const double Start = FPlatformTime::Seconds();
+	RbDestructibleAssetId Asset = 0;
+	if (rbCreateDestructibleAssetFromPack(WorldPtr, Bytes.GetData(), size_t(Bytes.Num()), &Asset) != RB_OK)
+	{
+		Error = AbiError(TEXT("rbCreateDestructibleAssetFromPack"));
+		return false;
+	}
+	RbDestructibleDef D = rbDefaultDestructibleDef();
+	D.asset = Asset;
+	D.anchored = true;     // its buried footings and road subgrade are fixed
+	D.start_asleep = true; // a standing town, until something hits it
+	RbDestructibleId Id = 0;
+	uint32 Count = 0;
+	if (rbCreateDestructible(WorldPtr, &D, &Id) != RB_OK || rbDestructible_GetChunkCount(WorldPtr, Id, &Count) != RB_OK)
+	{
+		Error = AbiError(TEXT("rbCreateDestructible"));
+		return false;
+	}
+	const double Physics = FPlatformTime::Seconds();
+	RubbleTownPack::FPack Pack;
+	if (!RubbleTownPack::Parse(Bytes, Pack, Error))
+	{
+		Error = FString::Printf(TEXT("%s: %s"), *Path, *Error);
+		return false;
+	}
+	// One mesh per hull (the library's shared shapes and any node's own), built on first use.
+	TArray<int32> MeshOfHull;
+	MeshOfHull.Init(INDEX_NONE, Pack.Hulls.Num());
+	int32 Drawn = 0;
+	for (uint32 c = 0; c < Count; ++c)
+	{
+		RbBodyId Body = 0;
+		int32 Node = -1;
+		RbTransform T, Pose;
+		// Every chunk body's origin is the destructible's frame; the chunk's collider is centred
+		// on its pose in that frame (rbDestructible_GetChunkPose).
+		if (rbDestructible_GetChunkBody(WorldPtr, Id, c, &Body) != RB_OK || rbDestructible_GetChunkNode(WorldPtr, Id, c, &Node) != RB_OK
+			|| rbBody_GetTransform(WorldPtr, Body, &T) != RB_OK || rbDestructible_GetChunkPose(WorldPtr, Id, c, &Pose) != RB_OK)
+		{
+			Error = AbiError(TEXT("town chunk query"));
+			return false;
+		}
+		if (!Pack.Nodes.IsValidIndex(Node))
+		{
+			continue;
+		}
+		const RubbleTownPack::FNode& N = Pack.Nodes[Node];
+		const RubbleTownPack::FMaterial& M = Pack.Materials[N.Material];
+		FRubbleShapeVisual Shape;
+		Shape.Material = M.Kind;
+		Shape.Tint = M.Color;
+		Shape.Local = Xf(Pose);
+		if (N.bBox)
+		{
+			Shape.Kind = ERubbleShape::Box;
+			Shape.HalfExtents = RubbleTownPack::HalfToUnreal(N.HalfExtents);
+		}
+		else
+		{
+			if (MeshOfHull[N.Hull] == INDEX_NONE)
+			{
+				FRubbleMeshData Mesh;
+				Mesh.Material = M.Kind;
+				MeshOfHull[N.Hull] = RubbleTownPack::HullMesh(Pack.Hulls[N.Hull], Mesh) ? SceneAssets->Meshes.Add(MoveTemp(Mesh)) : -2;
+			}
+			if (MeshOfHull[N.Hull] < 0)
+			{
+				continue; // a degenerate hull: nothing to draw (its physics is the pack's)
+			}
+			Shape.Kind = ERubbleShape::Hull;
+			Shape.Mesh = MeshOfHull[N.Hull];
+		}
+		FRubbleBodyVisual V;
+		V.Id = FRubbleBodyId(Body);
+		V.Initial = Xf(T);
+		V.FirstShape = SceneAssets->Shapes.Add(Shape);
+		V.NumShapes = 1;
+		V.bLumenVisible = true;
+		SceneAssets->Bodies.Add(V);
+		++Drawn;
+	}
+	UE_LOG(LogRubble, Display, TEXT("town: '%s', %u chunks (%d drawn, %d meshes, %d materials); physics %.0f ms, visuals %.0f ms"),
+		*Pack.Title, Count, Drawn, SceneAssets->Meshes.Num(), Pack.Materials.Num(), 1000.0 * (Physics - Start), 1000.0 * (FPlatformTime::Seconds() - Physics));
+	return true;
 }
 
 bool FRubbleAbiBackend::ParkBalls(int32 Count, FString& Error)

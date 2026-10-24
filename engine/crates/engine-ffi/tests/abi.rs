@@ -183,6 +183,29 @@ unsafe fn poll_all(w: *mut RbWorld) -> RbFrame {
     f
 }
 
+/// Before its first frame, a body reports the pose it was created with (not the identity), so a
+/// host can place what it draws at load.
+#[test]
+fn a_new_body_reports_its_creation_pose() {
+    unsafe {
+        let w = world(RbCoordinates::RB_COORDINATES_Y_UP_METRES);
+        let mut def = rbDefaultBodyDef();
+        def.type_ = RbBodyType::RB_DYNAMIC_BODY;
+        def.transform.p = RbVec3 { x: 3.0, y: 5.0, z: -2.0 };
+        def.transform.q = RbQuat { x: 0.0, y: 0.38268343, z: 0.0, w: 0.9238795 };
+        let mut b = 0;
+        ok(rbCreateBody(w, &def, &mut b));
+        let mut t = RbTransform::default();
+        ok(rbBody_GetTransform(w, b, &mut t));
+        assert!((t.p.x - 3.0).abs() < 1e-6 && (t.p.y - 5.0).abs() < 1e-6 && (t.p.z + 2.0).abs() < 1e-6, "{t:?}");
+        assert!((t.q.y - 0.38268343).abs() < 1e-6, "{t:?}");
+        let mut flat = [RbTransform::default()];
+        ok(rbWorld_GetTransforms(w, &b, 1, flat.as_mut_ptr()));
+        assert_eq!(flat[0], t);
+        rbDestroyWorld(w);
+    }
+}
+
 /// A body reporting only sleep and wake (RB_MOVES_SLEEP_WAKE) falls and sleeps exactly as one
 /// reporting every move, but its frames carry only its first report and its sleep.
 #[test]

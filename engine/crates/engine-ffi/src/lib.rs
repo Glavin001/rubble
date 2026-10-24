@@ -1346,8 +1346,12 @@ pub unsafe extern "C" fn rbWorld_GetTransforms(
         let ids = std::slice::from_raw_parts(bodies, count as usize);
         let outs = std::slice::from_raw_parts_mut(out, count as usize);
         for (id, o) in ids.iter().zip(outs) {
-            let t = w.world.body_transform(BodyId::from_bits(*id))?;
-            *o = t.map(|t| w.transform_out(t)).unwrap_or_default();
+            let id = BodyId::from_bits(*id);
+            let t = match w.world.body_transform(id)? {
+                Some(t) => t,
+                None => w.world.body_initial_transform(id)?,
+            };
+            *o = w.transform_out(t);
         }
         Ok(())
     })
@@ -1471,6 +1475,8 @@ pub unsafe extern "C" fn rbBody_IsValid(world: *mut RbWorld, body: RbBodyId) -> 
 }
 
 /// The body origin's pose as of the last polled frame.
+/// The body origin's pose as of the last polled frame; before the body's first frame, the pose
+/// it was created with (a destructible's chunk: where its asset and placement put it).
 #[no_mangle]
 pub unsafe extern "C" fn rbBody_GetTransform(
     world: *mut RbWorld,
@@ -1479,8 +1485,12 @@ pub unsafe extern "C" fn rbBody_GetTransform(
 ) -> RbResult {
     guard_args(|| {
         let w = world_mut(world)?;
-        let t = w.world.body_transform(BodyId::from_bits(body))?;
-        write(out, t.map(|t| w.transform_out(t)).unwrap_or_default())
+        let id = BodyId::from_bits(body);
+        let t = match w.world.body_transform(id)? {
+            Some(t) => t,
+            None => w.world.body_initial_transform(id)?,
+        };
+        write(out, w.transform_out(t))
     })
 }
 
@@ -2261,6 +2271,24 @@ pub unsafe extern "C" fn rbDestructible_GetChunkBody(
 }
 
 /// The glTF node that renders a chunk (-1: none).
+/// A chunk's pose in its body's frame: its centre of mass and principal axes in the asset, in
+/// the world's coordinates and units (every chunk body's origin is the destructible's frame).
+/// Its collider (a pack node's box or hull) is centred on it: draw it at the body's transform ×
+/// this pose.
+#[no_mangle]
+pub unsafe extern "C" fn rbDestructible_GetChunkPose(
+    world: *mut RbWorld,
+    id: RbDestructibleId,
+    chunk: u32,
+    out: *mut RbTransform,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let t = w.world.destructible_chunk_pose(DestructibleId::from_bits(id), chunk)?;
+        write(out, w.transform_out(t))
+    })
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rbDestructible_GetChunkNode(
     world: *mut RbWorld,

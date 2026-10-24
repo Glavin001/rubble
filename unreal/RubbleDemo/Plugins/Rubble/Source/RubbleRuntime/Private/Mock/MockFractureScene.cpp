@@ -35,6 +35,7 @@ namespace RubbleMock
 			Fracture(TEXT("suburb"), TEXT("Suburb: a street of houses")),
 			Fracture(TEXT("cuboids"), TEXT("Cuboids")),
 			Fracture(TEXT("cuboids2x"), TEXT("Cuboids ×2")),
+			Fracture(TEXT("town"), TEXT("Vibe Town: 70 buildings, 52k chunks (vibe-land)")),
 		};
 	}
 
@@ -321,7 +322,15 @@ namespace RubbleMock
 			const FString& Id = R.Id;
 			FVector Focus(0, 0, 150);
 			float Distance = 1600.0f;
-			if (Id == TEXT("house"))
+			if (Id == TEXT("town"))
+			{
+				// The ABI builds it from the pack; the layout is its stage and camera only.
+				Assets.Stage = ERubbleStage::Town;
+				Assets.GroundHalfExtentCm = 30000.0f;
+				Focus = FVector(0, 0, 600);
+				Distance = 16000.0f;
+			}
+			else if (Id == TEXT("house"))
 			{
 				House(FVector::ZeroVector, 0.0f);
 			}

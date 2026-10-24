@@ -54,6 +54,18 @@ fn town_pack_loads_steps_and_breaks() {
         let mut chunks = 0;
         ok(rbDestructible_GetChunkCount(w, d, &mut chunks));
         println!("loaded {chunks} chunks in {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
+        for c in [0, chunks / 2, chunks - 1] {
+            let mut node = -1;
+            ok(rbDestructible_GetChunkNode(w, d, c, &mut node));
+            assert_eq!(node, c as i32, "chunk {c} is pack node {c}");
+        }
+        // Chunk bodies start at the destructible's frame; each chunk sits at its pose.
+        let (mut b, mut t, mut local) = (0, RbTransform::default(), RbTransform::default());
+        ok(rbDestructible_GetChunkBody(w, d, chunks / 2, &mut b));
+        ok(rbBody_GetTransform(w, b, &mut t));
+        ok(rbDestructible_GetChunkPose(w, d, chunks / 2, &mut local));
+        assert!(t.p.x.abs() + t.p.y.abs() + t.p.z.abs() < 1e-6, "chunk body at the destructible's frame: {:?}", t.p);
+        assert!(local.p.x.abs() + local.p.z.abs() > 1.0, "chunk {} local {:?}", chunks / 2, local.p);
         let step = |w: *mut RbWorld, n: u32, label: &str| {
             let t = Instant::now();
             let mut moves = 0;

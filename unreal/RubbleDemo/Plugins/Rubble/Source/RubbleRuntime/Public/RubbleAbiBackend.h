@@ -51,6 +51,9 @@ private:
 	/** The bodies of a mock layout, created for real; returns false on an ABI error. */
 	bool CreateBodies(const FRubbleSceneAssets& Layout, FString& Error);
 	bool CreateDestructible(const TCHAR* Glb, const FTransform& Placement, FString& Error);
+	/** vibe-land's Vibe Town (a ScenePack v2, scripts/unreal/fetch-town.sh): one destructible of
+	 *  ~52k chunks, each drawn from the pack's own collider and material. */
+	bool CreateTown(FString& Error);
 	/** Balls for the shots, parked asleep; Launch reuses them through the body commands. */
 	bool ParkBalls(int32 Count, FString& Error);
 	static FVector ParkedAt(int32 Index);

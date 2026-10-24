@@ -7,7 +7,7 @@ public class RubbleRuntime : ModuleRules
 		// No PCHs: Apple clang 15 (Xcode 15.4) rejects the engine's shared PCH (see unreal/README.md).
 		PCHUsage = PCHUsageMode.NoPCHs;
 		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "ProceduralMeshComponent" });
-		PrivateDependencyModuleNames.AddRange(new string[] { "MeshDescription", "StaticMeshDescription", "RenderCore", "RHI", "Json", "RubbleFFI", "Renderer", "RubbleShaders" });
+		PrivateDependencyModuleNames.AddRange(new string[] { "MeshDescription", "StaticMeshDescription", "RenderCore", "RHI", "Json", "RubbleFFI", "Renderer", "RubbleShaders", "GeometryCore" });
 		if (Target.Platform == UnrealTargetPlatform.Mac)
 		{
 			// The Metal bridge (FRubbleGpuPoses): Unreal's MTLDevice and its buffers' MTLBuffers.
