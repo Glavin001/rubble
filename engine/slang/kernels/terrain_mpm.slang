@@ -527,7 +527,9 @@ void mpm_p2g(uint3 tid : SV_DispatchThreadID)
         }
     }
     gMpmGrid[2u * n] = float4(mv, m);
-    gMpmGrid[2u * n + 1u] = float4(0, 0, 0, asfloat(MPM_NO_SLOT));
+    // The node's coupling record: impulse, coupled slot (a float, exact below
+    // 2²⁴; −1 for none: an all-ones bit pattern is a NaN WGSL cannot spell).
+    gMpmGrid[2u * n + 1u] = float4(0, 0, 0, -1.0);
 }
 
 // Signed distance from world point x to collider c (negative inside) and the
@@ -628,7 +630,7 @@ void mpmRigidContact(uint n, uint b, float m, MpmParams p, inout float3 v)
     float mu = p.step.w;
     float3 relNew = st <= -mu * vn ? float3(0, 0, 0) : vt * (1.0 + mu * vn / st);
     float3 vNew = vb + relNew;
-    gMpmGrid[2u * n + 1u] = float4(m * (vNew - v), asfloat(bestSlot));
+    gMpmGrid[2u * n + 1u] = float4(m * (vNew - v), float(bestSlot));
     v = vNew;
 }
 
@@ -1127,7 +1129,7 @@ void mpm_couple_gather(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                 uint bk = mpmFindBlock(mpmBlockKey(int3(x, y, z)), p);
                 if (bk == MPM_NO_BLOCK) continue;
                 float4 rec = gMpmGrid[2u * (bk * MPM_BLOCK_NODES + l) + 1u];
-                if (asuint(rec.w) != slot) continue;
+                if (rec.w != float(slot)) continue;
                 int3 g = int3(x, y, z) * 4 + int3(int(l & 3u), int((l >> 2) & 3u), int(l >> 4));
                 float3 xw = p.origin.xyz + float3(g) * p.origin.w;
                 J -= rec.xyz;
