@@ -417,10 +417,16 @@ Blast's terms, reachable as a `BodyId`.
   impact loads are compared against bond capacity, with strike prediction for
   bodies marked as projectiles (`body_set_projectile`), and splits go into body
   slots reserved when the destructible is placed.
-- **`Stress(StressSettings)`** is Blast-parity: a quasi-static stress solve
-  with `compression`, `tension` and `shear` limits, each with an elastic and a
-  fatal value, plus an iteration budget. It is the charter baseline profile
-  `blast_parity`. It is host-coupled until island frames move to the GPU.
+- **`Stress`** is the fracture lab's `stress` mode, the charter baseline
+  profile `blast_parity` (shipped in D5): the stress oracle's GPU stress world
+  (`GpuWorld`) solves each bonded cluster's stresses from contacts, gravity and
+  impacts, with impact islands for the impactors launched at it
+  (`destructible_launch_impactor`), and breaks bonds past the asset's own
+  material limits (compression, tension, shear). Limits come from the asset,
+  scaled by `strength_scale`, as in the lab: there is no separate settings
+  struct, since overriding an asset's limits at load is a source fix
+  (Shardwright) rather than a runtime one. It is host-coupled until island
+  frames move to the GPU.
 - **`Bonds`** turns each bond into a breakable AVBD bond joint, the fracture
   lab's default. It supports yield and bend limits, and every fragment is its
   own body. It shipped in D1a.
@@ -705,7 +711,7 @@ today; each feature below gets a World call and an ABI call instead. Status:
 | Bonds that settle under self-weight before they can break (the lab's preload) | `preload_destructible_asset`, `rbWorld_PreloadDestructibleAsset` (the lab's procedure, checked against the Metal lab: the masonry arch never sleeps within 600 steps in either, so both give up there) | ✅ |
 | The lab's solver settings (120 Hz, 8 iterations, contact and sleep flags) | `DestructibleAssetDesc::solver`, `World::set_solver`, `rbWorld_UseDestructibleAssetSolver` | ✅ |
 | Fracture lab `threshold` mode (GPU splitter) | `StrengthModel::Threshold`, `RB_STRENGTH_THRESHOLD`; `body_set_projectile`, `rbBody_SetProjectile`; `solver_for`, `rbWorld_UseDestructibleAssetSolverFor`; `rbWorld_GetDestructibleAssetGround` (D1b) | ✅ |
-| Fracture lab `stress` mode (blast_parity) | D5, `StrengthModel::Stress` | 🔜 |
+| Fracture lab `stress` mode (blast_parity) | `StrengthModel::Stress`, `RB_STRENGTH_STRESS`; `destructible_launch_impactor`, `rbDestructible_LaunchImpactor`; `destructible_impactor_body`, `rbDestructible_GetImpactorBody`; `solver_for`, `rbWorld_UseDestructibleAssetSolverFor` (D5) | ✅ |
 | Picking (camera ray) | `rbWorld_CastRays` | ✅ |
 | Grab and drag | a kinematic mouse body (`rbBody_SetTargetTransform` each frame) jointed to the grabbed body (spherical, or a weld with `linear_stiffness`); tested through the ABI | ✅ (a dedicated mouse joint later) |
 | Scripted crusher, moving slabs | kinematic bodies: `BodyType::Kinematic`, `RB_KINEMATIC_BODY`, set velocity or `rbBody_SetTargetTransform` | ✅ |
@@ -719,7 +725,8 @@ design frame (metres, Y up), the format of `vehicle_presets.json` and the
 soft descriptors; spawn transforms and velocities use the world's
 coordinates. `tests/demo_parity.rs` covers each row through the ABI.
 
-Next: D5 (`stress`).
+Every row is shipped. Next, after the MVP: snapshots of destructible state,
+damage descriptors (D2) and fracture-command replay (D3).
 
 **P1.5: Box3D alignment (shipped).** `rubble::World` now has this shape:
 
@@ -918,9 +925,59 @@ impulses and damage.
 **D4: anchors, budgets and debris policy.** Runtime anchors; `Defer`;
 `DebrisPolicy` with reported removals.
 
-**D5: the stress model.** `StrengthModel::Stress` with `blast_parity`,
-host-coupled until R5 and island frames run on the GPU. Bond-utilization
-observables.
+**D5: the `Stress` model in `World` (shipped).** The fracture lab's `stress`
+mode, the blast_parity profile's stress world (stress-gpu `GpuWorld`) coupled
+to the lab's engine (stress-rubble `RubbleEngine`), runs inside `World`:
+
+- **One simulation.** The engine is *hosted* on the world's own sim
+  (`RubbleEngine::hosted`): World lends it its `WgpuSim` and hull arena for each
+  call, so the clusters, the impactors and every other body of the world step
+  together. The world's other bodies and colliders are foreign to the engine:
+  static to the stress solve, stepped with everything else. Each `World::step`
+  is one stress-world frame (`GpuWorld::step_frame`, as the lab's stress mode
+  sets it up: impact islands on, no frame redone, the profile applied).
+- **Bodies.** The engine makes a body for each cluster (and impactor) and
+  retires a split's parent. World adopts each body it made as a `BodyId`
+  (owned by the destructible: `destroy_body` on one is refused), frees each one
+  it retired for reuse after quarantine (so the hosted engine never compacts),
+  and reports `BondsBroken` and `Split`. A split's children are new bodies and
+  the parent's handle ends. Every piece's origin is the instance frame (the
+  render contract); its solver frame is the engine's centre of mass and
+  principal axes. Piece colliders are the engine's, not World shapes.
+- **The asset.** The stress scene is the asset's stress import (D1b's
+  `StressSource`), placed by the instance transform (baked into the scene's
+  poses and ground, which stays level), with the world's gravity and step.
+  `solver_for(StrengthModel::Stress)` gives the lab's engine settings.
+- **Impactors.** `destructible_launch_impactor` (C
+  `rbDestructible_LaunchImpactor`) launches a sphere or box of the lab's
+  projectile material, as the lab launches its shots; its body follows from
+  `destructible_impactor_body`. Bodies of the world that are not impactors
+  load the structure through their contacts as static geometry does; only
+  impactors take part in impact islands.
+- **Forward only.** No frame is redone, a hosted engine refuses to save or
+  restore, and the correction pass stays off (AGENTS.md).
+- **Limits, each refused by name:** one stress destructible per world (its
+  frame steps the whole world) and no threshold destructible beside it;
+  `ContactStorage::Canonical`; free room in `WorldCapacity` for the lab's
+  headroom (three times the chunks and parts, as `capacity_for` sizes it).
+- **Cost.** Each frame reads back what the lab's displayed frames read: the
+  stress world's bond and cluster state after its splits (`view_with`), and
+  the engine's motion. Island frames are host-coupled, as in the lab.
+- **Parity.** `engine-world/tests/stress.rs` shoots the masonry arch (at a
+  tenth of its masonry's strength, as the lab's slider sets it; at full
+  strength it holds the shot, in the lab too) and the cuboid house, and runs
+  the lab's own stress world on the same scene. With the lab's slot
+  compaction off (`RubbleEngine::compaction`, new, on by default), the two
+  break the same bonds in every frame and end with the same bodies: the arch
+  353 bonds and 66 bodies, the house 169 bonds and 133 bodies. With its
+  compaction on, the lab renumbers its bodies, and with them the order of the
+  solve, so after the first compaction its cascade is its own (the arch ends
+  at 301 bonds and 50 bodies; the house is unchanged). The first break is the
+  same in both. `engine-ffi/tests/stress.rs` runs both scenes through the C
+  ABI in Unreal coordinates.
+- **Not yet.** Bond-utilization observables; snapshots of stress state;
+  several stress destructibles in one world (one stress world over all of
+  them).
 
 **V1 (shipped, first cut).** These calls compose rigid, soft and
 destructible parts.

@@ -94,7 +94,21 @@ typedef enum RbStrengthModel {
   // The fracture lab's GPU threshold splitter: bonded clusters are bodies that
   // split on the GPU (its `threshold` mode). Projectiles: `rbBody_SetProjectile`.
   RB_STRENGTH_THRESHOLD = 1,
+  // The fracture lab's stress solver, the blast_parity profile (its `stress`
+  // mode): bonded clusters are bodies, bonds break past their material limits
+  // under the solved stresses, and impactors launched at it
+  // (`rbDestructible_LaunchImpactor`) take part in impact islands. One per
+  // world, none beside `RB_STRENGTH_THRESHOLD`; its frame steps the world.
+  RB_STRENGTH_STRESS = 2,
 } RbStrengthModel;
+
+// An impactor's shape (`RbImpactorDef::shape`).
+typedef enum RbImpactorShape {
+  // A sphere of `RbImpactorDef::radius`.
+  RB_IMPACTOR_SPHERE = 0,
+  // A box of `RbImpactorDef::half_extents`.
+  RB_IMPACTOR_BOX = 1,
+} RbImpactorShape;
 
 typedef enum RbVehicleDamageType {
   // The wheel falls off as a free body.
@@ -622,6 +636,20 @@ typedef struct RbDestructibleDef {
   uint32_t internal_value;
 } RbDestructibleDef;
 
+// A body launched at a stress destructible (`rbDefaultImpactorDef`,
+// `rbDestructible_LaunchImpactor`), as the fracture lab launches its shots: of
+// the lab's projectile material (steel), in the world's coordinates; mass in kg.
+typedef struct RbImpactorDef {
+  enum RbImpactorShape shape;
+  float radius;
+  struct RbVec3 half_extents;
+  float mass;
+  struct RbTransform transform;
+  struct RbVec3 linear_velocity;
+  struct RbVec3 angular_velocity;
+  uint32_t internal_value;
+} RbImpactorDef;
+
 // Mass, centre of mass (body frame) and rotational inertia about the centre
 // (body frame, rows), Box3D `b3MassData`.
 typedef struct RbMassData {
@@ -1030,6 +1058,25 @@ struct RbDestructibleDef rbDefaultDestructibleDef(void);
 enum RbResult rbCreateDestructible(struct RbWorld *world,
                                    const struct RbDestructibleDef *def,
                                    RbDestructibleId *out);
+
+// Defaults in `coordinates`' units.
+struct RbImpactorDef rbDefaultImpactorDef(enum RbCoordinates coordinates);
+
+// Launch an impactor at a stress destructible (`RB_STRENGTH_STRESS`). It takes
+// part in the next step; `*out_index` names it for
+// `rbDestructible_GetImpactorBody`.
+enum RbResult rbDestructible_LaunchImpactor(struct RbWorld *world,
+                                            RbDestructibleId id,
+                                            const struct RbImpactorDef *def,
+                                            uint32_t *out_index);
+
+// The body of a launched impactor (null until the engine has made it, by the
+// end of the step after its launch at the latest). It moves like any body;
+// destroying the destructible removes it.
+enum RbResult rbDestructible_GetImpactorBody(struct RbWorld *world,
+                                             RbDestructibleId id,
+                                             uint32_t index,
+                                             RbBodyId *out);
 
 enum RbResult rbDestroyDestructible(struct RbWorld *world, RbDestructibleId id);
 
