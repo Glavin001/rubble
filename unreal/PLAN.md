@@ -132,6 +132,18 @@ the fracture lab's threshold mode on the world's own device.
   64 break events. Cannonballs hole the house walls; the meteors break pieces off the tower roofs
   but rest on them.
 
+**Support loss (by decision, 2026-10-24; `?supportloss=0` turns it off).** The threshold model
+has no static solve, so a tower stood while one tie to its footings held: 16 balls of 22 t at
+60 m/s still left 8 columns and 12 wall pieces. `DestructibleDef::support_loss` (engine-world
+`support_loss.rs`, opt-in):
+- after a frame's breaks, each touched anchored piece's weight flows down its intact bonds to its
+  supports, and a bond carrying more than its compressive capacity breaks the next frame;
+- tipping: a piece whose centre of mass is outside the footprint of its loaded support bonds
+  loses them all and falls.
+In compression alone a tower holds on 2–3 of its 16 columns (13 MN against about 6.4 MN a column),
+so it is the tipping that brings one down. `Rubble.Video.Town` shoots tower A's column rows from
+the west, a volley a second (eight balls at 1.0 and 2.6 m), and it topples at about 3 s.
+
 Under bond joints, strikes broke nothing: under the pack's limits a 22 t meteor at 50 m/s broke
 no bond, in World and in the lab's own runner (`engine-viewer/tests/town_lab_meteor.rs`).
 
