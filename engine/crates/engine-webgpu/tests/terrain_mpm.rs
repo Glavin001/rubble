@@ -206,3 +206,89 @@ fn limits_fail_by_name() {
     let err = s.terrain_step(1, 1.0e-3, 0.0).unwrap_err();
     assert!(err.to_string().contains("CFL"), "{err}");
 }
+
+/// A heap of dry sand dropped on a flat bed spreads and comes to rest with its
+/// flanks at or below the friction angle (a granular pile cannot stand steeper
+/// than its angle of repose, which for cohesionless sand is about φ), and does
+/// not spread flat (it holds a slope near φ, unlike a fluid).
+#[test]
+fn a_sand_column_settles_at_or_below_its_friction_angle() {
+    use engine_terrain::{substeps_for, SandMaterial};
+    let mut s = sim();
+    let cfg = TerrainConfig {
+        max_particles: 1 << 18,
+        ..config()
+    };
+    s.terrain_enable(&cfg).unwrap();
+    let sand = SandMaterial::default();
+    s.terrain_set_material(Some(&sand)).unwrap();
+    let field = HeightField::new(65, 65, 0.0625, 0.0625, vec![0.0; 65 * 65]).unwrap();
+    let mut arena = HullArena::new();
+    let (_, bed) = s
+        .add_height_field(
+            &mut arena,
+            &field,
+            Vec3::new(0.0, -0.6, 0.0),
+            Quat::IDENTITY,
+            0,
+        )
+        .unwrap();
+    // A 0.4 m wide, 0.5 m tall column standing on the bed (y = -0.6).
+    let plan = RegionPlan::around(&cfg, Vec3::new(0.0, -0.3, 0.0), 1.2, 0.3, 0, 0).unwrap();
+    let h = plan.dx / 2.0;
+    let mut ps = Vec::new();
+    let (w, tall) = (0.4f32, 0.5f32);
+    let (nw, nt) = ((w / h).round() as i32, (tall / h).round() as i32);
+    for k in 0..nw {
+        for j in 0..nt {
+            for i in 0..nw {
+                let x = Vec3::new(-w / 2.0, -0.6, -w / 2.0)
+                    + (Vec3::new(i as f32, j as f32, k as f32) + 0.5) * h;
+                ps.push(MpmParticle::at_rest(x.to_array(), h * h * h, sand.density));
+            }
+        }
+    }
+    s.terrain_load(&plan, &ps, Some(bed), sand.friction_angle.tan())
+        .unwrap();
+    // 3 s at 60 Hz, substeps from the P-wave speed plus a 5 m/s flow bound.
+    let (n, dt) = substeps_for(&cfg, 1.0 / 60.0, plan.dx, sand.p_wave_speed(), 5.0).unwrap();
+    let mut last = 0.0;
+    let t0 = std::time::Instant::now();
+    for _ in 0..180 {
+        last = s.terrain_step(n, dt, -9.81).unwrap().max_speed;
+    }
+    let wall = t0.elapsed().as_secs_f32();
+    let out = s.terrain_particles();
+    // Height of the pile against distance from its axis: the top of the
+    // particles in rings of 2 cells.
+    let ring = 2.0 * plan.dx;
+    let mut top = vec![-0.6f32; 64];
+    for p in &out {
+        let r = (p.xm[0] * p.xm[0] + p.xm[2] * p.xm[2]).sqrt();
+        let k = ((r / ring) as usize).min(63);
+        top[k] = top[k].max(p.xm[1]);
+    }
+    let phi = sand.friction_angle.to_degrees();
+    let mut steepest = 0.0f32;
+    for k in 0..63 {
+        if top[k + 1] > -0.6 + 2.0 * plan.dx {
+            steepest = steepest.max(((top[k] - top[k + 1]) / ring).atan().to_degrees());
+        }
+    }
+    let peak = top.iter().cloned().fold(-1.0f32, f32::max) + 0.6;
+    eprintln!(
+        "pile: {} particles, peak {peak:.3} m, steepest flank {steepest:.1}° (φ = {phi:.0}°), \
+         max speed {last:.4} m/s, {n} substeps of {dt:.2e} s per frame, {:.1} ms per frame",
+        out.len(),
+        wall * 1e3 / 180.0
+    );
+    assert!(last < 0.05, "the pile is still moving at {last} m/s");
+    assert!(
+        steepest <= phi + 5.0,
+        "flank at {steepest}° stands steeper than φ = {phi}°"
+    );
+    assert!(
+        peak > 0.1,
+        "the pile spread flat (peak {peak} m): sand should hold a slope"
+    );
+}

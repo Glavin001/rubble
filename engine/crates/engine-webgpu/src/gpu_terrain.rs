@@ -5,7 +5,7 @@
 
 use super::WgpuSim;
 use engine_terrain::layout::*;
-use engine_terrain::{RegionPlan, TerrainConfig, TerrainError, BLOCK_CELLS};
+use engine_terrain::{RegionPlan, SandMaterial, TerrainConfig, TerrainError, BLOCK_CELLS};
 
 /// Host-side state of the terrain pool.
 pub(crate) struct TerrainState {
@@ -133,6 +133,27 @@ impl WgpuSim {
         Ok(())
     }
 
+    /// The loaded material's constitutive model: `None` carries no stress
+    /// (transfers only), `Some` is Drucker–Prager sand. Particles' masses are the
+    /// caller's (density × rest volume).
+    pub fn terrain_set_material(&mut self, material: Option<&SandMaterial>) -> anyhow::Result<()> {
+        let state = self.terrain_state()?;
+        match material {
+            None => {
+                state.params.counts[3] = MPM_MATERIAL_NONE;
+                state.params.sand = [0.0; 4];
+                state.wave_speed = 0.0;
+            }
+            Some(m) => {
+                m.validate()?;
+                state.params.counts[3] = MPM_MATERIAL_SAND;
+                state.params.sand = [m.lambda(), m.mu(), m.alpha(), m.cohesion];
+                state.wave_speed = m.p_wave_speed();
+            }
+        }
+        Ok(())
+    }
+
     /// Run `substeps` MPM substeps of `dt` under `gravity` (m/s² along y), in one
     /// submission. Fails if any substep overflowed a limit or a particle left the
     /// region (its state is then the GPU's as of the failure).
@@ -221,6 +242,10 @@ impl WgpuSim {
              more substeps (engine_terrain::substeps_for with a higher max_speed)",
             f32::from_bits(c[2]),
             params.limits[0]
+        );
+        anyhow::ensure!(
+            flags & MPM_INVALID == 0,
+            "a terrain particle's deformation or plastic state is not finite"
         );
         Ok(TerrainStepReport {
             blocks: c[0],

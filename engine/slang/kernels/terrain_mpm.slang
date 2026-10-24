@@ -21,6 +21,7 @@
 // must stay one cell inside the region's box (MPM_OUTSIDE otherwise: the host
 // fails the step; ejection to parcels is T4).
 #include "world_step.slang"
+#include "../physics/mpm_material.slang"
 
 static const uint MPM_GROUP = 64u;
 static const uint MPM_BLOCK = 4u;
@@ -35,9 +36,11 @@ static const uint MPM_OVERFLOW_BLOCKS = 1u;
 static const uint MPM_OVERFLOW_HASH = 2u;
 static const uint MPM_OUTSIDE = 4u;
 static const uint MPM_CFL = 8u;           // a particle outran the substep's speed bound
+static const uint MPM_INVALID = 16u;      // a particle's F or plastic state is not finite
 
 // Material kinds (params u0.w).
 static const uint MPM_MATERIAL_NONE = 0u; // no stress: transfers only (tests)
+static const uint MPM_MATERIAL_SAND = 1u; // Drucker–Prager sand (mpm_material.slang)
 
 struct MpmParams
 {
@@ -46,6 +49,7 @@ struct MpmParams
     uint4 counts;   // x = particles, y = hash slots (power of two), z = max blocks, w = material
     uint4 dims;     // xyz = region size in cells, w = bed heightfield collider (MPM_NO_BLOCK: none)
     float4 limits;  // x = largest particle speed the substep's dt allows (CFL)
+    float4 sand;    // λ, μ, α (friction), cohesion (log strain)
 };
 
 // Per particle (128 B).
@@ -317,10 +321,30 @@ void mpm_cell_sort(uint3 tid : SV_DispatchThreadID)
     }
 }
 
-// Kirchhoff stress τ of a particle (zero for MPM_MATERIAL_NONE).
-float3x3 mpmStress(MpmParticle q, MpmParams p)
+// Kirchhoff stress τ of particle q (zero for MPM_MATERIAL_NONE). Sand returns F
+// to the yield cone first (Klár et al. 2016), updating q's F and log Jp.
+float3x3 mpmStress(inout MpmParticle q, MpmParams p)
 {
-    return float3x3(0, 0, 0, 0, 0, 0, 0, 0, 0);
+    float3x3 zero = float3x3(0, 0, 0, 0, 0, 0, 0, 0, 0);
+    if (p.counts.w != MPM_MATERIAL_SAND) return zero;
+    float3x3 F = float3x3(q.f0.xyz, q.f1.xyz, q.f2.xyz);
+    if (!mpmSvdInputValid(F) || !mpmSandInputValid(float3(1, 1, 1), q.vj.w))
+    {
+        AOR2(gMpmCounters[MPM_C_FLAGS], MPM_INVALID);
+        return zero;
+    }
+    float3x3 U, V;
+    float3 sigma;
+    mpmSvd3(F, U, sigma, V);
+    float3 s;
+    float logJp;
+    mpmSandProject(sigma, q.vj.w, p.sand.z, p.sand.w, p.sand.x, p.sand.y, s, logJp);
+    F = mul(U, mul(float3x3(s.x, 0, 0, 0, s.y, 0, 0, 0, s.z), transpose(V)));
+    q.f0.xyz = F[0];
+    q.f1.xyz = F[1];
+    q.f2.xyz = F[2];
+    q.vj.w = logJp;
+    return mpmHenckyKirchhoff(U, s, p.sand.x, p.sand.y);
 }
 
 [shader("compute")]
@@ -333,11 +357,14 @@ void mpm_payload(uint3 tid : SV_DispatchThreadID)
     if (blocks == 0u) return;
     uint total = ALOAD(gMpmBlocks[4u * (blocks - 1u) + 2u]) + ALOAD(gMpmBlocks[4u * (blocks - 1u) + 1u]);
     if (s >= total) return;
-    MpmParticle q = gMpmParticles[gMpmSorted[s]];
+    uint id = gMpmSorted[s];
+    MpmParticle q = gMpmParticles[id];
     float m = q.xm.w;
     float dx = p.origin.w;
     float3x3 C = float3x3(q.c0.xyz, q.c1.xyz, q.c2.xyz);
-    float3x3 A = C * m - mpmStress(q, p) * (p.step.x * q.f0.w * 4.0 / (dx * dx));
+    float3x3 tau = mpmStress(q, p);
+    if (p.counts.w != MPM_MATERIAL_NONE) gMpmParticles[id] = q;
+    float3x3 A = C * m - tau * (p.step.x * q.f0.w * 4.0 / (dx * dx));
     MpmPayload o;
     o.xm = q.xm;
     o.mv = float4(q.vj.xyz * m, 0.0);

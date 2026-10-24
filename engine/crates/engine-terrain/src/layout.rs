@@ -21,12 +21,15 @@ pub const MPM_BINDING_END: usize = 46;
 pub const MPM_NO_BED: u32 = u32::MAX;
 /// `MpmParams.counts.w`: no stress (transfers only).
 pub const MPM_MATERIAL_NONE: u32 = 0;
+/// `MpmParams.counts.w`: Drucker–Prager sand.
+pub const MPM_MATERIAL_SAND: u32 = 1;
 
 /// Counter flags (`gMpmCounters[1]`).
 pub const MPM_OVERFLOW_BLOCKS: u32 = 1;
 pub const MPM_OVERFLOW_HASH: u32 = 2;
 pub const MPM_OUTSIDE: u32 = 4;
 pub const MPM_CFL: u32 = 8;
+pub const MPM_INVALID: u32 = 16;
 
 /// Block coordinates are packed in 10 bits per axis.
 pub const MPM_MAX_BLOCKS_PER_AXIS: u32 = 1024;
@@ -44,6 +47,8 @@ pub struct MpmParams {
     pub dims: [u32; 4],
     /// x: largest particle speed the substep's dt allows (CFL); y, z, w unused.
     pub limits: [f32; 4],
+    /// Sand: λ, μ, α (friction), cohesion (log strain).
+    pub sand: [f32; 4],
 }
 
 /// One particle (128 B).
