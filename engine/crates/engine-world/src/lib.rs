@@ -677,8 +677,16 @@ impl World {
         let i = self.live_body(id)?;
         let b = self.sim.read_body(id.index());
         let solver = Transform::new(b.position, b.orientation);
+        // The live pose is in the live solver frame: a threshold piece's may have changed
+        // in a step whose readback is still pending (a split on the GPU).
+        #[cfg(feature = "stress")]
+        let frame = self
+            .threshold_live_frame(id.index())
+            .unwrap_or_else(|| self.bodies[i].frame());
+        #[cfg(not(feature = "stress"))]
+        let frame = self.bodies[i].frame();
         Ok(BodyStateRead {
-            transform: self.bodies[i].frame().to_origin(solver),
+            transform: frame.to_origin(solver),
             linear_velocity: b.linear_vel,
             angular_velocity: b.angular_vel,
             awake: b.flags & engine_schema::BodyFlags::Sleeping as u32 == 0,

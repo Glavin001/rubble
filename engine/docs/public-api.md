@@ -855,7 +855,9 @@ oracle's `stress-gpu`, `stress-ref` and `stress-rubble`.
   inertia summed from its chunks. The step then reports `BondsBroken` and
   `Split` (the children partition the parent; one body per actor). Every
   piece's origin stays the instance frame, so `chunk_local` is the identity
-  and the render contract holds.
+  and the render contract holds. The blocking `read_body_state` converts a
+  piece's live GPU pose with the GPU's live frame record, since a step whose
+  readback is still pending may already have split it again.
 - **Projectiles.** `body_set_projectile(body, Some(Projectile))` adds a body
   with one sphere or box shape to strike prediction and gives its contacts
   the lab's shot loads. Other non-chunk colliders load chunks as static
@@ -880,8 +882,8 @@ oracle's `stress-gpu`, `stress-ref` and `stress-rubble`.
   `ThresholdWorld` on the same scene. The first break comes in the same frame
   with the same bond count in both. Afterwards the totals follow body-slot
   order (the lab parks 16 shots between its clusters and its spare slots).
-  The arch breaks 87 bonds in World against the lab's 92, both ending at 17
-  bodies; the house ends at 104 bodies against 95 (50 bonds against 21). Each
+  The arch breaks 125 bonds into 25 bodies in World against the lab's 139
+  into 28; the house breaks 58 bonds into 107 bodies against 63 into 109. Each
   new piece starts where its parent was. `engine-ffi/tests/threshold.rs` runs both
   scenes through the C ABI in Unreal coordinates.
 - **Shaders.** The kernels run as WGSL on World's device, as in the browser.
