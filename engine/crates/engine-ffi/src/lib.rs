@@ -1019,7 +1019,14 @@ impl RbWorld {
                     ev.destructible = destructible.to_bits();
                     let mut actor = |a: &ActorInfo| {
                         let chunks = a.chunks.clone();
-                        let bodies: Vec<RbBodyId> = a.bodies.iter().map(|b| b.to_bits()).collect();
+                        // One body per chunk, as RbActor promises: a threshold piece is one body
+                        // for all its chunks.
+                        let bodies: Vec<RbBodyId> = if a.bodies.len() == chunks.len() {
+                            a.bodies.iter().map(|b| b.to_bits()).collect()
+                        } else {
+                            let one = a.bodies.first().map_or(0, |b| b.to_bits());
+                            vec![one; chunks.len()]
+                        };
                         let out = RbActor {
                             chunks: chunks.as_ptr(),
                             bodies: bodies.as_ptr(),
