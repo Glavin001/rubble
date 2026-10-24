@@ -9,6 +9,13 @@
 | Destructibles | the rigid budget above, as chunks of many structures |
 | Frame rate | 60–120 FPS: **16.7–8.3 ms per frame**, shared by physics and rendering on one GPU |
 
+## Hard requirements
+
+- **Nanite and Lumen stay on.** The bodies feed Unreal through its own primitive paths (GPU
+  Scene instances, skeletal meshes), never a custom vertex factory.
+- **Every Unreal platform.** Mac (Metal), Windows (D3D12, Vulkan), Linux (Vulkan), consoles and
+  mobile. Anything API-specific is a stepping stone, not the design.
+
 ## The rule this sets
 
 **Per-body and per-vertex data never touches the CPU.** At 100k bodies, 60 ns of CPU work
@@ -44,20 +51,23 @@ Render graph (RDG), one GPU, one device:
 ### 1. Rubble's buffers live on Unreal's GPU device
 
 The renderers in sections 2–4 are compute passes inside Unreal's render graph, so Rubble's pose,
-chunk and skin buffers must be on Unreal's device. There are two hosts, and the renderers don't
-care which one filled the buffers.
+chunk and skin buffers must be on Unreal's device. **The host that reaches every platform is the
+render-graph replayer** (below): Rubble's Slang compiled to HLSL goes through Unreal's own shader
+pipeline, which cross-compiles to Metal, D3D12, Vulkan, the consoles and mobile.
 
-- **Interim, and first: Rubble's wgpu on Unreal's Metal device.**
-  - The Metal RHI exposes `RHIGetDevice()` and `RHIRunOnQueue()`. wgpu-hal can wrap an existing
-    `MTL::Device`, queue and buffer.
-  - Unreal allocates the output buffers (RDG external buffers). Rubble writes into them through
-    imported wgpu buffers.
-  - Submissions go on Unreal's queue, so Metal's queue order replaces cross-device fences.
-  - The whole `rubble::World` API keeps working unchanged.
-- **End state: Rubble's plan replayed in the render graph,** described below. This needs
-  `World`'s uploads routed through a backend trait instead of wgpu, a large Rust change.
+**The Metal bridge is a development stepping stone only.** Rubble's wgpu runs on Unreal's
+`MTL::Device` and command queue (wgpu-hal `device_from_raw`, `queue_from_raw`,
+`buffer_from_raw`), and Rubble copies its outputs into buffers Unreal owns. It lets the renderers
+be built and verified on a Mac before the replayer exists. It does not generalise:
 
-#### The render-graph replayer (end state)
+| Platform | Interop through wgpu | Why it isn't the design |
+|---|---|---|
+| Mac (Metal) | works (`engine-webgpu` `metal_interop`) | Mac only |
+| Windows (D3D12) | wgpu-hal `from_raw` exists | Rubble has never run on wgpu's D3D12 backend; needs cross-queue `ID3D12Fence` sync |
+| Windows and Linux (Vulkan) | wgpu-hal `device_from_raw` exists | `VkQueue` is not thread-safe: submit on Unreal's RHI thread or add timeline semaphores |
+| Consoles, mobile | none | wgpu does not run there |
+
+#### The render-graph replayer (the cross-platform host)
 
 Rubble already writes each step as a list of commands that no host owns:
 `engine_exec::rigid_plan::encode_step` and the fracture `Planner`. Every host replays that
@@ -104,6 +114,18 @@ the transforms come from changes:
 A custom vertex factory was the first draft. It was rejected because it loses Nanite and Lumen's
 full participation, and every future Unreal feature would need porting to it.
 
+**Lumen and GPU-only instances: a hybrid.** In 5.8, Lumen's distance-field scene and mesh cards
+exclude primitives with GPU-only instance data (`DistanceFieldObjectManagement.cpp`,
+`LumenScene.cpp` and `LumenMeshCards.cpp` check `!IsInstanceDataGPUOnly()`). Such bodies are
+still lit by Lumen (GI, reflections, screen traces) and keep Nanite and VSM, but they don't
+occlude or bounce light in Lumen's world-space tracing. Lumen culls small objects there anyway,
+and 100k moving distance fields would not fit in a frame. So:
+
+- **Large bodies** (vehicles, wall and roof sections, anything above a size threshold) use
+  ordinary, CPU-visible instance data and take part in Lumen fully. They are few, so the CPU
+  cost is small: their poses come from the compact readback.
+- **Small debris**, the bulk of the 100k, use GPU-only instances written by the compute pass.
+
 ### 3. Destructibles: chunks as GPU Scene instances
 
 - **Each chunk is an instance of its own chunk mesh,** written by the same pass as chunk
@@ -116,23 +138,45 @@ full participation, and every future Unreal feature would need porting to it.
 - **A split never touches the CPU;** chunks just read another body's pose. Split, bond and hit
   events still reach the CPU, compacted, for dust, audio and gameplay.
 
-### 4. Soft-body vehicles: Unreal's Deformer Graph, with Rubble's skin kernel
+### 4. Soft-body vehicles: Nanite skeletal meshes with exact affine bones
 
-- **Each car is a skeletal mesh** carrying the detailed flexbody render mesh, with a
-  `UMeshDeformer` (Deformer Graph / Optimus). Its compute kernel is Rubble's `soft_skin`,
-  compiled to HLSL. The kernel reads the car's node positions from Rubble's buffer and writes
-  deformed positions and normals into the GPU skin cache.
-- **The car gets everything a skinned mesh gets:** ray-traced dynamic geometry for Lumen,
-  virtual shadow maps, motion vectors, the material system. Strain goes to a vertex-colour
-  output that drives the dent and scratch mask. Torn triangles collapse in the kernel, so index
-  buffers are never rebuilt.
-- **The kernel runs once per rendered frame,** not once per physics substep.
-- **Render LOD only:** near cars use the full flexbody mesh, far cars the collision skin. The
-  simulation is identical at every distance.
-- **Expected cost:** 200 cars × 20k vertices = 4M vertices at three nodes each, about 1–2 ms a
-  frame.
-- **Open question:** Nanite for deformed meshes depends on 5.8's Nanite-skinning support for
-  deformers. Without it, cars are non-Nanite skinned meshes, which still get the features above.
+**Rubble's skin is exactly bone skinning.** `soft_skin` places each render vertex in a frame of
+three nodes (centre c, nodes x and y), with coefficients fixed at bind time:
+`v = c + a(x−c) + b(y−c) + d((x−c)×(y−c))`. With F = [x−c, y−c, (x−c)×(y−c)] now and F₀ at rest,
+that is `v = M v₀ + t`, where `M = F F₀⁻¹` and `t = c − M c₀`: an affine bone transform applied to
+the rest vertex with weight 1. So:
+
+- **Each car is a Nanite skeletal mesh.** It has one bone per distinct binding frame (a few
+  hundred to a couple of thousand per car) and one weight-1 influence per vertex. Nanite's bone
+  skinning reproduces Rubble's deformed positions exactly.
+- **The bone matrices are computed on the GPU** by a small Rubble Slang kernel (`soft_frames`,
+  the same formula as `soft_skin`), from node positions in place. They reach Nanite through
+  Unreal's GPU-only transform provider: `UTransformProviderData` and
+  `FTransformProviderRenderProxy`, public in 5.8, the hook instanced and Nanite skinning use.
+  Nothing per car goes through the CPU.
+- **The vehicle assets are built in the editor,** because Nanite data has no runtime build. A
+  commandlet builds each vehicle type's skeletal mesh from Rubble's flexbody render mesh and its
+  bindings: bones, rigid weights, Nanite on. The bindings are deterministic from the descriptor
+  and the mesh.
+- **Damage and tearing go through UV-space textures,** since Nanite skinned meshes take no
+  per-vertex dynamic attributes. Each frame a compute pass splats Rubble's per-vertex strain and
+  torn flags into a small texture in the car's UV layout:
+  - the paint material samples strain for dents and scratches;
+  - a masked Nanite material (programmable raster, cars only) clips torn regions.
+- **Normals are the only approximation.** Bone skinning carries rest normals through each bone's
+  matrix, while Rubble smooths normals over the deformed neighbours. They agree until panels
+  shear. If the difference shows, the UV texture carries a normal correction. Measure first.
+- **Lumen** treats the cars as skinned meshes: screen traces, and hardware ray tracing through
+  its deformed fallback when enabled.
+- **Expected cost:** 200 cars × about 1,000 bones × 48 B is under 10 MB of bone matrices a frame.
+  The splat pass grows with vertices, but only for visible cars.
+
+**Fallback: Deformer Graph.** A `UMeshDeformer` kernel running `soft_skin` gives the exact skin
+through the GPU skin cache, without Nanite. It is used where Nanite isn't available (mobile) and
+as the reference that validates the bone path.
+
+**Needs from Rubble:** the skin bindings (node triple and rest frame per vertex) and the
+procedural car's flexbody mesh (`engine-softbody/src/visual.rs`) on the ABI.
 
 ### 5. What the CPU still reads back
 
@@ -192,17 +236,23 @@ CPU: under 2 ms of Rubble work, all of it per event.
 
 ## Phases
 
-1. **Rubble on Unreal's device.** wgpu over Unreal's `MTL::Device` and queue, with the output
-   buffers allocated by Unreal and imported into wgpu. Gate: the same poses as Rubble on its own
-   device, and Unreal reading them in a render-graph pass with no CPU copy. The render-graph
-   replayer (Slang → HLSL, plan replay) follows separately; the HLSL target is needed for
-   phase 4 anyway.
+1. **Rubble on Unreal's device.**
+   - **1a, the Metal bridge (development):** wgpu over Unreal's `MTL::Device` and queue, with
+     output buffers owned by Unreal. Gate: exported poses equal Rubble's own.
+   - **1b, the render-graph replayer (every platform):** Slang → HLSL, Unreal global shaders,
+     and the plan replayed in RDG behind a backend trait in `rubble::World`. Gate: bit-equal
+     poses against the wgpu host on the same GPU.
 2. **The GPU Scene rigid renderer:** GPU-only instanced primitives per bucket, with poses
    written by `UpdatePrimitiveInstancesFromCompute`. Gate: 100k bodies drawn with less than
    0.2 ms of CPU, with Nanite and Lumen still working.
 3. **The destructible renderer:** chunks as GPU Scene instances, with GPU chunk views.
-4. **Soft skinning through Deformer Graph,** running Rubble's `soft_skin` in HLSL, with render
-   LOD. Gate: 200 cars drawn with less than 0.5 ms of CPU.
+4. **Soft cars as Nanite skeletal meshes with exact affine bones:**
+   - the `soft_frames` kernel and a GPU transform provider;
+   - an editor commandlet that builds the vehicle assets;
+   - UV-space strain and tear textures.
+
+   Gate: 200 cars drawn with less than 0.5 ms of CPU, with positions equal to `soft_skin`'s.
+   Deformer Graph is the fallback.
 5. **Async-compute overlap and budget profiling.** Run one GPU workload at a time while
    measuring.
 

@@ -26,7 +26,7 @@ use coords::{Coords, RbCoordinates};
 use rubble::*;
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::ffi::{c_char, CStr, CString};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 pub const RB_VERSION_MAJOR: u32 = 0;
@@ -1080,55 +1080,129 @@ pub extern "C" fn rbDefaultWorldDef() -> RbWorldDef {
     }
 }
 
+fn world_def_of(d: &RbWorldDef) -> anyhow::Result<(WorldDef, Coords)> {
+    check_cookie(d.internal_value, "world def not from rbDefaultWorldDef")?;
+    let coords = Coords::new(d.coordinates);
+    let solver = AvbdParams {
+        dt: d.time_step,
+        iterations: d.iterations,
+        ..AvbdParams::default()
+    };
+    let world_def = WorldDef {
+        gravity: coords.linear_in(d.gravity.a()),
+        enable_sleep: d.enable_sleep,
+        user_data: d.user_data,
+        capacity: WorldCapacity {
+            max_bodies: d.max_bodies,
+            max_colliders: d.max_colliders,
+            max_contacts: d.max_contacts,
+            max_joints: d.max_joints,
+            max_candidates: d.max_candidates,
+            max_colors: WorldCapacity::small().max_colors,
+            max_commands: d.max_commands,
+            max_hull_vertices: d.max_hull_vertices,
+        },
+        contacts: match d.contacts {
+            RbContacts::RB_CONTACTS_PERSISTENT => ContactStorage::Persistent,
+            RbContacts::RB_CONTACTS_COMPACT => ContactStorage::Compact,
+            RbContacts::RB_CONTACTS_CANONICAL => ContactStorage::Canonical,
+        },
+        soft: d.enable_soft_bodies.then(SoftCapacity::default),
+        solver,
+        readback_frames: d.readback_frames,
+        backpressure: if d.drop_frames {
+            Backpressure::Drop
+        } else {
+            Backpressure::Block
+        },
+        ..WorldDef::default()
+    };
+    Ok((world_def, coords))
+}
+
+unsafe fn create_world(def: *const RbWorldDef, gpu: GpuContext, out: *mut *mut RbWorld) -> anyhow::Result<()> {
+    let d = read(def, "null world def")?;
+    let (world_def, coords) = world_def_of(&d)?;
+    let world = World::new(gpu, &world_def)?;
+    let boxed = Box::new(RbWorld {
+        world,
+        coords,
+        store: FrameStore::default(),
+        pending: VecDeque::new(),
+        linear_joints: Default::default(),
+    });
+    write(out, Box::into_raw(boxed))
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rbCreateWorld(def: *const RbWorldDef, out: *mut *mut RbWorld) -> RbResult {
+    guard_args(|| create_world(def, GpuContext::Default, out))
+}
+
+/// A world on the host renderer's Metal device and command queue (`MTLDevice*`,
+/// `MTLCommandQueue*`; Unreal: `IMetalDynamicRHI::RHIGetDevice` and `RHIRunOnQueue`). Its
+/// submissions go on that queue, ordered with the host's frames, and `rbWorld_ExportPoses`
+/// can write into the host's buffers. Apple platforms only (elsewhere `RB_UNSUPPORTED`).
+#[no_mangle]
+pub unsafe extern "C" fn rbCreateWorldOnMetal(
+    def: *const RbWorldDef,
+    mtl_device: *mut c_void,
+    mtl_command_queue: *mut c_void,
+    out: *mut *mut RbWorld,
+) -> RbResult {
+    #[cfg(target_vendor = "apple")]
+    {
+        guard_args(|| {
+            let (info, device, queue) = engine_webgpu::metal_interop::shared_device(mtl_device, mtl_command_queue)?;
+            create_world(def, GpuContext::Shared { info, device, queue }, out)
+        })
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        let _ = (def, mtl_device, mtl_command_queue, out);
+        guard_args(|| Err(anyhow::Error::new(Unsupported("rbCreateWorldOnMetal needs an Apple platform"))))
+    }
+}
+
+/// Copy every step's render poses into the host's GPU buffers (`MTLBuffer*` on the world's
+/// device, at byte offsets: hosts that sub-allocate pass their range). `current` gets the
+/// step's poses, `previous` the step before's: `bytes` of 32-byte records indexed by
+/// `rbBody_GetPoseIndex`, each `{ position xyz (f32), word, rotation xyzw (f32) }` **in
+/// Rubble's frame** (Y up, metres; the renderer applies the host's axis map). GPU copies in the
+/// step's own submission; nothing is read back.
+#[no_mangle]
+pub unsafe extern "C" fn rbWorld_ExportPoses(
+    world: *mut RbWorld,
+    current: *mut c_void,
+    current_offset: u64,
+    previous: *mut c_void,
+    previous_offset: u64,
+    bytes: u64,
+) -> RbResult {
     guard_args(|| {
-        let d = read(def, "null world def")?;
-        check_cookie(d.internal_value, "world def not from rbDefaultWorldDef")?;
-        let coords = Coords::new(d.coordinates);
-        let solver = AvbdParams {
-            dt: d.time_step,
-            iterations: d.iterations,
-            ..AvbdParams::default()
-        };
-        let world_def = WorldDef {
-            gravity: coords.linear_in(d.gravity.a()),
-            enable_sleep: d.enable_sleep,
-            user_data: d.user_data,
-            capacity: WorldCapacity {
-                max_bodies: d.max_bodies,
-                max_colliders: d.max_colliders,
-                max_contacts: d.max_contacts,
-                max_joints: d.max_joints,
-                max_candidates: d.max_candidates,
-                max_colors: WorldCapacity::small().max_colors,
-                max_commands: d.max_commands,
-                max_hull_vertices: d.max_hull_vertices,
-            },
-            contacts: match d.contacts {
-                RbContacts::RB_CONTACTS_PERSISTENT => ContactStorage::Persistent,
-                RbContacts::RB_CONTACTS_COMPACT => ContactStorage::Compact,
-                RbContacts::RB_CONTACTS_CANONICAL => ContactStorage::Canonical,
-            },
-            soft: d.enable_soft_bodies.then(SoftCapacity::default),
-            solver,
-            readback_frames: d.readback_frames,
-            backpressure: if d.drop_frames {
-                Backpressure::Drop
-            } else {
-                Backpressure::Block
-            },
-            ..WorldDef::default()
-        };
-        let world = World::new(GpuContext::Default, &world_def)?;
-        let boxed = Box::new(RbWorld {
-            world,
-            coords,
-            store: FrameStore::default(),
-            pending: VecDeque::new(),
-            linear_joints: Default::default(),
-        });
-        write(out, Box::into_raw(boxed))
+        let w = world_mut(world)?;
+        #[cfg(target_vendor = "apple")]
+        {
+            let device = w.world.device().clone();
+            let cur = engine_webgpu::metal_interop::import_buffer(&device, current, "host poses (current)")?;
+            let prev = engine_webgpu::metal_interop::import_buffer(&device, previous, "host poses (previous)")?;
+            w.world.export_poses(cur, current_offset, prev, previous_offset, bytes)
+        }
+        #[cfg(not(target_vendor = "apple"))]
+        {
+            let _ = (w, current, current_offset, previous, previous_offset, bytes);
+            Err(anyhow::Error::new(Unsupported("rbWorld_ExportPoses imports Metal buffers (Apple platforms)")))
+        }
+    })
+}
+
+/// A body's slot in the pose buffer and its exports.
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_GetPoseIndex(world: *mut RbWorld, body: RbBodyId, out: *mut u32) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let i = w.world.body_pose_index(BodyId::from_bits(body))?;
+        write(out, i)
     })
 }
 

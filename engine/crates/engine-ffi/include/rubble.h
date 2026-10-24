@@ -526,6 +526,31 @@ struct RbWorldDef rbDefaultWorldDef(void);
 
 enum RbResult rbCreateWorld(const struct RbWorldDef *def, struct RbWorld **out);
 
+// A world on the host renderer's Metal device and command queue (`MTLDevice*`,
+// `MTLCommandQueue*`; Unreal: `IMetalDynamicRHI::RHIGetDevice` and `RHIRunOnQueue`). Its
+// submissions go on that queue, ordered with the host's frames, and `rbWorld_ExportPoses`
+// can write into the host's buffers. Apple platforms only (elsewhere `RB_UNSUPPORTED`).
+enum RbResult rbCreateWorldOnMetal(const struct RbWorldDef *def,
+                                   void *mtl_device,
+                                   void *mtl_command_queue,
+                                   struct RbWorld **out);
+
+// Copy every step's render poses into the host's GPU buffers (`MTLBuffer*` on the world's
+// device, at byte offsets: hosts that sub-allocate pass their range). `current` gets the
+// step's poses, `previous` the step before's: `bytes` of 32-byte records indexed by
+// `rbBody_GetPoseIndex`, each `{ position xyz (f32), word, rotation xyzw (f32) }` **in
+// Rubble's frame** (Y up, metres; the renderer applies the host's axis map). GPU copies in the
+// step's own submission; nothing is read back.
+enum RbResult rbWorld_ExportPoses(struct RbWorld *world,
+                                  void *current,
+                                  uint64_t current_offset,
+                                  void *previous,
+                                  uint64_t previous_offset,
+                                  uint64_t bytes);
+
+// A body's slot in the pose buffer and its exports.
+enum RbResult rbBody_GetPoseIndex(struct RbWorld *world, RbBodyId body, uint32_t *out);
+
 void rbDestroyWorld(struct RbWorld *world);
 
 // Advance one fixed step. Never waits on results (see `rbWorld_Poll`).
