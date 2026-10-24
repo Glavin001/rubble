@@ -1001,6 +1001,16 @@ The design (2026-10-24):
 queries with `QueryFilter`, moved off the vehicle ray pool. Then capsule
 `cast_mover` and `collide_mover`.
 
+- *Shipped (2026-10-24):* `World::overlap_aabb(min, max, QueryFilter)`
+  (C `rbWorld_OverlapAABB`), Box3D's bounds overlap: a pass over colliders
+  after the step, with bounds refreshed to its final poses (as ray queries
+  do; lossless, tested), up to 32 queries and 8192 results per step,
+  sensors not reported; results in `Frame::overlap_results` /
+  `RbFrame::overlaps`. And `World::explode(ExplosionDef)` (C
+  `rbWorld_Explode`), Box3D's radial impulse: an early pass in steps that
+  have one, impulse per area times each collider's cross-section, full
+  inside the radius and fading over the falloff, waking what it reaches.
+
 - *Shipped first cut:* `World::cast_rays` (C: `rbWorld_CastRays`) queues
   closest-hit rays for the next step. They trace on the GPU against that
   step's final poses (they share the vehicle ray pool, whose ray count only

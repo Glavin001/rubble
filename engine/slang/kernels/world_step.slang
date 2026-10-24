@@ -5853,3 +5853,104 @@ void contact_events(uint3 tid : SV_DispatchThreadID)
     ASTORE(gScratchAtomics[w + 9u], asuint(n.y));
     ASTORE(gScratchAtomics[w + 10u], asuint(n.z));
 }
+
+// ----- overlap queries (P5) and explosions -------------------------------------
+// Fixed regions after the contact events (engine-schema QUERY_* / EXPLODE_*).
+static const uint QUERY_BASE = CONTACT_EVENT_BASE + 4u + CONTACT_EVENT_WORDS * CONTACT_EVENT_CAP;
+static const uint QUERY_CAP = 32u;
+static const uint QUERY_RESULT_BASE = QUERY_BASE + 4u + 8u * QUERY_CAP;
+static const uint QUERY_RESULT_CAP = 8192u;
+static const uint EXPLODE_BASE = QUERY_RESULT_BASE + 2u * QUERY_RESULT_CAP;
+
+// A collider's filter: category bits in the low half, mask bits in the high
+// half of `generation`; 0 = everything.
+uint colliderCategories(Collider c) { return c.generation == 0u ? 0xFFFFu : (c.generation & 0xFFFFu); }
+uint colliderMask(Collider c) { return c.generation == 0u ? 0xFFFFu : (c.generation >> 16u); }
+
+// Shapes whose bounds overlap each queued box (Box3D b3World_OverlapAABB,
+// with its query filter; sensors are not reported). One thread per collider,
+// after build_aabbs refreshed the bounds for the step's final poses. Reads
+// physics state only.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void overlap_query(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (i >= gCounters[0].colliderCount) return;
+    Collider col = gColliders[i];
+    if ((col.material & COLLIDER_SENSOR) != 0u) return;
+    if (col.shape == SHAPE_PLANE) return;
+    Aabb box = gAabbs[HOST_S(1) + i];
+    uint n = min(ALOAD(gScratchAtomics[QUERY_BASE]), QUERY_CAP);
+    for (uint q = 0u; q < n; q++)
+    {
+        uint w = QUERY_BASE + 4u + 8u * q;
+        float3 mn = float3(asfloat(ALOAD(gScratchAtomics[w])), asfloat(ALOAD(gScratchAtomics[w + 1u])),
+                           asfloat(ALOAD(gScratchAtomics[w + 2u])));
+        uint categories = ALOAD(gScratchAtomics[w + 3u]);
+        float3 mx = float3(asfloat(ALOAD(gScratchAtomics[w + 4u])), asfloat(ALOAD(gScratchAtomics[w + 5u])),
+                           asfloat(ALOAD(gScratchAtomics[w + 6u])));
+        uint mask = ALOAD(gScratchAtomics[w + 7u]);
+        if ((colliderCategories(col) & mask) == 0u || (colliderMask(col) & categories) == 0u) continue;
+        if (any(box.mx < mn) || any(box.mn > mx)) continue;
+        uint slot;
+        AADD3(gScratchAtomics[QUERY_BASE + 1u], 1u, slot);
+        if (slot >= QUERY_RESULT_CAP) return;
+        ASTORE(gScratchAtomics[QUERY_RESULT_BASE + 2u * slot], q);
+        ASTORE(gScratchAtomics[QUERY_RESULT_BASE + 2u * slot + 1u], i);
+    }
+}
+
+// Radial impulses (Box3D b3World_Explode), at the start of a step that has
+// them: every collider of a dynamic body within radius + falloff of a queued
+// explosion takes impulse-per-area x its cross-section (pi r^2 of its bounding
+// radius), full strength inside the radius and fading linearly to zero over
+// the falloff, pushed away from the centre at the collider's centre. The body
+// wakes. One thread per body (colliders are sorted by body).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void explode(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (i >= gCounters[0].bodyCount) return;
+    BodyState b = gBodies[i];
+    if ((b.flags & BODY_DYNAMIC) == 0u || b.invMass <= 0.0 || bodyIsKinematic(b)) return;
+    uint n = min(ALOAD(gScratchAtomics[EXPLODE_BASE]), 16u);
+    bool hit = false;
+    uint count = gCounters[0].colliderCount;
+    for (uint c = firstColliderOfBody(i); c < count && gColliders[c].body == i; c++)
+    {
+        Collider col = gColliders[c];
+        if ((col.material & COLLIDER_SENSOR) != 0u) continue;
+        float3 centre = b.position + quatRotate(b.orientation, col.localPos);
+        float r = col.params.w;
+        for (uint e = 0u; e < n; e++)
+        {
+            uint w = EXPLODE_BASE + 4u + 8u * e;
+            float3 at = float3(asfloat(ALOAD(gScratchAtomics[w])), asfloat(ALOAD(gScratchAtomics[w + 1u])),
+                               asfloat(ALOAD(gScratchAtomics[w + 2u])));
+            float radius = asfloat(ALOAD(gScratchAtomics[w + 3u]));
+            float falloff = asfloat(ALOAD(gScratchAtomics[w + 4u]));
+            float perArea = asfloat(ALOAD(gScratchAtomics[w + 5u]));
+            uint mask = ALOAD(gScratchAtomics[w + 6u]);
+            if ((colliderCategories(col) & mask) == 0u) continue;
+            float3 off = centre - at;
+            float dist = length(off);
+            float d = max(dist - r, 0.0);
+            float scale = d <= radius ? 1.0 : (falloff > 0.0 ? max(0.0, 1.0 - (d - radius) / falloff) : 0.0);
+            if (scale <= 0.0) continue;
+            float3 dir = dist > 1e-6 ? off / dist : float3(0.0, 1.0, 0.0);
+            float3 j = dir * (scale * perArea * 3.14159265 * r * r);
+            b.linearVel = b.linearVel + j * b.invMass;
+            b.angularVel = b.angularVel + invInertiaWorld(b, cross(centre - b.position, j));
+            hit = true;
+        }
+    }
+    if (!hit) return;
+    b.flags = (b.flags & ~BODY_SLEEPING) | BODY_AWAKE;
+    b.sleepTimer = 0.0;
+    gBodies[i].linearVel = b.linearVel;
+    gBodies[i].angularVel = b.angularVel;
+    gBodies[i].flags = b.flags;
+    gBodies[i].sleepTimer = b.sleepTimer;
+}

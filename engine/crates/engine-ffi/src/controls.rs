@@ -772,6 +772,81 @@ pub unsafe extern "C" fn rbCreatePlaneShape(
     })
 }
 
+// ----- queries and explosions -------------------------------------------------------
+
+/// Shapes whose bounds overlap the box `min..max` at the next step's final
+/// poses (Box3D `b3World_OverlapAABB`; sensors are not reported), filtered as
+/// Box3D's query filter: a shape is reported when its categories meet
+/// `mask_bits` and its mask meets `category_bits`. The result arrives in that
+/// step's frame (`RbFrame::overlaps`, matched by `*out_query`).
+#[no_mangle]
+pub unsafe extern "C" fn rbWorld_OverlapAABB(
+    world: *mut RbWorld,
+    min: RbVec3,
+    max: RbVec3,
+    category_bits: u16,
+    mask_bits: u16,
+    out_query: *mut u64,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let (lo, hi) = w.coords.box_in(min.a(), max.a());
+        let filter = QueryFilter {
+            categories: category_bits,
+            mask: mask_bits,
+        };
+        let id = w.world.overlap_aabb(lo, hi, filter)?;
+        write(out_query, id.0)
+    })
+}
+
+/// A radial impulse (Box3D `b3ExplosionDef`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RbExplosionDef {
+    pub position: RbVec3,
+    /// Full strength within this distance of a shape's surface.
+    pub radius: f32,
+    /// Then fading linearly to zero over this distance.
+    pub falloff: f32,
+    /// Impulse per unit of a shape's cross-section.
+    pub impulse_per_area: f32,
+    pub mask_bits: u16,
+}
+
+#[no_mangle]
+pub extern "C" fn rbDefaultExplosionDef() -> RbExplosionDef {
+    let d = ExplosionDef::default();
+    RbExplosionDef {
+        position: RbVec3::default(),
+        radius: d.radius,
+        falloff: d.falloff,
+        impulse_per_area: d.impulse_per_area,
+        mask_bits: d.mask,
+    }
+}
+
+/// A radial impulse at the start of the next step (Box3D `b3World_Explode`);
+/// bodies it reaches wake. Up to 16 per step.
+#[no_mangle]
+pub unsafe extern "C" fn rbWorld_Explode(
+    world: *mut RbWorld,
+    def: *const RbExplosionDef,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let d = read(def, "null explosion def")?;
+        let c = w.coords;
+        w.world.explode(&ExplosionDef {
+            position: c.position_in(d.position.a()),
+            radius: c.length_in(d.radius),
+            falloff: c.length_in(d.falloff),
+            impulse_per_area: c.impulse_per_area_in(d.impulse_per_area),
+            mask: d.mask_bits,
+        })
+    })
+}
+
 // ----- debug draw ------------------------------------------------------------------
 
 #[repr(C)]

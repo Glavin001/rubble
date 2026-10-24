@@ -177,6 +177,8 @@ pub struct Frame {
     pub contact_events: ContactEvents,
     /// Shapes that entered or left sensors this step.
     pub sensor_events: SensorEvents,
+    /// Overlap queries queued before this step.
+    pub overlap_results: Vec<crate::OverlapResult>,
     /// Records overwritten in the GPU event ring before they were read (more
     /// than it holds between two frames). Never silently zero.
     pub lost_events: u32,
@@ -211,6 +213,8 @@ pub struct CoalescedFrame {
     /// Every step's contact events, in step order.
     pub contact_events: ContactEvents,
     pub sensor_events: SensorEvents,
+    /// Every overlap query's results.
+    pub overlap_results: Vec<crate::OverlapResult>,
     pub lost_events: u32,
     /// Any folded step's readback was dropped (a later one resynced it).
     pub dropped: bool,
@@ -265,6 +269,7 @@ pub fn coalesce(frames: Vec<Frame>) -> CoalescedFrame {
         out.contact_events.hits.extend(f.contact_events.hits);
         out.sensor_events.begin.extend(f.sensor_events.begin);
         out.sensor_events.end.extend(f.sensor_events.end);
+        out.overlap_results.extend(f.overlap_results);
         out.lost_events += f.lost_events;
         out.dropped |= f.dropped;
         if f.counters.is_some() {

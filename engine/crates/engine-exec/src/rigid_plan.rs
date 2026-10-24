@@ -102,6 +102,8 @@ pub struct StepInputs {
     pub soft: SoftCounts,
     /// Host commands in binding 8 (`apply_commands` runs first when non-zero).
     pub command_count: u32,
+    /// Queued explosions (`explode` runs after the commands when non-zero).
+    pub explosion_count: u32,
 }
 
 /// Largest particle colour `soft_primal_fused` (one 256-lane workgroup) takes;
@@ -266,6 +268,9 @@ pub fn encode_step(
     if i.command_count > 0 {
         // Host commands land before anything reads body state this step.
         e.d("apply_commands", u64::from(i.command_count));
+    }
+    if i.explosion_count > 0 {
+        e.d("explode", n_bodies);
     }
     let vehicles = i.vehicle_count > 0;
     if vehicles {
@@ -1003,6 +1008,7 @@ mod tests {
             wheel_count: 0,
             soft: SoftCounts::default(),
             command_count: 0,
+            explosion_count: 0,
         }
     }
 

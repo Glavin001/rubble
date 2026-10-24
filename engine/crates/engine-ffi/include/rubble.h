@@ -313,6 +313,13 @@ typedef struct RbSensorEvent {
   RbShapeId visitor_shape;
 } RbSensorEvent;
 
+// An overlap query's shapes (`RbFrame::overlaps`).
+typedef struct RbOverlapResult {
+  uint64_t query;
+  const RbShapeId *shapes;
+  uint32_t shape_count;
+} RbOverlapResult;
+
 // Results of one step, or of several folded together (`rbWorld_Poll`).
 // Pointers stay valid until the next poll.
 typedef struct RbFrame {
@@ -350,6 +357,9 @@ typedef struct RbFrame {
   uint32_t sensor_begin_count;
   const struct RbSensorEvent *sensor_end;
   uint32_t sensor_end_count;
+  // Overlap queries queued with `rbWorld_OverlapAABB` before these steps.
+  const struct RbOverlapResult *overlaps;
+  uint32_t overlap_count;
 } RbFrame;
 
 // A ray to cast: from `origin` along `translation` (its length is the range).
@@ -567,6 +577,18 @@ typedef struct RbSoftDamage {
   // Riding its rigid core right now (rigid mode).
   bool rigid;
 } RbSoftDamage;
+
+// A radial impulse (Box3D `b3ExplosionDef`).
+typedef struct RbExplosionDef {
+  struct RbVec3 position;
+  // Full strength within this distance of a shape's surface.
+  float radius;
+  // Then fading linearly to zero over this distance.
+  float falloff;
+  // Impulse per unit of a shape's cross-section.
+  float impulse_per_area;
+  uint16_t mask_bits;
+} RbExplosionDef;
 
 typedef struct RbColor {
   float r;
@@ -1031,6 +1053,24 @@ enum RbResult rbCreatePlaneShape(struct RbWorld *world,
                                  struct RbVec3 normal,
                                  float offset,
                                  RbShapeId *out);
+
+// Shapes whose bounds overlap the box `min..max` at the next step's final
+// poses (Box3D `b3World_OverlapAABB`; sensors are not reported), filtered as
+// Box3D's query filter: a shape is reported when its categories meet
+// `mask_bits` and its mask meets `category_bits`. The result arrives in that
+// step's frame (`RbFrame::overlaps`, matched by `*out_query`).
+enum RbResult rbWorld_OverlapAABB(struct RbWorld *world,
+                                  struct RbVec3 min,
+                                  struct RbVec3 max,
+                                  uint16_t category_bits,
+                                  uint16_t mask_bits,
+                                  uint64_t *out_query);
+
+struct RbExplosionDef rbDefaultExplosionDef(void);
+
+// A radial impulse at the start of the next step (Box3D `b3World_Explode`);
+// bodies it reaches wake. Up to 16 per step.
+enum RbResult rbWorld_Explode(struct RbWorld *world, const struct RbExplosionDef *def);
 
 // Draw every shape at its body's last polled pose, coloured by state
 // (static, awake, asleep) unless a material colour is set.

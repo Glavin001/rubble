@@ -145,6 +145,9 @@ const WORLD_ENTRIES: &[&str] = &[
     // Contact events (P4), canonical and persistent storage.
     "contact_events",
     "contact_events_persistent",
+    // Overlap queries (P5) and explosions.
+    "overlap_query",
+    "explode",
 ];
 
 const VEHICLE_ENTRIES: &[&str] = &[

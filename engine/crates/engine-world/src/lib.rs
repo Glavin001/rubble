@@ -28,6 +28,7 @@ mod events;
 mod handles;
 mod joints;
 mod math;
+mod queries;
 mod readback;
 mod rig;
 
@@ -56,6 +57,7 @@ pub use joints::{
     RevoluteJointDef, SphericalJointDef, Spring, WeldJointDef,
 };
 pub use math::Transform;
+pub use queries::{ExplosionDef, OverlapResult, QueryFilter, QueryId};
 pub use readback::Backpressure;
 pub use rig::{SoftBeam, VehicleDamage};
 
@@ -204,6 +206,8 @@ enum Extra {
     RayHits(Vec<(RayBatchId, u32, u32)>),
     /// This step's touching pairs of event-enabled shapes.
     Contacts,
+    /// The overlap query region, for these queries.
+    Overlaps(Vec<QueryId>),
 }
 
 #[derive(Clone, Debug)]
@@ -354,6 +358,7 @@ pub struct World {
     /// The adapter this world runs on (for helper worlds on its device).
     adapter: wgpu::AdapterInfo,
     contacts: contacts::ContactTracker,
+    queries: queries::QueryQueue,
     hit_event_threshold: f32,
     contact_storage: ContactStorage,
 }
@@ -417,6 +422,7 @@ impl World {
             last_counters: None,
             adapter,
             contacts: Default::default(),
+            queries: Default::default(),
             hit_event_threshold: def.hit_event_threshold,
             contact_storage: contacts,
             resync: false,
@@ -1395,6 +1401,15 @@ impl World {
         let rays = std::mem::take(&mut self.pending_rays);
         let batches = std::mem::take(&mut self.pending_batches);
         self.push_damping()?;
+        let explosions = std::mem::take(&mut self.queries.explosions);
+        if !explosions.is_empty() {
+            self.sim.write_explosions(&explosions)?;
+        }
+        let boxes = std::mem::take(&mut self.queries.boxes);
+        let query_ids = std::mem::take(&mut self.queries.ids);
+        if !boxes.is_empty() {
+            self.sim.write_overlap_queries(&boxes)?;
+        }
         let contact_events = self.contacts.enabled_shapes > 0;
         if contact_events {
             self.sim.clear_contact_events();
@@ -1417,8 +1432,10 @@ impl World {
         if ran {
             // Ray results are never dropped: a frame with queries waits for a slot.
             // Nor are contact events: a lost frame would break begin/end pairing.
-            let block =
-                self.backpressure == Backpressure::Block || !batches.is_empty() || contact_events;
+            let block = self.backpressure == Backpressure::Block
+                || !batches.is_empty()
+                || !query_ids.is_empty()
+                || contact_events;
             if !self.readback.has_free() && block {
                 self.wait_oldest()?;
             }
@@ -1443,6 +1460,16 @@ impl World {
                         buffer: self.sim.vehicle_pool_buffer(),
                         offset: u64::from(first) * 16,
                         size: u64::from(count) * 16,
+                    });
+                }
+                if !query_ids.is_empty() {
+                    self.sim.encode_overlap_queries(&mut enc);
+                    let (buffer, offset, size) = self.sim.overlap_result_range();
+                    extras.push(readback::Extra {
+                        kind: Extra::Overlaps(query_ids),
+                        buffer,
+                        offset,
+                        size,
                     });
                 }
                 if contact_events {
@@ -1692,10 +1719,16 @@ impl World {
         let mut ray_results = Vec::new();
         let mut contact_events = ContactEvents::default();
         let mut sensor_events = SensorEvents::default();
+        let mut overlap_results = Vec::new();
         let mut lost_contacts = 0;
         for (kind, bytes) in &raw.extras {
             match kind {
                 Extra::Resync => {}
+                Extra::Overlaps(ids) => {
+                    let (results, lost) = self.decode_overlaps(ids, bytes);
+                    overlap_results = results;
+                    lost_contacts += lost;
+                }
                 Extra::Contacts => {
                     (contact_events, sensor_events, lost_contacts) = self.decode_contacts(bytes);
                 }
@@ -1749,6 +1782,7 @@ impl World {
             ray_results,
             contact_events,
             sensor_events,
+            overlap_results,
             lost_events: ring.lost + lost_contacts,
             dropped: false,
             resynced: resync.is_some(),

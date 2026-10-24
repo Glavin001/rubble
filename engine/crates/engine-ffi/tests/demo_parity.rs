@@ -757,3 +757,83 @@ fn grab_and_drag_with_a_kinematic_mouse_body() {
         rbDestroyWorld(w);
     }
 }
+
+#[test]
+fn overlap_queries_and_explosions_in_unreal_units() {
+    unsafe {
+        let mut def = rbDefaultWorldDef();
+        def.coordinates = RbCoordinates::RB_COORDINATES_UNREAL;
+        def.gravity = v3(0.0, 0.0, -981.0);
+        let mut w = ptr::null_mut();
+        ok(rbCreateWorld(&def, &mut w));
+        let mut g = 0;
+        ok(rbCreateBody(w, &rbDefaultBodyDef(), &mut g));
+        let mut floor = 0;
+        ok(rbCreatePlaneShape(
+            w,
+            g,
+            &rbDefaultShapeDef(),
+            v3(0.0, 0.0, 1.0),
+            0.0,
+            &mut floor,
+        ));
+        let make = |x: f32, y: f32| {
+            let mut bd = rbDefaultBodyDef();
+            bd.type_ = RbBodyType::RB_DYNAMIC_BODY;
+            bd.transform.p = v3(x, y, 50.0);
+            let mut b = 0;
+            ok(rbCreateBody(w, &bd, &mut b));
+            let mut sd = rbDefaultShapeDef();
+            sd.density = 0.0005;
+            let mut s = 0;
+            ok(rbCreateBoxShape(
+                w,
+                b,
+                &sd,
+                v3(50.0, 50.0, 50.0),
+                RbTransform::default(),
+                &mut s,
+            ));
+            (b, s)
+        };
+        let (east, east_shape) = make(300.0, 0.0);
+        let (_far, far_shape) = make(3000.0, 0.0);
+        steps(w, 2);
+        // A box around the east crate only (above the floor).
+        let mut q = 0;
+        ok(rbWorld_OverlapAABB(
+            w,
+            v3(150.0, -150.0, 10.0),
+            v3(450.0, 150.0, 200.0),
+            0xFFFF,
+            0xFFFF,
+            &mut q,
+        ));
+        let f = steps(w, 1);
+        assert_eq!(f.overlap_count, 1);
+        let r = &*f.overlaps;
+        assert_eq!(r.query, q);
+        let shapes = std::slice::from_raw_parts(r.shapes, r.shape_count as usize);
+        assert_eq!(shapes, &[east_shape], "{shapes:?}");
+        assert!(!shapes.contains(&far_shape));
+        // An explosion at the origin pushes the east crate along +X.
+        let mut e = rbDefaultExplosionDef();
+        e.position = v3(0.0, 0.0, 50.0);
+        e.radius = 400.0;
+        e.falloff = 200.0;
+        e.impulse_per_area = 0.2; // kg cm/s per cm²
+        ok(rbWorld_Explode(w, &e));
+        steps(w, 1);
+        let (mut lin, mut ang) = (RbVec3::default(), RbVec3::default());
+        ok(rbBody_GetVelocity(w, east, &mut lin, &mut ang));
+        // 500 kg, bounding radius 86.6 cm: pi r² = 23562 cm² at 0.2 gives
+        // 4712 kg cm/s, so 9.42 cm/s.
+        let expected = 0.2 * std::f32::consts::PI * (3.0f32 * 50.0 * 50.0) / 500.0;
+        assert!(
+            (lin.x - expected).abs() < 0.03 * expected,
+            "pushed along +X: {lin:?} vs {expected}"
+        );
+        assert!(lin.y.abs() < 1e-3, "{lin:?}");
+        rbDestroyWorld(w);
+    }
+}

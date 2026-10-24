@@ -331,6 +331,7 @@ impl MetalSim {
             wheel_count: 0,
             soft: Default::default(),
             command_count: 0,
+            explosion_count: 0,
         }
     }
 

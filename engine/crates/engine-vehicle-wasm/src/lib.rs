@@ -574,6 +574,7 @@ impl RigidStep {
             wheel_count: wheels,
             soft,
             command_count: 0,
+            explosion_count: 0,
         }
     }
 

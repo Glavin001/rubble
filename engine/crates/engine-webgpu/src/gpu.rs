@@ -126,6 +126,8 @@ pub struct WgpuSim {
     pose_output: bool,
     /// Run `contact_events` each step (`set_contact_events`).
     contact_events: bool,
+    /// Explosions queued for the next step (`write_explosions`).
+    explosion_count: u32,
     /// The last `step*` call ran the GPU step (false: skipped, nothing awake).
     last_step_ran: bool,
     sleep_island_rounds: u32,
@@ -676,6 +678,7 @@ impl WgpuSim {
             command_count: 0,
             pose_output,
             contact_events: false,
+            explosion_count: 0,
             last_step_ran: false,
             sleep_island_rounds: 8,
             last_counters: StepCounters::default(),
@@ -1382,6 +1385,71 @@ impl WgpuSim {
         self.contact_events = enabled;
     }
 
+    /// Queue explosions for the next step (`explode` runs after the
+    /// commands): `(centre, radius, falloff, impulse per area, mask bits)`.
+    /// The step runs even if everything sleeps.
+    pub fn write_explosions(&mut self, explosions: &[([f32; 3], f32, f32, f32, u32)]) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            explosions.len() as u32 <= engine_schema::EXPLODE_CAP,
+            "{} explosions in one step exceed {}",
+            explosions.len(),
+            engine_schema::EXPLODE_CAP
+        );
+        let mut words = vec![explosions.len() as u32, 0, 0, 0];
+        for (c, radius, falloff, per_area, mask) in explosions {
+            words.extend([c[0].to_bits(), c[1].to_bits(), c[2].to_bits(), radius.to_bits()]);
+            words.extend([falloff.to_bits(), per_area.to_bits(), *mask, 0]);
+        }
+        let offset = u64::from(engine_schema::EXPLODE_BASE) * 4;
+        self.queue.write_buffer(&self.bufs[21], offset, bytemuck::cast_slice(&words));
+        self.explosion_count = explosions.len() as u32;
+        self.wake_pending = true;
+        Ok(())
+    }
+
+    /// Queue overlap queries (boxes, with their filter) for
+    /// [`Self::encode_overlap_queries`]: `(min, max, category bits, mask bits)`.
+    pub fn write_overlap_queries(&mut self, queries: &[([f32; 3], [f32; 3], u32, u32)]) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            queries.len() as u32 <= engine_schema::QUERY_CAP,
+            "{} overlap queries in one step exceed {}",
+            queries.len(),
+            engine_schema::QUERY_CAP
+        );
+        let mut words = vec![queries.len() as u32, 0, 0, 0];
+        for (mn, mx, categories, mask) in queries {
+            words.extend([mn[0].to_bits(), mn[1].to_bits(), mn[2].to_bits(), *categories]);
+            words.extend([mx[0].to_bits(), mx[1].to_bits(), mx[2].to_bits(), *mask]);
+        }
+        let offset = u64::from(engine_schema::QUERY_BASE) * 4;
+        self.queue.write_buffer(&self.bufs[21], offset, bytemuck::cast_slice(&words));
+        self.wake_pending = true;
+        Ok(())
+    }
+
+    /// After a step: refresh the bounds to its final poses and run the queued
+    /// overlap queries (reads physics state only).
+    pub fn encode_overlap_queries(&self, enc: &mut wgpu::CommandEncoder) {
+        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("overlap queries"),
+            timestamp_writes: None,
+        });
+        let n = u64::from(self.collider_count.max(1));
+        self.disp(&mut pass, "build_aabbs", n, None);
+        self.disp(&mut pass, "overlap_query", n, None);
+    }
+
+    /// The overlap results region: `[query count, result count, 0, 0]`, the
+    /// queries, then the results. Buffer, byte offset, size.
+    pub fn overlap_result_range(&self) -> (&wgpu::Buffer, u64, u64) {
+        let words = engine_schema::EXPLODE_BASE - engine_schema::QUERY_BASE;
+        (
+            &self.bufs[21],
+            u64::from(engine_schema::QUERY_BASE) * 4,
+            u64::from(words) * 4,
+        )
+    }
+
     /// Zero the contact-event count before a step (records are appended).
     pub fn clear_contact_events(&self) {
         let offset = u64::from(engine_schema::CONTACT_EVENT_BASE) * 4;
@@ -1813,6 +1881,7 @@ impl WgpuSim {
             self.contacts_parity ^= 1;
             self.steps_done = self.steps_done.saturating_add(1);
             self.command_count = 0;
+            self.explosion_count = 0;
             self.last_timings.total_gpu = wall.elapsed().as_secs_f64() * 1000.0;
             return Ok(self.last_counters);
         }
@@ -1820,6 +1889,7 @@ impl WgpuSim {
         self.contacts_parity ^= 1;
         self.steps_done = self.steps_done.saturating_add(1);
         self.command_count = 0;
+        self.explosion_count = 0;
         self.last_timings.total_gpu = wall.elapsed().as_secs_f64() * 1000.0;
         self.last_counters = counters;
         self.counted_steps = self.steps_done;
@@ -1941,6 +2011,7 @@ impl WgpuSim {
             wheel_count: self.vehicles.as_ref().map_or(0, |v| v.wheel_count()),
             soft: self.soft_counts(),
             command_count: self.command_count,
+            explosion_count: self.explosion_count,
         }
     }
 

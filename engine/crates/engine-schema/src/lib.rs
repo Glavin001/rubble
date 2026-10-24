@@ -263,9 +263,21 @@ pub const CONTACT_EVENT_WORDS: u32 = 12;
 pub const COLLIDER_CONTACT_EVENTS: u32 = 1 << 12;
 pub const COLLIDER_HIT_EVENTS: u32 = 1 << 13;
 pub const COLLIDER_SENSOR: u32 = 1 << 14;
+/// Overlap queries (P5): after the contact events, `[query count, result
+/// count (the host zeroes it), 0, 0]`, then `QUERY_CAP` queries of 8 words
+/// `[min, category bits]`, `[max, mask bits]`, then up to `QUERY_RESULT_CAP`
+/// results of 2 words `[query, collider]`.
+pub const QUERY_BASE: u32 = CONTACT_EVENT_BASE + 4 + CONTACT_EVENT_WORDS * CONTACT_EVENT_CAP;
+pub const QUERY_CAP: u32 = 32;
+pub const QUERY_RESULT_BASE: u32 = QUERY_BASE + 4 + 8 * QUERY_CAP;
+pub const QUERY_RESULT_CAP: u32 = 8192;
+/// Explosions (P4 `explode`): `[count, 0, 0, 0]`, then `EXPLODE_CAP` records
+/// of 8 words `[centre, radius]`, `[falloff, impulse per area, mask bits, 0]`.
+pub const EXPLODE_BASE: u32 = QUERY_RESULT_BASE + 2 * QUERY_RESULT_CAP;
+pub const EXPLODE_CAP: u32 = 16;
 /// Total `u32` words of the scratch-atomics buffer (host words, lists, ring,
-/// contact events).
-pub const SCRATCH_WORDS: u32 = CONTACT_EVENT_BASE + 4 + CONTACT_EVENT_WORDS * CONTACT_EVENT_CAP;
+/// contact events, queries, explosions).
+pub const SCRATCH_WORDS: u32 = EXPLODE_BASE + 4 + 8 * EXPLODE_CAP;
 /// Scratch word of the oversized-static count (uniform grid; see `LARGE_STATIC_CAP`).
 pub const LARGE_STATIC_COUNT: u32 = 80;
 /// First scratch word of the oversized-static collider ids, after the event ring.
