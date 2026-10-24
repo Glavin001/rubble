@@ -97,6 +97,15 @@ typedef enum RbBodyType {
   RB_DYNAMIC_BODY = 2,
 } RbBodyType;
 
+// How a destructible's bonds fail (`StrengthModel`).
+typedef enum RbStrengthModel {
+  // Breakable bond joints; every chunk is a body (the fracture lab's D6 mode).
+  RB_STRENGTH_BONDS = 0,
+  // The fracture lab's GPU threshold splitter: bonded clusters are bodies that
+  // split on the GPU (its `threshold` mode). Projectiles: `rbBody_SetProjectile`.
+  RB_STRENGTH_THRESHOLD = 1,
+} RbStrengthModel;
+
 typedef enum RbVehicleDamageType {
   // The wheel falls off as a free body.
   RB_DETACH_WHEEL = 0,
@@ -623,6 +632,7 @@ typedef struct RbDestructibleDef {
   bool start_asleep;
   float friction;
   uint64_t user_data;
+  enum RbStrengthModel model;
   uint32_t internal_value;
 } RbDestructibleDef;
 
@@ -685,6 +695,14 @@ typedef struct RbSoftDamage {
   // Riding its rigid core right now (rigid mode).
   bool rigid;
 } RbSoftDamage;
+
+// A projectile's material for threshold destructibles (`rbBody_SetProjectile`):
+// Young's modulus (Pa) and Poisson's ratio, in SI units in every coordinate
+// convention. The default is the fracture lab's steel.
+typedef struct RbProjectile {
+  float youngs_modulus;
+  float poisson_ratio;
+} RbProjectile;
 
 // A radial impulse (Box3D `b3ExplosionDef`).
 typedef struct RbExplosionDef {
@@ -1297,6 +1315,33 @@ enum RbResult rbWorld_PreloadDestructibleAsset(struct RbWorld *world,
 enum RbResult rbWorld_UseDestructibleAssetSolver(struct RbWorld *world,
                                                  RbDestructibleAssetId asset,
                                                  float *out_time_step);
+
+// Switch the world to the solver settings the asset's source was tuned with for
+// `model`: `rbWorld_UseDestructibleAssetSolver`'s for the bonds model; for the
+// threshold model the fracture lab's threshold mode's (never asleep, 4
+// iterations, 60 Hz; gravity included). `*out_time_step` receives the step.
+enum RbResult rbWorld_UseDestructibleAssetSolverFor(struct RbWorld *world,
+                                                    RbDestructibleAssetId asset,
+                                                    enum RbStrengthModel model,
+                                                    float *out_time_step);
+
+// The ground the asset's stress scene stands on (the fracture lab's ground
+// plane for the threshold model, which the host adds itself): a point on it in
+// the world's coordinates for an instance placed at the identity.
+// `*out_has_ground` is false when the scene has none.
+enum RbResult rbWorld_GetDestructibleAssetGround(struct RbWorld *world,
+                                                 RbDestructibleAssetId asset,
+                                                 bool *out_has_ground,
+                                                 struct RbVec3 *out_point);
+
+struct RbProjectile rbDefaultProjectile(void);
+
+// Mark a dynamic body with one sphere or box shape as a projectile for
+// threshold destructibles (null clears it): its contacts load chunks as the
+// lab's shots do and strike prediction checks it every step. At most 64.
+enum RbResult rbBody_SetProjectile(struct RbWorld *world,
+                                   RbBodyId body,
+                                   const struct RbProjectile *projectile);
 
 // An infinite ground plane on a static body: the half-space below
 // `normal · x = offset` in the body frame. At most 8 per world.
