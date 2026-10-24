@@ -384,6 +384,8 @@ typedef struct RbBodyDef {
   // `RB_LOCK_*` bits: axes (world, host frame) it may not move along or
   // turn about.
   uint32_t motion_locks;
+  // Continuous collision: never tunnels (projectiles, debris).
+  bool is_bullet;
   uint64_t user_data;
   uint32_t internal_value;
 } RbBodyDef;

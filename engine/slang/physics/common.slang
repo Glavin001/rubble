@@ -35,11 +35,12 @@ static const uint BODY_FOLLOW = 128u;
 // broadphase list and time-of-impact contacts. While registered for a step,
 // initialPad holds asfloat(CCD slot); vehicle chassis cannot be CCD bodies.
 static const uint BODY_CCD = 256u;
-// Kinematic bodies (BODY_KINEMATIC, no BODY_DYNAMIC): moved by their given
-// velocity each step, infinite mass; contacts see their motion.
 // Motion locks (world axes): bits 9..11 linear x, y, z; 12..14 angular x, y, z.
+// Read only by the lock_predict / lock_project passes.
 static const uint BODY_LOCK_SHIFT = 9u;
 static const uint BODY_LOCK_MASK = 0x7E00u;
+// Kinematic bodies (BODY_KINEMATIC, no BODY_DYNAMIC): moved by their given
+// velocity each step, infinite mass; contacts see their motion.
 
 struct Collider
 {

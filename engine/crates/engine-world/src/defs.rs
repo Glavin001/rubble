@@ -83,7 +83,9 @@ pub struct BodyDef {
     pub sleep_threshold: Option<f32>,
     /// Axes (world frame) the body may not move along or turn about.
     pub motion_locks: MotionLocks,
-    /// Continuous collision against everything (not yet supported on wgpu).
+    /// Continuous collision (the kernels' `BODY_CCD`): uncapped contact
+    /// reach, the fast broadphase list and a time-of-impact contact, so a
+    /// fast body never tunnels (projectiles, debris, vehicles at speed).
     pub is_bullet: bool,
     /// Not yet per body (sleep is per world); `false` is refused.
     pub enable_sleep: bool,
@@ -142,9 +144,6 @@ impl BodyDef {
         );
         if self.sleep_threshold.is_some() || !self.enable_sleep {
             return unsupported("per-body sleep settings (planned P3; sleep is per world)");
-        }
-        if self.is_bullet {
-            return unsupported("bullet bodies on wgpu (planned P3)");
         }
         if self.allow_fast_rotation {
             return unsupported("allow_fast_rotation (planned P3)");

@@ -120,13 +120,6 @@ void emitEvent(uint type, uint id, uint a, uint b)
 }
 
 bool bodyIsDynamic(BodyState b) { return b.invMass > 0.0 && (b.flags & BODY_DYNAMIC) != 0u; }
-// Motion locks: 1 keeps an axis free, 0 locks it (world axes).
-uint bodyLocks(BodyState b) { return (b.flags & BODY_LOCK_MASK) >> BODY_LOCK_SHIFT; }
-float3 lockedLinear(uint locks)
-{
-    return float3((locks & 1u) != 0u ? 0.0 : 1.0, (locks & 2u) != 0u ? 0.0 : 1.0, (locks & 4u) != 0u ? 0.0 : 1.0);
-}
-float3 lockedAngular(uint locks) { return lockedLinear(locks >> 3u); }
 bool bodyIsSleeping(BodyState b) { return (b.flags & BODY_SLEEPING) != 0u; }
 // Kinematic: moved by its given velocity (predict), never by the solver. It
 // counts as moving for contacts, bounds, the broadphase and wakes, while its
@@ -327,49 +320,6 @@ void apply_commands(uint3 tid : SV_DispatchThreadID)
     }
 }
 
-// predictOne for a body with motion locks: the same prediction with locked
-// velocity components and gravity zeroed (a separate function, so the
-// unlocked path compiles exactly as before on fast-math backends).
-void predictLocked(uint i, BodyState b, AvbdParams p)
-{
-    float dt = p.dt;
-    uint locks = bodyLocks(b);
-    float3 lin = lockedLinear(locks);
-    b.linearVel *= lin;
-    b.angularVel *= lockedAngular(locks);
-    float3 gravity = float3(0, p.gravityY, 0) * lin;
-    float3 prevVel = BODY_PREV(i).linearVel;
-    float3 accel = (b.linearVel - prevVel) / max(dt, 1e-8);
-    float accelExt = accel.y * sign(p.gravityY);
-    float accelWeight = clamp(accelExt / max(abs(p.gravityY), 1e-6), 0.0, 1.0);
-    float slow = length(b.linearVel) + length(b.angularVel) * 0.5;
-    bool startAtRest = slow < 0.1;
-    float3 inertialLin = b.position + b.linearVel * dt + gravity * (dt * dt);
-    float4 inertialAng = quatNormalize(
-        b.orientation + quatMul(float4(b.angularVel * dt, 0.0), b.orientation) * 0.5);
-    float3 x0 = b.position;
-    float4 q0 = b.orientation;
-    BODY_PREV(i).linearVel = b.linearVel;
-    if (!startAtRest && !wakePending(b))
-    {
-        // As predictOne: a CCD body with a time of impact starts at that pose.
-        float toi = min(ccdStartFraction(i, b), 1.0);
-        b.position = b.position + b.linearVel * (toi * dt) + gravity * (toi * accelWeight * dt * dt);
-        b.orientation = quatNormalize(
-            b.orientation + quatMul(float4(b.angularVel * (toi * dt), 0.0), b.orientation) * 0.5);
-    }
-    Aabb box;
-    box.mn = inertialLin;
-    box.mx = float3(inertialAng.x, inertialAng.y, inertialAng.z);
-    box._pad0 = inertialAng.w;
-    box._pad1 = 0.0;
-    gAabbs[i] = box;
-    gBodies[i].position = b.position;
-    gBodies[i].orientation = b.orientation;
-    gBodies[i].initialPos = x0;
-    gBodies[i].initialRot = q0;
-}
-
 void predictOne(uint i)
 {
     AvbdParams p = PARAMS;
@@ -391,11 +341,6 @@ void predictOne(uint i)
     // Sleeping/static: do not touch prev/pose (three-avbd mover compaction).
     if (!bodyIsDynamic(b) || bodyIsSleeping(b)) return;
     float dt = p.dt;
-    if (bodyLocks(b) != 0u)
-    {
-        predictLocked(i, b, p);
-        return;
-    }
     // Adaptive warm-start: (v - v_prev)/dt along up (three-avbd / VBD). gBodiesPrev still
     // holds the previous step's snapshot (incl. that step's incoming velocity).
     float3 prevVel = BODY_PREV(i).linearVel;
@@ -5279,53 +5224,10 @@ float3 bodyAngularVelocity(BodyState b, float dt)
     return dq.w < 0.0 ? -av : av;
 }
 
-// The Newton update of a body with motion locks: locked rows and columns
-// become identity, so their deltas are zero and the free axes solve
-// consistently. Leaves `b`'s pose updated; false when the step is rejected. A
-// separate function, so the unlocked path compiles as before on fast-math
-// backends; primalApply publishes either pose from the same two stores.
-bool primalLockedPose(uint bodyIdx, Mat6 A, Vec6 rhs, inout BodyState b)
-{
-    AvbdParams p = PARAMS;
-    uint locks = bodyLocks(b);
-    uint floors = 0;
-    Vec6 neg = rhs;
-    for (int k = 0; k < 6; k++)
-    {
-        neg.v[k] = -rhs.v[k];
-        if ((locks & (1u << uint(k))) == 0u) continue;
-        for (int j = 0; j < 6; j++)
-        {
-            A.m[k * 6 + j] = 0.0;
-            A.m[j * 6 + k] = 0.0;
-        }
-        A.m[k * 6 + k] = 1.0;
-        neg.v[k] = 0.0;
-    }
-    Vec6 dz = solve6x6(A, neg, p.pivotFloor, floors);
-    if (floors > 0) AADD2(gCounters[0].pivotFloorHits, floors);
-    float3 dlin = float3(dz.v[0], dz.v[1], dz.v[2]) * lockedLinear(locks);
-    float3 dang = float3(dz.v[3], dz.v[4], dz.v[5]) * lockedAngular(locks);
-    dlin = ccdTrustStep(bodyIdx, b, dlin);
-    float alen = length(dang);
-    if (alen > p.trustAng && alen > 1e-12) dang *= p.trustAng / alen;
-    if (dlin.x != dlin.x || dlin.y != dlin.y || dlin.z != dlin.z) return false;
-    if (dang.x != dang.x || dang.y != dang.y || dang.z != dang.z) return false;
-    b.position += dlin;
-    b.orientation = quatNormalize(b.orientation + quatMul(float4(dang, 0.0), b.orientation) * 0.5);
-    return true;
-}
-
 void primalApply(uint bodyIdx, Mat6 A, Vec6 rhs)
 {
     BodyState b = gBodies[bodyIdx];
     if (!bodyIsDynamic(b) || bodyIsSleeping(b) || wakePending(b) || (b.flags & BODY_FOLLOW) != 0u) return;
-    if (bodyLocks(b) != 0u)
-    {
-        if (!primalLockedPose(bodyIdx, A, rhs, b)) return;
-    }
-    else
-    {
     AvbdParams p = PARAMS;
     uint floors = 0;
     Vec6 neg = rhs;
@@ -5343,7 +5245,6 @@ void primalApply(uint bodyIdx, Mat6 A, Vec6 rhs)
     // three-avbd qadd: normalize(q + ½·(δω,0)·q) — first-order chart matching
     // Taylor C / qsub. Full exp-map quatApplyDelta disagrees for large δω.
     b.orientation = quatNormalize(b.orientation + quatMul(float4(dang, 0.0), b.orientation) * 0.5);
-    }
     gBodies[bodyIdx].position = b.position;
     gBodies[bodyIdx].orientation = b.orientation;
 }
@@ -6088,7 +5989,8 @@ void recompute_inertia(uint3 tid : SV_DispatchThreadID)
 // ----- contact events (P4) ----------------------------------------------------
 // Opt-in pass (hosts add it while any shape reports contact events), right after
 // contact persistence. One thread per manifold: a pair with a flagged collider
-// whose deepest contact touches (gap within the contact offset) is listed with
+// whose deepest contact touches this step (gap within the contact offset, or
+// closed by its approach within the step) is listed with
 // that point, the A-to-B normal and the closing speed there from the step-start
 // velocities, before the solve. Reads physics state only; the host diffs the
 // set step to step into begin, end and hit events (engine-world contacts.rs).
@@ -6135,7 +6037,7 @@ void contact_events(uint3 tid : SV_DispatchThreadID)
             deepest = c;
         }
     }
-    if (best > PARAMS.contactOffset) return;
+    if (best > 3.0e38) return;
     BodyState ba = gBodies[ca.body];
     BodyState bb = gBodies[cb.body];
     float3 rA = quatRotate(ba.orientation, deepest.anchorA);
@@ -6144,6 +6046,10 @@ void contact_events(uint3 tid : SV_DispatchThreadID)
     float3 vB = bb.linearVel + cross(bb.angularVel, rB);
     float3 n = mf.normal;
     float approach = dot(vA - vB, n);
+    // Touching this step: within the contact offset, or closing that gap
+    // within the step (a fast or continuous-collision impact reports its begin
+    // on the impact step, at the speed before the solve).
+    if (best > PARAMS.contactOffset + max(approach, 0.0) * PARAMS.dt) return;
     float3 point = 0.5 * (ba.position + rA + bb.position + rB);
     uint slot;
     AADD3(gScratchAtomics[CONTACT_EVENT_BASE], 1u, slot);
@@ -6261,4 +6167,61 @@ void explode(uint3 tid : SV_DispatchThreadID)
     gBodies[i].flags = b.flags;
     gBodies[i].sleepTimer = b.sleepTimer;
 }
+// ----- motion locks (P3) ------------------------------------------------------
+// Scheduled only while some body has locks (World), so no other step changes:
+// lock_predict after predict_bodies, lock_project after the solve. Each
+// projects a locked body's pose onto its free axes, measured from the step
+// start (initialPos / initialRot): the locked components of its displacement
+// and of its rotation (world axes) are removed. The prediction and the
+// inertial target the solve pulls toward respect the locks; the final
+// projection makes the locked axes exact at the end of every step.
+uint bodyLocks(BodyState b) { return (b.flags & BODY_LOCK_MASK) >> BODY_LOCK_SHIFT; }
+float3 lockKeep(uint bits) { return float3((bits & 1u) == 0u ? 1.0 : 0.0, (bits & 2u) == 0u ? 1.0 : 0.0, (bits & 4u) == 0u ? 1.0 : 0.0); }
+
+float3 lockPosition(float3 x, float3 x0, uint locks) { return x0 + (x - x0) * lockKeep(locks); }
+
+float4 lockRotation(float4 q, float4 q0, uint locks)
+{
+    if (dot(q, q0) < 0.0) q = -q;
+    float4 dq = quatMul(q, quatConjugate(q0)); // world-frame rotation since step start
+    float3 v = dq.xyz * lockKeep(locks >> 3u);
+    float w = sqrt(max(1.0 - dot(v, v), 0.0));
+    return quatNormalize(quatMul(float4(v, w), q0));
+}
+
+bool lockedBody(BodyState b) { return bodyIsDynamic(b) && !bodyIsSleeping(b) && bodyLocks(b) != 0u; }
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void lock_predict(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (i >= gCounters[0].bodyCount) return;
+    BodyState b = gBodies[i];
+    if (!lockedBody(b)) return;
+    uint locks = bodyLocks(b);
+    gBodies[i].position = lockPosition(b.position, b.initialPos, locks);
+    gBodies[i].orientation = lockRotation(b.orientation, b.initialRot, locks);
+    // The inertial target predict_bodies left in gAabbs[i].
+    Aabb box = gAabbs[i];
+    float4 target = lockRotation(float4(box.mx, box._pad0), b.initialRot, locks);
+    box.mn = lockPosition(box.mn, b.initialPos, locks);
+    box.mx = target.xyz;
+    box._pad0 = target.w;
+    gAabbs[i] = box;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void lock_project(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (i >= gCounters[0].bodyCount) return;
+    BodyState b = gBodies[i];
+    if (!lockedBody(b)) return;
+    uint locks = bodyLocks(b);
+    gBodies[i].position = lockPosition(b.position, b.initialPos, locks);
+    gBodies[i].orientation = lockRotation(b.orientation, b.initialRot, locks);
+}
+
 #include "ccd_step.slang"

@@ -75,6 +75,9 @@ pub struct StepModes {
     /// Append `contact_events` after contact persistence: list touching pairs
     /// of event-flagged colliders (read-only on physics state).
     pub contact_events: bool,
+    /// Some body has motion locks: `lock_predict` after `predict_bodies` and
+    /// `lock_project` after the solve.
+    pub motion_locks: bool,
 }
 
 /// Scene sizes and last step's counters this step is planned from.
@@ -532,6 +535,9 @@ pub fn encode_step(
         e.d("ccd_unhold", n_bodies);
     }
     e.d("predict_bodies", n_bodies);
+    if m.motion_locks {
+        e.d("lock_predict", n_bodies);
+    }
     if mo.ccd && !reuse_manifolds {
         // Struck bodies' trust regions for this step (ccd_step.slang).
         e.d("ccd_trust", u64::from(engine_schema::CCD_PAIR_CAP));
@@ -637,6 +643,9 @@ pub fn encode_step(
         e.d("ccd_validate", u64::from(engine_schema::CCD_PAIR_CAP));
         e.d("ccd_clamp", u64::from(CCD_BODY_CAP));
         e.phase("ccdValidate");
+    }
+    if m.motion_locks {
+        e.d("lock_project", n_bodies);
     }
     e.d("extract_velocity_sleep", n_bodies);
     if vehicles {

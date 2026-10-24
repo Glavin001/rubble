@@ -244,6 +244,7 @@ struct BodySlot {
     damping: (f32, f32),
     gravity_scale: f32,
     locks: u32,
+    bullet: bool,
 }
 
 impl BodySlot {
@@ -279,6 +280,9 @@ struct JointSlot {
     alive: bool,
     bodies: [u32; 2],
     user_data: u64,
+    /// Both frames in the bodies' origin frames, to re-express them when a
+    /// body's centre of mass moves.
+    origin_frames: [JointFrame; 2],
 }
 
 /// Steps a released body or collider slot waits before reuse: neither contact
@@ -539,6 +543,7 @@ impl World {
                 damping: (d.linear_damping, d.angular_damping),
                 gravity_scale: d.gravity_scale,
                 locks: d.motion_locks.bits(),
+                bullet: d.is_bullet && d.body_type == BodyType::Dynamic,
             };
             let state = body_state(&slot);
             match self.reusable_body_slot() {
@@ -568,6 +573,12 @@ impl World {
             for ((k, _), index) in fresh.iter().zip(range) {
                 ids[*k] = BodyId::new(index, 1);
             }
+        }
+        if defs
+            .iter()
+            .any(|d| d.motion_locks.bits() != 0 && d.body_type == BodyType::Dynamic)
+        {
+            self.sim.set_motion_locks(true);
         }
         Ok(ids)
     }
@@ -746,10 +757,15 @@ impl World {
     }
 
     /// Lock axes (world frame) the body may not move along or turn about
-    /// (Box3D `b3Body_SetMotionLocks`).
+    /// (Box3D `b3Body_SetMotionLocks`): its displacement and rotation since
+    /// each step's start lose their locked components (the `lock_predict` and
+    /// `lock_project` passes, scheduled only while some body has locks).
     pub fn body_set_motion_locks(&mut self, id: BodyId, locks: MotionLocks) -> anyhow::Result<()> {
         let i = self.live_body(id)?;
         self.bodies[i].locks = locks.bits();
+        if locks.bits() != 0 {
+            self.sim.set_motion_locks(true);
+        }
         self.command(id, GpuCommand::set_locks(id.index(), locks.bits()))
     }
 
@@ -1147,6 +1163,10 @@ impl World {
         self.dirty = true;
         desc.body_a = a as u32;
         desc.body_b = b as u32;
+        let origin_frames = [
+            joint_frame_origin(self.bodies[a].frame(), desc.frame_a),
+            joint_frame_origin(self.bodies[b].frame(), desc.frame_b),
+        ];
         let index = self.sim.add_joint_desc(&desc);
         let i = index as usize;
         if self.joints.len() <= i {
@@ -1155,6 +1175,7 @@ impl World {
                 alive: false,
                 bodies: [0, 0],
                 user_data: 0,
+                origin_frames: [JointFrame::at(Vec3::ZERO); 2],
             };
             self.joints.resize(i + 1, empty);
         }
@@ -1163,6 +1184,7 @@ impl World {
         slot.alive = true;
         slot.bodies = [a as u32, b as u32];
         slot.user_data = user_data;
+        slot.origin_frames = origin_frames;
         let id = JointId::new(index, slot.generation);
         self.bodies[a].joints.push(index);
         if b != a {
@@ -2098,6 +2120,26 @@ impl World {
             for s in self.bodies[b].shapes.clone() {
                 self.rewrite_shape(s as usize)?;
             }
+            // Joints are kept in solver frames: re-express this body's side.
+            // (A plastic weld's accumulated bend restarts from its rest.)
+            for j in self.bodies[b].joints.clone() {
+                let slot = &self.joints[j as usize];
+                if !slot.alive {
+                    continue;
+                }
+                let (bodies, frames) = (slot.bodies, slot.origin_frames);
+                for side in 0..2 {
+                    if bodies[side] as usize == b {
+                        let f = joint_frame(next, frames[side]);
+                        self.sim.set_joint_frame(
+                            j,
+                            side == 1,
+                            f.anchor.to_array(),
+                            f.rot.to_array(),
+                        );
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -2127,6 +2169,7 @@ impl World {
                 damping: (0.0, 0.0),
                 gravity_scale: 1.0,
                 locks: 0,
+                bullet: false,
             });
         }
     }
@@ -2171,7 +2214,8 @@ fn body_state(slot: &BodySlot) -> BodyState {
             let mut s = BodyState::static_plane_support();
             s.position = solver.position;
             s.orientation = solver.rotation;
-            s.flags = engine_schema::BodyFlags::Kinematic as u32 | engine_schema::BodyFlags::Awake as u32;
+            s.flags =
+                engine_schema::BodyFlags::Kinematic as u32 | engine_schema::BodyFlags::Awake as u32;
             s
         }
         BodyType::Static => {
@@ -2181,7 +2225,12 @@ fn body_state(slot: &BodySlot) -> BodyState {
             s
         }
     };
-    b.flags |= slot.locks << engine_schema::BODY_LOCK_SHIFT;
+    if slot.bullet {
+        b.flags |= engine_schema::BODY_CCD;
+    }
+    if slot.body_type == BodyType::Dynamic {
+        b.flags |= slot.locks << engine_schema::BODY_LOCK_SHIFT;
+    }
     b.initial_pos = b.position;
     b.initial_rot = b.orientation;
     b.linear_vel = slot.velocity.0;
@@ -2191,6 +2240,15 @@ fn body_state(slot: &BodySlot) -> BodyState {
             | engine_schema::BodyFlags::Sleeping as u32;
     }
     b
+}
+
+/// The inverse of `joint_frame`: a solver-frame joint frame in the body's
+/// origin frame.
+fn joint_frame_origin(frame: SolverFrame, f: JointFrame) -> JointFrame {
+    JointFrame {
+        anchor: frame.center + frame.axes * f.anchor,
+        rot: (frame.axes * f.rot).normalize(),
+    }
 }
 
 fn joint_frame(frame: SolverFrame, f: JointFrame) -> JointFrame {

@@ -198,6 +198,8 @@ pub struct RbBodyDef {
     /// `RB_LOCK_*` bits: axes (world, host frame) it may not move along or
     /// turn about.
     pub motion_locks: u32,
+    /// Continuous collision: never tunnels (projectiles, debris).
+    pub is_bullet: bool,
     pub user_data: u64,
     pub internal_value: u32,
 }
@@ -1400,6 +1402,7 @@ pub extern "C" fn rbDefaultBodyDef() -> RbBodyDef {
         angular_damping: 0.0,
         gravity_scale: 1.0,
         motion_locks: 0,
+        is_bullet: false,
         user_data: 0,
         internal_value: COOKIE,
     }
@@ -1450,6 +1453,7 @@ pub unsafe extern "C" fn rbCreateBodies(
                 angular_damping: d.angular_damping,
                 gravity_scale: d.gravity_scale,
                 motion_locks: MotionLocks::from_bits(w.coords.locks_in(d.motion_locks)),
+                is_bullet: d.is_bullet,
                 user_data: d.user_data,
                 ..BodyDef::default()
             });

@@ -168,6 +168,9 @@ const WORLD_ENTRIES: &[&str] = &[
     // Overlap queries (P5) and explosions.
     "overlap_query",
     "explode",
+    // Motion locks (P3).
+    "lock_predict",
+    "lock_project",
 ];
 
 const CHARACTER_ENTRIES: &[&str] = &["char_move", "char_post", "query_batch", "projectile_step"];
