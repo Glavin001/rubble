@@ -61,6 +61,8 @@ fn run_with(gpu: &Gpu, scene: &Scene, resident: bool, budget: Option<(u32, u32)>
     let engine = RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), stress_rubble::capacity_for(scene)).expect("rubble");
     let mut w = if resident { GpuWorld::with_resident_engine(gpu, scene, engine) } else { GpuWorld::with_engine(gpu, scene, Box::new(engine)) }.expect("coupled world");
     w.fast_qs = !resident;
+    // The resident frame keeps the engine's shapes undeformed; the fast frame matches it.
+    w.set_engine_shapes_deformed(false);
     w.redo_fractured_frames = false;
     w.set_impact_islands(false);
     w.solver.mirror.config.static_budget = budget;

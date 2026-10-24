@@ -206,7 +206,8 @@ impl World {
 
     /// Every body as the engine should have it: one per cluster (boxes per chunk) and
     /// one per impactor. A cluster's shapes are built when its signature is new and
-    /// shared from `cache` after that (they depend only on its chunks).
+    /// shared from `cache` after that (they depend only on its chunks), with their poses
+    /// brought to the chunks' current deformation (`shape_poses`).
     fn engine_bodies(&self, cache: &mut HashMap<u64, (u64, std::sync::Arc<Vec<BoxShape>>)>) -> Vec<EngineBody> {
         let mut out = Vec::with_capacity(self.solver.clusters.len() + self.impactors.len());
         let mut live = std::collections::HashSet::with_capacity(self.solver.clusters.len());
@@ -214,8 +215,19 @@ impl World {
             let st = &self.solver.structures[cl.structure];
             let signature = cluster_signature(cl);
             live.insert(cl.id);
-            if let Some((sig, shapes)) = cache.get(&cl.id) {
+            let poses = self.shape_poses(cl);
+            if let Some((sig, shapes)) = cache.get_mut(&cl.id) {
                 if *sig == signature {
+                    // Same chunks: the shapes move with the chunks' deformation (a new
+                    // shared list only when a pose changed, so a settled body's engine
+                    // geometry is untouched).
+                    if shapes.iter().zip(&poses).any(|(s, p)| s.local != *p) {
+                        let mut moved = (**shapes).clone();
+                        for (s, p) in moved.iter_mut().zip(&poses) {
+                            s.local = *p;
+                        }
+                        *shapes = std::sync::Arc::new(moved);
+                    }
                     out.push(EngineBody {
                         key: BodyKey::Cluster(cl.id),
                         signature,
@@ -229,12 +241,12 @@ impl World {
                     continue;
                 }
             }
+            let mut poses = poses.into_iter();
             let shapes: Vec<BoxShape> = cl
                 .chunks
                 .iter()
                 .flat_map(|&c| {
                     let ch = &st.chunks[c];
-                    let rotation = rotation_of(&ch.rotation);
                     match &ch.parts {
                         // A compound chunk: one hull shape per part, reported on the chunk,
                         // with the chunk's mass shared by the parts' volumes.
@@ -245,7 +257,7 @@ impl World {
                                 .iter()
                                 .zip(volumes)
                                 .map(|(p, v)| BoxShape {
-                                    local: Pose::new(ch.center + ch.rotation * p.offset, rotation),
+                                    local: poses.next().expect("a pose per shape"),
                                     half_extents: p.hull.half_extents(),
                                     mass: ch.mass * v / total,
                                     chunk: Some((cl.structure, c)),
@@ -254,7 +266,7 @@ impl World {
                                 .collect::<Vec<_>>()
                         }
                         None => vec![BoxShape {
-                            local: Pose::new(ch.center, rotation),
+                            local: poses.next().expect("a pose per shape"),
                             half_extents: ch.half_extents,
                             mass: ch.mass,
                             chunk: Some((cl.structure, c)),
@@ -299,6 +311,33 @@ impl World {
             });
         }
         cache.retain(|id, _| live.contains(id));
+        out
+    }
+
+    /// The pose of each of a cluster's engine shapes in the cluster frame, in
+    /// `engine_bodies`' order (a compound chunk's parts in turn): where the stress solve
+    /// has the chunk, its hidden displacement and rotation included, as the world's own
+    /// contact sees it (`World::chunk_box`); undeformed with `engine_shapes_deformed`
+    /// off. Undeformed shapes kept a piece freed from a
+    /// deforming structure flush against the remainder's faces where the solve had a
+    /// widening gap: it wedged there and broke (b8_frame_sudden, README "Known gaps").
+    fn shape_poses(&self, cl: &crate::solver::Cluster) -> Vec<Pose> {
+        let st = &self.solver.structures[cl.structure];
+        let mut out = Vec::with_capacity(cl.chunks.len());
+        for &c in &cl.chunks {
+            let ch = &st.chunks[c];
+            let (center, turn) = if self.engine_shapes_deformed {
+                let hidden = &self.solver.chunks[cl.structure][c];
+                (ch.center + hidden.u, Quat::from_axis_angle(hidden.th, hidden.th.norm()).to_mat3() * ch.rotation)
+            } else {
+                (ch.center, ch.rotation)
+            };
+            let rotation = rotation_of(&turn);
+            match &ch.parts {
+                Some(parts) => out.extend(parts.iter().map(|p| Pose::new(center + turn * p.offset, rotation))),
+                None => out.push(Pose::new(center, rotation)),
+            }
+        }
         out
     }
 

@@ -60,6 +60,9 @@ impl GpuWorld {
         let mut w = GpuWorld::with_engine_contact(gpu, scene, Box::new(SharedEngine(shared.clone())), true)?;
         w.solver.quiet_quasi_static = false;
         w.resident_engine = Some(shared);
+        // The GPU makes split bodies from the undeformed part table: the engine's shapes
+        // stay undeformed in every frame (`World::engine_shapes_deformed`).
+        w.shell.engine_shapes_deformed = false;
         // Room for splits laid out in place (`GpuSolver::split_resident`).
         // A shattering impact makes hundreds of fragments at once; an island record is
         // 400 B, so room for thousands costs little and keeps splits in place.
