@@ -82,6 +82,9 @@ pub struct StepInputs {
     pub joint_count: u32,
     pub joint_hash_slots: u32,
     pub has_convex: bool,
+    /// Heightfield colliders exist: their pairs take the convex stages
+    /// (`convex_classify`) without the convex-only scheduling choices.
+    pub has_height_field: bool,
     pub reuse_contacts: bool,
     pub max_colors: u32,
     pub iterations: u32,
@@ -412,8 +415,8 @@ pub fn encode_step(
                 64,
             );
         }
-        if i.has_convex {
-            // Hull pairs deferred by narrowphase: classify (cheap pairs emit
+        if i.has_convex || i.has_height_field {
+            // Hull and heightfield pairs deferred by narrowphase: classify (cheap pairs emit
             // here), bucket hull pairs, size-bucketed cooperative SAT, then clipping.
             e.w("convex_classify", 64);
             e.w("convex_bucket", 64);
@@ -1117,6 +1120,7 @@ mod tests {
             joint_count: 0,
             joint_hash_slots: 65536,
             has_convex: false,
+            has_height_field: false,
             reuse_contacts: true,
             max_colors: 32,
             iterations: 4,

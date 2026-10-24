@@ -358,6 +358,13 @@ impl CudaSim {
                 .all(|c| c.shape != ShapeType::ConvexHull as u32),
             "CudaSim: convex hulls are not wired yet"
         );
+        // Heightfield pairs take the convex stages, which this backend lacks.
+        assert!(
+            colliders
+                .iter()
+                .all(|c| c.shape != ShapeType::HeightField as u32),
+            "CudaSim: heightfields are not wired yet"
+        );
         self.upload(
             2,
             u64::from(start) * std::mem::size_of::<Collider>() as u64,
@@ -393,6 +400,7 @@ impl CudaSim {
             joint_count: 0,
             joint_hash_slots: engine_schema::joint_hash_size(0),
             has_convex: false,
+            has_height_field: false,
             reuse_contacts: record,
             max_colors: self.capacity.max_colors,
             iterations: self.params.iterations,

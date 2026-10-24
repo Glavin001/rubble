@@ -649,6 +649,31 @@ enum RbResult rbCreateHullShape(struct RbWorld *world,
                                 struct RbTransform local,
                                 RbShapeId *out);
 
+// Terrain on a static body: `heights` (`count_a × count_b`, A fastest) on
+// cells `cell_a × cell_b`, centred on `local`. A and B are the host's ground
+// axes (Rubble coordinates: +X, +Z; Unreal: +X, +Y) and heights run along
+// its up axis.
+enum RbResult rbCreateHeightFieldShape(struct RbWorld *world,
+                                       RbBodyId body,
+                                       const struct RbShapeDef *def,
+                                       uint32_t count_a,
+                                       uint32_t count_b,
+                                       float cell_a,
+                                       float cell_b,
+                                       const float *heights,
+                                       struct RbTransform local,
+                                       RbShapeId *out);
+
+// Overwrite heightfield samples `[a0, a0 + width_a) × [b0, b0 + width_b)`
+// (host order, A fastest). Bodies asleep over the edit are woken.
+enum RbResult rbHeightField_SetRegion(struct RbWorld *world,
+                                      RbShapeId shape,
+                                      uint32_t a0,
+                                      uint32_t b0,
+                                      uint32_t width_a,
+                                      uint32_t width_b,
+                                      const float *values);
+
 enum RbResult rbDestroyShape(struct RbWorld *world, RbShapeId shape, bool update_body_mass);
 
 bool rbShape_IsValid(struct RbWorld *world, RbShapeId shape);

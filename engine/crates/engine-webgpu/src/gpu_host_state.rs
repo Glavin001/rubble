@@ -32,6 +32,7 @@ pub struct SimSnapshot {
     host_bodies: Vec<BodyState>,
     host_cols: Vec<Collider>,
     has_convex: bool,
+    has_height_field: bool,
     has_filters: bool,
     grid_levels: u32,
     grid_cache: Option<(u32, f32, u32)>,
@@ -296,6 +297,7 @@ impl WgpuSim {
             host_bodies: self.host_bodies.clone(),
             host_cols: self.host_cols.clone(),
             has_convex: self.has_convex,
+            has_height_field: self.has_height_field,
             has_filters: self.has_filters,
             grid_levels: self.grid_levels,
             grid_cache: self.grid_cache,
@@ -337,6 +339,7 @@ impl WgpuSim {
         self.host_bodies.clone_from(&s.host_bodies);
         self.host_cols.clone_from(&s.host_cols);
         self.has_convex = s.has_convex;
+        self.has_height_field = s.has_height_field;
         self.has_filters = s.has_filters;
         self.grid_levels = s.grid_levels;
         self.grid_cache = s.grid_cache;

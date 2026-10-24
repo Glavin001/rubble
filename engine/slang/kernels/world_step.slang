@@ -89,6 +89,12 @@ BIND(17) RWStructuredBuffer<uint> gSolveColorCounts;
 
 #include "../physics/contact_storage.slang"
 #include "../physics/convex.slang"
+#include "../physics/heightfield.slang"
+
+// Round shapes roll: their contact point moves over the surface, so the solver
+// takes their lever arms at the step-start rotation (spheres, and capsules
+// rolling about their axis).
+bool shapeIsRound(uint shape) { return shape == SHAPE_SPHERE || shape == SHAPE_CAPSULE; }
 
 // WebGPU limits each dispatch dimension to 65535 workgroups. Large workloads
 // use rows of 32768 groups (2^21 threads); never clamp away contacts/hash slots.
@@ -502,6 +508,10 @@ void buildColliderBounds(uint i, Collider col, BodyState b)
     {
         mn = float3(-1e6, -1e6, -1e6);
         mx = float3(1e6, 1e6, 1e6);
+    }
+    else if (col.shape == SHAPE_HEIGHTFIELD)
+    {
+        heightFieldWorldAabb(col, worldPos, worldRot, aabbPad, mn, mx);
     }
     else
     {
@@ -2483,8 +2493,9 @@ float colliderMinSide(Collider col)
 {
     if (col.shape == SHAPE_SPHERE)
         return max(col.params.x * 2.0, 1e-6);
-    // Convex params.xyz are (tagged base, scale, 0); params.w bounds the hull.
-    if (col.shape == SHAPE_CONVEX)
+    // Convex params.xyz are (tagged base, scale, 0); params.w bounds the hull
+    // (a heightfield's params.w bounds the whole field).
+    if (col.shape == SHAPE_CONVEX || col.shape == SHAPE_HEIGHTFIELD)
         return max(col.params.w, 1e-6);
     float3 h = col.params.xyz;
     return max(2.0 * min(h.x, min(h.y, h.z)), 1e-6);
@@ -2495,7 +2506,7 @@ float colliderExtent(Collider col)
 {
     float r = col.shape == SHAPE_SPHERE ? col.params.x
         : col.shape == SHAPE_CAPSULE ? col.params.x + col.params.y
-        : col.shape == SHAPE_CONVEX ? col.params.w
+        : (col.shape == SHAPE_CONVEX || col.shape == SHAPE_HEIGHTFIELD) ? col.params.w
         : length(col.params.xyz);
     return length(col.localPos) + r;
 }
@@ -3005,7 +3016,10 @@ void reuse_all_manifolds(uint3 tid : SV_DispatchThreadID)
 // stay within the WebGPU storage-buffer budget. Carry the previous SAT feature.
 bool deferConvexPair(uint i, Collider ca, Collider cb, uint prevFeature)
 {
-    if (ca.shape != SHAPE_CONVEX && cb.shape != SHAPE_CONVEX) return false;
+    // Heightfield pairs read their samples from the hull arena too, so they
+    // take the same path (convex_classify).
+    if (ca.shape != SHAPE_CONVEX && cb.shape != SHAPE_CONVEX &&
+        ca.shape != SHAPE_HEIGHTFIELD && cb.shape != SHAPE_HEIGHTFIELD) return false;
     gCandidates[i]._pad = CONVEX_DEFER | convexHintFromFeature(prevFeature);
     return true;
 }
@@ -3712,11 +3726,15 @@ Contact persistContact(uint i, Contact c, bool reused, BodyState ba, BodyState b
                 c.kT = prev.kT;
                 c._pad2 = prev._pad2;
                 // three-avbd: keep old anchors while static friction held (stick).
-                // Not for spheres — contact point slides over the surface as they roll;
-                // pinned anchors rotate with the body and glue/stop smash balls.
+                // Not for round shapes (spheres, capsules) — the contact point
+                // slides over their surface as they roll; pinned anchors rotate
+                // with the body, glue/stop smash balls, and let a rolling capsule
+                // sink through the ground (its pinned anchor rises off the true
+                // contact point every step).
                 Collider colA = gColliders[c.colliderA];
                 Collider colB = gColliders[c.colliderB];
-                bool anySphere = colA.shape == SHAPE_SPHERE || colB.shape == SHAPE_SPHERE;
+                bool anySphere = colA.shape == SHAPE_SPHERE || colB.shape == SHAPE_SPHERE ||
+                    colA.shape == SHAPE_CAPSULE || colB.shape == SHAPE_CAPSULE;
                 // Nor for track belts: the surface runs past the contact every step.
                 bool belt = colliderIsBeltLazy(colA) || colliderIsBeltLazy(colB);
                 if (prev._pad0 > 0.5 && !anySphere && !belt)
@@ -4841,7 +4859,7 @@ void packSolverPair(uint mi, Manifold mf)
     pair.bodyA = a.body; pair.bodyB = b.body;
     pair.contactStart = mf.contactStart;
     pair.countAndSphere = mf.contactCount |
-        ((a.shape == SHAPE_SPHERE || b.shape == SHAPE_SPHERE) ? SOLVER_SPHERE : 0u);
+        ((shapeIsRound(a.shape) || shapeIsRound(b.shape)) ? SOLVER_SPHERE : 0u);
     pair.normal = mf.normal; pair.friction = mf.friction;
     if (colliderIsBeltLazy(a) || colliderIsBeltLazy(b))
     {
@@ -5053,7 +5071,7 @@ void primalAccumulate(uint bodyIdx, uint lane, uint lanes, out Mat6 A, out Vec6 
             Collider colA = gColliders[mf.colliderA];
             Collider colB = gColliders[mf.colliderB];
             uint ba = colA.body, bb = colB.body;
-            bool anySphere = colA.shape == SHAPE_SPHERE || colB.shape == SHAPE_SPHERE;
+            bool anySphere = shapeIsRound(colA.shape) || shapeIsRound(colB.shape);
 #endif
             bool isA = ba == bodyIdx;
             BodyState bA = gBodies[ba];
@@ -5471,7 +5489,7 @@ void solve_dual(uint3 tid : SV_DispatchThreadID)
 #else
             Collider colA = gColliders[c.colliderA];
             Collider colB = gColliders[c.colliderB];
-            bool anySphere = colA.shape == SHAPE_SPHERE || colB.shape == SHAPE_SPHERE;
+            bool anySphere = shapeIsRound(colA.shape) || shapeIsRound(colB.shape);
 #endif
             float3 belt = float3(0, 0, 0);
 #if defined(ENGINE_COMPACT_SOLVE)

@@ -275,6 +275,13 @@ impl MetalSim {
                 .all(|c| c.shape != ShapeType::ConvexHull as u32),
             "MetalSim: convex hulls are not wired yet"
         );
+        // Heightfield pairs take the convex stages, which this backend lacks.
+        assert!(
+            colliders
+                .iter()
+                .all(|c| c.shape != ShapeType::HeightField as u32),
+            "MetalSim: heightfields are not wired yet"
+        );
         write(
             &self.bufs[2],
             u64::from(start) * std::mem::size_of::<Collider>() as u64,
@@ -313,6 +320,7 @@ impl MetalSim {
             joint_count: 0,
             joint_hash_slots: engine_schema::joint_hash_size(0),
             has_convex: false,
+            has_height_field: false,
             reuse_contacts: self.reuse_on(),
             max_colors: self.capacity.max_colors,
             iterations: self.params.iterations,

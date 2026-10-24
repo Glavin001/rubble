@@ -210,11 +210,20 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     writeColliderRaw(i, words);
     // Category/mask (generation) or group (material bits 16..31): enable the GPU filter test.
     if (words[3] !== 0 || (words[2] >>> 16) !== 0) world.hasFilters = true;
+    // Heightfield terrain: its pairs take the convex stages (RigidStep counts[18] bit 3).
+    if (words[1] === 5) world.hasHeightField = true;
     const f = new Float32Array(words.buffer, words.byteOffset, 16);
     const body = words[0];
     const inv = new Float32Array(world.bodyWords.buffer, body * 112, 28);
     world.colliderInfo[i] = { body, radius: f[15] > 0 ? f[15] : Math.hypot(f[12], f[13], f[14]), dynamic: inv[3] > 0, plane: words[1] === 4 };
     return i;
+  };
+  // Hull arena records (binding 18, uint4 each), e.g. from height_field_arena
+  // (vehicle wasm): written from record `first`, so edits upload only what changed.
+  world.setHullRecords = (u32, first = 0) => {
+    const bytes = (first * 4 + u32.length) * 4;
+    if (bytes > bufs[18].size) throw new Error(`hull arena needs ${bytes} B (> ${bufs[18].size}): raise cap.maxHull`);
+    device.queue.writeBuffer(bufs[18], first * 16, u32);
   };
   // Convenience: {p, q, invMass, invI, flags, v, w}.
   world.addBody = (b) => world.addBodyWords(bodyWords({
@@ -518,7 +527,8 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     PFIELDS.forEach((k, i) => (i === 2 || i === 3) ? pv.setUint32(i * 4, params[k], true) : pv.setFloat32(i * 4, params[k], true));
     plan.set_params(new Uint8Array(paramBytes));
     const impulses = uploadImpulses();
-    const motionBits = (world.motion.ccd ? 1 : 0) | (world.motion.kinematic ? 2 : 0) | (impulses ? 4 : 0);
+    const motionBits = (world.motion.ccd ? 1 : 0) | (world.motion.kinematic ? 2 : 0) | (impulses ? 4 : 0)
+      | (world.hasHeightField ? 8 : 0);
     const soft = world.soft && world.soft.bodyCount > 0 ? world.soft.counts() : new Uint32Array(10);
     // [bodies, colliders, joints, vehicles, wheels, soft x10, filters, soft dual, sweeps,
     //  motion bits, projectiles, characters, queries] (RigidStep::inputs).

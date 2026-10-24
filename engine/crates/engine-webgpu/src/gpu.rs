@@ -142,6 +142,8 @@ pub struct WgpuSim {
     chip: String,
     /// Any convex hull collider: schedules the convex_* narrowphase entries.
     has_convex: bool,
+    /// Any heightfield collider: its pairs take the convex_* entries too.
+    has_height_field: bool,
     /// Size levels of the hierarchical broadphase grid (0 = uniform grid).
     grid_levels: u32,
     /// (collider count, base cell, levels): recomputed only when colliders change.
@@ -710,6 +712,7 @@ impl WgpuSim {
             body_reach: Vec::new(),
             chip: format!("{} / {}", info.name, info.backend),
             has_convex: false,
+            has_height_field: false,
             grid_levels: 0,
             grid_cache: None,
             has_filters: false,
@@ -910,6 +913,9 @@ impl WgpuSim {
             self.has_convex |= colliders
                 .iter()
                 .any(|c| c.shape == ShapeType::ConvexHull as u32);
+            self.has_height_field |= colliders
+                .iter()
+                .any(|c| c.shape == ShapeType::HeightField as u32);
             self.has_filters |= colliders
                 .iter()
                 .any(engine_schema::convex::CollisionFilter::is_set);
@@ -1037,6 +1043,9 @@ impl WgpuSim {
             self.has_convex |= colliders
                 .iter()
                 .any(|c| c.shape == ShapeType::ConvexHull as u32);
+            self.has_height_field |= colliders
+                .iter()
+                .any(|c| c.shape == ShapeType::HeightField as u32);
             self.has_filters |= colliders
                 .iter()
                 .any(engine_schema::convex::CollisionFilter::is_set);
@@ -1103,6 +1112,7 @@ impl WgpuSim {
             .any(CollisionFilter::is_set);
         self.host_cols[first as usize..end].copy_from_slice(cols);
         self.has_convex |= cols.iter().any(|c| c.shape == ShapeType::ConvexHull as u32);
+        self.has_height_field |= cols.iter().any(|c| c.shape == ShapeType::HeightField as u32);
         if cols.iter().any(CollisionFilter::is_set) {
             self.has_filters = true;
         } else if cleared {
@@ -1235,6 +1245,7 @@ impl WgpuSim {
             }
         }
         self.has_convex = cols.iter().any(|c| c.shape == ShapeType::ConvexHull as u32);
+        self.has_height_field = cols.iter().any(|c| c.shape == ShapeType::HeightField as u32);
         self.has_filters = cols
             .iter()
             .any(engine_schema::convex::CollisionFilter::is_set);
@@ -1269,6 +1280,7 @@ impl WgpuSim {
             .any(CollisionFilter::is_set);
         self.host_cols[first as usize..end].copy_from_slice(cols);
         self.has_convex |= cols.iter().any(|c| c.shape == ShapeType::ConvexHull as u32);
+        self.has_height_field |= cols.iter().any(|c| c.shape == ShapeType::HeightField as u32);
         if cols.iter().any(CollisionFilter::is_set) {
             self.has_filters = true;
         } else if cleared {
@@ -1313,6 +1325,67 @@ impl WgpuSim {
         self.add_colliders(&colliders);
         self.sync_hulls(arena);
         body
+    }
+
+    /// A static heightfield body at `pos`/`rot` (the field is centred on it).
+    /// Returns (body, collider).
+    pub fn add_height_field(
+        &mut self,
+        arena: &mut HullArena,
+        field: &engine_schema::heightfield::HeightField,
+        pos: glam::Vec3,
+        rot: glam::Quat,
+        material: u32,
+    ) -> Result<(u32, u32), engine_schema::heightfield::HeightFieldError> {
+        let base = arena.insert_height_field(field)?;
+        let mut support = BodyState::static_plane_support();
+        support.position = pos.to_array();
+        support.orientation = rot.to_array();
+        support.initial_pos = support.position;
+        support.initial_rot = support.orientation;
+        let body = self.add_body(support);
+        let collider = self.add_collider(Collider {
+            body,
+            shape: ShapeType::HeightField as u32,
+            material,
+            generation: 0,
+            local_pos: [0.0; 3],
+            density: 0.0,
+            local_rot: [0.0, 0.0, 0.0, 1.0],
+            params: engine_schema::heightfield::height_field_collider_params(base, field),
+        });
+        self.sync_hulls(arena);
+        Ok((body, collider))
+    }
+
+    /// Upload an edited heightfield (`rows` = the sample rows that changed).
+    /// The collider's bounds follow the new height range; contacts are rebuilt.
+    pub fn update_height_field(
+        &mut self,
+        arena: &mut HullArena,
+        collider: u32,
+        field: &engine_schema::heightfield::HeightField,
+        rows: std::ops::Range<u32>,
+    ) -> Result<(), engine_schema::heightfield::HeightFieldError> {
+        let mut col = self.collider(collider);
+        assert_eq!(col.shape, ShapeType::HeightField as u32, "collider {collider} is not a heightfield");
+        let base = engine_schema::convex::convex_params_base(col.params);
+        arena.update_height_field(base, field, rows)?;
+        col.params = engine_schema::heightfield::height_field_collider_params(base, field);
+        self.set_colliders(collider, std::slice::from_ref(&col));
+        self.sync_hulls(arena);
+        // Contact reuse (FLAG_REUSE_CONTACTS) keeps a pair's manifold until either
+        // body's generation passes the step it was made in, and a static body's
+        // never changes: mark the terrain as moved this step, so no manifold made
+        // against the old surface is reused.
+        let at = u64::from(col.body) * std::mem::size_of::<BodyState>() as u64
+            + std::mem::offset_of!(BodyState, generation) as u64;
+        self.queue
+            .write_buffer(&self.bufs[0], at, bytemuck::bytes_of(&self.steps_done));
+        if let Some(b) = self.host_bodies.get_mut(col.body as usize) {
+            b.generation = self.steps_done;
+        }
+        Ok(())
     }
 
     pub fn joint_count(&self) -> u32 {
@@ -2077,6 +2150,7 @@ impl WgpuSim {
             joint_count: self.joint_count,
             joint_hash_slots: engine_schema::joint_hash_size(self.joint_count),
             has_convex: self.has_convex,
+            has_height_field: self.has_height_field,
             reuse_contacts: self.reuse_on(),
             max_colors: self.capacity.max_colors,
             iterations: self.params.iterations,
@@ -2121,9 +2195,10 @@ impl WgpuSim {
         self.np_split && self.copy_reuse()
     }
     /// The persist list is written by narrowphase only; convex kernels emit
-    /// contacts after it, so hull scenes take the full persistence scan.
+    /// contacts after it, so hull and heightfield scenes take the full
+    /// persistence scan.
     fn listed_persist(&self) -> bool {
-        self.persist_list && !self.has_convex
+        self.persist_list && !self.has_convex && !self.has_height_field
     }
 
     fn wg_allows(&self, name: &str) -> bool {

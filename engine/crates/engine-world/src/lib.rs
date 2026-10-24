@@ -58,6 +58,7 @@ pub use readback::Backpressure;
 pub use rig::VehicleDamage;
 
 pub use engine_schema::convex::{CollisionFilter as Filter, ConvexHull};
+pub use engine_schema::heightfield::{HeightField, HeightFieldError};
 pub use engine_schema::{
     AvbdParams, Dof, JointDesc, JointFrame, Motion, StepCounters, WorldCapacity,
 };
@@ -303,6 +304,9 @@ pub struct World {
     free_shapes: Vec<u32>,
     /// Retired colliders: `(collider, released at step)`.
     free_colliders: Vec<(u32, u64)>,
+    /// Arena blocks of removed heightfields: `(base, released at step)`. Freed
+    /// past quarantine, when no step in flight can still read them.
+    retired_height_fields: Vec<(u32, u64)>,
     /// Collider index -> shape slot (u32::MAX: not a user shape).
     collider_shape: Vec<u32>,
     joints: Vec<JointSlot>,
@@ -382,6 +386,7 @@ impl World {
             shapes: Vec::new(),
             free_shapes: Vec::new(),
             free_colliders: Vec::new(),
+            retired_height_fields: Vec::new(),
             collider_shape: Vec::new(),
             joints: Vec::new(),
             // Slot 0 is the sim's default material (friction 0.5).
@@ -856,6 +861,92 @@ impl World {
         self.create_shape(body, def, geometry)
     }
 
+    /// Terrain on a static body: `field` centred on `transform` (its +Y up).
+    pub fn create_height_field_shape(
+        &mut self,
+        body: BodyId,
+        def: &ShapeDef,
+        field: &HeightField,
+        transform: Transform,
+    ) -> anyhow::Result<ShapeId> {
+        let geometry = Geometry::HeightField {
+            field: field.clone(),
+            transform,
+        };
+        self.create_shape(body, def, geometry)
+    }
+
+    /// Overwrite the samples `[i0, i0 + w) × [j0, j0 + d)` of a heightfield
+    /// shape (row-major `values`). Only the changed rows are uploaded; contacts
+    /// are rebuilt on the next step, and bodies that were asleep (as of the
+    /// last polled frame) over the edited cells are woken so they respond.
+    /// Fails, changing nothing, if the edit is out of bounds or the wakes exceed
+    /// `WorldCapacity::max_commands`.
+    pub fn set_height_field_region(
+        &mut self,
+        id: ShapeId,
+        i0: u32,
+        j0: u32,
+        w: u32,
+        d: u32,
+        values: &[f32],
+    ) -> anyhow::Result<()> {
+        let s = self.live_shape(id)?;
+        let Geometry::HeightField { field, transform } = &self.shapes[s].geometry else {
+            anyhow::bail!("shape {} is not a heightfield", id.to_bits());
+        };
+        let (mut field, transform) = (field.clone(), *transform);
+        field
+            .set_region(i0, j0, w, d, values)
+            .map_err(|e| anyhow::anyhow!("heightfield edit: {e}"))?;
+        // Sleeping bodies over the edited cells, from last frame's poses (the
+        // terrain's static body: its origin until a frame reports it).
+        let body = self.shapes[s].body as usize;
+        let to_world = |p: Vec3| {
+            let t = self.bodies[body].last_transform.unwrap_or(self.bodies[body].origin);
+            t.p() + t.q() * (transform.p() + transform.q() * p)
+        };
+        let lo = field.vertex(i0, j0);
+        let hi = field.vertex((i0 + w).saturating_sub(1), (j0 + d).saturating_sub(1));
+        let (mut mn, mut mx) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+        for c in [Vec3::new(lo.x, -1e3, lo.z), Vec3::new(hi.x, 1e3, hi.z), Vec3::new(lo.x, 1e3, hi.z), Vec3::new(hi.x, -1e3, lo.z)] {
+            let p = to_world(c);
+            mn = mn.min(p);
+            mx = mx.max(p);
+        }
+        let (dx, dz) = field.cell_size();
+        let pad = Vec3::splat(dx.max(dz));
+        let wakes: Vec<GpuCommand> = self
+            .bodies
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.alive && b.last_asleep)
+            .filter_map(|(i, b)| {
+                let p = b.last_transform?.p();
+                // Every collider's bounding sphere, about the body origin.
+                let reach = Vec3::splat(
+                    b.shapes
+                        .iter()
+                        .map(|&k| {
+                            let c = self.sim.collider_record(self.shapes[k as usize].collider);
+                            Vec3::from(c.local_pos).length() + c.params[3]
+                        })
+                        .fold(0.0, f32::max),
+                );
+                (p.cmpge(mn - pad - reach).all() && p.cmple(mx + pad + reach).all()).then(|| GpuCommand::wake(i as u32))
+            })
+            .collect();
+        self.sim.push_body_commands(&wakes)?;
+        let collider = self.shapes[s].collider;
+        self.sim
+            .update_height_field(&mut self.hulls, collider, &field, j0..j0 + d)
+            .map_err(|e| anyhow::anyhow!("heightfield edit: {e}"))?;
+        // The collider's filter bits live in `generation`: keep them.
+        self.shapes[s].geometry = Geometry::HeightField { field, transform };
+        self.dirty = true;
+        Ok(())
+    }
+
     /// Any geometry (the `create_*_shape` calls end here).
     pub fn create_shape(
         &mut self,
@@ -869,6 +960,12 @@ impl World {
             "shapes on vehicle-owned bodies"
         );
         def.validate()?;
+        if matches!(geometry, Geometry::HeightField { .. }) {
+            anyhow::ensure!(
+                self.bodies[b].body_type == BodyType::Static,
+                "heightfields go on static bodies"
+            );
+        }
         if matches!(geometry, Geometry::Plane { .. }) {
             anyhow::ensure!(
                 self.bodies[b].body_type == BodyType::Static,
@@ -960,10 +1057,13 @@ impl World {
         Ok(&self.shapes[self.live_shape(id)?].geometry)
     }
 
-    /// A triangle mesh of a box or hull shape in its body's frame: vertices and
-    /// counter-clockwise (outward) triangles, for renderers of hull bodies.
+    /// A triangle mesh of a box, hull or heightfield shape in its body's frame:
+    /// vertices and counter-clockwise (outward) triangles, for renderers.
     /// Spheres and capsules return `None` (draw them as primitives).
     pub fn shape_mesh(&self, id: ShapeId) -> anyhow::Result<Option<ShapeMesh>> {
+        if let Geometry::HeightField { field, transform } = self.shape_geometry(id)? {
+            return Ok(Some(height_field_mesh(field, *transform)));
+        }
         let (hull, transform) = match self.shape_geometry(id)? {
             Geometry::Box { half, transform } => {
                 (ConvexHull::cuboid(Vec3::from(*half)), *transform)
@@ -1698,6 +1798,12 @@ impl World {
         s.alive = false;
         s.generation = s.generation.wrapping_add(1).max(1);
         let (collider, body) = (s.collider, s.body);
+        // Hull blocks stay cached for reuse (inserts deduplicate them); a
+        // heightfield's block is its own, so it is freed once out of quarantine.
+        if matches!(s.geometry, Geometry::HeightField { .. }) {
+            let base = engine_schema::convex::convex_params_base(self.sim.collider_record(collider).params);
+            self.retired_height_fields.push((base, self.step));
+        }
         self.sim.set_collider(collider, retired_collider(body));
         self.collider_shape[collider as usize] = u32::MAX;
         self.free_colliders.push((collider, self.step));
@@ -1798,6 +1904,29 @@ impl World {
                 };
                 (ShapeType::ConvexHull, params, *transform)
             }
+            Geometry::HeightField { field, transform } => {
+                let params = match hull_params {
+                    Some(p) => p,
+                    None => {
+                        let now = self.step;
+                        let hulls = &mut self.hulls;
+                        self.retired_height_fields.retain(|&(base, t)| {
+                            let due = now >= t + QUARANTINE_STEPS;
+                            if due {
+                                hulls.release(base);
+                            }
+                            !due
+                        });
+                        let base = self
+                            .hulls
+                            .insert_height_field(field)
+                            .map_err(|e| anyhow::anyhow!("heightfield: {e}"))?;
+                        self.sim.sync_hulls(&mut self.hulls);
+                        engine_schema::heightfield::height_field_collider_params(base, field)
+                    }
+                };
+                (ShapeType::HeightField, params, *transform)
+            }
             Geometry::Plane { normal, offset } => {
                 // The kernels read planes in world space: place this one by
                 // the (static) body's pose now.
@@ -1838,7 +1967,7 @@ impl World {
         let frame = self.bodies[slot.body as usize].frame();
         let material = self.intern_material(&slot.def.material)?;
         let hull_params = match slot.geometry {
-            Geometry::Hull { .. } => Some(self.sim.collider_record(slot.collider).params),
+            Geometry::Hull { .. } | Geometry::HeightField { .. } => Some(self.sim.collider_record(slot.collider).params),
             _ => None,
         };
         let mut c = self.collider(
@@ -2115,5 +2244,53 @@ fn engine_ray(r: &RayInput) -> engine_vehicle::Ray {
         dir: t.normalize_or_zero().to_array(),
         max_dist: t.length(),
         exclude_body: r.ignore_body.map(|b| b.index()),
+    }
+}
+
+/// Two triangles per cell, counter-clockwise seen from +Y (the GPU's split).
+fn height_field_mesh(field: &HeightField, transform: Transform) -> ShapeMesh {
+    let (nx, nz) = field.samples();
+    let (q, p) = (transform.q(), transform.p());
+    let mut vertices = Vec::with_capacity((nx * nz) as usize);
+    for j in 0..nz {
+        for i in 0..nx {
+            vertices.push((p + q * field.vertex(i, j)).to_array());
+        }
+    }
+    let mut triangles = Vec::with_capacity(((nx - 1) * (nz - 1) * 2) as usize);
+    for j in 0..nz - 1 {
+        for i in 0..nx - 1 {
+            let v = |di: u32, dj: u32| (j + dj) * nx + i + di;
+            triangles.push([v(0, 0), v(1, 1), v(1, 0)]);
+            triangles.push([v(0, 0), v(0, 1), v(1, 1)]);
+        }
+    }
+    ShapeMesh { vertices, triangles }
+}
+
+#[cfg(test)]
+mod height_field_arena_tests {
+    use super::*;
+
+    /// A removed heightfield's arena block is freed once out of quarantine, so
+    /// replacing terrain again and again does not grow the arena.
+    #[test]
+    fn replacing_terrain_reuses_its_arena_block() {
+        let mut w = World::new(GpuContext::Default, &WorldDef::default()).unwrap();
+        let field = HeightField::new(33, 33, 0.5, 0.5, vec![0.0; 33 * 33]).unwrap();
+        let ground = w.create_body(&BodyDef::default()).unwrap();
+        let mut len = None;
+        for _ in 0..4 {
+            let s = w
+                .create_height_field_shape(ground, &ShapeDef::default(), &field, Transform::IDENTITY)
+                .unwrap();
+            let now = w.hulls.len();
+            assert!(len.is_none_or(|l| now <= l), "the arena grew to {now} records (was {len:?})");
+            len = Some(now);
+            w.destroy_shape(s, false).unwrap();
+            for _ in 0..QUARANTINE_STEPS + 1 {
+                w.step().unwrap();
+            }
+        }
     }
 }

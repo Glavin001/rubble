@@ -42,6 +42,7 @@ public static const uint SHAPE_CAPSULE = 1u;
 public static const uint SHAPE_BOX = 2u;
 public static const uint SHAPE_CONVEX = 3u;
 public static const uint SHAPE_PLANE = 4u;
+public static const uint SHAPE_HEIGHTFIELD = 5u;
 
 public struct Material
 {

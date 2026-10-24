@@ -12,6 +12,7 @@ pub mod commands;
 pub mod mass;
 pub mod convex;
 pub mod handles;
+pub mod heightfield;
 pub mod joint;
 pub mod params;
 pub mod scene;
@@ -91,6 +92,8 @@ pub enum ShapeType {
     Box = 2,
     ConvexHull = 3,
     Plane = 4,
+    /// Static terrain: a grid of heights in the hull arena (`heightfield`).
+    HeightField = 5,
 }
 
 /// Slots in the joint-pair hash (`jointHashSize()` in world_step.slang): a power
