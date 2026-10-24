@@ -563,31 +563,14 @@ them progressively (1, 1, 2, 10, 13, 15 broken bonds over the first 0.1 s, one p
   ~6.4 m/s, is 37% above ours (4.0; 4.2 with `--feature crushing=off`), just outside
   the 30% gate. Closing this needs a crushing law in the oracle (pressure-capped
   chunks) and a contact-pulse comparison; it stays open.
-* **b8 in the coupled pipeline (rubble) breaks 2-3x what the oracle breaks** (open,
-  2026-10-24; failing test `stress-rubble` `integrated::sudden_support_loss_is_promoted_at_its_event`).
-  At 0.25 s over the gate's input perturbations the oracle breaks 7-14 bonds, rubble's
-  coupled pipeline 11-40 (median 29; three runs agree, four cascade).
-  * *Exposed by a correct rubble fix.* rubble's broadphase used to drop
-    dynamic-static pairs whose static had the lower collider index. b8's anchored
-    frame is created first, so freed pieces fell through it; with those pairs lost the
-    coupled runs gave 10-14. Keeping the pairs (PR #52; without it a box falls through
-    a pedestal, `engine-webgpu/tests/static_pairs.rs`) exposes this.
-  * *Where it parts.* With and without the pairs, a run breaks the same bonds until
-    84 ms. Then a freed 2.7 m piece of the top beam (chunks 118-126) between the
-    frame's two anchored halves is squeezed by rubble: equal and opposite horizontal
-    impulses on its two end faces, 11, 84, then 121 N s per 1 ms frame, at closing
-    speeds of 0.01-0.03 m/s and at most 0.1 mm penetration. It then breaks in three.
-  * *Ruled out so far.*
-    * Engine contact loads: dropping them from the stress solve (on pieces against
-      anchored clusters, on anchored clusters, or both) still gives a median of 24-28.
-    * A freed piece's landing, or its squeeze between anchored walls, on its own:
-      both match the oracle (`a_beam_landing_on_an_anchored_block_breaks_as_the_oracle`,
-      `a_beam_freed_between_anchored_walls_breaks_as_the_oracle`).
-  * *Also seen.* The coupled run is not deterministic here: the same input gave 12
-    broken bonds in one run and at least 18 in another.
-  * *Next.* Find what of b8's piece the isolated cases lack (its floor load, the
-    deformation it carries from the frame, the island frames before it), and how the
-    squeeze reaches its bonds other than as contact loads.
+* **The coupled pipeline (rubble) is not deterministic** on a chaotic collapse: b8's
+  same input gave 12 broken bonds in one run and at least 18 in another (2026-10-24).
+  Judge such cases by the gate's ensemble (`stress-rubble`
+  `integrated::sudden_support_loss_is_promoted_at_its_event`), not single runs.
+* **The GPU-resident frame keeps the engine's shapes undeformed**
+  (`World::engine_shapes_deformed` off; IMPROVEMENTS.md "Engine shapes follow the
+  chunks' deformation"), so a piece freed from a deforming structure can wedge
+  between its undeformed faces there, as b8 did in the host-coupled frame before.
 * **Lateral release / Poisson coupling**: the chunk network has no Poisson effect, so
   spall breaks whole planes where the continuum keeps corner ligaments (b6), and peak
   panel displacement is 20-24% above OpenCourant (b9).

@@ -221,6 +221,7 @@ impl ResidentEngine for RubbleEngine {
                     ccd: false,
                     // Only CCD bodies' substep bound reads it.
                     thin: 0.0,
+                    shapes: None,
                 },
             );
         }

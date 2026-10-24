@@ -605,6 +605,69 @@ an intact joint carries no patch state.
 **Status:** evidence recorded. Adoption is a model change and needs a person's review
 (the b8 difference judged against its ensemble spread); then `scripts/fidelity.py`.
 
+### Engine shapes follow the chunks' deformation (coupling fix, switch, default on pending review, 2026-10-24)
+
+**Switch.** `World::engine_shapes_deformed` (`GpuWorld::set_engine_shapes_deformed`;
+`STRESS_ENGINE_SHAPES=undeformed` turns it off). Coupled runs only: the standalone
+oracle and the GPU accuracy gate build no engine shapes.
+
+**What it replaces.** The coupling built a cluster's engine shapes at its chunks'
+undeformed centres, once per chunk set. Now each shape sits where the stress solve has
+its chunk (hidden displacement `u` and rotation `th`, as `World::chunk_box`), refreshed
+every frame (`World::shape_poses`). A body whose shapes moved keeps its identity:
+rubble places its colliders in place (`RubbleEngine::move_shapes`), keeping its
+contacts and their warm starts. Its mass properties stay the build's (small strains).
+A settled structure's poses do not change, so nothing is uploaded for it.
+
+**Why (b8_frame_sudden, coupled).** rubble's broadphase used to drop dynamic-static
+pairs whose static had the lower collider index. b8's anchored frame is created first,
+so its freed pieces fell through it. Keeping those pairs (PR #52) exposed this:
+- 11-40 broken bonds at 0.25 s over the gate's input perturbations (median 29),
+  against the oracle's 7-14.
+- Runs with and without those pairs break the same bonds until 84 ms.
+- Then a freed 2.7 m top-beam piece sits between the frame's anchored halves. In the
+  stress solve it has a gap at both ends, widening from 0.2 to 0.9 mm in 4 ms as the
+  frame springs apart after the column loss. In rubble, with undeformed shapes, it was
+  flush against both faces.
+- Turning (0.08 rad/s), it wedged: equal and opposite end impulses of 11, 84, then
+  121 N s per 1 ms frame, about its angular momentum over the lever arm. It broke in
+  three, and the cascade followed.
+
+**Evidence.**
+
+| b8, 7 runs over the gate's perturbations | broken bonds |
+|---|---|
+| oracle ensemble | 7-14 |
+| undeformed shapes (before) | 11-40, median 29 |
+| without the lower-index pairs (before PR #52) | 10-14 |
+| this switch | 13-17, median 13 |
+
+- *Ruled out.*
+  - Dropping the engine's contact loads from the stress solve (on pieces, on
+    anchored clusters, or both): median 24-28.
+  - rubble's friction at 0: median 34.
+  - Shapes deformed only when a body is built (at the split), not refreshed: median 28.
+  - Rebuilding the anchored bodies every frame, undeformed: median 13, but two runs
+    still cascade (37, 30). The rebuild resets the contacts' warm starts, which acts
+    like compliance.
+- *Isolated cases* match the oracle either way: a beam landing on an anchored block,
+  and a beam freed between two undeformed anchored walls (`stress-rubble` tests
+  `integrated::a_beam_*`).
+- *Suite.* `stress-rubble` (every test binary) passes with the switch on, and
+  `resident_gpu` compares resident and fast frames with it off (below).
+
+**Not done.**
+- The GPU-resident frame keeps the engine's shapes undeformed. The GPU makes split
+  bodies from the undeformed part table, and the host never reads `u` there. Every
+  resident profile and `with_resident_engine` turn the switch off. Following the
+  deformation there needs a GPU pass that writes rubble's collider poses from the
+  chunk state.
+- Cost at scale is not measured: the host builds every cluster's shape poses each frame
+  (O(chunks)), and uploads the colliders of the bodies that moved.
+
+**Status:** default on in the host-coupled frame, pending review (a coupling model
+change).
+
 ## Runtime (bit-exact, no switch)
 
 Speedups that change no result take no switch. Each must reproduce the established

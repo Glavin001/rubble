@@ -116,10 +116,12 @@ fn anchored_wall_punch_through_without_rewind() {
 /// the runs on the same input changes must lie within the reference ensemble's range
 /// (counts only: this test never judged the probes).
 ///
-/// **Fails: open issue** (README "Known gaps", b8 in the coupled pipeline). The reference
-/// gives 7-14 broken bonds; rubble 11-40 (median 29). Before rubble's broadphase kept
-/// dynamic-static pairs whose static has the lower index, freed pieces fell through the
-/// frame's anchored parts and this matched (10-14).
+/// The reference gives 7-14 broken bonds. rubble gave 11-40 (median 29) once its
+/// broadphase kept dynamic-static pairs whose static has the lower index (before, freed
+/// pieces fell through the frame's anchored parts): engine shapes built undeformed held a
+/// freed top-beam piece flush between the frame's anchored halves, where the stress solve
+/// had a widening gap, and it wedged and broke. With the shapes following the chunks'
+/// deformation (`World::shape_poses`) it gives 13-17 (median 13).
 #[test]
 fn sudden_support_loss_is_promoted_at_its_event() {
     use stress_gpu::gate::{ensemble_gate, is_chaotic, perturbations, perturbed_by, reference_set};
@@ -143,8 +145,7 @@ fn sudden_support_loss_is_promoted_at_its_event() {
 
 /// A free concrete beam (nine 0.3 m chunks) landing on an anchored block: the coupled
 /// pipeline breaks what the standalone oracle breaks, from gentle (0.09 m/s, nothing
-/// breaks) to breaking (1 m/s), centred and off centre. With b8's open issue, this
-/// shows a freed piece's landing on an anchored body is not where the two part.
+/// breaks) to breaking (1 m/s), centred and off centre.
 #[test]
 fn a_beam_landing_on_an_anchored_block_breaks_as_the_oracle() {
     use stress_ref::builders::*;
@@ -171,8 +172,8 @@ fn a_beam_landing_on_an_anchored_block_breaks_as_the_oracle() {
 
 /// A free concrete beam fitting exactly between two anchored walls (its bonds to them
 /// already broken), falling at 0.1 m/s and turning about its width: it slides out as
-/// in the oracle (nothing breaks). b8's diverging piece is squeezed like this between
-/// the frame's two anchored halves; in isolation the squeeze does not break it.
+/// in the oracle (nothing breaks). Without the walls' deformation (none here), a freed
+/// piece flush between anchored faces is no harm.
 #[test]
 fn a_beam_freed_between_anchored_walls_breaks_as_the_oracle() {
     use stress_ref::builders::*;

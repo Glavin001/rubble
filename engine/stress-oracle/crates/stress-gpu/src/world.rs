@@ -410,10 +410,18 @@ impl GpuWorld {
             // come in the frame after it).
             self.route_next = true;
         }
-        // The profile's resident frame runs the GPU's split path.
+        // The profile's resident frame runs the GPU's split path. It keeps the engine's
+        // shapes undeformed (`World::engine_shapes_deformed`; not implemented there yet).
         if profile.resident() {
+            self.shell.engine_shapes_deformed = false;
             crate::GPU_FRAME_PROFILE.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+    }
+
+    /// Coupled mode: the engine's shapes follow the chunks' deformation
+    /// (`World::engine_shapes_deformed`).
+    pub fn set_engine_shapes_deformed(&mut self, on: bool) {
+        self.shell.engine_shapes_deformed = on;
     }
 
     pub fn set_impact_islands(&mut self, on: bool) {

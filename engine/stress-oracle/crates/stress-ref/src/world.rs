@@ -265,6 +265,13 @@ pub struct World {
     /// faster than the tiered impact speed does (resting contacts stay the engine's).
     /// `STRESS_TIERED_JOIN=fast` turns it on (a measurement until you decide).
     pub tiered_fast_joins: bool,
+    /// Coupled mode: the engine's shapes sit where the stress solve has their chunks (each
+    /// chunk's hidden displacement and rotation, as the world's own contact sees it),
+    /// refreshed every frame (`World::shape_poses`). Off, they keep the chunks' undeformed
+    /// layout, as PhysX's native destruction does. Default on; the GPU-resident frame does
+    /// not implement it yet and turns it off (`GpuWorld::with_resident_engine`, every
+    /// resident profile). `STRESS_ENGINE_SHAPES=undeformed` turns it off.
+    pub engine_shapes_deformed: bool,
     /// `implicit_failure_windows`: chunks whose clusters take this frame in a window
     /// (a bond of theirs started to fail in an implicit step of an earlier attempt),
     /// and those found failing in this attempt.
@@ -505,6 +512,7 @@ impl World {
             impact_islands: true,
             qs_islands: false,
             tiered_fast_joins: std::env::var("STRESS_TIERED_JOIN").is_ok_and(|v| v == "fast"),
+            engine_shapes_deformed: !std::env::var("STRESS_ENGINE_SHAPES").is_ok_and(|v| v == "undeformed"),
             window_forced: Vec::new(),
             implicit_failures: Vec::new(),
             implicit_contact_seen: 0.0,
