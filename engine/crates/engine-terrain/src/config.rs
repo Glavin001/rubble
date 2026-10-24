@@ -27,6 +27,8 @@ pub struct TerrainConfig {
     /// Substeps one call may run (a frame needing more fails, rather than
     /// taking longer substeps than CFL allows).
     pub max_substeps: u32,
+    /// Heightfield samples one region may activate.
+    pub max_columns: u32,
 }
 
 impl Default for TerrainConfig {
@@ -41,6 +43,7 @@ impl Default for TerrainConfig {
             min_cell_size: 0.01,
             courant: 0.3,
             max_substeps: 512,
+            max_columns: 1 << 16,
         }
     }
 }
@@ -90,15 +93,12 @@ impl TerrainConfig {
             "courant must be in (0, 1]",
         )?;
         bad(self.max_substeps == 0, "max_substeps must be at least 1")?;
+        bad(self.max_columns == 0, "max_columns must be at least 1")?;
         Ok(())
     }
 
     /// `requested` of `limit` against `allowed`.
-    pub(crate) fn check(
-        limit: &'static str,
-        requested: u64,
-        allowed: u64,
-    ) -> Result<(), TerrainError> {
+    pub fn check(limit: &'static str, requested: u64, allowed: u64) -> Result<(), TerrainError> {
         if requested > allowed {
             return Err(TerrainError::LimitExceeded {
                 limit,

@@ -15,6 +15,12 @@
 //   mpm_p2g         per grid node: gather from the particles whose stencil covers it
 //   mpm_grid        velocity, gravity, the heightfield bed
 //   mpm_g2p         per particle: velocity, C, position and F from the grid
+// Activation (heightfield → particles) and bake (particles → heightfield) work on
+// the window of heightfield samples under the region: mpm_activate_count,
+// mpm_activate_scan, mpm_activate_emit, mpm_activate_lower; mpm_bake_bin,
+// mpm_bake_raise, mpm_bake_header. Volume moves as whole quanta (params
+// column.y m³): a sample lowered by n quanta becomes particles holding exactly n,
+// and baking adds each particle's quanta back to the sample it stands over.
 // P2G is a gather (no float atomics, which WGSL lacks): every node sums its
 // particles in a fixed order, so runs and backends agree bit for bit.
 //
@@ -34,11 +40,14 @@ static const uint MPM_NO_BLOCK = 0xFFFFFFFFu;
 static const uint MPM_C_BLOCKS = 0u;      // blocks inserted this substep
 static const uint MPM_C_FLAGS = 1u;       // MPM_OVERFLOW_* | MPM_OUTSIDE
 static const uint MPM_C_MAX_SPEED = 2u;   // max |v| after G2P (f32 bits; monotone for v ≥ 0)
+static const uint MPM_C_PARTICLES = 3u;   // particles in the region (host load, activation)
+static const uint MPM_C_BAKE_MAX = 4u;    // largest baked height (order-preserving bits)
 static const uint MPM_OVERFLOW_BLOCKS = 1u;
 static const uint MPM_OVERFLOW_HASH = 2u;
 static const uint MPM_OUTSIDE = 4u;
 static const uint MPM_CFL = 8u;           // a particle outran the substep's speed bound
 static const uint MPM_INVALID = 16u;      // a particle's F or plastic state is not finite
+static const uint MPM_OVERFLOW_PARTICLES = 32u; // activation would pass max particles (nothing changed)
 
 // Material kinds (params u0.w).
 static const uint MPM_MATERIAL_NONE = 0u; // no stress: transfers only (tests)
@@ -48,15 +57,18 @@ struct MpmParams
 {
     float4 origin;  // xyz region origin, w = dx
     float4 step;    // x = dt, y = gravity (along y), z = node mass threshold, w = bed friction μ
-    uint4 counts;   // x = particles, y = hash slots (power of two), z = max blocks, w = material
+    uint4 counts;   // x = max particles, y = hash slots (power of two), z = max blocks, w = material
     uint4 dims;     // xyz = region size in cells, w = bed heightfield collider (MPM_NO_BLOCK: none)
     float4 limits;  // x = largest particle speed the substep's dt allows (CFL)
     float4 sand;    // λ, μ, α (friction), cohesion (log strain)
+    uint4 window;   // heightfield samples under the region: i0, j0, ni, nj
+    float4 column;  // bed height (heightfield-local y), volume quantum (m³), lattice spacing, density
 };
 
 // Per particle (128 B).
 struct MpmParticle
 {
+    // f1.w holds the particle's volume quanta (uint bits).
     float4 xm;      // position, mass
     float4 vj;      // velocity, log Jp (plastic volume)
     float4 c0;      // C rows (APIC affine velocity)
@@ -90,14 +102,20 @@ BIND(43) RWStructuredBuffer<AUint> gMpmCells;
 BIND(44) RWStructuredBuffer<uint> gMpmSorted;
 // Per node (block · 64 + local): after P2G (m·v, m), after mpm_grid (v, m).
 BIND(45) RWStructuredBuffer<float4> gMpmGrid;
-// Indirect dispatch of the per-block kernels: (blocks, 1, 1).
+// Indirect dispatch: [0..3) per-block kernels (blocks, 1, 1), [3..6) per-particle
+// kernels (⌈particles/64⌉, 1, 1).
 BIND(46) RWStructuredBuffer<uint> gMpmArgs;
+// Per window sample: [4t] = quanta, [4t + 1] = particles, [4t + 2] = first particle,
+// [4t + 3] = quanta baked onto it.
+BIND(47) RWStructuredBuffer<AUint> gMpmColumns;
 
 groupshared uint gsMpmScan[256];
 
 uint mpmIndex(uint3 tid) { return tid.x + tid.y * (32768u * 64u); }
 
 MpmParams mpmParams() { return gMpmParams[0]; }
+
+uint mpmParticleCount() { return ALOAD(gMpmCounters[MPM_C_PARTICLES]); }
 
 int3 mpmBaseNode(float3 x, MpmParams p)
 {
@@ -203,7 +221,7 @@ void mpm_touch(uint3 tid : SV_DispatchThreadID)
 {
     uint i = mpmIndex(tid);
     MpmParams p = mpmParams();
-    if (i >= p.counts.x) return;
+    if (i >= mpmParticleCount()) return;
     float3 x = gMpmParticles[i].xm.xyz;
     if (!mpmInside(x, p)) { AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OUTSIDE); return; }
     int3 b = mpmBaseNode(x, p);
@@ -222,6 +240,9 @@ void mpm_write_args(uint3 tid : SV_DispatchThreadID)
     gMpmArgs[0] = min(ALOAD(gMpmCounters[MPM_C_BLOCKS]), p.counts.z);
     gMpmArgs[1] = 1u;
     gMpmArgs[2] = 1u;
+    gMpmArgs[3] = (mpmParticleCount() + MPM_GROUP - 1u) / MPM_GROUP;
+    gMpmArgs[4] = 1u;
+    gMpmArgs[5] = 1u;
 }
 
 [shader("compute")]
@@ -230,7 +251,7 @@ void mpm_count(uint3 tid : SV_DispatchThreadID)
 {
     uint i = mpmIndex(tid);
     MpmParams p = mpmParams();
-    if (i >= p.counts.x) return;
+    if (i >= mpmParticleCount()) return;
     float3 x = gMpmParticles[i].xm.xyz;
     if (!mpmInside(x, p)) return;
     uint c = mpmCellOf(mpmBaseNode(x, p), p);
@@ -298,7 +319,7 @@ void mpm_scatter(uint3 tid : SV_DispatchThreadID)
 {
     uint i = mpmIndex(tid);
     MpmParams p = mpmParams();
-    if (i >= p.counts.x) return;
+    if (i >= mpmParticleCount()) return;
     float3 x = gMpmParticles[i].xm.xyz;
     if (!mpmInside(x, p)) return;
     uint c = mpmCellOf(mpmBaseNode(x, p), p);
@@ -481,7 +502,7 @@ void mpm_g2p(uint3 tid : SV_DispatchThreadID)
 {
     uint i = mpmIndex(tid);
     MpmParams p = mpmParams();
-    if (i >= p.counts.x) return;
+    if (i >= mpmParticleCount()) return;
     MpmParticle q = gMpmParticles[i];
     if (!mpmInside(q.xm.xyz, p)) return;
     float dx = p.origin.w;
@@ -519,4 +540,246 @@ void mpm_g2p(uint3 tid : SV_DispatchThreadID)
     float speed = length(v);
     AMAX2(gMpmCounters[MPM_C_MAX_SPEED], asuint(speed));
     if (!(speed <= p.limits.x)) AOR2(gMpmCounters[MPM_C_FLAGS], MPM_CFL);
+}
+
+// ---- activation and bake -----------------------------------------------------
+
+// Area each heightfield sample stands for (its cell around it) and the window
+// sample t's grid indices.
+float mpmSampleArea(HeightFieldRef hf) { return hf.dx * hf.dz; }
+
+uint2 mpmWindowSample(uint t, MpmParams p)
+{
+    return uint2(p.window.x + t % p.window.z, p.window.y + t / p.window.z);
+}
+
+// Particles a sample's column becomes: a lattice of spacing ≈ column.z over its
+// cell and its height above the bed, never more particles than quanta.
+uint3 mpmColumnLattice(HeightFieldRef hf, float dh, uint quanta, MpmParams p)
+{
+    if (quanta == 0u) return uint3(0, 0, 0);
+    float s = p.column.z;
+    uint3 n = uint3(max(1.0, round(hf.dx / s)), max(1.0, round(dh / s)), max(1.0, round(hf.dz / s)));
+    while (n.x * n.y * n.z > quanta)
+    {
+        if (n.y > 1u) n.y--;
+        else if (n.x >= n.z && n.x > 1u) n.x--;
+        else n.z--;
+    }
+    return n;
+}
+
+// Per window sample: the quanta above the bed (rounded to whole quanta) and its
+// particle count.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_activate_count(uint3 tid : SV_DispatchThreadID)
+{
+    uint t = mpmIndex(tid);
+    MpmParams p = mpmParams();
+    if (t >= p.window.z * p.window.w) return;
+    Collider col = gColliders[p.dims.w];
+    HeightFieldRef hf = heightFieldOf(col);
+    uint2 ij = mpmWindowSample(t, p);
+    float dh = hfHeight(hf, ij.x, ij.y) - p.column.x;
+    float area = mpmSampleArea(hf);
+    uint quanta = dh > 0.0 ? uint(floor(dh * area / p.column.y + 0.5)) : 0u;
+    uint3 n = mpmColumnLattice(hf, float(quanta) * p.column.y / area, quanta, p);
+    ASTORE(gMpmColumns[4u * t], quanta);
+    ASTORE(gMpmColumns[4u * t + 1u], n.x * n.y * n.z);
+    ASTORE(gMpmColumns[4u * t + 3u], 0u);
+}
+
+// One workgroup: each sample's first particle (after the particles already in
+// the region), in window order; all or nothing against max particles.
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void mpm_activate_scan(uint3 lid : SV_GroupThreadID)
+{
+    uint l = lid.x;
+    MpmParams p = mpmParams();
+    uint samples = p.window.z * p.window.w;
+    uint chunk = (samples + 255u) / 256u;
+    uint first = l * chunk, last = min(first + chunk, samples);
+    uint sum = 0u;
+    for (uint t = first; t < last; t++) sum += ALOAD(gMpmColumns[4u * t + 1u]);
+    gsMpmScan[l] = sum;
+    GROUP_SYNC();
+    for (uint d = 1u; d < 256u; d <<= 1u)
+    {
+        uint add = l >= d ? gsMpmScan[l - d] : 0u;
+        GROUP_SYNC();
+        gsMpmScan[l] += add;
+        GROUP_SYNC();
+    }
+    uint have = mpmParticleCount();
+    uint start = have + gsMpmScan[l] - sum;
+    for (uint t = first; t < last; t++)
+    {
+        ASTORE(gMpmColumns[4u * t + 2u], start);
+        start += ALOAD(gMpmColumns[4u * t + 1u]);
+    }
+    GROUP_SYNC();
+    if (l == 255u)
+    {
+        uint total = gsMpmScan[255];
+        if (have + total > p.counts.x)
+            AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_PARTICLES);
+        else ASTORE(gMpmCounters[MPM_C_PARTICLES], have + total);
+    }
+}
+
+bool mpmActivationRefused() { return (ALOAD(gMpmCounters[MPM_C_FLAGS]) & MPM_OVERFLOW_PARTICLES) != 0u; }
+
+// Per window sample: its particles, sharing its quanta (the first `quanta mod n`
+// take one more).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_activate_emit(uint3 tid : SV_DispatchThreadID)
+{
+    uint t = mpmIndex(tid);
+    MpmParams p = mpmParams();
+    if (t >= p.window.z * p.window.w || mpmActivationRefused()) return;
+    Collider col = gColliders[p.dims.w];
+    Frame f = colliderFrame(col, gBodies[col.body]);
+    HeightFieldRef hf = heightFieldOf(col);
+    uint2 ij = mpmWindowSample(t, p);
+    uint quanta = ALOAD(gMpmColumns[4u * t]);
+    uint total = ALOAD(gMpmColumns[4u * t + 1u]);
+    if (total == 0u) return;
+    uint first = ALOAD(gMpmColumns[4u * t + 2u]);
+    float area = mpmSampleArea(hf);
+    float dh = float(quanta) * p.column.y / area;
+    uint3 n = mpmColumnLattice(hf, dh, quanta, p);
+    float3 lo = float3(hf.x0 + (float(ij.x) - 0.5) * hf.dx, p.column.x, hf.z0 + (float(ij.y) - 0.5) * hf.dz);
+    float3 cell = float3(hf.dx / float(n.x), dh / float(n.y), hf.dz / float(n.z));
+    uint each = quanta / total, extra = quanta % total;
+    for (uint k = 0u; k < total; k++)
+    {
+        uint3 c = uint3(k % n.x, (k / n.x) % n.y, k / (n.x * n.y));
+        float3 xl = lo + (float3(c) + 0.5) * cell;
+        uint mine = each + (k < extra ? 1u : 0u);
+        float vol = float(mine) * p.column.y;
+        MpmParticle q;
+        q.xm = float4(frameToWorld(f, xl), vol * p.column.w);
+        q.vj = float4(0, 0, 0, 0);
+        q.c0 = float4(0, 0, 0, 0);
+        q.c1 = float4(0, 0, 0, 0);
+        q.c2 = float4(0, 0, 0, 0);
+        q.f0 = float4(1, 0, 0, vol);
+        q.f1 = float4(0, 1, 0, asfloat(mine));
+        q.f2 = float4(0, 0, 1, 0);
+        gMpmParticles[first + k] = q;
+    }
+}
+
+// Heightfield records (four samples each) touching the window, as a range.
+void mpmWindowRecords(HeightFieldRef hf, MpmParams p, out uint r0, out uint r1)
+{
+    r0 = (p.window.y * hf.nx + p.window.x) >> 2;
+    r1 = ((p.window.y + p.window.w - 1u) * hf.nx + p.window.x + p.window.z - 1u) >> 2;
+}
+
+// Per heightfield record (its own four samples, so no two threads share one):
+// window samples lowered by the quanta they gave (activate) or raised by the
+// quanta baked onto them (bake).
+void mpmAdjustRecord(uint r, bool raise, MpmParams p, HeightFieldRef hf)
+{
+    uint4 rec = gHulls[hf.base + 2u + r];
+    float area = mpmSampleArea(hf);
+    for (uint c = 0u; c < 4u; c++)
+    {
+        uint k = 4u * r + c;
+        uint i = k % hf.nx, j = k / hf.nx;
+        if (j >= hf.nz || i < p.window.x || i >= p.window.x + p.window.z || j < p.window.y || j >= p.window.y + p.window.w)
+            continue;
+        uint t = (j - p.window.y) * p.window.z + (i - p.window.x);
+        float h = asfloat(rec[c]);
+        if (raise)
+        {
+            h += float(ALOAD(gMpmColumns[4u * t + 3u])) * p.column.y / area;
+            // Order-preserving bits of h (a float's sign flips the order).
+            uint b = asuint(h);
+            AMAX2(gMpmCounters[MPM_C_BAKE_MAX], (b & 0x80000000u) != 0u ? ~b : (b | 0x80000000u));
+        }
+        else h -= float(ALOAD(gMpmColumns[4u * t])) * p.column.y / area;
+        rec[c] = asuint(h);
+    }
+    gHulls[hf.base + 2u + r] = rec;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_activate_lower(uint3 tid : SV_DispatchThreadID)
+{
+    MpmParams p = mpmParams();
+    if (mpmActivationRefused()) return;
+    Collider col = gColliders[p.dims.w];
+    HeightFieldRef hf = heightFieldOf(col);
+    uint r0, r1;
+    mpmWindowRecords(hf, p, r0, r1);
+    uint r = r0 + mpmIndex(tid);
+    if (r <= r1) mpmAdjustRecord(r, false, p, hf);
+    if (mpmIndex(tid) == 0u)
+    {
+        // Lowered samples sit within half a quantum's height of the bed.
+        uint4 dims = gHulls[hf.base + 1u];
+        float lowest = p.column.x - p.column.y / mpmSampleArea(hf);
+        dims.z = asuint(min(asfloat(dims.z), lowest));
+        gHulls[hf.base + 1u] = dims;
+    }
+}
+
+// Per particle: its quanta onto the window sample it stands over (the nearest
+// one, clamped to the window: none leaves it).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_bake_bin(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = mpmIndex(tid);
+    if (i >= mpmParticleCount()) return;
+    MpmParams p = mpmParams();
+    Collider col = gColliders[p.dims.w];
+    Frame f = colliderFrame(col, gBodies[col.body]);
+    HeightFieldRef hf = heightFieldOf(col);
+    MpmParticle q = gMpmParticles[i];
+    float3 xl = frameToLocal(f, q.xm.xyz);
+    int si = int(round((xl.x - hf.x0) / hf.dx)), sj = int(round((xl.z - hf.z0) / hf.dz));
+    uint ti = uint(clamp(si - int(p.window.x), 0, int(p.window.z) - 1));
+    uint tj = uint(clamp(sj - int(p.window.y), 0, int(p.window.w) - 1));
+    AADD2(gMpmColumns[4u * (tj * p.window.z + ti) + 3u], asuint(q.f1.w));
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_bake_raise(uint3 tid : SV_DispatchThreadID)
+{
+    MpmParams p = mpmParams();
+    Collider col = gColliders[p.dims.w];
+    HeightFieldRef hf = heightFieldOf(col);
+    uint r0, r1;
+    mpmWindowRecords(hf, p, r0, r1);
+    uint r = r0 + mpmIndex(tid);
+    if (r <= r1) mpmAdjustRecord(r, true, p, hf);
+}
+
+// After mpm_bake_raise: the field's max height covers the baked samples, and
+// the region holds no particles.
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void mpm_bake_header(uint3 tid : SV_DispatchThreadID)
+{
+    MpmParams p = mpmParams();
+    Collider col = gColliders[p.dims.w];
+    HeightFieldRef hf = heightFieldOf(col);
+    uint b = ALOAD(gMpmCounters[MPM_C_BAKE_MAX]);
+    if (b != 0u)
+    {
+        float top = asfloat((b & 0x80000000u) != 0u ? (b & 0x7FFFFFFFu) : ~b);
+        uint4 dims = gHulls[hf.base + 1u];
+        dims.w = asuint(max(asfloat(dims.w), top));
+        gHulls[hf.base + 1u] = dims;
+    }
+    ASTORE(gMpmCounters[MPM_C_PARTICLES], 0u);
+    ASTORE(gMpmCounters[MPM_C_BAKE_MAX], 0u);
 }

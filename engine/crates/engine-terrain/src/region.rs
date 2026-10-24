@@ -75,6 +75,50 @@ impl RegionPlan {
         })
     }
 
+    /// A region of cells of size `dx` covering the box `[lo, hi]` (rounded out
+    /// to whole blocks), for events whose extent is known directly.
+    pub fn spanning(
+        config: &TerrainConfig,
+        lo: Vec3,
+        hi: Vec3,
+        dx: f32,
+        active_regions: u32,
+        active_blocks: u32,
+    ) -> Result<Self, TerrainError> {
+        config.validate()?;
+        if !(lo.is_finite() && hi.is_finite() && hi.cmpgt(lo).all() && dx.is_finite() && dx > 0.0) {
+            return Err(TerrainError::InvalidRequest(
+                "box must be finite and non-empty, dx positive",
+            ));
+        }
+        TerrainConfig::check(
+            "max_regions",
+            u64::from(active_regions) + 1,
+            u64::from(config.max_regions),
+        )?;
+        if dx < config.min_cell_size {
+            return Err(TerrainError::CellTooSmall {
+                requested: dx,
+                allowed: config.min_cell_size,
+            });
+        }
+        let block = dx * BLOCK_CELLS as f32;
+        let lo = (lo / block).floor();
+        let hi = (hi / block).ceil();
+        let blocks = (hi - lo).as_ivec3();
+        let count = blocks.x as u64 * blocks.y as u64 * blocks.z as u64;
+        TerrainConfig::check(
+            "max_blocks",
+            u64::from(active_blocks) + count,
+            u64::from(config.max_blocks),
+        )?;
+        Ok(Self {
+            dx,
+            origin: lo * block,
+            blocks,
+        })
+    }
+
     /// The box's maximum corner.
     pub fn end(&self) -> Vec3 {
         self.origin + self.blocks.as_vec3() * (self.dx * BLOCK_CELLS as f32)

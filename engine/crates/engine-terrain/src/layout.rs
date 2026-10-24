@@ -16,8 +16,17 @@ pub const MPM_SORTED_BINDING: usize = 44;
 pub const MPM_GRID_BINDING: usize = 45;
 /// Indirect workgroup counts of the per-block kernels.
 pub const MPM_ARGS_BINDING: usize = 46;
+/// Per heightfield sample under the region: quanta, particles, first particle, baked quanta.
+pub const MPM_COLUMNS_BINDING: usize = 47;
 /// One past the last terrain binding.
-pub const MPM_BINDING_END: usize = 47;
+pub const MPM_BINDING_END: usize = 48;
+
+/// Counter words (`gMpmCounters`).
+pub const MPM_C_BLOCKS: usize = 0;
+pub const MPM_C_FLAGS: usize = 1;
+pub const MPM_C_MAX_SPEED: usize = 2;
+pub const MPM_C_PARTICLES: usize = 3;
+pub const MPM_COUNTER_WORDS: usize = 8;
 
 /// `MpmParams.dims.w` without a bed heightfield.
 pub const MPM_NO_BED: u32 = u32::MAX;
@@ -32,6 +41,7 @@ pub const MPM_OVERFLOW_HASH: u32 = 2;
 pub const MPM_OUTSIDE: u32 = 4;
 pub const MPM_CFL: u32 = 8;
 pub const MPM_INVALID: u32 = 16;
+pub const MPM_OVERFLOW_PARTICLES: u32 = 32;
 
 /// Block coordinates are packed in 10 bits per axis.
 pub const MPM_MAX_BLOCKS_PER_AXIS: u32 = 1024;
@@ -43,7 +53,7 @@ pub struct MpmParams {
     pub origin: [f32; 4],
     /// dt, gravity along y, node mass threshold, bed friction μ.
     pub step: [f32; 4],
-    /// Particles, hash slots (a power of two), max blocks, material kind.
+    /// Max particles, hash slots (a power of two), max blocks, material kind.
     pub counts: [u32; 4],
     /// Region size in cells, bed heightfield collider (or [`MPM_NO_BED`]).
     pub dims: [u32; 4],
@@ -51,6 +61,11 @@ pub struct MpmParams {
     pub limits: [f32; 4],
     /// Sand: λ, μ, α (friction), cohesion (log strain).
     pub sand: [f32; 4],
+    /// Heightfield samples under the region: i0, j0, ni, nj.
+    pub window: [u32; 4],
+    /// Bed height (heightfield-local y), volume quantum (m³), particle lattice
+    /// spacing (m), density (kg/m³).
+    pub column: [f32; 4],
 }
 
 /// One particle (128 B).
@@ -63,7 +78,8 @@ pub struct MpmParticle {
     pub vj: [f32; 4],
     /// Rows of C, the APIC affine velocity.
     pub c: [[f32; 4]; 3],
-    /// Rows of the deformation gradient F; `f[0][3]` is the rest volume.
+    /// Rows of the deformation gradient F; `f[0][3]` is the rest volume,
+    /// `f[1][3]` the volume quanta (u32 bits; 0 for particles loaded by the host).
     pub f: [[f32; 4]; 3],
 }
 

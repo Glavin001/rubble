@@ -175,6 +175,13 @@ const WORLD_ENTRIES: &[&str] = &[
     "mpm_p2g",
     "mpm_grid",
     "mpm_g2p",
+    "mpm_activate_count",
+    "mpm_activate_scan",
+    "mpm_activate_emit",
+    "mpm_activate_lower",
+    "mpm_bake_bin",
+    "mpm_bake_raise",
+    "mpm_bake_header",
 ];
 
 const CHARACTER_ENTRIES: &[&str] = &["char_move", "char_post", "query_batch", "projectile_step"];

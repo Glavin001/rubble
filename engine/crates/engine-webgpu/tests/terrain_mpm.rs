@@ -292,3 +292,161 @@ fn a_sand_column_settles_at_or_below_its_friction_angle() {
         "the pile spread flat (peak {peak} m): sand should hold a slope"
     );
 }
+
+/// Heights of heightfield `collider` as the GPU holds them (row-major).
+fn gpu_heights(s: &WgpuSim, collider: u32, field: &HeightField) -> Vec<f32> {
+    let base = engine_schema::convex::convex_params_base(s.collider(collider).params);
+    let (nx, nz) = field.samples();
+    let words = s.read_words(18, u64::from(base + 2) * 4, (nx * nz) as usize);
+    words.into_iter().map(f32::from_bits).collect()
+}
+
+/// A mound of `peak` m on a flat field of 33×33 samples (12.5 cm apart) at y = -0.5.
+fn mound(s: &mut WgpuSim, peak: f32, width: f32) -> (HeightField, u32, Vec3) {
+    let field = HeightField::from_fn(33, 33, 0.125, 0.125, |x, z| {
+        peak * (-(x * x + z * z) / (width * width)).exp()
+    })
+    .unwrap();
+    let origin = Vec3::new(0.0, -0.5, 0.0);
+    let mut arena = HullArena::new();
+    let (_, collider) = s
+        .add_height_field(&mut arena, &field, origin, Quat::IDENTITY, 0)
+        .unwrap();
+    (field, collider, origin)
+}
+
+#[test]
+fn activating_then_baking_unmoved_material_restores_the_terrain() {
+    let mut s = sim();
+    let cfg = TerrainConfig {
+        max_particles: 1 << 18,
+        ..config()
+    };
+    s.terrain_enable(&cfg).unwrap();
+    let (field, collider, origin) = mound(&mut s, 0.3, 0.5);
+    let before = gpu_heights(&s, collider, &field);
+    let plan = RegionPlan::spanning(
+        &cfg,
+        Vec3::new(-1.0, -0.8, -1.0),
+        Vec3::new(1.0, 0.0, 1.0),
+        0.05,
+        0,
+        0,
+    )
+    .unwrap();
+    s.terrain_activate(&plan, collider, &field, origin, 1600.0, 0.5)
+        .unwrap();
+    let lowered = gpu_heights(&s, collider, &field);
+    let ps = s.terrain_particles();
+    assert!(!ps.is_empty(), "nothing was activated");
+    // The particles hold exactly what the samples gave up: whole quanta.
+    let quanta: u64 = ps.iter().map(|p| u64::from(p.f[1][3].to_bits())).sum();
+    let (dx, dz) = field.cell_size();
+    let removed: f64 = before
+        .iter()
+        .zip(&lowered)
+        .map(|(a, b)| f64::from(a - b) * f64::from(dx * dz))
+        .sum();
+    let q = f64::from(ps[0].f[0][3]) / f64::from(ps[0].f[1][3].to_bits());
+    assert!(
+        (removed / q - quanta as f64).abs() < 1e-3 * quanta as f64,
+        "heights lost {removed} m³, particles hold {} m³",
+        quanta as f64 * q
+    );
+    let mass: f64 = ps.iter().map(|p| f64::from(p.xm[3])).sum();
+    assert!((mass - 1600.0 * quanta as f64 * q).abs() < 1e-4 * mass);
+    // Every particle sits between the bed and the surface it came from.
+    for p in &ps {
+        let (x, z) = (p.xm[0] - origin.x, p.xm[2] - origin.z);
+        let (h, _) = field.surface(x, z).unwrap();
+        assert!(
+            p.xm[1] < origin.y + h + 0.13,
+            "particle above its column: {:?}",
+            p.xm
+        );
+    }
+    s.terrain_bake().unwrap();
+    let after = gpu_heights(&s, collider, &field);
+    for (k, (a, b)) in before.iter().zip(&after).enumerate() {
+        assert!(
+            (a - b).abs() < 1e-5,
+            "sample {k}: {a} before, {b} after bake"
+        );
+    }
+    assert!(s.terrain_particles().is_empty());
+}
+
+/// A sand mound opened as an active region, flowing for 1.5 s and baked back:
+/// no particle gains or loses quanta, and the heightfield ends with the volume it
+/// started with. (How far a mound this steep slumps is the granular-validation
+/// question; this test is about where the material goes, not how.)
+#[test]
+fn a_sand_mound_flows_and_bakes_back_with_its_volume() {
+    use engine_terrain::{substeps_for, SandMaterial};
+    let mut s = sim();
+    let cfg = TerrainConfig {
+        max_particles: 1 << 18,
+        ..config()
+    };
+    s.terrain_enable(&cfg).unwrap();
+    let sand = SandMaterial::default();
+    s.terrain_set_material(Some(&sand)).unwrap();
+    let (field, collider, origin) = mound(&mut s, 0.45, 0.3);
+    let before = gpu_heights(&s, collider, &field);
+    let plan = RegionPlan::spanning(
+        &cfg,
+        Vec3::new(-1.2, -0.75, -1.2),
+        Vec3::new(1.2, 0.2, 1.2),
+        0.05,
+        0,
+        0,
+    )
+    .unwrap();
+    s.terrain_activate(
+        &plan,
+        collider,
+        &field,
+        origin,
+        sand.density,
+        sand.friction_angle.tan(),
+    )
+    .unwrap();
+    let quanta: u64 = s
+        .terrain_particles()
+        .iter()
+        .map(|p| u64::from(p.f[1][3].to_bits()))
+        .sum();
+    let (n, dt) = substeps_for(&cfg, 1.0 / 60.0, plan.dx, sand.p_wave_speed(), 5.0).unwrap();
+    let mut last = 0.0;
+    for _ in 0..90 {
+        last = s.terrain_step(n, dt, -9.81).unwrap().max_speed;
+    }
+    let moved: u64 = s
+        .terrain_particles()
+        .iter()
+        .map(|p| u64::from(p.f[1][3].to_bits()))
+        .sum();
+    assert_eq!(
+        moved, quanta,
+        "particles lost or gained quanta while flowing"
+    );
+    s.terrain_bake().unwrap();
+    let after = gpu_heights(&s, collider, &field);
+    let (dx, dz) = field.cell_size();
+    let vol = |h: &[f32]| {
+        h.iter()
+            .map(|&v| f64::from(v) * f64::from(dx * dz))
+            .sum::<f64>()
+    };
+    let (v0, v1) = (vol(&before), vol(&after));
+    let peak = |h: &[f32]| h.iter().cloned().fold(f32::MIN, f32::max);
+    eprintln!(
+        "mound: peak {:.3} -> {:.3} m, volume {v0:.5} -> {v1:.5} m³, max speed {last:.4} m/s",
+        peak(&before),
+        peak(&after)
+    );
+    assert!(
+        (v1 - v0).abs() < 1e-4 * v0.abs().max(1.0),
+        "volume {v0} m³ before, {v1} m³ after"
+    );
+}
