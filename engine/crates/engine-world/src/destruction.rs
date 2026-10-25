@@ -397,6 +397,11 @@ pub struct DestructibleDef {
     pub asleep: bool,
     pub shape: ShapeDef,
     pub user_data: u64,
+    /// Threshold model only: support loss (`support_loss.rs`). After a frame's breaks, each
+    /// anchored piece's weight flows down its intact bonds to its anchors, and a bond
+    /// carrying more than its compressive capacity breaks the next frame, so a structure
+    /// whose supports are shot away collapses. Off: the threshold model as the lab runs it.
+    pub support_loss: bool,
 }
 
 impl DestructibleDef {
@@ -413,6 +418,7 @@ impl DestructibleDef {
                 ..ShapeDef::default()
             },
             user_data: 0,
+            support_loss: false,
         }
     }
 }
@@ -594,6 +600,10 @@ impl World {
     /// frame), its shapes, and its bonds.
     pub fn create_destructible(&mut self, def: &DestructibleDef) -> anyhow::Result<DestructibleId> {
         def.shape.validate()?;
+        anyhow::ensure!(
+            !def.support_loss || def.model == StrengthModel::Threshold,
+            "support_loss is a capability of the Threshold strength model (the Bonds model carries weight in its joints)"
+        );
         let asset = self
             .assets
             .get(def.asset.0 as usize)
