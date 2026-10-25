@@ -25,6 +25,9 @@
 //   terrain_surface_debris   per particle: listed when in flight or when it
 //                            stands more than a layer above that surface, and
 //                            counted into the debris draw's indirect arguments
+//   terrain_surface_publish  (with a patch) the surface into a static
+//                            heightfield patch over the window, so wheel rays
+//                            and rigid contacts meet the live sand (below)
 //
 // In flight: faster than the header's ejecta speed (word 5, m/s; 0: never).
 // The plan sets it to what a fall of one layer gives, √(2 g dy): sand moving
@@ -47,7 +50,8 @@
 // u32 words (engine_terrain::surface). Host-written by the plan: [0] the shift
 // section's first word, [1] the occupancy section's, [2] layers per column,
 // [3] flags (bit 0: the absorbing ground's edge shift is used), [4] the debris
-// list's first word, [5] the ejecta speed (f32 bits, m/s). GPU-written by terrain_surface_resolve: [8..12) window
+// list's first word, [5] the ejecta speed (f32 bits, m/s), [6] the surface
+// patch's collider (0xFFFFFFFF: none). GPU-written by terrain_surface_resolve: [8..12) window
 // i0, j0, ni, nj, [12] the bed's local y (f32 bits), [13] the layer height
 // (f32), [14] frames resolved, [15] valid (1 while a region is open; the host
 // clears it at the bake). [16..20) the debris draw's indirect arguments: the
@@ -62,6 +66,8 @@ static const uint TS_LAYERS = 2u;
 static const uint TS_FLAGS = 3u;
 static const uint TS_DEBRIS_BASE = 4u;
 static const uint TS_EJECTA_SPEED = 5u;
+static const uint TS_PATCH = 6u;
+static const uint TS_NONE = 0xFFFFFFFFu;
 static const uint TS_WINDOW = 8u;
 static const uint TS_BED = 12u;
 static const uint TS_DY = 13u;
@@ -311,4 +317,64 @@ void terrain_surface_debris(uint3 tid : SV_DispatchThreadID)
     uint k;
     AADD3(gTerrainSurface[TS_DEBRIS_COUNT], 1u, k);
     ASTORE(gTerrainSurface[tsWord(TS_DEBRIS_BASE) + k], i);
+}
+
+// The surface patch: a static heightfield collider of its own (a body at rest,
+// no rotation) that the host made at least two samples larger than the
+// window. While a region is open the window's heightfield samples sit at the
+// bed, under the sand, and a wheel's ray would find that bed; the patch is
+// put over the window with a ring of the field's own samples, and given the
+// surface's heights, so rays and contacts meet the live sand where it is.
+// Without a region (valid word 0) it is sunk out of reach. One thread per
+// patch record (four samples); thread 0 also places the patch and its height
+// range. Physics reads this patch: it is the only output here that does.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void terrain_surface_publish(uint3 tid : SV_DispatchThreadID)
+{
+    uint r = mpmIndex(tid);
+    uint pc = tsWord(TS_PATCH);
+    if (pc == TS_NONE) return;
+    Collider lc = gColliders[pc];
+    HeightFieldRef lh = heightFieldOf(lc);
+    uint records = (lh.nx * lh.nz + 3u) / 4u;
+    if (r >= records) return;
+    MpmParams p = mpmParams();
+    bool on = tsWord(TS_VALID) == 1u && p.dims.w != MPM_NO_BLOCK;
+    if (!on)
+    {
+        float far = -1.0e4;
+        gHulls[lh.base + 2u + r] = uint4(asuint(far), asuint(far), asuint(far), asuint(far));
+        if (r == 0u)
+        {
+            uint4 dims = gHulls[lh.base + 1u];
+            dims.z = asuint(far);
+            dims.w = asuint(far);
+            gHulls[lh.base + 1u] = dims;
+        }
+        return;
+    }
+    Collider bc = gColliders[p.dims.w];
+    HeightFieldRef bh = heightFieldOf(bc);
+    Frame bf = colliderFrame(bc, gBodies[bc.body]);
+    // Patch sample (a, b) is the field's sample (i0 - 1 + a, j0 - 1 + b).
+    int i0 = int(p.window.x) - 1, j0 = int(p.window.y) - 1;
+    if (r == 0u)
+    {
+        float3 at = bf.p + float3(bh.x0 + float(i0) * bh.dx - lh.x0, 0.0, bh.z0 + float(j0) * bh.dz - lh.z0);
+        gBodies[lc.body].position = at - lc.localPos;
+        uint4 dims = gHulls[lh.base + 1u];
+        dims.z = asuint(p.column.x - tsLayerHeight(p));
+        dims.w = asuint(p.origin.y + float(p.dims.y) * p.origin.w - bf.p.y);
+        gHulls[lh.base + 1u] = dims;
+    }
+    uint4 rec;
+    for (uint c = 0u; c < 4u; c++)
+    {
+        uint k = 4u * r + c;
+        uint a = k % lh.nx, b = k / lh.nx;
+        float h = b < lh.nz ? tsSurfaceSample(i0 + int(a), j0 + int(b), bh, p) : -1.0e4;
+        rec[c] = asuint(h);
+    }
+    gHulls[lh.base + 2u + r] = rec;
 }

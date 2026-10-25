@@ -26,7 +26,7 @@
   </div>
   <script type="module">
     import { createWorld, sceneCapacity } from './world-host.mjs';
-    import { M, WHEEL_RIM_MATERIAL, L, heightFieldArena } from './vehicle.mjs';
+    import { M, WHEEL_RIM_MATERIAL, L, heightFieldArena, fbits, bitsf } from './vehicle.mjs';
     import { createTerrain, TerrainStep, T } from './terrain-host.mjs';
     import { GROUND_WGSL, surfaceSwitchError } from './terrain-render.mjs';
     import { createBuggyRenderer } from './buggy-render.mjs';
@@ -46,23 +46,32 @@
     // TerrainConfig preset for real time) replaces `settings` when it lands.
     const G = 9.81;
     const TERRAIN = {
-      // A stony meteor: π-scaling gives a 15 m transient crater, a 20 m final rim.
-      meteor: { radius: num('radius', 0.5), density: 3000, speed: num('speed', 20) * 1000 },
+      // A stony meteor: π-scaling gives a 27 m transient crater, a 35 m final rim.
+      meteor: { radius: num('radius', 1.0), density: 3000, speed: num('speed', 20) * 1000 },
       settings: {
         config: {
           max_particles: 1 << 20, max_blocks: 8192, max_parcels: 1 << 17, max_substeps: 1024,
-          max_columns: 1 << 16, max_field_samples: 1 << 19, max_coupled: 64,
-          // Cells across the transient radius: 6 gives 2.5 m cells.
+          max_columns: 1 << 16, max_field_samples: 1 << 19,
+          // The dune buggy drives into open regions: its 17 parts' colliders couple.
+          max_coupled: 256,
+          // Cells across the transient radius: 6 gives 4.5 m cells.
           cells_per_radius: num('cpr', 6),
         },
-        // 1 R past the transient radius (the final rim is at 1.3 R): a 60 m
-        // box of ~55k particles, which the car's track can pass close to.
+        // 1 R past the transient radius (the final rim is at 1.3 R): a box of
+        // ~100k particles, which the car's track can pass close to.
         region_margin: num('margin', 1.0),
         settle_speed: null, // 1% of the crater's √(gR), set below
         settle_frames: 60, // 0.5 s at 120 Hz
         surface_cells: 1 << 21,
       },
     };
+
+    // ================================================================ scenes
+    // drive (default): strikes beside and ahead of the car, which drives over
+    // the fresh rims and blankets while the sand still moves. pass: the first
+    // cut, strikes kept clear of the track. bts: behind the scenes, slowed,
+    // the engine's view and the game's side by side from one state.
+    const SCENE = ['drive', 'pass', 'bts'].includes(qs.get('scene')) ? qs.get('scene') : 'drive';
 
     // ================================================================ device
     if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
@@ -119,7 +128,16 @@
     // half circles), driven clockwise seen from above, the strike field inside
     // on the car's left. Straights line up with the regions' boxes, so a strike
     // can sit close beside one.
-    const STRAIGHT = num('straight', 70), TURN = num('turn', 58);
+    // The straights sit just outside a line of the regions' block lattice
+    // (4-cell blocks, which round a box out), so a strike beside them comes
+    // as close as its box allows.
+    // Clear of a box by more than a cell plus the buggy's reach: closer, its
+    // colliders' padded bounds (mpmColliderBounds) fall in the region's block
+    // cells and couple, and its parts overflow a cell's 8 slots (an error).
+    const CLEAR = num('clear', 9);
+    const BLOCK = 4 * DX;
+    const STRAIGHT = num('straight', 90);
+    const TURN = num('turn', Math.floor((58 * R / 15.1 - CLEAR) / BLOCK) * BLOCK + CLEAR + 0.5);
     const TRACK = (() => {
       const pts = [];
       for (let x = -STRAIGHT; x < STRAIGHT; x += 1) pts.push([x, TURN]);
@@ -143,6 +161,17 @@
     let heights = initialHeights.slice();
     const field = { nx: NX, nz: NZ, dx: SP, dz: SP, origin: [0, 0, 0] };
     const arena0 = heightFieldArena(NX, NZ, SP, SP, initialHeights);
+    // The surface patch (engine_terrain::surface::SurfacePatch): a second
+    // heightfield the surface pass keeps on the live sand over an open window,
+    // so the wheels' rays meet the sand, not the lowered bed under it. Out of
+    // reach (10 km down) while no region is open.
+    const PN = num('patch', 34);
+    const patchArena = heightFieldArena(PN, PN, SP, SP, new Float32Array(PN * PN).fill(-1e4));
+    const PATCH_BASE = arena0.records.length / 4 + patchArena.base;
+    const patchParams = [bitsf((fbits(patchArena.params[0]) & ~0x1FFFFFFF) | PATCH_BASE), ...patchArena.params.slice(1)];
+    const ALL_RECORDS = new Uint32Array(arena0.records.length + patchArena.records.length);
+    ALL_RECORDS.set(arena0.records, 0);
+    ALL_RECORDS.set(patchArena.records, arena0.records.length);
     const groundAt = (x, z) => {
       const fx = Math.min(Math.max((x - X0) / SP, 0), NX - 1.001), fz = Math.min(Math.max((z - Z0) / SP, 0), NZ - 1.001);
       const i = Math.floor(fx), j = Math.floor(fz), u = fx - i, v = fz - j;
@@ -151,21 +180,25 @@
     };
 
     // ================================================================ world
-    const cap = { ...sceneCapacity(256, 512), maxHull: arena0.records.length / 4 + 4096 };
+    const cap = { ...sceneCapacity(256, 512), maxHull: ALL_RECORDS.length / 4 + 4096 };
     const world = await createWorld(device, { cap, vehicleCap: { maxVehicles: 4, maxWheels: 16, maxCurvePoints: 512, maxDiffs: 8, maxAntiRolls: 8, maxParts: 64, maxRays: 16 },
       status: (s) => { statusEl.textContent = s; } });
-    // 120 Hz: physics and render every frame.
-    const DT = 1 / 120;
+    // 120 Hz: physics and render every frame (behind the scenes: 300 Hz, so
+    // each recorded frame can be a finer slice of the strike).
+    const DT = SCENE === 'bts' ? 1 / 300 : 1 / 120;
     Object.assign(world.params, { dt: DT, iterations: 8, gravityY: -G, flags: M.FLAG_SPEC_VELOCITY });
     world.setMaterial(0, 0.9);
     world.setMaterial(WHEEL_RIM_MATERIAL, 0.9);
     const groundBody = world.addBody({ p: [0, 0, 0], flags: 0 });
-    world.setHullRecords(arena0.records);
+    world.setHullRecords(ALL_RECORDS);
     const GROUND = world.addCollider({ body: groundBody, shape: 5, material: 0, params: arena0.params });
     const HF_BASE = arena0.base;
+    const patchBody = world.addBody({ p: [0, 0, 0], flags: 0 });
+    const PATCH = world.addCollider({ body: patchBody, shape: 5, material: 0, params: patchParams });
 
     statusEl.textContent = 'building terrain kernels…';
-    const terrain = await createTerrain(world, TERRAIN.settings, { status: (s) => { statusEl.textContent = s; }, surface: true });
+    const terrain = await createTerrain(world, TERRAIN.settings, { status: (s) => { statusEl.textContent = s; }, surface: true,
+      patch: { collider: PATCH, nx: PN, nz: PN } });
     const maxParticles = terrain.settings.config.max_particles, maxParcels = terrain.settings.config.max_parcels;
     // A second strike while a region is open: the engine's multi-region API
     // when it is there (max_regions > 1); until then each region bakes first.
@@ -174,7 +207,7 @@
     // ---- the car: the dune buggy on an autopilot loop around the strike field
     const presets = Object.fromEntries((await (await fetch('./generated/vehicle_presets.json', { cache: 'no-store' })).json()).map((p) => [p.name, p]));
     const CAR = qs.get('car') || 'dune_buggy';
-    const SPEED = num('kmh', 45) / 3.6;
+    const SPEED = num('kmh', 60) / 3.6;
     const qYaw = (yaw) => [0, Math.sin(yaw / 2), 0, Math.cos(yaw / 2)];
     const startCar = () => {
       const [x, z] = TRACK[0];
@@ -183,17 +216,35 @@
     };
 
     // ================================================================ the strikes
-    // Sim seconds (LEAD is the run-up before the recording starts). `x`: beside
-    // the first straight, as close as its region's box allows; `rimOf`: on
-    // that strike's rim, turned `rimTurn` from +x toward the field; `at`: a
-    // point. `overlapT`: when the strike is due once regions may overlap (the
-    // second then lands while the first still moves).
-    const LEAD = num('lead', 1.5);
-    const SCHEDULE = [
-      { t: LEAD + num('t1', 1.2), x: num('x1', -10) },
-      { t: LEAD + num('t2', 7.0), overlapT: LEAD + 3.2, rimOf: 0, rimTurn: num('turn2', 0.45) },
-      { t: LEAD + num('t3', 13.5), at: [STRAIGHT, 0] },
-    ];
+    // Sim seconds (LEAD is the run-up before the recording starts). `pass`:
+    // beside where the car will be then, as close to the track as the
+    // strike's region box allows; `rimOf`: on that strike's rim, turned
+    // `rimTurn` from +x toward the field. `overlapT`: when the strike is due
+    // once regions may overlap (the second then lands on the first crater's
+    // rim while it still moves).
+    const LEAD = num('lead', SCENE === 'bts' ? 0 : 1.5);
+    // drive: `beside` m between the crater's rim and the track where the car
+    // passes (near misses: the car rides the rim's flank and the blanket).
+    const GAP = num('gap', 3);
+    const SCHEDULES = {
+      pass: [
+        { t: LEAD + num('t1', 1.2), pass: LEAD + num('pass1', 5.0) },
+        { t: LEAD + num('t2', 7.0), overlapT: LEAD + 3.4, rimOf: 0, rimTurn: num('turn2', 0.45) },
+        { t: LEAD + num('t3', 13.5), pass: LEAD + num('pass3', 17.0) },
+      ],
+      drive: [
+        { t: LEAD + num('t1', 1.0), pass: LEAD + num('pass1', 4.6), beside: GAP },
+        { t: LEAD + num('t2', 7.0), overlapT: LEAD + 3.0, pass: LEAD + num('pass2', 10.6), beside: GAP },
+        { t: LEAD + num('t3', 13.0), pass: LEAD + num('pass3', 16.6), beside: GAP },
+      ],
+      bts: [
+        { t: num('t1', 1.5), at: [0, 20] },
+        { t: num('t2', 5.6), overlapT: 2.6, rimOf: 0, rimTurn: num('turn2', 0.45) },
+      ],
+    };
+    const SCHEDULE = SCHEDULES[SCENE];
+    // Where the car is at sim time t (it reaches SPEED about 1.8 s in).
+    const trackAt = (t) => TRACK[Math.min(TRACK.length - 1, Math.max(0, Math.round(SPEED * Math.max(0, t - 0.9))))];
     const APPROACH = 1.35; // s of fireball before contact (cosmetic)
     const VIS_SPEED = 520; // m/s along its path (cosmetic: the real 20 km/s is one frame)
     const MAX_FX = 16;
@@ -300,6 +351,9 @@ struct Frame {
   misc: vec4f,  // time (s), flash, volume quantum (m³), time since the last strike
   car: vec4f,   // chassis position, present
   fog: vec4f,   // haze distance
+  cut: vec4f,   // engine view: hidden where dot(xyz, p) > w
+  boxLo: vec4f, // engine view: the open region's box, open
+  boxHi: vec4f,
 };
 struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec4f, f1: vec4f, f2: vec4f };
 @group(0) @binding(1) var<uniform> frame: Frame;
@@ -339,7 +393,7 @@ struct SOut { @builtin(position) clip: vec4f, @location(0) ndc: vec2f };
 }
 
 // ---- the ground: the heightfield, and the live surface over an open region
-struct GOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1) n: vec3f, @location(2) d: f32 };
+struct GOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1) n: vec3f, @location(2) d: f32, @location(3) ao: f32, @location(4) cv: f32 };
 @vertex fn vsGround(@builtin(vertex_index) vi: u32) -> GOut {
   let hd = hfDims();
   let cell = vi / 6u;
@@ -351,8 +405,43 @@ struct GOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
   o.w = vec3f(hd.x0 + f32(i) * hd.dx, h, hd.z0 + f32(j) * hd.dz);
   o.n = groundNormal(i, j, true);
   o.d = h - h0[j * hd.nx + i];
+  // Sky occlusion from the horizon around the sample (1, 2 and 4 samples
+  // out in eight directions), and the curvature: positive in a bowl,
+  // negative on a crest such as the rim's lip.
+  let dirs = array<vec2i, 8>(vec2i(1, 0), vec2i(-1, 0), vec2i(0, 1), vec2i(0, -1), vec2i(1, 1), vec2i(-1, -1), vec2i(1, -1), vec2i(-1, 1));
+  var occ = 0.0; var cv = 0.0;
+  for (var k = 0u; k < 8u; k++) {
+    for (var st = 1; st <= 4; st *= 2) {
+      let ii = clamp(i32(i) + dirs[k].x * st, 0, i32(hd.nx) - 1);
+      let jj = clamp(i32(j) + dirs[k].y * st, 0, i32(hd.nz) - 1);
+      let dh = groundHeight(u32(ii), u32(jj), true) - h;
+      occ += max(dh / (f32(st) * hd.dx * length(vec2f(dirs[k]))), 0.0);
+      if (st == 2) { cv += dh; }
+    }
+  }
+  o.ao = clamp(1.0 - occ / 24.0 * 2.5, 0.3, 1.0);
+  o.cv = cv / 8.0;
   o.clip = frame.viewProj * vec4f(o.w, 1.0);
   return o;
+}
+// Fine ejecta settling round a crater (cosmetic): rays of fresh, darker
+// dust out to a few radii, laid down as the curtain lands.
+fn freshBlanket(w: vec3f) -> f32 {
+  var f = 0.0;
+  for (var k = 0u; k < ${MAX_FX}u; k++) {
+    let a = ev0(k); let b = ev1(k);
+    if (b.z < 0.5) { continue; }
+    let tau = frame.misc.x - a.w;
+    if (tau < 0.0) { continue; }
+    let d = w.xz - a.xz;
+    let r = length(d) / b.x;
+    if (r > 4.5) { continue; }
+    let ang = atan2(d.y, d.x);
+    let rays = smoothstep(0.35, 0.75, vnoise(vec2f(ang * 5.0 + f32(k) * 11.0, r * 0.35)) * 0.6 + vnoise(vec2f(ang * 13.0, f32(k) * 3.0)) * 0.4);
+    let reach = 1.3 + 2.8 * smoothstep(0.2, 2.5, tau);
+    f = max(f, smoothstep(reach, 1.1, r) * smoothstep(0.8, 1.15, r) * mix(0.35, 1.0, rays));
+  }
+  return f;
 }
 // The fresh crater floor glows for a few seconds (cosmetic).
 fn hotGround(w: vec3f, grain: f32) -> vec3f {
@@ -386,11 +475,19 @@ fn hotGround(w: vec3f, grain: f32) -> vec3f {
   alb *= (0.86 + 0.24 * fine) * (1.0 + 0.18 * grit * close);
   let slope = 1.0 - normalize(i.n).y;
   alb = mix(alb, vec3f(0.60, 0.46, 0.34), smoothstep(0.12, 0.45, slope));
-  // Disturbed ground: dug-out subsoil darker and redder, the ejecta blanket
-  // greyer and rubbly.
-  alb = mix(alb, vec3f(0.50, 0.36, 0.26) * (0.85 + 0.3 * fine), smoothstep(0.15, 1.6, -i.d));
-  alb = mix(alb, vec3f(0.64, 0.57, 0.50) * (0.8 + 0.4 * fine2), smoothstep(0.04, 0.9, i.d));
-  var c = lit(alb, n, i.w) + hotGround(i.w, fine);
+  // A crater: the dug-out bowl darker and redder (fresh subsoil), the
+  // ejecta blanket (raised ground, and fine dust in rays) darker and
+  // rubbly, the rim's lip catching the light.
+  let clump = vnoise(p * 1.1 + vec2f(fine * 2.0));
+  let bowl = smoothstep(0.1, 2.0, -i.d);
+  let blanket = max(smoothstep(0.03, 0.8, i.d), 0.75 * freshBlanket(i.w));
+  let lip = smoothstep(0.5, 1.8, -i.cv) * smoothstep(0.5, 2.0, i.d);
+  n = normalize(n + vec3f(clump - 0.5, 0.0, fine2 - 0.5) * 0.35 * blanket * near);
+  alb = mix(alb, vec3f(0.44, 0.31, 0.22) * (0.8 + 0.4 * fine), bowl);
+  alb = mix(alb, vec3f(0.50, 0.41, 0.33) * (0.7 + 0.55 * clump), blanket);
+  alb = mix(alb, vec3f(0.84, 0.70, 0.52), 0.4 * lip);
+  // Sky occlusion: the bowl's floor and walls see less sky and sun.
+  var c = lit(alb, n, i.w) * mix(1.0, i.ao, 0.85) + hotGround(i.w, fine);
   return vec4f(tonemap(fogged(c, i.w)), 1.0);
 }
 
@@ -404,10 +501,15 @@ fn rock(p: vec3f, v: vec3f, vol: f32, seed: u32, mesh: vec3f, nrm: vec3f) -> ROu
   let ang = 6.2831 * hash(seed * 7u) + frame.misc.x * spin;
   let q = vec4f(ax * sin(0.5 * ang), cos(0.5 * ang));
   let s = vec3f(0.8 + 0.5 * hash(seed * 5u), 0.55 + 0.45 * hash(seed * 5u + 1u), 0.8 + 0.5 * hash(seed * 5u + 2u));
-  o.w = p + qrot(q, mesh * s * r);
+  // Motion blur: stretched along the velocity (about 2 frames at 60 fps).
+  let sp = length(v);
+  let vh = select(vec3f(0.0, 1.0, 0.0), v / max(sp, 1e-4), sp > 1e-3);
+  var local = qrot(q, mesh * s * r);
+  local += vh * dot(local, vh) * min(sp * 0.035 / max(r, 0.05), 5.0);
+  o.w = p + local;
   o.n = qrot(q, normalize(nrm / s));
   let k = hash(seed * 13u);
-  o.c = select(select(vec3f(0.80, 0.66, 0.47), vec3f(0.56, 0.42, 0.31), k > 0.55), vec3f(0.52, 0.50, 0.47), k > 0.85);
+  o.c = select(select(vec3f(0.62, 0.48, 0.34), vec3f(0.46, 0.34, 0.25), k > 0.5), vec3f(0.48, 0.45, 0.42), k > 0.85);
   // Thrown fast and early: hot.
   o.glow = exp(-frame.misc.w / 0.9) * smoothstep(40.0, 260.0, length(v));
   o.clip = frame.viewProj * vec4f(o.w, 1.0);
@@ -433,7 +535,7 @@ fn rock(p: vec3f, v: vec3f, vol: f32, seed: u32, mesh: vec3f, nrm: vec3f) -> ROu
 }
 
 // ---- dust and smoke (cosmetic sprites, premultiplied alpha)
-struct DOut { @builtin(position) clip: vec4f, @location(0) q: vec2f, @location(1) c: vec4f, @location(2) w: vec3f, @location(3) seed: f32 };
+struct DOut { @builtin(position) clip: vec4f, @location(0) q: vec2f, @location(1) c: vec4f, @location(2) w: vec3f, @location(3) seed: f32, @location(4) l: vec3f };
 fn sprite(p: vec3f, size: f32, q: vec2f, rot: f32) -> vec4f {
   let cs = vec2f(cos(rot), sin(rot));
   let r = vec2f(q.x * cs.x - q.y * cs.y, q.x * cs.y + q.y * cs.x);
@@ -443,35 +545,46 @@ fn dustLit(c: vec3f, w: vec3f) -> vec3f {
   let a = toLinear(c);
   return a * (SUN * 0.5 + vec3f(0.24, 0.26, 0.32)) + a * strikeLight(w, normalize(frame.eye.xyz - w)) * 0.6;
 }
-fn hiddenSprite() -> DOut { var o: DOut; o.clip = HIDE; o.q = vec2f(0.0); o.c = vec4f(0.0); o.w = vec3f(0.0); o.seed = 0.0; return o; }
-// A dust trail behind moving debris (a lagged puff per piece).
-fn trail(p: vec3f, v: vec3f, vol: f32, seed: u32, q: vec2f) -> DOut {
+fn hiddenSprite() -> DOut { var o: DOut; o.clip = HIDE; o.q = vec2f(0.0); o.c = vec4f(0.0); o.w = vec3f(0.0); o.seed = 0.0; o.l = vec3f(0.0); return o; }
+// Dust from the debris itself: puff m of a moving piece trails it by a lag
+// (the thrown material's own dust curtain, as dense as the debris and as
+// fast as its speeds), and a piece coming down near the ground kicks up a
+// landing puff.
+const TRAIL_LAG = array<f32, 3>(0.05, 0.16, 0.38);
+fn trail(p: vec3f, v: vec3f, vol: f32, seed: u32, q: vec2f, m: u32) -> DOut {
   let s = length(v);
-  if (hash(seed * 17u) > 0.4 || s < 2.0) { return hiddenSprite(); }
+  if (hash(seed * 17u) > 0.6 || s < 1.5) { return hiddenSprite(); }
   var o: DOut;
-  let lag = 0.04 + 0.22 * hash(seed * 19u);
   let r = pow(vol * 0.2387, 1.0 / 3.0);
-  let size = r * 2.2 + min(s, 60.0) * lag * 0.5;
-  o.w = p - v * lag;
-  o.clip = sprite(o.w, size, q, 6.28 * hash(seed * 23u));
+  let above = p.y - groundAt(p.x, p.z, true);
+  let landing = v.y < -2.0 && above < 2.0 * surfLayer();
+  if (landing && m == 2u) {
+    let g = groundAt(p.x, p.z, true);
+    o.w = vec3f(p.x, g + r * 1.2, p.z);
+    o.clip = sprite(o.w, r * 3.0 + 0.12 * min(s, 40.0), q, 6.28 * hash(seed * 31u));
+    o.c = vec4f(dustLit(vec3f(0.70, 0.59, 0.46), o.w), 0.32);
+  } else {
+    let lag = TRAIL_LAG[m] * (0.7 + 0.6 * hash(seed * 19u + m));
+    o.w = p - v * lag + vec3f(0.0, 1.5 * lag * lag, 0.0);
+    o.clip = sprite(o.w, r * (1.4 + 2.0 * f32(m)) + min(s, 60.0) * lag * 0.3, q, 6.28 * hash(seed * 23u + m));
+    o.c = vec4f(dustLit(vec3f(0.66, 0.55, 0.43), o.w), (0.24 - 0.06 * f32(m)) * smoothstep(1.5, 12.0, s));
+  }
   o.q = q;
-  let a = 0.22 * smoothstep(2.0, 18.0, s) * (1.0 - 0.5 * hash(seed * 29u));
-  o.c = vec4f(dustLit(vec3f(0.74, 0.62, 0.48), o.w), a);
-  o.seed = hash(seed);
+  o.seed = hash(seed + m);
   return finishSprite(o);
 }
-// Drawn with the rock's indirect arguments: six of its vertices are the sprite.
+// Drawn with the rock's indirect arguments: its first 18 vertices are three puffs.
 @vertex fn vsTrailPart(@builtin(vertex_index) vi: u32, @builtin(instance_index) inst: u32) -> DOut {
-  if (vi >= 6u) { return hiddenSprite(); }
+  if (vi >= 18u) { return hiddenSprite(); }
   let i = debrisParticle(inst);
   let q = parts[i];
-  return trail(q.xm.xyz, q.vj.xyz, q.f0.w, i, QUAD[vi]);
+  return trail(q.xm.xyz, q.vj.xyz, q.f0.w, i, QUAD[vi % 6u], vi / 6u);
 }
 @vertex fn vsTrailParcel(@builtin(vertex_index) vi: u32, @builtin(instance_index) inst: u32) -> DOut {
   if (inst >= min(counters[${T.C_PARCELS}u], ${maxParcels}u)) { return hiddenSprite(); }
   let xq = parcels[2u * inst]; let vm = parcels[2u * inst + 1u];
   if (vm.w <= 0.0) { return hiddenSprite(); }
-  return trail(xq.xyz, vm.xyz, f32(bitcast<u32>(xq.w)) * frame.misc.z, inst + 0x9E3779B9u, QUAD[vi]);
+  return trail(xq.xyz, vm.xyz, f32(bitcast<u32>(xq.w)) * frame.misc.z, inst + 0x9E3779B9u, QUAD[vi % 6u], vi / 6u);
 }
 // The plume of strike k: an ejecta dust curtain, a base surge along the
 // ground and a rising column, from the strike's time alone.
@@ -490,23 +603,24 @@ const PLUME = 700u;
   var size = 0.0; var alpha = 0.0;
   var col = vec3f(0.58, 0.47, 0.36);
   let kind = hash(seed + 9u);
-  if (kind < 0.55) {
-    // Curtain dust: thrown out at ~45°, slowed by the air, then drifting.
+  if (kind < 0.5) {
+    // Curtain dust: thrown out at ~45° at the crater's ejection speeds
+    // (√(gR) and up), slowed by the air, then drifting.
     let elev = 0.55 + 0.6 * h2;
-    let v0 = sqrt(9.81 * R) * (1.0 + 2.6 * h3);
+    let v0 = sqrt(9.81 * R) * (1.0 + 2.0 * h3);
     let kd = 1.3;
     let te = (1.0 - exp(-kd * tau)) / kd;
     let horiz = v0 * cos(elev) * te * (0.4 + 0.6 * h4);
     let vert = v0 * sin(elev) * te - 1.2 * tau * tau * 0.25 + 0.6 * tau;
     p = a.xyz + vec3f(dir.x * (horiz + 0.3 * R * h4), max(vert, 0.2 * R * h2), dir.y * (horiz + 0.3 * R * h4));
-    size = R * (0.28 + 0.32 * h2) * (0.5 + min(tau, 6.0) * 0.45);
-    alpha = smoothstep(0.0, 0.2, tau) * exp(-tau / (1.1 + 1.4 * h3)) * 0.5;
-  } else if (kind < 0.85) {
+    size = R * (0.16 + 0.2 * h2) * (0.5 + min(tau, 6.0) * 0.4);
+    alpha = smoothstep(0.0, 0.2, tau) * exp(-tau / (0.8 + 1.0 * h3)) * 0.22;
+  } else if (kind < 0.9) {
     // Base surge: a ring of dust rolling out along the ground.
     let rr = R * (1.0 + 2.0 * (1.0 - exp(-tau / (0.9 + 0.8 * h2)))) + R * 0.3 * h3;
     p = a.xyz + vec3f(dir.x * rr, R * (0.06 + 0.18 * h4) + 0.1 * R * tau * h2, dir.y * rr);
-    size = R * (0.25 + 0.3 * h3) * (0.6 + min(tau, 8.0) * 0.15);
-    alpha = smoothstep(0.05, 0.5, tau) * exp(-tau / (1.6 + 1.6 * h4)) * 0.25;
+    size = R * (0.18 + 0.22 * h3) * (0.6 + min(tau, 8.0) * 0.15);
+    alpha = smoothstep(0.05, 0.5, tau) * exp(-tau / (1.4 + 1.4 * h4)) * 0.16;
     col = vec3f(0.66, 0.56, 0.44);
   } else {
     // The column: hot at first, then a darker rising cloud.
@@ -514,7 +628,7 @@ const PLUME = 700u;
     let spread = R * (0.1 + 0.4 * h3) * (1.0 + 0.35 * tau);
     p = a.xyz + vec3f(dir.x * spread, rise, dir.y * spread);
     size = R * (0.15 + 0.15 * h4) * (0.6 + min(tau, 8.0) * 0.2);
-    alpha = smoothstep(0.0, 0.12, tau) * exp(-tau / 2.4) * 0.3;
+    alpha = smoothstep(0.0, 0.12, tau) * exp(-tau / 1.8) * 0.16;
     col = mix(vec3f(0.40, 0.34, 0.28), vec3f(0.56, 0.47, 0.37), h4);
   }
   var o: DOut;
@@ -535,15 +649,21 @@ fn finishSprite(o: DOut) -> DOut {
   var r = o;
   let near = smoothstep(3.0, 18.0, length(o.w - frame.eye.xyz));
   r.c = vec4f(tonemap(fogged(o.c.rgb, o.w)), o.c.a * near);
+  // The sun in the sprite's own frame (right, up, toward the eye).
+  let l = sunDir();
+  r.l = vec3f(dot(l, frame.right.xyz), dot(l, frame.up.xyz), dot(l, normalize(frame.eye.xyz - o.w)));
   if (r.c.a < 0.004) { r.clip = HIDE; }
   return r;
 }
 @fragment fn fsDust(i: DOut) -> @location(0) vec4f {
   let r2 = dot(i.q, i.q);
   if (r2 > 1.0) { discard; }
-  let puff = 0.5 + 0.5 * vnoise(i.q * 2.6 + vec2f(i.seed * 37.0, i.seed * 11.0));
-  let a = i.c.a * (1.0 - smoothstep(0.15, 1.0, r2)) * puff;
-  return vec4f(i.c.rgb * a, a);
+  let noise = vnoise(i.q * 2.6 + vec2f(i.seed * 37.0, i.seed * 11.0));
+  // A puff is a soft ball: lit on its sun side, shaded on the other.
+  let nb = normalize(vec3f(i.q + vec2f(noise - 0.5) * 0.5, sqrt(max(1.0 - r2, 0.0))));
+  let light = 0.55 + 0.6 * max(dot(nb, i.l), 0.0);
+  let a = i.c.a * (1.0 - smoothstep(0.1, 1.0, r2)) * (0.45 + 0.55 * noise);
+  return vec4f(min(i.c.rgb * light, vec3f(1.0)) * a, a);
 }
 
 // ---- the meteor: fireball and its trail (additive), the smoke it leaves (alpha)
@@ -599,6 +719,102 @@ fn approachDir(b: vec4f) -> vec3f { return normalize(vec3f(cos(b.w) * sin(b.y), 
   return finishSprite(o);
 }
 
+// ---- behind the scenes: the engine's view (particles by speed, parcels,
+// the region's box and window, the heightfield with its lowered bed, a cut)
+fn cutAway(p: vec3f) -> bool { return dot(frame.cut.xyz, frame.cut.xyz) > 0.5 && dot(frame.cut.xyz, p) > frame.cut.w; }
+fn heat(s: f32) -> vec3f {
+  let t = clamp(log2(1.0 + s) / 7.0, 0.0, 1.0);
+  return mix(mix(vec3f(0.12, 0.2, 0.45), vec3f(0.9, 0.35, 0.1), clamp(t * 1.6, 0.0, 1.0)), vec3f(1.0, 0.95, 0.6), clamp(t * 2.0 - 1.0, 0.0, 1.0));
+}
+@vertex fn vsGroundEngine(@builtin(vertex_index) vi: u32) -> GOut {
+  let hd = hfDims();
+  let cell = vi / 6u;
+  let ci = cell % (hd.nx - 1u); let cj = cell / (hd.nx - 1u);
+  let corner = array<vec2u, 6>(vec2u(0u, 0u), vec2u(1u, 1u), vec2u(1u, 0u), vec2u(0u, 0u), vec2u(0u, 1u), vec2u(1u, 1u))[vi % 6u];
+  let i = ci + corner.x; let j = cj + corner.y;
+  let h = groundHeight(i, j, false);
+  var o: GOut;
+  o.w = vec3f(hd.x0 + f32(i) * hd.dx, h, hd.z0 + f32(j) * hd.dz);
+  o.n = groundNormal(i, j, false);
+  o.d = h - h0[j * hd.nx + i];
+  o.ao = 1.0; o.cv = 0.0;
+  o.clip = frame.viewProj * vec4f(o.w, 1.0);
+  return o;
+}
+@fragment fn fsGroundEngine(i: GOut) -> @location(0) vec4f {
+  // The cut opens the region's box only: the ground round it stays.
+  let inBox = frame.boxLo.w > 0.5 && all(i.w.xz >= frame.boxLo.xz) && all(i.w.xz <= frame.boxHi.xz);
+  if (inBox && cutAway(i.w)) { discard; }
+  let g = abs(fract(i.w.xz / 10.0) - 0.5);
+  var c = vec3f(0.62, 0.58, 0.52) * (1.0 - 0.12 * smoothstep(0.46, 0.5, max(g.x, g.y)));
+  // The window's lowered bed under the open region.
+  c = mix(c, vec3f(0.24, 0.25, 0.28), smoothstep(1.0, 4.0, -i.d) * f32(frame.boxLo.w > 0.5));
+  let n = normalize(i.n);
+  let l = max(dot(n, sunDir()), 0.0);
+  return vec4f(tonemap(toLinear(c) * (0.35 + 1.5 * l)), 1.0);
+}
+struct POut { @builtin(position) clip: vec4f, @location(0) q: vec2f, @location(1) c: vec3f, @location(2) w: vec3f };
+fn ball(p: vec3f, r: f32, c: vec3f, q: vec2f) -> POut {
+  var o: POut;
+  o.q = q; o.c = c; o.w = p;
+  o.clip = frame.viewProj * vec4f(p + (frame.right.xyz * q.x + frame.up.xyz * q.y) * r, 1.0);
+  return o;
+}
+fn hiddenBall() -> POut { var o: POut; o.clip = HIDE; o.q = vec2f(0.0); o.c = vec3f(0.0); o.w = vec3f(0.0); return o; }
+// Every particle of the open region, coloured by speed (the cut shows inside).
+@vertex fn vsPartEngine(@builtin(vertex_index) vi: u32, @builtin(instance_index) inst: u32) -> POut {
+  if (inst >= counters[${T.C_PARTICLES}u]) { return hiddenBall(); }
+  let q = parts[inst];
+  if ((bitcast<u32>(q.f2.w) & ${T.PARTICLE_DEAD}u) != 0u || cutAway(q.xm.xyz)) { return hiddenBall(); }
+  let spacing = 4.0 * pow(frame.misc.z, 1.0 / 3.0);
+  return ball(q.xm.xyz, 0.62 * spacing, heat(length(q.vj.xyz)) * (0.9 + 0.2 * hash(inst)), QUAD[vi]);
+}
+// Ejecta parcels in flight (ballistic, outside the grid).
+@vertex fn vsParcelEngine(@builtin(vertex_index) vi: u32, @builtin(instance_index) inst: u32) -> POut {
+  if (inst >= min(counters[${T.C_PARCELS}u], ${maxParcels}u)) { return hiddenBall(); }
+  let xq = parcels[2u * inst]; let vm = parcels[2u * inst + 1u];
+  if (vm.w <= 0.0 || cutAway(xq.xyz)) { return hiddenBall(); }
+  let spacing = 4.0 * pow(frame.misc.z, 1.0 / 3.0);
+  return ball(xq.xyz, 0.7 * spacing, vec3f(0.3, 1.0, 0.9), QUAD[vi]);
+}
+@fragment fn fsPartEngine(i: POut) -> @location(0) vec4f {
+  let rr = dot(i.q, i.q);
+  if (rr > 1.0) { discard; }
+  let nz = sqrt(1.0 - rr);
+  let n = normalize(frame.right.xyz * i.q.x + frame.up.xyz * i.q.y + normalize(frame.eye.xyz - i.w) * nz);
+  let l = max(dot(n, sunDir()), 0.0);
+  return vec4f(tonemap(toLinear(i.c) * (0.45 + 1.4 * l)), 1.0);
+}
+// The region's box (12 edges) and the heightfield window under it (4 edges).
+@vertex fn vsBox(@builtin(vertex_index) vi: u32) -> POut {
+  if (frame.boxLo.w < 0.5) { return hiddenBall(); }
+  let lo = frame.boxLo.xyz; let hi = frame.boxHi.xyz;
+  var o: POut;
+  o.q = vec2f(0.0); o.c = vec3f(1.0, 0.85, 0.2);
+  var p: vec3f;
+  if (vi < 24u) {
+    let e = vi / 2u; let end = f32(vi % 2u);
+    let axis = e / 4u; let k = e % 4u;
+    let a = f32(k & 1u); let b = f32(k >> 1u);
+    var u = vec3f(0.0);
+    if (axis == 0u) { u = vec3f(end, a, b); } else if (axis == 1u) { u = vec3f(a, end, b); } else { u = vec3f(a, b, end); }
+    p = lo + (hi - lo) * u;
+  } else {
+    let w = surfWindow(); let hd = hfDims();
+    let e = (vi - 24u) / 2u; let end = (vi - 24u) % 2u;
+    let cs = array<vec2f, 5>(vec2f(0.0, 0.0), vec2f(1.0, 0.0), vec2f(1.0, 1.0), vec2f(0.0, 1.0), vec2f(0.0, 0.0));
+    let c = cs[e + end];
+    let x = hd.x0 + (f32(w.x) - 0.5 + c.x * f32(w.z)) * hd.dx;
+    let z = hd.z0 + (f32(w.y) - 0.5 + c.y * f32(w.w)) * hd.dz;
+    p = vec3f(x, 0.6, z);
+    o.c = vec3f(0.3, 0.9, 1.0);
+  }
+  o.w = p;
+  o.clip = frame.viewProj * vec4f(p, 1.0);
+  return o;
+}
+@fragment fn fsLine(i: POut) -> @location(0) vec4f { return vec4f(i.c, 1.0); }
+
 // ---- the shockwave: a dust ring racing out over the ground
 struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1) c: vec4f, @location(2) r: f32 };
 @vertex fn vsRing(@builtin(vertex_index) vi: u32, @builtin(instance_index) k: u32) -> WOut {
@@ -652,7 +868,7 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
     const ROCK_VERTS = rockMesh.length / 6;
     // The engine's debris list is drawn as rocks: the indirect draw's vertex count.
     device.queue.writeBuffer(terrain.surfaceBuffer, 4 * T.SURFACE_DEBRIS_ARGS_WORD, Uint32Array.of(ROCK_VERTS));
-    const FRAME_BYTES = 256;
+    const FRAME_BYTES = 512;
     const frameBuf = device.createBuffer({ size: FRAME_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const eventBuf = device.createBuffer({ size: 2 * MAX_FX * 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const h0Buf = device.createBuffer({ size: NX * NZ * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
@@ -662,10 +878,10 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
     const blendDepth = { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'less' };
     const PREMUL = { color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' }, alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' } };
     const ADD = { color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' }, alpha: { srcFactor: 'zero', dstFactor: 'one', operation: 'add' } };
-    const pipe = (vs, fs, { buffers = [], depth = opaqueDepth, blend, cull = 'none' } = {}) => device.createRenderPipeline({
+    const pipe = (vs, fs, { buffers = [], depth = opaqueDepth, blend, cull = 'none', topology = 'triangle-list' } = {}) => device.createRenderPipeline({
       layout: 'auto', vertex: { module: mod, entryPoint: vs, buffers },
       fragment: { module: mod, entryPoint: fs, targets: [{ format, blend }] },
-      primitive: { cullMode: cull }, depthStencil: depth, multisample: { count: SAMPLES },
+      primitive: { cullMode: cull, topology }, depthStencil: depth, multisample: { count: SAMPLES },
     });
     const P = {
       sky: pipe('vsSky', 'fsSky', { depth: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'always' } }),
@@ -678,12 +894,19 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       smoke: pipe('vsMeteorSmoke', 'fsDust', { depth: blendDepth, blend: PREMUL }),
       glow: pipe('vsMeteorGlow', 'fsGlow', { depth: blendDepth, blend: ADD }),
       ring: pipe('vsRing', 'fsRing', { depth: blendDepth, blend: PREMUL }),
+      ...(SCENE === 'bts' ? {
+        groundEngine: pipe('vsGroundEngine', 'fsGroundEngine'),
+        partEngine: pipe('vsPartEngine', 'fsPartEngine'),
+        parcelEngine: pipe('vsParcelEngine', 'fsPartEngine'),
+        box: pipe('vsBox', 'fsLine', { topology: 'line-list' }),
+      } : {}),
     };
     const RES = { 1: frameBuf, 3: world.bufs[18], 4: world.bufs[T.PARTICLES], 6: world.bufs[T.PARCELS], 7: world.bufs[T.COUNTERS], 9: h0Buf, 10: terrain.surfaceBuffer, 11: eventBuf };
     // Which bindings each entry point reads (auto layouts reject extra entries).
     const USES = {
       sky: [1], ground: [1, 3, 9, 10, 11], rockPart: [1, 4, 10, 11], rockParcel: [1, 6, 7, 11],
-      trailPart: [1, 4, 10, 11], trailParcel: [1, 6, 7, 11], plume: [1, 11], smoke: [1, 11], glow: [1, 11], ring: [1, 3, 10, 11],
+      trailPart: [1, 3, 4, 10, 11], trailParcel: [1, 3, 6, 7, 10, 11],
+      ...(SCENE === 'bts' ? { groundEngine: [1, 3, 9, 10], partEngine: [1, 4, 7], parcelEngine: [1, 6, 7], box: [1, 3, 10] } : {}), plume: [1, 11], smoke: [1, 11], glow: [1, 11], ring: [1, 3, 10, 11],
     };
     const B = Object.fromEntries(Object.entries(USES).map(([k, ids]) => [k, device.createBindGroup({ layout: P[k].getBindGroupLayout(0), entries: ids.map((b) => ({ binding: b, resource: { buffer: RES[b] } })) })]));
     const buggy = CAR === 'dune_buggy' ? await createBuggyRenderer({ device, format, world, frameBuf, L, shadeWgsl: BUGGY_WGSL, sampleCount: SAMPLES }).catch((e) => { console.warn('buggy mesh', e); return null; }) : null;
@@ -696,7 +919,7 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
     function reset() {
       world.restore(initial);
       heights = initialHeights.slice();
-      world.setHullRecords(arena0.records);
+      world.setHullRecords(ALL_RECORDS);
       terrain.reset();
       st.t = 0; st.frame = 0; st.fx = []; st.strikes = []; st.lastStrike = -1e9; st.carPose = null; st.carSpeed = 0; st.switches = [];
       cam.eye = null;
@@ -710,7 +933,6 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
     // ---- the schedule
     // The box a strike at (x, z) opens (RegionPlan::around: the padded
     // radius rounded out to whole blocks), and how far the road passes from it.
-    const BLOCK = 4 * DX;
     const boxOf = (x, z) => {
       const reach = R * (1 + TERRAIN.settings.region_margin);
       return [Math.floor((x - reach) / BLOCK) * BLOCK, Math.floor((z - reach) / BLOCK) * BLOCK, Math.ceil((x + reach) / BLOCK) * BLOCK, Math.ceil((z + reach) / BLOCK) * BLOCK];
@@ -721,20 +943,38 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       for (const [x, z] of TRACK) d = Math.min(d, Math.hypot(Math.max(x0 - x, 0, x - x1), Math.max(z0 - z, 0, z - z1)));
       return d;
     };
-    const CLEAR = 6;
     function strikePoint(s) {
       if (s.at) return s.at;
-      if (s.rimOf !== undefined) {
+      if (s.beside !== undefined) {
+        // Inside the loop beside where the car will pass: the rim `beside` m
+        // from the track (the region's box takes the track in).
+        const [ax, az] = trackAt(s.pass);
+        const sx = Math.max(-STRAIGHT, Math.min(STRAIGHT, ax));
+        const d = Math.hypot(ax - sx, az);
+        const off = RIM + s.beside;
+        return [ax + (sx - ax) / d * off, az - az / d * off];
+      }
+      if (s.rimOf !== undefined && SCENE !== 'pass') {
         const o = SCHEDULE[s.rimOf].point;
         return [o[0] + RIM * Math.cos(s.rimTurn), o[2] - RIM * Math.sin(s.rimTurn)];
       }
-      // Beside the first straight: from the field's middle toward the track
-      // while the box still clears it.
-      let z = 0;
-      while (trackClearance(boxOf(s.x, z + 0.5)) >= CLEAR) z += 0.5;
-      return [s.x, z];
+      if (s.rimOf !== undefined) {
+        const o = SCHEDULE[s.rimOf].point;
+        let [x, z] = [o[0] + RIM * Math.cos(s.rimTurn), o[2] - RIM * Math.sin(s.rimTurn)];
+        // Into the field until its box clears the track.
+        for (let k = 0; k < 400 && trackClearance(boxOf(x, z)) < CLEAR; k++) z -= 0.5 * Math.sign(z || 1);
+        return [x, z];
+      }
+      // From the loop's spine toward where the car passes, while the box
+      // still clears the track.
+      const [ax, az] = trackAt(s.pass);
+      const sx = Math.max(-STRAIGHT, Math.min(STRAIGHT, ax));
+      const d = Math.hypot(ax - sx, az);
+      const u = [(ax - sx) / d, az / d];
+      let f = 0;
+      while (f + 0.5 < d && trackClearance(boxOf(sx + u[0] * (f + 0.5), u[1] * (f + 0.5))) >= CLEAR) f += 0.5;
+      return [sx + u[0] * f, u[1] * f];
     }
-    for (const s of SCHEDULE) if (s.at && trackClearance(boxOf(...s.at)) < CLEAR) throw new Error(`strike at ${s.at} opens a region on the track`);
     function schedule() {
       for (const s of SCHEDULE) {
         if (s.state === 'done') continue;
@@ -822,6 +1062,22 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
     const hashf = (n) => { let x = Math.imul(n | 0, 747796405) + 2891336453 | 0; x = Math.imul(((x >>> ((x >>> 28) + 4)) ^ x), 277803737); return (((x >>> 22) ^ x) >>> 0) / 4294967295; };
     const smoothNoise = (t, seed) => { const i = Math.floor(t), f = t - i, u = f * f * (3 - 2 * f); return (hashf(i * 31 + seed) * (1 - u) + hashf((i + 1) * 31 + seed) * u) * 2 - 1; };
     function updateCamera(dt) {
+      if (SCENE === 'bts') {
+        // An orbit round the latest strike, the cut facing the camera.
+        let f = null;
+        for (const s of SCHEDULE) if (s.point) f = s.point;
+        f ??= [...strikePoint(SCHEDULE[0]), 0].map((v, i, a) => (i === 1 ? 0 : i === 0 ? a[0] : a[1]));
+        const yaw = 2.2 + 0.0009 * st.frame, el = 0.36, d = num('orbit', 160);
+        const want = [f[0] + d * Math.cos(el) * Math.cos(yaw), f[1] + d * Math.sin(el), f[2] + d * Math.cos(el) * Math.sin(yaw)];
+        const k = cam.eye ? 1 - Math.exp(-dt * 2) : 1;
+        cam.eye = cam.eye ? cam.eye.map((x, i) => x + (want[i] - x) * k) : want;
+        const tgt = [f[0], f[1] + 4, f[2]];
+        cam.target = cam.target ? cam.target.map((x, i) => x + (tgt[i] - x) * k) : tgt;
+        const n = norm3([cam.eye[0] - cam.target[0], 0, cam.eye[2] - cam.target[2]]);
+        cam.cut = [n[0], 0, n[2], n[0] * cam.target[0] + n[2] * cam.target[2]];
+        st.shake = [0, 0, 0];
+        return;
+      }
       const p = st.carPose;
       if (!p) return;
       const flat = norm3([p.fwd[0], 0, p.fwd[2]]);
@@ -844,8 +1100,9 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       }
       const carT = [p.p[0] + flat[0] * 6, p.p[1] + 1.2, p.p[2] + flat[2] * 6];
       const target = cam.focus ? carT.map((x, i) => x + (cam.focus[i] - x) * 0.4 * cam.focusW) : carT;
-      const back = 9 + 5 * cam.focusW;
-      const eyeWant = [p.p[0] - behind[0] * back, p.p[1] + 3.0 + 6 * cam.focusW, p.p[2] - behind[2] * back];
+      // Up to look into the bowl while a strike is watched.
+      const back = 9 + 8 * cam.focusW;
+      const eyeWant = [p.p[0] - behind[0] * back, p.p[1] + 3.0 + 13 * cam.focusW, p.p[2] - behind[2] * back];
       if (cam.override) { cam.eye = cam.override.eye; cam.target = cam.override.target; return; }
       eyeWant[1] = Math.max(eyeWant[1], groundAt(eyeWant[0], eyeWant[2]) + 1.5);
       if (!cam.eye) { cam.eye = eyeWant.slice(); cam.target = target.slice(); }
@@ -909,13 +1166,13 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       }
       const eye = (cam.eye || [0, 10, -30]).map((x, i) => x + st.shake[i]);
       const at = (cam.target || [0, 0, 0]).map((x, i) => x + st.shake[i] * 0.6);
-      const vp = viewProj(eye, at, W / H);
+      const vp = viewProj(eye, at, (SCENE === 'bts' ? W / 2 : W) / H);
       frameF.fill(0);
       frameF.set(vp.m, 0);
       frameF.set([...eye, st.t], 16);
       frameF.set([-0.42, 0.52, 0.55, 0], 20);
       frameF.set(invert(vp.m), 24);
-      frameF.set([...vp.right, W / H], 40);
+      frameF.set([...vp.right, (SCENE === 'bts' ? W / 2 : W) / H], 40);
       frameF.set([...vp.up, 0], 44);
       let flash = 0;
       for (const s of SCHEDULE) if (s.state === 'done') { const tau = st.t - s.struckAt; if (tau >= 0) flash += 0.9 * Math.exp(-tau / 0.06) * Math.min(1, 120 / Math.hypot(...sub3(s.point, eye))); }
@@ -923,6 +1180,9 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       frameF.set([st.t, Math.min(flash, 1.2), quantum, st.t - st.lastStrike], 48);
       if (st.carPose) frameF.set([...st.carPose.p, 1], 52);
       frameF.set([num('haze', 900), 0, 0, 0], 56);
+      if (cam.cut) frameF.set(cam.cut, 60);
+      const reg = terrain.region;
+      if (reg) { frameF.set([...reg.origin, 1], 64); frameF.set([...reg.end, 0], 68); }
       device.queue.writeBuffer(frameBuf, 0, frameF);
       eventF.fill(0);
       st.fx.slice(-MAX_FX).forEach((s, k) => {
@@ -939,6 +1199,22 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
         colorAttachments: [{ view: msaa.createView(), resolveTarget: lastTex.createView(), clearValue: [0, 0, 0, 1], loadOp: 'clear', storeOp: 'discard' }],
         depthStencilAttachment: { view: depthTex.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'discard' },
       });
+      const W = canvas.width, H = canvas.height;
+      if (SCENE === 'bts') {
+        // Left: the engine's view; right: the game's; one camera, one state.
+        rp.setViewport(0, 0, W / 2, H, 0, 1);
+        rp.setPipeline(P.sky); rp.setBindGroup(0, B.sky); rp.draw(3);
+        rp.setPipeline(P.groundEngine); rp.setBindGroup(0, B.groundEngine); rp.draw((NX - 1) * (NZ - 1) * 6);
+        if (terrain.region) {
+          const n = Math.min(maxParticles, (terrain.report?.particles ?? terrain.region.window[2] * terrain.region.window[3] * 64) + 4096);
+          rp.setPipeline(P.partEngine); rp.setBindGroup(0, B.partEngine); rp.draw(6, n);
+          const m = Math.min(maxParcels, (terrain.report?.parcels ?? 0) + 4096);
+          rp.setPipeline(P.parcelEngine); rp.setBindGroup(0, B.parcelEngine); rp.draw(6, m);
+          rp.setPipeline(P.box); rp.setBindGroup(0, B.box); rp.draw(32);
+        }
+        buggy?.draw(rp);
+        rp.setViewport(W / 2, 0, W / 2, H, 0, 1);
+      }
       rp.setPipeline(P.sky); rp.setBindGroup(0, B.sky); rp.draw(3);
       rp.setPipeline(P.ground); rp.setBindGroup(0, B.ground); rp.draw((NX - 1) * (NZ - 1) * 6);
       const open = !!terrain.region;
@@ -1081,7 +1357,10 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
     // Record `seconds` of the run from the start: physics at 120 Hz, every
     // other frame encoded (60 fps) with explicit timestamps, H.264 Annex B
     // chunks uploaded as they come. `stills`: sim times to save PNGs at.
-    async function record({ seconds = 20, fps = 60, name = 'showcase.h264', bitrate = 24e6, stills = [] } = {}) {
+    // `pace(t)`: physics frames per recorded frame at sim time t (default: the
+    // frames of 1/fps of sim time, real time; 1 behind the scenes at 300 Hz
+    // and 60 fps is 5x slow motion).
+    async function record({ seconds = 20, fps = 60, name = 'showcase.h264', bitrate = 24e6, stills = [], pace = null } = {}) {
       manual = true;
       if (st.frame !== 0) throw new Error('record() runs from a fresh load (reload the page)');
       // The run-up: the car gets to speed before the first frame.
@@ -1100,8 +1379,10 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
         const parts = pending; pending = [];
         await post(name, new Blob(parts), true);
       };
-      const total = Math.round(seconds / DT);
-      const stillQ = stills.map((t) => Math.round(t / DT)); // video seconds
+      const frames = Math.round(seconds * fps);
+      const stillK = stills.map((t) => Math.round(t * fps)); // video seconds
+      const paceAt = pace ?? (() => every);
+      const times = [];
       // Each encoded frame from the canvas texture's own pixels (a copy in the
       // frame's submission), not from the canvas element: no race with its
       // presentation, also in a hidden page.
@@ -1110,13 +1391,27 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       const pixFormat = format === 'bgra8unorm' ? 'BGRA' : 'RGBA';
       let k = 0;
       const t0 = performance.now();
-      for (let f = 0; f < total && !failed; f++) {
-        const show = f % every === 0;
-        await stepFrame({ render: show || stillQ.includes(f), wait: true, capture: show ? capture : null });
-        if (show) {
+      while (k < frames && !failed) {
+        const n = Math.max(1, Math.round(paceAt(st.t)));
+        for (let i = 1; i < n; i++) await stepFrame({ render: false, wait: true });
+        times.push(+st.t.toFixed(4));
+        await stepFrame({ render: true, wait: true, capture });
+        {
           await capture.buffer.mapAsync(GPUMapMode.READ);
           const pixels = new Uint8Array(capture.buffer.getMappedRange()).slice();
           capture.buffer.unmap();
+          if (stillK.includes(k)) {
+            // A PNG from the same pixels (RGBA for the 2D canvas).
+            const rgba = new Uint8ClampedArray(W * H * 4);
+            for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+              const a = y * bytesPerRow + 4 * x, b = 4 * (y * W + x);
+              if (pixFormat === 'BGRA') { rgba[b] = pixels[a + 2]; rgba[b + 1] = pixels[a + 1]; rgba[b + 2] = pixels[a]; } else { rgba[b] = pixels[a]; rgba[b + 1] = pixels[a + 1]; rgba[b + 2] = pixels[a + 2]; }
+              rgba[b + 3] = 255;
+            }
+            const oc = new OffscreenCanvas(W, H);
+            oc.getContext('2d').putImageData(new ImageData(rgba, W, H), 0, 0);
+            await post(`${name.replace(/\.h264$/, '')}_still_${(k / fps).toFixed(1)}s.png`, await oc.convertToBlob({ type: 'image/png' }));
+          }
           const frame = new VideoFrame(pixels, { format: pixFormat, codedWidth: W, codedHeight: H, layout: [{ offset: 0, stride: bytesPerRow }],
             timestamp: Math.round((k * 1e6) / fps), duration: Math.round(1e6 / fps) });
           enc.encode(frame, { keyFrame: k % (2 * fps) === 0 });
@@ -1125,12 +1420,10 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
           if (enc.encodeQueueSize > 8) await new Promise((r) => setTimeout(r, 1));
           if (pending.length > 30) await flush();
         }
-        if (stillQ.includes(f)) {
-          const blob = await new Promise((r) => canvas.toBlob(r, 'image/png'));
-          await post(`still_${(f * DT).toFixed(1)}s.png`, blob);
-        }
         if (encErr) throw encErr;
       }
+      // Sim time of each recorded frame (labels, and the slow motion's pace).
+      await post(`${name}.times.json`, JSON.stringify({ fps, dt: DT, times }));
       await enc.flush();
       await flush();
       enc.close();

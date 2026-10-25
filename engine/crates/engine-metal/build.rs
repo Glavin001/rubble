@@ -170,8 +170,101 @@ fn main() -> Result<()> {
 
     println!("cargo:rustc-env=ENGINE_MSL_DIR={}", msl_dir.display());
     rigid_kernels(&slang_root, &out_dir)?;
+    terrain_kernels(&slang_root, &out_dir)?;
     Ok(())
 }
+
+/// The terrain plan's kernels (`engine_terrain::plan::KERNELS`, bindings
+/// 37-51) and the look-ahead's (`terrain_watch.slang`, binding 52), in the
+/// same `ENGINE_WGSL` layout as the rigid table, with each kernel's buffers
+/// renumbered from 0 (Slang numbers them across the whole module, past
+/// Metal's 31). Emits `terrain_kernels.rs`.
+fn terrain_kernels(root: &std::path::Path, out_dir: &std::path::Path) -> Result<()> {
+    use engine_slang_build::msl_layout::{
+        bind_slots, compact_buffers, compile_kernel, msl_buffers,
+    };
+    use std::fmt::Write;
+    let slangc = find_slangc()?;
+    let dir = out_dir.join("terrain_msl");
+    std::fs::create_dir_all(&dir)?;
+    let kernels = root.join("kernels");
+    let mpm = kernels.join("terrain_mpm.slang");
+    let watch = kernels.join("terrain_watch.slang");
+    let fast = kernels.join("terrain_mpm_fast.slang");
+    let slots = bind_slots(&[
+        kernels.join("world_step.slang"),
+        root.join("physics/contact_storage.slang"),
+        mpm.clone(),
+        watch.clone(),
+        fast.clone(),
+    ])?;
+    // (table name, Slang entry, source): a fast path may be a plan kernel
+    // compiled from terrain_mpm_fast.slang under a name of its own.
+    let entries: Vec<(&str, &str, &std::path::Path)> = engine_terrain::plan::KERNELS
+        .iter()
+        .map(|&e| (e, e, mpm.as_path()))
+        .chain(
+            TERRAIN_WATCH_ENTRIES
+                .iter()
+                .map(|&e| (e, e, watch.as_path())),
+        )
+        .chain(
+            TERRAIN_FAST_ENTRIES
+                .iter()
+                .map(|&(n, e)| (n, e, fast.as_path())),
+        )
+        .collect();
+    let compiled = engine_slang_build::par_map(&entries, |&(name, entry, source)| {
+        let dest = dir.join(format!("{name}.metal"));
+        let r = compile_kernel(&slangc, root, source, entry, &dest).and_then(|(msl, threads)| {
+            let mut msl = compact_buffers(&msl, entry, "[[kernel]]")?;
+            if name != entry {
+                let from = format!("[[kernel]] void {entry}(");
+                anyhow::ensure!(msl.contains(&from), "{entry}: no kernel signature");
+                msl = msl.replace(&from, &format!("[[kernel]] void {name}("));
+            }
+            std::fs::write(&dest, &msl)?;
+            Ok((msl, threads))
+        });
+        (dest, r)
+    });
+    let mut table = String::from(
+        "/// Terrain kernels: (entry, MSL, threads, [(metal buffer, host slot)])\n\
+         pub static TERRAIN_KERNELS: &[RigidKernel] = &[\n",
+    );
+    for (&(entry, _, _), (dest, r)) in entries.iter().zip(compiled) {
+        let (msl, threads) = r?;
+        let mut binds = String::new();
+        for (global, index) in msl_buffers(&msl, entry, "[[kernel]]")? {
+            let slot = slots
+                .get(&global)
+                .ok_or_else(|| anyhow::anyhow!("{entry}: global {global} has no BIND slot"))?;
+            write!(binds, "({index}, {slot}), ")?;
+        }
+        writeln!(
+            table,
+            "    RigidKernel {{ entry: {entry:?}, msl: include_str!({:?}), threads: {threads:?}, binds: &[{binds}] }},",
+            dest.display().to_string()
+        )?;
+    }
+    table.push_str("];\n");
+    std::fs::write(out_dir.join("terrain_kernels.rs"), table)?;
+    Ok(())
+}
+
+/// `terrain_mpm_fast.slang`'s entries (native fast paths behind `TerrainCaps`).
+/// (table name, Slang entry).
+const TERRAIN_FAST_ENTRIES: &[(&str, &str)] = &[
+    ("mpm_p2g_cells", "mpm_p2g_cells"),
+    ("mpm_p2g_nodes", "mpm_p2g_nodes"),
+];
+
+/// `terrain_watch.slang`'s entries (the look-ahead after the rigid step).
+const TERRAIN_WATCH_ENTRIES: &[&str] = &[
+    "terrain_watch_energy",
+    "terrain_watch_pick",
+    "terrain_watch_write",
+];
 
 /// The shared rigid step graph's kernels (`engine_exec::rigid_plan`), compiled
 /// with the browser's `ENGINE_WGSL` buffer layout so `MetalSim` replays exactly

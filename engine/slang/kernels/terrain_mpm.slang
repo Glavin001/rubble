@@ -89,7 +89,7 @@ static const uint MPM_BOUNDARY_GEOSTATIC = 2u; // the first step's mpm_geostatic
 static const uint MPM_PARTICLE_DEAD = 1u;       // left as a parcel: no longer simulated
 static const uint MPM_PARTICLE_HOME = 2u;       // activated: c1.w, c2.w hold where (the bake's reference)
 // Colliders one block cell of the region lists.
-static const uint MPM_CELL_COLLIDERS = 8u;
+static const uint MPM_CELL_COLLIDERS = 256u;
 static const uint MPM_NO_SLOT = 0xFFFFFFFFu;
 // apply_impulses' mode for a linear impulse through the centre and an angular
 // impulse (ccd_step.slang IMPULSE_LINEAR_ANGULAR).
