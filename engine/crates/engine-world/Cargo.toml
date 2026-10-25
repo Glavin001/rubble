@@ -40,3 +40,7 @@ reactions-support = ["stress"]
 [[example]]
 name = "destruction_reactions"
 required-features = ["stress"]
+
+[[example]]
+name = "reaction_replay"
+required-features = ["stress"]

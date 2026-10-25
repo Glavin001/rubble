@@ -9,6 +9,8 @@
 //   node record-reactions.mjs crush-wall:1.4x [reference-building-crush:8x ...]
 //        [--out DIR] [--seconds 5] [--bonds threshold|stress] [--orbit dx,dy] [--zoom d]
 //        [--size 1280x720] [--png]   (keep the PNG frames next to the MP4)
+//        [--crush 0|1|2]  (chunk crushing: off, the pack's parameters, those and the presets;
+//                          a take may also say it: crush-wall:1.4x:crush1)
 //
 // Output defaults to $TMPDIR/rubble-reactions (large media is never committed). Needs
 // Chrome with WebGPU and JSPI (CHROME env) and ffmpeg (FFMPEG env).
@@ -76,9 +78,10 @@ await send('Runtime.enable');
 await send('Emulation.setDeviceMetricsOverride', { width: W, height: H, deviceScaleFactor: 1, mobile: false });
 
 for (const take of takes) {
-  const [pack, shot] = take.split(':');
-  const name = `${pack}_${shot ?? 'gravity'}`.replace(/[^\w.-]/g, '_');
-  const query = new URLSearchParams({ pack, bonds: BONDS, ...(shot && shot !== 'gravity' ? { shot } : {}) });
+  const [pack, shot, mode] = take.split(':');
+  const crush = mode?.startsWith('crush') ? mode.slice(5) : flags.crush;
+  const name = `${pack}_${shot ?? 'gravity'}${crush !== undefined ? `_crush${crush}` : ''}`.replace(/[^\w.-]/g, '_');
+  const query = new URLSearchParams({ pack, bonds: BONDS, ...(shot && shot !== 'gravity' ? { shot } : {}), ...(crush !== undefined ? { crush } : {}) });
   const t0 = performance.now();
   await send('Page.navigate', { url: `${base}/fracture/?${query}` });
   let ready = false;
@@ -99,6 +102,7 @@ for (const take of takes) {
     writeFileSync(join(frames, `f${String(n).padStart(5, '0')}.png`), Buffer.from(r.result.data, 'base64'));
   }
   const status = await evaluate('window.__FRACTURE_DEMO__.status');
+  if (crush !== undefined && st.crush !== Number(crush)) throw new Error(`${take}: asked for crush ${crush}, the lab ran ${st.crush}`);
   if (/error|failed|unavailable/i.test(status)) throw new Error(`${take}: ${status}`);
   const mp4 = join(OUT, `${name}.mp4`);
   const r = spawnSync(FFMPEG, ['-loglevel', 'error', '-y', '-framerate', '60', '-i', join(frames, 'f%05d.png'),
@@ -106,7 +110,7 @@ for (const take of takes) {
   if (r.status !== 0) throw new Error('ffmpeg failed');
   spawnSync(FFMPEG, ['-loglevel', 'error', '-y', '-i', join(frames, 'f%05d.png'), '-vf', `select='not(mod(n\\,${Math.max(1, Math.floor(count / 16))}))',scale=480:-1,tile=4x4`, '-frames:v', '1', join(OUT, `${name}_sheet.jpg`)]);
   if (!KEEP_PNG) rmSync(frames, { recursive: true, force: true });
-  console.log(`${take}: ${count} frames, ${st.frames} physics frames, ${st.brokenBonds} bonds broken, ${st.bodies ?? st.fragments} bodies, ${st.shots} shots in ${((performance.now() - t0) / 1000).toFixed(0)} s → ${mp4}${KEEP_PNG ? ` (+ ${frames}/)` : ''}`);
+  console.log(`${take}: ${count} frames, ${st.frames} physics frames, ${st.brokenBonds} bonds broken, ${st.crushed ?? 0} crushed, ${st.bodies ?? st.fragments} bodies, ${st.shots} shots in ${((performance.now() - t0) / 1000).toFixed(0)} s → ${mp4}${KEEP_PNG ? ` (+ ${frames}/)` : ''}`);
 }
 ws.close();
 server.close();

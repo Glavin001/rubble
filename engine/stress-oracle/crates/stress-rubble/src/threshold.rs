@@ -105,11 +105,17 @@ pub struct ThresholdWorld {
     shot_radius: f64,
     /// What strike prediction knows of each shot (`GpuFracture::set_shots`).
     strikes: Vec<fracture::Shot>,
+    /// With crushing: each frame's crush events as the ring read them back (frame, event),
+    /// for a host's dust; [`Self::take_crush_events`] drains them. A frame whose counters
+    /// found no free ring slot is not read, so this can miss events (never the physics).
+    crush_events: Vec<(u64, fracture::CrushEvent)>,
 }
 
 const RING: usize = 4;
 const COUNTER_BYTES: u64 = std::mem::size_of::<engine_schema::StepCounters>() as u64;
 // Ring slot states.
+/// Where a ring slot's crush events start (bytes): after the counters, 16-aligned.
+const EVENTS_AT: u64 = (64 + COUNTER_BYTES).div_ceil(16) * 16;
 const IDLE: u8 = 0;
 const PENDING: u8 = 1;
 const READY: u8 = 2;
@@ -329,14 +335,15 @@ impl ThresholdWorld {
         // colours get their own dispatch: both change results). Fixed instead: the hash
         // sized for the contact capacity, every colour its own dispatch.
         engine.sim.set_plan_hints(capacity.max_contacts, capacity.max_colors.min(32));
+        let events_bytes = if fracture.crushes() { fracture.crush_events_range().1 } else { 0 };
         let ring = (0..RING)
             .map(|_| {
-                let b = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("threshold stats"), size: 64 + COUNTER_BYTES, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+                let b = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("threshold stats"), size: EVENTS_AT + events_bytes, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
                 (b, 0, std::sync::Arc::new(std::sync::atomic::AtomicU8::new(IDLE)))
             })
             .collect();
         let mirror = world.solver.clone();
-        Ok(ThresholdWorld { mirror, scene: scene.clone(), engine, ingest, fracture, tables: t, chunk_of, frame_dt: scene.sim.frame_dt, frame: 0, shots, fired: 0, ring, ring_next: 0, last: ThresholdStats::default(), initial_bodies: m.clusters.len() as u32, phases: Vec::new(), ground_modulus, projectile_modulus: projectile.youngs_modulus, shot_radius, strikes })
+        Ok(ThresholdWorld { mirror, scene: scene.clone(), engine, ingest, fracture, tables: t, chunk_of, frame_dt: scene.sim.frame_dt, frame: 0, shots, fired: 0, ring, ring_next: 0, last: ThresholdStats::default(), initial_bodies: m.clusters.len() as u32, phases: Vec::new(), ground_modulus, projectile_modulus: projectile.youngs_modulus, shot_radius, strikes, crush_events: Vec::new() })
     }
 
     /// Launch a shot (`desc`: the stress frame, its pose and velocity): its record written
@@ -437,6 +444,10 @@ impl ThresholdWorld {
         if self.ring[slot].2.load(std::sync::atomic::Ordering::Acquire) == IDLE {
             enc.copy_buffer_to_buffer(&self.fracture.atom, 4 * self.fracture.layout.a_counters() as u64, &self.ring[slot].0, 0, 64);
             enc.copy_buffer_to_buffer(self.engine.sim.counters_buffer(), 0, &self.ring[slot].0, 64, COUNTER_BYTES);
+            if self.fracture.crushes() {
+                let (at, bytes) = self.fracture.crush_events_range();
+                enc.copy_buffer_to_buffer(&self.fracture.crush_rw, at, &self.ring[slot].0, EVENTS_AT, bytes);
+            }
             self.ring[slot].1 = self.frame;
             self.ring_next = (slot + 1) % RING;
             gpu.queue.submit([enc.finish()]);
@@ -467,6 +478,13 @@ impl ThresholdWorld {
             };
             buf.unmap();
             flag.store(IDLE, std::sync::atomic::Ordering::Release);
+            if self.fracture.crushes() && c[fracture::C_CRUSH_EVENTS] > 0 {
+                let words: &[[f32; 4]] = bytemuck::cast_slice(&c[EVENTS_AT as usize / 4..]);
+                let max = words.len() as u32 / 6;
+                for e in fracture::CrushEvent::decode(words, c[fracture::C_CRUSH_EVENTS].min(max)) {
+                    self.crush_events.push((*frame, e));
+                }
+            }
             if *frame >= self.last.frame {
                 let e: engine_schema::StepCounters = bytemuck::pod_read_unaligned(bytemuck::cast_slice(&c[16..16 + COUNTER_BYTES as usize / 4]));
                 self.last = ThresholdStats {
@@ -483,6 +501,13 @@ impl ThresholdWorld {
             }
         }
         self.last
+    }
+
+    /// The crush events read back since the last call (frame, event), oldest first.
+    pub fn take_crush_events(&mut self) -> Vec<(u64, fracture::CrushEvent)> {
+        let mut e = std::mem::take(&mut self.crush_events);
+        e.sort_by_key(|x| x.0);
+        e
     }
 
     /// Diagnostic read (waits): every chunk's centre in the world (the stress frame), from
