@@ -712,6 +712,7 @@ today; each feature below gets a World call and an ABI call instead. Status:
 | The lab's solver settings (120 Hz, 8 iterations, contact and sleep flags) | `DestructibleAssetDesc::solver`, `World::set_solver`, `rbWorld_UseDestructibleAssetSolver` | ✅ |
 | Fracture lab `threshold` mode (GPU splitter) | D1b, `StrengthModel::Threshold` | 🔜 |
 | Fracture lab `stress` mode (blast_parity) | D5, `StrengthModel::Stress` | 🔜 |
+| Deformable terrain (`impact.html`, `terrain.html`): meteor and charge craters, heavy-body strikes, vehicle ruts, baked heights for the host's mesh | `enable_terrain`, `terrain_impact` / `terrain_explode` / `terrain_open`, `terrain_watch_shape`, `set_height_field_soil`; `rbWorld_EnableTerrain`, `rbTerrain_*`, `rbHeightField_SetSoil`, `rbHeightField_GetHeights` | ✅ (an Unreal sample project 🔜) |
 | Picking (camera ray) | `rbWorld_CastRays` | ✅ |
 | Grab and drag | a kinematic mouse body (`body_set_target_transform` each frame) plus a weld with `linear_stiffness` or a spherical joint | ✅ (composed; a dedicated mouse joint later) |
 | Scripted crusher, moving slabs | kinematic bodies: `BodyType::Kinematic`, `RB_KINEMATIC_BODY`, set velocity or `rbBody_SetTargetTransform` | ✅ |
