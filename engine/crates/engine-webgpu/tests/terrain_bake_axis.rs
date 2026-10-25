@@ -237,9 +237,25 @@ fn the_demo_crater_along_its_axes() {
     };
     let mut bilinear = vec![0.0f64; nn * nn];
     let mut bspline = vec![0.0f64; nn * nn];
-    let fades = [1.0f64, 0.5, 0.25];
-    let mut hyb_home = vec![vec![0.0f64; nn * nn]; 3];
-    let mut hyb_partial = vec![0.0f64; nn * nn];
+    // Mean displacement of each home column's particles (rest-volume
+    // weighted), for the share at home measured against the column.
+    let lattice = f64::from(dx) / 2.0;
+    let mut col = vec![(0.0f64, 0.0f64, 0.0f64); nn * nn];
+    for p in &c.particles {
+        if p.f[2][3].to_bits() & 2 == 0 {
+            continue;
+        }
+        let hi = ((p.c[1][3] - x0.x) / dx).round() as i64;
+        let hj = ((p.c[2][3] - x0.z) / dx).round() as i64;
+        let v0 = f64::from(p.f[0][3]);
+        let e = &mut col[at(hi, hj)];
+        e.0 += v0 * f64::from(p.xm[0] - p.c[1][3]);
+        e.1 += v0 * f64::from(p.xm[2] - p.c[2][3]);
+        e.2 += v0;
+    }
+    // Variants: (relative to the column?, fade in lattice spacings).
+    let variants = [(false, 0.5f64), (true, 0.5), (true, 0.25), (true, 0.125)];
+    let mut hyb = vec![vec![0.0f64; nn * nn]; variants.len()];
     for p in &c.particles {
         let v0 = f64::from(p.f[0][3]);
         let ax = |x: f32, h: f32, o: f32| {
@@ -252,60 +268,40 @@ fn the_demo_crater_along_its_axes() {
         };
         let (ux, ox, mx) = ax(p.xm[0], p.c[1][3], x0.x);
         let (uz, oz, mz) = ax(p.xm[2], p.c[2][3], x0.z);
-        let w = if p.f[2][3].to_bits() & 2 != 0 {
-            // The bilinear bake's default fade: one sample spacing.
+        let home = p.f[2][3].to_bits() & 2 != 0;
+        let w = if home {
             (1.0 - mx.hypot(mz)).max(0.0)
         } else {
             0.0
         };
-        let mut add = |arr: &mut Vec<f64>, kx: [(i64, f64); 3], kz: [(i64, f64); 3]| {
+        let mut add = |arr: &mut Vec<f64>, kx: [(i64, f64); 3], kz: [(i64, f64); 3], q: f64| {
             for (i, wx) in kx {
                 for (j, wz) in kz {
                     if i >= 0 && j >= 0 && i < n && j < n {
-                        arr[at(i, j)] += wx * wz * v0;
+                        arr[at(i, j)] += wx * wz * q;
                     }
                 }
             }
         };
-        // The bilinear bake before: the tent at u − w·o.
-        add(&mut bilinear, tent(ux - w * ox), tent(uz - w * oz));
-        add(&mut bspline, bspl(ux), bspl(uz));
-        let home = p.f[2][3].to_bits() & 2 != 0;
-        for (k, fade) in fades.iter().enumerate() {
-            let wk = if home {
-                (1.0 - mx.hypot(mz) / fade).max(0.0)
-            } else {
+        // The bilinear bake before: the tent at u − w·o, w over one sample.
+        add(&mut bilinear, tent(ux - w * ox), tent(uz - w * oz), v0);
+        add(&mut bspline, bspl(ux), bspl(uz), v0);
+        for (k, &(relative, fade)) in variants.iter().enumerate() {
+            let wk = if !home {
                 0.0
+            } else {
+                let (mut rx, mut rz) = (mx * f64::from(dx), mz * f64::from(dx));
+                if relative {
+                    let hi = ((p.c[1][3] - x0.x) / dx).round() as i64;
+                    let hj = ((p.c[2][3] - x0.z) / dx).round() as i64;
+                    let e = col[at(hi, hj)];
+                    rx -= e.0 / e.2;
+                    rz -= e.1 / e.2;
+                }
+                (1.0 - rx.hypot(rz) / (fade * lattice)).max(0.0)
             };
-            let (vh, vb) = (v0 * wk, v0 * (1.0 - wk));
-            for (i, wx) in tent(ux - ox) {
-                for (j, wz) in tent(uz - oz) {
-                    if i >= 0 && j >= 0 && i < n && j < n {
-                        hyb_home[k][at(i, j)] += wx * wz * vh;
-                    }
-                }
-            }
-            for (i, wx) in bspl(ux) {
-                for (j, wz) in bspl(uz) {
-                    if i >= 0 && j >= 0 && i < n && j < n {
-                        hyb_home[k][at(i, j)] += wx * wz * vb;
-                    }
-                }
-            }
-        }
-        for (i, wx) in tent(ux - w * ox) {
-            for (j, wz) in tent(uz - w * oz) {
-                if i >= 0 && j >= 0 && i < n && j < n {
-                    hyb_partial[at(i, j)] += wx * wz * v0 * w;
-                }
-            }
-        }
-        for (i, wx) in bspl(ux) {
-            for (j, wz) in bspl(uz) {
-                if i >= 0 && j >= 0 && i < n && j < n {
-                    hyb_partial[at(i, j)] += wx * wz * v0 * (1.0 - w);
-                }
-            }
+            add(&mut hyb[k], tent(ux - ox), tent(uz - oz), v0 * wk);
+            add(&mut hyb[k], bspl(ux), bspl(uz), v0 * (1.0 - wk));
         }
         let (i, j) = (ux.round() as i64, uz.round() as i64);
         if i >= 0 && j >= 0 && i < n && j < n {
@@ -327,20 +323,20 @@ fn the_demo_crater_along_its_axes() {
         ("P2G B-spline alone", Box::new(|i, j| low(&bspline, i, j))),
         ("GPU bake", Box::new(|i, j| f64::from(c.baked[at(i, j)]))),
         (
-            "hybrid at home+d, fade 1",
-            Box::new(|i, j| low(&hyb_home[0], i, j)),
+            "hybrid, absolute displacement, fade 0.5 (this bake)",
+            Box::new(|i, j| low(&hyb[0], i, j)),
         ),
         (
-            "hybrid at home+d, fade 0.5",
-            Box::new(|i, j| low(&hyb_home[1], i, j)),
+            "hybrid, against the column mean, fade 0.5",
+            Box::new(|i, j| low(&hyb[1], i, j)),
         ),
         (
-            "hybrid at home+d, fade 0.25",
-            Box::new(|i, j| low(&hyb_home[2], i, j)),
+            "hybrid, against the column, fade 0.25",
+            Box::new(|i, j| low(&hyb[2], i, j)),
         ),
         (
-            "hybrid at u-w·o, fade 1",
-            Box::new(|i, j| low(&hyb_partial, i, j)),
+            "hybrid, against the column, fade 0.125",
+            Box::new(|i, j| low(&hyb[3], i, j)),
         ),
     ];
     let mid = n / 2;
@@ -356,8 +352,32 @@ fn the_demo_crater_along_its_axes() {
                 format!("{:.1}/{:.1}", h(i, j), 0.5 * (h(i, j - 1) + h(i, j + 1)))
             })
             .collect();
+        // The largest local bump (a sample against the mean of its four
+        // neighbours) from 1.6 to 2.6 radii out: the activation window's edge.
+        let mut bump = 0.0f64;
+        for j in 1..n - 1 {
+            for i in 1..n - 1 {
+                let r = (((i - mid).pow(2) + (j - mid).pow(2)) as f64).sqrt() / c.radius as f64;
+                if !(1.6..=2.6).contains(&r) {
+                    continue;
+                }
+                let v = h(i, j) - 0.25 * (h(i - 1, j) + h(i + 1, j) + h(i, j - 1) + h(i, j + 1));
+                if v.abs() > bump.abs() {
+                    bump = v;
+                }
+            }
+        }
+        let edge: Vec<String> = (mid - 35..=mid - 26)
+            .map(|i| format!("{:.0}", h(i, mid + 5)))
+            .collect();
         eprintln!(
-            "{name}: axes {axis:.2} m over their neighbours, lines 2-4 off {}; −x arm (axis/beside): {}",
+            "{name}: row 5 off the axis, samples {}..{}: {}",
+            -35,
+            -26,
+            edge.join(" ")
+        );
+        eprintln!(
+            "{name}: axes {axis:.2} m over their neighbours, lines 2-4 off {}; window-edge bump {bump:.1} m; −x arm (axis/beside): {}",
             others.join(" "),
             prof.join(" ")
         );

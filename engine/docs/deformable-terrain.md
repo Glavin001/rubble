@@ -576,8 +576,11 @@ settled by default. Its rest tolerance is 1% of the crater's gravity speed
 
 The user approved a bilinear splat for the bake and the parcels' deposits.
 `mpm_bake_bin` and `mpm_parcels` (`mpmParcelDeposit`) split each particle's or
-landed parcel's quanta between the four heightfield samples around it, with
-tent weights. Each share goes where the whole particle went before:
+landed parcel's quanta between the heightfield samples around it. Material
+the MPM moved, and every landed parcel, now goes with P2G's quadratic
+B-spline over nine samples rather than the tent over four; see "Moved
+material: P2G's kernel" below. Each share goes where the whole particle went
+before:
 - a window sample's column;
 - the deposit accumulator, for a sample outside the window;
 - escaped, for a sample off the field.
@@ -585,7 +588,8 @@ tent weights. Each share goes where the whole particle went before:
 The max-height header is kept by the same raise kernels as before.
 
 **Where a particle is splatted: its position, less a fading share of its rest
-offset.** Activation lays a sample's particles on a lattice across the
+offset** (the bake from the home fade until the axis-trench fix below).
+Activation lays a sample's particles on a lattice across the
 sample's cell. A splat at each particle's own position would spread unmoved
 off-centre particles onto the neighbours, so activate-then-bake would no
 longer be the identity.
@@ -767,6 +771,106 @@ before it):
   The loaded cube is unchanged (`9aee277fcc35ea31`).
 - `engine-world` `fingerprint_world_impact_to_bake`: reports
   `59df3a636ac25733`, heights `df41faaa6898177b`, box `136fde101445dae3`.
+
+**The axis trench, and moved material on P2G's kernel (2026-10-25).** On the
+demo, baked once settled on the absorbing ground, the axis row z = 0 lay
+4–8 m below the rows at z = ±9.4 m all along the inner wall. The truck drove
+in that groove and stopped.
+
+*Where it came from.* `tests/terrain_bake_axis.rs` runs the demo's event
+natively and compares the particles just before the bake with the bake. The
+axis lines against the mean of the lines beside them, averaged from 2 samples
+to R on all four arms:
+
+| | 16 cells/R (demo) | 8 cells/R |
+|---|---|---|
+| highest particle over each sample | −4.6 m | −8.8 m |
+| rest volume, binned by nearest sample | +12.8 m | +10.1 m |
+| bilinear bake (the bake until now) | −4.8 m | −5.6 m |
+| P2G's quadratic B-spline at the particles | −0.5 m | −1.5 m |
+| lines 2–4 samples off the axes, for scale | −0.2 to −1.1 m | −0.3 to −1.6 m |
+
+The particles explain the sign changes. Across the x axis, in bins of an
+eighth of a cell, particles sit in sheets half a cell apart: the activation
+lattice, mixed between sheets everywhere except at the mirror plane. No
+particle crosses a mirror plane of the symmetric event, so there the two
+sheets beside the plane stand 0.62 of a cell apart instead of 0.5, with
+nothing between them. That is a sub-cell crack: P2G's B-spline, three cells
+wide, does not see it, and nothing in the simulation closes it. Deep
+material crowds the sheets beside it, so nearest-sample binning puts more on
+the axis, while a one-sample tent splits the outer sheets and leaves the axis
+short. With the impact a third of a cell off the grid node, the crack follows
+the mirror plane between sample rows and the axis rows lose only 0.6 m.
+
+*The fix.* The bake splits each activated particle in two:
+- the share w = max(0, 1 − |d| / (fade · s)) is still the heightfield it came
+  from, with d its displacement and s the lattice spacing. It goes with the
+  tent to its home sample plus its displacement, so activate-then-bake stays
+  exact;
+- the rest is material the MPM moved. It goes with P2G's quadratic B-spline,
+  in sample spacings, over nine samples, at its own position: the mass the
+  grid computed with.
+
+Further details:
+- Landed parcels deposit with the B-spline too. Sand pushed off a buried
+  body keeps the tent, because its place is the rule's, not the flow's.
+- Volume stays in whole quanta. A dithered three-way split of x, then z, sums
+  exactly.
+- `bake_home_fade` is now in lattice spacings, default 0.5: a particle that
+  has left its own lattice cell is moved material. One sample spacing (the
+  fade before) left a ridge of +2.2 m at 16 cells/R.
+
+After, the GPU bake's axes against their neighbours:
+- 16 cells/R: +0.04 m.
+- 8 cells/R: −0.59 m.
+- In the browser demo (baked at t = 24.9 s), the axes stand −0.03 m on
+  average. By x:
+
+  | x | z = 0 | z = ±9.4 |
+  |---|---|---|
+  | −28 | −97.7 | −98.7 / −97.4 |
+  | −57 | −79.4 | −79.0 / −79.3 |
+  | −76 | −63.1 | −61.9 / −62.8 |
+
+- The truck now climbs from the floor (x = −12 m, −100.6 m) to x = −63 m,
+  30 m up the wall. It stalls there on a stretch rising 8 m per sample
+  (about 40°) and slides back. That wall is steeper than sand's angle of
+  repose, so the stall is the crater's shape, not the bake.
+
+*Tried, not adopted.* Measuring the home share against the column's mean
+displacement, so that a column moved as a block keeps the tent however far
+it went, keeps a rigid shift exact.
+- It mixes kernels unevenly between neighbouring columns: a column on the
+  tent keeps its own volume while taking the B-spline spill of its
+  neighbours.
+- At 8 cells/R it raised the crater's centre sample 78 mm, from 40 mm deep to
+  38 mm high, and failed `engine-world`'s crater and ball tests.
+
+*Tests.*
+- `a_crater_bakes_without_a_trench_along_its_axes`, 8 cells/R, about 7 s. It
+  fails on the bilinear bake (−5.5 m against lines off the axes within
+  ±1.5 m) and passes now.
+- `moved_material…`: the rigid-shift test checks the hybrid definition. At
+  (0.03, 0.055) samples, part of each particle goes home; at (1.3, −0.55)
+  none does. The worst error is 1.3 mm.
+- The opened layer bakes flat to 0.2% rms with a 0.1% axis ridge (4.7% and
+  13.5% with the home correction kept).
+- At `CRATER_CPR=8`, the axis ridge is 0.5 mm.
+
+*Open: the window's edge.* On the absorbing ground the region's edge columns
+move outward as blocks, a few metres, onto the unactivated ground beside the
+window. The sample just outside the window then stands 65–80 m high and the
+edge sample inside 4 m low (to −10 m with the B-spline). Every bake shows it,
+nearest-sample binning included (73 m), so it comes from the particles. The
+ground outside the window does not move with the absorbing wall's
+displacement. In the browser that sample stands 82.6 m high, at x = −293 m.
+
+**Fingerprints after this change:**
+- `engine-webgpu` `fingerprint_impact_coupled_and_bake`: particles
+  `079220bca4b1a009`, bodies `a5336ecc75ef2ef8`, heights `8cd48a76cd182790`.
+  The cube is unchanged.
+- `engine-world` `fingerprint_world_impact_to_bake`: reports
+  `6484a2b48140af12`, heights `31f1c80605d3d905`, box `136fde101445dae3`.
 
 ## Absorbing ground (2026-10-25)
 
