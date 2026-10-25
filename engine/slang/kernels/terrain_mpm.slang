@@ -1459,7 +1459,9 @@ void mpm_g2p(uint3 tid : SV_DispatchThreadID)
     q.f2.xyz = F[2];
     float speed = length(v);
     AMAX2(gMpmCounters[MPM_C_MAX_SPEED], asuint(speed));
-    AMAX2(gMpmCounters[MPM_C_AREA_SPEED + area], asuint(speed));
+    // Per area only with more than slot 0 in use (one area's is the frame's:
+    // TerrainPlan::check), sparing every particle a second contended atomic.
+    if (p.area.x > 1u) AMAX2(gMpmCounters[MPM_C_AREA_SPEED + area], asuint(speed));
     if (!(speed <= p.limits.x)) AOR2(gMpmCounters[MPM_C_FLAGS], MPM_CFL);
     // Leaving its area's box: a parcel carries the material on (with ejecta enabled).
     uint maxParcels = asuint(p.couple.z);
@@ -2251,7 +2253,7 @@ void mpm_couple_bin(uint3 tid : SV_DispatchThreadID)
             float reach = 0.5 * length(hi - lo);
             uint speed = asuint(length(b.linearVel) + length(b.angularVel) * reach);
             AMAX2(gMpmCounters[MPM_C_BODY_SPEED], speed);
-            AMAX2(gMpmCounters[MPM_C_AREA_BODY + a], speed);
+            if (p.area.x > 1u) AMAX2(gMpmCounters[MPM_C_AREA_BODY + a], speed);
         }
         if (slot == MPM_NO_SLOT)
         {

@@ -100,6 +100,22 @@ pub struct TerrainStepReport {
 }
 
 impl TerrainStepReport {
+    /// The kernels keep per-area speeds only while slots past 0 are in use;
+    /// with slot 0 alone (every per-area word zero), its speeds are the
+    /// frame's.
+    fn one_area_is_the_frame(mut self) -> Self {
+        if self
+            .area_speed
+            .iter()
+            .chain(&self.area_body_speed)
+            .all(|&s| s == 0.0)
+        {
+            self.area_speed[0] = self.max_speed;
+            self.area_body_speed[0] = self.body_speed;
+        }
+        self
+    }
+
     /// The report as area `slot` sees it: its own particles' and bodies'
     /// speeds (the domain's parcels and ledger are shared).
     pub fn area(&self, slot: u32) -> Self {
@@ -1300,7 +1316,8 @@ impl TerrainPlan {
             body_speed: f32::from_bits(c[MPM_C_BODY_SPEED]),
             area_speed: std::array::from_fn(|k| f32::from_bits(c[MPM_C_AREA_SPEED + k])),
             area_body_speed: std::array::from_fn(|k| f32::from_bits(c[MPM_C_AREA_BODY + k])),
-        })
+        }
+        .one_area_is_the_frame())
     }
 }
 
