@@ -21,3 +21,7 @@ RubbleDemo/Content/VibeCity/
 # The Rust C ABI library is built by scripts/unreal/build-ffi.sh, never committed.
 **/ThirdParty/RubbleFFI/lib/
 **/ThirdParty/RubbleFFI/include-gen/
+
+# Quixel Megascans (Fab licence: not redistributed; scripts/unreal/fetch-assets.sh)
+RubbleDemo/SourceArt/Megascans/
+RubbleDemo/Content/Megascans/

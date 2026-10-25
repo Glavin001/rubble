@@ -108,7 +108,7 @@ private:
 	/** Whether a body is drawn through GPU Scene: dynamic, small, with a pose slot. */
 	bool DrawsOnGpu(const FRubbleBodyVisual& Body, TArrayView<const FRubbleShapeVisual> Shapes, const FRubbleSceneAssets& Assets) const;
 	void AddGpuBody(const FRubbleBodyVisual& Body, TArrayView<const FRubbleShapeVisual> Shapes, const FRubbleSceneAssets& Assets);
-	int32 GpuBatchFor(ERubbleShape Kind, int32 Mesh, ERubbleMaterial Material, float A, float B, const FRubbleSceneAssets& Assets, bool bTown = false, bool bHybrid = false, bool bCurtain = false);
+	int32 GpuBatchFor(ERubbleShape Kind, int32 Mesh, ERubbleMaterial Material, float A, float B, const FRubbleSceneAssets& Assets, bool bTown = false, bool bHybrid = false, bool bCurtain = false, FName Surface = NAME_None);
 	UStaticMesh* MeshFor(ERubbleShape Kind, int32 Mesh, ERubbleMaterial Material, float A, float B, const FRubbleSceneAssets& Assets, bool bNanite);
 	void WriteGpu(const FRubbleGpuPoses& Poses);
 	FRubbleGpuPoses* GpuPoses() const;
@@ -118,7 +118,7 @@ private:
 
 	void Rebuild(const FRubbleSceneAssets& Assets);
 	void OnFrame(const FRubbleFrame& Frame);
-	int32 BatchFor(ERubbleShape Kind, int32 Mesh, ERubbleMaterial Material, float A, float B, const FRubbleSceneAssets& Assets, bool bTown, bool bCurtain = false);
+	int32 BatchFor(ERubbleShape Kind, int32 Mesh, ERubbleMaterial Material, float A, float B, const FRubbleSceneAssets& Assets, bool bTown, bool bCurtain = false, FName Surface = NAME_None);
 	void Apply(int32 BodyIndex, const FTransform& Pose);
 	/** A Split: each child body draws its chunks' instances, from where the parent was. */
 	void Rebind(const FRubbleEvent& Split);

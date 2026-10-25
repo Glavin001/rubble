@@ -19,7 +19,7 @@ case "$FILM" in
   town) TEST=Rubble.Video.Town; FRAMES="$ROOT/unreal/RubbleDemo/Saved/RubbleShots/video/town_%04d.png" ;;
   glasstower) TEST=Rubble.Video.GlassTower; FRAMES="$ROOT/unreal/RubbleDemo/Saved/RubbleShots/video/glasstower/frame_%04d.png" ;;
 esac
-RUBBLE_VOLUMETRICS=1 "$ROOT/scripts/unreal/test.sh" ${ARGS[@]+"${ARGS[@]}"} --only "$TEST"
+RUBBLE_TEST_TIMEOUT=${RUBBLE_TEST_TIMEOUT:-1800} RUBBLE_VOLUMETRICS=1 "$ROOT/scripts/unreal/test.sh" ${ARGS[@]+"${ARGS[@]}"} --only "$TEST"
 OUT="$ROOT/target/unreal/$FILM-destruction.mp4"
 mkdir -p "$(dirname "$OUT")"
 ffmpeg -loglevel error -y -framerate 30 -i "$FRAMES" -c:v libx264 -pix_fmt yuv420p -crf 20 -movflags +faststart "$OUT"

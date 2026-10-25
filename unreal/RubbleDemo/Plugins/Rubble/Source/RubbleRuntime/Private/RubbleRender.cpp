@@ -115,6 +115,23 @@ namespace RubbleRender
 		return TownChunk();
 	}
 
+	FName ScanSurface(const FString& PackMaterial)
+	{
+		// Rubble's own looks (Quixel Megascans, build_content.py's MI_Scan_*), by pack material.
+		static const TMap<FString, FName> Table = {
+			{ TEXT("office-slab-concrete"), TEXT("MI_Scan_Slab") },
+			{ TEXT("office-steel"), TEXT("MI_Scan_Steel") },
+			{ TEXT("spandrel-metal"), TEXT("MI_Scan_Aluminium") },
+		};
+		const FName* Found = Table.Find(PackMaterial);
+		return Found && HasGeneratedContent() && LoadGenerated<UMaterialInterface>(*Found->ToString()) ? *Found : NAME_None;
+	}
+
+	UMaterialInterface* ScanMaterial(FName Surface)
+	{
+		return Surface.IsNone() || !HasGeneratedContent() ? nullptr : LoadGenerated<UMaterialInterface>(*Surface.ToString());
+	}
+
 	UMaterialInstanceDynamic* CarPaint(UObject* Outer, const FLinearColor& Paint)
 	{
 		UMaterialInterface* Parent = HasGeneratedContent() ? LoadGenerated<UMaterialInterface>(TEXT("M_RubbleCarPaint")) : nullptr;
@@ -128,7 +145,7 @@ namespace RubbleRender
 		if (HasGeneratedContent())
 		{
 			const TCHAR* Name = Stage == ERubbleStage::CrashHall ? TEXT("MI_GroundHall") : Stage == ERubbleStage::Lot ? TEXT("MI_GroundLot")
-				: Stage == ERubbleStage::Town ? TEXT("M_RubbleTownGround") : TEXT("MI_GroundYard");
+				: Stage == ERubbleStage::Town ? TEXT("MI_Scan_Ground") : TEXT("MI_GroundYard");
 			// The town's grass needs the copied texture arrays; without them it takes the yard's.
 			if (UMaterialInterface* M = LoadGenerated<UMaterialInterface>(Name))
 			{

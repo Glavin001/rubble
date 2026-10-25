@@ -151,6 +151,8 @@ struct FRubbleShapeVisual
 	int32 Chunk = INDEX_NONE;
 	/** A glass tower's curtain wall (the pack's curtain-glass): drawn see-through. */
 	bool bCurtainGlass = false;
+	/** Rubble's own scanned look (RubbleRender::ScanSurface): drawn with it, no custom data. */
+	FName Surface;
 };
 
 /** A rigid body drawn by its shapes (rigid scenes, scenery, projectiles, vehicle parts). */

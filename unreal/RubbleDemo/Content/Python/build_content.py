@@ -632,6 +632,299 @@ def nanite_meshes():
     log("nanite meshes: SM_NaniteBox, SM_NaniteSphere")
 
 
+# ----- Quixel Megascans (Assets/megascans.json; SourceArt/Megascans, git-ignored) -------------------------
+
+import os, re, glob as _glob
+
+MEGASCANS = os.path.join(unreal.Paths.convert_relative_path_to_full(unreal.Paths.project_dir()), "SourceArt", "Megascans")
+SCANS = "/Game/Megascans"
+
+
+def scan_map(key, role):
+    """The highest-resolution file of a role (BaseColor, Normal, Roughness, AO, Mask, Opacity) in a
+    surface's folder, or None."""
+    files = _glob.glob(os.path.join(MEGASCANS, key, f"*_{role}.jpg"))
+    rank = lambda f: int((re.search(r"_(\d+)K_", f) or re.search(r"(\d+)", "0")).group(1))
+    return max(files, key=rank) if files else None
+
+
+def scan_size(key):
+    """A surface's physical size (m), from its metadata (`physicalSize`: "2x2")."""
+    for j in _glob.glob(os.path.join(MEGASCANS, key, "*.json")):
+        m = re.search(r'"physicalSize":\s*"([\d.]+)x([\d.]+)"', open(j).read())
+        if m:
+            return float(m.group(1))
+    return 2.0
+
+
+def import_scan(key, role, kind):
+    """One map into /Game/Megascans/<key>: colour (sRGB), normal, or linear grey (roughness, AO, masks)."""
+    f = scan_map(key, role)
+    if not f:
+        return None
+    dest = f"{SCANS}/{key}"
+    name = os.path.splitext(os.path.basename(f))[0]
+    path = f"{dest}/{name}"
+    if not eal.does_asset_exist(path):
+        task = unreal.AssetImportTask()
+        task.set_editor_property("filename", f)
+        task.set_editor_property("destination_path", dest)
+        task.set_editor_property("automated", True)
+        task.set_editor_property("replace_existing", True)
+        task.set_editor_property("save", False)
+        tools.import_asset_tasks([task])
+    t = unreal.load_asset(path)
+    if kind == "normal":
+        t.set_editor_property("compression_settings", unreal.TextureCompressionSettings.TC_NORMALMAP)
+        t.set_editor_property("srgb", False)
+    elif kind == "grey":
+        t.set_editor_property("compression_settings", unreal.TextureCompressionSettings.TC_GRAYSCALE)
+        t.set_editor_property("srgb", False)
+    eal.save_loaded_asset(t)
+    return t
+
+
+def scan_set(key):
+    """A surface's maps (Albedo, Normal, Roughness, AO) and size (m), or None when it is missing."""
+    maps = {
+        "Albedo": import_scan(key, "BaseColor", "color"),
+        "Normal": import_scan(key, "Normal", "normal"),
+        "Roughness": import_scan(key, "Roughness", "grey"),
+        # Some scans carry no AO: their cavity map is the nearest.
+        "AO": import_scan(key, "AO", "grey") or import_scan(key, "Cavity", "grey"),
+    }
+    if not all(maps.values()):
+        return None
+    return maps, scan_size(key)
+
+
+def scan_missing(keys):
+    manifest = os.path.join(unreal.Paths.convert_relative_path_to_full(unreal.Paths.project_dir()), "Assets", "megascans.json")
+    import json
+    listing = {a["key"]: a for a in json.load(open(manifest))["assets"]}
+    for k in keys:
+        a = listing.get(k, {})
+        log(f"megascans: missing {k} ({a.get('title', '?')}: https://www.fab.com/listings/{a.get('uid', '?')}); scripts/unreal/fetch-assets.sh")
+
+
+def instance_space(m, x, y):
+    """The pixel's position and normal in its instance's frame (cm): an instanced mesh's Local space
+    is its component's, not the instance's."""
+    world = expr(m, unreal.MaterialExpressionWorldPosition, x - 200, y)
+    p = expr(m, unreal.MaterialExpressionTransformPosition, x, y,
+             transform_source_type=unreal.MaterialPositionTransformSource.TRANSFORMPOSSOURCE_WORLD,
+             transform_type=unreal.MaterialPositionTransformSource.TRANSFORMPOSSOURCE_INSTANCE)
+    link(world, "", p, "")
+    n = expr(m, unreal.MaterialExpressionTransform, x, y + 150,
+             transform_source_type=unreal.MaterialVectorCoordTransformSource.TRANSFORMSOURCE_WORLD,
+             transform_type=unreal.MaterialVectorCoordTransform.TRANSFORM_INSTANCE)
+    link(world_normal(m, x - 200, y + 150), "", n, "")
+    return p, n
+
+
+def normal_to_world(m, c, x, y):
+    w = expr(m, unreal.MaterialExpressionTransform, x, y,
+             transform_source_type=unreal.MaterialVectorCoordTransformSource.TRANSFORMSOURCE_INSTANCE,
+             transform_type=unreal.MaterialVectorCoordTransform.TRANSFORM_WORLD)
+    link(c, "Normal", w, "")
+    n = expr(m, unreal.MaterialExpressionNormalize, x + 200, y)
+    link(w, "", n, "")
+    return n
+
+
+def texture_param(m, name, default, sampler, x, y):
+    return expr(m, unreal.MaterialExpressionTextureObjectParameter, x, y, parameter_name=name, texture=default, sampler_type=sampler)
+
+
+SAMPLERS = {"Albedo": unreal.MaterialSamplerType.SAMPLERTYPE_COLOR, "Normal": unreal.MaterialSamplerType.SAMPLERTYPE_NORMAL,
+            "Roughness": unreal.MaterialSamplerType.SAMPLERTYPE_GRAYSCALE, "AO": unreal.MaterialSamplerType.SAMPLERTYPE_GRAYSCALE}
+
+# Triplanar in the instance's frame, three scans: Top on up faces, Bottom on down faces, Side on the
+# rest, each at its scan's physical size; a broken piece keeps its texture as it tumbles. Normals blend
+# per projection (each map's tangent frame is the projection's axes) and leave in the instance frame.
+SCAN_TRIPLANAR = r"""
+float3 n = normalize(N);
+float3 w = pow(abs(n), 8.0); w /= (w.x + w.y + w.z);
+float up = saturate(n.z * 1e4);
+float2 uvX = P.yz / (SideSize * 100.0), uvY = P.xz / (SideSize * 100.0);
+float2 uvT = P.xy / (TopSize * 100.0), uvB = P.xy / (BottomSize * 100.0);
+float3 aX = Texture2DSample(SideAlbedo, SideAlbedoSampler, uvX).rgb;
+float3 aY = Texture2DSample(SideAlbedo, SideAlbedoSampler, uvY).rgb;
+float3 aZ = lerp(Texture2DSample(BottomAlbedo, BottomAlbedoSampler, uvB).rgb, Texture2DSample(TopAlbedo, TopAlbedoSampler, uvT).rgb, up);
+float3 albedo = aX * w.x + aY * w.y + aZ * w.z;
+// Large-scale variation over the tiles (the top scan at a seventh of its scale).
+float3 big = Texture2DSample(TopAlbedo, TopAlbedoSampler, (P.xy + P.z * 0.37) / (TopSize * 100.0 * 7.3)).rgb;
+albedo *= lerp(1.0, saturate(dot(big, float3(0.333, 0.333, 0.333)) / max(dot(aZ, float3(0.333, 0.333, 0.333)), 0.05)), Variation);
+float rX = Texture2DSample(SideRoughness, SideRoughnessSampler, uvX).r, rY = Texture2DSample(SideRoughness, SideRoughnessSampler, uvY).r;
+float rZ = lerp(Texture2DSample(BottomRoughness, BottomRoughnessSampler, uvB).r, Texture2DSample(TopRoughness, TopRoughnessSampler, uvT).r, up);
+Roughness = saturate((rX * w.x + rY * w.y + rZ * w.z) * RoughnessScale);
+float oX = Texture2DSample(SideAO, SideAOSampler, uvX).r, oY = Texture2DSample(SideAO, SideAOSampler, uvY).r;
+float oZ = lerp(Texture2DSample(BottomAO, BottomAOSampler, uvB).r, Texture2DSample(TopAO, TopAOSampler, uvT).r, up);
+Occlusion = oX * w.x + oY * w.y + oZ * w.z;
+float2 tX = Texture2DSample(SideNormal, SideNormalSampler, uvX).xy * 2.0 - 1.0;
+float2 tY = Texture2DSample(SideNormal, SideNormalSampler, uvY).xy * 2.0 - 1.0;
+float2 tZ = lerp(Texture2DSample(BottomNormal, BottomNormalSampler, uvB).xy, Texture2DSample(TopNormal, TopNormalSampler, uvT).xy, up) * 2.0 - 1.0;
+tX.y *= NormalY; tY.y *= NormalY; tZ.y *= NormalY;
+// Each projection's tangent axes: X uses (Y, Z), Y uses (X, Z), Z uses (X, Y).
+float3 nX = float3(sign(n.x) * sqrt(saturate(1.0 - dot(tX, tX))), tX.x, tX.y);
+float3 nY = float3(tY.x, sign(n.y) * sqrt(saturate(1.0 - dot(tY, tY))), tY.y);
+float3 nZ = float3(tZ.x, tZ.y, sign(n.z) * sqrt(saturate(1.0 - dot(tZ, tZ))));
+Normal = normalize(nX * w.x + nY * w.y + nZ * w.z);
+return albedo * Tint.rgb;
+"""
+
+
+def scan_master(defaults):
+    """M_RubbleScan: three Megascans surfaces, triplanar in the instance's frame (SCAN_TRIPLANAR);
+    `defaults` a scan's maps (each parameter's default must match its sampler type)."""
+    m = material("M_RubbleScan")
+    m.set_editor_property("tangent_space_normal", False)
+    p, n = instance_space(m, -1800, 0)
+    inputs = {"P": (p, ""), "N": (n, "")}
+    y = 400
+    for face in ("Top", "Side", "Bottom"):
+        for role in ("Albedo", "Normal", "Roughness", "AO"):
+            inputs[face + role] = (texture_param(m, face + role, defaults[role], SAMPLERS[role], -1800, y), "")
+            y += 120
+        inputs[face + "Size"] = (scalar(m, face + "Size", 2.0, -1800, y), "")
+        y += 80
+    inputs.update({
+        "Tint": (vector(m, "Tint", (1, 1, 1, 1), -1800, y), ""),
+        "RoughnessScale": (scalar(m, "RoughnessScale", 1.0, -1800, y + 80), ""),
+        "Variation": (scalar(m, "Variation", 0.35, -1800, y + 160), ""),
+        "NormalY": (scalar(m, "NormalY", 1.0, -1800, y + 240), ""),
+    })
+    c = custom(m, SCAN_TRIPLANAR, -1100, 0, inputs, {"Normal": 3, "Roughness": 1, "Occlusion": 1}, "ScanTriplanar")
+    mel.connect_material_property(c, "", MP.MP_BASE_COLOR)
+    mel.connect_material_property(normal_to_world(m, c, -700, 150), "", MP.MP_NORMAL)
+    mel.connect_material_property(c, "Roughness", MP.MP_ROUGHNESS)
+    mel.connect_material_property(c, "Occlusion", MP.MP_AMBIENT_OCCLUSION)
+    mel.connect_material_property(scalar(m, "Metallic", 0.0, -700, 400), "", MP.MP_METALLIC)
+    mel.recompile_material(m)
+    return m
+
+
+def scan_instance(name, parent, top, side=None, bottom=None, scalars=None, vectors=None):
+    mi = instance(name, parent, scalars, vectors)
+    for face, surf in (("Top", top), ("Side", side or top), ("Bottom", bottom or top)):
+        maps, size = surf
+        for role, tex in maps.items():
+            mel.set_material_instance_texture_parameter_value(mi, face + role, tex)
+        mel.set_material_instance_scalar_parameter_value(mi, face + "Size", size)
+    eal.save_loaded_asset(mi)
+    return mi
+
+
+# Painted or bare metal from a Megascans imperfection scan (Scratched Painted Metal: a scratch mask
+# and roughness): paint over metal, bare where scratched; triplanar in the instance's frame.
+SCAN_METAL = r"""
+float3 n = normalize(N);
+float3 w = pow(abs(n), 8.0); w /= (w.x + w.y + w.z);
+float s = 1.0 / (Size * 100.0);
+float mX = Texture2DSample(Mask, MaskSampler, P.yz * s).r, mY = Texture2DSample(Mask, MaskSampler, P.xz * s).r, mZ = Texture2DSample(Mask, MaskSampler, P.xy * s).r;
+float rX = Texture2DSample(Rough, RoughSampler, P.yz * s).r, rY = Texture2DSample(Rough, RoughSampler, P.xz * s).r, rZ = Texture2DSample(Rough, RoughSampler, P.xy * s).r;
+float scratch = saturate((mX * w.x + mY * w.y + mZ * w.z) * ScratchAmount);
+float r = rX * w.x + rY * w.y + rZ * w.z;
+Metal = lerp(PaintMetal, 1.0, scratch);
+Roughness = saturate(lerp(PaintRoughness, BareRoughness, scratch) * lerp(0.7, 1.3, r));
+return lerp(PaintColor.rgb, BareColor.rgb, scratch);
+"""
+
+
+def metal_master(mask, rough):
+    m = material("M_RubbleScanMetal")
+    p, n = instance_space(m, -1800, 0)
+    inputs = {
+        "P": (p, ""), "N": (n, ""),
+        "Mask": (texture_param(m, "Mask", mask, SAMPLERS["Roughness"], -1800, 400), ""),
+        "Rough": (texture_param(m, "Rough", rough, SAMPLERS["Roughness"], -1800, 520), ""),
+        "Size": (scalar(m, "Size", 1.0, -1800, 640), ""),
+        "PaintColor": (vector(m, "PaintColor", (0.05, 0.055, 0.06, 1), -1800, 720), ""),
+        "BareColor": (vector(m, "BareColor", (0.56, 0.57, 0.58, 1), -1800, 800), ""),
+        "PaintMetal": (scalar(m, "PaintMetal", 0.0, -1800, 880), ""),
+        "PaintRoughness": (scalar(m, "PaintRoughness", 0.45, -1800, 960), ""),
+        "BareRoughness": (scalar(m, "BareRoughness", 0.3, -1800, 1040), ""),
+        "ScratchAmount": (scalar(m, "ScratchAmount", 1.0, -1800, 1120), ""),
+    }
+    c = custom(m, SCAN_METAL, -1100, 0, inputs, {"Metal": 1, "Roughness": 1}, "ScanMetal")
+    mel.connect_material_property(c, "", MP.MP_BASE_COLOR)
+    mel.connect_material_property(c, "Metal", MP.MP_METALLIC)
+    mel.connect_material_property(c, "Roughness", MP.MP_ROUGHNESS)
+    mel.recompile_material(m)
+    return m
+
+
+# The ground: a Megascans surface in world space (XY), sampled at two scales and rotations and
+# mixed by broad noise, so its 2 m scan does not read as tiles across a 400 m plane.
+SCAN_GROUND = r"""
+float2 uv = WorldP.xy / (Size * 100.0);
+float2 uv2 = float2(uv.x * 0.8 - uv.y * 0.6, uv.x * 0.6 + uv.y * 0.8) * 0.43 + 0.37;
+float k = saturate(0.5 + 0.5 * sin(WorldP.x / 2300.0) * sin(WorldP.y / 1900.0 + 1.3));
+float3 a = lerp(Texture2DSample(Albedo, AlbedoSampler, uv).rgb, Texture2DSample(Albedo, AlbedoSampler, uv2).rgb, k);
+float2 t = lerp(Texture2DSample(NormalMap, NormalMapSampler, uv).xy, Texture2DSample(NormalMap, NormalMapSampler, uv2).xy, k) * 2.0 - 1.0;
+t.y *= NormalY;
+Normal = float3(t, sqrt(saturate(1.0 - dot(t, t))));
+Roughness = lerp(Texture2DSample(Rough, RoughSampler, uv).r, Texture2DSample(Rough, RoughSampler, uv2).r, k);
+Occlusion = lerp(Texture2DSample(AO, AOSampler, uv).r, Texture2DSample(AO, AOSampler, uv2).r, k);
+return a;
+"""
+
+
+def scan_ground(surf):
+    maps, size = surf
+    m = material("M_RubbleScanGround")
+    m.set_editor_property("used_with_instanced_static_meshes", False)
+    inputs = {
+        "WorldP": (expr(m, unreal.MaterialExpressionWorldPosition, -1600, 0), ""),
+        "Albedo": (texture_param(m, "Albedo", maps["Albedo"], SAMPLERS["Albedo"], -1600, 150), ""),
+        "NormalMap": (texture_param(m, "NormalMap", maps["Normal"], SAMPLERS["Normal"], -1600, 270), ""),
+        "Rough": (texture_param(m, "Rough", maps["Roughness"], SAMPLERS["Roughness"], -1600, 390), ""),
+        "AO": (texture_param(m, "AO", maps["AO"], SAMPLERS["AO"], -1600, 510), ""),
+        "Size": (scalar(m, "Size", size, -1600, 630), ""),
+        "NormalY": (scalar(m, "NormalY", 1.0, -1600, 710), ""),
+    }
+    c = custom(m, SCAN_GROUND, -1000, 0, inputs, {"Normal": 3, "Roughness": 1, "Occlusion": 1}, "ScanGround")
+    mel.connect_material_property(c, "", MP.MP_BASE_COLOR)
+    mel.connect_material_property(c, "Normal", MP.MP_NORMAL)
+    mel.connect_material_property(c, "Roughness", MP.MP_ROUGHNESS)
+    mel.connect_material_property(c, "Occlusion", MP.MP_AMBIENT_OCCLUSION)
+    mel.recompile_material(m)
+    return instance("MI_Scan_Ground", m)
+
+
+def megascans():
+    """Rubble's own looks from Quixel Megascans (MI_Scan_*): the glass tower's slabs, steel and
+    aluminium, and the ground. A missing scan is reported with its Fab listing and its look skipped
+    (the renderer falls back)."""
+    if not eal.does_directory_exist(SCANS):
+        eal.make_directory(SCANS)
+    want = ["smooth_precast_concrete", "shuttered_concrete_wall", "stained_concrete_ceiling", "grassy_soil"]
+    sets = {k: scan_set(k) for k in want}
+    scan_missing([k for k, v in sets.items() if v is None])
+    first = next((v for v in sets.values() if v), None)
+    scan = scan_master(first[0]) if first else None
+    if scan and sets["smooth_precast_concrete"] and sets["shuttered_concrete_wall"] and sets["stained_concrete_ceiling"]:
+        # Floor slabs: precast tops, shuttered (board-formed) edges, stained ceilings below.
+        scan_instance("MI_Scan_Slab", scan, sets["smooth_precast_concrete"], sets["shuttered_concrete_wall"], sets["stained_concrete_ceiling"])
+    if scan and sets["shuttered_concrete_wall"]:
+        scan_instance("MI_Scan_Concrete", scan, sets["shuttered_concrete_wall"])
+    mask = import_scan("scratched_painted_metal", "Mask", "grey")
+    rough = import_scan("scratched_painted_metal", "Roughness", "grey")
+    if mask and rough:
+        metal = metal_master(mask, rough)
+        size = scan_size("scratched_painted_metal")
+        # Steel columns and frames: charcoal paint, scratched through to steel.
+        instance("MI_Scan_Steel", metal, {"Size": size, "ScratchAmount": 0.9}, {"PaintColor": (0.035, 0.038, 0.042, 1)})
+        # Spandrel panels: clear-anodised aluminium, faintly scuffed.
+        instance("MI_Scan_Aluminium", metal, {"Size": size, "PaintMetal": 1.0, "PaintRoughness": 0.32, "BareRoughness": 0.22, "ScratchAmount": 0.35},
+                 {"PaintColor": (0.62, 0.64, 0.67, 1), "BareColor": (0.8, 0.81, 0.83, 1)})
+    else:
+        scan_missing(["scratched_painted_metal"])
+    if sets["grassy_soil"]:
+        scan_ground(sets["grassy_soil"])
+    eal.save_directory(SCANS, only_if_is_dirty=True, recursive=True)
+
+
 def main():
     if not eal.does_directory_exist(ROOT):
         eal.make_directory(ROOT)
@@ -653,6 +946,7 @@ def main():
     spark()
     nanite_meshes()
     town()
+    megascans()
     eal.save_directory(ROOT, only_if_is_dirty=False, recursive=True)
     log("done: " + ", ".join(sorted(a.split("/")[-1].split(".")[0] for a in eal.list_assets(ROOT))))
 

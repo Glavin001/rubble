@@ -6,6 +6,7 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "RubbleGlb.h"
+#include "RubbleRender.h"
 #include "RubbleTownPack.h"
 #include "HAL/PlatformTime.h"
 #include "RubbleSubsystem.h"
@@ -1231,7 +1232,8 @@ bool FRubbleAbiBackend::CreateTown(FString& Error)
 		return false;
 	}
 	TArray<uint8> Catalog;
-	if (FFileHelper::LoadFileToArray(Catalog, *(FPaths::GetPath(Path) / TEXT("catalog.json"))))
+	// vibe-land's texture catalogue is the town's look only: the glass tower is drawn with rubble's own.
+	if (Current.Id != TEXT("glasstower") && FFileHelper::LoadFileToArray(Catalog, *(FPaths::GetPath(Path) / TEXT("catalog.json"))))
 	{
 		RubbleTownPack::ApplyCatalog(Catalog, Pack);
 	}
@@ -1274,6 +1276,7 @@ bool FRubbleAbiBackend::CreateTown(FString& Error)
 		Shape.Local = Xf(Frame);
 		Shape.bTownSurface = true;
 		Shape.bCurtainGlass = M.Name == TEXT("curtain-glass");
+		Shape.Surface = RubbleRender::ScanSurface(M.Name);
 		Shape.TextureLayer = M.Layer;
 		Shape.TilesPerMetre = 1.0f / M.MetresPerTile;
 		Shape.UpLayer = M.UpLayer;

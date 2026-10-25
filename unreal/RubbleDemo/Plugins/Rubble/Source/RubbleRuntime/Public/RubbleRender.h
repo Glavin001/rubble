@@ -27,6 +27,11 @@ namespace RubbleRender
 	 *  tower's curtain wall, M_RubbleTownGlass (reflective panes over lit rooms) for other glass,
 	 *  M_RubbleTownChunk otherwise; null when they were not generated. */
 	RUBBLERUNTIME_API UMaterialInterface* TownSurface(ERubbleMaterial Material, bool bCurtainGlass = false);
+	/** Rubble's own scanned look for a pack material (Quixel Megascans, MI_Scan_*): its generated
+	 *  material instance's name, or None (no look for it, or the content was not generated). */
+	RUBBLERUNTIME_API FName ScanSurface(const FString& PackMaterial);
+	/** The material for a ScanSurface name; null for None. */
+	RUBBLERUNTIME_API UMaterialInterface* ScanMaterial(FName Surface);
 	/** Car paint (clear coat, damage mask from vertex colour R) as a dynamic instance of Paint. */
 	RUBBLERUNTIME_API UMaterialInstanceDynamic* CarPaint(UObject* Outer, const FLinearColor& Paint);
 	RUBBLERUNTIME_API UMaterialInterface* Ground(ERubbleStage Stage);

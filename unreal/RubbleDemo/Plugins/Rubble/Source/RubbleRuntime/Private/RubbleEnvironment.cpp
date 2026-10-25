@@ -225,14 +225,14 @@ void ARubbleEnvironment::ApplyStage(const FRubbleSceneAssets& Assets)
 		break;
 	}
 	case ERubbleStage::Town:
-		// The town brings its own streets and pavements: open ground and a late-afternoon sun,
-		// warm and low enough for long shadows down the streets.
-		SunPitch = -24.0f;
+		// The town brings its own streets and pavements: open ground and a mid-afternoon sun, high
+		// enough that the scanned surfaces keep their colours, low enough for long shadows.
+		SunPitch = -36.0f;
 		SunYaw = -55.0f;
 		break;
 	}
 	Sun->SetUseTemperature(Assets.Stage == ERubbleStage::Town);
-	Sun->SetTemperature(4900.0f);
+	Sun->SetTemperature(5600.0f);
 	// The lot is mostly seen from above, ground filling the view: auto exposure would lift it to
 	// white, so it is biased down there.
 	PostProcess->Settings.AutoExposureBias = Assets.Stage == ERubbleStage::Lot ? -1.3f : 0.3f;

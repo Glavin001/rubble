@@ -87,12 +87,12 @@ void ARubblePrimitives::EndPlay(const EEndPlayReason::Type Reason)
 	Super::EndPlay(Reason);
 }
 
-int32 ARubblePrimitives::BatchFor(ERubbleShape Kind, int32 Mesh, ERubbleMaterial Material, float A, float B, const FRubbleSceneAssets& Assets, bool bTown, bool bCurtain)
+int32 ARubblePrimitives::BatchFor(ERubbleShape Kind, int32 Mesh, ERubbleMaterial Material, float A, float B, const FRubbleSceneAssets& Assets, bool bTown, bool bCurtain, FName Surface)
 {
 	// Capsules of each size get their own mesh (a scaled capsule is not a capsule).
 	const uint32 Dims = Kind == ERubbleShape::Capsule ? GetTypeHash(FVector2f(A, B)) : 0u;
 	const uint64 Key = (uint64(Kind) << 56) ^ (uint64(uint8(Material)) << 48) ^ (uint64(uint32(Mesh + 1)) << 20) ^ Dims ^ (bTown ? (1ull << 63) : 0ull)
-		^ (bCurtain ? (1ull << 61) : 0ull);
+		^ (bCurtain ? (1ull << 61) : 0ull) ^ (uint64(GetTypeHash(Surface)) << 8);
 	if (const int32* Found = BatchByKey.Find(Key))
 	{
 		return *Found;
@@ -100,8 +100,9 @@ int32 ARubblePrimitives::BatchFor(ERubbleShape Kind, int32 Mesh, ERubbleMaterial
 	UStaticMesh* StaticMesh = MeshFor(Kind, Mesh, Material, A, B, Assets, /*bNanite=*/false);
 	UInstancedStaticMeshComponent* ISM = NewObject<UInstancedStaticMeshComponent>(this);
 	ISM->SetStaticMesh(StaticMesh);
-	UMaterialInterface* Town = bTown ? RubbleRender::TownSurface(Material, bCurtain) : nullptr;
-	ISM->SetMaterial(0, Town ? Town : RubbleRender::Surface(Material));
+	UMaterialInterface* Scan = RubbleRender::ScanMaterial(Surface);
+	UMaterialInterface* Town = !Scan && bTown ? RubbleRender::TownSurface(Material, bCurtain) : nullptr;
+	ISM->SetMaterial(0, Scan ? Scan : Town ? Town : RubbleRender::Surface(Material));
 	ISM->SetMobility(EComponentMobility::Movable);
 	ISM->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	ISM->NumCustomDataFloats = Town ? TownCustomFloats : 3; // tint (and the town surface's projection)
@@ -209,8 +210,8 @@ void ARubblePrimitives::Rebuild(const FRubbleSceneAssets& Assets)
 			case ERubbleShape::Sphere: Scale = FVector(Shape.Radius / 50.0); break;
 			default: break;
 			}
-			const bool bTown = Shape.bTownSurface && RubbleRender::TownSurface(Shape.Material);
-			Ref.Batch = BatchFor(Shape.Kind, Shape.Mesh, Shape.Material, Shape.Radius, Shape.HalfHeight, Assets, bTown, Shape.bCurtainGlass);
+			const bool bTown = Shape.bTownSurface && Shape.Surface.IsNone() && RubbleRender::TownSurface(Shape.Material);
+			Ref.Batch = BatchFor(Shape.Kind, Shape.Mesh, Shape.Material, Shape.Radius, Shape.HalfHeight, Assets, bTown, Shape.bCurtainGlass, Shape.Surface);
 			Ref.Local = FTransform(Shape.Local.GetRotation(), Shape.Local.GetLocation(), Scale);
 			if (NewTransforms.Num() <= Ref.Batch)
 			{
@@ -538,19 +539,20 @@ bool ARubblePrimitives::DrawsOnGpu(const FRubbleBodyVisual& Body, TArrayView<con
 	return Poses->PoseIndex(Body.Id) != MAX_uint32;
 }
 
-int32 ARubblePrimitives::GpuBatchFor(ERubbleShape Kind, int32 Mesh, ERubbleMaterial Material, float A, float B, const FRubbleSceneAssets& Assets, bool bTown, bool bHybrid, bool bCurtain)
+int32 ARubblePrimitives::GpuBatchFor(ERubbleShape Kind, int32 Mesh, ERubbleMaterial Material, float A, float B, const FRubbleSceneAssets& Assets, bool bTown, bool bHybrid, bool bCurtain, FName Surface)
 {
 	const uint32 Dims = Kind == ERubbleShape::Capsule ? GetTypeHash(FVector2f(A, B)) : 0u;
 	const uint64 Key = (uint64(Kind) << 56) ^ (uint64(uint8(Material)) << 48) ^ (uint64(uint32(Mesh + 1)) << 20) ^ Dims
-		^ (bTown ? (1ull << 63) : 0ull) ^ (bHybrid ? (1ull << 62) : 0ull) ^ (bCurtain ? (1ull << 61) : 0ull);
+		^ (bTown ? (1ull << 63) : 0ull) ^ (bHybrid ? (1ull << 62) : 0ull) ^ (bCurtain ? (1ull << 61) : 0ull) ^ (uint64(GetTypeHash(Surface)) << 8);
 	if (const int32* Found = GpuBatchByKey.Find(Key))
 	{
 		return *Found;
 	}
 	URubbleInstancesComponent* C = NewObject<URubbleInstancesComponent>(this);
 	C->SetStaticMesh(MeshFor(Kind, Mesh, Material, A, B, Assets, /*bNanite=*/true));
-	UMaterialInterface* Town = bTown ? RubbleRender::TownSurface(Material, bCurtain) : nullptr;
-	C->SetMaterial(0, Town ? Town : RubbleRender::Surface(Material));
+	UMaterialInterface* Scan = RubbleRender::ScanMaterial(Surface);
+	UMaterialInterface* Town = !Scan && bTown ? RubbleRender::TownSurface(Material, bCurtain) : nullptr;
+	C->SetMaterial(0, Scan ? Scan : Town ? Town : RubbleRender::Surface(Material));
 	C->SetCustomFloats(Town ? TownCustomFloats : 3);
 	C->SetCastShadow(true);
 	// Where the instances can be: the bounds GPU culling starts from.
@@ -639,9 +641,9 @@ void ARubblePrimitives::AddHybrid(const FRubbleBodyVisual& Body, TArrayView<cons
 	for (int32 s = 0; s < Body.NumShapes; ++s)
 	{
 		const FRubbleShapeVisual& Shape = Shapes[Body.FirstShape + s];
-		const bool bTown = Shape.bTownSurface && RubbleRender::TownSurface(Shape.Material);
+		const bool bTown = Shape.bTownSurface && Shape.Surface.IsNone() && RubbleRender::TownSurface(Shape.Material);
 		FHybridRef Ref;
-		Ref.GpuBatch = GpuBatchFor(Shape.Kind, Shape.Mesh, Shape.Material, Shape.Radius, Shape.HalfHeight, Assets, bTown, /*bHybrid=*/true, Shape.bCurtainGlass);
+		Ref.GpuBatch = GpuBatchFor(Shape.Kind, Shape.Mesh, Shape.Material, Shape.Radius, Shape.HalfHeight, Assets, bTown, /*bHybrid=*/true, Shape.bCurtainGlass, Shape.Surface);
 		FGpuBatch& Batch = GpuBatches[Ref.GpuBatch];
 		Ref.GpuIndex = Batch.PoseSlot.Add(MAX_uint32); // hidden until it wakes
 		GpuRows(Shape, Offset, bTown, Batch.Local);

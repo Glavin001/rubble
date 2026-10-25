@@ -45,8 +45,8 @@ run() { # run <name> <filter> <game|cmd> [extra game args]
       "-ExecCmds=Automation RunTests $filter; Quit" "-TestExit=Automation Test Queue Empty" -abslog="$log" > /dev/null 2>&1 &
   fi
   local pid=$!
-  # Stop a hung run after ten minutes; SIGKILL if a graceful exit hangs.
-  for _ in $(seq 1 200); do kill -0 "$pid" 2>/dev/null || break; sleep 3; done
+  # Stop a hung run after RUBBLE_TEST_TIMEOUT seconds (ten minutes); SIGKILL if a graceful exit hangs.
+  for _ in $(seq 1 $(( ${RUBBLE_TEST_TIMEOUT:-600} / 3 ))); do kill -0 "$pid" 2>/dev/null || break; sleep 3; done
   kill "$pid" 2>/dev/null; sleep 2; kill -9 "$pid" 2>/dev/null
   local passed failures
   passed=$(grep -c "Result={Success}" "$log" 2>/dev/null || true)
