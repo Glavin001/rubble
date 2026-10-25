@@ -400,6 +400,20 @@ pub struct DestructibleDef {
     /// Blasts (`World::detonate`) load its exposed chunk faces with the stress oracle's
     /// face pressures (`StrengthModel::Threshold` only). Off by default.
     pub blast_loading: bool,
+    /// Threshold model only: support loss (`support_loss.rs`). After a frame's breaks, each
+    /// anchored piece's weight flows down its intact bonds to its anchors, and a bond
+    /// carrying more than its compressive capacity breaks the next frame, so a structure
+    /// whose supports are shot away collapses. Off: the threshold model as the lab runs it.
+    pub support_loss: bool,
+    /// With `support_loss`: the dynamic factor `k` on the increase of load in a piece whose
+    /// supports changed this frame (a sudden loss; `support_loss.rs`): a bond that carried
+    /// `before` and carries `after` is held to `before + k (after - before)`, the step
+    /// response of a suddenly applied load (which peaks at twice the step undamped). This
+    /// amplifies the change of load, not the whole post-loss demand as the linear static
+    /// procedure of progressive-collapse guidance does (GSA 2003, UFC 4-023-03: up to 2 on
+    /// the gravity load over a removed column). 1 (the default) is the quasi-static flow;
+    /// the range is 1 to 2, anything else is an error.
+    pub support_loss_dynamic_factor: f32,
 }
 
 impl DestructibleDef {
@@ -417,6 +431,8 @@ impl DestructibleDef {
             },
             user_data: 0,
             blast_loading: false,
+            support_loss: false,
+            support_loss_dynamic_factor: 1.0,
         }
     }
 }
@@ -598,6 +614,19 @@ impl World {
     /// frame), its shapes, and its bonds.
     pub fn create_destructible(&mut self, def: &DestructibleDef) -> anyhow::Result<DestructibleId> {
         def.shape.validate()?;
+        anyhow::ensure!(
+            !def.support_loss || def.model == StrengthModel::Threshold,
+            "support_loss is a capability of the Threshold strength model (the Bonds model carries weight in its joints)"
+        );
+        let k = def.support_loss_dynamic_factor;
+        anyhow::ensure!(
+            (1.0..=2.0).contains(&k),
+            "support_loss_dynamic_factor {k} is outside 1 to 2 (1: quasi-static; 2: an undamped sudden load's peak)"
+        );
+        anyhow::ensure!(
+            k == 1.0 || def.support_loss,
+            "support_loss_dynamic_factor {k} needs support_loss (it scales the support-loss flow)"
+        );
         let asset = self
             .assets
             .get(def.asset.0 as usize)

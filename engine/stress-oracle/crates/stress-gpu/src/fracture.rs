@@ -736,6 +736,25 @@ impl GpuFracture {
         gpu.queue.write_buffer(&self.atom, 4 * self.layout.a_counters() as u64, bytemuck::bytes_of(&count));
     }
 
+    /// Break `bonds` (and mark their chunks' bodies dirty) touching only their own words, so
+    /// a step still in flight keeps every other bond's state: a host pass's breaks between
+    /// frames, split by the next frame's gate. `chunk_body` is each chunk's body as last read.
+    pub fn break_bonds_sparse(&self, gpu: &Gpu, bonds: &[u32], chunk_body: &[u32], bond_table: &[[u32; 4]]) {
+        if bonds.is_empty() {
+            return;
+        }
+        let (zero, one) = (0u32, 1u32);
+        for &i in bonds {
+            gpu.queue.write_buffer(&self.work, 4 * (self.layout.w_alive() + i) as u64, bytemuck::bytes_of(&zero));
+            for end in [bond_table[i as usize][0], bond_table[i as usize][1]] {
+                let body = chunk_body[end as usize];
+                gpu.queue.write_buffer(&self.atom, 4 * (self.layout.a_dirty() + body) as u64, bytemuck::bytes_of(&one));
+            }
+        }
+        // The frame's broken count (`C_FRAME_BROKEN`, cleared by every frame's gate).
+        gpu.queue.write_buffer(&self.atom, 4 * self.layout.a_counters() as u64, bytemuck::bytes_of(&(bonds.len() as u32)));
+    }
+
     pub fn body_words() -> u32 {
         BODY_WORDS
     }

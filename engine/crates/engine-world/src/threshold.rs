@@ -321,6 +321,93 @@ mod imp {
         pub nodes: Vec<Option<u32>>,
         /// Blast loading's state (`DestructibleDef::blast_loading`).
         blast: Option<blast::BlastSlot>,
+        /// `DestructibleDef::support_loss`: what the pass reads.
+        support: Option<SupportLoss>,
+    }
+
+    /// Support loss's inputs for one threshold destructible (`support_loss.rs`).
+    struct SupportLoss {
+        /// Per bond (the tables' order): its compressive capacity (N).
+        compressive: Vec<f32>,
+        /// Per chunk: its bonds.
+        bonds_of: Vec<Vec<u32>>,
+        /// Gravity in the stress frame (m/s²): the chunks' centres are in it.
+        gravity: [f32; 3],
+        /// Bonds the pass has broken that no readback has shown broken yet.
+        sent: Vec<bool>,
+        /// `DestructibleDef::support_loss_dynamic_factor`: on the increase of load in a
+        /// piece whose supports changed this frame.
+        dynamic_factor: f32,
+        /// Per bond: its flow load (N) when the pass last ran on its piece (from the intact
+        /// structure at placement), the `before` of a sudden loss's amplification.
+        load: Vec<f32>,
+    }
+
+    /// The pass on one piece (`chunks`): the bonds (the tables' indices) it breaks, and its
+    /// intact bonds' static flow loads now. `sudden`: the dynamic factor of a sudden loss of
+    /// support (the bonds' `SupportLoss::load` as their loads before).
+    fn evaluate_piece(
+        tables: &FractureTables,
+        intact: &[bool],
+        sl: &SupportLoss,
+        chunks: &[u32],
+        sudden: Option<f32>,
+    ) -> (Vec<u32>, Vec<(u32, f32)>) {
+        let bonds = &tables.bonds;
+        let mut local = std::collections::HashMap::with_capacity(chunks.len());
+        for (j, &c) in chunks.iter().enumerate() {
+            local.insert(c, j as u32);
+        }
+        let mut piece_bonds = Vec::new();
+        let mut table_index = Vec::new();
+        for &c in chunks.iter() {
+            for &b in &sl.bonds_of[c as usize] {
+                let [a, o, _, _] = bonds[b as usize];
+                // Each bond once (from its first chunk), intact and inside the piece.
+                if a != c || !intact[b as usize] || sl.sent[b as usize] {
+                    continue;
+                }
+                if let (Some(&la), Some(&lo)) = (local.get(&a), local.get(&o)) {
+                    piece_bonds.push((la, lo, sl.compressive[b as usize]));
+                    table_index.push(b);
+                }
+            }
+        }
+        let mass: Vec<f32> = chunks
+            .iter()
+            .map(|&c| tables.chunks[c as usize][0][3])
+            .collect();
+        let support: Vec<bool> = chunks
+            .iter()
+            .map(|&c| tables.info[c as usize] & INFO_SUPPORT != 0)
+            .collect();
+        // Chunk centres in their structure's stress frame (a piece is in one structure).
+        let centre: Vec<[f32; 3]> = chunks
+            .iter()
+            .map(|&c| {
+                let r = tables.chunks[c as usize][0];
+                [r[0], r[1], r[2]]
+            })
+            .collect();
+        let piece = crate::support_loss::Piece {
+            mass: &mass,
+            support: &support,
+            centre: &centre,
+            bonds: &piece_bonds,
+        };
+        let before: Vec<f32> = table_index.iter().map(|&b| sl.load[b as usize]).collect();
+        let sudden = sudden.map(|factor| crate::support_loss::Sudden {
+            factor,
+            before: &before,
+        });
+        let r = crate::support_loss::failing(&piece, sl.gravity, sudden.as_ref());
+        let broken = r.bonds.iter().map(|&i| table_index[i as usize]).collect();
+        let loads = table_index
+            .iter()
+            .zip(&r.load)
+            .map(|(&b, &l)| (b, l as f32))
+            .collect();
+        (broken, loads)
     }
 
     /// The world's threshold destructibles.
@@ -680,6 +767,15 @@ mod imp {
             if cooked_hulls(&chunk_parts) {
                 self.sim.sync_hulls(&mut self.hulls);
             }
+            // Any chunk can split off onto a dynamic body on the GPU, before (or without)
+            // this host adopting the split: the broadphase grid is sized for the largest
+            // chunk collider moving from the start.
+            let reach = chunk_cols
+                .iter()
+                .flatten()
+                .map(|&c| engine_schema::convex::collider_radius(&self.sim.collider(c)))
+                .fold(0.0f32, f32::max);
+            self.sim.reserve_movable_radius(reach);
             // Reserved slots for every other piece a split can make: static, parked, out
             // of every pair until a split re-parents a chunk's colliders onto one.
             let spare_count = chunk_count.saturating_sub(m.clusters.len());
@@ -724,6 +820,7 @@ mod imp {
                 t.free[s as usize] = 1;
             }
             let f = |x: f64| x as f32;
+            let mut compressive = Vec::new();
             for &(s, c) in &chunk_of {
                 let k = global(s, c) as usize;
                 let ch = &m.structures[s].chunks[c];
@@ -807,6 +904,11 @@ mod imp {
                     }
                     let capacity = bond.strength.tensile * bond.geometry.area * bond.weibull;
                     bond_source.push((cl.structure, bi));
+                    let source = &scene.bodies[cl.structure].bonds[bond.source];
+                    compressive.push(
+                        (scene.material(&source.material).compressive_strength * bond.geometry.area)
+                            as f32,
+                    );
                     t.bonds.push([
                         global(cl.structure, bond.geometry.a),
                         global(cl.structure, bond.geometry.b),
@@ -881,7 +983,36 @@ mod imp {
                 projectile_colliders: Vec::new(),
                 nodes: source.nodes.clone(),
                 blast,
+                support: None,
             };
+            let mut slot = slot;
+            if def.support_loss {
+                let mut bonds_of = vec![Vec::new(); slot.tables.chunks.len()];
+                for (i, b) in slot.tables.bonds.iter().enumerate() {
+                    bonds_of[b[0] as usize].push(i as u32);
+                    bonds_of[b[1] as usize].push(i as u32);
+                }
+                let g = scene.gravity;
+                let mut sl = SupportLoss {
+                    sent: vec![false; compressive.len()],
+                    load: vec![0.0; compressive.len()],
+                    compressive,
+                    bonds_of,
+                    gravity: g.map(|x| x as f32),
+                    dynamic_factor: def.support_loss_dynamic_factor,
+                };
+                // The intact structure's flow: every bond's load before any loss.
+                for &(b, ..) in &cluster_bodies {
+                    let chunks: Vec<u32> = (0..slot.chunk_body.len() as u32)
+                        .filter(|&c| slot.chunk_body[c as usize] == b)
+                        .collect();
+                    let (_, loads) = evaluate_piece(&slot.tables, &slot.intact, &sl, &chunks, None);
+                    for (bond, load) in loads {
+                        sl.load[bond as usize] = load;
+                    }
+                }
+                slot.support = Some(sl);
+            }
             let k = match self.fracture.slots.iter().position(|s| s.is_none()) {
                 Some(k) => k,
                 None => {
@@ -1024,7 +1155,19 @@ mod imp {
                 let frames: Vec<[f32; 4]> = find(FractureRead::Frames)
                     .map(|b| bytemuck::cast_slice(b).to_vec())
                     .unwrap_or_default();
-                out.extend(self.apply_fracture(k, step, chunks, intact, &frames)?);
+                let events = self.apply_fracture(k, step, chunks, intact, &frames)?;
+                let broken: Vec<u32> = events
+                    .iter()
+                    .filter_map(|e| match e {
+                        DestructionEvent::BondsBroken { bonds, .. } => Some(bonds.clone()),
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect();
+                if !broken.is_empty() {
+                    self.support_loss(k, &broken);
+                }
+                out.extend(events);
             }
             Ok(out)
         }
@@ -1155,6 +1298,64 @@ mod imp {
             Ok(out)
         }
 
+        /// Support loss after a frame's breaks (`broken`): the pieces they touched carry their
+        /// weight to their anchors, and the bonds it overloads break with the next frame.
+        fn support_loss(&mut self, k: usize, broken: &[u32]) {
+            let Some(gpu) = self.fracture.gpu.clone() else {
+                return;
+            };
+            let t = self.fracture.slots[k].as_mut().expect("live slot");
+            let Some(sl) = t.support.as_mut() else { return };
+            for &b in broken {
+                sl.sent[b as usize] = false;
+            }
+            let bonds = &t.tables.bonds;
+            let mut bodies: Vec<u32> = broken
+                .iter()
+                .flat_map(|&b| {
+                    [
+                        t.chunk_body[bonds[b as usize][0] as usize],
+                        t.chunk_body[bonds[b as usize][1] as usize],
+                    ]
+                })
+                .collect();
+            bodies.sort_unstable();
+            bodies.dedup();
+            // The touched pieces' chunks, in one sweep.
+            let mut chunks_of: Vec<Vec<u32>> = vec![Vec::new(); bodies.len()];
+            for (c, b) in t.chunk_body.iter().enumerate() {
+                if let Ok(i) = bodies.binary_search(b) {
+                    chunks_of[i].push(c as u32);
+                }
+            }
+            let lost = crate::support_loss::lost_support(
+                &bodies,
+                &chunks_of,
+                broken,
+                |b| {
+                    let [a, o, _, _] = bonds[b as usize];
+                    (t.chunk_body[a as usize], t.chunk_body[o as usize])
+                },
+                |c| t.tables.info[c as usize] & INFO_SUPPORT != 0,
+            );
+            let mut over = Vec::new();
+            for (i, chunks) in chunks_of.iter().enumerate() {
+                // A sudden loss of support: the dynamic factor on the load's increase; else
+                // the quasi-static flow.
+                let sudden = (lost[i] && sl.dynamic_factor != 1.0).then_some(sl.dynamic_factor);
+                let (broken, loads) = evaluate_piece(&t.tables, &t.intact, sl, chunks, sudden);
+                over.extend(broken);
+                for (bond, load) in loads {
+                    sl.load[bond as usize] = load;
+                }
+            }
+            for &b in &over {
+                sl.sent[b as usize] = true;
+            }
+            t.fracture
+                .break_bonds_sparse(&gpu, &over, &t.chunk_body, bonds);
+        }
+
         /// A changed body's mass, solver frame (from the GPU's frame record), type and
         /// shapes, from `from_step` on.
         fn reframe_piece(
@@ -1233,8 +1434,40 @@ mod imp {
             slot.frames.retain(|f| f.0 < from_step);
             slot.frames.push((from_step, frame));
             slot.shapes = shapes.clone();
+            let state = crate::body_state(slot);
             for s in shapes {
                 self.shapes[s as usize].body = b;
+            }
+            // The split was the GPU's (`fr_commit`, `fr_reparent`): the host's mirror of the
+            // body and of its chunks' colliders follows it, with no upload. The step plan
+            // reads that mirror: the hierarchical grid sizes its levels from the colliders of
+            // moving bodies (`hierarchical_grid`), and a moving collider larger than the
+            // levels a stale mirror gives goes to the oversized-static list, which never
+            // queries, so it passed through the ground and every static piece.
+            let t = self.fracture.slots[k].as_ref().expect("live slot");
+            let com = Vec3::new(c0[0], c0[1], c0[2]);
+            let to_body = glam::Quat::from_xyzw(c1[0], c1[1], c1[2], c1[3])
+                .normalize()
+                .conjugate();
+            let mut cols = Vec::new();
+            for &c in &chunks {
+                let r = t.tables.chunks[c][2];
+                let (first, count) = (r[2].to_bits() as usize, r[3].to_bits() as usize);
+                for p in &t.tables.parts[first..first + count] {
+                    let id = p[0][3].to_bits();
+                    let mut col = self.sim.collider(id);
+                    col.body = b;
+                    col.local_pos =
+                        (to_body * (Vec3::new(p[0][0], p[0][1], p[0][2]) - com)).to_array();
+                    col.local_rot = (to_body * glam::Quat::from_array(p[1]))
+                        .normalize()
+                        .to_array();
+                    cols.push((id, col));
+                }
+            }
+            self.sim.mirror_bodies(b, &[state]);
+            for (id, col) in cols {
+                self.sim.mirror_colliders(id, &[col]);
             }
             Ok(())
         }

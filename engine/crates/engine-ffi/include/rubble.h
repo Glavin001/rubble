@@ -619,6 +619,14 @@ typedef struct RbDestructibleDef {
   float friction;
   uint64_t user_data;
   enum RbStrengthModel model;
+  // `RB_STRENGTH_THRESHOLD` only: support loss. Each anchored piece's weight flows down its
+  // intact bonds, and a bond carrying more than its compressive capacity breaks, so a
+  // structure whose supports are shot away collapses. Off by default.
+  bool support_loss;
+  // With `support_loss`: the dynamic factor k, 1 to 2, on the increase of load after a
+  // sudden loss of support (a bond is held to before + k (after - before)). 1 (the
+  // default): quasi-static.
+  float support_loss_dynamic_factor;
   uint32_t internal_value;
 } RbDestructibleDef;
 

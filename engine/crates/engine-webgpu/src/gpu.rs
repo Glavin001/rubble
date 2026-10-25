@@ -101,6 +101,9 @@ pub struct WgpuSim {
     grid_fixed: bool,
     /// `ENGINE_GRID_LEVELS` override of the hierarchical grid (None: convex scenes).
     grid_levels_mode: Option<bool>,
+    /// The largest collider radius a GPU kernel may turn dynamic behind the host's
+    /// mirror (`reserve_movable_radius`); the grid is sized as if one moved.
+    movable_radius: f32,
     /// Diagnostic dispatch filters (`WG_ONLY` / `WG_SKIP`), parsed once.
     wg_only: Option<Vec<String>>,
     wg_skip: Option<Vec<String>>,
@@ -690,6 +693,7 @@ impl WgpuSim {
             grid_split: features.grid == GridLayout::Split,
             grid_fixed: features.grid == GridLayout::Fixed,
             grid_levels_mode: features.grid_levels,
+            movable_radius: 0.0,
             color_headroom: features.color_headroom,
             color_round_headroom: features.color_round_headroom,
             soft_unfused: features.soft_unfused,
@@ -1724,6 +1728,19 @@ impl WgpuSim {
         self.grid_cache = None;
     }
 
+    /// Size the broadphase grid for a moving collider of radius `radius` (m) even while
+    /// none moves on the host's mirror: colliders a GPU kernel can put on a dynamic body
+    /// with no host write (a fracture's split, stress-gpu `fr_reparent`). Without it the
+    /// grid's levels follow the mirror's moving colliders only, and a larger piece freed
+    /// on the GPU lands in the oversized-static list, which never queries the statics.
+    /// Only grows (several fracture hosts reserve their own).
+    pub fn reserve_movable_radius(&mut self, radius: f32) {
+        if radius > self.movable_radius {
+            self.movable_radius = radius;
+            self.grid_cache = None;
+        }
+    }
+
     pub fn step(&mut self) -> Result<StepCounters, ExecError> {
         self.step_inner(false)
     }
@@ -2401,7 +2418,7 @@ impl WgpuSim {
         let (cell, levels) = match self.grid_cache {
             Some((n, cell, levels)) if hier && n == self.collider_count => (cell, levels),
             _ => {
-                let r = rigid_plan::grid_cell(&self.host_cols, &self.host_bodies, hier);
+                let r = rigid_plan::grid_cell_with(&self.host_cols, &self.host_bodies, hier, self.movable_radius);
                 if hier {
                     self.grid_cache = Some((self.collider_count, r.0, r.1));
                 }

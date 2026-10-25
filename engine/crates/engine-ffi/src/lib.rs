@@ -2227,6 +2227,14 @@ pub struct RbDestructibleDef {
     pub friction: f32,
     pub user_data: u64,
     pub model: RbStrengthModel,
+    /// `RB_STRENGTH_THRESHOLD` only: support loss. Each anchored piece's weight flows down its
+    /// intact bonds, and a bond carrying more than its compressive capacity breaks, so a
+    /// structure whose supports are shot away collapses. Off by default.
+    pub support_loss: bool,
+    /// With `support_loss`: the dynamic factor k, 1 to 2, on the increase of load after a
+    /// sudden loss of support (a bond is held to before + k (after - before)). 1 (the
+    /// default): quasi-static.
+    pub support_loss_dynamic_factor: f32,
     pub internal_value: u32,
 }
 
@@ -2241,6 +2249,8 @@ pub extern "C" fn rbDefaultDestructibleDef() -> RbDestructibleDef {
         friction: SurfaceMaterial::default().friction,
         user_data: 0,
         model: RbStrengthModel::RB_STRENGTH_BONDS,
+        support_loss: false,
+        support_loss_dynamic_factor: 1.0,
         internal_value: COOKIE,
     }
 }
@@ -2277,6 +2287,8 @@ pub unsafe extern "C" fn rbCreateDestructible(
             },
             user_data: d.user_data,
             model: strength_model(d.model),
+            support_loss: d.support_loss,
+            support_loss_dynamic_factor: d.support_loss_dynamic_factor,
             ..base
         };
         let id = w.world.create_destructible(&def)?;

@@ -33,6 +33,7 @@ mod motion;
 mod queries;
 mod readback;
 mod rig;
+mod support_loss;
 mod threshold;
 
 pub use assembly::{
