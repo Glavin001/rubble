@@ -164,8 +164,10 @@
     // The surface patch (engine_terrain::surface::SurfacePatch): a second
     // heightfield the surface pass keeps on the live sand over an open window,
     // so the wheels' rays meet the sand, not the lowered bed under it. Out of
-    // reach (10 km down) while no region is open.
-    const PN = num('patch', 34);
+    // reach (10 km down) while no region is open. Overlapping strikes grow one
+    // area to cover them both (49 × 25 samples for the drive scene's first
+    // two), so the patch takes the grown window plus its ring.
+    const PN = num('patch', 72);
     const patchArena = heightFieldArena(PN, PN, SP, SP, new Float32Array(PN * PN).fill(-1e4));
     const PATCH_BASE = arena0.records.length / 4 + patchArena.base;
     const patchParams = [bitsf((fbits(patchArena.params[0]) & ~0x1FFFFFFF) | PATCH_BASE), ...patchArena.params.slice(1)];
