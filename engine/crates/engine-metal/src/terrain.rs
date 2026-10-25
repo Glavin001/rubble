@@ -40,19 +40,12 @@ pub struct TerrainCaps {
     /// read once, by the SIMD group of its cell, into per-(cell, node)
     /// partials that each node then sums. Deterministic (fixed orders, no
     /// atomics); it groups the same terms by cell, so it differs from the
-    /// portable kernel in rounding only. Binding 53 holds the partials
+    /// portable kernel in rounding only. Binding 54 holds the partials
     /// (`max_blocks` · 64 · 27 · 16 bytes).
     pub p2g_cells: bool,
-    /// The binning reads each particle once (`mpm_touch_keys`,
-    /// `mpm_count_keys`, `mpm_scatter_keys`): touch writes its base node,
-    /// count turns it into its cell, scatter uses the cell, instead of each
-    /// reading the 128-byte particle and looking the cell up again. Same cells
-    /// and counts, same sorted order: bit for bit the portable binning.
-    /// Binding 54 holds the keys (`max_particles` · 8 bytes).
-    pub sort_keys: bool,
 }
 
-/// Bytes of the partials buffer (binding 53) for `max_blocks`.
+/// Bytes of the partials buffer (binding 54) for `max_blocks`.
 pub fn p2g_partial_bytes(max_blocks: u32) -> u64 {
     u64::from(max_blocks) * 64 * 27 * 16
 }
@@ -60,10 +53,7 @@ pub fn p2g_partial_bytes(max_blocks: u32) -> u64 {
 impl TerrainCaps {
     /// Every fast path on.
     pub fn all() -> Self {
-        Self {
-            p2g_cells: true,
-            sort_keys: true,
-        }
+        Self { p2g_cells: true }
     }
 
     /// Flag names separated by `,` or `+` (`all` for every one).
@@ -73,7 +63,6 @@ impl TerrainCaps {
             match f {
                 "all" => caps = Self::all(),
                 "p2g_cells" => caps.p2g_cells = true,
-                "sort_keys" => caps.sort_keys = true,
                 "" => {}
                 other => anyhow::bail!("unknown terrain fast path {other}"),
             }
@@ -116,10 +105,8 @@ pub(crate) struct MetalTerrain {
     profiled: Option<TerrainTiming>,
 }
 
-/// Binding of the `p2g_cells` partials (after the look-ahead's 52).
-pub(crate) const P2G_PARTIALS_BINDING: usize = MPM_WATCH_BINDING + 1;
-/// Binding of the `sort_keys` per-particle keys.
-pub(crate) const SORT_KEYS_BINDING: usize = MPM_WATCH_BINDING + 2;
+/// Binding of the `p2g_cells` partials (after the render surface's 53).
+pub(crate) const P2G_PARTIALS_BINDING: usize = engine_terrain::surface::SURFACE_BINDING + 1;
 
 /// The plan's commands as this host runs them: a fast path replaces the
 /// commands of the kernels it stands for.
@@ -139,19 +126,6 @@ fn lower(ops: &TerrainOps, caps: TerrainCaps) -> Vec<TerrainCmd> {
                     kernel: "mpm_p2g_nodes",
                     offset,
                 });
-            }
-            TerrainCmd::Indirect { kernel, offset }
-                if caps.sort_keys
-                    && matches!(kernel, "mpm_touch" | "mpm_count" | "mpm_scatter") =>
-            {
-                out.push(TerrainCmd::Indirect {
-                    kernel: match kernel {
-                        "mpm_touch" => "mpm_touch_keys",
-                        "mpm_count" => "mpm_count_keys",
-                        _ => "mpm_scatter_keys",
-                    },
-                    offset,
-                })
             }
             c => out.push(c),
         }
@@ -217,13 +191,8 @@ impl MetalSim {
                 "the p2g_cells partials need {bytes} bytes; the device allows {max}"
             );
             let b = shared(&self.device, bytes);
-            b.set_label("b53 terrain partials");
+            b.set_label("b54 terrain partials");
             self.bufs[P2G_PARTIALS_BINDING] = b;
-        }
-        if caps.sort_keys {
-            let b = shared(&self.device, u64::from(config.max_particles) * 8);
-            b.set_label("b54 terrain keys");
-            self.bufs[SORT_KEYS_BINDING] = b;
         }
         // The GPU's first touch of a page costs far more than a later one
         // (measured: the strike frame ran ~10 ms longer on fresh buffers). Pay
@@ -235,10 +204,8 @@ impl MetalSim {
                 let b = &self.bufs[binding];
                 blit.fill_buffer(b, NSRange::new(0, b.length()), 0);
             }
-            for binding in [P2G_PARTIALS_BINDING, SORT_KEYS_BINDING] {
-                let b = &self.bufs[binding];
-                blit.fill_buffer(b, NSRange::new(0, b.length()), 0);
-            }
+            let b = &self.bufs[P2G_PARTIALS_BINDING];
+            blit.fill_buffer(b, NSRange::new(0, b.length()), 0);
             blit.end_encoding();
             cb.commit();
             cb.wait_until_completed();

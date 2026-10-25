@@ -11,6 +11,7 @@
 //!
 //! `cargo run --release -p engine-metal --example terrain_bench -- --secs 10 --runs 3 --profile`
 //! Options: `--backend metal,metal-fast,wgpu` (any subset), `--cells 12`, `--margin 1.5`,
+//! `--game` (`TerrainProfile::Game`, which sets its own cells per radius),
 //! `--frame-hz 120`, `--json out.json`.
 
 use engine_metal::{MetalSim, TerrainCaps};
@@ -53,6 +54,9 @@ struct Opts {
     /// `metal+flag+...` (those fast paths), `wgpu`.
     backends: Vec<String>,
     profile: bool,
+    /// `TerrainProfile::Game`'s settings (8 cells/R, bed 1.25 R, Courant
+    /// 0.45, no speed growth) instead of the physical defaults.
+    game: bool,
     json: Option<String>,
 }
 
@@ -65,6 +69,7 @@ fn opts() -> Opts {
         hz: 120.0,
         backends: vec!["metal".into(), "metal-fast".into(), "wgpu".into()],
         profile: false,
+        game: false,
         json: None,
     };
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -79,6 +84,11 @@ fn opts() -> Opts {
             "--frame-hz" => o.hz = v.parse().unwrap(),
             "--json" => o.json = Some(v),
             "--backend" => o.backends = v.split(',').map(str::to_string).collect(),
+            "--game" => {
+                o.game = true;
+                i += 1;
+                continue;
+            }
             "--profile" => {
                 o.profile = true;
                 i += 1;
@@ -101,7 +111,7 @@ struct Event {
 }
 
 fn event(o: &Opts) -> Event {
-    let cfg = TerrainConfig {
+    let mut cfg = TerrainConfig {
         max_particles: 4_000_000,
         max_blocks: 16384,
         max_parcels: 1 << 19,
@@ -111,6 +121,9 @@ fn event(o: &Opts) -> Event {
         cells_per_radius: o.cells,
         ..TerrainConfig::default()
     };
+    if o.game {
+        cfg = cfg.with_profile(engine_terrain::TerrainProfile::Game);
+    }
     let sand = SandMaterial::default();
     let src = ImpactSource {
         impactor_radius: 8.0,
@@ -297,7 +310,7 @@ fn run(b: &mut dyn Bench, e: &Event, o: &Opts) -> ([f64; 2], Vec<Frame>) {
             frame,
             e.plan.dx,
             e.sand.p_wave_speed(),
-            1.5 * speed + 20.0,
+            e.cfg.speed_growth * speed + 20.0 + G * frame,
         )
         .unwrap();
         let t = Instant::now();
@@ -427,12 +440,14 @@ fn main() {
     let e = event(&o);
     let cells = e.plan.blocks * 4;
     println!(
-        "chip {}; region {:?} cells of {:.2} m ({} R margin, {} cells/R), field {}², frames 1/{} s, {} s, {} runs",
+        "chip {}; {} profile: region {:?} cells of {:.2} m ({} R margin, {} cells/R, bed {:?} R), field {}², frames 1/{} s, {} s, {} runs",
         MetalSim::new(capacity()).unwrap().chip(),
+        if o.game { "game" } else { "physical" },
         cells,
         e.plan.dx,
         o.margin,
-        o.cells,
+        e.cfg.cells_per_radius,
+        e.cfg.bed_depth,
         e.field.samples().0,
         o.hz,
         o.secs,
@@ -555,7 +570,7 @@ fn main() {
                 frame,
                 e.plan.dx,
                 e.sand.p_wave_speed(),
-                1.5 * speed + 20.0,
+                e.cfg.speed_growth * speed + 20.0 + G * frame,
             )
             .unwrap();
             let profile = windows.iter().any(|(_, w)| w.contains(&i));

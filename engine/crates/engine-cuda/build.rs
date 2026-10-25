@@ -165,13 +165,7 @@ fn main() -> Result<()> {
 
 /// `terrain_mpm_fast.slang`'s entries (the native fast paths, engine-metal
 /// `TerrainCaps`).
-const TERRAIN_FAST_ENTRIES: &[&str] = &[
-    "mpm_p2g_cells",
-    "mpm_p2g_nodes",
-    "mpm_touch_keys",
-    "mpm_count_keys",
-    "mpm_scatter_keys",
-];
+const TERRAIN_FAST_ENTRIES: &[&str] = &["mpm_p2g_cells", "mpm_p2g_nodes"];
 
 /// Grid-stride entries of `terrain_mpm_cuda.slang`: each stands for the plan's
 /// indirect dispatch of the kernel it names (without `_gs`).
@@ -191,9 +185,6 @@ const TERRAIN_GS_ENTRIES: &[&str] = &[
     "mpm_couple_apply_gs",
     "mpm_p2g_nodes_gs",
     "mpm_scan_cells_gs",
-    "mpm_touch_keys_gs",
-    "mpm_count_keys_gs",
-    "mpm_scatter_keys_gs",
     "mpm_p2g_cells_gs",
 ];
 

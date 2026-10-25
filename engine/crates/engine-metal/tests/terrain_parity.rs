@@ -429,16 +429,6 @@ fn the_native_fast_paths_match_the_portable_kernels() {
     let d = diff(&f.particles, &g.particles);
     assert_eq!(d.identical, d.count, "two fast-path runs differ: {d:?}");
     let p = impact(&mut metal(), 4, false);
-    // The bit-for-bit fast paths alone.
-    let mut keys = metal();
-    keys.set_terrain_caps(TerrainCaps {
-        sort_keys: true,
-        ..TerrainCaps::default()
-    });
-    let k = impact(&mut keys, 4, false);
-    let d = diff(&k.particles, &p.particles);
-    assert_eq!(d.identical, d.count, "sort_keys changed the run: {d:?}");
-    assert_eq!(k.reports, p.reports);
     let d = report_line("fast paths vs portable (Metal)", &f, &p);
     assert!(d.dx < 1e-4 && d.dv < 1e-2, "{d:?}");
     for (a, b) in f.reports.iter().zip(&p.reports) {

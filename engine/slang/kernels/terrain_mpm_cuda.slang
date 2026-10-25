@@ -62,9 +62,6 @@ MPM_GS_PER_NODE(mpm_p2g_gs, mpm_p2g)
 MPM_GS_PER_NODE(mpm_grid_gs, mpm_grid)
 MPM_GS_PER_NODE(mpm_couple_apply_gs, mpm_couple_apply)
 MPM_GS_PER_NODE(mpm_p2g_nodes_gs, mpm_p2g_nodes)
-MPM_GS_PER_INDEX(mpm_touch_keys_gs, mpm_touch_keys, mpmGsParticleThreads())
-MPM_GS_PER_INDEX(mpm_count_keys_gs, mpm_count_keys, mpmGsParticleThreads())
-MPM_GS_PER_INDEX(mpm_scatter_keys_gs, mpm_scatter_keys, mpmGsParticleThreads())
 
 // mpm_p2g_cells: one 1024-thread workgroup per block, no barriers.
 [shader("compute")]
