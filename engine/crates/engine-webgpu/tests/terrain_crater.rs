@@ -102,19 +102,28 @@ fn an_impact_crater_in_dry_sand_follows_pi_scaling() {
         max_particles: 65535 * 64,
         max_blocks: 65535,
         max_substeps: 1 << 14,
-        max_parcels: 1 << 18,
+        max_parcels: 1 << 20,
         min_cell_size: 0.002,
+        cells_per_radius: std::env::var("CRATER_CPR")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(16.0),
         ..TerrainConfig::default()
     };
     s.terrain_enable(&cfg).unwrap();
-    let sand = SandMaterial::default();
+    // CRATER_E: Young's modulus override (Pa), to measure what softer sand
+    // would change (a lossy option, reported, not adopted).
+    let mut sand = SandMaterial::default();
+    if let Some(e) = std::env::var("CRATER_E").ok().and_then(|v| v.parse().ok()) {
+        sand.youngs_modulus = e;
+    }
     s.terrain_set_material(Some(&sand)).unwrap();
     let src = impact(&sand);
     let crater = src.crater(G).unwrap();
     let z = point_source_z(src.target.ejecta.mu);
     let field_model = src.field(G, z).unwrap();
     let r = crater.radius as f32;
-    let spacing = r / 16.0;
+    let spacing = r / cfg.cells_per_radius;
     let n = 257u32;
     let field = HeightField::new(n, n, spacing, spacing, vec![0.0; (n * n) as usize]).unwrap();
     let mut arena = HullArena::new();
@@ -261,5 +270,55 @@ fn an_impact_crater_in_dry_sand_follows_pi_scaling() {
             .iter()
             .map(|h| (h * 1e4).round() / 1e4)
             .collect::<Vec<_>>()
+    );
+
+    // The ledger closes: what the field lost escaped or is still in flight.
+    let in_flight = f64::from(rep.airborne) * 64.0 * quantum;
+    assert!(
+        (dv + f64::from(rep.escaped) * quantum).abs() <= in_flight + 1e-6,
+        "field change {dv} m³, escaped {} m³, in flight ≤ {in_flight} m³",
+        f64::from(rep.escaped) * quantum
+    );
+    // Against gravity-regime π-scaling (Holsapple 1993) and simple-crater
+    // shape (Melosh 1989). The bands are the laboratory scatter, not a fit:
+    // - the final apparent crater is the transient one widened by rim
+    //   collapse, D ≈ 1.1–1.3 D_transient for simple craters, and dry-sand
+    //   π-scaling fits scatter by about ±20% in radius;
+    // - depth over apparent diameter between Holsapple's transient 0.125 and
+    //   Melosh's transient 1/3 (final simple craters ≈ 0.2);
+    // - a raised rim outside the apparent radius;
+    // - cavity volume within a factor of 2 of the predicted transient volume.
+    let deepest = -profile.iter().cloned().fold(f64::MAX, f64::min);
+    let ratio = apparent / crater.radius;
+    assert!(
+        (0.9..=1.6).contains(&ratio),
+        "apparent radius {apparent} m is {ratio}× the transient {} m",
+        crater.radius
+    );
+    let d_over_d = deepest / (2.0 * apparent);
+    assert!(
+        (0.1..=1.0 / 3.0).contains(&d_over_d),
+        "depth/diameter {d_over_d}"
+    );
+    assert!(
+        rim > apparent && rim_h > 0.0,
+        "no raised rim ({rim} m, {rim_h} m)"
+    );
+    let area = f64::from(spacing * spacing);
+    let cavity: f64 = after
+        .iter()
+        .zip(&before)
+        .map(|(a, b)| f64::from((b - a).max(0.0)))
+        .sum::<f64>()
+        * area;
+    let v_ratio = cavity / crater.volume;
+    assert!(
+        (0.5..=2.0).contains(&v_ratio),
+        "cavity {cavity} m³ is {v_ratio}× the transient {} m³",
+        crater.volume
+    );
+    eprintln!(
+        "apparent/transient radius {ratio:.2}, depth/diameter {d_over_d:.3}, \
+         cavity/transient volume {v_ratio:.2}"
     );
 }

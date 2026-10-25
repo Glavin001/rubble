@@ -270,6 +270,110 @@ Not yet:
 - the host's copy of an edited heightfield (it goes stale until a readback);
 - performance (about 1,900 dispatches per 60 Hz frame at physical stiffness).
 
+## T4 status (2026-10-24)
+
+**Sources.** `engine-terrain::source` predicts the crater by Holsapple's
+π-scaling (gravity and strength regimes, complex-crater rim) and builds the
+Maxwell Z-model excavation field. Its magnitude is fitted to Housen &
+Holsapple's (2011) launch speeds, with Z = 1/μ by default, which is the Z for
+which a steady Z-flow reproduces point-source ejecta scaling. `mpm_source` adds
+that field to every particle of the region on the GPU. From there the MPM
+computes everything: excavation, ejection, rim uplift and collapse. The
+prediction only sizes the region.
+
+**Ejecta.** Material leaving the region's box becomes a ballistic parcel.
+- A parcel that lands inside the box re-enters as a particle.
+- One that lands outside deposits its volume quanta on the heightfield sample
+  it lands on.
+- One that leaves the field's footprint counts as escaped.
+- `airborne` counts the parcels still in flight.
+- The ledger closes exactly: initial volume = field + particles + airborne + escaped.
+
+**Two bed bugs a resting region exposed.** Sand activated with no source must
+stay put. It did not: after 0.5 s, 147k parcels had been thrown and the window
+stood 4–7 cm lower. Two causes:
+- **The bed beside the window.** Under the unactivated ground next to the window,
+  the bed used that column's surface normal (up), so grid nodes could slide
+  sideways freely and the sand squeezed out under the rigid ground. Now:
+  - inside the window, the bed is the lowered sample's floor;
+  - under the ground around the window, it is a wall facing the window
+    (`mpmBedNormal`).
+- **The SVD's trailing 2×2 rotation.** It took √(h² + 4q²) with h = 0 exactly
+  whenever singular values repeat (a near-rotation F, which is sand at rest). A
+  1e-23 off-diagonal squares to 0 in f32, so t = 2q/0 and the stress was NaN.
+  The rotations now take the hypotenuse scaled to the larger term. The captured F
+  is a regression case on the CPU and the GPU.
+
+With both fixed, a resting region is the identity: no height change, no parcels,
+0.001 m/s residual.
+
+**World.**
+- `World::enable_terrain(&TerrainDef)`, then one of:
+  - `terrain_impact` (π-scaled region plus Z-model source);
+  - `terrain_explode` (buried charge);
+  - `terrain_open` (a box, no source, for heavy bodies).
+- Every `World::step` encodes the region's coupled substeps ahead of the rigid
+  step, in the same submission.
+- `Frame::terrain` carries the region's counters; a limit or CFL flag is an error
+  of that frame.
+- A region bakes on its own once its top speed has stayed under `settle_speed`,
+  with nothing airborne, for `settle_frames` frames. Baking freezes whatever creep
+  remains, so `settle_speed` is the region's rest tolerance, an explicit setting.
+- The bake's heights ride back in a later frame's readback to the shape's host
+  geometry. A host edit of that shape in between reads them first (blocking),
+  and an edit while a region is open on it is refused.
+- Each frame's substeps are bounded by a speed bound, which the GPU checks:
+  1.5 × the last reported speed, plus what gravity can add over the readback lag,
+  plus `speed_headroom` for bodies entering faster than the sand.
+
+**The crater against π-scaling** (`tests/terrain_crater.rs`, ignored; a 5 mm
+aluminium sphere at 2 km/s into dry sand). Prediction: transient radius 0.147 m,
+depth 0.037 m, final rim 0.191 m.
+
+| Run | Apparent radius (m) | Deepest (m) | Rim height (m) | Wall time |
+|---|---|---|---|---|
+| margin 2.0, 16 cells/R | 0.193 (1.31 R) | 0.083 | 0.029 at 0.26 m | 730 s |
+| margin 0.6, 16 cells/R | 0.184 | 0.092 | 0.029 (at the box edge) | 127 s |
+| margin 0.6, 24 cells/R | 0.190 | 0.092 | 0.025 | 644 s |
+| margin 0.6, 8 cells/R | 0.129 | 0.057 | 0.009 | 10 s |
+
+- From margin 0.6 to 2.0 the radius moves 5%. From 16 to 24 cells per radius it
+  moves 3%, and the deepest point not at all. At 8 cells the source is
+  under-resolved and the crater comes out about 30% smaller.
+- The converged crater (16 cells/R, margin 2):
+  - apparent radius 1.31× the transient one, 1% from the predicted final rim radius;
+  - depth over diameter 0.17, between Holsapple's transient 0.125 and Melosh's
+    final 0.2;
+  - cavity volume 4.1e-3 m³;
+  - a rim 2.9 cm high.
+- **Open: volume.** The cavity is 3.6× π-scaling's volume (1.16e-3 m³, Kr = 1.4,
+  Kd = 0.35): the radius is 1.31× and the depth 2.25×. The field carries 9.5% of
+  the impactor's kinetic energy (269 J, mostly within a few impactor radii),
+  against about 3 J to lift the cavity. Real sand spends the near-field energy
+  compacting; this sand (Mohr–Coulomb, ψ = 0) has no volumetric compaction, so
+  it drives the floor down. The likely fix is a compaction cap (Drucker–Prager
+  cap hardening on J_p), not a retune of the field. `terrain_crater` asserts
+  the factor-2 volume band and fails there until then; the radius, shape, rim
+  and ledger checks pass.
+- The ejecta blanket thins faster than McGetchin's r⁻³ (about r⁻¹⁰ between 1.4
+  and 1.9 rim radii); not yet understood.
+
+**Cost and stiffness (measured, not adopted).** At physical stiffness (E = 50 MPa,
+c_p ≈ 200 m/s) a 60 Hz frame needs about 11.5/dx substeps (dx in m), plus the
+flow-speed term. The centimetre crater above runs 1,250 substeps over 0.6–2.4 M
+particles: about 1,500× slower than real time.
+
+Softer sand, against the margin-0.6, 16-cells/R baseline:
+
+| E | Radius | Depth | Rim height | Wall time |
+|---|---|---|---|---|
+| 5 MPa | +10% | −13% | −16% | 2.8× faster |
+| 0.5 MPa | +5% | −37% | −52% | 6.5× faster |
+
+It is lossy, and it is not adopted. Large events are real-time at physical
+stiffness: a crater of radius 450 m at 16 cells/R has 28 m cells, so 1–2
+substeps.
+
 ## Validation targets
 
 Tests come from physics and published laws, never from another program's outputs.
