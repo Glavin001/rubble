@@ -705,7 +705,7 @@ float hertz_duration_0(float m_0, float r_3, float e_0, float v_2)
     uint _S83 = _S42 + 2U * to_0;
     *((&kernelContext_18)->work_0+_S83) = base_0;
     *((&kernelContext_18)->work_0+(_S83 + 1U)) = kept_0;
-    *((&kernelContext_18)->loads_0+k_0) = packed_float4(float4(length(f_total_0), 0.0f, 0.0f, 0.0f)) ;
+    *((&kernelContext_18)->loads_0+k_0) = packed_float4(float4(length(f_total_0), f_total_0)) ;
     return;
 }
 

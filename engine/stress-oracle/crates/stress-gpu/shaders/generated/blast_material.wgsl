@@ -16,6 +16,11 @@ struct BlastParams_std140_0
     @align(4) damage_rate_0 : f32,
     @align(8) apply_damage_0 : u32,
     @align(4) pad_0 : u32,
+    @align(16) gravity_0 : vec4<f32>,
+    @align(16) w_alive_0 : u32,
+    @align(4) a_dirty_0 : u32,
+    @align(8) a_counters_0 : u32,
+    @align(4) pad1_0 : u32,
 };
 
 @binding(0) @group(0) var<uniform> params_0 : BlastParams_std140_0;
@@ -38,6 +43,8 @@ struct BlastBond_std430_0
 @binding(3) @group(0) var<storage, read> geometry_0 : array<vec4<f32>>;
 
 @binding(4) @group(0) var<storage, read> materials_0 : array<vec4<f32>>;
+
+@binding(6) @group(0) var<storage, read_write> topo_0 : array<atomic<u32>>;
 
 fn fdot_0( a_0 : vec3<f32>,  b_0 : vec3<f32>) -> f32
 {
@@ -67,6 +74,16 @@ fn excess_0( value_0 : f32,  elastic_0 : f32,  fatal_0 : f32) -> f32
         _S3 = 1.0f;
     }
     return _S2 / _S3;
+}
+
+fn topo_total_0( node_count_1 : u32) -> u32
+{
+    return u32(10) * node_count_1 + u32(3) * ((node_count_1 + u32(1023)) / u32(1024));
+}
+
+fn topo_dirty_0( node_count_2 : u32) -> u32
+{
+    return topo_total_0(node_count_2) + u32(4);
 }
 
 @compute
@@ -368,6 +385,7 @@ fn blast_bond_stress(@builtin(global_invocation_id) id_0 : vec3<u32>)
             var _S17 : vec4<f32> = vec4<f32>(0.0f);
             x_0[_S4] = _S17;
             x_0[_S5] = _S17;
+            atomicStore(&(topo_0[topo_dirty_0(params_0.node_count_0)]), u32(1));
         }
     }
     return;

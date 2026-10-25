@@ -16,6 +16,11 @@ struct BlastParams_std140_0
     @align(4) damage_rate_0 : f32,
     @align(8) apply_damage_0 : u32,
     @align(4) pad_0 : u32,
+    @align(16) gravity_0 : vec4<f32>,
+    @align(16) w_alive_0 : u32,
+    @align(4) a_dirty_0 : u32,
+    @align(8) a_counters_0 : u32,
+    @align(4) pad1_0 : u32,
 };
 
 @binding(0) @group(0) var<uniform> params_0 : BlastParams_std140_0;

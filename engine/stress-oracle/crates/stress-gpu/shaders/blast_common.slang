@@ -41,7 +41,26 @@ public struct BlastParams
     public float damage_rate;
     public uint apply_damage;
     public uint pad;
+    // blast_fracture.slang: gravity (world, Z-up), and where fracture.slang's `work` and `atom`
+    // keep the bonds' alive flags, the bodies' dirty marks and the counters.
+    public float4 gravity;
+    public uint w_alive;
+    public uint a_dirty;
+    public uint a_counters;
+    public uint pad1;
 };
+
+// `topo` (blast_topology.slang): the totals after the per-node and per-block words: islands,
+// nodes, bonds, a union that did not settle, and whether a bond broke since the islands were
+// built.
+public uint topo_total(uint node_count)
+{
+    return 10 * node_count + 3 * ((node_count + 1023) / 1024);
+}
+public uint topo_dirty(uint node_count)
+{
+    return topo_total(node_count) + 4;
+}
 
 // A dynamic node: its weights in D and its CSR range in `refs`.
 public struct BlastNode

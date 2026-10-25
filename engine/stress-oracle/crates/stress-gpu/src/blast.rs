@@ -1,9 +1,10 @@
 //! Blast's bond-impulse stress solver on the GPU: the Slang port of the PhysX fork's GPU
 //! backend (`stressgpu/NvBlastExtStressGpu.cu`), host path. The kernels are
 //! `shaders/blast_cgls.slang` (the per-island node-space CGLS), `shaders/blast_material.slang`
-//! (stresses and damage) and `shaders/blast_topology.slang` (the islands, from the bonds'
-//! health); the f64 reference they are diffed against is `stress_ref::blast_bond`, which also
-//! derives the graph's fixed data (scales, offsets, weights, column scales) uploaded here.
+//! (stresses and damage), `shaders/blast_topology.slang` (the islands, from the bonds' health)
+//! and `shaders/blast_fracture.slang` (its inputs and breaks in [`crate::fracture`]'s frame); the
+//! f64 reference they are diffed against is `stress_ref::blast_bond`, which also derives the
+//! graph's fixed data (scales, offsets, weights, column scales) uploaded here.
 //!
 //! Nodes and bonds keep their indices (the structure's chunks and bonds): an island is a list
 //! of each, which the GPU rebuilds when a bond breaks, so a frame reads nothing back to run.
@@ -14,7 +15,7 @@ use stress_ref::blast_bond::{
 };
 use stress_ref::math::Vec3;
 
-use crate::gpu::{groups, Binding, Gpu, Kernel};
+use crate::gpu::{Binding, Gpu, Kernel};
 use crate::shaders;
 
 const REF_SECOND: u32 = 0x8000_0000;
@@ -23,6 +24,7 @@ const SCAN_BLOCK: usize = 1024;
 const REPORT_CONVERGED: u32 = 1;
 const REPORT_SKIPPED: u32 = 2;
 
+/// `blast_common.slang` `BlastParams`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 pub struct Params {
@@ -42,6 +44,11 @@ pub struct Params {
     pub damage_rate: f32,
     pub apply_damage: u32,
     pub pad: u32,
+    pub gravity: [f32; 4],
+    pub w_alive: u32,
+    pub a_dirty: u32,
+    pub a_counters: u32,
+    pub pad1: u32,
 }
 
 #[repr(C)]
@@ -64,60 +71,35 @@ struct BondGpu {
     o1: [f32; 4],
 }
 
-const CGLS_BINDINGS: [Binding; 10] = [
-    Binding::Uniform,
-    Binding::Storage,
-    Binding::Storage,
-    Binding::Storage,
-    Binding::StorageRw,
-    Binding::Storage,
-    Binding::StorageRw,
-    Binding::StorageRw,
-    Binding::StorageRw,
-    Binding::Storage,
-];
-const MATERIAL_BINDINGS: [Binding; 6] = [
-    Binding::Uniform,
-    Binding::StorageRw,
-    Binding::StorageRw,
-    Binding::Storage,
-    Binding::Storage,
-    Binding::StorageRw,
-];
-const TOPOLOGY_BINDINGS: [Binding; 8] = [
-    Binding::Uniform,
-    Binding::Storage,
-    Binding::Storage,
-    Binding::StorageRw,
-    Binding::StorageRw,
-    Binding::StorageRw,
-    Binding::StorageRw,
-    Binding::StorageRw,
-];
+use Binding::{Storage as R, StorageRw as W, Uniform as U};
+const CGLS_BINDINGS: [Binding; 10] = [U, R, R, R, W, R, W, W, W, R];
+const MATERIAL_BINDINGS: [Binding; 7] = [U, W, W, R, R, W, W];
+const TOPOLOGY_BINDINGS: [Binding; 8] = [U, R, R, W, W, W, W, W];
+const FRACTURE_BINDINGS: [Binding; 9] = [U, W, W, R, R, R, R, W, R];
 
-/// The topology kernels by what they cover.
-#[derive(Clone, Copy)]
-enum Over {
-    Nodes,
-    Bonds,
-    ScanBlocks,
-    One,
-    Islands,
-}
-const TOPOLOGY: [(&str, Over); 12] = [
-    ("bt_reset", Over::Nodes),
-    ("bt_union", Over::Bonds),
-    ("bt_flatten", Over::Nodes),
-    ("bt_count_nodes", Over::Nodes),
-    ("bt_count_bonds", Over::Bonds),
-    ("bt_scan_blocks", Over::ScanBlocks),
-    ("bt_scan_top", Over::One),
-    ("bt_scan_add", Over::ScanBlocks),
-    ("bt_islands", Over::Nodes),
-    ("bt_scatter_nodes", Over::Nodes),
-    ("bt_scatter_bonds", Over::Bonds),
-    ("bt_sort", Over::Islands),
+/// The topology kernels and their indirect sizes (`blast_topology.slang` `A_*`, words).
+const TOPOLOGY: [(&str, u64); 12] = [
+    ("bt_reset", A_NODES),
+    ("bt_union", A_BONDS),
+    ("bt_flatten", A_NODES),
+    ("bt_count_nodes", A_NODES),
+    ("bt_count_bonds", A_BONDS),
+    ("bt_scan_blocks", A_SCAN),
+    ("bt_scan_top", A_ONE),
+    ("bt_scan_add", A_SCAN),
+    ("bt_islands", A_NODES),
+    ("bt_scatter_nodes", A_NODES),
+    ("bt_scatter_bonds", A_BONDS),
+    ("bt_sort", A_SORT),
 ];
+const A_SOLVE: u64 = 0;
+const A_COUNT: usize = 3;
+const A_NODES: u64 = 4;
+const A_BONDS: u64 = 7;
+const A_SCAN: u64 = 10;
+const A_ONE: u64 = 13;
+const A_SORT: u64 = 16;
+const ARGS_BYTES: u64 = 80;
 
 fn f4(v: Vec3) -> [f32; 4] {
     [v.x as f32, v.y as f32, v.z as f32, 0.0]
@@ -127,9 +109,10 @@ fn v3(a: [f32; 4]) -> Vec3 {
     Vec3::new(a[0] as f64, a[1] as f64, a[2] as f64)
 }
 
-/// Words of `blast_topology.slang`'s `topo`.
-fn topo_words(nodes: usize) -> usize {
-    10 * nodes + 3 * nodes.div_ceil(SCAN_BLOCK) + 4
+/// Where `blast_topology.slang`'s `topo` keeps its totals (`blast_common.slang` `topo_total`):
+/// islands, nodes, bonds, a union that did not settle, a pending rebuild.
+fn topo_total(nodes: usize) -> usize {
+    10 * nodes + 3 * nodes.div_ceil(SCAN_BLOCK)
 }
 
 /// A bond's results after a solve.
@@ -140,9 +123,7 @@ pub struct BondResult {
     pub damage: Damage,
 }
 
-/// The device buffers of one support graph, for a frame that records the solve into its own
-/// encoder ([`GpuBlastSolver::record_topology`], [`GpuBlastSolver::record_solve`],
-/// [`GpuBlastSolver::record_stress`]).
+/// The device buffers of one support graph.
 pub struct BlastBuffers {
     pub params: wgpu::Buffer,
     pub islands: wgpu::Buffer,
@@ -157,8 +138,7 @@ pub struct BlastBuffers {
     pub report: wgpu::Buffer,
     pub lists: wgpu::Buffer,
     pub topo: wgpu::Buffer,
-    /// Written by the topology: the solve's and sort's size (islands, 1, 1), then the island
-    /// count.
+    /// Indirect sizes the topology writes (`A_*`).
     pub args: wgpu::Buffer,
     /// `args` copied for the indirect dispatches (a buffer a dispatch binds for writing cannot
     /// size it).
@@ -177,13 +157,12 @@ pub struct GpuBlastSolver {
     pub buffers: BlastBuffers,
     solve: Kernel,
     stress: Kernel,
-    topology: Vec<(Kernel, Over)>,
+    gate: Kernel,
+    topology: Vec<(Kernel, u64)>,
     solve_bind: wgpu::BindGroup,
     stress_bind: wgpu::BindGroup,
     topology_bind: wgpu::BindGroup,
     has_warm_start: bool,
-    /// A bond's health changed since the islands were built.
-    topology_dirty: bool,
 }
 
 impl GpuBlastSolver {
@@ -245,13 +224,9 @@ impl GpuBlastSolver {
         if material_rows.is_empty() {
             material_rows = vec![[0.0; 4]; 2];
         }
-        let args = gpu.storage("blast args", &[0u32; 4]);
-        let dispatch = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("blast dispatch"),
-            size: 16,
-            usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        // The islands are built before the first solve (a pending rebuild).
+        let mut topo = vec![0u32; topo_total(n.max(1)) + 5];
+        topo[topo_total(n.max(1)) + 4] = 1;
         let buffers = BlastBuffers {
             params: gpu.uniform("blast params", &Params::default()),
             islands: gpu.storage("blast islands", &vec![[0u32; 4]; n.max(1)]),
@@ -269,9 +244,14 @@ impl GpuBlastSolver {
             ),
             report: gpu.storage("blast report", &vec![[0u32; 4]; n.max(1)]),
             lists: gpu.storage("blast lists", &vec![0u32; (n + m).max(1)]),
-            topo: gpu.storage("blast topology", &vec![0u32; topo_words(n.max(1))]),
-            args,
-            dispatch,
+            topo: gpu.storage("blast topology", &topo),
+            args: gpu.storage("blast args", &[0u32; ARGS_BYTES as usize / 4]),
+            dispatch: gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("blast dispatch"),
+                size: ARGS_BYTES,
+                usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
             geometry: gpu.storage("blast geometry", &geometry),
             materials: gpu.storage("blast materials", &material_rows),
             out: gpu.storage("blast out", &vec![[0.0f32; 4]; 4 * m.max(1)]),
@@ -282,12 +262,13 @@ impl GpuBlastSolver {
             "blast_bond_stress",
             &MATERIAL_BINDINGS,
         );
-        let topology: Vec<(Kernel, Over)> = TOPOLOGY
+        let gate = gpu.compute(&shaders::BLAST_TOPOLOGY, "bt_gate", &TOPOLOGY_BINDINGS);
+        let topology = TOPOLOGY
             .iter()
-            .map(|&(e, over)| {
+            .map(|&(e, at)| {
                 (
                     gpu.compute(&shaders::BLAST_TOPOLOGY, e, &TOPOLOGY_BINDINGS),
-                    over,
+                    at,
                 )
             })
             .collect();
@@ -301,10 +282,18 @@ impl GpuBlastSolver {
         );
         let stress_bind = gpu.bind(
             &stress.group,
-            &[&b.params, &b.bonds, &b.x, &b.geometry, &b.materials, &b.out],
+            &[
+                &b.params,
+                &b.bonds,
+                &b.x,
+                &b.geometry,
+                &b.materials,
+                &b.out,
+                &b.topo,
+            ],
         );
         let topology_bind = gpu.bind(
-            &topology[0].0.group,
+            &gate.group,
             &[
                 &b.params, &b.nodes, &b.bonds, &b.topo, &b.islands, &b.lists, &b.report, &b.args,
             ],
@@ -315,18 +304,19 @@ impl GpuBlastSolver {
             buffers,
             solve,
             stress,
+            gate,
             topology,
             solve_bind,
             stress_bind,
             topology_bind,
             has_warm_start: false,
-            topology_dirty: true,
         };
-        s.write_params(false, false, 0.0, false);
+        s.write_params(&s.params(false, false, 0.0, false));
         s
     }
 
-    /// The frame's parameters (`blast_common.slang` `BlastParams`).
+    /// The parameters of a solve (`blast_common.slang` `BlastParams`); `warm` as the settings
+    /// allow it, once a solve has run.
     pub fn params(&self, warm: bool, skip_settled: bool, dt: f64, apply_damage: bool) -> Params {
         let g = &self.graph;
         let s = &g.settings;
@@ -334,7 +324,7 @@ impl GpuBlastSolver {
             // The dispatch is sized on the GPU (`args`); this only bounds it.
             island_count: g.node_count() as u32,
             max_iterations: s.max_iterations,
-            warm: warm as u32,
+            warm: (warm && s.warm_start && self.has_warm_start) as u32,
             skip_settled: skip_settled as u32,
             tolerance: s.tolerance as f32,
             recip_length: (1.0 / g.length_scale) as f32,
@@ -347,35 +337,40 @@ impl GpuBlastSolver {
             dt: dt as f32,
             damage_rate: s.damage_rate as f32,
             apply_damage: apply_damage as u32,
-            pad: 0,
+            ..Default::default()
         }
     }
 
-    fn write_params(&self, warm: bool, skip_settled: bool, dt: f64, apply_damage: bool) {
-        self.gpu.queue.write_buffer(
-            &self.buffers.params,
-            0,
-            bytemuck::bytes_of(&self.params(warm, skip_settled, dt, apply_damage)),
-        );
+    pub fn write_params(&self, p: &Params) {
+        self.gpu
+            .queue
+            .write_buffer(&self.buffers.params, 0, bytemuck::bytes_of(p));
     }
 
-    /// Record the islands' rebuild from the bonds' health.
+    /// Record the islands' rebuild from the bonds' health. It runs only when a bond broke since
+    /// the last one (gated on the GPU: nothing is read back).
     pub fn record_topology(&self, encoder: &mut wgpu::CommandEncoder) {
-        let (n, m) = (self.graph.node_count(), self.graph.bond_count());
-        for (k, over) in &self.topology {
-            if let Over::Islands = over {
-                encoder.copy_buffer_to_buffer(&self.buffers.args, 0, &self.buffers.dispatch, 0, 16);
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.gate.pipeline);
+            pass.set_bind_group(0, &self.topology_bind, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        for (i, (k, at)) in self.topology.iter().enumerate() {
+            // The gate sized the rebuild; bt_scan_top then sizes the sort (and the solve).
+            if i == 0 || *at == A_SORT {
+                encoder.copy_buffer_to_buffer(
+                    &self.buffers.args,
+                    0,
+                    &self.buffers.dispatch,
+                    0,
+                    ARGS_BYTES,
+                );
             }
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_pipeline(&k.pipeline);
             pass.set_bind_group(0, &self.topology_bind, &[]);
-            match over {
-                Over::Nodes => pass.dispatch_workgroups(groups(n, k.workgroup), 1, 1),
-                Over::Bonds => pass.dispatch_workgroups(groups(m, k.workgroup), 1, 1),
-                Over::ScanBlocks => pass.dispatch_workgroups(groups(n, SCAN_BLOCK as u32), 1, 1),
-                Over::One => pass.dispatch_workgroups(1, 1, 1),
-                Over::Islands => pass.dispatch_workgroups_indirect(&self.buffers.dispatch, 0),
-            }
+            pass.dispatch_workgroups_indirect(&self.buffers.dispatch, 4 * at);
         }
     }
 
@@ -384,7 +379,7 @@ impl GpuBlastSolver {
         let mut pass = encoder.begin_compute_pass(&Default::default());
         pass.set_pipeline(&self.solve.pipeline);
         pass.set_bind_group(0, &self.solve_bind, &[]);
-        pass.dispatch_workgroups_indirect(&self.buffers.dispatch, 0);
+        pass.dispatch_workgroups_indirect(&self.buffers.dispatch, 4 * A_SOLVE);
     }
 
     /// Record every bond's stresses and damage (and, with the params' `apply_damage`, the
@@ -393,6 +388,11 @@ impl GpuBlastSolver {
         let mut pass = encoder.begin_compute_pass(&Default::default());
         self.stress
             .dispatch(&mut pass, &self.stress_bind, self.graph.bond_count().max(1));
+    }
+
+    /// A solve has been recorded (the next one warm-starts from it).
+    pub fn mark_solved(&mut self) {
+        self.has_warm_start = true;
     }
 
     /// Solve the bond impulses for node accelerations `accel` (as `BlastSolver::solve`).
@@ -408,23 +408,20 @@ impl GpuBlastSolver {
                 .queue
                 .write_buffer(&self.buffers.accel, 0, bytemuck::cast_slice(&a));
         }
-        let warm = self.graph.settings.warm_start && self.has_warm_start;
-        self.write_params(warm, skip_settled, 0.0, false);
+        self.write_params(&self.params(true, skip_settled, 0.0, false));
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
-        if self.topology_dirty {
-            self.record_topology(&mut encoder);
-            self.topology_dirty = false;
-        }
+        self.record_topology(&mut encoder);
         self.record_solve(&mut encoder);
         self.gpu.queue.submit([encoder.finish()]);
-        self.has_warm_start = true;
+        self.mark_solved();
         self.reports()
     }
 
     /// The islands' reports of the last solve, by island.
     pub fn reports(&self) -> Vec<IslandReport> {
-        let count = self.island_count();
-        let report: Vec<[u32; 4]> = self.gpu.read_range(&self.buffers.report, 0, count);
+        let report: Vec<[u32; 4]> =
+            self.gpu
+                .read_range(&self.buffers.report, 0, self.island_count());
         report
             .iter()
             .map(|r| IslandReport {
@@ -438,8 +435,7 @@ impl GpuBlastSolver {
     }
 
     fn island_count(&self) -> usize {
-        let args: Vec<u32> = self.gpu.read_range(&self.buffers.args, 3, 1);
-        args[0] as usize
+        self.gpu.read_range::<u32>(&self.buffers.args, A_COUNT, 1)[0] as usize
     }
 
     /// The islands as the GPU built them (each node's and bond's island; and it checks that the
@@ -478,13 +474,10 @@ impl GpuBlastSolver {
     /// Every bond's impulse, stresses and damage verdict; with `apply_damage`, the damage is
     /// taken from the bonds' health (a broken bond's islands are rebuilt before the next solve).
     pub fn bond_results(&mut self, dt: f64, apply_damage: bool) -> Vec<BondResult> {
-        self.write_params(self.has_warm_start, false, dt, apply_damage);
+        self.write_params(&self.params(true, false, dt, apply_damage));
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
         self.record_stress(&mut encoder);
         self.gpu.queue.submit([encoder.finish()]);
-        if apply_damage {
-            self.topology_dirty = true;
-        }
         let m = self.graph.bond_count();
         let out: Vec<[f32; 4]> = self.gpu.read_range(&self.buffers.out, 0, 4 * m);
         (0..m)
@@ -562,6 +555,129 @@ impl GpuBlastSolver {
                 .queue
                 .write_buffer(&self.buffers.x, (bond * 32) as u64, &[0u8; 32]);
         }
-        self.topology_dirty = true;
+        let dirty = 4 * (topo_total(self.graph.node_count().max(1)) + 4) as u64;
+        self.gpu
+            .queue
+            .write_buffer(&self.buffers.topo, dirty, bytemuck::bytes_of(&1u32));
+    }
+}
+
+/// What [`BlastFrame`] reads and writes of the GPU fracture (`fracture.slang`), and where its
+/// `work` and `atom` keep the bonds' alive flags, dirty marks and counters.
+pub struct FractureBuffers<'a> {
+    pub work: &'a wgpu::Buffer,
+    pub atom: &'a wgpu::Buffer,
+    pub frames: &'a wgpu::Buffer,
+    pub bodies: &'a wgpu::Buffer,
+    pub loads: &'a wgpu::Buffer,
+    pub w_alive: u32,
+    pub a_dirty: u32,
+    pub a_counters: u32,
+}
+
+/// Blast's solver in the GPU fracture's frame (`Profile::BlastGpu`): each frame, after the
+/// fracture's loads, Blast's inputs, its islands (when a bond broke), the solve, the stresses
+/// and damage, and the bonds that broke marked in the fracture for its split. The fracture's
+/// chunks and bonds are the graph's nodes and bonds, index for index.
+pub struct BlastFrame {
+    pub solver: GpuBlastSolver,
+    node_frame: wgpu::Buffer,
+    loads: Kernel,
+    breaks: Kernel,
+    bind: Option<wgpu::BindGroup>,
+    gravity: Vec3,
+    w_alive: u32,
+    a_dirty: u32,
+    a_counters: u32,
+}
+
+impl BlastFrame {
+    pub fn new(
+        gpu: &Gpu,
+        graph: BlastGraph,
+        materials: Vec<BlastMaterial>,
+        gravity: Vec3,
+    ) -> BlastFrame {
+        let node_frame: Vec<[f32; 4]> = graph
+            .nodes
+            .iter()
+            .map(|n| {
+                [
+                    n.position.x as f32,
+                    n.position.y as f32,
+                    n.position.z as f32,
+                    n.mass as f32,
+                ]
+            })
+            .collect();
+        let node_frame = gpu.storage(
+            "blast node frame",
+            &if node_frame.is_empty() {
+                vec![[0.0f32; 4]]
+            } else {
+                node_frame
+            },
+        );
+        let loads = gpu.compute(&shaders::BLAST_FRACTURE, "blast_loads", &FRACTURE_BINDINGS);
+        let breaks = gpu.compute(&shaders::BLAST_FRACTURE, "blast_breaks", &FRACTURE_BINDINGS);
+        let solver = GpuBlastSolver::new(gpu, graph, materials);
+        BlastFrame {
+            solver,
+            node_frame,
+            loads,
+            breaks,
+            bind: None,
+            gravity,
+            w_alive: 0,
+            a_dirty: 0,
+            a_counters: 0,
+        }
+    }
+
+    /// Bind the fracture's buffers (again whenever they change).
+    pub fn bind(&mut self, gpu: &Gpu, f: &FractureBuffers) {
+        let b = &self.solver.buffers;
+        self.bind = Some(gpu.bind(
+            &self.loads.group,
+            &[
+                &b.params,
+                f.work,
+                f.atom,
+                f.frames,
+                f.bodies,
+                f.loads,
+                &self.node_frame,
+                &b.accel,
+                &b.bonds,
+            ],
+        ));
+        (self.w_alive, self.a_dirty, self.a_counters) = (f.w_alive, f.a_dirty, f.a_counters);
+    }
+
+    /// Record the frame's Blast work after `fr_loads` (`dt`: the frame's duration, for the
+    /// gradual damage), before the fracture's gate and split.
+    pub fn record(&mut self, encoder: &mut wgpu::CommandEncoder, dt: f64) {
+        let bind = self.bind.as_ref().expect("BlastFrame::bind before record");
+        let mut p = self.solver.params(true, true, dt, true);
+        let g = self.gravity;
+        p.gravity = [g.x as f32, g.y as f32, g.z as f32, 0.0];
+        (p.w_alive, p.a_dirty, p.a_counters) = (self.w_alive, self.a_dirty, self.a_counters);
+        self.solver.write_params(&p);
+        let (n, m) = (
+            self.solver.graph.node_count(),
+            self.solver.graph.bond_count(),
+        );
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            self.loads.dispatch(&mut pass, bind, n.max(1));
+        }
+        self.solver.record_topology(encoder);
+        self.solver.record_solve(encoder);
+        self.solver.record_stress(encoder);
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            self.breaks.dispatch(&mut pass, bind, m.max(1));
+        }
+        self.solver.mark_solved();
     }
 }

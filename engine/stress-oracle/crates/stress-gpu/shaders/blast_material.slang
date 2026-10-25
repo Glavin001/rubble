@@ -6,7 +6,8 @@
 //   blast_bond_stress   the bond's physical impulse (x s, times length mass or length^2
 //                       mass), its stresses over the remaining area, and its damage verdict;
 //                       with apply_damage, the damage is taken from the bond's health, and a
-//                       bond at 0 is broken (its impulse cleared).
+//                       bond at 0 is broken (its impulse cleared, the islands marked for
+//                       rebuilding).
 
 import blast_common;
 
@@ -22,6 +23,8 @@ import blast_common;
 // Per bond slot: impulse angular, linear; (normal, shear, bend, compression);
 // (tension, damage, multiplier, command).
 [[vk::binding(5, 0)]] RWStructuredBuffer<float4> out;
+// blast_topology.slang's: a break marks the islands for rebuilding (`topo_dirty`).
+[[vk::binding(6, 0)]] RWStructuredBuffer<Atomic<uint>> topo;
 
 // |v - (v.n) n| with fused components (extStressPerpendicularMagnitude).
 float perpendicular(float3 v, float3 n, float along)
@@ -154,6 +157,7 @@ void blast_bond_stress(uint3 id : SV_DispatchThreadID)
         {
             x[j * 2] = float4(0.0);
             x[j * 2 + 1] = float4(0.0);
+            topo[topo_dirty(params.node_count)].store(1);
         }
     }
 }

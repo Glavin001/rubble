@@ -6,6 +6,9 @@
 // health alone: a union hooks each root under the smaller, counts are integer atomics, and the
 // lists are sorted, so the order the threads ran in shows nowhere.
 //
+//   bt_gate                 one thread: unless a bond broke since the islands were built
+//                           (`topo_dirty`, which blast_material.slang and the host set), every
+//                           size below is zero, so a frame without a break rebuilds nothing;
 //   bt_reset                one thread per node: its own root, its counts cleared;
 //   bt_union                one thread per live bond between two dynamic nodes: lock-free union;
 //   bt_flatten              one thread per node: its root (`label`);
@@ -32,8 +35,16 @@ import blast_common;
 [[vk::binding(4, 0)]] RWStructuredBuffer<uint4> islands;
 [[vk::binding(5, 0)]] RWStructuredBuffer<uint> lists;
 [[vk::binding(6, 0)]] RWStructuredBuffer<uint4> report;
-// The solve's and the sort's indirect sizes: (islands, 1, 1), then (island count, 0, 0).
+// Indirect sizes, 3 words each (A_*), and the island count (word 3).
 [[vk::binding(7, 0)]] RWStructuredBuffer<uint> args;
+
+static const uint A_SOLVE = 0;   // (islands, 1, 1): blast_cgls.slang
+static const uint A_COUNT = 3;
+static const uint A_NODES = 4;   // the rebuild's kernels, zero on a frame without a break
+static const uint A_BONDS = 7;
+static const uint A_SCAN = 10;
+static const uint A_ONE = 13;
+static const uint A_SORT = 16;
 
 static const uint SCAN_BLOCK = 1024;
 
@@ -47,7 +58,7 @@ uint t_bond_cursor() { return 5 * params.node_count; }
 uint t_scan() { return 6 * params.node_count; }        // 3 per node: island, nodes, bonds
 uint t_island_of() { return 9 * params.node_count; }
 uint t_blocks() { return 10 * params.node_count; }     // 3 per scan block
-uint t_total() { return t_blocks() + 3 * ((params.node_count + SCAN_BLOCK - 1) / SCAN_BLOCK); } // islands, nodes, bonds, error
+uint t_total() { return topo_total(params.node_count); } // islands, nodes, bonds, error, dirty
 
 bool is_dynamic(uint i)
 {
@@ -73,6 +84,26 @@ uint find(uint i)
         p = topo[t_parent() + i].load();
     }
     return i;
+}
+
+void set_args(uint at, uint x)
+{
+    args[at] = x;
+    args[at + 1] = 1;
+    args[at + 2] = 1;
+}
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void bt_gate(uint3 id: SV_DispatchThreadID)
+{
+    bool run = topo[topo_dirty(params.node_count)].exchange(0) != 0;
+    set_args(A_NODES, run ? (params.node_count + 63) / 64 : 0);
+    set_args(A_BONDS, run ? (params.bond_count + 63) / 64 : 0);
+    set_args(A_SCAN, run ? (params.node_count + SCAN_BLOCK - 1) / SCAN_BLOCK : 0);
+    set_args(A_ONE, run ? 1 : 0);
+    // bt_scan_top sizes the sort when the rebuild runs.
+    set_args(A_SORT, 0);
 }
 
 [shader("compute")]
@@ -230,10 +261,9 @@ void bt_scan_top(uint3 thread: SV_GroupThreadID)
         topo[t_total()].store(total.x);
         topo[t_total() + 1].store(total.y);
         topo[t_total() + 2].store(total.z);
-        args[0] = total.x;
-        args[1] = 1;
-        args[2] = 1;
-        args[3] = total.x;
+        set_args(A_SOLVE, total.x);
+        args[A_COUNT] = total.x;
+        set_args(A_SORT, total.x);
     }
 }
 

@@ -32,6 +32,16 @@ float excess_0(float value_0, float elastic_0, float fatal_0)
     return _S2 / _S3;
 }
 
+uint topo_total_0(uint node_count_0)
+{
+    return 10U * node_count_0 + 3U * ((node_count_0 + 1023U) / 1024U);
+}
+
+uint topo_dirty_0(uint node_count_1)
+{
+    return topo_total_0(node_count_1) + 4U;
+}
+
 struct BlastParams_0
 {
     uint island_count_0;
@@ -40,7 +50,7 @@ struct BlastParams_0
     uint skip_settled_0;
     float tolerance_0;
     float recip_length_0;
-    uint node_count_0;
+    uint node_count_2;
     uint bond_count_0;
     float linear_scale_0;
     float angular_scale_0;
@@ -50,6 +60,11 @@ struct BlastParams_0
     float damage_rate_0;
     uint apply_damage_0;
     uint pad_0;
+    float4 gravity_0;
+    uint w_alive_0;
+    uint a_dirty_0;
+    uint a_counters_0;
+    uint pad1_0;
 };
 
 struct BlastBond_natural_0
@@ -70,9 +85,10 @@ struct KernelContext_0
     packed_float4 device* out_0;
     packed_float4 device* geometry_0;
     packed_float4 device* materials_0;
+    atomic<uint> device* topo_0;
 };
 
-[[kernel]] void blast_bond_stress(uint3 id_0 [[thread_position_in_grid]], BlastParams_0 constant* params_1 [[buffer(0)]], BlastBond_natural_0 device* bonds_1 [[buffer(1)]], packed_float4 device* x_1 [[buffer(2)]], packed_float4 device* out_1 [[buffer(5)]], packed_float4 device* geometry_1 [[buffer(3)]], packed_float4 device* materials_1 [[buffer(4)]])
+[[kernel]] void blast_bond_stress(uint3 id_0 [[thread_position_in_grid]], BlastParams_0 constant* params_1 [[buffer(0)]], BlastBond_natural_0 device* bonds_1 [[buffer(1)]], packed_float4 device* x_1 [[buffer(2)]], packed_float4 device* out_1 [[buffer(5)]], packed_float4 device* geometry_1 [[buffer(3)]], packed_float4 device* materials_1 [[buffer(4)]], atomic<uint> device* topo_1 [[buffer(6)]])
 {
     thread KernelContext_0 kernelContext_0;
     (&kernelContext_0)->params_0 = params_1;
@@ -81,6 +97,7 @@ struct KernelContext_0
     (&kernelContext_0)->out_0 = out_1;
     (&kernelContext_0)->geometry_0 = geometry_1;
     (&kernelContext_0)->materials_0 = materials_1;
+    (&kernelContext_0)->topo_0 = topo_1;
     uint j_0 = id_0.x;
     if(j_0 >= (params_1->bond_count_0))
     {
@@ -369,6 +386,7 @@ struct KernelContext_0
             packed_float4 _S23 = packed_float4(float4(0.0f) ) ;
             *((&kernelContext_0)->x_0+_S5) = _S23;
             *((&kernelContext_0)->x_0+_S6) = _S23;
+            atomic_store_explicit((&kernelContext_0)->topo_0+topo_dirty_0((&kernelContext_0)->params_0->node_count_2), 1U, memory_order_relaxed);
         }
     }
     return;
