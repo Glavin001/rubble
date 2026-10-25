@@ -536,8 +536,8 @@ change):
   - So the rest tolerance (5 cm/s) is not reached soon. The demo bakes at a set
     time (`World::terrain_close` semantics) once nothing is in flight, and
     says so in its UI.
-- **The bake roughened the surface** (the splat bake below smooths the rim; the
-  crater centre is still open there).
+- **The bake roughened the surface** (the splat bake below, with its home
+  fade, smooths it).
   Neighbouring 9.4 m samples of the baked rim differed by up to about 10 m,
   while the particle surface just before the bake was smooth.
   - The bake binned every particle of a column about 300 m deep by its nearest
@@ -563,21 +563,30 @@ tent weights. Each share goes where the whole particle went before:
 
 The max-height header is kept by the same raise kernels as before.
 
-**Where a particle is splatted: its home sample plus its displacement.**
-Activation lays a sample's particles on a lattice across the sample's cell. A
-splat at each particle's own position would spread unmoved off-centre
-particles onto the neighbours, so activate-then-bake would no longer be the
-identity.
+**Where a particle is splatted: its position, less a fading share of its rest
+offset.** Activation lays a sample's particles on a lattice across the
+sample's cell. A splat at each particle's own position would spread unmoved
+off-centre particles onto the neighbours, so activate-then-bake would no
+longer be the identity.
 - `mpm_activate_emit` records where it emitted each particle, x₀ in the
   heightfield's frame (`MpmParticle` `c[1][3]`, `c[2][3]`, flag
   `MPM_PARTICLE_HOME`). G2P carries the record.
-- The bake splats at u = home + (x − x₀)/spacing.
-  - Unmoved, the displacement is exactly zero, which puts weight 1 on the home
-    sample.
-  - A column moved rigidly by any distance bakes as that column moved: its
-    volume is split by the tent around its new centre.
+- The bake splats at u = x/spacing − w·o, where:
+  - o is x₀'s offset from its home sample (in spacings);
+  - w = max(0, 1 − |x − x₀| / (fade · spacing));
+  - fade is `TerrainConfig::bake_home_fade`, params `limits.y`, default one
+    sample spacing.
+- Unmoved (w = 1), the reference is exactly the home sample, so the identity
+  holds.
+- From one spacing of displacement on (w = 0), the particle splats where it
+  is. Material that has flowed no longer keeps its rest lattice: near a
+  crater's centre one column is stretched over several samples. There the
+  particle's own position says best where its volume is.
 - Particles loaded by the host and parcels landing back in the region carry
   no home, so they splat at their position.
+- First version, before the fade: the correction was kept however far a
+  particle moved, u = home + (x − x₀)/spacing. A rigid shift was then exact,
+  but stretched columns clumped into ridges; see "The home fade" below.
 - The alternative was to splat each particle's own footprint (its lattice
   cell) by its overlap with the sample cells. It also keeps the identity, but
   its kernel is a box of the lattice spacing (half a sample by default), not
@@ -604,13 +613,21 @@ reach of nearest-sample binning.
 
 **Tests** (`tests/terrain_mpm.rs`):
 - activate-then-bake with no motion is still the identity to 1e-5 m;
-- `material_moved_rigidly_bakes_as_its_columns_moved`: after a rigid shift of
-  (0.3, 0.55) samples (`WgpuSim::terrain_overwrite_particles`, a diagnostic),
-  the heights are the bilinear interpolation of the shifted columns. The
-  tolerance is one quantum per contributing particle; the worst error is
-  0.65 mm. The centroid moves by the shift to 1e-3 samples, and the volume is
-  exact. Binning by the nearest sample would move the centroid by multiples
-  of 1/5 of a sample.
+- `material_moved_rigidly_bakes_as_the_splat_defines`: rigid shifts of
+  (0.3, 0.55) samples (inside the fade) and (1.3, −0.55) samples (beyond it),
+  made with `WgpuSim::terrain_overwrite_particles`, a diagnostic.
+  - The heights equal the splat's definition within one quantum per
+    contributing particle. The worst error is 0.77 mm.
+  - The volume is exact.
+  - The baked centroid is the splat's to 1e-4 samples. It follows the shift
+    to 2e-3 samples: a column's `quanta mod n` extra quanta go to its first
+    particles, which breaks the offsets' symmetry slightly.
+- `an_opened_layer_bakes_flat_without_axis_ridges`: a flat layer is opened by
+  the area-keeping radial map r′ = √(r² + r₀²), which leaves it exactly as
+  thick around the hole.
+  - With the fade, it bakes back with an error of 0.7% rms (2.2% max), and
+    the axis lines stand 1.6% of the thickness above their neighbours.
+  - With the correction kept, those are 4.7%, 18% and 13.5%.
 
 The volume and ledger tests pass unchanged: flow and bake, ejecta, and the
 crater's ledger.
@@ -662,7 +679,7 @@ Neighbour steps, max / rms (m), by distance from the impact point (R = 151 m):
 | splat at the particle's position | 11.3 / 5.50 | 7.6 / 3.56 | 17.9 / 5.75 | 39.1 / 10.71 |
 
 - The rim and the window edge are 2.5–2.7× smoother (rms).
-- **Open: the crater centre is not.** Within 0.5 R, home plus displacement
+- **The crater centre was not** (fixed by the home fade below). Within 0.5 R, home plus displacement
   leaves ridges along the two axes through the impact point. On the z = 0 row
   they stand 12–15 m above the rows beside it, and nearest-sample binning
   leaves the same ridges.
@@ -676,14 +693,59 @@ Neighbour steps, max / rms (m), by distance from the impact point (R = 151 m):
     identity (it is the roughest at the window edge).
   - The elastic F cannot measure this spread, because plastic flow is not in
     it.
-- **The truck** spawns on the z = 0 row at x = −12 m. It sits high-centred on
-  that ridge and does not move, so whether it can climb the now-smoother rim
-  was not reached.
-- One alternative was tried in JavaScript only and is not adopted: fade the
-  home correction with the displacement, applying it fully at rest and not at
-  all past one sample. It gives 5.73 / 3.66 / 5.77 / 3.03 m rms and keeps the
-  identity, but a rigid shift is no longer exact, and it adds a parameter. The
-  choice is the user's.
+- **The truck** spawned on the z = 0 row at x = −12 m. It sat high-centred on
+  that ridge and did not move.
+- One alternative was tried in JavaScript first: fade the home correction
+  with the displacement. It was adopted (below).
+
+**The home fade (the user's decision, 2026-10-25).** The correction fades
+linearly from full at rest to none at `bake_home_fade` sample spacings of
+displacement. The default is one spacing, the smallest move that can take a
+particle across to another sample.
+- Kept as before: activate-then-bake is exactly the identity, volume is exact,
+  and the pushed sand of a buried body splats at its new place.
+- Given up: a rigid shift is now exact only at zero.
+
+Crater validation at `CRATER_CPR=8` (after the bounded source was merged; same
+simulation, only the bake differs). Rough is the neighbour step, max / rms
+(mm); "residual" is the height change minus its ring mean:
+
+| | correction kept (fade 10⁹) | fade 1 |
+|---|---|---|
+| axis ridge within 0.5 R, mean / max | 17.5 / 21.7 mm | −2.7 / 3.6 mm |
+| rough < 0.5 R | 23.7 / 14.6 | 18.1 / 9.0 |
+| rough 0.5–1 R | 15.3 / 7.2 | 12.3 / 6.1 |
+| rough 1–3 R | 6.1 / 0.65 | 4.2 / 0.58 |
+| residual rms, within 3 R | 1.84 | 1.08 |
+| depth | 28.6 mm | 36.9 mm |
+
+The validation now asserts that the axes stand no higher than the centre's
+residual rms.
+
+Browser demo:
+- On the earlier demo state (t = 12.9 s, baked in JavaScript), the fade
+  changes the rms neighbour step (m) by zone as follows: centre 8.27 → 5.73,
+  0.5–1 R 4.27 → 3.66, rim 4.74 → 5.77, window edge 3.11 → 3.03. The rim
+  gives back a little; the centre loses its ridges.
+- The GPU bake of the current demo (default, baked at t = 13.45 s with the
+  bounded source) measures, max / rms (m): centre 15.4 / 6.41,
+  0.5–1 R 9.8 / 3.44, rim 15.8 / 4.65, window edge 10.5 / 2.53. The axis rows
+  stand 4.2 m below their neighbours on average, not above.
+- **The truck** now drives off the centre, from x = −12 m to x = −27 m, at up
+  to 6.3 m/s. There it stops at the foot of the crater's inner wall, which
+  rises 11 m and then 10 m over the next two 9.4 m samples (about 47°).
+  - That wall is steeper than sand's angle of repose because the region is
+    baked unsettled (top speed 8.6 m/s at the bake; see "The region does not
+    settle"). It is the crater's shape, not the bake's roughness.
+  - The truck does not reach the rim.
+
+**Fingerprints after the fade** (both include the bounded source merged
+before it):
+- `engine-webgpu` `fingerprint_impact_coupled_and_bake`: particles
+  `c574ae35b3634fb3`, bodies `368fd4be1705937b`, heights `87fc671ed38d6dde`.
+  The loaded cube is unchanged (`9aee277fcc35ea31`).
+- `engine-world` `fingerprint_world_impact_to_bake`: reports
+  `59df3a636ac25733`, heights `df41faaa6898177b`, box `136fde101445dae3`.
 
 ## T5 materials (2026-10-24)
 
