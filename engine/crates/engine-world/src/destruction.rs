@@ -501,6 +501,8 @@ pub struct DestructibleStats {
     pub bonds: u32,
     pub bonds_intact: u32,
     pub actors: u32,
+    /// Chunks crushed (`DestructibleDef::crush`).
+    pub crushed: u32,
 }
 
 pub(crate) struct DestructibleSlot {
@@ -958,7 +960,12 @@ impl World {
 
     pub fn destructible_stats(&self, id: DestructibleId) -> anyhow::Result<DestructibleStats> {
         let d = &self.destructibles[self.live_destructible(id)?];
-        let mut labels = d.actor.clone();
+        // A crushed chunk is no actor.
+        let crushed = |c: usize| d.crushed.get(c).copied().unwrap_or(false);
+        let mut labels: Vec<u32> = (0..d.actor.len())
+            .filter(|&c| !crushed(c))
+            .map(|c| d.actor[c])
+            .collect();
         labels.sort_unstable();
         labels.dedup();
         Ok(DestructibleStats {
@@ -966,6 +973,7 @@ impl World {
             bonds: d.bond_joints.len() as u32,
             bonds_intact: d.bond_intact.iter().filter(|&&b| b).count() as u32,
             actors: labels.len() as u32,
+            crushed: d.crushed.iter().filter(|&&c| c).count() as u32,
         })
     }
 

@@ -1574,7 +1574,12 @@ mod imp {
                     let id = BodyId::new(b, self.bodies[b as usize].generation);
                     self.destroy_body(id)?;
                 } else {
-                    // A reserved slot no piece took: free it.
+                    // A reserved slot no piece took, a crushed chunk's parked body or an
+                    // unused fragment: its shapes retired (a crushed chunk's, a fragment's
+                    // box), then the slot freed.
+                    for s in std::mem::take(&mut self.bodies[b as usize].shapes) {
+                        self.release_shape(s);
+                    }
                     let slot = &mut self.bodies[b as usize];
                     slot.owner = Owner::User;
                     slot.generation = slot.generation.wrapping_add(1).max(1);

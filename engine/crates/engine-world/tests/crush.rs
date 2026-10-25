@@ -536,9 +536,18 @@ fn remove_takes_the_chunk_out() {
     }
     assert!(!removed.is_empty());
     // The chunk is no part of any live piece.
-    for c in removed {
+    for &c in &removed {
         let actor = w.destructible_actor_of(id, c).unwrap();
         assert!(actor.bodies.iter().all(|b| !w.body_is_valid(*b)));
+    }
+    assert_eq!(
+        w.destructible_stats(id).unwrap().crushed,
+        removed.len() as u32
+    );
+    // Removing the destructible retires its parked chunks' shapes too: the world steps on.
+    w.destroy_destructible(id).unwrap();
+    for _ in 0..3 {
+        w.step_sync().unwrap();
     }
 }
 
