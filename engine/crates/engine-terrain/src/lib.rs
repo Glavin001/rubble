@@ -18,6 +18,7 @@ pub mod plan;
 pub mod region;
 pub mod source;
 pub mod step;
+pub mod surface;
 pub mod zmodel;
 
 pub use config::{InitialStress, RegionBoundary, TerrainConfig, TerrainError};
@@ -28,4 +29,5 @@ pub use source::{
     CraterPrediction, CraterScaling, CraterTarget, ExplosionSource, Explosive, ImpactSource, Regime,
 };
 pub use step::substeps_for;
+pub use surface::SurfacePlan;
 pub use zmodel::{EjectaScaling, ZModel};

@@ -1,0 +1,236 @@
+// Render-only: the live ground surface over an open terrain region
+// (engine/docs/deformable-terrain.md, "Rendering and showcase").
+//
+// While a region is open its heightfield samples are lowered to the bed and
+// the material is particles. A renderer that draws those particles shows a
+// cloud; a game shows ground that deforms, with only the material that left it
+// flying as debris. These kernels rebuild, every frame, one height per window
+// sample from the particles, with the bake's own splat, so the surface a host
+// draws over the window is the heightfield the region would bake to now:
+//
+//   terrain_surface_clear    empty the occupancy (window samples × layers)
+//   terrain_surface_shift    on the absorbing ground: the walls' give (a copy of
+//                            mpm_bake_shift into this buffer)
+//   terrain_surface_bin      per particle: its quanta split between samples as
+//                            mpm_bake_bin splits them (the tent at home for the
+//                            share at rest, P2G's B-spline for the share the MPM
+//                            moved, in the unactivated ground's frame), and
+//                            between the two layers around its height (a tent
+//                            in y), in fixed point
+//   terrain_surface_resolve  per sample: the material attached to the bed (the
+//                            layers from the bed up to the first one holding
+//                            less than TS_FILLED of a full cell, that one
+//                            included), as a height above the bed
+//
+// Material above the first gap (the ejecta curtain, a lifted flap, sand in
+// flight inside the box) is not part of the surface; a renderer draws it, and
+// the parcels, as debris. Once nothing is in flight and the region bakes, the
+// surface and the baked heightfield are the same splat of the same quanta, so
+// the switch at the bake does not show (to the fixed point's rounding, and the
+// material the bake pushes off a buried body, which this pass does not move).
+//
+// Nothing here is read by the simulation, and nothing the simulation reads is
+// written: binding 53 is the only output. engine_terrain::surface is the plan.
+#include "terrain_mpm.slang"
+
+// u32 words. Host-written header: [0] the shift section's first word, [1] the
+// occupancy section's first word, [2] layers per column, [3] flags (bit 0: the
+// absorbing ground's edge shift is used). GPU-written by
+// terrain_surface_resolve: [4..8) window i0, j0, ni, nj, [8] the bed's local y
+// (f32 bits), [9] the layer height (f32), [10] frames resolved, [11] valid (1
+// while a region is open; the host clears it at the bake). Heights (f32 bits,
+// the heightfield's local y) from word 16, one per window sample.
+BIND(53) RWStructuredBuffer<AUint> gTerrainSurface;
+
+static const uint TS_SHIFT_BASE = 0u;
+static const uint TS_OCC_BASE = 1u;
+static const uint TS_LAYERS = 2u;
+static const uint TS_FLAGS = 3u;
+static const uint TS_WINDOW = 4u;
+static const uint TS_BED = 8u;
+static const uint TS_DY = 9u;
+static const uint TS_FRAMES = 10u;
+static const uint TS_VALID = 11u;
+static const uint TS_HEIGHTS = 16u;
+static const uint TS_FLAG_SHIFT = 1u;
+// Occupancy units per volume quantum (atomic adds are integers).
+static const float TS_FIXED = 16.0;
+// A layer holding less than this share of a full cell ends the attached column.
+static const float TS_FILLED = 0.3;
+
+uint tsWord(uint k) { return ALOAD(gTerrainSurface[k]); }
+
+// Layers are the region's cells in y from the bed up.
+float tsLayerHeight(MpmParams p) { return p.origin.w; }
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void terrain_surface_clear(uint3 tid : SV_DispatchThreadID)
+{
+    uint k = mpmIndex(tid);
+    MpmParams p = mpmParams();
+    if (k < p.window.z * p.window.w * tsWord(TS_LAYERS)) ASTORE(gTerrainSurface[tsWord(TS_OCC_BASE) + k], 0u);
+}
+
+// mpm_bake_shift's measurement (per window edge sample: its column's mean
+// outward displacement across that side), into this buffer's shift section:
+// the face records it would overwrite are in use while the region is open.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void terrain_surface_shift(uint3 tid : SV_DispatchThreadID)
+{
+    uint k = mpmIndex(tid);
+    MpmParams p = mpmParams();
+    uint ni = p.window.z, nj = p.window.w;
+    if (k >= 2u * (ni + nj)) return;
+    Collider col = gColliders[p.dims.w];
+    Frame f = colliderFrame(col, gBodies[col.body]);
+    uint2 ij;
+    uint axis;
+    if (k < 2u * nj)
+    {
+        ij = uint2(k < nj ? 0u : ni - 1u, k % nj);
+        axis = 0u;
+    }
+    else
+    {
+        uint m = k - 2u * nj;
+        ij = uint2(m % ni, m < ni ? 0u : nj - 1u);
+        axis = 2u;
+    }
+    uint t = ij.y * ni + ij.x;
+    uint first = ALOAD(gMpmColumns[4u * t + 2u]), n = ALOAD(gMpmColumns[4u * t + 1u]);
+    float sum = 0.0, quanta = 0.0;
+    for (uint s = first; s < first + n; s++)
+    {
+        MpmParticle q = gMpmParticles[s];
+        if (mpmParticleDead(q) || (asuint(q.f2.w) & MPM_PARTICLE_HOME) == 0u) continue;
+        float3 xl = frameToLocal(f, q.xm.xyz);
+        float w = float(asuint(q.f1.w));
+        sum += w * (axis == 0u ? xl.x - q.c1.w : xl.z - q.c2.w);
+        quanta += w;
+    }
+    float mean = quanta > 0.0 ? sum / quanta : 0.0;
+    bool low = k < 2u * nj ? k < nj : (k - 2u * nj) < ni;
+    ASTORE(gTerrainSurface[tsWord(TS_SHIFT_BASE) + k], asuint(low ? min(mean, 0.0) : max(mean, 0.0)));
+}
+
+// mpmGroundShift over this buffer's shift section.
+float2 tsGroundShift(float3 xl, HeightFieldRef hf, MpmParams p)
+{
+    int i0 = int(p.window.x), j0 = int(p.window.y);
+    int ni = int(p.window.z), nj = int(p.window.w);
+    float2 u = (xl.xz - float2(hf.x0, hf.z0)) / float2(hf.dx, hf.dz);
+    int ti = clamp(int(round(u.x)) - i0, 0, ni - 1), tj = clamp(int(round(u.y)) - j0, 0, nj - 1);
+    uint base = tsWord(TS_SHIFT_BASE);
+    float sx = ni > 1 ? clamp((u.x - float(i0)) / float(ni - 1), 0.0, 1.0) : 0.5;
+    float sz = nj > 1 ? clamp((u.y - float(j0)) / float(nj - 1), 0.0, 1.0) : 0.5;
+    float lx = asfloat(tsWord(base + uint(tj))), hx = asfloat(tsWord(base + uint(nj + tj)));
+    float lz = asfloat(tsWord(base + uint(2 * nj + ti))), hz = asfloat(tsWord(base + uint(2 * nj + ni + ti)));
+    return float2(lerp(lx, hx, sx), lerp(lz, hz, sz));
+}
+
+// `units` of a particle onto sample s at local height yl: a window sample's
+// two layers around yl. Outside the window, material below the unactivated
+// ground there folds into the nearest window sample (as mpmBakeOnto bakes it);
+// material above it would bake onto that ground as a deposit and is not part
+// of the window's surface.
+void tsAdd(int2 s, float units, float yl, MpmParams p, HeightFieldRef hf)
+{
+    if (units <= 0.0) return;
+    if (s.x < 0 || s.y < 0 || s.x >= int(hf.nx) || s.y >= int(hf.nz)) return;
+    int2 wlo = int2(p.window.xy), whi = int2(p.window.xy + p.window.zw) - 1;
+    if (any(s < wlo) || any(s > whi))
+    {
+        if (yl >= hfHeight(hf, uint(s.x), uint(s.y))) return;
+        s = clamp(s, wlo, whi);
+    }
+    uint t = uint(s.y - wlo.y) * p.window.z + uint(s.x - wlo.x);
+    uint layers = tsWord(TS_LAYERS);
+    float fy = (yl - p.column.x) / tsLayerHeight(p) - 0.5;
+    float b = floor(fy);
+    float f = fy - b;
+    int k0 = clamp(int(b), 0, int(layers) - 1), k1 = clamp(int(b) + 1, 0, int(layers) - 1);
+    uint at = tsWord(TS_OCC_BASE) + t * layers;
+    uint lo = uint(units * (1.0 - f) + 0.5), hi = uint(units * f + 0.5);
+    if (lo > 0u) AADD2(gTerrainSurface[at + uint(k0)], lo);
+    if (hi > 0u) AADD2(gTerrainSurface[at + uint(k1)], hi);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void terrain_surface_bin(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = mpmIndex(tid);
+    if (i >= mpmParticleCount()) return;
+    MpmParams p = mpmParams();
+    Collider col = gColliders[p.dims.w];
+    Frame f = colliderFrame(col, gBodies[col.body]);
+    HeightFieldRef hf = heightFieldOf(col);
+    MpmParticle q = gMpmParticles[i];
+    if (mpmParticleDead(q)) return;
+    float3 xl = frameToLocal(f, q.xm.xyz);
+    if ((tsWord(TS_FLAGS) & TS_FLAG_SHIFT) != 0u) xl.xz -= tsGroundShift(xl, hf, p);
+    uint quanta = asuint(q.f1.w);
+    // A host-loaded particle carries no quanta: its rest volume in quanta.
+    float units = (quanta > 0u ? float(quanta) : q.f0.w / p.column.y) * TS_FIXED;
+    float2 uHome;
+    float w = mpmHomeShare(q, xl, hf, p, uHome);
+    if (w > 0.0)
+    {
+        // The share at rest: the tent at its home sample plus its displacement.
+        float2 b = floor(uHome);
+        float2 t = uHome - b;
+        int2 s0 = int2(b);
+        float h = units * w;
+        tsAdd(s0, h * (1.0 - t.x) * (1.0 - t.y), xl.y, p, hf);
+        tsAdd(s0 + int2(1, 0), h * t.x * (1.0 - t.y), xl.y, p, hf);
+        tsAdd(s0 + int2(0, 1), h * (1.0 - t.x) * t.y, xl.y, p, hf);
+        tsAdd(s0 + int2(1, 1), h * t.x * t.y, xl.y, p, hf);
+    }
+    if (w < 1.0)
+    {
+        // The share the MPM moved: P2G's B-spline at its own position.
+        float2 u = (xl.xz - float2(hf.x0, hf.z0)) / float2(hf.dx, hf.dz);
+        int bx, bz;
+        float3 wx = mpmBsplineWeights(u.x, bx), wz = mpmBsplineWeights(u.y, bz);
+        float m = units * (1.0 - w);
+        for (uint k = 0u; k < 9u; k++)
+        {
+            uint a = k % 3u, c = k / 3u;
+            tsAdd(int2(bx + int(a), bz + int(c)), m * mpmWeightAt(wx, a) * mpmWeightAt(wz, c), xl.y, p, hf);
+        }
+    }
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void terrain_surface_resolve(uint3 tid : SV_DispatchThreadID)
+{
+    uint t = mpmIndex(tid);
+    MpmParams p = mpmParams();
+    uint n = p.window.z * p.window.w;
+    if (t == 0u)
+    {
+        for (uint k = 0u; k < 4u; k++) ASTORE(gTerrainSurface[TS_WINDOW + k], p.window[k]);
+        ASTORE(gTerrainSurface[TS_BED], asuint(p.column.x));
+        ASTORE(gTerrainSurface[TS_DY], asuint(tsLayerHeight(p)));
+        AADD2(gTerrainSurface[TS_FRAMES], 1u);
+        ASTORE(gTerrainSurface[TS_VALID], 1u);
+    }
+    if (t >= n) return;
+    Collider col = gColliders[p.dims.w];
+    HeightFieldRef hf = heightFieldOf(col);
+    float area = mpmSampleArea(hf);
+    float full = area * tsLayerHeight(p) / p.column.y * TS_FIXED;
+    uint layers = tsWord(TS_LAYERS);
+    uint at = tsWord(TS_OCC_BASE) + t * layers;
+    float units = 0.0;
+    for (uint k = 0u; k < layers; k++)
+    {
+        float o = float(tsWord(at + k));
+        units += o;
+        if (o < TS_FILLED * full) break;
+    }
+    ASTORE(gTerrainSurface[TS_HEIGHTS + t], asuint(p.column.x + units / TS_FIXED * p.column.y / area));
+}

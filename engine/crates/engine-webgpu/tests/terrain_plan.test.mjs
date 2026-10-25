@@ -122,3 +122,30 @@ test('the absorbing ground sets up its node records at activation and the geosta
   assert.throws(() => new TerrainStep(JSON.stringify({ config: { boundary: 'absorbing', initial_stress: 'unstressed' } })), /geostatic/i);
   assert.throws(() => new TerrainStep(JSON.stringify({ config: { boundary: 'soft' } })), /boundary/);
 });
+
+test('the render-only surface pass rebuilds the open region\'s ground and fails past its limit by name', () => {
+  const SURFACE_KERNELS = JSON.parse(TerrainStep.surface_kernels());
+  for (const k of SURFACE_KERNELS) assert.ok(existsSync(new URL(`../generated/wgsl/${k}.wgsl`, import.meta.url)), k);
+  const names = (words) => {
+    assert.equal(words[0], 1);
+    const nw = words[1], nc = words[2];
+    let at = 3;
+    const writes = [];
+    for (let i = 0; i < nw; i++) { writes.push({ binding: words[at], words: words.slice(at + 3, at + 3 + words[at + 2]) }); at += 3 + words[at + 2]; }
+    const cmds = [];
+    for (let i = 0; i < nc; i++, at += 3) cmds.push(SURFACE_KERNELS[words[at + 1]]);
+    return { writes, cmds };
+  };
+  const p = new TerrainStep(JSON.stringify(SETTINGS));
+  assert.deepEqual(Array.from(p.surface()), [0], 'no region, no pass');
+  p.impact(0, FIELD, Float32Array.of(0, 0, 0), 2, 3000, 20000, 9.81);
+  const { writes, cmds } = names(p.surface());
+  assert.deepEqual(cmds, ['terrain_surface_clear', 'terrain_surface_shift', 'mpm_write_args', 'terrain_surface_bin', 'terrain_surface_resolve']);
+  assert.equal(writes[0].binding, T.SURFACE);
+  assert.ok(p.surface_bytes() >= 4 * writes[0].words[1]);
+  p.free();
+  const small = new TerrainStep(JSON.stringify({ ...SETTINGS, surface_cells: 1000 }));
+  small.impact(0, FIELD, Float32Array.of(0, 0, 0), 2, 3000, 20000, 9.81);
+  assert.throws(() => small.surface(), /surface max_cells/);
+  small.free();
+});

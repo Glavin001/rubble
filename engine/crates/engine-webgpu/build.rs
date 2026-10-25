@@ -205,6 +205,11 @@ const WORLD_ENTRIES: &[&str] = &[
     "terrain_watch_energy",
     "terrain_watch_pick",
     "terrain_watch_write",
+    // Render-only terrain surface (slang/kernels/terrain_surface.slang).
+    "terrain_surface_clear",
+    "terrain_surface_shift",
+    "terrain_surface_bin",
+    "terrain_surface_resolve",
 ];
 
 const CHARACTER_ENTRIES: &[&str] = &["char_move", "char_post", "query_batch", "projectile_step"];
@@ -242,6 +247,9 @@ fn source_for(root: &std::path::Path, entry: &str) -> PathBuf {
     }
     if entry.starts_with("mpm_") {
         return kernels.join("terrain_mpm.slang");
+    }
+    if entry.starts_with("terrain_surface_") {
+        return kernels.join("terrain_surface.slang");
     }
     if entry.starts_with("terrain_watch_") {
         return kernels.join("terrain_watch.slang");
