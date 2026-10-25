@@ -231,10 +231,23 @@ fn a_dropped_ball_opens_a_region_before_it_lands_and_penetrates_as_uehara_says()
     for _ in 0..60 {
         w.step().unwrap();
         w.poll().unwrap();
-        after.push(w.body_transform(b).unwrap().map_or(f32::NAN, |t| t.position[1]) - r);
+        after.push(
+            w.body_transform(b)
+                .unwrap()
+                .map_or(f32::NAN, |t| t.position[1])
+                - r,
+        );
     }
     eprintln!("ball bottom after the bake: {:?}", &after[..8]);
     eprintln!("... settles at {:.4} m", after[after.len() - 1]);
+    // The bake pushed the sand covering it aside: it rests in its pit, as deep
+    // as it went, neither through the ground nor thrown out.
+    for &y in &after {
+        assert!(
+            (y + deepest).abs() < 0.03,
+            "ball bottom at {y} m after the bake; it went {deepest} m in"
+        );
+    }
     assert_eq!(w.terrain_missed_strikes(), 0);
     let above = opened_above.expect("a region opened for the strike");
     assert!(

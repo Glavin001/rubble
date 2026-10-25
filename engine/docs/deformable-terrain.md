@@ -279,6 +279,16 @@ mass at the farthest reach of the body's bounds, a lower bound over its contacts
 so spin cannot overshoot either. A 1 kg box now rests on sand
 (`a_light_box_rests_on_sand_whatever_the_mass_ratio`).
 
+**Bodies sunk into the sand at bake time (the user's rule, 2026-10-25).** A
+heightfield cannot hold a buried body. Before the rule, the bake left sand above
+a sunk ball's centre and the ball fell through the ground.
+
+Now `mpm_bake_bin` (`mpmBakeColumn`) moves any particle lying above part of a
+coupled dynamic body to just outside the body's footprint, straight away from
+its centre. The body is left in a pit as deep as it went, and the volume is
+kept. The dropped ball rests in its pit to within 1.3 cm of its depth in the
+sand.
+
 **Activation by strikes: a GPU look-ahead.** The user chose this over hit events,
 which reach the host 1–3 frames after the rigid step has already stopped the
 body on rigid ground.
@@ -299,9 +309,6 @@ body).
 
 Not yet:
 - coupling for bodies that rotate fast within a frame (poses are the frame's start);
-- bodies buried at bake time: a heightfield cannot hold them, so the bake leaves
-  the surface where the sand's volume puts it, and the rigid contact pushes them
-  up onto it;
 - performance (about 1,900 dispatches per 60 Hz frame at physical stiffness).
 
 ## T4 status (2026-10-24)

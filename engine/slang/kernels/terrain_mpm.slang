@@ -1018,6 +1018,44 @@ void mpm_activate_lower(uint3 tid : SV_DispatchThreadID)
 // nearest): a window sample's column, or, outside the window (material that
 // flowed past it inside the region's box), the field's deposit accumulator, as
 // a landed parcel. Off the field's footprint, escaped.
+// Where a particle's volume bakes: where it stands, unless it covers a dynamic
+// body coupled to the region (it lies above part of the body). A heightfield
+// cannot hold a buried body, so that sand is pushed aside: to just outside the
+// body's footprint, straight away from its centre (`spacing`: the field's
+// sample spacing). The body is left in a pit as deep as it went, and the
+// volume is kept.
+float3 mpmBakeColumn(float3 x, MpmParams p, float spacing)
+{
+    uint slots = min(ALOAD(gMpmCouple[0]), asuint(p.couple.y));
+    for (uint k = 0u; k < slots; k++)
+    {
+        Collider col = gColliders[asuint(gMpmCoupled[4u * k].w)];
+        BodyState b = gBodies[col.body];
+        if (!bodyIsDynamic(b)) continue;
+        float3 lo, hi;
+        mpmColliderBounds(col, b, p, lo, hi);
+        if (any(x.xz < lo.xz) || any(x.xz > hi.xz) || x.y < lo.y) continue;
+        // Does the vertical line below x meet the body? Sampled from the
+        // body's bottom up to x (or its top).
+        float top = min(x.y, hi.y);
+        bool covers = false;
+        for (uint j = 0u; j <= 8u && !covers; j++)
+        {
+            float3 at = float3(x.x, lerp(lo.y, top, float(j) / 8.0), x.z);
+            float3 n;
+            covers = mpmColliderSdf(col, b, at, n) < 0.0;
+        }
+        if (!covers) continue;
+        float3 c = colliderFrame(col, b).p;
+        float2 d = x.xz - c.xz;
+        float len = length(d);
+        float2 dir = len > 1e-6 ? d / len : float2(1.0, 0.0);
+        float reach = 0.5 * length(hi.xz - lo.xz) + 0.5 * spacing;
+        return float3(c.x + dir.x * reach, x.y, c.z + dir.y * reach);
+    }
+    return x;
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void mpm_bake_bin(uint3 tid : SV_DispatchThreadID)
@@ -1030,7 +1068,7 @@ void mpm_bake_bin(uint3 tid : SV_DispatchThreadID)
     HeightFieldRef hf = heightFieldOf(col);
     MpmParticle q = gMpmParticles[i];
     if (mpmParticleDead(q)) return;
-    float3 xl = frameToLocal(f, q.xm.xyz);
+    float3 xl = frameToLocal(f, mpmBakeColumn(q.xm.xyz, p, max(hf.dx, hf.dz)));
     int si = int(round((xl.x - hf.x0) / hf.dx)), sj = int(round((xl.z - hf.z0) / hf.dz));
     uint quanta = asuint(q.f1.w);
     if (si < 0 || sj < 0 || si >= int(hf.nx) || sj >= int(hf.nz))
