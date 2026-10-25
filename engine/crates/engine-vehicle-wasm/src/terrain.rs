@@ -1,6 +1,6 @@
 //! Deformable terrain for a browser host (`engine-webgpu/terrain-host.mjs`): the
 //! shared command plan (`engine_terrain::plan`) the native `WgpuSim` replays,
-//! plus the open region's lifecycle: π-scaled impact and explosion regions with
+//! plus the open areas' lifecycle: π-scaled impact and explosion regions with
 //! their Z-model source, each frame's coupled substeps from a speed bound the
 //! GPU checks, the counters' check, and the bake once the region settles. The
 //! JS host only executes the commands and copies the counters back.
@@ -49,6 +49,9 @@ struct ConfigJson {
     /// "unstressed" or "geostatic" (`InitialStress`).
     initial_stress: Option<String>,
     max_boundary_nodes: Option<u32>,
+    max_regions: Option<u32>,
+    cell_size: Option<f32>,
+    min_resolution: Option<f32>,
 }
 
 /// Dry sand's parameters (the default sand when absent).
@@ -76,15 +79,18 @@ struct SettingsJson {
     settle_frames: Option<u32>,
 }
 
-/// The open region.
+/// An open area.
+#[derive(Clone)]
 struct Open {
+    /// Its slot in the plan (`AreaInfo::slot`).
+    slot: u32,
     plan: RegionPlan,
     clock: RegionClock,
     prediction: Option<CraterPrediction>,
     source_speed: f32,
 }
 
-/// The terrain pool of a browser world: its plan, material and open region.
+/// The terrain pool of a browser world: its plan, material and open areas.
 #[wasm_bindgen]
 pub struct TerrainStep {
     plan: TerrainPlan,
@@ -94,7 +100,8 @@ pub struct TerrainStep {
     headroom: f32,
     settle_speed: f32,
     settle_frames: u32,
-    region: Option<Open>,
+    /// The open areas, by slot.
+    areas: Vec<Open>,
     /// Frames encoded (the step ids reports come back with).
     frame: u64,
     last: Option<TerrainStepReport>,
@@ -221,6 +228,9 @@ impl TerrainStep {
             boundary,
             initial_stress,
             max_boundary_nodes: c.max_boundary_nodes.unwrap_or(d.max_boundary_nodes),
+            max_regions: c.max_regions.unwrap_or(d.max_regions),
+            cell_size: c.cell_size.unwrap_or(d.cell_size),
+            min_resolution: c.min_resolution.unwrap_or(d.min_resolution),
             ..d
         };
         let ds = SandMaterial::default();
@@ -262,7 +272,7 @@ impl TerrainStep {
             headroom,
             settle_speed,
             settle_frames,
-            region: None,
+            areas: Vec::new(),
             frame: 0,
             last: None,
         })
@@ -290,6 +300,8 @@ impl TerrainStep {
             "PARCELS": MPM_PARCELS_BINDING, "WATCH": MPM_WATCH_BINDING,
             "BINDING_END": MPM_BINDING_END,
             "COUNTER_WORDS": MPM_COUNTER_WORDS, "C_PARTICLES": MPM_C_PARTICLES,
+            "C_AREA_SPEED": MPM_C_AREA_SPEED, "C_AREA_BODY": MPM_C_AREA_BODY,
+            "MAX_AREAS": MPM_MAX_AREAS,
             "C_PARCELS": MPM_C_PARCELS, "C_FLAGS": MPM_C_FLAGS,
             "PARTICLE_BYTES": std::mem::size_of::<MpmParticle>(),
             "PARCEL_BYTES": std::mem::size_of::<MpmParcel>(),
@@ -320,7 +332,8 @@ impl TerrainStep {
                     InitialStress::Unstressed => "unstressed",
                     InitialStress::Geostatic => "geostatic",
                 },
-                "max_boundary_nodes": c.max_boundary_nodes},
+                "max_boundary_nodes": c.max_boundary_nodes, "max_regions": c.max_regions,
+                "cell_size": c.cell_size, "min_resolution": c.min_resolution},
             "region_margin": self.margin, "speed_headroom": self.headroom,
             "settle_speed": self.settle_speed, "settle_frames": self.settle_frames,
         })
@@ -432,19 +445,25 @@ impl TerrainStep {
         model: &ZModel,
     ) -> Result<Vec<u32>, JsError> {
         let at = point(at)?;
-        let plan = crater
-            .region(self.plan.config(), at, self.margin, 0, 0)
+        let dx = self
+            .plan
+            .event_cell(crater.asked_cell(self.plan.config()))
             .map_err(err)?;
-        let activate = self.open(collider, field, plan)?;
-        let source = self.plan.apply_source(model, at).map_err(err)?;
+        let plan = crater
+            .region_with_cell(self.plan.config(), at, self.margin, dx)
+            .map_err(err)?;
+        let (slot, activate) = self.open(collider, field, plan, Some(crater))?;
+        let source = self.plan.apply_source_to(slot, model, at).map_err(err)?;
         let speed = source_peak_speed(model);
-        self.region = Some(Open {
-            plan,
-            clock: RegionClock::new(speed, self.frame),
-            prediction: Some(crater),
-            source_speed: speed,
-        });
-        Ok(encode(&[activate, source]))
+        let frame = self.frame;
+        let area = self.area_mut(slot);
+        // Its velocity adds to the material's: the bound adds its peak.
+        area.clock.kick(speed, frame);
+        area.source_speed = area.source_speed.max(speed);
+        let mut blocks = Vec::new();
+        blocks.extend(activate);
+        blocks.push(source);
+        Ok(encode(&blocks))
     }
 
     /// A region over the box `[lo, hi]` with cells of `dx` and no source
@@ -457,36 +476,36 @@ impl TerrainStep {
         hi: &[f32],
         dx: f32,
     ) -> Result<Vec<u32>, JsError> {
+        let dx = self.plan.event_cell(dx).map_err(err)?;
         let plan = RegionPlan::spanning(self.plan.config(), point(lo)?, point(hi)?, dx, 0, 0)
             .map_err(err)?;
-        let activate = self.open(collider, field, plan)?;
-        self.region = Some(Open {
-            plan,
-            clock: RegionClock::new(0.0, self.frame),
-            prediction: None,
-            source_speed: 0.0,
-        });
-        Ok(encode(&[activate]))
+        let (_, activate) = self.open(collider, field, plan, None)?;
+        Ok(encode(&activate.into_iter().collect::<Vec<_>>()))
     }
 
+    fn area_mut(&mut self, slot: u32) -> &mut Open {
+        self.areas
+            .iter_mut()
+            .find(|a| a.slot == slot)
+            .expect("the plan's area is tracked")
+    }
+
+    /// Open `plan` beside, into or around the open areas (`TerrainPlan::open`):
+    /// the covering area and its activation (none if an area covered it).
     fn open(
         &mut self,
         collider: u32,
         field: &[f32],
         plan: RegionPlan,
-    ) -> Result<TerrainOps, JsError> {
-        if self.region.is_some() {
-            // One region at a time on the GPU: a second waits for the bake.
-            return Err(err(TerrainError::LimitExceeded {
-                limit: "open terrain regions",
-                requested: 2,
-                allowed: 1,
-            }));
-        }
+        prediction: Option<CraterPrediction>,
+    ) -> Result<(u32, Option<TerrainOps>), JsError> {
         let (grid, origin) = grid(field)?;
-        self.last = None;
-        self.plan
-            .activate(
+        if self.areas.is_empty() {
+            self.last = None;
+        }
+        let opened = self
+            .plan
+            .open(
                 &plan,
                 collider,
                 grid,
@@ -494,15 +513,61 @@ impl TerrainStep {
                 self.sand.density,
                 self.sand.friction_angle.tan(),
             )
-            .map_err(err)
+            .map_err(err)?;
+        let frame = self.frame;
+        // The covering area's clock: a new area's, the merged areas'
+        // combined, or the covering one's own.
+        let mut clock = RegionClock::new(0.0, frame);
+        let mut source_speed = 0.0f32;
+        let mut pred = prediction;
+        if opened.activated {
+            let merged: Vec<&Open> = self
+                .areas
+                .iter()
+                .filter(|a| opened.absorbed.contains(&a.slot))
+                .collect();
+            if !merged.is_empty() {
+                let clocks: Vec<RegionClock> = merged.iter().map(|a| a.clock).collect();
+                clock = RegionClock::merged(&clocks, frame);
+                source_speed = merged.iter().map(|a| a.source_speed).fold(0.0, f32::max);
+                pred = pred.or_else(|| merged.iter().find_map(|a| a.prediction));
+            }
+            self.areas.retain(|a| !opened.absorbed.contains(&a.slot));
+        } else if let Some(at) = self.areas.iter().position(|a| a.slot == opened.area) {
+            let old = self.areas.remove(at);
+            clock = old.clock;
+            source_speed = old.source_speed;
+            pred = old.prediction.or(pred);
+        }
+        let plan = self
+            .plan
+            .areas()
+            .into_iter()
+            .find(|a| a.slot == opened.area)
+            .map_or(plan, |a| a.plan);
+        self.areas.push(Open {
+            slot: opened.area,
+            plan,
+            clock,
+            prediction: pred,
+            source_speed,
+        });
+        self.areas.sort_by_key(|a| a.slot);
+        Ok((opened.area, opened.activated.then_some(opened.ops)))
     }
 
     /// This frame's terrain work, ahead of the rigid step: `[kind, step,
-    /// blocks…]`. Kind 0: no region (no blocks). Kind 1: the coupled substeps
-    /// (one block, encoded into the frame's submission ahead of the rigid step,
-    /// which must run its impulse pass; copy the counters after the step and
-    /// clear their flags, then hand the copy to [`Self::report`] with `step`).
-    /// Kind 2: the region settled and bakes (one block, its own submission).
+    /// blocks…]`.
+    /// - Kind 0: no area open (no blocks).
+    /// - Kind 1: the coupled substeps of every open area (one block, encoded
+    ///   into the frame's submission ahead of the rigid step, which must run
+    ///   its impulse pass; copy the counters after the step and clear their
+    ///   flags, then hand the copy to [`Self::report`] with `step`).
+    /// - Kind 2: every open area settled and bakes (a block each, each its
+    ///   own submission); no substeps.
+    /// - Kind 3: some areas settled: their bakes (a block each, each its own
+    ///   submission, first), then the others' coupled substeps as kind 1 (the
+    ///   last block).
     pub fn frame(
         &mut self,
         frame_dt: f32,
@@ -510,65 +575,108 @@ impl TerrainStep {
         colliders: u32,
     ) -> Result<Vec<u32>, JsError> {
         let step = self.frame;
-        let Some(region) = self.region.as_ref() else {
+        if self.areas.is_empty() {
             return Ok(vec![0, step as u32, 0]);
-        };
-        if region.clock.settled(self.settle_frames) {
+        }
+        let settled: Vec<u32> = self
+            .areas
+            .iter()
+            .filter(|a| a.clock.settled(self.settle_frames))
+            .map(|a| a.slot)
+            .collect();
+        let mut blocks = Vec::new();
+        for slot in &settled {
+            blocks.push(self.close_area_ops(*slot)?);
+        }
+        if self.areas.is_empty() {
             let mut out = vec![2, step as u32];
-            out.extend(encode(&[self.close_ops()?]));
+            out.extend(encode(&blocks));
             return Ok(out);
         }
-        let (substeps, dt) = region
-            .clock
-            .substeps(
-                self.plan.config(),
-                step,
-                frame_dt,
-                gravity,
-                region.plan.dx,
-                self.sand.p_wave_speed(),
-                self.headroom,
-            )
-            .map_err(err)?;
+        // One schedule for the domain: the busiest area's bound.
+        let mut sched = (1u32, frame_dt);
+        for a in &self.areas {
+            let (n, dt) = a
+                .clock
+                .substeps(
+                    self.plan.config(),
+                    step,
+                    frame_dt,
+                    gravity,
+                    a.plan.dx,
+                    self.sand.p_wave_speed(),
+                    self.headroom,
+                )
+                .map_err(err)?;
+            if n > sched.0 {
+                sched = (n, dt);
+            }
+        }
         let ops = self
             .plan
-            .coupled(substeps, dt, gravity, colliders)
+            .coupled(sched.0, sched.1, gravity, colliders)
             .map_err(err)?;
         self.frame += 1;
-        let mut out = vec![1, step as u32];
-        out.extend(encode(&[ops]));
+        let kind = if blocks.is_empty() { 1 } else { 3 };
+        blocks.push(ops);
+        let mut out = vec![kind, step as u32];
+        out.extend(encode(&blocks));
         Ok(out)
     }
 
-    fn close_ops(&mut self) -> Result<TerrainOps, JsError> {
-        if self.region.take().is_none() {
-            return Err(JsError::new("no terrain region is open"));
-        }
-        self.plan.bake().map_err(err)
+    fn close_area_ops(&mut self, slot: u32) -> Result<TerrainOps, JsError> {
+        let Some(at) = self.areas.iter().position(|a| a.slot == slot) else {
+            return Err(JsError::new(&format!("terrain area {slot} is not open")));
+        };
+        self.areas.remove(at);
+        self.plan.bake_area(slot).map_err(err)
     }
 
-    /// Bake the open region now (it otherwise bakes once settled): one block,
-    /// its own submission. `World::terrain_close`.
+    /// Bake every open area now (each otherwise bakes once settled): a block
+    /// each, each its own submission. `World::terrain_close`.
     pub fn close(&mut self) -> Result<Vec<u32>, JsError> {
-        Ok(encode(&[self.close_ops()?]))
+        if self.areas.is_empty() {
+            return Err(JsError::new("no terrain region is open"));
+        }
+        let slots: Vec<u32> = self.areas.iter().map(|a| a.slot).collect();
+        let mut blocks = Vec::new();
+        for slot in slots {
+            blocks.push(self.close_area_ops(slot)?);
+        }
+        Ok(encode(&blocks))
+    }
+
+    /// Bake open area `slot` now (one block, its own submission); the
+    /// others go on. `World::terrain_close_area`.
+    pub fn close_area(&mut self, slot: u32) -> Result<Vec<u32>, JsError> {
+        Ok(encode(&[self.close_area_ops(slot)?]))
     }
 
     /// The counters copied after frame `step` (`COUNTER_WORDS` words): the
-    /// report as JSON, or the error a flag names. Tracks the region's settling.
+    /// report as JSON, or the error a flag names. Tracks each area's settling.
     pub fn report(&mut self, step: u32, counters: &[u32]) -> Result<String, JsError> {
         let r = self
             .plan
             .check(counters)
             .map_err(|e| JsError::new(&format!("step {step}: terrain: {e}")))?;
         let settle = self.settle_speed;
-        if let Some(open) = self.region.as_mut() {
-            open.clock.report(u64::from(step), &r, settle);
+        for open in &mut self.areas {
+            open.clock
+                .report(u64::from(step), &r.area(open.slot), settle);
         }
         self.last = Some(r);
+        let areas: Vec<serde_json::Value> = self
+            .areas
+            .iter()
+            .map(|a| {
+                json!({"slot": a.slot, "max_speed": r.area_speed[a.slot as usize],
+                    "body_speed": r.area_body_speed[a.slot as usize]})
+            })
+            .collect();
         Ok(json!({
             "blocks": r.blocks, "max_speed": r.max_speed, "particles": r.particles,
             "parcels": r.parcels, "deposited": r.deposited, "escaped": r.escaped,
-            "airborne": r.airborne, "body_speed": r.body_speed,
+            "airborne": r.airborne, "body_speed": r.body_speed, "areas": areas,
         })
         .to_string())
     }
@@ -579,20 +687,30 @@ impl TerrainStep {
         vec![b as u32, o as u32, n as u32]
     }
 
-    /// The open region (JSON, or `null`): its box, cell, the activation window
-    /// and bed height, the prediction that sized it and the source's peak speed.
-    pub fn region(&self) -> String {
-        let Some(r) = self.region.as_ref() else {
-            return "null".into();
-        };
-        let p = self.plan.params();
+    fn area_json(&self, r: &Open) -> serde_json::Value {
+        let p = self.plan.area_params(r.slot).copied().unwrap_or_default();
         json!({
+            "slot": r.slot,
             "origin": r.plan.origin.to_array(), "end": r.plan.end().to_array(), "dx": r.plan.dx,
             "blocks": r.plan.blocks.to_array(), "window": p.window, "bed": p.column[0],
             "spacing": p.column[2], "prediction": r.prediction.as_ref().map(prediction_json),
             "source_speed": r.source_speed, "speed_bound_basis": r.clock.speed(),
         })
-        .to_string()
+    }
+
+    /// The first open area (JSON, or `null`): its box, cell, the activation
+    /// window and bed height, the prediction that sized it and the source's
+    /// peak speed. [`Self::areas`] lists them all.
+    pub fn region(&self) -> String {
+        let Some(r) = self.areas.first() else {
+            return "null".into();
+        };
+        self.area_json(r).to_string()
+    }
+
+    /// Every open area (JSON array of [`Self::region`]'s objects, by slot).
+    pub fn areas(&self) -> String {
+        serde_json::Value::Array(self.areas.iter().map(|a| self.area_json(a)).collect()).to_string()
     }
 
     /// Frames encoded since the pool was created.

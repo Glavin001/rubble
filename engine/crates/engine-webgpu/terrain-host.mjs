@@ -7,6 +7,8 @@
 //
 //   const terrain = await createTerrain(world, settings);
 //   terrain.impact(groundCollider, field, point, radius, density, speed);
+//   terrain.impact(groundCollider, field, point2, radius, density, speed); // more at once
+//   terrain.areas; // the open areas (TerrainStep.areas JSON)
 //   // each frame, before world.encodeStep(enc):
 //   terrain.encodeFrame(enc);
 //   world.encodeStep(enc); …; device.queue.submit([enc.finish()]); terrain.afterSubmit();
@@ -73,7 +75,8 @@ export async function createTerrain(world, settings = {}, { wgslBase = './genera
 
   const terrain = {
     plan, settings: JSON.parse(plan.settings()), T,
-    region: null, // the open region (TerrainStep.region JSON)
+    region: null, // the first open area (TerrainStep.region JSON)
+    areas: [], // every open area (TerrainStep.areas JSON)
     report: null, // the last frame's report
     error: null, // a flag the GPU raised (the frame's error), or a host failure
     lastKind: 0, lastSubsteps: 0, lastStep: -1,
@@ -95,8 +98,9 @@ export async function createTerrain(world, settings = {}, { wgslBase = './genera
     p.end();
   };
   // Blocks run one submission each, writes first (WgpuSim::terrain_submit).
-  const submitBlocks = (words, at = 0) => {
-    for (const block of decodeBlocks(words, at)) {
+  const submitBlocks = (words, at = 0) => submitDecoded(decodeBlocks(words, at));
+  const submitDecoded = (blocks) => {
+    for (const block of blocks) {
       block.writes.forEach(write);
       const enc = device.createCommandEncoder({ label: 'terrain' });
       pass(enc, block);
@@ -111,13 +115,19 @@ export async function createTerrain(world, settings = {}, { wgslBase = './genera
     device.queue.writeBuffer(bufs[0], body * 112 + 76, Uint32Array.of(world.steps >>> 0));
   };
   const fieldWords = (f) => Float32Array.of(f.nx, f.nz, f.dx, f.dz, ...(f.origin || [0, 0, 0]));
+  const refresh = () => {
+    terrain.region = JSON.parse(plan.region());
+    terrain.areas = JSON.parse(plan.areas());
+  };
   const opened = (collider, words) => {
-    terrain.error = null;
-    terrain.report = null;
+    if (!terrain.areas.length) {
+      terrain.error = null;
+      terrain.report = null;
+    }
     submitBlocks(words);
     surfaceMoved(collider);
     terrain.collider = collider;
-    terrain.region = JSON.parse(plan.region());
+    refresh();
     return terrain.region;
   };
 
@@ -135,16 +145,19 @@ export async function createTerrain(world, settings = {}, { wgslBase = './genera
     opened(collider, plan.open_box(collider, fieldWords(field), Float32Array.from(lo), Float32Array.from(hi), dx));
   const baked = () => {
     surfaceMoved(terrain.collider);
-    terrain.region = null;
+    refresh();
     terrain.onBake?.();
   };
-  /** Bake the open region now. */
+  /** Bake every open area now. */
   terrain.close = () => { submitBlocks(plan.close()); baked(); };
+  /** Bake open area `slot` now; the others go on. */
+  terrain.closeArea = (slot) => { submitBlocks(plan.close_area(slot)); baked(); };
 
   /**
    * This frame's terrain work into `enc`, ahead of world.encodeStep(enc): the
    * coupled substeps and a copy of their counters (or a bake, submitted on its
-   * own). Returns the frame's kind (0 none, 1 coupled, 2 baked).
+   * own). Returns the frame's kind (0 none, 1 coupled, 2 baked, 3 some areas
+   * baked and the others coupled).
    * `timestampWrites` (optional) times the coupled pass.
    */
   terrain.encodeFrame = (enc, { timestampWrites } = {}) => {
@@ -155,8 +168,11 @@ export async function createTerrain(world, settings = {}, { wgslBase = './genera
     if (kind === 2) {
       submitBlocks(words, 2);
       baked();
-    } else if (kind === 1) {
-      const [block] = decodeBlocks(words, 2);
+    } else if (kind === 1 || kind === 3) {
+      const blocks = decodeBlocks(words, 2);
+      const block = blocks.pop();
+      // Kind 3: the settled areas' bakes first, each its own submission.
+      if (blocks.length) { submitDecoded(blocks); baked(); }
       block.writes.forEach(write);
       pass(enc, block, timestampWrites);
       terrain.lastSubsteps = block.cmds.filter((c) => KERNELS[c.kernel] === 'mpm_p2g').length;
@@ -184,7 +200,7 @@ export async function createTerrain(world, settings = {}, { wgslBase = './genera
         try {
           terrain.report = JSON.parse(plan.report(step, words));
           terrain.lastStep = step;
-          terrain.region = terrain.region && JSON.parse(plan.region());
+          if (terrain.region) refresh();
           terrain.onReport?.(terrain.report, step);
         } catch (e) {
           terrain.error = e instanceof Error ? e : new Error(String(e));
@@ -202,7 +218,7 @@ export async function createTerrain(world, settings = {}, { wgslBase = './genera
     plan.free();
     plan = new TerrainStep(JSON.stringify(settings));
     terrain.plan = plan;
-    terrain.region = null; terrain.report = null; terrain.error = null;
+    terrain.region = null; terrain.areas = []; terrain.report = null; terrain.error = null;
     terrain.lastKind = 0; terrain.lastSubsteps = 0; terrain.lastStep = -1;
     terrain.pending.length = 0;
     device.queue.writeBuffer(bufs[T.COUNTERS], 0, new Uint32Array(T.COUNTER_WORDS));

@@ -32,11 +32,19 @@ function decodeBlocks(words, at = 0) {
 
 const SETTINGS = { config: { max_particles: 1 << 20, max_blocks: 8192, max_parcels: 1 << 16 }, region_margin: 0.6, settle_speed: 0.05, settle_frames: 2 };
 const FIELD = Float32Array.of(193, 193, 1.5, 1.5, 0, 0, 0);
+// An area's bake on the absorbing ground: the edge columns' give (a counting
+// sort of their particles, then the shift), the splat and the deposits.
+const BAKE = ['mpm_write_args', 'mpm_bake_edge_clear', 'mpm_bake_edge_count', 'mpm_bake_edge_scan',
+  'mpm_bake_edge_scatter', 'mpm_bake_edge_sort', 'mpm_bake_shift', 'mpm_write_args', 'mpm_bake_bin',
+  'mpm_bake_raise', 'mpm_bake_header', 'mpm_deposit_raise', 'mpm_deposit_header'];
 const counters = (o = {}) => {
   const c = new Uint32Array(T.COUNTER_WORDS);
   const f = new Float32Array(c.buffer);
   c[3] = o.particles ?? 1000;
   f[2] = o.speed ?? 0;
+  // Each area's own top speed (slot k at C_AREA_SPEED + k): `areas` by slot,
+  // else every area at `speed`.
+  for (let k = 0; k < T.MAX_AREAS; k++) f[T.C_AREA_SPEED + k] = o.areas ? (o.areas[k] ?? 0) : (o.speed ?? 0);
   if (o.flags) c[T.C_FLAGS] = o.flags;
   return c;
 };
@@ -78,8 +86,7 @@ test('an impact opens a region (activation, then source) and runs coupled frames
   // Two quiet frames: the next frame bakes (kind 2) and the region closes.
   const bake = p.frame(1 / 60, -9.81, 1);
   assert.equal(bake[0], 2);
-  assert.deepEqual(decodeBlocks(bake, 2).blocks[0].cmds.map((c) => c.kernel),
-    ['mpm_bake_shift', 'mpm_write_args', 'mpm_bake_bin', 'mpm_bake_raise', 'mpm_bake_header', 'mpm_deposit_raise', 'mpm_deposit_header']);
+  assert.deepEqual(decodeBlocks(bake, 2).blocks[0].cmds.map((c) => c.kernel), BAKE);
   assert.equal(p.region(), 'null');
   assert.equal(p.frame(1 / 60, -9.81, 1)[0], 0);
   p.free();
@@ -91,8 +98,59 @@ test('a GPU flag is the frame\'s error, by name', () => {
   const f = p.frame(1 / 60, -9.81, 1);
   assert.throws(() => p.report(f[1], counters({ flags: 4 })), /left the active region/);
   assert.throws(() => p.report(f[1], counters({ flags: 32 })), /max_particles/);
-  // One region at a time.
-  assert.throws(() => p.impact(0, FIELD, Float32Array.of(0, 0, 0), 2, 3000, 20000, 9.81), /open terrain regions/);
+  p.free();
+});
+
+test('several impacts: far apart they open areas that bake on their own; near one they grow it', () => {
+  const p = new TerrainStep(JSON.stringify(SETTINGS));
+  decodeBlocks(p.impact(0, FIELD, Float32Array.of(-125, 0, 0), 2, 3000, 20000, 9.81));
+  // A second meteor far away: a second area, activated and with its source.
+  const second = decodeBlocks(p.impact(0, FIELD, Float32Array.of(125, 0, 0), 2, 3000, 20000, 9.81)).blocks;
+  assert.equal(second.length, 2);
+  assert.deepEqual(second[1].cmds.map((c) => c.kernel), ['mpm_write_args', 'mpm_source']);
+  let areas = JSON.parse(p.areas());
+  assert.equal(areas.length, 2);
+  assert.notEqual(areas[0].slot, areas[1].slot);
+  assert.equal(areas[0].dx, areas[1].dx, 'one grid');
+  // One frame steps both (one coupled block).
+  const f0 = p.frame(1 / 60, -9.81, 1);
+  assert.equal(f0[0], 1);
+  assert.equal(decodeBlocks(f0, 2).blocks.length, 1);
+  // A third inside the first one's forming crater grows it: its source finds the surface of
+  // the material that has moved.
+  const r = areas[0].prediction.radius;
+  const rim = decodeBlocks(p.impact(0, FIELD, Float32Array.of(-125 + 0.5 * r, 0, 0), 2, 3000, 20000, 9.81)).blocks;
+  assert.deepEqual(rim.at(-1).cmds.map((c) => c.kernel), ['mpm_write_args', 'mpm_source_surface', 'mpm_source']);
+  areas = JSON.parse(p.areas());
+  assert.equal(areas.length, 2, 'the second hit grew the first area');
+  const grown = areas.find((a) => a.origin[0] < 0);
+  assert.ok(grown.end[0] > -125 + 0.5 * r, 'the grown box covers the new hit');
+  // The far area settles while the grown one still moves: kind 3, its bake
+  // then the others' coupled substeps.
+  const speeds = (far, near) => { const a = []; a[areas.find((x) => x.origin[0] > 0).slot] = far; a[grown.slot] = near; return a; };
+  let f = p.frame(1 / 60, -9.81, 1);
+  for (let i = 0; i < 3; i++) {
+    JSON.parse(p.report(f[1], counters({ speed: 50, areas: speeds(0.01, 50) })));
+    f = p.frame(1 / 60, -9.81, 1);
+    if (f[0] === 3) break;
+  }
+  assert.equal(f[0], 3);
+  const blocks = decodeBlocks(f, 2).blocks;
+  assert.equal(blocks.length, 2);
+  assert.deepEqual(blocks[0].cmds.map((c) => c.kernel), BAKE);
+  assert.ok(blocks[1].cmds.some((c) => c.kernel === 'mpm_p2g'));
+  assert.equal(JSON.parse(p.areas()).length, 1);
+  // Bake the rest now.
+  assert.equal(decodeBlocks(p.close()).blocks.length, 1);
+  assert.equal(p.region(), 'null');
+  p.free();
+});
+
+test('a later event too coarse for the open grid fails by name', () => {
+  const p = new TerrainStep(JSON.stringify(SETTINGS));
+  p.impact(0, FIELD, Float32Array.of(-125, 0, 0), 2, 3000, 20000, 9.81);
+  // A much smaller impactor asks for far finer cells than the open grid's.
+  assert.throws(() => p.impact(0, FIELD, Float32Array.of(125, 0, 0), 0.5, 3000, 20000, 9.81), /too coarse/);
   p.free();
 });
 
