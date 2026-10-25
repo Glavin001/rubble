@@ -529,7 +529,8 @@ change):
   - So the rest tolerance (5 cm/s) is not reached soon. The demo bakes at a set
     time (`World::terrain_close` semantics) once nothing is in flight, and
     says so in its UI.
-- **The bake roughened the surface** (fixed by the splat bake below).
+- **The bake roughened the surface** (the splat bake below smooths the rim; the
+  crater centre is still open there).
   Neighbouring 9.4 m samples of the baked rim differed by up to about 10 m,
   while the particle surface just before the bake was smooth.
   - The bake binned every particle of a column about 300 m deep by its nearest
@@ -635,6 +636,47 @@ changes:
 - bodies `81af402f01161578` unchanged.
 
 The loaded cube's fingerprint (no activation, no bake) is unchanged.
+
+**In the browser demo** (`impact.html?bakeAt=1000`, default event). The
+particles were read back at t = 12.9 s, when the top speed was still 9.4 m/s.
+The same state was then baked four ways in JavaScript (in floats), and the GPU
+splat bake was compared with them:
+- The GPU bake matches the JavaScript home-plus-displacement splat within
+  0.26 m rms. The difference is the dithered whole-quanta rounding.
+- Nearest-sample binning is what the old bake did, so it gives "before" on the
+  same state.
+
+Neighbour steps, max / rms (m), by distance from the impact point (R = 151 m):
+
+| | < 0.5 R | 0.5–1 R | 1–1.8 R (rim) | 1.8–2.2 R (window edge) |
+|---|---|---|---|---|
+| nearest sample (old bake) | 24.8 / 7.66 | 31.8 / 9.00 | 48.3 / 11.99 | 32.6 / 8.44 |
+| splat at home + displacement (this bake) | 21.8 / 8.27 | 16.6 / 4.27 | 18.1 / 4.74 | 11.5 / 3.11 |
+| splat at the particle's position | 11.3 / 5.50 | 7.6 / 3.56 | 17.9 / 5.75 | 39.1 / 10.71 |
+
+- The rim and the window edge are 2.5–2.7× smoother (rms).
+- **Open: the crater centre is not.** Within 0.5 R, home plus displacement
+  leaves ridges along the two axes through the impact point. On the z = 0 row
+  they stand 12–15 m above the rows beside it, and nearest-sample binning
+  leaves the same ridges.
+  - Near the centre, material spread several samples outward. A column's
+    particles there end up spread apart, but the bake puts them back at their
+    lattice offsets from home, so each column's volume clumps around where its
+    centre went.
+  - The rows on the axes do not move sideways, so they keep their own volume
+    while the rows beside them empty.
+  - Splatting at the particle's own position has no ridges, but it breaks the
+    identity (it is the roughest at the window edge).
+  - The elastic F cannot measure this spread, because plastic flow is not in
+    it.
+- **The truck** spawns on the z = 0 row at x = −12 m. It sits high-centred on
+  that ridge and does not move, so whether it can climb the now-smoother rim
+  was not reached.
+- One alternative was tried in JavaScript only and is not adopted: fade the
+  home correction with the displacement, applying it fully at rest and not at
+  all past one sample. It gives 5.73 / 3.66 / 5.77 / 3.03 m rms and keeps the
+  identity, but a rigid shift is no longer exact, and it adds a parameter. The
+  choice is the user's.
 
 ## T5 materials (2026-10-24)
 
