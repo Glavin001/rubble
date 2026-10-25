@@ -73,6 +73,10 @@ pub const MPM_OVERFLOW_FIELD: u32 = 1024;
 
 /// `MpmParticle::f[2][3]` bit: the particle left the region as a parcel.
 pub const MPM_PARTICLE_DEAD: u32 = 1;
+/// `MpmParticle::f[2][3]` bit: the particle was made by activation, and
+/// `c[1][3]`, `c[2][3]` hold the heightfield-local x and z it was emitted at.
+/// The bake splats it from its home sample moved by its displacement since.
+pub const MPM_PARTICLE_HOME: u32 = 2;
 
 /// One ejecta parcel: position, quanta (u32 bits), velocity, mass (0 once landed).
 #[repr(C)]
@@ -127,11 +131,13 @@ pub struct MpmParticle {
     /// Velocity, log Jp (plastic volume).
     pub vj: [f32; 4],
     /// Rows of C, the APIC affine velocity; `c[0][3]` is the rock's damage
-    /// (0 intact, 1 broken; 0 for other materials).
+    /// (0 intact, 1 broken; 0 for other materials); `c[1][3]`, `c[2][3]`
+    /// where activation emitted it (with [`MPM_PARTICLE_HOME`]).
     pub c: [[f32; 4]; 3],
     /// Rows of the deformation gradient F; `f[0][3]` is the rest volume,
     /// `f[1][3]` the volume quanta (u32 bits; 0 for particles loaded by the host),
-    /// `f[2][3]` flags (u32 bits; [`MPM_PARTICLE_DEAD`]: left as a parcel).
+    /// `f[2][3]` flags (u32 bits; [`MPM_PARTICLE_DEAD`]: left as a parcel;
+    /// [`MPM_PARTICLE_HOME`]: made by activation).
     pub f: [[f32; 4]; 3],
 }
 

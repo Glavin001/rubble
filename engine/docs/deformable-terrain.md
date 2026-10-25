@@ -210,8 +210,9 @@ are taken from them.
   - The bed stays a heightfield, so rigid bodies over the region stand on it until
     two-way coupling (T3).
 - **Bake.** When the region's kinetic energy stays below ε for a dwell time, each
-  particle's quanta are added to the heightfield column it stands over, and the
-  particles are freed.
+  particle's quanta are splatted bilinearly onto the four heightfield samples
+  around it, in whole quanta, and the particles are freed ("The splat bake"
+  below).
 
 ## T2 and T3 status (2026-10-24)
 
@@ -287,7 +288,9 @@ Now `mpm_bake_bin` (`mpmBakeColumn`) moves any particle lying above part of a
 coupled dynamic body to just outside the body's footprint, straight away from
 its centre. The body is left in a pit as deep as it went, and the volume is
 kept. The dropped ball rests in its pit to within 1.3 cm of its depth in the
-sand.
+sand. With the splat bake, the moved particle is splatted at its new place,
+which lies one sample spacing past the footprint's half diagonal (half a
+spacing before), so the four samples it reaches stay outside it.
 
 **Activation by strikes: a GPU look-ahead.** The user chose this over hit events,
 which reach the host 1–3 frames after the rigid step has already stopped the
@@ -324,8 +327,8 @@ prediction only sizes the region.
 
 **Ejecta.** Material leaving the region's box becomes a ballistic parcel.
 - A parcel that lands inside the box re-enters as a particle.
-- One that lands outside deposits its volume quanta on the heightfield sample
-  it lands on.
+- One that lands outside deposits its volume quanta on the four heightfield
+  samples around where it lands, split bilinearly in whole quanta (as the bake).
 - One that leaves the field's footprint counts as escaped.
 - `airborne` counts the parcels still in flight.
 - The ledger closes exactly: initial volume = field + particles + airborne + escaped.
@@ -526,21 +529,112 @@ change):
   - So the rest tolerance (5 cm/s) is not reached soon. The demo bakes at a set
     time (`World::terrain_close` semantics) once nothing is in flight, and
     says so in its UI.
-- **The bake roughens the surface.** Neighbouring 9.4 m samples of the baked
-  rim differ by up to about 10 m, while the particle surface just before the
-  bake is smooth.
-  - The bake bins every particle of a column about 300 m deep by its nearest
-    sample. A small sideways shift of deep material therefore moves a lot of
+- **The bake roughened the surface** (fixed by the splat bake below).
+  Neighbouring 9.4 m samples of the baked rim differed by up to about 10 m,
+  while the particle surface just before the bake was smooth.
+  - The bake binned every particle of a column about 300 m deep by its nearest
+    sample. A small sideways shift of deep material therefore moved a lot of
     height between samples.
-  - Deposits are whole parcels on one sample: 1.2 m each at these cells.
-  - The truck cannot cross the baked rim, so it starts on the floor.
-  - A smoother bake (spline weights, or binning only the moved surface) would
-    change the design and needs a decision.
+  - Deposits were whole parcels on one sample: 1.2 m each at these cells.
+  - The truck could not cross the baked rim, so it starts on the floor.
 - **Ejecta escape the field.** About 0.43 M m³ leaves the 6 R field's footprint
   by the bake (the core moves at 1.4 km/s).
 - **Not in the browser yet:** the strike look-ahead (`terrain_watch`, binding 52)
   and soil ruts. `engine-world/src/terrain.rs` keeps its own copy of the frame
   schedule; it should switch to `RegionClock`.
+
+## The splat bake (2026-10-25)
+
+The user approved a bilinear splat for the bake and the parcels' deposits.
+`mpm_bake_bin` and `mpm_parcels` (`mpmParcelDeposit`) split each particle's or
+landed parcel's quanta between the four heightfield samples around it, with
+tent weights. Each share goes where the whole particle went before:
+- a window sample's column;
+- the deposit accumulator, for a sample outside the window;
+- escaped, for a sample off the field.
+
+The max-height header is kept by the same raise kernels as before.
+
+**Where a particle is splatted: its home sample plus its displacement.**
+Activation lays a sample's particles on a lattice across the sample's cell. A
+splat at each particle's own position would spread unmoved off-centre
+particles onto the neighbours, so activate-then-bake would no longer be the
+identity.
+- `mpm_activate_emit` records where it emitted each particle, x₀ in the
+  heightfield's frame (`MpmParticle` `c[1][3]`, `c[2][3]`, flag
+  `MPM_PARTICLE_HOME`). G2P carries the record.
+- The bake splats at u = home + (x − x₀)/spacing.
+  - Unmoved, the displacement is exactly zero, which puts weight 1 on the home
+    sample.
+  - A column moved rigidly by any distance bakes as that column moved: its
+    volume is split by the tent around its new centre.
+- Particles loaded by the host and parcels landing back in the region carry
+  no home, so they splat at their position.
+- The alternative was to splat each particle's own footprint (its lattice
+  cell) by its overlap with the sample cells. It also keeps the identity, but
+  its kernel is a box of the lattice spacing (half a sample by default), not
+  the tent of one sample: less smoothing. With one particle per sample axis
+  the two are the same.
+
+**Whole quanta.** The split rounds x first, then each half along z, so the
+four parts are whole quanta that sum exactly to the particle's. Each split
+rounds with a dither from the particle's slot (floor(share + r), r uniform in
+[0, 1), from a PCG hash). Its expected value is the exact share, and a zero
+weight gets exactly nothing.
+- Rounding half up was tried first. It errs the same way for every particle
+  moved alike, so a column's errors add up.
+- In the rigid-shift test (0.3, 0.55 of a sample, 5 particles per sample axis)
+  the worst height error was 1.2 cm, and the centroid moved 0.547 samples
+  instead of 0.55. With the dither: 0.65 mm, and the centroid is within 1e-4.
+- At the demo's scale (about 240 particles a column, 1.8 cm quanta) rounding
+  half up could leave about 2 m steps between neighbours.
+
+**Buried bodies.** `mpmBakeColumn` now pushes covering sand one sample spacing
+past the body footprint's half diagonal, so the four samples the splat reaches
+stay outside the footprint. Before, it pushed half a spacing, which was the
+reach of nearest-sample binning.
+
+**Tests** (`tests/terrain_mpm.rs`):
+- activate-then-bake with no motion is still the identity to 1e-5 m;
+- `material_moved_rigidly_bakes_as_its_columns_moved`: after a rigid shift of
+  (0.3, 0.55) samples (`WgpuSim::terrain_overwrite_particles`, a diagnostic),
+  the heights are the bilinear interpolation of the shifted columns. The
+  tolerance is one quantum per contributing particle; the worst error is
+  0.65 mm. The centroid moves by the shift to 1e-3 samples, and the volume is
+  exact. Binning by the nearest sample would move the centroid by multiples
+  of 1/5 of a sample.
+
+The volume and ledger tests pass unchanged: flow and bake, ejecta, and the
+crater's ledger.
+
+**Smoothness**: the crater validation at `CRATER_CPR=8` (8 samples per
+transient radius). Roughness is measured within 3 R; "residual" is the height
+change minus its ring mean, which leaves out the crater's own slopes.
+
+| | Nearest sample | Splat |
+|---|---|---|
+| neighbour step, max | 34.5 mm | 26.0 mm |
+| neighbour step, rms | 5.28 mm | 3.91 mm |
+| residual, rms | 3.29 mm | 2.26 mm |
+| residual, max | 23.3 mm | 17.4 mm |
+| apparent radius / transient | 0.875 (fails the 0.9 band) | 1.00 |
+| depth | 27.6 mm | 34.2 mm |
+| rim | 11.2 mm at 0.184 m | 7.0 mm at 0.165 m |
+
+- The ring-mean profile is smooth now. Before, it was spiky (11.2 mm at ring
+  10, 6.5 mm at ring 11, 7.6 mm at ring 13) and cut off at ring 16.
+- It now has a tail of a few tenths of a millimetre out to ring 27. That is the
+  far field's small outward displacement, which nearest-sample binning
+  rounded away.
+- The simulation itself is unchanged; only the bake differs.
+
+**Fingerprints.** `terrain_fingerprint` `fingerprint_impact_coupled_and_bake`
+changes:
+- particles `a0f6c33cccae1a95` → `7bd9e041c0c4bdf5` (the home record);
+- heights `73fb3fb0af79c17c` → `79c9061c160a5ae5`;
+- bodies `81af402f01161578` unchanged.
+
+The loaded cube's fingerprint (no activation, no bake) is unchanged.
 
 ## T5 materials (2026-10-24)
 
