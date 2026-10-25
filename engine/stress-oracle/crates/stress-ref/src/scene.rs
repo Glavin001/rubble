@@ -58,6 +58,10 @@ pub struct Scene {
     /// Free-form per-oracle settings (mesh density, element formulation, ...), keyed by oracle name.
     #[serde(default)]
     pub oracle: BTreeMap<String, serde_json::Value>,
+    /// What Blast's own solver reads from the pack this scene came from, for Blast-model runs
+    /// (`blast_bond`); `None` for every other scene.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blast: Option<crate::blast_bond::BlastAuthoring>,
 }
 
 /// One rigid cluster of chunks: a single rigid body until fracture splits it.

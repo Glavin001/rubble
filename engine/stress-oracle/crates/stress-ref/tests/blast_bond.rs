@@ -8,6 +8,85 @@ use stress_ref::math::Vec3;
 
 const G: f64 = 9.81;
 
+#[test]
+fn a_pack_imports_blasts_own_graph_and_stands_on_its_supports() {
+    // house-1story: Blast's inputs kept beside the scene, every bond of positive area, one to
+    // one; under gravity the supports take the whole load, as each node is balanced.
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/house-1story.json");
+    let options = stress_ref::scene_pack::ImportOptions {
+        authored_strengths: true,
+        authored_fatal: true,
+        pack_masses: true,
+        pack_modulus: true,
+        blast_authoring: true,
+    };
+    let scene = stress_ref::scene_pack::import_with(&path, "house", "house", options).unwrap();
+    let pack: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let pack_bonds = pack["scenario"]["bonds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|b| b["area"].as_f64().unwrap_or(0.0) > 0.0)
+        .count();
+    let authoring = scene.blast.as_ref().unwrap();
+    assert_eq!(authoring.bonds.len(), pack_bonds);
+    assert_eq!(scene.bodies[0].bonds.len(), pack_bonds);
+    assert_eq!(authoring.nodes.len(), scene.bodies[0].chunks.len());
+    assert!(authoring
+        .materials
+        .iter()
+        .all(|m| m.tension_fatal > m.tension_elastic && m.modulus > 0.0));
+
+    let gravity = Vec3::from_array(scene.gravity);
+    let (graph, _) = BlastAuthoring::graph(
+        &scene,
+        BlastSettings {
+            max_iterations: 200_000,
+            tolerance: 1e-7,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut solver = BlastSolver::new(graph);
+    let accel: Vec<AngLin> = (0..solver.graph.node_count())
+        .map(|_| AngLin {
+            ang: Vec3::ZERO,
+            lin: gravity,
+        })
+        .collect();
+    let reports = solver.solve(&accel, false);
+    assert!(
+        reports.iter().all(|r| r.converged),
+        "{:?}",
+        reports.iter().filter(|r| !r.converged).collect::<Vec<_>>()
+    );
+    let e = imbalance(&solver, &accel);
+    assert!(e < 1e-4, "imbalance {e}");
+    // The supports' reaction is the total load of the islands that reach them.
+    let g = &solver.graph;
+    let mut reaction = Vec3::ZERO;
+    for j in 0..g.bond_count() {
+        let [a, b] = g.bonds[j].nodes;
+        let jb = solver.impulse(j);
+        if g.weight[a].is_static() && !g.weight[b].is_static() {
+            reaction -= jb.lin;
+        } else if g.weight[b].is_static() && !g.weight[a].is_static() {
+            reaction += jb.lin;
+        }
+    }
+    let carried = (0..g.node_count())
+        .filter(|&i| solver.islands.node[i] != NO_ISLAND && !g.weight[i].is_static())
+        .count() as f64
+        * g.mass_scale
+        * gravity.norm();
+    assert!(
+        (reaction.norm() - carried).abs() < 1e-3 * carried,
+        "{reaction:?} vs {carried}"
+    );
+}
+
 fn converged() -> BlastSettings {
     BlastSettings {
         max_iterations: 100_000,

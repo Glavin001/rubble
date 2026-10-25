@@ -71,7 +71,7 @@ impl Profile {
     /// How packs import under the profile.
     pub fn import_options(self) -> ImportOptions {
         match self {
-            Profile::BlastParity | Profile::BlastParityRouted | Profile::Threshold => ImportOptions { authored_strengths: true, authored_fatal: true, pack_masses: true, pack_modulus: true },
+            Profile::BlastParity | Profile::BlastParityRouted | Profile::Threshold => ImportOptions { authored_strengths: true, authored_fatal: true, pack_masses: true, pack_modulus: true, blast_authoring: false },
         }
     }
 

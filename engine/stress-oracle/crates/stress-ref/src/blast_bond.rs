@@ -28,6 +28,7 @@
 //! angular) across frames, as the device does; [`BlastSolver::impulse`] converts it.
 
 use crate::math::Vec3;
+use serde::{Deserialize, Serialize};
 
 /// Reference modulus the compliance weight is relative to (concrete).
 pub const MODULUS_REFERENCE: f64 = 30.0e9;
@@ -76,7 +77,8 @@ pub struct BlastBond {
 }
 
 /// A material's limits (Pa), Blast's `ExtStressMaterial`.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BlastMaterial {
     pub compression_elastic: f64,
     pub compression_fatal: f64,
@@ -86,6 +88,9 @@ pub struct BlastMaterial {
     pub shear_fatal: f64,
     /// Area fraction gradual damage cannot go below (0: none).
     pub residual_area_fraction: f64,
+    /// Young's modulus the bonds of this material are weighted by (0: [`MODULUS_REFERENCE`]).
+    #[serde(default)]
+    pub modulus: f64,
 }
 
 impl BlastMaterial {
@@ -98,6 +103,7 @@ impl BlastMaterial {
         shear_elastic: 1.6e6,
         shear_fatal: 4e6,
         residual_area_fraction: 0.0,
+        modulus: 30e9,
     };
 }
 
@@ -158,12 +164,6 @@ impl AngLin {
     pub fn norm2(self) -> f64 {
         self.ang.norm2() + self.lin.norm2()
     }
-    fn add_scaled(self, o: AngLin, k: f64) -> AngLin {
-        AngLin {
-            ang: self.ang + o.ang * k,
-            lin: self.lin + o.lin * k,
-        }
-    }
 }
 
 /// A node's weight in `D`.
@@ -176,6 +176,97 @@ pub struct Weight {
 impl Weight {
     pub fn is_static(self) -> bool {
         !(self.lin > 0.0)
+    }
+}
+
+/// What Blast itself reads from a scene pack, kept beside the scene so a Blast-model run takes
+/// Blast's inputs rather than rubble's hull-derived ones: the pack's node centroids, masses and
+/// volumes, its bond centroids, normals and areas, and both limit sets of each material
+/// (`scene_pack::ImportOptions::blast_authoring`). Node `i` is the scene's chunk `i` and bond
+/// `k` the scene's bond `k` of its one body; positions are in the scene's frame.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlastAuthoring {
+    pub nodes: Vec<BlastNodeDesc>,
+    pub bonds: Vec<BlastBondDesc>,
+    pub materials: Vec<BlastMaterial>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlastNodeDesc {
+    pub position: [f64; 3],
+    pub mass: f64,
+    pub volume: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlastBondDesc {
+    pub centroid: [f64; 3],
+    pub normal: [f64; 3],
+    pub area: f64,
+    pub material: usize,
+}
+
+impl BlastAuthoring {
+    /// The solver graph of `scene`'s one body from its authoring, and the materials by index.
+    pub fn graph(
+        scene: &crate::scene::Scene,
+        settings: BlastSettings,
+    ) -> Result<(BlastGraph, Vec<BlastMaterial>), String> {
+        let a = scene
+            .blast
+            .as_ref()
+            .ok_or("the scene has no Blast authoring (import the pack with blast_authoring)")?;
+        let body = match scene.bodies.as_slice() {
+            [body] => body,
+            _ => {
+                return Err(format!(
+                    "Blast authoring needs exactly one body, the scene has {}",
+                    scene.bodies.len()
+                ))
+            }
+        };
+        if a.nodes.len() != body.chunks.len() || a.bonds.len() != body.bonds.len() {
+            return Err(format!(
+                "Blast authoring has {} nodes and {} bonds, the body {} chunks and {} bonds",
+                a.nodes.len(),
+                a.bonds.len(),
+                body.chunks.len(),
+                body.bonds.len()
+            ));
+        }
+        let nodes = a
+            .nodes
+            .iter()
+            .map(|n| BlastNode {
+                position: Vec3::from_array(n.position),
+                mass: n.mass,
+                inertia: 0.0,
+                volume: n.volume,
+            })
+            .collect();
+        let mut bonds = Vec::with_capacity(a.bonds.len());
+        for (k, (d, b)) in a.bonds.iter().zip(&body.bonds).enumerate() {
+            let material = a.materials.get(d.material).ok_or(format!(
+                "bond {k}: material {} of {}",
+                d.material,
+                a.materials.len()
+            ))?;
+            bonds.push(BlastBond {
+                nodes: [b.a, b.b],
+                centroid: Vec3::from_array(d.centroid),
+                normal: Vec3::from_array(d.normal),
+                area: d.area,
+                modulus: material.modulus,
+                material: d.material,
+            });
+        }
+        Ok((
+            BlastGraph::new(nodes, bonds, settings)?,
+            a.materials.clone(),
+        ))
     }
 }
 
@@ -380,47 +471,6 @@ impl BlastGraph {
     pub fn bond_count(&self) -> usize {
         self.bonds.len()
     }
-
-    /// `t_j = S C^T D rho` for one bond (its bond-space value), from both endpoints.
-    fn bond_term(&self, j: usize, rho: &[AngLin]) -> AngLin {
-        let [n0, n1] = self.bonds[j].nodes;
-        let (w0, w1) = (self.weight[n0], self.weight[n1]);
-        let (a0, l0) = (rho[n0].ang * w0.ang, rho[n0].lin * w0.lin);
-        let (a1, l1) = (rho[n1].ang * w1.ang, rho[n1].lin * w1.lin);
-        let s = self.col_scale[j];
-        AngLin {
-            ang: (a0 - a1) * s,
-            lin: ((l0 - l1) + (self.offset0[j].cross(a0) - self.offset1[j].cross(a1))) * s,
-        }
-    }
-
-    /// `y = D C S x` over live bonds (the device's `gatherRightMultiply`).
-    fn right_multiply(&self, x: &[AngLin], health: &[f64], out: &mut [AngLin]) {
-        for (i, o) in out.iter_mut().enumerate() {
-            let w = self.weight[i];
-            let mut acc = AngLin::ZERO;
-            if !(w.ang == 0.0 && w.lin == 0.0) {
-                for &(j, second) in &self.node_refs[self.node_begin[i]..self.node_begin[i + 1]] {
-                    if !(health[j] > 0.0) {
-                        continue;
-                    }
-                    let s = self.col_scale[j];
-                    let (ang, lin) = (x[j].ang * s, x[j].lin * s);
-                    if second {
-                        acc.ang += self.offset1[j].cross(lin) - ang;
-                        acc.lin -= lin;
-                    } else {
-                        acc.ang += ang - self.offset0[j].cross(lin);
-                        acc.lin += lin;
-                    }
-                }
-            }
-            *o = AngLin {
-                ang: acc.ang * w.ang,
-                lin: acc.lin * w.lin,
-            };
-        }
-    }
 }
 
 /// Islands of the dynamic nodes over live bonds, cut at supports (`computeIslands`).
@@ -523,6 +573,10 @@ pub struct BlastSolver {
     pub islands: Islands,
     /// The solver variable, scaled units (see the module docs).
     pub x: Vec<AngLin>,
+    /// Solve in f32, the device's precision (the reference is f64): the same recurrence in the
+    /// arithmetic the GPU runs, for checking a capped iterate, which f32 rounding moves far more
+    /// than it moves a converged one.
+    pub device_precision: bool,
     has_warm_start: bool,
     /// Settled-island skip: the last converged input per island.
     last_input: Vec<AngLin>,
@@ -539,6 +593,7 @@ impl BlastSolver {
             health,
             islands,
             x: vec![AngLin::ZERO; m],
+            device_precision: false,
             has_warm_start: false,
             last_input: vec![AngLin::ZERO; n],
             last_converged: Vec::new(),
@@ -587,23 +642,6 @@ impl BlastSolver {
             }
         };
 
-        // b = -D^-1 a (linear over L); a support's weight is replaced by 1.
-        let recip_length = 1.0 / g.length_scale;
-        let b: Vec<AngLin> = (0..n)
-            .map(|i| {
-                let w = g.weight[i];
-                let ia = if w.ang > 0.0 { 1.0 / w.ang } else { 1.0 };
-                let il = if w.lin > 0.0 {
-                    recip_length / w.lin
-                } else {
-                    recip_length
-                };
-                AngLin {
-                    ang: accel[i].ang * -ia,
-                    lin: accel[i].lin * -il,
-                }
-            })
-            .collect();
         if !warm {
             for j in 0..m {
                 if !settled_bond(j) {
@@ -612,124 +650,18 @@ impl BlastSolver {
             }
         }
         // Live bonds of skipped islands keep their impulses; everything else enters the solve.
-        let health: Vec<f64> = (0..m)
-            .map(|j| if settled_bond(j) { 0.0 } else { self.health[j] })
+        let live: Vec<bool> = (0..m)
+            .map(|j| !settled_bond(j) && self.health[j] > 0.0)
             .collect();
-        let mut rho = b.clone();
-        let mut ax = vec![AngLin::ZERO; n];
-        g.right_multiply(&self.x, &health, &mut ax);
-        for i in 0..n {
-            rho[i] = rho[i].add_scaled(ax[i], -1.0);
-        }
-
         let mut reports = vec![IslandReport::default(); islands.count];
         for k in 0..islands.count {
             reports[k].skipped = skip_mask[k];
         }
-        for i in 0..n {
-            let k = islands.node[i];
-            if k != NO_ISLAND {
-                reports[k as usize].target2 += b[i].norm2();
-            }
-        }
-        let tol2 = g.settings.tolerance * g.settings.tolerance;
-        for r in &mut reports {
-            r.target2 *= tol2;
-        }
-
-        let mut mu = vec![AngLin::ZERO; n];
-        let mut pi = vec![AngLin::ZERO; n];
-        let mut q = vec![AngLin::ZERO; n];
-        let mut w = vec![AngLin::ZERO; n];
-        let mut active: Vec<bool> = reports.iter().map(|r| !r.skipped).collect();
-        let mut z_prev = vec![0.0f64; islands.count];
-        let mut z2 = vec![0.0f64; islands.count];
-        let mut q2 = vec![0.0f64; islands.count];
-        for iteration in 0..g.settings.max_iterations {
-            if !active.iter().any(|&a| a) {
-                break;
-            }
-            // w = L rho = D C S (S C^T D rho), and z2 = |S C^T D rho|^2, each bond once.
-            let t: Vec<AngLin> = (0..m)
-                .map(|j| {
-                    if health[j] > 0.0 {
-                        g.bond_term(j, &rho)
-                    } else {
-                        AngLin::ZERO
-                    }
-                })
-                .collect();
-            z2.iter_mut().for_each(|z| *z = 0.0);
-            for j in 0..m {
-                let k = islands.bond[j];
-                if health[j] > 0.0 && k != NO_ISLAND {
-                    z2[k as usize] += t[j].norm2();
-                }
-            }
-            g.right_multiply(&t, &health, &mut w);
-            for k in 0..islands.count {
-                if active[k] {
-                    reports[k].residual2 = z2[k];
-                    if z2[k] <= reports[k].target2 {
-                        active[k] = false;
-                        reports[k].converged = true;
-                    }
-                }
-            }
-            // pi = rho + beta pi ; q = w + beta q.
-            q2.iter_mut().for_each(|x| *x = 0.0);
-            for i in 0..n {
-                let k = islands.node[i];
-                if k == NO_ISLAND || !active[k as usize] {
-                    continue;
-                }
-                let k = k as usize;
-                let beta = if iteration != 0 && z_prev[k] > 0.0 {
-                    z2[k] / z_prev[k]
-                } else {
-                    0.0
-                };
-                pi[i] = rho[i].add_scaled(pi[i], beta);
-                q[i] = w[i].add_scaled(q[i], beta);
-                q2[k] += q[i].norm2();
-            }
-            for k in 0..islands.count {
-                if active[k] {
-                    if !(q2[k] > 0.0) || !q2[k].is_finite() {
-                        active[k] = false;
-                    }
-                    z_prev[k] = z2[k];
-                }
-            }
-            // mu += alpha pi ; rho -= alpha q.
-            for i in 0..n {
-                let k = islands.node[i];
-                if k == NO_ISLAND || !active[k as usize] {
-                    continue;
-                }
-                let k = k as usize;
-                let alpha = z2[k] / q2[k];
-                mu[i] = mu[i].add_scaled(pi[i], alpha);
-                rho[i] = rho[i].add_scaled(q[i], -alpha);
-            }
-            for k in 0..islands.count {
-                if active[k] {
-                    reports[k].iterations += 1;
-                }
-            }
-        }
-
-        // x = x0 + S C^T D mu.
-        for j in 0..m {
-            if settled_bond(j) {
-                continue;
-            }
-            if !(self.health[j] > 0.0) {
-                self.x[j] = AngLin::ZERO;
-                continue;
-            }
-            let t = g.bond_term(j, &mu);
-            self.x[j] = self.x[j].add_scaled(t, 1.0);
+        let enters: Vec<bool> = (0..m).map(|j| !settled_bond(j)).collect();
+        if self.device_precision {
+            cgls::<f32>(g, islands, accel, &live, &enters, &mut self.x, &mut reports);
+        } else {
+            cgls::<f64>(g, islands, accel, &live, &enters, &mut self.x, &mut reports);
         }
 
         self.has_warm_start = true;
@@ -780,6 +712,287 @@ impl BlastSolver {
             dt,
             self.graph.settings.damage_rate,
         )
+    }
+}
+
+/// The arithmetic the solve runs in: f64 (the reference) or f32 (the device's).
+trait Real:
+    Copy
+    + Default
+    + PartialOrd
+    + std::ops::Add<Output = Self>
+    + std::ops::Sub<Output = Self>
+    + std::ops::Mul<Output = Self>
+    + std::ops::Div<Output = Self>
+    + std::ops::Neg<Output = Self>
+{
+    fn of(x: f64) -> Self;
+    fn to(self) -> f64;
+    fn finite(self) -> bool;
+}
+
+impl Real for f64 {
+    fn of(x: f64) -> Self {
+        x
+    }
+    fn to(self) -> f64 {
+        self
+    }
+    fn finite(self) -> bool {
+        self.is_finite()
+    }
+}
+
+impl Real for f32 {
+    fn of(x: f64) -> Self {
+        x as f32
+    }
+    fn to(self) -> f64 {
+        self as f64
+    }
+    fn finite(self) -> bool {
+        self.is_finite()
+    }
+}
+
+/// An angular/linear pair in `T`.
+#[derive(Clone, Copy, Default)]
+struct Pair<T> {
+    a: [T; 3],
+    l: [T; 3],
+}
+
+fn add<T: Real>(u: [T; 3], v: [T; 3]) -> [T; 3] {
+    [u[0] + v[0], u[1] + v[1], u[2] + v[2]]
+}
+fn sub<T: Real>(u: [T; 3], v: [T; 3]) -> [T; 3] {
+    [u[0] - v[0], u[1] - v[1], u[2] - v[2]]
+}
+fn scale<T: Real>(u: [T; 3], k: T) -> [T; 3] {
+    [u[0] * k, u[1] * k, u[2] * k]
+}
+fn cross<T: Real>(u: [T; 3], v: [T; 3]) -> [T; 3] {
+    [
+        u[1] * v[2] - u[2] * v[1],
+        u[2] * v[0] - u[0] * v[2],
+        u[0] * v[1] - u[1] * v[0],
+    ]
+}
+fn dot<T: Real>(u: [T; 3], v: [T; 3]) -> T {
+    u[0] * v[0] + u[1] * v[1] + u[2] * v[2]
+}
+fn of3<T: Real>(v: Vec3) -> [T; 3] {
+    [T::of(v.x), T::of(v.y), T::of(v.z)]
+}
+fn to3<T: Real>(v: [T; 3]) -> Vec3 {
+    Vec3::new(v[0].to(), v[1].to(), v[2].to())
+}
+impl<T: Real> Pair<T> {
+    fn norm2(self) -> T {
+        dot(self.a, self.a) + dot(self.l, self.l)
+    }
+    fn plus(self, o: Pair<T>, k: T) -> Pair<T> {
+        Pair {
+            a: add(self.a, scale(o.a, k)),
+            l: add(self.l, scale(o.l, k)),
+        }
+    }
+}
+
+/// The node-space CGLS of [`BlastSolver::solve`] in `T`, every island at once: `b`, the
+/// residual of the warm start, the iterations, and `x += B^T mu` over the bonds that `enter`
+/// (live bonds `live` couple). Fills each report's iterations, convergence and norms.
+fn cgls<T: Real>(
+    g: &BlastGraph,
+    islands: &Islands,
+    accel: &[AngLin],
+    live: &[bool],
+    enters: &[bool],
+    x_out: &mut [AngLin],
+    reports: &mut [IslandReport],
+) {
+    let (n, m) = (g.node_count(), g.bond_count());
+    let zero = T::default();
+    let w: Vec<(T, T)> = g
+        .weight
+        .iter()
+        .map(|w| (T::of(w.ang), T::of(w.lin)))
+        .collect();
+    let s: Vec<T> = g.col_scale.iter().map(|&s| T::of(s)).collect();
+    let o0: Vec<[T; 3]> = g.offset0.iter().map(|&o| of3(o)).collect();
+    let o1: Vec<[T; 3]> = g.offset1.iter().map(|&o| of3(o)).collect();
+    let mut x: Vec<Pair<T>> = x_out
+        .iter()
+        .map(|v| Pair {
+            a: of3(v.ang),
+            l: of3(v.lin),
+        })
+        .collect();
+    // t_j = S C^T D v.
+    let bond_term = |j: usize, v: &[Pair<T>]| -> Pair<T> {
+        let [n0, n1] = g.bonds[j].nodes;
+        let (a0, l0) = (scale(v[n0].a, w[n0].0), scale(v[n0].l, w[n0].1));
+        let (a1, l1) = (scale(v[n1].a, w[n1].0), scale(v[n1].l, w[n1].1));
+        Pair {
+            a: scale(sub(a0, a1), s[j]),
+            l: scale(
+                add(sub(l0, l1), sub(cross(o0[j], a0), cross(o1[j], a1))),
+                s[j],
+            ),
+        }
+    };
+    // (D C S y)_i over live bonds (gatherRightMultiply).
+    let gather = |i: usize, y: &[Pair<T>]| -> Pair<T> {
+        let mut acc = Pair::<T>::default();
+        if w[i].0 == zero && w[i].1 == zero {
+            return acc;
+        }
+        for &(j, second) in &g.node_refs[g.node_begin[i]..g.node_begin[i + 1]] {
+            if !live[j] {
+                continue;
+            }
+            let (ya, yl) = (scale(y[j].a, s[j]), scale(y[j].l, s[j]));
+            if second {
+                acc.a = add(acc.a, sub(cross(o1[j], yl), ya));
+                acc.l = sub(acc.l, yl);
+            } else {
+                acc.a = add(acc.a, sub(ya, cross(o0[j], yl)));
+                acc.l = add(acc.l, yl);
+            }
+        }
+        Pair {
+            a: scale(acc.a, w[i].0),
+            l: scale(acc.l, w[i].1),
+        }
+    };
+
+    // b = -D^-1 a (linear over L); a support's weight is replaced by 1.
+    let recip_length = T::of(1.0 / g.length_scale);
+    let one = T::of(1.0);
+    let b: Vec<Pair<T>> = (0..n)
+        .map(|i| {
+            let ia = if w[i].0 > zero { one / w[i].0 } else { one };
+            let il = if w[i].1 > zero {
+                recip_length / w[i].1
+            } else {
+                recip_length
+            };
+            Pair {
+                a: scale(of3(accel[i].ang), -ia),
+                l: scale(of3(accel[i].lin), -il),
+            }
+        })
+        .collect();
+    let mut rho: Vec<Pair<T>> = (0..n).map(|i| b[i].plus(gather(i, &x), -one)).collect();
+    let mut target2 = vec![zero; islands.count];
+    for i in 0..n {
+        let k = islands.node[i];
+        if k != NO_ISLAND {
+            target2[k as usize] = target2[k as usize] + b[i].norm2();
+        }
+    }
+    let tol = T::of(g.settings.tolerance);
+    for t in &mut target2 {
+        *t = *t * tol * tol;
+    }
+
+    let mut mu = vec![Pair::<T>::default(); n];
+    let mut pi = vec![Pair::<T>::default(); n];
+    let mut q = vec![Pair::<T>::default(); n];
+    let mut active: Vec<bool> = reports.iter().map(|r| !r.skipped).collect();
+    let mut z_prev = vec![zero; islands.count];
+    let mut z2 = vec![zero; islands.count];
+    let mut q2 = vec![zero; islands.count];
+    for iteration in 0..g.settings.max_iterations {
+        if !active.iter().any(|&a| a) {
+            break;
+        }
+        // t = B^T rho, and z2 = |t|^2, each bond once.
+        let t: Vec<Pair<T>> = (0..m)
+            .map(|j| {
+                if live[j] {
+                    bond_term(j, &rho)
+                } else {
+                    Pair::default()
+                }
+            })
+            .collect();
+        z2.iter_mut().for_each(|z| *z = zero);
+        for j in 0..m {
+            let k = islands.bond[j];
+            if live[j] && k != NO_ISLAND {
+                z2[k as usize] = z2[k as usize] + t[j].norm2();
+            }
+        }
+        for k in 0..islands.count {
+            if active[k] {
+                reports[k].residual2 = z2[k].to();
+                if z2[k] <= target2[k] {
+                    active[k] = false;
+                    reports[k].converged = true;
+                }
+            }
+        }
+        // pi = rho + beta pi ; q = B t + beta q.
+        q2.iter_mut().for_each(|v| *v = zero);
+        for i in 0..n {
+            let k = islands.node[i];
+            if k == NO_ISLAND || !active[k as usize] {
+                continue;
+            }
+            let k = k as usize;
+            let beta = if iteration != 0 && z_prev[k] > zero {
+                z2[k] / z_prev[k]
+            } else {
+                zero
+            };
+            pi[i] = rho[i].plus(pi[i], beta);
+            q[i] = gather(i, &t).plus(q[i], beta);
+            q2[k] = q2[k] + q[i].norm2();
+        }
+        for k in 0..islands.count {
+            if active[k] {
+                if !(q2[k] > zero) || !q2[k].finite() {
+                    active[k] = false;
+                }
+                z_prev[k] = z2[k];
+            }
+        }
+        // mu += alpha pi ; rho -= alpha q.
+        for i in 0..n {
+            let k = islands.node[i];
+            if k == NO_ISLAND || !active[k as usize] {
+                continue;
+            }
+            let k = k as usize;
+            let alpha = z2[k] / q2[k];
+            mu[i] = mu[i].plus(pi[i], alpha);
+            rho[i] = rho[i].plus(q[i], -alpha);
+        }
+        for k in 0..islands.count {
+            if active[k] {
+                reports[k].iterations += 1;
+            }
+        }
+    }
+    for (k, r) in reports.iter_mut().enumerate() {
+        r.target2 = target2[k].to();
+    }
+
+    // x = x0 + S C^T D mu.
+    for j in 0..m {
+        if !enters[j] {
+            continue;
+        }
+        x[j] = if live[j] {
+            x[j].plus(bond_term(j, &mu), one)
+        } else {
+            Pair::default()
+        };
+        x_out[j] = AngLin {
+            ang: to3(x[j].a),
+            lin: to3(x[j].l),
+        };
     }
 }
 
