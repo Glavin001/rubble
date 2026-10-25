@@ -408,6 +408,95 @@ It is lossy, and it is not adopted. Large events are real-time at physical
 stiffness: a crater of radius 450 m at 16 cells/R has 28 m cells, so 1–2
 substeps.
 
+## Browser and demo (2026-10-25)
+
+**One plan.** `engine_terrain::plan::TerrainPlan` holds the terrain pool's host
+state (limits, `MpmParams`, the material's wave speed). It turns each call into
+host writes plus the dispatches of one compute pass:
+- activation, the Z-model source, uncoupled and coupled frames of substeps,
+  the deposits, and the bake;
+- a coupled substep runs `mpm_couple_gather` and `mpm_couple_apply` between
+  `mpm_grid` and `mpm_g2p`.
+
+`WgpuSim` replays it, and so does the browser. `RegionClock` is the open
+region's frame schedule: speed-bound substeps, and settling with the coupled
+bodies and a strike's hold. The refactor is bit-identical. The ignored
+fingerprints `engine-webgpu/tests/terrain_fingerprint.rs` and
+`engine-world/tests/terrain_fingerprint.rs` match the host before it, through
+load, activate, source, uncoupled and coupled frames, and the bake.
+
+**Browser.** `engine-vehicle-wasm`'s `TerrainStep` is the plan plus the region
+lifecycle `engine-world` runs natively (π-scaled impact and explosion regions,
+coupled frames, the counters' check, the bake once settled). It returns
+commands as words. `terrain-host.mjs` allocates bindings 37–51 from the
+plan's sizes, builds the kernels, executes the words and copies the counters
+back. Nothing else is in JavaScript.
+- `mpm_grid` binds 9 storage buffers. `world-host.mjs`'s `buildKernels` fails
+  by name when the device allows fewer per stage.
+- `tests/terrain_plan.test.mjs` (node) checks the decoded plan and the
+  lifecycle through wasm.
+
+**`impact.html`.** A stony 8 m impactor at 20 km/s (308 kt) into dry sand at
+E = 50 MPa:
+- the transient radius is 151 m, cells are 9.4 m, the margin is 1.0 R, and the
+  region holds 0.91 M particles;
+- views: contact, ground flow, a cross-section through the impact point
+  (particles coloured by starting depth), a tracked particle followed into its
+  ejecta parcel, material returning, the baked crater, and a monster truck
+  driving from the crater floor up its wall.
+
+Frame cost in Chrome on the Mac it was built on. These are GPU-bound wall times
+from `frames()`, rendering included; another session was using the GPU.
+
+| Sim time | Substeps | Mean (ms) | Max (ms) |
+|---|---|---|---|
+| strike frame (activation, source) | 10 | 94 | |
+| 0–0.5 s | 9–10 | 51 | 62 |
+| 0.5–1 s | 6–9 | 43 | 51 |
+| 1–2 s | 4–6 | 28 | 36 |
+| 2–3 s | 3–4 | 21 | 26 |
+| 3–6 s | 2–3 | 16.3 | 21 |
+| 6–12 s | 2 | 14.7 | 16 |
+
+- Real time is reached about 3 s in. Before that, the material's flow speed
+  (850 m/s at the source, from `max_speed`) sets the substeps, not stiffness.
+- At margin 0.6 the region holds 0.60 M particles and its 2-substep frames take
+  10.6 ms. But the rim then forms at the box edge, as a square rampart (as in
+  the crater table above).
+- A 1 kt buried charge (R 47 m, 2.9 m cells) needs 6 substeps (36 ms) at
+  t = 2.5 s: smaller events are not real-time.
+
+**The crater** (default event, baked at 12.9 s; azimuthal mean of the height
+change):
+- rim crest at 250 m, 1.28× the predicted final rim of 196 m;
+- deepest point 75 m, 2× the predicted transient depth of 38 m;
+- the same excess as the crater validation above.
+
+**Open points.**
+- **The region does not settle.** In a margin-0.6 run, 20 s after the strike,
+  half the particles still move faster than 1 m/s, deep ones at the far side of the box included,
+  and `max_speed` decays only from 5.7 m/s (15 s) to 2.4 m/s (35 s). The most
+  likely cause is elastic waves trapped by the box's walls and bed: real ground
+  radiates them away. This is not verified.
+  - So the rest tolerance (5 cm/s) is not reached soon. The demo bakes at a set
+    time (`World::terrain_close` semantics) once nothing is in flight, and
+    says so in its UI.
+- **The bake roughens the surface.** Neighbouring 9.4 m samples of the baked
+  rim differ by up to about 10 m, while the particle surface just before the
+  bake is smooth.
+  - The bake bins every particle of a column about 300 m deep by its nearest
+    sample. A small sideways shift of deep material therefore moves a lot of
+    height between samples.
+  - Deposits are whole parcels on one sample: 1.2 m each at these cells.
+  - The truck cannot cross the baked rim, so it starts on the floor.
+  - A smoother bake (spline weights, or binning only the moved surface) would
+    change the design and needs a decision.
+- **Ejecta escape the field.** About 0.43 M m³ leaves the 6 R field's footprint
+  by the bake (the core moves at 1.4 km/s).
+- **Not in the browser yet:** the strike look-ahead (`terrain_watch`, binding 52)
+  and soil ruts. `engine-world/src/terrain.rs` keeps its own copy of the frame
+  schedule; it should switch to `RegionClock`.
+
 ## T5 materials (2026-10-24)
 
 Cohesive soil and damage-softening rock, beside dry sand. Each has its own kernel

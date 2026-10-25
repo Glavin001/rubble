@@ -1,0 +1,1116 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Cache-Control" content="no-store" />
+  <title>Rubble impact — deformable terrain (WebGPU MPM)</title>
+  <style>
+    [hidden] { display: none !important; }
+    html, body { margin: 0; height: 100%; background: #0e1117; color: #dfe4ee; font: 13px/1.4 ui-sans-serif, system-ui, sans-serif; overflow: hidden; }
+    canvas { width: 100%; height: 100%; display: block; touch-action: none; }
+    .panel { position: fixed; background: rgba(14, 17, 23, 0.82); border: 1px solid #2c3346; border-radius: 8px; padding: 10px 12px; backdrop-filter: blur(4px); }
+    #hud { top: 12px; left: 12px; width: 26rem; max-width: calc(100vw - 48px); max-height: calc(100vh - 140px); overflow: auto; }
+    #hud h1 { font-size: 15px; margin: 0 0 6px; font-weight: 650; }
+    .row { display: flex; align-items: center; gap: 6px; margin: 4px 0; flex-wrap: wrap; }
+    .muted { color: #8d96aa; }
+    .small { font-size: 12px; }
+    label.ctl { display: grid; grid-template-columns: 8.5rem 1fr 4.6rem; align-items: center; gap: 6px; margin: 2px 0; }
+    label.ctl output { text-align: right; font-variant-numeric: tabular-nums; }
+    input[type=range] { width: 100%; }
+    select, button { background: #1d2333; color: #dfe4ee; border: 1px solid #3a4360; border-radius: 5px; padding: 3px 8px; font: inherit; cursor: pointer; }
+    button:hover { border-color: #6c7aa6; }
+    button.on { background: #34406a; border-color: #8090c8; }
+    button.go { background: #6a2a1a; border-color: #c0603a; font-weight: 650; }
+    #err { color: #ff8e8e; white-space: pre-wrap; }
+    kbd { background: #252c3d; border: 1px solid #3a4360; border-radius: 3px; padding: 0 4px; font-size: 11px; }
+    #timeline { left: 12px; right: 12px; bottom: 12px; padding: 8px 12px; }
+    #bar { position: relative; height: 22px; background: #161b27; border: 1px solid #2c3346; border-radius: 4px; margin-top: 6px; overflow: hidden; }
+    #bar .seg { position: absolute; top: 0; bottom: 0; display: flex; align-items: center; justify-content: center; font-size: 11px; color: #c9d0e0; border-right: 1px solid #2c3346; white-space: nowrap; overflow: hidden; }
+    #bar .now { position: absolute; top: 0; bottom: 0; width: 2px; background: #ffcc66; }
+    #views button { min-width: 5.4rem; }
+    #stats { font-variant-numeric: tabular-nums; }
+    .k { color: #8d96aa; }
+    table.st { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+    table.st td { padding: 0 4px 0 0; vertical-align: top; }
+    table.st td:nth-child(2n) { text-align: right; padding-right: 10px; color: #e8ecf5; }
+    #legend { right: 12px; top: 12px; width: 15rem; font-size: 12px; }
+    .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div id="hud" class="panel">
+    <div class="row" style="justify-content:space-between;margin:0"><h1>Meteor impact · deformable terrain</h1><button id="fold" title="Fold the panel">▾</button></div>
+    <div id="foldBody">
+    <div class="muted small">GPU MLS-MPM sand (Mohr–Coulomb, physical stiffness) in an active region of a heightfield,
+      opened by a π-scaled Z-model source and baked back when it settles. Runs at 1× (1/60 s per frame).</div>
+    <div class="row" style="margin-top:8px">
+      <select id="mode"><option value="impact">Meteor impact</option><option value="explosion">Buried charge</option></select>
+      <button id="launch" class="go">Launch <kbd>Space</kbd></button>
+      <button id="replay">Replay <kbd>R</kbd></button>
+      <button id="bake">Bake now</button>
+    </div>
+    <div id="impactCtl">
+      <label class="ctl"><span>Meteor radius</span><input id="radius" type="range" min="1" max="12" step="0.5" /><output id="radiusOut"></output></label>
+      <label class="ctl"><span>Speed</span><input id="speed" type="range" min="5" max="40" step="1" /><output id="speedOut"></output></label>
+      <label class="ctl"><span>Density</span><select id="density"><option value="3000">stone 3000 kg/m³</option><option value="7800">iron 7800 kg/m³</option><option value="1000">ice 1000 kg/m³</option></select><span></span></label>
+      <label class="ctl"><span>Angle</span><input id="angle" type="range" min="90" max="90" value="90" disabled /><output>90° only</output></label>
+      <div class="muted small">Vertical only: the source is the axisymmetric Z-model field, so oblique impacts are not supported yet.</div>
+    </div>
+    <div id="explosionCtl" hidden>
+      <label class="ctl"><span>Charge (TNT)</span><input id="charge" type="range" min="3" max="7" step="0.25" /><output id="chargeOut"></output></label>
+      <label class="ctl"><span>Depth of burial</span><input id="depth" type="range" min="0.5" max="40" step="0.5" /><output id="depthOut"></output></label>
+      <div class="muted small">π-scaling covers scaled depths of burial 1–2 (depth ÷ the charge's cube-root size); outside that the source is refused.</div>
+    </div>
+    <label class="ctl"><span>Region margin</span><select id="margin"><option value="1">1.0 R (~0.9 M particles)</option><option value="0.6">0.6 R (faster; the rim forms at the box edge)</option><option value="2">2.0 R (engine default; ~3.5 M particles, too many here)</option></select><span></span></label>
+    <label class="ctl"><span>Bake</span><select id="bakeMode"><option value="time" id="bakeAtOpt">at t = 12 s, nothing in flight</option><option value="settle">when settled (&lt; 5 cm/s for 0.5 s)</option></select><span></span></label>
+    <div class="muted small">The region keeps moving: 20 s after the strike half its particles are still faster than 1 m/s, deep ones too (most likely elastic waves trapped by its walls and bed), so it does not reach the rest tolerance soon. A timed bake is World::terrain_close at that time, once nothing is in flight; it freezes the motion left.</div>
+    <div class="row muted small" id="apply" hidden><button id="applyBtn">Apply (reloads)</button> settings changed</div>
+    <div id="pred" class="small" style="margin-top:6px"></div>
+    <div id="stats" class="small" style="margin-top:6px"></div>
+    </div>
+    <div id="status" class="muted small">starting…</div>
+    <div id="err"></div>
+  </div>
+  <div id="legend" class="panel">
+    <div><strong>Colours</strong></div>
+    <div class="row"><button id="colStrata" class="on">Strata</button><button id="colSpeed">Speed</button><button id="cutBtn">Cut <kbd>X</kbd></button></div>
+    <div id="legendBody" class="muted"></div>
+  </div>
+  <div id="timeline" class="panel">
+    <div class="row" id="views">
+      <button data-view="auto" class="on">Auto</button>
+      <button data-view="contact">Contact</button>
+      <button data-view="flow">Ground flow</button>
+      <button data-view="section">Cross-section</button>
+      <button data-view="parcel">Tracked parcel</button>
+      <button data-view="return">Return</button>
+      <button data-view="crater">Crater</button>
+      <button data-view="drive">Drive</button>
+      <span class="muted small" style="margin-left:auto">drag to orbit · scroll to zoom · <kbd>1</kbd>–<kbd>8</kbd> views · drive <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></span>
+    </div>
+    <div id="bar"></div>
+  </div>
+  <script type="module">
+    import { createWorld, sceneCapacity } from './world-host.mjs';
+    import { M, L, WHEEL_RIM_MATERIAL, heightFieldArena } from './vehicle.mjs';
+    import { createTerrain, TerrainStep, T } from './terrain-host.mjs';
+
+    const statusEl = document.getElementById('status');
+    const errEl = document.getElementById('err');
+    let failed = false;
+    const fail = (e) => { failed = true; errEl.textContent = String((e && e.message) || e) + (e && e.stack ? '\n' + e.stack.split('\n').slice(1, 4).join('\n') : ''); statusEl.textContent = 'stopped'; window.__failed = String((e && e.message) || e); };
+    addEventListener('unhandledrejection', (e) => { fail(e.reason); e.preventDefault(); });
+    addEventListener('error', (e) => fail(e.error || e.message));
+
+    // ---------------------------------------------------------------- settings (URL)
+    const qs = new URLSearchParams(location.search);
+    const num = (k, d) => (qs.has(k) && Number.isFinite(Number(qs.get(k))) ? Number(qs.get(k)) : d);
+    const S = {
+      mode: qs.get('mode') === 'explosion' ? 'explosion' : 'impact',
+      radius: num('radius', 8), speed: num('speed', 20), density: num('density', 3000),
+      charge: num('charge', 6), depth: num('depth', 8), margin: num('margin', 1),
+      bake: qs.get('bake') === 'settle' ? 'settle' : 'time', bakeAt: num('bakeAt', 12),
+    };
+    const $ = (id) => document.getElementById(id);
+    const fold = (on) => { $('foldBody').hidden = on; $('fold').textContent = on ? '▸' : '▾'; };
+    $('fold').onclick = () => fold(!$('foldBody').hidden);
+    if (qs.get('hud') === '0') fold(true);
+    $('mode').value = S.mode; $('radius').value = S.radius; $('speed').value = S.speed; $('density').value = String(S.density);
+    $('charge').value = S.charge; $('depth').value = S.depth; $('margin').value = String(S.margin); $('bakeMode').value = S.bake;
+    $('bakeAtOpt').textContent = `at t = ${S.bakeAt} s, nothing in flight`;
+    const showCtl = () => { $('impactCtl').hidden = $('mode').value !== 'impact'; $('explosionCtl').hidden = $('mode').value === 'impact'; };
+    showCtl();
+    const outs = () => {
+      $('radiusOut').textContent = `${Number($('radius').value).toFixed(2)} m`;
+      $('speedOut').textContent = `${$('speed').value} km/s`;
+      $('chargeOut').textContent = `${fmtMass(10 ** Number($('charge').value))}`;
+      $('depthOut').textContent = `${Number($('depth').value).toFixed(1)} m`;
+    };
+    const fmtMass = (kg) => (kg >= 1e6 ? `${(kg / 1e6).toFixed(1)} kt` : kg >= 1e3 ? `${(kg / 1e3).toFixed(1)} t` : `${kg.toFixed(0)} kg`);
+    const changed = () => { outs(); showCtl(); $('apply').hidden = false; };
+    for (const id of ['mode', 'radius', 'speed', 'density', 'charge', 'depth', 'margin', 'bakeMode']) $(id).addEventListener('input', changed);
+    outs();
+    $('applyBtn').onclick = () => {
+      const u = new URL(location.href);
+      u.searchParams.set('mode', $('mode').value);
+      for (const k of ['radius', 'speed', 'density', 'depth', 'margin']) u.searchParams.set(k, $(k).value);
+      u.searchParams.set('charge', $('charge').value);
+      u.searchParams.set('bake', $('bakeMode').value);
+      location.href = u.href;
+    };
+
+    // ---------------------------------------------------------------- device
+    if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
+    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+    if (!adapter) throw new Error('no WebGPU adapter');
+    const timestamps = adapter.features.has('timestamp-query');
+    const device = await adapter.requestDevice({
+      requiredFeatures: timestamps ? ['timestamp-query'] : [],
+      requiredLimits: {
+        maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage,
+        maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+        maxBufferSize: adapter.limits.maxBufferSize,
+      },
+    });
+    device.lost.then((i) => fail('device lost: ' + i.message));
+    device.addEventListener('uncapturederror', (e) => fail('gpu: ' + ((e.error && e.error.message) || e.error)));
+    const canvas = $('c');
+    const context = canvas.getContext('webgpu');
+    const format = navigator.gpu.getPreferredCanvasFormat();
+    const configure = () => {
+      const dpr = Math.min(devicePixelRatio || 1, 2);
+      canvas.width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
+      canvas.height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
+      context.configure({ device, format, alphaMode: 'opaque' });
+    };
+    configure();
+    addEventListener('resize', configure);
+
+    // ---------------------------------------------------------------- the event (Rust: π-scaling)
+    // The terrain's settings: dry sand at physical stiffness (E = 50 MPa), engine
+    // limits sized for the browser. Every limit fails by name when exceeded.
+    const G = 9.81;
+    const SETTINGS = {
+      config: { max_particles: 3 << 19, max_blocks: 8192, max_parcels: 1 << 18, max_substeps: 1024,
+        max_columns: 1 << 17, max_field_samples: 1 << 19, max_coupled: 64 },
+      region_margin: S.margin,
+      // The region's rest tolerance: it bakes once its fastest particle stays
+      // under 5 cm/s for half a second with nothing in flight.
+      settle_speed: 0.05, settle_frames: 30,
+    };
+    const probe = new TerrainStep(JSON.stringify(SETTINGS));
+    const settingsInfo = JSON.parse(probe.settings());
+    let pred;
+    try {
+      pred = S.mode === 'impact'
+        ? JSON.parse(probe.predict_impact(S.radius, S.density, S.speed * 1000, G))
+        : JSON.parse(probe.predict_explosion(10 ** S.charge, S.depth, G));
+    } finally { probe.free(); }
+    const R = pred.crater.radius;
+    const DXR = pred.dx; // region cell (m)
+    const PPC = settingsInfo.config.particles_per_cell_axis;
+    // The heightfield's samples are the region's cells (the native crater tests'
+    // spacing: each baked column holds PPC² particle columns), out to 6
+    // transient radii: room for the ejecta blanket and a drive in.
+    const SP = DXR;
+    const HALF = 6 * R;
+    const NX = 2 * Math.ceil(HALF / SP) + 1, NZ = NX;
+    const X0 = -0.5 * (NX - 1) * SP, Z0 = X0;
+    // Gently rolling plain, flat at the impact point (the scaling assumes level ground).
+    const amp = 0.01 * R;
+    const plain = (x, z) => {
+      const r = Math.hypot(x, z) / R;
+      const fade = Math.min(1, Math.max(0, (r - 0.4) / 1.2));
+      return fade * amp * (Math.sin(x / (1.7 * R) + 0.4) * Math.cos(z / (2.1 * R)) + 0.6 * Math.sin((x + z) / (0.9 * R)));
+    };
+    const initialHeights = new Float32Array(NX * NZ);
+    for (let j = 0; j < NZ; j++) for (let i = 0; i < NX; i++) initialHeights[j * NX + i] = plain(X0 + i * SP, Z0 + j * SP);
+    let heights = initialHeights.slice();
+    const field = { nx: NX, nz: NZ, dx: SP, dz: SP, origin: [0, 0, 0] };
+    const arena0 = heightFieldArena(NX, NZ, SP, SP, initialHeights);
+
+    // ---------------------------------------------------------------- world
+    const cap = { ...sceneCapacity(256, 512), maxHull: arena0.records.length / 4 + 64 };
+    const world = await createWorld(device, { cap, vehicleCap: { maxVehicles: 4, maxWheels: 16, maxCurvePoints: 512, maxDiffs: 8, maxAntiRolls: 8, maxParts: 16, maxRays: 16 },
+      status: (s) => { statusEl.textContent = s; } });
+    const DT = 1 / 60;
+    Object.assign(world.params, { dt: DT, iterations: 8, gravityY: -G, flags: M.FLAG_SPEC_VELOCITY });
+    world.setMaterial(0, 0.9);
+    world.setMaterial(WHEEL_RIM_MATERIAL, 0.9);
+    const groundBody = world.addBody({ p: [0, 0, 0], flags: 0 });
+    world.setHullRecords(arena0.records);
+    const GROUND = world.addCollider({ body: groundBody, shape: 5, material: 0, params: arena0.params });
+    const HF_BASE = arena0.base;
+    const initial = world.snapshot();
+
+    statusEl.textContent = 'building terrain kernels…';
+    const terrain = await createTerrain(world, SETTINGS, { status: (s) => { statusEl.textContent = s; } });
+    const maxParticles = terrain.settings.config.max_particles, maxParcels = terrain.settings.config.max_parcels;
+
+    const surfaceAt = (x, z) => {
+      const fx = (x - X0) / SP, fz = (z - Z0) / SP;
+      if (fx < 0 || fz < 0 || fx > NX - 1 || fz > NZ - 1) return 0;
+      const i = Math.min(Math.floor(fx), NX - 2), j = Math.min(Math.floor(fz), NZ - 2);
+      const u = fx - i, v = fz - j;
+      const h = (a, b) => heights[(j + b) * NX + i + a];
+      return u >= v ? h(0, 0) + u * (h(1, 0) - h(0, 0)) + v * (h(1, 1) - h(1, 0)) : h(0, 0) + v * (h(0, 1) - h(0, 0)) + u * (h(1, 1) - h(0, 1));
+    };
+    const IMPACT = [0, surfaceAt(0, 0), 0];
+
+    // Prediction panel.
+    {
+      const c = pred.crater;
+      const kt = (pred.energy / 4.184e12);
+      $('pred').innerHTML = `<table class="st">
+        <tr><td class="k">π-scaling transient R</td><td>${c.radius.toFixed(1)} m</td><td class="k">depth</td><td>${c.depth.toFixed(1)} m</td></tr>
+        <tr><td class="k">final rim radius</td><td>${c.final_rim_radius.toFixed(1)} m</td><td class="k">formation</td><td>${c.formation_time.toFixed(2)} s</td></tr>
+        <tr><td class="k">energy</td><td>${kt >= 1 ? kt.toFixed(1) + ' kt' : (kt * 1000).toFixed(1) + ' t'} TNT</td><td class="k">${S.mode === 'impact' ? 'impactor mass' : 'charge'}</td><td>${S.mode === 'impact' ? fmtMass(pred.mass) : fmtMass(10 ** S.charge)}</td></tr>
+        <tr><td class="k">region cell dx</td><td>${DXR.toFixed(2)} m</td><td class="k">source peak</td><td>${pred.source_speed.toFixed(0)} m/s</td></tr>
+        <tr><td class="k">sand P-wave</td><td>${settingsInfo.sand.p_wave_speed.toFixed(0)} m/s</td><td class="k">E</td><td>${(settingsInfo.sand.youngs_modulus / 1e6).toFixed(0)} MPa</td></tr></table>`;
+    }
+
+    // ---------------------------------------------------------------- renderer
+    const LAYER = Math.max(0.5, R / 9);
+    const SHADER = /* wgsl */`
+struct Body { position: vec3f, invMass: f32, orientation: vec4f, invInertia: vec3f, flags: u32,
+  linearVel: vec3f, sleepTimer: f32, angularVel: vec3f, generation: u32, initialPos: vec3f, initialPad: f32, initialRot: vec4f };
+struct Collider { body: u32, shape: u32, material: u32, generation: u32, localPos: vec3f, density: f32, localRot: vec4f, params: vec4f };
+struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec4f, f1: vec4f, f2: vec4f };
+struct Frame {
+  viewProj: mat4x4f, eye: vec4f, light: vec4f,
+  clip: vec4f,      // cut plane: normal, offset (hidden where dot(n, p) > w); w unused when opts.x = 0
+  opts: vec4f,      // cut on, colour mode (0 strata, 1 speed), particle spacing, layer thickness
+  datum: vec4f,     // strata datum y, flash, region open, curtain bottom y
+  meteor: vec4f,    // impactor centre, radius (0: none)
+  tail: vec4f,      // the streak's far end, glow
+  right: vec4f, up: vec4f,
+  track: vec4f,     // tracked parcel, on
+  window: vec4f,    // activation window x0, z0, x1, z1 (bed under the region)
+};
+@group(0) @binding(0) var<storage, read> bodies: array<Body>;
+@group(0) @binding(1) var<uniform> frame: Frame;
+@group(0) @binding(2) var<storage, read> cols: array<Collider>;
+@group(0) @binding(3) var<storage, read> hulls: array<vec4u>;
+@group(0) @binding(4) var<storage, read> parts: array<Particle>;
+@group(0) @binding(5) var<storage, read> rest: array<vec4f>;
+@group(0) @binding(6) var<storage, read> parcels: array<vec4f>;
+@group(0) @binding(7) var<storage, read> counters: array<u32>;
+@group(0) @binding(8) var<storage, read> vdata: array<vec4u>;
+@group(0) @binding(9) var<storage, read> h0: array<f32>;
+
+fn qrot(q: vec4f, v: vec3f) -> vec3f {
+  let u = q.xyz;
+  return u * (2.0 * dot(u, v)) + v * (q.w * q.w - dot(u, u)) + cross(u, v) * (2.0 * q.w);
+}
+fn hash(n: u32) -> f32 { var x = n * 747796405u + 2891336453u; x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u; return f32((x >> 22u) ^ x) / 4294967295.0; }
+fn shade(c: vec3f, n: vec3f, w: vec3f) -> vec3f {
+  let l = normalize(frame.light.xyz);
+  let diff = max(dot(n, l), 0.0);
+  let v = normalize(frame.eye.xyz - w);
+  let spec = pow(max(dot(reflect(-l, n), v), 0.0), 24.0) * 0.08;
+  let sky = 0.5 + 0.5 * n.y;
+  let fog = clamp(length(frame.eye.xyz - w) / ${(40 * R).toFixed(1)}, 0.0, 1.0);
+  let lit = mix(c * (0.25 + 0.2 * sky + 0.7 * diff) + spec, vec3f(0.62, 0.68, 0.76), fog * fog);
+  return mix(lit, vec3f(1.0, 0.97, 0.9), frame.datum.y);
+}
+fn cutAway(p: vec3f) -> bool { return frame.opts.x > 0.5 && dot(frame.clip.xyz, p) > frame.clip.w; }
+// Layers by depth below the datum (the plain's level): the colours mark where
+// material started, so the cut shows how the flow overturned and lifted it.
+fn strata(y: f32) -> vec3f {
+  let t = (frame.datum.x - y) / frame.opts.w;
+  if (t < 0.0) { return vec3f(0.78, 0.66, 0.46); }
+  let pal = array<vec3f, 6>(vec3f(0.80, 0.68, 0.47), vec3f(0.70, 0.45, 0.28), vec3f(0.88, 0.80, 0.60),
+    vec3f(0.52, 0.40, 0.30), vec3f(0.75, 0.56, 0.36), vec3f(0.45, 0.47, 0.50));
+  let k = u32(floor(t)) % 6u;
+  let f = fract(t);
+  return pal[k] * (0.82 + 0.18 * smoothstep(0.0, 0.06, f));
+}
+fn heat(s: f32) -> vec3f {
+  let t = clamp(log2(1.0 + s) / 7.0, 0.0, 1.0);
+  return mix(mix(vec3f(0.12, 0.2, 0.45), vec3f(0.9, 0.35, 0.1), clamp(t * 1.6, 0.0, 1.0)), vec3f(1.0, 0.95, 0.6), clamp(t * 2.0 - 1.0, 0.0, 1.0));
+}
+const RETURNED = vec3f(0.95, 0.88, 0.70);
+
+struct Out { @builtin(position) clip: vec4f, @location(0) n: vec3f, @location(1) c: vec3f, @location(2) w: vec3f,
+  @location(3) q: vec2f, @location(4) d: f32 };
+
+// ---- heightfield straight from the physics records (engine_schema::heightfield)
+const HF_BASE = ${HF_BASE}u;
+fn hfH(i: u32, j: u32, nx: u32) -> f32 { let k = j * nx + i; let r = hulls[HF_BASE + 2u + (k >> 2u)]; return bitcast<f32>(r[k & 3u]); }
+fn inWindow(x: f32, z: f32) -> bool {
+  return frame.datum.z > 0.5 && x >= frame.window.x && x <= frame.window.z && z >= frame.window.y && z <= frame.window.w;
+}
+@vertex fn vsTerrain(@builtin(vertex_index) vi: u32) -> Out {
+  let head = hulls[HF_BASE];
+  let nx = head.y; let nz = head.z;
+  let d = bitcast<vec4f>(hulls[HF_BASE + 1u]);
+  let cell = vi / 6u;
+  let ci = cell % (nx - 1u); let cj = cell / (nx - 1u);
+  let corner = array<vec2u, 6>(vec2u(0u, 0u), vec2u(1u, 1u), vec2u(1u, 0u), vec2u(0u, 0u), vec2u(0u, 1u), vec2u(1u, 1u))[vi % 6u];
+  let i = ci + corner.x; let j = cj + corner.y;
+  let x0 = -0.5 * f32(nx - 1u) * d.x; let z0 = -0.5 * f32(nz - 1u) * d.y;
+  let h = hfH(i, j, nx);
+  let hx0 = hfH(max(i, 1u) - 1u, j, nx); let hx1 = hfH(min(i + 1u, nx - 1u), j, nx);
+  let hz0 = hfH(i, max(j, 1u) - 1u, nx); let hz1 = hfH(i, min(j + 1u, nz - 1u), nx);
+  var o: Out;
+  o.w = vec3f(x0 + f32(i) * d.x, h, z0 + f32(j) * d.y);
+  o.n = normalize(vec3f(-(hx1 - hx0) / (2.0 * d.x), 1.0, -(hz1 - hz0) / (2.0 * d.y)));
+  o.d = h - h0[j * nx + i];
+  o.c = vec3f(0.0); o.q = vec2f(0.0);
+  o.clip = frame.viewProj * vec4f(o.w, 1.0);
+  return o;
+}
+@fragment fn fsTerrain(i: Out) -> @location(0) vec4f {
+  if (cutAway(i.w)) { discard; }
+  let n = normalize(i.n);
+  let slope = 1.0 - n.y;
+  var base = mix(vec3f(0.76, 0.64, 0.44), vec3f(0.62, 0.49, 0.33), clamp(slope * 3.0, 0.0, 1.0));
+  let g = abs(fract(i.w.xz / ${(R / 2).toFixed(2)}) - 0.5);
+  base = base * (1.0 - 0.06 * smoothstep(0.48, 0.5, max(g.x, g.y)));
+  // Changed ground (after a bake, and deposits around an open region): dug out
+  // darker, built up (ejecta) lighter. Under an open region: its bed.
+  let s = ${(0.02 * R).toFixed(3)};
+  base = mix(base, vec3f(0.42, 0.33, 0.24), smoothstep(s, 4.0 * s, -i.d));
+  base = mix(base, RETURNED * 0.95, smoothstep(0.2 * s, 2.0 * s, i.d));
+  if (inWindow(i.w.x, i.w.z)) { base = vec3f(0.22, 0.22, 0.24); }
+  return vec4f(shade(base, n, i.w), 1.0);
+}
+// ---- the cut face of the heightfield: a curtain along the plane z = clip.w
+@vertex fn vsCut(@builtin(vertex_index) vi: u32) -> Out {
+  let head = hulls[HF_BASE];
+  let nx = head.y; let nz = head.z;
+  let d = bitcast<vec4f>(hulls[HF_BASE + 1u]);
+  let x0 = -0.5 * f32(nx - 1u) * d.x; let z0 = -0.5 * f32(nz - 1u) * d.y;
+  let zc = frame.clip.w;
+  let fz = clamp((zc - z0) / d.y, 0.0, f32(nz - 1u) - 0.001);
+  let j = u32(floor(fz)); let v = fz - f32(j);
+  let seg = vi / 6u;
+  let corner = array<vec2u, 6>(vec2u(0u, 0u), vec2u(1u, 0u), vec2u(1u, 1u), vec2u(0u, 0u), vec2u(1u, 1u), vec2u(0u, 1u))[vi % 6u];
+  let i = min(seg + corner.x, nx - 1u);
+  let h = mix(hfH(i, j, nx), hfH(i, j + 1u, nx), v);
+  let hi = mix(h0[j * nx + i], h0[(j + 1u) * nx + i], v);
+  var o: Out;
+  o.w = vec3f(x0 + f32(i) * d.x, select(frame.datum.w, h, corner.y == 1u), zc);
+  o.n = vec3f(0.0, 0.0, 1.0);
+  o.d = hi; o.c = vec3f(0.0); o.q = vec2f(0.0);
+  o.clip = select(vec4f(0.0, 0.0, 2.0, 1.0), frame.viewProj * vec4f(o.w, 1.0), frame.opts.x > 0.5);
+  return o;
+}
+@fragment fn fsCut(i: Out) -> @location(0) vec4f {
+  // Below the original surface: the strata; above it: deposited (moved) material.
+  var c = select(strata(i.w.y), RETURNED * 0.9, i.w.y > i.d + 0.02);
+  if (inWindow(i.w.x, i.w.z) && i.w.y > frame.datum.w + 0.5) { c = strata(i.w.y); }
+  return vec4f(shade(c, vec3f(0.0, 0.3, 1.0), i.w), 1.0);
+}
+// ---- particles of the open region, and its parcels in flight
+const QUAD = array<vec2f, 6>(vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0), vec2f(-1.0, -1.0), vec2f(1.0, 1.0), vec2f(-1.0, 1.0));
+fn billboard(p: vec3f, r: f32, q: vec2f) -> vec4f {
+  return frame.viewProj * vec4f(p + (frame.right.xyz * q.x + frame.up.xyz * q.y) * r, 1.0);
+}
+@vertex fn vsPart(@builtin(vertex_index) vi: u32, @builtin(instance_index) inst: u32) -> Out {
+  var o: Out;
+  o.clip = vec4f(0.0, 0.0, 2.0, 1.0);
+  o.n = vec3f(0.0); o.w = vec3f(0.0); o.c = vec3f(0.0); o.q = vec2f(0.0); o.d = 0.0;
+  if (inst >= counters[${T.C_PARTICLES}u]) { return o; }
+  let p = parts[inst];
+  if ((bitcast<u32>(p.f2.w) & ${T.PARTICLE_DEAD}u) != 0u || cutAway(p.xm.xyz)) { return o; }
+  let q = QUAD[vi];
+  let r0 = rest[inst];
+  var c = select(RETURNED, strata(r0.y), r0.w > 0.0);
+  let speed = length(p.vj.xyz);
+  if (frame.opts.y > 0.5) { c = heat(speed); }
+  o.c = c * (0.9 + 0.2 * hash(inst));
+  o.w = p.xm.xyz; o.q = q;
+  o.clip = billboard(p.xm.xyz, 0.62 * frame.opts.z / ${PPC}.0, q);
+  return o;
+}
+@vertex fn vsParcel(@builtin(vertex_index) vi: u32, @builtin(instance_index) inst: u32) -> Out {
+  var o: Out;
+  o.clip = vec4f(0.0, 0.0, 2.0, 1.0);
+  o.n = vec3f(0.0); o.w = vec3f(0.0); o.c = vec3f(0.0); o.q = vec2f(0.0); o.d = 0.0;
+  if (inst >= min(counters[${T.C_PARCELS}u], ${maxParcels}u)) { return o; }
+  let xq = parcels[2u * inst]; let vm = parcels[2u * inst + 1u];
+  if (vm.w <= 0.0 || cutAway(xq.xyz)) { return o; }
+  let q = QUAD[vi];
+  o.c = select(vec3f(0.98, 0.82, 0.55), heat(length(vm.xyz)), frame.opts.y > 0.5);
+  o.w = xq.xyz; o.q = q;
+  o.clip = billboard(xq.xyz, 0.62 * frame.opts.z / ${PPC}.0, q);
+  return o;
+}
+@fragment fn fsPart(i: Out) -> @location(0) vec4f {
+  let rr = dot(i.q, i.q);
+  if (rr > 1.0) { discard; }
+  let nz = sqrt(1.0 - rr);
+  let n = normalize(frame.right.xyz * i.q.x + frame.up.xyz * i.q.y + normalize(frame.eye.xyz - i.w) * nz);
+  return vec4f(shade(i.c, n, i.w), 1.0);
+}
+// ---- the impactor, its streak and the tracked parcel marker
+@vertex fn vsGlow(@builtin(vertex_index) vi: u32) -> Out {
+  var o: Out;
+  o.n = vec3f(0.0); o.c = vec3f(0.0); o.d = 0.0;
+  let q = QUAD[vi % 6u];
+  o.q = q;
+  if (vi < 6u) {
+    o.w = frame.meteor.xyz; o.c = vec3f(1.0, 0.85, 0.55); o.d = 1.0;
+    o.clip = select(vec4f(0.0, 0.0, 2.0, 1.0), billboard(frame.meteor.xyz, frame.meteor.w * 2.5, q), frame.meteor.w > 0.0);
+  } else if (vi < 12u) {
+    // Streak: a camera-facing quad from the impactor up to its tail.
+    let a = frame.meteor.xyz; let b = frame.tail.xyz;
+    let ax = normalize(b - a);
+    let side = normalize(cross(ax, normalize(frame.eye.xyz - a)));
+    let p = mix(a, b, q.y * 0.5 + 0.5) + side * q.x * frame.meteor.w * 1.5 * (1.0 - 0.8 * (q.y * 0.5 + 0.5));
+    o.w = p; o.c = vec3f(1.0, 0.6, 0.25); o.d = 0.5 + 0.5 * q.y;
+    o.q = vec2f(q.x, 0.0);
+    o.clip = select(vec4f(0.0, 0.0, 2.0, 1.0), frame.viewProj * vec4f(p, 1.0), frame.meteor.w > 0.0);
+  } else {
+    o.w = frame.track.xyz; o.c = vec3f(0.3, 1.0, 0.9); o.d = 1.0;
+    o.clip = select(vec4f(0.0, 0.0, 2.0, 1.0), billboard(frame.track.xyz, 0.9 * frame.opts.z, q), frame.track.w > 0.5);
+  }
+  return o;
+}
+@fragment fn fsGlow(i: Out) -> @location(0) vec4f {
+  let rr = dot(i.q, i.q);
+  if (rr > 1.0) { discard; }
+  return vec4f(i.c * (1.6 - rr), 1.0);
+}
+// ---- the tracked parcel's path
+@vertex fn vsTrail(@location(0) p: vec3f) -> Out {
+  var o: Out;
+  o.w = p; o.n = vec3f(0.0); o.c = vec3f(0.3, 1.0, 0.9); o.q = vec2f(0.0); o.d = 0.0;
+  o.clip = frame.viewProj * vec4f(p, 1.0);
+  return o;
+}
+@fragment fn fsTrail(i: Out) -> @location(0) vec4f { return vec4f(i.c, 1.0); }
+// The path as dots too (a line is one pixel wide).
+@vertex fn vsTrailDot(@location(0) p: vec3f, @builtin(vertex_index) vi: u32) -> Out {
+  var o: Out;
+  let q = QUAD[vi];
+  o.w = p; o.n = vec3f(0.0); o.c = vec3f(0.3, 1.0, 0.9); o.q = q; o.d = 0.0;
+  o.clip = billboard(p, 0.12 * frame.opts.z, q);
+  return o;
+}
+// ---- rigid bodies (the vehicle's chassis parts) and its wheels (vehicle.html)
+@vertex fn vsCol(@location(0) corner: vec3f, @location(1) normal: vec3f, @builtin(instance_index) inst: u32) -> Out {
+  let ci = inst + 1u;
+  let col = cols[ci];
+  let b = bodies[col.body];
+  var o: Out;
+  o.q = vec2f(0.0); o.d = 0.0;
+  let hidden = col.material == ${WHEEL_RIM_MATERIAL}u || col.shape == 5u;
+  var half = col.params.xyz;
+  if (col.shape == 0u) { half = vec3f(col.params.x); }
+  let local = col.localPos + qrot(col.localRot, corner * half * 2.0);
+  let w = b.position + qrot(b.orientation, local);
+  o.w = w;
+  o.n = qrot(b.orientation, qrot(col.localRot, normal));
+  o.clip = select(frame.viewProj * vec4f(w, 1.0), vec4f(0.0, 0.0, 2.0, 1.0), hidden);
+  o.c = select(vec3f(0.85, 0.15, 0.1), vec3f(0.95, 0.75, 0.15), col.localPos.y > 0.4);
+  return o;
+}
+@fragment fn fsCol(i: Out) -> @location(0) vec4f { return vec4f(shade(i.c, normalize(i.n), i.w), 1.0); }
+fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
+@vertex fn vsWheel(@location(0) mesh: vec3f, @location(1) normal: vec3f, @builtin(instance_index) inst: u32) -> Out {
+  let bases = vdata[1u];
+  let wr = bases.y + inst * ${L.WHEEL_STRIDE}u;
+  let cfg = vdata[wr];
+  let vr = bases.x + cfg.x * ${L.VEH_STRIDE}u;
+  let up = normalize(vf(vr + ${L.V_UP}u).xyz);
+  let fwd = normalize(vf(vr + ${L.V_FWD}u).xyz);
+  let axle = normalize(cross(up, fwd));
+  let radius = vf(wr + ${L.W_HP}u).w;
+  let width = vf(wr + ${L.W_DIR}u).w;
+  let pos = vf(wr + ${L.W_O_POS}u).xyz;
+  let q = vf(wr + ${L.W_O_ROT}u);
+  let hidden = (cfg.y & ${L.WF_ENABLED}u) == 0u || inst >= vdata[0u].w;
+  let local = axle * mesh.x * width * 0.5 + up * mesh.y * radius + fwd * mesh.z * radius;
+  var o: Out;
+  o.w = pos + qrot(q, local);
+  o.n = qrot(q, axle * normal.x + up * normal.y + fwd * normal.z);
+  o.q = vec2f(0.0); o.d = 0.0;
+  o.clip = select(frame.viewProj * vec4f(o.w, 1.0), vec4f(0.0, 0.0, 2.0, 1.0), hidden);
+  let rr = length(mesh.yz);
+  o.c = select(vec3f(0.08, 0.08, 0.09), vec3f(0.6, 0.6, 0.64), abs(mesh.x) > 0.98 && rr < 0.62);
+  return o;
+}
+`;
+    const CAPTURE = /* wgsl */`
+struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec4f, f1: vec4f, f2: vec4f };
+@group(0) @binding(0) var<storage, read> parts: array<Particle>;
+@group(0) @binding(1) var<storage, read_write> rest: array<vec4f>;
+@group(0) @binding(2) var<storage, read> counters: array<u32>;
+// Render-only: where each particle starts (its strata colour), right after activation.
+@compute @workgroup_size(64) fn capture(@builtin(global_invocation_id) g: vec3u) {
+  if (g.x >= counters[${T.C_PARTICLES}u]) { return; }
+  rest[g.x] = vec4f(parts[g.x].xm.xyz, 1.0);
+}`;
+    const mod = device.createShaderModule({ label: 'impact-render', code: SHADER });
+    const capMod = device.createShaderModule({ label: 'impact-capture', code: CAPTURE });
+    for (const [m, n] of [[mod, 'render'], [capMod, 'capture']]) {
+      const e = (await m.getCompilationInfo()).messages.find((x) => x.type === 'error');
+      if (e) throw new Error(`${n} shader: ${e.message} @${e.lineNum}`);
+    }
+    const restBuf = device.createBuffer({ size: maxParticles * 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    const h0Buf = device.createBuffer({ size: NX * NZ * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(h0Buf, 0, initialHeights);
+    const capturePipe = device.createComputePipeline({ layout: 'auto', compute: { module: capMod, entryPoint: 'capture' } });
+    const captureBind = device.createBindGroup({ layout: capturePipe.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: { buffer: world.bufs[T.PARTICLES] } }, { binding: 1, resource: { buffer: restBuf } }, { binding: 2, resource: { buffer: world.bufs[T.COUNTERS] } }] });
+
+    const cube = [];
+    for (const [u, v, w] of [[0, 1, 2], [1, 2, 0], [2, 0, 1]]) for (const s of [-1, 1]) {
+      const n = [0, 0, 0]; n[w] = s;
+      const cs = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([a, b]) => { const p = [0, 0, 0]; p[u] = a * 0.5; p[v] = b * 0.5; p[w] = s * 0.5; return p; });
+      for (const t of (s > 0 ? [[0, 1, 2], [0, 2, 3]] : [[0, 2, 1], [0, 3, 2]])) for (const k of t) cube.push(...cs[k], ...n);
+    }
+    const cyl = [];
+    for (let k = 0, SEG = 24; k < SEG; k++) {
+      const a0 = (k / SEG) * Math.PI * 2, a1 = ((k + 1) / SEG) * Math.PI * 2;
+      const p = (x, a, r = 1) => [x, Math.cos(a) * r, Math.sin(a) * r];
+      const nr = (a) => [0, Math.cos(a), Math.sin(a)];
+      for (const [pp, nn] of [[p(-1, a0), nr(a0)], [p(1, a0), nr(a0)], [p(1, a1), nr(a1)], [p(-1, a0), nr(a0)], [p(1, a1), nr(a1)], [p(-1, a1), nr(a1)]]) cyl.push(...pp, ...nn);
+      for (const s of [-1, 1]) for (const v of (s > 0 ? [p(1, 0, 0), p(1, a1), p(1, a0)] : [p(-1, 0, 0), p(-1, a0), p(-1, a1)])) cyl.push(...v, s, 0, 0);
+    }
+    const vbo = (arr) => { const b = device.createBuffer({ size: arr.length * 4, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST }); device.queue.writeBuffer(b, 0, new Float32Array(arr)); return b; };
+    const cubeVbo = vbo(cube), cylVbo = vbo(cyl);
+    const TRAIL_MAX = 4096;
+    const trailVbo = device.createBuffer({ size: TRAIL_MAX * 12, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+    const FRAME_BYTES = 256;
+    const frameBuf = device.createBuffer({ size: FRAME_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const vtx6 = [{ arrayStride: 24, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }, { shaderLocation: 1, offset: 12, format: 'float32x3' }] }];
+    const depthStencil = { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' };
+    const pipe = (vs, fs, buffers = [], topology = 'triangle-list', fsName = fs) => device.createRenderPipeline({
+      layout: 'auto', vertex: { module: mod, entryPoint: vs, buffers }, fragment: { module: mod, entryPoint: fsName, targets: [{ format }] },
+      primitive: { cullMode: 'none', topology }, depthStencil,
+    });
+    const P = {
+      terrain: pipe('vsTerrain', 'fsTerrain'), cut: pipe('vsCut', 'fsCut'), part: pipe('vsPart', 'fsPart'), parcel: pipe('vsParcel', 'fsPart'),
+      glow: pipe('vsGlow', 'fsGlow'), trail: pipe('vsTrail', 'fsTrail', [{ arrayStride: 12, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }] }], 'line-strip'),
+      trailDot: pipe('vsTrailDot', 'fsGlow', [{ arrayStride: 12, stepMode: 'instance', attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }] }]),
+      col: pipe('vsCol', 'fsCol', vtx6), wheel: pipe('vsWheel', 'fsCol', vtx6),
+    };
+    const RES = { 0: world.bufs[0], 1: frameBuf, 2: world.bufs[2], 3: world.bufs[18], 4: world.bufs[T.PARTICLES], 5: restBuf, 6: world.bufs[T.PARCELS], 7: world.bufs[T.COUNTERS], 8: world.bufs[31], 9: h0Buf };
+    const bind = (p, ids) => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: ids.map((b) => ({ binding: b, resource: { buffer: RES[b] } })) });
+    const B = {
+      terrain: bind(P.terrain, [1, 3, 9]), cut: bind(P.cut, [1, 3, 9]), part: bind(P.part, [1, 4, 5, 7]), parcel: bind(P.parcel, [1, 6, 7]),
+      glow: bind(P.glow, [1]), trail: bind(P.trail, [1]), trailDot: bind(P.trailDot, [1]), col: bind(P.col, [0, 1, 2]), wheel: bind(P.wheel, [1, 8]),
+    };
+    let depthTex = null;
+
+    // ---------------------------------------------------------------- camera
+    const cam = { yaw: 0.9, pitch: 0.3, dist: 6 * R, target: [0, 0, 0] };
+    const want = { ...cam, target: [...cam.target] };
+    let userCam = false;
+    let drag = null;
+    canvas.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, y: e.clientY }; userCam = true; });
+    addEventListener('pointerup', () => { drag = null; });
+    addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      want.yaw -= (e.clientX - drag.x) * 0.005;
+      want.pitch = Math.max(-0.2, Math.min(1.45, want.pitch + (e.clientY - drag.y) * 0.005));
+      drag = { x: e.clientX, y: e.clientY };
+    });
+    canvas.addEventListener('wheel', (e) => { e.preventDefault(); userCam = true; want.dist = Math.max(0.05 * R, Math.min(60 * R, want.dist * Math.exp(e.deltaY * 0.001))); }, { passive: false });
+    const sub3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    const norm3 = (a) => { const l = Math.hypot(...a) || 1; return a.map((x) => x / l); };
+    const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    const eyeOf = (c) => {
+      const cp = Math.cos(c.pitch);
+      return [c.target[0] + c.dist * cp * Math.sin(c.yaw), c.target[1] + c.dist * Math.sin(c.pitch), c.target[2] + c.dist * cp * Math.cos(c.yaw)];
+    };
+    function viewProj(eye, at, aspect) {
+      const z = norm3(sub3(eye, at)), x = norm3(cross3([0, 1, 0], z)), y = cross3(z, x);
+      const view = [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0,
+        -(x[0] * eye[0] + x[1] * eye[1] + x[2] * eye[2]), -(y[0] * eye[0] + y[1] * eye[1] + y[2] * eye[2]), -(z[0] * eye[0] + z[1] * eye[1] + z[2] * eye[2]), 1];
+      const f = 1 / Math.tan(Math.PI / 6), near = Math.max(0.05, 0.002 * R), far = 200 * R;
+      const proj = [f / aspect, 0, 0, 0, 0, f, 0, 0, 0, 0, far / (near - far), -1, 0, 0, (near * far) / (near - far), 0];
+      const o = new Float32Array(16);
+      for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) o[c * 4 + r] = proj[r] * view[c * 4] + proj[4 + r] * view[c * 4 + 1] + proj[8 + r] * view[c * 4 + 2] + proj[12 + r] * view[c * 4 + 3];
+      return { m: o, right: x, up: y };
+    }
+
+    // ---------------------------------------------------------------- state and timeline
+    const st = {
+      phase: 'ready', // ready → approach → open (region) → baked → drive
+      t: 0, // sim time since impact (s); negative on approach
+      launchT: 0, impactStep: 0, bakeT: null,
+      view: 'auto', shown: 'contact', colour: 0, cut: false, flash: 0,
+      tracked: null, // { index, mode: 'particle'|'parcel'|'landed', slot, path: [], pos }
+      vehicle: null, chassis: null, carPose: null, carSpeed: 0, drive: { forward: 0, steer: 0, brake: 0 }, manual: false,
+      crater: null, // measured after the bake
+      frames: 0, simTime: 0,
+    };
+    const APPROACH = 0.12; // s of flight shown before contact
+    const TF = pred.crater.formation_time;
+    const viewBtns = [...document.querySelectorAll('#views button')];
+    const setView = (v) => {
+      st.view = v; userCam = false;
+      viewBtns.forEach((b) => b.classList.toggle('on', b.dataset.view === v));
+    };
+    viewBtns.forEach((b) => { b.onclick = () => setView(b.dataset.view); });
+    const autoView = () => {
+      if (st.phase === 'ready' || st.phase === 'approach') return 'contact';
+      if (st.phase === 'open') {
+        if (st.t < 0.35) return 'contact';
+        if (st.t < 1.3 * TF) return 'flow';
+        if (st.t < 2.8 * TF + 1) return 'section';
+        return 'return';
+      }
+      if (st.phase === 'baked') return 'crater';
+      return 'drive';
+    };
+    function aimCamera() {
+      const v = st.view === 'auto' ? autoView() : st.view;
+      st.shown = v;
+      st.cutView = v === 'section' || v === 'parcel';
+      if (userCam) return;
+      const at = (x, y, z) => { want.target = [x, y, z]; };
+      const I = IMPACT;
+      if (v === 'contact') { at(I[0], I[1] + 0.9 * R, I[2]); Object.assign(want, { yaw: 0.6, pitch: 0.06, dist: 7 * R }); }
+      else if (v === 'flow') { at(I[0], I[1] + 0.2 * R, I[2]); Object.assign(want, { yaw: 0.75, pitch: 0.42, dist: 5.5 * R }); }
+      else if (v === 'section') { at(I[0], I[1] - 0.2 * R, I[2]); Object.assign(want, { yaw: 0.0, pitch: 0.12, dist: 3.6 * R }); }
+      else if (v === 'return') { at(I[0], I[1], I[2]); Object.assign(want, { yaw: 1.1, pitch: 0.75, dist: 8 * R }); }
+      else if (v === 'crater') { at(I[0], I[1] - 0.1 * R, I[2]); Object.assign(want, { yaw: 0.5 + 0.05 * (st.simTime % 120), pitch: 0.55, dist: 4.2 * R }); }
+      else if (v === 'parcel') {
+        // Side on to its path (it starts just behind the cut plane): the whole
+        // arc from where it started to where it is.
+        const p = st.tracked?.pos;
+        if (p) {
+          const m = [(p[0] + I[0]) / 2, (p[1] + I[1]) / 2, (p[2] + I[2]) / 2];
+          at(...m);
+          Object.assign(want, { dist: Math.max(2.2 * R, 1.4 * Math.hypot(...sub3(p, I))), pitch: 0.08, yaw: 0.0 });
+        }
+        else { at(I[0], I[1], I[2]); Object.assign(want, { yaw: 0.35, pitch: 0.3, dist: 3 * R }); }
+      } else if (v === 'drive') {
+        const p = st.carPose;
+        if (p) {
+          at(p.p[0], p.p[1] + 1.5, p.p[2]);
+          // Behind the car: its velocity's heading, or the way it faces.
+          const fw = p.fwd;
+          Object.assign(want, { yaw: Math.atan2(-fw[0], -fw[2]), pitch: 0.42, dist: 26 });
+        } else { at(I[0], I[1], I[2]); Object.assign(want, { yaw: 1.4, pitch: 0.4, dist: 3 * R }); }
+      }
+    }
+    const lerpAngle = (a, b, k) => a + (((b - a + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI) * k;
+    function smoothCamera(dtWall) {
+      const k = 1 - Math.exp(-dtWall * (st.shown === 'parcel' || st.shown === 'drive' ? 6 : 2.5));
+      cam.yaw = lerpAngle(cam.yaw, want.yaw, k);
+      cam.pitch += (want.pitch - cam.pitch) * k;
+      cam.dist *= Math.exp(Math.log(want.dist / cam.dist) * k);
+      for (let i = 0; i < 3; i++) cam.target[i] += (want.target[i] - cam.target[i]) * k;
+    }
+
+    // Timeline bar: phases on a sim-time axis.
+    const barEl = $('bar');
+    function drawBar() {
+      const end = Math.max(st.bakeT ?? 0, 3 * TF + 4, st.t + 1) + 6;
+      const segs = [['contact', -APPROACH, 0.35], ['flow', 0.35, 1.3 * TF], ['cross-section', 1.3 * TF, 2.8 * TF + 1], ['return', 2.8 * TF + 1, st.bakeT ?? Math.max(st.t, 3 * TF + 4)], ['crater + drive', st.bakeT ?? Math.max(st.t, 3 * TF + 4), end]];
+      const x = (t) => `${(100 * (t + APPROACH) / (end + APPROACH)).toFixed(2)}%`;
+      barEl.innerHTML = segs.map(([n, a, b]) => `<div class="seg" style="left:${x(a)};width:calc(${x(b)} - ${x(a)})">${n}</div>`).join('')
+        + (st.phase === 'ready' ? '' : `<div class="now" style="left:${x(Math.min(st.t, end))}"></div>`);
+    }
+
+    // ---------------------------------------------------------------- events
+    function launch() {
+      if (st.phase !== 'ready') return;
+      st.phase = 'approach'; st.t = -APPROACH; st.launchT = st.simTime;
+    }
+    function strike() {
+      const region = S.mode === 'impact'
+        ? terrain.impact(GROUND, field, IMPACT, S.radius, S.density, S.speed * 1000)
+        : terrain.explode(GROUND, field, IMPACT, 10 ** S.charge, S.depth);
+      st.region = region;
+      // Where each particle starts (render-only strata colours).
+      const enc = device.createCommandEncoder();
+      enc.clearBuffer(restBuf);
+      const p = enc.beginComputePass();
+      p.setPipeline(capturePipe); p.setBindGroup(0, captureBind);
+      p.dispatchWorkgroups(Math.ceil(maxParticles / 64));
+      p.end();
+      device.queue.submit([enc.finish()]);
+      st.phase = 'open'; st.t = 0; st.impactStep = st.frames; st.flash = 1;
+      pickTracked().catch(fail);
+    }
+    terrain.onBake = () => {
+      st.phase = 'baked'; st.bakeT = st.t;
+      readHeights().then(measureCrater).catch(fail);
+    };
+    function bakeNow() { if (st.phase === 'open') terrain.close(); }
+    $('launch').onclick = launch;
+    $('bake').onclick = bakeNow;
+    $('replay').onclick = () => replay();
+    $('colStrata').onclick = () => { st.colour = 0; $('colStrata').classList.add('on'); $('colSpeed').classList.remove('on'); };
+    $('colSpeed').onclick = () => { st.colour = 1; $('colSpeed').classList.add('on'); $('colStrata').classList.remove('on'); };
+    $('cutBtn').onclick = () => { st.cut = !st.cut; $('cutBtn').classList.toggle('on', st.cut); };
+    const keys = new Set();
+    addEventListener('keydown', (e) => {
+      if (e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT') return;
+      keys.add(e.code);
+      if (e.repeat) return;
+      if (e.code === 'Space') { e.preventDefault(); launch(); }
+      else if (e.code === 'KeyR') replay();
+      else if (e.code === 'KeyX') $('cutBtn').click();
+      else if (/^Digit[1-8]$/.test(e.code)) setView(viewBtns[Number(e.code.slice(5)) - 1].dataset.view);
+      if (['KeyW', 'KeyA', 'KeyS', 'KeyD'].includes(e.code) && st.vehicle != null) st.manual = true;
+    });
+    addEventListener('keyup', (e) => keys.delete(e.code));
+
+    function replay() {
+      world.restore(initial);
+      heights = initialHeights.slice();
+      world.setHullRecords(arena0.records);
+      terrain.reset();
+      st.phase = 'ready'; st.t = 0; st.tracked = null; st.vehicle = null; st.chassis = null; st.carPose = null;
+      st.crater = null; st.bakeT = null; st.manual = false; st.flash = 0; st.region = null;
+      trailN = 0;
+    }
+
+    // ---------------------------------------------------------------- tracked parcel
+    // A particle near the surface at 0.9 transient radii, just behind the
+    // cut plane: followed as a particle, then (thrown out of the region) as the
+    // ballistic parcel that carries it, until it lands.
+    let trailN = 0;
+    const smallRb = Array.from({ length: 4 }, () => device.createBuffer({ size: 128, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
+    let trackBusy = false;
+    async function pickTracked() {
+      const n = terrain.settings.config.max_particles;
+      const rb = device.createBuffer({ size: n * 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      const enc = device.createCommandEncoder();
+      enc.copyBufferToBuffer(restBuf, 0, rb, 0, n * 16);
+      device.queue.submit([enc.finish()]);
+      await rb.mapAsync(GPUMapMode.READ);
+      const f = new Float32Array(rb.getMappedRange().slice(0));
+      rb.unmap(); rb.destroy();
+      const target = [IMPACT[0] + 0.9 * R, IMPACT[1] - 0.25 * SP, IMPACT[2] - 0.25 * SP];
+      let best = -1, bd = Infinity;
+      for (let i = 0; i < n; i++) {
+        if (f[i * 4 + 3] === 0) break;
+        const d = (f[i * 4] - target[0]) ** 2 + (f[i * 4 + 1] - target[1]) ** 2 + (f[i * 4 + 2] - target[2]) ** 2;
+        if (d < bd) { bd = d; best = i; }
+      }
+      if (best >= 0 && st.phase === 'open') st.tracked = { index: best, mode: 'particle', slot: -1, pos: [f[best * 4], f[best * 4 + 1], f[best * 4 + 2]], path: [], vel: [0, 0, 0], since: 0 };
+    }
+    async function followTracked() {
+      const tr = st.tracked;
+      if (!tr || tr.mode === 'landed' || trackBusy || st.phase !== 'open') return;
+      trackBusy = true;
+      try {
+        if (tr.mode === 'particle') {
+          const w = await terrain.readParticle(tr.index);
+          const f = new Float32Array(w.buffer);
+          if ((w[31] & T.PARTICLE_DEAD) !== 0) {
+            // Thrown: the parcel in flight nearest to where the particle left.
+            const n = Math.min(terrain.report?.parcels ?? 0, maxParcels);
+            if (n > 0) {
+              const pw = new Float32Array((await terrain.readParcels(n)).buffer);
+              let best = -1, bd = Infinity;
+              for (let k = 0; k < n; k++) {
+                if (pw[k * 8 + 7] <= 0) continue;
+                const d = (pw[k * 8] - f[0]) ** 2 + (pw[k * 8 + 1] - f[1]) ** 2 + (pw[k * 8 + 2] - f[2]) ** 2;
+                if (d < bd) { bd = d; best = k; }
+              }
+              if (best >= 0) { tr.mode = 'parcel'; tr.slot = best; tr.thrownAt = st.t; }
+            }
+          } else {
+            tr.pos = [f[0], f[1], f[2]]; tr.vel = [f[4], f[5], f[6]];
+          }
+        } else if (tr.mode === 'parcel') {
+          const pw = new Float32Array((await terrain.readParcel(tr.slot)).buffer);
+          tr.pos = [pw[0], pw[1], pw[2]]; tr.vel = [pw[4], pw[5], pw[6]];
+          if (pw[7] <= 0) {
+            tr.mode = 'landed'; tr.landedAt = st.t;
+            const r = st.region;
+            tr.inside = r && tr.pos.every((x, k) => x > r.origin[k] && x < r.end[k]);
+            tr.escaped = Math.abs(tr.pos[0]) > HALF || Math.abs(tr.pos[2]) > HALF;
+          }
+        }
+        const last = tr.path[tr.path.length - 1];
+        if (!last || Math.hypot(...sub3(tr.pos, last)) > 0.05 * SP) {
+          tr.path.push(tr.pos.slice());
+          if (tr.path.length > TRAIL_MAX) tr.path.shift();
+          trailN = tr.path.length;
+          device.queue.writeBuffer(trailVbo, 0, new Float32Array(tr.path.flat()));
+        }
+      } finally { trackBusy = false; }
+    }
+
+    // ---------------------------------------------------------------- after the bake
+    async function readHeights() {
+      const bytes = NX * NZ * 4;
+      const rb = device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+      const enc = device.createCommandEncoder();
+      enc.copyBufferToBuffer(world.bufs[18], (HF_BASE + 2) * 16, rb, 0, bytes);
+      device.queue.submit([enc.finish()]);
+      await rb.mapAsync(GPUMapMode.READ);
+      heights = new Float32Array(rb.getMappedRange().slice(0));
+      rb.unmap(); rb.destroy();
+    }
+    // The baked crater's profile (azimuthal mean of the height change): its
+    // deepest point, the rim's crest and where the floor crosses the plain.
+    function measureCrater() {
+      const bins = Math.ceil(3 * R / SP), sum = new Float64Array(bins), cnt = new Uint32Array(bins);
+      for (let j = 0; j < NZ; j++) for (let i = 0; i < NX; i++) {
+        const r = Math.hypot(X0 + i * SP - IMPACT[0], Z0 + j * SP - IMPACT[2]);
+        const b = Math.floor(r / SP);
+        if (b < bins) { sum[b] += heights[j * NX + i] - initialHeights[j * NX + i]; cnt[b]++; }
+      }
+      const prof = Array.from(sum, (s, b) => (cnt[b] ? s / cnt[b] : 0));
+      let rim = 0;
+      for (let b = 1; b < bins; b++) if (prof[b] > prof[rim]) rim = b;
+      let cross = 0;
+      for (let b = 0; b < rim; b++) if (prof[b] < 0) cross = b;
+      st.crater = { depth: -Math.min(...prof), rimR: (rim + 0.5) * SP, rimH: prof[rim], apparentR: (cross + 1) * SP };
+      // Drive in a few seconds later.
+      setTimeout(spawnVehicle, 1500);
+    }
+    function spawnVehicle() {
+      if (st.phase !== 'baked' || st.vehicle != null) return;
+      // On the crater floor, facing out (-x): it drives up the inner wall
+      // toward the rim. (The baked rim itself is jagged, up to ~10 m between
+      // neighbouring samples; see the doc's open points.)
+      const x = IMPACT[0] - 0.08 * R;
+      const desc = presets.monster_truck;
+      st.vehicle = world.vehicles.addVehicle(world.backend, desc, [x, surfaceAt(x, 0) + 2.2, 0], [0, -Math.SQRT1_2, 0, Math.SQRT1_2]);
+      st.chassis = world.vehicles.chassisBody(st.vehicle);
+      st.phase = 'drive';
+    }
+    const presets = Object.fromEntries((await (await fetch('./generated/vehicle_presets.json', { cache: 'no-store' })).json()).map((p) => [p.name, p]));
+    async function followCar() {
+      if (st.chassis == null || st.carBusy) return;
+      st.carBusy = true;
+      try {
+        const rb = smallRb.pop();
+        if (!rb) return;
+        const enc = device.createCommandEncoder();
+        enc.copyBufferToBuffer(world.bufs[0], st.chassis * 112, rb, 0, 112);
+        device.queue.submit([enc.finish()]);
+        await rb.mapAsync(GPUMapMode.READ);
+        const f = new Float32Array(rb.getMappedRange(0, 112).slice(0));
+        rb.unmap(); smallRb.push(rb);
+        const q = [f[4], f[5], f[6], f[7]];
+        const rot = (v) => { const [x, y, z, w] = q, d = 2 * (x * v[0] + y * v[1] + z * v[2]), s = w * w - (x * x + y * y + z * z); const c = cross3([x, y, z], v); return [x * d + v[0] * s + c[0] * 2 * w, y * d + v[1] * s + c[1] * 2 * w, z * d + v[2] * s + c[2] * 2 * w]; };
+        st.carPose = { p: [f[0], f[1], f[2]], fwd: rot([0, 0, 1]), up: rot([0, 1, 0]) };
+        st.carSpeed = Math.hypot(f[12], f[13], f[14]);
+      } finally { st.carBusy = false; }
+    }
+    function driveInput() {
+      if (st.vehicle == null) return;
+      let inp;
+      if (st.manual) {
+        inp = { forward: keys.has('KeyW') ? 1 : 0, brake: keys.has('KeyS') ? 1 : 0, steer: (keys.has('KeyA') ? 1 : 0) - (keys.has('KeyD') ? 1 : 0) };
+      } else {
+        // Autopilot: full throttle straight out along -x, held to 12 m/s.
+        const p = st.carPose;
+        const fast = st.carSpeed > 12;
+        inp = { forward: fast ? 0 : 1, brake: 0, steer: 0 };
+        if (p) {
+          const want = [-1, 0, 0];
+          const side = p.fwd[0] * want[2] - p.fwd[2] * want[0];
+          inp.steer = Math.max(-1, Math.min(1, 2 * side));
+        }
+      }
+      const k = `${inp.forward}/${inp.brake}/${inp.steer.toFixed(2)}`;
+      if (k !== st.lastInput) { world.vehicles.setInput(world.backend, st.vehicle, inp); st.lastInput = k; }
+    }
+
+    // ---------------------------------------------------------------- timing
+    // GPU time of the terrain pass (timestamp queries when the device has them)
+    // and the wall clock: sim seconds per wall second is the speed of the run.
+    const TS_SLOTS = 8;
+    const ts = timestamps ? { qs: device.createQuerySet({ type: 'timestamp', count: 2 * TS_SLOTS }),
+      res: device.createBuffer({ size: 256 * TS_SLOTS, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC }),
+      rbs: Array.from({ length: 3 }, () => device.createBuffer({ size: 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST })), slot: 0 } : null;
+    const timing = { terrainMs: [], frameMs: [], ratio: [], substeps: [], worst: 0, log: [] };
+    const pushCap = (a, v, n = 120) => { a.push(v); if (a.length > n) a.shift(); };
+    const mean = (a) => (a.length ? a.reduce((s, x) => s + x, 0) / a.length : 0);
+
+    // ---------------------------------------------------------------- frame
+    const frameF = new Float32Array(FRAME_BYTES / 4);
+    const counterRb = Array.from({ length: 4 }, () => device.createBuffer({ size: 80, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
+    function writeFrame() {
+      if (!depthTex || depthTex.width !== canvas.width || depthTex.height !== canvas.height) {
+        depthTex?.destroy();
+        depthTex = device.createTexture({ size: [canvas.width, canvas.height], format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT });
+      }
+      const eye = eyeOf(cam);
+      const vp = viewProj(eye, cam.target, canvas.width / canvas.height);
+      frameF.fill(0);
+      frameF.set(vp.m, 0);
+      frameF.set([...eye, 0], 16);
+      frameF.set([0.45, 0.8, 0.3, 0], 20);
+      const cut = st.cut || st.cutView;
+      frameF.set([0, 0, 1, IMPACT[2]], 24);
+      frameF.set([cut ? 1 : 0, st.colour, SP, LAYER], 28);
+      const r = terrain.region;
+      const bottom = r ? r.origin[1] - 0.5 * R : IMPACT[1] - 2 * R;
+      frameF.set([IMPACT[1], st.flash, r ? 1 : 0, bottom], 32);
+      if (st.phase === 'approach' && S.mode === 'impact') {
+        const h = -st.t * S.speed * 1000; // altitude of the impactor above the surface
+        frameF.set([IMPACT[0], IMPACT[1] + h + S.radius, IMPACT[2], Math.max(S.radius, 0.01 * R)], 36);
+        frameF.set([IMPACT[0], IMPACT[1] + h + Math.min(30 * R, S.speed * 1000 * 0.05), IMPACT[2], 1], 40);
+      }
+      frameF.set([...vp.right, 0], 44);
+      frameF.set([...vp.up, 0], 48);
+      if (st.tracked && st.phase === 'open') frameF.set([...st.tracked.pos, 1], 52);
+      if (r) {
+        const x0 = X0 + (r.window[0] - 0.5) * SP, z0 = Z0 + (r.window[1] - 0.5) * SP;
+        frameF.set([x0, z0, x0 + r.window[2] * SP, z0 + r.window[3] * SP], 56);
+      }
+      device.queue.writeBuffer(frameBuf, 0, frameF);
+    }
+    function draw(enc) {
+      const rp = enc.beginRenderPass({
+        colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.55 + 0.45 * st.flash, 0.62 + 0.38 * st.flash, 0.72 + 0.28 * st.flash, 1], loadOp: 'clear', storeOp: 'store' }],
+        depthStencilAttachment: { view: depthTex.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
+      });
+      rp.setPipeline(P.terrain); rp.setBindGroup(0, B.terrain); rp.draw((NX - 1) * (NZ - 1) * 6);
+      if (st.cut || st.cutView) { rp.setPipeline(P.cut); rp.setBindGroup(0, B.cut); rp.draw((NX - 1) * 6); }
+      if (terrain.region) {
+        const n = Math.min(maxParticles, (terrain.report?.particles ?? terrain.region.window[2] * terrain.region.window[3] * 64) + 4096);
+        rp.setPipeline(P.part); rp.setBindGroup(0, B.part); rp.draw(6, n);
+        const m = Math.min(maxParcels, (terrain.report?.parcels ?? 0) + 4096);
+        rp.setPipeline(P.parcel); rp.setBindGroup(0, B.parcel); rp.draw(6, m);
+      }
+      rp.setPipeline(P.glow); rp.setBindGroup(0, B.glow); rp.draw(18);
+      if (trailN > 1 && st.phase === 'open') { rp.setPipeline(P.trail); rp.setBindGroup(0, B.trail); rp.setVertexBuffer(0, trailVbo); rp.draw(trailN);
+        rp.setPipeline(P.trailDot); rp.setBindGroup(0, B.trailDot); rp.setVertexBuffer(0, trailVbo); rp.draw(6, trailN); }
+      if (world.colliderCount > 1) { rp.setPipeline(P.col); rp.setBindGroup(0, B.col); rp.setVertexBuffer(0, cubeVbo); rp.draw(36, world.colliderCount - 1); }
+      if (world.vehicles.wheelCount) { rp.setPipeline(P.wheel); rp.setBindGroup(0, B.wheel); rp.setVertexBuffer(0, cylVbo); rp.draw(cyl.length / 6, world.vehicles.wheelCount); }
+      rp.end();
+    }
+
+    // One physics frame (1/60 s): the terrain's coupled substeps (or its bake)
+    // ahead of the rigid step, in one submission with the render.
+    async function physicsFrame(enc, render) {
+      if (st.phase === 'approach' && st.t >= 0) strike();
+      // Timed bake: once nothing is in flight (a parcel still flying would be
+      // left out of the ledger), as the settle rule also requires.
+      if (st.phase === 'open' && S.bake === 'time' && st.t >= S.bakeAt && terrain.report && terrain.report.airborne === 0) terrain.close();
+      driveInput();
+      let tsIdx = -1;
+      const tsw = ts && st.phase === 'open' ? (tsIdx = ts.slot++ % TS_SLOTS, { querySet: ts.qs, beginningOfPassWriteIndex: 2 * tsIdx, endOfPassWriteIndex: 2 * tsIdx + 1 }) : undefined;
+      const kind = terrain.encodeFrame(enc, { timestampWrites: tsw });
+      world.encodeStep(enc);
+      const rb = counterRb.pop();
+      if (rb) enc.copyBufferToBuffer(world.bufs[7], 0, rb, 0, 80);
+      let tsRb = null;
+      if (kind === 1 && tsw) {
+        tsRb = ts.rbs.pop();
+        if (tsRb) { enc.resolveQuerySet(ts.qs, 2 * tsIdx, 2, ts.res, 256 * tsIdx); enc.copyBufferToBuffer(ts.res, 256 * tsIdx, tsRb, 0, 16); }
+      }
+      if (render) draw(enc);
+      device.queue.submit([enc.finish()]);
+      terrain.afterSubmit();
+      if (kind === 1) pushCap(timing.substeps, terrain.lastSubsteps);
+      if (rb) rb.mapAsync(GPUMapMode.READ).then(() => { world.setLastCounters(new Uint32Array(rb.getMappedRange().slice(0))); rb.unmap(); counterRb.push(rb); }).catch(fail);
+      if (tsRb) tsRb.mapAsync(GPUMapMode.READ).then(() => {
+        const t = new BigUint64Array(tsRb.getMappedRange().slice(0)); tsRb.unmap(); ts.rbs.push(tsRb);
+        const ms = Number(t[1] - t[0]) / 1e6;
+        if (ms > 0 && ms < 1e4) {
+          pushCap(timing.terrainMs, ms);
+          timing.worst = Math.max(timing.worst, ms);
+          timing.log.push({ t: +st.t.toFixed(3), ms: +ms.toFixed(2), substeps: terrain.lastSubsteps, particles: terrain.report?.particles ?? 0 });
+          if (timing.log.length > 4000) timing.log.shift();
+        }
+      }).catch(fail);
+      st.frames++; st.simTime += DT;
+      if (st.phase === 'approach' || st.phase === 'open' || st.phase === 'baked' || st.phase === 'drive') st.t += DT;
+      st.flash = Math.max(0, st.flash - DT * 4);
+    }
+
+    // Fixed 1/60 s steps against the wall clock: at most one terrain frame in
+    // flight, so a frame slower than real time slows the run (shown as sim speed)
+    // instead of queueing.
+    let lastT = performance.now(), acc = 0, inFlight = null;
+    const statsEl = $('stats');
+    async function loop(now) {
+      if (failed) return;
+      const dtWall = Math.min(0.1, (now - lastT) / 1000);
+      lastT = now;
+      try {
+        if (window.__manual) { requestAnimationFrame(loop); return; }
+        if (inFlight) await inFlight;
+        if (terrain.busy()) await terrain.settle();
+        acc += dtWall;
+        let steps = Math.min(st.phase === 'open' ? 1 : 2, Math.floor(acc / DT));
+        if (st.phase === 'ready') { acc = 0; steps = 1; }
+        if (steps === 0 && acc < DT) steps = 0;
+        acc = Math.max(0, acc - steps * DT);
+        if (acc > 2 * DT) acc = 0; // behind: run slower than real time, don't catch up
+        aimCamera(); smoothCamera(dtWall); writeFrame();
+        const simBefore = st.simTime;
+        if (steps === 0) {
+          const enc = device.createCommandEncoder(); draw(enc); device.queue.submit([enc.finish()]);
+        }
+        for (let s = 0; s < steps; s++) await physicsFrame(device.createCommandEncoder(), s === steps - 1);
+        inFlight = st.phase === 'open' ? device.queue.onSubmittedWorkDone() : null;
+        pushCap(timing.frameMs, dtWall * 1000);
+        pushCap(timing.ratio, dtWall > 0 ? (st.simTime - simBefore) / dtWall : 1);
+        followTracked().catch(fail);
+        followCar().catch(fail);
+        hud();
+      } catch (e) { fail(e); return; }
+      requestAnimationFrame(loop);
+    }
+    function hud() {
+      const r = terrain.report, reg = terrain.region;
+      const ratio = mean(timing.ratio);
+      const rows = [];
+      rows.push(`<tr><td class="k">phase</td><td>${st.phase}</td><td class="k">t</td><td>${st.t.toFixed(2)} s</td></tr>`);
+      if (reg) {
+        rows.push(`<tr><td class="k">particles</td><td>${(r?.particles ?? 0).toLocaleString()}</td><td class="k">blocks</td><td>${r?.blocks ?? 0}</td></tr>`);
+        rows.push(`<tr><td class="k">substeps / frame</td><td>${terrain.lastSubsteps}</td><td class="k">max speed</td><td>${(r?.max_speed ?? 0).toFixed(2)} m/s</td></tr>`);
+        rows.push(`<tr><td class="k">parcels thrown</td><td>${(r?.parcels ?? 0).toLocaleString()}</td><td class="k">in flight</td><td>${(r?.airborne ?? 0).toLocaleString()}</td></tr>`);
+        const q = ((DXR / PPC) ** 3) / 64;
+        rows.push(`<tr><td class="k">deposited</td><td>${((r?.deposited ?? 0) * q).toFixed(0)} m³</td><td class="k">escaped</td><td>${((r?.escaped ?? 0) * q).toFixed(0)} m³</td></tr>`);
+      }
+      rows.push(`<tr><td class="k">terrain GPU</td><td>${timing.terrainMs.length ? mean(timing.terrainMs.slice(-30)).toFixed(1) + ' ms' : '–'}</td><td class="k">frame</td><td>${mean(timing.frameMs.slice(-30)).toFixed(1)} ms</td></tr>`);
+      // Driven frame by frame (frames()): the speed each frame's cost allows.
+      const shown = window.__manual && frameLog.length ? Math.min(1, (1000 / 60) / mean(frameLog.slice(-30).map((e) => e.ms))) : ratio;
+      rows.push(`<tr><td class="k">sim speed</td><td>${shown.toFixed(2)}×</td><td class="k">worst terrain</td><td>${timing.worst ? timing.worst.toFixed(1) + ' ms' : '–'}</td></tr>`);
+      if (st.crater) {
+        const c = st.crater;
+        rows.push(`<tr><td class="k">baked rim radius</td><td>${c.rimR.toFixed(1)} m</td><td class="k">predicted</td><td>${pred.crater.final_rim_radius.toFixed(1)} m</td></tr>`);
+        rows.push(`<tr><td class="k">deepest</td><td>${c.depth.toFixed(1)} m</td><td class="k">rim height</td><td>${c.rimH.toFixed(1)} m</td></tr>`);
+      }
+      if (st.carPose) rows.push(`<tr><td class="k">truck speed</td><td>${(st.carSpeed * 3.6).toFixed(0)} km/h</td><td class="k">height</td><td>${(st.carPose.p[1] - IMPACT[1]).toFixed(1)} m</td></tr>`);
+      if (st.tracked) {
+        const tr = st.tracked;
+        rows.push(`<tr><td class="k">tracked</td><td>${tr.mode}${tr.mode === 'landed' ? (tr.escaped ? ' (off the field: escaped)' : tr.inside ? ' (back in the region)' : ' (on the field)') : ''}</td><td class="k">speed</td><td>${Math.hypot(...tr.vel).toFixed(1)} m/s</td></tr>`);
+      }
+      statsEl.innerHTML = `<table class="st">${rows.join('')}</table>`;
+      statusEl.textContent = st.phase === 'ready' ? `ready · press Launch (Space) · ${timestamps ? 'GPU timestamps on' : 'no timestamp queries'}`
+        : st.phase === 'drive' ? (st.manual ? 'driving (W/A/S/D)' : 'autopilot: from the floor out up the wall · W/A/S/D to drive') : `view: ${st.shown}`;
+      drawBar();
+      legend();
+    }
+    function legend() {
+      const sw = (c, t) => `<div><span class="sw" style="background:${c}"></span>${t}</div>`;
+      $('legendBody').innerHTML = (st.colour === 0
+        ? `${sw('#cdae78', 'sand by starting depth: bands of')} <div style="margin-left:16px">${LAYER.toFixed(1)} m (strata)</div>${sw('#f2e0b3', 'material that landed back in the region / ejecta deposits')}`
+        : `${sw('#1f3373', 'still')}${sw('#e65a1a', 'moving')}${sw('#fff299', 'fast')}`)
+        + sw('#383a3d', 'the region\'s bed (open region)') + sw('#6b543d', 'excavated ground (baked)')
+        + `<div style="margin-top:4px">The cut (X, Cross-section) removes everything in front of the plane through the impact point; below the plain the heightfield's face shows the original strata (a baked column keeps no layers).</div>`;
+    }
+
+    // ---------------------------------------------------------------- automation
+    // frames(n): n frames back to back, each waited for on the GPU (no rAF: it
+    // also runs in a background page). Each entry is that frame's wall time from
+    // encode to GPU completion, which is what 1× needs under 16.7 ms.
+    const frameLog = [];
+    async function frames(n, { render = true } = {}) {
+      window.__manual = true;
+      const out = [];
+      for (let i = 0; i < n && !failed; i++) {
+        if (terrain.busy()) await terrain.settle();
+        aimCamera(); smoothCamera(DT); writeFrame();
+        const t0 = performance.now();
+        const phase = st.phase, t = st.t;
+        await physicsFrame(device.createCommandEncoder(), render);
+        await device.queue.onSubmittedWorkDone();
+        const ms = performance.now() - t0;
+        const e = { t: +t.toFixed(3), phase, ms: +ms.toFixed(2), substeps: terrain.lastKind === 1 ? terrain.lastSubsteps : 0, particles: terrain.report?.particles ?? 0 };
+        out.push(e); frameLog.push(e);
+        await followTracked(); await followCar();
+        hud();
+      }
+      await terrain.settle();
+      if (terrain.error) throw terrain.error;
+      return out;
+    }
+    window.__impact = {
+      frames, frameLog, resume: () => { window.__manual = false; },
+      launch, replay, setView, bake: bakeNow, state: () => ({ phase: st.phase, t: st.t, view: st.shown, report: terrain.report, region: terrain.region, crater: st.crater, tracked: st.tracked && { mode: st.tracked.mode, pos: st.tracked.pos, inside: st.tracked.inside }, car: st.carPose, carSpeed: st.carSpeed, error: terrain.error && String(terrain.error) }),
+      timings: () => ({ terrainMsMean: mean(timing.terrainMs), terrainMsWorst: timing.worst, frameMsMean: mean(timing.frameMs), simSpeed: mean(timing.ratio), substeps: timing.substeps.slice(-20), log: timing.log }),
+      prediction: pred, settings: terrain.settings,
+      debug: { surfaceAt: (x, z) => surfaceAt(x, z), heights: () => heights, field, HF_BASE },
+    };
+    window.__world = world; window.__terrain = terrain;
+    window.__ready = true;
+    statusEl.textContent = 'ready';
+    if (qs.get('autostart') === '1') launch();
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>

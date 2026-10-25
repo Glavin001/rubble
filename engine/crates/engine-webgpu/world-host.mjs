@@ -64,6 +64,48 @@ function bindingsOf(wgsl) {
   return out.sort((a, b) => a.index - b.index);
 }
 
+// Compute pipelines for Slang→WGSL kernels `names` (generated/wgsl/<name>.wgsl),
+// each bound to `bufs` by binding index ([{ pipeline, bind, dynamic }], same order).
+// Binding 22 is the dynamic pass uniform; 6 and 22 are uniforms, the rest storage.
+export async function buildKernels(device, bufs, names, { wgslBase = './generated/wgsl/', status = () => {} } = {}) {
+  const modules = await loadShaderModules(device, names.map((name) => ({ name, file: name })),
+    { urlOf: (file) => `${wgslBase}${file}.wgsl`, status });
+  // A kernel past the device's storage-buffer limit fails here by name, not as
+  // a pipeline validation error (mpm_grid binds 9; WebGPU's default is 8: pages
+  // request the adapter's maxStorageBuffersPerShaderStage).
+  const perStage = device.limits.maxStorageBuffersPerShaderStage;
+  for (const [i, name] of names.entries()) {
+    const n = bindingsOf(modules[i].src).filter((b) => !b.uniform).length;
+    if (n > perStage) {
+      throw new Error(`${name} binds ${n} storage buffers; this device allows ${perStage} per shader stage `
+        + '(request the adapter\'s maxStorageBuffersPerShaderStage; this GPU or browser may not offer enough)');
+    }
+  }
+  const builder = pipelineBuilder(device, names.length, status);
+  const pipes = [];
+  for (const [i, name] of names.entries()) {
+    const { src, module } = modules[i];
+    const binds = bindingsOf(src);
+    const missing = binds.filter((b) => !bufs[b.index]).map((b) => b.index);
+    if (missing.length) throw new Error(`${name} binds ${missing.join(', ')}, which this host has no buffer for`);
+    const layout = device.createBindGroupLayout({
+      label: name,
+      entries: binds.map((b) => ({
+        binding: b.index, visibility: GPUShaderStage.COMPUTE,
+        buffer: b.uniform ? { type: 'uniform', hasDynamicOffset: b.index === 22, minBindingSize: b.index === 22 ? 16 : undefined } : { type: 'storage' },
+      })),
+    });
+    const pipeline = await builder.create(name, { label: name, layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }), compute: { module, entryPoint: name } });
+    const bind = device.createBindGroup({
+      label: name, layout,
+      entries: binds.map((b) => ({ binding: b.index, resource: b.index === 22 ? { buffer: bufs[22], size: 16 } : { buffer: bufs[b.index] } })),
+    });
+    pipes.push({ pipeline, bind, dynamic: binds.some((b) => b.index === 22) });
+  }
+  await builder.finish();
+  return pipes;
+}
+
 export const DEFAULT_PARAMS = {
   dt: 1 / 60, gravityY: -10, iterations: 10, flags: 0, alpha: 0.99, gamma: 0.999, betaLin: 10000, betaAng: 100,
   kStart: 1000, kMaxN: 1e10, kMaxT: 1e6, contactOffset: 0.01, sleepLin: 0.15, sleepAng: 0.15, sleepTime: 0.5,
@@ -108,28 +150,7 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
   const bufs = sizes.map((size, i) => device.createBuffer({ label: 'b' + i, size, usage: usage(i) }));
   device.queue.writeBuffer(bufs[22], 0, plan.pass_table());
 
-  const modules = await loadShaderModules(device, kernels.map((name) => ({ name, file: name })),
-    { urlOf: (file) => `${wgslBase}${file}.wgsl`, status });
-  const builder = pipelineBuilder(device, kernels.length, status);
-  const pipes = [];
-  for (const [i, name] of kernels.entries()) {
-    const { src, module } = modules[i];
-    const binds = bindingsOf(src);
-    const layout = device.createBindGroupLayout({
-      label: name,
-      entries: binds.map((b) => ({
-        binding: b.index, visibility: GPUShaderStage.COMPUTE,
-        buffer: b.uniform ? { type: 'uniform', hasDynamicOffset: b.index === 22, minBindingSize: b.index === 22 ? 16 : undefined } : { type: 'storage' },
-      })),
-    });
-    const pipeline = await builder.create(name, { label: name, layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }), compute: { module, entryPoint: name } });
-    const bind = device.createBindGroup({
-      label: name, layout,
-      entries: binds.map((b) => ({ binding: b.index, resource: b.index === 22 ? { buffer: bufs[22], size: 16 } : { buffer: bufs[b.index] } })),
-    });
-    pipes.push({ pipeline, bind, dynamic: binds.some((b) => b.index === 22) });
-  }
-  await builder.finish();
+  const pipes = await buildKernels(device, bufs, kernels, { wgslBase, status });
 
   const params = { ...DEFAULT_PARAMS };
   const jointWords32 = JOINT_BYTES / 4;
@@ -527,7 +548,9 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     PFIELDS.forEach((k, i) => (i === 2 || i === 3) ? pv.setUint32(i * 4, params[k], true) : pv.setFloat32(i * 4, params[k], true));
     plan.set_params(new Uint8Array(paramBytes));
     const impulses = uploadImpulses();
-    const motionBits = (world.motion.ccd ? 1 : 0) | (world.motion.kinematic ? 2 : 0) | (impulses ? 4 : 0)
+    // A coupled terrain frame (terrain-host.mjs) appends its reactions to the
+    // impulse records on the GPU: the step's impulse pass must run.
+    const motionBits = (world.motion.ccd ? 1 : 0) | (world.motion.kinematic ? 2 : 0) | (impulses || world.terrainImpulses ? 4 : 0)
       | (world.hasHeightField ? 8 : 0);
     const soft = world.soft && world.soft.bodyCount > 0 ? world.soft.counts() : new Uint32Array(10);
     // [bodies, colliders, joints, vehicles, wheels, soft x10, filters, soft dual, sweeps,
@@ -568,6 +591,7 @@ export async function createWorld(device, { cap: userCap, vehicleCap = DEFAULT_V
     p.end();
     world.steps = plan.steps();
     world.vehicles.dirty = false;
+    world.terrainImpulses = false;
   };
   // Profiling (device with 'timestamp-query'): encode and run one step with every
   // dispatch in its own timed pass; resolves to GPU ms per kernel name. The step
