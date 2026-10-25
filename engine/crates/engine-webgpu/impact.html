@@ -44,7 +44,7 @@
     <div class="row" style="justify-content:space-between;margin:0"><h1>Meteor impact · deformable terrain</h1><button id="fold" title="Fold the panel">▾</button></div>
     <div id="foldBody">
     <div class="muted small">GPU MLS-MPM sand (Mohr–Coulomb, physical stiffness) in an active region of a heightfield,
-      opened by a π-scaled Z-model source and baked back when it settles. Runs at 1× (1/60 s per frame).</div>
+      opened by a π-scaled Z-model source and baked back when it settles. Runs at 1× (1/120 s per frame; ?hz= changes it). Game profile by default; ?profile=physical for the validated settings.</div>
     <div class="row" style="margin-top:8px">
       <select id="mode"><option value="impact">Meteor impact</option><option value="explosion">Buried charge</option></select>
       <button id="launch" class="go">Launch <kbd>Space</kbd></button>
@@ -112,9 +112,16 @@
       mode: qs.get('mode') === 'explosion' ? 'explosion' : 'impact',
       radius: num('radius', 8), speed: num('speed', 20), density: num('density', 3000),
       charge: num('charge', 6), depth: num('depth', 8), margin: num('margin', 1.5),
-      // Cells across the transient radius: 12 at the default margin keeps the
-      // particles (and frame time) of 16 at 1.0 R; ?cpr= overrides.
-      cpr: num('cpr', num('margin', 1.5) >= 1.5 ? 12 : 16),
+      // The terrain profile (engine_terrain::TerrainProfile): "game" (8 cells
+      // per transient radius, the bed 1.25 R deep, Courant 0.45; the default)
+      // or ?profile=physical (the validated settings).
+      profile: qs.get('profile') === 'physical' ? 'physical' : 'game',
+      // Physics frames per second (?hz=; 120 by default).
+      hz: num('hz', 120),
+      // Cells across the transient radius. Physical: 12 at the default margin
+      // keeps the particles (and frame time) of 16 at 1.0 R. Game: the
+      // profile's. ?cpr= overrides either.
+      cpr: qs.has('cpr') ? num('cpr', 12) : qs.get('profile') === 'physical' ? (num('margin', 1.5) >= 1.5 ? 12 : 16) : null,
       bake: qs.get('bake') === 'time' ? 'time' : 'settle', bakeAt: num('bakeAt', 12),
       // The live surface (render only): ?surface=0 draws every particle instead.
       surface: qs.get('surface') !== '0',
@@ -180,7 +187,8 @@
     const G = 9.81;
     const SETTINGS = {
       config: { max_particles: 3 << 19, max_blocks: 8192, max_parcels: 1 << 18, max_substeps: 1024,
-        max_columns: 1 << 17, max_field_samples: 1 << 19, max_coupled: 64, cells_per_radius: S.cpr },
+        max_columns: 1 << 17, max_field_samples: 1 << 19, max_coupled: 64, profile: S.profile,
+        ...(S.cpr != null ? { cells_per_radius: S.cpr } : {}) },
       region_margin: S.margin,
       // The region's rest tolerance (set from the crater below): it bakes once
       // its fastest particle stays under it for half a second with nothing in
@@ -227,7 +235,7 @@
     const cap = { ...sceneCapacity(256, 512), maxHull: arena0.records.length / 4 + 64 };
     const world = await createWorld(device, { cap, vehicleCap: { maxVehicles: 4, maxWheels: 16, maxCurvePoints: 512, maxDiffs: 8, maxAntiRolls: 8, maxParts: 16, maxRays: 16 },
       status: (s) => { statusEl.textContent = s; } });
-    const DT = 1 / 60;
+    const DT = 1 / S.hz;
     Object.assign(world.params, { dt: DT, iterations: 8, gravityY: -G, flags: M.FLAG_SPEC_VELOCITY });
     world.setMaterial(0, 0.9);
     world.setMaterial(WHEEL_RIM_MATERIAL, 0.9);
@@ -986,7 +994,7 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
       rp.end();
     }
 
-    // One physics frame (1/60 s): the terrain's coupled substeps (or its bake)
+    // One physics frame (DT, 1/120 s by default): the terrain's coupled substeps (or its bake)
     // ahead of the rigid step, in one submission with the render.
     async function physicsFrame(enc, render) {
       if (st.phase === 'approach' && st.t >= 0) strike();
@@ -1025,7 +1033,7 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
       st.flash = Math.max(0, st.flash - DT * 4);
     }
 
-    // Fixed 1/60 s steps against the wall clock: at most one terrain frame in
+    // Fixed DT steps against the wall clock: at most one terrain frame in
     // flight, so a frame slower than real time slows the run (shown as sim speed)
     // instead of queueing.
     let lastT = performance.now(), acc = 0, inFlight = null;
@@ -1039,11 +1047,14 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
         if (inFlight) await inFlight;
         if (terrain.busy()) await terrain.settle();
         acc += dtWall;
-        let steps = Math.min(st.phase === 'open' ? 1 : 2, Math.floor(acc / DT));
+        // At most one display frame's worth of physics frames while the region
+        // is open (two otherwise), so 120 Hz steps keep up on a 60 Hz display.
+        const perDisplay = Math.max(1, Math.round(1 / (60 * DT)));
+        let steps = Math.min((st.phase === 'open' ? 1 : 2) * perDisplay, Math.floor(acc / DT));
         if (st.phase === 'ready') { acc = 0; steps = 1; }
         if (steps === 0 && acc < DT) steps = 0;
         acc = Math.max(0, acc - steps * DT);
-        if (acc > 2 * DT) acc = 0; // behind: run slower than real time, don't catch up
+        if (acc > 2 * perDisplay * DT) acc = 0; // behind: run slower than real time, don't catch up
         aimCamera(); smoothCamera(dtWall); writeFrame();
         const simBefore = st.simTime;
         if (steps === 0) {

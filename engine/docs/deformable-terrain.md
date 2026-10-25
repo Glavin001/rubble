@@ -113,7 +113,13 @@ measurements behind them.
 - physical stiffness (E = 50 MPa);
 - absorbing ground with a geostatic start;
 - the hybrid bake: tent at home for unmoved sand, P2G's B-spline for moved
-  sand, in the unactivated ground's frame.
+  sand, in the unactivated ground's frame;
+- a π-scaled region's bed 1.5 R deep (`bed_depth`; "Performance").
+
+**Profiles** (`TerrainProfile`, `TerrainConfig::profile`): `Physical` (the
+default, what the validations run at) and `Game` (8 cells/R, bed 1.25 R,
+Courant 0.45, no growth on the clock's speed bound), which `impact.html`
+uses by default ("Performance").
 
 **Validated:**
 - a resting region is the identity;
@@ -1237,6 +1243,218 @@ side near 0 and 1 m.
 - **Browser.** The browser runs the same plan and kernels (`TerrainStep`'s
   `config.boundary`, `config.initial_stress`); `impact.html` has not been
   rerun in Chrome with the absorbing ground.
+
+## Performance (2026-10-25)
+
+The browser demo's event (an 8 m stony impactor at 20 km/s into dry sand,
+R = 151 m, margin 1.5 R, the absorbing ground), natively on the M3 Max
+(wgpu on Metal) and in Chrome. GPU times are the kernels' own, summed
+(`RUBBLE_TERRAIN_GPU_MS=1`: every dispatch in a timestamped pass of its own;
+a pass holding all of a frame's dispatches reads 0 on Metal). Other agents
+shared the GPU throughout: a run's spans move by up to 2-3× between
+repeats, so the tables give the quietest of three runs and medians.
+- `tests/terrain_perf.rs` (`demo_event_frame_cost_and_crater`, ignored): the
+  event from strike to bake, each frame's GPU time, the baked crater.
+  `RUNS="GAME=1+CPR=12,BED=1.5"` runs settings in turn.
+- `tests/terrain_bench.rs` `terrain_demo_profile` (`RUBBLE_GPU_TIMING=1`):
+  each kernel's share; `PROFILE_REST=1` how much of the region is at rest.
+
+**Where a substep went** (before, 60 Hz frames, 0.91 M particles, 2.3-2.8 k
+blocks): 4.85 ms per substep, whatever the material did. P2G 1.89 ms (39%),
+G2P 0.95, payload (return map) 0.80, touch 0.49, scatter 0.30, count 0.27;
+the rest under 0.05 each. Every per-particle kernel is bound by memory
+traffic: a particle is 128 B, and P2G reads each 80 B payload once per node
+it reaches (27×), from L2.
+
+**Lossless changes** (same work order; fingerprints below):
+- `mpm_touch` records each particle's base cell (block key, cell in block)
+  and `mpm_count` its cell and rank, in `gMpmSorted` after the sorted ids
+  (binding 44 is 12 B per particle). `mpm_count` and `mpm_scatter` no longer
+  read the particle or the hash: 0.27 → 0.11 and 0.30 → 0.08 ms. The order
+  after `mpm_cell_sort` is the same: bit-identical.
+- P2G's payload is 64 B (the momentum and the affine matrix packed): P2G
+  1.89 → 1.57 ms. Four lanes per node, each summing a fixed subset of the 27
+  cells, added in lane order: → 1.20 ms. Both are deterministic, but the
+  sums round differently (Metal's fast-math contracts the repacked terms
+  differently), so the fingerprints changed.
+- `mpm_clear` writes `mpm_touch`'s workgroup counts (one dispatch less per
+  substep); `mpm_touch` loads only the position and flags. Bit-identical.
+- Tried, not kept: writing back only F and log Jp in `mpm_payload` (3.6×
+  slower on Metal, field stores of the struct), and staging a block's
+  neighbourhood in workgroup memory for P2G (0.27 → 0.80 ms at the game
+  profile: 14 KiB per 64-thread workgroup leaves two workgroups per core).
+
+**Bed depth** (`TerrainConfig::bed_depth`, in R below the event; it was
+the lateral reach, 2.5 R at margin 1.5). With the absorbing ground the bed
+need not sit that deep. At 12 cells/R, 120 Hz frames:
+
+| Bed | Particles | Centre depth | Deepest | Apparent radius | Rim | Cavity / π |
+|---|---|---|---|---|---|---|
+| 2.5 R | 0.91 M | 76.7 m | 100.3 m | 201 m | 23.0 m at 252 m | 2.98 |
+| 1.5 R | 0.55 M | 80.3 | 100.8 | 201 | 23.8 at 252 | 2.99 |
+| 1.25 R | 0.43 M | 80.8 | 97.5 | 201 | 24.0 at 252 | 2.95 |
+| 1.0 R | 0.31 M | 78.1 | 87.9 | 201 | 23.8 at 252 | 2.79 |
+
+- From 2.5 R to 1.5 R the crater moves under 5% (the centre +4.7%, its
+  deepest point +0.5%); at 1.0 R the floor reaches the bed (deepest −12%).
+- The default is 1.5 R (the game profile's 1.25 R). The region's sides and
+  top keep the margin. `CraterPrediction::region` refuses a bed shallower
+  than twice the transient depth.
+- The crater validation at the new default: below.
+
+**The game profile** (`TerrainProfile::Game`; the user's direction: authentic
+to look at, not a structural simulation). Each setting against the
+demo's crater at 12 cells/R and bed 1.25 R (centre 80.8 m, deepest
+97.5 m, rim 24.0 m at 252 m), 120 Hz frames:
+
+| Setting | Particles | Centre | Deepest | Apparent radius | Rim | Cavity / π | Frame (quiet run) |
+|---|---|---|---|---|---|---|---|
+| 8 cells/R | 115 k | 76.8 m | 92.6 m | 189 m | 23.4 m at 246 m | 2.88 | impact 4 substeps; then 1-2 |
+| + Courant 0.45 | | 77.7 | 93.9 | 189 | 23.5 at 246 | 2.92 | impact 3 |
+| + speed growth 1 (the game profile) | | 78.1 | 94.3 | 189 | 23.9 at 246 | 2.96 | impact 2; then 1 |
+| 6 cells/R | 44 k | 72.4 | 84.3 | 151 (1.0 R) | 26.1 at 176 m | 2.27 | rejected: rim at 1.17 R |
+| margin 1.0 | 71 k | 76.0 | 91.7 | 189 | 25.3 at 227 m | 2.70 | not adopted: the box edge holds the rim in |
+| E = 5 MPa | | 80.1 | 93.4 | 208 | 24.3 at 264 m | 3.39 | rejected: not settled at 40 s |
+| E = 0.5 MPa | | | | | | | rejected: the crater fills in |
+
+- Rings are one sample: 18.9 m at 8 cells/R, 12.6 m at 12, so radii move in
+  steps of a sample.
+- **Stiffness is not the bound at the demo's scale**: with cells of 12-19 m
+  the elastic CFL step is 19-28 ms, longer than a 120 Hz frame. Softer sand
+  saves nothing there and does not settle (5 MPa), or loses the crater
+  (0.5 MPa). The game profile keeps physical stiffness. Stiffness bounds
+  small events (a 1 kt charge's 2.9 m cells: 4.4 ms at physical E).
+- **Speed growth** (`TerrainConfig::speed_growth`, default 1.5): the clock
+  bounds a frame's speed by this factor × the last reported speed (the
+  source's peak until the first report), plus gravity over the lag and the
+  host's headroom (20 m/s). At 1 the impact frame takes 2 substeps instead of
+  3. The GPU still checks every substep, so a frame whose material outruns
+  the bound fails with the CFL error; it is never silently degraded. The
+  crater validation's own clock, which has no headroom, failed that way at
+  1.0, so that test keeps 1.5.
+- **Scale.** At the crater validation's centimetre scale, 8 cells/R gives a
+  crater 30% too small (apparent radius 0.875 R; it fails the band), as
+  found before: the source's core (0.015 m) is under a cell there, while at
+  the demo it spans 2.5 cells. At 12 cells/R the game profile passes the
+  bands there. Small or slow events need `cells_per_radius` 12.
+
+Validation of the game profile:
+- crater (`CRATER_PROFILE=game`, cm scale): at 8 cells/R fails the radius
+  band (above); at `CRATER_CPR=12`: apparent radius 0.172 m (1.17 R; physical
+  1.25 R), depth 0.071 m, rim 3.3 cm at 0.221 m, cavity 2.78× (the known
+  volume failure; physical 3.08×), 68 s wall;
+- slope (`SLOPE_PROFILE=game SLOPE_HZ=120`): the 40° slope relaxes to
+  28.6° (physical 29.7°), the 25° slope moves 1.9 mm (physical 1.9 mm);
+- coupling (`COUPLE_PROFILE=game`): all three pass; momentum to 2.5e-6
+  (physical 3.6e-6), the heavy box at 0.141 m (0.144 m) after 0.33 s.
+
+**Frame time, natively** (GPU ms per 1/120 s frame; quiet runs, the median of
+three for each setting):
+
+| Span | Physical, bed 2.5 R (after the binning and payload changes only) | Physical now (bed 1.5 R) | Game |
+|---|---|---|---|
+| strike frame | 33.8 (6 substeps) | 20.8 (6) | 2.4-4.6 (2) + activation 0.2 |
+| 0-0.1 s | 12.9 (3-4) | 7.5 (3-4) | 1.7 (1) |
+| 0.1-1 s | 12.1-12.4 (3) | 7.8-8.4 (3) | 0.72-0.76 (1) |
+| 1-3 s | 8.2-9.5 (2-3) | 5.7-6.5 (2-3) | 0.72-0.78 (1) |
+| 3 s to the bake | 4.1-4.6 (1-2) | 2.6-3.1 (1-2) | 0.67-0.73 (1) |
+| all frames: mean / median / 99% | 5.28 / 4.10 / 12.6 | 3.55 / 2.57 / 8.7 | 0.71 / 0.67 / 2.05 |
+
+The game profile settles at 13 s (physical 15 s). In the slower runs every
+span rose by up to 3× (other agents' work), so a single worst frame is not
+meaningful here; the strike frame's 2.4 ms is the quietest measurement.
+
+**In Chrome** (`impact.html`, `__impact.timings().log`: the page's terrain
+GPU time per 1/120 s frame; launched and stepped with `__impact.frames`):
+
+| Span | Physical (`?profile=physical`, 0.55 M) | Game (default, 115 k) |
+|---|---|---|
+| strike frame | 20.3 ms (6 substeps) | 4.2 ms (2) |
+| 0-0.1 s | 7.1 (3) | 1.0 (1) |
+| 0.1-1 s | 7.2-7.5 (3) | 0.8-1.5 (1) |
+| 1-3 s | 5.1-6.0 (2-3) | 1.8-2.4 (1) |
+| 3 s to the bake | 3.2-3.5 (1-2) | 1.8-2.2 (1) |
+
+Before (the task's measurement, 1/60 s frames, 0.91 M particles): 27 ms per
+frame in the first 0.5 s, 22-25 ms to 2 s, 15 ms at 2-3 s, 5-11 ms until the
+bake at 22 s. The game crater in Chrome: apparent radius 189 m, deepest
+93.9 m, rim 23.7 m at 236 m (physical: 201 m, 99.2 m, 22.0 m at 258 m). The
+page's whole frame (rendering included) takes 3-6 ms in the game profile.
+
+**Block sleeping: measured, not built.** `PROFILE_REST=1` reads the particles
+back and counts the share in blocks whose fastest particle is below a speed,
+alone and with one and two blocks around (a sleeping block needs its
+neighbours at rest to keep their stencils' nodes exact):
+
+| t | < 1 cm/s | < 10 cm/s | < 0.38 m/s (the demo's rest tolerance) |
+|---|---|---|---|
+| 0.02 s | 78 / 44 / 8% | 87 / 72 / 50% | 90 / 77 / 58% |
+| 0.25 s | 65 / 30 / 2% | 75 / 54 / 25% | 83 / 65 / 39% |
+| 1 s | 10 / 0 / 0% | 30 / 8 / 0% | 35 / 11 / 1% |
+| 1.5-6 s | 0% | 0-4% | 0-6 / 0 / 0% |
+| 8 s | 0% | 6 / 0 / 0% | 96 / 80 / 63% |
+| 10 s | 0% | 44 / 11 / 1% | 98 / 86 / 68% |
+
+- From 1 s to 6 s the whole region moves: the strike's waves (above 1 m/s
+  across the region at 2 s) take that long to leave through the absorbing
+  ground and the free surface. The bed layer and the surface layer move
+  above 1 cm/s from the start (the geostatic start is in equilibrium to a
+  fraction of a percent of 6 MPa), and the region is only 7-8 blocks deep,
+  so the two-block margin covers most of it.
+- So sleeping could not lower the peak, which is the strike frame and the
+  first second, and in the tail the game profile already costs 0.7 ms per
+  frame. It would only pay at a tolerance near the bake's own (0.38 m/s),
+  which freezes motion that the bake does not. It is left out.
+
+**What bounds the peak, and what is left to 2 ms per frame** (Metal; the
+user's target is every frame at 120 Hz under about 2 ms, the strike frame
+included):
+- **The strike frame**: activation (0.2 ms, `mpm_activate_emit` a serial
+  loop per column), the geostatic start, and as many substeps as the
+  source's peak needs. The Z-model's core edge moves at about 1.7 km/s; the
+  first P2G averages it to under 600 m/s. At the game profile that is 2
+  substeps, about 1.5 ms at 0.7 ms each when the GPU is quiet.
+- **Every later frame**: one substep of 0.67-0.73 ms at 115 k particles.
+  About 0.15 ms of it is fixed: a dozen small dispatches (clear, the args,
+  the scan, the cell sort, the grid, the absorbing faces, the parcels).
+- **To get under 2 ms with margin**, in order of yield:
+  1. The strike frame's first substep only at the source's peak, the rest at
+     the speed the GPU reports after it (a second params record per frame;
+     the plan schedules both). Saves a substep: about 0.7 ms.
+  2. P2G is about 40% of a substep and bound by L2 traffic. On Metal and
+     CUDA (32-48 KiB of threadgroup memory, 256-1024 threads) a staged
+     gather with larger workgroups keeps occupancy; behind a capability
+     flag, deterministic (fixed order). A scatter with float atomics would
+     be faster still but not reproducible; integer fixed-point atomics are
+     reproducible but trade range against resolution (the design rejected
+     them for WebGPU).
+  3. Fuse the small kernels (the grid update into P2G's write; the scan and
+     the cell sort), and emit activation per particle.
+  4. SIMD-group reductions for the lane sums and scans (Metal, CUDA):
+     deterministic.
+- WebGPU in Chrome runs the game profile at 1-2.4 ms per frame and 4.2 ms
+  on the strike frame: viewable, not the target.
+
+**Fingerprints** (`terrain_fingerprint`, after these changes: the packed
+payload and P2G's lanes round differently, and the default bed changes the
+impact case's region to 70,644 particles):
+- `engine-webgpu` `fingerprint_impact_coupled_and_bake`: particles
+  `a822b412486e9128`, bodies `da87b70009941bcf`, heights `bf7da3456dcaa81e`;
+  the loaded cube `5ac333cbab3eb7bb`.
+- `engine-world` `fingerprint_world_impact_to_bake`: reports
+  `c99f8a2f0a2fd4d4`, heights `7539de010b3a6c4f`, box `136fde101445dae3`.
+
+**Validation at the physical defaults** (bed 1.5 R):
+- crater (`terrain_crater`, 16 cells/R, margin 2): apparent radius 0.184 m
+  (1.25 R), depth 0.069 m, rim 2.9 cm at 0.248 m, axis ridge 0.5 mm, cavity
+  3.08× π-scaling's (the known volume failure; 3.10× before). 347 s wall
+  (782 s before);
+- slope (`terrain_slope`): the 40° slope relaxes to 29.7°, the 25° slope
+  moves 1.9 mm;
+- every listed suite passes (`terrain_mpm`, `terrain_couple`,
+  `terrain_absorb`, `terrain_bake_axis`, `terrain_watch`,
+  `terrain_materials`, `mpm_material`, `heightfield`, `vehicle_soil`;
+  engine-world `terrain`; engine-terrain; `terrain_plan.test.mjs`).
 
 ## T5 materials (2026-10-24)
 

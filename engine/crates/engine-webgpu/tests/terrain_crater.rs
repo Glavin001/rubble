@@ -377,7 +377,24 @@ fn an_impact_crater_in_dry_sand_follows_pi_scaling() {
         },
         _ => cfg,
     };
-    eprintln!("ground: {:?}, {:?}", cfg.boundary, cfg.initial_stress);
+    // CRATER_PROFILE=game: the game profile's settings (TerrainProfile::Game),
+    // CRATER_CPR still overriding its cells per radius.
+    let cfg = if std::env::var("CRATER_PROFILE").is_ok_and(|v| v == "game") {
+        let game = cfg.with_profile(engine_terrain::TerrainProfile::Game);
+        TerrainConfig {
+            cells_per_radius: std::env::var("CRATER_CPR")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(game.cells_per_radius),
+            ..game
+        }
+    } else {
+        cfg
+    };
+    eprintln!(
+        "ground: {:?}, {:?}; {} cells/R, bed {:?} R, courant {}",
+        cfg.boundary, cfg.initial_stress, cfg.cells_per_radius, cfg.bed_depth, cfg.courant
+    );
     s.terrain_enable(&cfg).unwrap();
     // CRATER_E: Young's modulus override (Pa), to measure what softer sand
     // would change (a lossy option, reported, not adopted).

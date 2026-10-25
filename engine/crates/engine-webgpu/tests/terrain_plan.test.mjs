@@ -149,3 +149,18 @@ test('the render-only surface pass rebuilds the open region\'s ground and fails 
   assert.throws(() => small.surface(9.81), /surface max_cells/);
   small.free();
 });
+
+test('the game profile sets its settings, and the page may override them', () => {
+  const settings = (config) => JSON.parse(new TerrainStep(JSON.stringify({ config })).settings()).config;
+  const game = settings({ profile: 'game' });
+  assert.equal(game.cells_per_radius, 8);
+  assert.ok(Math.abs(game.courant - 0.45) < 1e-6);
+  assert.equal(game.bed_depth, 1.25);
+  assert.equal(game.speed_growth, 1);
+  const physical = settings({});
+  assert.equal(physical.cells_per_radius, 16);
+  assert.equal(physical.bed_depth, 1.5);
+  assert.equal(physical.speed_growth, 1.5);
+  assert.equal(settings({ profile: 'game', cells_per_radius: 12 }).cells_per_radius, 12);
+  assert.throws(() => new TerrainStep(JSON.stringify({ config: { profile: 'fast' } })), /profile/);
+});

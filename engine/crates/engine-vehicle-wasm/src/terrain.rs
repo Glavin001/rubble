@@ -25,7 +25,7 @@ use engine_terrain::surface::{
 use engine_terrain::zmodel::point_source_z;
 use engine_terrain::{
     CraterPrediction, CraterTarget, ExplosionSource, ImpactSource, InitialStress, RegionBoundary,
-    RegionPlan, SandMaterial, TerrainConfig, TerrainError, ZModel,
+    RegionPlan, SandMaterial, TerrainConfig, TerrainError, TerrainProfile, ZModel,
 };
 use glam::{DVec3, Vec3};
 use serde::Deserialize;
@@ -53,6 +53,12 @@ struct ConfigJson {
     /// "unstressed" or "geostatic" (`InitialStress`).
     initial_stress: Option<String>,
     max_boundary_nodes: Option<u32>,
+    /// Bed depth below the event in transient radii (`TerrainConfig::bed_depth`).
+    bed_depth: Option<f32>,
+    speed_growth: Option<f32>,
+    /// "physical" (the default) or "game" (`TerrainProfile`): the settings
+    /// the other fields then override.
+    profile: Option<String>,
 }
 
 /// Dry sand's parameters (the default sand when absent).
@@ -197,8 +203,16 @@ impl TerrainStep {
     #[wasm_bindgen(constructor)]
     pub fn new(settings: &str) -> Result<TerrainStep, JsError> {
         let s: SettingsJson = super::parse(settings)?;
-        let d = TerrainConfig::default();
         let c = s.config;
+        let d = TerrainConfig::profile(match c.profile.as_deref() {
+            None | Some("physical") => TerrainProfile::Physical,
+            Some("game") => TerrainProfile::Game,
+            Some(other) => {
+                return Err(JsError::new(&format!(
+                    "config.profile is \"physical\" or \"game\", not {other:?}"
+                )))
+            }
+        });
         let boundary = match c.boundary.as_deref() {
             None => d.boundary,
             Some("rigid") => RegionBoundary::Rigid,
@@ -237,6 +251,8 @@ impl TerrainStep {
             boundary,
             initial_stress,
             max_boundary_nodes: c.max_boundary_nodes.unwrap_or(d.max_boundary_nodes),
+            bed_depth: c.bed_depth.or(d.bed_depth),
+            speed_growth: c.speed_growth.unwrap_or(d.speed_growth),
             ..d
         };
         let ds = SandMaterial::default();
@@ -343,7 +359,8 @@ impl TerrainStep {
                     InitialStress::Unstressed => "unstressed",
                     InitialStress::Geostatic => "geostatic",
                 },
-                "max_boundary_nodes": c.max_boundary_nodes},
+                "max_boundary_nodes": c.max_boundary_nodes, "bed_depth": c.bed_depth,
+                "speed_growth": c.speed_growth},
             "region_margin": self.margin, "speed_headroom": self.headroom,
             "settle_speed": self.settle_speed, "settle_frames": self.settle_frames,
         })

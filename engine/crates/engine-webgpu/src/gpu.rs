@@ -295,8 +295,12 @@ pub fn default_device() -> anyhow::Result<(wgpu::AdapterInfo, wgpu::Device, wgpu
     let info = adapter.get_info();
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("engine-webgpu-sim"),
-        // Per-phase GPU timing (`RUBBLE_GPU_TIMING=1`) needs timestamp queries.
-        required_features: if std::env::var("RUBBLE_GPU_TIMING").is_ok_and(|v| v == "1") {
+        // Per-phase GPU timing (`RUBBLE_GPU_TIMING=1`, and the terrain's
+        // `RUBBLE_TERRAIN_TIMING` / `RUBBLE_TERRAIN_GPU_MS`) needs timestamp queries.
+        required_features: if ["RUBBLE_GPU_TIMING", "RUBBLE_TERRAIN_TIMING", "RUBBLE_TERRAIN_GPU_MS"]
+            .iter()
+            .any(|k| std::env::var(k).is_ok_and(|v| v == "1"))
+        {
             adapter.features() & wgpu::Features::TIMESTAMP_QUERY
         } else {
             wgpu::Features::empty()
