@@ -372,6 +372,10 @@ pub enum RbDestructionType {
     /// A connection of an assembly or composed vehicle broke: `assembly`,
     /// `name`, `joint`, `force`, `torque`.
     RB_CONNECTION_BROKE = 6,
+    /// A chunk of a destructible was crushed: `destructible`, `index` (the
+    /// chunk), `mass`; `children` / `child_count` are the fragment bodies that
+    /// carry its mass, one each (none when removed).
+    RB_CHUNK_CRUSHED = 7,
 }
 
 /// A connected group of chunks of a destructible (one rigid actor).
@@ -1013,6 +1017,40 @@ impl RbWorld {
                     };
                     ev.parent = actor(parent);
                     let kids: Vec<RbActor> = children.iter().map(&mut actor).collect();
+                    ev.children = kids.as_ptr();
+                    ev.child_count = kids.len() as u32;
+                    s.actor_lists.push(kids);
+                }
+                DestructionEvent::ChunkCrushed {
+                    destructible,
+                    chunk,
+                    mass,
+                    fragments,
+                    ..
+                } => {
+                    ev.type_ = RbDestructionType::RB_CHUNK_CRUSHED;
+                    ev.destructible = destructible.to_bits();
+                    ev.index = *chunk;
+                    ev.mass = *mass;
+                    // Each fragment a child: the chunk, its body, its share of the mass.
+                    let share = *mass / fragments.len().max(1) as f32;
+                    let kids: Vec<RbActor> = fragments
+                        .iter()
+                        .map(|f| {
+                            let chunks = vec![*chunk];
+                            let bodies = vec![f.to_bits()];
+                            let out = RbActor {
+                                chunks: chunks.as_ptr(),
+                                bodies: bodies.as_ptr(),
+                                chunk_count: 1,
+                                anchored: false,
+                                mass: share,
+                            };
+                            s.u32_lists.push(chunks);
+                            s.body_lists.push(bodies);
+                            out
+                        })
+                        .collect();
                     ev.children = kids.as_ptr();
                     ev.child_count = kids.len() as u32;
                     s.actor_lists.push(kids);

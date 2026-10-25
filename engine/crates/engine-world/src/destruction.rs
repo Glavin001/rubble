@@ -383,6 +383,62 @@ pub enum Anchors {
     None,
 }
 
+/// A material's crush parameters (engine/docs/destruction-reactions.md section 1;
+/// ScenePack v3 `materials[].crush`; stress-ref `crush::CrushParams`, whose `presets`
+/// derive them from compressive strengths with their sources). SI units.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CrushMaterial {
+    /// Hydrostatic cap (Pa). > 0.
+    pub cap_pressure: f64,
+    /// Drucker-Prager intercept at p = 0 (Pa). >= 0.
+    pub cohesion: f64,
+    /// dq/dp of the cone. >= 0.
+    pub friction_slope: f64,
+    /// Specific comminution energy (J/m^3). > 0.
+    pub crush_energy: f64,
+    /// Perzyna viscosity (Pa s). > 0.
+    pub crush_viscosity: f64,
+}
+
+/// What becomes of a crushed chunk's mass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CrushMass {
+    /// Kept: the chunk leaves its structure as `fragments` small rigid boxes (a power of
+    /// two, at most 64) inside its volume, carrying its mass and momentum, so its weight
+    /// still loads what is below. `budget` fragment bodies are reserved when the
+    /// destructible is placed (the engine never allocates during a step); a crush past
+    /// them fails the step with an error naming this budget, never a silent drop.
+    Conserve { fragments: u32, budget: u32 },
+    /// Removed (dust): the chunk's mass leaves the simulation. The host draws the dust
+    /// from `ChunkCrushed`.
+    Remove,
+}
+
+impl Default for CrushMass {
+    fn default() -> Self {
+        CrushMass::Conserve {
+            fragments: 4,
+            budget: 256,
+        }
+    }
+}
+
+/// Chunk crushing for a `StrengthModel::Threshold` destructible, opt-in
+/// (`DestructibleDef::crush`): a chunk hit hard enough (a predicted strike, sustained
+/// contact pressure, or the reactions through its bonds) is crushed, reported as
+/// `DestructionEvent::ChunkCrushed`, and leaves its structure.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Crush {
+    pub mass: CrushMass,
+    /// Crush parameters by the stress import's chunk material name, supplying (or
+    /// replacing) the import's own (a v3 pack's `materials[].crush`). A chunk whose
+    /// material has none never crushes; enabling crushing where no chunk can crush is an
+    /// error, never a guessed value.
+    pub materials: Vec<(String, CrushMaterial)>,
+    /// Crushes one step reports at most (0: 256); more fail the step with an error.
+    pub max_per_step: u32,
+}
+
 /// A placed destructible (`World::create_destructible`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct DestructibleDef {
@@ -397,6 +453,9 @@ pub struct DestructibleDef {
     pub asleep: bool,
     pub shape: ShapeDef,
     pub user_data: u64,
+    /// Chunk crushing (threshold model only); `None`, the default: off, and nothing
+    /// differs from a world without it.
+    pub crush: Option<Crush>,
 }
 
 impl DestructibleDef {
@@ -413,6 +472,7 @@ impl DestructibleDef {
                 ..ShapeDef::default()
             },
             user_data: 0,
+            crush: None,
         }
     }
 }
@@ -458,6 +518,8 @@ pub(crate) struct DestructibleSlot {
     pub model: StrengthModel,
     /// The threshold model's fracture slot (`World::fracture`).
     pub threshold: Option<u32>,
+    /// Per chunk: crushed (threshold model with crushing).
+    pub crushed: Vec<bool>,
 }
 
 impl DestructibleSlot {
@@ -474,6 +536,7 @@ impl DestructibleSlot {
             actor: Vec::new(),
             model: StrengthModel::Bonds,
             threshold: None,
+            crushed: Vec::new(),
         }
     }
 }
@@ -594,6 +657,10 @@ impl World {
     /// frame), its shapes, and its bonds.
     pub fn create_destructible(&mut self, def: &DestructibleDef) -> anyhow::Result<DestructibleId> {
         def.shape.validate()?;
+        anyhow::ensure!(
+            def.crush.is_none() || def.model == StrengthModel::Threshold,
+            "DestructibleDef::crush needs StrengthModel::Threshold"
+        );
         let asset = self
             .assets
             .get(def.asset.0 as usize)

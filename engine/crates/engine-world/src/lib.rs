@@ -43,14 +43,14 @@ pub use debug_draw::{
 };
 pub use defs::{BodyDef, BodyType, Geometry, MassData, MotionLocks, ShapeDef, SurfaceMaterial};
 pub use destruction::{
-    lab_solver, ActorInfo, Anchors, BondDesc, ChunkDesc, DestructibleAssetDesc,
-    DestructibleAssetId, DestructibleDef, DestructibleId, DestructibleStats, Preload,
-    StrengthModel,
+    lab_solver, ActorInfo, Anchors, BondDesc, ChunkDesc, Crush, CrushMass, CrushMaterial,
+    DestructibleAssetDesc, DestructibleAssetId, DestructibleDef, DestructibleId,
+    DestructibleStats, Preload, StrengthModel,
 };
 pub use error::{StaleHandle, Unsupported};
 pub use events::{
     coalesce, BodyEvents, BodyMoveEvent, CoalescedFrame, ContactBeginEvent, ContactEndEvent,
-    ContactEvents, DestructionEvent, Frame, RayBatchId, RayBatchResult, SensorEvent, SensorEvents,
+    ContactEvents, CrushCause, DestructionEvent, Frame, RayBatchId, RayBatchResult, SensorEvent, SensorEvents,
     SkinId, SkinOutput, SoftOutput, VehicleOutput,
 };
 pub use handles::{BodyId, JointId, ShapeId};
