@@ -26,6 +26,7 @@ pub const SURFACE_KERNELS: &[&str] = &[
     "terrain_surface_bin",
     "terrain_surface_resolve",
     "terrain_surface_debris",
+    "terrain_surface_publish",
 ];
 
 /// Header words; the heights follow, one f32 per window sample.
@@ -39,6 +40,20 @@ pub const SURFACE_WINDOW_WORD: u32 = 8;
 /// The debris draw's indirect arguments (`drawIndirect`: vertex count, which
 /// a renderer writes; instance count, the particles listed this frame; 0; 0).
 pub const SURFACE_DEBRIS_ARGS_WORD: u32 = 16;
+/// Header word: the surface patch's collider (`u32::MAX`: none).
+pub const SURFACE_PATCH_WORD: u32 = 6;
+
+/// A static heightfield collider (`nx × nz` samples, the field's spacing)
+/// that `terrain_surface_publish` places over the open window with the live
+/// surface's heights, so wheel rays and contacts meet the sand; sunk out of
+/// reach while no region is open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SurfacePatch {
+    pub collider: u32,
+    pub nx: u32,
+    pub nz: u32,
+}
+
 /// Default limit on window samples × layers.
 pub const DEFAULT_SURFACE_CELLS: u32 = 1 << 21;
 
@@ -49,6 +64,7 @@ pub struct SurfacePlan {
     max_particles: u32,
     max_cells: u32,
     ejecta_fall: f32,
+    patch: Option<SurfacePatch>,
 }
 
 impl SurfacePlan {
@@ -68,7 +84,54 @@ impl SurfacePlan {
             max_particles: config.max_particles,
             max_cells,
             ejecta_fall: 1.0,
+            patch: None,
         })
+    }
+
+    /// Publish the surface into `patch` every frame (and sink it at the bake).
+    pub fn with_patch(mut self, patch: Option<SurfacePatch>) -> Self {
+        self.patch = patch;
+        self
+    }
+
+    pub fn patch(&self) -> Option<SurfacePatch> {
+        self.patch
+    }
+
+    fn patch_word(&self) -> u32 {
+        self.patch.map_or(u32::MAX, |p| p.collider)
+    }
+
+    fn publish(&self, ops: &mut TerrainOps) {
+        if let Some(patch) = self.patch {
+            ops.cmds.push(TerrainCmd::Dispatch {
+                kernel: "terrain_surface_publish",
+                threads: u64::from(patch.nx * patch.nz).div_ceil(4),
+            });
+        }
+    }
+
+    /// After a bake: the surface is no longer valid, and the patch sinks out
+    /// of reach (no blocks without a patch).
+    pub fn retire(&self) -> Option<TerrainOps> {
+        self.patch?;
+        let mut ops = TerrainOps {
+            writes: vec![
+                TerrainWrite {
+                    binding: SURFACE_BINDING,
+                    offset: 4 * u64::from(SURFACE_PATCH_WORD),
+                    words: vec![self.patch_word()],
+                },
+                TerrainWrite {
+                    binding: SURFACE_BINDING,
+                    offset: 4 * u64::from(SURFACE_VALID_WORD),
+                    words: vec![0],
+                },
+            ],
+            cmds: Vec::new(),
+        };
+        self.publish(&mut ops);
+        Some(ops)
     }
 
     /// Sand faster than a fall of `layers` layers (√(2 g · layers · dy)) is in
@@ -126,6 +189,14 @@ impl SurfacePlan {
             samples * u64::from(layers),
             u64::from(self.max_cells),
         )?;
+        if let Some(patch) = self.patch {
+            // The window and a ring of the field's samples round it.
+            TerrainConfig::check(
+                "surface patch samples",
+                u64::from(ni.max(nj) + 2),
+                u64::from(patch.nx.min(patch.nz)),
+            )?;
+        }
         let absorbing = p.boundary[0] & MPM_BOUNDARY_ABSORBING != 0;
         let ejecta_speed = (2.0 * gravity.abs() * self.ejecta_fall * p.origin[3]).sqrt();
         let mut ops = TerrainOps {
@@ -139,6 +210,7 @@ impl SurfacePlan {
                     u32::from(absorbing),
                     self.debris_base(),
                     ejecta_speed.to_bits(),
+                    self.patch_word(),
                 ],
             }],
             cmds: Vec::new(),
@@ -164,6 +236,7 @@ impl SurfacePlan {
             kernel: "terrain_surface_debris",
             offset: ARGS_PARTICLES,
         });
+        self.publish(&mut ops);
         Ok(ops)
     }
 }
@@ -250,7 +323,8 @@ mod tests {
                 layers,
                 1,
                 s.debris_base(),
-                (2.0 * 9.81 * t.params().origin[3]).sqrt().to_bits()
+                (2.0 * 9.81 * t.params().origin[3]).sqrt().to_bits(),
+                u32::MAX
             ]
         );
         // Off: only the material a gap separates is debris.
@@ -295,5 +369,33 @@ mod tests {
         p.load(&region, 10, None, 0.5).unwrap();
         let s = SurfacePlan::new(&cfg, DEFAULT_SURFACE_CELLS).unwrap();
         assert!(s.frame(&p, 9.81).is_err());
+    }
+
+    #[test]
+    fn a_patch_takes_the_surface_while_open_and_sinks_at_the_bake() {
+        let cfg = TerrainConfig::default();
+        let t = opened(&cfg);
+        let [_, _, ni, nj] = t.params().window;
+        let patch = SurfacePatch {
+            collider: 7,
+            nx: ni + 2,
+            nz: nj + 2,
+        };
+        let s = SurfacePlan::new(&cfg, DEFAULT_SURFACE_CELLS)
+            .unwrap()
+            .with_patch(Some(patch));
+        let ops = s.frame(&t, 9.81).unwrap();
+        assert_eq!(kernels(&ops).last(), Some(&"terrain_surface_publish"));
+        assert_eq!(ops.writes[0].words[6], 7);
+        let retire = s.retire().unwrap();
+        assert_eq!(kernels(&retire), ["terrain_surface_publish"]);
+        assert!(SurfacePlan::new(&cfg, DEFAULT_SURFACE_CELLS)
+            .unwrap()
+            .retire()
+            .is_none());
+        // A patch smaller than the window and its ring fails by name.
+        let small = s.with_patch(Some(SurfacePatch { nx: ni, ..patch }));
+        let e = small.frame(&t, 9.81).unwrap_err().to_string();
+        assert!(e.contains("surface patch samples"), "{e}");
     }
 }

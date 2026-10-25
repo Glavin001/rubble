@@ -19,7 +19,7 @@ use engine_terrain::plan::{
     TerrainStepReport, KERNELS,
 };
 use engine_terrain::surface::{
-    SurfacePlan, DEFAULT_SURFACE_CELLS, SURFACE_BINDING, SURFACE_DEBRIS_ARGS_WORD,
+    SurfacePatch, SurfacePlan, DEFAULT_SURFACE_CELLS, SURFACE_BINDING, SURFACE_DEBRIS_ARGS_WORD,
     SURFACE_HEADER_WORDS, SURFACE_KERNELS, SURFACE_VALID_WORD, SURFACE_WINDOW_WORD,
 };
 use engine_terrain::zmodel::point_source_z;
@@ -641,6 +641,24 @@ impl TerrainStep {
             &[self.surface.frame(&self.plan, gravity).map_err(err)?],
             SURFACE_KERNELS,
         ))
+    }
+
+    /// Publish the live surface into a static heightfield collider of
+    /// `nx × nz` samples (the field's spacing, at least two more than the
+    /// window each way) so wheel rays and contacts meet the sand while a
+    /// region is open (`SurfacePatch`).
+    pub fn set_surface_patch(&mut self, collider: u32, nx: u32, nz: u32) {
+        self.surface = self
+            .surface
+            .with_patch(Some(SurfacePatch { collider, nx, nz }));
+    }
+
+    /// After a bake: one block that sinks the patch (no blocks without one).
+    pub fn surface_retire(&self) -> Vec<u32> {
+        match self.surface.retire() {
+            Some(ops) => encode_in(&[ops], SURFACE_KERNELS),
+            None => vec![0],
+        }
     }
 
     /// Frames encoded since the pool was created.

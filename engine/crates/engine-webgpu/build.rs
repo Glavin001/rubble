@@ -211,6 +211,7 @@ const WORLD_ENTRIES: &[&str] = &[
     "terrain_surface_bin",
     "terrain_surface_resolve",
     "terrain_surface_debris",
+    "terrain_surface_publish",
 ];
 
 const CHARACTER_ENTRIES: &[&str] = &["char_move", "char_post", "query_batch", "projectile_step"];
