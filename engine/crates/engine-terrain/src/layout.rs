@@ -50,6 +50,10 @@ pub const MPM_MATERIAL_NONE: u32 = 0;
 pub const MPM_MATERIAL_SAND: u32 = 1;
 /// `MpmParams.counts.w`: Mohr–Coulomb sand.
 pub const MPM_MATERIAL_SAND_MC: u32 = 2;
+/// `MpmParams.counts.w`: cohesive Mohr–Coulomb soil (cohesion in stress space).
+pub const MPM_MATERIAL_SOIL_MC: u32 = 3;
+/// `MpmParams.counts.w`: damage-softening rock.
+pub const MPM_MATERIAL_ROCK: u32 = 4;
 
 /// Counter flags (`gMpmCounters[1]`).
 pub const MPM_OVERFLOW_BLOCKS: u32 = 1;
@@ -91,8 +95,11 @@ pub struct MpmParams {
     pub dims: [u32; 4],
     /// x: largest particle speed the substep's dt allows (CFL); y, z, w unused.
     pub limits: [f32; 4],
-    /// Sand: λ, μ, friction (Drucker–Prager α, or sin φ for Mohr–Coulomb),
-    /// cohesion (log strain).
+    /// The material's words: λ, μ, then for sand and soil friction
+    /// (Drucker–Prager α, or sin φ for Mohr–Coulomb) and cohesion (the apex
+    /// stretch c·cot φ/(3λ + 2μ) for Drucker–Prager, 0 for dry Mohr–Coulomb
+    /// sand, c·cos φ (Pa) for cohesive soil); for rock the tensile strength f_t
+    /// (Pa) and `RockMaterial::band_stress`, E·G_f/(2f_t) (Pa·m).
     pub sand: [f32; 4],
     /// Heightfield samples under the region: i0, j0, ni, nj.
     pub window: [u32; 4],
@@ -116,7 +123,8 @@ pub struct MpmParticle {
     pub xm: [f32; 4],
     /// Velocity, log Jp (plastic volume).
     pub vj: [f32; 4],
-    /// Rows of C, the APIC affine velocity.
+    /// Rows of C, the APIC affine velocity; `c[0][3]` is the rock's damage
+    /// (0 intact, 1 broken; 0 for other materials).
     pub c: [[f32; 4]; 3],
     /// Rows of the deformation gradient F; `f[0][3]` is the rest volume,
     /// `f[1][3]` the volume quanta (u32 bits; 0 for particles loaded by the host),
@@ -138,6 +146,11 @@ impl MpmParticle {
             c: [[0.0; 4]; 3],
             f,
         }
+    }
+
+    /// Damage of a rock particle (`c[0][3]`).
+    pub fn damage(&self) -> f32 {
+        self.c[0][3]
     }
 }
 

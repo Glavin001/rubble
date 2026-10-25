@@ -374,6 +374,62 @@ It is lossy, and it is not adopted. Large events are real-time at physical
 stiffness: a crater of radius 450 m at 16 cells/R has 28 m cells, so 1–2
 substeps.
 
+## T5 materials (2026-10-24)
+
+Cohesive soil and damage-softening rock, beside dry sand. Each has its own kernel
+function behind an early return in `mpmStress`, so dry sand's path is untouched: a
+30-frame sand pile hashes bit-identical before and after, with either yield surface.
+`terrain_set_material` takes `impl Into<TerrainMaterial>`: `Some(&sand)` and `None`
+as before, `&rock`, or a `TerrainMaterial`.
+
+**Cohesive soil** (`SandMaterial::cohesion` > 0, now in Pa; `mpmSoilProjectMohrCoulomb`):
+- Mohr–Coulomb with cohesion in stress space,
+  f = (τ₁ − τ₃) + (τ₁ + τ₃)·sin φ − 2c·cos φ, replacing the log-strain cohesion shift.
+  The tension cutoff is the apex c·cot φ: past it the material separates and log Jp
+  keeps the volume, as at the dry tip. The Drucker–Prager cone takes the same apex.
+- φ > 0 is required with cohesion (otherwise there is no apex); it is an error.
+- Unit tests: idempotence, returns onto the surface, Koiter normality for ψ = 0, the
+  apex, unconfined strengths 2c·cos φ/(1 ± sin φ), and equality with the cohesionless
+  map shifted by the apex.
+- MPM: a soil tower with c = 10.2 kPa, φ = 30° and γ = 17.7 kN/m³ has
+  H_c = (4c/γ)·tan(45° + φ/2) = 4 m (Terzaghi). With dx = H_c/16 and gravity ramped
+  on over 1 s, it stands at 0.7·H_c (no particle moved a cell) and collapses at
+  1.5·H_c (76% moved; the top fell from 6.0 to 4.3 m). A sweep put the solver's
+  critical height between 1.0·H_c and 1.1·H_c.
+
+**Rock** (`RockMaterial`: ρ, E, ν, f_t, G_f; `mpmRockDamage`):
+- Hencky elasticity and a damage d ∈ [0, 1] in `MpmParticle.c0.w`, carried by G2P.
+- A Rankine driver: d grows when the largest undamaged principal stress passes f_t.
+- Exponential softening scales the tensile principal stresses by (1 − d); the
+  compressive ones are kept (cracks close).
+- The crack band is h = 2·dx (`CRACK_BAND_CELLS`). A crack in quadratic-B-spline
+  MLS-MPM strains the particles of two cells, and the bar test measures cracks
+  exactly 2.00 cells wide at both cell sizes.
+- The band must stay under 2·E·G_f/f_t², so dx < E·G_f/f_t² (0.12 m for the default
+  rock). A coarser region fails its step with `TerrainError::CrackBand`; the rock is
+  never weakened to fit.
+- Ejecta that land back in the region come back broken (d = 1). A bake forgets
+  damage: the heightfield has no damage layer.
+- CPU: uniaxial tension peaks at f_t (to 2e-4) and dissipates G_f per crack area
+  (to 2e-4) at four cell sizes. Unloading follows the secant. Compression to
+  10·f_t (uniaxial, confined, hydrostatic) stays elastic and undamaged, and is carried
+  in full when cracked.
+- MPM: a bar pulled slowly by rigid grips cracks beside each grip. The cracks
+  dissipate 46.4 and 47.0 J/m² per crack area at dx = 0.04 and 0.02 m (G_f = 50).
+  Dynamic stretching is not used as the test: it breaks into a number of pieces that
+  depends on the rate and the cell size, with damage spread before it localises.
+- The GPU matches the CPU mirror for both materials: projection 3.8e-6, damage 8e-6.
+
+Not yet:
+- **Rock shear failure.** Rock has no shear or compressive failure (crushing under
+  confinement), and broken rock has no friction limit: it is not yet a granular
+  rubble.
+- **Coarse cells.** Regions coarser than l_ch (most terrain scales) need rock
+  parameters for their scale (a size effect). That is the user's decision, not a
+  silent change.
+- **Cohesive craters.** Crater scaling for cohesive (strength-regime) targets:
+  `CraterTarget::sand` still rejects cohesion.
+
 ## Validation targets
 
 Tests come from physics and published laws, never from another program's outputs.
@@ -416,3 +472,6 @@ Tests come from physics and published laws, never from another program's outputs
   Phys. Rev. E 72.
 - Katsuragi, Durian (2007). Unified force law for granular impact cratering. Nature
   Physics 3.
+- Terzaghi (1943). Theoretical Soil Mechanics. Wiley.
+- Bažant, Oh (1983). Crack band theory for fracture of concrete. Matériaux et
+  Constructions 16.

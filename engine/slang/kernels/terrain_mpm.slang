@@ -88,6 +88,8 @@ static const uint MPM_IMPULSE_LINEAR_ANGULAR = 2u;
 static const uint MPM_MATERIAL_NONE = 0u; // no stress: transfers only (tests)
 static const uint MPM_MATERIAL_SAND = 1u; // Drucker–Prager sand (mpm_material.slang)
 static const uint MPM_MATERIAL_SAND_MC = 2u; // Mohr–Coulomb sand
+static const uint MPM_MATERIAL_SOIL_MC = 3u; // cohesive Mohr–Coulomb soil (T5)
+static const uint MPM_MATERIAL_ROCK = 4u; // damage-softening rock (T5); damage in MpmParticle.c0.w
 
 struct MpmParams
 {
@@ -96,7 +98,8 @@ struct MpmParams
     uint4 counts;   // x = max particles, y = hash slots (power of two), z = max blocks, w = material
     uint4 dims;     // xyz = region size in cells, w = bed heightfield collider (MPM_NO_BLOCK: none)
     float4 limits;  // x = largest particle speed the substep's dt allows (CFL)
-    float4 sand;    // λ, μ, friction (DP α, or sin φ for Mohr–Coulomb), cohesion (log strain)
+    float4 sand;    // λ, μ, then sand/soil: friction (DP α, or sin φ for Mohr–Coulomb), cohesion
+                    // (DP: apex stretch; dry MC: 0; soil: c·cos φ in Pa); rock: f_t, E·G_f/f_t
     uint4 window;   // heightfield samples under the region: i0, j0, ni, nj
     float4 column;  // bed height (heightfield-local y), volume quantum (m³), lattice spacing, density
     float4 couple;  // x = frame duration (s, bounds pad by motion), y = max coupled colliders (uint bits),
@@ -112,7 +115,7 @@ struct MpmParticle
     // f1.w holds the particle's volume quanta (uint bits).
     float4 xm;      // position, mass
     float4 vj;      // velocity, log Jp (plastic volume)
-    float4 c0;      // C rows (APIC affine velocity)
+    float4 c0;      // C rows (APIC affine velocity); c0.w = rock damage
     float4 c1;
     float4 c2;
     float4 f0;      // F rows; f0.w = rest volume
@@ -432,11 +435,61 @@ void mpm_cell_sort(uint3 tid : SV_DispatchThreadID)
     }
 }
 
+// Cohesive soil (T5): F returned to the stress-space Mohr–Coulomb surface and
+// its apex, updating q's F and log Jp, then its Hencky stress.
+float3x3 mpmSoilStress(inout MpmParticle q, MpmParams p)
+{
+    float3x3 zero = float3x3(0, 0, 0, 0, 0, 0, 0, 0, 0);
+    float3x3 F = float3x3(q.f0.xyz, q.f1.xyz, q.f2.xyz);
+    if (!mpmSvdInputValid(F) || !mpmSandInputValid(float3(1, 1, 1), q.vj.w))
+    {
+        AOR2(gMpmCounters[MPM_C_FLAGS], MPM_INVALID);
+        return zero;
+    }
+    float3x3 U, V;
+    float3 sigma;
+    mpmSvd3(F, U, sigma, V);
+    float3 s;
+    float logJp;
+    mpmSoilProjectMohrCoulomb(sigma, q.vj.w, p.sand.z, p.sand.w, p.sand.x, p.sand.y, s, logJp);
+    F = mul(U, mul(float3x3(s.x, 0, 0, 0, s.y, 0, 0, 0, s.z), transpose(V)));
+    q.f0.xyz = F[0];
+    q.f1.xyz = F[1];
+    q.f2.xyz = F[2];
+    q.vj.w = logJp;
+    return mpmHenckyKirchhoff(U, s, p.sand.x, p.sand.y);
+}
+
+// Rock (T5): F is elastic; the damage in q.c0.w grows with the largest
+// principal stress, and the stress is Hencky's with its tensile part scaled by
+// (1 − d). The crack band is the cell size.
+float3x3 mpmRockStress(inout MpmParticle q, MpmParams p)
+{
+    float3x3 zero = float3x3(0, 0, 0, 0, 0, 0, 0, 0, 0);
+    float3x3 F = float3x3(q.f0.xyz, q.f1.xyz, q.f2.xyz);
+    if (!mpmSvdInputValid(F) || !(q.c0.w >= 0.0 && q.c0.w <= 1.0))
+    {
+        AOR2(gMpmCounters[MPM_C_FLAGS], MPM_INVALID);
+        return zero;
+    }
+    float3x3 U, V;
+    float3 sigma;
+    mpmSvd3(F, U, sigma, V);
+    float3 t;
+    float d;
+    mpmRockDamage(sigma, q.c0.w, p.sand.x, p.sand.y, p.sand.z, p.sand.w, p.origin.w, t, d);
+    q.c0.w = d;
+    return mpmPrincipalKirchhoff(U, t);
+}
+
 // Kirchhoff stress τ of particle q (zero for MPM_MATERIAL_NONE). Sand returns F
 // to its yield surface first (Mohr–Coulomb, or Klár et al.'s Drucker–Prager
-// cone), updating q's F and log Jp.
+// cone), updating q's F and log Jp. Cohesive soil and rock have their own
+// functions, ahead of the dry-sand path.
 float3x3 mpmStress(inout MpmParticle q, MpmParams p)
 {
+    if (p.counts.w == MPM_MATERIAL_SOIL_MC) return mpmSoilStress(q, p);
+    if (p.counts.w == MPM_MATERIAL_ROCK) return mpmRockStress(q, p);
     float3x3 zero = float3x3(0, 0, 0, 0, 0, 0, 0, 0, 0);
     if (p.counts.w != MPM_MATERIAL_SAND && p.counts.w != MPM_MATERIAL_SAND_MC) return zero;
     float3x3 F = float3x3(q.f0.xyz, q.f1.xyz, q.f2.xyz);
@@ -742,7 +795,7 @@ void mpm_g2p(uint3 tid : SV_DispatchThreadID)
     float3x3 C = transpose(B) * (4.0 / (dx * dx));
     q.xm.xyz += dt * v;
     q.vj.xyz = v;
-    q.c0 = float4(C[0], 0.0);
+    q.c0 = float4(C[0], q.c0.w); // c0.w: rock damage, carried
     q.c1 = float4(C[1], 0.0);
     q.c2 = float4(C[2], 0.0);
     float3x3 F = float3x3(q.f0.xyz, q.f1.xyz, q.f2.xyz);
@@ -1254,7 +1307,8 @@ void mpm_parcels(uint3 tid : SV_DispatchThreadID)
                     float vol = float(quanta) * p.column.y;
                     q.xm = float4(xq.xyz, vm.w);
                     q.vj = float4(vm.xyz, 0.0);
-                    q.c0 = float4(0, 0, 0, 0);
+                    // Rock comes back as rubble: thrown fragments are broken.
+                    q.c0 = float4(0, 0, 0, p.counts.w == MPM_MATERIAL_ROCK ? 1.0 : 0.0);
                     q.c1 = float4(0, 0, 0, 0);
                     q.c2 = float4(0, 0, 0, 0);
                     q.f0 = float4(1, 0, 0, vol > 0.0 ? vol : vm.w / max(p.column.w, 1e-30));

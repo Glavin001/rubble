@@ -14,7 +14,8 @@ use super::WgpuSim;
 use engine_schema::heightfield::HeightField;
 use engine_terrain::layout::*;
 use engine_terrain::{
-    RegionPlan, SandMaterial, TerrainConfig, TerrainError, YieldSurface, BLOCK_CELLS,
+    RegionPlan, RockMaterial, TerrainConfig, TerrainError, TerrainMaterial, YieldSurface,
+    BLOCK_CELLS,
 };
 
 /// Host-side state of the terrain pool.
@@ -23,6 +24,8 @@ pub(crate) struct TerrainState {
     params: MpmParams,
     /// Elastic (P-) wave speed of the loaded material (0 without stress).
     wave_speed: f32,
+    /// The loaded rock, whose crack band each step checks against the cell size.
+    rock: Option<RockMaterial>,
     /// Heightfield records the activation window touches (bake rewrites them).
     window_records: u32,
 }
@@ -131,6 +134,7 @@ impl WgpuSim {
                 ..MpmParams::default()
             },
             wave_speed: 0.0,
+            rock: None,
             window_records: 0,
         });
         Ok(())
@@ -335,28 +339,49 @@ impl WgpuSim {
         Ok(())
     }
 
-    /// The loaded material's constitutive model: `None` carries no stress
-    /// (transfers only), `Some` is sand with its yield surface. Particles' masses are the
+    /// The loaded material's constitutive model: [`TerrainMaterial::Inert`]
+    /// (or `None`) carries no stress (transfers only); sand or soil (`Some(&sand)`
+    /// or `&sand`) is elastoplastic with its yield surface (dry Mohr–Coulomb sand,
+    /// cohesive soil or the Drucker–Prager cone); rock (`&rock`) softens with
+    /// damage, and each step fails ([`TerrainError::CrackBand`]) while the
+    /// region's cell is too large for its crack band. Particles' masses are the
     /// caller's (density × rest volume).
-    pub fn terrain_set_material(&mut self, material: Option<&SandMaterial>) -> anyhow::Result<()> {
+    pub fn terrain_set_material(
+        &mut self,
+        material: impl Into<TerrainMaterial>,
+    ) -> anyhow::Result<()> {
+        let material = material.into();
+        material.validate()?;
         let state = self.terrain_state()?;
-        match material {
-            None => {
-                state.params.counts[3] = MPM_MATERIAL_NONE;
-                state.params.sand = [0.0; 4];
-                state.wave_speed = 0.0;
-            }
-            Some(m) => {
-                m.validate()?;
-                let (kind, friction) = match m.yield_surface {
-                    YieldSurface::MohrCoulomb => (MPM_MATERIAL_SAND_MC, m.friction_angle.sin()),
-                    YieldSurface::DruckerPrager => (MPM_MATERIAL_SAND, m.alpha()),
+        state.rock = None;
+        state.wave_speed = material.p_wave_speed();
+        let (kind, words) = match material {
+            TerrainMaterial::Inert => (MPM_MATERIAL_NONE, [0.0; 4]),
+            TerrainMaterial::Sand(m) => {
+                let (kind, friction, cohesion) = match m.yield_surface {
+                    // Dry sand keeps its kernel (and its results) unchanged.
+                    YieldSurface::MohrCoulomb if m.cohesion == 0.0 => {
+                        (MPM_MATERIAL_SAND_MC, m.friction_angle.sin(), 0.0)
+                    }
+                    YieldSurface::MohrCoulomb => (
+                        MPM_MATERIAL_SOIL_MC,
+                        m.friction_angle.sin(),
+                        m.cohesion_cos_phi(),
+                    ),
+                    YieldSurface::DruckerPrager => (MPM_MATERIAL_SAND, m.alpha(), m.apex_strain()),
                 };
-                state.params.counts[3] = kind;
-                state.params.sand = [m.lambda(), m.mu(), friction, m.cohesion];
-                state.wave_speed = m.p_wave_speed();
+                (kind, [m.lambda(), m.mu(), friction, cohesion])
             }
-        }
+            TerrainMaterial::Rock(m) => {
+                state.rock = Some(m);
+                (
+                    MPM_MATERIAL_ROCK,
+                    [m.lambda(), m.mu(), m.tensile_strength, m.band_stress()],
+                )
+            }
+        };
+        state.params.counts[3] = kind;
+        state.params.sand = words;
         Ok(())
     }
 
@@ -411,6 +436,9 @@ impl WgpuSim {
             u64::from(substeps),
             u64::from(state.config.max_substeps),
         )?;
+        if let Some(rock) = state.rock {
+            rock.softening_stress(state.params.origin[3])?;
+        }
         state.params.step[0] = dt;
         state.params.step[1] = gravity;
         // Nodes lighter than this carry no velocity (f32 momentum over mass).

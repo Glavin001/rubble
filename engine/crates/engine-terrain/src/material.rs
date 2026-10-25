@@ -1,8 +1,9 @@
-//! The sand material of the MPM active region (`engine/docs/deformable-terrain.md`,
-//! "T2 kernel design"): its physical parameters ([`SandMaterial`]) and the CPU
-//! mirror of `engine/slang/physics/mpm_material.slang`, step for step in f32, for
-//! tests and the host. engine-webgpu `tests/mpm_material.rs` checks the GPU code
-//! against it.
+//! The materials of the MPM active region (`engine/docs/deformable-terrain.md`,
+//! "T2 kernel design" and "T5 materials"): their physical parameters
+//! ([`SandMaterial`] for dry sand and cohesive soil, [`RockMaterial`] for
+//! damage-softening rock, either as a [`TerrainMaterial`]) and the CPU mirror of
+//! `engine/slang/physics/mpm_material.slang`, step for step in f32, for tests and
+//! the host. engine-webgpu `tests/mpm_material.rs` checks the GPU code against it.
 //!
 //! - [`svd3`] (`mpmSvd3`), the 3×3 SVD of McAdams et al. (2011).
 //! - [`sand_project`] (`mpmSandProject`), the Drucker–Prager return map in Hencky
@@ -10,6 +11,10 @@
 //!   2017).
 //! - [`sand_project_mohr_coulomb`] (`mpmSandProjectMohrCoulomb`), the
 //!   Mohr–Coulomb return map in Hencky strain (the default yield surface).
+//! - [`soil_project_mohr_coulomb`] (`mpmSoilProjectMohrCoulomb`), Mohr–Coulomb
+//!   with cohesion in stress space and its tension cutoff at the apex.
+//! - [`rock_damage`] (`mpmRockDamage`), Rankine damage with crack-band
+//!   exponential softening, and [`principal_kirchhoff`] (`mpmPrincipalKirchhoff`).
 //! - [`hencky_kirchhoff`] (`mpmHenckyKirchhoff`), the Kirchhoff stress.
 //! - [`friction_alpha`] (`mpmFrictionAlpha`).
 
@@ -24,9 +29,10 @@ pub const SVD_SWEEPS: u32 = 6;
 pub const INPUT_LIMIT: f32 = 1.0e18;
 /// Smallest |σ| the return map takes the log of (`MPM_SIGMA_FLOOR`).
 pub const SIGMA_FLOOR: f32 = 1.0e-4;
-/// Largest cohesion accepted (log strain): past it the material would hold an
-/// e-fold stretch without yielding.
-pub const MAX_COHESION: f32 = 1.0;
+/// Largest elastic log stretch per axis a cohesion may hold at the apex,
+/// c·cot φ / (3λ + 2μ): past it the material would hold an e-fold stretch
+/// before it separates.
+pub const MAX_APEX_STRAIN: f32 = 1.0;
 
 /// (1 + √2)²: below it the approximate half angle is within π/8.
 const SVD_GAMMA: f32 = 5.828_427;
@@ -45,7 +51,8 @@ pub enum YieldSurface {
     DruckerPrager,
 }
 
-/// Elastoplastic sand: Hencky elasticity bounded by a frictional yield surface.
+/// Elastoplastic sand or soil: Hencky elasticity bounded by a frictional yield
+/// surface, cohesionless (dry sand) or cohesive (soil).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SandMaterial {
     /// Bulk density (kg/m³).
@@ -56,8 +63,10 @@ pub struct SandMaterial {
     pub poisson_ratio: f32,
     /// Internal friction angle φ (radians).
     pub friction_angle: f32,
-    /// Cohesion as a log-strain offset of the cone's tip (0 for dry sand): the
-    /// stretch the material holds before it separates.
+    /// Cohesion c (Pa; 0 for dry sand), in stress space: the Mohr–Coulomb
+    /// surface is (τ₁ − τ₃) + (τ₁ + τ₃)·sin φ = 2c·cos φ, cut off in tension at
+    /// its apex, the hydrostatic tension c·cot φ. The Drucker–Prager cone takes
+    /// the same apex. A cohesive material needs φ > 0.
     pub cohesion: f32,
     /// Shape of the yield surface.
     pub yield_surface: YieldSurface,
@@ -81,7 +90,8 @@ impl Default for SandMaterial {
 
 impl SandMaterial {
     /// Rejects nonphysical parameters: density > 0, E > 0, ν in (−1, 0.5), φ in
-    /// [0, 90°), cohesion in [0, [`MAX_COHESION`]], all finite.
+    /// [0, 90°), cohesion ≥ 0 (and then φ > 0, with its apex stretch
+    /// [`Self::apex_strain`] at most [`MAX_APEX_STRAIN`]), all finite.
     pub fn validate(&self) -> Result<(), TerrainError> {
         let bad = |c: bool, why| {
             if c {
@@ -107,10 +117,33 @@ impl SandMaterial {
             "sand friction angle must lie in [0, 90°)",
         )?;
         bad(
-            !(self.cohesion >= 0.0 && self.cohesion <= MAX_COHESION),
-            "sand cohesion must lie in [0, 1] (log strain)",
+            !(self.cohesion.is_finite() && self.cohesion >= 0.0),
+            "sand cohesion must be finite and non-negative (Pa)",
+        )?;
+        bad(
+            self.cohesion > 0.0 && self.friction_angle <= 0.0,
+            "cohesive soil needs a friction angle above 0: its tension cutoff is the apex c·cot φ",
+        )?;
+        bad(
+            !(self.apex_strain().is_finite() && self.apex_strain() <= MAX_APEX_STRAIN),
+            "sand cohesion's apex stretch c·cot φ / (3λ + 2μ) must be at most 1 (log strain)",
         )?;
         Ok(())
+    }
+
+    /// The elastic log stretch per axis at the apex of the yield surface, the
+    /// hydrostatic tension c·cot φ: c·cot φ / (3λ + 2μ) (0 without cohesion).
+    /// The Drucker–Prager return map takes it as its tip offset.
+    pub fn apex_strain(&self) -> f32 {
+        if self.cohesion == 0.0 {
+            return 0.0;
+        }
+        self.cohesion / self.friction_angle.tan() / (3.0 * self.lambda() + 2.0 * self.mu())
+    }
+
+    /// c·cos φ (Pa): the cohesive soil kernel's word.
+    pub fn cohesion_cos_phi(&self) -> f32 {
+        self.cohesion * self.friction_angle.cos()
     }
 
     /// Shear modulus μ = E / 2(1 + ν) (Pa).
@@ -132,6 +165,214 @@ impl SandMaterial {
     /// P-wave speed c = √((λ + 2μ) / ρ) (m/s), which bounds the explicit substep.
     pub fn p_wave_speed(&self) -> f32 {
         ((self.lambda() + 2.0 * self.mu()) / self.density).sqrt()
+    }
+}
+
+/// Width of the crack band in cells. The narrowest opening the grid holds is
+/// a velocity jump between two neighbouring nodes, and with quadratic B-splines
+/// every particle within a cell of the plane between them reads both (a
+/// particle's stencil is the three nodes around it), so a crack strains the
+/// particles of two cells. engine-webgpu `tests/terrain_materials.rs` measures
+/// cracks exactly two cells wide at two cell sizes. The softening is
+/// regularised over h = `CRACK_BAND_CELLS`·dx.
+pub const CRACK_BAND_CELLS: f32 = 2.0;
+
+/// Damage-softening rock (continuum damage in the spirit of Wolper et al. 2019,
+/// CD-MPM): Hencky elasticity whose tensile principal stresses are scaled by
+/// (1 − d), with a per-particle damage d ∈ [0, 1] that grows when the largest
+/// principal stress of the undamaged material passes the tensile strength
+/// (Rankine), and exponential softening regularised by the crack band
+/// h = [`CRACK_BAND_CELLS`]·dx (Bažant & Oh 1983): under uniaxial tension the
+/// stress past the peak is f_t·exp(−(ε − f_t/E)/ε_s) with ε_s chosen so the
+/// energy dissipated per unit volume is G_f/h, hence G_f per crack area whatever
+/// the cell size. Compressive principal stresses are never degraded (cracks
+/// close).
+///
+/// The band must stay below `2·E·G_f/f_t²` (a cell below
+/// [`Self::max_cell_size`]): past it the softening branch would have to snap
+/// back. That is an error ([`TerrainError::CrackBand`]), never a silently
+/// weakened rock.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RockMaterial {
+    /// Bulk density (kg/m³).
+    pub density: f32,
+    /// Young's modulus E (Pa).
+    pub youngs_modulus: f32,
+    /// Poisson's ratio ν.
+    pub poisson_ratio: f32,
+    /// Tensile strength f_t (Pa): the uniaxial tensile stress at which damage
+    /// starts.
+    pub tensile_strength: f32,
+    /// Fracture energy G_f (J/m²): the energy a crack dissipates per unit area
+    /// as it opens fully.
+    pub fracture_energy: f32,
+}
+
+impl Default for RockMaterial {
+    /// Sound sedimentary or igneous rock, inside the ranges of rock-mechanics
+    /// references (E 10–70 GPa, ν 0.15–0.3, f_t 2–15 MPa, G_f 30–200 J/m²):
+    /// ρ = 2600 kg/m³, E = 30 GPa, ν = 0.25, f_t = 5 MPa, G_f = 100 J/m²
+    /// (characteristic length E·G_f/f_t² = 0.12 m, so cells up to 0.12 m: finer
+    /// than most terrain regions, which then fail with
+    /// [`TerrainError::CrackBand`] until given rock parameters for their scale).
+    fn default() -> Self {
+        Self {
+            density: 2600.0,
+            youngs_modulus: 30.0e9,
+            poisson_ratio: 0.25,
+            tensile_strength: 5.0e6,
+            fracture_energy: 100.0,
+        }
+    }
+}
+
+impl RockMaterial {
+    /// Rejects nonphysical parameters: density, E, f_t and G_f finite and
+    /// positive, ν in (−1, 0.5).
+    pub fn validate(&self) -> Result<(), TerrainError> {
+        let bad = |c: bool, why| {
+            if c {
+                Err(TerrainError::InvalidConfig(why))
+            } else {
+                Ok(())
+            }
+        };
+        bad(
+            !(self.density.is_finite() && self.density > 0.0),
+            "rock density must be finite and positive",
+        )?;
+        bad(
+            !(self.youngs_modulus.is_finite() && self.youngs_modulus > 0.0),
+            "rock Young's modulus must be finite and positive",
+        )?;
+        bad(
+            !(self.poisson_ratio > -1.0 && self.poisson_ratio < 0.5),
+            "rock Poisson's ratio must lie in (-1, 0.5)",
+        )?;
+        bad(
+            !(self.tensile_strength.is_finite() && self.tensile_strength > 0.0),
+            "rock tensile strength must be finite and positive (Pa)",
+        )?;
+        bad(
+            !(self.fracture_energy.is_finite() && self.fracture_energy > 0.0),
+            "rock fracture energy must be finite and positive (J/m²)",
+        )?;
+        bad(
+            !self.band_stress().is_finite(),
+            "rock E·G_f/f_t must be finite in f32",
+        )?;
+        Ok(())
+    }
+
+    /// Shear modulus μ = E / 2(1 + ν) (Pa).
+    pub fn mu(&self) -> f32 {
+        self.youngs_modulus / (2.0 * (1.0 + self.poisson_ratio))
+    }
+
+    /// Lamé's first parameter λ = Eν / (1 + ν)(1 − 2ν) (Pa).
+    pub fn lambda(&self) -> f32 {
+        let nu = self.poisson_ratio;
+        self.youngs_modulus * nu / ((1.0 + nu) * (1.0 - 2.0 * nu))
+    }
+
+    /// P-wave speed c = √((λ + 2μ) / ρ) (m/s), which bounds the explicit substep.
+    pub fn p_wave_speed(&self) -> f32 {
+        ((self.lambda() + 2.0 * self.mu()) / self.density).sqrt()
+    }
+
+    /// Hillerborg's characteristic length E·G_f/f_t² (m).
+    pub fn characteristic_length(&self) -> f32 {
+        self.youngs_modulus * self.fracture_energy / (self.tensile_strength * self.tensile_strength)
+    }
+
+    /// The largest cell size the crack band allows, 2·E·G_f/f_t² over
+    /// [`CRACK_BAND_CELLS`] (m): there the softening branch is vertical (all of
+    /// G_f/h is the elastic energy at the peak).
+    pub fn max_cell_size(&self) -> f32 {
+        2.0 * self.characteristic_length() / CRACK_BAND_CELLS
+    }
+
+    /// E·G_f/(f_t·[`CRACK_BAND_CELLS`]) (Pa·m), the kernel's word: the softening
+    /// stress is this over the cell size, less f_t/2.
+    pub fn band_stress(&self) -> f32 {
+        self.youngs_modulus * self.fracture_energy / (self.tensile_strength * CRACK_BAND_CELLS)
+    }
+
+    /// The softening stress σ_s = E·ε_s = E·G_f/(f_t·h) − f_t/2 (Pa) over the
+    /// crack band h = [`CRACK_BAND_CELLS`]·`dx`, computed as the kernel does;
+    /// fails with [`TerrainError::CrackBand`] unless it is positive (dx below
+    /// [`Self::max_cell_size`]).
+    pub fn softening_stress(&self, dx: f32) -> Result<f32, TerrainError> {
+        let s = self.band_stress() / dx - 0.5 * self.tensile_strength;
+        if !(dx > 0.0 && s > 0.0 && s.is_finite()) {
+            return Err(TerrainError::CrackBand {
+                cell: dx,
+                max: self.max_cell_size(),
+            });
+        }
+        Ok(s)
+    }
+}
+
+/// The constitutive model of an active region's material.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TerrainMaterial {
+    /// No stress: transfers only (tests).
+    Inert,
+    /// Dry sand (no cohesion) or cohesive soil.
+    Sand(SandMaterial),
+    /// Damage-softening rock.
+    Rock(RockMaterial),
+}
+
+impl TerrainMaterial {
+    pub fn validate(&self) -> Result<(), TerrainError> {
+        match self {
+            Self::Inert => Ok(()),
+            Self::Sand(m) => m.validate(),
+            Self::Rock(m) => m.validate(),
+        }
+    }
+
+    /// P-wave speed (m/s; 0 without stress).
+    pub fn p_wave_speed(&self) -> f32 {
+        match self {
+            Self::Inert => 0.0,
+            Self::Sand(m) => m.p_wave_speed(),
+            Self::Rock(m) => m.p_wave_speed(),
+        }
+    }
+}
+
+impl From<SandMaterial> for TerrainMaterial {
+    fn from(m: SandMaterial) -> Self {
+        Self::Sand(m)
+    }
+}
+
+impl From<&SandMaterial> for TerrainMaterial {
+    fn from(m: &SandMaterial) -> Self {
+        Self::Sand(*m)
+    }
+}
+
+/// `None` is [`TerrainMaterial::Inert`] (the form `terrain_set_material` has
+/// always taken).
+impl From<Option<&SandMaterial>> for TerrainMaterial {
+    fn from(m: Option<&SandMaterial>) -> Self {
+        m.map_or(Self::Inert, |m| Self::Sand(*m))
+    }
+}
+
+impl From<RockMaterial> for TerrainMaterial {
+    fn from(m: RockMaterial) -> Self {
+        Self::Rock(m)
+    }
+}
+
+impl From<&RockMaterial> for TerrainMaterial {
+    fn from(m: &RockMaterial) -> Self {
+        Self::Rock(*m)
     }
 }
 
@@ -453,7 +694,8 @@ pub fn sand_project(
 /// plane, and a 2×2 solve onto an edge (τ₁ = τ₂ or τ₂ = τ₃) when the main-plane
 /// return would reorder the strains (its multipliers clamped at 0 only against
 /// rounding, for a state already on the edge).
-/// Mirrors `mpmSandProjectMohrCoulomb`.
+/// Mirrors `mpmSandProjectMohrCoulomb`. The engine runs it for dry sand only
+/// (`cohesion` 0); cohesive soil takes [`soil_project_mohr_coulomb`].
 pub fn sand_project_mohr_coulomb(
     sigma: Vec3,
     log_jp: f32,
@@ -512,6 +754,145 @@ pub fn sand_project_mohr_coulomb(
         e = eps - da * n_a - db * n_b;
     }
     done(e)
+}
+
+/// Mohr–Coulomb return map for cohesive soil, cohesion c in stress space, with
+/// the volume correction of [`sand_project`] (ε = ln max(|σ|, [`SIGMA_FLOOR`]) +
+/// log Jp / 3, tr = Σε) and non-dilatant flow (ψ = 0). `cohesion_cos_phi` is
+/// c·cos φ (Pa); `sin_phi` must be positive when it is (validated by
+/// [`SandMaterial::validate`]).
+///
+/// - Tension cutoff at the apex, the hydrostatic tension c·cot φ, whose
+///   volumetric strain is tr_a = 3·c·cot φ / (3λ + 2μ): when tr ≥ tr_a no
+///   deviatoric return reaches the surface, so σ = exp(tr_a/3) and log Jp keeps
+///   the excess tr − tr_a (the volume the material gains as it separates).
+/// - Otherwise log Jp is cleared and the principal Kirchhoff stresses
+///   τᵢ = 2μεᵢ + λ tr (ε₁ ≥ ε₂ ≥ ε₃) must satisfy
+///   f = (τ₁ − τ₃) + (τ₁ + τ₃)·sin φ − 2c·cos φ ≤ 0, returned as in
+///   [`sand_project_mohr_coulomb`]: closed form onto the main plane, a 2×2
+///   solve onto an edge. Below the apex an edge return always exists.
+///
+/// It is the cohesionless map translated by the apex (f(τ) is the cohesionless
+/// f of τ − c·cot φ, and the flow is deviatoric), so c = 0 gives
+/// [`sand_project_mohr_coulomb`]'s result. Mirrors `mpmSoilProjectMohrCoulomb`.
+pub fn soil_project_mohr_coulomb(
+    sigma: Vec3,
+    log_jp: f32,
+    sin_phi: f32,
+    cohesion_cos_phi: f32,
+    lambda: f32,
+    mu: f32,
+) -> SandProjection {
+    let floor = Vec3::splat(SIGMA_FLOOR);
+    let eps = Vec3::new(
+        sigma.x.abs().max(floor.x).ln(),
+        sigma.y.abs().max(floor.y).ln(),
+        sigma.z.abs().max(floor.z).ln(),
+    ) + log_jp / 3.0;
+    let tr = eps.x + eps.y + eps.z;
+    let tr_apex = 3.0 * cohesion_cos_phi / (sin_phi * (3.0 * lambda + 2.0 * mu));
+    if tr >= tr_apex {
+        return SandProjection {
+            sigma: Vec3::splat((tr_apex / 3.0).exp()),
+            log_jp: tr - tr_apex,
+        };
+    }
+    let tau = 2.0 * mu * eps + Vec3::splat(lambda * tr);
+    let k = 2.0 * cohesion_cos_phi;
+    let g_a = Vec3::new(1.0 + sin_phi, 0.0, -(1.0 - sin_phi));
+    let f_a = g_a.dot(tau) - k;
+    let done = |e: Vec3| SandProjection {
+        sigma: Vec3::new(e.x.exp(), e.y.exp(), e.z.exp()),
+        log_jp: 0.0,
+    };
+    if f_a <= 0.0 {
+        return done(eps);
+    }
+    let n_a = Vec3::new(1.0, 0.0, -1.0);
+    let mut e = eps - (f_a / (4.0 * mu)) * n_a;
+    if e.x < e.y || e.y < e.z {
+        let right = e.y > e.x;
+        let (n_b, g_b) = if right {
+            (
+                Vec3::new(0.0, 1.0, -1.0),
+                Vec3::new(0.0, 1.0 + sin_phi, -(1.0 - sin_phi)),
+            )
+        } else {
+            (
+                Vec3::new(1.0, -1.0, 0.0),
+                Vec3::new(1.0 + sin_phi, -(1.0 - sin_phi), 0.0),
+            )
+        };
+        let f_b = g_b.dot(tau) - k;
+        let (a11, a12, a21, a22) = (2.0, g_a.dot(n_b), g_b.dot(n_a), 2.0);
+        let det = (a11 * a22 - a12 * a21) * 2.0 * mu;
+        let da = ((a22 * f_a - a12 * f_b) / det).max(0.0);
+        let db = ((a11 * f_b - a21 * f_a) / det).max(0.0);
+        e = eps - da * n_a - db * n_b;
+    }
+    done(e)
+}
+
+/// The result of [`rock_damage`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RockState {
+    /// Principal Kirchhoff stresses (Pa), in the SVD's order.
+    pub tau: Vec3,
+    /// Damage after the update, in [0, 1].
+    pub damage: f32,
+}
+
+/// Rankine damage with crack-band exponential softening ([`RockMaterial`]).
+/// With ε = ln max(|σ|, [`SIGMA_FLOOR`]) (ε₁ ≥ ε₂ ≥ ε₃) the undamaged principal
+/// Kirchhoff stresses are τ̄ᵢ = 2μεᵢ + λ tr ε. When τ̄₁ passes the tensile
+/// strength f_t, the damage it implies is
+/// d(τ̄₁) = 1 − (f_t/τ̄₁)·exp(−(τ̄₁ − f_t)/σ_s), with the softening stress
+/// σ_s = `band_stress`/dx − f_t/2 (`band_stress` = E·G_f/(f_t·b), b =
+/// [`CRACK_BAND_CELLS`], so σ_s = E·G_f/(f_t·h) − f_t/2 over the band h = b·dx); d never
+/// decreases (d = max(d, d(τ̄₁)), equivalent to keeping the largest τ̄₁ reached,
+/// as d is increasing in it). Under uniaxial tension the stress is then
+/// (1 − d)·τ̄₁ = f_t·exp(−(τ̄₁ − f_t)/σ_s), and the energy dissipated per unit
+/// volume once broken is f_t²/2E + f_t·σ_s/E = G_f/h. Positive τ̄ᵢ are scaled
+/// by (1 − d); compressive ones are kept (a closed crack carries compression).
+/// dx must give σ_s > 0 ([`RockMaterial::softening_stress`]). Mirrors
+/// `mpmRockDamage`.
+pub fn rock_damage(
+    sigma: Vec3,
+    damage: f32,
+    lambda: f32,
+    mu: f32,
+    tensile_strength: f32,
+    band_stress: f32,
+    dx: f32,
+) -> RockState {
+    let floor = Vec3::splat(SIGMA_FLOOR);
+    let e = Vec3::new(
+        sigma.x.abs().max(floor.x).ln(),
+        sigma.y.abs().max(floor.y).ln(),
+        sigma.z.abs().max(floor.z).ln(),
+    );
+    let tr = e.x + e.y + e.z;
+    let te = 2.0 * mu * e + Vec3::splat(lambda * tr);
+    let mut d = damage;
+    if te.x > tensile_strength {
+        let soft = band_stress / dx - 0.5 * tensile_strength;
+        let fresh = 1.0 - tensile_strength / te.x * (-(te.x - tensile_strength) / soft).exp();
+        d = d.max(fresh);
+    }
+    let keep = 1.0 - d;
+    let degrade = |t: f32| if t > 0.0 { keep * t } else { t };
+    RockState {
+        tau: Vec3::new(degrade(te.x), degrade(te.y), degrade(te.z)),
+        damage: d,
+    }
+}
+
+/// The Kirchhoff stress U·diag(tau)·Uᵀ of principal stresses `tau` in the
+/// columns of U. Mirrors `mpmPrincipalKirchhoff`.
+pub fn principal_kirchhoff(u: Mat3, tau: Vec3) -> Mat3 {
+    let (u0, u1, u2) = (u.x_axis, u.y_axis, u.z_axis);
+    let col = |j: usize| u0 * (tau.x * u0[j]) + u1 * (tau.y * u1[j]) + u2 * (tau.z * u2[j]);
+    Mat3::from_cols(col(0), col(1), col(2))
 }
 
 /// Kirchhoff stress of Hencky elasticity, τ = U·diag(2μ ln σ + λ Σ ln σ)·Uᵀ, for
@@ -781,12 +1162,13 @@ mod tests {
         for i in 0..20_000 {
             let mat = SandMaterial {
                 friction_angle: rng.range(0.0, 45.0).to_radians(),
-                cohesion: if i % 3 == 0 {
-                    rng.range(0.0, 0.05)
-                } else {
-                    0.0
-                },
                 ..SandMaterial::default()
+            };
+            // The cone's tip offset (log strain; SandMaterial::apex_strain).
+            let apex = if i % 3 == 0 {
+                rng.range(0.0, 0.05)
+            } else {
+                0.0
             };
             let (alpha, lambda, mu) = (mat.alpha(), mat.lambda(), mat.mu());
             let mut sigma = Vec3::new(
@@ -798,14 +1180,14 @@ mod tests {
                 sigma.z = -sigma.z;
             }
             let log_jp = if i % 2 == 0 { 0.0 } else { rng.range(0.0, 0.2) };
-            let p = sand_project(sigma, log_jp, alpha, mat.cohesion, lambda, mu);
+            let p = sand_project(sigma, log_jp, alpha, apex, lambda, mu);
             assert!(p.sigma.min_element() > 0.0 && p.log_jp >= 0.0, "{p:?}");
             // On or inside the cone, and never in tension.
-            let eps = strain(p.sigma, mat.cohesion);
+            let eps = strain(p.sigma, apex);
             let f = yield_fn(eps, alpha, lambda, mu);
             assert!(f <= 1e-5, "yield {f} after projecting {sigma:?}, {log_jp}");
             assert!(eps.x + eps.y + eps.z <= 1e-5, "tension {eps:?}");
-            let again = sand_project(p.sigma, p.log_jp, alpha, mat.cohesion, lambda, mu);
+            let again = sand_project(p.sigma, p.log_jp, alpha, apex, lambda, mu);
             assert!(
                 (again.sigma - p.sigma).abs().max_element() <= 2e-5
                     && (again.log_jp - p.log_jp).abs() <= 2e-5,
@@ -1093,7 +1475,25 @@ mod tests {
                 cohesion: -0.01,
                 ..d
             },
-            SandMaterial { cohesion: 2.0, ..d },
+            SandMaterial {
+                cohesion: f32::NAN,
+                ..d
+            },
+            SandMaterial {
+                cohesion: f32::INFINITY,
+                ..d
+            },
+            // Cohesive, frictionless: no apex to cut tension off at.
+            SandMaterial {
+                cohesion: 1.0e3,
+                friction_angle: 0.0,
+                ..d
+            },
+            // Apex stretch c·cot φ / (3λ + 2μ) past an e-fold (E = 50 MPa).
+            SandMaterial {
+                cohesion: 1.0e8,
+                ..d
+            },
         ];
         for m in bad {
             assert!(
@@ -1101,5 +1501,438 @@ mod tests {
                 "{m:?} accepted"
             );
         }
+    }
+
+    /// The cohesive soil of the soil tests: dry-sand elasticity, friction angle
+    /// `phi`, and the cohesion whose apex stretch is `apex` (log strain).
+    fn soil(phi: f32, apex: f32) -> SandMaterial {
+        let d = SandMaterial::default();
+        SandMaterial {
+            friction_angle: phi,
+            cohesion: apex * (3.0 * d.lambda() + 2.0 * d.mu()) * phi.tan(),
+            ..d
+        }
+    }
+
+    /// Stress-space Mohr–Coulomb yield function of an elastic strain, with
+    /// cohesion (compression negative).
+    fn soil_yield(eps: Vec3, m: &SandMaterial) -> f32 {
+        let (lambda, mu) = (m.lambda(), m.mu());
+        let tau = 2.0 * mu * eps + Vec3::splat(lambda * (eps.x + eps.y + eps.z));
+        let (s, c) = (m.friction_angle.sin(), m.friction_angle.cos());
+        (tau.x - tau.z) + (tau.x + tau.z) * s - 2.0 * m.cohesion * c
+    }
+
+    /// Hencky strain of principal Kirchhoff stresses τ:
+    /// ε = τ/2μ − λ·tr τ / (2μ(3λ + 2μ)).
+    fn strain_of(tau: Vec3, lambda: f32, mu: f32) -> Vec3 {
+        let tr = tau.x + tau.y + tau.z;
+        tau / (2.0 * mu) - Vec3::splat(lambda * tr / (2.0 * mu * (3.0 * lambda + 2.0 * mu)))
+    }
+
+    fn exp3(e: Vec3) -> Vec3 {
+        Vec3::new(e.x.exp(), e.y.exp(), e.z.exp())
+    }
+
+    #[test]
+    fn cohesionless_soil_is_dry_sand_bit_for_bit() {
+        let (_, lambda, mu) = sand();
+        let mut rng = Rng(31);
+        for i in 0..20_000 {
+            let s = rng.range(0.0, 45.0).to_radians().sin();
+            let sigma = sorted_sigma(&mut rng, 0.05) * if i % 3 == 0 { 1.02 } else { 1.0 };
+            let log_jp = if i % 2 == 0 {
+                0.0
+            } else {
+                rng.range(0.0, 0.05)
+            };
+            assert_eq!(
+                soil_project_mohr_coulomb(sigma, log_jp, s, 0.0, lambda, mu),
+                sand_project_mohr_coulomb(sigma, log_jp, s, 0.0, lambda, mu),
+                "{sigma:?}, {log_jp}"
+            );
+        }
+    }
+
+    /// Cohesion in stress space translates the cohesionless surface along the
+    /// hydrostatic axis by its apex c·cot φ, and the flow is deviatoric, so the
+    /// return map equals the cohesionless one applied to the strain shifted by
+    /// the apex stretch (the log-strain offset the cone takes).
+    #[test]
+    fn cohesive_soil_is_the_cohesionless_map_shifted_by_its_apex() {
+        let (_, lambda, mu) = sand();
+        let mut rng = Rng(37);
+        let mut worst = 0.0f32;
+        for i in 0..20_000 {
+            let phi = rng.range(5.0, 45.0).to_radians();
+            let m = soil(phi, rng.range(1e-4, 0.02));
+            let apex = m.apex_strain();
+            let sigma = sorted_sigma(&mut rng, 0.05) * (1.0 + rng.range(0.0, 2.0 * apex));
+            let log_jp = if i % 2 == 0 {
+                0.0
+            } else {
+                rng.range(0.0, 0.05)
+            };
+            let p = soil_project_mohr_coulomb(
+                sigma,
+                log_jp,
+                phi.sin(),
+                m.cohesion_cos_phi(),
+                lambda,
+                mu,
+            );
+            let q = sand_project_mohr_coulomb(sigma, log_jp, phi.sin(), apex, lambda, mu);
+            let d = ((p.sigma - q.sigma).abs() / q.sigma)
+                .max_element()
+                .max((p.log_jp - q.log_jp).abs());
+            worst = worst.max(d);
+            assert!(d <= 2e-6, "{sigma:?}, {log_jp}: {p:?} vs {q:?}");
+        }
+        eprintln!("cohesive MC vs shifted cohesionless MC: max difference {worst:.2e}");
+    }
+
+    #[test]
+    fn cohesive_soil_returns_onto_its_surface_with_deviatoric_normal_flow() {
+        let (_, lambda, mu) = sand();
+        let mut rng = Rng(41);
+        let (mut yielded, mut edges, mut apexes) = (0, 0, 0);
+        for i in 0..20_000 {
+            let phi = rng.range(5.0, 45.0).to_radians();
+            let m = soil(phi, rng.range(1e-3, 0.02));
+            let (s, kc) = (phi.sin(), m.cohesion_cos_phi());
+            let apex = m.apex_strain();
+            // Strains from compression to past the apex.
+            let sigma = sorted_sigma(&mut rng, 0.03) * (1.0 + rng.range(0.0, 2.0 * apex));
+            let log_jp = if i % 4 == 0 {
+                rng.range(0.0, 0.02)
+            } else {
+                0.0
+            };
+            let e0 = strain(sigma, 0.0) + log_jp / 3.0;
+            let tr0 = e0.x + e0.y + e0.z;
+            let p = soil_project_mohr_coulomb(sigma, log_jp, s, kc, lambda, mu);
+            assert!(p.sigma.min_element() > 0.0 && p.log_jp >= 0.0, "{p:?}");
+            let e = strain(p.sigma, 0.0);
+            let scale = mu * e0.abs().max_element().max(apex);
+            let f = soil_yield(e, &m);
+            assert!(f <= 2e-4 * scale, "f = {f} (scale {scale}) after {sigma:?}");
+            if p.log_jp > 0.0 || tr0 >= 3.0 * apex {
+                // The apex: hydrostatic at c·cot φ, the excess volume kept.
+                apexes += 1;
+                assert!((e - Vec3::splat(apex)).abs().max_element() <= 1e-6, "{e:?}");
+                assert!((p.log_jp - (tr0 - 3.0 * apex)).abs() <= 2e-6, "{p:?}");
+                continue;
+            }
+            let tr = e.x + e.y + e.z;
+            assert!(
+                (tr - tr0).abs() <= 2e-6 + 1e-4 * tr0.abs(),
+                "trace {tr0} → {tr}"
+            );
+            assert!(e.x + 2e-6 >= e.y && e.y + 2e-6 >= e.z, "order lost: {e:?}");
+            if soil_yield(e0, &m) <= 0.0 {
+                assert!((e - e0).abs().max_element() <= 1e-6, "inside, yet moved");
+                continue;
+            }
+            yielded += 1;
+            assert!(f >= -2e-4 * scale, "returned inside the surface: f = {f}");
+            // Koiter's rule for the plastic potential τ₁ − τ₃ (ψ = 0): the
+            // plastic strain is a non-negative combination of the active planes'
+            // flow directions, (1, 0, −1) and, on an edge, (0, 1, −1) (τ₁ = τ₂)
+            // or (1, −1, 0) (τ₂ = τ₃).
+            let dp = e0 - e;
+            let tol = 2e-6 + 1e-4 * dp.abs().max_element();
+            assert!(dp.x >= -tol && dp.z <= tol, "flow {dp:?}");
+            if dp.y > tol {
+                edges += 1;
+                assert!((e.x - e.y).abs() <= 2e-6, "flow {dp:?} off the edge {e:?}");
+            } else if dp.y < -tol {
+                edges += 1;
+                assert!((e.y - e.z).abs() <= 2e-6, "flow {dp:?} off the edge {e:?}");
+            }
+            let again = soil_project_mohr_coulomb(p.sigma, 0.0, s, kc, lambda, mu);
+            assert!(
+                (again.sigma - p.sigma).abs().max_element() <= 2e-6,
+                "not idempotent: {sigma:?} → {:?} → {:?}",
+                p.sigma,
+                again.sigma
+            );
+        }
+        assert!(
+            yielded > 1000 && edges > 50 && apexes > 50,
+            "cases: {yielded} yielded, {edges} on an edge, {apexes} at the apex"
+        );
+    }
+
+    /// Unconfined strengths of a Mohr–Coulomb soil: it holds uniaxial tension up
+    /// to 2c·cos φ/(1 + sin φ) and uniaxial compression up to
+    /// q_u = 2c·cos φ/(1 − sin φ) = 2c·tan(45° + φ/2) (so H_c = 2q_u/γ).
+    #[test]
+    fn cohesive_soil_has_its_unconfined_strengths() {
+        let phi = 30f32.to_radians();
+        let m = soil(phi, 0.005);
+        let (lambda, mu) = (m.lambda(), m.mu());
+        let (s, c) = (phi.sin(), m.cohesion);
+        let kc = m.cohesion_cos_phi();
+        let tension = 2.0 * c * phi.cos() / (1.0 + s);
+        let qu = 2.0 * c * (std::f32::consts::FRAC_PI_4 + phi / 2.0).tan();
+        assert!((qu - 2.0 * c * phi.cos() / (1.0 - s)).abs() <= 1e-6 * qu);
+        for (tau, what) in [
+            (Vec3::new(tension, 0.0, 0.0), "tension"),
+            (Vec3::new(0.0, 0.0, -qu), "compression"),
+        ] {
+            for (k, inside) in [(0.99, true), (1.01, false)] {
+                let sigma = exp3(strain_of(tau * k, lambda, mu));
+                let p = soil_project_mohr_coulomb(sigma, 0.0, s, kc, lambda, mu);
+                let moved = (p.sigma - sigma).abs().max_element() > 1e-7;
+                assert_eq!(!moved, inside, "uniaxial {what} at {k}× strength");
+            }
+        }
+    }
+
+    /// Uniaxial stress along x (the lateral strain −ν·ε₁ keeps τ₂ = τ₃ = 0 at
+    /// any damage): the stretches of the Hencky strain ε₁.
+    fn uniaxial(m: &RockMaterial, e1: f64) -> Vec3 {
+        let lateral = (-f64::from(m.poisson_ratio) * e1).exp() as f32;
+        Vec3::new(e1.exp() as f32, lateral, lateral)
+    }
+
+    fn rock_step(m: &RockMaterial, sigma: Vec3, d: f32, dx: f32) -> RockState {
+        rock_damage(
+            sigma,
+            d,
+            m.lambda(),
+            m.mu(),
+            m.tensile_strength,
+            m.band_stress(),
+            dx,
+        )
+    }
+
+    /// Uniaxial tension: elastic to the tensile strength, then exponential
+    /// softening, and the energy dissipated per crack area (per volume times the
+    /// cell size) is G_f at any cell size the crack band allows.
+    #[test]
+    fn rock_in_uniaxial_tension_peaks_at_its_strength_and_dissipates_its_fracture_energy() {
+        let m = RockMaterial::default();
+        let (ft, e) = (f64::from(m.tensile_strength), f64::from(m.youngs_modulus));
+        for share in [0.1f32, 0.3, 0.6, 0.9] {
+            let dx = share * m.max_cell_size();
+            let ss = f64::from(m.softening_stress(dx).unwrap());
+            let (mut d, mut peak, mut work) = (0.0f32, 0.0f64, 0.0f64);
+            let (mut last_e, mut last_t) = (0.0f64, 0.0f64);
+            let end = (ft + 30.0 * ss) / e;
+            let steps = 200_000;
+            let (lambda, mu) = (f64::from(m.lambda()), f64::from(m.mu()));
+            let mut most = 0.0f64;
+            for k in 1..=steps {
+                let sigma = uniaxial(&m, end * k as f64 / steps as f64);
+                let r = rock_step(&m, sigma, d, dx);
+                assert!(r.damage >= d, "damage healed");
+                d = r.damage;
+                // The lateral stresses stay zero (to the stretch's rounding).
+                assert!(
+                    f64::from(r.tau.y.abs().max(r.tau.z.abs())) <= 2e-3 * ft,
+                    "{r:?}"
+                );
+                // The law at the strain the stretches hold (f32 rounds them by
+                // about 6e-8, a third of a percent of the peak strain).
+                let el = sigma.as_dvec3();
+                let el = glam::DVec3::new(el.x.ln(), el.y.ln(), el.z.ln());
+                let e1 = el.x;
+                let bar = 2.0 * mu * e1 + lambda * (el.x + el.y + el.z);
+                let t = f64::from(r.tau.x);
+                peak = peak.max(t);
+                // The damage is that of the largest τ̄₁ reached (the rounding of
+                // the stretches can step τ̄₁ back by a few kPa).
+                most = most.max(bar);
+                let want = if most <= ft {
+                    assert_eq!(d, 0.0, "damage before the peak at ε = {e1}");
+                    bar
+                } else {
+                    ft / most * (-(most - ft) / ss).exp() * bar
+                };
+                assert!(
+                    (t - want).abs() <= 1e-4 * ft,
+                    "dx {dx}: τ = {t} at ε = {e1}, the law gives {want}"
+                );
+                work += 0.5 * (t + last_t) * (e1 - last_e);
+                (last_e, last_t) = (e1, t);
+            }
+            let per_area = work * f64::from(CRACK_BAND_CELLS * dx);
+            let gf = f64::from(m.fracture_energy);
+            eprintln!(
+                "rock, dx = {dx:.4} m ({share} of the crack-band limit): peak {peak:.4e} Pa \
+                 (f_t {ft:.4e}), dissipated {per_area:.3} J/m² (G_f {gf}), final d {d}"
+            );
+            assert!((peak / ft - 1.0).abs() <= 1e-3, "peak {peak} vs f_t {ft}");
+            assert!(
+                (per_area / gf - 1.0).abs() <= 5e-3,
+                "dx {dx}: {per_area} J/m² vs G_f {gf}"
+            );
+        }
+    }
+
+    /// Past the peak, unloading follows the secant (the damage is kept), and
+    /// reloading meets the softening curve where it left it.
+    #[test]
+    fn rock_unloads_along_the_secant_and_keeps_its_damage() {
+        let m = RockMaterial::default();
+        let dx = 0.5 * m.max_cell_size();
+        let e = f64::from(m.youngs_modulus);
+        let e1 = 1.5 * f64::from(m.tensile_strength) / e;
+        let loaded = rock_step(&m, uniaxial(&m, e1), 0.0, dx);
+        assert!(loaded.damage > 0.1 && loaded.damage < 0.99, "{loaded:?}");
+        for k in [0.75, 0.5, 0.1] {
+            let r = rock_step(&m, uniaxial(&m, k * e1), loaded.damage, dx);
+            assert_eq!(r.damage, loaded.damage, "damage changed on unloading");
+            let secant = f64::from(1.0 - loaded.damage) * e * k * e1;
+            assert!(
+                (f64::from(r.tau.x) - secant).abs() <= 2e-3 * f64::from(m.tensile_strength),
+                "unloading to {k}: {} vs secant {secant}",
+                r.tau.x
+            );
+        }
+        let again = rock_step(&m, uniaxial(&m, e1), loaded.damage, dx);
+        assert_eq!(again, loaded);
+    }
+
+    /// Compression up to ten times the tensile strength (a rock's compressive
+    /// strength is about 10–20 f_t) stays elastic and undamaged, uniaxial,
+    /// confined or hydrostatic; and cracked rock carries compression in full
+    /// (its cracks close).
+    #[test]
+    fn rock_in_compression_stays_elastic() {
+        let m = RockMaterial::default();
+        let (lambda, mu) = (m.lambda(), m.mu());
+        let dx = 0.5 * m.max_cell_size();
+        let limit = 10.0 * m.tensile_strength;
+        let hencky = |sigma: Vec3| {
+            let e = Vec3::new(sigma.x.ln(), sigma.y.ln(), sigma.z.ln());
+            2.0 * mu * e + Vec3::splat(lambda * (e.x + e.y + e.z))
+        };
+        for k in [0.1f32, 0.5, 1.0] {
+            let q = k * limit;
+            // Uniaxial stress, the compressed axis last (the SVD's order);
+            // uniaxial strain (confined); hydrostatic.
+            let uniaxial = exp3(strain_of(Vec3::new(0.0, 0.0, -q), lambda, mu));
+            let confined = Vec3::new(1.0, 1.0, (-q / (lambda + 2.0 * mu)).exp());
+            let hydro = Vec3::splat((-q / (3.0 * lambda + 2.0 * mu)).exp());
+            for sigma in [uniaxial, confined, hydro] {
+                let want = hencky(sigma);
+                for d in [0.0f32, 0.5, 1.0] {
+                    let r = rock_step(&m, sigma, d, dx);
+                    assert_eq!(r.damage, d, "compression changed the damage: {sigma:?}");
+                    // The uniaxial case's zero lateral stresses come out of the
+                    // stretches' rounding (2e-7 of 3λ + 2μ, a few kPa), which
+                    // the damage may scale; the rest is exact.
+                    let err = (r.tau - want).abs().max_element();
+                    let round = 2e-7 * (3.0 * lambda + 2.0 * mu);
+                    assert!(
+                        err <= round + 1e-5 * q,
+                        "{sigma:?}, d {d}: τ {:?} vs {want:?}",
+                        r.tau
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rock_damage_only_grows_and_no_stress_passes_the_tensile_strength() {
+        let m = RockMaterial::default();
+        let mut rng = Rng(43);
+        for _ in 0..20_000 {
+            let dx = rng.range(0.05, 0.95) * m.max_cell_size();
+            let mut v = [
+                rng.range(-2e-3, 2e-3),
+                rng.range(-2e-3, 2e-3),
+                rng.range(-2e-3, 2e-3),
+            ];
+            v.sort_by(|a, b| b.partial_cmp(a).unwrap());
+            let sigma = exp3(Vec3::from_array(v));
+            let d0 = if rng.next() & 1 == 0 {
+                0.0
+            } else {
+                rng.range(0.0, 1.0)
+            };
+            let r = rock_step(&m, sigma, d0, dx);
+            assert!(r.damage >= d0 && r.damage <= 1.0, "{d0} → {}", r.damage);
+            assert!(r.tau.is_finite(), "{r:?}");
+            // (1 − d)·τ̄₁ ≤ (1 − d(τ̄₁))·τ̄₁ = f_t·exp(…) ≤ f_t.
+            assert!(
+                r.tau.max_element() <= m.tensile_strength * (1.0 + 1e-5),
+                "{sigma:?}, d {d0}: {r:?}"
+            );
+        }
+        // Far past the peak the rock is fully broken: no tension at all.
+        let r = rock_step(&m, Vec3::splat(1.01), 0.0, 0.5 * m.max_cell_size());
+        assert_eq!(r.damage, 1.0);
+        assert_eq!(r.tau, Vec3::ZERO);
+    }
+
+    #[test]
+    fn the_crack_band_rejects_cells_past_its_limit() {
+        let m = RockMaterial::default();
+        // E·G_f/f_t² = 30e9·100/25e12 = 0.12 m; the largest cell 2·0.12/2 m.
+        assert!((m.characteristic_length() - 0.12).abs() < 1e-6);
+        assert!((m.max_cell_size() - 0.12).abs() < 1e-6);
+        assert!(m.softening_stress(0.99 * m.max_cell_size()).is_ok());
+        for dx in [
+            m.max_cell_size(),
+            1.01 * m.max_cell_size(),
+            10.0,
+            0.0,
+            -1.0,
+            f32::NAN,
+        ] {
+            assert!(
+                matches!(m.softening_stress(dx), Err(TerrainError::CrackBand { .. })),
+                "dx {dx} accepted"
+            );
+        }
+        // σ_s over the band h = 2·dx: E·G_f/(f_t·h) − f_t/2.
+        let s = m.softening_stress(0.05).unwrap();
+        assert!((s - (30e9 * 100.0 / (5e6 * 0.1) - 2.5e6)).abs() <= 1e-6 * s);
+    }
+
+    #[test]
+    fn nonphysical_rock_is_rejected() {
+        let d = RockMaterial::default();
+        d.validate().unwrap();
+        let bad = [
+            RockMaterial { density: 0.0, ..d },
+            RockMaterial {
+                youngs_modulus: f32::NAN,
+                ..d
+            },
+            RockMaterial {
+                poisson_ratio: 0.5,
+                ..d
+            },
+            RockMaterial {
+                tensile_strength: 0.0,
+                ..d
+            },
+            RockMaterial {
+                tensile_strength: f32::INFINITY,
+                ..d
+            },
+            RockMaterial {
+                fracture_energy: -1.0,
+                ..d
+            },
+            RockMaterial {
+                fracture_energy: f32::NAN,
+                ..d
+            },
+        ];
+        for m in bad {
+            assert!(
+                matches!(m.validate(), Err(TerrainError::InvalidConfig(_))),
+                "{m:?} accepted"
+            );
+        }
+        assert_eq!(TerrainMaterial::from(None), TerrainMaterial::Inert);
+        assert_eq!(TerrainMaterial::from(&d), TerrainMaterial::Rock(d));
     }
 }
