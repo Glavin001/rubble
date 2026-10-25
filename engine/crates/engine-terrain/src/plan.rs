@@ -53,6 +53,8 @@ pub const KERNELS: &[&str] = &[
     "mpm_source",
     "mpm_absorb_init",
     "mpm_geostatic",
+    "mpm_absorb_faces",
+    "mpm_bake_shift",
 ];
 
 /// Byte offsets of the indirect workgroup counts in [`MPM_ARGS_BINDING`].
@@ -267,13 +269,13 @@ impl TerrainPlan {
         self.wave_speed
     }
 
-    /// Grid nodes an absorbing boundary keeps a record for in a region of
-    /// `cells` (each axis): three node layers along the floor and along each of
-    /// the four sides (`mpmAbsorbSlot`), against
+    /// Face points an absorbing boundary keeps a displacement for in a region
+    /// of `cells` (each axis): the node lattice's columns through the floor and
+    /// through each of the four sides (`mpmFaceRecord`), against
     /// [`TerrainConfig::max_boundary_nodes`].
     pub fn boundary_nodes(cells: [u32; 3]) -> u64 {
         let [x, y, z] = cells.map(|c| u64::from(c) + 1);
-        3 * x * z + 6 * y * (x + z)
+        x * z + 2 * y * (x + z)
     }
 
     /// The region's bed heightfield collider, if it has one.
@@ -410,7 +412,9 @@ impl TerrainPlan {
                 self.params.dims[1],
                 self.params.dims[2],
             ];
-            let n = Self::boundary_nodes(cells);
+            // The faces' points; the bake reuses them for the window's edge
+            // samples (mpm_bake_shift).
+            let n = Self::boundary_nodes(cells).max(2 * u64::from(ni + nj));
             TerrainConfig::check("max_boundary_nodes", n, u64::from(cfg.max_boundary_nodes))?;
             n as u32
         } else {
@@ -452,6 +456,12 @@ impl TerrainPlan {
         );
         let records = u64::from(self.window_records);
         let mut ops = TerrainOps::default();
+        // On the absorbing ground: the walls' give, measured on the window's
+        // edge columns, for the bake to take out (in the face records' space).
+        if self.params.boundary[2] > 0 {
+            let [_, _, ni, nj] = self.params.window;
+            ops.disp("mpm_bake_shift", 2 * u64::from(ni + nj));
+        }
         ops.disp("mpm_write_args", 1);
         ops.particles("mpm_bake_bin");
         ops.disp("mpm_bake_raise", records);
@@ -605,6 +615,11 @@ impl TerrainPlan {
             ops.blocks("mpm_couple_apply");
         }
         ops.particles("mpm_g2p");
+        // The absorbing faces move with the material at them.
+        let faces = u64::from(self.params.boundary[2]);
+        if faces > 0 {
+            ops.disp("mpm_absorb_faces", faces);
+        }
         ops.indirect("mpm_parcels", ARGS_PARCELS);
     }
 

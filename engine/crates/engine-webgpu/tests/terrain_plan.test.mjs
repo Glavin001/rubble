@@ -68,7 +68,7 @@ test('an impact opens a region (activation, then source) and runs coupled frames
   assert.ok(subs >= 1);
   assert.equal(names.filter((k) => k === 'mpm_couple_apply').length, subs);
   const g = names.indexOf('mpm_grid');
-  assert.deepEqual(names.slice(g, g + 4), ['mpm_grid', 'mpm_couple_gather', 'mpm_couple_apply', 'mpm_g2p']);
+  assert.deepEqual(names.slice(g, g + 5), ['mpm_grid', 'mpm_couple_gather', 'mpm_couple_apply', 'mpm_g2p', 'mpm_absorb_faces']);
   assert.deepEqual(names.slice(-2), ['mpm_couple_emit', 'mpm_couple_finish']);
   // The source frame needs more substeps than a calm one.
   JSON.parse(p.report(f0[1], counters({ speed: 0.01 })));
@@ -79,7 +79,7 @@ test('an impact opens a region (activation, then source) and runs coupled frames
   const bake = p.frame(1 / 60, -9.81, 1);
   assert.equal(bake[0], 2);
   assert.deepEqual(decodeBlocks(bake, 2).blocks[0].cmds.map((c) => c.kernel),
-    ['mpm_write_args', 'mpm_bake_bin', 'mpm_bake_raise', 'mpm_bake_header', 'mpm_deposit_raise', 'mpm_deposit_header']);
+    ['mpm_bake_shift', 'mpm_write_args', 'mpm_bake_bin', 'mpm_bake_raise', 'mpm_bake_header', 'mpm_deposit_raise', 'mpm_deposit_header']);
   assert.equal(p.region(), 'null');
   assert.equal(p.frame(1 / 60, -9.81, 1)[0], 0);
   p.free();

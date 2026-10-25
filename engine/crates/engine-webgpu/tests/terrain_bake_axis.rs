@@ -68,7 +68,7 @@ struct Crater {
     radius: i64,
 }
 
-fn demo_crater(cells: f32) -> Crater {
+fn demo_crater(cells: f32, margin: f64) -> Crater {
     let mut s = sim();
     let cfg = TerrainConfig {
         max_particles: 3 << 19,
@@ -94,7 +94,7 @@ fn demo_crater(cells: f32) -> Crater {
     let g = f64::from(G);
     let crater = src.crater(g).unwrap();
     let model = src.field(g, point_source_z(src.target.ejecta.mu)).unwrap();
-    let plan = crater.region(&cfg, Vec3::ZERO, 1.0, 0, 0).unwrap();
+    let plan = crater.region(&cfg, Vec3::ZERO, margin, 0, 0).unwrap();
     let n = 2 * (3.0 * crater.radius as f32 / plan.dx).ceil() as u32 + 1;
     let field = HeightField::new(n, n, plan.dx, plan.dx, vec![0.0; (n * n) as usize]).unwrap();
     let mut arena = HullArena::new();
@@ -135,6 +135,38 @@ fn demo_crater(cells: f32) -> Crater {
         plan.dx
     );
     let particles = s.terrain_particles().into_iter().filter(live).collect();
+    // The absorbing ground's node displacements (binding 49, after the
+    // coupling slots): the largest horizontal one.
+    let records = engine_terrain::plan::TerrainPlan::boundary_nodes([
+        plan.blocks.x as u32 * 4,
+        plan.blocks.y as u32 * 4,
+        plan.blocks.z as u32 * 4,
+    ]) as usize;
+    let words = s.read_words(49, 64 * u64::from(cfg.max_coupled), 4 * records);
+    let wall = words
+        .chunks(4)
+        .map(|w| f32::from_bits(w[0]).abs().max(f32::from_bits(w[2]).abs()))
+        .fold(0.0f32, f32::max);
+    eprintln!("largest horizontal ground displacement at the walls: {wall:.3} m");
+    if std::env::var("WALL_TRACE").is_ok() {
+        // The low-x side's face points on the region's middle z row.
+        let d = [
+            plan.blocks.x * 4 + 1,
+            plan.blocks.y * 4 + 1,
+            plan.blocks.z * 4 + 1,
+        ];
+        let (nx, ny, nz) = (d[0] as usize, d[1] as usize, d[2] as usize);
+        let gz = nz / 2;
+        let u: Vec<String> = (0..ny)
+            .map(|gy| {
+                format!(
+                    "{:+.2}",
+                    f32::from_bits(words[4 * (nx * nz + gy * nz + gz)])
+                )
+            })
+            .collect();
+        eprintln!("  low-x side, u_x by node row: {}", u.join(" "));
+    }
     s.terrain_bake().unwrap();
     Crater {
         baked: gpu_heights(&s, collider, &field),
@@ -175,7 +207,7 @@ fn line_excess(h: &dyn Fn(i64, i64) -> f64, c: i64, k: i64, r0: i64, r1: i64) ->
 /// add a trench to that. The bilinear bake left them 5.5 m low here.
 #[test]
 fn a_crater_bakes_without_a_trench_along_its_axes() {
-    let c = demo_crater(8.0);
+    let c = demo_crater(8.0, 1.0);
     let n = c.field.samples().0 as i64;
     let at = |i: i64, j: i64| (j * n + i) as usize;
     let h = |i: i64, j: i64| f64::from(c.baked[at(i, j)]);
@@ -209,7 +241,7 @@ fn the_demo_crater_along_its_axes() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(16.0);
-    let c = demo_crater(cells);
+    let c = demo_crater(cells, 1.0);
     let n = c.field.samples().0 as i64;
     let nn = n as usize;
     let (dx, _) = c.field.cell_size();
@@ -382,4 +414,142 @@ fn the_demo_crater_along_its_axes() {
             prof.join(" ")
         );
     }
+}
+
+/// The edge of the activation window, after the demo's event (margin 1.5 R as
+/// the demo, at 8 cells per radius): no sample of the window's rim may stand
+/// out of the ground beside it. The absorbing walls give outward under the
+/// crater's residual push (metres, at E = 50 MPa and R ≈ 0.4 km), and the
+/// unactivated ground beyond is a heightfield, so a bake in the region's own
+/// frame put all of that volume on the window's last samples: a ridge a
+/// sample wide.
+#[test]
+fn the_window_edge_bakes_without_a_ridge() {
+    // RIDGE_CPR: cells per radius (the demo runs 12).
+    let cells = std::env::var("RIDGE_CPR")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8.0);
+    let c = demo_crater(cells, 1.5);
+    let n = c.field.samples().0 as i64;
+    let at = |i: i64, j: i64| (j * n + i) as usize;
+    let inside = |i: i64, j: i64| c.lowered[at(i, j)] < -1.0;
+    let h = |i: i64, j: i64| f64::from(c.baked[at(i, j)]);
+    if std::env::var("RIDGE_TRACE").is_ok() {
+        // On the −x arm's axis row: the particles' rest volume binned by the
+        // nearest sample (as height), their mean x displacement from home,
+        // and the highest particle, near the window's edge.
+        let (dx, _) = c.field.cell_size();
+        let x0 = c.field.vertex(0, 0);
+        let mid = n / 2;
+        let edge = (0..n).find(|&i| inside(i, mid)).unwrap();
+        let mut bins = vec![(0.0f64, 0.0f64, f32::MIN, 0u32, 0.0f64); n as usize];
+        for p in &c.particles {
+            let i = ((p.xm[0] - x0.x) / dx).round() as i64;
+            let j = ((p.xm[2] - x0.z) / dx).round() as i64;
+            if j != mid || !(0..n).contains(&i) {
+                continue;
+            }
+            let b = &mut bins[i as usize];
+            b.0 += f64::from(p.f[0][3]);
+            b.1 += f64::from(p.f[0][3]) * f64::from(p.xm[0] - p.c[1][3]);
+            b.2 = b.2.max(p.xm[1]);
+            b.3 += 1;
+            if p.xm[1] < 0.0 {
+                b.4 += f64::from(p.f[0][3]);
+            }
+        }
+        // The edge column's particles by depth: mean x displacement.
+        let mut prof = std::collections::BTreeMap::<i32, (f64, f64)>::new();
+        for p in &c.particles {
+            let i = ((p.c[1][3] - x0.x) / dx).round() as i64;
+            let j = ((p.c[2][3] - x0.z) / dx).round() as i64;
+            if i == edge && j == mid {
+                let e = prof.entry((p.xm[1] / dx).floor() as i32).or_default();
+                e.0 += f64::from(p.xm[0] - p.c[1][3]);
+                e.1 += 1.0;
+            }
+        }
+        let s: Vec<String> = prof
+            .iter()
+            .map(|(k, v)| format!("{k}:{:+.2}", v.0 / v.1))
+            .collect();
+        eprintln!(
+            "  edge column (home), mean dx by depth cell: {}",
+            s.join(" ")
+        );
+        for i in edge - 2..edge + 4 {
+            let b = bins[i as usize];
+            eprintln!(
+                "  sample {:+}: lowered {:.1}, baked {:.1}; nearest-bin height {:.1} m (from {:.1}), mean dx {:+.2} m, top particle {:.1}, {} particles",
+                i - mid,
+                c.lowered[at(i, mid)],
+                h(i, mid),
+                b.0 / f64::from(dx * dx),
+                f64::from(c.lowered[at(i, mid)]),
+                b.1 / b.0.max(1e-9),
+                b.2,
+                b.3
+            );
+        }
+    }
+    // Window samples with an unactivated neighbour across one edge: how far
+    // they stand over both that neighbour and the window sample behind them
+    // (a ridge; a step down to the ground beside is not one).
+    let (mut worst, mut at_worst) = (0.0f64, (0, 0));
+    for j in 1..n - 1 {
+        for i in 1..n - 1 {
+            if !inside(i, j) {
+                continue;
+            }
+            for (di, dj) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
+                if inside(i + di, j + dj) || !inside(i - di, j - dj) {
+                    continue;
+                }
+                let v = h(i, j) - h(i + di, j + dj).max(h(i - di, j - dj));
+                if v > worst {
+                    worst = v;
+                    at_worst = (i - n / 2, j - n / 2);
+                }
+            }
+        }
+    }
+    let mid = n / 2;
+    let row: Vec<String> = (0..n)
+        .filter(|&i| inside(i, mid) && !inside(i - 1, mid) || !inside(i, mid) && inside(i + 1, mid))
+        .flat_map(|i| (i - 2..=i + 2).map(move |k| k))
+        .map(|k| format!("{:.1}", h(k, mid)))
+        .collect();
+    eprintln!(
+        "window edge: largest ridge {worst:.2} m at sample {at_worst:?} from the centre; \
+         the −x and +x edges on the axis (2 samples each side): {}",
+        row.join(" ")
+    );
+    // Around the worst sample (rows of 7, from the edge inward).
+    let (wi, wj) = (at_worst.0 + mid, at_worst.1 + mid);
+    for j in wj - 2..=wj + 2 {
+        let r: Vec<String> = (wi - 2..=wi + 4)
+            .map(|i| format!("{:5.1}", h(i, j)))
+            .collect();
+        eprintln!("  row {:+}: {}", j - mid, r.join(" "));
+    }
+    // The bake's own noise: the same measure 2 to 4 samples in from the edge
+    // (the first unactivated sample 3 to 5 steps away).
+    let inb = |i: i64, j: i64| (0..n).contains(&i) && (0..n).contains(&j) && inside(i, j);
+    let mut noise = 0.0f64;
+    for j in 1..n - 1 {
+        for i in 1..n - 1 {
+            for (di, dj) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
+                let out = (1..=6).find(|&d| !inb(i + d * di, j + d * dj));
+                if inb(i, j) && matches!(out, Some(3..=5)) {
+                    noise = noise.max(h(i, j) - h(i + di, j + dj).max(h(i - di, j - dj)));
+                }
+            }
+        }
+    }
+    eprintln!("the same 2 to 4 samples in (the bake's noise): {noise:.2} m");
+    assert!(
+        worst < noise + 1.0,
+        "a ridge {worst} m high stands at the window's edge (noise inside {noise} m)"
+    );
 }

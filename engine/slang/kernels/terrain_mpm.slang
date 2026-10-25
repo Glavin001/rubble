@@ -176,9 +176,9 @@ BIND(51) RWStructuredBuffer<AUint> gMpmDeposit;
 // Per coupling slot s: [4s] = (impulse on the body, collider bits), [4s + 1] =
 // (angular impulse about its centre, 0), summed over the frame's substeps;
 // [4s + 2], [4s + 3] = the body's proxy linear and angular velocity. From
-// params.boundary.y on, per absorbing-boundary node record (mpmAbsorbSlot): the
-// node's displacement since activation, and the surface height of the column
-// above it at activation (the bed heightfield's local y).
+// params.boundary.y on, per absorbing face point (mpmFaceRecord): the face's
+// displacement since activation there, and the surface height of the column
+// over it at activation (the bed heightfield's local y).
 BIND(49) RWStructuredBuffer<float4> gMpmCoupled;
 
 groupshared uint gsMpmScan[256];
@@ -744,8 +744,8 @@ bool mpmBedNormal(HeightFieldRef hf, float3 xl, MpmParams p, out float3 nl)
 // unactivated ground's surface. On each face the ground pushes on the material
 // with the traction
 //   t = p0·n − (k_N·u_n + ρ·c_p·v_n)·n − (k_T·u_t + ρ·c_s·v_t),
-// n into the material, u and v the material's displacement since activation
-// and its velocity there:
+// n into the material, v the material's velocity at the face and u the face's
+// displacement since activation:
 // - the dashpots are Lysmer & Kuhlemeyer's (1969), exact for plane waves at
 //   normal incidence;
 // - the springs are the viscous-spring boundary's (Liu et al. 2006),
@@ -756,31 +756,33 @@ bool mpmBedNormal(HeightFieldRef hf, float3 xl, MpmParams p, out float3 nl)
 //   on the sides, K0 = λ/(λ + 2μ)), the stress the material starts with
 //   (InitialStress::Geostatic), so material at rest stays at rest.
 // The ground has the strength of granular ground: a face carries no tension
-// (one whose normal traction would pull lets the node go: sand separates from
-// the ground), and no more shear than the bed friction μ allows (one whose
-// tangential traction would pass μ·t_n slides at μ·t_n). The dashpots model
-// small-strain waves, not plastic flow along the face, which would otherwise
-// meet a viscous drag ρ·c_s·v_t far above any frictional strength.
+// (one whose normal traction would pull lets the material go: sand separates
+// from the ground), and no more shear than the bed friction μ allows (one
+// whose tangential traction would pass μ·t_n slides at μ·t_n). The dashpots
+// model small-strain waves, not plastic flow along the face, which would
+// otherwise meet a viscous drag ρ·c_s·v_t far above any frictional strength.
 // It is discretised like any traction on the grid: node i takes ∫ w_i·t dS over
 // the faces (w_i its B-spline), lumped, so its share of a face is ∫ w_i dS and
-// its dashpot and spring act on its own velocity and displacement. That is the
-// force the particles' geostatic stress transmits through the face, so the
-// activated state is in equilibrium (a floor half a cell above a node layer
-// splits between two layers). Each node is solved implicitly (stable for any
-// dt) and keeps its displacement in a record of its own (mpmAbsorbSlot).
+// the dashpot acts on its own velocity. That is the force the particles'
+// geostatic stress transmits through the face, so the activated state is in
+// equilibrium (a floor half a cell above a node layer splits between two
+// layers). Each node is solved implicitly (stable for any dt).
+// The displacement u belongs to the face, not to the nodes: one record per
+// face point (the node lattice's columns through the face, mpmFaceRecord),
+// moved once per substep, after G2P, by the material's velocity there (the
+// mass-weighted B-spline mean of the node layers across the face,
+// mpm_absorb_faces). Every node the face reaches springs against that one
+// displacement. A record per node instead integrated each node's own Eulerian
+// velocity: under the strike's flow the node layers across a face drifted
+// metres apart, and their springs then pushed opposite ways across it.
 
 // The region's absorbing faces in grid units (cells from the region's origin):
-// the window's low and high corners (lo.y is the floor), and the first node of
-// the three node layers each face reaches (a B-spline reaches 1.5 cells).
+// the window's low and high corners (lo.y is the floor).
 struct MpmAbsorbGeom
 {
     float3 lo;
     float3 hi;
-    int3 band0; // floor (y), low-x and low-z sides
-    int3 band1; // high-x and high-z sides (y unused)
 };
-
-int mpmBandStart(float plane) { return int(floor(plane - 1.5)) + 1; }
 
 MpmAbsorbGeom mpmAbsorbGeometry(HeightFieldRef hf, Frame f, MpmParams p)
 {
@@ -792,52 +794,65 @@ MpmAbsorbGeom mpmAbsorbGeometry(HeightFieldRef hf, Frame f, MpmParams p)
     MpmAbsorbGeom a;
     a.lo = (frameToWorld(f, lo) - p.origin.xyz) / dx;
     a.hi = (frameToWorld(f, hi) - p.origin.xyz) / dx;
-    a.band0 = int3(mpmBandStart(a.lo.x), mpmBandStart(a.lo.y), mpmBandStart(a.lo.z));
-    a.band1 = int3(mpmBandStart(a.hi.x), 0, mpmBandStart(a.hi.z));
     return a;
 }
 
-// Records: the floor's three node layers over the region's nodes, then each x
-// side's three layers, then each z side's. A node in several takes the first.
-// (TerrainPlan::boundary_nodes counts them.)
-uint mpmAbsorbSlot(int3 g, MpmAbsorbGeom a, MpmParams p)
+// The five faces: floor, low x, high x, low z, high z. Each one's normal axis,
+// the sign of its normal into the material, and its plane (grid units).
+uint mpmFaceAxis(uint k) { return k == 0u ? 1u : (k < 3u ? 0u : 2u); }
+
+float mpmFaceSign(uint k) { return (k == 2u || k == 4u) ? -1.0 : 1.0; }
+
+float3 mpmAxisVector(uint axis)
+{
+    return float3(axis == 0u ? 1.0 : 0.0, axis == 1u ? 1.0 : 0.0, axis == 2u ? 1.0 : 0.0);
+}
+
+float mpmFacePlane(uint k, MpmAbsorbGeom a)
+{
+    return k == 0u ? a.lo.y : (k == 1u ? a.lo.x : (k == 2u ? a.hi.x : (k == 3u ? a.lo.z : a.hi.z)));
+}
+
+// Face records: the floor's points over the node lattice's (x, z) columns,
+// then each x side's over (y, z), then each z side's over (y, x)
+// (TerrainPlan::boundary_nodes counts them). The record of face k at node g's
+// column.
+uint mpmFaceRecord(uint k, int3 g, MpmParams p)
 {
     int3 n = int3(p.dims.xyz) + 1;
     if (any(g < int3(0, 0, 0)) || any(g >= n)) return MPM_NO_SLOT;
-    int l = g.y - a.band0.y;
-    if (l >= 0 && l < 3) return uint((l * n.z + g.z) * n.x + g.x);
-    uint floorRecords = 3u * uint(n.x * n.z);
-    for (int side = 0; side < 2; side++)
-    {
-        l = g.x - (side == 0 ? a.band0.x : a.band1.x);
-        if (l >= 0 && l < 3) return floorRecords + uint(((side * 3 + l) * n.y + g.y) * n.z + g.z);
-    }
-    uint xRecords = 6u * uint(n.y * n.z);
-    for (int side = 0; side < 2; side++)
-    {
-        l = g.z - (side == 0 ? a.band0.z : a.band1.z);
-        if (l >= 0 && l < 3) return floorRecords + xRecords + uint(((side * 3 + l) * n.y + g.y) * n.x + g.x);
-    }
-    return MPM_NO_SLOT;
+    if (k == 0u) return uint(g.z * n.x + g.x);
+    uint base = uint(n.x * n.z);
+    if (k < 3u) return base + (k - 1u) * uint(n.y * n.z) + uint(g.y * n.z + g.z);
+    base += 2u * uint(n.y * n.z);
+    return base + (k - 3u) * uint(n.y * n.x) + uint(g.y * n.x + g.x);
 }
 
-// The node record `slot` stands for (mpmAbsorbSlot's inverse).
-int3 mpmAbsorbNodeOf(uint slot, MpmAbsorbGeom a, MpmParams p)
+// Face records in all (TerrainPlan::boundary_nodes).
+uint mpmFaceCount(MpmParams p)
+{
+    uint3 n = p.dims.xyz + 1u;
+    return n.x * n.z + 2u * n.y * (n.x + n.z);
+}
+
+// The face and point (grid units, on its plane) of record `slot`.
+float3 mpmFacePoint(uint slot, MpmAbsorbGeom a, MpmParams p, out uint k)
 {
     int3 n = int3(p.dims.xyz) + 1;
     int s = int(slot);
-    int floorRecords = 3 * n.x * n.z;
-    if (s < floorRecords) return int3(s % n.x, a.band0.y + s / (n.x * n.z), (s / n.x) % n.z);
-    s -= floorRecords;
-    int xRecords = 6 * n.y * n.z;
-    if (s < xRecords)
+    k = 0u;
+    if (s < n.x * n.z) return float3(float(s % n.x), a.lo.y, float(s / n.x));
+    s -= n.x * n.z;
+    if (s < 2 * n.y * n.z)
     {
-        int k = s / (n.y * n.z);
-        return int3((k < 3 ? a.band0.x : a.band1.x) + k % 3, (s / n.z) % n.y, s % n.z);
+        k = s < n.y * n.z ? 1u : 2u;
+        s %= n.y * n.z;
+        return float3(mpmFacePlane(k, a), float(s / n.z), float(s % n.z));
     }
-    s -= xRecords;
-    int k = s / (n.y * n.x);
-    return int3(s % n.x, (s / n.x) % n.y, (k < 3 ? a.band0.z : a.band1.z) + k % 3);
+    s -= 2 * n.y * n.z;
+    k = s < n.y * n.x ? 3u : 4u;
+    s %= n.y * n.x;
+    return float3(float(s % n.x), float(s / n.x), mpmFacePlane(k, a));
 }
 
 // The quadratic B-spline (in cells) and its integral from −∞ to u.
@@ -874,56 +889,100 @@ float mpmGroundTop(HeightFieldRef hf, Frame f, MpmParams p, int i, int j)
     return (frameToWorld(f, xl).y - p.origin.y) / p.origin.w;
 }
 
+// The window's samples nearest grid point r (clamped into the window).
+int2 mpmWindowNearest(float3 r, HeightFieldRef hf, Frame f, MpmParams p)
+{
+    float3 xl = frameToLocal(f, p.origin.xyz + r * p.origin.w);
+    int2 lo = int2(p.window.xy), hi = lo + int2(p.window.zw) - 1;
+    return clamp(int2(round((xl.xz - float2(hf.x0, hf.z0)) / float2(hf.dx, hf.dz))), lo, hi);
+}
+
+// The top of side k (1..4) at the window sample s beside it: the unactivated
+// ground's surface there.
+float mpmSideTop(uint k, int2 s, HeightFieldRef hf, Frame f, MpmParams p)
+{
+    int2 lo = int2(p.window.xy), hi = lo + int2(p.window.zw) - 1;
+    int2 o = k == 1u ? int2(lo.x - 1, s.y) : (k == 2u ? int2(hi.x + 1, s.y) : (k == 3u ? int2(s.x, lo.y - 1) : int2(s.x, hi.y + 1)));
+    return mpmGroundTop(hf, f, p, o.x, o.y);
+}
+
+// The material's elastic constants for the faces.
+struct MpmGround
+{
+    float rho, cp, cs, k0, weight, mu;
+};
+
+MpmGround mpmGroundOf(MpmParams p)
+{
+    MpmGround m;
+    m.rho = p.column.w;
+    float lam = p.sand.x;
+    m.mu = p.sand.y;
+    m.cp = sqrt((lam + 2.0 * m.mu) / m.rho);
+    m.cs = sqrt(m.mu / m.rho);
+    m.k0 = lam / (lam + 2.0 * m.mu);
+    m.weight = m.rho * max(-p.step.y, 0.0) * p.origin.w;
+    return m;
+}
+
+// The springs per unit area at grid point r: k_N, k_T.
+float2 mpmFaceSprings(float3 r, MpmGround m, MpmParams p)
+{
+    float R = max(length(r - 0.5 * float3(p.dims.xyz)), 1.0) * p.origin.w;
+    return float2(4.0 / 3.0, 2.0 / 3.0) * (m.mu / R);
+}
+
+// Face k's geostatic traction at height y (grid units) under a column whose
+// surface (at activation) is at `top`, floor at ys.
+float mpmFaceP0(uint k, float top, float y, float ys, MpmGround m)
+{
+    return k == 0u ? m.weight * max(top - ys, 0.0) : m.k0 * m.weight * max(top - max(y, ys), 0.0);
+}
+
 // Grid velocity v (after gravity) of node g, of mass m, on the absorbing faces.
 // False when no face reaches the node: it keeps the rigid bed.
 bool mpmAbsorbNode(int3 g, float m, HeightFieldRef hf, Frame f, MpmParams p, inout float3 v)
 {
     MpmAbsorbGeom a = mpmAbsorbGeometry(hf, f, p);
-    uint slot = mpmAbsorbSlot(g, a, p);
-    if (slot == MPM_NO_SLOT || slot >= p.boundary.z) return false;
     float3 r = float3(g);
-    // The window's sample row and column nearest the node, and the ground
-    // beside each side there (the sides' tops).
-    int i0 = int(p.window.x), j0 = int(p.window.y);
-    int i1 = i0 + int(p.window.z) - 1, j1 = j0 + int(p.window.w) - 1;
-    float3 xl = frameToLocal(f, p.origin.xyz + r * p.origin.w);
-    int si = clamp(int(round((xl.x - hf.x0) / hf.dx)), i0, i1);
-    int sj = clamp(int(round((xl.z - hf.z0) / hf.dz)), j0, j1);
+    int2 s = mpmWindowNearest(r, hf, f, p);
     float ys = a.lo.y;
     float ix = mpmSplineSpan(a.lo.x, a.hi.x, r.x);
     float iz = mpmSplineSpan(a.lo.z, a.hi.z, r.z);
-    // The node's shares of the five faces (cells²): floor, low x, high x, low z, high z.
+    // The node's shares of the five faces (cells²).
     float share[5];
     share[0] = mpmSpline(ys - r.y) * ix * iz;
-    share[1] = mpmSpline(a.lo.x - r.x) * iz * mpmSplineSpan(ys, mpmGroundTop(hf, f, p, i0 - 1, sj), r.y);
-    share[2] = mpmSpline(a.hi.x - r.x) * iz * mpmSplineSpan(ys, mpmGroundTop(hf, f, p, i1 + 1, sj), r.y);
-    share[3] = mpmSpline(a.lo.z - r.z) * ix * mpmSplineSpan(ys, mpmGroundTop(hf, f, p, si, j0 - 1), r.y);
-    share[4] = mpmSpline(a.hi.z - r.z) * ix * mpmSplineSpan(ys, mpmGroundTop(hf, f, p, si, j1 + 1), r.y);
+    share[1] = mpmSpline(a.lo.x - r.x) * iz * mpmSplineSpan(ys, mpmSideTop(1u, s, hf, f, p), r.y);
+    share[2] = mpmSpline(a.hi.x - r.x) * iz * mpmSplineSpan(ys, mpmSideTop(2u, s, hf, f, p), r.y);
+    share[3] = mpmSpline(a.lo.z - r.z) * ix * mpmSplineSpan(ys, mpmSideTop(3u, s, hf, f, p), r.y);
+    share[4] = mpmSpline(a.hi.z - r.z) * ix * mpmSplineSpan(ys, mpmSideTop(4u, s, hf, f, p), r.y);
     if (share[0] + share[1] + share[2] + share[3] + share[4] <= 0.0) return false;
-    uint at = p.boundary.y + slot;
-    float4 rec = gMpmCoupled[at];
-    float3 u = rec.xyz;
-    // The material's density, wave speeds and K0; the springs' R.
+    MpmGround gr = mpmGroundOf(p);
+    float2 kk = mpmFaceSprings(r, gr, p);
+    float kn = kk.x, kt = kk.y;
     float dx = p.origin.w, dt = p.step.x;
-    float rho = p.column.w;
-    float lam = p.sand.x, mu = p.sand.y;
-    float cp = sqrt((lam + 2.0 * mu) / rho), cs = sqrt(mu / rho);
-    float k0 = lam / (lam + 2.0 * mu);
-    float R = max(length(r - 0.5 * float3(p.dims.xyz)), 1.0) * dx;
-    float kn = (4.0 / 3.0) * mu / R, kt = (2.0 / 3.0) * mu / R;
-    // Geostatic tractions from the surface of the column over the node at activation.
-    float top = (frameToWorld(f, float3(0.0, rec.w, 0.0)).y - p.origin.y) / dx;
-    float weight = rho * max(-p.step.y, 0.0) * dx;
-    float p0[5];
-    p0[0] = weight * max(top - ys, 0.0);
-    float lateral = k0 * weight * max(top - max(r.y, ys), 0.0);
-    for (uint k = 1u; k < 5u; k++) p0[k] = lateral;
-    uint axis[5] = { 1u, 0u, 0u, 2u, 2u };
-    float sgn[5] = { 1.0, 1.0, -1.0, 1.0, -1.0 };
     float area = dx * dx;
     float mu_g = p.step.w;
+    // Each face's displacement at the node's column, and its geostatic traction.
+    float3 u[5];
+    float p0[5];
+    for (uint k = 0u; k < 5u; k++)
+    {
+        u[k] = float3(0, 0, 0);
+        p0[k] = 0.0;
+        if (!(share[k] > 0.0)) continue;
+        uint rec = mpmFaceRecord(k, g, p);
+        if (rec == MPM_NO_SLOT || rec >= p.boundary.z)
+        {
+            share[k] = 0.0;
+            continue;
+        }
+        float4 d = gMpmCoupled[p.boundary.y + rec];
+        u[k] = d.xyz;
+        float top = (frameToWorld(f, float3(0.0, d.w, 0.0)).y - p.origin.y) / dx;
+        p0[k] = mpmFaceP0(k, top, r.y, ys, gr);
+    }
     float3 vNew = v;
-    float3 held = float3(0, 0, 0);
     // Solve with every face sticking; then again with any face that would
     // pull let go, and any whose shear would pass the ground's friction
     // sliding (its tangential traction μ·t_n, along the sticking one).
@@ -933,43 +992,44 @@ bool mpmAbsorbNode(int3 g, float m, HeightFieldRef hf, Frame f, MpmParams p, ino
     for (uint pass = 0u; pass < 3u; pass++)
     {
         float3 damp = float3(0, 0, 0), stiff = float3(0, 0, 0), push = float3(0, 0, 0);
-        held = float3(0, 0, 0);
         for (uint k = 0u; k < 5u; k++)
         {
             if ((live & (1u << k)) == 0u || !(share[k] > 0.0)) continue;
-            float s = share[k] * area;
-            float3 e = float3(axis[k] == 0u ? 1.0 : 0.0, axis[k] == 1u ? 1.0 : 0.0, axis[k] == 2u ? 1.0 : 0.0);
-            damp += s * rho * cp * e;
-            stiff += s * kn * e;
-            push += s * sgn[k] * p0[k] * e;
-            held = max(held, e);
-            if ((slide & (1u << k)) != 0u) push += s * slip[k];
+            float sk = share[k] * area;
+            float3 e = mpmAxisVector(mpmFaceAxis(k));
+            float3 st = kn * e;
+            damp += sk * gr.rho * gr.cp * e;
+            push += sk * mpmFaceSign(k) * p0[k] * e;
+            if ((slide & (1u << k)) != 0u) push += sk * slip[k];
             else
             {
-                damp += s * rho * cs * (1.0 - e);
-                stiff += s * kt * (1.0 - e);
-                held = float3(1, 1, 1);
+                damp += sk * gr.rho * gr.cs * (1.0 - e);
+                st += kt * (1.0 - e);
             }
+            // The spring on the face's displacement, implicit in the node's
+            // own velocity (the face moves with the material there).
+            stiff += sk * st;
+            push -= sk * st * u[k];
         }
-        vNew = (m * v + dt * (push - stiff * u)) / (m + dt * damp + dt * dt * stiff);
+        vNew = (m * v + dt * push) / (m + dt * damp + dt * dt * stiff);
         if (pass == 2u) break;
-        float3 uNew = u + dt * vNew;
         uint keep = live, slip0 = slide;
         for (uint k = 0u; k < 5u; k++)
         {
             if ((live & (1u << k)) == 0u || !(share[k] > 0.0)) continue;
-            float un = sgn[k] * uNew[axis[k]], vn = sgn[k] * vNew[axis[k]];
-            float tn = p0[k] - kn * un - rho * cp * vn;
+            uint ax = mpmFaceAxis(k);
+            float3 uNew = u[k] + dt * vNew;
+            float sg = mpmFaceSign(k);
+            float tn = p0[k] - kn * sg * uNew[ax] - gr.rho * gr.cp * sg * vNew[ax];
             if (tn < 0.0)
             {
                 keep &= ~(1u << k);
                 continue;
             }
             if ((slide & (1u << k)) != 0u) continue;
-            float3 e = float3(axis[k] == 0u ? 1.0 : 0.0, axis[k] == 1u ? 1.0 : 0.0, axis[k] == 2u ? 1.0 : 0.0);
-            float3 tt = -(kt * uNew + rho * cs * vNew) * (1.0 - e);
+            float3 tt = -(kt * uNew + gr.rho * gr.cs * vNew) * (1.0 - mpmAxisVector(ax));
             // Its two components, without squaring tiny ones.
-            float t = axis[k] == 1u ? mpmHypot(tt.x, tt.z) : (axis[k] == 0u ? mpmHypot(tt.y, tt.z) : mpmHypot(tt.x, tt.y));
+            float t = ax == 1u ? mpmHypot(tt.x, tt.z) : (ax == 0u ? mpmHypot(tt.y, tt.z) : mpmHypot(tt.x, tt.y));
             if (t > mu_g * tn)
             {
                 slide |= 1u << k;
@@ -980,33 +1040,82 @@ bool mpmAbsorbNode(int3 g, float m, HeightFieldRef hf, Frame f, MpmParams p, ino
         live = keep;
     }
     v = vNew;
-    // The ground follows the material along every axis a face still holds;
-    // along the others (a face let go, or sliding) it stays where it was.
-    float3 uNext = u + dt * vNew * held;
-    if (any(held > float3(0, 0, 0))) gMpmCoupled[at] = float4(uNext, rec.w);
     return true;
 }
 
-// Once at activation, per absorbing-node record: no displacement yet, and the
-// surface height of the column over the node (the window sample nearest it).
+// Once at activation, per face record: no displacement yet, and the surface
+// height of the column over the face point (the window sample nearest it).
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void mpm_absorb_init(uint3 tid : SV_DispatchThreadID)
 {
     uint slot = mpmIndex(tid);
     MpmParams p = mpmParams();
-    if (slot >= p.boundary.z || mpmActivationRefused()) return;
+    if (slot >= min(p.boundary.z, mpmFaceCount(p)) || mpmActivationRefused()) return;
     Collider col = gColliders[p.dims.w];
     Frame f = colliderFrame(col, gBodies[col.body]);
     HeightFieldRef hf = heightFieldOf(col);
     MpmAbsorbGeom a = mpmAbsorbGeometry(hf, f, p);
-    int3 g = mpmAbsorbNodeOf(slot, a, p);
-    float3 xl = frameToLocal(f, p.origin.xyz + float3(g) * p.origin.w);
-    int si = clamp(int(round((xl.x - hf.x0) / hf.dx)), int(p.window.x), int(p.window.x + p.window.z) - 1);
-    int sj = clamp(int(round((xl.z - hf.z0) / hf.dz)), int(p.window.y), int(p.window.y + p.window.w) - 1);
-    uint t = uint(sj - int(p.window.y)) * p.window.z + uint(si - int(p.window.x));
+    uint k;
+    int2 s = mpmWindowNearest(mpmFacePoint(slot, a, p, k), hf, f, p);
+    uint t = uint(s.y - int(p.window.y)) * p.window.z + uint(s.x - int(p.window.x));
     float dh = float(ALOAD(gMpmColumns[4u * t])) * p.column.y / mpmSampleArea(hf);
     gMpmCoupled[p.boundary.y + slot] = float4(0, 0, 0, p.column.x + dh);
+}
+
+// Per face record, each substep after G2P: the face point moves with the
+// material's velocity there, the mass-weighted B-spline mean of the node
+// layers across the face, while the material presses on it. It stays where it
+// was while the face lets the material go (its normal traction would pull, as
+// mpmAbsorbNode decides).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_absorb_faces(uint3 tid : SV_DispatchThreadID)
+{
+    uint slot = mpmIndex(tid);
+    MpmParams p = mpmParams();
+    if (slot >= min(p.boundary.z, mpmFaceCount(p))) return;
+    Collider col = gColliders[p.dims.w];
+    Frame f = colliderFrame(col, gBodies[col.body]);
+    HeightFieldRef hf = heightFieldOf(col);
+    MpmAbsorbGeom a = mpmAbsorbGeometry(hf, f, p);
+    uint k;
+    float3 r = mpmFacePoint(slot, a, p, k);
+    uint ax = mpmFaceAxis(k);
+    // Only where a node reaches the face: within 1.5 cells of the window's
+    // span, and of a side's floor and top (the ground beside it).
+    if (any(r.xz < a.lo.xz - 1.5) || any(r.xz > a.hi.xz + 1.5)) return;
+    if (k != 0u && (r.y < a.lo.y - 1.5 || r.y > mpmSideTop(k, mpmWindowNearest(r, hf, f, p), hf, f, p) + 1.5))
+        return;
+    float plane = r[ax];
+    int first = int(floor(plane - 1.5)) + 1;
+    float3 mv = float3(0, 0, 0);
+    float mw = 0.0;
+    for (int l = 0; l < 3; l++)
+    {
+        int3 g = int3(round(r));
+        g[ax] = first + l;
+        float w = mpmSpline(plane - float(g[ax]));
+        uint c = mpmCellOf(g, p);
+        if (c == MPM_NO_BLOCK || !(w > 0.0)) continue;
+        float4 node = gMpmGrid[2u * c];
+        if (!(node.w > p.step.z)) continue;
+        mv += w * node.w * node.xyz;
+        mw += w * node.w;
+    }
+    if (!(mw > 0.0)) return;
+    float3 v = mv / mw;
+    float4 d = gMpmCoupled[p.boundary.y + slot];
+    MpmGround gr = mpmGroundOf(p);
+    float2 kk = mpmFaceSprings(r, gr, p);
+    float dx = p.origin.w, dt = p.step.x;
+    float top = (frameToWorld(f, float3(0.0, d.w, 0.0)).y - p.origin.y) / dx;
+    float p0 = mpmFaceP0(k, top, r.y, a.lo.y, gr);
+    float sg = mpmFaceSign(k);
+    float3 uNew = d.xyz + dt * v;
+    float tn = p0 - kk.x * sg * uNew[ax] - gr.rho * gr.cp * sg * v[ax];
+    if (tn < 0.0) return;
+    gMpmCoupled[p.boundary.y + slot] = float4(uNew, d.w);
 }
 
 // Once, in the first step after a geostatic activation (it needs gravity; the
@@ -1393,6 +1502,89 @@ void mpm_activate_lower(uint3 tid : SV_DispatchThreadID)
 // Particles not made by activation (loaded by the host, or landed parcels)
 // have w = 0. Sand pushed off a buried body (mpmBakeColumn) is placed by that
 // rule, not by the flow: it splats with the tent at its new place.
+//
+// On the absorbing ground the bake measures positions in the unactivated
+// ground's frame (mpmGroundShift). That ground is a heightfield and cannot
+// move, but the absorbing walls give, and the material against them moves
+// out with them: the window's edge columns end displaced outward by the
+// walls' give (metres at the browser demo's scale, where the ground is
+// 50 MPa sand 350 m deep). Splatted in the region's frame, that shift crosses
+// the window's edge and folds back onto its last samples (mpmBakeOnto): a
+// ridge a sample wide, tens of metres high, over a deficit spread inside. In
+// the ground's frame the walls are where they were: each particle's position
+// has the walls' displacement taken out, interpolated linearly between
+// opposite walls (the uniform strain an elastic layer between two displaced
+// walls takes). The walls' displacement is their edge columns' mean outward
+// displacement (mpm_bake_shift): material can only move out past a side's
+// plane by moving the ground with it. (The faces' own records hold the grid's
+// velocity at the plane, integrated, which the dashpot-held node layers there
+// pull to a fraction of the material's a cell in.) Volume is kept exactly;
+// the region's lateral give comes back as a uniform rise of its columns.
+
+// Once before the bake on the absorbing ground, per sample along the window's
+// edge (low-x then high-x side's rows, then low-z then high-z side's
+// columns): its column's mean displacement across that side (quanta-weighted,
+// the particles activation made there, in slot order), into the face records'
+// space (the faces are done with).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_bake_shift(uint3 tid : SV_DispatchThreadID)
+{
+    uint k = mpmIndex(tid);
+    MpmParams p = mpmParams();
+    uint ni = p.window.z, nj = p.window.w;
+    if (k >= 2u * (ni + nj)) return;
+    Collider col = gColliders[p.dims.w];
+    Frame f = colliderFrame(col, gBodies[col.body]);
+    uint2 ij;
+    uint axis;
+    if (k < 2u * nj)
+    {
+        ij = uint2(k < nj ? 0u : ni - 1u, k % nj);
+        axis = 0u;
+    }
+    else
+    {
+        uint m = k - 2u * nj;
+        ij = uint2(m % ni, m < ni ? 0u : nj - 1u);
+        axis = 2u;
+    }
+    uint t = ij.y * ni + ij.x;
+    uint first = ALOAD(gMpmColumns[4u * t + 2u]), n = ALOAD(gMpmColumns[4u * t + 1u]);
+    float sum = 0.0, quanta = 0.0;
+    for (uint s = first; s < first + n; s++)
+    {
+        MpmParticle q = gMpmParticles[s];
+        if (mpmParticleDead(q) || (asuint(q.f2.w) & MPM_PARTICLE_HOME) == 0u) continue;
+        float3 xl = frameToLocal(f, q.xm.xyz);
+        float w = float(asuint(q.f1.w));
+        sum += w * (axis == 0u ? xl.x - q.c1.w : xl.z - q.c2.w);
+        quanta += w;
+    }
+    // Only outward: material moving out past the side's plane has moved the
+    // ground with it (it cannot enter the ground); moving in, it left the
+    // ground where it was.
+    float mean = quanta > 0.0 ? sum / quanta : 0.0;
+    bool low = k < 2u * nj ? k < nj : (k - 2u * nj) < ni;
+    gMpmCoupled[p.boundary.y + k] = float4(low ? min(mean, 0.0) : max(mean, 0.0), 0, 0, 0);
+}
+
+// The walls' displacement at local point xl (the bed heightfield's frame), in
+// x and z: each side's edge columns' (mpm_bake_shift), interpolated linearly
+// between opposite sides along the window's row or column through xl.
+float2 mpmGroundShift(float3 xl, HeightFieldRef hf, MpmParams p)
+{
+    int i0 = int(p.window.x), j0 = int(p.window.y);
+    int ni = int(p.window.z), nj = int(p.window.w);
+    float2 u = (xl.xz - float2(hf.x0, hf.z0)) / float2(hf.dx, hf.dz);
+    int ti = clamp(int(round(u.x)) - i0, 0, ni - 1), tj = clamp(int(round(u.y)) - j0, 0, nj - 1);
+    uint base = p.boundary.y;
+    float sx = ni > 1 ? clamp((u.x - float(i0)) / float(ni - 1), 0.0, 1.0) : 0.5;
+    float sz = nj > 1 ? clamp((u.y - float(j0)) / float(nj - 1), 0.0, 1.0) : 0.5;
+    float lx = gMpmCoupled[base + uint(tj)].x, hx = gMpmCoupled[base + uint(nj + tj)].x;
+    float lz = gMpmCoupled[base + uint(2 * nj + ti)].x, hz = gMpmCoupled[base + uint(2 * nj + ni + ti)].x;
+    return float2(lerp(lx, hx, sx), lerp(lz, hz, sz));
+}
 
 // The share of a particle that is still the heightfield it came from (w
 // above), and where its tent goes: its home sample plus its displacement, in
@@ -1592,6 +1784,8 @@ void mpm_bake_bin(uint3 tid : SV_DispatchThreadID)
     float3 x = q.xm.xyz;
     bool pushed = mpmBakeColumn(x, p, max(hf.dx, hf.dz));
     float3 xl = frameToLocal(f, x);
+    // On the absorbing ground, in the unactivated ground's frame.
+    if ((p.boundary.x & MPM_BOUNDARY_ABSORBING) != 0u) xl.xz -= mpmGroundShift(xl, hf, p);
     uint quanta = asuint(q.f1.w);
     int2 s0;
     uint4 parts;

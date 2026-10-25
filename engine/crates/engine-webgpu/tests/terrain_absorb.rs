@@ -366,6 +366,30 @@ fn p_wave_reflection(absorbing: bool, pulse: Pulse) -> f64 {
     let steps = (t1 / dt).ceil() as u32 - arrive;
     s.terrain_step(steps, dt, -G).unwrap();
     let e1 = central_energy(&s.terrain_particles(), &rest, half, lam, mu);
+    if absorbing && std::env::var("PW_FACE").is_ok() {
+        // The floor's face point under the axis, against the particles near
+        // the floor there.
+        let d = [plan.blocks.x * 4 + 1, plan.blocks.z * 4 + 1];
+        let (gx, gz) = (
+            ((0.0 - plan.origin.x) / dx).round() as usize,
+            ((0.0 - plan.origin.z) / dx).round() as usize,
+        );
+        let k = gz * d[0] as usize + gx;
+        let w = s.read_words(49, 64 * u64::from(cfg.max_coupled) + 16 * k as u64, 4);
+        let ps = s.terrain_particles();
+        let (mut sum, mut cnt) = (0.0f64, 0.0f64);
+        for (p, r) in ps.iter().zip(&rest) {
+            if p.xm[0].abs() < 0.2 && p.xm[2].abs() < 0.2 && r.xm[1] < bed + 2.0 * dx {
+                sum += f64::from(p.xm[1] - r.xm[1]);
+                cnt += 1.0;
+            }
+        }
+        eprintln!(
+            "floor face u_y {:+.3e} m; particles within 2 cells of the floor moved {:+.3e} m",
+            f32::from_bits(w[1]),
+            sum / cnt
+        );
+    }
     let r = e1 / e0;
     eprintln!(
         "{} bed, {pulse:?}: wave energy on the axis {start:.4e} J, arriving {e0:.4e} J, {e1:.4e} J {:.2} ms later: {r:.4}",

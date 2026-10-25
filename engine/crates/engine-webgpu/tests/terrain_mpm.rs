@@ -34,6 +34,18 @@ fn config() -> TerrainConfig {
     }
 }
 
+/// For the bake's splat itself, with displacements set by hand: the rigid
+/// ground, whose bake is in the region's own frame. On the absorbing ground the
+/// bake takes the walls' give out of the edge columns (`mpmGroundShift`), and
+/// a displacement set by hand at a wall has no ground that gave.
+fn splat_config() -> TerrainConfig {
+    TerrainConfig {
+        boundary: engine_terrain::RegionBoundary::Rigid,
+        initial_stress: engine_terrain::InitialStress::Unstressed,
+        ..config()
+    }
+}
+
 /// A region of radius 1 m (dx = 1/16 m) around `center`, and a cube of
 /// particles (2³ per cell) of side `side` centred there.
 fn cube(center: Vec3, side: f32, v: impl Fn(Vec3) -> Vec3) -> (RegionPlan, Vec<MpmParticle>) {
@@ -400,7 +412,7 @@ fn bake_after_rigid_shift(shift: (f32, f32)) -> f64 {
     let mut s = sim();
     let cfg = TerrainConfig {
         max_particles: 1 << 18,
-        ..config()
+        ..splat_config()
     };
     s.terrain_enable(&cfg).unwrap();
     let (field, collider, origin) = mound(&mut s, 0.3, 0.5);
@@ -604,7 +616,7 @@ fn opened_layer_error(fade: f32) -> (f64, f64, f64) {
     let cfg = TerrainConfig {
         max_particles: 1 << 18,
         bake_home_fade: fade,
-        ..config()
+        ..splat_config()
     };
     s.terrain_enable(&cfg).unwrap();
     let field = HeightField::new(65, 65, 0.125, 0.125, vec![0.0; 65 * 65]).unwrap();

@@ -63,8 +63,8 @@ pub struct TerrainConfig {
     pub boundary: RegionBoundary,
     /// The stress activated material starts with.
     pub initial_stress: InitialStress,
-    /// Grid nodes an absorbing boundary keeps a displacement for: the node
-    /// layers within reach of the region's bed and walls (each region needs
+    /// Face points an absorbing boundary keeps a displacement for: the node
+    /// lattice's columns through the region's bed and walls (each region needs
     /// `TerrainPlan::boundary_nodes`).
     pub max_boundary_nodes: u32,
 }

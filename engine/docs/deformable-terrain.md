@@ -909,29 +909,88 @@ t = p0·n − (k_N·u_n + ρ·c_p·v_n)·n − (k_T·u_t + ρ·c_s·v_t):
   the bed friction, μ·t_n, slides at μ·t_n, as the rigid bed does. The
   dashpots model small-strain waves; without the limit, plastic flow along a
   face meets a drag of ρ·c_s·v_t (176 kPa at 1 m/s), far above the ground's
-  strength at shallow depth. Along an axis no face holds, the ground stays
-  where it was.
+  strength at shallow depth. While a face lets the material go, the ground
+  stays where it was.
   - Found on the dropped ball (engine-world `terrain`): without the limit, the
     sand flowing along its shallow region's bed stopped the ball at 0.089 m.
 - **Discretisation.** Node i takes ∫ w_i·t dS over the faces (w_i its
   B-spline), lumped: its share of a face is ∫ w_i dS, from the B-spline's
-  closed-form integral, and its dashpot and spring act on its own velocity and
-  displacement. That is the force the particles' geostatic stress transmits
+  closed-form integral, and its dashpot acts on its own velocity. That is the force the particles' geostatic stress transmits
   through the face, so the activated state is in equilibrium.
   - A floor half a cell above a node layer splits its load between two layers;
     walls off the node lattice spread over three.
   - In a 1D check, the dashpot on the boundary node alone sent back 2.6% of a
     pulse's energy and the consistent shares 0.13%.
 - **Each node is solved implicitly:** v = (m·v* + dt·(f0 − K·u))/(m + dt·C + dt²·K)
-  per axis, stable for any dt. It keeps its displacement in a record of its own:
-  the floor's three node layers and each side's three, after the coupling slots
-  in binding 49 (`TerrainConfig::max_boundary_nodes`, an error past it).
-  `mpm_grid` still binds 9 storage buffers.
+  per axis, stable for any dt.
+- **The displacement u belongs to the face.** One record per face point (the
+  node lattice's columns through the floor and each side), after the coupling
+  slots in binding 49 (`TerrainConfig::max_boundary_nodes`, an error past it).
+  `mpm_absorb_faces` moves each point once per substep, after G2P, by the
+  material's velocity there (the mass-weighted B-spline mean of the node layers
+  across the face), while the material presses on it. Every node the face
+  reaches springs against that one displacement, implicit in its own velocity.
+  - The first version kept a record per node, each integrating its own
+    Eulerian velocity. Under the strike's flow the node layers across a side
+    drifted metres apart (−5 m and +8.7 m one cell apart at 8 cells per radius),
+    and their springs pushed opposite ways across it.
+  - With the face's record, engine-world's dropped ball goes 0.118 m deep
+    (0.61× Uehara; it was 0.094 m, 0.49×, below the test's band).
+  - `mpm_grid` still binds 9 storage buffers; `mpm_absorb_faces` binds 7.
 - **Unchanged:** the region's top and the free surface stay free. Contact with
   rigid bodies, host-loaded regions (no window: the field's surface is a contact)
   and the rigid ground's code path are as before.
 - **Validation.** The absorbing ground requires the geostatic start and a
   material with stiffness; either missing is an error.
+
+**The bake in the ground's frame (2026-10-25).** The demo's settled crater
+(margin 1.5 R, 12 cells/R) baked a ridge one sample wide at the window's edge:
++42 m at x = −378 m natively (+37 m in the browser), the samples on either
+side near 0 and 1 m.
+- **Cause.** The absorbing sides give, and the material against them moves out
+  with them. The window's edge columns end 1.4–1.5 m outward on average (up to
+  3.4 m near the surface) at the demo's scale: 50 MPa sand 384 m deep, springs
+  for R ≈ 0.4 km. The bake splats each column at home plus its displacement,
+  so that shift crosses the window's edge. Beside the window is unactivated
+  ground, a heightfield that cannot move, so the share below its surface folds
+  back onto the edge sample (`mpmBakeOnto`). Every column passes ~8% of itself
+  outward and the edge keeps it: 0.08 × 384 m.
+- **Fix** (`mpm_bake_shift`, `mpmGroundShift`). The bake measures positions in
+  the unactivated ground's frame. Material can only move out past a side's
+  plane by moving the ground with it (it cannot enter the ground), so the
+  ground's give at a side is its edge columns' mean outward displacement
+  (inward motion leaves the ground where it was). Each particle has that give
+  taken out, interpolated linearly between opposite sides: the uniform strain
+  an elastic layer between two displaced walls takes.
+  - Volume is kept exactly; only where it is splatted changes. The region's
+    lateral give comes back as a uniform rise of its columns (about 2 m here)
+    instead of a ridge.
+  - The faces' own records are not the measure: they hold the grid's velocity
+    at the plane, which the dashpot-held node layers there pull to a fifth to
+    a third of the material's a cell in.
+  - The splat tests that set displacements by hand
+    (`material_moved_rigidly_bakes_as_the_splat_defines`,
+    `an_opened_layer_bakes_flat_without_axis_ridges`) run on the rigid ground:
+    a displacement set at a wall by hand has no ground that gave.
+- **Test** (`terrain_bake_axis`, `the_window_edge_bakes_without_a_ridge`, 8
+  cells/R): no edge sample may stand over both its neighbours across the edge
+  by more than the same measure 2–4 samples in (the bake's noise) plus 1 m.
+
+  | Cells/R | Before: ridge (edge, inside) | After: worst edge excess | Noise inside |
+  |---|---|---|---|
+  | 8 | 28.7 m (27.8, 1.4) | 2.3 m (edge 2.6, inside 5.0) | 2.9 m |
+  | 12 (the demo's) | 41.8 m (42.0, 1.2) | 2.5 m (edge 2.2, inside 3.2) | 3.7 m |
+
+- **The demo** (Chrome, this tree): settled and baked at 20.9 s. Along −x, the
+  edge at −378 m is 1.0 m, the ground beyond −1.6 to −0.5 m (the plain's own
+  roll); rim crest 20.9 m at 252 m, floor −96.4 m. The truck climbs from the
+  floor to x = −189 m (chassis at −0.8 m, about 95 m up the 117 m wall) and
+  stops below the crest, where the wall steepens to about 28°.
+- **Root cause, open.** Metres of give at 2.5 R come from sand of constant
+  E = 50 MPa down to 384 m. Real sand stiffens with confinement (Hardin's
+  G ∝ √p: several times stiffer at those depths), which would give a fraction
+  of it. That changes the material and its validated results, so it is not
+  done here.
 
 **Tests** (`tests/terrain_absorb.rs`):
 - **At rest.** One second under gravity, then the bake. The splat bake moves
