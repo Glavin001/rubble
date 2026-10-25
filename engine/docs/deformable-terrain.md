@@ -1530,13 +1530,110 @@ impact case's region to 70,644 particles):
 - `engine-world` `fingerprint_world_impact_to_bake`: reports
   `c99f8a2f0a2fd4d4`, heights `7539de010b3a6c4f`, box `136fde101445dae3`.
 
-**Validation at the physical defaults** (bed 1.5 R):
+**The strike frame (2026-10-25, second pass).** The user's target: every
+terrain frame under about 2 ms natively at 120 Hz, the strike frame
+included (the game profile).
+- **Its substeps cannot drop at 120 Hz.** Sizing only the first substep at
+  the source's peak (about 1.7 km/s at the core's edge) and the rest at the
+  speed after it was the plan's first item. At 8 cells/R and Courant 0.45
+  that first substep covers 4.4 ms of the 8.3 ms frame, and a second one
+  takes the rest whatever its speed: two substeps either way. It would save
+  substeps only on the physical profile (6 on its strike frame), and it is
+  not built.
+- **Per-particle activation emit** (`mpm_activate_emit`: a thread per
+  particle, finding its sample by binary search over the samples' first
+  particles, instead of a serial loop per column). It writes exactly what
+  the loop wrote: 0.12 → 0.06-0.10 ms.
+- **The geostatic start in the first payload.** `mpm_geostatic` had a pass
+  over every particle of its own. The first substep's `mpm_payload` now sets
+  the geostatic F just before the stress: counter `MPM_C_GEOSTATIC`, set by
+  the plan and cleared by `mpm_grid`. It sits in a function of its own behind
+  an early return: inline, Metal's fast-math compiled the usual path
+  differently and the loaded cube's fingerprint changed. The first substep's
+  stress now rounds differently (deterministic; the impact fingerprint
+  changes).
+- **The grid binding** is 32 B per node, two float4 records. It was sized
+  at 16 B, so a region using more than half of `max_blocks` wrote past it
+  (WebGPU's robust access clamps such writes). No test region came near that.
+- **Tried, not kept:** P2G in cell sums. In three rounds of nine nodes, each
+  cell first sums its particles' share, then each node adds its cells'
+  sums. Each payload is then read 3 times instead of 27, but it was slower
+  on wgpu-on-Metal: 0.70 against 0.60 ms per frame (the best of 20 frames
+  each). It costs six dispatches and 144 B more per node. The Metal
+  executor's `p2g_cells` fast path does the same in one round with
+  threadgroup memory, and pays there ("Native backends").
+- **Timing.** A pass's own timestamps around many dispatches read 0 on
+  wgpu-on-Metal, and the adapter has no encoder timestamps. The wgpu numbers
+  are each kernel's own pass, summed (`RUBBLE_TERRAIN_GPU_MS=1`), and the
+  strike frame there measures 4.2-4.3 ms however warm the GPU (`WARM=1`,
+  `GAP_MS`). `engine-metal`'s `terrain_bench` times the command buffer
+  itself; its numbers are the reference.
+
+The strike frame and every frame after it: activation, source and frame 0
+together; all 720 frames of 6 s; three runs each.
+`cargo run --release -p engine-metal --example terrain_bench -- --game --secs 6 --runs 3`:
+
+| Native, game profile | Strike frame | Worst frame | First second, mean / max | Steady, mean / max |
+|---|---|---|---|---|
+| Metal, portable kernels | 2.48 ms | 2.06 ms (frame 0, 2 substeps) | 0.98 / 2.06 | 1.01 / 1.26 |
+| Metal, fast paths | 2.03 ms | 1.70 ms (frame 0) | 0.97 / 1.70 | 0.50 / 0.55 |
+
+- Other agents' runs shared the GPU until 3.5 s into this run: the fast
+  paths' steady frames read 1.0 ms before that and 0.50 ms after.
+- The same run's particle and parcel hashes match across all three runs and
+  each backend's own runs. With nothing else on the GPU, the strike frame on
+  the fast paths is about 1.6 ms ("Native backends").
+- What remains of the strike frame: two substeps (0.5-0.85 ms each on the
+  fast paths), activation 0.17 ms (its emit 0.09-0.10), the source 0.04-0.08.
+  The source could move into the first payload as the geostatic start did
+  (it saves its pass), but a host would then read the source's velocities
+  only after the first substep, and `the_source_kernel_applies_the_z_model_field`
+  reads them right after it. Left as it is.
+
+In Chrome (`impact.html`, the game profile, 1/120 s frames, all 2,029
+frames to the bake): the strike frame 1.7 ms (4.2 before this pass); median
+0.72 ms, 90% 2.16, 99% 2.23, worst 3.28 ms; mean 1.25.
+
+**Ejecta, deterministic (2026-10-25).** G2P hands each ejected parcel a slot
+by atomic, so the slots' order is the GPU's. The Metal executor's run-to-run
+check found that it reached results in two ways:
+- the deposit's whole-quanta rounding was seeded by the slot;
+- `mpm_parcels`'s last workgroup flew some of the parcels G2P had just
+  thrown, chosen by slot, so their landing came a substep early or late. The
+  test below found this one.
+
+A parcel landing back in the region also took a particle slot by atomic,
+which reorders P2G's sums. Now:
+- each parcel records the particle it left (after the parcels in binding
+  50, 48 B per parcel), and the deposit is seeded by that particle;
+- a parcel landing back takes its particle's own dead slot again;
+- `mpm_parcels` flies exactly the parcels thrown before this substep's G2P
+  (`MPM_C_FLYING`, set with the workgroup counts; `MPM_COUNTER_WORDS` is
+  16), and a parcel counts as airborne from the substep it is thrown in.
+- Test: `terrain_mpm` `ejecta_are_the_same_run_to_run`. A layer is thrown
+  partly out of the region and partly back into it (14,771 parcels): the
+  heights, the particles and the parcels (as a set) are bit-identical over
+  two runs. Before the last fix, 7 samples' heights differed.
+
+**Fingerprints now:**
+- `engine-webgpu` impact: particles `2d38d5b92f5c7c7f`, bodies
+  `ab718fa12584d495`, heights `767eaa69f034c221`; the cube is unchanged
+  (`5ac333cbab3eb7bb`).
+- `engine-world`: reports `9d870853cf98ba9f`, heights `bd49360d36b558ae`, box
+  `136fde101445dae3`.
+- These cases throw no parcels, so the ejecta change leaves them as they
+  were.
+
+**Validation at the physical defaults** (bed 1.5 R; after the second pass:
+the same to the digits shown):
 - crater (`terrain_crater`, 16 cells/R, margin 2): apparent radius 0.184 m
   (1.25 R), depth 0.069 m, rim 2.9 cm at 0.248 m, axis ridge 0.5 mm, cavity
   3.08× π-scaling's (the known volume failure; 3.10× before). 347 s wall
   (782 s before);
 - slope (`terrain_slope`): the 40° slope relaxes to 29.7°, the 25° slope
-  moves 1.9 mm;
+  moves 1.9 mm (1.5 mm after the second pass; the game profile 28.6° and
+  1.8 mm);
+- coupling at the game profile passes after the second pass too;
 - every listed suite passes (`terrain_mpm`, `terrain_couple`,
   `terrain_absorb`, `terrain_bake_axis`, `terrain_watch`,
   `terrain_materials`, `mpm_material`, `heightfield`, `vehicle_soil`;
