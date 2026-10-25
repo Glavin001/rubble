@@ -257,7 +257,9 @@ fn terrain_kernels(root: &std::path::Path, out_dir: &std::path::Path) -> Result<
 const TERRAIN_FAST_ENTRIES: &[(&str, &str)] = &[
     ("mpm_p2g_cells", "mpm_p2g_cells"),
     ("mpm_p2g_nodes", "mpm_p2g_nodes"),
-    ("mpm_g2p_simd", "mpm_g2p"),
+    ("mpm_touch_keys", "mpm_touch_keys"),
+    ("mpm_count_keys", "mpm_count_keys"),
+    ("mpm_scatter_keys", "mpm_scatter_keys"),
 ];
 
 /// `terrain_watch.slang`'s entries (the look-ahead after the rigid step).

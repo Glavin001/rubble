@@ -159,5 +159,124 @@ fn main() -> Result<()> {
     }
     table.push_str("];\n");
     std::fs::write(out_dir.join("cuda_kernels.rs"), table)?;
+    terrain_kernels(&slangc, nvcc.as_deref(), &arch, &sass, &root, &out_dir)?;
+    Ok(())
+}
+
+/// `terrain_mpm_fast.slang`'s entries (the native fast paths, engine-metal
+/// `TerrainCaps`).
+const TERRAIN_FAST_ENTRIES: &[&str] = &[
+    "mpm_p2g_cells",
+    "mpm_p2g_nodes",
+    "mpm_touch_keys",
+    "mpm_count_keys",
+    "mpm_scatter_keys",
+];
+
+/// Grid-stride entries of `terrain_mpm_cuda.slang`: each stands for the plan's
+/// indirect dispatch of the kernel it names (without `_gs`).
+const TERRAIN_GS_ENTRIES: &[&str] = &[
+    "mpm_touch_gs",
+    "mpm_count_gs",
+    "mpm_scatter_gs",
+    "mpm_payload_gs",
+    "mpm_g2p_gs",
+    "mpm_geostatic_gs",
+    "mpm_source_gs",
+    "mpm_bake_bin_gs",
+    "mpm_parcels_gs",
+    "mpm_cell_sort_gs",
+    "mpm_p2g_gs",
+    "mpm_grid_gs",
+    "mpm_couple_apply_gs",
+    "mpm_p2g_nodes_gs",
+    "mpm_scan_cells_gs",
+    "mpm_touch_keys_gs",
+    "mpm_count_keys_gs",
+    "mpm_scatter_keys_gs",
+    "mpm_p2g_cells_gs",
+];
+
+/// The terrain plan's kernels (`engine_terrain::plan::KERNELS`, bindings
+/// 37-51), the native fast paths (`terrain_mpm_fast.slang`) and the CUDA
+/// grid-stride entries for the plan's indirect dispatches
+/// (`terrain_mpm_cuda.slang`), Slang → CUDA with the same hazard check as the
+/// rigid kernels, and fatbins when nvcc is present. Emits
+/// `cuda_terrain_kernels.rs` (`CUDA_TERRAIN_KERNELS`). No host executor runs
+/// them yet (engine/docs/deformable-terrain.md, "Native backends").
+fn terrain_kernels(
+    slangc: &std::path::Path,
+    nvcc: Option<&std::path::Path>,
+    arch: &str,
+    sass: &[&str],
+    root: &std::path::Path,
+    out_dir: &std::path::Path,
+) -> Result<()> {
+    let dir = out_dir.join("cuda_terrain");
+    std::fs::create_dir_all(&dir)?;
+    let kernels = root.join("kernels");
+    let mpm = kernels.join("terrain_mpm.slang");
+    let fast = kernels.join("terrain_mpm_fast.slang");
+    let gs = kernels.join("terrain_mpm_cuda.slang");
+    let slots = bind_slots(&[
+        kernels.join("world_step.slang"),
+        root.join("physics/contact_storage.slang"),
+        mpm.clone(),
+        fast.clone(),
+    ])?;
+    let entries: Vec<(&str, &std::path::Path)> = engine_terrain::plan::KERNELS
+        .iter()
+        .map(|&e| (e, mpm.as_path()))
+        .chain(TERRAIN_FAST_ENTRIES.iter().map(|&e| (e, fast.as_path())))
+        .chain(TERRAIN_GS_ENTRIES.iter().map(|&e| (e, gs.as_path())))
+        .collect();
+    let compiled = engine_slang_build::par_map(&entries, |&(entry, source)| -> Compiled {
+        let cu = dir.join(format!("{entry}.cu"));
+        let kernel = compile_kernel(slangc, root, source, entry, &cu)?;
+        let text = std::fs::read_to_string(&cu)?;
+        let hazards = deferred_load_hazards(&text);
+        if !hazards.is_empty() {
+            anyhow::bail!(
+                "{entry}: Slang's CUDA output reads a buffer element after storing to it \
+                 (use the value before the store in the .slang source):\n  {}",
+                hazards.join("\n  ")
+            );
+        }
+        if let Some(nvcc) = nvcc {
+            fatbin(nvcc, &cu, &cu.with_extension("fatbin"), arch, sass)?;
+        }
+        Ok((kernel, text.len() as u64, nvcc.is_some(), false))
+    });
+    let mut table = String::from(
+        "/// Terrain kernels: plan, fast paths, grid-stride entries (see build.rs).\n\
+         pub static CUDA_TERRAIN_KERNELS: &[CudaKernel] = &[\n",
+    );
+    for (&(entry, _), r) in entries.iter().zip(compiled) {
+        let (kernel, cu_bytes, has_image, _) = r?;
+        let mut binds = String::new();
+        let mut params_bytes = 0;
+        for f in &kernel.fields {
+            let slot = slots
+                .get(&f.name)
+                .ok_or_else(|| anyhow!("{entry}: global {} has no BIND slot", f.name))?;
+            write!(binds, "({}, {}, {slot}), ", f.offset, f.size)?;
+            params_bytes = params_bytes.max(f.offset + f.size);
+        }
+        let image = if has_image {
+            format!(
+                "include_bytes!({:?})",
+                dir.join(format!("{entry}.fatbin")).display().to_string()
+            )
+        } else {
+            "&[]".into()
+        };
+        writeln!(
+            table,
+            "    CudaKernel {{ entry: {entry:?}, cu_bytes: {cu_bytes}, image: {image}, threads: {:?}, params_bytes: {params_bytes}, writes_indirect: false, binds: &[{binds}] }},",
+            kernel.threads
+        )?;
+    }
+    table.push_str("];\n");
+    std::fs::write(out_dir.join("cuda_terrain_kernels.rs"), table)?;
     Ok(())
 }

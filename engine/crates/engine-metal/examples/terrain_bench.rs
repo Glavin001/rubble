@@ -49,7 +49,8 @@ struct Opts {
     margin: f64,
     hz: f32,
     /// Backends, in the order each run takes them: `metal` (the plan's
-    /// portable kernels), `metal-fast` (every `TerrainCaps` fast path), `wgpu`.
+    /// portable kernels), `metal-fast` (every `TerrainCaps` fast path),
+    /// `metal+flag+...` (those fast paths), `wgpu`.
     backends: Vec<String>,
     profile: bool,
     json: Option<String>,
@@ -154,6 +155,8 @@ trait Bench {
 struct MetalBench {
     sim: MetalSim,
     bed: u32,
+    /// Print the activation's and the source's per-kernel times.
+    profile_open: bool,
 }
 
 impl Bench for MetalBench {
@@ -168,7 +171,11 @@ impl Bench for MetalBench {
             .1;
     }
     fn open(&mut self, e: &Event) -> f64 {
+        let profile = self.profile_open;
         let s = &mut self.sim;
+        if profile {
+            s.terrain_profile_next();
+        }
         s.terrain_activate(
             &e.plan,
             self.bed,
@@ -179,7 +186,20 @@ impl Bench for MetalBench {
         )
         .unwrap();
         let a = s.terrain_last_gpu_ms();
+        let activation = s.terrain_profiled();
+        if profile {
+            s.terrain_profile_next();
+        }
         s.terrain_apply_source(&e.model, Vec3::ZERO).unwrap();
+        let source = s.terrain_profiled();
+        for (label, t) in [("activation", activation), ("source", source)] {
+            if let Some(t) = t {
+                println!("  {label}: {:.3} ms GPU (profiled)", t.gpu_ms);
+                for (name, ms, c) in t.kernels {
+                    println!("    {name:<20} {ms:>8.4} ms ({c} dispatches)");
+                }
+            }
+        }
         a + s.terrain_last_gpu_ms()
     }
     fn frame(&mut self, k: u32, dt: f32) -> (TerrainStepReport, f64) {
@@ -358,6 +378,16 @@ fn summary_json(s: &Summary) -> serde_json::Value {
     })
 }
 
+/// `metal`: the plan's portable kernels; `metal-fast`: every fast path;
+/// `metal+a+b`: those fast paths (`TerrainCaps::parse`).
+fn caps_of(name: &str) -> TerrainCaps {
+    match name {
+        "metal" => TerrainCaps::default(),
+        "metal-fast" => TerrainCaps::all(),
+        n => TerrainCaps::parse(n.trim_start_matches("metal+")).unwrap(),
+    }
+}
+
 fn main() {
     let o = opts();
     let e = event(&o);
@@ -376,14 +406,14 @@ fn main() {
     );
     let make = |name: &str| -> Box<dyn Bench> {
         match name {
-            "metal" | "metal-fast" => {
+            n if n.starts_with("metal") => {
                 let mut sim = MetalSim::new(capacity()).unwrap();
-                sim.set_terrain_caps(if name == "metal" {
-                    TerrainCaps::default()
-                } else {
-                    TerrainCaps::all()
-                });
-                Box::new(MetalBench { sim, bed: 0 })
+                sim.set_terrain_caps(caps_of(n));
+                Box::new(MetalBench {
+                    sim,
+                    bed: 0,
+                    profile_open: false,
+                })
             }
             "wgpu" => Box::new(WgpuBench {
                 sim: WgpuSim::new(capacity()).expect("wgpu"),
@@ -460,12 +490,13 @@ fn main() {
     for variant in profiled.into_iter().filter(|_| o.profile) {
         // Per-kernel breakdown over three windows of a fresh Metal run.
         let mut sim = MetalSim::new(capacity()).unwrap();
-        sim.set_terrain_caps(if variant == "metal" {
-            TerrainCaps::default()
-        } else {
-            TerrainCaps::all()
-        });
-        let mut b = MetalBench { sim, bed: 0 };
+        sim.set_terrain_caps(caps_of(variant));
+        let mut b = MetalBench {
+            sim,
+            bed: 0,
+            profile_open: true,
+        };
+        println!("{variant} strike:");
         b.prepare(&e);
         b.open(&e);
         let frame = 1.0 / o.hz;

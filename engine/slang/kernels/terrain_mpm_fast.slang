@@ -2,7 +2,10 @@
 // "Native backends"). Each replaces one or more of the plan's kernels when its
 // capability flag is on (engine-metal `TerrainCaps`); the plan's portable kernels
 // are unchanged and remain the default. Only native hosts compile this file: it
-// uses SIMD-group (wave) intrinsics and bindings past the browser's.
+// uses bindings past the browser's.
+//
+// A fast path that duplicates a plan kernel's logic must follow it: engine-metal's
+// terrain_parity checks every fast path against the portable kernels.
 //
 // p2g_cells: P2G in two passes, each particle read once.
 //   mpm_p2g_cells  one SIMD group per cell, lane o < 27 one of the 27 nodes the
@@ -15,20 +18,23 @@
 //   reaches). The sums hold the same terms grouped by cell, so the result differs
 //   from it only in rounding; it is deterministic (fixed orders, no atomics).
 //
-// g2p_simd: the plan's mpm_g2p compiled from this file (as mpm_g2p_simd), its
-//   top-speed record reduced over the SIMD group before the one atomic max per
-//   group (the portable kernel takes one per particle, all on one word). Max is
-//   exact and order-free: bit for bit the portable kernel.
-#define MPM_RECORD_SPEED(s)                                                   \
-    {                                                                         \
-        float _mpmTop = WaveActiveMax(s);                                     \
-        if (WaveIsFirstLane()) AMAX2(gMpmCounters[MPM_C_MAX_SPEED], asuint(_mpmTop)); \
-    }
+// sort_keys: the binning's particle reads, once.
+//   mpm_touch_keys    mpm_touch, also writing each particle's base node (8 bytes)
+//   mpm_count_keys    mpm_count from that key, replacing it with the cell index
+//   mpm_scatter_keys  mpm_scatter from the cell index
+//   The portable count and scatter each read the whole 128-byte particle (and
+//   look its cell up in the block hash) for its position. Same cells, same
+//   counts, same sorted order: bit for bit the portable binning.
 #include "terrain_mpm.slang"
 
 // Per region cell c (block · 64 + local) and stencil offset o (x + 3y + 9z):
 // [27c + o] = (Σ w·(m v + A·dpos), Σ w·m) over the cell's particles.
 BIND(53) RWStructuredBuffer<float4> gMpmPartials;
+
+// Per particle: after mpm_touch_keys its base node (x | y << 16, z), after
+// mpm_count_keys its cell (cell, 0); MPM_NO_BLOCK in both words when it is not
+// binned (dead, or outside the region).
+BIND(54) RWStructuredBuffer<uint2> gMpmKeys;
 
 [shader("compute")]
 [numthreads(1024, 1, 1)]
@@ -95,4 +101,60 @@ void mpm_p2g_nodes(uint3 tid : SV_DispatchThreadID)
     }
     gMpmGrid[2u * n] = float4(mv, m);
     gMpmGrid[2u * n + 1u] = float4(0, 0, 0, -1.0);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_touch_keys(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = mpmIndex(tid);
+    MpmParams p = mpmParams();
+    if (i >= mpmParticleCount()) return;
+    MpmParticle q = gMpmParticles[i];
+    uint2 none = uint2(MPM_NO_BLOCK, MPM_NO_BLOCK);
+    if (mpmParticleDead(q)) { gMpmKeys[i] = none; return; }
+    float3 x = q.xm.xyz;
+    if (!mpmInside(x, p))
+    {
+        AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OUTSIDE);
+        gMpmKeys[i] = none;
+        return;
+    }
+    int3 b = mpmBaseNode(x, p);
+    // Inside the box, the base node is in [0, dims): 16 bits a coordinate.
+    gMpmKeys[i] = uint2(uint(b.x) | (uint(b.y) << 16), uint(b.z));
+    int3 lo = b >> 2, hi = (b + 2) >> 2;
+    for (int bz = lo.z; bz <= hi.z; bz++)
+    for (int by = lo.y; by <= hi.y; by++)
+    for (int bx = lo.x; bx <= hi.x; bx++)
+        mpmInsertBlock(mpmBlockKey(int3(bx, by, bz)), p);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_count_keys(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = mpmIndex(tid);
+    MpmParams p = mpmParams();
+    if (i >= mpmParticleCount()) return;
+    uint2 k = gMpmKeys[i];
+    if (k.y == MPM_NO_BLOCK) return;
+    int3 b = int3(int(k.x & 0xFFFFu), int(k.x >> 16), int(k.y));
+    uint c = mpmCellOf(b, p);
+    gMpmKeys[i] = uint2(c, 0u);
+    if (c != MPM_NO_BLOCK) AADD2(gMpmCells[4u * c], 1u);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_scatter_keys(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = mpmIndex(tid);
+    if (i >= mpmParticleCount()) return;
+    uint c = gMpmKeys[i].x;
+    if (c == MPM_NO_BLOCK) return;
+    uint k;
+    AADD3(gMpmCells[4u * c + 2u], 1u, k);
+    uint b = c / MPM_BLOCK_NODES;
+    gMpmSorted[ALOAD(gMpmBlocks[4u * b + 2u]) + ALOAD(gMpmCells[4u * c + 1u]) + k] = i;
 }

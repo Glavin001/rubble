@@ -43,10 +43,13 @@ pub struct TerrainCaps {
     /// portable kernel in rounding only. Binding 53 holds the partials
     /// (`max_blocks` · 64 · 27 · 16 bytes).
     pub p2g_cells: bool,
-    /// G2P with its top-speed record reduced over the SIMD group before one
-    /// atomic max per group (`mpm_g2p_simd`, the plan's kernel compiled with
-    /// a hook). Max is exact and order-free: bit for bit the portable kernel.
-    pub g2p_simd: bool,
+    /// The binning reads each particle once (`mpm_touch_keys`,
+    /// `mpm_count_keys`, `mpm_scatter_keys`): touch writes its base node,
+    /// count turns it into its cell, scatter uses the cell, instead of each
+    /// reading the 128-byte particle and looking the cell up again. Same cells
+    /// and counts, same sorted order: bit for bit the portable binning.
+    /// Binding 54 holds the keys (`max_particles` · 8 bytes).
+    pub sort_keys: bool,
 }
 
 /// Bytes of the partials buffer (binding 53) for `max_blocks`.
@@ -59,25 +62,30 @@ impl TerrainCaps {
     pub fn all() -> Self {
         Self {
             p2g_cells: true,
-            g2p_simd: true,
+            sort_keys: true,
         }
     }
 
-    /// From `ENGINE_TERRAIN_CAPS` (comma-separated flag names, or `all`).
-    pub fn from_env() -> Self {
+    /// Flag names separated by `,` or `+` (`all` for every one).
+    pub fn parse(flags: &str) -> anyhow::Result<Self> {
         let mut caps = Self::default();
-        if let Ok(v) = std::env::var("ENGINE_TERRAIN_CAPS") {
-            for f in v.split(',').map(str::trim) {
-                match f {
-                    "all" => caps = Self::all(),
-                    "p2g_cells" => caps.p2g_cells = true,
-                    "g2p_simd" => caps.g2p_simd = true,
-                    "" => {}
-                    other => log::warn!("ENGINE_TERRAIN_CAPS: unknown flag {other}"),
-                }
+        for f in flags.split([',', '+']).map(str::trim) {
+            match f {
+                "all" => caps = Self::all(),
+                "p2g_cells" => caps.p2g_cells = true,
+                "sort_keys" => caps.sort_keys = true,
+                "" => {}
+                other => anyhow::bail!("unknown terrain fast path {other}"),
             }
         }
-        caps
+        Ok(caps)
+    }
+
+    /// From `ENGINE_TERRAIN_CAPS` (as [`Self::parse`]; none when unset).
+    pub fn from_env() -> Self {
+        std::env::var("ENGINE_TERRAIN_CAPS")
+            .map(|v| Self::parse(&v).unwrap_or_else(|e| panic!("ENGINE_TERRAIN_CAPS: {e}")))
+            .unwrap_or_default()
     }
 }
 
@@ -103,10 +111,15 @@ pub(crate) struct MetalTerrain {
     last: Option<CommandBuffer>,
     /// Timestamps of the profiled calls (one encoder per dispatch).
     samples: Option<CounterSampleBuffer>,
+    /// Profile the next call (`terrain_profile_next`), and what it measured.
+    profile_next: bool,
+    profiled: Option<TerrainTiming>,
 }
 
 /// Binding of the `p2g_cells` partials (after the look-ahead's 52).
 pub(crate) const P2G_PARTIALS_BINDING: usize = MPM_WATCH_BINDING + 1;
+/// Binding of the `sort_keys` per-particle keys.
+pub(crate) const SORT_KEYS_BINDING: usize = MPM_WATCH_BINDING + 2;
 
 /// The plan's commands as this host runs them: a fast path replaces the
 /// commands of the kernels it stands for.
@@ -127,13 +140,19 @@ fn lower(ops: &TerrainOps, caps: TerrainCaps) -> Vec<TerrainCmd> {
                     offset,
                 });
             }
-            TerrainCmd::Indirect {
-                kernel: "mpm_g2p",
-                offset,
-            } if caps.g2p_simd => out.push(TerrainCmd::Indirect {
-                kernel: "mpm_g2p_simd",
-                offset,
-            }),
+            TerrainCmd::Indirect { kernel, offset }
+                if caps.sort_keys
+                    && matches!(kernel, "mpm_touch" | "mpm_count" | "mpm_scatter") =>
+            {
+                out.push(TerrainCmd::Indirect {
+                    kernel: match kernel {
+                        "mpm_touch" => "mpm_touch_keys",
+                        "mpm_count" => "mpm_count_keys",
+                        _ => "mpm_scatter_keys",
+                    },
+                    offset,
+                })
+            }
             c => out.push(c),
         }
     }
@@ -201,6 +220,29 @@ impl MetalSim {
             b.set_label("b53 terrain partials");
             self.bufs[P2G_PARTIALS_BINDING] = b;
         }
+        if caps.sort_keys {
+            let b = shared(&self.device, u64::from(config.max_particles) * 8);
+            b.set_label("b54 terrain keys");
+            self.bufs[SORT_KEYS_BINDING] = b;
+        }
+        // The GPU's first touch of a page costs far more than a later one
+        // (measured: the strike frame ran ~10 ms longer on fresh buffers). Pay
+        // it here, at enable, with a fill of every terrain buffer.
+        {
+            let cb = self.queue.new_command_buffer();
+            let blit = cb.new_blit_command_encoder();
+            for (binding, _) in plan.buffer_sizes() {
+                let b = &self.bufs[binding];
+                blit.fill_buffer(b, NSRange::new(0, b.length()), 0);
+            }
+            for binding in [P2G_PARTIALS_BINDING, SORT_KEYS_BINDING] {
+                let b = &self.bufs[binding];
+                blit.fill_buffer(b, NSRange::new(0, b.length()), 0);
+            }
+            blit.end_encoding();
+            cb.commit();
+            cb.wait_until_completed();
+        }
         let pipes = match self.terrain.take() {
             Some(t) => t.pipes,
             None => self.terrain_pipelines()?,
@@ -212,6 +254,8 @@ impl MetalSim {
             caps,
             last: None,
             samples: None,
+            profile_next: false,
+            profiled: None,
         });
         Ok(())
     }
@@ -330,6 +374,14 @@ impl MetalSim {
     /// The plan's writes and commands in one command buffer, committed and
     /// tracked with the rigid steps (no wait).
     fn terrain_submit(&mut self, ops: &TerrainOps, label: &str) -> anyhow::Result<CommandBuffer> {
+        if std::mem::take(&mut self.terrain.as_mut().expect("terrain").profile_next) {
+            self.wait_all();
+            let (cb, timing) = self.terrain_submit_profiled(ops, label)?;
+            let t = self.terrain.as_mut().expect("terrain");
+            t.profiled = Some(timing);
+            t.last = Some(cb.clone());
+            return Ok(cb);
+        }
         let cb = self.queue.new_command_buffer().to_owned();
         cb.set_label(label);
         self.terrain_blit_writes(&cb, ops);
@@ -354,7 +406,7 @@ impl MetalSim {
         &mut self,
         ops: &TerrainOps,
         label: &str,
-    ) -> anyhow::Result<TerrainTiming> {
+    ) -> anyhow::Result<(CommandBuffer, TerrainTiming)> {
         let caps = self.terrain.as_ref().expect("terrain").caps;
         let cmds = lower(ops, caps);
         let n = cmds.len() as u64;
@@ -437,10 +489,13 @@ impl MetalSim {
                 None => kernels.push((name, ms, 1)),
             }
         }
-        Ok(TerrainTiming {
-            gpu_ms: total,
-            kernels,
-        })
+        Ok((
+            cb,
+            TerrainTiming {
+                gpu_ms: total,
+                kernels,
+            },
+        ))
     }
 
     /// Make `plan` the active region and `particles` its material. `bed` is the
@@ -561,8 +616,22 @@ impl MetalSim {
     ) -> anyhow::Result<(TerrainStepReport, TerrainTiming)> {
         let ops = self.terrain_plan()?.step(substeps, dt, gravity)?;
         self.wait_all();
-        let timing = self.terrain_submit_profiled(&ops, "terrain profiled")?;
+        let (_, timing) = self.terrain_submit_profiled(&ops, "terrain profiled")?;
         Ok((self.terrain_report()?, timing))
+    }
+
+    /// Run the next terrain call (activation, source, step, bake) with one
+    /// timestamped encoder per dispatch; [`Self::terrain_profiled`] then
+    /// returns what it measured.
+    pub fn terrain_profile_next(&mut self) {
+        if let Some(t) = self.terrain.as_mut() {
+            t.profile_next = true;
+        }
+    }
+
+    /// The per-kernel timing of the call [`Self::terrain_profile_next`] marked.
+    pub fn terrain_profiled(&mut self) -> Option<TerrainTiming> {
+        self.terrain.as_mut().and_then(|t| t.profiled.take())
     }
 
     /// GPU time (ms) of the last terrain call's command buffer (waits for it).

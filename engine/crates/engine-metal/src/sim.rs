@@ -30,8 +30,8 @@ use table::RIGID_KERNELS;
 
 /// Bindings a terrain-capable host allocates: the rigid plan's
 /// ([`BIND_COUNT`]), the unused pose outputs (34-36), the terrain pool
-/// (37-51), the look-ahead (52) and the native fast paths' scratch (53).
-pub(crate) const HOST_BINDINGS: usize = engine_terrain::layout::MPM_WATCH_BINDING + 2;
+/// (37-51), the look-ahead (52) and the native fast paths' scratch (53-54).
+pub(crate) const HOST_BINDINGS: usize = engine_terrain::layout::MPM_WATCH_BINDING + 3;
 
 /// Host-upload ring slots (steps in flight before the host waits).
 const RING: usize = 4;
