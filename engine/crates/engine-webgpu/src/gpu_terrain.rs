@@ -24,6 +24,8 @@ pub use engine_terrain::TerrainStepReport;
 /// Host-side state of the terrain pool: the shared plan.
 pub(crate) struct TerrainState {
     plan: TerrainPlan,
+    /// The last submission's GPU ms (`RUBBLE_TERRAIN_GPU_MS=1`).
+    gpu_ms: std::cell::Cell<Option<f64>>,
 }
 
 pub(crate) fn terrain_buffer(device: &wgpu::Device, binding: usize, bytes: u64) -> wgpu::Buffer {
@@ -55,7 +57,10 @@ impl WgpuSim {
             self.bufs[binding] = terrain_buffer(&self.device, binding, bytes);
             self.rebind_buffer(binding as u32);
         }
-        self.terrain = Some(TerrainState { plan });
+        self.terrain = Some(TerrainState {
+            plan,
+            gpu_ms: std::cell::Cell::new(None),
+        });
         Ok(())
     }
 
@@ -98,6 +103,38 @@ impl WgpuSim {
     /// The plan's writes and commands in a submission of their own.
     fn terrain_submit(&self, ops: &TerrainOps, label: &str) {
         self.terrain_writes(ops);
+        // Diagnostic (`RUBBLE_TERRAIN_TIMING=1`, on a device with timestamp
+        // queries): each kernel's GPU time, printed per submission.
+        if std::env::var("RUBBLE_TERRAIN_TIMING").is_ok_and(|v| v == "1")
+            && self
+                .device
+                .features()
+                .contains(wgpu::Features::TIMESTAMP_QUERY)
+        {
+            if let Ok(times) = self.terrain_timed_pass(ops) {
+                let total: f64 = times.iter().map(|(_, ms)| ms).sum();
+                let parts: Vec<String> =
+                    times.iter().map(|(n, ms)| format!("{n} {ms:.3}")).collect();
+                eprintln!("{label} GPU {total:.3} ms: {}", parts.join(", "));
+            }
+            return;
+        }
+        if std::env::var("RUBBLE_TERRAIN_GPU_MS").is_ok_and(|v| v == "1")
+            && self
+                .device
+                .features()
+                .contains(wgpu::Features::TIMESTAMP_QUERY)
+        {
+            // The kernels' GPU time, each timed in a pass of its own (one
+            // pass's own ends, around many dispatches, read 0 on Metal).
+            let ms = self
+                .terrain_timed_pass(ops)
+                .map_or(0.0, |t| t.iter().map(|(_, ms)| ms).sum());
+            if let Some(t) = self.terrain.as_ref() {
+                t.gpu_ms.set(Some(ms));
+            }
+            return;
+        }
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
@@ -203,6 +240,107 @@ impl WgpuSim {
         let ops = self.terrain_plan()?.step(substeps, dt, gravity)?;
         self.terrain_submit(&ops, "terrain");
         self.terrain_report()
+    }
+
+    /// Diagnostic: [`Self::terrain_step`] with every dispatch in a timestamped
+    /// pass of its own, and each kernel's GPU time summed over the frame (ms,
+    /// in first-dispatch order). Needs a device with timestamp queries (the
+    /// default device asks for them under `RUBBLE_GPU_TIMING=1`); never on a
+    /// host's hot path (it waits for the GPU).
+    pub fn terrain_step_timed(
+        &mut self,
+        substeps: u32,
+        dt: f32,
+        gravity: f32,
+    ) -> anyhow::Result<(TerrainStepReport, Vec<(&'static str, f64)>)> {
+        anyhow::ensure!(
+            self.device
+                .features()
+                .contains(wgpu::Features::TIMESTAMP_QUERY),
+            "terrain_step_timed needs timestamp queries (RUBBLE_GPU_TIMING=1)"
+        );
+        let ops = self.terrain_plan()?.step(substeps, dt, gravity)?;
+        self.terrain_writes(&ops);
+        let times = self.terrain_timed_pass(&ops)?;
+        Ok((self.terrain_report()?, times))
+    }
+
+    /// Diagnostic: the GPU time (ms) of the last terrain submission when
+    /// `RUBBLE_TERRAIN_GPU_MS=1` (on a device with timestamp queries; each
+    /// submission then waits for the GPU): its kernels' times summed, each
+    /// dispatch timed in a pass of its own. Else `None`.
+    pub fn terrain_last_gpu_ms(&self) -> Option<f64> {
+        self.terrain.as_ref().and_then(|t| t.gpu_ms.get())
+    }
+
+    /// `ops`' commands, each in a timestamped pass, submitted and waited for:
+    /// each kernel's summed GPU time (ms).
+    fn terrain_timed_pass(&self, ops: &TerrainOps) -> anyhow::Result<Vec<(&'static str, f64)>> {
+        let mut times: Vec<(&'static str, f64)> = Vec::new();
+        // A query set holds at most 4096 timestamps: chunks of 2048 commands.
+        for chunk in ops.cmds.chunks(2048) {
+            let count = 2 * chunk.len() as u32;
+            let queries = self.device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("terrain kernels"),
+                ty: wgpu::QueryType::Timestamp,
+                count,
+            });
+            let mut enc = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("terrain timed"),
+                });
+            for (k, c) in chunk.iter().enumerate() {
+                let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("terrain timed"),
+                    timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
+                        query_set: &queries,
+                        beginning_of_pass_write_index: Some(2 * k as u32),
+                        end_of_pass_write_index: Some(2 * k as u32 + 1),
+                    }),
+                });
+                match *c {
+                    TerrainCmd::Dispatch { kernel, threads } => {
+                        self.disp(&mut pass, kernel, threads, None)
+                    }
+                    TerrainCmd::Indirect { kernel, offset } => {
+                        self.disp_terrain_indirect(&mut pass, kernel, offset)
+                    }
+                }
+            }
+            let bytes = 8 * u64::from(count);
+            let resolve = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("terrain kernels"),
+                size: bytes,
+                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("terrain kernels read"),
+                size: bytes,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            enc.resolve_query_set(&queries, 0..count, &resolve, 0);
+            enc.copy_buffer_to_buffer(&resolve, 0, &staging, 0, bytes);
+            self.queue.submit([enc.finish()]);
+            let slice = staging.slice(..);
+            slice.map_async(wgpu::MapMode::Read, |_| {});
+            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+            let t: Vec<u64> =
+                bytemuck::cast_slice(&slice.get_mapped_range().expect("mapped")).to_vec();
+            let period = f64::from(self.queue.get_timestamp_period()) * 1e-6;
+            for (k, c) in chunk.iter().enumerate() {
+                let (TerrainCmd::Dispatch { kernel, .. } | TerrainCmd::Indirect { kernel, .. }) =
+                    *c;
+                let ms = t[2 * k + 1].saturating_sub(t[2 * k]) as f64 * period;
+                match times.iter_mut().find(|(n, _)| *n == kernel) {
+                    Some((_, sum)) => *sum += ms,
+                    None => times.push((kernel, ms)),
+                }
+            }
+        }
+        Ok(times)
     }
 
     /// The counters after the last submission (blocking), as a report or the

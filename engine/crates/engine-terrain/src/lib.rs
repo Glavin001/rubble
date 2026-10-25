@@ -20,7 +20,7 @@ pub mod source;
 pub mod step;
 pub mod zmodel;
 
-pub use config::{InitialStress, RegionBoundary, TerrainConfig, TerrainError};
+pub use config::{InitialStress, RegionBoundary, TerrainConfig, TerrainError, TerrainProfile};
 pub use material::{RockMaterial, SandMaterial, TerrainMaterial, YieldSurface};
 pub use plan::{RegionClock, TerrainOps, TerrainPlan, TerrainStepReport};
 pub use region::{RegionPlan, BLOCK_CELLS};

@@ -235,11 +235,12 @@ impl TerrainPlan {
                 MPM_PARTICLES_BINDING,
                 particles * std::mem::size_of::<MpmParticle>() as u64,
             ),
-            (MPM_PAYLOAD_BINDING, particles * 80),
+            (MPM_PAYLOAD_BINDING, particles * 64),
             (MPM_HASH_BINDING, slots * 8),
             (MPM_BLOCKS_BINDING, blocks * 16),
             (MPM_CELLS_BINDING, nodes * 16),
-            (MPM_SORTED_BINDING, particles * 4),
+            // Sorted ids, then per particle its base cell and rank (mpm_touch, mpm_count).
+            (MPM_SORTED_BINDING, particles * 12),
             (MPM_GRID_BINDING, nodes * 16),
             (MPM_ARGS_BINDING, 36),
             (MPM_COLUMNS_BINDING, u64::from(config.max_columns) * 16),
@@ -793,8 +794,9 @@ impl RegionClock {
         self.hold_until = step;
     }
 
-    /// `(substeps, dt)` for the frame at `step`: the bound is 1.5 × the last
-    /// reported speed, plus what gravity can add over the readback lag, plus
+    /// `(substeps, dt)` for the frame at `step`: the bound is
+    /// [`TerrainConfig::speed_growth`] (1.5 by default) × the last reported
+    /// speed, plus what gravity can add over the readback lag, plus
     /// `headroom` (bodies entering faster than the sand).
     #[allow(clippy::too_many_arguments)]
     pub fn substeps(
@@ -808,7 +810,7 @@ impl RegionClock {
         headroom: f32,
     ) -> Result<(u32, f32), TerrainError> {
         let lag = (step - self.speed_step + 1) as f32;
-        let bound = 1.5 * self.speed + gravity.abs() * frame_dt * lag + headroom;
+        let bound = config.speed_growth * self.speed + gravity.abs() * frame_dt * lag + headroom;
         substeps_for(config, frame_dt, dx, wave_speed, bound)
     }
 
