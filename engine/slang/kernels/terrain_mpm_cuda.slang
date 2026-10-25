@@ -10,7 +10,8 @@
 // Per-index kernels see the same index they would under the indirect launch.
 // Per-workgroup kernels (one workgroup per block, with group barriers) loop at
 // workgroup granularity: every thread of a group runs the same trip count, so
-// the barriers stay uniform. Bit for bit the indirect dispatch: each index or
+// the barriers stay uniform, and a barrier ends each trip before the next
+// block reuses the group's shared memory. Bit for bit the indirect dispatch: each index or
 // block runs the same code once.
 #include "terrain_mpm_fast.slang"
 
@@ -58,10 +59,24 @@ MPM_GS_PER_INDEX(mpm_source_gs, mpm_source, mpmGsParticleThreads())
 MPM_GS_PER_INDEX(mpm_bake_bin_gs, mpm_bake_bin, mpmGsParticleThreads())
 MPM_GS_PER_INDEX(mpm_parcels_gs, mpm_parcels, mpmGsParcelThreads())
 MPM_GS_PER_NODE(mpm_cell_sort_gs, mpm_cell_sort)
-MPM_GS_PER_NODE(mpm_p2g_gs, mpm_p2g)
 MPM_GS_PER_NODE(mpm_grid_gs, mpm_grid)
 MPM_GS_PER_NODE(mpm_couple_apply_gs, mpm_couple_apply)
 MPM_GS_PER_NODE(mpm_p2g_nodes_gs, mpm_p2g_nodes)
+
+// mpm_p2g: one workgroup of MPM_P2G_LANES threads per node per block, with a
+// barrier before the lanes' sums add.
+[shader("compute")]
+[numthreads(64 * 4, 1, 1)]
+void mpm_p2g_gs(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
+{
+    uint n = mpmGsBlocks();
+    for (uint b = gid.x; b < n; b += MPM_GS_GROUPS)
+    {
+        mpm_p2g(mpmGsGroup(b), lid);
+        // The next block's lanes reuse the group's sums.
+        GROUP_SYNC();
+    }
+}
 
 // mpm_p2g_cells: one 1024-thread workgroup per block, no barriers.
 [shader("compute")]
@@ -78,5 +93,9 @@ void mpm_p2g_cells_gs(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 void mpm_scan_cells_gs(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
     uint n = mpmGsBlocks();
-    for (uint b = gid.x; b < n; b += MPM_GS_GROUPS) mpm_scan_cells(mpmGsGroup(b), lid);
+    for (uint b = gid.x; b < n; b += MPM_GS_GROUPS)
+    {
+        mpm_scan_cells(mpmGsGroup(b), lid);
+        GROUP_SYNC();
+    }
 }
