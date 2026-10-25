@@ -6,6 +6,39 @@
 
 **The plan:** `~/.claude/plans/in-rubble-we-have-cheeky-feather.md`.
 
+## Update: the native (resident) solve, 2026-10-25
+
+`blast_gpu` now runs PhysX's native destruction solver (`componentStressSolve`), the one vibe-land runs on the Mac: `shaders/blast_native.slang`, with the reference in `stress-ref/src/blast_bond/native.rs`. The host-path CG stays available as `STRESS_BLAST_SOLVER=host`.
+
+**Reference, house-1story:**
+- Native reaches the host path's converged forces (within 1e-8) in 165 iterations, against 2,925.
+- At vibe-land's budgets (native 16 iterations a frame, host 32), after 30 frames native is 1e-6 from the converged forces. The host path is 38% off.
+
+**GPU, Metal and WGSL:**
+- Converged forces are within 3e-6 of f64.
+- Capped warm frames are within 1e-3 of the f32 reference; that reference's one-ulp spread is 3e-3.
+- The certificate, zero loads, free pieces and bit-identical reruns behave as in the reference.
+
+**f32 residual floor:** in f32 the residual test has a floor on the house far above the tolerance, while the forces are within 1e-5. This is the CUDA README's own observation. The force tolerance (`STRESS_BLAST_FORCE_TOL=1e-3`, off by default, as in vibe-land) stops such solves within 0.28% of the converged forces.
+
+**Gravity only, 240 frames:**
+
+| Pack | Native | Host |
+|---|---|---|
+| house-1story | 0 bonds broken | 0 |
+| villa-savoye | 2 bonds broken (still one body) | 0 |
+
+**villa-savoye, 4 shots** (frame times with the wait included):
+
+| Solver | Frame median | Bonds broken | Bodies | Split frames |
+|---|---|---|---|---|
+| native | 5.8 ms | 1,106 | 313 | 115 |
+| host | 3.6 ms | 208 | 63 | 5 |
+
+The native solve carries impact loads through converged forces rather than a stalled iterate. Which breakage is right is for the vibe-land head-to-head to settle.
+
+**Solve alone, villa-savoye** (submission included): 2.3 ms at 16 iterations. With the force tolerance on it is 1.0 ms, settling to 1 iteration a frame.
+
 ## What exists now
 
 | Piece | Where | What it does |
