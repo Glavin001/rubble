@@ -387,6 +387,16 @@ typedef struct RbShapeDef {
   uint32_t internal_value;
 } RbShapeDef;
 
+// Bekker soil for vehicle ruts (deformable terrain T5). `k_c` (N/m^(n+1))
+// and `k_phi` (N/m^(n+2)) are SI whatever the host's units; `max_sinkage`
+// is in the host's length unit (a wheel sinking deeper fails the step).
+typedef struct RbSoil {
+  float k_c;
+  float k_phi;
+  float n;
+  float max_sinkage;
+} RbSoil;
+
 // Fields every joint has (`rbDefaultJointBase`). Frames are measured from
 // each body's origin; z is the hinge, cone and twist axis, x the slide axis.
 typedef struct RbJointBase {
@@ -724,6 +734,14 @@ enum RbResult rbHeightField_SetRegion(struct RbWorld *world,
                                       uint32_t width_a,
                                       uint32_t width_b,
                                       const float *values);
+
+// Give a heightfield a soil (`soil` non-null) or take it away (null). Wheels
+// on it sink to the rigid-wheel depth of their load, press ruts and pay
+// compaction resistance. The field is placed again from the host's samples,
+// so earlier ruts are not kept.
+enum RbResult rbHeightField_SetSoil(struct RbWorld *world,
+                                    RbShapeId shape,
+                                    const struct RbSoil *soil);
 
 enum RbResult rbDestroyShape(struct RbWorld *world, RbShapeId shape, bool update_body_mass);
 

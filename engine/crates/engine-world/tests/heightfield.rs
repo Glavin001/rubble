@@ -161,3 +161,44 @@ fn digging_wakes_the_box_on_terrain_away_from_the_origin() {
         "after the edit the box is at {fallen}"
     );
 }
+
+/// Soil on a heightfield shape (deformable terrain T5): a car parked on it
+/// sinks and reports compaction resistance; without soil it does not; a bad
+/// soil is refused by name. The physics is checked in engine-webgpu's
+/// `vehicle_soil` tests.
+#[test]
+fn a_soil_heightfield_lets_wheels_sink() {
+    let mut w = world();
+    let field = HeightField::new(81, 81, 0.05, 0.05, vec![0.0; 81 * 81]).unwrap();
+    let s = terrain(&mut w, &field);
+    let bad = Soil {
+        n: 3.5,
+        ..Soil::sandy_loam()
+    };
+    let err = w.set_height_field_soil(s, Some(bad)).unwrap_err();
+    assert!(err.to_string().contains("exponent"), "{err}");
+    w.set_height_field_soil(s, Some(Soil::sandy_loam()))
+        .unwrap();
+    let v = w
+        .add_vehicle(
+            &engine_vehicle::presets::sedan(),
+            [0.0, 0.8, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        )
+        .unwrap();
+    run(&mut w, 180);
+    let st = w.vehicle_state(v);
+    assert_eq!(st.contacts, 4);
+    for wh in &st.wheels {
+        assert!(
+            wh.sinkage > 0.01 && wh.compaction_resistance > 0.0,
+            "{wh:?}"
+        );
+    }
+    // Taken away: rigid ground again (fresh, from the host's samples).
+    w.set_height_field_soil(s, None).unwrap();
+    run(&mut w, 30);
+    for wh in &w.vehicle_state(v).wheels {
+        assert_eq!((wh.sinkage, wh.compaction_resistance), (0.0, 0.0), "{wh:?}");
+    }
+}

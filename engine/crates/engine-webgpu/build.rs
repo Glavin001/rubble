@@ -140,6 +140,8 @@ const WORLD_ENTRIES: &[&str] = &[
     "vehicle_loads_persistent",
     "vehicle_post",
     "raycast_batch",
+    "wheel_soil",
+    "wheel_soil_press",
     // Characters, in-step queries, projectiles (slang/kernels/character_step.slang).
     "char_move",
     "char_post",
@@ -207,6 +209,8 @@ const VEHICLE_ENTRIES: &[&str] = &[
     "vehicle_loads",
     "vehicle_post",
     "raycast_batch",
+    "wheel_soil",
+    "wheel_soil_press",
 ];
 
 /// Slang source that defines `entry`.

@@ -108,6 +108,10 @@ pub struct StepInputs {
     /// (`engine_schema::SHAPE_EVENT_FLAGS`): plan the `contact_events` pass.
     /// Off, the step graph is unchanged.
     pub contact_events: bool,
+    /// Some heightfield carries a soil (`engine_schema::soil`, vehicle ruts):
+    /// plan `wheel_soil` and `wheel_soil_press` after the vehicle passes.
+    /// Off, the step graph is unchanged.
+    pub soil: bool,
 }
 
 /// Largest particle colour `soft_primal_fused` (one 256-lane workgroup) takes;
@@ -648,6 +652,16 @@ pub fn encode_step(
         // and wheels are severed by the next step's vehicle_input.
         e.d("vehicle_loads", u64::from(i.vehicle_count));
         e.d("vehicle_post", u64::from(i.vehicle_count));
+        if i.soil {
+            // Wheels on soil sink to their load's depth: their patches are
+            // pressed into the heightfield for the next step's queries, and
+            // their compaction resistance waits for its vehicle_prepare.
+            e.d("wheel_soil", u64::from(i.wheel_count.max(1)));
+            e.d(
+                "wheel_soil_press",
+                u64::from(engine_schema::vehicle::SOIL_LANES),
+            );
+        }
     }
     if soft {
         // BDF2 velocities and history (a no-op under backward Euler).
@@ -717,6 +731,8 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "vehicle_iterate",
     "vehicle_loads_persistent",
     "vehicle_post",
+    "wheel_soil",
+    "wheel_soil_press",
     "build_aabbs",
     "joint_hash_clear",
     "joint_hash_insert",
@@ -814,6 +830,8 @@ pub const VEHICLE_ENTRIES: &[&str] = &[
     "vehicle_loads",
     "vehicle_post",
     "raycast_batch",
+    "wheel_soil",
+    "wheel_soil_press",
 ];
 
 pub fn kernel_source(entry: &str) -> &'static str {
@@ -1155,6 +1173,7 @@ mod tests {
             soft: SoftCounts::default(),
             command_count: 0,
             contact_events: false,
+            soil: false,
         }
     }
 
@@ -1436,6 +1455,54 @@ mod tests {
         assert!(at("ccd_pick") < np);
         let emit = ccd.iter().position(|n| n.starts_with("ccd_emit")).unwrap();
         assert!(np < emit && emit < at("predict_bodies"));
+    }
+
+    #[test]
+    fn soil_passes_follow_the_vehicle_passes_only_with_soil() {
+        for m in [fast(), StepModes::default()] {
+            for whole in [false, true] {
+                let mut i = inputs(10, 0);
+                i.has_height_field = true;
+                i.vehicle_count = 2;
+                i.wheel_count = 8;
+                let plain = encode_step(&m, &i, whole, true);
+                i.soil = true;
+                let with = encode_step(&m, &i, whole, true);
+                let soil = |c: &Cmd| {
+                    matches!(
+                        c,
+                        Cmd::Dispatch {
+                            kernel: "wheel_soil" | "wheel_soil_press",
+                            ..
+                        }
+                    )
+                };
+                // Off: unchanged. On: the two passes inserted, nothing else moves.
+                assert!(!plain.iter().any(soil));
+                let stripped: Vec<Cmd> = with.iter().copied().filter(|c| !soil(c)).collect();
+                assert_eq!(stripped, plain);
+                let at = |k: &str| {
+                    with.iter()
+                        .position(|c| matches!(c, Cmd::Dispatch { kernel, .. } if *kernel == k))
+                        .unwrap_or_else(|| panic!("{k} missing"))
+                };
+                assert!(at("vehicle_post") < at("wheel_soil"));
+                assert_eq!(at("wheel_soil") + 1, at("wheel_soil_press"));
+                assert!(at("wheel_soil_press") < at("write_sleep_args"));
+                assert!(with.contains(&Cmd::Dispatch {
+                    kernel: "wheel_soil_press",
+                    threads: u64::from(engine_schema::vehicle::SOIL_LANES),
+                    pass: 0,
+                }));
+                for k in ["wheel_soil", "wheel_soil_press"] {
+                    assert!(PERSISTENT_ENTRIES.contains(&resolve_entry(k, true)));
+                    assert_eq!(kernel_source(k), "vehicle_step.slang");
+                }
+                // No vehicles: no wheels to sink.
+                i.vehicle_count = 0;
+                assert!(!encode_step(&m, &i, whole, true).iter().any(soil));
+            }
+        }
     }
 
     #[test]
