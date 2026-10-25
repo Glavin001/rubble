@@ -1492,13 +1492,23 @@ void mpmBsplineSplit(float2 u, uint quanta, uint seed, out int2 s0, out uint par
 // `quanta` baked onto sample s: a window sample's column, or, outside the
 // window (material that flowed past it inside the region's box), the field's
 // deposit accumulator, as a landed parcel. Off the field's footprint, escaped.
-void mpmBakeOnto(int2 s, uint quanta, MpmParams p, HeightFieldRef hf)
+void mpmBakeOnto(int2 s, uint quanta, float yl, MpmParams p, HeightFieldRef hf)
 {
     if (quanta == 0u) return;
     if (s.x < 0 || s.y < 0 || s.x >= int(hf.nx) || s.y >= int(hf.nz))
     {
         AADD2(gMpmCounters[MPM_C_ESCAPED], quanta);
         return;
+    }
+    // Material below the unactivated ground beside the window (at local height
+    // yl) is the region's own column pressed into that ground, which yields as
+    // the absorbing walls do but stays put as a heightfield: it bakes into the
+    // nearest window sample (the kernel reflects at the wall), never onto the
+    // ground's top. Only what lies above that ground spills onto it.
+    int2 wlo = int2(p.window.xy), whi = int2(p.window.xy + p.window.zw) - 1;
+    if (any(s < wlo) || any(s > whi))
+    {
+        if (yl < hfHeight(hf, uint(s.x), uint(s.y))) s = clamp(s, wlo, whi);
     }
     int ti = s.x - int(p.window.x), tj = s.y - int(p.window.y);
     if (ti >= 0 && tj >= 0 && ti < int(p.window.z) && tj < int(p.window.w))
@@ -1557,12 +1567,12 @@ bool mpmBakeColumn(inout float3 x, MpmParams p, float spacing)
 
 // `quanta` of material the MPM moved, at sample coordinates u: the B-spline
 // split onto its nine samples (mpmBakeOnto).
-void mpmBakeMoved(float2 u, uint quanta, uint seed, MpmParams p, HeightFieldRef hf)
+void mpmBakeMoved(float2 u, uint quanta, uint seed, float yl, MpmParams p, HeightFieldRef hf)
 {
     int2 s0;
     uint parts[9];
     mpmBsplineSplit(u, quanta, seed, s0, parts);
-    for (uint k = 0u; k < 9u; k++) mpmBakeOnto(s0 + int2(int(k % 3u), int(k / 3u)), parts[k], p, hf);
+    for (uint k = 0u; k < 9u; k++) mpmBakeOnto(s0 + int2(int(k % 3u), int(k / 3u)), parts[k], yl, p, hf);
 }
 
 // Per particle: its quanta split between the heightfield it came from and the
@@ -1588,7 +1598,7 @@ void mpm_bake_bin(uint3 tid : SV_DispatchThreadID)
     if (pushed)
     {
         mpmTentSplit((xl.xz - float2(hf.x0, hf.z0)) / float2(hf.dx, hf.dz), quanta, i, s0, parts);
-        for (uint c = 0u; c < 4u; c++) mpmBakeOnto(mpmTentSample(s0, c), parts[c], p, hf);
+        for (uint c = 0u; c < 4u; c++) mpmBakeOnto(mpmTentSample(s0, c), parts[c], xl.y, p, hf);
         return;
     }
     float2 uHome;
@@ -1596,9 +1606,9 @@ void mpm_bake_bin(uint3 tid : SV_DispatchThreadID)
     // The heightfield's share (all of it at rest: floor(q + r) = q).
     uint home = min(uint(floor(float(quanta) * w + mpmDither(mpmPcgHash(~i)))), quanta);
     mpmTentSplit(uHome, home, i, s0, parts);
-    for (uint c = 0u; c < 4u; c++) mpmBakeOnto(mpmTentSample(s0, c), parts[c], p, hf);
+    for (uint c = 0u; c < 4u; c++) mpmBakeOnto(mpmTentSample(s0, c), parts[c], xl.y, p, hf);
     if (home == quanta) return;
-    mpmBakeMoved((xl.xz - float2(hf.x0, hf.z0)) / float2(hf.dx, hf.dz), quanta - home, i, p, hf);
+    mpmBakeMoved((xl.xz - float2(hf.x0, hf.z0)) / float2(hf.dx, hf.dz), quanta - home, i, xl.y, p, hf);
 }
 
 [shader("compute")]

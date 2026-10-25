@@ -63,7 +63,7 @@
       <label class="ctl"><span>Depth of burial</span><input id="depth" type="range" min="0.5" max="40" step="0.5" /><output id="depthOut"></output></label>
       <div class="muted small">π-scaling covers scaled depths of burial 1–2 (depth ÷ the charge's cube-root size); outside that the source is refused.</div>
     </div>
-    <label class="ctl"><span>Region margin</span><select id="margin"><option value="1">1.0 R (~0.9 M particles)</option><option value="0.6">0.6 R (faster; the rim forms at the box edge)</option><option value="2">2.0 R (engine default; ~3.5 M particles, too many here)</option></select><span></span></label>
+    <label class="ctl"><span>Region margin</span><select id="margin"><option value="1.5">1.5 R at 12 cells/R (the rim inside the box)</option><option value="1">1.0 R at 16 cells/R (the rim at the box edge)</option><option value="0.6">0.6 R (faster; the rim forms at the box edge)</option></select><span></span></label>
     <label class="ctl"><span>Bake</span><select id="bakeMode"><option value="settle">when settled (&lt; 5 cm/s for 0.5 s)</option><option value="time" id="bakeAtOpt">at t = 12 s, nothing in flight</option></select><span></span></label>
     <div class="muted small">The region's bed and walls are absorbing ground (Lysmer–Kuhlemeyer dashpots and springs on the geostatic stress), so the elastic waves of the strike leave the box as they would into the ground beyond, and the sand comes to rest. A timed bake is World::terrain_close at that time, once nothing is in flight; it freezes whatever motion is left.</div>
     <div class="row muted small" id="apply" hidden><button id="applyBtn">Apply (reloads)</button> settings changed</div>
@@ -110,7 +110,10 @@
     const S = {
       mode: qs.get('mode') === 'explosion' ? 'explosion' : 'impact',
       radius: num('radius', 8), speed: num('speed', 20), density: num('density', 3000),
-      charge: num('charge', 6), depth: num('depth', 8), margin: num('margin', 1),
+      charge: num('charge', 6), depth: num('depth', 8), margin: num('margin', 1.5),
+      // Cells across the transient radius: 12 at the default margin keeps the
+      // particles (and frame time) of 16 at 1.0 R; ?cpr= overrides.
+      cpr: num('cpr', num('margin', 1.5) >= 1.5 ? 12 : 16),
       bake: qs.get('bake') === 'time' ? 'time' : 'settle', bakeAt: num('bakeAt', 12),
     };
     const $ = (id) => document.getElementById(id);
@@ -174,7 +177,7 @@
     const G = 9.81;
     const SETTINGS = {
       config: { max_particles: 3 << 19, max_blocks: 8192, max_parcels: 1 << 18, max_substeps: 1024,
-        max_columns: 1 << 17, max_field_samples: 1 << 19, max_coupled: 64 },
+        max_columns: 1 << 17, max_field_samples: 1 << 19, max_coupled: 64, cells_per_radius: S.cpr },
       region_margin: S.margin,
       // The region's rest tolerance (set from the crater below): it bakes once
       // its fastest particle stays under it for half a second with nothing in

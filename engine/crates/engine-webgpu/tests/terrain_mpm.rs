@@ -433,10 +433,24 @@ fn bake_after_rigid_shift(shift: (f32, f32)) -> f64 {
         p.xm[0] += shift.0 * dx;
         p.xm[2] += shift.1 * dz;
     }
+    // The activation window (the samples activation lowered), as index bounds.
+    let win = |k: usize| lowered[k] != before[k];
+    let (mut ilo, mut ihi, mut jlo, mut jhi) = (i64::MAX, i64::MIN, i64::MAX, i64::MIN);
+    for j in 0..nz {
+        for i in 0..nx {
+            if win((j * nx + i) as usize) {
+                (ilo, ihi) = (ilo.min(i64::from(i)), ihi.max(i64::from(i)));
+                (jlo, jhi) = (jlo.min(i64::from(j)), jhi.max(i64::from(j)));
+            }
+        }
+    }
     // The splat's definition, in f64: volume per sample, and how many
-    // particles reach each sample.
+    // particles reach each sample. A share landing beside the window from
+    // below the unactivated ground there folds back to the nearest window
+    // sample (the region's own column pressed into that ground).
     let mut want = vec![0.0f64; (nx * nz) as usize];
     let mut reach = vec![0u32; (nx * nz) as usize];
+    let mut folded = 0.0f64;
     for p in &ps {
         let quanta = f64::from(p.f[1][3].to_bits());
         let axis = |x: f32, home: f32, x0: f32, d: f32| {
@@ -477,7 +491,12 @@ fn bake_after_rigid_shift(shift: (f32, f32)) -> f64 {
                         && i < i64::from(nx)
                         && j < i64::from(nz)
                     {
-                        let k = (j * i64::from(nx) + i) as usize;
+                        let mut k = (j * i64::from(nx) + i) as usize;
+                        if !win(k) && p.xm[1] - origin.y < before[k] {
+                            let (ci, cj) = (i.clamp(ilo, ihi), j.clamp(jlo, jhi));
+                            k = (cj * i64::from(nx) + ci) as usize;
+                            folded += share * wa * wb * quanta;
+                        }
                         want[k] += share * wa * wb * quanta;
                         if seen.insert(k) {
                             reach[k] += 1;
@@ -545,11 +564,15 @@ fn bake_after_rigid_shift(shift: (f32, f32)) -> f64 {
         );
         // And the splat's moves with the material: to within the lattice's
         // own asymmetry (a column's `quanta mod n` extra quanta go to its
-        // first particles, which keeps part of their offsets in the centroid).
-        assert!(
-            (got - f64::from(want)).abs() < 2e-3,
-            "centroid moved {got} samples, the material {want}"
-        );
+        // first particles, which keeps part of their offsets in the centroid),
+        // unless some was folded back at the window's edge, where the shifted
+        // columns press into the solid ground beside it.
+        if folded == 0.0 {
+            assert!(
+                (got - f64::from(want)).abs() < 2e-3,
+                "centroid moved {got} samples, the material {want}"
+            );
+        }
     }
     assert!(s.terrain_particles().is_empty());
     worst
@@ -619,9 +642,12 @@ fn opened_layer_error(fade: f32) -> (f64, f64, f64) {
         |i: u32, j: u32| f64::from(after[(j * n + i) as usize] - lowered[(j * n + i) as usize]);
     // The layer's thickness: what activation took from a sample in the window.
     let thick = -f64::from(lowered[(c * n + c) as usize]);
+    // Away from the hole and from the window's edge (its outermost samples
+    // are at 1.375 m): the map pushes the edge columns into the solid ground
+    // beside the window, which the bake folds back onto them.
     let within = |i: u32, j: u32| {
         let r = field.vertex(i, j).length();
-        r >= r0 + 2.0 * dx && r <= 1.4
+        r >= r0 + 2.0 * dx && r <= 1.2
     };
     let (mut sum2, mut max, mut count) = (0.0f64, 0.0f64, 0u32);
     let (mut ridge, mut lines) = (0.0f64, 0u32);
