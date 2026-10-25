@@ -185,6 +185,10 @@ are taken from them.
   - The bed is a separating Coulomb contact on grid velocity against the heightfield
     under the region: the normal approach is removed and the tangential part is
     clamped by the friction cone (the nodal form of Newton and Genesis).
+  - Or, with `RegionBoundary::Absorbing`, the bed and side walls of an
+    activated region are the absorbing ground: dashpots and springs on the
+    geostatic traction ("Absorbing ground" below). The rigid bed stays
+    available.
   - Material reaching the region's box raises a region-overflow flag (an error that
     asks for a larger margin) until ejection to parcels exists (T4).
 - **G2P.** Velocity and C come from the grid, then x += dt·v and F ← (I + dt·C)F. The
@@ -528,11 +532,12 @@ change):
 - the same excess as the crater validation above.
 
 **Open points.**
-- **The region does not settle.** In a margin-0.6 run, 20 s after the strike,
-  half the particles still move faster than 1 m/s, deep ones at the far side of the box included,
-  and `max_speed` decays only from 5.7 m/s (15 s) to 2.4 m/s (35 s). The most
-  likely cause is elastic waves trapped by the box's walls and bed: real ground
-  radiates them away. This is not verified.
+- **The region does not settle** (with the rigid ground). In a margin-0.6 run,
+  20 s after the strike, half the particles still move faster than 1 m/s, deep
+  ones at the far side of the box included, and `max_speed` decays only from
+  5.7 m/s (15 s) to 2.4 m/s (35 s). Diagnosed and fixed by the absorbing ground
+  (below): elastic waves trapped between the rigid walls, most of them set off
+  by the activation itself.
   - So the rest tolerance (5 cm/s) is not reached soon. The demo bakes at a set
     time (`World::terrain_close` semantics) once nothing is in flight, and
     says so in its UI.
@@ -747,6 +752,149 @@ before it):
 - `engine-world` `fingerprint_world_impact_to_bake`: reports
   `59df3a636ac25733`, heights `df41faaa6898177b`, box `136fde101445dae3`.
 
+## Absorbing ground (2026-10-25)
+
+**Why the region rang.** Measured natively on the demo's event at 8 cells per
+radius (`tests/terrain_absorb.rs`):
+- With no source at all, the activated region oscillates at up to 10–15 m/s,
+  and after 10 s half of it is still faster than 1 m/s.
+- Activation makes particles with F = I: unstressed ground, which then sags
+  under its own weight. A column H = 288 m deep sags ρgH²/(2(λ + 2μ)) ≈ 10 m
+  at its surface, at up to g·H/c_p ≈ 14 m/s. The rigid bed and walls reflect
+  that wave, and the strike's waves, back into the box forever.
+- Starting geostatic but keeping the rigid ground leaves 3 m/s: the rigid bed
+  holds only the node layer below the floor, while the stress puts half the
+  floor's load on the layer above it.
+
+**The model** (`RegionBoundary::Absorbing`, `InitialStress::Geostatic`;
+`mpmAbsorbNode`, `mpm_geostatic`, `mpm_absorb_init`). The ground around an
+activated region is an elastic half-space of the region's own material. Its
+faces are the floor (the bed plane) and the window's four sides, up to the
+unactivated ground's surface. On each face the ground pushes with
+t = p0·n − (k_N·u_n + ρ·c_p·v_n)·n − (k_T·u_t + ρ·c_s·v_t):
+- **Dashpots** ρ·c_p and ρ·c_s: Lysmer & Kuhlemeyer (1969), exact for plane
+  waves at normal incidence.
+- **Springs** k_N = (4/3)·μ/R and k_T = (2/3)·μ/R, R the distance to the
+  region's centre: the 3D viscous-spring boundary (Liu et al. 2006, after
+  Deeks & Randolph 1994). They are the static stiffness of the ground beyond,
+  so a change of load (ejecta leaving, a rim deposited) gives a bounded
+  displacement instead of an endless creep at Δσ/(ρ·c_p).
+- **Geostatic traction** p0: ρ·g·d on the floor and K0·ρ·g·d on the sides,
+  K0 = λ/(λ + 2μ). The material starts in that state: the first step after
+  activation (which has gravity) sets each particle's F to the uniaxial strain
+  of its depth below its column's surface. It is the K0 initial-stress
+  procedure of geotechnical dynamic analysis.
+- **The ground's strength.** A face whose normal traction would pull lets the
+  node go: sand does not stick to the ground. A face whose shear would pass
+  the bed friction, μ·t_n, slides at μ·t_n, as the rigid bed does. The
+  dashpots model small-strain waves; without the limit, plastic flow along a
+  face meets a drag of ρ·c_s·v_t (176 kPa at 1 m/s), far above the ground's
+  strength at shallow depth. Along an axis no face holds, the ground stays
+  where it was.
+  - Found on the dropped ball (engine-world `terrain`): without the limit, the
+    sand flowing along its shallow region's bed stopped the ball at 0.089 m.
+- **Discretisation.** Node i takes ∫ w_i·t dS over the faces (w_i its
+  B-spline), lumped: its share of a face is ∫ w_i dS, from the B-spline's
+  closed-form integral, and its dashpot and spring act on its own velocity and
+  displacement. That is the force the particles' geostatic stress transmits
+  through the face, so the activated state is in equilibrium.
+  - A floor half a cell above a node layer splits its load between two layers;
+    walls off the node lattice spread over three.
+  - In a 1D check, the dashpot on the boundary node alone sent back 2.6% of a
+    pulse's energy and the consistent shares 0.13%.
+- **Each node is solved implicitly:** v = (m·v* + dt·(f0 − K·u))/(m + dt·C + dt²·K)
+  per axis, stable for any dt. It keeps its displacement in a record of its own:
+  the floor's three node layers and each side's three, after the coupling slots
+  in binding 49 (`TerrainConfig::max_boundary_nodes`, an error past it).
+  `mpm_grid` still binds 9 storage buffers.
+- **Unchanged:** the region's top and the free surface stay free. Contact with
+  rigid bodies, host-loaded regions (no window: the field's surface is a contact)
+  and the rigid ground's code path are as before.
+- **Validation.** The absorbing ground requires the geostatic start and a
+  material with stiffness; either missing is an error.
+
+**Tests** (`tests/terrain_absorb.rs`):
+- **At rest.** One second under gravity, then the bake. The splat bake moves
+  whole quanta by the particles' displacement, so it is checked by its exact
+  volume and a bound on what that displacement moves (the elastic layer: one
+  quantum, 1.25e-4 m; the sand: 0.9 mm). Activate-then-bake with no step is
+  still the identity (`terrain_mpm`).
+
+  | Material | Ground | Top speed | After 1 s | Largest move |
+  |---|---|---|---|---|
+  | elastic, flat | absorbing | 4.0e-4 m/s | 2.2e-5 m/s | 8.6e-6 m |
+  | elastic, flat | rigid, unstressed | 7.0e-2 m/s | 2.7e-3 m/s | 1.4e-4 m |
+  | sand, mound | absorbing | 1.6e-2 m/s | 5.4e-4 m/s | 7.1e-4 m |
+  | sand, mound | rigid, unstressed | 9.2e-2 m/s | 2.0e-3 m/s | 1.8e-3 m |
+
+  The elastic layer (a rock of sand's stiffness that does not crack here) shows
+  the ground holds the geostatic state. What sand keeps is its own slow plastic
+  creep near the free surface, where confinement vanishes (log Jp grows there),
+  on either ground.
+- **A plane P-wave at the bed.** A layer 1.4 m deep and 5 m wide, so the side
+  walls' effect (not at normal incidence) has not reached the axis. The energy
+  left 8 cells after the pulse's tail reached the bed, over the energy arriving:
+
+  | Pulse | Rigid | Absorbing |
+  |---|---|---|
+  | one sine period, 8 cells, 2 cm/s, elastic | | 1.2% |
+  | compressive cos², 6 cells, 1 m/s, elastic | 80% | 2.3% |
+  | the same in sand (330 kPa on 22 kPa) | 86% | 1.3% |
+
+  - The rigid bed's 14–20% is the transfers' dissipation on the way back.
+  - The sine wavelet stays under the 6.7 cm/s at which its tension would pull
+    on the overburden. Neither ground pulls, so a stronger tension phase comes
+    back from both.
+  - The compressive pulse displaces the layer by ∫v dt. The springs push it
+    back up, which a plane wave in a half-space would not do. In a shallower
+    layer, with the springs taken out as a measurement, the sand pulse left
+    0.6% against 2.4% with them; the sine wavelet's share did not change.
+- **The demo's event settles** (the bounded source). The 8 m stony impactor
+  at 20 km/s; the share of particles faster than 1 m/s (and than 5 cm/s):
+
+  | Region | After | Rigid, unstressed | Absorbing |
+  |---|---|---|---|
+  | 8 cells/R, margin 0.6 (97 k particles) | 10 s | 80% (100%) | 0 (36%), top 0.9 m/s |
+  | the demo's: 16 cells/R, margin 1 (0.90 M) | 20 s | 53% (99%) | 0 (0.5%), top 0.25 m/s |
+
+  - The first is a test; the second is ignored (a minute).
+  - Before the bounded source, at the demo's resolution, nothing was above
+    1 m/s from 8 s on. What still moved at 20 s was the crater floor's loose
+    material settling (0.2 m/s) and rim deposits sliding off the box's edge,
+    so the 5 cm/s rest tolerance is still some seconds away.
+- **The crater** (`terrain_crater`, `CRATER_GROUND=absorbing`, margin 2,
+  16 cells/R, the bounded source and the splat bake; nothing tuned to it):
+  apparent radius 0.184 m (1.25 R), centre 0.061 m deep, deepest 0.079 m, rim
+  2.9 cm high at 0.239 m, cavity 3.10× π-scaling's volume (rigid: 3.08×,
+  1.25 R, 3.2 cm). The bed and walls hardly change the crater; the volume
+  excess is the source's, as diagnosed above. 782 s wall.
+
+**Open points.**
+- **Not the default.** `TerrainConfig::default()` keeps the rigid ground and
+  the unstressed start, so existing results and fingerprints are unchanged.
+  With the absorbing ground on, every suite passes except engine-world's
+  dropped ball: it penetrates 0.094 m, 0.486× Uehara's 0.194 m, just under
+  the test's 0.5–2× band (rigid ground: 0.115 m, 0.59×). Its region is shallow,
+  so the ball's flow reaches the bed and walls; most likely the rigid box
+  sends back energy the absorbing ground lets go (not verified). At
+  6 cells per body the penetration is under-resolved either way. Making it
+  the default needs that settled (`TERRAIN_GROUND=absorbing` runs it).
+- **The walls' top corner.** Within 1.5 cells of a side's top edge, the
+  unactivated ground's surface is the soft wall face rather than a rigid
+  contact. Rim material deposited there sinks into the corner at the spring's
+  pace: 0.35 m/s at margin 0.6, where the rim forms at the box's edge. The
+  rigid ground does no better there: under unactivated ground its normal faces
+  the window, so it holds nothing up.
+- **The springs' R** is the distance to the region's centre, the source of an
+  impact region. For a load right at a face, a rim deposited on a side's top,
+  that is softer than the ground's local stiffness.
+- **Oblique waves.** Lysmer–Kuhlemeyer is exact only at normal incidence, and
+  reflects a few per cent at grazing incidence: the side walls take a plane
+  wave travelling along them.
+- **Browser.** The browser runs the same plan and kernels (`TerrainStep`'s
+  `config.boundary`, `config.initial_stress`); `impact.html` has not been
+  rerun in Chrome with the absorbing ground.
+
 ## T5 materials (2026-10-24)
 
 Cohesive soil and damage-softening rock, beside dry sand. Each has its own kernel
@@ -951,5 +1099,11 @@ Tests come from physics and published laws, never from another program's outputs
 - Katsuragi, Durian (2007). Unified force law for granular impact cratering. Nature
   Physics 3.
 - Terzaghi (1943). Theoretical Soil Mechanics. Wiley.
+- Lysmer, Kuhlemeyer (1969). Finite dynamic model for infinite media. J. Eng.
+  Mech. Div. ASCE 95(EM4).
+- Deeks, Randolph (1994). Axisymmetric time-domain transmitting boundaries.
+  J. Eng. Mech. 120(1).
+- Liu, Du, Du, Wang, Wu (2006). 3D viscous-spring artificial boundary in time
+  domain. Earthquake Engineering and Engineering Vibration 5(1).
 - Bažant, Oh (1983). Crack band theory for fracture of concrete. Matériaux et
   Constructions 16.

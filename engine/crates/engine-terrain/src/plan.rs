@@ -14,7 +14,7 @@
 //! [`RegionClock`] is the open region's frame schedule: each frame's substeps
 //! from a speed bound the GPU checks, and when the region has settled.
 
-use crate::config::{TerrainConfig, TerrainError};
+use crate::config::{InitialStress, RegionBoundary, TerrainConfig, TerrainError};
 use crate::layout::*;
 use crate::material::{RockMaterial, TerrainMaterial, YieldSurface};
 use crate::region::{RegionPlan, BLOCK_CELLS};
@@ -51,6 +51,8 @@ pub const KERNELS: &[&str] = &[
     "mpm_deposit_raise",
     "mpm_deposit_header",
     "mpm_source",
+    "mpm_absorb_init",
+    "mpm_geostatic",
 ];
 
 /// Byte offsets of the indirect workgroup counts in [`MPM_ARGS_BINDING`].
@@ -174,6 +176,8 @@ pub struct TerrainPlan {
     rock: Option<RockMaterial>,
     /// Heightfield records the activation window touches (bake rewrites them).
     window_records: u32,
+    /// A geostatic activation's particles wait for the next step's gravity.
+    geostatic_pending: bool,
 }
 
 impl TerrainPlan {
@@ -209,6 +213,7 @@ impl TerrainPlan {
             wave_speed: 0.0,
             rock: None,
             window_records: 0,
+            geostatic_pending: false,
         })
     }
 
@@ -240,7 +245,10 @@ impl TerrainPlan {
                 MPM_COUPLE_BINDING,
                 (4 + blocks * u64::from(1 + MPM_CELL_COLLIDERS)) * 4,
             ),
-            (MPM_COUPLED_BINDING, u64::from(config.max_coupled) * 64),
+            (
+                MPM_COUPLED_BINDING,
+                u64::from(config.max_coupled) * 64 + u64::from(config.max_boundary_nodes) * 16,
+            ),
             (MPM_PARCELS_BINDING, u64::from(config.max_parcels) * 32),
             (MPM_DEPOSIT_BINDING, u64::from(config.max_field_samples) * 4),
         ]
@@ -257,6 +265,15 @@ impl TerrainPlan {
     /// Elastic (P-) wave speed of the loaded material (m/s; 0 without stress).
     pub fn wave_speed(&self) -> f32 {
         self.wave_speed
+    }
+
+    /// Grid nodes an absorbing boundary keeps a record for in a region of
+    /// `cells` (each axis): three node layers along the floor and along each of
+    /// the four sides (`mpmAbsorbSlot`), against
+    /// [`TerrainConfig::max_boundary_nodes`].
+    pub fn boundary_nodes(cells: [u32; 3]) -> u64 {
+        let [x, y, z] = cells.map(|c| u64::from(c) + 1);
+        3 * x * z + 6 * y * (x + z)
     }
 
     /// The region's bed heightfield collider, if it has one.
@@ -312,9 +329,12 @@ impl TerrainPlan {
             u64::from(self.config.max_particles),
         )?;
         self.set_region(plan, bed, bed_friction)?;
-        // No activation window: the bed is the field's surface everywhere.
+        // No activation window: the bed is the field's surface everywhere, a
+        // contact (the absorbing ground is the window's floor and sides).
         self.params.window = [0; 4];
+        self.params.boundary = [0; 4];
         self.window_records = 0;
+        self.geostatic_pending = false;
         let mut ops = TerrainOps::default();
         ops.counter(MPM_C_PARTICLES, n);
         Self::reset_ejecta(&mut ops);
@@ -382,6 +402,28 @@ impl TerrainPlan {
         let first = (j0 * nx + i0) / 4;
         let last = ((j0 + nj - 1) * nx + i0 + ni - 1) / 4;
         self.window_records = last - first + 1;
+        let geostatic = cfg.initial_stress == InitialStress::Geostatic;
+        let absorbing = cfg.boundary == RegionBoundary::Absorbing;
+        let absorb_records = if absorbing {
+            let cells = [
+                self.params.dims[0],
+                self.params.dims[1],
+                self.params.dims[2],
+            ];
+            let n = Self::boundary_nodes(cells);
+            TerrainConfig::check("max_boundary_nodes", n, u64::from(cfg.max_boundary_nodes))?;
+            n as u32
+        } else {
+            0
+        };
+        self.params.boundary = [
+            if absorbing { MPM_BOUNDARY_ABSORBING } else { 0 }
+                | if geostatic { MPM_BOUNDARY_GEOSTATIC } else { 0 },
+            4 * cfg.max_coupled,
+            absorb_records,
+            0,
+        ];
+        self.geostatic_pending = geostatic;
         let samples = u64::from(ni) * u64::from(nj);
         let records = u64::from(self.window_records);
         let mut ops = TerrainOps::default();
@@ -392,6 +434,10 @@ impl TerrainPlan {
         ops.disp("mpm_activate_scan", 64);
         ops.disp("mpm_activate_emit", samples);
         ops.disp("mpm_activate_lower", records);
+        let absorb = u64::from(self.params.boundary[2]);
+        if absorb > 0 {
+            ops.disp("mpm_absorb_init", absorb);
+        }
         Ok(ops)
     }
 
@@ -470,6 +516,10 @@ impl TerrainPlan {
         if let Some(rock) = self.rock {
             rock.softening_stress(self.params.origin[3])?;
         }
+        anyhow::ensure!(
+            self.params.boundary[0] & MPM_BOUNDARY_ABSORBING == 0 || self.wave_speed > 0.0,
+            "the absorbing boundary needs a material with stiffness (terrain_set_material)"
+        );
         self.params.step[0] = dt;
         self.params.step[1] = gravity;
         // Nodes lighter than this carry no velocity (f32 momentum over mass).
@@ -484,6 +534,12 @@ impl TerrainPlan {
             self.wave_speed
         );
         ops.params(&self.params);
+        // A geostatic activation's particles take their stress before the
+        // first substep.
+        if std::mem::take(&mut self.geostatic_pending) {
+            ops.disp("mpm_write_args", 1);
+            ops.particles("mpm_geostatic");
+        }
         Ok(())
     }
 
@@ -892,5 +948,131 @@ mod tests {
             .substeps(&cfg, 400, 1.0 / 60.0, -9.81, 1.0, 200.0, 0.0)
             .unwrap();
         assert!(b.0 >= a.0);
+    }
+
+    fn kernels(ops: &TerrainOps) -> Vec<&'static str> {
+        ops.cmds
+            .iter()
+            .map(|c| match *c {
+                TerrainCmd::Dispatch { kernel, .. } | TerrainCmd::Indirect { kernel, .. } => kernel,
+            })
+            .collect()
+    }
+
+    fn absorbing() -> TerrainConfig {
+        TerrainConfig {
+            boundary: RegionBoundary::Absorbing,
+            initial_stress: InitialStress::Geostatic,
+            ..TerrainConfig::default()
+        }
+    }
+
+    #[test]
+    fn an_absorbing_region_sets_up_its_node_records_and_starts_geostatic_once() {
+        let cfg = absorbing();
+        let mut p = TerrainPlan::new(&cfg).unwrap();
+        p.set_material(Some(&crate::SandMaterial::default()))
+            .unwrap();
+        let region = RegionPlan::spanning(
+            &cfg,
+            glam::Vec3::splat(-1.0),
+            glam::Vec3::splat(1.0),
+            0.1,
+            0,
+            0,
+        )
+        .unwrap();
+        let ops = p
+            .activate(&region, 0, grid(), glam::Vec3::ZERO, 1600.0, 0.6)
+            .unwrap();
+        let cells = [p.params().dims[0], p.params().dims[1], p.params().dims[2]];
+        let records = TerrainPlan::boundary_nodes(cells);
+        assert_eq!(
+            ops.cmds.last(),
+            Some(&TerrainCmd::Dispatch {
+                kernel: "mpm_absorb_init",
+                threads: records
+            })
+        );
+        let b = p.params().boundary;
+        assert_eq!(b[0], MPM_BOUNDARY_ABSORBING | MPM_BOUNDARY_GEOSTATIC);
+        // The records follow the coupling slots in their binding, which holds them all.
+        assert_eq!(b[1], 4 * cfg.max_coupled);
+        assert_eq!(u64::from(b[2]), records);
+        let coupled = p
+            .buffer_sizes()
+            .iter()
+            .find(|(k, _)| *k == MPM_COUPLED_BINDING)
+            .unwrap()
+            .1;
+        assert!(coupled >= 16 * (u64::from(b[1]) + records));
+        // The first step sets the geostatic stress, before its substeps; later ones do not.
+        let first = kernels(&p.step(2, 1.0e-4, -9.81).unwrap());
+        assert_eq!(first.iter().filter(|k| **k == "mpm_geostatic").count(), 1);
+        assert!(
+            first.iter().position(|k| *k == "mpm_geostatic")
+                < first.iter().position(|k| *k == "mpm_p2g")
+        );
+        let next = kernels(&p.coupled(2, 1.0e-4, -9.81, 3).unwrap());
+        assert!(!next.contains(&"mpm_geostatic"));
+        // A rigid, unstressed region does neither.
+        let mut q = TerrainPlan::new(&TerrainConfig {
+            boundary: RegionBoundary::Rigid,
+            initial_stress: InitialStress::Unstressed,
+            ..TerrainConfig::default()
+        })
+        .unwrap();
+        q.set_material(Some(&crate::SandMaterial::default()))
+            .unwrap();
+        let ops = q
+            .activate(&region, 0, grid(), glam::Vec3::ZERO, 1600.0, 0.6)
+            .unwrap();
+        assert!(!kernels(&ops).contains(&"mpm_absorb_init"));
+        let b = q.params().boundary;
+        assert_eq!((b[0], b[2]), (0, 0));
+        assert!(!kernels(&q.step(2, 1.0e-4, -9.81).unwrap()).contains(&"mpm_geostatic"));
+    }
+
+    #[test]
+    fn the_absorbing_ground_fails_by_name_past_its_limits_and_without_stiffness() {
+        let region = |cfg: &TerrainConfig| {
+            RegionPlan::spanning(
+                cfg,
+                glam::Vec3::splat(-1.0),
+                glam::Vec3::splat(1.0),
+                0.1,
+                0,
+                0,
+            )
+            .unwrap()
+        };
+        let cfg = TerrainConfig {
+            max_boundary_nodes: 100,
+            ..absorbing()
+        };
+        let mut p = TerrainPlan::new(&cfg).unwrap();
+        let err = p
+            .activate(&region(&cfg), 0, grid(), glam::Vec3::ZERO, 1600.0, 0.6)
+            .unwrap_err();
+        assert!(err.to_string().contains("max_boundary_nodes"), "{err}");
+        // Its static traction is the geostatic stress.
+        let bad = TerrainConfig {
+            initial_stress: InitialStress::Unstressed,
+            ..absorbing()
+        };
+        assert!(matches!(
+            bad.validate(),
+            Err(TerrainError::InvalidConfig(_))
+        ));
+        // A material with no stiffness has no wave speed for the dashpots.
+        let cfg = absorbing();
+        let mut p = TerrainPlan::new(&cfg).unwrap();
+        p.activate(&region(&cfg), 0, grid(), glam::Vec3::ZERO, 1600.0, 0.6)
+            .unwrap();
+        let err = p.step(1, 1.0e-4, -9.81).unwrap_err();
+        assert!(err.to_string().contains("stiffness"), "{err}");
+        // A host-loaded region has no window: its bed is the field's surface.
+        p.load(&region(&cfg), 10, Some(0), 0.5).unwrap();
+        assert_eq!(p.params().boundary, [0; 4]);
     }
 }

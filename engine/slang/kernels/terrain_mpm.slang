@@ -12,7 +12,8 @@
 //   mpm_cell_sort   each cell's range by particle id (the sums' fixed order)
 //   mpm_payload     per particle: mass, momentum and the affine term, in sorted order
 //   mpm_p2g         per grid node: gather from the particles whose stencil covers it
-//   mpm_grid        velocity, gravity, the heightfield bed
+//   mpm_grid        velocity, gravity, the heightfield bed (rigid, or the
+//                   absorbing ground: mpmAbsorbNode)
 //   mpm_g2p         per particle: velocity, C, position and F from the grid
 // Rigid coupling (T3, explicit and staggered): mpm_couple_clear and mpm_couple_bin
 // list, once per frame, the rigid colliders overlapping the region in its block
@@ -79,6 +80,9 @@ static const uint MPM_OVERFLOW_CELL = 128u;     // more colliders in one block c
 static const uint MPM_OVERFLOW_IMPULSES = 256u; // the rigid step's impulse records were full
 static const uint MPM_OVERFLOW_PARCELS = 512u;  // more ejecta than parcel slots
 static const uint MPM_OVERFLOW_FIELD = 1024u;   // the bed heightfield has more samples than deposit slots
+// MpmParams.boundary.x bits.
+static const uint MPM_BOUNDARY_ABSORBING = 1u; // bed and walls absorb (mpmAbsorbNode)
+static const uint MPM_BOUNDARY_GEOSTATIC = 2u; // the first step's mpm_geostatic sets F
 // MpmParticle.f2.w bits.
 static const uint MPM_PARTICLE_DEAD = 1u;       // left as a parcel: no longer simulated
 static const uint MPM_PARTICLE_HOME = 2u;       // activated: c1.w, c2.w hold where (the bake's reference)
@@ -113,6 +117,8 @@ struct MpmParams
                     // w = heightfield samples parcels may deposit on (uint bits)
     float4 source0; // Z-model source: surface point (world), Z
     float4 source1; // flow-centre depth, core radius, strength α, unused
+    uint4 boundary; // x = MPM_BOUNDARY_* bits, y = first absorbing-node record in
+                    // gMpmCoupled, z = records the region uses, w unused
 };
 
 // Per particle (128 B).
@@ -168,7 +174,10 @@ BIND(50) RWStructuredBuffer<float4> gMpmParcels;
 BIND(51) RWStructuredBuffer<AUint> gMpmDeposit;
 // Per coupling slot s: [4s] = (impulse on the body, collider bits), [4s + 1] =
 // (angular impulse about its centre, 0), summed over the frame's substeps;
-// [4s + 2], [4s + 3] = the body's proxy linear and angular velocity.
+// [4s + 2], [4s + 3] = the body's proxy linear and angular velocity. From
+// params.boundary.y on, per absorbing-boundary node record (mpmAbsorbSlot): the
+// node's displacement since activation, and the surface height of the column
+// above it at activation (the bed heightfield's local y).
 BIND(49) RWStructuredBuffer<float4> gMpmCoupled;
 
 groupshared uint gsMpmScan[256];
@@ -726,6 +735,308 @@ bool mpmBedNormal(HeightFieldRef hf, float3 xl, MpmParams p, out float3 nl)
     return hfSurface(hf, xl.x, xl.z, h, nl) && (xl.y - h) * nl.y <= 0.0;
 }
 
+// ---- absorbing boundary (RegionBoundary::Absorbing) ----------------------------
+//
+// The ground around an activated region is an elastic half-space of the
+// region's own material, not a rigid wall. Its faces are the floor (the bed
+// plane the window was lowered to) and the window's four sides up to the
+// unactivated ground's surface. On each face the ground pushes on the material
+// with the traction
+//   t = p0·n − (k_N·u_n + ρ·c_p·v_n)·n − (k_T·u_t + ρ·c_s·v_t),
+// n into the material, u and v the material's displacement since activation
+// and its velocity there:
+// - the dashpots are Lysmer & Kuhlemeyer's (1969), exact for plane waves at
+//   normal incidence;
+// - the springs are the viscous-spring boundary's (Liu et al. 2006),
+//   k_N = (4/3)·μ/R and k_T = (2/3)·μ/R with R the distance to the region's
+//   centre: the static stiffness of the ground beyond, so a change of load
+//   gives a bounded displacement instead of creep;
+// - p0 is the geostatic traction at activation (ρ·g·d on the floor, K0·ρ·g·d
+//   on the sides, K0 = λ/(λ + 2μ)), the stress the material starts with
+//   (InitialStress::Geostatic), so material at rest stays at rest.
+// The ground has the strength of granular ground: a face carries no tension
+// (one whose normal traction would pull lets the node go: sand separates from
+// the ground), and no more shear than the bed friction μ allows (one whose
+// tangential traction would pass μ·t_n slides at μ·t_n). The dashpots model
+// small-strain waves, not plastic flow along the face, which would otherwise
+// meet a viscous drag ρ·c_s·v_t far above any frictional strength.
+// It is discretised like any traction on the grid: node i takes ∫ w_i·t dS over
+// the faces (w_i its B-spline), lumped, so its share of a face is ∫ w_i dS and
+// its dashpot and spring act on its own velocity and displacement. That is the
+// force the particles' geostatic stress transmits through the face, so the
+// activated state is in equilibrium (a floor half a cell above a node layer
+// splits between two layers). Each node is solved implicitly (stable for any
+// dt) and keeps its displacement in a record of its own (mpmAbsorbSlot).
+
+// The region's absorbing faces in grid units (cells from the region's origin):
+// the window's low and high corners (lo.y is the floor), and the first node of
+// the three node layers each face reaches (a B-spline reaches 1.5 cells).
+struct MpmAbsorbGeom
+{
+    float3 lo;
+    float3 hi;
+    int3 band0; // floor (y), low-x and low-z sides
+    int3 band1; // high-x and high-z sides (y unused)
+};
+
+int mpmBandStart(float plane) { return int(floor(plane - 1.5)) + 1; }
+
+MpmAbsorbGeom mpmAbsorbGeometry(HeightFieldRef hf, Frame f, MpmParams p)
+{
+    float dx = p.origin.w;
+    float3 lo = float3(hf.x0 + (float(p.window.x) - 0.5) * hf.dx, p.column.x,
+        hf.z0 + (float(p.window.y) - 0.5) * hf.dz);
+    float3 hi = float3(hf.x0 + (float(p.window.x + p.window.z) - 0.5) * hf.dx, p.column.x,
+        hf.z0 + (float(p.window.y + p.window.w) - 0.5) * hf.dz);
+    MpmAbsorbGeom a;
+    a.lo = (frameToWorld(f, lo) - p.origin.xyz) / dx;
+    a.hi = (frameToWorld(f, hi) - p.origin.xyz) / dx;
+    a.band0 = int3(mpmBandStart(a.lo.x), mpmBandStart(a.lo.y), mpmBandStart(a.lo.z));
+    a.band1 = int3(mpmBandStart(a.hi.x), 0, mpmBandStart(a.hi.z));
+    return a;
+}
+
+// Records: the floor's three node layers over the region's nodes, then each x
+// side's three layers, then each z side's. A node in several takes the first.
+// (TerrainPlan::boundary_nodes counts them.)
+uint mpmAbsorbSlot(int3 g, MpmAbsorbGeom a, MpmParams p)
+{
+    int3 n = int3(p.dims.xyz) + 1;
+    if (any(g < int3(0, 0, 0)) || any(g >= n)) return MPM_NO_SLOT;
+    int l = g.y - a.band0.y;
+    if (l >= 0 && l < 3) return uint((l * n.z + g.z) * n.x + g.x);
+    uint floorRecords = 3u * uint(n.x * n.z);
+    for (int side = 0; side < 2; side++)
+    {
+        l = g.x - (side == 0 ? a.band0.x : a.band1.x);
+        if (l >= 0 && l < 3) return floorRecords + uint(((side * 3 + l) * n.y + g.y) * n.z + g.z);
+    }
+    uint xRecords = 6u * uint(n.y * n.z);
+    for (int side = 0; side < 2; side++)
+    {
+        l = g.z - (side == 0 ? a.band0.z : a.band1.z);
+        if (l >= 0 && l < 3) return floorRecords + xRecords + uint(((side * 3 + l) * n.y + g.y) * n.x + g.x);
+    }
+    return MPM_NO_SLOT;
+}
+
+// The node record `slot` stands for (mpmAbsorbSlot's inverse).
+int3 mpmAbsorbNodeOf(uint slot, MpmAbsorbGeom a, MpmParams p)
+{
+    int3 n = int3(p.dims.xyz) + 1;
+    int s = int(slot);
+    int floorRecords = 3 * n.x * n.z;
+    if (s < floorRecords) return int3(s % n.x, a.band0.y + s / (n.x * n.z), (s / n.x) % n.z);
+    s -= floorRecords;
+    int xRecords = 6 * n.y * n.z;
+    if (s < xRecords)
+    {
+        int k = s / (n.y * n.z);
+        return int3((k < 3 ? a.band0.x : a.band1.x) + k % 3, (s / n.z) % n.y, s % n.z);
+    }
+    s -= xRecords;
+    int k = s / (n.y * n.x);
+    return int3(s % n.x, (s / n.x) % n.y, (k < 3 ? a.band0.z : a.band1.z) + k % 3);
+}
+
+// The quadratic B-spline (in cells) and its integral from −∞ to u.
+float mpmSpline(float u)
+{
+    float a = abs(u);
+    return a < 0.5 ? 0.75 - a * a : (a < 1.5 ? 0.5 * (1.5 - a) * (1.5 - a) : 0.0);
+}
+
+float mpmSplineCdf(float u)
+{
+    if (u <= -1.5) return 0.0;
+    if (u >= 1.5) return 1.0;
+    if (u < -0.5)
+    {
+        float a = u + 1.5;
+        return a * a * a / 6.0;
+    }
+    if (u < 0.5) return 0.5 + u * (0.75 - u * u / 3.0);
+    float b = 1.5 - u;
+    return 1.0 - b * b * b / 6.0;
+}
+
+// ∫ w over [lo, hi] (cells) for a node at x: its share of that span.
+float mpmSplineSpan(float lo, float hi, float x)
+{
+    return hi > lo ? mpmSplineCdf(hi - x) - mpmSplineCdf(lo - x) : 0.0;
+}
+
+// The unactivated ground's surface at sample (i, j) beside the window, in grid units.
+float mpmGroundTop(HeightFieldRef hf, Frame f, MpmParams p, int i, int j)
+{
+    float3 xl = float3(0.0, hfHeight(hf, uint(i), uint(j)), 0.0);
+    return (frameToWorld(f, xl).y - p.origin.y) / p.origin.w;
+}
+
+// Grid velocity v (after gravity) of node g, of mass m, on the absorbing faces.
+// False when no face reaches the node: it keeps the rigid bed.
+bool mpmAbsorbNode(int3 g, float m, HeightFieldRef hf, Frame f, MpmParams p, inout float3 v)
+{
+    MpmAbsorbGeom a = mpmAbsorbGeometry(hf, f, p);
+    uint slot = mpmAbsorbSlot(g, a, p);
+    if (slot == MPM_NO_SLOT || slot >= p.boundary.z) return false;
+    float3 r = float3(g);
+    // The window's sample row and column nearest the node, and the ground
+    // beside each side there (the sides' tops).
+    int i0 = int(p.window.x), j0 = int(p.window.y);
+    int i1 = i0 + int(p.window.z) - 1, j1 = j0 + int(p.window.w) - 1;
+    float3 xl = frameToLocal(f, p.origin.xyz + r * p.origin.w);
+    int si = clamp(int(round((xl.x - hf.x0) / hf.dx)), i0, i1);
+    int sj = clamp(int(round((xl.z - hf.z0) / hf.dz)), j0, j1);
+    float ys = a.lo.y;
+    float ix = mpmSplineSpan(a.lo.x, a.hi.x, r.x);
+    float iz = mpmSplineSpan(a.lo.z, a.hi.z, r.z);
+    // The node's shares of the five faces (cells²): floor, low x, high x, low z, high z.
+    float share[5];
+    share[0] = mpmSpline(ys - r.y) * ix * iz;
+    share[1] = mpmSpline(a.lo.x - r.x) * iz * mpmSplineSpan(ys, mpmGroundTop(hf, f, p, i0 - 1, sj), r.y);
+    share[2] = mpmSpline(a.hi.x - r.x) * iz * mpmSplineSpan(ys, mpmGroundTop(hf, f, p, i1 + 1, sj), r.y);
+    share[3] = mpmSpline(a.lo.z - r.z) * ix * mpmSplineSpan(ys, mpmGroundTop(hf, f, p, si, j0 - 1), r.y);
+    share[4] = mpmSpline(a.hi.z - r.z) * ix * mpmSplineSpan(ys, mpmGroundTop(hf, f, p, si, j1 + 1), r.y);
+    if (share[0] + share[1] + share[2] + share[3] + share[4] <= 0.0) return false;
+    uint at = p.boundary.y + slot;
+    float4 rec = gMpmCoupled[at];
+    float3 u = rec.xyz;
+    // The material's density, wave speeds and K0; the springs' R.
+    float dx = p.origin.w, dt = p.step.x;
+    float rho = p.column.w;
+    float lam = p.sand.x, mu = p.sand.y;
+    float cp = sqrt((lam + 2.0 * mu) / rho), cs = sqrt(mu / rho);
+    float k0 = lam / (lam + 2.0 * mu);
+    float R = max(length(r - 0.5 * float3(p.dims.xyz)), 1.0) * dx;
+    float kn = (4.0 / 3.0) * mu / R, kt = (2.0 / 3.0) * mu / R;
+    // Geostatic tractions from the surface of the column over the node at activation.
+    float top = (frameToWorld(f, float3(0.0, rec.w, 0.0)).y - p.origin.y) / dx;
+    float weight = rho * max(-p.step.y, 0.0) * dx;
+    float p0[5];
+    p0[0] = weight * max(top - ys, 0.0);
+    float lateral = k0 * weight * max(top - max(r.y, ys), 0.0);
+    for (uint k = 1u; k < 5u; k++) p0[k] = lateral;
+    uint axis[5] = { 1u, 0u, 0u, 2u, 2u };
+    float sgn[5] = { 1.0, 1.0, -1.0, 1.0, -1.0 };
+    float area = dx * dx;
+    float mu_g = p.step.w;
+    float3 vNew = v;
+    float3 held = float3(0, 0, 0);
+    // Solve with every face sticking; then again with any face that would
+    // pull let go, and any whose shear would pass the ground's friction
+    // sliding (its tangential traction μ·t_n, along the sticking one).
+    uint live = 31u, slide = 0u;
+    float3 slip[5];
+    for (uint k = 0u; k < 5u; k++) slip[k] = float3(0, 0, 0);
+    for (uint pass = 0u; pass < 3u; pass++)
+    {
+        float3 damp = float3(0, 0, 0), stiff = float3(0, 0, 0), push = float3(0, 0, 0);
+        held = float3(0, 0, 0);
+        for (uint k = 0u; k < 5u; k++)
+        {
+            if ((live & (1u << k)) == 0u || !(share[k] > 0.0)) continue;
+            float s = share[k] * area;
+            float3 e = float3(axis[k] == 0u ? 1.0 : 0.0, axis[k] == 1u ? 1.0 : 0.0, axis[k] == 2u ? 1.0 : 0.0);
+            damp += s * rho * cp * e;
+            stiff += s * kn * e;
+            push += s * sgn[k] * p0[k] * e;
+            held = max(held, e);
+            if ((slide & (1u << k)) != 0u) push += s * slip[k];
+            else
+            {
+                damp += s * rho * cs * (1.0 - e);
+                stiff += s * kt * (1.0 - e);
+                held = float3(1, 1, 1);
+            }
+        }
+        vNew = (m * v + dt * (push - stiff * u)) / (m + dt * damp + dt * dt * stiff);
+        if (pass == 2u) break;
+        float3 uNew = u + dt * vNew;
+        uint keep = live, slip0 = slide;
+        for (uint k = 0u; k < 5u; k++)
+        {
+            if ((live & (1u << k)) == 0u || !(share[k] > 0.0)) continue;
+            float un = sgn[k] * uNew[axis[k]], vn = sgn[k] * vNew[axis[k]];
+            float tn = p0[k] - kn * un - rho * cp * vn;
+            if (tn < 0.0)
+            {
+                keep &= ~(1u << k);
+                continue;
+            }
+            if ((slide & (1u << k)) != 0u) continue;
+            float3 e = float3(axis[k] == 0u ? 1.0 : 0.0, axis[k] == 1u ? 1.0 : 0.0, axis[k] == 2u ? 1.0 : 0.0);
+            float3 tt = -(kt * uNew + rho * cs * vNew) * (1.0 - e);
+            // Its two components, without squaring tiny ones.
+            float t = axis[k] == 1u ? mpmHypot(tt.x, tt.z) : (axis[k] == 0u ? mpmHypot(tt.y, tt.z) : mpmHypot(tt.x, tt.y));
+            if (t > mu_g * tn)
+            {
+                slide |= 1u << k;
+                slip[k] = tt * (mu_g * tn / t);
+            }
+        }
+        if (keep == live && slide == slip0) break;
+        live = keep;
+    }
+    v = vNew;
+    // The ground follows the material along every axis a face still holds;
+    // along the others (a face let go, or sliding) it stays where it was.
+    float3 uNext = u + dt * vNew * held;
+    if (any(held > float3(0, 0, 0))) gMpmCoupled[at] = float4(uNext, rec.w);
+    return true;
+}
+
+// Once at activation, per absorbing-node record: no displacement yet, and the
+// surface height of the column over the node (the window sample nearest it).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_absorb_init(uint3 tid : SV_DispatchThreadID)
+{
+    uint slot = mpmIndex(tid);
+    MpmParams p = mpmParams();
+    if (slot >= p.boundary.z || mpmActivationRefused()) return;
+    Collider col = gColliders[p.dims.w];
+    Frame f = colliderFrame(col, gBodies[col.body]);
+    HeightFieldRef hf = heightFieldOf(col);
+    MpmAbsorbGeom a = mpmAbsorbGeometry(hf, f, p);
+    int3 g = mpmAbsorbNodeOf(slot, a, p);
+    float3 xl = frameToLocal(f, p.origin.xyz + float3(g) * p.origin.w);
+    int si = clamp(int(round((xl.x - hf.x0) / hf.dx)), int(p.window.x), int(p.window.x + p.window.z) - 1);
+    int sj = clamp(int(round((xl.z - hf.z0) / hf.dz)), int(p.window.y), int(p.window.y + p.window.w) - 1);
+    uint t = uint(sj - int(p.window.y)) * p.window.z + uint(si - int(p.window.x));
+    float dh = float(ALOAD(gMpmColumns[4u * t])) * p.column.y / mpmSampleArea(hf);
+    gMpmCoupled[p.boundary.y + slot] = float4(0, 0, 0, p.column.x + dh);
+}
+
+// Once, in the first step after a geostatic activation (it needs gravity; the
+// activation made every particle of the region, and none has moved yet): each
+// particle's F from its depth d below the surface of the column it came from
+// (its home sample, MpmParticle c1.w and c2.w), the elastic state of a layer
+// under its own weight with no lateral strain. Hencky's τ_yy = (λ + 2μ)·ln F_yy
+// = −ρ·g·d and τ_xx = τ_zz = λ·ln F_yy = K0·τ_yy.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_geostatic(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = mpmIndex(tid);
+    MpmParams p = mpmParams();
+    if (i >= mpmParticleCount()) return;
+    MpmParticle q = gMpmParticles[i];
+    if (mpmParticleDead(q) || (asuint(q.f2.w) & MPM_PARTICLE_HOME) == 0u) return;
+    float modulus = p.sand.x + 2.0 * p.sand.y;
+    if (!(modulus > 0.0) || !(p.step.y < 0.0)) return;
+    Collider col = gColliders[p.dims.w];
+    Frame f = colliderFrame(col, gBodies[col.body]);
+    HeightFieldRef hf = heightFieldOf(col);
+    int si = clamp(int(round((q.c1.w - hf.x0) / hf.dx)), int(p.window.x), int(p.window.x + p.window.z) - 1);
+    int sj = clamp(int(round((q.c2.w - hf.z0) / hf.dz)), int(p.window.y), int(p.window.y + p.window.w) - 1);
+    uint t = uint(sj - int(p.window.y)) * p.window.z + uint(si - int(p.window.x));
+    float top = p.column.x + float(ALOAD(gMpmColumns[4u * t])) * p.column.y / mpmSampleArea(hf);
+    float depth = max(top - frameToLocal(f, q.xm.xyz).y, 0.0);
+    q.f1.y = exp(p.step.y * p.column.w * depth / modulus);
+    gMpmParticles[i] = q;
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void mpm_grid(uint3 tid : SV_DispatchThreadID)
@@ -748,6 +1059,13 @@ void mpm_grid(uint3 tid : SV_DispatchThreadID)
         Collider col = gColliders[p.dims.w];
         Frame f = colliderFrame(col, gBodies[col.body]);
         HeightFieldRef hf = heightFieldOf(col);
+        // A node the absorbing faces reach (its own function, ahead of the rigid bed).
+        if ((p.boundary.x & MPM_BOUNDARY_ABSORBING) != 0u && mpmAbsorbNode(g, node.w, hf, f, p, v))
+        {
+            mpmRigidContact(n, b, node.w, p, v);
+            gMpmGrid[2u * n] = float4(v, node.w);
+            return;
+        }
         float3 xl = frameToLocal(f, xw);
         float3 nl;
         if (mpmBedNormal(hf, xl, p, nl))

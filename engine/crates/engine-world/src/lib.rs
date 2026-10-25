@@ -61,8 +61,8 @@ pub use readback::Backpressure;
 pub use rig::VehicleDamage;
 pub use terrain::{StrikeDef, TerrainDef};
 pub use engine_terrain::{
-    CraterPrediction, CraterTarget, ExplosionSource, ImpactSource, RegionPlan, SandMaterial,
-    TerrainConfig, TerrainError, YieldSurface,
+    CraterPrediction, CraterTarget, ExplosionSource, ImpactSource, InitialStress, RegionBoundary,
+    RegionPlan, SandMaterial, TerrainConfig, TerrainError, YieldSurface,
 };
 pub use engine_webgpu::TerrainStepReport;
 

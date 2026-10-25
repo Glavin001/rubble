@@ -27,6 +27,14 @@ fn world() -> World {
 }
 
 fn terrain_def() -> TerrainDef {
+    // TERRAIN_GROUND=absorbing|rigid-geostatic (diagnostics): the region's
+    // ground and start other than the default config's.
+    let d = TerrainConfig::default();
+    let (boundary, initial_stress) = match std::env::var("TERRAIN_GROUND").as_deref() {
+        Ok("absorbing") => (RegionBoundary::Absorbing, InitialStress::Geostatic),
+        Ok("rigid-geostatic") => (RegionBoundary::Rigid, InitialStress::Geostatic),
+        _ => (d.boundary, d.initial_stress),
+    };
     TerrainDef {
         config: TerrainConfig {
             max_particles: 1 << 20,
@@ -35,6 +43,8 @@ fn terrain_def() -> TerrainDef {
             max_substeps: 1 << 13,
             cells_per_radius: 8.0,
             min_cell_size: 0.002,
+            boundary,
+            initial_stress,
             ..TerrainConfig::default()
         },
         region_margin: 0.6,

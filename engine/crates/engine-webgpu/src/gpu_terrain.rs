@@ -347,6 +347,32 @@ impl WgpuSim {
         self.read_binding(MPM_PARCELS_BINDING, 0, n as usize)
     }
 
+    /// Overwrite the active region's particles from `first` on with
+    /// `particles` (their count is unchanged), ahead of the next submission:
+    /// tests set an initial state on activated material this way.
+    pub fn terrain_write_particles(
+        &self,
+        first: usize,
+        particles: &[MpmParticle],
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.terrain.is_some(),
+            "terrain is not enabled (call terrain_enable)"
+        );
+        let n = self.read_binding::<u32>(MPM_COUNTERS_BINDING, 4 * MPM_C_PARTICLES as u64, 1)[0];
+        anyhow::ensure!(
+            first + particles.len() <= n as usize,
+            "particles {first}..{} are past the region's {n}",
+            first + particles.len()
+        );
+        self.queue.write_buffer(
+            &self.bufs[MPM_PARTICLES_BINDING],
+            (first * std::mem::size_of::<MpmParticle>()) as u64,
+            bytemuck::cast_slice(particles),
+        );
+        Ok(())
+    }
+
     /// The active region's particles (blocking readback).
     pub fn terrain_particles(&self) -> Vec<MpmParticle> {
         if self.terrain.is_none() {

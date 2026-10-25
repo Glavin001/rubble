@@ -20,7 +20,9 @@ pub const MPM_ARGS_BINDING: usize = 46;
 pub const MPM_COLUMNS_BINDING: usize = 47;
 /// Coupled colliders and the region's block cells listing them.
 pub const MPM_COUPLE_BINDING: usize = 48;
-/// Per coupling slot: the frame's reaction on the body and its proxy velocity.
+/// Per coupling slot: the frame's reaction on the body and its proxy velocity;
+/// after the slots, the absorbing boundary's nodes (displacement, the column's
+/// surface height above them).
 pub const MPM_COUPLED_BINDING: usize = 49;
 /// Ejecta parcels: (position, quanta), (velocity, mass; 0 once landed).
 pub const MPM_PARCELS_BINDING: usize = 50;
@@ -70,6 +72,13 @@ pub const MPM_OVERFLOW_CELL: u32 = 128;
 pub const MPM_OVERFLOW_IMPULSES: u32 = 256;
 pub const MPM_OVERFLOW_PARCELS: u32 = 512;
 pub const MPM_OVERFLOW_FIELD: u32 = 1024;
+
+/// `MpmParams::boundary[0]` bits (u32): the bed and walls absorb
+/// ([`crate::RegionBoundary::Absorbing`]) ...
+pub const MPM_BOUNDARY_ABSORBING: u32 = 1;
+/// ... the first step after activation gives each particle the geostatic F
+/// of its depth below its home column's surface (`mpm_geostatic`).
+pub const MPM_BOUNDARY_GEOSTATIC: u32 = 2;
 
 /// `MpmParticle::f[2][3]` bit: the particle left the region as a parcel.
 pub const MPM_PARTICLE_DEAD: u32 = 1;
@@ -122,6 +131,10 @@ pub struct MpmParams {
     /// Z-model source: surface point (world), Z; flow-centre depth, core
     /// radius, strength α, extent (f32::MAX: unbounded).
     pub source: [[f32; 4]; 2],
+    /// The region's boundary (u32 bits): [`MPM_BOUNDARY_ABSORBING`] |
+    /// [`MPM_BOUNDARY_GEOSTATIC`], the first absorbing-node record in
+    /// [`MPM_COUPLED_BINDING`], the records the region uses, unused.
+    pub boundary: [u32; 4],
 }
 
 /// One particle (128 B).

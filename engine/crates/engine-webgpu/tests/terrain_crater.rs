@@ -362,6 +362,22 @@ fn an_impact_crater_in_dry_sand_follows_pi_scaling() {
             .unwrap_or(TerrainConfig::default().bake_home_fade),
         ..TerrainConfig::default()
     };
+    // CRATER_GROUND=rigid|absorbing: the region's bed and walls (the
+    // default config's otherwise; absorbing starts geostatic).
+    let cfg = match std::env::var("CRATER_GROUND").as_deref() {
+        Ok("rigid") => TerrainConfig {
+            boundary: engine_terrain::RegionBoundary::Rigid,
+            initial_stress: engine_terrain::InitialStress::Unstressed,
+            ..cfg
+        },
+        Ok("absorbing") => TerrainConfig {
+            boundary: engine_terrain::RegionBoundary::Absorbing,
+            initial_stress: engine_terrain::InitialStress::Geostatic,
+            ..cfg
+        },
+        _ => cfg,
+    };
+    eprintln!("ground: {:?}, {:?}", cfg.boundary, cfg.initial_stress);
     s.terrain_enable(&cfg).unwrap();
     // CRATER_E: Young's modulus override (Pa), to measure what softer sand
     // would change (a lossy option, reported, not adopted).
