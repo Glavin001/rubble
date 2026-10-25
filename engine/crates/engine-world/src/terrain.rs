@@ -14,7 +14,7 @@ use engine_terrain::{
     substeps_for, CraterPrediction, ExplosionSource, ImpactSource, RegionPlan, SandMaterial,
     TerrainConfig, ZModel,
 };
-use engine_webgpu::TerrainStepReport;
+use engine_webgpu::{TerrainStepReport, TerrainStrike, TerrainWatch};
 use glam::{Quat, Vec3};
 
 /// A world's terrain: limits, the material, and when a region closes.
@@ -40,6 +40,36 @@ pub struct TerrainDef {
     /// stops whatever creep is left, so this is the region's rest tolerance.
     pub settle_speed: f32,
     pub settle_frames: u32,
+    /// What counts as a heavy-body strike on a watched heightfield
+    /// ([`World::terrain_watch_shape`]).
+    pub strike: StrikeDef,
+}
+
+/// The look-ahead's thresholds and the region a strike opens.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StrikeDef {
+    /// A strike opens a region at this impact speed (m/s) ...
+    pub min_speed: f32,
+    /// ... and this kinetic energy (J) or more.
+    pub min_energy: f32,
+    /// Frames ahead the look-ahead sees, past the readback lag.
+    pub horizon_frames: u32,
+    /// Samples of each path over the horizon.
+    pub samples: u32,
+    /// Cells across the striking body's bounding diameter.
+    pub cells_per_body: f32,
+}
+
+impl Default for StrikeDef {
+    fn default() -> Self {
+        Self {
+            min_speed: 3.0,
+            min_energy: 100.0,
+            horizon_frames: 4,
+            samples: 16,
+            cells_per_body: 8.0,
+        }
+    }
 }
 
 impl Default for TerrainDef {
@@ -52,6 +82,7 @@ impl Default for TerrainDef {
             speed_headroom: 20.0,
             settle_speed: 0.01,
             settle_frames: 30,
+            strike: StrikeDef::default(),
         }
     }
 }
@@ -67,6 +98,8 @@ struct ActiveRegion {
     speed_step: u64,
     /// Consecutive settled frames.
     quiet: u32,
+    /// No settling before this step (a predicted strike still to come).
+    hold_until: u64,
 }
 
 pub(crate) struct TerrainHost {
@@ -76,6 +109,12 @@ pub(crate) struct TerrainHost {
     mirror_due: Vec<ShapeId>,
     /// Copies encoded, not yet read.
     mirror_in_flight: Vec<ShapeId>,
+    /// Heightfield shapes the look-ahead watches.
+    watched: Vec<ShapeId>,
+    /// A predicted strike to open a region for before the next step.
+    pending_strike: Option<(ShapeId, TerrainStrike)>,
+    /// Strikes predicted too late to open a region before them.
+    missed_strikes: u64,
 }
 
 impl World {
@@ -105,6 +144,9 @@ impl World {
             region: None,
             mirror_due: Vec::new(),
             mirror_in_flight: Vec::new(),
+            watched: Vec::new(),
+            pending_strike: None,
+            missed_strikes: 0,
         });
         Ok(())
     }
@@ -249,6 +291,7 @@ impl World {
             speed,
             speed_step: step,
             quiet: 0,
+            hold_until: 0,
         });
         self.dirty = true;
         Ok(())
@@ -288,15 +331,22 @@ impl World {
     }
 
     /// The terrain copies this step's readback carries.
-    pub(crate) fn terrain_extras(&mut self, counters: bool) -> Vec<(Extra, u64, u64, bool)> {
+    pub(crate) fn terrain_extras(
+        &mut self,
+        counters: bool,
+        watched: bool,
+    ) -> Vec<(Extra, u64, u64)> {
         let mut out = Vec::new();
         if counters {
             out.push((
                 Extra::TerrainCounters,
                 0,
                 4 * engine_terrain::layout::MPM_COUNTER_WORDS as u64,
-                false,
             ));
+        }
+        if watched {
+            let (_, offset, size) = self.sim.terrain_watch_buffer();
+            out.push((Extra::TerrainWatch, offset, size));
         }
         let Some(host) = self.terrain.as_mut() else {
             return out;
@@ -321,7 +371,6 @@ impl World {
                 Extra::TerrainHeights(id),
                 u64::from(base + 2) * 16,
                 u64::from(nx * nz) * 4,
-                true,
             ));
             host.mirror_in_flight.push(id);
         }
@@ -331,16 +380,16 @@ impl World {
     /// The readback copies for [`Self::terrain_extras`]' list.
     pub(crate) fn terrain_extra_copies<'a>(
         sim: &'a engine_webgpu::WgpuSim,
-        list: Vec<(Extra, u64, u64, bool)>,
+        list: Vec<(Extra, u64, u64)>,
     ) -> Vec<readback::Extra<'a, Extra>> {
         list.into_iter()
-            .map(|(kind, offset, size, arena)| readback::Extra {
-                kind,
-                buffer: if arena {
-                    sim.hull_arena_buffer()
-                } else {
-                    sim.terrain_counters_buffer()
+            .map(|(kind, offset, size)| readback::Extra {
+                buffer: match kind {
+                    Extra::TerrainHeights(_) => sim.hull_arena_buffer(),
+                    Extra::TerrainWatch => sim.terrain_watch_buffer().0,
+                    _ => sim.terrain_counters_buffer(),
                 },
+                kind,
                 offset,
                 size,
             })
@@ -367,7 +416,13 @@ impl World {
             if let Some(r) = host.region.as_mut().filter(|r| step >= r.speed_step) {
                 r.speed = report.max_speed;
                 r.speed_step = step;
-                if report.max_speed < settle && report.airborne == 0 {
+                // Settled: the sand and every body in it at rest, nothing in
+                // flight, and no predicted strike still to come.
+                if report.max_speed < settle
+                    && report.body_speed < settle
+                    && report.airborne == 0
+                    && step >= r.hold_until
+                {
                     r.quiet += 1;
                 } else {
                     r.quiet = 0;
@@ -435,6 +490,146 @@ impl World {
         Ok(())
     }
 
+    /// Watch (or stop watching) heightfield shape `ground` for heavy-body
+    /// strikes: after each step the GPU predicts every awake dynamic body's
+    /// ballistic path, and a strike past `TerrainDef::strike`'s thresholds
+    /// opens a region around it before the body arrives (forward only; hit
+    /// events come after the rigid step has already stopped the body). At most
+    /// 4 shapes, axis-aligned like every terrain region.
+    pub fn terrain_watch_shape(&mut self, ground: ShapeId, watch: bool) -> anyhow::Result<()> {
+        let s = self.live_shape(ground)?;
+        anyhow::ensure!(
+            matches!(self.shapes[s].geometry, Geometry::HeightField { .. }),
+            "shape {} is not a heightfield",
+            ground.to_bits()
+        );
+        let host = self.terrain_host()?;
+        host.watched.retain(|&w| w != ground);
+        if watch {
+            host.watched.push(ground);
+        }
+        self.terrain_update_watch()
+    }
+
+    /// Strikes the look-ahead saw too late to open a region before (each a
+    /// body that met rigid ground instead).
+    pub fn terrain_missed_strikes(&self) -> u64 {
+        self.terrain.as_ref().map_or(0, |t| t.missed_strikes)
+    }
+
+    fn terrain_update_watch(&mut self) -> anyhow::Result<()> {
+        let dt = self.sim.params().dt;
+        let lag = self.readback.frames() as f32;
+        let host = self.terrain.as_mut().expect("terrain enabled");
+        host.watched.retain(|id| {
+            self.shapes
+                .get(id.index() as usize)
+                .is_some_and(|s| s.alive && s.generation == id.generation())
+        });
+        let fields = host
+            .watched
+            .iter()
+            .map(|id| self.shapes[id.index() as usize].collider)
+            .collect();
+        let d = &host.def.strike;
+        let watch = TerrainWatch {
+            fields,
+            // A pick reaches the host up to `lag` frames later; the region
+            // opens before the step after that.
+            horizon: (lag + d.horizon_frames as f32) * dt,
+            samples: d.samples,
+            min_speed: d.min_speed,
+            min_energy: d.min_energy,
+            min_time: dt,
+        };
+        self.sim.terrain_set_watch(&watch)
+    }
+
+    /// Whether this step should run the look-ahead.
+    pub(crate) fn terrain_watching(&self) -> bool {
+        self.sim.terrain_watch_enabled()
+            && self
+                .terrain
+                .as_ref()
+                .is_some_and(|t| t.region.is_none() && t.pending_strike.is_none())
+    }
+
+    /// A frame's look-ahead pick (predicted at the end of `step`).
+    pub(crate) fn terrain_strike(&mut self, step: u64, bytes: &[u8]) {
+        let words: Vec<u32> = bytes
+            .chunks_exact(4)
+            .map(bytemuck::pod_read_unaligned)
+            .collect();
+        let Some(strike) = engine_webgpu::WgpuSim::decode_terrain_strike(&words) else {
+            return;
+        };
+        let dt = self.sim.params().dt;
+        let shape = self.collider_shape.get(strike.field as usize).copied();
+        let Some(host) = self.terrain.as_mut() else {
+            return;
+        };
+        if host.region.is_some() || host.pending_strike.is_some() {
+            return;
+        }
+        // Steps already submitted since the prediction run before the region
+        // can exist: the strike must come after them.
+        let ahead = (self.step - 1 - step) as f32 * dt;
+        let Some(s) = shape else {
+            return;
+        };
+        let id = ShapeId::new(s, self.shapes[s as usize].generation);
+        if strike.time <= ahead {
+            host.missed_strikes += 1;
+            return;
+        }
+        host.pending_strike = Some((id, strike));
+    }
+
+    /// Before a step: open the region a predicted strike asks for.
+    pub(crate) fn terrain_open_strike(&mut self) -> anyhow::Result<()> {
+        let Some(host) = self.terrain.as_mut() else {
+            return Ok(());
+        };
+        let Some((ground, strike)) = host.pending_strike.take() else {
+            return Ok(());
+        };
+        if host.region.is_some() {
+            return Ok(());
+        }
+        let def = host.def.clone();
+        let g = self.terrain_gravity()?;
+        let s = self.live_shape(ground)?;
+        let Geometry::HeightField { field, transform } = &self.shapes[s].geometry else {
+            return Ok(());
+        };
+        let origin = self.bodies[self.shapes[s].body as usize].origin.p() + transform.p();
+        let p = Vec3::from(strike.point);
+        let surface = field
+            .surface(p.x - origin.x, p.z - origin.z)
+            .map_or(p.y - strike.radius, |(h, _)| h + origin.y);
+        let size = strike_region(&def, g, &strike);
+        let lo = Vec3::new(
+            p.x - size.half_width,
+            surface - size.depth,
+            p.z - size.half_width,
+        );
+        let hi = Vec3::new(
+            p.x + size.half_width,
+            surface + size.above,
+            p.z + size.half_width,
+        );
+        let plan = RegionPlan::spanning(&def.config, lo, hi, size.dx, 0, 0)?;
+        self.terrain_open_with(ground, plan, None)?;
+        // Faster than the sand: the frame's speed bound starts at the body's.
+        let dt = self.sim.params().dt;
+        let step = self.step;
+        if let Some(r) = self.terrain.as_mut().and_then(|t| t.region.as_mut()) {
+            r.speed = Vec3::from(strike.velocity).length();
+            r.hold_until = step + (strike.time / dt).ceil() as u64 + 1;
+        }
+        Ok(())
+    }
+
     /// A heightfield shape's samples as the GPU holds them now (blocking: it
     /// waits for every step submitted). For tools and tests; frames keep the
     /// shape's geometry current after a bake without this.
@@ -452,6 +647,40 @@ impl World {
             .sim
             .read_words(18, u64::from(base + 2) * 4, (nx * nz) as usize);
         Ok(words.into_iter().map(f32::from_bits).collect())
+    }
+}
+
+/// A strike's region, from the scaling of spheres dropped into dry sand
+/// (Uehara et al. 2003, PRL 90, 194301): penetration depth
+/// d = (0.14/μ)·(ρ_b/ρ_g)^½·D^⅔·H^⅓ and crater diameter
+/// D_c = 0.90·(ρ_b/ρ_g)^¼·D^¾·H^¼, with H the drop height plus d (H = v²/2g
+/// for an impact at v), μ = tan φ, D the body's bounding diameter and ρ_b its
+/// mass over that sphere. The box reaches `region_margin` past both.
+struct StrikeRegion {
+    half_width: f32,
+    depth: f32,
+    above: f32,
+    dx: f32,
+}
+
+fn strike_region(def: &TerrainDef, g: f64, strike: &TerrainStrike) -> StrikeRegion {
+    let d_b = 2.0 * f64::from(strike.radius);
+    let rho_b = f64::from(strike.mass) / (std::f64::consts::PI / 6.0 * d_b.powi(3));
+    let ratio = rho_b / f64::from(def.material.density);
+    let mu = f64::from(def.material.friction_angle).tan();
+    let v = Vec3::from(strike.velocity).as_dvec3().length();
+    let drop = v * v / (2.0 * g);
+    let mut d = 0.0;
+    for _ in 0..8 {
+        d = 0.14 / mu * ratio.sqrt() * d_b.powf(2.0 / 3.0) * (drop + d).cbrt();
+    }
+    let crater = 0.90 * ratio.powf(0.25) * d_b.powf(0.75) * (drop + d).powf(0.25);
+    let m = 1.0 + def.region_margin;
+    StrikeRegion {
+        half_width: (m * (0.5 * crater).max(d_b)) as f32,
+        depth: (m * (d + d_b)) as f32,
+        above: (m * d_b) as f32,
+        dx: ((d_b / f64::from(def.strike.cells_per_body)) as f32).max(def.config.min_cell_size),
     }
 }
 

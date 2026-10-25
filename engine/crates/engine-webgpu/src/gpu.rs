@@ -128,6 +128,8 @@ pub struct WgpuSim {
     terrain: Option<terrain::TerrainState>,
     /// The terrain's coupled frame appended impulse records for this step.
     terrain_impulses_pending: bool,
+    /// A heightfield is watched by the terrain look-ahead.
+    terrain_watch_on: bool,
     /// The last `step*` call ran the GPU step (false: skipped, nothing awake).
     last_step_ran: bool,
     sleep_island_rounds: u32,
@@ -719,6 +721,7 @@ impl WgpuSim {
             pose_output,
             terrain: None,
             terrain_impulses_pending: false,
+            terrain_watch_on: false,
             last_step_ran: false,
             sleep_island_rounds: 8,
             last_counters: StepCounters::default(),
@@ -3021,6 +3024,9 @@ mod host_state;
 #[path = "gpu_terrain.rs"]
 mod terrain;
 pub use terrain::TerrainStepReport;
+#[path = "gpu_terrain_watch.rs"]
+mod terrain_watch;
+pub use terrain_watch::{TerrainStrike, TerrainWatch};
 pub(crate) use terrain::terrain_buffer;
 #[path = "gpu_characters.rs"]
 mod characters;
