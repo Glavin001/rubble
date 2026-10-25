@@ -17,6 +17,7 @@ pub mod joint;
 pub mod params;
 pub mod scene;
 pub mod snapshot;
+pub mod soil;
 pub mod vehicle;
 
 pub use commands::*;
@@ -550,6 +551,9 @@ pub const OVERFLOW_IMPULSES: u32 = 8192;
 pub const OVERFLOW_CCD_PAIRS: u32 = 32768;
 /// A character gathered more colliders than `character::CHAR_MAX_CANDIDATES`.
 pub const OVERFLOW_CHAR_CANDIDATES: u32 = 16384;
+/// A wheel on a soil heightfield would sink past the soil's `max_sinkage`
+/// (`soil::Soil`; the step clamps it there and fails).
+pub const OVERFLOW_SOIL_SINKAGE: u32 = 65536;
 /// Oversized-static list (statics wider than half a grid cell, uniform grid):
 /// this many collider ids in the scratch-atomics buffer at `LARGE_STATIC_BASE`.
 pub const LARGE_STATIC_CAP: u32 = 1024;

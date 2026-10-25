@@ -10,9 +10,22 @@
 //!
 //! | record   | contents                                     |
 //! |----------|----------------------------------------------|
-//! | `base+0` | `HEIGHT_FIELD_MAGIC`, `nx`, `nz`, flags (0)  |
+//! | `base+0` | `HEIGHT_FIELD_MAGIC`, `nx`, `nz`, flags      |
 //! | `base+1` | `dx`, `dz`, min height, max height (f32 bits)|
 //! | `base+2..` | heights, four per record, row-major `j·nx + i` |
+//!
+//! With a [`Soil`] (flags `HEIGHT_FIELD_SOIL`, deformable terrain T5) `H` =
+//! ⌈nx·nz/4⌉ more records follow the heights' `H`:
+//!
+//! | record       | contents                                         |
+//! |--------------|--------------------------------------------------|
+//! | `base+2+H`   | `k_c`, `k_phi`, `n`, `c_n` ([`Soil::shape_factor`]) |
+//! | `base+3+H`   | `max_sinkage`, 0, 0, 0                              |
+//! | `base+4+H..` | uncompacted heights, packed as the heights are    |
+//!
+//! The header's min height then sits `max_sinkage` below the lowest sample,
+//! so the bounds hold every rut the GPU presses (samples never go below the
+//! uncompacted height minus `max_sinkage`) without a readback.
 //!
 //! Collider `params`: `x` = tagged base (as for hulls), `w` = bounding radius.
 //! `engine/slang/physics/heightfield.slang` is the GPU side.
@@ -20,8 +33,11 @@
 use glam::Vec3;
 
 use crate::convex::{HullArena, HullError, HULL_MAX_BASE, HULL_PARAM_TAG};
+use crate::soil::{Soil, SoilError};
 
 pub const HEIGHT_FIELD_MAGIC: u32 = 0x4846_0001;
+/// Header flag: the field carries a soil (records after the heights).
+pub const HEIGHT_FIELD_SOIL: u32 = 1;
 /// Fewest samples per side (one cell).
 pub const HEIGHT_FIELD_MIN_SAMPLES: u32 = 2;
 /// Most samples per side. The GPU's feature ids hold a 24-bit vertex index;
@@ -54,6 +70,10 @@ pub enum HeightFieldError {
     },
     #[error("no heightfield at arena base {0}")]
     NotAHeightField(u32),
+    #[error("heightfield at arena base {0} was placed with a different soil layout")]
+    SoilLayout(u32),
+    #[error(transparent)]
+    Soil(#[from] SoilError),
     #[error(transparent)]
     Arena(#[from] HullError),
 }
@@ -66,6 +86,7 @@ pub struct HeightField {
     dx: f32,
     dz: f32,
     heights: Vec<f32>,
+    soil: Option<Soil>,
 }
 
 impl HeightField {
@@ -102,7 +123,28 @@ impl HeightField {
             dx,
             dz,
             heights,
+            soil: None,
         })
+    }
+
+    /// The same field carrying `soil` (vehicle ruts, T5).
+    pub fn with_soil(mut self, soil: Soil) -> Result<Self, HeightFieldError> {
+        self.set_soil(Some(soil))?;
+        Ok(self)
+    }
+
+    /// Assign or remove the field's soil. A placed field must be placed again
+    /// (its arena block grows or shrinks).
+    pub fn set_soil(&mut self, soil: Option<Soil>) -> Result<(), HeightFieldError> {
+        if let Some(s) = &soil {
+            s.validate()?;
+        }
+        self.soil = soil;
+        Ok(())
+    }
+
+    pub fn soil(&self) -> Option<&Soil> {
+        self.soil.as_ref()
     }
 
     /// A field sampled from `f(x, z)` at every vertex (local coordinates).
@@ -158,10 +200,20 @@ impl HeightField {
             })
     }
 
+    /// The height range the collider's bounds cover: the samples' range,
+    /// extended `max_sinkage` down under a soil (ruts the GPU presses).
+    pub fn bounds_range(&self) -> (f32, f32) {
+        let (lo, hi) = self.height_range();
+        match &self.soil {
+            Some(s) => (lo - s.max_sinkage, hi),
+            None => (lo, hi),
+        }
+    }
+
     /// Local bounds `(min, max)`.
     pub fn local_bounds(&self) -> (Vec3, Vec3) {
         let (x0, z0) = origin(self.nx, self.nz, self.dx, self.dz);
-        let (lo, hi) = self.height_range();
+        let (lo, hi) = self.bounds_range();
         (Vec3::new(x0, lo, z0), Vec3::new(-x0, hi, -z0))
     }
 
@@ -237,22 +289,54 @@ impl HeightField {
         Ok(())
     }
 
-    /// Records this field occupies in the arena.
-    pub fn record_count(&self) -> u32 {
-        2 + (self.heights.len() as u32).div_ceil(4)
+    /// Records of one plane of samples (the heights, or a soil's uncompacted
+    /// heights).
+    pub fn plane_records(&self) -> u32 {
+        (self.heights.len() as u32).div_ceil(4)
     }
 
-    /// Packed arena records (see the module table).
+    /// Records this field occupies in the arena.
+    pub fn record_count(&self) -> u32 {
+        let plane = self.plane_records();
+        2 + plane + if self.soil.is_some() { 2 + plane } else { 0 }
+    }
+
+    /// Header flags word (`base+0`, `.w`).
+    pub fn flags(&self) -> u32 {
+        if self.soil.is_some() {
+            HEIGHT_FIELD_SOIL
+        } else {
+            0
+        }
+    }
+
+    /// Packed arena records (see the module table). A soil's uncompacted
+    /// surface is the field as packed: fresh soil.
     pub fn pack(&self) -> Vec<[u32; 4]> {
-        let (lo, hi) = self.height_range();
+        let (lo, hi) = self.bounds_range();
         let mut out = Vec::with_capacity(self.record_count() as usize);
-        out.push([HEIGHT_FIELD_MAGIC, self.nx, self.nz, 0]);
+        out.push([HEIGHT_FIELD_MAGIC, self.nx, self.nz, self.flags()]);
         out.push([
             self.dx.to_bits(),
             self.dz.to_bits(),
             lo.to_bits(),
             hi.to_bits(),
         ]);
+        self.push_plane(&mut out);
+        if let Some(s) = &self.soil {
+            out.push([
+                s.k_c.to_bits(),
+                s.k_phi.to_bits(),
+                s.n.to_bits(),
+                s.shape_factor().to_bits(),
+            ]);
+            out.push([s.max_sinkage.to_bits(), 0, 0, 0]);
+            self.push_plane(&mut out);
+        }
+        out
+    }
+
+    fn push_plane(&self, out: &mut Vec<[u32; 4]>) {
         for chunk in self.heights.chunks(4) {
             let mut r = [0u32; 4];
             for (k, h) in chunk.iter().enumerate() {
@@ -260,7 +344,6 @@ impl HeightField {
             }
             out.push(r);
         }
-        out
     }
 }
 
@@ -305,16 +388,31 @@ impl HullArena {
         if head[0] != HEIGHT_FIELD_MAGIC || head[1] != field.nx || head[2] != field.nz {
             return Err(HeightFieldError::NotAHeightField(base));
         }
+        if head[3] != field.flags() {
+            return Err(HeightFieldError::SoilLayout(base));
+        }
         let packed = field.pack();
         self.write_records(base, &packed[..2]);
         let rows = rows.start.min(field.nz)..rows.end.min(field.nz);
+        // A soil's two parameter records, then its uncompacted plane: edited rows
+        // are fresh soil there too.
+        let plane = field.plane_records();
+        let planes: &[u32] = if field.soil.is_some() {
+            let at = 2 + plane;
+            self.write_records(base + at, &packed[at as usize..at as usize + 2]);
+            &[2, 4 + plane]
+        } else {
+            &[2]
+        };
         if !rows.is_empty() {
             let first = (rows.start * field.nx) / 4;
             let last = (rows.end * field.nx).div_ceil(4);
-            self.write_records(
-                base + 2 + first,
-                &packed[2 + first as usize..2 + last as usize],
-            );
+            for &p in planes {
+                self.write_records(
+                    base + p + first,
+                    &packed[(p + first) as usize..(p + last) as usize],
+                );
+            }
         }
         Ok(())
     }
@@ -412,6 +510,64 @@ mod tests {
             f.set_region(6, 0, 3, 1, &[0.0; 3]),
             Err(HeightFieldError::EditBounds { .. })
         ));
+    }
+
+    #[test]
+    fn soil_packs_after_the_heights_and_edits_refresh_it() {
+        let soil = Soil::sandy_loam().with_max_sinkage(0.25);
+        let heights = (0..15).map(|k| k as f32 * 0.1).collect();
+        let mut f = HeightField::new(5, 3, 1.0, 1.0, heights)
+            .unwrap()
+            .with_soil(soil)
+            .unwrap();
+        assert_eq!(f.record_count(), 2 + 4 + 2 + 4);
+        let mut arena = HullArena::new();
+        let base = arena.insert_height_field(&f).unwrap();
+        let r = &arena.records()[base as usize..];
+        assert_eq!(r[0], [HEIGHT_FIELD_MAGIC, 5, 3, HEIGHT_FIELD_SOIL]);
+        // The bounds reach max_sinkage below the lowest sample.
+        assert_eq!(f32::from_bits(r[1][2]), -0.25);
+        let params = [
+            soil.k_c.to_bits(),
+            soil.k_phi.to_bits(),
+            soil.n.to_bits(),
+            soil.shape_factor().to_bits(),
+        ];
+        assert_eq!(r[6], params);
+        for k in 0..15usize {
+            assert_eq!(
+                r[8 + k / 4][k % 4],
+                r[2 + k / 4][k % 4],
+                "uncompacted = heights"
+            );
+        }
+        arena.take_dirty();
+        f.set_region(0, 2, 5, 1, &[2.0; 5]).unwrap();
+        arena.update_height_field(base, &f, 2..3).unwrap();
+        let dirty = arena.take_dirty();
+        // Header, soil record, row 2 = samples 10..15 = records 2..4 of each plane.
+        assert_eq!(
+            dirty,
+            vec![base..base + 2, base + 4..base + 8, base + 10..base + 12]
+        );
+        assert_eq!(
+            f32::from_bits(arena.records()[(base + 11) as usize][0]),
+            2.0
+        );
+        // A field placed without soil is not updated as one with soil.
+        let plain = HeightField::new(5, 3, 1.0, 1.0, vec![0.0; 15]).unwrap();
+        let other = arena.insert_height_field(&plain).unwrap();
+        assert_eq!(
+            arena.update_height_field(other, &f, 0..1),
+            Err(HeightFieldError::SoilLayout(other))
+        );
+        assert!(matches!(
+            plain.clone().with_soil(Soil { n: 4.0, ..soil }),
+            Err(HeightFieldError::Soil(_))
+        ));
+        // Without soil the layout is unchanged.
+        assert_eq!(plain.record_count(), 2 + 4);
+        assert_eq!(plain.bounds_range(), plain.height_range());
     }
 
     #[test]
