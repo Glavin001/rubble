@@ -100,7 +100,10 @@ fn map_material_authored(asset: &str) -> Result<(&'static str, &'static str), St
         ("brick", "mortar")
     } else if has(&["stone", "masonry", "slate", "paving", "porcelain", "road"]) {
         ("stone", "mortar")
-    } else if has(&["concrete", "footing", "asphalt", "slab", "facade", "plaster"]) {
+    } else if has(&["block"]) {
+        // Concrete blockwork (blast-stress-solver's `block-wall`): concrete units in mortar.
+        ("concrete", "mortar")
+    } else if has(&["concrete", "footing", "asphalt", "slab", "facade", "plaster", "drywall", "gypsum"]) {
         ("concrete", "concrete")
     } else if has(&["wood", "timber", "oak", "joinery", "siding", "trim", "fibre", "poster", "paper", "ink", "upholstery", "bedding", "rubber", "plastic", "appliance", "furniture"]) {
         ("timber", "timber")
