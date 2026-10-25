@@ -706,6 +706,8 @@ impl BlastSolver {
         let mut reports = vec![IslandReport::default(); islands.count];
         for k in 0..islands.count {
             reports[k].skipped = skip_mask[k];
+            // The native certificate stands for a converged solve (beginNativeSettledReuse).
+            reports[k].converged = skip_mask[k] && native;
         }
         let enters: Vec<bool> = (0..m).map(|j| !settled_bond(j)).collect();
         match (native, self.device_precision) {

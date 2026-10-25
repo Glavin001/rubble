@@ -597,5 +597,23 @@ fn blast_graph(scene: &Scene, t: &FractureTables, bond_source: &[(usize, usize)]
         let material = a.materials.get(d.material).ok_or(format!("blast_gpu: bond {bi}: material {} of {}", d.material, a.materials.len()))?;
         bonds.push(BlastBond { nodes: [sb.a, sb.b], centroid: Vec3::from_array(d.centroid), normal: Vec3::from_array(d.normal), area: d.area, modulus: material.modulus, material: d.material });
     }
-    Ok((BlastGraph::new(nodes, bonds, BlastSettings::default())?, a.materials.clone()))
+    Ok((BlastGraph::new(nodes, bonds, blast_settings()?)?, a.materials.clone()))
+}
+
+/// The profile's Blast solve: PhysX's native (resident) stage as vibe-land runs it on the Mac,
+/// or `STRESS_BLAST_SOLVER=host` the CUDA host path (vibe-land's `blast` backend), for
+/// comparison.
+/// `STRESS_BLAST_FORCE_TOL=1e-3`: the native solve's force tolerance (vibe-land's
+/// `VIBE_NATIVE_STRESS_FORCE_TOLERANCE`, off by default there too).
+fn blast_settings() -> Result<stress_ref::blast_bond::BlastSettings, String> {
+    use stress_ref::blast_bond::BlastSettings;
+    let mut s = match std::env::var("STRESS_BLAST_SOLVER").as_deref() {
+        Err(_) | Ok("native") => BlastSettings::native(),
+        Ok("host") => BlastSettings::default(),
+        Ok(other) => return Err(format!("STRESS_BLAST_SOLVER={other}: expected native or host")),
+    };
+    if let Ok(t) = std::env::var("STRESS_BLAST_FORCE_TOL") {
+        s.force_tolerance = t.parse().map_err(|_| format!("STRESS_BLAST_FORCE_TOL={t}: expected a number"))?;
+    }
+    Ok(s)
 }

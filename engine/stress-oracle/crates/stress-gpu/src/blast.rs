@@ -10,7 +10,7 @@
 //! of each, which the GPU rebuilds when a bond breaks, so a frame reads nothing back to run.
 
 use bytemuck::{Pod, Zeroable};
-use stress_ref::blast_bond::{
+use stress_ref::blast_bond::{SolverKind, 
     AngLin, BlastGraph, BlastMaterial, BondStress, Damage, IslandReport, Islands, NO_ISLAND,
 };
 use stress_ref::math::Vec3;
@@ -20,6 +20,8 @@ use crate::shaders;
 
 const REF_SECOND: u32 = 0x8000_0000;
 const NODE_VECTORS: usize = 10;
+/// `blast_native.slang` `NV`: its scratch float4s per node.
+const NATIVE_NODE_VECTORS: usize = 24;
 const SCAN_BLOCK: usize = 1024;
 const REPORT_CONVERGED: u32 = 1;
 const REPORT_SKIPPED: u32 = 2;
@@ -43,7 +45,7 @@ pub struct Params {
     pub dt: f32,
     pub damage_rate: f32,
     pub apply_damage: u32,
-    pub pad: u32,
+    pub force_tolerance: f32,
     pub gravity: [f32; 4],
     pub w_alive: u32,
     pub a_dirty: u32,
@@ -73,6 +75,7 @@ struct BondGpu {
 
 use Binding::{Storage as R, StorageRw as W, Uniform as U};
 const CGLS_BINDINGS: [Binding; 10] = [U, R, R, R, W, R, W, W, W, R];
+const NATIVE_BINDINGS: [Binding; 11] = [U, R, R, R, W, R, W, W, W, R, R];
 const MATERIAL_BINDINGS: [Binding; 7] = [U, W, W, R, R, W, W];
 const TOPOLOGY_BINDINGS: [Binding; 8] = [U, R, R, W, W, W, W, W];
 const FRACTURE_BINDINGS: [Binding; 9] = [U, W, W, R, R, R, R, W, R];
@@ -240,7 +243,7 @@ impl GpuBlastSolver {
             x: gpu.storage("blast x", &vec![[0.0f32; 4]; 2 * m.max(1)]),
             scratch: gpu.storage(
                 "blast scratch",
-                &vec![[0.0f32; 4]; NODE_VECTORS * n.max(1) + 2 * m.max(1)],
+                &vec![[0.0f32; 4]; NODE_VECTORS.max(NATIVE_NODE_VECTORS) * n.max(1) + 2 * m.max(1)],
             ),
             report: gpu.storage("blast report", &vec![[0u32; 4]; n.max(1)]),
             lists: gpu.storage("blast lists", &vec![0u32; (n + m).max(1)]),
@@ -256,7 +259,15 @@ impl GpuBlastSolver {
             materials: gpu.storage("blast materials", &material_rows),
             out: gpu.storage("blast out", &vec![[0.0f32; 4]; 4 * m.max(1)]),
         };
-        let solve = gpu.compute(&shaders::BLAST_CGLS, "blast_solve", &CGLS_BINDINGS);
+        // The rigid modes' frame (blast_native.slang): node positions over the length scale.
+        let positions: Vec<[f32; 4]> = graph.nodes.iter().map(|n| f4(n.position * (1.0 / graph.length_scale))).collect();
+        let positions = gpu.storage("blast positions", &if positions.is_empty() { vec![[0.0f32; 4]] } else { positions });
+        let native = graph.settings.solver == SolverKind::Native;
+        let solve = if native {
+            gpu.compute(&shaders::BLAST_NATIVE, "blast_native", &NATIVE_BINDINGS)
+        } else {
+            gpu.compute(&shaders::BLAST_CGLS, "blast_solve", &CGLS_BINDINGS)
+        };
         let stress = gpu.compute(
             &shaders::BLAST_MATERIAL,
             "blast_bond_stress",
@@ -273,13 +284,8 @@ impl GpuBlastSolver {
             })
             .collect();
         let b = &buffers;
-        let solve_bind = gpu.bind(
-            &solve.group,
-            &[
-                &b.params, &b.islands, &b.nodes, &b.refs, &b.bonds, &b.accel, &b.x, &b.scratch,
-                &b.report, &b.lists,
-            ],
-        );
+        let solve_buffers = [&b.params, &b.islands, &b.nodes, &b.refs, &b.bonds, &b.accel, &b.x, &b.scratch, &b.report, &b.lists, &positions];
+        let solve_bind = gpu.bind(&solve.group, if native { &solve_buffers[..] } else { &solve_buffers[..10] });
         let stress_bind = gpu.bind(
             &stress.group,
             &[
@@ -337,6 +343,7 @@ impl GpuBlastSolver {
             dt: dt as f32,
             damage_rate: s.damage_rate as f32,
             apply_damage: apply_damage as u32,
+            force_tolerance: s.force_tolerance as f32,
             ..Default::default()
         }
     }

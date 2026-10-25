@@ -23,12 +23,21 @@ fn main() {
         options,
     )
     .expect("pack");
-    let mut settings = BlastSettings::default();
+    // `STRESS_BLAST_SOLVER=native`: the resident solve at vibe-land's Mac settings.
+    let mut settings = if std::env::var("STRESS_BLAST_SOLVER").is_ok_and(|v| v == "native") {
+        BlastSettings::native()
+    } else {
+        BlastSettings::default()
+    };
     if let Some(i) = std::env::var("STRESS_BLAST_ITERATIONS").ok() {
         settings.max_iterations = i.parse().expect("STRESS_BLAST_ITERATIONS");
     }
     if std::env::var("STRESS_BLAST_MASS").is_ok_and(|v| v == "native") {
         settings.mass_weighting = MassWeighting::Native;
+    }
+    // `STRESS_BLAST_FORCE_TOL=1e-3`: the force tolerance (vibe-land's VIBE_NATIVE_STRESS_FORCE_TOLERANCE).
+    if let Ok(t) = std::env::var("STRESS_BLAST_FORCE_TOL") {
+        settings.force_tolerance = t.parse().expect("STRESS_BLAST_FORCE_TOL");
     }
     let skip = !std::env::var("STRESS_BLAST_SKIP").is_ok_and(|v| v == "0");
     let (graph, materials) = BlastAuthoring::graph(&scene, settings).expect("graph");

@@ -40,7 +40,8 @@ public struct BlastParams
     public float dt;
     public float damage_rate;
     public uint apply_damage;
-    public uint pad;
+    // blast_native.slang: also stop when a step moves the forces by at most this fraction (0 off).
+    public float force_tolerance;
     // blast_fracture.slang: gravity (world, Z-up), and where fracture.slang's `work` and `atom`
     // keep the bonds' alive flags, the bodies' dirty marks and the counters.
     public float4 gravity;

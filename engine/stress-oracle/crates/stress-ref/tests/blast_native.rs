@@ -8,6 +8,31 @@ use stress_ref::math::Vec3;
 
 const G: f64 = 9.81;
 
+#[test]
+fn the_force_tolerance_stops_early_within_its_force_error() {
+    // vibe-land's VIBE_NATIVE_STRESS_FORCE_TOLERANCE=1e-3 (PhysX forceTolerance): in f32 the
+    // house's residual test has a floor that keeps a capped solve running every frame; the
+    // force test stops it, and the forces stay close to the converged ones.
+    let (graph, g) = house(BlastSettings {
+        force_tolerance: 1e-3,
+        ..native(16, 1e-3)
+    });
+    let accel = uniform(graph.node_count(), g);
+    let (exact_graph, _) = house(native(20_000, 1e-9));
+    let mut exact = BlastSolver::new(exact_graph);
+    exact.solve(&accel, false);
+    let mut s = BlastSolver::new(graph);
+    s.device_precision = true;
+    let mut last = Vec::new();
+    for _ in 0..30 {
+        last = s.solve(&accel, false);
+    }
+    let e = difference(&impulses(&s), &impulses(&exact));
+    println!("force tolerance: {last:?}; {e:.2e} from the converged forces");
+    assert!(last[0].converged && last[0].iterations <= 2, "{last:?}");
+    assert!(e < 1e-2, "{e:.2e}");
+}
+
 fn native(max_iterations: u32, tolerance: f64) -> BlastSettings {
     BlastSettings {
         max_iterations,

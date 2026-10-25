@@ -106,7 +106,7 @@ struct BlastParams_0
     float dt_0;
     float damage_rate_0;
     uint apply_damage_0;
-    uint pad_0;
+    float force_tolerance_0;
     float4 gravity_0;
     uint w_alive_0;
     uint a_dirty_0;
