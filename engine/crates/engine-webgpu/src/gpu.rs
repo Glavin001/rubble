@@ -563,6 +563,14 @@ impl WgpuSim {
             debug_assert_eq!(bufs.len(), binding);
             bufs.push(terrain_buffer(&device, binding, 256));
         }
+        // The render-only surface pass (terrain_surface.slang) binds 53: a
+        // placeholder (hosts that run the pass size it from SurfacePlan).
+        debug_assert_eq!(bufs.len(), engine_terrain::surface::SURFACE_BINDING);
+        bufs.push(terrain_buffer(
+            &device,
+            engine_terrain::surface::SURFACE_BINDING,
+            256,
+        ));
         // Pass table slots (256-byte aligned so dynamic offsets are legal).
         queue.write_buffer(&bufs[22], 0, &rigid_plan::pass_table());
 

@@ -55,9 +55,16 @@ export function decodeBlocks(words, at = 0) {
  * Terrain for `world` (world-host.mjs). `settings`: TerrainStep JSON (config,
  * sand, region_margin, z, speed_headroom, settle_speed, settle_frames).
  */
-export async function createTerrain(world, settings = {}, { wgslBase = './generated/wgsl/', status = () => {}, surface = false } = {}) {
+export async function createTerrain(world, settings = {}, { wgslBase = './generated/wgsl/', status = () => {}, surface = false, patch = null } = {}) {
   const device = world.device;
-  let plan = new TerrainStep(JSON.stringify(settings));
+  // patch: { collider, nx, nz }, a static heightfield the surface pass keeps
+  // on the live sand (wheel rays and contacts meet it; engine_terrain::surface).
+  const newPlan = () => {
+    const p = new TerrainStep(JSON.stringify(settings));
+    if (patch) p.set_surface_patch(patch.collider, patch.nx, patch.nz);
+    return p;
+  };
+  let plan = newPlan();
   const sizes = plan.buffer_sizes();
   const limit = Math.min(device.limits.maxBufferSize, device.limits.maxStorageBufferBindingSize);
   for (let i = 0; i < sizes.length; i += 3) {
@@ -113,11 +120,11 @@ export async function createTerrain(world, settings = {}, { wgslBase = './genera
     p.end();
   };
   // Blocks run one submission each, writes first (WgpuSim::terrain_submit).
-  const submitBlocks = (words, at = 0) => {
+  const submitBlocks = (words, at = 0, kernels = pipes) => {
     for (const block of decodeBlocks(words, at)) {
       block.writes.forEach(write);
       const enc = device.createCommandEncoder({ label: 'terrain' });
-      pass(enc, block);
+      pass(enc, block, undefined, kernels);
       device.queue.submit([enc.finish()]);
     }
   };
@@ -151,9 +158,12 @@ export async function createTerrain(world, settings = {}, { wgslBase = './genera
   /** A sourceless region over [lo, hi] with cells of dx. */
   terrain.openBox = (collider, field, lo, hi, dx) =>
     opened(collider, plan.open_box(collider, fieldWords(field), Float32Array.from(lo), Float32Array.from(hi), dx));
-  // The heightfield is the ground again: the surface's valid word off.
+  // The heightfield is the ground again: the surface's valid word off, and
+  // the patch (if any) sunk out of reach.
   const surfaceOff = () => {
-    if (surface) device.queue.writeBuffer(bufs[T.SURFACE], 4 * T.SURFACE_VALID_WORD, new Uint32Array(1));
+    if (!surface) return;
+    device.queue.writeBuffer(bufs[T.SURFACE], 4 * T.SURFACE_VALID_WORD, new Uint32Array(1));
+    if (patch) { submitBlocks(plan.surface_retire(), 0, surfacePipes); surfaceMoved(patch.collider); }
   };
   const baked = () => {
     surfaceOff();
@@ -204,6 +214,8 @@ export async function createTerrain(world, settings = {}, { wgslBase = './genera
     const [block] = decodeBlocks(words);
     block.writes.forEach(write);
     pass(enc, block, timestampWrites, surfacePipes, 'terrain surface');
+    // The patch's surface moved under its contacts.
+    if (patch) surfaceMoved(patch.collider);
     return true;
   };
   // After the frame's submission: map its counters; reports arrive in order.
@@ -236,7 +248,7 @@ export async function createTerrain(world, settings = {}, { wgslBase = './genera
   terrain.reset = () => {
     generation++;
     plan.free();
-    plan = new TerrainStep(JSON.stringify(settings));
+    plan = newPlan();
     terrain.plan = plan;
     terrain.region = null; terrain.report = null; terrain.error = null;
     terrain.lastKind = 0; terrain.lastSubsteps = 0; terrain.lastStep = -1;

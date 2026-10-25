@@ -32,8 +32,12 @@ pub const MPM_DEPOSIT_BINDING: usize = 51;
 /// Terrain look-ahead (`terrain_watch.slang`): parameters, then the GPU's pick.
 pub const MPM_WATCH_BINDING: usize = 52;
 pub const MPM_BINDING_END: usize = 53;
-/// Colliders one block cell of the region lists (`MPM_CELL_COLLIDERS`).
-pub const MPM_CELL_COLLIDERS: u32 = 8;
+/// Colliders one block cell of the region lists (`MPM_CELL_COLLIDERS`): 256, so
+/// a vehicle of many collider hulls (the dune buggy has 187) can drive into a
+/// region whose block cells are a few metres across. The coupling buffer holds
+/// 1 + 256 words per block (8.4 MB at 8192 blocks); a node only visits the
+/// colliders its cell lists.
+pub const MPM_CELL_COLLIDERS: u32 = 256;
 
 /// Counter words (`gMpmCounters`).
 pub const MPM_C_BLOCKS: usize = 0;
