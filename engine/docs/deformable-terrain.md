@@ -263,11 +263,45 @@ rests 2.6 mm in, at 0.2 mm/s. A box striking a sand block conserves the pair's
 momentum to 2e-5. The design question of T3 (does resting stability need an
 implicit AVBD coupling block?) is answered no for this case.
 
+**The contact exchange (fixed 2026-10-25).** Step 2 first held each node to an
+immovable body, then pushed the body with the whole reaction. That overshoots
+once the sand in contact outweighs about twice the body: a 4 kg box was thrown
+up at 136 m/s.
+
+Now each substep runs in this order:
+1. The grid records the holding impulse.
+2. `mpm_couple_gather` sums it with the contact nodes' mass m.
+3. Body and nodes (`mpm_couple_apply`, before G2P) take the share Me/(Me + m).
+
+For translation the share gives exactly their common velocity (perfectly
+inelastic, momentum conserved), stable at any mass ratio. Me is the effective
+mass at the farthest reach of the body's bounds, a lower bound over its contacts,
+so spin cannot overshoot either. A 1 kg box now rests on sand
+(`a_light_box_rests_on_sand_whatever_the_mass_ratio`).
+
+**Activation by strikes: a GPU look-ahead.** The user chose this over hit events,
+which reach the host 1–3 frames after the rigid step has already stopped the
+body on rigid ground.
+- After each step, `terrain_watch.slang` marches every awake dynamic collider's
+  ballistic path against the watched heightfields
+  (`World::terrain_watch_shape`).
+- It reports the most energetic strike that passes `TerrainDef::strike`'s
+  speed and energy and lies far enough ahead to act on.
+- The host opens a region before the next step. The region is sized by the
+  scaling of spheres dropped into dry sand (Uehara et al. 2003, penetration and
+  crater diameter) plus the region margin, and held until the strike has passed.
+- Strikes seen too late are counted (`terrain_missed_strikes`).
+- A region also stays open while any dynamic body coupled to it still moves.
+
+Result: a 0.2 m steel ball dropped 1 m opens its region while 0.31 m above the
+sand and penetrates 0.115 m, against Uehara's 0.194 m (0.59×, at 6 cells per
+body).
+
 Not yet:
-- hit events as the activation trigger;
 - coupling for bodies that rotate fast within a frame (poses are the frame's start);
-- the browser path (`mpm_grid` binds 9 storage buffers, past WebGPU's default 8);
-- the host's copy of an edited heightfield (it goes stale until a readback);
+- bodies buried at bake time: a heightfield cannot hold them, so the bake leaves
+  the surface where the sand's volume puts it, and the rigid contact pushes them
+  up onto it;
 - performance (about 1,900 dispatches per 60 Hz frame at physical stiffness).
 
 ## T4 status (2026-10-24)
