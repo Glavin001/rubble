@@ -381,6 +381,130 @@ fn activating_then_baking_unmoved_material_restores_the_terrain() {
     assert!(s.terrain_particles().is_empty());
 }
 
+/// The bake splats each activated particle bilinearly from its home sample
+/// moved by its displacement. So material moved rigidly by a fraction of a
+/// sample bakes as its columns moved: each column's volume is split by the
+/// tent weights between the samples around its new centre (the heights become
+/// the bilinear interpolation of the shifted columns, within one quantum per
+/// contributing particle), the volume's centroid moves by the shift (to 1e-3
+/// of a sample: the dithered rounding to whole quanta is unbiased, so it does
+/// not add up over the column's particles, which all moved alike), and no
+/// quantum is lost. Binning by the nearest sample instead moves whole lattice
+/// rows at a time (here 5 per sample), so the centroid would move by a
+/// multiple of 1/5 of a sample.
+#[test]
+fn material_moved_rigidly_bakes_as_its_columns_moved() {
+    let mut s = sim();
+    let cfg = TerrainConfig {
+        max_particles: 1 << 18,
+        ..config()
+    };
+    s.terrain_enable(&cfg).unwrap();
+    let (field, collider, origin) = mound(&mut s, 0.3, 0.5);
+    let before = gpu_heights(&s, collider, &field);
+    let plan = RegionPlan::spanning(
+        &cfg,
+        Vec3::new(-1.0, -0.8, -1.0),
+        Vec3::new(1.0, 0.0, 1.0),
+        0.05,
+        0,
+        0,
+    )
+    .unwrap();
+    s.terrain_activate(&plan, collider, &field, origin, 1600.0, 0.5)
+        .unwrap();
+    let lowered = gpu_heights(&s, collider, &field);
+    let (nx, nz) = field.samples();
+    let (dx, dz) = field.cell_size();
+    let x0 = field.vertex(0, 0);
+    let mut ps = s.terrain_particles();
+    let q = f64::from(ps[0].f[0][3]) / f64::from(ps[0].f[1][3].to_bits());
+    let qh = q / f64::from(dx * dz);
+    // Particles per home sample (activation records where it emitted each).
+    let mut count = vec![0u32; (nx * nz) as usize];
+    for p in &ps {
+        assert_ne!(
+            p.f[2][3].to_bits() & engine_terrain::layout::MPM_PARTICLE_HOME,
+            0,
+            "an activated particle without its home"
+        );
+        let i = ((p.c[1][3] - x0.x) / dx).round() as u32;
+        let j = ((p.c[2][3] - x0.z) / dz).round() as u32;
+        count[(j * nx + i) as usize] += 1;
+    }
+    let shift = (0.3f32, 0.55f32);
+    for p in &mut ps {
+        p.xm[0] += shift.0 * dx;
+        p.xm[2] += shift.1 * dz;
+    }
+    s.terrain_overwrite_particles(&ps).unwrap();
+    s.terrain_bake().unwrap();
+    let after = gpu_heights(&s, collider, &field);
+    let column = |i: i64, j: i64| -> (f64, u32) {
+        if i < 0 || j < 0 || i >= i64::from(nx) || j >= i64::from(nz) {
+            return (0.0, 0);
+        }
+        let k = (j * i64::from(nx) + i) as usize;
+        (f64::from(before[k] - lowered[k]), count[k])
+    };
+    let (wx, wz) = (
+        [1.0 - f64::from(shift.0), f64::from(shift.0)],
+        [1.0 - f64::from(shift.1), f64::from(shift.1)],
+    );
+    let mut worst = 0.0f64;
+    let (mut m0, mut m1) = ([0.0f64; 2], [0.0f64; 2]);
+    let (mut v0, mut v1) = (0.0f64, 0.0f64);
+    for j in 0..nz {
+        for i in 0..nx {
+            let k = (j * nx + i) as usize;
+            let (mut want, mut tol) = (f64::from(lowered[k]), 0.0f64);
+            for (a, wa) in wx.iter().enumerate() {
+                for (b, wb) in wz.iter().enumerate() {
+                    let (c, n) = column(i64::from(i) - a as i64, i64::from(j) - b as i64);
+                    want += wa * wb * c;
+                    tol += f64::from(n) * qh;
+                }
+            }
+            let err = (f64::from(after[k]) - want).abs();
+            worst = worst.max(err);
+            assert!(
+                err <= tol + 1e-5,
+                "sample ({i}, {j}): {} baked, {want} for the shifted columns (±{tol})",
+                after[k]
+            );
+            let v = field.vertex(i, j);
+            let (c, _) = column(i64::from(i), i64::from(j));
+            let d = f64::from(after[k] - lowered[k]);
+            v0 += c;
+            v1 += d;
+            m0[0] += c * f64::from(v.x);
+            m0[1] += c * f64::from(v.z);
+            m1[0] += d * f64::from(v.x);
+            m1[1] += d * f64::from(v.z);
+        }
+    }
+    assert!(
+        ((v1 - v0) / qh).abs() < 1e-4 * v0 / qh,
+        "volume {v0} before, {v1} after (heights × samples)"
+    );
+    let moved = [m1[0] / v1 - m0[0] / v0, m1[1] / v1 - m0[1] / v0];
+    eprintln!(
+        "rigid shift ({}, {}) samples: centroid moved ({:.5}, {:.5}) samples, worst height error {worst:.2e} m",
+        shift.0,
+        shift.1,
+        moved[0] / f64::from(dx),
+        moved[1] / f64::from(dz)
+    );
+    for (got, (want, d)) in moved.iter().zip([(shift.0, dx), (shift.1, dz)]) {
+        assert!(
+            (got / f64::from(d) - f64::from(want)).abs() < 1e-3,
+            "centroid moved {} samples, the material {want}",
+            got / f64::from(d)
+        );
+    }
+    assert!(s.terrain_particles().is_empty());
+}
+
 /// A sand mound opened as an active region, flowing for 1.5 s and baked back:
 /// no particle gains or loses quanta, and the heightfield ends with the volume it
 /// started with. (How far a mound this steep slumps is the granular-validation
@@ -416,11 +540,19 @@ fn a_sand_mound_flows_and_bakes_back_with_its_volume() {
         sand.friction_angle.tan(),
     )
     .unwrap();
-    let quanta: u64 = s
-        .terrain_particles()
+    let activated = s.terrain_particles();
+    let quanta: u64 = activated
         .iter()
         .map(|p| u64::from(p.f[1][3].to_bits()))
         .sum();
+    let home = |p: &MpmParticle| {
+        (
+            p.f[2][3].to_bits() & engine_terrain::layout::MPM_PARTICLE_HOME,
+            p.c[1][3].to_bits(),
+            p.c[2][3].to_bits(),
+        )
+    };
+    let homes: Vec<_> = activated.iter().map(home).collect();
     let (n, dt) = substeps_for(&cfg, 1.0 / 60.0, plan.dx, sand.p_wave_speed(), 5.0).unwrap();
     let mut last = 0.0;
     for _ in 0..90 {
@@ -434,6 +566,16 @@ fn a_sand_mound_flows_and_bakes_back_with_its_volume() {
     assert_eq!(
         moved, quanta,
         "particles lost or gained quanta while flowing"
+    );
+    // Flowing keeps each particle's record of where it was activated (the
+    // bake's reference), bit for bit, its flag word included.
+    assert!(homes.iter().all(|h| h.0 != 0));
+    assert!(
+        s.terrain_particles()
+            .iter()
+            .map(home)
+            .eq(homes.iter().copied()),
+        "a particle lost its home while flowing"
     );
     s.terrain_bake().unwrap();
     let after = gpu_heights(&s, collider, &field);

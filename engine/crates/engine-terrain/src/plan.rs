@@ -394,9 +394,10 @@ impl TerrainPlan {
         Ok(ops)
     }
 
-    /// Close the region: every particle's quanta go back onto the heightfield
-    /// sample it stands over (within the activation window), and the region
-    /// holds no particles.
+    /// Close the region: every particle's quanta are splatted bilinearly, in
+    /// whole quanta, onto the four heightfield samples around its home sample
+    /// moved by its displacement (window samples directly, others through the
+    /// deposits), and the region holds no particles.
     pub fn bake(&self) -> anyhow::Result<TerrainOps> {
         anyhow::ensure!(
             self.window_records > 0,
