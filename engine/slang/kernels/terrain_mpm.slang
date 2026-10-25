@@ -30,7 +30,7 @@
 // ballistic parcel holding its quanta (mpm_g2p; the particle's slot is left
 // dead); mpm_parcels flies parcels under gravity: one landing over the region
 // comes back as a particle, one landing elsewhere on the heightfield adds its
-// quanta to the four samples around it, split bilinearly in whole quanta
+// quanta to the nine samples around it, split by P2G's B-spline in whole quanta
 // (mpm_deposit_raise, once per frame), one leaving
 // the field's footprint is counted as escaped. Activated quanta always equal
 // particles + parcels + deposited + escaped.
@@ -39,9 +39,10 @@
 // mpm_activate_scan, mpm_activate_emit, mpm_activate_lower; mpm_bake_bin,
 // mpm_bake_raise, mpm_bake_header. Volume moves as whole quanta (params
 // column.y m³): a sample lowered by n quanta becomes particles holding exactly n,
-// and baking splats each particle's quanta back bilinearly, in whole quanta, onto
-// the four samples around its reference point (mpmBakeReference: unmoved
-// material bakes back exactly where it came from).
+// and baking splits each particle's quanta back in whole quanta, the share
+// still at rest with the tent from its home sample, the share the MPM moved
+// with P2G's B-spline (mpmHomeShare: unmoved material bakes back exactly where
+// it came from).
 // P2G is a gather (no float atomics, which WGSL lacks): every node sums its
 // particles in a fixed order, so runs and backends agree bit for bit.
 //
@@ -107,7 +108,7 @@ struct MpmParams
     uint4 counts;   // x = max particles, y = hash slots (power of two), z = max blocks, w = material
     uint4 dims;     // xyz = region size in cells, w = bed heightfield collider (MPM_NO_BLOCK: none)
     float4 limits;  // x = largest particle speed the substep's dt allows (CFL),
-                    // y = the bake's home fade (sample spacings; TerrainConfig::bake_home_fade)
+                    // y = the bake's home fade (lattice spacings; TerrainConfig::bake_home_fade)
     float4 sand;    // λ, μ, then sand/soil: friction (DP α, or sin φ for Mohr–Coulomb), cohesion
                     // (DP: apex stretch; dry MC: 0; soil: c·cos φ in Pa); rock: f_t, E·G_f/f_t
     uint4 window;   // heightfield samples under the region: i0, j0, ni, nj
@@ -1368,42 +1369,42 @@ void mpm_activate_lower(uint3 tid : SV_DispatchThreadID)
     }
 }
 
-// The bake (mpm_bake_bin) and the parcels' deposits (mpm_parcels) splat each
-// particle's or parcel's quanta bilinearly onto the four heightfield samples
-// around its reference point: the tent weights (1 - t)·(1 - s), ..., t·s, split
-// into whole quanta that sum exactly to the particle's (mpmTentSplit).
+// The bake (mpm_bake_bin) and the parcels' deposits (mpm_parcels) split each
+// particle's or parcel's quanta between heightfield samples, in whole quanta
+// that sum exactly to the particle's (mpmTentSplit, mpmBsplineSplit).
 //
-// The reference point of a particle made by activation is its position less
-// a fading share of its rest offset in its home sample's cell:
-//   u = x/spacing - w·o,  w = max(0, 1 - |x - x₀|/(fade·spacing)),
-// x₀ where it was emitted (MpmParticle c1.w, c2.w), o = x₀'s offset from its
-// home sample (in spacings), fade = params limits.y (TerrainConfig::
-// bake_home_fade). Activation lays a sample's particles on a lattice across
-// the sample's cell, so splatting an unmoved particle at x would spread
-// off-centre particles onto the neighbours. At rest (w = 1) the reference is
-// the home sample plus the displacement: zero displacement is weight 1 on the
-// home sample, so activate-then-bake is the identity exactly. Material that
-// has flowed no longer keeps its rest lattice (near a crater's centre one
-// column is stretched over several samples, and taking out the rest offsets
-// piles each column into a ridge), so from `fade` spacings on (w = 0) the
-// particle splats at its own position. Particles not made by activation
-// (loaded by the host, or landed parcels re-entering the region) splat at x.
+// Two kernels, blended by how far a particle made by activation has moved,
+// w = max(0, 1 - |x - x₀|/(fade·s)) (x₀ where it was emitted, in MpmParticle
+// c1.w, c2.w; s the activation lattice's spacing, params column.z; fade =
+// params limits.y, TerrainConfig::bake_home_fade, by default half a lattice
+// spacing: the particle has left its own lattice cell):
+// - The share w is the heightfield the particle came from: the tent (bilinear,
+//   four samples) at its home sample plus its displacement. Activation lays a
+//   sample's particles on a lattice across the sample's cell; at zero
+//   displacement this puts all of it back on the home sample, so
+//   activate-then-bake is the identity exactly.
+// - The share 1 - w is material the MPM moved: the quadratic B-spline (nine
+//   samples) at its own position, the kernel P2G gives the grid its mass
+//   with. The simulation resolves no finer than that: particles may part
+//   within a cell (a sub-cell crack, as along a crater's mirror planes through
+//   the impact point, where nothing mixes across) without any force on the
+//   grid to close it. A narrower kernel bakes such a gap as a trench a sample
+//   wide; the grid's own kernel bakes the mass the simulation computed with.
+// Particles not made by activation (loaded by the host, or landed parcels)
+// have w = 0. Sand pushed off a buried body (mpmBakeColumn) is placed by that
+// rule, not by the flow: it splats with the tent at its new place.
 
-// Sample coordinates (heightfield-local x, z over the spacing) of a particle's
-// reference point; `xl` is its position in the heightfield's frame.
-float2 mpmBakeReference(MpmParticle q, float3 xl, HeightFieldRef hf, bool pushed, float fade)
+// The share of a particle that is still the heightfield it came from (w
+// above), and where its tent goes: its home sample plus its displacement, in
+// sample coordinates. 0 for a particle not made by activation.
+float mpmHomeShare(MpmParticle q, float3 xl, HeightFieldRef hf, MpmParams p, out float2 uHome)
 {
     float2 d = float2(hf.dx, hf.dz), o = float2(hf.x0, hf.z0);
-    float2 u = (xl.xz - o) / d;
-    if (pushed || (asuint(q.f2.w) & MPM_PARTICLE_HOME) == 0u) return u;
+    uHome = (xl.xz - o) / d;
+    if ((asuint(q.f2.w) & MPM_PARTICLE_HOME) == 0u) return 0.0;
     float2 x0 = float2(q.c1.w, q.c2.w);
-    float2 s0 = (x0 - o) / d;
-    float2 home = floor(s0 + 0.5);
-    float2 moved = (xl.xz - x0) / d;
-    float w = max(0.0, 1.0 - length(moved) / fade);
-    // Unmoved: exactly the home sample (no rounding through u and the offset).
-    if (w >= 1.0) return home + moved;
-    return u - (s0 - home) * w;
+    uHome = floor((x0 - o) / d + 0.5) + (xl.xz - x0) / d;
+    return max(0.0, 1.0 - length(xl.xz - x0) / (p.limits.y * p.column.z));
 }
 
 // PCG integer hash (Jarzynski & Olano 2020).
@@ -1444,6 +1445,49 @@ void mpmTentSplit(float2 u, uint quanta, uint seed, out int2 s0, out uint4 parts
 }
 
 int2 mpmTentSample(int2 s0, uint c) { return s0 + int2(int(c & 1u), int(c >> 1u)); }
+
+// Quadratic B-spline weights at sample coordinate u (P2G's kernel, in sample
+// spacings) over samples base, base + 1, base + 2.
+float3 mpmBsplineWeights(float u, out int base)
+{
+    float b = floor(u - 0.5);
+    float f = u - b;
+    base = int(b);
+    return float3(0.5 * (1.5 - f) * (1.5 - f), 0.75 - (f - 1.0) * (f - 1.0), 0.5 * (f - 0.5) * (f - 0.5));
+}
+
+// Whole-quanta split of q in the proportions w (summing to 1): the third part
+// first, then the first two, each rounded with a dither from the chain h.
+// Never negative, summing exactly to q; a zero weight gets nothing.
+uint3 mpmSplit3(uint q, float3 w, inout uint h)
+{
+    h = mpmPcgHash(h);
+    uint q2 = min(uint(floor(float(q) * w.z + mpmDither(h))), q);
+    uint rest = q - q2;
+    float ab = w.x + w.y;
+    h = mpmPcgHash(h);
+    uint q0 = ab > 0.0 ? min(uint(floor(float(rest) * (w.x / ab) + mpmDither(h))), rest) : 0u;
+    return uint3(q0, rest - q0, q2);
+}
+
+// The B-spline split of `quanta` at sample coordinates u: parts[3k + m] for
+// sample s0 + (m, k), split along x, then each third along z (dithered from
+// `seed`, as mpmTentSplit).
+void mpmBsplineSplit(float2 u, uint quanta, uint seed, out int2 s0, out uint parts[9])
+{
+    int bx, bz;
+    float3 wx = mpmBsplineWeights(u.x, bx), wz = mpmBsplineWeights(u.y, bz);
+    s0 = int2(bx, bz);
+    uint h = mpmPcgHash(seed ^ 0xB5297A4Du);
+    uint3 qx = mpmSplit3(quanta, wx, h);
+    for (uint m = 0u; m < 3u; m++)
+    {
+        uint3 qz = mpmSplit3(qx[m], wz, h);
+        parts[m] = qz.x;
+        parts[3u + m] = qz.y;
+        parts[6u + m] = qz.z;
+    }
+}
 
 // `quanta` baked onto sample s: a window sample's column, or, outside the
 // window (material that flowed past it inside the region's box), the field's
@@ -1511,8 +1555,18 @@ bool mpmBakeColumn(inout float3 x, MpmParams p, float spacing)
     return false;
 }
 
-// Per particle: its quanta splatted onto the four samples around its reference
-// point (see above).
+// `quanta` of material the MPM moved, at sample coordinates u: the B-spline
+// split onto its nine samples (mpmBakeOnto).
+void mpmBakeMoved(float2 u, uint quanta, uint seed, MpmParams p, HeightFieldRef hf)
+{
+    int2 s0;
+    uint parts[9];
+    mpmBsplineSplit(u, quanta, seed, s0, parts);
+    for (uint k = 0u; k < 9u; k++) mpmBakeOnto(s0 + int2(int(k % 3u), int(k / 3u)), parts[k], p, hf);
+}
+
+// Per particle: its quanta split between the heightfield it came from and the
+// material the MPM moved (see above).
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void mpm_bake_bin(uint3 tid : SV_DispatchThreadID)
@@ -1527,11 +1581,24 @@ void mpm_bake_bin(uint3 tid : SV_DispatchThreadID)
     if (mpmParticleDead(q)) return;
     float3 x = q.xm.xyz;
     bool pushed = mpmBakeColumn(x, p, max(hf.dx, hf.dz));
-    float2 u = mpmBakeReference(q, frameToLocal(f, x), hf, pushed, p.limits.y);
+    float3 xl = frameToLocal(f, x);
+    uint quanta = asuint(q.f1.w);
     int2 s0;
     uint4 parts;
-    mpmTentSplit(u, asuint(q.f1.w), i, s0, parts);
+    if (pushed)
+    {
+        mpmTentSplit((xl.xz - float2(hf.x0, hf.z0)) / float2(hf.dx, hf.dz), quanta, i, s0, parts);
+        for (uint c = 0u; c < 4u; c++) mpmBakeOnto(mpmTentSample(s0, c), parts[c], p, hf);
+        return;
+    }
+    float2 uHome;
+    float w = mpmHomeShare(q, xl, hf, p, uHome);
+    // The heightfield's share (all of it at rest: floor(q + r) = q).
+    uint home = min(uint(floor(float(quanta) * w + mpmDither(mpmPcgHash(~i)))), quanta);
+    mpmTentSplit(uHome, home, i, s0, parts);
     for (uint c = 0u; c < 4u; c++) mpmBakeOnto(mpmTentSample(s0, c), parts[c], p, hf);
+    if (home == quanta) return;
+    mpmBakeMoved((xl.xz - float2(hf.x0, hf.z0)) / float2(hf.dx, hf.dz), quanta - home, i, p, hf);
 }
 
 [shader("compute")]
@@ -1795,37 +1862,37 @@ uint mpmOrderedBits(float h)
 }
 
 // A parcel landed at `xl` (heightfield-local, over the field): its quanta
-// splatted onto the four samples around it (mpmTentSplit, seeded by `seed`),
-// all or none. A share on a sample past the field's edge (which a parcel over
-// the field reaches only with a vanishing weight) escapes. Returns false,
-// raising MPM_OVERFLOW_FIELD and depositing nothing, when a share's sample
-// has no deposit slot.
+// split onto the nine samples around it with the B-spline (mpmBsplineSplit,
+// seeded by `seed`), as the bake splits moved material, all or none. A share
+// on a sample past the field's edge escapes. Returns false, raising
+// MPM_OVERFLOW_FIELD and depositing nothing, when a share's sample has no
+// deposit slot.
 bool mpmParcelDeposit(float3 xl, uint quanta, uint seed, MpmParams p, HeightFieldRef hf)
 {
     int2 s0;
-    uint4 parts;
-    mpmTentSplit((xl.xz - float2(hf.x0, hf.z0)) / float2(hf.dx, hf.dz), quanta, seed, s0, parts);
-    for (uint c = 0u; c < 4u; c++)
+    uint parts[9];
+    mpmBsplineSplit((xl.xz - float2(hf.x0, hf.z0)) / float2(hf.dx, hf.dz), quanta, seed, s0, parts);
+    for (uint k = 0u; k < 9u; k++)
     {
-        int2 s = mpmTentSample(s0, c);
+        int2 s = s0 + int2(int(k % 3u), int(k / 3u));
         bool on = s.x >= 0 && s.y >= 0 && s.x < int(hf.nx) && s.y < int(hf.nz);
-        if (parts[c] != 0u && on && uint(s.y) * hf.nx + uint(s.x) >= asuint(p.couple.w))
+        if (parts[k] != 0u && on && uint(s.y) * hf.nx + uint(s.x) >= asuint(p.couple.w))
         {
             AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_FIELD);
             return false;
         }
     }
-    for (uint c = 0u; c < 4u; c++)
+    for (uint k = 0u; k < 9u; k++)
     {
-        if (parts[c] == 0u) continue;
-        int2 s = mpmTentSample(s0, c);
+        if (parts[k] == 0u) continue;
+        int2 s = s0 + int2(int(k % 3u), int(k / 3u));
         if (s.x < 0 || s.y < 0 || s.x >= int(hf.nx) || s.y >= int(hf.nz))
         {
-            AADD2(gMpmCounters[MPM_C_ESCAPED], parts[c]);
+            AADD2(gMpmCounters[MPM_C_ESCAPED], parts[k]);
             continue;
         }
-        AADD2(gMpmDeposit[uint(s.y) * hf.nx + uint(s.x)], parts[c]);
-        AADD2(gMpmCounters[MPM_C_DEPOSITED], parts[c]);
+        AADD2(gMpmDeposit[uint(s.y) * hf.nx + uint(s.x)], parts[k]);
+        AADD2(gMpmCounters[MPM_C_DEPOSITED], parts[k]);
     }
     return true;
 }

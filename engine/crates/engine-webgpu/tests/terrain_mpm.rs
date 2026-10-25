@@ -383,17 +383,18 @@ fn activating_then_baking_unmoved_material_restores_the_terrain() {
 
 /// Activate the mound, move every particle rigidly by `shift` samples, bake,
 /// and check the bake against its definition (`terrain_mpm.slang`,
-/// `mpmBakeReference`): each activated particle is splatted bilinearly at
-/// u = x/spacing − w·o, o its rest offset in its home sample's cell and
-/// w = max(0, 1 − |displacement|/fade), with fade = `bake_home_fade`.
-/// - The heights equal that splat, within one quantum per particle reaching
-///   the sample (each particle's share is rounded to whole quanta).
+/// `mpmHomeShare`): a share w = max(0, 1 − |displacement|/(fade·s)) of each
+/// activated particle (s the lattice spacing, fade = `bake_home_fade`) goes
+/// with the bilinear tent to its home sample plus its displacement; the rest
+/// with P2G's quadratic B-spline at its position.
+/// - The heights equal that splat, within three quanta per particle reaching
+///   the sample (each split rounds to whole quanta: the share, then x, then z).
 /// - The volume is exact, and its centroid is the splat's (the rounding is
-///   unbiased) and moves with the shift: a column's rest offsets are
-///   symmetric about its sample and all its particles moved alike, so their
-///   w·o nearly cancel (only the extra quanta of `quanta mod n` break the
-///   symmetry). Binning by the nearest sample instead moves whole lattice rows
-///   at a time (here 5 per sample).
+///   unbiased) and moves with the shift (both kernels keep the first moment;
+///   only the extra quanta of `quanta mod n`, which go to a column's first
+///   particles, keep part of the lattice's offsets in it). Binning by the
+///   nearest sample instead moves whole lattice rows at a time (here 5 per
+///   sample).
 /// Returns the worst height error (m).
 fn bake_after_rigid_shift(shift: (f32, f32)) -> f64 {
     let mut s = sim();
@@ -419,7 +420,7 @@ fn bake_after_rigid_shift(shift: (f32, f32)) -> f64 {
     let (nx, nz) = field.samples();
     let (dx, dz) = field.cell_size();
     let x0 = field.vertex(0, 0);
-    let fade = f64::from(cfg.bake_home_fade);
+    let fade = f64::from(cfg.bake_home_fade * plan.dx / cfg.particles_per_cell_axis as f32);
     let mut ps = s.terrain_particles();
     let q = f64::from(ps[0].f[0][3]) / f64::from(ps[0].f[1][3].to_bits());
     let qh = q / f64::from(dx * dz);
@@ -444,18 +445,44 @@ fn bake_after_rigid_shift(shift: (f32, f32)) -> f64 {
         };
         let (ux, ox) = axis(p.xm[0] - origin.x, p.c[1][3], x0.x, dx);
         let (uz, oz) = axis(p.xm[2] - origin.z, p.c[2][3], x0.z, dz);
-        let moved = f64::from(shift.0).hypot(f64::from(shift.1));
+        let moved = f64::from(shift.0 * dx).hypot(f64::from(shift.1 * dz));
         let w = (1.0 - moved / fade).max(0.0);
-        let (ux, uz) = (ux - w * ox, uz - w * oz);
-        let (i0, j0) = (ux.floor(), uz.floor());
-        let (tx, tz) = (ux - i0, uz - j0);
-        for (a, wa) in [(0, 1.0 - tx), (1, tx)] {
-            for (b, wb) in [(0, 1.0 - tz), (1, tz)] {
-                let (i, j) = (i0 as i64 + a, j0 as i64 + b);
-                if wa * wb > 0.0 && i >= 0 && j >= 0 && i < i64::from(nx) && j < i64::from(nz) {
-                    let k = (j * i64::from(nx) + i) as usize;
-                    want[k] += wa * wb * quanta;
-                    reach[k] += 1;
+        let tent = |t: f64| {
+            let b = t.floor();
+            [
+                (b as i64, 1.0 - (t - b)),
+                (b as i64 + 1, t - b),
+                (b as i64 + 2, 0.0),
+            ]
+        };
+        let bspline = |t: f64| {
+            let b = (t - 0.5).floor();
+            let f = t - b;
+            [
+                (b as i64, 0.5 * (1.5 - f).powi(2)),
+                (b as i64 + 1, 0.75 - (f - 1.0).powi(2)),
+                (b as i64 + 2, 0.5 * (f - 0.5).powi(2)),
+            ]
+        };
+        let mut seen = std::collections::HashSet::new();
+        for (share, kx, kz) in [
+            (w, tent(ux - ox), tent(uz - oz)),
+            (1.0 - w, bspline(ux), bspline(uz)),
+        ] {
+            for (i, wa) in kx {
+                for (j, wb) in kz {
+                    if share * wa * wb > 0.0
+                        && i >= 0
+                        && j >= 0
+                        && i < i64::from(nx)
+                        && j < i64::from(nz)
+                    {
+                        let k = (j * i64::from(nx) + i) as usize;
+                        want[k] += share * wa * wb * quanta;
+                        if seen.insert(k) {
+                            reach[k] += 1;
+                        }
+                    }
                 }
             }
         }
@@ -471,7 +498,7 @@ fn bake_after_rigid_shift(shift: (f32, f32)) -> f64 {
             let k = (j * nx + i) as usize;
             let d = f64::from(after[k] - lowered[k]);
             let err = (d - want[k] * qh).abs();
-            let tol = f64::from(reach[k]) * qh;
+            let tol = 3.0 * f64::from(reach[k]) * qh;
             worst = worst.max(err);
             assert!(
                 err <= tol + 1e-5,
@@ -529,13 +556,14 @@ fn bake_after_rigid_shift(shift: (f32, f32)) -> f64 {
 }
 
 /// Material moved rigidly bakes as the splat defines, keeps its volume and
-/// moves its centroid by the shift: within the home fade (here 0.63 of the
-/// one-spacing fade, so the rest offsets are partly taken out) and beyond it
-/// (each particle at its own position). Zero shift is the identity
+/// moves its centroid by the shift: within the home fade (a shift of 0.063
+/// samples is 0.63 of the half-lattice-spacing fade here, so part of each
+/// particle still goes to its home sample) and beyond it (all of it with the
+/// B-spline at its position). Zero shift is the identity
 /// (`activating_then_baking_unmoved_material_restores_the_terrain`).
 #[test]
 fn material_moved_rigidly_bakes_as_the_splat_defines() {
-    bake_after_rigid_shift((0.3, 0.55));
+    bake_after_rigid_shift((0.03, 0.055));
     bake_after_rigid_shift((1.3, -0.55));
 }
 

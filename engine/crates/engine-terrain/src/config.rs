@@ -35,24 +35,27 @@ pub struct TerrainConfig {
     pub max_coupled: u32,
     /// Samples of the bed heightfield parcels may land on.
     pub max_field_samples: u32,
-    /// How far an activated particle moves (in heightfield sample spacings,
-    /// sideways) before the bake stops placing it by its home sample.
+    /// How far an activated particle moves sideways (in spacings of the
+    /// activation lattice, `cells` / `particles_per_cell_axis`) before the
+    /// bake treats it as material the MPM moved rather than as the heightfield
+    /// it came from.
     ///
     /// Activation lays a sample's material out as a lattice of particles
     /// across the sample's cell. At rest each particle stands for a share of
-    /// that one sample, so the bake splats it from the sample's centre moved
-    /// by its displacement, and activate-then-bake is the identity. Once the
-    /// material has flowed, the particles of a column no longer keep their
-    /// rest spacing: near a crater's centre a column is stretched over
-    /// several samples, and putting its particles back at their rest offsets
-    /// piles its volume into ridges. There each particle's own position says
-    /// best where its volume is. The bake blends the two linearly: the full
-    /// rest offset is taken out at zero displacement, none from this
-    /// displacement on.
+    /// that one sample: the bake puts it back there with the bilinear tent
+    /// (its home sample plus its displacement), and activate-then-bake is the
+    /// identity. Material the MPM moved is baked with the kernel P2G gives the
+    /// grid its mass with, the quadratic B-spline, at its own position: the
+    /// simulation resolves nothing finer, and finer arrangements of its
+    /// particles (sub-cell cracks along a crater's mirror planes, columns
+    /// stretched over several samples) would otherwise bake as trenches or
+    /// ridges a sample wide. The share at home falls linearly from 1 at rest
+    /// to 0 at this displacement.
     ///
-    /// One spacing (the default) is the smallest move that can take a
-    /// particle across to another sample. On the browser demo's crater it
-    /// removed the ridges and kept the rim smooth
+    /// Half a spacing (the default) is where a particle leaves its own
+    /// lattice cell: past it, where it sat in the rest lattice no longer says
+    /// where its volume is. On the browser demo's crater the axes then stand
+    /// within 0.5 m of their neighbours, against 2.2 m at two spacings
     /// (`engine/docs/deformable-terrain.md`, "The splat bake").
     pub bake_home_fade: f32,
     /// How the ground around an activated region (its bed and side walls)
@@ -114,7 +117,7 @@ impl Default for TerrainConfig {
             max_columns: 1 << 16,
             max_coupled: 256,
             max_field_samples: 1 << 20,
-            bake_home_fade: 1.0,
+            bake_home_fade: 0.5,
             boundary: RegionBoundary::Absorbing,
             initial_stress: InitialStress::Geostatic,
             max_boundary_nodes: 1 << 18,
