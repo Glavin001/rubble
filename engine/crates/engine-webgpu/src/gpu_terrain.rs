@@ -47,6 +47,9 @@ pub struct TerrainStepReport {
     pub escaped: u32,
     /// Parcels still in flight after the last substep.
     pub airborne: u32,
+    /// Fastest surface speed of a dynamic body coupled to the region this
+    /// frame (m/s; 0 without coupling).
+    pub body_speed: f32,
 }
 
 /// Quanta per lattice particle: a column's volume is rounded to s³/64 (s the
@@ -416,7 +419,7 @@ impl WgpuSim {
                 None,
             );
             for _ in 0..substeps {
-                self.encode_terrain_substep(&mut pass, clear);
+                self.encode_terrain_substep(&mut pass, clear, None);
             }
             self.encode_terrain_deposits(&mut pass);
         }
@@ -461,8 +464,15 @@ impl WgpuSim {
         Ok(())
     }
 
-    /// One MPM substep's dispatches (`clear`: hash words to empty).
-    fn encode_terrain_substep<'a>(&'a self, pass: &mut wgpu::ComputePass<'a>, clear: u64) {
+    /// One MPM substep's dispatches (`clear`: hash words to empty). With
+    /// `coupled` (the coupling slots), the rigid contacts' exchange runs between
+    /// the grid update and G2P.
+    fn encode_terrain_substep<'a>(
+        &'a self,
+        pass: &mut wgpu::ComputePass<'a>,
+        clear: u64,
+        coupled: Option<u64>,
+    ) {
         self.disp(pass, "mpm_clear", clear, None);
         self.disp(pass, "mpm_write_args", 1, None);
         self.disp_terrain_particles(pass, "mpm_touch");
@@ -474,6 +484,10 @@ impl WgpuSim {
         self.disp_terrain_particles(pass, "mpm_payload");
         self.disp_terrain_blocks(pass, "mpm_p2g");
         self.disp_terrain_blocks(pass, "mpm_grid");
+        if let Some(slots) = coupled {
+            self.disp(pass, "mpm_couple_gather", slots * 64, None);
+            self.disp_terrain_blocks(pass, "mpm_couple_apply");
+        }
         self.disp_terrain_particles(pass, "mpm_g2p");
         self.disp_terrain_indirect(pass, "mpm_parcels", 24);
     }
@@ -582,6 +596,7 @@ impl WgpuSim {
             deposited: c[MPM_C_DEPOSITED],
             escaped: c[MPM_C_ESCAPED],
             airborne: c[MPM_C_AIRBORNE],
+            body_speed: f32::from_bits(c[MPM_C_BODY_SPEED]),
         })
     }
 
@@ -629,13 +644,7 @@ impl WgpuSim {
             );
             self.disp(&mut pass, "mpm_couple_bin", colliders, None);
             for _ in 0..substeps {
-                self.encode_terrain_substep(&mut pass, clear);
-                self.disp(
-                    &mut pass,
-                    "mpm_couple_gather",
-                    u64::from(cfg.max_coupled) * 64,
-                    None,
-                );
+                self.encode_terrain_substep(&mut pass, clear, Some(u64::from(cfg.max_coupled)));
             }
             self.encode_terrain_deposits(&mut pass);
             self.disp(
@@ -695,8 +704,7 @@ impl WgpuSim {
             self.disp(&mut pass, "mpm_couple_clear", cells, None);
             self.disp(&mut pass, "mpm_couple_bin", colliders, None);
             for _ in 0..substeps {
-                self.encode_terrain_substep(&mut pass, clear);
-                self.disp(&mut pass, "mpm_couple_gather", slots * 64, None);
+                self.encode_terrain_substep(&mut pass, clear, Some(slots));
             }
             self.encode_terrain_deposits(&mut pass);
             self.disp(&mut pass, "mpm_couple_emit", slots, None);

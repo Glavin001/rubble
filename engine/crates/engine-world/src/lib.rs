@@ -59,7 +59,7 @@ pub use joints::{
 pub use math::Transform;
 pub use readback::Backpressure;
 pub use rig::VehicleDamage;
-pub use terrain::TerrainDef;
+pub use terrain::{StrikeDef, TerrainDef};
 pub use engine_terrain::{
     CraterPrediction, CraterTarget, ExplosionSource, ImpactSource, RegionPlan, SandMaterial,
     TerrainConfig, TerrainError, YieldSurface,
@@ -217,6 +217,8 @@ enum Extra {
     TerrainCounters,
     /// A baked heightfield's samples, for the host mirror.
     TerrainHeights(ShapeId),
+    /// The terrain look-ahead's pick after this step.
+    TerrainWatch,
 }
 
 #[derive(Clone, Debug)]
@@ -1527,6 +1529,7 @@ impl World {
                 label: Some("world step"),
             });
         // The terrain's substeps go first: the rigid step applies their reactions.
+        self.terrain_open_strike()?;
         let terrain = self.terrain_encode(&mut enc)?;
         self.sim
             .step_encode(&mut enc)
@@ -1548,7 +1551,12 @@ impl World {
                 if !batches.is_empty() {
                     self.sim.encode_ray_queries(&mut enc);
                 }
-                let copies = self.terrain_extras(terrain);
+                let watched = self.terrain_watching();
+                if watched {
+                    // Reads the step's end state: after the rigid step.
+                    self.sim.terrain_encode_watch(&mut enc);
+                }
+                let copies = self.terrain_extras(terrain, watched);
                 let mut extras = extras(
                     &self.sim,
                     self.resync,
@@ -1876,6 +1884,7 @@ impl World {
                 }
                 Extra::TerrainCounters => terrain = Some(self.terrain_counters(step, bytes)?),
                 Extra::TerrainHeights(id) => self.terrain_heights(*id, bytes),
+                Extra::TerrainWatch => self.terrain_strike(step, bytes),
             }
         }
         Ok(Frame {

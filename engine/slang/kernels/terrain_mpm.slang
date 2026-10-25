@@ -64,6 +64,7 @@ static const uint MPM_C_DEPOSITED = 6u;   // quanta parcels have laid on the hei
 static const uint MPM_C_ESCAPED = 7u;     // quanta that left the heightfield's footprint
 static const uint MPM_C_SORTED = 8u;      // sorted slots claimed by blocks this substep
 static const uint MPM_C_AIRBORNE = 9u;    // parcels still in flight after this substep
+static const uint MPM_C_BODY_SPEED = 10u; // fastest dynamic body coupled this frame (f32 bits)
 static const uint MPM_OVERFLOW_BLOCKS = 1u;
 static const uint MPM_OVERFLOW_HASH = 2u;
 static const uint MPM_OUTSIDE = 4u;
@@ -683,8 +684,9 @@ void mpmRigidContact(uint n, uint b, float m, MpmParams p, inout float3 v)
     float mu = p.step.w;
     float3 relNew = st <= -mu * vn ? float3(0, 0, 0) : vt * (1.0 + mu * vn / st);
     float3 vNew = vb + relNew;
+    // The impulse that would hold the node to the body as if the body were
+    // immovable; mpm_couple_apply applies the share the body's mass allows.
     gMpmGrid[2u * n + 1u] = float4(m * (vNew - v), float(bestSlot));
-    v = vNew;
 }
 
 // Grid velocity: momentum over mass, gravity, then the bed (the heightfield
@@ -1099,6 +1101,7 @@ void mpm_couple_clear(uint3 tid : SV_DispatchThreadID)
         ASTORE(gMpmCouple[0], 0u);
         // Once per frame: the frame's top speed, over all its substeps.
         ASTORE(gMpmCounters[MPM_C_MAX_SPEED], 0u);
+        ASTORE(gMpmCounters[MPM_C_BODY_SPEED], 0u);
     }
     if (c < blocks.x * blocks.y * blocks.z) ASTORE(gMpmCouple[4u + c * (1u + MPM_CELL_COLLIDERS)], 0u);
 }
@@ -1125,6 +1128,13 @@ void mpm_couple_bin(uint3 tid : SV_DispatchThreadID)
     k1 = min(k1, blocks - 1);
     if (any(k1 < k0)) return;
     uint slot;
+    // The region cannot settle while a dynamic body in it still moves: its
+    // fastest surface point (linear plus spin over its bounds' half diagonal).
+    if (b.invMass > 0.0)
+    {
+        float reach = 0.5 * length(hi - lo);
+        AMAX2(gMpmCounters[MPM_C_BODY_SPEED], asuint(length(b.linearVel) + length(b.angularVel) * reach));
+    }
     AADD3(gMpmCouple[0], 1u, slot);
     if (slot >= asuint(p.couple.y))
     {
@@ -1149,6 +1159,7 @@ void mpm_couple_bin(uint3 tid : SV_DispatchThreadID)
 
 groupshared float3 gsMpmJ[64];
 groupshared float3 gsMpmL[64];
+groupshared float gsMpmM[64];
 
 // One workgroup per coupling slot (dynamic bodies): the substep's reaction on
 // the body, minus the momentum its contacts gave the grid nodes, in a fixed order
@@ -1162,6 +1173,7 @@ void mpm_couple_gather(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     MpmParams p = mpmParams();
     bool live = slot < min(ALOAD(gMpmCouple[0]), asuint(p.couple.y));
     float3 J = float3(0, 0, 0), L = float3(0, 0, 0);
+    float M = 0.0;
     if (live)
     {
         uint ci = asuint(gMpmCoupled[4u * slot].w);
@@ -1187,11 +1199,13 @@ void mpm_couple_gather(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                 float3 xw = p.origin.xyz + float3(g) * p.origin.w;
                 J -= rec.xyz;
                 L -= cross(xw - b.position, rec.xyz);
+                M += gMpmGrid[2u * (bk * MPM_BLOCK_NODES + l)].w;
             }
         }
     }
     gsMpmJ[l] = J;
     gsMpmL[l] = L;
+    gsMpmM[l] = M;
     GROUP_SYNC();
     for (uint d = 32u; d > 0u; d >>= 1u)
     {
@@ -1199,24 +1213,59 @@ void mpm_couple_gather(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         {
             gsMpmJ[l] += gsMpmJ[l + d];
             gsMpmL[l] += gsMpmL[l + d];
+            gsMpmM[l] += gsMpmM[l + d];
         }
         GROUP_SYNC();
     }
     if (live && l == 0u)
     {
         float4 a = gMpmCoupled[4u * slot], c = gMpmCoupled[4u * slot + 1u];
-        gMpmCoupled[4u * slot] = float4(a.xyz + gsMpmJ[0], a.w);
-        gMpmCoupled[4u * slot + 1u] = float4(c.xyz + gsMpmL[0], 0.0);
-        BodyState b = gBodies[gColliders[asuint(a.w)].body];
+        Collider col = gColliders[asuint(a.w)];
+        BodyState b = gBodies[col.body];
+        // The exchange is perfectly inelastic: the contact nodes and the body
+        // take the share a = Me/(Me + m) of the impulse that would hold the nodes
+        // to an immovable body (m: the contact nodes' mass). For a translating
+        // body (Me = M) that is exactly their common velocity, stable at any mass
+        // ratio. Me is the body's effective mass at the farthest reach of its
+        // bounds (a lower bound over its contacts), so spin cannot overshoot.
+        float share = 1.0;
         if (bodyIsDynamic(b))
         {
-            float3 local = quatRotate(quatConjugate(b.orientation), gsMpmL[0]);
+            float3 lo, hi;
+            mpmColliderBounds(col, b, p, lo, hi);
+            float reach = 0.5 * length(hi - lo);
+            float invI = max(b.invInertia.x, max(b.invInertia.y, b.invInertia.z));
+            float invMe = b.invMass + reach * reach * invI;
+            share = 1.0 / (1.0 + gsMpmM[0] * invMe);
+        }
+        float3 Jt = share * gsMpmJ[0], Lt = share * gsMpmL[0];
+        gMpmCoupled[4u * slot] = float4(a.xyz + Jt, a.w);
+        gMpmCoupled[4u * slot + 1u] = float4(c.xyz + Lt, share);
+        if (bodyIsDynamic(b))
+        {
+            float3 local = quatRotate(quatConjugate(b.orientation), Lt);
             float3 dw = quatRotate(b.orientation, local * b.invInertia);
-            float3 dv = gsMpmJ[0] * b.invMass + float3(0.0, p.step.x * p.step.y, 0.0);
+            float3 dv = Jt * b.invMass + float3(0.0, p.step.x * p.step.y, 0.0);
             gMpmCoupled[4u * slot + 2u] += float4(dv, 0.0);
             gMpmCoupled[4u * slot + 3u] += float4(dw, 0.0);
         }
     }
+}
+
+// Per grid node, after mpm_couple_gather: a contact node takes its body's share
+// of the holding impulse (the body took the reaction in the gather).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_couple_apply(uint3 tid : SV_DispatchThreadID)
+{
+    uint n = mpmIndex(tid);
+    MpmParams p = mpmParams();
+    if (n >= min(ALOAD(gMpmCounters[MPM_C_BLOCKS]), p.counts.z) * MPM_BLOCK_NODES) return;
+    float4 rec = gMpmGrid[2u * n + 1u];
+    if (rec.w < 0.0) return;
+    float4 node = gMpmGrid[2u * n];
+    float share = gMpmCoupled[4u * uint(rec.w) + 1u].w;
+    gMpmGrid[2u * n] = float4(node.xyz + rec.xyz * (share / node.w), node.w);
 }
 
 // Per coupling slot of a dynamic body: its frame's reaction as one impulse record
