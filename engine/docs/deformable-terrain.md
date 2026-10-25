@@ -89,6 +89,52 @@ reported, not adopted.
 | T4 | Explosion and impact sources, ejecta parcels, an impact demo at 1× with a cross-section view and a vehicle driving into the settled crater. |
 | T5 | Cohesive soil, damage-softening rock, slope failure, a Bekker–Wong rut tier, an Unreal sample. |
 
+## Where it stands (2026-10-25)
+
+All five milestones are built; the sections below record each, with the
+measurements behind them.
+- **T1.** Heightfield collider (convex, CCD, fracture and soft paths), editable.
+- **T2.** GPU MLS-MPM sand: Mohr–Coulomb and Drucker–Prager; activation and
+  bake in whole volume quanta.
+- **T3.** Two-way rigid coupling, a momentum-conserving inelastic exchange
+  stable at any mass ratio. Strikes open regions before they land: a GPU
+  look-ahead, chosen over hit events, which arrive after the rigid step.
+- **T4.** π-scaled impact and explosion sources: a Z-model field bounded at the
+  transient radius. Ejecta parcels; the World and C APIs; `impact.html` in the
+  browser, sharing the Rust command plan.
+- **T5.** Cohesive soil, damage-softening rock, vehicle ruts (Bekker), and the
+  slope-failure check.
+
+**Defaults** (`TerrainConfig::default()`):
+- physical stiffness (E = 50 MPa);
+- absorbing ground with a geostatic start;
+- the hybrid bake: tent at home for unmoved sand, P2G's B-spline for moved
+  sand, in the unactivated ground's frame.
+
+**Validated:**
+- a resting region is the identity;
+- the slope-failure check;
+- a dropped ball against Uehara's penetration scaling;
+- the light-box coupling;
+- P-wave absorption;
+- demo-scale settling;
+- the crater against π-scaling in radius (1.25 R), shape (d/D 0.17) and the
+  volume ledger;
+- no axis ridge or window-edge ridge.
+
+**Open:**
+- **Crater volume.** About 3.1× π-scaling's. The excess follows the source
+  field's strength at crater scale; it is not compaction and not the walls.
+- **Wall give.** Constant-E sand at depth gives metres at the absorbing walls.
+  Hardin-type pressure-dependent stiffness would fix it at the root, but it
+  changes validated results.
+- **Coupling.** Bodies that rotate fast within a frame (poses are the frame's
+  start).
+- **Hosts.** An Unreal sample project. The browser has no strike look-ahead and
+  no ruts yet.
+- **Real time** comes from scale. Centimetre-cell events run far slower than
+  1×, by the user's choice of physical stiffness.
+
 ## T1 status (2026-10-24)
 
 The heightfield collider is in:
