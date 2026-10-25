@@ -301,7 +301,8 @@ pub fn default_device() -> anyhow::Result<(wgpu::AdapterInfo, wgpu::Device, wgpu
             .iter()
             .any(|k| std::env::var(k).is_ok_and(|v| v == "1"))
         {
-            adapter.features() & wgpu::Features::TIMESTAMP_QUERY
+            adapter.features()
+                & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS)
         } else {
             wgpu::Features::empty()
         },
@@ -563,6 +564,9 @@ impl WgpuSim {
             debug_assert_eq!(bufs.len(), binding);
             bufs.push(terrain_buffer(&device, binding, 256));
         }
+        // Binding 53: the render-only terrain surface (terrain_surface.slang),
+        // a placeholder natively (its kernels are built with every entry).
+        bufs.push(terrain_buffer(&device, bufs.len(), 256));
         // Pass table slots (256-byte aligned so dynamic offsets are legal).
         queue.write_buffer(&bufs[22], 0, &rigid_plan::pass_table());
 

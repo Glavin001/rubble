@@ -45,6 +45,8 @@ pub const MPM_C_DEPOSITED: usize = 6;
 pub const MPM_C_ESCAPED: usize = 7;
 pub const MPM_C_AIRBORNE: usize = 9;
 pub const MPM_C_BODY_SPEED: usize = 10;
+/// Nonzero: the next substep's `mpm_payload` sets the geostatic F first.
+pub const MPM_C_GEOSTATIC: usize = 11;
 pub const MPM_COUNTER_WORDS: usize = 12;
 
 /// `MpmParams.dims.w` without a bed heightfield.

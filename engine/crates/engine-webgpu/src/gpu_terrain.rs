@@ -125,11 +125,20 @@ impl WgpuSim {
                 .features()
                 .contains(wgpu::Features::TIMESTAMP_QUERY)
         {
-            // The kernels' GPU time, each timed in a pass of its own (one
-            // pass's own ends, around many dispatches, read 0 on Metal).
-            let ms = self
-                .terrain_timed_pass(ops)
-                .map_or(0.0, |t| t.iter().map(|(_, ms)| ms).sum());
+            // The frame's GPU time: timestamps written on the encoder around
+            // its one pass where the device can (a pass's own ends, around
+            // many dispatches, read 0 on Metal); else the kernels' times
+            // summed, each timed in a pass of its own.
+            let ms = if self
+                .device
+                .features()
+                .contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS)
+            {
+                self.terrain_span_pass(ops)
+            } else {
+                self.terrain_timed_pass(ops)
+                    .map_or(0.0, |t| t.iter().map(|(_, ms)| ms).sum())
+            };
             if let Some(t) = self.terrain.as_ref() {
                 t.gpu_ms.set(Some(ms));
             }
@@ -263,6 +272,47 @@ impl WgpuSim {
         self.terrain_writes(&ops);
         let times = self.terrain_timed_pass(&ops)?;
         Ok((self.terrain_report()?, times))
+    }
+
+    /// `ops` as one pass between two encoder timestamps, submitted and waited
+    /// for: its GPU ms.
+    fn terrain_span_pass(&self, ops: &TerrainOps) -> f64 {
+        let queries = self.device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("terrain span"),
+            ty: wgpu::QueryType::Timestamp,
+            count: 2,
+        });
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("terrain span"),
+            });
+        enc.write_timestamp(&queries, 0);
+        self.terrain_pass(&mut enc, ops, "terrain span");
+        enc.write_timestamp(&queries, 1);
+        let resolve = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("terrain span"),
+            size: 16,
+            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("terrain span read"),
+            size: 16,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        enc.resolve_query_set(&queries, 0..2, &resolve, 0);
+        enc.copy_buffer_to_buffer(&resolve, 0, &staging, 0, 16);
+        self.queue.submit([enc.finish()]);
+        let slice = staging.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        let t: Vec<u64> = bytemuck::cast_slice(&slice.get_mapped_range().expect("mapped")).to_vec();
+        if std::env::var("RUBBLE_TS_DEBUG").is_ok() {
+            eprintln!("span ts {t:?}");
+        }
+        t[1].saturating_sub(t[0]) as f64 * f64::from(self.queue.get_timestamp_period()) * 1e-6
     }
 
     /// Diagnostic: the GPU time (ms) of the last terrain submission when
