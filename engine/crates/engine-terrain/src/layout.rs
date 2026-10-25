@@ -45,7 +45,29 @@ pub const MPM_C_DEPOSITED: usize = 6;
 pub const MPM_C_ESCAPED: usize = 7;
 pub const MPM_C_AIRBORNE: usize = 9;
 pub const MPM_C_BODY_SPEED: usize = 10;
-pub const MPM_COUNTER_WORDS: usize = 12;
+/// The material's surface under a source point (order-preserving f32 bits),
+/// found on the GPU when a source lands on ground already moving.
+pub const MPM_C_SURFACE: usize = 11;
+/// Per area slot k: its fastest particle over the frame (f32 bits) at
+/// `MPM_C_AREA_SPEED + k`, and its fastest coupled body at
+/// `MPM_C_AREA_BODY + k`.
+pub const MPM_C_AREA_SPEED: usize = 12;
+pub const MPM_C_AREA_BODY: usize = MPM_C_AREA_SPEED + MPM_MAX_AREAS as usize;
+pub const MPM_COUNTER_WORDS: usize = MPM_C_AREA_BODY + MPM_MAX_AREAS as usize;
+
+/// Area slots (`TerrainConfig::max_regions` is at most this): records
+/// `1..=MPM_MAX_AREAS` of [`MPM_PARAMS_BINDING`] after the domain's.
+pub const MPM_MAX_AREAS: u32 = 16;
+/// `MpmParams::area[3]` of the domain record: this bake empties the pool
+/// (the last open area).
+pub const MPM_DOMAIN_CLOSE: u32 = 1;
+/// ... the source finds the material's surface under its point
+/// (`mpm_source_surface`) rather than taking the point's height.
+pub const MPM_DOMAIN_SURFACE: u32 = 2;
+/// Block keys pack x, y, z in 11, 10 and 11 bits, biased by these: the open
+/// areas reach this many blocks either way from the domain's origin (the
+/// first area's).
+pub const MPM_KEY_BIAS: [i32; 3] = [1024, 512, 1024];
 
 /// `MpmParams.dims.w` without a bed heightfield.
 pub const MPM_NO_BED: u32 = u32::MAX;
@@ -86,6 +108,9 @@ pub const MPM_PARTICLE_DEAD: u32 = 1;
 /// `c[1][3]`, `c[2][3]` hold the heightfield-local x and z it was emitted at.
 /// The bake splats it from its home sample moved by its displacement since.
 pub const MPM_PARTICLE_HOME: u32 = 2;
+/// `MpmParticle::f[2][3]` bit: activated since the last step; the next
+/// geostatic start (`mpm_geostatic`) gives it its F and clears the bit.
+pub const MPM_PARTICLE_FRESH: u32 = 4;
 
 /// One ejecta parcel: position, quanta (u32 bits), velocity, mass (0 once landed).
 #[repr(C)]
@@ -95,7 +120,7 @@ pub struct MpmParcel {
     pub vm: [f32; 4],
 }
 
-/// Block coordinates are packed in 10 bits per axis.
+/// Block coordinates are packed in 11 (x, z) and 10 (y) bits per axis.
 pub const MPM_MAX_BLOCKS_PER_AXIS: u32 = 1024;
 
 #[repr(C)]
@@ -133,9 +158,20 @@ pub struct MpmParams {
     pub source: [[f32; 4]; 2],
     /// The region's boundary (u32 bits): [`MPM_BOUNDARY_ABSORBING`] |
     /// [`MPM_BOUNDARY_GEOSTATIC`], the first absorbing-node record in
-    /// [`MPM_COUPLED_BINDING`], the records the region uses, unused.
+    /// [`MPM_COUPLED_BINDING`], the records the region uses, its first
+    /// record in [`MPM_COLUMNS_BINDING`].
     pub boundary: [u32; 4],
+    /// The domain record (0): area slots in use, the selected area (of an
+    /// activation, a source or a bake), the areas a growing one takes over
+    /// (bits), [`MPM_DOMAIN_CLOSE`] | [`MPM_DOMAIN_SURFACE`]. An area record
+    /// (1 + slot): its origin's node offset from the domain's (i32 bits),
+    /// its first block cell in [`MPM_COUPLE_BINDING`].
+    pub area: [u32; 4],
 }
+
+/// Bytes of [`MPM_PARAMS_BINDING`]: the domain record and every area slot's.
+pub const MPM_PARAMS_BYTES: u64 =
+    (1 + MPM_MAX_AREAS as u64) * std::mem::size_of::<MpmParams>() as u64;
 
 /// One particle (128 B).
 #[repr(C)]

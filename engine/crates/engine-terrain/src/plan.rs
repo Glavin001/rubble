@@ -20,6 +20,7 @@ use crate::material::{RockMaterial, TerrainMaterial, YieldSurface};
 use crate::region::{RegionPlan, BLOCK_CELLS};
 use crate::step::substeps_for;
 use crate::zmodel::ZModel;
+use glam::IVec3;
 
 /// Every kernel a [`TerrainPlan`] dispatches.
 pub const KERNELS: &[&str] = &[
@@ -55,6 +56,12 @@ pub const KERNELS: &[&str] = &[
     "mpm_geostatic",
     "mpm_absorb_faces",
     "mpm_bake_shift",
+    "mpm_bake_edge_clear",
+    "mpm_bake_edge_count",
+    "mpm_bake_edge_scan",
+    "mpm_bake_edge_scatter",
+    "mpm_bake_edge_sort",
+    "mpm_source_surface",
 ];
 
 /// Byte offsets of the indirect workgroup counts in [`MPM_ARGS_BINDING`].
@@ -86,6 +93,23 @@ pub struct TerrainStepReport {
     /// Fastest surface speed of a dynamic body coupled to the region this
     /// frame (m/s; 0 without coupling).
     pub body_speed: f32,
+    /// Per area slot: its fastest particle over the frame (m/s).
+    pub area_speed: [f32; MPM_MAX_AREAS as usize],
+    /// Per area slot: its fastest coupled body this frame (m/s).
+    pub area_body_speed: [f32; MPM_MAX_AREAS as usize],
+}
+
+impl TerrainStepReport {
+    /// The report as area `slot` sees it: its own particles' and bodies'
+    /// speeds (the domain's parcels and ledger are shared).
+    pub fn area(&self, slot: u32) -> Self {
+        let k = slot as usize;
+        Self {
+            max_speed: self.area_speed.get(k).copied().unwrap_or(0.0),
+            body_speed: self.area_body_speed.get(k).copied().unwrap_or(0.0),
+            ..*self
+        }
+    }
 }
 
 /// A host write (`queue.write_buffer`) of `words` at byte `offset` of `binding`.
@@ -167,19 +191,111 @@ pub struct FieldGrid {
     pub dz: f32,
 }
 
+/// A run `[base, base + len)` of a pooled buffer's records.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Slice {
+    base: u32,
+    len: u32,
+}
+
+/// First fit of `len` records in `[0, cap)` beside the `used` runs.
+fn first_fit(used: &[Slice], len: u32, cap: u32) -> Option<u32> {
+    if len == 0 {
+        return Some(0);
+    }
+    let mut runs: Vec<Slice> = used.iter().copied().filter(|s| s.len > 0).collect();
+    runs.sort_by_key(|s| s.base);
+    let mut at = 0u32;
+    for r in runs {
+        if r.base >= at && r.base - at >= len {
+            return Some(at);
+        }
+        at = at.max(r.base + r.len);
+    }
+    (cap.checked_sub(at)? >= len).then_some(at)
+}
+
+/// One open area: an activated box over the heightfield (or a host-loaded
+/// region), with its own window of samples, absorbing faces and bake.
+#[derive(Clone, Debug)]
+struct Area {
+    plan: RegionPlan,
+    /// The box's minimum corner in blocks of the shared lattice.
+    block_lo: IVec3,
+    /// Its record (`gMpmParams[1 + slot]`).
+    record: MpmParams,
+    columns: Slice,
+    faces: Slice,
+    couple: Slice,
+    /// Opened over a heightfield window (a host-loaded region has none).
+    windowed: bool,
+    /// Its particles have been stepped since it opened: a source on it finds
+    /// the material's surface on the GPU.
+    moved: bool,
+}
+
+/// The sparse grid every open area shares: one cell size and block lattice,
+/// one bed heightfield.
+#[derive(Clone, Copy, Debug)]
+struct Domain {
+    dx: f32,
+    /// The lattice block of the domain's origin (the first area's corner):
+    /// block keys are relative to it.
+    block_lo: IVec3,
+    bed: Option<u32>,
+    field: Option<(FieldGrid, glam::Vec3)>,
+    density: f32,
+}
+
+/// An open area, as hosts see it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AreaInfo {
+    /// Its slot (`MPM_C_AREA_SPEED + slot` is its speed counter).
+    pub slot: u32,
+    /// Its box.
+    pub plan: RegionPlan,
+    /// Heightfield samples under it: i0, j0, ni, nj (0 for a loaded region).
+    pub window: [u32; 4],
+    /// Its bed (heightfield-local y).
+    pub bed: f32,
+}
+
+/// What [`TerrainPlan::open`] did with a request.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Opened {
+    /// The area that now covers the request.
+    pub area: u32,
+    /// Open areas it took over (grown into one box with the request), now
+    /// closed as areas of their own.
+    pub absorbed: Vec<u32>,
+    /// Columns were activated (false: an open area already covered it).
+    pub activated: bool,
+    pub ops: TerrainOps,
+}
+
 /// Host state of the terrain pool, and the commands of each call.
+///
+/// The pool is one sparse domain: every open area shares its cell size, its
+/// block lattice (keys relative to the first area's corner) and its bed
+/// heightfield. A request whose box comes within [`TerrainPlan::merge_gap`]
+/// of open areas grows them into one box covering all of them; otherwise it
+/// opens an area of its own. Each area keeps its window, absorbing faces,
+/// settling and bake; the substeps run over all their particles at once.
 #[derive(Clone, Debug)]
 pub struct TerrainPlan {
     config: TerrainConfig,
+    /// The domain record (`gMpmParams[0]`).
     params: MpmParams,
     /// Elastic (P-) wave speed of the loaded material (0 without stress).
     wave_speed: f32,
     /// The loaded rock, whose crack band each step checks against the cell size.
     rock: Option<RockMaterial>,
-    /// Heightfield records the activation window touches (bake rewrites them).
-    window_records: u32,
-    /// A geostatic activation's particles wait for the next step's gravity.
+    /// Activated particles wait for the next step's gravity (geostatic start).
     geostatic_pending: bool,
+    domain: Option<Domain>,
+    areas: Vec<Option<Area>>,
+    /// The area records changed since they were last written.
+    areas_dirty: bool,
 }
 
 impl TerrainPlan {
@@ -214,8 +330,10 @@ impl TerrainPlan {
             },
             wave_speed: 0.0,
             rock: None,
-            window_records: 0,
             geostatic_pending: false,
+            domain: None,
+            areas: vec![None; MPM_MAX_AREAS as usize],
+            areas_dirty: true,
         })
     }
 
@@ -229,7 +347,7 @@ impl TerrainPlan {
         let slots = u64::from(hash_slots(config.max_blocks));
         let nodes = blocks * u64::from(BLOCK_CELLS.pow(3));
         [
-            (MPM_PARAMS_BINDING, std::mem::size_of::<MpmParams>() as u64),
+            (MPM_PARAMS_BINDING, MPM_PARAMS_BYTES),
             (MPM_COUNTERS_BINDING, 4 * MPM_COUNTER_WORDS as u64),
             (
                 MPM_PARTICLES_BINDING,
@@ -260,8 +378,17 @@ impl TerrainPlan {
         &self.config
     }
 
+    /// The domain record (`gMpmParams[0]`).
     pub fn params(&self) -> &MpmParams {
         &self.params
+    }
+
+    /// Area `slot`'s record (`gMpmParams[1 + slot]`), if it is open.
+    pub fn area_params(&self, slot: u32) -> Option<&MpmParams> {
+        self.areas
+            .get(slot as usize)?
+            .as_ref()
+            .map(|a| &a.record)
     }
 
     /// Elastic (P-) wave speed of the loaded material (m/s; 0 without stress).
@@ -278,45 +405,133 @@ impl TerrainPlan {
         x * z + 2 * y * (x + z)
     }
 
-    /// The region's bed heightfield collider, if it has one.
+    /// The domain's bed heightfield collider, if it has one.
     pub fn bed(&self) -> Option<u32> {
-        let bed = self.params.dims[3];
-        (bed != MPM_NO_BED).then_some(bed)
+        self.domain.and_then(|d| d.bed)
     }
 
-    /// The region's box and its bed (the heightfield collider under it, or none).
-    fn set_region(
-        &mut self,
-        plan: &RegionPlan,
-        bed: Option<u32>,
-        bed_friction: f32,
-    ) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            plan.blocks.max_element() as u32 <= MPM_MAX_BLOCKS_PER_AXIS,
-            "region spans {:?} blocks; block keys hold {MPM_MAX_BLOCKS_PER_AXIS} per axis",
-            plan.blocks
-        );
-        let cells = plan.blocks * BLOCK_CELLS as i32;
-        self.params.origin = [plan.origin.x, plan.origin.y, plan.origin.z, plan.dx];
-        self.params.dims = [
-            cells.x as u32,
-            cells.y as u32,
-            cells.z as u32,
-            bed.unwrap_or(MPM_NO_BED),
-        ];
-        self.params.step[3] = bed_friction;
-        Ok(())
+    /// The open grid's cell size (m), while any area is open.
+    pub fn domain_dx(&self) -> Option<f32> {
+        self.domain.map(|d| d.dx)
     }
 
-    /// A new region throws its ejecta from slot 0 and counts afresh.
+    /// The cell an event asking for cells of `asked` m runs at: the fixed
+    /// [`TerrainConfig::cell_size`], else the open grid's, else its own. It
+    /// fails ([`TerrainError::CellTooCoarse`]) when that cell resolves the
+    /// event coarser than [`TerrainConfig::min_resolution`] allows.
+    pub fn event_cell(&self, asked: f32) -> Result<f32, TerrainError> {
+        if !(asked.is_finite() && asked > 0.0) {
+            return Err(TerrainError::InvalidRequest("cell size must be positive"));
+        }
+        let grid = if self.config.cell_size > 0.0 {
+            self.config.cell_size
+        } else {
+            self.domain_dx().unwrap_or(asked)
+        };
+        if grid * self.config.min_resolution > asked * (1.0 + 1e-6) {
+            return Err(TerrainError::CellTooCoarse {
+                asked,
+                grid,
+                min_resolution: self.config.min_resolution,
+            });
+        }
+        Ok(grid)
+    }
+
+    /// The open areas, by slot.
+    pub fn areas(&self) -> Vec<AreaInfo> {
+        self.areas
+            .iter()
+            .enumerate()
+            .filter_map(|(k, a)| {
+                a.as_ref().map(|a| AreaInfo {
+                    slot: k as u32,
+                    plan: a.plan,
+                    window: a.record.window,
+                    bed: a.record.column[0],
+                })
+            })
+            .collect()
+    }
+
+    /// The open area whose box holds `point` horizontally.
+    pub fn area_at(&self, point: glam::Vec3) -> Option<u32> {
+        self.areas.iter().enumerate().find_map(|(k, a)| {
+            let a = a.as_ref()?;
+            let (lo, hi) = (a.plan.origin, a.plan.end());
+            (point.x >= lo.x && point.x < hi.x && point.z >= lo.z && point.z < hi.z)
+                .then_some(k as u32)
+        })
+    }
+
+    /// Blocks of clear ground two areas keep between their boxes (else a
+    /// request touching both grows them into one): two blocks, so no grid
+    /// block holds nodes of two areas, and at least two heightfield samples,
+    /// so one area's bake and deposits stay off another's window.
+    pub fn merge_gap(&self) -> i32 {
+        let Some(d) = self.domain else { return 2 };
+        let block = d.dx * BLOCK_CELLS as f32;
+        let samples = d
+            .field
+            .map_or(0.0, |(f, _)| 2.0 * f.dx.max(f.dz) / block);
+        2.max(samples.ceil() as i32)
+    }
+
+    fn slots_in_use(&self) -> u32 {
+        self.areas
+            .iter()
+            .rposition(Option::is_some)
+            .map_or(0, |k| k as u32 + 1)
+    }
+
+    fn open_count(&self) -> u32 {
+        self.areas.iter().filter(|a| a.is_some()).count() as u32
+    }
+
+    /// The domain record with `sel` selected, `merge` the areas it takes over
+    /// and `flags`, written ahead of the pass, with the area records if they
+    /// changed (an area record never changes while it is open).
+    fn write_params(&mut self, ops: &mut TerrainOps, sel: u32, merge: u32, flags: u32) {
+        self.params.area = [self.slots_in_use(), sel, merge, flags];
+        ops.params(&self.params);
+        if std::mem::take(&mut self.areas_dirty) {
+            let mut records = vec![MpmParams::default(); MPM_MAX_AREAS as usize];
+            for (k, a) in self.areas.iter().enumerate() {
+                if let Some(a) = a {
+                    records[k] = a.record;
+                }
+            }
+            ops.write_words(
+                MPM_PARAMS_BINDING,
+                std::mem::size_of::<MpmParams>() as u64,
+                bytemuck::cast_slice(&records),
+            );
+        }
+    }
+
+    /// The domain starts afresh: its parcels are thrown from slot 0 and
+    /// counted anew.
     fn reset_ejecta(ops: &mut TerrainOps) {
         for w in [MPM_C_PARCELS, MPM_C_DEPOSITED, MPM_C_ESCAPED] {
             ops.counter(w, 0);
         }
     }
 
-    /// Make `plan` the active region holding `particles` host-loaded
-    /// particles (the host writes them to [`MPM_PARTICLES_BINDING`] itself).
+    fn check_lattice(plan: &RegionPlan) -> anyhow::Result<IVec3> {
+        let block = plan.dx * BLOCK_CELLS as f32;
+        let lo = (plan.origin / block).round().as_ivec3();
+        anyhow::ensure!(
+            ((plan.origin / block) - lo.as_vec3()).abs().max_element() < 1e-3,
+            "region origin {:?} is not on the block lattice of cells {}",
+            plan.origin,
+            plan.dx
+        );
+        Ok(lo)
+    }
+
+    /// Make `plan` the only area, holding `particles` host-loaded particles
+    /// (the host writes them to [`MPM_PARTICLES_BINDING`] itself). Any open
+    /// area is dropped.
     pub fn load(
         &mut self,
         plan: &RegionPlan,
@@ -330,12 +545,57 @@ impl TerrainPlan {
             u64::from(n),
             u64::from(self.config.max_particles),
         )?;
-        self.set_region(plan, bed, bed_friction)?;
+        anyhow::ensure!(
+            plan.blocks.max_element() as u32 <= MPM_MAX_BLOCKS_PER_AXIS,
+            "region spans {:?} blocks; block keys hold {MPM_MAX_BLOCKS_PER_AXIS} per axis",
+            plan.blocks
+        );
+        let block_lo = Self::check_lattice(plan)?;
+        self.domain = Some(Domain {
+            dx: plan.dx,
+            block_lo,
+            bed,
+            field: None,
+            density: 0.0,
+        });
+        self.areas = vec![None; MPM_MAX_AREAS as usize];
+        let cells = plan.blocks * BLOCK_CELLS as i32;
+        self.params.origin = [plan.origin.x, plan.origin.y, plan.origin.z, plan.dx];
+        self.params.dims = [0, 0, 0, bed.unwrap_or(MPM_NO_BED)];
+        self.params.step[3] = bed_friction;
         // No activation window: the bed is the field's surface everywhere, a
         // contact (the absorbing ground is the window's floor and sides).
-        self.params.window = [0; 4];
-        self.params.boundary = [0; 4];
-        self.window_records = 0;
+        let record = MpmParams {
+            origin: self.params.origin,
+            dims: [
+                cells.x as u32,
+                cells.y as u32,
+                cells.z as u32,
+                bed.unwrap_or(MPM_NO_BED),
+            ],
+            window: [0; 4],
+            column: self.params.column,
+            boundary: [0; 4],
+            area: [0; 4],
+            ..self.params
+        };
+        // Its box's block cells (a step past max_blocks fails on the GPU).
+        let count = (plan.blocks.x as u64 * plan.blocks.y as u64 * plan.blocks.z as u64)
+            .min(u64::from(self.config.max_blocks)) as u32;
+        self.areas[0] = Some(Area {
+            plan: *plan,
+            block_lo,
+            record,
+            columns: Slice { base: 0, len: 0 },
+            faces: Slice { base: 0, len: 0 },
+            couple: Slice {
+                base: 0,
+                len: count,
+            },
+            windowed: false,
+            moved: false,
+        });
+        self.areas_dirty = true;
         self.geostatic_pending = false;
         let mut ops = TerrainOps::default();
         ops.counter(MPM_C_PARTICLES, n);
@@ -343,12 +603,8 @@ impl TerrainPlan {
         Ok(ops)
     }
 
-    /// Open `plan` as the active region over heightfield `collider` (`field`'s
-    /// grid, its frame at `field_origin` with no rotation, y up): every sample
-    /// whose cell lies inside the region (a cell in from its box) is lowered to
-    /// the region's bed, and the material above becomes particles of `density`
-    /// holding exactly the volume removed (in whole quanta). An activation
-    /// past `max_particles` changes nothing and fails the next step's check.
+    /// Open `plan` over heightfield `collider` (see [`Self::open`]) and return
+    /// its commands.
     pub fn activate(
         &mut self,
         plan: &RegionPlan,
@@ -358,12 +614,149 @@ impl TerrainPlan {
         density: f32,
         bed_friction: f32,
     ) -> anyhow::Result<TerrainOps> {
+        Ok(self
+            .open(plan, collider, field, field_origin, density, bed_friction)?
+            .ops)
+    }
+
+    /// Open `request` over heightfield `collider` (`field`'s grid, its frame
+    /// at `field_origin` with no rotation, y up).
+    ///
+    /// - Far from every open area, it becomes an area of its own: every sample
+    ///   whose cell lies inside its box (a cell in) is lowered to the box's
+    ///   bed, and the material above becomes particles of `density` holding
+    ///   exactly the volume removed (in whole quanta).
+    /// - Within [`Self::merge_gap`] blocks of open areas (overlapping them, on
+    ///   their rim, partly outside them), those areas and the request grow
+    ///   into one box. Its samples not yet active are activated; a sample that
+    ///   was gives the slab between its old bed and a deeper new one. The
+    ///   moving material stays as it is.
+    /// - Inside one open area, nothing is activated.
+    ///
+    /// Every area shares the domain's cell size, lattice and bed: a request on
+    /// another heightfield, or with other cells, fails. An activation past
+    /// `max_particles` changes nothing and fails the next step's check.
+    pub fn open(
+        &mut self,
+        request: &RegionPlan,
+        collider: u32,
+        field: FieldGrid,
+        field_origin: glam::Vec3,
+        density: f32,
+        bed_friction: f32,
+    ) -> anyhow::Result<Opened> {
         let cfg = self.config;
         anyhow::ensure!(
             density > 0.0 && density.is_finite(),
             "density must be positive"
         );
-        self.set_region(plan, Some(collider), bed_friction)?;
+        let dx = request.dx;
+        let req_lo = Self::check_lattice(request)?;
+        let req_hi = req_lo + request.blocks;
+        // A host-loaded region has no window to bake: an activation replaces it.
+        if self.areas.iter().flatten().any(|a| !a.windowed) {
+            self.domain = None;
+            self.areas = vec![None; MPM_MAX_AREAS as usize];
+        }
+        if let Some(d) = self.domain {
+            anyhow::ensure!(
+                d.dx.to_bits() == dx.to_bits(),
+                "the request's cells ({dx} m) differ from the open terrain grid's ({} m): every \
+                 open area shares one grid (TerrainPlan::event_cell picks its cell)",
+                d.dx
+            );
+            anyhow::ensure!(
+                d.bed == Some(collider) && d.field == Some((field, field_origin)),
+                "terrain areas are open on another heightfield: one heightfield at a time"
+            );
+            anyhow::ensure!(
+                d.density.to_bits() == density.to_bits(),
+                "the open terrain's material has density {} kg/m³, not {density}",
+                d.density
+            );
+        } else {
+            anyhow::ensure!(
+                request.blocks.max_element() as u32 <= MPM_MAX_BLOCKS_PER_AXIS,
+                "region spans {:?} blocks; block keys hold {MPM_MAX_BLOCKS_PER_AXIS} per axis",
+                request.blocks
+            );
+            self.domain = Some(Domain {
+                dx,
+                block_lo: req_lo,
+                bed: Some(collider),
+                field: Some((field, field_origin)),
+                density,
+            });
+            self.areas = vec![None; MPM_MAX_AREAS as usize];
+            self.areas_dirty = true;
+            self.params.origin = [request.origin.x, request.origin.y, request.origin.z, dx];
+            self.params.dims = [0, 0, 0, collider];
+        }
+        let fresh_domain = self.open_count() == 0;
+        let domain = self.domain.expect("set above");
+        // The areas the request reaches, and the box covering them all.
+        let gap = self.merge_gap();
+        let (mut lo, mut hi) = (req_lo, req_hi);
+        let mut merge: Vec<u32> = Vec::new();
+        loop {
+            let before = merge.len();
+            for (k, a) in self.areas.iter().enumerate() {
+                let Some(a) = a else { continue };
+                if merge.contains(&(k as u32)) {
+                    continue;
+                }
+                let (alo, ahi) = (a.block_lo, a.block_lo + a.plan.blocks);
+                let near = alo.x - gap < hi.x
+                    && lo.x < ahi.x + gap
+                    && alo.z - gap < hi.z
+                    && lo.z < ahi.z + gap;
+                if near {
+                    merge.push(k as u32);
+                    lo = lo.min(alo);
+                    hi = hi.max(ahi);
+                }
+            }
+            if merge.len() == before {
+                break;
+            }
+        }
+        merge.sort_unstable();
+        if let [k] = merge[..] {
+            let a = self.areas[k as usize].as_ref().expect("open");
+            if a.block_lo == lo && a.block_lo + a.plan.blocks == hi {
+                return Ok(Opened {
+                    area: k,
+                    absorbed: Vec::new(),
+                    activated: false,
+                    ops: TerrainOps::default(),
+                });
+            }
+        }
+        TerrainConfig::check(
+            "max_regions",
+            u64::from(self.open_count() - merge.len() as u32 + 1),
+            u64::from(cfg.max_regions),
+        )?;
+        let rel_lo = lo - domain.block_lo;
+        let rel_hi = hi - domain.block_lo;
+        let [bx, by, bz] = MPM_KEY_BIAS;
+        anyhow::ensure!(
+            rel_lo.x >= -bx
+                && rel_lo.y >= -by
+                && rel_lo.z >= -bz
+                && rel_hi.x < bx - 1
+                && rel_hi.y < by
+                && rel_hi.z < bz - 1,
+            "terrain areas would span blocks {rel_lo:?}..{rel_hi:?} from the grid's origin; block \
+             keys reach {:?} each way (bake the open areas, or use larger cells)",
+            MPM_KEY_BIAS
+        );
+        let block = dx * BLOCK_CELLS as f32;
+        let plan = RegionPlan {
+            dx,
+            origin: lo.as_vec3() * block,
+            blocks: hi - lo,
+        };
         let FieldGrid {
             nx,
             nz,
@@ -372,101 +765,202 @@ impl TerrainPlan {
         } = field;
         let x0 = field_origin.x - 0.5 * (nx - 1) as f32 * sx;
         let z0 = field_origin.z - 0.5 * (nz - 1) as f32 * sz;
-        let lo = plan.origin + glam::Vec3::splat(plan.dx);
-        let hi = plan.end() - glam::Vec3::splat(plan.dx);
-        // Interior samples (full-area cells) whose cell lies within [lo, hi].
+        let blo = plan.origin + glam::Vec3::splat(dx);
+        let bhi = plan.end() - glam::Vec3::splat(dx);
+        // Interior samples (full-area cells) whose cell lies within [blo, bhi].
         let range = |o: f32, d: f32, n: u32, a: f32, b: f32| {
             let first = ((a - o) / d + 0.5).ceil().max(1.0) as u32;
             let last = ((b - o) / d - 0.5).floor().min((n - 2) as f32) as i64;
             (first, (last - i64::from(first) + 1).max(0) as u32)
         };
-        let (i0, ni) = range(x0, sx, nx, lo.x, hi.x);
-        let (j0, nj) = range(z0, sz, nz, lo.z, hi.z);
+        let (i0, ni) = range(x0, sx, nx, blo.x, bhi.x);
+        let (j0, nj) = range(z0, sz, nz, blo.z, bhi.z);
         anyhow::ensure!(ni > 0 && nj > 0, "the region covers no heightfield samples");
         TerrainConfig::check(
             "max_field_samples",
             u64::from(nx) * u64::from(nz),
             u64::from(cfg.max_field_samples),
         )?;
-        TerrainConfig::check(
-            "max_columns",
-            u64::from(ni) * u64::from(nj),
-            u64::from(cfg.max_columns),
-        )?;
-        let spacing = plan.dx / cfg.particles_per_cell_axis as f32;
-        self.params.window = [i0, j0, ni, nj];
-        self.params.column = [
-            lo.y + 0.5 * plan.dx - field_origin.y,
+        let spacing = dx / cfg.particles_per_cell_axis as f32;
+        let column = [
+            blo.y + 0.5 * dx - field_origin.y,
             spacing.powi(3) / QUANTA_PER_LATTICE_CELL,
             spacing,
             density,
         ];
-        let first = (j0 * nx + i0) / 4;
-        let last = ((j0 + nj - 1) * nx + i0 + ni - 1) / 4;
-        self.window_records = last - first + 1;
+        let cells = plan.blocks * BLOCK_CELLS as i32;
+        let cells = [cells.x as u32, cells.y as u32, cells.z as u32];
         let geostatic = cfg.initial_stress == InitialStress::Geostatic;
         let absorbing = cfg.boundary == RegionBoundary::Absorbing;
-        let absorb_records = if absorbing {
-            let cells = [
-                self.params.dims[0],
-                self.params.dims[1],
-                self.params.dims[2],
-            ];
+        // Pool slices, beside every open area's (the merged ones' included:
+        // the activation reads them).
+        let live: Vec<&Area> = self.areas.iter().flatten().collect();
+        let fit = |limit: &'static str,
+                   used: &dyn Fn(&Area) -> Slice,
+                   len: u64,
+                   cap: u32|
+         -> anyhow::Result<Slice> {
+            let used: Vec<Slice> = live.iter().map(|a| used(a)).collect();
+            let total: u64 = used.iter().map(|s| u64::from(s.len)).sum::<u64>() + len;
+            TerrainConfig::check(limit, total, u64::from(cap))?;
+            let len = len as u32;
+            let base = first_fit(&used, len, cap).ok_or(TerrainError::LimitExceeded {
+                limit,
+                requested: total,
+                allowed: u64::from(cap),
+            })?;
+            Ok(Slice { base, len })
+        };
+        let columns = fit(
+            "max_columns",
+            &|a| a.columns,
+            u64::from(ni) * u64::from(nj),
+            cfg.max_columns,
+        )?;
+        let faces = if absorbing {
             // The faces' points; the bake reuses them for the window's edge
             // samples (mpm_bake_shift).
             let n = Self::boundary_nodes(cells).max(2 * u64::from(ni + nj));
-            TerrainConfig::check("max_boundary_nodes", n, u64::from(cfg.max_boundary_nodes))?;
-            n as u32
+            fit("max_boundary_nodes", &|a| a.faces, n, cfg.max_boundary_nodes)?
         } else {
-            0
+            Slice { base: 0, len: 0 }
         };
-        self.params.boundary = [
-            if absorbing { MPM_BOUNDARY_ABSORBING } else { 0 }
-                | if geostatic { MPM_BOUNDARY_GEOSTATIC } else { 0 },
-            4 * cfg.max_coupled,
-            absorb_records,
-            0,
-        ];
-        self.geostatic_pending = geostatic;
-        let samples = u64::from(ni) * u64::from(nj);
-        let records = u64::from(self.window_records);
+        let couple = fit(
+            "max_blocks",
+            &|a| a.couple,
+            plan.blocks.x as u64 * plan.blocks.y as u64 * plan.blocks.z as u64,
+            cfg.max_blocks,
+        )?;
+        let slot = self
+            .areas
+            .iter()
+            .position(Option::is_none)
+            .expect("max_regions is at most MPM_MAX_AREAS") as u32;
+        let off = rel_lo * BLOCK_CELLS as i32;
+        let record = MpmParams {
+            origin: [plan.origin.x, plan.origin.y, plan.origin.z, dx],
+            dims: [cells[0], cells[1], cells[2], collider],
+            window: [i0, j0, ni, nj],
+            column,
+            boundary: [
+                if absorbing { MPM_BOUNDARY_ABSORBING } else { 0 }
+                    | if geostatic { MPM_BOUNDARY_GEOSTATIC } else { 0 },
+                4 * cfg.max_coupled + faces.base,
+                faces.len,
+                columns.base,
+            ],
+            area: [off.x as u32, off.y as u32, off.z as u32, couple.base],
+            ..self.params
+        };
+        let moved = merge
+            .iter()
+            .any(|&k| self.areas[k as usize].as_ref().is_some_and(|a| a.moved));
+        self.areas[slot as usize] = Some(Area {
+            plan,
+            block_lo: lo,
+            record,
+            columns,
+            faces,
+            couple,
+            windowed: true,
+            moved,
+        });
+        self.areas_dirty = true;
+        // Domain-wide: the material's quantum, spacing and density.
+        self.params.column = [0.0, column[1], column[2], column[3]];
+        self.params.step[3] = bed_friction;
+        let mask = merge.iter().fold(0u32, |m, &k| m | (1 << k));
         let mut ops = TerrainOps::default();
-        ops.params(&self.params);
-        ops.counter(MPM_C_PARTICLES, 0);
-        Self::reset_ejecta(&mut ops);
+        self.write_params(&mut ops, slot, mask, 0);
+        if fresh_domain {
+            ops.counter(MPM_C_PARTICLES, 0);
+            Self::reset_ejecta(&mut ops);
+        }
+        let samples = u64::from(ni) * u64::from(nj);
+        let first = (j0 * nx + i0) / 4;
+        let last = ((j0 + nj - 1) * nx + i0 + ni - 1) / 4;
         ops.disp("mpm_activate_count", samples);
         ops.disp("mpm_activate_scan", 64);
         ops.disp("mpm_activate_emit", samples);
-        ops.disp("mpm_activate_lower", records);
-        let absorb = u64::from(self.params.boundary[2]);
-        if absorb > 0 {
-            ops.disp("mpm_absorb_init", absorb);
+        ops.disp("mpm_activate_lower", u64::from(last - first + 1));
+        if faces.len > 0 {
+            ops.disp("mpm_absorb_init", u64::from(faces.len));
         }
-        Ok(ops)
+        // The merged areas are this one now; their records go with the next
+        // write.
+        for &k in &merge {
+            self.areas[k as usize] = None;
+            self.areas_dirty = true;
+        }
+        self.geostatic_pending |= geostatic;
+        Ok(Opened {
+            area: slot,
+            absorbed: merge,
+            activated: true,
+            ops,
+        })
     }
 
-    /// Close the region: every particle's quanta are splatted bilinearly, in
-    /// whole quanta, onto the four heightfield samples around its home sample
-    /// moved by its displacement (window samples directly, others through the
-    /// deposits), and the region holds no particles.
-    pub fn bake(&self) -> anyhow::Result<TerrainOps> {
+    /// Close every open area (see [`Self::bake_area`]), one pass each.
+    pub fn bake(&mut self) -> anyhow::Result<Vec<TerrainOps>> {
+        let slots: Vec<u32> = self.areas().iter().map(|a| a.slot).collect();
         anyhow::ensure!(
-            self.window_records > 0,
+            !slots.is_empty() && self.areas.iter().flatten().all(|a| a.windowed),
             "terrain_bake needs a region opened by terrain_activate"
         );
-        let records = u64::from(self.window_records);
+        slots.into_iter().map(|k| self.bake_area(k)).collect()
+    }
+
+    /// Close area `slot`: each of its particles' quanta are split, in whole
+    /// quanta, between the heightfield it came from (the tent at its home
+    /// sample moved by its displacement) and material the MPM moved (P2G's
+    /// B-spline at its position), onto window samples directly and others
+    /// through the deposits. Its samples are rigid ground again; other areas
+    /// go on. The last area's bake empties the particle pool.
+    pub fn bake_area(&mut self, slot: u32) -> anyhow::Result<TerrainOps> {
+        let area = self
+            .areas
+            .get(slot as usize)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| anyhow::anyhow!("terrain area {slot} is not open"))?;
+        anyhow::ensure!(
+            area.windowed,
+            "terrain_bake needs a region opened by terrain_activate"
+        );
+        let rec = area.record;
+        let nx = self
+            .domain
+            .and_then(|d| d.field)
+            .map(|(f, _)| f.nx)
+            .expect("an activated area has a field");
+        let [i0, j0, ni, nj] = rec.window;
+        let first = (j0 * nx + i0) / 4;
+        let last = ((j0 + nj - 1) * nx + i0 + ni - 1) / 4;
+        let close = self.open_count() == 1;
         let mut ops = TerrainOps::default();
+        self.write_params(&mut ops, slot, 0, if close { MPM_DOMAIN_CLOSE } else { 0 });
         // On the absorbing ground: the walls' give, measured on the window's
         // edge columns, for the bake to take out (in the face records' space).
-        if self.params.boundary[2] > 0 {
-            let [_, _, ni, nj] = self.params.window;
-            ops.disp("mpm_bake_shift", 2 * u64::from(ni + nj));
+        if rec.boundary[2] > 0 {
+            let edges = 2 * u64::from(ni + nj);
+            ops.disp("mpm_write_args", 1);
+            ops.disp("mpm_bake_edge_clear", edges);
+            ops.particles("mpm_bake_edge_count");
+            ops.disp("mpm_bake_edge_scan", 64);
+            ops.particles("mpm_bake_edge_scatter");
+            ops.disp("mpm_bake_edge_sort", edges);
+            ops.disp("mpm_bake_shift", edges);
         }
         ops.disp("mpm_write_args", 1);
         ops.particles("mpm_bake_bin");
-        ops.disp("mpm_bake_raise", records);
+        ops.disp("mpm_bake_raise", u64::from(last - first + 1));
         ops.disp("mpm_bake_header", 1);
         self.deposits(&mut ops);
+        self.areas[slot as usize] = None;
+        self.areas_dirty = true;
+        if close {
+            self.domain = None;
+        }
         Ok(ops)
     }
 
@@ -527,7 +1021,11 @@ impl TerrainPlan {
             rock.softening_stress(self.params.origin[3])?;
         }
         anyhow::ensure!(
-            self.params.boundary[0] & MPM_BOUNDARY_ABSORBING == 0 || self.wave_speed > 0.0,
+            self.areas
+                .iter()
+                .flatten()
+                .all(|a| a.record.boundary[0] & MPM_BOUNDARY_ABSORBING == 0)
+                || self.wave_speed > 0.0,
             "the absorbing boundary needs a material with stiffness (terrain_set_material)"
         );
         self.params.step[0] = dt;
@@ -543,9 +1041,12 @@ impl TerrainPlan {
              engine_terrain::substeps_for",
             self.wave_speed
         );
-        ops.params(&self.params);
-        // A geostatic activation's particles take their stress before the
-        // first substep.
+        self.write_params(ops, 0, 0, 0);
+        for a in self.areas.iter_mut().flatten() {
+            a.moved = true;
+        }
+        // Freshly activated particles take their stress before the first
+        // substep.
         if std::mem::take(&mut self.geostatic_pending) {
             ops.disp("mpm_write_args", 1);
             ops.particles("mpm_geostatic");
@@ -568,10 +1069,10 @@ impl TerrainPlan {
     }
 
     /// A coupled frame (explicit, staggered) ahead of the rigid step: the
-    /// rigid colliders (`colliders` in the world) overlapping the region are
-    /// listed, each substep holds the material to them, and their reactions
-    /// become impulse records the rigid step applies at its start (so the
-    /// step must run with its impulse pass on).
+    /// rigid colliders (`colliders` in the world) overlapping the open areas
+    /// are listed, each substep holds the material to them, and their
+    /// reactions become impulse records the rigid step applies at its start
+    /// (so the step must run with its impulse pass on).
     pub fn coupled(
         &mut self,
         substeps: u32,
@@ -592,6 +1093,16 @@ impl TerrainPlan {
         ops.disp("mpm_couple_emit", slots);
         ops.disp("mpm_couple_finish", 1);
         Ok(ops)
+    }
+
+    /// One past the last absorbing face record any open area uses.
+    fn faces_end(&self) -> u32 {
+        self.areas
+            .iter()
+            .flatten()
+            .map(|a| a.faces.base + a.faces.len)
+            .max()
+            .unwrap_or(0)
     }
 
     /// One MPM substep's dispatches. With `coupled` (the coupling slots), the
@@ -616,7 +1127,7 @@ impl TerrainPlan {
         }
         ops.particles("mpm_g2p");
         // The absorbing faces move with the material at them.
-        let faces = u64::from(self.params.boundary[2]);
+        let faces = u64::from(self.faces_end());
         if faces > 0 {
             ops.disp("mpm_absorb_faces", faces);
         }
@@ -630,14 +1141,39 @@ impl TerrainPlan {
         ops.disp("mpm_deposit_header", 1);
     }
 
-    /// Start a km/s impact or explosion at `point` (on the surface): every
-    /// live particle of the region takes `field`'s excavation velocity.
+    /// Start a km/s impact or explosion at `point` (on the surface) in the
+    /// open area under it: see [`Self::apply_source_to`].
     pub fn apply_source(
         &mut self,
         field: &ZModel,
         point: glam::Vec3,
     ) -> anyhow::Result<TerrainOps> {
+        let area = self
+            .area_at(point)
+            .ok_or_else(|| anyhow::anyhow!("no open terrain area under the source point"))?;
+        self.apply_source_to(area, field, point)
+    }
+
+    /// Start a km/s impact or explosion at `point` in area `slot`: every live
+    /// particle of the area within the field's extent takes `field`'s
+    /// excavation velocity, added to its own (the impulses of several
+    /// sources superpose on the moving material). On an area whose material
+    /// has moved since it opened, the source sits on the material's surface
+    /// under `point` (its highest particle there, found on the GPU), not at
+    /// `point`'s height.
+    pub fn apply_source_to(
+        &mut self,
+        slot: u32,
+        field: &ZModel,
+        point: glam::Vec3,
+    ) -> anyhow::Result<TerrainOps> {
         anyhow::ensure!(point.is_finite(), "source point must be finite");
+        let area = self
+            .areas
+            .get(slot as usize)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| anyhow::anyhow!("terrain area {slot} is not open"))?;
+        let surface = area.moved;
         self.params.source = [
             [point.x, point.y, point.z, field.z as f32],
             [
@@ -652,8 +1188,13 @@ impl TerrainPlan {
             ],
         ];
         let mut ops = TerrainOps::default();
-        ops.params(&self.params);
+        let flags = if surface { MPM_DOMAIN_SURFACE } else { 0 };
+        self.write_params(&mut ops, slot, 0, flags);
         ops.disp("mpm_write_args", 1);
+        if surface {
+            ops.counter(MPM_C_SURFACE, 0);
+            ops.particles("mpm_source_surface");
+        }
         ops.particles("mpm_source");
         Ok(ops)
     }
@@ -756,6 +1297,8 @@ impl TerrainPlan {
             escaped: c[MPM_C_ESCAPED],
             airborne: c[MPM_C_AIRBORNE],
             body_speed: f32::from_bits(c[MPM_C_BODY_SPEED]),
+            area_speed: std::array::from_fn(|k| f32::from_bits(c[MPM_C_AREA_SPEED + k])),
+            area_body_speed: std::array::from_fn(|k| f32::from_bits(c[MPM_C_AREA_BODY + k])),
         })
     }
 }
@@ -790,7 +1333,27 @@ impl RegionClock {
 
     /// Keep the region open (not settled) until `step`.
     pub fn hold_until(&mut self, step: u64) {
-        self.hold_until = step;
+        self.hold_until = self.hold_until.max(step);
+    }
+
+    /// A source adds up to `speed` m/s to material already moving (its
+    /// velocity superposes on the flow): from `step` the bound starts from
+    /// the sum, and reports from before it are ignored.
+    pub fn kick(&mut self, speed: f32, step: u64) {
+        self.speed += speed;
+        self.speed_step = self.speed_step.max(step);
+        self.quiet = 0;
+    }
+
+    /// Areas grown into one: the merged area's clock starts at `step` from
+    /// the fastest of theirs, held as long as the longest hold.
+    pub fn merged(clocks: &[RegionClock], step: u64) -> Self {
+        Self {
+            speed: clocks.iter().map(|c| c.speed).fold(0.0, f32::max),
+            speed_step: step,
+            quiet: 0,
+            hold_until: clocks.iter().map(|c| c.hold_until).max().unwrap_or(0),
+        }
     }
 
     /// `(substeps, dt)` for the frame at `step`: the bound is 1.5 × the last
@@ -941,6 +1504,8 @@ mod tests {
             escaped: 0,
             airborne: air,
             body_speed: 0.0,
+            area_speed: [s; MPM_MAX_AREAS as usize],
+            area_body_speed: [0.0; MPM_MAX_AREAS as usize],
         };
         c.report(9, &r(0.0, 0), 0.01);
         assert_eq!(
@@ -1000,7 +1565,8 @@ mod tests {
         let ops = p
             .activate(&region, 0, grid(), glam::Vec3::ZERO, 1600.0, 0.6)
             .unwrap();
-        let cells = [p.params().dims[0], p.params().dims[1], p.params().dims[2]];
+        let a = *p.area_params(0).unwrap();
+        let cells = [a.dims[0], a.dims[1], a.dims[2]];
         let records = TerrainPlan::boundary_nodes(cells);
         assert_eq!(
             ops.cmds.last(),
@@ -1009,7 +1575,7 @@ mod tests {
                 threads: records
             })
         );
-        let b = p.params().boundary;
+        let b = a.boundary;
         assert_eq!(b[0], MPM_BOUNDARY_ABSORBING | MPM_BOUNDARY_GEOSTATIC);
         // The records follow the coupling slots in their binding, which holds them all.
         assert_eq!(b[1], 4 * cfg.max_coupled);
@@ -1043,7 +1609,7 @@ mod tests {
             .activate(&region, 0, grid(), glam::Vec3::ZERO, 1600.0, 0.6)
             .unwrap();
         assert!(!kernels(&ops).contains(&"mpm_absorb_init"));
-        let b = q.params().boundary;
+        let b = q.area_params(0).unwrap().boundary;
         assert_eq!((b[0], b[2]), (0, 0));
         assert!(!kernels(&q.step(2, 1.0e-4, -9.81).unwrap()).contains(&"mpm_geostatic"));
     }
@@ -1088,6 +1654,6 @@ mod tests {
         assert!(err.to_string().contains("stiffness"), "{err}");
         // A host-loaded region has no window: its bed is the field's surface.
         p.load(&region(&cfg), 10, Some(0), 0.5).unwrap();
-        assert_eq!(p.params().boundary, [0; 4]);
+        assert_eq!(p.area_params(0).unwrap().boundary, [0; 4]);
     }
 }
