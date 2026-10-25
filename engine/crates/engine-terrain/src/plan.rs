@@ -600,8 +600,8 @@ impl TerrainPlan {
     fn substep(&self, ops: &mut TerrainOps, coupled: Option<u64>) {
         // Hash words to empty.
         let clear = 2 * u64::from(self.params.counts[1]);
+        // mpm_clear also writes the workgroup counts mpm_touch reads.
         ops.disp("mpm_clear", clear);
-        ops.disp("mpm_write_args", 1);
         ops.particles("mpm_touch");
         ops.disp("mpm_write_args", 1);
         ops.particles("mpm_count");

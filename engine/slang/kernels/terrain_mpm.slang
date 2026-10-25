@@ -307,6 +307,21 @@ float3 mpmWeights(float fx)
 
 float mpmWeightAt(float3 wx, uint o) { return o == 0u ? wx.x : o == 1u ? wx.y : wx.z; }
 
+// The indirect workgroup counts from the counters: blocks, particles, parcels.
+void mpmWriteArgs(MpmParams p)
+{
+    gMpmArgs[0] = min(ALOAD(gMpmCounters[MPM_C_BLOCKS]), p.counts.z);
+    gMpmArgs[1] = 1u;
+    gMpmArgs[2] = 1u;
+    gMpmArgs[3] = (mpmParticleCount() + MPM_GROUP - 1u) / MPM_GROUP;
+    gMpmArgs[4] = 1u;
+    gMpmArgs[5] = 1u;
+    uint parcels = min(ALOAD(gMpmCounters[MPM_C_PARCELS]), asuint(p.couple.z));
+    gMpmArgs[6] = (parcels + MPM_GROUP - 1u) / MPM_GROUP;
+    gMpmArgs[7] = 1u;
+    gMpmArgs[8] = 1u;
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void mpm_clear(uint3 tid : SV_DispatchThreadID)
@@ -319,6 +334,9 @@ void mpm_clear(uint3 tid : SV_DispatchThreadID)
         ASTORE(gMpmCounters[MPM_C_BLOCKS], 0u);
         ASTORE(gMpmCounters[MPM_C_SORTED], 0u);
         ASTORE(gMpmCounters[MPM_C_AIRBORNE], 0u);
+        // mpm_touch's workgroups (mpm_write_args, fused: one dispatch less
+        // per substep).
+        mpmWriteArgs(p);
     }
 }
 
@@ -353,17 +371,7 @@ void mpm_touch(uint3 tid : SV_DispatchThreadID)
 [numthreads(1, 1, 1)]
 void mpm_write_args(uint3 tid : SV_DispatchThreadID)
 {
-    MpmParams p = mpmParams();
-    gMpmArgs[0] = min(ALOAD(gMpmCounters[MPM_C_BLOCKS]), p.counts.z);
-    gMpmArgs[1] = 1u;
-    gMpmArgs[2] = 1u;
-    gMpmArgs[3] = (mpmParticleCount() + MPM_GROUP - 1u) / MPM_GROUP;
-    gMpmArgs[4] = 1u;
-    gMpmArgs[5] = 1u;
-    uint parcels = min(ALOAD(gMpmCounters[MPM_C_PARCELS]), asuint(p.couple.z));
-    gMpmArgs[6] = (parcels + MPM_GROUP - 1u) / MPM_GROUP;
-    gMpmArgs[7] = 1u;
-    gMpmArgs[8] = 1u;
+    mpmWriteArgs(mpmParams());
 }
 
 [shader("compute")]

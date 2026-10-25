@@ -122,3 +122,18 @@ test('the absorbing ground sets up its node records at activation and the geosta
   assert.throws(() => new TerrainStep(JSON.stringify({ config: { boundary: 'absorbing', initial_stress: 'unstressed' } })), /geostatic/i);
   assert.throws(() => new TerrainStep(JSON.stringify({ config: { boundary: 'soft' } })), /boundary/);
 });
+
+test('the game profile sets its settings, and the page may override them', () => {
+  const settings = (config) => JSON.parse(new TerrainStep(JSON.stringify({ config })).settings()).config;
+  const game = settings({ profile: 'game' });
+  assert.equal(game.cells_per_radius, 8);
+  assert.ok(Math.abs(game.courant - 0.45) < 1e-6);
+  assert.equal(game.bed_depth, 1.25);
+  assert.equal(game.speed_growth, 1);
+  const physical = settings({});
+  assert.equal(physical.cells_per_radius, 16);
+  assert.equal(physical.bed_depth, 1.5);
+  assert.equal(physical.speed_growth, 1.5);
+  assert.equal(settings({ profile: 'game', cells_per_radius: 12 }).cells_per_radius, 12);
+  assert.throws(() => new TerrainStep(JSON.stringify({ config: { profile: 'fast' } })), /profile/);
+});
