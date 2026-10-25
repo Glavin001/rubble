@@ -392,6 +392,13 @@ depth 0.037 m, final rim 0.191 m.
   the impactor's kinetic energy (269 J, mostly within a few impactor radii),
   against about 3 J to lift the cavity. `terrain_crater` asserts the factor-2
   volume band and fails there; the radius, shape, rim and ledger checks pass.
+- **Bounded source (2026-10-25, user-approved).** The field now moves only
+  the transient crater (`ZModel::extent` = R about the impact point; zmodel.rs
+  "Extent"). It keeps 266 of 268 J and carries a momentum-transfer β of 1.26.
+  At margin 2 and 16 cells/R the cavity is 3.08× (from 3.57×), the radius
+  1.25×, the rim 3.2 cm. Still open: what remains follows the field's strength
+  at crater scale (α, fitted to Housen & Holsapple's launch speeds) and how long
+  the impulsive flow keeps displacing ground, not its far field.
 - **Volume diagnosis (2026-10-25): not compaction, not the bed.** Measured with
   the test's env-gated probes (`CRATER_PROBE`, `CRATER_SPLIT`, `CRATER_COLUMN`,
   `CRATER_BED`, `CRATER_PHI`, `CRATER_Z`, `CRATER_CORE`). The baseline is
