@@ -96,8 +96,15 @@ namespace RubbleRender
 		return HasGeneratedContent() ? LoadGenerated<UMaterialInterface>(TEXT("M_RubbleTownChunk")) : nullptr;
 	}
 
-	UMaterialInterface* TownSurface(ERubbleMaterial Material)
+	UMaterialInterface* TownSurface(ERubbleMaterial Material, bool bCurtainGlass)
 	{
+		if (bCurtainGlass && HasGeneratedContent())
+		{
+			if (UMaterialInterface* Curtain = LoadGenerated<UMaterialInterface>(TEXT("M_RubbleCurtainGlass")))
+			{
+				return Curtain;
+			}
+		}
 		if (Material == ERubbleMaterial::Glass && HasGeneratedContent())
 		{
 			if (UMaterialInterface* Glass = LoadGenerated<UMaterialInterface>(TEXT("M_RubbleTownGlass")))

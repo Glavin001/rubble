@@ -149,7 +149,7 @@ fn materials(seam_scale: f64) -> Vec<PackMaterial> {
         ..steel.clone()
     };
     let glass = PackMaterial {
-        name: "window-glass".into(),
+        name: "curtain-glass".into(),
         compression: [60e6, 63e6],
         tension: [3e6, 3.15e6],
         shear: [5.4e6, 5.67e6],
@@ -174,7 +174,7 @@ fn materials(seam_scale: f64) -> Vec<PackMaterial> {
         ..glass.clone()
     };
     let seam = PackMaterial {
-        name: "window-glass-shard-seam".into(),
+        name: "curtain-glass-shard-seam".into(),
         tension: glass.tension.map(|x| x * seam_scale),
         shear: glass.shear.map(|x| x * seam_scale),
         ..glass.clone()

@@ -149,6 +149,8 @@ struct FRubbleShapeVisual
 	/** The destructible chunk this shape draws (the town's threshold pieces): Split events move it
 	 *  to a child body. INDEX_NONE: it stays on its body. */
 	int32 Chunk = INDEX_NONE;
+	/** A glass tower's curtain wall (the pack's curtain-glass): drawn see-through. */
+	bool bCurtainGlass = false;
 };
 
 /** A rigid body drawn by its shapes (rigid scenes, scenery, projectiles, vehicle parts). */

@@ -228,7 +228,7 @@ FString FRubbleAbiBackend::MockReason(const FRubbleSceneRequest& R)
 		}
 		return FString();
 	case ERubbleFamily::Fracture:
-		return R.Id == TEXT("house") || R.Id == TEXT("arch") || R.Id == TEXT("town") ? FString() : TEXT("procedural destructibles (cuboids, rows, grids) are not on the ABI");
+		return R.Id == TEXT("house") || R.Id == TEXT("arch") || R.Id == TEXT("town") || R.Id == TEXT("glasstower") ? FString() : TEXT("procedural destructibles (cuboids, rows, grids) are not on the ABI");
 	default:
 		return FString();
 	}
@@ -656,7 +656,17 @@ bool FRubbleAbiBackend::LoadAbi(const FRubbleSceneRequest& Request, FString& Err
 		W.max_joints = FMath::Max(W.max_joints, 32768u);
 		W.max_hull_vertices = FMath::Max(W.max_hull_vertices, 1u << 20);
 	}
-	bTownThreshold = Request.Family == ERubbleFamily::Fracture && Request.Id == TEXT("town") && Request.Param(TEXT("bonds"), 0.0f) < 0.5f;
+	// The town runs the threshold model (?bonds=1: bond joints); the glass tower bond joints, as
+	// the fracture lab does (?threshold=1: the threshold model).
+	bTownThreshold = Request.Family == ERubbleFamily::Fracture
+		&& ((Request.Id == TEXT("town") && Request.Param(TEXT("bonds"), 0.0f) < 0.5f)
+			|| (Request.Id == TEXT("glasstower") && Request.Param(TEXT("threshold"), 0.0f) > 0.5f));
+	if (Request.Family == ERubbleFamily::Fracture && Request.Id == TEXT("glasstower"))
+	{
+		// About 1.7k chunks and 4.5k bonds, hull shards of up to 16 points.
+		NumBodies += 4096;
+		W.max_joints = FMath::Max(W.max_joints, 1u << 14);
+	}
 	if (Request.Family == ERubbleFamily::Fracture && Request.Id == TEXT("town"))
 	{
 		// Vibe Town: ~52k chunks, ~133k bonds, ~25k hull chunks of up to 42 points.
@@ -772,7 +782,7 @@ bool FRubbleAbiBackend::LoadAbi(const FRubbleSceneRequest& Request, FString& Err
 		break;
 	}
 	case ERubbleFamily::Fracture:
-		if (Request.Id == TEXT("town"))
+		if (Request.Id == TEXT("town") || Request.Id == TEXT("glasstower"))
 		{
 			if (!CreateTown(Error))
 			{
@@ -1150,7 +1160,7 @@ void FRubbleAbiBackend::SetVehicleInput(const FRubbleVehicleInput& In)
 
 bool FRubbleAbiBackend::CreateTown(FString& Error)
 {
-	FString Path = FPaths::ProjectContentDir() / TEXT("Rubble/Town/vibe-town.json");
+	FString Path = FPaths::ProjectContentDir() / (Current.Id == TEXT("glasstower") ? TEXT("Rubble/Town/glass-tower.json") : TEXT("Rubble/Town/vibe-town.json"));
 	FParse::Value(FCommandLine::Get(), TEXT("RubbleTownPack="), Path);
 	TArray<uint8> Bytes;
 	if (!FFileHelper::LoadFileToArray(Bytes, *Path))
@@ -1263,6 +1273,7 @@ bool FRubbleAbiBackend::CreateTown(FString& Error)
 		Shape.Tint = M.Color;
 		Shape.Local = Xf(Frame);
 		Shape.bTownSurface = true;
+		Shape.bCurtainGlass = M.Name == TEXT("curtain-glass");
 		Shape.TextureLayer = M.Layer;
 		Shape.TilesPerMetre = 1.0f / M.MetresPerTile;
 		Shape.UpLayer = M.UpLayer;
@@ -1480,7 +1491,7 @@ void FRubbleAbiBackend::Launch(const FVector& Origin, const FVector& Direction)
 		const RbBodyId Ball = Balls[NextBall];
 		NextBall = (NextBall + 1) % Balls.Num();
 		if (rbBody_SetTransform(WorldPtr, Ball, Xf(FTransform(Origin))) != RB_OK
-			|| rbBody_SetLinearVelocity(WorldPtr, Ball, Vec(Direction.GetSafeNormal() * (IsTown() ? 4500.0 : 3500.0))) != RB_OK
+			|| rbBody_SetLinearVelocity(WorldPtr, Ball, Vec(Direction.GetSafeNormal() * ShotSpeed())) != RB_OK
 			|| rbBody_SetAngularVelocity(WorldPtr, Ball, RbVec3{ 0, 0, 0 }) != RB_OK
 			|| rbBody_SetAwake(WorldPtr, Ball, true) != RB_OK)
 		{

@@ -786,3 +786,87 @@ bool FRubbleVideoTown::RunTest(const FString& Parameters)
 }
 #endif
 
+#if WITH_DEV_AUTOMATION_TESTS
+/**
+ * Rubble.Video.GlassTower: the fracture lab's Generated · Glass tower in Unreal, wrecked as the lab
+ * wrecks it: bond joints under the lab's solver, three 7 t cannonballs at 18 m/s into the tower's
+ * base. Every frame (fixed 1/30 s) to RubbleShots/video/glasstower/ (scripts/unreal/video.sh
+ * glasstower encodes them). The camera orbits slowly from the west, the side the shots come from.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRubbleVideoGlassTower, "Rubble.Video.GlassTower",
+	EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
+
+bool FRubbleVideoGlassTower::RunTest(const FString& Parameters)
+{
+	if (!TestTrue(TEXT("the glass tower loads"), Rubble() && Load(TEXT("fracture:glasstower?autoshot=0"))))
+	{
+		return false;
+	}
+	constexpr double Fps = 30.0;
+	constexpr double Length = 22.0;
+	const FString Dir = ShotDir() / TEXT("video") / TEXT("glasstower");
+	IFileManager::Get().DeleteDirectory(*Dir, false, true);
+	IFileManager::Get().MakeDirectory(*Dir, true);
+	struct FState
+	{
+		int32 Frame = -100;
+		int32 Fired = 0;
+	};
+	TSharedRef<FState> S = MakeShared<FState>();
+	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(4.0f));
+	ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([S, Dir, Fps, Length]() {
+		// Frames -10..-1 settle the camera on its first pose (no blur from the jump), unrecorded.
+		if (S->Frame == -100)
+		{
+			FApp::SetUseFixedTimeStep(true);
+			FApp::SetFixedDeltaTime(1.0 / Fps);
+			S->Frame = -10;
+		}
+		const double At = FMath::Max(0, S->Frame) / Fps;
+		// The pack's footprint is centred: the tower stands at X -999 cm, its west face at Y -706,
+		// the pavilion 7.8 m off its south face at X +1099.
+		const FVector Tower(-999, 0, 0);
+		const float u = float(At / Length);
+		const float Ease = u * u * (3.0f - 2.0f * u);
+		const float Angle = FMath::DegreesToRadians(FMath::Lerp(-38.0f, 12.0f, Ease));
+		const float Radius = FMath::Lerp(6600.0f, 5600.0f, Ease);
+		const FVector Centre(0, 0, FMath::Lerp(1300.0f, 900.0f, Ease));
+		const FVector Eye = Centre + FVector(Radius * FMath::Sin(Angle), -Radius * FMath::Cos(Angle), FMath::Lerp(1500.0f, 700.0f, Ease));
+		if (ARubblePawn* Pawn = Cast<ARubblePawn>(GameWorld()->GetFirstPlayerController()->GetPawn()))
+		{
+			Pawn->LookFrom(Eye, Centre);
+		}
+		// Three shots into the west face's base, a half second apart, from 10 m out at 2 m up,
+		// aimed up enough that gravity brings them in at 1.5 m.
+		static const double Shots[] = { 1.0, 1.5, 2.0 };
+		static const double Along[] = { -500.0, -1000.0, -1500.0 };
+		for (int32 c = 0; c < UE_ARRAY_COUNT(Shots); ++c)
+		{
+			if (At >= Shots[c] && !(S->Fired & (1 << c)))
+			{
+				S->Fired |= 1 << c;
+				const double Speed = 1800.0, Run = 1000.0, Fall = 50.0, G = 981.0;
+				const double T = Run / Speed;
+				const double Up = (-Fall + 0.5 * G * T * T) / T;
+				Rubble()->Launch(FVector(Along[c], -706.0 - Run, 200.0), FVector(0, Speed, Up));
+			}
+		}
+		if (S->Frame < 0)
+		{
+			++S->Frame;
+			return false;
+		}
+		FScreenshotRequest::RequestScreenshot(Dir / FString::Printf(TEXT("frame_%04d.png"), S->Frame), /*bShowUI=*/false, false);
+		if (++S->Frame < int32(Length * Fps))
+		{
+			return false;
+		}
+		FApp::SetUseFixedTimeStep(false);
+		UE_LOG(LogRubble, Display, TEXT("Rubble.Video.GlassTower: %d frames in %s"), S->Frame, *Dir);
+		return true;
+	}));
+	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(0.5f));
+	return true;
+}
+#endif
+

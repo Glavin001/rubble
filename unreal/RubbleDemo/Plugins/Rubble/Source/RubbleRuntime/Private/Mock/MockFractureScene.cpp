@@ -20,6 +20,14 @@ namespace RubbleMock
 			return D;
 		}
 
+		FRubbleDemoDesc GlassTower()
+		{
+			FRubbleDemoDesc D = Fracture(TEXT("glasstower"), TEXT("Glass tower and pavilion (engine-fracture glass_tower.rs)"));
+			D.Params.Add({ TEXT("strength"), TEXT("Bond strength (x the pack's)"), 1.0f, 0.25f, 4.0f });
+			D.Params.Add({ TEXT("threshold"), TEXT("Threshold model with support loss (0: bond joints, the fracture lab's)"), 0.0f, 0.0f, 1.0f });
+			return D;
+		}
+
 		FRubbleDemoDesc Fracture(const TCHAR* Id, const TCHAR* Title)
 		{
 			FRubbleDemoDesc D;
@@ -45,6 +53,7 @@ namespace RubbleMock
 			Fracture(TEXT("cuboids"), TEXT("Cuboids")),
 			Fracture(TEXT("cuboids2x"), TEXT("Cuboids ×2")),
 			Town(),
+			GlassTower(),
 		};
 	}
 
@@ -339,6 +348,14 @@ namespace RubbleMock
 				Assets.GroundHalfExtentCm = 400000.0f;
 				Focus = FVector(0, 0, 600);
 				Distance = 16000.0f;
+			}
+			else if (Id == TEXT("glasstower"))
+			{
+				// Built by the ABI from its pack, on the town's stage.
+				Assets.Stage = ERubbleStage::Town;
+				Assets.GroundHalfExtentCm = 400000.0f;
+				Focus = FVector(0, -1000, 1200);
+				Distance = 7000.0f;
 			}
 			else if (Id == TEXT("house"))
 			{

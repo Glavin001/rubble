@@ -64,7 +64,15 @@ private:
 	/** The town's meteors, parked as the balls are. */
 	TArray<uint64> Meteors;
 	int32 NextMeteor = 0;
-	bool IsTown() const { return Current.Family == ERubbleFamily::Fracture && Current.Id == TEXT("town"); }
+	/** A cannonball's speed (cm/s): the glass tower's the fracture lab's for it (18 m/s, its
+	 *  default for a scene that size), the town's 45 m/s, the rest 35 m/s; ?shotspeed= (m/s). */
+	double ShotSpeed() const
+	{
+		const double Default = Current.Id == TEXT("glasstower") ? 18.0 : IsTown() ? 45.0 : 35.0;
+		return 100.0 * Current.Param(TEXT("shotspeed"), float(Default));
+	}
+	/** The pack scenes on the town's stage and kit: the town, and the glass tower and pavilion. */
+	bool IsTown() const { return Current.Family == ERubbleFamily::Fracture && (Current.Id == TEXT("town") || Current.Id == TEXT("glasstower")); }
 	/** The town under the threshold strength model (the default; ?bonds=1 keeps the breakable
 	 *  bond joints, every chunk a body). */
 	bool bTownThreshold = false;

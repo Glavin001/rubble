@@ -23,9 +23,10 @@ namespace RubbleRender
 	/** M_RubbleTownChunk (build_content.py: textured town chunks, 12 custom data floats), or null
 	 *  when it was not generated. */
 	RUBBLERUNTIME_API UMaterialInterface* TownChunk();
-	/** A town chunk's material: M_RubbleTownGlass (reflective panes over lit rooms) for glass,
+	/** A town chunk's material: M_RubbleCurtainGlass (see-through, reflective) for a glass
+	 *  tower's curtain wall, M_RubbleTownGlass (reflective panes over lit rooms) for other glass,
 	 *  M_RubbleTownChunk otherwise; null when they were not generated. */
-	RUBBLERUNTIME_API UMaterialInterface* TownSurface(ERubbleMaterial Material);
+	RUBBLERUNTIME_API UMaterialInterface* TownSurface(ERubbleMaterial Material, bool bCurtainGlass = false);
 	/** Car paint (clear coat, damage mask from vertex colour R) as a dynamic instance of Paint. */
 	RUBBLERUNTIME_API UMaterialInstanceDynamic* CarPaint(UObject* Outer, const FLinearColor& Paint);
 	RUBBLERUNTIME_API UMaterialInterface* Ground(ERubbleStage Stage);

@@ -145,6 +145,13 @@ void ARubbleEffects::Collapse(const FVector& At, int32 Bonds, ERubbleMaterial Ma
 {
 	// A break of a few bonds puffs; a storey's worth billows, wide and slow to settle.
 	const int32 N = FMath::Max(1, Bonds);
+	if (Material == ERubbleMaterial::Glass)
+	{
+		// Glass shatters into a spray of small, fast fragments and raises almost no dust.
+		Chips(At, FMath::Min(80, 6 * N), Material, 700.0f, 1.2f, Color);
+		DustPuffs(At, 1, 60.0f, 1.5f, Color);
+		return;
+	}
 	const float Radius = 180.0f + 10.0f * FMath::Min(N, 60);
 	DustPuffs(At, FMath::Clamp(4 + N / 2, 4, 30), Radius, 6.0f + 0.15f * FMath::Min(N, 60), Color);
 	Chips(At, FMath::Min(60, 2 * N), Material, 500.0f, 3.0f, Color);

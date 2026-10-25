@@ -560,6 +560,27 @@ def town_glass():
     return m
 
 
+def curtain_glass():
+    """M_RubbleCurtainGlass: a glass tower's curtain wall (the pack's curtain-glass), seen
+    through. Translucent and lit per pixel (surface forward shading), so the sun's highlight is
+    sharp and Lumen's front-layer reflections reach it; Fresnel opacity: clear face on, a mirror
+    at grazing angles, as float glass is; a faint green-blue body tint."""
+    m = material("M_RubbleCurtainGlass")
+    m.set_editor_property("blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT)
+    m.set_editor_property("translucency_lighting_mode", unreal.TranslucencyLightingMode.TLM_SURFACE_PER_PIXEL_LIGHTING)
+    fres = expr(m, unreal.MaterialExpressionFresnel, -900, 200, exponent=3.0, base_reflect_fraction=0.04)
+    opacity = expr(m, unreal.MaterialExpressionLinearInterpolate, -600, 200)
+    mel.connect_material_expressions(scalar(m, "FaceOpacity", 0.38, -900, 80), "", opacity, "A")
+    mel.connect_material_expressions(scalar(m, "EdgeOpacity", 0.92, -900, 140), "", opacity, "B")
+    mel.connect_material_expressions(fres, "", opacity, "Alpha")
+    mel.connect_material_property(opacity, "", MP.MP_OPACITY)
+    mel.connect_material_property(vector(m, "BodyTint", (0.035, 0.065, 0.08, 1.0), -600, -250), "", MP.MP_BASE_COLOR)
+    mel.connect_material_property(scalar(m, "Roughness", 0.02, -600, 380), "", MP.MP_ROUGHNESS)
+    mel.connect_material_property(scalar(m, "Specular", 1.0, -600, 450), "", MP.MP_SPECULAR)
+    mel.recompile_material(m)
+    return m
+
+
 def town_ground(arrays):
     """M_RubbleTownGround: the grass and mud layers of the town's texture arrays, world-projected."""
     m = material("M_RubbleTownGround")
@@ -585,6 +606,7 @@ def town():
     """The town's materials. Glass needs no textures; the rest fall back to tint-only chunks and
     the yard's ground when the copied texture arrays are missing."""
     town_glass()
+    curtain_glass()
     arrays = city_arrays()
     if not arrays:
         log("town: no /Game/VibeCity texture arrays (scripts/unreal/fetch-city-textures.sh); chunk and ground skipped")
