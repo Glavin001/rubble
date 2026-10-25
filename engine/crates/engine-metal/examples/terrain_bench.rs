@@ -150,6 +150,8 @@ trait Bench {
     /// Activation and source; their GPU time (ms; NaN without one).
     fn open(&mut self, e: &Event) -> f64;
     fn frame(&mut self, k: u32, dt: f32) -> (TerrainStepReport, f64);
+    /// The region's state, for run-to-run determinism (`state_print`).
+    fn fingerprint(&mut self) -> String;
 }
 
 struct MetalBench {
@@ -205,6 +207,9 @@ impl Bench for MetalBench {
     fn frame(&mut self, k: u32, dt: f32) -> (TerrainStepReport, f64) {
         self.sim.terrain_step_timed(k, dt, -G).unwrap()
     }
+    fn fingerprint(&mut self) -> String {
+        state_print(&self.sim.terrain_particles(), &self.sim.terrain_parcels())
+    }
 }
 
 struct WgpuBench {
@@ -244,10 +249,39 @@ impl Bench for WgpuBench {
     fn frame(&mut self, k: u32, dt: f32) -> (TerrainStepReport, f64) {
         (self.sim.terrain_step(k, dt, -G).unwrap(), f64::NAN)
     }
+    fn fingerprint(&mut self) -> String {
+        state_print(&self.sim.terrain_particles(), &self.sim.terrain_parcels())
+    }
 }
 
 /// One run of the timeline: the strike frame's activation and source, then
 /// `secs` of frames.
+/// FNV-1a of the particles (in slot order) and of the parcels as a set:
+/// parcels take their slots by atomic claims in G2P, whose order the GPU
+/// does not fix, so only their sorted list is comparable run to run.
+fn state_print(
+    p: &[engine_terrain::layout::MpmParticle],
+    q: &[engine_terrain::layout::MpmParcel],
+) -> String {
+    let mut parcels: Vec<Vec<u8>> = q.iter().map(|x| bytemuck::bytes_of(x).to_vec()).collect();
+    parcels.sort();
+    format!(
+        "particles {:016x}, {} parcels {:016x} (as a set)",
+        fnv(bytemuck::cast_slice(p)),
+        q.len(),
+        fnv(&parcels.concat())
+    )
+}
+
+fn fnv(bytes: &[u8]) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for &b in bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
 fn run(b: &mut dyn Bench, e: &Event, o: &Opts) -> ([f64; 2], Vec<Frame>) {
     b.prepare(e);
     let t = Instant::now();
@@ -427,11 +461,15 @@ fn main() {
         for (name, runs) in all_runs.iter_mut() {
             let mut b = make(name);
             let x = run(b.as_mut(), &e, &o);
+            let last = x.1.last().copied().unwrap_or_default();
             eprintln!(
-                "run {r} {name}: activation and source {:.2} ms GPU, {:.2} ms wall, {} particles",
+                "run {r} {name}: activation and source {:.2} ms GPU, {:.2} ms wall, {} particles; \
+                 at the end {} particle slots, {}",
                 x.0[0],
                 x.0[1],
-                x.1.first().map_or(0, |f| f.particles)
+                x.1.first().map_or(0, |f| f.particles),
+                last.particles,
+                b.fingerprint()
             );
             runs.push(x);
         }
