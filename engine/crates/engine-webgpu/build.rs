@@ -190,12 +190,17 @@ const WORLD_ENTRIES: &[&str] = &[
     "mpm_couple_clear",
     "mpm_couple_bin",
     "mpm_couple_gather",
+    "mpm_couple_apply",
     "mpm_couple_emit",
     "mpm_couple_finish",
     "mpm_parcels",
     "mpm_deposit_raise",
     "mpm_deposit_header",
     "mpm_source",
+    // Terrain look-ahead (slang/kernels/terrain_watch.slang).
+    "terrain_watch_energy",
+    "terrain_watch_pick",
+    "terrain_watch_write",
 ];
 
 const CHARACTER_ENTRIES: &[&str] = &["char_move", "char_post", "query_batch", "projectile_step"];
@@ -233,6 +238,9 @@ fn source_for(root: &std::path::Path, entry: &str) -> PathBuf {
     }
     if entry.starts_with("mpm_") {
         return kernels.join("terrain_mpm.slang");
+    }
+    if entry.starts_with("terrain_watch_") {
+        return kernels.join("terrain_watch.slang");
     }
     if entry.starts_with("convex_") {
         return kernels.join(if entry.ends_with("_persistent") {

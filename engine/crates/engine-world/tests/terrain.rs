@@ -138,14 +138,26 @@ fn a_box_dropped_on_an_open_region_rests_on_the_sand() {
     w.create_box_shape(b, &ShapeDef::default(), [half; 3])
         .unwrap();
     let mut ys = Vec::new();
-    for _ in 0..90 {
+    let trace = std::env::var("TERRAIN_TRACE").is_ok();
+    for k in 0..90 {
         w.step().unwrap();
-        w.poll().unwrap();
+        for f in w.poll().unwrap() {
+            if trace {
+                eprintln!("step {} terrain {:?}", f.step, f.terrain);
+            }
+        }
         ys.push(
             w.body_transform(b)
                 .unwrap()
                 .map_or(f32::NAN, |t| t.position[1]),
         );
+        if trace {
+            eprintln!(
+                "frame {k}: box y {:.4}, region {}",
+                ys[k],
+                w.terrain_region().is_some()
+            );
+        }
     }
     w.poll_blocking().unwrap();
     let y = w.body_transform(b).unwrap().unwrap().position[1];
@@ -160,4 +172,73 @@ fn a_box_dropped_on_an_open_region_rests_on_the_sand() {
     let drift = late.iter().cloned().fold(f32::MIN, f32::max)
         - late.iter().cloned().fold(f32::MAX, f32::min);
     assert!(drift < 2e-3, "still moving: {late:?}");
+}
+
+/// A heavy ball dropped on a watched field: the look-ahead opens a region
+/// before it arrives (none missed), and the ball buries itself as deep as the
+/// scaling of spheres dropped into dry sand says (Uehara et al. 2003:
+/// d = (0.14/μ)·(ρ_b/ρ_g)^½·D^⅔·H^⅓, H the drop height plus d), within the
+/// spread between their packings.
+#[test]
+fn a_dropped_ball_opens_a_region_before_it_lands_and_penetrates_as_uehara_says() {
+    let mut w = world();
+    let mut def = terrain_def();
+    def.strike.cells_per_body = 6.0;
+    def.strike.min_energy = 10.0;
+    w.enable_terrain(&def).unwrap();
+    let (ground, _) = flat_ground(&mut w, 65, 0.04);
+    w.terrain_watch_shape(ground, true).unwrap();
+    let (r, rho, drop) = (0.1f32, 7800.0f32, 1.0f32);
+    let b = w
+        .create_body(&BodyDef::dynamic([0.0, r + drop, 0.0]))
+        .unwrap();
+    w.create_sphere_shape(
+        b,
+        &ShapeDef {
+            density: rho,
+            ..ShapeDef::default()
+        },
+        [0.0; 3],
+        r,
+    )
+    .unwrap();
+    let mut opened_above = None;
+    let mut deepest = 0.0f32;
+    for _ in 0..150 {
+        w.step().unwrap();
+        w.poll().unwrap();
+        let y = w
+            .body_transform(b)
+            .unwrap()
+            .map_or(f32::NAN, |t| t.position[1]);
+        if w.terrain_region().is_some() {
+            opened_above.get_or_insert(y - r);
+            deepest = deepest.max(r - y);
+        } else if opened_above.is_some() {
+            break;
+        }
+    }
+    w.poll_blocking().unwrap();
+    assert_eq!(w.terrain_missed_strikes(), 0);
+    let above = opened_above.expect("a region opened for the strike");
+    assert!(
+        above > 0.0,
+        "the region opened with the ball {above} m above the sand"
+    );
+    // Uehara's law for this ball and sand.
+    let mu = f64::from(def.material.friction_angle).tan();
+    let ratio = f64::from(rho / def.material.density);
+    let mut d = 0.0f64;
+    for _ in 0..16 {
+        d = 0.14 / mu
+            * ratio.sqrt()
+            * (2.0 * f64::from(r)).powf(2.0 / 3.0)
+            * (f64::from(drop) + d).cbrt();
+    }
+    let got = f64::from(deepest);
+    eprintln!("region opened {above:.3} m above; penetration {got:.3} m, Uehara {d:.3} m");
+    assert!(
+        (0.5 * d..=2.0 * d).contains(&got),
+        "penetration {got} m against Uehara's {d} m"
+    );
 }

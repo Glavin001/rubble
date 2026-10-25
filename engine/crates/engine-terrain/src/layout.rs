@@ -27,7 +27,9 @@ pub const MPM_PARCELS_BINDING: usize = 50;
 /// Per heightfield sample: quanta deposited this frame.
 pub const MPM_DEPOSIT_BINDING: usize = 51;
 /// One past the last terrain binding.
-pub const MPM_BINDING_END: usize = 52;
+/// Terrain look-ahead (`terrain_watch.slang`): parameters, then the GPU's pick.
+pub const MPM_WATCH_BINDING: usize = 52;
+pub const MPM_BINDING_END: usize = 53;
 /// Colliders one block cell of the region lists (`MPM_CELL_COLLIDERS`).
 pub const MPM_CELL_COLLIDERS: u32 = 8;
 
@@ -40,6 +42,7 @@ pub const MPM_C_PARCELS: usize = 5;
 pub const MPM_C_DEPOSITED: usize = 6;
 pub const MPM_C_ESCAPED: usize = 7;
 pub const MPM_C_AIRBORNE: usize = 9;
+pub const MPM_C_BODY_SPEED: usize = 10;
 pub const MPM_COUNTER_WORDS: usize = 12;
 
 /// `MpmParams.dims.w` without a bed heightfield.

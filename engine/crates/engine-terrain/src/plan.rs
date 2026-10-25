@@ -44,6 +44,7 @@ pub const KERNELS: &[&str] = &[
     "mpm_couple_clear",
     "mpm_couple_bin",
     "mpm_couple_gather",
+    "mpm_couple_apply",
     "mpm_couple_emit",
     "mpm_couple_finish",
     "mpm_parcels",
@@ -78,6 +79,9 @@ pub struct TerrainStepReport {
     pub escaped: u32,
     /// Parcels still in flight after the last substep.
     pub airborne: u32,
+    /// Fastest surface speed of a dynamic body coupled to the region this
+    /// frame (m/s; 0 without coupling).
+    pub body_speed: f32,
 }
 
 /// A host write (`queue.write_buffer`) of `words` at byte `offset` of `binding`.
@@ -207,8 +211,10 @@ impl TerrainPlan {
         })
     }
 
-    /// The bytes each terrain binding needs (before [`alloc_bytes`]).
-    pub fn buffer_sizes(&self) -> [(usize, u64); MPM_BINDING_END - MPM_PARAMS_BINDING] {
+    /// The bytes each binding of the terrain pool needs (before
+    /// [`alloc_bytes`]): bindings 37-51. The look-ahead's binding
+    /// ([`MPM_WATCH_BINDING`]) is not the pool's: hosts keep it at 256 bytes.
+    pub fn buffer_sizes(&self) -> [(usize, u64); MPM_WATCH_BINDING - MPM_PARAMS_BINDING] {
         let config = &self.config;
         let blocks = u64::from(config.max_blocks);
         let particles = u64::from(config.max_particles);
@@ -487,7 +493,7 @@ impl TerrainPlan {
         // No colliders listed: the grid holds no rigid contacts.
         ops.disp("mpm_couple_clear", u64::from(self.config.max_blocks));
         for _ in 0..substeps {
-            self.substep(&mut ops);
+            self.substep(&mut ops, None);
         }
         self.deposits(&mut ops);
         Ok(ops)
@@ -512,8 +518,7 @@ impl TerrainPlan {
         ops.disp("mpm_couple_clear", u64::from(self.config.max_blocks));
         ops.disp("mpm_couple_bin", u64::from(colliders));
         for _ in 0..substeps {
-            self.substep(&mut ops);
-            ops.disp("mpm_couple_gather", slots * 64);
+            self.substep(&mut ops, Some(slots));
         }
         self.deposits(&mut ops);
         ops.disp("mpm_couple_emit", slots);
@@ -521,8 +526,9 @@ impl TerrainPlan {
         Ok(ops)
     }
 
-    /// One MPM substep's dispatches.
-    fn substep(&self, ops: &mut TerrainOps) {
+    /// One MPM substep's dispatches. With `coupled` (the coupling slots), the
+    /// rigid contacts' exchange runs between the grid update and G2P.
+    fn substep(&self, ops: &mut TerrainOps, coupled: Option<u64>) {
         // Hash words to empty.
         let clear = 2 * u64::from(self.params.counts[1]);
         ops.disp("mpm_clear", clear);
@@ -536,6 +542,10 @@ impl TerrainPlan {
         ops.particles("mpm_payload");
         ops.blocks("mpm_p2g");
         ops.blocks("mpm_grid");
+        if let Some(slots) = coupled {
+            ops.disp("mpm_couple_gather", slots * 64);
+            ops.blocks("mpm_couple_apply");
+        }
         ops.particles("mpm_g2p");
         ops.indirect("mpm_parcels", ARGS_PARCELS);
     }
@@ -668,6 +678,7 @@ impl TerrainPlan {
             deposited: c[MPM_C_DEPOSITED],
             escaped: c[MPM_C_ESCAPED],
             airborne: c[MPM_C_AIRBORNE],
+            body_speed: f32::from_bits(c[MPM_C_BODY_SPEED]),
         })
     }
 }
@@ -685,6 +696,8 @@ pub struct RegionClock {
     speed_step: u64,
     /// Consecutive settled frames.
     quiet: u32,
+    /// No settling before this step (a strike still on its way in).
+    hold_until: u64,
 }
 
 impl RegionClock {
@@ -694,7 +707,13 @@ impl RegionClock {
             speed,
             speed_step: step,
             quiet: 0,
+            hold_until: 0,
         }
+    }
+
+    /// Keep the region open (not settled) until `step`.
+    pub fn hold_until(&mut self, step: u64) {
+        self.hold_until = step;
     }
 
     /// `(substeps, dt)` for the frame at `step`: the bound is 1.5 × the last
@@ -717,14 +736,20 @@ impl RegionClock {
     }
 
     /// The report of the frame at `step` (reports arrive in order; one from
-    /// before the region opened is ignored).
+    /// before the region opened is ignored). A frame is quiet when its
+    /// material and every body coupled to it move slower than `settle_speed`,
+    /// nothing is in flight, and no hold is on.
     pub fn report(&mut self, step: u64, report: &TerrainStepReport, settle_speed: f32) {
         if step < self.speed_step {
             return;
         }
         self.speed = report.max_speed;
         self.speed_step = step;
-        if report.max_speed < settle_speed && report.airborne == 0 {
+        if report.max_speed < settle_speed
+            && report.body_speed < settle_speed
+            && report.airborne == 0
+            && step >= self.hold_until
+        {
             self.quiet += 1;
         } else {
             self.quiet = 0;
@@ -791,6 +816,7 @@ mod tests {
         };
         assert_eq!(count("mpm_couple_bin"), 1);
         assert_eq!(count("mpm_couple_gather"), 3);
+        assert_eq!(count("mpm_couple_apply"), 3);
         assert_eq!(count("mpm_p2g"), 3);
         assert_eq!(count("mpm_couple_finish"), 1);
         // The params ride ahead of the pass.
@@ -837,6 +863,7 @@ mod tests {
             deposited: 0,
             escaped: 0,
             airborne: air,
+            body_speed: 0.0,
         };
         c.report(9, &r(0.0, 0), 0.01);
         assert_eq!(

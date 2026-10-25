@@ -227,3 +227,68 @@ fn a_heavy_box_rests_on_sand_not_on_the_bed() {
         state.linear_vel[1]
     );
 }
+
+/// A light box on sand far heavier than it: the contact exchange is the
+/// inelastic one (nodes and body share an impulse in proportion to their
+/// masses), so it stays at rest whatever the mass ratio. Holding the nodes to
+/// the body and then pushing the body with their whole reaction once threw such
+/// a box up at 136 m/s.
+#[test]
+fn a_light_box_rests_on_sand_whatever_the_mass_ratio() {
+    let mut s = sim(-9.81);
+    let cfg = config();
+    s.terrain_enable(&cfg).unwrap();
+    let sand = SandMaterial::default();
+    s.terrain_set_material(Some(&sand)).unwrap();
+    let field = HeightField::new(33, 33, 0.0625, 0.0625, vec![0.0; 33 * 33]).unwrap();
+    let mut arena = HullArena::new();
+    let (_, bed) = s
+        .add_height_field(&mut arena, &field, Vec3::ZERO, Quat::IDENTITY, 0)
+        .unwrap();
+    let plan = RegionPlan::spanning(
+        &cfg,
+        Vec3::new(-0.5, -0.3, -0.5),
+        Vec3::new(0.5, 0.5, 0.5),
+        0.025,
+        0,
+        0,
+    )
+    .unwrap();
+    s.terrain_activate(
+        &plan,
+        bed,
+        &field,
+        Vec3::ZERO,
+        sand.density,
+        sand.friction_angle.tan(),
+    )
+    .unwrap();
+    // 0.16 m cube of 1 kg (244 kg/m³): the sand nodes it touches outweigh it.
+    let half = 0.08;
+    let b = crate_box(
+        &mut s,
+        Vec3::new(0.0, half + 0.05, 0.0),
+        Vec3::splat(half),
+        1.0,
+        Vec3::ZERO,
+    );
+    let (n, dt) = substeps_for(&cfg, FRAME, plan.dx, sand.p_wave_speed(), 5.0).unwrap();
+    let mut fastest = 0.0f32;
+    for _ in 0..60 {
+        s.step_with_terrain(n, dt).unwrap();
+        fastest = fastest.max(Vec3::from(s.read_body(b).linear_vel).length());
+    }
+    let state = s.read_body(b);
+    let sink = half - state.position[1];
+    // Dropped 5 cm: never faster than free fall from there (1 m/s).
+    assert!(fastest < 1.1, "the box reached {fastest} m/s");
+    assert!(
+        (-0.005..0.03).contains(&sink),
+        "box bottom {sink} m into the sand"
+    );
+    assert!(
+        Vec3::from(state.linear_vel).length() < 0.02,
+        "still moving: {:?}",
+        state.linear_vel
+    );
+}
