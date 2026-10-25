@@ -234,7 +234,10 @@ loop {
   - `create_hull_shape` and `create_transformed_hull_shape(hull, transform,
     scale)`;
   - `create_height_field_shape` (static only, as in Box3D; editable in place
-    with `set_height_field_region`, see `deformable-terrain.md`);
+    with `set_height_field_region`, see `deformable-terrain.md`); a field may
+    carry a Bekker soil (`HeightField::with_soil`, `set_height_field_soil`, C
+    ABI `rbHeightField_SetSoil`) that vehicle wheels sink into and rut
+    (`deformable-terrain.md`, "T5 ruts");
   - later: baked static compounds.
   - **No triangle-mesh shapes** (decided 2026-10-24). Level geometry comes in
     convex-decomposed at the source (several hull shapes on a static body),

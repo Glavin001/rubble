@@ -650,6 +650,7 @@ impl RigidStep {
             has_height_field: c(18) & 8 != 0,
             // The browser hosts no event shapes yet (World runs natively).
             contact_events: false,
+            soil: false,
             reuse_contacts: self.params.flags & engine_schema::FLAG_REUSE_CONTACTS != 0,
             max_colors: self.cap.max_colors,
             iterations: self.params.iterations,

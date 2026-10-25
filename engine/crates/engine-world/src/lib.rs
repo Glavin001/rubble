@@ -61,6 +61,7 @@ pub use rig::VehicleDamage;
 
 pub use engine_schema::convex::{CollisionFilter as Filter, ConvexHull};
 pub use engine_schema::heightfield::{HeightField, HeightFieldError};
+pub use engine_schema::soil::{Soil, SoilError};
 pub use engine_schema::{
     AvbdParams, Dof, JointDesc, JointFrame, Motion, StepCounters, WorldCapacity, CONTACT_EVENT_CAP,
 };
@@ -932,6 +933,31 @@ impl World {
         field
             .set_region(i0, j0, w, d, values)
             .map_err(|e| anyhow::anyhow!("heightfield edit: {e}"))?;
+        let wakes = self.sleepers_over_height_field(s, &field, transform, i0, j0, w, d);
+        self.sim.push_body_commands(&wakes)?;
+        let collider = self.shapes[s].collider;
+        self.sim
+            .update_height_field(&mut self.hulls, collider, &field, j0..j0 + d)
+            .map_err(|e| anyhow::anyhow!("heightfield edit: {e}"))?;
+        // The collider's filter bits live in `generation`: keep them.
+        self.shapes[s].geometry = Geometry::HeightField { field, transform };
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Wake commands for the bodies asleep (as of the last polled frame) over
+    /// samples `[i0, i0 + w) × [j0, j0 + d)` of heightfield shape `s`.
+    #[allow(clippy::too_many_arguments)]
+    fn sleepers_over_height_field(
+        &self,
+        s: usize,
+        field: &HeightField,
+        transform: Transform,
+        i0: u32,
+        j0: u32,
+        w: u32,
+        d: u32,
+    ) -> Vec<GpuCommand> {
         // Sleeping bodies over the edited cells, from last frame's poses (the
         // terrain's static body: its origin until a frame reports it).
         let body = self.shapes[s].body as usize;
@@ -949,8 +975,7 @@ impl World {
         }
         let (dx, dz) = field.cell_size();
         let pad = Vec3::splat(dx.max(dz));
-        let wakes: Vec<GpuCommand> = self
-            .bodies
+        self.bodies
             .iter()
             .enumerate()
             .filter(|(_, b)| b.alive && b.last_asleep)
@@ -968,13 +993,46 @@ impl World {
                 );
                 (p.cmpge(mn - pad - reach).all() && p.cmple(mx + pad + reach).all()).then(|| GpuCommand::wake(i as u32))
             })
-            .collect();
+            .collect()
+    }
+
+    /// Give a heightfield shape a soil (or take it away, `None`): vehicle
+    /// wheels on it then sink to the rigid-wheel depth of their load, press
+    /// ruts and pay compaction resistance (deformable terrain T5,
+    /// `engine/docs/deformable-terrain.md`). A field can also be created with
+    /// one (`HeightField::with_soil`). The field is placed again from this
+    /// host's copy of its samples, which is fresh soil: ruts pressed so far
+    /// are not kept, and bodies asleep over the field are woken. Fails,
+    /// changing nothing, on invalid soil parameters or if the wakes exceed
+    /// `WorldCapacity::max_commands`.
+    pub fn set_height_field_soil(&mut self, id: ShapeId, soil: Option<Soil>) -> anyhow::Result<()> {
+        let s = self.live_shape(id)?;
+        let Geometry::HeightField { field, transform } = &self.shapes[s].geometry else {
+            anyhow::bail!("shape {} is not a heightfield", id.to_bits());
+        };
+        let (mut field, transform) = (field.clone(), *transform);
+        field
+            .set_soil(soil)
+            .map_err(|e| anyhow::anyhow!("heightfield soil: {e}"))?;
+        // Ruts pressed so far are gone: wake what sleeps on the field.
+        let (nx, nz) = field.samples();
+        let wakes = self.sleepers_over_height_field(s, &field, transform, 0, 0, nx, nz);
         self.sim.push_body_commands(&wakes)?;
         let collider = self.shapes[s].collider;
+        let mut col = self.sim.collider_record(collider);
+        let old = engine_schema::convex::convex_params_base(col.params);
+        let base = self
+            .hulls
+            .insert_height_field(&field)
+            .map_err(|e| anyhow::anyhow!("heightfield: {e}"))?;
+        col.params = engine_schema::heightfield::height_field_collider_params(base, &field);
+        self.sim.set_collider(collider, col);
+        // Rebuilds the terrain's contacts (and uploads the new block).
         self.sim
-            .update_height_field(&mut self.hulls, collider, &field, j0..j0 + d)
-            .map_err(|e| anyhow::anyhow!("heightfield edit: {e}"))?;
-        // The collider's filter bits live in `generation`: keep them.
+            .update_height_field(&mut self.hulls, collider, &field, 0..0)
+            .map_err(|e| anyhow::anyhow!("heightfield: {e}"))?;
+        // The old block is freed once no step in flight can read it.
+        self.retired_height_fields.push((old, self.step));
         self.shapes[s].geometry = Geometry::HeightField { field, transform };
         self.dirty = true;
         Ok(())

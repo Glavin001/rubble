@@ -270,6 +270,111 @@ Not yet:
 - the host's copy of an edited heightfield (it goes stale until a readback);
 - performance (about 1,900 dispatches per 60 Hz frame at physical stiffness).
 
+## T5 ruts (2026-10-24)
+
+Vehicle wheels on soil sink, leave ruts and pay compaction resistance. The tier is
+quasi-static Bekker–Wong pressure–sinkage on the heightfield; no MPM.
+
+**Soil.** A heightfield may carry an `engine_schema::soil::Soil`:
+- Bekker's k_c, k_φ and n (SI), and `max_sinkage`.
+- Presets `dry_sand` and `sandy_loam` (Wong 2008, Table 2.3).
+- API: `HeightField::with_soil`, `World::set_height_field_soil` (which places the
+  field again from the host's samples) and C ABI `rbHeightField_SetSoil`.
+- In the hull arena, after the heights: two parameter records (k_c, k_φ, n, c_n;
+  max sinkage), then a plane of uncompacted heights (`heightfield.rs` table).
+- The header's min height sits `max_sinkage` below the samples, so the bounds hold
+  every rut without a readback. A wheel that would sink deeper sets
+  `OVERFLOW_SOIL_SINKAGE`, and the step fails. So does a wheel of zero width.
+
+**Relations** (`soil.rs`, mirrored in `slang/physics/soil.slang`):
+- Pressure p = (k_c/b + k_φ)·zⁿ, with b the tyre width.
+- Rigid wheel: Bekker's radial pressure on the front arc with the chord
+  x² = D(z₀ − z), integrated exactly: W = b·k·√D·c_n·z₀^(n+½), with
+  c_n = B(n+1, ½)/2. Bekker's closed form uses (3 − n)/3 for c_n. That is equal at
+  n = 1 and 5 % more load at n = 0.7.
+- Against the exact arc integral the load is within 0.3·z/D (1.7 % at z/D = 0.06).
+- Compaction resistance R_c = b·k·(z^(n+1) − z₁^(n+1))/(n+1), where z₁ is the
+  compaction already ahead of the wheel. For radial pressure it is exactly the
+  horizontal reaction (1e-3 against quadrature).
+
+**Each step**, after `vehicle_post`, on the GPU (`vehicle_step.slang`):
+1. `wheel_soil`, one thread per wheel standing on a soil field:
+   - The sinkage is solved with the soil in series with the suspension: the
+     wheel's bottom is a massless node, the soil yields until it carries what the
+     suspension pushes, and the push falls by K + D/dt per metre the ground gives
+     way. At rest this is the static sinkage of the load. Rolling at a steady
+     load, it stays within 0.5 % of it.
+   - Setting the static sinkage of the last load directly diverged: the damper's
+     reaction to each drop fed the next load with a gain of about 2.
+   - The patch to press runs from this step's contact to where the next query
+     will find it, 1.5 cells past both ends, so every triangle a contact can
+     stand on is level. Beyond that, the wheel's circle. Across, it is the tyre's
+     width plus half a cell.
+   - z₁ is sampled just past the patch's front.
+   - R_c goes to the next step's `vehicle_prepare` as a torque bound on the spin
+     servo, the same as rolling resistance.
+2. `wheel_soil_press`, 256 threads. Thread L owns the heightfield records
+   r ≡ L (mod 256) and lowers their samples to (uncompacted − imprint depth),
+   never raising one, for every wheel in order. No two threads write one record,
+   so runs agree bit for bit.
+
+The plan schedules both passes only when some heightfield has a soil
+(`StepInputs::soil`). Without one the step graph is unchanged. The fingerprint
+of a sedan run on a box and on a heightfield (`tests/soil_fingerprint.rs`,
+ignored, run by hand) is the same before and after the change:
+`ededb32943f4b60c` and `9ac86a20ae54669d`. Metal `vehicle_parity` passes.
+
+**Tests** (`engine-webgpu/tests/vehicle_soil.rs`, sandy loam, sedan, 5 cm cells):
+- **Static.** Loaded quasi-statically, the soil carries 12 969 N of 12 969 N.
+  Each rut equals the sinkage of its wheel's peak load, which is 0.8 % above
+  its load at rest. Front ruts are 30.7 mm and rear ruts 33.0 mm, within 0.1 mm.
+  Each wheel's bottom sits on its rut's floor, within 3 mm.
+- **Motion resistance.** The car coasts from 6 m/s. On rigid ground it
+  decelerates at 0.144 m/s², on soil at 0.972 m/s². The difference is
+  0.828 m/s², against ΣR_c/m = 0.833 m/s².
+  - The front wheels pay the first-pass R_c of their sinkage.
+  - The rear wheels run in the front ruts and pay almost nothing: Wong's
+    multipass effect between axles.
+- **Rut.** Along the path, the rut is within 1.8 % of each step's sinkage. It
+  is full depth inside the tyre and untouched beyond its edge plus 1.5 cells.
+- **Second pass.** The same car runs again from the same start at the same
+  speed.
+  - Rut samples under no deeper sinkage are bit-unchanged.
+  - Others deepen only to the second pass's own sinkage: its rear wheels carry
+    more, because it decelerates less (up to 2.1 mm deeper).
+  - It pays ΣR_c = 144 N, against 1 130 N on the first pass, and decelerates at
+    0.251 m/s².
+- **Limit.** `max_sinkage` 1 cm fails the step with `OVERFLOW_SOIL_SINKAGE`.
+- **CPU relations.** `soil.rs` checks them against the arc integrals.
+  `heightfield.rs` checks the packing, and engine-world the API.
+
+**Known limits:**
+- **Not modelled:** traction limits (Janosi–Hanamoto shear: tyres keep their
+  friction curves), multipass hardening, elastic rebound, bulldozing.
+- **Sinkage is vertical**, in the field's frame.
+- **Grid effects.** A rut's width snaps to the grid. Where a car stops, the floor
+  runs 1.5 cells plus the contact half-length past its wheels.
+- **Varying load.** A wheel whose load falls climbs to its new, shallower
+  sinkage along its path, at the rate the series solve allows.
+- **Sphere-cast wheels** (`WheelQuery::Sphere`) are not tested. A rut narrower
+  than the sphere's chord at its depth holds the sphere on its lips.
+- **Stale host copy.** The host's copy of a pressed field goes stale (as with
+  MPM).
+  - `set_height_field_region` uploads whole rows from it, which erases ruts there
+    and makes those rows fresh soil.
+  - `set_height_field_soil` places the field again, so earlier ruts are lost.
+  - `restore_state` does not restore the arena, so ruts outlive a restore.
+- **MPM** activation lowers the heights but not the uncompacted plane, so a crater
+  floor reads as compacted and wheels do not sink there. Material that bake or
+  deposit raises above the plane counts as fresh soil.
+- **Bodies on the soil.** A body resting on soil is not woken by a rut pressed
+  under it. Reused contacts do not see the rut until the terrain's generation
+  changes.
+- **Hosts.** No browser path (the wasm plan passes `soil: false`). No Metal or
+  CUDA path: they reject heightfields. Metal compiles the two kernels.
+- **Cost.** Each `wheel_soil_press` thread visits every soil wheel's patch rows.
+  It has not been benchmarked.
+
 ## Validation targets
 
 Tests come from physics and published laws, never from another program's outputs.

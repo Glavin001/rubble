@@ -35,6 +35,8 @@ fn main() -> Result<()> {
         "vehicle_loads",
         "vehicle_post",
         "raycast_batch",
+        "wheel_soil",
+        "wheel_soil_press",
     ];
     let entries = [
         "apply_commands",
@@ -107,6 +109,8 @@ fn main() -> Result<()> {
         "vehicle_loads",
         "vehicle_post",
         "raycast_batch",
+        "wheel_soil",
+        "wheel_soil_press",
     ];
     let convex = slang_root.join("kernels/convex_step.slang");
     for entry in entries {

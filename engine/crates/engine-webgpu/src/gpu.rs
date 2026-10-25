@@ -157,6 +157,10 @@ pub struct WgpuSim {
     /// Any collider carries a contact or hit event flag: the step plans the
     /// `contact_events` pass (P4).
     has_contact_events: bool,
+    /// Some heightfield in the hull arena carries a soil (vehicle ruts, T5):
+    /// the step plans `wheel_soil` / `wheel_soil_press`. Set once, from the
+    /// arena uploads (`sync_hulls`).
+    has_soil: bool,
     /// The last step's manifolds still describe the scene (whole-step reuse).
     manifolds_valid: bool,
     /// Records the hull buffer (binding 18) holds; grows on demand.
@@ -733,6 +737,7 @@ impl WgpuSim {
             grid_cache: None,
             has_filters: false,
             has_contact_events: false,
+            has_soil: false,
             manifolds_valid: false,
             hull_records_capacity: hull_records,
             wake_pending: false,
@@ -1010,6 +1015,21 @@ impl WgpuSim {
         }
         let dirty = arena.take_dirty();
         let records = arena.records();
+        // A heightfield placed (or rewritten) with a soil: plan the soil passes
+        // from now on. Every upload of a field includes its header. (A record
+        // that only looks like one costs two idle dispatches per step.)
+        if !self.has_soil {
+            use engine_schema::heightfield::*;
+            let sides = HEIGHT_FIELD_MIN_SAMPLES..=HEIGHT_FIELD_MAX_SAMPLES;
+            self.has_soil = dirty.iter().any(|r| {
+                records[r.start as usize..r.end as usize].iter().any(|h| {
+                    h[0] == HEIGHT_FIELD_MAGIC
+                        && h[3] & HEIGHT_FIELD_SOIL != 0
+                        && sides.contains(&h[1])
+                        && sides.contains(&h[2])
+                })
+            });
+        }
         for r in dirty {
             self.queue.write_buffer(
                 &self.bufs[18],
@@ -2190,6 +2210,7 @@ impl WgpuSim {
             has_convex: self.has_convex,
             has_height_field: self.has_height_field,
             contact_events: self.has_contact_events,
+            soil: self.has_soil,
             reuse_contacts: self.reuse_on(),
             max_colors: self.capacity.max_colors,
             iterations: self.params.iterations,

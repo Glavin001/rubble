@@ -1836,6 +1836,43 @@ pub unsafe extern "C" fn rbHeightField_SetRegion(
     })
 }
 
+/// Bekker soil for vehicle ruts (deformable terrain T5). `k_c` (N/m^(n+1))
+/// and `k_phi` (N/m^(n+2)) are SI whatever the host's units; `max_sinkage`
+/// is in the host's length unit (a wheel sinking deeper fails the step).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RbSoil {
+    pub k_c: f32,
+    pub k_phi: f32,
+    pub n: f32,
+    pub max_sinkage: f32,
+}
+
+/// Give a heightfield a soil (`soil` non-null) or take it away (null). Wheels
+/// on it sink to the rigid-wheel depth of their load, press ruts and pay
+/// compaction resistance. The field is placed again from the host's samples,
+/// so earlier ruts are not kept.
+#[no_mangle]
+pub unsafe extern "C" fn rbHeightField_SetSoil(
+    world: *mut RbWorld,
+    shape: RbShapeId,
+    soil: *const RbSoil,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let soil = match soil.as_ref() {
+            None => None,
+            Some(s) => Some(
+                Soil::new(s.k_c, s.k_phi, s.n, w.coords.length_in(s.max_sinkage)).map_err(|e| {
+                    anyhow::anyhow!("soil: {e}").context(InvalidArgumentMarker("soil"))
+                })?,
+            ),
+        };
+        w.world
+            .set_height_field_soil(ShapeId::from_bits(shape), soil)
+    })
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rbDestroyShape(
     world: *mut RbWorld,
