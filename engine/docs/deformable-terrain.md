@@ -739,6 +739,91 @@ Medians, with p95 in brackets:
 - The dust was 9 ms of render before its colour moved to the vertex shader,
   its noise to one octave, and its plume to 700 sprites a strike.
 
+### Second pass: wheels on the sand, bigger craters, two more videos
+
+**Wheels on the live sand.** While a region is open, the window's samples sit
+at the bed, under the sand. A wheel's ray found that bed, so a car could not
+enter an open region.
+- `terrain_surface_publish` (the surface pass, with
+  `SurfacePlan::with_patch`) keeps a second static heightfield, the *surface
+  patch*, on the live surface each frame:
+  - it places the patch over the window, with a ring of the field's own
+    samples round it;
+  - it gives the patch the surface's heights and height range;
+  - at the bake (`SurfacePlan::retire`), it sinks the patch 10 km down.
+- Wheel rays and rigid contacts meet the patch, so they meet the sand where it
+  is now, still settling. A test checks the plan and the limit ("surface
+  patch samples").
+- This is not the design asked for, which was a branch inside the vehicle
+  step's wheel query. That branch would give `wheel_query` two more bindings
+  (37 and 53) on every host. The Metal host binds by its own table, and the
+  browser creates the vehicle's bind groups before the terrain's buffers
+  exist. The patch leaves the vehicle step, `vehicle_parity` and every host
+  as they were. With no region open it is out of reach.
+- It also takes rigid contacts (a chassis or debris body on the sand), not
+  only rays.
+- Open: wheels do not push the sand, so there are no ruts in an open region
+  and no two-way wheel-to-sand coupling. The chassis is coupled as any body
+  is.
+
+**A car in a region.** The dune buggy has 187 collider hulls on its 17 parts.
+- Coupling lists colliders per block cell. `MPM_CELL_COLLIDERS` was 8; it is
+  now 256.
+  - The couple buffer holds 1 + 256 words per block: 8.4 MB at 8,192 blocks.
+  - A node only visits the colliders its cell lists. With the buggy in a
+    region, the terrain pass took 1.57 ms against 1.25 ms.
+- The showcase sets `max_coupled` to 256.
+- Native `WgpuSim` now allocates a placeholder at binding 53. It builds every
+  exported kernel and binds them by reflection, so the surface kernels had
+  broken `terrain_couple` there since they were added.
+  - Note: `wgsl_export` only warns when a kernel fails to compile, and leaves
+    the earlier WGSL in place.
+
+**Look.** The craters were 15 m and read flat from the chase camera.
+- A 1.0 m meteor gives R = 26.9 m and a 35 m final rim. At 6 cells per radius
+  that is 4.48 m cells, about 44k particles, and 2 substeps a frame.
+- The ground's vertices carry sky occlusion and curvature, measured 1, 2 and
+  4 samples out in eight directions. With them the ground shows:
+  - a dark, red dug-out bowl;
+  - a lit lip;
+  - a darker, clumped ejecta blanket, with cosmetic rays of fine dust out to
+    4.5 R.
+- Rocks are stretched along their velocity (about two frames' blur).
+- Dust comes mainly from the debris list: three lagged puffs behind each
+  moving piece, and a landing puff where a piece comes down near the ground.
+  The cosmetic curtain, base surge and column are thinner and faster, and
+  every puff is lit as a ball from the sun.
+- The track's straights sit just outside the regions' block lattice, so a
+  strike beside them comes as close as its box allows.
+
+**Scenes** (`showcase.html?scene=`):
+- `drive` (the default). Strikes land 3.6 s before the car passes, their rims
+  3 m off the track. The car rides each rim's flank and blanket while the
+  region is open: its height rose 2.6–3.1 m beside each crater, at 60 km/h.
+- `pass`. The first cut: strikes kept clear of the track.
+- `bts`. Behind the scenes, at 1/300 s steps, in two viewports from one
+  camera and one state.
+  - Left, the engine's view: the heightfield with its lowered bed, every
+    particle coloured by speed, parcels in cyan, the region's box in yellow,
+    the window in blue, and a cut facing the camera.
+  - Right, the game's view.
+  - `record({ pace })` sets the speed: real time, 5× slow motion through each
+    strike, 2× through the bake between.
+
+**Videos** (scratchpad, not committed):
+- `showcase-v2.mp4`: `drive`, 1920×1080, 60 fps, 20 s.
+- `behind-the-scenes.mp4`: 2560×720, 60 fps, 21 s. Labels and the simulated
+  time are burned in by ffmpeg from the recording's time sidecar.
+
+**Frame cost** (1280×720, rendering every frame). Other agents shared the
+machine; the 1080p recording ran 7× slower than earlier ones.
+
+| Scene and step | Terrain (GPU) | Surface | Render | Frame (wall) |
+|---|---|---|---|---|
+| `drive`, 1/120 s, region open | 1.57 ms (p95 2.29) | 0.26 ms | 1.25 ms | 7.7 ms (p95 12.4) |
+| `drive`, 1/120 s, no region | — | — | — | 3.7 ms |
+| `bts`, 1/300 s, region open, both views at 2560×720 | 0.72 ms, 1 substep | 0.33 ms | 2.1 ms | 7.7 ms simulated only, 10.2 ms rendered |
+
 ## The splat bake (2026-10-25)
 
 The user approved a bilinear splat for the bake and the parcels' deposits.

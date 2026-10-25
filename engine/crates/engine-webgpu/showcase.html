@@ -742,7 +742,9 @@ fn heat(s: f32) -> vec3f {
   return o;
 }
 @fragment fn fsGroundEngine(i: GOut) -> @location(0) vec4f {
-  if (cutAway(i.w)) { discard; }
+  // The cut opens the region's box only: the ground round it stays.
+  let inBox = frame.boxLo.w > 0.5 && all(i.w.xz >= frame.boxLo.xz) && all(i.w.xz <= frame.boxHi.xz);
+  if (inBox && cutAway(i.w)) { discard; }
   let g = abs(fract(i.w.xz / 10.0) - 0.5);
   var c = vec3f(0.62, 0.58, 0.52) * (1.0 - 0.12 * smoothstep(0.46, 0.5, max(g.x, g.y)));
   // The window's lowered bed under the open region.
