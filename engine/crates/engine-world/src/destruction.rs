@@ -397,6 +397,9 @@ pub struct DestructibleDef {
     pub asleep: bool,
     pub shape: ShapeDef,
     pub user_data: u64,
+    /// Blasts (`World::detonate`) load its exposed chunk faces with the stress oracle's
+    /// face pressures (`StrengthModel::Threshold` only). Off by default.
+    pub blast_loading: bool,
 }
 
 impl DestructibleDef {
@@ -413,6 +416,7 @@ impl DestructibleDef {
                 ..ShapeDef::default()
             },
             user_data: 0,
+            blast_loading: false,
         }
     }
 }
@@ -602,6 +606,11 @@ impl World {
         if def.model == StrengthModel::Threshold {
             return self.create_threshold_destructible(def, asset);
         }
+        anyhow::ensure!(
+            !def.blast_loading,
+            "blast_loading needs StrengthModel::Threshold (the {:?} model has no blast loads)",
+            def.model
+        );
         let instance = def.transform;
         let body_defs: Vec<BodyDef> = asset
             .chunks

@@ -101,6 +101,11 @@ impl Fracture {
 
 #[cfg(feature = "stress")]
 mod imp {
+    /// Blast loading's threshold side (`crate::blast`): a child, so it reads the slots.
+    mod blast {
+        include!("blast_threshold.rs");
+    }
+
     use super::{Projectile, StressSource};
     use crate::defs::{BodyDef, BodyType, Geometry, MassData};
     use crate::destruction::{ActorInfo, DestructibleDef, StrengthModel};
@@ -314,6 +319,8 @@ mod imp {
         /// Colliders the ingest now sees as projectiles.
         projectile_colliders: Vec<u32>,
         pub nodes: Vec<Option<u32>>,
+        /// Blast loading's state (`DestructibleDef::blast_loading`).
+        blast: Option<blast::BlastSlot>,
     }
 
     /// The world's threshold destructibles.
@@ -784,6 +791,8 @@ mod imp {
                 });
                 t.chunk_body.push(chunk_body[k]);
             }
+            // Per GPU bond: its structure and bond (blast loading's mirror).
+            let mut bond_source = Vec::new();
             for &(b, id, structure, com, principal) in &cluster_bodies {
                 let cl = m.clusters.iter().find(|c| c.id == id).expect("a cluster");
                 let (c, p) = (com.as_vec3(), principal.as_quat());
@@ -797,6 +806,7 @@ mod imp {
                         continue;
                     }
                     let capacity = bond.strength.tensile * bond.geometry.area * bond.weibull;
+                    bond_source.push((cl.structure, bi));
                     t.bonds.push([
                         global(cl.structure, bond.geometry.a),
                         global(cl.structure, bond.geometry.b),
@@ -846,6 +856,15 @@ mod imp {
             let fracture = GpuFracture::new(&gpu, &t, &buffers(&self.sim), &ingest)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             let bond_count = t.bonds.len();
+            let blast = def.blast_loading.then(|| {
+                blast::BlastSlot::new(
+                    &gpu.device,
+                    m.clone(),
+                    &scene,
+                    bond_source,
+                    chunk_of.clone(),
+                )
+            });
             let slot = ThresholdSlot {
                 destructible: index as u32,
                 ingest,
@@ -861,6 +880,7 @@ mod imp {
                 static_info,
                 projectile_colliders: Vec::new(),
                 nodes: source.nodes.clone(),
+                blast,
             };
             let k = match self.fracture.slots.iter().position(|s| s.is_none()) {
                 Some(k) => k,
@@ -1017,6 +1037,19 @@ mod imp {
             intact: Vec<bool>,
             frames: &[[f32; 4]],
         ) -> anyhow::Result<Vec<DestructionEvent>> {
+            // This step's poses are from before the split: re-frame from the next.
+            self.apply_fracture_from(k, step + 1, chunks, intact, frames)
+        }
+
+        /// A split's adoption, the changed bodies re-framed from `from_step` on.
+        fn apply_fracture_from(
+            &mut self,
+            k: usize,
+            from_step: u64,
+            chunks: Vec<u32>,
+            intact: Vec<bool>,
+            frames: &[[f32; 4]],
+        ) -> anyhow::Result<Vec<DestructionEvent>> {
             let t = self.fracture.slots[k].as_mut().expect("live slot");
             let d = t.destructible as usize;
             let broken: Vec<u32> = (0..t.intact.len() as u32)
@@ -1068,8 +1101,7 @@ mod imp {
                     spare_taken.push(b);
                 }
             }
-            // Adopt the pieces' new bodies; re-frame every changed body from the step
-            // after this one (this step's poses are from before the split).
+            // Adopt the pieces' new bodies; re-frame every changed body from `from_step`.
             for &b in &spare_taken {
                 let slot = &mut self.bodies[b as usize];
                 slot.alive = true;
@@ -1081,7 +1113,7 @@ mod imp {
                 slot.asleep = false;
             }
             for &b in &changed {
-                self.reframe_piece(k, b, step + 1, frames)?;
+                self.reframe_piece(k, b, from_step, frames)?;
             }
             // Splits: each parent's chunks before, grouped by where they are now.
             let t = self.fracture.slots[k].as_ref().expect("live slot");
