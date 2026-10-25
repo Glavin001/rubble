@@ -160,9 +160,10 @@ impl WgpuSim {
         Ok(())
     }
 
-    /// Close the region: every particle's quanta go back onto the heightfield
-    /// sample it stands over (within the activation window), and the region
-    /// holds no particles. Runs on the GPU.
+    /// Close the region: every particle's quanta are splatted bilinearly, in
+    /// whole quanta, onto the four heightfield samples around its home sample
+    /// moved by its displacement (unmoved material returns exactly where it
+    /// came from), and the region holds no particles. Runs on the GPU.
     pub fn terrain_bake(&mut self) -> anyhow::Result<()> {
         let plan = self.terrain_plan()?;
         let ops = plan.bake()?;
@@ -382,5 +383,27 @@ impl WgpuSim {
             return Vec::new();
         }
         self.read_binding(MPM_PARTICLES_BINDING, 0, n as usize)
+    }
+
+    /// Diagnostic: overwrite the active region's particles with `particles`
+    /// (as [`Self::terrain_particles`] read them, the same count), keeping the
+    /// region and its activation window. For tests that move material by hand
+    /// before a bake; never on a host's hot path.
+    pub fn terrain_overwrite_particles(&mut self, particles: &[MpmParticle]) -> anyhow::Result<()> {
+        anyhow::ensure!(self.terrain.is_some(), "terrain_enable first");
+        let n = self.read_binding::<u32>(MPM_COUNTERS_BINDING, 4 * MPM_C_PARTICLES as u64, 1)[0];
+        anyhow::ensure!(
+            particles.len() == n as usize,
+            "terrain_overwrite_particles: {} particles given, the region holds {n}",
+            particles.len()
+        );
+        if !particles.is_empty() {
+            self.queue.write_buffer(
+                &self.bufs[MPM_PARTICLES_BINDING],
+                0,
+                bytemuck::cast_slice(particles),
+            );
+        }
+        Ok(())
     }
 }

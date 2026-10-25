@@ -250,6 +250,68 @@ fn the_source_kernel_applies_the_z_model_field() {
 
 /// The crater dug by the MPM from the Z-model start, after it settles and is
 /// baked, against the π-scaling prediction for the same impact.
+/// How rough the baked surface is within `reach` of the impact point: the
+/// largest and rms height step between neighbouring samples (x and z), and
+/// the rms and largest residual of the height change from its ring mean
+/// (`profile`, rings one sample wide), which leaves out the crater's own
+/// slopes.
+struct Roughness {
+    samples: usize,
+    step_max: f64,
+    step_rms: f64,
+    residual_rms: f64,
+    residual_max: f64,
+}
+
+fn roughness(
+    field: &HeightField,
+    before: &[f32],
+    after: &[f32],
+    profile: &[f64],
+    reach: f32,
+) -> Roughness {
+    let (n, _) = field.samples();
+    let (spacing, _) = field.cell_size();
+    let change =
+        |i: u32, j: u32| f64::from(after[(j * n + i) as usize] - before[(j * n + i) as usize]);
+    let within = |i: u32, j: u32| {
+        let v = field.vertex(i, j);
+        (v.x * v.x + v.z * v.z).sqrt() <= reach
+    };
+    let mut r = Roughness {
+        samples: 0,
+        step_max: 0.0,
+        step_rms: 0.0,
+        residual_rms: 0.0,
+        residual_max: 0.0,
+    };
+    let mut steps = 0usize;
+    for j in 0..n {
+        for i in 0..n {
+            if !within(i, j) {
+                continue;
+            }
+            r.samples += 1;
+            let v = field.vertex(i, j);
+            let k = ((v.x * v.x + v.z * v.z).sqrt() / spacing).round() as usize;
+            let res = (change(i, j) - profile[k.min(profile.len() - 1)]).abs();
+            r.residual_rms += res * res;
+            r.residual_max = r.residual_max.max(res);
+            for (a, b) in [(i + 1, j), (i, j + 1)] {
+                if a < n && b < n && within(a, b) {
+                    let d = (change(a, b) - change(i, j)).abs();
+                    r.step_rms += d * d;
+                    r.step_max = r.step_max.max(d);
+                    steps += 1;
+                }
+            }
+        }
+    }
+    r.residual_rms = (r.residual_rms / r.samples.max(1) as f64).sqrt();
+    r.step_rms = (r.step_rms / steps.max(1) as f64).sqrt();
+    r
+}
+
 #[test]
 #[ignore = "validation run (long): cargo test --release ... -- --ignored"]
 fn an_impact_crater_in_dry_sand_follows_pi_scaling() {
@@ -513,6 +575,18 @@ fn an_impact_crater_in_dry_sand_follows_pi_scaling() {
             .iter()
             .map(|h| (h * 1e4).round() / 1e4)
             .collect::<Vec<_>>()
+    );
+    let rough = roughness(
+        &field,
+        &before,
+        &after,
+        &profile,
+        3.0 * crater.radius as f32,
+    );
+    eprintln!(
+        "roughness within 3 R ({} samples): neighbour |Δh| max {:.5} m, rms {:.5} m; \
+         residual from the ring mean rms {:.5} m, max {:.5} m",
+        rough.samples, rough.step_max, rough.step_rms, rough.residual_rms, rough.residual_max
     );
 
     // The ledger closes: what the field lost escaped or is still in flight.

@@ -30,7 +30,8 @@
 // ballistic parcel holding its quanta (mpm_g2p; the particle's slot is left
 // dead); mpm_parcels flies parcels under gravity: one landing over the region
 // comes back as a particle, one landing elsewhere on the heightfield adds its
-// quanta to the sample under it (mpm_deposit_raise, once per frame), one leaving
+// quanta to the four samples around it, split bilinearly in whole quanta
+// (mpm_deposit_raise, once per frame), one leaving
 // the field's footprint is counted as escaped. Activated quanta always equal
 // particles + parcels + deposited + escaped.
 // Activation (heightfield → particles) and bake (particles → heightfield) work on
@@ -38,7 +39,9 @@
 // mpm_activate_scan, mpm_activate_emit, mpm_activate_lower; mpm_bake_bin,
 // mpm_bake_raise, mpm_bake_header. Volume moves as whole quanta (params
 // column.y m³): a sample lowered by n quanta becomes particles holding exactly n,
-// and baking adds each particle's quanta back to the sample it stands over.
+// and baking splats each particle's quanta back bilinearly, in whole quanta, onto
+// the four samples around its home sample moved by its displacement (see
+// mpmBakeReference: unmoved material bakes back exactly where it came from).
 // P2G is a gather (no float atomics, which WGSL lacks): every node sums its
 // particles in a fixed order, so runs and backends agree bit for bit.
 //
@@ -79,9 +82,10 @@ static const uint MPM_OVERFLOW_PARCELS = 512u;  // more ejecta than parcel slots
 static const uint MPM_OVERFLOW_FIELD = 1024u;   // the bed heightfield has more samples than deposit slots
 // MpmParams.boundary.x bits.
 static const uint MPM_BOUNDARY_ABSORBING = 1u; // bed and walls absorb (mpmAbsorbNode)
-static const uint MPM_BOUNDARY_GEOSTATIC = 2u; // activation records depths for mpm_geostatic
+static const uint MPM_BOUNDARY_GEOSTATIC = 2u; // the first step's mpm_geostatic sets F
 // MpmParticle.f2.w bits.
 static const uint MPM_PARTICLE_DEAD = 1u;       // left as a parcel: no longer simulated
+static const uint MPM_PARTICLE_HOME = 2u;       // activated: c1.w, c2.w hold where (the bake's reference)
 // Colliders one block cell of the region lists.
 static const uint MPM_CELL_COLLIDERS = 8u;
 static const uint MPM_NO_SLOT = 0xFFFFFFFFu;
@@ -1003,10 +1007,12 @@ void mpm_absorb_init(uint3 tid : SV_DispatchThreadID)
     gMpmCoupled[p.boundary.y + slot] = float4(0, 0, 0, p.column.x + dh);
 }
 
-// The first step after a geostatic activation (it needs gravity): each new
-// particle's F from its depth d below its column's surface, the elastic state
-// of a layer under its own weight with no lateral strain. Hencky's τ_yy =
-// (λ + 2μ)·ln F_yy = −ρ·g·d and τ_xx = τ_zz = λ·ln F_yy = K0·τ_yy.
+// Once, in the first step after a geostatic activation (it needs gravity; the
+// activation made every particle of the region, and none has moved yet): each
+// particle's F from its depth d below the surface of the column it came from
+// (its home sample, MpmParticle c1.w and c2.w), the elastic state of a layer
+// under its own weight with no lateral strain. Hencky's τ_yy = (λ + 2μ)·ln F_yy
+// = −ρ·g·d and τ_xx = τ_zz = λ·ln F_yy = K0·τ_yy.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void mpm_geostatic(uint3 tid : SV_DispatchThreadID)
@@ -1015,10 +1021,18 @@ void mpm_geostatic(uint3 tid : SV_DispatchThreadID)
     MpmParams p = mpmParams();
     if (i >= mpmParticleCount()) return;
     MpmParticle q = gMpmParticles[i];
-    if (mpmParticleDead(q) || !(q.c1.w > 0.0)) return;
+    if (mpmParticleDead(q) || (asuint(q.f2.w) & MPM_PARTICLE_HOME) == 0u) return;
     float modulus = p.sand.x + 2.0 * p.sand.y;
-    if (modulus > 0.0 && p.step.y < 0.0) q.f1.y = exp(p.step.y * p.column.w * q.c1.w / modulus);
-    q.c1.w = 0.0;
+    if (!(modulus > 0.0) || !(p.step.y < 0.0)) return;
+    Collider col = gColliders[p.dims.w];
+    Frame f = colliderFrame(col, gBodies[col.body]);
+    HeightFieldRef hf = heightFieldOf(col);
+    int si = clamp(int(round((q.c1.w - hf.x0) / hf.dx)), int(p.window.x), int(p.window.x + p.window.z) - 1);
+    int sj = clamp(int(round((q.c2.w - hf.z0) / hf.dz)), int(p.window.y), int(p.window.y + p.window.w) - 1);
+    uint t = uint(sj - int(p.window.y)) * p.window.z + uint(si - int(p.window.x));
+    float top = p.column.x + float(ALOAD(gMpmColumns[4u * t])) * p.column.y / mpmSampleArea(hf);
+    float depth = max(top - frameToLocal(f, q.xm.xyz).y, 0.0);
+    q.f1.y = exp(p.step.y * p.column.w * depth / modulus);
     gMpmParticles[i] = q;
 }
 
@@ -1106,8 +1120,8 @@ void mpm_g2p(uint3 tid : SV_DispatchThreadID)
     q.xm.xyz += dt * v;
     q.vj.xyz = v;
     q.c0 = float4(C[0], q.c0.w); // c0.w: rock damage, carried
-    q.c1 = float4(C[1], 0.0);
-    q.c2 = float4(C[2], 0.0);
+    q.c1 = float4(C[1], q.c1.w); // c1.w, c2.w: where it was activated, carried
+    q.c2 = float4(C[2], q.c2.w);
     float3x3 F = float3x3(q.f0.xyz, q.f1.xyz, q.f2.xyz);
     float3x3 I = float3x3(1, 0, 0, 0, 1, 0, 0, 0, 1);
     F = mul(I + C * dt, F);
@@ -1252,18 +1266,19 @@ void mpm_activate_emit(uint3 tid : SV_DispatchThreadID)
         float3 xl = lo + (float3(c) + 0.5) * cell;
         uint mine = each + (k < extra ? 1u : 0u);
         float vol = float(mine) * p.column.y;
+        float3 xw = frameToWorld(f, xl);
+        // Where the bake will see it if it never moves (the same transform
+        // mpm_bake_bin applies), so its displacement is then exactly zero.
+        float3 home = frameToLocal(f, xw);
         MpmParticle q;
-        q.xm = float4(frameToWorld(f, xl), vol * p.column.w);
+        q.xm = float4(xw, vol * p.column.w);
         q.vj = float4(0, 0, 0, 0);
         q.c0 = float4(0, 0, 0, 0);
-        // Geostatic start: the depth below the column's surface, which the
-        // first step's mpm_geostatic turns into F (it needs gravity).
-        float depth = (p.boundary.x & MPM_BOUNDARY_GEOSTATIC) != 0u ? p.column.x + dh - xl.y : 0.0;
-        q.c1 = float4(0, 0, 0, depth);
-        q.c2 = float4(0, 0, 0, 0);
+        q.c1 = float4(0, 0, 0, home.x);
+        q.c2 = float4(0, 0, 0, home.z);
         q.f0 = float4(1, 0, 0, vol);
         q.f1 = float4(0, 1, 0, asfloat(mine));
-        q.f2 = float4(0, 0, 1, 0);
+        q.f2 = float4(0, 0, 1, asfloat(MPM_PARTICLE_HOME));
         gMpmParticles[first + k] = q;
     }
 }
@@ -1325,17 +1340,105 @@ void mpm_activate_lower(uint3 tid : SV_DispatchThreadID)
     }
 }
 
-// Per particle: its quanta onto the heightfield sample it stands over (the
-// nearest): a window sample's column, or, outside the window (material that
-// flowed past it inside the region's box), the field's deposit accumulator, as
-// a landed parcel. Off the field's footprint, escaped.
+// The bake (mpm_bake_bin) and the parcels' deposits (mpm_parcels) splat each
+// particle's or parcel's quanta bilinearly onto the four heightfield samples
+// around its reference point: the tent weights (1 - t)·(1 - s), ..., t·s, split
+// into whole quanta that sum exactly to the particle's (mpmTentSplit).
+//
+// The reference point of a particle made by activation is its home sample plus
+// its displacement since: u = home + (x - x₀)/spacing, x₀ where it was emitted
+// (MpmParticle c1.w, c2.w). Activation lays a sample's particles on a lattice
+// across the sample's cell, so splatting at x itself would spread unmoved
+// off-centre particles onto the neighbours. Splatting at home + displacement
+// keeps activate-then-bake the identity exactly (zero displacement is weight 1
+// on the home sample), and a column moved rigidly by any distance bakes as that
+// column moved: its volume is split between the samples around its new centre
+// by the tent. Particles not made by activation (loaded by the host, or landed
+// parcels re-entering the region) splat at x.
+
+// Sample coordinates (heightfield-local x, z over the spacing) of a particle's
+// reference point; `xl` is its position in the heightfield's frame.
+float2 mpmBakeReference(MpmParticle q, float3 xl, HeightFieldRef hf, bool pushed)
+{
+    float2 d = float2(hf.dx, hf.dz), o = float2(hf.x0, hf.z0);
+    if (pushed || (asuint(q.f2.w) & MPM_PARTICLE_HOME) == 0u) return (xl.xz - o) / d;
+    float2 x0 = float2(q.c1.w, q.c2.w);
+    return floor((x0 - o) / d + 0.5) + (xl.xz - x0) / d;
+}
+
+// PCG integer hash (Jarzynski & Olano 2020).
+uint mpmPcgHash(uint v)
+{
+    uint s = v * 747796405u + 2891336453u;
+    uint w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+    return (w >> 22u) ^ w;
+}
+
+// A hash as a uniform offset in [0, 1) (24 bits, exact in f32).
+float mpmDither(uint h) { return float(h >> 8u) * (1.0 / 16777216.0); }
+
+// The tent split of `quanta` at sample coordinates u: the sample at or below u
+// (s0) and its parts for (i, j), (i+1, j), (i, j+1), (i+1, j+1). Split along x
+// first, then each half along z: whole quanta, never negative, summing exactly
+// to `quanta`, each within one quantum of its exact share. A zero weight gets
+// exactly nothing, so an unmoved particle stays whole.
+// Each split rounds with a dither from `seed` (the particle's or parcel's
+// slot): floor(share + r), r uniform in [0, 1), so its expected value is the
+// exact share. Rounding half up instead errs the same way for every particle
+// moved alike, and a deep column of N particles that moved together would be
+// off by up to N/2 quanta, a height step between neighbours (at the browser
+// demo's scale, about 240 particles a column, up to about 2 m). Deterministic: the seed is
+// the slot, not the thread order.
+void mpmTentSplit(float2 u, uint quanta, uint seed, out int2 s0, out uint4 parts)
+{
+    float2 b = floor(u);
+    float2 t = u - b;
+    s0 = int2(b);
+    uint hx = mpmPcgHash(seed);
+    float rx = mpmDither(hx), rz = mpmDither(mpmPcgHash(hx));
+    uint q1 = min(uint(floor(float(quanta) * t.x + rx)), quanta);
+    uint q0 = quanta - q1;
+    uint q01 = min(uint(floor(float(q0) * t.y + rz)), q0);
+    uint q11 = min(uint(floor(float(q1) * t.y + rz)), q1);
+    parts = uint4(q0 - q01, q1 - q11, q01, q11);
+}
+
+int2 mpmTentSample(int2 s0, uint c) { return s0 + int2(int(c & 1u), int(c >> 1u)); }
+
+// `quanta` baked onto sample s: a window sample's column, or, outside the
+// window (material that flowed past it inside the region's box), the field's
+// deposit accumulator, as a landed parcel. Off the field's footprint, escaped.
+void mpmBakeOnto(int2 s, uint quanta, MpmParams p, HeightFieldRef hf)
+{
+    if (quanta == 0u) return;
+    if (s.x < 0 || s.y < 0 || s.x >= int(hf.nx) || s.y >= int(hf.nz))
+    {
+        AADD2(gMpmCounters[MPM_C_ESCAPED], quanta);
+        return;
+    }
+    int ti = s.x - int(p.window.x), tj = s.y - int(p.window.y);
+    if (ti >= 0 && tj >= 0 && ti < int(p.window.z) && tj < int(p.window.w))
+    {
+        AADD2(gMpmColumns[4u * (uint(tj) * p.window.z + uint(ti)) + 3u], quanta);
+        return;
+    }
+    uint at = uint(s.y) * hf.nx + uint(s.x);
+    if (at < asuint(p.couple.w))
+    {
+        AADD2(gMpmDeposit[at], quanta);
+        AADD2(gMpmCounters[MPM_C_DEPOSITED], quanta);
+    }
+    else AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_FIELD);
+}
+
 // Where a particle's volume bakes: where it stands, unless it covers a dynamic
 // body coupled to the region (it lies above part of the body). A heightfield
 // cannot hold a buried body, so that sand is pushed aside: to just outside the
-// body's footprint, straight away from its centre (`spacing`: the field's
-// sample spacing). The body is left in a pit as deep as it went, and the
-// volume is kept.
-float3 mpmBakeColumn(float3 x, MpmParams p, float spacing)
+// body's footprint, straight away from its centre, far enough that the splat's
+// samples (within one `spacing`, the field's sample spacing) lie beyond it.
+// The body is left in a pit as deep as it went, and the volume is kept.
+// Returns whether it moved x.
+bool mpmBakeColumn(inout float3 x, MpmParams p, float spacing)
 {
     uint slots = min(ALOAD(gMpmCouple[0]), asuint(p.couple.y));
     for (uint k = 0u; k < slots; k++)
@@ -1361,12 +1464,15 @@ float3 mpmBakeColumn(float3 x, MpmParams p, float spacing)
         float2 d = x.xz - c.xz;
         float len = length(d);
         float2 dir = len > 1e-6 ? d / len : float2(1.0, 0.0);
-        float reach = 0.5 * length(hi.xz - lo.xz) + 0.5 * spacing;
-        return float3(c.x + dir.x * reach, x.y, c.z + dir.y * reach);
+        float reach = 0.5 * length(hi.xz - lo.xz) + spacing;
+        x = float3(c.x + dir.x * reach, x.y, c.z + dir.y * reach);
+        return true;
     }
-    return x;
+    return false;
 }
 
+// Per particle: its quanta splatted onto the four samples around its reference
+// point (see above).
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void mpm_bake_bin(uint3 tid : SV_DispatchThreadID)
@@ -1379,27 +1485,13 @@ void mpm_bake_bin(uint3 tid : SV_DispatchThreadID)
     HeightFieldRef hf = heightFieldOf(col);
     MpmParticle q = gMpmParticles[i];
     if (mpmParticleDead(q)) return;
-    float3 xl = frameToLocal(f, mpmBakeColumn(q.xm.xyz, p, max(hf.dx, hf.dz)));
-    int si = int(round((xl.x - hf.x0) / hf.dx)), sj = int(round((xl.z - hf.z0) / hf.dz));
-    uint quanta = asuint(q.f1.w);
-    if (si < 0 || sj < 0 || si >= int(hf.nx) || sj >= int(hf.nz))
-    {
-        AADD2(gMpmCounters[MPM_C_ESCAPED], quanta);
-        return;
-    }
-    int ti = si - int(p.window.x), tj = sj - int(p.window.y);
-    if (ti >= 0 && tj >= 0 && ti < int(p.window.z) && tj < int(p.window.w))
-    {
-        AADD2(gMpmColumns[4u * (uint(tj) * p.window.z + uint(ti)) + 3u], quanta);
-        return;
-    }
-    uint at = uint(sj) * hf.nx + uint(si);
-    if (at < asuint(p.couple.w))
-    {
-        AADD2(gMpmDeposit[at], quanta);
-        AADD2(gMpmCounters[MPM_C_DEPOSITED], quanta);
-    }
-    else AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_FIELD);
+    float3 x = q.xm.xyz;
+    bool pushed = mpmBakeColumn(x, p, max(hf.dx, hf.dz));
+    float2 u = mpmBakeReference(q, frameToLocal(f, x), hf, pushed);
+    int2 s0;
+    uint4 parts;
+    mpmTentSplit(u, asuint(q.f1.w), i, s0, parts);
+    for (uint c = 0u; c < 4u; c++) mpmBakeOnto(mpmTentSample(s0, c), parts[c], p, hf);
 }
 
 [shader("compute")]
@@ -1662,10 +1754,46 @@ uint mpmOrderedBits(float h)
     return (b & 0x80000000u) != 0u ? ~b : (b | 0x80000000u);
 }
 
+// A parcel landed at `xl` (heightfield-local, over the field): its quanta
+// splatted onto the four samples around it (mpmTentSplit, seeded by `seed`),
+// all or none. A share on a sample past the field's edge (which a parcel over
+// the field reaches only with a vanishing weight) escapes. Returns false,
+// raising MPM_OVERFLOW_FIELD and depositing nothing, when a share's sample
+// has no deposit slot.
+bool mpmParcelDeposit(float3 xl, uint quanta, uint seed, MpmParams p, HeightFieldRef hf)
+{
+    int2 s0;
+    uint4 parts;
+    mpmTentSplit((xl.xz - float2(hf.x0, hf.z0)) / float2(hf.dx, hf.dz), quanta, seed, s0, parts);
+    for (uint c = 0u; c < 4u; c++)
+    {
+        int2 s = mpmTentSample(s0, c);
+        bool on = s.x >= 0 && s.y >= 0 && s.x < int(hf.nx) && s.y < int(hf.nz);
+        if (parts[c] != 0u && on && uint(s.y) * hf.nx + uint(s.x) >= asuint(p.couple.w))
+        {
+            AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_FIELD);
+            return false;
+        }
+    }
+    for (uint c = 0u; c < 4u; c++)
+    {
+        if (parts[c] == 0u) continue;
+        int2 s = mpmTentSample(s0, c);
+        if (s.x < 0 || s.y < 0 || s.x >= int(hf.nx) || s.y >= int(hf.nz))
+        {
+            AADD2(gMpmCounters[MPM_C_ESCAPED], parts[c]);
+            continue;
+        }
+        AADD2(gMpmDeposit[uint(s.y) * hf.nx + uint(s.x)], parts[c]);
+        AADD2(gMpmCounters[MPM_C_DEPOSITED], parts[c]);
+    }
+    return true;
+}
+
 // Per parcel, per substep: ballistic flight (symplectic Euler, as particles), then
 // landing on the heightfield (bed collider): back into the region as a particle
-// when over its box, else deposited on the sample under it; off the field's
-// footprint, escaped.
+// when over its box, else deposited on the four samples around it; off the
+// field's footprint, escaped.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void mpm_parcels(uint3 tid : SV_DispatchThreadID)
@@ -1716,22 +1844,7 @@ void mpm_parcels(uint3 tid : SV_DispatchThreadID)
                 }
                 else AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_PARTICLES);
             }
-            else
-            {
-                int si = clamp(int(round((xl.x - hf.x0) / hf.dx)), 0, int(hf.nx) - 1);
-                int sj = clamp(int(round((xl.z - hf.z0) / hf.dz)), 0, int(hf.nz) - 1);
-                uint at = uint(sj) * hf.nx + uint(si);
-                if (at < asuint(p.couple.w))
-                {
-                    AADD2(gMpmDeposit[at], quanta);
-                    AADD2(gMpmCounters[MPM_C_DEPOSITED], quanta);
-                }
-                else
-                {
-                    AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_FIELD);
-                    landed = false;
-                }
-            }
+            else landed = mpmParcelDeposit(xl, quanta, ~k, p, hf);
         }
     }
     if (!landed) AADD2(gMpmCounters[MPM_C_AIRBORNE], 1u);
@@ -1817,6 +1930,7 @@ void mpm_source(uint3 tid : SV_DispatchThreadID)
     if (mpmParticleDead(q)) return;
     float3 d = q.xm.xyz - p.source0.xyz;
     if (d.y > 0.0) return; // the field is the target's (y ≤ 0)
+    if (length(d) > p.source1.w) return; // beyond the transient crater: at rest
     q.vj.xyz += mpmZModelVelocity(d, p.source0.w, p.source1.x, p.source1.y, p.source1.z);
     gMpmParticles[i] = q;
 }

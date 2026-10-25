@@ -159,12 +159,28 @@ fn at_rest(cfg: TerrainConfig, sand: bool, mound: bool) -> Rest {
     );
     s.terrain_bake().unwrap();
     let after = gpu_heights(&s, collider, &field);
-    for (k, (a, b)) in before.iter().zip(&after).enumerate() {
-        assert!(
-            (a - b).abs() < 1e-5,
-            "sample {k}: {a} before, {b} after the bake"
-        );
+    // The bake splats each particle's whole quanta by its displacement, so a
+    // column moved by δ gives its neighbours about H·δ/spacing (H ≤ 1.3 m) and
+    // a quantum of rounding; the volume is kept exactly.
+    let quantum = (plan.dx / cfg.particles_per_cell_axis as f32).powi(3) / 64.0 / (0.125 * 0.125);
+    let bound = 2.0 * 1.3 * moved / 0.125 + 1.01 * quantum;
+    let mut worst = 0.0f32;
+    let mut change = 0.0f64;
+    for (a, b) in before.iter().zip(&after) {
+        worst = worst.max((a - b).abs());
+        change += f64::from(b - a);
     }
+    eprintln!(
+        "bake: largest height change {worst:.2e} m (bound {bound:.2e} m), total {change:.2e} m"
+    );
+    assert!(
+        worst <= bound,
+        "a sample moved {worst} m in the bake (bound {bound} m)"
+    );
+    assert!(
+        change.abs() < 1e-4,
+        "the bake changed the summed heights by {change} m"
+    );
     Rest { top, last, moved }
 }
 
