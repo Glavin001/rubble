@@ -9,7 +9,7 @@ use engine_schema::WorldCapacity;
 use engine_terrain::zmodel::point_source_z;
 use engine_terrain::{substeps_for, CraterTarget, ImpactSource, SandMaterial, TerrainConfig};
 use engine_webgpu::WgpuSim;
-use glam::{DVec3, Quat, Vec3};
+use glam::{DVec3, Mat3, Quat, Vec3};
 
 const G: f64 = 9.81;
 const FRAME: f32 = 1.0 / 60.0;
@@ -42,6 +42,162 @@ fn gpu_heights(s: &WgpuSim, collider: u32, field: &HeightField) -> Vec<f32> {
     let (nx, nz) = field.samples();
     let words = s.read_words(18, u64::from(base + 2) * 4, (nx * nz) as usize);
     words.into_iter().map(f32::from_bits).collect()
+}
+
+/// Diagnostics of the region's state (CRATER_PROBE=k, every k frames): kinetic
+/// energy, the elastic volumetric energy ½K(ln J)²·V of the elastic F, the
+/// most compressed particle, the volume compressed past J < 0.9 and 0.7, the
+/// plastic compaction (log Jp < 0 or `c[0][3]` when a cap runs), and the
+/// surface on the axis (the highest particle within one cell of it).
+thread_local! {
+    static COLUMNS: std::cell::RefCell<Option<std::collections::HashMap<(i32, i32), f64>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn probe(s: &WgpuSim, sand: &SandMaterial, dx: f32, t: f32) {
+    let k = f64::from(sand.lambda() + 2.0 * sand.mu() / 3.0);
+    let (mut ke, mut pe, mut jmin, mut v09, mut v07, mut vol, mut cap) =
+        (0.0f64, 0.0f64, f64::MAX, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    let mut floor = f32::MIN;
+    let (mut mom, mut ke_down) = (glam::DVec3::ZERO, 0.0f64);
+    // Surface (highest particle) in rings of width 2dx at r = 0, 0.04, ... m,
+    // and the separated volume Σ V0·(exp(log Jp) − 1) (gaps a particle gained
+    // at the tension tip, which compression consumes first).
+    let mut rings = [f32::MIN; 8];
+    let (mut gap, mut gap_floor) = (0.0f64, 0.0f64);
+    let mut jmin_at = Vec3::ZERO;
+    // Virtual bake: rest volume per dx-wide column of live particles, against
+    // the first probe's; the cavity is the summed deficit (material in flight
+    // counts as gone), the uplift the summed excess.
+    let mut cols: std::collections::HashMap<(i32, i32), f64> = std::collections::HashMap::new();
+    for p in s.terrain_particles() {
+        if p.xm[3] > 0.0 && p.f[2][3].to_bits() & 1 == 0 {
+            let key = ((p.xm[0] / dx).floor() as i32, (p.xm[2] / dx).floor() as i32);
+            *cols.entry(key).or_default() += f64::from(p.f[0][3]);
+        }
+    }
+    COLUMNS.with(|c| {
+        let mut c = c.borrow_mut();
+        let base = c.get_or_insert_with(|| cols.clone());
+        let (mut deficit, mut excess) = (0.0f64, 0.0f64);
+        for (key, v0) in base.iter() {
+            let d = cols.get(key).copied().unwrap_or(0.0) - v0;
+            if d < 0.0 {
+                deficit -= d;
+            } else {
+                excess += d;
+            }
+        }
+        for (key, v) in cols.iter() {
+            if !base.contains_key(key) {
+                excess += v;
+            }
+        }
+        eprintln!("probe t {t:.4}: virtual-bake cavity {deficit:.3e} m³, uplift {excess:.3e} m³");
+    });
+    for p in s.terrain_particles() {
+        if p.xm[3] <= 0.0 || p.f[2][3].to_bits() & 1 != 0 {
+            continue;
+        }
+        let v = Vec3::from_slice(&p.vj[..3]);
+        ke += 0.5 * f64::from(p.xm[3]) * f64::from(v.length_squared());
+        mom += v.as_dvec3() * f64::from(p.xm[3]);
+        if v.y < 0.0 {
+            ke_down += 0.5 * f64::from(p.xm[3]) * f64::from(v.length_squared());
+        }
+        let f = glam::DMat3::from_cols_array(&[
+            f64::from(p.f[0][0]),
+            f64::from(p.f[1][0]),
+            f64::from(p.f[2][0]),
+            f64::from(p.f[0][1]),
+            f64::from(p.f[1][1]),
+            f64::from(p.f[2][1]),
+            f64::from(p.f[0][2]),
+            f64::from(p.f[1][2]),
+            f64::from(p.f[2][2]),
+        ]);
+        let j = f.determinant();
+        let v0 = f64::from(p.f[0][3]);
+        vol += v0;
+        if j > 0.0 {
+            pe += 0.5 * k * j.ln().powi(2) * v0;
+        }
+        if j < jmin {
+            jmin = j;
+            jmin_at = Vec3::from_slice(&p.xm[..3]);
+        }
+        if j < 0.9 {
+            v09 += v0;
+        }
+        if j < 0.7 {
+            v07 += v0;
+        }
+        cap += f64::from(p.c[0][3].min(0.0)) * v0;
+        let x = Vec3::from_slice(&p.xm[..3]);
+        if x.x * x.x + x.z * x.z < dx * dx {
+            floor = floor.max(x.y);
+        }
+        let r = (x.x * x.x + x.z * x.z).sqrt();
+        for (k, h) in rings.iter_mut().enumerate() {
+            if (r - 0.04 * k as f32).abs() < dx {
+                *h = h.max(x.y);
+            }
+        }
+        let g = (f64::from(p.vj[3]).exp() - 1.0) * v0;
+        gap += g;
+        if r < 0.15 && x.y < -0.02 {
+            gap_floor += g;
+        }
+    }
+    if std::env::var("CRATER_COLUMN").is_ok() {
+        // The axis column (r < 2dx) in 1 cm bins: particles, mean v_y, mean
+        // separated strain log Jp, mean elastic J.
+        let mut bins = [(0u32, 0.0f64, 0.0f64, 0.0f64); 30];
+        for p in s.terrain_particles() {
+            if p.xm[3] <= 0.0 || p.f[2][3].to_bits() & 1 != 0 {
+                continue;
+            }
+            let x = Vec3::from_slice(&p.xm[..3]);
+            if x.x * x.x + x.z * x.z >= 4.0 * dx * dx {
+                continue;
+            }
+            let k = ((0.05 - x.y) / 0.01).floor();
+            if !(0.0..30.0).contains(&k) {
+                continue;
+            }
+            let f = Mat3::from_cols_array(&[
+                p.f[0][0], p.f[1][0], p.f[2][0], p.f[0][1], p.f[1][1], p.f[2][1], p.f[0][2],
+                p.f[1][2], p.f[2][2],
+            ]);
+            let b = &mut bins[k as usize];
+            b.0 += 1;
+            b.1 += f64::from(p.vj[1]);
+            b.2 += f64::from(p.vj[3]);
+            b.3 += f64::from(f.determinant());
+        }
+        for (k, b) in bins.iter().enumerate() {
+            if b.0 > 0 {
+                let n = f64::from(b.0);
+                eprintln!(
+                    "  column y {:+.2}: {:5} particles, v_y {:+.3} m/s, log Jp {:.4}, J {:.4}",
+                    0.05 - 0.01 * (k as f64 + 0.5),
+                    b.0,
+                    b.1 / n,
+                    b.2 / n,
+                    b.3 / n
+                );
+            }
+        }
+    }
+    eprintln!("probe t {t:.4}: momentum {mom:.3?} kg·m/s, KE moving down {ke_down:.2} J");
+    eprintln!(
+        "probe t {t:.4}: separated volume {gap:.3e} m³ ({gap_floor:.3e} under the cavity), surface at r = 0, 0.04, … {:?}",
+        rings.map(|h| (h * 1e4).round() / 1e4)
+    );
+    eprintln!(
+        "probe t {t:.4}: KE {ke:.2} J, elastic vol {pe:.2} J, min J {jmin:.3} at {jmin_at:?}, \
+         V(J<0.9) {v09:.3e} V(J<0.7) {v07:.3e} of {vol:.3e} m³, compaction {cap:.3e} m³, axis surface {floor:.4} m"
+    );
 }
 
 /// The field the GPU adds to the particles is the CPU Z-model's.
@@ -117,11 +273,26 @@ fn an_impact_crater_in_dry_sand_follows_pi_scaling() {
     if let Some(e) = std::env::var("CRATER_E").ok().and_then(|v| v.parse().ok()) {
         sand.youngs_modulus = e;
     }
+    // Sensitivities (diagnostics, reported, not adopted): CRATER_PHI (degrees),
+    // CRATER_Z (Maxwell's Z), CRATER_CORE (core radius over the flow-centre depth).
+    let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f64>().ok());
+    if let Some(phi) = env("CRATER_PHI") {
+        sand.friction_angle = (phi as f32).to_radians();
+    }
     s.terrain_set_material(Some(&sand)).unwrap();
     let src = impact(&sand);
     let crater = src.crater(G).unwrap();
-    let z = point_source_z(src.target.ejecta.mu);
-    let field_model = src.field(G, z).unwrap();
+    let z = env("CRATER_Z").unwrap_or_else(|| point_source_z(src.target.ejecta.mu));
+    let h = engine_terrain::source::EQUIVALENT_BURIAL * src.impactor_radius;
+    let field_model = src
+        .field_with(G, z, h, env("CRATER_CORE").unwrap_or(2.0) * h)
+        .unwrap();
+    eprintln!(
+        "field: Z {z:.3}, core {:.4} m, KE {:.1} J of the impactor's {:.0} J",
+        field_model.core_radius,
+        field_model.kinetic_energy(f64::from(sand.density)),
+        src.kinetic_energy()
+    );
     let r = crater.radius as f32;
     let spacing = r / cfg.cells_per_radius;
     let n = 257u32;
@@ -134,7 +305,25 @@ fn an_impact_crater_in_dry_sand_follows_pi_scaling() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(2.0);
-    let plan = crater.region(&cfg, Vec3::ZERO, margin, 0, 0).unwrap();
+    let mut plan = crater.region(&cfg, Vec3::ZERO, margin, 0, 0).unwrap();
+    // CRATER_BED: the box's bed this many transient radii below the surface,
+    // the sides as the margin sets them (diagnostics: the bed's reflection).
+    if let Some(bed) = std::env::var("CRATER_BED")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+    {
+        let reach = r * (1.0 + margin as f32);
+        plan = engine_terrain::RegionPlan::spanning(
+            &cfg,
+            Vec3::new(-reach, -bed * r, -reach),
+            Vec3::splat(reach),
+            plan.dx,
+            0,
+            0,
+        )
+        .unwrap();
+        eprintln!("box {:?}..{:?}", plan.origin, plan.end());
+    }
     // The pre-impact surface.
     let before = gpu_heights(&s, bed, &field);
     s.terrain_activate(
@@ -148,6 +337,9 @@ fn an_impact_crater_in_dry_sand_follows_pi_scaling() {
     .unwrap();
     if std::env::var("CRATER_NO_SOURCE").is_err() {
         s.terrain_apply_source(&field_model, Vec3::ZERO).unwrap();
+    }
+    if std::env::var("CRATER_PROBE").is_ok() {
+        probe(&s, &sand, plan.dx, 0.0);
     }
     // Substeps per frame from the last frame's top speed (the GPU checks each
     // substep against the bound and fails the step if it is exceeded).
@@ -163,6 +355,33 @@ fn an_impact_crater_in_dry_sand_follows_pi_scaling() {
     let t0 = std::time::Instant::now();
     let (mut t, mut frames) = (0.0f32, 0u32);
     let mut last = None;
+    // CRATER_SPLIT=k: the first frame in k parts, probed after each (diagnostics).
+    if let Some(k) = std::env::var("CRATER_SPLIT")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+    {
+        let part = FRAME / k as f32;
+        let mut tp = 0.0f32;
+        let parts: u32 = std::env::var("CRATER_SPLIT_N")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(k);
+        for _ in 0..parts {
+            let bound = (1.5 * speed).max(2.0);
+            let (n_sub, dt) =
+                substeps_for(&cfg, part, plan.dx, sand.p_wave_speed(), bound).unwrap();
+            let rep = s.terrain_step(n_sub, dt, -(G as f32)).unwrap();
+            speed = rep.max_speed;
+            tp += part;
+            eprintln!(
+                "split: {n_sub} substeps, max speed {:.1} m/s",
+                rep.max_speed
+            );
+            probe(&s, &sand, plan.dx, tp);
+        }
+        t += FRAME;
+        frames += 1;
+    }
     while t < t_end {
         let bound = (1.5 * speed).max(2.0);
         let (n_sub, dt) = substeps_for(&cfg, FRAME, plan.dx, sand.p_wave_speed(), bound).unwrap();
@@ -177,6 +396,14 @@ fn an_impact_crater_in_dry_sand_follows_pi_scaling() {
         t += FRAME;
         frames += 1;
         last = Some(rep);
+        if let Some(every) = std::env::var("CRATER_PROBE")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+        {
+            if frames % every.max(1) == 1 || every == 1 {
+                probe(&s, &sand, plan.dx, t);
+            }
+        }
     }
     let rep = last.unwrap();
     if std::env::var("CRATER_DUMP").is_ok() {
