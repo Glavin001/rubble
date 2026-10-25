@@ -11,7 +11,7 @@
 //   terrain_surface_clear    empty the occupancy (window samples × layers)
 //   terrain_surface_shift    on the absorbing ground: the walls' give (a copy of
 //                            mpm_bake_shift into this buffer)
-//   terrain_surface_bin      per particle: its quanta split between samples as
+//   terrain_surface_bin      per particle not in flight (below): its quanta split between samples as
 //                            mpm_bake_bin splits them (the tent at home for the
 //                            share at rest, P2G's B-spline for the share the MPM
 //                            moved, in the unactivated ground's frame), and
@@ -22,10 +22,20 @@
 //                            holding less than TS_FILLED of a full cell, those
 //                            included), as a height above the sample's own
 //                            (the lowered bed plus any parcels deposited on it)
+//   terrain_surface_debris   per particle: listed when in flight or when it
+//                            stands more than a layer above that surface, and
+//                            counted into the debris draw's indirect arguments
 //
-// Material above the first gap of two layers (the ejecta curtain, a lifted flap, sand in
-// flight inside the box) is not part of the surface; a renderer draws it, and
-// the parcels, as debris. Once nothing is in flight and the region bakes, the
+// In flight: faster than the header's ejecta speed (word 5, m/s; 0: never).
+// The plan sets it to what a fall of one layer gives, √(2 g dy): sand moving
+// faster has been thrown, whether or not a gap has opened under it yet (the
+// excavation flow and the curtain at the crater's scale), and is debris, not
+// ground. A settled region has nothing that fast, so the bake still sees the
+// same quanta the surface holds.
+//
+// Material above the first gap of two layers (the ejecta curtain, a lifted
+// flap, sand in flight inside the box) is not part of the surface; a renderer
+// draws the debris list, and the parcels, as debris. Once nothing is in flight and the region bakes, the
 // surface and the baked heightfield are the same splat of the same quanta, so
 // the switch at the bake does not show (to the fixed point's rounding, and the
 // material the bake pushes off a buried body, which this pass does not move).
@@ -34,25 +44,31 @@
 // written: binding 53 is the only output. engine_terrain::surface is the plan.
 #include "terrain_mpm.slang"
 
-// u32 words. Host-written header: [0] the shift section's first word, [1] the
-// occupancy section's first word, [2] layers per column, [3] flags (bit 0: the
-// absorbing ground's edge shift is used). GPU-written by
-// terrain_surface_resolve: [4..8) window i0, j0, ni, nj, [8] the bed's local y
-// (f32 bits), [9] the layer height (f32), [10] frames resolved, [11] valid (1
-// while a region is open; the host clears it at the bake). Heights (f32 bits,
-// the heightfield's local y) from word 16, one per window sample.
+// u32 words (engine_terrain::surface). Host-written by the plan: [0] the shift
+// section's first word, [1] the occupancy section's, [2] layers per column,
+// [3] flags (bit 0: the absorbing ground's edge shift is used), [4] the debris
+// list's first word, [5] the ejecta speed (f32 bits, m/s). GPU-written by terrain_surface_resolve: [8..12) window
+// i0, j0, ni, nj, [12] the bed's local y (f32 bits), [13] the layer height
+// (f32), [14] frames resolved, [15] valid (1 while a region is open; the host
+// clears it at the bake). [16..20) the debris draw's indirect arguments: the
+// vertex count (a renderer writes it), the instance count (the debris listed
+// this frame), 0, 0. Heights (f32 bits, the heightfield's local y) from word
+// 24, one per window sample.
 BIND(53) RWStructuredBuffer<AUint> gTerrainSurface;
 
 static const uint TS_SHIFT_BASE = 0u;
 static const uint TS_OCC_BASE = 1u;
 static const uint TS_LAYERS = 2u;
 static const uint TS_FLAGS = 3u;
-static const uint TS_WINDOW = 4u;
-static const uint TS_BED = 8u;
-static const uint TS_DY = 9u;
-static const uint TS_FRAMES = 10u;
-static const uint TS_VALID = 11u;
-static const uint TS_HEIGHTS = 16u;
+static const uint TS_DEBRIS_BASE = 4u;
+static const uint TS_EJECTA_SPEED = 5u;
+static const uint TS_WINDOW = 8u;
+static const uint TS_BED = 12u;
+static const uint TS_DY = 13u;
+static const uint TS_FRAMES = 14u;
+static const uint TS_VALID = 15u;
+static const uint TS_DEBRIS_COUNT = 17u;
+static const uint TS_HEIGHTS = 24u;
 static const uint TS_FLAG_SHIFT = 1u;
 // Occupancy units per volume quantum (atomic adds are integers).
 static const float TS_FIXED = 16.0;
@@ -61,6 +77,12 @@ static const float TS_FIXED = 16.0;
 static const float TS_FILLED = 0.3;
 
 uint tsWord(uint k) { return ALOAD(gTerrainSurface[k]); }
+
+bool tsInFlight(MpmParticle q)
+{
+    float v = asfloat(tsWord(TS_EJECTA_SPEED));
+    return v > 0.0 && dot(q.vj.xyz, q.vj.xyz) > v * v;
+}
 
 // Layers are the region's cells in y from the bed up.
 float tsLayerHeight(MpmParams p) { return p.origin.w; }
@@ -72,6 +94,7 @@ void terrain_surface_clear(uint3 tid : SV_DispatchThreadID)
     uint k = mpmIndex(tid);
     MpmParams p = mpmParams();
     if (k < p.window.z * p.window.w * tsWord(TS_LAYERS)) ASTORE(gTerrainSurface[tsWord(TS_OCC_BASE) + k], 0u);
+    if (k == 0u) ASTORE(gTerrainSurface[TS_DEBRIS_COUNT], 0u);
 }
 
 // mpm_bake_shift's measurement (per window edge sample: its column's mean
@@ -170,7 +193,7 @@ void terrain_surface_bin(uint3 tid : SV_DispatchThreadID)
     Frame f = colliderFrame(col, gBodies[col.body]);
     HeightFieldRef hf = heightFieldOf(col);
     MpmParticle q = gMpmParticles[i];
-    if (mpmParticleDead(q)) return;
+    if (mpmParticleDead(q) || tsInFlight(q)) return;
     float3 xl = frameToLocal(f, q.xm.xyz);
     if ((tsWord(TS_FLAGS) & TS_FLAG_SHIFT) != 0u) xl.xz -= tsGroundShift(xl, hf, p);
     uint quanta = asuint(q.f1.w);
@@ -243,4 +266,49 @@ void terrain_surface_resolve(uint3 tid : SV_DispatchThreadID)
     uint2 ij = mpmWindowSample(t, p);
     float base = hfHeight(hf, ij.x, ij.y);
     ASTORE(gTerrainSurface[TS_HEIGHTS + t], asuint(base + units / TS_FIXED * p.column.y / area));
+}
+
+// The live surface at local (x, z): bilinear over the samples, the window's
+// rebuilt heights inside it and the heightfield outside.
+float tsSurfaceSample(int i, int j, HeightFieldRef hf, MpmParams p)
+{
+    i = clamp(i, 0, int(hf.nx) - 1);
+    j = clamp(j, 0, int(hf.nz) - 1);
+    int ti = i - int(p.window.x), tj = j - int(p.window.y);
+    if (ti >= 0 && tj >= 0 && ti < int(p.window.z) && tj < int(p.window.w))
+        return asfloat(tsWord(TS_HEIGHTS + uint(tj) * p.window.z + uint(ti)));
+    return hfHeight(hf, uint(i), uint(j));
+}
+
+float tsSurfaceAt(float2 xz, HeightFieldRef hf, MpmParams p)
+{
+    float2 u = (xz - float2(hf.x0, hf.z0)) / float2(hf.dx, hf.dz);
+    float2 b = floor(u);
+    float2 f = u - b;
+    int i = int(b.x), j = int(b.y);
+    return lerp(lerp(tsSurfaceSample(i, j, hf, p), tsSurfaceSample(i + 1, j, hf, p), f.x),
+        lerp(tsSurfaceSample(i, j + 1, hf, p), tsSurfaceSample(i + 1, j + 1, hf, p), f.x), f.y);
+}
+
+// After terrain_surface_resolve: every particle in flight or more than a layer
+// above the surface (in the ground's frame the surface was built in), listed
+// for the debris draw.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void terrain_surface_debris(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = mpmIndex(tid);
+    if (i >= mpmParticleCount()) return;
+    MpmParams p = mpmParams();
+    MpmParticle q = gMpmParticles[i];
+    if (mpmParticleDead(q)) return;
+    Collider col = gColliders[p.dims.w];
+    Frame f = colliderFrame(col, gBodies[col.body]);
+    HeightFieldRef hf = heightFieldOf(col);
+    float3 xl = frameToLocal(f, q.xm.xyz);
+    if ((tsWord(TS_FLAGS) & TS_FLAG_SHIFT) != 0u) xl.xz -= tsGroundShift(xl, hf, p);
+    if (!tsInFlight(q) && xl.y <= tsSurfaceAt(xl.xz, hf, p) + tsLayerHeight(p)) return;
+    uint k;
+    AADD3(gTerrainSurface[TS_DEBRIS_COUNT], 1u, k);
+    ASTORE(gTerrainSurface[tsWord(TS_DEBRIS_BASE) + k], i);
 }

@@ -11,10 +11,13 @@
 //   groundHeight(i, j, live)   sample (i, j): live surface or heightfield
 //   groundAt(x, z, live)       bilinear height at local (x, z)
 //   groundNormal(i, j, live)
-//   detached(p, live)          above the live surface by more than a layer
+//   debrisParticle(k)          the k-th particle the engine listed as debris
+//                              (more than a layer above the surface); draw them
+//                              with drawIndirect(surfaceBuffer, 4 * T.SURFACE_DEBRIS_ARGS_WORD)
+//                              after writing the vertex count to that word
 
 /** Header words of the surface buffer (engine_terrain::surface). */
-export const SURFACE_WORDS = { window: 4, bed: 8, layer: 9, frames: 10, valid: 11, heights: 16 };
+export const SURFACE_WORDS = { debrisBase: 4, window: 8, bed: 12, layer: 13, frames: 14, valid: 15, debrisArgs: 16, debrisCount: 17, heights: 24 };
 
 /**
  * How far the last live surface is from the heightfield now (call right after
@@ -90,9 +93,6 @@ fn groundAt(x: f32, z: f32, live: bool) -> f32 {
   return mix(mix(groundHeight(i, j, live), groundHeight(i + 1u, j, live), u),
              mix(groundHeight(i, j + 1u, live), groundHeight(i + 1u, j + 1u, live), u), v);
 }
-// Material that has left the ground: above the live surface by more than a layer.
-fn detached(p: vec3f, live: bool) -> bool {
-  if (!live || !surfValid()) { return true; }
-  return p.y > groundAt(p.x, p.z, live) + surfLayer();
-}
+// The k-th particle terrain_surface_debris listed (k < the debris count).
+fn debrisParticle(k: u32) -> u32 { return surf[surf[${SURFACE_WORDS.debrisBase}u] + k]; }
 `;

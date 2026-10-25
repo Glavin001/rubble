@@ -25,29 +25,37 @@ pub const SURFACE_KERNELS: &[&str] = &[
     "terrain_surface_shift",
     "terrain_surface_bin",
     "terrain_surface_resolve",
+    "terrain_surface_debris",
 ];
 
 /// Header words; the heights follow, one f32 per window sample.
-pub const SURFACE_HEADER_WORDS: u32 = 16;
+pub const SURFACE_HEADER_WORDS: u32 = 24;
 /// Header word set to 1 by every resolve; a host clears it when the region
 /// bakes (the heightfield is then the ground again).
-pub const SURFACE_VALID_WORD: u32 = 11;
+pub const SURFACE_VALID_WORD: u32 = 15;
 /// Header words the GPU fills: window i0, j0, ni, nj, then the bed's local y
 /// and the layer height (f32 bits).
-pub const SURFACE_WINDOW_WORD: u32 = 4;
+pub const SURFACE_WINDOW_WORD: u32 = 8;
+/// The debris draw's indirect arguments (`drawIndirect`: vertex count, which
+/// a renderer writes; instance count, the particles listed this frame; 0; 0).
+pub const SURFACE_DEBRIS_ARGS_WORD: u32 = 16;
 /// Default limit on window samples × layers.
 pub const DEFAULT_SURFACE_CELLS: u32 = 1 << 21;
 
 /// The surface buffer's sections and limit.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SurfacePlan {
     max_columns: u32,
+    max_particles: u32,
     max_cells: u32,
+    ejecta_fall: f32,
 }
 
 impl SurfacePlan {
     /// For regions within `config`'s `max_columns`, with at most `max_cells`
-    /// occupancy cells (window samples × the region's cells in y).
+    /// occupancy cells (window samples × the region's cells in y). Sand
+    /// moving faster than a fall of one layer is in flight (debris, not
+    /// ground); [`Self::with_ejecta_fall`] changes that height.
     pub fn new(config: &TerrainConfig, max_cells: u32) -> Result<Self, TerrainError> {
         config.validate()?;
         if max_cells == 0 {
@@ -57,8 +65,22 @@ impl SurfacePlan {
         }
         Ok(Self {
             max_columns: config.max_columns,
+            max_particles: config.max_particles,
             max_cells,
+            ejecta_fall: 1.0,
         })
+    }
+
+    /// Sand faster than a fall of `layers` layers (√(2 g · layers · dy)) is in
+    /// flight; 0 counts only the material a gap separates.
+    pub fn with_ejecta_fall(mut self, layers: f32) -> Result<Self, TerrainError> {
+        if !(layers.is_finite() && layers >= 0.0) {
+            return Err(TerrainError::InvalidRequest(
+                "surface ejecta_fall must be finite and non-negative",
+            ));
+        }
+        self.ejecta_fall = layers;
+        Ok(self)
     }
 
     /// First word of the walls' give (two per window edge sample).
@@ -71,9 +93,14 @@ impl SurfacePlan {
         self.shift_base() + 2 * self.max_columns + 2
     }
 
+    /// First word of the debris list (particle indices, one per particle at most).
+    pub fn debris_base(&self) -> u32 {
+        self.occupancy_base() + self.max_cells
+    }
+
     /// Bytes of the surface buffer.
     pub fn bytes(&self) -> u64 {
-        4 * (u64::from(self.occupancy_base()) + u64::from(self.max_cells))
+        4 * (u64::from(self.debris_base()) + u64::from(self.max_particles))
     }
 
     pub fn max_cells(&self) -> u32 {
@@ -81,10 +108,11 @@ impl SurfacePlan {
     }
 
     /// The pass that rebuilds the surface of `terrain`'s open region from its
-    /// particles as they are now (after the frame's substeps). Fails naming the
-    /// limit when the region needs more cells than `max_cells`, and when the
-    /// region was not opened over a heightfield (no window).
-    pub fn frame(&self, terrain: &TerrainPlan) -> anyhow::Result<TerrainOps> {
+    /// particles as they are now (after the frame's substeps), under `gravity`
+    /// (m/s², its magnitude). Fails naming the limit when the region needs
+    /// more cells than `max_cells`, and when the region was not opened over a
+    /// heightfield (no window).
+    pub fn frame(&self, terrain: &TerrainPlan, gravity: f32) -> anyhow::Result<TerrainOps> {
         let p = terrain.params();
         let [_, _, ni, nj] = p.window;
         anyhow::ensure!(
@@ -99,6 +127,7 @@ impl SurfacePlan {
             u64::from(self.max_cells),
         )?;
         let absorbing = p.boundary[0] & MPM_BOUNDARY_ABSORBING != 0;
+        let ejecta_speed = (2.0 * gravity.abs() * self.ejecta_fall * p.origin[3]).sqrt();
         let mut ops = TerrainOps {
             writes: vec![TerrainWrite {
                 binding: SURFACE_BINDING,
@@ -108,6 +137,8 @@ impl SurfacePlan {
                     self.occupancy_base(),
                     layers,
                     u32::from(absorbing),
+                    self.debris_base(),
+                    ejecta_speed.to_bits(),
                 ],
             }],
             cmds: Vec::new(),
@@ -129,6 +160,10 @@ impl SurfacePlan {
             offset: ARGS_PARTICLES,
         });
         disp(&mut ops, "terrain_surface_resolve", samples);
+        ops.cmds.push(TerrainCmd::Indirect {
+            kernel: "terrain_surface_debris",
+            offset: ARGS_PARTICLES,
+        });
         Ok(ops)
     }
 }
@@ -181,7 +216,7 @@ mod tests {
         };
         let t = opened(&cfg);
         let s = SurfacePlan::new(&cfg, DEFAULT_SURFACE_CELLS).unwrap();
-        let ops = s.frame(&t).unwrap();
+        let ops = s.frame(&t, 9.81).unwrap();
         assert_eq!(
             kernels(&ops),
             [
@@ -189,7 +224,8 @@ mod tests {
                 "terrain_surface_shift",
                 "mpm_write_args",
                 "terrain_surface_bin",
-                "terrain_surface_resolve"
+                "terrain_surface_resolve",
+                "terrain_surface_debris"
             ]
         );
         for k in kernels(&ops) {
@@ -208,8 +244,18 @@ mod tests {
         assert_eq!(ops.writes[0].binding, SURFACE_BINDING);
         assert_eq!(
             ops.writes[0].words,
-            [s.shift_base(), s.occupancy_base(), layers, 1]
+            [
+                s.shift_base(),
+                s.occupancy_base(),
+                layers,
+                1,
+                s.debris_base(),
+                (2.0 * 9.81 * t.params().origin[3]).sqrt().to_bits()
+            ]
         );
+        // Off: only the material a gap separates is debris.
+        let off = s.with_ejecta_fall(0.0).unwrap().frame(&t, 9.81).unwrap();
+        assert_eq!(off.writes[0].words[5], 0f32.to_bits());
         assert!(s.bytes() >= 4 * u64::from(s.occupancy_base() + ni * nj * layers));
     }
 
@@ -221,12 +267,12 @@ mod tests {
         };
         let t = opened(&cfg);
         let s = SurfacePlan::new(&cfg, 100).unwrap();
-        let e = s.frame(&t).unwrap_err().to_string();
+        let e = s.frame(&t, 9.81).unwrap_err().to_string();
         assert!(e.contains("surface max_cells"), "{e}");
         // The rigid ground has no walls' give to measure.
         let ops = SurfacePlan::new(&cfg, DEFAULT_SURFACE_CELLS)
             .unwrap()
-            .frame(&t)
+            .frame(&t, 9.81)
             .unwrap();
         assert!(!kernels(&ops).contains(&"terrain_surface_shift"));
         assert_eq!(ops.writes[0].words[3], 0);
@@ -248,6 +294,6 @@ mod tests {
         .unwrap();
         p.load(&region, 10, None, 0.5).unwrap();
         let s = SurfacePlan::new(&cfg, DEFAULT_SURFACE_CELLS).unwrap();
-        assert!(s.frame(&p).is_err());
+        assert!(s.frame(&p, 9.81).is_err());
     }
 }

@@ -19,8 +19,8 @@ use engine_terrain::plan::{
     TerrainStepReport, KERNELS,
 };
 use engine_terrain::surface::{
-    SurfacePlan, DEFAULT_SURFACE_CELLS, SURFACE_BINDING, SURFACE_HEADER_WORDS, SURFACE_KERNELS,
-    SURFACE_VALID_WORD, SURFACE_WINDOW_WORD,
+    SurfacePlan, DEFAULT_SURFACE_CELLS, SURFACE_BINDING, SURFACE_DEBRIS_ARGS_WORD,
+    SURFACE_HEADER_WORDS, SURFACE_KERNELS, SURFACE_VALID_WORD, SURFACE_WINDOW_WORD,
 };
 use engine_terrain::zmodel::point_source_z;
 use engine_terrain::{
@@ -81,6 +81,9 @@ struct SettingsJson {
     /// The render-only surface's limit on window samples × layers
     /// (`engine_terrain::surface`).
     surface_cells: Option<u32>,
+    /// Sand faster than a fall of this many layers is in flight (debris);
+    /// 0: only what a gap separates (`SurfacePlan::with_ejecta_fall`).
+    surface_ejecta_fall: Option<f32>,
 }
 
 /// The open region.
@@ -249,6 +252,7 @@ impl TerrainStep {
         };
         let mut plan = TerrainPlan::new(&config).map_err(err)?;
         let surface = SurfacePlan::new(&config, s.surface_cells.unwrap_or(DEFAULT_SURFACE_CELLS))
+            .and_then(|p| p.with_ejecta_fall(s.surface_ejecta_fall.unwrap_or(1.0)))
             .map_err(err)?;
         plan.set_material(Some(&sand)).map_err(err)?;
         // engine-world's TerrainDef defaults and checks.
@@ -312,6 +316,7 @@ impl TerrainStep {
             "PARTICLE_DEAD": MPM_PARTICLE_DEAD,
             "SURFACE": SURFACE_BINDING, "SURFACE_HEADER_WORDS": SURFACE_HEADER_WORDS,
             "SURFACE_VALID_WORD": SURFACE_VALID_WORD, "SURFACE_WINDOW_WORD": SURFACE_WINDOW_WORD,
+            "SURFACE_DEBRIS_ARGS_WORD": SURFACE_DEBRIS_ARGS_WORD,
         })
         .to_string()
     }
@@ -625,14 +630,15 @@ impl TerrainStep {
     }
 
     /// The pass that rebuilds the live surface of the open region from its
-    /// particles (one block, after the frame's substeps; kernel indices into
-    /// [`Self::surface_kernels`]), or no blocks without a region.
-    pub fn surface(&self) -> Result<Vec<u32>, JsError> {
+    /// particles under `gravity` (m/s²; one block, after the frame's
+    /// substeps; kernel indices into [`Self::surface_kernels`]), or no blocks
+    /// without a region.
+    pub fn surface(&self, gravity: f32) -> Result<Vec<u32>, JsError> {
         if self.region.is_none() {
             return Ok(vec![0]);
         }
         Ok(encode_in(
-            &[self.surface.frame(&self.plan).map_err(err)?],
+            &[self.surface.frame(&self.plan, gravity).map_err(err)?],
             SURFACE_KERNELS,
         ))
     }

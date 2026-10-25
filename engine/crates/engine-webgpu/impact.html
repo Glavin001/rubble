@@ -239,6 +239,8 @@
 
     statusEl.textContent = 'building terrain kernels…';
     const terrain = await createTerrain(world, SETTINGS, { status: (s) => { statusEl.textContent = s; }, surface: true });
+    // The debris draw: a particle billboard (6 vertices) per listed particle.
+    device.queue.writeBuffer(terrain.surfaceBuffer, 4 * T.SURFACE_DEBRIS_ARGS_WORD, Uint32Array.of(6));
     const maxParticles = terrain.settings.config.max_particles, maxParcels = terrain.settings.config.max_parcels;
 
     const surfaceAt = (x, z) => {
@@ -400,15 +402,13 @@ const QUAD = array<vec2f, 6>(vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0
 fn billboard(p: vec3f, r: f32, q: vec2f) -> vec4f {
   return frame.viewProj * vec4f(p + (frame.right.xyz * q.x + frame.up.xyz * q.y) * r, 1.0);
 }
-@vertex fn vsPart(@builtin(vertex_index) vi: u32, @builtin(instance_index) inst: u32) -> Out {
+fn partOut(vi: u32, inst: u32) -> Out {
   var o: Out;
   o.clip = vec4f(0.0, 0.0, 2.0, 1.0);
   o.n = vec3f(0.0); o.w = vec3f(0.0); o.c = vec3f(0.0); o.q = vec2f(0.0); o.d = 0.0;
   if (inst >= counters[${T.C_PARTICLES}u]) { return o; }
   let p = parts[inst];
   if ((bitcast<u32>(p.f2.w) & ${T.PARTICLE_DEAD}u) != 0u || cutAway(p.xm.xyz)) { return o; }
-  // With the live surface: only material that has left the ground.
-  if (live() && !detached(p.xm.xyz, true)) { return o; }
   let q = QUAD[vi];
   let r0 = rest[inst];
   var c = select(RETURNED, strata(r0.y), r0.w > 0.0);
@@ -419,6 +419,11 @@ fn billboard(p: vec3f, r: f32, q: vec2f) -> vec4f {
   o.clip = billboard(p.xm.xyz, 0.62 * frame.opts.z / ${PPC}.0, q);
   return o;
 }
+// Every particle (the cut, or the surface off).
+@vertex fn vsPart(@builtin(vertex_index) vi: u32, @builtin(instance_index) inst: u32) -> Out { return partOut(vi, inst); }
+// With the live surface: only material that has left the ground (the engine's
+// debris list, drawn indirectly).
+@vertex fn vsDebris(@builtin(vertex_index) vi: u32, @builtin(instance_index) inst: u32) -> Out { return partOut(vi, debrisParticle(inst)); }
 @vertex fn vsParcel(@builtin(vertex_index) vi: u32, @builtin(instance_index) inst: u32) -> Out {
   var o: Out;
   o.clip = vec4f(0.0, 0.0, 2.0, 1.0);
@@ -578,7 +583,7 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
       primitive: { cullMode: 'none', topology }, depthStencil,
     });
     const P = {
-      terrain: pipe('vsTerrain', 'fsTerrain'), cut: pipe('vsCut', 'fsCut'), part: pipe('vsPart', 'fsPart'), parcel: pipe('vsParcel', 'fsPart'),
+      terrain: pipe('vsTerrain', 'fsTerrain'), cut: pipe('vsCut', 'fsCut'), part: pipe('vsPart', 'fsPart'), debris: pipe('vsDebris', 'fsPart'), parcel: pipe('vsParcel', 'fsPart'),
       glow: pipe('vsGlow', 'fsGlow'), trail: pipe('vsTrail', 'fsTrail', [{ arrayStride: 12, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }] }], 'line-strip'),
       trailDot: pipe('vsTrailDot', 'fsGlow', [{ arrayStride: 12, stepMode: 'instance', attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }] }]),
       col: pipe('vsCol', 'fsCol', vtx6), wheel: pipe('vsWheel', 'fsCol', vtx6),
@@ -586,7 +591,7 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
     const RES = { 0: world.bufs[0], 1: frameBuf, 2: world.bufs[2], 3: world.bufs[18], 4: world.bufs[T.PARTICLES], 5: restBuf, 6: world.bufs[T.PARCELS], 7: world.bufs[T.COUNTERS], 8: world.bufs[31], 9: h0Buf, 10: terrain.surfaceBuffer };
     const bind = (p, ids) => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: ids.map((b) => ({ binding: b, resource: { buffer: RES[b] } })) });
     const B = {
-      terrain: bind(P.terrain, [1, 3, 9, 10]), cut: bind(P.cut, [1, 3, 9]), part: bind(P.part, [1, 3, 4, 5, 7, 10]), parcel: bind(P.parcel, [1, 6, 7]),
+      terrain: bind(P.terrain, [1, 3, 9, 10]), cut: bind(P.cut, [1, 3, 9]), part: bind(P.part, [1, 4, 5, 7]), debris: bind(P.debris, [1, 4, 5, 7, 10]), parcel: bind(P.parcel, [1, 6, 7]),
       glow: bind(P.glow, [1]), trail: bind(P.trail, [1]), trailDot: bind(P.trailDot, [1]), col: bind(P.col, [0, 1, 2]), wheel: bind(P.wheel, [1, 8]),
     };
     let depthTex = null;
@@ -968,7 +973,8 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
       if (st.cut || st.cutView) { rp.setPipeline(P.cut); rp.setBindGroup(0, B.cut); rp.draw((NX - 1) * 6); }
       if (terrain.region) {
         const n = Math.min(maxParticles, (terrain.report?.particles ?? terrain.region.window[2] * terrain.region.window[3] * 64) + 4096);
-        rp.setPipeline(P.part); rp.setBindGroup(0, B.part); rp.draw(6, n);
+        if (frameF[60] > 0.5) { rp.setPipeline(P.debris); rp.setBindGroup(0, B.debris); rp.drawIndirect(terrain.surfaceBuffer, 4 * T.SURFACE_DEBRIS_ARGS_WORD); }
+        else { rp.setPipeline(P.part); rp.setBindGroup(0, B.part); rp.draw(6, n); }
         const m = Math.min(maxParcels, (terrain.report?.parcels ?? 0) + 4096);
         rp.setPipeline(P.parcel); rp.setBindGroup(0, B.parcel); rp.draw(6, m);
       }

@@ -76,7 +76,7 @@ export async function createTerrain(world, settings = {}, { wgslBase = './genera
     if (bytes > limit) throw new Error(`terrain surface needs ${bytes} bytes; this device allows ${limit} (lower surface_cells)`);
     world.bufs[T.SURFACE]?.destroy?.();
     world.bufs[T.SURFACE] = device.createBuffer({ label: `b${T.SURFACE} terrain surface`, size: bytes,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT });
   }
   const pipes = await buildKernels(device, world.bufs, KERNELS, { wgslBase, status });
   const surfacePipes = surface ? await buildKernels(device, world.bufs, SURFACE_KERNELS, { wgslBase, status }) : null;
@@ -199,7 +199,7 @@ export async function createTerrain(world, settings = {}, { wgslBase = './genera
    * runs it after each coupled frame; call it yourself to rebuild it at other times). */
   terrain.encodeSurface = (enc, { timestampWrites } = {}) => {
     if (!surface) throw new Error('createTerrain(…, { surface: true }) builds the surface pass');
-    const words = plan.surface();
+    const words = plan.surface(-world.params.gravityY);
     if (!words[0]) return false;
     const [block] = decodeBlocks(words);
     block.writes.forEach(write);
