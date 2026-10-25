@@ -30,9 +30,8 @@ stress-rubble = { path = "../../stress-oracle/crates/stress-rubble", default-fea
 [features]
 default = ["stress"]
 stress = ["dep:stress-gpu", "dep:stress-ref", "dep:stress-rubble", "dep:serde_json"]
-# The destruction-reactions harness only (tests/support/reactions.rs): count the
-# reactions other branches add once they merge (engine/docs/destruction-reactions.md).
-# Off until then; enabling one before its event exists fails to compile.
+# The destruction-reactions harness (tests/support/reactions.rs) counts every reaction
+# without them now; kept as no-ops for scripts that pass them.
 reactions-crush = ["stress"]
 reactions-blast = ["stress"]
 reactions-support = ["stress"]
