@@ -197,6 +197,7 @@ impl TerrainPlan {
                     MPM_MATERIAL_NONE,
                 ],
                 dims: [0, 0, 0, MPM_NO_BED],
+                limits: [0.0, config.bake_home_fade, 0.0, 0.0],
                 couple: [
                     0.0,
                     f32::from_bits(config.max_coupled),

@@ -39,8 +39,8 @@
 // mpm_bake_raise, mpm_bake_header. Volume moves as whole quanta (params
 // column.y m³): a sample lowered by n quanta becomes particles holding exactly n,
 // and baking splats each particle's quanta back bilinearly, in whole quanta, onto
-// the four samples around its home sample moved by its displacement (see
-// mpmBakeReference: unmoved material bakes back exactly where it came from).
+// the four samples around its reference point (mpmBakeReference: unmoved
+// material bakes back exactly where it came from).
 // P2G is a gather (no float atomics, which WGSL lacks): every node sums its
 // particles in a fixed order, so runs and backends agree bit for bit.
 //
@@ -102,7 +102,8 @@ struct MpmParams
     float4 step;    // x = dt, y = gravity (along y), z = node mass threshold, w = bed friction μ
     uint4 counts;   // x = max particles, y = hash slots (power of two), z = max blocks, w = material
     uint4 dims;     // xyz = region size in cells, w = bed heightfield collider (MPM_NO_BLOCK: none)
-    float4 limits;  // x = largest particle speed the substep's dt allows (CFL)
+    float4 limits;  // x = largest particle speed the substep's dt allows (CFL),
+                    // y = the bake's home fade (sample spacings; TerrainConfig::bake_home_fade)
     float4 sand;    // λ, μ, then sand/soil: friction (DP α, or sin φ for Mohr–Coulomb), cohesion
                     // (DP: apex stretch; dry MC: 0; soil: c·cos φ in Pa); rock: f_t, E·G_f/f_t
     uint4 window;   // heightfield samples under the region: i0, j0, ni, nj
@@ -1027,25 +1028,37 @@ void mpm_activate_lower(uint3 tid : SV_DispatchThreadID)
 // around its reference point: the tent weights (1 - t)·(1 - s), ..., t·s, split
 // into whole quanta that sum exactly to the particle's (mpmTentSplit).
 //
-// The reference point of a particle made by activation is its home sample plus
-// its displacement since: u = home + (x - x₀)/spacing, x₀ where it was emitted
-// (MpmParticle c1.w, c2.w). Activation lays a sample's particles on a lattice
-// across the sample's cell, so splatting at x itself would spread unmoved
-// off-centre particles onto the neighbours. Splatting at home + displacement
-// keeps activate-then-bake the identity exactly (zero displacement is weight 1
-// on the home sample), and a column moved rigidly by any distance bakes as that
-// column moved: its volume is split between the samples around its new centre
-// by the tent. Particles not made by activation (loaded by the host, or landed
-// parcels re-entering the region) splat at x.
+// The reference point of a particle made by activation is its position less
+// a fading share of its rest offset in its home sample's cell:
+//   u = x/spacing - w·o,  w = max(0, 1 - |x - x₀|/(fade·spacing)),
+// x₀ where it was emitted (MpmParticle c1.w, c2.w), o = x₀'s offset from its
+// home sample (in spacings), fade = params limits.y (TerrainConfig::
+// bake_home_fade). Activation lays a sample's particles on a lattice across
+// the sample's cell, so splatting an unmoved particle at x would spread
+// off-centre particles onto the neighbours. At rest (w = 1) the reference is
+// the home sample plus the displacement: zero displacement is weight 1 on the
+// home sample, so activate-then-bake is the identity exactly. Material that
+// has flowed no longer keeps its rest lattice (near a crater's centre one
+// column is stretched over several samples, and taking out the rest offsets
+// piles each column into a ridge), so from `fade` spacings on (w = 0) the
+// particle splats at its own position. Particles not made by activation
+// (loaded by the host, or landed parcels re-entering the region) splat at x.
 
 // Sample coordinates (heightfield-local x, z over the spacing) of a particle's
 // reference point; `xl` is its position in the heightfield's frame.
-float2 mpmBakeReference(MpmParticle q, float3 xl, HeightFieldRef hf, bool pushed)
+float2 mpmBakeReference(MpmParticle q, float3 xl, HeightFieldRef hf, bool pushed, float fade)
 {
     float2 d = float2(hf.dx, hf.dz), o = float2(hf.x0, hf.z0);
-    if (pushed || (asuint(q.f2.w) & MPM_PARTICLE_HOME) == 0u) return (xl.xz - o) / d;
+    float2 u = (xl.xz - o) / d;
+    if (pushed || (asuint(q.f2.w) & MPM_PARTICLE_HOME) == 0u) return u;
     float2 x0 = float2(q.c1.w, q.c2.w);
-    return floor((x0 - o) / d + 0.5) + (xl.xz - x0) / d;
+    float2 s0 = (x0 - o) / d;
+    float2 home = floor(s0 + 0.5);
+    float2 moved = (xl.xz - x0) / d;
+    float w = max(0.0, 1.0 - length(moved) / fade);
+    // Unmoved: exactly the home sample (no rounding through u and the offset).
+    if (w >= 1.0) return home + moved;
+    return u - (s0 - home) * w;
 }
 
 // PCG integer hash (Jarzynski & Olano 2020).
@@ -1169,7 +1182,7 @@ void mpm_bake_bin(uint3 tid : SV_DispatchThreadID)
     if (mpmParticleDead(q)) return;
     float3 x = q.xm.xyz;
     bool pushed = mpmBakeColumn(x, p, max(hf.dx, hf.dz));
-    float2 u = mpmBakeReference(q, frameToLocal(f, x), hf, pushed);
+    float2 u = mpmBakeReference(q, frameToLocal(f, x), hf, pushed, p.limits.y);
     int2 s0;
     uint4 parts;
     mpmTentSplit(u, asuint(q.f1.w), i, s0, parts);

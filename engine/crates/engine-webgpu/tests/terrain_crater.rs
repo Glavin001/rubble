@@ -250,7 +250,7 @@ fn the_source_kernel_applies_the_z_model_field() {
 
 /// The crater dug by the MPM from the Z-model start, after it settles and is
 /// baked, against the π-scaling prediction for the same impact.
-/// How rough the baked surface is within `reach` of the impact point: the
+/// How rough the baked surface is from `from` to `reach` of the impact point: the
 /// largest and rms height step between neighbouring samples (x and z), and
 /// the rms and largest residual of the height change from its ring mean
 /// (`profile`, rings one sample wide), which leaves out the crater's own
@@ -268,6 +268,7 @@ fn roughness(
     before: &[f32],
     after: &[f32],
     profile: &[f64],
+    from: f32,
     reach: f32,
 ) -> Roughness {
     let (n, _) = field.samples();
@@ -276,7 +277,8 @@ fn roughness(
         |i: u32, j: u32| f64::from(after[(j * n + i) as usize] - before[(j * n + i) as usize]);
     let within = |i: u32, j: u32| {
         let v = field.vertex(i, j);
-        (v.x * v.x + v.z * v.z).sqrt() <= reach
+        let r = (v.x * v.x + v.z * v.z).sqrt();
+        r >= from && r <= reach
     };
     let mut r = Roughness {
         samples: 0,
@@ -312,6 +314,33 @@ fn roughness(
     r
 }
 
+/// The baked height change on the two axis lines through the field's centre
+/// (row and column n/2) less the mean of the lines beside them, within
+/// `reach`: (mean, max) over the axis samples.
+fn axis_ridge(field: &HeightField, before: &[f32], after: &[f32], reach: f32) -> (f64, f64) {
+    let (n, _) = field.samples();
+    let (spacing, _) = field.cell_size();
+    let c = n / 2;
+    let change =
+        |i: u32, j: u32| f64::from(after[(j * n + i) as usize] - before[(j * n + i) as usize]);
+    let k = (reach / spacing) as u32;
+    let (mut sum, mut max, mut count) = (0.0f64, f64::MIN, 0u32);
+    for t in c - k..=c + k {
+        if t == c {
+            continue;
+        }
+        for excess in [
+            change(t, c) - 0.5 * (change(t, c - 1) + change(t, c + 1)),
+            change(c, t) - 0.5 * (change(c - 1, t) + change(c + 1, t)),
+        ] {
+            sum += excess;
+            max = max.max(excess);
+            count += 1;
+        }
+    }
+    (sum / f64::from(count.max(1)), max)
+}
+
 #[test]
 #[ignore = "validation run (long): cargo test --release ... -- --ignored"]
 fn an_impact_crater_in_dry_sand_follows_pi_scaling() {
@@ -326,6 +355,11 @@ fn an_impact_crater_in_dry_sand_follows_pi_scaling() {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(16.0),
+        // CRATER_FADE: the bake's home fade (sample spacings), to compare.
+        bake_home_fade: std::env::var("CRATER_FADE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(TerrainConfig::default().bake_home_fade),
         ..TerrainConfig::default()
     };
     s.terrain_enable(&cfg).unwrap();
@@ -560,17 +594,33 @@ fn an_impact_crater_in_dry_sand_follows_pi_scaling() {
             .map(|h| (h * 1e4).round() / 1e4)
             .collect::<Vec<_>>()
     );
-    let rough = roughness(
-        &field,
-        &before,
-        &after,
-        &profile,
-        3.0 * crater.radius as f32,
-    );
+    let r = crater.radius as f32;
+    for (from, reach) in [(0.0, 3.0), (0.0, 0.5), (0.5, 1.0), (1.0, 3.0)] {
+        let rough = roughness(&field, &before, &after, &profile, from * r, reach * r);
+        eprintln!(
+            "roughness {from}–{reach} R ({} samples): neighbour |Δh| max {:.5} m, rms {:.5} m; \
+             residual from the ring mean rms {:.5} m, max {:.5} m",
+            rough.samples, rough.step_max, rough.step_rms, rough.residual_rms, rough.residual_max
+        );
+    }
+    // Ridges along the axes through the impact point (what a bake that puts
+    // stretched columns back at their rest offsets leaves): the rows and
+    // columns on the axes against the mean of their two neighbours, within
+    // half a transient radius.
+    let ridge = axis_ridge(&field, &before, &after, 0.5 * r);
     eprintln!(
-        "roughness within 3 R ({} samples): neighbour |Δh| max {:.5} m, rms {:.5} m; \
-         residual from the ring mean rms {:.5} m, max {:.5} m",
-        rough.samples, rough.step_max, rough.step_rms, rough.residual_rms, rough.residual_max
+        "axis ridge within 0.5 R: mean {:.5} m, max {:.5} m above the rows beside the axes",
+        ridge.0, ridge.1
+    );
+    // The axes must not stand out of the centre's own roughness (with the
+    // home correction kept for stretched material they stood 17.5 mm above
+    // their neighbours at CRATER_CPR=8, twice the centre's residual rms).
+    let centre = roughness(&field, &before, &after, &profile, 0.0, 0.5 * r);
+    assert!(
+        ridge.0.abs() <= centre.residual_rms,
+        "the axes stand {} m above the rows beside them (centre residual rms {} m)",
+        ridge.0,
+        centre.residual_rms
     );
 
     // The ledger closes: what the field lost escaped or is still in flight.

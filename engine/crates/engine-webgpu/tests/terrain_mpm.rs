@@ -381,19 +381,21 @@ fn activating_then_baking_unmoved_material_restores_the_terrain() {
     assert!(s.terrain_particles().is_empty());
 }
 
-/// The bake splats each activated particle bilinearly from its home sample
-/// moved by its displacement. So material moved rigidly by a fraction of a
-/// sample bakes as its columns moved: each column's volume is split by the
-/// tent weights between the samples around its new centre (the heights become
-/// the bilinear interpolation of the shifted columns, within one quantum per
-/// contributing particle), the volume's centroid moves by the shift (to 1e-3
-/// of a sample: the dithered rounding to whole quanta is unbiased, so it does
-/// not add up over the column's particles, which all moved alike), and no
-/// quantum is lost. Binning by the nearest sample instead moves whole lattice
-/// rows at a time (here 5 per sample), so the centroid would move by a
-/// multiple of 1/5 of a sample.
-#[test]
-fn material_moved_rigidly_bakes_as_its_columns_moved() {
+/// Activate the mound, move every particle rigidly by `shift` samples, bake,
+/// and check the bake against its definition (`terrain_mpm.slang`,
+/// `mpmBakeReference`): each activated particle is splatted bilinearly at
+/// u = x/spacing − w·o, o its rest offset in its home sample's cell and
+/// w = max(0, 1 − |displacement|/fade), with fade = `bake_home_fade`.
+/// - The heights equal that splat, within one quantum per particle reaching
+///   the sample (each particle's share is rounded to whole quanta).
+/// - The volume is exact, and its centroid is the splat's (the rounding is
+///   unbiased) and moves with the shift: a column's rest offsets are
+///   symmetric about its sample and all its particles moved alike, so their
+///   w·o nearly cancel (only the extra quanta of `quanta mod n` break the
+///   symmetry). Binning by the nearest sample instead moves whole lattice rows
+///   at a time (here 5 per sample).
+/// Returns the worst height error (m).
+fn bake_after_rigid_shift(shift: (f32, f32)) -> f64 {
     let mut s = sim();
     let cfg = TerrainConfig {
         max_particles: 1 << 18,
@@ -417,70 +419,76 @@ fn material_moved_rigidly_bakes_as_its_columns_moved() {
     let (nx, nz) = field.samples();
     let (dx, dz) = field.cell_size();
     let x0 = field.vertex(0, 0);
+    let fade = f64::from(cfg.bake_home_fade);
     let mut ps = s.terrain_particles();
     let q = f64::from(ps[0].f[0][3]) / f64::from(ps[0].f[1][3].to_bits());
     let qh = q / f64::from(dx * dz);
-    // Particles per home sample (activation records where it emitted each).
-    let mut count = vec![0u32; (nx * nz) as usize];
-    for p in &ps {
+    for p in &mut ps {
         assert_ne!(
             p.f[2][3].to_bits() & engine_terrain::layout::MPM_PARTICLE_HOME,
             0,
             "an activated particle without its home"
         );
-        let i = ((p.c[1][3] - x0.x) / dx).round() as u32;
-        let j = ((p.c[2][3] - x0.z) / dz).round() as u32;
-        count[(j * nx + i) as usize] += 1;
-    }
-    let shift = (0.3f32, 0.55f32);
-    for p in &mut ps {
         p.xm[0] += shift.0 * dx;
         p.xm[2] += shift.1 * dz;
+    }
+    // The splat's definition, in f64: volume per sample, and how many
+    // particles reach each sample.
+    let mut want = vec![0.0f64; (nx * nz) as usize];
+    let mut reach = vec![0u32; (nx * nz) as usize];
+    for p in &ps {
+        let quanta = f64::from(p.f[1][3].to_bits());
+        let axis = |x: f32, home: f32, x0: f32, d: f32| {
+            let s0 = f64::from(home - x0) / f64::from(d);
+            (f64::from(x - x0) / f64::from(d), s0 - (s0 + 0.5).floor())
+        };
+        let (ux, ox) = axis(p.xm[0] - origin.x, p.c[1][3], x0.x, dx);
+        let (uz, oz) = axis(p.xm[2] - origin.z, p.c[2][3], x0.z, dz);
+        let moved = f64::from(shift.0).hypot(f64::from(shift.1));
+        let w = (1.0 - moved / fade).max(0.0);
+        let (ux, uz) = (ux - w * ox, uz - w * oz);
+        let (i0, j0) = (ux.floor(), uz.floor());
+        let (tx, tz) = (ux - i0, uz - j0);
+        for (a, wa) in [(0, 1.0 - tx), (1, tx)] {
+            for (b, wb) in [(0, 1.0 - tz), (1, tz)] {
+                let (i, j) = (i0 as i64 + a, j0 as i64 + b);
+                if wa * wb > 0.0 && i >= 0 && j >= 0 && i < i64::from(nx) && j < i64::from(nz) {
+                    let k = (j * i64::from(nx) + i) as usize;
+                    want[k] += wa * wb * quanta;
+                    reach[k] += 1;
+                }
+            }
+        }
     }
     s.terrain_overwrite_particles(&ps).unwrap();
     s.terrain_bake().unwrap();
     let after = gpu_heights(&s, collider, &field);
-    let column = |i: i64, j: i64| -> (f64, u32) {
-        if i < 0 || j < 0 || i >= i64::from(nx) || j >= i64::from(nz) {
-            return (0.0, 0);
-        }
-        let k = (j * i64::from(nx) + i) as usize;
-        (f64::from(before[k] - lowered[k]), count[k])
-    };
-    let (wx, wz) = (
-        [1.0 - f64::from(shift.0), f64::from(shift.0)],
-        [1.0 - f64::from(shift.1), f64::from(shift.1)],
-    );
     let mut worst = 0.0f64;
-    let (mut m0, mut m1) = ([0.0f64; 2], [0.0f64; 2]);
-    let (mut v0, mut v1) = (0.0f64, 0.0f64);
+    let (mut m0, mut m1, mut mw) = ([0.0f64; 2], [0.0f64; 2], [0.0f64; 2]);
+    let (mut v0, mut v1, mut vw) = (0.0f64, 0.0f64, 0.0f64);
     for j in 0..nz {
         for i in 0..nx {
             let k = (j * nx + i) as usize;
-            let (mut want, mut tol) = (f64::from(lowered[k]), 0.0f64);
-            for (a, wa) in wx.iter().enumerate() {
-                for (b, wb) in wz.iter().enumerate() {
-                    let (c, n) = column(i64::from(i) - a as i64, i64::from(j) - b as i64);
-                    want += wa * wb * c;
-                    tol += f64::from(n) * qh;
-                }
-            }
-            let err = (f64::from(after[k]) - want).abs();
+            let d = f64::from(after[k] - lowered[k]);
+            let err = (d - want[k] * qh).abs();
+            let tol = f64::from(reach[k]) * qh;
             worst = worst.max(err);
             assert!(
                 err <= tol + 1e-5,
-                "sample ({i}, {j}): {} baked, {want} for the shifted columns (±{tol})",
-                after[k]
+                "shift {shift:?}, sample ({i}, {j}): raised {d} m, the splat {} m (±{tol})",
+                want[k] * qh
             );
             let v = field.vertex(i, j);
-            let (c, _) = column(i64::from(i), i64::from(j));
-            let d = f64::from(after[k] - lowered[k]);
+            let c = f64::from(before[k] - lowered[k]);
             v0 += c;
             v1 += d;
             m0[0] += c * f64::from(v.x);
             m0[1] += c * f64::from(v.z);
             m1[0] += d * f64::from(v.x);
             m1[1] += d * f64::from(v.z);
+            vw += want[k];
+            mw[0] += want[k] * f64::from(v.x);
+            mw[1] += want[k] * f64::from(v.z);
         }
     }
     assert!(
@@ -488,6 +496,7 @@ fn material_moved_rigidly_bakes_as_its_columns_moved() {
         "volume {v0} before, {v1} after (heights × samples)"
     );
     let moved = [m1[0] / v1 - m0[0] / v0, m1[1] / v1 - m0[1] / v0];
+    let defined = [mw[0] / vw - m0[0] / v0, mw[1] / vw - m0[1] / v0];
     eprintln!(
         "rigid shift ({}, {}) samples: centroid moved ({:.5}, {:.5}) samples, worst height error {worst:.2e} m",
         shift.0,
@@ -495,14 +504,144 @@ fn material_moved_rigidly_bakes_as_its_columns_moved() {
         moved[0] / f64::from(dx),
         moved[1] / f64::from(dz)
     );
-    for (got, (want, d)) in moved.iter().zip([(shift.0, dx), (shift.1, dz)]) {
+    for ((got, def), (want, d)) in moved
+        .iter()
+        .zip(defined)
+        .zip([(shift.0, dx), (shift.1, dz)])
+    {
+        let (got, def) = (got / f64::from(d), def / f64::from(d));
+        // The whole-quanta rounding is unbiased: the baked centroid is the
+        // splat's to well under a quantum's share.
         assert!(
-            (got / f64::from(d) - f64::from(want)).abs() < 1e-3,
-            "centroid moved {} samples, the material {want}",
-            got / f64::from(d)
+            (got - def).abs() < 1e-4,
+            "centroid moved {got} samples, the splat {def}"
+        );
+        // And the splat's moves with the material: to within the lattice's
+        // own asymmetry (a column's `quanta mod n` extra quanta go to its
+        // first particles, which keeps part of their offsets in the centroid).
+        assert!(
+            (got - f64::from(want)).abs() < 2e-3,
+            "centroid moved {got} samples, the material {want}"
         );
     }
     assert!(s.terrain_particles().is_empty());
+    worst
+}
+
+/// Material moved rigidly bakes as the splat defines, keeps its volume and
+/// moves its centroid by the shift: within the home fade (here 0.63 of the
+/// one-spacing fade, so the rest offsets are partly taken out) and beyond it
+/// (each particle at its own position). Zero shift is the identity
+/// (`activating_then_baking_unmoved_material_restores_the_terrain`).
+#[test]
+fn material_moved_rigidly_bakes_as_the_splat_defines() {
+    bake_after_rigid_shift((0.3, 0.55));
+    bake_after_rigid_shift((1.3, -0.55));
+}
+
+/// A flat layer opened by a crater-like flow and baked with home fade `fade`.
+/// Every particle moves radially from r to r' = √(r² + r₀²) (r₀ = 0.5 m, four
+/// samples): the map keeps area (r' dr' = r dr), so it opens a hole of radius
+/// r₀ and leaves the layer around it exactly as thick as before, while the
+/// material near the centre is stretched round the hole many times over, as a
+/// crater's flow stretches it. Over the samples from r₀ + 2 samples to 1.4 m,
+/// returns the rms and largest deviation of the raise from the layer's
+/// thickness, and how far the two axis lines through the centre stand above
+/// the lines beside them, all relative to the thickness.
+fn opened_layer_error(fade: f32) -> (f64, f64, f64) {
+    let mut s = sim();
+    let cfg = TerrainConfig {
+        max_particles: 1 << 18,
+        bake_home_fade: fade,
+        ..config()
+    };
+    s.terrain_enable(&cfg).unwrap();
+    let field = HeightField::new(65, 65, 0.125, 0.125, vec![0.0; 65 * 65]).unwrap();
+    let mut arena = HullArena::new();
+    let (_, bed) = s
+        .add_height_field(&mut arena, &field, Vec3::ZERO, Quat::IDENTITY, 0)
+        .unwrap();
+    let plan = RegionPlan::spanning(
+        &cfg,
+        Vec3::new(-1.6, -0.3, -1.6),
+        Vec3::new(1.6, 0.1, 1.6),
+        0.05,
+        0,
+        0,
+    )
+    .unwrap();
+    s.terrain_activate(&plan, bed, &field, Vec3::ZERO, 1600.0, 0.5)
+        .unwrap();
+    let lowered = gpu_heights(&s, bed, &field);
+    let r0 = 0.5f32;
+    let mut ps = s.terrain_particles();
+    for p in &mut ps {
+        let r = p.xm[0].hypot(p.xm[2]);
+        let k = (r * r + r0 * r0).sqrt() / r.max(1e-6);
+        p.xm[0] *= k;
+        p.xm[2] *= k;
+    }
+    s.terrain_overwrite_particles(&ps).unwrap();
+    s.terrain_bake().unwrap();
+    let after = gpu_heights(&s, bed, &field);
+    let (n, _) = field.samples();
+    let (dx, _) = field.cell_size();
+    let c = n / 2;
+    let raise =
+        |i: u32, j: u32| f64::from(after[(j * n + i) as usize] - lowered[(j * n + i) as usize]);
+    // The layer's thickness: what activation took from a sample in the window.
+    let thick = -f64::from(lowered[(c * n + c) as usize]);
+    let within = |i: u32, j: u32| {
+        let r = field.vertex(i, j).length();
+        r >= r0 + 2.0 * dx && r <= 1.4
+    };
+    let (mut sum2, mut max, mut count) = (0.0f64, 0.0f64, 0u32);
+    let (mut ridge, mut lines) = (0.0f64, 0u32);
+    for j in 1..n - 1 {
+        for i in 1..n - 1 {
+            if !within(i, j) {
+                continue;
+            }
+            let e = raise(i, j) - thick;
+            sum2 += e * e;
+            max = max.max(e.abs());
+            count += 1;
+            if j == c {
+                ridge += raise(i, j) - 0.5 * (raise(i, j - 1) + raise(i, j + 1));
+                lines += 1;
+            }
+            if i == c {
+                ridge += raise(i, j) - 0.5 * (raise(i - 1, j) + raise(i + 1, j));
+                lines += 1;
+            }
+        }
+    }
+    let rms = (sum2 / f64::from(count)).sqrt();
+    (rms / thick, max / thick, ridge / f64::from(lines) / thick)
+}
+
+/// Material a crater's flow stretched bakes without ridges: a flat layer
+/// opened by an area-keeping radial map must bake back as thick as it was
+/// around the hole. With the home correction kept however far particles
+/// moved, each column's particles go back to their rest offsets around where
+/// the column's centre went, and stretched columns clump into ridges (the two
+/// axis lines, whose centres do not move sideways, keep all of theirs). With
+/// the fade (one sample spacing), particles that moved splat where they are.
+/// The bounds leave room for the bilinear splat's own ripple (measured: rms
+/// 0.7%, max 2.2%, axis ridge 1.6% of the thickness; with the home correction
+/// kept: 4.7%, 18% and 13.5%).
+#[test]
+fn an_opened_layer_bakes_flat_without_axis_ridges() {
+    let fade = TerrainConfig::default().bake_home_fade;
+    let (rms, max, ridge) = opened_layer_error(fade);
+    let (rms_home, max_home, ridge_home) = opened_layer_error(1e9);
+    eprintln!(
+        "opened layer, relative to its thickness: fade {fade}: error rms {rms:.4}, max {max:.4}, \
+         axis ridge {ridge:.4}; home correction kept: rms {rms_home:.4}, max {max_home:.4}, \
+         axis ridge {ridge_home:.4}"
+    );
+    assert!(rms < 0.02 && max < 0.06, "error rms {rms}, max {max}");
+    assert!(ridge.abs() < 0.05, "axis ridge {ridge} of the thickness");
 }
 
 /// A sand mound opened as an active region, flowing for 1.5 s and baked back:

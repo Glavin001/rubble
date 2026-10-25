@@ -35,6 +35,26 @@ pub struct TerrainConfig {
     pub max_coupled: u32,
     /// Samples of the bed heightfield parcels may land on.
     pub max_field_samples: u32,
+    /// How far an activated particle moves (in heightfield sample spacings,
+    /// sideways) before the bake stops placing it by its home sample.
+    ///
+    /// Activation lays a sample's material out as a lattice of particles
+    /// across the sample's cell. At rest each particle stands for a share of
+    /// that one sample, so the bake splats it from the sample's centre moved
+    /// by its displacement, and activate-then-bake is the identity. Once the
+    /// material has flowed, the particles of a column no longer keep their
+    /// rest spacing: near a crater's centre a column is stretched over
+    /// several samples, and putting its particles back at their rest offsets
+    /// piles its volume into ridges. There each particle's own position says
+    /// best where its volume is. The bake blends the two linearly: the full
+    /// rest offset is taken out at zero displacement, none from this
+    /// displacement on.
+    ///
+    /// One spacing (the default) is the smallest move that can take a
+    /// particle across to another sample. On the browser demo's crater it
+    /// removed the ridges and kept the rim smooth
+    /// (`engine/docs/deformable-terrain.md`, "The splat bake").
+    pub bake_home_fade: f32,
 }
 
 impl Default for TerrainConfig {
@@ -52,6 +72,7 @@ impl Default for TerrainConfig {
             max_columns: 1 << 16,
             max_coupled: 256,
             max_field_samples: 1 << 20,
+            bake_home_fade: 1.0,
         }
     }
 }
@@ -126,6 +147,10 @@ impl TerrainConfig {
         bad(
             self.max_coupled == 0 || self.max_coupled > 65535,
             "max_coupled must lie in [1, 65535]",
+        )?;
+        bad(
+            !(self.bake_home_fade.is_finite() && self.bake_home_fade > 0.0),
+            "bake_home_fade must be finite and positive",
         )?;
         Ok(())
     }

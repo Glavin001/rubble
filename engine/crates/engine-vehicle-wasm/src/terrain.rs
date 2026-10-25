@@ -43,6 +43,7 @@ struct ConfigJson {
     max_columns: Option<u32>,
     max_coupled: Option<u32>,
     max_field_samples: Option<u32>,
+    bake_home_fade: Option<f32>,
 }
 
 /// Dry sand's parameters (the default sand when absent).
@@ -191,6 +192,7 @@ impl TerrainStep {
             max_columns: c.max_columns.unwrap_or(d.max_columns),
             max_coupled: c.max_coupled.unwrap_or(d.max_coupled),
             max_field_samples: c.max_field_samples.unwrap_or(d.max_field_samples),
+            bake_home_fade: c.bake_home_fade.unwrap_or(d.bake_home_fade),
             ..d
         };
         let ds = SandMaterial::default();
@@ -280,7 +282,8 @@ impl TerrainStep {
                 "max_parcels": c.max_parcels, "particles_per_cell_axis": c.particles_per_cell_axis,
                 "cells_per_radius": c.cells_per_radius, "courant": c.courant,
                 "max_substeps": c.max_substeps, "max_columns": c.max_columns,
-                "max_coupled": c.max_coupled, "max_field_samples": c.max_field_samples},
+                "max_coupled": c.max_coupled, "max_field_samples": c.max_field_samples,
+                "bake_home_fade": c.bake_home_fade},
             "region_margin": self.margin, "speed_headroom": self.headroom,
             "settle_speed": self.settle_speed, "settle_frames": self.settle_frames,
         })

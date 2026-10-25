@@ -100,7 +100,9 @@ pub struct MpmParams {
     pub counts: [u32; 4],
     /// Region size in cells, bed heightfield collider (or [`MPM_NO_BED`]).
     pub dims: [u32; 4],
-    /// x: largest particle speed the substep's dt allows (CFL); y, z, w unused.
+    /// x: largest particle speed the substep's dt allows (CFL); y: the bake's
+    /// home fade ([`crate::TerrainConfig::bake_home_fade`], sample spacings);
+    /// z, w unused.
     pub limits: [f32; 4],
     /// The material's words: λ, μ, then for sand and soil friction
     /// (Drucker–Prager α, or sin φ for Mohr–Coulomb) and cohesion (the apex
