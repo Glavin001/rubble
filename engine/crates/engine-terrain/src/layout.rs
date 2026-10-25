@@ -114,7 +114,7 @@ pub struct MpmParams {
     /// samples parcels may deposit on (the last three u32 bits).
     pub couple: [f32; 4],
     /// Z-model source: surface point (world), Z; flow-centre depth, core
-    /// radius, strength α, unused.
+    /// radius, strength α, extent (f32::MAX: unbounded).
     pub source: [[f32; 4]; 2],
 }
 

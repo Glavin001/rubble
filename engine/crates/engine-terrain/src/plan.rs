@@ -571,7 +571,11 @@ impl TerrainPlan {
                 field.flow_center_depth as f32,
                 field.core_radius as f32,
                 field.alpha as f32,
-                0.0,
+                if field.extent.is_finite() {
+                    field.extent as f32
+                } else {
+                    f32::MAX
+                },
             ],
         ];
         let mut ops = TerrainOps::default();

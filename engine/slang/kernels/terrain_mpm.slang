@@ -1506,6 +1506,7 @@ void mpm_source(uint3 tid : SV_DispatchThreadID)
     if (mpmParticleDead(q)) return;
     float3 d = q.xm.xyz - p.source0.xyz;
     if (d.y > 0.0) return; // the field is the target's (y ≤ 0)
+    if (length(d) > p.source1.w) return; // beyond the transient crater: at rest
     q.vj.xyz += mpmZModelVelocity(d, p.source0.w, p.source1.x, p.source1.y, p.source1.z);
     gMpmParticles[i] = q;
 }

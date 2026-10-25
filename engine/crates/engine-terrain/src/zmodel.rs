@@ -70,6 +70,19 @@
 //! (constant-α) field is Housen et al.'s (1983) assumption under which the
 //! field's surface speed is the launch speed.
 
+//! # Extent
+//!
+//! A steady Z-flow fills the half-space with u ∝ r^(−Z). Applied at once to a
+//! whole region, it moves ground far beyond the crater, and its downward
+//! momentum grows with the region (2.4× the impactor's over a box 1.6 R wide
+//! for the 5 mm / 2 km/s sand test; the volume came out 3.6× π-scaling's).
+//! Bounded at the transient radius R about the impact point, the field keeps
+//! almost all its energy (266 of 268 J there) and carries 1.26× the
+//! impactor's momentum downward, a momentum-transfer β in the range measured
+//! for impacts into granular targets: the target takes the impactor's
+//! momentum plus the ejecta's recoil. Ground beyond R starts at rest and the
+//! continuum moves it.
+
 use crate::config::TerrainError;
 use glam::{DVec3, Vec3};
 use std::f64::consts::PI;
@@ -165,6 +178,11 @@ pub struct ZModel {
     pub core_radius: f64,
     /// Flow strength α (m^(Z+1)/s).
     pub alpha: f64,
+    /// The field moves the target within this distance of the surface point
+    /// (m; infinite: everywhere). A source bounds it at the transient crater
+    /// radius: the excavation flow is the crater's; ground beyond it starts at
+    /// rest and is moved by the continuum (module docs, "Extent").
+    pub extent: f64,
 }
 
 impl ZModel {
@@ -201,7 +219,17 @@ impl ZModel {
             flow_center_depth,
             core_radius,
             alpha,
+            extent: f64::INFINITY,
         })
+    }
+
+    /// This field, moving the target only within `extent` of the surface point
+    /// (at least the core's reach to the surface).
+    pub fn bounded(self, extent: f64) -> Result<Self, TerrainError> {
+        if !(extent.is_finite() && extent > self.core_radius) {
+            return Err(out_of_range("extent", extent, self.core_radius, f64::MAX));
+        }
+        Ok(Self { extent, ..self })
     }
 
     /// The field whose surface speed matches Housen & Holsapple's point-source
@@ -261,6 +289,9 @@ impl ZModel {
 
     /// Velocity (m/s) at `p` (m), a point of the target (y ≤ 0).
     pub fn velocity(&self, p: DVec3) -> DVec3 {
+        if p.length() > self.extent {
+            return DVec3::ZERO;
+        }
         let d = p - self.center();
         let r = d.length();
         let r0 = self.core_radius;
@@ -294,7 +325,8 @@ impl ZModel {
         r * (1.0 - cos).powf(-1.0 / (self.z - 2.0))
     }
 
-    /// Kinetic energy of the field over the target (J) for bulk density `rho`.
+    /// Kinetic energy of the field over the target (J) for bulk density `rho`,
+    /// unbounded (an upper bound for a bounded field).
     pub fn kinetic_energy(&self, rho: f64) -> f64 {
         let (z, h, r0, a) = (self.z, self.flow_center_depth, self.core_radius, self.alpha);
         // Outside the core: ½ρα²∫ r^(2−2Z) A(r) dr, with A the angular integral
