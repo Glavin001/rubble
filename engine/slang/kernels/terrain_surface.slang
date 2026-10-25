@@ -18,11 +18,12 @@
 //                            between the two layers around its height (a tent
 //                            in y), in fixed point
 //   terrain_surface_resolve  per sample: the material attached to the bed (the
-//                            layers from the bed up to the first one holding
-//                            less than TS_FILLED of a full cell, that one
-//                            included), as a height above the bed
+//                            layers from the bed up to the first two in a row
+//                            holding less than TS_FILLED of a full cell, those
+//                            included), as a height above the sample's own
+//                            (the lowered bed plus any parcels deposited on it)
 //
-// Material above the first gap (the ejecta curtain, a lifted flap, sand in
+// Material above the first gap of two layers (the ejecta curtain, a lifted flap, sand in
 // flight inside the box) is not part of the surface; a renderer draws it, and
 // the parcels, as debris. Once nothing is in flight and the region bakes, the
 // surface and the baked heightfield are the same splat of the same quanta, so
@@ -55,7 +56,8 @@ static const uint TS_HEIGHTS = 16u;
 static const uint TS_FLAG_SHIFT = 1u;
 // Occupancy units per volume quantum (atomic adds are integers).
 static const float TS_FIXED = 16.0;
-// A layer holding less than this share of a full cell ends the attached column.
+// Two layers in a row holding less than this share of a full cell end the
+// attached column.
 static const float TS_FILLED = 0.3;
 
 uint tsWord(uint k) { return ALOAD(gTerrainSurface[k]); }
@@ -225,12 +227,20 @@ void terrain_surface_resolve(uint3 tid : SV_DispatchThreadID)
     float full = area * tsLayerHeight(p) / p.column.y * TS_FIXED;
     uint layers = tsWord(TS_LAYERS);
     uint at = tsWord(TS_OCC_BASE) + t * layers;
+    // Up to two sparse layers in a row (both counted): a gap of at least two
+    // layers separates detached material. One sparse layer alone is the
+    // loose top of the column (a resting top row split between two layers).
     float units = 0.0;
-    for (uint k = 0u; k < layers; k++)
+    uint sparse = 0u;
+    for (uint k = 0u; k < layers && sparse < 2u; k++)
     {
         float o = float(tsWord(at + k));
         units += o;
-        if (o < TS_FILLED * full) break;
+        sparse = o < TS_FILLED * full ? sparse + 1u : 0u;
     }
-    ASTORE(gTerrainSurface[TS_HEIGHTS + t], asuint(p.column.x + units / TS_FIXED * p.column.y / area));
+    // On the sample's own height, as the bake raises it: the bed (to within
+    // the activation's rounding) plus what parcels deposited there meanwhile.
+    uint2 ij = mpmWindowSample(t, p);
+    float base = hfHeight(hf, ij.x, ij.y);
+    ASTORE(gTerrainSurface[TS_HEIGHTS + t], asuint(base + units / TS_FIXED * p.column.y / area));
 }

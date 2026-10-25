@@ -75,7 +75,7 @@
   </div>
   <div id="legend" class="panel">
     <div><strong>Colours</strong></div>
-    <div class="row"><button id="colStrata" class="on">Strata</button><button id="colSpeed">Speed</button><button id="cutBtn">Cut <kbd>X</kbd></button></div>
+    <div class="row"><button id="colStrata" class="on">Strata</button><button id="colSpeed">Speed</button><button id="cutBtn">Cut <kbd>X</kbd></button><button id="surfBtn" class="on" title="The live ground the engine rebuilds from the particles each frame (render only); off: every particle">Surface <kbd>G</kbd></button></div>
     <div id="legendBody" class="muted"></div>
   </div>
   <div id="timeline" class="panel">
@@ -96,6 +96,7 @@
     import { createWorld, sceneCapacity } from './world-host.mjs';
     import { M, L, WHEEL_RIM_MATERIAL, heightFieldArena } from './vehicle.mjs';
     import { createTerrain, TerrainStep, T } from './terrain-host.mjs';
+    import { GROUND_WGSL, surfaceSwitchError } from './terrain-render.mjs';
 
     const statusEl = document.getElementById('status');
     const errEl = document.getElementById('err');
@@ -115,6 +116,8 @@
       // particles (and frame time) of 16 at 1.0 R; ?cpr= overrides.
       cpr: num('cpr', num('margin', 1.5) >= 1.5 ? 12 : 16),
       bake: qs.get('bake') === 'time' ? 'time' : 'settle', bakeAt: num('bakeAt', 12),
+      // The live surface (render only): ?surface=0 draws every particle instead.
+      surface: qs.get('surface') !== '0',
     };
     const $ = (id) => document.getElementById(id);
     const fold = (on) => { $('foldBody').hidden = on; $('fold').textContent = on ? '▸' : '▾'; };
@@ -235,7 +238,7 @@
     const initial = world.snapshot();
 
     statusEl.textContent = 'building terrain kernels…';
-    const terrain = await createTerrain(world, SETTINGS, { status: (s) => { statusEl.textContent = s; } });
+    const terrain = await createTerrain(world, SETTINGS, { status: (s) => { statusEl.textContent = s; }, surface: true });
     const maxParticles = terrain.settings.config.max_particles, maxParcels = terrain.settings.config.max_parcels;
 
     const surfaceAt = (x, z) => {
@@ -277,6 +280,7 @@ struct Frame {
   right: vec4f, up: vec4f,
   track: vec4f,     // tracked parcel, on
   window: vec4f,    // activation window x0, z0, x1, z1 (bed under the region)
+  surf: vec4f,      // x: draw the live surface over the window (and only detached material)
 };
 @group(0) @binding(0) var<storage, read> bodies: array<Body>;
 @group(0) @binding(1) var<uniform> frame: Frame;
@@ -326,8 +330,8 @@ struct Out { @builtin(position) clip: vec4f, @location(0) n: vec3f, @location(1)
   @location(3) q: vec2f, @location(4) d: f32 };
 
 // ---- heightfield straight from the physics records (engine_schema::heightfield)
-const HF_BASE = ${HF_BASE}u;
-fn hfH(i: u32, j: u32, nx: u32) -> f32 { let k = j * nx + i; let r = hulls[HF_BASE + 2u + (k >> 2u)]; return bitcast<f32>(r[k & 3u]); }
+${GROUND_WGSL({ hfBase: HF_BASE, surfaceBinding: 10 })}
+fn live() -> bool { return frame.surf.x > 0.5; }
 fn inWindow(x: f32, z: f32) -> bool {
   return frame.datum.z > 0.5 && x >= frame.window.x && x <= frame.window.z && z >= frame.window.y && z <= frame.window.w;
 }
@@ -340,12 +344,10 @@ fn inWindow(x: f32, z: f32) -> bool {
   let corner = array<vec2u, 6>(vec2u(0u, 0u), vec2u(1u, 1u), vec2u(1u, 0u), vec2u(0u, 0u), vec2u(0u, 1u), vec2u(1u, 1u))[vi % 6u];
   let i = ci + corner.x; let j = cj + corner.y;
   let x0 = -0.5 * f32(nx - 1u) * d.x; let z0 = -0.5 * f32(nz - 1u) * d.y;
-  let h = hfH(i, j, nx);
-  let hx0 = hfH(max(i, 1u) - 1u, j, nx); let hx1 = hfH(min(i + 1u, nx - 1u), j, nx);
-  let hz0 = hfH(i, max(j, 1u) - 1u, nx); let hz1 = hfH(i, min(j + 1u, nz - 1u), nx);
+  let h = groundHeight(i, j, live());
   var o: Out;
   o.w = vec3f(x0 + f32(i) * d.x, h, z0 + f32(j) * d.y);
-  o.n = normalize(vec3f(-(hx1 - hx0) / (2.0 * d.x), 1.0, -(hz1 - hz0) / (2.0 * d.y)));
+  o.n = groundNormal(i, j, live());
   o.d = h - h0[j * nx + i];
   o.c = vec3f(0.0); o.q = vec2f(0.0);
   o.clip = frame.viewProj * vec4f(o.w, 1.0);
@@ -363,7 +365,7 @@ fn inWindow(x: f32, z: f32) -> bool {
   let s = ${(0.02 * R).toFixed(3)};
   base = mix(base, vec3f(0.42, 0.33, 0.24), smoothstep(s, 4.0 * s, -i.d));
   base = mix(base, RETURNED * 0.95, smoothstep(0.2 * s, 2.0 * s, i.d));
-  if (inWindow(i.w.x, i.w.z)) { base = vec3f(0.22, 0.22, 0.24); }
+  if (inWindow(i.w.x, i.w.z) && !(live() && surfValid())) { base = vec3f(0.22, 0.22, 0.24); }
   return vec4f(shade(base, n, i.w), 1.0);
 }
 // ---- the cut face of the heightfield: a curtain along the plane z = clip.w
@@ -405,6 +407,8 @@ fn billboard(p: vec3f, r: f32, q: vec2f) -> vec4f {
   if (inst >= counters[${T.C_PARTICLES}u]) { return o; }
   let p = parts[inst];
   if ((bitcast<u32>(p.f2.w) & ${T.PARTICLE_DEAD}u) != 0u || cutAway(p.xm.xyz)) { return o; }
+  // With the live surface: only material that has left the ground.
+  if (live() && !detached(p.xm.xyz, true)) { return o; }
   let q = QUAD[vi];
   let r0 = rest[inst];
   var c = select(RETURNED, strata(r0.y), r0.w > 0.0);
@@ -579,10 +583,10 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
       trailDot: pipe('vsTrailDot', 'fsGlow', [{ arrayStride: 12, stepMode: 'instance', attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }] }]),
       col: pipe('vsCol', 'fsCol', vtx6), wheel: pipe('vsWheel', 'fsCol', vtx6),
     };
-    const RES = { 0: world.bufs[0], 1: frameBuf, 2: world.bufs[2], 3: world.bufs[18], 4: world.bufs[T.PARTICLES], 5: restBuf, 6: world.bufs[T.PARCELS], 7: world.bufs[T.COUNTERS], 8: world.bufs[31], 9: h0Buf };
+    const RES = { 0: world.bufs[0], 1: frameBuf, 2: world.bufs[2], 3: world.bufs[18], 4: world.bufs[T.PARTICLES], 5: restBuf, 6: world.bufs[T.PARCELS], 7: world.bufs[T.COUNTERS], 8: world.bufs[31], 9: h0Buf, 10: terrain.surfaceBuffer };
     const bind = (p, ids) => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: ids.map((b) => ({ binding: b, resource: { buffer: RES[b] } })) });
     const B = {
-      terrain: bind(P.terrain, [1, 3, 9]), cut: bind(P.cut, [1, 3, 9]), part: bind(P.part, [1, 4, 5, 7]), parcel: bind(P.parcel, [1, 6, 7]),
+      terrain: bind(P.terrain, [1, 3, 9, 10]), cut: bind(P.cut, [1, 3, 9]), part: bind(P.part, [1, 3, 4, 5, 7, 10]), parcel: bind(P.parcel, [1, 6, 7]),
       glow: bind(P.glow, [1]), trail: bind(P.trail, [1]), trailDot: bind(P.trailDot, [1]), col: bind(P.col, [0, 1, 2]), wheel: bind(P.wheel, [1, 8]),
     };
     let depthTex = null;
@@ -724,6 +728,8 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
     terrain.onBake = () => {
       st.phase = 'baked'; st.bakeT = st.t;
       readHeights().then(measureCrater).catch(fail);
+      // The jump at the switch from the live surface to the baked heightfield.
+      surfaceSwitchError(device, terrain.surfaceBuffer, world.bufs[18], HF_BASE, NX).then((e) => { st.switchError = e; }).catch(fail);
     };
     function bakeNow() { if (st.phase === 'open') terrain.close(); }
     $('launch').onclick = launch;
@@ -732,6 +738,8 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
     $('colStrata').onclick = () => { st.colour = 0; $('colStrata').classList.add('on'); $('colSpeed').classList.remove('on'); };
     $('colSpeed').onclick = () => { st.colour = 1; $('colSpeed').classList.add('on'); $('colStrata').classList.remove('on'); };
     $('cutBtn').onclick = () => { st.cut = !st.cut; $('cutBtn').classList.toggle('on', st.cut); };
+    $('surfBtn').classList.toggle('on', S.surface);
+    $('surfBtn').onclick = () => { S.surface = !S.surface; $('surfBtn').classList.toggle('on', S.surface); };
     const keys = new Set();
     addEventListener('keydown', (e) => {
       if (e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT') return;
@@ -740,6 +748,7 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
       if (e.code === 'Space') { e.preventDefault(); launch(); }
       else if (e.code === 'KeyR') replay();
       else if (e.code === 'KeyX') $('cutBtn').click();
+      else if (e.code === 'KeyG') $('surfBtn').click();
       else if (/^Digit[1-8]$/.test(e.code)) setView(viewBtns[Number(e.code.slice(5)) - 1].dataset.view);
       if (['KeyW', 'KeyA', 'KeyS', 'KeyD'].includes(e.code) && st.vehicle != null) st.manual = true;
     });
@@ -946,6 +955,8 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
         const x0 = X0 + (r.window[0] - 0.5) * SP, z0 = Z0 + (r.window[1] - 0.5) * SP;
         frameF.set([x0, z0, x0 + r.window[2] * SP, z0 + r.window[3] * SP], 56);
       }
+      // The cut shows the particles (the strata inside); otherwise the ground.
+      frameF.set([S.surface && !cut ? 1 : 0, 0, 0, 0], 60);
       device.queue.writeBuffer(frameBuf, 0, frameF);
     }
     function draw(enc) {
@@ -1110,7 +1121,7 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
     }
     window.__impact = {
       frames, frameLog, resume: () => { window.__manual = false; },
-      launch, replay, setView, bake: bakeNow, state: () => ({ phase: st.phase, t: st.t, view: st.shown, report: terrain.report, region: terrain.region, crater: st.crater, tracked: st.tracked && { mode: st.tracked.mode, pos: st.tracked.pos, inside: st.tracked.inside }, car: st.carPose, carSpeed: st.carSpeed, error: terrain.error && String(terrain.error) }),
+      launch, replay, setView, bake: bakeNow, state: () => ({ phase: st.phase, t: st.t, view: st.shown, report: terrain.report, region: terrain.region, crater: st.crater, switchError: st.switchError, tracked: st.tracked && { mode: st.tracked.mode, pos: st.tracked.pos, inside: st.tracked.inside }, car: st.carPose, carSpeed: st.carSpeed, error: terrain.error && String(terrain.error) }),
       timings: () => ({ terrainMsMean: mean(timing.terrainMs), terrainMsWorst: timing.worst, frameMsMean: mean(timing.frameMs), simSpeed: mean(timing.ratio), substeps: timing.substeps.slice(-20), log: timing.log }),
       prediction: pred, settings: terrain.settings,
       debug: { surfaceAt: (x, z) => surfaceAt(x, z), heights: () => heights, field, HF_BASE },
