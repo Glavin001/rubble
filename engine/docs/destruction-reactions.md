@@ -133,7 +133,9 @@ inside the engine's step.
   next frame's contact loads, uncharged.
 - Strain-rate hardening is omitted.
 - The lab (`ThresholdWorld::new_with_crush`, Fracture Lab `Crush`) removes crushed chunks;
-  it keeps no fragments.
+  it keeps no fragments. It reads each frame's crush events back with its counters
+  (`ThresholdWorld::take_crush_events`) and draws a dust puff at each (stress-web
+  `stress_dust`, render only); its status line counts them.
 
 **A finding, fixed 2026-10-25.** The strike prediction picked its entry chunk by matching a
 distance recomputed in a second kernel bit for bit (`fr_strike_entry`, `fr_strike_nearest`).
@@ -338,3 +340,14 @@ predicts its peak (49.0 N against 48.5 N), where `k = 2` on the whole demand ask
 elastic frame, has increment ratios above 2, beyond the factor's range under either convention:
 `k = 2` on the change gives 46.2 kN and 65.1 kN against its peaks of 54.5 kN and 74.2 kN (low),
 on the whole demand 66.4 kN and 96.4 kN (high). The factor is not tuned to these.
+
+## Seeing the reactions (videos)
+
+- Fracture Lab, frame-locked: `node engine/crates/engine-webgpu/fracture/record-reactions.mjs
+  crush-wall:1.4x:crush0 crush-wall:1.4x:crush1 --orbit 400,-60` (`:crushN` or `--crush N`
+  sets the lab's Crush; the URL is `fracture/?pack=crush-wall&shot=1.4x&crush=1`).
+- `World` only (blast loading, support loss, `Conserve` fragments): `cargo run --release -p
+  engine-world --example reaction_replay -- <scenario>` dumps poses, shapes and events to
+  JSON; `engine/tools/reaction-replay/` plays it in three.js and records it.
+  `bash engine/tools/reaction-replay/record-all.sh OUT_DIR` runs every scenario. Support-loss
+  breaks are told apart with `World::destructible_support_loss_breaks`.
