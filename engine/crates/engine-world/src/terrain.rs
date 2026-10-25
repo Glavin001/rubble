@@ -9,9 +9,10 @@
 
 use crate::readback;
 use crate::{unsupported, Extra, Geometry, ShapeId, World};
+use engine_terrain::plan::source_peak_speed;
 use engine_terrain::zmodel::point_source_z;
 use engine_terrain::{
-    substeps_for, CraterPrediction, ExplosionSource, ImpactSource, RegionPlan, SandMaterial,
+    CraterPrediction, ExplosionSource, ImpactSource, RegionClock, RegionPlan, SandMaterial,
     TerrainConfig, ZModel,
 };
 use engine_webgpu::{TerrainStepReport, TerrainStrike, TerrainWatch};
@@ -92,14 +93,9 @@ impl Default for TerrainDef {
 struct ActiveRegion {
     shape: ShapeId,
     plan: RegionPlan,
-    /// Speed bound basis: the source's peak, then each frame's report.
-    speed: f32,
-    /// The step whose report set `speed`.
-    speed_step: u64,
-    /// Consecutive settled frames.
-    quiet: u32,
-    /// No settling before this step (a predicted strike still to come).
-    hold_until: u64,
+    /// Its frame schedule (substeps, settling): engine-terrain's, shared with
+    /// the browser host.
+    clock: RegionClock,
 }
 
 pub(crate) struct TerrainHost {
@@ -293,10 +289,7 @@ impl World {
         self.terrain_host()?.region = Some(ActiveRegion {
             shape: ground,
             plan,
-            speed,
-            speed_step: step,
-            quiet: 0,
-            hold_until: 0,
+            clock: RegionClock::new(speed, step),
         });
         self.dirty = true;
         Ok(())
@@ -314,22 +307,19 @@ impl World {
         let Some(region) = host.region.as_ref() else {
             return Ok(false);
         };
-        if region.quiet >= host.def.settle_frames {
+        if region.clock.settled(host.def.settle_frames) {
             self.terrain_close()?;
             return Ok(false);
         }
         let p = self.sim.params();
-        let frame_dt = p.dt;
-        // Each frame the report is older adds what gravity can add to a speed.
-        let lag = (self.step - region.speed_step + 1) as f32;
-        let bound =
-            1.5 * region.speed + p.gravity_y.abs() * frame_dt * lag + host.def.speed_headroom;
-        let (substeps, dt) = substeps_for(
+        let (substeps, dt) = region.clock.substeps(
             &host.def.config,
-            frame_dt,
+            self.step,
+            p.dt,
+            p.gravity_y,
             region.plan.dx,
             host.def.material.p_wave_speed(),
-            bound,
+            host.def.speed_headroom,
         )?;
         self.sim.terrain_encode_coupled(enc, substeps, dt)?;
         Ok(true)
@@ -418,20 +408,8 @@ impl World {
             .map_err(|e| anyhow::anyhow!("step {step}: terrain: {e}"))?;
         if let Some(host) = self.terrain.as_mut() {
             let settle = host.def.settle_speed;
-            if let Some(r) = host.region.as_mut().filter(|r| step >= r.speed_step) {
-                r.speed = report.max_speed;
-                r.speed_step = step;
-                // Settled: the sand and every body in it at rest, nothing in
-                // flight, and no predicted strike still to come.
-                if report.max_speed < settle
-                    && report.body_speed < settle
-                    && report.airborne == 0
-                    && step >= r.hold_until
-                {
-                    r.quiet += 1;
-                } else {
-                    r.quiet = 0;
-                }
+            if let Some(r) = host.region.as_mut() {
+                r.clock.report(step, &report, settle);
             }
         }
         Ok(report)
@@ -629,8 +607,9 @@ impl World {
         let dt = self.sim.params().dt;
         let step = self.step;
         if let Some(r) = self.terrain.as_mut().and_then(|t| t.region.as_mut()) {
-            r.speed = Vec3::from(strike.velocity).length();
-            r.hold_until = step + (strike.time / dt).ceil() as u64 + 1;
+            r.clock = RegionClock::new(Vec3::from(strike.velocity).length(), step);
+            r.clock
+                .hold_until(step + (strike.time / dt).ceil() as u64 + 1);
         }
         Ok(())
     }
@@ -687,14 +666,6 @@ fn strike_region(def: &TerrainDef, g: f64, strike: &TerrainStrike) -> StrikeRegi
         above: (m * d_b) as f32,
         dx: ((d_b / f64::from(def.strike.cells_per_body)) as f32).max(def.config.min_cell_size),
     }
-}
-
-/// The largest speed the excavation field starts: at its core's edge.
-fn source_peak_speed(model: &ZModel) -> f32 {
-    let core = model.core_radius as f32;
-    let depth = model.flow_center_depth as f32;
-    let deep = model.velocity_f32(Vec3::new(0.0, -depth, core)).length();
-    deep.max(model.surface_speed(model.core_radius) as f32)
 }
 
 fn quat_is_identity(q: Quat) -> bool {
