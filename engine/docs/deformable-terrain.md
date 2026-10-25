@@ -104,6 +104,10 @@ measurements behind them.
   browser, sharing the Rust command plan.
 - **T5.** Cohesive soil, damage-softening rock, vehicle ruts (Bekker), and the
   slope-failure check.
+- **Rendering.** A render-only GPU pass rebuilds the ground over an open
+  region from its particles every frame and lists what flies as debris.
+  `showcase.html` is a 120 Hz chase-camera run past three strikes; see
+  "Rendering and showcase".
 
 **Defaults** (`TerrainConfig::default()`):
 - physical stiffness (E = 50 MPa);
@@ -617,6 +621,123 @@ settled by default. Its rest tolerance is 1% of the crater's gravity speed
   (its tyres hold to about 27°): the crater is a trap.
 - Open: along the axis row through the impact (z = 0) the baked inner wall
   sits 4–8 m below its neighbours, a groove the truck drives in.
+
+## Rendering and showcase (2026-10-25)
+
+Drawn as particles, an open region looks like a cloud of sand. A game wants
+ground that deforms, and only the material that leaves it flying as debris.
+
+**The live surface** (`slang/kernels/terrain_surface.slang`, planned by
+`engine_terrain::surface::SurfacePlan`). This is a render-only pass after each
+coupled frame. Its only output is binding 53; nothing in the simulation reads
+it. The kernels:
+- `terrain_surface_clear` empties an occupancy grid: window samples × the
+  region's cells in y.
+- `terrain_surface_shift` measures the absorbing walls' give, as
+  `mpm_bake_shift` does, into its own buffer.
+- `terrain_surface_bin` splats every particle as `mpm_bake_bin` does: the
+  tent at home for the share at rest, P2G's B-spline for the share the MPM
+  moved, in the unactivated ground's frame. In y it uses a tent over two
+  layers, in fixed point.
+- `terrain_surface_resolve` gives one height per window sample: the sample's
+  own height (the lowered bed plus any parcels deposited there), plus the
+  material attached to the bed. A column ends at the first two layers in a
+  row that hold less than 30% of a full cell. One sparse layer is a column's
+  loose top, not a gap.
+- `terrain_surface_debris` lists every particle more than a layer above that
+  surface, and every particle in flight. It counts them into indirect draw
+  arguments, so a renderer draws only the debris.
+
+*In flight* means faster than a fall of one layer, √(2 g dy): 7 m/s on
+2.5 m cells. That sand has been thrown, even before a gap opens under it.
+- It stays out of the surface and is drawn as debris. At crater scale the
+  ejecta curtain and the excavation flow never rise two layers clear of the
+  ground: on 2.5 m cells, a 15 m crater's ejecta at √(gR) ≈ 12 m/s climb
+  about 7 m.
+- A settled region has nothing that fast, so at the bake the surface and the
+  heightfield are the same splat of the same quanta.
+- `SurfacePlan::with_ejecta_fall` (`surface_ejecta_fall` in the wasm
+  settings) sets the fall height; 0 counts only what a gap separates.
+- `surface_cells` (default 2²¹) caps samples × layers, and fails by name when
+  a region needs more.
+
+**The switch at the bake.** `terrain-render.mjs`'s `surfaceSwitchError`
+compares the last live surface with the baked heightfield. Results:
+
+| Case | rms | worst |
+|---|---|---|
+| `impact.html`, 2 m meteor, 3 m cells, timed bake at 10 s | 0.15 m (5% of a cell) | 0.57 m |
+| showcase, 2.5 m cells, timed bakes at 4.5 and 5.1 s | 0.07 m | 0.57 m |
+
+- The difference is the residual motion and the fixed point.
+- The bake also pushes sand off a buried body; this pass does not.
+- The first resolve stood on the bed instead of each sample's own height, and
+  ended a column at one sparse layer: 0.39 m rms, with parcels deposited on
+  window samples and loose top rows missing.
+
+**Hosts.** `terrain-host.mjs` runs the pass with `createTerrain(…,
+{ surface: true })`. `terrain-render.mjs` holds the WGSL that draws one
+ground: the heightfield's records outside the window, the live surface inside
+it, and `debrisParticle(k)` for the debris list.
+- `impact.html` draws the surface by default. G or the Surface button turns
+  it off. The cross-section and the cut always show the particles (the
+  strata).
+- One open region per surface pass. With the multi-region engine, each
+  region needs its own window in the pass.
+
+**`showcase.html`** (hub card "Meteor run"):
+- A third-person chase camera behind the dune buggy (`buggy-render.mjs`'s
+  mesh), on an autopilot round a stadium track (straights of 140 m, turns of
+  58 m), at 45 km/h. Physics and render run at 1/120 s.
+- Three meteors strike inside the track: a 0.5 m stone at 20 km/s, giving a
+  15.1 m transient crater and a 19.7 m final rim. The second lands on the
+  first crater's rim, the third at the centre of the turn the car drives
+  round.
+- `cells_per_radius` 6 at margin 1.0: 2.52 m cells, a 60 m box of 97,592
+  particles, 3 substeps a frame after the first 0.05 s.
+- Placement: a strike sits as close beside the track as its region's box
+  allows (6 m clear), so the car passes 18 m from the rim while the crater
+  still moves. A car must never enter an open window: its wheels' rays would
+  find the lowered bed.
+- Cosmetic only, from the strike's time and point:
+  - the fireball and its smoke trail on approach;
+  - the flash, and the light it casts;
+  - camera shake;
+  - a shockwave ring, a dust curtain, a base surge and a rising column;
+  - a dust trail behind each piece of debris, and a hot crater floor.
+- Debris is the engine's list, drawn as rocks sized from each particle's
+  volume.
+- The terrain settings sit in one `TERRAIN` object, where the engine's game
+  profile can replace them.
+- One region at a time. A strike due while a region is open first bakes it,
+  once nothing is in flight (a timed bake, `World::terrain_close`).
+  - Here those regions are 4.5 and 5.1 s old: the timed-bake jumps above.
+  - Once the engine allows several regions (`config.max_regions > 1`), the
+    second strike lands at 3.2 s, while the first crater still moves.
+- `record()` steps 1/120 s frames and encodes every other one: WebCodecs H.264
+  (Annex B) with explicit timestamps, from the canvas texture's pixels copied
+  in the frame's submission. `timings()` gives GPU timestamps for the
+  terrain, surface and render passes, and each frame's wall time from
+  encode to GPU completion.
+
+Frame cost at 1/120 s, rendering every frame, in Chrome on the Mac it was
+built on. Other agents were compiling and running GPU tests at the same time.
+Medians, with p95 in brackets:
+
+| | 1280×720 | 1920×1080 |
+|---|---|---|
+| frame, region open (wall) | 7.9 ms (15.5) | 9.0 ms (11.0) |
+| frame, no region (wall) | 4.0 ms (5.3) | 6.8 ms (8.9) |
+| terrain pass (GPU) | 1.25 ms (3.7) | 1.25 ms (1.6) |
+| surface pass (GPU) | 0.20 ms (0.46) | 0.20 ms (0.26) |
+| render pass (GPU, 4× MSAA) | 2.1 ms (2.9) | 2.8 ms (3.7) |
+
+- The terrain is within its 2 ms share of the 8.3 ms budget.
+- The strike frame takes 27 substeps (about 12 ms of terrain, once).
+- The frame's wall time also holds the rigid step and the vehicle, untimed,
+  and a wait for the GPU every frame: at 1080p it sits at or just over 8.3 ms.
+- The dust was 9 ms of render before its colour moved to the vertex shader,
+  its noise to one octave, and its plume to 700 sprites a strike.
 
 ## The splat bake (2026-10-25)
 
