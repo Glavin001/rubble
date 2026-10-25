@@ -867,7 +867,7 @@ void sort_list_0(uint tid_3, uint begin_0, uint n_0, KernelContext_0 thread* ker
                         *(kernelContext_28->lists_0+_S105) = a_1;
                     }
                 }
-                t_0 = t_0 + 256U;
+                t_0 = t_0 + 1024U;
             }
             threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
             j_3 = j_3 >> 1U;

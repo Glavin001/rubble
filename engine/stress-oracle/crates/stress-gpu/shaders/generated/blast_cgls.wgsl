@@ -123,7 +123,7 @@ fn node_slot_0( node_0 : u32,  vector_0 : u32) -> u32
     return node_0 * u32(10) + vector_0;
 }
 
-var<workgroup> g_blast_red_0 : array<vec2<f32>, i32(256)>;
+var<workgroup> g_blast_red_0 : array<vec2<f32>, i32(1024)>;
 
 var<workgroup> g_blast_sum_0 : vec2<f32>;
 
@@ -131,7 +131,7 @@ fn blast_group_sum_0( tid_0 : u32,  v_0 : vec2<f32>) -> vec2<f32>
 {
     g_blast_red_0[tid_0] = v_0;
     workgroupBarrier();
-    var k_0 : u32 = u32(128);
+    var k_0 : u32 = u32(512);
     loop
     {
         if(k_0 > u32(0))
@@ -255,7 +255,7 @@ fn bond_term_0( b_2 : ptr<function, BlastBond_std430_0>,  vec_0 : u32,  ang_1 : 
 }
 
 @compute
-@workgroup_size(256, 1, 1)
+@workgroup_size(1024, 1, 1)
 fn blast_solve(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invocation_id) thread_1 : vec3<u32>)
 {
     var ia_0 : f32;
@@ -324,7 +324,7 @@ fn blast_solve(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invoca
             {
                 target_0 = 1.0f;
             }
-            p_0 = p_0 + u32(256);
+            p_0 = p_0 + u32(1024);
         }
         var _S23 : vec2<f32> = blast_group_sum_0(tid_1, vec2<f32>(target_0, 0.0f));
         if((_S23.x) == 0.0f)
@@ -391,7 +391,7 @@ fn blast_solve(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invoca
             scratch_0[node_slot_0(i_1, v_1)] = vec4<f32>(0.0f);
             v_1 = v_1 + u32(1);
         }
-        p_0 = p_0 + u32(256);
+        p_0 = p_0 + u32(1024);
         target_0 = target_1;
     }
     if(!warm_1)
@@ -410,7 +410,7 @@ fn blast_solve(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invoca
             var _S29 : vec4<f32> = vec4<f32>(0.0f);
             x_0[_S28] = _S29;
             x_0[_S28 + u32(1)] = _S29;
-            v_1 = v_1 + u32(256);
+            v_1 = v_1 + u32(1024);
         }
     }
     device_group_barrier_0();
@@ -434,7 +434,7 @@ fn blast_solve(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invoca
             scratch_0[_S30] = vec4<f32>(scratch_0[_S30].xyz - ya_1, 0.0f);
             var _S31 : u32 = _S30 + u32(1);
             scratch_0[_S31] = vec4<f32>(scratch_0[_S31].xyz - yl_1, 0.0f);
-            p_0 = p_0 + u32(256);
+            p_0 = p_0 + u32(1024);
         }
     }
     var _S32 : vec2<f32> = blast_group_sum_0(tid_1, vec2<f32>(target_0, 0.0f));
@@ -478,7 +478,7 @@ fn blast_solve(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invoca
             var t_1 : u32 = bond_slot_0(params_0.node_count_0, j_1);
             scratch_0[t_1] = vec4<f32>(ta_0, 0.0f);
             scratch_0[t_1 + u32(1)] = vec4<f32>(tl_0, 0.0f);
-            q_0 = q_0 + u32(256);
+            q_0 = q_0 + u32(1024);
             il_0 = zt_0;
         }
         var _S35 : vec2<f32> = blast_group_sum_0(tid_1, vec2<f32>(il_0, 0.0f));
@@ -534,7 +534,7 @@ fn blast_solve(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invoca
             scratch_0[_S39] = vec4<f32>(qa_0, 0.0f);
             scratch_0[_S40] = vec4<f32>(ql_0, 0.0f);
             var qq_1 : f32 = qq_0 + norm2_0(qa_0, ql_0);
-            p_0 = p_0 + u32(256);
+            p_0 = p_0 + u32(1024);
             qq_0 = qq_1;
         }
         var _S41 : vec2<f32> = blast_group_sum_0(tid_1, vec2<f32>(qq_0, 0.0f));
@@ -577,7 +577,7 @@ fn blast_solve(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invoca
             scratch_0[_S48] = vec4<f32>(scratch_0[_S48].xyz - scratch_0[_S49].xyz * _S46, 0.0f);
             var _S50 : u32 = _S48 + u32(1);
             scratch_0[_S50] = vec4<f32>(scratch_0[_S50].xyz - scratch_0[_S49 + u32(1)].xyz * _S46, 0.0f);
-            p_1 = p_1 + u32(256);
+            p_1 = p_1 + u32(1024);
         }
         var _S51 : u32 = iterations_0 + u32(1);
         device_group_barrier_0();
@@ -605,7 +605,7 @@ fn blast_solve(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invoca
             var _S55 : vec4<f32> = vec4<f32>(0.0f);
             x_0[_S54] = _S55;
             x_0[_S54 + u32(1)] = _S55;
-            q_0 = q_0 + u32(256);
+            q_0 = q_0 + u32(1024);
             continue;
         }
         var ta_1 : vec3<f32>;
@@ -615,7 +615,7 @@ fn blast_solve(@builtin(workgroup_id) group_0 : vec3<u32>, @builtin(local_invoca
         x_0[_S56] = vec4<f32>(x_0[_S56].xyz + ta_1, 0.0f);
         var _S57 : u32 = _S56 + u32(1);
         x_0[_S57] = vec4<f32>(x_0[_S57].xyz + tl_1, 0.0f);
-        q_0 = q_0 + u32(256);
+        q_0 = q_0 + u32(1024);
     }
     if(tid_1 == u32(0))
     {

@@ -359,7 +359,7 @@ void sort_list(uint tid, uint begin, uint n)
 }
 
 [shader("compute")]
-[numthreads(256, 1, 1)]
+[numthreads(1024, 1, 1)]
 void bt_sort(uint3 group: SV_GroupID, uint3 thread: SV_GroupThreadID)
 {
     uint tid = thread.x;

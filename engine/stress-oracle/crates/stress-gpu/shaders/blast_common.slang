@@ -11,7 +11,7 @@
 
 module blast_common;
 
-public static const uint BLAST_THREADS = 256;
+public static const uint BLAST_THREADS = 1024;
 public static const uint NO_NODE = 0xFFFFFFFFu;
 // A CSR ref's top bit: the node is the bond's second endpoint.
 public static const uint REF_SECOND = 0x80000000u;

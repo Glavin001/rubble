@@ -726,7 +726,7 @@ fn sort_list_0( tid_3 : u32,  begin_0 : u32,  n_0 : u32)
                         lists_0[_S64] = a_2;
                     }
                 }
-                t_0 = t_0 + u32(256);
+                t_0 = t_0 + u32(1024);
             }
             device_group_barrier_0();
             j_3 = (j_3 >> (u32(1)));
@@ -737,7 +737,7 @@ fn sort_list_0( tid_3 : u32,  begin_0 : u32,  n_0 : u32)
 }
 
 @compute
-@workgroup_size(256, 1, 1)
+@workgroup_size(1024, 1, 1)
 fn bt_sort(@builtin(workgroup_id) group_2 : vec3<u32>, @builtin(local_invocation_id) thread_4 : vec3<u32>)
 {
     var tid_4 : u32 = thread_4.x;

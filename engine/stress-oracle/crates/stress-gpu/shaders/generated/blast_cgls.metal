@@ -83,7 +83,7 @@ float2 blast_group_sum_0(uint tid_0, float2 v_0, KernelContext_0 thread* kernelC
     float2 s_1 = _S1;
     for(;;)
     {
-        if(k_0 < 8U)
+        if(k_0 < 32U)
         {
         }
         else
@@ -271,7 +271,7 @@ void bond_term_0(const BlastBond_natural_0 thread* b_2, uint vec_0, float3 threa
             {
                 target_0 = 1.0f;
             }
-            p_0 = p_0 + 256U;
+            p_0 = p_0 + 1024U;
         }
         float2 _S19 = blast_group_sum_0(tid_1, float2(target_0, 0.0f), &kernelContext_3);
         if((_S19.x) == 0.0f)
@@ -338,7 +338,7 @@ void bond_term_0(const BlastBond_natural_0 thread* b_2, uint vec_0, float3 threa
             *((&kernelContext_3)->scratch_0+node_slot_0(i_1, v_1)) = packed_float4(float4(0.0f) ) ;
             v_1 = v_1 + 1U;
         }
-        p_0 = p_0 + 256U;
+        p_0 = p_0 + 1024U;
         target_0 = target_1;
     }
     if(!warm_1)
@@ -357,7 +357,7 @@ void bond_term_0(const BlastBond_natural_0 thread* b_2, uint vec_0, float3 threa
             packed_float4 _S27 = packed_float4(float4(0.0f) ) ;
             *((&kernelContext_3)->x_0+_S26) = _S27;
             *((&kernelContext_3)->x_0+(_S26 + 1U)) = _S27;
-            v_1 = v_1 + 256U;
+            v_1 = v_1 + 1024U;
         }
     }
     threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
@@ -381,7 +381,7 @@ void bond_term_0(const BlastBond_natural_0 thread* b_2, uint vec_0, float3 threa
             *((&kernelContext_3)->scratch_0+_S28) = packed_float4(float4((float4(*((&kernelContext_3)->scratch_0+_S28)) ).xyz - ya_1, 0.0f)) ;
             uint _S29 = _S28 + 1U;
             *((&kernelContext_3)->scratch_0+_S29) = packed_float4(float4((float4(*((&kernelContext_3)->scratch_0+_S29)) ).xyz - yl_1, 0.0f)) ;
-            p_0 = p_0 + 256U;
+            p_0 = p_0 + 1024U;
         }
     }
     float2 _S30 = blast_group_sum_0(tid_1, float2(target_0, 0.0f), &kernelContext_3);
@@ -425,7 +425,7 @@ void bond_term_0(const BlastBond_natural_0 thread* b_2, uint vec_0, float3 threa
             uint t_1 = bond_slot_0((&kernelContext_3)->params_0->node_count_0, j_1);
             *((&kernelContext_3)->scratch_0+t_1) = packed_float4(float4(ta_0, 0.0f)) ;
             *((&kernelContext_3)->scratch_0+(t_1 + 1U)) = packed_float4(float4(tl_0, 0.0f)) ;
-            q_0 = q_0 + 256U;
+            q_0 = q_0 + 1024U;
             il_0 = zt_0;
         }
         float2 _S33 = blast_group_sum_0(tid_1, float2(il_0, 0.0f), &kernelContext_3);
@@ -481,7 +481,7 @@ void bond_term_0(const BlastBond_natural_0 thread* b_2, uint vec_0, float3 threa
             *((&kernelContext_3)->scratch_0+_S37) = packed_float4(float4(qa_0, 0.0f)) ;
             *((&kernelContext_3)->scratch_0+_S38) = packed_float4(float4(ql_0, 0.0f)) ;
             float qq_1 = qq_0 + norm2_0(qa_0, ql_0);
-            p_0 = p_0 + 256U;
+            p_0 = p_0 + 1024U;
             qq_0 = qq_1;
         }
         float2 _S39 = blast_group_sum_0(tid_1, float2(qq_0, 0.0f), &kernelContext_3);
@@ -524,7 +524,7 @@ void bond_term_0(const BlastBond_natural_0 thread* b_2, uint vec_0, float3 threa
             *((&kernelContext_3)->scratch_0+_S46) = packed_float4(float4((float4(*((&kernelContext_3)->scratch_0+_S46)) ).xyz - (float4(*((&kernelContext_3)->scratch_0+_S47)) ).xyz * _S44, 0.0f)) ;
             uint _S48 = _S46 + 1U;
             *((&kernelContext_3)->scratch_0+_S48) = packed_float4(float4((float4(*((&kernelContext_3)->scratch_0+_S48)) ).xyz - (float4(*((&kernelContext_3)->scratch_0+(_S47 + 1U))) ).xyz * _S44, 0.0f)) ;
-            p_1 = p_1 + 256U;
+            p_1 = p_1 + 1024U;
         }
         uint _S49 = iterations_0 + 1U;
         threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
@@ -552,7 +552,7 @@ void bond_term_0(const BlastBond_natural_0 thread* b_2, uint vec_0, float3 threa
             packed_float4 _S53 = packed_float4(float4(0.0f) ) ;
             *((&kernelContext_3)->x_0+_S52) = _S53;
             *((&kernelContext_3)->x_0+(_S52 + 1U)) = _S53;
-            q_0 = q_0 + 256U;
+            q_0 = q_0 + 1024U;
             continue;
         }
         thread float3 ta_1;
@@ -562,7 +562,7 @@ void bond_term_0(const BlastBond_natural_0 thread* b_2, uint vec_0, float3 threa
         *((&kernelContext_3)->x_0+_S54) = packed_float4(float4((float4(*((&kernelContext_3)->x_0+_S54)) ).xyz + ta_1, 0.0f)) ;
         uint _S55 = _S54 + 1U;
         *((&kernelContext_3)->x_0+_S55) = packed_float4(float4((float4(*((&kernelContext_3)->x_0+_S55)) ).xyz + tl_1, 0.0f)) ;
-        q_0 = q_0 + 256U;
+        q_0 = q_0 + 1024U;
     }
     if(tid_1 == 0U)
     {

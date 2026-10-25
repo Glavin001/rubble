@@ -96,7 +96,7 @@ void gather(uint node, bool from_x, out float3 ang, out float3 lin)
 }
 
 [shader("compute")]
-[numthreads(256, 1, 1)]
+[numthreads(1024, 1, 1)]
 void blast_solve(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
 {
     uint tid = thread.x;

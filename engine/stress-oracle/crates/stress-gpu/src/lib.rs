@@ -231,7 +231,7 @@ pub mod shaders {
     pub const SPLIT: ShaderSet = shader_set!("split", [("split_components", (256, 1, 1)), ("split_children", (64, 1, 1)), ("split_frames", (64, 1, 1)), ("split_children_group", (64, 1, 1))]);
     pub const HUD_OVERLAY: ShaderSet = shader_set!("hud_overlay", [("hud_vs", (1, 1, 1)), ("hud_fs", (1, 1, 1))]);
     pub const THRESHOLD: ShaderSet = shader_set!("threshold", [("threshold_breaks", (256, 1, 1)), ("threshold_predict", (256, 1, 1))]);
-    pub const BLAST_CGLS: ShaderSet = shader_set!("blast_cgls", [("blast_solve", (256, 1, 1))]);
+    pub const BLAST_CGLS: ShaderSet = shader_set!("blast_cgls", [("blast_solve", (1024, 1, 1))]);
     pub const BLAST_MATERIAL: ShaderSet = shader_set!("blast_material", [("blast_bond_stress", (64, 1, 1))]);
     pub const BLAST_FRACTURE: ShaderSet = shader_set!("blast_fracture", [("blast_loads", (64, 1, 1)), ("blast_breaks", (64, 1, 1))]);
     pub const BLAST_TOPOLOGY: ShaderSet = shader_set!(
@@ -249,7 +249,7 @@ pub mod shaders {
             ("bt_islands", (64, 1, 1)),
             ("bt_scatter_nodes", (64, 1, 1)),
             ("bt_scatter_bonds", (64, 1, 1)),
-            ("bt_sort", (256, 1, 1)),
+            ("bt_sort", (1024, 1, 1)),
         ]
     );
     pub const FRACTURE: ShaderSet = shader_set!(
