@@ -346,7 +346,8 @@ fn warm_gpu(seconds: f64) {
     for k in 0..40 {
         for j in 0..40 {
             for i in 0..40 {
-                let x = Vec3::new(-0.5, -0.5, -0.5) + (Vec3::new(i as f32, j as f32, k as f32) + 0.5) * h;
+                let x = Vec3::new(-0.5, -0.5, -0.5)
+                    + (Vec3::new(i as f32, j as f32, k as f32) + 0.5) * h;
                 ps.push(MpmParticle::at_rest(x.to_array(), h * h * h, sand.density));
             }
         }

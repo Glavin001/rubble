@@ -51,7 +51,9 @@ pub const MPM_C_AIRBORNE: usize = 9;
 pub const MPM_C_BODY_SPEED: usize = 10;
 /// Nonzero: the next substep's `mpm_payload` sets the geostatic F first.
 pub const MPM_C_GEOSTATIC: usize = 11;
-pub const MPM_COUNTER_WORDS: usize = 12;
+/// Parcels thrown before this substep's G2P: the ones `mpm_parcels` flies.
+pub const MPM_C_FLYING: usize = 12;
+pub const MPM_COUNTER_WORDS: usize = 16;
 
 /// `MpmParams.dims.w` without a bed heightfield.
 pub const MPM_NO_BED: u32 = u32::MAX;

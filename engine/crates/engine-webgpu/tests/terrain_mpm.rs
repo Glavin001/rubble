@@ -900,3 +900,91 @@ fn ejecta_land_on_the_terrain_with_their_volume() {
         f64::from(r.deposited) * q
     );
 }
+
+/// One run of a thrown layer: its outer ring out of the region (deposits),
+/// its middle up and back into it (re-entry as particles). The heights, the
+/// particles, and the parcels as a set (their slots are the GPU's order),
+/// after a second; and the parcels thrown.
+fn thrown_layer() -> (Vec<u32>, Vec<u8>, Vec<[u32; 8]>, u32) {
+    use engine_terrain::{substeps_for, SandMaterial};
+    let mut s = sim();
+    let cfg = TerrainConfig {
+        max_particles: 1 << 18,
+        ..config()
+    };
+    s.terrain_enable(&cfg).unwrap();
+    let sand = SandMaterial::default();
+    s.terrain_set_material(Some(&sand)).unwrap();
+    let field = HeightField::new(65, 65, 0.125, 0.125, vec![0.0; 65 * 65]).unwrap();
+    let mut arena = HullArena::new();
+    let (_, bed) = s
+        .add_height_field(&mut arena, &field, Vec3::ZERO, Quat::IDENTITY, 0)
+        .unwrap();
+    let plan = RegionPlan::spanning(
+        &cfg,
+        Vec3::new(-0.6, -0.3, -0.6),
+        Vec3::new(0.6, 0.9, 0.6),
+        0.05,
+        0,
+        0,
+    )
+    .unwrap();
+    s.terrain_activate(
+        &plan,
+        bed,
+        &field,
+        Vec3::ZERO,
+        sand.density,
+        sand.friction_angle.tan(),
+    )
+    .unwrap();
+    let mut ps = s.terrain_particles();
+    for p in &mut ps {
+        let r = Vec3::new(p.xm[0], 0.0, p.xm[2]);
+        let out = r.normalize_or_zero() * if r.length() > 0.3 { 3.0 } else { 0.2 };
+        p.vj[0] = out.x;
+        p.vj[1] = 4.0;
+        p.vj[2] = out.z;
+    }
+    s.terrain_load(&plan, &ps, Some(bed), sand.friction_angle.tan())
+        .unwrap();
+    let (n, dt) = substeps_for(&cfg, 1.0 / 60.0, plan.dx, sand.p_wave_speed(), 8.0).unwrap();
+    let mut report = None;
+    for _ in 0..60 {
+        report = Some(s.terrain_step(n, dt, -9.81).unwrap());
+    }
+    let mut parcels: Vec<[u32; 8]> = s
+        .terrain_parcels()
+        .iter()
+        .map(|p| bytemuck::cast::<_, [u32; 8]>(*p))
+        .collect();
+    parcels.sort_unstable();
+    let heights = gpu_heights(&s, bed, &field)
+        .iter()
+        .map(|h| h.to_bits())
+        .collect();
+    let particles = bytemuck::cast_slice::<MpmParticle, u8>(&s.terrain_particles()).to_vec();
+    (heights, particles, parcels, report.unwrap().parcels)
+}
+
+/// Ejecta take parcel slots in the GPU's order, but nothing that changes
+/// results depends on it (the deposit's rounding is seeded by the particle
+/// a parcel left, and a parcel landing back takes that particle's slot):
+/// two runs agree bit for bit, deposits and re-entered particles included.
+#[test]
+fn ejecta_are_the_same_run_to_run() {
+    let a = thrown_layer();
+    let b = thrown_layer();
+    assert!(a.3 > 100, "too few parcels ({}) to test", a.3);
+    let landed_back = a.2.iter().filter(|p| f32::from_bits(p[7]) <= 0.0).count();
+    eprintln!("{} parcels thrown, {landed_back} landed", a.3);
+    let diff_h = a.0.iter().zip(&b.0).filter(|(x, y)| x != y).count();
+    eprintln!(
+        "differ: heights {diff_h} samples, parcels {}, particles {}",
+        a.2 != b.2,
+        a.1 != b.1
+    );
+    assert_eq!(a.0, b.0, "deposited heights differ run to run");
+    assert_eq!(a.2, b.2, "parcels differ run to run");
+    assert!(a.1 == b.1, "particles differ run to run");
+}

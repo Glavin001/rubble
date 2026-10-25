@@ -253,7 +253,8 @@ impl TerrainPlan {
                 MPM_COUPLED_BINDING,
                 u64::from(config.max_coupled) * 64 + u64::from(config.max_boundary_nodes) * 16,
             ),
-            (MPM_PARCELS_BINDING, u64::from(config.max_parcels) * 32),
+            // Two float4 per parcel, then the particle each left (16 B).
+            (MPM_PARCELS_BINDING, u64::from(config.max_parcels) * 48),
             (MPM_DEPOSIT_BINDING, u64::from(config.max_field_samples) * 4),
         ]
     }

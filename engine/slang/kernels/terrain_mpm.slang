@@ -70,6 +70,7 @@ static const uint MPM_C_ESCAPED = 7u;     // quanta that left the heightfield's 
 static const uint MPM_C_SORTED = 8u;      // sorted slots claimed by blocks this substep
 static const uint MPM_C_AIRBORNE = 9u;    // parcels still in flight after this substep
 static const uint MPM_C_BODY_SPEED = 10u; // fastest dynamic body coupled this frame (f32 bits)
+static const uint MPM_C_FLYING = 12u;     // parcels thrown before this substep's G2P (mpm_parcels flies them)
 static const uint MPM_C_GEOSTATIC = 11u;  // nonzero: this substep's mpm_payload sets the geostatic F first
 static const uint MPM_OVERFLOW_BLOCKS = 1u;
 static const uint MPM_OVERFLOW_HASH = 2u;
@@ -175,7 +176,12 @@ BIND(47) RWStructuredBuffer<AUint> gMpmColumns;
 // [0] coupled colliders; per region block cell c (x + X·(y + Y·z)):
 // [4 + c·(1 + MPM_CELL_COLLIDERS)] count, then coupling slots.
 BIND(48) RWStructuredBuffer<AUint> gMpmCouple;
-// Ejecta parcels: [2k] = (position, quanta bits), [2k + 1] = (velocity, mass; 0 once landed).
+// Ejecta parcels: [2k] = (position, quanta bits), [2k + 1] = (velocity, mass; 0 once landed);
+// from [2·max parcels] on, per parcel k, x = the particle it left (uint bits).
+// Slots k are handed out by an atomic, so their order is the GPU's: nothing
+// that changes results depends on k (the deposit's rounding is seeded by the
+// particle, and a parcel landing back in the region takes that particle's
+// own slot again), so runs agree bit for bit.
 BIND(50) RWStructuredBuffer<float4> gMpmParcels;
 // Per heightfield sample (j·nx + i): quanta deposited this frame.
 BIND(51) RWStructuredBuffer<AUint> gMpmDeposit;
@@ -319,6 +325,9 @@ void mpmWriteArgs(MpmParams p)
     gMpmArgs[5] = 1u;
     uint parcels = min(ALOAD(gMpmCounters[MPM_C_PARCELS]), asuint(p.couple.z));
     gMpmArgs[6] = (parcels + MPM_GROUP - 1u) / MPM_GROUP;
+    // Exactly these fly in mpm_parcels: G2P adds parcels after this, in the
+    // GPU's slot order, and its last workgroup would fly some of them.
+    ASTORE(gMpmCounters[MPM_C_FLYING], parcels);
     gMpmArgs[7] = 1u;
     gMpmArgs[8] = 1u;
 }
@@ -1365,6 +1374,9 @@ void mpm_g2p(uint3 tid : SV_DispatchThreadID)
         {
             gMpmParcels[2u * k] = float4(q.xm.xyz, q.f1.w);
             gMpmParcels[2u * k + 1u] = float4(v, q.xm.w);
+            gMpmParcels[2u * maxParcels + k] = float4(asfloat(i), 0, 0, 0);
+            // In flight from now (mpm_parcels flies it from the next substep).
+            AADD2(gMpmCounters[MPM_C_AIRBORNE], 1u);
             q.f2.w = asfloat(asuint(q.f2.w) | MPM_PARTICLE_DEAD);
         }
         else AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_PARCELS);
@@ -2212,7 +2224,7 @@ void mpm_parcels(uint3 tid : SV_DispatchThreadID)
 {
     uint k = mpmIndex(tid);
     MpmParams p = mpmParams();
-    if (k >= min(ALOAD(gMpmCounters[MPM_C_PARCELS]), asuint(p.couple.z))) return;
+    if (k >= ALOAD(gMpmCounters[MPM_C_FLYING])) return;
     float4 xq = gMpmParcels[2u * k], vm = gMpmParcels[2u * k + 1u];
     if (vm.w <= 0.0) return;
     float dt = p.step.x;
@@ -2235,11 +2247,14 @@ void mpm_parcels(uint3 tid : SV_DispatchThreadID)
         else if (xl.y <= h)
         {
             landed = true;
+            // The particle it left (its slot is dead while it flies).
+            uint source = asuint(gMpmParcels[2u * asuint(p.couple.z) + k].x);
             if (mpmInside(xq.xyz, p))
             {
-                uint slot;
-                AADD3(gMpmCounters[MPM_C_PARTICLES], 1u, slot);
-                if (slot < p.counts.x)
+                // Back as a particle, in the slot of the one it left: no
+                // atomic, so particle ids (P2G's order) do not depend on the
+                // parcels' slots.
+                uint slot = source;
                 {
                     MpmParticle q;
                     float vol = float(quanta) * p.column.y;
@@ -2254,9 +2269,8 @@ void mpm_parcels(uint3 tid : SV_DispatchThreadID)
                     q.f2 = float4(0, 0, 1, 0);
                     gMpmParticles[slot] = q;
                 }
-                else AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_PARTICLES);
             }
-            else landed = mpmParcelDeposit(xl, quanta, ~k, p, hf);
+            else landed = mpmParcelDeposit(xl, quanta, ~source, p, hf);
         }
     }
     if (!landed) AADD2(gMpmCounters[MPM_C_AIRBORNE], 1u);
