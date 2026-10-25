@@ -328,6 +328,9 @@ mod imp {
         gravity: [f32; 3],
         /// Bonds the pass has broken that no readback has shown broken yet.
         sent: Vec<bool>,
+        /// `DestructibleDef::support_loss_dynamic_factor`: the flow's demand on a piece
+        /// whose supports changed this frame.
+        dynamic_factor: f32,
     }
 
     /// The world's threshold destructibles.
@@ -896,6 +899,7 @@ mod imp {
                     compressive,
                     bonds_of,
                     gravity: g.map(|x| x as f32),
+                    dynamic_factor: def.support_loss_dynamic_factor,
                 });
             }
             let k = match self.fracture.slots.iter().position(|s| s.is_none()) {
@@ -1194,18 +1198,34 @@ mod imp {
                 .collect();
             bodies.sort_unstable();
             bodies.dedup();
+            // The touched pieces' chunks, in one sweep.
+            let mut chunks_of: Vec<Vec<u32>> = vec![Vec::new(); bodies.len()];
+            for (c, b) in t.chunk_body.iter().enumerate() {
+                if let Ok(i) = bodies.binary_search(b) {
+                    chunks_of[i].push(c as u32);
+                }
+            }
+            let lost = crate::support_loss::lost_support(
+                &bodies,
+                &chunks_of,
+                broken,
+                |b| {
+                    let [a, o, _, _] = bonds[b as usize];
+                    (t.chunk_body[a as usize], t.chunk_body[o as usize])
+                },
+                |c| t.tables.info[c as usize] & INFO_SUPPORT != 0,
+            );
             let mut over = Vec::new();
-            for body in bodies {
-                let chunks: Vec<u32> = (0..t.chunk_body.len() as u32)
-                    .filter(|&c| t.chunk_body[c as usize] == body)
-                    .collect();
+            for (i, chunks) in chunks_of.iter().enumerate() {
+                // A sudden loss of support: the dynamic factor; else the quasi-static flow.
+                let factor = if lost[i] { sl.dynamic_factor } else { 1.0 };
                 let mut local = std::collections::HashMap::with_capacity(chunks.len());
-                for (i, &c) in chunks.iter().enumerate() {
-                    local.insert(c, i as u32);
+                for (j, &c) in chunks.iter().enumerate() {
+                    local.insert(c, j as u32);
                 }
                 let mut piece_bonds = Vec::new();
                 let mut table_index = Vec::new();
-                for &c in &chunks {
+                for &c in chunks.iter() {
                     for &b in &sl.bonds_of[c as usize] {
                         let [a, o, _, _] = bonds[b as usize];
                         // Each bond once (from its first chunk), intact and inside the piece.
@@ -1241,7 +1261,7 @@ mod imp {
                     bonds: &piece_bonds,
                 };
                 over.extend(
-                    crate::support_loss::failing(&piece, sl.gravity)
+                    crate::support_loss::failing(&piece, sl.gravity, factor)
                         .into_iter()
                         .map(|i| table_index[i as usize]),
                 );

@@ -623,6 +623,9 @@ typedef struct RbDestructibleDef {
   // intact bonds, and a bond carrying more than its compressive capacity breaks, so a
   // structure whose supports are shot away collapses. Off by default.
   bool support_loss;
+  // With `support_loss`: the dynamic increase factor on the load flow of a piece whose
+  // supports changed this frame (a sudden loss), 1 to 2. 1 (the default): quasi-static.
+  float support_loss_dynamic_factor;
   uint32_t internal_value;
 } RbDestructibleDef;
 

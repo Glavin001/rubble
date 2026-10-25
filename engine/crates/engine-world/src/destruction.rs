@@ -402,6 +402,13 @@ pub struct DestructibleDef {
     /// carrying more than its compressive capacity breaks the next frame, so a structure
     /// whose supports are shot away collapses. Off: the threshold model as the lab runs it.
     pub support_loss: bool,
+    /// With `support_loss`: the dynamic increase factor on the load flow of a piece whose
+    /// supports changed this frame (a sudden loss; `support_loss.rs`). A suddenly applied
+    /// load on an undamped elastic system peaks at twice its static effect, and
+    /// progressive-collapse guidance (GSA 2003, UFC 4-023-03) applies a factor of up to 2 to
+    /// the gravity load over a removed column. 1 (the default) is the quasi-static flow;
+    /// the range is 1 to 2, anything else is an error.
+    pub support_loss_dynamic_factor: f32,
 }
 
 impl DestructibleDef {
@@ -419,6 +426,7 @@ impl DestructibleDef {
             },
             user_data: 0,
             support_loss: false,
+            support_loss_dynamic_factor: 1.0,
         }
     }
 }
@@ -603,6 +611,15 @@ impl World {
         anyhow::ensure!(
             !def.support_loss || def.model == StrengthModel::Threshold,
             "support_loss is a capability of the Threshold strength model (the Bonds model carries weight in its joints)"
+        );
+        let k = def.support_loss_dynamic_factor;
+        anyhow::ensure!(
+            (1.0..=2.0).contains(&k),
+            "support_loss_dynamic_factor {k} is outside 1 to 2 (1: quasi-static; 2: an undamped sudden load's peak)"
+        );
+        anyhow::ensure!(
+            k == 1.0 || def.support_loss,
+            "support_loss_dynamic_factor {k} needs support_loss (it scales the support-loss flow)"
         );
         let asset = self
             .assets
