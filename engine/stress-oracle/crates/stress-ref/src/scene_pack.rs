@@ -98,6 +98,9 @@ fn map_material_authored(asset: &str) -> Result<(&'static str, &'static str), St
         ("brick", "mortar")
     } else if has(&["brick"]) {
         ("brick", "mortar")
+    } else if has(&["block"]) {
+        // Blockwork (concrete masonry units in mortar).
+        ("brick", "mortar")
     } else if has(&["stone", "masonry", "slate", "paving", "porcelain", "road"]) {
         ("stone", "mortar")
     } else if has(&["block"]) {
@@ -110,6 +113,43 @@ fn map_material_authored(asset: &str) -> Result<(&'static str, &'static str), St
     } else {
         return Err(format!("no material class for asset material '{asset}' (authored strengths)"));
     })
+}
+
+/// Each pack material's crush block (ScenePack v3 `materials[].crush`, camelCase, SI),
+/// by material index. A crush block in a pack declaring version 1 or 2 is an error (the
+/// author expects behaviour the declared version does not have); a missing required
+/// field or a non-positive one is an error naming the material. Strain-rate hardening
+/// (`strainRateExponent`) is not modelled: a pack that asks for it gets a note.
+fn pack_crush(json: &Value, notes: &mut Vec<String>) -> Result<Vec<Option<crate::crush::CrushParams>>, String> {
+    let version = json["version"].as_u64().unwrap_or(1);
+    let Some(materials) = json["defaults"]["solver"]["materials"].as_array() else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::with_capacity(materials.len());
+    for (i, m) in materials.iter().enumerate() {
+        let name = m["name"].as_str().unwrap_or("").to_string();
+        let Some(c) = m.get("crush").filter(|c| !c.is_null()) else {
+            out.push(None);
+            continue;
+        };
+        if version < 3 {
+            return Err(format!("pack material {i} ('{name}') has a crush block but the pack declares version {version}; crushing is ScenePack v3"));
+        }
+        let required = |k: &str| c[k].as_f64().ok_or_else(|| format!("pack material {i} ('{name}'): crush.{k} is required"));
+        let params = crate::crush::CrushParams {
+            cap_pressure: required("capPressure")?,
+            cohesion: c["cohesion"].as_f64().unwrap_or(0.0),
+            friction_slope: c["frictionSlope"].as_f64().unwrap_or(0.0),
+            crush_energy: required("crushEnergy")?,
+            crush_viscosity: required("crushViscosity")?,
+        };
+        params.validate(&name)?;
+        if c["strainRateExponent"].as_f64().is_some_and(|e| e > 0.0) {
+            notes.push(format!("material '{name}': crush strain-rate hardening is not modelled"));
+        }
+        out.push(Some(params));
+    }
+    Ok(out)
 }
 
 fn zup(v: &Value) -> Vec3 {
@@ -218,6 +258,10 @@ pub fn import_value_with(json: &Value, name: &str, body_name: &str, source: &str
         })
         .unwrap_or_default();
     let pack_moduli: Vec<Option<f64>> = json["defaults"]["solver"]["materials"].as_array().map(|a| a.iter().map(|m| Some(m["elasticModulus"].as_f64()? * scale)).collect()).unwrap_or_default();
+    // ScenePack v3: each pack material's optional crush block (chunk crushing); a node's
+    // own material (`nodes[].m`) selects it.
+    let mut notes = Vec::new();
+    let crush = pack_crush(json, &mut notes)?;
     let classify = |asset: &str| if options.authored_strengths { map_material_authored(asset) } else { map_material(asset) };
 
     let mut scene = new_scene(name, &format!("Imported from {source}"));
@@ -250,13 +294,26 @@ pub fn import_value_with(json: &Value, name: &str, body_name: &str, source: &str
         if node_mass <= 0.0 || (!options.pack_masses && lowest <= GRADE + SEAM) {
             c.support = Support::Fixed;
         }
+        // The node's own material's crush block (v3), if it has one.
+        // (Checked only in a pack that crushes: v2 packs keep importing as they did.)
+        let node_crush = match node.get("m").and_then(Value::as_u64) {
+            _ if crush.iter().all(Option::is_none) => None,
+            Some(m) => *crush.get(m as usize).ok_or_else(|| format!("node {i}: material index {m} out of range ({} materials)", crush.len()))?,
+            None => crush.first().copied().flatten(),
+        };
         if options.pack_masses && node_mass > 0.0 {
             // A chunk material of its own, at the density that gives the pack's mass.
             let volume = hull.unit_mass().volume;
             let key = format!("{mat}#mass{i}");
             let mut m = material_preset(mat);
             m.density = node_mass / volume;
+            m.crush = node_crush;
             scene.materials.insert(key.clone(), m);
+            c.material = key;
+        } else if let Some(cp) = node_crush.filter(|_| node_mass > 0.0) {
+            let index = node.get("m").and_then(Value::as_u64).unwrap_or(0);
+            let key = format!("{mat}@crush#{index}");
+            scene.materials.entry(key.clone()).or_insert_with(|| Material { crush: Some(cp), ..material_preset(mat) });
             c.material = key;
         }
         if let Some(t) = node_types.get(i).filter(|t| !t.is_empty()) {
@@ -365,7 +422,6 @@ pub fn import_value_with(json: &Value, name: &str, body_name: &str, source: &str
             derived: None,
         });
     }
-    let mut notes = Vec::new();
     if fallback > 0 {
         notes.push(format!("{fallback} of {} bond patches from the asset's area, no shared face found", bonds.len()));
     }

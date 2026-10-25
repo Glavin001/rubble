@@ -108,6 +108,9 @@ thread_local! {
     /// The physics frame rate of the next `stress_load` (`stress_set_physics_hz`); 0 keeps
     /// the scene's own.
     static PHYSICS_HZ: Cell<f64> = const { Cell::new(0.0) };
+    /// Chunk crushing of the next threshold load (`stress_set_crush`): 0 off, 1 the scene's
+    /// own crush parameters, 2 those and the cited presets for the rest.
+    static CRUSH: Cell<u32> = const { Cell::new(0) };
     static RUNNING: Cell<bool> = const { Cell::new(false) };
     static SIZE: Cell<(u32, u32)> = const { Cell::new((0, 0)) };
     static STATS: RefCell<String> = RefCell::new("{}".into());
@@ -298,6 +301,16 @@ pub fn stress_set_profile(name: String) -> Result<(), JsValue> {
     let p = Profile::parse(&name).ok_or_else(|| JsValue::from_str(&format!("no profile {name}")))?;
     PROFILE.set(p);
     Ok(())
+}
+
+/// Chunk crushing for the next `stress_load` (threshold profile on the GPU-resident world;
+/// engine/docs/destruction-reactions.md section 1): 0 off (the default), 1 with the scene's
+/// own crush parameters (a ScenePack v3's `materials[].crush`), 2 those and, for chunk
+/// materials without any, the cited presets (stress-ref `crush::presets::for_material`). A
+/// crushed chunk is removed (dust); the stats count them (`crushed`).
+#[wasm_bindgen]
+pub fn stress_set_crush(mode: u32) {
+    CRUSH.set(mode.min(2));
 }
 
 /// The physics frame rate (Hz) of the next `stress_load`: one resident frame per
@@ -534,12 +547,25 @@ fn load(level: u8) -> Result<(), String> {
     scene.sim.methods = stress_ref::scene::Methods::established();
     profile.apply_scene(&mut scene);
     scene.materials.entry("projectile".into()).or_insert_with(stress_ref::builders::elastic_steel);
+    let crush = CRUSH.get();
+    if crush == 2 {
+        // The presets, chosen explicitly, for chunk materials without their own (a pack
+        // import's per-node copies by their calibrated base name).
+        for (name, m) in scene.materials.iter_mut() {
+            if m.crush.is_none() {
+                m.crush = stress_ref::crush::presets::for_material(name.split(['#', '@']).next().unwrap_or(name));
+            }
+        }
+    }
+    if crush != 0 && !(profile == Profile::Threshold && THRESHOLD_GPU.get()) {
+        return Err("chunk crushing runs in the threshold profile on the GPU-resident world".into());
+    }
     if profile == Profile::Threshold && THRESHOLD_GPU.get() {
         return DEVICE.with_borrow(|d| {
             let d = d.as_ref().ok_or("stress_init first")?;
             let gpu = &d.gpu;
             let s = SHOOTING.get().expect("shooting set");
-            let mut world = stress_rubble::threshold::ThresholdWorld::new(gpu, &scene, s.radius, s.mass)?;
+            let mut world = stress_rubble::threshold::ThresholdWorld::new_with_crush(gpu, &scene, s.radius, s.mass, crush != 0)?;
             let shots = world.shot_impactors();
             let renderer = Renderer::for_target(gpu, &world.mirror, &shots, d.config.width, d.config.height, d.view_format);
             world.attach_view(gpu, &renderer);
@@ -699,6 +725,8 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, elapsed_ms: f64) -> Result<(
         "fragments": st.bodies,
         "brokenBonds": st.broken,
         "splitFrames": st.split_frames,
+        "crush": CRUSH.get(),
+        "crushed": st.crushed,
         "awake": st.awake,
         "contacts": st.contacts,
         "errors": st.error,

@@ -64,11 +64,51 @@ pub enum DestructionEvent {
     },
     /// An actor (connected chunks) of a destructible came apart. The parent
     /// is described by value: its chunks have already moved to the children.
+    /// A crushed chunk is not a child (see `ChunkCrushed`).
     Split {
         destructible: DestructibleId,
         parent: ActorInfo,
         children: Vec<ActorInfo>,
     },
+    /// A chunk was crushed (`DestructibleDef::crush`): its material comminuted, it
+    /// left its structure (every bond of it broken, its body gone). Its mass went to
+    /// `fragments` (`CrushMass::Conserve`) or out of the simulation (`Remove`); the
+    /// host draws the dust from this.
+    ChunkCrushed {
+        destructible: DestructibleId,
+        chunk: u32,
+        /// kg, m^3.
+        mass: f32,
+        volume: f32,
+        /// The chunk's pose when crushed: its centre of mass, and the rotation its
+        /// render mesh had (its body origin's).
+        pose: Transform,
+        /// At the chunk (its centre of mass), m/s and rad/s.
+        linear_velocity: [f32; 3],
+        angular_velocity: [f32; 3],
+        /// The highest mean pressure (compression positive) and deviatoric stress it
+        /// met (Pa).
+        peak_pressure: f32,
+        peak_deviator: f32,
+        cause: CrushCause,
+        /// The rigid fragments carrying its mass and momentum (empty: removed).
+        fragments: Vec<BodyId>,
+    },
+}
+
+/// What crushed a chunk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CrushCause {
+    /// A predicted strike (a projectile, `World::body_set_projectile`).
+    Impact,
+    /// A blast's face pressures (not produced yet).
+    Blast,
+    /// Contact loads after a step (debris, impacts the strike prediction did not see,
+    /// sustained pressure), with their reactions through the chunk's bonds.
+    Contact,
+    /// Loads through its bonds alone (not produced yet: the threshold mode solves no
+    /// bond forces).
+    Load,
 }
 
 /// A vehicle's state after the step: speeds, engine, gear, and per wheel the

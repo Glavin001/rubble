@@ -508,7 +508,7 @@ impl World {
             let frames: Vec<[f32; 4]> =
                 t.fracture.body_frames(&gpu).into_iter().flatten().collect();
             // The pieces take their frames from this step on: the step simulates them.
-            let events = self.apply_fracture_from(k, step, chunks, intact, &frames)?;
+            let events = self.apply_fracture_from(k, step, chunks, intact, &frames, &[])?;
             self.blasts
                 .events
                 .extend(events.into_iter().map(|e| (step, e)));

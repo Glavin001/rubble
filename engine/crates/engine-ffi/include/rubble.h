@@ -66,6 +66,10 @@ typedef enum RbDestructionType {
   // A connection of an assembly or composed vehicle broke: `assembly`,
   // `name`, `joint`, `force`, `torque`.
   RB_CONNECTION_BROKE = 6,
+  // A chunk of a destructible was crushed: `destructible`, `index` (the
+  // chunk), `mass`; `children` / `child_count` are the fragment bodies that
+  // carry its mass, one each (none when removed).
+  RB_CHUNK_CRUSHED = 7,
 } RbDestructionType;
 
 typedef enum RbGroundState {
