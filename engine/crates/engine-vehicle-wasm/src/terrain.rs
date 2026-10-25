@@ -20,8 +20,8 @@ use engine_terrain::plan::{
 };
 use engine_terrain::zmodel::point_source_z;
 use engine_terrain::{
-    CraterPrediction, CraterTarget, ExplosionSource, ImpactSource, RegionPlan, SandMaterial,
-    TerrainConfig, TerrainError, ZModel,
+    CraterPrediction, CraterTarget, ExplosionSource, ImpactSource, InitialStress, RegionBoundary,
+    RegionPlan, SandMaterial, TerrainConfig, TerrainError, ZModel,
 };
 use glam::{DVec3, Vec3};
 use serde::Deserialize;
@@ -43,6 +43,11 @@ struct ConfigJson {
     max_columns: Option<u32>,
     max_coupled: Option<u32>,
     max_field_samples: Option<u32>,
+    /// "rigid" or "absorbing" (`RegionBoundary`).
+    boundary: Option<String>,
+    /// "unstressed" or "geostatic" (`InitialStress`).
+    initial_stress: Option<String>,
+    max_boundary_nodes: Option<u32>,
 }
 
 /// Dry sand's parameters (the default sand when absent).
@@ -177,6 +182,26 @@ impl TerrainStep {
         let s: SettingsJson = super::parse(settings)?;
         let d = TerrainConfig::default();
         let c = s.config;
+        let boundary = match c.boundary.as_deref() {
+            None => d.boundary,
+            Some("rigid") => RegionBoundary::Rigid,
+            Some("absorbing") => RegionBoundary::Absorbing,
+            Some(other) => {
+                return Err(JsError::new(&format!(
+                    "config.boundary is \"rigid\" or \"absorbing\", not {other:?}"
+                )))
+            }
+        };
+        let initial_stress = match c.initial_stress.as_deref() {
+            None => d.initial_stress,
+            Some("unstressed") => InitialStress::Unstressed,
+            Some("geostatic") => InitialStress::Geostatic,
+            Some(other) => {
+                return Err(JsError::new(&format!(
+                    "config.initial_stress is \"unstressed\" or \"geostatic\", not {other:?}"
+                )))
+            }
+        };
         let config = TerrainConfig {
             max_particles: c.max_particles.unwrap_or(d.max_particles),
             max_blocks: c.max_blocks.unwrap_or(d.max_blocks),
@@ -191,6 +216,9 @@ impl TerrainStep {
             max_columns: c.max_columns.unwrap_or(d.max_columns),
             max_coupled: c.max_coupled.unwrap_or(d.max_coupled),
             max_field_samples: c.max_field_samples.unwrap_or(d.max_field_samples),
+            boundary,
+            initial_stress,
+            max_boundary_nodes: c.max_boundary_nodes.unwrap_or(d.max_boundary_nodes),
             ..d
         };
         let ds = SandMaterial::default();
@@ -280,7 +308,16 @@ impl TerrainStep {
                 "max_parcels": c.max_parcels, "particles_per_cell_axis": c.particles_per_cell_axis,
                 "cells_per_radius": c.cells_per_radius, "courant": c.courant,
                 "max_substeps": c.max_substeps, "max_columns": c.max_columns,
-                "max_coupled": c.max_coupled, "max_field_samples": c.max_field_samples},
+                "max_coupled": c.max_coupled, "max_field_samples": c.max_field_samples,
+                "boundary": match c.boundary {
+                    RegionBoundary::Rigid => "rigid",
+                    RegionBoundary::Absorbing => "absorbing",
+                },
+                "initial_stress": match c.initial_stress {
+                    InitialStress::Unstressed => "unstressed",
+                    InitialStress::Geostatic => "geostatic",
+                },
+                "max_boundary_nodes": c.max_boundary_nodes},
             "region_margin": self.margin, "speed_headroom": self.headroom,
             "settle_speed": self.settle_speed, "settle_frames": self.settle_frames,
         })
