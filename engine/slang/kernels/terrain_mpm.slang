@@ -1037,6 +1037,29 @@ void mpm_geostatic(uint3 tid : SV_DispatchThreadID)
     gMpmParticles[i] = q;
 }
 
+// A node over the unactivated ground beside the window, at or below that
+// ground's surface: a separating Coulomb contact with the surface (as the rigid
+// bed's hfSurface case). Nodes inside the window, or under the ground's top
+// (the walls), are the absorbing faces' and are left alone.
+void mpmGroundSurfaceContact(HeightFieldRef hf, Frame f, float3 xl, MpmParams p, inout float3 v)
+{
+    int si = clamp(int(round((xl.x - hf.x0) / hf.dx)), 0, int(hf.nx) - 1);
+    int sj = clamp(int(round((xl.z - hf.z0) / hf.dz)), 0, int(hf.nz) - 1);
+    int2 lo = int2(p.window.xy), hi = int2(p.window.xy + p.window.zw) - 1;
+    bool outside = si < lo.x || si > hi.x || sj < lo.y || sj > hi.y;
+    if (!outside || xl.y < hfHeight(hf, uint(si), uint(sj))) return;
+    float h;
+    float3 nl;
+    if (!(hfSurface(hf, xl.x, xl.z, h, nl) && (xl.y - h) * nl.y <= 0.0)) return;
+    float3 nw = quatRotate(f.q, nl);
+    float vn = dot(v, nw);
+    if (vn >= 0.0) return;
+    float3 vt = v - nw * vn;
+    float st = length(vt);
+    float mu = p.step.w;
+    v = st <= -mu * vn ? float3(0, 0, 0) : vt * (1.0 + mu * vn / st);
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void mpm_grid(uint3 tid : SV_DispatchThreadID)
@@ -1062,6 +1085,10 @@ void mpm_grid(uint3 tid : SV_DispatchThreadID)
         // A node the absorbing faces reach (its own function, ahead of the rigid bed).
         if ((p.boundary.x & MPM_BOUNDARY_ABSORBING) != 0u && mpmAbsorbNode(g, node.w, hf, f, p, v))
         {
+            // The absorbing faces are the floor and the walls below the
+            // ground's top; the ground's own surface beside the window (where
+            // the rim spills over) stays rigid ground.
+            mpmGroundSurfaceContact(hf, f, frameToLocal(f, xw), p, v);
             mpmRigidContact(n, b, node.w, p, v);
             gMpmGrid[2u * n] = float4(v, node.w);
             return;

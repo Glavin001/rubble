@@ -484,6 +484,42 @@ fn demo_after_impact(absorbing: bool, cells: f32, margin: f64, secs: f32) -> (f6
         .filter(|p| live(p))
         .map(|p| Vec3::from_slice(&p.vj[..3]).length())
         .collect();
+    if std::env::var("ABSORB_SLOW_DUMP").is_ok() {
+        // Where the still-moving particles are: cells from the nearest side
+        // wall, cells above the bed, and radius from the impact (in R).
+        let all = s.terrain_particles();
+        let mut slow: Vec<(f32, Vec3)> = all
+            .iter()
+            .filter(|p| live(p))
+            .map(|p| {
+                (
+                    Vec3::from_slice(&p.vj[..3]).length(),
+                    Vec3::from_slice(&p.xm[..3]),
+                )
+            })
+            .filter(|(v, _)| *v > 0.05)
+            .collect();
+        slow.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let (lo, hi) = (plan.origin, plan.end());
+        let mut wall = [0u32; 6];
+        for (_, x) in &slow {
+            let d =
+                ((x.x - lo.x).min(hi.x - x.x).min(x.z - lo.z).min(hi.z - x.z) / plan.dx) as usize;
+            wall[d.min(5)] += 1;
+        }
+        eprintln!(
+            "{} slow; by cells from a side wall (0,1,2,3,4,5+): {wall:?}",
+            slow.len()
+        );
+        for (v, x) in slow.iter().take(8) {
+            let d = (x.x - lo.x).min(hi.x - x.x).min(x.z - lo.z).min(hi.z - x.z) / plan.dx;
+            eprintln!(
+                "  {v:.3} m/s at r {:.2} R, y {:.1} m, {d:.1} cells from a wall",
+                (x.x * x.x + x.z * x.z).sqrt() / crater.radius as f32,
+                x.y
+            );
+        }
+    }
     let frac = |v: f32| ps.iter().filter(|&&s| s > v).count() as f64 / ps.len() as f64;
     let (fast, moving) = (frac(1.0), frac(0.05));
     eprintln!(

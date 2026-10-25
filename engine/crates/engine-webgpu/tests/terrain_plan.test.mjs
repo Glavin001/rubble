@@ -51,7 +51,8 @@ test('an impact opens a region (activation, then source) and runs coupled frames
   assert.ok(pred.crater.radius > 30 && pred.crater.radius < 70, `R = ${pred.crater.radius}`);
   const { blocks, end } = decodeBlocks(p.impact(0, FIELD, Float32Array.of(0, 0, 0), 2, 3000, 20000, 9.81));
   assert.equal(blocks.length, 2);
-  assert.deepEqual(blocks[0].cmds.map((c) => c.kernel), ['mpm_activate_count', 'mpm_activate_scan', 'mpm_activate_emit', 'mpm_activate_lower']);
+  // The default ground is absorbing: activation also lays out its boundary nodes.
+  assert.deepEqual(blocks[0].cmds.map((c) => c.kernel), ['mpm_activate_count', 'mpm_activate_scan', 'mpm_activate_emit', 'mpm_activate_lower', 'mpm_absorb_init']);
   assert.equal(blocks[0].writes[0].binding, T.PARAMS);
   assert.deepEqual(blocks[1].cmds.map((c) => c.kernel), ['mpm_write_args', 'mpm_source']);
   assert.ok(end > 0);

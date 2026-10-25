@@ -73,14 +73,15 @@ pub struct TerrainConfig {
 pub enum RegionBoundary {
     /// Rigid ground: a separating Coulomb contact (the bed friction), which
     /// reflects elastic waves back into the region.
-    #[default]
     Rigid,
     /// The ground beyond as an elastic half-space: Lysmer & Kuhlemeyer's (1969)
     /// viscous dashpots (−ρ·c_p·v_n − ρ·c_s·v_t per unit area) with the
     /// viscous-spring boundary's springs (Liu et al. 2006), on the geostatic
     /// traction the ground carried at activation. Waves leave the region as if
     /// into the surrounding ground; material at rest neither sinks nor creeps.
-    /// Needs [`InitialStress::Geostatic`] and a material with stiffness.
+    /// Needs [`InitialStress::Geostatic`] and a material with stiffness. The
+    /// default: the ground beyond the region is more ground.
+    #[default]
     Absorbing,
 }
 
@@ -89,12 +90,12 @@ pub enum RegionBoundary {
 pub enum InitialStress {
     /// Undeformed (F = I): the material sags under gravity once it steps, by
     /// ρ·g·H²/(2(λ + 2μ)) at the surface of a column H deep, and rings.
-    #[default]
     Unstressed,
     /// The geostatic (K0) state of an elastic layer under its own weight with
     /// no lateral strain: σ_v = −ρ·g·d at depth d below the column's surface
     /// and σ_h = K0·σ_v, K0 = ν/(1 − ν). Set by the first step after
-    /// activation (it needs gravity).
+    /// activation (it needs gravity). The default.
+    #[default]
     Geostatic,
 }
 
@@ -114,8 +115,8 @@ impl Default for TerrainConfig {
             max_coupled: 256,
             max_field_samples: 1 << 20,
             bake_home_fade: 1.0,
-            boundary: RegionBoundary::Rigid,
-            initial_stress: InitialStress::Unstressed,
+            boundary: RegionBoundary::Absorbing,
+            initial_stress: InitialStress::Geostatic,
             max_boundary_nodes: 1 << 18,
         }
     }

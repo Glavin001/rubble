@@ -193,7 +193,6 @@ fn a_box_dropped_on_an_open_region_rests_on_the_sand() {
 fn a_dropped_ball_opens_a_region_before_it_lands_and_penetrates_as_uehara_says() {
     let mut w = world();
     let mut def = terrain_def();
-    def.strike.cells_per_body = 6.0;
     def.strike.min_energy = 10.0;
     w.enable_terrain(&def).unwrap();
     let (ground, _) = flat_ground(&mut w, 65, 0.04);

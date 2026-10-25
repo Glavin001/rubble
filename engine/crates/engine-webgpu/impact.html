@@ -64,8 +64,8 @@
       <div class="muted small">π-scaling covers scaled depths of burial 1–2 (depth ÷ the charge's cube-root size); outside that the source is refused.</div>
     </div>
     <label class="ctl"><span>Region margin</span><select id="margin"><option value="1">1.0 R (~0.9 M particles)</option><option value="0.6">0.6 R (faster; the rim forms at the box edge)</option><option value="2">2.0 R (engine default; ~3.5 M particles, too many here)</option></select><span></span></label>
-    <label class="ctl"><span>Bake</span><select id="bakeMode"><option value="time" id="bakeAtOpt">at t = 12 s, nothing in flight</option><option value="settle">when settled (&lt; 5 cm/s for 0.5 s)</option></select><span></span></label>
-    <div class="muted small">The region keeps moving: 20 s after the strike half its particles are still faster than 1 m/s, deep ones too (most likely elastic waves trapped by its walls and bed), so it does not reach the rest tolerance soon. A timed bake is World::terrain_close at that time, once nothing is in flight; it freezes the motion left.</div>
+    <label class="ctl"><span>Bake</span><select id="bakeMode"><option value="settle">when settled (&lt; 5 cm/s for 0.5 s)</option><option value="time" id="bakeAtOpt">at t = 12 s, nothing in flight</option></select><span></span></label>
+    <div class="muted small">The region's bed and walls are absorbing ground (Lysmer–Kuhlemeyer dashpots and springs on the geostatic stress), so the elastic waves of the strike leave the box as they would into the ground beyond, and the sand comes to rest. A timed bake is World::terrain_close at that time, once nothing is in flight; it freezes whatever motion is left.</div>
     <div class="row muted small" id="apply" hidden><button id="applyBtn">Apply (reloads)</button> settings changed</div>
     <div id="pred" class="small" style="margin-top:6px"></div>
     <div id="stats" class="small" style="margin-top:6px"></div>
@@ -111,7 +111,7 @@
       mode: qs.get('mode') === 'explosion' ? 'explosion' : 'impact',
       radius: num('radius', 8), speed: num('speed', 20), density: num('density', 3000),
       charge: num('charge', 6), depth: num('depth', 8), margin: num('margin', 1),
-      bake: qs.get('bake') === 'settle' ? 'settle' : 'time', bakeAt: num('bakeAt', 12),
+      bake: qs.get('bake') === 'time' ? 'time' : 'settle', bakeAt: num('bakeAt', 12),
     };
     const $ = (id) => document.getElementById(id);
     const fold = (on) => { $('foldBody').hidden = on; $('fold').textContent = on ? '▸' : '▾'; };
@@ -176,8 +176,9 @@
       config: { max_particles: 3 << 19, max_blocks: 8192, max_parcels: 1 << 18, max_substeps: 1024,
         max_columns: 1 << 17, max_field_samples: 1 << 19, max_coupled: 64 },
       region_margin: S.margin,
-      // The region's rest tolerance: it bakes once its fastest particle stays
-      // under 5 cm/s for half a second with nothing in flight.
+      // The region's rest tolerance (set from the crater below): it bakes once
+      // its fastest particle stays under it for half a second with nothing in
+      // flight.
       settle_speed: 0.05, settle_frames: 30,
     };
     const probe = new TerrainStep(JSON.stringify(SETTINGS));
@@ -189,6 +190,11 @@
         : JSON.parse(probe.predict_explosion(10 ** S.charge, S.depth, G));
     } finally { probe.free(); }
     const R = pred.crater.radius;
+    // Rest, at the crater's scale: 1% of its gravity speed √(gR) (38 m/s for the
+    // default 151 m crater, so 0.38 m/s). A crater's walls keep creeping for
+    // minutes at a few tenths of a m/s; the bake freezes motion below that.
+    SETTINGS.settle_speed = num('settle', 0.01 * Math.sqrt(G * R));
+    $('bakeMode').options[0].textContent = `when settled (< ${SETTINGS.settle_speed.toFixed(2)} m/s for 0.5 s)`;
     const DXR = pred.dx; // region cell (m)
     const PPC = settingsInfo.config.particles_per_cell_axis;
     // The heightfield's samples are the region's cells (the native crater tests'
