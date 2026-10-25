@@ -147,9 +147,8 @@ fn blast_crush(
 ) -> Option<Vec<[f32; 4]>> {
     let ct = t.tables.crush.as_ref()?;
     let n = faces.len();
-    let can = |c: usize| {
-        !faces[c].is_empty() && !crushed[c] && ct.chunks[c][1][2].to_bits() & 1 != 0
-    };
+    let can =
+        |c: usize| !faces[c].is_empty() && !crushed[c] && ct.chunks[c][1][2].to_bits() & 1 != 0;
     if !(0..n).any(can) {
         return None;
     }

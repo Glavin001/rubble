@@ -294,7 +294,9 @@ fn chunk_centres(
             out.push(Some((sum / frs.len() as f32).to_array()));
             continue;
         }
-        let t = w.read_body_state(w.destructible_chunk_body(id, c as u32)?)?.transform;
+        let t = w
+            .read_body_state(w.destructible_chunk_body(id, c as u32)?)?
+            .transform;
         let q = glam::Quat::from_array(t.rotation);
         let p = glam::Vec3::from(t.position) + q * glam::Vec3::from(ch.pose.position);
         out.push(Some(p.to_array()));
@@ -532,7 +534,11 @@ pub fn run(spec: &RunSpec) -> anyhow::Result<Report> {
             .iter()
             .map(|c| {
                 let p = c.pose.position;
-                [p[0] - placement[0] as f32, p[1] - placement[1] as f32, p[2] - placement[2] as f32]
+                [
+                    p[0] - placement[0] as f32,
+                    p[1] - placement[1] as f32,
+                    p[2] - placement[2] as f32,
+                ]
             })
             .collect(),
         chunk_centres_end,

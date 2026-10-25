@@ -439,13 +439,18 @@ pub(crate) mod model {
     /// its clearing, the end of its positive phase), each piece graded geometrically from
     /// its start (the first sub-piece `grade` times the fastest decay time `duration / b`
     /// of the faces acting, each next twice the last), 8-point Gauss-Legendre on each
-    /// sub-piece. Open nodes: none sits on a jump.
+    /// sub-piece. Open nodes: none with a weight sits on a jump; each piece's start is a
+    /// node of weight 0, where the peaks are taken.
     pub fn nodes(faces: &[Face], t0: f64, t1: f64, grade: f64) -> Vec<(f64, f64)> {
         let mut cuts = vec![t0, t1];
         let mut tau = f64::INFINITY;
         for f in faces {
             let b = &f.blast;
-            for t in [b.arrival, b.arrival + b.clearing_time, b.arrival + b.duration] {
+            for t in [
+                b.arrival,
+                b.arrival + b.clearing_time,
+                b.arrival + b.duration,
+            ] {
                 if t > t0 && t < t1 {
                     cuts.push(t);
                 }
@@ -462,6 +467,8 @@ pub(crate) mod model {
         }
         for w in cuts.windows(2) {
             let (lo, hi) = (w[0], w[1]);
+            // The piece's start with no weight: the peaks (a pressure jumps there).
+            out.push((lo, 0.0));
             let mut a = lo;
             let mut width = (grade * tau).min(hi - lo);
             while a < hi {
@@ -703,8 +710,21 @@ pub(crate) mod model {
                 blast: fb,
             };
             let m = drywall();
-            let (d, p, q) = crush_damage(&[f], DVec3::ZERO, Some(DVec3::ZERO), volume, &m, 0.0, 1.0 / 60.0, GRADE);
-            assert!((p - fb.peak / 6.0).abs() < 1e-3 * fb.peak, "{p} vs {}", fb.peak / 6.0);
+            let (d, p, q) = crush_damage(
+                &[f],
+                DVec3::ZERO,
+                Some(DVec3::ZERO),
+                volume,
+                &m,
+                0.0,
+                1.0 / 60.0,
+                GRADE,
+            );
+            assert!(
+                (p - fb.peak / 6.0).abs() < 1e-3 * fb.peak,
+                "{p} vs {}",
+                fb.peak / 6.0
+            );
             assert!((q - fb.peak / 2.0).abs() < 1e-3 * fb.peak, "{q}");
             let n = 1_000_000;
             let (a, end) = (fb.arrival, (fb.arrival + fb.duration).min(1.0 / 60.0));
@@ -720,13 +740,37 @@ pub(crate) mod model {
             assert!(want > 0.5, "the charge crushes: {want}");
             assert!((d - want).abs() < 2e-3 * want, "{d} vs {want}");
             // Finer grading changes nothing that matters.
-            let (fine, ..) = crush_damage(&[f], DVec3::ZERO, Some(DVec3::ZERO), volume, &m, 0.0, 1.0 / 60.0, GRADE / 16.0);
+            let (fine, ..) = crush_damage(
+                &[f],
+                DVec3::ZERO,
+                Some(DVec3::ZERO),
+                volume,
+                &m,
+                0.0,
+                1.0 / 60.0,
+                GRADE / 16.0,
+            );
             assert!((d - fine).abs() < 1e-3 * fine, "{d} vs {fine}");
             // Windows add up.
-            let split: f64 = [(0.0, 0.3 * fb.duration + a), (0.3 * fb.duration + a, 1.0 / 60.0)]
-                .iter()
-                .map(|&(t0, t1)| crush_damage(&[f], DVec3::ZERO, Some(DVec3::ZERO), volume, &m, t0, t1, GRADE).0)
-                .sum();
+            let split: f64 = [
+                (0.0, 0.3 * fb.duration + a),
+                (0.3 * fb.duration + a, 1.0 / 60.0),
+            ]
+            .iter()
+            .map(|&(t0, t1)| {
+                crush_damage(
+                    &[f],
+                    DVec3::ZERO,
+                    Some(DVec3::ZERO),
+                    volume,
+                    &m,
+                    t0,
+                    t1,
+                    GRADE,
+                )
+                .0
+            })
+            .sum();
             assert!((split - d).abs() < 2e-3 * d, "{split} vs {d}");
         }
 
@@ -741,10 +785,28 @@ pub(crate) mod model {
                 area: 5.0,
                 blast: fb,
             };
-            let (d, p, _) = crush_damage(&[f], DVec3::ZERO, None, 0.6, &drywall(), 0.0, 1.0 / 60.0, GRADE);
+            let (d, p, _) = crush_damage(
+                &[f],
+                DVec3::ZERO,
+                None,
+                0.6,
+                &drywall(),
+                0.0,
+                1.0 / 60.0,
+                GRADE,
+            );
             assert_eq!(d, 0.0);
             assert!(p.abs() < 1.0, "{p}");
-            let (d, ..) = crush_damage(&[f], DVec3::ZERO, Some(DVec3::ZERO), 0.6, &drywall(), 0.0, 0.5 * fb.arrival, GRADE);
+            let (d, ..) = crush_damage(
+                &[f],
+                DVec3::ZERO,
+                Some(DVec3::ZERO),
+                0.6,
+                &drywall(),
+                0.0,
+                0.5 * fb.arrival,
+                GRADE,
+            );
             assert_eq!(d, 0.0);
         }
     }

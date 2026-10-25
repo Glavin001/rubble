@@ -165,7 +165,11 @@ fn reference_building_with_every_reaction_on_stands_under_gravity() {
     .unwrap();
     assert_eq!(r.total_broken(), 0, "gravity alone breaks no bond");
     assert_eq!(r.total_splits(), 0);
-    assert_eq!(r.total_crushed(), 0, "a structure under its own weight never crushes");
+    assert_eq!(
+        r.total_crushed(),
+        0,
+        "a structure under its own weight never crushes"
+    );
     assert_eq!(r.bonds_intact_end, r.bonds);
     assert_mass_conserved(&r);
 }
@@ -226,18 +230,27 @@ fn tall_building_partially_destroyed_by_a_ground_floor_charge() {
     assert!(!near.is_empty(), "the charge crushes a chunk");
     for &c in &near {
         let d = (glam::Vec3::from(r.chunk_centres_start[c as usize]) - charge).length();
-        assert!(d < 1.0, "chunk {c} crushed by the blast {d} m from the charge");
+        assert!(
+            d < 1.0,
+            "chunk {c} crushed by the blast {d} m from the charge"
+        );
     }
     // Knocked off: the blast breaks bonds and pieces come off.
     assert!(r.total_blast_breaks() > 0, "the blast breaks bonds");
-    assert!(r.total_splits() > 0 && r.actors_end() > 1, "pieces come off");
+    assert!(
+        r.total_splits() > 0 && r.actors_end() > 1,
+        "pieces come off"
+    );
     // A crushed chunk's bonds are reported as the crush's.
     let crush_bonds = r
         .broken_by_cause
         .iter()
         .find(|c| c.0 == BreakCause::Crush)
         .map_or(0, |c| c.1.len());
-    assert!(crush_bonds > 0, "the crushed chunk's bonds break with cause Crush");
+    assert!(
+        crush_bonds > 0,
+        "the crushed chunk's bonds break with cause Crush"
+    );
     // Support loss: the bonds that carried the floors above to the footings break once
     // the blast has cut their load path, above the charge's level, never in a footing.
     let support = &r
@@ -247,26 +260,43 @@ fn tall_building_partially_destroyed_by_a_ground_floor_charge() {
         .expect("support-loss breaks")
         .1;
     assert!(!support.is_empty());
-    let pack: serde_json::Value = serde_json::from_slice(pack_bytes("reference-building-crush").unwrap()).unwrap();
+    let pack: serde_json::Value =
+        serde_json::from_slice(pack_bytes("reference-building-crush").unwrap()).unwrap();
     let bonds = pack["scenario"]["bonds"].as_array().unwrap();
     for &b in support {
         let bond = &bonds[b as usize];
-        let (a, o) = (bond["node0"].as_u64().unwrap() as usize, bond["node1"].as_u64().unwrap() as usize);
+        let (a, o) = (
+            bond["node0"].as_u64().unwrap() as usize,
+            bond["node1"].as_u64().unwrap() as usize,
+        );
         let top = r.chunk_centres_start[a][1].max(r.chunk_centres_start[o][1]);
-        assert!(top > CHARGE.position[1], "support-loss bond {b} ({a}-{o}) below the charge");
+        assert!(
+            top > CHARGE.position[1],
+            "support-loss bond {b} ({a}-{o}) below the charge"
+        );
         for c in [a, o] {
-            assert!(pack["scenario"]["nodes"][c]["mass"].as_f64().unwrap() > 0.0, "bond {b} on a footing");
+            assert!(
+                pack["scenario"]["nodes"][c]["mass"].as_f64().unwrap() > 0.0,
+                "bond {b} on a footing"
+            );
         }
     }
     // The support-loss breaks come after the blast's (forward: the flow runs on the
     // pieces the blast's breaks left).
-    let first_support = r.frames.iter().position(|f| f.support_loss_breaks > 0).unwrap();
+    let first_support = r
+        .frames
+        .iter()
+        .position(|f| f.support_loss_breaks > 0)
+        .unwrap();
     let first_blast = r.frames.iter().position(|f| f.blast_breaks > 0).unwrap();
     assert!(first_support >= first_blast);
     // Debris lands: no chunk centre (or crush fragment) ever below the ground, and the
     // crushed chunks' fragments end on it.
     let lowest = r.lowest_above_ground().unwrap();
-    assert!(lowest > 0.0, "a chunk centre went {lowest} m below the ground");
+    assert!(
+        lowest > 0.0,
+        "a chunk centre went {lowest} m below the ground"
+    );
     let ground = r.ground.unwrap();
     for &c in &near {
         let y = r.chunk_centres_end[c as usize][1] - ground;

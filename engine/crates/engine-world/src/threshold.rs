@@ -1480,8 +1480,11 @@ mod imp {
                     BreakCause::SupportLoss,
                     BreakCause::Crush,
                 ] {
-                    let these: Vec<u32> =
-                        broken.iter().copied().filter(|&b| cause_of(b) == c).collect();
+                    let these: Vec<u32> = broken
+                        .iter()
+                        .copied()
+                        .filter(|&b| cause_of(b) == c)
+                        .collect();
                     if !these.is_empty() {
                         out.push(DestructionEvent::BondsBroken {
                             destructible: id,

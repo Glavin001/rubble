@@ -540,8 +540,15 @@ fn support_loss_flow_loads_a_column_with_the_weight_above_it() {
     let (damage, p, q, crushed) = state[f.columns[0] as usize];
     let sigma = ((top * G) + (top + 400.0) * G) / (2.0 * AREA);
     assert!(damage == 0.0 && !crushed);
-    assert!(((q as f64) - sigma).abs() < 1e-4 * sigma, "q {q} vs {sigma}");
-    assert!(((p as f64) - sigma / 3.0).abs() < 1e-4 * sigma, "p {p} vs {}", sigma / 3.0);
+    assert!(
+        ((q as f64) - sigma).abs() < 1e-4 * sigma,
+        "q {q} vs {sigma}"
+    );
+    assert!(
+        ((p as f64) - sigma / 3.0).abs() < 1e-4 * sigma,
+        "p {p} vs {}",
+        sigma / 3.0
+    );
     // The block on it: its one bond pushes it up at its bottom face.
     let (_, pt, qt, _) = state[f.top as usize];
     let st = top * G * f.top_half[1] / (8.0 * f.top_half[0] * f.top_half[1] * f.top_half[2]);
@@ -606,8 +613,13 @@ fn a_column_crushes_under_the_weight_above_it_with_cause_load() {
     // The block came down.
     let body = w.destructible_chunk_body(id, f.top).unwrap();
     let v = w.read_body_state(body).unwrap().linear_velocity;
-    let y0 = DestructibleAssetDesc::from_pack(&f.pack).unwrap().chunks[f.top as usize].pose.position[1];
+    let y0 = DestructibleAssetDesc::from_pack(&f.pack).unwrap().chunks[f.top as usize]
+        .pose
+        .position[1];
     let y = w.read_body_state(body).unwrap().transform.position[1];
     eprintln!("top block: origin y {y} (chunk at {y0}), v {v:?}");
-    assert!(y < -0.5 || v[1] < -1.0, "the block falls once its column is crushed");
+    assert!(
+        y < -0.5 || v[1] < -1.0,
+        "the block falls once its column is crushed"
+    );
 }
