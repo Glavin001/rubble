@@ -19,6 +19,7 @@
 //! See `engine/docs/public-api.md` and `engine/docs/api-review.md`.
 
 mod assembly;
+mod blast;
 mod contacts;
 mod debug_draw;
 mod defs;
@@ -37,6 +38,9 @@ mod threshold;
 pub use assembly::{
     AssemblyDef, AssemblyId, ConnectionDef, ConnectionKind, PartDef, PartHandle, PartModel,
     PartRef, VehicleBuild, VehicleDef, VehicleModel,
+};
+pub use blast::{
+    BlastDef, ChunkBlastLoad, LoadCause, RadialImpulse, BLAST_CAP, MIN_SCALED_DISTANCE,
 };
 pub use debug_draw::{
     DebugColor, DebugDraw, DebugDrawOptions, COLOR_ASLEEP, COLOR_AWAKE, COLOR_STATIC,
@@ -389,6 +393,7 @@ pub struct World {
     contact_storage: ContactStorage,
     /// Threshold destructibles (`StrengthModel::Threshold`).
     fracture: threshold::Fracture,
+    blasts: blast::Blasts,
     motion: motion::MotionState,
 }
 
@@ -468,6 +473,7 @@ impl World {
             pending_batches: Vec::new(),
             next_ray_batch: 0,
             fracture: Default::default(),
+            blasts: Default::default(),
         })
     }
 
@@ -1493,6 +1499,9 @@ impl World {
     /// `Backpressure::Block`; collect results with [`World::poll`].
     pub fn step(&mut self) -> anyhow::Result<()> {
         let step = self.step;
+        // Blasts' loads, breaks and splits before the engine steps (forward-only).
+        #[cfg(feature = "stress")]
+        self.blast_before_step()?;
         if std::mem::take(&mut self.dirty) {
             self.last_input_step = Some(step);
         }
@@ -1799,6 +1808,8 @@ impl World {
                     _ => None,
                 })
                 .collect();
+            // The splits blasts made before this step, then the step's own.
+            destruction.extend(self.take_blast_events(step));
             if !reads.is_empty() {
                 destruction.extend(self.fracture_frame(step, &reads)?);
             }
