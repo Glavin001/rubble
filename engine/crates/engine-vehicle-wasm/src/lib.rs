@@ -168,6 +168,8 @@ impl engine_softbody::SoftBackend for Recorder<'_> {
 
 mod soft;
 pub use soft::*;
+mod terrain;
+pub use terrain::*;
 
 fn err(e: impl std::fmt::Display) -> JsError {
     JsError::new(&e.to_string())

@@ -1,0 +1,562 @@
+//! Deformable terrain for a browser host (`engine-webgpu/terrain-host.mjs`): the
+//! shared command plan (`engine_terrain::plan`) the native `WgpuSim` replays,
+//! plus the open region's lifecycle: π-scaled impact and explosion regions with
+//! their Z-model source, each frame's coupled substeps from a speed bound the
+//! GPU checks, the counters' check, and the bake once the region settles. The
+//! JS host only executes the commands and copies the counters back.
+//!
+//! Commands come back as words: `[blocks, block…]`, each block
+//! `[writes, cmds, write…, cmd…]` with a write `[binding, byte offset, n,
+//! words × n]` and a command `[op, kernel, value]` (op 1: dispatch of `value`
+//! threads, 64 per workgroup; op 2: indirect, workgroup counts at byte `value`
+//! of the args binding). A block's writes go ahead of its commands' submission;
+//! its commands are one compute pass. Kernel indices are into [`TerrainStep::kernels`].
+
+use super::err;
+use engine_terrain::layout::*;
+use engine_terrain::plan::{
+    alloc_bytes, source_peak_speed, FieldGrid, RegionClock, TerrainCmd, TerrainOps, TerrainPlan,
+    TerrainStepReport, KERNELS,
+};
+use engine_terrain::zmodel::point_source_z;
+use engine_terrain::{
+    CraterPrediction, CraterTarget, ExplosionSource, ImpactSource, RegionPlan, SandMaterial,
+    TerrainConfig, TerrainError, ZModel,
+};
+use glam::{DVec3, Vec3};
+use serde::Deserialize;
+use serde_json::json;
+use wasm_bindgen::prelude::*;
+
+/// `TerrainConfig` fields a page may set (the rest keep their defaults).
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct ConfigJson {
+    max_particles: Option<u32>,
+    max_blocks: Option<u32>,
+    max_parcels: Option<u32>,
+    particles_per_cell_axis: Option<u32>,
+    cells_per_radius: Option<f32>,
+    min_cell_size: Option<f32>,
+    courant: Option<f32>,
+    max_substeps: Option<u32>,
+    max_columns: Option<u32>,
+    max_coupled: Option<u32>,
+    max_field_samples: Option<u32>,
+}
+
+/// Dry sand's parameters (the default sand when absent).
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct SandJson {
+    density: Option<f32>,
+    youngs_modulus: Option<f32>,
+    poisson_ratio: Option<f32>,
+    friction_angle_deg: Option<f32>,
+}
+
+/// The settings of `engine-world`'s `TerrainDef`, as JSON.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct SettingsJson {
+    #[serde(default)]
+    config: ConfigJson,
+    #[serde(default)]
+    sand: SandJson,
+    region_margin: Option<f64>,
+    z: Option<f64>,
+    speed_headroom: Option<f32>,
+    settle_speed: Option<f32>,
+    settle_frames: Option<u32>,
+}
+
+/// The open region.
+struct Open {
+    plan: RegionPlan,
+    clock: RegionClock,
+    prediction: Option<CraterPrediction>,
+    source_speed: f32,
+}
+
+/// The terrain pool of a browser world: its plan, material and open region.
+#[wasm_bindgen]
+pub struct TerrainStep {
+    plan: TerrainPlan,
+    sand: SandMaterial,
+    margin: f64,
+    z: Option<f64>,
+    headroom: f32,
+    settle_speed: f32,
+    settle_frames: u32,
+    region: Option<Open>,
+    /// Frames encoded (the step ids reports come back with).
+    frame: u64,
+    last: Option<TerrainStepReport>,
+}
+
+/// Op words of a block's command.
+const OP_DISPATCH: u32 = 1;
+const OP_INDIRECT: u32 = 2;
+
+fn kernel_index(name: &str) -> u32 {
+    KERNELS
+        .iter()
+        .position(|k| *k == name)
+        .expect("plan kernels are in KERNELS") as u32
+}
+
+/// `[blocks, block…]` for a sequence of the plan's ops.
+fn encode(blocks: &[TerrainOps]) -> Vec<u32> {
+    let mut out = vec![blocks.len() as u32];
+    for ops in blocks {
+        out.push(ops.writes.len() as u32);
+        out.push(ops.cmds.len() as u32);
+        for w in &ops.writes {
+            out.extend([w.binding as u32, w.offset as u32, w.words.len() as u32]);
+            out.extend_from_slice(&w.words);
+        }
+        for c in &ops.cmds {
+            match *c {
+                TerrainCmd::Dispatch { kernel, threads } => out.extend([
+                    OP_DISPATCH,
+                    kernel_index(kernel),
+                    u32::try_from(threads).expect("a dispatch's threads fit u32"),
+                ]),
+                TerrainCmd::Indirect { kernel, offset } => {
+                    out.extend([OP_INDIRECT, kernel_index(kernel), offset as u32])
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A heightfield `[nx, nz, dx, dz]` (samples as f32) and its frame's origin.
+fn grid(field: &[f32]) -> Result<(FieldGrid, Vec3), JsError> {
+    if field.len() != 7 {
+        return Err(JsError::new(
+            "field is [nx, nz, dx, dz, origin x, origin y, origin z]",
+        ));
+    }
+    Ok((
+        FieldGrid {
+            nx: field[0] as u32,
+            nz: field[1] as u32,
+            dx: field[2],
+            dz: field[3],
+        },
+        Vec3::new(field[4], field[5], field[6]),
+    ))
+}
+
+fn point(p: &[f32]) -> Result<Vec3, JsError> {
+    if p.len() != 3 {
+        return Err(JsError::new("point is [x, y, z]"));
+    }
+    Ok(Vec3::from_slice(p))
+}
+
+fn prediction_json(c: &CraterPrediction) -> serde_json::Value {
+    json!({
+        "radius": c.radius, "depth": c.depth, "rim_radius": c.rim_radius,
+        "final_rim_radius": c.final_rim_radius, "volume": c.volume,
+        "formation_time": c.formation_time, "complex": c.complex, "pi_v": c.pi_v,
+        "regime": format!("{:?}", c.regime),
+    })
+}
+
+#[wasm_bindgen]
+impl TerrainStep {
+    /// The pool for `settings` (JSON: `config` with `TerrainConfig` fields,
+    /// `sand` with density, youngs_modulus, poisson_ratio, friction_angle_deg,
+    /// and `region_margin`, `z`, `speed_headroom`, `settle_speed`,
+    /// `settle_frames` as in `engine-world`'s `TerrainDef`; absent fields take
+    /// its defaults).
+    #[wasm_bindgen(constructor)]
+    pub fn new(settings: &str) -> Result<TerrainStep, JsError> {
+        let s: SettingsJson = super::parse(settings)?;
+        let d = TerrainConfig::default();
+        let c = s.config;
+        let config = TerrainConfig {
+            max_particles: c.max_particles.unwrap_or(d.max_particles),
+            max_blocks: c.max_blocks.unwrap_or(d.max_blocks),
+            max_parcels: c.max_parcels.unwrap_or(d.max_parcels),
+            particles_per_cell_axis: c
+                .particles_per_cell_axis
+                .unwrap_or(d.particles_per_cell_axis),
+            cells_per_radius: c.cells_per_radius.unwrap_or(d.cells_per_radius),
+            min_cell_size: c.min_cell_size.unwrap_or(d.min_cell_size),
+            courant: c.courant.unwrap_or(d.courant),
+            max_substeps: c.max_substeps.unwrap_or(d.max_substeps),
+            max_columns: c.max_columns.unwrap_or(d.max_columns),
+            max_coupled: c.max_coupled.unwrap_or(d.max_coupled),
+            max_field_samples: c.max_field_samples.unwrap_or(d.max_field_samples),
+            ..d
+        };
+        let ds = SandMaterial::default();
+        let sand = SandMaterial {
+            density: s.sand.density.unwrap_or(ds.density),
+            youngs_modulus: s.sand.youngs_modulus.unwrap_or(ds.youngs_modulus),
+            poisson_ratio: s.sand.poisson_ratio.unwrap_or(ds.poisson_ratio),
+            friction_angle: s
+                .sand
+                .friction_angle_deg
+                .map_or(ds.friction_angle, f32::to_radians),
+            ..ds
+        };
+        let mut plan = TerrainPlan::new(&config).map_err(err)?;
+        plan.set_material(Some(&sand)).map_err(err)?;
+        // engine-world's TerrainDef defaults and checks.
+        let margin = s.region_margin.unwrap_or(2.0);
+        let headroom = s.speed_headroom.unwrap_or(20.0);
+        let settle_speed = s.settle_speed.unwrap_or(0.01);
+        let settle_frames = s.settle_frames.unwrap_or(30);
+        if !(margin.is_finite() && margin > 0.0) {
+            return Err(JsError::new("region_margin must be positive"));
+        }
+        if !(headroom.is_finite() && headroom >= 0.0) {
+            return Err(JsError::new(
+                "speed_headroom must be finite and non-negative",
+            ));
+        }
+        if !(settle_speed.is_finite() && settle_speed > 0.0 && settle_frames > 0) {
+            return Err(JsError::new(
+                "settle_speed must be positive and settle_frames at least 1",
+            ));
+        }
+        Ok(TerrainStep {
+            plan,
+            sand,
+            margin,
+            z: s.z,
+            headroom,
+            settle_speed,
+            settle_frames,
+            region: None,
+            frame: 0,
+            last: None,
+        })
+    }
+
+    /// Kernel entry names (JSON array); command words index into it.
+    pub fn kernels() -> String {
+        serde_json::to_string(KERNELS).unwrap()
+    }
+
+    /// `[binding, bytes to allocate, bytes needed]` for every terrain binding.
+    pub fn buffer_sizes(&self) -> Vec<f64> {
+        self.plan
+            .buffer_sizes()
+            .iter()
+            .flat_map(|&(b, bytes)| [b as f64, alloc_bytes(bytes) as f64, bytes as f64])
+            .collect()
+    }
+
+    /// Bindings, counter words and record sizes (JSON object).
+    pub fn constants() -> String {
+        json!({
+            "PARAMS": MPM_PARAMS_BINDING, "COUNTERS": MPM_COUNTERS_BINDING,
+            "PARTICLES": MPM_PARTICLES_BINDING, "ARGS": MPM_ARGS_BINDING,
+            "PARCELS": MPM_PARCELS_BINDING, "WATCH": MPM_WATCH_BINDING,
+            "BINDING_END": MPM_BINDING_END,
+            "COUNTER_WORDS": MPM_COUNTER_WORDS, "C_PARTICLES": MPM_C_PARTICLES,
+            "C_PARCELS": MPM_C_PARCELS, "C_FLAGS": MPM_C_FLAGS,
+            "PARTICLE_BYTES": std::mem::size_of::<MpmParticle>(),
+            "PARCEL_BYTES": std::mem::size_of::<MpmParcel>(),
+            "PARTICLE_DEAD": MPM_PARTICLE_DEAD,
+        })
+        .to_string()
+    }
+
+    /// The material and limits in use (JSON).
+    pub fn settings(&self) -> String {
+        let c = self.plan.config();
+        json!({
+            "sand": {"density": self.sand.density, "youngs_modulus": self.sand.youngs_modulus,
+                "poisson_ratio": self.sand.poisson_ratio,
+                "friction_angle_deg": self.sand.friction_angle.to_degrees(),
+                "p_wave_speed": self.sand.p_wave_speed()},
+            "config": {"max_particles": c.max_particles, "max_blocks": c.max_blocks,
+                "max_parcels": c.max_parcels, "particles_per_cell_axis": c.particles_per_cell_axis,
+                "cells_per_radius": c.cells_per_radius, "courant": c.courant,
+                "max_substeps": c.max_substeps, "max_columns": c.max_columns,
+                "max_coupled": c.max_coupled, "max_field_samples": c.max_field_samples},
+            "region_margin": self.margin, "speed_headroom": self.headroom,
+            "settle_speed": self.settle_speed, "settle_frames": self.settle_frames,
+        })
+        .to_string()
+    }
+
+    fn impact_source(
+        &self,
+        radius: f64,
+        density: f64,
+        speed: f64,
+    ) -> Result<ImpactSource, TerrainError> {
+        Ok(ImpactSource {
+            impactor_radius: radius,
+            impactor_density: density,
+            // Vertical: the Z-model source is axisymmetric.
+            velocity: DVec3::new(0.0, -speed, 0.0),
+            target: CraterTarget::sand(&self.sand)?,
+        })
+    }
+
+    /// The π-scaling prediction for a vertical impact (JSON), without opening
+    /// a region: the crater, the impactor's mass and energy, the region's cell.
+    pub fn predict_impact(
+        &self,
+        radius: f64,
+        density: f64,
+        speed: f64,
+        gravity: f64,
+    ) -> Result<String, JsError> {
+        let src = self.impact_source(radius, density, speed).map_err(err)?;
+        let crater = src.crater(gravity).map_err(err)?;
+        let field = src.field(gravity, self.z_for(src.target)).map_err(err)?;
+        let plan = crater
+            .region(self.plan.config(), Vec3::ZERO, self.margin, 0, 0)
+            .map_err(err)?;
+        Ok(json!({
+            "crater": prediction_json(&crater), "mass": src.mass(), "energy": src.kinetic_energy(),
+            "dx": plan.dx, "blocks": plan.blocks.to_array(), "source_speed": source_peak_speed(&field),
+        })
+        .to_string())
+    }
+
+    /// The prediction for a buried charge of `kg` TNT at `depth` m (JSON).
+    pub fn predict_explosion(&self, kg: f64, depth: f64, gravity: f64) -> Result<String, JsError> {
+        let target = CraterTarget::sand(&self.sand).map_err(err)?;
+        let ex = ExplosionSource::tnt(kg, depth, target);
+        let crater = ex.crater(gravity).map_err(err)?;
+        let field = ex.field(gravity, self.z_for(target)).map_err(err)?;
+        let plan = crater
+            .region(self.plan.config(), Vec3::ZERO, self.margin, 0, 0)
+            .map_err(err)?;
+        Ok(json!({
+            "crater": prediction_json(&crater), "energy": ex.energy, "dx": plan.dx,
+            "blocks": plan.blocks.to_array(), "source_speed": source_peak_speed(&field),
+        })
+        .to_string())
+    }
+
+    fn z_for(&self, target: CraterTarget) -> f64 {
+        self.z.unwrap_or_else(|| point_source_z(target.ejecta.mu))
+    }
+
+    /// A vertical km/s impact at `at` (on the surface of heightfield collider
+    /// `collider`, `field` = [nx, nz, dx, dz, origin x, y, z]) of an impactor
+    /// of `radius` m and `density` kg/m³ at `speed` m/s: opens a region sized
+    /// by π-scaling and starts the Z-model excavation flow in it (two blocks:
+    /// activation, then the source). `World::terrain_impact`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn impact(
+        &mut self,
+        collider: u32,
+        field: &[f32],
+        at: &[f32],
+        radius: f64,
+        density: f64,
+        speed: f64,
+        gravity: f64,
+    ) -> Result<Vec<u32>, JsError> {
+        let src = self.impact_source(radius, density, speed).map_err(err)?;
+        let crater = src.crater(gravity).map_err(err)?;
+        let model = src.field(gravity, self.z_for(src.target)).map_err(err)?;
+        self.open_source(collider, field, at, crater, &model)
+    }
+
+    /// A buried charge of `kg` TNT at `depth` m under `at`; see [`Self::impact`].
+    pub fn explode(
+        &mut self,
+        collider: u32,
+        field: &[f32],
+        at: &[f32],
+        kg: f64,
+        depth: f64,
+        gravity: f64,
+    ) -> Result<Vec<u32>, JsError> {
+        let target = CraterTarget::sand(&self.sand).map_err(err)?;
+        let ex = ExplosionSource::tnt(kg, depth, target);
+        let crater = ex.crater(gravity).map_err(err)?;
+        let model = ex.field(gravity, self.z_for(target)).map_err(err)?;
+        self.open_source(collider, field, at, crater, &model)
+    }
+
+    fn open_source(
+        &mut self,
+        collider: u32,
+        field: &[f32],
+        at: &[f32],
+        crater: CraterPrediction,
+        model: &ZModel,
+    ) -> Result<Vec<u32>, JsError> {
+        let at = point(at)?;
+        let plan = crater
+            .region(self.plan.config(), at, self.margin, 0, 0)
+            .map_err(err)?;
+        let activate = self.open(collider, field, plan)?;
+        let source = self.plan.apply_source(model, at).map_err(err)?;
+        let speed = source_peak_speed(model);
+        self.region = Some(Open {
+            plan,
+            clock: RegionClock::new(speed, self.frame),
+            prediction: Some(crater),
+            source_speed: speed,
+        });
+        Ok(encode(&[activate, source]))
+    }
+
+    /// A region over the box `[lo, hi]` with cells of `dx` and no source
+    /// (heavy bodies move the sand). `World::terrain_open`.
+    pub fn open_box(
+        &mut self,
+        collider: u32,
+        field: &[f32],
+        lo: &[f32],
+        hi: &[f32],
+        dx: f32,
+    ) -> Result<Vec<u32>, JsError> {
+        let plan = RegionPlan::spanning(self.plan.config(), point(lo)?, point(hi)?, dx, 0, 0)
+            .map_err(err)?;
+        let activate = self.open(collider, field, plan)?;
+        self.region = Some(Open {
+            plan,
+            clock: RegionClock::new(0.0, self.frame),
+            prediction: None,
+            source_speed: 0.0,
+        });
+        Ok(encode(&[activate]))
+    }
+
+    fn open(
+        &mut self,
+        collider: u32,
+        field: &[f32],
+        plan: RegionPlan,
+    ) -> Result<TerrainOps, JsError> {
+        if self.region.is_some() {
+            // One region at a time on the GPU: a second waits for the bake.
+            return Err(err(TerrainError::LimitExceeded {
+                limit: "open terrain regions",
+                requested: 2,
+                allowed: 1,
+            }));
+        }
+        let (grid, origin) = grid(field)?;
+        self.last = None;
+        self.plan
+            .activate(
+                &plan,
+                collider,
+                grid,
+                origin,
+                self.sand.density,
+                self.sand.friction_angle.tan(),
+            )
+            .map_err(err)
+    }
+
+    /// This frame's terrain work, ahead of the rigid step: `[kind, step,
+    /// blocks…]`. Kind 0: no region (no blocks). Kind 1: the coupled substeps
+    /// (one block, encoded into the frame's submission ahead of the rigid step,
+    /// which must run its impulse pass; copy the counters after the step and
+    /// clear their flags, then hand the copy to [`Self::report`] with `step`).
+    /// Kind 2: the region settled and bakes (one block, its own submission).
+    pub fn frame(
+        &mut self,
+        frame_dt: f32,
+        gravity: f32,
+        colliders: u32,
+    ) -> Result<Vec<u32>, JsError> {
+        let step = self.frame;
+        let Some(region) = self.region.as_ref() else {
+            return Ok(vec![0, step as u32, 0]);
+        };
+        if region.clock.settled(self.settle_frames) {
+            let mut out = vec![2, step as u32];
+            out.extend(encode(&[self.close_ops()?]));
+            return Ok(out);
+        }
+        let (substeps, dt) = region
+            .clock
+            .substeps(
+                self.plan.config(),
+                step,
+                frame_dt,
+                gravity,
+                region.plan.dx,
+                self.sand.p_wave_speed(),
+                self.headroom,
+            )
+            .map_err(err)?;
+        let ops = self
+            .plan
+            .coupled(substeps, dt, gravity, colliders)
+            .map_err(err)?;
+        self.frame += 1;
+        let mut out = vec![1, step as u32];
+        out.extend(encode(&[ops]));
+        Ok(out)
+    }
+
+    fn close_ops(&mut self) -> Result<TerrainOps, JsError> {
+        if self.region.take().is_none() {
+            return Err(JsError::new("no terrain region is open"));
+        }
+        self.plan.bake().map_err(err)
+    }
+
+    /// Bake the open region now (it otherwise bakes once settled): one block,
+    /// its own submission. `World::terrain_close`.
+    pub fn close(&mut self) -> Result<Vec<u32>, JsError> {
+        Ok(encode(&[self.close_ops()?]))
+    }
+
+    /// The counters copied after frame `step` (`COUNTER_WORDS` words): the
+    /// report as JSON, or the error a flag names. Tracks the region's settling.
+    pub fn report(&mut self, step: u32, counters: &[u32]) -> Result<String, JsError> {
+        let r = self
+            .plan
+            .check(counters)
+            .map_err(|e| JsError::new(&format!("step {step}: terrain: {e}")))?;
+        let settle = self.settle_speed;
+        if let Some(open) = self.region.as_mut() {
+            open.clock.report(u64::from(step), &r, settle);
+        }
+        self.last = Some(r);
+        Ok(json!({
+            "blocks": r.blocks, "max_speed": r.max_speed, "particles": r.particles,
+            "parcels": r.parcels, "deposited": r.deposited, "escaped": r.escaped,
+            "airborne": r.airborne, "body_speed": r.body_speed,
+        })
+        .to_string())
+    }
+
+    /// The flags word to clear after copying the counters: `[binding, byte offset, bytes]`.
+    pub fn flags_clear(&self) -> Vec<u32> {
+        let (b, o, n) = self.plan.flags_clear();
+        vec![b as u32, o as u32, n as u32]
+    }
+
+    /// The open region (JSON, or `null`): its box, cell, the activation window
+    /// and bed height, the prediction that sized it and the source's peak speed.
+    pub fn region(&self) -> String {
+        let Some(r) = self.region.as_ref() else {
+            return "null".into();
+        };
+        let p = self.plan.params();
+        json!({
+            "origin": r.plan.origin.to_array(), "end": r.plan.end().to_array(), "dx": r.plan.dx,
+            "blocks": r.plan.blocks.to_array(), "window": p.window, "bed": p.column[0],
+            "spacing": p.column[2], "prediction": r.prediction.as_ref().map(prediction_json),
+            "source_speed": r.source_speed, "speed_bound_basis": r.clock.speed(),
+        })
+        .to_string()
+    }
+
+    /// Frames encoded since the pool was created.
+    pub fn frames(&self) -> u32 {
+        self.frame as u32
+    }
+}
