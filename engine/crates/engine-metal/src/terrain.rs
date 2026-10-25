@@ -31,18 +31,47 @@ mod table {
 }
 pub use table::TERRAIN_KERNELS;
 
-/// Metal-only fast paths for the terrain plan, each behind its own flag.
-/// [`TerrainCaps::default`] is the portable path, bit for bit the plan's.
+/// Native fast paths for the terrain plan (`slang/kernels/terrain_mpm_fast.slang`),
+/// each behind its own flag. [`TerrainCaps::default`] is the portable path:
+/// the plan's own kernels.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct TerrainCaps {}
+pub struct TerrainCaps {
+    /// P2G in two passes (`mpm_p2g_cells`, `mpm_p2g_nodes`): each particle is
+    /// read once, by the SIMD group of its cell, into per-(cell, node)
+    /// partials that each node then sums. Deterministic (fixed orders, no
+    /// atomics); it groups the same terms by cell, so it differs from the
+    /// portable kernel in rounding only. Binding 53 holds the partials
+    /// (`max_blocks` · 64 · 27 · 16 bytes).
+    pub p2g_cells: bool,
+    /// G2P with its top-speed record reduced over the SIMD group before one
+    /// atomic max per group (`mpm_g2p_simd`, the plan's kernel compiled with
+    /// a hook). Max is exact and order-free: bit for bit the portable kernel.
+    pub g2p_simd: bool,
+}
+
+/// Bytes of the partials buffer (binding 53) for `max_blocks`.
+pub fn p2g_partial_bytes(max_blocks: u32) -> u64 {
+    u64::from(max_blocks) * 64 * 27 * 16
+}
 
 impl TerrainCaps {
-    /// From `ENGINE_TERRAIN_CAPS` (comma-separated flag names).
+    /// Every fast path on.
+    pub fn all() -> Self {
+        Self {
+            p2g_cells: true,
+            g2p_simd: true,
+        }
+    }
+
+    /// From `ENGINE_TERRAIN_CAPS` (comma-separated flag names, or `all`).
     pub fn from_env() -> Self {
         let mut caps = Self::default();
         if let Ok(v) = std::env::var("ENGINE_TERRAIN_CAPS") {
             for f in v.split(',').map(str::trim) {
                 match f {
+                    "all" => caps = Self::all(),
+                    "p2g_cells" => caps.p2g_cells = true,
+                    "g2p_simd" => caps.g2p_simd = true,
                     "" => {}
                     other => log::warn!("ENGINE_TERRAIN_CAPS: unknown flag {other}"),
                 }
@@ -70,6 +99,45 @@ pub(crate) struct MetalTerrain {
     /// Writes queued for the next terrain command buffer (flag resets).
     pending: Vec<TerrainWrite>,
     caps: TerrainCaps,
+    /// The last terrain command buffer (its GPU time, for hosts that time calls).
+    last: Option<CommandBuffer>,
+    /// Timestamps of the profiled calls (one encoder per dispatch).
+    samples: Option<CounterSampleBuffer>,
+}
+
+/// Binding of the `p2g_cells` partials (after the look-ahead's 52).
+pub(crate) const P2G_PARTIALS_BINDING: usize = MPM_WATCH_BINDING + 1;
+
+/// The plan's commands as this host runs them: a fast path replaces the
+/// commands of the kernels it stands for.
+fn lower(ops: &TerrainOps, caps: TerrainCaps) -> Vec<TerrainCmd> {
+    let mut out = Vec::with_capacity(ops.cmds.len() + 16);
+    for &c in &ops.cmds {
+        match c {
+            TerrainCmd::Indirect {
+                kernel: "mpm_p2g",
+                offset,
+            } if caps.p2g_cells => {
+                out.push(TerrainCmd::Indirect {
+                    kernel: "mpm_p2g_cells",
+                    offset,
+                });
+                out.push(TerrainCmd::Indirect {
+                    kernel: "mpm_p2g_nodes",
+                    offset,
+                });
+            }
+            TerrainCmd::Indirect {
+                kernel: "mpm_g2p",
+                offset,
+            } if caps.g2p_simd => out.push(TerrainCmd::Indirect {
+                kernel: "mpm_g2p_simd",
+                offset,
+            }),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn kernel_index(name: &str) -> anyhow::Result<usize> {
@@ -91,7 +159,17 @@ impl MetalSim {
     /// Size the terrain buffers for `config` (and drop any particles), and
     /// build the terrain kernels.
     pub fn terrain_enable(&mut self, config: &TerrainConfig) -> anyhow::Result<()> {
-        self.terrain_enable_with(config, TerrainCaps::from_env())
+        self.terrain_enable_with(config, self.terrain_caps)
+    }
+
+    /// The fast paths the next [`Self::terrain_enable`] builds.
+    pub fn set_terrain_caps(&mut self, caps: TerrainCaps) {
+        self.terrain_caps = caps;
+    }
+
+    /// The fast paths of the enabled terrain pool (or the next one's).
+    pub fn terrain_caps(&self) -> TerrainCaps {
+        self.terrain.as_ref().map_or(self.terrain_caps, |t| t.caps)
     }
 
     /// [`Self::terrain_enable`] with explicit fast paths.
@@ -113,6 +191,16 @@ impl MetalSim {
             b.set_label(&format!("b{binding} terrain"));
             self.bufs[binding] = b;
         }
+        if caps.p2g_cells {
+            let bytes = p2g_partial_bytes(config.max_blocks);
+            anyhow::ensure!(
+                bytes <= max,
+                "the p2g_cells partials need {bytes} bytes; the device allows {max}"
+            );
+            let b = shared(&self.device, bytes);
+            b.set_label("b53 terrain partials");
+            self.bufs[P2G_PARTIALS_BINDING] = b;
+        }
         let pipes = match self.terrain.take() {
             Some(t) => t.pipes,
             None => self.terrain_pipelines()?,
@@ -122,6 +210,8 @@ impl MetalSim {
             pipes,
             pending: Vec::new(),
             caps,
+            last: None,
+            samples: None,
         });
         Ok(())
     }
@@ -247,12 +337,14 @@ impl MetalSim {
         desc.set_dispatch_type(MTLDispatchType::Serial);
         let e = cb.compute_command_encoder_with_descriptor(desc);
         let mut st = EncodeState::new();
-        for c in &ops.cmds {
+        let caps = self.terrain.as_ref().expect("terrain").caps;
+        for c in &lower(ops, caps) {
             self.terrain_dispatch(e, &mut st, c)?;
         }
         e.end_encoding();
         cb.commit();
         self.in_flight.push_back(cb.clone());
+        self.terrain.as_mut().expect("terrain").last = Some(cb.clone());
         Ok(cb)
     }
 
@@ -263,30 +355,46 @@ impl MetalSim {
         ops: &TerrainOps,
         label: &str,
     ) -> anyhow::Result<TerrainTiming> {
-        let n = ops.cmds.len() as u64;
-        let set = self
-            .device
-            .counter_sets()
-            .into_iter()
-            .find(|s| s.name() == "timestamp")
-            .ok_or_else(|| anyhow::anyhow!("no timestamp counter set on this device"))?;
-        anyhow::ensure!(
-            self.device
-                .supports_counter_sampling(MTLCounterSamplingPoint::AtStageBoundary),
-            "the device does not sample counters at stage boundaries"
-        );
-        let desc = CounterSampleBufferDescriptor::new();
-        desc.set_counter_set(&set);
-        desc.set_sample_count(2 * n.max(1));
-        desc.set_storage_mode(MTLStorageMode::Shared);
+        let caps = self.terrain.as_ref().expect("terrain").caps;
+        let cmds = lower(ops, caps);
+        let n = cmds.len() as u64;
+        // One sample buffer, kept: the device allows only a few alive.
+        let have = self
+            .terrain
+            .as_ref()
+            .and_then(|t| t.samples.as_ref())
+            .map_or(0, |b| b.sample_count());
+        if have < 2 * n {
+            let set = self
+                .device
+                .counter_sets()
+                .into_iter()
+                .find(|s| s.name() == "timestamp")
+                .ok_or_else(|| anyhow::anyhow!("no timestamp counter set on this device"))?;
+            anyhow::ensure!(
+                self.device
+                    .supports_counter_sampling(MTLCounterSamplingPoint::AtStageBoundary),
+                "the device does not sample counters at stage boundaries"
+            );
+            let desc = CounterSampleBufferDescriptor::new();
+            desc.set_counter_set(&set);
+            desc.set_sample_count((2 * n).next_power_of_two().max(1024));
+            desc.set_storage_mode(MTLStorageMode::Shared);
+            let b = self
+                .device
+                .new_counter_sample_buffer_with_descriptor(&desc)
+                .map_err(|e| anyhow::anyhow!("counter sample buffer: {e}"))?;
+            self.terrain.as_mut().expect("terrain").samples = Some(b);
+        }
         let samples = self
-            .device
-            .new_counter_sample_buffer_with_descriptor(&desc)
-            .map_err(|e| anyhow::anyhow!("counter sample buffer: {e}"))?;
+            .terrain
+            .as_ref()
+            .and_then(|t| t.samples.clone())
+            .expect("sample buffer");
         let cb = self.queue.new_command_buffer().to_owned();
         cb.set_label(label);
         self.terrain_blit_writes(&cb, ops);
-        for (i, c) in ops.cmds.iter().enumerate() {
+        for (i, c) in cmds.iter().enumerate() {
             let pd = ComputePassDescriptor::new();
             pd.set_dispatch_type(MTLDispatchType::Serial);
             let att = pd.sample_buffer_attachments().object_at(0).unwrap();
@@ -304,14 +412,23 @@ impl MetalSim {
         let ts = samples.resolve_counter_range(NSRange::new(0, 2 * n));
         // Timestamps are in GPU ticks: scale the encoders' span to the
         // command buffer's GPU time (the blits before them are tiny).
-        let span = ts.last().copied().unwrap_or(0) as f64 - ts.first().copied().unwrap_or(0) as f64;
+        // A sample the GPU could not take reads 0 or MTLCounterErrorValue (!0).
+        let valid = |t: u64| t != 0 && t != u64::MAX;
+        let lo = ts.iter().copied().filter(|&t| valid(t)).min().unwrap_or(0);
+        let hi = ts.iter().copied().filter(|&t| valid(t)).max().unwrap_or(0);
+        let span = hi.saturating_sub(lo) as f64;
         let scale = if span > 0.0 { total / span } else { 0.0 };
         let mut kernels: Vec<(&'static str, f64, u32)> = Vec::new();
-        for (i, c) in ops.cmds.iter().enumerate() {
+        for (i, c) in cmds.iter().enumerate() {
             let name = match *c {
                 TerrainCmd::Dispatch { kernel, .. } | TerrainCmd::Indirect { kernel, .. } => kernel,
             };
-            let ms = (ts[2 * i + 1] as f64 - ts[2 * i] as f64).max(0.0) * scale;
+            let (t0, t1) = (ts[2 * i], ts[2 * i + 1]);
+            let ms = if valid(t0) && valid(t1) && t1 >= t0 {
+                (t1 - t0) as f64 * scale
+            } else {
+                0.0
+            };
             match kernels.iter_mut().find(|(k, _, _)| *k == name) {
                 Some(slot) => {
                     slot.1 += ms;
@@ -446,6 +563,15 @@ impl MetalSim {
         self.wait_all();
         let timing = self.terrain_submit_profiled(&ops, "terrain profiled")?;
         Ok((self.terrain_report()?, timing))
+    }
+
+    /// GPU time (ms) of the last terrain call's command buffer (waits for it).
+    pub fn terrain_last_gpu_ms(&mut self) -> f64 {
+        let Some(cb) = self.terrain.as_mut().and_then(|t| t.last.take()) else {
+            return 0.0;
+        };
+        cb.wait_until_completed();
+        gpu_ms(&cb)
     }
 
     /// The commands [`Self::terrain_step`] would run for a frame, without

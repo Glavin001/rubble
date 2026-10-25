@@ -183,6 +183,12 @@ BIND(49) RWStructuredBuffer<float4> gMpmCoupled;
 
 groupshared uint gsMpmScan[256];
 
+// G2P's top-speed record; a native fast path (terrain_mpm_fast.slang
+// g2p_simd) reduces it over the SIMD group first.
+#ifndef MPM_RECORD_SPEED
+#define MPM_RECORD_SPEED(s) AMAX2(gMpmCounters[MPM_C_MAX_SPEED], asuint(s))
+#endif
+
 uint mpmIndex(uint3 tid) { return tid.x + tid.y * (32768u * 64u); }
 
 MpmParams mpmParams() { return gMpmParams[0]; }
@@ -1267,7 +1273,7 @@ void mpm_g2p(uint3 tid : SV_DispatchThreadID)
     q.f1.xyz = F[1];
     q.f2.xyz = F[2];
     float speed = length(v);
-    AMAX2(gMpmCounters[MPM_C_MAX_SPEED], asuint(speed));
+    MPM_RECORD_SPEED(speed);
     if (!(speed <= p.limits.x)) AOR2(gMpmCounters[MPM_C_FLAGS], MPM_CFL);
     // Leaving the box: a parcel carries the material on (with ejecta enabled).
     uint maxParcels = asuint(p.couple.z);

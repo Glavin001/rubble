@@ -30,8 +30,8 @@ use table::RIGID_KERNELS;
 
 /// Bindings a terrain-capable host allocates: the rigid plan's
 /// ([`BIND_COUNT`]), the unused pose outputs (34-36), the terrain pool
-/// (37-51) and the look-ahead (52).
-pub(crate) const HOST_BINDINGS: usize = engine_terrain::layout::MPM_WATCH_BINDING + 1;
+/// (37-51), the look-ahead (52) and the native fast paths' scratch (53).
+pub(crate) const HOST_BINDINGS: usize = engine_terrain::layout::MPM_WATCH_BINDING + 2;
 
 /// Host-upload ring slots (steps in flight before the host waits).
 const RING: usize = 4;
@@ -129,6 +129,8 @@ pub struct MetalSim {
     pub(crate) fast_math: (bool, Vec<String>),
     /// The next rigid step applies impulse records the terrain appended.
     pub(crate) terrain_impulses_pending: bool,
+    /// Fast paths the next `terrain_enable` builds (`ENGINE_TERRAIN_CAPS` by default).
+    pub(crate) terrain_caps: crate::terrain::TerrainCaps,
 }
 
 impl MetalSim {
@@ -247,6 +249,7 @@ impl MetalSim {
             terrain: None,
             fast_math: (fast, strict),
             terrain_impulses_pending: false,
+            terrain_caps: crate::terrain::TerrainCaps::from_env(),
         })
     }
 

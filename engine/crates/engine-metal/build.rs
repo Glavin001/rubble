@@ -190,21 +190,39 @@ fn terrain_kernels(root: &std::path::Path, out_dir: &std::path::Path) -> Result<
     let kernels = root.join("kernels");
     let mpm = kernels.join("terrain_mpm.slang");
     let watch = kernels.join("terrain_watch.slang");
+    let fast = kernels.join("terrain_mpm_fast.slang");
     let slots = bind_slots(&[
         kernels.join("world_step.slang"),
         root.join("physics/contact_storage.slang"),
         mpm.clone(),
         watch.clone(),
+        fast.clone(),
     ])?;
-    let entries: Vec<(&str, &std::path::Path)> = engine_terrain::plan::KERNELS
+    // (table name, Slang entry, source): a fast path may be a plan kernel
+    // compiled from terrain_mpm_fast.slang under a name of its own.
+    let entries: Vec<(&str, &str, &std::path::Path)> = engine_terrain::plan::KERNELS
         .iter()
-        .map(|&e| (e, mpm.as_path()))
-        .chain(TERRAIN_WATCH_ENTRIES.iter().map(|&e| (e, watch.as_path())))
+        .map(|&e| (e, e, mpm.as_path()))
+        .chain(
+            TERRAIN_WATCH_ENTRIES
+                .iter()
+                .map(|&e| (e, e, watch.as_path())),
+        )
+        .chain(
+            TERRAIN_FAST_ENTRIES
+                .iter()
+                .map(|&(n, e)| (n, e, fast.as_path())),
+        )
         .collect();
-    let compiled = engine_slang_build::par_map(&entries, |&(entry, source)| {
-        let dest = dir.join(format!("{entry}.metal"));
+    let compiled = engine_slang_build::par_map(&entries, |&(name, entry, source)| {
+        let dest = dir.join(format!("{name}.metal"));
         let r = compile_kernel(&slangc, root, source, entry, &dest).and_then(|(msl, threads)| {
-            let msl = compact_buffers(&msl, entry, "[[kernel]]")?;
+            let mut msl = compact_buffers(&msl, entry, "[[kernel]]")?;
+            if name != entry {
+                let from = format!("[[kernel]] void {entry}(");
+                anyhow::ensure!(msl.contains(&from), "{entry}: no kernel signature");
+                msl = msl.replace(&from, &format!("[[kernel]] void {name}("));
+            }
             std::fs::write(&dest, &msl)?;
             Ok((msl, threads))
         });
@@ -214,7 +232,7 @@ fn terrain_kernels(root: &std::path::Path, out_dir: &std::path::Path) -> Result<
         "/// Terrain kernels: (entry, MSL, threads, [(metal buffer, host slot)])\n\
          pub static TERRAIN_KERNELS: &[RigidKernel] = &[\n",
     );
-    for (&(entry, _), (dest, r)) in entries.iter().zip(compiled) {
+    for (&(entry, _, _), (dest, r)) in entries.iter().zip(compiled) {
         let (msl, threads) = r?;
         let mut binds = String::new();
         for (global, index) in msl_buffers(&msl, entry, "[[kernel]]")? {
@@ -233,6 +251,14 @@ fn terrain_kernels(root: &std::path::Path, out_dir: &std::path::Path) -> Result<
     std::fs::write(out_dir.join("terrain_kernels.rs"), table)?;
     Ok(())
 }
+
+/// `terrain_mpm_fast.slang`'s entries (native fast paths behind `TerrainCaps`).
+/// (table name, Slang entry).
+const TERRAIN_FAST_ENTRIES: &[(&str, &str)] = &[
+    ("mpm_p2g_cells", "mpm_p2g_cells"),
+    ("mpm_p2g_nodes", "mpm_p2g_nodes"),
+    ("mpm_g2p_simd", "mpm_g2p"),
+];
 
 /// `terrain_watch.slang`'s entries (the look-ahead after the rigid step).
 const TERRAIN_WATCH_ENTRIES: &[&str] = &[

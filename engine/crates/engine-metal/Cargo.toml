@@ -32,6 +32,8 @@ anyhow.workspace = true
 
 [dev-dependencies]
 engine-webgpu = { path = "../engine-webgpu" }
+# terrain_bench times wgpu-on-Metal with timestamp queries.
+wgpu.workspace = true
 env_logger.workspace = true
 
 [[bin]]

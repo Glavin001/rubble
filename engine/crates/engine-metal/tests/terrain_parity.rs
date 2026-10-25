@@ -6,7 +6,7 @@
 //!
 //! `cargo test --release -p engine-metal --test terrain_parity -- --test-threads=1 --nocapture`
 
-use engine_metal::MetalSim;
+use engine_metal::{MetalSim, TerrainCaps};
 use engine_schema::convex::HullArena;
 use engine_schema::heightfield::HeightField;
 use engine_schema::{AvbdParams, BodyState, Collider, Material, ShapeType, WorldCapacity};
@@ -52,10 +52,19 @@ const MAT: Material = Material {
     _pad: 0.0,
 };
 
+/// The portable path: the plan's own kernels, whatever ENGINE_TERRAIN_CAPS says.
 fn metal() -> MetalSim {
     let mut s = MetalSim::new(capacity()).expect("metal");
     s.set_params(params());
     s.set_materials(&[MAT; 64]);
+    s.set_terrain_caps(TerrainCaps::default());
+    s
+}
+
+/// Every native fast path on.
+fn metal_fast() -> MetalSim {
+    let mut s = metal();
+    s.set_terrain_caps(TerrainCaps::all());
     s
 }
 
@@ -407,6 +416,25 @@ fn report_line(name: &str, m: &Run, w: &Run) -> Diff {
         }
     }
     d
+}
+
+/// The native fast paths (`TerrainCaps::all`) against the plan's portable
+/// kernels on Metal: deterministic run to run, and within the rounding the
+/// two codegens already differ by.
+#[test]
+fn the_native_fast_paths_match_the_portable_kernels() {
+    let f = impact(&mut metal_fast(), 4, false);
+    let g = impact(&mut metal_fast(), 4, false);
+    assert_eq!(f.reports, g.reports, "two fast-path runs differ");
+    let d = diff(&f.particles, &g.particles);
+    assert_eq!(d.identical, d.count, "two fast-path runs differ: {d:?}");
+    let p = impact(&mut metal(), 4, false);
+    let d = report_line("fast paths vs portable (Metal)", &f, &p);
+    assert!(d.dx < 1e-4 && d.dv < 1e-2, "{d:?}");
+    for (a, b) in f.reports.iter().zip(&p.reports) {
+        assert_eq!(a.particles, b.particles);
+        assert!((a.max_speed - b.max_speed).abs() <= 0.05 * b.max_speed.max(1.0));
+    }
 }
 
 #[test]
