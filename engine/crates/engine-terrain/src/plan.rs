@@ -594,6 +594,7 @@ impl TerrainPlan {
         self.geostatic_pending = false;
         let mut ops = TerrainOps::default();
         ops.counter(MPM_C_PARTICLES, n);
+        ops.counter(MPM_C_AREA_FIRST, 0);
         Self::reset_ejecta(&mut ops);
         Ok(ops)
     }
@@ -1662,5 +1663,243 @@ mod tests {
         // A host-loaded region has no window: its bed is the field's surface.
         p.load(&region(&cfg), 10, Some(0), 0.5).unwrap();
         assert_eq!(p.area_params(0).unwrap().boundary, [0; 4]);
+    }
+
+    /// A wide field: 401 samples a side, 0.1 m apart.
+    fn wide() -> FieldGrid {
+        FieldGrid {
+            nx: 401,
+            nz: 401,
+            dx: 0.1,
+            dz: 0.1,
+        }
+    }
+
+    fn sand_plan(cfg: &TerrainConfig) -> TerrainPlan {
+        let mut p = TerrainPlan::new(cfg).unwrap();
+        p.set_material(Some(&crate::SandMaterial::default()))
+            .unwrap();
+        p
+    }
+
+    fn open_at(p: &mut TerrainPlan, cfg: &TerrainConfig, at: glam::Vec3, r: f32) -> Opened {
+        let req = RegionPlan::around_with_cell(cfg, at, r, 0.6, 0.1, 0, 0).unwrap();
+        p.open(&req, 0, wide(), glam::Vec3::ZERO, 1600.0, 0.6)
+            .unwrap()
+    }
+
+    #[test]
+    fn far_requests_open_areas_and_near_ones_grow_them() {
+        let cfg = TerrainConfig::default();
+        let mut p = sand_plan(&cfg);
+        let a = open_at(&mut p, &cfg, glam::Vec3::new(-6.0, 0.0, 0.0), 1.0);
+        let b = open_at(&mut p, &cfg, glam::Vec3::new(6.0, 0.0, 0.0), 1.0);
+        assert!(a.activated && b.activated && a.area != b.area);
+        assert!(b.absorbed.is_empty());
+        // Each area's records: its own columns, faces and block cells, and an
+        // integer node offset from the domain's origin (the first area's).
+        let (ra, rb) = (
+            *p.area_params(a.area).unwrap(),
+            *p.area_params(b.area).unwrap(),
+        );
+        assert_eq!(ra.area[..3], [0, 0, 0]);
+        let off = rb.area[0] as i32;
+        assert_eq!(off % 4, 0);
+        assert!(((rb.origin[0] - ra.origin[0]) / 0.1 - off as f32).abs() < 1e-3);
+        assert!(
+            rb.boundary[3] >= ra.window[2] * ra.window[3],
+            "columns apart"
+        );
+        assert!(
+            rb.boundary[1] >= ra.boundary[1] + ra.boundary[2],
+            "faces apart"
+        );
+        assert!(rb.area[3] >= ra.dims[0] / 4 * (ra.dims[1] / 4) * (ra.dims[2] / 4));
+        // Inside one: covered, nothing activated.
+        let c = open_at(&mut p, &cfg, glam::Vec3::new(-6.0, 0.0, 0.0), 0.5);
+        assert!(!c.activated && c.area == a.area && c.ops.cmds.is_empty());
+        // On its rim: the two grow into one box covering both requests.
+        let d = open_at(&mut p, &cfg, glam::Vec3::new(-4.5, 0.0, 0.0), 1.0);
+        assert!(d.activated && d.absorbed == vec![a.area]);
+        let grown = *p.area_params(d.area).unwrap();
+        assert!(grown.origin[0] <= ra.origin[0] + 1e-4);
+        assert!(grown.origin[0] + grown.dims[0] as f32 * 0.1 >= -4.5 + 1.6 - 1e-3);
+        assert_eq!(p.areas().len(), 2);
+        // The grown area's activation names the area it takes over.
+        let words: Vec<u32> = d.ops.writes[0].words.clone();
+        let rec: MpmParams = *bytemuck::from_bytes(bytemuck::cast_slice(&words));
+        assert_eq!(rec.area[1], d.area);
+        assert_eq!(rec.area[2], 1 << a.area);
+        // A request bridging both grows them all into one.
+        let bridge = RegionPlan::spanning(
+            &cfg,
+            glam::Vec3::new(-3.0, -0.5, -0.5),
+            glam::Vec3::new(5.0, 0.5, 0.5),
+            0.1,
+            0,
+            0,
+        )
+        .unwrap();
+        let e = p
+            .open(&bridge, 0, wide(), glam::Vec3::ZERO, 1600.0, 0.6)
+            .unwrap();
+        assert_eq!(p.areas().len(), 1);
+        assert_eq!(e.absorbed.len(), 2);
+    }
+
+    #[test]
+    fn areas_bake_one_at_a_time_and_the_last_empties_the_pool() {
+        let cfg = TerrainConfig::default();
+        let mut p = sand_plan(&cfg);
+        let a = open_at(&mut p, &cfg, glam::Vec3::new(-10.0, 0.0, 0.0), 2.0);
+        let b = open_at(&mut p, &cfg, glam::Vec3::new(10.0, 0.0, 0.0), 2.0);
+        let flags = |ops: &TerrainOps| {
+            let rec: MpmParams = *bytemuck::from_bytes(bytemuck::cast_slice(
+                &ops.writes[0].words[..std::mem::size_of::<MpmParams>() / 4],
+            ));
+            (rec.area[1], rec.area[3])
+        };
+        let first = p.bake_area(a.area).unwrap();
+        assert_eq!(flags(&first), (a.area, 0), "others open: the pool stays");
+        assert!(kernels(&first).contains(&"mpm_bake_edge_sort"));
+        assert_eq!(p.areas().len(), 1);
+        assert!(p.domain_dx().is_some());
+        let last = p.bake_area(b.area).unwrap();
+        assert_eq!(flags(&last), (b.area, MPM_DOMAIN_CLOSE));
+        assert!(p.domain_dx().is_none() && p.areas().is_empty());
+        assert!(p.bake_area(b.area).is_err());
+    }
+
+    #[test]
+    fn multi_area_limits_fail_by_name() {
+        // More open areas than max_regions.
+        let cfg = TerrainConfig {
+            max_regions: 2,
+            ..TerrainConfig::default()
+        };
+        let mut p = sand_plan(&cfg);
+        open_at(&mut p, &cfg, glam::Vec3::new(-15.0, 0.0, 0.0), 1.0);
+        open_at(&mut p, &cfg, glam::Vec3::new(0.0, 0.0, 0.0), 1.0);
+        let req = RegionPlan::around_with_cell(
+            &cfg,
+            glam::Vec3::new(15.0, 0.0, 0.0),
+            1.0,
+            0.6,
+            0.1,
+            0,
+            0,
+        )
+        .unwrap();
+        let err = p
+            .open(&req, 0, wide(), glam::Vec3::ZERO, 1600.0, 0.6)
+            .unwrap_err();
+        assert!(err.to_string().contains("max_regions"), "{err}");
+        // Columns over all areas.
+        let cfg = TerrainConfig {
+            max_columns: 3000,
+            ..TerrainConfig::default()
+        };
+        let mut p = sand_plan(&cfg);
+        open_at(&mut p, &cfg, glam::Vec3::new(-10.0, 0.0, 0.0), 1.5);
+        let req = RegionPlan::around_with_cell(
+            &cfg,
+            glam::Vec3::new(10.0, 0.0, 0.0),
+            1.5,
+            0.6,
+            0.1,
+            0,
+            0,
+        )
+        .unwrap();
+        let err = p
+            .open(&req, 0, wide(), glam::Vec3::ZERO, 1600.0, 0.6)
+            .unwrap_err();
+        assert!(err.to_string().contains("max_columns"), "{err}");
+        // Another cell size, another heightfield.
+        let cfg = TerrainConfig::default();
+        let mut p = sand_plan(&cfg);
+        open_at(&mut p, &cfg, glam::Vec3::ZERO, 1.0);
+        let other = RegionPlan::around_with_cell(
+            &cfg,
+            glam::Vec3::new(10.0, 0.0, 0.0),
+            1.0,
+            0.6,
+            0.2,
+            0,
+            0,
+        )
+        .unwrap();
+        let err = p
+            .open(&other, 0, wide(), glam::Vec3::ZERO, 1600.0, 0.6)
+            .unwrap_err();
+        assert!(err.to_string().contains("one grid"), "{err}");
+        let same = RegionPlan::around_with_cell(
+            &cfg,
+            glam::Vec3::new(10.0, 0.0, 0.0),
+            1.0,
+            0.6,
+            0.1,
+            0,
+            0,
+        )
+        .unwrap();
+        let err = p
+            .open(&same, 1, wide(), glam::Vec3::ZERO, 1600.0, 0.6)
+            .unwrap_err();
+        assert!(err.to_string().contains("another heightfield"), "{err}");
+        // Past the block keys' reach from the grid's origin (±1024 blocks).
+        let mut far = same;
+        far.origin.x += 1100.0 * 0.4;
+        let err = p
+            .open(&far, 0, wide(), glam::Vec3::ZERO, 1600.0, 0.6)
+            .unwrap_err();
+        assert!(err.to_string().contains("block keys"), "{err}");
+    }
+
+    #[test]
+    fn later_events_take_the_open_grid_if_it_resolves_them() {
+        let cfg = TerrainConfig::default();
+        let mut p = sand_plan(&cfg);
+        assert_eq!(p.event_cell(0.1).unwrap(), 0.1, "no grid open: its own");
+        open_at(&mut p, &cfg, glam::Vec3::ZERO, 1.0);
+        assert_eq!(p.event_cell(0.2).unwrap(), 0.1, "finer is always fine");
+        assert_eq!(
+            p.event_cell(0.05).unwrap(),
+            0.1,
+            "half the cells it asks for"
+        );
+        let err = p.event_cell(0.04).unwrap_err();
+        assert!(matches!(err, TerrainError::CellTooCoarse { .. }), "{err}");
+        // A fixed cell size.
+        let fixed = TerrainConfig {
+            cell_size: 0.5,
+            ..TerrainConfig::default()
+        };
+        let p = sand_plan(&fixed);
+        assert_eq!(p.event_cell(1.0).unwrap(), 0.5);
+        assert!(p.event_cell(0.2).is_err());
+        assert!(TerrainConfig {
+            min_resolution: 0.0,
+            ..TerrainConfig::default()
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    fn a_source_on_moved_material_finds_its_surface() {
+        let cfg = TerrainConfig::default();
+        let mut p = sand_plan(&cfg);
+        let a = open_at(&mut p, &cfg, glam::Vec3::ZERO, 1.0);
+        let model = crate::ZModel::new(2.7, 0.05, 0.1, 1.0).unwrap();
+        let fresh = p.apply_source_to(a.area, &model, glam::Vec3::ZERO).unwrap();
+        assert!(!kernels(&fresh).contains(&"mpm_source_surface"));
+        p.step(1, 1.0e-5, -9.81).unwrap();
+        let moved = p.apply_source_to(a.area, &model, glam::Vec3::ZERO).unwrap();
+        let k = kernels(&moved);
+        assert!(
+            k.iter().position(|k| *k == "mpm_source_surface")
+                < k.iter().position(|k| *k == "mpm_source")
+        );
     }
 }

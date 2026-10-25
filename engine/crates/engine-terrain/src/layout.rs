@@ -53,7 +53,10 @@ pub const MPM_C_SURFACE: usize = 11;
 /// `MPM_C_AREA_BODY + k`.
 pub const MPM_C_AREA_SPEED: usize = 12;
 pub const MPM_C_AREA_BODY: usize = MPM_C_AREA_SPEED + MPM_MAX_AREAS as usize;
-pub const MPM_COUNTER_WORDS: usize = MPM_C_AREA_BODY + MPM_MAX_AREAS as usize;
+/// Per area slot: the pool's particle count when it opened (the bake's
+/// dithers count slots from it, so an area bakes as it would alone).
+pub const MPM_C_AREA_FIRST: usize = MPM_C_AREA_BODY + MPM_MAX_AREAS as usize;
+pub const MPM_COUNTER_WORDS: usize = MPM_C_AREA_FIRST + MPM_MAX_AREAS as usize;
 
 /// Area slots (`TerrainConfig::max_regions` is at most this): records
 /// `1..=MPM_MAX_AREAS` of [`MPM_PARAMS_BINDING`] after the domain's.

@@ -87,6 +87,7 @@ static const uint MPM_C_BODY_SPEED = 10u; // fastest dynamic body coupled this f
 static const uint MPM_C_SURFACE = 11u;    // the material's top under a source point (ordered bits)
 static const uint MPM_C_AREA_SPEED = 12u; // + slot: an area's fastest particle this frame (f32 bits)
 static const uint MPM_C_AREA_BODY = 28u;  // + slot: an area's fastest coupled body this frame
+static const uint MPM_C_AREA_FIRST = 44u; // + slot: the pool's particle count when the area opened
 static const uint MPM_MAX_AREAS = 16u;
 static const uint MPM_NO_AREA = 0xFFFFFFFFu;
 // gMpmParams[0].area.w bits.
@@ -1585,7 +1586,18 @@ void mpm_activate_scan(uint3 lid : SV_GroupThreadID)
         uint total = gsMpmScan[255];
         if (have + total > p.counts.x)
             AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_PARTICLES);
-        else ASTORE(gMpmCounters[MPM_C_PARTICLES], have + total);
+        else
+        {
+            ASTORE(gMpmCounters[MPM_C_PARTICLES], have + total);
+            // The area's first slot (a grown one keeps its oldest area's): the
+            // bake's dithers count slots from it, so an area bakes as it
+            // would alone however many particles other areas hold.
+            uint first = have;
+            uint mask = gMpmParams[0].area.z;
+            for (uint k = 0u; k < MPM_MAX_AREAS; k++)
+                if ((mask & (1u << k)) != 0u) first = min(first, ALOAD(gMpmCounters[MPM_C_AREA_FIRST + k]));
+            ASTORE(gMpmCounters[MPM_C_AREA_FIRST + gMpmParams[0].area.y], first);
+        }
     }
 }
 
@@ -2128,22 +2140,24 @@ void mpm_bake_bin(uint3 tid : SV_DispatchThreadID)
     // On the absorbing ground, in the unactivated ground's frame.
     if ((p.boundary.x & MPM_BOUNDARY_ABSORBING) != 0u) xl.xz -= mpmGroundShift(xl, hf, p);
     uint quanta = asuint(q.f1.w);
+    // The dithers' seed: the slot from the area's first.
+    uint seed = i - ALOAD(gMpmCounters[MPM_C_AREA_FIRST + gMpmParams[0].area.y]);
     int2 s0;
     uint4 parts;
     if (pushed)
     {
-        mpmTentSplit((xl.xz - float2(hf.x0, hf.z0)) / float2(hf.dx, hf.dz), quanta, i, s0, parts);
+        mpmTentSplit((xl.xz - float2(hf.x0, hf.z0)) / float2(hf.dx, hf.dz), quanta, seed, s0, parts);
         for (uint c = 0u; c < 4u; c++) mpmBakeOnto(mpmTentSample(s0, c), parts[c], xl.y, p, hf);
         return;
     }
     float2 uHome;
     float w = mpmHomeShare(q, xl, hf, p, uHome);
     // The heightfield's share (all of it at rest: floor(q + r) = q).
-    uint home = min(uint(floor(float(quanta) * w + mpmDither(mpmPcgHash(~i)))), quanta);
-    mpmTentSplit(uHome, home, i, s0, parts);
+    uint home = min(uint(floor(float(quanta) * w + mpmDither(mpmPcgHash(~seed)))), quanta);
+    mpmTentSplit(uHome, home, seed, s0, parts);
     for (uint c = 0u; c < 4u; c++) mpmBakeOnto(mpmTentSample(s0, c), parts[c], xl.y, p, hf);
     if (home == quanta) return;
-    mpmBakeMoved((xl.xz - float2(hf.x0, hf.z0)) / float2(hf.dx, hf.dz), quanta - home, i, xl.y, p, hf);
+    mpmBakeMoved((xl.xz - float2(hf.x0, hf.z0)) / float2(hf.dx, hf.dz), quanta - home, seed, xl.y, p, hf);
 }
 
 [shader("compute")]
