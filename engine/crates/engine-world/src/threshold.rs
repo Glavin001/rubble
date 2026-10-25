@@ -690,6 +690,15 @@ mod imp {
             if cooked_hulls(&chunk_parts) {
                 self.sim.sync_hulls(&mut self.hulls);
             }
+            // Any chunk can split off onto a dynamic body on the GPU, before (or without)
+            // this host adopting the split: the broadphase grid is sized for the largest
+            // chunk collider moving from the start.
+            let reach = chunk_cols
+                .iter()
+                .flatten()
+                .map(|&c| engine_schema::convex::collider_radius(&self.sim.collider(c)))
+                .fold(0.0f32, f32::max);
+            self.sim.reserve_movable_radius(reach);
             // Reserved slots for every other piece a split can make: static, parked, out
             // of every pair until a split re-parents a chunk's colliders onto one.
             let spare_count = chunk_count.saturating_sub(m.clusters.len());
@@ -1351,8 +1360,40 @@ mod imp {
             slot.frames.retain(|f| f.0 < from_step);
             slot.frames.push((from_step, frame));
             slot.shapes = shapes.clone();
+            let state = crate::body_state(slot);
             for s in shapes {
                 self.shapes[s as usize].body = b;
+            }
+            // The split was the GPU's (`fr_commit`, `fr_reparent`): the host's mirror of the
+            // body and of its chunks' colliders follows it, with no upload. The step plan
+            // reads that mirror: the hierarchical grid sizes its levels from the colliders of
+            // moving bodies (`hierarchical_grid`), and a moving collider larger than the
+            // levels a stale mirror gives goes to the oversized-static list, which never
+            // queries, so it passed through the ground and every static piece.
+            let t = self.fracture.slots[k].as_ref().expect("live slot");
+            let com = Vec3::new(c0[0], c0[1], c0[2]);
+            let to_body = glam::Quat::from_xyzw(c1[0], c1[1], c1[2], c1[3])
+                .normalize()
+                .conjugate();
+            let mut cols = Vec::new();
+            for &c in &chunks {
+                let r = t.tables.chunks[c][2];
+                let (first, count) = (r[2].to_bits() as usize, r[3].to_bits() as usize);
+                for p in &t.tables.parts[first..first + count] {
+                    let id = p[0][3].to_bits();
+                    let mut col = self.sim.collider(id);
+                    col.body = b;
+                    col.local_pos =
+                        (to_body * (Vec3::new(p[0][0], p[0][1], p[0][2]) - com)).to_array();
+                    col.local_rot = (to_body * glam::Quat::from_array(p[1]))
+                        .normalize()
+                        .to_array();
+                    cols.push((id, col));
+                }
+            }
+            self.sim.mirror_bodies(b, &[state]);
+            for (id, col) in cols {
+                self.sim.mirror_colliders(id, &[col]);
             }
             Ok(())
         }

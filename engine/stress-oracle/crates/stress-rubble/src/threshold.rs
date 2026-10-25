@@ -190,6 +190,12 @@ impl ThresholdWorld {
                 }
             }
         }
+        // Any chunk can split off onto a dynamic body, on the GPU alone (`fr_reparent`): the
+        // host's mirror never sees it move, so the broadphase grid is sized for the largest
+        // chunk collider moving from the start (else a larger freed piece takes the
+        // oversized-static list, which never queries, and falls through every static).
+        let reach = chunk_cols.values().flatten().map(|&c| engine_schema::convex::collider_radius(&engine.sim.collider(c))).fold(0.0f32, f32::max);
+        engine.sim.reserve_movable_radius(reach);
         let mut t = FractureTables {
             max_bodies: engine.sim.capacity().max_bodies,
             pool_cap: pool_cap(capacity.max_contacts),

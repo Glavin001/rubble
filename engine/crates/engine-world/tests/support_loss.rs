@@ -22,6 +22,8 @@ struct Frame {
     footings: Vec<u32>,
     columns: Vec<u32>,
     top: u32,
+    /// The top's half extents.
+    top_half: [f64; 3],
 }
 
 fn frame(
@@ -94,6 +96,7 @@ fn frame(
         footings,
         columns: ids,
         top,
+        top_half,
     }
 }
 
@@ -117,6 +120,10 @@ struct Run {
     id: DestructibleId,
     asset: DestructibleAssetDesc,
     broken: usize,
+    /// The ground plane's height (world frame).
+    ground: f32,
+    /// The top chunk's body transform after every frame.
+    trace: Vec<(glam::Vec3, glam::Quat)>,
 }
 
 /// Place the frame (support loss on or off, `factor` its dynamic factor), shoot the columns
@@ -157,11 +164,15 @@ fn run(f: &Frame, support_loss: bool, factor: f32, shoot: &[usize], frames: u32)
             ..DestructibleDef::new(a)
         })
         .unwrap();
-    // Each shot from -z through the middle of its column, in the asset frame.
+    // Each shot from -z through the middle of its column, in the asset frame, from 2.3 m
+    // away: its first contact is then 1.7 frames' travel off (40 m/s at 60 Hz), and the
+    // strike is predicted the frame before it, so the shot meets a freed column. (From
+    // 2.5 m the gap was exactly one frame's travel: the strike went unpredicted, the shot
+    // met the column still welded and static, and stopped dead.)
     for &column in shoot {
         let (r, m) = (0.3f32, 400.0f32);
         let p = asset.chunks[f.columns[column] as usize].pose.position;
-        let at = [p[0] + offset[0], p[1] + offset[1], p[2] + offset[2] - 2.5];
+        let at = [p[0] + offset[0], p[1] + offset[1], p[2] + offset[2] - 2.3];
         let b = w
             .create_body(&BodyDef {
                 linear_velocity: [0.0, 0.0, 40.0],
@@ -193,6 +204,7 @@ fn run(f: &Frame, support_loss: bool, factor: f32, shoot: &[usize], frames: u32)
             .unwrap();
     }
     let mut broken = 0;
+    let mut trace = Vec::new();
     for n in 0..frames {
         if std::env::var("SL_DEBUG").is_ok() && n % 10 == 0 {
             let body = w.destructible_chunk_body(id, f.top).unwrap();
@@ -214,12 +226,21 @@ fn run(f: &Frame, support_loss: bool, factor: f32, shoot: &[usize], frames: u32)
                 }
             }
         }
+        let st = w
+            .read_body_state(w.destructible_chunk_body(id, f.top).unwrap())
+            .unwrap();
+        trace.push((
+            glam::Vec3::from(st.transform.position),
+            glam::Quat::from_array(st.transform.rotation),
+        ));
     }
     Run {
         world: w,
         id,
         asset,
         broken,
+        ground: h,
+        trace,
     }
 }
 
@@ -241,6 +262,32 @@ impl Run {
             q * glam::Vec3::from(pose) + glam::Vec3::from(st.transform.position),
             q,
         )
+    }
+
+    /// The world corners of the top (a box of `half` about its pose in the asset frame)
+    /// with its body at `at` (an entry of `trace`).
+    fn top_corners(&self, f: &Frame, at: (glam::Vec3, glam::Quat)) -> Vec<glam::Vec3> {
+        let c = glam::Vec3::from(self.asset.chunks[f.top as usize].pose.position);
+        let h = glam::DVec3::from(f.top_half).as_vec3();
+        (0..8)
+            .map(|i| {
+                let s = glam::Vec3::new(
+                    if i & 1 == 0 { -1.0 } else { 1.0 },
+                    if i & 2 == 0 { -1.0 } else { 1.0 },
+                    if i & 4 == 0 { -1.0 } else { 1.0 },
+                );
+                at.1 * (c + s * h) + at.0
+            })
+            .collect()
+    }
+
+    /// How deep the world point `p` is inside the top with its body at `at` (m; negative
+    /// outside).
+    fn depth_in_top(&self, f: &Frame, at: (glam::Vec3, glam::Quat), p: glam::Vec3) -> f32 {
+        let c = glam::Vec3::from(self.asset.chunks[f.top as usize].pose.position);
+        let h = glam::DVec3::from(f.top_half).as_vec3();
+        let local = at.1.inverse() * (p - at.0) - c;
+        (h - local.abs()).min_element()
     }
 }
 
@@ -351,15 +398,42 @@ fn a_block_whose_centre_leaves_its_footprint_tips() {
             "column {k} stands"
         );
     }
-    // Free of its welds it moves under gravity. (Where it ends up is the rigid engine's: see
-    // `probe_a_dropped_block_lands`.)
+    // Free of its welds it tips off over the tops of the columns it let go of (they are
+    // static pieces): no frame has a column's top inside the block, and it never goes below
+    // the ground.
     let (now, _) = on.centre(f.top);
+    let offset = glam::DVec3::from(on.asset.stress.as_ref().unwrap().placement()).as_vec3();
+    for k in 0..2 {
+        let c = glam::Vec3::from(on.asset.chunks[f.columns[k] as usize].pose.position) - offset;
+        // 0.1 m below the column's top (its half height is 1 m).
+        let top = c + glam::Vec3::new(0.0, 0.9, 0.0);
+        for (n, &at) in on.trace.iter().enumerate() {
+            let d = on.depth_in_top(&f, at, top);
+            assert!(
+                d < 0.05,
+                "frame {n}: column {k}'s top {d} m inside the block"
+            );
+        }
+    }
+    for (n, &at) in on.trace.iter().enumerate() {
+        let low = on
+            .top_corners(&f, at)
+            .iter()
+            .map(|c| c.y)
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            low > on.ground - 0.05,
+            "frame {n}: the block's lowest corner at {low}"
+        );
+    }
     let body = on.world.destructible_chunk_body(on.id, f.top).unwrap();
     assert_eq!(on.world.body_type(body).unwrap(), BodyType::Dynamic);
     eprintln!("block: centre {start} -> {now}");
+    // Over to the side the shot column held (+x), off the deck and down onto the ground and
+    // the footing there.
     assert!(
-        now.y < start.y - 0.2,
-        "it comes off its columns (centre {now})"
+        now.y < start.y - 1.5 && now.x > 1.5,
+        "it tips off its columns towards +x (centre {now})"
     );
 }
 
@@ -405,20 +479,49 @@ fn the_dynamic_factor_is_validated() {
     assert!(e.contains("Threshold strength model"), "{e}");
 }
 
-/// Probe (ignored), a finding outside support loss: with support loss off, all three of the
-/// block's columns shot away, the free block falls through the world's ground plane (and
-/// through static pieces) instead of landing. Pieces of the cuboid house land on the same
-/// plane. `SL_DEBUG=1` prints the block's centre every 10 frames.
+/// A piece split off a pack-built destructible lands on the world's ground plane and on the
+/// static pieces, with support loss off: all three of the block's columns shot away, the
+/// free block falls onto the footings and the ground and comes to rest there. (It once
+/// fell straight through: the GPU's split put the 4 m block on a dynamic body the host's
+/// mirror still saw as static, so the broadphase grid had no level for a collider that
+/// large moving, and it took the oversized-static list, which never queries the statics.)
+/// `SL_DEBUG=1` prints the block's centre every 10 frames.
 #[test]
-#[ignore]
-fn probe_a_dropped_block_lands() {
+fn a_dropped_block_lands_on_the_ground() {
     let columns = [[-1.0, -1.0], [-1.0, 1.0], [1.6, 0.0]];
     let f = frame(&columns, &[0, 1, 2], 4.0e4, [2.0, 2.0, 1.4], 1.0e9);
-    let r = run(&f, false, 1.0, &[0, 1, 2], 150);
+    let (start, _) = run(&f, false, 1.0, &[], 1).centre(f.top);
+    let r = run(&f, false, 1.0, &[0, 1, 2], 400);
     let (now, _) = r.centre(f.top);
     eprintln!(
-        "{} bonds broken; the block's centre at {now} (it lands at y = 2)",
-        r.broken
+        "{} bonds broken; the block's centre {start} -> {now} (ground at y = {})",
+        r.broken, r.ground
     );
-    assert!(now.y > 1.5, "the block fell through the ground: {now}");
+    assert!(
+        !r.on_footings(f.top, &f.footings),
+        "the block is off its columns"
+    );
+    // It came down by more than a column's height (2 m) onto the footings (0.5 m) and
+    // the ground: its centre is at most its half height (2 m) above the footings' tops.
+    assert!(now.y < start.y - 1.5, "the block came down: {now}");
+    let lowest = |at| {
+        r.top_corners(&f, at)
+            .iter()
+            .map(|c| c.y)
+            .fold(f32::INFINITY, f32::min)
+    };
+    // No frame has it below the ground (a corner by more than a contact's slop).
+    for (n, &at) in r.trace.iter().enumerate() {
+        let low = lowest(at);
+        assert!(
+            low > r.ground - 0.05,
+            "frame {n}: the block's lowest corner at {low}, the ground at {}",
+            r.ground
+        );
+    }
+    // And at rest.
+    let body = r.world.destructible_chunk_body(r.id, f.top).unwrap();
+    let st = r.world.read_body_state(body).unwrap();
+    let speed = glam::Vec3::from(st.linear_velocity).length();
+    assert!(speed < 0.2, "the block rests ({speed} m/s)");
 }
