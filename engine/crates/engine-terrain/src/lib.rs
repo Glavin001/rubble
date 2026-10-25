@@ -7,12 +7,14 @@
 //! mirror of their Slang functions, the GPU records ([`layout`]), and the point
 //! sources of km/s impacts and explosions ([`source`], [`zmodel`]): π-scaling
 //! crater predictions that size the region, and a Z-model initial velocity
-//! field. The simulation runs in Slang kernels (`slang/kernels/terrain_mpm.slang`);
-//! the host loads material and reads results.
+//! field. [`plan`] is the command sequence every host replays. The
+//! simulation runs in Slang kernels (`slang/kernels/terrain_mpm.slang`); the
+//! host loads material and reads results.
 
 pub mod config;
 pub mod layout;
 pub mod material;
+pub mod plan;
 pub mod region;
 pub mod source;
 pub mod step;
@@ -20,6 +22,7 @@ pub mod zmodel;
 
 pub use config::{TerrainConfig, TerrainError};
 pub use material::{RockMaterial, SandMaterial, TerrainMaterial, YieldSurface};
+pub use plan::{RegionClock, TerrainOps, TerrainPlan, TerrainStepReport};
 pub use region::{RegionPlan, BLOCK_CELLS};
 pub use source::{
     CraterPrediction, CraterScaling, CraterTarget, ExplosionSource, Explosive, ImpactSource, Regime,
