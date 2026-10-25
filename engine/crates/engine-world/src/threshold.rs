@@ -328,9 +328,79 @@ mod imp {
         gravity: [f32; 3],
         /// Bonds the pass has broken that no readback has shown broken yet.
         sent: Vec<bool>,
-        /// `DestructibleDef::support_loss_dynamic_factor`: the flow's demand on a piece
-        /// whose supports changed this frame.
+        /// `DestructibleDef::support_loss_dynamic_factor`: on the increase of load in a
+        /// piece whose supports changed this frame.
         dynamic_factor: f32,
+        /// Per bond: its flow load (N) when the pass last ran on its piece (from the intact
+        /// structure at placement), the `before` of a sudden loss's amplification.
+        load: Vec<f32>,
+    }
+
+    /// The pass on one piece (`chunks`): the bonds (the tables' indices) it breaks, and its
+    /// intact bonds' static flow loads now. `sudden`: the dynamic factor of a sudden loss of
+    /// support (the bonds' `SupportLoss::load` as their loads before).
+    fn evaluate_piece(
+        tables: &FractureTables,
+        intact: &[bool],
+        sl: &SupportLoss,
+        chunks: &[u32],
+        sudden: Option<f32>,
+    ) -> (Vec<u32>, Vec<(u32, f32)>) {
+        let bonds = &tables.bonds;
+        let mut local = std::collections::HashMap::with_capacity(chunks.len());
+        for (j, &c) in chunks.iter().enumerate() {
+            local.insert(c, j as u32);
+        }
+        let mut piece_bonds = Vec::new();
+        let mut table_index = Vec::new();
+        for &c in chunks.iter() {
+            for &b in &sl.bonds_of[c as usize] {
+                let [a, o, _, _] = bonds[b as usize];
+                // Each bond once (from its first chunk), intact and inside the piece.
+                if a != c || !intact[b as usize] || sl.sent[b as usize] {
+                    continue;
+                }
+                if let (Some(&la), Some(&lo)) = (local.get(&a), local.get(&o)) {
+                    piece_bonds.push((la, lo, sl.compressive[b as usize]));
+                    table_index.push(b);
+                }
+            }
+        }
+        let mass: Vec<f32> = chunks
+            .iter()
+            .map(|&c| tables.chunks[c as usize][0][3])
+            .collect();
+        let support: Vec<bool> = chunks
+            .iter()
+            .map(|&c| tables.info[c as usize] & INFO_SUPPORT != 0)
+            .collect();
+        // Chunk centres in their structure's stress frame (a piece is in one structure).
+        let centre: Vec<[f32; 3]> = chunks
+            .iter()
+            .map(|&c| {
+                let r = tables.chunks[c as usize][0];
+                [r[0], r[1], r[2]]
+            })
+            .collect();
+        let piece = crate::support_loss::Piece {
+            mass: &mass,
+            support: &support,
+            centre: &centre,
+            bonds: &piece_bonds,
+        };
+        let before: Vec<f32> = table_index.iter().map(|&b| sl.load[b as usize]).collect();
+        let sudden = sudden.map(|factor| crate::support_loss::Sudden {
+            factor,
+            before: &before,
+        });
+        let r = crate::support_loss::failing(&piece, sl.gravity, sudden.as_ref());
+        let broken = r.bonds.iter().map(|&i| table_index[i as usize]).collect();
+        let loads = table_index
+            .iter()
+            .zip(&r.load)
+            .map(|(&b, &l)| (b, l as f32))
+            .collect();
+        (broken, loads)
     }
 
     /// The world's threshold destructibles.
@@ -903,13 +973,25 @@ mod imp {
                     bonds_of[b[1] as usize].push(i as u32);
                 }
                 let g = scene.gravity;
-                slot.support = Some(SupportLoss {
+                let mut sl = SupportLoss {
                     sent: vec![false; compressive.len()],
+                    load: vec![0.0; compressive.len()],
                     compressive,
                     bonds_of,
                     gravity: g.map(|x| x as f32),
                     dynamic_factor: def.support_loss_dynamic_factor,
-                });
+                };
+                // The intact structure's flow: every bond's load before any loss.
+                for &(b, ..) in &cluster_bodies {
+                    let chunks: Vec<u32> = (0..slot.chunk_body.len() as u32)
+                        .filter(|&c| slot.chunk_body[c as usize] == b)
+                        .collect();
+                    let (_, loads) = evaluate_piece(&slot.tables, &slot.intact, &sl, &chunks, None);
+                    for (bond, load) in loads {
+                        sl.load[bond as usize] = load;
+                    }
+                }
+                slot.support = Some(sl);
             }
             let k = match self.fracture.slots.iter().position(|s| s.is_none()) {
                 Some(k) => k,
@@ -1226,54 +1308,14 @@ mod imp {
             );
             let mut over = Vec::new();
             for (i, chunks) in chunks_of.iter().enumerate() {
-                // A sudden loss of support: the dynamic factor; else the quasi-static flow.
-                let factor = if lost[i] { sl.dynamic_factor } else { 1.0 };
-                let mut local = std::collections::HashMap::with_capacity(chunks.len());
-                for (j, &c) in chunks.iter().enumerate() {
-                    local.insert(c, j as u32);
+                // A sudden loss of support: the dynamic factor on the load's increase; else
+                // the quasi-static flow.
+                let sudden = (lost[i] && sl.dynamic_factor != 1.0).then_some(sl.dynamic_factor);
+                let (broken, loads) = evaluate_piece(&t.tables, &t.intact, sl, chunks, sudden);
+                over.extend(broken);
+                for (bond, load) in loads {
+                    sl.load[bond as usize] = load;
                 }
-                let mut piece_bonds = Vec::new();
-                let mut table_index = Vec::new();
-                for &c in chunks.iter() {
-                    for &b in &sl.bonds_of[c as usize] {
-                        let [a, o, _, _] = bonds[b as usize];
-                        // Each bond once (from its first chunk), intact and inside the piece.
-                        if a != c || !t.intact[b as usize] || sl.sent[b as usize] {
-                            continue;
-                        }
-                        if let (Some(&la), Some(&lo)) = (local.get(&a), local.get(&o)) {
-                            piece_bonds.push((la, lo, sl.compressive[b as usize]));
-                            table_index.push(b);
-                        }
-                    }
-                }
-                let mass: Vec<f32> = chunks
-                    .iter()
-                    .map(|&c| t.tables.chunks[c as usize][0][3])
-                    .collect();
-                let support: Vec<bool> = chunks
-                    .iter()
-                    .map(|&c| t.tables.info[c as usize] & INFO_SUPPORT != 0)
-                    .collect();
-                // Chunk centres in their structure's stress frame (a piece is in one structure).
-                let centre: Vec<[f32; 3]> = chunks
-                    .iter()
-                    .map(|&c| {
-                        let r = t.tables.chunks[c as usize][0];
-                        [r[0], r[1], r[2]]
-                    })
-                    .collect();
-                let piece = crate::support_loss::Piece {
-                    mass: &mass,
-                    support: &support,
-                    centre: &centre,
-                    bonds: &piece_bonds,
-                };
-                over.extend(
-                    crate::support_loss::failing(&piece, sl.gravity, factor)
-                        .into_iter()
-                        .map(|i| table_index[i as usize]),
-                );
             }
             for &b in &over {
                 sl.sent[b as usize] = true;

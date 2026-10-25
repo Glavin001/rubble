@@ -65,7 +65,8 @@ pieces those breaks touched carry their weight down their intact bonds to their 
 breadth first from the supports, each chunk handing its weight and what reached it from above to
 the neighbours one bond nearer an anchor in proportion to those bonds' compressive capacities
 (`compressive_strength * area`). A bond whose load exceeds its capacity breaks with the next
-frame (`GpuFracture::break_bonds_sparse`), so a collapse cascades forward a frame at a time.
+frame (`GpuFracture::break_bonds_sparse`), so a collapse cascades forward a frame at a time
+(after a sudden loss of support, with the dynamic factor on the load's increase: section 5).
 Tipping: a piece whose centre of mass, along gravity, is outside the hull of its loaded support
 bonds lets go of the members standing on those supports (their bonds into it break). The flow
 conserves weight (the load reaching the anchors is the piece's weight); it has no bending, no
@@ -74,19 +75,32 @@ tension and no redundancy beyond the sharing. An error under the Bonds model. C 
 
 ## 5. Dynamic amplification (`DestructibleDef::support_loss_dynamic_factor`, opt-in)
 
-The flow is quasi-static. A suddenly applied load on an undamped elastic system peaks at twice
-its static effect (single degree of freedom: `1 + exp(-zeta pi / sqrt(1 - zeta^2))`), and
-progressive-collapse guidance applies a dynamic increase factor of up to 2 to the gravity load
-over a removed column in linear static analysis (GSA 2003 *Progressive Collapse Analysis and
-Design Guidelines*, `2(DL + 0.25 LL)`; DoD UFC 4-023-03 *Design of Buildings to Resist
-Progressive Collapse*, load increase factor `Omega_LD`). With factor `k`, a piece whose supports
-changed this frame (the piece it was part of before held anchors it no longer holds; a chip
-knocked off changes nothing) breaks a bond whose flow load times `k` exceeds its capacity.
-Range 1 to 2, anything else an error; `k != 1` needs `support_loss`. Default 1: today's
-behaviour. Tipping takes no factor. C ABI: `RbDestructibleDef::support_loss_dynamic_factor`.
+The flow is quasi-static. A load suddenly applied to an elastic system overshoots its static
+effect: the single-degree-of-freedom step response peaks at `1 + exp(-zeta pi / sqrt(1 - zeta^2))`
+times the step (2 undamped). There are two conventions for applying that to a support loss:
 
-`k` multiplies the whole post-loss static demand, as the codes' linear static procedure does.
-The stress oracle (stress-ref, explicit mode) amplifies the *change* of load:
+- **On the whole post-loss demand.** Progressive-collapse guidance's linear static procedure
+  multiplies the gravity load over a removed column by a dynamic increase factor of up to 2
+  (GSA 2003 *Progressive Collapse Analysis and Design Guidelines*, `2(DL + 0.25 LL)`; DoD UFC
+  4-023-03 *Design of Buildings to Resist Progressive Collapse*, load increase factor
+  `Omega_LD`). It is a design check: conservative for a member that already carried load.
+- **On the change of load.** The step response itself: a member that carried `before` and
+  carries `after` once the support is gone peaks at `before + k (after - before)`.
+
+We use the second. The pass predicts what an event breaks rather than sizing members, so it
+follows the physics; it is exact for a member that carried nothing (`k after`) and adds nothing
+for one whose load does not change. With factor `k`, a piece whose supports changed this frame
+(the piece it was part of before held anchors it no longer holds; a chip knocked off changes
+nothing) breaks a bond whose demand `before + k max(after - before, 0)` exceeds its capacity.
+`before` is the bond's flow load the frame before the loss: the pass keeps every bond's load
+from the last time it ran on the bond's piece, starting from the intact structure's flow at
+placement; a bond that carried nothing has `before = 0`. Only an increase is amplified: a bond
+whose load drops peaks at `before`, which it already held. Range 1 to 2, anything else an
+error; `k != 1` needs `support_loss`. Default 1: the quasi-static flow. Tipping takes no
+factor. C ABI: `RbDestructibleDef::support_loss_dynamic_factor`.
+
+The stress oracle (stress-ref, explicit mode) amplifies the change of load, which is what the
+convention reproduces:
 
 | Oracle scene | before | static after | peak | (peak - before) / (after - before) | peak / after |
 |---|---|---|---|---|---|
@@ -94,6 +108,9 @@ The stress oracle (stress-ref, explicit mode) amplifies the *change* of load:
 | b8 sudden column removal (elastic), column 0 axial | 20.2 kN | 33.2 kN | 54.5 kN | 2.63 | 1.64 |
 | b8 sudden column removal (elastic), column 2 axial | 31.3 kN | 48.2 kN | 74.2 kN | 2.54 | 1.54 |
 
-(b8's static-after is the mean of its last 50 ms.) So `k = 2` on the full demand is
-conservative for a member that already carried load before the loss (b4: 1.24x, b8: 1.5-1.6x of
-the static-after load) and exact for one that carried none. The factor is not tuned to these.
+(b8's static-after is the mean of its last 50 ms.) b4, a single degree of freedom, gives an
+increment ratio of 1.944 against the analytic 1.939 at `zeta = 0.02`: `k = 2` on the change
+predicts its peak (49.0 N against 48.5 N), where `k = 2` on the whole demand asks 78.4 N. b8, an
+elastic frame, has increment ratios above 2, beyond the factor's range under either convention:
+`k = 2` on the change gives 46.2 kN and 65.1 kN against its peaks of 54.5 kN and 74.2 kN (low),
+on the whole demand 66.4 kN and 96.4 kN (high). The factor is not tuned to these.

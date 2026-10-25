@@ -20,15 +20,29 @@
 //!
 //! Dynamic amplification (`DestructibleDef::support_loss_dynamic_factor`, opt-in): the flow is
 //! quasi-static, so a piece that suddenly loses a support loads what is left with its static
-//! weight. A suddenly applied load on an undamped elastic system peaks at twice its static
-//! effect (the single-degree-of-freedom step response, `1 + exp(-zeta pi / sqrt(1 - zeta^2))`
-//! with damping ratio zeta). Progressive-collapse practice applies this as a dynamic increase
-//! factor of up to 2 on the gravity load of the bays affected by a removed column in a linear
-//! static analysis (GSA 2003 *Progressive Collapse Analysis and Design Guidelines*, 2(DL +
-//! 0.25 LL); DoD UFC 4-023-03 *Design of Buildings to Resist Progressive Collapse*, load
-//! increase factor Omega_LD of its linear static procedure). With the factor `k`, a piece whose supports changed this frame
-//! breaks a bond whose flow load times `k` exceeds its capacity. `k` = 1 (the default) is the
-//! quasi-static flow. Tipping is geometric and takes no factor.
+//! weight. A load suddenly applied to an elastic system overshoots its static effect: the
+//! single-degree-of-freedom step response peaks at `1 + exp(-zeta pi / sqrt(1 - zeta^2))`
+//! times the step (2 undamped, zeta the damping ratio). Two conventions apply that:
+//!
+//! - on the whole post-loss demand: progressive-collapse practice's linear static procedure
+//!   multiplies the gravity load of the bays over a removed column by a dynamic increase factor
+//!   of up to 2 (GSA 2003 *Progressive Collapse Analysis and Design Guidelines*,
+//!   `2(DL + 0.25 LL)`; DoD UFC 4-023-03 *Design of Buildings to Resist Progressive Collapse*,
+//!   load increase factor `Omega_LD`). A design check, conservative for a member that already
+//!   carried load;
+//! - on the change of load: the step response itself. A member that carried `before` and
+//!   carries `after` once the support is gone peaks at `before + k (after - before)`. The
+//!   stress oracle's explicit runs follow it (`docs/destruction-reactions.md` section 5: b4,
+//!   increment ratio 1.944 against 1.939 analytic at zeta 0.02).
+//!
+//! We use the second: it is the physics of the event we simulate (the pass predicts what
+//! breaks, it does not size members), and it is exact both for a member that carried nothing
+//! (`k after`) and for one whose load does not change (no amplification). With the factor `k`,
+//! a piece whose supports changed this frame breaks a bond whose demand
+//! `before + k max(after - before, 0)` exceeds its capacity, `before` the bond's flow load the
+//! frame before (0 if it carried none) and `after` its flow load now. Only an increase is
+//! amplified: a bond whose load drops peaks at `before`, which it already held. `k` = 1 (the
+//! default) is the quasi-static flow. Tipping is geometric and takes no factor.
 
 use std::collections::VecDeque;
 
@@ -43,15 +57,37 @@ pub struct Piece<'a> {
     pub bonds: &'a [(u32, u32, f32)],
 }
 
+/// A sudden support loss's dynamic amplification: the factor `k` (1 to 2) and, per bond of
+/// the piece (`Piece::bonds`' order), its flow load (N) the frame before the loss.
+pub struct Sudden<'a> {
+    pub factor: f32,
+    pub before: &'a [f32],
+}
+
+/// What the pass decided for a piece.
+pub struct Failing {
+    /// The bonds (indices into `Piece::bonds`) that break.
+    pub bonds: Vec<u32>,
+    /// Every bond's static flow load now (N): the next frame's `Sudden::before`.
+    pub load: Vec<f64>,
+}
+
 /// What the pass breaks in a piece under gravity `g` (m/s², its vector): the bonds (indices
 /// into `Piece::bonds`) its weight overloads; or, when its centre of mass is outside the
 /// footprint of its loaded support bonds, the bonds from the members on those supports into
 /// the rest of the piece (it topples over them). A piece with no support carries nothing: it
-/// falls. `factor` multiplies the flow's loads before they are held against the bonds'
-/// capacities (1: quasi-static; the dynamic increase of a sudden support loss, up to 2).
-pub fn failing(piece: &Piece, g: [f32; 3], factor: f32) -> Vec<u32> {
+/// falls. With `sudden` (its supports changed this frame) a bond's demand is its load before
+/// plus `k` times its increase (the step response); without, its static flow load.
+pub fn failing(piece: &Piece, g: [f32; 3], sudden: Option<&Sudden>) -> Failing {
     let magnitude = (g[0] * g[0] + g[1] * g[1] + g[2] * g[2]).sqrt();
-    let (over, carried) = flow(piece, magnitude, factor);
+    let carried = flow(piece, magnitude);
+    let over = (0..piece.bonds.len() as u32)
+        .filter(|&i| demand(&carried, i as usize, sudden) > piece.bonds[i as usize].2 as f64)
+        .collect();
+    let out = |bonds| Failing {
+        bonds,
+        load: carried.clone(),
+    };
     // Loaded support bonds, at the middle of their chunks' centres.
     let feet: Vec<u32> = (0..piece.bonds.len() as u32)
         .filter(|&i| {
@@ -60,7 +96,7 @@ pub fn failing(piece: &Piece, g: [f32; 3], factor: f32) -> Vec<u32> {
         })
         .collect();
     if feet.is_empty() || magnitude <= 0.0 {
-        return over;
+        return out(over);
     }
     let down = g.map(|x| x / magnitude);
     // A plane across gravity: two axes perpendicular to it.
@@ -86,7 +122,7 @@ pub fn failing(piece: &Piece, g: [f32; 3], factor: f32) -> Vec<u32> {
         .collect();
     let total: f64 = piece.mass.iter().map(|&m| m as f64).sum();
     if total <= 0.0 {
-        return over;
+        return out(over);
     }
     let com = (0..piece.mass.len()).fold([0.0f64; 2], |acc, c| {
         let p = flat(piece.centre[c]);
@@ -94,7 +130,7 @@ pub fn failing(piece: &Piece, g: [f32; 3], factor: f32) -> Vec<u32> {
         [acc[0] + p[0] * m, acc[1] + p[1] * m]
     });
     if inside(&hull(points), com) {
-        return over;
+        return out(over);
     }
     // The members standing on the feet, and their bonds to anything but supports and each other.
     let mut member = vec![false; piece.mass.len()];
@@ -102,25 +138,40 @@ pub fn failing(piece: &Piece, g: [f32; 3], factor: f32) -> Vec<u32> {
         let (a, b, _) = piece.bonds[i as usize];
         member[if piece.support[a as usize] { b } else { a } as usize] = true;
     }
-    (0..piece.bonds.len() as u32)
+    out((0..piece.bonds.len() as u32)
         .filter(|&i| {
             let (a, b, _) = piece.bonds[i as usize];
             let (a, b) = (a as usize, b as usize);
             (member[a] != member[b]) && !piece.support[a] && !piece.support[b]
         })
-        .collect()
+        .collect())
+}
+
+/// Bond `i`'s demand (N) from its static flow load now (`carried`): that load, or after a
+/// sudden loss its load before plus `k` times the increase.
+fn demand(carried: &[f64], i: usize, sudden: Option<&Sudden>) -> f64 {
+    let after = carried[i];
+    match sudden {
+        None => after,
+        Some(s) => {
+            let before = s.before.get(i).copied().unwrap_or(0.0) as f64;
+            after + (s.factor as f64 - 1.0) * (after - before).max(0.0)
+        }
+    }
 }
 
 /// The bonds (indices into `Piece::bonds`) the piece's weight overloads under gravity `g`
 /// (m/s², its magnitude): compression only, no tipping.
 #[cfg(test)]
 fn overloaded(piece: &Piece, g: f32) -> Vec<u32> {
-    flow(piece, g, 1.0).0
+    let carried = flow(piece, g);
+    (0..piece.bonds.len() as u32)
+        .filter(|&i| carried[i as usize] > piece.bonds[i as usize].2 as f64)
+        .collect()
 }
 
-/// The load flow: the bonds whose load times `factor` exceeds their capacity, and every
-/// bond's (static) load (N).
-fn flow(piece: &Piece, g: f32, factor: f32) -> (Vec<u32>, Vec<f64>) {
+/// The load flow: every bond's static load (N).
+fn flow(piece: &Piece, g: f32) -> Vec<f64> {
     let n = piece.mass.len();
     let mut adjacent: Vec<Vec<u32>> = vec![Vec::new(); n];
     for (i, &(a, b, _)) in piece.bonds.iter().enumerate() {
@@ -181,10 +232,7 @@ fn flow(piece: &Piece, g: f32, factor: f32) -> (Vec<u32>, Vec<f64>) {
             load[o] += f;
         }
     }
-    let over = (0..piece.bonds.len() as u32)
-        .filter(|&i| carried[i as usize] * factor as f64 > piece.bonds[i as usize].2 as f64)
-        .collect();
-    (over, carried)
+    carried
 }
 
 /// Which of the pieces a frame's breaks touched lost supports in them: a piece lost support
@@ -408,7 +456,7 @@ mod tests {
             bonds: &b,
         };
         assert!(
-            failing(&piece, g, 1.0).is_empty(),
+            failing(&piece, g, None).bonds.is_empty(),
             "four legs round its centre"
         );
         // Two legs on one side: its centre (x = 2) is off the line x = 4 they make.
@@ -420,7 +468,7 @@ mod tests {
             bonds: &b,
         };
         assert_eq!(
-            failing(&piece, g, 1.0),
+            failing(&piece, g, None).bonds,
             vec![0, 1],
             "the slab lets go of both legs, which stay on their feet: it topples"
         );
@@ -433,7 +481,7 @@ mod tests {
             bonds: &b,
         };
         assert!(
-            failing(&piece, g, 1.0).is_empty(),
+            failing(&piece, g, None).bonds.is_empty(),
             "the centre (2, 2) is on the triangle's edge"
         );
         let (m, s, c, b) = table(&[[1.0, 0.0], [4.0, 0.0], [4.0, 4.0]]);
@@ -444,7 +492,7 @@ mod tests {
             bonds: &b,
         };
         assert_eq!(
-            failing(&piece, g, 1.0),
+            failing(&piece, g, None).bonds,
             vec![0, 1, 2],
             "(2, 2) is outside (1,0)-(4,0)-(4,4)"
         );
@@ -491,7 +539,7 @@ mod tests {
                 centre: &centre,
                 bonds: &bonds,
             };
-            let (_, carried) = flow(&piece, g, 1.0);
+            let carried = flow(&piece, g);
             let into_anchors: f64 = bonds
                 .iter()
                 .zip(&carried)
@@ -516,9 +564,9 @@ mod tests {
     }
 
     #[test]
-    fn a_dynamic_factor_scales_the_demand_and_only_the_demand() {
+    fn a_dynamic_factor_amplifies_the_increase_of_load_and_only_that() {
         // A slab (chunk 1, 1000 kg) on one column bond of capacity 12 kN under 10 m/s²:
-        // 10 kN static, 83% utilised.
+        // 10 kN static now, 83% utilised.
         let mass = [0.0, 1000.0];
         let support = [true, false];
         let centre = [[0.0; 3]; 2];
@@ -530,12 +578,27 @@ mod tests {
             bonds: &bonds,
         };
         let g = [0.0, -10.0, 0.0];
-        assert!(failing(&piece, g, 1.0).is_empty());
-        assert!(failing(&piece, g, 1.19).is_empty());
-        assert_eq!(failing(&piece, g, 1.21), vec![0]);
-        assert_eq!(failing(&piece, g, 2.0), vec![0]);
-        // The loads themselves stay static.
-        assert_eq!(flow(&piece, 10.0, 2.0).1, flow(&piece, 10.0, 1.0).1);
+        let sudden = |factor, before: &'static [f32]| Sudden { factor, before };
+        let breaks = |s: Option<&Sudden>| failing(&piece, g, s).bonds;
+        assert!(breaks(None).is_empty());
+        // It carried nothing before (the slab was on another support): demand k * 10 kN,
+        // over 12 kN once k > 1.2.
+        assert!(breaks(Some(&sudden(1.19, &[0.0]))).is_empty());
+        assert_eq!(breaks(Some(&sudden(1.21, &[0.0]))), vec![0]);
+        assert_eq!(breaks(Some(&sudden(2.0, &[0.0]))), vec![0]);
+        // It carried 7.5 kN before (a share of the slab): demand 7.5 + k * 2.5 kN, over
+        // 12 kN once k > 1.8. The whole-demand rule (k * 10 kN) would break it at 1.21.
+        assert!(breaks(Some(&sudden(1.79, &[7.5e3]))).is_empty());
+        assert_eq!(breaks(Some(&sudden(1.81, &[7.5e3]))), vec![0]);
+        // Its load did not change, or dropped: no amplification at any k.
+        assert!(breaks(Some(&sudden(2.0, &[1.0e4]))).is_empty());
+        assert!(breaks(Some(&sudden(2.0, &[1.1e4]))).is_empty());
+        // The loads reported are the static flow's (the next frame's `before`).
+        assert_eq!(
+            failing(&piece, g, Some(&sudden(2.0, &[0.0]))).load,
+            vec![1.0e4]
+        );
+        assert_eq!(demand(&[1.0e4], 0, Some(&sudden(2.0, &[7.5e3]))), 1.25e4);
     }
 
     #[test]

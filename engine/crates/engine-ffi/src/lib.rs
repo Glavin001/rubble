@@ -2231,8 +2231,9 @@ pub struct RbDestructibleDef {
     /// intact bonds, and a bond carrying more than its compressive capacity breaks, so a
     /// structure whose supports are shot away collapses. Off by default.
     pub support_loss: bool,
-    /// With `support_loss`: the dynamic increase factor on the load flow of a piece whose
-    /// supports changed this frame (a sudden loss), 1 to 2. 1 (the default): quasi-static.
+    /// With `support_loss`: the dynamic factor k, 1 to 2, on the increase of load after a
+    /// sudden loss of support (a bond is held to before + k (after - before)). 1 (the
+    /// default): quasi-static.
     pub support_loss_dynamic_factor: f32,
     pub internal_value: u32,
 }

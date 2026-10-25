@@ -402,11 +402,13 @@ pub struct DestructibleDef {
     /// carrying more than its compressive capacity breaks the next frame, so a structure
     /// whose supports are shot away collapses. Off: the threshold model as the lab runs it.
     pub support_loss: bool,
-    /// With `support_loss`: the dynamic increase factor on the load flow of a piece whose
-    /// supports changed this frame (a sudden loss; `support_loss.rs`). A suddenly applied
-    /// load on an undamped elastic system peaks at twice its static effect, and
-    /// progressive-collapse guidance (GSA 2003, UFC 4-023-03) applies a factor of up to 2 to
-    /// the gravity load over a removed column. 1 (the default) is the quasi-static flow;
+    /// With `support_loss`: the dynamic factor `k` on the increase of load in a piece whose
+    /// supports changed this frame (a sudden loss; `support_loss.rs`): a bond that carried
+    /// `before` and carries `after` is held to `before + k (after - before)`, the step
+    /// response of a suddenly applied load (which peaks at twice the step undamped). This
+    /// amplifies the change of load, not the whole post-loss demand as the linear static
+    /// procedure of progressive-collapse guidance does (GSA 2003, UFC 4-023-03: up to 2 on
+    /// the gravity load over a removed column). 1 (the default) is the quasi-static flow;
     /// the range is 1 to 2, anything else is an error.
     pub support_loss_dynamic_factor: f32,
 }

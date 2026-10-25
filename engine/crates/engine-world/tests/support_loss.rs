@@ -354,23 +354,39 @@ fn a_structure_intact_under_its_own_weight_never_breaks() {
 
 #[test]
 fn a_sudden_loss_with_the_dynamic_factor_fails_a_member_the_static_flow_holds() {
-    // After the loss each column left carries 60% of its capacity under the static flow.
-    let f = slab_row(0.6);
+    // The demand after a sudden loss is before + k (after - before) (the step response,
+    // `support_loss.rs`). Slab weight W = 1e5 kg * 9.81 = 981 kN on four equal columns:
+    // before the loss each column's top bond carries W/4, after it W/3. With the static
+    // utilisation after u = (W/3) / C:
+    //   top bond:    (W/3 + (k - 1)(W/3 - W/4)) / C = u (1 + (k - 1)/4)
+    //   bottom bond: the same plus the column's own 400 kg (3.9 kN), which does not
+    //                change: + 3924 / C = + 0.012 u
+    // u = 0.9, k = 1: 0.900 and 0.911, both hold; k = 2: 1.125 and 1.136, both break.
+    let f = slab_row(0.9);
     let quasi = run(&f, true, 1.0, &[0], 90);
     assert!(
         quasi.on_footings(f.top, &f.footings[1..]),
-        "factor 1: 60% holds"
+        "factor 1: 90% holds"
     );
     let dynamic = run(&f, true, 2.0, &[0], 90);
     assert!(
         !dynamic.on_footings(f.top, &f.footings),
-        "factor 2: 120% of capacity breaks the columns"
+        "factor 2: 112% of capacity breaks the columns"
     );
     eprintln!(
         "factor 1: {} bonds broken; factor 2: {}",
         quasi.broken, dynamic.broken
     );
     assert!(dynamic.broken > quasi.broken);
+    // u = 0.6, k = 2: 0.75 and 0.757, both hold. (Factor 2 on the whole post-loss demand,
+    // the codes' linear static convention, would ask 1.2 of them and break them.)
+    let f = slab_row(0.6);
+    let r = run(&f, true, 2.0, &[0], 90);
+    assert!(
+        r.on_footings(f.top, &f.footings[1..]),
+        "factor 2 at 60%: the increase alone is amplified, and it holds"
+    );
+    assert_eq!(r.broken, quasi.broken, "only the shot column's bonds break");
 }
 
 #[test]
