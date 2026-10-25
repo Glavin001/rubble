@@ -35,6 +35,47 @@ pub struct TerrainConfig {
     pub max_coupled: u32,
     /// Samples of the bed heightfield parcels may land on.
     pub max_field_samples: u32,
+    /// How the ground around an activated region (its bed and side walls)
+    /// acts on the region's material.
+    pub boundary: RegionBoundary,
+    /// The stress activated material starts with.
+    pub initial_stress: InitialStress,
+    /// Grid nodes an absorbing boundary keeps a displacement for: the node
+    /// layers within reach of the region's bed and walls (each region needs
+    /// `TerrainPlan::boundary_nodes`).
+    pub max_boundary_nodes: u32,
+}
+
+/// The ground around an activated region: its bed (the floor the window was
+/// lowered to) and side walls (where the window meets the unactivated ground).
+/// The region's top, and the free surface, are free either way.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RegionBoundary {
+    /// Rigid ground: a separating Coulomb contact (the bed friction), which
+    /// reflects elastic waves back into the region.
+    #[default]
+    Rigid,
+    /// The ground beyond as an elastic half-space: Lysmer & Kuhlemeyer's (1969)
+    /// viscous dashpots (−ρ·c_p·v_n − ρ·c_s·v_t per unit area) with the
+    /// viscous-spring boundary's springs (Liu et al. 2006), on the geostatic
+    /// traction the ground carried at activation. Waves leave the region as if
+    /// into the surrounding ground; material at rest neither sinks nor creeps.
+    /// Needs [`InitialStress::Geostatic`] and a material with stiffness.
+    Absorbing,
+}
+
+/// The stress activated material starts with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InitialStress {
+    /// Undeformed (F = I): the material sags under gravity once it steps, by
+    /// ρ·g·H²/(2(λ + 2μ)) at the surface of a column H deep, and rings.
+    #[default]
+    Unstressed,
+    /// The geostatic (K0) state of an elastic layer under its own weight with
+    /// no lateral strain: σ_v = −ρ·g·d at depth d below the column's surface
+    /// and σ_h = K0·σ_v, K0 = ν/(1 − ν). Set by the first step after
+    /// activation (it needs gravity).
+    Geostatic,
 }
 
 impl Default for TerrainConfig {
@@ -52,6 +93,9 @@ impl Default for TerrainConfig {
             max_columns: 1 << 16,
             max_coupled: 256,
             max_field_samples: 1 << 20,
+            boundary: RegionBoundary::Rigid,
+            initial_stress: InitialStress::Unstressed,
+            max_boundary_nodes: 1 << 18,
         }
     }
 }
@@ -126,6 +170,15 @@ impl TerrainConfig {
         bad(
             self.max_coupled == 0 || self.max_coupled > 65535,
             "max_coupled must lie in [1, 65535]",
+        )?;
+        bad(
+            self.boundary == RegionBoundary::Absorbing
+                && self.initial_stress != InitialStress::Geostatic,
+            "an absorbing boundary carries the geostatic traction: it needs initial_stress Geostatic",
+        )?;
+        bad(
+            self.boundary == RegionBoundary::Absorbing && self.max_boundary_nodes == 0,
+            "an absorbing boundary needs max_boundary_nodes",
         )?;
         Ok(())
     }

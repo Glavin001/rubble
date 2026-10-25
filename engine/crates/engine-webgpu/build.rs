@@ -197,6 +197,8 @@ const WORLD_ENTRIES: &[&str] = &[
     "mpm_deposit_raise",
     "mpm_deposit_header",
     "mpm_source",
+    "mpm_absorb_init",
+    "mpm_geostatic",
     // Terrain look-ahead (slang/kernels/terrain_watch.slang).
     "terrain_watch_energy",
     "terrain_watch_pick",

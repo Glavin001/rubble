@@ -14,7 +14,7 @@
 //! [`RegionClock`] is the open region's frame schedule: each frame's substeps
 //! from a speed bound the GPU checks, and when the region has settled.
 
-use crate::config::{TerrainConfig, TerrainError};
+use crate::config::{InitialStress, RegionBoundary, TerrainConfig, TerrainError};
 use crate::layout::*;
 use crate::material::{RockMaterial, TerrainMaterial, YieldSurface};
 use crate::region::{RegionPlan, BLOCK_CELLS};
@@ -51,6 +51,8 @@ pub const KERNELS: &[&str] = &[
     "mpm_deposit_raise",
     "mpm_deposit_header",
     "mpm_source",
+    "mpm_absorb_init",
+    "mpm_geostatic",
 ];
 
 /// Byte offsets of the indirect workgroup counts in [`MPM_ARGS_BINDING`].
@@ -174,6 +176,8 @@ pub struct TerrainPlan {
     rock: Option<RockMaterial>,
     /// Heightfield records the activation window touches (bake rewrites them).
     window_records: u32,
+    /// A geostatic activation's particles wait for the next step's gravity.
+    geostatic_pending: bool,
 }
 
 impl TerrainPlan {
@@ -208,6 +212,7 @@ impl TerrainPlan {
             wave_speed: 0.0,
             rock: None,
             window_records: 0,
+            geostatic_pending: false,
         })
     }
 
@@ -239,7 +244,10 @@ impl TerrainPlan {
                 MPM_COUPLE_BINDING,
                 (4 + blocks * u64::from(1 + MPM_CELL_COLLIDERS)) * 4,
             ),
-            (MPM_COUPLED_BINDING, u64::from(config.max_coupled) * 64),
+            (
+                MPM_COUPLED_BINDING,
+                u64::from(config.max_coupled) * 64 + u64::from(config.max_boundary_nodes) * 16,
+            ),
             (MPM_PARCELS_BINDING, u64::from(config.max_parcels) * 32),
             (MPM_DEPOSIT_BINDING, u64::from(config.max_field_samples) * 4),
         ]
@@ -256,6 +264,15 @@ impl TerrainPlan {
     /// Elastic (P-) wave speed of the loaded material (m/s; 0 without stress).
     pub fn wave_speed(&self) -> f32 {
         self.wave_speed
+    }
+
+    /// Grid nodes an absorbing boundary keeps a record for in a region of
+    /// `cells` (each axis): three node layers along the floor and along each of
+    /// the four sides (`mpmAbsorbSlot`), against
+    /// [`TerrainConfig::max_boundary_nodes`].
+    pub fn boundary_nodes(cells: [u32; 3]) -> u64 {
+        let [x, y, z] = cells.map(|c| u64::from(c) + 1);
+        3 * x * z + 6 * y * (x + z)
     }
 
     /// The region's bed heightfield collider, if it has one.
@@ -311,9 +328,12 @@ impl TerrainPlan {
             u64::from(self.config.max_particles),
         )?;
         self.set_region(plan, bed, bed_friction)?;
-        // No activation window: the bed is the field's surface everywhere.
+        // No activation window: the bed is the field's surface everywhere, a
+        // contact (the absorbing ground is the window's floor and sides).
         self.params.window = [0; 4];
+        self.params.boundary = [0; 4];
         self.window_records = 0;
+        self.geostatic_pending = false;
         let mut ops = TerrainOps::default();
         ops.counter(MPM_C_PARTICLES, n);
         Self::reset_ejecta(&mut ops);
@@ -381,6 +401,28 @@ impl TerrainPlan {
         let first = (j0 * nx + i0) / 4;
         let last = ((j0 + nj - 1) * nx + i0 + ni - 1) / 4;
         self.window_records = last - first + 1;
+        let geostatic = cfg.initial_stress == InitialStress::Geostatic;
+        let absorbing = cfg.boundary == RegionBoundary::Absorbing;
+        let absorb_records = if absorbing {
+            let cells = [
+                self.params.dims[0],
+                self.params.dims[1],
+                self.params.dims[2],
+            ];
+            let n = Self::boundary_nodes(cells);
+            TerrainConfig::check("max_boundary_nodes", n, u64::from(cfg.max_boundary_nodes))?;
+            n as u32
+        } else {
+            0
+        };
+        self.params.boundary = [
+            if absorbing { MPM_BOUNDARY_ABSORBING } else { 0 }
+                | if geostatic { MPM_BOUNDARY_GEOSTATIC } else { 0 },
+            4 * cfg.max_coupled,
+            absorb_records,
+            0,
+        ];
+        self.geostatic_pending = geostatic;
         let samples = u64::from(ni) * u64::from(nj);
         let records = u64::from(self.window_records);
         let mut ops = TerrainOps::default();
@@ -391,6 +433,10 @@ impl TerrainPlan {
         ops.disp("mpm_activate_scan", 64);
         ops.disp("mpm_activate_emit", samples);
         ops.disp("mpm_activate_lower", records);
+        let absorb = u64::from(self.params.boundary[2]);
+        if absorb > 0 {
+            ops.disp("mpm_absorb_init", absorb);
+        }
         Ok(ops)
     }
 
@@ -468,6 +514,10 @@ impl TerrainPlan {
         if let Some(rock) = self.rock {
             rock.softening_stress(self.params.origin[3])?;
         }
+        anyhow::ensure!(
+            self.params.boundary[0] & MPM_BOUNDARY_ABSORBING == 0 || self.wave_speed > 0.0,
+            "the absorbing boundary needs a material with stiffness (terrain_set_material)"
+        );
         self.params.step[0] = dt;
         self.params.step[1] = gravity;
         // Nodes lighter than this carry no velocity (f32 momentum over mass).
@@ -482,6 +532,12 @@ impl TerrainPlan {
             self.wave_speed
         );
         ops.params(&self.params);
+        // A geostatic activation's particles take their stress before the
+        // first substep.
+        if std::mem::take(&mut self.geostatic_pending) {
+            ops.disp("mpm_write_args", 1);
+            ops.particles("mpm_geostatic");
+        }
         Ok(())
     }
 
