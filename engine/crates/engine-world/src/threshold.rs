@@ -348,6 +348,9 @@ mod imp {
         /// With crushing: some chunk's flow stress alone is at its crush surface, so its
         /// damage grows every step: the world steps even when nothing is awake.
         overstressed: bool,
+        /// Every bond the pass has broken, in order (a diagnostic record:
+        /// `World::destructible_support_loss_breaks`).
+        broke: Vec<u32>,
     }
 
     /// Whether the flow's loads alone (`SupportLoss::load`) put a crushable, uncrushed
@@ -1195,6 +1198,7 @@ mod imp {
                 let mut sl = SupportLoss {
                     sent: vec![false; compressive.len()],
                     load: vec![0.0; compressive.len()],
+                    broke: Vec::new(),
                     compressive,
                     bonds_of,
                     gravity: g.map(|x| x as f32),
@@ -1627,6 +1631,7 @@ mod imp {
             for &b in &over {
                 sl.sent[b as usize] = true;
             }
+            sl.broke.extend_from_slice(&over);
             t.fracture
                 .break_bonds_sparse(&gpu, &over, &t.chunk_body, bonds);
             // The flow's loads for the crush estimate from the next frame on.
@@ -1767,6 +1772,22 @@ mod imp {
                 });
             }
             Ok(out)
+        }
+
+        /// The bonds support loss (`DestructibleDef::support_loss`) has broken so far, in the
+        /// order it broke them (bond indices into the asset's threshold tables, as
+        /// `BondsBroken` reports them). `BondsBroken` does not carry a cause; this tells a
+        /// host which of its breaks were the weight's. Empty without support loss.
+        pub fn destructible_support_loss_breaks(
+            &self,
+            id: DestructibleId,
+        ) -> anyhow::Result<&[u32]> {
+            let i = self.live_destructible(id)?;
+            let k = self.destructibles[i].threshold.ok_or_else(|| {
+                anyhow::anyhow!("destructible {} is not a threshold one", id.index())
+            })? as usize;
+            let t = self.fracture.slots[k].as_ref().expect("live slot");
+            Ok(t.support.as_ref().map_or(&[][..], |s| &s.broke[..]))
         }
 
         /// A threshold destructible's chunks' crush state (blocking: for tools and

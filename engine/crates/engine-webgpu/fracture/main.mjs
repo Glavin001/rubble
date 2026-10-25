@@ -365,7 +365,7 @@ window.__FRACTURE_DEMO__={get sliceRate(){return sliceRate},
  // display frame of `ms` (the Rust steps the physics frames that fell due, fires a URL
  // shot at its launch time and draws). orbit/zoom move the stress camera as a drag would.
  get stressReady(){return !loading&&stressOn&&!!stress},
- async stressAdvance(ms=1000/60){stressCapture=true;await frame;await stress.frame(ms);const st=stress.stats;firePendingShot(st);setStatus(`${st.shots} shots · ${st.frames} frames · ${st.bodies??'—'} bodies · ${st.brokenBonds} bonds broken · ${(st.frames/st.frameHz).toFixed(2)} s`);return st},
+ async stressAdvance(ms=1000/60){stressCapture=true;await frame;await stress.frame(ms);const st=stress.stats;firePendingShot(st);setStatus(stressStatus(st));return st},
  stressOrbit(dx,dy){stress.orbit(dx,dy)},stressZoom(delta){stress.zoom(delta)},
  get status(){return $('status').textContent},
  // The page's own shot (a click's path: queued behind the frame, the loop keeps running).
@@ -397,6 +397,8 @@ window.__FRACTURE_DEMO__={get sliceRate(){return sliceRate},
 // frames and rendered frames per second from its stats.
 // What the stress import could not take from the scene as given (stress-web `warnings`).
 const stressWarning=st=>st.warnings?.length?` · ⚠ ${st.warnings.join('; ')}`:'';
+// The running stress mode's status line (the frame loop's and the frame-locked capture's).
+const stressStatus=st=>`${st.shots} shots · ${st.frames} frames · ${st.bodies??'—'} bodies · ${st.brokenBonds} bonds broken${st.crush?` · ${st.crushed} crushed`:' · crush off'} · ${st.simSeconds.toFixed(2)} s${stressWarning(st)}`;
 function stressTick(now,elapsedMs){
  frame=(async()=>{try{
   const before=stress.stats.frames??0;await stress.frame(elapsedMs);const st=stress.stats;firePendingShot(st);
@@ -408,7 +410,7 @@ function stressTick(now,elapsedMs){
   $('step-ms').textContent=stressHud.stepMs?`${stressHud.stepMs.toFixed(1)} ms/frame (stress + rubble)`:`target ${Math.round(st.frameHz)} frames/s`;
   $('frame-ms').textContent='frames / second';
   $('awake').textContent=st.moving??st.awake??'—';
-  if(stress.running||st.shots){$('release').textContent=stress.running?'Pause':'Resume';setStatus(`${st.shots} shots · ${st.frames} frames · ${st.fragments} fragments · ${st.bodies??'—'} bodies · ${st.brokenBonds} bonds broken${st.crush?` · ${st.crushed} chunks crushed`:''} · ${st.simSeconds.toFixed(1)} s${stressWarning(st)}`)}
+  if(stress.running||st.shots){$('release').textContent=stress.running?'Pause':'Resume';setStatus(stressStatus(st))}
  }catch(e){fail(e)}})();
  frame.finally(()=>requestAnimationFrame(tick));
 }

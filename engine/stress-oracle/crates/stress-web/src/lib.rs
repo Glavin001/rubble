@@ -117,6 +117,10 @@ thread_local! {
     /// The last frame's step, state copy and draw (ms).
     static PHASES: Cell<[f64; 3]> = const { Cell::new([0.0; 3]) };
     static ERROR: RefCell<String> = const { RefCell::new(String::new()) };
+    /// Dust at each crushed chunk (render only; `stress_dust`): the puffs alive, and their
+    /// particles as last drawn, on the canvas.
+    static DUST: RefCell<Vec<Puff>> = const { RefCell::new(Vec::new()) };
+    static DUST_VIEW: RefCell<String> = RefCell::new("[]".into());
 }
 
 /// The input of the next [`stress_load`].
@@ -486,6 +490,8 @@ pub extern "C" fn stress_load(level: u32) -> u32 {
 fn load(level: u8) -> Result<(), String> {
     WORLD.with_borrow_mut(|w| *w = None);
     TWORLD.with_borrow_mut(|w| *w = None);
+    DUST.with_borrow_mut(|d| d.clear());
+    DUST_VIEW.set("[]".into());
     // The lab's own scene (its camera, centre, extent and projectile) and the stress
     // oracle's input: the GLB's level, the cuboid houses in their layout, or the pack.
     let profile = PROFILE.get();
@@ -626,6 +632,69 @@ pub extern "C" fn stress_frame(elapsed_ms: f64) -> u32 {
     }
 }
 
+/// A crushed chunk's dust puff (render only): where and when (simulated s) its chunk was
+/// crushed, its size (m, from the chunk's volume), its velocity (stress frame), and the
+/// cause (`CrushEvent::cause`: 1 contact loads, 2 a predicted strike).
+#[derive(Clone, Copy)]
+struct Puff {
+    at: Vec3,
+    born: f64,
+    size: f64,
+    velocity: Vec3,
+    cause: u32,
+}
+
+/// How long a puff lasts (simulated s), and its particles.
+const PUFF_LIFE: f64 = 1.4;
+const PUFF_PARTICLES: usize = 7;
+
+/// The dust as drawn this frame: per particle `[x, y, radius, alpha, cause]` in canvas
+/// pixels (the page draws them over the canvas, `fracture/stress-mode.mjs`).
+#[wasm_bindgen]
+pub fn stress_dust() -> String {
+    DUST_VIEW.with_borrow(|d| d.clone())
+}
+
+/// This frame's crush events become puffs, old puffs end, and the live ones' particles
+/// are projected with the frame's camera.
+fn update_dust(events: Vec<(u64, stress_gpu::fracture::CrushEvent)>, dt: f64, now: f64, view_proj: [[f32; 4]; 4], width: u32, height: u32) {
+    DUST.with_borrow_mut(|dust| {
+        for (frame, e) in events {
+            dust.push(Puff {
+                at: stress_rubble::from_rubble(e.position),
+                born: frame as f64 * dt,
+                size: (e.volume.max(1e-4) as f64).cbrt(),
+                velocity: stress_rubble::from_rubble(e.linear_velocity),
+                cause: e.cause,
+            });
+        }
+        dust.retain(|p| now - p.born < PUFF_LIFE);
+        let project = |p: Vec3| -> Option<[f64; 3]> {
+            let c: [f64; 4] = std::array::from_fn(|r| view_proj[0][r] as f64 * p.x + view_proj[1][r] as f64 * p.y + view_proj[2][r] as f64 * p.z + view_proj[3][r] as f64);
+            (c[3] > 1e-3).then(|| [(c[0] / c[3] * 0.5 + 0.5) * width as f64, (0.5 - c[1] / c[3] * 0.5) * height as f64, c[3]])
+        };
+        let mut out = Vec::new();
+        for p in dust.iter() {
+            let age = (now - p.born).max(0.0);
+            let grow = p.size * (0.45 + 1.1 * age.sqrt());
+            for k in 0..PUFF_PARTICLES {
+                // Fixed directions (a golden-angle spiral, upward-biased): the same puff
+                // every run.
+                let a = k as f64 * 2.399963;
+                let up = 0.25 + 0.75 * (k as f64 + 0.5) / PUFF_PARTICLES as f64;
+                let side = (1.0 - up * up).sqrt();
+                let dir = Vec3::new(side * a.cos(), side * a.sin(), up);
+                let centre = p.at + p.velocity * (0.12 * age) + dir * (0.8 * grow);
+                let (Some(c), Some(top)) = (project(centre), project(centre + Vec3::new(0.0, 0.0, grow))) else { continue };
+                let r = ((top[0] - c[0]).powi(2) + (top[1] - c[1]).powi(2)).sqrt();
+                let alpha = 0.5 * (1.0 - age / PUFF_LIFE).powf(0.8);
+                out.push([c[0].round(), c[1].round(), r.round().max(2.0), (alpha * 100.0).round() / 100.0, p.cause as f64]);
+            }
+        }
+        DUST_VIEW.set(serde_json::to_string(&out).unwrap_or_else(|_| "[]".into()));
+    });
+}
+
 /// The lab's camera for the renderer: its view-projection and eye in the stress scene's
 /// frame. The lab's camera looks at its own frame (the asset, +Y up, moved by
 /// `placement`); the renderer draws the stress scene's (+Z up): view_proj times the map
@@ -703,6 +772,7 @@ fn frame_threshold(d: &mut Device, l: &mut TLoaded, elapsed_ms: f64) -> Result<(
     let draw_ms = t_draw.elapsed().as_secs_f64() * 1e3;
     PHASES.set([step_ms, 0.0, draw_ms]);
     let st = l.world.poll(gpu);
+    update_dust(l.world.take_crush_events(), dt, l.world.frame as f64 * dt, view_proj, width, height);
     let s = SHOOTING.get();
     let stats = serde_json::json!({
         "gpuResident": true,

@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reaction Replay</title>
+<!-- Plays back a World run dumped by `cargo run -p engine-world --example reaction_replay`
+     (?replay=<url of the JSON>). Render only: poses, shapes and events are the engine's;
+     the dust is drawn at each ChunkCrushed from its pose, mass and velocity.
+     ?frame=N shows one frame; record.mjs steps it frame-locked (window.__REPLAY__). -->
+<style>
+ :root { --bg: #20242a; --fg: #e8eaed; --muted: #a0a6ad; --accent: #f0b04a; }
+ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.35 system-ui, sans-serif; overflow: hidden; }
+ canvas { display: block; }
+ #hud { position: absolute; left: 16px; top: 12px; background: rgba(0,0,0,.55); padding: 10px 14px; border-radius: 6px; min-width: 300px; }
+ #hud h1 { font-size: 15px; margin: 0 0 4px; }
+ #hud .sw { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+ #hud table { border-collapse: collapse; font-variant-numeric: tabular-nums; }
+ #hud td { padding: 1px 10px 1px 0; }
+ #hud td.v { text-align: right; font-weight: 600; }
+ #flash { position: absolute; right: 16px; top: 12px; background: rgba(0,0,0,.55); padding: 8px 12px; border-radius: 6px; color: var(--accent); font-weight: 600; display: none; max-width: 40%; }
+</style>
+<script type="importmap">{"imports": {"three": "https://cdn.jsdelivr.net/npm/three@0.172.0/build/three.module.js", "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.172.0/examples/jsm/"}}</script>
+</head>
+<body>
+<div id="hud"><h1 id="title">loading…</h1><div class="sw" id="switches"></div><table id="counters"></table></div>
+<div id="flash"></div>
+<script type="module">
+import * as THREE from 'three';
+import { ConvexGeometry } from 'three/addons/geometries/ConvexGeometry.js';
+const q = new URLSearchParams(location.search);
+const data = await (await fetch(q.get('replay') ?? 'replay.json')).json();
+const W = innerWidth, H = innerHeight;
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1); renderer.setSize(W, H); renderer.shadowMap.enabled = true;
+document.body.prepend(renderer.domElement);
+const scene = new THREE.Scene(); scene.background = new THREE.Color(0x20242a);
+const cam = new THREE.PerspectiveCamera(45, W / H, 0.05, 500);
+const [ex, ey, ez] = (q.get('eye') ?? data.camera.eye.join(',')).split(',').map(Number);
+const [tx, ty, tz] = (q.get('target') ?? data.camera.target.join(',')).split(',').map(Number);
+cam.position.set(ex, ey, ez); cam.lookAt(tx, ty, tz);
+scene.add(new THREE.HemisphereLight(0xdde6ff, 0x404040, 1.3));
+const sun = new THREE.DirectionalLight(0xffffff, 2.0); sun.position.set(-8, 16, -6); sun.castShadow = true;
+Object.assign(sun.shadow.camera, { left: -20, right: 20, top: 20, bottom: -20 }); sun.shadow.mapSize.set(2048, 2048);
+scene.add(sun);
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(200, 200), new THREE.MeshStandardMaterial({ color: 0x55594f }));
+ground.rotation.x = -Math.PI / 2; ground.position.y = data.ground; ground.receiveShadow = true; scene.add(ground);
+{ const grid = new THREE.GridHelper(60, 60, 0x777777, 0x666666); grid.position.y = data.ground + 0.002; scene.add(grid); }
+
+const geo = s => s.kind === 'box' ? new THREE.BoxGeometry(2 * s.half[0], 2 * s.half[1], 2 * s.half[2])
+  : s.kind === 'sphere' ? new THREE.SphereGeometry(s.radius, 24, 16)
+  : new ConvexGeometry(Array.from({ length: s.vertices.length / 3 }, (_, i) => new THREE.Vector3(...s.vertices.slice(3 * i, 3 * i + 3))));
+const place = (o, t) => { o.position.set(t[0], t[1], t[2]); o.quaternion.set(t[3], t[4], t[5], t[6]); };
+// A group per chunk (its shapes in the asset frame); the group takes its body's pose.
+const palette = [0xc8a27a, 0x8fb3d9, 0xd98f8f, 0x9fd98f, 0xd9c98f, 0xb38fd9, 0x8fd9cf, 0xe0a060, 0xa0a0e0, 0xc0d070];
+const staticMat = new THREE.MeshStandardMaterial({ color: 0x9a9a9a, roughness: 0.9 });
+const mats = palette.map(c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.85 }));
+const mesh = (s, m) => { const g = new THREE.Group(), x = new THREE.Mesh(geo(s), m); place(x, s.t); x.castShadow = x.receiveShadow = true; g.add(x); return g; };
+const chunkObjs = data.chunks.map(c => { const g = new THREE.Group(); for (const s of c.shapes) g.add(mesh(s, staticMat)); scene.add(g); return g; });
+const ballMat = new THREE.MeshStandardMaterial({ color: 0x303338, metalness: 0.6, roughness: 0.35 });
+const fragMat = new THREE.MeshStandardMaterial({ color: 0xe6d3b0, roughness: 1 });
+const extraObjs = data.extras.map(e => { const g = new THREE.Group(); for (const s of e.shapes) g.add(mesh(s, e.kind === 'ball' ? ballMat : fragMat)); g.visible = false; scene.add(g); return g; });
+// Colour by body: the first body (the intact structure) keeps the first colour; a static
+// piece is grey; every new piece gets its own, kept as it moves.
+const bodyColour = new Map();
+const setMat = (g, m) => g.traverse(o => { if (o.isMesh) o.material = m; });
+
+// Dust: a puff per crushed chunk, its size from the chunk's volume (mass), drifting with
+// its velocity, fading over ~1.2 s. A blast flashes a sphere at the charge.
+const puffTex = (() => { const c = document.createElement('canvas'); c.width = c.height = 64; const x = c.getContext('2d');
+  const g = x.createRadialGradient(32, 32, 0, 32, 32, 32); g.addColorStop(0, 'rgba(255,255,255,1)'); g.addColorStop(.5, 'rgba(255,255,255,.5)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+  x.fillStyle = g; x.fillRect(0, 0, 64, 64); return new THREE.CanvasTexture(c); })();
+const puffs = [];
+function addPuff(e) {
+  // Mass over a masonry density (2400 kg/m^3): the chunk's edge; the cloud is a few times it.
+  const size = Math.max(0.5, 1.6 * Math.cbrt(Math.max(e.mass, 1) / 2400));
+  for (let i = 0; i < 12; i++) {
+    const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: puffTex, color: e.cause === 'blast' ? 0xd9a070 : 0xb3a68f, transparent: true, depthWrite: false }));
+    const r = j => (Math.sin(e.chunk * 12.9898 + i * 78.233 + j * 37.719) * 43758.5453) % 1;
+    const dir = new THREE.Vector3(r(0), Math.abs(r(1)) + 0.3, r(2)).normalize();
+    s.userData = { born: e.frame, base: new THREE.Vector3(...e.pos), v: new THREE.Vector3(...e.velocity).multiplyScalar(0.15).add(dir.multiplyScalar(0.8 * size)), size };
+    scene.add(s); puffs.push(s);
+  }
+}
+const blasts = [];
+for (const e of data.events) {
+  if (e.type === 'crushed') addPuff(e);
+  if (e.type === 'blast') { const m = new THREE.Mesh(new THREE.SphereGeometry(1, 32, 16), new THREE.MeshBasicMaterial({ color: 0xffaa33, transparent: true, depthWrite: false }));
+    m.position.set(...e.pos); m.userData = { born: e.frame, tnt: e.tnt }; scene.add(m); blasts.push(m); }
+}
+const sw = data.switches;
+document.getElementById('title').textContent = data.title;
+document.getElementById('switches').textContent = `blast loading ${sw.blastLoading ? 'on' : 'off'} · support loss ${sw.supportLoss ? `on${sw.dynamicFactor !== 1 ? ` (k ${sw.dynamicFactor})` : ''}` : 'off'} · crush ${sw.crush}`;
+const flash = document.getElementById('flash');
+// A chunk's latest pose at or before frame n.
+function lastPose(n, c) {
+  for (let m = n; m >= 0; m--) { const f = data.frames[m], k = f.cb[c]; if (k === null) return null; if (f.b[k]) return f.b[k]; }
+  return null;
+}
+function show(n) {
+  n = Math.max(0, Math.min(data.frames.length - 1, n));
+  const f = data.frames[n];
+  const bodyKeys = [];
+  chunkObjs.forEach((g, c) => {
+    const k = f.cb[c];
+    if (k === null) { g.visible = false; return; }
+    // A piece split off this frame has no polled pose yet: its chunks stay where they were.
+    const t = f.b[k] ?? lastPose(n, c);
+    g.visible = !!t; if (t) place(g, t);
+    // A body's identity across frames: its pose slot is per frame, so key it by the
+    // lowest chunk it holds.
+    bodyKeys[k] ??= c;
+  });
+  chunkObjs.forEach((g, c) => {
+    const k = f.cb[c]; if (k === null) return;
+    const key = bodyKeys[k];
+    if (f.s.includes(k)) { setMat(g, staticMat); return; }
+    if (!bodyColour.has(key)) bodyColour.set(key, mats[bodyColour.size % mats.length]);
+    setMat(g, bodyColour.get(key));
+  });
+  extraObjs.forEach((g, i) => { const t = f.x[i]; g.visible = !!t && n >= data.extras[i].born; if (g.visible) place(g, t); });
+  for (const s of puffs) { const a = (n - s.userData.born) * data.dt; s.visible = a >= 0 && a < 1.4;
+    if (s.visible) { const u = s.userData; s.position.copy(u.base).addScaledVector(u.v, a); s.scale.setScalar(u.size * (0.5 + 2.2 * Math.sqrt(a))); s.material.opacity = 0.95 * (1 - a / 1.4) ** 0.7; } }
+  for (const b of blasts) { const a = (n - b.userData.born) * data.dt; b.visible = a >= 0 && a < 0.35;
+    if (b.visible) { b.scale.setScalar(0.3 + Math.cbrt(b.userData.tnt) * 1.6 * (a / 0.35)); b.material.opacity = 0.9 * (1 - a / 0.35); } }
+  const h = f.hud, cause = Object.entries(h.crushedByCause).map(([k, v]) => `${v} ${k}`).join(', ') || '—';
+  const rows = [['time', `${((n + 1) * data.dt).toFixed(2)} s · frame ${n + 1}`], ['bonds broken', h.bondsBroken], ['  by support loss', sw.supportLoss ? h.supportLossBreaks : 'off'],
+    ['splits', h.splits], ['pieces', h.actors], ['crushed', `${h.crushed}${h.crushed ? ` (${cause}; ${(h.crushedMass / 1000).toFixed(1)} t)` : ''}`]];
+  document.getElementById('counters').innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td class="v">${v}</td></tr>`).join('');
+  const recent = data.events.filter(e => e.frame <= n && e.frame > n - 45 && (e.type === 'blast' || e.type === 'shot' || e.type === 'supportLoss' || e.type === 'crushed'));
+  const last = recent.at(-1);
+  flash.style.display = last ? 'block' : 'none';
+  if (last) flash.textContent = last.type === 'blast' ? `Blast: ${last.tnt} kg TNT` : last.type === 'shot' ? `Shot: ${(last.mass / 1000).toFixed(1)} t at ${last.speed.toFixed(0)} m/s`
+    : last.type === 'supportLoss' ? `Support loss: ${last.bonds} bond${last.bonds > 1 ? 's' : ''} fail under the weight` : `Crushed (${last.cause}): chunk ${last.chunk}, ${(last.mass).toFixed(0)} kg${last.fragments ? ` → ${last.fragments} fragments` : ''}`;
+  renderer.render(scene, cam);
+  return n;
+}
+window.__REPLAY__ = { frames: data.frames.length, dt: data.dt, show, ready: true };
+if (q.has('frame')) show(Number(q.get('frame')));
+else { let n = 0, t0 = performance.now(); const loop = now => { const k = Math.floor((now - t0) / 1000 / data.dt); show(k % data.frames.length); requestAnimationFrame(loop); }; requestAnimationFrame(loop); }
+</script>
+</body>
+</html>
