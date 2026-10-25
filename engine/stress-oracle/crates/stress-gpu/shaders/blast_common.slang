@@ -3,10 +3,11 @@
 // as the PhysX fork's GPU backend runs it (stressgpu/NvBlastExtStressGpu.cu); its f64
 // reference is stress-ref blast_bond.rs, whose module docs give the math.
 //
-// Layout (src/blast/mod.rs packs it): islands are Blast's (dynamic nodes over live bonds, cut
-// at supports), each a contiguous range of node slots and of bond slots. Supports have no
-// slot: a bond's endpoint on one is NO_NODE, whose weight in D is 0. Vectors are float4 with
-// w unused, two per node or bond (angular, then linear).
+// Layout (src/blast.rs): nodes and bonds keep their indices for good (the structure's chunks
+// and bonds; a support is a node whose weights in D are 0). Islands are Blast's (dynamic nodes
+// over live bonds, cut at supports), each a list of its nodes and of its bonds, ascending
+// (blast_topology.slang). Vectors are float4 with w unused, two per node or bond (angular,
+// then linear).
 
 module blast_common;
 
@@ -51,8 +52,8 @@ public struct BlastNode
     public uint ref_end;
 };
 
-// A bond: endpoint slots (NO_NODE on a support), compliance column scale, health (remaining
-// area; 0 broken), offsets in units of the length scale.
+// A bond: its endpoints, compliance column scale, health (remaining area; 0 broken), offsets
+// in units of the length scale.
 public struct BlastBond
 {
     public uint n0;
@@ -63,7 +64,7 @@ public struct BlastBond
     public float4 o1;
 };
 
-// Scratch: per node slot (rho, pi, q, mu, last input) x (angular, linear); then per bond slot
+// Scratch: per node (rho, pi, q, mu, last input) x (angular, linear); then per bond
 // t = S C^T D rho, angular and linear.
 public static const uint NODE_VECTORS = 10;
 public uint node_slot(uint node, uint vector)

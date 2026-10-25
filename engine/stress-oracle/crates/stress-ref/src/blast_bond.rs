@@ -503,21 +503,32 @@ impl Islands {
                 parent[r0.max(r1)] = r0.min(r1);
             }
         }
-        // Ids in order of first appearance over the bonds, as the device numbers them.
-        let mut root_island = vec![NO_ISLAND; n];
-        let mut bond = vec![NO_ISLAND; graph.bond_count()];
-        let mut count = 0usize;
+        // A component's root is its lowest node; the components with a coupling bond are the
+        // islands, numbered in order of their roots (as blast_topology.slang numbers them; the
+        // device numbers them by first appearance over the bonds, which changes nothing but the
+        // ids).
+        let mut has_bond = vec![false; n];
         for (j, b) in graph.bonds.iter().enumerate() {
             let [n0, n1] = b.nodes;
-            if !(health[j] > 0.0) || (fixed(n0) && fixed(n1)) {
-                continue;
+            if health[j] > 0.0 && !(fixed(n0) && fixed(n1)) {
+                let rep = find(&mut parent, if fixed(n0) { n1 } else { n0 });
+                has_bond[rep] = true;
             }
-            let rep = find(&mut parent, if fixed(n0) { n1 } else { n0 });
-            if root_island[rep] == NO_ISLAND {
-                root_island[rep] = count as u32;
+        }
+        let mut root_island = vec![NO_ISLAND; n];
+        let mut count = 0usize;
+        for i in 0..n {
+            if !fixed(i) && parent[i] == i && has_bond[i] {
+                root_island[i] = count as u32;
                 count += 1;
             }
-            bond[j] = root_island[rep];
+        }
+        let mut bond = vec![NO_ISLAND; graph.bond_count()];
+        for (j, b) in graph.bonds.iter().enumerate() {
+            let [n0, n1] = b.nodes;
+            if health[j] > 0.0 && !(fixed(n0) && fixed(n1)) {
+                bond[j] = root_island[find(&mut parent, if fixed(n0) { n1 } else { n0 })];
+            }
         }
         let node = (0..n)
             .map(|i| {

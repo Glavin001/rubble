@@ -154,12 +154,14 @@ fn track(
     let mut reference = single(&graph);
     let mut exact = BlastSolver::new(graph.clone());
     let mut device = GpuBlastSolver::new(gpu, graph, materials);
-    assert_eq!(device.islands, reference.islands);
     let (mut worst, mut worst_exact) = (0.0f64, 0.0f64);
     for (frame, accel) in loads.iter().enumerate() {
         let r = reference.solve(accel, skip);
         exact.solve(accel, skip);
         let d = device.solve(accel, skip);
+        if frame == 0 {
+            assert_eq!(device.islands(), reference.islands);
+        }
         assert_eq!(r.len(), d.len());
         for (k, (r, d)) in r.iter().zip(&d).enumerate() {
             assert_eq!(
@@ -332,9 +334,10 @@ fn stresses_and_damage_match_the_reference_formula() {
     }
     let dt = 1.0 / 60.0;
     let results = device.bond_results(dt, false);
+    let healths = device.health();
     let (mut commands, mut agree) = (0, 0);
     for (j, d) in results.iter().enumerate() {
-        let health = device.health[j];
+        let health = healths[j];
         let r = bond_stress(
             d.impulse,
             graph.normal[j],
@@ -394,23 +397,26 @@ fn stresses_and_damage_match_the_reference_formula() {
     assert!(agree + 2 >= results.len(), "{agree} of {}", results.len());
 
     // Applying the damage: health falls by each verdict's damage, and a bond at zero breaks.
-    let before = device.health.clone();
+    let before = healths;
     let applied = device.bond_results(dt, true);
+    let after = device.health();
     for (j, d) in applied.iter().enumerate() {
         if d.damage.command {
             let expected = (before[j] - d.damage.damage).max(0.0);
             assert!(
-                (device.health[j] - expected).abs() <= 1e-6 * before[j].max(1.0),
+                (after[j] - expected).abs() <= 1e-6 * before[j].max(1.0),
                 "bond {j}: {} vs {expected}",
-                device.health[j]
+                after[j]
             );
         } else {
-            assert_eq!(device.health[j] as f32, before[j] as f32, "bond {j}");
+            assert_eq!(after[j] as f32, before[j] as f32, "bond {j}");
         }
     }
-    let broken = device.health.iter().filter(|h| !(**h > 0.0)).count();
+    let broken = after.iter().filter(|h| !(**h > 0.0)).count();
     println!("{broken} bonds broken");
-    assert_eq!(device.islands, Islands::compute(&graph, &device.health));
+    // The islands the GPU rebuilds from the damaged health, before the next solve.
+    device.solve(&accel, false);
+    assert_eq!(device.islands(), Islands::compute(&graph, &after));
 }
 
 #[test]
@@ -427,10 +433,10 @@ fn breaking_bonds_repartitions_as_the_reference() {
         let j = frame * 7;
         reference.set_health(j, 0.0);
         device.set_health(j, 0.0);
-        assert_eq!(device.islands, reference.islands, "frame {frame}");
     }
     reference.solve(&accel, false);
     device.solve(&accel, false);
+    assert_eq!(device.islands(), reference.islands);
     let e = difference(&device.impulses(), &reference_impulses(&reference));
     assert!(
         e < 10.0 * spread.max(1e-5),

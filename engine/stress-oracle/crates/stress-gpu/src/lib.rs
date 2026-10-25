@@ -233,6 +233,23 @@ pub mod shaders {
     pub const THRESHOLD: ShaderSet = shader_set!("threshold", [("threshold_breaks", (256, 1, 1)), ("threshold_predict", (256, 1, 1))]);
     pub const BLAST_CGLS: ShaderSet = shader_set!("blast_cgls", [("blast_solve", (256, 1, 1))]);
     pub const BLAST_MATERIAL: ShaderSet = shader_set!("blast_material", [("blast_bond_stress", (64, 1, 1))]);
+    pub const BLAST_TOPOLOGY: ShaderSet = shader_set!(
+        "blast_topology",
+        [
+            ("bt_reset", (64, 1, 1)),
+            ("bt_union", (64, 1, 1)),
+            ("bt_flatten", (64, 1, 1)),
+            ("bt_count_nodes", (64, 1, 1)),
+            ("bt_count_bonds", (64, 1, 1)),
+            ("bt_scan_blocks", (1024, 1, 1)),
+            ("bt_scan_top", (1024, 1, 1)),
+            ("bt_scan_add", (1024, 1, 1)),
+            ("bt_islands", (64, 1, 1)),
+            ("bt_scatter_nodes", (64, 1, 1)),
+            ("bt_scatter_bonds", (64, 1, 1)),
+            ("bt_sort", (256, 1, 1)),
+        ]
+    );
     pub const FRACTURE: ShaderSet = shader_set!(
         "fracture",
         [
@@ -271,7 +288,7 @@ pub mod shaders {
     /// Every set (each Slang file with entry points).
     pub const ALL: &[ShaderSet] = &[
         WORLD_IC, SMOKE, STRESS_STEP, JOINT_TEST, WORLD, STRESS_RENDER, DESTRUCTION_RENDER, COUPLING, RESIDENT, CASCADE, PLAN, LAYOUT, SPAWN, COLLIDERS, PASS, PASSLOG, ROUTING, PUNCH, SPLIT,
-        HUD_OVERLAY, THRESHOLD, FRACTURE, BLAST_CGLS, BLAST_MATERIAL,
+        HUD_OVERLAY, THRESHOLD, FRACTURE, BLAST_CGLS, BLAST_MATERIAL, BLAST_TOPOLOGY,
     ];
 }
 
