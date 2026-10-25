@@ -237,7 +237,11 @@ loop {
     with `set_height_field_region`, see `deformable-terrain.md`); a field may
     carry a Bekker soil (`HeightField::with_soil`, `set_height_field_soil`, C
     ABI `rbHeightField_SetSoil`) that vehicle wheels sink into and rut
-    (`deformable-terrain.md`, "T5 ruts");
+    (`deformable-terrain.md`, "T5 ruts"); and its ground can deform
+    (`enable_terrain`, `terrain_impact` / `terrain_explode` / `terrain_open`,
+    `terrain_watch_shape` for heavy-body strikes, `read_height_field`; C ABI
+    `rbWorld_EnableTerrain`, `rbTerrain_*`, `rbHeightField_GetHeights`;
+    `deformable-terrain.md`, "T4 status");
   - later: baked static compounds.
   - **No triangle-mesh shapes** (decided 2026-10-24). Level geometry comes in
     convex-decomposed at the source (several hull shapes on a static body),

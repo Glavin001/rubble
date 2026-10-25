@@ -20,6 +20,8 @@
 
 mod controls;
 pub use controls::*;
+mod terrain;
+pub use terrain::*;
 pub mod coords;
 
 use coords::{Coords, RbCoordinates};

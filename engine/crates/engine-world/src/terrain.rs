@@ -225,6 +225,11 @@ impl World {
             .ok_or_else(|| anyhow::anyhow!("terrain is not enabled (call enable_terrain)"))
     }
 
+    /// The settings `enable_terrain` was given, if terrain is on.
+    pub fn terrain_settings(&self) -> Option<&TerrainDef> {
+        self.terrain.as_ref().map(|t| &t.def)
+    }
+
     fn terrain_def(&self) -> anyhow::Result<&TerrainDef> {
         self.terrain
             .as_ref()
