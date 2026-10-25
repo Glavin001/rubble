@@ -264,8 +264,6 @@ pub mod shaders {
             ("fr_strike_force", (64, 1, 1)),
             ("fr_strike_breaks", (64, 1, 1)),
             ("fr_crush_loads", (64, 1, 1)),
-            ("fr_crush_entry", (64, 1, 1)),
-            ("fr_crush_nearest", (64, 1, 1)),
             ("fr_strike_crush", (64, 1, 1)),
             ("fr_crush_bill", (64, 1, 1)),
             ("fr_crush_push", (64, 1, 1)),

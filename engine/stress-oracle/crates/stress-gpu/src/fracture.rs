@@ -161,10 +161,10 @@ struct CrushParams {
     r_bill: u32,
     r_shot: u32,
     r_events: u32,
-    r_dist: u32,
     park_y: f32,
     park_step: f32,
     pad0: f32,
+    pad1: f32,
 }
 
 /// The crush tables and state on the GPU (`fracture.slang` `crush_tab`, `crush_rw`).
@@ -216,8 +216,7 @@ fn crush_buffers(gpu: &Gpu, t: &FractureTables) -> Result<(wgpu::Buffer, wgpu::B
     }
     let r_bill = n as u32;
     let r_shot = r_bill + 2 * b as u32;
-    let r_dist = r_shot + MAX_SHOTS as u32;
-    let r_events = r_dist + n as u32;
+    let r_events = r_shot + MAX_SHOTS as u32;
     let rw_words = r_events as u64 + 6 * c.max_events as u64;
     let params = CrushParams {
         enabled: 1,
@@ -232,7 +231,6 @@ fn crush_buffers(gpu: &Gpu, t: &FractureTables) -> Result<(wgpu::Buffer, wgpu::B
         r_bill,
         r_shot,
         r_events,
-        r_dist,
         park_y: c.park_y,
         park_step: c.park_step,
         ..Default::default()
@@ -385,12 +383,12 @@ impl Layout {
     pub fn a_strike(&self) -> u32 {
         self.a_counters() + 16
     }
-    /// Per body slot 2 words: crush's strike entry (`fracture.slang` `a_crush`).
-    pub fn a_crush(&self) -> u32 {
+    /// Per chunk: its distance to its body's strike path (`fracture.slang` `a_strike_dist`).
+    pub fn a_strike_dist(&self) -> u32 {
         self.a_strike() + 9 * self.b
     }
     pub fn atom_words(&self) -> u32 {
-        self.a_crush() + 2 * self.b
+        self.a_strike_dist() + self.n
     }
 }
 
@@ -449,7 +447,7 @@ const BINDINGS: [Binding; 26] = [
     Binding::Uniform,   // crush params
 ];
 
-const ENTRIES: [&str; 40] = [
+const ENTRIES: [&str; 38] = [
     "fr_loads",
     "fr_breaks",
     "fr_gate",
@@ -480,8 +478,6 @@ const ENTRIES: [&str; 40] = [
     "fr_strike_force",
     "fr_strike_breaks",
     "fr_crush_loads",
-    "fr_crush_entry",
-    "fr_crush_nearest",
     "fr_strike_crush",
     "fr_crush_bill",
     "fr_crush_push",
@@ -819,8 +815,6 @@ impl GpuFracture {
                 self.direct(&mut pass, "fr_strike_nearest", self.layout.n as usize);
                 if crush {
                     // Before fr_strike_force, which drops a strike it finds no entry for.
-                    self.direct(&mut pass, "fr_crush_entry", self.layout.n as usize);
-                    self.direct(&mut pass, "fr_crush_nearest", self.layout.n as usize);
                     self.direct(&mut pass, "fr_strike_crush", self.layout.b as usize);
                 }
                 self.direct(&mut pass, "fr_strike_force", self.layout.b as usize);

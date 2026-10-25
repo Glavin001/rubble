@@ -164,15 +164,17 @@ fn run(f: &Frame, support_loss: bool, factor: f32, shoot: &[usize], frames: u32)
             ..DestructibleDef::new(a)
         })
         .unwrap();
-    // Each shot from -z through the middle of its column, in the asset frame, from 2.3 m
-    // away: its first contact is then 1.7 frames' travel off (40 m/s at 60 Hz), and the
-    // strike is predicted the frame before it, so the shot meets a freed column. (From
-    // 2.5 m the gap was exactly one frame's travel: the strike went unpredicted, the shot
-    // met the column still welded and static, and stopped dead.)
+    // Each shot from -z through the middle of its column, in the asset frame, from 2.5 m
+    // away: its first contact is then three frames' travel off (40 m/s at 60 Hz), exactly
+    // one frame's when the second prediction checks it. The strike is predicted the frame
+    // before it, so the shot meets a freed column. (The strike prediction once picked its
+    // struck chunk by a distance recomputed bit for bit: here no chunk matched, the strike
+    // went unpredicted, and the shot met the column still welded and static and stopped
+    // dead. The start was moved to 2.3 m around it.)
     for &column in shoot {
         let (r, m) = (0.3f32, 400.0f32);
         let p = asset.chunks[f.columns[column] as usize].pose.position;
-        let at = [p[0] + offset[0], p[1] + offset[1], p[2] + offset[2] - 2.3];
+        let at = [p[0] + offset[0], p[1] + offset[1], p[2] + offset[2] - 2.5];
         let b = w
             .create_body(&BodyDef {
                 linear_velocity: [0.0, 0.0, 40.0],

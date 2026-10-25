@@ -108,9 +108,9 @@ Consequences:
 **Forward only.** Everything runs in the fracture's encode after the engine's step and before
 the next one; nothing is rewound.
 1. `fr_crush_loads` integrates the frame's contact loads, before the frame's bond breaks.
-2. The predicted strike (`fr_crush_entry`, `fr_crush_nearest`, `fr_strike_crush`) loads the
-   struck body's entry chunk. It runs before `fr_strike_force`, so the struck chunk is
-   crushed before the engine's step meets it.
+2. The predicted strike (`fr_strike_crush`) loads the struck body's entry chunk, the one
+   `fr_strike_nearest` picks for the strike's bond breaks. It runs before `fr_strike_force`,
+   so the struck chunk is crushed before the engine's step meets it.
 3. A crushed chunk's bonds break with the frame's other breaks (`fr_crush_bonds`). The split
    then leaves it alone on a body.
 4. After the split, `fr_crush_apply` parks that body out of the world and writes the event.
@@ -135,12 +135,16 @@ inside the engine's step.
 - The lab (`ThresholdWorld::new_with_crush`, Fracture Lab `Crush`) removes crushed chunks;
   it keeps no fragments.
 
-**A finding, left as it was.** The existing strike prediction picks its entry chunk by
-matching a distance recomputed in a second kernel bit for bit (`fr_strike_entry`,
-`fr_strike_nearest`). Where the compiler fuses the two differently, no chunk matches and the
-strike is dropped. On the crush wall (Metal) no predicted bond broke at all; the contact
-broke them a frame later. Crushing picks its entry from stored distances instead. The bond
-path was not changed, so its behaviour stays bit for bit.
+**A finding, fixed 2026-10-25.** The strike prediction picked its entry chunk by matching a
+distance recomputed in a second kernel bit for bit (`fr_strike_entry`, `fr_strike_nearest`).
+Metal's fast-math compiles the same expression differently in the two kernels, so on some
+strikes no chunk matched and the strike was dropped: the contact broke the bonds a frame late
+(on the crush wall, the pack's 1.0x shot broke its first bonds in frame 18 rather than 17;
+the support-loss frame's shot from exactly one frame's travel met its column still welded).
+`fr_strike_entry` now stores each chunk's distance and `fr_strike_nearest` compares the stored
+bits, so the minimum always has its chunk. Crushing takes the same entry chunk (its own
+`fr_crush_entry` and `fr_crush_nearest` are gone). Tests: `engine-world`
+`tests/strike_prediction.rs`, and `tests/support_loss.rs` back at its 2.5 m start.
 
 ## 3. Blast loading (shipped 2026-10-25)
 

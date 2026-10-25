@@ -847,8 +847,12 @@ void fr_view_bonds(uint3 id: SV_DispatchThreadID)
 //   fr_strike_find     one thread per body: the first shot (in order) whose sphere reaches
 //                      its bounds within the frame;
 //   fr_strike_entry    one thread per chunk of a struck body: the first time the shot meets
-//                      its box, and its distance to the shot's path;
-//   fr_strike_nearest  the struck chunk: the nearest to the path (ties: the lowest);
+//                      its box, and its distance to the shot's path (stored per chunk, and
+//                      the body's minimum);
+//   fr_strike_nearest  the struck chunk: the nearest to the path (ties: the lowest), the one
+//                      whose stored distance is the minimum. The distance is computed once:
+//                      a second computation can round differently (the compiler fuses each
+//                      kernel its own way) and match no chunk, dropping the strike;
 //   fr_strike_force    one thread per struck body: the contact point and the Hertz force;
 //   fr_strike_breaks   one thread per bond.
 
@@ -862,6 +866,9 @@ float unordered(uint u)
 {
     return asfloat((u & 0x80000000u) != 0 ? (u & 0x7fffffffu) : ~u);
 }
+
+// Per chunk: its distance to its body's strike path (float bits, fr_strike_entry).
+uint a_strike_dist() { return a_strike() + 9 * params.body_count; }
 
 // A chunk's box centre in the world (the stress frame), and its body's rotation.
 float3 chunk_box_world(uint k, out Quat q)
@@ -1020,6 +1027,7 @@ void fr_strike_entry(uint3 id: SV_DispatchThreadID)
     float3 r = cc - hit;
     float along = dot(r, d);
     float dist = length(r - d * along) + abs(along) * 1e-3;
+    atom[a_strike_dist() + k].store(asuint(dist));
     atom[at + 7].min(asuint(dist));
 }
 
@@ -1034,15 +1042,8 @@ void fr_strike_nearest(uint3 id: SV_DispatchThreadID)
     uint shot;
     if (!struck(b, shot))
         return;
-    float4 s0 = frames[strike_at(b)];
-    float4 s1 = frames[strike_at(b) + 1];
-    float3 d = s1.xyz / max(length(s1.xyz), 1e-12);
-    Quat q;
-    float3 r = chunk_box_world(k, q) - (s0.xyz + s1.xyz * s1.w);
-    float along = dot(r, d);
-    float dist = length(r - d * along) + abs(along) * 1e-3;
     uint at = a_strike() + 9 * b;
-    if (asuint(dist) == atom[at + 7].load())
+    if (atom[a_strike_dist() + k].load() == atom[at + 7].load())
         atom[at + 8].min(k);
 }
 
@@ -1136,13 +1137,10 @@ void fr_strike_breaks(uint3 id: SV_DispatchThreadID)
 //   fr_crush_loads   one thread per chunk: this frame's contact loads (fr_loads's: the
 //                    sustained forces and carried pulses for the frame, each new impact at
 //                    its Hertz peak force for its duration), the damage step;
-//   fr_crush_entry, fr_crush_nearest
-//                    a struck body's entry chunk: the nearest to the shot's path (as
-//                    fr_strike_entry and fr_strike_nearest choose it, matched by stored
-//                    distances rather than recomputed ones);
 //   fr_strike_crush  one thread per struck body: the predicted strike's Hertz force on its
-//                    entry chunk, for the Hertz contact time; the energy it takes booked
-//                    to the shot (`bill`);
+//                    entry chunk (fr_strike_nearest's, the chunk whose bonds the strike
+//                    breaks), for the Hertz contact time; the energy it takes booked to the
+//                    shot (`bill`);
 //   fr_crush_bill    one thread per shot: the energy its strikes booked, paid from its
 //                    kinetic energy, J = M (v - sqrt(v^2 - 2 dE / M)) capped at M v;
 //   fr_crush_push    one thread per struck body: the struck dynamic bodies take J (their
@@ -1170,10 +1168,10 @@ struct CrushParams
     uint r_bill;      // crush_rw: per body slot (energy booked, shot + 1), (contact, -)
     uint r_shot;      // crush_rw: per shot (impulse, energy)
     uint r_events;    // crush_rw: per event 6 float4
-    uint r_dist;      // crush_rw: per chunk its distance to a strike's path
     float park_y;     // a parked body's height (rubble frame, World `graveyard`)
     float park_step;  // and its spacing
     float pad0;
+    float pad1;
 };
 
 // Per chunk 2 float4: (capPressure, cohesion, frictionSlope, crushEnergy), (crushViscosity,
@@ -1347,55 +1345,10 @@ void fr_crush_loads(uint3 id: SV_DispatchThreadID)
     crush_record(k, crush_two(base, dt - tau, peak, tau, k, st.x), CAUSE_CONTACT);
 }
 
-// Per body slot 2 words (crush's own strike entry), complemented so that the buffer's
-// zeros are the reset state: ~ the nearest chunk's distance to the shot's path (float
-// bits; atomic max of the complement is the min), ~ that chunk (0: none).
-uint a_crush() { return a_strike() + 9 * params.body_count; }
-
-// A struck chunk's distance to the shot's path (fr_strike_entry's measure), stored per
-// chunk so the nearest is found by the stored bits (one computation per chunk: the
-// minimum is matched exactly whatever the compiler fuses).
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void fr_crush_entry(uint3 id: SV_DispatchThreadID)
-{
-    uint k = id.x;
-    if (k >= params.chunk_count || params.shot_count == 0 || crush.enabled == 0)
-        return;
-    uint b = body_of(k);
-    uint shot;
-    if (!struck(b, shot))
-        return;
-    float4 s0 = frames[strike_at(b)];
-    float4 s1 = frames[strike_at(b) + 1];
-    float3 d = s1.xyz / max(length(s1.xyz), 1e-12);
-    Quat q;
-    float3 r = chunk_box_world(k, q) - (s0.xyz + s1.xyz * s1.w);
-    float along = dot(r, d);
-    float dist = length(r - d * along) + abs(along) * 1e-3;
-    crush_rw[crush.r_dist + k] = float4(dist, 0.0, 0.0, 0.0);
-    atom[a_crush() + 2 * b].max(~asuint(dist));
-}
-
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void fr_crush_nearest(uint3 id: SV_DispatchThreadID)
-{
-    uint k = id.x;
-    if (k >= params.chunk_count || params.shot_count == 0 || crush.enabled == 0)
-        return;
-    uint b = body_of(k);
-    uint shot;
-    if (!struck(b, shot))
-        return;
-    if (~asuint(crush_rw[crush.r_dist + k].x) == atom[a_crush() + 2 * b].load())
-        atom[a_crush() + 2 * b + 1].max(~k);
-}
-
-// One thread per body: crush's strike words reset, the struck body's entry chunk loaded
-// by the strike's Hertz force (fr_strike_force's) for the Hertz contact time; the energy
-// the damage took booked to the shot. Before fr_strike_force (which drops a strike it
-// finds no entry chunk for).
+// One thread per body: the struck body's entry chunk (fr_strike_nearest's) loaded by the
+// strike's Hertz force (fr_strike_force's) for the Hertz contact time; the energy the
+// damage took booked to the shot. Before fr_strike_force (which drops a strike it finds no
+// entry chunk for).
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void fr_strike_crush(uint3 id: SV_DispatchThreadID)
@@ -1403,9 +1356,7 @@ void fr_strike_crush(uint3 id: SV_DispatchThreadID)
     uint b = id.x;
     if (b >= params.body_count || params.shot_count == 0 || crush.enabled == 0)
         return;
-    uint k = ~atom[a_crush() + 2 * b + 1].load();
-    atom[a_crush() + 2 * b].store(0u);
-    atom[a_crush() + 2 * b + 1].store(0u);
+    uint k = atom[a_strike() + 9 * b + 8].load();
     crush_rw[crush.r_bill + 2 * b] = float4(0.0);
     uint shot;
     if (!struck(b, shot))
