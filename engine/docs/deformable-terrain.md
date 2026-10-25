@@ -752,7 +752,11 @@ t = p0·n − (k_N·u_n + ρ·c_p·v_n)·n − (k_T·u_t + ρ·c_s·v_t):
   material with stiffness; either missing is an error.
 
 **Tests** (`tests/terrain_absorb.rs`):
-- **At rest.** One second under gravity, then the bake (the identity, to 1e-5 m):
+- **At rest.** One second under gravity, then the bake. The splat bake moves
+  whole quanta by the particles' displacement, so it is checked by its exact
+  volume and a bound on what that displacement moves (the elastic layer: one
+  quantum, 1.25e-4 m; the sand: 0.9 mm). Activate-then-bake with no step is
+  still the identity (`terrain_mpm`).
 
   | Material | Ground | Top speed | After 1 s | Largest move |
   |---|---|---|---|---|
@@ -783,20 +787,36 @@ t = p0·n − (k_N·u_n + ρ·c_p·v_n)·n − (k_T·u_t + ρ·c_s·v_t):
     back up, which a plane wave in a half-space would not do. In a shallower
     layer, with the springs taken out as a measurement, the sand pulse left
     0.6% against 2.4% with them; the sine wavelet's share did not change.
-- **The demo's event settles.** The 8 m stony impactor at 20 km/s, margin 0.6,
-  8 cells per radius; particles faster than 1 m/s 10 s after the strike:
-  86% with the rigid ground, none with the absorbing ground (48% still faster
-  than 5 cm/s, top 0.50 m/s).
-  - At the demo's own resolution (16 cells/R, margin 1, 0.97 M particles):
-    after 20 s, 52% against none (1.2% faster than 5 cm/s, top 0.22 m/s).
-    Nothing is above 1 m/s from 8 s on.
-  - What still moves at 20 s is the crater floor's loose material settling
-    (0.2 m/s) and rim deposits sliding off the box's edge, so the 5 cm/s rest
-    tolerance is still some seconds away.
-- **The crater** (`terrain_crater`, margin 2, absorbing): CRATER_RESULTS.
+- **The demo's event settles** (the bounded source). The 8 m stony impactor
+  at 20 km/s; the share of particles faster than 1 m/s (and than 5 cm/s):
+
+  | Region | After | Rigid, unstressed | Absorbing |
+  |---|---|---|---|
+  | 8 cells/R, margin 0.6 (97 k particles) | 10 s | 80% (100%) | 0 (36%), top 0.9 m/s |
+  | the demo's: 16 cells/R, margin 1 (0.90 M) | 20 s | 53% (99%) | 0 (0.5%), top 0.25 m/s |
+
+  - The first is a test; the second is ignored (a minute).
+  - Before the bounded source, at the demo's resolution, nothing was above
+    1 m/s from 8 s on. What still moved at 20 s was the crater floor's loose
+    material settling (0.2 m/s) and rim deposits sliding off the box's edge,
+    so the 5 cm/s rest tolerance is still some seconds away.
+- **The crater** (`terrain_crater`, `CRATER_GROUND=absorbing`, margin 2,
+  16 cells/R, the bounded source and the splat bake; nothing tuned to it):
+  apparent radius 0.184 m (1.25 R), centre 0.061 m deep, deepest 0.079 m, rim
+  2.9 cm high at 0.239 m, cavity 3.10× π-scaling's volume (rigid: 3.08×,
+  1.25 R, 3.2 cm). The bed and walls hardly change the crater; the volume
+  excess is the source's, as diagnosed above. 782 s wall.
 
 **Open points.**
-- **Not the default yet:** CRATER_DEFAULT.
+- **Not the default.** `TerrainConfig::default()` keeps the rigid ground and
+  the unstressed start, so existing results and fingerprints are unchanged.
+  With the absorbing ground on, every suite passes except engine-world's
+  dropped ball: it penetrates 0.094 m, 0.486× Uehara's 0.194 m, just under
+  the test's 0.5–2× band (rigid ground: 0.115 m, 0.59×). Its region is shallow,
+  so the ball's flow reaches the bed and walls; most likely the rigid box
+  sends back energy the absorbing ground lets go (not verified). At
+  6 cells per body the penetration is under-resolved either way. Making it
+  the default needs that settled (`TERRAIN_GROUND=absorbing` runs it).
 - **The walls' top corner.** Within 1.5 cells of a side's top edge, the
   unactivated ground's surface is the soft wall face rather than a rigid
   contact. Rim material deposited there sinks into the corner at the spring's
