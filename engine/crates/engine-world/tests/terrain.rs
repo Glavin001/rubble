@@ -219,6 +219,22 @@ fn a_dropped_ball_opens_a_region_before_it_lands_and_penetrates_as_uehara_says()
         }
     }
     w.poll_blocking().unwrap();
+    if std::env::var("TERRAIN_TRACE").is_ok() {
+        let h = w.read_height_field(ground).unwrap();
+        let row: Vec<String> = (24..41).map(|i| format!("{:.3}", h[32 * 65 + i])).collect();
+        let yb = w.body_transform(b).unwrap().unwrap().position[1];
+        eprintln!("baked row through the ball (x -0.32..0.32): {row:?}; ball centre {yb:.4}");
+    }
+    // After the bake: the ball on the baked ground (the heightfield cannot
+    // hold it buried), not thrown off it.
+    let mut after = Vec::new();
+    for _ in 0..60 {
+        w.step().unwrap();
+        w.poll().unwrap();
+        after.push(w.body_transform(b).unwrap().map_or(f32::NAN, |t| t.position[1]) - r);
+    }
+    eprintln!("ball bottom after the bake: {:?}", &after[..8]);
+    eprintln!("... settles at {:.4} m", after[after.len() - 1]);
     assert_eq!(w.terrain_missed_strikes(), 0);
     let above = opened_above.expect("a region opened for the strike");
     assert!(
