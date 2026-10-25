@@ -541,3 +541,155 @@ fn a_dropped_block_lands_on_the_ground() {
     let speed = glam::Vec3::from(st.linear_velocity).length();
     assert!(speed < 0.2, "the block rests ({speed} m/s)");
 }
+
+/// Place one column under a `top_mass` block with support loss and crushing on (`crush`:
+/// the concrete's crush parameters); step `frames`. Returns the world, the destructible,
+/// the frame and the crush events by frame.
+fn crush_column(
+    top_mass: f64,
+    crush: CrushMaterial,
+    frames: u32,
+) -> (World, DestructibleId, Frame, Vec<(u32, DestructionEvent)>) {
+    let f = frame(&[[0.0, 0.0]], &[], top_mass, [0.5, 0.25, 0.5], 1e12);
+    let asset = DestructibleAssetDesc::from_pack(&f.pack).unwrap();
+    let solver = asset.solver_for(StrengthModel::Threshold).unwrap();
+    let stress = asset.stress.as_ref().unwrap();
+    let offset = stress.placement().map(|x| -x as f32);
+    let def = WorldDef {
+        capacity: capacity(&asset),
+        gravity: [0.0, solver.gravity_y, 0.0],
+        solver,
+        enable_sleep: false,
+        contacts: ContactStorage::Canonical,
+        ..WorldDef::default()
+    };
+    let mut w = World::new(GpuContext::Default, &def).unwrap();
+    let ground = w.create_body(&BodyDef::default()).unwrap();
+    let h = stress.ground_height().unwrap_or(0.0) + offset[1];
+    w.create_shape(
+        ground,
+        &ShapeDef::default(),
+        Geometry::Plane {
+            normal: [0.0, 1.0, 0.0],
+            offset: h,
+        },
+    )
+    .unwrap();
+    let a = w.create_destructible_asset(&asset).unwrap();
+    let id = w
+        .create_destructible(&DestructibleDef {
+            model: StrengthModel::Threshold,
+            transform: Transform::new(offset, [0.0, 0.0, 0.0, 1.0]),
+            asleep: false,
+            support_loss: true,
+            crush: Some(Crush {
+                materials: vec![("concrete".into(), crush)],
+                ..Crush::default()
+            }),
+            ..DestructibleDef::new(a)
+        })
+        .unwrap();
+    let mut events = Vec::new();
+    for n in 0..frames {
+        w.step().unwrap();
+        for fr in w.poll_blocking().unwrap() {
+            for e in &fr.destruction_events {
+                events.push((n, e.clone()));
+            }
+        }
+    }
+    (w, id, f, events)
+}
+
+/// The column's flow stress (`engine/docs/destruction-reactions.md` section 2, "Loads
+/// through bonds"): the weight above it reaches its top bond, that plus its own its bottom
+/// bond; pushing into it at its ends (each its half height `h` from its centre) they give
+/// `sigma V = -h (L_top + L_bot)`, the uniaxial `sigma = (L_top + L_bot) / 2A`: `q = sigma`,
+/// `p = sigma / 3`.
+#[test]
+fn support_loss_flow_loads_a_column_with_the_weight_above_it() {
+    let strong = CrushMaterial {
+        cap_pressure: 1e12,
+        cohesion: 1e12,
+        friction_slope: 0.0,
+        crush_energy: 1e9,
+        crush_viscosity: 1e9,
+    };
+    let top = 20_000.0;
+    let (w, id, f, events) = crush_column(top, strong, 5);
+    assert!(events.is_empty(), "{events:?}");
+    let state = w.destructible_crush_state(id).unwrap();
+    let (damage, p, q, crushed) = state[f.columns[0] as usize];
+    let sigma = ((top * G) + (top + 400.0) * G) / (2.0 * AREA);
+    assert!(damage == 0.0 && !crushed);
+    assert!(((q as f64) - sigma).abs() < 1e-4 * sigma, "q {q} vs {sigma}");
+    assert!(((p as f64) - sigma / 3.0).abs() < 1e-4 * sigma, "p {p} vs {}", sigma / 3.0);
+    // The block on it: its one bond pushes it up at its bottom face.
+    let (_, pt, qt, _) = state[f.top as usize];
+    let st = top * G * f.top_half[1] / (8.0 * f.top_half[0] * f.top_half[1] * f.top_half[2]);
+    assert!(((qt as f64) - st).abs() < 1e-4 * st, "top q {qt} vs {st}");
+    assert!(pt > 0.0);
+}
+
+/// A column whose cohesion its load beats crushes with cause Load when the law's damage
+/// reaches 1: `excess = q - cohesion` (no friction, no cap), `D = n dt excess^2 /
+/// (crushViscosity crushEnergy)` after n frames. Its mass goes to its fragments; the block
+/// falls onto them.
+#[test]
+fn a_column_crushes_under_the_weight_above_it_with_cause_load() {
+    let top = 20_000.0;
+    let sigma = ((top * G) + (top + 400.0) * G) / (2.0 * AREA);
+    let weak = CrushMaterial {
+        cap_pressure: 1e12,
+        cohesion: 0.5e6,
+        friction_slope: 0.0,
+        crush_energy: 1e6,
+        crush_viscosity: 1e5,
+    };
+    let excess = sigma - weak.cohesion;
+    let dt = 1.0 / 60.0;
+    let want = (weak.crush_viscosity * weak.crush_energy / (excess * excess * dt)).ceil() as u32;
+    assert!(want > 3 && want < 40, "{want}");
+    let (w, id, f, events) = crush_column(top, weak, want + 20);
+    let crushes: Vec<&(u32, DestructionEvent)> = events
+        .iter()
+        .filter(|e| matches!(e.1, DestructionEvent::ChunkCrushed { .. }))
+        .collect();
+    let (frame, first) = crushes.first().expect("the column crushes");
+    let DestructionEvent::ChunkCrushed {
+        chunk,
+        cause,
+        mass,
+        fragments,
+        peak_deviator,
+        ..
+    } = first
+    else {
+        unreachable!()
+    };
+    assert_eq!(*chunk, f.columns[0]);
+    assert_eq!(*cause, CrushCause::Load);
+    assert!(
+        (*frame as i64 - (want as i64 - 1)).abs() <= 1,
+        "crushed in frame {frame}, the law says after {want} frames"
+    );
+    assert!(((*peak_deviator as f64) - sigma).abs() < 1e-4 * sigma);
+    // Conserve: its fragments carry its mass.
+    let carried: f32 = fragments
+        .iter()
+        .map(|b| w.body_mass_data(*b).unwrap().unwrap().mass)
+        .sum();
+    assert!((carried - mass).abs() < 1e-3 * mass, "{carried} vs {mass}");
+    // Its bonds broke with cause Crush.
+    assert!(events.iter().any(|e| matches!(
+        &e.1,
+        DestructionEvent::BondsBroken { cause: BreakCause::Crush, bonds, .. } if bonds.len() == 2
+    )));
+    // The block came down.
+    let body = w.destructible_chunk_body(id, f.top).unwrap();
+    let v = w.read_body_state(body).unwrap().linear_velocity;
+    let y0 = DestructibleAssetDesc::from_pack(&f.pack).unwrap().chunks[f.top as usize].pose.position[1];
+    let y = w.read_body_state(body).unwrap().transform.position[1];
+    eprintln!("top block: origin y {y} (chunk at {y0}), v {v:?}");
+    assert!(y < -0.5 || v[1] < -1.0, "the block falls once its column is crushed");
+}

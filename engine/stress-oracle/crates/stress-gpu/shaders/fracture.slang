@@ -1173,6 +1173,10 @@ struct CrushParams
     uint r_dist;      // crush_rw: per chunk its distance to a strike's path
     float park_y;     // a parked body's height (rubble frame, World `graveyard`)
     float park_step;  // and its spacing
+    uint flow;        // 1: the support-loss flow's bond loads (`r_flow`) load the chunks
+    uint t_normal;    // crush_tab: per bond its normal (structure frame)
+    uint r_flow;      // crush_rw: per bond its compressive flow load (N), 4 per float4
+    uint r_blast;     // crush_rw: per chunk a blast window's (damage, peak p, peak q, -)
     float pad0;
 };
 
@@ -1189,6 +1193,8 @@ static const uint CR_CRUSHED = 1;
 static const uint CR_NOW = 2;
 static const uint CAUSE_CONTACT = 1;
 static const uint CAUSE_IMPACT = 2;
+static const uint CAUSE_BLAST = 3;
+static const uint CAUSE_LOAD = 4;
 static const uint C_CRUSH_EVENTS = 7;  // crushes this frame (the events)
 static const uint C_FRAGMENTS = 8;     // fragment pool entries taken in all
 static const uint C_CRUSHED = 9;       // chunks crushed in all
@@ -1272,6 +1278,145 @@ void crush_record(uint k, float4 step, uint cause)
     crush_rw[k] = float4(step.x, max(st.y, step.y), max(st.z, step.z), asfloat(flags));
 }
 
+float sym_norm2(Sym s)
+{
+    return dot(s.d, s.d) + 2.0 * dot(s.o, s.o);
+}
+
+// The support-loss flow's tractions on chunk k (engine/docs/destruction-reactions.md
+// section 2, "Loads through bonds"): each intact bond's compressive flow load L (N, the
+// host's `SupportLoss::load`) pushes into the chunk at the bond's centroid along its
+// normal, f = -L n_out (n_out from the chunk toward the bond). They are reactions already
+// (the weight above it and its own, carried to the anchors), so they enter the virial as
+// they are: sum sym(r (x) f). (wf: the virial; w: the loads' total, 0 for none.)
+void flow_virial(uint k, Quat q, float3 origin, float3 centre, out Sym wf, out float total)
+{
+    wf = sym_zero();
+    total = 0.0;
+    float4 adj = crush_tab[crush.t_adj + k];
+    uint first = asuint(adj.x);
+    uint count = asuint(adj.y);
+    for (uint j = first; j < first + count; j++)
+    {
+        uint bi = asuint(crush_tab[crush.t_list + j / 4][j % 4]);
+        if (work[w_alive() + bi] == 0)
+            continue;
+        float l = crush_rw[crush.r_flow + bi / 4][bi % 4];
+        if (!(l > 0.0))
+            continue;
+        float3 r = origin + rotate(q, crush_tab[crush.t_bonds + bi].xyz) - centre;
+        float3 n = rotate(q, crush_tab[crush.t_normal + bi].xyz);
+        float3 out_n = dot(n, r) >= 0.0 ? n : -n;
+        wf = sym_add(wf, sym_outer(r, -l * out_n));
+        total += l;
+    }
+}
+
+// fr_crush_loads with the support-loss flow (`crush.flow`): the frame's contact loads as
+// fr_crush_loads takes them, balanced through the bonds, plus the flow's tractions for the
+// whole frame (sustained). Crushed with cause Load when the flow's part of the peak virial
+// is the larger (by its norm), else Contact.
+void crush_loads_flow(uint k)
+{
+    uint slot = body_of(k);
+    uint b = BODY_WORDS * slot;
+    Quat q;
+    float3 origin;
+    structure_pose(slot, b, q, origin);
+    float4 c0 = chunks[4 * k];
+    float4 props = chunks[4 * k + 3];
+    float3 centre = origin + rotate(q, c0.xyz);
+    float inv_mass = bodies[b].w;
+    float m_body = inv_mass > 0.0 ? 1.0 / inv_mass : float_bits(0x7f800000u);
+    float dt = params.dt;
+    Sym wa = sym_zero();
+    float3 fa = float3(0.0);
+    float4 sa = float4(0.0);
+    Sym wb = sym_zero();
+    float3 fb = float3(0.0);
+    float4 sb = float4(0.0);
+    float tau = 0.0;
+    uint begin = sort[k];
+    uint count = sort[params.chunk_count + 1 + k];
+    for (uint i = 0; i < count; i++)
+    {
+        Record r = manifolds[begin + i];
+        float j = length(r.impulse.xyz);
+        if (j == 0.0)
+            continue;
+        float m_other = r.other.x;
+        float m = isinf(m_body) ? (isinf(m_other) ? c0.w : m_other) : (isinf(m_other) ? m_body : m_body * m_other / (m_body + m_other));
+        float j_impact = min(j, 2.0 * m * max(r.impulse.w - params.band, 0.0));
+        float3 rr = r.point.xyz - centre;
+        float3 dir = r.impulse.xyz / j;
+        if (j_impact < j)
+            add_load(wa, fa, sa, rr, dir * ((j - j_impact) / dt));
+        if (j_impact > 0.0)
+        {
+            float e_star = 1.0 / ((1.0 - props.y * props.y) / props.x + 1.0 / r.other.y);
+            float radius = min(r.other.z, props.z);
+            float duration = hertz_duration(m, radius, e_star, r.impulse.w);
+            add_load(wb, fb, sb, rr, dir * (PI * j_impact / (2.0 * duration)));
+            tau = max(tau, min(duration, dt));
+        }
+    }
+    uint from = params.parity;
+    uint off = work[w_pulses() + 4 * k + 2 * from];
+    uint carried = work[w_pulses() + 4 * k + 2 * from + 1];
+    uint src = l_pool(from) + 3 * off;
+    for (uint p = 0; p < carried; p++)
+    {
+        float4 a = loads[src + 3 * p];
+        float4 bb = loads[src + 3 * p + 1];
+        float4 c = loads[src + 3 * p + 2];
+        float mean = pulse_mean(a.x, a.y, a.z, a.w, bb.w, dt);
+        if (mean != 0.0)
+            add_load(wa, fa, sa, bb.xyz - centre, c.xyz * mean);
+    }
+    Sym wf;
+    float flow_total;
+    flow_virial(k, q, origin, centre, wf, flow_total);
+    bool contact = sa.w > 0.0 || sb.w > 0.0;
+    if (!contact && !(flow_total > 0.0))
+        return;
+    Sym base = wf;
+    Sym peak = wf;
+    Sym peak_contact = sym_zero();
+    if (contact)
+    {
+        float4 bonds = bond_centroid(k, q, origin, centre);
+        base = sym_add(balanced(wa, fa, sa, bonds), wf);
+        peak_contact = balanced(sym_add(wa, wb), fa + fb, sa + sb, bonds);
+        peak = sym_add(peak_contact, wf);
+    }
+    uint cause = sym_norm2(wf) >= sym_norm2(peak_contact) ? CAUSE_LOAD : CAUSE_CONTACT;
+    float4 st = crush_rw[k];
+    crush_record(k, crush_two(base, dt - tau, peak, tau, k, st.x), cause);
+}
+
+// One thread per chunk, before a blast's split (GpuFracture::encode_split_crush): the
+// damage a blast window adds (the host integrates it from the face pressures, balanced
+// through the chunk's intact bonds as fr_crush_loads balances contact loads:
+// `crush_rw[r_blast + k]` = (damage, peak p, peak q, -)), recorded with cause Blast. The
+// word is consumed (zeroed).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_crush_blast(uint3 id: SV_DispatchThreadID)
+{
+    uint k = id.x;
+    if (k >= params.chunk_count || crush.enabled == 0)
+        return;
+    float4 w = crush_rw[crush.r_blast + k];
+    if (!(w.x > 0.0) && !(w.y > 0.0) && !(w.z > 0.0))
+        return;
+    crush_rw[crush.r_blast + k] = float4(0.0);
+    if (!crushable(k) || (crush_flags(k) & CR_CRUSHED) != 0)
+        return;
+    float d = crush_rw[k].x + w.x;
+    float4 step = d >= 1.0 ? float4(1.0, w.y, w.z, 1.0) : float4(d, w.y, w.z, 0.0);
+    crush_record(k, step, CAUSE_BLAST);
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void fr_crush_loads(uint3 id: SV_DispatchThreadID)
@@ -1279,6 +1424,12 @@ void fr_crush_loads(uint3 id: SV_DispatchThreadID)
     uint k = id.x;
     if (k >= params.chunk_count || crush.enabled == 0 || !crushable(k) || (crush_flags(k) & CR_CRUSHED) != 0)
         return;
+    // With the support-loss flow its own path (this one's arithmetic stays as it was).
+    if (crush.flow != 0)
+    {
+        crush_loads_flow(k);
+        return;
+    }
     uint slot = body_of(k);
     uint b = BODY_WORDS * slot;
     Quat q;

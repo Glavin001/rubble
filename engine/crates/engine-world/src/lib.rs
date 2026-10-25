@@ -55,7 +55,7 @@ pub use destruction::{
 pub use error::{StaleHandle, Unsupported};
 pub use events::{
     coalesce, BodyEvents, BodyMoveEvent, CoalescedFrame, ContactBeginEvent, ContactEndEvent,
-    ContactEvents, CrushCause, DestructionEvent, Frame, RayBatchId, RayBatchResult, SensorEvent, SensorEvents,
+    BreakCause, ContactEvents, CrushCause, DestructionEvent, Frame, RayBatchId, RayBatchResult, SensorEvent, SensorEvents,
     SkinId, SkinOutput, SoftOutput, VehicleOutput,
 };
 pub use handles::{BodyId, JointId, ShapeId};
@@ -1540,6 +1540,10 @@ impl World {
             });
         #[cfg(feature = "stress")]
         if fracture {
+            // A sustained load still crushing must see every step.
+            if self.fracture_flow_needs_step() {
+                self.sim.request_step();
+            }
             self.encode_fracture_begin(&mut enc);
         }
         self.sim

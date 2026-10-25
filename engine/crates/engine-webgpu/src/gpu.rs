@@ -1648,6 +1648,12 @@ impl WgpuSim {
         self.pose_output
     }
 
+    /// Run the next step even if nothing is awake and nothing was written (a host
+    /// pass that has to see every step, such as a sustained load integrating damage).
+    pub fn request_step(&mut self) {
+        self.wake_pending = true;
+    }
+
     /// Whether the last `step*` call ran the GPU step (false: it was skipped
     /// because nothing was awake and nothing was written).
     pub fn last_step_ran(&self) -> bool {

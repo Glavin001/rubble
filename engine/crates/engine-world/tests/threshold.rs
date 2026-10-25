@@ -163,6 +163,7 @@ fn run_world(asset: &DestructibleAssetDesc, lab: &engine_fracture::Scene, frames
                     DestructionEvent::BondsBroken {
                         destructible,
                         bonds,
+                        ..
                     } => {
                         assert_eq!(*destructible, id);
                         broken += bonds.len() as u32;

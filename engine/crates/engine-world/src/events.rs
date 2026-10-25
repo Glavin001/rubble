@@ -57,10 +57,12 @@ pub enum DestructionEvent {
         force: f32,
         torque: f32,
     },
-    /// Bonds of a destructible broke this step (bond indices into its asset).
+    /// Bonds of a destructible broke this step (bond indices into its asset). A step
+    /// whose breaks have several causes reports one event per cause.
     BondsBroken {
         destructible: DestructibleId,
         bonds: Vec<u32>,
+        cause: BreakCause,
     },
     /// An actor (connected chunks) of a destructible came apart. The parent
     /// is described by value: its chunks have already moved to the children.
@@ -96,18 +98,35 @@ pub enum DestructionEvent {
     },
 }
 
+/// What broke a destructible's bonds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BreakCause {
+    /// The strength model's own rule: the threshold model's contact and impact loads and
+    /// its strike prediction, or the Bonds model's joint forces.
+    Stress,
+    /// A blast's face pressures (`World::detonate`, `DestructibleDef::blast_loading`).
+    Blast,
+    /// Support loss (`DestructibleDef::support_loss`): the weight a piece's bonds carry
+    /// to its anchors overloads them, or it tips off its supports.
+    SupportLoss,
+    /// A chunk was crushed: every bond of it breaks (`ChunkCrushed`).
+    Crush,
+}
+
 /// What crushed a chunk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CrushCause {
     /// A predicted strike (a projectile, `World::body_set_projectile`).
     Impact,
-    /// A blast's face pressures (not produced yet).
+    /// A blast's face pressures over its windows (`DestructibleDef::blast_loading`),
+    /// with their reactions through the chunk's bonds.
     Blast,
     /// Contact loads after a step (debris, impacts the strike prediction did not see,
     /// sustained pressure), with their reactions through the chunk's bonds.
     Contact,
-    /// Loads through its bonds alone (not produced yet: the threshold mode solves no
-    /// bond forces).
+    /// Loads through its bonds: the support-loss flow's (`DestructibleDef::
+    /// support_loss`), the weight above it carried to the anchors, the larger part of
+    /// its stress.
     Load,
 }
 

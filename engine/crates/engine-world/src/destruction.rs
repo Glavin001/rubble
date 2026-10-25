@@ -1120,6 +1120,7 @@ impl World {
             out.push(DestructionEvent::BondsBroken {
                 destructible: id,
                 bonds: bonds.clone(),
+                cause: crate::BreakCause::Stress,
             });
             let before = self.destructibles[i].actor.clone();
             let anchored_before = self.anchored(i);
