@@ -28,6 +28,9 @@
 //! angular) across frames, as the device does; [`BlastSolver::impulse`] converts it.
 
 use crate::math::Vec3;
+
+mod native;
+use native::native_pcg;
 use serde::{Deserialize, Serialize};
 
 /// Reference modulus the compliance weight is relative to (concrete).
@@ -132,6 +135,22 @@ pub struct BlastSettings {
     pub fibres: bool,
     /// Gradual damage per second below the fatal limit (`BLAST_DAMAGE_RATE`, 2).
     pub damage_rate: f64,
+    pub solver: SolverKind,
+    /// [`SolverKind::Native`]: also stop when a preconditioned step moves the forces by at most
+    /// this fraction of them (`ExtStressGpuSolveParams::forceTolerance`; 0 off).
+    pub force_tolerance: f64,
+}
+
+/// Which solve runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SolverKind {
+    /// The CUDA host path (ExtStressSolver's GPU solve, vibe-land's `blast` backend):
+    /// unpreconditioned node-space CGLS restarted every solve.
+    HostCgls,
+    /// The resident path (PhysX's native destruction stage, vibe-land's `native` backend):
+    /// projected PCG with the two-step Chebyshev block-Jacobi polynomial
+    /// (`componentStressSolve`), rigid modes projected out, reliable residual, settled reuse.
+    Native,
 }
 
 impl Default for BlastSettings {
@@ -145,6 +164,22 @@ impl Default for BlastSettings {
             bend_gain_max: 3.0,
             fibres: true,
             damage_rate: 2.0,
+            solver: SolverKind::HostCgls,
+            force_tolerance: 0.0,
+        }
+    }
+}
+
+impl BlastSettings {
+    /// PhysX's native destruction stage as vibe-land configures it on the Mac
+    /// (`destruction/src/native_runtime.rs`): native weighting, the resident PCG, 16 iterations
+    /// at tolerance 1e-3, warm-started.
+    pub fn native() -> BlastSettings {
+        BlastSettings {
+            max_iterations: 16,
+            mass_weighting: MassWeighting::Native,
+            solver: SolverKind::Native,
+            ..Default::default()
         }
     }
 }
@@ -631,6 +666,10 @@ impl BlastSolver {
         assert_eq!(accel.len(), n, "one acceleration per node");
         let islands = &self.islands;
         let warm = g.settings.warm_start && self.has_warm_start;
+        // The native path skips only on its certificate (`beginNativeSettledReuse`), so with or
+        // without `skip_settled`.
+        let native = g.settings.solver == SolverKind::Native;
+        let skip_settled = skip_settled || native;
         let skip_mask: Vec<bool> = (0..islands.count)
             .map(|k| {
                 skip_settled
@@ -669,15 +708,35 @@ impl BlastSolver {
             reports[k].skipped = skip_mask[k];
         }
         let enters: Vec<bool> = (0..m).map(|j| !settled_bond(j)).collect();
-        if self.device_precision {
-            cgls::<f32>(g, islands, accel, &live, &enters, &mut self.x, &mut reports);
-        } else {
-            cgls::<f64>(g, islands, accel, &live, &enters, &mut self.x, &mut reports);
+        match (native, self.device_precision) {
+            (false, true) => {
+                cgls::<f32>(g, islands, accel, &live, &enters, &mut self.x, &mut reports)
+            }
+            (false, false) => {
+                cgls::<f64>(g, islands, accel, &live, &enters, &mut self.x, &mut reports)
+            }
+            (true, true) => {
+                native_pcg::<f32>(g, islands, accel, &live, warm, &mut self.x, &mut reports)
+            }
+            (true, false) => {
+                native_pcg::<f64>(g, islands, accel, &live, warm, &mut self.x, &mut reports)
+            }
         }
 
         self.has_warm_start = true;
         self.last_input.copy_from_slice(accel);
-        self.last_converged = reports.iter().map(|r| r.converged || r.skipped).collect();
+        // The native certificate (`commitNativeSettledReuse`): a warm solve that converged with
+        // no update stores an output the next identical input may keep.
+        self.last_converged = reports
+            .iter()
+            .map(|r| {
+                if native {
+                    r.skipped || (warm && r.converged && r.iterations == 0)
+                } else {
+                    r.converged || r.skipped
+                }
+            })
+            .collect();
         reports
     }
 
