@@ -143,6 +143,13 @@ fn demo_event(set: &Settings) {
     let (_, collider) = s
         .add_height_field(&mut arena, &field, Vec3::ZERO, Quat::IDENTITY, 0)
         .unwrap();
+    // WARM=1: keep the GPU busy for half a second right before the strike
+    // (a second device stepping a sand block): a game renders every frame,
+    // so its GPU is clocked up when a strike lands, while this harness's GPU
+    // idles through the setup and would time the strike frame cold.
+    if env("WARM") == Some(1.0) {
+        warm_gpu(0.5);
+    }
     let wall = std::time::Instant::now();
     s.terrain_activate(
         &plan,
@@ -172,6 +179,11 @@ fn demo_event(set: &Settings) {
             cfg.speed_growth * speed + 20.0 + G * frame,
         )
         .unwrap();
+        // GAP_MS: idle the GPU before each frame (how much its clock state
+        // moves the numbers: an idle GPU clocks down).
+        if let Some(gap) = env("GAP_MS") {
+            std::thread::sleep(std::time::Duration::from_secs_f64(gap * 1e-3));
+        }
         let w = std::time::Instant::now();
         let rep = s.terrain_step(k, dt, -G).unwrap();
         let ms = s
@@ -303,4 +315,45 @@ fn demo_event(set: &Settings) {
         plan.dx,
         prof.join(" ")
     );
+}
+
+/// Steps a sand block on a device of its own for `seconds` of wall time.
+fn warm_gpu(seconds: f64) {
+    use engine_terrain::layout::MpmParticle;
+    use engine_terrain::RegionPlan;
+    let mut w = WgpuSim::new(WorldCapacity {
+        max_bodies: 64,
+        max_colliders: 64,
+        max_contacts: 4096,
+        max_joints: 16,
+        max_candidates: 8192,
+        max_colors: 32,
+        max_commands: 64,
+        max_hull_vertices: 64,
+    })
+    .unwrap();
+    let cfg = TerrainConfig {
+        max_particles: 1 << 17,
+        max_blocks: 4096,
+        ..TerrainConfig::default()
+    };
+    w.terrain_enable(&cfg).unwrap();
+    let sand = SandMaterial::default();
+    w.terrain_set_material(Some(&sand)).unwrap();
+    let plan = RegionPlan::spanning(&cfg, Vec3::splat(-1.0), Vec3::splat(1.0), 0.05, 0, 0).unwrap();
+    let h = 0.025f32;
+    let mut ps = Vec::new();
+    for k in 0..40 {
+        for j in 0..40 {
+            for i in 0..40 {
+                let x = Vec3::new(-0.5, -0.5, -0.5) + (Vec3::new(i as f32, j as f32, k as f32) + 0.5) * h;
+                ps.push(MpmParticle::at_rest(x.to_array(), h * h * h, sand.density));
+            }
+        }
+    }
+    w.terrain_load(&plan, &ps, None, 0.5).unwrap();
+    let t = std::time::Instant::now();
+    while t.elapsed().as_secs_f64() < seconds {
+        let _ = w.terrain_step(4, 1.0e-4, 0.0);
+    }
 }
