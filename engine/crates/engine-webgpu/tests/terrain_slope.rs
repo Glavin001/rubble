@@ -45,6 +45,17 @@ fn run(angle_deg: f32) -> (Vec<f32>, Vec<f32>) {
         max_blocks: 1 << 13,
         ..TerrainConfig::default()
     };
+    // SLOPE_PROFILE=game: the game profile's step settings (Courant, the
+    // clock's speed growth; the region's cell is the test's own).
+    let cfg = if std::env::var("SLOPE_PROFILE").is_ok_and(|v| v == "game") {
+        cfg.with_profile(engine_terrain::TerrainProfile::Game)
+    } else {
+        cfg
+    };
+    let hz: f32 = std::env::var("SLOPE_HZ")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60.0);
     s.terrain_enable(&cfg).unwrap();
     let sand = SandMaterial::default();
     s.terrain_set_material(Some(&sand)).unwrap();
@@ -75,13 +86,13 @@ fn run(angle_deg: f32) -> (Vec<f32>, Vec<f32>) {
     )
     .unwrap();
     let mut speed = 2.0f32;
-    for _ in 0..120 {
+    for _ in 0..(2.0 * hz) as u32 {
         let (n, dt) = substeps_for(
             &cfg,
-            1.0 / 60.0,
+            1.0 / hz,
             plan.dx,
             sand.p_wave_speed(),
-            (1.5 * speed).max(2.0),
+            (cfg.speed_growth * speed).max(2.0),
         )
         .unwrap();
         speed = s.terrain_step(n, dt, -9.81).unwrap().max_speed;

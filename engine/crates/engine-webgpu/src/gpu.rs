@@ -295,8 +295,12 @@ pub fn default_device() -> anyhow::Result<(wgpu::AdapterInfo, wgpu::Device, wgpu
     let info = adapter.get_info();
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("engine-webgpu-sim"),
-        // Per-phase GPU timing (`RUBBLE_GPU_TIMING=1`) needs timestamp queries.
-        required_features: if std::env::var("RUBBLE_GPU_TIMING").is_ok_and(|v| v == "1") {
+        // Per-phase GPU timing (`RUBBLE_GPU_TIMING=1`, and the terrain's
+        // `RUBBLE_TERRAIN_TIMING` / `RUBBLE_TERRAIN_GPU_MS`) needs timestamp queries.
+        required_features: if ["RUBBLE_GPU_TIMING", "RUBBLE_TERRAIN_TIMING", "RUBBLE_TERRAIN_GPU_MS"]
+            .iter()
+            .any(|k| std::env::var(k).is_ok_and(|v| v == "1"))
+        {
             adapter.features() & wgpu::Features::TIMESTAMP_QUERY
         } else {
             wgpu::Features::empty()
@@ -559,6 +563,14 @@ impl WgpuSim {
             debug_assert_eq!(bufs.len(), binding);
             bufs.push(terrain_buffer(&device, binding, 256));
         }
+        // The render-only surface pass (terrain_surface.slang) binds 53: a
+        // placeholder (hosts that run the pass size it from SurfacePlan).
+        debug_assert_eq!(bufs.len(), engine_terrain::surface::SURFACE_BINDING);
+        bufs.push(terrain_buffer(
+            &device,
+            engine_terrain::surface::SURFACE_BINDING,
+            256,
+        ));
         // Pass table slots (256-byte aligned so dynamic offsets are legal).
         queue.write_buffer(&bufs[22], 0, &rigid_plan::pass_table());
 
