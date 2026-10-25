@@ -383,12 +383,50 @@ depth 0.037 m, final rim 0.191 m.
 - **Open: volume.** The cavity is 3.6× π-scaling's volume (1.16e-3 m³, Kr = 1.4,
   Kd = 0.35): the radius is 1.31× and the depth 2.25×. The field carries 9.5% of
   the impactor's kinetic energy (269 J, mostly within a few impactor radii),
-  against about 3 J to lift the cavity. Real sand spends the near-field energy
-  compacting; this sand (Mohr–Coulomb, ψ = 0) has no volumetric compaction, so
-  it drives the floor down. The likely fix is a compaction cap (Drucker–Prager
-  cap hardening on J_p), not a retune of the field. `terrain_crater` asserts
-  the factor-2 volume band and fails there until then; the radius, shape, rim
-  and ledger checks pass.
+  against about 3 J to lift the cavity. `terrain_crater` asserts the factor-2
+  volume band and fails there; the radius, shape, rim and ledger checks pass.
+- **Volume diagnosis (2026-10-25): not compaction, not the bed.** Measured with
+  the test's env-gated probes (`CRATER_PROBE`, `CRATER_SPLIT`, `CRATER_COLUMN`,
+  `CRATER_BED`, `CRATER_PHI`, `CRATER_Z`, `CRATER_CORE`). The baseline is
+  margin 0.6 (3.44×) unless stated.
+  - **No compression to cap.**
+    - The elastic J never falls below 0.978, so p ≤ 0.9 MPa (K = 42 MPa). The
+      elastic volumetric energy peaks at 2.1 J.
+    - The field's energy is dissipated, not stored: 265 J becomes 156 J after
+      the first substep (P2G averages a core under two cells wide) and 72 J by
+      0.4 ms.
+    - A cap at dry sand's crush pressures (MPa and up) would hardly engage.
+      It could act only on the early penetration of the floor, whose
+      mass-deficit cavity (a "virtual bake" of the particles' rest volume per
+      column) is 2.4e-4 m³ at 2 ms, 6% of the final.
+  - **The cavity forms over the formation time.**
+    - The virtual-bake cavity grows at a steady 6e-5 m³/ms from 2 ms to T
+      (83 ms), then holds: 4.13e-3 m³ at 0.1 s and 4.14e-3 m³ baked (margin 2).
+    - Nearly all of it is uplift inside the box; 9e-5 m³ escapes.
+    - The particle floor keeps sinking after T (4.5 → 8.3 cm on the axis,
+      70–300 ms). This is a column of separated material (log Jp up to 2.9)
+      settling, and it leaves the baked volume unchanged.
+  - **The bed is not the cause.** A bed at 4 R instead of 1.6 R gives 3.24×.
+    The field fills the box with u ∝ r^−Z, so its momentum grows with the box
+    (−7.1 and −10.9 kg·m/s, against the impactor's 2.83), but the volume
+    barely follows it.
+  - **Not the near-field energy, nor friction.**
+
+    | Change | Volume / π-scaling |
+    |---|---|
+    | Core 3h (field 107 J) | 3.13× |
+    | Core 4h (field 58 J) | 2.80× |
+    | φ = 35° | 3.18× |
+    | Z = 2.7 | 2.92× |
+
+    A 4.7× cut in field energy moves the volume 19%. The excess follows the
+    field's strength at the crater's scale: α, fitted to launch speeds from
+    the core's edge to R. It also follows how long that flow keeps
+    displacing ground before gravity and friction stop it.
+  - **That is the source's design, so it is open and reported, not changed.**
+    Re-run on the current coupling at margin 2: 3.57× (radius 0.193 m, centre
+    depth 0.064 m). No material change is adopted, and the measurements above
+    are not adopted either.
 - The ejecta blanket thins faster than McGetchin's r⁻³ (about r⁻¹⁰ between 1.4
   and 1.9 rim radii); not yet understood.
 
