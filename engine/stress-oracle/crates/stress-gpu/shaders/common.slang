@@ -152,7 +152,7 @@ public struct ChunkStatic
     public float4 inv2;
     public float4 scale;      // inertia scale mu, 1 / (m mu), 1 / mu, -
     public uint4 info;        // support, island, structure, chunk
-    public uint4 load_range;  // load terms [x, y) in `loads`
+    public uint4 load_range;  // load terms [x, y) in `loads`; w: 1 its structure is CCD (`Structure::ccd`)
     public float4 half;       // half extents; w: bounding radius
     public float4 crot0;      // chunk rotation rows (body frame of the structure)
     public float4 crot1;

@@ -128,8 +128,7 @@ impl ThresholdWorld {
         capacity.max_candidates = capacity.max_candidates.max(capacity.max_contacts);
         let mut engine = RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), capacity.clone()).map_err(|e| format!("rubble: {e}"))?;
         let profile = stress_ref::capability::Profile::Threshold;
-        let (iterations, substeps) = profile.engine_policy();
-        engine.set_policy(iterations, substeps);
+        engine.apply_profile(profile);
         if let Some(g) = &scene.ground {
             engine.add_ground(g.height);
         }
@@ -318,7 +317,7 @@ impl ThresholdWorld {
         let p = to_rubble(Vec3::from_array(desc.position));
         let v = to_rubble(Vec3::from_array(desc.velocity));
         let w = to_rubble(Vec3::from_array(desc.angular_velocity));
-        let ccd = if self.engine.toi_ccd() { engine_schema::BODY_CCD } else { 0 };
+        let ccd = if self.engine.toi_ccd() && desc.ccd { engine_schema::BODY_CCD } else { 0 };
         let flags = engine_schema::BodyFlags::Dynamic as u32 | engine_schema::BodyFlags::Awake as u32 | ccd;
         let record = BodyState {
             position: p,
@@ -499,6 +498,7 @@ impl ThresholdWorld {
                     angular_velocity: [0.0; 3],
                     material: "projectile".into(),
                     crush: None,
+                    ccd: true,
                 };
                 stress_ref::world::Impactor::from_desc(&desc, &self.scene)
             })

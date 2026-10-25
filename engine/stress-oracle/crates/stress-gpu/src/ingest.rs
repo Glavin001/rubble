@@ -251,7 +251,10 @@ impl EngineIngest {
         let params = gpu.uniform("ingest params", &params);
         let records = (2 * self.max_rows * substeps.max(1)) as usize;
         let n = self.chunk_count as usize;
-        for (k, size) in [(&self.clear, groups(2 * n, 64)), (&self.count, groups(records, 64)), (&self.scan, 1), (&self.scatter, groups(records, 64)), (&self.merge, groups(n, 64))] {
+        // The record kernels stride over the records past 65535 groups (coupling.slang
+        // `RECORD_GROUPS`): many substeps' records fit one dispatch.
+        let record_groups = groups(records, 64).min(65535);
+        for (k, size) in [(&self.clear, groups(2 * n, 64)), (&self.count, record_groups), (&self.scan, 1), (&self.scatter, record_groups), (&self.merge, groups(n, 64))] {
             let bind = self.bind(gpu, k, &params, e);
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_pipeline(&k.pipeline);

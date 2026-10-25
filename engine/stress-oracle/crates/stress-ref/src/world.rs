@@ -63,6 +63,8 @@ pub struct Impactor {
     pub crush_depth: f64,
     /// Moved by an external engine this frame (not in an impact island).
     pub driven: bool,
+    /// A continuous-collision body in an engine-coupled world (`ImpactorDesc::ccd`).
+    pub ccd: bool,
 }
 
 impl Impactor {
@@ -88,6 +90,7 @@ impl Impactor {
             crush_used: 0.0,
             crush_depth: 0.0,
             driven: false,
+            ccd: d.ccd,
         }
     }
 

@@ -266,6 +266,7 @@ fn run_lab(
             angular_velocity: [0.0; 3],
             material: "projectile".into(),
             crush: None,
+            ccd: true,
         },
     );
     let mut timeline = Vec::new();

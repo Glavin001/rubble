@@ -2205,6 +2205,7 @@ float4 quat_vec_0(const Quat_0 thread* q_11)
     {
         spin_0 = w_parent_0;
     }
+    uint ccd_0 = (as_type<uint>(((float4(*((&kernelContext_45)->bodies_0+(pb_0 + 2U))) ).w))) & 256U;
     uint flags_0;
     if(anchored_0)
     {
@@ -2212,7 +2213,7 @@ float4 quat_vec_0(const Quat_0 thread* q_11)
     }
     else
     {
-        flags_0 = 9U;
+        flags_0 = 9U | ccd_0;
     }
     uint _S271 = stage_0(c_11, &kernelContext_45);
     *((&kernelContext_45)->frames_0+_S271) = packed_float4(float4(pos_0, inv_mass_1)) ;

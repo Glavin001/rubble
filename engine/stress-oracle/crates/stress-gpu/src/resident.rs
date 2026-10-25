@@ -333,6 +333,16 @@ pub trait ResidentEngine: stress_ref::engine::RigidEngine {
     fn spawn_buffers(&self) -> Option<(&wgpu::Buffer, &wgpu::Buffer, u32)> {
         None
     }
+    /// The body flag a free piece of a CCD structure (`Structure::ccd`) takes when the GPU
+    /// makes it: the engine's continuous-collision flag, 0 when the engine has it off.
+    fn ccd_flag(&self) -> u32 {
+        0
+    }
+    /// Reads of engine state the resident frames made on the host's behalf (the CCD
+    /// substeps' fast-body speeds, `RubbleEngine::resident_reads`).
+    fn host_reads(&self) -> u64 {
+        0
+    }
     /// A body's slot, centre of mass (its oracle frame) and principal rotation (x, y, z,
     /// w), for the GPU to take its frame from the engine's buffer (`split_frames`).
     fn frame_record(&self, _key: stress_ref::engine::BodyKey) -> Option<(u32, [f32; 3], [f32; 4])> {
@@ -383,6 +393,9 @@ pub struct AdoptedBody {
     /// frame to the engine body's), as `cook_with` reports them.
     pub com: [f64; 3],
     pub principal: [f64; 4],
+    /// Its structure is CCD (`Structure::ccd`), and its chunks' smallest half extent (m).
+    pub ccd: bool,
+    pub thin: f64,
 }
 
 /// A resident engine shared between the world's shell (as its `RigidEngine`) and the

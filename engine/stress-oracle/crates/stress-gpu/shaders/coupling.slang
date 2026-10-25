@@ -225,15 +225,24 @@ void ingest_clear(uint3 id: SV_DispatchThreadID)
         counts[id.x].store(0u);
 }
 
+// The record kernels' grid: at most RECORD_GROUPS groups of 64 (WebGPU's 65535 per
+// dimension), each thread striding over the records (a frame of many substeps has more
+// records than one thread each could cover; the merge orders them, not the threads).
+static const uint RECORD_GROUPS = 65535;
+static const uint RECORD_STRIDE = RECORD_GROUPS * 64;
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void ingest_count(uint3 id: SV_DispatchThreadID)
 {
-    if (id.x >= params.record_count || !record_live(id.x))
-        return;
-    Record r = records[id.x];
-    if (r.ids.w != 0)
-        counts[r.ids.x].add(1u);
+    for (uint i = id.x; i < params.record_count; i += RECORD_STRIDE)
+    {
+        if (!record_live(i))
+            continue;
+        Record r = records[i];
+        if (r.ids.w != 0)
+            counts[r.ids.x].add(1u);
+    }
 }
 
 // Segment starts: an exclusive scan of the counts by one group (chunk_count / 1024 rounds).
@@ -273,14 +282,17 @@ void ingest_scan(uint3 thread: SV_GroupThreadID)
 [numthreads(64, 1, 1)]
 void ingest_scatter(uint3 id: SV_DispatchThreadID)
 {
-    if (id.x >= params.record_count || !record_live(id.x))
-        return;
-    Record r = records[id.x];
-    if (r.ids.w == 0)
-        return;
     uint n = params.chunk_count;
-    uint at = counts[n + r.ids.x].add(1u);
-    sort[2 * n + 1 + sort[r.ids.x] + at] = id.x;
+    for (uint i = id.x; i < params.record_count; i += RECORD_STRIDE)
+    {
+        if (!record_live(i))
+            continue;
+        Record r = records[i];
+        if (r.ids.w == 0)
+            continue;
+        uint at = counts[n + r.ids.x].add(1u);
+        sort[2 * n + 1 + sort[r.ids.x] + at] = i;
+    }
 }
 
 [shader("compute")]

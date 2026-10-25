@@ -108,6 +108,8 @@ static const uint NONE = 0xffffffffu;
 static const uint BODY_WORDS = 7;
 static const uint FLAG_DYNAMIC = 1;
 static const uint FLAG_AWAKE = 8;
+// engine_schema::BODY_CCD: continuous collision, which every piece of a CCD body keeps.
+static const uint FLAG_CCD = 256;
 static const uint INFO_SUPPORT = 1;
 static const uint SUMS = 20;      // per root: mass, first moment (3), second moment (6), 64-bit each
 
@@ -609,7 +611,10 @@ void fr_piece(uint3 id: SV_DispatchThreadID)
         inv_inertia = float3(moments.x > 0.0 ? 1.0 / moments.x : 0.0, moments.y > 0.0 ? 1.0 / moments.y : 0.0, moments.z > 0.0 ? 1.0 / moments.z : 0.0);
     float3 velocity = anchored ? float3(0.0) : v_parent + cross(w_parent, pos - p_parent);
     float3 spin = anchored ? float3(0.0) : w_parent;
-    uint flags = anchored ? 0u : (FLAG_DYNAMIC | FLAG_AWAKE);
+    // A free piece of a CCD body stays one (the parent's record is read before `fr_commit`
+    // writes the pieces); an anchored piece is static.
+    uint ccd = asuint(bodies[pb + 2].w) & FLAG_CCD;
+    uint flags = anchored ? 0u : (FLAG_DYNAMIC | FLAG_AWAKE | ccd);
     uint st = stage(c);
     frames[st] = float4(pos, inv_mass);
     frames[st + 1] = quat_vec(orientation);

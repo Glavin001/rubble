@@ -678,7 +678,7 @@ impl GpuWorld {
                 let (bodies, colliders, max_bodies) = e.spawn_buffers().expect("spawn buffers");
                 let max_colliders = e.collider_capacity();
                 let fs = crate::solver::FrameSplits {
-                    target: crate::gpu_split::SpawnTarget { bodies, colliders, max_bodies },
+                    target: crate::gpu_split::SpawnTarget { bodies, colliders, max_bodies, ccd_flag: e.ccd_flag() },
                     max_colliders,
                     table: part_table.as_ref().expect("part table"),
                     resident: r.qs.layout(),
@@ -1037,7 +1037,7 @@ impl GpuWorld {
                 let (bodies, colliders, max_bodies) = e.spawn_buffers().expect("spawn buffers");
                 let max_colliders = e.collider_capacity();
                 let fs = crate::solver::FrameSplits {
-                    target: crate::gpu_split::SpawnTarget { bodies, colliders, max_bodies },
+                    target: crate::gpu_split::SpawnTarget { bodies, colliders, max_bodies, ccd_flag: e.ccd_flag() },
                     max_colliders,
                     table,
                     resident: r.qs.layout(),
@@ -1439,7 +1439,7 @@ impl GpuWorld {
                 return None;
             }
         }
-        let target = crate::gpu_split::SpawnTarget { bodies: bodies_buf, colliders: cols_buf, max_bodies };
+        let target = crate::gpu_split::SpawnTarget { bodies: bodies_buf, colliders: cols_buf, max_bodies, ccd_flag: e.ccd_flag() };
         let (bodies, _) = self.solver.gpu_spawn_bodies(gpu, &run, &table, first_body, first_collider, Some(target), &retire);
         let comps: Vec<Vec<Vec<usize>>> = run
             .children
@@ -1487,7 +1487,7 @@ impl GpuWorld {
         let (first_body, first_collider) = e.body_counts();
         let pass_engine = crate::gpu_split::PassEngine {
             parent_bodies,
-            target: crate::gpu_split::SpawnTarget { bodies: bodies_buf, colliders: cols_buf, max_bodies },
+            target: crate::gpu_split::SpawnTarget { bodies: bodies_buf, colliders: cols_buf, max_bodies, ccd_flag: e.ccd_flag() },
             max_colliders,
             first_body,
             first_collider,
@@ -1553,11 +1553,11 @@ impl GpuWorld {
         let colliders = r.colliders.as_ref().filter(|c| c.capacity() >= max_colliders).map(|c| (c, &r.ingest.collider_info));
         let refreshed = colliders.is_some();
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
-        let target = crate::gpu_split::SpawnTarget { bodies: bodies_buf, colliders: cols_buf, max_bodies };
+        let target = crate::gpu_split::SpawnTarget { bodies: bodies_buf, colliders: cols_buf, max_bodies, ccd_flag: e.ccd_flag() };
         self.solver.encode_gpu_split_pass(gpu, &mut encoder, target, max_colliders, &table, r.qs.layout(), colliders, false)?;
         self.solver.set_gpu_pass_counters(gpu, first_body, first_collider);
         gpu.queue.submit([encoder.finish()]);
-        let target = crate::gpu_split::SpawnTarget { bodies: bodies_buf, colliders: cols_buf, max_bodies };
+        let target = crate::gpu_split::SpawnTarget { bodies: bodies_buf, colliders: cols_buf, max_bodies, ccd_flag: e.ccd_flag() };
         let (result, gpu_parents) = self.solver.read_gpu_split_pass(gpu, &target)?;
         drop(e);
         if gpu_parents != parents {
@@ -1617,6 +1617,8 @@ impl GpuWorld {
                     chunks: chunks.clone(),
                     com: [g.com[0] as f64, g.com[1] as f64, g.com[2] as f64],
                     principal: [g.principal[0] as f64, g.principal[1] as f64, g.principal[2] as f64, g.principal[3] as f64],
+                    ccd: m.structures[chunks[0].0].ccd,
+                    thin: chunks.iter().map(|&(s, c)| m.structures[s].chunks[c].half_extents.min_elem()).fold(f64::INFINITY, f64::min),
                 });
             }
         }
@@ -1702,6 +1704,8 @@ impl GpuWorld {
                     chunks: chunks.clone(),
                     com: [g.com[0] as f64, g.com[1] as f64, g.com[2] as f64],
                     principal: [g.principal[0] as f64, g.principal[1] as f64, g.principal[2] as f64, g.principal[3] as f64],
+                    ccd: m.structures[chunks[0].0].ccd,
+                    thin: chunks.iter().map(|&(s, c)| m.structures[s].chunks[c].half_extents.min_elem()).fold(f64::INFINITY, f64::min),
                 });
             }
         }
