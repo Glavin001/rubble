@@ -749,8 +749,12 @@ bool mpmBedNormal(HeightFieldRef hf, float3 xl, MpmParams p, out float3 nl)
 // - p0 is the geostatic traction at activation (ρ·g·d on the floor, K0·ρ·g·d
 //   on the sides, K0 = λ/(λ + 2μ)), the stress the material starts with
 //   (InitialStress::Geostatic), so material at rest stays at rest.
-// A face carries no tension: one whose normal traction would pull lets the
-// node go (sand separates from the ground).
+// The ground has the strength of granular ground: a face carries no tension
+// (one whose normal traction would pull lets the node go: sand separates from
+// the ground), and no more shear than the bed friction μ allows (one whose
+// tangential traction would pass μ·t_n slides at μ·t_n). The dashpots model
+// small-strain waves, not plastic flow along the face, which would otherwise
+// meet a viscous drag ρ·c_s·v_t far above any frictional strength.
 // It is discretised like any traction on the grid: node i takes ∫ w_i·t dS over
 // the faces (w_i its B-spline), lumped, so its share of a face is ∫ w_i dS and
 // its dashpot and spring act on its own velocity and displacement. That is the
@@ -911,40 +915,69 @@ bool mpmAbsorbNode(int3 g, float m, HeightFieldRef hf, Frame f, MpmParams p, ino
     uint axis[5] = { 1u, 0u, 0u, 2u, 2u };
     float sgn[5] = { 1.0, 1.0, -1.0, 1.0, -1.0 };
     float area = dx * dx;
+    float mu_g = p.step.w;
     float3 vNew = v;
-    bool held = false;
-    // Solve with every face, then once more without any face that would pull.
-    uint live = 31u;
-    for (uint pass = 0u; pass < 2u; pass++)
+    float3 held = float3(0, 0, 0);
+    // Solve with every face sticking; then again with any face that would
+    // pull let go, and any whose shear would pass the ground's friction
+    // sliding (its tangential traction μ·t_n, along the sticking one).
+    uint live = 31u, slide = 0u;
+    float3 slip[5];
+    for (uint k = 0u; k < 5u; k++) slip[k] = float3(0, 0, 0);
+    for (uint pass = 0u; pass < 3u; pass++)
     {
         float3 damp = float3(0, 0, 0), stiff = float3(0, 0, 0), push = float3(0, 0, 0);
+        held = float3(0, 0, 0);
         for (uint k = 0u; k < 5u; k++)
         {
             if ((live & (1u << k)) == 0u || !(share[k] > 0.0)) continue;
             float s = share[k] * area;
             float3 e = float3(axis[k] == 0u ? 1.0 : 0.0, axis[k] == 1u ? 1.0 : 0.0, axis[k] == 2u ? 1.0 : 0.0);
-            damp += s * rho * (cs + (cp - cs) * e);
-            stiff += s * (kt + (kn - kt) * e);
+            damp += s * rho * cp * e;
+            stiff += s * kn * e;
             push += s * sgn[k] * p0[k] * e;
+            held = max(held, e);
+            if ((slide & (1u << k)) != 0u) push += s * slip[k];
+            else
+            {
+                damp += s * rho * cs * (1.0 - e);
+                stiff += s * kt * (1.0 - e);
+                held = float3(1, 1, 1);
+            }
         }
         vNew = (m * v + dt * (push - stiff * u)) / (m + dt * damp + dt * dt * stiff);
-        held = any(damp > float3(0, 0, 0));
-        if (pass == 1u) break;
+        if (pass == 2u) break;
         float3 uNew = u + dt * vNew;
-        uint keep = live;
+        uint keep = live, slip0 = slide;
         for (uint k = 0u; k < 5u; k++)
         {
-            if (!(share[k] > 0.0)) continue;
+            if ((live & (1u << k)) == 0u || !(share[k] > 0.0)) continue;
             float un = sgn[k] * uNew[axis[k]], vn = sgn[k] * vNew[axis[k]];
-            if (p0[k] - kn * un - rho * cp * vn < 0.0) keep &= ~(1u << k);
+            float tn = p0[k] - kn * un - rho * cp * vn;
+            if (tn < 0.0)
+            {
+                keep &= ~(1u << k);
+                continue;
+            }
+            if ((slide & (1u << k)) != 0u) continue;
+            float3 e = float3(axis[k] == 0u ? 1.0 : 0.0, axis[k] == 1u ? 1.0 : 0.0, axis[k] == 2u ? 1.0 : 0.0);
+            float3 tt = -(kt * uNew + rho * cs * vNew) * (1.0 - e);
+            // Its two components, without squaring tiny ones.
+            float t = axis[k] == 1u ? mpmHypot(tt.x, tt.z) : (axis[k] == 0u ? mpmHypot(tt.y, tt.z) : mpmHypot(tt.x, tt.y));
+            if (t > mu_g * tn)
+            {
+                slide |= 1u << k;
+                slip[k] = tt * (mu_g * tn / t);
+            }
         }
-        if (keep == live) break;
+        if (keep == live && slide == slip0) break;
         live = keep;
     }
     v = vNew;
-    // The ground follows the material while a face holds it; where every face
-    // has let go, it stays where it was.
-    if (held) gMpmCoupled[at] = float4(u + dt * vNew, rec.w);
+    // The ground follows the material along every axis a face still holds;
+    // along the others (a face let go, or sliding) it stays where it was.
+    float3 uNext = u + dt * vNew * held;
+    if (any(held > float3(0, 0, 0))) gMpmCoupled[at] = float4(uNext, rec.w);
     return true;
 }
 

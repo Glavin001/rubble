@@ -100,3 +100,24 @@ test('settings are checked: unknown fields and bad values fail', () => {
   assert.throws(() => new TerrainStep(JSON.stringify({ settle_speed: 0 })), /settle_speed/);
   assert.throws(() => new TerrainStep(JSON.stringify({ config: { max_blocks: 70000 } })), /dispatch row/);
 });
+
+test('the absorbing ground sets up its node records at activation and the geostatic start in the first frame', () => {
+  const p = new TerrainStep(JSON.stringify({ ...SETTINGS, config: { ...SETTINGS.config, boundary: 'absorbing', initial_stress: 'geostatic' } }));
+  const s = JSON.parse(p.settings());
+  assert.equal(s.config.boundary, 'absorbing');
+  assert.equal(s.config.initial_stress, 'geostatic');
+  const { blocks } = decodeBlocks(p.impact(0, FIELD, Float32Array.of(0, 0, 0), 2, 3000, 20000, 9.81));
+  assert.deepEqual(blocks[0].cmds.map((c) => c.kernel),
+    ['mpm_activate_count', 'mpm_activate_scan', 'mpm_activate_emit', 'mpm_activate_lower', 'mpm_absorb_init']);
+  const f0 = p.frame(1 / 60, -9.81, 1);
+  const first = decodeBlocks(f0, 2).blocks[0].cmds.map((c) => c.kernel);
+  assert.equal(first.filter((k) => k === 'mpm_geostatic').length, 1);
+  assert.ok(first.indexOf('mpm_geostatic') < first.indexOf('mpm_p2g'));
+  JSON.parse(p.report(f0[1], counters({ speed: 1 })));
+  const next = decodeBlocks(p.frame(1 / 60, -9.81, 1), 2).blocks[0].cmds.map((c) => c.kernel);
+  assert.ok(!next.includes('mpm_geostatic'));
+  p.free();
+  // The absorbing ground carries the geostatic traction: it needs that start.
+  assert.throws(() => new TerrainStep(JSON.stringify({ config: { boundary: 'absorbing', initial_stress: 'unstressed' } })), /geostatic/i);
+  assert.throws(() => new TerrainStep(JSON.stringify({ config: { boundary: 'soft' } })), /boundary/);
+});

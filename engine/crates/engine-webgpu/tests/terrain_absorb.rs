@@ -399,19 +399,20 @@ fn a_plane_p_wave_leaves_through_the_absorbing_bed() {
 }
 
 /// The browser demo's event (`impact.html`: an 8 m stony impactor at 20 km/s
-/// into dry sand, a 151 m transient radius), at 8 cells per radius instead of
-/// 16 and margin 0.6, a 300 m deep box: the fraction of the material still
-/// faster than 1 m/s ten seconds after the strike.
-fn demo_after_impact(absorbing: bool) -> (f64, f64) {
+/// into dry sand, a 151 m transient radius) at `cells` per radius and region
+/// `margin`, a box about 300 m deep: the fractions of the material faster
+/// than 1 m/s and than 5 cm/s `secs` after the strike.
+fn demo_after_impact(absorbing: bool, cells: f32, margin: f64, secs: f32) -> (f64, f64) {
     let mut s = sim();
     let cfg = ground(
         TerrainConfig {
-            max_particles: 1 << 18,
-            max_blocks: 4096,
-            max_parcels: 1 << 16,
-            max_columns: 1 << 13,
-            max_field_samples: 1 << 16,
-            cells_per_radius: 8.0,
+            max_particles: 3 << 19,
+            max_blocks: 8192,
+            max_parcels: 1 << 18,
+            max_columns: 1 << 17,
+            max_field_samples: 1 << 19,
+            max_substeps: 1024,
+            cells_per_radius: cells,
             ..TerrainConfig::default()
         },
         absorbing,
@@ -434,7 +435,7 @@ fn demo_after_impact(absorbing: bool) -> (f64, f64) {
     let g = f64::from(G);
     let crater = src.crater(g).unwrap();
     let model = src.field(g, point_source_z(src.target.ejecta.mu)).unwrap();
-    let plan = crater.region(&cfg, Vec3::ZERO, 0.6, 0, 0).unwrap();
+    let plan = crater.region(&cfg, Vec3::ZERO, margin, 0, 0).unwrap();
     let n = 2 * (3.0 * crater.radius as f32 / plan.dx).ceil() as u32 + 1;
     let (field, collider) = flat(&mut s, n, plan.dx);
     s.terrain_activate(
@@ -449,7 +450,7 @@ fn demo_after_impact(absorbing: bool) -> (f64, f64) {
     s.terrain_apply_source(&model, Vec3::ZERO).unwrap();
     let mut speed = engine_terrain::plan::source_peak_speed(&model);
     let mut t = 0.0;
-    while t < 10.0 {
+    while t < secs {
         let (k, dt) = substeps_for(
             &cfg,
             FRAME,
@@ -470,8 +471,8 @@ fn demo_after_impact(absorbing: bool) -> (f64, f64) {
     let frac = |v: f32| ps.iter().filter(|&&s| s > v).count() as f64 / ps.len() as f64;
     let (fast, moving) = (frac(1.0), frac(0.05));
     eprintln!(
-        "{} ground, 10 s after the strike: {fast:.4} of {} particles faster than 1 m/s, {moving:.4} \
-         faster than 5 cm/s, top {speed:.2} m/s",
+        "{} ground, {secs} s after the strike ({cells} cells/R, margin {margin}): {fast:.4} of {} \
+         particles faster than 1 m/s, {moving:.4} faster than 5 cm/s, top {speed:.2} m/s",
         if absorbing { "absorbing" } else { "rigid" },
         ps.len()
     );
@@ -480,8 +481,9 @@ fn demo_after_impact(absorbing: bool) -> (f64, f64) {
 
 #[test]
 fn a_demo_scale_region_settles_on_the_absorbing_ground() {
-    let (rigid, _) = demo_after_impact(false);
-    let (absorbing, moving) = demo_after_impact(true);
+    // 8 cells per radius instead of the demo's 16, margin 0.6 (32 cells across).
+    let (rigid, _) = demo_after_impact(false, 8.0, 0.6, 10.0);
+    let (absorbing, moving) = demo_after_impact(true, 8.0, 0.6, 10.0);
     assert!(
         rigid > 0.3,
         "between rigid walls only {rigid} still moves at 1 m/s"
@@ -492,6 +494,27 @@ fn a_demo_scale_region_settles_on_the_absorbing_ground() {
     );
     assert!(
         moving < 0.6,
+        "{moving} of the region is still faster than 5 cm/s"
+    );
+}
+
+/// The demo's own region (16 cells per radius, margin 1, 0.97 M particles),
+/// 20 s after the strike.
+#[test]
+#[ignore = "validation run (about a minute): cargo test --release ... -- --ignored"]
+fn the_demo_region_settles_on_the_absorbing_ground() {
+    let (rigid, _) = demo_after_impact(false, 16.0, 1.0, 20.0);
+    let (absorbing, moving) = demo_after_impact(true, 16.0, 1.0, 20.0);
+    assert!(
+        rigid > 0.3,
+        "between rigid walls only {rigid} still moves at 1 m/s"
+    );
+    assert!(
+        absorbing < 1e-3,
+        "{absorbing} of the region is still faster than 1 m/s"
+    );
+    assert!(
+        moving < 0.1,
         "{moving} of the region is still faster than 5 cm/s"
     );
 }

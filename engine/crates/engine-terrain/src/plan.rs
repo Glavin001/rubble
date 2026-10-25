@@ -1010,7 +1010,12 @@ mod tests {
         let next = kernels(&p.coupled(2, 1.0e-4, -9.81, 3).unwrap());
         assert!(!next.contains(&"mpm_geostatic"));
         // A rigid, unstressed region does neither.
-        let mut q = TerrainPlan::new(&TerrainConfig::default()).unwrap();
+        let mut q = TerrainPlan::new(&TerrainConfig {
+            boundary: RegionBoundary::Rigid,
+            initial_stress: InitialStress::Unstressed,
+            ..TerrainConfig::default()
+        })
+        .unwrap();
         q.set_material(Some(&crate::SandMaterial::default()))
             .unwrap();
         let ops = q
