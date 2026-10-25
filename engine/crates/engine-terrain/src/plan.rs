@@ -385,10 +385,7 @@ impl TerrainPlan {
 
     /// Area `slot`'s record (`gMpmParams[1 + slot]`), if it is open.
     pub fn area_params(&self, slot: u32) -> Option<&MpmParams> {
-        self.areas
-            .get(slot as usize)?
-            .as_ref()
-            .map(|a| &a.record)
+        self.areas.get(slot as usize)?.as_ref().map(|a| &a.record)
     }
 
     /// Elastic (P-) wave speed of the loaded material (m/s; 0 without stress).
@@ -471,9 +468,7 @@ impl TerrainPlan {
     pub fn merge_gap(&self) -> i32 {
         let Some(d) = self.domain else { return 2 };
         let block = d.dx * BLOCK_CELLS as f32;
-        let samples = d
-            .field
-            .map_or(0.0, |(f, _)| 2.0 * f.dx.max(f.dz) / block);
+        let samples = d.field.map_or(0.0, |(f, _)| 2.0 * f.dx.max(f.dz) / block);
         2.max(samples.ceil() as i32)
     }
 
@@ -821,7 +816,12 @@ impl TerrainPlan {
             // The faces' points; the bake reuses them for the window's edge
             // samples (mpm_bake_shift).
             let n = Self::boundary_nodes(cells).max(2 * u64::from(ni + nj));
-            fit("max_boundary_nodes", &|a| a.faces, n, cfg.max_boundary_nodes)?
+            fit(
+                "max_boundary_nodes",
+                &|a| a.faces,
+                n,
+                cfg.max_boundary_nodes,
+            )?
         } else {
             Slice { base: 0, len: 0 }
         };
@@ -1343,6 +1343,13 @@ impl RegionClock {
         self.speed += speed;
         self.speed_step = self.speed_step.max(step);
         self.quiet = 0;
+    }
+
+    /// A body arrives at up to `speed` m/s (a strike): from `step` the bound
+    /// starts from at least that, and reports from before it are ignored.
+    pub fn raise(&mut self, speed: f32, step: u64) {
+        self.speed = self.speed.max(speed);
+        self.speed_step = self.speed_step.max(step);
     }
 
     /// Areas grown into one: the merged area's clock starts at `step` from

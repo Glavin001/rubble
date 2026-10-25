@@ -59,7 +59,7 @@ pub use joints::{
 pub use math::Transform;
 pub use readback::Backpressure;
 pub use rig::VehicleDamage;
-pub use terrain::{StrikeDef, TerrainDef};
+pub use terrain::{StrikeDef, TerrainArea, TerrainDef};
 pub use engine_terrain::{
     CraterPrediction, CraterTarget, ExplosionSource, ImpactSource, InitialStress, RegionBoundary,
     RegionPlan, SandMaterial, TerrainConfig, TerrainError, YieldSurface,
