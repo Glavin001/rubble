@@ -52,7 +52,8 @@ function updateTrails(){
 }
 // Bond mode (the Bonds menu): 'none' (pieces sleep until hit), 'd6' (breakable D6
 // joints, AVBD welds), 'stress' (GPU stress solver on its own canvas), 'threshold' (the
-// same, with the v0 rule: a bond breaks on contact force alone, no solve), or 'learned'
+// same, with the v0 rule: a bond breaks on contact force alone, no solve), 'blast' (the same
+// GPU-only world, Blast's stress solver deciding the bonds: profile blast_gpu), or 'learned'
 // (lean MGN-T forward on this page's WebGPU — compute/timing only; rubble stays unbonded).
 const bondMode=()=>$('bond-mode').value;
 // The controls panel collapses for a full view (remembered per viewer; phones start
@@ -70,7 +71,7 @@ $('panel-toggle').onclick=()=>setPanel(document.body.classList.contains('collaps
  new MutationObserver(sync).observe(release,{childList:true,characterData:true,subtree:true,attributes:true,attributeFilter:['disabled']});sync();quick.onclick=()=>release.click()}
 
 // The stress solver's modes, and the capability profile each runs (stress-web).
-const STRESS_PROFILES={stress:'blast_parity',threshold:'threshold'};
+const STRESS_PROFILES={stress:'blast_parity',threshold:'threshold',blast:'blast_gpu'};
 const stressMode=()=>bondMode() in STRESS_PROFILES;
 // The stress-solver modes wait on the GPU from Rust: through WebAssembly JavaScript Promise
 // Integration where the browser has it, else (Safari) through the Asyncify build
@@ -229,7 +230,7 @@ async function loadStress(level){
  const st=stress.stats;stressHud={t:performance.now(),frames:0,renders:0};
  $('fragments').textContent=st.chunks;$('bonds').textContent=st.bonds;$('hulls').textContent=st.hulls;$('awake').textContent='0';$('contacts').textContent='—';
  $('release').textContent='Start simulation';$('fire').hidden=true;
- setStatus(`Stress solver · ${st.chunks} chunks · ${st.bonds} bonds · ${profile==='threshold'?'simple threshold (v0): a bond breaks when a contact force beats its strength':profile}, resident GPU frame at ${Math.round(st.frameHz)} Hz${cuboid||pack?'':' · one copy'}${stressWarning(st)} · click the model to shoot`);
+ setStatus(`Stress solver · ${st.chunks} chunks · ${st.bonds} bonds · ${profile==='threshold'?'simple threshold (v0): a bond breaks when a contact force beats its strength':profile==='blast_gpu'?"Blast's stress solver (vibe-land's model, Slang)":profile}, resident GPU frame at ${Math.round(st.frameHz)} Hz${cuboid||pack?'':' · one copy'}${stressWarning(st)} · click the model to shoot`);
 }
 async function importBytes(bytes,name,sampleKey="",entry={}){
  assetBytes=bytes;layout=entry.layout??null;maxHullVertices=entry.maxHullVertices;procedural=null;towersBlock=false;

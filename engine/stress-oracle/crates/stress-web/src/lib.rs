@@ -480,12 +480,14 @@ fn load(level: u8) -> Result<(), String> {
     scene.sim.methods = stress_ref::scene::Methods::established();
     profile.apply_scene(&mut scene);
     scene.materials.entry("projectile".into()).or_insert_with(stress_ref::builders::elastic_steel);
-    if profile == Profile::Threshold && THRESHOLD_GPU.get() {
+    // The GPU-only world: the threshold profile (unless THRESHOLD_GPU is off), and blast_gpu,
+    // which only it runs.
+    if (profile == Profile::Threshold && THRESHOLD_GPU.get()) || profile == Profile::BlastGpu {
         return DEVICE.with_borrow(|d| {
             let d = d.as_ref().ok_or("stress_init first")?;
             let gpu = &d.gpu;
             let s = SHOOTING.get().expect("shooting set");
-            let mut world = stress_rubble::threshold::ThresholdWorld::new(gpu, &scene, s.radius, s.mass)?;
+            let mut world = stress_rubble::threshold::ThresholdWorld::with_profile(gpu, &scene, s.radius, s.mass, profile)?;
             let shots = world.shot_impactors();
             let renderer = Renderer::for_target(gpu, &world.mirror, &shots, d.config.width, d.config.height, d.view_format);
             world.attach_view(gpu, &renderer);

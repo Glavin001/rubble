@@ -117,6 +117,16 @@ impl ThresholdWorld {
     /// [`SHOTS`] parked spheres of `shot` (radius, mass; its material the scene's
     /// "projectile").
     pub fn new(gpu: &Gpu, scene: &Scene, shot_radius: f64, shot_mass: f64) -> Result<ThresholdWorld, String> {
+        Self::with_profile(gpu, scene, shot_radius, shot_mass, stress_ref::capability::Profile::Threshold)
+    }
+
+    /// The world under `profile`: `Threshold` (bonds break on contact force), or `BlastGpu`
+    /// (Blast's stress solver decides them; the scene needs its Blast authoring, one structure).
+    pub fn with_profile(gpu: &Gpu, scene: &Scene, shot_radius: f64, shot_mass: f64, profile: stress_ref::capability::Profile) -> Result<ThresholdWorld, String> {
+        use stress_ref::capability::Profile;
+        if !matches!(profile, Profile::Threshold | Profile::BlastGpu) {
+            return Err(format!("the GPU-only world runs the threshold or blast_gpu profile, not {}", profile.name()));
+        }
         let world = stress_ref::world::World::new(scene);
         let m = &world.solver;
         let chunk_count: usize = m.structures.iter().map(|s| s.chunks.len()).sum();
@@ -127,7 +137,6 @@ impl ThresholdWorld {
         capacity.max_contacts = contact_capacity(chunk_count, capacity.max_contacts, gpu.device.limits().max_storage_buffer_binding_size as u64);
         capacity.max_candidates = capacity.max_candidates.max(capacity.max_contacts);
         let mut engine = RubbleEngine::with_device_capacity(Vec3::from_array(scene.gravity), gpu.adapter_info.clone(), gpu.device.clone(), gpu.queue.clone(), capacity.clone()).map_err(|e| format!("rubble: {e}"))?;
-        let profile = stress_ref::capability::Profile::Threshold;
         let (iterations, substeps) = profile.engine_policy();
         engine.set_policy(iterations, substeps);
         if let Some(g) = &scene.ground {
@@ -241,7 +250,8 @@ impl ThresholdWorld {
             t.chunk_body.push(collider_body[cols[0] as usize]);
         }
         // Each cluster's body frame (its structure's frame: a cluster's shapes are its
-        // chunks at their structure-frame poses) and its bonds.
+        // chunks at their structure-frame poses) and its bonds (and each one's structure bond).
+        let mut bond_source: Vec<(usize, usize)> = Vec::new();
         for cl in &m.clusters {
             let e = &engine.bodies[&BodyKey::Cluster(cl.id)];
             let p = e.principal;
@@ -253,6 +263,7 @@ impl ThresholdWorld {
                 }
                 let capacity = b.strength.tensile * b.geometry.area * b.weibull;
                 t.bonds.push([global(cl.structure, b.geometry.a), global(cl.structure, b.geometry.b), (capacity as f32).to_bits(), (b.geometry.area as f32).to_bits()]);
+                bond_source.push((cl.structure, bi));
             }
         }
         // The ingest's collider table: chunks' colliders on their bodies, the shots, the
@@ -278,6 +289,10 @@ impl ThresholdWorld {
         }
         let ingest = EngineIngest::new(gpu, capacity.max_contacts, 1, capacity.max_bodies, chunk_count as u32, &table);
         let mut fracture = GpuFracture::new(gpu, &t, &engine.engine_buffers_now(), &ingest)?;
+        if profile == Profile::BlastGpu {
+            let (graph, materials) = blast_graph(scene, &t, &bond_source)?;
+            fracture.set_blast(gpu, stress_gpu::blast::BlastFrame::new(gpu, graph, materials, Vec3::from_array(scene.gravity)))?;
+        }
         // The punch list's sphere (world_coupling.rs `predict_punch`): bounding radius
         // 1.01 r + 1e-3, face r.
         let e_shot = projectile.youngs_modulus * scene.sim.stiffness_scale / (1.0 - projectile.poisson_ratio * projectile.poisson_ratio);
@@ -557,4 +572,30 @@ pub fn rotation_quat(m: &stress_ref::math::Mat3) -> Quat {
     let glam_m = glam::DMat3::from_cols(glam::DVec3::new(r(0, 0), r(1, 0), r(2, 0)), glam::DVec3::new(r(0, 1), r(1, 1), r(2, 1)), glam::DVec3::new(r(0, 2), r(1, 2), r(2, 2)));
     let q = glam::DQuat::from_mat3(&glam_m).normalize();
     Quat { w: q.w, x: q.x, y: q.y, z: q.z }
+}
+
+/// Blast's graph over the fracture's chunks and bonds, index for index, from the scene's Blast
+/// authoring (one structure: the fracture's chunk `c` is the scene's chunk `c`, and each
+/// fracture bond names the scene bond it came from).
+fn blast_graph(scene: &Scene, t: &FractureTables, bond_source: &[(usize, usize)]) -> Result<(stress_ref::blast_bond::BlastGraph, Vec<stress_ref::blast_bond::BlastMaterial>), String> {
+    use stress_ref::blast_bond::{BlastBond, BlastGraph, BlastNode, BlastSettings};
+    let a = scene.blast.as_ref().ok_or("blast_gpu: the scene has no Blast authoring (import its pack with the profile's import options)")?;
+    let body = match scene.bodies.as_slice() {
+        [body] => body,
+        _ => return Err(format!("blast_gpu: Blast authoring covers one structure, the scene has {}", scene.bodies.len())),
+    };
+    if a.nodes.len() != t.chunks.len() || a.bonds.len() != body.bonds.len() {
+        return Err(format!("blast_gpu: {} Blast nodes and {} bonds for {} chunks and {} bonds", a.nodes.len(), a.bonds.len(), t.chunks.len(), body.bonds.len()));
+    }
+    let nodes = a.nodes.iter().map(|n| BlastNode { position: Vec3::from_array(n.position), mass: n.mass, inertia: 0.0, volume: n.volume }).collect();
+    let mut bonds = Vec::with_capacity(t.bonds.len());
+    for (f, (&(s, bi), tb)) in bond_source.iter().zip(&t.bonds).enumerate() {
+        let (d, sb) = (a.bonds[bi], &body.bonds[bi]);
+        if s != 0 || [sb.a as u32, sb.b as u32] != [tb[0], tb[1]] {
+            return Err(format!("blast_gpu: fracture bond {f} is structure {s} bond {bi}, chunks {:?}; the scene's is {:?}", [tb[0], tb[1]], [sb.a, sb.b]));
+        }
+        let material = a.materials.get(d.material).ok_or(format!("blast_gpu: bond {bi}: material {} of {}", d.material, a.materials.len()))?;
+        bonds.push(BlastBond { nodes: [sb.a, sb.b], centroid: Vec3::from_array(d.centroid), normal: Vec3::from_array(d.normal), area: d.area, modulus: material.modulus, material: d.material });
+    }
+    Ok((BlastGraph::new(nodes, bonds, BlastSettings::default())?, a.materials.clone()))
 }

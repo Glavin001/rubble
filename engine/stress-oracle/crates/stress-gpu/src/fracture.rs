@@ -362,6 +362,8 @@ pub struct GpuFracture {
     engine_bodies: Option<wgpu::Buffer>,
     engine_colliders: Option<wgpu::Buffer>,
     ingest_buffers: Option<[wgpu::Buffer; 3]>,
+    /// `Profile::BlastGpu`: Blast's stress solver decides the bonds in place of `fr_breaks`.
+    blast: Option<crate::blast::BlastFrame>,
 }
 
 fn storage_bytes(gpu: &Gpu, label: &str, bytes: u64, extra: wgpu::BufferUsages) -> wgpu::Buffer {
@@ -474,6 +476,7 @@ impl GpuFracture {
             engine_bodies: None,
             engine_colliders: None,
             ingest_buffers: None,
+            blast: None,
         };
         f.rebind(gpu, engine, ingest);
         Ok(f)
@@ -519,6 +522,7 @@ impl GpuFracture {
         self.engine_bodies = Some(engine.bodies.clone());
         self.engine_colliders = Some(engine.colliders.clone());
         self.ingest_buffers = Some([ingest.collider_info.clone(), ingest.manifolds.clone(), ingest.sort.clone()]);
+        self.rebind_blast(gpu);
     }
 
     /// The view's tables (once per renderer layout).
@@ -584,6 +588,33 @@ impl GpuFracture {
         (i, &self.kernels[i])
     }
 
+    /// Blast's stress solver decides the bonds (`Profile::BlastGpu`) in place of `fr_breaks`'
+    /// contact-force threshold: `blast`'s graph is the fracture's chunks and bonds, index for
+    /// index.
+    pub fn set_blast(&mut self, gpu: &Gpu, blast: crate::blast::BlastFrame) -> Result<(), String> {
+        let g = &blast.solver.graph;
+        if g.node_count() != self.layout.n as usize || g.bond_count() != self.layout.e as usize {
+            return Err(format!("fracture: a Blast graph of {} nodes and {} bonds for {} chunks and {} bonds", g.node_count(), g.bond_count(), self.layout.n, self.layout.e));
+        }
+        self.blast = Some(blast);
+        self.rebind_blast(gpu);
+        Ok(())
+    }
+
+    /// Blast's solver, when set.
+    pub fn blast(&self) -> Option<&crate::blast::BlastFrame> {
+        self.blast.as_ref()
+    }
+
+    fn rebind_blast(&mut self, gpu: &Gpu) {
+        let (Some(blast), Some(bodies)) = (self.blast.as_mut(), self.engine_bodies.as_ref()) else { return };
+        let (n, b) = (self.layout.n, self.layout.b);
+        // fracture.slang `w_alive`, `a_dirty`, `a_counters`.
+        let a_dirty = 3 * n + 20 * n;
+        let f = crate::blast::FractureBuffers { work: &self.work, atom: &self.atom, frames: &self.frames, bodies, loads: &self.loads, w_alive: n, a_dirty, a_counters: a_dirty + 3 * b };
+        blast.bind(gpu, &f);
+    }
+
     /// The frame's loads and breaks, then its splits (gated on the GPU). `step` is the
     /// engine's next step (a re-parented body's generation).
     pub fn encode_frame(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, step: u32) {
@@ -594,7 +625,15 @@ impl GpuFracture {
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             self.direct(&mut pass, "fr_loads", self.layout.n as usize);
-            self.direct(&mut pass, "fr_breaks", self.layout.e as usize);
+            if self.blast.is_none() {
+                self.direct(&mut pass, "fr_breaks", self.layout.e as usize);
+            }
+        }
+        if let Some(blast) = self.blast.as_mut() {
+            blast.record(encoder, self.params.dt as f64);
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
             if self.params.shot_count > 0 {
                 self.direct(&mut pass, "fr_strike_reset", self.layout.b as usize);
                 self.direct(&mut pass, "fr_strike_bounds", self.layout.n as usize);
