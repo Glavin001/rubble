@@ -112,7 +112,7 @@ static const uint MPM_PARTICLE_DEAD = 1u;       // left as a parcel: no longer s
 static const uint MPM_PARTICLE_HOME = 2u;       // activated: c1.w, c2.w hold where (the bake's reference)
 static const uint MPM_PARTICLE_FRESH = 4u;      // activated since the last step (mpm_geostatic's)
 // Colliders one block cell of the region lists.
-static const uint MPM_CELL_COLLIDERS = 8u;
+static const uint MPM_CELL_COLLIDERS = 256u;
 static const uint MPM_NO_SLOT = 0xFFFFFFFFu;
 // apply_impulses' mode for a linear impulse through the centre and an angular
 // impulse (ccd_step.slang IMPULSE_LINEAR_ANGULAR).
@@ -163,14 +163,15 @@ struct MpmParticle
     float4 f2;
 };
 
-// Per particle in sorted order, what P2G reads (80 B).
+// Per particle in sorted order, what P2G reads (64 B): position and mass,
+// momentum m·v and the affine term A = m·C − dt·V·(4/dx²)·τ, row-major,
+// packed: p0 = (m·v, A00), p1 = (A01, A02, A10, A11), p2 = (A12, A20, A21, A22).
 struct MpmPayload
 {
-    float4 xm;      // position, mass
-    float4 mv;      // momentum m·v
-    float4 a0;      // affine term rows: m·C − dt·V·(4/dx²)·τ
-    float4 a1;
-    float4 a2;
+    float4 xm;
+    float4 p0;
+    float4 p1;
+    float4 p2;
 };
 
 BIND(37) RWStructuredBuffer<MpmParams> gMpmParams;
@@ -181,8 +182,12 @@ BIND(40) RWStructuredBuffer<MpmPayload> gMpmPayload;
 BIND(41) RWStructuredBuffer<AUint> gMpmHash;
 // Per block: [4b] = key, [4b + 1] = particles, [4b + 2] = first sorted slot.
 BIND(42) RWStructuredBuffer<AUint> gMpmBlocks;
-// Per cell (block · 64 + local): [4c] = count, [4c + 1] = start in its block, [4c + 2] = cursor.
+// Per cell (block · 64 + local): [4c] = count, [4c + 1] = start in its block.
 BIND(43) RWStructuredBuffer<AUint> gMpmCells;
+// [0, N) particle ids by cell (N = max particles); per particle i, [N + i] and
+// [2N + i]: its base cell's block key and cell in the block (mpm_touch), then
+// its cell index and rank in the cell (mpm_count), so mpm_count and
+// mpm_scatter read 4-8 B per particle instead of the particle.
 BIND(44) RWStructuredBuffer<uint> gMpmSorted;
 // Per node n (block · 64 + local): [2n] after P2G (m·v, m), after mpm_grid (v, m);
 // [2n + 1] the rigid contact mpm_grid applied: (momentum change, coupling slot bits).
@@ -422,47 +427,9 @@ float3 mpmWeights(float fx)
 
 float mpmWeightAt(float3 wx, uint o) { return o == 0u ? wx.x : o == 1u ? wx.y : wx.z; }
 
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void mpm_clear(uint3 tid : SV_DispatchThreadID)
+// The indirect workgroup counts from the counters: blocks, particles, parcels.
+void mpmWriteArgs(MpmParams p)
 {
-    uint i = mpmIndex(tid);
-    MpmParams p = mpmParams();
-    if (i < 2u * p.counts.y) ASTORE(gMpmHash[i], 0u);
-    if (i == 0u)
-    {
-        ASTORE(gMpmCounters[MPM_C_BLOCKS], 0u);
-        ASTORE(gMpmCounters[MPM_C_SORTED], 0u);
-        ASTORE(gMpmCounters[MPM_C_AIRBORNE], 0u);
-    }
-}
-
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void mpm_touch(uint3 tid : SV_DispatchThreadID)
-{
-    uint i = mpmIndex(tid);
-    MpmParams p = mpmParams();
-    if (i >= mpmParticleCount()) return;
-    MpmParticle q = gMpmParticles[i];
-    if (mpmParticleDead(q)) return;
-    float3 x = q.xm.xyz;
-    uint area = mpmAreaOf(x, p);
-    if (area == MPM_NO_AREA) { AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OUTSIDE); return; }
-    int3 b = mpmBaseNodeIn(x, area);
-    int3 lo = b >> 2, hi = (b + 2) >> 2;
-    if (!mpmKeyOk(lo) || !mpmKeyOk(hi)) { AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OUTSIDE); return; }
-    for (int bz = lo.z; bz <= hi.z; bz++)
-    for (int by = lo.y; by <= hi.y; by++)
-    for (int bx = lo.x; bx <= hi.x; bx++)
-        mpmInsertBlock(mpmBlockKey(int3(bx, by, bz)), p);
-}
-
-[shader("compute")]
-[numthreads(1, 1, 1)]
-void mpm_write_args(uint3 tid : SV_DispatchThreadID)
-{
-    MpmParams p = mpmParams();
     gMpmArgs[0] = min(ALOAD(gMpmCounters[MPM_C_BLOCKS]), p.counts.z);
     gMpmArgs[1] = 1u;
     gMpmArgs[2] = 1u;
@@ -477,18 +444,80 @@ void mpm_write_args(uint3 tid : SV_DispatchThreadID)
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
+void mpm_clear(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = mpmIndex(tid);
+    MpmParams p = mpmParams();
+    if (i < 2u * p.counts.y) ASTORE(gMpmHash[i], 0u);
+    if (i == 0u)
+    {
+        ASTORE(gMpmCounters[MPM_C_BLOCKS], 0u);
+        ASTORE(gMpmCounters[MPM_C_SORTED], 0u);
+        ASTORE(gMpmCounters[MPM_C_AIRBORNE], 0u);
+        // mpm_touch's workgroups (mpm_write_args, fused: one dispatch less
+        // per substep).
+        mpmWriteArgs(p);
+    }
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_touch(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = mpmIndex(tid);
+    MpmParams p = mpmParams();
+    if (i >= mpmParticleCount()) return;
+    // Only its position and flags (not the whole particle).
+    float4 xm = gMpmParticles[i].xm;
+    uint flags = asuint(gMpmParticles[i].f2.w);
+    uint n = p.counts.x;
+    gMpmSorted[n + i] = MPM_NO_BLOCK;
+    if ((flags & MPM_PARTICLE_DEAD) != 0u) return;
+    float3 x = xm.xyz;
+    uint area = mpmAreaOf(x, p);
+    if (area == MPM_NO_AREA) { AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OUTSIDE); return; }
+    int3 b = mpmBaseNodeIn(x, area);
+    int3 lo = b >> 2, hi = (b + 2) >> 2;
+    if (!mpmKeyOk(lo) || !mpmKeyOk(hi)) { AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OUTSIDE); return; }
+    // Its base cell for mpm_count: block key and the cell in the block.
+    uint3 l = uint3(b & 3);
+    gMpmSorted[n + i] = mpmBlockKey(b >> 2);
+    gMpmSorted[2u * n + i] = l.x + 4u * l.y + 16u * l.z;
+    for (int bz = lo.z; bz <= hi.z; bz++)
+    for (int by = lo.y; by <= hi.y; by++)
+    for (int bx = lo.x; bx <= hi.x; bx++)
+        mpmInsertBlock(mpmBlockKey(int3(bx, by, bz)), p);
+}
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void mpm_write_args(uint3 tid : SV_DispatchThreadID)
+{
+    mpmWriteArgs(mpmParams());
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
 void mpm_count(uint3 tid : SV_DispatchThreadID)
 {
     uint i = mpmIndex(tid);
     MpmParams p = mpmParams();
     if (i >= mpmParticleCount()) return;
-    MpmParticle q = gMpmParticles[i];
-    float3 x = q.xm.xyz;
-    if (mpmParticleDead(q)) return;
-    uint area = mpmAreaOf(x, p);
-    if (area == MPM_NO_AREA) return;
-    uint c = mpmCellOf(mpmBaseNodeIn(x, area), p);
-    if (c != MPM_NO_BLOCK) AADD2(gMpmCells[4u * c], 1u);
+    uint n = p.counts.x;
+    uint key = gMpmSorted[n + i];
+    uint c = MPM_NO_BLOCK;
+    if (key != MPM_NO_BLOCK)
+    {
+        uint b = mpmFindBlock(key, p);
+        if (b != MPM_NO_BLOCK) c = b * MPM_BLOCK_NODES + gMpmSorted[2u * n + i];
+    }
+    // Its cell and its rank among the cell's particles, for mpm_scatter (the
+    // rank's order is the atomics'; mpm_cell_sort fixes the order).
+    gMpmSorted[n + i] = c;
+    if (c == MPM_NO_BLOCK) return;
+    uint k;
+    AADD3(gMpmCells[4u * c], 1u, k);
+    gMpmSorted[2u * n + i] = k;
 }
 
 // One workgroup per block: exclusive scan of its 64 cell counts.
@@ -533,15 +562,10 @@ void mpm_scatter(uint3 tid : SV_DispatchThreadID)
     uint i = mpmIndex(tid);
     MpmParams p = mpmParams();
     if (i >= mpmParticleCount()) return;
-    MpmParticle q = gMpmParticles[i];
-    float3 x = q.xm.xyz;
-    if (mpmParticleDead(q)) return;
-    uint area = mpmAreaOf(x, p);
-    if (area == MPM_NO_AREA) return;
-    uint c = mpmCellOf(mpmBaseNodeIn(x, area), p);
+    uint n = p.counts.x;
+    uint c = gMpmSorted[n + i];
     if (c == MPM_NO_BLOCK) return;
-    uint k;
-    AADD3(gMpmCells[4u * c + 2u], 1u, k);
+    uint k = gMpmSorted[2u * n + i];
     uint b = c / MPM_BLOCK_NODES;
     gMpmSorted[ALOAD(gMpmBlocks[4u * b + 2u]) + ALOAD(gMpmCells[4u * c + 1u]) + k] = i;
 }
@@ -669,71 +693,82 @@ void mpm_payload(uint3 tid : SV_DispatchThreadID)
     float dx = p.origin.w;
     float3x3 C = float3x3(q.c0.xyz, q.c1.xyz, q.c2.xyz);
     float3x3 tau = mpmStress(q, p);
+    // What the return map changed: F, log Jp, and the rock's damage.
     if (p.counts.w != MPM_MATERIAL_NONE) gMpmParticles[id] = q;
     float3x3 A = C * m - tau * (p.step.x * q.f0.w * 4.0 / (dx * dx));
     MpmPayload o;
     o.xm = q.xm;
-    o.mv = float4(q.vj.xyz * m, 0.0);
-    o.a0 = float4(A[0], 0.0);
-    o.a1 = float4(A[1], 0.0);
-    o.a2 = float4(A[2], 0.0);
+    o.p0 = float4(q.vj.xyz * m, A[0].x);
+    o.p1 = float4(A[0].y, A[0].z, A[1].x, A[1].y);
+    o.p2 = float4(A[1].z, A[2].x, A[2].y, A[2].z);
     gMpmPayload[s] = o;
 }
 
-// One thread per node: the 27 cells whose particles' stencils cover it, in a
-// fixed order, each cell's particles by id.
+// P2G's lanes per node: each sums the cells o = lane, lane + 4, ... of
+// the 27, and the lanes' sums add in lane order: a fixed order, so runs and
+// backends still agree bit for bit. Each node's gather is a chain of loads;
+// more lanes per node run more of them at once.
+static const uint MPM_P2G_LANES = 4u;
+groupshared float4 gsMpmP2g[64u * MPM_P2G_LANES];
+
+// One workgroup per block, MPM_P2G_LANES threads per node: the 27 cells whose
+// particles' stencils cover the node, each cell's particles by id.
 [shader("compute")]
-[numthreads(64, 1, 1)]
-void mpm_p2g(uint3 tid : SV_DispatchThreadID)
+[numthreads(64 * 4, 1, 1)]
+void mpm_p2g(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
 {
-    uint n = mpmIndex(tid);
+    uint b = gid.x + gid.y * 32768u;
+    uint l = lid.x % MPM_BLOCK_NODES;
+    uint lane = lid.x / MPM_BLOCK_NODES;
     MpmParams p = mpmParams();
-    uint b = n / MPM_BLOCK_NODES;
-    if (b >= min(ALOAD(gMpmCounters[MPM_C_BLOCKS]), p.counts.z)) return;
-    uint key = ALOAD(gMpmBlocks[4u * b]);
-    uint l = n % MPM_BLOCK_NODES;
-    int3 g = mpmKeyNode(key, l);
-    float dx = p.origin.w;
+    bool live = b < min(ALOAD(gMpmCounters[MPM_C_BLOCKS]), p.counts.z);
     float3 mv = float3(0, 0, 0);
     float m = 0.0;
-    // The node's area: every particle whose stencil reaches it is that area's,
-    // in that area's frame.
-    uint area = mpmNodeArea(g, p);
-    if (area == MPM_NO_AREA)
+    if (live)
     {
-        gMpmGrid[2u * n] = float4(0, 0, 0, 0);
-        gMpmGrid[2u * n + 1u] = float4(0, 0, 0, -1.0);
-        return;
-    }
-    float3 ao = gMpmParams[1u + area].origin.xyz;
-    int3 aoff = mpmSlotOffset(area);
-    // Bases g − 2 .. g lie in the blocks from (g − 2) >> 2.
-    int3 k0 = (g - 2) >> 2;
-    uint blk[8];
-    mpmBlockCube(k0, p, blk);
-    for (uint o = 0u; o < 27u; o++)
-    {
-        uint3 off = uint3(o % 3u, (o / 3u) % 3u, o / 9u);
-        int3 base = g - int3(off);
-        uint c = mpmCellInCube(base, k0, blk);
-        if (c == MPM_NO_BLOCK) continue;
-        uint first, count;
-        mpmCellRange(c, first, count);
-        for (uint k = 0u; k < count; k++)
+        uint key = ALOAD(gMpmBlocks[4u * b]);
+        int3 g = mpmKeyNode(key, l);
+        float dx = p.origin.w;
+        // The node's area: every particle whose stencil reaches it is that
+        // area's, in that area's frame (none: the node has no mass).
+        uint area = mpmNodeArea(g, p);
+        float3 ao = area == MPM_NO_AREA ? float3(0, 0, 0) : gMpmParams[1u + area].origin.xyz;
+        int3 aoff = area == MPM_NO_AREA ? int3(0, 0, 0) : mpmSlotOffset(area);
+        // Bases g - 2 .. g lie in the blocks from (g - 2) >> 2.
+        int3 k0 = (g - 2) >> 2;
+        uint blk[8];
+        mpmBlockCube(k0, p, blk);
+        for (uint o = lane; o < 27u && area != MPM_NO_AREA; o += MPM_P2G_LANES)
         {
-            MpmPayload q = gMpmPayload[first + k];
-            float3 fx = (q.xm.xyz - ao) / dx - float3(base - aoff);
-            float w = mpmWeightAt(mpmWeights(fx.x), off.x) * mpmWeightAt(mpmWeights(fx.y), off.y)
-                * mpmWeightAt(mpmWeights(fx.z), off.z);
-            float3 dpos = (float3(off) - fx) * dx;
-            float3x3 A = float3x3(q.a0.xyz, q.a1.xyz, q.a2.xyz);
-            m += w * q.xm.w;
-            mv += w * (q.mv.xyz + mul(A, dpos));
+            uint3 off = uint3(o % 3u, (o / 3u) % 3u, o / 9u);
+            int3 base = g - int3(off);
+            uint c = mpmCellInCube(base, k0, blk);
+            if (c == MPM_NO_BLOCK) continue;
+            uint first, count;
+            mpmCellRange(c, first, count);
+            for (uint k = 0u; k < count; k++)
+            {
+                MpmPayload q = gMpmPayload[first + k];
+                float3 fx = (q.xm.xyz - ao) / dx - float3(base - aoff);
+                float w = mpmWeightAt(mpmWeights(fx.x), off.x) * mpmWeightAt(mpmWeights(fx.y), off.y)
+                    * mpmWeightAt(mpmWeights(fx.z), off.z);
+                float3 dpos = (float3(off) - fx) * dx;
+                float3x3 A = float3x3(float3(q.p0.w, q.p1.x, q.p1.y), float3(q.p1.z, q.p1.w, q.p2.x),
+                    float3(q.p2.y, q.p2.z, q.p2.w));
+                m += w * q.xm.w;
+                mv += w * (q.p0.xyz + mul(A, dpos));
+            }
         }
     }
-    gMpmGrid[2u * n] = float4(mv, m);
+    gsMpmP2g[lid.x] = float4(mv, m);
+    GROUP_SYNC();
+    if (!live || lane != 0u) return;
+    float4 sum = gsMpmP2g[l];
+    for (uint j = 1u; j < MPM_P2G_LANES; j++) sum += gsMpmP2g[l + j * MPM_BLOCK_NODES];
+    uint n = b * MPM_BLOCK_NODES + l;
+    gMpmGrid[2u * n] = sum;
     // The node's coupling record: impulse, coupled slot (a float, exact below
-    // 2²⁴; −1 for none: an all-ones bit pattern is a NaN WGSL cannot spell).
+    // 2^24; -1 for none: an all-ones bit pattern is a NaN WGSL cannot spell).
     gMpmGrid[2u * n + 1u] = float4(0, 0, 0, -1.0);
 }
 

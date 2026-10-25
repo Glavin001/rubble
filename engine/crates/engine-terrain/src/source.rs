@@ -312,6 +312,14 @@ impl CraterPrediction {
         if !(margin.is_finite() && margin >= need) {
             return Err(out_of_range("margin", margin, need, f64::MAX));
         }
+        // The bed must leave room under the cavity: at least twice the
+        // transient depth (the demo's crater bottoms out at 2.6× it).
+        if let Some(d) = config.bed_depth {
+            let need = 2.0 * self.depth / self.radius;
+            if f64::from(d) < need {
+                return Err(out_of_range("bed_depth", f64::from(d), need, f64::MAX));
+            }
+        }
         RegionPlan::around(
             config,
             center,

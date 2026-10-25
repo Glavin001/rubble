@@ -31,8 +31,9 @@ pub struct TerrainDef {
     /// Z-model exponent of the excavation field (`None`: 1/μ of the target's
     /// ejecta scaling, `point_source_z`).
     pub z: Option<f64>,
-    /// Added to 1.5 × the last reported material speed to bound each frame's
-    /// speed for its CFL substeps (m/s): covers bodies entering the region
+    /// Added to `config.speed_growth` (1.5 by default) × the last reported
+    /// material speed to bound each frame's speed for its CFL substeps
+    /// (m/s): covers bodies entering the region
     /// faster than the sand moves. A frame that exceeds its bound fails (the
     /// GPU checks every substep); nothing is clamped.
     pub speed_headroom: f32,

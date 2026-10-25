@@ -81,6 +81,36 @@ pub struct TerrainConfig {
     /// lattice's columns through the region's bed and walls (each region needs
     /// `TerrainPlan::boundary_nodes`).
     pub max_boundary_nodes: u32,
+    /// How far below the event a region planned around a radius
+    /// ([`crate::RegionPlan::around`], the π-scaled impact and explosion
+    /// regions) puts its bed, in those radii: `None` reaches as deep as it
+    /// reaches sideways, radius · (1 + margin). With the absorbing ground the
+    /// bed need not sit that deep (`engine/docs/deformable-terrain.md`,
+    /// "Performance"); the region's sides and top keep the margin.
+    pub bed_depth: Option<f32>,
+    /// The open region's frame clock ([`crate::plan::RegionClock`]) bounds a
+    /// frame's material speed by this factor times the last reported speed
+    /// (or the source's peak, until the first report), plus gravity over the
+    /// readback lag and the host's headroom. The GPU checks the bound each
+    /// substep (an error past it), so a smaller factor never degrades a run
+    /// silently: it takes fewer substeps while speeds fall, and fails a frame
+    /// whose material outruns it.
+    pub speed_growth: f32,
+}
+
+/// Which settings a world's terrain starts from ([`TerrainConfig::profile`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TerrainProfile {
+    /// Physical: the settings the validations run at (cells per radius 16,
+    /// Courant 0.3, the clock's 1.5× speed growth).
+    #[default]
+    Physical,
+    /// Games: a convincing crater in real time at 120 Hz. Eight cells per
+    /// transient radius, the bed 1.25 R deep, Courant 0.45 and no growth on
+    /// the clock's speed bound; the sand keeps its physical stiffness. Each
+    /// setting's measured effect on the crater and the frame time is in
+    /// `engine/docs/deformable-terrain.md`, "Performance".
+    Game,
 }
 
 /// The ground around an activated region: its bed (the floor the window was
@@ -137,6 +167,8 @@ impl Default for TerrainConfig {
             boundary: RegionBoundary::Absorbing,
             initial_stress: InitialStress::Geostatic,
             max_boundary_nodes: 1 << 18,
+            bed_depth: Some(1.5),
+            speed_growth: 1.5,
         }
     }
 }
@@ -192,6 +224,33 @@ pub enum TerrainError {
 }
 
 impl TerrainConfig {
+    /// The default limits with `profile`'s settings.
+    pub fn profile(profile: TerrainProfile) -> Self {
+        let d = Self::default();
+        match profile {
+            TerrainProfile::Physical => d,
+            TerrainProfile::Game => Self {
+                cells_per_radius: 8.0,
+                bed_depth: Some(1.25),
+                courant: 0.45,
+                speed_growth: 1.0,
+                ..d
+            },
+        }
+    }
+
+    /// `profile`'s settings over these limits (the other fields kept).
+    pub fn with_profile(self, profile: TerrainProfile) -> Self {
+        let p = Self::profile(profile);
+        Self {
+            cells_per_radius: p.cells_per_radius,
+            bed_depth: p.bed_depth,
+            courant: p.courant,
+            speed_growth: p.speed_growth,
+            ..self
+        }
+    }
+
     pub fn validate(&self) -> Result<(), TerrainError> {
         let bad = |c: bool, why| {
             if c {
@@ -250,6 +309,14 @@ impl TerrainConfig {
         bad(
             self.boundary == RegionBoundary::Absorbing && self.max_boundary_nodes == 0,
             "an absorbing boundary needs max_boundary_nodes",
+        )?;
+        bad(
+            self.bed_depth.is_some_and(|d| !(d.is_finite() && d > 0.0)),
+            "bed_depth must be finite and positive",
+        )?;
+        bad(
+            !(self.speed_growth.is_finite() && self.speed_growth >= 1.0),
+            "speed_growth must be finite and at least 1",
         )?;
         Ok(())
     }

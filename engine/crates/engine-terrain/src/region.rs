@@ -23,8 +23,9 @@ pub struct RegionPlan {
 
 impl RegionPlan {
     /// A region centred horizontally on `center` (the event at the surface),
-    /// reaching `radius · (1 + margin)` sideways and as deep below it, and the
-    /// same above for material thrown up. `active_regions` and `active_blocks`
+    /// reaching `radius · (1 + margin)` sideways and above (for material
+    /// thrown up), and as deep below it unless [`TerrainConfig::bed_depth`]
+    /// sets the depth (`radius · bed_depth`). `active_regions` and `active_blocks`
     /// are what the world already holds.
     pub fn around(
         config: &TerrainConfig,
@@ -81,7 +82,8 @@ impl RegionPlan {
         }
         let block = dx * BLOCK_CELLS as f32;
         let reach = radius * (1.0 + margin);
-        let lo = ((center - Vec3::splat(reach)) / block).floor();
+        let depth = config.bed_depth.map_or(reach, |d| radius * d);
+        let lo = ((center - Vec3::new(reach, depth, reach)) / block).floor();
         let hi = ((center + Vec3::splat(reach)) / block).ceil();
         let blocks = (hi - lo).as_ivec3();
         let count = blocks.x as u64 * blocks.y as u64 * blocks.z as u64;
@@ -164,6 +166,32 @@ mod tests {
             let m = p.origin[k] / block;
             assert!((m - m.round()).abs() < 1e-4, "origin off the lattice");
         }
+    }
+
+    #[test]
+    fn the_bed_depth_is_its_own_setting() {
+        let c = TerrainConfig {
+            bed_depth: Some(1.25),
+            ..TerrainConfig::default()
+        };
+        let center = Vec3::new(0.0, 0.0, 0.0);
+        let p = RegionPlan::around(&c, center, 2.0, 1.5, 0, 0).unwrap();
+        let deep = TerrainConfig {
+            bed_depth: None,
+            ..TerrainConfig::default()
+        };
+        let q = RegionPlan::around(&deep, center, 2.0, 1.5, 0, 0).unwrap();
+        let block = p.dx * BLOCK_CELLS as f32;
+        // The bed within a block below radius · bed_depth; sides and top unchanged.
+        assert!(p.origin.y <= -2.5 + 1e-5 && p.origin.y > -2.5 - block - 1e-5);
+        assert!(q.origin.y <= -5.0 + 1e-5);
+        assert_eq!((p.origin.x, p.origin.z), (q.origin.x, q.origin.z));
+        assert_eq!(p.end(), q.end());
+        let bad = TerrainConfig {
+            bed_depth: Some(0.0),
+            ..TerrainConfig::default()
+        };
+        assert!(RegionPlan::around(&bad, center, 2.0, 1.5, 0, 0).is_err());
     }
 
     #[test]

@@ -352,16 +352,16 @@ fn far_apart_impacts_each_dig_the_single_impacts_crater() {
         repeat.0, repeat.1
     );
     // Each area steps in its own frame and bakes with dithers counted from its
-    // own first slot: the first area is bit-identical to the single impact.
-    assert_eq!((d1, n1), (0.0, 0), "the first area is the single impact");
-    // The areas share one pool of parcels, whose slots (and so their
-    // deposits' dithers, and the slots of those landing back in an area)
-    // interleave: the second area differs by a few whole quanta where
-    // ejecta land.
+    // own first slot. The areas share one pool of parcels, whose slots (and so
+    // their deposits' dithers, and the slots of those landing back in an area)
+    // interleave in the atomics' order: an area differs from its single impact
+    // only by a few whole quanta where ejecta land (which area, and whether at
+    // all, follows that order; so far one of the two has come out
+    // bit-identical in every run, which is not asserted).
     let quantum = (q / area) as f32;
     assert!(
-        d2 <= 8.0 * quantum,
-        "second area: {d2} m against 8 quanta ({} m)",
+        d1 <= 8.0 * quantum && d2 <= 8.0 * quantum,
+        "areas against single impacts: {d1} m, {d2} m; 8 quanta are {} m",
         8.0 * quantum
     );
     assert!(((v - v1) / v1).abs() < 1e-3 && ((v2 - v2s) / v2s).abs() < 1e-3);

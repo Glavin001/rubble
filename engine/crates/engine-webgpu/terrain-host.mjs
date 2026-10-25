@@ -12,6 +12,11 @@
 //   // each frame, before world.encodeStep(enc):
 //   terrain.encodeFrame(enc);
 //   world.encodeStep(enc); …; device.queue.submit([enc.finish()]); terrain.afterSubmit();
+//
+// With { surface: true } each coupled frame also rebuilds the live ground over
+// the open region from its particles (engine_terrain::surface, render only)
+// into terrain.surfaceBuffer (binding T.SURFACE): the heights a renderer draws
+// over the window, and the line above which material is drawn as debris.
 import { buildKernels } from './world-host.mjs';
 import { wasm } from './vehicle.mjs';
 
@@ -20,6 +25,7 @@ export const { TerrainStep } = wasm;
 /** Bindings, counter words and record sizes (engine_terrain::layout). */
 export const T = JSON.parse(TerrainStep.constants());
 const KERNELS = JSON.parse(TerrainStep.kernels());
+const SURFACE_KERNELS = JSON.parse(TerrainStep.surface_kernels());
 const OP_DISPATCH = 1, OP_INDIRECT = 2;
 const READBACKS = 8;
 
@@ -51,9 +57,16 @@ export function decodeBlocks(words, at = 0) {
  * Terrain for `world` (world-host.mjs). `settings`: TerrainStep JSON (config,
  * sand, region_margin, z, speed_headroom, settle_speed, settle_frames).
  */
-export async function createTerrain(world, settings = {}, { wgslBase = './generated/wgsl/', status = () => {} } = {}) {
+export async function createTerrain(world, settings = {}, { wgslBase = './generated/wgsl/', status = () => {}, surface = false, patch = null } = {}) {
   const device = world.device;
-  let plan = new TerrainStep(JSON.stringify(settings));
+  // patch: { collider, nx, nz }, a static heightfield the surface pass keeps
+  // on the live sand (wheel rays and contacts meet it; engine_terrain::surface).
+  const newPlan = () => {
+    const p = new TerrainStep(JSON.stringify(settings));
+    if (patch) p.set_surface_patch(patch.collider, patch.nx, patch.nz);
+    return p;
+  };
+  let plan = newPlan();
   const sizes = plan.buffer_sizes();
   const limit = Math.min(device.limits.maxBufferSize, device.limits.maxStorageBufferBindingSize);
   for (let i = 0; i < sizes.length; i += 3) {
@@ -67,7 +80,15 @@ export async function createTerrain(world, settings = {}, { wgslBase = './genera
   }
   // The look-ahead (terrain_watch.slang, binding 52) is not run by this host;
   // no terrain_mpm kernel binds it.
+  if (surface) {
+    const bytes = plan.surface_bytes();
+    if (bytes > limit) throw new Error(`terrain surface needs ${bytes} bytes; this device allows ${limit} (lower surface_cells)`);
+    world.bufs[T.SURFACE]?.destroy?.();
+    world.bufs[T.SURFACE] = device.createBuffer({ label: `b${T.SURFACE} terrain surface`, size: bytes,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT });
+  }
   const pipes = await buildKernels(device, world.bufs, KERNELS, { wgslBase, status });
+  const surfacePipes = surface ? await buildKernels(device, world.bufs, SURFACE_KERNELS, { wgslBase, status }) : null;
   const bufs = world.bufs;
   const counterBytes = T.COUNTER_WORDS * 4;
   const free = Array.from({ length: READBACKS }, () => device.createBuffer({ size: counterBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }));
@@ -82,13 +103,17 @@ export async function createTerrain(world, settings = {}, { wgslBase = './genera
     lastKind: 0, lastSubsteps: 0, lastStep: -1,
     onReport: null, onBake: null,
     pending: [],
+    /** The live surface (binding T.SURFACE), or null without { surface: true }. */
+    surfaceBuffer: surface ? world.bufs[T.SURFACE] : null,
+    /** Rebuild the surface each coupled frame (when built with it). */
+    surfaceOn: surface,
   };
 
   const write = (w) => device.queue.writeBuffer(bufs[w.binding], w.offset, w.words);
-  const pass = (enc, block, timestampWrites) => {
-    const p = enc.beginComputePass({ label: 'terrain', timestampWrites });
+  const pass = (enc, block, timestampWrites, kernels = pipes, label = 'terrain') => {
+    const p = enc.beginComputePass({ label, timestampWrites });
     for (const c of block.cmds) {
-      const k = pipes[c.kernel];
+      const k = kernels[c.kernel];
       p.setPipeline(k.pipeline);
       p.setBindGroup(0, k.bind);
       if (c.op === OP_DISPATCH) p.dispatchWorkgroups(...groups(c.value));
@@ -98,12 +123,12 @@ export async function createTerrain(world, settings = {}, { wgslBase = './genera
     p.end();
   };
   // Blocks run one submission each, writes first (WgpuSim::terrain_submit).
-  const submitBlocks = (words, at = 0) => submitDecoded(decodeBlocks(words, at));
-  const submitDecoded = (blocks) => {
+  const submitBlocks = (words, at = 0, kernels = pipes) => submitDecoded(decodeBlocks(words, at), kernels);
+  const submitDecoded = (blocks, kernels = pipes) => {
     for (const block of blocks) {
       block.writes.forEach(write);
       const enc = device.createCommandEncoder({ label: 'terrain' });
-      pass(enc, block);
+      pass(enc, block, undefined, kernels);
       device.queue.submit([enc.finish()]);
     }
   };
@@ -143,9 +168,18 @@ export async function createTerrain(world, settings = {}, { wgslBase = './genera
   /** A sourceless region over [lo, hi] with cells of dx. */
   terrain.openBox = (collider, field, lo, hi, dx) =>
     opened(collider, plan.open_box(collider, fieldWords(field), Float32Array.from(lo), Float32Array.from(hi), dx));
+  // The heightfield is the ground again: the surface's valid word off, and
+  // the patch (if any) sunk out of reach.
+  const surfaceOff = () => {
+    if (!surface) return;
+    device.queue.writeBuffer(bufs[T.SURFACE], 4 * T.SURFACE_VALID_WORD, new Uint32Array(1));
+    if (patch) { submitBlocks(plan.surface_retire(), 0, surfacePipes); surfaceMoved(patch.collider); }
+  };
   const baked = () => {
     surfaceMoved(terrain.collider);
     refresh();
+    // The surface shows the first open area: off once none is left.
+    if (!terrain.areas.length) surfaceOff();
     terrain.onBake?.();
   };
   /** Bake every open area now. */
@@ -158,9 +192,10 @@ export async function createTerrain(world, settings = {}, { wgslBase = './genera
    * coupled substeps and a copy of their counters (or a bake, submitted on its
    * own). Returns the frame's kind (0 none, 1 coupled, 2 baked, 3 some areas
    * baked and the others coupled).
-   * `timestampWrites` (optional) times the coupled pass.
+   * `timestampWrites` (optional) times the coupled pass, `surfaceTimestampWrites`
+   * the surface pass that follows it.
    */
-  terrain.encodeFrame = (enc, { timestampWrites } = {}) => {
+  terrain.encodeFrame = (enc, { timestampWrites, surfaceTimestampWrites } = {}) => {
     if (terrain.error) throw terrain.error;
     const words = plan.frame(world.params.dt, world.params.gravityY, world.colliderCount);
     const kind = words[0], step = words[1];
@@ -176,6 +211,7 @@ export async function createTerrain(world, settings = {}, { wgslBase = './genera
       block.writes.forEach(write);
       pass(enc, block, timestampWrites);
       terrain.lastSubsteps = block.cmds.filter((c) => KERNELS[c.kernel] === 'mpm_p2g').length;
+      if (surface && terrain.surfaceOn) terrain.encodeSurface(enc, { timestampWrites: surfaceTimestampWrites });
       // The rigid step applies the frame's reactions (impulse records on the GPU).
       world.terrainImpulses = true;
       const rb = free.pop();
@@ -185,6 +221,19 @@ export async function createTerrain(world, settings = {}, { wgslBase = './genera
       terrain.pending.push({ rb, step });
     }
     return kind;
+  };
+  /** The surface pass for the open region as it is now, into `enc` (encodeFrame
+   * runs it after each coupled frame; call it yourself to rebuild it at other times). */
+  terrain.encodeSurface = (enc, { timestampWrites } = {}) => {
+    if (!surface) throw new Error('createTerrain(…, { surface: true }) builds the surface pass');
+    const words = plan.surface(-world.params.gravityY);
+    if (!words[0]) return false;
+    const [block] = decodeBlocks(words);
+    block.writes.forEach(write);
+    pass(enc, block, timestampWrites, surfacePipes, 'terrain surface');
+    // The patch's surface moved under its contacts.
+    if (patch) surfaceMoved(patch.collider);
+    return true;
   };
   // After the frame's submission: map its counters; reports arrive in order.
   const reading = [];
@@ -216,12 +265,13 @@ export async function createTerrain(world, settings = {}, { wgslBase = './genera
   terrain.reset = () => {
     generation++;
     plan.free();
-    plan = new TerrainStep(JSON.stringify(settings));
+    plan = newPlan();
     terrain.plan = plan;
     terrain.region = null; terrain.areas = []; terrain.report = null; terrain.error = null;
     terrain.lastKind = 0; terrain.lastSubsteps = 0; terrain.lastStep = -1;
     terrain.pending.length = 0;
     device.queue.writeBuffer(bufs[T.COUNTERS], 0, new Uint32Array(T.COUNTER_WORDS));
+    surfaceOff();
   };
 
   // ---- reads for rendering and tools ----

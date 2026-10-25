@@ -46,11 +46,18 @@ fn sim(gravity: f32) -> WgpuSim {
     s
 }
 
+/// `COUPLE_PROFILE=game`: the game profile's step settings (Courant; the
+/// regions' cells are the tests' own).
 fn config() -> TerrainConfig {
-    TerrainConfig {
+    let cfg = TerrainConfig {
         max_particles: 1 << 18,
         max_blocks: 1 << 13,
         ..TerrainConfig::default()
+    };
+    if std::env::var("COUPLE_PROFILE").is_ok_and(|v| v == "game") {
+        cfg.with_profile(engine_terrain::TerrainProfile::Game)
+    } else {
+        cfg
     }
 }
 

@@ -18,10 +18,14 @@ use engine_terrain::plan::{
     alloc_bytes, source_peak_speed, FieldGrid, RegionClock, TerrainCmd, TerrainOps, TerrainPlan,
     TerrainStepReport, KERNELS,
 };
+use engine_terrain::surface::{
+    SurfacePatch, SurfacePlan, DEFAULT_SURFACE_CELLS, SURFACE_BINDING, SURFACE_DEBRIS_ARGS_WORD,
+    SURFACE_HEADER_WORDS, SURFACE_KERNELS, SURFACE_VALID_WORD, SURFACE_WINDOW_WORD,
+};
 use engine_terrain::zmodel::point_source_z;
 use engine_terrain::{
     CraterPrediction, CraterTarget, ExplosionSource, ImpactSource, InitialStress, RegionBoundary,
-    RegionPlan, SandMaterial, TerrainConfig, TerrainError, ZModel,
+    RegionPlan, SandMaterial, TerrainConfig, TerrainError, TerrainProfile, ZModel,
 };
 use glam::{DVec3, Vec3};
 use serde::Deserialize;
@@ -52,6 +56,12 @@ struct ConfigJson {
     max_regions: Option<u32>,
     cell_size: Option<f32>,
     min_resolution: Option<f32>,
+    /// Bed depth below the event in transient radii (`TerrainConfig::bed_depth`).
+    bed_depth: Option<f32>,
+    speed_growth: Option<f32>,
+    /// "physical" (the default) or "game" (`TerrainProfile`): the settings
+    /// the other fields then override.
+    profile: Option<String>,
 }
 
 /// Dry sand's parameters (the default sand when absent).
@@ -77,6 +87,12 @@ struct SettingsJson {
     speed_headroom: Option<f32>,
     settle_speed: Option<f32>,
     settle_frames: Option<u32>,
+    /// The render-only surface's limit on window samples × layers
+    /// (`engine_terrain::surface`).
+    surface_cells: Option<u32>,
+    /// Sand faster than a fall of this many layers is in flight (debris);
+    /// 0: only what a gap separates (`SurfacePlan::with_ejecta_fall`).
+    surface_ejecta_fall: Option<f32>,
 }
 
 /// An open area.
@@ -102,6 +118,7 @@ pub struct TerrainStep {
     settle_frames: u32,
     /// The open areas, by slot.
     areas: Vec<Open>,
+    surface: SurfacePlan,
     /// Frames encoded (the step ids reports come back with).
     frame: u64,
     last: Option<TerrainStepReport>,
@@ -111,15 +128,20 @@ pub struct TerrainStep {
 const OP_DISPATCH: u32 = 1;
 const OP_INDIRECT: u32 = 2;
 
-fn kernel_index(name: &str) -> u32 {
-    KERNELS
+fn kernel_index(kernels: &[&str], name: &str) -> u32 {
+    kernels
         .iter()
         .position(|k| *k == name)
-        .expect("plan kernels are in KERNELS") as u32
+        .expect("plan kernels are in their kernel list") as u32
 }
 
 /// `[blocks, block…]` for a sequence of the plan's ops.
 fn encode(blocks: &[TerrainOps]) -> Vec<u32> {
+    encode_in(blocks, KERNELS)
+}
+
+/// [`encode`] with kernel indices into `kernels`.
+fn encode_in(blocks: &[TerrainOps], kernels: &[&str]) -> Vec<u32> {
     let mut out = vec![blocks.len() as u32];
     for ops in blocks {
         out.push(ops.writes.len() as u32);
@@ -132,11 +154,11 @@ fn encode(blocks: &[TerrainOps]) -> Vec<u32> {
             match *c {
                 TerrainCmd::Dispatch { kernel, threads } => out.extend([
                     OP_DISPATCH,
-                    kernel_index(kernel),
+                    kernel_index(kernels, kernel),
                     u32::try_from(threads).expect("a dispatch's threads fit u32"),
                 ]),
                 TerrainCmd::Indirect { kernel, offset } => {
-                    out.extend([OP_INDIRECT, kernel_index(kernel), offset as u32])
+                    out.extend([OP_INDIRECT, kernel_index(kernels, kernel), offset as u32])
                 }
             }
         }
@@ -188,8 +210,16 @@ impl TerrainStep {
     #[wasm_bindgen(constructor)]
     pub fn new(settings: &str) -> Result<TerrainStep, JsError> {
         let s: SettingsJson = super::parse(settings)?;
-        let d = TerrainConfig::default();
         let c = s.config;
+        let d = TerrainConfig::profile(match c.profile.as_deref() {
+            None | Some("physical") => TerrainProfile::Physical,
+            Some("game") => TerrainProfile::Game,
+            Some(other) => {
+                return Err(JsError::new(&format!(
+                    "config.profile is \"physical\" or \"game\", not {other:?}"
+                )))
+            }
+        });
         let boundary = match c.boundary.as_deref() {
             None => d.boundary,
             Some("rigid") => RegionBoundary::Rigid,
@@ -231,6 +261,8 @@ impl TerrainStep {
             max_regions: c.max_regions.unwrap_or(d.max_regions),
             cell_size: c.cell_size.unwrap_or(d.cell_size),
             min_resolution: c.min_resolution.unwrap_or(d.min_resolution),
+            bed_depth: c.bed_depth.or(d.bed_depth),
+            speed_growth: c.speed_growth.unwrap_or(d.speed_growth),
             ..d
         };
         let ds = SandMaterial::default();
@@ -245,6 +277,9 @@ impl TerrainStep {
             ..ds
         };
         let mut plan = TerrainPlan::new(&config).map_err(err)?;
+        let surface = SurfacePlan::new(&config, s.surface_cells.unwrap_or(DEFAULT_SURFACE_CELLS))
+            .and_then(|p| p.with_ejecta_fall(s.surface_ejecta_fall.unwrap_or(1.0)))
+            .map_err(err)?;
         plan.set_material(Some(&sand)).map_err(err)?;
         // engine-world's TerrainDef defaults and checks.
         let margin = s.region_margin.unwrap_or(2.0);
@@ -273,6 +308,7 @@ impl TerrainStep {
             settle_speed,
             settle_frames,
             areas: Vec::new(),
+            surface,
             frame: 0,
             last: None,
         })
@@ -306,6 +342,9 @@ impl TerrainStep {
             "PARTICLE_BYTES": std::mem::size_of::<MpmParticle>(),
             "PARCEL_BYTES": std::mem::size_of::<MpmParcel>(),
             "PARTICLE_DEAD": MPM_PARTICLE_DEAD,
+            "SURFACE": SURFACE_BINDING, "SURFACE_HEADER_WORDS": SURFACE_HEADER_WORDS,
+            "SURFACE_VALID_WORD": SURFACE_VALID_WORD, "SURFACE_WINDOW_WORD": SURFACE_WINDOW_WORD,
+            "SURFACE_DEBRIS_ARGS_WORD": SURFACE_DEBRIS_ARGS_WORD,
         })
         .to_string()
     }
@@ -333,7 +372,8 @@ impl TerrainStep {
                     InitialStress::Geostatic => "geostatic",
                 },
                 "max_boundary_nodes": c.max_boundary_nodes, "max_regions": c.max_regions,
-                "cell_size": c.cell_size, "min_resolution": c.min_resolution},
+                "cell_size": c.cell_size, "min_resolution": c.min_resolution,
+                "bed_depth": c.bed_depth, "speed_growth": c.speed_growth},
             "region_margin": self.margin, "speed_headroom": self.headroom,
             "settle_speed": self.settle_speed, "settle_frames": self.settle_frames,
         })
@@ -711,6 +751,58 @@ impl TerrainStep {
     /// Every open area (JSON array of [`Self::region`]'s objects, by slot).
     pub fn areas(&self) -> String {
         serde_json::Value::Array(self.areas.iter().map(|a| self.area_json(a)).collect()).to_string()
+    }
+
+    /// The render-only surface pass's kernel entry names (JSON array); its
+    /// command words index into it.
+    pub fn surface_kernels() -> String {
+        serde_json::to_string(SURFACE_KERNELS).unwrap()
+    }
+
+    /// Bytes of the surface buffer (binding `SURFACE`).
+    pub fn surface_bytes(&self) -> f64 {
+        alloc_bytes(self.surface.bytes()) as f64
+    }
+
+    /// The pass that rebuilds the live surface of the open region from its
+    /// particles under `gravity` (m/s²; one block, after the frame's
+    /// substeps; kernel indices into [`Self::surface_kernels`]), or no blocks
+    /// without a region. With several areas open it shows the first (by
+    /// slot); [`Self::surface_area`] picks one.
+    pub fn surface(&self, gravity: f32) -> Result<Vec<u32>, JsError> {
+        match self.areas.first() {
+            None => Ok(vec![0]),
+            Some(a) => self.surface_area(a.slot, gravity),
+        }
+    }
+
+    /// [`Self::surface`] for open area `slot` (the surface is one window's).
+    pub fn surface_area(&self, slot: u32, gravity: f32) -> Result<Vec<u32>, JsError> {
+        Ok(encode_in(
+            &[self
+                .surface
+                .frame_area(&self.plan, slot, gravity)
+                .map_err(err)?],
+            SURFACE_KERNELS,
+        ))
+    }
+
+    /// Publish the live surface into a static heightfield collider of
+    /// `nx × nz` samples (the field's spacing, at least two more than the
+    /// window each way) so wheel rays and contacts meet the sand while a
+    /// region is open (`SurfacePatch`).
+    pub fn set_surface_patch(&mut self, collider: u32, nx: u32, nz: u32) {
+        self.surface = self
+            .surface
+            .with_patch(Some(SurfacePatch { collider, nx, nz }));
+    }
+
+    /// After a bake: one block that sinks the patch (no blocks without one).
+    pub fn surface_retire(&self) -> Vec<u32> {
+        match self.surface.retire() {
+            Some(ops) => encode_in(&[ops], SURFACE_KERNELS),
+            None => vec![0],
+        }
     }
 
     /// Frames encoded since the pool was created.
