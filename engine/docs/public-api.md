@@ -878,7 +878,11 @@ oracle's `stress-gpu`, `stress-ref` and `stress-rubble`.
   inertia summed from its chunks. The step then reports `BondsBroken` and
   `Split` (the children partition the parent; one body per actor). Every
   piece's origin stays the instance frame, so `chunk_local` is the identity
-  and the render contract holds.
+  and the render contract holds. The frame that reports a `Split` also
+  reports each new piece's pose (`body_transform`, and a move with no
+  `previous`): it starts at its parent's origin, so it is drawable at once.
+  `read_body_state` poses a piece in the solver frame the GPU holds now, so a
+  read after a step whose split is not yet polled is still the piece's origin.
 - **Projectiles.** `body_set_projectile(body, Some(Projectile))` adds a body
   with one sphere or box shape to strike prediction and gives its contacts
   the lab's shot loads. Other non-chunk colliders load chunks as static

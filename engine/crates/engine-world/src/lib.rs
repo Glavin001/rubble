@@ -706,13 +706,21 @@ impl World {
     }
 
     /// The body's state read straight from the GPU (blocking; for tools and
-    /// tests, not per-frame use).
+    /// tests, not per-frame use), as of every step taken, polled or not.
     pub fn read_body_state(&self, id: BodyId) -> anyhow::Result<BodyStateRead> {
         let i = self.live_body(id)?;
         let b = self.sim.read_body(id.index());
         let solver = Transform::new(b.position, b.orientation);
+        // The solver frame the GPU posed the body in: a threshold piece's from the
+        // GPU too, since a step not yet polled may have split and re-framed it.
+        #[cfg(feature = "stress")]
+        let frame = self
+            .threshold_frame_now(id.index())
+            .unwrap_or_else(|| self.bodies[i].frame());
+        #[cfg(not(feature = "stress"))]
+        let frame = self.bodies[i].frame();
         Ok(BodyStateRead {
-            transform: self.bodies[i].frame().to_origin(solver),
+            transform: frame.to_origin(solver),
             linear_velocity: b.linear_vel,
             angular_velocity: b.angular_vel,
             awake: b.flags & engine_schema::BodyFlags::Sleeping as u32 == 0,
@@ -1799,6 +1807,10 @@ impl World {
                 .map(DestructionEvent::PieceDetached),
         );
         let mut destruction = self.destruction_events(destruction);
+        // Pieces this step's GPU split adopted (child, parent): their slots' records are
+        // from before the split.
+        #[allow(unused_mut)]
+        let mut adopted: Vec<(u32, u32)> = Vec::new();
         #[cfg(feature = "stress")]
         {
             let reads: Vec<(threshold::FractureRead, &[u8])> = raw
@@ -1812,7 +1824,24 @@ impl World {
             // The splits blasts made before this step, then the step's own.
             destruction.extend(self.take_blast_events(step));
             if !reads.is_empty() {
-                destruction.extend(self.fracture_frame(step, &reads)?);
+                let events = self.fracture_frame(step, &reads)?;
+                // The pieces this step's split adopted, each with its parent's body.
+                for e in &events {
+                    if let DestructionEvent::Split {
+                        parent, children, ..
+                    } = e
+                    {
+                        let p = parent.bodies[0].index();
+                        adopted.extend(
+                            children
+                                .iter()
+                                .map(|c| c.bodies[0].index())
+                                .filter(|&c| c != p)
+                                .map(|c| (c, p)),
+                        );
+                    }
+                }
+                destruction.extend(events);
             }
         }
         let destruction = self.connection_events(destruction);
@@ -1832,13 +1861,13 @@ impl World {
             None => raw.moved,
         };
         records.sort_by_key(|r| r.body());
-        let mut moves = Vec::with_capacity(records.len());
+        let mut moves = Vec::with_capacity(records.len() + adopted.len());
         for r in &records {
             let i = r.body() as usize;
             let Some(slot) = self.bodies.get_mut(i) else {
                 continue;
             };
-            if !slot.alive {
+            if !slot.alive || adopted.iter().any(|a| a.0 == r.body()) {
                 continue;
             }
             let solver = Transform::new(r.position, r.rotation);
@@ -1861,6 +1890,24 @@ impl World {
                 previous,
                 fell_asleep: r.slept(),
                 woke: r.woke(),
+                user_data: slot.user_data,
+            });
+        }
+        // A split's new pieces are drawable in the frame that reports the split: each
+        // starts at its parent's origin (the instance frame, carried by the parent's
+        // motion), so its first pose is the parent's this step.
+        for (child, parent) in adopted {
+            let Some(transform) = self.bodies[parent as usize].last_transform else {
+                continue;
+            };
+            let slot = &mut self.bodies[child as usize];
+            slot.last_transform = Some(transform);
+            moves.push(BodyMoveEvent {
+                body: BodyId::new(child, slot.generation),
+                transform,
+                previous: None,
+                fell_asleep: false,
+                woke: false,
                 user_data: slot.user_data,
             });
         }

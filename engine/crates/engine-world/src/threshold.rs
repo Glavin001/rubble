@@ -1720,9 +1720,6 @@ mod imp {
                     .ok_or_else(|| anyhow::anyhow!("fracture frame {i} missing"))
             };
             let (c0, c1) = (rec(2 * b as usize)?, rec(2 * b as usize + 1)?);
-            let structure = c0[3].to_bits() as usize;
-            let (sq, st) = t.structures[structure];
-            let com = DVec3::new(c0[0] as f64, c0[1] as f64, c0[2] as f64);
             let principal =
                 DQuat::from_xyzw(c1[0] as f64, c1[1] as f64, c1[2] as f64, c1[3] as f64)
                     .normalize();
@@ -1754,10 +1751,7 @@ mod imp {
             let pm = DMat3::from_quat(principal);
             let local = pm.transpose() * inertia * pm;
             let moments = DVec3::new(local.x_axis.x, local.y_axis.y, local.z_axis.z);
-            let frame = SolverFrame {
-                center: (st + sq * com).as_vec3(),
-                axes: (sq * principal).normalize().as_quat(),
-            };
+            let frame = piece_frame(t, c0, c1);
             let body_type = if anchored || mass <= 0.0 {
                 BodyType::Static
             } else {
@@ -1806,6 +1800,22 @@ mod imp {
                 self.sim.mirror_colliders(id, &[col]);
             }
             Ok(())
+        }
+
+        /// A piece body's solver frame as the GPU holds it now, after every step submitted
+        /// (polled or not), for `read_body_state`: a step still in flight may have split the
+        /// body and re-framed it, and the host's frame changes only when its readback is
+        /// polled. `None` for a body that is no threshold piece.
+        pub(crate) fn threshold_frame_now(&self, body: u32) -> Option<SolverFrame> {
+            let gpu = self.fracture.gpu.as_ref()?;
+            let t = self
+                .fracture
+                .slots
+                .iter()
+                .flatten()
+                .find(|t| t.chunk_body.contains(&body))?;
+            let r: Vec<[f32; 4]> = gpu.read_range(&t.fracture.frames, 2 * body as usize, 2);
+            Some(piece_frame(t, r[0], r[1]))
         }
 
         fn piece_info(&self, k: usize, chunks: &[u32], body: u32) -> ActorInfo {
@@ -1914,6 +1924,19 @@ mod imp {
             );
         }
         Ok(())
+    }
+
+    /// A body's solver frame from the GPU's frame record (`frames`: its centre of mass
+    /// and principal rotation in its structure's stress frame, the structure as bits).
+    fn piece_frame(t: &ThresholdSlot, c0: [f32; 4], c1: [f32; 4]) -> SolverFrame {
+        let (sq, st) = t.structures[c0[3].to_bits() as usize];
+        let com = DVec3::new(c0[0] as f64, c0[1] as f64, c0[2] as f64);
+        let principal =
+            DQuat::from_xyzw(c1[0] as f64, c1[1] as f64, c1[2] as f64, c1[3] as f64).normalize();
+        SolverFrame {
+            center: (st + sq * com).as_vec3(),
+            axes: (sq * principal).normalize().as_quat(),
+        }
     }
 
     fn read_slot(r: FractureRead) -> u32 {
