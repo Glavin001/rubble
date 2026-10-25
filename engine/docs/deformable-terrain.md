@@ -556,6 +556,22 @@ change):
   and soil ruts. `engine-world/src/terrain.rs` keeps its own copy of the frame
   schedule; it should switch to `RegionClock`.
 
+**The demo on the absorbing ground (2026-10-25).** `impact.html` bakes once
+settled by default. Its rest tolerance is 1% of the crater's gravity speed
+√(gR) (0.38 m/s for the default 151 m crater; `?settle=` overrides it).
+- The region settles and bakes by itself at t ≈ 26 s.
+- Held open to t = 200 s at 5 cm/s, its top speed only fell to 0.077 m/s, and
+  baking then gave the same crater: depth 101.6 m against 101.9 m, the same
+  apparent radius (198 m) and rim (297 m, 22.5 m high). What still moves is a
+  few particles rattling, not flow, so the scaled tolerance loses nothing.
+- The inner wall stands at about 35° near the floor and 28° higher up. A
+  crater wall is concave in plan, and that supports a steeper face than the
+  planar slope test (which relaxes to 29°).
+- The demo truck, starting on the floor, stalls at the foot of the 35° wall
+  (its tyres hold to about 27°): the crater is a trap.
+- Open: along the axis row through the impact (z = 0) the baked inner wall
+  sits 4–8 m below its neighbours, a groove the truck drives in.
+
 ## The splat bake (2026-10-25)
 
 The user approved a bilinear splat for the bake and the parcels' deposits.
@@ -870,18 +886,15 @@ t = p0·n − (k_N·u_n + ρ·c_p·v_n)·n − (k_T·u_t + ρ·c_s·v_t):
   excess is the source's, as diagnosed above. 782 s wall.
 
 **Open points.**
-- **Not the default.** `TerrainConfig::default()` keeps the rigid ground and
-  the unstressed start, so existing results and fingerprints are unchanged.
-  With the absorbing ground on, every suite passes except engine-world's
-  dropped ball: it penetrates 0.094 m, 0.486× Uehara's 0.194 m, just under
-  the test's 0.5–2× band (rigid ground: 0.115 m, 0.59×). Its region is shallow,
-  so the ball's flow reaches the bed and walls; most likely the rigid box
-  sends back energy the absorbing ground lets go (not verified). At
-  6 cells per body the penetration is under-resolved either way. Making it
-  the default needs that settled (`TERRAIN_GROUND=absorbing` runs it).
-- **The walls' top corner.** Within 1.5 cells of a side's top edge, the
-  unactivated ground's surface is the soft wall face rather than a rigid
-  contact. Rim material deposited there sinks into the corner at the spring's
+- **The default since 2026-10-25.** `TerrainConfig::default()` is the absorbing
+  ground with the geostatic start (`Rigid` / `Unstressed` remain). The dropped
+  ball that blocked it was under-resolved at 6 cells per body. At the default
+  8 it penetrates 0.117 m on absorbing ground and 0.123 m on rigid ground (0.60× and
+  0.63× Uehara), and the test now runs at the default.
+- **The walls' top corner.** The unactivated ground's surface beside the window
+  is now a rigid contact for the nodes the absorbing faces reach as well
+  (`mpmGroundSurfaceContact`). Before, within 1.5 cells of a side's top edge,
+  the surface was the soft wall face rather than a rigid contact. Rim material deposited there sinks into the corner at the spring's
   pace: 0.35 m/s at margin 0.6, where the rim forms at the box's edge. The
   rigid ground does no better there: under unactivated ground its normal faces
   the window, so it holds nothing up.
