@@ -64,6 +64,8 @@ pub struct ThresholdStats {
     pub engine_overflow: u32,
     pub contacts: u32,
     pub awake: u32,
+    /// Chunks crushed in all (`ThresholdWorld::new_with_crush`).
+    pub crushed: u32,
 }
 
 /// A shot's parked sphere: its engine body and collider.
@@ -117,6 +119,15 @@ impl ThresholdWorld {
     /// [`SHOTS`] parked spheres of `shot` (radius, mass; its material the scene's
     /// "projectile").
     pub fn new(gpu: &Gpu, scene: &Scene, shot_radius: f64, shot_mass: f64) -> Result<ThresholdWorld, String> {
+        Self::new_with_crush(gpu, scene, shot_radius, shot_mass, false)
+    }
+
+    /// [`Self::new`], with chunk crushing when `crush` (engine/docs/destruction-reactions.md
+    /// section 1): a chunk of a material with crush parameters (stress-ref `Material::crush`)
+    /// whose stress leaves its crush surface is removed (its bonds broken, its body parked
+    /// out of the world; the lab keeps no fragments). Crushing with no crushable chunk is
+    /// an error.
+    pub fn new_with_crush(gpu: &Gpu, scene: &Scene, shot_radius: f64, shot_mass: f64, crush: bool) -> Result<ThresholdWorld, String> {
         let world = stress_ref::world::World::new(scene);
         let m = &world.solver;
         let chunk_count: usize = m.structures.iter().map(|s| s.chunks.len()).sum();
@@ -242,6 +253,7 @@ impl ThresholdWorld {
         }
         // Each cluster's body frame (its structure's frame: a cluster's shapes are its
         // chunks at their structure-frame poses) and its bonds.
+        let mut crush_bonds: Vec<[f32; 4]> = Vec::new();
         for cl in &m.clusters {
             let e = &engine.bodies[&BodyKey::Cluster(cl.id)];
             let p = e.principal;
@@ -253,7 +265,24 @@ impl ThresholdWorld {
                 }
                 let capacity = b.strength.tensile * b.geometry.area * b.weibull;
                 t.bonds.push([global(cl.structure, b.geometry.a), global(cl.structure, b.geometry.b), (capacity as f32).to_bits(), (b.geometry.area as f32).to_bits()]);
+                let g = b.geometry.centroid;
+                crush_bonds.push([g.x as f32, g.y as f32, g.z as f32, b.geometry.area as f32]);
             }
+        }
+        if crush {
+            let mut rows = Vec::with_capacity(chunk_of.len());
+            for (k, &(s, c)) in chunk_of.iter().enumerate() {
+                let ch = &m.structures[s].chunks[c];
+                let row = match (&scene.material(&ch.material).crush, ch.support == Support::None && t.chunks[k][0][3] > 0.0) {
+                    (Some(p), true) => [[p.cap_pressure as f32, p.cohesion as f32, p.friction_slope as f32, p.crush_energy as f32], [p.crush_viscosity as f32, ch.volume() as f32, f32::from_bits(1), 0.0]],
+                    _ => [[0.0; 4]; 2],
+                };
+                rows.push(row);
+            }
+            if !rows.iter().any(|r| r[1][2].to_bits() == 1) {
+                return Err("crushing: no chunk's material has crush parameters (a ScenePack v3's materials[].crush, or the presets)".into());
+            }
+            t.crush = Some(fracture::CrushTables { chunks: rows, bonds: std::mem::take(&mut crush_bonds), conserve: false, fragments: 0, pool: Vec::new(), max_events: 1024, park_y: -10_000.0, park_step: 8.0 });
         }
         // The ingest's collider table: chunks' colliders on their bodies, the shots, the
         // ground (static).
@@ -443,6 +472,7 @@ impl ThresholdWorld {
                     engine_overflow: e.overflow_flags,
                     contacts: e.contact_count,
                     awake: e.awake_count,
+                    crushed: c[9],
                 };
             }
         }

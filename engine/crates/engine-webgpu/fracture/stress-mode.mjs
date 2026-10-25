@@ -2,7 +2,7 @@
 // WebGPU device and canvas (engine/stress-oracle/crates/stress-web). This file loads the
 // module, forwards input (camera-input.mjs, as the page's renderer) and drives one frame per
 // animation frame; the physics, camera, shot rule and drawing are the Rust's.
-import init,{stress_init,stress_set_glb,stress_set_cuboid,stress_set_pack,stress_error,stress_stats,stress_set_running,stress_running,stress_resize,stress_drag,stress_zoom,stress_shoot,stress_set_view_mode,stress_mouse_look,stress_travel,stress_set_shot_mass_scale,stress_set_shot_speed_scale,stress_set_shot_radius_scale,stress_set_bond_strength_scale,stress_set_profile,stress_set_view,stress_set_physics_hz,stress_panic} from '../generated/stress-web/stress_web.js';
+import init,{stress_init,stress_set_glb,stress_set_cuboid,stress_set_pack,stress_error,stress_stats,stress_set_running,stress_running,stress_resize,stress_drag,stress_zoom,stress_shoot,stress_set_view_mode,stress_mouse_look,stress_travel,stress_set_shot_mass_scale,stress_set_shot_speed_scale,stress_set_shot_radius_scale,stress_set_bond_strength_scale,stress_set_profile,stress_set_view,stress_set_physics_hz,stress_set_crush,stress_panic} from '../generated/stress-web/stress_web.js';
 // Chrome and Edge 137+ suspend the wasm stack natively (JSPI). Elsewhere (Safari) the
 // Asyncify build of the same Rust does, driven by gpu-wait.mjs, which picks the build.
 import {JSPI,bindAsyncify,asyncifyPromising} from './gpu-wait.mjs';
@@ -43,6 +43,9 @@ export async function createStressMode(canvas){
   setProfile(name){stress_set_profile(name)},
   // The physics frame rate of the next load (Hz; 0 keeps the scene's).
   setPhysicsHz(hz){stress_set_physics_hz(hz)},
+  // Chunk crushing of the next threshold load: 0 off, 1 the scene's crush parameters,
+  // 2 those and the cited presets (crushed chunks are removed; stats.crushed counts them).
+  setCrush(mode){stress_set_crush(mode)},
   // The lab's view: the bond graph, and the colour mode (0 materials, 1 body state,
   // 2 one colour per body, kept as it breaks).
   setView(bonds,colorMode){stress_set_view(bonds,colorMode)},

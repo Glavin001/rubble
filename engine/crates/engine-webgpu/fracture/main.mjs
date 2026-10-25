@@ -114,6 +114,9 @@ const strengthScale=()=>2**Number($('bond-strength').value);
 // Physics rate: 0 (Auto) keeps the scene's dt, else 60 or 120 ticks per second of
 // simulated time, applied when the level loads.
 const physicsHz=()=>Number($('physics-hz').value);
+// Chunk crushing in the threshold mode (engine/docs/destruction-reactions.md): 0 off, 1 the
+// scene's own crush parameters (a ScenePack v3's materials[].crush), 2 those and the cited presets.
+const crushMode=()=>Number($('crush').value);
 const scaleLabel=k=>`×${k>=1?k:`1/${1/k}`}`;
 function applyBallSpeed(){
  const k=speedScale(),ms=(stressOn?stress?.stats.ballSpeed:sim?.shotSpeed)*k;
@@ -223,7 +226,7 @@ async function loadStress(level){
  catch(e){$('view').hidden=false;$('stress-view').hidden=true;throw new Error(`Stress-solver mode unavailable: ${e?.message??e}. Rebuild it (README, Bond modes).`)}
  stressOn=true;
  const profile=STRESS_PROFILES[bondMode()];
- stress.viewMode=cameraMode();stress.setProfile(profile);stress.setPhysicsHz(physicsHz());stress.setBondStrengthScale(strengthScale());stress.setShotRadiusScale(radiusScale());applyView();
+ stress.viewMode=cameraMode();stress.setProfile(profile);stress.setPhysicsHz(physicsHz());stress.setCrush(profile==='threshold'?crushMode():0);stress.setBondStrengthScale(strengthScale());stress.setShotRadiusScale(radiusScale());applyView();
  if(cuboid)await stress.loadCuboid(layout);else if(pack)await stress.loadPack(packBytes);else await stress.load(assetBytes,level);
  await stress.frame(0);applyBallMass();applyBallSpeed();showBallRadius();
  const st=stress.stats;stressHud={t:performance.now(),frames:0,renders:0};
@@ -245,6 +248,10 @@ const samples=Object.fromEntries(SAMPLES.map(s=>[s.key,{...s,procedural:s.file?n
 const optgroup=(label,options)=>{const g=document.createElement('optgroup');g.label=label;g.append(...options);return g};
 const sceneGroups=[...new Set(SAMPLES.map(s=>s.group))].map(label=>optgroup(label,SAMPLES.filter(s=>s.group===label).map(s=>new Option(s.menu,s.key,s.key==='house',s.key==='house'))));
 $('scene').replaceChildren(...sceneGroups,optgroup('Your file',[Object.assign(new Option('Custom GLB (choose or drop one below)',''),{disabled:true})]));
+// The punch-through wall (ScenePack v3 with crush blocks, blast-stress-solver crush-wall.json):
+// chunk crushing's showcase (Bonds: simple threshold, Crush: on).
+samples['crush-wall']={key:'crush-wall',label:'punch-through wall',pack:'./assets/crush-wall.json',nodes:216,bonds:464};
+$('scene').insertBefore(optgroup('Chunk crushing (ScenePack v3)',[new Option('Punch-through wall · 12×8×2 blocks','crush-wall')]),$('scene').lastElementChild);
 // vibe-city /destructible-stress presets, generated into ../generated/vibe-city (optional).
 const VIBE_CITY='../generated/vibe-city/';
 try{const index=await (await fetch(`${VIBE_CITY}index.json`)).json();
@@ -312,6 +319,7 @@ $('ball-radius').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').valu
 $('bond-strength').oninput=()=>{$('bond-strength-value').textContent=scaleLabel(strengthScale())};
 $('bond-strength').onchange=()=>{if(bondMode()!=='none')serializeLoad(()=>loadLevel(Number($('level').value)))};
 $('bond-mode').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
+$('crush').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('physics-hz').onchange=()=>serializeLoad(()=>loadLevel(Number($('level').value)));
 $('release').onclick=()=>{if(stressOn&&stress){stress.running=!stress.running;$('release').textContent=stress.running?'Pause':'Resume';return}released=true;running=!running;$('release').textContent=running?'Pause':'Resume';accumulator=0;rates.reset()};
 $('reset').onclick=()=>serializeLoad(async()=>{if(stressOn){await loadStress(Number($('level').value));return}sim.reset();volley=null;resetTrails();released=false;$('release').textContent='Start simulation';setStatus('Reset · click the model to shoot')});
@@ -360,7 +368,7 @@ function stressTick(now,elapsedMs){
   $('step-ms').textContent=stressHud.stepMs?`${stressHud.stepMs.toFixed(1)} ms/frame (stress + rubble)`:`target ${Math.round(st.frameHz)} frames/s`;
   $('frame-ms').textContent='frames / second';
   $('awake').textContent=st.moving??st.awake??'—';
-  if(stress.running||st.shots){$('release').textContent=stress.running?'Pause':'Resume';setStatus(`${st.shots} shots · ${st.frames} frames · ${st.fragments} fragments · ${st.bodies??'—'} bodies · ${st.brokenBonds} bonds broken · ${st.simSeconds.toFixed(1)} s${stressWarning(st)}`)}
+  if(stress.running||st.shots){$('release').textContent=stress.running?'Pause':'Resume';setStatus(`${st.shots} shots · ${st.frames} frames · ${st.fragments} fragments · ${st.bodies??'—'} bodies · ${st.brokenBonds} bonds broken${st.crush?` · ${st.crushed} chunks crushed`:''} · ${st.simSeconds.toFixed(1)} s${stressWarning(st)}`)}
  }catch(e){fail(e)}})();
  frame.finally(()=>requestAnimationFrame(tick));
 }
@@ -424,5 +432,10 @@ try{
  const adapter=await navigator.gpu.requestAdapter();if(!adapter)throw new Error('No WebGPU adapter available');
  device=await adapter.requestDevice({requiredFeatures:adapter.features.has('timestamp-query')?['timestamp-query']:[],requiredLimits:{maxStorageBuffersPerShaderStage:Math.min(16,adapter.limits.maxStorageBuffersPerShaderStage),maxStorageBufferBindingSize:adapter.limits.maxStorageBufferBindingSize,maxBufferSize:adapter.limits.maxBufferSize}});
  device.addEventListener('uncapturederror',e=>fail(e.error));device.lost.then(info=>fail(new Error(`GPU device lost: ${info.message}. Reload this page.`)));
+ // ?scene=<key>&bonds=<mode>&crush=<0|1|2> preselect the panel (e.g. scene=crush-wall&bonds=threshold&crush=1).
+ const q=new URLSearchParams(location.search);
+ if(q.has('scene')&&samples[q.get('scene')])$('scene').value=q.get('scene');
+ if(q.has('bonds'))$('bond-mode').value=q.get('bonds');
+ if(q.has('crush'))$('crush').value=q.get('crush');
  await sample();requestAnimationFrame(tick);
 }catch(e){fail(e);controls(false)}

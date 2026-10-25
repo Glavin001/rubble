@@ -5,7 +5,7 @@ use stress_ref::capability::Profile;
 use stress_ref::scene_pack::import_value_with;
 
 fn crush_wall() -> serde_json::Value {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../packs/crush-wall.json");
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../crates/engine-webgpu/fracture/assets/crush-wall.json");
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 

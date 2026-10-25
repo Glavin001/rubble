@@ -16,7 +16,7 @@ use rubble::*;
 fn crush_wall_json() -> serde_json::Value {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../stress-oracle/packs/crush-wall.json"
+        "/../engine-webgpu/fracture/assets/crush-wall.json"
     );
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
