@@ -1442,6 +1442,14 @@ cells per radius; 40 frames, then the bakes).
 - After one substep of the loaded cube, velocities differ in the last one or
   two bits.
 - Every validated suite passes unchanged.
+- The crater validation (margin 2, 16 cells/R, absorbing ground) gives what
+  it gave before: apparent radius 0.1838 m (1.25 R), centre 0.069 m deep, rim
+  2.9 cm high at 0.239 m, ledger closed. The cavity is 3.09× π-scaling's, so
+  the volume band still fails there, the known open point (3.10× before).
+- New fingerprints: `engine-webgpu` impact particles `c71c7e64cf7aef94`,
+  bodies `63ce7712cd6c0b07`, heights `39a743e448abe527`; cube
+  `a0c6daecfc7ce3b6`. `engine-world`: reports `6ee2a0a7740af3dd`, heights
+  `cfa3765bdac07cb1`, box `136fde101445dae3` (unchanged).
 
 **Measured on the way: the source frame's time step.** A harness bug once
 doubled the first frame's speed bound for both areas of the far-apart test,
