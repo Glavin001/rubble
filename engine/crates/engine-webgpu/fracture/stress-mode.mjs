@@ -2,7 +2,7 @@
 // WebGPU device and canvas (engine/stress-oracle/crates/stress-web). This file loads the
 // module, forwards input (camera-input.mjs, as the page's renderer) and drives one frame per
 // animation frame; the physics, camera, shot rule and drawing are the Rust's.
-import init,{stress_init,stress_set_glb,stress_set_cuboid,stress_set_pack,stress_error,stress_stats,stress_set_running,stress_running,stress_resize,stress_drag,stress_zoom,stress_shoot,stress_set_view_mode,stress_mouse_look,stress_travel,stress_set_shot_mass_scale,stress_set_shot_speed_scale,stress_set_shot_radius_scale,stress_set_bond_strength_scale,stress_set_profile,stress_set_view,stress_set_physics_hz,stress_panic} from '../generated/stress-web/stress_web.js';
+import init,{stress_init,stress_set_glb,stress_set_cuboid,stress_set_pack,stress_error,stress_stats,stress_set_running,stress_running,stress_resize,stress_drag,stress_zoom,stress_shoot,stress_set_view_mode,stress_mouse_look,stress_travel,stress_set_shot_mass_scale,stress_set_shot_speed_scale,stress_set_shot_radius_scale,stress_set_bond_strength_scale,stress_set_profile,stress_set_view,stress_set_physics_hz,stress_panic,stress_pack_shots,stress_fire_pack_shot} from '../generated/stress-web/stress_web.js';
 // Chrome and Edge 137+ suspend the wasm stack natively (JSPI). Elsewhere (Safari) the
 // Asyncify build of the same Rust does, driven by gpu-wait.mjs, which picks the build.
 import {JSPI,bindAsyncify,asyncifyPromising} from './gpu-wait.mjs';
@@ -33,6 +33,12 @@ export async function createStressMode(canvas){
   async loadPack(bytes){stress_set_pack(new Uint8Array(bytes));if(!await load(0))throw new Error(stress_error())},
   async frame(elapsedMs){fit();input.update();if(!await frame(elapsedMs))throw new Error(stress_error())},
   get stats(){return JSON.parse(stress_stats())},
+  // The loaded pack's authored shots ({label, mass, radius, speed, launchAt, note}), and
+  // firing one as authored (stress-web stress_fire_pack_shot).
+  get packShots(){return JSON.parse(stress_pack_shots())},
+  firePackShot(index){return stress_fire_pack_shot(index)},
+  // The camera, as a drag (px) and a scroll would move it.
+  orbit(dx,dy){stress_drag(dx,dy)},zoom(delta){stress_zoom(delta)},
   setShotMassScale(scale){stress_set_shot_mass_scale(scale)},
   // The shots' speed (from the next shot) and radius (from the next load), as multiples
   // of the lab's.

@@ -73,6 +73,7 @@ const SCENES = {
 };
 SCENES['reference-building-crush'] = SCENES['reference-building'];
 
+const index = [];
 for (const [key, shots] of Object.entries(SCENES)) {
   const pack = JSON.parse(show(`blast/blast-stress-solver/assets/reference/${key}.json`));
   pack.defaults.shots = shots(pack);
@@ -84,4 +85,7 @@ for (const [key, shots] of Object.entries(SCENES)) {
   const out = path.join(here, `${key}.json`);
   writeFileSync(out, `${JSON.stringify(pack, null, 1)}\n`);
   console.log(`wrote ${out}: ${pack.scenario.nodes.length} nodes, ${pack.scenario.bonds.length} bonds, ${pack.defaults.shots.length} shots`);
+  index.push({ key, title: pack.title, file: `${key}.json`, version: pack.version, nodes: pack.scenario.nodes.length, bonds: pack.scenario.bonds.length, shots: pack.defaults.shots.map((s) => s.label) });
 }
+// The Fracture Lab's Reference rigs menu (main.mjs).
+writeFileSync(path.join(here, 'index.json'), `${JSON.stringify({ packs: index }, null, 1)}\n`);

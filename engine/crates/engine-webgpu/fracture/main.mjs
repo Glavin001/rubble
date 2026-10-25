@@ -171,7 +171,7 @@ async function loadLevel(level){
   // static equilibrium (bonds carrying their load) rather than at zero force.
   // Breakable bonds are experimental (opt-in): see README "Breakable bonds".
   if(stressMode())return loadStress(level);
-  stressOn=false;$('view').hidden=false;$('stress-view').hidden=true;if(stress)stress.running=false;
+  stressOn=false;$('view').hidden=false;$('stress-view').hidden=true;if(stress)stress.running=false;$('pack-shot-row').hidden=true;pendingShot=null;
   learned?.dispose();learned=null;learnedMs=0;
   const raw=procedural==='pack'?buildPackScene(packBytes):procedural?buildCuboidHouse():buildScene(asset,level,{maxHullVertices});
   const built=physicsHz()?withParams(raw,{dt:1/physicsHz()}):raw;
@@ -230,6 +230,7 @@ async function loadStress(level){
  $('fragments').textContent=st.chunks;$('bonds').textContent=st.bonds;$('hulls').textContent=st.hulls;$('awake').textContent='0';$('contacts').textContent='—';
  $('release').textContent='Start simulation';$('fire').hidden=true;
  setStatus(`Stress solver · ${st.chunks} chunks · ${st.bonds} bonds · ${profile==='threshold'?'simple threshold (v0): a bond breaks when a contact force beats its strength':profile}, resident GPU frame at ${Math.round(st.frameHz)} Hz${cuboid||pack?'':' · one copy'}${stressWarning(st)} · click the model to shoot`);
+ pendingShot=null;showPackShots();
 }
 async function importBytes(bytes,name,sampleKey="",entry={}){
  assetBytes=bytes;layout=entry.layout??null;maxHullVertices=entry.maxHullVertices;procedural=null;towersBlock=false;
@@ -261,13 +262,45 @@ try{const index=await (await fetch(`${VIBE_CITY}index.json`)).json();
  }
  if(group.children.length)$('scene').insertBefore(group,$('scene').lastElementChild);
 }catch{}
+// The reference destruction rigs (packs/index.json, port-reference-packs.mjs): scene packs
+// with authored shots, run in the stress-solver modes (destruction-reactions.md).
+try{const index=await (await fetch('./packs/index.json')).json();
+ const group=document.createElement('optgroup');group.label='Reference rigs (scene packs, authored shots)';
+ for(const p of index.packs){const key=`ref:${p.key}`;samples[key]={key,label:p.title,pack:`./packs/${p.file}`,nodes:p.nodes,bonds:p.bonds,reference:true,shots:p.shots};
+  group.append(new Option(`${p.key} · ${p.nodes} chunks · ${p.bonds} bonds`,key))}
+ if(group.children.length)$('scene').insertBefore(group,$('scene').lastElementChild);
+}catch{}
+// URL: ?pack=crush-wall&shot=1.4x[&bonds=threshold|stress][&camera=x,y,z,tx,ty,tz] picks a
+// reference rig, the stress-solver mode (threshold unless bonds= says otherwise) and fires
+// the authored shot at its launch time (the source's 2 s settle); shot=1.4 matches 1.4x.
+const query=new URLSearchParams(location.search);
+let urlShot=null;
+{const pack=query.get('pack'),bonds=query.get('bonds');
+ if(bonds&&$('bond-mode').querySelector(`option[value="${bonds}"]`))$('bond-mode').value=bonds;
+ if(pack&&samples[`ref:${pack}`]){$('scene').value=`ref:${pack}`;if(!bonds)$('bond-mode').value='threshold';urlShot=query.get('shot')}}
+// The pack's authored shots in the panel (stress modes), and firing one.
+function showPackShots(){
+ const shots=stressOn&&procedural==='pack'?stress.packShots:[];
+ $('pack-shot').replaceChildren(...shots.map((s,i)=>new Option(`${s.label} · ${(s.mass/1000).toFixed(1)} t at ${s.speed.toFixed(1)} m/s`,i)));
+ $('pack-shot-row').hidden=!shots.length;$('pack-shot').title=shots.map(s=>`${s.label}: ${s.note}`).join('\n');
+ if(urlShot!==null){const i=shots.findIndex(s=>s.label===urlShot||s.label===`${urlShot}x`);
+  if(i<0)throw new Error(`No authored shot ${urlShot}: ${shots.map(s=>s.label).join(', ')}`);
+  $('pack-shot').value=String(i);pendingShot={index:i,at:shots[i].launchAt};urlShot=null;stress.running=true}
+}
+// An authored shot waiting for its launch time (s of simulated time).
+let pendingShot=null;
+function firePendingShot(st){
+ if(!pendingShot||(st.frames??0)/st.frameHz<pendingShot.at)return;
+ stress.firePackShot(pendingShot.index);pendingShot=null;
+}
+$('fire-pack-shot').onclick=()=>{if(stressOn&&stress){stress.firePackShot(Number($('pack-shot').value));stress.running=true}};
 const sample=(key=$('scene').value||'house')=>serializeLoad(async()=>{
  const entry=samples[key];if(!entry)throw new Error('Unknown bundled scene');
  if(entry.pack){
   // A generated scene pack (engine/scenes/vibe-city, bun run export.ts): one level, bonds from the pack.
   setStatus(`Fetching ${entry.label}…`);
   const response=await fetch(entry.pack);
-  if(!response.ok)throw new Error('Scene pack missing: run bun run export.ts in engine/scenes/vibe-city.');
+  if(!response.ok)throw new Error(entry.reference?`Scene pack missing: ${entry.pack}`:'Scene pack missing: run bun run export.ts in engine/scenes/vibe-city.');
   packBytes=await response.arrayBuffer();assetBytes=null;layout=null;procedural='pack';
   // The towers block: breakable welds, CCD balls at 16× unless the panel says otherwise.
   if(entry.towers&&!towersBlock){$('bond-mode').value='d6';$('ball-speed').value='4';$('ball-ccd').checked=true}
@@ -320,6 +353,13 @@ for(const type of ['dragenter','dragover'])window.addEventListener(type,e=>{e.pr
 window.addEventListener('dragleave',()=>document.body.classList.remove('drop'));
 window.addEventListener('drop',e=>{e.preventDefault();document.body.classList.remove('drop');const f=e.dataTransfer.files[0];if(f&&device)serializeLoad(async()=>importBytes(await f.arrayBuffer(),f.name))});
 window.__FRACTURE_DEMO__={get sliceRate(){return sliceRate},
+ // The stress modes, frame-locked for recording: ready once loaded; each advance runs one
+ // display frame of `ms` (the Rust steps the physics frames that fell due, fires a URL
+ // shot at its launch time and draws). orbit/zoom move the stress camera as a drag would.
+ get stressReady(){return !loading&&stressOn&&!!stress},
+ async stressAdvance(ms=1000/60){stressCapture=true;await frame;await stress.frame(ms);const st=stress.stats;firePendingShot(st);setStatus(`${st.shots} shots · ${st.frames} frames · ${st.bodies??'—'} bodies · ${st.brokenBonds} bonds broken · ${(st.frames/st.frameHz).toFixed(2)} s`);return st},
+ stressOrbit(dx,dy){stress.orbit(dx,dy)},stressZoom(delta){stress.zoom(delta)},
+ get status(){return $('status').textContent},
  // The page's own shot (a click's path: queued behind the frame, the loop keeps running).
  shoot:ray=>shoot(ray),
  // Run or pause the frame loop's physics, as the Start / Pause button does.
@@ -351,7 +391,7 @@ window.__FRACTURE_DEMO__={get sliceRate(){return sliceRate},
 const stressWarning=st=>st.warnings?.length?` · ⚠ ${st.warnings.join('; ')}`:'';
 function stressTick(now,elapsedMs){
  frame=(async()=>{try{
-  const before=stress.stats.frames??0;await stress.frame(elapsedMs);const st=stress.stats;
+  const before=stress.stats.frames??0;await stress.frame(elapsedMs);const st=stress.stats;firePendingShot(st);
   stressHud.frames+=(st.frames??0)-before;stressHud.renders++;
   if(now-stressHud.t>=1000){const s=(now-stressHud.t)/1000;$('tps').textContent=(stressHud.frames/s).toFixed(0);$('fps').textContent=(stressHud.renders/s).toFixed(0);$('sim-speed').textContent=`${(stressHud.frames/s/st.frameHz).toFixed(2)}×`;stressHud={t:now,frames:0,renders:0,stepMs:stressHud.stepMs}}
   // A display frame that stepped no physics frame (a 120 Hz display, a 60 Hz simulation)
@@ -364,7 +404,10 @@ function stressTick(now,elapsedMs){
  }catch(e){fail(e)}})();
  frame.finally(()=>requestAnimationFrame(tick));
 }
+// Frame-locked capture (record-reactions.mjs): the stress mode steps only when asked.
+let stressCapture=false;
 function tick(now){
+ if(stressOn&&stressCapture){requestAnimationFrame(tick);return}
  if(stressOn&&!loading&&stress){const ms=last?Math.min(250,now-last):0;last=now;return stressTick(now,ms)}
  const frameMs=last?now-last:FRAME_BUDGET_MS;
  const elapsed=last?Math.min(.04,(now-last)/1000):0;last=now;

@@ -88,6 +88,9 @@ thread_local! {
     /// The camera's view mode, kept across loads (`stress_set_view_mode`).
     static VIEW_MODE: Cell<ViewMode> = const { Cell::new(ViewMode::Orbit) };
     static SHOOTING: Cell<Option<Shooting>> = const { Cell::new(None) };
+    /// The loaded pack's authored shots (`defaults.shots`, pack frame), for
+    /// [`stress_fire_pack_shot`].
+    static PACK_SHOTS: RefCell<Vec<engine_fracture::pack::PackShot>> = const { RefCell::new(Vec::new()) };
     static PENDING: RefCell<Vec<ImpactorDesc>> = const { RefCell::new(Vec::new()) };
     static FIRED: Cell<usize> = const { Cell::new(0) };
     /// The shots' mass as a multiple of the lab's default ball (`stress_set_shot_mass_scale`).
@@ -403,6 +406,54 @@ pub fn stress_shoot(u: f64, v: f64) -> bool {
     true
 }
 
+/// The loaded pack's authored shots (`defaults.shots`), as JSON: label, mass (kg), speed
+/// (m/s), the source's launch time (s) and note. Empty for a GLB or the cuboid houses.
+#[wasm_bindgen]
+pub fn stress_pack_shots() -> String {
+    PACK_SHOTS.with_borrow(|shots| {
+        serde_json::Value::Array(
+            shots
+                .iter()
+                .map(|s| {
+                    let speed = s.velocity.iter().map(|x| x * x).sum::<f64>().sqrt();
+                    serde_json::json!({"label": s.label, "mass": s.mass, "radius": s.radius, "speed": speed, "launchAt": s.launch_at, "note": s.note})
+                })
+                .collect(),
+        )
+        .to_string()
+    })
+}
+
+/// Fire the loaded pack's authored shot `index` exactly as authored (origin, velocity,
+/// spin, mass and radius; the panel's ball scales do not apply): launched into the world
+/// at the next frame. False when there is no such shot or all shots are fired.
+#[wasm_bindgen]
+pub fn stress_fire_pack_shot(index: u32) -> bool {
+    let Some(shot) = PACK_SHOTS.with_borrow(|s| s.get(index as usize).cloned()) else { return false };
+    if FIRED.get() >= SHOTS && TWORLD.with_borrow(|w| w.is_none()) {
+        return false;
+    }
+    let k = FIRED.get();
+    FIRED.set(k + 1);
+    PENDING.with_borrow_mut(|p| {
+        p.push(ImpactorDesc {
+            name: format!("shot{k}"),
+            shape: ImpactorShape::Sphere { radius: shot.radius },
+            mass: shot.mass,
+            // The pack's frame is the stress scene's turned Y up (the asset frame less
+            // its placement).
+            position: zup(shot.origin),
+            orientation: [1.0, 0.0, 0.0, 0.0],
+            velocity: zup(shot.velocity),
+            angular_velocity: zup(shot.angular_velocity),
+            material: "projectile".into(),
+            crush: None,
+        })
+    });
+    RUNNING.set(true);
+    true
+}
+
 fn fail(e: String) -> u32 {
     web_sys::console::error_1(&e.clone().into());
     ERROR.set(e);
@@ -426,6 +477,7 @@ fn load(level: u8) -> Result<(), String> {
     // oracle's input: the GLB's level, the cuboid houses in their layout, or the pack.
     let profile = PROFILE.get();
     let mut warnings = Vec::new();
+    let mut shots = Vec::new();
     let (lab, mut scene) = SOURCE.with_borrow(|source| -> Result<_, String> {
         Ok(match source {
             Source::Cuboid(layout) => {
@@ -441,6 +493,7 @@ fn load(level: u8) -> Result<(), String> {
             }
             Source::Pack(bytes) => {
                 let (lab, info) = engine_fracture::pack::build_pack_scene(bytes).map_err(|e| format!("scene pack: {e}"))?;
+                shots = engine_fracture::pack::pack_shots(bytes).map_err(|e| format!("scene pack: {e}"))?;
                 let json: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| format!("scene pack: {e}"))?;
                 let (scene, notes) = stress_ref::scene_pack::import_value_with(&json, &info.key, "structure", &info.key, profile.import_options())?;
                 warnings = notes;
@@ -449,6 +502,7 @@ fn load(level: u8) -> Result<(), String> {
         })
     })?;
     WARNINGS.set(warnings);
+    PACK_SHOTS.set(shots);
     let mut camera = Orbit::new(&lab);
     let (w, h) = SIZE.get();
     camera.set_mode(VIEW_MODE.get(), w.max(1) as f64 / h.max(1) as f64);
