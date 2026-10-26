@@ -986,6 +986,7 @@ impl RbWorld {
                 DestructionEvent::BondsBroken {
                     destructible,
                     bonds,
+                    ..
                 } => {
                     ev.type_ = RbDestructionType::RB_BONDS_BROKEN;
                     ev.destructible = destructible.to_bits();

@@ -109,7 +109,7 @@ mod imp {
     use super::{Projectile, StressSource};
     use crate::defs::{BodyDef, BodyType, Geometry, MassData};
     use crate::destruction::{ActorInfo, CrushMass, DestructibleDef, StrengthModel};
-    use crate::events::DestructionEvent;
+    use crate::events::{BreakCause, DestructionEvent};
     use crate::math::SolverFrame;
     use crate::{BodyId, DestructibleAssetDesc, DestructibleId, Owner, Transform, World};
     use engine_schema::convex::ConvexHull;
@@ -345,9 +345,57 @@ mod imp {
         /// Per bond: its flow load (N) when the pass last ran on its piece (from the intact
         /// structure at placement), the `before` of a sudden loss's amplification.
         load: Vec<f32>,
+        /// With crushing: some chunk's flow stress alone is at its crush surface, so its
+        /// damage grows every step: the world steps even when nothing is awake.
+        overstressed: bool,
         /// Every bond the pass has broken, in order (a diagnostic record:
         /// `World::destructible_support_loss_breaks`).
         broke: Vec<u32>,
+    }
+
+    /// Whether the flow's loads alone (`SupportLoss::load`) put a crushable, uncrushed
+    /// chunk at (or within 0.1% of) its crush surface: the virial `fracture.slang`
+    /// `flow_virial` builds, in the structure frame (the invariants do not depend on it).
+    /// Conservative (the GPU decides the damage): it only keeps the world stepping.
+    fn flow_overstressed(t: &ThresholdSlot, sl: &SupportLoss, crushed: &[bool]) -> bool {
+        let Some(ct) = t.tables.crush.as_ref().filter(|c| c.flow) else {
+            return false;
+        };
+        (0..t.tables.chunks.len()).any(|c| {
+            let [m0, m1] = ct.chunks[c];
+            if crushed.get(c).copied().unwrap_or(false) || m1[2].to_bits() & 1 == 0 {
+                return false;
+            }
+            let r0 = t.tables.chunks[c][0];
+            let centre = DVec3::new(r0[0] as f64, r0[1] as f64, r0[2] as f64);
+            let mut virial = [0.0f64; 6];
+            for &b in &sl.bonds_of[c] {
+                let l = sl.load[b as usize] as f64;
+                if !t.intact[b as usize] || sl.sent[b as usize] || !(l > 0.0) {
+                    continue;
+                }
+                let g = ct.bonds[b as usize];
+                let n = ct.normals[b as usize];
+                let r = DVec3::new(g[0] as f64, g[1] as f64, g[2] as f64) - centre;
+                let mut n = DVec3::new(n[0] as f64, n[1] as f64, n[2] as f64);
+                if n.dot(r) < 0.0 {
+                    n = -n;
+                }
+                let s = stress_ref::crush::sym_outer(r.to_array(), (-l * n).to_array());
+                for (v, x) in virial.iter_mut().zip(s) {
+                    *v += x;
+                }
+            }
+            let (p, q) = stress_ref::crush::invariants(virial, m1[1] as f64);
+            let m = stress_ref::crush::CrushParams {
+                cap_pressure: m0[0] as f64,
+                cohesion: m0[1] as f64,
+                friction_slope: m0[2] as f64,
+                crush_energy: m0[3] as f64,
+                crush_viscosity: m1[0] as f64,
+            };
+            m.excess(1.001 * p, 1.001 * q).is_some()
+        })
     }
 
     /// The pass on one piece (`chunks`): the bonds (the tables' indices) it breaks, and its
@@ -912,6 +960,7 @@ mod imp {
             // Per GPU bond: its structure and bond (blast loading's mirror).
             let mut bond_source = Vec::new();
             let mut crush_bonds: Vec<[f32; 4]> = Vec::new();
+            let mut crush_normals: Vec<[f32; 4]> = Vec::new();
             for &(b, id, structure, com, principal) in &cluster_bodies {
                 let cl = m.clusters.iter().find(|c| c.id == id).expect("a cluster");
                 let (c, p) = (com.as_vec3(), principal.as_quat());
@@ -938,6 +987,8 @@ mod imp {
                         g.z as f32,
                         bond.geometry.area as f32,
                     ]);
+                    let nn = bond.geometry.normal;
+                    crush_normals.push([nn.x as f32, nn.y as f32, nn.z as f32, 0.0]);
                     t.bonds.push([
                         global(cl.structure, bond.geometry.a),
                         global(cl.structure, bond.geometry.b),
@@ -1030,9 +1081,14 @@ mod imp {
                 } else {
                     c.max_per_step
                 };
+                // With support loss, its flow's bond loads enter the stress estimate
+                // (`fracture.slang` `crush_loads_flow`: crushes with cause Load).
+                let flow = def.support_loss;
                 t.crush = Some(CrushTables {
                     chunks: rows,
                     bonds: crush_bonds,
+                    normals: if flow { crush_normals } else { Vec::new() },
+                    flow,
                     conserve,
                     fragments,
                     pool: pool.iter().map(|p| [p.0, p.2]).collect(),
@@ -1147,6 +1203,7 @@ mod imp {
                     bonds_of,
                     gravity: g.map(|x| x as f32),
                     dynamic_factor: def.support_loss_dynamic_factor,
+                    overstressed: false,
                 };
                 // The intact structure's flow: every bond's load before any loss.
                 for &(b, ..) in &cluster_bodies {
@@ -1157,6 +1214,12 @@ mod imp {
                     for (bond, load) in loads {
                         sl.load[bond as usize] = load;
                     }
+                }
+                if slot.fracture.crush_flow() {
+                    slot.fracture
+                        .set_crush_flow(&gpu, &sl.load)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    sl.overstressed = flow_overstressed(&slot, &sl, &[]);
                 }
                 slot.support = Some(sl);
             }
@@ -1355,10 +1418,21 @@ mod imp {
             crushed_now: &[u32],
         ) -> anyhow::Result<Vec<DestructionEvent>> {
             // This step's poses are from before the split: re-frame from the next.
-            self.apply_fracture_from(k, step + 1, chunks, intact, frames, crushed_now)
+            self.apply_fracture_from(
+                k,
+                step + 1,
+                chunks,
+                intact,
+                frames,
+                crushed_now,
+                BreakCause::Stress,
+            )
         }
 
-        /// A split's adoption, the changed bodies re-framed from `from_step` on.
+        /// A split's adoption, the changed bodies re-framed from `from_step` on. The
+        /// broken bonds are reported by cause: a crushed chunk's (`crushed_now`) Crush, a
+        /// bond support loss broke SupportLoss, the rest `cause`.
+        #[allow(clippy::too_many_arguments)]
         fn apply_fracture_from(
             &mut self,
             k: usize,
@@ -1367,6 +1441,7 @@ mod imp {
             intact: Vec<bool>,
             frames: &[[f32; 4]],
             crushed_now: &[u32],
+            cause: BreakCause,
         ) -> anyhow::Result<Vec<DestructionEvent>> {
             let t = self.fracture.slots[k].as_mut().expect("live slot");
             let d = t.destructible as usize;
@@ -1387,10 +1462,37 @@ mod imp {
             let id = DestructibleId::new(d as u32, self.destructibles[d].generation);
             let mut out = Vec::new();
             if !broken.is_empty() {
-                out.push(DestructionEvent::BondsBroken {
-                    destructible: id,
-                    bonds: broken.clone(),
-                });
+                let bonds = &t.tables.bonds;
+                let sent = t.support.as_ref().map(|sl| &sl.sent);
+                let cause_of = |b: u32| {
+                    let [a, o, _, _] = bonds[b as usize];
+                    if crushed_now.contains(&a) || crushed_now.contains(&o) {
+                        BreakCause::Crush
+                    } else if sent.is_some_and(|s| s[b as usize]) {
+                        BreakCause::SupportLoss
+                    } else {
+                        cause
+                    }
+                };
+                for c in [
+                    BreakCause::Stress,
+                    BreakCause::Blast,
+                    BreakCause::SupportLoss,
+                    BreakCause::Crush,
+                ] {
+                    let these: Vec<u32> = broken
+                        .iter()
+                        .copied()
+                        .filter(|&b| cause_of(b) == c)
+                        .collect();
+                    if !these.is_empty() {
+                        out.push(DestructionEvent::BondsBroken {
+                            destructible: id,
+                            bonds: these,
+                            cause: c,
+                        });
+                    }
+                }
                 for &b in &broken {
                     self.destructibles[d].bond_intact[b as usize] = false;
                 }
@@ -1535,6 +1637,28 @@ mod imp {
             sl.broke.extend_from_slice(&over);
             t.fracture
                 .break_bonds_sparse(&gpu, &over, &t.chunk_body, bonds);
+            // The flow's loads for the crush estimate from the next frame on.
+            if t.fracture.crush_flow() {
+                t.fracture
+                    .set_crush_flow(&gpu, &sl.load)
+                    .expect("a flow-crushing destructible's loads");
+                let t = self.fracture.slots[k].as_ref().expect("live slot");
+                let sl = t.support.as_ref().expect("support loss");
+                let crushed = &self.destructibles[t.destructible as usize].crushed;
+                let over = flow_overstressed(t, sl, crushed);
+                let t = self.fracture.slots[k].as_mut().expect("live slot");
+                t.support.as_mut().expect("support loss").overstressed = over;
+            }
+        }
+
+        /// Whether a destructible's flow keeps a chunk's crush damage growing
+        /// (`SupportLoss::overstressed`): its steps must run with nothing awake.
+        pub(crate) fn fracture_flow_needs_step(&self) -> bool {
+            self.fracture
+                .slots
+                .iter()
+                .flatten()
+                .any(|t| t.support.as_ref().is_some_and(|s| s.overstressed))
         }
 
         /// A step's crushes: each chunk's body (parked on the GPU) retired, its fragments
@@ -1641,10 +1765,11 @@ mod imp {
                     angular_velocity: e.angular_velocity,
                     peak_pressure: e.peak_pressure,
                     peak_deviator: e.peak_deviator,
-                    cause: if e.cause == 2 {
-                        crate::CrushCause::Impact
-                    } else {
-                        crate::CrushCause::Contact
+                    cause: match e.cause {
+                        2 => crate::CrushCause::Impact,
+                        3 => crate::CrushCause::Blast,
+                        4 => crate::CrushCause::Load,
+                        _ => crate::CrushCause::Contact,
                     },
                     fragments: ids,
                 });

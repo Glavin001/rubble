@@ -124,7 +124,7 @@ fn scenario(name: &str, tnt: f32) -> anyhow::Result<Scenario> {
                 camera: ([16.0, 8.0, 18.0], [0.0, 4.4, 0.0]),
                 notes: vec![
                     "Blast loading, crushing (Conserve) and support loss on.".into(),
-                    "Crush cause Blast needs blast->crush wiring (feat/dr-integrate).".into(),
+                    "Blast crushes need a charge at a crushable face: from inside, the drywall infill is in tension (tests/reactions.rs CHARGE).".into(),
                 ],
             }
         }

@@ -129,6 +129,81 @@ fn chunk_frames(
         .collect()
 }
 
+/// A blast window's crush damage on each crushable chunk of `t` its faces load
+/// (`model::crush_damage`, `engine/docs/destruction-reactions.md` section 1, "Blast"),
+/// with its reactions through its intact bonds (less `pending`, broken already) at their
+/// area-weighted centroid, as `fracture.slang` `bond_centroid` takes them: per chunk
+/// (damage, peak p, peak q, 0) for `fr_crush_blast`. `None`: no crushable chunk is
+/// loaded (or the destructible does not crush).
+#[allow(clippy::too_many_arguments)]
+fn blast_crush(
+    t: &ThresholdSlot,
+    pending: &[u32],
+    crushed: &[bool],
+    faces: &[Vec<model::Face>],
+    centres: &[DVec3],
+    poses: &[(DQuat, DVec3)],
+    dt: f64,
+) -> Option<Vec<[f32; 4]>> {
+    let ct = t.tables.crush.as_ref()?;
+    let n = faces.len();
+    let can =
+        |c: usize| !faces[c].is_empty() && !crushed[c] && ct.chunks[c][1][2].to_bits() & 1 != 0;
+    if !(0..n).any(can) {
+        return None;
+    }
+    let mut gone = vec![false; t.intact.len()];
+    for &b in pending {
+        gone[b as usize] = true;
+    }
+    // Each loaded chunk's intact bonds: area-weighted centroid (relative to it) and area.
+    let mut sums = vec![(DVec3::ZERO, 0.0f64); n];
+    for (i, bond) in t.tables.bonds.iter().enumerate() {
+        if !t.intact[i] || gone[i] {
+            continue;
+        }
+        let bc = ct.bonds[i];
+        let local = DVec3::new(bc[0] as f64, bc[1] as f64, bc[2] as f64);
+        for end in [bond[0], bond[1]] {
+            let c = end as usize;
+            if !can(c) {
+                continue;
+            }
+            let (q, o) = poses[c];
+            sums[c].0 += bc[3] as f64 * (o + q * local - centres[c]);
+            sums[c].1 += bc[3] as f64;
+        }
+    }
+    let mut words = vec![[0.0f32; 4]; n];
+    let mut any = false;
+    for c in (0..n).filter(|&c| can(c)) {
+        let [m0, m1] = ct.chunks[c];
+        let params = stress_ref::crush::CrushParams {
+            cap_pressure: m0[0] as f64,
+            cohesion: m0[1] as f64,
+            friction_slope: m0[2] as f64,
+            crush_energy: m0[3] as f64,
+            crush_viscosity: m1[0] as f64,
+        };
+        let bonds = (sums[c].1 > 0.0).then(|| sums[c].0 / sums[c].1);
+        let (damage, p, q) = model::crush_damage(
+            &faces[c],
+            centres[c],
+            bonds,
+            m1[1] as f64,
+            &params,
+            0.0,
+            dt,
+            model::GRADE,
+        );
+        if damage > 0.0 || p > 0.0 || q > 0.0 {
+            words[c] = [damage as f32, p as f32, q as f32, 0.0];
+            any = true;
+        }
+    }
+    any.then_some(words)
+}
+
 impl World {
     fn blast_slots(&self) -> Vec<usize> {
         self.fracture
@@ -459,6 +534,18 @@ impl World {
             centres[c] = o + q * gv(b.mirror.structures[s].chunks[sc].center);
             windows[c] = model::window(&faces[c], centres[c], 0.0, dt, peak);
         }
+        // Bonds support loss broke that no readback has shown yet: they stay broken (the
+        // breaks below rewrite every bond's state from the host's).
+        let pending: Vec<u32> = match &t.support {
+            Some(sl) => (0..t.intact.len() as u32)
+                .filter(|&i| sl.sent[i as usize] && t.intact[i as usize])
+                .collect(),
+            None => Vec::new(),
+        };
+        // Crushing: each crushable chunk's damage over the window, from its faces and its
+        // bonds as the window's start meets them (before the breaks below).
+        let crushed = &self.destructibles[t.destructible as usize].crushed;
+        let crush_words = blast_crush(t, &pending, crushed, &faces, &centres, poses, dt);
         // The threshold rule (`fr_breaks`): a bond breaks when the load on either of its
         // chunks beats its tensile capacity.
         let demand: Vec<f32> = windows.iter().map(|w| w.force.length() as f32).collect();
@@ -466,6 +553,7 @@ impl World {
             .filter(|&i| {
                 let bond = t.tables.bonds[i as usize];
                 t.intact[i as usize]
+                    && !pending.contains(&i)
                     && demand[bond[0] as usize].max(demand[bond[1] as usize])
                         > f32::from_bits(bond[2])
             })
@@ -485,50 +573,114 @@ impl World {
                 cause: LoadCause::Blast,
             })
             .collect();
-        if !broken.is_empty() {
+        let mut crushes: Vec<stress_gpu::fracture::CrushEvent> = Vec::new();
+        let split = !broken.is_empty() || crush_words.is_some();
+        if split {
             let t = self.fracture.slots[k].as_mut().expect("live slot");
-            t.fracture
-                .break_bonds(&gpu, &broken, &t.intact, &t.chunk_body, &t.tables.bonds);
+            let all: Vec<u32> = broken.iter().chain(&pending).copied().collect();
+            if !all.is_empty() {
+                t.fracture
+                    .break_bonds(&gpu, &all, &t.intact, &t.chunk_body, &t.tables.bonds);
+            }
+            if let Some(words) = &crush_words {
+                t.fracture
+                    .set_crush_blast(&gpu, words)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+            }
             let mut enc = gpu
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("blast split"),
                 });
-            t.fracture
-                .encode_split(&gpu, &mut enc, self.sim.steps_done());
+            t.fracture.encode_split_crush(
+                &gpu,
+                &mut enc,
+                self.sim.steps_done(),
+                crush_words.is_some(),
+            );
             gpu.queue.submit([enc.finish()]);
             let counters = t.fracture.counters(&gpu);
+            anyhow::ensure!(
+                counters.error & stress_gpu::fracture::CRUSH_ERROR_FRAGMENTS == 0,
+                "step {step}: a blast's chunk crush found the fragment bodies spent: raise CrushMass::Conserve's budget"
+            );
+            anyhow::ensure!(
+                counters.error & stress_gpu::fracture::CRUSH_ERROR_EVENTS == 0,
+                "step {step}: a blast crushed more chunks in one step than Crush::max_per_step"
+            );
             anyhow::ensure!(
                 counters.error == 0,
                 "step {step}: blast split error {:#x} (1: no free body slot, 2: mass sum out of range, 4: union did not settle)",
                 counters.error
             );
+            if crush_words.is_some() {
+                crushes = t.fracture.crush_events(&gpu);
+            }
             let chunks = t.fracture.chunk_bodies(&gpu);
             let intact = t.fracture.bonds_intact(&gpu);
             let frames: Vec<[f32; 4]> =
                 t.fracture.body_frames(&gpu).into_iter().flatten().collect();
+            let crushed_now: Vec<u32> = crushes.iter().map(|e| e.chunk).collect();
             // The pieces take their frames from this step on: the step simulates them.
-            let events = self.apply_fracture_from(k, step, chunks, intact, &frames, &[])?;
+            let mut events = self.apply_fracture_from(
+                k,
+                step,
+                chunks,
+                intact,
+                &frames,
+                &crushed_now,
+                crate::BreakCause::Blast,
+            )?;
+            let all_broken: Vec<u32> = events
+                .iter()
+                .filter_map(|e| match e {
+                    crate::DestructionEvent::BondsBroken { bonds, .. } => Some(bonds.clone()),
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            events.extend(self.apply_crush(k, step, &crushes)?);
+            // The weight the breaks left without a path: support loss, its breaks split
+            // with this step's frame.
+            if !all_broken.is_empty() {
+                self.support_loss(k, &all_broken);
+            }
             self.blasts
                 .events
                 .extend(events.into_iter().map(|e| (step, e)));
         }
         // Each body's share of its chunks' impulses, about its centre of mass as it is now.
-        let bodies = if broken.is_empty() {
-            None
-        } else {
+        let bodies = if split {
             Some(self.sim.download_bodies())
+        } else {
+            None
         };
         let t = self.fracture.slots[k].as_ref().expect("live slot");
         let mut per_body: BTreeMap<u32, (DVec3, DVec3)> = BTreeMap::new();
         for l in &loads {
             let c = l.chunk as usize;
-            let body = t.chunk_body[c];
             let w = &windows[c];
-            let e = per_body.entry(body).or_default();
-            e.0 += w.impulse;
             // The moment about the body's centre is added below, once it is known.
-            e.1 += w.angular_impulse + centres[c].cross(w.impulse);
+            let about_origin = w.angular_impulse + centres[c].cross(w.impulse);
+            // A crushed chunk's share goes to its fragments, equally (they are centred on
+            // its centre of mass: the total's moment is kept); removed, it leaves with its
+            // mass.
+            if let Some(e) = crushes.iter().find(|e| e.chunk == l.chunk) {
+                let (Some(first), Some(cs)) = (e.first_fragment, t.crush.as_ref()) else {
+                    continue;
+                };
+                let n = cs.fragments as f64;
+                for i in 0..cs.fragments {
+                    let body = cs.pool[(first + i) as usize].0;
+                    let entry = per_body.entry(body).or_default();
+                    entry.0 += w.impulse / n;
+                    entry.1 += about_origin / n;
+                }
+                continue;
+            }
+            let entry = per_body.entry(t.chunk_body[c]).or_default();
+            entry.0 += w.impulse;
+            entry.1 += about_origin;
         }
         let fresh;
         let bodies: &[BodyState] = match &bodies {

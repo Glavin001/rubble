@@ -99,8 +99,9 @@ loads' own (|f|-weighted) centroid, so one contact or one strike never crushes a
 Body forces (gravity, inertia) are excluded, as the law says.
 
 Consequences:
-- Loads through bonds alone (a column under a building's weight) are not estimated: there is
-  no bond solve. Cause `Load` is reserved, as is `Blast`.
+- Loads through bonds alone (a column under a building's weight) are not estimated from a
+  bond solve (there is none); with support loss on they come from its flow ("Composed
+  reactions" below: cause `Load`). Blast face pressures crush with cause `Blast` (ditto).
 - Area share counts a block's side bonds too. On the free wall's bottom row the estimate came
   to the same order as `W / 3A`: measured 1.06 W/(3A) at peak, settling included.
   A projected share (`A |n . F|`) would load only the bonds facing the load; not built.
@@ -147,6 +148,99 @@ the support-loss frame's shot from exactly one frame's travel met its column sti
 bits, so the minimum always has its chunk. Crushing takes the same entry chunk (its own
 `fr_crush_entry` and `fr_crush_nearest` are gone). Tests: `engine-world`
 `tests/strike_prediction.rs`, and `tests/support_loss.rs` back at its 2.5 m start.
+
+## Composed reactions (feat/dr-integrate, 2026-10-25)
+
+One event can now produce every reaction: a charge crushes the chunks next to it, knocks
+others off, and the weight the breaks leave without a path breaks bonds by support loss; the
+flow's loads crush what they overload. All opt-in, through the existing switches; with any
+of them off the paths below do not run and nothing differs.
+
+**Blast to crushing** (a destructible with `blast_loading` and `crush`; cause `Blast`).
+- In each blast step, before the engine steps (`blast_threshold.rs` `blast_crush`), every
+  crushable chunk a face of it is loaded integrates the law over the step's window on the
+  host: `D += integral excess^2 dt / (crushViscosity crushEnergy)`. The stress at each time is
+  the faces' forces `-n A p(t)` at their centres, balanced as contact loads are (reactions
+  through the chunk's intact bonds at their area centroid, as the window's start meets them,
+  before the window's breaks; a lone chunk by its inertia at the loads' centroid).
+- Quadrature (`blast::model::nodes`): split at every face's arrival, end of clearing and end
+  of positive phase, each piece graded geometrically from a quarter of the fastest decay time
+  `td / b`, 8-point Gauss-Legendre per sub-piece (no node on a jump). It matches a 1e6-point
+  midpoint sum to 2e-3, and windows add up (`blast` unit tests).
+- The host integrates because the pulses are host physics already (the oracle's
+  `FaceBlast`); the law and the damage state stay on the GPU: `fr_crush_blast` adds the
+  window's damage (`crush_rw` `r_blast`, per chunk (dD, peak p, peak q)) and records cause
+  Blast. `GpuFracture::encode_split_crush` then breaks the crushed chunks' bonds with the
+  blast's, splits, and makes the events and fragments as a frame's crushes; the events come
+  with the step's frame.
+- A crushed chunk's share of the window's impulse goes to its fragments, equally (they are
+  centred on its centre of mass, so the angular impulse is kept too); with `Remove` it leaves
+  with the mass.
+- **Energy:** blast crushes charge nobody: the blast is no body (the comminution energy comes
+  out of the pulse, which the face model does not deplete).
+- Support loss now also runs after a blast's breaks (it did not before: a blast that cut a
+  frame's load path never triggered the pass), and a blast step keeps the bonds support loss
+  broke that no readback had shown yet (`break_bonds` rewrites every bond's state from the
+  host's).
+
+**Support-loss flow to crushing** (a destructible with `support_loss` and `crush`; cause
+`Load`).
+- Every intact bond's flow load `SupportLoss::load` (N, compressive) is written to the GPU
+  (`set_crush_flow`) whenever the pass runs (and at placement), and from the next frame on
+  pushes into both its chunks at its centroid along its normal (`f = -L n_out`, `n_out` from
+  the chunk toward the bond). The tractions are reactions already, so they add `sum sym(r (x)
+  f)` to the virial as they are, sustained over the whole frame (`fracture.slang`
+  `crush_loads_flow`, its own path behind `crush.flow`: `fr_crush_loads` without it is as it
+  was).
+- A column of section A under `L_top` above and `L_bot` below gets the uniaxial
+  `(L_top + L_bot) / 2A` (`tests/support_loss.rs`, to 1e-4).
+- Cause `Load` when the flow's part of the peak virial is the larger by its norm, else
+  `Contact`. The flow is the static one: the dynamic factor amplifies only the break check.
+- Forward: the flow is computed after a frame's breaks and applied from the next frame, as
+  its breaks are.
+- An intact anchored structure is a static body and the engine skips idle steps, so a
+  sustained overload would stop integrating. The host checks the flow's stress per chunk
+  (`flow_overstressed`, 0.1% conservative) and, while a chunk is at its surface, asks the
+  engine to step (`WgpuSim::request_step`). A structure under its own weight within its
+  materials idles as before. The reference building's columns carry about 1 MPa against the
+  reinforced concrete's 14.4 MPa cohesion: it stands 5 s with every reaction on, nothing
+  broken or crushed.
+
+**Break causes.** `DestructionEvent::BondsBroken` has a `cause: BreakCause` (`Stress`: the
+strength model's own rule; `Blast`; `SupportLoss`; `Crush`), one event per cause in a step.
+The least invasive choice: one field instead of a new event kind, so the C ABI's event list
+is unchanged (the cause is not in `RbDestructionEvent` yet). A bond support loss broke is
+tagged when its break is seen (the next frame); `World::destructible_support_loss_breaks`
+still lists what the pass decided, in order.
+
+**The tall building partially destroyed** (`tests/reactions.rs`, reference-building-crush,
+crush + support loss + blast loading): 20 kg of TNT 0.30 m outside the ground-floor drywall
+infill on the -z wall (`-0.9, 2.1, -2.36`), at 2 s. Hand calculation: Z = 0.110 m/kg^(1/3),
+reflected 242 MPa, td 15.7 ms, b = 314; the drywall needs `integral excess^2 dt >= 4e11 Pa^2
+s`; the uniaxial bound gives D = 0.32, and the pack's bond centroids (the chunk centres'
+midpoints) put the infill's reaction 0.11 m behind its mid-plane, which doubles the normal
+stress and adds shear: D of order 3 (measured 8.7). The reinforced-concrete columns get D <
+0.01: knocked off, not crushed. From inside the building the same lever puts the infill in
+tension: no charge inside crushes it. One run (6 s, Metal):
+
+| Scene | Event | Bonds broken (blast / support loss / crush) | Splits | Actors | Crushed (cause) | Lowest centre above ground | Mass start → end |
+|---|---|---|---|---|---|---|---|
+| reference-building-crush | 20 kg TNT at (-0.9, 2.1, -2.36) | 94 (86 / 2 / 4) | 2 | 29 | 1, infill 40 (Blast), 423 kg | 0.02 m | 67,127.0 → 67,127.0 kg |
+
+The drywall on every floor goes (its tensile capacity is a few kN against 0.1 to 0.5 MPa
+reflected on 5 m²), the charge-side corner column's joints and the slab beside it break; the
+remaining feet are two footings on the +z side, so the frame's centre of mass is outside its
+footprint and support loss tips it off them (`6-7`, `10-11`, the ground-floor columns'
+joints above the charge); the first-floor corner slab falls to the ground, the infill's
+fragments land. A larger charge (25 kg: 1 support-loss break; 60 kg: none) breaks those
+joints directly in the blast's window: the frame above is then unanchored, carries nothing to
+an anchor and falls, which is support loss's model (it acts on anchored pieces), not a lost
+anchor. Mass is conserved every frame (fragments counted), and two runs give identical
+events, counts and poses.
+
+Harness: `destruction_reactions -- reference-building-crush:gravity --crush --support-loss
+--blast -0.9,2.1,-2.36,20 [--blast-at 2] [--blast-loading]`; counters for blast and
+support-loss breaks and crushes by cause.
 
 ## 3. Blast loading (shipped 2026-10-25)
 
@@ -234,9 +328,10 @@ spin, mass, radius, launch after the 2 s settle), read by `engine_fracture::pack
 `StrengthModel::Threshold` destructible, fires a shot and counts per frame: bonds broken,
 splits, pieces created, actors, support-loss breaks, crushed chunks and mass, blast breaks,
 the impactor's speed and kinetic energy, and the system's mass (every actor plus the
-impactor). The crush, blast and support counters are hooks behind the harness features
-`reactions-crush`, `reactions-blast`, `reactions-support` (off; they read zero, or `n/a`)
-until those branches' events land.
+impactor; crush fragments' bodies for crushed chunks). Breaks are counted by `BreakCause`,
+crushes by `CrushCause`; a run turns on `crush`, `support_loss` and `blast_loading` as asked.
+The harness features `reactions-crush`, `reactions-blast`, `reactions-support` are kept as
+no-ops for scripts that pass them.
 
 ```sh
 cd engine
@@ -264,8 +359,8 @@ frame-locked in headless Chrome to an MP4 (and PNGs), by default under `$TMPDIR/
 CPU, rewind/resimulation pass 1, a different engine): reference building 0/64 crushed under
 gravity, ordinary impact 0, 2x 3, 8x 4, 16x 7; crush-wall at 1.4x with crush off the plug is
 blown through and the ball exits at 36.5 m/s, with crush on the wall absorbs 5.2 of the
-ball's 6.3 MJ and the ball leaves at 2.7 m/s. Rubble is forward-only and has no crushing
-yet; its numbers are measured, not tuned toward these.
+ball's 6.3 MJ and the ball leaves at 2.7 m/s. Rubble is forward-only; its numbers are
+measured, not tuned toward these.
 
 Rubble on this branch (threshold model, Metal, 8 s, crushing not yet merged; speed out is the
 last frame's, after the ball has rolled or come to rest):

@@ -49,14 +49,14 @@ pub use debug_draw::{
 pub use defs::{BodyDef, BodyType, Geometry, MassData, MotionLocks, ShapeDef, SurfaceMaterial};
 pub use destruction::{
     lab_solver, ActorInfo, Anchors, BondDesc, ChunkDesc, Crush, CrushMass, CrushMaterial,
-    DestructibleAssetDesc, DestructibleAssetId, DestructibleDef, DestructibleId,
-    DestructibleStats, Preload, StrengthModel,
+    DestructibleAssetDesc, DestructibleAssetId, DestructibleDef, DestructibleId, DestructibleStats,
+    Preload, StrengthModel,
 };
 pub use error::{StaleHandle, Unsupported};
 pub use events::{
-    coalesce, BodyEvents, BodyMoveEvent, CoalescedFrame, ContactBeginEvent, ContactEndEvent,
-    ContactEvents, CrushCause, DestructionEvent, Frame, RayBatchId, RayBatchResult, SensorEvent, SensorEvents,
-    SkinId, SkinOutput, SoftOutput, VehicleOutput,
+    coalesce, BodyEvents, BodyMoveEvent, BreakCause, CoalescedFrame, ContactBeginEvent,
+    ContactEndEvent, ContactEvents, CrushCause, DestructionEvent, Frame, RayBatchId,
+    RayBatchResult, SensorEvent, SensorEvents, SkinId, SkinOutput, SoftOutput, VehicleOutput,
 };
 pub use handles::{BodyId, JointId, ShapeId};
 pub use joints::{
@@ -1548,6 +1548,10 @@ impl World {
             });
         #[cfg(feature = "stress")]
         if fracture {
+            // A sustained load still crushing must see every step.
+            if self.fracture_flow_needs_step() {
+                self.sim.request_step();
+            }
             self.encode_fracture_begin(&mut enc);
         }
         self.sim

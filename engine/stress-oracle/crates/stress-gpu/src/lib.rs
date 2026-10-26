@@ -272,6 +272,7 @@ pub mod shaders {
             ("fr_crush_gate", (1, 1, 1)),
             ("fr_crush_apply", (64, 1, 1)),
             ("fr_crush_end", (1, 1, 1)),
+            ("fr_crush_blast", (64, 1, 1)),
         ]
     );
 

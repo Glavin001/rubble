@@ -422,6 +422,127 @@ pub(crate) mod model {
         out
     }
 
+    /// Gauss-Legendre nodes and weights on [-1, 1], 8 points.
+    const GL8: [(f64, f64); 8] = [
+        (-0.960_289_856_497_536_3, 0.101_228_536_290_376_26),
+        (-0.796_666_477_413_626_7, 0.222_381_034_453_374_47),
+        (-0.525_532_409_916_329, 0.313_706_645_877_887_3),
+        (-0.183_434_642_495_649_8, 0.362_683_783_378_362),
+        (0.183_434_642_495_649_8, 0.362_683_783_378_362),
+        (0.525_532_409_916_329, 0.313_706_645_877_887_3),
+        (0.796_666_477_413_626_7, 0.222_381_034_453_374_47),
+        (0.960_289_856_497_536_3, 0.101_228_536_290_376_26),
+    ];
+
+    /// Quadrature nodes `(t, weight)` over `[t0, t1]` for an integrand of the faces'
+    /// pressures: split where any face's pressure is not smooth (its arrival, the end of
+    /// its clearing, the end of its positive phase), each piece graded geometrically from
+    /// its start (the first sub-piece `grade` times the fastest decay time `duration / b`
+    /// of the faces acting, each next twice the last), 8-point Gauss-Legendre on each
+    /// sub-piece. Open nodes: none with a weight sits on a jump; each piece's start is a
+    /// node of weight 0, where the peaks are taken.
+    pub fn nodes(faces: &[Face], t0: f64, t1: f64, grade: f64) -> Vec<(f64, f64)> {
+        let mut cuts = vec![t0, t1];
+        let mut tau = f64::INFINITY;
+        for f in faces {
+            let b = &f.blast;
+            for t in [
+                b.arrival,
+                b.arrival + b.clearing_time,
+                b.arrival + b.duration,
+            ] {
+                if t > t0 && t < t1 {
+                    cuts.push(t);
+                }
+            }
+            if b.arrival < t1 && b.arrival + b.duration > t0 {
+                tau = tau.min(b.duration / b.decay.max(1.0));
+            }
+        }
+        cuts.sort_by(f64::total_cmp);
+        cuts.dedup();
+        let mut out = Vec::new();
+        if !tau.is_finite() {
+            return out;
+        }
+        for w in cuts.windows(2) {
+            let (lo, hi) = (w[0], w[1]);
+            // The piece's start with no weight: the peaks (a pressure jumps there).
+            out.push((lo, 0.0));
+            let mut a = lo;
+            let mut width = (grade * tau).min(hi - lo);
+            while a < hi {
+                let b = (a + width).min(hi);
+                let (mid, half) = (0.5 * (a + b), 0.5 * (b - a));
+                out.extend(GL8.iter().map(|&(x, w)| (mid + half * x, w * half)));
+                a = b;
+                width *= 2.0;
+            }
+        }
+        out
+    }
+
+    /// The grading [`crush_damage`] integrates with (a quarter of the fastest decay time).
+    pub const GRADE: f64 = 0.25;
+
+    /// A blast window's crush damage on one chunk (`engine/docs/destruction-reactions.md`
+    /// section 1, "Blast"): the faces' forces `f = -n A p(t)` at their centres, balanced as
+    /// `fracture.slang` `balanced` balances contact loads (reactions through the chunk's
+    /// intact bonds at their area-weighted centroid `bonds`, relative to `centre`; with no
+    /// intact bond, by its inertia at the loads' |f|-weighted centroid), through the law's
+    /// invariants over `volume`, `D += integral excess^2 dt / (crushViscosity crushEnergy)`
+    /// over `[t0, t1]` (blast time; [`nodes`]). Returns the increment and the peak (p, q).
+    #[allow(clippy::too_many_arguments)]
+    pub fn crush_damage(
+        faces: &[Face],
+        centre: DVec3,
+        bonds: Option<DVec3>,
+        volume: f64,
+        m: &stress_ref::crush::CrushParams,
+        t0: f64,
+        t1: f64,
+        grade: f64,
+    ) -> (f64, f64, f64) {
+        use stress_ref::crush::{invariants, sym_outer};
+        let (mut damage, mut p_max, mut q_max) = (0.0, 0.0f64, 0.0f64);
+        for (t, w) in nodes(faces, t0, t1, grade) {
+            let mut virial = [0.0; 6];
+            let mut force = DVec3::ZERO;
+            let mut spread = (DVec3::ZERO, 0.0);
+            for f in faces {
+                let p = f.blast.pressure(t);
+                if p == 0.0 {
+                    continue;
+                }
+                let ff = -f.normal * (f.area * p);
+                let r = f.point - centre;
+                let s = sym_outer(r.to_array(), ff.to_array());
+                for (v, x) in virial.iter_mut().zip(s) {
+                    *v += x;
+                }
+                force += ff;
+                let m = ff.length();
+                spread.0 += m * r;
+                spread.1 += m;
+            }
+            if spread.1 == 0.0 {
+                continue;
+            }
+            let at = bonds.unwrap_or(spread.0 / spread.1);
+            let s = sym_outer(at.to_array(), (-force).to_array());
+            for (v, x) in virial.iter_mut().zip(s) {
+                *v += x;
+            }
+            let (p, q) = invariants(virial, volume);
+            p_max = p_max.max(p);
+            q_max = q_max.max(q);
+            if let Some(e) = m.excess(p, q) {
+                damage += w * e * e;
+            }
+        }
+        (damage / (m.crush_viscosity * m.crush_energy), p_max, q_max)
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -559,6 +680,134 @@ pub(crate) mod model {
             // Compression along x: r . F < 0 on both faces.
             assert!(win.stress_volume[0] < 0.0 && win.stress_volume[1] == 0.0);
             assert!((win.stress_volume[0] + 2.0 * h * fb.peak * 0.04).abs() < 1e-6);
+        }
+
+        /// The reference building's drywall (its pack's `crush` block).
+        fn drywall() -> stress_ref::crush::CrushParams {
+            stress_ref::crush::CrushParams {
+                cap_pressure: 2e6,
+                cohesion: 4.8e5,
+                friction_slope: 1.2,
+                crush_energy: 2e6,
+                crush_viscosity: 2e5,
+            }
+        }
+
+        /// A slab 2h thick loaded on one face, its reactions through bonds at its centre:
+        /// the law's mean stress is the uniaxial `sigma_n = -P A h / V = -P/2`, so
+        /// `p = P/6`, `q = P/2`. The damage is that law integrated over the pulse: equal to
+        /// a brute-force midpoint sum over the positive phase (1e6 points).
+        #[test]
+        fn blast_crush_damage_is_the_law_over_the_pulse() {
+            let (w, r) = (20.0, 0.2);
+            let fb = FaceBlast::new(w, 0.0, r, 1.0, false, f64::INFINITY);
+            let (h, area) = (0.06, 1.8 * 2.8);
+            let volume = 2.0 * h * area;
+            let f = Face {
+                point: DVec3::new(0.0, 0.0, h),
+                normal: DVec3::Z,
+                area,
+                blast: fb,
+            };
+            let m = drywall();
+            let (d, p, q) = crush_damage(
+                &[f],
+                DVec3::ZERO,
+                Some(DVec3::ZERO),
+                volume,
+                &m,
+                0.0,
+                1.0 / 60.0,
+                GRADE,
+            );
+            assert!(
+                (p - fb.peak / 6.0).abs() < 1e-3 * fb.peak,
+                "{p} vs {}",
+                fb.peak / 6.0
+            );
+            assert!((q - fb.peak / 2.0).abs() < 1e-3 * fb.peak, "{q}");
+            let n = 1_000_000;
+            let (a, end) = (fb.arrival, (fb.arrival + fb.duration).min(1.0 / 60.0));
+            let dt = (end - a) / n as f64;
+            let mut want = 0.0;
+            for i in 0..n {
+                let pr = fb.pressure(a + (i as f64 + 0.5) * dt);
+                if let Some(e) = m.excess(pr / 6.0, pr / 2.0) {
+                    want += e * e * dt;
+                }
+            }
+            want /= m.crush_viscosity * m.crush_energy;
+            assert!(want > 0.5, "the charge crushes: {want}");
+            assert!((d - want).abs() < 2e-3 * want, "{d} vs {want}");
+            // Finer grading changes nothing that matters.
+            let (fine, ..) = crush_damage(
+                &[f],
+                DVec3::ZERO,
+                Some(DVec3::ZERO),
+                volume,
+                &m,
+                0.0,
+                1.0 / 60.0,
+                GRADE / 16.0,
+            );
+            assert!((d - fine).abs() < 1e-3 * fine, "{d} vs {fine}");
+            // Windows add up.
+            let split: f64 = [
+                (0.0, 0.3 * fb.duration + a),
+                (0.3 * fb.duration + a, 1.0 / 60.0),
+            ]
+            .iter()
+            .map(|&(t0, t1)| {
+                crush_damage(
+                    &[f],
+                    DVec3::ZERO,
+                    Some(DVec3::ZERO),
+                    volume,
+                    &m,
+                    t0,
+                    t1,
+                    GRADE,
+                )
+                .0
+            })
+            .sum();
+            assert!((split - d).abs() < 2e-3 * d, "{split} vs {d}");
+        }
+
+        /// A lone chunk's reaction is its inertia: one loaded face is balanced at its own
+        /// centre and never crushes it; nor does a pulse that has not arrived.
+        #[test]
+        fn blast_crushes_no_lone_chunk_on_one_face() {
+            let fb = FaceBlast::new(20.0, 0.0, 0.2, 1.0, false, f64::INFINITY);
+            let f = Face {
+                point: DVec3::new(0.0, 0.0, 0.06),
+                normal: DVec3::Z,
+                area: 5.0,
+                blast: fb,
+            };
+            let (d, p, _) = crush_damage(
+                &[f],
+                DVec3::ZERO,
+                None,
+                0.6,
+                &drywall(),
+                0.0,
+                1.0 / 60.0,
+                GRADE,
+            );
+            assert_eq!(d, 0.0);
+            assert!(p.abs() < 1.0, "{p}");
+            let (d, ..) = crush_damage(
+                &[f],
+                DVec3::ZERO,
+                Some(DVec3::ZERO),
+                0.6,
+                &drywall(),
+                0.0,
+                0.5 * fb.arrival,
+                GRADE,
+            );
+            assert_eq!(d, 0.0);
         }
     }
 }

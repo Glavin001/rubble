@@ -182,6 +182,7 @@ fn run_shot(
                     DestructionEvent::BondsBroken {
                         destructible,
                         bonds,
+                        ..
                     } => {
                         assert_eq!(*destructible, id);
                         broken += bonds.len() as u32;
