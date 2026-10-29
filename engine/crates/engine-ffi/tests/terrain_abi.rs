@@ -118,6 +118,74 @@ fn an_impact_bakes_a_crater_the_host_reads_back() {
 }
 
 #[test]
+fn two_impacts_far_apart_open_two_areas_that_bake_on_their_own() {
+    unsafe {
+        let w = world(
+            RbCoordinates::RB_COORDINATES_Y_UP_METRES,
+            RbVec3 {
+                x: 0.0,
+                y: -9.81,
+                z: 0.0,
+            },
+        );
+        let mut def = rbDefaultTerrainDef();
+        def.max_particles = 1 << 20;
+        def.max_parcels = 1 << 18;
+        def.max_substeps = 1 << 13;
+        def.cells_per_radius = 8.0;
+        def.min_cell_size = 0.002;
+        def.region_margin = 0.6;
+        def.settle_speed = 0.05;
+        def.settle_frames = 3;
+        assert_eq!(def.max_regions, 4);
+        ok(rbWorld_EnableTerrain(w, &def));
+        let (nx, nz) = (129u32, 65u32);
+        let s = field(w, nx, nz, 0.147 / 8.0, &vec![0.0; (nx * nz) as usize]);
+        for x in [-0.6f32, 0.6] {
+            ok(rbTerrain_Impact(
+                w,
+                s,
+                0.005,
+                2700.0,
+                RbVec3 {
+                    x: 0.0,
+                    y: -2000.0,
+                    z: 0.0,
+                },
+                RbVec3 { x, y: 0.0, z: 0.0 },
+                std::ptr::null_mut(),
+            ));
+        }
+        let mut areas = 0u32;
+        ok(rbTerrain_AreaCount(w, &mut areas));
+        assert_eq!(areas, 2);
+        let mut frames = 0;
+        while areas > 0 {
+            assert!(frames < 300, "the areas never settled");
+            ok(rbWorld_Step(w));
+            let mut f = std::mem::zeroed();
+            ok(rbWorld_Poll(w, false, false, &mut f));
+            ok(rbTerrain_AreaCount(w, &mut areas));
+            frames += 1;
+        }
+        ok(rbWorld_Step(w));
+        let mut f = std::mem::zeroed();
+        ok(rbWorld_Poll(w, true, true, &mut f));
+        let mut heights = vec![0.0f32; (nx * nz) as usize];
+        ok(rbHeightField_GetHeights(w, s, nx, nz, heights.as_mut_ptr()));
+        // Two craters, alike.
+        let at = |x: f32| {
+            let i = ((x / (0.147 / 8.0)) + 0.5 * (nx - 1) as f32).round() as u32;
+            heights[(nz / 2 * nx + i) as usize]
+        };
+        let (a, b) = (at(-0.6), at(0.6));
+        assert!(a < -0.01 && b < -0.01, "{a} {b}");
+        assert!((a - b).abs() < 0.1 * a.abs(), "{a} {b}");
+        rbDestroyWorld(w);
+    }
+}
+
+#[test]
 fn heights_come_back_in_host_order_and_units() {
     unsafe {
         let w = world(

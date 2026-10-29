@@ -1009,14 +1009,14 @@ struct Particle { xm: vec4f, vj: vec4f, c0: vec4f, c1: vec4f, c2: vec4f, f0: vec
       const rb = counterRb.pop();
       if (rb) enc.copyBufferToBuffer(world.bufs[7], 0, rb, 0, 80);
       let tsRb = null;
-      if (kind === 1 && tsw) {
+      if ((kind === 1 || kind === 3) && tsw) {
         tsRb = ts.rbs.pop();
         if (tsRb) { enc.resolveQuerySet(ts.qs, 2 * tsIdx, 2, ts.res, 256 * tsIdx); enc.copyBufferToBuffer(ts.res, 256 * tsIdx, tsRb, 0, 16); }
       }
       if (render) draw(enc);
       device.queue.submit([enc.finish()]);
       terrain.afterSubmit();
-      if (kind === 1) pushCap(timing.substeps, terrain.lastSubsteps);
+      if (kind === 1 || kind === 3) pushCap(timing.substeps, terrain.lastSubsteps);
       if (rb) rb.mapAsync(GPUMapMode.READ).then(() => { world.setLastCounters(new Uint32Array(rb.getMappedRange().slice(0))); rb.unmap(); counterRb.push(rb); }).catch(fail);
       if (tsRb) tsRb.mapAsync(GPUMapMode.READ).then(() => {
         const t = new BigUint64Array(tsRb.getMappedRange().slice(0)); tsRb.unmap(); ts.rbs.push(tsRb);

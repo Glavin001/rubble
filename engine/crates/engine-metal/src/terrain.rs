@@ -500,9 +500,25 @@ impl MetalSim {
         density: f32,
         bed_friction: f32,
     ) -> anyhow::Result<()> {
+        self.terrain_open_area(plan, collider, field, field_origin, density, bed_friction)?;
+        Ok(())
+    }
+
+    /// Open `plan` beside, into or around the open areas (see
+    /// `WgpuSim::terrain_open_area`): which area covers it and which it took
+    /// over. Runs on the GPU.
+    pub fn terrain_open_area(
+        &mut self,
+        plan: &RegionPlan,
+        collider: u32,
+        field: &HeightField,
+        field_origin: glam::Vec3,
+        density: f32,
+        bed_friction: f32,
+    ) -> anyhow::Result<engine_terrain::plan::Opened> {
         let (nx, nz) = field.samples();
         let (dx, dz) = field.cell_size();
-        let ops = self.terrain_plan()?.activate(
+        let mut opened = self.terrain_plan()?.open(
             plan,
             collider,
             FieldGrid { nx, nz, dx, dz },
@@ -510,17 +526,35 @@ impl MetalSim {
             density,
             bed_friction,
         )?;
-        self.terrain_submit(&ops, "terrain activate")?;
-        let body = self.collider(collider).body;
-        self.mark_surface_moved(body);
+        let ops = std::mem::take(&mut opened.ops);
+        if opened.activated {
+            self.terrain_submit(&ops, "terrain activate")?;
+            let body = self.collider(collider).body;
+            self.mark_surface_moved(body);
+        }
+        Ok(opened)
+    }
+
+    /// Close every open area (see `WgpuSim::terrain_bake`). Runs on the GPU.
+    pub fn terrain_bake(&mut self) -> anyhow::Result<()> {
+        let plan = self.terrain_plan()?;
+        let bed = plan.bed();
+        let all = plan.bake()?;
+        for ops in &all {
+            self.terrain_submit(ops, "terrain bake")?;
+        }
+        if let Some(bed) = bed {
+            let body = self.collider(bed).body;
+            self.mark_surface_moved(body);
+        }
         Ok(())
     }
 
-    /// Close the region (see `WgpuSim::terrain_bake`). Runs on the GPU.
-    pub fn terrain_bake(&mut self) -> anyhow::Result<()> {
+    /// Close area `slot` alone (see `WgpuSim::terrain_bake_area`).
+    pub fn terrain_bake_area(&mut self, slot: u32) -> anyhow::Result<()> {
         let plan = self.terrain_plan()?;
-        let ops = plan.bake()?;
         let bed = plan.bed();
+        let ops = plan.bake_area(slot)?;
         self.terrain_submit(&ops, "terrain bake")?;
         if let Some(bed) = bed {
             let body = self.collider(bed).body;
@@ -545,6 +579,18 @@ impl MetalSim {
         point: glam::Vec3,
     ) -> anyhow::Result<()> {
         let ops = self.terrain_plan()?.apply_source(field, point)?;
+        self.terrain_submit(&ops, "terrain source")?;
+        Ok(())
+    }
+
+    /// A source in area `slot` (see `WgpuSim::terrain_apply_source_to`).
+    pub fn terrain_apply_source_to(
+        &mut self,
+        slot: u32,
+        field: &engine_terrain::ZModel,
+        point: glam::Vec3,
+    ) -> anyhow::Result<()> {
+        let ops = self.terrain_plan()?.apply_source_to(slot, field, point)?;
         self.terrain_submit(&ops, "terrain source")?;
         Ok(())
     }

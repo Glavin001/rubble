@@ -329,6 +329,28 @@ impl CraterPrediction {
             active_blocks,
         )
     }
+
+    /// [`Self::region`] with cells of `dx` (from `TerrainPlan::event_cell`,
+    /// when other areas are open or the terrain fixes its cell size).
+    pub fn region_with_cell(
+        &self,
+        config: &TerrainConfig,
+        center: Vec3,
+        margin: f64,
+        dx: f32,
+    ) -> Result<RegionPlan, TerrainError> {
+        let need = self.final_rim_radius / self.radius - 1.0;
+        if !(margin.is_finite() && margin >= need) {
+            return Err(out_of_range("margin", margin, need, f64::MAX));
+        }
+        RegionPlan::around_with_cell(config, center, self.radius as f32, margin as f32, dx, 0, 0)
+    }
+
+    /// The cell size this crater asks for (`cells_per_radius` across its
+    /// transient radius).
+    pub fn asked_cell(&self, config: &TerrainConfig) -> f32 {
+        self.radius as f32 / config.cells_per_radius
+    }
 }
 
 /// The scaling constants of one target: crater size (Holsapple) and ejection

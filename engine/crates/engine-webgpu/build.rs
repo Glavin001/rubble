@@ -197,6 +197,12 @@ const WORLD_ENTRIES: &[&str] = &[
     "mpm_geostatic",
     "mpm_absorb_faces",
     "mpm_bake_shift",
+    "mpm_bake_edge_clear",
+    "mpm_bake_edge_count",
+    "mpm_bake_edge_scan",
+    "mpm_bake_edge_scatter",
+    "mpm_bake_edge_sort",
+    "mpm_source_surface",
     // Terrain look-ahead (slang/kernels/terrain_watch.slang).
     "terrain_watch_energy",
     "terrain_watch_pick",

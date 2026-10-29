@@ -23,6 +23,15 @@ pub struct RbTerrainDef {
     pub cells_per_radius: f32,
     /// Smallest cell a region may use (length).
     pub min_cell_size: f32,
+    /// Areas open at once: impacts far apart open areas of their own, one
+    /// near an open area grows it.
+    pub max_regions: u32,
+    /// One cell size (length) for every event, or 0: the first event's own
+    /// while any area is open (all open areas share one grid).
+    pub cell_size: f32,
+    /// The coarsest a later event may run on the open grid, as a fraction of
+    /// the cells it asks for (0, 1]; coarser fails.
+    pub min_resolution: f32,
     /// Dry sand: density, Young's modulus (Pa), Poisson's ratio, friction angle
     /// (rad).
     pub density: f32,
@@ -70,6 +79,9 @@ pub extern "C" fn rbDefaultTerrainDef() -> RbTerrainDef {
         max_substeps: d.config.max_substeps,
         cells_per_radius: d.config.cells_per_radius,
         min_cell_size: d.config.min_cell_size,
+        max_regions: d.config.max_regions,
+        cell_size: d.config.cell_size,
+        min_resolution: d.config.min_resolution,
         density: d.material.density,
         youngs_modulus: d.material.youngs_modulus,
         poisson_ratio: d.material.poisson_ratio,
@@ -103,6 +115,9 @@ pub unsafe extern "C" fn rbWorld_EnableTerrain(
         t.config.max_substeps = d.max_substeps;
         t.config.cells_per_radius = d.cells_per_radius;
         t.config.min_cell_size = c.length_in(d.min_cell_size);
+        t.config.max_regions = d.max_regions;
+        t.config.cell_size = c.length_in(d.cell_size);
+        t.config.min_resolution = d.min_resolution;
         t.material.density = c.density_in(d.density);
         t.material.youngs_modulus = d.youngs_modulus;
         t.material.poisson_ratio = d.poisson_ratio;
@@ -132,7 +147,10 @@ unsafe fn write_prediction(c: &coords::Coords, p: &CraterPrediction, out: *mut R
 /// A hypervelocity impact at `point` on heightfield `shape`: a sphere of
 /// `impactor_radius` and `impactor_density` arriving at `velocity` (its
 /// downward part; the excavation field is vertical). `out` (may be null)
-/// receives π-scaling's prediction; the crater itself is simulated.
+/// receives π-scaling's prediction; the crater itself is simulated. Several
+/// may be under way: one far from the open areas opens its own, one near an
+/// open area (into a crater still forming, on its rim) grows it and adds its
+/// flow to the material's.
 #[no_mangle]
 pub unsafe extern "C" fn rbTerrain_Impact(
     world: *mut RbWorld,
@@ -224,7 +242,7 @@ pub unsafe extern "C" fn rbTerrain_Open(
     })
 }
 
-/// Bake the open region now (it otherwise bakes once settled).
+/// Bake every open area now (each otherwise bakes once settled).
 #[no_mangle]
 pub unsafe extern "C" fn rbTerrain_Close(world: *mut RbWorld) -> RbResult {
     guard_args(|| world_mut(world)?.world.terrain_close())
@@ -245,12 +263,21 @@ pub unsafe extern "C" fn rbTerrain_WatchShape(
     })
 }
 
-/// Whether a region is open now (`*out_open`).
+/// Whether any area is open now (`*out_open`).
 #[no_mangle]
 pub unsafe extern "C" fn rbTerrain_IsOpen(world: *mut RbWorld, out_open: *mut bool) -> RbResult {
     guard_args(|| {
         let w = world_mut(world)?;
         write(out_open, w.world.terrain_region().is_some())
+    })
+}
+
+/// Terrain areas open now (`*out_count`).
+#[no_mangle]
+pub unsafe extern "C" fn rbTerrain_AreaCount(world: *mut RbWorld, out_count: *mut u32) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        write(out_count, w.world.terrain_areas().len() as u32)
     })
 }
 

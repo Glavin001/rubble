@@ -74,7 +74,7 @@ flag and measured before it becomes a default.
 ## Limits
 
 Nothing degrades silently. All limits are engine-wide configuration (`TerrainConfig`) and
-fail with a clear error when exceeded: active regions, particles, grid blocks, parcels,
+fail with a clear error when exceeded: open areas, particles, grid blocks, parcels,
 particles per cell, minimum cell size, heightfield size. Elastic stiffness defaults to
 physical values; softening it to need fewer substeps is a lossy trade that is measured and
 reported, not adopted.
@@ -104,6 +104,9 @@ measurements behind them.
   browser, sharing the Rust command plan.
 - **T5.** Cohesive soil, damage-softening rock, vehicle ruts (Bekker), and the
   slope-failure check.
+- **Multiple impacts.** Several areas in one sparse domain: far hits open
+  their own, near ones grow them, sources superpose, each area bakes on its
+  own ("Multiple impacts" below).
 - **Rendering.** A render-only GPU pass rebuilds the ground over an open
   region from its particles every frame and lists what flies as debris.
   `showcase.html` is a 120 Hz chase-camera run past three strikes; see
@@ -2062,6 +2065,262 @@ ignored, run by hand) is the same before and after the change:
   CUDA path: they reject heightfields. Metal compiles the two kernels.
 - **Cost.** Each `wheel_soil_press` thread visits every soil wheel's patch rows.
   It has not been benchmarked.
+
+## Multiple impacts (2026-10-25)
+
+Several hits may be under way at once, overlapping in time and in space: a
+second meteor on the rim of a crater still forming, a charge inside a moving
+crater, impacts kilometres apart, a hit on ground baked a minute ago. Wide land
+costs nothing where it is at rest: only open areas hold particles and blocks.
+
+**One sparse domain, several areas.** The terrain pool is one sparse MPM
+domain. Every open *area* is an activated box over the heightfield, with its
+own window of samples, columns, absorbing faces, coupling cells, settling and
+bake. All areas share three things:
+- one cell size;
+- one block lattice: block keys are integer block coordinates from the
+  domain's origin (the first area's corner), so the active blocks of every
+  area, near or far, are one hash;
+- one bed heightfield.
+
+The first area's corner is the domain's origin; it resets once every area has
+baked.
+
+Considered and not taken:
+- *Growing one box over everything.* Two hits 2 km apart would activate the
+  ground between them.
+- *A domain per area, stepped in turn.* Each would need its own buffers and
+  bind groups (hosts bind one set), and two areas that come to overlap would
+  have to move particles between pools.
+
+**Keys and frames** (`terrain_mpm.slang`).
+- Keys pack x, y, z in 11, 10 and 11 bits, biased (`MPM_KEY_BIAS`). The areas
+  reach ±1024 blocks horizontally (±4096 cells) and ±512 vertically from the
+  domain's origin: ±38 km at the demo's 9.4 m cells, ±82 m at 2 cm. Past that,
+  opening fails by name.
+- Each area's record follows the domain's (`gMpmParams[1 + slot]`, `mpmArea`):
+  - its box (origin, cells, bed collider), window and bed;
+  - its runs of columns, face records and block cells;
+  - its origin's integer node offset from the domain's origin.
+- A particle belongs to the area whose box holds it (one cell in, as before).
+  It is computed in that area's own frame: base node and weights from the
+  area's origin, plus the integer offset (`mpmBaseNodeIn`). Grid nodes also
+  take their area's frame (`mpmNodeArea`). So an area steps exactly as it
+  would alone.
+- A hard requirement holds this together: two areas keep at least two blocks,
+  and at least two heightfield samples, of rigid ground between their boxes.
+  Then no grid block holds nodes of two areas, and no bake or deposit splat of
+  one reaches the other's window. A request that comes closer than that grows
+  the areas instead.
+
+**Opening** (`TerrainPlan::open`; `World::terrain_impact`, `terrain_explode`,
+`terrain_open`, strikes). A request's box is compared with the open areas:
+- *Far from all of them:* a new area, activated as before.
+- *Inside one:* covered, nothing is activated (a hit near the centre of a
+  forming crater whose margin box already holds the new one's).
+- *Within the gap of one or more* (overlapping, on a rim, partly outside):
+  they and the request grow into one box, their bounding box on the lattice.
+  - The grown area's window holds every sample of theirs.
+  - A sample that was active keeps the quanta it gave. It gives only the slab
+    between its old bed and a deeper new one (the slab's particles take the
+    geostatic stress of their depth below the original surface).
+  - A sample that was not active is activated from its current height.
+  - The moving material is left exactly as it is.
+  - A face point the old area had, on the same plane (a side that did not
+    move, the floor at the same bed), keeps its displacement. The rest of the
+    grown box's faces start at rest, since the ground beyond them was the
+    rigid heightfield.
+  - Only the new particles take the geostatic start (`MPM_PARTICLE_FRESH`).
+  - The grown area is one area from then on: one clock, one bake.
+- A request that bridges several areas grows them all into one.
+
+**Sources superpose.** `mpm_source` adds the Z-model field to the velocity of
+the selected area's particles within its extent: the impulses of several
+sources on the moving material add linearly.
+- The field stays bounded at its transient radius, about its own point.
+- On material that has moved since its area opened, the source sits on the
+  material's surface under its point, not at the caller's height.
+  `mpm_source_surface` takes the highest particle within one lattice spacing
+  of the vertical line, plus half a spacing, or the heightfield there if
+  higher.
+  - In the test below, six frames after a first impact, the material 0.4 R
+    from its centre stood 3.5 mm above the original surface: the second
+    field's centre sits that much higher.
+- The area's speed bound adds the source's peak to its own (the speeds add at
+  most). Grown areas take the fastest of their clocks and the longest hold.
+
+**Stepping and settling.**
+- One frame steps every area together; its substeps follow the busiest area's
+  bound (`RegionClock` per area, the largest count).
+- G2P and the coupling keep per-area top speeds (`MPM_C_AREA_SPEED + slot`,
+  `MPM_C_AREA_BODY + slot`), so each area settles on its own speeds. The
+  frame's still settles only with nothing of the terrain in flight: parcels
+  are one pool for the domain.
+- A settled area bakes by itself; the others go on.
+  - A baked area's particles are marked dead, and their slots are reused once
+    the pool empties (the last area's bake).
+  - The bake's dithers count slots from the area's first, so an area bakes as
+    it would alone.
+  - The walls' give (`mpm_bake_shift`) used the activation's slot range of
+    each edge column. It now uses a counting sort of the edge columns'
+    particles by slot (`mpm_bake_edge_*`), in the same order. That works for
+    grown areas, whose edge columns hold particles from several activations.
+
+**Cell size.** Every area shares the domain's cells, so a later event runs at
+the open grid's cell, or at the fixed `TerrainConfig::cell_size` when one is
+set (`TerrainPlan::event_cell`).
+- An event is accepted if that cell is at most its own asked cell divided by
+  `TerrainConfig::min_resolution` (default 0.5). An impact that asks for 16
+  cells per radius then runs at no fewer than 8.
+- A coarser grid fails with `TerrainError::CellTooCoarse`. At 8 cells per
+  radius the crater validation's crater comes out about 30% small (T4 status).
+- A finer grid is always accepted; it costs particles, which the limits bound.
+- Levels (several grids, one per cell size) were not done. They need a domain
+  per level, and two hits of very different sizes on the same ground would
+  still have to share one.
+
+**Limits** (all `TerrainConfig`, by name):
+- `max_regions`: open areas, at most `MPM_MAX_AREAS` = 16.
+- `max_columns`, `max_boundary_nodes`: over all areas.
+- `max_blocks`: the boxes' blocks over all areas.
+- The keys' reach, one heightfield and one material density at a time.
+
+**Cost per frame.** No readbacks and no passes over the whole grid are added.
+- The domain record is written each frame (208 bytes, as before). The area
+  records (3.3 KB) are written only when an area opens, grows or bakes.
+- The per-particle and per-node kernels loop over the slots in use (one with
+  one area) to find a particle's or node's area. Per-area atomics run only
+  while slots past 0 are in use.
+- `terrain_bench` (32,768 particles, 176 blocks, one area): 0.399–0.403 ms per
+  substep, against 0.397–0.400 ms before. That is within the run-to-run noise
+  of a shared GPU.
+
+**Merged with native Metal and deterministic ejecta (177d8e4e).**
+- Activation emits one thread per particle in the selected area's columns,
+  the quanta each sample gives now.
+- The geostatic start rides the first payload, for fresh particles only
+  (`mpmGeostaticFresh`), in their area's frame.
+- Re-entering parcels take their source particle's dead slot in whichever
+  open area they land in.
+- The area counters follow the 16-word frame block: `MPM_C_SURFACE` 13, area
+  speeds from 16, bodies from 32, first slots from 48 (64 words).
+- `terrain_mpm_fast.slang`'s two-pass P2G takes each block's area frame.
+- `engine-metal` gains `terrain_open_area`, `terrain_bake_area` and
+  `terrain_apply_source_to`.
+- A parcel still in flight when the last area is closed by force keeps a
+  source slot past the emptied pool. The World bakes only with nothing
+  airborne, so only forced closes can lose it: open point.
+
+**Merged with the performance and rendering work (80f16fbd).** The surface
+pass (`terrain_surface.slang`, render-only) shows one area's window: header
+word 7 names its slot (`SurfacePlan::frame_area`, the wasm `surface_area`;
+`frame` and `surface` take the first open area). It bins only that area's
+particles. For a grown area's older edge columns its walls' give is taken as
+zero (it reads the last activation's slot ranges). The host turns the surface
+off when the last area bakes. `showcase.html` and `impact.html` treat a kind-3
+frame as coupled.
+
+**Validation** (`engine-webgpu` `tests/terrain_multi.rs`: the crater
+validation's 5 mm aluminium sphere at 2 km/s, transient radius 0.147 m, at 8
+cells per radius; 40 frames, then the bakes).
+
+| Case | Result |
+|---|---|
+| Two identical impacts 1.8 m apart, against single ones | one area bit-identical, the other within 1.8e-4 to 2.2e-4 m (about 150 of ~1,800 samples, 5–6 quanta) where the shared parcels land; which one depends on the parcel slots' atomic order (the first before the merge with the performance work, the second after); cavity volume within 7e-5 |
+| A second source on still material | adds the field's momentum to 4e-7 |
+| A third on material 6 frames in motion | adds the field's momentum from the found surface to 1.7e-7 (at the caller's height it would differ by about 8%) |
+| Hit inside the forming crater (0.2 R off centre, 10 frames in) | cavity 1.43× the single crater's |
+| Hit on its rim (1 R, 10 frames in): the area grows | cavity 1.60× |
+| Hit partly outside (2.5 R, 4 frames in): the area grows | cavity 1.88× |
+| Two far hits in one frame, then a hit on the baked crater | two areas; the baked ground reactivates; cavity 7.07e-4 → 9.31e-4 m³ |
+
+- The volume ledger is exact in every case: the field's change, the live
+  particles and the escaped quanta sum to zero quanta.
+- The same runs single are bit-identical to themselves.
+- The World API (`engine-world` `tests/terrain.rs`) runs two far meteors and a
+  third on the first one's rim after 8 frames. The rim hit grows the first
+  area; the far one bakes while the grown one still moves. The cavities are
+  1.09e-3 and 6.71e-4 m³, and the ledger is exact to the quantum.
+- The C ABI test opens two areas with `rbTerrain_Impact`; the wasm plan test
+  runs kind 3 frames (one area bakes, another steps on).
+
+**Single-area runs.**
+- An area's arithmetic is the old region's. But the kernels are new code, and
+  Metal compiles them differently, so the fingerprints changed at the ulp
+  level. The particles of both fingerprint scenes lie on half-cell lattices,
+  exactly where a base node's floor can flip.
+- After one substep of the loaded cube, velocities differ in the last one or
+  two bits.
+- Every validated suite passes unchanged.
+- The crater validation (margin 2, 16 cells/R, absorbing ground) gives what
+  it gave before: apparent radius 0.1838 m (1.25 R), centre 0.069 m deep, rim
+  2.9 cm high at 0.239 m, ledger closed. The cavity is 3.09× π-scaling's, so
+  the volume band still fails there, the known open point (3.10× before).
+- New fingerprints: `engine-webgpu` impact particles `c71c7e64cf7aef94`,
+  bodies `63ce7712cd6c0b07`, heights `39a743e448abe527`; cube
+  `a0c6daecfc7ce3b6`. `engine-world`: reports `6ee2a0a7740af3dd`, heights
+  `cfa3765bdac07cb1`, box `136fde101445dae3` (unchanged).
+
+**Measured on the way: the source frame's time step.** A harness bug once
+doubled the first frame's speed bound for both areas of the far-apart test,
+and so about halved that frame's substep. Both craters came out with 0.765 of
+the cavity volume (5.41e-4 against 7.07e-4 m³). The crater depends on the time
+step of the frame the field starts in. That bears on the open volume excess
+(3.1× π-scaling). It is reported, not investigated or adopted.
+
+**Open points.**
+- **Slot reuse.** Slots of baked particles, and of landed parcels, are reused
+  only when the pool empties. A chain of events that always leaves one area
+  open fills `max_particles` or `max_parcels`, which then fails by name.
+  Compacting the pool is the follow-up; the bake no longer needs slot ranges,
+  so it can be done.
+- **Parcels are one pool.** An area's landing ejecta take slots, deposit
+  dithers and re-entry order shared with the others, in the atomics' order.
+  So an area matches a single run only to a few quanta where its ejecta
+  land.
+- **Bounding boxes.** Growth is to a bounding box: an L of two hits activates
+  the corner between them. The union of rectangles would need faces on any
+  column boundary.
+- **Between areas.** The ground between two areas is rigid heightfield, and
+  each area's absorbing faces treat the ground beyond as an infinite
+  half-space. Waves one area sends into the ground do not reach the other.
+- **Settling.** One area's ejecta in flight delay another's bake; quiet areas
+  pay the busiest one's substeps.
+- **Pre-existing.** A parcel over an open window lands on the window's
+  lowered heightfield, the bed, and becomes a particle there, under the moving
+  material. It was not changed here.
+- **Browser.** `TerrainStep.frame()` returns kind 3. `terrain-host.mjs`
+  executes it; a page that reads `kind` must treat 3 as coupled.
+  `terrain.areas` lists the open areas.
+
+**The calls** (the showcase).
+- World:
+
+  ```rust
+  w.enable_terrain(&TerrainDef { config: TerrainConfig { max_regions: 4, max_particles: 4 << 20, ..Default::default() }, ..Default::default() })?;
+  w.terrain_impact(ground, &meteor_a, [x1, y1, z1])?;
+  w.terrain_impact(ground, &meteor_b, [x2, y2, z2])?; // same frame, or any later one
+  w.terrain_areas();          // slot, shape, box of each open area
+  w.terrain_close_area(slot); // or terrain_close() for all; each bakes by itself once settled
+  ```
+- JavaScript (`terrain-host.mjs` over the wasm `TerrainStep`):
+
+  ```js
+  const terrain = await createTerrain(world, { config: { max_regions: 4, max_particles: 4 << 20 } });
+  terrain.impact(collider, field, [x1, 0, z1], radius, density, speed);
+  terrain.impact(collider, field, [x2, 0, z2], radius, density, speed);
+  terrain.encodeFrame(enc); // each frame: kinds 0–3
+  terrain.areas;            // JSON per area: slot, origin, end, dx, window, prediction
+  terrain.closeArea(slot);
+  ```
+
+  With `TerrainStep` itself:
+  - `impact(collider, fieldWords, at, radius, density, speed, gravity)` and
+    `explode(…)` return the command words;
+  - `frame(dt, gravity, colliders)` returns kind 0–3;
+  - `areas()`, `close_area(slot)` and `close()`.
+- C: `rbTerrain_Impact` as before, any number of times; `rbTerrain_AreaCount`;
+  `RbTerrainDef.max_regions`, `cell_size`, `min_resolution`.
 
 ## Validation targets
 

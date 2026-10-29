@@ -760,6 +760,15 @@ typedef struct RbTerrainDef {
   float cells_per_radius;
   // Smallest cell a region may use (length).
   float min_cell_size;
+  // Areas open at once: impacts far apart open areas of their own, one
+  // near an open area grows it.
+  uint32_t max_regions;
+  // One cell size (length) for every event, or 0: the first event's own
+  // while any area is open (all open areas share one grid).
+  float cell_size;
+  // The coarsest a later event may run on the open grid, as a fraction of
+  // the cells it asks for (0, 1]; coarser fails.
+  float min_resolution;
   // Dry sand: density, Young's modulus (Pa), Poisson's ratio, friction angle
   // (rad).
   float density;
@@ -1394,7 +1403,10 @@ enum RbResult rbWorld_EnableTerrain(struct RbWorld *world, const struct RbTerrai
 // A hypervelocity impact at `point` on heightfield `shape`: a sphere of
 // `impactor_radius` and `impactor_density` arriving at `velocity` (its
 // downward part; the excavation field is vertical). `out` (may be null)
-// receives π-scaling's prediction; the crater itself is simulated.
+// receives π-scaling's prediction; the crater itself is simulated. Several
+// may be under way: one far from the open areas opens its own, one near an
+// open area (into a crater still forming, on its rim) grows it and adds its
+// flow to the material's.
 enum RbResult rbTerrain_Impact(struct RbWorld *world,
                                RbShapeId shape,
                                float impactor_radius,
@@ -1420,15 +1432,18 @@ enum RbResult rbTerrain_Open(struct RbWorld *world,
                              struct RbVec3 b,
                              float cell_size);
 
-// Bake the open region now (it otherwise bakes once settled).
+// Bake every open area now (each otherwise bakes once settled).
 enum RbResult rbTerrain_Close(struct RbWorld *world);
 
 // Watch heightfield `shape` for heavy-body strikes: one predicted to pass the
 // def's speed and energy opens a region before the body arrives.
 enum RbResult rbTerrain_WatchShape(struct RbWorld *world, RbShapeId shape, bool watch);
 
-// Whether a region is open now (`*out_open`).
+// Whether any area is open now (`*out_open`).
 enum RbResult rbTerrain_IsOpen(struct RbWorld *world, bool *out_open);
+
+// Terrain areas open now (`*out_count`).
+enum RbResult rbTerrain_AreaCount(struct RbWorld *world, uint32_t *out_count);
 
 // Strikes seen too late to open a region before them (`*out_count`).
 enum RbResult rbTerrain_MissedStrikes(struct RbWorld *world, uint64_t *out_count);

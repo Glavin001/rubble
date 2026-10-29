@@ -89,9 +89,11 @@ impl Default for TerrainDef {
     }
 }
 
-/// The open region: on which heightfield shape, and how it is settling.
+/// An open area: on which heightfield shape, its box, and how it is settling.
 #[derive(Clone, Debug)]
-struct ActiveRegion {
+struct ActiveArea {
+    /// Its slot in the terrain pool (`engine_terrain::plan::AreaInfo::slot`).
+    slot: u32,
     shape: ShapeId,
     plan: RegionPlan,
     /// Its frame schedule (substeps, settling): engine-terrain's, shared with
@@ -99,9 +101,21 @@ struct ActiveRegion {
     clock: RegionClock,
 }
 
+/// An open terrain area ([`World::terrain_areas`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TerrainArea {
+    /// Its slot: [`World::terrain_close_area`] takes it, and
+    /// `TerrainStepReport::area_speed[slot]` is its speed.
+    pub slot: u32,
+    pub shape: ShapeId,
+    /// Its box (cells of `plan.dx`).
+    pub plan: RegionPlan,
+}
+
 pub(crate) struct TerrainHost {
     def: TerrainDef,
-    region: Option<ActiveRegion>,
+    /// The open areas, by slot.
+    areas: Vec<ActiveArea>,
     /// Heightfield shapes whose heights a step should copy back (after a bake).
     mirror_due: Vec<ShapeId>,
     /// Copies encoded, not yet read.
@@ -119,7 +133,7 @@ impl World {
     /// load the material. Heightfield shapes stay rigid until a region opens.
     pub fn enable_terrain(&mut self, def: &TerrainDef) -> anyhow::Result<()> {
         anyhow::ensure!(
-            self.terrain.as_ref().is_none_or(|t| t.region.is_none()),
+            self.terrain.as_ref().is_none_or(|t| t.areas.is_empty()),
             "a terrain region is open"
         );
         anyhow::ensure!(
@@ -138,7 +152,7 @@ impl World {
         self.sim.terrain_set_material(Some(&def.material))?;
         self.terrain = Some(TerrainHost {
             def: def.clone(),
-            region: None,
+            areas: Vec::new(),
             mirror_due: Vec::new(),
             mirror_in_flight: Vec::new(),
             watched: Vec::new(),
@@ -151,6 +165,14 @@ impl World {
     /// A km/s impact at `point` on heightfield shape `ground`: opens a region
     /// sized by π-scaling and starts the Z-model excavation flow in it. The
     /// crater is computed, not prescribed. Returns the scaling prediction.
+    ///
+    /// Several may be under way at once. Far from the open areas it opens an
+    /// area of its own; near them (inside a crater still forming, on its rim,
+    /// partly outside it) they grow into one box with it and its field adds to
+    /// the material's motion there (the sources superpose). Every area shares
+    /// one grid: the impact runs at the open grid's cells (or
+    /// `TerrainConfig::cell_size`), and fails with `TerrainError::CellTooCoarse`
+    /// if those resolve it coarser than `TerrainConfig::min_resolution` allows.
     pub fn terrain_impact(
         &mut self,
         ground: ShapeId,
@@ -161,9 +183,30 @@ impl World {
         let (margin, z) = self.terrain_source_settings(impact.target.ejecta.mu)?;
         let crater = impact.crater(g)?;
         let field = impact.field(g, z)?;
-        let plan = crater.region(&self.terrain_def()?.config, Vec3::from(point), margin, 0, 0)?;
+        let plan = self.terrain_event_region(&crater, point, margin)?;
         self.terrain_open_with(ground, plan, Some((&field, Vec3::from(point))))?;
         Ok(crater)
+    }
+
+    /// The region of an event's crater on the terrain's grid.
+    fn terrain_event_region(
+        &self,
+        crater: &CraterPrediction,
+        point: [f32; 3],
+        margin: f64,
+    ) -> anyhow::Result<RegionPlan> {
+        let config = self.terrain_def()?.config;
+        let dx = self.terrain_cell(crater.asked_cell(&config))?;
+        Ok(crater.region_with_cell(&config, Vec3::from(point), margin, dx)?)
+    }
+
+    /// The cell an event asking for `asked` runs at (`TerrainPlan::event_cell`).
+    fn terrain_cell(&self, asked: f32) -> anyhow::Result<f32> {
+        let plan = self
+            .sim
+            .terrain_plan_ref()
+            .ok_or_else(|| anyhow::anyhow!("terrain is not enabled (call enable_terrain)"))?;
+        Ok(plan.event_cell(asked)?)
     }
 
     /// A buried charge under `point` (on the surface of `ground`); see
@@ -178,7 +221,7 @@ impl World {
         let (margin, z) = self.terrain_source_settings(charge.target.ejecta.mu)?;
         let crater = charge.crater(g)?;
         let field = charge.field(g, z)?;
-        let plan = crater.region(&self.terrain_def()?.config, Vec3::from(point), margin, 0, 0)?;
+        let plan = self.terrain_event_region(&crater, point, margin)?;
         self.terrain_open_with(ground, plan, Some((&field, Vec3::from(point))))?;
         Ok(crater)
     }
@@ -193,27 +236,60 @@ impl World {
         dx: f32,
     ) -> anyhow::Result<()> {
         let config = self.terrain_def()?.config;
+        let dx = self.terrain_cell(dx)?;
         let plan = RegionPlan::spanning(&config, Vec3::from(lo), Vec3::from(hi), dx, 0, 0)?;
-        self.terrain_open_with(ground, plan, None)
+        self.terrain_open_with(ground, plan, None).map(|_| ())
     }
 
-    /// Bake the open region now (it otherwise bakes once settled): its
+    /// Bake every open area now (each otherwise bakes once settled): their
     /// material goes back into the heightfield and the shape is rigid again.
     pub fn terrain_close(&mut self) -> anyhow::Result<()> {
         let host = self.terrain_host()?;
-        let Some(region) = host.region.take() else {
-            anyhow::bail!("no terrain region is open");
-        };
-        host.mirror_due.push(region.shape);
+        anyhow::ensure!(!host.areas.is_empty(), "no terrain region is open");
+        for a in std::mem::take(&mut host.areas) {
+            if !host.mirror_due.contains(&a.shape) {
+                host.mirror_due.push(a.shape);
+            }
+        }
         self.sim.terrain_bake()?;
         self.dirty = true;
         Ok(())
     }
 
-    /// The open region's heightfield shape and box, if one is open.
+    /// Bake open area `slot` now; the others go on.
+    pub fn terrain_close_area(&mut self, slot: u32) -> anyhow::Result<()> {
+        let host = self.terrain_host()?;
+        let Some(at) = host.areas.iter().position(|a| a.slot == slot) else {
+            anyhow::bail!("terrain area {slot} is not open");
+        };
+        let a = host.areas.remove(at);
+        if !host.mirror_due.contains(&a.shape) {
+            host.mirror_due.push(a.shape);
+        }
+        self.sim.terrain_bake_area(slot)?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// An open area's heightfield shape and box (the first, by slot), if any
+    /// is open.
     pub fn terrain_region(&self) -> Option<(ShapeId, RegionPlan)> {
-        let r = self.terrain.as_ref()?.region.as_ref()?;
+        let r = self.terrain.as_ref()?.areas.first()?;
         Some((r.shape, r.plan))
+    }
+
+    /// The open areas, by slot.
+    pub fn terrain_areas(&self) -> Vec<TerrainArea> {
+        self.terrain.as_ref().map_or_else(Vec::new, |t| {
+            t.areas
+                .iter()
+                .map(|a| TerrainArea {
+                    slot: a.slot,
+                    shape: a.shape,
+                    plan: a.plan,
+                })
+                .collect()
+        })
     }
 
     fn terrain_host(&mut self) -> anyhow::Result<&mut TerrainHost> {
@@ -248,22 +324,22 @@ impl World {
         ))
     }
 
+    /// Open `plan` on `ground` (beside, into or around the open areas) and
+    /// start `source` there. Returns the area that covers it.
     fn terrain_open_with(
         &mut self,
         ground: ShapeId,
         plan: RegionPlan,
         source: Option<(&ZModel, Vec3)>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<u32> {
         let s = self.live_shape(ground)?;
         let host = self.terrain_host()?;
-        if host.region.is_some() {
-            // One region at a time on the GPU: a second waits for the bake.
-            return Err(engine_terrain::TerrainError::LimitExceeded {
-                limit: "open terrain regions",
-                requested: 2,
-                allowed: 1,
-            }
-            .into());
+        if let Some(a) = host.areas.first() {
+            anyhow::ensure!(
+                a.shape == ground,
+                "terrain areas are open on heightfield shape {}: one heightfield at a time",
+                a.shape.to_bits()
+            );
         }
         let density = host.def.material.density;
         let bed_friction = host.def.material.friction_angle.tan();
@@ -279,21 +355,50 @@ impl World {
         let origin = at.p() + transform.p();
         let collider = self.shapes[s].collider;
         let field = field.clone();
-        self.sim
-            .terrain_activate(&plan, collider, &field, origin, density, bed_friction)?;
-        let mut speed = 0.0;
-        if let Some((model, point)) = source {
-            self.sim.terrain_apply_source(model, point)?;
-            speed = source_peak_speed(model);
-        }
+        let opened =
+            self.sim
+                .terrain_open_area(&plan, collider, &field, origin, density, bed_friction)?;
         let step = self.step;
-        self.terrain_host()?.region = Some(ActiveRegion {
+        let host = self.terrain_host()?;
+        // The covering area's clock: a new area's, the merged areas' combined,
+        // or the covering one's own.
+        let mut clock = RegionClock::new(0.0, step);
+        if opened.activated {
+            let merged: Vec<RegionClock> = host
+                .areas
+                .iter()
+                .filter(|a| opened.absorbed.contains(&a.slot))
+                .map(|a| a.clock)
+                .collect();
+            if !merged.is_empty() {
+                clock = RegionClock::merged(&merged, step);
+            }
+            host.areas.retain(|a| !opened.absorbed.contains(&a.slot));
+        } else if let Some(at) = host.areas.iter().position(|a| a.slot == opened.area) {
+            clock = host.areas.remove(at).clock;
+        }
+        let area_plan = self
+            .sim
+            .terrain_areas()
+            .into_iter()
+            .find(|a| a.slot == opened.area)
+            .map_or(plan, |a| a.plan);
+        if let Some((model, point)) = source {
+            self.sim
+                .terrain_apply_source_to(opened.area, model, point)?;
+            // Its velocity adds to the material's: the bound adds its peak.
+            clock.kick(source_peak_speed(model), step);
+        }
+        let host = self.terrain_host()?;
+        host.areas.push(ActiveArea {
+            slot: opened.area,
             shape: ground,
-            plan,
-            clock: RegionClock::new(speed, step),
+            plan: area_plan,
+            clock,
         });
+        host.areas.sort_by_key(|a| a.slot);
         self.dirty = true;
-        Ok(())
+        Ok(opened.area)
     }
 
     /// Before the rigid step: bake a settled region, or encode this frame's
@@ -305,24 +410,38 @@ impl World {
         let Some(host) = self.terrain.as_ref() else {
             return Ok(false);
         };
-        let Some(region) = host.region.as_ref() else {
-            return Ok(false);
-        };
-        if region.clock.settled(host.def.settle_frames) {
-            self.terrain_close()?;
+        // Settled areas bake (each its own submission); the rest step on.
+        let settled: Vec<u32> = host
+            .areas
+            .iter()
+            .filter(|a| a.clock.settled(host.def.settle_frames))
+            .map(|a| a.slot)
+            .collect();
+        for slot in settled {
+            self.terrain_close_area(slot)?;
+        }
+        let host = self.terrain.as_ref().expect("terrain enabled");
+        if host.areas.is_empty() {
             return Ok(false);
         }
+        // One schedule for the domain: the busiest area's bound.
         let p = self.sim.params();
-        let (substeps, dt) = region.clock.substeps(
-            &host.def.config,
-            self.step,
-            p.dt,
-            p.gravity_y,
-            region.plan.dx,
-            host.def.material.p_wave_speed(),
-            host.def.speed_headroom,
-        )?;
-        self.sim.terrain_encode_coupled(enc, substeps, dt)?;
+        let mut frame = (1u32, p.dt);
+        for a in &host.areas {
+            let (n, dt) = a.clock.substeps(
+                &host.def.config,
+                self.step,
+                p.dt,
+                p.gravity_y,
+                a.plan.dx,
+                host.def.material.p_wave_speed(),
+                host.def.speed_headroom,
+            )?;
+            if n > frame.0 {
+                frame = (n, dt);
+            }
+        }
+        self.sim.terrain_encode_coupled(enc, frame.0, frame.1)?;
         Ok(true)
     }
 
@@ -409,8 +528,8 @@ impl World {
             .map_err(|e| anyhow::anyhow!("step {step}: terrain: {e}"))?;
         if let Some(host) = self.terrain.as_mut() {
             let settle = host.def.settle_speed;
-            if let Some(r) = host.region.as_mut() {
-                r.clock.report(step, &report, settle);
+            for a in &mut host.areas {
+                a.clock.report(step, &report.area(a.slot), settle);
             }
         }
         Ok(report)
@@ -459,7 +578,7 @@ impl World {
             return Ok(());
         };
         anyhow::ensure!(
-            host.region.as_ref().is_none_or(|r| r.shape != id),
+            host.areas.iter().all(|a| a.shape != id),
             "shape {} has an open terrain region",
             id.to_bits()
         );
@@ -529,13 +648,14 @@ impl World {
         self.sim.terrain_set_watch(&watch)
     }
 
-    /// Whether this step should run the look-ahead.
+    /// Whether this step should run the look-ahead (open areas or not: a
+    /// strike beside them opens another, one into them grows or holds them).
     pub(crate) fn terrain_watching(&self) -> bool {
         self.sim.terrain_watch_enabled()
             && self
                 .terrain
                 .as_ref()
-                .is_some_and(|t| t.region.is_none() && t.pending_strike.is_none())
+                .is_some_and(|t| t.pending_strike.is_none())
     }
 
     /// A frame's look-ahead pick (predicted at the end of `step`).
@@ -552,7 +672,7 @@ impl World {
         let Some(host) = self.terrain.as_mut() else {
             return;
         };
-        if host.region.is_some() || host.pending_strike.is_some() {
+        if host.pending_strike.is_some() {
             return;
         }
         // Steps already submitted since the prediction run before the region
@@ -577,7 +697,9 @@ impl World {
         let Some((ground, strike)) = host.pending_strike.take() else {
             return Ok(());
         };
-        if host.region.is_some() {
+        if host.areas.first().is_some_and(|a| a.shape != ground) {
+            // Areas are open on another heightfield: one at a time.
+            host.missed_strikes += 1;
             return Ok(());
         }
         let def = host.def.clone();
@@ -602,13 +724,18 @@ impl World {
             surface + size.above,
             p.z + size.half_width,
         );
-        let plan = RegionPlan::spanning(&def.config, lo, hi, size.dx, 0, 0)?;
-        self.terrain_open_with(ground, plan, None)?;
-        // Faster than the sand: the frame's speed bound starts at the body's.
+        let dx = self.terrain_cell(size.dx)?;
+        let plan = RegionPlan::spanning(&def.config, lo, hi, dx, 0, 0)?;
+        let slot = self.terrain_open_with(ground, plan, None)?;
+        // Faster than the sand: the frame's speed bound covers the body's.
         let dt = self.sim.params().dt;
         let step = self.step;
-        if let Some(r) = self.terrain.as_mut().and_then(|t| t.region.as_mut()) {
-            r.clock = RegionClock::new(Vec3::from(strike.velocity).length(), step);
+        if let Some(r) = self
+            .terrain
+            .as_mut()
+            .and_then(|t| t.areas.iter_mut().find(|a| a.slot == slot))
+        {
+            r.clock.raise(Vec3::from(strike.velocity).length(), step);
             r.clock
                 .hold_until(step + (strike.time / dt).ceil() as u64 + 1);
         }

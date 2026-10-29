@@ -16,7 +16,9 @@
 use super::WgpuSim;
 use engine_schema::heightfield::HeightField;
 use engine_terrain::layout::*;
-use engine_terrain::plan::{alloc_bytes, FieldGrid, TerrainCmd, TerrainOps, TerrainPlan};
+use engine_terrain::plan::{
+    alloc_bytes, AreaInfo, FieldGrid, Opened, TerrainCmd, TerrainOps, TerrainPlan,
+};
 use engine_terrain::{RegionPlan, TerrainConfig, TerrainMaterial};
 
 pub use engine_terrain::TerrainStepReport;
@@ -190,9 +192,28 @@ impl WgpuSim {
         density: f32,
         bed_friction: f32,
     ) -> anyhow::Result<()> {
+        self.terrain_open_area(plan, collider, field, field_origin, density, bed_friction)?;
+        Ok(())
+    }
+
+    /// Open `plan` over heightfield `collider` as [`Self::terrain_activate`],
+    /// beside the open areas: far from them it is an area of its own; near
+    /// them (overlapping, on a rim, partly outside) they grow into one box
+    /// with it; inside one, nothing is activated
+    /// ([`engine_terrain::plan::TerrainPlan::open`]). Returns which area
+    /// covers it and which it took over.
+    pub fn terrain_open_area(
+        &mut self,
+        plan: &RegionPlan,
+        collider: u32,
+        field: &HeightField,
+        field_origin: glam::Vec3,
+        density: f32,
+        bed_friction: f32,
+    ) -> anyhow::Result<Opened> {
         let (nx, nz) = field.samples();
         let (dx, dz) = field.cell_size();
-        let ops = self.terrain_plan()?.activate(
+        let mut opened = self.terrain_plan()?.open(
             plan,
             collider,
             FieldGrid { nx, nz, dx, dz },
@@ -200,26 +221,57 @@ impl WgpuSim {
             density,
             bed_friction,
         )?;
-        self.terrain_submit(&ops, "terrain activate");
-        let body = self.collider(collider).body;
-        self.mark_surface_moved(body);
+        let ops = std::mem::take(&mut opened.ops);
+        if opened.activated {
+            self.terrain_submit(&ops, "terrain activate");
+            let body = self.collider(collider).body;
+            self.mark_surface_moved(body);
+        }
+        Ok(opened)
+    }
+
+    /// Close every open area: each particle's quanta are split, in whole
+    /// quanta, between the tent at its home sample moved by its displacement
+    /// (unmoved material returns exactly where it came from) and P2G's
+    /// B-spline at its position, and the pool holds no particles. Runs on the
+    /// GPU.
+    pub fn terrain_bake(&mut self) -> anyhow::Result<()> {
+        let plan = self.terrain_plan()?;
+        let bed = plan.bed();
+        let all = plan.bake()?;
+        for ops in &all {
+            self.terrain_submit(ops, "terrain bake");
+        }
+        if let Some(bed) = bed {
+            let body = self.collider(bed).body;
+            self.mark_surface_moved(body);
+        }
         Ok(())
     }
 
-    /// Close the region: every particle's quanta are splatted bilinearly, in
-    /// whole quanta, onto the four heightfield samples around its home sample
-    /// moved by its displacement (unmoved material returns exactly where it
-    /// came from), and the region holds no particles. Runs on the GPU.
-    pub fn terrain_bake(&mut self) -> anyhow::Result<()> {
+    /// Close area `slot` alone (see [`Self::terrain_bake`]); the others go on.
+    pub fn terrain_bake_area(&mut self, slot: u32) -> anyhow::Result<()> {
         let plan = self.terrain_plan()?;
-        let ops = plan.bake()?;
         let bed = plan.bed();
+        let ops = plan.bake_area(slot)?;
         self.terrain_submit(&ops, "terrain bake");
         if let Some(bed) = bed {
             let body = self.collider(bed).body;
             self.mark_surface_moved(body);
         }
         Ok(())
+    }
+
+    /// The open areas.
+    pub fn terrain_areas(&self) -> Vec<AreaInfo> {
+        self.terrain
+            .as_ref()
+            .map_or_else(Vec::new, |t| t.plan.areas())
+    }
+
+    /// The terrain's plan (cells, areas), if terrain is enabled.
+    pub fn terrain_plan_ref(&self) -> Option<&TerrainPlan> {
+        self.terrain.as_ref().map(|t| &t.plan)
     }
 
     /// The loaded material's constitutive model: [`TerrainMaterial::Inert`]
@@ -518,6 +570,21 @@ impl WgpuSim {
         point: glam::Vec3,
     ) -> anyhow::Result<()> {
         let ops = self.terrain_plan()?.apply_source(field, point)?;
+        self.terrain_submit(&ops, "terrain source");
+        Ok(())
+    }
+
+    /// [`Self::terrain_apply_source`] in area `slot`: its particles within the
+    /// field's extent add the field's velocity to their own (sources
+    /// superpose). On material that has moved, the source sits on its surface
+    /// under `point`, found on the GPU.
+    pub fn terrain_apply_source_to(
+        &mut self,
+        slot: u32,
+        field: &engine_terrain::ZModel,
+        point: glam::Vec3,
+    ) -> anyhow::Result<()> {
+        let ops = self.terrain_plan()?.apply_source_to(slot, field, point)?;
         self.terrain_submit(&ops, "terrain source");
         Ok(())
     }

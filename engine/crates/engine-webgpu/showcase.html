@@ -164,8 +164,10 @@
     // The surface patch (engine_terrain::surface::SurfacePatch): a second
     // heightfield the surface pass keeps on the live sand over an open window,
     // so the wheels' rays meet the sand, not the lowered bed under it. Out of
-    // reach (10 km down) while no region is open.
-    const PN = num('patch', 34);
+    // reach (10 km down) while no region is open. Overlapping strikes grow one
+    // area to cover them both (49 × 25 samples for the drive scene's first
+    // two), so the patch takes the grown window plus its ring.
+    const PN = num('patch', 72);
     const patchArena = heightFieldArena(PN, PN, SP, SP, new Float32Array(PN * PN).fill(-1e4));
     const PATCH_BASE = arena0.records.length / 4 + patchArena.base;
     const patchParams = [bitsf((fbits(patchArena.params[0]) & ~0x1FFFFFFF) | PATCH_BASE), ...patchArena.params.slice(1)];
@@ -1260,6 +1262,8 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
         timestampWrites: { querySet: ts.qs, beginningOfPassWriteIndex: 6 * slot, endOfPassWriteIndex: 6 * slot + 1 },
         surfaceTimestampWrites: { querySet: ts.qs, beginningOfPassWriteIndex: 6 * slot + 2, endOfPassWriteIndex: 6 * slot + 3 },
       } : {});
+      // Kind 3: some areas baked, the others stepped (a coupled frame too).
+      const coupled = kind === 1 || kind === 3;
       world.encodeStep(enc);
       const carRb = carRbs.pop();
       const chassis = world.vehicles.chassisBody(st.car);
@@ -1269,10 +1273,10 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       // Recording: the frame's pixels, copied in the same submission.
       if (render && capture) enc.copyTextureToBuffer({ texture: lastTex }, { buffer: capture.buffer, bytesPerRow: capture.bytesPerRow }, [canvas.width, canvas.height]);
       let tsRb = null;
-      if (tsOn && (kind === 1 || render)) {
+      if (tsOn && (coupled || render)) {
         tsRb = ts.rbs.pop();
         // Resolve offsets are 256-byte aligned: terrain and surface, then the render.
-        if (kind === 1) enc.resolveQuerySet(ts.qs, 6 * slot, 4, ts.res, 512 * slot);
+        if (coupled) enc.resolveQuerySet(ts.qs, 6 * slot, 4, ts.res, 512 * slot);
         if (render) enc.resolveQuerySet(ts.qs, 6 * slot + 4, 2, ts.res, 512 * slot + 256);
         enc.copyBufferToBuffer(ts.res, 512 * slot, tsRb, 0, 32);
         enc.copyBufferToBuffer(ts.res, 512 * slot + 256, tsRb, 32, 16);
@@ -1280,7 +1284,7 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       const t0 = performance.now();
       device.queue.submit([enc.finish()]);
       terrain.afterSubmit();
-      const entry = { t: +st.t.toFixed(4), car: st.carPose && st.frame % 30 === 0 ? st.carPose.p.map((v) => +v.toFixed(1)) : undefined, kind, substeps: kind === 1 ? terrain.lastSubsteps : 0, particles: terrain.report?.particles ?? 0, airborne: terrain.report?.airborne ?? 0 };
+      const entry = { t: +st.t.toFixed(4), car: st.carPose && st.frame % 30 === 0 ? st.carPose.p.map((v) => +v.toFixed(1)) : undefined, kind, substeps: coupled ? terrain.lastSubsteps : 0, particles: terrain.report?.particles ?? 0, airborne: terrain.report?.airborne ?? 0 };
       const done = [];
       if (carRb) done.push(carRb.mapAsync(GPUMapMode.READ).then(() => {
         const f = new Float32Array(carRb.getMappedRange(0, 112).slice(0));
@@ -1447,7 +1451,7 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
         const q = (p) => a[Math.min(a.length - 1, Math.floor(p * a.length))];
         return { n: a.length, mean: +(a.reduce((s, x) => s + x, 0) / a.length).toFixed(3), p50: q(0.5), p95: q(0.95), max: a[a.length - 1] };
       };
-      return { frameMs: stat('ms'), frameMsOpen: stat('ms', (e) => e.kind === 1), frameMsIdle: stat('ms', (e) => e.kind === 0), terrainMs: stat('terrainMs'), surfaceMs: stat('surfaceMs'), renderMs: stat('renderMs'), renderMsOpen: stat('renderMs', (e) => e.kind === 1), substeps: stat('substeps', (e) => e.kind === 1), over8_3: v.filter((e) => e.ms > 8.333).length, frames: v.length };
+      return { frameMs: stat('ms'), frameMsOpen: stat('ms', (e) => e.kind === 1 || e.kind === 3), frameMsIdle: stat('ms', (e) => e.kind === 0), terrainMs: stat('terrainMs'), surfaceMs: stat('surfaceMs'), renderMs: stat('renderMs'), renderMsOpen: stat('renderMs', (e) => e.kind === 1 || e.kind === 3), substeps: stat('substeps', (e) => e.kind === 1 || e.kind === 3), over8_3: v.filter((e) => e.ms > 8.333).length, frames: v.length };
     }
     window.__showcase = {
       frames, record, still, reset, timings, log,

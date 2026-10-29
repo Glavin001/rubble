@@ -68,7 +68,7 @@ pub use motion::{
 pub use queries::{ExplosionDef, OverlapResult, QueryFilter, QueryId};
 pub use readback::Backpressure;
 pub use rig::{SoftBeam, VehicleDamage};
-pub use terrain::{StrikeDef, TerrainDef};
+pub use terrain::{StrikeDef, TerrainArea, TerrainDef};
 pub use threshold::{Projectile, StressSource};
 pub use engine_terrain::{
     CraterPrediction, CraterTarget, ExplosionSource, ImpactSource, InitialStress, RegionBoundary,

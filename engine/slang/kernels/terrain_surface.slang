@@ -51,7 +51,8 @@
 // section's first word, [1] the occupancy section's, [2] layers per column,
 // [3] flags (bit 0: the absorbing ground's edge shift is used), [4] the debris
 // list's first word, [5] the ejecta speed (f32 bits, m/s), [6] the surface
-// patch's collider (0xFFFFFFFF: none). GPU-written by terrain_surface_resolve: [8..12) window
+// patch's collider (0xFFFFFFFF: none), [7] the area slot it shows (several
+// areas may be open; the surface is one window's). GPU-written by terrain_surface_resolve: [8..12) window
 // i0, j0, ni, nj, [12] the bed's local y (f32 bits), [13] the layer height
 // (f32), [14] frames resolved, [15] valid (1 while a region is open; the host
 // clears it at the bake). [16..20) the debris draw's indirect arguments: the
@@ -67,6 +68,7 @@ static const uint TS_FLAGS = 3u;
 static const uint TS_DEBRIS_BASE = 4u;
 static const uint TS_EJECTA_SPEED = 5u;
 static const uint TS_PATCH = 6u;
+static const uint TS_AREA = 7u;
 static const uint TS_NONE = 0xFFFFFFFFu;
 static const uint TS_WINDOW = 8u;
 static const uint TS_BED = 12u;
@@ -84,6 +86,12 @@ static const float TS_FILLED = 0.3;
 
 uint tsWord(uint k) { return ALOAD(gTerrainSurface[k]); }
 
+// The area the surface shows (its record composed onto the domain's).
+MpmParams tsArea() { return mpmArea(tsWord(TS_AREA)); }
+
+// A particle of the area the surface shows.
+bool tsMine(MpmParticle q) { return mpmAreaOf(q.xm.xyz, gMpmParams[0]) == tsWord(TS_AREA); }
+
 bool tsInFlight(MpmParticle q)
 {
     float v = asfloat(tsWord(TS_EJECTA_SPEED));
@@ -98,7 +106,7 @@ float tsLayerHeight(MpmParams p) { return p.origin.w; }
 void terrain_surface_clear(uint3 tid : SV_DispatchThreadID)
 {
     uint k = mpmIndex(tid);
-    MpmParams p = mpmParams();
+    MpmParams p = tsArea();
     if (k < p.window.z * p.window.w * tsWord(TS_LAYERS)) ASTORE(gTerrainSurface[tsWord(TS_OCC_BASE) + k], 0u);
     if (k == 0u) ASTORE(gTerrainSurface[TS_DEBRIS_COUNT], 0u);
 }
@@ -111,7 +119,7 @@ void terrain_surface_clear(uint3 tid : SV_DispatchThreadID)
 void terrain_surface_shift(uint3 tid : SV_DispatchThreadID)
 {
     uint k = mpmIndex(tid);
-    MpmParams p = mpmParams();
+    MpmParams p = tsArea();
     uint ni = p.window.z, nj = p.window.w;
     if (k >= 2u * (ni + nj)) return;
     Collider col = gColliders[p.dims.w];
@@ -130,7 +138,9 @@ void terrain_surface_shift(uint3 tid : SV_DispatchThreadID)
         axis = 2u;
     }
     uint t = ij.y * ni + ij.x;
-    uint first = ALOAD(gMpmColumns[4u * t + 2u]), n = ALOAD(gMpmColumns[4u * t + 1u]);
+    // The column's last activation range (a grown area's older samples gave
+    // none: their give is taken as zero here, render-only).
+    uint first = ALOAD(gMpmColumns[mpmCol(p, t) + 2u]), n = ALOAD(gMpmColumns[mpmCol(p, t) + 1u]);
     float sum = 0.0, quanta = 0.0;
     for (uint s = first; s < first + n; s++)
     {
@@ -194,12 +204,12 @@ void terrain_surface_bin(uint3 tid : SV_DispatchThreadID)
 {
     uint i = mpmIndex(tid);
     if (i >= mpmParticleCount()) return;
-    MpmParams p = mpmParams();
+    MpmParams p = tsArea();
     Collider col = gColliders[p.dims.w];
     Frame f = colliderFrame(col, gBodies[col.body]);
     HeightFieldRef hf = heightFieldOf(col);
     MpmParticle q = gMpmParticles[i];
-    if (mpmParticleDead(q) || tsInFlight(q)) return;
+    if (mpmParticleDead(q) || tsInFlight(q) || !tsMine(q)) return;
     float3 xl = frameToLocal(f, q.xm.xyz);
     if ((tsWord(TS_FLAGS) & TS_FLAG_SHIFT) != 0u) xl.xz -= tsGroundShift(xl, hf, p);
     uint quanta = asuint(q.f1.w);
@@ -239,7 +249,7 @@ void terrain_surface_bin(uint3 tid : SV_DispatchThreadID)
 void terrain_surface_resolve(uint3 tid : SV_DispatchThreadID)
 {
     uint t = mpmIndex(tid);
-    MpmParams p = mpmParams();
+    MpmParams p = tsArea();
     uint n = p.window.z * p.window.w;
     if (t == 0u)
     {
@@ -305,9 +315,9 @@ void terrain_surface_debris(uint3 tid : SV_DispatchThreadID)
 {
     uint i = mpmIndex(tid);
     if (i >= mpmParticleCount()) return;
-    MpmParams p = mpmParams();
+    MpmParams p = tsArea();
     MpmParticle q = gMpmParticles[i];
-    if (mpmParticleDead(q)) return;
+    if (mpmParticleDead(q) || !tsMine(q)) return;
     Collider col = gColliders[p.dims.w];
     Frame f = colliderFrame(col, gBodies[col.body]);
     HeightFieldRef hf = heightFieldOf(col);
@@ -339,7 +349,7 @@ void terrain_surface_publish(uint3 tid : SV_DispatchThreadID)
     HeightFieldRef lh = heightFieldOf(lc);
     uint records = (lh.nx * lh.nz + 3u) / 4u;
     if (r >= records) return;
-    MpmParams p = mpmParams();
+    MpmParams p = tsArea();
     bool on = tsWord(TS_VALID) == 1u && p.dims.w != MPM_NO_BLOCK;
     if (!on)
     {

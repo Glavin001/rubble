@@ -1,6 +1,20 @@
 // Deformable terrain MPM (T2; engine/docs/deformable-terrain.md, "T2 kernel design").
 //
-// Explicit MLS-MPM on a sparse grid of 4³-cell blocks inside one active region.
+// Explicit MLS-MPM on a sparse grid of 4³-cell blocks over the open areas.
+//
+// Areas (engine/docs/deformable-terrain.md, "Multiple impacts"): one sparse
+// domain holds every open area. They share its cell size and block lattice:
+// block keys are integer block coordinates from the domain's origin (the first
+// area's corner), so material anywhere in any area is one hash. Each area is a
+// box of whole blocks with its own window of heightfield samples, columns,
+// absorbing faces and bake; its record is gMpmParams[1 + slot] (mpmArea), and
+// its box sits at an integer node offset from the domain's origin. A particle
+// belongs to the area whose box holds it (boxes keep two blocks apart), and
+// is computed in that area's own frame: base node and weights from the area's
+// origin, plus its offset (mpmBaseNodeIn), so an area steps exactly as it
+// would alone. Kernels that work on one area (activation, a source, a bake)
+// take it from gMpmParams[0].area.y (mpmSelArea).
+//
 // Per substep:
 //   mpm_clear       empty the block hash and the counters
 //   mpm_touch       insert every block a particle's 3³ stencil reaches (a new
@@ -72,6 +86,15 @@ static const uint MPM_C_AIRBORNE = 9u;    // parcels still in flight after this 
 static const uint MPM_C_BODY_SPEED = 10u; // fastest dynamic body coupled this frame (f32 bits)
 static const uint MPM_C_FLYING = 12u;     // parcels thrown before this substep's G2P (mpm_parcels flies them)
 static const uint MPM_C_GEOSTATIC = 11u;  // nonzero: this substep's mpm_payload sets the geostatic F first
+static const uint MPM_C_SURFACE = 13u;    // the material's top under a source point (ordered bits)
+static const uint MPM_C_AREA_SPEED = 16u; // + slot: an area's fastest particle this frame (f32 bits)
+static const uint MPM_C_AREA_BODY = 32u;  // + slot: an area's fastest coupled body this frame
+static const uint MPM_C_AREA_FIRST = 48u; // + slot: the pool's particle count when the area opened
+static const uint MPM_MAX_AREAS = 16u;
+static const uint MPM_NO_AREA = 0xFFFFFFFFu;
+// gMpmParams[0].area.w bits.
+static const uint MPM_DOMAIN_CLOSE = 1u;   // this bake closes the last area: the pool empties
+static const uint MPM_DOMAIN_SURFACE = 2u; // the source sits on the material's top (mpm_source_surface)
 static const uint MPM_OVERFLOW_BLOCKS = 1u;
 static const uint MPM_OVERFLOW_HASH = 2u;
 static const uint MPM_OUTSIDE = 4u;
@@ -89,6 +112,7 @@ static const uint MPM_BOUNDARY_GEOSTATIC = 2u; // the first step's mpm_geostatic
 // MpmParticle.f2.w bits.
 static const uint MPM_PARTICLE_DEAD = 1u;       // left as a parcel: no longer simulated
 static const uint MPM_PARTICLE_HOME = 2u;       // activated: c1.w, c2.w hold where (the bake's reference)
+static const uint MPM_PARTICLE_FRESH = 4u;      // activated since the last step (mpm_geostatic's)
 // Colliders one block cell of the region lists.
 static const uint MPM_CELL_COLLIDERS = 256u;
 static const uint MPM_NO_SLOT = 0xFFFFFFFFu;
@@ -121,7 +145,10 @@ struct MpmParams
     float4 source0; // Z-model source: surface point (world), Z
     float4 source1; // flow-centre depth, core radius, strength α, unused
     uint4 boundary; // x = MPM_BOUNDARY_* bits, y = first absorbing-node record in
-                    // gMpmCoupled, z = records the region uses, w unused
+                    // gMpmCoupled, z = records the region uses, w = first record in gMpmColumns
+    uint4 area;     // domain record: area slots in use, the selected area, the areas a growing
+                    // one takes over (bits), MPM_DOMAIN_* flags; an area record: its origin's
+                    // node offset from the domain's (int bits), its first block cell in gMpmCouple
 };
 
 // Per particle (128 B).
@@ -199,16 +226,115 @@ uint mpmIndex(uint3 tid) { return tid.x + tid.y * (32768u * 64u); }
 
 MpmParams mpmParams() { return gMpmParams[0]; }
 
+// Area slot k's record composed onto the domain's: its box (origin, dims, bed
+// collider), window, columns, faces and offset; the rest is the domain's.
+MpmParams mpmArea(uint k)
+{
+    MpmParams p = gMpmParams[0];
+    MpmParams a = gMpmParams[1u + k];
+    p.origin = a.origin;
+    p.dims = a.dims;
+    p.window = a.window;
+    p.column = a.column;
+    p.boundary = a.boundary;
+    p.area = a.area;
+    return p;
+}
+
+// The area an activation, a source or a bake works on.
+MpmParams mpmSelArea() { return mpmArea(gMpmParams[0].area.y); }
+
+int3 mpmAreaOffset(MpmParams a) { return int3(asint(a.area.x), asint(a.area.y), asint(a.area.z)); }
+
+int3 mpmSlotOffset(uint k)
+{
+    uint4 a = gMpmParams[1u + k].area;
+    return int3(asint(a.x), asint(a.y), asint(a.z));
+}
+
+// Record t of an area's window in gMpmColumns (its first word).
+uint mpmCol(MpmParams p, uint t) { return 4u * (p.boundary.w + t); }
+
+// x one cell inside area k's box (its stencil stays on the area's grid).
+bool mpmInsideArea(float3 x, uint k)
+{
+    float4 o = gMpmParams[1u + k].origin;
+    uint3 d = gMpmParams[1u + k].dims.xyz;
+    float3 r = (x - o.xyz) / o.w;
+    return all(r >= float3(1, 1, 1)) && all(r < float3(d) - 1.0);
+}
+
+// The open area whose box holds x one cell in, or MPM_NO_AREA (boxes keep
+// apart, so at most one does).
+uint mpmAreaOf(float3 x, MpmParams p)
+{
+    for (uint k = 0u; k < p.area.x; k++)
+    {
+        if (gMpmParams[1u + k].dims.x == 0u) continue;
+        if (mpmInsideArea(x, k)) return k;
+    }
+    return MPM_NO_AREA;
+}
+
+// Whether the selected area's bake takes material at x: every live particle
+// when it is the last area, else those within a block of its box (boxes keep
+// two blocks apart, so no other area's are).
+bool mpmBakeOwns(float3 x)
+{
+    MpmParams d = gMpmParams[0];
+    if ((d.area.w & MPM_DOMAIN_CLOSE) != 0u) return true;
+    float4 o = gMpmParams[1u + d.area.y].origin;
+    float3 r = (x - o.xyz) / o.w;
+    float3 n = float3(gMpmParams[1u + d.area.y].dims.xyz);
+    float pad = float(MPM_BLOCK);
+    return all(r >= -pad) && all(r <= n + pad);
+}
+
+// The open area whose box (nodes 0 ..= dims) holds domain node g, or MPM_NO_AREA.
+uint mpmNodeArea(int3 g, MpmParams p)
+{
+    for (uint k = 0u; k < p.area.x; k++)
+    {
+        uint3 d = gMpmParams[1u + k].dims.xyz;
+        if (d.x == 0u) continue;
+        int3 l = g - mpmSlotOffset(k);
+        if (all(l >= int3(0, 0, 0)) && all(l <= int3(d))) return k;
+    }
+    return MPM_NO_AREA;
+}
+
 uint mpmParticleCount() { return ALOAD(gMpmCounters[MPM_C_PARTICLES]); }
 
 bool mpmParticleDead(MpmParticle q) { return (asuint(q.f2.w) & MPM_PARTICLE_DEAD) != 0u; }
 
-int3 mpmBaseNode(float3 x, MpmParams p)
+// A particle's base node in area k, on the domain's lattice: from the area's
+// own origin (as the area alone would compute it), plus its offset.
+int3 mpmBaseNodeIn(float3 x, uint k)
 {
-    return int3(floor((x - p.origin.xyz) / p.origin.w - 0.5));
+    float4 o = gMpmParams[1u + k].origin;
+    return int3(floor((x - o.xyz) / o.w - 0.5)) + mpmSlotOffset(k);
 }
 
-uint mpmBlockKey(int3 block) { return uint(block.x) | (uint(block.y) << 10) | (uint(block.z) << 20); }
+// Block keys: domain block coordinates biased into 11, 10 and 11 bits (the
+// top x and z values are left out, so key + 1 never wraps to the hash's empty 0).
+static const int3 MPM_KEY_BIAS = int3(1024, 512, 1024);
+
+bool mpmKeyOk(int3 block)
+{
+    int3 u = block + MPM_KEY_BIAS;
+    return all(u >= int3(0, 0, 0)) && u.x < 2047 && u.y < 1024 && u.z < 2047;
+}
+
+uint mpmBlockKey(int3 block)
+{
+    uint3 u = uint3(block + MPM_KEY_BIAS);
+    return u.x | (u.y << 11) | (u.z << 21);
+}
+
+int3 mpmKeyBlock(uint key) { return int3(int(key & 2047u), int((key >> 11) & 1023u), int(key >> 21)) - MPM_KEY_BIAS; }
+
+// Domain node of local node l (0..63) in the block of `key`.
+int3 mpmKeyNode(uint key, uint l) { return mpmKeyBlock(key) * 4 + int3(int(l & 3u), int((l >> 2) & 3u), int(l >> 4)); }
 
 uint mpmHashSlot(uint key, uint slots) { return (key * 0x9E3779B1u) & (slots - 1u); }
 
@@ -269,7 +395,7 @@ uint mpmFindBlock(uint key, MpmParams p)
 // Cell index (block · 64 + local) of node g, or MPM_NO_BLOCK.
 uint mpmCellOf(int3 g, MpmParams p)
 {
-    if (any(g < int3(0, 0, 0))) return MPM_NO_BLOCK;
+    if (!mpmKeyOk(g >> 2)) return MPM_NO_BLOCK;
     uint b = mpmFindBlock(mpmBlockKey(g >> 2), p);
     if (b == MPM_NO_BLOCK) return MPM_NO_BLOCK;
     uint3 l = uint3(g & 3);
@@ -283,7 +409,7 @@ void mpmBlockCube(int3 k0, MpmParams p, out uint blk[8])
     for (uint i = 0u; i < 8u; i++)
     {
         int3 k = k0 + int3(int(i & 1u), int((i >> 1) & 1u), int(i >> 2));
-        blk[i] = any(k < int3(0, 0, 0)) ? MPM_NO_BLOCK : mpmFindBlock(mpmBlockKey(k), p);
+        blk[i] = !mpmKeyOk(k) ? MPM_NO_BLOCK : mpmFindBlock(mpmBlockKey(k), p);
     }
 }
 
@@ -291,19 +417,13 @@ void mpmBlockCube(int3 k0, MpmParams p, out uint blk[8])
 uint mpmCellInCube(int3 g, int3 k0, uint blk[8])
 {
     int3 d = (g >> 2) - k0;
-    if (any(g < int3(0, 0, 0)) || any(d < int3(0, 0, 0)) || any(d > int3(1, 1, 1))) return MPM_NO_BLOCK;
+    if (any(d < int3(0, 0, 0)) || any(d > int3(1, 1, 1))) return MPM_NO_BLOCK;
     uint b = blk[uint(d.x) + 2u * uint(d.y) + 4u * uint(d.z)];
     if (b == MPM_NO_BLOCK) return MPM_NO_BLOCK;
     uint3 l = uint3(g & 3);
     return b * MPM_BLOCK_NODES + l.x + 4u * l.y + 16u * l.z;
 }
 
-// A particle one cell inside the region box (its stencil stays on the grid).
-bool mpmInside(float3 x, MpmParams p)
-{
-    float3 r = (x - p.origin.xyz) / p.origin.w;
-    return all(r >= float3(1, 1, 1)) && all(r < float3(p.dims.xyz) - 1.0);
-}
 
 // Quadratic B-spline weights of the three nodes base + 0..2 along one axis,
 // fx = x/dx − base in [0.5, 1.5).
@@ -364,13 +484,15 @@ void mpm_touch(uint3 tid : SV_DispatchThreadID)
     gMpmSorted[n + i] = MPM_NO_BLOCK;
     if ((flags & MPM_PARTICLE_DEAD) != 0u) return;
     float3 x = xm.xyz;
-    if (!mpmInside(x, p)) { AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OUTSIDE); return; }
-    int3 b = mpmBaseNode(x, p);
+    uint area = mpmAreaOf(x, p);
+    if (area == MPM_NO_AREA) { AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OUTSIDE); return; }
+    int3 b = mpmBaseNodeIn(x, area);
+    int3 lo = b >> 2, hi = (b + 2) >> 2;
+    if (!mpmKeyOk(lo) || !mpmKeyOk(hi)) { AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OUTSIDE); return; }
     // Its base cell for mpm_count: block key and the cell in the block.
     uint3 l = uint3(b & 3);
     gMpmSorted[n + i] = mpmBlockKey(b >> 2);
     gMpmSorted[2u * n + i] = l.x + 4u * l.y + 16u * l.z;
-    int3 lo = b >> 2, hi = (b + 2) >> 2;
     for (int bz = lo.z; bz <= hi.z; bz++)
     for (int by = lo.y; by <= hi.y; by++)
     for (int bx = lo.x; bx <= hi.x; bx++)
@@ -576,7 +698,7 @@ void mpmPayloadGeostatic(uint s, MpmParams p)
 {
     uint id = gMpmSorted[s];
     MpmParticle q = gMpmParticles[id];
-    mpmGeostaticStart(q, p);
+    mpmGeostaticFresh(q, p);
     float m = q.xm.w;
     float dx = p.origin.w;
     float3x3 C = float3x3(q.c0.xyz, q.c1.xyz, q.c2.xyz);
@@ -643,14 +765,18 @@ void mpm_p2g(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     if (live)
     {
         uint key = ALOAD(gMpmBlocks[4u * b]);
-        int3 g = int3(int(key & 1023u), int((key >> 10) & 1023u), int(key >> 20)) * 4
-            + int3(int(l & 3u), int((l >> 2) & 3u), int(l >> 4));
+        int3 g = mpmKeyNode(key, l);
         float dx = p.origin.w;
+        // The node's area: every particle whose stencil reaches it is that
+        // area's, in that area's frame (none: the node has no mass).
+        uint area = mpmNodeArea(g, p);
+        float3 ao = area == MPM_NO_AREA ? float3(0, 0, 0) : gMpmParams[1u + area].origin.xyz;
+        int3 aoff = area == MPM_NO_AREA ? int3(0, 0, 0) : mpmSlotOffset(area);
         // Bases g - 2 .. g lie in the blocks from (g - 2) >> 2.
         int3 k0 = (g - 2) >> 2;
         uint blk[8];
         mpmBlockCube(k0, p, blk);
-        for (uint o = lane; o < 27u; o += MPM_P2G_LANES)
+        for (uint o = lane; o < 27u && area != MPM_NO_AREA; o += MPM_P2G_LANES)
         {
             uint3 off = uint3(o % 3u, (o / 3u) % 3u, o / 9u);
             int3 base = g - int3(off);
@@ -661,7 +787,7 @@ void mpm_p2g(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             for (uint k = 0u; k < count; k++)
             {
                 MpmPayload q = gMpmPayload[first + k];
-                float3 fx = (q.xm.xyz - p.origin.xyz) / dx - float3(base);
+                float3 fx = (q.xm.xyz - ao) / dx - float3(base - aoff);
                 float w = mpmWeightAt(mpmWeights(fx.x), off.x) * mpmWeightAt(mpmWeights(fx.y), off.y)
                     * mpmWeightAt(mpmWeights(fx.z), off.z);
                 float3 dpos = (float3(off) - fx) * dx;
@@ -728,28 +854,26 @@ void mpmColliderBounds(Collider c, BodyState b, MpmParams p, out float3 lo, out 
     hi = x + (r + pad);
 }
 
-// Region block cell of block coordinates k (region-local), or MPM_NO_BLOCK.
+// The block cell of an area's block k (area-local block coordinates) in
+// gMpmCouple's cells (the area's run from its record's area.w), or MPM_NO_BLOCK.
 uint mpmLatticeCell(int3 k, MpmParams p)
 {
     int3 blocks = int3(p.dims.xyz / MPM_BLOCK);
     if (any(k < int3(0, 0, 0)) || any(k >= blocks)) return MPM_NO_BLOCK;
-    return uint(k.x + blocks.x * (k.y + blocks.y * k.z));
+    uint c = p.area.w + uint(k.x + blocks.x * (k.y + blocks.y * k.z));
+    return c < p.counts.z ? c : MPM_NO_BLOCK;
 }
 
-// Node n (world position from its block) inside a coupled collider: hold it to
+// Node n (area-local node g of area p) inside a coupled collider: hold it to
 // the body's surface velocity (separating, Coulomb friction p.step.w) and record
 // the momentum change for that body's reaction.
-void mpmRigidContact(uint n, uint b, float m, MpmParams p, inout float3 v)
+void mpmRigidContact(uint n, int3 g, float m, MpmParams p, inout float3 v)
 {
-    uint key = ALOAD(gMpmBlocks[4u * b]);
-    int3 kb = int3(int(key & 1023u), int((key >> 10) & 1023u), int(key >> 20));
-    uint cell = mpmLatticeCell(kb, p);
+    uint cell = mpmLatticeCell(g >> 2, p);
     if (cell == MPM_NO_BLOCK) return;
     uint base = 4u + cell * (1u + MPM_CELL_COLLIDERS);
     uint count = min(ALOAD(gMpmCouple[base]), MPM_CELL_COLLIDERS);
     if (count == 0u) return;
-    uint l = n % MPM_BLOCK_NODES;
-    int3 g = kb * 4 + int3(int(l & 3u), int((l >> 2) & 3u), int(l >> 4));
     float3 xw = p.origin.xyz + float3(g) * p.origin.w;
     float best = 0.0;
     uint bestSlot = MPM_NO_SLOT, bestCollider = 0xFFFFFFFFu;
@@ -1133,7 +1257,7 @@ bool mpmAbsorbNode(int3 g, float m, HeightFieldRef hf, Frame f, MpmParams p, ino
 void mpm_absorb_init(uint3 tid : SV_DispatchThreadID)
 {
     uint slot = mpmIndex(tid);
-    MpmParams p = mpmParams();
+    MpmParams p = mpmSelArea();
     if (slot >= min(p.boundary.z, mpmFaceCount(p)) || mpmActivationRefused()) return;
     Collider col = gColliders[p.dims.w];
     Frame f = colliderFrame(col, gBodies[col.body]);
@@ -1142,8 +1266,35 @@ void mpm_absorb_init(uint3 tid : SV_DispatchThreadID)
     uint k;
     int2 s = mpmWindowNearest(mpmFacePoint(slot, a, p, k), hf, f, p);
     uint t = uint(s.y - int(p.window.y)) * p.window.z + uint(s.x - int(p.window.x));
-    float dh = float(ALOAD(gMpmColumns[4u * t])) * p.column.y / mpmSampleArea(hf);
-    gMpmCoupled[p.boundary.y + slot] = float4(0, 0, 0, p.column.x + dh);
+    float dh = float(ALOAD(gMpmColumns[mpmCol(p, t)])) * p.column.y / mpmSampleArea(hf);
+    float3 u = float3(0, 0, 0);
+    if (gMpmParams[0].area.z != 0u) u = mpmMergedFaceDisplacement(k, mpmFacePoint(slot, a, p, k), a, p, hf, f);
+    gMpmCoupled[p.boundary.y + slot] = float4(u, p.column.x + dh);
+}
+
+// A grown area's face point that one of the areas it took over had too (the
+// same face, on the same plane: a side that did not move, or the floor at the
+// same bed) keeps that face's displacement; elsewhere the ground beyond starts
+// at rest.
+float3 mpmMergedFaceDisplacement(uint k, float3 r, MpmAbsorbGeom a, MpmParams p, HeightFieldRef hf, Frame f)
+{
+    uint mask = gMpmParams[0].area.z;
+    uint ax = mpmFaceAxis(k);
+    int3 g = int3(round(r)) + mpmAreaOffset(p);
+    float plane = mpmFacePlane(k, a) + float(mpmAreaOffset(p)[ax]);
+    for (uint o = 0u; o < MPM_MAX_AREAS; o++)
+    {
+        if ((mask & (1u << o)) == 0u) continue;
+        MpmParams q = mpmArea(o);
+        if (q.boundary.z == 0u) continue;
+        MpmAbsorbGeom b = mpmAbsorbGeometry(hf, f, q);
+        int3 qo = mpmAreaOffset(q);
+        if (!(abs(mpmFacePlane(k, b) + float(qo[ax]) - plane) < 1e-3)) continue;
+        uint rec = mpmFaceRecord(k, g - qo, q);
+        if (rec == MPM_NO_SLOT || rec >= q.boundary.z) continue;
+        return gMpmCoupled[q.boundary.y + rec].xyz;
+    }
+    return float3(0, 0, 0);
 }
 
 // Per face record, each substep after G2P: the face point moves with the
@@ -1155,8 +1306,20 @@ void mpm_absorb_init(uint3 tid : SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void mpm_absorb_faces(uint3 tid : SV_DispatchThreadID)
 {
-    uint slot = mpmIndex(tid);
-    MpmParams p = mpmParams();
+    // Face records of every open area: thread s is record s of the face pool.
+    uint s = mpmIndex(tid);
+    MpmParams pd = mpmParams();
+    uint at = 4u * asuint(pd.couple.y) + s;
+    uint area = MPM_NO_AREA;
+    for (uint a = 0u; a < pd.area.x; a++)
+    {
+        uint4 bd = gMpmParams[1u + a].boundary;
+        if (gMpmParams[1u + a].dims.x != 0u && at >= bd.y && at < bd.y + bd.z) area = a;
+    }
+    if (area == MPM_NO_AREA) return;
+    MpmParams p = mpmArea(area);
+    uint slot = at - p.boundary.y;
+    int3 off = mpmAreaOffset(p);
     if (slot >= min(p.boundary.z, mpmFaceCount(p))) return;
     Collider col = gColliders[p.dims.w];
     Frame f = colliderFrame(col, gBodies[col.body]);
@@ -1179,7 +1342,7 @@ void mpm_absorb_faces(uint3 tid : SV_DispatchThreadID)
         int3 g = int3(round(r));
         g[ax] = first + l;
         float w = mpmSpline(plane - float(g[ax]));
-        uint c = mpmCellOf(g, p);
+        uint c = mpmCellOf(g + off, p);
         if (c == MPM_NO_BLOCK || !(w > 0.0)) continue;
         float4 node = gMpmGrid[2u * c];
         if (!(node.w > p.step.z)) continue;
@@ -1216,7 +1379,19 @@ void mpm_geostatic(uint3 tid : SV_DispatchThreadID)
     if (i >= mpmParticleCount()) return;
     MpmParticle q = gMpmParticles[i];
     if (mpmParticleDead(q)) return;
-    if (mpmGeostaticStart(q, p)) gMpmParticles[i] = q;
+    if (mpmGeostaticFresh(q, p)) gMpmParticles[i] = q;
+}
+
+// The geostatic start of particle q when it was activated since the last
+// step (MPM_PARTICLE_FRESH, which it clears): its area's (the others' material
+// is moving already). True when q changed.
+bool mpmGeostaticFresh(inout MpmParticle q, MpmParams p)
+{
+    if ((asuint(q.f2.w) & MPM_PARTICLE_FRESH) == 0u) return false;
+    q.f2.w = asfloat(asuint(q.f2.w) & ~MPM_PARTICLE_FRESH);
+    uint area = mpmAreaOf(q.xm.xyz, p);
+    if (area != MPM_NO_AREA) mpmGeostaticStart(q, mpmArea(area));
+    return true;
 }
 
 // The geostatic F of activated particle q (see mpm_geostatic); false when it
@@ -1234,7 +1409,7 @@ bool mpmGeostaticStart(inout MpmParticle q, MpmParams p)
     int si = clamp(int(round((q.c1.w - hf.x0) / hf.dx)), int(p.window.x), int(p.window.x + p.window.z) - 1);
     int sj = clamp(int(round((q.c2.w - hf.z0) / hf.dz)), int(p.window.y), int(p.window.y + p.window.w) - 1);
     uint t = uint(sj - int(p.window.y)) * p.window.z + uint(si - int(p.window.x));
-    float top = p.column.x + float(ALOAD(gMpmColumns[4u * t])) * p.column.y / mpmSampleArea(hf);
+    float top = p.column.x + float(ALOAD(gMpmColumns[mpmCol(p, t)])) * p.column.y / mpmSampleArea(hf);
     float depth = max(top - frameToLocal(f, q.xm.xyz).y, 0.0);
     q.f1.y = exp(p.step.y * p.column.w * depth / modulus);
     return true;
@@ -1277,12 +1452,17 @@ void mpm_grid(uint3 tid : SV_DispatchThreadID)
     if (node.w <= p.step.z) { gMpmGrid[2u * n] = float4(0, 0, 0, node.w); return; }
     float3 v = node.xyz / node.w;
     v.y += p.step.x * p.step.y;
+    // The node's area, in its own frame (node g from the area's origin).
+    uint area = mpmNodeArea(mpmKeyNode(ALOAD(gMpmBlocks[4u * b]), n % MPM_BLOCK_NODES), p);
+    if (area == MPM_NO_AREA)
+    {
+        gMpmGrid[2u * n] = float4(v, node.w);
+        return;
+    }
+    int3 g = mpmKeyNode(ALOAD(gMpmBlocks[4u * b]), n % MPM_BLOCK_NODES) - mpmSlotOffset(area);
+    p = mpmArea(area);
     if (p.dims.w != MPM_NO_BLOCK)
     {
-        uint key = ALOAD(gMpmBlocks[4u * b]);
-        uint l = n % MPM_BLOCK_NODES;
-        int3 g = int3(int(key & 1023u), int((key >> 10) & 1023u), int(key >> 20)) * 4
-            + int3(int(l & 3u), int((l >> 2) & 3u), int(l >> 4));
         float3 xw = p.origin.xyz + float3(g) * p.origin.w;
         Collider col = gColliders[p.dims.w];
         Frame f = colliderFrame(col, gBodies[col.body]);
@@ -1294,7 +1474,7 @@ void mpm_grid(uint3 tid : SV_DispatchThreadID)
             // ground's top; the ground's own surface beside the window (where
             // the rim spills over) stays rigid ground.
             mpmGroundSurfaceContact(hf, f, frameToLocal(f, xw), p, v);
-            mpmRigidContact(n, b, node.w, p, v);
+            mpmRigidContact(n, g, node.w, p, v);
             gMpmGrid[2u * n] = float4(v, node.w);
             return;
         }
@@ -1313,7 +1493,7 @@ void mpm_grid(uint3 tid : SV_DispatchThreadID)
             }
         }
     }
-    mpmRigidContact(n, b, node.w, p, v);
+    mpmRigidContact(n, g, node.w, p, v);
     gMpmGrid[2u * n] = float4(v, node.w);
 }
 
@@ -1325,11 +1505,17 @@ void mpm_g2p(uint3 tid : SV_DispatchThreadID)
     MpmParams p = mpmParams();
     if (i >= mpmParticleCount()) return;
     MpmParticle q = gMpmParticles[i];
-    if (mpmParticleDead(q) || !mpmInside(q.xm.xyz, p)) return;
+    if (mpmParticleDead(q)) return;
+    uint area = mpmAreaOf(q.xm.xyz, p);
+    if (area == MPM_NO_AREA) return;
     float dx = p.origin.w;
     float dt = p.step.x;
-    int3 base = mpmBaseNode(q.xm.xyz, p);
-    float3 fx = (q.xm.xyz - p.origin.xyz) / dx - float3(base);
+    // In the area's frame (exactly as the area alone), on the domain's lattice.
+    float3 ao = gMpmParams[1u + area].origin.xyz;
+    int3 aoff = mpmSlotOffset(area);
+    int3 local = int3(floor((q.xm.xyz - ao) / dx - 0.5));
+    float3 fx = (q.xm.xyz - ao) / dx - float3(local);
+    int3 base = local + aoff;
     float3 wx = mpmWeights(fx.x), wy = mpmWeights(fx.y), wz = mpmWeights(fx.z);
     float3 v = float3(0, 0, 0);
     float3x3 B = float3x3(0, 0, 0, 0, 0, 0, 0, 0, 0);
@@ -1363,10 +1549,13 @@ void mpm_g2p(uint3 tid : SV_DispatchThreadID)
     q.f2.xyz = F[2];
     float speed = length(v);
     AMAX2(gMpmCounters[MPM_C_MAX_SPEED], asuint(speed));
+    // Per area only with more than slot 0 in use (one area's is the frame's:
+    // TerrainPlan::check), sparing every particle a second contended atomic.
+    if (p.area.x > 1u) AMAX2(gMpmCounters[MPM_C_AREA_SPEED + area], asuint(speed));
     if (!(speed <= p.limits.x)) AOR2(gMpmCounters[MPM_C_FLAGS], MPM_CFL);
-    // Leaving the box: a parcel carries the material on (with ejecta enabled).
+    // Leaving its area's box: a parcel carries the material on (with ejecta enabled).
     uint maxParcels = asuint(p.couple.z);
-    if (!mpmInside(q.xm.xyz, p) && maxParcels > 0u)
+    if (!mpmInsideArea(q.xm.xyz, area) && maxParcels > 0u)
     {
         uint k;
         AADD3(gMpmCounters[MPM_C_PARCELS], 1u, k);
@@ -1411,14 +1600,30 @@ uint3 mpmColumnLattice(HeightFieldRef hf, float dh, uint quanta, MpmParams p)
     return n;
 }
 
-// Per window sample: the quanta above the bed (rounded to whole quanta) and its
-// particle count.
+// The area being taken over by a growing one (gMpmParams[0].area.z) whose
+// window holds sample ij, or MPM_NO_AREA.
+uint mpmMergedAt(uint2 ij)
+{
+    uint mask = gMpmParams[0].area.z;
+    for (uint k = 0u; k < MPM_MAX_AREAS; k++)
+    {
+        if ((mask & (1u << k)) == 0u) continue;
+        uint4 w = gMpmParams[1u + k].window;
+        if (ij.x >= w.x && ij.x < w.x + w.z && ij.y >= w.y && ij.y < w.y + w.w) return k;
+    }
+    return MPM_NO_AREA;
+}
+
+// Per window sample: the quanta above the bed (rounded to whole quanta), to
+// emit now ([3]), all it has given ([0]), and its particle count. A sample a
+// growing area takes over is active already: it keeps the quanta it gave, and
+// gives only the slab between its old bed and a deeper new one.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void mpm_activate_count(uint3 tid : SV_DispatchThreadID)
 {
     uint t = mpmIndex(tid);
-    MpmParams p = mpmParams();
+    MpmParams p = mpmSelArea();
     if (t >= p.window.z * p.window.w) return;
     Collider col = gColliders[p.dims.w];
     HeightFieldRef hf = heightFieldOf(col);
@@ -1426,10 +1631,19 @@ void mpm_activate_count(uint3 tid : SV_DispatchThreadID)
     float dh = hfHeight(hf, ij.x, ij.y) - p.column.x;
     float area = mpmSampleArea(hf);
     uint quanta = dh > 0.0 ? uint(floor(dh * area / p.column.y + 0.5)) : 0u;
+    uint total = quanta;
+    uint old = mpmMergedAt(ij);
+    if (old != MPM_NO_AREA)
+    {
+        MpmParams o = mpmArea(old);
+        uint to = (ij.y - o.window.y) * o.window.z + (ij.x - o.window.x);
+        if (!(p.column.x < o.column.x)) quanta = 0u;
+        total = ALOAD(gMpmColumns[mpmCol(o, to)]) + quanta;
+    }
     uint3 n = mpmColumnLattice(hf, float(quanta) * p.column.y / area, quanta, p);
-    ASTORE(gMpmColumns[4u * t], quanta);
-    ASTORE(gMpmColumns[4u * t + 1u], n.x * n.y * n.z);
-    ASTORE(gMpmColumns[4u * t + 3u], 0u);
+    ASTORE(gMpmColumns[mpmCol(p, t)], total);
+    ASTORE(gMpmColumns[mpmCol(p, t) + 1u], n.x * n.y * n.z);
+    ASTORE(gMpmColumns[mpmCol(p, t) + 3u], quanta);
 }
 
 // One workgroup: each sample's first particle (after the particles already in
@@ -1439,12 +1653,12 @@ void mpm_activate_count(uint3 tid : SV_DispatchThreadID)
 void mpm_activate_scan(uint3 lid : SV_GroupThreadID)
 {
     uint l = lid.x;
-    MpmParams p = mpmParams();
+    MpmParams p = mpmSelArea();
     uint samples = p.window.z * p.window.w;
     uint chunk = (samples + 255u) / 256u;
     uint first = l * chunk, last = min(first + chunk, samples);
     uint sum = 0u;
-    for (uint t = first; t < last; t++) sum += ALOAD(gMpmColumns[4u * t + 1u]);
+    for (uint t = first; t < last; t++) sum += ALOAD(gMpmColumns[mpmCol(p, t) + 1u]);
     gsMpmScan[l] = sum;
     GROUP_SYNC();
     for (uint d = 1u; d < 256u; d <<= 1u)
@@ -1458,8 +1672,8 @@ void mpm_activate_scan(uint3 lid : SV_GroupThreadID)
     uint start = have + gsMpmScan[l] - sum;
     for (uint t = first; t < last; t++)
     {
-        ASTORE(gMpmColumns[4u * t + 2u], start);
-        start += ALOAD(gMpmColumns[4u * t + 1u]);
+        ASTORE(gMpmColumns[mpmCol(p, t) + 2u], start);
+        start += ALOAD(gMpmColumns[mpmCol(p, t) + 1u]);
     }
     GROUP_SYNC();
     if (l == 255u)
@@ -1467,7 +1681,18 @@ void mpm_activate_scan(uint3 lid : SV_GroupThreadID)
         uint total = gsMpmScan[255];
         if (have + total > p.counts.x)
             AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_PARTICLES);
-        else ASTORE(gMpmCounters[MPM_C_PARTICLES], have + total);
+        else
+        {
+            ASTORE(gMpmCounters[MPM_C_PARTICLES], have + total);
+            // The area's first slot (a grown one keeps its oldest area's): the
+            // bake's dithers count slots from it, so an area bakes as it
+            // would alone however many particles other areas hold.
+            uint first = have;
+            uint mask = gMpmParams[0].area.z;
+            for (uint k = 0u; k < MPM_MAX_AREAS; k++)
+                if ((mask & (1u << k)) != 0u) first = min(first, ALOAD(gMpmCounters[MPM_C_AREA_FIRST + k]));
+            ASTORE(gMpmCounters[MPM_C_AREA_FIRST + gMpmParams[0].area.y], first);
+        }
     }
 }
 
@@ -1484,30 +1709,31 @@ bool mpmActivationRefused() { return (ALOAD(gMpmCounters[MPM_C_FLAGS]) & MPM_OVE
 void mpm_activate_emit(uint3 tid : SV_DispatchThreadID)
 {
     uint i = mpmIndex(tid);
-    MpmParams p = mpmParams();
+    MpmParams p = mpmSelArea();
     uint samples = p.window.z * p.window.w;
     if (samples == 0u || mpmActivationRefused() || i >= mpmParticleCount()) return;
-    // Particles already in the region before this activation are not its.
-    if (i < ALOAD(gMpmColumns[2u])) return;
+    // Particles already in the pool before this activation are not its.
+    if (i < ALOAD(gMpmColumns[mpmCol(p, 0u) + 2u])) return;
     // The last sample whose first particle is at or before i (samples with
     // no particles share the next one's first, so this one holds i).
     uint lo = 0u, hi = samples - 1u;
     while (lo < hi)
     {
         uint mid = (lo + hi + 1u) / 2u;
-        if (ALOAD(gMpmColumns[4u * mid + 2u]) <= i) lo = mid;
+        if (ALOAD(gMpmColumns[mpmCol(p, mid) + 2u]) <= i) lo = mid;
         else hi = mid - 1u;
     }
     uint t = lo;
-    uint total = ALOAD(gMpmColumns[4u * t + 1u]);
-    uint first = ALOAD(gMpmColumns[4u * t + 2u]);
+    uint total = ALOAD(gMpmColumns[mpmCol(p, t) + 1u]);
+    uint first = ALOAD(gMpmColumns[mpmCol(p, t) + 2u]);
     if (i >= first + total) return;
     uint k = i - first;
     Collider col = gColliders[p.dims.w];
     Frame f = colliderFrame(col, gBodies[col.body]);
     HeightFieldRef hf = heightFieldOf(col);
     uint2 ij = mpmWindowSample(t, p);
-    uint quanta = ALOAD(gMpmColumns[4u * t]);
+    // The quanta it gives now (a grown area's old sample: only a deeper slab).
+    uint quanta = ALOAD(gMpmColumns[mpmCol(p, t) + 3u]);
     float area = mpmSampleArea(hf);
     float dh = float(quanta) * p.column.y / area;
     uint3 n = mpmColumnLattice(hf, dh, quanta, p);
@@ -1530,7 +1756,7 @@ void mpm_activate_emit(uint3 tid : SV_DispatchThreadID)
     q.c2 = float4(0, 0, 0, home.z);
     q.f0 = float4(1, 0, 0, vol);
     q.f1 = float4(0, 1, 0, asfloat(mine));
-    q.f2 = float4(0, 0, 1, asfloat(MPM_PARTICLE_HOME));
+    q.f2 = float4(0, 0, 1, asfloat(MPM_PARTICLE_HOME | MPM_PARTICLE_FRESH));
     gMpmParticles[i] = q;
 }
 
@@ -1558,12 +1784,17 @@ void mpmAdjustRecord(uint r, bool raise, MpmParams p, HeightFieldRef hf)
         float h = asfloat(rec[c]);
         if (raise)
         {
-            h += float(ALOAD(gMpmColumns[4u * t + 3u])) * p.column.y / area;
+            h += float(ALOAD(gMpmColumns[mpmCol(p, t) + 3u])) * p.column.y / area;
             // Order-preserving bits of h (a float's sign flips the order).
             uint b = asuint(h);
             AMAX2(gMpmCounters[MPM_C_BAKE_MAX], (b & 0x80000000u) != 0u ? ~b : (b | 0x80000000u));
         }
-        else h -= float(ALOAD(gMpmColumns[4u * t])) * p.column.y / area;
+        else
+        {
+            // The quanta it gave now; [3] then starts the bake's tally at 0.
+            h -= float(ALOAD(gMpmColumns[mpmCol(p, t) + 3u])) * p.column.y / area;
+            ASTORE(gMpmColumns[mpmCol(p, t) + 3u], 0u);
+        }
         rec[c] = asuint(h);
     }
     gHulls[hf.base + 2u + r] = rec;
@@ -1573,7 +1804,7 @@ void mpmAdjustRecord(uint r, bool raise, MpmParams p, HeightFieldRef hf)
 [numthreads(64, 1, 1)]
 void mpm_activate_lower(uint3 tid : SV_DispatchThreadID)
 {
-    MpmParams p = mpmParams();
+    MpmParams p = mpmSelArea();
     if (mpmActivationRefused()) return;
     Collider col = gColliders[p.dims.w];
     HeightFieldRef hf = heightFieldOf(col);
@@ -1639,12 +1870,127 @@ void mpm_activate_lower(uint3 tid : SV_DispatchThreadID)
 // columns): its column's mean displacement across that side (quanta-weighted,
 // the particles activation made there, in slot order), into the face records'
 // space (the faces are done with).
+// The list (in gMpmCells, three words each: count, start, cursor) of the
+// window's edge sample t (window-local ti, tj), or MPM_NO_SLOT for an inner
+// sample: low-z row, high-z row, then the low-x and high-x columns between.
+uint mpmEdgeList(int ti, int tj, MpmParams p)
+{
+    int ni = int(p.window.z), nj = int(p.window.w);
+    if (tj == 0) return uint(ti);
+    if (tj == nj - 1) return uint(ni + ti);
+    if (ti == 0) return uint(2 * ni + tj - 1);
+    if (ti == ni - 1) return uint(2 * ni + nj - 2 + tj - 1);
+    return MPM_NO_SLOT;
+}
+
+// The edge list of particle q's home sample in the selected area p (live,
+// made by activation, inside p's box), or MPM_NO_SLOT.
+uint mpmParticleEdgeList(MpmParticle q, MpmParams p, HeightFieldRef hf)
+{
+    if (mpmParticleDead(q) || (asuint(q.f2.w) & MPM_PARTICLE_HOME) == 0u) return MPM_NO_SLOT;
+    if (!mpmBakeOwns(q.xm.xyz)) return MPM_NO_SLOT;
+    int si = clamp(int(round((q.c1.w - hf.x0) / hf.dx)), int(p.window.x), int(p.window.x + p.window.z) - 1);
+    int sj = clamp(int(round((q.c2.w - hf.z0) / hf.dz)), int(p.window.y), int(p.window.y + p.window.w) - 1);
+    return mpmEdgeList(si - int(p.window.x), sj - int(p.window.y), p);
+}
+
+// The bake's edge lists: the particles activation made on each sample along
+// the selected area's window edge, by slot (a counting sort, so the walls'
+// give sums them in a fixed order however the pool's slots lie).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_bake_edge_clear(uint3 tid : SV_DispatchThreadID)
+{
+    uint e = mpmIndex(tid);
+    MpmParams p = mpmSelArea();
+    if (e >= 2u * (p.window.z + p.window.w)) return;
+    for (uint w = 0u; w < 3u; w++) ASTORE(gMpmCells[3u * e + w], 0u);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_bake_edge_count(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = mpmIndex(tid);
+    if (i >= mpmParticleCount()) return;
+    MpmParams p = mpmSelArea();
+    HeightFieldRef hf = heightFieldOf(gColliders[p.dims.w]);
+    uint e = mpmParticleEdgeList(gMpmParticles[i], p, hf);
+    if (e != MPM_NO_SLOT) AADD2(gMpmCells[3u * e], 1u);
+}
+
+// One workgroup: each list's start (exclusive prefix over the lists' counts).
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void mpm_bake_edge_scan(uint3 lid : SV_GroupThreadID)
+{
+    uint l = lid.x;
+    MpmParams p = mpmSelArea();
+    uint lists = 2u * (p.window.z + p.window.w);
+    uint chunk = (lists + 255u) / 256u;
+    uint first = l * chunk, last = min(first + chunk, lists);
+    uint sum = 0u;
+    for (uint e = first; e < last; e++) sum += ALOAD(gMpmCells[3u * e]);
+    gsMpmScan[l] = sum;
+    GROUP_SYNC();
+    for (uint d = 1u; d < 256u; d <<= 1u)
+    {
+        uint add = l >= d ? gsMpmScan[l - d] : 0u;
+        GROUP_SYNC();
+        gsMpmScan[l] += add;
+        GROUP_SYNC();
+    }
+    uint start = gsMpmScan[l] - sum;
+    for (uint e = first; e < last; e++)
+    {
+        ASTORE(gMpmCells[3u * e + 1u], start);
+        start += ALOAD(gMpmCells[3u * e]);
+    }
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_bake_edge_scatter(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = mpmIndex(tid);
+    if (i >= mpmParticleCount()) return;
+    MpmParams p = mpmSelArea();
+    HeightFieldRef hf = heightFieldOf(gColliders[p.dims.w]);
+    uint e = mpmParticleEdgeList(gMpmParticles[i], p, hf);
+    if (e == MPM_NO_SLOT) return;
+    uint k;
+    AADD3(gMpmCells[3u * e + 2u], 1u, k);
+    gMpmSorted[ALOAD(gMpmCells[3u * e + 1u]) + k] = i;
+}
+
+// Per list: its range by slot (insertion sort; the order the sums take).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_bake_edge_sort(uint3 tid : SV_DispatchThreadID)
+{
+    uint e = mpmIndex(tid);
+    MpmParams p = mpmSelArea();
+    if (e >= 2u * (p.window.z + p.window.w)) return;
+    uint first = ALOAD(gMpmCells[3u * e + 1u]), n = ALOAD(gMpmCells[3u * e]);
+    for (uint a = 1u; a < n; a++)
+    {
+        uint v = gMpmSorted[first + a];
+        uint k = a;
+        while (k > 0u && gMpmSorted[first + k - 1u] > v)
+        {
+            gMpmSorted[first + k] = gMpmSorted[first + k - 1u];
+            k--;
+        }
+        gMpmSorted[first + k] = v;
+    }
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void mpm_bake_shift(uint3 tid : SV_DispatchThreadID)
 {
     uint k = mpmIndex(tid);
-    MpmParams p = mpmParams();
+    MpmParams p = mpmSelArea();
     uint ni = p.window.z, nj = p.window.w;
     if (k >= 2u * (ni + nj)) return;
     Collider col = gColliders[p.dims.w];
@@ -1662,12 +2008,12 @@ void mpm_bake_shift(uint3 tid : SV_DispatchThreadID)
         ij = uint2(m % ni, m < ni ? 0u : nj - 1u);
         axis = 2u;
     }
-    uint t = ij.y * ni + ij.x;
-    uint first = ALOAD(gMpmColumns[4u * t + 2u]), n = ALOAD(gMpmColumns[4u * t + 1u]);
+    uint e = mpmEdgeList(int(ij.x), int(ij.y), p);
+    uint first = ALOAD(gMpmCells[3u * e + 1u]), n = ALOAD(gMpmCells[3u * e]);
     float sum = 0.0, quanta = 0.0;
-    for (uint s = first; s < first + n; s++)
+    for (uint r = first; r < first + n; r++)
     {
-        MpmParticle q = gMpmParticles[s];
+        MpmParticle q = gMpmParticles[gMpmSorted[r]];
         if (mpmParticleDead(q) || (asuint(q.f2.w) & MPM_PARTICLE_HOME) == 0u) continue;
         float3 xl = frameToLocal(f, q.xm.xyz);
         float w = float(asuint(q.f1.w));
@@ -1818,7 +2164,7 @@ void mpmBakeOnto(int2 s, uint quanta, float yl, MpmParams p, HeightFieldRef hf)
     int ti = s.x - int(p.window.x), tj = s.y - int(p.window.y);
     if (ti >= 0 && tj >= 0 && ti < int(p.window.z) && tj < int(p.window.w))
     {
-        AADD2(gMpmColumns[4u * (uint(tj) * p.window.z + uint(ti)) + 3u], quanta);
+        AADD2(gMpmColumns[mpmCol(p, uint(tj) * p.window.z + uint(ti)) + 3u], quanta);
         return;
     }
     uint at = uint(s.y) * hf.nx + uint(s.x);
@@ -1888,41 +2234,48 @@ void mpm_bake_bin(uint3 tid : SV_DispatchThreadID)
 {
     uint i = mpmIndex(tid);
     if (i >= mpmParticleCount()) return;
-    MpmParams p = mpmParams();
+    MpmParams p = mpmSelArea();
     Collider col = gColliders[p.dims.w];
     Frame f = colliderFrame(col, gBodies[col.body]);
     HeightFieldRef hf = heightFieldOf(col);
     MpmParticle q = gMpmParticles[i];
     if (mpmParticleDead(q)) return;
+    // The selected area's particles only; with other areas still open they
+    // leave the pool as baked (their slots are reused once it empties).
+    if (!mpmBakeOwns(q.xm.xyz)) return;
+    if ((gMpmParams[0].area.w & MPM_DOMAIN_CLOSE) == 0u)
+        gMpmParticles[i].f2.w = asfloat(asuint(q.f2.w) | MPM_PARTICLE_DEAD);
     float3 x = q.xm.xyz;
     bool pushed = mpmBakeColumn(x, p, max(hf.dx, hf.dz));
     float3 xl = frameToLocal(f, x);
     // On the absorbing ground, in the unactivated ground's frame.
     if ((p.boundary.x & MPM_BOUNDARY_ABSORBING) != 0u) xl.xz -= mpmGroundShift(xl, hf, p);
     uint quanta = asuint(q.f1.w);
+    // The dithers' seed: the slot from the area's first.
+    uint seed = i - ALOAD(gMpmCounters[MPM_C_AREA_FIRST + gMpmParams[0].area.y]);
     int2 s0;
     uint4 parts;
     if (pushed)
     {
-        mpmTentSplit((xl.xz - float2(hf.x0, hf.z0)) / float2(hf.dx, hf.dz), quanta, i, s0, parts);
+        mpmTentSplit((xl.xz - float2(hf.x0, hf.z0)) / float2(hf.dx, hf.dz), quanta, seed, s0, parts);
         for (uint c = 0u; c < 4u; c++) mpmBakeOnto(mpmTentSample(s0, c), parts[c], xl.y, p, hf);
         return;
     }
     float2 uHome;
     float w = mpmHomeShare(q, xl, hf, p, uHome);
     // The heightfield's share (all of it at rest: floor(q + r) = q).
-    uint home = min(uint(floor(float(quanta) * w + mpmDither(mpmPcgHash(~i)))), quanta);
-    mpmTentSplit(uHome, home, i, s0, parts);
+    uint home = min(uint(floor(float(quanta) * w + mpmDither(mpmPcgHash(~seed)))), quanta);
+    mpmTentSplit(uHome, home, seed, s0, parts);
     for (uint c = 0u; c < 4u; c++) mpmBakeOnto(mpmTentSample(s0, c), parts[c], xl.y, p, hf);
     if (home == quanta) return;
-    mpmBakeMoved((xl.xz - float2(hf.x0, hf.z0)) / float2(hf.dx, hf.dz), quanta - home, i, xl.y, p, hf);
+    mpmBakeMoved((xl.xz - float2(hf.x0, hf.z0)) / float2(hf.dx, hf.dz), quanta - home, seed, xl.y, p, hf);
 }
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void mpm_bake_raise(uint3 tid : SV_DispatchThreadID)
 {
-    MpmParams p = mpmParams();
+    MpmParams p = mpmSelArea();
     Collider col = gColliders[p.dims.w];
     HeightFieldRef hf = heightFieldOf(col);
     uint r0, r1;
@@ -1937,7 +2290,7 @@ void mpm_bake_raise(uint3 tid : SV_DispatchThreadID)
 [numthreads(1, 1, 1)]
 void mpm_bake_header(uint3 tid : SV_DispatchThreadID)
 {
-    MpmParams p = mpmParams();
+    MpmParams p = mpmSelArea();
     Collider col = gColliders[p.dims.w];
     HeightFieldRef hf = heightFieldOf(col);
     uint b = ALOAD(gMpmCounters[MPM_C_BAKE_MAX]);
@@ -1948,7 +2301,7 @@ void mpm_bake_header(uint3 tid : SV_DispatchThreadID)
         dims.w = asuint(max(asfloat(dims.w), top));
         gHulls[hf.base + 1u] = dims;
     }
-    ASTORE(gMpmCounters[MPM_C_PARTICLES], 0u);
+    if ((gMpmParams[0].area.w & MPM_DOMAIN_CLOSE) != 0u) ASTORE(gMpmCounters[MPM_C_PARTICLES], 0u);
     ASTORE(gMpmCounters[MPM_C_BAKE_MAX], 0u);
 }
 
@@ -1960,15 +2313,20 @@ void mpm_couple_clear(uint3 tid : SV_DispatchThreadID)
 {
     uint c = mpmIndex(tid);
     MpmParams p = mpmParams();
-    uint3 blocks = p.dims.xyz / MPM_BLOCK;
     if (c == 0u)
     {
         ASTORE(gMpmCouple[0], 0u);
-        // Once per frame: the frame's top speed, over all its substeps.
+        // Once per frame: the frame's top speeds, over all its substeps.
         ASTORE(gMpmCounters[MPM_C_MAX_SPEED], 0u);
         ASTORE(gMpmCounters[MPM_C_BODY_SPEED], 0u);
+        for (uint a = 0u; a < MPM_MAX_AREAS; a++)
+        {
+            ASTORE(gMpmCounters[MPM_C_AREA_SPEED + a], 0u);
+            ASTORE(gMpmCounters[MPM_C_AREA_BODY + a], 0u);
+        }
     }
-    if (c < blocks.x * blocks.y * blocks.z) ASTORE(gMpmCouple[4u + c * (1u + MPM_CELL_COLLIDERS)], 0u);
+    // The open areas' block cells (the plan dispatches as many as they use).
+    if (c < p.counts.z) ASTORE(gMpmCouple[4u + c * (1u + MPM_CELL_COLLIDERS)], 0u);
 }
 
 // Per rigid collider: a coupling slot and a place in every block cell of the
@@ -1986,39 +2344,51 @@ void mpm_couple_bin(uint3 tid : SV_DispatchThreadID)
     float3 lo, hi;
     mpmColliderBounds(col, b, p, lo, hi);
     float block = p.origin.w * float(MPM_BLOCK);
-    int3 k0 = int3(floor((lo - p.origin.xyz) / block));
-    int3 k1 = int3(floor((hi - p.origin.xyz) / block));
-    int3 blocks = int3(p.dims.xyz / MPM_BLOCK);
-    k0 = max(k0, int3(0, 0, 0));
-    k1 = min(k1, blocks - 1);
-    if (any(k1 < k0)) return;
-    uint slot;
-    // The region cannot settle while a dynamic body in it still moves: its
-    // fastest surface point (linear plus spin over its bounds' half diagonal).
-    if (b.invMass > 0.0)
+    uint slot = MPM_NO_SLOT;
+    for (uint a = 0u; a < p.area.x; a++)
     {
-        float reach = 0.5 * length(hi - lo);
-        AMAX2(gMpmCounters[MPM_C_BODY_SPEED], asuint(length(b.linearVel) + length(b.angularVel) * reach));
-    }
-    AADD3(gMpmCouple[0], 1u, slot);
-    if (slot >= asuint(p.couple.y))
-    {
-        AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_COUPLED);
-        return;
-    }
-    gMpmCoupled[4u * slot] = float4(0, 0, 0, asfloat(i));
-    gMpmCoupled[4u * slot + 1u] = float4(0, 0, 0, 0);
-    gMpmCoupled[4u * slot + 2u] = float4(b.linearVel, 0);
-    gMpmCoupled[4u * slot + 3u] = float4(b.angularVel, 0);
-    for (int z = k0.z; z <= k1.z; z++)
-    for (int y = k0.y; y <= k1.y; y++)
-    for (int x = k0.x; x <= k1.x; x++)
-    {
-        uint base = 4u + mpmLatticeCell(int3(x, y, z), p) * (1u + MPM_CELL_COLLIDERS);
-        uint at;
-        AADD3(gMpmCouple[base], 1u, at);
-        if (at < MPM_CELL_COLLIDERS) ASTORE(gMpmCouple[base + 1u + at], slot);
-        else AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_CELL);
+        MpmParams pa = mpmArea(a);
+        if (pa.dims.x == 0u) continue;
+        int3 k0 = int3(floor((lo - pa.origin.xyz) / block));
+        int3 k1 = int3(floor((hi - pa.origin.xyz) / block));
+        int3 blocks = int3(pa.dims.xyz / MPM_BLOCK);
+        k0 = max(k0, int3(0, 0, 0));
+        k1 = min(k1, blocks - 1);
+        if (any(k1 < k0)) continue;
+        // An area cannot settle while a dynamic body in it still moves: its
+        // fastest surface point (linear plus spin over its bounds' half diagonal).
+        if (b.invMass > 0.0)
+        {
+            float reach = 0.5 * length(hi - lo);
+            uint speed = asuint(length(b.linearVel) + length(b.angularVel) * reach);
+            AMAX2(gMpmCounters[MPM_C_BODY_SPEED], speed);
+            if (p.area.x > 1u) AMAX2(gMpmCounters[MPM_C_AREA_BODY + a], speed);
+        }
+        if (slot == MPM_NO_SLOT)
+        {
+            AADD3(gMpmCouple[0], 1u, slot);
+            if (slot >= asuint(p.couple.y))
+            {
+                AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_COUPLED);
+                return;
+            }
+            gMpmCoupled[4u * slot] = float4(0, 0, 0, asfloat(i));
+            gMpmCoupled[4u * slot + 1u] = float4(0, 0, 0, 0);
+            gMpmCoupled[4u * slot + 2u] = float4(b.linearVel, 0);
+            gMpmCoupled[4u * slot + 3u] = float4(b.angularVel, 0);
+        }
+        for (int z = k0.z; z <= k1.z; z++)
+        for (int y = k0.y; y <= k1.y; y++)
+        for (int x = k0.x; x <= k1.x; x++)
+        {
+            uint cell = mpmLatticeCell(int3(x, y, z), pa);
+            if (cell == MPM_NO_BLOCK) continue;
+            uint base = 4u + cell * (1u + MPM_CELL_COLLIDERS);
+            uint at;
+            AADD3(gMpmCouple[base], 1u, at);
+            if (at < MPM_CELL_COLLIDERS) ASTORE(gMpmCouple[base + 1u + at], slot);
+            else AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_CELL);
+        }
     }
 }
 
@@ -2049,22 +2419,30 @@ void mpm_couple_gather(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             float3 lo, hi;
             mpmColliderBounds(col, b, p, lo, hi);
             float block = p.origin.w * float(MPM_BLOCK);
-            int3 blocks = int3(p.dims.xyz / MPM_BLOCK);
-            int3 k0 = max(int3(floor((lo - p.origin.xyz) / block)), int3(0, 0, 0));
-            int3 k1 = min(int3(floor((hi - p.origin.xyz) / block)), blocks - 1);
-            for (int z = k0.z; z <= k1.z; z++)
-            for (int y = k0.y; y <= k1.y; y++)
-            for (int x = k0.x; x <= k1.x; x++)
+            // Each open area its bounds reach, in slot order, its blocks in
+            // lattice order (in the area's frame).
+            for (uint a = 0u; a < p.area.x; a++)
             {
-                uint bk = mpmFindBlock(mpmBlockKey(int3(x, y, z)), p);
-                if (bk == MPM_NO_BLOCK) continue;
-                float4 rec = gMpmGrid[2u * (bk * MPM_BLOCK_NODES + l) + 1u];
-                if (rec.w != float(slot)) continue;
-                int3 g = int3(x, y, z) * 4 + int3(int(l & 3u), int((l >> 2) & 3u), int(l >> 4));
-                float3 xw = p.origin.xyz + float3(g) * p.origin.w;
-                J -= rec.xyz;
-                L -= cross(xw - b.position, rec.xyz);
-                M += gMpmGrid[2u * (bk * MPM_BLOCK_NODES + l)].w;
+                MpmParams pa = mpmArea(a);
+                if (pa.dims.x == 0u) continue;
+                int3 kb = mpmAreaOffset(pa) >> 2;
+                int3 blocks = int3(pa.dims.xyz / MPM_BLOCK);
+                int3 k0 = max(int3(floor((lo - pa.origin.xyz) / block)), int3(0, 0, 0));
+                int3 k1 = min(int3(floor((hi - pa.origin.xyz) / block)), blocks - 1);
+                for (int z = k0.z; z <= k1.z; z++)
+                for (int y = k0.y; y <= k1.y; y++)
+                for (int x = k0.x; x <= k1.x; x++)
+                {
+                    uint bk = mpmFindBlock(mpmBlockKey(int3(x, y, z) + kb), p);
+                    if (bk == MPM_NO_BLOCK) continue;
+                    float4 rec = gMpmGrid[2u * (bk * MPM_BLOCK_NODES + l) + 1u];
+                    if (rec.w != float(slot)) continue;
+                    int3 g = int3(x, y, z) * 4 + int3(int(l & 3u), int((l >> 2) & 3u), int(l >> 4));
+                    float3 xw = pa.origin.xyz + float3(g) * pa.origin.w;
+                    J -= rec.xyz;
+                    L -= cross(xw - b.position, rec.xyz);
+                    M += gMpmGrid[2u * (bk * MPM_BLOCK_NODES + l)].w;
+                }
             }
         }
     }
@@ -2249,7 +2627,7 @@ void mpm_parcels(uint3 tid : SV_DispatchThreadID)
             landed = true;
             // The particle it left (its slot is dead while it flies).
             uint source = asuint(gMpmParcels[2u * asuint(p.couple.z) + k].x);
-            if (mpmInside(xq.xyz, p))
+            if (mpmAreaOf(xq.xyz, p) != MPM_NO_AREA)
             {
                 // Back as a particle, in the slot of the one it left: no
                 // atomic, so particle ids (P2G's order) do not depend on the
@@ -2343,8 +2721,44 @@ float3 mpmZModelVelocity(float3 d0, float z, float depth, float core, float alph
     return (d / r + tangential) * (alpha * pow(r, -z));
 }
 
-// Per live particle: the source's excavation velocity added (the shock and
-// contact stage replaced by its outcome; the MPM computes the rest).
+// Before a source on material that has moved: the top of the material under
+// the source point, the highest of the selected area's particles within a
+// lattice spacing of its vertical line (plus half a spacing, the particle's
+// own extent), or the heightfield's surface there if higher (bare bed), as
+// order-preserving bits in MPM_C_SURFACE (which the host zeroes first).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_source_surface(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = mpmIndex(tid);
+    MpmParams p = mpmParams();
+    if (i == 0u && p.dims.w != MPM_NO_BLOCK)
+    {
+        Collider col = gColliders[p.dims.w];
+        Frame f = colliderFrame(col, gBodies[col.body]);
+        HeightFieldRef hf = heightFieldOf(col);
+        float3 xl = frameToLocal(f, p.source0.xyz);
+        float h;
+        float3 n;
+        if (hfSurface(hf, xl.x, xl.z, h, n))
+            AMAX2(gMpmCounters[MPM_C_SURFACE], mpmOrderedBits(frameToWorld(f, float3(xl.x, h, xl.z)).y));
+    }
+    if (i >= mpmParticleCount()) return;
+    MpmParticle q = gMpmParticles[i];
+    if (mpmParticleDead(q)) return;
+    float s = p.column.z;
+    float2 d = q.xm.xz - p.source0.xz;
+    if (abs(d.x) > s || abs(d.y) > s) return;
+    if (mpmAreaOf(q.xm.xyz, p) != p.area.y) return;
+    AMAX2(gMpmCounters[MPM_C_SURFACE], mpmOrderedBits(q.xm.y + 0.5 * s));
+}
+
+float mpmFromOrderedBits(uint b) { return asfloat((b & 0x80000000u) != 0u ? (b & 0x7FFFFFFFu) : ~b); }
+
+// Per live particle of the selected area: the source's excavation velocity
+// added to its own (the shock and contact stage replaced by its outcome; the
+// MPM computes the rest). Several sources superpose: each adds its field to
+// the material's velocity where it stands.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void mpm_source(uint3 tid : SV_DispatchThreadID)
@@ -2354,9 +2768,16 @@ void mpm_source(uint3 tid : SV_DispatchThreadID)
     MpmParams p = mpmParams();
     MpmParticle q = gMpmParticles[i];
     if (mpmParticleDead(q)) return;
-    float3 d = q.xm.xyz - p.source0.xyz;
+    float3 s0 = p.source0.xyz;
+    if ((p.area.w & MPM_DOMAIN_SURFACE) != 0u)
+    {
+        uint top = ALOAD(gMpmCounters[MPM_C_SURFACE]);
+        if (top != 0u) s0.y = mpmFromOrderedBits(top);
+    }
+    float3 d = q.xm.xyz - s0;
     if (d.y > 0.0) return; // the field is the target's (y ≤ 0)
     if (length(d) > p.source1.w) return; // beyond the transient crater: at rest
+    if (mpmAreaOf(q.xm.xyz, p) != p.area.y) return;
     q.vj.xyz += mpmZModelVelocity(d, p.source0.w, p.source1.x, p.source1.y, p.source1.z);
     gMpmParticles[i] = q;
 }

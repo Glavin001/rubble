@@ -34,9 +34,15 @@ void mpm_p2g_cells(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint o = lid.x & 31u;
     if (o >= 27u) return;
     uint key = ALOAD(gMpmBlocks[4u * b]);
-    int3 corner = int3(int(key & 1023u), int((key >> 10) & 1023u), int(key >> 20)) * 4;
+    int3 corner = mpmKeyBlock(key) * 4;
     uint3 off = uint3(o % 3u, (o / 3u) % 3u, o / 9u);
     float dx = p.origin.w;
+    // The block's area (areas are whole blocks apart): its particles are
+    // that area's, in its frame (as the portable mpm_p2g).
+    uint area = mpmNodeArea(corner, p);
+    if (area == MPM_NO_AREA) area = mpmNodeArea(corner + int3(3, 3, 3), p);
+    float3 ao = area == MPM_NO_AREA ? p.origin.xyz : gMpmParams[1u + area].origin.xyz;
+    int3 aoff = area == MPM_NO_AREA ? int3(0, 0, 0) : mpmSlotOffset(area);
     for (uint l = lid.x >> 5; l < MPM_BLOCK_NODES; l += 32u)
     {
         uint c = b * MPM_BLOCK_NODES + l;
@@ -49,7 +55,7 @@ void mpm_p2g_cells(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         for (uint k = 0u; k < count; k++)
         {
             MpmPayload q = gMpmPayload[first + k];
-            float3 fx = (q.xm.xyz - p.origin.xyz) / dx - float3(base);
+            float3 fx = (q.xm.xyz - ao) / dx - float3(base - aoff);
             float w = mpmWeightAt(mpmWeights(fx.x), off.x) * mpmWeightAt(mpmWeights(fx.y), off.y)
                 * mpmWeightAt(mpmWeights(fx.z), off.z);
             float3 dpos = (float3(off) - fx) * dx;
@@ -72,8 +78,7 @@ void mpm_p2g_nodes(uint3 tid : SV_DispatchThreadID)
     if (b >= min(ALOAD(gMpmCounters[MPM_C_BLOCKS]), p.counts.z)) return;
     uint key = ALOAD(gMpmBlocks[4u * b]);
     uint l = n % MPM_BLOCK_NODES;
-    int3 g = int3(int(key & 1023u), int((key >> 10) & 1023u), int(key >> 20)) * 4
-        + int3(int(l & 3u), int((l >> 2) & 3u), int(l >> 4));
+    int3 g = mpmKeyNode(key, l);
     float3 mv = float3(0, 0, 0);
     float m = 0.0;
     int3 k0 = (g - 2) >> 2;

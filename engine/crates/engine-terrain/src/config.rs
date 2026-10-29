@@ -6,7 +6,10 @@
 /// (GPU buffers are sized from them).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TerrainConfig {
-    /// Active regions alive at once.
+    /// Active areas open at once (each an activated box over the heightfield
+    /// with its own window, absorbing faces and bake; at most
+    /// [`crate::layout::MPM_MAX_AREAS`]). Requests whose boxes come near an
+    /// open area grow that area instead of opening another.
     pub max_regions: u32,
     /// MPM particles over all regions.
     pub max_particles: u32,
@@ -22,6 +25,17 @@ pub struct TerrainConfig {
     pub cells_per_radius: f32,
     /// Smallest cell size a region may use (m).
     pub min_cell_size: f32,
+    /// One cell size (m) for every event on this terrain, or 0: the first
+    /// event's own (from `cells_per_radius`) while any area is open. All open
+    /// areas share one sparse grid, so they share its cell size.
+    pub cell_size: f32,
+    /// The coarsest a later event may be resolved, as a fraction of the cells
+    /// it asks for: an event joins the open grid (or the fixed `cell_size`)
+    /// only if that cell is at most its own asked cell / `min_resolution`, so
+    /// at 0.5 an impact asking 16 cells per radius runs at no fewer than 8.
+    /// A coarser grid fails with [`TerrainError::CellTooCoarse`]; a finer one
+    /// is always accepted (it costs particles, which the limits bound).
+    pub min_resolution: f32,
     /// Courant number of the explicit substeps: no material point moves, and
     /// no elastic wave travels, more than this fraction of a cell per substep.
     pub courant: f32,
@@ -142,6 +156,8 @@ impl Default for TerrainConfig {
             particles_per_cell_axis: 2,
             cells_per_radius: 16.0,
             min_cell_size: 0.01,
+            cell_size: 0.0,
+            min_resolution: 0.5,
             courant: 0.3,
             max_substeps: 512,
             max_columns: 1 << 16,
@@ -167,6 +183,19 @@ pub enum TerrainError {
     },
     #[error("cell size {requested} m is below `min_cell_size` ({allowed} m)")]
     CellTooSmall { requested: f32, allowed: f32 },
+    /// An event asks for cells of `asked` m, and the open terrain grid (or the
+    /// fixed `cell_size`) has cells of `grid` m: coarser than `min_resolution`
+    /// allows.
+    #[error(
+        "the terrain grid's cells ({grid} m) are too coarse for this event, which asks for \
+         {asked} m cells (`min_resolution` {min_resolution}): wait for the open areas to bake, \
+         or use a finer `cell_size`"
+    )]
+    CellTooCoarse {
+        asked: f32,
+        grid: f32,
+        min_resolution: f32,
+    },
     /// A rock's crack band does not fit the cell: softening over a band of
     /// cells this large would have to snap back (`RockMaterial::max_cell_size`).
     #[error(
@@ -231,6 +260,19 @@ impl TerrainConfig {
             }
         };
         bad(self.max_regions == 0, "max_regions must be at least 1")?;
+        bad(
+            self.max_regions > crate::layout::MPM_MAX_AREAS,
+            "max_regions must be at most MPM_MAX_AREAS (16)",
+        )?;
+        bad(
+            !(self.cell_size.is_finite()
+                && (self.cell_size == 0.0 || self.cell_size >= self.min_cell_size)),
+            "cell_size must be 0 (from the events) or at least min_cell_size",
+        )?;
+        bad(
+            !(self.min_resolution > 0.0 && self.min_resolution <= 1.0),
+            "min_resolution must be in (0, 1]",
+        )?;
         bad(self.max_particles == 0, "max_particles must be at least 1")?;
         bad(self.max_blocks == 0, "max_blocks must be at least 1")?;
         bad(

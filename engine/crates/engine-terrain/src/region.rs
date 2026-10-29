@@ -35,10 +35,33 @@ impl RegionPlan {
         active_regions: u32,
         active_blocks: u32,
     ) -> Result<Self, TerrainError> {
+        Self::around_with_cell(
+            config,
+            center,
+            radius,
+            margin,
+            radius / config.cells_per_radius,
+            active_regions,
+            active_blocks,
+        )
+    }
+
+    /// [`Self::around`] with cells of `dx` given (an event joining an open
+    /// grid: `TerrainPlan::event_cell`).
+    pub fn around_with_cell(
+        config: &TerrainConfig,
+        center: Vec3,
+        radius: f32,
+        margin: f32,
+        dx: f32,
+        active_regions: u32,
+        active_blocks: u32,
+    ) -> Result<Self, TerrainError> {
         config.validate()?;
-        if !(center.is_finite() && radius.is_finite() && radius > 0.0) {
+        if !(center.is_finite() && radius.is_finite() && radius > 0.0 && dx.is_finite() && dx > 0.0)
+        {
             return Err(TerrainError::InvalidRequest(
-                "center must be finite and radius positive",
+                "center must be finite, radius and cell positive",
             ));
         }
         if !(margin.is_finite() && margin >= 0.0) {
@@ -51,7 +74,6 @@ impl RegionPlan {
             u64::from(active_regions) + 1,
             u64::from(config.max_regions),
         )?;
-        let dx = radius / config.cells_per_radius;
         if dx < config.min_cell_size {
             return Err(TerrainError::CellTooSmall {
                 requested: dx,

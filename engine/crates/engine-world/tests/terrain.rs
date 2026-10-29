@@ -280,3 +280,103 @@ fn a_dropped_ball_opens_a_region_before_it_lands_and_penetrates_as_uehara_says()
         "penetration {got} m against Uehara's {d} m"
     );
 }
+
+/// Several meteors through the World API: two far apart open two areas in one
+/// step; a third on the first one's rim a few frames later grows that area
+/// and adds its flow. Each area bakes once it settles, and the host's field
+/// follows; volume is kept to whole quanta.
+#[test]
+fn several_impacts_open_areas_that_settle_and_bake_on_their_own() {
+    let mut w = world();
+    let def = terrain_def();
+    w.enable_terrain(&def).unwrap();
+    let impact = ImpactSource {
+        impactor_radius: 0.005,
+        impactor_density: 2700.0,
+        velocity: glam::DVec3::new(0.0, -2000.0, 0.0),
+        target: CraterTarget::sand(&def.material).unwrap(),
+    };
+    let spacing = 0.147 / 8.0;
+    let g = w.create_body(&BodyDef::default()).unwrap();
+    let (nx, nz) = (161u32, 65u32);
+    let field = HeightField::new(nx, nz, spacing, spacing, vec![0.0; (nx * nz) as usize]).unwrap();
+    let ground = w
+        .create_height_field_shape(g, &ShapeDef::default(), &field, Transform::IDENTITY)
+        .unwrap();
+    let crater = w.terrain_impact(ground, &impact, [-0.9, 0.0, 0.0]).unwrap();
+    w.terrain_impact(ground, &impact, [0.9, 0.0, 0.0]).unwrap();
+    assert_eq!(w.terrain_areas().len(), 2, "far apart: two areas");
+    let mut last = None;
+    let mut frames = 0;
+    let step = |w: &mut World, last: &mut Option<TerrainStepReport>| {
+        w.step().unwrap();
+        for f in w.poll().unwrap() {
+            if let Some(r) = f.terrain {
+                *last = Some(r);
+            }
+        }
+    };
+    for _ in 0..8 {
+        step(&mut w, &mut last);
+        frames += 1;
+    }
+    // On the first crater's rim, while it forms.
+    let r = crater.radius as f32;
+    w.terrain_impact(ground, &impact, [-0.9 + r, 0.0, 0.0])
+        .unwrap();
+    let areas = w.terrain_areas();
+    assert_eq!(areas.len(), 2, "the rim hit grew the first area");
+    let grown = *areas.iter().find(|a| a.plan.origin.x < 0.0).unwrap();
+    assert!(grown.plan.end().x > -0.9 + 2.0 * r);
+    let mut one_left = false;
+    while !w.terrain_areas().is_empty() {
+        assert!(frames < 400, "the areas never settled");
+        step(&mut w, &mut last);
+        one_left |= w.terrain_areas().len() == 1;
+        frames += 1;
+    }
+    step(&mut w, &mut last);
+    w.poll_blocking().unwrap();
+    let after = w.read_height_field(ground).unwrap();
+    assert_eq!(
+        mirror(&w, ground),
+        after,
+        "the host's field follows the bakes"
+    );
+    let rep = last.expect("frames report the areas");
+    let depth = |x: f32| {
+        let i = (x / spacing + 0.5 * (nx - 1) as f32).round() as u32;
+        after[(nz / 2 * nx + i) as usize]
+    };
+    assert!(depth(-0.9) < 0.0 && depth(0.9) < 0.0, "two craters");
+    let cavity = |lo: f32, hi: f32| -> f64 {
+        let mut v = 0.0;
+        for j in 0..nz {
+            for i in 0..nx {
+                let x = (i as f32 - 0.5 * (nx - 1) as f32) * spacing;
+                if x >= lo && x < hi {
+                    v += f64::from((-after[(j * nx + i) as usize]).max(0.0));
+                }
+            }
+        }
+        v * f64::from(spacing * spacing)
+    };
+    let (west, east) = (cavity(-1.5, 0.0), cavity(0.0, 1.5));
+    eprintln!(
+        "{frames} frames; cavities west {west:.3e} m³ (two hits), east {east:.3e} m³; one area \
+         left open while the other baked: {one_left}"
+    );
+    assert!(west > east, "the rim hit dug more");
+    // The ledger in whole quanta: the field's change and what escaped.
+    let q = f64::from(grown.plan.dx / def.config.particles_per_cell_axis as f32).powi(3) / 64.0;
+    let area = f64::from(spacing * spacing);
+    let quanta: i64 = after
+        .iter()
+        .map(|&h| (f64::from(h) * area / q).round() as i64)
+        .sum();
+    assert_eq!(
+        quanta + i64::from(rep.escaped),
+        0,
+        "volume kept to the quantum"
+    );
+}

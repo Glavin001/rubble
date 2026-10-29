@@ -176,7 +176,21 @@ impl SurfacePlan {
     /// more cells than `max_cells`, and when the region was not opened over a
     /// heightfield (no window).
     pub fn frame(&self, terrain: &TerrainPlan, gravity: f32) -> anyhow::Result<TerrainOps> {
-        let p = terrain.params();
+        let slot = terrain.areas().first().map_or(0, |a| a.slot);
+        self.frame_area(terrain, slot, gravity)
+    }
+
+    /// [`Self::frame`] for open area `slot` (the surface is one area's
+    /// window; with several open, the host picks which it shows).
+    pub fn frame_area(
+        &self,
+        terrain: &TerrainPlan,
+        slot: u32,
+        gravity: f32,
+    ) -> anyhow::Result<TerrainOps> {
+        let p = terrain.area_params(slot).ok_or_else(|| {
+            anyhow::anyhow!("the terrain surface needs a region opened over a heightfield")
+        })?;
         let [_, _, ni, nj] = p.window;
         anyhow::ensure!(
             p.dims[3] != MPM_NO_BED && ni > 0 && nj > 0,
@@ -211,6 +225,7 @@ impl SurfacePlan {
                     self.debris_base(),
                     ejecta_speed.to_bits(),
                     self.patch_word(),
+                    slot,
                 ],
             }],
             cmds: Vec::new(),
@@ -304,8 +319,8 @@ mod tests {
         for k in kernels(&ops) {
             assert!(SURFACE_KERNELS.contains(&k), "{k}");
         }
-        let [_, _, ni, nj] = t.params().window;
-        let layers = t.params().dims[1];
+        let [_, _, ni, nj] = t.area_params(0).unwrap().window;
+        let layers = t.area_params(0).unwrap().dims[1];
         assert!(
             matches!(ops.cmds[0], TerrainCmd::Dispatch { threads, .. } if threads == u64::from(ni * nj * layers))
         );
@@ -323,8 +338,11 @@ mod tests {
                 layers,
                 1,
                 s.debris_base(),
-                (2.0 * 9.81 * t.params().origin[3]).sqrt().to_bits(),
-                u32::MAX
+                (2.0 * 9.81 * t.area_params(0).unwrap().origin[3])
+                    .sqrt()
+                    .to_bits(),
+                u32::MAX,
+                0
             ]
         );
         // Off: only the material a gap separates is debris.
@@ -375,7 +393,7 @@ mod tests {
     fn a_patch_takes_the_surface_while_open_and_sinks_at_the_bake() {
         let cfg = TerrainConfig::default();
         let t = opened(&cfg);
-        let [_, _, ni, nj] = t.params().window;
+        let [_, _, ni, nj] = t.area_params(0).unwrap().window;
         let patch = SurfacePatch {
             collider: 7,
             nx: ni + 2,
