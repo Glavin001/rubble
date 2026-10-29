@@ -283,7 +283,10 @@ of them off the paths below do not run and nothing differs.
 **Break causes.** `DestructionEvent::BondsBroken` has a `cause: BreakCause` (`Stress`: the
 strength model's own rule; `Blast`; `SupportLoss`; `Crush`), one event per cause in a step.
 The least invasive choice: one field instead of a new event kind, so the C ABI's event list
-is unchanged (the cause is not in `RbDestructionEvent` yet). A bond support loss broke is
+is unchanged. Since 2026-10-29 the C ABI carries it (`RbDestructionEvent::break_cause`), with
+`RB_CHUNK_CRUSHED`'s cause, volume, pose, velocities and peaks, `rbWorld_Detonate` /
+`RbBlastDef`, and `RbDestructibleDef::blast_loading` / `crush` (`engine-ffi` README,
+`tests/reactions.rs`). A bond support loss broke is
 tagged when its break is seen (the next frame); `World::destructible_support_loss_breaks`
 still lists what the pass decided, in order.
 
