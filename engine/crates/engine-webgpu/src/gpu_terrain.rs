@@ -19,6 +19,7 @@ use engine_terrain::layout::*;
 use engine_terrain::plan::{
     alloc_bytes, AreaInfo, FieldGrid, Opened, TerrainCmd, TerrainOps, TerrainPlan,
 };
+use engine_terrain::surface::SurfacePlan;
 use engine_terrain::{RegionPlan, TerrainConfig, TerrainMaterial};
 
 pub use engine_terrain::TerrainStepReport;
@@ -663,6 +664,38 @@ impl WgpuSim {
                 0,
                 bytemuck::cast_slice(particles),
             );
+        }
+        Ok(())
+    }
+
+    /// Size the render-only surface buffer (binding
+    /// [`engine_terrain::surface::SURFACE_BINDING`]) for `surface`.
+    pub fn terrain_surface_enable(&mut self, surface: &SurfacePlan) -> anyhow::Result<()> {
+        let binding = engine_terrain::surface::SURFACE_BINDING;
+        crate::features::check_limits(&self.device.limits(), binding, surface.bytes())?;
+        self.bufs[binding] = terrain_buffer(&self.device, binding, surface.bytes());
+        self.rebind_buffer(binding as u32);
+        Ok(())
+    }
+
+    /// Rebuild the live surface of every open area from its particles as
+    /// they are now, under the world's gravity, and publish it into
+    /// `surface`'s patches ([`SurfacePlan::frame`]); with no area open, sink
+    /// the patches ([`SurfacePlan::retire`]).
+    pub fn terrain_surface(&mut self, surface: &SurfacePlan) -> anyhow::Result<()> {
+        let gravity = self.params.gravity_y;
+        let plan = self.terrain_plan()?;
+        let ops = if plan.areas().is_empty() {
+            surface.retire()
+        } else {
+            Some(surface.frame(plan, gravity)?)
+        };
+        if let Some(ops) = ops {
+            self.terrain_submit(&ops, "terrain surface");
+        }
+        for p in surface.patches().to_vec() {
+            let body = self.collider(p.collider).body;
+            self.mark_surface_moved(body);
         }
         Ok(())
     }

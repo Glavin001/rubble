@@ -13,7 +13,7 @@ const T = JSON.parse(TerrainStep.constants());
 
 // The decoder terrain-host.mjs uses (it imports world-host.mjs, which needs a
 // browser; keep the two in step).
-function decodeBlocks(words, at = 0) {
+function decodeBlocks(words, at = 0, kernels = KERNELS) {
   const blocks = [];
   const n = words[at++];
   for (let b = 0; b < n; b++) {
@@ -24,7 +24,7 @@ function decodeBlocks(words, at = 0) {
       writes.push({ binding: words[at], offset: words[at + 1], words: words.slice(at + 3, at + 3 + len) });
       at += 3 + len;
     }
-    for (let i = 0; i < nc; i++, at += 3) cmds.push({ op: words[at], kernel: KERNELS[words[at + 1]], value: words[at + 2] });
+    for (let i = 0; i < nc; i++, at += 3) cmds.push({ op: words[at], kernel: kernels[words[at + 1]], value: words[at + 2] });
     blocks.push({ writes, cmds });
   }
   return { blocks, end: at };
@@ -205,6 +205,37 @@ test('the render-only surface pass rebuilds the open region\'s ground and fails 
   small.impact(0, FIELD, Float32Array.of(0, 0, 0), 2, 3000, 20000, 9.81);
   assert.throws(() => small.surface(9.81), /surface max_cells/);
   small.free();
+});
+
+test('the surface pass shows every open area, each in its own view and patch', () => {
+  const p = new TerrainStep(JSON.stringify(SETTINGS));
+  p.set_surface_patches(Uint32Array.of(5, 128, 128, 6, 128, 128));
+  p.impact(0, FIELD, Float32Array.of(-125, 0, 0), 2, 3000, 20000, 9.81);
+  p.impact(0, FIELD, Float32Array.of(125, 0, 0), 2, 3000, 20000, 9.81);
+  const areas = JSON.parse(p.areas());
+  assert.equal(areas.length, 2);
+  const [block] = decodeBlocks(p.surface(9.81), 0, JSON.parse(TerrainStep.surface_kernels())).blocks;
+  const table = block.writes.find((w) => w.offset === 4 * T.SURFACE_VIEW_WORD).words;
+  const view = (s) => table.slice(s * T.SURFACE_VIEW_WORDS, (s + 1) * T.SURFACE_VIEW_WORDS);
+  for (const a of areas) {
+    const v = view(a.slot);
+    assert.equal(v[0] & T.SURFACE_VIEW_OPEN, T.SURFACE_VIEW_OPEN);
+    assert.deepEqual(Array.from(v.slice(T.SURFACE_VIEW_WINDOW, T.SURFACE_VIEW_WINDOW + 4)), a.window);
+    assert.equal(v[5], a.slot === 0 ? 5 : 6, 'its slot\'s patch');
+  }
+  assert.equal(view(2)[0], 0);
+  // Every patch is published (a slot not open sinks its own).
+  const publish = block.cmds.at(-1);
+  assert.equal(publish.kernel, "terrain_surface_publish");
+  assert.equal(publish.value, 2 * Math.ceil((128 * 128) / 4));
+  p.free();
+  // An area past the last patch fails by name.
+  const one = new TerrainStep(JSON.stringify(SETTINGS));
+  one.set_surface_patches(Uint32Array.of(5, 128, 128));
+  one.impact(0, FIELD, Float32Array.of(-125, 0, 0), 2, 3000, 20000, 9.81);
+  one.impact(0, FIELD, Float32Array.of(125, 0, 0), 2, 3000, 20000, 9.81);
+  assert.throws(() => one.surface(9.81), /surface patches/);
+  one.free();
 });
 
 test('the game profile sets its settings, and the page may override them', () => {

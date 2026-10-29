@@ -20,7 +20,8 @@ use engine_terrain::plan::{
 };
 use engine_terrain::surface::{
     SurfacePatch, SurfacePlan, DEFAULT_SURFACE_CELLS, SURFACE_BINDING, SURFACE_DEBRIS_ARGS_WORD,
-    SURFACE_HEADER_WORDS, SURFACE_KERNELS, SURFACE_VALID_WORD, SURFACE_WINDOW_WORD,
+    SURFACE_HEADER_WORDS, SURFACE_KERNELS, SURFACE_VALID_WORD, SURFACE_VIEW_OPEN,
+    SURFACE_VIEW_WINDOW, SURFACE_VIEW_WORD, SURFACE_VIEW_WORDS,
 };
 use engine_terrain::zmodel::point_source_z;
 use engine_terrain::{
@@ -343,7 +344,9 @@ impl TerrainStep {
             "PARCEL_BYTES": std::mem::size_of::<MpmParcel>(),
             "PARTICLE_DEAD": MPM_PARTICLE_DEAD,
             "SURFACE": SURFACE_BINDING, "SURFACE_HEADER_WORDS": SURFACE_HEADER_WORDS,
-            "SURFACE_VALID_WORD": SURFACE_VALID_WORD, "SURFACE_WINDOW_WORD": SURFACE_WINDOW_WORD,
+            "SURFACE_VALID_WORD": SURFACE_VALID_WORD, "SURFACE_VIEW_WORD": SURFACE_VIEW_WORD,
+            "SURFACE_VIEW_WORDS": SURFACE_VIEW_WORDS, "SURFACE_VIEW_WINDOW": SURFACE_VIEW_WINDOW,
+            "SURFACE_VIEW_OPEN": SURFACE_VIEW_OPEN, "MAX_SURFACE_VIEWS": MPM_MAX_AREAS,
             "SURFACE_DEBRIS_ARGS_WORD": SURFACE_DEBRIS_ARGS_WORD,
         })
         .to_string()
@@ -769,40 +772,46 @@ impl TerrainStep {
         alloc_bytes(self.surface.bytes()) as f64
     }
 
-    /// The pass that rebuilds the live surface of the open region from its
+    /// The pass that rebuilds the live surface of every open area from its
     /// particles under `gravity` (m/s²; one block, after the frame's
-    /// substeps; kernel indices into [`Self::surface_kernels`]), or no blocks
-    /// without a region. With several areas open it shows the first (by
-    /// slot); [`Self::surface_area`] picks one.
+    /// substeps; kernel indices into [`Self::surface_kernels`]), each in its
+    /// slot's view and patch, or no blocks without an area.
     pub fn surface(&self, gravity: f32) -> Result<Vec<u32>, JsError> {
-        match self.areas.first() {
-            None => Ok(vec![0]),
-            Some(a) => self.surface_area(a.slot, gravity),
+        if self.areas.is_empty() {
+            return Ok(vec![0]);
         }
-    }
-
-    /// [`Self::surface`] for open area `slot` (the surface is one window's).
-    pub fn surface_area(&self, slot: u32, gravity: f32) -> Result<Vec<u32>, JsError> {
         Ok(encode_in(
-            &[self
-                .surface
-                .frame_area(&self.plan, slot, gravity)
-                .map_err(err)?],
+            &[self.surface.frame(&self.plan, gravity).map_err(err)?],
             SURFACE_KERNELS,
         ))
     }
 
-    /// Publish the live surface into a static heightfield collider of
-    /// `nx × nz` samples (the field's spacing, at least two more than the
-    /// window each way) so wheel rays and contacts meet the sand while a
-    /// region is open (`SurfacePatch`).
-    pub fn set_surface_patch(&mut self, collider: u32, nx: u32, nz: u32) {
-        self.surface = self
-            .surface
-            .with_patch(Some(SurfacePatch { collider, nx, nz }));
+    /// Publish each open area's live surface into a static heightfield
+    /// collider of its own: `patches` is `[collider, nx, nz]` per area slot
+    /// (the field's spacing, at least two samples more than the window each
+    /// way), so wheel rays and contacts meet the sand (`SurfacePatch`). Give
+    /// one per `max_regions`: a frame with an area open past the last fails
+    /// naming "surface patches".
+    pub fn set_surface_patches(&mut self, patches: &[u32]) -> Result<(), JsError> {
+        if patches.len() % 3 != 0 {
+            return Err(JsError::new(
+                "surface patches are [collider, nx, nz] triples",
+            ));
+        }
+        let list = patches
+            .chunks(3)
+            .map(|p| SurfacePatch {
+                collider: p[0],
+                nx: p[1],
+                nz: p[2],
+            })
+            .collect();
+        self.surface = self.surface.clone().with_patches(list).map_err(err)?;
+        Ok(())
     }
 
-    /// After a bake: one block that sinks the patch (no blocks without one).
+    /// After the last area bakes: one block that sinks the patches (no
+    /// blocks without one).
     pub fn surface_retire(&self) -> Vec<u32> {
         match self.surface.retire() {
             Some(ops) => encode_in(&[ops], SURFACE_KERNELS),

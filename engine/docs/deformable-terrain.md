@@ -107,8 +107,9 @@ measurements behind them.
 - **Multiple impacts.** Several areas in one sparse domain: far hits open
   their own, near ones grow them, sources superpose, each area bakes on its
   own ("Multiple impacts" below).
-- **Rendering.** A render-only GPU pass rebuilds the ground over an open
-  region from its particles every frame and lists what flies as debris.
+- **Rendering.** A render-only GPU pass rebuilds the ground over every open
+  area from its particles every frame, and lists what flies as debris. A
+  patch per area keeps the wheels on the live sand.
   `showcase.html` is a 120 Hz chase-camera run past three strikes; see
   "Rendering and showcase".
 
@@ -692,8 +693,8 @@ it, and `debrisParticle(k)` for the debris list.
 - `impact.html` draws the surface by default. G or the Surface button turns
   it off. The cross-section and the cut always show the particles (the
   strata).
-- One open region per surface pass. With the multi-region engine, each
-  region needs its own window in the pass.
+- Every open area in one surface pass, each with its own view and patch
+  ("Several open areas at once").
 
 **`showcase.html`** (hub card "Meteor run"):
 - A third-person chase camera behind the dune buggy (`buggy-render.mjs`'s
@@ -842,10 +843,10 @@ one is ever open:
 - drive: windows of 25×25, then 49×25, then 61×33 samples;
 - bts: 21×25, then 29×29.
 
-Two separate open areas (far apart, both still moving) would show only the
-first; the second's window would draw as its lowered bed. That case does not
-arise here. Showing several areas needs a section of the surface buffer per
-area, and a patch for each.
+Two separate open areas (far apart, both still moving) showed only the
+first; the second's window drew as its lowered bed and its wheels' rays
+found that bed. The pass now shows every open area, each with a patch of its
+own ("Several open areas at once" below).
 
 **The walls' give on a grown window.** The per-frame shift read each edge
 column's activation range. A grown window's older edge samples have none, so
@@ -953,6 +954,105 @@ Behind the scenes, per 1/300 s frame:
 - surface 0.26 ms;
 - render of both views at 2560×720, 1.8 ms;
 - 3.8 ms per frame simulated only, 7.3 ms rendered.
+
+### Several open areas at once (2026-10-29)
+
+Two strikes far apart open two areas, both moving at once. The surface pass
+and the wheels' patch used to show only the first. Now every open area is
+drawn and drivable.
+
+**Views.** Each open area is a *view* of the surface buffer, one record per
+area slot in a table after the header (`SURFACE_VIEW_WORD`, 16 words × 16
+slots). A record holds:
+- the area's flags (open, absorbing);
+- its layers;
+- where its heights, walls' give and occupancy start in their sections;
+- its patch collider;
+- its window, bed and layer height;
+- its first thread in each per-sample dispatch.
+
+The plan lays the open areas back to back in every section.
+
+**One pass for all of them.** The plan dispatches each kernel once, over every
+view, instead of once per area.
+- The per-sample kernels (clear, the give's mean, resolve, publish) find their
+  view by scanning the table for the range that holds their thread. That is at
+  most 16 records.
+- The per-particle kernels (shift, bin, debris) take the area the particle is
+  in (`mpmAreaOf`) and splat into that view only. The bake owns material the
+  same way.
+- The splat, the give and the resolve are unchanged for each area.
+- `tsSurfaceSample`, which the debris test and the patches read, looks across
+  every open window. A patch whose ring or extent reaches another open window
+  takes that window's live heights, not its lowered bed.
+
+**Patches.** There is one patch per area slot:
+- `SurfacePlan::with_patches`;
+- `TerrainStep::set_surface_patches` in the wasm host;
+- `createTerrain(…, { patches })` in the browser.
+
+Patch k follows slot k: it sits on that area's live sand while the area is
+open, and sinks 10 km down while it is not. Every patch is written every
+frame, so a slot whose area baked sinks while the others stay open. Because
+the patch is tied to its slot, it never jumps to another area when one area
+closes, so contacts against it are not handed between areas.
+
+**Limits** (explicit, each failing by name; nothing degrades silently):
+- `surface max_cells`: window samples × layers, summed over the open areas.
+- `surface edge samples`: 6 (ni + nj) summed, against the shift section.
+- `max_columns`: the plan's own pool.
+- `surface patches`:
+  - more than 16 patches fails;
+  - with patches given, an area open in a slot that has no patch fails.
+  Give one patch per `max_regions`. `showcase.html` makes `max_regions` of
+  them.
+- `surface patch samples`: a patch smaller than its window plus a ring fails.
+
+**Hosts.**
+- `terrain-render.mjs`'s `groundHeight` looks a sample up in every open view
+  (`surfViewAt`). `surfWindow()` and `surfLayer()` give the first open view,
+  for single-area tools: the behind-the-scenes box and window lines still draw
+  the first area only.
+- `surfaceSwitchError` takes the slots that baked (`terrain.bakedSlots`), so
+  a partial bake is measured against the baked windows only.
+- Native: `WgpuSim::terrain_surface_enable` and `terrain_surface` run the
+  pass, for tests.
+- The constants come from Rust (`T.SURFACE_VIEW_*`). `SURFACE_WINDOW_WORD`,
+  `SurfacePlan::frame_area` and the wasm `surface_area` are gone. `frame` and
+  `surface` show every open area.
+
+**Checks.**
+- `engine-webgpu` `tests/terrain_surface.rs`: the crater validation's 5 mm
+  sphere at 2 km/s, at x = ±0.9 m (transient radius 0.147 m, 0.018 m layers).
+  The two impacts open two separate areas, with two patches.
+
+  | Check | Result |
+  |---|---|
+  | Each window right after activation, against the flat ground | 1.8e-8 m |
+  | Each window after 40 frames and landing | craters 0.0505 m deep, equal to 1e-4 |
+  | Each patch, against its window's surface plus the field's ring | 0 (bit-equal) |
+  | The field between the two windows | the flat ground, unchanged |
+  | Area 0 bakes, then the pass runs again | its view closes, patch 0 sinks, area 1's surface and patch unchanged (bit-equal) |
+  | Each window's last live surface, against its bake (worst sample) | 1.3e-3 and 1.5e-3 m (7–8% of a layer: the residual motion, as for one area) |
+  | Both areas baked | every view closed, both patches sunk |
+
+- `engine-terrain` `surface` tests:
+  - the views' sections and dispatch ranges are laid back to back;
+  - `max_cells` is summed over the areas;
+  - each slot's patch and publish range;
+  - "surface patches" fails by name.
+- `tests/terrain_plan.test.mjs`: through the wasm, two far impacts give two
+  open views with their windows and patches. One patch for two areas fails
+  by name.
+- `showcase.html?scene=drive&t3=2.2&pass3=19.6`: the third strike lands at
+  the far turn while the first crater still moves, so two areas are open at
+  t = 3.7–4.5 s (windows 25 × 25 at i0 = 58 and 94). Both craters draw live,
+  from their own views. The two windows' surfaces:
+  - first: −12.95 to 4.56 m;
+  - second: −13.59 to 2.99 m.
+
+  At 4.5 s the second strike lands between them and grows one area over
+  both. `impact.html` (one area) is unchanged.
 
 ## The splat bake (2026-10-25)
 
@@ -2332,10 +2432,9 @@ set (`TerrainPlan::event_cell`).
   airborne, so only forced closes can lose it: open point.
 
 **Merged with the performance and rendering work (80f16fbd).** The surface
-pass (`terrain_surface.slang`, render-only) shows one area's window: header
-word 7 names its slot (`SurfacePlan::frame_area`, the wasm `surface_area`;
-`frame` and `surface` take the first open area). It bins only that area's
-particles. For a grown area's older edge columns its walls' give is taken as
+pass (`terrain_surface.slang`, render-only) showed one area's window: header
+word 7 named its slot (since replaced by one view per open area; "Several
+open areas at once"). It binned only that area's particles. For a grown area's older edge columns its walls' give is taken as
 zero (it reads the last activation's slot ranges). The host turns the surface
 off when the last area bakes. `showcase.html` and `impact.html` treat a kind-3
 frame as coupled.

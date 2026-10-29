@@ -14,9 +14,10 @@
 //   world.encodeStep(enc); …; device.queue.submit([enc.finish()]); terrain.afterSubmit();
 //
 // With { surface: true } each coupled frame also rebuilds the live ground over
-// the open region from its particles (engine_terrain::surface, render only)
+// every open area from its particles (engine_terrain::surface, render only)
 // into terrain.surfaceBuffer (binding T.SURFACE): the heights a renderer draws
-// over the window, and the line above which material is drawn as debris.
+// over each window, and the line above which material is drawn as debris.
+// With { patches } it also keeps each open area's patch on its sand.
 import { buildKernels } from './world-host.mjs';
 import { wasm } from './vehicle.mjs';
 
@@ -57,13 +58,16 @@ export function decodeBlocks(words, at = 0) {
  * Terrain for `world` (world-host.mjs). `settings`: TerrainStep JSON (config,
  * sand, region_margin, z, speed_headroom, settle_speed, settle_frames).
  */
-export async function createTerrain(world, settings = {}, { wgslBase = './generated/wgsl/', status = () => {}, surface = false, patch = null } = {}) {
+export async function createTerrain(world, settings = {}, { wgslBase = './generated/wgsl/', status = () => {}, surface = false, patch = null, patches = null } = {}) {
   const device = world.device;
-  // patch: { collider, nx, nz }, a static heightfield the surface pass keeps
-  // on the live sand (wheel rays and contacts meet it; engine_terrain::surface).
+  // patches: [{ collider, nx, nz }] per area slot, static heightfields the
+  // surface pass keeps on each open area's live sand (wheel rays and
+  // contacts meet it; engine_terrain::surface). Give one per max_regions.
+  // patch: one, for slot 0.
+  patches = patches || (patch ? [patch] : []);
   const newPlan = () => {
     const p = new TerrainStep(JSON.stringify(settings));
-    if (patch) p.set_surface_patch(patch.collider, patch.nx, patch.nz);
+    if (patches.length) p.set_surface_patches(Uint32Array.from(patches.flatMap((q) => [q.collider, q.nx, q.nz])));
     return p;
   };
   let plan = newPlan();
@@ -169,16 +173,20 @@ export async function createTerrain(world, settings = {}, { wgslBase = './genera
   terrain.openBox = (collider, field, lo, hi, dx) =>
     opened(collider, plan.open_box(collider, fieldWords(field), Float32Array.from(lo), Float32Array.from(hi), dx));
   // The heightfield is the ground again: the surface's valid word off, and
-  // the patch (if any) sunk out of reach.
+  // the patches (if any) sunk out of reach.
   const surfaceOff = () => {
     if (!surface) return;
     device.queue.writeBuffer(bufs[T.SURFACE], 4 * T.SURFACE_VALID_WORD, new Uint32Array(1));
-    if (patch) { submitBlocks(plan.surface_retire(), 0, surfacePipes); surfaceMoved(patch.collider); }
+    if (patches.length) { submitBlocks(plan.surface_retire(), 0, surfacePipes); patches.forEach((q) => surfaceMoved(q.collider)); }
   };
   const baked = () => {
     surfaceMoved(terrain.collider);
+    const before = terrain.areas.map((a) => a.slot);
     refresh();
-    // The surface shows the first open area: off once none is left.
+    /** The area slots the last bake closed (surfaceSwitchError's `slots`). */
+    terrain.bakedSlots = before.filter((s) => !terrain.areas.some((a) => a.slot === s));
+    // The surface shows every open area: off once none is left (the next
+    // surface pass sinks a baked area's patch while others stay open).
     if (!terrain.areas.length) surfaceOff();
     terrain.onBake?.();
   };
@@ -222,7 +230,7 @@ export async function createTerrain(world, settings = {}, { wgslBase = './genera
     }
     return kind;
   };
-  /** The surface pass for the open region as it is now, into `enc` (encodeFrame
+  /** The surface pass for the open areas as they are now, into `enc` (encodeFrame
    * runs it after each coupled frame; call it yourself to rebuild it at other times). */
   terrain.encodeSurface = (enc, { timestampWrites } = {}) => {
     if (!surface) throw new Error('createTerrain(…, { surface: true }) builds the surface pass');
@@ -231,8 +239,8 @@ export async function createTerrain(world, settings = {}, { wgslBase = './genera
     const [block] = decodeBlocks(words);
     block.writes.forEach(write);
     pass(enc, block, timestampWrites, surfacePipes, 'terrain surface');
-    // The patch's surface moved under its contacts.
-    if (patch) surfaceMoved(patch.collider);
+    // The patches' surfaces moved under their contacts.
+    patches.forEach((q) => surfaceMoved(q.collider));
     return true;
   };
   // After the frame's submission: map its counters; reports arrive in order.

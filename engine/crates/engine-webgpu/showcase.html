@@ -161,19 +161,26 @@
     let heights = initialHeights.slice();
     const field = { nx: NX, nz: NZ, dx: SP, dz: SP, origin: [0, 0, 0] };
     const arena0 = heightFieldArena(NX, NZ, SP, SP, initialHeights);
-    // The surface patch (engine_terrain::surface::SurfacePatch): a second
-    // heightfield the surface pass keeps on the live sand over an open window,
-    // so the wheels' rays meet the sand, not the lowered bed under it. Out of
-    // reach (10 km down) while no region is open. Overlapping strikes grow one
-    // area to cover them both (49 × 25 samples for the drive scene's first
-    // two), so the patch takes the grown window plus its ring.
+    // The surface patches (engine_terrain::surface::SurfacePatch): one more
+    // heightfield per area slot (max_regions of them), which the surface pass
+    // keeps on that area's live sand over its open window, so the wheels'
+    // rays meet the sand, not the lowered bed under it. Out of reach (10 km
+    // down) while its area is not open. Overlapping strikes grow one area to
+    // cover them both (49 × 25 samples for the drive scene's first two), so a
+    // patch takes the grown window plus its ring.
+    const REGIONS = (() => {
+      const p = new TerrainStep(JSON.stringify(TERRAIN.settings));
+      try { return JSON.parse(p.settings()).config.max_regions; } finally { p.free(); }
+    })();
     const PN = num('patch', 72);
     const patchArena = heightFieldArena(PN, PN, SP, SP, new Float32Array(PN * PN).fill(-1e4));
-    const PATCH_BASE = arena0.records.length / 4 + patchArena.base;
-    const patchParams = [bitsf((fbits(patchArena.params[0]) & ~0x1FFFFFFF) | PATCH_BASE), ...patchArena.params.slice(1)];
-    const ALL_RECORDS = new Uint32Array(arena0.records.length + patchArena.records.length);
+    const ALL_RECORDS = new Uint32Array(arena0.records.length + REGIONS * patchArena.records.length);
     ALL_RECORDS.set(arena0.records, 0);
-    ALL_RECORDS.set(patchArena.records, arena0.records.length);
+    const patchParams = Array.from({ length: REGIONS }, (_, k) => {
+      const at = arena0.records.length + k * patchArena.records.length;
+      ALL_RECORDS.set(patchArena.records, at);
+      return [bitsf((fbits(patchArena.params[0]) & ~0x1FFFFFFF) | (at / 4 + patchArena.base)), ...patchArena.params.slice(1)];
+    });
     const groundAt = (x, z) => {
       const fx = Math.min(Math.max((x - X0) / SP, 0), NX - 1.001), fz = Math.min(Math.max((z - Z0) / SP, 0), NZ - 1.001);
       const i = Math.floor(fx), j = Math.floor(fz), u = fx - i, v = fz - j;
@@ -195,12 +202,11 @@
     world.setHullRecords(ALL_RECORDS);
     const GROUND = world.addCollider({ body: groundBody, shape: 5, material: 0, params: arena0.params });
     const HF_BASE = arena0.base;
-    const patchBody = world.addBody({ p: [0, 0, 0], flags: 0 });
-    const PATCH = world.addCollider({ body: patchBody, shape: 5, material: 0, params: patchParams });
+    const PATCHES = patchParams.map((params) => world.addCollider({ body: world.addBody({ p: [0, 0, 0], flags: 0 }), shape: 5, material: 0, params }));
 
     statusEl.textContent = 'building terrain kernels…';
     const terrain = await createTerrain(world, TERRAIN.settings, { status: (s) => { statusEl.textContent = s; }, surface: true,
-      patch: { collider: PATCH, nx: PN, nz: PN } });
+      patches: PATCHES.map((collider) => ({ collider, nx: PN, nz: PN })) });
     const maxParticles = terrain.settings.config.max_particles, maxParcels = terrain.settings.config.max_parcels;
     // A second strike while a region is open: the engine's multi-region API
     // when it is there (max_regions > 1); until then each region bakes first.
@@ -978,7 +984,7 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       return [sx + u[0] * f, u[1] * f];
     }
     // The live surface's height at (x, z) (nearest sample), or null outside
-    // the area the surface shows.
+    // every open area's window.
     async function liveHeightAt(x, z) {
       const read = async (offset, bytes) => {
         const rb = device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
@@ -987,12 +993,18 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
         const out = rb.getMappedRange().slice(0); rb.unmap(); rb.destroy();
         return out;
       };
-      const head = new Uint32Array(await read(0, 4 * T.SURFACE_HEADER_WORDS));
+      const head = new Uint32Array(await read(0, 4 * (T.SURFACE_VIEW_WORD + T.SURFACE_VIEW_WORDS * T.MAX_SURFACE_VIEWS)));
       if (head[T.SURFACE_VALID_WORD] !== 1) return null;
-      const [i0, j0, ni, nj] = head.slice(T.SURFACE_WINDOW_WORD, T.SURFACE_WINDOW_WORD + 4);
-      const ti = Math.round((x - X0) / SP) - i0, tj = Math.round((z - Z0) / SP) - j0;
-      if (ti < 0 || tj < 0 || ti >= ni || tj >= nj) return null;
-      return new Float32Array(await read(4 * (T.SURFACE_HEADER_WORDS + tj * ni + ti), 4))[0];
+      for (let s = 0; s < T.MAX_SURFACE_VIEWS; s++) {
+        const v = head.subarray(T.SURFACE_VIEW_WORD + s * T.SURFACE_VIEW_WORDS, T.SURFACE_VIEW_WORD + (s + 1) * T.SURFACE_VIEW_WORDS);
+        if (!(v[0] & T.SURFACE_VIEW_OPEN)) continue;
+        const [i0, j0, ni, nj] = v.subarray(T.SURFACE_VIEW_WINDOW, T.SURFACE_VIEW_WINDOW + 4);
+        const ti = Math.round((x - X0) / SP) - i0, tj = Math.round((z - Z0) / SP) - j0;
+        if (ti < 0 || tj < 0 || ti >= ni || tj >= nj) continue;
+        // v[2]: the view's heights' first word.
+        return new Float32Array(await read(4 * (v[2] + tj * ni + ti), 4))[0];
+      }
+      return null;
     }
     function schedule() {
       for (const s of SCHEDULE) {
@@ -1046,7 +1058,7 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       const rec = { t: +st.t.toFixed(3), kind: st.closing || 'settled' };
       st.closing = null;
       st.switches.push(rec);
-      st.pendingBake = Promise.all([readHeights(), surfaceSwitchError(device, terrain.surfaceBuffer, world.bufs[18], HF_BASE, NX).then((e) => {
+      st.pendingBake = Promise.all([readHeights(), surfaceSwitchError(device, terrain.surfaceBuffer, world.bufs[18], HF_BASE, NX, terrain.bakedSlots).then((e) => {
         rec.error = { rms: +e.rms.toFixed(3), mean: +e.mean.toFixed(3), worst: +e.worst.toFixed(3) };
       })]).catch(fail);
     };
