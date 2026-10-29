@@ -834,6 +834,58 @@ machine; the 1080p recording ran 7× slower than earlier ones.
 | `drive`, 1/120 s, no region | — | — | — | 3.7 ms |
 | `bts`, 1/300 s, region open, both views at 2560×720 | 0.72 ms, 1 substep | 0.33 ms | 2.1 ms | 7.7 ms simulated only, 10.2 ms rendered |
 
+### With overlapping strikes (multi-hit)
+
+The surface pass shows one area: the first open one, set by the plan's area
+slot. In both showcase scenes every later strike grows that area, so only
+one is ever open:
+- drive: windows of 25×25, then 49×25, then 61×33 samples;
+- bts: 21×25, then 29×29.
+
+Two separate open areas (far apart, both still moving) would show only the
+first; the second's window would draw as its lowered bed. That case does not
+arise here. Showing several areas needs a section of the surface buffer per
+area, and a patch for each.
+
+**The walls' give on a grown window.** The per-frame shift read each edge
+column's activation range. A grown window's older edge samples have none, so
+their give read as zero, and material against the walls folded onto the last
+row: a straight ridge a sample wide, 1.3 m on the drive scene's grown window.
+- `terrain_surface_shift` now adds every particle made at an edge column (by
+  its home) into that edge's accumulators, in fixed point.
+  `terrain_surface_shift_mean` divides.
+- The edge rows now fall off smoothly (0.41 then 0.20 m, where the last row
+  had been 1.56 m).
+
+**Open, in the bake (growth).** A grown area keeps a ridge on the ring of
+samples just outside the first window: about 2.3 m on the bts scene's first
+window ring, at j = 65 and i = 83.
+- It is in the baked heightfield too (2.69 m baked against 2.67 m live), and
+  the particles' tops there are smooth.
+- The cause: the first area's edge columns gave outward by about 0.15 m,
+  their particles carrying that as displacement from home. The grown area
+  then activated the ring's full columns over the same ground. The column
+  just outside holds about 270 quanta (5%) more than its own particles.
+- So the volume the walls pushed into the ground is counted twice. It is a
+  growth-activation matter, not the surface pass's.
+
+**A strike on a moving rim** takes the live surface's height there, read back
+0.25 s before contact: 3.58 m against the heightfield's 0.
+
+Frame cost with overlapping strikes, drive scene, 1/120 s, 1280×720,
+rendering every frame:
+- whole frame (wall) 6.4 ms median, p95 7.2;
+- terrain 1.44 ms, surface 0.39 ms, render 0.98 ms.
+
+The 1080p recording (rendering every other frame): 6.2 ms median, p95 8.3;
+107 of 2,580 frames over 8.33 ms.
+
+Behind the scenes, per 1/300 s frame:
+- terrain 0.59 ms, 1 substep;
+- surface 0.26 ms;
+- render of both views at 2560×720, 1.8 ms;
+- 3.8 ms per frame simulated only, 7.3 ms rendered.
+
 ## The splat bake (2026-10-25)
 
 The user approved a bilinear splat for the bake and the parcels' deposits.
