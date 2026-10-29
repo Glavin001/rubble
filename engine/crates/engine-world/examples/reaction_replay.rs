@@ -7,14 +7,15 @@
 //! ```sh
 //! cd engine
 //! cargo run --release -p engine-world --example reaction_replay -- building-blast \
-//!   [--seconds 6] [--tnt 25] [--crush conserve|remove|off] [--support-loss on|off] \
+//!   [--seconds 6] [--tnt 20] [--crush conserve|remove|off] [--support-loss on|off] \
 //!   [--factor 1.0] [--blast-loading on|off] [--out replay.json]
 //! cargo run --release -p engine-world --example reaction_replay -- --list
 //! ```
 //!
 //! Scenarios (each a reusable recipe; flags override its switches):
-//! - `building-blast`: reference-building-crush, a charge on the ground floor at the bay's
-//!   centre; blast loading, crushing (`Conserve`) and support loss on.
+//! - `building-blast`: reference-building-crush, 20 kg of TNT (`--tnt`) 0.30 m outside the
+//!   ground-floor drywall infill at (-0.9, 2.1, -2.36), at 2 s; blast loading, crushing
+//!   (`Conserve`) and support loss on.
 //! - `slab-columns`: a 100 t slab on four columns, one shot away (tests/support_loss.rs);
 //!   support loss on (`--support-loss off` for the comparison).
 //! - `block-columns`: a 40 t block on three columns, the outer one shot away: it tips.
@@ -99,13 +100,14 @@ fn scenario(name: &str, tnt: f32) -> anyhow::Result<Scenario> {
         "building-blast" => {
             let bytes = reactions::pack_bytes("reference-building-crush")?;
             let asset = DestructibleAssetDesc::from_pack(bytes)?;
-            // The ground floor runs from the footings' tops (0.6 m) to the first slab
-            // (2.1 m); the charge sits 1 m up at the 2x2 bay's centre.
-            let at = [0.0, 1.0, 0.0];
+            // engine/docs/destruction-reactions.md "The tall building partially destroyed"
+            // (tests/reactions.rs CHARGE): 0.30 m outside the ground-floor drywall infill on
+            // the -z wall, at 2 s. From inside the infill is in tension: no blast crush.
+            let at = [-0.9, 2.1, -2.36];
             let dt = dt_of(&asset);
             Scenario {
                 name: name.into(),
-                title: format!("Reference building: {tnt} kg TNT on the ground floor"),
+                title: format!("Reference building: {tnt} kg TNT outside the ground-floor infill"),
                 asset,
                 seconds: 6.0,
                 blast_loading: true,
@@ -114,17 +116,18 @@ fn scenario(name: &str, tnt: f32) -> anyhow::Result<Scenario> {
                 crush: Some(Crush::default()),
                 shots: Vec::new(),
                 blasts: vec![(
-                    (1.0 / dt).round() as u32,
+                    (2.0 / dt).round() as u32,
                     BlastDef {
                         position: at,
                         tnt_kg: tnt,
                         radial: None,
                     },
                 )],
-                camera: ([16.0, 8.0, 18.0], [0.0, 4.4, 0.0]),
+                // From the charge's side (-z), above and to the left.
+                camera: ([-11.0, 7.0, -15.0], [0.0, 3.6, 0.0]),
                 notes: vec![
                     "Blast loading, crushing (Conserve) and support loss on.".into(),
-                    "Blast crushes need a charge at a crushable face: from inside, the drywall infill is in tension (tests/reactions.rs CHARGE).".into(),
+                    "The charge is outside the infill: from inside it is in tension and does not crush (tests/reactions.rs CHARGE).".into(),
                 ],
             }
         }
@@ -565,7 +568,7 @@ fn run(s: &Scenario) -> anyhow::Result<Value> {
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let mut name = None;
-    let (mut seconds, mut tnt, mut out) = (None, 25.0f32, None);
+    let (mut seconds, mut tnt, mut out) = (None, 20.0f32, None);
     let (mut crush, mut support, mut blast, mut factor) = (None, None, None, None);
     let on = |v: Option<String>| -> anyhow::Result<bool> {
         match v.as_deref() {

@@ -5,7 +5,7 @@
 #
 #   bash engine/tools/reaction-replay/record-all.sh [OUT_DIR] [scenario ...]
 #
-# Scenarios default to all of: building-blast-25 building-blast-60 slab-columns-on
+# Scenarios default to all of: building-blast-20 building-blast-60 slab-columns-on
 # slab-columns-off block-columns-on block-columns-off crush-wall-conserve.
 # One GPU job at a time: the simulations run first, then the recordings.
 set -euo pipefail
@@ -13,7 +13,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ENGINE="$(cd "$HERE/../.." && pwd)"
 OUT="${1:-${TMPDIR:-/tmp}/rubble-reactions}"
 shift || true
-ALL=(building-blast-25 building-blast-60 slab-columns-on slab-columns-off block-columns-on block-columns-off crush-wall-conserve)
+ALL=(building-blast-20 building-blast-60 slab-columns-on slab-columns-off block-columns-on block-columns-off crush-wall-conserve)
 RUNS=("${@:-${ALL[@]}}")
 mkdir -p "$OUT/json"
 (cd "$ENGINE" && cargo build --release -p engine-world --example reaction_replay)

@@ -523,5 +523,7 @@ on the whole demand 66.4 kN and 96.4 kN (high). The factor is not tuned to these
 - `World` only (blast loading, support loss, `Conserve` fragments): `cargo run --release -p
   engine-world --example reaction_replay -- <scenario>` dumps poses, shapes and events to
   JSON; `engine/tools/reaction-replay/` plays it in three.js and records it.
-  `bash engine/tools/reaction-replay/record-all.sh OUT_DIR` runs every scenario. Support-loss
+  `bash engine/tools/reaction-replay/record-all.sh OUT_DIR` runs every scenario
+  (`building-blast` is the tall building's charge above: 20 kg, `--tnt` to change it, outside
+  the ground-floor infill at 2 s, with crushing, support loss and blast loading on). Support-loss
   breaks are told apart with `World::destructible_support_loss_breaks`.
