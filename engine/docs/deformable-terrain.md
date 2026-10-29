@@ -137,7 +137,8 @@ uses by default ("Performance").
 - demo-scale settling;
 - the crater against π-scaling in radius (1.25 R), shape (d/D 0.17) and the
   volume ledger;
-- no axis ridge or window-edge ridge.
+- no axis ridge or window-edge ridge;
+- the volume ledger through forced closes with ejecta in flight.
 
 **Open:**
 - **Crater volume.** About 3.1× π-scaling's. The excess follows the source
@@ -2527,9 +2528,9 @@ set (`TerrainPlan::event_cell`).
 - `terrain_mpm_fast.slang`'s two-pass P2G takes each block's area frame.
 - `engine-metal` gains `terrain_open_area`, `terrain_bake_area` and
   `terrain_apply_source_to`.
-- A parcel still in flight when the last area is closed by force keeps a
-  source slot past the emptied pool. The World bakes only with nothing
-  airborne, so only forced closes can lose it: open point.
+- A parcel still in flight when the last area is closed by force kept a
+  source slot past the emptied pool, and was lost. Fixed since: such a close
+  lands it ("Forced closes" below).
 
 **Merged with the performance and rendering work (80f16fbd).** The surface
 pass (`terrain_surface.slang`, render-only) showed one area's window: header
@@ -2640,6 +2641,46 @@ step of the frame the field starts in. That bears on the open volume excess
   - `areas()`, `close_area(slot)` and `close()`.
 - C: `rbTerrain_Impact` as before, any number of times; `rbTerrain_AreaCount`;
   `RbTerrainDef.max_regions`, `cell_size`, `min_resolution`.
+
+### Forced closes (2026-10-29)
+
+The World bakes an area by itself only once it has settled with nothing in
+flight. A host can still close areas early: `World::terrain_close` and
+`terrain_close_area`, `TerrainStep.close()` and `close_area(slot)` in the
+browser, the C close, or `WgpuSim`/`MetalSim::terrain_bake`. The ledger stays
+exact through every such close.
+
+| Close | What happens to parcels in flight |
+|---|---|
+| One area of several (`bake_area` while others stay open) | They keep flying with the open areas' substeps. Each lands on the heightfield, or back in an open area as a particle in the dead slot of the particle it left. The pool keeps every slot while an area is open, so no one else takes that slot. Unchanged. |
+| The last area (`bake`, or `bake_area` on the only one) | Before: no frame runs once no area is open, so they hung in the air. The next fresh domain reset the parcel counters and dropped their quanta. Their source slots also pointed into an emptied pool that the next activation refills. Now: in the bake's pass, after the window is raised, `mpm_parcels_land` flies each one on to where it lands, all in that pass. |
+
+**How `mpm_parcels_land` flies them:**
+- Each parcel is flown exactly as `mpm_parcels` would: symplectic Euler substeps at the last frame's dt and gravity.
+- It lands on the baked ground, with `mpmParcelDeposit` and the same seed.
+- It escapes when it crosses the field's edge.
+- No area is left to take it back, so it never re-enters as a particle.
+- A parcel rising with no gravity to bring it back escapes, since it never lands.
+- The flight runs at most 2²² substeps, far past any flight under the CFL bound. A parcel still up after that stays counted airborne, though none can be under gravity.
+- The open checked the field against `max_field_samples`, so every share has its deposit slot.
+
+**A forced close ends the flight now.** The quanta land where the parcels would have come down with no area open, and in the same frame as the close. Their deposits are on the field before the pool empties, so a domain opened afresh starts with nothing of the old one in flight.
+
+**Other paths checked:**
+- Every other way material leaves the pool or the ledger is already exact, or fails by name:
+  - a particle leaving its box with no parcel slot raises `max_parcels`;
+  - with `max_parcels` 0, a particle outside every area raises `MPM_OUTSIDE`, and the last bake still takes it;
+  - a deposit with no slot raises `max_field_samples` and stays in flight.
+- `TerrainPlan::load` replaces the domain on purpose: it is for host-loaded test material and drops what was there. It is not a close.
+- Parcel slots are not reused within a domain. A domain that throws more than `max_parcels` over its life fails by name even if most of them have landed.
+
+**Validation** (`engine-webgpu` `tests/terrain_multi.rs`, the scene above). The area's material is thrown up at 4 m/s and out at 1 m/s, as a blast would; this impact's own ejecta stay inside its box.
+
+| Case | Result |
+|---|---|
+| The only area closed 3 frames (0.05 s) into the flight | 27,181 parcels (1,739,584 quanta) in flight land in the close's pass. Nothing airborne after it; 82,806 quanta escaped off the field. Ledger (field + live + escaped) exactly 0 quanta. Without the landing pass, all 27,181 stay in flight and the test fails. |
+| A second impact in the fresh domain afterwards, settled and baked | Ledger over both domains exactly 0. |
+| One of two areas closed mid-flight (27,138 parcels in flight); the other steps on, lands them, settles and bakes | Ledger exactly 0. |
 
 ## Validation targets
 

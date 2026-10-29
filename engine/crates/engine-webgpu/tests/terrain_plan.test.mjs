@@ -37,6 +37,9 @@ const FIELD = Float32Array.of(193, 193, 1.5, 1.5, 0, 0, 0);
 const BAKE = ['mpm_write_args', 'mpm_bake_edge_clear', 'mpm_bake_edge_count', 'mpm_bake_edge_scan',
   'mpm_bake_edge_scatter', 'mpm_bake_edge_sort', 'mpm_bake_shift', 'mpm_write_args', 'mpm_bake_bin',
   'mpm_bake_raise', 'mpm_bake_header', 'mpm_deposit_raise', 'mpm_deposit_header'];
+// The last area's bake also lands any parcels still in flight before the pool
+// empties (a forced close; settling waits for them).
+const LAST_BAKE = [...BAKE.slice(0, -2), 'mpm_parcels_land', ...BAKE.slice(-2)];
 const counters = (o = {}) => {
   const c = new Uint32Array(T.COUNTER_WORDS);
   const f = new Float32Array(c.buffer);
@@ -86,7 +89,7 @@ test('an impact opens a region (activation, then source) and runs coupled frames
   // Two quiet frames: the next frame bakes (kind 2) and the region closes.
   const bake = p.frame(1 / 60, -9.81, 1);
   assert.equal(bake[0], 2);
-  assert.deepEqual(decodeBlocks(bake, 2).blocks[0].cmds.map((c) => c.kernel), BAKE);
+  assert.deepEqual(decodeBlocks(bake, 2).blocks[0].cmds.map((c) => c.kernel), LAST_BAKE);
   assert.equal(p.region(), 'null');
   assert.equal(p.frame(1 / 60, -9.81, 1)[0], 0);
   p.free();

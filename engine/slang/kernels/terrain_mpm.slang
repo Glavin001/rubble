@@ -2825,6 +2825,64 @@ void mpm_parcels(uint3 tid : SV_DispatchThreadID)
     gMpmParcels[2u * k + 1u] = float4(vm.xyz, landed ? 0.0 : vm.w);
 }
 
+// Flights a forced close lands at most (substeps of the last frame's dt): far
+// past any ballistic flight under the CFL bound; one not down by then stays
+// in flight, counted airborne.
+static const uint MPM_LAND_STEPS = 1u << 22;
+
+// When the bake closing the last area runs with parcels still in flight (a
+// forced close: the World bakes on its own only with nothing airborne): each
+// flies on as mpm_parcels would fly it, substep by substep at the last
+// frame's dt, until it lands, all in this one pass. No area is left to take it
+// back, so it lands on the heightfield (mpmParcelDeposit, the same seed), or
+// escapes off its footprint; one rising with no gravity to bring it back never
+// lands and escapes. Its quanta are on the field when the pool empties, so a
+// domain opened afresh starts with nothing of the old one in flight.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_parcels_land(uint3 tid : SV_DispatchThreadID)
+{
+    uint k = mpmIndex(tid);
+    MpmParams p = mpmParams();
+    if (k >= ALOAD(gMpmCounters[MPM_C_FLYING])) return;
+    float4 xq = gMpmParcels[2u * k], vm = gMpmParcels[2u * k + 1u];
+    if (vm.w <= 0.0) return;
+    if (p.dims.w == MPM_NO_BLOCK) return;
+    Collider col = gColliders[p.dims.w];
+    Frame f = colliderFrame(col, gBodies[col.body]);
+    HeightFieldRef hf = heightFieldOf(col);
+    uint quanta = asuint(xq.w);
+    uint source = asuint(gMpmParcels[2u * asuint(p.couple.z) + k].x);
+    float dt = p.step.x, g = p.step.y;
+    bool landed = false;
+    if (!(dt > 0.0) || (!(g < 0.0) && vm.y >= 0.0))
+    {
+        AADD2(gMpmCounters[MPM_C_ESCAPED], quanta);
+        landed = true;
+    }
+    for (uint n = 0u; n < MPM_LAND_STEPS && !landed; n++)
+    {
+        vm.y += dt * g;
+        xq.xyz += dt * vm.xyz;
+        float3 xl = frameToLocal(f, xq.xyz);
+        float h; float3 nrm;
+        if (!hfSurface(hf, xl.x, xl.z, h, nrm))
+        {
+            AADD2(gMpmCounters[MPM_C_ESCAPED], quanta);
+            landed = true;
+        }
+        else if (xl.y <= h)
+        {
+            landed = mpmParcelDeposit(xl, quanta, ~source, p, hf);
+            // No deposit slot (MPM_OVERFLOW_FIELD raised): it stays in flight.
+            if (!landed) break;
+        }
+    }
+    if (!landed) AADD2(gMpmCounters[MPM_C_AIRBORNE], 1u);
+    gMpmParcels[2u * k] = xq;
+    gMpmParcels[2u * k + 1u] = float4(vm.xyz, landed ? 0.0 : vm.w);
+}
+
 // Once per frame, per heightfield record: the quanta deposited on its samples,
 // as height, and the field's max height raised over them.
 [shader("compute")]

@@ -137,6 +137,12 @@ impl Scene {
     /// An impact at `at` (on the surface): its region on the open grid, then
     /// its source in the area that covers it. Returns that area.
     fn impact(&mut self, at: Vec3) -> engine_terrain::plan::Opened {
+        self.impact_in(at, 0.6)
+    }
+
+    /// [`Self::impact`] in a region `margin` transient radii past the
+    /// crater's (a tight one throws ejecta past its box as parcels).
+    fn impact_in(&mut self, at: Vec3, margin: f64) -> engine_terrain::plan::Opened {
         let dx = self
             .s
             .terrain_plan_ref()
@@ -145,7 +151,7 @@ impl Scene {
             .unwrap();
         let plan = self
             .crater
-            .region_with_cell(&self.cfg, at, 0.6, dx)
+            .region_with_cell(&self.cfg, at, margin, dx)
             .unwrap();
         let opened = self
             .s
@@ -528,4 +534,130 @@ fn simultaneous_far_hits_and_a_hit_on_baked_ground() {
     let (v2, d2) = crater_stats(&sc, &h2, p1, 0.6);
     eprintln!("baked ground hit again: cavity {v1:.4e} → {v2:.4e} m³, deepest {d1:.4} → {d2:.4} m");
     assert!(v2 > v1 && d2 < d1);
+}
+
+/// The domain's escaped quanta and parcels still in flight, from its counters
+/// (read after a bake, which no step report follows).
+fn counters(sc: &Scene) -> (u32, u32) {
+    use engine_terrain::layout::{MPM_COUNTERS_BINDING, MPM_C_AIRBORNE, MPM_C_ESCAPED};
+    let c = sc.s.read_words(MPM_COUNTERS_BINDING, 0, MPM_C_AIRBORNE + 1);
+    (c[MPM_C_ESCAPED], c[MPM_C_AIRBORNE])
+}
+
+/// Parcels still in flight and the quanta they carry.
+fn in_flight(sc: &Scene) -> (usize, u64) {
+    let ps: Vec<_> =
+        sc.s.terrain_parcels()
+            .into_iter()
+            .filter(|p| p.vm[3] > 0.0)
+            .collect();
+    (
+        ps.len(),
+        ps.iter().map(|p| u64::from(p.xq[3].to_bits())).sum(),
+    )
+}
+
+/// The material of the area around `at` (within 0.6 m in x) thrown up at
+/// 4 m/s and out from `at` at 1 m/s, as a blast would (this impact's own
+/// ejecta stay inside its box): it leaves the area's box and flies as parcels
+/// for most of a second.
+fn throw(sc: &mut Scene, at: Vec3) {
+    let mut ps = sc.s.terrain_particles();
+    let mut n = 0;
+    for p in &mut ps {
+        let x = Vec3::from_slice(&p.xm[..3]);
+        if (x.x - at.x).abs() < 0.6 {
+            let out = Vec3::new(x.x - at.x, 0.0, x.z - at.z).normalize_or_zero() * 1.0;
+            p.vj = [out.x, 4.0, out.z, p.vj[3]];
+            n += 1;
+        }
+    }
+    assert!(n > 0, "material to throw at {at}");
+    sc.s.terrain_overwrite_particles(&ps).unwrap();
+    sc.speed = sc.speed.max(6.0);
+}
+
+/// Frames after an impact until ejecta are in flight (at most `cap`).
+fn until_airborne(sc: &mut Scene, cap: u32) {
+    for _ in 0..cap {
+        sc.frames(1);
+        if sc.airborne > 0 {
+            return;
+        }
+    }
+    panic!("no parcels in flight after {cap} frames");
+}
+
+#[test]
+fn a_forced_close_lands_the_parcels_still_in_flight() {
+    let mut sc = Scene::new();
+    sc.impact(Vec3::new(-0.9, 0.0, 0.0));
+    throw(&mut sc, Vec3::new(-0.9, 0.0, 0.0));
+    until_airborne(&mut sc, 30);
+    sc.frames(2);
+    let (n, quanta) = in_flight(&sc);
+    assert!(n > 0, "parcels in flight at the close");
+    // Before the close: the field, the live and the escaped, with what flies.
+    let (q, area) = sc.quantum();
+    let before = sc.heights();
+    assert_eq!(
+        sc.ledger(&before, q, area) + quanta as i64,
+        0,
+        "ledger in flight"
+    );
+    // Closed by force mid-flight: everything bakes, and what flies lands.
+    sc.s.terrain_bake().unwrap();
+    assert!(sc.s.terrain_areas().is_empty());
+    let (escaped, airborne) = counters(&sc);
+    assert_eq!(airborne, 0, "nothing left in flight");
+    assert_eq!(in_flight(&sc).0, 0);
+    sc.escaped = escaped;
+    let h = sc.heights();
+    assert_eq!(sc.ledger(&h, q, area), 0, "the forced close's ledger");
+    eprintln!(
+        "forced close: {n} parcels ({quanta} quanta) in flight landed; escaped {escaped} quanta"
+    );
+
+    // A fresh domain afterwards: nothing of the old one flies into it (the
+    // parcels' source slots died with the old pool).
+    let old_escaped = escaped;
+    sc.speed = 0.0;
+    sc.impact(Vec3::new(0.9, 0.0, 0.0));
+    sc.frames(SETTLE_FRAMES);
+    sc.land(240);
+    sc.s.terrain_bake().unwrap();
+    let (escaped, airborne) = counters(&sc);
+    assert_eq!(airborne, 0);
+    sc.escaped = old_escaped + escaped;
+    let h2 = sc.heights();
+    assert_eq!(sc.ledger(&h2, q, area), 0, "the next domain's ledger");
+}
+
+#[test]
+fn closing_one_area_by_force_lets_its_parcels_fly_on() {
+    let mut sc = Scene::new();
+    let (p1, p2) = (Vec3::new(-0.9, 0.0, 0.0), Vec3::new(0.9, 0.0, 0.0));
+    let a = sc.impact(p1);
+    let b = sc.impact(p2);
+    throw(&mut sc, p1);
+    assert_ne!(a.area, b.area);
+    until_airborne(&mut sc, 30);
+    sc.frames(2);
+    let (n, _) = in_flight(&sc);
+    assert!(n > 0);
+    // The first area closes mid-flight; the second steps on and flies both
+    // areas' parcels until they land (or come back into it).
+    sc.s.terrain_bake_area(a.area).unwrap();
+    sc.frames(1);
+    sc.land(240);
+    sc.frames(SETTLE_FRAMES);
+    sc.land(240);
+    sc.s.terrain_bake_area(b.area).unwrap();
+    let (escaped, airborne) = counters(&sc);
+    assert_eq!(airborne, 0);
+    sc.escaped = escaped;
+    let (q, area) = sc.quantum();
+    let h = sc.heights();
+    assert_eq!(sc.ledger(&h, q, area), 0, "one area closed by force");
+    eprintln!("one area closed with {n} parcels in flight: ledger exact");
 }

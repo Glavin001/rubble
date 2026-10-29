@@ -206,6 +206,7 @@ const WORLD_ENTRIES: &[&str] = &[
     "mpm_grow_shift",
     "mpm_wheel_loads",
     "mpm_wheel_mass",
+    "mpm_parcels_land",
     // Terrain look-ahead (slang/kernels/terrain_watch.slang).
     "terrain_watch_energy",
     "terrain_watch_pick",

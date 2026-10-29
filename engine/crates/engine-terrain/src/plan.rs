@@ -65,6 +65,7 @@ pub const KERNELS: &[&str] = &[
     "mpm_grow_shift",
     "mpm_wheel_loads",
     "mpm_wheel_mass",
+    "mpm_parcels_land",
 ];
 
 /// Byte offsets of the indirect workgroup counts in [`MPM_ARGS_BINDING`].
@@ -1036,6 +1037,16 @@ impl TerrainPlan {
         ops.particles("mpm_bake_bin");
         ops.disp("mpm_bake_raise", u64::from(last - first + 1));
         ops.disp("mpm_bake_header", 1);
+        if close {
+            // A forced close (the World bakes on its own only with nothing in
+            // flight): parcels still airborne fly on to where they land, on
+            // the baked ground, before the pool empties (their source slots
+            // die with it, and a fresh domain counts parcels anew). The open
+            // checked the field against max_field_samples, so each has its
+            // deposit slots.
+            ops.counter(MPM_C_AIRBORNE, 0);
+            ops.indirect("mpm_parcels_land", ARGS_PARCELS);
+        }
         self.deposits(&mut ops);
         self.areas[slot as usize] = None;
         self.areas_dirty = true;
