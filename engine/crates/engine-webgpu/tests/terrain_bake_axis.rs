@@ -620,6 +620,24 @@ fn growing_an_area_over_its_walls_leaves_no_ridge_on_the_ring() {
         ));
     }
     let ridge = diffs.iter().map(|d| d.2).sum::<f64>() / diffs.len() as f64;
+    // The bake's own row-to-row noise: the same measure (a sample over the
+    // mean of its row neighbours, averaged over the rows) on the columns 2 to
+    // 4 samples either side of the ring.
+    let mut noise = 0.0f64;
+    for off in [-4i64, -3, -2, 2, 3, 4] {
+        let mut sum = 0.0;
+        let mut rows = 0.0;
+        for j in 0..n {
+            let Some(edge) = (0..n - 1).rev().find(|&i| inside(i, j)) else {
+                continue;
+            };
+            let i = edge + 1 + off;
+            let g = |i: i64| f64::from(grown.baked[at(i, j)]);
+            sum += g(i) - 0.5 * (g(i - 1) + g(i + 1));
+            rows += 1.0;
+        }
+        noise = noise.max((sum / rows).abs());
+    }
     // GROW_TRACE: the particles' own volume over each sample (rest volume
     // binned by the nearest sample, as height above the bed) against the
     // bakes, on the middle row about the old +x edge.
@@ -652,21 +670,25 @@ fn growing_an_area_over_its_walls_leaves_no_ridge_on_the_ring() {
     let (dx, _) = base.field.cell_size();
     eprintln!(
         "ring past the old +x edge ({} rows, {dx:.1} m samples): grown minus ungrown bake mean \
-         {mean:+.2} m, highest {worst:+.2} m; over its neighbours on the row {ridge:+.2} m",
+         {mean:+.2} m, highest {worst:+.2} m; over its neighbours on the row {ridge:+.2} m \
+         (the bake's noise on columns 2-4 either side: {noise:.2} m)",
         diffs.len()
     );
-    // Counted twice (before the fix), the pushed-in share of the 190 m
-    // columns stood the ring 24.4 m (mean) over the ungrown bake and 27.0 m
-    // over its neighbours. What is left (4.0 m and 4.8 m) is not volume the
-    // ring's particles lack (they stand flat across the old edge, GROW_TRACE):
-    // it is the bake's two kernels meeting there. The old edge columns have
-    // moved, so part of each goes with P2G's B-spline and spills an eighth
-    // across onto the ring, while the ring's new columns, at rest, bake with
-    // the tent at home and give nothing back. The ungrown bake folds that
-    // spill back onto its window's edge.
+    // Counted twice (before 9282acfc), the pushed-in share of the 190 m
+    // columns stood the ring 27.0 m over its row neighbours; with the give
+    // taken out of the old material alone, the bake's two kernels still met
+    // there (4.8 m: moved edge columns on P2G's B-spline beside new columns at
+    // rest on the tent). With the ground's give carried on into the new
+    // columns, both sides are moved material and the ring is as smooth as the
+    // bake anywhere else. The grown bake stands higher than the ungrown one
+    // over the ring (`mean`): the ground the walls compressed comes back as a
+    // rise across the new columns, not folded onto the old edge.
     assert!(
-        mean.abs() < 6.0 && ridge < 8.0,
-        "the ring stands {mean:+.2} m (mean) over the ungrown bake and {ridge:+.2} m over its \
-         neighbours: the walls' give counted twice"
+        ridge.abs() <= noise + 0.25,
+        "the ring stands {ridge:+.2} m over its row neighbours; the bake's noise is {noise:.2} m"
+    );
+    assert!(
+        worst < 6.0,
+        "the ring stands up to {worst:+.2} m over the ungrown bake"
     );
 }

@@ -63,7 +63,6 @@ pub const KERNELS: &[&str] = &[
     "mpm_bake_edge_sort",
     "mpm_source_surface",
     "mpm_grow_shift",
-    "mpm_grow_apply",
 ];
 
 /// Byte offsets of the indirect workgroup counts in [`MPM_ARGS_BINDING`].
@@ -289,8 +288,9 @@ pub struct Opened {
     /// Columns were activated (false: an open area already covered it).
     pub activated: bool,
     /// Passes to run, in order and each its own, before `ops`: for each
-    /// absorbing area taken over, the give of its walls that stop being walls
-    /// taken out of its material (`mpm_grow_shift`, `mpm_grow_apply`).
+    /// absorbing area taken over, the give of its walls that stop being walls,
+    /// measured (`mpm_grow_shift`) for the new columns beyond them to carry on
+    /// outward (`mpm_activate_emit`).
     pub pre: Vec<TerrainOps>,
     pub ops: TerrainOps,
 }
@@ -885,9 +885,10 @@ impl TerrainPlan {
         let moved = merge
             .iter()
             .any(|&k| self.areas[k as usize].as_ref().is_some_and(|a| a.moved));
-        // The old areas' walls that stop being walls: their give out of the
-        // material that pushed into the ground beyond them, which the grown
-        // area now activates (else it counts twice, a ridge along the ring).
+        // The old areas' walls that stop being walls: their give, measured,
+        // for the ground beyond them (which the grown area now activates) to
+        // carry on outward, clear of the material the walls let go (else it
+        // counts twice, a ridge along the ring).
         let mut pre = Vec::new();
         for &k in &merge {
             let old = self.areas[k as usize].as_ref().expect("open");
@@ -913,7 +914,6 @@ impl TerrainPlan {
             g.particles("mpm_bake_edge_scatter");
             g.disp("mpm_bake_edge_sort", edges);
             g.disp("mpm_grow_shift", edges);
-            g.particles("mpm_grow_apply");
             pre.push(g);
         }
         self.areas[slot as usize] = Some(Area {
@@ -1787,15 +1787,19 @@ mod tests {
         // On its rim: the two grow into one box covering both requests.
         let d = open_at(&mut p, &cfg, glam::Vec3::new(-4.5, 0.0, 0.0), 1.0);
         assert!(d.activated && d.absorbed == vec![a.area]);
-        // First, a pass of its own: the old walls that stop being walls give
-        // their give back (the area grew in +x only: the other three stay).
+        // First, a pass of its own: the old walls that stop being walls
+        // measure their give (the area grew in +x only: the other three stay).
         assert_eq!(d.pre.len(), 1);
-        assert!(kernels(&d.pre[0]).ends_with(&["mpm_grow_shift", "mpm_grow_apply"]));
+        assert!(kernels(&d.pre[0]).ends_with(&["mpm_bake_edge_sort", "mpm_grow_shift"]));
         let sel: MpmParams = *bytemuck::from_bytes(bytemuck::cast_slice(
             &d.pre[0].writes[0].words[..std::mem::size_of::<MpmParams>() / 4],
         ));
         assert_eq!(sel.area[1], a.area);
-        assert_eq!(sel.area[3] >> MPM_DOMAIN_KEEP, 0b1101, "high x moves, the rest stay");
+        assert_eq!(
+            sel.area[3] >> MPM_DOMAIN_KEEP,
+            0b1101,
+            "high x moves, the rest stay"
+        );
         let grown = *p.area_params(d.area).unwrap();
         assert!(grown.origin[0] <= ra.origin[0] + 1e-4);
         assert!(grown.origin[0] + grown.dims[0] as f32 * 0.1 >= -4.5 + 1.6 - 1e-3);

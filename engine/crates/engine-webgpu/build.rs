@@ -204,7 +204,6 @@ const WORLD_ENTRIES: &[&str] = &[
     "mpm_bake_edge_sort",
     "mpm_source_surface",
     "mpm_grow_shift",
-    "mpm_grow_apply",
     // Terrain look-ahead (slang/kernels/terrain_watch.slang).
     "terrain_watch_energy",
     "terrain_watch_pick",

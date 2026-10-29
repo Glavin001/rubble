@@ -869,46 +869,56 @@ window ring, at j = 65 and i = 83.
 - So the volume the walls pushed into the ground is counted twice. It is a
   growth-activation matter, not the surface pass's.
 
-**Fixed (2026-10-29): the old walls' give out before growth.**
+**Fixed (2026-10-29): the ground beyond the old walls carries their give.**
 - Before a grown area activates, each absorbing area it takes over gets a
-  pass of its own (`Opened::pre`; `mpm_grow_shift`, `mpm_grow_apply`).
-  - That pass measures its edge columns' give with the bake's own edge
-    lists.
-  - It then takes the give of each side that stops being a wall out of the
-    old material's positions, interpolated between opposite sides, exactly
-    as that area's bake would take it out.
-  - Sides that stay walls keep their give and their face displacements
-    (`MPM_DOMAIN_KEEP` bits).
-- The ground beyond is now material that starts at rest where it was, and
-  nothing stands over it twice. Volume is untouched, so the ledger stays
-  exact; only where the old material stands changes, by the walls' elastic
-  give.
-- Hosts run the passes before the activation:
-  - `WgpuSim` and `engine-metal` `terrain_open_area`;
-  - the wasm plan's blocks (a block each, ahead of the activation's).
+  pass of its own (`Opened::pre`, `mpm_grow_shift`).
+  - The pass measures the give of that area's edge columns with the bake's
+    own edge lists.
+  - It stores each side's give in the old columns' records.
+- The grown area then activates its new columns beyond each side that
+  stopped being a wall (`mpmGrowGive` in `mpm_activate_emit`).
+  - The ground's displacement continues outward from the old face: the
+    side's measured give falls linearly to zero at the grown area's far face
+    on that side. That is the uniform strain the bake already takes between
+    opposite sides (the user's decision).
+  - Each particle's home stays where it was laid, so it carries that
+    displacement as material the MPM moved, as the old edge columns do.
+- Nothing is counted twice: the old material stays where the walls let it
+  go, and the new columns stand clear of it. Both sides of the old edge bake
+  as moved material under one field.
+- What does not change:
+  - sides that stay walls keep their give and face displacements
+    (`MPM_DOMAIN_KEEP` bits);
+  - volume is untouched (the ledger is exact);
+  - an ungrown area's activation is as before (activate-then-bake is the
+    identity).
+- The new particles' F carries no lateral strain from the give (about
+  give/D, D the distance to the far face): they start unstressed laterally,
+  like every activation.
+- The first version (9282acfc) took the give out of the old material
+  instead. That left the bake's two kernels meeting at the old edge: moved
+  edge columns spilling an eighth across on P2G's B-spline, onto new columns
+  at rest on the tent.
+- Hosts run the passes before the activation: `WgpuSim` and `engine-metal`
+  `terrain_open_area`; the wasm plan, a block each.
 - **Test** (`terrain_bake_axis`,
-  `growing_an_area_over_its_walls_leaves_no_ridge_on_the_ring`): the demo's
-  event at 8 cells/R, settled (walls give up to 16 m at the faces), then
-  grown by a sourceless box past its +x side and baked.
+  `growing_an_area_over_its_walls_leaves_no_ridge_on_the_ring`):
+  - the demo's event at 8 cells/R, settled (walls give up to 16 m at the
+    faces);
+  - grown by a sourceless box past its +x side, then baked;
+  - the ring (the first samples past the old +x edge, 37 rows) against its
+    row neighbours, and against the bake's own noise: the same measure on
+    the columns 2 to 4 samples either side.
 
   | | Ring over the ungrown bake (mean, worst) | Ring over its row neighbours |
   |---|---|---|
-  | before | +24.4 m, +31.8 m | +27.0 m |
-  | after | +4.0 m, +5.9 m | +4.8 m |
+  | counted twice | +24.4 m, +31.8 m | +27.0 m |
+  | give taken out of the old material (9282acfc) | +4.0 m, +5.9 m | +4.8 m |
+  | give carried into the new columns | +2.0 m, +3.3 m | −0.5 m (noise 2.6 m) |
 
-- **Left, open: the bake's kernels at the old edge.** The particles over the
-  edge and the ring now stand flat (their rest volume by nearest sample:
-  190 m over both, `GROW_TRACE`). The remaining 4 m comes from how the bake
-  splats them:
-  - The old edge columns have moved, so part of each bakes with P2G's
-    B-spline and spills an eighth across onto the ring.
-  - The ring's new columns, at rest, bake with the tent at home and give
-    nothing back.
-  - The ungrown bake folds that spill back onto its window's edge, so it
-    shows no step there.
-  - Activating the ring with the ground's own displacement continuing
-    outward would make the two sides alike. That needs a decay law for the
-    displacement beyond the wall, a model choice left open.
+  The grown bake stands higher than the ungrown one beyond the old edge (the
+  +2.0 m mean). The ground the walls compressed comes back as a rise across
+  the new columns, instead of folding onto the old edge.
 
 **A strike on a moving rim** takes the live surface's height there, read back
 0.25 s before contact: 3.58 m against the heightfield's 0.

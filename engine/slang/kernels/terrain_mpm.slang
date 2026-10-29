@@ -1748,6 +1748,8 @@ void mpm_activate_emit(uint3 tid : SV_DispatchThreadID)
     // Where the bake will see it if it never moves (the same transform
     // mpm_bake_bin applies), so its displacement is then exactly zero.
     float3 home = frameToLocal(f, xw);
+    // Growing over an old area's wall: the ground there gave (mpmGrowGive).
+    if (gMpmParams[0].area.z != 0u) xw = frameToWorld(f, xl + mpmGrowGive(xl, ij, p, hf));
     MpmParticle q;
     q.xm = float4(xw, vol * p.column.w);
     q.vj = float4(0, 0, 0, 0);
@@ -2050,28 +2052,31 @@ uint2 mpmEdgeSample(uint k, MpmParams p, out uint axis)
     return uint2(m % ni, m < ni ? 0u : nj - 1u);
 }
 
-// ---- growth: the old walls' give taken out (TerrainPlan::open) -------------
+// ---- growth: the ground beyond the old walls (TerrainPlan::open) ----------
 //
-// An open area's absorbing walls give: the material against a side moves
-// out past its plane by the ground's displacement there, over the samples
-// beyond the window. The bake measures positions in the unactivated
-// ground's frame, so that give comes back into the window (mpmGroundShift).
-// When the area grows, those samples beyond are activated in full, and the
-// material that pushed into them would count twice: once in their new
-// columns, once over them in the old area's particles (a ridge a sample wide
-// along the old window's ring). So before the grown area activates, each old
-// area's sides that stop being walls have their give taken out of the old
-// area's particles, exactly as its bake would take it out: the old ground
-// beyond is now material starting at rest where it was. Sides that stay walls
-// keep their give (and their face displacements). Volume is untouched; only
-// where the old material stands changes, by the walls' elastic give.
+// An open area's absorbing walls give: the material against a side moves out
+// past its plane by the ground's displacement there, over the samples beyond
+// the window (its bake measures positions in the unactivated ground's frame,
+// mpmGroundShift). When the area grows over those samples, the ground beyond
+// becomes material, and it had moved too: it is activated with that
+// displacement continuing outward, the old wall's measured give at the old
+// face falling linearly to zero at the grown area's far face on that side
+// (the uniform strain the bake already takes between opposite sides). The old
+// material stays where the walls let it go, the new columns stand clear of
+// it (nothing is counted twice), and both bake as material moved by the same
+// field. Sides that stay walls keep their give and face displacements.
+// Volume is untouched; the positions of the new particles carry the give, F
+// does not (the ground's elastic strain under that give, about give/D, is not
+// added: an unstressed start, as every activation's lateral state).
 
 // gMpmParams[0].area.w bit (MPM_DOMAIN_KEEP + side, sides low x, high x, low
 // z, high z): the selected old area's side stays a wall of the grown area.
 static const uint MPM_DOMAIN_KEEP = 4u;
 
-// Per edge sample of the selected old area: its give (0 on a side that
-// stays a wall), into the cells after its edge lists.
+// Per edge sample of the selected old area (before the grown area
+// activates): its give (0 on a side that stays a wall), into that sample's
+// column record of the old area, word 1 across an x side, word 2 across a z
+// side (the activation's ranges there are spent).
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void mpm_grow_shift(uint3 tid : SV_DispatchThreadID)
@@ -2079,8 +2084,7 @@ void mpm_grow_shift(uint3 tid : SV_DispatchThreadID)
     uint k = mpmIndex(tid);
     MpmParams p = mpmSelArea();
     uint ni = p.window.z, nj = p.window.w;
-    uint edges = 2u * (ni + nj);
-    if (k >= edges) return;
+    if (k >= 2u * (ni + nj)) return;
     uint side = k < 2u * nj ? (k < nj ? 0u : 1u) : ((k - 2u * nj) < ni ? 2u : 3u);
     bool kept = ((gMpmParams[0].area.w >> (MPM_DOMAIN_KEEP + side)) & 1u) != 0u;
     Collider col = gColliders[p.dims.w];
@@ -2088,42 +2092,52 @@ void mpm_grow_shift(uint3 tid : SV_DispatchThreadID)
     uint axis;
     uint2 ij = mpmEdgeSample(k, p, axis);
     float give = kept ? 0.0 : mpmEdgeGive(k, ij, axis, p, f);
-    ASTORE(gMpmCells[3u * edges + k], asuint(give));
+    ASTORE(gMpmColumns[mpmCol(p, ij.y * ni + ij.x) + (axis == 0u ? 1u : 2u)], asuint(give));
 }
 
-// mpmGroundShift over mpm_grow_shift's gives.
-float2 mpmGrowShift(float3 xl, HeightFieldRef hf, MpmParams p)
+// A grown area's new particle at local xl (on sample ij of window p): the
+// ground's give there, from each old area's sides it grew past. Zero inside
+// the old windows and beyond the new far faces.
+float3 mpmGrowGive(float3 xl, uint2 ij, MpmParams p, HeightFieldRef hf)
 {
-    int i0 = int(p.window.x), j0 = int(p.window.y);
-    int ni = int(p.window.z), nj = int(p.window.w);
-    float2 u = (xl.xz - float2(hf.x0, hf.z0)) / float2(hf.dx, hf.dz);
-    int ti = clamp(int(round(u.x)) - i0, 0, ni - 1), tj = clamp(int(round(u.y)) - j0, 0, nj - 1);
-    uint base = 3u * 2u * uint(ni + nj);
-    float sx = ni > 1 ? clamp((u.x - float(i0)) / float(ni - 1), 0.0, 1.0) : 0.5;
-    float sz = nj > 1 ? clamp((u.y - float(j0)) / float(nj - 1), 0.0, 1.0) : 0.5;
-    float lx = asfloat(ALOAD(gMpmCells[base + uint(tj)])), hx = asfloat(ALOAD(gMpmCells[base + uint(nj + tj)]));
-    float lz = asfloat(ALOAD(gMpmCells[base + uint(2 * nj + ti)]));
-    float hz = asfloat(ALOAD(gMpmCells[base + uint(2 * nj + ni + ti)]));
-    return float2(lerp(lx, hx, sx), lerp(lz, hz, sz));
-}
-
-// Per particle of the selected old area: its position less the give of the
-// old walls that stop being walls.
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void mpm_grow_apply(uint3 tid : SV_DispatchThreadID)
-{
-    uint i = mpmIndex(tid);
-    if (i >= mpmParticleCount()) return;
-    MpmParams p = mpmSelArea();
-    MpmParticle q = gMpmParticles[i];
-    if (mpmParticleDead(q) || !mpmBakeOwns(q.xm.xyz)) return;
-    Collider col = gColliders[p.dims.w];
-    Frame f = colliderFrame(col, gBodies[col.body]);
-    HeightFieldRef hf = heightFieldOf(col);
-    float3 xl = frameToLocal(f, q.xm.xyz);
-    xl.xz -= mpmGrowShift(xl, hf, p);
-    gMpmParticles[i].xm = float4(frameToWorld(f, xl), q.xm.w);
+    float3 u = float3(0, 0, 0);
+    uint mask = gMpmParams[0].area.z;
+    uint4 nw = p.window;
+    float nlx = hf.x0 + (float(nw.x) - 0.5) * hf.dx, nhx = hf.x0 + (float(nw.x + nw.z) - 0.5) * hf.dx;
+    float nlz = hf.z0 + (float(nw.y) - 0.5) * hf.dz, nhz = hf.z0 + (float(nw.y + nw.w) - 0.5) * hf.dz;
+    for (uint o = 0u; o < MPM_MAX_AREAS; o++)
+    {
+        if ((mask & (1u << o)) == 0u) continue;
+        MpmParams q = mpmArea(o);
+        if (q.boundary.z == 0u) continue;
+        uint4 w = q.window;
+        float lx = hf.x0 + (float(w.x) - 0.5) * hf.dx, hx = hf.x0 + (float(w.x + w.z) - 0.5) * hf.dx;
+        float lz = hf.z0 + (float(w.y) - 0.5) * hf.dz, hz = hf.z0 + (float(w.y + w.w) - 0.5) * hf.dz;
+        uint tj = uint(clamp(int(ij.y) - int(w.y), 0, int(w.w) - 1));
+        uint ti = uint(clamp(int(ij.x) - int(w.x), 0, int(w.z) - 1));
+        // Past an x side it grew over: that row's give, fading to the far face.
+        if (nw.x + nw.z > w.x + w.z && xl.x > hx)
+        {
+            float g = asfloat(ALOAD(gMpmColumns[mpmCol(q, tj * w.z + w.z - 1u) + 1u]));
+            u.x += g * max(0.0, 1.0 - (xl.x - hx) / (nhx - hx));
+        }
+        if (nw.x < w.x && xl.x < lx)
+        {
+            float g = asfloat(ALOAD(gMpmColumns[mpmCol(q, tj * w.z) + 1u]));
+            u.x += g * max(0.0, 1.0 - (lx - xl.x) / (lx - nlx));
+        }
+        if (nw.y + nw.w > w.y + w.w && xl.z > hz)
+        {
+            float g = asfloat(ALOAD(gMpmColumns[mpmCol(q, (w.w - 1u) * w.z + ti) + 2u]));
+            u.z += g * max(0.0, 1.0 - (xl.z - hz) / (nhz - hz));
+        }
+        if (nw.y < w.y && xl.z < lz)
+        {
+            float g = asfloat(ALOAD(gMpmColumns[mpmCol(q, ti) + 2u]));
+            u.z += g * max(0.0, 1.0 - (lz - xl.z) / (lz - nlz));
+        }
+    }
+    return u;
 }
 
 // The walls' displacement at local point xl (the bed heightfield's frame), in
