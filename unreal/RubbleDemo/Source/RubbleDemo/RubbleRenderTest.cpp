@@ -838,25 +838,31 @@ bool FRubbleVideoGlassTower::RunTest(const FString& Parameters)
 		{
 			Pawn->LookFrom(Eye, Centre);
 		}
-		// Volleys a second apart, alternately from 7 m off its west face (heading east, +Y) and its
-		// east face (heading west): one ball (45 m/s) along each of the tower's three southern column
-		// rows (X -1174, -824, -474 cm; the fourth, north, at -1524) at each of its lowest storeys'
-		// heights, the ground storey twice. Support loss frees the floors above and they fall south
-		// onto the pavilion; volleys all from one side shove it past the pavilion. In each of six
-		// runs of engine-world's glass_tower_felling_probe (plan "both") it comes to rest on the
-		// pavilion. Sixty shots on 58 parked balls: the last volley reuses the first two.
-		static const double Volleys[] = { 1.0, 2.0, 3.0, 4.0 };
+		// A felling notch: the pavilion side's supports go and the north row (X -1524 cm) stands as
+		// the hinge. Three volleys a second apart, each one ball (45 m/s) along each of the three
+		// southern column rows (X -1174, -824, -474) at three heights in each of the lowest three
+		// storeys, from 7 m off the west face (heading east, +Y) or the east face, alternating shot
+		// by shot so the volley's push across the tower cancels. Support loss tips the floors above
+		// over the north row onto the pavilion: in twelve jittered runs of engine-world's
+		// glass_tower_felling_probe (plans "notch3", "notch3b") it falls toward the pavilion every
+		// time, where volleys alternating whole (plan "both") scatter it. 81 shots on 58 parked balls.
+		static const double Volleys[] = { 1.0, 2.0, 3.0 };
 		for (int32 c = 0; c < UE_ARRAY_COUNT(Volleys); ++c)
 		{
 			if (At >= Volleys[c] && !(S->Fired & (1 << c)))
 			{
 				S->Fired |= 1 << c;
-				const double Side = c % 2 ? 1.0 : -1.0;
-				for (const double Row : { -1174.0, -824.0, -474.0 })
+				static const double Rows[] = { -1174.0, -824.0, -474.0 };
+				static const double Heights[] = { 60.0, 150.0, 240.0 };
+				for (int32 i = 0; i < UE_ARRAY_COUNT(Rows); ++i)
 				{
-					for (const double Up : { 100.0, 260.0, 530.0, 830.0, 1130.0 })
+					for (int32 Storey = 0; Storey < 3; ++Storey)
 					{
-						Rubble()->Launch(FVector(Row, Side * (706.0 + 700.0), Up), FVector(0, -Side, 0));
+						for (int32 j = 0; j < UE_ARRAY_COUNT(Heights); ++j)
+						{
+							const double Side = (c + i + Storey + j) % 2 ? 1.0 : -1.0;
+							Rubble()->Launch(FVector(Rows[i], Side * (706.0 + 700.0), 300.0 * Storey + Heights[j]), FVector(0, -Side, 0));
+						}
 					}
 				}
 			}

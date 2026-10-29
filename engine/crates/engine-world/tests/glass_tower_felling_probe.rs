@@ -89,6 +89,24 @@ fn plan(name: &str) -> Vec<Shot> {
             }
             shots.sort_by(|a, b| a.at.total_cmp(&b.at));
         }
+        // A felling notch: every storey up to the Nth along the three southern rows, struck at
+        // three heights each, the north row (X -1524) left standing as the hinge.
+        n if n.starts_with("notch") => {
+            // "notch3b": each volley balanced, its shots alternately from the west and the east.
+            let balanced = n.ends_with('b');
+            let storeys: usize = n.trim_start_matches("notch").trim_end_matches('b').parse().unwrap_or(3);
+            for (k, at) in [1.0, 2.0, 3.0].into_iter().enumerate() {
+                for (i, x) in [-1174.0, -824.0, -474.0].into_iter().enumerate() {
+                    for s in 0..storeys {
+                        for (j, dz) in [60.0, 150.0, 240.0].into_iter().enumerate() {
+                            let z = 300.0 * s as f32 + dz;
+                            let west_side = if balanced { (k + i + s + j) % 2 == 0 } else { k % 2 == 0 };
+                            shots.push(if west_side { west(at, x, z) } else { unreal(at, x, 1406.0, z, [0.0, -1.0, 0.0], 45.0) });
+                        }
+                    }
+                }
+            }
+        }
         // A felling wedge: deeper toward the pavilion.
         _ => {
             for at in [1.0, 2.0, 3.0, 4.0] {
@@ -152,24 +170,48 @@ fn glass_tower_falls_onto_the_pavilion() {
     let pavilion: Vec<usize> = (0..n).filter(|&i| group(i).starts_with("pavilion@")).collect();
     let roof = *tower.iter().max_by(|&&a, &&b| y_of(a).total_cmp(&y_of(b))).unwrap() as u32;
     let name = std::env::var("GT_PLAN").unwrap_or_else(|_| "wedge".into());
-    let shots = plan(&name);
+    let mut shots = plan(&name);
+    // GT_JITTER=<seed>: each shot up to 0.1 s later and 15 cm off, to test a plan's robustness.
+    if let Some(mut seed) = std::env::var("GT_JITTER").ok().and_then(|v| v.parse::<u64>().ok()) {
+        let mut rand = move || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((seed >> 33) as f32 / (1u64 << 31) as f32) * 2.0 - 1.0
+        };
+        for s in &mut shots {
+            s.at += 0.05 * (rand() + 1.0);
+            s.from[1] += 0.15 * rand();
+            s.from[2] += 0.15 * rand();
+        }
+        shots.sort_by(|a, b| a.at.total_cmp(&b.at));
+    }
     let seconds = std::env::var("GT_SECONDS").ok().and_then(|v| v.parse().ok()).unwrap_or(20u32);
     println!("plan {name}: {} shots; tower {} chunks, pavilion {}", shots.len(), tower.len(), pavilion.len());
     for s in shots.iter().take(3) {
         println!("  shot at {} s from {:?} at {:?} m/s", s.at, s.from, s.v);
     }
     let hz = (1.0 / solver.dt).round() as u32;
+    // The film's cannon: 58 balls parked far above, asleep, each shot moving the next into place.
     let (r, m) = (0.6f32, 7000.0f32);
+    let balls: Vec<BodyId> = (0..58)
+        .map(|i| {
+            let b = w.create_body(&BodyDef { is_awake: false, is_bullet: true, ..BodyDef::dynamic([0.0, 1.0e4, i as f32 * 3.0]) }).unwrap();
+            w.create_sphere_shape(b, &ShapeDef { update_body_mass: false, ..ShapeDef::default() }, [0.0; 3], r).unwrap();
+            let i = 0.4 * m * r * r;
+            w.body_set_mass_data(b, MassData { mass: m, center: [0.0; 3], rotational_inertia: [[i, 0.0, 0.0], [0.0, i, 0.0], [0.0, 0.0, i]] }).unwrap();
+            w.body_set_projectile(b, Some(Projectile::default())).unwrap();
+            b
+        })
+        .collect();
     let mut fired = 0;
     for step in 0..seconds * hz {
         let t = step as f32 / hz as f32;
         while fired < shots.len() && shots[fired].at <= t {
             let s = &shots[fired];
-            let b = w.create_body(&BodyDef { linear_velocity: s.v, is_bullet: true, ..BodyDef::dynamic(s.from) }).unwrap();
-            w.create_sphere_shape(b, &ShapeDef { update_body_mass: false, ..ShapeDef::default() }, [0.0; 3], r).unwrap();
-            let i = 0.4 * m * r * r;
-            w.body_set_mass_data(b, MassData { mass: m, center: [0.0; 3], rotational_inertia: [[i, 0.0, 0.0], [0.0, i, 0.0], [0.0, 0.0, i]] }).unwrap();
-            w.body_set_projectile(b, Some(Projectile::default())).unwrap();
+            let b = balls[fired % balls.len()];
+            w.body_set_transform(b, Transform::new(s.from, [0.0, 0.0, 0.0, 1.0])).unwrap();
+            w.body_set_linear_velocity(b, s.v).unwrap();
+            w.body_set_angular_velocity(b, [0.0; 3]).unwrap();
+            w.body_set_awake(b, true).unwrap();
             fired += 1;
         }
         w.step().unwrap();
