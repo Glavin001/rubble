@@ -197,7 +197,7 @@ test('the render-only surface pass rebuilds the open region\'s ground and fails 
   assert.deepEqual(Array.from(p.surface(9.81)), [0], 'no region, no pass');
   p.impact(0, FIELD, Float32Array.of(0, 0, 0), 2, 3000, 20000, 9.81);
   const { writes, cmds } = names(p.surface(9.81));
-  assert.deepEqual(cmds, ['terrain_surface_clear', 'terrain_surface_shift', 'mpm_write_args', 'terrain_surface_bin', 'terrain_surface_resolve', 'terrain_surface_debris']);
+  assert.deepEqual(cmds, ['terrain_surface_clear', 'mpm_write_args', 'terrain_surface_shift', 'terrain_surface_shift_mean', 'terrain_surface_bin', 'terrain_surface_resolve', 'terrain_surface_debris']);
   assert.equal(writes[0].binding, T.SURFACE);
   assert.ok(p.surface_bytes() >= 4 * writes[0].words[1]);
   p.free();

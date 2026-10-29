@@ -9,8 +9,8 @@
 // draws over the window is the heightfield the region would bake to now:
 //
 //   terrain_surface_clear    empty the occupancy (window samples × layers)
-//   terrain_surface_shift    on the absorbing ground: the walls' give (a copy of
-//                            mpm_bake_shift into this buffer)
+//   terrain_surface_shift    on the absorbing ground: the walls' give, as
+//   terrain_surface_shift_mean  mpm_bake_shift measures it, into this buffer
 //   terrain_surface_bin      per particle not in flight (below): its quanta split between samples as
 //                            mpm_bake_bin splits them (the tent at home for the
 //                            share at rest, P2G's B-spline for the share the MPM
@@ -108,50 +108,72 @@ void terrain_surface_clear(uint3 tid : SV_DispatchThreadID)
     uint k = mpmIndex(tid);
     MpmParams p = tsArea();
     if (k < p.window.z * p.window.w * tsWord(TS_LAYERS)) ASTORE(gTerrainSurface[tsWord(TS_OCC_BASE) + k], 0u);
+    // The walls' give accumulators (terrain_surface_shift).
+    if (k < 4u * (p.window.z + p.window.w)) ASTORE(gTerrainSurface[tsShiftAcc(0u, p) + k], 0u);
     if (k == 0u) ASTORE(gTerrainSurface[TS_DEBRIS_COUNT], 0u);
 }
 
-// mpm_bake_shift's measurement (per window edge sample: its column's mean
-// outward displacement across that side), into this buffer's shift section:
-// the face records it would overwrite are in use while the region is open.
+// The walls' give, as mpm_bake_shift measures it (per window edge sample:
+// its column's mean outward displacement across that side), into this
+// buffer's shift section; the face records it would overwrite are in use
+// while the region is open. Two kernels, from the particles themselves (an
+// area that grew has no activation range for its older samples, and the
+// bake's edge lists are built at the bake): terrain_surface_shift adds each
+// particle made at an edge column (by its home) into that edge's
+// accumulators, in fixed point (mm × quanta, signed, two's complement adds);
+// terrain_surface_shift_mean divides. Edge k: the low-x side's rows, the
+// high-x side's, then the low-z side's columns and the high-z side's.
+// Accumulators: two words per edge after the 2(ni + nj) shift words.
+static const float TS_SHIFT_FIXED = 1000.0;
+uint tsShiftAcc(uint k, MpmParams p) { return tsWord(TS_SHIFT_BASE) + 2u * (p.window.z + p.window.w) + 2u * k; }
+
+void tsShiftAdd(uint k, float disp, uint w, MpmParams p)
+{
+    uint at = tsShiftAcc(k, p);
+    AADD2(gTerrainSurface[at], uint(int(round(disp * TS_SHIFT_FIXED)) * int(w)));
+    AADD2(gTerrainSurface[at + 1u], w);
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void terrain_surface_shift(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = mpmIndex(tid);
+    if (i >= mpmParticleCount()) return;
+    MpmParams p = tsArea();
+    MpmParticle q = gMpmParticles[i];
+    if (mpmParticleDead(q) || (asuint(q.f2.w) & MPM_PARTICLE_HOME) == 0u || !tsMine(q)) return;
+    Collider col = gColliders[p.dims.w];
+    Frame f = colliderFrame(col, gBodies[col.body]);
+    HeightFieldRef hf = heightFieldOf(col);
+    int ni = int(p.window.z), nj = int(p.window.w);
+    int hi = int(floor((q.c1.w - hf.x0) / hf.dx + 0.5)) - int(p.window.x);
+    int hj = int(floor((q.c2.w - hf.z0) / hf.dz + 0.5)) - int(p.window.y);
+    if (hi < 0 || hj < 0 || hi >= ni || hj >= nj) return;
+    bool ex = hi == 0 || hi == ni - 1, ez = hj == 0 || hj == nj - 1;
+    if (!ex && !ez) return;
+    float3 xl = frameToLocal(f, q.xm.xyz);
+    uint w = asuint(q.f1.w);
+    if (hi == 0) tsShiftAdd(uint(hj), xl.x - q.c1.w, w, p);
+    if (hi == ni - 1) tsShiftAdd(uint(nj + hj), xl.x - q.c1.w, w, p);
+    if (hj == 0) tsShiftAdd(uint(2 * nj + hi), xl.z - q.c2.w, w, p);
+    if (hj == nj - 1) tsShiftAdd(uint(2 * nj + ni + hi), xl.z - q.c2.w, w, p);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void terrain_surface_shift_mean(uint3 tid : SV_DispatchThreadID)
 {
     uint k = mpmIndex(tid);
     MpmParams p = tsArea();
     uint ni = p.window.z, nj = p.window.w;
     if (k >= 2u * (ni + nj)) return;
-    Collider col = gColliders[p.dims.w];
-    Frame f = colliderFrame(col, gBodies[col.body]);
-    uint2 ij;
-    uint axis;
-    if (k < 2u * nj)
-    {
-        ij = uint2(k < nj ? 0u : ni - 1u, k % nj);
-        axis = 0u;
-    }
-    else
-    {
-        uint m = k - 2u * nj;
-        ij = uint2(m % ni, m < ni ? 0u : nj - 1u);
-        axis = 2u;
-    }
-    uint t = ij.y * ni + ij.x;
-    // The column's last activation range (a grown area's older samples gave
-    // none: their give is taken as zero here, render-only).
-    uint first = ALOAD(gMpmColumns[mpmCol(p, t) + 2u]), n = ALOAD(gMpmColumns[mpmCol(p, t) + 1u]);
-    float sum = 0.0, quanta = 0.0;
-    for (uint s = first; s < first + n; s++)
-    {
-        MpmParticle q = gMpmParticles[s];
-        if (mpmParticleDead(q) || (asuint(q.f2.w) & MPM_PARTICLE_HOME) == 0u) continue;
-        float3 xl = frameToLocal(f, q.xm.xyz);
-        float w = float(asuint(q.f1.w));
-        sum += w * (axis == 0u ? xl.x - q.c1.w : xl.z - q.c2.w);
-        quanta += w;
-    }
-    float mean = quanta > 0.0 ? sum / quanta : 0.0;
+    uint at = tsShiftAcc(k, p);
+    float quanta = float(tsWord(at + 1u));
+    float mean = quanta > 0.0 ? float(int(tsWord(at))) / TS_SHIFT_FIXED / quanta : 0.0;
+    // Only outward: material moving out past the side's plane has moved the
+    // ground with it (it cannot enter the ground); moving in, it left the
+    // ground where it was.
     bool low = k < 2u * nj ? k < nj : (k - 2u * nj) < ni;
     ASTORE(gTerrainSurface[tsWord(TS_SHIFT_BASE) + k], asuint(low ? min(mean, 0.0) : max(mean, 0.0)));
 }

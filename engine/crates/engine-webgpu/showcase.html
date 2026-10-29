@@ -925,7 +925,7 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       terrain.reset();
       st.t = 0; st.frame = 0; st.fx = []; st.strikes = []; st.lastStrike = -1e9; st.carPose = null; st.carSpeed = 0; st.switches = [];
       cam.eye = null;
-      SCHEDULE.forEach((s) => { s.state = 'wait'; s.fx = null; });
+      SCHEDULE.forEach((s) => { s.state = 'wait'; s.fx = null; s.liveRead = false; });
     }
     st.car = startCar();
     if (buggy) buggy.add(st.car);
@@ -977,6 +977,23 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       while (f + 0.5 < d && trackClearance(boxOf(sx + u[0] * (f + 0.5), u[1] * (f + 0.5))) >= CLEAR) f += 0.5;
       return [sx + u[0] * f, u[1] * f];
     }
+    // The live surface's height at (x, z) (nearest sample), or null outside
+    // the area the surface shows.
+    async function liveHeightAt(x, z) {
+      const read = async (offset, bytes) => {
+        const rb = device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+        const e = device.createCommandEncoder(); e.copyBufferToBuffer(terrain.surfaceBuffer, offset, rb, 0, bytes); device.queue.submit([e.finish()]);
+        await rb.mapAsync(GPUMapMode.READ);
+        const out = rb.getMappedRange().slice(0); rb.unmap(); rb.destroy();
+        return out;
+      };
+      const head = new Uint32Array(await read(0, 4 * T.SURFACE_HEADER_WORDS));
+      if (head[T.SURFACE_VALID_WORD] !== 1) return null;
+      const [i0, j0, ni, nj] = head.slice(T.SURFACE_WINDOW_WORD, T.SURFACE_WINDOW_WORD + 4);
+      const ti = Math.round((x - X0) / SP) - i0, tj = Math.round((z - Z0) / SP) - j0;
+      if (ti < 0 || tj < 0 || ti >= ni || tj >= nj) return null;
+      return new Float32Array(await read(4 * (T.SURFACE_HEADER_WORDS + tj * ni + ti), 4))[0];
+    }
     function schedule() {
       for (const s of SCHEDULE) {
         if (s.state === 'done') continue;
@@ -995,6 +1012,7 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
           }
           const [x, z] = strikePoint(s);
           s.point = [x, groundAt(x, z), z];
+
           s.t0 = st.t + APPROACH;
           // Coming in from beyond the strike as the car sees it, and from the
           // side: it streaks down across the view toward the ground ahead.
@@ -1005,6 +1023,12 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
           s.fx = { yaw: Math.atan2(d[0], d[2]), pitch: 0.5 };
           s.state = 'approach';
           st.fx.push(s);
+        }
+        // Over an open area the ground is the live surface (a rim still
+        // moving): its height there, read back just before contact.
+        if (s.state === 'approach' && !s.liveRead && terrain.areas.length && st.t > s.t0 - 0.25) {
+          s.liveRead = true;
+          liveHeightAt(s.point[0], s.point[2]).then((h) => { if (h !== null && s.state === 'approach') s.point[1] = h; }).catch(fail);
         }
         if (s.state === 'approach' && st.t >= s.t0 - 1e-9) {
           if (terrain.region && !canOverlap()) throw new Error('a strike is due while a region is open');

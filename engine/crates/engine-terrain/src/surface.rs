@@ -23,6 +23,7 @@ pub const SURFACE_KERNELS: &[&str] = &[
     "mpm_write_args",
     "terrain_surface_clear",
     "terrain_surface_shift",
+    "terrain_surface_shift_mean",
     "terrain_surface_bin",
     "terrain_surface_resolve",
     "terrain_surface_debris",
@@ -203,6 +204,12 @@ impl SurfacePlan {
             samples * u64::from(layers),
             u64::from(self.max_cells),
         )?;
+        // The shift section holds the walls' give and its accumulators.
+        TerrainConfig::check(
+            "surface edge samples",
+            6 * u64::from(ni + nj),
+            2 * u64::from(self.max_columns) + 2,
+        )?;
         if let Some(patch) = self.patch {
             // The window and a ring of the field's samples round it.
             TerrainConfig::check(
@@ -238,10 +245,19 @@ impl SurfacePlan {
             "terrain_surface_clear",
             samples * u64::from(layers),
         );
-        if absorbing {
-            disp(&mut ops, "terrain_surface_shift", 2 * u64::from(ni + nj));
-        }
         disp(&mut ops, "mpm_write_args", 1);
+        if absorbing {
+            // The walls' give, from the particles made at the edge columns.
+            ops.cmds.push(TerrainCmd::Indirect {
+                kernel: "terrain_surface_shift",
+                offset: ARGS_PARTICLES,
+            });
+            disp(
+                &mut ops,
+                "terrain_surface_shift_mean",
+                2 * u64::from(ni + nj),
+            );
+        }
         ops.cmds.push(TerrainCmd::Indirect {
             kernel: "terrain_surface_bin",
             offset: ARGS_PARTICLES,
@@ -309,8 +325,9 @@ mod tests {
             kernels(&ops),
             [
                 "terrain_surface_clear",
-                "terrain_surface_shift",
                 "mpm_write_args",
+                "terrain_surface_shift",
+                "terrain_surface_shift_mean",
                 "terrain_surface_bin",
                 "terrain_surface_resolve",
                 "terrain_surface_debris"
@@ -325,7 +342,7 @@ mod tests {
             matches!(ops.cmds[0], TerrainCmd::Dispatch { threads, .. } if threads == u64::from(ni * nj * layers))
         );
         assert!(
-            matches!(ops.cmds[4], TerrainCmd::Dispatch { threads, .. } if threads == u64::from(ni * nj))
+            matches!(ops.cmds[5], TerrainCmd::Dispatch { threads, .. } if threads == u64::from(ni * nj))
         );
         // The header names the sections, the layers and the shift.
         assert_eq!(ops.writes.len(), 1);

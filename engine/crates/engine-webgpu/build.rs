@@ -210,6 +210,7 @@ const WORLD_ENTRIES: &[&str] = &[
     // Render-only terrain surface (slang/kernels/terrain_surface.slang).
     "terrain_surface_clear",
     "terrain_surface_shift",
+    "terrain_surface_shift_mean",
     "terrain_surface_bin",
     "terrain_surface_resolve",
     "terrain_surface_debris",
