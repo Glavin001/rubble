@@ -67,11 +67,16 @@
     };
 
     // ================================================================ scenes
-    // drive (default): strikes beside and ahead of the car, which drives over
-    // the fresh rims and blankets while the sand still moves. pass: the first
-    // cut, strikes kept clear of the track. bts: behind the scenes, slowed,
-    // the engine's view and the game's side by side from one state.
-    const SCENE = ['drive', 'pass', 'bts'].includes(qs.get('scene')) ? qs.get('scene') : 'drive';
+    // drive (default): a barrage, strikes on both sides of the road, some
+    // close enough that the car drives up over a fresh rim, near misses just
+    // ahead of and just behind the car, several areas open at once. drive1:
+    // the earlier cut, three strikes beside the road. pass: the first cut,
+    // strikes kept clear of the track. bts: behind the scenes, slowed, the
+    // engine's view and the game's side by side from one state.
+    const SCENE = ['drive', 'drive1', 'pass', 'bts'].includes(qs.get('scene')) ? qs.get('scene') : 'drive';
+    // The barrage keeps several areas open at once (overlapping strikes grow
+    // one area): explicit, so a schedule that needs more fails by name.
+    if (SCENE === 'drive') TERRAIN.settings.config.max_regions = num('regions', 8);
 
     // ================================================================ device
     if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
@@ -148,12 +153,14 @@
     })();
     // Distance from the loop's spine (the segment between the turns' centres).
     const spine = (x, z) => Math.hypot(x - Math.max(-STRAIGHT, Math.min(STRAIGHT, x)), z);
+    // Flat this far outside the track too: the barrage strikes outside it.
+    const FLAT_OUT = SCENE === 'drive' ? num('flatout', 75) : 14;
     const dune = (x, z) => {
       const r = spine(x, z);
-      const field = Math.min(1, Math.max(0, (r - TURN - 14) / 40)); // flat inside the loop
+      const field = Math.min(1, Math.max(0, (r - TURN - FLAT_OUT) / 40)); // flat inside the loop
       const big = 2.6 * Math.sin(x / 47 + 0.7) * Math.cos(z / 61 - 0.4) + 1.6 * Math.sin((x + 1.7 * z) / 37);
       const ridge = 1.2 * Math.sin((0.8 * x - 0.6 * z) / 11 + Math.sin(z / 29) * 2.0);
-      const far = Math.min(1, Math.max(0, (r - TURN - 30) / 80)) * 9 * (0.6 + 0.4 * Math.sin(x / 53) * Math.cos(z / 71));
+      const far = Math.min(1, Math.max(0, (r - TURN - FLAT_OUT - 16) / 80)) * 9 * (0.6 + 0.4 * Math.sin(x / 53) * Math.cos(z / 71));
       return field * (big + 0.35 * ridge) * 0.6 + far;
     };
     const initialHeights = new Float32Array(NX * NZ);
@@ -172,7 +179,8 @@
       const p = new TerrainStep(JSON.stringify(TERRAIN.settings));
       try { return JSON.parse(p.settings()).config.max_regions; } finally { p.free(); }
     })();
-    const PN = num('patch', 72);
+    // The barrage's strikes chain along the road into longer grown windows.
+    const PN = num('patch', SCENE === 'drive' ? 128 : 72);
     const patchArena = heightFieldArena(PN, PN, SP, SP, new Float32Array(PN * PN).fill(-1e4));
     const ALL_RECORDS = new Uint32Array(arena0.records.length + REGIONS * patchArena.records.length);
     ALL_RECORDS.set(arena0.records, 0);
@@ -240,7 +248,24 @@
         { t: LEAD + num('t2', 7.0), overlapT: LEAD + 3.4, rimOf: 0, rimTurn: num('turn2', 0.45) },
         { t: LEAD + num('t3', 13.5), pass: LEAD + num('pass3', 17.0) },
       ],
+      // The barrage. `side`: 1 inside the loop, -1 outside it. `beside` < 0:
+      // the track runs inside the rim, so the car drives up over its crest
+      // and down. A strike with t > pass lands just behind the car, one with
+      // t a little before pass just ahead of it.
       drive: [
+        { t: LEAD + 0.5, pass: LEAD + 2.9, side: 1, beside: 2 },
+        { t: LEAD + 1.9, pass: LEAD + 3.9, side: -1, beside: -2 },
+        { t: LEAD + 4.4, pass: LEAD + 4.8, side: 1, beside: 4 }, // just ahead
+        { t: LEAD + 6.5, pass: LEAD + 5.5, side: -1, beside: -4 }, // just behind
+        { t: LEAD + 6.5, pass: LEAD + 8.9, side: 1, beside: -3 },
+        { t: LEAD + 8.0, pass: LEAD + 10.1, side: -1, beside: 3 },
+        { t: LEAD + 11.1, pass: LEAD + 11.5, side: 1, beside: 3 }, // just ahead
+        { t: LEAD + 12.5, pass: LEAD + 14.7, side: -1, beside: 2 },
+        { t: LEAD + 14.7, pass: LEAD + 13.7, side: 1, beside: 3 }, // just behind
+        { t: LEAD + 15.5, pass: LEAD + 17.9, side: 1, beside: 4 },
+        { t: LEAD + 17.1, pass: LEAD + 17.5, side: -1, beside: 2 }, // just ahead
+      ],
+      drive1: [
         { t: LEAD + num('t1', 1.0), pass: LEAD + num('pass1', 4.6), beside: GAP },
         { t: LEAD + num('t2', 7.0), overlapT: LEAD + 3.0, pass: LEAD + num('pass2', 10.6), beside: GAP },
         { t: LEAD + num('t3', 13.0), pass: LEAD + num('pass3', 16.6), beside: GAP },
@@ -252,7 +277,10 @@
     };
     const SCHEDULE = SCHEDULES[SCENE];
     // Where the car is at sim time t (it reaches SPEED about 1.8 s in).
-    const trackAt = (t) => TRACK[Math.min(TRACK.length - 1, Math.max(0, Math.round(SPEED * Math.max(0, t - 0.9))))];
+    // The barrage's near misses need it closer: measured, the car is 0.75 s
+    // behind that from the start.
+    const RUNUP = SCENE === 'drive' ? 1.65 : 0.9;
+    const trackAt = (t) => TRACK[Math.min(TRACK.length - 1, Math.max(0, Math.round(SPEED * Math.max(0, t - RUNUP))))];
     const APPROACH = 1.35; // s of fireball before contact (cosmetic)
     const VIS_SPEED = 520; // m/s along its path (cosmetic: the real 20 km/s is one frame)
     const MAX_FX = 16;
@@ -956,10 +984,11 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       if (s.beside !== undefined) {
         // Inside the loop beside where the car will pass: the rim `beside` m
         // from the track (the region's box takes the track in).
+        // `side` -1: outside the loop instead, away from the spine.
         const [ax, az] = trackAt(s.pass);
         const sx = Math.max(-STRAIGHT, Math.min(STRAIGHT, ax));
         const d = Math.hypot(ax - sx, az);
-        const off = RIM + s.beside;
+        const off = (RIM + s.beside) * (s.side ?? 1);
         return [ax + (sx - ax) / d * off, az - az / d * off];
       }
       if (s.rimOf !== undefined && SCENE !== 'pass') {
