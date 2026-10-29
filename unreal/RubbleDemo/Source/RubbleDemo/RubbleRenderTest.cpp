@@ -788,10 +788,11 @@ bool FRubbleVideoTown::RunTest(const FString& Parameters)
 
 #if WITH_DEV_AUTOMATION_TESTS
 /**
- * Rubble.Video.GlassTower: the fracture lab's Generated · Glass tower in Unreal, wrecked as the lab
- * wrecks it: bond joints under the lab's solver, three 7 t cannonballs at 18 m/s into the tower's
- * base. Every frame (fixed 1/30 s) to RubbleShots/video/glasstower/ (scripts/unreal/video.sh
- * glasstower encodes them). The camera orbits slowly from the west, the side the shots come from.
+ * Rubble.Video.GlassTower: the fracture lab's Generated · Glass tower in Unreal under the threshold
+ * model with support loss: rigid until its bonds break. The 54 m tower's lower storeys are shot from
+ * either side and it falls south onto the pavilion. Every frame (fixed 1/30 s) to
+ * RubbleShots/video/glasstower/ (scripts/unreal/video.sh glasstower encodes them). The camera orbits
+ * slowly from the west.
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRubbleVideoGlassTower, "Rubble.Video.GlassTower",
 	EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
@@ -803,7 +804,7 @@ bool FRubbleVideoGlassTower::RunTest(const FString& Parameters)
 		return false;
 	}
 	constexpr double Fps = 30.0;
-	constexpr double Length = 22.0;
+	constexpr double Length = 30.0;
 	const FString Dir = ShotDir() / TEXT("video") / TEXT("glasstower");
 	IFileManager::Get().DeleteDirectory(*Dir, false, true);
 	IFileManager::Get().MakeDirectory(*Dir, true);
@@ -829,26 +830,35 @@ bool FRubbleVideoGlassTower::RunTest(const FString& Parameters)
 		const float u = float(At / Length);
 		const float Ease = u * u * (3.0f - 2.0f * u);
 		const float Angle = FMath::DegreesToRadians(FMath::Lerp(-38.0f, 12.0f, Ease));
-		const float Radius = FMath::Lerp(6600.0f, 5600.0f, Ease);
-		const FVector Centre(0, 0, FMath::Lerp(1300.0f, 900.0f, Ease));
-		const FVector Eye = Centre + FVector(Radius * FMath::Sin(Angle), -Radius * FMath::Cos(Angle), FMath::Lerp(1500.0f, 700.0f, Ease));
+		// The 54 m tower standing, then the wreck across the pavilion.
+		const float Radius = FMath::Lerp(9500.0f, 7000.0f, Ease);
+		const FVector Centre(0, 0, FMath::Lerp(2300.0f, 800.0f, Ease));
+		const FVector Eye = Centre + FVector(Radius * FMath::Sin(Angle), -Radius * FMath::Cos(Angle), FMath::Lerp(1200.0f, 900.0f, Ease));
 		if (ARubblePawn* Pawn = Cast<ARubblePawn>(GameWorld()->GetFirstPlayerController()->GetPawn()))
 		{
 			Pawn->LookFrom(Eye, Centre);
 		}
-		// Three shots into the west face's base, a half second apart, from 10 m out at 2 m up,
-		// aimed up enough that gravity brings them in at 1.5 m.
-		static const double Shots[] = { 1.0, 1.5, 2.0 };
-		static const double Along[] = { -500.0, -1000.0, -1500.0 };
-		for (int32 c = 0; c < UE_ARRAY_COUNT(Shots); ++c)
+		// Volleys a second apart, alternately from 7 m off its west face (heading east, +Y) and its
+		// east face (heading west): one ball (45 m/s) along each of the tower's three southern column
+		// rows (X -1174, -824, -474 cm; the fourth, north, at -1524) at each of its lowest storeys'
+		// heights, the ground storey twice. Support loss frees the floors above and they fall south
+		// onto the pavilion; volleys all from one side shove it past the pavilion. In each of six
+		// runs of engine-world's glass_tower_felling_probe (plan "both") it comes to rest on the
+		// pavilion. Sixty shots on 58 parked balls: the last volley reuses the first two.
+		static const double Volleys[] = { 1.0, 2.0, 3.0, 4.0 };
+		for (int32 c = 0; c < UE_ARRAY_COUNT(Volleys); ++c)
 		{
-			if (At >= Shots[c] && !(S->Fired & (1 << c)))
+			if (At >= Volleys[c] && !(S->Fired & (1 << c)))
 			{
 				S->Fired |= 1 << c;
-				const double Speed = 1800.0, Run = 1000.0, Fall = 50.0, G = 981.0;
-				const double T = Run / Speed;
-				const double Up = (-Fall + 0.5 * G * T * T) / T;
-				Rubble()->Launch(FVector(Along[c], -706.0 - Run, 200.0), FVector(0, Speed, Up));
+				const double Side = c % 2 ? 1.0 : -1.0;
+				for (const double Row : { -1174.0, -824.0, -474.0 })
+				{
+					for (const double Up : { 100.0, 260.0, 530.0, 830.0, 1130.0 })
+					{
+						Rubble()->Launch(FVector(Row, Side * (706.0 + 700.0), Up), FVector(0, -Side, 0));
+					}
+				}
 			}
 		}
 		if (S->Frame < 0)

@@ -657,14 +657,13 @@ bool FRubbleAbiBackend::LoadAbi(const FRubbleSceneRequest& Request, FString& Err
 		W.max_joints = FMath::Max(W.max_joints, 32768u);
 		W.max_hull_vertices = FMath::Max(W.max_hull_vertices, 1u << 20);
 	}
-	// The town runs the threshold model (?bonds=1: bond joints); the glass tower bond joints, as
-	// the fracture lab does (?threshold=1: the threshold model).
-	bTownThreshold = Request.Family == ERubbleFamily::Fracture
-		&& ((Request.Id == TEXT("town") && Request.Param(TEXT("bonds"), 0.0f) < 0.5f)
-			|| (Request.Id == TEXT("glasstower") && Request.Param(TEXT("threshold"), 0.0f) > 0.5f));
+	// The town and the glass tower run the threshold model: rigid until a bond's stress passes its
+	// limit, then split (?bonds=1: breakable bond joints, every chunk a body, as the fracture lab).
+	bTownThreshold = Request.Family == ERubbleFamily::Fracture && (Request.Id == TEXT("town") || Request.Id == TEXT("glasstower"))
+		&& Request.Param(TEXT("bonds"), 0.0f) < 0.5f;
 	if (Request.Family == ERubbleFamily::Fracture && Request.Id == TEXT("glasstower"))
 	{
-		// About 1.7k chunks and 4.5k bonds, hull shards of up to 16 points.
+		// About 2.8k chunks and 7.1k bonds, hull shards of up to 16 points.
 		NumBodies += 4096;
 		W.max_joints = FMath::Max(W.max_joints, 1u << 14);
 	}

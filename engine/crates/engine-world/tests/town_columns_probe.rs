@@ -6,7 +6,8 @@
 //! TOWN_SHOTS: `x` (each column row along +x, default), `xz` (also each column line along +z);
 //! TOWN_SPEED (m/s, 45), TOWN_RADIUS (m, 0.6), TOWN_MASS (kg, 7000), TOWN_HEIGHT (m above the
 //! ground, 1.3), TOWN_HEIGHTS (a comma list, a volley at each), TOWN_SUPPORT_LOSS (the
-//! support-loss capability), TOWN_VOLLEYS (the shots again each second, this many in all).
+//! support-loss capability), TOWN_VOLLEYS (the shots again each second, this many in all),
+//! TOWN_SHIFT (x,z: the shots' footprint shift, default the town's 0.03,-0.365).
 #![cfg(feature = "stress")]
 
 use rubble::*;
@@ -72,8 +73,10 @@ fn tower_columns_shot_from_the_side() {
     let roof = *tower.iter().max_by(|&&a, &&b| y_of(a).total_cmp(&y_of(b))).unwrap() as u32;
     let ground_storey: Vec<usize> = tower.iter().copied().filter(|&i| y_of(i) < 3.4 && kind(i) != "foundation").collect();
     let (speed, r, m, h) = (env("TOWN_SPEED", 45.0), env("TOWN_RADIUS", 0.6), env("TOWN_MASS", 7000.0), env("TOWN_HEIGHT", 1.3));
-    // The pack's footprint is centred (x shift +0.03, z shift -0.365) and lifted 0.5 m.
-    let (sx, sz) = (0.03f32, -0.365f32);
+    // The pack's footprint is centred (x shift +0.03, z shift -0.365) and lifted 0.5 m;
+    // TOWN_SHIFT=x,z for another pack (the glass tower's: 0,0).
+    let shift: Vec<f32> = std::env::var("TOWN_SHIFT").map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect()).unwrap_or_default();
+    let (sx, sz) = if shift.len() == 2 { (shift[0], shift[1]) } else { (0.03f32, -0.365f32) };
     // TOWN_HEIGHTS: a comma list of heights in place of TOWN_HEIGHT (a volley at each).
     let heights: Vec<f32> = std::env::var("TOWN_HEIGHTS").map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect()).unwrap_or_else(|_| vec![h]);
     // The column lines (pack frame) and the tower's footprint.

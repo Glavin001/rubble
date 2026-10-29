@@ -591,11 +591,13 @@ pub fn replace_building(pack: &mut serde_json::Value, group: &str, tower: &Tower
     add_building(pack, tower, at, name)
 }
 
-/// The fracture lab's glass tower scene (a ScenePack v2): the town's glass tower and, 7.8 m off
-/// its south face, a two-storey glass pavilion it can be felled onto, as the Unreal town's tower
-/// stands by its grocery. Shots are the town's cannonballs (60 cm iron, 7 t).
+/// The fracture lab's glass tower scene (a ScenePack v2): an eighteen-storey glass tower (the
+/// town's on its footprint, eight storeys taller) and, 7.8 m off its south face, a two-storey glass
+/// pavilion it can be felled onto, as the Unreal town's tower stands by its grocery. Shots are the town's cannonballs (60 cm iron, 7 t).
 pub fn felling_scene_pack() -> serde_json::Value {
-    let tall = glass_tower(&GlassTowerOptions::default());
+    // Eighteen storeys (54 m on its 14 m square, about 1:4): a ten-storey tower is too squat to
+    // topple; its freed upper floors settle on their own base at ~30 degrees.
+    let tall = glass_tower(&GlassTowerOptions { storeys: 18, ..GlassTowerOptions::default() });
     let small = glass_tower(&GlassTowerOptions { storeys: 2, half: 6.0, seed: 0x7061_7669, ..GlassTowerOptions::default() });
     let gap = 7.8 + SKIN;
     let mut pack = serde_json::json!({
@@ -682,7 +684,9 @@ mod tests {
         let pack = felling_scene_pack();
         let bytes = serde_json::to_vec(&pack).unwrap();
         let (scene, info) = crate::pack::build_pack_scene(&bytes).unwrap();
-        let tall = glass_tower(&GlassTowerOptions::default());
+        // Eighteen storeys (54 m on its 14 m square, about 1:4): a ten-storey tower is too squat to
+    // topple; its freed upper floors settle on their own base at ~30 degrees.
+    let tall = glass_tower(&GlassTowerOptions { storeys: 18, ..GlassTowerOptions::default() });
         let small = glass_tower(&GlassTowerOptions { storeys: 2, half: 6.0, ..GlassTowerOptions::default() });
         assert_eq!(info.nodes, tall.nodes.len() + small.nodes.len());
         assert_eq!(info.bonds, tall.bonds.len() + small.bonds.len());
