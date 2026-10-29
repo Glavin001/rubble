@@ -39,8 +39,9 @@ pub mod table {
         pub binds: &'static [(u32, u32, u32)],
     }
     include!(concat!(env!("OUT_DIR"), "/cuda_kernels.rs"));
+    include!(concat!(env!("OUT_DIR"), "/cuda_terrain_kernels.rs"));
 }
-pub use table::{CudaKernel, CUDA_KERNELS, PTX_ARCH, SASS_ARCHS};
+pub use table::{CudaKernel, CUDA_KERNELS, CUDA_TERRAIN_KERNELS, PTX_ARCH, SASS_ARCHS};
 
 /// Binding 23: colour slots, work slots and convex slots, three words each.
 const INDIRECT_BINDING: u32 = 23;

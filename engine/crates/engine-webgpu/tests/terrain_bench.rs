@@ -322,10 +322,20 @@ fn terrain_demo_profile() {
             next += 1;
         }
         let rep = if profile && timed {
-            let (rep, times) = s.terrain_step_timed(k, dt, -9.81).unwrap();
-            let total: f64 = times.iter().map(|(_, ms)| ms).sum();
+            // PROFILE_REPEAT frames from here: the quietest one's kernels
+            // (other work on the GPU only adds), and the median total.
+            let reps = env("PROFILE_REPEAT", 1.0).max(1.0) as usize;
+            let mut runs = Vec::new();
+            for _ in 0..reps {
+                let (rep, times) = s.terrain_step_timed(k, dt, -9.81).unwrap();
+                let total: f64 = times.iter().map(|(_, ms)| ms).sum();
+                runs.push((total, rep, times));
+            }
+            runs.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let median = runs[runs.len() / 2].0;
+            let (total, rep, times) = runs.swap_remove(0);
             eprintln!(
-                "t {t:.2} s: {k} substeps, {} blocks, {} particles, max speed {:.2} m/s: GPU {total:.2} ms ({:.3} per substep)",
+                "t {t:.2} s: {k} substeps, {} blocks, {} particles, max speed {:.2} m/s: GPU {total:.2} ms ({:.3} per substep; median of {reps}: {median:.2} ms)",
                 rep.blocks,
                 rep.particles,
                 rep.max_speed,

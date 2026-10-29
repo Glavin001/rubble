@@ -84,10 +84,12 @@ static const uint MPM_C_ESCAPED = 7u;     // quanta that left the heightfield's 
 static const uint MPM_C_SORTED = 8u;      // sorted slots claimed by blocks this substep
 static const uint MPM_C_AIRBORNE = 9u;    // parcels still in flight after this substep
 static const uint MPM_C_BODY_SPEED = 10u; // fastest dynamic body coupled this frame (f32 bits)
-static const uint MPM_C_SURFACE = 11u;    // the material's top under a source point (ordered bits)
-static const uint MPM_C_AREA_SPEED = 12u; // + slot: an area's fastest particle this frame (f32 bits)
-static const uint MPM_C_AREA_BODY = 28u;  // + slot: an area's fastest coupled body this frame
-static const uint MPM_C_AREA_FIRST = 44u; // + slot: the pool's particle count when the area opened
+static const uint MPM_C_FLYING = 12u;     // parcels thrown before this substep's G2P (mpm_parcels flies them)
+static const uint MPM_C_GEOSTATIC = 11u;  // nonzero: this substep's mpm_payload sets the geostatic F first
+static const uint MPM_C_SURFACE = 13u;    // the material's top under a source point (ordered bits)
+static const uint MPM_C_AREA_SPEED = 16u; // + slot: an area's fastest particle this frame (f32 bits)
+static const uint MPM_C_AREA_BODY = 32u;  // + slot: an area's fastest coupled body this frame
+static const uint MPM_C_AREA_FIRST = 48u; // + slot: the pool's particle count when the area opened
 static const uint MPM_MAX_AREAS = 16u;
 static const uint MPM_NO_AREA = 0xFFFFFFFFu;
 // gMpmParams[0].area.w bits.
@@ -201,7 +203,12 @@ BIND(47) RWStructuredBuffer<AUint> gMpmColumns;
 // [0] coupled colliders; per region block cell c (x + X·(y + Y·z)):
 // [4 + c·(1 + MPM_CELL_COLLIDERS)] count, then coupling slots.
 BIND(48) RWStructuredBuffer<AUint> gMpmCouple;
-// Ejecta parcels: [2k] = (position, quanta bits), [2k + 1] = (velocity, mass; 0 once landed).
+// Ejecta parcels: [2k] = (position, quanta bits), [2k + 1] = (velocity, mass; 0 once landed);
+// from [2·max parcels] on, per parcel k, x = the particle it left (uint bits).
+// Slots k are handed out by an atomic, so their order is the GPU's: nothing
+// that changes results depends on k (the deposit's rounding is seeded by the
+// particle, and a parcel landing back in the region takes that particle's
+// own slot again), so runs agree bit for bit.
 BIND(50) RWStructuredBuffer<float4> gMpmParcels;
 // Per heightfield sample (j·nx + i): quanta deposited this frame.
 BIND(51) RWStructuredBuffer<AUint> gMpmDeposit;
@@ -438,6 +445,9 @@ void mpmWriteArgs(MpmParams p)
     gMpmArgs[5] = 1u;
     uint parcels = min(ALOAD(gMpmCounters[MPM_C_PARCELS]), asuint(p.couple.z));
     gMpmArgs[6] = (parcels + MPM_GROUP - 1u) / MPM_GROUP;
+    // Exactly these fly in mpm_parcels: G2P adds parcels after this, in the
+    // GPU's slot order, and its last workgroup would fly some of them.
+    ASTORE(gMpmCounters[MPM_C_FLYING], parcels);
     gMpmArgs[7] = 1u;
     gMpmArgs[8] = 1u;
 }
@@ -680,6 +690,29 @@ float3x3 mpmStress(inout MpmParticle q, MpmParams p)
     return mpmHenckyKirchhoff(U, s, p.sand.x, p.sand.y);
 }
 
+// The payload of slot s, the first substep after a geostatic activation:
+// particle q's geostatic F first (mpmGeostaticStart), then as mpm_payload.
+// A function of its own behind mpm_payload's early return, so the usual
+// path's code (and its fast-math results) is unchanged.
+void mpmPayloadGeostatic(uint s, MpmParams p)
+{
+    uint id = gMpmSorted[s];
+    MpmParticle q = gMpmParticles[id];
+    mpmGeostaticFresh(q, p);
+    float m = q.xm.w;
+    float dx = p.origin.w;
+    float3x3 C = float3x3(q.c0.xyz, q.c1.xyz, q.c2.xyz);
+    float3x3 tau = mpmStress(q, p);
+    gMpmParticles[id] = q;
+    float3x3 A = C * m - tau * (p.step.x * q.f0.w * 4.0 / (dx * dx));
+    MpmPayload o;
+    o.xm = q.xm;
+    o.p0 = float4(q.vj.xyz * m, A[0].x);
+    o.p1 = float4(A[0].y, A[0].z, A[1].x, A[1].y);
+    o.p2 = float4(A[1].z, A[2].x, A[2].y, A[2].z);
+    gMpmPayload[s] = o;
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void mpm_payload(uint3 tid : SV_DispatchThreadID)
@@ -687,13 +720,18 @@ void mpm_payload(uint3 tid : SV_DispatchThreadID)
     uint s = mpmIndex(tid);
     MpmParams p = mpmParams();
     if (s >= ALOAD(gMpmCounters[MPM_C_SORTED])) return;
+    // The first substep after a geostatic activation: its F first.
+    if (ALOAD(gMpmCounters[MPM_C_GEOSTATIC]) != 0u)
+    {
+        mpmPayloadGeostatic(s, p);
+        return;
+    }
     uint id = gMpmSorted[s];
     MpmParticle q = gMpmParticles[id];
     float m = q.xm.w;
     float dx = p.origin.w;
     float3x3 C = float3x3(q.c0.xyz, q.c1.xyz, q.c2.xyz);
     float3x3 tau = mpmStress(q, p);
-    // What the return map changed: F, log Jp, and the rock's damage.
     if (p.counts.w != MPM_MATERIAL_NONE) gMpmParticles[id] = q;
     float3x3 A = C * m - tau * (p.step.x * q.f0.w * 4.0 / (dx * dx));
     MpmPayload o;
@@ -1340,16 +1378,31 @@ void mpm_geostatic(uint3 tid : SV_DispatchThreadID)
     MpmParams p = mpmParams();
     if (i >= mpmParticleCount()) return;
     MpmParticle q = gMpmParticles[i];
-    // Only material activated since the last step (others are moving already).
-    if (mpmParticleDead(q) || (asuint(q.f2.w) & MPM_PARTICLE_FRESH) == 0u) return;
-    uint area = mpmAreaOf(q.xm.xyz, p);
-    if (area == MPM_NO_AREA) return;
-    p = mpmArea(area);
+    if (mpmParticleDead(q)) return;
+    if (mpmGeostaticFresh(q, p)) gMpmParticles[i] = q;
+}
+
+// The geostatic start of particle q when it was activated since the last
+// step (MPM_PARTICLE_FRESH, which it clears): its area's (the others' material
+// is moving already). True when q changed.
+bool mpmGeostaticFresh(inout MpmParticle q, MpmParams p)
+{
+    if ((asuint(q.f2.w) & MPM_PARTICLE_FRESH) == 0u) return false;
     q.f2.w = asfloat(asuint(q.f2.w) & ~MPM_PARTICLE_FRESH);
-    gMpmParticles[i] = q;
-    if ((asuint(q.f2.w) & MPM_PARTICLE_HOME) == 0u) return;
+    uint area = mpmAreaOf(q.xm.xyz, p);
+    if (area != MPM_NO_AREA) mpmGeostaticStart(q, mpmArea(area));
+    return true;
+}
+
+// The geostatic F of activated particle q (see mpm_geostatic); false when it
+// takes none. The plan applies it in the first substep's mpm_payload, just
+// before the stress (MPM_C_GEOSTATIC): the same F, one pass over the
+// particles less on the strike frame.
+bool mpmGeostaticStart(inout MpmParticle q, MpmParams p)
+{
+    if ((asuint(q.f2.w) & MPM_PARTICLE_HOME) == 0u) return false;
     float modulus = p.sand.x + 2.0 * p.sand.y;
-    if (!(modulus > 0.0) || !(p.step.y < 0.0)) return;
+    if (!(modulus > 0.0) || !(p.step.y < 0.0)) return false;
     Collider col = gColliders[p.dims.w];
     Frame f = colliderFrame(col, gBodies[col.body]);
     HeightFieldRef hf = heightFieldOf(col);
@@ -1359,7 +1412,7 @@ void mpm_geostatic(uint3 tid : SV_DispatchThreadID)
     float top = p.column.x + float(ALOAD(gMpmColumns[mpmCol(p, t)])) * p.column.y / mpmSampleArea(hf);
     float depth = max(top - frameToLocal(f, q.xm.xyz).y, 0.0);
     q.f1.y = exp(p.step.y * p.column.w * depth / modulus);
-    gMpmParticles[i] = q;
+    return true;
 }
 
 // A node over the unactivated ground beside the window, at or below that
@@ -1393,6 +1446,8 @@ void mpm_grid(uint3 tid : SV_DispatchThreadID)
     MpmParams p = mpmParams();
     uint b = n / MPM_BLOCK_NODES;
     if (b >= min(ALOAD(gMpmCounters[MPM_C_BLOCKS]), p.counts.z)) return;
+    // mpm_payload has set the geostatic F: later substeps do not.
+    if (n == 0u) ASTORE(gMpmCounters[MPM_C_GEOSTATIC], 0u);
     float4 node = gMpmGrid[2u * n];
     if (node.w <= p.step.z) { gMpmGrid[2u * n] = float4(0, 0, 0, node.w); return; }
     float3 v = node.xyz / node.w;
@@ -1508,6 +1563,9 @@ void mpm_g2p(uint3 tid : SV_DispatchThreadID)
         {
             gMpmParcels[2u * k] = float4(q.xm.xyz, q.f1.w);
             gMpmParcels[2u * k + 1u] = float4(v, q.xm.w);
+            gMpmParcels[2u * maxParcels + k] = float4(asfloat(i), 0, 0, 0);
+            // In flight from now (mpm_parcels flies it from the next substep).
+            AADD2(gMpmCounters[MPM_C_AIRBORNE], 1u);
             q.f2.w = asfloat(asuint(q.f2.w) | MPM_PARTICLE_DEAD);
         }
         else AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_PARCELS);
@@ -1640,50 +1698,66 @@ void mpm_activate_scan(uint3 lid : SV_GroupThreadID)
 
 bool mpmActivationRefused() { return (ALOAD(gMpmCounters[MPM_C_FLAGS]) & MPM_OVERFLOW_PARTICLES) != 0u; }
 
-// Per window sample: its particles, sharing the quanta it gives now (the
-// first `quanta mod n` take one more), from its bed up.
+// Per particle of the window (one thread each: a column's particles were a
+// serial loop of one thread per sample before, the strike frame's longest
+// activation kernel): the sample whose range holds it, by binary search over
+// the samples' first particles, and its place in that sample's lattice. The
+// first `quanta mod n` of a sample take one more quantum. Writes exactly what
+// the per-sample loop wrote.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void mpm_activate_emit(uint3 tid : SV_DispatchThreadID)
 {
-    uint t = mpmIndex(tid);
+    uint i = mpmIndex(tid);
     MpmParams p = mpmSelArea();
-    if (t >= p.window.z * p.window.w || mpmActivationRefused()) return;
+    uint samples = p.window.z * p.window.w;
+    if (samples == 0u || mpmActivationRefused() || i >= mpmParticleCount()) return;
+    // Particles already in the pool before this activation are not its.
+    if (i < ALOAD(gMpmColumns[mpmCol(p, 0u) + 2u])) return;
+    // The last sample whose first particle is at or before i (samples with
+    // no particles share the next one's first, so this one holds i).
+    uint lo = 0u, hi = samples - 1u;
+    while (lo < hi)
+    {
+        uint mid = (lo + hi + 1u) / 2u;
+        if (ALOAD(gMpmColumns[mpmCol(p, mid) + 2u]) <= i) lo = mid;
+        else hi = mid - 1u;
+    }
+    uint t = lo;
+    uint total = ALOAD(gMpmColumns[mpmCol(p, t) + 1u]);
+    uint first = ALOAD(gMpmColumns[mpmCol(p, t) + 2u]);
+    if (i >= first + total) return;
+    uint k = i - first;
     Collider col = gColliders[p.dims.w];
     Frame f = colliderFrame(col, gBodies[col.body]);
     HeightFieldRef hf = heightFieldOf(col);
     uint2 ij = mpmWindowSample(t, p);
+    // The quanta it gives now (a grown area's old sample: only a deeper slab).
     uint quanta = ALOAD(gMpmColumns[mpmCol(p, t) + 3u]);
-    uint total = ALOAD(gMpmColumns[mpmCol(p, t) + 1u]);
-    if (total == 0u) return;
-    uint first = ALOAD(gMpmColumns[mpmCol(p, t) + 2u]);
     float area = mpmSampleArea(hf);
     float dh = float(quanta) * p.column.y / area;
     uint3 n = mpmColumnLattice(hf, dh, quanta, p);
-    float3 lo = float3(hf.x0 + (float(ij.x) - 0.5) * hf.dx, p.column.x, hf.z0 + (float(ij.y) - 0.5) * hf.dz);
+    float3 lo3 = float3(hf.x0 + (float(ij.x) - 0.5) * hf.dx, p.column.x, hf.z0 + (float(ij.y) - 0.5) * hf.dz);
     float3 cell = float3(hf.dx / float(n.x), dh / float(n.y), hf.dz / float(n.z));
     uint each = quanta / total, extra = quanta % total;
-    for (uint k = 0u; k < total; k++)
-    {
-        uint3 c = uint3(k % n.x, (k / n.x) % n.y, k / (n.x * n.y));
-        float3 xl = lo + (float3(c) + 0.5) * cell;
-        uint mine = each + (k < extra ? 1u : 0u);
-        float vol = float(mine) * p.column.y;
-        float3 xw = frameToWorld(f, xl);
-        // Where the bake will see it if it never moves (the same transform
-        // mpm_bake_bin applies), so its displacement is then exactly zero.
-        float3 home = frameToLocal(f, xw);
-        MpmParticle q;
-        q.xm = float4(xw, vol * p.column.w);
-        q.vj = float4(0, 0, 0, 0);
-        q.c0 = float4(0, 0, 0, 0);
-        q.c1 = float4(0, 0, 0, home.x);
-        q.c2 = float4(0, 0, 0, home.z);
-        q.f0 = float4(1, 0, 0, vol);
-        q.f1 = float4(0, 1, 0, asfloat(mine));
-        q.f2 = float4(0, 0, 1, asfloat(MPM_PARTICLE_HOME | MPM_PARTICLE_FRESH));
-        gMpmParticles[first + k] = q;
-    }
+    uint3 c = uint3(k % n.x, (k / n.x) % n.y, k / (n.x * n.y));
+    float3 xl = lo3 + (float3(c) + 0.5) * cell;
+    uint mine = each + (k < extra ? 1u : 0u);
+    float vol = float(mine) * p.column.y;
+    float3 xw = frameToWorld(f, xl);
+    // Where the bake will see it if it never moves (the same transform
+    // mpm_bake_bin applies), so its displacement is then exactly zero.
+    float3 home = frameToLocal(f, xw);
+    MpmParticle q;
+    q.xm = float4(xw, vol * p.column.w);
+    q.vj = float4(0, 0, 0, 0);
+    q.c0 = float4(0, 0, 0, 0);
+    q.c1 = float4(0, 0, 0, home.x);
+    q.c2 = float4(0, 0, 0, home.z);
+    q.f0 = float4(1, 0, 0, vol);
+    q.f1 = float4(0, 1, 0, asfloat(mine));
+    q.f2 = float4(0, 0, 1, asfloat(MPM_PARTICLE_HOME | MPM_PARTICLE_FRESH));
+    gMpmParticles[i] = q;
 }
 
 // Heightfield records (four samples each) touching the window, as a range.
@@ -2528,7 +2602,7 @@ void mpm_parcels(uint3 tid : SV_DispatchThreadID)
 {
     uint k = mpmIndex(tid);
     MpmParams p = mpmParams();
-    if (k >= min(ALOAD(gMpmCounters[MPM_C_PARCELS]), asuint(p.couple.z))) return;
+    if (k >= ALOAD(gMpmCounters[MPM_C_FLYING])) return;
     float4 xq = gMpmParcels[2u * k], vm = gMpmParcels[2u * k + 1u];
     if (vm.w <= 0.0) return;
     float dt = p.step.x;
@@ -2551,11 +2625,14 @@ void mpm_parcels(uint3 tid : SV_DispatchThreadID)
         else if (xl.y <= h)
         {
             landed = true;
+            // The particle it left (its slot is dead while it flies).
+            uint source = asuint(gMpmParcels[2u * asuint(p.couple.z) + k].x);
             if (mpmAreaOf(xq.xyz, p) != MPM_NO_AREA)
             {
-                uint slot;
-                AADD3(gMpmCounters[MPM_C_PARTICLES], 1u, slot);
-                if (slot < p.counts.x)
+                // Back as a particle, in the slot of the one it left: no
+                // atomic, so particle ids (P2G's order) do not depend on the
+                // parcels' slots.
+                uint slot = source;
                 {
                     MpmParticle q;
                     float vol = float(quanta) * p.column.y;
@@ -2570,9 +2647,8 @@ void mpm_parcels(uint3 tid : SV_DispatchThreadID)
                     q.f2 = float4(0, 0, 1, 0);
                     gMpmParticles[slot] = q;
                 }
-                else AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_PARTICLES);
             }
-            else landed = mpmParcelDeposit(xl, quanta, ~k, p, hf);
+            else landed = mpmParcelDeposit(xl, quanta, ~source, p, hf);
         }
     }
     if (!landed) AADD2(gMpmCounters[MPM_C_AIRBORNE], 1u);

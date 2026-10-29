@@ -49,13 +49,18 @@ pub const MPM_C_DEPOSITED: usize = 6;
 pub const MPM_C_ESCAPED: usize = 7;
 pub const MPM_C_AIRBORNE: usize = 9;
 pub const MPM_C_BODY_SPEED: usize = 10;
+/// Nonzero: the next substep's `mpm_payload` sets the geostatic F first.
+pub const MPM_C_GEOSTATIC: usize = 11;
+/// Parcels thrown before this substep's G2P: the ones `mpm_parcels` flies.
+pub const MPM_C_FLYING: usize = 12;
+/// The first 16 words are the frame's counters; the areas' follow.
 /// The material's surface under a source point (order-preserving f32 bits),
 /// found on the GPU when a source lands on ground already moving.
-pub const MPM_C_SURFACE: usize = 11;
+pub const MPM_C_SURFACE: usize = 13;
 /// Per area slot k: its fastest particle over the frame (f32 bits) at
 /// `MPM_C_AREA_SPEED + k`, and its fastest coupled body at
 /// `MPM_C_AREA_BODY + k`.
-pub const MPM_C_AREA_SPEED: usize = 12;
+pub const MPM_C_AREA_SPEED: usize = 16;
 pub const MPM_C_AREA_BODY: usize = MPM_C_AREA_SPEED + MPM_MAX_AREAS as usize;
 /// Per area slot: the pool's particle count when it opened (the bake's
 /// dithers count slots from it, so an area bakes as it would alone).

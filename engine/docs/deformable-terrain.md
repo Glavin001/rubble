@@ -144,7 +144,8 @@ uses by default ("Performance").
 - **Coupling.** Bodies that rotate fast within a frame (poses are the frame's
   start).
 - **Hosts.** An Unreal sample project. The browser has no strike look-ahead and
-  no ruts yet.
+  no ruts yet. Native Metal runs the terrain plan (`MetalSim`); CUDA compiles
+  it but has no executor ("Native backends").
 - **Real time** comes from scale. Centimetre-cell events run far slower than
   1×, by the user's choice of physical stiffness.
 
@@ -181,8 +182,8 @@ Known limits:
   Restricting the face to ones the terrain supports there made boxes sink or
   slide on uneven terrain and under CCD, so it is not done.
 - Not in the fracture lab's own pipeline (`fracture_step`, its own hull buffer),
-  and not on the Metal or CUDA backends (they reject heightfield colliders: their
-  step graphs have no convex stages).
+  in `MetalWorld` or on CUDA. `MetalSim` takes heightfields since 2026-10-25
+  ("Native backends").
 - Rolling spheres and capsules lose speed as their spin grows, on planes too (an
   existing solver effect, not the heightfield's).
 - `char_move` compiles in about 8 s in Chrome on Metal, against about 5.6 s with
@@ -1532,17 +1533,377 @@ impact case's region to 70,644 particles):
 - `engine-world` `fingerprint_world_impact_to_bake`: reports
   `c99f8a2f0a2fd4d4`, heights `7539de010b3a6c4f`, box `136fde101445dae3`.
 
-**Validation at the physical defaults** (bed 1.5 R):
+**The strike frame (2026-10-25, second pass).** The user's target: every
+terrain frame under about 2 ms natively at 120 Hz, the strike frame
+included (the game profile).
+- **Its substeps cannot drop at 120 Hz.** Sizing only the first substep at
+  the source's peak (about 1.7 km/s at the core's edge) and the rest at the
+  speed after it was the plan's first item. At 8 cells/R and Courant 0.45
+  that first substep covers 4.4 ms of the 8.3 ms frame, and a second one
+  takes the rest whatever its speed: two substeps either way. It would save
+  substeps only on the physical profile (6 on its strike frame), and it is
+  not built.
+- **Per-particle activation emit** (`mpm_activate_emit`: a thread per
+  particle, finding its sample by binary search over the samples' first
+  particles, instead of a serial loop per column). It writes exactly what
+  the loop wrote: 0.12 → 0.06-0.10 ms.
+- **The geostatic start in the first payload.** `mpm_geostatic` had a pass
+  over every particle of its own. The first substep's `mpm_payload` now sets
+  the geostatic F just before the stress: counter `MPM_C_GEOSTATIC`, set by
+  the plan and cleared by `mpm_grid`. It sits in a function of its own behind
+  an early return: inline, Metal's fast-math compiled the usual path
+  differently and the loaded cube's fingerprint changed. The first substep's
+  stress now rounds differently (deterministic; the impact fingerprint
+  changes).
+- **The grid binding** is 32 B per node, two float4 records. It was sized
+  at 16 B, so a region using more than half of `max_blocks` wrote past it
+  (WebGPU's robust access clamps such writes). No test region came near that.
+- **Tried, not kept:** P2G in cell sums. In three rounds of nine nodes, each
+  cell first sums its particles' share, then each node adds its cells'
+  sums. Each payload is then read 3 times instead of 27, but it was slower
+  on wgpu-on-Metal: 0.70 against 0.60 ms per frame (the best of 20 frames
+  each). It costs six dispatches and 144 B more per node. The Metal
+  executor's `p2g_cells` fast path does the same in one round with
+  threadgroup memory, and pays there ("Native backends").
+- **Timing.** A pass's own timestamps around many dispatches read 0 on
+  wgpu-on-Metal, and the adapter has no encoder timestamps. The wgpu numbers
+  are each kernel's own pass, summed (`RUBBLE_TERRAIN_GPU_MS=1`), and the
+  strike frame there measures 4.2-4.3 ms however warm the GPU (`WARM=1`,
+  `GAP_MS`). `engine-metal`'s `terrain_bench` times the command buffer
+  itself; its numbers are the reference.
+
+The strike frame and every frame after it: activation, source and frame 0
+together; all 720 frames of 6 s; three runs each.
+`cargo run --release -p engine-metal --example terrain_bench -- --game --secs 6 --runs 3`:
+
+| Native, game profile | Strike frame | Worst frame | First second, mean / max | Steady, mean / max |
+|---|---|---|---|---|
+| Metal, portable kernels | 2.48 ms | 2.06 ms (frame 0, 2 substeps) | 0.98 / 2.06 | 1.01 / 1.26 |
+| Metal, fast paths | 2.03 ms | 1.70 ms (frame 0) | 0.97 / 1.70 | 0.50 / 0.55 |
+
+- Other agents' runs shared the GPU until 3.5 s into this run: the fast
+  paths' steady frames read 1.0 ms before that and 0.50 ms after.
+- The same run's particle and parcel hashes match across all three runs and
+  each backend's own runs. With nothing else on the GPU, the strike frame on
+  the fast paths is about 1.6 ms ("Native backends").
+- What remains of the strike frame: two substeps (0.5-0.85 ms each on the
+  fast paths), activation 0.17 ms (its emit 0.09-0.10), the source 0.04-0.08.
+  The source could move into the first payload as the geostatic start did
+  (it saves its pass), but a host would then read the source's velocities
+  only after the first substep, and `the_source_kernel_applies_the_z_model_field`
+  reads them right after it. Left as it is.
+
+In Chrome (`impact.html`, the game profile, 1/120 s frames, all 2,029
+frames to the bake): the strike frame 1.7 ms (4.2 before this pass); median
+0.72 ms, 90% 2.16, 99% 2.23, worst 3.28 ms; mean 1.25.
+
+**Ejecta, deterministic (2026-10-25).** G2P hands each ejected parcel a slot
+by atomic, so the slots' order is the GPU's. The Metal executor's run-to-run
+check found that it reached results in two ways:
+- the deposit's whole-quanta rounding was seeded by the slot;
+- `mpm_parcels`'s last workgroup flew some of the parcels G2P had just
+  thrown, chosen by slot, so their landing came a substep early or late. The
+  test below found this one.
+
+A parcel landing back in the region also took a particle slot by atomic,
+which reorders P2G's sums. Now:
+- each parcel records the particle it left (after the parcels in binding
+  50, 48 B per parcel), and the deposit is seeded by that particle;
+- a parcel landing back takes its particle's own dead slot again;
+- `mpm_parcels` flies exactly the parcels thrown before this substep's G2P
+  (`MPM_C_FLYING`, set with the workgroup counts; `MPM_COUNTER_WORDS` is
+  16), and a parcel counts as airborne from the substep it is thrown in.
+- Test: `terrain_mpm` `ejecta_are_the_same_run_to_run`. A layer is thrown
+  partly out of the region and partly back into it (14,771 parcels): the
+  heights, the particles and the parcels (as a set) are bit-identical over
+  two runs. Before the last fix, 7 samples' heights differed.
+
+**Fingerprints now:**
+- `engine-webgpu` impact: particles `2d38d5b92f5c7c7f`, bodies
+  `ab718fa12584d495`, heights `767eaa69f034c221`; the cube is unchanged
+  (`5ac333cbab3eb7bb`).
+- `engine-world`: reports `9d870853cf98ba9f`, heights `bd49360d36b558ae`, box
+  `136fde101445dae3`.
+- These cases throw no parcels, so the ejecta change leaves them as they
+  were.
+
+**Validation at the physical defaults** (bed 1.5 R; after the second pass:
+the same to the digits shown):
 - crater (`terrain_crater`, 16 cells/R, margin 2): apparent radius 0.184 m
   (1.25 R), depth 0.069 m, rim 2.9 cm at 0.248 m, axis ridge 0.5 mm, cavity
   3.08× π-scaling's (the known volume failure; 3.10× before). 347 s wall
   (782 s before);
 - slope (`terrain_slope`): the 40° slope relaxes to 29.7°, the 25° slope
-  moves 1.9 mm;
+  moves 1.9 mm (1.5 mm after the second pass; the game profile 28.6° and
+  1.8 mm);
+- coupling at the game profile passes after the second pass too;
 - every listed suite passes (`terrain_mpm`, `terrain_couple`,
   `terrain_absorb`, `terrain_bake_axis`, `terrain_watch`,
   `terrain_materials`, `mpm_material`, `heightfield`, `vehicle_soil`;
   engine-world `terrain`; engine-terrain; `terrain_plan.test.mjs`).
+
+## Native backends (2026-10-25)
+
+The terrain plan on native Metal (`engine-metal`'s `MetalSim`), its Metal-only
+fast paths, a benchmark against wgpu-on-Metal, and the plan for CUDA. All on
+the M3 Max, sharing the GPU with other agents' runs (see "Timing" below).
+
+**Heightfields in `MetalSim`.** `MetalSim::add_height_field` puts the samples
+in the hull arena (binding 18, grown to the next power of two of records)
+and the collider on a static body of its own, as `WgpuSim` does. Heightfield
+pairs take the rigid plan's convex stages (`has_height_field`), and such
+scenes take the full persistence scan (the persist list is narrowphase's;
+the convex kernels emit after it). `MetalWorld` and CUDA still reject them.
+
+**The executor** (`engine-metal/src/terrain.rs`). `MetalSim` replays
+`TerrainPlan`'s `TerrainOps` unchanged:
+- Kernels: `build.rs` compiles `engine_terrain::plan::KERNELS` and the
+  look-ahead's entries Slang → MSL in the browser's `ENGINE_WGSL` layout (the
+  same source as wgpu and the browser). Slang numbers Metal buffers across
+  the whole module, past Metal's 31 per stage for a file that includes
+  `world_step.slang`; `msl_layout::compact_buffers` renumbers each kernel's
+  signature from 0, and the table maps each index back to its `BIND` slot.
+- Bindings 37–52 as the plan sizes them, 53 a placeholder for the render
+  surface (as on wgpu), 54 the `p2g_cells` partials.
+- Each call is one command buffer: the plan's host writes (and pending flag
+  resets) as blits at its head, the queue-ordered `write_buffer` of wgpu,
+  then one serial compute encoder. Indirect commands use
+  `dispatchThreadgroupsWithIndirectBuffer` on binding 46: the counts the GPU
+  wrote, no host readback inside a frame. Counters are read in place
+  (shared storage) after the frame.
+- `terrain_enable` fills every terrain buffer on the GPU. The GPU's first
+  touch of a page is far dearer than a later one: on fresh buffers the
+  strike's activation and source took 12 ms, prefaulted 0.5–1 ms (0.9 M
+  particles). wgpu does not prefault; its strike frame pays this (below).
+- API as `WgpuSim`'s: `terrain_enable`, `_set_material`, `_load`,
+  `_activate`, `_apply_source`, `_step` (and `_step_timed`,
+  `_step_profiled`), `step_with_terrain` (coupled, the rigid step applying
+  the reactions), `_bake`, the readbacks; `terrain_profile_next` times any
+  call per kernel.
+- After merging the branch's kernel changes (the binning keys, the packed
+  payload, P2G's lanes, the fused first `write_args`, binding 53) the
+  executor ran the new plan without a change of its own.
+- Not yet: the render surface pass (`SurfacePlan`; its kernels are not in
+  the table), a host API for the look-ahead (its kernels are compiled), and
+  waking sleeping bodies on a coupled frame (wgpu's `wake_pending`).
+
+**Against wgpu** (`engine-metal/tests/terrain_parity.rs`, 7 tests, one
+process at a time, about 30 s):
+
+| Stage | Metal against wgpu |
+|---|---|
+| activation (lowered field, particles), the source, activate-then-bake | bit for bit |
+| one substep after the source | 95.5% of particles bit for bit, the rest within 1.8e-12 m/s |
+| 4 impact frames (70.6 k particles) | max \|Δx\| 5.8e-6 m, \|Δv\| 3.0e-4 m/s; the same particle, parcel and block counts; the bake within 1.1e-4 m |
+| 6 coupled frames, a box falling in | the box within 2.1e-6 m |
+| host-loaded sand cube, 6 frames | 1.4e-5 m |
+| spheres and boxes on a bumpy heightfield (rigid), 120 steps | 1.6e-5 m |
+| Metal run against Metal run | bit for bit |
+
+The integer work agrees exactly. The float work differs in its last bits
+from the first substep: the two codegens (Slang → MSL, and Slang → SPIR-V →
+WGSL → naga → MSL) contract and order expressions differently, both under
+Metal's default fast math (wgpu's Metal backend compiles with it; strict
+math on Metal moved the run further from wgpu, to 8.5e-5 m). Bit-identity
+would need one codegen for both.
+
+**Fast paths** (`TerrainCaps`, `slang/kernels/terrain_mpm_fast.slang`, off
+by default; `ENGINE_TERRAIN_CAPS=p2g_cells` or `all`):
+- **`p2g_cells`: P2G in two passes, each particle read once.**
+  `mpm_p2g_cells` gives each cell a SIMD group: lane o < 27 owns one of the
+  27 nodes the cell's particles reach and sums the cell's particles in their
+  sorted order (the loads are uniform across the group) into a partial per
+  (cell, node). `mpm_p2g_nodes` then sums each node's 27 partials in the
+  portable kernel's cell order.
+  - Deterministic: fixed orders, no atomics; checked run to run.
+  - Not bit for bit the portable kernel: it adds the same terms grouped by
+    cell. Against the portable kernels: 6.4e-6 m and 2.8e-4 m/s after four
+    impact frames, within what the two codegens differ by.
+  - P2G per substep: 0.76 → 0.51 ms at 0.55 M particles, 0.26 → 0.19 ms at
+    115 k (quiet profiles).
+  - Binding 54 holds the partials: `max_blocks` × 64 × 27 × 16 bytes
+    (453 MB at the benchmark's 16 k blocks; size `max_blocks` to the event).
+- Tried and dropped:
+  - `g2p_simd`: G2P's top-speed atomic reduced over the SIMD group first.
+    Bit for bit, but no measurable gain, and it needed a hook in
+    `terrain_mpm.slang`.
+  - `sort_keys`: count and scatter reading a per-particle key rather than
+    the particle. Bit for bit and 0.5 ms faster per substep, but the
+    branch's portable kernels now do the same, so it went.
+- Not done: float-atomic P2G scatter. Faster, but its sums depend on
+  scheduling; it would have to be explicit and off by default, and the
+  deterministic two-pass gather took most of P2G's cost already.
+
+**The benchmark** (`cargo run --release -p engine-metal --example
+terrain_bench -- [--game] --secs 6 --runs 3 --profile`). The browser demo's
+event: an 8 m stony impactor at 20 km/s into dry sand, margin 1.5 R, the
+absorbing ground, 1/120 s frames, the demo's clock (`speed_growth` × the last
+speed + 20 m/s + a frame of gravity), the same plan on:
+- `metal`, the portable kernels;
+- `metal-fast`, every fast path;
+- `wgpu`, `WgpuSim` on the same Metal GPU.
+
+Metal frames are timed by the command buffer's GPU start and end. wgpu's
+are wall times, submission to counters read: timestamps on empty or tiny
+passes around the terrain pass came back out of order (Metal does not order
+encoders without a shared resource). Metal's wall time runs 0.1–0.3 ms over
+its GPU time, so compare wgpu against Metal's wall column.
+
+**Timing.** The GPU was shared throughout. In busy spells every span rose 3–7×
+(a 115 k-particle frame at 4–7 ms, `mpm_clear` at 2.4 ms). The tables are
+quiet runs: five of eight repeated samples, giving the range and the median
+in brackets.
+
+Physical (the defaults: 12 cells/R, bed 1.5 R; 0.55 M particles, 1.7 k
+blocks):
+
+| Span | metal GPU | metal-fast GPU | metal wall | wgpu wall |
+|---|---|---|---|---|
+| strike frame: activation + source + frame 0 (6 substeps) | 14.8–20.6 (19.7) | 13.5–16.4 (14.6) | 15.6–26.8 (21.2) | 51.6–83.7 (51.8) |
+| worst frame | the strike frame | the strike frame | | frame 0 (30.6–54.8) |
+| first second, mean (3–6 substeps) | 6.6–8.4 (6.8) | 5.9–8.1 (6.1) | 6.8–8.9 (7.2) | 8.0–10.5 (8.7) |
+| steady (from 4 s, 1 substep) | 2.26–3.08 (2.34) | 2.00–2.87 (2.27) | 2.4–5.0 (2.7) | 2.9–4.0 (3.7) |
+
+Game (`TerrainProfile::Game`: 8 cells/R, bed 1.25 R, Courant 0.45, no speed
+growth; 115 k particles):
+
+| Span | metal GPU | metal-fast GPU | metal wall | wgpu wall |
+|---|---|---|---|---|
+| strike frame (2 substeps) | 1.56–5.78 (3.61) | 1.62–3.29 (3.24) | 3.0–10.1 (5.1) | 34–59 (39.7) |
+| worst frame | the strike frame | the strike frame | | frame 0 (14–27) |
+| first second, mean (1–2 substeps) | 0.57–1.67 (0.61) | 0.61–0.95 (0.77) | 0.74–2.4 (0.78) | 1.1–1.5 (1.4) |
+| steady (1 substep) | 0.57–0.58 | 0.50–0.82 (0.50) | 0.73–0.75 | 0.96–1.5 (1.05) |
+
+- **Metal against wgpu**: per frame, native Metal's wall time is 20–30%
+  under wgpu's at the same plan and GPU (steady 2.7 against 3.7 ms
+  physical, 0.74 against 1.05 game; the first second 7.2 against 8.7 ms
+  physical). The strike frame differs most: wgpu's
+  pays the first touch of its buffers (Metal prefaults at enable) and
+  creates its activation's staging on the spot.
+- **The 2 ms target** (every frame at 120 Hz under about 2 ms): met by the
+  game profile on Metal in quiet runs. Every frame after the strike costs
+  0.5–0.6 ms of GPU. The strike frame, which is activation, the source, the
+  geostatic start and two substeps, costs 1.6 ms in the quietest runs,
+  3.2–3.6 ms in the median ones. At the physical defaults it is not met:
+  the strike frame is 15–20 ms and the first second 6–7 ms a frame.
+
+**Per kernel** (quiet runs, ms per substep, `--profile`: one timestamped
+encoder per dispatch; the profiled sums run a few per cent over an unprofiled
+frame):
+
+| Kernel | physical, metal | physical, metal-fast | game, metal | game, metal-fast |
+|---|---|---|---|---|
+| P2G | 0.76 | 0.35 + 0.17 (`_cells` + `_nodes`) | 0.26 | 0.11 + 0.08 |
+| G2P | 0.53 | 0.53 | 0.16 | 0.16 |
+| payload (return map) | 0.44 | 0.44 | 0.06 | 0.06 |
+| touch | 0.32 | 0.32 | 0.09 | 0.09 |
+| count, scatter | 0.065, 0.045 | 0.065, 0.045 | 0.04, 0.03 | 0.04, 0.03 |
+| grid, absorbing faces, cell sort, scan, clear, args, parcels | 0.11 together | 0.11 | 0.21 together | 0.21 |
+| per frame: deposits, couple clear | 0.02 | 0.02 | 0.04 | 0.04 |
+| a substep | 2.27 | 2.03 | 0.89 | 0.81 |
+| activation, source (once) | 0.45, 0.27 | | 0.15–0.21, 0.05–0.06 | |
+
+**What bounds the peak.**
+- **The physical event's strike frame** is six substeps at about 2.3 ms:
+  0.55 M particles, and a CFL bound set by the source's speed (1.5 × its
+  peak + 20 m/s at first), not by stiffness. Its per-particle kernels are
+  bound by memory traffic. A substep moves about 700 bytes per particle:
+  - the particle read by touch;
+  - read and written by the return map, with a 64-byte payload written;
+  - the payload read by P2G;
+  - the particle read and written by G2P, with its 27 grid nodes.
+
+  At the M3 Max's ~350 GB/s that is about 1.1 ms per substep at 0.55 M (the
+  kernels take 2.0–2.3 ms), so six
+  substeps cannot come under 2 ms however the kernels are tuned: the strike
+  needs fewer substeps or fewer particles.
+- **The game profile's strike frame** is 2 substeps of 0.8 ms plus
+  activation and the geostatic start (0.2 ms). About 0.2 ms of each substep
+  is a dozen small dispatches (grid, absorbing faces, scan, cell sort,
+  clear, args, parcels), each a few tens of microseconds, whatever the
+  particle count.
+
+**What remains to reach 2 ms reliably** (the game profile's strike frame in
+a median run, 3.2–3.6 ms; then the physical event), in order of yield:
+1. The strike frame's substeps (the branch's "Performance" list, item 1):
+   the first substep at the source's peak, the rest at the speed the GPU
+   measures after it. One substep less is 0.8 ms (game) or 2.3 ms (physical).
+2. Fuse the small kernels: grid into the P2G node pass (`mpm_p2g_nodes`
+   writes the node once; the grid update is per node), scan and cell sort
+   into one per-block kernel, absorbing faces into G2P's tail. About
+   0.1–0.15 ms a substep at the game profile.
+3. Fewer bytes per particle: G2P writing a compact position array for the
+   next touch (saves a 128-byte read), and the return map folded into G2P
+   for substeps after a frame's first (the next payload computed where F is
+   updated; it then needs the payload in particle order and `dt` folded out
+   of it). Up to a third of a substep at the physical scale.
+4. CUDA graphs and a quiet GPU. Launch gaps are already small on Metal (one
+   serial encoder), but the variance between runs on a shared GPU is larger
+   than any of these.
+
+**Determinism findings.**
+- Metal runs are bit-identical run to run (particles; the parcels as a set)
+  through 1 s of the physical event and through four impact frames.
+- **Over 6 s the parcels are not.** Particles stay bit-identical, but the set
+  of 2,676 parcels differs run to run, on Metal and on wgpu alike. G2P gives
+  a parcel its slot with an atomic counter, so its slot k depends on
+  scheduling. `mpm_parcels` then seeds the dither of a landing parcel's
+  deposit split with `~k` (`mpmParcelDeposit(xl, quanta, ~k, ...)`). Which
+  heightfield samples get the odd quantum, and so the baked field, can
+  differ run to run. The particles' own slots are fixed, but a re-entering
+  parcel also takes its particle slot from an atomic counter (`mpm_parcels`),
+  which would reorder P2G's sums. None re-entered in these runs.
+  - **Fix** (not made: a kernel change for the substep's owner): carry the
+    source particle's id in the parcel and seed by it. Hand out re-entry
+    slots in parcel-id order, a scan rather than an atomic.
+
+**CUDA plan.** CUDA has no indirect dispatch. `CudaSim` (the rigid plan)
+reads binding 23 back after any kernel that may have rewritten it. The
+terrain plan would need that after every `mpm_write_args`: twice a substep,
+12 host round trips in a physical strike frame, each draining the GPU.
+Instead:
+1. **Grid-stride entries** (built: `slang/kernels/terrain_mpm_cuda.slang`).
+   - Each `_gs` entry stands for one indirect dispatch of the plan. The host
+     launches it with a fixed grid of `MPM_GS_GROUPS` (2048) workgroups.
+   - It walks the range the GPU wrote into binding 46 (blocks, particle
+     groups, parcel groups) in a grid-stride loop, calling the plan's kernel
+     unchanged with the thread id the indirect launch would have given each
+     index.
+   - Per-workgroup kernels with barriers (`mpm_scan_cells`, `mpm_p2g`'s
+     lanes, `mpm_p2g_cells`) loop at workgroup granularity: every thread of
+     a group takes the same trip count, and a barrier ends each trip before
+     the next block reuses the group's shared memory.
+   - Each index runs the same code once: bit for bit the indirect dispatch.
+     An idle launch costs one load and a compare per thread.
+   - `engine-cuda`'s build compiles all 32 plan kernels, both fast-path
+     kernels and the 16 `_gs` entries Slang → CUDA (`CUDA_TERRAIN_KERNELS`),
+     with the rigid kernels' deferred-load hazard check (none found), and
+     fatbins where nvcc is installed. macOS has no nvcc: none of it has run
+     on a GPU.
+2. **A CUDA graph per frame shape.** With no host-dependent launch size, a
+   frame's launches are fixed by its shape: the substep count and the passes
+   (coupled or not, absorbing faces, the geostatic start). Capture each
+   shape once, cache it by that key, and replay it with one `cuGraphLaunch`.
+   The host writes (the params record, counter resets) go ahead of the
+   launch. A six-substep frame is about 90 launches; replayed as a graph it
+   costs one.
+3. **Conditional nodes, later.** CUDA 12.4's conditional handles (IF and
+   WHILE nodes) let the device decide: skip the parcel passes while nothing
+   is airborne, or run the substep loop as a WHILE node until the frame is
+   covered, the count chosen on the GPU from the speed it just measured.
+   That removes `RegionClock`'s readback lag, and with it the strike frame's
+   extra substeps (item 1 above). A measured win to try, not needed for
+   parity.
+4. **The executor**, still to write:
+   - `CudaSim` gains bindings 37–54 (the plan's sizes and the fast paths'
+     scratch).
+   - `TerrainPlan` is lowered as on Metal: `_gs` for every indirect command,
+     the fast paths by flag.
+   - The counters are copied once a frame into pinned host memory behind an
+     event, with no stream drain.
+   - `terrain_parity`'s scenarios run on Modal
+     (`engine/tools/modal/run_cuda_tests.sh`) against the wgpu host with the
+     tolerances above.
 
 ## T5 materials (2026-10-24)
 
@@ -1833,6 +2194,22 @@ set (`TerrainPlan::event_cell`).
 - `terrain_bench` (32,768 particles, 176 blocks, one area): 0.399–0.403 ms per
   substep, against 0.397–0.400 ms before. That is within the run-to-run noise
   of a shared GPU.
+
+**Merged with native Metal and deterministic ejecta (177d8e4e).**
+- Activation emits one thread per particle in the selected area's columns,
+  the quanta each sample gives now.
+- The geostatic start rides the first payload, for fresh particles only
+  (`mpmGeostaticFresh`), in their area's frame.
+- Re-entering parcels take their source particle's dead slot in whichever
+  open area they land in.
+- The area counters follow the 16-word frame block: `MPM_C_SURFACE` 13, area
+  speeds from 16, bodies from 32, first slots from 48 (64 words).
+- `terrain_mpm_fast.slang`'s two-pass P2G takes each block's area frame.
+- `engine-metal` gains `terrain_open_area`, `terrain_bake_area` and
+  `terrain_apply_source_to`.
+- A parcel still in flight when the last area is closed by force keeps a
+  source slot past the emptied pool. The World bakes only with nothing
+  airborne, so only forced closes can lose it: open point.
 
 **Merged with the performance and rendering work (80f16fbd).** The surface
 pass (`terrain_surface.slang`, render-only) shows one area's window: header

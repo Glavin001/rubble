@@ -60,7 +60,7 @@ test('an impact opens a region (activation, then source) and runs coupled frames
   const { blocks, end } = decodeBlocks(p.impact(0, FIELD, Float32Array.of(0, 0, 0), 2, 3000, 20000, 9.81));
   assert.equal(blocks.length, 2);
   // The default ground is absorbing: activation also lays out its boundary nodes.
-  assert.deepEqual(blocks[0].cmds.map((c) => c.kernel), ['mpm_activate_count', 'mpm_activate_scan', 'mpm_activate_emit', 'mpm_activate_lower', 'mpm_absorb_init']);
+  assert.deepEqual(blocks[0].cmds.map((c) => c.kernel), ['mpm_activate_count', 'mpm_activate_scan', 'mpm_write_args', 'mpm_activate_emit', 'mpm_activate_lower', 'mpm_absorb_init']);
   assert.equal(blocks[0].writes[0].binding, T.PARAMS);
   assert.deepEqual(blocks[1].cmds.map((c) => c.kernel), ['mpm_write_args', 'mpm_source']);
   assert.ok(end > 0);
@@ -167,14 +167,13 @@ test('the absorbing ground sets up its node records at activation and the geosta
   assert.equal(s.config.initial_stress, 'geostatic');
   const { blocks } = decodeBlocks(p.impact(0, FIELD, Float32Array.of(0, 0, 0), 2, 3000, 20000, 9.81));
   assert.deepEqual(blocks[0].cmds.map((c) => c.kernel),
-    ['mpm_activate_count', 'mpm_activate_scan', 'mpm_activate_emit', 'mpm_activate_lower', 'mpm_absorb_init']);
+    ['mpm_activate_count', 'mpm_activate_scan', 'mpm_write_args', 'mpm_activate_emit', 'mpm_activate_lower', 'mpm_absorb_init']);
   const f0 = p.frame(1 / 60, -9.81, 1);
-  const first = decodeBlocks(f0, 2).blocks[0].cmds.map((c) => c.kernel);
-  assert.equal(first.filter((k) => k === 'mpm_geostatic').length, 1);
-  assert.ok(first.indexOf('mpm_geostatic') < first.indexOf('mpm_p2g'));
+  // The first frame's payload sets the geostatic F (counter word 11).
+  const geostatic = (words) => decodeBlocks(words, 2).blocks[0].writes.some((w) => w.binding === T.COUNTERS && w.offset === 44 && w.words[0] === 1);
+  assert.ok(geostatic(f0));
   JSON.parse(p.report(f0[1], counters({ speed: 1 })));
-  const next = decodeBlocks(p.frame(1 / 60, -9.81, 1), 2).blocks[0].cmds.map((c) => c.kernel);
-  assert.ok(!next.includes('mpm_geostatic'));
+  assert.ok(!geostatic(p.frame(1 / 60, -9.81, 1)));
   p.free();
   // The absorbing ground carries the geostatic traction: it needs that start.
   assert.throws(() => new TerrainStep(JSON.stringify({ config: { boundary: 'absorbing', initial_stress: 'unstressed' } })), /geostatic/i);

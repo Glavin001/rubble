@@ -375,7 +375,8 @@ impl TerrainPlan {
             (MPM_CELLS_BINDING, nodes * 16),
             // Sorted ids, then per particle its base cell and rank (mpm_touch, mpm_count).
             (MPM_SORTED_BINDING, particles * 12),
-            (MPM_GRID_BINDING, nodes * 16),
+            // Per node: (m·v, m) then its contact record (2 × 16 B).
+            (MPM_GRID_BINDING, nodes * 32),
             (MPM_ARGS_BINDING, 36),
             (MPM_COLUMNS_BINDING, u64::from(config.max_columns) * 16),
             (
@@ -386,7 +387,8 @@ impl TerrainPlan {
                 MPM_COUPLED_BINDING,
                 u64::from(config.max_coupled) * 64 + u64::from(config.max_boundary_nodes) * 16,
             ),
-            (MPM_PARCELS_BINDING, u64::from(config.max_parcels) * 32),
+            // Two float4 per parcel, then the particle each left (16 B).
+            (MPM_PARCELS_BINDING, u64::from(config.max_parcels) * 48),
             (MPM_DEPOSIT_BINDING, u64::from(config.max_field_samples) * 4),
         ]
     }
@@ -899,7 +901,9 @@ impl TerrainPlan {
         let last = ((j0 + nj - 1) * nx + i0 + ni - 1) / 4;
         ops.disp("mpm_activate_count", samples);
         ops.disp("mpm_activate_scan", 64);
-        ops.disp("mpm_activate_emit", samples);
+        // One thread per particle, counted on the GPU by the scan.
+        ops.disp("mpm_write_args", 1);
+        ops.particles("mpm_activate_emit");
         ops.disp("mpm_activate_lower", u64::from(last - first + 1));
         if faces.len > 0 {
             ops.disp("mpm_absorb_init", u64::from(faces.len));
@@ -1063,11 +1067,10 @@ impl TerrainPlan {
         for a in self.areas.iter_mut().flatten() {
             a.moved = true;
         }
-        // Freshly activated particles take their stress before the first
-        // substep.
+        // Freshly activated particles take their stress in the first
+        // substep's mpm_payload, before the stress (mpm_grid clears the flag).
         if std::mem::take(&mut self.geostatic_pending) {
-            ops.disp("mpm_write_args", 1);
-            ops.particles("mpm_geostatic");
+            ops.counter(MPM_C_GEOSTATIC, 1);
         }
         Ok(())
     }
@@ -1486,8 +1489,9 @@ mod tests {
         assert_eq!(count("mpm_couple_apply"), 3);
         assert_eq!(count("mpm_p2g"), 3);
         assert_eq!(count("mpm_couple_finish"), 1);
-        // The params ride ahead of the pass.
-        assert_eq!(ops.writes.len(), 1);
+        // The params ride ahead of the pass (and, first after a geostatic
+        // activation, the payload's geostatic flag).
+        assert_eq!(ops.writes.len(), 2);
         assert_eq!(ops.writes[0].binding, MPM_PARAMS_BINDING);
         // Every kernel the plan names is in KERNELS.
         for c in &ops.cmds {
@@ -1615,14 +1619,15 @@ mod tests {
             .1;
         assert!(coupled >= 16 * (u64::from(b[1]) + records));
         // The first step sets the geostatic stress, before its substeps; later ones do not.
-        let first = kernels(&p.step(2, 1.0e-4, -9.81).unwrap());
-        assert_eq!(first.iter().filter(|k| **k == "mpm_geostatic").count(), 1);
-        assert!(
-            first.iter().position(|k| *k == "mpm_geostatic")
-                < first.iter().position(|k| *k == "mpm_p2g")
-        );
-        let next = kernels(&p.coupled(2, 1.0e-4, -9.81, 3).unwrap());
-        assert!(!next.contains(&"mpm_geostatic"));
+        let geostatic = |ops: &TerrainOps| {
+            ops.writes.iter().any(|w| {
+                w.binding == MPM_COUNTERS_BINDING
+                    && w.offset == 4 * MPM_C_GEOSTATIC as u64
+                    && w.words == [1]
+            })
+        };
+        assert!(geostatic(&p.step(2, 1.0e-4, -9.81).unwrap()));
+        assert!(!geostatic(&p.coupled(2, 1.0e-4, -9.81, 3).unwrap()));
         // A rigid, unstressed region does neither.
         let mut q = TerrainPlan::new(&TerrainConfig {
             boundary: RegionBoundary::Rigid,
@@ -1638,7 +1643,7 @@ mod tests {
         assert!(!kernels(&ops).contains(&"mpm_absorb_init"));
         let b = q.area_params(0).unwrap().boundary;
         assert_eq!((b[0], b[2]), (0, 0));
-        assert!(!kernels(&q.step(2, 1.0e-4, -9.81).unwrap()).contains(&"mpm_geostatic"));
+        assert!(!geostatic(&q.step(2, 1.0e-4, -9.81).unwrap()));
     }
 
     #[test]

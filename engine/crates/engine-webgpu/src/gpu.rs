@@ -301,7 +301,8 @@ pub fn default_device() -> anyhow::Result<(wgpu::AdapterInfo, wgpu::Device, wgpu
             .iter()
             .any(|k| std::env::var(k).is_ok_and(|v| v == "1"))
         {
-            adapter.features() & wgpu::Features::TIMESTAMP_QUERY
+            adapter.features()
+                & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS)
         } else {
             wgpu::Features::empty()
         },
