@@ -34,7 +34,10 @@ struct BlastParams_0
     uint w_alive_0;
     uint a_dirty_0;
     uint a_counters_0;
-    uint pad1_0;
+    uint wide_min_0;
+    uint wide_rows_0;
+    uint wide_blocks_0;
+    uint pad2_0;
 };
 
 struct BlastNode_natural_0
@@ -1010,6 +1013,19 @@ float group_max_0(uint tid_7, float v_10, KernelContext_0 thread* kernelContext_
     uint n1_6 = _S101.y;
     uint b0_1 = _S101.z;
     uint _S102 = _S101.w;
+    uint p_6;
+    if((n1_6 - n0_6) > ((&kernelContext_20)->params_0->wide_min_0))
+    {
+        p_6 = 1U;
+    }
+    else
+    {
+        p_6 = 0U;
+    }
+    if((group_uniform_0(p_6, tid_8)) != 0U)
+    {
+        return;
+    }
     uint4 _S103 = uint4(*((&kernelContext_20)->report_0+k_6)) ;
     uint last_flags_0 = group_uniform_0(_S103.y, tid_8);
     bool warm_1 = ((&kernelContext_20)->params_0->warm_0) != 0U;
@@ -1023,7 +1039,6 @@ float group_max_0(uint tid_7, float v_10, KernelContext_0 thread* kernelContext_
         converged_0 = false;
     }
     float singular_0;
-    uint p_6;
     if(converged_0)
     {
         uint _S104 = n0_6 + tid_8;

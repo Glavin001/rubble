@@ -50,7 +50,10 @@ pub struct Params {
     pub w_alive: u32,
     pub a_dirty: u32,
     pub a_counters: u32,
-    pub pad1: u32,
+    pub wide_min: u32,
+    pub wide_rows: u32,
+    pub wide_blocks: u32,
+    pub pad2: u32,
 }
 
 #[repr(C)]
@@ -168,10 +171,97 @@ pub struct GpuBlastSolver {
     stress_bind: wgpu::BindGroup,
     topology_bind: wgpu::BindGroup,
     has_warm_start: bool,
+    /// The native solve of islands over `wide_min` nodes (`blast_native_wide.slang`).
+    wide: Option<Wide>,
+}
+
+/// `blast_native_wide.slang`: its kernels, its state and partial sums, its row table and the
+/// indirect sizes copied from it.
+struct Wide {
+    /// Each kernel with its bind group (on WGSL past the device's storage limit, each entry has
+    /// its own layout).
+    kernels: Vec<(Kernel, Grid, wgpu::BindGroup)>,
+    meta: wgpu::Buffer,
+    dispatch: wgpu::Buffer,
+    rows: u32,
+    blocks: u32,
+    min: u32,
+}
+
+/// What a wide kernel runs over.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Grid {
+    One,
+    Islands,
+    Nodes,
+    Bonds,
+    Rows,
+}
+
+/// The wide solve's kernels for one frame: set-up, the iteration (recorded `max_iterations`
+/// times), the end.
+const WIDE_SETUP: &[(&str, Grid)] = &[
+    ("w_reset", Grid::One),
+    ("w_classify", Grid::Islands),
+    ("w_args", Grid::One),
+    ("w_init_nodes", Grid::Nodes),
+    ("w_init_bonds", Grid::Bonds),
+    ("w_setup", Grid::Rows),
+    ("w_gram_nodes", Grid::Nodes),
+    ("w_gram", Grid::Rows),
+    ("w_warm", Grid::Nodes),
+];
+const WIDE_ITERATION: &[(&str, Grid)] = &[
+    ("w_proj_part_r", Grid::Nodes),
+    ("w_proj_solve", Grid::Rows),
+    ("w_proj_apply_r", Grid::Nodes),
+    ("w_bond_r", Grid::Bonds),
+    ("w_node_rn", Grid::Nodes),
+    ("w_test", Grid::Rows),
+    ("w_rebuild", Grid::Nodes),
+    ("w_proj_part_rb", Grid::Nodes),
+    ("w_proj_solve_rb", Grid::Rows),
+    ("w_proj_apply_rb", Grid::Nodes),
+    ("w_bond_rb", Grid::Bonds),
+    ("w_node_rnb", Grid::Nodes),
+    ("w_decide", Grid::Rows),
+    ("w_pre1", Grid::Nodes),
+    ("w_bond_loc", Grid::Bonds),
+    ("w_pre2", Grid::Nodes),
+    ("w_proj_part_g", Grid::Nodes),
+    ("w_proj_solve", Grid::Rows),
+    ("w_proj_apply_g", Grid::Nodes),
+    ("w_max", Grid::Nodes),
+    ("w_mag", Grid::Rows),
+    ("w_scale", Grid::Nodes),
+    ("w_gamma", Grid::Rows),
+    ("w_dir", Grid::Nodes),
+    ("w_bond_p", Grid::Bonds),
+    ("w_node_q", Grid::Nodes),
+    ("w_den", Grid::Rows),
+    ("w_update", Grid::Nodes),
+];
+const WIDE_END: &[(&str, Grid)] = &[("w_final", Grid::Bonds), ("w_report", Grid::Rows)];
+const WIDE_BINDINGS: [Binding; 13] = [U, R, R, R, W, R, W, W, W, R, W, W, R];
+/// `blast_native_wide.slang` `ROW_WORDS`, `PARTIAL`, `M_ROWS`.
+const WIDE_ROW_WORDS: u32 = 16;
+const WIDE_PARTIAL: u32 = 6;
+const WIDE_META_ROWS: u32 = 16;
+const WIDE_THREADS: usize = 1024;
+
+/// Islands over this many nodes take the wide solve (`STRESS_BLAST_WIDE_MIN`; `0` sends every
+/// island there, a large number none).
+fn wide_min() -> u32 {
+    std::env::var("STRESS_BLAST_WIDE_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(4096)
 }
 
 impl GpuBlastSolver {
     pub fn new(gpu: &Gpu, graph: BlastGraph, materials: Vec<BlastMaterial>) -> GpuBlastSolver {
+        Self::with_wide_min(gpu, graph, materials, wide_min())
+    }
+
+    /// `new`, the native solve taking islands over `wide_min` nodes to its many-group path.
+    pub fn with_wide_min(gpu: &Gpu, graph: BlastGraph, materials: Vec<BlastMaterial>, wide_min: u32) -> GpuBlastSolver {
         let (n, m) = (graph.node_count(), graph.bond_count());
         let mut nodes = vec![NodeGpu::default(); n.max(1)];
         let mut refs = Vec::new();
@@ -316,9 +406,43 @@ impl GpuBlastSolver {
             stress_bind,
             topology_bind,
             has_warm_start: false,
+            wide: None,
         };
+        let mut s = s;
+        if native {
+            s.wide = Some(s.build_wide(gpu, wide_min));
+        }
         s.write_params(&s.params(false, false, 0.0, false));
         s
+    }
+
+    fn build_wide(&self, gpu: &Gpu, min: u32) -> Wide {
+        let (n, m) = (self.graph.node_count().max(1), self.graph.bond_count().max(1));
+
+        let rows = (n as u32 / min.max(1)) + 1;
+        let blocks = (n.max(m).div_ceil(WIDE_THREADS) + 1) as u32;
+        let words = (rows * WIDE_ROW_WORDS + rows * blocks * WIDE_PARTIAL) as usize;
+        let wide = gpu.storage("blast wide", &vec![[0.0f32; 4]; words]);
+        let meta = gpu.storage("blast wide meta", &vec![0u32; (WIDE_META_ROWS + rows) as usize]);
+        let dispatch = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("blast wide dispatch"),
+            size: 48,
+            usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let b = &self.buffers;
+        let buffers = [&b.params, &b.islands, &b.nodes, &b.refs, &b.bonds, &b.accel, &b.x, &b.scratch, &b.report, &b.lists, &wide, &meta, &b.args];
+        let kernels = WIDE_SETUP
+            .iter()
+            .chain(WIDE_ITERATION)
+            .chain(WIDE_END)
+            .map(|&(e, g)| {
+                let k = gpu.compute(&shaders::BLAST_NATIVE_WIDE, e, &WIDE_BINDINGS);
+                let bind = gpu.bind(&k.group, &buffers);
+                (k, g, bind)
+            })
+            .collect();
+        Wide { kernels, meta, dispatch, rows, blocks, min }
     }
 
     /// The parameters of a solve (`blast_common.slang` `BlastParams`); `warm` as the settings
@@ -344,6 +468,9 @@ impl GpuBlastSolver {
             damage_rate: s.damage_rate as f32,
             apply_damage: apply_damage as u32,
             force_tolerance: s.force_tolerance as f32,
+            wide_min: self.wide.as_ref().map_or(u32::MAX, |w| w.min),
+            wide_rows: self.wide.as_ref().map_or(0, |w| w.rows),
+            wide_blocks: self.wide.as_ref().map_or(0, |w| w.blocks),
             ..Default::default()
         }
     }
@@ -383,10 +510,53 @@ impl GpuBlastSolver {
 
     /// Record the solve of every island (one group each, sized on the GPU).
     pub fn record_solve(&self, encoder: &mut wgpu::CommandEncoder) {
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.solve.pipeline);
+            pass.set_bind_group(0, &self.solve_bind, &[]);
+            pass.dispatch_workgroups_indirect(&self.buffers.dispatch, 4 * A_SOLVE);
+        }
+        if let Some(w) = &self.wide {
+            self.record_wide(encoder, w);
+        }
+    }
+
+    /// The large islands' solve: set-up (their rows listed, then the sizes copied for the
+    /// indirect dispatches), `max_iterations` iterations, the end.
+    fn record_wide(&self, encoder: &mut wgpu::CommandEncoder, w: &Wide) {
+        let setup = WIDE_SETUP.len();
+        let iteration = WIDE_ITERATION.len();
+        let run = |pass: &mut wgpu::ComputePass<'_>, (k, grid, bind): &(Kernel, Grid, wgpu::BindGroup)| {
+            pass.set_pipeline(&k.pipeline);
+            pass.set_bind_group(0, bind, &[]);
+            match grid {
+                Grid::One => pass.dispatch_workgroups(1, 1, 1),
+                Grid::Islands => pass.dispatch_workgroups(crate::gpu::groups(self.graph.node_count().max(1), k.workgroup), 1, 1),
+                Grid::Nodes => pass.dispatch_workgroups_indirect(&w.dispatch, 0),
+                Grid::Bonds => pass.dispatch_workgroups_indirect(&w.dispatch, 16),
+                Grid::Rows => pass.dispatch_workgroups_indirect(&w.dispatch, 32),
+            }
+        };
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            for k in &w.kernels[..3] {
+                run(&mut pass, k);
+            }
+        }
+        // meta words 4..16: the node, bond and row grids.
+        encoder.copy_buffer_to_buffer(&w.meta, 16, &w.dispatch, 0, 48);
         let mut pass = encoder.begin_compute_pass(&Default::default());
-        pass.set_pipeline(&self.solve.pipeline);
-        pass.set_bind_group(0, &self.solve_bind, &[]);
-        pass.dispatch_workgroups_indirect(&self.buffers.dispatch, 4 * A_SOLVE);
+        for k in &w.kernels[3..setup] {
+            run(&mut pass, k);
+        }
+        for _ in 0..self.graph.settings.max_iterations {
+            for k in &w.kernels[setup..setup + iteration] {
+                run(&mut pass, k);
+            }
+        }
+        for k in &w.kernels[setup + iteration..] {
+            run(&mut pass, k);
+        }
     }
 
     /// Record every bond's stresses and damage (and, with the params' `apply_damage`, the

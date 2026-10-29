@@ -308,6 +308,9 @@ void blast_native(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     uint n1 = range.y;
     uint b0 = range.z;
     uint b1 = range.w;
+    // A large island is blast_native_wide.slang's.
+    if (group_uniform(n1 - n0 > params.wide_min ? 1u : 0u, tid) != 0)
+        return;
     uint4 last = report[k];
     uint last_flags = group_uniform(last.y, tid);
     bool warm = params.warm != 0;

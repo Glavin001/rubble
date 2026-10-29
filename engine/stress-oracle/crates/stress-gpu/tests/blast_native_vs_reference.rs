@@ -29,6 +29,51 @@ fn house(settings: BlastSettings) -> (BlastGraph, Vec<BlastMaterial>, Vec3) {
     (graph, materials, Vec3::from_array(scene.gravity))
 }
 
+fn pack(name: &str, settings: BlastSettings) -> (BlastGraph, Vec<BlastMaterial>, Vec3) {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../../packs/{name}.json"));
+    let options = stress_ref::capability::Profile::BlastGpu.import_options();
+    let scene = stress_ref::scene_pack::import_with(&path, name, name, options).expect("pack");
+    let (graph, materials) = BlastAuthoring::graph(&scene, settings).unwrap();
+    (graph, materials, Vec3::from_array(scene.gravity))
+}
+
+#[test]
+fn the_wide_solve_of_a_multi_block_island_tracks_the_reference() {
+    let Some(gpu) = gpu() else { return };
+    // villa-savoye's one island of 1045 nodes and 2464 bonds spans two node blocks and three
+    // bond blocks of the many-group solve (blast_native_wide.slang): against the f32 reference
+    // within its one-ulp spread, and against the one-group solve of the same island.
+    let (graph, materials, g) = pack("villa-savoye", BlastSettings::native());
+    let loads: Vec<_> = (0..12)
+        .map(|f| uniform(graph.node_count(), g * if f < 6 { 1.0 } else { 1.3 }))
+        .collect();
+    let spread = rounding_spread(&graph, &loads);
+    let bound = (10.0 * spread).max(1e-4);
+    let mut reference = single(&graph);
+    let mut wide = GpuBlastSolver::with_wide_min(&gpu, graph.clone(), materials.clone(), 0);
+    let mut group = GpuBlastSolver::with_wide_min(&gpu, graph.clone(), materials, u32::MAX);
+    let (mut worst, mut worst_group) = (0.0f64, 0.0f64);
+    for (frame, accel) in loads.iter().enumerate() {
+        let r = reference.solve(accel, false);
+        let w = wide.solve(accel, false);
+        group.solve(accel, false);
+        for (k, (r, w)) in r.iter().zip(&w).enumerate() {
+            assert_eq!(
+                (r.skipped, r.converged),
+                (w.skipped, w.converged),
+                "frame {frame} island {k}: {r:?} vs {w:?}"
+            );
+        }
+        let e = difference(&wide.impulses(), &reference_impulses(&reference));
+        worst = worst.max(e);
+        worst_group = worst_group.max(difference(&wide.impulses(), &group.impulses()));
+        assert!(e < bound, "frame {frame}: {e:.3e} (bound {bound:.3e})");
+    }
+    println!("wide: worst {worst:.3e} from the f32 reference, {worst_group:.3e} from the one-group solve (one-ulp spread {spread:.3e})");
+    assert!(worst_group < bound, "{worst_group:.3e}");
+}
+
 fn uniform(n: usize, lin: Vec3) -> Vec<AngLin> {
     vec![
         AngLin {

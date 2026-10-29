@@ -48,7 +48,12 @@ public struct BlastParams
     public uint w_alive;
     public uint a_dirty;
     public uint a_counters;
-    public uint pad1;
+    // blast_native_wide.slang: islands over wide_min nodes are solved by many groups; it holds up
+    // to wide_rows of them, each over at most wide_blocks blocks.
+    public uint wide_min;
+    public uint wide_rows;
+    public uint wide_blocks;
+    public uint pad2;
 };
 
 // `topo` (blast_topology.slang): the totals after the per-node and per-block words: islands,

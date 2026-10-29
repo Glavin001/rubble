@@ -111,7 +111,10 @@ struct BlastParams_0
     uint w_alive_0;
     uint a_dirty_0;
     uint a_counters_0;
-    uint pad1_0;
+    uint wide_min_0;
+    uint wide_rows_0;
+    uint wide_blocks_0;
+    uint pad2_0;
 };
 
 struct BlastBond_natural_0
