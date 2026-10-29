@@ -929,7 +929,17 @@ enter an open region.
   strike beside them comes as close as its box allows.
 
 **Scenes** (`showcase.html?scene=`):
-- `drive` (the default). Strikes land 3.6 s before the car passes, their rims
+- `drive` (the default since 2026-10-29): a barrage of 11 strikes in 20 s on
+  both sides of the road (`side`: inside or outside the loop, the ground
+  flat 75 m outside it too).
+  - Four put the track just inside the rim, so the car drives up over the
+    crest and down (its height peaks at 4.5–5.1 m); two land 0.4 s before the
+    car passes and two 1 s after it.
+  - The areas overlap and grow into one; `max_regions` is 8 and the patches
+    are 128 samples, both explicit.
+  - `trackAt` runs 0.75 s later here, as measured, so near misses land where
+    the car is.
+- `drive1`: the earlier cut. Strikes land 3.6 s before the car passes, their rims
   3 m off the track. The car rides each rim's flank and blanket while the
   region is open: its height rose 2.6–3.1 m beside each crater, at 60 km/h.
 - `pass`. The first cut: strikes kept clear of the track.
