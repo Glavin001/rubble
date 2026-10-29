@@ -2,7 +2,7 @@
 //! joint events) plus Rubble's destruction stream and per-frame outputs for
 //! vehicles, soft bodies and skinned meshes.
 
-use crate::{ActorInfo, AssemblyId, BodyId, DestructibleId, JointId, ShapeId, Transform};
+use crate::{ActorInfo, AssemblyId, BodyId, DestructibleId, JointId, Transform};
 use engine_schema::{MountBreak, StepCounters};
 use engine_softbody::{BeamBreak, PieceDetached, SoftHandle};
 use engine_vehicle::{VehicleHandle, VehicleState};
@@ -28,60 +28,6 @@ pub struct BodyMoveEvent {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BodyEvents {
     pub moves: Vec<BodyMoveEvent>,
-}
-
-/// Two shapes started touching (Box3D `b3ContactBeginTouchEvent`), for pairs
-/// where either shape has `ShapeDef::enable_contact_events`. `shape_a` is the
-/// lower handle (`ShapeId::to_bits`); `normal` points from `shape_a` to
-/// `shape_b`. `point` is the deepest contact (world, midway between the
-/// surfaces) and `approach_speed` the closing speed along `normal` there,
-/// from the bodies' velocities at the start of the step (positive: closing).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ContactBeginEvent {
-    pub shape_a: ShapeId,
-    pub shape_b: ShapeId,
-    pub point: [f32; 3],
-    pub normal: [f32; 3],
-    pub approach_speed: f32,
-}
-
-/// Two shapes stopped touching, or one of them was destroyed while they
-/// touched (Box3D `b3ContactEndTouchEvent`). A destroyed shape's handle is
-/// already stale. Pairs whose bodies are both asleep (or static) keep
-/// touching: sleep ends nothing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ContactEndEvent {
-    pub shape_a: ShapeId,
-    pub shape_b: ShapeId,
-}
-
-/// A begin at least `WorldDef::hit_event_threshold` fast, for pairs where
-/// either shape has `ShapeDef::enable_hit_events` (Box3D
-/// `b3ContactHitEvent`). Fields as in [`ContactBeginEvent`], plus each
-/// shape's `SurfaceMaterial::user_material_id`.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ContactHitEvent {
-    pub shape_a: ShapeId,
-    pub shape_b: ShapeId,
-    pub point: [f32; 3],
-    pub normal: [f32; 3],
-    pub approach_speed: f32,
-    pub user_material_ids: [u64; 2],
-}
-
-/// Touch changes in one step (P4): the touching pair set diffed against the
-/// previous step's. Sorted by `(shape_a, shape_b)`.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct ContactEvents {
-    pub begins: Vec<ContactBeginEvent>,
-    pub ends: Vec<ContactEndEvent>,
-    pub hits: Vec<ContactHitEvent>,
-}
-
-impl ContactEvents {
-    pub fn is_empty(&self) -> bool {
-        self.begins.is_empty() && self.ends.is_empty() && self.hits.is_empty()
-    }
 }
 
 /// Something broke.
@@ -141,6 +87,49 @@ pub struct SoftOutput {
     pub nodes: Vec<[f32; 3]>,
 }
 
+/// Two shapes started touching (either has `enable_contact_events`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContactBeginEvent {
+    pub shape_a: crate::ShapeId,
+    pub shape_b: crate::ShapeId,
+    /// The deepest contact point and the normal from A to B (world).
+    pub point: [f32; 3],
+    pub normal: [f32; 3],
+    /// Closing speed along the normal at that point, before the solve (m/s).
+    pub approach_speed: f32,
+}
+
+/// Two shapes stopped touching (or one was destroyed while touching).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContactEndEvent {
+    pub shape_a: crate::ShapeId,
+    pub shape_b: crate::ShapeId,
+}
+
+/// Contact begin and end events, and hits: begins at or above
+/// `WorldDef::hit_event_threshold` on shapes with `enable_hit_events`
+/// (impact sounds, effects, damage).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ContactEvents {
+    pub begin: Vec<ContactBeginEvent>,
+    pub end: Vec<ContactEndEvent>,
+    pub hits: Vec<ContactBeginEvent>,
+}
+
+/// A shape entered or left a sensor (`ShapeDef::is_sensor` with
+/// `enable_sensor_events`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SensorEvent {
+    pub sensor_shape: crate::ShapeId,
+    pub visitor_shape: crate::ShapeId,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SensorEvents {
+    pub begin: Vec<SensorEvent>,
+    pub end: Vec<SensorEvent>,
+}
+
 /// A batch of queued ray casts ([`crate::World::cast_rays`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RayBatchId(pub u64);
@@ -175,8 +164,6 @@ pub struct Frame {
     /// nothing was written: nothing moved and nothing happened.
     pub ran: bool,
     pub body_events: BodyEvents,
-    /// Contact begins, ends and hits of shapes with contact or hit events.
-    pub contact_events: ContactEvents,
     pub destruction_events: Vec<DestructionEvent>,
     /// Every vehicle (rigid, or a soft vehicle's core).
     pub vehicles: Vec<VehicleOutput>,
@@ -186,10 +173,26 @@ pub struct Frame {
     pub skins: Vec<SkinOutput>,
     /// Ray batches queued before this step.
     pub ray_results: Vec<RayBatchResult>,
+    /// Shapes that started or stopped touching this step, and hits.
+    pub contact_events: ContactEvents,
+    /// Shapes that entered or left sensors this step.
+    pub sensor_events: SensorEvents,
+    /// Overlap queries queued before this step.
+    pub overlap_results: Vec<crate::OverlapResult>,
+    /// Every character, as this step left it.
+    pub characters: Vec<crate::CharacterOutput>,
+    /// Characters that landed, lost their support or were crushed.
+    pub character_events: Vec<crate::CharacterEvent>,
+    /// Casts queued before this step.
+    pub cast_results: Vec<crate::CastResult>,
+    /// Every projectile in flight, and each one that stopped this step.
+    pub projectiles: Vec<crate::ProjectileOutput>,
+    /// Shapes projectiles went through or stopped in.
+    pub projectile_events: Vec<crate::ProjectileEvent>,
     /// Records overwritten in the GPU event ring before they were read (more
-    /// than it holds between two frames), plus touching manifolds past
-    /// `engine_schema::CONTACT_EVENT_CAP` in this step (such a frame reports
-    /// no contact ends: the pairs it could not see stay touching). Never
+    /// than it holds between two frames), plus touching pairs past
+    /// `engine_schema::CONTACT_EVENT_CAP` in this step (such a frame ends no
+    /// contacts or sensor overlaps: the pairs it could not see stay). Never
     /// silently zero.
     pub lost_events: u32,
     /// This frame's readback was dropped (`Backpressure::Drop`): it carries
@@ -214,9 +217,6 @@ pub struct CoalescedFrame {
     /// Per body: the latest transform, the earliest previous transform, and
     /// the net sleep change across the steps.
     pub moves: Vec<BodyMoveEvent>,
-    /// Every step's contact events, in step order, with its step (steps
-    /// without any are left out).
-    pub contact_events: Vec<(u64, ContactEvents)>,
     /// Every destruction event, in step order, with its step.
     pub destruction_events: Vec<(u64, DestructionEvent)>,
     /// The latest output per vehicle, soft body and skin.
@@ -225,6 +225,19 @@ pub struct CoalescedFrame {
     pub skins: Vec<SkinOutput>,
     /// Every ray batch's results.
     pub ray_results: Vec<RayBatchResult>,
+    /// Every step's contact events, in step order.
+    pub contact_events: ContactEvents,
+    pub sensor_events: SensorEvents,
+    /// Every overlap query's results.
+    pub overlap_results: Vec<crate::OverlapResult>,
+    /// The latest state per character and per projectile.
+    pub characters: Vec<crate::CharacterOutput>,
+    pub projectiles: Vec<crate::ProjectileOutput>,
+    /// Every step's character and projectile events and cast results, in
+    /// step order.
+    pub character_events: Vec<crate::CharacterEvent>,
+    pub cast_results: Vec<crate::CastResult>,
+    pub projectile_events: Vec<crate::ProjectileEvent>,
     pub lost_events: u32,
     /// Any folded step's readback was dropped (a later one resynced it).
     pub dropped: bool,
@@ -243,6 +256,8 @@ pub fn coalesce(frames: Vec<Frame>) -> CoalescedFrame {
     let mut vehicles = BTreeMap::new();
     let mut soft = BTreeMap::new();
     let mut skins = BTreeMap::new();
+    let mut characters = BTreeMap::new();
+    let mut projectiles = BTreeMap::new();
     for f in frames {
         for m in f.body_events.moves {
             moves
@@ -262,9 +277,6 @@ pub fn coalesce(frames: Vec<Frame>) -> CoalescedFrame {
                 })
                 .or_insert(m);
         }
-        if !f.contact_events.is_empty() {
-            out.contact_events.push((f.step, f.contact_events));
-        }
         out.destruction_events
             .extend(f.destruction_events.into_iter().map(|e| (f.step, e)));
         for v in f.vehicles {
@@ -277,6 +289,21 @@ pub fn coalesce(frames: Vec<Frame>) -> CoalescedFrame {
             skins.insert(s.skin, s);
         }
         out.ray_results.extend(f.ray_results);
+        out.contact_events.begin.extend(f.contact_events.begin);
+        out.contact_events.end.extend(f.contact_events.end);
+        out.contact_events.hits.extend(f.contact_events.hits);
+        out.sensor_events.begin.extend(f.sensor_events.begin);
+        out.sensor_events.end.extend(f.sensor_events.end);
+        out.overlap_results.extend(f.overlap_results);
+        for c in f.characters {
+            characters.insert(c.character, c);
+        }
+        for p in f.projectiles {
+            projectiles.insert(p.projectile, p);
+        }
+        out.character_events.extend(f.character_events);
+        out.cast_results.extend(f.cast_results);
+        out.projectile_events.extend(f.projectile_events);
         out.lost_events += f.lost_events;
         out.dropped |= f.dropped;
         if f.counters.is_some() {
@@ -287,6 +314,8 @@ pub fn coalesce(frames: Vec<Frame>) -> CoalescedFrame {
     out.vehicles = vehicles.into_values().collect();
     out.soft = soft.into_values().collect();
     out.skins = skins.into_values().collect();
+    out.characters = characters.into_values().collect();
+    out.projectiles = projectiles.into_values().collect();
     out
 }
 

@@ -6,7 +6,7 @@
 use super::*;
 use engine_schema::commands::{CommandType, GpuCommand, CMD_RUN_MEMBER};
 
-const BODY_COMMANDS: [u32; 9] = [
+const BODY_COMMANDS: [u32; 11] = [
     CommandType::WakeBody as u32,
     CommandType::TeleportBody as u32,
     CommandType::SetVelocity as u32,
@@ -16,6 +16,8 @@ const BODY_COMMANDS: [u32; 9] = [
     CommandType::AngularImpulse as u32,
     CommandType::SetMassFrame as u32,
     CommandType::SetKinematicTarget as u32,
+    CommandType::Damp as u32,
+    CommandType::SetLocks as u32,
 ];
 
 /// Every GPU buffer and the host mirror of a [`WgpuSim`] at one instant
@@ -34,7 +36,6 @@ pub struct SimSnapshot {
     has_convex: bool,
     has_height_field: bool,
     has_filters: bool,
-    has_contact_events: bool,
     grid_levels: u32,
     grid_cache: Option<(u32, f32, u32)>,
     manifolds_valid: bool,
@@ -300,7 +301,6 @@ impl WgpuSim {
             has_convex: self.has_convex,
             has_height_field: self.has_height_field,
             has_filters: self.has_filters,
-            has_contact_events: self.has_contact_events,
             grid_levels: self.grid_levels,
             grid_cache: self.grid_cache,
             manifolds_valid: self.manifolds_valid,
@@ -343,7 +343,6 @@ impl WgpuSim {
         self.has_convex = s.has_convex;
         self.has_height_field = s.has_height_field;
         self.has_filters = s.has_filters;
-        self.has_contact_events = s.has_contact_events;
         self.grid_levels = s.grid_levels;
         self.grid_cache = s.grid_cache;
         self.manifolds_valid = s.manifolds_valid;

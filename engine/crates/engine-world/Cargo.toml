@@ -20,3 +20,14 @@ wgpu.workspace = true
 glam.workspace = true
 bytemuck.workspace = true
 anyhow.workspace = true
+serde_json = { workspace = true, optional = true }
+# The fracture lab's stress-solver modes (`StrengthModel::Threshold`): the stress
+# oracle's GPU fracture and contact ingest on the world's device, its scene import
+# and the lab's cooking of clusters (engine/stress-oracle, its own workspace).
+stress-gpu = { path = "../../stress-oracle/crates/stress-gpu", optional = true }
+stress-ref = { path = "../../stress-oracle/crates/stress-ref", optional = true }
+stress-rubble = { path = "../../stress-oracle/crates/stress-rubble", default-features = false, features = ["gpu"], optional = true }
+
+[features]
+default = ["stress"]
+stress = ["dep:stress-gpu", "dep:stress-ref", "dep:stress-rubble", "dep:serde_json"]

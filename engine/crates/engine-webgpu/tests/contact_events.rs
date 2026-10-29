@@ -1,14 +1,61 @@
 //! The opt-in `contact_events` pass (P4) on raw `WgpuSim` records: shape flags
-//! in `Collider::material` bits 12..15 only add the pass, which reads and never
-//! writes physics state, and its records describe the touch (pair, deepest
-//! point, normal, closing speed from the step-start velocities).
+//! in `Collider::material` bits 12..15 change no body, the pass reads and
+//! never writes physics state, and its records describe the touch (pair,
+//! deepest point, normal, closing speed from the step-start velocities).
 
 use engine_schema::{
-    AvbdParams, BodyState, Collider, ShapeType, WorldCapacity, CONTACT_EVENT_CAP,
-    SHAPE_CONTACT_EVENTS, SHAPE_HIT_EVENTS,
+    AvbdParams, BodyState, Collider, ShapeType, WorldCapacity, COLLIDER_CONTACT_EVENTS,
+    COLLIDER_HIT_EVENTS, CONTACT_EVENT_CAP, CONTACT_EVENT_WORDS,
 };
 use engine_webgpu::WgpuSim;
 use glam::{Quat, Vec3};
+
+/// One record of the contact-event region (`world_step.slang` `contact_events`).
+#[derive(Clone, Copy, Debug)]
+struct Record {
+    collider_a: u32,
+    collider_b: u32,
+    approach_speed: f32,
+    point: [f32; 3],
+    normal: [f32; 3],
+}
+
+/// The last step's records (`contact_event_range`), and how many the region
+/// could not hold.
+fn read_events(s: &WgpuSim) -> (Vec<Record>, u32) {
+    let (buffer, offset, size) = s.contact_event_range();
+    let staging = s.device().create_buffer(&wgpu::BufferDescriptor {
+        label: Some("contact events readback"),
+        size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut enc = s
+        .device()
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    enc.copy_buffer_to_buffer(buffer, offset, &staging, 0, size);
+    s.queue().submit([enc.finish()]);
+    let slice = staging.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |r| r.unwrap());
+    let _ = s.device().poll(wgpu::PollType::wait_indefinitely());
+    let words: Vec<u32> = bytemuck::cast_slice(&slice.get_mapped_range().unwrap()).to_vec();
+    let held = words[0].min(CONTACT_EVENT_CAP) as usize;
+    let f = f32::from_bits;
+    let w = CONTACT_EVENT_WORDS as usize;
+    let records = (0..held)
+        .map(|k| {
+            let r = &words[4 + k * w..4 + (k + 1) * w];
+            Record {
+                collider_a: r[0],
+                collider_b: r[1],
+                approach_speed: f(r[2]),
+                point: [f(r[4]), f(r[5]), f(r[6])],
+                normal: [f(r[8]), f(r[9]), f(r[10])],
+            }
+        })
+        .collect();
+    (records, words[0] - held as u32)
+}
 
 const G: f32 = 9.81;
 const DT: f32 = 1.0 / 60.0;
@@ -72,11 +119,11 @@ fn scene(flags: u32, heights: &[f32]) -> (WgpuSim, Vec<u32>) {
 fn flags_only_add_the_pass_and_change_no_body() {
     let heights = [0.3, 0.8, 1.4];
     let (mut plain, boxes) = scene(0, &heights);
-    let (mut flagged, _) = scene(SHAPE_CONTACT_EVENTS | SHAPE_HIT_EVENTS, &heights);
-    assert!(!plain.has_contact_events());
-    assert!(flagged.has_contact_events());
+    let (mut flagged, _) = scene(COLLIDER_CONTACT_EVENTS | COLLIDER_HIT_EVENTS, &heights);
+    flagged.set_contact_events(true);
     for _ in 0..90 {
         plain.step().unwrap();
+        flagged.clear_contact_events();
         flagged.step().unwrap();
         for &b in &boxes {
             let (p, f) = (plain.read_body(b), flagged.read_body(b));
@@ -88,19 +135,21 @@ fn flags_only_add_the_pass_and_change_no_body() {
         }
     }
     // The unflagged sim never ran the pass: its region was never written.
-    let (records, lost) = plain.read_contact_events();
+    let (records, lost) = read_events(&plain);
     assert!(records.is_empty() && lost == 0);
 }
 
 #[test]
 fn records_carry_the_touch_at_the_impact_speed() {
     let gap = 0.8;
-    let (mut s, boxes) = scene(SHAPE_HIT_EVENTS, &[gap]);
+    let (mut s, boxes) = scene(COLLIDER_CONTACT_EVENTS | COLLIDER_HIT_EVENTS, &[gap]);
+    s.set_contact_events(true);
     let v = (2.0 * G * gap).sqrt();
     let mut first = None;
     for step in 0..60 {
+        s.clear_contact_events();
         let c = s.step().unwrap();
-        let (records, lost) = s.read_contact_events();
+        let (records, lost) = read_events(&s);
         assert_eq!(lost, 0);
         assert!(
             records.len() as u32 <= c.manifold_count,

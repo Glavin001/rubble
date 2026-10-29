@@ -3,6 +3,7 @@
 //! is a begin at least `hit_event_threshold` fast, its approach speed the
 //! closing speed at impact (√(2gh) for a drop from rest through h).
 
+use engine_schema::CONTACT_EVENT_CAP;
 use rubble::*;
 use std::collections::BTreeMap;
 
@@ -83,29 +84,28 @@ fn run(w: &mut World, steps: u32) -> Vec<Frame> {
 struct Tally {
     begins: Vec<(u64, ContactBeginEvent)>,
     ends: Vec<(u64, ContactEndEvent)>,
-    hits: Vec<(u64, ContactHitEvent)>,
+    hits: Vec<(u64, ContactBeginEvent)>,
 }
 
-/// Events per shape pair (lower handle first, as reported).
+/// Events per shape pair (keyed lower handle first).
 fn tally(frames: &[Frame]) -> BTreeMap<(ShapeId, ShapeId), Tally> {
     let mut out: BTreeMap<_, Tally> = BTreeMap::new();
     for f in frames {
         let e = &f.contact_events;
-        for b in &e.begins {
-            assert!(b.shape_a < b.shape_b);
-            out.entry((b.shape_a, b.shape_b))
+        for b in &e.begin {
+            out.entry(pair(b.shape_a, b.shape_b))
                 .or_default()
                 .begins
                 .push((f.step, *b));
         }
-        for x in &e.ends {
-            out.entry((x.shape_a, x.shape_b))
+        for x in &e.end {
+            out.entry(pair(x.shape_a, x.shape_b))
                 .or_default()
                 .ends
                 .push((f.step, *x));
         }
         for h in &e.hits {
-            out.entry((h.shape_a, h.shape_b))
+            out.entry(pair(h.shape_a, h.shape_b))
                 .or_default()
                 .hits
                 .push((f.step, *h));
@@ -154,7 +154,6 @@ fn drop_onto_with(contacts: ContactStorage, terrain: bool, flags: u32) {
             falling_box(&mut w, &events_def(), [x, half + h, 0.0], half).1
         })
         .collect();
-    assert!(w.sim().has_contact_events());
     let frames = run(&mut w, 150);
     let t = tally(&frames);
     for (h, s) in HEIGHTS.iter().zip(&boxes) {
@@ -186,11 +185,11 @@ fn drop_onto_with(contacts: ContactStorage, terrain: bool, flags: u32) {
             "{contacts:?} terrain={terrain} h={h}: approach {} m/s, √(2gh) = {v} (±{tol})",
             hit.approach_speed
         );
-        // Normal from the lower handle to the higher: the ground was made first.
-        assert!(ground < *s);
+        // The normal points from shape A to shape B.
+        let up = if hit.shape_a == ground { 1.0 } else { -1.0 };
         assert!(
-            hit.normal[1] > 0.99,
-            "normal {:?} points up, ground to box",
+            hit.normal[1] * up > 0.99,
+            "normal {:?} points from A to B (ground to box is up)",
             hit.normal
         );
         assert!(
@@ -280,7 +279,7 @@ fn no_hit_below_the_threshold() {
 }
 
 #[test]
-fn hit_events_alone_report_hits_without_begins() {
+fn hit_events_alone_report_hits() {
     let mut w = world(0.5);
     let ground = ground_plane(&mut w, &ShapeDef::default());
     let def = ShapeDef {
@@ -290,7 +289,10 @@ fn hit_events_alone_report_hits_without_begins() {
     let (_, s) = falling_box(&mut w, &def, [0.0, 1.25, 0.0], 0.25);
     let t = tally(&run(&mut w, 90));
     let e = &t[&pair(ground, s)];
-    assert!(e.begins.is_empty() && e.ends.is_empty());
+    // A hit is also a begin (hits are the begins at or above the threshold),
+    // and the box comes to rest: no end.
+    assert_eq!(e.begins.len(), 1);
+    assert!(e.ends.is_empty());
     assert_eq!(e.hits.len(), 1);
 }
 
@@ -411,7 +413,6 @@ fn shape_flags_keep_the_material() {
             })
             .unwrap();
         w.create_box_shape(b, &def, [0.25; 3]).unwrap();
-        assert_eq!(w.sim().has_contact_events(), flagged);
         run(&mut w, 120);
         stops.push(w.body_transform(b).unwrap().unwrap().position[0]);
     }
@@ -452,14 +453,14 @@ fn overflow_is_counted_not_silent() {
         first.lost_events >= 100,
         "{} touching, {} reported: lost {}",
         n,
-        first.contact_events.begins.len(),
+        first.contact_events.begin.len(),
         first.lost_events
     );
-    assert_eq!(first.contact_events.begins.len() as u32, CONTACT_EVENT_CAP);
+    assert_eq!(first.contact_events.begin.len() as u32, CONTACT_EVENT_CAP);
     // A frame that lost records ends nothing.
     for f in &frames {
         if f.lost_events > 0 {
-            assert!(f.contact_events.ends.is_empty());
+            assert!(f.contact_events.end.is_empty());
         }
     }
     let _ = ground;

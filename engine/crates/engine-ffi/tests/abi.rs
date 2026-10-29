@@ -285,21 +285,20 @@ fn contact_and_hit_events_arrive_in_host_units() {
             let mut f: RbFrame = std::mem::zeroed();
             ok(rbWorld_Poll(w, true, false, &mut f));
             if f.has_frame {
-                begins.extend_from_slice(slice(f.contact_begins, f.contact_begin_count));
-                hits.extend_from_slice(slice(f.contact_hits, f.contact_hit_count));
+                begins.extend_from_slice(slice(f.contact_begin, f.contact_begin_count));
+                hits.extend_from_slice(slice(f.hits, f.hit_count));
                 assert_eq!(f.contact_end_count, 0);
             }
         }
         let f = poll_all(w);
-        begins.extend_from_slice(slice(f.contact_begins, f.contact_begin_count));
-        hits.extend_from_slice(slice(f.contact_hits, f.contact_hit_count));
+        begins.extend_from_slice(slice(f.contact_begin, f.contact_begin_count));
+        hits.extend_from_slice(slice(f.hits, f.hit_count));
         assert_eq!(begins.len(), 1, "{begins:?}");
         assert_eq!(hits.len(), 1, "{hits:?}");
         let h = hits[0];
-        // The ground's shape was made first: the lower handle, shape A.
-        assert!(h.shape_b == s && h.shape_a != 0 && h.shape_a < s, "{h:?}");
+        // The ground's shape was made first: shape A, the normal from it.
+        assert!(h.shape_b == s && h.shape_a != 0 && h.shape_a != s, "{h:?}");
         let ground_shape = h.shape_a;
-        assert_eq!((h.user_material_id_a, h.user_material_id_b), (0, 9));
         let v = (2.0f32 * 981.0 * 100.0).sqrt();
         assert!(
             (h.approach_speed - v).abs() < 981.0 / 60.0 + 0.02 * v,
@@ -312,17 +311,13 @@ fn contact_and_hit_events_arrive_in_host_units() {
             h.normal
         );
         assert!(h.point.z.abs() < 10.0, "at the ground: {:?}", h.point);
-        assert_eq!(begins[0].step, h.step);
         // Destroying the box ends the touch.
         ok(rbDestroyBody(w, b));
         ok(rbWorld_Step(w));
         let f = poll_all(w);
-        let ends = slice(f.contact_ends, f.contact_end_count);
+        let ends = slice(f.contact_end, f.contact_end_count);
         assert_eq!(ends.len(), 1);
         assert_eq!((ends[0].shape_a, ends[0].shape_b), (ground_shape, s));
-        // The threshold changes at run time (in host units); negative is refused.
-        ok(rbWorld_SetHitEventThreshold(w, v + 100.0));
-        assert_ne!(rbWorld_SetHitEventThreshold(w, -1.0), RbResult::RB_OK);
         rbDestroyWorld(w);
     }
 }

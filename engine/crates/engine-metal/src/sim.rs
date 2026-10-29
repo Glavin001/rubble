@@ -438,7 +438,6 @@ impl MetalSim {
             has_convex: false,
             has_height_field: self.has_height_field,
             // No event shapes on Metal (the World API runs on wgpu).
-            contact_events: false,
             soil: false,
             reuse_contacts: self.reuse_on(),
             max_colors: self.capacity.max_colors,
@@ -468,6 +467,7 @@ impl MetalSim {
             },
             soft: Default::default(),
             command_count: 0,
+            explosion_count: 0,
         }
     }
 

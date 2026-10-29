@@ -88,6 +88,134 @@ pub unsafe extern "C" fn rbBody_SetTargetTransform(
     })
 }
 
+/// Box3D damping (1/s): velocities shrink by `1 / (1 + h c)` each step.
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_SetDamping(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    linear: f32,
+    angular: f32,
+) -> RbResult {
+    body_command(world, body, |w, id| {
+        w.world.body_set_damping(id, linear, angular)
+    })
+}
+
+/// Multiply gravity for this body (it wakes).
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_SetGravityScale(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    scale: f32,
+) -> RbResult {
+    body_command(world, body, |w, id| {
+        w.world.body_set_gravity_scale(id, scale)
+    })
+}
+
+/// `RB_LOCK_*` bits (host axes).
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_SetMotionLocks(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    locks: u32,
+) -> RbResult {
+    body_command(world, body, |w, id| {
+        let bits = w.coords.locks_in(locks);
+        w.world
+            .body_set_motion_locks(id, MotionLocks::from_bits(bits))
+    })
+}
+
+/// Mass, centre of mass (body frame) and rotational inertia about the centre
+/// (body frame, rows), Box3D `b3MassData`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RbMassData {
+    pub mass: f32,
+    pub center: RbVec3,
+    pub rotational_inertia: [RbVec3; 3],
+}
+
+/// The body's mass data (zero for static and kinematic bodies).
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_GetMassData(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    out: *mut RbMassData,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let m = w.world.body_mass_data(BodyId::from_bits(body))?;
+        let c = w.coords;
+        let out_data = m.map_or(RbMassData::default(), |m| {
+            let t = c.inertia_out(m.rotational_inertia);
+            RbMassData {
+                mass: m.mass,
+                center: RbVec3::of(c.position_out(m.center)),
+                rotational_inertia: t.map(RbVec3::of),
+            }
+        });
+        write(out, out_data)
+    })
+}
+
+/// Override a dynamic body's mass data (Box3D `b3Body_SetMassData`).
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_SetMassData(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    mass: RbMassData,
+) -> RbResult {
+    body_command(world, body, |w, id| {
+        let c = w.coords;
+        let data = MassData {
+            mass: mass.mass,
+            center: c.position_in(mass.center.a()),
+            rotational_inertia: c.inertia_in(mass.rotational_inertia.map(|r| r.a())),
+        };
+        w.world.body_set_mass_data(id, data)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_GetType(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    out: *mut RbBodyType,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let t = match w.world.body_type(BodyId::from_bits(body))? {
+            BodyType::Static => RbBodyType::RB_STATIC_BODY,
+            BodyType::Kinematic => RbBodyType::RB_KINEMATIC_BODY,
+            BodyType::Dynamic => RbBodyType::RB_DYNAMIC_BODY,
+        };
+        write(out, t)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_GetUserData(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    out: *mut u64,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        write(out, w.world.body_user_data(BodyId::from_bits(body))?)
+    })
+}
+
+/// GPU time of the last step that ran (ms; 0 where timestamps are off).
+#[no_mangle]
+pub unsafe extern "C" fn rbWorld_GetProfileMs(world: *mut RbWorld, out: *mut f64) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        write(out, w.world.profile_ms())
+    })
+}
+
 /// Awake as of the last polled frame.
 #[no_mangle]
 pub unsafe extern "C" fn rbBody_IsAwake(
@@ -139,45 +267,6 @@ pub unsafe extern "C" fn rbShape_SetFriction(
         m.friction = friction;
         m.restitution = restitution;
         w.world.shape_set_surface_material(id, m)
-    })
-}
-
-/// Turn a shape's contact begin / end events on or off.
-#[no_mangle]
-pub unsafe extern "C" fn rbShape_EnableContactEvents(
-    world: *mut RbWorld,
-    shape: RbShapeId,
-    enabled: bool,
-) -> RbResult {
-    guard_args(|| {
-        let w = world_mut(world)?;
-        w.world
-            .shape_enable_contact_events(ShapeId::from_bits(shape), enabled)
-    })
-}
-
-/// Turn a shape's hit events on or off.
-#[no_mangle]
-pub unsafe extern "C" fn rbShape_EnableHitEvents(
-    world: *mut RbWorld,
-    shape: RbShapeId,
-    enabled: bool,
-) -> RbResult {
-    guard_args(|| {
-        let w = world_mut(world)?;
-        w.world
-            .shape_enable_hit_events(ShapeId::from_bits(shape), enabled)
-    })
-}
-
-/// The approach speed (world units per second) at or above which a beginning
-/// touch raises a hit event, from frames polled next.
-#[no_mangle]
-pub unsafe extern "C" fn rbWorld_SetHitEventThreshold(world: *mut RbWorld, speed: f32) -> RbResult {
-    guard_args(|| {
-        let w = world_mut(world)?;
-        let speed = w.coords.length_in(speed);
-        w.world.set_hit_event_threshold(speed)
     })
 }
 
@@ -516,6 +605,57 @@ pub unsafe extern "C" fn rbSoft_AddObstacle(world: *mut RbWorld, shape: RbShapeI
     })
 }
 
+/// One beam of a soft body (`rbSoft_GetBeams`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RbSoftBeam {
+    /// Node ordinals (index `RbSoftOutput::nodes`).
+    pub node_a: u32,
+    pub node_b: u32,
+    /// Rest length now (plastic deformation moves it) and at spawn.
+    pub rest_length: f32,
+    pub spawn_length: f32,
+    /// Signed axial force (+ = compression).
+    pub force: f32,
+    pub broken: bool,
+    pub yielded: bool,
+    pub visible: bool,
+}
+
+/// Every beam (**blocks** on a readback; for beam views and damage maps).
+/// Writes up to `capacity`; `*out_count` gets the total.
+#[no_mangle]
+pub unsafe extern "C" fn rbSoft_GetBeams(
+    world: *mut RbWorld,
+    soft: RbSoftId,
+    out: *mut RbSoftBeam,
+    capacity: u32,
+    out_count: *mut u32,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let beams = w.world.soft_beams(SoftHandle(soft))?;
+        let c = w.coords;
+        write(out_count, beams.len() as u32)?;
+        if capacity > 0 && out.is_null() {
+            return Err(invalid("null beam array"));
+        }
+        for (k, b) in beams.iter().take(capacity as usize).enumerate() {
+            *out.add(k) = RbSoftBeam {
+                node_a: b.node_a,
+                node_b: b.node_b,
+                rest_length: c.length_out(b.rest_length),
+                spawn_length: c.length_out(b.spawn_length),
+                force: c.force_out(b.force),
+                broken: b.broken,
+                yielded: b.yielded,
+                visible: b.visible,
+            };
+        }
+        Ok(())
+    })
+}
+
 /// A soft body's damage so far.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -613,6 +753,97 @@ pub unsafe extern "C" fn rbWorld_UseDestructibleAssetSolver(
     })
 }
 
+/// Switch the world to the solver settings the asset's source was tuned with for
+/// `model`: `rbWorld_UseDestructibleAssetSolver`'s for the bonds model; for the
+/// threshold model the fracture lab's threshold mode's (never asleep, 4
+/// iterations, 60 Hz; gravity included). `*out_time_step` receives the step.
+#[no_mangle]
+pub unsafe extern "C" fn rbWorld_UseDestructibleAssetSolverFor(
+    world: *mut RbWorld,
+    asset: RbDestructibleAssetId,
+    model: RbStrengthModel,
+    out_time_step: *mut f32,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let solver = w
+            .world
+            .destructible_asset(DestructibleAssetId(asset))?
+            .solver_for(strength_model(model))
+            .ok_or_else(|| anyhow::anyhow!("the asset carries no solver settings for {model:?}"))?;
+        w.world.set_solver(solver);
+        write(out_time_step, solver.dt)
+    })
+}
+
+/// The ground the asset's stress scene stands on (the fracture lab's ground
+/// plane for the threshold model, which the host adds itself): a point on it in
+/// the world's coordinates for an instance placed at the identity.
+/// `*out_has_ground` is false when the scene has none.
+#[no_mangle]
+pub unsafe extern "C" fn rbWorld_GetDestructibleAssetGround(
+    world: *mut RbWorld,
+    asset: RbDestructibleAssetId,
+    out_has_ground: *mut bool,
+    out_point: *mut RbVec3,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let height = w
+            .world
+            .destructible_asset(DestructibleAssetId(asset))?
+            .stress
+            .as_ref()
+            .and_then(|s| s.ground_height());
+        write(out_has_ground, height.is_some())?;
+        write(
+            out_point,
+            RbVec3::of(w.coords.position_out([0.0, height.unwrap_or(0.0), 0.0])),
+        )
+    })
+}
+
+/// A projectile's material for threshold destructibles (`rbBody_SetProjectile`):
+/// Young's modulus (Pa) and Poisson's ratio, in SI units in every coordinate
+/// convention. The default is the fracture lab's steel.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RbProjectile {
+    pub youngs_modulus: f32,
+    pub poisson_ratio: f32,
+}
+
+#[no_mangle]
+pub extern "C" fn rbDefaultProjectile() -> RbProjectile {
+    let p = Projectile::default();
+    RbProjectile {
+        youngs_modulus: p.youngs_modulus,
+        poisson_ratio: p.poisson_ratio,
+    }
+}
+
+/// Mark a dynamic body with one sphere or box shape as a projectile for
+/// threshold destructibles (null clears it): its contacts load chunks as the
+/// lab's shots do and strike prediction checks it every step. At most 64.
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_SetProjectile(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    projectile: *const RbProjectile,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let p = (!projectile.is_null()).then(|| {
+            let p = *projectile;
+            Projectile {
+                youngs_modulus: p.youngs_modulus,
+                poisson_ratio: p.poisson_ratio,
+            }
+        });
+        w.world.body_set_projectile(BodyId::from_bits(body), p)
+    })
+}
+
 /// An infinite ground plane on a static body: the half-space below
 /// `normal · x = offset` in the body frame. At most 8 per world.
 #[no_mangle]
@@ -628,6 +859,83 @@ pub unsafe extern "C" fn rbCreatePlaneShape(
         Ok(Geometry::Plane {
             normal: w.coords.direction_in(normal.a()),
             offset: w.coords.length_in(offset),
+        })
+    })
+}
+
+// ----- queries and explosions -------------------------------------------------------
+
+/// Shapes whose bounds overlap the box `min..max` at the next step's final
+/// poses (Box3D `b3World_OverlapAABB`; sensors are not reported), filtered as
+/// Box3D's query filter: a shape is reported when its categories meet
+/// `mask_bits` and its mask meets `category_bits`. The result arrives in that
+/// step's frame (`RbFrame::overlaps`, matched by `*out_query`).
+#[no_mangle]
+pub unsafe extern "C" fn rbWorld_OverlapAABB(
+    world: *mut RbWorld,
+    min: RbVec3,
+    max: RbVec3,
+    category_bits: u16,
+    mask_bits: u16,
+    out_query: *mut u64,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let (lo, hi) = w.coords.box_in(min.a(), max.a());
+        let filter = QueryFilter {
+            categories: category_bits,
+            mask: mask_bits,
+        };
+        let id = w.world.overlap_aabb(lo, hi, filter)?;
+        write(out_query, id.0)
+    })
+}
+
+/// A radial impulse (Box3D `b3ExplosionDef`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RbExplosionDef {
+    pub position: RbVec3,
+    /// Full strength within this distance of a shape's surface.
+    pub radius: f32,
+    /// Then fading linearly to zero over this distance.
+    pub falloff: f32,
+    /// Impulse per unit of a shape's cross-section.
+    pub impulse_per_area: f32,
+    pub mask_bits: u16,
+}
+
+/// Defaults in `coordinates`' units.
+#[no_mangle]
+pub extern "C" fn rbDefaultExplosionDef(coordinates: RbCoordinates) -> RbExplosionDef {
+    let c = Coords::new(coordinates);
+    let d = ExplosionDef::default();
+    RbExplosionDef {
+        position: RbVec3::default(),
+        radius: c.length_out(d.radius),
+        falloff: c.length_out(d.falloff),
+        impulse_per_area: c.impulse_per_area_out(d.impulse_per_area),
+        mask_bits: d.mask,
+    }
+}
+
+/// A radial impulse at the start of the next step (Box3D `b3World_Explode`);
+/// bodies it reaches wake. Up to 16 per step.
+#[no_mangle]
+pub unsafe extern "C" fn rbWorld_Explode(
+    world: *mut RbWorld,
+    def: *const RbExplosionDef,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let d = read(def, "null explosion def")?;
+        let c = w.coords;
+        w.world.explode(&ExplosionDef {
+            position: c.position_in(d.position.a()),
+            radius: c.length_in(d.radius),
+            falloff: c.length_in(d.falloff),
+            impulse_per_area: c.impulse_per_area_in(d.impulse_per_area),
+            mask: d.mask_bits,
         })
     })
 }

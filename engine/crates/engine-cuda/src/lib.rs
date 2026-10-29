@@ -403,7 +403,6 @@ impl CudaSim {
             has_convex: false,
             has_height_field: false,
             // No event shapes on CUDA (the World API runs on wgpu).
-            contact_events: false,
             soil: false,
             reuse_contacts: record,
             max_colors: self.capacity.max_colors,
@@ -432,6 +431,7 @@ impl CudaSim {
             },
             soft: Default::default(),
             command_count: 0,
+            explosion_count: 0,
         }
     }
 

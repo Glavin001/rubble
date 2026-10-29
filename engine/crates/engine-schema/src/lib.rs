@@ -84,6 +84,9 @@ pub enum BodyFlags {
 /// and the nearest time of impact along its path places a speculative contact
 /// in the solve and starts the body's iterate at that pose.
 pub const BODY_CCD: u32 = 256; // 64 BODY_PARTICLE, 128 BODY_FOLLOW (engine-softbody)
+/// Motion locks in `BodyState::flags` (world axes): bits 9..11 linear x, y,
+/// z; 12..14 angular x, y, z (the `lock_predict` / `lock_project` passes).
+pub const BODY_LOCK_SHIFT: u32 = 9;
 
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -259,75 +262,6 @@ pub struct Manifold {
 /// joint count.)
 pub const EVENT_RING_BASE: u32 = 96;
 pub const EVENT_RING_CAPACITY: u32 = 1024;
-/// Total `u32` words of the scratch-atomics buffer (host words, lists, ring,
-/// continuous-collision lists, impulse records, carried CCD velocities and the
-/// contact-event region).
-pub const SCRATCH_WORDS: u32 = CONTACT_EVENT_BASE + 1 + CONTACT_EVENT_WORDS * CONTACT_EVENT_CAP;
-
-/// Shape flags in the free bits 12..15 of `Collider::material` (the material
-/// index keeps bits 0..11, below 64; the filter group bits 16..31). No record
-/// without events sets them, so every kernel reads such records as before.
-pub const MATERIAL_INDEX_MASK: u32 = 0x0FFF;
-/// The shape reports contact begin and end events (P4).
-pub const SHAPE_CONTACT_EVENTS: u32 = 1 << 12;
-/// The shape reports hit events (P4).
-pub const SHAPE_HIT_EVENTS: u32 = 1 << 13;
-/// Reserved for sensor shapes (P4, second step); no kernel reads it yet.
-pub const SHAPE_SENSOR: u32 = 1 << 14;
-/// Either event flag: the collider takes part in the `contact_events` pass.
-pub const SHAPE_EVENT_FLAGS: u32 = SHAPE_CONTACT_EVENTS | SHAPE_HIT_EVENTS;
-
-/// Contact-event region of the scratch-atomics buffer (`contact_events`, P4),
-/// after every other list: word `CONTACT_EVENT_BASE` counts the records the
-/// step tried to append (cleared each step by `contact_events_clear`), then
-/// `CONTACT_EVENT_CAP` records of `CONTACT_EVENT_WORDS` words. Appends past
-/// the capacity are counted, never written: `count - CONTACT_EVENT_CAP` were
-/// lost.
-pub const CONTACT_EVENT_BASE: u32 = CCD_PAIR_BASE + 2 * CCD_PAIR_CAP;
-/// Touching manifolds of event-flagged shapes one step can report.
-pub const CONTACT_EVENT_CAP: u32 = 16384;
-/// `[colliderA, colliderB, approach speed, point.xyz, normal.xyz, c0N]`.
-pub const CONTACT_EVENT_WORDS: u32 = 10;
-
-/// One touching manifold of an event-flagged collider (`contact_events`): the
-/// deepest contact's world point (midway between the two surfaces), the
-/// manifold normal (from A to B), the approach speed there from the bodies'
-/// step-start velocities (positive: closing) and that contact's `c0N`.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ContactEventRecord {
-    pub collider_a: u32,
-    pub collider_b: u32,
-    pub approach_speed: f32,
-    pub point: [f32; 3],
-    pub normal: [f32; 3],
-    pub c0n: f32,
-}
-
-/// Decode a copy of the contact-event region (`words` starts at
-/// `CONTACT_EVENT_BASE`): the records written, and how many the step lost to
-/// the capacity.
-pub fn decode_contact_events(words: &[u32]) -> (Vec<ContactEventRecord>, u32) {
-    let Some(&tried) = words.first() else {
-        return (Vec::new(), 0);
-    };
-    let room = ((words.len() - 1) / CONTACT_EVENT_WORDS as usize) as u32;
-    let n = tried.min(CONTACT_EVENT_CAP).min(room);
-    let f = f32::from_bits;
-    let out = (0..n as usize)
-        .map(|k| {
-            let r = &words[1 + k * CONTACT_EVENT_WORDS as usize..][..CONTACT_EVENT_WORDS as usize];
-            ContactEventRecord {
-                collider_a: r[0],
-                collider_b: r[1],
-                approach_speed: f(r[2]),
-                point: [f(r[3]), f(r[4]), f(r[5])],
-                normal: [f(r[6]), f(r[7]), f(r[8])],
-                c0n: f(r[9]),
-            }
-        })
-        .collect();
-    (out, tried - n)
-}
 
 /// Continuous-collision scratch (`ccd_step.slang`), after the oversized-static
 /// list: CCD body count, fast-collider count, impulse count, TOI fallbacks.
@@ -397,6 +331,36 @@ impl ImpulseRecord {
         Self { body, mode: IMPULSE_LINEAR_ANGULAR, j: linear, point: angular }
     }
 }
+/// Contact events (opt-in `contact_events` pass): after the large-static
+/// list, a header word counting the records appended this step (the host
+/// zeroes it), three spare words, then up to `CONTACT_EVENT_CAP` records of
+/// `CONTACT_EVENT_WORDS`: `[colliderA, colliderB, approach speed, 0]`,
+/// `[point, 0]`, `[normal, 0]`. Counts past the capacity are reported lost.
+/// (After the continuous-collision region.)
+pub const CONTACT_EVENT_BASE: u32 = CCD_PAIR_BASE + 2 * CCD_PAIR_CAP;
+pub const CONTACT_EVENT_CAP: u32 = 2048;
+pub const CONTACT_EVENT_WORDS: u32 = 12;
+/// `Collider.material` bits 12..15 (the index uses 0..11, the filter group
+/// 16..31): the shape reports contact events, hit events, or is a sensor.
+pub const COLLIDER_CONTACT_EVENTS: u32 = 1 << 12;
+pub const COLLIDER_HIT_EVENTS: u32 = 1 << 13;
+pub const COLLIDER_SENSOR: u32 = 1 << 14;
+/// Overlap queries (P5): after the contact events, `[query count, result
+/// count (the host zeroes it), 0, 0]`, then `QUERY_CAP` queries of 8 words
+/// `[min, category bits]`, `[max, mask bits]`, then up to `QUERY_RESULT_CAP`
+/// results of 2 words `[query, collider]`.
+pub const QUERY_BASE: u32 = CONTACT_EVENT_BASE + 4 + CONTACT_EVENT_WORDS * CONTACT_EVENT_CAP;
+pub const QUERY_CAP: u32 = 32;
+pub const QUERY_RESULT_BASE: u32 = QUERY_BASE + 4 + 8 * QUERY_CAP;
+pub const QUERY_RESULT_CAP: u32 = 8192;
+/// Explosions (P4 `explode`): `[count, 0, 0, 0]`, then `EXPLODE_CAP` records
+/// of 8 words `[centre, radius]`, `[falloff, impulse per area, mask bits, 0]`.
+pub const EXPLODE_BASE: u32 = QUERY_RESULT_BASE + 2 * QUERY_RESULT_CAP;
+pub const EXPLODE_CAP: u32 = 16;
+/// Total `u32` words of the scratch-atomics buffer (host words, lists, ring,
+/// continuous-collision lists, impulse records and carried CCD velocities,
+/// contact events, queries, explosions).
+pub const SCRATCH_WORDS: u32 = EXPLODE_BASE + 4 + 8 * EXPLODE_CAP;
 /// Scratch word of the oversized-static count (uniform grid; see `LARGE_STATIC_CAP`).
 pub const LARGE_STATIC_COUNT: u32 = 80;
 /// First scratch word of the oversized-static collider ids, after the event ring.
@@ -562,59 +526,6 @@ pub const LARGE_STATIC_CAP: u32 = 1024;
 mod tests {
     use super::*;
     use std::mem::{align_of, size_of};
-
-    #[test]
-    fn contact_event_region_decodes_records_and_counts_the_overflow() {
-        let words_of = |tried: u32, written: u32| {
-            let mut w = vec![tried];
-            for k in 0..written {
-                w.extend([
-                    k,
-                    k + 1,
-                    2.5f32.to_bits(),
-                    1.0f32.to_bits(),
-                    2.0f32.to_bits(),
-                    3.0f32.to_bits(),
-                ]);
-                w.extend([
-                    0.0f32.to_bits(),
-                    1.0f32.to_bits(),
-                    0.0f32.to_bits(),
-                    (-0.01f32).to_bits(),
-                ]);
-            }
-            w
-        };
-        let (r, lost) = decode_contact_events(&words_of(2, 2));
-        assert_eq!(lost, 0);
-        assert_eq!(r.len(), 2);
-        assert_eq!(
-            r[1],
-            ContactEventRecord {
-                collider_a: 1,
-                collider_b: 2,
-                approach_speed: 2.5,
-                point: [1.0, 2.0, 3.0],
-                normal: [0.0, 1.0, 0.0],
-                c0n: -0.01,
-            }
-        );
-        // Appends past the capacity are counted, never decoded from stale words.
-        let (r, lost) = decode_contact_events(&words_of(CONTACT_EVENT_CAP + 7, 3));
-        assert_eq!((r.len(), lost), (3, CONTACT_EVENT_CAP + 4));
-        let full = (1 + CONTACT_EVENT_WORDS * CONTACT_EVENT_CAP) as usize;
-        let mut w = vec![0u32; full];
-        w[0] = CONTACT_EVENT_CAP + 7;
-        let (r, lost) = decode_contact_events(&w);
-        assert_eq!((r.len() as u32, lost), (CONTACT_EVENT_CAP, 7));
-        assert_eq!(SCRATCH_WORDS as usize, CONTACT_EVENT_BASE as usize + full);
-        assert_eq!(MATERIAL_INDEX_MASK & SHAPE_EVENT_FLAGS, 0);
-        assert_eq!(
-            (SHAPE_EVENT_FLAGS | SHAPE_SENSOR) & 0xFFFF_0000,
-            0,
-            "clear of the filter group"
-        );
-    }
 
     #[test]
     fn event_ring_decodes_new_breaks_and_counts_overwritten_ones() {

@@ -130,6 +130,12 @@ pub struct WgpuSim {
     terrain_impulses_pending: bool,
     /// A heightfield is watched by the terrain look-ahead.
     terrain_watch_on: bool,
+    /// Run `contact_events` each step (`set_contact_events`).
+    contact_events: bool,
+    /// Explosions queued for the next step (`write_explosions`).
+    explosion_count: u32,
+    /// Some body has motion locks (`set_motion_locks`).
+    motion_locks: bool,
     /// The last `step*` call ran the GPU step (false: skipped, nothing awake).
     last_step_ran: bool,
     sleep_island_rounds: u32,
@@ -154,11 +160,10 @@ pub struct WgpuSim {
     grid_levels: u32,
     /// (collider count, base cell, levels): recomputed only when colliders change.
     grid_cache: Option<(u32, f32, u32)>,
+    /// Colliders were added after step 0; see `build_all_bounds`.
+    bounds_dirty: bool,
     /// Any collider carries a collision filter (HOST_S(21)).
     has_filters: bool,
-    /// Any collider carries a contact or hit event flag: the step plans the
-    /// `contact_events` pass (P4).
-    has_contact_events: bool,
     /// Some heightfield in the hull arena carries a soil (vehicle ruts, T5):
     /// the step plans `wheel_soil` / `wheel_soil_press`. Set once, from the
     /// arena uploads (`sync_hulls`).
@@ -735,6 +740,9 @@ impl WgpuSim {
             terrain: None,
             terrain_impulses_pending: false,
             terrain_watch_on: false,
+            contact_events: false,
+            explosion_count: 0,
+            motion_locks: false,
             last_step_ran: false,
             sleep_island_rounds: 8,
             last_counters: StepCounters::default(),
@@ -751,8 +759,8 @@ impl WgpuSim {
             has_height_field: false,
             grid_levels: 0,
             grid_cache: None,
+            bounds_dirty: false,
             has_filters: false,
-            has_contact_events: false,
             has_soil: false,
             manifolds_valid: false,
             hull_records_capacity: hull_records,
@@ -941,6 +949,7 @@ impl WgpuSim {
 
     /// Append collider records in one contiguous upload, preserving body indices.
     pub fn add_colliders(&mut self, colliders: &[Collider]) -> std::ops::Range<u32> {
+        self.bounds_dirty |= self.steps_done > 0 && !colliders.is_empty();
         let start = self.collider_count;
         let count = u32::try_from(colliders.len()).expect("collider batch exceeds u32 index space");
         assert!(
@@ -958,7 +967,6 @@ impl WgpuSim {
             self.has_filters |= colliders
                 .iter()
                 .any(engine_schema::convex::CollisionFilter::is_set);
-            self.has_contact_events |= colliders.iter().any(has_event_flags);
             self.manifolds_valid = false;
             self.queue.write_buffer(
                 &self.bufs[2],
@@ -1104,7 +1112,6 @@ impl WgpuSim {
             self.has_filters |= colliders
                 .iter()
                 .any(engine_schema::convex::CollisionFilter::is_set);
-            self.has_contact_events |= colliders.iter().any(has_event_flags);
             self.manifolds_valid = false;
             self.host_cols.extend_from_slice(colliders);
             self.collider_count += count;
@@ -1166,9 +1173,6 @@ impl WgpuSim {
         let cleared = self.host_cols[first as usize..end]
             .iter()
             .any(CollisionFilter::is_set);
-        let events_cleared = self.host_cols[first as usize..end]
-            .iter()
-            .any(has_event_flags);
         self.host_cols[first as usize..end].copy_from_slice(cols);
         self.has_convex |= cols.iter().any(|c| c.shape == ShapeType::ConvexHull as u32);
         self.has_height_field |= cols.iter().any(|c| c.shape == ShapeType::HeightField as u32);
@@ -1176,11 +1180,6 @@ impl WgpuSim {
             self.has_filters = true;
         } else if cleared {
             self.has_filters = self.host_cols.iter().any(CollisionFilter::is_set);
-        }
-        if cols.iter().any(has_event_flags) {
-            self.has_contact_events = true;
-        } else if events_cleared {
-            self.has_contact_events = self.host_cols.iter().any(has_event_flags);
         }
         self.grid_cache = None;
         self.manifolds_valid = false;
@@ -1313,7 +1312,6 @@ impl WgpuSim {
         self.has_filters = cols
             .iter()
             .any(engine_schema::convex::CollisionFilter::is_set);
-        self.has_contact_events = cols.iter().any(has_event_flags);
         self.host_cols = cols;
         self.grid_cache = None;
         self.manifolds_valid = false;
@@ -1343,9 +1341,6 @@ impl WgpuSim {
         let cleared = self.host_cols[first as usize..end]
             .iter()
             .any(CollisionFilter::is_set);
-        let events_cleared = self.host_cols[first as usize..end]
-            .iter()
-            .any(has_event_flags);
         self.host_cols[first as usize..end].copy_from_slice(cols);
         self.has_convex |= cols.iter().any(|c| c.shape == ShapeType::ConvexHull as u32);
         self.has_height_field |= cols.iter().any(|c| c.shape == ShapeType::HeightField as u32);
@@ -1353,11 +1348,6 @@ impl WgpuSim {
             self.has_filters = true;
         } else if cleared {
             self.has_filters = self.host_cols.iter().any(CollisionFilter::is_set);
-        }
-        if cols.iter().any(has_event_flags) {
-            self.has_contact_events = true;
-        } else if events_cleared {
-            self.has_contact_events = self.host_cols.iter().any(has_event_flags);
         }
         self.grid_cache = None;
         self.manifolds_valid = false;
@@ -1582,6 +1572,24 @@ impl WgpuSim {
         broken
     }
 
+    /// Re-express one side of a joint in its body's new solver frame (the
+    /// body's centre of mass moved): that side's anchor and orientation, and
+    /// for side B the rest orientation too. Solver state is untouched.
+    pub fn set_joint_frame(&mut self, id: u32, side_b: bool, anchor: [f32; 3], rot: [f32; 4]) {
+        let base = Self::joint_offset(id);
+        let (a, r) = if side_b {
+            (std::mem::offset_of!(Joint, anchor_b), std::mem::offset_of!(Joint, frame_b))
+        } else {
+            (std::mem::offset_of!(Joint, anchor_a), std::mem::offset_of!(Joint, frame_a))
+        };
+        self.queue.write_buffer(&self.bufs[5], base + a as u64, bytemuck::cast_slice(&anchor));
+        self.queue.write_buffer(&self.bufs[5], base + r as u64, bytemuck::cast_slice(&rot));
+        if side_b {
+            let rest = std::mem::offset_of!(Joint, rest_start) as u64;
+            self.queue.write_buffer(&self.bufs[5], base + rest, bytemuck::cast_slice(&rot));
+        }
+    }
+
     /// Update a drive's targets in place without touching solver state.
     pub fn set_joint_drive(&mut self, id: u32, velocity: f32, target: f32) {
         let off = Self::joint_offset(id) + std::mem::offset_of!(Joint, drive_target) as u64;
@@ -1639,6 +1647,99 @@ impl WgpuSim {
             }
         }
         Ok(())
+    }
+
+    /// Run the motion-lock passes each step (World turns them on while any
+    /// body has locks).
+    pub fn set_motion_locks(&mut self, enabled: bool) {
+        self.motion_locks = enabled;
+    }
+
+    /// Run the `contact_events` pass each step (World turns it on while any
+    /// shape reports contact events).
+    pub fn set_contact_events(&mut self, enabled: bool) {
+        self.contact_events = enabled;
+    }
+
+    /// Queue explosions for the next step (`explode` runs after the
+    /// commands): `(centre, radius, falloff, impulse per area, mask bits)`.
+    /// The step runs even if everything sleeps.
+    pub fn write_explosions(&mut self, explosions: &[([f32; 3], f32, f32, f32, u32)]) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            explosions.len() as u32 <= engine_schema::EXPLODE_CAP,
+            "{} explosions in one step exceed {}",
+            explosions.len(),
+            engine_schema::EXPLODE_CAP
+        );
+        let mut words = vec![explosions.len() as u32, 0, 0, 0];
+        for (c, radius, falloff, per_area, mask) in explosions {
+            words.extend([c[0].to_bits(), c[1].to_bits(), c[2].to_bits(), radius.to_bits()]);
+            words.extend([falloff.to_bits(), per_area.to_bits(), *mask, 0]);
+        }
+        let offset = u64::from(engine_schema::EXPLODE_BASE) * 4;
+        self.queue.write_buffer(&self.bufs[21], offset, bytemuck::cast_slice(&words));
+        self.explosion_count = explosions.len() as u32;
+        self.wake_pending = true;
+        Ok(())
+    }
+
+    /// Queue overlap queries (boxes, with their filter) for
+    /// [`Self::encode_overlap_queries`]: `(min, max, category bits, mask bits)`.
+    pub fn write_overlap_queries(&mut self, queries: &[([f32; 3], [f32; 3], u32, u32)]) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            queries.len() as u32 <= engine_schema::QUERY_CAP,
+            "{} overlap queries in one step exceed {}",
+            queries.len(),
+            engine_schema::QUERY_CAP
+        );
+        let mut words = vec![queries.len() as u32, 0, 0, 0];
+        for (mn, mx, categories, mask) in queries {
+            words.extend([mn[0].to_bits(), mn[1].to_bits(), mn[2].to_bits(), *categories]);
+            words.extend([mx[0].to_bits(), mx[1].to_bits(), mx[2].to_bits(), *mask]);
+        }
+        let offset = u64::from(engine_schema::QUERY_BASE) * 4;
+        self.queue.write_buffer(&self.bufs[21], offset, bytemuck::cast_slice(&words));
+        self.wake_pending = true;
+        Ok(())
+    }
+
+    /// After a step: refresh the bounds to its final poses and run the queued
+    /// overlap queries (reads physics state only).
+    pub fn encode_overlap_queries(&self, enc: &mut wgpu::CommandEncoder) {
+        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("overlap queries"),
+            timestamp_writes: None,
+        });
+        let n = u64::from(self.collider_count.max(1));
+        self.disp(&mut pass, "build_aabbs", n, None);
+        self.disp(&mut pass, "overlap_query", n, None);
+    }
+
+    /// The overlap results region: `[query count, result count, 0, 0]`, the
+    /// queries, then the results. Buffer, byte offset, size.
+    pub fn overlap_result_range(&self) -> (&wgpu::Buffer, u64, u64) {
+        let words = engine_schema::EXPLODE_BASE - engine_schema::QUERY_BASE;
+        (
+            &self.bufs[21],
+            u64::from(engine_schema::QUERY_BASE) * 4,
+            u64::from(words) * 4,
+        )
+    }
+
+    /// Zero the contact-event count before a step (records are appended).
+    pub fn clear_contact_events(&self) {
+        let offset = u64::from(engine_schema::CONTACT_EVENT_BASE) * 4;
+        self.queue.write_buffer(&self.bufs[21], offset, bytemuck::cast_slice(&[0u32; 4]));
+    }
+
+    /// The contact-event region (header and records): buffer, byte offset, size.
+    pub fn contact_event_range(&self) -> (&wgpu::Buffer, u64, u64) {
+        let words = 4 + engine_schema::CONTACT_EVENT_WORDS * engine_schema::CONTACT_EVENT_CAP;
+        (
+            &self.bufs[21],
+            u64::from(engine_schema::CONTACT_EVENT_BASE) * 4,
+            u64::from(words) * 4,
+        )
     }
 
     /// Diagnostic: run this step's graph only up to the end of the broadphase
@@ -1813,6 +1914,7 @@ impl WgpuSim {
     }
 
     fn step_core(&mut self, reuse_manifolds: bool, read: bool) -> Result<StepCounters, ExecError> {
+        self.build_all_bounds_if_dirty();
         let wall = web_time::Instant::now();
         // Skip only when the counters describe the latest step: pipelined steps
         // leave them stale until `drain`.
@@ -2040,6 +2142,8 @@ impl WgpuSim {
     /// once. The step's host writes (its uniforms) take effect at that submission, before
     /// its commands, as they would at its own.
     pub fn step_encode(&mut self, enc: &mut wgpu::CommandEncoder) -> Result<(), ExecError> {
+        // Its own submission, ahead of the caller's encoder.
+        self.build_all_bounds_if_dirty();
         let wall = web_time::Instant::now();
         let vehicles_dirty = self.vehicles.as_ref().is_some_and(|v| v.dirty);
         if self.steps_done > 0
@@ -2114,6 +2218,7 @@ impl WgpuSim {
             self.contacts_parity ^= 1;
             self.steps_done = self.steps_done.saturating_add(1);
             self.command_count = 0;
+            self.explosion_count = 0;
             self.last_timings.total_gpu = wall.elapsed().as_secs_f64() * 1000.0;
             return Ok(self.last_counters);
         }
@@ -2125,6 +2230,7 @@ impl WgpuSim {
         self.contacts_parity ^= 1;
         self.steps_done = self.steps_done.saturating_add(1);
         self.command_count = 0;
+        self.explosion_count = 0;
         self.last_timings.total_gpu = wall.elapsed().as_secs_f64() * 1000.0;
         self.last_counters = counters;
         self.counted_steps = self.steps_done;
@@ -2210,6 +2316,8 @@ impl WgpuSim {
             color_round_headroom: self.color_round_headroom,
             tail_ok: self.capacity.max_bodies <= crate::WGSL_LOOP_CAP * 8,
             pose_output: self.pose_output,
+            contact_events: self.contact_events,
+            motion_locks: self.motion_locks,
         }
     }
 
@@ -2232,7 +2340,6 @@ impl WgpuSim {
             joint_hash_slots: engine_schema::joint_hash_size(self.joint_count),
             has_convex: self.has_convex,
             has_height_field: self.has_height_field,
-            contact_events: self.has_contact_events,
             soil: self.has_soil,
             reuse_contacts: self.reuse_on(),
             max_colors: self.capacity.max_colors,
@@ -2258,6 +2365,7 @@ impl WgpuSim {
             },
             soft: self.soft_counts(),
             command_count: self.command_count,
+            explosion_count: self.explosion_count,
         }
     }
 
@@ -2329,6 +2437,49 @@ impl WgpuSim {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
+    /// Bounds for every collider, sleeping ones included: the full
+    /// `build_aabbs` pass step 0 runs. After step 0 the kernel keeps a
+    /// sleeping body's previous AABB/OBB, and a collider added to a running
+    /// world while its body sleeps has none, so rays and the broadphase never
+    /// see it (a pre-fractured structure rebuilt into a running world). Run
+    /// once after colliders are added past step 0; a sleeping body that
+    /// already had bounds gets the same bounds again from the same pose.
+    fn build_all_bounds_if_dirty(&mut self) {
+        if !self.bounds_dirty {
+            return;
+        }
+        self.bounds_dirty = false;
+        let inputs = self.step_inputs();
+        let mut s = rigid_plan::host_words(
+            &self.capacity,
+            &self.step_modes(),
+            &inputs,
+            &rigid_plan::HostState {
+                contacts_parity: self.contacts_parity,
+                grid_levels: self.grid_levels,
+                has_filters: self.has_filters,
+                record_hash: self.record_hash(),
+                np_defer_limit: self.np_defer_limit,
+                persist_list_limit: self.persist_list_limit,
+            },
+        );
+        // The step-0 full pass: every collider, asleep or not.
+        s[17] = 0;
+        s[19] = 0;
+        self.queue.write_buffer(&self.bufs[21], 0, bytemuck::cast_slice(&s));
+        let host = rigid_plan::host_uniforms(&self.params, &s);
+        self.queue.write_buffer(&self.bufs[6], 0, bytes_of(&host));
+        // build_aabbs reads the collider count from the counter block, which
+        // only a step would otherwise refresh (raycast_batch writes it too).
+        self.queue.write_buffer(&self.bufs[7], 0, bytes_of(&rigid_plan::step_counters(&inputs)));
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("bounds") });
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("bounds"), timestamp_writes: None });
+            self.disp(&mut pass, "build_aabbs", u64::from(self.collider_count.max(1)), None);
+        }
+        self.queue.submit([enc.finish()]);
+    }
+
     fn write_host_uniforms(&self) {
         self.write_host_uniforms_ex(false);
     }
@@ -2710,39 +2861,6 @@ impl WgpuSim {
         )
     }
 
-    /// Whether any collider carries a contact or hit event flag
-    /// (`engine_schema::SHAPE_EVENT_FLAGS`), so each step runs the
-    /// `contact_events` pass.
-    pub fn has_contact_events(&self) -> bool {
-        self.has_contact_events
-    }
-
-    /// The contact-event region (binding 21 from `CONTACT_EVENT_BASE`: the
-    /// append count, then the records): buffer, byte offset and byte size, for
-    /// hosts that copy it into their readback with each step. Decode a copy
-    /// with `engine_schema::decode_contact_events`.
-    pub fn contact_event_range(&self) -> (&wgpu::Buffer, u64, u64) {
-        (
-            &self.bufs[21],
-            u64::from(CONTACT_EVENT_BASE) * 4,
-            u64::from(1 + CONTACT_EVENT_WORDS * CONTACT_EVENT_CAP) * 4,
-        )
-    }
-
-    /// The last step's contact-event records and how many it lost to
-    /// `CONTACT_EVENT_CAP` (waits for the GPU; for tests and tools: a host
-    /// copies `contact_event_range` with its step instead).
-    pub fn read_contact_events(&self) -> (Vec<engine_schema::ContactEventRecord>, u32) {
-        let count: Vec<u32> = self.read_buffer_range(21, u64::from(CONTACT_EVENT_BASE) * 4, 1);
-        let n = count[0].min(CONTACT_EVENT_CAP) as usize;
-        let words: Vec<u32> = self.read_buffer_range(
-            21,
-            u64::from(CONTACT_EVENT_BASE) * 4,
-            1 + n * CONTACT_EVENT_WORDS as usize,
-        );
-        engine_schema::decode_contact_events(&words)
-    }
-
     /// Every event in a copy of the event ring (`event_ring_range`) since the last
     /// poll: joint, mount and beam breaks and the soft pieces those cut loose. It
     /// advances the same cursors as `poll_joint_breaks`, `poll_mount_breaks` and
@@ -2843,6 +2961,7 @@ impl WgpuSim {
             "{} ray queries exceed VehicleCapacity::max_rays ({max})",
             rays.len()
         );
+        self.build_all_bounds_if_dirty();
         self.with_vehicles(|h, sim| h.write_rays(sim, rays));
         // The next step runs even if everything sleeps, so its frame carries
         // the hits (a step with nothing awake changes nothing).
@@ -2884,6 +3003,7 @@ impl WgpuSim {
         if rays.is_empty() {
             return Vec::new();
         }
+        self.build_all_bounds_if_dirty();
         self.with_vehicles(|h, sim| h.write_rays(sim, rays));
         self.write_host_uniforms();
         let mut enc = self
@@ -3068,9 +3188,4 @@ pub struct SoftEvents {
     /// Records overwritten in the event ring before this poll (bodies were
     /// resynchronised from a readback).
     pub lost: u32,
-}
-
-/// The collider carries a contact or hit event flag (bits 12..15 of `material`).
-fn has_event_flags(c: &Collider) -> bool {
-    c.material & engine_schema::SHAPE_EVENT_FLAGS != 0
 }

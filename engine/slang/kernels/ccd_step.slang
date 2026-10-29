@@ -307,6 +307,25 @@ float3 shapeSupport(Collider c, float3 pos, float4 rot, float3 dir)
     return pos + quatRotate(rot, hullVertex(h, hullSupportIndex(h, local)));
 }
 
+// A sphere's or capsule's radius: the margin around its core (a point or a
+// segment). Boxes and hulls have none.
+float shapeMargin(Collider c)
+{
+    return (c.shape == SHAPE_SPHERE || c.shape == SHAPE_CAPSULE) ? c.params.x : 0.0;
+}
+
+// Support point of a collider's core (the shape less its margin).
+float3 coreSupport(Collider c, float3 pos, float4 rot, float3 dir)
+{
+    if (c.shape == SHAPE_SPHERE) return pos;
+    if (c.shape == SHAPE_CAPSULE)
+    {
+        float3 axis = quatRotate(rot, float3(0, 1, 0));
+        return pos + axis * (dot(dir, axis) >= 0.0 ? c.params.y : -c.params.y);
+    }
+    return shapeSupport(c, pos, rot, dir);
+}
+
 // Closest point of triangle (a, b, c) to the origin (Ericson 5.1.5); `mask`
 // names the vertices of the feature it lies on (bits 0, 1, 2).
 float3 triangleClosest(float3 a, float3 b, float3 c, out uint mask)
@@ -431,11 +450,19 @@ static const uint CAST_BUDGET = 3u;
 // against B, both at their given poses, for mu in [0, muMax]. On a hit, mu is
 // the first touch and n the contact normal from A to B; CAST_OVERLAP: they
 // already overlap at mu = 0 (no normal).
+//
+// GJK runs on the shapes' cores (a sphere's centre, a capsule's segment) and
+// the radii are a margin m: a touch is the cores `m` apart (Box2D
+// b2ShapeCast, Jolt's convex radius). GJK on the rounded shapes themselves
+// converges slowly against flat faces and stalls millimetres short, worse the
+// larger the other shape. With no margin (boxes, hulls) every step is the
+// plain cast's.
 uint gjkCast(Collider ca, float3 pa, float4 qa, Collider cb, float3 pb, float4 qb,
     float3 s0, float3 r, float muMax, float eps, out float mu, out float3 n)
 {
     mu = 0.0;
     n = float3(0, 0, 0);
+    float m = shapeMargin(ca) + shapeMargin(cb);
     float3 x = s0;
     // C = B − A contains pb − pa (the reference points of both shapes).
     float3 v = x - (pb - pa);
@@ -448,15 +475,16 @@ uint gjkCast(Collider ca, float3 pa, float4 qa, Collider cb, float3 pb, float4 q
     float prevVV = 1e30;
     for (uint it = 0u; it < GJK_MAX_ITERS; it++)
     {
-        if (dot(v, v) <= eps * eps) return advanced ? CAST_HIT : CAST_OVERLAP;
-        float3 p = shapeSupport(cb, pb, qb, v) - shapeSupport(ca, pa, qa, -v);
+        if (dot(v, v) <= (m + eps) * (m + eps)) return advanced ? CAST_HIT : CAST_OVERLAP;
+        float3 p = coreSupport(cb, pb, qb, v) - coreSupport(ca, pa, qa, -v);
         float3 w = x - p;
-        float vw = dot(v, w);
-        if (vw > 0.0)
+        // Past the margin along v: advance until the cores are m apart there.
+        float gapV = dot(v, w) - m * length(v);
+        if (gapV > 0.0)
         {
             float vr = dot(v, r);
             if (vr >= 0.0) return CAST_MISS;
-            mu -= vw / vr;
+            mu -= gapV / vr;
             if (mu > muMax) return CAST_MISS;
             x = s0 + r * mu;
             n = -normalize(v);
@@ -480,7 +508,7 @@ uint gjkCast(Collider ca, float3 pa, float4 qa, Collider cb, float3 pb, float4 q
         float vv = dot(v, v);
         if (vv >= prevVV * (1.0 - 1.0e-5))
         {
-            float touch = max(10.0 * eps, GJK_TOUCH);
+            float touch = m + max(10.0 * eps, GJK_TOUCH);
             if (vv <= touch * touch) return advanced ? CAST_HIT : CAST_OVERLAP;
             return CAST_MISS;
         }
@@ -584,6 +612,8 @@ void ccd_toi(uint3 tid : SV_DispatchThreadID)
     BodyState ba = gBodies[ca.body];
     BodyState bb = gBodies[cb.body];
     if (!bodyIsCcd(ba) && !bodyIsCcd(bb)) return;
+    // Sensors have no response: no time of impact against them.
+    if (((ca.material | cb.material) & COLLIDER_SENSOR) != 0u) return;
     bool fastIsA = ccdFastIsA(ba, ca.body, bb, cb.body);
     uint fastBody = fastIsA ? ca.body : cb.body;
     BodyState bf = fastIsA ? ba : bb;
@@ -621,6 +651,8 @@ void ccd_pick(uint3 tid : SV_DispatchThreadID)
     BodyState ba = gBodies[ca.body];
     BodyState bb = gBodies[cb.body];
     if (!bodyIsCcd(ba) && !bodyIsCcd(bb)) return;
+    // Nor a post-solve sweep check (validate, clamp, respond) against them.
+    if (((ca.material | cb.material) & COLLIDER_SENSOR) != 0u) return;
     bool fastIsA = ccdFastIsA(ba, ca.body, bb, cb.body);
     uint slot = ccdSlotOf(fastIsA ? ca.body : cb.body, fastIsA ? ba : bb);
     if (slot == CCD_NO_PAIR) return;

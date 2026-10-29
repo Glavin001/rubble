@@ -35,6 +35,10 @@ static const uint BODY_FOLLOW = 128u;
 // broadphase list and time-of-impact contacts. While registered for a step,
 // initialPad holds asfloat(CCD slot); vehicle chassis cannot be CCD bodies.
 static const uint BODY_CCD = 256u;
+// Motion locks (world axes): bits 9..11 linear x, y, z; 12..14 angular x, y, z.
+// Read only by the lock_predict / lock_project passes.
+static const uint BODY_LOCK_SHIFT = 9u;
+static const uint BODY_LOCK_MASK = 0x7E00u;
 // Kinematic bodies (BODY_KINEMATIC, no BODY_DYNAMIC): moved by their given
 // velocity each step, infinite mass; contacts see their motion.
 
@@ -259,6 +263,11 @@ static const uint CMD_SET_MASS_FRAME = 15u;
 // Kinematic bodies: f0.xyz = target position, f1 = target rotation (solver
 // pose); sets the velocity that reaches them over this step.
 static const uint CMD_SET_KINEMATIC_TARGET = 16u;
+// Damping and gravity scale for one step (Box3D): v = f0.w * v + f0.xyz,
+// w = f1.x * w (World sends them every step for bodies that use them).
+static const uint CMD_DAMP = 17u;
+// Motion locks: f0.x = the six lock bits (BODY_LOCK_SHIFT order).
+static const uint CMD_SET_LOCKS = 18u;
 // GpuCommand.b bits of run commands.
 static const uint CMD_NO_WAKE = 1u;   // skip the command if the body is asleep
 static const uint CMD_AT_CENTER = 2u; // impulse through the centre of mass

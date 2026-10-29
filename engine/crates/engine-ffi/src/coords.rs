@@ -210,6 +210,76 @@ impl Coords {
         [p[0].abs(), p[1].abs(), p[2].abs()]
     }
 
+    /// An axis-aligned box's corners in: the map reflects axes, so the
+    /// corners are re-sorted per component.
+    pub fn box_in(&self, min: [f32; 3], max: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+        let (a, b) = (self.position_in(min), self.position_in(max));
+        (
+            [a[0].min(b[0]), a[1].min(b[1]), a[2].min(b[2])],
+            [a[0].max(b[0]), a[1].max(b[1]), a[2].max(b[2])],
+        )
+    }
+
+    /// Impulse per area (N s / m², or kg cm / s per cm²): ×100 in from cm.
+    pub fn impulse_per_area_in(&self, x: f32) -> f32 {
+        x / self.scale(-1)
+    }
+    pub fn impulse_per_area_out(&self, x: f32) -> f32 {
+        x * self.scale(-1)
+    }
+
+    /// Inertia tensors (rows; kg·m² or kg·cm²): `I = Mᵀ I_host M` in, the
+    /// reverse out. Quadratic in the axis map, so the reflection's sign cancels.
+    pub fn inertia_in(&self, t: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
+        if !self.unreal() {
+            return t;
+        }
+        let host = Mat3::from_cols_array_2d(&t).transpose();
+        let engine = m().transpose() * host * m() / self.scale(2);
+        engine.transpose().to_cols_array_2d()
+    }
+
+    pub fn inertia_out(&self, t: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
+        if !self.unreal() {
+            return t;
+        }
+        let engine = Mat3::from_cols_array_2d(&t).transpose();
+        let host = m() * engine * m().transpose() * self.scale(2);
+        host.transpose().to_cols_array_2d()
+    }
+
+    /// Motion-lock bits (linear x, y, z, then angular x, y, z, in host axes)
+    /// to Rubble's axes: a permutation, so signs do not matter.
+    pub fn locks_in(&self, bits: u32) -> u32 {
+        self.locks_map(bits, false)
+    }
+
+    pub fn locks_out(&self, bits: u32) -> u32 {
+        self.locks_map(bits, true)
+    }
+
+    fn locks_map(&self, bits: u32, out: bool) -> u32 {
+        if !self.unreal() {
+            return bits;
+        }
+        let map = m();
+        let mut result = 0;
+        for engine in 0..3 {
+            // The host axis that Rubble axis `engine` maps to.
+            let col = map.col(engine);
+            let host = (0..3)
+                .max_by(|&a, &b| col[a].abs().total_cmp(&col[b].abs()))
+                .unwrap();
+            for block in [0, 3] {
+                let (from, to) = if out { (engine, host) } else { (host, engine) };
+                if bits & (1 << (block + from)) != 0 {
+                    result |= 1 << (block + to);
+                }
+            }
+        }
+        result
+    }
+
     /// Triangle winding for exported meshes.
     pub fn triangle_out(&self, t: [u32; 3]) -> [u32; 3] {
         if self.unreal() {
@@ -302,5 +372,36 @@ mod tests {
     fn winding_flips_for_unreal() {
         let c = Coords::new(RbCoordinates::RB_COORDINATES_UNREAL);
         assert_eq!(c.triangle_out([0, 1, 2]), [0, 2, 1]);
+    }
+
+    #[test]
+    fn inertia_round_trips_and_follows_the_axes() {
+        let c = Coords::new(RbCoordinates::RB_COORDINATES_UNREAL);
+        // Rubble diag(1, 2, 3) kg m²: Rubble X is Unreal Y, Y is Z, Z is X.
+        let i = [[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 3.0]];
+        let host = c.inertia_out(i);
+        assert!(close(host[0], [3e4, 0.0, 0.0], 1e-2));
+        assert!(close(host[1], [0.0, 1e4, 0.0], 1e-2));
+        assert!(close(host[2], [0.0, 0.0, 2e4], 1e-2));
+        let skew = [[2.0, 0.3, 0.1], [0.3, 1.5, -0.2], [0.1, -0.2, 1.0]];
+        let back = c.inertia_in(c.inertia_out(skew));
+        for r in 0..3 {
+            assert!(close(back[r], skew[r], 1e-5), "{back:?}");
+        }
+    }
+
+    #[test]
+    fn locks_follow_the_axes() {
+        let c = Coords::new(RbCoordinates::RB_COORDINATES_UNREAL);
+        // Unreal Z (up) is Rubble Y; Unreal X is Rubble Z; Unreal Y is Rubble X.
+        assert_eq!(c.locks_in(4), 2);
+        assert_eq!(c.locks_in(1), 4);
+        assert_eq!(c.locks_in(2), 1);
+        assert_eq!(c.locks_in(32), 16);
+        for bits in 0..64 {
+            assert_eq!(c.locks_out(c.locks_in(bits)), bits);
+        }
+        let y_up = Coords::new(RbCoordinates::RB_COORDINATES_Y_UP_METRES);
+        assert_eq!(y_up.locks_in(37), 37);
     }
 }

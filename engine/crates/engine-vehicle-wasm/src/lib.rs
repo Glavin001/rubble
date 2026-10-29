@@ -651,7 +651,6 @@ impl RigidStep {
             has_convex: false,
             has_height_field: c(18) & 8 != 0,
             // The browser hosts no event shapes yet (World runs natively).
-            contact_events: false,
             soil: false,
             reuse_contacts: self.params.flags & engine_schema::FLAG_REUSE_CONTACTS != 0,
             max_colors: self.cap.max_colors,
@@ -666,6 +665,7 @@ impl RigidStep {
             wheel_count: wheels,
             soft,
             command_count: 0,
+            explosion_count: 0,
             // counts[18]: bit 0 CCD bodies, bit 1 kinematic bodies, bit 2 impulse
             // records this step, bit 3 heightfield colliders (has_height_field,
             // below); counts[19] projectiles, counts[20] characters, counts[21]

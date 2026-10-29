@@ -72,6 +72,12 @@ pub struct StepModes {
     /// Append `pose_pack` after the sleep commit: compact render poses and the
     /// list of bodies that moved (bindings 34-36, after BIND_COUNT; read-only on physics state).
     pub pose_output: bool,
+    /// Append `contact_events` after contact persistence: list touching pairs
+    /// of event-flagged colliders (read-only on physics state).
+    pub contact_events: bool,
+    /// Some body has motion locks: `lock_predict` after `predict_bodies` and
+    /// `lock_project` after the solve.
+    pub motion_locks: bool,
 }
 
 /// Scene sizes and last step's counters this step is planned from.
@@ -104,14 +110,12 @@ pub struct StepInputs {
     pub soft: SoftCounts,
     /// Host commands in binding 8 (`apply_commands` runs first when non-zero).
     pub command_count: u32,
-    /// Some collider carries a contact or hit event flag
-    /// (`engine_schema::SHAPE_EVENT_FLAGS`): plan the `contact_events` pass.
-    /// Off, the step graph is unchanged.
-    pub contact_events: bool,
     /// Some heightfield carries a soil (`engine_schema::soil`, vehicle ruts):
     /// plan `wheel_soil` and `wheel_soil_press` after the vehicle passes.
     /// Off, the step graph is unchanged.
     pub soil: bool,
+    /// Queued explosions (`explode` runs after the commands when non-zero).
+    pub explosion_count: u32,
 }
 
 /// Largest particle colour `soft_primal_fused` (one 256-lane workgroup) takes;
@@ -222,11 +226,11 @@ pub fn resolve_entry(name: &str, persistent: bool) -> &str {
         "solve_primal_sparse_compact" => "solve_primal_sparse_persistent",
         "solve_primal_one_compact" => "solve_primal_one_persistent",
         "solve_dual_compact" => "solve_dual_persistent",
-        "contact_events" => "contact_events_persistent",
         "convex_classify" => "convex_classify_persistent",
         "convex_manifold" => "convex_manifold_persistent",
         "ccd_emit" => "ccd_emit_persistent",
         "reuse_all_manifolds" => "reuse_all_manifolds_persistent",
+        "contact_events" => "contact_events_persistent",
         // The one vehicle kernel that reads contacts (vehicle_step_persistent.slang).
         "vehicle_loads" => "vehicle_loads_persistent",
         _ => name,
@@ -313,6 +317,9 @@ pub fn encode_step(
     if i.command_count > 0 {
         // Host commands land before anything reads body state this step.
         e.d("apply_commands", u64::from(i.command_count));
+    }
+    if i.explosion_count > 0 {
+        e.d("explode", n_bodies);
     }
     let vehicles = i.vehicle_count > 0;
     let mo = i.motion;
@@ -479,13 +486,8 @@ pub fn encode_step(
     if early_pair_pack {
         e.w("pack_solver_contacts", 66);
     }
-    if i.contact_events {
-        // P4: every manifold is final here (box, convex, heightfield and CCD
-        // stages, reused contacts completed by persistence) and bodies still
-        // hold their step-start velocities. One thread per manifold (slot 66).
-        e.d("contact_events_clear", 64);
+    if m.contact_events {
         e.w("contact_events", 66);
-        e.phase("contactEvents");
     }
     if i.joint_count > 0 {
         e.d("warmstart_joints", n_joints);
@@ -540,6 +542,9 @@ pub fn encode_step(
         e.d("ccd_unhold", n_bodies);
     }
     e.d("predict_bodies", n_bodies);
+    if m.motion_locks {
+        e.d("lock_predict", n_bodies);
+    }
     if mo.ccd && !reuse_manifolds {
         // Struck bodies' trust regions for this step (ccd_step.slang).
         e.d("ccd_trust", u64::from(engine_schema::CCD_PAIR_CAP));
@@ -645,6 +650,9 @@ pub fn encode_step(
         e.d("ccd_validate", u64::from(engine_schema::CCD_PAIR_CAP));
         e.d("ccd_clamp", u64::from(CCD_BODY_CAP));
         e.phase("ccdValidate");
+    }
+    if m.motion_locks {
+        e.d("lock_project", n_bodies);
     }
     e.d("extract_velocity_sleep", n_bodies);
     if vehicles {
@@ -762,7 +770,6 @@ pub const PERSISTENT_ENTRIES: &[&str] = &[
     "persist_list_copy_persistent",
     "persist_manifolds_persistent",
     "pack_solver_pairs_persistent",
-    "contact_events_clear",
     "contact_events_persistent",
     "warmstart_joints",
     "build_awake_list",
@@ -1172,8 +1179,8 @@ mod tests {
             motion: MotionInputs::default(),
             soft: SoftCounts::default(),
             command_count: 0,
-            contact_events: false,
             soil: false,
+            explosion_count: 0,
         }
     }
 
@@ -1294,7 +1301,7 @@ mod tests {
                 let mut i = inputs(10, 0);
                 i.joint_count = 3;
                 i.has_convex = true;
-                i.contact_events = true;
+                m.contact_events = true;
                 for whole in [false, true] {
                     for c in encode_step(&m, &i, whole, true) {
                         let k = match c {
@@ -1516,8 +1523,9 @@ mod tests {
                 })
                 .collect()
         };
-        for m in [fast(), StepModes::default()] {
+        for mut m in [fast(), StepModes::default()] {
             for whole in [false, true] {
+                m.contact_events = false;
                 let mut i = inputs(10, 0);
                 i.has_height_field = true;
                 i.motion.ccd = true;
@@ -1528,7 +1536,7 @@ mod tests {
                         .any(|k| k.starts_with("contact_events")),
                     "a world without event shapes plans no contact_events pass"
                 );
-                i.contact_events = true;
+                m.contact_events = true;
                 let with = encode_step(&m, &i, whole, true);
                 // The same commands with the pass inserted: nothing else moves.
                 let stripped: Vec<Cmd> = with
@@ -1537,14 +1545,9 @@ mod tests {
                     .filter(|c| {
                         !matches!(
                             c,
-                            Cmd::Dispatch {
-                                kernel: "contact_events_clear",
-                                ..
-                            } | Cmd::Indirect {
+                            Cmd::Indirect {
                                 kernel: "contact_events",
                                 ..
-                            } | Cmd::Phase {
-                                name: "contactEvents"
                             }
                         )
                     })
@@ -1566,8 +1569,7 @@ mod tests {
                             || k.starts_with("persist_")
                     })
                     .unwrap();
-                assert!(at("contact_events_clear") < at("contact_events"));
-                assert!(last_manifold_stage < at("contact_events_clear"));
+                assert!(last_manifold_stage < at("contact_events"));
                 assert!(at("contact_events") < at("predict_bodies"));
                 if !whole {
                     assert!(

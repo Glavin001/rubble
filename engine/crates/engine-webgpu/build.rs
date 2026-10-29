@@ -25,10 +25,6 @@ const WORLD_ENTRIES: &[&str] = &[
     "persist_contacts_persistent",
     "persist_manifolds_persistent",
     "pack_solver_pairs_persistent",
-    // Contact and hit events (P4, opt-in).
-    "contact_events_clear",
-    "contact_events",
-    "contact_events_persistent",
     "solve_primal_color_persistent",
     "solve_primal_one_persistent",
     "solve_dual_persistent",
@@ -212,6 +208,15 @@ const WORLD_ENTRIES: &[&str] = &[
     "terrain_surface_resolve",
     "terrain_surface_debris",
     "terrain_surface_publish",
+    // Contact events (P4), canonical and persistent storage.
+    "contact_events",
+    "contact_events_persistent",
+    // Overlap queries (P5) and explosions.
+    "overlap_query",
+    "explode",
+    // Motion locks (P3).
+    "lock_predict",
+    "lock_project",
 ];
 
 const CHARACTER_ENTRIES: &[&str] = &["char_move", "char_post", "query_batch", "projectile_step"];
