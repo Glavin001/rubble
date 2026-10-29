@@ -57,6 +57,11 @@ pub const MPM_C_FLYING: usize = 12;
 /// The material's surface under a source point (order-preserving f32 bits),
 /// found on the GPU when a source lands on ground already moving.
 pub const MPM_C_SURFACE: usize = 13;
+/// Wheel loads `mpm_wheel_loads` listed this frame (vehicle wheels standing
+/// on an open area's sand, [`TerrainConfig::max_wheel_loads`]).
+///
+/// [`TerrainConfig::max_wheel_loads`]: crate::TerrainConfig::max_wheel_loads
+pub const MPM_C_WHEELS: usize = 14;
 /// Per area slot k: its fastest particle over the frame (f32 bits) at
 /// `MPM_C_AREA_SPEED + k`, and its fastest coupled body at
 /// `MPM_C_AREA_BODY + k`.
@@ -110,6 +115,13 @@ pub const MPM_OVERFLOW_CELL: u32 = 128;
 pub const MPM_OVERFLOW_IMPULSES: u32 = 256;
 pub const MPM_OVERFLOW_PARCELS: u32 = 512;
 pub const MPM_OVERFLOW_FIELD: u32 = 1024;
+/// More wheels stood on open sand than `max_wheel_loads` (the rest pressed nothing).
+pub const MPM_OVERFLOW_WHEELS: u32 = 2048;
+/// float4 records per wheel load in [`MPM_COUPLED_BINDING`], after the
+/// coupling slots and the absorbing face points: (the contact's offset in its
+/// base cell, area slot bits), (base node, domain lattice, int bits), (force
+/// on the sand N, the material's mass at the contact this substep).
+pub const MPM_WHEEL_RECORDS: u32 = 3;
 
 /// `MpmParams::boundary[0]` bits (u32): the bed and walls absorb
 /// ([`crate::RegionBoundary::Absorbing`]) ...

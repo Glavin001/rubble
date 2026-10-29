@@ -47,6 +47,11 @@ pub struct TerrainConfig {
     /// Rigid colliders the active region may hold at once (each couples to the
     /// material and takes its reaction).
     pub max_coupled: u32,
+    /// Vehicle wheels whose load an open area's sand may carry at once (each
+    /// wheel standing on an area's live surface presses its contact force into
+    /// the material: ruts and berms). 0: wheels ride the surface without
+    /// loading it. More wheels on open sand than this fail the frame by name.
+    pub max_wheel_loads: u32,
     /// Samples of the bed heightfield parcels may land on.
     pub max_field_samples: u32,
     /// How far an activated particle moves sideways (in spacings of the
@@ -162,6 +167,7 @@ impl Default for TerrainConfig {
             max_substeps: 512,
             max_columns: 1 << 16,
             max_coupled: 256,
+            max_wheel_loads: 64,
             max_field_samples: 1 << 20,
             bake_home_fade: 0.5,
             boundary: RegionBoundary::Absorbing,
@@ -296,6 +302,10 @@ impl TerrainConfig {
         bad(
             self.max_coupled == 0 || self.max_coupled > 65535,
             "max_coupled must lie in [1, 65535]",
+        )?;
+        bad(
+            self.max_wheel_loads > 65535,
+            "max_wheel_loads must be at most 65535",
         )?;
         bad(
             !(self.bake_home_fade.is_finite() && self.bake_home_fade > 0.0),

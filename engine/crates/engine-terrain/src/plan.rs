@@ -63,12 +63,20 @@ pub const KERNELS: &[&str] = &[
     "mpm_bake_edge_sort",
     "mpm_source_surface",
     "mpm_grow_shift",
+    "mpm_wheel_loads",
+    "mpm_wheel_mass",
 ];
 
 /// Byte offsets of the indirect workgroup counts in [`MPM_ARGS_BINDING`].
 pub const ARGS_BLOCKS: u64 = 0;
 pub const ARGS_PARTICLES: u64 = 12;
 pub const ARGS_PARCELS: u64 = 24;
+
+/// The first wheel-load record in [`MPM_COUPLED_BINDING`] (float4 units):
+/// after the coupling slots (four each) and the absorbing face points.
+fn wheel_base(config: &TerrainConfig) -> u32 {
+    (4 * config.max_coupled).saturating_add(config.max_boundary_nodes)
+}
 
 /// Quanta per lattice particle: a column's volume is rounded to s³/64 (s the
 /// particle spacing), so a sample's height moves by whole quanta.
@@ -94,6 +102,8 @@ pub struct TerrainStepReport {
     /// Fastest surface speed of a dynamic body coupled to the region this
     /// frame (m/s; 0 without coupling).
     pub body_speed: f32,
+    /// Vehicle wheels whose load the open sand carried this frame.
+    pub wheels: u32,
     /// Per area slot: its fastest particle over the frame (m/s).
     pub area_speed: [f32; MPM_MAX_AREAS as usize],
     /// Per area slot: its fastest coupled body this frame (m/s).
@@ -341,7 +351,12 @@ impl TerrainPlan {
                     MPM_MATERIAL_NONE,
                 ],
                 dims: [0, 0, 0, MPM_NO_BED],
-                limits: [0.0, config.bake_home_fade, 0.0, 0.0],
+                limits: [
+                    0.0,
+                    config.bake_home_fade,
+                    f32::from_bits(wheel_base(config)),
+                    f32::from_bits(config.max_wheel_loads),
+                ],
                 couple: [
                     0.0,
                     f32::from_bits(config.max_coupled),
@@ -391,7 +406,9 @@ impl TerrainPlan {
             ),
             (
                 MPM_COUPLED_BINDING,
-                u64::from(config.max_coupled) * 64 + u64::from(config.max_boundary_nodes) * 16,
+                (u64::from(wheel_base(config))
+                    + u64::from(config.max_wheel_loads) * u64::from(MPM_WHEEL_RECORDS))
+                    * 16,
             ),
             // Two float4 per parcel, then the particle each left (16 B).
             (MPM_PARCELS_BINDING, u64::from(config.max_parcels) * 48),
@@ -1122,8 +1139,9 @@ impl TerrainPlan {
     pub fn step(&mut self, substeps: u32, dt: f32, gravity: f32) -> anyhow::Result<TerrainOps> {
         let mut ops = TerrainOps::default();
         self.step_params(&mut ops, substeps, dt, gravity)?;
-        // No colliders listed: the grid holds no rigid contacts.
+        // No colliders listed: the grid holds no rigid contacts, and no wheel loads.
         ops.disp("mpm_couple_clear", u64::from(self.config.max_blocks));
+        ops.counter(MPM_C_WHEELS, 0);
         for _ in 0..substeps {
             self.substep(&mut ops, None);
         }
@@ -1149,8 +1167,14 @@ impl TerrainPlan {
         let slots = u64::from(self.config.max_coupled);
         ops.disp("mpm_couple_clear", u64::from(self.config.max_blocks));
         ops.disp("mpm_couple_bin", u64::from(colliders));
+        // The wheels standing on open sand (their contact forces from the
+        // rigid step before), in wheel order.
+        let wheels = u64::from(self.config.max_wheel_loads);
+        if wheels > 0 {
+            ops.disp("mpm_wheel_loads", 1);
+        }
         for _ in 0..substeps {
-            self.substep(&mut ops, Some(slots));
+            self.substep(&mut ops, Some((slots, wheels)));
         }
         self.deposits(&mut ops);
         ops.disp("mpm_couple_emit", slots);
@@ -1170,7 +1194,7 @@ impl TerrainPlan {
 
     /// One MPM substep's dispatches. With `coupled` (the coupling slots), the
     /// rigid contacts' exchange runs between the grid update and G2P.
-    fn substep(&self, ops: &mut TerrainOps, coupled: Option<u64>) {
+    fn substep(&self, ops: &mut TerrainOps, coupled: Option<(u64, u64)>) {
         // Hash words to empty.
         let clear = 2 * u64::from(self.params.counts[1]);
         // mpm_clear also writes the workgroup counts mpm_touch reads.
@@ -1183,8 +1207,12 @@ impl TerrainPlan {
         ops.blocks("mpm_cell_sort");
         ops.particles("mpm_payload");
         ops.blocks("mpm_p2g");
+        // The material's mass at each wheel's contact, which its load moves.
+        if let Some((_, wheels)) = coupled.filter(|c| c.1 > 0) {
+            ops.disp("mpm_wheel_mass", wheels);
+        }
         ops.blocks("mpm_grid");
-        if let Some(slots) = coupled {
+        if let Some((slots, _)) = coupled {
             ops.disp("mpm_couple_gather", slots * 64);
             ops.blocks("mpm_couple_apply");
         }
@@ -1323,6 +1351,14 @@ impl TerrainPlan {
             }
             .into());
         }
+        if flags & MPM_OVERFLOW_WHEELS != 0 {
+            return Err(TerrainError::LimitExceeded {
+                limit: "max_wheel_loads",
+                requested: u64::from(cfg.max_wheel_loads) + 1,
+                allowed: u64::from(cfg.max_wheel_loads),
+            }
+            .into());
+        }
         anyhow::ensure!(
             flags & MPM_OVERFLOW_CELL == 0,
             "more than {MPM_CELL_COLLIDERS} rigid colliders overlap one terrain block (4 cells across)"
@@ -1360,6 +1396,7 @@ impl TerrainPlan {
             escaped: c[MPM_C_ESCAPED],
             airborne: c[MPM_C_AIRBORNE],
             body_speed: f32::from_bits(c[MPM_C_BODY_SPEED]),
+            wheels: c[MPM_C_WHEELS],
             area_speed: std::array::from_fn(|k| f32::from_bits(c[MPM_C_AREA_SPEED + k])),
             area_body_speed: std::array::from_fn(|k| f32::from_bits(c[MPM_C_AREA_BODY + k])),
         }
@@ -1577,6 +1614,7 @@ mod tests {
             escaped: 0,
             airborne: air,
             body_speed: 0.0,
+            wheels: 0,
             area_speed: [s; MPM_MAX_AREAS as usize],
             area_body_speed: [0.0; MPM_MAX_AREAS as usize],
         };

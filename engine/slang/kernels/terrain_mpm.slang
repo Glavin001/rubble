@@ -40,6 +40,17 @@
 // mpm_couple_emit appends one LINEAR_ANGULAR impulse record per dynamic body for
 // the rigid step that follows, which applies it at its start and ends the frame
 // at the proxy's velocity.
+// Wheel loads (two-way wheel coupling): mpm_wheel_loads lists, once per
+// coupled frame and in wheel order, each vehicle wheel the rigid step before
+// stood on an open area's live surface (a static heightfield other than the
+// bed: the area's surface patch) with the force it pressed there, the
+// reaction of the ground's force on the chassis; mpm_wheel_mass sums, each
+// substep after P2G, the material's mass M at the contact (B-spline weighted,
+// over the nodes that carry velocity); mpm_grid then moves each node of the
+// contact's stencil by F·dt·w/M (mpmWheelLoads), so the material takes F·dt
+// per substep, exactly, and the frame's substeps the impulse the chassis took
+// over the step. The sand ruts, berms and sinks under the load from its own
+// strength; the wheel follows the surface down.
 // Ejecta (T4): a particle G2P would carry out of the region's box becomes a
 // ballistic parcel holding its quanta (mpm_g2p; the particle's slot is left
 // dead); mpm_parcels flies parcels under gravity: one landing over the region
@@ -66,6 +77,11 @@
 // fails the step; ejection to parcels is T4).
 #include "world_step.slang"
 #include "../physics/mpm_material.slang"
+#include "../physics/vehicle_layout.slang"
+
+// The vehicle pool (vehicle_step.slang): the wheels' contacts and forces from
+// the rigid step before (mpm_wheel_loads reads it; nothing here writes it).
+BIND(31) RWStructuredBuffer<float4> gVehicleData;
 
 static const uint MPM_GROUP = 64u;
 static const uint MPM_BLOCK = 4u;
@@ -87,6 +103,7 @@ static const uint MPM_C_BODY_SPEED = 10u; // fastest dynamic body coupled this f
 static const uint MPM_C_FLYING = 12u;     // parcels thrown before this substep's G2P (mpm_parcels flies them)
 static const uint MPM_C_GEOSTATIC = 11u;  // nonzero: this substep's mpm_payload sets the geostatic F first
 static const uint MPM_C_SURFACE = 13u;    // the material's top under a source point (ordered bits)
+static const uint MPM_C_WHEELS = 14u;     // wheel loads mpm_wheel_loads listed this frame
 static const uint MPM_C_AREA_SPEED = 16u; // + slot: an area's fastest particle this frame (f32 bits)
 static const uint MPM_C_AREA_BODY = 32u;  // + slot: an area's fastest coupled body this frame
 static const uint MPM_C_AREA_FIRST = 48u; // + slot: the pool's particle count when the area opened
@@ -106,6 +123,12 @@ static const uint MPM_OVERFLOW_CELL = 128u;     // more colliders in one block c
 static const uint MPM_OVERFLOW_IMPULSES = 256u; // the rigid step's impulse records were full
 static const uint MPM_OVERFLOW_PARCELS = 512u;  // more ejecta than parcel slots
 static const uint MPM_OVERFLOW_FIELD = 1024u;   // the bed heightfield has more samples than deposit slots
+static const uint MPM_OVERFLOW_WHEELS = 2048u;  // more wheels on open sand than max wheel loads
+// Wheel-load records in gMpmCoupled from params.limits.z (uint bits) on, at
+// most params.limits.w: (the contact's offset in its base cell, area slot
+// bits), (its base node on the domain lattice, int bits), (force on the
+// material N, its mass at the contact this substep).
+static const uint MPM_WHEEL_RECORDS = 3u;
 // MpmParams.boundary.x bits.
 static const uint MPM_BOUNDARY_ABSORBING = 1u; // bed and walls absorb (mpmAbsorbNode)
 static const uint MPM_BOUNDARY_GEOSTATIC = 2u; // the first step's mpm_geostatic sets F
@@ -134,7 +157,8 @@ struct MpmParams
     uint4 counts;   // x = max particles, y = hash slots (power of two), z = max blocks, w = material
     uint4 dims;     // xyz = region size in cells, w = bed heightfield collider (MPM_NO_BLOCK: none)
     float4 limits;  // x = largest particle speed the substep's dt allows (CFL),
-                    // y = the bake's home fade (lattice spacings; TerrainConfig::bake_home_fade)
+                    // y = the bake's home fade (lattice spacings; TerrainConfig::bake_home_fade),
+                    // z = first wheel-load record in gMpmCoupled, w = max wheel loads (uint bits)
     float4 sand;    // λ, μ, then sand/soil: friction (DP α, or sin φ for Mohr–Coulomb), cohesion
                     // (DP: apex stretch; dry MC: 0; soil: c·cos φ in Pa); rock: f_t, E·G_f/f_t
     uint4 window;   // heightfield samples under the region: i0, j0, ni, nj
@@ -911,6 +935,31 @@ void mpmRigidContact(uint n, int3 g, float m, MpmParams p, inout float3 v)
     gMpmGrid[2u * n + 1u] = float4(m * (vNew - v), float(bestSlot));
 }
 
+// Wheel loads on domain node gd of area `area`: each listed wheel standing in
+// the area moves the node by F·dt·w/M, w the node's B-spline weight at the
+// contact and M the material's mass there (mpm_wheel_mass), so the nodes
+// together take F·dt.
+void mpmWheelLoads(int3 gd, uint area, MpmParams d, inout float3 v)
+{
+    uint count = ALOAD(gMpmCounters[MPM_C_WHEELS]);
+    if (count == 0u) return;
+    uint base = asuint(d.limits.z);
+    for (uint i = 0u; i < count; i++)
+    {
+        uint r = base + MPM_WHEEL_RECORDS * i;
+        float4 r0 = gMpmCoupled[r];
+        if (asuint(r0.w) != area) continue;
+        int3 off = gd - asint(gMpmCoupled[r + 1u].xyz);
+        if (any(off < int3(0, 0, 0)) || any(off > int3(2, 2, 2))) continue;
+        float4 fm = gMpmCoupled[r + 2u];
+        if (!(fm.w > 0.0)) continue;
+        uint3 o = uint3(off);
+        float w = mpmWeightAt(mpmWeights(r0.x), o.x) * mpmWeightAt(mpmWeights(r0.y), o.y)
+            * mpmWeightAt(mpmWeights(r0.z), o.z);
+        v += fm.xyz * (d.step.x * w / fm.w);
+    }
+}
+
 // Grid velocity: momentum over mass, gravity, then the bed (the heightfield
 // under the region) as a separating Coulomb contact.
 // Whether a grid node at xl (the bed's local frame) lies in the rigid bed, and
@@ -1459,7 +1508,11 @@ void mpm_grid(uint3 tid : SV_DispatchThreadID)
         gMpmGrid[2u * n] = float4(v, node.w);
         return;
     }
-    int3 g = mpmKeyNode(ALOAD(gMpmBlocks[4u * b]), n % MPM_BLOCK_NODES) - mpmSlotOffset(area);
+    int3 gd = mpmKeyNode(ALOAD(gMpmBlocks[4u * b]), n % MPM_BLOCK_NODES);
+    // The wheels' loads (their own function, ahead of the bed, which carries
+    // what the material passes on).
+    mpmWheelLoads(gd, area, p, v);
+    int3 g = gd - mpmSlotOffset(area);
     p = mpmArea(area);
     if (p.dims.w != MPM_NO_BLOCK)
     {
@@ -2896,4 +2949,106 @@ void mpm_source(uint3 tid : SV_DispatchThreadID)
     if (mpmAreaOf(q.xm.xyz, p) != p.area.y) return;
     q.vj.xyz += mpmZModelVelocity(d, p.source0.w, p.source1.x, p.source1.y, p.source1.z);
     gMpmParticles[i] = q;
+}
+
+// ---- wheel loads ----------------------------------------------------------------
+
+// Whether wheel record wr stood, in the rigid step before, on an open area's
+// live surface: in contact, enabled and attached, on a static heightfield
+// other than the area's bed (the area's surface patch), the contact one cell
+// inside the area's box. Then the force it pressed on the ground there (the
+// reaction of the ground's force on the chassis), the contact and the area.
+bool mpmWheelOnSand(uint wr, MpmParams p, out float3 force, out float3 x, out uint area)
+{
+    force = float3(0, 0, 0);
+    x = float3(0, 0, 0);
+    area = MPM_NO_AREA;
+    uint4 cfg = asuint(gVehicleData[wr + W_CFG]);
+    uint4 dyn = asuint(gVehicleData[wr + W_C0]);
+    if ((cfg.y & WF_ENABLED) == 0u) return false;
+    if ((dyn.z & (WD_DETACHED | WD_DISABLED | WD_CONTACT)) != WD_CONTACT) return false;
+    uint vr = asuint(gVehicleData[VH_BASES]).x + cfg.x * VEH_STRIDE;
+    if ((asuint(gVehicleData[vr + V_CFG]).w & VF_ENABLED) == 0u) return false;
+    uint ci = dyn.y;
+    if (ci >= gCounters[0].colliderCount) return false;
+    Collider col = gColliders[ci];
+    if (col.shape != SHAPE_HEIGHTFIELD || bodyIsDynamic(gBodies[col.body])) return false;
+    x = gVehicleData[wr + W_HIT].xyz;
+    area = mpmAreaOf(x, p);
+    if (area == MPM_NO_AREA) return false;
+    if (ci == gMpmParams[1u + area].dims.w) return false;
+    float4 f = gVehicleData[wr + W_F];
+    float3 nrm = gVehicleData[wr + W_C2].xyz;
+    float3 t = gVehicleData[wr + W_C3].xyz;
+    float3 s = gVehicleData[wr + W_C4].xyz;
+    force = -(nrm * f.x - t * f.y - s * f.z);
+    return all(isfinite(force)) && dot(force, force) > 0.0;
+}
+
+// Once per coupled frame, one thread: the wheels on open sand, in wheel order
+// (so runs agree bit for bit), as wheel-load records; past max wheel loads the
+// frame fails by name (MPM_OVERFLOW_WHEELS).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_wheel_loads(uint3 tid : SV_DispatchThreadID)
+{
+    if (mpmIndex(tid) != 0u) return;
+    MpmParams p = mpmParams();
+    uint base = asuint(p.limits.z);
+    uint maxLoads = asuint(p.limits.w);
+    uint wheels = asuint(gVehicleData[VH_COUNTS]).w;
+    uint wb = asuint(gVehicleData[VH_BASES]).y;
+    uint n = 0u;
+    for (uint w = 0u; w < wheels; w++)
+    {
+        float3 force, x;
+        uint area;
+        if (!mpmWheelOnSand(wb + w * WHEEL_STRIDE, p, force, x, area)) continue;
+        if (n >= maxLoads)
+        {
+            AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_WHEELS);
+            break;
+        }
+        // The contact's base node and offset in the area's frame, as a
+        // particle there would have them (mpm_g2p).
+        float4 o = gMpmParams[1u + area].origin;
+        int3 local = int3(floor((x - o.xyz) / o.w - 0.5));
+        float3 fx = (x - o.xyz) / o.w - float3(local);
+        int3 b = local + mpmSlotOffset(area);
+        uint r = base + MPM_WHEEL_RECORDS * n;
+        gMpmCoupled[r] = float4(fx, asfloat(area));
+        gMpmCoupled[r + 1u] = float4(asfloat(b.x), asfloat(b.y), asfloat(b.z), 0.0);
+        gMpmCoupled[r + 2u] = float4(force, 0.0);
+        n++;
+    }
+    ASTORE(gMpmCounters[MPM_C_WHEELS], n);
+}
+
+// Per wheel load, each substep after P2G: the material's mass at the contact,
+// M = Σ w·m over the stencil's nodes that carry velocity (mpm_grid's).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_wheel_mass(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = mpmIndex(tid);
+    if (i >= ALOAD(gMpmCounters[MPM_C_WHEELS])) return;
+    MpmParams p = mpmParams();
+    uint r = asuint(p.limits.z) + MPM_WHEEL_RECORDS * i;
+    float3 fx = gMpmCoupled[r].xyz;
+    int3 base = asint(gMpmCoupled[r + 1u].xyz);
+    float3 wx = mpmWeights(fx.x), wy = mpmWeights(fx.y), wz = mpmWeights(fx.z);
+    int3 k0 = base >> 2;
+    uint blk[8];
+    mpmBlockCube(k0, p, blk);
+    float mass = 0.0;
+    for (uint o = 0u; o < 27u; o++)
+    {
+        uint3 off = uint3(o % 3u, (o / 3u) % 3u, o / 9u);
+        uint c = mpmCellInCube(base + int3(off), k0, blk);
+        if (c == MPM_NO_BLOCK) continue;
+        float m = gMpmGrid[2u * c].w;
+        if (m <= p.step.z) continue;
+        mass += mpmWeightAt(wx, off.x) * mpmWeightAt(wy, off.y) * mpmWeightAt(wz, off.z) * m;
+    }
+    gMpmCoupled[r + 2u].w = mass;
 }
