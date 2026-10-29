@@ -2115,23 +2115,27 @@ float3 mpmGrowGive(float3 xl, uint2 ij, MpmParams p, HeightFieldRef hf)
         float lz = hf.z0 + (float(w.y) - 0.5) * hf.dz, hz = hf.z0 + (float(w.y + w.w) - 0.5) * hf.dz;
         uint tj = uint(clamp(int(ij.y) - int(w.y), 0, int(w.w) - 1));
         uint ti = uint(clamp(int(ij.x) - int(w.x), 0, int(w.z) - 1));
+        // Only across a side's own span: beyond its ends (the corners past
+        // two sides) no wall of the old area stood, and the ground there
+        // did not give.
+        bool alongX = xl.z >= lz && xl.z <= hz, alongZ = xl.x >= lx && xl.x <= hx;
         // Past an x side it grew over: that row's give, fading to the far face.
-        if (nw.x + nw.z > w.x + w.z && xl.x > hx)
+        if (alongX && nw.x + nw.z > w.x + w.z && xl.x > hx)
         {
             float g = asfloat(ALOAD(gMpmColumns[mpmCol(q, tj * w.z + w.z - 1u) + 1u]));
             u.x += g * max(0.0, 1.0 - (xl.x - hx) / (nhx - hx));
         }
-        if (nw.x < w.x && xl.x < lx)
+        if (alongX && nw.x < w.x && xl.x < lx)
         {
             float g = asfloat(ALOAD(gMpmColumns[mpmCol(q, tj * w.z) + 1u]));
             u.x += g * max(0.0, 1.0 - (lx - xl.x) / (lx - nlx));
         }
-        if (nw.y + nw.w > w.y + w.w && xl.z > hz)
+        if (alongZ && nw.y + nw.w > w.y + w.w && xl.z > hz)
         {
             float g = asfloat(ALOAD(gMpmColumns[mpmCol(q, (w.w - 1u) * w.z + ti) + 2u]));
             u.z += g * max(0.0, 1.0 - (xl.z - hz) / (nhz - hz));
         }
-        if (nw.y < w.y && xl.z < lz)
+        if (alongZ && nw.y < w.y && xl.z < lz)
         {
             float g = asfloat(ALOAD(gMpmColumns[mpmCol(q, ti) + 2u]));
             u.z += g * max(0.0, 1.0 - (lz - xl.z) / (lz - nlz));

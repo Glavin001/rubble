@@ -919,6 +919,23 @@ window ring, at j = 65 and i = 83.
   The grown bake stands higher than the ungrown one beyond the old edge (the
   +2.0 m mean). The ground the walls compressed comes back as a rise across
   the new columns, instead of folding onto the old edge.
+- **A side's give applies only across its own span.** Beyond its ends, in a
+  corner past two old sides, no old wall stood. At first both sides' gives
+  applied there. In bts that pulled the corner ring apart into a 1.5 m trench
+  along j = 65 for i > 82, and along i = 83 for j < 66.
+- **`showcase.html?scene=bts`, baked at 21.3 s** (Chrome). Each ring sample
+  over the mean of its neighbours across the ring:
+
+  | Line | Mean | Worst |
+  |---|---|---|
+  | ring j = 65, across the old window's span | −0.41 m | 1.29 m |
+  | ring j = 65, past it (the corner) | +0.35 m | 1.17 m |
+  | ring i = 83, across the old window's span | −0.12 m | 0.77 m |
+  | ring i = 83, past it (the corner) | +0.11 m | 0.89 m |
+  | rows 60, 62, 68, 70 (the bake's own noise) | up to +0.33 m | up to 3.1 m |
+  | columns 78, 80, 86, 88 (the bake's own noise) | up to −0.21 m | up to 1.71 m |
+
+  The 2.3 m rails are gone.
 
 **A strike on a moving rim** takes the live surface's height there, read back
 0.25 s before contact: 3.58 m against the heightfield's 0.
