@@ -39,6 +39,18 @@ The native solve carries impact loads through converged forces rather than a sta
 
 **Solve alone, villa-savoye** (submission included): 2.3 ms at 16 iterations. With the force tolerance on it is 1.0 ms, settling to 1 iteration a frame.
 
+## Update: GPU-built events, and the city scale, 2026-10-29
+
+**Events.** World's D1b destruction events now come from a GPU change log (`stress-gpu` `fracture_log.slang`), not a host diff of full arrays.
+- After each break frame's split, the GPU appends broken bonds, chunks that changed body, and re-framed body slots. Each entry is stamped with its step, into a ring the host acknowledges.
+- Readback is at most about 60 KB a step. The full arrays (about 460 KB at 10k chunks) are read only after an overflow.
+- Fracture no longer forces `Backpressure::Block`. A World on `Drop` that dropped 115 of 120 readbacks reported the same 47 bonds, 4 splits and 104 bodies as one that waited every frame.
+
+**City scale.** vibe-land's production scene `skyline-stable.json` has 29,592 chunks and 92,421 bonds.
+- Its Blast islands are only 5, of about 6,000 nodes each. One workgroup per island leaves the GPU almost idle: the native solve takes 35 ms a frame (median; p95 41 ms; measured with the Unreal Editor also on the GPU).
+- vibe-land's CuMetal build has the same one-threadgroup-per-component shape up to 8,192 nodes. CUDA switches to a grid-wide cooperative kernel above 1,024.
+- Next: spread a large island over many workgroups, per-iteration dispatches with two-level fixed-order sums per island, the same recurrence.
+
 ## What exists now
 
 | Piece | Where | What it does |
