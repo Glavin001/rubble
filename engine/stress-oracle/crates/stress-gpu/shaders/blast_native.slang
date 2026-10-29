@@ -20,197 +20,7 @@
 // The island's lists as blast_cgls.slang's (blast_topology.slang builds them); one group per
 // island (`args` sizes the dispatch).
 
-import common;
-import blast_common;
-
-[[vk::binding(0, 0)]] ConstantBuffer<BlastParams> params;
-[[vk::binding(1, 0)]] StructuredBuffer<uint4> islands;
-[[vk::binding(2, 0)]] StructuredBuffer<BlastNode> nodes;
-[[vk::binding(3, 0)]] StructuredBuffer<uint> refs;
-[[vk::binding(4, 0)]] RWStructuredBuffer<BlastBond> bonds;
-[[vk::binding(5, 0)]] StructuredBuffer<float4> accel;
-[[vk::binding(6, 0)]] RWStructuredBuffer<float4> x;
-[[vk::binding(7, 0)]] RWStructuredBuffer<float4> scratch;
-[[vk::binding(8, 0)]] RWStructuredBuffer<uint4> report;
-[[vk::binding(9, 0)]] StructuredBuffer<uint> lists;
-// Per node: its position over the length scale (the rigid modes' frame).
-[[vk::binding(10, 0)]] StructuredBuffer<float4> positions;
-
-// Scratch per node (float4s): vectors, angular then linear.
-static const uint NV = 24;
-static const uint N_R = 0;     // residual
-static const uint N_P = 2;     // direction
-static const uint N_Q = 4;     // L p
-static const uint N_U = 6;     // solution in node space
-static const uint N_G = 8;     // preconditioned residual
-static const uint N_LOC = 10;  // polynomial scratch: M r
-static const uint N_OFF = 12;  // polynomial scratch: E M r
-static const uint N_B = 14;    // right-hand side
-static const uint N_LAST = 16; // the input, for the settled certificate
-static const uint N_BLK = 18;  // the block: (A xx, yy, zz, xy), (A xz, yz, c, 0), (k, 0)
-static const uint N_INV = 21;  // its inverse: (S^-1 xx, yy, zz, xy), (S^-1 xz, yz, 1/c, 0), (k / c, 0)
-uint ns(uint n, uint v) { return n * NV + v; }
-uint bs(uint j) { return params.node_count * NV + 2 * j; }
-
-static const float LOW_WEIGHT = 0.5779388123770052;
-static const float HIGH_WEIGHT = 2.6335678180143502;
-static const uint STAGNATION = 512;
-
-float3 va(uint n, uint v) { return scratch[ns(n, v)].xyz; }
-float3 vl(uint n, uint v) { return scratch[ns(n, v) + 1].xyz; }
-void set_v(uint n, uint v, float3 a, float3 l)
-{
-    scratch[ns(n, v)] = float4(a, 0.0);
-    scratch[ns(n, v) + 1] = float4(l, 0.0);
-}
-
-// t_j = S C^T D v for node vector `v` (a support's weights are 0; its scratch stays 0).
-void bond_term(BlastBond b, uint v, out float3 ta, out float3 tl)
-{
-    BlastNode m0 = nodes[b.n0];
-    BlastNode m1 = nodes[b.n1];
-    float3 a0 = va(b.n0, v) * m0.w_ang;
-    float3 l0 = vl(b.n0, v) * m0.w_lin;
-    float3 a1 = va(b.n1, v) * m1.w_ang;
-    float3 l1 = vl(b.n1, v) * m1.w_lin;
-    ta = (a0 - a1) * b.s;
-    tl = ((l0 - l1) + (cross(b.o0.xyz, a0) - cross(b.o1.xyz, a1))) * b.s;
-}
-
-// (D C S y)_node over live bonds: y the bond scratch (from_t) or x0 + (from_u ? B^T u : 0).
-void gather(uint node, bool from_t, bool with_u, out float3 ang, out float3 lin)
-{
-    BlastNode n = nodes[node];
-    float3 acc_a = float3(0.0);
-    float3 acc_l = float3(0.0);
-    for (uint r = n.ref_begin; r < n.ref_end; r++)
-    {
-        uint ref = refs[r];
-        uint j = ref & ~REF_SECOND;
-        BlastBond b = bonds[j];
-        if (!(b.health > 0.0))
-            continue;
-        float3 ya;
-        float3 yl;
-        if (from_t)
-        {
-            ya = scratch[bs(j)].xyz;
-            yl = scratch[bs(j) + 1].xyz;
-        }
-        else
-        {
-            ya = x[j * 2].xyz;
-            yl = x[j * 2 + 1].xyz;
-            if (with_u)
-            {
-                float3 ta;
-                float3 tl;
-                bond_term(b, N_U, ta, tl);
-                ya += ta;
-                yl += tl;
-            }
-        }
-        ya *= b.s;
-        yl *= b.s;
-        if ((ref & REF_SECOND) != 0)
-        {
-            acc_a += cross(b.o1.xyz, yl) - ya;
-            acc_l -= yl;
-        }
-        else
-        {
-            acc_a += ya - cross(b.o0.xyz, yl);
-            acc_l += yl;
-        }
-    }
-    ang = acc_a * n.w_ang;
-    lin = acc_l * n.w_lin;
-}
-
-float3 sym_mul(float4 s0, float4 s1, float3 v)
-{
-    // (xx, yy, zz, xy), (xz, yz, ...)
-    return float3(s0.x * v.x + s0.w * v.y + s1.x * v.z, s0.w * v.x + s0.y * v.y + s1.y * v.z, s1.x * v.x + s1.y * v.y + s0.z * v.z);
-}
-
-// The node's block applied to (a, l): (A a - k x l, k x a + c l).
-void block_apply(uint n, float3 a, float3 l, out float3 oa, out float3 ol)
-{
-    float4 b0 = scratch[ns(n, N_BLK)];
-    float4 b1 = scratch[ns(n, N_BLK) + 1];
-    float3 k = scratch[ns(n, N_BLK) + 2].xyz;
-    oa = sym_mul(b0, b1, a) - cross(k, l);
-    ol = cross(k, a) + b1.z * l;
-}
-
-// The block's inverse applied: x = S^-1 (a + k' x l), y = l / c - k' x x.
-void inverse_apply(uint n, float3 a, float3 l, out float3 oa, out float3 ol)
-{
-    float4 s0 = scratch[ns(n, N_INV)];
-    float4 s1 = scratch[ns(n, N_INV) + 1];
-    float3 kc = scratch[ns(n, N_INV) + 2].xyz;
-    oa = sym_mul(s0, s1, a + cross(kc, l));
-    ol = l * s1.z - cross(kc, oa);
-}
-
-// Build node n's block and its inverse; false when the block is singular.
-bool build_block(uint node)
-{
-    BlastNode n = nodes[node];
-    float3 diag = float3(0.0);
-    float3 offd = float3(0.0); // xy, xz, yz of sum s^2 ((1+|o|^2) I - o o^T)
-    float3 ks = float3(0.0);
-    float cs = 0.0;
-    for (uint r = n.ref_begin; r < n.ref_end; r++)
-    {
-        uint ref = refs[r];
-        BlastBond b = bonds[ref & ~REF_SECOND];
-        if (!(b.health > 0.0))
-            continue;
-        float3 o = (ref & REF_SECOND) != 0 ? b.o1.xyz : b.o0.xyz;
-        float s2 = b.s * b.s;
-        float oo = 1.0 + dot(o, o);
-        diag += s2 * (float3(oo) - o * o);
-        offd += s2 * -float3(o.x * o.y, o.x * o.z, o.y * o.z);
-        ks += s2 * o;
-        cs += s2;
-    }
-    float da = n.w_ang * n.w_ang;
-    float dad = n.w_ang * n.w_lin;
-    float c = n.w_lin * n.w_lin * cs;
-    float3 k = ks * dad;
-    float4 a0 = float4(diag * da, offd.x * da);
-    float4 a1 = float4(offd.y * da, offd.z * da, c, 0.0);
-    scratch[ns(node, N_BLK)] = a0;
-    scratch[ns(node, N_BLK) + 1] = a1;
-    scratch[ns(node, N_BLK) + 2] = float4(k, 0.0);
-    if (!(c > 0.0))
-        return false;
-    // S = A + [k]x^2 / c = A + (k k^T - |k|^2 I) / c.
-    float ic = 1.0 / c;
-    float kk = dot(k, k);
-    float sxx = a0.x + (k.x * k.x - kk) * ic;
-    float syy = a0.y + (k.y * k.y - kk) * ic;
-    float szz = a0.z + (k.z * k.z - kk) * ic;
-    float sxy = a0.w + k.x * k.y * ic;
-    float sxz = a1.x + k.x * k.z * ic;
-    float syz = a1.y + k.y * k.z * ic;
-    // Symmetric 3x3 inverse by its adjugate.
-    float cxx = syy * szz - syz * syz;
-    float cxy = sxz * syz - sxy * szz;
-    float cxz = sxy * syz - sxz * syy;
-    float det = sxx * cxx + sxy * cxy + sxz * cxz;
-    if (!(det > 0.0) || !isfinite(det))
-        return false;
-    float id = 1.0 / det;
-    float cyy = sxx * szz - sxz * sxz;
-    float cyz = sxy * sxz - sxx * syz;
-    float czz = sxx * syy - sxy * sxy;
-    scratch[ns(node, N_INV)] = float4(cxx * id, cyy * id, czz * id, cxy * id);
-    scratch[ns(node, N_INV) + 1] = float4(cxz * id, cyz * id, ic, 0.0);
-    scratch[ns(node, N_INV) + 2] = float4(k * ic, 0.0);
-    return true;
-}
+#include "blast_native_ops.slangh"
 
 // The rigid modes' Gram matrix and frame, per group (thread 0 solves with them).
 groupshared float g_gram[6][6];
@@ -221,7 +31,7 @@ groupshared float3 g_centre;
 // A free island's rigid modes at node n: rot k = (e_k / dA, (q x e_k) / dL), trans j = (0, e_j / dL).
 float3 rel(uint n)
 {
-    return positions[n].xyz - g_centre;
+    return nodes[n].position.xyz - g_centre;
 }
 
 // Solve g_gram c = g_rhs (6x6) into g_coef, thread 0 (Gaussian elimination, partial pivoting).
@@ -322,7 +132,7 @@ void build_modes(uint tid, uint n0, uint n1)
     {
         uint i = lists[p];
         float w = 1.0 / (nodes[i].w_lin * nodes[i].w_lin);
-        cw += float4(positions[i].xyz * w, w);
+        cw += float4(nodes[i].position.xyz * w, w);
     }
     float2 c0 = blast_group_sum(tid, cw.xy);
     float2 c1 = blast_group_sum(tid, cw.zw);

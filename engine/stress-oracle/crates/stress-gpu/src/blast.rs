@@ -60,6 +60,8 @@ struct NodeGpu {
     w_lin: f32,
     ref_begin: u32,
     ref_end: u32,
+    /// Over the length scale (the native solve's rigid modes).
+    position: [f32; 4],
 }
 
 #[repr(C)]
@@ -75,7 +77,7 @@ struct BondGpu {
 
 use Binding::{Storage as R, StorageRw as W, Uniform as U};
 const CGLS_BINDINGS: [Binding; 10] = [U, R, R, R, W, R, W, W, W, R];
-const NATIVE_BINDINGS: [Binding; 11] = [U, R, R, R, W, R, W, W, W, R, R];
+const NATIVE_BINDINGS: [Binding; 10] = [U, R, R, R, W, R, W, W, W, R];
 const MATERIAL_BINDINGS: [Binding; 7] = [U, W, W, R, R, W, W];
 const TOPOLOGY_BINDINGS: [Binding; 8] = [U, R, R, W, W, W, W, W];
 const FRACTURE_BINDINGS: [Binding; 9] = [U, W, W, R, R, R, R, W, R];
@@ -183,6 +185,7 @@ impl GpuBlastSolver {
                 w_lin: graph.weight[i].lin as f32,
                 ref_begin: begin,
                 ref_end: refs.len() as u32,
+                position: f4(graph.nodes[i].position * (1.0 / graph.length_scale)),
             };
         }
         let mut bonds = vec![BondGpu::default(); m.max(1)];
@@ -259,9 +262,6 @@ impl GpuBlastSolver {
             materials: gpu.storage("blast materials", &material_rows),
             out: gpu.storage("blast out", &vec![[0.0f32; 4]; 4 * m.max(1)]),
         };
-        // The rigid modes' frame (blast_native.slang): node positions over the length scale.
-        let positions: Vec<[f32; 4]> = graph.nodes.iter().map(|n| f4(n.position * (1.0 / graph.length_scale))).collect();
-        let positions = gpu.storage("blast positions", &if positions.is_empty() { vec![[0.0f32; 4]] } else { positions });
         let native = graph.settings.solver == SolverKind::Native;
         let solve = if native {
             gpu.compute(&shaders::BLAST_NATIVE, "blast_native", &NATIVE_BINDINGS)
@@ -284,8 +284,8 @@ impl GpuBlastSolver {
             })
             .collect();
         let b = &buffers;
-        let solve_buffers = [&b.params, &b.islands, &b.nodes, &b.refs, &b.bonds, &b.accel, &b.x, &b.scratch, &b.report, &b.lists, &positions];
-        let solve_bind = gpu.bind(&solve.group, if native { &solve_buffers[..] } else { &solve_buffers[..10] });
+        let solve_buffers = [&b.params, &b.islands, &b.nodes, &b.refs, &b.bonds, &b.accel, &b.x, &b.scratch, &b.report, &b.lists];
+        let solve_bind = gpu.bind(&solve.group, &solve_buffers);
         let stress_bind = gpu.bind(
             &stress.group,
             &[

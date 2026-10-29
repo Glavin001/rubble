@@ -37,12 +37,13 @@ struct BlastParams_0
     uint pad1_0;
 };
 
-struct BlastNode_0
+struct BlastNode_natural_0
 {
     float w_ang_0;
     float w_lin_0;
     uint ref_begin_0;
     uint ref_end_0;
+    packed_float4 position_0;
 };
 
 struct BlastBond_natural_0
@@ -63,11 +64,10 @@ struct KernelContext_0
     uint device* lists_0;
     packed_float4 device* accel_0;
     packed_float4 device* scratch_0;
-    BlastNode_0 device* nodes_0;
+    BlastNode_natural_0 device* nodes_0;
     uint device* refs_0;
     BlastBond_natural_0 device* bonds_0;
     packed_float4 device* x_0;
-    packed_float4 device* positions_0;
     array<float2, int(32)> threadgroup* g_blast_part_0;
     float3 threadgroup* g_centre_0;
     array<array<float, int(6)>, int(6)> threadgroup* g_gram_0;
@@ -120,7 +120,7 @@ void set_v_0(uint n_1, uint v_2, float3 a_1, float3 l_0, KernelContext_0 thread*
 
 bool build_block_0(uint node_0, KernelContext_0 thread* kernelContext_2)
 {
-    BlastNode_0 n_2 = kernelContext_2->nodes_0[node_0];
+    BlastNode_natural_0 n_2 = kernelContext_2->nodes_0[node_0];
     float3 _S3 = float3(0.0f) ;
     uint r_0 = n_2.ref_begin_0;
     float3 diag_0 = _S3;
@@ -223,7 +223,7 @@ bool build_block_0(uint node_0, KernelContext_0 thread* kernelContext_2)
 
 float3 rel_0(uint n_3, KernelContext_0 thread* kernelContext_3)
 {
-    return (float4(*(kernelContext_3->positions_0+n_3)) ).xyz - *kernelContext_3->g_centre_0;
+    return (float4(kernelContext_3->nodes_0[n_3].position_0) ).xyz - *kernelContext_3->g_centre_0;
 }
 
 void build_modes_0(uint tid_1, uint n0_1, uint n1_1, KernelContext_0 thread* kernelContext_4)
@@ -245,7 +245,7 @@ void build_modes_0(uint tid_1, uint n0_1, uint n1_1, KernelContext_0 thread* ker
         }
         uint i_0 = kernelContext_4->lists_0[p_0];
         float w_1 = 1.0f / (kernelContext_4->nodes_0[i_0].w_lin_0 * kernelContext_4->nodes_0[i_0].w_lin_0);
-        float4 cw_1 = cw_0 + float4((float4(*(kernelContext_4->positions_0+i_0)) ).xyz * float3(w_1) , w_1);
+        float4 cw_1 = cw_0 + float4((float4(kernelContext_4->nodes_0[i_0].position_0) ).xyz * float3(w_1) , w_1);
         p_0 = p_0 + 1024U;
         cw_0 = cw_1;
     }
@@ -297,7 +297,7 @@ void build_modes_0(uint tid_1, uint n0_1, uint n1_1, KernelContext_0 thread* ker
             break;
         }
         uint i_1 = kernelContext_4->lists_0[p_0];
-        BlastNode_0 n_4 = kernelContext_4->nodes_0[i_1];
+        BlastNode_natural_0 n_4 = kernelContext_4->nodes_0[i_1];
         float _S24 = n_4.w_ang_0;
         float wa_0 = 1.0f / (_S24 * _S24);
         float _S25 = n_4.w_lin_0;
@@ -442,9 +442,9 @@ float3 vl_0(uint n_6, uint v_4, KernelContext_0 thread* kernelContext_7)
 void bond_term_0(const BlastBond_natural_0 thread* b_2, uint v_5, float3 thread* ta_0, float3 thread* tl_0, KernelContext_0 thread* kernelContext_8)
 {
     uint _S43 = b_2->n0_0;
-    BlastNode_0 m0_0 = kernelContext_8->nodes_0[b_2->n0_0];
+    BlastNode_natural_0 m0_0 = kernelContext_8->nodes_0[b_2->n0_0];
     uint _S44 = b_2->n1_0;
-    BlastNode_0 m1_0 = kernelContext_8->nodes_0[b_2->n1_0];
+    BlastNode_natural_0 m1_0 = kernelContext_8->nodes_0[b_2->n1_0];
     float3 _S45 = va_0(b_2->n0_0, v_5, kernelContext_8);
     float3 a0_1 = _S45 * float3(m0_0.w_ang_0) ;
     float3 _S46 = vl_0(_S43, v_5, kernelContext_8);
@@ -462,9 +462,9 @@ void bond_term_0(const BlastBond_natural_0 thread* b_2, uint v_5, float3 thread*
 void bond_term_1(const BlastBond_natural_0 thread* b_3, uint v_6, float3 thread* ta_1, float3 thread* tl_1, KernelContext_0 thread* kernelContext_9)
 {
     uint _S50 = b_3->n0_0;
-    BlastNode_0 m0_1 = kernelContext_9->nodes_0[b_3->n0_0];
+    BlastNode_natural_0 m0_1 = kernelContext_9->nodes_0[b_3->n0_0];
     uint _S51 = b_3->n1_0;
-    BlastNode_0 m1_1 = kernelContext_9->nodes_0[b_3->n1_0];
+    BlastNode_natural_0 m1_1 = kernelContext_9->nodes_0[b_3->n1_0];
     float3 _S52 = va_0(b_3->n0_0, v_6, kernelContext_9);
     float3 a0_2 = _S52 * float3(m0_1.w_ang_0) ;
     float3 _S53 = vl_0(_S50, v_6, kernelContext_9);
@@ -481,7 +481,7 @@ void bond_term_1(const BlastBond_natural_0 thread* b_3, uint v_6, float3 thread*
 
 void gather_0(uint node_1, bool from_t_0, bool with_u_0, float3 thread* ang_0, float3 thread* lin_0, KernelContext_0 thread* kernelContext_10)
 {
-    BlastNode_0 n_7 = kernelContext_10->nodes_0[node_1];
+    BlastNode_natural_0 n_7 = kernelContext_10->nodes_0[node_1];
     float3 _S57 = float3(0.0f) ;
     uint r_1 = n_7.ref_begin_0;
     float3 acc_a_0 = _S57;
@@ -772,7 +772,7 @@ void project_0(uint tid_3, uint n0_3, uint n1_3, uint v_7, bool free_0, KernelCo
             break;
         }
         uint i_3 = kernelContext_13->lists_0[p_3];
-        BlastNode_0 n_8 = kernelContext_13->nodes_0[i_3];
+        BlastNode_natural_0 n_8 = kernelContext_13->nodes_0[i_3];
         float3 _S69 = vl_0(i_3, v_7, kernelContext_13);
         float3 lin_1 = _S69 / float3(n_8.w_lin_0) ;
         float3 _S70 = va_0(i_3, v_7, kernelContext_13);
@@ -811,7 +811,7 @@ void project_0(uint tid_3, uint n0_3, uint n1_3, uint v_7, bool free_0, KernelCo
             break;
         }
         uint i_4 = kernelContext_13->lists_0[p_3];
-        BlastNode_0 n_9 = kernelContext_13->nodes_0[i_4];
+        BlastNode_natural_0 n_9 = kernelContext_13->nodes_0[i_4];
         float3 _S78 = va_0(i_4, v_7, kernelContext_13);
         float3 _S79 = _S78 - _S76 / float3(n_9.w_ang_0) ;
         float3 _S80 = vl_0(i_4, v_7, kernelContext_13);
@@ -968,7 +968,7 @@ float group_max_0(uint tid_7, float v_10, KernelContext_0 thread* kernelContext_
     return *_S100;
 }
 
-[[kernel]] void blast_native(uint3 group_0 [[threadgroup_position_in_grid]], uint3 thread_1 [[thread_position_in_threadgroup]], BlastParams_0 constant* params_1 [[buffer(0)]], packed_uint4 device* islands_1 [[buffer(1)]], packed_uint4 device* report_1 [[buffer(8)]], uint device* lists_1 [[buffer(9)]], packed_float4 device* accel_1 [[buffer(5)]], packed_float4 device* scratch_1 [[buffer(7)]], BlastNode_0 device* nodes_1 [[buffer(2)]], uint device* refs_1 [[buffer(3)]], BlastBond_natural_0 device* bonds_1 [[buffer(4)]], packed_float4 device* x_1 [[buffer(6)]], packed_float4 device* positions_1 [[buffer(10)]])
+[[kernel]] void blast_native(uint3 group_0 [[threadgroup_position_in_grid]], uint3 thread_1 [[thread_position_in_threadgroup]], BlastParams_0 constant* params_1 [[buffer(0)]], packed_uint4 device* islands_1 [[buffer(1)]], packed_uint4 device* report_1 [[buffer(8)]], uint device* lists_1 [[buffer(9)]], packed_float4 device* accel_1 [[buffer(5)]], packed_float4 device* scratch_1 [[buffer(7)]], BlastNode_natural_0 device* nodes_1 [[buffer(2)]], uint device* refs_1 [[buffer(3)]], BlastBond_natural_0 device* bonds_1 [[buffer(4)]], packed_float4 device* x_1 [[buffer(6)]])
 {
     float anchor_0;
     float force_start_0;
@@ -985,7 +985,6 @@ float group_max_0(uint tid_7, float v_10, KernelContext_0 thread* kernelContext_
     (&kernelContext_20)->refs_0 = refs_1;
     (&kernelContext_20)->bonds_0 = bonds_1;
     (&kernelContext_20)->x_0 = x_1;
-    (&kernelContext_20)->positions_0 = positions_1;
     threadgroup array<float2, int(32)> g_blast_part_1;
     (&kernelContext_20)->g_blast_part_0 = &g_blast_part_1;
     threadgroup float3 g_centre_1;
@@ -1080,7 +1079,7 @@ float group_max_0(uint tid_7, float v_10, KernelContext_0 thread* kernelContext_
             break;
         }
         uint i_8 = (&kernelContext_20)->lists_0[p_6];
-        BlastNode_0 n_12 = (&kernelContext_20)->nodes_0[i_8];
+        BlastNode_natural_0 n_12 = (&kernelContext_20)->nodes_0[i_8];
         uint _S109 = i_8 * 2U;
         float4 _S110 = float4(*((&kernelContext_20)->accel_0+_S109)) ;
         float4 _S111 = float4(*((&kernelContext_20)->accel_0+(_S109 + 1U))) ;

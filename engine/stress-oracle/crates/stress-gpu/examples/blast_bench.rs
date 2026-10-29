@@ -41,6 +41,18 @@ fn main() {
     }
     let skip = !std::env::var("STRESS_BLAST_SKIP").is_ok_and(|v| v == "0");
     let (graph, materials) = BlastAuthoring::graph(&scene, settings).expect("graph");
+    // The islands' sizes (nodes, bonds), largest first.
+    let health: Vec<f64> = graph.bonds.iter().map(|b| b.area.max(0.0)).collect();
+    let islands = stress_ref::blast_bond::Islands::compute(&graph, &health);
+    let mut sizes = vec![(0usize, 0usize); islands.count];
+    for &k in islands.node.iter().filter(|&&k| k != stress_ref::blast_bond::NO_ISLAND) {
+        sizes[k as usize].0 += 1;
+    }
+    for &k in islands.bond.iter().filter(|&&k| k != stress_ref::blast_bond::NO_ISLAND) {
+        sizes[k as usize].1 += 1;
+    }
+    sizes.sort_unstable_by(|a, b| b.cmp(a));
+    println!("{} islands; largest (nodes, bonds): {:?}", sizes.len(), &sizes[..sizes.len().min(8)]);
     let gpu = Gpu::new().expect("GPU");
     println!(
         "{path}: {} nodes, {} bonds, {} iterations a frame, skip {skip}",

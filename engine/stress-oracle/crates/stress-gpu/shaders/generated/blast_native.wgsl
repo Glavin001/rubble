@@ -36,10 +36,11 @@ struct BlastParams_std140_0
 
 struct BlastNode_std430_0
 {
-    @align(4) w_ang_0 : f32,
+    @align(16) w_ang_0 : f32,
     @align(4) w_lin_0 : f32,
-    @align(4) ref_begin_0 : u32,
+    @align(8) ref_begin_0 : u32,
     @align(4) ref_end_0 : u32,
+    @align(16) position_0 : vec4<f32>,
 };
 
 @binding(2) @group(0) var<storage, read> nodes_0 : array<BlastNode_std430_0>;
@@ -59,8 +60,6 @@ struct BlastBond_std430_0
 @binding(4) @group(0) var<storage, read_write> bonds_0 : array<BlastBond_std430_0>;
 
 @binding(6) @group(0) var<storage, read_write> x_0 : array<vec4<f32>>;
-
-@binding(10) @group(0) var<storage, read> positions_0 : array<vec4<f32>>;
 
 fn isnan_0( x_1 : f32) -> bool
 {
@@ -284,7 +283,7 @@ var<workgroup> g_centre_0 : vec3<f32>;
 
 fn rel_0( n_3 : u32) -> vec3<f32>
 {
-    return positions_0[n_3].xyz - g_centre_0;
+    return nodes_0[n_3].position_0.xyz - g_centre_0;
 }
 
 var<workgroup> g_gram_0 : array<array<f32, i32(6)>, i32(6)>;
@@ -308,7 +307,7 @@ fn build_modes_0( tid_1 : u32,  n0_1 : u32,  n1_1 : u32)
         }
         var i_0 : u32 = lists_0[p_0];
         var w_0 : f32 = 1.0f / (nodes_0[i_0].w_lin_0 * nodes_0[i_0].w_lin_0);
-        var cw_1 : vec4<f32> = cw_0 + vec4<f32>(positions_0[i_0].xyz * vec3<f32>(w_0), w_0);
+        var cw_1 : vec4<f32> = cw_0 + vec4<f32>(nodes_0[i_0].position_0.xyz * vec3<f32>(w_0), w_0);
         p_0 = p_0 + u32(1024);
         cw_0 = cw_1;
     }

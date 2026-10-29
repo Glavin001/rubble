@@ -70,6 +70,8 @@ public struct BlastNode
     public float w_lin;
     public uint ref_begin;
     public uint ref_end;
+    // Its position over the length scale (the native solve's rigid modes).
+    public float4 position;
 };
 
 // A bond: its endpoints, compliance column scale, health (remaining area; 0 broken), offsets

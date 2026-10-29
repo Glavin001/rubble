@@ -47,12 +47,13 @@ struct BlastBond_natural_0
     packed_float4 o1_0;
 };
 
-struct BlastNode_0
+struct BlastNode_natural_0
 {
     float w_ang_0;
     float w_lin_0;
     uint ref_begin_0;
     uint ref_end_0;
+    packed_float4 position_0;
 };
 
 struct KernelContext_0
@@ -61,7 +62,7 @@ struct KernelContext_0
     atomic<uint> device* topo_0;
     uint device* args_0;
     BlastBond_natural_0 device* bonds_0;
-    BlastNode_0 device* nodes_0;
+    BlastNode_natural_0 device* nodes_0;
     packed_uint4 device* islands_0;
     packed_uint4 device* report_0;
     uint device* lists_0;
@@ -76,7 +77,7 @@ void set_args_0(uint at_0, uint x_0, KernelContext_0 thread* kernelContext_0)
     return;
 }
 
-[[kernel]] void bt_gate(uint3 id_0 [[thread_position_in_grid]], BlastParams_0 constant* params_1 [[buffer(0)]], atomic<uint> device* topo_1 [[buffer(3)]], uint device* args_1 [[buffer(7)]], BlastBond_natural_0 device* bonds_1 [[buffer(2)]], BlastNode_0 device* nodes_1 [[buffer(1)]], packed_uint4 device* islands_1 [[buffer(4)]], packed_uint4 device* report_1 [[buffer(6)]], uint device* lists_1 [[buffer(5)]])
+[[kernel]] void bt_gate(uint3 id_0 [[thread_position_in_grid]], BlastParams_0 constant* params_1 [[buffer(0)]], atomic<uint> device* topo_1 [[buffer(3)]], uint device* args_1 [[buffer(7)]], BlastBond_natural_0 device* bonds_1 [[buffer(2)]], BlastNode_natural_0 device* nodes_1 [[buffer(1)]], packed_uint4 device* islands_1 [[buffer(4)]], packed_uint4 device* report_1 [[buffer(6)]], uint device* lists_1 [[buffer(5)]])
 {
     thread KernelContext_0 kernelContext_1;
     (&kernelContext_1)->params_0 = params_1;
@@ -158,7 +159,7 @@ uint t_bond_cursor_0(KernelContext_0 thread* kernelContext_5)
     return 5U * kernelContext_5->params_0->node_count_2;
 }
 
-[[kernel]] void bt_reset(uint3 id_1 [[thread_position_in_grid]], BlastParams_0 constant* params_2 [[buffer(0)]], atomic<uint> device* topo_2 [[buffer(3)]], uint device* args_2 [[buffer(7)]], BlastBond_natural_0 device* bonds_2 [[buffer(2)]], BlastNode_0 device* nodes_2 [[buffer(1)]], packed_uint4 device* islands_2 [[buffer(4)]], packed_uint4 device* report_2 [[buffer(6)]], uint device* lists_2 [[buffer(5)]])
+[[kernel]] void bt_reset(uint3 id_1 [[thread_position_in_grid]], BlastParams_0 constant* params_2 [[buffer(0)]], atomic<uint> device* topo_2 [[buffer(3)]], uint device* args_2 [[buffer(7)]], BlastBond_natural_0 device* bonds_2 [[buffer(2)]], BlastNode_natural_0 device* nodes_2 [[buffer(1)]], packed_uint4 device* islands_2 [[buffer(4)]], packed_uint4 device* report_2 [[buffer(6)]], uint device* lists_2 [[buffer(5)]])
 {
     thread KernelContext_0 kernelContext_6;
     (&kernelContext_6)->params_0 = params_2;
@@ -231,7 +232,7 @@ uint t_total_0(KernelContext_0 thread* kernelContext_9)
     return topo_total_0(kernelContext_9->params_0->node_count_2);
 }
 
-[[kernel]] void bt_union(uint3 id_2 [[thread_position_in_grid]], BlastParams_0 constant* params_3 [[buffer(0)]], atomic<uint> device* topo_3 [[buffer(3)]], uint device* args_3 [[buffer(7)]], BlastBond_natural_0 device* bonds_3 [[buffer(2)]], BlastNode_0 device* nodes_3 [[buffer(1)]], packed_uint4 device* islands_3 [[buffer(4)]], packed_uint4 device* report_3 [[buffer(6)]], uint device* lists_3 [[buffer(5)]])
+[[kernel]] void bt_union(uint3 id_2 [[thread_position_in_grid]], BlastParams_0 constant* params_3 [[buffer(0)]], atomic<uint> device* topo_3 [[buffer(3)]], uint device* args_3 [[buffer(7)]], BlastBond_natural_0 device* bonds_3 [[buffer(2)]], BlastNode_natural_0 device* nodes_3 [[buffer(1)]], packed_uint4 device* islands_3 [[buffer(4)]], packed_uint4 device* report_3 [[buffer(6)]], uint device* lists_3 [[buffer(5)]])
 {
     thread KernelContext_0 kernelContext_10;
     (&kernelContext_10)->params_0 = params_3;
@@ -318,7 +319,7 @@ uint t_label_0(KernelContext_0 thread* kernelContext_11)
     return kernelContext_11->params_0->node_count_2;
 }
 
-[[kernel]] void bt_flatten(uint3 id_3 [[thread_position_in_grid]], BlastParams_0 constant* params_4 [[buffer(0)]], atomic<uint> device* topo_4 [[buffer(3)]], uint device* args_4 [[buffer(7)]], BlastBond_natural_0 device* bonds_4 [[buffer(2)]], BlastNode_0 device* nodes_4 [[buffer(1)]], packed_uint4 device* islands_4 [[buffer(4)]], packed_uint4 device* report_4 [[buffer(6)]], uint device* lists_4 [[buffer(5)]])
+[[kernel]] void bt_flatten(uint3 id_3 [[thread_position_in_grid]], BlastParams_0 constant* params_4 [[buffer(0)]], atomic<uint> device* topo_4 [[buffer(3)]], uint device* args_4 [[buffer(7)]], BlastBond_natural_0 device* bonds_4 [[buffer(2)]], BlastNode_natural_0 device* nodes_4 [[buffer(1)]], packed_uint4 device* islands_4 [[buffer(4)]], packed_uint4 device* report_4 [[buffer(6)]], uint device* lists_4 [[buffer(5)]])
 {
     thread KernelContext_0 kernelContext_12;
     (&kernelContext_12)->params_0 = params_4;
@@ -353,7 +354,7 @@ uint t_label_0(KernelContext_0 thread* kernelContext_11)
     return;
 }
 
-[[kernel]] void bt_count_nodes(uint3 id_4 [[thread_position_in_grid]], BlastParams_0 constant* params_5 [[buffer(0)]], atomic<uint> device* topo_5 [[buffer(3)]], uint device* args_5 [[buffer(7)]], BlastBond_natural_0 device* bonds_5 [[buffer(2)]], BlastNode_0 device* nodes_5 [[buffer(1)]], packed_uint4 device* islands_5 [[buffer(4)]], packed_uint4 device* report_5 [[buffer(6)]], uint device* lists_5 [[buffer(5)]])
+[[kernel]] void bt_count_nodes(uint3 id_4 [[thread_position_in_grid]], BlastParams_0 constant* params_5 [[buffer(0)]], atomic<uint> device* topo_5 [[buffer(3)]], uint device* args_5 [[buffer(7)]], BlastBond_natural_0 device* bonds_5 [[buffer(2)]], BlastNode_natural_0 device* nodes_5 [[buffer(1)]], packed_uint4 device* islands_5 [[buffer(4)]], packed_uint4 device* report_5 [[buffer(6)]], uint device* lists_5 [[buffer(5)]])
 {
     thread KernelContext_0 kernelContext_13;
     (&kernelContext_13)->params_0 = params_5;
@@ -429,7 +430,7 @@ uint bond_root_0(const BlastBond_natural_0 thread* b_2, KernelContext_0 thread* 
     return _S42;
 }
 
-[[kernel]] void bt_count_bonds(uint3 id_5 [[thread_position_in_grid]], BlastParams_0 constant* params_6 [[buffer(0)]], atomic<uint> device* topo_6 [[buffer(3)]], uint device* args_6 [[buffer(7)]], BlastBond_natural_0 device* bonds_6 [[buffer(2)]], BlastNode_0 device* nodes_6 [[buffer(1)]], packed_uint4 device* islands_6 [[buffer(4)]], packed_uint4 device* report_6 [[buffer(6)]], uint device* lists_6 [[buffer(5)]])
+[[kernel]] void bt_count_bonds(uint3 id_5 [[thread_position_in_grid]], BlastParams_0 constant* params_6 [[buffer(0)]], atomic<uint> device* topo_6 [[buffer(3)]], uint device* args_6 [[buffer(7)]], BlastBond_natural_0 device* bonds_6 [[buffer(2)]], BlastNode_natural_0 device* nodes_6 [[buffer(1)]], packed_uint4 device* islands_6 [[buffer(4)]], packed_uint4 device* report_6 [[buffer(6)]], uint device* lists_6 [[buffer(5)]])
 {
     thread KernelContext_0 kernelContext_16;
     (&kernelContext_16)->params_0 = params_6;
@@ -534,7 +535,7 @@ uint t_blocks_0(KernelContext_0 thread* kernelContext_20)
     return 10U * kernelContext_20->params_0->node_count_2;
 }
 
-[[kernel]] void bt_scan_blocks(uint3 group_0 [[threadgroup_position_in_grid]], uint3 thread_0 [[thread_position_in_threadgroup]], BlastParams_0 constant* params_7 [[buffer(0)]], atomic<uint> device* topo_7 [[buffer(3)]], uint device* args_7 [[buffer(7)]], BlastBond_natural_0 device* bonds_7 [[buffer(2)]], BlastNode_0 device* nodes_7 [[buffer(1)]], packed_uint4 device* islands_7 [[buffer(4)]], packed_uint4 device* report_7 [[buffer(6)]], uint device* lists_7 [[buffer(5)]])
+[[kernel]] void bt_scan_blocks(uint3 group_0 [[threadgroup_position_in_grid]], uint3 thread_0 [[thread_position_in_threadgroup]], BlastParams_0 constant* params_7 [[buffer(0)]], atomic<uint> device* topo_7 [[buffer(3)]], uint device* args_7 [[buffer(7)]], BlastBond_natural_0 device* bonds_7 [[buffer(2)]], BlastNode_natural_0 device* nodes_7 [[buffer(1)]], packed_uint4 device* islands_7 [[buffer(4)]], packed_uint4 device* report_7 [[buffer(6)]], uint device* lists_7 [[buffer(5)]])
 {
     thread KernelContext_0 kernelContext_21;
     (&kernelContext_21)->params_0 = params_7;
@@ -572,7 +573,7 @@ uint t_blocks_0(KernelContext_0 thread* kernelContext_20)
     return;
 }
 
-[[kernel]] void bt_scan_top(uint3 thread_1 [[thread_position_in_threadgroup]], BlastParams_0 constant* params_8 [[buffer(0)]], atomic<uint> device* topo_8 [[buffer(3)]], uint device* args_8 [[buffer(7)]], BlastBond_natural_0 device* bonds_8 [[buffer(2)]], BlastNode_0 device* nodes_8 [[buffer(1)]], packed_uint4 device* islands_8 [[buffer(4)]], packed_uint4 device* report_8 [[buffer(6)]], uint device* lists_8 [[buffer(5)]])
+[[kernel]] void bt_scan_top(uint3 thread_1 [[thread_position_in_threadgroup]], BlastParams_0 constant* params_8 [[buffer(0)]], atomic<uint> device* topo_8 [[buffer(3)]], uint device* args_8 [[buffer(7)]], BlastBond_natural_0 device* bonds_8 [[buffer(2)]], BlastNode_natural_0 device* nodes_8 [[buffer(1)]], packed_uint4 device* islands_8 [[buffer(4)]], packed_uint4 device* report_8 [[buffer(6)]], uint device* lists_8 [[buffer(5)]])
 {
     thread KernelContext_0 kernelContext_22;
     (&kernelContext_22)->params_0 = params_8;
@@ -624,7 +625,7 @@ uint t_blocks_0(KernelContext_0 thread* kernelContext_20)
     return;
 }
 
-[[kernel]] void bt_scan_add(uint3 group_1 [[threadgroup_position_in_grid]], uint3 thread_2 [[thread_position_in_threadgroup]], BlastParams_0 constant* params_9 [[buffer(0)]], atomic<uint> device* topo_9 [[buffer(3)]], uint device* args_9 [[buffer(7)]], BlastBond_natural_0 device* bonds_9 [[buffer(2)]], BlastNode_0 device* nodes_9 [[buffer(1)]], packed_uint4 device* islands_9 [[buffer(4)]], packed_uint4 device* report_9 [[buffer(6)]], uint device* lists_9 [[buffer(5)]])
+[[kernel]] void bt_scan_add(uint3 group_1 [[threadgroup_position_in_grid]], uint3 thread_2 [[thread_position_in_threadgroup]], BlastParams_0 constant* params_9 [[buffer(0)]], atomic<uint> device* topo_9 [[buffer(3)]], uint device* args_9 [[buffer(7)]], BlastBond_natural_0 device* bonds_9 [[buffer(2)]], BlastNode_natural_0 device* nodes_9 [[buffer(1)]], packed_uint4 device* islands_9 [[buffer(4)]], packed_uint4 device* report_9 [[buffer(6)]], uint device* lists_9 [[buffer(5)]])
 {
     thread KernelContext_0 kernelContext_23;
     (&kernelContext_23)->params_0 = params_9;
@@ -668,7 +669,7 @@ uint t_island_of_0(KernelContext_0 thread* kernelContext_24)
     return 9U * kernelContext_24->params_0->node_count_2;
 }
 
-[[kernel]] void bt_islands(uint3 id_6 [[thread_position_in_grid]], BlastParams_0 constant* params_10 [[buffer(0)]], atomic<uint> device* topo_10 [[buffer(3)]], uint device* args_10 [[buffer(7)]], BlastBond_natural_0 device* bonds_10 [[buffer(2)]], BlastNode_0 device* nodes_10 [[buffer(1)]], packed_uint4 device* islands_10 [[buffer(4)]], packed_uint4 device* report_10 [[buffer(6)]], uint device* lists_10 [[buffer(5)]])
+[[kernel]] void bt_islands(uint3 id_6 [[thread_position_in_grid]], BlastParams_0 constant* params_10 [[buffer(0)]], atomic<uint> device* topo_10 [[buffer(3)]], uint device* args_10 [[buffer(7)]], BlastBond_natural_0 device* bonds_10 [[buffer(2)]], BlastNode_natural_0 device* nodes_10 [[buffer(1)]], packed_uint4 device* islands_10 [[buffer(4)]], packed_uint4 device* report_10 [[buffer(6)]], uint device* lists_10 [[buffer(5)]])
 {
     thread KernelContext_0 kernelContext_25;
     (&kernelContext_25)->params_0 = params_10;
@@ -706,7 +707,7 @@ uint t_island_of_0(KernelContext_0 thread* kernelContext_24)
     return;
 }
 
-[[kernel]] void bt_scatter_nodes(uint3 id_7 [[thread_position_in_grid]], BlastParams_0 constant* params_11 [[buffer(0)]], atomic<uint> device* topo_11 [[buffer(3)]], uint device* args_11 [[buffer(7)]], BlastBond_natural_0 device* bonds_11 [[buffer(2)]], BlastNode_0 device* nodes_11 [[buffer(1)]], packed_uint4 device* islands_11 [[buffer(4)]], packed_uint4 device* report_11 [[buffer(6)]], uint device* lists_11 [[buffer(5)]])
+[[kernel]] void bt_scatter_nodes(uint3 id_7 [[thread_position_in_grid]], BlastParams_0 constant* params_11 [[buffer(0)]], atomic<uint> device* topo_11 [[buffer(3)]], uint device* args_11 [[buffer(7)]], BlastBond_natural_0 device* bonds_11 [[buffer(2)]], BlastNode_natural_0 device* nodes_11 [[buffer(1)]], packed_uint4 device* islands_11 [[buffer(4)]], packed_uint4 device* report_11 [[buffer(6)]], uint device* lists_11 [[buffer(5)]])
 {
     thread KernelContext_0 kernelContext_26;
     (&kernelContext_26)->params_0 = params_11;
@@ -751,7 +752,7 @@ uint t_island_of_0(KernelContext_0 thread* kernelContext_24)
     return;
 }
 
-[[kernel]] void bt_scatter_bonds(uint3 id_8 [[thread_position_in_grid]], BlastParams_0 constant* params_12 [[buffer(0)]], atomic<uint> device* topo_12 [[buffer(3)]], uint device* args_12 [[buffer(7)]], BlastBond_natural_0 device* bonds_12 [[buffer(2)]], BlastNode_0 device* nodes_12 [[buffer(1)]], packed_uint4 device* islands_12 [[buffer(4)]], packed_uint4 device* report_12 [[buffer(6)]], uint device* lists_12 [[buffer(5)]])
+[[kernel]] void bt_scatter_bonds(uint3 id_8 [[thread_position_in_grid]], BlastParams_0 constant* params_12 [[buffer(0)]], atomic<uint> device* topo_12 [[buffer(3)]], uint device* args_12 [[buffer(7)]], BlastBond_natural_0 device* bonds_12 [[buffer(2)]], BlastNode_natural_0 device* nodes_12 [[buffer(1)]], packed_uint4 device* islands_12 [[buffer(4)]], packed_uint4 device* report_12 [[buffer(6)]], uint device* lists_12 [[buffer(5)]])
 {
     thread KernelContext_0 kernelContext_27;
     (&kernelContext_27)->params_0 = params_12;
@@ -877,7 +878,7 @@ void sort_list_0(uint tid_3, uint begin_0, uint n_0, KernelContext_0 thread* ker
     return;
 }
 
-[[kernel]] void bt_sort(uint3 group_2 [[threadgroup_position_in_grid]], uint3 thread_4 [[thread_position_in_threadgroup]], BlastParams_0 constant* params_13 [[buffer(0)]], atomic<uint> device* topo_13 [[buffer(3)]], uint device* args_13 [[buffer(7)]], BlastBond_natural_0 device* bonds_13 [[buffer(2)]], BlastNode_0 device* nodes_13 [[buffer(1)]], packed_uint4 device* islands_13 [[buffer(4)]], packed_uint4 device* report_13 [[buffer(6)]], uint device* lists_13 [[buffer(5)]])
+[[kernel]] void bt_sort(uint3 group_2 [[threadgroup_position_in_grid]], uint3 thread_4 [[thread_position_in_threadgroup]], BlastParams_0 constant* params_13 [[buffer(0)]], atomic<uint> device* topo_13 [[buffer(3)]], uint device* args_13 [[buffer(7)]], BlastBond_natural_0 device* bonds_13 [[buffer(2)]], BlastNode_natural_0 device* nodes_13 [[buffer(1)]], packed_uint4 device* islands_13 [[buffer(4)]], packed_uint4 device* report_13 [[buffer(6)]], uint device* lists_13 [[buffer(5)]])
 {
     thread KernelContext_0 kernelContext_29;
     (&kernelContext_29)->params_0 = params_13;

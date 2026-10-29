@@ -42,10 +42,11 @@ struct BlastBond_std430_0
 
 struct BlastNode_std430_0
 {
-    @align(4) w_ang_0 : f32,
+    @align(16) w_ang_0 : f32,
     @align(4) w_lin_0 : f32,
-    @align(4) ref_begin_0 : u32,
+    @align(8) ref_begin_0 : u32,
     @align(4) ref_end_0 : u32,
+    @align(16) position_0 : vec4<f32>,
 };
 
 @binding(1) @group(0) var<storage, read> nodes_0 : array<BlastNode_std430_0>;
