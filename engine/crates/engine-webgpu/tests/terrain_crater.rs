@@ -30,7 +30,11 @@ fn sim() -> WgpuSim {
 
 fn impact(sand: &SandMaterial) -> ImpactSource {
     ImpactSource {
-        impactor_radius: 0.005,
+        // CRATER_A: the impactor radius (m), for the energy sweep.
+        impactor_radius: std::env::var("CRATER_A")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.005),
         impactor_density: 2700.0,
         velocity: DVec3::new(0.0, -2000.0, 0.0),
         target: CraterTarget::sand(sand).unwrap(),
@@ -416,6 +420,16 @@ fn an_impact_crater_in_dry_sand_follows_pi_scaling() {
     let field_model = src
         .field_with(G, z, h, env("CRATER_CORE").unwrap_or(2.0) * h)
         .unwrap();
+    // CRATER_ALPHA: the field's strength α times this (diagnostics, reported,
+    // not adopted).
+    let mut field_model = field_model;
+    if let Some(k) = env("CRATER_ALPHA") {
+        field_model.alpha *= k;
+    }
+    // CRATER_EXTENT: the field's extent in transient radii (diagnostics).
+    if let Some(k) = env("CRATER_EXTENT") {
+        field_model = field_model.bounded(k * crater.radius).unwrap();
+    }
     eprintln!(
         "field: Z {z:.3}, core {:.4} m, KE {:.1} J of the impactor's {:.0} J",
         field_model.core_radius,
@@ -484,6 +498,75 @@ fn an_impact_crater_in_dry_sand_follows_pi_scaling() {
     let t0 = std::time::Instant::now();
     let (mut t, mut frames) = (0.0f32, 0u32);
     let mut last = None;
+    // CRATER_LAUNCH=ms: the emergent launch speeds (diagnostics). Steps in
+    // parts of `ms` milliseconds through the formation time; a particle that
+    // started in the top cell is launched when it first stands half a cell
+    // above the pre-impact surface, and its speed then is binned by its home
+    // distance from the impact point, against Housen & Holsapple's law.
+    if let Some(ms) = env("CRATER_LAUNCH") {
+        let part = (ms * 1e-3) as f32;
+        let home: Vec<(f32, f32)> = s
+            .terrain_particles()
+            .iter()
+            .map(|p| ((p.c[1][3].powi(2) + p.c[2][3].powi(2)).sqrt(), p.xm[1]))
+            .collect();
+        let mut launched = vec![false; home.len()];
+        let mut speeds: Vec<(f32, f32, f32)> = Vec::new();
+        let mut tp = 0.0f32;
+        while tp < crater.formation_time as f32 {
+            let bound = (1.5 * speed).max(2.0);
+            let (n_sub, dt) =
+                substeps_for(&cfg, part, plan.dx, sand.p_wave_speed(), bound).unwrap();
+            let rep = s.terrain_step(n_sub, dt, -(G as f32)).unwrap();
+            speed = rep.max_speed;
+            tp += part;
+            for (k, p) in s.terrain_particles().iter().enumerate().take(home.len()) {
+                let (x0, y0) = home[k];
+                if launched[k] || y0 < -plan.dx || p.xm[3] <= 0.0 {
+                    continue;
+                }
+                if p.xm[1] > 0.5 * plan.dx {
+                    launched[k] = true;
+                    speeds.push((x0, Vec3::from_slice(&p.vj[..3]).length(), tp));
+                }
+            }
+        }
+        t += tp;
+        frames += (tp / FRAME).round() as u32;
+        let ej = src.target.ejecta;
+        let r = crater.radius as f32;
+        for b in 0..12 {
+            let (lo, hi) = (0.05 * 1.35f32.powi(b), 0.05 * 1.35f32.powi(b + 1));
+            let mut v: Vec<f32> = speeds
+                .iter()
+                .filter(|s| s.0 >= lo * r && s.0 < hi * r)
+                .map(|s| s.1)
+                .collect();
+            if v.is_empty() {
+                continue;
+            }
+            v.sort_by(f32::total_cmp);
+            let x = f64::from(0.5 * (lo + hi) * r);
+            let law = ej.launch_speed(
+                src.impactor_radius,
+                src.normal_speed(),
+                src.impactor_density,
+                src.target.crater.density,
+                x,
+            );
+            let rim = (1.0 - x / (ej.n2 * crater.radius)).max(0.0).powf(ej.p);
+            eprintln!(
+                "launch x/R {:.3}–{:.3}: {} launched, median {:.3} m/s (HH {:.3}, with rim factor {:.3}), ratio {:.2}",
+                lo,
+                hi,
+                v.len(),
+                v[v.len() / 2],
+                law,
+                law * rim,
+                f64::from(v[v.len() / 2]) / (law * rim)
+            );
+        }
+    }
     // CRATER_SPLIT=k: the first frame in k parts, probed after each (diagnostics).
     if let Some(k) = std::env::var("CRATER_SPLIT")
         .ok()
@@ -674,6 +757,19 @@ fn an_impact_crater_in_dry_sand_follows_pi_scaling() {
     // - cavity volume within a factor of 2 of the predicted transient volume.
     let deepest = -profile.iter().cloned().fold(f64::MAX, f64::min);
     let ratio = apparent / crater.radius;
+    let cavity_early: f64 = after
+        .iter()
+        .zip(&before)
+        .map(|(a, b)| f64::from((b - a).max(0.0)))
+        .sum::<f64>()
+        * f64::from(spacing * spacing);
+    eprintln!(
+        "summary: apparent/transient radius {ratio:.3}, deepest {deepest:.4} m, \
+         depth/radius {:.3} (Kd/Kr {:.3}), cavity {cavity_early:.3e} m³ = {:.2}× the transient",
+        deepest / apparent,
+        crater.depth / crater.radius,
+        cavity_early / crater.volume
+    );
     assert!(
         (0.9..=1.6).contains(&ratio),
         "apparent radius {apparent} m is {ratio}× the transient {} m",

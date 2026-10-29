@@ -141,8 +141,11 @@ uses by default ("Performance").
 - the volume ledger through forced closes with ejecta in flight.
 
 **Open:**
-- **Crater volume.** About 3.1× π-scaling's. The excess follows the source
-  field's strength at crater scale; it is not compaction and not the walls.
+- **Crater volume.** About 2.8–3.1× π-scaling's, a constant factor over two
+  decades of energy (slope 0.836 against 0.830). The cause is the source: it
+  counts the excavation push twice, so crater-scale ground leaves 2–5× faster
+  than Housen & Holsapple's launch law ("Volume cause found"). Fixing it
+  needs a decision on the approved source.
 - **Wall give.** Constant-E sand at depth gives metres at the absorbing walls.
   Hardin-type pressure-dependent stiffness would fix it at the root, but it
   changes validated results.
@@ -513,6 +516,90 @@ depth 0.037 m, final rim 0.191 m.
     Re-run on the current coupling at margin 2: 3.57× (radius 0.193 m, centre
     depth 0.064 m). No material change is adopted, and the measurements above
     are not adopted either.
+- **Volume cause found (2026-10-29): the source counts the excavation push
+  twice.** Measured with new env-gated diagnostics in `terrain_crater`
+  (`CRATER_LAUNCH`, `CRATER_ALPHA`, `CRATER_EXTENT`, `CRATER_A`; a `summary:`
+  line now prints before the asserts). Baseline: margin 0.6, 16 cells/R,
+  2.79× (radius 1.19 R, deepest 7.7 cm).
+  - **The scaling exponents are right; only the constant is off.** Impactor
+    radius 2.5, 5 and 11.6 mm at 2 km/s, two decades of energy (353 J to 35 kJ):
+
+    | a | Transient R | Apparent R | Cavity / π-scaling |
+    |---|---|---|---|
+    | 2.5 mm | 0.083 m | 1.13 R | 2.68× |
+    | 5 mm | 0.147 m | 1.19 R | 2.79× |
+    | 11.6 mm | 0.296 m | 1.19 R | 2.76× |
+
+    The log-log slope of volume against energy is 0.836, against π-scaling's
+    0.830. For radius it is 0.288, against 0.277. The excess is a constant
+    2.7–2.8×, the same at every size.
+  - **The emergent launch speeds are too fast at crater scale.** The source
+    sets Housen & Holsapple's launch speed v(x) on all ground within R at
+    t = 0. `CRATER_LAUNCH=0.5` records each top-cell particle's speed when it
+    first stands half a cell above the original surface, binned by its home
+    distance x, and compares it with v(x)·(1 − x/1.3R)^0.3 (HH 2011 with the
+    rim factor):
+
+    | x / R | 0.26 | 0.36 | 0.48 | 0.65 | 0.87 | 1.18 |
+    |---|---|---|---|---|---|---|
+    | Field bounded at R (current) | 1.20× | 1.78× | 2.59× | 3.48× | 4.29× | 5.21× |
+    | Field bounded at 0.3 R | 0.96× | 1.29× | 1.63× | 1.84× | 1.75× | 2.02× |
+    | Field bounded at 0.15 R | 0.30× | 0.37× | 0.43× | 0.38× | 0.24× | — |
+
+    HH's v(x) is the speed with which ground at x *leaves*, after the flow
+    from inside x has pushed it. The source gives every x that speed at once,
+    and the MPM then also carries the inner ground's momentum outward, which
+    pushes the outer ground again. So at crater scale the ground leaves
+    2–5× faster than the law says. (Inside 0.2 R the speeds measured are
+    below the law: the first substep's P2G averages the core, as noted
+    above.)
+  - **Volume follows the extent, not the energy.** All the field's energy lies
+    inside 0.3 R (244 of 266 J), yet the volume swings 7× with the extent:
+
+    | Field extent | Net down momentum | Cavity / π-scaling | Apparent R |
+    |---|---|---|---|
+    | 1.0 R (current) | 1.26 m·U | 2.79× | 1.19 R |
+    | 0.8 R | 0.98 m·U | 2.61× | 1.13 R |
+    | 0.3 R | 0.16 m·U | 1.40× | 0.94 R |
+    | 0.15 R | — | 0.41× | 0.56 R |
+
+    The α sweep agrees: α × 0.5 gives radius 0.129 m and depth 5.7 cm;
+    α × 0.25 gives 0.083 m and 4.2 cm. That is V ∝ α^1.2, so the 22 J outside
+    0.3 R sets the crater.
+  - **A momentum error, smaller.** The field bounded at R carries 1.26 m·U
+    net downward: 6.79 kg·m/s down and 3.23 up, against the impactor's 2.83.
+    The earlier note read this as a momentum-transfer β of 1.26. But β is the
+    *remaining* target's momentum over m·U. The whole target, ejecta
+    included, must carry exactly m·U, so the field breaks momentum
+    conservation by 26%. Bounding at 0.8 R conserves it, and that alone
+    takes the volume from 2.79× to 2.61×.
+  - **Shape: deeper for its width, at every strength.** Depth over apparent
+    radius is 0.43–0.56 in every run above, against Holsapple's
+    Kd/Kr = 0.25. The profile has a flat floor out to about 0.3 R and walls
+    at about 31°, the sand's repose (φ = 30°). So at a given radius the bowl
+    holds about 1.7× Holsapple's volume; the rest is the radius (1.19³ ≈
+    1.7). Laboratory sand craters are often quoted near d/D ≈ 0.2 (this
+    crater: 0.22), deeper than Kd/Kr implies, so this part may be in
+    Holsapple's shape constants, not the MPM. It is not resolved here.
+  - **Not changed; needs a decision.** Each fix changes the source the user
+    approved (bounded at R, α fitted to the launch law), so none is adopted.
+    The candidates, most principled first:
+    1. **Conserve momentum.** Bound the field where its net momentum equals
+       m·U (0.8 R here). This is Newton, not a fit, but on its own it closes
+       only 7% of the gap.
+    2. **Calibrate to the emergent launch speeds.** Fit the source, its
+       extent or α, so that the speeds the MPM *produces* follow HH's v(x)
+       with the rim factor over 0.3–1 R. This uses the same law and the same
+       least squares as today, applied to the ground's departure instead of
+       the initial field. By the table it lands near an extent of 0.24 R
+       and a cavity around 1–1.4×. It needs a fitted extent per profile
+       (resolution changes how the MPM carries the push), so it is a
+       calibration, measured and reported.
+    3. The shape constant above. A cone-like bowl at d/D ≈ 0.2 would put
+       Kr near 1.2. It needs the laboratory profiles.
+
+    `terrain_crater` keeps the factor-2 volume assertion, so it still fails
+    there (ignored). The radius, shape, rim, axis and ledger checks pass.
 - The ejecta blanket thins faster than McGetchin's r⁻³ (about r⁻¹⁰ between 1.4
   and 1.9 rim radii); not yet understood.
 
