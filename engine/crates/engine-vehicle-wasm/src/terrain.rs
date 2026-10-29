@@ -47,6 +47,8 @@ struct ConfigJson {
     max_substeps: Option<u32>,
     max_columns: Option<u32>,
     max_coupled: Option<u32>,
+    /// Wheels whose load open sand may carry at once (0: none).
+    max_wheel_loads: Option<u32>,
     max_field_samples: Option<u32>,
     bake_home_fade: Option<f32>,
     /// "rigid" or "absorbing" (`RegionBoundary`).
@@ -254,6 +256,7 @@ impl TerrainStep {
             max_substeps: c.max_substeps.unwrap_or(d.max_substeps),
             max_columns: c.max_columns.unwrap_or(d.max_columns),
             max_coupled: c.max_coupled.unwrap_or(d.max_coupled),
+            max_wheel_loads: c.max_wheel_loads.unwrap_or(d.max_wheel_loads),
             max_field_samples: c.max_field_samples.unwrap_or(d.max_field_samples),
             bake_home_fade: c.bake_home_fade.unwrap_or(d.bake_home_fade),
             boundary,
@@ -364,7 +367,8 @@ impl TerrainStep {
                 "max_parcels": c.max_parcels, "particles_per_cell_axis": c.particles_per_cell_axis,
                 "cells_per_radius": c.cells_per_radius, "courant": c.courant,
                 "max_substeps": c.max_substeps, "max_columns": c.max_columns,
-                "max_coupled": c.max_coupled, "max_field_samples": c.max_field_samples,
+                "max_coupled": c.max_coupled, "max_wheel_loads": c.max_wheel_loads,
+                "max_field_samples": c.max_field_samples,
                 "bake_home_fade": c.bake_home_fade,
                 "boundary": match c.boundary {
                     RegionBoundary::Rigid => "rigid",
@@ -724,7 +728,8 @@ impl TerrainStep {
         Ok(json!({
             "blocks": r.blocks, "max_speed": r.max_speed, "particles": r.particles,
             "parcels": r.parcels, "deposited": r.deposited, "escaped": r.escaped,
-            "airborne": r.airborne, "body_speed": r.body_speed, "areas": areas,
+            "airborne": r.airborne, "body_speed": r.body_speed, "wheels": r.wheels,
+            "areas": areas,
         })
         .to_string())
     }

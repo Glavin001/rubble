@@ -1361,7 +1361,7 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       $('stats').textContent = [
         `t ${st.t.toFixed(2)} s · ${st.carPose ? (st.carSpeed * 3.6).toFixed(0) : '–'} km/h · region ${terrain.region ? 'open' : '—'}`,
         `frame ${mean('ms').toFixed(2)} ms (budget 8.33) · terrain ${mean('terrainMs').toFixed(2)} ms · surface ${mean('surfaceMs').toFixed(2)} ms`,
-        `particles ${(terrain.report?.particles ?? 0).toLocaleString()} · substeps ${last?.substeps ?? 0} · in flight ${(terrain.report?.airborne ?? 0).toLocaleString()}`,
+        `particles ${(terrain.report?.particles ?? 0).toLocaleString()} · substeps ${last?.substeps ?? 0} · in flight ${(terrain.report?.airborne ?? 0).toLocaleString()} · wheels on sand ${terrain.report?.wheels ?? 0}`,
         `crater R ${R.toFixed(1)} m · rim ${RIM.toFixed(1)} m · cells ${DX.toFixed(2)} m (${TERRAIN.settings.config.cells_per_radius}/R, margin ${TERRAIN.settings.region_margin})`,
       ].join('\n');
       statusEl.textContent = canOverlap() ? 'overlapping strikes (multi-region engine)' : 'one region at a time: each crater bakes before the next strike';

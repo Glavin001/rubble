@@ -383,3 +383,34 @@ fn wheels_outside_every_open_area_press_nothing() {
         "max_wheel_loads 0: {listed:?}"
     );
 }
+
+/// The wheel loads' GPU cost: the car resting on the open sand, the terrain's
+/// GPU time per frame with the wheels pressing (four loads listed) and with
+/// `max_wheel_loads` 0 (no wheel kernels). Run alone, release:
+///
+/// `RUBBLE_TERRAIN_GPU_MS=1 cargo test --release -p engine-webgpu --test
+/// terrain_wheels -- --ignored --nocapture`
+#[test]
+#[ignore = "benchmark: run alone, release, with RUBBLE_TERRAIN_GPU_MS=1"]
+fn wheel_load_cost() {
+    for loads in [64, 0, 64, 0] {
+        let mut sc = Scene::new(loads);
+        sc.place(&car(), 0.0, 0.0);
+        sc.frames(120, |_| {});
+        let mut ms = Vec::new();
+        for _ in 0..120 {
+            sc.frames(1, |_| {});
+            ms.extend(sc.s.terrain_last_gpu_ms());
+        }
+        ms.sort_by(f64::total_cmp);
+        let (k, _) = substeps_for(&sc.cfg, FRAME, DX, sc.sand.p_wave_speed(), 5.0).unwrap();
+        eprintln!(
+            "max_wheel_loads {loads}: terrain GPU per frame median {:.3} ms, p95 {:.3} ms, worst {:.3} ms \
+             ({k} substeps of a 1/60 s frame; {} particles)",
+            ms[ms.len() / 2],
+            ms[ms.len() * 95 / 100],
+            ms[ms.len() - 1],
+            sc.s.terrain_particles().len(),
+        );
+    }
+}

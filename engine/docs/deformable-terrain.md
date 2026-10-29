@@ -107,6 +107,9 @@ measurements behind them.
 - **Multiple impacts.** Several areas in one sparse domain: far hits open
   their own, near ones grow them, sources superpose, each area bakes on its
   own ("Multiple impacts" below).
+- **Wheels on open sand.** Two-way: a wheel on an open area's live surface
+  presses its contact force into the sand, which ruts, berms and carries the
+  car ("Wheels on open sand" below).
 - **Rendering.** A render-only GPU pass rebuilds the ground over every open
   area from its particles every frame, and lists what flies as debris. A
   patch per area keeps the wheels on the live sand.
@@ -773,9 +776,8 @@ enter an open region.
   as they were. With no region open it is out of reach.
 - It also takes rigid contacts (a chassis or debris body on the sand), not
   only rays.
-- Open: wheels do not push the sand, so there are no ruts in an open region
-  and no two-way wheel-to-sand coupling. The chassis is coupled as any body
-  is.
+- Wheels push the sand since 2026-10-29: see "Wheels on open sand" below.
+  The chassis is coupled as any body is.
 
 **A car in a region.** The dune buggy has 187 collider hulls on its 17 parts.
 - Coupling lists colliders per block cell. `MPM_CELL_COLLIDERS` was 8; it is
@@ -1053,6 +1055,104 @@ closes, so contacts against it are not handed between areas.
 
   At 4.5 s the second strike lands between them and grows one area over
   both. `impact.html` (one area) is unchanged.
+
+### Wheels on open sand (2026-10-29)
+
+Before this, wheels rode an open area's surface patch, but the sand under them
+felt nothing: no ruts, and the car's weight went into the static patch. Now
+each wheel standing on the live sand presses its contact force into the MPM,
+so the sand ruts and berms under it and carries the car's load.
+
+**How** (`terrain_mpm.slang`, "Wheel loads"; three kernels in the coupled
+frame, `TerrainPlan::coupled`):
+- **`mpm_wheel_loads`**, once per coupled frame, one thread. It walks the
+  vehicle pool (binding 31) in wheel order, so runs agree bit for bit. It
+  lists each wheel that, in the rigid step before:
+  - was in contact, enabled and attached;
+  - stood on a static heightfield other than the area's bed (the area's
+    surface patch);
+  - had its contact one cell inside an open area's box.
+
+  Each listed wheel carries the force it pressed on the ground there:
+  F = −(n·Fn − t·fL − s·fT). That is the reaction of the ground's force on the
+  chassis, from the wheel's latched normal and friction forces.
+- **`mpm_wheel_mass`**, per substep after P2G, one thread per load. It sums
+  the material's mass at the contact: M = Σ w·m over the contact's B-spline
+  stencil, counting only nodes that carry velocity.
+- **`mpm_grid`** (`mpmWheelLoads`, its own function behind an early return)
+  moves each stencil node by F·dt·w/M. That is ahead of the bed and walls, so
+  they take what the material passes on.
+  - Σ m·Δv = F·dt exactly: the sand takes F·dt per substep, and the frame's
+    substeps the impulse the chassis took over the rigid step.
+  - The load is shared by mass (Δv the same at every node), not by weight
+    alone. A weight-only share would put the load's full share on a nearly
+    empty surface node.
+- **Timing.** Explicit and staggered, like the rigid coupling. The forces are
+  the rigid step's from the frame before, so momentum balances over the pair
+  of frames, forward only.
+- **The wheel follows the sand down** through the surface patch, which is
+  rebuilt from the particles every frame.
+- **The contact is one point.** It is spread by P2G's own kernel: a footprint
+  about a cell across. No contact-patch model; the tyre's width and length
+  are not used.
+
+**Limits.** `TerrainConfig::max_wheel_loads` (default 64; 0 turns it off and
+dispatches no wheel kernels). More wheels on open sand than that set
+`MPM_OVERFLOW_WHEELS`, and the frame fails naming `max_wheel_loads`. The
+records sit in binding 49 after the coupling slots and the face points (three
+float4 each). The counter `MPM_C_WHEELS` (word 14) holds the frame's count;
+`TerrainStepReport::wheels` reports it. An uncoupled `step` clears it, so
+stale loads never press.
+- `mpm_grid` still binds 9 storage buffers, `mpm_wheel_loads` 7 and
+  `mpm_wheel_mass` 5.
+- Metal binds 31 from its own table (`terrain_parity` 7/7, `vehicle_parity`
+  4/4 pass). CUDA needs no entry: both kernels are fixed dispatches.
+
+**Measured** (`tests/terrain_wheels.rs`):
+- **Set-up.** The sedan (1322 kg, 12 969 N), game profile, physical sand,
+  0.15 m cells, over a 4.8 × 6 × 1.8 m area of 55 796 particles, at 1/60 s
+  frames and 52 substeps.
+- **At rest on the sand:**
+  - all four wheels are listed;
+  - sinkage 1.9 cm at 1 s and 5.2 cm at 10 s;
+  - the rate falls from 21 mm/s in the first second to 0.7 mm/s in the tenth;
+  - the wheels carry 13 079 N of the car's 12 969 N;
+  - the sand's momentum moved 43 N·s in the last second, against the weight's
+    12 969 N·s.
+
+  The sand's stress holds the load. The slow tail is the sand under the
+  tyres compacting and flowing out as the bearing area grows. A Bekker
+  dry-sand wheel would sink deeper (centimetres to decimetres).
+- **Driving through** (throttle 0.3, from rest outside the area):
+  - all four wheels pressed at once;
+  - after the bake, the ground under the tracks is 4.5 mm lower on average
+    (8.5 mm at most), and the window clear of them is +0.7 mm;
+  - the berms rise to 7.6 mm;
+  - the field's volume is 0 → 0 m³: the rut's sand is all still there, to
+    the quanta.
+- **Coasting** at 1–2 m/s, the sand's resistance stops the car inside the
+  area. At 4 m/s it crosses, with a 1 mm rut.
+- **Outside the area.** A car parked on the unactivated ground lists no load,
+  and `max_wheel_loads` 0 lists none.
+- **Cost** (`wheel_load_cost`, native wgpu on Metal, encoder timestamps):
+  - the terrain frame takes 0.274 / 0.281 ms with the four loads, against
+    0.268 / 0.268 ms off;
+  - so +0.006–0.013 ms a frame of 52 substeps, about 0.2 µs per substep;
+  - the single-thread list is a few µs a frame.
+
+**In the browser.** `showcase.html?scene=drive`, stepped by hand:
+- the HUD's "wheels on sand" shows 2–4 of the buggy's wheels on the open
+  craters from t = 3 s to 12 s, with no frame errors;
+- `impact.html` builds the two kernels.
+- **The showcase's 4.48 m cells resolve no rut.** The sand's mass at a contact
+  is about 10⁵ kg, so a wheel's 3 kN moves it by micrometres. A rut needs
+  cells near the tyre's width, as in the test's 0.15 m.
+
+**Open:**
+- the tyre's contact patch: width, and length from its sinkage;
+- wheels over baked ground: the bake ends the rut, and baked ground is the
+  heightfield's, where the Bekker rut tier applies to soil fields;
+- sphere-cast wheels are not tested.
 
 ## The splat bake (2026-10-25)
 

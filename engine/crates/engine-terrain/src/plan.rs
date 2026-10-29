@@ -1888,6 +1888,68 @@ mod tests {
     }
 
     #[test]
+    fn wheel_loads_run_in_coupled_frames_only_and_fail_by_name_past_their_limit() {
+        let region = |cfg: &TerrainConfig| {
+            RegionPlan::spanning(
+                cfg,
+                glam::Vec3::splat(-1.0),
+                glam::Vec3::splat(1.0),
+                0.1,
+                0,
+                0,
+            )
+            .unwrap()
+        };
+        let count = |ops: &TerrainOps, k: &str| {
+            ops.cmds
+                .iter()
+                .filter(|c| matches!(c, TerrainCmd::Dispatch { kernel, .. } if *kernel == k))
+                .count()
+        };
+        let cfg = TerrainConfig::default();
+        let mut p = sand_plan(&cfg);
+        p.activate(&region(&cfg), 0, grid(), glam::Vec3::ZERO, 1600.0, 0.6)
+            .unwrap();
+        // Listed once per coupled frame, their mass found every substep.
+        let ops = p.coupled(3, 1.0e-4, -9.81, 5).unwrap();
+        assert_eq!(count(&ops, "mpm_wheel_loads"), 1);
+        assert_eq!(count(&ops, "mpm_wheel_mass"), 3);
+        // An uncoupled frame presses nothing: no list, and the count cleared.
+        let ops = p.step(2, 1.0e-4, -9.81).unwrap();
+        assert_eq!(
+            count(&ops, "mpm_wheel_loads") + count(&ops, "mpm_wheel_mass"),
+            0
+        );
+        assert!(ops
+            .writes
+            .iter()
+            .any(|w| w.binding == MPM_COUNTERS_BINDING && w.offset == 4 * MPM_C_WHEELS as u64));
+        // The records follow the coupling slots and the face points.
+        assert_eq!(
+            p.params().limits[2].to_bits(),
+            4 * cfg.max_coupled + cfg.max_boundary_nodes
+        );
+        assert_eq!(p.params().limits[3].to_bits(), cfg.max_wheel_loads);
+        let mut c = vec![0u32; MPM_COUNTER_WORDS];
+        c[MPM_C_FLAGS] = MPM_OVERFLOW_WHEELS;
+        let err = p.check(&c).unwrap_err();
+        assert!(err.to_string().contains("max_wheel_loads"), "{err}");
+        // Off: no wheel kernels at all.
+        let cfg = TerrainConfig {
+            max_wheel_loads: 0,
+            ..TerrainConfig::default()
+        };
+        let mut p = sand_plan(&cfg);
+        p.activate(&region(&cfg), 0, grid(), glam::Vec3::ZERO, 1600.0, 0.6)
+            .unwrap();
+        let ops = p.coupled(3, 1.0e-4, -9.81, 5).unwrap();
+        assert_eq!(
+            count(&ops, "mpm_wheel_loads") + count(&ops, "mpm_wheel_mass"),
+            0
+        );
+    }
+
+    #[test]
     fn multi_area_limits_fail_by_name() {
         // More open areas than max_regions.
         let cfg = TerrainConfig {
