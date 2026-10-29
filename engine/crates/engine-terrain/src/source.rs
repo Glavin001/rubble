@@ -481,7 +481,11 @@ impl ImpactSource {
             self.target.crater.density,
             crater.radius,
         )?
-        .bounded(crater.radius)?;
+        .bounded_by_momentum(
+            self.target.crater.density,
+            self.mass() * self.normal_speed(),
+            crater.radius,
+        )?;
         let field_j = field.kinetic_energy(self.target.crater.density);
         let source_j = self.kinetic_energy();
         if field_j > source_j {
@@ -935,21 +939,26 @@ mod tests {
         ));
     }
 
-    /// The source's field moves only the transient crater (zmodel "Extent"),
-    /// and the target then takes the impactor's momentum plus the ejecta's
-    /// recoil: a momentum-transfer β of at least 1 (momentum is conserved) and
-    /// within the few measured for granular targets.
+    /// The target, ejecta included, carries exactly the impactor's momentum
+    /// (zmodel.rs, "Momentum"): a direct Cartesian sum of ρ·u_y, independent
+    /// of the spherical quadrature that set the bound, and within the
+    /// transient crater.
     #[test]
-    fn the_bounded_field_carries_the_impactors_momentum_and_a_recoil() {
-        let sand = SandMaterial::default();
+    fn the_bounded_field_carries_exactly_the_impactors_momentum() {
         let s = sand_impact(0.005, 2000.0);
         let crater = s.crater(G).unwrap();
         let f = s
             .field(G, crate::zmodel::point_source_z(s.target.ejecta.mu))
             .unwrap();
-        assert_eq!(f.extent, crater.radius);
-        let rho = f64::from(sand.density);
-        let (n, r) = (96usize, crater.radius);
+        assert!(
+            f.extent < crater.radius && f.extent > 0.5 * crater.radius,
+            "extent {} of R {}",
+            f.extent,
+            crater.radius
+        );
+        // The scaling target's density, which the source integrates with.
+        let rho = s.target.crater.density;
+        let (n, r) = (160usize, f.extent);
         let d = 2.0 * r / n as f64;
         let mut py = 0.0;
         for i in 0..n {
@@ -964,10 +973,14 @@ mod tests {
                 }
             }
         }
-        let impactor = 2.0 * s.kinetic_energy() / s.normal_speed();
-        let beta = -py / impactor;
-        assert!((1.0..=3.0).contains(&beta), "momentum transfer β = {beta}");
-        // Nothing moves beyond the crater.
+        let impactor = s.mass() * s.normal_speed();
+        assert!(
+            (-py / impactor - 1.0).abs() < 0.03,
+            "net {} of m*U {impactor}",
+            -py
+        );
+        assert!((f.net_down_momentum(rho, f.extent) / impactor - 1.0).abs() < 1e-3);
+        // Nothing moves beyond the bound.
         assert_eq!(f.velocity(DVec3::new(1.01 * r, -0.01, 0.0)), DVec3::ZERO);
     }
 }

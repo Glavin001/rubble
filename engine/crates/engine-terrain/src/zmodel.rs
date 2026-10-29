@@ -77,11 +77,21 @@
 //! momentum grows with the region (2.4× the impactor's over a box 1.6 R wide
 //! for the 5 mm / 2 km/s sand test; the volume came out 3.6× π-scaling's).
 //! Bounded at the transient radius R about the impact point, the field keeps
-//! almost all its energy (266 of 268 J there) and carries 1.26× the
-//! impactor's momentum downward, a momentum-transfer β in the range measured
-//! for impacts into granular targets: the target takes the impactor's
-//! momentum plus the ejecta's recoil. Ground beyond R starts at rest and the
-//! continuum moves it.
+//! almost all its energy (266 of 268 J there). Ground beyond the bound starts
+//! at rest and the continuum moves it.
+//!
+//! # Momentum
+//!
+//! Bounded at R the field carries 1.26× the impactor's momentum m·U net
+//! downward (6.79 kg·m/s down, 3.23 up, against 2.83 for the 5 mm / 2 km/s
+//! sand test). That breaks momentum conservation: the impactor's momentum is
+//! all the target can receive. The momentum-transfer factor β measured for
+//! impacts is the *remaining* target's momentum over m·U, which exceeds 1
+//! because the ejecta carry momentum the other way: β·m·U down plus
+//! (β − 1)·m·U up in the ejecta nets m·U. So a source bounds the field where
+//! its net downward momentum (`ZModel::net_down_momentum`, the field's own
+//! integral) reaches m·U, and never beyond R ([`ZModel::bounded_by_momentum`]);
+//! for the sand test that is 0.8 R.
 
 use crate::config::TerrainError;
 use glam::{DVec3, Vec3};
@@ -355,7 +365,76 @@ impl ZModel {
                 + 2.0 * PI * ((r0.powi(5) - h.powi(5)) / 5.0 + h * (r0.powi(4) - h.powi(4)) / 4.0));
         outside + core
     }
+
+    /// Net downward momentum (kg·m/s) of the field over the target within
+    /// `extent` of the surface point, for bulk density `rho` (this field's own
+    /// extent ignored).
+    pub fn net_down_momentum(&self, rho: f64, extent: f64) -> f64 {
+        let profile = self.down_momentum_shells(rho, extent);
+        profile.iter().sum()
+    }
+
+    /// The net downward momentum of the target in [`MOMENTUM_SHELLS`] equal
+    /// shells of distance from the surface point out to `extent`: ρ·∫(−u_y) dV
+    /// with dV = 2π·r²·sin φ dr dφ (φ from the downward vertical, axisymmetric
+    /// field), midpoint rule in r and φ.
+    fn down_momentum_shells(&self, rho: f64, extent: f64) -> Vec<f64> {
+        let unbounded = Self {
+            extent: f64::INFINITY,
+            ..*self
+        };
+        let dr = extent / MOMENTUM_SHELLS as f64;
+        let dphi = 0.5 * PI / MOMENTUM_ANGLES as f64;
+        (0..MOMENTUM_SHELLS)
+            .map(|i| {
+                let r = (i as f64 + 0.5) * dr;
+                let mut sum = 0.0;
+                for k in 0..MOMENTUM_ANGLES {
+                    let phi = (k as f64 + 0.5) * dphi;
+                    let v = unbounded.velocity(DVec3::new(r * phi.sin(), -r * phi.cos(), 0.0));
+                    sum -= v.y * phi.sin();
+                }
+                rho * 2.0 * PI * r * r * sum * dphi * dr
+            })
+            .collect()
+    }
+
+    /// This field bounded where its net downward momentum reaches `momentum`
+    /// (the impactor's m·U), and at most at `max_extent` (module docs,
+    /// "Momentum"). The impactor's momentum is all the target can carry: the
+    /// ejecta's upward momentum and the remaining ground's downward momentum
+    /// (β·m·U) together sum to m·U.
+    pub fn bounded_by_momentum(
+        self,
+        rho: f64,
+        momentum: f64,
+        max_extent: f64,
+    ) -> Result<Self, TerrainError> {
+        if !(momentum.is_finite() && momentum > 0.0) {
+            return Err(out_of_range(
+                "momentum",
+                momentum,
+                f64::MIN_POSITIVE,
+                f64::MAX,
+            ));
+        }
+        let shells = self.down_momentum_shells(rho, max_extent);
+        let dr = max_extent / MOMENTUM_SHELLS as f64;
+        let mut total = 0.0;
+        for (i, p) in shells.iter().enumerate() {
+            if total + p >= momentum && *p > 0.0 {
+                let extent = (i as f64 + (momentum - total) / p) * dr;
+                return self.bounded(extent.max(self.core_radius * (1.0 + 1e-9)));
+            }
+            total += p;
+        }
+        self.bounded(max_extent)
+    }
 }
+
+/// Shells and angles of the momentum quadrature.
+const MOMENTUM_SHELLS: usize = 2048;
+const MOMENTUM_ANGLES: usize = 512;
 
 #[cfg(test)]
 mod tests {

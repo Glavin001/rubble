@@ -141,11 +141,13 @@ uses by default ("Performance").
 - the volume ledger through forced closes with ejecta in flight.
 
 **Open:**
-- **Crater volume.** About 2.8–3.1× π-scaling's, a constant factor over two
-  decades of energy (slope 0.836 against 0.830). The cause is the source: it
-  counts the excavation push twice, so crater-scale ground leaves 2–5× faster
-  than Housen & Holsapple's launch law ("Volume cause found"). Fixing it
-  needs a decision on the approved source.
+- **Crater volume.** About 2.6× π-scaling's (margin 0.6), a constant factor
+  over two decades of energy (slope 0.836 against 0.830). The field now
+  conserves the impactor's momentum (2026-10-29), which took 2.79× to 2.62×.
+  What remains is the source counting the excavation push twice (crater-scale
+  ground leaves 2–5× faster than Housen & Holsapple's launch law), plus a
+  bowl deeper than Holsapple's Kd/Kr ("Volume cause found"). Calibrating the
+  source to the volume was decided against.
 - **Wall give.** Constant-E sand at depth gives metres at the absorbing walls.
   Hardin-type pressure-dependent stiffness would fix it at the root, but it
   changes validated results.
@@ -469,7 +471,9 @@ depth 0.037 m, final rim 0.191 m.
   volume band and fails there; the radius, shape, rim and ledger checks pass.
 - **Bounded source (2026-10-25, user-approved).** The field now moves only
   the transient crater (`ZModel::extent` = R about the impact point; zmodel.rs
-  "Extent"). It keeps 266 of 268 J and carries a momentum-transfer β of 1.26.
+  "Extent"). It keeps 266 of 268 J. (This note first read the field's 1.26·m·U as a
+  momentum-transfer β; that was wrong, see "A momentum error" below. Since
+  2026-10-29 the field is bounded where it carries exactly m·U, 0.825 R.)
   At margin 2 and 16 cells/R the cavity is 3.08× (from 3.57×), the radius
   1.25×, the rim 3.2 cm. Still open: what remains follows the field's strength
   at crater scale (α, fitted to Housen & Holsapple's launch speeds) and how long
@@ -566,7 +570,7 @@ depth 0.037 m, final rim 0.191 m.
     The α sweep agrees: α × 0.5 gives radius 0.129 m and depth 5.7 cm;
     α × 0.25 gives 0.083 m and 4.2 cm. That is V ∝ α^1.2, so the 22 J outside
     0.3 R sets the crater.
-  - **A momentum error, smaller.** The field bounded at R carries 1.26 m·U
+  - **A momentum error (fixed, see below).** The field bounded at R carries 1.26 m·U
     net downward: 6.79 kg·m/s down and 3.23 up, against the impactor's 2.83.
     The earlier note read this as a momentum-transfer β of 1.26. But β is the
     *remaining* target's momentum over m·U. The whole target, ejecta
@@ -581,22 +585,49 @@ depth 0.037 m, final rim 0.191 m.
     1.7). Laboratory sand craters are often quoted near d/D ≈ 0.2 (this
     crater: 0.22), deeper than Kd/Kr implies, so this part may be in
     Holsapple's shape constants, not the MPM. It is not resolved here.
-  - **Not changed; needs a decision.** Each fix changes the source the user
-    approved (bounded at R, α fitted to the launch law), so none is adopted.
-    The candidates, most principled first:
-    1. **Conserve momentum.** Bound the field where its net momentum equals
-       m·U (0.8 R here). This is Newton, not a fit, but on its own it closes
-       only 7% of the gap.
-    2. **Calibrate to the emergent launch speeds.** Fit the source, its
-       extent or α, so that the speeds the MPM *produces* follow HH's v(x)
-       with the rim factor over 0.3–1 R. This uses the same law and the same
-       least squares as today, applied to the ground's departure instead of
-       the initial field. By the table it lands near an extent of 0.24 R
-       and a cavity around 1–1.4×. It needs a fitted extent per profile
-       (resolution changes how the MPM carries the push), so it is a
-       calibration, measured and reported.
-    3. The shape constant above. A cone-like bowl at d/D ≈ 0.2 would put
-       Kr near 1.2. It needs the laboratory profiles.
+  - **Adopted (2026-10-29, decided): the field conserves momentum.** An
+    impact's field is now bounded where its net downward momentum, the
+    field's own integral (`ZModel::net_down_momentum`, a midpoint quadrature
+    in r and the angle from the vertical), reaches the impactor's m·U, and
+    never beyond R (`ZModel::bounded_by_momentum`; zmodel.rs "Momentum"). The
+    bound comes from the field's definition and Newton, not from the volume.
+    For the 5 mm / 2 km/s sand test it is 0.825 R; a direct Cartesian sum
+    over the bounded field checks the momentum (`source.rs`,
+    `the_bounded_field_carries_exactly_the_impactors_momentum`). Explosions
+    keep their bound at R: a buried charge brings no momentum of its own, so
+    the impact rule has nothing to conserve there, and that case is open.
+
+    | Margin 0.6, 16 cells/R | Before | After |
+    |---|---|---|
+    | Cavity / π-scaling | 2.79× | 2.62× |
+    | Apparent radius | 1.19 R | 1.13 R |
+    | Deepest | 7.7 cm | 7.6 cm |
+    | Rim | 2.85 cm at 0.221 m | 2.84 cm at 0.221 m |
+    | Axis ridge, mean | | −0.6 mm (passes) |
+
+  - **Decided against: calibrating the source to the emergent launch
+    speeds.** It would fit the extent or α to reach the volume, which is
+    tuning to the answer, and it would pull the apparent radius under the
+    1.13–1.19 R that passes now.
+  - **Literature check on the shape (decided: a quick check only).**
+    - Holsapple (2022, §3.4 and Table 2) takes simple craters as a fixed bowl
+      with R = Kr·V^(1/3) and depth Kd·V^(1/3); for dry sand Kr = 1.4 and
+      Kd = 0.35, d/D = 0.125. The formulas are relative to the excavation
+      crater: the rim is placed separately at 1.3 times the excavation
+      diameter. So R and d are the excavation crater's, at the pre-impact
+      surface, not rim-to-floor. The test measures the same thing: the
+      cavity below the pre-impact surface and the depth from it.
+    - Laboratory and simple lunar bowls are usually quoted near d/D ≈ 0.2
+      (Pike 1974 for bowl craters; impacts into sand near 0.2, falling
+      slightly as the impactor gets wider; Daly, Barnouin et al., NASA NTRS
+      20200001923). The MPM's 0.22 sits there. Holsapple's Kd/Kr for sand is
+      shallower than that.
+    - The volume band therefore rests on matching definitions: below the
+      pre-impact surface on both sides. It is left as it is. The remaining
+      factor splits into the shape (depth over radius 0.46 against
+      Kd/Kr = 0.25, about 1.8×) and the radius (1.13³ ≈ 1.4×).
+    - Whether Holsapple's sand shape constants or the MPM's bowl is off
+      needs measured laboratory profiles, which were not found. Open.
 
     `terrain_crater` keeps the factor-2 volume assertion, so it still fails
     there (ignored). The radius, shape, rim, axis and ledger checks pass.
