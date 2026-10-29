@@ -76,6 +76,10 @@ pub const MPM_DOMAIN_CLOSE: u32 = 1;
 /// ... the source finds the material's surface under its point
 /// (`mpm_source_surface`) rather than taking the point's height.
 pub const MPM_DOMAIN_SURFACE: u32 = 2;
+/// `MpmParams::area[3]` of the domain record, from this bit on (low x, high
+/// x, low z, high z): the selected old area's side stays a wall of the area
+/// growing over it (`mpm_grow_shift` keeps its give).
+pub const MPM_DOMAIN_KEEP: u32 = 4;
 /// Block keys pack x, y, z in 11, 10 and 11 bits, biased by these: the open
 /// areas reach this many blocks either way from the domain's origin (the
 /// first area's).

@@ -223,6 +223,11 @@ impl WgpuSim {
         )?;
         let ops = std::mem::take(&mut opened.ops);
         if opened.activated {
+            // A grown area's old walls first (each its own pass), then the
+            // activation.
+            for pre in std::mem::take(&mut opened.pre) {
+                self.terrain_submit(&pre, "terrain grow");
+            }
             self.terrain_submit(&ops, "terrain activate");
             let body = self.collider(collider).body;
             self.mark_surface_moved(body);

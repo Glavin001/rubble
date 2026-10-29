@@ -869,6 +869,47 @@ window ring, at j = 65 and i = 83.
 - So the volume the walls pushed into the ground is counted twice. It is a
   growth-activation matter, not the surface pass's.
 
+**Fixed (2026-10-29): the old walls' give out before growth.**
+- Before a grown area activates, each absorbing area it takes over gets a
+  pass of its own (`Opened::pre`; `mpm_grow_shift`, `mpm_grow_apply`).
+  - That pass measures its edge columns' give with the bake's own edge
+    lists.
+  - It then takes the give of each side that stops being a wall out of the
+    old material's positions, interpolated between opposite sides, exactly
+    as that area's bake would take it out.
+  - Sides that stay walls keep their give and their face displacements
+    (`MPM_DOMAIN_KEEP` bits).
+- The ground beyond is now material that starts at rest where it was, and
+  nothing stands over it twice. Volume is untouched, so the ledger stays
+  exact; only where the old material stands changes, by the walls' elastic
+  give.
+- Hosts run the passes before the activation:
+  - `WgpuSim` and `engine-metal` `terrain_open_area`;
+  - the wasm plan's blocks (a block each, ahead of the activation's).
+- **Test** (`terrain_bake_axis`,
+  `growing_an_area_over_its_walls_leaves_no_ridge_on_the_ring`): the demo's
+  event at 8 cells/R, settled (walls give up to 16 m at the faces), then
+  grown by a sourceless box past its +x side and baked.
+
+  | | Ring over the ungrown bake (mean, worst) | Ring over its row neighbours |
+  |---|---|---|
+  | before | +24.4 m, +31.8 m | +27.0 m |
+  | after | +4.0 m, +5.9 m | +4.8 m |
+
+- **Left, open: the bake's kernels at the old edge.** The particles over the
+  edge and the ring now stand flat (their rest volume by nearest sample:
+  190 m over both, `GROW_TRACE`). The remaining 4 m comes from how the bake
+  splats them:
+  - The old edge columns have moved, so part of each bakes with P2G's
+    B-spline and spills an eighth across onto the ring.
+  - The ring's new columns, at rest, bake with the tent at home and give
+    nothing back.
+  - The ungrown bake folds that spill back onto its window's edge, so it
+    shows no step there.
+  - Activating the ring with the ground's own displacement continuing
+    outward would make the two sides alike. That needs a decay law for the
+    displacement beyond the wall, a model choice left open.
+
 **A strike on a moving rim** takes the live surface's height there, read back
 0.25 s before contact: 3.58 m against the heightfield's 0.
 

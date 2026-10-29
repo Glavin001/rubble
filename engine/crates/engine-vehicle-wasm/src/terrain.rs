@@ -520,7 +520,7 @@ impl TerrainStep {
         let plan = RegionPlan::spanning(self.plan.config(), point(lo)?, point(hi)?, dx, 0, 0)
             .map_err(err)?;
         let (_, activate) = self.open(collider, field, plan, None)?;
-        Ok(encode(&activate.into_iter().collect::<Vec<_>>()))
+        Ok(encode(&activate))
     }
 
     fn area_mut(&mut self, slot: u32) -> &mut Open {
@@ -538,7 +538,7 @@ impl TerrainStep {
         field: &[f32],
         plan: RegionPlan,
         prediction: Option<CraterPrediction>,
-    ) -> Result<(u32, Option<TerrainOps>), JsError> {
+    ) -> Result<(u32, Vec<TerrainOps>), JsError> {
         let (grid, origin) = grid(field)?;
         if self.areas.is_empty() {
             self.last = None;
@@ -593,7 +593,12 @@ impl TerrainStep {
             source_speed,
         });
         self.areas.sort_by_key(|a| a.slot);
-        Ok((opened.area, opened.activated.then_some(opened.ops)))
+        // A grown area's old walls first (a block each), then the activation.
+        let mut blocks = opened.pre;
+        if opened.activated {
+            blocks.push(opened.ops);
+        }
+        Ok((opened.area, blocks))
     }
 
     /// This frame's terrain work, ahead of the rigid step: `[kind, step,

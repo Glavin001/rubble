@@ -62,6 +62,8 @@ pub const KERNELS: &[&str] = &[
     "mpm_bake_edge_scatter",
     "mpm_bake_edge_sort",
     "mpm_source_surface",
+    "mpm_grow_shift",
+    "mpm_grow_apply",
 ];
 
 /// Byte offsets of the indirect workgroup counts in [`MPM_ARGS_BINDING`].
@@ -286,6 +288,10 @@ pub struct Opened {
     pub absorbed: Vec<u32>,
     /// Columns were activated (false: an open area already covered it).
     pub activated: bool,
+    /// Passes to run, in order and each its own, before `ops`: for each
+    /// absorbing area taken over, the give of its walls that stop being walls
+    /// taken out of its material (`mpm_grow_shift`, `mpm_grow_apply`).
+    pub pre: Vec<TerrainOps>,
     pub ops: TerrainOps,
 }
 
@@ -629,9 +635,12 @@ impl TerrainPlan {
         density: f32,
         bed_friction: f32,
     ) -> anyhow::Result<TerrainOps> {
-        Ok(self
-            .open(plan, collider, field, field_origin, density, bed_friction)?
-            .ops)
+        let opened = self.open(plan, collider, field, field_origin, density, bed_friction)?;
+        anyhow::ensure!(
+            opened.pre.is_empty(),
+            "this activation grows an absorbing area: use TerrainPlan::open (it has passes of its own first)"
+        );
+        Ok(opened.ops)
     }
 
     /// Open `request` over heightfield `collider` (`field`'s grid, its frame
@@ -743,6 +752,7 @@ impl TerrainPlan {
                     area: k,
                     absorbed: Vec::new(),
                     activated: false,
+                    pre: Vec::new(),
                     ops: TerrainOps::default(),
                 });
             }
@@ -875,6 +885,37 @@ impl TerrainPlan {
         let moved = merge
             .iter()
             .any(|&k| self.areas[k as usize].as_ref().is_some_and(|a| a.moved));
+        // The old areas' walls that stop being walls: their give out of the
+        // material that pushed into the ground beyond them, which the grown
+        // area now activates (else it counts twice, a ridge along the ring).
+        let mut pre = Vec::new();
+        for &k in &merge {
+            let old = self.areas[k as usize].as_ref().expect("open");
+            if old.record.boundary[2] == 0 || !old.windowed {
+                continue;
+            }
+            let (olo, ohi) = (old.block_lo, old.block_lo + old.plan.blocks);
+            let kept = u32::from(olo.x == lo.x)
+                | u32::from(ohi.x == hi.x) << 1
+                | u32::from(olo.z == lo.z) << 2
+                | u32::from(ohi.z == hi.z) << 3;
+            if kept == 15 {
+                continue;
+            }
+            let [_, _, oni, onj] = old.record.window;
+            let edges = 2 * u64::from(oni + onj);
+            let mut g = TerrainOps::default();
+            self.write_params(&mut g, k, 0, kept << MPM_DOMAIN_KEEP);
+            g.disp("mpm_write_args", 1);
+            g.disp("mpm_bake_edge_clear", edges);
+            g.particles("mpm_bake_edge_count");
+            g.disp("mpm_bake_edge_scan", 64);
+            g.particles("mpm_bake_edge_scatter");
+            g.disp("mpm_bake_edge_sort", edges);
+            g.disp("mpm_grow_shift", edges);
+            g.particles("mpm_grow_apply");
+            pre.push(g);
+        }
         self.areas[slot as usize] = Some(Area {
             plan,
             block_lo: lo,
@@ -919,6 +960,7 @@ impl TerrainPlan {
             area: slot,
             absorbed: merge,
             activated: true,
+            pre,
             ops,
         })
     }
@@ -1745,6 +1787,15 @@ mod tests {
         // On its rim: the two grow into one box covering both requests.
         let d = open_at(&mut p, &cfg, glam::Vec3::new(-4.5, 0.0, 0.0), 1.0);
         assert!(d.activated && d.absorbed == vec![a.area]);
+        // First, a pass of its own: the old walls that stop being walls give
+        // their give back (the area grew in +x only: the other three stay).
+        assert_eq!(d.pre.len(), 1);
+        assert!(kernels(&d.pre[0]).ends_with(&["mpm_grow_shift", "mpm_grow_apply"]));
+        let sel: MpmParams = *bytemuck::from_bytes(bytemuck::cast_slice(
+            &d.pre[0].writes[0].words[..std::mem::size_of::<MpmParams>() / 4],
+        ));
+        assert_eq!(sel.area[1], a.area);
+        assert_eq!(sel.area[3] >> MPM_DOMAIN_KEEP, 0b1101, "high x moves, the rest stay");
         let grown = *p.area_params(d.area).unwrap();
         assert!(grown.origin[0] <= ra.origin[0] + 1e-4);
         assert!(grown.origin[0] + grown.dims[0] as f32 * 0.1 >= -4.5 + 1.6 - 1e-3);

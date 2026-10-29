@@ -69,6 +69,13 @@ struct Crater {
 }
 
 fn demo_crater(cells: f32, margin: f64) -> Crater {
+    demo_crater_grown(cells, margin, None)
+}
+
+/// [`demo_crater`], with the settled area grown before the bake by a
+/// sourceless box reaching `grow` transient radii past its +x side (the
+/// other sides stay where they are).
+fn demo_crater_grown(cells: f32, margin: f64, grow: Option<f32>) -> Crater {
     let mut s = sim();
     let cfg = TerrainConfig {
         max_particles: 3 << 19,
@@ -134,6 +141,34 @@ fn demo_crater(cells: f32, margin: f64) -> Crater {
         "{cells} cells/R: settled to {speed:.3} m/s (tolerance {settle:.3}) at t = {t:.2} s, dx {:.2} m",
         plan.dx
     );
+    if let Some(grow) = grow {
+        let block = plan.dx * 4.0;
+        let (o, e) = (plan.origin, plan.end());
+        let r = crater.radius as f32;
+        let ext = engine_terrain::RegionPlan::spanning(
+            &cfg,
+            Vec3::new(e.x - 2.0 * block, o.y + block, o.z + block),
+            Vec3::new(e.x + grow * r, e.y - block, e.z - block),
+            plan.dx,
+            0,
+            0,
+        )
+        .unwrap();
+        let opened = s
+            .terrain_open_area(
+                &ext,
+                collider,
+                &field,
+                Vec3::ZERO,
+                sand.density,
+                sand.friction_angle.tan(),
+            )
+            .unwrap();
+        assert!(
+            opened.activated && opened.absorbed.len() == 1,
+            "the area grew"
+        );
+    }
     let particles = s.terrain_particles().into_iter().filter(live).collect();
     // The absorbing ground's node displacements (binding 49, after the
     // coupling slots): the largest horizontal one.
@@ -551,5 +586,87 @@ fn the_window_edge_bakes_without_a_ridge() {
     assert!(
         worst < noise + 1.0,
         "a ridge {worst} m high stands at the window's edge (noise inside {noise} m)"
+    );
+}
+
+/// An area grown over the ground beyond its absorbing walls (the user's bug,
+/// 2026-10-29: `showcase.html?scene=bts`). The walls gave outward, and the
+/// material against them stood over the samples just outside the window; the
+/// grown area then activated those samples' full columns, so the pushed-in
+/// volume counted twice and baked as a ridge a sample wide along the old
+/// window's ring. Growth now takes the give of the walls that stop being
+/// walls out of the old material first (`mpm_grow_shift`): the ring bakes as
+/// the ungrown area's bake leaves it, the ground beyond at its own height.
+#[test]
+fn growing_an_area_over_its_walls_leaves_no_ridge_on_the_ring() {
+    let base = demo_crater(8.0, 1.5);
+    let grown = demo_crater_grown(8.0, 1.5, Some(1.0));
+    let n = base.field.samples().0 as i64;
+    let at = |i: i64, j: i64| (j * n + i) as usize;
+    let inside = |i: i64, j: i64| base.lowered[at(i, j)] < -1.0;
+    // The ring beyond the old window's +x edge, on every row of the window.
+    let mut diffs = Vec::new();
+    for j in 0..n {
+        let Some(edge) = (0..n - 1).rev().find(|&i| inside(i, j)) else {
+            continue;
+        };
+        let ring = edge + 1;
+        let g = |i: i64| f64::from(grown.baked[at(i, j)]);
+        diffs.push((
+            j - n / 2,
+            f64::from(grown.baked[at(ring, j)]) - f64::from(base.baked[at(ring, j)]),
+            // The ring over the mean of the samples beside it on its row.
+            g(ring) - 0.5 * (g(ring - 1) + g(ring + 1)),
+        ));
+    }
+    let ridge = diffs.iter().map(|d| d.2).sum::<f64>() / diffs.len() as f64;
+    // GROW_TRACE: the particles' own volume over each sample (rest volume
+    // binned by the nearest sample, as height above the bed) against the
+    // bakes, on the middle row about the old +x edge.
+    if std::env::var("GROW_TRACE").is_ok() {
+        let (sx, _) = base.field.cell_size();
+        let x0 = base.field.vertex(0, 0);
+        let mut bins = vec![0.0f64; (n * n) as usize];
+        for q in &grown.particles {
+            let i = ((q.xm[0] - x0.x) / sx).round() as i64;
+            let j = ((q.xm[2] - x0.z) / sx).round() as i64;
+            if (0..n).contains(&i) && (0..n).contains(&j) {
+                bins[at(i, j)] += f64::from(q.f[0][3]) / f64::from(sx * sx);
+            }
+        }
+        let j = n / 2;
+        let edge = (0..n - 1).rev().find(|&i| inside(i, j)).unwrap();
+        let bed = f64::from(grown.lowered[at(edge, j)]);
+        for i in edge - 2..edge + 4 {
+            eprintln!(
+                "  sample {:+}: particles to {:.1} m, grown bake {:.1}, ungrown bake {:.1}",
+                i - edge,
+                bins[at(i, j)] + bed,
+                grown.baked[at(i, j)],
+                base.baked[at(i, j)]
+            );
+        }
+    }
+    let worst = diffs.iter().map(|d| d.1).fold(f64::MIN, f64::max);
+    let mean = diffs.iter().map(|d| d.1).sum::<f64>() / diffs.len() as f64;
+    let (dx, _) = base.field.cell_size();
+    eprintln!(
+        "ring past the old +x edge ({} rows, {dx:.1} m samples): grown minus ungrown bake mean \
+         {mean:+.2} m, highest {worst:+.2} m; over its neighbours on the row {ridge:+.2} m",
+        diffs.len()
+    );
+    // Counted twice (before the fix), the pushed-in share of the 190 m
+    // columns stood the ring 24.4 m (mean) over the ungrown bake and 27.0 m
+    // over its neighbours. What is left (4.0 m and 4.8 m) is not volume the
+    // ring's particles lack (they stand flat across the old edge, GROW_TRACE):
+    // it is the bake's two kernels meeting there. The old edge columns have
+    // moved, so part of each goes with P2G's B-spline and spills an eighth
+    // across onto the ring, while the ring's new columns, at rest, bake with
+    // the tent at home and give nothing back. The ungrown bake folds that
+    // spill back onto its window's edge.
+    assert!(
+        mean.abs() < 6.0 && ridge < 8.0,
+        "the ring stands {mean:+.2} m (mean) over the ungrown bake and {ridge:+.2} m over its \
+         neighbours: the walls' give counted twice"
     );
 }
