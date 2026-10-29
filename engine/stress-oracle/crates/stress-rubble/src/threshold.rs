@@ -578,7 +578,7 @@ pub fn rotation_quat(m: &stress_ref::math::Mat3) -> Quat {
 /// authoring (one structure: the fracture's chunk `c` is the scene's chunk `c`, and each
 /// fracture bond names the scene bond it came from).
 fn blast_graph(scene: &Scene, t: &FractureTables, bond_source: &[(usize, usize)]) -> Result<(stress_ref::blast_bond::BlastGraph, Vec<stress_ref::blast_bond::BlastMaterial>), String> {
-    use stress_ref::blast_bond::{BlastBond, BlastGraph, BlastNode, BlastSettings};
+    use stress_ref::blast_bond::{BlastBond, BlastGraph, BlastNode};
     let a = scene.blast.as_ref().ok_or("blast_gpu: the scene has no Blast authoring (import its pack with the profile's import options)")?;
     let body = match scene.bodies.as_slice() {
         [body] => body,

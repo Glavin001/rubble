@@ -364,6 +364,11 @@ pub struct GpuFracture {
     ingest_buffers: Option<[wgpu::Buffer; 3]>,
     /// `Profile::BlastGpu`: Blast's stress solver decides the bonds in place of `fr_breaks`.
     blast: Option<crate::blast::BlastFrame>,
+    /// What each frame changed, for a host (`fracture_log.slang`).
+    pub log: crate::fracture_log::FractureLog,
+    /// The step the log stamps on this frame's changes, when the host counts steps its own way
+    /// (else the engine's).
+    log_stamp: Option<u32>,
 }
 
 fn storage_bytes(gpu: &Gpu, label: &str, bytes: u64, extra: wgpu::BufferUsages) -> wgpu::Buffer {
@@ -434,6 +439,7 @@ impl GpuFracture {
         // + staging (9 per chunk) + the strikes (3 per body slot).
         frames.resize((2 * b + 9 * n + 3 * b) as usize, [0.0; 4]);
         let frames = gpu.storage("fracture frames", &frames);
+        let (log_work, log_frames) = (work.clone(), frames.clone());
         let loads = storage_bytes(gpu, "fracture loads", 16 * (n as u64 + 2 * 3 * t.pool_cap as u64), wgpu::BufferUsages::empty());
         let sizes = storage_bytes(gpu, "fracture sizes", 12 * ARGS, wgpu::BufferUsages::empty());
         let args = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -477,6 +483,8 @@ impl GpuFracture {
             engine_colliders: None,
             ingest_buffers: None,
             blast: None,
+            log: crate::fracture_log::FractureLog::new(gpu, layout, &log_work, &log_frames, &t.chunk_body, &t.frames),
+            log_stamp: None,
         };
         f.rebind(gpu, engine, ingest);
         Ok(f)
@@ -646,6 +654,19 @@ impl GpuFracture {
             self.direct(&mut pass, "fr_gate", 1);
         }
         self.record_split(encoder);
+        self.record_log(gpu, encoder, step);
+    }
+
+    /// The step the next frames' log entries carry (`None`: the engine's step).
+    pub fn set_log_stamp(&mut self, stamp: Option<u32>) {
+        self.log_stamp = stamp;
+    }
+
+    /// The frame's change log after its split (`fracture_log.slang`), sized by the same gate.
+    fn record_log(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, step: u32) {
+        self.log.set_step(gpu, self.log_stamp.unwrap_or(step));
+        encoder.copy_buffer_to_buffer(&self.sizes, 0, &self.args, 0, 12 * ARGS);
+        self.log.record(encoder, &self.args, ARG_BONDS, ARG_CHUNKS, ARG_BODIES);
     }
 
     /// The shots strike prediction checks (in order: the first that reaches a body is its
@@ -675,6 +696,7 @@ impl GpuFracture {
             self.direct(&mut pass, "fr_gate", 1);
         }
         self.record_split(encoder);
+        self.record_log(gpu, encoder, step);
     }
 
     fn set_step(&mut self, gpu: &Gpu, step: u32) {

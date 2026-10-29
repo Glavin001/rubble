@@ -314,6 +314,12 @@ mod imp {
         /// Colliders the ingest now sees as projectiles.
         projectile_colliders: Vec<u32>,
         pub nodes: Vec<Option<u32>>,
+        /// How far the host has read the GPU's change log (stress-gpu `fracture_log`), every
+        /// body slot's frame as of then, and whether the next readback must carry the state in
+        /// full (the log overflowed).
+        log_cursor: stress_gpu::fracture_log::LogCursor,
+        frames: Vec<fracture::FrameRecord>,
+        snapshot: bool,
     }
 
     /// The world's threshold destructibles.
@@ -349,6 +355,8 @@ mod imp {
         ChunkBodies(u32),
         Intact(u32),
         Frames(u32),
+        /// The change log (stress-gpu `fracture_log`).
+        Log(u32),
     }
 
     fn buffers(sim: &engine_webgpu::WgpuSim) -> EngineBuffers<'_> {
@@ -850,6 +858,9 @@ mod imp {
                 destructible: index as u32,
                 ingest,
                 fracture,
+                log_cursor: [0; 3],
+                frames: t.frames.clone(),
+                snapshot: false,
                 chunk_body: t.chunk_body.clone(),
                 tables: t,
                 structures,
@@ -910,17 +921,21 @@ mod imp {
             let offset = self.sim.last_contact_offset();
             let dt = self.sim.params().dt as f64;
             let step = self.sim.steps_done();
+            // The log stamps changes with the world's step (the readback's).
+            let stamp = self.step as u32;
             for t in self.fracture.slots.iter_mut().flatten() {
                 t.ingest.substep(&gpu, enc, &e, offset, 0, dt);
                 t.ingest.merge(&gpu, enc, &e, 1);
+                t.fracture.set_log_stamp(Some(stamp));
                 t.fracture.encode_frame(&gpu, enc, step);
             }
         }
     }
 
     impl Fracture {
-        /// The readback copies of every threshold destructible's state after a step:
-        /// its counters, chunk owners, bond states and body frames.
+        /// The readback copies of every threshold destructible after a step: its counters
+        /// and change log (stress-gpu `fracture_log`), and, once after the log overflowed, its
+        /// chunk owners, bond states and body frames in full.
         pub(crate) fn extras(&self) -> Vec<crate::readback::Extra<'_, crate::Extra>> {
             let mut out = Vec::new();
             for (k, t) in self.slots.iter().enumerate() {
@@ -928,6 +943,27 @@ mod imp {
                 let k = k as u32;
                 let l = t.fracture.layout;
                 let f = &t.fracture;
+                out.push(crate::readback::Extra {
+                    kind: crate::Extra::Fracture(FractureRead::Log(k)),
+                    buffer: &f.log.buffer,
+                    offset: 0,
+                    size: f.log.bytes(),
+                });
+                let full: &[(FractureRead, &wgpu::Buffer, u64, u64)] = &[
+                    (FractureRead::ChunkBodies(k), &f.work, 4 * l.w_body() as u64, 4 * l.n as u64),
+                    (FractureRead::Intact(k), &f.work, 4 * l.w_alive() as u64, 4 * l.e as u64),
+                    (FractureRead::Frames(k), &f.frames, 0, 32 * l.b as u64),
+                ];
+                for &(read, buffer, offset, size) in full.iter().filter(|_| t.snapshot) {
+                    if size > 0 {
+                        out.push(crate::readback::Extra {
+                            kind: crate::Extra::Fracture(read),
+                            buffer,
+                            offset,
+                            size,
+                        });
+                    }
+                }
                 for (read, buffer, offset, size) in [
                     (
                         FractureRead::Counters(k),
@@ -935,19 +971,6 @@ mod imp {
                         4 * l.a_counters() as u64,
                         4 * COUNTER_WORDS,
                     ),
-                    (
-                        FractureRead::ChunkBodies(k),
-                        &f.work,
-                        4 * l.w_body() as u64,
-                        4 * l.n as u64,
-                    ),
-                    (
-                        FractureRead::Intact(k),
-                        &f.work,
-                        4 * l.w_alive() as u64,
-                        4 * l.e as u64,
-                    ),
-                    (FractureRead::Frames(k), &f.frames, 0, 32 * l.b as u64),
                 ] {
                     if size > 0 {
                         out.push(crate::readback::Extra {
@@ -984,14 +1007,22 @@ mod imp {
                         })
                         .map(|(_, b)| *b)
                 };
-                let (Some(counters), Some(chunks)) = (
-                    find(FractureRead::Counters),
-                    find(FractureRead::ChunkBodies),
-                ) else {
+                let Some(counters) = find(FractureRead::Counters) else {
                     continue;
                 };
                 let counters: &[u32] = bytemuck::cast_slice(counters);
                 anyhow::ensure!(counters[3] == 0, "step {step}: threshold fracture error {:#x} (1: no free body slot, 2: mass sum out of range, 4: union did not settle, 8: impact pulse pool full)", counters[3]);
+                let log = find(FractureRead::Log);
+                let Some(chunks) = find(FractureRead::ChunkBodies) else {
+                    // The change log: each step's changes in order (entries wait on the GPU
+                    // until acknowledged, so steps whose readback was dropped are here too).
+                    if let Some(log) = log {
+                        out.extend(self.apply_log(k, log)?);
+                    }
+                    continue;
+                };
+                // A full read (after the log overflowed): the state diffed as it is now, then
+                // the log resumes from its cursor.
                 let chunks: Vec<u32> = bytemuck::cast_slice(chunks).to_vec();
                 let intact: Vec<bool> = find(FractureRead::Intact)
                     .map(|b| {
@@ -1005,6 +1036,60 @@ mod imp {
                     .map(|b| bytemuck::cast_slice(b).to_vec())
                     .unwrap_or_default();
                 out.extend(self.apply_fracture(k, step, chunks, intact, &frames)?);
+                let gpu = self.fracture.gpu.clone();
+                let t = self.fracture.slots[k].as_mut().expect("live slot");
+                if !frames.is_empty() {
+                    t.frames = frames.chunks_exact(2).map(|p| [p[0], p[1]]).collect();
+                }
+                t.snapshot = false;
+                if let (Some(log), Some(gpu)) = (log, gpu) {
+                    let entries = t.fracture.log.decode(log, t.log_cursor);
+                    t.log_cursor = entries.cursor;
+                    t.fracture.log.acknowledge(&gpu, t.log_cursor, true);
+                }
+            }
+            Ok(out)
+        }
+
+        /// A change log's entries since the last one read, applied step by step.
+        fn apply_log(&mut self, k: usize, log: &[u8]) -> anyhow::Result<Vec<DestructionEvent>> {
+            let Some(gpu) = self.fracture.gpu.clone() else {
+                return Ok(Vec::new());
+            };
+            let t = self.fracture.slots[k].as_mut().expect("live slot");
+            let entries = t.fracture.log.decode(log, t.log_cursor);
+            if entries.overflow {
+                // More changes than the log holds: the next readback carries the state.
+                t.snapshot = true;
+                return Ok(Vec::new());
+            }
+            t.log_cursor = entries.cursor;
+            t.fracture.log.acknowledge(&gpu, t.log_cursor, false);
+            let mut steps: Vec<u32> = entries
+                .bonds
+                .iter()
+                .map(|e| e.1)
+                .chain(entries.chunks.iter().map(|e| e.2))
+                .chain(entries.frames.iter().map(|e| e.1))
+                .collect();
+            steps.sort_unstable();
+            steps.dedup();
+            let mut out = Vec::new();
+            for s in steps {
+                let t = self.fracture.slots[k].as_mut().expect("live slot");
+                let mut intact = t.intact.clone();
+                for &(b, _) in entries.bonds.iter().filter(|e| e.1 == s) {
+                    intact[b as usize] = false;
+                }
+                let mut chunks = t.chunk_body.clone();
+                for &(c, body, _) in entries.chunks.iter().filter(|e| e.2 == s) {
+                    chunks[c as usize] = body;
+                }
+                for &(b, _, f) in entries.frames.iter().filter(|e| e.1 == s) {
+                    t.frames[b as usize] = f;
+                }
+                let frames: Vec<[f32; 4]> = t.frames.iter().flatten().copied().collect();
+                out.extend(self.apply_fracture(k, s as u64, chunks, intact, &frames)?);
             }
             Ok(out)
         }
@@ -1284,7 +1369,8 @@ mod imp {
             FractureRead::Counters(k)
             | FractureRead::ChunkBodies(k)
             | FractureRead::Intact(k)
-            | FractureRead::Frames(k) => k,
+            | FractureRead::Frames(k)
+            | FractureRead::Log(k) => k,
         }
     }
 

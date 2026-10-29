@@ -24,6 +24,10 @@ fn capacity(asset: &DestructibleAssetDesc) -> WorldCapacity {
 /// A world with the asset's threshold solver and the stress scene's ground, `offset`
 /// placing the asset.
 fn world_for(asset: &DestructibleAssetDesc, offset: [f32; 3]) -> World {
+    world_with(asset, offset, Backpressure::Block, 3)
+}
+
+fn world_with(asset: &DestructibleAssetDesc, offset: [f32; 3], backpressure: Backpressure, readback_frames: u32) -> World {
     let solver = asset
         .solver_for(StrengthModel::Threshold)
         .expect("threshold solver");
@@ -33,6 +37,8 @@ fn world_for(asset: &DestructibleAssetDesc, offset: [f32; 3]) -> World {
         solver,
         enable_sleep: false,
         contacts: ContactStorage::Canonical,
+        backpressure,
+        readback_frames,
         ..WorldDef::default()
     };
     let mut w = World::new(GpuContext::Default, &def).unwrap();
@@ -80,14 +86,22 @@ struct Outcome {
     splits: usize,
     /// Bonds broken by each frame's end.
     timeline: Vec<u32>,
+    /// Frames whose readback was dropped.
+    dropped: usize,
 }
 
 /// Place `asset` as a threshold destructible, fire the lab's shot, step `frames`.
 fn run_world(asset: &DestructibleAssetDesc, lab: &engine_fracture::Scene, frames: u32) -> Outcome {
+    run_world_with(asset, lab, frames, Backpressure::Block, 1)
+}
+
+/// `run_world` with the world's backpressure and the host polling every `poll_every` steps
+/// (1: waiting for each frame; else without waiting, one readback slot, so frames drop).
+fn run_world_with(asset: &DestructibleAssetDesc, lab: &engine_fracture::Scene, frames: u32, backpressure: Backpressure, poll_every: u32) -> Outcome {
     let placement = asset.stress.as_ref().unwrap().placement();
     // The lab's stress world is the asset frame less its placement.
     let offset = placement.map(|x| -x as f32);
-    let mut w = world_for(asset, offset);
+    let mut w = world_with(asset, offset, backpressure, if poll_every == 1 { 3 } else { 1 });
     let a = w.create_destructible_asset(asset).unwrap();
     let id = w
         .create_destructible(&DestructibleDef {
@@ -135,6 +149,7 @@ fn run_world(asset: &DestructibleAssetDesc, lab: &engine_fracture::Scene, frames
     let mut new_bodies = Vec::new();
     // Splits to check a frame later: (frame, parent body, its pose then, children).
     let mut fresh: Vec<(u32, BodyId, Transform, Vec<BodyId>)> = Vec::new();
+    let mut dropped = 0;
     let dt = asset.solver_for(StrengthModel::Threshold).unwrap().dt;
     for n in 0..frames {
         w.step().unwrap();
@@ -157,7 +172,15 @@ fn run_world(asset: &DestructibleAssetDesc, lab: &engine_fracture::Scene, frames
                 assert!(d < 2.0 * v * dt + 0.02 && a < 2.0 * spin * dt + 0.01, "frame {at}: piece {c:?} starts {d} m and {a} rad from where its parent was (v {v} m/s, w {spin} rad/s)");
             }
         }
-        for f in w.poll_blocking().unwrap() {
+        let delivered = if poll_every == 1 {
+            w.poll_blocking().unwrap()
+        } else if n % poll_every == 0 {
+            w.poll().unwrap()
+        } else {
+            Vec::new()
+        };
+        for f in delivered {
+            dropped += f.dropped as usize;
             for e in &f.destruction_events {
                 match e {
                     DestructionEvent::BondsBroken {
@@ -204,8 +227,20 @@ fn run_world(asset: &DestructibleAssetDesc, lab: &engine_fracture::Scene, frames
             timeline.push(broken);
         }
     }
-    for f in w.poll_blocking().unwrap() {
+    // A host that dropped frames catches up at the next frame delivered: a few more steps,
+    // their frames waited for.
+    let mut tail = Vec::new();
+    for _ in 0..if poll_every == 1 { 0 } else { 3 } {
+        w.step().unwrap();
+        tail.extend(w.poll_blocking().unwrap());
+    }
+    tail.extend(w.poll_blocking().unwrap());
+    for f in tail {
+        dropped += f.dropped as usize;
         for e in &f.destruction_events {
+            if let DestructionEvent::Split { .. } = e {
+                splits += 1;
+            }
             if let DestructionEvent::BondsBroken { bonds, .. } = e {
                 broken += bonds.len() as u32;
             }
@@ -235,6 +270,7 @@ fn run_world(asset: &DestructibleAssetDesc, lab: &engine_fracture::Scene, frames
         bodies: stats.actors,
         splits,
         timeline,
+        dropped,
     }
 }
 
@@ -413,4 +449,22 @@ fn limits_fail_loudly() {
         let r = w.body_set_projectile(b, Some(Projectile::default()));
         assert_eq!(r.is_ok(), k < 64, "projectile {k}: {r:?}");
     }
+}
+
+#[test]
+fn breaks_and_splits_survive_dropped_readbacks() {
+    // A host that never waits (`Backpressure::Drop`, one readback slot, polling every few
+    // steps): frames drop, yet the GPU's change log keeps every break and split for the next
+    // frame delivered, so the events still report every broken bond and every chunk's body is
+    // a live piece (`run_world_with`'s checks).
+    let (asset, lab) = house();
+    let o = run_world_with(&asset, &lab, 120, Backpressure::Drop, 5);
+    let every = run_world(&asset, &lab, 120);
+    println!("dropped {} frames: {} bonds broken, {} splits, {} bodies; read every frame: {} bonds, {} bodies", o.dropped, o.broken, o.splits, o.bodies, every.broken, every.bodies);
+    assert!(o.dropped > 0, "frames were dropped");
+    assert!(o.broken > 0 && o.splits > 0, "the shot broke and split the house");
+    // The same strike: the first break is the same, totals near (the cascade after the
+    // first split is not bit-reproducible between native worlds).
+    let ratio = o.broken as f64 / every.broken as f64;
+    assert!((0.7..=1.3).contains(&ratio), "{} vs {} bonds", o.broken, every.broken);
 }

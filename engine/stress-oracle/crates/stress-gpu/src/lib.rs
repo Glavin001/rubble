@@ -37,6 +37,7 @@ pub fn gpu_frame() -> bool {
     gpu_layout() && switch("STRESS_GPU_FRAME")
 }
 pub mod blast;
+pub mod fracture_log;
 pub mod gpu;
 pub mod gpu_plan;
 pub mod gpu_pass;
@@ -233,6 +234,7 @@ pub mod shaders {
     pub const THRESHOLD: ShaderSet = shader_set!("threshold", [("threshold_breaks", (256, 1, 1)), ("threshold_predict", (256, 1, 1))]);
     pub const BLAST_CGLS: ShaderSet = shader_set!("blast_cgls", [("blast_solve", (1024, 1, 1))]);
     pub const BLAST_MATERIAL: ShaderSet = shader_set!("blast_material", [("blast_bond_stress", (64, 1, 1))]);
+    pub const FRACTURE_LOG: ShaderSet = shader_set!("fracture_log", [("log_bonds", (64, 1, 1)), ("log_chunks", (64, 1, 1)), ("log_frames", (64, 1, 1))]);
     pub const BLAST_NATIVE: ShaderSet = shader_set!("blast_native", [("blast_native", (1024, 1, 1))]);
     pub const BLAST_FRACTURE: ShaderSet = shader_set!("blast_fracture", [("blast_loads", (64, 1, 1)), ("blast_breaks", (64, 1, 1))]);
     pub const BLAST_TOPOLOGY: ShaderSet = shader_set!(
@@ -291,7 +293,7 @@ pub mod shaders {
     /// Every set (each Slang file with entry points).
     pub const ALL: &[ShaderSet] = &[
         WORLD_IC, SMOKE, STRESS_STEP, JOINT_TEST, WORLD, STRESS_RENDER, DESTRUCTION_RENDER, COUPLING, RESIDENT, CASCADE, PLAN, LAYOUT, SPAWN, COLLIDERS, PASS, PASSLOG, ROUTING, PUNCH, SPLIT,
-        HUD_OVERLAY, THRESHOLD, FRACTURE, BLAST_CGLS, BLAST_MATERIAL, BLAST_TOPOLOGY, BLAST_FRACTURE, BLAST_NATIVE,
+        HUD_OVERLAY, THRESHOLD, FRACTURE, BLAST_CGLS, BLAST_MATERIAL, BLAST_TOPOLOGY, BLAST_FRACTURE, BLAST_NATIVE, FRACTURE_LOG,
     ];
 }
 
