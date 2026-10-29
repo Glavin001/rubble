@@ -600,6 +600,8 @@ pub fn to_json(r: &Report) -> serde_json::Value {
                    "structureMassStart": r.structure_mass_start, "structureMassEnd": r.structure_mass_end},
         "blast": r.blast.map(|b| json!({"position": b.position, "tntKg": b.tnt_kg, "at": b.at})),
         "activeFrames": frames,
+        // Every frame's impactor speed (m/s): where it is after it clears the structure.
+        "impactorSpeeds": r.frames.iter().map(|f| f.impactor_speed).collect::<Vec<_>>(),
         "brokenByCause": r.broken_by_cause.iter().map(|(c, b)| json!({"cause": format!("{c:?}"), "bonds": b})).collect::<Vec<_>>(),
         "crushed": r.crushed.iter().map(|(c, k)| json!({"chunk": c, "cause": format!("{k:?}")})).collect::<Vec<_>>(),
         "chunkCentresEnd": r.chunk_centres_end,

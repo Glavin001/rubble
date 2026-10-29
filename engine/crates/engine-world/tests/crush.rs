@@ -1,10 +1,11 @@
 //! Chunk crushing in the threshold mode (`DestructibleDef::crush`,
 //! engine/docs/destruction-reactions.md section 1), from the law's definition and
 //! physical invariants: a structure under its own weight never crushes (and its stress
-//! estimate is its weight over its section); a hard projectile crushes the chunks it
-//! strikes and pays their crush energy out of its kinetic energy; `Conserve` keeps the
-//! chunk's mass and the system's momentum; `Remove` takes the mass out; with nothing to
-//! crush the switch changes nothing; a crush switch with nothing crushable is an error.
+//! estimate is its weight over its section); a hard projectile crushes the chunks its
+//! contact patch covers and pays their crush energy out of its kinetic energy, never more
+//! than it has; `Conserve` keeps the chunk's mass and the system's momentum; `Remove` takes
+//! the mass out; with nothing to crush the switch changes nothing; a crush switch with
+//! nothing crushable is an error.
 #![cfg(feature = "stress")]
 
 use glam::Vec3;
@@ -206,6 +207,25 @@ fn chunk_data(asset: &DestructibleAssetDesc) -> Vec<(f64, f64, f64)> {
         .collect()
 }
 
+/// Per chunk (global order): its centre in the stress frame (Z up; the wall is two blocks
+/// thick along x).
+fn chunk_centres(asset: &DestructibleAssetDesc) -> Vec<glam::DVec3> {
+    let scene = asset
+        .stress
+        .as_ref()
+        .unwrap()
+        .threshold_scene(1.0, 1.0 / 60.0)
+        .unwrap();
+    let world = stress_ref::world::World::new(&scene);
+    world
+        .solver
+        .structures
+        .iter()
+        .flat_map(|s| &s.chunks)
+        .map(|c| glam::DVec3::new(c.center.x, c.center.y, c.center.z))
+        .collect()
+}
+
 fn crushes(frame: &Frame) -> Vec<DestructionEvent> {
     frame
         .destruction_events
@@ -293,7 +313,7 @@ fn a_wall_under_its_own_weight_never_crushes() {
 }
 
 #[test]
-fn a_hard_projectile_crushes_the_struck_chunk_and_pays_for_it() {
+fn a_hard_projectile_crushes_the_chunks_it_covers_and_pays_for_them() {
     let json = crush_wall_json();
     let asset = asset_of(&json);
     let mut w = world_for(&asset, 256, true, true);
@@ -312,6 +332,7 @@ fn a_hard_projectile_crushes_the_struck_chunk_and_pays_for_it() {
     .unwrap();
     let ball = shoot(&mut w, 35.0, 4800.0);
     let data = chunk_data(&asset);
+    let centres = chunk_centres(&asset);
     let mut seen = Vec::new();
     let mut before = w.destructible_crush_state(id).unwrap();
     let mut ke_before = momentum(&w, &[ball]).1;
@@ -337,6 +358,36 @@ fn a_hard_projectile_crushes_the_struck_chunk_and_pays_for_it() {
                 (paid - booked).abs() < 1e-3 * booked + 4800.0 * 9.81 * 1.0 / 60.0,
                 "paid {paid} J, booked {booked} J"
             );
+            // The strike loads every block its patch covers, not only the one on its axis:
+            // the 0.45 m ball crushes the 0.4 m blocks (its force over their cap pressure
+            // needs more than its projected disc), so the patch is that disc and reaches
+            // the struck block's neighbours. Every damaged block is on the struck (front)
+            // face and within the disc (R plus a block's half diagonal of the patch's
+            // centre, the damage-weighted centre of the damaged blocks).
+            let damaged: Vec<usize> = (0..now.len()).filter(|&k| now[k].0 > before[k].0).collect();
+            assert!(
+                damaged.len() > 1,
+                "the strike's patch covers the struck block's neighbours: {damaged:?}"
+            );
+            let weight: f64 = damaged
+                .iter()
+                .map(|&k| (now[k].0 - before[k].0) as f64)
+                .sum();
+            let mid = damaged.iter().fold(glam::DVec3::ZERO, |m, &k| {
+                m + centres[k] * ((now[k].0 - before[k].0) as f64 / weight)
+            });
+            for &k in &damaged {
+                let c = centres[k];
+                assert!(
+                    (c.x - centres[damaged[0]].x).abs() < 1e-6,
+                    "chunk {k} at {c:?}: not on the struck face"
+                );
+                let lateral = ((c.y - mid.y).powi(2) + (c.z - mid.z).powi(2)).sqrt();
+                assert!(
+                    lateral < 0.45 + 0.2 * 2f64.sqrt(),
+                    "chunk {k} {lateral} m off the patch's centre"
+                );
+            }
             assert!(
                 events.iter().all(|e| matches!(
                     e,
@@ -410,6 +461,62 @@ fn a_hard_projectile_crushes_the_struck_chunk_and_pays_for_it() {
     // It slowed: the wall took energy out of it.
     let v = Vec3::from(w.read_body_state(ball).unwrap().linear_velocity);
     eprintln!("{} chunks crushed; the ball leaves at {v:?}", seen.len());
+}
+
+#[test]
+fn a_strike_never_pays_more_than_the_shots_kinetic_energy() {
+    // The wall's blocks made very costly to crush (crushEnergy x250, the rate of damage
+    // x40): every block the patch covers would crush, at 64 MJ each, against the ball's
+    // 2.94 MJ. The shot pays what it has and no more (energy is not made): the strike
+    // books exactly its kinetic energy, the ball stops, and the damage is what that
+    // energy paid for, so no block crushes.
+    let mut json = crush_wall_json();
+    for m in json["defaults"]["solver"]["materials"]
+        .as_array_mut()
+        .unwrap()
+    {
+        if let Some(c) = m.get_mut("crush") {
+            c["crushEnergy"] = 1.0e9.into();
+            c["crushViscosity"] = 20.0.into();
+        }
+    }
+    let asset = asset_of(&json);
+    let mut w = world_for(&asset, 256, false, true);
+    let id = place(
+        &mut w,
+        &asset,
+        Some(Crush {
+            mass: CrushMass::Remove,
+            ..Crush::default()
+        }),
+    )
+    .unwrap();
+    let ball = shoot(&mut w, 35.0, 4800.0);
+    let data = chunk_data(&asset);
+    let ke0 = 0.5 * 4800.0 * 35.0f64 * 35.0;
+    let mut before = w.destructible_crush_state(id).unwrap();
+    let mut struck = false;
+    for _ in 0..20 {
+        let f = w.step_sync().unwrap();
+        assert!(crushes(&f).is_empty(), "the ball cannot pay for a crush");
+        let now = w.destructible_crush_state(id).unwrap();
+        let booked: f64 = (0..now.len())
+            .map(|k| (now[k].0 - before[k].0) as f64 * data[k].2 * data[k].0)
+            .sum();
+        if booked > 0.0 {
+            let v = Vec3::from(w.read_body_state(ball).unwrap().linear_velocity);
+            eprintln!("strike: booked {booked:.0} J of the ball's {ke0:.0} J; it leaves at {v:?}");
+            assert!(!struck, "one strike");
+            assert!(
+                (booked - ke0).abs() < 2e-3 * ke0,
+                "booked {booked} J, the ball had {ke0} J"
+            );
+            assert!(v.length() < 0.5, "the ball paid all it had: {v:?}");
+            struck = true;
+        }
+        before = now;
+    }
+    assert!(struck, "the ball strikes the wall");
 }
 
 #[test]

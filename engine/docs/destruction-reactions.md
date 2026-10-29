@@ -109,9 +109,11 @@ Consequences:
 **Forward only.** Everything runs in the fracture's encode after the engine's step and before
 the next one; nothing is rewound.
 1. `fr_crush_loads` integrates the frame's contact loads, before the frame's bond breaks.
-2. The predicted strike (`fr_strike_crush`) loads the struck body's entry chunk, the one
-   `fr_strike_nearest` picks for the strike's bond breaks. It runs before `fr_strike_force`,
-   so the struck chunk is crushed before the engine's step meets it.
+2. The predicted strike loads every chunk of the struck body inside its ball's contact patch
+   (`fr_strike_patch`, `fr_strike_cover`, `fr_strike_claim`, `fr_strike_crush`; "The
+   strike's contact patch" below). It runs before `fr_strike_force`, so the covered chunks
+   are crushed before the engine's step meets them (and before the strike's breaks knock
+   them off).
 3. A crushed chunk's bonds break with the frame's other breaks (`fr_crush_bonds`). The split
    then leaves it alone on a body.
 4. After the split, `fr_crush_apply` parks that body out of the world and writes the event.
@@ -122,16 +124,19 @@ the next one; nothing is rewound.
    So the fragments carry its mass and momentum exactly. Ranks come from a scan, so event
    order and fragment slots are deterministic.
 
-**Energy.** The strike's damage increment books `dD crushEnergy V` to its shot (`fr_strike_crush`).
-Each shot pays its booked total once, as `J = M (v - sqrt(v^2 - 2 dE / M))` capped at `M v`,
+**Energy.** The strike's damage increments book `dD crushEnergy V` to its shot (`fr_strike_crush`),
+every covered chunk's from the same budget: the shot's kinetic energy. A chunk the rest of the
+budget cannot crush takes only the damage it pays for, so a strike never books more than the
+shot has (`tests/crush.rs` `a_strike_never_pays_more_than_the_shots_kinetic_energy`). Each
+shot pays its booked total once, as `J = M (v - sqrt(v^2 - 2 dE / M))` capped at `M v`,
 against its speed (`fr_crush_bill`). The struck dynamic bodies receive `J` by their share of
 the energy, at the contact (`fr_crush_push`), so momentum is kept. Contact-path crushes
 charge nobody: debris, sustained pressure and impacts the predictor did not see are already
 inside the engine's step.
 
 **v1 limits.**
-- A strike crushes only its entry chunk; the neighbours its ball also covers crush from the
-  next frame's contact loads, uncharged.
+- ~~A strike crushes only its entry chunk~~: since 2026-10-29 it loads every chunk its
+  contact patch covers (below).
 - Strain-rate hardening is omitted.
 - The lab (`ThresholdWorld::new_with_crush`, Fracture Lab `Crush`) removes crushed chunks;
   it keeps no fragments. It reads each frame's crush events back with its counters
@@ -148,6 +153,75 @@ the support-loss frame's shot from exactly one frame's travel met its column sti
 bits, so the minimum always has its chunk. Crushing takes the same entry chunk (its own
 `fr_crush_entry` and `fr_crush_nearest` are gone). Tests: `engine-world`
 `tests/strike_prediction.rs`, and `tests/support_loss.rs` back at its 2.5 m start.
+
+### The strike's contact patch (2026-10-29)
+
+**Why.** Once predicted strikes worked (the stored-distance fix above), a strike crushed only
+its entry chunk, and the strike's breaks knocked the neighbours its ball also covers off
+before any contact load reached them: `tests/crush.rs`'s 4.8 t ball at 35 m/s went from 10
+crushed and a bounce (+10.2 m/s, the strike unseen, contact loads only) to 1 crushed and the
+ball through the wall at -24.9 m/s. A 0.45 m ball on 0.4 m blocks presses on up to nine.
+
+**The patch** is a disc about the path's axis at the struck face, of radius
+
+```
+a = min(R, max(a_H, sqrt(F / (pi p_cap))))
+a_H = sqrt(R delta),  delta = (15 m_eff v^2 / (16 E* sqrt(R)))^(2/5)
+```
+
+- `a_H` is Hertz's elastic patch at the peak indentation `delta`, the same Hertz contact that
+  gives the force `F = m_eff v / tau` and the contact time `tau` (`api.rs` `hertz_duration`).
+- A chunk that crushes cannot carry a contact pressure above its material's cap pressure
+  (the law's hydrostatic limit), so `F` needs at least `F / p_cap` of contact: a fully
+  plastic contact, mean pressure equal to the flow pressure (Johnson, *Contact Mechanics*
+  1985, ch. 6). The entry chunk's material sets `p_cap` when it crushes; otherwise only Hertz.
+- It is never more than the ball's projected disc, `R`.
+
+On the crush wall (4.8 t, 35 m/s, concrete E* 27 GPa): `delta` 39 mm, `a_H` 0.13 m (inside
+the struck block), `F` 51 MN, `sqrt(F / (pi 20 MPa))` 0.9 m: the patch is the projected disc,
+0.45 m, as the ball's 80 MPa mean pressure on it says (the ball sinks past its equator).
+
+**Which chunks, by how much.** The disc is cut into 64 equal-area cells (8 rings of 8
+sectors). Along each cell's line, parallel to the path, the first box of the struck body it
+enters is the chunk the ball meets there (`fr_strike_cover`: atomic min of the entry depth;
+`fr_strike_claim`: the chunk at that depth within 0.1 mm, ties to the lowest index; the
+depth is computed in both kernels and compared within a tolerance, never bit for bit, after
+the stored-distance finding). A cell counts when the ball, sunk to the patch's depth
+`max(delta, R - sqrt(R^2 - a^2))`, reaches its surface: its depth below the first surface the
+ball touches plus the ball's curvature there, `R - sqrt(R^2 - rho^2)`. Each chunk takes `F`
+times its counted cells over all counted cells (its contact area's share, so the chunks
+together carry `F` exactly), applied at its cells' centroid and balanced through its bonds as
+before, for `tau`. Non-crushable chunks take their share (and crush nothing); a lone chunk is
+still not stressed by one strike. If no cell counts (a box grazed at its corner) the entry
+chunk takes `F`, as before.
+
+**Order and energy.** One thread per shot (`fr_strike_crush`) visits the bodies it strikes in
+slot order and each body's chunks in cell order (from the axis outward), paying each chunk's
+damage from what is left of the shot's kinetic energy. The bill keeps one energy per body at
+its energy-weighted contact point, which `fr_crush_bill` and `fr_crush_push` pay as before.
+Storage: 4 float4 per body slot for the bill and the patch (`crush_rw`), and, with crushing
+only, 128 words per body slot for the cells (`atom`, after `a_strike_dist`).
+
+**Measured** (Metal, threshold model, `destruction_reactions --crush`, 2026-10-29; speed after
+clearing the wall, from the run's per-frame `impactorSpeeds`):
+
+| Run | Entry chunk only (before) | Contact patch (now) |
+|---|---|---|
+| `tests/crush.rs` 4.8 t at 35 m/s | 1 crushed, booked 256 kJ, ball leaves -24.9 m/s | 2 crushed (centre and the block below), 5 more damaged (D 0.07 to 0.52), booked 917 kJ, ball leaves -18.5 m/s |
+| crush-wall 1.0x, crush on | 9 crushed, 36.7 → 23.1 → 15.1 m/s over the strike frames | 12 crushed, 36.7 → 17.6 → 7.1 m/s, stopped at the wall (4 m/s, rolling) |
+| crush-wall 1.1x, crush on | 7 crushed | 10 crushed, through at 19 m/s |
+| crush-wall 1.4x, crush on | 1 impact + 1 contact crushed, through at about 36.5 m/s | 5 crushed, through at 33.8 m/s (wall takes 3.8 of 6.35 MJ) |
+| crush-wall 1.0x / 1.4x, crush off | — | through at 14.8 / 37.8 m/s |
+| reference-building-crush 16x, crush on | 2 crushed | 1 crushed |
+
+Against blast-stress-solver's reference observations (below; PhysX, CPU, rewind): at 1.0-1.2x
+it stops the ball and bites 5 to 31 chunks out (rubble now stops it at 1.0x with 12, and
+passes through at 1.1x with 10); at 1.4x with crush on its wall absorbs 5.2 of 6.3 MJ and the
+ball leaves at 2.7 m/s (rubble: 3.8 MJ, 33.8 m/s); with crush off its ball exits at 36.5 m/s
+(rubble 37.8). Rubble's patch crushes the struck face's blocks in the strike frame; the
+neighbours that only reach D 0.1 to 0.5 are then knocked off by the strike's breaks and travel
+with the ball, so the second layer is met by loose pieces rather than a crushing strike. Not
+tuned.
 
 ## Composed reactions (feat/dr-integrate, 2026-10-25)
 
@@ -295,8 +369,10 @@ Crushing's, as built:
 - engine-world `tests/crush.rs`:
   - the free wall under its own weight never crushes, and its bottom row's pressure matches
     `W / 3A`;
-  - the pack's 4.8 t ball crushes the struck block with cause Impact and pays exactly its
-    crush energy;
+  - the pack's 4.8 t ball crushes with cause Impact, loads every block of the struck face
+    its patch covers (all within its projected disc) and pays exactly their crush energy;
+  - a strike books at most the shot's kinetic energy (blocks too costly to crush: the ball
+    pays all it has, stops, and nothing crushes);
   - `Conserve` keeps the free wall's mass and the system's momentum in zero g;
   - `Remove` takes the chunk out;
   - crushing that crushes nothing changes no body bit for bit;

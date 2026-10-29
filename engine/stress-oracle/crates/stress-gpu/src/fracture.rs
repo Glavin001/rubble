@@ -233,7 +233,9 @@ fn crush_buffers(gpu: &Gpu, t: &FractureTables) -> Result<(wgpu::Buffer, wgpu::B
         tab.extend_from_slice(&c.normals);
     }
     let r_bill = n as u32;
-    let r_shot = r_bill + 2 * b as u32;
+    // Per body slot 4 float4: the bill (energy, shot + 1), (contact, -), and the strike's
+    // contact patch (`fr_strike_patch`).
+    let r_shot = r_bill + 4 * b as u32;
     let r_events = r_shot + MAX_SHOTS as u32;
     // After the events: per chunk a blast window's damage, then (with the flow) the bonds'
     // flow loads, 4 a float4.
@@ -417,9 +419,19 @@ impl Layout {
     pub fn atom_words(&self) -> u32 {
         self.a_strike_dist() + self.n
     }
+    /// With crushing, per body slot 2 words per cell of a strike's contact patch
+    /// (`fracture.slang` `a_cover`): the first depth, the chunk there. After `atom_words`.
+    pub fn a_cover(&self) -> u32 {
+        self.atom_words()
+    }
+    pub fn cover_words(&self) -> u32 {
+        2 * COVER_SAMPLES * self.b
+    }
 }
 
 const SUMS: u32 = 20;
+/// Cells of a strike's contact patch (`fracture.slang` `COVER_SAMPLES`).
+const COVER_SAMPLES: u32 = 64;
 /// The shots strike prediction checks, at most.
 pub const MAX_SHOTS: usize = 64;
 const BODY_WORDS: u32 = 7;
@@ -474,7 +486,7 @@ const BINDINGS: [Binding; 26] = [
     Binding::Uniform,   // crush params
 ];
 
-const ENTRIES: [&str; 39] = [
+const ENTRIES: [&str; 42] = [
     "fr_loads",
     "fr_breaks",
     "fr_gate",
@@ -514,6 +526,9 @@ const ENTRIES: [&str; 39] = [
     "fr_crush_apply",
     "fr_crush_end",
     "fr_crush_blast",
+    "fr_strike_patch",
+    "fr_strike_cover",
+    "fr_strike_claim",
 ];
 
 #[repr(C)]
@@ -654,7 +669,8 @@ impl GpuFracture {
         words[layout.w_alive() as usize..(layout.w_alive() + e) as usize].fill(1);
         words[layout.w_free() as usize..(layout.w_free() + b) as usize].copy_from_slice(&t.free);
         let work = gpu.storage("fracture work", &words);
-        let atom = storage_bytes(gpu, "fracture atom", 4 * layout.atom_words() as u64, wgpu::BufferUsages::empty());
+        let cover = if t.crush.is_some() { layout.cover_words() } else { 0 };
+        let atom = storage_bytes(gpu, "fracture atom", 4 * (layout.atom_words() + cover) as u64, wgpu::BufferUsages::empty());
         let mut frames: Vec<[f32; 4]> = t.frames.iter().flatten().copied().collect();
         // + staging (9 per chunk) + the strikes (3 per body slot).
         frames.resize((2 * b + 9 * n + 3 * b) as usize, [0.0; 4]);
@@ -842,8 +858,13 @@ impl GpuFracture {
                 self.direct(&mut pass, "fr_strike_entry", self.layout.n as usize);
                 self.direct(&mut pass, "fr_strike_nearest", self.layout.n as usize);
                 if crush {
-                    // Before fr_strike_force, which drops a strike it finds no entry for.
-                    self.direct(&mut pass, "fr_strike_crush", self.layout.b as usize);
+                    // Before fr_strike_force, which drops a strike it finds no entry for:
+                    // the contact patch, the chunks on it, their crush from each shot's
+                    // kinetic energy.
+                    self.direct(&mut pass, "fr_strike_patch", self.layout.b as usize);
+                    self.direct(&mut pass, "fr_strike_cover", self.layout.n as usize);
+                    self.direct(&mut pass, "fr_strike_claim", self.layout.n as usize);
+                    self.direct(&mut pass, "fr_strike_crush", self.params.shot_count as usize);
                 }
                 self.direct(&mut pass, "fr_strike_force", self.layout.b as usize);
                 self.direct(&mut pass, "fr_strike_breaks", self.layout.e as usize);

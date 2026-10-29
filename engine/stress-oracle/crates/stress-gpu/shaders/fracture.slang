@@ -1137,10 +1137,11 @@ void fr_strike_breaks(uint3 id: SV_DispatchThreadID)
 //   fr_crush_loads   one thread per chunk: this frame's contact loads (fr_loads's: the
 //                    sustained forces and carried pulses for the frame, each new impact at
 //                    its Hertz peak force for its duration), the damage step;
-//   fr_strike_crush  one thread per struck body: the predicted strike's Hertz force on its
-//                    entry chunk (fr_strike_nearest's, the chunk whose bonds the strike
-//                    breaks), for the Hertz contact time; the energy it takes booked to the
-//                    shot (`bill`);
+//   fr_strike_patch, fr_strike_cover, fr_strike_claim, fr_strike_crush
+//                    the predicted strike's Hertz force shared over the chunks its ball
+//                    covers (its contact patch, below), each loaded for the Hertz contact
+//                    time; the energy they take booked to the shot (`bill`), never more
+//                    than its kinetic energy;
 //   fr_crush_bill    one thread per shot: the energy its strikes booked, paid from its
 //                    kinetic energy, J = M (v - sqrt(v^2 - 2 dE / M)) capped at M v;
 //   fr_crush_push    one thread per struck body: the struck dynamic bodies take J (their
@@ -1165,7 +1166,7 @@ struct CrushParams
     uint t_adj;       // crush_tab: per chunk (first, count) of its bonds in t_list
     uint t_list;      // crush_tab: bond indices, 4 per float4
     uint t_pool;      // crush_tab: per fragment (engine body, engine collider)
-    uint r_bill;      // crush_rw: per body slot (energy booked, shot + 1), (contact, -)
+    uint r_bill;      // crush_rw: per body slot (energy booked, shot + 1), (contact, -), the strike's patch (fr_strike_patch)
     uint r_shot;      // crush_rw: per shot (impulse, energy)
     uint r_events;    // crush_rw: per event 6 float4
     float park_y;     // a parked body's height (rubble frame, World `graveyard`)
@@ -1496,24 +1497,119 @@ void fr_crush_loads(uint3 id: SV_DispatchThreadID)
     crush_record(k, crush_two(base, dt - tau, peak, tau, k, st.x), CAUSE_CONTACT);
 }
 
-// One thread per body: the struck body's entry chunk (fr_strike_nearest's) loaded by the
-// strike's Hertz force (fr_strike_force's) for the Hertz contact time; the energy the
-// damage took booked to the shot. Before fr_strike_force (which drops a strike it finds no
-// entry chunk for).
+// ---- The strike's contact patch (engine/docs/destruction-reactions.md, "The strike's
+// contact patch") ----
+//
+// A predicted strike loads every chunk of the struck body its ball covers, not only the
+// entry chunk: the strike's force F = m_eff v / tau is shared over the patch's chunks by
+// their contact area (so the chunks together carry F), each integrates the law for tau,
+// and all of it is billed to the shot's one kinetic-energy budget.
+//
+// The patch: a disc of radius a about the path's axis at the struck face,
+//   a = min(R, max(a_H, sqrt(F / (pi p_cap))))
+// - a_H = sqrt(R delta), delta = (15 m_eff v^2 / (16 E* sqrt(R)))^(2/5): Hertz's elastic
+//   patch at the peak indentation (the same Hertz contact that gives tau);
+// - sqrt(F / (pi p_cap)): a struck chunk that crushes cannot carry a contact pressure
+//   above its material's cap pressure (the law's hydrostatic limit), so the force needs at
+//   least F / p_cap of contact (a fully plastic contact: the mean pressure is the flow
+//   pressure); the entry chunk's material, when it crushes;
+// - never more than the ball's projected disc (R).
+// The patch is sampled by COVER_SAMPLES equal-area cells (COVER_RINGS rings of
+// COVER_SECTORS). Along each cell's line (parallel to the path) the first surface of the
+// body is the chunk the ball meets there (fr_strike_cover, fr_strike_claim); a cell
+// counts when the ball, sunk to the patch's depth, reaches that surface: its depth below
+// the first surface the ball touches, plus the ball's own curvature there
+// (R - sqrt(R^2 - rho^2)), is at most max(delta, R - sqrt(R^2 - a^2)). A chunk's share of
+// F is its counted cells over all counted cells, at its cells' centroid.
+//
+//   fr_strike_patch   one thread per body: its patch (contact, axis, a, F, tau, depth) and
+//                     its cells cleared, for a struck body; every body's bill cleared;
+//   fr_strike_cover   one thread per chunk of a struck body: per cell, the first depth at
+//                     which the cell's line enters its box (atomic min);
+//   fr_strike_claim   one thread per chunk: per cell, the chunk at that depth (ties: the
+//                     lowest). The depth is compared within COVER_TOL: a recomputation in
+//                     another kernel can round differently (fr_strike_nearest's finding);
+//   fr_strike_crush   one thread per shot: each body it strikes (in slot order), each chunk
+//                     of its patch (in cell order, from the axis outward) loaded by its share,
+//                     the energy its damage takes paid from what is left of the shot's
+//                     kinetic energy (a chunk the rest cannot crush takes only the damage it
+//                     pays for: the shot never gives more energy than it has).
+
+static const uint COVER_RINGS = 8;
+static const uint COVER_SECTORS = 8;
+static const uint COVER_SAMPLES = 64;
+static const float COVER_TOL = 1e-4; // m
+static const uint BILL_WORDS = 4;    // crush_rw float4 per body at r_bill
+static const float COVER_MISS = 1e30; // a depth no line reaches (no infinities: fast math)
+
+// Per body slot 2 words per cell: the first depth (ordered float bits), the chunk there.
+uint a_cover() { return a_strike_dist() + params.chunk_count; }
+
+// Cell s of a patch of radius a about the axis d: its offset from the axis, and rho.
+float3 cover_offset(uint s, float3 d, float a, out float rho)
+{
+    uint ring = s / COVER_SECTORS;
+    uint sector = s % COVER_SECTORS;
+    rho = a * sqrt((float(ring) + 0.5) / float(COVER_RINGS));
+    float theta = 6.28318530718 * (float(sector) + 0.5 * float(ring & 1u)) / float(COVER_SECTORS);
+    float3 e = abs(d.x) < 0.57735 ? float3(1.0, 0.0, 0.0) : (abs(d.y) < 0.57735 ? float3(0.0, 1.0, 0.0) : float3(0.0, 0.0, 1.0));
+    float3 u = normalize(cross(d, e));
+    float3 v = cross(d, u);
+    return rho * (cos(theta) * u + sin(theta) * v);
+}
+
+// The depth (along d, from the plane through `contact`) at which cell s's line enters
+// chunk k's box; COVER_MISS when it misses (or the box is wholly behind the ball). The line
+// starts 2R in front of the plane.
+float cover_depth(uint k, uint s, float3 contact, float3 d, float a, float radius)
+{
+    float rho;
+    float3 p = contact + cover_offset(s, d, a, rho) - d * (2.0 * radius);
+    Quat q;
+    float3 cc = chunk_box_world(k, q);
+    Quat box = normalized(quat_mul(q, quat_of(geometry[3 * k + 2])));
+    float3 half = geometry[3 * k + 1].xyz;
+    float t0 = -COVER_MISS;
+    float t1 = COVER_MISS;
+    for (uint ax = 0; ax < 3; ax++)
+    {
+        float3 e = float3(0.0);
+        e[ax] = 1.0;
+        float3 axis = rotate(box, e);
+        float o = dot(p - cc, axis);
+        float dv = dot(d, axis);
+        if (abs(dv) < 1e-9)
+        {
+            if (abs(o) > half[ax])
+                return COVER_MISS;
+            continue;
+        }
+        float ta = (-half[ax] - o) / dv;
+        float tb = (half[ax] - o) / dv;
+        t0 = max(t0, min(ta, tb));
+        t1 = min(t1, max(ta, tb));
+    }
+    if (!(t0 <= t1) || t1 < 0.0)
+        return COVER_MISS;
+    return t0 - 2.0 * radius;
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void fr_strike_crush(uint3 id: SV_DispatchThreadID)
+void fr_strike_patch(uint3 id: SV_DispatchThreadID)
 {
     uint b = id.x;
     if (b >= params.body_count || params.shot_count == 0 || crush.enabled == 0)
         return;
-    uint k = atom[a_strike() + 9 * b + 8].load();
-    crush_rw[crush.r_bill + 2 * b] = float4(0.0);
+    uint bill = crush.r_bill + BILL_WORDS * b;
+    crush_rw[bill] = float4(0.0);
+    crush_rw[bill + 3] = float4(0.0);
     uint shot;
     if (!struck(b, shot))
         return;
+    uint k = atom[a_strike() + 9 * b + 8].load();
     float t_in = asfloat(atom[a_strike() + 9 * b + 6].load());
-    if (!(t_in <= params.dt) || k == NONE || !crushable(k) || (crush_flags(k) & CR_CRUSHED) != 0)
+    if (!(t_in <= params.dt) || k == NONE)
         return;
     uint st = strike_at(b);
     float4 s0 = frames[st];
@@ -1528,26 +1624,231 @@ void fr_strike_crush(uint3 id: SV_DispatchThreadID)
     float m_body = inv_mass == 0.0 ? 0.0 : 1.0 / inv_mass;
     float m_eff = inv_mass == 0.0 ? m_imp : m_imp * m_body / (m_imp + m_body);
     float modulus = 1.0 / (1.0 / shots[2 * shot + 1].x + 1.0 / geometry[3 * k + 1].w);
-    float tau = 2.87 * pow(m_eff * m_eff / (face * modulus * modulus * max(speed, 1e-3)), 0.2);
+    float v = max(speed, 1e-3);
+    float tau = 2.87 * pow(m_eff * m_eff / (face * modulus * modulus * v), 0.2);
+    float force = m_eff * speed / tau;
     float3 contact = s0.xyz + s1.xyz * t_in + d * radius;
-    float3 f = d * (m_eff * speed / tau);
+    // Hertz's peak indentation and patch, and the patch the crush pressure needs.
+    float delta = pow(15.0 * m_eff * v * v / (16.0 * modulus * sqrt(face)), 0.4);
+    float a_h = sqrt(radius * delta);
+    float p_cap = crushable(k) ? crush_tab[2 * k].x : 0.0;
+    float a_p = p_cap > 0.0 ? sqrt(force / (PI * p_cap)) : 0.0;
+    float a = min(radius, max(a_h, a_p));
+    float depth = max(delta, radius - sqrt(max(radius * radius - a * a, 0.0)));
+    crush_rw[bill + 1] = float4(contact, 0.0);
+    crush_rw[bill + 2] = float4(d, a);
+    crush_rw[bill + 3] = float4(force, tau, depth, float(k + 1));
+    uint base = a_cover() + 2 * COVER_SAMPLES * b;
+    for (uint s = 0; s < COVER_SAMPLES; s++)
+    {
+        atom[base + 2 * s].store(0xffffffffu);
+        atom[base + 2 * s + 1].store(NONE);
+    }
+}
+
+// The patch of chunk k's body, if it is struck and k can be on it: (contact, radius),
+// (axis, a), the cells' base word.
+bool cover_patch(uint k, out uint b, out float4 p1, out float4 p2)
+{
+    b = body_of(k);
+    p1 = float4(0.0);
+    p2 = float4(0.0);
+    uint shot;
+    if (!struck(b, shot) || (crush_flags(k) & CR_CRUSHED) != 0)
+        return false;
+    uint bill = crush.r_bill + BILL_WORDS * b;
+    if (crush_rw[bill + 3].w == 0.0)
+        return false;
+    p1 = float4(crush_rw[bill + 1].xyz, shots[2 * shot].y);
+    p2 = crush_rw[bill + 2];
+    return true;
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_strike_cover(uint3 id: SV_DispatchThreadID)
+{
+    uint k = id.x;
+    if (k >= params.chunk_count || params.shot_count == 0 || crush.enabled == 0)
+        return;
+    uint b;
+    float4 p1, p2;
+    if (!cover_patch(k, b, p1, p2))
+        return;
+    uint base = a_cover() + 2 * COVER_SAMPLES * b;
+    for (uint s = 0; s < COVER_SAMPLES; s++)
+    {
+        float t = cover_depth(k, s, p1.xyz, p2.xyz, p2.w, p1.w);
+        if (t < 0.5 * COVER_MISS)
+            atom[base + 2 * s].min(ordered(t));
+    }
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_strike_claim(uint3 id: SV_DispatchThreadID)
+{
+    uint k = id.x;
+    if (k >= params.chunk_count || params.shot_count == 0 || crush.enabled == 0)
+        return;
+    uint b;
+    float4 p1, p2;
+    if (!cover_patch(k, b, p1, p2))
+        return;
+    uint base = a_cover() + 2 * COVER_SAMPLES * b;
+    for (uint s = 0; s < COVER_SAMPLES; s++)
+    {
+        uint first = atom[base + 2 * s].load();
+        if (first == 0xffffffffu)
+            continue;
+        float t = cover_depth(k, s, p1.xyz, p2.xyz, p2.w, p1.w);
+        if (t < 0.5 * COVER_MISS && t <= unordered(first) + COVER_TOL)
+            atom[base + 2 * s + 1].min(k);
+    }
+}
+
+// Chunk k loaded by `f` at `at` for `tau` (a lone chunk: no stress), its damage limited to
+// what `budget` (J) pays for; the energy it took.
+float strike_load(uint k, uint slot, float3 f, float3 at, float tau, float budget)
+{
+    if (!crushable(k) || (crush_flags(k) & CR_CRUSHED) != 0 || !(budget > 0.0))
+        return 0.0;
     Quat q;
     float3 origin;
-    structure_pose(b, BODY_WORDS * b, q, origin);
+    structure_pose(slot, BODY_WORDS * slot, q, origin);
     float3 centre = origin + rotate(q, chunks[4 * k].xyz);
     float4 bonds = bond_centroid(k, q, origin, centre);
     // A lone chunk's reaction to one strike is its inertia: no stress.
     if (!(bonds.w > 0.0))
-        return;
-    Sym w = sym_add(sym_outer(contact - centre, f), sym_outer(bonds.xyz, -f));
+        return 0.0;
+    Sym w = sym_add(sym_outer(at - centre, f), sym_outer(bonds.xyz, -f));
     // The load lasts the Hertz contact time, at most the frame.
     float before = crush_rw[k].x;
     float4 step = crush_two(w, min(tau, params.dt), w, 0.0, k, before);
+    // The energy the damage takes: dD crushEnergy V.
+    float per = crush_tab[2 * k].w * crush_tab[2 * k + 1].y;
+    float energy = (step.x - before) * per;
+    if (energy > budget)
+    {
+        // The shot pays for no more: the damage it can.
+        float d = before + budget / per;
+        step = float4(min(d, 1.0), step.y, step.z, d >= 1.0 ? 1.0 : 0.0);
+        energy = budget;
+    }
     crush_record(k, step, CAUSE_IMPACT);
-    // The energy the damage took: dD crushEnergy V, booked to the shot, at the contact.
-    float energy = (step.x - before) * crush_tab[2 * k].w * crush_tab[2 * k + 1].y;
-    crush_rw[crush.r_bill + 2 * b] = float4(energy, float(shot + 1), 0.0, 0.0);
-    crush_rw[crush.r_bill + 2 * b + 1] = float4(contact, 0.0);
+    return energy;
+}
+
+bool cell_in(uint2 mask, uint c)
+{
+    return ((mask[c / 32] >> (c % 32)) & 1u) != 0;
+}
+
+// Shot s's strike on body b: its patch's chunks loaded by their shares, from `budget`;
+// the bill (energy, at its energy-weighted point) written. The energy taken.
+float strike_crush_body(uint b, uint s, float budget)
+{
+    uint bill = crush.r_bill + BILL_WORDS * b;
+    float4 p1 = crush_rw[bill + 1];
+    float4 p2 = crush_rw[bill + 2];
+    float4 p3 = crush_rw[bill + 3];
+    float3 contact = p1.xyz;
+    float3 d = p2.xyz;
+    float a = p2.w;
+    float radius = shots[2 * s].y;
+    uint base = a_cover() + 2 * COVER_SAMPLES * b;
+    // The first surface the ball touches: the least depth plus its curvature.
+    float first = COVER_MISS;
+    for (uint c = 0; c < COVER_SAMPLES; c++)
+    {
+        if (atom[base + 2 * c + 1].load() == NONE)
+            continue;
+        float rho;
+        cover_offset(c, d, a, rho);
+        float key = unordered(atom[base + 2 * c].load()) + radius - sqrt(max(radius * radius - rho * rho, 0.0));
+        first = min(first, key);
+    }
+    // The counted cells: the ball, sunk to the patch's depth, reaches their surface.
+    uint2 counted = uint2(0u);
+    uint total = 0;
+    for (uint c = 0; c < COVER_SAMPLES; c++)
+    {
+        if (atom[base + 2 * c + 1].load() == NONE)
+            continue;
+        float rho;
+        cover_offset(c, d, a, rho);
+        float key = unordered(atom[base + 2 * c].load()) + radius - sqrt(max(radius * radius - rho * rho, 0.0));
+        if (key - first <= p3.z)
+        {
+            counted[c / 32] |= 1u << (c % 32);
+            total++;
+        }
+    }
+    float energy = 0.0;
+    float3 point = float3(0.0);
+    if (total == 0)
+    {
+        // No cell met a surface (a box grazed at its corner): the entry chunk takes it all.
+        uint k = uint(p3.w) - 1;
+        energy = strike_load(k, b, d * p3.x, contact, p3.y, budget);
+        point = energy * contact;
+    }
+    for (uint c = 0; c < COVER_SAMPLES; c++)
+    {
+        if (!cell_in(counted, c))
+            continue;
+        uint k = atom[base + 2 * c + 1].load();
+        bool seen = false;
+        for (uint e = 0; e < c; e++)
+            seen = seen || (cell_in(counted, e) && atom[base + 2 * e + 1].load() == k);
+        if (seen)
+            continue;
+        // Its cells, and where the ball meets them.
+        uint n = 0;
+        float3 at = float3(0.0);
+        for (uint e = c; e < COVER_SAMPLES; e++)
+        {
+            if (!cell_in(counted, e) || atom[base + 2 * e + 1].load() != k)
+                continue;
+            float rho;
+            float3 off = cover_offset(e, d, a, rho);
+            at += contact + off + d * unordered(atom[base + 2 * e].load());
+            n++;
+        }
+        at /= float(n);
+        float took = strike_load(k, b, d * (p3.x * float(n) / float(total)), at, p3.y, budget - energy);
+        energy += took;
+        point += took * at;
+    }
+    crush_rw[bill] = float4(energy, float(s + 1), 0.0, 0.0);
+    if (energy > 0.0)
+        crush_rw[bill + 1] = float4(point / energy, 0.0);
+    return energy;
+}
+
+// One thread per shot, after fr_strike_claim and before fr_strike_force (which drops a
+// strike it finds no entry chunk for): every body it strikes, in slot order, from its
+// kinetic energy.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_strike_crush(uint3 id: SV_DispatchThreadID)
+{
+    uint s = id.x;
+    if (s >= params.shot_count || crush.enabled == 0)
+        return;
+    uint sb = BODY_WORDS * asuint(shots[2 * s].x);
+    float inv_mass = bodies[sb].w;
+    float3 v = bodies[sb + 3].xyz;
+    // fr_crush_bill pays from this: the shot's kinetic energy (an anchored shot's is
+    // unbounded).
+    float budget = inv_mass > 0.0 ? 0.5 * dot(v, v) / inv_mass : COVER_MISS;
+    for (uint b = 0; b < params.body_count; b++)
+    {
+        uint shot;
+        if (!struck(b, shot) || shot != s || crush_rw[crush.r_bill + BILL_WORDS * b + 3].w == 0.0)
+            continue;
+        budget -= strike_crush_body(b, s, budget);
+    }
 }
 
 [shader("compute")]
@@ -1560,7 +1861,7 @@ void fr_crush_bill(uint3 id: SV_DispatchThreadID)
     float energy = 0.0;
     for (uint b = 0; b < params.body_count; b++)
     {
-        float4 bill = crush_rw[crush.r_bill + 2 * b];
+        float4 bill = crush_rw[crush.r_bill + BILL_WORDS * b];
         if (bill.y == float(s + 1))
             energy += bill.x;
     }
@@ -1593,7 +1894,7 @@ void fr_crush_push(uint3 id: SV_DispatchThreadID)
     uint b = id.x;
     if (b >= params.body_count || params.shot_count == 0 || crush.enabled == 0)
         return;
-    float4 bill = crush_rw[crush.r_bill + 2 * b];
+    float4 bill = crush_rw[crush.r_bill + BILL_WORDS * b];
     if (!(bill.x > 0.0))
         return;
     uint s = uint(bill.y) - 1;
@@ -1604,7 +1905,7 @@ void fr_crush_push(uint3 id: SV_DispatchThreadID)
         return;
     // This body's share of the shot's impulse, at the strike's contact (rubble frame).
     float3 j = paid.xyz * (bill.x / paid.w);
-    float3 r = to_rubble(crush_rw[crush.r_bill + 2 * b + 1].xyz) - bodies[bw].xyz;
+    float3 r = to_rubble(crush_rw[crush.r_bill + BILL_WORDS * b + 1].xyz) - bodies[bw].xyz;
     Quat o = quat_of(bodies[bw + 1]);
     float3 inv_i = bodies[bw + 2].xyz;
     float3 dw = rotate(o, inv_i * inverse_rotate(o, cross(r, j)));
