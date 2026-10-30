@@ -23,6 +23,7 @@
     #touch button { position: fixed; bottom: calc(16px + env(safe-area-inset-bottom)); width: 72px; height: 72px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.35); background: rgba(20, 24, 34, 0.45); color: #fff; font-size: 26px; touch-action: none; -webkit-tap-highlight-color: transparent; }
     #touch button.on { background: rgba(255, 150, 90, 0.55); }
     canvas { touch-action: none; }
+    [hidden] { display: none !important; }
   </style>
 </head>
 <body>
@@ -900,7 +901,7 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
   if (b.z > 0.5 && tau < 0.0 && tau > -3.0 && frame.fog.y > 0.5) {
     let q = QUAD[vi] * (b.x * 1.15);
     o.w = a.xyz + vec3f(q.x, 0.0, q.y);
-    o.w.y = groundAt(o.w.x, o.w.z, true) + 0.4;
+    o.w.y = groundAt(o.w.x, o.w.z, true) + 0.9;
     o.clip = frame.viewProj * vec4f(o.w, 1.0);
     o.r = b.x;
     o.c = vec4f(a.xyz, tau);
@@ -1023,7 +1024,7 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       SCHEDULE.forEach((s) => { s.state = 'wait'; s.fx = null; s.liveRead = false; });
       if (PLAY) {
         SCHEDULE.length = 0;
-        Object.assign(game, { over: null, near: 0, dropped: 0, survived: 0, next: 3, lull: false, closed: 0, msg: '', msgT: -1e9, flipT: 0, stuckT: 0 });
+        Object.assign(game, { over: null, near: 0, dropped: 0, survived: 0, next: 3, lull: false, closed: 0, msg: '', msgT: -1e9, flipT: 0, stuckT: 0, trail: [] });
         game.opened.clear();
         $('over').hidden = true;
       }
@@ -1332,8 +1333,11 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       if (st.carPose && !game.over) {
         game.flipT = st.carPose.up[1] < 0.3 ? game.flipT + DT : 0;
         if (game.flipT > 2.5) end('Rolled over');
-        game.stuckT = game.throttle && st.carSpeed < 1.2 ? game.stuckT + DT : 0;
-        if (game.stuckT > 6) end('Stuck in the sand');
+        // Stuck: on the throttle, and under 5 m from where the car was 8 s ago.
+        game.stuckT = game.throttle ? game.stuckT + DT : 0;
+        if (st.frame % Math.round(1 / DT) === 0) { (game.trail ??= []).push(st.carPose.p.slice()); if (game.trail.length > 9) game.trail.shift(); }
+        const back = game.trail?.length === 9 ? game.trail[0] : null;
+        if (back && game.stuckT > 8 && Math.hypot(st.carPose.p[0] - back[0], st.carPose.p[2] - back[2]) < 5) end('Stuck in the sand');
       }
       {
         const prev = game.opened, next = new Map();

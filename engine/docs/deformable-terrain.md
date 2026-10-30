@@ -1293,6 +1293,68 @@ stale loads never press.
   heightfield's, where the Bekker rut tier applies to soil fields;
 - sphere-cast wheels are not tested.
 
+### Playable: `showcase.html?scene=play` (2026-10-30)
+
+You drive the buggy; meteors land around you without end. It is the showcase's
+renderer, terrain and car, with the schedule filled as you play.
+
+**Controls.**
+- W A S D or the arrows drive; Space is the handbrake; R restarts.
+- On a phone: on-screen ◀ ▶ ▲ ▼ buttons, shown on a coarse pointer or with
+  `?touch=1`.
+- Click or tap the ground to drop a meteor there (a ray from the eye marched
+  over the heightfield). F (☄ on a phone) drops one ahead of the car.
+
+**The director** places each strike from where the car will be at contact:
+- beside the line, the centre RIM + 2–12 m off it, a rim to ride;
+- ahead on the line, 30–60 m (steer round the fresh crater);
+- behind; or far out, as scenery;
+- onto the car itself, with a 2.4 s warning (`lead`), 8% of strikes at first
+  and up to 30%.
+
+It strikes every 2.6 s at first, down to every 0.9 s after about two minutes.
+Each strike shows a red ring on the ground while it comes in. Runs are seeded
+(`?seed=`).
+
+**A run ends** on any of these:
+- a contact within 0.5 R of the car (horizontally);
+- rolled over for 2.5 s;
+- 8 s on the throttle while the car moved under 5 m (sand that holds it at
+  about 1 m/s counts as stuck).
+
+A contact within RIM + 12 m that you survive is a near miss. The best time is
+kept in the browser.
+
+**Endless.** The engine's own settling needs nothing in flight, and with
+strikes every second or two the ejecta always are. So the page bakes the areas
+it leaves behind itself: a timed close (`World::terrain_close_area`, the same
+forced close that lands parcels still in flight) that freezes any motion left.
+Each part is an explicit `?` setting, shown in the status line:
+- **When an area closes:**
+  - once it is `closeafter` s old (6) and its fastest sand is under
+    `closespeed` m/s (1.5);
+  - or at `maxage` s (12) whatever it does.
+  - An area grown over others keeps the oldest one's age, since growth can
+    move it to another slot. That bug once let the car's area grow strike by
+    strike to 490k particles and never close.
+- **The director stays out of old areas:** it drops nothing into an area
+  already older than `closeafter`.
+- **Lulls:** baked slots return to the pool only once every area has baked
+  ("Slot reuse"). Past `pool` (0.7) of the particle or parcel pool the
+  director pauses, and areas close sooner, until the last one bakes and the
+  pool starts empty.
+- **Limits checked before a strike is placed**, refused with a message rather
+  than an engine error:
+  - the area slots (`max_regions` 12, two kept for yours);
+  - the pool;
+  - the wheel patch: a strike whose growth would make a window wider than
+    `PN` − 8 samples is not placed, since a larger one fails by name ("surface
+    patch samples").
+
+  A strike that can no longer open by contact burns up.
+
+The ground is a 1.2 km basin (`?half=600`) of low dunes, rimmed by hills.
+
 ## The splat bake (2026-10-25)
 
 The user approved a bilinear splat for the bake and the parcels' deposits.
