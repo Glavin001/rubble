@@ -92,6 +92,7 @@ pub fn failing(piece: &Piece, g: [f32; 3]) -> Vec<u32> {
 
 /// The bonds (indices into `Piece::bonds`) the piece's weight overloads under gravity `g`
 /// (m/s², its magnitude): compression only, no tipping.
+#[cfg(test)]
 pub fn overloaded(piece: &Piece, g: f32) -> Vec<u32> {
     flow(piece, g).0
 }
