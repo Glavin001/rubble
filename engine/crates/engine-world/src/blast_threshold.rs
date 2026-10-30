@@ -637,7 +637,7 @@ impl World {
                 })
                 .flatten()
                 .collect();
-            events.extend(self.apply_crush(k, step, &crushes)?);
+            events.extend(self.apply_crush(k, step, &crushes, &frames)?);
             // The weight the breaks left without a path: support loss, its breaks split
             // with this step's frame.
             if !all_broken.is_empty() {

@@ -1409,7 +1409,7 @@ mod imp {
                     self.support_loss(k, &broken);
                 }
                 out.extend(events);
-                out.extend(self.apply_crush(k, step, &crushes)?);
+                out.extend(self.apply_crush(k, step, &crushes, &frames)?);
             }
             Ok(out)
         }
@@ -1669,12 +1669,14 @@ mod imp {
         }
 
         /// A step's crushes: each chunk's body (parked on the GPU) retired, its fragments
-        /// (made on the GPU) adopted as bodies, and the events.
+        /// (made on the GPU) adopted as bodies, and the events. `frames` is the fracture's
+        /// frame record after the step (the crushed bodies' principal frames).
         fn apply_crush(
             &mut self,
             k: usize,
             _step: u64,
             crushes: &[CrushEvent],
+            frames: &[[f32; 4]],
         ) -> anyhow::Result<Vec<DestructionEvent>> {
             if crushes.is_empty() {
                 return Ok(Vec::new());
@@ -1710,6 +1712,58 @@ mod imp {
                 slot.last_solver = None;
                 // Its fragments: boxes about its centre of mass, origin = solver frame.
                 let mut ids = Vec::new();
+                // Each fragment's pose and velocity as `fr_crush_apply` wrote them (rubble's
+                // frame): the chunk's box (its rotation `g` and half extents in the
+                // structure frame) about its centre of mass, the body's `orientation` less
+                // its principal rotation `p` turning the structure frame into the world's.
+                let t = self.fracture.slots[k].as_ref().expect("live slot");
+                let fragment_poses = {
+                    let rec = frames
+                        .get(2 * b + 1)
+                        .ok_or_else(|| anyhow::anyhow!("fracture frame {} missing", 2 * b + 1))?;
+                    let p = glam::Quat::from_array(*rec).normalize();
+                    let geo =
+                        t.tables.geometry.get(c).ok_or_else(|| {
+                            anyhow::anyhow!("crush: chunk {c} has no box geometry")
+                        })?;
+                    let g = glam::Quat::from_array(geo[2]).normalize();
+                    let o = (glam::Quat::from_array(e.orientation) * p.conjugate() * g).normalize();
+                    let h = Vec3::new(geo[1][0], geo[1][1], geo[1][2]);
+                    let (mut dims, mut cell) = ([1u32; 3], h);
+                    let mut n = fragments;
+                    while n > 1 {
+                        let ax = if cell.x >= cell.y && cell.x >= cell.z {
+                            0
+                        } else if cell.y >= cell.z {
+                            1
+                        } else {
+                            2
+                        };
+                        dims[ax] *= 2;
+                        cell[ax] *= 0.5;
+                        n >>= 1;
+                    }
+                    let (b0, v, w) = (
+                        Vec3::from(e.position),
+                        Vec3::from(e.linear_velocity),
+                        Vec3::from(e.angular_velocity),
+                    );
+                    (0..fragments)
+                        .map(|i| {
+                            let idx = Vec3::new(
+                                (i % dims[0]) as f32,
+                                ((i / dims[0]) % dims[1]) as f32,
+                                (i / (dims[0] * dims[1])) as f32,
+                            );
+                            let x = b0 + o * (-h + cell * (2.0 * idx + Vec3::ONE));
+                            (
+                                Transform::new(x.to_array(), o.to_array()),
+                                (v + w.cross(x - b0)).to_array(),
+                                w.to_array(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                };
                 if let Some(first) = e.first_fragment {
                     let mf = e.mass / fragments as f32;
                     let h = Vec3::from(e.fragment_half);
@@ -1743,6 +1797,13 @@ mod imp {
                         slot.last_solver = None;
                         slot.last_asleep = false;
                         slot.asleep = false;
+                        let (pose, v, w) = fragment_poses[i as usize];
+                        slot.origin = pose;
+                        slot.velocity = (v, w);
+                        // The GPU wrote the body (dynamic, awake): the host's mirror follows,
+                        // with no upload (the step plan reads which bodies move).
+                        let state = crate::body_state(slot);
+                        self.sim.mirror_bodies(fb, &[state]);
                         self.shapes[shape as usize].geometry = geometry.clone();
                         // The GPU rewrote the collider: the host's mirror follows.
                         let mut col = self.collider(
@@ -2134,5 +2195,166 @@ mod imp {
             .enumerate()
             .map(|(c, b)| *first.entry(*b).or_insert(c as u32))
             .collect()
+    }
+}
+
+/// The host's mirror of a crush's fragment bodies (`apply_crush`): dynamic, where the GPU
+/// put them. Reads the mirror, which no public call shows.
+#[cfg(all(test, feature = "stress"))]
+mod crush_mirror_tests {
+    use crate::*;
+
+    /// Two crush-wall blocks bonded front to back (`tests/crush.rs` `two_blocks_json`).
+    fn two_blocks() -> DestructibleAssetDesc {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../engine-webgpu/fracture/packs/crush-wall.json"
+        );
+        let mut json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let sc = &mut json["scenario"];
+        let nodes = sc["nodes"].as_array().unwrap().clone();
+        let at = |x: f64| {
+            nodes
+                .iter()
+                .position(|n| {
+                    let c = &n["centroid"];
+                    let near = |k: &str, v: f64| (c[k].as_f64().unwrap() - v).abs() < 1e-6;
+                    near("x", x) && near("y", 1.8) && near("z", 0.2)
+                })
+                .unwrap()
+        };
+        let keep = [at(0.2), at(-0.2)];
+        for key in ["nodes", "nodeTypes", "nodeSizes", "nodeColliders"] {
+            if let Some(a) = sc[key].as_array() {
+                let a: Vec<serde_json::Value> = keep.iter().map(|&i| a[i].clone()).collect();
+                sc[key] = a.into();
+            }
+        }
+        let bonds: Vec<serde_json::Value> = sc["bonds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|b| {
+                let a = keep
+                    .iter()
+                    .position(|&k| k as u64 == b["node0"].as_u64().unwrap())?;
+                let c = keep
+                    .iter()
+                    .position(|&k| k as u64 == b["node1"].as_u64().unwrap())?;
+                let mut b = b.clone();
+                b["node0"] = a.into();
+                b["node1"] = c.into();
+                Some(b)
+            })
+            .collect();
+        sc["bonds"] = bonds.into();
+        DestructibleAssetDesc::from_pack(&serde_json::to_vec(&json).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn fragments_are_mirrored_dynamic_where_the_gpu_put_them() {
+        let asset = two_blocks();
+        let stress = asset.stress.as_ref().unwrap();
+        let solver = asset.solver_for(StrengthModel::Threshold).unwrap();
+        let scene = stress.threshold_scene(1.0, solver.dt).unwrap();
+        let mut capacity = stress_rubble::capacity_for(&scene);
+        capacity.max_bodies = capacity.max_bodies.max(64);
+        capacity.max_colliders = capacity.max_colliders.max(capacity.max_bodies + 64);
+        capacity.max_contacts =
+            stress_rubble::threshold::contact_capacity(2, capacity.max_contacts, 1 << 30);
+        capacity.max_candidates = capacity.max_candidates.max(capacity.max_contacts);
+        let def = WorldDef {
+            capacity,
+            gravity: [0.0; 3],
+            solver: engine_schema::AvbdParams {
+                gravity_y: 0.0,
+                ..solver
+            },
+            enable_sleep: false,
+            contacts: ContactStorage::Canonical,
+            ..WorldDef::default()
+        };
+        let mut w = World::new(GpuContext::Default, &def).unwrap();
+        let offset = stress.placement().map(|x| -x as f32);
+        let a = w.create_destructible_asset(&asset).unwrap();
+        w.create_destructible(&DestructibleDef {
+            model: StrengthModel::Threshold,
+            transform: Transform::new(offset, [0.0, 0.0, 0.0, 1.0]),
+            asleep: false,
+            strength_scale: 1e6,
+            crush: Some(Crush {
+                mass: CrushMass::Conserve {
+                    fragments: 8,
+                    budget: 8,
+                },
+                ..Crush::default()
+            }),
+            ..DestructibleDef::new(a)
+        })
+        .unwrap();
+        // A heavy fast ball at the front block (chunk 0), from +x.
+        let p0 = glam::Vec3::from(asset.chunks[0].pose.position) + glam::Vec3::from(offset);
+        let (r, m) = (0.45f32, 4800.0f32);
+        let ball = w
+            .create_body(&BodyDef {
+                linear_velocity: [-100.0, 0.0, 0.0],
+                ..BodyDef::dynamic((p0 + glam::Vec3::new(3.8, 0.0, 0.0)).to_array())
+            })
+            .unwrap();
+        let shape = ShapeDef {
+            update_body_mass: false,
+            ..ShapeDef::default()
+        };
+        w.create_sphere_shape(ball, &shape, [0.0; 3], r).unwrap();
+        let i = 0.4 * m * r * r;
+        w.body_set_mass_data(
+            ball,
+            MassData {
+                mass: m,
+                center: [0.0; 3],
+                rotational_inertia: [[i, 0.0, 0.0], [0.0, i, 0.0], [0.0, 0.0, i]],
+            },
+        )
+        .unwrap();
+        w.body_set_projectile(ball, Some(Projectile::default()))
+            .unwrap();
+        let mut checked = 0;
+        for _ in 0..20 {
+            let f = w.step_sync().unwrap();
+            for e in &f.destruction_events {
+                let DestructionEvent::ChunkCrushed { fragments, .. } = e else {
+                    continue;
+                };
+                assert_eq!(fragments.len(), 8);
+                for b in fragments {
+                    let mirror = engine_softbody::SoftBackend::host_body(&w.sim, b.index());
+                    let gpu = w.sim.read_body(b.index());
+                    assert!(mirror.inv_mass > 0.0, "fragment {b:?} mirrored static");
+                    assert!((mirror.inv_mass - gpu.inv_mass).abs() <= 1e-4 * gpu.inv_mass);
+                    let d = glam::Vec3::from(mirror.position) - glam::Vec3::from(gpu.position);
+                    // No step since the crush: the GPU's record is `fr_crush_apply`'s.
+                    assert!(
+                        d.length() < 1e-4,
+                        "fragment {b:?}: mirror {:?}, GPU {:?}",
+                        mirror.position,
+                        gpu.position
+                    );
+                    let dv = glam::Vec3::from(mirror.linear_vel) - glam::Vec3::from(gpu.linear_vel);
+                    assert!(dv.length() < 1e-3, "fragment {b:?}: velocity");
+                    let q = glam::Quat::from_array(mirror.orientation);
+                    let qg = glam::Quat::from_array(gpu.orientation);
+                    assert!(q.dot(qg).abs() > 0.999, "fragment {b:?}: {q:?} vs {qg:?}");
+                    checked += 1;
+                }
+            }
+            if checked > 0 {
+                break;
+            }
+        }
+        assert!(
+            checked > 0,
+            "the strike crushes the front block into fragments"
+        );
     }
 }
