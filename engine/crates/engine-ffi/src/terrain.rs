@@ -7,7 +7,7 @@
 //! radians whatever the units.
 
 use super::*;
-use rubble::SettleRule;
+use rubble::{SettleRule, TerrainDebris, TerrainProfile, TerrainSurfaceDef, TerrainSurfaceView};
 
 /// Deformable-terrain settings (from [`rbDefaultTerrainDef`]).
 #[repr(C)]
@@ -59,7 +59,202 @@ pub struct RbTerrainDef {
     pub strike_min_speed: f32,
     pub strike_min_energy: f32,
     pub strike_cells_per_body: f32,
+    /// Vehicle wheels standing on open sand at once.
+    pub max_wheel_loads: u32,
+    /// Heightfield samples the open areas activate, summed.
+    pub max_columns: u32,
+    /// 0: the settings as given (the defaults are the physical, validation
+    /// preset); 1: the game preset (real time) for cells per radius, bed
+    /// depth, Courant number and speed growth, over `cells_per_radius`.
+    pub profile: u32,
+    /// The live surface ([`RbFrame::terrain_surfaces`], `terrain_debris`) and
+    /// the patches vehicles drive on over open sand. Off by default.
+    pub enable_surface: bool,
+    /// Its occupancy cells (window samples × layers, summed over open areas).
+    pub surface_cells: u32,
+    /// Sand faster than a fall of this many layers is debris.
+    pub surface_ejecta_fall: f32,
+    /// Samples across each area's patch (an area's window plus two must fit);
+    /// 0: no patches.
+    pub surface_patch_samples: u32,
+    /// Debris records a frame carries at most (past it the poll fails naming
+    /// "surface debris"); 0: none.
+    pub surface_max_debris: u32,
     pub internal_value: u32,
+}
+
+/// The terrain counters of the latest step (`RbFrame::terrain`): speeds in
+/// the world's units.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RbTerrainReport {
+    pub max_speed: f32,
+    /// Fastest dynamic body coupled to an open area.
+    pub body_speed: f32,
+    pub blocks: u32,
+    /// The particle pool's extent and its live particles.
+    pub particles: u32,
+    pub live: u32,
+    pub parcels: u32,
+    pub airborne: u32,
+    pub deposited: u32,
+    pub escaped: u32,
+    /// Vehicle wheels whose load the open sand carried.
+    pub wheels: u32,
+}
+
+/// An open area's live ground (`RbFrame::terrain_surfaces`), in the order and
+/// units of `rbCreateHeightFieldShape`: samples `[a0, a0 + count_a) ×
+/// [b0, b0 + count_b)` of `shape`, `heights` A fastest. Once the area bakes,
+/// `rbHeightField_GetHeights` holds these there.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RbTerrainSurface {
+    pub shape: RbShapeId,
+    pub slot: u32,
+    pub a0: u32,
+    pub b0: u32,
+    pub count_a: u32,
+    pub count_b: u32,
+    pub heights: *const f32,
+}
+
+/// A piece of debris (`RbFrame::terrain_debris`): sand in flight or above the
+/// surface, or a ballistic parcel.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RbTerrainDebris {
+    pub position: RbVec3,
+    pub velocity: RbVec3,
+    pub volume: f32,
+    pub is_parcel: bool,
+}
+
+/// An area that baked (`RbFrame::terrain_bakes`): re-read its shape's heights.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RbTerrainBake {
+    pub shape: RbShapeId,
+    pub slot: u32,
+}
+
+/// An open area (`rbTerrain_GetAreas`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RbTerrainArea {
+    pub shape: RbShapeId,
+    /// `rbTerrain_CloseArea` takes it.
+    pub slot: u32,
+    /// Its box (world, min and max corners) and cell size.
+    pub lower: RbVec3,
+    pub upper: RbVec3,
+    pub cell_size: f32,
+    /// The heightfield samples it covers, as `RbTerrainSurface`'s.
+    pub a0: u32,
+    pub b0: u32,
+    pub count_a: u32,
+    pub count_b: u32,
+    /// Seconds since it opened.
+    pub age: f32,
+}
+
+/// Window `[i0, j0, ni, nj]` of a field of `nz` rows as host samples
+/// (a0, b0, count_a, count_b): Unreal's A runs along Rubble's −Z, B along +X.
+fn window_out(unreal: bool, nz: u32, w: [u32; 4]) -> [u32; 4] {
+    let [i0, j0, ni, nj] = w;
+    if unreal {
+        [nz - j0 - nj, i0, nj, ni]
+    } else {
+        [i0, j0, ni, nj]
+    }
+}
+
+fn field_rows(world: &World, shape: ShapeId) -> u32 {
+    match world.shape_geometry(shape) {
+        Ok(Geometry::HeightField { field, .. }) => field.samples().1,
+        _ => 0,
+    }
+}
+
+/// A frame's terrain outputs in the host's axes and units.
+#[derive(Default)]
+pub(crate) struct TerrainStore {
+    pub(crate) report: Option<RbTerrainReport>,
+    pub(crate) surfaces: Vec<RbTerrainSurface>,
+    heights: Vec<Vec<f32>>,
+    pub(crate) debris: Vec<RbTerrainDebris>,
+    pub(crate) bakes: Vec<RbTerrainBake>,
+}
+
+impl TerrainStore {
+    pub(crate) fn new(
+        world: &World,
+        c: &coords::Coords,
+        report: Option<&rubble::TerrainStepReport>,
+        surfaces: &[TerrainSurfaceView],
+        debris: &[TerrainDebris],
+        bakes: &[rubble::TerrainBake],
+    ) -> Self {
+        let unreal = c.unreal();
+        let mut s = Self {
+            report: report.map(|r| RbTerrainReport {
+                max_speed: c.length_out(r.max_speed),
+                body_speed: c.length_out(r.body_speed),
+                blocks: r.blocks,
+                particles: r.particles,
+                live: r.live,
+                parcels: r.parcels,
+                airborne: r.airborne,
+                deposited: r.deposited,
+                escaped: r.escaped,
+                wheels: r.wheels,
+            }),
+            ..Self::default()
+        };
+        for v in surfaces {
+            let nz = field_rows(world, v.shape);
+            let [a0, b0, na, nb] = window_out(unreal, nz, v.window);
+            let [_, _, ni, _] = v.window;
+            let mut h = vec![0.0; v.heights.len()];
+            for b in 0..nb {
+                for a in 0..na {
+                    // Host sample (a0 + a, b0 + b) is window sample (ti, tj).
+                    let (ti, tj) = if unreal { (b, na - 1 - a) } else { (a, b) };
+                    h[(b * na + a) as usize] = c.length_out(v.heights[(tj * ni + ti) as usize]);
+                }
+            }
+            s.surfaces.push(RbTerrainSurface {
+                shape: v.shape.to_bits(),
+                slot: v.slot,
+                a0,
+                b0,
+                count_a: na,
+                count_b: nb,
+                heights: std::ptr::null(),
+            });
+            s.heights.push(h);
+        }
+        for (o, h) in s.surfaces.iter_mut().zip(&s.heights) {
+            o.heights = h.as_ptr();
+        }
+        s.debris = debris
+            .iter()
+            .map(|d| RbTerrainDebris {
+                position: RbVec3::of(c.position_out(d.position)),
+                velocity: RbVec3::of(c.linear_out(d.velocity)),
+                volume: c.volume_out(d.volume),
+                is_parcel: d.parcel,
+            })
+            .collect();
+        s.bakes = bakes
+            .iter()
+            .map(|b| RbTerrainBake {
+                shape: b.shape.to_bits(),
+                slot: b.slot,
+            })
+            .collect();
+        s
+    }
 }
 
 /// π-scaling's prediction for an impact or charge (lengths in world units).
@@ -73,33 +268,42 @@ pub struct RbCraterPrediction {
     pub formation_time: f32,
 }
 
-/// Defaults in metres (the default coordinates); scale lengths, speeds,
-/// densities and energies for other units.
+/// Defaults in `coordinates`' units (lengths, speeds, densities, energies).
 #[no_mangle]
-pub extern "C" fn rbDefaultTerrainDef() -> RbTerrainDef {
+pub extern "C" fn rbDefaultTerrainDef(coordinates: RbCoordinates) -> RbTerrainDef {
+    let c = Coords::new(coordinates);
     let d = TerrainDef::default();
+    let sd = TerrainSurfaceDef::default();
     RbTerrainDef {
         max_particles: d.config.max_particles,
         max_blocks: d.config.max_blocks,
         max_parcels: d.config.max_parcels,
         max_substeps: d.config.max_substeps,
         cells_per_radius: d.config.cells_per_radius,
-        min_cell_size: d.config.min_cell_size,
+        min_cell_size: c.length_out(d.config.min_cell_size),
         max_regions: d.config.max_regions,
-        cell_size: d.config.cell_size,
+        cell_size: c.length_out(d.config.cell_size),
         min_resolution: d.config.min_resolution,
-        density: d.material.density,
+        density: c.density_out(d.material.density),
         youngs_modulus: d.material.youngs_modulus,
         poisson_ratio: d.material.poisson_ratio,
         friction_angle: d.material.friction_angle,
         region_margin: d.region_margin as f32,
-        settle_speed: d.settle_speed,
+        settle_speed: c.length_out(d.settle_speed),
         settle_frames: d.settle_frames,
         settle_local: u32::from(d.settle_rule == SettleRule::Local),
-        speed_headroom: d.speed_headroom,
-        strike_min_speed: d.strike.min_speed,
-        strike_min_energy: d.strike.min_energy,
+        speed_headroom: c.length_out(d.speed_headroom),
+        strike_min_speed: c.length_out(d.strike.min_speed),
+        strike_min_energy: c.energy_out(d.strike.min_energy),
         strike_cells_per_body: d.strike.cells_per_body,
+        max_wheel_loads: d.config.max_wheel_loads,
+        max_columns: d.config.max_columns,
+        profile: 0,
+        enable_surface: false,
+        surface_cells: sd.cells,
+        surface_ejecta_fall: sd.ejecta_fall,
+        surface_patch_samples: sd.patch_samples,
+        surface_max_debris: sd.max_debris,
         internal_value: COOKIE,
     }
 }
@@ -141,6 +345,19 @@ pub unsafe extern "C" fn rbWorld_EnableTerrain(
         t.strike.min_speed = c.length_in(d.strike_min_speed);
         t.strike.min_energy = d.strike_min_energy / c.energy_out(1.0);
         t.strike.cells_per_body = d.strike_cells_per_body;
+        t.config.max_wheel_loads = d.max_wheel_loads;
+        t.config.max_columns = d.max_columns;
+        t.config = match d.profile {
+            0 => t.config,
+            1 => t.config.with_profile(TerrainProfile::Game),
+            _ => return Err(invalid("terrain profile is 0 (as given) or 1 (game)")),
+        };
+        t.surface = d.enable_surface.then(|| TerrainSurfaceDef {
+            cells: d.surface_cells,
+            ejecta_fall: d.surface_ejecta_fall,
+            patch_samples: d.surface_patch_samples,
+            max_debris: d.surface_max_debris,
+        });
         w.world.enable_terrain(&t)
     })
 }
@@ -338,6 +555,114 @@ pub unsafe extern "C" fn rbHeightField_GetHeights(
                 out[(b * count_a + a) as usize] = w.coords.length_out(field.height(i, j));
             }
         }
+        Ok(())
+    })
+}
+
+/// Bake open area `slot` now (`rbTerrain_GetAreas` lists them); the others go on.
+#[no_mangle]
+pub unsafe extern "C" fn rbTerrain_CloseArea(world: *mut RbWorld, slot: u32) -> RbResult {
+    guard_args(|| world_mut(world)?.world.terrain_close_area(slot))
+}
+
+/// The open areas: up to `capacity` into `out` (may be null with capacity
+/// 0), and how many are open in `*out_count`.
+#[no_mangle]
+pub unsafe extern "C" fn rbTerrain_GetAreas(
+    world: *mut RbWorld,
+    out: *mut RbTerrainArea,
+    capacity: u32,
+    out_count: *mut u32,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        if capacity > 0 && out.is_null() {
+            return Err(invalid("null areas output"));
+        }
+        let c = w.coords;
+        let areas = w.world.terrain_areas();
+        let out = if capacity > 0 {
+            std::slice::from_raw_parts_mut(out, capacity as usize)
+        } else {
+            &mut []
+        };
+        for (o, a) in out.iter_mut().zip(&areas) {
+            let (lo, hi) = (a.plan.origin.to_array(), a.plan.end().to_array());
+            let (pa, pb) = (c.position_out(lo), c.position_out(hi));
+            let nz = field_rows(&w.world, a.shape);
+            let [a0, b0, na, nb] = window_out(c.unreal(), nz, a.window);
+            *o = RbTerrainArea {
+                shape: a.shape.to_bits(),
+                slot: a.slot,
+                lower: RbVec3::of([pa[0].min(pb[0]), pa[1].min(pb[1]), pa[2].min(pb[2])]),
+                upper: RbVec3::of([pa[0].max(pb[0]), pa[1].max(pb[1]), pa[2].max(pb[2])]),
+                cell_size: c.length_out(a.plan.dx),
+                a0,
+                b0,
+                count_a: na,
+                count_b: nb,
+                age: a.age,
+            };
+        }
+        write(out_count, areas.len() as u32)
+    })
+}
+
+/// π-scaling's crater for an impact (as [`rbTerrain_Impact`] would strike)
+/// without striking.
+#[no_mangle]
+pub unsafe extern "C" fn rbTerrain_PredictImpact(
+    world: *mut RbWorld,
+    impactor_radius: f32,
+    impactor_density: f32,
+    velocity: RbVec3,
+    out: *mut RbCraterPrediction,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let c = w.coords;
+        let def = w
+            .world
+            .terrain_settings()
+            .ok_or_else(|| anyhow::anyhow!("terrain is not enabled (rbWorld_EnableTerrain)"))?
+            .clone();
+        let v = c.linear_in([velocity.x, velocity.y, velocity.z]);
+        let impact = ImpactSource {
+            impactor_radius: f64::from(c.length_in(impactor_radius)),
+            impactor_density: f64::from(c.density_in(impactor_density)),
+            velocity: glam::DVec3::new(f64::from(v[0]), f64::from(v[1]), f64::from(v[2])),
+            target: CraterTarget::sand(&def.material)?,
+        };
+        let crater = w.world.terrain_predict_impact(&impact)?;
+        write_prediction(&c, &crater, out);
+        Ok(())
+    })
+}
+
+/// π-scaling's crater for a buried charge (as [`rbTerrain_Explode`]) without
+/// striking.
+#[no_mangle]
+pub unsafe extern "C" fn rbTerrain_PredictExplosion(
+    world: *mut RbWorld,
+    tnt_kg: f32,
+    depth_of_burial: f32,
+    out: *mut RbCraterPrediction,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let c = w.coords;
+        let def = w
+            .world
+            .terrain_settings()
+            .ok_or_else(|| anyhow::anyhow!("terrain is not enabled (rbWorld_EnableTerrain)"))?
+            .clone();
+        let charge = ExplosionSource::tnt(
+            f64::from(tnt_kg),
+            f64::from(c.length_in(depth_of_burial)),
+            CraterTarget::sand(&def.material)?,
+        );
+        let crater = w.world.terrain_predict_explosion(&charge)?;
+        write_prediction(&c, &crater, out);
         Ok(())
     })
 }

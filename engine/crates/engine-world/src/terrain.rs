@@ -170,6 +170,8 @@ struct ActiveArea {
     /// Its frame schedule (substeps, settling): engine-terrain's, shared with
     /// the browser host.
     clock: RegionClock,
+    /// The step it opened (a grown area keeps its oldest area's).
+    opened: u64,
 }
 
 /// An open terrain area ([`World::terrain_areas`]).
@@ -181,6 +183,10 @@ pub struct TerrainArea {
     pub shape: ShapeId,
     /// Its box (cells of `plan.dx`).
     pub plan: RegionPlan,
+    /// The heightfield samples it activated: i0, j0, ni, nj.
+    pub window: [u32; 4],
+    /// Seconds since it opened (a grown area: since its oldest part did).
+    pub age: f32,
 }
 
 pub(crate) struct TerrainHost {
@@ -501,6 +507,8 @@ impl World {
 
     /// The open areas, by slot.
     pub fn terrain_areas(&self) -> Vec<TerrainArea> {
+        let dt = self.sim.params().dt;
+        let infos = self.sim.terrain_areas();
         self.terrain.as_ref().map_or_else(Vec::new, |t| {
             t.areas
                 .iter()
@@ -508,9 +516,31 @@ impl World {
                     slot: a.slot,
                     shape: a.shape,
                     plan: a.plan,
+                    window: infos
+                        .iter()
+                        .find(|i| i.slot == a.slot)
+                        .map_or([0; 4], |i| i.window),
+                    age: (self.step - a.opened) as f32 * dt,
                 })
                 .collect()
         })
+    }
+
+    /// π-scaling's crater for `impact` under the world's gravity, without
+    /// striking ([`Self::terrain_impact`] returns the same once it strikes).
+    pub fn terrain_predict_impact(
+        &self,
+        impact: &ImpactSource,
+    ) -> anyhow::Result<CraterPrediction> {
+        Ok(impact.crater(self.terrain_gravity()?)?)
+    }
+
+    /// [`Self::terrain_predict_impact`] for a buried charge.
+    pub fn terrain_predict_explosion(
+        &self,
+        charge: &ExplosionSource,
+    ) -> anyhow::Result<CraterPrediction> {
+        Ok(charge.crater(self.terrain_gravity()?)?)
     }
 
     fn terrain_host(&mut self) -> anyhow::Result<&mut TerrainHost> {
@@ -587,7 +617,15 @@ impl World {
         // The covering area's clock: a new area's, the merged areas' combined,
         // or the covering one's own.
         let mut clock = RegionClock::new(0.0, step);
+        let mut since = step;
         if opened.activated {
+            since = host
+                .areas
+                .iter()
+                .filter(|a| opened.absorbed.contains(&a.slot))
+                .map(|a| a.opened)
+                .min()
+                .unwrap_or(step);
             let merged: Vec<RegionClock> = host
                 .areas
                 .iter()
@@ -599,7 +637,9 @@ impl World {
             }
             host.areas.retain(|a| !opened.absorbed.contains(&a.slot));
         } else if let Some(at) = host.areas.iter().position(|a| a.slot == opened.area) {
-            clock = host.areas.remove(at).clock;
+            let a = host.areas.remove(at);
+            clock = a.clock;
+            since = a.opened;
         }
         let area_plan = self
             .sim
@@ -619,6 +659,7 @@ impl World {
             shape: ground,
             plan: area_plan,
             clock,
+            opened: since,
         });
         host.areas.sort_by_key(|a| a.slot);
         self.dirty = true;

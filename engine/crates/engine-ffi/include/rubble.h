@@ -408,6 +408,53 @@ typedef struct RbProjectileEvent {
   uint64_t user_data;
 } RbProjectileEvent;
 
+// The terrain counters of the latest step (`RbFrame::terrain`): speeds in
+// the world's units.
+typedef struct RbTerrainReport {
+  float max_speed;
+  // Fastest dynamic body coupled to an open area.
+  float body_speed;
+  uint32_t blocks;
+  // The particle pool's extent and its live particles.
+  uint32_t particles;
+  uint32_t live;
+  uint32_t parcels;
+  uint32_t airborne;
+  uint32_t deposited;
+  uint32_t escaped;
+  // Vehicle wheels whose load the open sand carried.
+  uint32_t wheels;
+} RbTerrainReport;
+
+// An open area's live ground (`RbFrame::terrain_surfaces`), in the order and
+// units of `rbCreateHeightFieldShape`: samples `[a0, a0 + count_a) ×
+// [b0, b0 + count_b)` of `shape`, `heights` A fastest. Once the area bakes,
+// `rbHeightField_GetHeights` holds these there.
+typedef struct RbTerrainSurface {
+  RbShapeId shape;
+  uint32_t slot;
+  uint32_t a0;
+  uint32_t b0;
+  uint32_t count_a;
+  uint32_t count_b;
+  const float *heights;
+} RbTerrainSurface;
+
+// A piece of debris (`RbFrame::terrain_debris`): sand in flight or above the
+// surface, or a ballistic parcel.
+typedef struct RbTerrainDebris {
+  struct RbVec3 position;
+  struct RbVec3 velocity;
+  float volume;
+  bool is_parcel;
+} RbTerrainDebris;
+
+// An area that baked (`RbFrame::terrain_bakes`): re-read its shape's heights.
+typedef struct RbTerrainBake {
+  RbShapeId shape;
+  uint32_t slot;
+} RbTerrainBake;
+
 // Results of one step, or of several folded together (`rbWorld_Poll`).
 // Pointers stay valid until the next poll.
 typedef struct RbFrame {
@@ -461,6 +508,18 @@ typedef struct RbFrame {
   uint32_t projectile_count;
   const struct RbProjectileEvent *projectile_events;
   uint32_t projectile_event_count;
+  // Deformable terrain (`rbWorld_EnableTerrain`): the latest step's
+  // counters while an area is open (`has_terrain`).
+  bool has_terrain;
+  struct RbTerrainReport terrain;
+  // With `enable_surface`: each open area's live ground, and the debris.
+  const struct RbTerrainSurface *terrain_surfaces;
+  uint32_t terrain_surface_count;
+  const struct RbTerrainDebris *terrain_debris;
+  uint32_t terrain_debris_count;
+  // Areas that baked, in step order: re-read their shapes' heights.
+  const struct RbTerrainBake *terrain_bakes;
+  uint32_t terrain_bake_count;
 } RbFrame;
 
 // A ray to cast: from `origin` along `translation` (its length is the range).
@@ -795,6 +854,27 @@ typedef struct RbTerrainDef {
   float strike_min_speed;
   float strike_min_energy;
   float strike_cells_per_body;
+  // Vehicle wheels standing on open sand at once.
+  uint32_t max_wheel_loads;
+  // Heightfield samples the open areas activate, summed.
+  uint32_t max_columns;
+  // 0: the settings as given (the defaults are the physical, validation
+  // preset); 1: the game preset (real time) for cells per radius, bed
+  // depth, Courant number and speed growth, over `cells_per_radius`.
+  uint32_t profile;
+  // The live surface ([`RbFrame::terrain_surfaces`], `terrain_debris`) and
+  // the patches vehicles drive on over open sand. Off by default.
+  bool enable_surface;
+  // Its occupancy cells (window samples × layers, summed over open areas).
+  uint32_t surface_cells;
+  // Sand faster than a fall of this many layers is debris.
+  float surface_ejecta_fall;
+  // Samples across each area's patch (an area's window plus two must fit);
+  // 0: no patches.
+  uint32_t surface_patch_samples;
+  // Debris records a frame carries at most (past it the poll fails naming
+  // "surface debris"); 0: none.
+  uint32_t surface_max_debris;
   uint32_t internal_value;
 } RbTerrainDef;
 
@@ -806,6 +886,24 @@ typedef struct RbCraterPrediction {
   // Seconds.
   float formation_time;
 } RbCraterPrediction;
+
+// An open area (`rbTerrain_GetAreas`).
+typedef struct RbTerrainArea {
+  RbShapeId shape;
+  // `rbTerrain_CloseArea` takes it.
+  uint32_t slot;
+  // Its box (world, min and max corners) and cell size.
+  struct RbVec3 lower;
+  struct RbVec3 upper;
+  float cell_size;
+  // The heightfield samples it covers, as `RbTerrainSurface`'s.
+  uint32_t a0;
+  uint32_t b0;
+  uint32_t count_a;
+  uint32_t count_b;
+  // Seconds since it opened.
+  float age;
+} RbTerrainArea;
 
 // A capsule character controller (`rbDefaultCharacterDef`): an upright
 // capsule that walks, climbs steps, sticks to the floor, jumps and rides
@@ -1398,9 +1496,8 @@ enum RbResult rbWorld_Explode(struct RbWorld *world, const struct RbExplosionDef
 // (static, awake, asleep) unless a material colour is set.
 enum RbResult rbWorld_DebugDraw(struct RbWorld *world, const struct RbDebugDraw *draw);
 
-// Defaults in metres (the default coordinates); scale lengths, speeds,
-// densities and energies for other units.
-struct RbTerrainDef rbDefaultTerrainDef(void);
+// Defaults in `coordinates`' units (lengths, speeds, densities, energies).
+struct RbTerrainDef rbDefaultTerrainDef(enum RbCoordinates coordinates);
 
 // Turn on deformable terrain for the world.
 enum RbResult rbWorld_EnableTerrain(struct RbWorld *world, const struct RbTerrainDef *def);
@@ -1461,6 +1558,31 @@ enum RbResult rbHeightField_GetHeights(struct RbWorld *world,
                                        uint32_t count_a,
                                        uint32_t count_b,
                                        float *out_heights);
+
+// Bake open area `slot` now (`rbTerrain_GetAreas` lists them); the others go on.
+enum RbResult rbTerrain_CloseArea(struct RbWorld *world, uint32_t slot);
+
+// The open areas: up to `capacity` into `out` (may be null with capacity
+// 0), and how many are open in `*out_count`.
+enum RbResult rbTerrain_GetAreas(struct RbWorld *world,
+                                 struct RbTerrainArea *out,
+                                 uint32_t capacity,
+                                 uint32_t *out_count);
+
+// π-scaling's crater for an impact (as [`rbTerrain_Impact`] would strike)
+// without striking.
+enum RbResult rbTerrain_PredictImpact(struct RbWorld *world,
+                                      float impactor_radius,
+                                      float impactor_density,
+                                      struct RbVec3 velocity,
+                                      struct RbCraterPrediction *out);
+
+// π-scaling's crater for a buried charge (as [`rbTerrain_Explode`]) without
+// striking.
+enum RbResult rbTerrain_PredictExplosion(struct RbWorld *world,
+                                         float tnt_kg,
+                                         float depth_of_burial,
+                                         struct RbCraterPrediction *out);
 
 // Defaults in `coordinates`' units.
 struct RbCharacterDef rbDefaultCharacterDef(enum RbCoordinates coordinates);

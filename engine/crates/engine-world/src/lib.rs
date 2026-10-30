@@ -75,7 +75,8 @@ pub use terrain::{
 pub use threshold::{Projectile, StressSource};
 pub use engine_terrain::{
     CraterPrediction, CraterTarget, ExplosionSource, ImpactSource, InitialStress, RegionBoundary,
-    RegionPlan, SandMaterial, SettleRule, TerrainConfig, TerrainError, YieldSurface,
+    RegionPlan, SandMaterial, SettleRule, TerrainConfig, TerrainError, TerrainProfile,
+    YieldSurface,
 };
 pub use engine_webgpu::TerrainStepReport;
 
