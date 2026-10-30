@@ -24,6 +24,12 @@
     #touch button.on { background: rgba(255, 150, 90, 0.55); }
     canvas { touch-action: none; }
     [hidden] { display: none !important; }
+    /* A phone: the HUD down to its title, the buttons in thumb reach. */
+    @media (max-width: 640px) {
+      #hud { max-width: 52vw; padding: 6px 8px; }
+      #hud #stats, #hud #hint, #hud #status { display: none; }
+      #touch button { width: 64px; height: 64px; font-size: 24px; }
+    }
   </style>
 </head>
 <body>
@@ -38,11 +44,11 @@
   <div id="play" hidden><div class="big" id="pTime">0.0 s</div><div id="pInfo"></div></div>
   <div id="over" hidden><div><b id="oWhy"></b><div id="oScore"></div><div class="muted">Tap or press R to drive again</div></div></div>
   <div id="touch" hidden>
-    <button id="tLeft" style="left: 16px">◀</button>
-    <button id="tRight" style="left: 100px">▶</button>
-    <button id="tStrike" style="right: 184px; font-size: 22px">☄</button>
-    <button id="tBrake" style="right: 100px">▼</button>
-    <button id="tGas" style="right: 16px">▲</button>
+    <button id="tLeft" style="left: 14px">◀</button>
+    <button id="tRight" style="left: 90px">▶</button>
+    <button id="tStrike" style="right: 14px; bottom: calc(96px + env(safe-area-inset-bottom)); font-size: 22px">☄</button>
+    <button id="tBrake" style="right: 90px">▼</button>
+    <button id="tGas" style="right: 14px">▲</button>
   </div>
   <script type="module">
     import { createWorld, sceneCapacity } from './world-host.mjs';
