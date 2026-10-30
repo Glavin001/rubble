@@ -68,7 +68,10 @@ pub use motion::{
 pub use queries::{ExplosionDef, OverlapResult, QueryFilter, QueryId};
 pub use readback::Backpressure;
 pub use rig::{SoftBeam, VehicleDamage};
-pub use terrain::{StrikeDef, TerrainArea, TerrainDef};
+pub use terrain::{
+    StrikeDef, TerrainArea, TerrainBake, TerrainDebris, TerrainDef, TerrainSurfaceDef,
+    TerrainSurfaceView,
+};
 pub use threshold::{Projectile, StressSource};
 pub use engine_terrain::{
     CraterPrediction, CraterTarget, ExplosionSource, ImpactSource, InitialStress, RegionBoundary,
@@ -211,6 +214,8 @@ enum Owner {
     Piece,
     /// A character's inner capsule: reported through `Frame::characters`.
     Character,
+    /// A terrain surface patch (`TerrainDef::surface`): the GPU places it.
+    TerrainPatch,
 }
 
 /// What an extra readback copy holds.
@@ -245,6 +250,10 @@ enum Extra {
     TerrainHeights(ShapeId),
     /// The terrain look-ahead's pick after this step.
     TerrainWatch,
+    /// The live surface's heights, for these views of the ground shape.
+    TerrainSurface(ShapeId, Vec<engine_terrain::surface::SurfaceViewRange>),
+    /// The surface pass's debris gather.
+    TerrainDebris,
 }
 
 #[derive(Clone, Debug)]
@@ -1894,6 +1903,9 @@ impl World {
                 }
             }
         }
+        for f in &mut frames {
+            f.terrain_bakes = self.terrain_take_bakes(f.step);
+        }
         if let Some(last) = frames.last_mut() {
             let (ends, sensor_ends) = self.take_pending_contact_ends();
             last.contact_events.end.extend(ends);
@@ -2047,6 +2059,8 @@ impl World {
         let mut record: Option<(VehicleHandle, Vec<[u32; 4]>)> = None;
         let mut ray_results = Vec::new();
         let mut terrain = None;
+        let mut terrain_surface = Vec::new();
+        let mut terrain_debris = Vec::new();
         let mut contact_events = ContactEvents::default();
         let mut sensor_events = SensorEvents::default();
         let mut overlap_results = Vec::new();
@@ -2110,6 +2124,10 @@ impl World {
                 Extra::TerrainCounters => terrain = Some(self.terrain_counters(step, bytes)?),
                 Extra::TerrainHeights(id) => self.terrain_heights(*id, bytes),
                 Extra::TerrainWatch => self.terrain_strike(step, bytes),
+                Extra::TerrainSurface(shape, views) => {
+                    terrain_surface = Self::terrain_surface_views(*shape, views, bytes)
+                }
+                Extra::TerrainDebris => terrain_debris = self.terrain_debris(step, bytes)?,
             }
         }
         Ok(Frame {
@@ -2135,6 +2153,9 @@ impl World {
             resynced: resync.is_some(),
             counters: Some(c),
             terrain,
+            terrain_surface,
+            terrain_debris,
+            terrain_bakes: Vec::new(),
         })
     }
 

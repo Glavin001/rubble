@@ -232,6 +232,8 @@ const WORLD_ENTRIES: &[&str] = &[
     "terrain_surface_bin",
     "terrain_surface_resolve",
     "terrain_surface_debris",
+    "terrain_surface_gather",
+    "terrain_surface_gather_parcels",
     "terrain_surface_publish",
     // Contact events (P4), canonical and persistent storage.
     "contact_events",

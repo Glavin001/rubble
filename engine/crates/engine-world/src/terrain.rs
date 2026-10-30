@@ -8,8 +8,12 @@
 //! copies the new heights back only to refresh the host's mirror of the field.
 
 use crate::readback;
-use crate::{unsupported, Extra, Geometry, ShapeId, World};
+use crate::{unsupported, BodyDef, BodyId, Extra, Geometry, Owner, ShapeId, World};
+use engine_schema::heightfield::HeightField;
 use engine_terrain::plan::source_peak_speed;
+use engine_terrain::surface::{
+    SurfaceDebris, SurfacePatch, SurfacePlan, SurfaceReadback, DEFAULT_SURFACE_CELLS,
+};
 use engine_terrain::zmodel::point_source_z;
 use engine_terrain::{
     CraterPrediction, ExplosionSource, ImpactSource, RegionClock, RegionPlan, SandMaterial,
@@ -48,9 +52,68 @@ pub struct TerrainDef {
     /// settle under a car driving over them and beside ejecta flying
     /// elsewhere).
     pub settle_rule: SettleRule,
+    /// The live surface (off by default): every frame rebuilds each open
+    /// area's ground from its sand, lists what flies as debris, and keeps a
+    /// patch on the sand so vehicles and contacts meet it; frames carry the
+    /// heights and the debris (`Frame::terrain_surface`, `terrain_debris`).
+    pub surface: Option<TerrainSurfaceDef>,
     /// What counts as a heavy-body strike on a watched heightfield
     /// ([`World::terrain_watch_shape`]).
     pub strike: StrikeDef,
+}
+
+/// The live surface's limits (`engine_terrain::surface::SurfacePlan`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TerrainSurfaceDef {
+    /// Occupancy cells (window samples × layers, summed over the open areas).
+    pub cells: u32,
+    /// Sand faster than a fall of this many layers is in flight (debris); 0
+    /// counts only what a gap separates.
+    pub ejecta_fall: f32,
+    /// Samples across each area's patch (one per `max_regions` slot, the
+    /// ground's spacing): an area's window plus a ring of two must fit, or
+    /// its frame fails naming "surface patch samples". 0: no patches (the
+    /// surface is shown, but bodies meet the lowered bed).
+    pub patch_samples: u32,
+    /// Debris records a frame carries at most (particles in flight or above
+    /// the surface, and parcels); a frame with more fails naming "surface
+    /// debris". 0: no debris in frames.
+    pub max_debris: u32,
+}
+
+impl Default for TerrainSurfaceDef {
+    fn default() -> Self {
+        Self {
+            cells: DEFAULT_SURFACE_CELLS,
+            ejecta_fall: 1.0,
+            patch_samples: 128,
+            max_debris: 16384,
+        }
+    }
+}
+
+/// An open area's live ground after a step (`Frame::terrain_surface`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TerrainSurfaceView {
+    pub slot: u32,
+    /// The heightfield shape the area is open on.
+    pub shape: ShapeId,
+    /// Its window in the heightfield's samples: i0, j0, ni, nj.
+    pub window: [u32; 4],
+    /// `ni × nj` heights, row-major (j then i), in the heightfield's local y:
+    /// what its samples will hold once the area bakes.
+    pub heights: Vec<f32>,
+}
+
+/// A piece of terrain debris after a step (`Frame::terrain_debris`).
+pub type TerrainDebris = SurfaceDebris;
+
+/// An area that baked (`Frame::terrain_bakes`): its heightfield shape's
+/// samples changed, and `World`'s copy of them follows by this frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerrainBake {
+    pub slot: u32,
+    pub shape: ShapeId,
 }
 
 /// The look-ahead's thresholds and the region a strike opens.
@@ -91,6 +154,7 @@ impl Default for TerrainDef {
             settle_speed: 0.01,
             settle_frames: 30,
             settle_rule: SettleRule::Strict,
+            surface: None,
             strike: StrikeDef::default(),
         }
     }
@@ -133,6 +197,22 @@ pub(crate) struct TerrainHost {
     pending_strike: Option<(ShapeId, TerrainStrike)>,
     /// Strikes predicted too late to open a region before them.
     missed_strikes: u64,
+    /// The live surface, with `TerrainDef::surface`.
+    surface: Option<HostSurface>,
+    /// Bakes not yet delivered: the step each came before, and the area.
+    bakes: Vec<(u64, TerrainBake)>,
+    /// This step's surface copy (its layout), when the pass ran.
+    surface_copy: Option<SurfaceReadback>,
+}
+
+/// The surface pass's plan and the patches `World` made for it.
+struct HostSurface {
+    plan: SurfacePlan,
+    def: TerrainSurfaceDef,
+    /// One per area slot: its body, shape and collider.
+    patches: Vec<(BodyId, ShapeId, u32)>,
+    /// The ground spacing the patches were made for.
+    spacing: Option<(f32, f32)>,
 }
 
 impl World {
@@ -155,8 +235,27 @@ impl World {
             def.settle_speed.is_finite() && def.settle_speed > 0.0 && def.settle_frames > 0,
             "settle_speed must be positive and settle_frames at least 1"
         );
+        anyhow::ensure!(
+            self.terrain.as_ref().is_none_or(|t| t.surface.is_none()),
+            "terrain is enabled with a live surface: its patches stay (enable it once)"
+        );
         self.sim.terrain_enable(&def.config)?;
         self.sim.terrain_set_material(Some(&def.material))?;
+        let surface = match &def.surface {
+            None => None,
+            Some(sd) => {
+                let plan = SurfacePlan::new(&def.config, sd.cells)?
+                    .with_ejecta_fall(sd.ejecta_fall)?
+                    .with_debris(sd.max_debris);
+                self.sim.terrain_surface_enable(&plan)?;
+                Some(HostSurface {
+                    plan,
+                    def: sd.clone(),
+                    patches: Vec::new(),
+                    spacing: None,
+                })
+            }
+        };
         self.terrain = Some(TerrainHost {
             def: def.clone(),
             areas: Vec::new(),
@@ -165,8 +264,119 @@ impl World {
             watched: Vec::new(),
             pending_strike: None,
             missed_strikes: 0,
+            surface,
+            bakes: Vec::new(),
+            surface_copy: None,
         });
         Ok(())
+    }
+
+    /// Before an area opens on `ground` (live shape slot `s`): the surface
+    /// patches exist, at its spacing, one per `max_regions` slot, and stand
+    /// for it (a contact or ray hit on a patch reports `ground`).
+    fn terrain_place_patches(&mut self, ground: ShapeId, s: usize) -> anyhow::Result<()> {
+        let Some(host) = self.terrain.as_ref() else {
+            return Ok(());
+        };
+        let Some(sf) = host.surface.as_ref() else {
+            return Ok(());
+        };
+        let n = sf.def.patch_samples;
+        if n == 0 {
+            return Ok(());
+        }
+        let regions = host.def.config.max_regions;
+        let Geometry::HeightField { field, .. } = &self.shapes[s].geometry else {
+            anyhow::bail!("shape {} is not a heightfield", ground.to_bits());
+        };
+        let spacing = field.cell_size();
+        if let Some(have) = sf.spacing {
+            anyhow::ensure!(
+                have == spacing,
+                "the terrain surface patches were made for samples {have:?} apart; heightfield {} \
+                 has {spacing:?} (one ground spacing per world)",
+                ground.to_bits()
+            );
+        } else {
+            // Sunk far below anything until the surface pass places them.
+            let sunk = HeightField::new(n, n, spacing.0, spacing.1, vec![-1.0e4; (n * n) as usize])
+                .map_err(|e| anyhow::anyhow!("terrain surface patch: {e}"))?;
+            let def = self.shapes[s].def.clone();
+            let mut patches = Vec::new();
+            for _ in 0..regions {
+                let body = self.create_body(&BodyDef::default())?;
+                let shape =
+                    self.create_height_field_shape(body, &def, &sunk, crate::Transform::default())?;
+                let b = body.index() as usize;
+                self.bodies[b].owner = Owner::TerrainPatch;
+                let collider = self.shapes[shape.index() as usize].collider;
+                patches.push((body, shape, collider));
+            }
+            let list = patches
+                .iter()
+                .map(|&(_, _, collider)| SurfacePatch {
+                    collider,
+                    nx: n,
+                    nz: n,
+                })
+                .collect();
+            let sf = self
+                .terrain
+                .as_mut()
+                .and_then(|t| t.surface.as_mut())
+                .expect("surface on");
+            sf.plan = sf.plan.clone().with_patches(list)?;
+            sf.patches = patches;
+            sf.spacing = Some(spacing);
+        }
+        // Contacts and hits on a patch are the ground's.
+        let sf = self
+            .terrain
+            .as_ref()
+            .and_then(|t| t.surface.as_ref())
+            .expect("surface on");
+        for &(_, _, collider) in &sf.patches {
+            self.collider_shape[collider as usize] = ground.index();
+        }
+        Ok(())
+    }
+
+    /// The surface patches (`TerrainDef::surface`), one per area slot, once
+    /// the first area has opened: the GPU writes them; for tools and tests
+    /// (`read_height_field` reads one), never edited.
+    pub fn terrain_surface_patches(&self) -> Vec<ShapeId> {
+        self.terrain
+            .as_ref()
+            .and_then(|t| t.surface.as_ref())
+            .map_or_else(Vec::new, |sf| {
+                sf.patches.iter().map(|&(_, s, _)| s).collect()
+            })
+    }
+
+    /// After a bake: the area's event, and once none is left open the
+    /// surface is no longer valid and the patches sink.
+    fn terrain_baked(&mut self, slot: u32, shape: ShapeId) -> anyhow::Result<()> {
+        let step = self.step;
+        let host = self.terrain_host()?;
+        host.bakes.push((step, TerrainBake { slot, shape }));
+        if !host.areas.is_empty() {
+            return Ok(());
+        }
+        if let Some(sf) = host.surface.as_ref() {
+            let plan = sf.plan.clone();
+            self.sim.terrain_surface(&plan)?;
+        }
+        Ok(())
+    }
+
+    /// The bakes up to `step`, for its frame.
+    pub(crate) fn terrain_take_bakes(&mut self, step: u64) -> Vec<TerrainBake> {
+        let Some(host) = self.terrain.as_mut() else {
+            return Vec::new();
+        };
+        let (due, later): (Vec<_>, Vec<_>) = host.bakes.drain(..).partition(|(s, _)| *s <= step);
+        host.bakes = later;
+        due.into_iter().map(|(_, b)| b).collect()
     }
 
     /// A km/s impact at `point` on heightfield shape `ground`: opens a region
@@ -253,13 +463,17 @@ impl World {
     pub fn terrain_close(&mut self) -> anyhow::Result<()> {
         let host = self.terrain_host()?;
         anyhow::ensure!(!host.areas.is_empty(), "no terrain region is open");
-        for a in std::mem::take(&mut host.areas) {
+        let closed = std::mem::take(&mut host.areas);
+        for a in &closed {
             if !host.mirror_due.contains(&a.shape) {
                 host.mirror_due.push(a.shape);
             }
         }
         self.sim.terrain_bake()?;
         self.dirty = true;
+        for a in closed {
+            self.terrain_baked(a.slot, a.shape)?;
+        }
         Ok(())
     }
 
@@ -275,7 +489,7 @@ impl World {
         }
         self.sim.terrain_bake_area(slot)?;
         self.dirty = true;
-        Ok(())
+        self.terrain_baked(slot, a.shape)
     }
 
     /// An open area's heightfield shape and box (the first, by slot), if any
@@ -340,6 +554,9 @@ impl World {
         source: Option<(&ZModel, Vec3)>,
     ) -> anyhow::Result<u32> {
         let s = self.live_shape(ground)?;
+        if self.terrain_host()?.areas.is_empty() {
+            self.terrain_place_patches(ground, s)?;
+        }
         let host = self.terrain_host()?;
         if let Some(a) = host.areas.first() {
             anyhow::ensure!(
@@ -449,6 +666,16 @@ impl World {
             }
         }
         self.sim.terrain_encode_coupled(enc, frame.0, frame.1)?;
+        // The live surface from the substeps' sand, before the rigid step
+        // (the patches carry it into this step).
+        let host = self.terrain.as_mut().expect("terrain enabled");
+        host.surface_copy = None;
+        if let Some(sf) = host.surface.as_ref() {
+            let plan = sf.plan.clone();
+            self.sim.terrain_encode_surface(enc, &plan)?;
+            let copy = plan.readback(self.sim.terrain_plan_ref().expect("terrain enabled"));
+            self.terrain.as_mut().expect("terrain enabled").surface_copy = Some(copy);
+        }
         Ok(true)
     }
 
@@ -473,6 +700,25 @@ impl World {
         let Some(host) = self.terrain.as_mut() else {
             return out;
         };
+        if let Some(copy) = host.surface_copy.take() {
+            if counters {
+                let shape = host.areas.first().map_or(ShapeId::NULL, |a| a.shape);
+                if copy.heights_words > 0 {
+                    out.push((
+                        Extra::TerrainSurface(shape, copy.views.clone()),
+                        4 * u64::from(copy.heights_word),
+                        4 * u64::from(copy.heights_words),
+                    ));
+                }
+                if copy.debris_words > 0 {
+                    out.push((
+                        Extra::TerrainDebris,
+                        4 * u64::from(copy.debris_word),
+                        4 * u64::from(copy.debris_words),
+                    ));
+                }
+            }
+        }
         for id in std::mem::take(&mut host.mirror_due) {
             let Some(s) = self
                 .shapes
@@ -509,6 +755,9 @@ impl World {
                 buffer: match kind {
                     Extra::TerrainHeights(_) => sim.hull_arena_buffer(),
                     Extra::TerrainWatch => sim.terrain_watch_buffer().0,
+                    Extra::TerrainSurface(..) | Extra::TerrainDebris => {
+                        sim.terrain_surface_buffer()
+                    }
                     _ => sim.terrain_counters_buffer(),
                 },
                 kind,
@@ -541,6 +790,49 @@ impl World {
             }
         }
         Ok(report)
+    }
+
+    /// A frame's live heights: each open area's window.
+    pub(crate) fn terrain_surface_views(
+        shape: ShapeId,
+        views: &[engine_terrain::surface::SurfaceViewRange],
+        bytes: &[u8],
+    ) -> Vec<TerrainSurfaceView> {
+        let words: Vec<f32> = bytes
+            .chunks_exact(4)
+            .map(bytemuck::pod_read_unaligned)
+            .collect();
+        views
+            .iter()
+            .map(|v| {
+                let n = (v.window[2] * v.window[3]) as usize;
+                let at = v.offset as usize;
+                TerrainSurfaceView {
+                    slot: v.slot,
+                    shape,
+                    window: v.window,
+                    heights: words[at..at + n].to_vec(),
+                }
+            })
+            .collect()
+    }
+
+    /// A frame's debris, or the error naming the limit it passed.
+    pub(crate) fn terrain_debris(
+        &self,
+        step: u64,
+        bytes: &[u8],
+    ) -> anyhow::Result<Vec<TerrainDebris>> {
+        let Some(sf) = self.terrain.as_ref().and_then(|t| t.surface.as_ref()) else {
+            return Ok(Vec::new());
+        };
+        let words: Vec<u32> = bytes
+            .chunks_exact(4)
+            .map(bytemuck::pod_read_unaligned)
+            .collect();
+        sf.plan
+            .decode_debris(&words)
+            .map_err(|e| anyhow::anyhow!("step {step}: terrain: {e}"))
     }
 
     /// A baked heightfield's samples: the host mirror follows the GPU (unless
@@ -588,6 +880,14 @@ impl World {
         anyhow::ensure!(
             host.areas.iter().all(|a| a.shape != id),
             "shape {} has an open terrain region",
+            id.to_bits()
+        );
+        anyhow::ensure!(
+            !host
+                .surface
+                .as_ref()
+                .is_some_and(|sf| sf.patches.iter().any(|&(_, s, _)| s == id)),
+            "shape {} is a terrain surface patch (the GPU writes it)",
             id.to_bits()
         );
         let due = host.mirror_due.contains(&id) || host.mirror_in_flight.contains(&id);
