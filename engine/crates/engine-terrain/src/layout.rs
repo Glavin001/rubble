@@ -70,7 +70,26 @@ pub const MPM_C_AREA_BODY: usize = MPM_C_AREA_SPEED + MPM_MAX_AREAS as usize;
 /// Per area slot: the pool's particle count when it opened (the bake's
 /// dithers count slots from it, so an area bakes as it would alone).
 pub const MPM_C_AREA_FIRST: usize = MPM_C_AREA_BODY + MPM_MAX_AREAS as usize;
-pub const MPM_COUNTER_WORDS: usize = MPM_C_AREA_FIRST + MPM_MAX_AREAS as usize;
+/// Area clocks ([`TerrainConfig::area_clocks`]): bit k set while area slot k
+/// sits out the current substep pass (none without area clocks).
+///
+/// [`TerrainConfig::area_clocks`]: crate::TerrainConfig::area_clocks
+pub const MPM_C_SKIP: usize = MPM_C_AREA_FIRST + MPM_MAX_AREAS as usize;
+/// Area clocks: the frame's next pass (its record in the pass table).
+pub const MPM_C_PASS: usize = MPM_C_SKIP + 1;
+/// Block sleep ([`TerrainConfig::sleep_speed`]): the speed (f32 bits) under
+/// which material counts as at rest; 0 with sleep off.
+///
+/// [`TerrainConfig::sleep_speed`]: crate::TerrainConfig::sleep_speed
+pub const MPM_C_SLEEP: usize = MPM_C_PASS + 1;
+/// Block sleep: the substeps at rest after which a particle sleeps.
+pub const MPM_C_SLEEP_AFTER: usize = MPM_C_SLEEP + 1;
+/// Block sleep: this substep's blocks below this index are its awake blocks
+/// (where awake material and the wake sources reach), below the next word's
+/// those and their neighbours; the rest are the second ring.
+pub const MPM_C_SLEEP_RING0: usize = MPM_C_SLEEP_AFTER + 1;
+pub const MPM_C_SLEEP_RING1: usize = MPM_C_SLEEP_RING0 + 1;
+pub const MPM_COUNTER_WORDS: usize = MPM_C_SLEEP_RING1 + 1;
 
 /// Area slots (`TerrainConfig::max_regions` is at most this): records
 /// `1..=MPM_MAX_AREAS` of [`MPM_PARAMS_BINDING`] after the domain's.
@@ -139,6 +158,9 @@ pub const MPM_PARTICLE_HOME: u32 = 2;
 /// `MpmParticle::f[2][3]` bit: activated since the last step; the next
 /// geostatic start (`mpm_geostatic`) gives it its F and clears the bit.
 pub const MPM_PARTICLE_FRESH: u32 = 4;
+/// `MpmParticle::f[2][3]` bit: block sleep froze it at rest
+/// ([`crate::TerrainConfig::sleep_speed`]); bits 8-15 count its substeps at rest.
+pub const MPM_PARTICLE_ASLEEP: u32 = 8;
 
 /// One ejecta parcel: position, quanta (u32 bits), velocity, mass (0 once landed).
 #[repr(C)]
@@ -198,8 +220,30 @@ pub struct MpmParams {
 }
 
 /// Bytes of [`MPM_PARAMS_BINDING`]: the domain record and every area slot's.
+/// With [`TerrainConfig::area_clocks`] the pass table follows them: one
+/// record per substep pass of the frame (`step`: dt, the CFL speed bound, the
+/// areas it steps as bits, nonzero to set the geostatic F first), at most
+/// [`area_clock_passes`] of them.
+///
+/// [`TerrainConfig::area_clocks`]: crate::TerrainConfig::area_clocks
 pub const MPM_PARAMS_BYTES: u64 =
     (1 + MPM_MAX_AREAS as u64) * std::mem::size_of::<MpmParams>() as u64;
+
+/// The area clocks' passes a frame may hold: every open area at the frame's
+/// substep limit.
+pub fn area_clock_passes(config: &crate::TerrainConfig) -> u32 {
+    if config.area_clocks {
+        config.max_regions * config.max_substeps
+    } else {
+        0
+    }
+}
+
+/// [`MPM_PARAMS_BINDING`]'s bytes under `config`: the records, then the pass table.
+pub fn params_bytes(config: &crate::TerrainConfig) -> u64 {
+    MPM_PARAMS_BYTES
+        + u64::from(area_clock_passes(config)) * std::mem::size_of::<MpmParams>() as u64
+}
 
 /// One particle (128 B).
 #[repr(C)]
