@@ -806,8 +806,7 @@ fn eight_storage_buffers_child() {
             ..Crush::default()
         }),
     )
-    .err()
-    .expect("crushing needs more than 8 storage buffers")
+    .expect_err("crushing needs more than 8 storage buffers")
     .to_string();
     assert!(
         err.contains("storage buffers") && err.contains("allows 8"),
