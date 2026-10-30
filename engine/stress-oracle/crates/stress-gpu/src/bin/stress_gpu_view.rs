@@ -167,9 +167,9 @@ impl View {
         let surface = instance.create_surface(window.clone()).expect("surface");
         let gpu = pollster::block_on(Gpu::with_instance(&instance, Some(&surface))).expect("GPU");
         let size = window.inner_size();
-        let mut config = surface.get_default_config(&gpu.adapter, size.width.max(1), size.height.max(1)).expect("surface config");
+        let mut config = surface.get_default_config(gpu.surface_adapter(), size.width.max(1), size.height.max(1)).expect("surface config");
         // Readable for screenshots of exactly what is presented.
-        if surface.get_capabilities(&gpu.adapter).usages.contains(wgpu::TextureUsages::COPY_SRC) {
+        if surface.get_capabilities(gpu.surface_adapter()).usages.contains(wgpu::TextureUsages::COPY_SRC) {
             config.usage |= wgpu::TextureUsages::COPY_SRC;
         }
         surface.configure(&gpu.device, &config);

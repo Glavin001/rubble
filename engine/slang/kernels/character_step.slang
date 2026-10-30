@@ -17,6 +17,9 @@
 //   → projectile_step → apply_impulses (late) → query_batch → char_move
 //   → … narrowphase … → extract_velocity_sleep → vehicle_post → char_post
 
+// Characters only cast capsules: keep the heightfield hull sweep out of these
+// kernels (Metal's compiler failed on char_move with it in).
+#define HF_CAST_ROUND_ONLY 1
 #include "world_step.slang"
 #include "scene_query.slang"
 #include "../physics/character_layout.slang"
@@ -128,6 +131,24 @@ bool capsuleContact(uint ci, float3 P, float r, float hh, float spec, out float3
         Frame fc; fc.p = P; fc.q = qCap;
         m = convexCapsuleManifold(hullOf(col), fh, fc, r, hh, true, spec);
         charIsA = false;
+    }
+    else if (col.shape == SHAPE_HEIGHTFIELD)
+    {
+        // The deepest point only (the character takes one normal and gap): the
+        // capsule's clearance, the routine its casts use.
+        Frame fh; fh.p = pc; fh.q = qc;
+        HeightFieldRef hf = heightFieldOf(col);
+        float3 a0 = frameToLocal(fh, P - CHAR_UP * hh);
+        float3 a1 = frameToLocal(fh, P + CHAR_UP * hh);
+        float3 nl;
+        float clear = hfCapsuleClearance(hf, a0, a1, r + spec, nl) - r;
+        if (clear >= spec) return false;
+        n = quatRotate(fh.q, nl);
+        gap = clear;
+        // The obstacle point under the axis point nearest the surface.
+        float3 lowest = dot(a0 - a1, nl) < 0.0 ? a0 : a1;
+        point = frameToWorld(fh, lowest - nl * (clear + r));
+        return true;
     }
     else
         m = collideCapsulePlane(P, qCap, r, hh, col.params.xyz, col.params.w, spec);
@@ -728,7 +749,10 @@ void projectile_step(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                 float span = 2.0 * bound + 2.0 * rad + 1e-3;
                 float tb;
                 float3 nb;
-                if (col.shape != SHAPE_PLANE && rayCollider(ci, hp + dir * span, -dir, rad, tb, nb))
+                // A heightfield is solid below its surface, not a closed body.
+                if (col.shape == SHAPE_HEIGHTFIELD)
+                    thick = heightFieldThickness(ci, hp, dir, rad);
+                else if (col.shape != SHAPE_PLANE && rayCollider(ci, hp + dir * span, -dir, rad, tb, nb))
                     thick = max(span - tb, 0.0);
                 else
                     thick = 1e30;

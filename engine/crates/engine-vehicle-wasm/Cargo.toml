@@ -3,7 +3,7 @@ name = "engine-vehicle-wasm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "wasm-bindgen face of engine-vehicle (packer + VehicleHost) and engine-softbody (SoftHost, .truck import) for the WebGPU demos"
+description = "wasm-bindgen face of engine-vehicle (packer + VehicleHost), engine-softbody (SoftHost, .truck import) and engine-terrain (the terrain plan) for the WebGPU demos"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -17,6 +17,7 @@ engine-exec.workspace = true
 glam.workspace = true
 engine-vehicle.workspace = true
 engine-softbody.workspace = true
+engine-terrain.workspace = true
 bytemuck.workspace = true
 serde.workspace = true
 serde_json.workspace = true

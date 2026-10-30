@@ -156,13 +156,13 @@ RWStructuredBuffer<uint> gConstraintIds;
 #define CSR_ID(e) gConstraintIds[e]
 #define PREV_VEL(i) gBodiesPrev[i].linearVel
 #endif
-BIND(37) RWStructuredBuffer<GuideParams> gGuideParams;
-BIND(38) RWStructuredBuffer<GuideZone> gZones;
-BIND(39) RWStructuredBuffer<GuideBody> gGuide;
+BIND(55) RWStructuredBuffer<GuideParams> gGuideParams;
+BIND(56) RWStructuredBuffer<GuideZone> gZones;
+BIND(57) RWStructuredBuffer<GuideBody> gGuide;
 // [0] cursor block, [1] selected this tick; claims from 16; then per block
 // (candidate count, first rank).
-BIND(40) RWStructuredBuffer<uint> gGuideScratch;
-BIND(41) RWStructuredBuffer<GuideSlot> gGuideSlots;
+BIND(58) RWStructuredBuffer<uint> gGuideScratch;
+BIND(59) RWStructuredBuffer<GuideSlot> gGuideSlots;
 
 #define GP (gGuideParams[0])
 // Bodies per scan block (and lanes of the single-group passes); plan slots

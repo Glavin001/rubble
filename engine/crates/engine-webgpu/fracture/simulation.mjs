@@ -7,7 +7,7 @@ import {loadShaderModules,pipelineBuilder} from '../shader-loader.mjs';
 // (engine-viewer/src/fracture/sim.rs) replays the same commands.
 const PASS_ALIGN=256,COUNTER_BYTES=80,BODY_BYTES=112,JOINT_BYTES=288;
 // Directed debris buffers (engine-schema guidance: zones, per-body records, scratch).
-const GUIDE_ZONES=38,GUIDE_BODIES=39,GUIDE_SCRATCH=40;
+const [,GUIDE_ZONES,GUIDE_BODIES,GUIDE_SCRATCH]=Plan.guideBindings();
 const OP_DISPATCH=0,OP_INDIRECT=1,OP_COPY=2,HOST_UPLOAD=255;
 const KERNELS=Plan.kernels(),PHASES=Plan.phases();
 // One step encoded as several command buffers, split after these phases. Submitted

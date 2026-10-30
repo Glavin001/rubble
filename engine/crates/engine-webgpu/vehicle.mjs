@@ -19,6 +19,11 @@ export const M = JSON.parse(wasm.motion_constants());
 /** A character record (Uint32Array, 16 slots) from a CharacterDesc JSON. */
 export const characterRecord = (descJson, innerBody, x, y, z) => wasm.character_record(descJson, innerBody, x, y, z);
 export const characterDefault = () => JSON.parse(wasm.character_default());
+// Heightfield terrain: { params (collider), records (hull arena, binding 18) }.
+export const heightFieldArena = (nx, nz, dx, dz, heights) => {
+  const out = wasm.height_field_arena(nx, nz, dx, dz, Float32Array.from(heights));
+  return { base: out[0], params: Array.from(out.subarray(1, 5), bitsf), records: out.subarray(5) };
+};
 /** The whole wasm module (soft.mjs builds on the same instance). */
 export { wasm };
 const OP = JSON.parse(wasm.op_codes());

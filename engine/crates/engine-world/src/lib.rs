@@ -33,6 +33,8 @@ mod motion;
 mod queries;
 mod readback;
 mod rig;
+mod terrain;
+mod threshold;
 
 pub use assembly::{
     AssemblyDef, AssemblyId, ConnectionDef, ConnectionKind, PartDef, PartHandle, PartModel,
@@ -71,8 +73,17 @@ pub use motion::{
 pub use queries::{ExplosionDef, OverlapResult, QueryFilter, QueryId};
 pub use readback::Backpressure;
 pub use rig::{SoftBeam, VehicleDamage};
+pub use terrain::{StrikeDef, TerrainArea, TerrainDef};
+pub use threshold::{Projectile, StressSource};
+pub use engine_terrain::{
+    CraterPrediction, CraterTarget, ExplosionSource, ImpactSource, InitialStress, RegionBoundary,
+    RegionPlan, SandMaterial, TerrainConfig, TerrainError, YieldSurface,
+};
+pub use engine_webgpu::TerrainStepReport;
 
 pub use engine_schema::convex::{CollisionFilter as Filter, ConvexHull};
+pub use engine_schema::heightfield::{HeightField, HeightFieldError};
+pub use engine_schema::soil::{Soil, SoilError};
 pub use engine_schema::{
     AvbdParams, Dof, JointDesc, JointFrame, Motion, StepCounters, WorldCapacity,
 };
@@ -203,6 +214,9 @@ enum Owner {
     Vehicle,
     /// A soft-body particle: reported through `Frame::soft`, not as moves.
     SoftNode,
+    /// A threshold destructible's piece (or a slot reserved for one): its shapes and
+    /// lifetime belong to the destructible.
+    Piece,
     /// A character's inner capsule: reported through `Frame::characters`.
     Character,
 }
@@ -224,12 +238,21 @@ enum Extra {
     Contacts,
     /// The overlap query region, for these queries.
     Overlaps(Vec<QueryId>),
+    /// A threshold destructible's state after this step.
+    #[cfg(feature = "stress")]
+    Fracture(threshold::FractureRead),
     /// Every character record.
     Characters,
     /// The scene-query records, for these casts.
     Casts(Vec<CastId>),
     /// Every projectile record.
     Projectiles,
+    /// The terrain counters after this step's MPM substeps.
+    TerrainCounters,
+    /// A baked heightfield's samples, for the host mirror.
+    TerrainHeights(ShapeId),
+    /// The terrain look-ahead's pick after this step.
+    TerrainWatch,
 }
 
 #[derive(Clone, Debug)]
@@ -350,6 +373,9 @@ pub struct World {
     free_shapes: Vec<u32>,
     /// Retired colliders: `(collider, released at step)`.
     free_colliders: Vec<(u32, u64)>,
+    /// Arena blocks of removed heightfields: `(base, released at step)`. Freed
+    /// past quarantine, when no step in flight can still read them.
+    retired_height_fields: Vec<(u32, u64)>,
     /// Collider index -> shape slot (u32::MAX: not a user shape).
     collider_shape: Vec<u32>,
     joints: Vec<JointSlot>,
@@ -387,7 +413,11 @@ pub struct World {
     queries: queries::QueryQueue,
     hit_event_threshold: f32,
     contact_storage: ContactStorage,
+    /// Threshold destructibles (`StrengthModel::Threshold`).
+    fracture: threshold::Fracture,
     motion: motion::MotionState,
+    /// Deformable terrain, once enabled.
+    terrain: Option<terrain::TerrainHost>,
 }
 
 impl World {
@@ -435,6 +465,7 @@ impl World {
             shapes: Vec::new(),
             free_shapes: Vec::new(),
             free_colliders: Vec::new(),
+            retired_height_fields: Vec::new(),
             collider_shape: Vec::new(),
             joints: Vec::new(),
             // Slot 0 is the sim's default material (friction 0.5).
@@ -466,6 +497,8 @@ impl World {
             pending_rays: Vec::new(),
             pending_batches: Vec::new(),
             next_ray_batch: 0,
+            fracture: Default::default(),
+            terrain: None,
         })
     }
 
@@ -613,6 +646,12 @@ impl World {
     /// after two steps.
     pub fn destroy_body(&mut self, id: BodyId) -> anyhow::Result<()> {
         let i = self.live_body(id)?;
+        if self.bodies[i].owner == Owner::Piece {
+            anyhow::bail!(
+                "body {} is a threshold destructible's piece; destroy the destructible instead",
+                id.index()
+            );
+        }
         if self.bodies[i].owner != Owner::User {
             anyhow::bail!(
                 "body {} belongs to a vehicle or soft body; remove that instead",
@@ -627,6 +666,7 @@ impl World {
             self.release_shape(s);
         }
         let index = id.index();
+        self.fracture.body_destroyed(index);
         self.sim.cancel_body_commands(index);
         self.sim.clear_guide_body(index);
         let p = graveyard(index);
@@ -1003,6 +1043,150 @@ impl World {
         self.create_shape(body, def, geometry)
     }
 
+    /// Terrain on a static body: `field` centred on `transform` (its +Y up).
+    pub fn create_height_field_shape(
+        &mut self,
+        body: BodyId,
+        def: &ShapeDef,
+        field: &HeightField,
+        transform: Transform,
+    ) -> anyhow::Result<ShapeId> {
+        let geometry = Geometry::HeightField {
+            field: field.clone(),
+            transform,
+        };
+        self.create_shape(body, def, geometry)
+    }
+
+    /// Overwrite the samples `[i0, i0 + w) × [j0, j0 + d)` of a heightfield
+    /// shape (row-major `values`). Only the changed rows are uploaded; contacts
+    /// are rebuilt on the next step, and bodies that were asleep (as of the
+    /// last polled frame) over the edited cells are woken so they respond.
+    /// Fails, changing nothing, if the edit is out of bounds or the wakes exceed
+    /// `WorldCapacity::max_commands`.
+    pub fn set_height_field_region(
+        &mut self,
+        id: ShapeId,
+        i0: u32,
+        j0: u32,
+        w: u32,
+        d: u32,
+        values: &[f32],
+    ) -> anyhow::Result<()> {
+        let s = self.live_shape(id)?;
+        self.terrain_before_edit(id)?;
+        let Geometry::HeightField { field, transform } = &self.shapes[s].geometry else {
+            anyhow::bail!("shape {} is not a heightfield", id.to_bits());
+        };
+        let (mut field, transform) = (field.clone(), *transform);
+        field
+            .set_region(i0, j0, w, d, values)
+            .map_err(|e| anyhow::anyhow!("heightfield edit: {e}"))?;
+        let wakes = self.sleepers_over_height_field(s, &field, transform, i0, j0, w, d);
+        self.sim.push_body_commands(&wakes)?;
+        let collider = self.shapes[s].collider;
+        self.sim
+            .update_height_field(&mut self.hulls, collider, &field, j0..j0 + d)
+            .map_err(|e| anyhow::anyhow!("heightfield edit: {e}"))?;
+        // The collider's filter bits live in `generation`: keep them.
+        self.shapes[s].geometry = Geometry::HeightField { field, transform };
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Wake commands for the bodies asleep (as of the last polled frame) over
+    /// samples `[i0, i0 + w) × [j0, j0 + d)` of heightfield shape `s`.
+    #[allow(clippy::too_many_arguments)]
+    fn sleepers_over_height_field(
+        &self,
+        s: usize,
+        field: &HeightField,
+        transform: Transform,
+        i0: u32,
+        j0: u32,
+        w: u32,
+        d: u32,
+    ) -> Vec<GpuCommand> {
+        // Sleeping bodies over the edited cells, from last frame's poses (the
+        // terrain's static body: its origin until a frame reports it).
+        let body = self.shapes[s].body as usize;
+        let to_world = |p: Vec3| {
+            let t = self.bodies[body].last_transform.unwrap_or(self.bodies[body].origin);
+            t.p() + t.q() * (transform.p() + transform.q() * p)
+        };
+        let lo = field.vertex(i0, j0);
+        let hi = field.vertex((i0 + w).saturating_sub(1), (j0 + d).saturating_sub(1));
+        let (mut mn, mut mx) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+        for c in [Vec3::new(lo.x, -1e3, lo.z), Vec3::new(hi.x, 1e3, hi.z), Vec3::new(lo.x, 1e3, hi.z), Vec3::new(hi.x, -1e3, lo.z)] {
+            let p = to_world(c);
+            mn = mn.min(p);
+            mx = mx.max(p);
+        }
+        let (dx, dz) = field.cell_size();
+        let pad = Vec3::splat(dx.max(dz));
+        self.bodies
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.alive && b.last_asleep)
+            .filter_map(|(i, b)| {
+                let p = b.last_transform?.p();
+                // Every collider's bounding sphere, about the body origin.
+                let reach = Vec3::splat(
+                    b.shapes
+                        .iter()
+                        .map(|&k| {
+                            let c = self.sim.collider_record(self.shapes[k as usize].collider);
+                            Vec3::from(c.local_pos).length() + c.params[3]
+                        })
+                        .fold(0.0, f32::max),
+                );
+                (p.cmpge(mn - pad - reach).all() && p.cmple(mx + pad + reach).all()).then(|| GpuCommand::wake(i as u32))
+            })
+            .collect()
+    }
+
+    /// Give a heightfield shape a soil (or take it away, `None`): vehicle
+    /// wheels on it then sink to the rigid-wheel depth of their load, press
+    /// ruts and pay compaction resistance (deformable terrain T5,
+    /// `engine/docs/deformable-terrain.md`). A field can also be created with
+    /// one (`HeightField::with_soil`). The field is placed again from this
+    /// host's copy of its samples, which is fresh soil: ruts pressed so far
+    /// are not kept, and bodies asleep over the field are woken. Fails,
+    /// changing nothing, on invalid soil parameters or if the wakes exceed
+    /// `WorldCapacity::max_commands`.
+    pub fn set_height_field_soil(&mut self, id: ShapeId, soil: Option<Soil>) -> anyhow::Result<()> {
+        let s = self.live_shape(id)?;
+        let Geometry::HeightField { field, transform } = &self.shapes[s].geometry else {
+            anyhow::bail!("shape {} is not a heightfield", id.to_bits());
+        };
+        let (mut field, transform) = (field.clone(), *transform);
+        field
+            .set_soil(soil)
+            .map_err(|e| anyhow::anyhow!("heightfield soil: {e}"))?;
+        // Ruts pressed so far are gone: wake what sleeps on the field.
+        let (nx, nz) = field.samples();
+        let wakes = self.sleepers_over_height_field(s, &field, transform, 0, 0, nx, nz);
+        self.sim.push_body_commands(&wakes)?;
+        let collider = self.shapes[s].collider;
+        let mut col = self.sim.collider_record(collider);
+        let old = engine_schema::convex::convex_params_base(col.params);
+        let base = self
+            .hulls
+            .insert_height_field(&field)
+            .map_err(|e| anyhow::anyhow!("heightfield: {e}"))?;
+        col.params = engine_schema::heightfield::height_field_collider_params(base, &field);
+        self.sim.set_collider(collider, col);
+        // Rebuilds the terrain's contacts (and uploads the new block).
+        self.sim
+            .update_height_field(&mut self.hulls, collider, &field, 0..0)
+            .map_err(|e| anyhow::anyhow!("heightfield: {e}"))?;
+        // The old block is freed once no step in flight can read it.
+        self.retired_height_fields.push((old, self.step));
+        self.shapes[s].geometry = Geometry::HeightField { field, transform };
+        self.dirty = true;
+        Ok(())
+    }
+
     /// Any geometry (the `create_*_shape` calls end here).
     pub fn create_shape(
         &mut self,
@@ -1016,6 +1200,12 @@ impl World {
             "shapes on vehicle-owned bodies"
         );
         def.validate()?;
+        if matches!(geometry, Geometry::HeightField { .. }) {
+            anyhow::ensure!(
+                self.bodies[b].body_type == BodyType::Static,
+                "heightfields go on static bodies"
+            );
+        }
         if def.is_sensor && self.contact_storage == ContactStorage::Compact {
             // Compact solver pairs are packed before the events pass runs.
             return unsupported("sensor shapes with ContactStorage::Compact");
@@ -1073,6 +1263,48 @@ impl World {
         Ok(ShapeId::new(index, self.shapes[index as usize].generation))
     }
 
+    /// A shape whose collider record the caller built (a threshold destructible's
+    /// cooked chunk parts): placed as is, with `geometry` for queries and rewrites.
+    /// Returns the shape slot and the collider.
+    #[cfg_attr(not(feature = "stress"), allow(dead_code))]
+    pub(crate) fn add_shape_record(
+        &mut self,
+        b: usize,
+        def: &ShapeDef,
+        geometry: Geometry,
+        collider: Collider,
+    ) -> anyhow::Result<(u32, u32)> {
+        self.dirty = true;
+        self.contacts_shape_added(def);
+        let collider_index = self.place_collider(collider)?;
+        let slot = ShapeSlot {
+            generation: 1,
+            alive: true,
+            body: b as u32,
+            collider: collider_index,
+            geometry,
+            def: def.clone(),
+        };
+        let index = match self.free_shapes.pop() {
+            Some(i) => {
+                let generation = self.shapes[i as usize].generation;
+                self.shapes[i as usize] = ShapeSlot { generation, ..slot };
+                i
+            }
+            None => {
+                self.shapes.push(slot);
+                self.shapes.len() as u32 - 1
+            }
+        };
+        if self.collider_shape.len() <= collider_index as usize {
+            self.collider_shape
+                .resize(collider_index as usize + 1, u32::MAX);
+        }
+        self.collider_shape[collider_index as usize] = index;
+        self.bodies[b].shapes.push(index);
+        Ok((index, collider_index))
+    }
+
     /// Destroy a shape (Box3D `b3DestroyShape`).
     pub fn destroy_shape(&mut self, id: ShapeId, update_body_mass: bool) -> anyhow::Result<()> {
         let s = self.live_shape(id)?;
@@ -1113,10 +1345,13 @@ impl World {
         Ok(&self.shapes[self.live_shape(id)?].geometry)
     }
 
-    /// A triangle mesh of a box or hull shape in its body's frame: vertices and
-    /// counter-clockwise (outward) triangles, for renderers of hull bodies.
+    /// A triangle mesh of a box, hull or heightfield shape in its body's frame:
+    /// vertices and counter-clockwise (outward) triangles, for renderers.
     /// Spheres and capsules return `None` (draw them as primitives).
     pub fn shape_mesh(&self, id: ShapeId) -> anyhow::Result<Option<ShapeMesh>> {
+        if let Geometry::HeightField { field, transform } = self.shape_geometry(id)? {
+            return Ok(Some(height_field_mesh(field, *transform)));
+        }
         let (hull, transform) = match self.shape_geometry(id)? {
             Geometry::Box { half, transform } => {
                 (ConvexHull::cuboid(Vec3::from(*half)), *transform)
@@ -1467,25 +1702,44 @@ impl World {
             // Forces the step to run, so its frame carries the hits.
             self.sim.write_ray_queries(&rays)?;
         }
+        let fracture = self.fracture.active();
+        #[cfg(feature = "stress")]
+        if fracture && self.fracture_projectiles_dirty() {
+            self.sync_projectiles()?;
+        }
         let mut enc = self
             .sim
             .device()
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("world step"),
             });
+        // The terrain's substeps go first: the rigid step applies their reactions.
+        self.terrain_open_strike()?;
+        let terrain = self.terrain_encode(&mut enc)?;
+        #[cfg(feature = "stress")]
+        if fracture {
+            self.encode_fracture_begin(&mut enc);
+        }
         self.sim
             .step_encode(&mut enc)
             .map_err(|e| anyhow::anyhow!("step: {e:?}"))?;
         let ran = self.sim.last_step_ran();
+        #[cfg(feature = "stress")]
+        if fracture && ran {
+            // Loads, breaks and splits from this step's contacts, before the next step.
+            self.encode_fracture(&mut enc);
+        }
         let mut mapped = None;
         if ran {
             // Ray results are never dropped: a frame with queries waits for a slot.
             // Nor are contact events: a lost frame would break begin/end pairing.
+            // Nor are fracture states: a split must be adopted in the step it happened.
             let block = self.backpressure == Backpressure::Block
                 || !batches.is_empty()
                 || !query_ids.is_empty()
                 || !casts.is_empty()
-                || contact_events;
+                || contact_events
+                || fracture;
             if !self.readback.has_free() && block {
                 self.wait_oldest()?;
             }
@@ -1496,6 +1750,12 @@ impl World {
                 if !batches.is_empty() {
                     self.sim.encode_ray_queries(&mut enc);
                 }
+                let watched = self.terrain_watching();
+                if watched {
+                    // Reads the step's end state: after the rigid step.
+                    self.sim.terrain_encode_watch(&mut enc);
+                }
+                let copies = self.terrain_extras(terrain, watched);
                 let mut extras = extras(
                     &self.sim,
                     self.resync,
@@ -1511,6 +1771,11 @@ impl World {
                         offset: u64::from(first) * 16,
                         size: u64::from(count) * 16,
                     });
+                }
+                extras.extend(Self::terrain_extra_copies(&self.sim, copies));
+                #[cfg(feature = "stress")]
+                if fracture {
+                    extras.extend(self.fracture.extras());
                 }
                 if !query_ids.is_empty() {
                     self.sim.encode_overlap_queries(&mut enc);
@@ -1533,6 +1798,10 @@ impl World {
                 }
                 extras.extend(motion::extras(&self.sim, &self.motion, casts));
                 let slot = self.readback.encode(&self.sim, &mut enc, step, &extras);
+                if terrain {
+                    // Copied: the next frame's flags start clear.
+                    self.sim.terrain_encode_flags_clear(&mut enc);
+                }
                 self.resync = false;
                 mapped = Some(slot);
             } else {
@@ -1683,6 +1952,9 @@ impl World {
             );
             self.sim.set_plan_hints(c.contact_count, c.color_count);
         }
+        if let Some((contacts, colors)) = self.fracture.fixed_plan {
+            self.sim.set_plan_hints(contacts, colors);
+        }
         self.last_counters = Some(c);
         let ring = self.sim.ring_events(&raw.ring);
         let (character_events, projectile_events, lost_motion) =
@@ -1715,7 +1987,21 @@ impl World {
                 .into_iter()
                 .map(DestructionEvent::PieceDetached),
         );
-        let destruction = self.destruction_events(destruction);
+        let mut destruction = self.destruction_events(destruction);
+        #[cfg(feature = "stress")]
+        {
+            let reads: Vec<(threshold::FractureRead, &[u8])> = raw
+                .extras
+                .iter()
+                .filter_map(|(k, b)| match k {
+                    Extra::Fracture(r) => Some((*r, b.as_slice())),
+                    _ => None,
+                })
+                .collect();
+            if !reads.is_empty() {
+                destruction.extend(self.fracture_frame(step, &reads)?);
+            }
+        }
         let destruction = self.connection_events(destruction);
         let resync = raw
             .extras
@@ -1770,6 +2056,7 @@ impl World {
         let mut skins: Vec<SkinOutput> = Vec::new();
         let mut record: Option<(VehicleHandle, Vec<[u32; 4]>)> = None;
         let mut ray_results = Vec::new();
+        let mut terrain = None;
         let mut contact_events = ContactEvents::default();
         let mut sensor_events = SensorEvents::default();
         let mut overlap_results = Vec::new();
@@ -1780,6 +2067,8 @@ impl World {
         for (kind, bytes) in &raw.extras {
             match kind {
                 Extra::Resync => {}
+                #[cfg(feature = "stress")]
+                Extra::Fracture(_) => {}
                 Extra::Overlaps(ids) => {
                     let (results, lost) = self.decode_overlaps(ids, bytes);
                     overlap_results = results;
@@ -1828,6 +2117,9 @@ impl World {
                         s.normals = xyz(bytes);
                     }
                 }
+                Extra::TerrainCounters => terrain = Some(self.terrain_counters(step, bytes)?),
+                Extra::TerrainHeights(id) => self.terrain_heights(*id, bytes),
+                Extra::TerrainWatch => self.terrain_strike(step, bytes),
             }
         }
         Ok(Frame {
@@ -1852,6 +2144,7 @@ impl World {
             dropped: false,
             resynced: resync.is_some(),
             counters: Some(c),
+            terrain,
         })
     }
 
@@ -1932,6 +2225,12 @@ impl World {
         s.alive = false;
         s.generation = s.generation.wrapping_add(1).max(1);
         let (collider, body) = (s.collider, s.body);
+        // Hull blocks stay cached for reuse (inserts deduplicate them); a
+        // heightfield's block is its own, so it is freed once out of quarantine.
+        if matches!(s.geometry, Geometry::HeightField { .. }) {
+            let base = engine_schema::convex::convex_params_base(self.sim.collider_record(collider).params);
+            self.retired_height_fields.push((base, self.step));
+        }
         self.sim.set_collider(collider, retired_collider(body));
         self.collider_shape[collider as usize] = u32::MAX;
         self.free_colliders.push((collider, self.step));
@@ -2032,6 +2331,29 @@ impl World {
                 };
                 (ShapeType::ConvexHull, params, *transform)
             }
+            Geometry::HeightField { field, transform } => {
+                let params = match hull_params {
+                    Some(p) => p,
+                    None => {
+                        let now = self.step;
+                        let hulls = &mut self.hulls;
+                        self.retired_height_fields.retain(|&(base, t)| {
+                            let due = now >= t + QUARANTINE_STEPS;
+                            if due {
+                                hulls.release(base);
+                            }
+                            !due
+                        });
+                        let base = self
+                            .hulls
+                            .insert_height_field(field)
+                            .map_err(|e| anyhow::anyhow!("heightfield: {e}"))?;
+                        self.sim.sync_hulls(&mut self.hulls);
+                        engine_schema::heightfield::height_field_collider_params(base, field)
+                    }
+                };
+                (ShapeType::HeightField, params, *transform)
+            }
             Geometry::Plane { normal, offset } => {
                 // The kernels read planes in world space: place this one by
                 // the (static) body's pose now.
@@ -2072,7 +2394,7 @@ impl World {
         let frame = self.bodies[slot.body as usize].frame();
         let material = self.intern_material(&slot.def.material)?;
         let hull_params = match slot.geometry {
-            Geometry::Hull { .. } => Some(self.sim.collider_record(slot.collider).params),
+            Geometry::Hull { .. } | Geometry::HeightField { .. } => Some(self.sim.collider_record(slot.collider).params),
             _ => None,
         };
         let mut c = self.collider(
@@ -2390,5 +2712,53 @@ fn engine_ray(r: &RayInput) -> engine_vehicle::Ray {
         dir: t.normalize_or_zero().to_array(),
         max_dist: t.length(),
         exclude_body: r.ignore_body.map(|b| b.index()),
+    }
+}
+
+/// Two triangles per cell, counter-clockwise seen from +Y (the GPU's split).
+fn height_field_mesh(field: &HeightField, transform: Transform) -> ShapeMesh {
+    let (nx, nz) = field.samples();
+    let (q, p) = (transform.q(), transform.p());
+    let mut vertices = Vec::with_capacity((nx * nz) as usize);
+    for j in 0..nz {
+        for i in 0..nx {
+            vertices.push((p + q * field.vertex(i, j)).to_array());
+        }
+    }
+    let mut triangles = Vec::with_capacity(((nx - 1) * (nz - 1) * 2) as usize);
+    for j in 0..nz - 1 {
+        for i in 0..nx - 1 {
+            let v = |di: u32, dj: u32| (j + dj) * nx + i + di;
+            triangles.push([v(0, 0), v(1, 1), v(1, 0)]);
+            triangles.push([v(0, 0), v(0, 1), v(1, 1)]);
+        }
+    }
+    ShapeMesh { vertices, triangles }
+}
+
+#[cfg(test)]
+mod height_field_arena_tests {
+    use super::*;
+
+    /// A removed heightfield's arena block is freed once out of quarantine, so
+    /// replacing terrain again and again does not grow the arena.
+    #[test]
+    fn replacing_terrain_reuses_its_arena_block() {
+        let mut w = World::new(GpuContext::Default, &WorldDef::default()).unwrap();
+        let field = HeightField::new(33, 33, 0.5, 0.5, vec![0.0; 33 * 33]).unwrap();
+        let ground = w.create_body(&BodyDef::default()).unwrap();
+        let mut len = None;
+        for _ in 0..4 {
+            let s = w
+                .create_height_field_shape(ground, &ShapeDef::default(), &field, Transform::IDENTITY)
+                .unwrap();
+            let now = w.hulls.len();
+            assert!(len.is_none_or(|l| now <= l), "the arena grew to {now} records (was {len:?})");
+            len = Some(now);
+            w.destroy_shape(s, false).unwrap();
+            for _ in 0..QUARANTINE_STEPS + 1 {
+                w.step().unwrap();
+            }
+        }
     }
 }

@@ -20,7 +20,9 @@ use engine_schema::guidance::{
 };
 use engine_schema::{BodyState, BondSpec, Collider as GpuCollider, Joint as GpuJoint, JointDesc};
 
-pub const BUFFERS: usize = 42;
+/// Bindings 0..=59 (directed debris is last, 55-59; 37-54 are the terrain's,
+/// placeholders here).
+pub const BUFFERS: usize = GUIDE_SLOTS_BINDING + 1;
 /// Host uniform buffers (params, pass table) and the indirect-args buffer.
 pub const PARAMS_BUFFER: u32 = 6;
 pub const COUNTERS_BUFFER: u32 = 7;
@@ -49,7 +51,7 @@ pub const UPLOAD_SCRATCH: u32 = 0;
 pub const UPLOAD_PARAMS: u32 = 256;
 pub const UPLOAD_COUNTERS: u32 = 512;
 pub const UPLOAD_COLORS: u32 = 608;
-/// Directed debris: this tick's `GuideParamsGpu` (copied to binding 37).
+/// Directed debris: this tick's `GuideParamsGpu` (copied to binding 55).
 pub const UPLOAD_GUIDE: u32 = 608 + COLOR_COUNT_WORDS as u32 * 4;
 pub const UPLOAD_BYTES: usize = UPLOAD_GUIDE as usize + GUIDE_PARAMS_BYTES;
 const GUIDE_PARAMS_BYTES: usize = std::mem::size_of::<GuideParamsGpu>();
@@ -804,7 +806,7 @@ impl Planner {
         Ok(())
     }
 
-    /// The zone records for binding 38 (hosts write them at offset 0).
+    /// The zone records for binding 56 (hosts write them at offset 0).
     pub fn set_guidance_zones(&mut self, zones: &[ZoneDesc]) -> Result<Vec<u8>> {
         ensure!(
             zones.len() <= GUIDE_CAP.max_zones as usize,
@@ -824,7 +826,7 @@ impl Planner {
         Ok(out)
     }
 
-    /// Guidance records of every body for binding 39: the scene's pieces
+    /// Guidance records of every body for binding 57: the scene's pieces
     /// (not the ground or the projectiles) armed with `tag_mask`, 0 for off.
     pub fn guide_records(&self, tag_mask: u32) -> Vec<u8> {
         let mut out = vec![0u8; self.body_count as usize * std::mem::size_of::<GuideBodyGpu>()];
@@ -840,7 +842,7 @@ impl Planner {
 
     /// How many bodies are in each `GuideState` (off, armed, steering, done),
     /// then how many ended for each `GuideEnd` reason, from a readback of
-    /// binding 39.
+    /// binding 57.
     pub fn guide_state_counts(records: &[u8]) -> [u32; 12] {
         let mut out = [0u32; 12];
         for r in bytemuck::cast_slice::<u8, GuideBodyGpu>(records) {
@@ -850,7 +852,7 @@ impl Planner {
         out
     }
 
-    /// Byte range of the zone claim counters in binding 40 (`GUIDE_SCRATCH_CLAIMS`).
+    /// Byte range of the zone claim counters in binding 58 (`GUIDE_SCRATCH_CLAIMS`).
     pub fn guide_claims_range(&self) -> (u32, u32) {
         (GUIDE_SCRATCH_CLAIMS * 4, self.guide_zones * 4)
     }

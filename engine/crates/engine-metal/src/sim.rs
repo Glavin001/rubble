@@ -25,7 +25,14 @@ mod table {
     }
     include!(concat!(env!("OUT_DIR"), "/rigid_kernels.rs"));
 }
-use table::{RigidKernel, RIGID_KERNELS};
+pub(crate) use table::RigidKernel;
+use table::RIGID_KERNELS;
+
+/// Bindings a terrain-capable host allocates: the rigid plan's
+/// ([`BIND_COUNT`]), the unused pose outputs (34-36), the terrain pool
+/// (37-51), the look-ahead (52), the render surface (53, a placeholder) and
+/// the native fast paths' scratch (54).
+pub(crate) const HOST_BINDINGS: usize = engine_terrain::layout::MPM_WATCH_BINDING + 3;
 
 /// Host-upload ring slots (steps in flight before the host waits).
 const RING: usize = 4;
@@ -37,13 +44,13 @@ const UP_HOST: u64 = 256;
 const UP_COUNTERS: u64 = 512;
 const UP_COLORS: u64 = 640;
 
-fn shared(device: &Device, size: u64) -> Buffer {
+pub(crate) fn shared(device: &Device, size: u64) -> Buffer {
     let buf = device.new_buffer(size.max(4), MTLResourceOptions::StorageModeShared);
     unsafe { std::ptr::write_bytes(buf.contents() as *mut u8, 0, size.max(4) as usize) };
     buf
 }
 
-fn write(buf: &Buffer, offset: u64, bytes: &[u8]) {
+pub(crate) fn write(buf: &Buffer, offset: u64, bytes: &[u8]) {
     assert!(offset as usize + bytes.len() <= buf.length() as usize);
     unsafe {
         std::ptr::copy_nonoverlapping(
@@ -55,20 +62,20 @@ fn write(buf: &Buffer, offset: u64, bytes: &[u8]) {
 }
 
 /// What a compute encoder already has bound (pipeline, (slot, offset) per index).
-struct EncodeState {
-    pipeline: Option<usize>,
-    bound: [Option<(u32, u64)>; 32],
+pub(crate) struct EncodeState {
+    pub(crate) pipeline: Option<usize>,
+    pub(crate) bound: [Option<(u32, u64)>; 32],
 }
 
 impl EncodeState {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { pipeline: None, bound: [None; 32] }
     }
 }
 
 /// GPU execution time of a completed command buffer (`GPUEndTime - GPUStartTime`).
 #[allow(unexpected_cfgs)] // objc 0.2 msg_send! checks a cargo-clippy feature
-fn gpu_ms(cb: &CommandBufferRef) -> f64 {
+pub(crate) fn gpu_ms(cb: &CommandBufferRef) -> f64 {
     use metal::foreign_types::ForeignTypeRef;
     use objc::{msg_send, sel, sel_impl};
     let obj = cb.as_ptr() as *mut objc::runtime::Object;
@@ -79,16 +86,17 @@ fn gpu_ms(cb: &CommandBufferRef) -> f64 {
 
 /// Workgroup grid for `threads` invocations at 64 per group, rows of 32768
 /// (must agree with Slang's dispatchIndex).
-fn groups(threads: u64) -> (u64, u64) {
+pub(crate) fn groups(threads: u64) -> (u64, u64) {
     let g = threads.max(1).div_ceil(64);
     (g.min(32768), g.div_ceil(32768))
 }
 
 pub struct MetalSim {
-    queue: CommandQueue,
+    pub(crate) device: Device,
+    pub(crate) queue: CommandQueue,
     chip: String,
     pipes: Vec<ComputePipelineState>,
-    bufs: Vec<Buffer>,
+    pub(crate) bufs: Vec<Buffer>,
     upload: Buffer,
     capacity: WorldCapacity,
     params: AvbdParams,
@@ -98,13 +106,17 @@ pub struct MetalSim {
     host_bodies: Vec<BodyState>,
     /// CCD / kinematic bodies uploaded (the motion passes of the step graph).
     motion: rigid_plan::MotionInputs,
-    host_cols: Vec<Collider>,
+    pub(crate) host_cols: Vec<Collider>,
+    /// Some collider is a heightfield: its pairs take the convex stages.
+    has_height_field: bool,
+    /// Hull-arena records binding 18 holds.
+    hull_records_capacity: u32,
     grid_levels: u32,
     sleep_island_rounds: u32,
     last_counters: StepCounters,
     steps_done: u32,
     contacts_parity: u32,
-    in_flight: VecDeque<CommandBuffer>,
+    pub(crate) in_flight: VecDeque<CommandBuffer>,
     ring: usize,
     /// Per-phase command buffers of a profiled step (`step_profiled`).
     profiling: bool,
@@ -112,6 +124,14 @@ pub struct MetalSim {
     kernel_cache: std::cell::RefCell<std::collections::HashMap<&'static str, usize>>,
     /// Steps the counters in `last_counters` describe.
     counted_steps: u32,
+    /// The terrain pool (`terrain_enable`), its kernels and pending writes.
+    pub(crate) terrain: Option<crate::terrain::MetalTerrain>,
+    /// Fast math for terrain kernels (`ENGINE_FAST_MATH`, `ENGINE_STRICT_KERNELS`).
+    pub(crate) fast_math: (bool, Vec<String>),
+    /// The next rigid step applies impulse records the terrain appended.
+    pub(crate) terrain_impulses_pending: bool,
+    /// Fast paths the next `terrain_enable` builds (`ENGINE_TERRAIN_CAPS` by default).
+    pub(crate) terrain_caps: crate::terrain::TerrainCaps,
 }
 
 impl MetalSim {
@@ -121,7 +141,7 @@ impl MetalSim {
         let queue = device.new_command_queue();
         let chip = device.name().to_string();
         let sizes = rigid_plan::buffer_sizes(&capacity, true, true);
-        let bufs: Vec<Buffer> = sizes
+        let mut bufs: Vec<Buffer> = sizes
             .iter()
             .enumerate()
             .map(|(i, &size)| {
@@ -131,6 +151,8 @@ impl MetalSim {
             })
             .collect();
         assert_eq!(bufs.len(), BIND_COUNT);
+        // Placeholders until terrain_enable sizes the terrain pool.
+        bufs.extend((BIND_COUNT..HOST_BINDINGS).map(|_| shared(&device, 256)));
         // Metal's default math mode, as wgpu's Metal backend compiles the same
         // kernels (MTLCompileOptions defaults): fast math on. ENGINE_FAST_MATH=off
         // compiles strict IEEE; ENGINE_STRICT_KERNELS=a,b keeps those strict.
@@ -195,12 +217,15 @@ impl MetalSim {
             tail_ok: capacity.max_bodies <= (1 << 16) * 8,
             ..StepModes::default()
         };
+        let hull_records_capacity = (sizes[18] / 16) as u32;
+        let upload = shared(&device, SLOT_BYTES * RING as u64);
         Ok(Self {
+            device,
             queue,
             chip,
             pipes,
             bufs,
-            upload: shared(&device, SLOT_BYTES * RING as u64),
+            upload,
             capacity,
             params: AvbdParams::default(),
             modes,
@@ -209,6 +234,8 @@ impl MetalSim {
             host_bodies: Vec::new(),
             motion: rigid_plan::MotionInputs::default(),
             host_cols: Vec::new(),
+            has_height_field: false,
+            hull_records_capacity,
             grid_levels: 0,
             sleep_island_rounds: 8,
             last_counters: StepCounters::default(),
@@ -220,11 +247,19 @@ impl MetalSim {
             profile_cbs: Vec::new(),
             kernel_cache: Default::default(),
             counted_steps: 0,
+            terrain: None,
+            fast_math: (fast, strict),
+            terrain_impulses_pending: false,
+            terrain_caps: crate::terrain::TerrainCaps::from_env(),
         })
     }
 
     pub fn chip(&self) -> &str {
         &self.chip
+    }
+
+    pub fn params(&self) -> AvbdParams {
+        self.params
     }
 
     pub fn set_params(&mut self, params: AvbdParams) {
@@ -275,6 +310,11 @@ impl MetalSim {
                 .all(|c| c.shape != ShapeType::ConvexHull as u32),
             "MetalSim: convex hulls are not wired yet"
         );
+        // Heightfield pairs take the convex stages (convex_classify); their
+        // samples live in the hull arena (add_height_field, sync_hulls).
+        self.has_height_field |= colliders
+            .iter()
+            .any(|c| c.shape == ShapeType::HeightField as u32);
         write(
             &self.bufs[2],
             u64::from(start) * std::mem::size_of::<Collider>() as u64,
@@ -285,6 +325,86 @@ impl MetalSim {
         start..self.collider_count
     }
 
+    /// A static heightfield collider (`field`, its frame at `pos`, `rot`) on a
+    /// body of its own; its samples go into `arena` and up to binding 18.
+    /// Returns (body, collider).
+    pub fn add_height_field(
+        &mut self,
+        arena: &mut engine_schema::convex::HullArena,
+        field: &engine_schema::heightfield::HeightField,
+        pos: glam::Vec3,
+        rot: glam::Quat,
+        material: u32,
+    ) -> Result<(u32, u32), engine_schema::heightfield::HeightFieldError> {
+        let base = arena.insert_height_field(field)?;
+        let mut support = BodyState::static_plane_support();
+        support.position = pos.to_array();
+        support.orientation = rot.to_array();
+        support.initial_pos = support.position;
+        support.initial_rot = support.orientation;
+        let body = self.add_bodies(std::slice::from_ref(&support)).start;
+        let collider = self
+            .add_colliders(&[Collider {
+                body,
+                shape: ShapeType::HeightField as u32,
+                material,
+                generation: 0,
+                local_pos: [0.0; 3],
+                density: 0.0,
+                local_rot: [0.0, 0.0, 0.0, 1.0],
+                params: engine_schema::heightfield::height_field_collider_params(base, field),
+            }])
+            .start;
+        self.sync_hulls(arena);
+        Ok((body, collider))
+    }
+
+    /// Upload the hull arena (binding 18), growing the buffer to the next power
+    /// of two of records when it no longer fits.
+    pub fn sync_hulls(&mut self, arena: &engine_schema::convex::HullArena) {
+        self.wait_all();
+        let needed = arena.len() as u32;
+        if needed > self.hull_records_capacity {
+            let records = needed.next_power_of_two();
+            let grown = shared(&self.device, u64::from(records) * 16);
+            grown.set_label("rigid 18");
+            self.bufs[18] = grown;
+            self.hull_records_capacity = records;
+        }
+        write(&self.bufs[18], 0, bytemuck::cast_slice(arena.records()));
+    }
+
+    /// The collider record `id` as uploaded.
+    pub fn collider(&self, id: u32) -> Collider {
+        self.host_cols[id as usize]
+    }
+
+    /// A static body's surface changed under its contacts (terrain activation
+    /// and bake): contact reuse must not keep manifolds made against the old
+    /// surface, so its generation becomes this step.
+    pub(crate) fn mark_surface_moved(&mut self, body: u32) {
+        let at = u64::from(body) * std::mem::size_of::<BodyState>() as u64
+            + std::mem::offset_of!(BodyState, generation) as u64;
+        // The rigid steps in flight read binding 0; the write lands after them.
+        self.wait_all();
+        write(&self.bufs[0], at, bytemuck::bytes_of(&self.steps_done));
+        if let Some(b) = self.host_bodies.get_mut(body as usize) {
+            b.generation = self.steps_done;
+        }
+    }
+
+    /// `n` words of binding `slot` from word `first` (waits for the GPU), as
+    /// `WgpuSim::read_words`.
+    pub fn read_words(&mut self, slot: usize, first: u64, n: usize) -> Vec<u32> {
+        self.wait_all();
+        let buf = &self.bufs[slot];
+        assert!(4 * (first as usize + n) <= buf.length() as usize);
+        unsafe {
+            std::slice::from_raw_parts((buf.contents() as *const u32).add(first as usize), n)
+                .to_vec()
+        }
+    }
+
     fn reuse_on(&self) -> bool {
         (self.params.flags & FLAG_REUSE_CONTACTS) != 0
     }
@@ -293,6 +413,9 @@ impl MetalSim {
         let reuse = self.reuse_on();
         StepModes {
             manifold_insert: self.modes.manifold_insert && reuse,
+            // Convex kernels emit heightfield contacts after narrowphase's
+            // persist list: those scenes take the full persistence scan.
+            listed_persist: self.modes.listed_persist && !self.has_height_field,
             ..self.modes
         }
     }
@@ -313,6 +436,9 @@ impl MetalSim {
             joint_count: 0,
             joint_hash_slots: engine_schema::joint_hash_size(0),
             has_convex: false,
+            has_height_field: self.has_height_field,
+            // No event shapes on Metal (the World API runs on wgpu).
+            soil: false,
             reuse_contacts: self.reuse_on(),
             max_colors: self.capacity.max_colors,
             iterations: self.params.iterations,
@@ -336,6 +462,7 @@ impl MetalSim {
             wheel_count: 0,
             motion: rigid_plan::MotionInputs {
                 look_ahead: self.params.flags & engine_schema::FLAG_SPEC_VELOCITY != 0,
+                impulses: self.terrain_impulses_pending,
                 ..self.motion
             },
             soft: Default::default(),
@@ -354,6 +481,7 @@ impl MetalSim {
             && self.counted_steps == self.steps_done
             && self.last_counters.awake_count == 0
             && self.body_count > 0
+            && !self.terrain_impulses_pending
         {
             self.counted_steps += 1;
             self.steps_done += 1;
@@ -475,6 +603,7 @@ impl MetalSim {
         e.end_encoding();
         cb.commit();
         self.in_flight.push_back(cb);
+        self.terrain_impulses_pending = false;
         self.contacts_parity ^= 1;
         self.steps_done = self.steps_done.saturating_add(1);
         Ok(())
@@ -541,7 +670,7 @@ impl MetalSim {
         Ok(k)
     }
 
-    fn wait_all(&mut self) {
+    pub(crate) fn wait_all(&mut self) {
         while let Some(cb) = self.in_flight.pop_front() {
             cb.wait_until_completed();
         }

@@ -39,8 +39,9 @@ pub mod table {
         pub binds: &'static [(u32, u32, u32)],
     }
     include!(concat!(env!("OUT_DIR"), "/cuda_kernels.rs"));
+    include!(concat!(env!("OUT_DIR"), "/cuda_terrain_kernels.rs"));
 }
-pub use table::{CudaKernel, CUDA_KERNELS, PTX_ARCH, SASS_ARCHS};
+pub use table::{CudaKernel, CUDA_KERNELS, CUDA_TERRAIN_KERNELS, PTX_ARCH, SASS_ARCHS};
 
 /// Binding 23: colour slots, work slots and convex slots, three words each.
 const INDIRECT_BINDING: u32 = 23;
@@ -358,6 +359,13 @@ impl CudaSim {
                 .all(|c| c.shape != ShapeType::ConvexHull as u32),
             "CudaSim: convex hulls are not wired yet"
         );
+        // Heightfield pairs take the convex stages, which this backend lacks.
+        assert!(
+            colliders
+                .iter()
+                .all(|c| c.shape != ShapeType::HeightField as u32),
+            "CudaSim: heightfields are not wired yet"
+        );
         self.upload(
             2,
             u64::from(start) * std::mem::size_of::<Collider>() as u64,
@@ -393,6 +401,9 @@ impl CudaSim {
             joint_count: 0,
             joint_hash_slots: engine_schema::joint_hash_size(0),
             has_convex: false,
+            has_height_field: false,
+            // No event shapes on CUDA (the World API runs on wgpu).
+            soil: false,
             reuse_contacts: record,
             max_colors: self.capacity.max_colors,
             iterations: self.params.iterations,

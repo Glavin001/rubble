@@ -168,6 +168,8 @@ impl engine_softbody::SoftBackend for Recorder<'_> {
 
 mod soft;
 pub use soft::*;
+mod terrain;
+pub use terrain::*;
 
 fn err(e: impl std::fmt::Display) -> JsError {
     JsError::new(&e.to_string())
@@ -249,6 +251,31 @@ pub fn character_record(desc_json: &str, inner_body: u32, x: f32, y: f32, z: f32
     }
     let d: engine_schema::character::CharacterDesc = serde_json::from_value(base).map_err(err)?;
     Ok(d.record(inner_body, [x, y, z]).iter().flatten().copied().collect())
+}
+
+/// A hull arena holding the unit cube (box pairs read it) and one heightfield,
+/// as `[base, params × 4 (f32 bits), records…]`: the host uploads the records to
+/// binding 18 and gives the heightfield collider those params
+/// (engine_schema::heightfield; samples row-major, `nx × nz`).
+#[wasm_bindgen]
+pub fn height_field_arena(
+    nx: u32,
+    nz: u32,
+    dx: f32,
+    dz: f32,
+    heights: &[f32],
+) -> Result<Vec<u32>, JsError> {
+    use engine_schema::heightfield::{height_field_collider_params, HeightField};
+    let field = HeightField::new(nx, nz, dx, dz, heights.to_vec())
+        .map_err(|e| JsError::new(&e.to_string()))?;
+    let mut arena = engine_schema::convex::HullArena::new();
+    let base = arena
+        .insert_height_field(&field)
+        .map_err(|e| JsError::new(&e.to_string()))?;
+    let mut out = vec![base];
+    out.extend(height_field_collider_params(base, &field).map(f32::to_bits));
+    out.extend(arena.records().iter().flatten());
+    Ok(out)
 }
 
 /// Default character descriptor (JSON).
@@ -633,6 +660,9 @@ impl RigidStep {
             joint_count: joints,
             joint_hash_slots: engine_schema::joint_hash_size(joints),
             has_convex: false,
+            has_height_field: c(18) & 8 != 0,
+            // The browser hosts no event shapes yet (World runs natively).
+            soil: false,
             reuse_contacts: self.params.flags & engine_schema::FLAG_REUSE_CONTACTS != 0,
             max_colors: self.cap.max_colors,
             iterations: self.params.iterations,
@@ -650,8 +680,9 @@ impl RigidStep {
             guide_slots: self.guide.as_ref().map_or(0, |g| g.cap.plan_budget),
             explosion_count: 0,
             // counts[18]: bit 0 CCD bodies, bit 1 kinematic bodies, bit 2 impulse
-            // records this step; counts[19] projectiles, counts[20] characters,
-            // counts[21] queries.
+            // records this step, bit 3 heightfield colliders (has_height_field,
+            // below); counts[19] projectiles, counts[20] characters, counts[21]
+            // queries.
             motion: {
                 let bits = c(18);
                 rp::MotionInputs {
@@ -693,7 +724,7 @@ impl RigidStep {
     /// `soft` (optional) = [maxBodies, maxBeams, maxParticles, maxColors, maxGroups,
     /// maxTriangles, maxObstacles] of the soft-body arena (binding 32).
     /// `guidance` (optional) = [maxZones, planBudget]: directed debris
-    /// (bindings 37-41, `set_guidance`).
+    /// (bindings 55-59, `set_guidance`).
     #[wasm_bindgen(constructor)]
     pub fn new(
         world: &[u32],
@@ -782,6 +813,8 @@ impl RigidStep {
             (4096, false, 1, 1, 0, 0),
             (4096, false, 1, 0, 1, 7),
             (4096, false, 1, 0, 0, 7),
+            // Heightfield terrain: the convex stages take its pairs.
+            (4096, false, 1, 0, 0, 15),
         ] {
             let mut i = s.inputs(&[
                 n, n, 1, 1, 1, bodies, 1, 1, max_color, 1, 1, 1, 1, 1, 1, 1, 1, 1, motion, motion,
@@ -851,7 +884,7 @@ impl RigidStep {
         Ok(())
     }
 
-    /// Zone records (`ZoneDesc` JSON array) for binding 38, written at offset 0.
+    /// Zone records (`ZoneDesc` JSON array) for binding 56, written at offset 0.
     /// `body_count` bounds the anchors.
     pub fn set_guidance_zones(
         &mut self,
@@ -889,7 +922,7 @@ impl RigidStep {
         Ok(out)
     }
 
-    /// This step's guidance params (binding 37), empty while guidance is off
+    /// This step's guidance params (binding 55), empty while guidance is off
     /// or has no zones. `counts` as for `encode`.
     pub fn guide_params(&self, counts: &[u32]) -> Vec<u8> {
         if !self.guide_active() {
@@ -910,7 +943,7 @@ impl RigidStep {
         bytemuck::bytes_of(&p).to_vec()
     }
 
-    /// `count` guidance records (binding 39) arming bodies for zones whose tags
+    /// `count` guidance records (binding 57) arming bodies for zones whose tags
     /// meet `tag_mask` (0: off); write them at the first body's record.
     pub fn guide_records(count: u32, tag_mask: u32) -> Vec<u8> {
         use engine_schema::guidance::GuideBodyGpu;
@@ -935,12 +968,26 @@ impl RigidStep {
         out
     }
 
-    /// Bytes of one body's guidance record (binding 39).
+    /// Guidance bindings: params, zones, bodies, scratch, slots.
+    pub fn guide_bindings() -> Vec<u32> {
+        use engine_schema::guidance as gd;
+        [
+            gd::GUIDE_PARAMS_BINDING,
+            gd::GUIDE_ZONES_BINDING,
+            gd::GUIDE_BODIES_BINDING,
+            gd::GUIDE_SCRATCH_BINDING,
+            gd::GUIDE_SLOTS_BINDING,
+        ]
+        .map(|b| b as u32)
+        .to_vec()
+    }
+
+    /// Bytes of one body's guidance record (the bodies binding).
     pub fn guide_record_bytes() -> u32 {
         std::mem::size_of::<engine_schema::guidance::GuideBodyGpu>() as u32
     }
 
-    /// Byte offset of the zone claim counters in binding 40.
+    /// Byte offset of the zone claim counters in the scratch binding.
     pub fn guide_claims_offset() -> u32 {
         engine_schema::guidance::GUIDE_SCRATCH_CLAIMS * 4
     }

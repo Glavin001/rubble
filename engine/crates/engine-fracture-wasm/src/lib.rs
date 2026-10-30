@@ -966,29 +966,43 @@ impl Plan {
         let settings: GuidanceSettings = merge(&GuidanceSettings::default(), partial)?;
         self.0.set_guidance(&settings).map_err(err)
     }
-    /// Validate `zones`; returns their records for buffer 38 (offset 0).
+    /// Validate `zones`; returns their records for buffer 56 (offset 0).
     #[wasm_bindgen(js_name = setGuidanceZones)]
     pub fn set_guidance_zones(&mut self, zones: JsValue) -> Result<Vec<u8>, JsError> {
         let zones: Vec<ZoneDesc> = from_js(zones)?;
         self.0.set_guidance_zones(&zones).map_err(err)
     }
-    /// Every body's guidance record for buffer 39 (offset 0): the pieces armed
+    /// Every body's guidance record for buffer 57 (offset 0): the pieces armed
     /// with `tagMask`, or all off for 0.
     #[wasm_bindgen(js_name = guideRecords)]
     pub fn guide_records(&self, tag_mask: u32) -> Vec<u8> {
         self.0.guide_records(tag_mask)
     }
-    /// Bodies per guidance state `[off, armed, steering, done]` in a readback of buffer 39.
+    /// Guidance buffers: `[params, zones, bodies, scratch, slots]`.
+    #[wasm_bindgen(js_name = guideBindings)]
+    pub fn guide_bindings() -> Vec<u32> {
+        use engine_schema::guidance as gd;
+        [
+            gd::GUIDE_PARAMS_BINDING,
+            gd::GUIDE_ZONES_BINDING,
+            gd::GUIDE_BODIES_BINDING,
+            gd::GUIDE_SCRATCH_BINDING,
+            gd::GUIDE_SLOTS_BINDING,
+        ]
+        .map(|b| b as u32)
+        .to_vec()
+    }
+    /// Bodies per guidance state `[off, armed, steering, done]` in a readback of the bodies buffer.
     #[wasm_bindgen(js_name = guideStateCounts)]
     pub fn guide_state_counts(records: &[u8]) -> Vec<u32> {
         Planner::guide_state_counts(records).to_vec()
     }
-    /// Bytes of one body's guidance record in buffer 39.
+    /// Bytes of one body's guidance record in the bodies buffer.
     #[wasm_bindgen(js_name = guideRecordBytes)]
     pub fn guide_record_bytes() -> u32 {
         std::mem::size_of::<engine_schema::guidance::GuideBodyGpu>() as u32
     }
-    /// `[byte offset, byte length]` of the zone claim counters in buffer 40.
+    /// `[byte offset, byte length]` of the zone claim counters in the scratch buffer.
     #[wasm_bindgen(js_name = guideClaimsRange)]
     pub fn guide_claims_range(&self) -> Vec<u32> {
         let (o, n) = self.0.guide_claims_range();
