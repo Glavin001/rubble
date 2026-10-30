@@ -1635,8 +1635,9 @@ mod imp {
                 sl.sent[b as usize] = true;
             }
             sl.broke.extend_from_slice(&over);
-            t.fracture
-                .break_bonds_sparse(&gpu, &over, &t.chunk_body, bonds);
+            // The GPU marks each bond's body from its own chunk to body map: a step still in
+            // flight may have split the piece since `chunk_body` was read.
+            t.fracture.break_bonds_sparse(&over);
             // The flow's loads for the crush estimate from the next frame on.
             if t.fracture.crush_flow() {
                 t.fracture
@@ -1815,6 +1816,28 @@ mod imp {
                 .iter()
                 .map(|s| (s[0], s[1], s[2], s[3].to_bits() & 1 != 0))
                 .collect())
+        }
+
+        /// A threshold destructible's fracture counters on the GPU (blocking: for tools and
+        /// tests): bonds broken and new piece bodies made, in all, after every step
+        /// submitted. Every broken bond is counted once, whatever broke it (contact loads,
+        /// a strike, a blast, support loss, a crush), as `BondsBroken` reports it once.
+        pub fn destructible_fracture_counts(
+            &self,
+            id: DestructibleId,
+        ) -> anyhow::Result<(u32, u32)> {
+            let i = self.live_destructible(id)?;
+            let k = self.destructibles[i].threshold.ok_or_else(|| {
+                anyhow::anyhow!("destructible {} is not a threshold one", id.index())
+            })? as usize;
+            let t = self.fracture.slots[k].as_ref().expect("live slot");
+            let gpu = self
+                .fracture
+                .gpu
+                .as_ref()
+                .expect("a threshold destructible's GPU");
+            let c = t.fracture.counters(gpu);
+            Ok((c.broken, c.pieces))
         }
 
         /// A changed body's mass, solver frame (from the GPU's frame record), type and

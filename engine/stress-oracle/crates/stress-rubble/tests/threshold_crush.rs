@@ -63,3 +63,18 @@ fn the_lab_crushes_the_struck_blocks() {
     assert!(on > 0, "the ball crushes the blocks it strikes");
     assert_eq!(off, 0);
 }
+
+/// On a device allowing 8 storage buffers per shader stage (WebGPU's default; the
+/// browser's per-entry WGSL layouts, natively): the lab's threshold world without
+/// crushing builds and breaks the wall; with crushing it is a clear error, not a panic.
+#[test]
+fn eight_storage_buffers_run_the_lab_without_crushing() {
+    let mut gpu = Gpu::new().expect("GPU");
+    assert!(gpu.set_shader_path(stress_gpu::gpu::ShaderPath::Wgsl));
+    gpu.storage_limit = 8;
+    let (off, broken) = crushed(&gpu, false);
+    assert_eq!(off, 0);
+    assert!(broken > 0, "the ball breaks the wall's bonds on 8 storage buffers");
+    let err = ThresholdWorld::new_with_crush(&gpu, &wall_scene(), 0.45, 4800.0, true).err().expect("crushing needs more than 8 storage buffers");
+    assert!(err.contains("storage buffers") && err.contains("allows 8"), "{err}");
+}

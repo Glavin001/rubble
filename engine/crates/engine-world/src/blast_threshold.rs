@@ -534,8 +534,8 @@ impl World {
             centres[c] = o + q * gv(b.mirror.structures[s].chunks[sc].center);
             windows[c] = model::window(&faces[c], centres[c], 0.0, dt, peak);
         }
-        // Bonds support loss broke that no readback has shown yet: they stay broken (the
-        // breaks below rewrite every bond's state from the host's).
+        // Bonds support loss broke that no readback has shown yet: not the blast's, and they
+        // break with its split if the GPU has not broken them yet.
         let pending: Vec<u32> = match &t.support {
             Some(sl) => (0..t.intact.len() as u32)
                 .filter(|&i| sl.sent[i as usize] && t.intact[i as usize])
@@ -578,10 +578,8 @@ impl World {
         if split {
             let t = self.fracture.slots[k].as_mut().expect("live slot");
             let all: Vec<u32> = broken.iter().chain(&pending).copied().collect();
-            if !all.is_empty() {
-                t.fracture
-                    .break_bonds(&gpu, &all, &t.intact, &t.chunk_body, &t.tables.bonds);
-            }
+            // Broken on the GPU with the split below, each counted once.
+            t.fracture.break_bonds_sparse(&all);
             if let Some(words) = &crush_words {
                 t.fracture
                     .set_crush_blast(&gpu, words)

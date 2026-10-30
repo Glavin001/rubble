@@ -276,6 +276,7 @@ pub mod shaders {
             ("fr_strike_patch", (64, 1, 1)),
             ("fr_strike_cover", (64, 1, 1)),
             ("fr_strike_claim", (64, 1, 1)),
+            ("fr_host_breaks", (64, 1, 1)),
         ]
     );
 

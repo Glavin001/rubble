@@ -748,3 +748,69 @@ fn crush_needs_parameters_and_the_threshold_model() {
         .to_string();
     assert!(e.contains("StrengthModel::Threshold"), "{e}");
 }
+
+/// On a device allowing 8 storage buffers per shader stage (WebGPU's default, the
+/// browser's per-entry WGSL layouts reproduced natively by `STRESS_GPU_STORAGE_LIMIT`), a
+/// threshold destructible without crushing places and fractures, and one with crushing is
+/// a clear error, never a panic. The environment is process-wide: the check runs in a
+/// child process of this test binary.
+#[test]
+fn eight_storage_buffers_place_without_crush_and_refuse_crush() {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "eight_storage_buffers_child",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("STRESS_GPU_STORAGE_LIMIT", "8")
+        .env("STRESS_GPU_SHADERS", "wgsl")
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success() && text.contains("1 passed"), "{text}");
+}
+
+#[test]
+#[ignore = "run by eight_storage_buffers_place_without_crush_and_refuse_crush, with the limit"]
+fn eight_storage_buffers_child() {
+    assert_eq!(
+        std::env::var("STRESS_GPU_STORAGE_LIMIT").as_deref(),
+        Ok("8")
+    );
+    let asset = asset_of(&crush_wall_json());
+    let mut w = world_for(&asset, 0, true, true);
+    place(&mut w, &asset, None).expect("a threshold destructible without crushing");
+    shoot(&mut w, 35.0, 4800.0);
+    let mut broken = 0;
+    for _ in 0..20 {
+        let f = w.step_sync().unwrap();
+        for e in &f.destruction_events {
+            if let DestructionEvent::BondsBroken { bonds, .. } = e {
+                broken += bonds.len();
+            }
+        }
+    }
+    assert!(broken > 0, "the shot breaks the wall on 8 storage buffers");
+    let mut w = world_for(&asset, 0, true, true);
+    let err = place(
+        &mut w,
+        &asset,
+        Some(Crush {
+            mass: CrushMass::Remove,
+            ..Crush::default()
+        }),
+    )
+    .err()
+    .expect("crushing needs more than 8 storage buffers")
+    .to_string();
+    assert!(
+        err.contains("storage buffers") && err.contains("allows 8"),
+        "{err}"
+    );
+}

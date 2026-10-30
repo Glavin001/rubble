@@ -39,6 +39,19 @@ struct Run {
 /// Place the frame (support loss on or off, `factor` its dynamic factor), shoot the columns
 /// `shoot` (indices into the frame's columns) from the side, step `frames`.
 fn run(f: &Frame, support_loss: bool, factor: f32, shoot: &[usize], frames: u32) -> Run {
+    run_polling(f, support_loss, factor, shoot, frames, 1)
+}
+
+/// `run`, waiting for the frames only every `wait_every` steps (the steps between run with
+/// earlier ones in flight; a non-blocking poll after each).
+fn run_polling(
+    f: &Frame,
+    support_loss: bool,
+    factor: f32,
+    shoot: &[usize],
+    frames: u32,
+    wait_every: u32,
+) -> Run {
     let asset = DestructibleAssetDesc::from_pack(&f.pack).unwrap();
     let solver = asset.solver_for(StrengthModel::Threshold).unwrap();
     let stress = asset.stress.as_ref().unwrap();
@@ -131,7 +144,12 @@ fn run(f: &Frame, support_loss: bool, factor: f32, shoot: &[usize], frames: u32)
             );
         }
         w.step().unwrap();
-        for fr in w.poll_blocking().unwrap() {
+        let ready = if (n + 1) % wait_every == 0 || n + 1 == frames {
+            w.poll_blocking().unwrap()
+        } else {
+            w.poll().unwrap()
+        };
+        for fr in ready {
             for e in &fr.destruction_events {
                 if let DestructionEvent::BondsBroken { bonds, .. } = e {
                     broken += bonds.len();
@@ -624,4 +642,28 @@ fn a_column_crushes_under_the_weight_above_it_with_cause_load() {
         y < -0.5 || v[1] < -1.0,
         "the block falls once its column is crushed"
     );
+}
+
+/// Support loss with steps in flight: its breaks are issued while later steps (already
+/// submitted, maybe splitting the same structure) run, so the GPU marks each bond's body
+/// from its own chunk to body map. The slab still comes down, and the GPU's count of broken
+/// bonds is every `BondsBroken` bond once (support loss's breaks counted with the rest).
+#[test]
+fn support_loss_with_steps_in_flight_splits_and_counts_every_break() {
+    let f = slab_row(1.2);
+    for wait_every in [1, 4] {
+        let on = run_polling(&f, true, 1.0, &[0], 90, wait_every);
+        let sl = on.world.destructible_support_loss_breaks(on.id).unwrap().len();
+        let (gpu_broken, pieces) = on.world.destructible_fracture_counts(on.id).unwrap();
+        eprintln!(
+            "waiting every {wait_every} steps: {} bonds broken ({sl} by support loss), the GPU counts {gpu_broken} in {pieces} pieces",
+            on.broken
+        );
+        assert!(sl > 0, "support loss breaks the columns left");
+        assert_eq!(gpu_broken as usize, on.broken, "the GPU counts every reported break once");
+        assert!(
+            !on.on_footings(f.top, &f.footings),
+            "the slab's weight breaks the columns left (waiting every {wait_every} steps)"
+        );
+    }
 }

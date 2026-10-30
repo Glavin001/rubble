@@ -154,6 +154,15 @@ bits, so the minimum always has its chunk. Crushing takes the same entry chunk (
 `fr_crush_entry` and `fr_crush_nearest` are gone). Tests: `engine-world`
 `tests/strike_prediction.rs`, and `tests/support_loss.rs` back at its 2.5 m start.
 
+### Storage-buffer limits
+
+The crush kernels bind more storage buffers per shader stage than the core fracture
+(`fr_crush_apply` 10, `fr_crush_loads` 9; every other fracture entry at most 8, WebGPU's default
+limit; `stress-gpu/tests/binding_limits.rs`). `GpuFracture` builds them only with crushing on
+(`fracture::CRUSH_ENTRIES`), so a destructible without crushing places on an 8-buffer device; with
+crushing on such a device placing it is an error naming the limit. Reproduce natively with
+`STRESS_GPU_SHADERS=wgsl STRESS_GPU_STORAGE_LIMIT=8` (honoured by `Gpu::from_device` too).
+
 ### The strike's contact patch (2026-10-29)
 
 **Why.** Once predicted strikes worked (the stored-distance fix above), a strike crushed only
@@ -467,6 +476,10 @@ the neighbours one bond nearer an anchor in proportion to those bonds' compressi
 (`compressive_strength * area`). A bond whose load exceeds its capacity breaks with the next
 frame (`GpuFracture::break_bonds_sparse`), so a collapse cascades forward a frame at a time
 (after a sudden loss of support, with the dynamic factor on the load's increase: section 5).
+The next frame's first kernel (`fr_host_breaks`) breaks them and marks each bond's body dirty
+from the GPU's own chunk to body map: steps still in flight when the pass ran may have split the
+piece, which the host's last read does not know. A bond the GPU already broke is skipped, so the
+fracture's counters count each break once (`World::destructible_fracture_counts`).
 Tipping: a piece whose centre of mass, along gravity, is outside the hull of its loaded support
 bonds lets go of the members standing on those supports (their bonds into it break). The flow
 conserves weight (the load reaching the anchors is the piece's weight); it has no bending, no

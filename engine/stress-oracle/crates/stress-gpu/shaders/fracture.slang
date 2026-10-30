@@ -9,6 +9,8 @@
 //   fr_breaks       one thread per bond: an intact bond breaks when the load on either of
 //                   its chunks beats its tensile capacity (threshold.slang `threshold_breaks`);
 //                   its body is marked dirty;
+//   fr_host_breaks  the host's breaks between frames (support loss), first: the same, the
+//                   body read from the GPU's chunk to body map;
 //   fr_gate         one thread: the indirect sizes of the split kernels (all zero when no
 //                   bond broke this frame, so a quiet frame costs nothing more);
 //   fr_uf_init, fr_body_init, fr_uf_union, fr_uf_flatten
@@ -124,6 +126,9 @@ uint w_free_rank() { return w_free() + params.body_count; }
 uint w_free_list() { return w_free_rank() + params.body_count; }
 // Per chunk, for each half of the pool: where its carried pulses start and how many.
 uint w_pulses() { return w_free_list() + params.body_count + 2 * 1025; }
+// Bonds the host broke between frames (fracture.rs `break_bonds_sparse`): the count, then
+// the bonds.
+uint w_host_breaks() { return w_pulses() + 4 * params.chunk_count; }
 
 // `atom` layout.
 uint a_parent() { return 0; }
@@ -238,6 +243,26 @@ void fr_breaks(uint3 id: SV_DispatchThreadID)
         atom[a_counters() + C_FRAME_BROKEN].add(1u);
         atom[a_counters() + C_BROKEN].add(1u);
     }
+}
+
+// The host's breaks between frames (support loss), one thread per listed bond, before the
+// frame's own: each still intact breaks and marks its body dirty from the chunk to body
+// map as it is now (a step the host has not read yet may have split it), counted as
+// `fr_breaks` counts.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void fr_host_breaks(uint3 id: SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= work[w_host_breaks()])
+        return;
+    uint b = work[w_host_breaks() + 1 + i];
+    if (b >= params.bond_count || work[w_alive() + b] == 0)
+        return;
+    work[w_alive() + b] = 0;
+    atom[a_dirty() + body_of(bonds[b].x)].or(1u);
+    atom[a_counters() + C_FRAME_BROKEN].add(1u);
+    atom[a_counters() + C_BROKEN].add(1u);
 }
 
 void set_args(uint at, uint x)
