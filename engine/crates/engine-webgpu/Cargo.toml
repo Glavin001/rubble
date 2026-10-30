@@ -12,6 +12,7 @@ web-time.workspace = true
 engine-exec.workspace = true
 engine-vehicle.workspace = true
 engine-softbody.workspace = true
+engine-terrain.workspace = true
 glam.workspace = true
 serde_json.workspace = true
 engine-slang-build.workspace = true
@@ -35,6 +36,8 @@ objc2-metal = "0.3"
 # so it does not compile the native wgpu stack).
 default = ["gpu"]
 gpu = ["dep:wgpu", "dep:pollster"]
+
+[dev-dependencies]
 
 [build-dependencies]
 engine-slang-build.workspace = true

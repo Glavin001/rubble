@@ -690,6 +690,25 @@ impl HullArena {
         Ok(base)
     }
 
+    /// Place `records` in a block of their own, never shared (heightfields, which
+    /// are edited in place). Takes one reference, released with `release`.
+    pub(crate) fn insert_unique(&mut self, records: &[[u32; 4]]) -> Result<u32, HullError> {
+        let len = records.len() as u32;
+        let base = self.allocate(len)?;
+        self.records[base as usize..(base + len) as usize].copy_from_slice(records);
+        self.mark_dirty(base..base + len);
+        // An empty key is never in `dedup`, so release leaves other blocks alone.
+        self.blocks.insert(base, HullBlock { len, refs: 1, key: Vec::new() });
+        Ok(base)
+    }
+
+    /// Overwrite records inside a live unshared block and mark them for upload.
+    pub(crate) fn write_records(&mut self, at: u32, records: &[[u32; 4]]) {
+        let start = at as usize;
+        self.records[start..start + records.len()].copy_from_slice(records);
+        self.mark_dirty(at..at + records.len() as u32);
+    }
+
     /// Drop one reference. Returns true when the block was freed (its records may
     /// be reused by later inserts; colliders must no longer point at it).
     pub fn release(&mut self, base: u32) -> bool {

@@ -190,7 +190,10 @@ pub struct Frame {
     /// Shapes projectiles went through or stopped in.
     pub projectile_events: Vec<crate::ProjectileEvent>,
     /// Records overwritten in the GPU event ring before they were read (more
-    /// than it holds between two frames). Never silently zero.
+    /// than it holds between two frames), plus touching pairs past
+    /// `engine_schema::CONTACT_EVENT_CAP` in this step (such a frame ends no
+    /// contacts or sensor overlaps: the pairs it could not see stay). Never
+    /// silently zero.
     pub lost_events: u32,
     /// This frame's readback was dropped (`Backpressure::Drop`): it carries
     /// nothing. The next delivered frame has `resynced` set and reports every
@@ -201,6 +204,8 @@ pub struct Frame {
     pub resynced: bool,
     /// The step's counters (awake bodies, contacts, colours, overflow flags).
     pub counters: Option<StepCounters>,
+    /// The open terrain region after this step's MPM substeps.
+    pub terrain: Option<engine_webgpu::TerrainStepReport>,
 }
 
 /// Several steps' frames folded into one, for hosts that step more often than

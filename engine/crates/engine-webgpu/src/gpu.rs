@@ -124,6 +124,12 @@ pub struct WgpuSim {
     command_count: u32,
     /// Run `pose_pack` each step (render poses and the moved-body list).
     pose_output: bool,
+    /// Deformable-terrain MPM pool (`terrain_enable`).
+    terrain: Option<terrain::TerrainState>,
+    /// The terrain's coupled frame appended impulse records for this step.
+    terrain_impulses_pending: bool,
+    /// A heightfield is watched by the terrain look-ahead.
+    terrain_watch_on: bool,
     /// Run `contact_events` each step (`set_contact_events`).
     contact_events: bool,
     /// Explosions queued for the next step (`write_explosions`).
@@ -148,6 +154,8 @@ pub struct WgpuSim {
     chip: String,
     /// Any convex hull collider: schedules the convex_* narrowphase entries.
     has_convex: bool,
+    /// Any heightfield collider: its pairs take the convex_* entries too.
+    has_height_field: bool,
     /// Size levels of the hierarchical broadphase grid (0 = uniform grid).
     grid_levels: u32,
     /// (collider count, base cell, levels): recomputed only when colliders change.
@@ -156,6 +164,10 @@ pub struct WgpuSim {
     bounds_dirty: bool,
     /// Any collider carries a collision filter (HOST_S(21)).
     has_filters: bool,
+    /// Some heightfield in the hull arena carries a soil (vehicle ruts, T5):
+    /// the step plans `wheel_soil` / `wheel_soil_press`. Set once, from the
+    /// arena uploads (`sync_hulls`).
+    has_soil: bool,
     /// The last step's manifolds still describe the scene (whole-step reuse).
     manifolds_valid: bool,
     /// Records the hull buffer (binding 18) holds; grows on demand.
@@ -288,9 +300,14 @@ pub fn default_device() -> anyhow::Result<(wgpu::AdapterInfo, wgpu::Device, wgpu
     let info = adapter.get_info();
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("engine-webgpu-sim"),
-        // Per-phase GPU timing (`RUBBLE_GPU_TIMING=1`) needs timestamp queries.
-        required_features: if std::env::var("RUBBLE_GPU_TIMING").is_ok_and(|v| v == "1") {
-            adapter.features() & wgpu::Features::TIMESTAMP_QUERY
+        // Per-phase GPU timing (`RUBBLE_GPU_TIMING=1`, and the terrain's
+        // `RUBBLE_TERRAIN_TIMING` / `RUBBLE_TERRAIN_GPU_MS`) needs timestamp queries.
+        required_features: if ["RUBBLE_GPU_TIMING", "RUBBLE_TERRAIN_TIMING", "RUBBLE_TERRAIN_GPU_MS"]
+            .iter()
+            .any(|k| std::env::var(k).is_ok_and(|v| v == "1"))
+        {
+            adapter.features()
+                & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS)
         } else {
             wgpu::Features::empty()
         },
@@ -546,6 +563,20 @@ impl WgpuSim {
                 mapped_at_creation: false,
             }));
         }
+        // Deformable-terrain MPM buffers (terrain_mpm.slang): placeholders until
+        // `terrain_enable` sizes them from a TerrainConfig.
+        for binding in engine_terrain::layout::MPM_PARAMS_BINDING..engine_terrain::layout::MPM_BINDING_END {
+            debug_assert_eq!(bufs.len(), binding);
+            bufs.push(terrain_buffer(&device, binding, 256));
+        }
+        // The render-only surface pass (terrain_surface.slang) binds 53: a
+        // placeholder (hosts that run the pass size it from SurfacePlan).
+        debug_assert_eq!(bufs.len(), engine_terrain::surface::SURFACE_BINDING);
+        bufs.push(terrain_buffer(
+            &device,
+            engine_terrain::surface::SURFACE_BINDING,
+            256,
+        ));
         // Pass table slots (256-byte aligned so dynamic offsets are legal).
         queue.write_buffer(&bufs[22], 0, &rigid_plan::pass_table());
 
@@ -706,6 +737,9 @@ impl WgpuSim {
             joint_count: 0,
             command_count: 0,
             pose_output,
+            terrain: None,
+            terrain_impulses_pending: false,
+            terrain_watch_on: false,
             contact_events: false,
             explosion_count: 0,
             motion_locks: false,
@@ -722,10 +756,12 @@ impl WgpuSim {
             body_reach: Vec::new(),
             chip: format!("{} / {}", info.name, info.backend),
             has_convex: false,
+            has_height_field: false,
             grid_levels: 0,
             grid_cache: None,
             bounds_dirty: false,
             has_filters: false,
+            has_soil: false,
             manifolds_valid: false,
             hull_records_capacity: hull_records,
             wake_pending: false,
@@ -883,7 +919,8 @@ impl WgpuSim {
     /// the step's uniforms (which schedule `apply_impulses` from it).
     fn upload_impulses(&mut self) {
         let n = self.impulse_queue.len() as u32;
-        self.impulses_this_step = n > 0;
+        // Terrain coupling appended its reaction records on the GPU after these.
+        self.impulses_this_step = n > 0 || self.terrain_impulses_pending;
         if n > 0 {
             // Mode word: mode | queue index << 8 (the per-body sum order).
             let keyed: Vec<ImpulseRecord> = self
@@ -924,6 +961,9 @@ impl WgpuSim {
             self.has_convex |= colliders
                 .iter()
                 .any(|c| c.shape == ShapeType::ConvexHull as u32);
+            self.has_height_field |= colliders
+                .iter()
+                .any(|c| c.shape == ShapeType::HeightField as u32);
             self.has_filters |= colliders
                 .iter()
                 .any(engine_schema::convex::CollisionFilter::is_set);
@@ -999,6 +1039,21 @@ impl WgpuSim {
         }
         let dirty = arena.take_dirty();
         let records = arena.records();
+        // A heightfield placed (or rewritten) with a soil: plan the soil passes
+        // from now on. Every upload of a field includes its header. (A record
+        // that only looks like one costs two idle dispatches per step.)
+        if !self.has_soil {
+            use engine_schema::heightfield::*;
+            let sides = HEIGHT_FIELD_MIN_SAMPLES..=HEIGHT_FIELD_MAX_SAMPLES;
+            self.has_soil = dirty.iter().any(|r| {
+                records[r.start as usize..r.end as usize].iter().any(|h| {
+                    h[0] == HEIGHT_FIELD_MAGIC
+                        && h[3] & HEIGHT_FIELD_SOIL != 0
+                        && sides.contains(&h[1])
+                        && sides.contains(&h[2])
+                })
+            });
+        }
         for r in dirty {
             self.queue.write_buffer(
                 &self.bufs[18],
@@ -1051,6 +1106,9 @@ impl WgpuSim {
             self.has_convex |= colliders
                 .iter()
                 .any(|c| c.shape == ShapeType::ConvexHull as u32);
+            self.has_height_field |= colliders
+                .iter()
+                .any(|c| c.shape == ShapeType::HeightField as u32);
             self.has_filters |= colliders
                 .iter()
                 .any(engine_schema::convex::CollisionFilter::is_set);
@@ -1117,6 +1175,7 @@ impl WgpuSim {
             .any(CollisionFilter::is_set);
         self.host_cols[first as usize..end].copy_from_slice(cols);
         self.has_convex |= cols.iter().any(|c| c.shape == ShapeType::ConvexHull as u32);
+        self.has_height_field |= cols.iter().any(|c| c.shape == ShapeType::HeightField as u32);
         if cols.iter().any(CollisionFilter::is_set) {
             self.has_filters = true;
         } else if cleared {
@@ -1249,6 +1308,7 @@ impl WgpuSim {
             }
         }
         self.has_convex = cols.iter().any(|c| c.shape == ShapeType::ConvexHull as u32);
+        self.has_height_field = cols.iter().any(|c| c.shape == ShapeType::HeightField as u32);
         self.has_filters = cols
             .iter()
             .any(engine_schema::convex::CollisionFilter::is_set);
@@ -1283,6 +1343,7 @@ impl WgpuSim {
             .any(CollisionFilter::is_set);
         self.host_cols[first as usize..end].copy_from_slice(cols);
         self.has_convex |= cols.iter().any(|c| c.shape == ShapeType::ConvexHull as u32);
+        self.has_height_field |= cols.iter().any(|c| c.shape == ShapeType::HeightField as u32);
         if cols.iter().any(CollisionFilter::is_set) {
             self.has_filters = true;
         } else if cleared {
@@ -1327,6 +1388,74 @@ impl WgpuSim {
         self.add_colliders(&colliders);
         self.sync_hulls(arena);
         body
+    }
+
+    /// A static heightfield body at `pos`/`rot` (the field is centred on it).
+    /// Returns (body, collider).
+    pub fn add_height_field(
+        &mut self,
+        arena: &mut HullArena,
+        field: &engine_schema::heightfield::HeightField,
+        pos: glam::Vec3,
+        rot: glam::Quat,
+        material: u32,
+    ) -> Result<(u32, u32), engine_schema::heightfield::HeightFieldError> {
+        let base = arena.insert_height_field(field)?;
+        let mut support = BodyState::static_plane_support();
+        support.position = pos.to_array();
+        support.orientation = rot.to_array();
+        support.initial_pos = support.position;
+        support.initial_rot = support.orientation;
+        let body = self.add_body(support);
+        let collider = self.add_collider(Collider {
+            body,
+            shape: ShapeType::HeightField as u32,
+            material,
+            generation: 0,
+            local_pos: [0.0; 3],
+            density: 0.0,
+            local_rot: [0.0, 0.0, 0.0, 1.0],
+            params: engine_schema::heightfield::height_field_collider_params(base, field),
+        });
+        self.sync_hulls(arena);
+        Ok((body, collider))
+    }
+
+    /// Upload an edited heightfield (`rows` = the sample rows that changed).
+    /// The collider's bounds follow the new height range; contacts are rebuilt.
+    pub fn update_height_field(
+        &mut self,
+        arena: &mut HullArena,
+        collider: u32,
+        field: &engine_schema::heightfield::HeightField,
+        rows: std::ops::Range<u32>,
+    ) -> Result<(), engine_schema::heightfield::HeightFieldError> {
+        let mut col = self.collider(collider);
+        assert_eq!(col.shape, ShapeType::HeightField as u32, "collider {collider} is not a heightfield");
+        let base = engine_schema::convex::convex_params_base(col.params);
+        arena.update_height_field(base, field, rows)?;
+        col.params = engine_schema::heightfield::height_field_collider_params(base, field);
+        self.set_colliders(collider, std::slice::from_ref(&col));
+        self.sync_hulls(arena);
+        self.mark_surface_moved(col.body);
+        Ok(())
+    }
+
+    /// A static body's surface changed under its contacts (a heightfield edit,
+    /// or terrain activation and bake on the GPU). Contact reuse
+    /// (FLAG_REUSE_CONTACTS) keeps a pair's manifold until either body's
+    /// generation passes the step it was made in, and a static body's never
+    /// changes: mark it as moved this step, so no manifold made against the old
+    /// surface is reused.
+    pub(crate) fn mark_surface_moved(&mut self, body: u32) {
+        let at = u64::from(body) * std::mem::size_of::<BodyState>() as u64
+            + std::mem::offset_of!(BodyState, generation) as u64;
+        self.queue
+            .write_buffer(&self.bufs[0], at, bytemuck::bytes_of(&self.steps_done));
+        if let Some(b) = self.host_bodies.get_mut(body as usize) {
+            b.generation = self.steps_done;
+        }
+        self.wake_pending = true;
     }
 
     pub fn joint_count(&self) -> u32 {
@@ -2084,6 +2213,7 @@ impl WgpuSim {
             v.dirty = false;
         }
         self.impulses_this_step = false;
+        self.terrain_impulses_pending = false;
         if !read {
             self.contacts_parity ^= 1;
             self.steps_done = self.steps_done.saturating_add(1);
@@ -2209,6 +2339,8 @@ impl WgpuSim {
             joint_count: self.joint_count,
             joint_hash_slots: engine_schema::joint_hash_size(self.joint_count),
             has_convex: self.has_convex,
+            has_height_field: self.has_height_field,
+            soil: self.has_soil,
             reuse_contacts: self.reuse_on(),
             max_colors: self.capacity.max_colors,
             iterations: self.params.iterations,
@@ -2255,9 +2387,10 @@ impl WgpuSim {
         self.np_split && self.copy_reuse()
     }
     /// The persist list is written by narrowphase only; convex kernels emit
-    /// contacts after it, so hull scenes take the full persistence scan.
+    /// contacts after it, so hull and heightfield scenes take the full
+    /// persistence scan.
     fn listed_persist(&self) -> bool {
-        self.persist_list && !self.has_convex
+        self.persist_list && !self.has_convex && !self.has_height_field
     }
 
     fn wg_allows(&self, name: &str) -> bool {
@@ -3022,6 +3155,13 @@ impl VehicleBackend for WgpuSim {
 
 #[path = "gpu_host_state.rs"]
 mod host_state;
+#[path = "gpu_terrain.rs"]
+mod terrain;
+pub use terrain::TerrainStepReport;
+#[path = "gpu_terrain_watch.rs"]
+mod terrain_watch;
+pub use terrain_watch::{TerrainStrike, TerrainWatch};
+pub(crate) use terrain::terrain_buffer;
 #[path = "gpu_characters.rs"]
 mod characters;
 pub use characters::{CharacterHandle, MotionEvent};
