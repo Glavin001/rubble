@@ -1330,9 +1330,17 @@ runs with `settle_rule: "local"`, so an area settles on its own sand while the
 car drives over it and the barrage's ejecta fly elsewhere, and the pool takes
 back a baked area's slots while others are open. The page closes nothing and
 never pauses the director. (Until 2026-10-30 it did: timed closes at
-`closeafter`/`maxage`, the director kept out of old areas, and lulls until
-every area had baked. `?settle=strict` keeps the strict rule, with none of
-those, to compare.)
+`closeafter`/`maxage` and lulls until every area had baked. `?rule=strict`
+keeps the strict rule, without them, to compare.)
+
+A crater's sand creeps for some 10–15 s before it is under the settle speed
+(measured on the preview: an area 0.46 m/s 3 s after its strike, under
+0.16 m/s and baked 13 s after). A strike into an open area grows it and starts
+it over, and an area's box is about 144 m across, so a director that keeps
+striking near the car feeds one area that never settles (one grew to 508k
+particles in 25 s). So the director keeps its own strikes out of an area older
+than `settleafter` s (8); an area grown over others keeps the oldest one's
+age. Yours go anywhere.
 
 **Limits checked before a strike is placed**, refused with a message rather
 than an engine error:

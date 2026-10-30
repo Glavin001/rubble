@@ -115,7 +115,7 @@
     // Endless play: an area settles on its own sand and the parcels that can
     // still reach it (engine_terrain::SettleRule::Local), not on the car
     // driving over it or a barrage's ejecta flying elsewhere.
-    if (PLAY) TERRAIN.settings.settle_rule = qs.get('settle') === 'strict' ? 'strict' : 'local';
+    if (PLAY) TERRAIN.settings.settle_rule = qs.get('rule') === 'strict' ? 'strict' : 'local';
 
     // ================================================================ device
     if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
@@ -1035,6 +1035,7 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       if (PLAY) {
         SCHEDULE.length = 0;
         Object.assign(game, { over: null, near: 0, dropped: 0, survived: 0, next: 3, baked: 0, msg: '', msgT: -1e9, flipT: 0, stuckT: 0, trail: [] });
+        game.opened.clear();
         $('over').hidden = true;
       }
     }
@@ -1216,7 +1217,7 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
     const touch = { left: false, right: false, gas: false, brake: false };
     const key = (...c) => c.some((k) => keys.has(k));
     let steerNow = 0;
-    const game = { over: null, near: 0, dropped: 0, survived: 0, next: 3, baked: 0, msg: '', msgT: -1e9, flipT: 0, stuckT: 0, throttle: false, best: 0 };
+    const game = { over: null, near: 0, dropped: 0, survived: 0, next: 3, baked: 0, opened: new Map(), msg: '', msgT: -1e9, flipT: 0, stuckT: 0, throttle: false, best: 0 };
     try { game.best = Number(localStorage.getItem('rubble.meteorRun.best')) || 0; } catch { /* no storage: no best */ }
     // Seeded, so a run can be replayed with ?seed=.
     let seed = num('seed', Math.floor(Math.random() * 1e9)) >>> 0;
@@ -1225,7 +1226,13 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
     const NEAR = RIM + 12; // closer than this and you live: a near miss
     // The open areas you leave behind bake on their own once their sand is
     // at rest (the local settle rule, set above), and the pool takes back
-    // their slots while others are open: nothing here closes or pauses.
+    // their slots while others are open: nothing here closes or pauses. A
+    // crater's sand creeps for some 10-15 s before it is at rest, and a strike
+    // into an open area grows it and starts it over; so the director keeps its
+    // strikes out of an area older than SETTLE_AFTER s (yours go anywhere).
+    // An area grown over others keeps the oldest one's age (growth can move it
+    // to another slot).
+    const SETTLE_AFTER = num('settleafter', 8);
     const EDGE = HALF - 170;
     const inField = (x, z) => Math.abs(x) < EDGE && Math.abs(z) < EDGE;
     const pending = () => SCHEDULE.filter((s) => s.state === 'wait' || s.state === 'approach').length;
@@ -1255,6 +1262,13 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       return Math.max(x1 - x0, z1 - z0) / SP + 4;
     };
     const fitsPatch = (x, z) => grownSpan(x, z) <= PN - 8;
+    // The age of the oldest open area a strike at (x, z) would grow (0: none).
+    const touchedAge = (x, z) => {
+      const [x0, z0, x1, z1] = boxOf(x, z), g = 2 * BLOCK;
+      let age = 0;
+      for (const a of terrain.areas) if (x0 < a.end[0] + g && x1 > a.origin[0] - g && z0 < a.end[2] + g && z1 > a.origin[2] - g) age = Math.max(age, st.t - (game.opened.get(a.slot)?.t ?? st.t));
+      return age;
+    };
     const playCanOpen = (x, z) => poolUse() < 0.93 && fitsPatch(x, z) && (touchesArea(x, z) || terrain.areas.length < REGIONS);
     game.say = (m) => { game.msg = m; game.msgT = st.t; };
     function tryStrike(x, z, who) {
@@ -1318,10 +1332,12 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       else if (pick < onYou + 0.75) { const a = 14 + 20 * rand(), o = sgn * 8 * rand(); x = p[0] - f[0] * a + side[0] * o; z = p[2] - f[2] * a + side[2] * o; }
       else { const a = 2 * Math.PI * rand(), d = 70 + 120 * rand(); x = p[0] + Math.cos(a) * d; z = p[2] + Math.sin(a) * d; }
       x = Math.max(-EDGE + 1, Math.min(EDGE - 1, x)); z = Math.max(-EDGE + 1, Math.min(EDGE - 1, z));
+      // Not into an area left to settle: try again next frame.
+      if (touchedAge(x, z) > SETTLE_AFTER) { game.next = st.t; return; }
       if (poolUse() < 0.88 && fitsPatch(x, z)) SCHEDULE.push({ t: st.t, at: [x, z], who: 'sky', state: 'wait', lead });
     }
-    // Each frame before the strikes: the run's end checks, the director, and
-    // pruning what has played out.
+    // Each frame before the strikes: the run's end checks, the areas' ages,
+    // the director, and pruning what has played out.
     function playTick() {
       if (st.carPose && !game.over) {
         game.flipT = st.carPose.up[1] < 0.3 ? game.flipT + DT : 0;
@@ -1331,6 +1347,15 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
         if (st.frame % Math.round(1 / DT) === 0) { (game.trail ??= []).push(st.carPose.p.slice()); if (game.trail.length > 9) game.trail.shift(); }
         const back = game.trail?.length === 9 ? game.trail[0] : null;
         if (back && game.stuckT > 8 && Math.hypot(st.carPose.p[0] - back[0], st.carPose.p[2] - back[2]) < 5) end('Stuck in the sand');
+      }
+      {
+        const prev = game.opened, next = new Map();
+        for (const a of terrain.areas) {
+          let t = prev.get(a.slot)?.t ?? st.t;
+          for (const o of prev.values()) if (o.lo[0] < a.end[0] && o.hi[0] > a.origin[0] && o.lo[2] < a.end[2] && o.hi[2] > a.origin[2]) t = Math.min(t, o.t);
+          next.set(a.slot, { t, lo: a.origin, hi: a.end });
+        }
+        game.opened = next;
       }
       direct();
       for (let i = SCHEDULE.length - 1; i >= 0; i--) {
