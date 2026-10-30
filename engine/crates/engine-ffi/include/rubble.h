@@ -167,6 +167,8 @@ typedef struct RbQuat {
   float w;
 } RbQuat;
 
+// A position and rotation. A zero rotation (all four components 0, as in
+// `(RbTransform){0}`) is read as identity.
 typedef struct RbTransform {
   struct RbVec3 p;
   struct RbQuat q;

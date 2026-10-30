@@ -54,7 +54,7 @@ jobs:
           path: |
             ~/.cache/rubble-tools
             ~/.cache/.wasm-pack
-          key: rubble-tools-${{ runner.os }}-${{ hashFiles('engine/scripts/build-web.sh', 'engine/crates/*-wasm/Cargo.toml', 'engine/stress-oracle/crates/stress-web/Cargo.toml') }}
+          key: rubble-tools-${{ runner.os }}-${{ hashFiles('engine/scripts/build-web.sh', 'engine/scripts/slangc.sh', 'engine/crates/*-wasm/Cargo.toml', 'engine/stress-oracle/crates/stress-web/Cargo.toml') }}
       # The same build as the Vercel preview: slangc → WGSL, wasm modules, scene snapshots.
       - name: Build the demo site
         run: bash engine/scripts/build-web.sh
@@ -87,3 +87,57 @@ jobs:
       # engine/crates/engine-webgpu/README.md and engine/docs/softbody.md.
       - name: cargo test
         run: cargo test --release -p engine-schema -p engine-exec -p engine-scenes -p engine-vehicle -p engine-softbody -p engine-fracture --no-default-features
+
+  # The C library a game engine links (engine/crates/engine-ffi): built, its header
+  # checked, packaged with engine/scripts/build-ffi.sh, and examples/hello.c compiled
+  # and linked against the package. macOS runs it on the runner's Metal device and
+  # Linux on lavapipe (Mesa's CPU Vulkan); Windows runners have no Vulkan driver, so
+  # there it is linked only. Each package is uploaded as `rubble-<os>`.
+  c-abi:
+    name: C library (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos
+            os: macos-14
+            run_example: 1
+          - name: linux
+            os: ubuntu-latest
+            run_example: 1
+          - name: windows
+            os: windows-latest
+            run_example: 0
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/lfs-pull
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+          key: c-abi
+      - name: Cache slangc
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/rubble-tools
+          key: rubble-slangc-${{ runner.os }}-${{ hashFiles('engine/scripts/slangc.sh') }}
+      - name: Mesa lavapipe (Vulkan on the CPU)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
+      - name: MSVC developer shell
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Build, package and run the C example
+        env:
+          RUN_EXAMPLE: ${{ matrix.run_example }}
+        run: bash engine/scripts/build-ffi.sh
+      - name: Upload the package
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubble-${{ matrix.name }}
+          path: engine/ffi-dist
+          retention-days: 30

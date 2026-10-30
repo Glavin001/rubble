@@ -143,7 +143,13 @@ impl Coords {
         let a = -(m() * Vec3::new(q[0], q[1], q[2]));
         [a.x, a.y, a.z, q[3]]
     }
+    /// A host rotation. The zero quaternion, which is no rotation at all, is
+    /// read as identity, so a zero-initialised `RbTransform` (`{0}` in C)
+    /// places things unrotated instead of normalising to NaN.
     pub fn rotation_in(&self, q: [f32; 4]) -> [f32; 4] {
+        if q == [0.0; 4] {
+            return [0.0, 0.0, 0.0, 1.0];
+        }
         if !self.unreal() {
             return q;
         }
@@ -323,6 +329,9 @@ mod tests {
         ));
         let q = Quat::from_euler(glam::EulerRot::XYZ, 0.3, -0.9, 1.4).to_array();
         let back = c.rotation_in(c.rotation_out(q));
+        for k in [RbCoordinates::RB_COORDINATES_Y_UP_METRES, RbCoordinates::RB_COORDINATES_UNREAL] {
+            assert_eq!(Coords::new(k).rotation_in([0.0; 4]), [0.0, 0.0, 0.0, 1.0]);
+        }
         assert!(Quat::from_array(back).dot(Quat::from_array(q)) > 1.0 - 1e-6);
         let rubble = Coords::new(RbCoordinates::RB_COORDINATES_Y_UP_METRES);
         assert_eq!(rubble.position_out(v), v);
