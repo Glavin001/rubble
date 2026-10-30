@@ -21,10 +21,13 @@
 #include "Misc/Paths.h"
 #include "DynamicRHI.h"
 #include "RenderTimer.h"
+#include "RubbleAbiBackend.h"
+#include "RubbleFilmRig.h"
 #include "RubbleFracture.h"
 #include "RubbleGpuPoses.h"
 #include "RubblePawn.h"
 #include "RubblePrimitives.h"
+#include "RubbleReplayBackend.h"
 #include "RubbleSoftBodies.h"
 #include "RubbleSubsystem.h"
 #include "Tests/AutomationCommon.h"
@@ -787,57 +790,199 @@ bool FRubbleVideoTown::RunTest(const FString& Parameters)
 #endif
 
 #if WITH_DEV_AUTOMATION_TESTS
+namespace GlassTowerFilm
+{
+	enum class ERide : uint8
+	{
+		Orbit, // the slow orbit from the west
+		Chunk, // riding a chunk of the tower: where it goes, the camera goes
+		Fixed, // standing still, shaken by the breaks around it
+	};
+	/** One camera. Eye and Target are where it stands and looks with everything at rest (cm); a
+	 *  riding camera keeps that pose relative to the chunk nearest Chunk. */
+	struct FView
+	{
+		const TCHAR* Name;
+		double Length;
+		ERide Ride;
+		FVector Chunk;
+		FVector Eye;
+		FVector Target;
+		float Fov;
+		/** Fixed cameras: degrees of shake at the peak of the breaking. */
+		float Shake;
+	};
+	// The pack's footprint is centred: the tower stands at X -999 cm (X -1699..-299, Y -706..706,
+	// 18 storeys of 3 m), the two-storey pavilion 7.8 m off its south face at X +1099 (X 499..1699,
+	// Y -600..600). The tower falls south (+X).
+	static const FView Views[] = {
+		{ TEXT("orbit"), 30.0, ERide::Orbit, FVector::ZeroVector, FVector::ZeroVector, FVector::ZeroVector, 70.0f, 0.0f },
+		// Standing on the twelfth floor (Z 3300), at the north side of its core, facing the pavilion.
+		{ TEXT("inside"), 22.0, ERide::Chunk, FVector(-1350, 0, 3290), FVector(-1350, 0, 3465), FVector(1100, 0, 2900), 95.0f, 0.0f },
+		// Leaning out over the roof's south edge (past its glass), looking down and out at the pavilion.
+		{ TEXT("roof"), 22.0, ERide::Chunk, FVector(-420, 0, 5390), FVector(-180, 0, 5750), FVector(1500, 0, 4200), 95.0f, 0.0f },
+		// On the pavilion's upper floor, at its north window, looking up at the tower.
+		{ TEXT("pavilion"), 22.0, ERide::Fixed, FVector::ZeroVector, FVector(560, 150, 465), FVector(-999, 0, 1500), 100.0f, 2.5f },
+		// On the ground 26 m east of the gap between them: the tower comes down across the view.
+		{ TEXT("street"), 22.0, ERide::Fixed, FVector::ZeroVector, FVector(1300, 2600, 165), FVector(-400, 0, 1800), 80.0f, 1.0f },
+	};
+}
+
 /**
  * Rubble.Video.GlassTower: the fracture lab's Generated · Glass tower in Unreal under the threshold
  * model with support loss: rigid until its bonds break. The 54 m tower's lower storeys are shot from
- * either side and it falls south onto the pavilion. Every frame (fixed 1/30 s) to
- * RubbleShots/video/glasstower/ (scripts/unreal/video.sh glasstower encodes them). The camera orbits
- * slowly from the west.
+ * either side and it falls south onto the pavilion, filmed from several cameras (GlassTowerFilm):
+ * the slow orbit, riding a floor and the roof of the falling tower, inside the pavilion it lands on,
+ * and from the street. The world's GPU stepping is not bit-reproducible, so the orbit's pass
+ * records every frame (FRubbleReplayBackend) and the other cameras replay that one collapse.
+ * Every frame (fixed 1/30 s) to RubbleShots/video/glasstower/<camera>/ (scripts/unreal/video.sh
+ * glasstower encodes them).
  */
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRubbleVideoGlassTower, "Rubble.Video.GlassTower",
 	EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
 
 bool FRubbleVideoGlassTower::RunTest(const FString& Parameters)
 {
-	if (!TestTrue(TEXT("the glass tower loads"), Rubble() && Load(TEXT("fracture:glasstower?autoshot=0"))))
+	using namespace GlassTowerFilm;
+	FString Error;
+	if (!TestTrue(TEXT("the engine's ABI"), Rubble() && FRubbleAbiBackend::CheckVersion(Error)))
 	{
 		return false;
 	}
+	TUniquePtr<FRubbleReplayBackend> Owned = MakeUnique<FRubbleReplayBackend>(MakeUnique<FRubbleAbiBackend>());
+	FRubbleReplayBackend* Replay = Owned.Get();
+	Rubble()->SetBackend(MoveTemp(Owned));
+	if (!TestTrue(TEXT("the glass tower loads"), Load(TEXT("fracture:glasstower?autoshot=0"))))
+	{
+		Rubble()->SetBackend(MakeUnique<FRubbleAbiBackend>());
+		return false;
+	}
+	Rubble()->bPaused = true;
 	constexpr double Fps = 30.0;
-	constexpr double Length = 30.0;
-	const FString Dir = ShotDir() / TEXT("video") / TEXT("glasstower");
-	IFileManager::Get().DeleteDirectory(*Dir, false, true);
-	IFileManager::Get().MakeDirectory(*Dir, true);
+	// -RubbleFilmSeconds=N cuts every camera to at most N seconds (a quick look at all of them).
+	double Cap = 1.0e9;
+	FParse::Value(FCommandLine::Get(), TEXT("RubbleFilmSeconds="), Cap);
+	const FString Root = ShotDir() / TEXT("video") / TEXT("glasstower");
+	IFileManager::Get().DeleteDirectory(*Root, false, true);
 	struct FState
 	{
-		int32 Frame = -100;
+		int32 Pass = 0;
+		int32 Frame = -100; // -100: the pass starts
+		double At = 0.0;
 		int32 Fired = 0;
+		/** Per camera, the chunk it rides (found at rest, before anything moves). */
+		TArray<int32> Chunks;
+		bool bAttached = false;
+		FTransform EyeOnChunk;
+		float Breaking = 0.0f;
+		TWeakObjectPtr<ARubbleFilmRig> Rig;
 	};
 	TSharedRef<FState> S = MakeShared<FState>();
+	const FRubbleAbiBackend* Abi = static_cast<const FRubbleAbiBackend*>(Replay->InnerBackend());
+	for (const FView& V : Views)
+	{
+		S->Chunks.Add(V.Ride == ERide::Chunk ? Abi->NearestTownChunk(V.Chunk) : INDEX_NONE);
+	}
+	// The cameras move after the renderers have drawn the frame (a riding camera sees its chunk
+	// where it is drawn).
+	ARubbleFilmRig* Rig = GameWorld()->SpawnActor<ARubbleFilmRig>();
+	S->Rig = Rig;
+	Rig->Late = [S]() {
+		const FView& V = Views[S->Pass];
+		ARubblePawn* Pawn = Cast<ARubblePawn>(GameWorld()->GetFirstPlayerController()->GetPawn());
+		if (!Pawn || S->Frame == -100)
+		{
+			return;
+		}
+		switch (V.Ride)
+		{
+		case ERide::Orbit:
+		{
+			const float u = float(S->At / V.Length);
+			const float Ease = u * u * (3.0f - 2.0f * u);
+			const float Angle = FMath::DegreesToRadians(FMath::Lerp(-38.0f, 12.0f, Ease));
+			// The 54 m tower standing, then the wreck across the pavilion.
+			const float Radius = FMath::Lerp(9500.0f, 7000.0f, Ease);
+			const FVector Centre(0, 0, FMath::Lerp(2300.0f, 800.0f, Ease));
+			const FVector Eye = Centre + FVector(Radius * FMath::Sin(Angle), -Radius * FMath::Cos(Angle), FMath::Lerp(1200.0f, 900.0f, Ease));
+			Pawn->LookFrom(Eye, Centre);
+			break;
+		}
+		case ERide::Chunk:
+		{
+			ARubblePrimitives* Drawn = nullptr;
+			for (TActorIterator<ARubblePrimitives> It(GameWorld()); It; ++It)
+			{
+				Drawn = *It;
+			}
+			FTransform Chunk;
+			if (!Drawn || !Drawn->ChunkTransform(S->Chunks[S->Pass], Chunk))
+			{
+				break;
+			}
+			Chunk.RemoveScaling();
+			if (!S->bAttached)
+			{
+				S->EyeOnChunk = FTransform((V.Target - V.Eye).Rotation(), V.Eye).GetRelativeTransform(Chunk);
+				S->bAttached = true;
+			}
+			const FTransform Eye = S->EyeOnChunk * Chunk;
+			Pawn->ViewFrom(Eye.GetLocation(), Eye.Rotator(), V.Fov);
+			break;
+		}
+		case ERide::Fixed:
+		{
+			// Shaken as things break: a step's splits kick it, and it settles over a third of a second.
+			const float Kick = FMath::Min(1.0f, float(Rubble()->Stats().Events) / 8.0f);
+			S->Breaking = FMath::Max(S->Breaking * FMath::Exp(-3.0f / float(Fps)), Kick);
+			const float a = V.Shake * S->Breaking;
+			const float t = float(S->At);
+			const FRotator Shake(a * FMath::PerlinNoise1D(13.0f * t), a * FMath::PerlinNoise1D(11.0f * t + 31.0f), 0.5f * a * FMath::PerlinNoise1D(7.0f * t + 57.0f));
+			Pawn->ViewFrom(V.Eye, (V.Target - V.Eye).Rotation() + Shake, V.Fov);
+			break;
+		}
+		}
+	};
 	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(4.0f));
-	ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([S, Dir, Fps, Length]() {
-		// Frames -10..-1 settle the camera on its first pose (no blur from the jump), unrecorded.
+	ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([S, Replay, Root, Fps, Cap]() {
+		const FView& V = Views[S->Pass];
+		const FString Dir = Root / V.Name;
 		if (S->Frame == -100)
 		{
 			FApp::SetUseFixedTimeStep(true);
 			FApp::SetFixedDeltaTime(1.0 / Fps);
-			S->Frame = -10;
+			IFileManager::Get().MakeDirectory(*Dir, true);
+			if (S->Pass > 0)
+			{
+				// Back to the start: the renderers rebuild from the recorded scene's assets.
+				Replay->BeginReplay();
+				Replay->SetHold(true);
+				FRubbleSceneRequest R;
+				FString Error;
+				FRubbleSceneRequest::Parse(TEXT("fracture:glasstower?autoshot=0"), R, Error);
+				Rubble()->LoadScene(R, Error);
+				Rubble()->bPaused = true;
+			}
+			S->Fired = 0;
+			S->bAttached = false;
+			S->Breaking = 0.0f;
+			// Frames -40..-1 settle the camera on its first pose and Lumen on the scene, unrecorded;
+			// the world runs from -10.
+			S->Frame = -40;
 		}
-		const double At = FMath::Max(0, S->Frame) / Fps;
-		// The pack's footprint is centred: the tower stands at X -999 cm, its west face at Y -706,
-		// the pavilion 7.8 m off its south face at X +1099.
-		const FVector Tower(-999, 0, 0);
-		const float u = float(At / Length);
-		const float Ease = u * u * (3.0f - 2.0f * u);
-		const float Angle = FMath::DegreesToRadians(FMath::Lerp(-38.0f, 12.0f, Ease));
-		// The 54 m tower standing, then the wreck across the pavilion.
-		const float Radius = FMath::Lerp(9500.0f, 7000.0f, Ease);
-		const FVector Centre(0, 0, FMath::Lerp(2300.0f, 800.0f, Ease));
-		const FVector Eye = Centre + FVector(Radius * FMath::Sin(Angle), -Radius * FMath::Cos(Angle), FMath::Lerp(1200.0f, 900.0f, Ease));
-		if (ARubblePawn* Pawn = Cast<ARubblePawn>(GameWorld()->GetFirstPlayerController()->GetPawn()))
+		if (S->Frame == -10)
 		{
-			Pawn->LookFrom(Eye, Centre);
+			Rubble()->bPaused = false;
+			if (S->Pass == 0)
+			{
+				Replay->BeginRecording();
+			}
+			else
+			{
+				Replay->SetHold(false);
+			}
 		}
+		S->At = FMath::Max(0, S->Frame) / Fps;
 		// A felling notch: the pavilion side's supports go and the north row (X -1524 cm) stands as
 		// the hinge. Three volleys a second apart, each one ball (45 m/s) along each of the three
 		// southern column rows (X -1174, -824, -474) at three heights in each of the lowest three
@@ -846,10 +991,11 @@ bool FRubbleVideoGlassTower::RunTest(const FString& Parameters)
 		// over the north row onto the pavilion: in twelve jittered runs of engine-world's
 		// glass_tower_felling_probe (plans "notch3", "notch3b") it falls toward the pavilion every
 		// time, where volleys alternating whole (plan "both") scatter it. 81 shots on 58 parked balls.
+		// Replays take no shots: their frames already hold them.
 		static const double Volleys[] = { 1.0, 2.0, 3.0 };
-		for (int32 c = 0; c < UE_ARRAY_COUNT(Volleys); ++c)
+		for (int32 c = 0; c < UE_ARRAY_COUNT(Volleys) && S->Pass == 0; ++c)
 		{
-			if (At >= Volleys[c] && !(S->Fired & (1 << c)))
+			if (S->At >= Volleys[c] && !(S->Fired & (1 << c)))
 			{
 				S->Fired |= 1 << c;
 				static const double Rows[] = { -1174.0, -824.0, -474.0 };
@@ -873,12 +1019,23 @@ bool FRubbleVideoGlassTower::RunTest(const FString& Parameters)
 			return false;
 		}
 		FScreenshotRequest::RequestScreenshot(Dir / FString::Printf(TEXT("frame_%04d.png"), S->Frame), /*bShowUI=*/false, false);
-		if (++S->Frame < int32(Length * Fps))
+		if (++S->Frame < int32(FMath::Min(V.Length, Cap) * Fps))
 		{
 			return false;
 		}
+		UE_LOG(LogRubble, Display, TEXT("Rubble.Video.GlassTower: %s, %d frames in %s (%d polls recorded)"), V.Name, S->Frame, *Dir, Replay->RecordedPolls());
+		if (S->Pass + 1 < UE_ARRAY_COUNT(Views))
+		{
+			++S->Pass;
+			S->Frame = -100;
+			return false;
+		}
 		FApp::SetUseFixedTimeStep(false);
-		UE_LOG(LogRubble, Display, TEXT("Rubble.Video.GlassTower: %d frames in %s"), S->Frame, *Dir);
+		if (S->Rig.IsValid())
+		{
+			S->Rig->Destroy();
+		}
+		Rubble()->SetBackend(MakeUnique<FRubbleAbiBackend>());
 		return true;
 	}));
 	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(0.5f));

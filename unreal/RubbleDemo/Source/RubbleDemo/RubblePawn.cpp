@@ -125,9 +125,16 @@ bool ARubblePawn::HasPlayerVehicle() const
 void ARubblePawn::LookFrom(const FVector& Eye, const FVector& Target)
 {
 	SetMode(ERubbleCamera::Fly);
-	const FRotator View = (Target - Eye).Rotation();
+	ViewFrom(Eye, (Target - Eye).Rotation(), 70.0f);
+}
+
+void ARubblePawn::ViewFrom(const FVector& Eye, const FRotator& View, float FieldOfView)
+{
+	SetMode(ERubbleCamera::Fly);
 	Yaw = View.Yaw;
 	Pitch = View.Pitch;
+	Roll = View.Roll;
+	Camera->SetFieldOfView(FieldOfView);
 	SetActorLocationAndRotation(Eye, View);
 }
 
@@ -249,6 +256,7 @@ void ARubblePawn::SetupPlayerInputComponent(UInputComponent* InputComponent)
 			Yaw += D.X * 0.25f;
 			Pitch = FMath::Clamp(Pitch + D.Y * 0.25f, -88.0f, 60.0f);
 			ChaseYaw += D.X * 0.25f;
+			Roll = 0.0f;
 		}
 	});
 	In->BindActionValueLambda(A(TEXT("Zoom")), ETriggerEvent::Triggered, [this](const FInputActionValue& V) {
@@ -418,7 +426,7 @@ void ARubblePawn::Tick(float DeltaSeconds)
 			const FVector Delta = View.Vector() * Move.Y + FRotator(0, Yaw + 90, 0).Vector() * Move.X + FVector::UpVector * Up;
 			SetActorLocation(GetActorLocation() + Delta * 1500.0 * DeltaSeconds);
 		}
-		SetActorRotation(View);
+		SetActorRotation(FRotator(Pitch, Yaw, Roll));
 		break;
 	}
 	case ERubbleCamera::Chase:

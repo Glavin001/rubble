@@ -705,6 +705,18 @@ void ARubblePrimitives::WriteGpu(const FRubbleGpuPoses& Poses)
 	}
 }
 
+bool ARubblePrimitives::ChunkTransform(int32 Chunk, FTransform& Out) const
+{
+	const int32* r = ChunkRefs.Find(Chunk);
+	if (!r || !Refs.IsValidIndex(*r))
+	{
+		return false;
+	}
+	const FInstanceRef& Ref = Refs[*r];
+	return Batches.IsValidIndex(Ref.Batch) && Batches[Ref.Batch].Component
+		&& Batches[Ref.Batch].Component->GetInstanceTransform(Ref.Instance, Out, true);
+}
+
 bool ARubblePrimitives::BodyTransform(FRubbleBodyId Body, FTransform& Out) const
 {
 	const FBodyState* State = BodyInstances.Find(Body.Index());

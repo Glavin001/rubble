@@ -1350,6 +1350,33 @@ bool FRubbleAbiBackend::CreateTown(FString& Error)
 	return true;
 }
 
+int32 FRubbleAbiBackend::NearestTownChunk(const FVector& At) const
+{
+	int32 Best = -1;
+	double BestSq = TNumericLimits<double>::Max();
+	for (int32 c = 0; c < TownChunkBody.Num(); ++c)
+	{
+		const double Sq = FVector::DistSquared(TownChunkAt(uint32(c)), At);
+		if (Sq < BestSq)
+		{
+			BestSq = Sq;
+			Best = c;
+		}
+	}
+	return Best;
+}
+
+bool FRubbleAbiBackend::TownChunkPose(uint32 Chunk, FTransform& Out) const
+{
+	if (!TownChunkBody.IsValidIndex(Chunk))
+	{
+		return false;
+	}
+	const FTransform* Pose = TownBodyPose.Find(TownChunkBody[Chunk]);
+	Out = FTransform(Pose ? Pose->GetRotation() : FQuat::Identity, TownChunkAt(Chunk));
+	return true;
+}
+
 FVector FRubbleAbiBackend::TownChunkAt(uint32 Chunk) const
 {
 	if (!TownChunkBody.IsValidIndex(Chunk))

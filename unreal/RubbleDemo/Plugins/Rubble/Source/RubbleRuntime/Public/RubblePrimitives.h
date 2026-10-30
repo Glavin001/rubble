@@ -44,6 +44,9 @@ public:
 	int32 NumActiveBodies() const { return Active.Num(); }
 	/** The drawn transform of a body's first shape (tests). */
 	bool BodyTransform(FRubbleBodyId Body, FTransform& Out) const;
+	/** A destructible chunk's drawn instance transform, as drawn this frame (scale included); false
+	 *  when it has no CPU-drawn instance. Scripted cameras ride it. */
+	bool ChunkTransform(int32 Chunk, FTransform& Out) const;
 	double LastUpdateMs() const { return UpdateMs; }
 
 private:

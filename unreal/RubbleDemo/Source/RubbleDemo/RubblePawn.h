@@ -41,6 +41,8 @@ public:
 	void SetMode(ERubbleCamera Mode);
 	/** The fly camera at Eye, looking at Target (scripted shots). */
 	void LookFrom(const FVector& Eye, const FVector& Target);
+	/** The fly camera at Eye, turned to View (roll included) with a field of view (scripted shots). */
+	void ViewFrom(const FVector& Eye, const FRotator& View, float FieldOfView);
 	void ToggleMenu();
 	/** Fire along the camera's view (F) or through the cursor (left click). */
 	void Shoot(bool bAtCursor);
@@ -60,6 +62,8 @@ private:
 	FVector Focus = FVector::ZeroVector;
 	float Yaw = 30.0f;
 	float Pitch = -20.0f;
+	/** The fly camera's roll (scripted shots riding a falling floor). */
+	float Roll = 0.0f;
 	float Distance = 2000.0f;
 	FVector2D Move = FVector2D::ZeroVector;
 	float Up = 0.0f;

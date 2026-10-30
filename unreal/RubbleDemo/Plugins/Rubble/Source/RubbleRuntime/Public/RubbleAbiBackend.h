@@ -45,6 +45,10 @@ public:
 	bool IsOnAbi() const { return !bMock; }
 	virtual FRubbleGpuPoses* GpuPoses() const override { return bMock ? nullptr : Gpu.Get(); }
 	RbWorld* World() const { return WorldPtr; }
+	/** The town's (or glass tower's) chunk nearest At at its latest pose, or -1 without a town. */
+	int32 NearestTownChunk(const FVector& At) const;
+	/** A town chunk's latest world frame: its body's rotation, at the chunk's centre. */
+	bool TownChunkPose(uint32 Chunk, FTransform& Out) const;
 
 private:
 	bool LoadAbi(const FRubbleSceneRequest& Request, FString& Error);
