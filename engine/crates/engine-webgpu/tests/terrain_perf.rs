@@ -322,7 +322,9 @@ fn demo_event(set: &Settings) {
 /// apart (1.6) in areas of their own `SPACING` m apart (150) on one field,
 /// none baked, stepped at `HZ` (120) for `UNTIL` s (21.5) on the showcase's
 /// clock; each frame's GPU time. `CPR` (6), `MARGIN` (1.0), `GAME=1` the game
-/// profile's settings. With `RUBBLE_TERRAIN_TIMING=1` each submission prints
+/// profile's settings; `FORCE_K` a floor on each frame's substeps,
+/// `STATE_HASH=1` a hash of the end state and the substep counts (to compare
+/// kernels on the same run). With `RUBBLE_TERRAIN_TIMING=1` each submission prints
 /// its kernels' times (each kernel timed in a pass of its own). Run alone:
 ///
 /// `RUBBLE_TERRAIN_GPU_MS=1 cargo test --release -p engine-webgpu --test
@@ -437,6 +439,11 @@ fn barrage_frame_cost() {
             each[a] = n;
             k = k.max(n);
         }
+        // FORCE_K=n: at least n substeps every frame (each frame then costs
+        // what a strike frame's substeps cost at that particle count).
+        if let Some(f) = env("FORCE_K") {
+            k = k.max(f as u32);
+        }
         s.terrain_set_area_substeps(each).unwrap();
         let dt = frame / k as f32;
         let w = std::time::Instant::now();
@@ -465,6 +472,22 @@ fn barrage_frame_cost() {
             );
         }
         t += frame;
+    }
+    // STATE_HASH=1: the run's end state (every particle's words) and each
+    // frame's substep count hashed, to compare kernels on the same run.
+    if env("STATE_HASH") == Some(1.0) {
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        let mut mix = |w: u32| {
+            h ^= u64::from(w);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        };
+        for p in s.terrain_particles() {
+            bytemuck::cast_slice::<_, u32>(&[p])
+                .iter()
+                .for_each(|&w| mix(w));
+        }
+        frames.iter().for_each(|f| mix(f.1));
+        eprintln!("  state hash {h:016x}");
     }
     let pct = |v: &mut Vec<f64>, p: f64| {
         v.sort_by(f64::total_cmp);

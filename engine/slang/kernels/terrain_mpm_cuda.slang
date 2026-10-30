@@ -53,7 +53,16 @@ MPM_GS_PER_INDEX(mpm_touch_gs, mpm_touch, mpmGsParticleThreads())
 MPM_GS_PER_INDEX(mpm_count_gs, mpm_count, mpmGsParticleThreads())
 MPM_GS_PER_INDEX(mpm_scatter_gs, mpm_scatter, mpmGsParticleThreads())
 MPM_GS_PER_INDEX(mpm_payload_gs, mpm_payload, mpmGsParticleThreads())
-MPM_GS_PER_INDEX(mpm_g2p_gs, mpm_g2p, mpmGsParticleThreads())
+// G2P synchronises its workgroup (its speed maxima): the stride keeps every
+// lane of a workgroup on the same iterations (n and the stride are multiples
+// of 64), so each iteration's lanes are one workgroup's.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_g2p_gs(uint3 tid : SV_DispatchThreadID)
+{
+    uint n = mpmGsParticleThreads();
+    for (uint i = tid.x; i < n; i += MPM_GS_THREADS) mpmG2pGroup(mpmGsTid(i), i % 64u);
+}
 MPM_GS_PER_INDEX(mpm_geostatic_gs, mpm_geostatic, mpmGsParticleThreads())
 MPM_GS_PER_INDEX(mpm_source_gs, mpm_source, mpmGsParticleThreads())
 MPM_GS_PER_INDEX(mpm_bake_bin_gs, mpm_bake_bin, mpmGsParticleThreads())

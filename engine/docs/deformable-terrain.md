@@ -2312,7 +2312,87 @@ strikes 1.6 s apart in areas of their own, measured alone):
   passes, so they meet that floor too.
   - The lossless lever left for the worst frame is that fixed cost: fewer
     dispatches per substep (fusing kernels, as the native fast paths began)
-    and lighter barriers (Metal directly, `MetalSim`).
+    and lighter barriers (Metal directly, `MetalSim`). Measured since: the
+    dispatches are not that floor (next section).
+
+### What a substep costs (2026-10-30, measured alone)
+
+Native wgpu on Metal, `terrain_perf barrage_frame_cost`, game profile, alone on
+the GPU (only an idle 4-day-old `cargo test` process). `FORCE_K=7` steps every
+frame at 7 substeps, so each frame costs what a strike frame's substeps cost at
+that particle count.
+
+**A strike frame is 7 substeps of the sand there is, nothing more.**
+
+| Particles | 7-substep frame, forced (median) | Strike frame |
+|---|---|---|
+| 27k | 4.35 ms | 7.0 ms (the run's first frame: a cold GPU) |
+| 182k | 6.50 ms | 6.84 ms |
+| 342k | 11.61 ms | 11.42 ms |
+
+That is about 0.5 ms a substep plus about 3.4 ns per particle a substep. The
+earlier "0.5–1 ms at 27k" compared the cold first frame with warm ones.
+
+**Dispatches are not the floor.** Twenty extra one-thread dispatches a substep
+(140 a frame) added 0.7 ms at 342k and 1.4 ms at 27k: 5–10 µs each. A
+substep's 13–16 dispatches therefore cost about 0.1 ms of its 0.6–1.7 ms.
+Fusing kernels can save at most that. The frame is already one compute pass
+(one serial encoder on `MetalSim`), and every adjacent pair in the substep
+depends on the one before through another workgroup's writes, except
+`mpm_g2p` / `mpm_absorb_faces` / `mpm_parcels` (one dispatch, about 1%).
+
+**Shares at 342k** (7 substeps, each kernel timed in a pass of its own):
+`mpm_p2g` 35%, `mpm_g2p` 28%, `mpm_payload` 12%, `mpm_touch` 11%, the
+count/scan/scatter/sort 7%, `mpm_grid` 4%. P2G is bound by its gathers'
+loads: evaluating only the weight each node needs (3 quadratics, not 9) gained
+nothing, so that change was not kept.
+
+**G2P's speed maxima, once per workgroup** (kept). Every particle did two
+atomic maxima on the same two counters (the frame's fastest particle, and its
+area's). Each workgroup now reduces its 64 speeds in a tree in shared memory
+(the speeds' maximum and the lowest and highest area that moved) and does
+one atomic each. A workgroup over several areas falls back to one atomic per
+area present.
+- **Every lane reaches every barrier.** WGSL requires it (Chrome's compiler
+  rejects a barrier after a branch on a storage value; native naga let it
+  through). So the block-sleep path no longer returns early from the kernel:
+  it is still its own function, and it takes its own maxima.
+- **Results identical.** The maximum of the same values is the same in any
+  order, and the particles' update is untouched. `STATE_HASH=1` hashes every
+  particle's words at the end of a run, together with every frame's substep
+  count (which the speeds set). The hash is equal for the old and new kernels:
+  game profile with 4 strikes, physical with 3, area clocks, and block sleep
+  (0.01 m/s). Repeats on the same device were equal.
+- **Cost, native wgpu on Metal:**
+
+  | Game profile, barrage | Median | p95 | Worst (the last strike, 342k) |
+  |---|---|---|---|
+  | Before (two runs) | 1.44 / 1.45 ms | 2.89 / 2.99 | 11.42 / 11.64 ms |
+  | After (two runs) | 1.35 / 1.41 ms | 2.67 / 2.70 | 10.50 / 10.52 ms |
+
+  | 7 substeps forced (median) | Before | After |
+  |---|---|---|
+  | 27k particles | 4.35 ms | 2.60 ms |
+  | 182k | 6.50 ms | 5.96 ms |
+  | 342k | 11.61 ms | 10.78 ms |
+
+  The gain is largest where few workgroups contend for one address the
+  longest: small, fast sand.
+- **Chrome** (`showcase.html?profile=game`, 1280×720, 2,580 frames stepped
+  by hand, pane visible, nothing else on the GPU): terrain median 1.376 ms,
+  p95 2.556, worst 19.3 → 19.2 ms. Unchanged within noise, with the same
+  substep schedule. Dawn's atomics there were not the cost.
+- `MetalSim` has no barrage bench, so it was not measured. It runs the same
+  kernel; `terrain_parity` passes.
+
+**Where this leaves the 2 ms worst frame.** At 342k particles a substep costs
+about 1.5 ms, so seven of them cannot fit 2 ms without stepping less sand or
+fewer times. Doing either changes results (area clocks; a cheaper material or
+coarser cells, by profile), so neither is adopted here. What a lossless
+change could still buy is in the gathers themselves (P2G and G2P loading a
+neighbour's particles or nodes once per workgroup, not once per node) or in
+not copying the payload each substep. Both are larger rewrites, for perhaps
+a few tens of percent, not the 5× the target needs.
 
 ## Native backends (2026-10-25)
 

@@ -473,7 +473,6 @@ float3 mpmWeights(float fx)
 }
 
 float mpmWeightAt(float3 wx, uint o) { return o == 0u ? wx.x : o == 1u ? wx.y : wx.z; }
-
 // The indirect workgroup counts from the counters: blocks, particles, parcels.
 void mpmWriteArgs(MpmParams p)
 {
@@ -1777,19 +1776,21 @@ void mpmG2pSleep(uint i, MpmParams p)
     gMpmParticles[i] = q;
 }
 
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void mpm_g2p(uint3 tid : SV_DispatchThreadID)
+// G2P's fastest speeds, reduced in its workgroup before the counters' atomics:
+// each lane's speed (f32 bits, 0 for none) and its area, kept; and the tree
+// over them: the speeds' maximum and the lowest and highest area that moved.
+groupshared uint gsMpmG2pSpeed[64];
+groupshared uint gsMpmG2pArea[64];
+groupshared uint gsMpmG2pTop[64];
+groupshared uint gsMpmG2pLo[64];
+groupshared uint gsMpmG2pHi[64];
+
+// G2P of particle i; its speed (f32 bits) and area for the frame's maxima, or
+// area MPM_NO_AREA when it moved no material.
+void mpmG2p(uint i, MpmParams p, out uint speedBits, out uint speedArea)
 {
-    uint i = mpmIndex(tid);
-    MpmParams p = mpmParams();
-    if (i >= mpmParticleCount()) return;
-    // Block sleep: its own function, ahead of the usual path.
-    if (mpmSleepSpeed() > 0.0)
-    {
-        mpmG2pSleep(i, p);
-        return;
-    }
+    speedBits = 0u;
+    speedArea = MPM_NO_AREA;
     MpmParticle q = gMpmParticles[i];
     if (mpmParticleDead(q)) return;
     uint area = mpmAreaOf(q.xm.xyz, p);
@@ -1836,10 +1837,8 @@ void mpm_g2p(uint3 tid : SV_DispatchThreadID)
     q.f1.xyz = F[1];
     q.f2.xyz = F[2];
     float speed = length(v);
-    AMAX2(gMpmCounters[MPM_C_MAX_SPEED], asuint(speed));
-    // Per area only with more than slot 0 in use (one area's is the frame's:
-    // TerrainPlan::check), sparing every particle a second contended atomic.
-    if (p.area.x > 1u) AMAX2(gMpmCounters[MPM_C_AREA_SPEED + area], asuint(speed));
+    speedBits = asuint(speed);
+    speedArea = area;
     if (!(speed <= p.limits.x)) AOR2(gMpmCounters[MPM_C_FLAGS], MPM_CFL);
     // Leaving its area's box: a parcel carries the material on (with ejecta enabled).
     uint maxParcels = asuint(p.couple.z);
@@ -1859,6 +1858,72 @@ void mpm_g2p(uint3 tid : SV_DispatchThreadID)
         else AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_PARCELS);
     }
     gMpmParticles[i] = q;
+}
+
+// mpm_g2p's body for thread tid, lane j of its workgroup (every lane of the
+// workgroup calls it: it synchronises the workgroup).
+void mpmG2pGroup(uint3 tid, uint j)
+{
+    uint i = mpmIndex(tid);
+    MpmParams p = mpmParams();
+    uint speedBits = 0u, speedArea = MPM_NO_AREA;
+    if (i < mpmParticleCount())
+    {
+        // Block sleep: its own function, ahead of the usual path (it takes
+        // its maxima itself: this lane then adds none below).
+        if (mpmSleepSpeed() > 0.0) mpmG2pSleep(i, p);
+        else mpmG2p(i, p, speedBits, speedArea);
+    }
+    // The fastest speed, once per workgroup instead of once per particle (a
+    // max of the same values: the counters end the same). f32 bits of speeds
+    // order as the speeds; 0 is no speed. Every barrier is reached by every
+    // lane (WGSL's uniformity).
+    bool moved = speedArea != MPM_NO_AREA;
+    gsMpmG2pSpeed[j] = speedBits;
+    gsMpmG2pArea[j] = speedArea;
+    gsMpmG2pTop[j] = speedBits;
+    gsMpmG2pLo[j] = moved ? speedArea : MPM_NO_AREA;
+    gsMpmG2pHi[j] = moved ? speedArea : 0u;
+    GROUP_SYNC();
+    for (uint w = 32u; w > 0u; w >>= 1)
+    {
+        if (j < w)
+        {
+            gsMpmG2pTop[j] = max(gsMpmG2pTop[j], gsMpmG2pTop[j + w]);
+            gsMpmG2pLo[j] = min(gsMpmG2pLo[j], gsMpmG2pLo[j + w]);
+            gsMpmG2pHi[j] = max(gsMpmG2pHi[j], gsMpmG2pHi[j + w]);
+        }
+        GROUP_SYNC();
+    }
+    uint top = gsMpmG2pTop[0];
+    uint lo = gsMpmG2pLo[0], hi = gsMpmG2pHi[0];
+    if (j == 0u && top != 0u) AMAX2(gMpmCounters[MPM_C_MAX_SPEED], top);
+    // Per area only with more than slot 0 in use (one area's is the frame's:
+    // TerrainPlan::check). One area in the workgroup: its maximum is the
+    // workgroup's. Several: the first lane of each takes that area's.
+    if (p.area.x <= 1u || lo > hi) return;
+    if (lo == hi)
+    {
+        if (j == 0u) AMAX2(gMpmCounters[MPM_C_AREA_SPEED + lo], top);
+        return;
+    }
+    if (!moved) return;
+    uint mine = 0u;
+    bool first = true;
+    for (uint k = 0u; k < 64u; k++)
+    {
+        if (gsMpmG2pArea[k] != speedArea) continue;
+        if (k < j) first = false;
+        mine = max(mine, gsMpmG2pSpeed[k]);
+    }
+    if (first) AMAX2(gMpmCounters[MPM_C_AREA_SPEED + speedArea], mine);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_g2p(uint3 tid : SV_DispatchThreadID, uint3 lid : SV_GroupThreadID)
+{
+    mpmG2pGroup(tid, lid.x);
 }
 
 // ---- activation and bake -----------------------------------------------------
