@@ -2272,9 +2272,10 @@ void mpm_pool_holes_scan(uint3 lid : SV_GroupThreadID)
 {
     uint l = lid.x;
     MpmParams p = mpmParams();
-    // Uniform: every lane returns or none (the scan synchronises them).
-    if (!mpmPoolReusing()) return;
-    uint chunks = (mpmParticleCount() + 63u) / 64u;
+    // No early return before the barriers (WGSL needs uniform control flow):
+    // with reuse off there are no chunks.
+    bool on = mpmPoolReusing();
+    uint chunks = on ? (mpmParticleCount() + 63u) / 64u : 0u;
     uint per = (chunks + 255u) / 256u;
     uint first = l * per, last = min(first + per, chunks);
     uint sum = 0u;
@@ -2295,7 +2296,7 @@ void mpm_pool_holes_scan(uint3 lid : SV_GroupThreadID)
         gMpmSorted[p.counts.x + c] = start;
         start += n;
     }
-    if (l == 255u) ASTORE(gMpmCounters[MPM_C_HOLES], gsMpmScan[255]);
+    if (on && l == 255u) ASTORE(gMpmCounters[MPM_C_HOLES], gsMpmScan[255]);
 }
 
 // Per 64 slots: its free slots into the list, in slot order (gMpmSorted
@@ -2347,9 +2348,10 @@ void mpm_parcels_pack(uint3 lid : SV_GroupThreadID)
 {
     uint l = lid.x;
     MpmParams p = mpmParams();
-    if (!mpmPoolReusing()) return;
+    // No early return before the barriers (uniform control flow).
+    bool on = mpmPoolReusing();
     uint maxP = asuint(p.couple.z);
-    uint n = min(ALOAD(gMpmCounters[MPM_C_PARCELS]), maxP);
+    uint n = on ? min(ALOAD(gMpmCounters[MPM_C_PARCELS]), maxP) : 0u;
     uint per = (n + 255u) / 256u;
     uint first = l * per, last = min(first + per, n);
     uint sum = 0u;
@@ -2373,7 +2375,7 @@ void mpm_parcels_pack(uint3 lid : SV_GroupThreadID)
         at++;
     }
     GROUP_SYNC();
-    if (l == 255u) ASTORE(gMpmCounters[MPM_C_PARCELS], gsMpmScan[255]);
+    if (on && l == 255u) ASTORE(gMpmCounters[MPM_C_PARCELS], gsMpmScan[255]);
 }
 
 // After mpm_parcels_pack, per parcel slot: the packed parcels back in place.
