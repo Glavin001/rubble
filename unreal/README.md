@@ -19,6 +19,22 @@ scripts/unreal/run.sh soft:wall?speed=56&overlap=0.25
 scripts/unreal/test.sh            # Rubble.Clock, Rubble.Mock, Rubble.Abi (headless), Rubble.Render (in game)
 ```
 
+The town and the glass tower need their scene packs, and their look needs textures that are not
+in this repo:
+
+```bash
+scripts/unreal/build-town.sh            # Content/Rubble/Town: the town pack and glass-tower.json (git lfs pull first)
+scripts/unreal/fetch-assets.sh          # Megascans from the private Glavin001/rubble-assets repo (optional)
+scripts/unreal/fetch-city-textures.sh   # the town's CC0 texture arrays, from a vibe-land checkout (optional)
+scripts/unreal/run.sh fracture:town
+scripts/unreal/run.sh fracture:glasstower
+scripts/unreal/video.sh glasstower      # one collapse filmed from five cameras (target/unreal/glasstower-*.mp4)
+```
+
+Without the optional textures the scenes still run. `build-content.sh` reports each missing
+Megascans set with its Fab listing and skips that look, and without the city textures the town's
+chunks are tinted only and the ground is the yard's.
+
 Scenes are `family:id?key=value`, using the families `rigid`, `vehicles`, `soft` and `fracture`
 and the pages' own ids and parameters. Press Tab in game for the menu.
 
@@ -70,7 +86,7 @@ FRubbleMockBackend (stand-in motion; the HUD says "mock: <reason>")
 | Rigid | Every stack, ring, gable, pile, grid and scatter scene | `joints`, `ragdolls`, `hingechains10k`, `motorfield10k`: their builders are not on the ABI |
 | Vehicles | Every scene. Presets are drawn from their descriptors (`rbGetVehiclePresetJson`) | — |
 | Soft-body cars | Every crash test, the yard and the traffic derby. The demo's `procedural_car` (`rbGetSoftVehiclePresetJson`) uses the calibrated 240 Hz settings, rigid shapes are soft obstacles, and a fitted shell is bound with `rbSoft_BindSkin` | `crates`: no lattice-crate preset |
-| Fracture | `house`, `arch`: Shardwright GLBs at level 0, with the lab's own solver and bond preload | The cuboid, row and grid scenes: `rbCreateDestructibleAssetCuboidHouse` exists, but nothing reports chunk geometry to draw them with |
+| Fracture | `house`, `arch`: Shardwright GLBs at level 0, with the lab's own solver and bond preload. `town` (70 buildings, about 52k chunks) and `glasstower` (an 18-storey glass tower beside a pavilion): ScenePack v2 packs on the threshold strength model, with support loss on (`?supportloss=0` turns it off, `?bonds=1` uses breakable bond joints instead) | The cuboid, row and grid scenes: `rbCreateDestructibleAssetCuboidHouse` exists, but nothing reports chunk geometry to draw them with |
 
 The ground is an infinite plane (`rbCreatePlaneShape`). Shots reuse parked balls through the
 body commands.
