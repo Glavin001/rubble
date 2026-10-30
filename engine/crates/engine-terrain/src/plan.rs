@@ -71,6 +71,15 @@ pub const KERNELS: &[&str] = &[
     "mpm_sleep_ring",
     "mpm_sleep_dilate",
     "mpm_sleep_touch",
+    "mpm_pool_reserve",
+    "mpm_pool_top",
+    "mpm_pool_trim",
+    "mpm_pool_holes_count",
+    "mpm_pool_holes_scan",
+    "mpm_pool_holes_list",
+    "mpm_pool_finish",
+    "mpm_parcels_pack",
+    "mpm_parcels_unpack",
 ];
 
 /// Byte offsets of the indirect workgroup counts in [`MPM_ARGS_BINDING`].
@@ -95,9 +104,15 @@ pub struct TerrainStepReport {
     pub blocks: u32,
     /// Largest particle speed over the frame's substeps (m/s).
     pub max_speed: f32,
-    /// Particle slots in the region (live, or left as parcels).
+    /// Particle slots in the region (live, or left as parcels): the pool's
+    /// extent; with slots reused it can hold dead ones (see `live`).
     pub particles: u32,
-    /// Parcels thrown so far (in flight or landed).
+    /// Live particles. The pool's slots in use are these plus `airborne`
+    /// (each parcel in flight comes back to the slot it left): an
+    /// activation of n more fits while that sum + n ≤ `max_particles`.
+    pub live: u32,
+    /// Parcel slots in use (in flight or landed; a bake that leaves areas
+    /// open packs them to those in flight).
     pub parcels: u32,
     /// Quanta parcels have deposited on the heightfield.
     pub deposited: u32,
@@ -114,6 +129,10 @@ pub struct TerrainStepReport {
     pub area_speed: [f32; MPM_MAX_AREAS as usize],
     /// Per area slot: its fastest coupled body this frame (m/s).
     pub area_body_speed: [f32; MPM_MAX_AREAS as usize],
+    /// Per area slot: parcels in flight whose path can still reach its box.
+    pub area_airborne: [u32; MPM_MAX_AREAS as usize],
+    /// Per area slot: its fastest body touching its material this frame (m/s).
+    pub area_touch_speed: [f32; MPM_MAX_AREAS as usize],
 }
 
 impl TerrainStepReport {
@@ -143,6 +162,38 @@ impl TerrainStepReport {
             ..*self
         }
     }
+
+    /// The report area `slot`'s clock settles on under `rule`: its own
+    /// speeds, and the domain's parcels (strict) or those that can still
+    /// reach it, with only bodies touching its material (local).
+    pub fn settle_view(&self, slot: u32, rule: SettleRule) -> Self {
+        let k = slot as usize;
+        let area = self.area(slot);
+        match rule {
+            SettleRule::Strict => area,
+            SettleRule::Local => Self {
+                airborne: self.area_airborne.get(k).copied().unwrap_or(0),
+                body_speed: self.area_touch_speed.get(k).copied().unwrap_or(0.0),
+                ..area
+            },
+        }
+    }
+}
+
+/// What holds an open area from settling, besides its own material moving
+/// (`engine-world`'s `TerrainDef::settle_rule`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SettleRule {
+    /// Any parcel in flight anywhere, and any dynamic body in its box that
+    /// moves (touching the material or not).
+    #[default]
+    Strict,
+    /// Only parcels whose ballistic path can still reach its box, and bodies
+    /// that touch its material: a car driving over a settled crater on its
+    /// wheels, or ejecta flying elsewhere, no longer keep it open. A body
+    /// falling onto it untouched is the strike look-ahead's
+    /// (`World::terrain_watch_shape`), which holds the area until it lands.
+    Local,
 }
 
 /// A host write (`queue.write_buffer`) of `words` at byte `offset` of `binding`.
@@ -434,8 +485,9 @@ impl TerrainPlan {
                     + u64::from(config.max_wheel_loads) * u64::from(MPM_WHEEL_RECORDS))
                     * 16,
             ),
-            // Two float4 per parcel, then the particle each left (16 B).
-            (MPM_PARCELS_BINDING, u64::from(config.max_parcels) * 48),
+            // Two float4 per parcel, then the particle each left (16 B);
+            // as much again for packing them (mpm_parcels_pack).
+            (MPM_PARCELS_BINDING, u64::from(config.max_parcels) * 96),
             (MPM_DEPOSIT_BINDING, u64::from(config.max_field_samples) * 4),
         ]
     }
@@ -660,6 +712,7 @@ impl TerrainPlan {
         self.geostatic_pending = false;
         let mut ops = TerrainOps::default();
         ops.counter(MPM_C_PARTICLES, n);
+        ops.counter(MPM_C_LIVE, n);
         ops.counter(MPM_C_AREA_FIRST, 0);
         Self::reset_ejecta(&mut ops);
         Ok(ops)
@@ -976,6 +1029,7 @@ impl TerrainPlan {
         self.write_params(&mut ops, slot, mask, 0);
         if fresh_domain {
             ops.counter(MPM_C_PARTICLES, 0);
+            ops.counter(MPM_C_LIVE, 0);
             Self::reset_ejecta(&mut ops);
         }
         let samples = u64::from(ni) * u64::from(nj);
@@ -985,6 +1039,9 @@ impl TerrainPlan {
         ops.disp("mpm_activate_scan", 64);
         // One thread per particle, counted on the GPU by the scan.
         ops.disp("mpm_write_args", 1);
+        // Past the pool's end, the free slots first (each pass returns at
+        // once otherwise).
+        self.pool_holes(&mut ops);
         ops.particles("mpm_activate_emit");
         ops.disp("mpm_activate_lower", u64::from(last - first + 1));
         if faces.len > 0 {
@@ -1060,6 +1117,11 @@ impl TerrainPlan {
         ops.particles("mpm_bake_bin");
         ops.disp("mpm_bake_raise", u64::from(last - first + 1));
         ops.disp("mpm_bake_header", 1);
+        if !close {
+            // Other areas go on: the pool's dead tail and the landed parcels'
+            // slots are free again.
+            self.pool_trim(&mut ops);
+        }
         if close {
             // A forced close (the World bakes on its own only with nothing in
             // flight): parcels still airborne fly on to where they land, on
@@ -1418,6 +1480,31 @@ impl TerrainPlan {
         }
     }
 
+    /// An activation's particles past the pool's end take the slots baked
+    /// areas and landed parcels left, in slot order (no live particle moves).
+    fn pool_holes(&self, ops: &mut TerrainOps) {
+        let chunks = u64::from(self.config.max_particles).div_ceil(64);
+        ops.indirect("mpm_pool_reserve", ARGS_PARCELS);
+        ops.disp("mpm_pool_holes_count", chunks);
+        ops.disp("mpm_pool_holes_scan", 64);
+        ops.disp("mpm_pool_holes_list", chunks);
+        ops.disp("mpm_pool_finish", 1);
+    }
+
+    /// After a bake that leaves areas open (`mpm_bake_bin` marked its
+    /// particles dead): the pool ends after its last slot still held (live,
+    /// or a parcel in flight comes back to it), and the parcels still in
+    /// flight are packed to the front (no live particle moves).
+    fn pool_trim(&self, ops: &mut TerrainOps) {
+        ops.counter(MPM_C_REUSE, 1);
+        ops.disp("mpm_write_args", 1);
+        ops.indirect("mpm_pool_reserve", ARGS_PARCELS);
+        ops.particles("mpm_pool_top");
+        ops.disp("mpm_parcels_pack", 64);
+        ops.disp("mpm_parcels_unpack", u64::from(self.config.max_parcels));
+        ops.disp("mpm_pool_trim", 1);
+    }
+
     /// Once per frame: the parcels' deposits onto the heightfield.
     fn deposits(&self, ops: &mut TerrainOps) {
         let records = u64::from(self.config.max_field_samples).div_ceil(4);
@@ -1584,6 +1671,7 @@ impl TerrainPlan {
             blocks: c[MPM_C_BLOCKS],
             max_speed: f32::from_bits(c[MPM_C_MAX_SPEED]),
             particles: c[MPM_C_PARTICLES],
+            live: c[MPM_C_LIVE],
             parcels: c[MPM_C_PARCELS].min(cfg.max_parcels),
             deposited: c[MPM_C_DEPOSITED],
             escaped: c[MPM_C_ESCAPED],
@@ -1592,6 +1680,8 @@ impl TerrainPlan {
             wheels: c[MPM_C_WHEELS],
             area_speed: std::array::from_fn(|k| f32::from_bits(c[MPM_C_AREA_SPEED + k])),
             area_body_speed: std::array::from_fn(|k| f32::from_bits(c[MPM_C_AREA_BODY + k])),
+            area_airborne: std::array::from_fn(|k| c[MPM_C_AREA_AIR + k]),
+            area_touch_speed: std::array::from_fn(|k| f32::from_bits(c[MPM_C_AREA_TOUCH + k])),
         }
         .one_area_is_the_frame())
     }
@@ -1802,6 +1892,7 @@ mod tests {
             blocks: 1,
             max_speed: s,
             particles: 1,
+            live: 1,
             parcels: 0,
             deposited: 0,
             escaped: 0,
@@ -1810,6 +1901,8 @@ mod tests {
             wheels: 0,
             area_speed: [s; MPM_MAX_AREAS as usize],
             area_body_speed: [0.0; MPM_MAX_AREAS as usize],
+            area_airborne: [air; MPM_MAX_AREAS as usize],
+            area_touch_speed: [0.0; MPM_MAX_AREAS as usize],
         };
         c.report(9, &r(0.0, 0), 0.01);
         assert_eq!(

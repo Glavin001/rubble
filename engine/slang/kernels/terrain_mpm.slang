@@ -113,6 +113,12 @@ static const uint MPM_C_SLEEP = 66u;      // block sleep: the rest speed (f32 bi
 static const uint MPM_C_SLEEP_AFTER = 67u; // block sleep: substeps at rest before a particle sleeps
 static const uint MPM_C_SLEEP_RING0 = 68u; // block sleep: blocks below this are the awake blocks
 static const uint MPM_C_SLEEP_RING1 = 69u; // block sleep: below this, their neighbours (ring 1)
+static const uint MPM_C_AREA_AIR = 70u;    // + slot: parcels in flight whose path can still reach the area
+static const uint MPM_C_AREA_TOUCH = 86u;  // + slot: an area's fastest body touching its material this frame
+static const uint MPM_C_POOL_TOP = 102u;   // pool reuse: one past the highest slot still held
+static const uint MPM_C_HOLES = 103u;      // pool reuse: free slots found (then: the ones the activation takes)
+static const uint MPM_C_REUSE = 104u;      // pool reuse: nonzero while a pass reuses slots (an activation's particles)
+static const uint MPM_C_LIVE = 105u;       // live particles (the pool's held slots: these plus the parcels in flight)
 static const uint MPM_MAX_AREAS = 16u;
 static const uint MPM_NO_AREA = 0xFFFFFFFFu;
 // gMpmParams[0].area.w bits.
@@ -143,6 +149,7 @@ static const uint MPM_PARTICLE_DEAD = 1u;       // left as a parcel: no longer s
 static const uint MPM_PARTICLE_HOME = 2u;       // activated: c1.w, c2.w hold where (the bake's reference)
 static const uint MPM_PARTICLE_FRESH = 4u;      // activated since the last step (mpm_geostatic's)
 static const uint MPM_PARTICLE_ASLEEP = 8u;     // block sleep: at rest, frozen (TerrainConfig::sleep_speed)
+static const uint MPM_PARTICLE_RESERVED = 16u;  // pool reuse: a dead slot a parcel in flight comes back to
 static const uint MPM_PARTICLE_QUIET = 0xFF00u; // block sleep: substeps at rest in a row (bits 8-15)
 static const uint MPM_PARTICLE_QUIET_ONE = 0x100u;
 // Colliders one block cell of the region lists.
@@ -340,6 +347,51 @@ uint mpmParticleCount() { return ALOAD(gMpmCounters[MPM_C_PARTICLES]); }
 
 bool mpmParticleDead(MpmParticle q) { return (asuint(q.f2.w) & MPM_PARTICLE_DEAD) != 0u; }
 
+// A parcel in flight at x with velocity v: every open area its ballistic path
+// can still reach (its box padded by a block, before the parcel falls below
+// the box's floor) counts it (MPM_C_AREA_AIR, the local settle rule). It may
+// land on the heightfield sooner: counting it then only keeps the area open.
+void mpmParcelReach(float3 x, float3 v, MpmParams p)
+{
+    float g = p.step.y;
+    for (uint a = 0u; a < p.area.x; a++)
+    {
+        MpmParams pa = gMpmParams[1u + a];
+        if (pa.dims.x == 0u) continue;
+        float pad = pa.origin.w * float(MPM_BLOCK);
+        float3 lo = pa.origin.xyz - pad;
+        float3 hi = pa.origin.xyz + float3(pa.dims.xyz) * pa.origin.w + pad;
+        // When it falls below the floor: y + v.y·t + g·t²/2 = lo.y, the later root.
+        float t = 0.0;
+        if (x.y >= lo.y)
+        {
+            if (g < 0.0)
+            {
+                float c = x.y - lo.y;
+                t = (v.y + sqrt(v.y * v.y - 2.0 * g * c)) / -g;
+            }
+            else t = 3.0e38;
+        }
+        // Its horizontal path over [0, t] against the box's footprint (slabs).
+        float t0 = 0.0, t1 = t;
+        bool miss = false;
+        for (uint ax = 0u; ax < 2u; ax++)
+        {
+            float xa = ax == 0u ? x.x : x.z, va = ax == 0u ? v.x : v.z;
+            float la = ax == 0u ? lo.x : lo.z, ha = ax == 0u ? hi.x : hi.z;
+            if (abs(va) < 1e-20)
+            {
+                if (xa < la || xa > ha) miss = true;
+                continue;
+            }
+            float ta = (la - xa) / va, tb = (ha - xa) / va;
+            t0 = max(t0, min(ta, tb));
+            t1 = min(t1, max(ta, tb));
+        }
+        if (!miss && t0 <= t1) AADD2(gMpmCounters[MPM_C_AREA_AIR + a], 1u);
+    }
+}
+
 // Area clocks (TerrainConfig::area_clocks): area slot k sits out this substep
 // pass (mpm_pass sets which; none without area clocks).
 bool mpmAreaSkips(uint k) { return ((ALOAD(gMpmCounters[MPM_C_SKIP]) >> k) & 1u) != 0u; }
@@ -503,6 +555,7 @@ void mpm_clear(uint3 tid : SV_DispatchThreadID)
         ASTORE(gMpmCounters[MPM_C_BLOCKS], 0u);
         ASTORE(gMpmCounters[MPM_C_SORTED], 0u);
         ASTORE(gMpmCounters[MPM_C_AIRBORNE], 0u);
+        for (uint a = 0u; a < MPM_MAX_AREAS; a++) ASTORE(gMpmCounters[MPM_C_AREA_AIR + a], 0u);
         // Block sleep's rings: unset until mpm_sleep_ring.
         ASTORE(gMpmCounters[MPM_C_SLEEP_RING0], MPM_NO_BLOCK);
         ASTORE(gMpmCounters[MPM_C_SLEEP_RING1], MPM_NO_BLOCK);
@@ -1769,6 +1822,8 @@ void mpmG2pSleep(uint i, MpmParams p)
             gMpmParcels[2u * k + 1u] = float4(v, q.xm.w);
             gMpmParcels[2u * maxParcels + k] = float4(asfloat(i), 0, 0, 0);
             AADD2(gMpmCounters[MPM_C_AIRBORNE], 1u);
+            mpmParcelReach(q.xm.xyz, v, p);
+            AADD2(gMpmCounters[MPM_C_LIVE], 0xFFFFFFFFu);
             q.f2.w = asfloat(asuint(q.f2.w) | MPM_PARTICLE_DEAD);
         }
         else AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_PARCELS);
@@ -1853,6 +1908,8 @@ void mpmG2p(uint i, MpmParams p, out uint speedBits, out uint speedArea)
             gMpmParcels[2u * maxParcels + k] = float4(asfloat(i), 0, 0, 0);
             // In flight from now (mpm_parcels flies it from the next substep).
             AADD2(gMpmCounters[MPM_C_AIRBORNE], 1u);
+            mpmParcelReach(q.xm.xyz, v, p);
+            AADD2(gMpmCounters[MPM_C_LIVE], 0xFFFFFFFFu);
             q.f2.w = asfloat(asuint(q.f2.w) | MPM_PARTICLE_DEAD);
         }
         else AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_PARCELS);
@@ -2032,11 +2089,19 @@ void mpm_activate_scan(uint3 lid : SV_GroupThreadID)
     if (l == 255u)
     {
         uint total = gsMpmScan[255];
-        if (have + total > p.counts.x)
+        // Past the pool's end: the slots baked areas and landed parcels left
+        // take them (mpm_pool_*), if enough are free (mpm_pool_finish decides).
+        bool reuse = have + total > p.counts.x;
+        if (reuse && total > p.counts.x)
             AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_PARTICLES);
         else
         {
-            ASTORE(gMpmCounters[MPM_C_PARTICLES], have + total);
+            if (reuse) ASTORE(gMpmCounters[MPM_C_REUSE], total);
+            else
+            {
+                ASTORE(gMpmCounters[MPM_C_PARTICLES], have + total);
+                AADD2(gMpmCounters[MPM_C_LIVE], total);
+            }
             // The area's first slot (a grown one keeps its oldest area's): the
             // bake's dithers count slots from it, so an area bakes as it
             // would alone however many particles other areas hold.
@@ -2064,9 +2129,12 @@ void mpm_activate_emit(uint3 tid : SV_DispatchThreadID)
     uint i = mpmIndex(tid);
     MpmParams p = mpmSelArea();
     uint samples = p.window.z * p.window.w;
-    if (samples == 0u || mpmActivationRefused() || i >= mpmParticleCount()) return;
+    if (samples == 0u || mpmActivationRefused()) return;
     // Particles already in the pool before this activation are not its.
-    if (i < ALOAD(gMpmColumns[mpmCol(p, 0u) + 2u])) return;
+    uint have = ALOAD(gMpmColumns[mpmCol(p, 0u) + 2u]);
+    uint reuse = ALOAD(gMpmCounters[MPM_C_REUSE]);
+    if (i >= (reuse != 0u ? have + reuse : mpmParticleCount())) return;
+    if (i < have) return;
     // The last sample whose first particle is at or before i (samples with
     // no particles share the next one's first, so this one holds i).
     uint lo = 0u, hi = samples - 1u;
@@ -2112,7 +2180,215 @@ void mpm_activate_emit(uint3 tid : SV_DispatchThreadID)
     q.f0 = float4(1, 0, 0, vol);
     q.f1 = float4(0, 1, 0, asfloat(mine));
     q.f2 = float4(0, 0, 1, asfloat(MPM_PARTICLE_HOME | MPM_PARTICLE_FRESH));
-    gMpmParticles[i] = q;
+    // Reusing slots: the first ones take the free slots in order, the rest
+    // go past the pool's end (i counts the activation's particles from it).
+    uint slot = i;
+    if (reuse != 0u)
+    {
+        uint v = i - have, used = ALOAD(gMpmCounters[MPM_C_HOLES]);
+        slot = v < used ? gMpmSorted[v] : have + (v - used);
+    }
+    gMpmParticles[slot] = q;
+}
+
+// ---- pool reuse ---------------------------------------------------------------
+// engine/docs/deformable-terrain.md, "Endless areas". A baked area's particles
+// and a landed parcel's source stay in the pool as dead slots while other
+// areas are open. Two passes take them back, neither moving a live particle:
+// a bake that leaves areas open trims the pool's dead tail (mpm_pool_top,
+// mpm_pool_trim) and packs the parcels still in flight (mpm_parcels_pack,
+// mpm_parcels_unpack); an activation past the pool's end puts its particles
+// in the free slots, in slot order (mpm_pool_holes_*, mpm_pool_finish). Both
+// run only while MPM_C_REUSE is set. A dead slot a parcel in flight will come
+// back to is held (mpm_pool_reserve).
+
+bool mpmPoolReusing() { return ALOAD(gMpmCounters[MPM_C_REUSE]) != 0u; }
+
+// Per parcel in flight: the slot it left is held.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_pool_reserve(uint3 tid : SV_DispatchThreadID)
+{
+    uint k = mpmIndex(tid);
+    MpmParams p = mpmParams();
+    if (!mpmPoolReusing() || k >= min(ALOAD(gMpmCounters[MPM_C_PARCELS]), asuint(p.couple.z))) return;
+    if (gMpmParcels[2u * k + 1u].w <= 0.0) return;
+    uint source = asuint(gMpmParcels[2u * asuint(p.couple.z) + k].x);
+    gMpmParticles[source].f2.w = asfloat(asuint(gMpmParticles[source].f2.w) | MPM_PARTICLE_RESERVED);
+}
+
+// Whether slot i is held (live, or a dead slot a parcel comes back to);
+// `release` clears the parcel's mark (the pass's last read of it).
+bool mpmPoolHeld(uint i, bool release)
+{
+    uint flags = asuint(gMpmParticles[i].f2.w);
+    if (release && (flags & MPM_PARTICLE_RESERVED) != 0u)
+        gMpmParticles[i].f2.w = asfloat(flags & ~MPM_PARTICLE_RESERVED);
+    return (flags & (MPM_PARTICLE_DEAD | MPM_PARTICLE_RESERVED)) != MPM_PARTICLE_DEAD;
+}
+
+// Per particle: one past the highest held slot.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_pool_top(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = mpmIndex(tid);
+    if (!mpmPoolReusing() || i >= mpmParticleCount()) return;
+    if (mpmPoolHeld(i, true)) AMAX2(gMpmCounters[MPM_C_POOL_TOP], i + 1u);
+}
+
+// After mpm_pool_top: the pool ends after its last held slot.
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void mpm_pool_trim(uint3 tid : SV_DispatchThreadID)
+{
+    if (!mpmPoolReusing()) return;
+    ASTORE(gMpmCounters[MPM_C_PARTICLES], ALOAD(gMpmCounters[MPM_C_POOL_TOP]));
+    ASTORE(gMpmCounters[MPM_C_POOL_TOP], 0u);
+    ASTORE(gMpmCounters[MPM_C_REUSE], 0u);
+}
+
+// Per 64 slots of the pool (a thread each): its free slots, counted after
+// the slot list's room (gMpmSorted[counts.x + chunk]; between frames the
+// sort's scratch).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_pool_holes_count(uint3 tid : SV_DispatchThreadID)
+{
+    uint c = mpmIndex(tid);
+    MpmParams p = mpmParams();
+    uint have = mpmParticleCount();
+    if (!mpmPoolReusing() || c >= (have + 63u) / 64u) return;
+    uint n = 0u;
+    for (uint i = 64u * c; i < min(64u * c + 64u, have); i++)
+        if (!mpmPoolHeld(i, false)) n++;
+    gMpmSorted[p.counts.x + c] = n;
+}
+
+// One workgroup: each chunk's first place in the slot list, and the count.
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void mpm_pool_holes_scan(uint3 lid : SV_GroupThreadID)
+{
+    uint l = lid.x;
+    MpmParams p = mpmParams();
+    // Uniform: every lane returns or none (the scan synchronises them).
+    if (!mpmPoolReusing()) return;
+    uint chunks = (mpmParticleCount() + 63u) / 64u;
+    uint per = (chunks + 255u) / 256u;
+    uint first = l * per, last = min(first + per, chunks);
+    uint sum = 0u;
+    for (uint c = first; c < last; c++) sum += gMpmSorted[p.counts.x + c];
+    gsMpmScan[l] = sum;
+    GROUP_SYNC();
+    for (uint d = 1u; d < 256u; d <<= 1u)
+    {
+        uint add = l >= d ? gsMpmScan[l - d] : 0u;
+        GROUP_SYNC();
+        gsMpmScan[l] += add;
+        GROUP_SYNC();
+    }
+    uint start = gsMpmScan[l] - sum;
+    for (uint c = first; c < last; c++)
+    {
+        uint n = gMpmSorted[p.counts.x + c];
+        gMpmSorted[p.counts.x + c] = start;
+        start += n;
+    }
+    if (l == 255u) ASTORE(gMpmCounters[MPM_C_HOLES], gsMpmScan[255]);
+}
+
+// Per 64 slots: its free slots into the list, in slot order (gMpmSorted
+// from 0), releasing the parcels' marks.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_pool_holes_list(uint3 tid : SV_DispatchThreadID)
+{
+    uint c = mpmIndex(tid);
+    MpmParams p = mpmParams();
+    uint have = mpmParticleCount();
+    if (!mpmPoolReusing() || c >= (have + 63u) / 64u) return;
+    uint at = gMpmSorted[p.counts.x + c];
+    for (uint i = 64u * c; i < min(64u * c + 64u, have); i++)
+        if (!mpmPoolHeld(i, true)) gMpmSorted[at++] = i;
+}
+
+// After the list: the activation takes the free slots first, then the pool
+// grows by the rest (all or nothing against max particles); the emit's
+// workgroups cover every particle of the activation.
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void mpm_pool_finish(uint3 tid : SV_DispatchThreadID)
+{
+    MpmParams p = mpmParams();
+    uint total = ALOAD(gMpmCounters[MPM_C_REUSE]);
+    if (total == 0u) return;
+    uint have = mpmParticleCount();
+    uint used = min(ALOAD(gMpmCounters[MPM_C_HOLES]), total);
+    if (have + (total - used) > p.counts.x)
+    {
+        AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_PARTICLES);
+        return;
+    }
+    ASTORE(gMpmCounters[MPM_C_HOLES], used);
+    ASTORE(gMpmCounters[MPM_C_PARTICLES], have + (total - used));
+    AADD2(gMpmCounters[MPM_C_LIVE], total);
+    gMpmArgs[3] = (have + total + MPM_GROUP - 1u) / MPM_GROUP;
+}
+
+// Packing the parcels (a bake leaving areas open): one workgroup, each lane
+// a run of slots; those still in flight go, in slot order, to the staging
+// records past the parcels' own (gMpmParcels[3·max ..]), and the count is
+// theirs. Nothing reads a parcel's slot (landing, deposits and the slot it
+// returns to go by its own record), so packing changes no result.
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void mpm_parcels_pack(uint3 lid : SV_GroupThreadID)
+{
+    uint l = lid.x;
+    MpmParams p = mpmParams();
+    if (!mpmPoolReusing()) return;
+    uint maxP = asuint(p.couple.z);
+    uint n = min(ALOAD(gMpmCounters[MPM_C_PARCELS]), maxP);
+    uint per = (n + 255u) / 256u;
+    uint first = l * per, last = min(first + per, n);
+    uint sum = 0u;
+    for (uint k = first; k < last; k++) if (gMpmParcels[2u * k + 1u].w > 0.0) sum++;
+    gsMpmScan[l] = sum;
+    GROUP_SYNC();
+    for (uint d = 1u; d < 256u; d <<= 1u)
+    {
+        uint add = l >= d ? gsMpmScan[l - d] : 0u;
+        GROUP_SYNC();
+        gsMpmScan[l] += add;
+        GROUP_SYNC();
+    }
+    uint at = gsMpmScan[l] - sum;
+    for (uint k = first; k < last; k++)
+    {
+        if (!(gMpmParcels[2u * k + 1u].w > 0.0)) continue;
+        gMpmParcels[3u * maxP + 2u * at] = gMpmParcels[2u * k];
+        gMpmParcels[3u * maxP + 2u * at + 1u] = gMpmParcels[2u * k + 1u];
+        gMpmParcels[5u * maxP + at] = gMpmParcels[2u * maxP + k];
+        at++;
+    }
+    GROUP_SYNC();
+    if (l == 255u) ASTORE(gMpmCounters[MPM_C_PARCELS], gsMpmScan[255]);
+}
+
+// After mpm_parcels_pack, per parcel slot: the packed parcels back in place.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_parcels_unpack(uint3 tid : SV_DispatchThreadID)
+{
+    uint k = mpmIndex(tid);
+    MpmParams p = mpmParams();
+    if (!mpmPoolReusing()) return;
+    uint maxP = asuint(p.couple.z);
+    if (k >= min(ALOAD(gMpmCounters[MPM_C_PARCELS]), maxP)) return;
+    gMpmParcels[2u * k] = gMpmParcels[3u * maxP + 2u * k];
+    gMpmParcels[2u * k + 1u] = gMpmParcels[3u * maxP + 2u * k + 1u];
+    gMpmParcels[2u * maxP + k] = gMpmParcels[5u * maxP + k];
 }
 
 // Heightfield records (four samples each) touching the window, as a range.
@@ -2160,7 +2436,11 @@ void mpmAdjustRecord(uint r, bool raise, MpmParams p, HeightFieldRef hf)
 void mpm_activate_lower(uint3 tid : SV_DispatchThreadID)
 {
     MpmParams p = mpmSelArea();
-    if (mpmActivationRefused()) return;
+    if (mpmActivationRefused())
+    {
+        if (mpmIndex(tid) == 0u) ASTORE(gMpmCounters[MPM_C_REUSE], 0u);
+        return;
+    }
     Collider col = gColliders[p.dims.w];
     HeightFieldRef hf = heightFieldOf(col);
     uint r0, r1;
@@ -2169,6 +2449,7 @@ void mpm_activate_lower(uint3 tid : SV_DispatchThreadID)
     if (r <= r1) mpmAdjustRecord(r, false, p, hf);
     if (mpmIndex(tid) == 0u)
     {
+        ASTORE(gMpmCounters[MPM_C_REUSE], 0u);
         // Lowered samples sit within half a quantum's height of the bed.
         uint4 dims = gHulls[hf.base + 1u];
         float lowest = p.column.x - p.column.y / mpmSampleArea(hf);
@@ -2713,7 +2994,10 @@ void mpm_bake_bin(uint3 tid : SV_DispatchThreadID)
     // leave the pool as baked (their slots are reused once it empties).
     if (!mpmBakeOwns(q.xm.xyz)) return;
     if ((gMpmParams[0].area.w & MPM_DOMAIN_CLOSE) == 0u)
+    {
         gMpmParticles[i].f2.w = asfloat(asuint(q.f2.w) | MPM_PARTICLE_DEAD);
+        AADD2(gMpmCounters[MPM_C_LIVE], 0xFFFFFFFFu);
+    }
     float3 x = q.xm.xyz;
     bool pushed = mpmBakeColumn(x, p, max(hf.dx, hf.dz));
     float3 xl = frameToLocal(f, x);
@@ -2770,7 +3054,11 @@ void mpm_bake_header(uint3 tid : SV_DispatchThreadID)
         dims.w = asuint(max(asfloat(dims.w), top));
         gHulls[hf.base + 1u] = dims;
     }
-    if ((gMpmParams[0].area.w & MPM_DOMAIN_CLOSE) != 0u) ASTORE(gMpmCounters[MPM_C_PARTICLES], 0u);
+    if ((gMpmParams[0].area.w & MPM_DOMAIN_CLOSE) != 0u)
+    {
+        ASTORE(gMpmCounters[MPM_C_PARTICLES], 0u);
+        ASTORE(gMpmCounters[MPM_C_LIVE], 0u);
+    }
     ASTORE(gMpmCounters[MPM_C_BAKE_MAX], 0u);
 }
 
@@ -2792,6 +3080,7 @@ void mpm_couple_clear(uint3 tid : SV_DispatchThreadID)
         {
             ASTORE(gMpmCounters[MPM_C_AREA_SPEED + a], 0u);
             ASTORE(gMpmCounters[MPM_C_AREA_BODY + a], 0u);
+            ASTORE(gMpmCounters[MPM_C_AREA_TOUCH + a], 0u);
         }
     }
     // The open areas' block cells (the plan dispatches as many as they use).
@@ -2864,6 +3153,7 @@ void mpm_couple_bin(uint3 tid : SV_DispatchThreadID)
 groupshared float3 gsMpmJ[64];
 groupshared float3 gsMpmL[64];
 groupshared float gsMpmM[64];
+groupshared uint gsMpmTouched[64];
 
 // One workgroup per coupling slot (dynamic bodies): the substep's reaction on
 // the body, minus the momentum its contacts gave the grid nodes, in a fixed order
@@ -2878,6 +3168,8 @@ void mpm_couple_gather(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     bool live = slot < min(ALOAD(gMpmCouple[0]), asuint(p.couple.y));
     float3 J = float3(0, 0, 0), L = float3(0, 0, 0);
     float M = 0.0;
+    // The areas whose material the body's contacts hold (bit per slot).
+    uint touched = 0u;
     if (live)
     {
         uint ci = asuint(gMpmCoupled[4u * slot].w);
@@ -2910,7 +3202,9 @@ void mpm_couple_gather(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
                     float3 xw = pa.origin.xyz + float3(g) * pa.origin.w;
                     J -= rec.xyz;
                     L -= cross(xw - b.position, rec.xyz);
-                    M += gMpmGrid[2u * (bk * MPM_BLOCK_NODES + l)].w;
+                    float m = gMpmGrid[2u * (bk * MPM_BLOCK_NODES + l)].w;
+                    M += m;
+                    if (m > 0.0) touched |= 1u << a;
                 }
             }
         }
@@ -2918,6 +3212,7 @@ void mpm_couple_gather(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     gsMpmJ[l] = J;
     gsMpmL[l] = L;
     gsMpmM[l] = M;
+    gsMpmTouched[l] = touched;
     GROUP_SYNC();
     for (uint d = 32u; d > 0u; d >>= 1u)
     {
@@ -2926,6 +3221,7 @@ void mpm_couple_gather(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             gsMpmJ[l] += gsMpmJ[l + d];
             gsMpmL[l] += gsMpmL[l + d];
             gsMpmM[l] += gsMpmM[l + d];
+            gsMpmTouched[l] |= gsMpmTouched[l + d];
         }
         GROUP_SYNC();
     }
@@ -2949,6 +3245,11 @@ void mpm_couple_gather(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             float invI = max(b.invInertia.x, max(b.invInertia.y, b.invInertia.z));
             float invMe = b.invMass + reach * reach * invI;
             share = 1.0 / (1.0 + gsMpmM[0] * invMe);
+            // The local settle rule: an area stays open while a body that
+            // touches its material moves (one above it, not touching, does not).
+            uint speed = asuint(length(b.linearVel) + length(b.angularVel) * reach);
+            for (uint t = gsMpmTouched[0]; t != 0u; t &= t - 1u)
+                AMAX2(gMpmCounters[MPM_C_AREA_TOUCH + firstbitlow(t)], speed);
         }
         float3 Jt = share * gsMpmJ[0], Lt = share * gsMpmL[0];
         gMpmCoupled[4u * slot] = float4(a.xyz + Jt, a.w);
@@ -3061,9 +3362,28 @@ bool mpmParcelDeposit(float3 xl, uint quanta, uint seed, MpmParams p, HeightFiel
     return true;
 }
 
+// A parcel back as a particle, in the slot of the one it left: no atomic, so
+// particle ids (P2G's order) do not depend on the parcels' slots.
+void mpmParcelReturn(uint slot, float4 xq, float4 vm, uint quanta, MpmParams p)
+{
+    MpmParticle q;
+    float vol = float(quanta) * p.column.y;
+    q.xm = float4(xq.xyz, vm.w);
+    q.vj = float4(vm.xyz, 0.0);
+    // Rock comes back as rubble: thrown fragments are broken.
+    q.c0 = float4(0, 0, 0, p.counts.w == MPM_MATERIAL_ROCK ? 1.0 : 0.0);
+    q.c1 = float4(0, 0, 0, 0);
+    q.c2 = float4(0, 0, 0, 0);
+    q.f0 = float4(1, 0, 0, vol > 0.0 ? vol : vm.w / max(p.column.w, 1e-30));
+    q.f1 = float4(0, 1, 0, asfloat(quanta));
+    q.f2 = float4(0, 0, 1, 0);
+    gMpmParticles[slot] = q;
+    AADD2(gMpmCounters[MPM_C_LIVE], 1u);
+}
+
 // Per parcel, per substep: ballistic flight (symplectic Euler, as particles), then
-// landing on the heightfield (bed collider): back into the region as a particle
-// when over its box, else deposited on the four samples around it; off the
+// back as a particle on entering an open area's box, else landing on the
+// heightfield (bed collider): deposited on the samples around it; off the
 // field's footprint, escaped.
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -3079,7 +3399,18 @@ void mpm_parcels(uint3 tid : SV_DispatchThreadID)
     xq.xyz += dt * vm.xyz;
     uint quanta = asuint(xq.w);
     bool landed = false;
-    if (p.dims.w != MPM_NO_BLOCK)
+    // The particle it left (its slot is dead while it flies).
+    uint source = asuint(gMpmParcels[2u * asuint(p.couple.z) + k].x);
+    if (mpmAreaOf(xq.xyz, p) != MPM_NO_AREA)
+    {
+        // Into an open area's box (one cell in): back as a particle, which
+        // the MPM lands on the material there. (Landing it only at the
+        // heightfield, which an open area lowers to its bed, buried it under
+        // the material still there.)
+        mpmParcelReturn(source, xq, vm, quanta, p);
+        landed = true;
+    }
+    else if (p.dims.w != MPM_NO_BLOCK)
     {
         Collider col = gColliders[p.dims.w];
         Frame f = colliderFrame(col, gBodies[col.body]);
@@ -3091,36 +3422,13 @@ void mpm_parcels(uint3 tid : SV_DispatchThreadID)
             AADD2(gMpmCounters[MPM_C_ESCAPED], quanta);
             landed = true;
         }
-        else if (xl.y <= h)
-        {
-            landed = true;
-            // The particle it left (its slot is dead while it flies).
-            uint source = asuint(gMpmParcels[2u * asuint(p.couple.z) + k].x);
-            if (mpmAreaOf(xq.xyz, p) != MPM_NO_AREA)
-            {
-                // Back as a particle, in the slot of the one it left: no
-                // atomic, so particle ids (P2G's order) do not depend on the
-                // parcels' slots.
-                uint slot = source;
-                {
-                    MpmParticle q;
-                    float vol = float(quanta) * p.column.y;
-                    q.xm = float4(xq.xyz, vm.w);
-                    q.vj = float4(vm.xyz, 0.0);
-                    // Rock comes back as rubble: thrown fragments are broken.
-                    q.c0 = float4(0, 0, 0, p.counts.w == MPM_MATERIAL_ROCK ? 1.0 : 0.0);
-                    q.c1 = float4(0, 0, 0, 0);
-                    q.c2 = float4(0, 0, 0, 0);
-                    q.f0 = float4(1, 0, 0, vol > 0.0 ? vol : vm.w / max(p.column.w, 1e-30));
-                    q.f1 = float4(0, 1, 0, asfloat(quanta));
-                    q.f2 = float4(0, 0, 1, 0);
-                    gMpmParticles[slot] = q;
-                }
-            }
-            else landed = mpmParcelDeposit(xl, quanta, ~source, p, hf);
-        }
+        else if (xl.y <= h) landed = mpmParcelDeposit(xl, quanta, ~source, p, hf);
     }
-    if (!landed) AADD2(gMpmCounters[MPM_C_AIRBORNE], 1u);
+    if (!landed)
+    {
+        AADD2(gMpmCounters[MPM_C_AIRBORNE], 1u);
+        mpmParcelReach(xq.xyz, vm.xyz, p);
+    }
     gMpmParcels[2u * k] = xq;
     gMpmParcels[2u * k + 1u] = float4(vm.xyz, landed ? 0.0 : vm.w);
 }

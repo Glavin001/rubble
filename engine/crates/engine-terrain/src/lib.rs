@@ -23,7 +23,7 @@ pub mod zmodel;
 
 pub use config::{InitialStress, RegionBoundary, TerrainConfig, TerrainError, TerrainProfile};
 pub use material::{RockMaterial, SandMaterial, TerrainMaterial, YieldSurface};
-pub use plan::{RegionClock, TerrainOps, TerrainPlan, TerrainStepReport};
+pub use plan::{RegionClock, SettleRule, TerrainOps, TerrainPlan, TerrainStepReport};
 pub use region::{RegionPlan, BLOCK_CELLS};
 pub use source::{
     CraterPrediction, CraterScaling, CraterTarget, ExplosionSource, Explosive, ImpactSource, Regime,

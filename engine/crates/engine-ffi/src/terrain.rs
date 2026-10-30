@@ -7,6 +7,7 @@
 //! radians whatever the units.
 
 use super::*;
+use rubble::SettleRule;
 
 /// Deformable-terrain settings (from [`rbDefaultTerrainDef`]).
 #[repr(C)]
@@ -45,6 +46,11 @@ pub struct RbTerrainDef {
     /// (speed), with nothing in flight, for `settle_frames` frames.
     pub settle_speed: f32,
     pub settle_frames: u32,
+    /// Nonzero: only parcels that can still reach an area and bodies touching
+    /// its sand hold it open (`SettleRule::Local`: craters settle under a car
+    /// driving over them); 0: every parcel in flight and every moving body in
+    /// its box (`SettleRule::Strict`, the default).
+    pub settle_local: u32,
     /// Added to each frame's speed bound for its substeps (speed).
     pub speed_headroom: f32,
     /// Strikes on watched shapes ([`rbTerrain_WatchShape`]): the impact speed
@@ -89,6 +95,7 @@ pub extern "C" fn rbDefaultTerrainDef() -> RbTerrainDef {
         region_margin: d.region_margin as f32,
         settle_speed: d.settle_speed,
         settle_frames: d.settle_frames,
+        settle_local: u32::from(d.settle_rule == SettleRule::Local),
         speed_headroom: d.speed_headroom,
         strike_min_speed: d.strike.min_speed,
         strike_min_energy: d.strike.min_energy,
@@ -125,6 +132,11 @@ pub unsafe extern "C" fn rbWorld_EnableTerrain(
         t.region_margin = f64::from(d.region_margin);
         t.settle_speed = c.length_in(d.settle_speed);
         t.settle_frames = d.settle_frames;
+        t.settle_rule = if d.settle_local != 0 {
+            SettleRule::Local
+        } else {
+            SettleRule::Strict
+        };
         t.speed_headroom = c.length_in(d.speed_headroom);
         t.strike.min_speed = c.length_in(d.strike_min_speed);
         t.strike.min_energy = d.strike_min_energy / c.energy_out(1.0);

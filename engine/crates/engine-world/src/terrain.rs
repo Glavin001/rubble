@@ -13,7 +13,7 @@ use engine_terrain::plan::source_peak_speed;
 use engine_terrain::zmodel::point_source_z;
 use engine_terrain::{
     CraterPrediction, ExplosionSource, ImpactSource, RegionClock, RegionPlan, SandMaterial,
-    TerrainConfig, ZModel,
+    SettleRule, TerrainConfig, ZModel,
 };
 use engine_webgpu::{TerrainStepReport, TerrainStrike, TerrainWatch};
 use glam::{Quat, Vec3};
@@ -42,6 +42,12 @@ pub struct TerrainDef {
     /// stops whatever creep is left, so this is the region's rest tolerance.
     pub settle_speed: f32,
     pub settle_frames: u32,
+    /// What else holds an area open: every parcel in flight and every
+    /// moving body in its box (`Strict`, the default), or only parcels that
+    /// can still reach it and bodies touching its material (`Local`: craters
+    /// settle under a car driving over them and beside ejecta flying
+    /// elsewhere).
+    pub settle_rule: SettleRule,
     /// What counts as a heavy-body strike on a watched heightfield
     /// ([`World::terrain_watch_shape`]).
     pub strike: StrikeDef,
@@ -84,6 +90,7 @@ impl Default for TerrainDef {
             speed_headroom: 20.0,
             settle_speed: 0.01,
             settle_frames: 30,
+            settle_rule: SettleRule::Strict,
             strike: StrikeDef::default(),
         }
     }
@@ -527,9 +534,10 @@ impl World {
             .terrain_check(&words)
             .map_err(|e| anyhow::anyhow!("step {step}: terrain: {e}"))?;
         if let Some(host) = self.terrain.as_mut() {
-            let settle = host.def.settle_speed;
+            let (settle, rule) = (host.def.settle_speed, host.def.settle_rule);
             for a in &mut host.areas {
-                a.clock.report(step, &report.area(a.slot), settle);
+                a.clock
+                    .report(step, &report.settle_view(a.slot, rule), settle);
             }
         }
         Ok(report)

@@ -782,6 +782,11 @@ typedef struct RbTerrainDef {
   // (speed), with nothing in flight, for `settle_frames` frames.
   float settle_speed;
   uint32_t settle_frames;
+  // Nonzero: only parcels that can still reach an area and bodies touching
+  // its sand hold it open (`SettleRule::Local`: craters settle under a car
+  // driving over them); 0: every parcel in flight and every moving body in
+  // its box (`SettleRule::Strict`, the default).
+  uint32_t settle_local;
   // Added to each frame's speed bound for its substeps (speed).
   float speed_headroom;
   // Strikes on watched shapes ([`rbTerrain_WatchShape`]): the impact speed

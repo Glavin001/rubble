@@ -18,7 +18,8 @@ use engine_terrain::layout::MpmParticle;
 use engine_terrain::plan::source_peak_speed;
 use engine_terrain::zmodel::point_source_z;
 use engine_terrain::{
-    substeps_for, CraterPrediction, CraterTarget, ImpactSource, SandMaterial, TerrainConfig, ZModel,
+    substeps_for, CraterPrediction, CraterTarget, ImpactSource, SandMaterial, TerrainConfig,
+    TerrainStepReport, ZModel,
 };
 use engine_webgpu::WgpuSim;
 use glam::{DVec3, Quat, Vec3};
@@ -89,12 +90,17 @@ struct Scene {
     dx: f32,
     escaped: u32,
     airborne: u32,
+    /// The last frame's report.
+    last: Option<TerrainStepReport>,
 }
 
 impl Scene {
     fn new() -> Self {
+        Self::with_config(config())
+    }
+
+    fn with_config(cfg: TerrainConfig) -> Self {
         let mut s = sim();
-        let cfg = config();
         s.terrain_enable(&cfg).unwrap();
         let sand = SandMaterial::default();
         s.terrain_set_material(Some(&sand)).unwrap();
@@ -127,6 +133,7 @@ impl Scene {
             dx: 0.0,
             escaped: 0,
             airborne: 0,
+            last: None,
         }
     }
 
@@ -201,6 +208,7 @@ impl Scene {
             self.speed = r.max_speed;
             self.escaped = r.escaped;
             self.airborne = r.airborne;
+            self.last = Some(r);
         }
     }
 
@@ -660,4 +668,287 @@ fn closing_one_area_by_force_lets_its_parcels_fly_on() {
     let h = sc.heights();
     assert_eq!(sc.ledger(&h, q, area), 0, "one area closed by force");
     eprintln!("one area closed with {n} parcels in flight: ledger exact");
+}
+
+// ---- endless areas (engine/docs/deformable-terrain.md, "Endless areas") ----
+
+/// The slots the parcels still in flight came from, and the parcels
+/// themselves (bits, sorted: their order in the pool is not theirs).
+fn flying(sc: &Scene) -> (Vec<u32>, Vec<[u32; 8]>) {
+    use engine_terrain::layout::MPM_PARCELS_BINDING;
+    let ps = sc.s.terrain_parcels();
+    let max = sc.cfg.max_parcels as u64;
+    let sources =
+        sc.s.read_words(MPM_PARCELS_BINDING, 8 * max, 4 * ps.len().max(1));
+    let mut src = Vec::new();
+    let mut bits = Vec::new();
+    for (k, p) in ps.iter().enumerate() {
+        if p.vm[3] > 0.0 {
+            src.push(sources[4 * k]);
+            let mut b = [0u32; 8];
+            for c in 0..4 {
+                b[c] = p.xq[c].to_bits();
+                b[4 + c] = p.vm[c].to_bits();
+            }
+            bits.push(b);
+        }
+    }
+    bits.sort_unstable();
+    (src, bits)
+}
+
+fn dead(p: &MpmParticle) -> bool {
+    p.f[2][3].to_bits() & engine_terrain::layout::MPM_PARTICLE_DEAD != 0
+}
+
+#[test]
+fn parcels_count_only_for_the_areas_they_can_reach() {
+    let mut sc = Scene::new();
+    let (p1, p2) = (Vec3::new(-0.9, 0.0, 0.0), Vec3::new(0.9, 0.0, 0.0));
+    let a = sc.impact(p1);
+    let b = sc.impact(p2);
+    // Up at 4 m/s, out at 1 m/s: about 0.9 s aloft, 0.9 m out, short of the
+    // second area's box (which ends 0.66 m from the origin).
+    throw(&mut sc, p1);
+    until_airborne(&mut sc, 30);
+    let (ka, kb) = (a.area as usize, b.area as usize);
+    for f in 0..8 {
+        let r = sc.last.unwrap();
+        assert!(r.airborne > 0);
+        assert_eq!(
+            r.area_airborne[kb], 0,
+            "frame {f}: none can reach the far area"
+        );
+        assert_eq!(
+            r.area_airborne[ka], r.airborne,
+            "frame {f}: all can fall back into their own"
+        );
+        sc.frames(1);
+    }
+    // The thrown area closes mid-flight (the throw leaves its last sand torn,
+    // as in closing_one_area_by_force_lets_its_parcels_fly_on); the other
+    // area's word stays 0 while they fly on and land.
+    sc.s.terrain_bake_area(a.area).unwrap();
+    for _ in 0..240 {
+        sc.frames(1);
+        assert_eq!(sc.last.unwrap().area_airborne[kb], 0);
+        if sc.airborne == 0 {
+            break;
+        }
+    }
+    assert_eq!(sc.airborne, 0, "landed");
+    sc.frames(SETTLE_FRAMES);
+    sc.s.terrain_bake().unwrap();
+    sc.escaped = counters(&sc).0;
+    let (q, area) = sc.quantum();
+    let h = sc.heights();
+    assert_eq!(sc.ledger(&h, q, area), 0);
+}
+
+#[test]
+fn a_bake_with_areas_open_trims_the_pools_dead_tail() {
+    let mut sc = Scene::new();
+    let (p1, p2) = (Vec3::new(-0.9, 0.0, 0.0), Vec3::new(0.9, 0.0, 0.0));
+    sc.impact(p1);
+    let first = sc.s.terrain_particles().len();
+    let b = sc.impact(p2);
+    sc.frames(SETTLE_FRAMES);
+    sc.land(240);
+    let before = sc.s.terrain_particles();
+    assert!(before.len() > first);
+    // The second area holds the pool's tail: its bake gives it back, and
+    // the first area's particles stay exactly as they were.
+    sc.s.terrain_bake_area(b.area).unwrap();
+    let after = sc.s.terrain_particles();
+    let top = before[..first].iter().rposition(|p| !dead(p)).unwrap() + 1;
+    assert_eq!(after.len(), top, "the pool ends after its last live slot");
+    assert_eq!(
+        bytemuck::cast_slice::<_, u32>(&after[..]),
+        bytemuck::cast_slice::<_, u32>(&before[..top]),
+        "no live particle moved"
+    );
+    sc.frames(SETTLE_FRAMES);
+    sc.s.terrain_bake().unwrap();
+    sc.escaped = counters(&sc).0;
+    let (q, area) = sc.quantum();
+    let h = sc.heights();
+    assert_eq!(sc.ledger(&h, q, area), 0);
+    eprintln!("trimmed {} of {} slots", before.len() - top, before.len());
+}
+
+#[test]
+fn a_bake_mid_flight_keeps_the_parcels_slots_and_packs_them() {
+    let mut sc = Scene::new();
+    let (p1, p2) = (Vec3::new(-0.9, 0.0, 0.0), Vec3::new(0.9, 0.0, 0.0));
+    let a = sc.impact(p1);
+    sc.impact(p2);
+    throw(&mut sc, p1);
+    until_airborne(&mut sc, 30);
+    sc.frames(2);
+    let (src, bits) = flying(&sc);
+    assert!(!src.is_empty());
+    let parcels = sc.s.terrain_parcels().len();
+    // The first area bakes with its ejecta aloft: every slot a parcel comes
+    // back to stays in the pool, and only the parcels still flying are kept.
+    sc.s.terrain_bake_area(a.area).unwrap();
+    let (src2, bits2) = flying(&sc);
+    assert_eq!(bits2, bits, "the same parcels fly on");
+    assert_eq!(
+        sc.s.terrain_parcels().len(),
+        bits.len(),
+        "packed from {parcels}"
+    );
+    let n = sc.s.terrain_particles().len() as u32;
+    let mut s1 = src.clone();
+    let mut s2 = src2.clone();
+    s1.sort_unstable();
+    s2.sort_unstable();
+    assert_eq!(s1, s2, "each keeps the slot it came from");
+    assert!(s2.iter().all(|&k| k < n), "inside the trimmed pool");
+    sc.frames(1);
+    sc.land(240);
+    sc.frames(SETTLE_FRAMES);
+    sc.land(240);
+    sc.s.terrain_bake().unwrap();
+    let (escaped, airborne) = counters(&sc);
+    assert_eq!(airborne, 0);
+    sc.escaped = escaped;
+    let (q, area) = sc.quantum();
+    let h = sc.heights();
+    assert_eq!(sc.ledger(&h, q, area), 0, "packed mid-flight");
+    eprintln!(
+        "{} parcels of {parcels} packed mid-flight: ledger exact",
+        bits.len()
+    );
+}
+
+#[test]
+fn an_activation_past_the_pools_end_takes_the_free_slots() {
+    let (p1, p2, p3) = (
+        Vec3::new(-0.9, 0.0, 0.0),
+        Vec3::new(0.9, 0.0, 0.0),
+        Vec3::ZERO,
+    );
+    // One impact's particles: the pool holds two areas and half of a third.
+    let (_, h_alone) = single(p3);
+    let mut probe = Scene::new();
+    probe.impact(p1);
+    let per = probe.s.terrain_particles().len() as u32;
+    drop(probe);
+    let cfg = TerrainConfig {
+        max_particles: 2 * per + per / 2,
+        ..config()
+    };
+    let mut sc = Scene::with_config(cfg);
+    let a = sc.impact(p1);
+    sc.impact(p2);
+    let both = sc.s.terrain_particles().len();
+    sc.frames(SETTLE_FRAMES);
+    sc.land(240);
+    sc.s.terrain_bake_area(a.area).unwrap();
+    let ps = sc.s.terrain_particles();
+    assert_eq!(
+        ps.len(),
+        both,
+        "the first area's slots are free but not the tail"
+    );
+    let live = ps.iter().filter(|p| !dead(p)).count();
+    // A third between them: past the pool's end, into the first's free slots.
+    sc.speed = 0.0;
+    let c = sc.impact(p3);
+    assert!(c.activated && c.absorbed.is_empty());
+    let ps = sc.s.terrain_particles();
+    let added = ps.iter().filter(|p| !dead(p)).count() - live;
+    assert!(ps.len() as u32 <= cfg.max_particles);
+    assert!(
+        both + added > cfg.max_particles as usize,
+        "it would not have fit past the end"
+    );
+    eprintln!(
+        "{added} particles: the pool {both} → {} of {}",
+        ps.len(),
+        cfg.max_particles
+    );
+    sc.frames(SETTLE_FRAMES);
+    sc.land(240);
+    sc.s.terrain_bake().unwrap();
+    sc.escaped = counters(&sc).0;
+    let (q, area) = sc.quantum();
+    let h = sc.heights();
+    assert_eq!(sc.ledger(&h, q, area), 0, "reused slots");
+    // Its crater is the single impact's: the same particles step the same
+    // way; only the bake's dithers count from other slots.
+    let (v0, d0) = crater_stats(&sc, &h_alone, p3, 0.4);
+    let (v1, d1) = crater_stats(&sc, &h, p3, 0.4);
+    let (worst, differ) = max_diff(&sc, &h_alone, &h, p3, 0.4);
+    eprintln!(
+        "reused slots: cavity {v0:.5e} → {v1:.5e} m³, deepest {d0:.5} → {d1:.5} m, \
+         {differ} samples differ by at most {worst:.2e} m"
+    );
+    assert!((v1 - v0).abs() < 0.01 * v0);
+    assert!((d1 - d0).abs() < 0.25 * sc.dx());
+}
+
+#[test]
+fn ejecta_falling_back_into_an_open_area_land_on_its_sand_not_its_bed() {
+    let mut sc = Scene::new();
+    let p1 = Vec3::new(-0.9, 0.0, 0.0);
+    sc.impact(p1);
+    sc.frames(SETTLE_FRAMES);
+    sc.land(240);
+    // The crater's middle straight up at 4 m/s: out of the box's top
+    // (0.29 m; apex 0.8 m) and back in about 0.8 s later.
+    let mut ps = sc.s.terrain_particles();
+    let mut thrown = Vec::new();
+    for (i, p) in ps.iter_mut().enumerate() {
+        let x = Vec3::from_slice(&p.xm[..3]);
+        if !dead(p) && (x.x - p1.x).hypot(x.z - p1.z) < 0.12 {
+            p.vj = [0.0, 4.0, 0.0, p.vj[3]];
+            thrown.push(i);
+        }
+    }
+    assert!(!thrown.is_empty());
+    sc.s.terrain_overwrite_particles(&ps).unwrap();
+    sc.speed = sc.speed.max(6.0);
+    until_airborne(&mut sc, 30);
+    sc.land(240);
+    sc.frames(SETTLE_FRAMES);
+    // Back in the slots they left, resting on the crater's floor around
+    // them: well above the area's bed.
+    let bed = sc.s.terrain_areas()[0].bed;
+    let ps = sc.s.terrain_particles();
+    let floor = ps
+        .iter()
+        .filter(|p| !dead(p))
+        .filter(|p| (p.xm[0] - p1.x).hypot(p.xm[2] - p1.z) < 0.2)
+        .map(|p| p.xm[1])
+        .fold(f32::MIN, f32::max);
+    eprintln!(
+        "{} thrown; bed {bed:.4} m, top of the sand there {floor:.4} m",
+        thrown.len()
+    );
+    // Those that flew (some stayed, held by the sand round them).
+    let flew: Vec<f32> = thrown
+        .iter()
+        .filter(|&&i| {
+            !dead(&ps[i])
+                && ps[i].f[2][3].to_bits() & engine_terrain::layout::MPM_PARTICLE_HOME == 0
+        })
+        .map(|&i| ps[i].xm[1])
+        .collect();
+    let deepest = flew.iter().copied().fold(f32::MAX, f32::min);
+    eprintln!(
+        "{} flew and came back, the deepest at {deepest:.4} m",
+        flew.len()
+    );
+    assert!(!flew.is_empty(), "some came back as particles");
+    assert!(
+        deepest > bed + 0.5 * (floor - bed),
+        "they fell through the sand toward the bed"
+    );
+    sc.s.terrain_bake().unwrap();
+    sc.escaped = counters(&sc).0;
+    let (q, area) = sc.quantum();
+    let h = sc.heights();
+    assert_eq!(sc.ledger(&h, q, area), 0);
 }
