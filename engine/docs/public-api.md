@@ -233,8 +233,16 @@ loop {
     `create_box_shape` (a native fast path);
   - `create_hull_shape` and `create_transformed_hull_shape(hull, transform,
     scale)`;
-  - later: `create_height_field_shape` (static only, as in Box3D) and baked
-    static compounds.
+  - `create_height_field_shape` (static only, as in Box3D; editable in place
+    with `set_height_field_region`, see `deformable-terrain.md`); a field may
+    carry a Bekker soil (`HeightField::with_soil`, `set_height_field_soil`, C
+    ABI `rbHeightField_SetSoil`) that vehicle wheels sink into and rut
+    (`deformable-terrain.md`, "T5 ruts"); and its ground can deform
+    (`enable_terrain`, `terrain_impact` / `terrain_explode` / `terrain_open`,
+    `terrain_watch_shape` for heavy-body strikes, `read_height_field`; C ABI
+    `rbWorld_EnableTerrain`, `rbTerrain_*`, `rbHeightField_GetHeights`;
+    `deformable-terrain.md`, "T4 status");
+  - later: baked static compounds.
   - **No triangle-mesh shapes** (decided 2026-10-24). Level geometry comes in
     convex-decomposed at the source (several hull shapes on a static body),
     the way Unreal's own collision is authored. Nothing is decomposed at
@@ -706,6 +714,7 @@ today; each feature below gets a World call and an ABI call instead. Status:
 | The lab's solver settings (120 Hz, 8 iterations, contact and sleep flags) | `DestructibleAssetDesc::solver`, `World::set_solver`, `rbWorld_UseDestructibleAssetSolver` | ✅ |
 | Fracture lab `threshold` mode (GPU splitter) | `StrengthModel::Threshold`, `RB_STRENGTH_THRESHOLD`; `body_set_projectile`, `rbBody_SetProjectile`; `solver_for`, `rbWorld_UseDestructibleAssetSolverFor`; `rbWorld_GetDestructibleAssetGround` (D1b) | ✅ |
 | Fracture lab `stress` mode (blast_parity) | D5, `StrengthModel::Stress` | 🔜 |
+| Deformable terrain (`impact.html`, `terrain.html`): meteor and charge craters, heavy-body strikes, vehicle ruts, baked heights for the host's mesh | `enable_terrain`, `terrain_impact` / `terrain_explode` / `terrain_open`, `terrain_watch_shape`, `set_height_field_soil`; `rbWorld_EnableTerrain`, `rbTerrain_*`, `rbHeightField_SetSoil`, `rbHeightField_GetHeights` | ✅ (an Unreal sample project 🔜) |
 | Picking (camera ray) | `rbWorld_CastRays` | ✅ |
 | Grab and drag | a kinematic mouse body (`rbBody_SetTargetTransform` each frame) jointed to the grabbed body (spherical, or a weld with `linear_stiffness`); tested through the ABI | ✅ (a dedicated mouse joint later) |
 | Scripted crusher, moving slabs | kinematic bodies: `BodyType::Kinematic`, `RB_KINEMATIC_BODY`, set velocity or `rbBody_SetTargetTransform` | ✅ |

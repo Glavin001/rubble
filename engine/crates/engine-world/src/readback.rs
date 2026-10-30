@@ -95,6 +95,11 @@ impl<K: Clone> ReadbackRing<K> {
         }
     }
 
+    /// Slots in the ring: how many steps' readbacks can be in flight.
+    pub fn frames(&self) -> usize {
+        self.slots.len()
+    }
+
     pub fn has_free(&self) -> bool {
         !self.free.is_empty()
     }

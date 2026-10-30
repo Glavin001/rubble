@@ -517,6 +517,16 @@ typedef struct RbShapeDef {
   uint32_t internal_value;
 } RbShapeDef;
 
+// Bekker soil for vehicle ruts (deformable terrain T5). `k_c` (N/m^(n+1))
+// and `k_phi` (N/m^(n+2)) are SI whatever the host's units; `max_sinkage`
+// is in the host's length unit (a wheel sinking deeper fails the step).
+typedef struct RbSoil {
+  float k_c;
+  float k_phi;
+  float n;
+  float max_sinkage;
+} RbSoil;
+
 // Fields every joint has (`rbDefaultJointBase`). Frames are measured from
 // each body's origin; z is the hinge, cone and twist axis, x the slide axis.
 typedef struct RbJointBase {
@@ -737,6 +747,61 @@ typedef struct RbDebugDraw {
   bool draw_body_transforms;
 } RbDebugDraw;
 
+// Deformable-terrain settings (from [`rbDefaultTerrainDef`]).
+typedef struct RbTerrainDef {
+  // Limits: exceeding one fails the step with its name.
+  uint32_t max_particles;
+  uint32_t max_blocks;
+  // Ejecta parcels a region may throw (0: material leaving the region's box
+  // is an error).
+  uint32_t max_parcels;
+  uint32_t max_substeps;
+  // Cells across an impact's predicted transient radius.
+  float cells_per_radius;
+  // Smallest cell a region may use (length).
+  float min_cell_size;
+  // Areas open at once: impacts far apart open areas of their own, one
+  // near an open area grows it.
+  uint32_t max_regions;
+  // One cell size (length) for every event, or 0: the first event's own
+  // while any area is open (all open areas share one grid).
+  float cell_size;
+  // The coarsest a later event may run on the open grid, as a fraction of
+  // the cells it asks for (0, 1]; coarser fails.
+  float min_resolution;
+  // Dry sand: density, Young's modulus (Pa), Poisson's ratio, friction angle
+  // (rad).
+  float density;
+  float youngs_modulus;
+  float poisson_ratio;
+  float friction_angle;
+  // How far an impact's region reaches past its predicted transient radius,
+  // in those radii.
+  float region_margin;
+  // A region bakes once its sand and every body in it stay slower than this
+  // (speed), with nothing in flight, for `settle_frames` frames.
+  float settle_speed;
+  uint32_t settle_frames;
+  // Added to each frame's speed bound for its substeps (speed).
+  float speed_headroom;
+  // Strikes on watched shapes ([`rbTerrain_WatchShape`]): the impact speed
+  // and kinetic energy that open a region, and cells across the striking
+  // body.
+  float strike_min_speed;
+  float strike_min_energy;
+  float strike_cells_per_body;
+  uint32_t internal_value;
+} RbTerrainDef;
+
+// π-scaling's prediction for an impact or charge (lengths in world units).
+typedef struct RbCraterPrediction {
+  float transient_radius;
+  float transient_depth;
+  float final_rim_radius;
+  // Seconds.
+  float formation_time;
+} RbCraterPrediction;
+
 // A capsule character controller (`rbDefaultCharacterDef`): an upright
 // capsule that walks, climbs steps, sticks to the floor, jumps and rides
 // moving support, run on the GPU inside the step. Its inner kinematic capsule
@@ -952,6 +1017,39 @@ enum RbResult rbCreateHullShape(struct RbWorld *world,
                                 uint32_t count,
                                 struct RbTransform local,
                                 RbShapeId *out);
+
+// Terrain on a static body: `heights` (`count_a × count_b`, A fastest) on
+// cells `cell_a × cell_b`, centred on `local`. A and B are the host's ground
+// axes (Rubble coordinates: +X, +Z; Unreal: +X, +Y) and heights run along
+// its up axis.
+enum RbResult rbCreateHeightFieldShape(struct RbWorld *world,
+                                       RbBodyId body,
+                                       const struct RbShapeDef *def,
+                                       uint32_t count_a,
+                                       uint32_t count_b,
+                                       float cell_a,
+                                       float cell_b,
+                                       const float *heights,
+                                       struct RbTransform local,
+                                       RbShapeId *out);
+
+// Overwrite heightfield samples `[a0, a0 + width_a) × [b0, b0 + width_b)`
+// (host order, A fastest). Bodies asleep over the edit are woken.
+enum RbResult rbHeightField_SetRegion(struct RbWorld *world,
+                                      RbShapeId shape,
+                                      uint32_t a0,
+                                      uint32_t b0,
+                                      uint32_t width_a,
+                                      uint32_t width_b,
+                                      const float *values);
+
+// Give a heightfield a soil (`soil` non-null) or take it away (null). Wheels
+// on it sink to the rigid-wheel depth of their load, press ruts and pay
+// compaction resistance. The field is placed again from the host's samples,
+// so earlier ruts are not kept.
+enum RbResult rbHeightField_SetSoil(struct RbWorld *world,
+                                    RbShapeId shape,
+                                    const struct RbSoil *soil);
 
 enum RbResult rbDestroyShape(struct RbWorld *world, RbShapeId shape, bool update_body_mass);
 
@@ -1294,6 +1392,70 @@ enum RbResult rbWorld_Explode(struct RbWorld *world, const struct RbExplosionDef
 // Draw every shape at its body's last polled pose, coloured by state
 // (static, awake, asleep) unless a material colour is set.
 enum RbResult rbWorld_DebugDraw(struct RbWorld *world, const struct RbDebugDraw *draw);
+
+// Defaults in metres (the default coordinates); scale lengths, speeds,
+// densities and energies for other units.
+struct RbTerrainDef rbDefaultTerrainDef(void);
+
+// Turn on deformable terrain for the world.
+enum RbResult rbWorld_EnableTerrain(struct RbWorld *world, const struct RbTerrainDef *def);
+
+// A hypervelocity impact at `point` on heightfield `shape`: a sphere of
+// `impactor_radius` and `impactor_density` arriving at `velocity` (its
+// downward part; the excavation field is vertical). `out` (may be null)
+// receives π-scaling's prediction; the crater itself is simulated. Several
+// may be under way: one far from the open areas opens its own, one near an
+// open area (into a crater still forming, on its rim) grows it and adds its
+// flow to the material's.
+enum RbResult rbTerrain_Impact(struct RbWorld *world,
+                               RbShapeId shape,
+                               float impactor_radius,
+                               float impactor_density,
+                               struct RbVec3 velocity,
+                               struct RbVec3 point,
+                               struct RbCraterPrediction *out);
+
+// A buried charge of `tnt_kg` TNT-equivalent, its centre `depth_of_burial`
+// below `point` on heightfield `shape`. `out` as [`rbTerrain_Impact`].
+enum RbResult rbTerrain_Explode(struct RbWorld *world,
+                                RbShapeId shape,
+                                float tnt_kg,
+                                float depth_of_burial,
+                                struct RbVec3 point,
+                                struct RbCraterPrediction *out);
+
+// Open a region over the box between corners `a` and `b` with cells of
+// `cell_size`, with no source (for bodies landing or driving on it).
+enum RbResult rbTerrain_Open(struct RbWorld *world,
+                             RbShapeId shape,
+                             struct RbVec3 a,
+                             struct RbVec3 b,
+                             float cell_size);
+
+// Bake every open area now (each otherwise bakes once settled).
+enum RbResult rbTerrain_Close(struct RbWorld *world);
+
+// Watch heightfield `shape` for heavy-body strikes: one predicted to pass the
+// def's speed and energy opens a region before the body arrives.
+enum RbResult rbTerrain_WatchShape(struct RbWorld *world, RbShapeId shape, bool watch);
+
+// Whether any area is open now (`*out_open`).
+enum RbResult rbTerrain_IsOpen(struct RbWorld *world, bool *out_open);
+
+// Terrain areas open now (`*out_count`).
+enum RbResult rbTerrain_AreaCount(struct RbWorld *world, uint32_t *out_count);
+
+// Strikes seen too late to open a region before them (`*out_count`).
+enum RbResult rbTerrain_MissedStrikes(struct RbWorld *world, uint64_t *out_count);
+
+// A heightfield shape's samples as the host's copy holds them (updated by
+// the frames that follow a bake), in the order and units of
+// `rbCreateHeightFieldShape` (`count_a × count_b`, A fastest).
+enum RbResult rbHeightField_GetHeights(struct RbWorld *world,
+                                       RbShapeId shape,
+                                       uint32_t count_a,
+                                       uint32_t count_b,
+                                       float *out_heights);
 
 // Defaults in `coordinates`' units.
 struct RbCharacterDef rbDefaultCharacterDef(enum RbCoordinates coordinates);

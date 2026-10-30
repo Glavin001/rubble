@@ -672,6 +672,7 @@ impl World {
                         return unsupported("rotated capsule chunks");
                     }
                     Geometry::Plane { .. } => return unsupported("plane chunks"),
+                    Geometry::HeightField { .. } => return unsupported("heightfield chunks"),
                     Geometry::Box { half, transform } => Geometry::Box {
                         half: *half,
                         transform: compose(pose, *transform),
