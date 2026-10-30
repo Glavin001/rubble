@@ -2021,15 +2021,19 @@ mod imp {
         /// A piece body's solver frame as the GPU holds it now, after every step submitted
         /// (polled or not), for `read_body_state`: a step still in flight may have split the
         /// body and re-framed it, and the host's frame changes only when its readback is
-        /// polled. `None` for a body that is no threshold piece.
+        /// polled. `None` for a body that is no threshold piece. Found by slot (every slot
+        /// a destructible's pieces may take), not by the host's last read of the chunks'
+        /// bodies, which a split in flight may have changed; the crush fragments' pool,
+        /// whose frames the fracture does not keep, excluded.
         pub(crate) fn threshold_frame_now(&self, body: u32) -> Option<SolverFrame> {
             let gpu = self.fracture.gpu.as_ref()?;
-            let t = self
-                .fracture
-                .slots
-                .iter()
-                .flatten()
-                .find(|t| t.chunk_body.contains(&body))?;
+            let t = self.fracture.slots.iter().flatten().find(|t| {
+                t.owned.contains(&body)
+                    && !t
+                        .crush
+                        .as_ref()
+                        .is_some_and(|c| c.pool.iter().any(|p| p.0 == body))
+            })?;
             let r: Vec<[f32; 4]> = gpu.read_range(&t.fracture.frames, 2 * body as usize, 2);
             Some(piece_frame(t, r[0], r[1]))
         }
@@ -2342,6 +2346,10 @@ mod crush_mirror_tests {
                     );
                     let dv = glam::Vec3::from(mirror.linear_vel) - glam::Vec3::from(gpu.linear_vel);
                     assert!(dv.length() < 1e-3, "fragment {b:?}: velocity");
+                    // A fragment's solver frame is the identity (`threshold_frame_now`
+                    // keeps the pool out of the fracture's frame records).
+                    let read = w.read_body_state(*b).unwrap().transform;
+                    assert_eq!(read.position, gpu.position, "fragment {b:?}: read pose");
                     let q = glam::Quat::from_array(mirror.orientation);
                     let qg = glam::Quat::from_array(gpu.orientation);
                     assert!(q.dot(qg).abs() > 0.999, "fragment {b:?}: {q:?} vs {qg:?}");
