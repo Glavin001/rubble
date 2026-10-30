@@ -693,3 +693,41 @@ fn batch_creation_matches_one_by_one() {
     assert_eq!(ids, ids_b);
     assert!(bytes(&a.sim().download_bodies()) == bytes(&b.sim().download_bodies()));
 }
+
+/// Adding a collider mid-simulation must not cost resting contacts their warm start: the
+/// bounds pass a new collider schedules once rewrote the GPU counter block, and the
+/// pipelined step then forwarded zero contacts and manifolds from the step before, so a
+/// resting tower (never asleep) restarted every contact cold and jumped.
+#[test]
+fn adding_a_collider_keeps_resting_contacts_warm() {
+    let d = WorldDef {
+        enable_sleep: false,
+        ..def(ContactStorage::Persistent)
+    };
+    let mut w = World::new(GpuContext::Default, &d).unwrap();
+    ground(&mut w);
+    let tower: Vec<BodyId> = (0..12)
+        .map(|k| cube(&mut w, [0.0, 0.5 + k as f32 * 1.001, 0.0], k))
+        .collect();
+    let fastest = |w: &mut World, steps: u32| -> f32 {
+        let mut top = 0.0f32;
+        for _ in 0..steps {
+            w.step().unwrap();
+            w.poll_blocking().unwrap();
+            for b in &tower {
+                let v = w.read_body_state(*b).unwrap().linear_velocity;
+                top = top.max(Vec3::from(v).length());
+            }
+        }
+        top
+    };
+    fastest(&mut w, 300);
+    let resting = fastest(&mut w, 10);
+    // Far from the tower: it touches nothing.
+    let far = w.create_body(&BodyDef::default()).unwrap();
+    w.create_box_shape(far, &ShapeDef::default(), [1.0; 3]).unwrap();
+    w.body_set_transform(far, Transform { position: [30.0, 5.0, 30.0], ..Transform::default() }).unwrap();
+    let after = fastest(&mut w, 10);
+    eprintln!("tower's fastest body: {resting:.2e} m/s resting, {after:.2e} m/s after the new collider");
+    assert!(after <= 2.0 * resting + 1e-3, "{after} m/s after a far collider was added; {resting} m/s before");
+}

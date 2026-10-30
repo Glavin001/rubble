@@ -2472,7 +2472,11 @@ impl WgpuSim {
         self.queue.write_buffer(&self.bufs[6], 0, bytes_of(&host));
         // build_aabbs reads the collider count from the counter block, which
         // only a step would otherwise refresh (raycast_batch writes it too).
-        self.queue.write_buffer(&self.bufs[7], 0, bytes_of(&rigid_plan::step_counters(&inputs)));
+        // Only the body and collider counts: a pipelined step forwards the
+        // contact and manifold counts the block still holds from the step
+        // before, and zeroing them would restart every resting contact cold.
+        let counts = rigid_plan::step_counters(&inputs);
+        self.queue.write_buffer(&self.bufs[7], 0, bytemuck::cast_slice(&[counts.body_count, counts.collider_count]));
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("bounds") });
         {
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("bounds"), timestamp_writes: None });
