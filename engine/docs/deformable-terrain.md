@@ -2394,6 +2394,66 @@ neighbour's particles or nodes once per workgroup, not once per node) or in
 not copying the payload each substep. Both are larger rewrites, for perhaps
 a few tens of percent, not the 5× the target needs.
 
+### How it scales with several strikes (2026-10-30, measured alone)
+
+Native wgpu on Metal, `terrain_perf barrage_frame_cost`, game profile, the
+showcase's meteor (about 27–35k particles per crater), nothing baked. `EVERY=0`
+now opens every strike in the same frame. Every run's first frame also pays a
+cold GPU: a lone first strike costs 7.0–7.2 ms, a later one at 55k particles
+4–5 ms.
+
+**Simultaneous, in areas of their own** (150 m apart):
+
+| Strikes | Particles | Strike frame (7 substeps, cold, with the openings) | Settled frame (1 substep) |
+|---|---|---|---|
+| 1 | 23k | 6.78 ms | 1.05 ms |
+| 2 | 55k | 9.36 ms | 0.5–0.9 ms |
+| 4 | 124k | 11.30 ms | 1.08 ms |
+| 8 | 249k | 15.37 ms | 1.12 ms |
+| 16 (`MPM_MAX_AREAS`) | 513k | 25.13 ms | 2.34 ms |
+
+About 1.2 ms per extra strike in the frame they land, linear: that frame does
+the strikes' openings and 7 substeps over all of their sand. The frames after
+it cost what the open sand costs, about 4.5 ns per particle per substep.
+
+**Staggered, 8 strikes in areas of their own:**
+
+| Apart | Strike frames (the 1st cold) | Worst | Median, p95 |
+|---|---|---|---|
+| 0.25 s | 7.25, then 4.6–7.8 ms, rising with the open sand | 7.79 ms | 1.16, 2.26 ms |
+| 0.5 s | 7.05, then 4.6–7.8 ms | 7.76 ms | 1.27, 2.22 ms |
+| 1.6 s | 7.03, then 5.3–9.2 ms | 9.21 ms | 1.13, 2.05 ms |
+| 1.6 s, area clocks | 7.21, then 3.3–7.8 ms (the last 4.49 against 7.79) | 7.76 ms | 1.15, 2.20 ms |
+| 0.25 s, area clocks | 7.14, then 4.8–7.0 ms | 7.14 ms | 1.27, 2.86 ms |
+
+Staggering spreads the cost: each strike frame pays its own opening and
+7 substeps over the sand open then, so the 8 strikes' worst is about half the
+same 8 at once. Area clocks help only once the earlier craters have quieted
+(1.6 s apart); 0.25 s apart every area is still fast, and the extra passes
+raise the p95.
+
+**Overlapping** (8 strikes 25 m apart, one grown area):
+
+| | Particles | Strike frames | Worst |
+|---|---|---|---|
+| at once | 67k | 10.61 ms (cold) | 10.61 ms |
+| 0.5 s apart | 27k growing to 67k | 7.06 (cold), then 3.3–4.6 ms, one 7.07 | 7.07 ms |
+
+Overlapping strikes share sand, so 8 of them hold 67k particles, not 249k, and
+cost the least. The grown area is one clock: it takes the fastest bound and
+the longest hold of its strikes (up to 3 substeps between them here).
+
+**What bounds it.**
+- Cost follows the sand open, not the number of strikes or the land's size:
+  separate craters add their particles, overlapping ones add only the ring the
+  area grows by. A baked area costs nothing.
+- At most 16 separate areas open at once (`max_regions`, `MPM_MAX_AREAS`);
+  a closer strike grows an area instead.
+- Slots of baked particles and landed parcels are reused only once every area
+  has baked, so a barrage that always leaves one area open fills
+  `max_particles` / `max_parcels` and then fails by name ("Slot reuse" under
+  "Multiple impacts"). Compacting the pool is the fix for an endless barrage.
+
 ## Native backends (2026-10-25)
 
 The terrain plan on native Metal (`engine-metal`'s `MetalSim`), its Metal-only

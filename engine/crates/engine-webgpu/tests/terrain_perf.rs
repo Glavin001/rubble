@@ -319,7 +319,7 @@ fn demo_event(set: &Settings) {
 
 /// The showcase's barrage (`showcase.html`, scene `drive`): its 1 m stony
 /// meteor at 20 km/s into dry sand, `STRIKES` (11) of them opened `EVERY` s
-/// apart (1.6) in areas of their own `SPACING` m apart (150) on one field,
+/// apart (1.6; 0 opens them all in one frame) in areas of their own `SPACING` m apart (150) on one field,
 /// none baked, stepped at `HZ` (120) for `UNTIL` s (21.5) on the showcase's
 /// clock; each frame's GPU time. `CPR` (6), `MARGIN` (1.0), `GAME=1` the game
 /// profile's settings; `FORCE_K` a floor on each frame's substeps,
@@ -401,7 +401,8 @@ fn barrage_frame_cost() {
     let wall = std::time::Instant::now();
     while t < until {
         let mut strike = false;
-        if opened < strikes && t >= next {
+        // `while`: with EVERY=0 every strike opens in the first frame.
+        while opened < strikes && t >= next {
             let at = Vec3::new(-0.5 * span + opened as f32 * spacing, 0.0, 0.0);
             let cell = s.terrain_plan_ref().unwrap().event_cell(dx).unwrap();
             let plan = crater.region_with_cell(&cfg, at, margin, cell).unwrap();
