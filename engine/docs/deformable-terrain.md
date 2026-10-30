@@ -1452,11 +1452,31 @@ the MPM lands it on the material.
 | `ejecta_falling_back_into_an_open_area_land_on_its_sand_not_its_bed` | The crater's middle thrown straight up: the 3,572 that flew come back no lower than 0.016 m, on sand topping out at 0.16 m (bed −0.19 m). With the old landing they came back at −0.193 m, the bed. |
 | `terrain_couple` `a_falling_box_touches_the_sand_only_when_it_lands` | A box falling 0.4 m through an area's air counts as moving (strict word) but not as touching (local word) until it reaches the sand. |
 
-**Not fixed, found on the way:** in `terrain_multi`'s scene, material thrown
-out of an area by hand (most of its sand at 4 m/s) leaves a torn remnant.
-Stepped on with that area open, a few of the remnant's particles outrun the
-CFL bound about 13 frames later, on main as well. The existing tests close the
-area mid-flight, and the new one does too.
+**On the preview** (`showcase.html?scene=play`, seed 11, a scripted driver on
+the throttle weaving every 3 s; WebGPU, Chrome on an M-series Mac):
+- the car's chassis never touched the sand (`touch_speed` 0 throughout), so it
+  held no area open;
+- areas settled and baked by themselves, 6–13 s after their last strike; the
+  pool's live particles fell with each bake (160,967 → 96,031 → 0);
+- terrain GPU time per frame 0.4–1.35 ms mean over 3 s spans, 15 ms at worst
+  (strike frames).
+
+**Not fixed, found on the way:**
+- **The live-to-baked jump** (`surfaceSwitchError`, logged per bake) was
+  rms 4.5 m, worst 14.9 m, on one of three bakes on the preview, and rms
+  5.4 m, worst 18.75 m, on one of four of main's timed closes with the same
+  seed and driver. So it is not from this change. Most bakes read exactly 0
+  (no samples measured), so the measurement itself may be reading the
+  surface after its view has closed; it needs its own look before it says
+  whether bodies see a step.
+- In `terrain_multi`'s scene, material thrown out of an area by hand (most of
+  its sand at 4 m/s) leaves a torn remnant. Stepped on with that area open, a
+  few of the remnant's particles outrun the CFL bound about 13 frames later,
+  on main as well. The existing tests close the area mid-flight, and the new
+  one does too.
+- `terrain_crater`'s π-scaling validation (ignored, long) fails its cavity
+  check, 2.85× the transient volume against a 0.5–2× band, with identical
+  numbers on main.
 
 ## The splat bake (2026-10-25)
 
