@@ -56,9 +56,10 @@
           max_coupled: 256,
           // Cells across the transient radius: 6 gives 4.5 m cells.
           cells_per_radius: num('cpr', 6),
-          // ?profile=game: the engine's game profile (TerrainProfile::Game:
-          // Courant 0.45, speed growth 1.0, bed 1.25 R) under these limits.
-          ...(qs.get('profile') ? { profile: qs.get('profile') } : {}),
+          // The engine's game profile (TerrainProfile::Game: Courant 0.45,
+          // speed growth 1.0, bed 1.25 R) under these limits, the default for
+          // demos; ?profile=physical keeps the validation profile.
+          profile: qs.get('profile') ?? 'game',
         },
         // 1 R past the transient radius (the final rim is at 1.3 R): a box of
         // ~100k particles, which the car's track can pass close to.
@@ -257,10 +258,10 @@
       // t a little before pass just ahead of it.
       drive: [
         { t: LEAD + 0.5, pass: LEAD + 2.9, side: 1, beside: 2 },
-        { t: LEAD + 1.9, pass: LEAD + 3.9, side: -1, beside: -2 },
+        { t: LEAD + 1.9, pass: LEAD + 3.9, side: -1, beside: -1 },
         { t: LEAD + 4.4, pass: LEAD + 4.8, side: 1, beside: 4 }, // just ahead
-        { t: LEAD + 6.5, pass: LEAD + 5.5, side: -1, beside: -4 }, // just behind
-        { t: LEAD + 6.5, pass: LEAD + 8.9, side: 1, beside: -3 },
+        { t: LEAD + 6.5, pass: LEAD + 5.2, side: -1, beside: 9 }, // just behind
+        { t: LEAD + 6.5, pass: LEAD + 8.9, side: 1, beside: -1 },
         { t: LEAD + 8.0, pass: LEAD + 10.1, side: -1, beside: 3 },
         { t: LEAD + 11.1, pass: LEAD + 11.5, side: 1, beside: 3 }, // just ahead
         { t: LEAD + 12.5, pass: LEAD + 14.7, side: -1, beside: 2 },

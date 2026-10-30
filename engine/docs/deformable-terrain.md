@@ -929,12 +929,22 @@ enter an open region.
   strike beside them comes as close as its box allows.
 
 **Scenes** (`showcase.html?scene=`):
+- Every scene runs the engine's game profile (`TerrainProfile::Game`) since
+  2026-10-30; `?profile=physical` keeps the validation profile.
 - `drive` (the default since 2026-10-29): a barrage of 11 strikes in 20 s on
   both sides of the road (`side`: inside or outside the loop, the ground
   flat 75 m outside it too).
   - Four put the track just inside the rim, so the car drives up over the
-    crest and down (its height peaks at 4.5–5.1 m); two land 0.4 s before the
-    car passes and two 1 s after it.
+    crest and down (its height peaks at 5.5–6.3 m); three land 0.4 s before
+    the car passes and two 1 s after it.
+  - Re-placed for the game profile, whose rims stand higher and whose bowls
+    are steeper (the car peaked at 6.6 m over them, against 5.0 m):
+    - the first behind-the-car strike lands 9 m outside the road, not 4 m
+      inside it. Where it was, it landed on the car's line and stopped it
+      at 1 km/h;
+    - the first two over-the-rim strikes cut 1 m inside the rim, not 2–3 m:
+      deeper, the car ran down the bowl's inner wall 17 m off the road.
+  - The car then holds the road to 5 m at 41–67 km/h after its run-up.
   - The areas overlap and grow into one; `max_regions` is 8 and the patches
     are 128 samples, both explicit.
   - `trackAt` runs 0.75 s later here, as measured, so near misses land where
@@ -2168,8 +2178,10 @@ so none is adopted:
   measurement):
   - In Chrome: terrain median 1.77 ms, p95 3.41, worst 17.4 ms;
     208k particles at most.
-  - But the car ends the run stuck at 0.8 km/h. The schedule's rims were
-    placed for the physical profile's craters, so it needs re-placing too.
+  - But the car ended the run stuck at 0.8 km/h: the schedule's rims were
+    placed for the physical profile's craters. Since re-placed, and the game
+    profile is now the showcase's default (see the scene notes): terrain
+    median 1.70 ms, p95 2.62, worst 17.6 ms at 1080p, recording.
 - **Settling under a moving car:** bake an area's quiet sand while a body
   drives over it, rather than holding the whole area open. A change to the
   buried-body rule.
