@@ -154,8 +154,8 @@
     // Heightfield samples are the region's cells. Dunes, flattened over the
     // strike field (π-scaling assumes level ground).
     const SP = DX;
-    // play: a wide basin, 1.8 km across, rimmed by hills.
-    const HALF = PLAY ? num('half', 900) : 320;
+    // play: a wide basin, 1.2 km across, rimmed by hills.
+    const HALF = PLAY ? num('half', 600) : 320;
     const NX = 2 * Math.ceil(HALF / SP) + 1, NZ = NX;
     const X0 = -0.5 * (NX - 1) * SP, Z0 = X0;
     // The track: a stadium loop along x (straights at z = ±TURN joined by
@@ -217,7 +217,7 @@
       try { return JSON.parse(p.settings()).config.max_regions; } finally { p.free(); }
     })();
     // The barrage's strikes chain along the road into longer grown windows.
-    const PN = num('patch', SCENE === 'drive' ? 128 : 72);
+    const PN = num('patch', SCENE === 'drive' || PLAY ? 128 : 72);
     const patchArena = heightFieldArena(PN, PN, SP, SP, new Float32Array(PN * PN).fill(-1e4));
     const ALL_RECORDS = new Uint32Array(arena0.records.length + REGIONS * patchArena.records.length);
     ALL_RECORDS.set(arena0.records, 0);
@@ -923,7 +923,8 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
     // middle (half of it) filled, pulsing faster as contact nears.
     let left = -i.c.w;
     let close = i.r * (1.0 + 0.6 * clamp(left / 1.35, 0.0, 1.0));
-    let ring = exp(-pow((d - close) / 0.9, 2.0)) + 0.6 * exp(-pow((d - i.r) / 0.6, 2.0));
+    let u = (d - close) / 0.9; let w = (d - i.r) / 0.6;
+    let ring = exp(-u * u) + 0.6 * exp(-w * w);
     let pulse = 0.55 + 0.45 * sin(frame.misc.x * mix(26.0, 9.0, clamp(left / 1.35, 0.0, 1.0)));
     let core = select(0.0, 0.22 * pulse, d < 0.5 * i.r);
     let a = clamp(ring * 0.9 + core, 0.0, 1.0);
@@ -1142,7 +1143,7 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
           if (PLAY && !playCanOpen(s.point[0], s.point[2])) {
             // No area slot or pool room left by contact: it burns up.
             s.state = 'fizzled'; s.struckAt = st.t; st.fx = st.fx.filter((f) => f !== s);
-            game.say('it burned up: the sky is reloading');
+            game.say('it burned up');
             continue;
           }
           terrain.impact(GROUND, field, s.point, TERRAIN.meteor.radius, TERRAIN.meteor.density, TERRAIN.meteor.speed);
@@ -1229,12 +1230,30 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       const [x0, z0, x1, z1] = boxOf(x, z), g = 2 * BLOCK;
       return terrain.areas.some((a) => x0 < a.end[0] + g && x1 > a.origin[0] - g && z0 < a.end[2] + g && z1 > a.origin[2] - g);
     };
-    const playCanOpen = (x, z) => poolUse() < 0.93 && (touchesArea(x, z) || terrain.areas.length < REGIONS);
+    // The window a strike at (x, z) would grow to with the open areas it
+    // reaches (and theirs in turn): its samples across, against the patches'
+    // PN less their ring (a larger one fails by name: "surface patch samples").
+    const grownSpan = (x, z) => {
+      let [x0, z0, x1, z1] = boxOf(x, z);
+      const g = 2 * BLOCK, used = new Set();
+      for (let grew = true; grew;) {
+        grew = false;
+        for (const a of terrain.areas) {
+          if (used.has(a.slot) || !(x0 < a.end[0] + g && x1 > a.origin[0] - g && z0 < a.end[2] + g && z1 > a.origin[2] - g)) continue;
+          used.add(a.slot); grew = true;
+          x0 = Math.min(x0, a.origin[0]); z0 = Math.min(z0, a.origin[2]); x1 = Math.max(x1, a.end[0]); z1 = Math.max(z1, a.end[2]);
+        }
+      }
+      return Math.max(x1 - x0, z1 - z0) / SP + 4;
+    };
+    const fitsPatch = (x, z) => grownSpan(x, z) <= PN - 8;
+    const playCanOpen = (x, z) => poolUse() < 0.93 && fitsPatch(x, z) && (touchesArea(x, z) || terrain.areas.length < REGIONS);
     game.say = (m) => { game.msg = m; game.msgT = st.t; };
     function tryStrike(x, z, who) {
       if (!inField(x, z)) return game.say('out of the basin');
       if (poolUse() > 0.88) return game.say('the sky is reloading…');
       if (!touchesArea(x, z) && terrain.areas.length + pending() >= REGIONS) return game.say('too many craters still moving');
+      if (!fitsPatch(x, z)) return game.say('that crater field is too big already');
       SCHEDULE.push({ t: st.t, at: [x, z], who });
       if (who === 'you') game.dropped++;
     }
@@ -1288,7 +1307,7 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       else if (pick < onYou + 0.75) { const a = 14 + 20 * rand(), o = sgn * 8 * rand(); x = p[0] - f[0] * a + side[0] * o; z = p[2] - f[2] * a + side[2] * o; }
       else { const a = 2 * Math.PI * rand(), d = 70 + 120 * rand(); x = p[0] + Math.cos(a) * d; z = p[2] + Math.sin(a) * d; }
       x = Math.max(-EDGE + 1, Math.min(EDGE - 1, x)); z = Math.max(-EDGE + 1, Math.min(EDGE - 1, z));
-      if (poolUse() < 0.88) SCHEDULE.push({ t: st.t, at: [x, z], who: 'sky' });
+      if (poolUse() < 0.88 && fitsPatch(x, z)) SCHEDULE.push({ t: st.t, at: [x, z], who: 'sky' });
     }
     // Each frame before the strikes: the run's end checks, closing the areas
     // left behind, the lull, the director, and pruning what has played out.
