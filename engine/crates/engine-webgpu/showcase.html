@@ -1121,7 +1121,9 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
           const [x, z] = strikePoint(s);
           s.point = [x, groundAt(x, z), z];
 
-          s.t0 = st.t + APPROACH;
+          // `lead` (play): a longer warning before contact; the fireball
+          // still shows for the last APPROACH s.
+          s.t0 = st.t + (s.lead ?? APPROACH);
           // Coming in from beyond the strike as the car sees it, and from the
           // side: it streaks down across the view toward the ground ahead.
           const c = st.carPose ? st.carPose.p : [0, 0, 0];
@@ -1254,7 +1256,7 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       if (poolUse() > 0.88) return game.say('the sky is reloading…');
       if (!touchesArea(x, z) && terrain.areas.length + pending() >= REGIONS) return game.say('too many craters still moving');
       if (!fitsPatch(x, z)) return game.say('that crater field is too big already');
-      SCHEDULE.push({ t: st.t, at: [x, z], who });
+      SCHEDULE.push({ t: st.t, at: [x, z], who, state: 'wait' });
       if (who === 'you') game.dropped++;
     }
     const flatFwd = () => norm3([st.carPose.fwd[0], 0, st.carPose.fwd[2]]);
@@ -1300,14 +1302,17 @@ struct WOut { @builtin(position) clip: vec4f, @location(0) w: vec3f, @location(1
       const at = [p[0] + v[0] * APPROACH, p[2] + v[2] * APPROACH];
       const sgn = rand() < 0.5 ? -1 : 1, pick = rand();
       const onYou = Math.min(0.3, 0.08 + st.t / 600);
-      let x, z;
-      if (pick < onYou) { x = at[0] + (rand() - 0.5) * 8; z = at[1] + (rand() - 0.5) * 8; }
+      // Onto the car: 2.4 s of warning, time to steer or brake out of the
+      // deadly middle (KILL) at full speed.
+      const ON_YOU_LEAD = 2.4;
+      let x, z, lead;
+      if (pick < onYou) { lead = ON_YOU_LEAD; x = p[0] + v[0] * lead + (rand() - 0.5) * 8; z = p[2] + v[2] * lead + (rand() - 0.5) * 8; }
       else if (pick < onYou + 0.35) { const a = 8 + 35 * rand(), o = sgn * (RIM + 2 + 10 * rand()); x = at[0] + f[0] * a + side[0] * o; z = at[1] + f[2] * a + side[2] * o; }
       else if (pick < onYou + 0.55) { const a = 30 + 30 * rand(), o = sgn * 6 * rand(); x = at[0] + f[0] * a + side[0] * o; z = at[1] + f[2] * a + side[2] * o; }
       else if (pick < onYou + 0.75) { const a = 14 + 20 * rand(), o = sgn * 8 * rand(); x = p[0] - f[0] * a + side[0] * o; z = p[2] - f[2] * a + side[2] * o; }
       else { const a = 2 * Math.PI * rand(), d = 70 + 120 * rand(); x = p[0] + Math.cos(a) * d; z = p[2] + Math.sin(a) * d; }
       x = Math.max(-EDGE + 1, Math.min(EDGE - 1, x)); z = Math.max(-EDGE + 1, Math.min(EDGE - 1, z));
-      if (poolUse() < 0.88 && fitsPatch(x, z)) SCHEDULE.push({ t: st.t, at: [x, z], who: 'sky' });
+      if (poolUse() < 0.88 && fitsPatch(x, z)) SCHEDULE.push({ t: st.t, at: [x, z], who: 'sky', state: 'wait', lead });
     }
     // Each frame before the strikes: the run's end checks, closing the areas
     // left behind, the lull, the director, and pruning what has played out.
