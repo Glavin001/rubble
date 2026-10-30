@@ -107,6 +107,12 @@ static const uint MPM_C_WHEELS = 14u;     // wheel loads mpm_wheel_loads listed 
 static const uint MPM_C_AREA_SPEED = 16u; // + slot: an area's fastest particle this frame (f32 bits)
 static const uint MPM_C_AREA_BODY = 32u;  // + slot: an area's fastest coupled body this frame
 static const uint MPM_C_AREA_FIRST = 48u; // + slot: the pool's particle count when the area opened
+static const uint MPM_C_SKIP = 64u;       // area clocks: bit k, area slot k sits out this pass
+static const uint MPM_C_PASS = 65u;       // area clocks: the frame's next pass (mpm_pass)
+static const uint MPM_C_SLEEP = 66u;      // block sleep: the rest speed (f32 bits; 0: off)
+static const uint MPM_C_SLEEP_AFTER = 67u; // block sleep: substeps at rest before a particle sleeps
+static const uint MPM_C_SLEEP_RING0 = 68u; // block sleep: blocks below this are the awake blocks
+static const uint MPM_C_SLEEP_RING1 = 69u; // block sleep: below this, their neighbours (ring 1)
 static const uint MPM_MAX_AREAS = 16u;
 static const uint MPM_NO_AREA = 0xFFFFFFFFu;
 // gMpmParams[0].area.w bits.
@@ -136,6 +142,9 @@ static const uint MPM_BOUNDARY_GEOSTATIC = 2u; // the first step's mpm_geostatic
 static const uint MPM_PARTICLE_DEAD = 1u;       // left as a parcel: no longer simulated
 static const uint MPM_PARTICLE_HOME = 2u;       // activated: c1.w, c2.w hold where (the bake's reference)
 static const uint MPM_PARTICLE_FRESH = 4u;      // activated since the last step (mpm_geostatic's)
+static const uint MPM_PARTICLE_ASLEEP = 8u;     // block sleep: at rest, frozen (TerrainConfig::sleep_speed)
+static const uint MPM_PARTICLE_QUIET = 0xFF00u; // block sleep: substeps at rest in a row (bits 8-15)
+static const uint MPM_PARTICLE_QUIET_ONE = 0x100u;
 // Colliders one block cell of the region lists.
 static const uint MPM_CELL_COLLIDERS = 256u;
 static const uint MPM_NO_SLOT = 0xFFFFFFFFu;
@@ -331,6 +340,13 @@ uint mpmParticleCount() { return ALOAD(gMpmCounters[MPM_C_PARTICLES]); }
 
 bool mpmParticleDead(MpmParticle q) { return (asuint(q.f2.w) & MPM_PARTICLE_DEAD) != 0u; }
 
+// Area clocks (TerrainConfig::area_clocks): area slot k sits out this substep
+// pass (mpm_pass sets which; none without area clocks).
+bool mpmAreaSkips(uint k) { return ((ALOAD(gMpmCounters[MPM_C_SKIP]) >> k) & 1u) != 0u; }
+
+// Block sleep (TerrainConfig::sleep_speed): the rest speed, 0 with sleep off.
+float mpmSleepSpeed() { return asfloat(ALOAD(gMpmCounters[MPM_C_SLEEP])); }
+
 // A particle's base node in area k, on the domain's lattice: from the area's
 // own origin (as the area alone would compute it), plus its offset.
 int3 mpmBaseNodeIn(float3 x, uint k)
@@ -488,6 +504,9 @@ void mpm_clear(uint3 tid : SV_DispatchThreadID)
         ASTORE(gMpmCounters[MPM_C_BLOCKS], 0u);
         ASTORE(gMpmCounters[MPM_C_SORTED], 0u);
         ASTORE(gMpmCounters[MPM_C_AIRBORNE], 0u);
+        // Block sleep's rings: unset until mpm_sleep_ring.
+        ASTORE(gMpmCounters[MPM_C_SLEEP_RING0], MPM_NO_BLOCK);
+        ASTORE(gMpmCounters[MPM_C_SLEEP_RING1], MPM_NO_BLOCK);
         // mpm_touch's workgroups (mpm_write_args, fused: one dispatch less
         // per substep).
         mpmWriteArgs(p);
@@ -510,6 +529,11 @@ void mpm_touch(uint3 tid : SV_DispatchThreadID)
     float3 x = xm.xyz;
     uint area = mpmAreaOf(x, p);
     if (area == MPM_NO_AREA) { AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OUTSIDE); return; }
+    // Area clocks: an area sitting out this pass takes no part in it.
+    if (mpmAreaSkips(area)) return;
+    // Block sleep: an asleep particle joins after the awake blocks are known
+    // (mpm_sleep_touch), unless a wake source reaches it now.
+    if ((flags & MPM_PARTICLE_ASLEEP) != 0u && mpmTouchStaysAsleep(i, x, area, flags)) return;
     int3 b = mpmBaseNodeIn(x, area);
     int3 lo = b >> 2, hi = (b + 2) >> 2;
     if (!mpmKeyOk(lo) || !mpmKeyOk(hi)) { AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OUTSIDE); return; }
@@ -528,6 +552,121 @@ void mpm_touch(uint3 tid : SV_DispatchThreadID)
 void mpm_write_args(uint3 tid : SV_DispatchThreadID)
 {
     mpmWriteArgs(mpmParams());
+}
+
+// ---- area clocks and block sleep ---------------------------------------------
+// engine/docs/deformable-terrain.md, "Area clocks and block sleep".
+
+// Area clocks: before each substep pass, the pass's dt and CFL bound into the
+// domain record, which areas sit it out, and whether its fresh particles take
+// their geostatic F first (each area group's first pass). The pass table
+// follows the area records (TerrainPlan::area_passes); its last record puts
+// the frame's own dt back.
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void mpm_pass(uint3 tid : SV_DispatchThreadID)
+{
+    if (mpmIndex(tid) != 0u) return;
+    uint k = ALOAD(gMpmCounters[MPM_C_PASS]);
+    float4 e = gMpmParams[1u + MPM_MAX_AREAS + k].step;
+    MpmParams d = gMpmParams[0];
+    d.step.x = e.x;
+    d.limits.x = e.y;
+    gMpmParams[0] = d;
+    ASTORE(gMpmCounters[MPM_C_SKIP], asuint(e.z));
+    if (asuint(e.w) != 0u) ASTORE(gMpmCounters[MPM_C_GEOSTATIC], 1u);
+    ASTORE(gMpmCounters[MPM_C_PASS], k + 1u);
+}
+
+// Block sleep, in mpm_touch: asleep particle i at x (area `area`) stays asleep
+// unless a coupled collider's padded bounds reach its block cell (the body may
+// press on it this frame); woken, it clears its flag and joins as awake.
+bool mpmTouchStaysAsleep(uint i, float3 x, uint area, uint flags)
+{
+    MpmParams pa = mpmArea(area);
+    float block = pa.origin.w * float(MPM_BLOCK);
+    uint cell = mpmLatticeCell(int3(floor((x - pa.origin.xyz) / block)), pa);
+    if (cell == MPM_NO_BLOCK || ALOAD(gMpmCouple[4u + cell * (1u + MPM_CELL_COLLIDERS)]) == 0u) return true;
+    gMpmParticles[i].f2.w = asfloat(flags & ~(MPM_PARTICLE_ASLEEP | MPM_PARTICLE_QUIET));
+    return false;
+}
+
+// Block sleep: each wheel load's stencil blocks are awake blocks (the load
+// presses on what stands there, asleep or not).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_sleep_wheels(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = mpmIndex(tid);
+    if (i >= ALOAD(gMpmCounters[MPM_C_WHEELS])) return;
+    MpmParams p = mpmParams();
+    uint r = asuint(p.limits.z) + MPM_WHEEL_RECORDS * i;
+    if (mpmAreaSkips(asuint(gMpmCoupled[r].w))) return;
+    int3 b = asint(gMpmCoupled[r + 1u].xyz);
+    int3 lo = b >> 2, hi = (b + 2) >> 2;
+    for (int bz = lo.z; bz <= hi.z; bz++)
+    for (int by = lo.y; by <= hi.y; by++)
+    for (int bx = lo.x; bx <= hi.x; bx++)
+        if (mpmKeyOk(int3(bx, by, bz))) mpmInsertBlock(mpmBlockKey(int3(bx, by, bz)), mpmParams());
+}
+
+// Block sleep: the blocks so far are a ring (the first call: the awake
+// blocks; the second: those and their neighbours). mpm_clear unsets both.
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void mpm_sleep_ring(uint3 tid : SV_DispatchThreadID)
+{
+    if (mpmIndex(tid) != 0u) return;
+    uint blocks = min(ALOAD(gMpmCounters[MPM_C_BLOCKS]), mpmParams().counts.z);
+    if (ALOAD(gMpmCounters[MPM_C_SLEEP_RING0]) == MPM_NO_BLOCK) ASTORE(gMpmCounters[MPM_C_SLEEP_RING0], blocks);
+    else ASTORE(gMpmCounters[MPM_C_SLEEP_RING1], blocks);
+}
+
+// Block sleep: the last ring's blocks insert their 26 neighbours.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_sleep_dilate(uint3 tid : SV_DispatchThreadID)
+{
+    uint b = mpmIndex(tid);
+    MpmParams p = mpmParams();
+    uint ring1 = ALOAD(gMpmCounters[MPM_C_SLEEP_RING1]);
+    uint ring = ring1 == MPM_NO_BLOCK ? ALOAD(gMpmCounters[MPM_C_SLEEP_RING0]) : ring1;
+    if (b >= ring) return;
+    int3 k = mpmKeyBlock(ALOAD(gMpmBlocks[4u * b]));
+    for (int z = -1; z <= 1; z++)
+    for (int y = -1; y <= 1; y++)
+    for (int x = -1; x <= 1; x++)
+    {
+        int3 kn = k + int3(x, y, z);
+        if (mpmKeyOk(kn)) mpmInsertBlock(mpmBlockKey(kn), p);
+    }
+}
+
+// Block sleep: an asleep particle joins the substep, frozen, where its base
+// block is in the rings (it then pushes on the awake material with its mass
+// and its stress); elsewhere it takes no part.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void mpm_sleep_touch(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = mpmIndex(tid);
+    MpmParams p = mpmParams();
+    if (i >= mpmParticleCount()) return;
+    uint flags = asuint(gMpmParticles[i].f2.w);
+    if ((flags & (MPM_PARTICLE_DEAD | MPM_PARTICLE_ASLEEP)) != MPM_PARTICLE_ASLEEP) return;
+    uint n = p.counts.x;
+    // Woken in mpm_touch (its slot then holds its key).
+    if (gMpmSorted[n + i] != MPM_NO_BLOCK) return;
+    float3 x = gMpmParticles[i].xm.xyz;
+    uint area = mpmAreaOf(x, p);
+    if (area == MPM_NO_AREA || mpmAreaSkips(area)) return;
+    int3 b = mpmBaseNodeIn(x, area);
+    if (!mpmKeyOk(b >> 2)) return;
+    uint key = mpmBlockKey(b >> 2);
+    if (mpmFindBlock(key, p) == MPM_NO_BLOCK) return;
+    uint3 l = uint3(b & 3);
+    gMpmSorted[n + i] = key;
+    gMpmSorted[2u * n + i] = l.x + 4u * l.y + 16u * l.z;
 }
 
 [shader("compute")]
@@ -1365,7 +1504,7 @@ void mpm_absorb_faces(uint3 tid : SV_DispatchThreadID)
         uint4 bd = gMpmParams[1u + a].boundary;
         if (gMpmParams[1u + a].dims.x != 0u && at >= bd.y && at < bd.y + bd.z) area = a;
     }
-    if (area == MPM_NO_AREA) return;
+    if (area == MPM_NO_AREA || mpmAreaSkips(area)) return;
     MpmParams p = mpmArea(area);
     uint slot = at - p.boundary.y;
     int3 off = mpmAreaOffset(p);
@@ -1550,6 +1689,94 @@ void mpm_grid(uint3 tid : SV_DispatchThreadID)
     gMpmGrid[2u * n] = float4(v, node.w);
 }
 
+// Block sleep's G2P (mpm_g2p behind its early return; the update is
+// mpm_g2p's). An asleep particle outside the substep, or in the outer ring
+// (whose nodes miss what lies beyond), stays as it is. One in the awake blocks
+// or the first ring has every node of its stencil complete: it takes its
+// update as an awake particle would (so stress waves pass through it), and
+// wakes once the update moves it faster than the rest speed or varies its
+// velocity across a cell by more. An awake particle after `sleep_after`
+// substeps at rest in a row falls asleep: it stops drawing the rings round it.
+void mpmG2pSleep(uint i, MpmParams p)
+{
+    uint flags = asuint(gMpmParticles[i].f2.w);
+    if ((flags & MPM_PARTICLE_DEAD) != 0u) return;
+    bool asleep = (flags & MPM_PARTICLE_ASLEEP) != 0u;
+    if (asleep)
+    {
+        uint c = gMpmSorted[p.counts.x + i];
+        if (c == MPM_NO_BLOCK || c / MPM_BLOCK_NODES >= ALOAD(gMpmCounters[MPM_C_SLEEP_RING1])) return;
+    }
+    MpmParticle q = gMpmParticles[i];
+    uint area = mpmAreaOf(q.xm.xyz, p);
+    if (area == MPM_NO_AREA || mpmAreaSkips(area)) return;
+    float dx = p.origin.w;
+    float dt = p.step.x;
+    float3 ao = gMpmParams[1u + area].origin.xyz;
+    int3 aoff = mpmSlotOffset(area);
+    int3 local = int3(floor((q.xm.xyz - ao) / dx - 0.5));
+    float3 fx = (q.xm.xyz - ao) / dx - float3(local);
+    int3 base = local + aoff;
+    float3 wx = mpmWeights(fx.x), wy = mpmWeights(fx.y), wz = mpmWeights(fx.z);
+    float3 v = float3(0, 0, 0);
+    float3x3 B = float3x3(0, 0, 0, 0, 0, 0, 0, 0, 0);
+    int3 k0 = base >> 2;
+    uint blk[8];
+    mpmBlockCube(k0, p, blk);
+    for (uint o = 0u; o < 27u; o++)
+    {
+        uint3 off = uint3(o % 3u, (o / 3u) % 3u, o / 9u);
+        uint c = mpmCellInCube(base + int3(off), k0, blk);
+        if (c == MPM_NO_BLOCK) continue;
+        float w = mpmWeightAt(wx, off.x) * mpmWeightAt(wy, off.y) * mpmWeightAt(wz, off.z);
+        float3 vi = gMpmGrid[2u * c].xyz;
+        float3 dpos = (float3(off) - fx) * dx;
+        v += w * vi;
+        B += float3x3(vi * dpos.x, vi * dpos.y, vi * dpos.z) * w;
+    }
+    float3x3 C = transpose(B) * (4.0 / (dx * dx));
+    float speed = length(v);
+    // The velocity's spread across a cell: ‖C‖·dx (Frobenius).
+    float spread = sqrt(dot(C[0], C[0]) + dot(C[1], C[1]) + dot(C[2], C[2])) * dx;
+    float rest = mpmSleepSpeed();
+    bool still = speed <= rest && spread <= rest;
+    q.xm.xyz += dt * v;
+    q.vj.xyz = v;
+    q.c0 = float4(C[0], q.c0.w);
+    q.c1 = float4(C[1], q.c1.w);
+    q.c2 = float4(C[2], q.c2.w);
+    float3x3 F = float3x3(q.f0.xyz, q.f1.xyz, q.f2.xyz);
+    float3x3 I = float3x3(1, 0, 0, 0, 1, 0, 0, 0, 1);
+    F = mul(I + C * dt, F);
+    q.f0.xyz = F[0];
+    q.f1.xyz = F[1];
+    q.f2.xyz = F[2];
+    // Substeps at rest in a row; enough of them and it sleeps.
+    uint quiet = still ? min(((flags & MPM_PARTICLE_QUIET) >> 8) + 1u, 255u) : 0u;
+    flags = (flags & ~(MPM_PARTICLE_ASLEEP | MPM_PARTICLE_QUIET)) | (quiet << 8);
+    if (quiet >= ALOAD(gMpmCounters[MPM_C_SLEEP_AFTER])) flags |= MPM_PARTICLE_ASLEEP;
+    q.f2.w = asfloat(flags);
+    AMAX2(gMpmCounters[MPM_C_MAX_SPEED], asuint(speed));
+    if (p.area.x > 1u) AMAX2(gMpmCounters[MPM_C_AREA_SPEED + area], asuint(speed));
+    if (!(speed <= p.limits.x)) AOR2(gMpmCounters[MPM_C_FLAGS], MPM_CFL);
+    uint maxParcels = asuint(p.couple.z);
+    if (!mpmInsideArea(q.xm.xyz, area) && maxParcels > 0u)
+    {
+        uint k;
+        AADD3(gMpmCounters[MPM_C_PARCELS], 1u, k);
+        if (k < maxParcels)
+        {
+            gMpmParcels[2u * k] = float4(q.xm.xyz, q.f1.w);
+            gMpmParcels[2u * k + 1u] = float4(v, q.xm.w);
+            gMpmParcels[2u * maxParcels + k] = float4(asfloat(i), 0, 0, 0);
+            AADD2(gMpmCounters[MPM_C_AIRBORNE], 1u);
+            q.f2.w = asfloat(asuint(q.f2.w) | MPM_PARTICLE_DEAD);
+        }
+        else AOR2(gMpmCounters[MPM_C_FLAGS], MPM_OVERFLOW_PARCELS);
+    }
+    gMpmParticles[i] = q;
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void mpm_g2p(uint3 tid : SV_DispatchThreadID)
@@ -1557,10 +1784,18 @@ void mpm_g2p(uint3 tid : SV_DispatchThreadID)
     uint i = mpmIndex(tid);
     MpmParams p = mpmParams();
     if (i >= mpmParticleCount()) return;
+    // Block sleep: its own function, ahead of the usual path.
+    if (mpmSleepSpeed() > 0.0)
+    {
+        mpmG2pSleep(i, p);
+        return;
+    }
     MpmParticle q = gMpmParticles[i];
     if (mpmParticleDead(q)) return;
     uint area = mpmAreaOf(q.xm.xyz, p);
     if (area == MPM_NO_AREA) return;
+    // Area clocks: an area sitting out this pass keeps its state.
+    if (mpmAreaSkips(area)) return;
     float dx = p.origin.w;
     float dt = p.step.x;
     // In the area's frame (exactly as the area alone), on the domain's lattice.
@@ -3006,6 +3241,8 @@ void mpm_source(uint3 tid : SV_DispatchThreadID)
     if (length(d) > p.source1.w) return; // beyond the transient crater: at rest
     if (mpmAreaOf(q.xm.xyz, p) != p.area.y) return;
     q.vj.xyz += mpmZModelVelocity(d, p.source0.w, p.source1.x, p.source1.y, p.source1.z);
+    // A source wakes what it moves (block sleep).
+    q.f2.w = asfloat(asuint(q.f2.w) & ~(MPM_PARTICLE_ASLEEP | MPM_PARTICLE_QUIET));
     gMpmParticles[i] = q;
 }
 

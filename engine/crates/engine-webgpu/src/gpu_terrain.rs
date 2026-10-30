@@ -275,6 +275,17 @@ impl WgpuSim {
             .map_or_else(Vec::new, |t| t.plan.areas())
     }
 
+    /// With `TerrainConfig::area_clocks`, the substeps each area slot takes
+    /// per frame from the next step (0: the frame's;
+    /// [`TerrainPlan::set_area_substeps`]).
+    pub fn terrain_set_area_substeps(
+        &mut self,
+        n: [u32; MPM_MAX_AREAS as usize],
+    ) -> anyhow::Result<()> {
+        self.terrain_plan()?.set_area_substeps(n);
+        Ok(())
+    }
+
     /// The terrain's plan (cells, areas), if terrain is enabled.
     pub fn terrain_plan_ref(&self) -> Option<&TerrainPlan> {
         self.terrain.as_ref().map(|t| &t.plan)

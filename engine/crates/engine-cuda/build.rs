@@ -180,6 +180,8 @@ const TERRAIN_GS_ENTRIES: &[&str] = &[
     "mpm_bake_bin_gs",
     "mpm_parcels_gs",
     "mpm_parcels_land_gs",
+    "mpm_sleep_touch_gs",
+    "mpm_sleep_dilate_gs",
     "mpm_cell_sort_gs",
     "mpm_p2g_gs",
     "mpm_grid_gs",

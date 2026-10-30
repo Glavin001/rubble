@@ -2195,6 +2195,125 @@ so none is adopted:
 - **Block sleep** (planned behind a flag since the design): blocks at rest
   skip their substeps until something reaches them.
 
+Both are built since, opt-in and measured: "Area clocks and block sleep" below.
+
+### Area clocks and block sleep (2026-10-30, opt-in, off by default)
+
+Two ways to spend substeps only where the CFL bound needs them, each an
+explicit `TerrainConfig` setting, off by default. Both change results (a
+substep's dt, or what is stepped), so adopting either is a decision for the
+project, not a default (AGENTS.md).
+
+**Area clocks** (`TerrainConfig::area_clocks`). Each open area takes its own
+substeps: the host gives each area its CFL count from its own speed bound
+(`TerrainPlan::set_area_substeps`, `WgpuSim::terrain_set_area_substeps`;
+`RegionClock` per area, `TerrainStepReport::area_speed`). The frame's count
+is the finest.
+- Areas share no nodes, so each steps exactly as it would alone, at its own
+  dt. Only the dt of an area slower than the fastest changes (coarser, still
+  inside its own CFL bound, which the GPU checks each substep as before).
+- The plan groups the areas by count and emits one substep pass per group
+  substep. The finest group's passes fly the parcels (they cover the frame
+  once). Each coarser group's passes follow the fine pass that brings its
+  clock past them. Each group's first pass sets its fresh particles'
+  geostatic F.
+- `mpm_pass` (one thread, before each pass) writes the pass's dt and CFL
+  bound into the domain record, and which areas sit the pass out
+  (`MPM_C_SKIP`). The pass table follows the area records in binding 37, at
+  most `max_regions × max_substeps` records (allocated only with area
+  clocks); a frame needing more fails by name ("area clock passes"). A last
+  record puts the frame's dt back.
+- `mpm_touch`, `mpm_g2p` and `mpm_absorb_faces` skip a sitting-out area's
+  particles and faces: such a particle is in no block, so the other kernels
+  never see it.
+- Not wired into `World` or the browser host yet: the bench and the test set
+  the counts themselves.
+
+**Block sleep** (`TerrainConfig::sleep_speed`, `sleep_after`). A particle
+slower than the rest speed, whose velocity also varies by less than that
+across a cell (‖C‖·dx), for `sleep_after` substeps in a row falls asleep.
+Each substep:
+- Awake particles insert their stencils' blocks as usual (`mpm_touch`). So do
+  wheel loads (`mpm_sleep_wheels`). An asleep particle in a block cell that a
+  coupled collider's padded bounds reach wakes there.
+- Those are the awake blocks. Two rings of blocks round them are added
+  (`mpm_sleep_ring`, `mpm_sleep_dilate`); asleep particles whose base block is
+  in them join the substep (`mpm_sleep_touch`) with their mass and stress.
+  The rest of the asleep sand takes no part.
+- **The wake criterion, and why skipped work is ~zero.** A node of an awake
+  block gathers from particles whose base block is that block or the one
+  below it on each axis, all inside the first ring. A node of the first ring
+  gathers from inside the second ring. So every node an awake particle or a
+  first-ring particle reads is complete: what it would be with sleep off.
+  - Those particles take their full update, asleep or not. An asleep one
+    wakes (and draws the rings round it) once its update moves it faster than
+    the rest speed, or varies its velocity across a cell by more.
+  - Second-ring particles, and those outside the rings, are not updated. Only
+    material that has stayed at rest is skipped. Anything that would move it
+    reaches the first ring a substep before it reaches the particle (signals
+    move under one cell per substep at the CFL bound).
+  - Sources wake what they move (`mpm_source`).
+- The skipped motion is bounded by the rest speed. It is not zero:
+  stresses carried by waves slower than the rest speed stop at the rings.
+
+  The first version froze first-ring particles too, waking them only on
+  their evaluated speed. Frozen sand then reflected the elastic waves (a
+  0.01 m/s wave in this sand carries several kPa, more than the geostatic
+  stress a few centimetres down): the small crater came out 62% too large.
+
+**Results against the shared clock with no sleep** (`terrain_clocks`; two 5 mm
+impacts 1.8 m apart, the second 20 frames after the first; same device, and a
+repeat of the shared run as the noise floor, here bit-identical):
+
+| | Crater 1 cavity | Crater 1 worst height difference | Crater 2 cavity | Crater 2 worst | Ledger |
+|---|---|---|---|---|---|
+| Area clocks | −0.08% | 8 quanta (about 0.3 mm) | 0.00% | 0 | exact |
+| Block sleep, 0.01 m/s | +1.18% | 79 quanta (about 2.8 mm, on a 47 mm deep crater) | +0.93% | 88 quanta | exact |
+
+Area clocks: deepest point and rim unchanged. Sleep: deepest within 1%, rim
+height +1% and −6% (its radius within 3 mm). With sleep, 99% of the first
+crater's sand slept 20 frames after the strike, 54% a frame after the
+second strike (its own ground woken by its source), and all but 21
+particles 40 frames later. At this scale the elastic wave sets the CFL count
+(about 700 substeps a frame), so the areas' counts differ little and area
+clocks save under 1% of the work here.
+
+**Cost** (native, wgpu on Metal, `terrain_perf` `barrage_frame_cost`, 11
+strikes 1.6 s apart in areas of their own, measured alone):
+
+| Profile, option | Median | p95 | Worst (the last strike) |
+|---|---|---|---|
+| game (two runs) | 1.47, 1.51 ms | 2.89, 3.01 | 11.39, 11.70 ms |
+| game, area clocks (two runs) | 1.50, 1.50 ms | 2.54, 2.58 | 7.09, 7.05 ms; the worst frame overall 10.28, 10.09 (an early strike's frame spiking, as the shared clock's do: 10.67 ms at 3.2 s) |
+| game, sleep 0.01 m/s | 3.81 ms | 7.78 | 30.24 ms |
+| game, both | 3.82 ms | 7.32 | 18.61 ms |
+| physical | 3.10 ms | 5.09 | 37.81 ms |
+| physical, area clocks | 3.09 ms | 5.05 | 21.75 ms |
+| physical, sleep 0.01 m/s | 7.62 ms | 10.21 | 78.89 ms |
+
+- **Area clocks** cut the later strike frames by 35–50% (game, at 160k
+  particles: 5.80 → 4.54 ms; at 342k: 11.39 → 7.09 ms), with the median
+  unchanged.
+- **Block sleep costs more on the barrage, not less.** With 65–80% of the
+  sand asleep by 8–12 s (at 0.01 or 0.1 m/s), the frame is still 2.6× the
+  cost.
+  - The two rings of 18 m blocks round the awake sand, which is scattered
+    through every crater, quadruple the blocks of a sand layer 2–3 blocks
+    deep: 4,522 blocks at 12 s against 1,062.
+  - P2G and the grid work per block. This is what "Block sleeping: measured,
+    not built" (above) foresaw: the regions are only a few blocks deep.
+  - It pays only where large areas lie fully at rest far from awake sand,
+    and a baked area costs nothing at all.
+- **Neither reaches 2 ms at a strike frame.** A strike frame's substeps cost
+  about 0.5–1 ms each even at 27k particles (game: 7.25 ms for 7 substeps of
+  27k particles, against 1.29 ms for 2 substeps the next frame). That is
+  about 20 dispatches and their barriers per substep, nearly independent of
+  the sand. Seven substeps then cost at least about 3.5 ms. Area clocks add
+  passes, so they meet that floor too.
+  - The lossless lever left for the worst frame is that fixed cost: fewer
+    dispatches per substep (fusing kernels, as the native fast paths began)
+    and lighter barriers (Metal directly, `MetalSim`).
+
 ## Native backends (2026-10-25)
 
 The terrain plan on native Metal (`engine-metal`'s `MetalSim`), its Metal-only

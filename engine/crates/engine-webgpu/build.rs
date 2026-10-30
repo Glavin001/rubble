@@ -207,6 +207,11 @@ const WORLD_ENTRIES: &[&str] = &[
     "mpm_wheel_loads",
     "mpm_wheel_mass",
     "mpm_parcels_land",
+    "mpm_pass",
+    "mpm_sleep_wheels",
+    "mpm_sleep_ring",
+    "mpm_sleep_dilate",
+    "mpm_sleep_touch",
     // Terrain look-ahead (slang/kernels/terrain_watch.slang).
     "terrain_watch_energy",
     "terrain_watch_pick",

@@ -101,6 +101,28 @@ pub struct TerrainConfig {
     /// silently: it takes fewer substeps while speeds fall, and fails a frame
     /// whose material outruns it.
     pub speed_growth: f32,
+    /// Each open area takes its own substeps: as many as its own material's
+    /// speed needs at the CFL bound ([`crate::TerrainPlan::set_area_substeps`]),
+    /// instead of every area taking the frame's finest (the fastest area's).
+    /// Areas share no nodes, so each steps exactly as it would alone; a quiet
+    /// area beside a fresh strike stops paying for the strike's substeps.
+    /// Results differ from the shared clock (an area's dt is its own), so it is
+    /// off by default (`engine/docs/deformable-terrain.md`, "Area clocks and
+    /// block sleep").
+    pub area_clocks: bool,
+    /// Block sleep: material slower than this (m/s), whose velocity also
+    /// varies by less than this across a cell, for [`Self::sleep_after`]
+    /// substeps in a row falls asleep and is frozen. Only the blocks awake
+    /// material, a coupled collider or a wheel load reaches, and two rings of
+    /// blocks round them, take substeps; a sleeping particle there is
+    /// evaluated each substep and wakes the moment its update would move it
+    /// faster than this. 0 (the default): off. The skipped motion is bounded by
+    /// this speed (`engine/docs/deformable-terrain.md`, "Area clocks and
+    /// block sleep").
+    pub sleep_speed: f32,
+    /// Block sleep: the substeps in a row at rest before a particle sleeps
+    /// (at most 255).
+    pub sleep_after: u32,
 }
 
 /// Which settings a world's terrain starts from ([`TerrainConfig::profile`]).
@@ -175,6 +197,9 @@ impl Default for TerrainConfig {
             max_boundary_nodes: 1 << 18,
             bed_depth: Some(1.5),
             speed_growth: 1.5,
+            area_clocks: false,
+            sleep_speed: 0.0,
+            sleep_after: 16,
         }
     }
 }
@@ -327,6 +352,14 @@ impl TerrainConfig {
         bad(
             !(self.speed_growth.is_finite() && self.speed_growth >= 1.0),
             "speed_growth must be finite and at least 1",
+        )?;
+        bad(
+            !(self.sleep_speed.is_finite() && self.sleep_speed >= 0.0),
+            "sleep_speed must be finite and non-negative (0: no block sleep)",
+        )?;
+        bad(
+            self.sleep_after == 0 || self.sleep_after > 255,
+            "sleep_after must lie in [1, 255]",
         )?;
         Ok(())
     }

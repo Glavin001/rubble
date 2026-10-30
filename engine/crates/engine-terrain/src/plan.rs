@@ -66,6 +66,11 @@ pub const KERNELS: &[&str] = &[
     "mpm_wheel_loads",
     "mpm_wheel_mass",
     "mpm_parcels_land",
+    "mpm_pass",
+    "mpm_sleep_wheels",
+    "mpm_sleep_ring",
+    "mpm_sleep_dilate",
+    "mpm_sleep_touch",
 ];
 
 /// Byte offsets of the indirect workgroup counts in [`MPM_ARGS_BINDING`].
@@ -329,6 +334,23 @@ pub struct TerrainPlan {
     areas: Vec<Option<Area>>,
     /// The area records changed since they were last written.
     areas_dirty: bool,
+    /// [`TerrainConfig::area_clocks`]: each area slot's substeps per frame
+    /// (0: the frame's).
+    area_substeps: [u32; MPM_MAX_AREAS as usize],
+}
+
+/// One substep pass of a frame on the area clocks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct AreaPass {
+    dt: f32,
+    /// The CFL speed bound of `dt`.
+    limit: f32,
+    /// The area slots stepping in it.
+    mask: u32,
+    /// The pass sets the geostatic F of fresh particles first.
+    geostatic: bool,
+    /// The parcels fly in it (the frame's finest passes: they cover the frame once).
+    parcels: bool,
 }
 
 impl TerrainPlan {
@@ -372,6 +394,7 @@ impl TerrainPlan {
             domain: None,
             areas: vec![None; MPM_MAX_AREAS as usize],
             areas_dirty: true,
+            area_substeps: [0; MPM_MAX_AREAS as usize],
         })
     }
 
@@ -385,7 +408,7 @@ impl TerrainPlan {
         let slots = u64::from(hash_slots(config.max_blocks));
         let nodes = blocks * u64::from(BLOCK_CELLS.pow(3));
         [
-            (MPM_PARAMS_BINDING, MPM_PARAMS_BYTES),
+            (MPM_PARAMS_BINDING, params_bytes(config)),
             (MPM_COUNTERS_BINDING, 4 * MPM_COUNTER_WORDS as u64),
             (
                 MPM_PARTICLES_BINDING,
@@ -1134,6 +1157,10 @@ impl TerrainPlan {
             self.wave_speed
         );
         self.write_params(ops, 0, 0, 0);
+        if self.config.sleep_speed > 0.0 {
+            ops.counter(MPM_C_SLEEP, self.config.sleep_speed.to_bits());
+            ops.counter(MPM_C_SLEEP_AFTER, self.config.sleep_after);
+        }
         for a in self.areas.iter_mut().flatten() {
             a.moved = true;
         }
@@ -1146,18 +1173,156 @@ impl TerrainPlan {
     }
 
     /// `substeps` substeps of `dt` under `gravity` (m/s² along y) with no
-    /// rigid coupling, then the parcels' deposits.
+    /// rigid coupling, then the parcels' deposits. With
+    /// [`TerrainConfig::area_clocks`], `substeps · dt` is the frame and each
+    /// open area takes its own substeps over it ([`Self::set_area_substeps`]).
     pub fn step(&mut self, substeps: u32, dt: f32, gravity: f32) -> anyhow::Result<TerrainOps> {
         let mut ops = TerrainOps::default();
+        let geostatic = self.geostatic_pending;
         self.step_params(&mut ops, substeps, dt, gravity)?;
         // No colliders listed: the grid holds no rigid contacts, and no wheel loads.
         ops.disp("mpm_couple_clear", u64::from(self.config.max_blocks));
         ops.counter(MPM_C_WHEELS, 0);
-        for _ in 0..substeps {
-            self.substep(&mut ops, None);
-        }
+        self.substeps(&mut ops, substeps, dt, geostatic, None)?;
         self.deposits(&mut ops);
         Ok(ops)
+    }
+
+    /// With [`TerrainConfig::area_clocks`]: the substeps area slot k takes in
+    /// each frame from now, `n[k]` (0: the frame's). Each covers the frame
+    /// (its dt is the frame over its count) and is clamped to the frame's
+    /// count, which is the finest; the host gives each area its own CFL count
+    /// ([`crate::substeps_for`] on that area's speed,
+    /// `TerrainStepReport::area_speed`). Without area clocks it is ignored.
+    pub fn set_area_substeps(&mut self, n: [u32; MPM_MAX_AREAS as usize]) {
+        self.area_substeps = n;
+    }
+
+    /// The frame's substeps: `substeps` of `dt` over every area, or on the
+    /// area clocks each open area's own, as passes ([`Self::area_passes`]).
+    fn substeps(
+        &mut self,
+        ops: &mut TerrainOps,
+        substeps: u32,
+        dt: f32,
+        geostatic: bool,
+        coupled: Option<(u64, u64)>,
+    ) -> anyhow::Result<()> {
+        let Some(passes) = self.area_passes(substeps, dt, geostatic)? else {
+            for _ in 0..substeps {
+                self.substep(ops, coupled, true);
+            }
+            return Ok(());
+        };
+        // The pass table, then the frame's own dt and bound back (a last
+        // record: what reads the domain record after the substeps sees the
+        // frame's, and no area sits out).
+        let mut table: Vec<MpmParams> = passes
+            .iter()
+            .map(|p| MpmParams {
+                step: [
+                    p.dt,
+                    p.limit,
+                    f32::from_bits(!p.mask),
+                    f32::from_bits(u32::from(p.geostatic)),
+                ],
+                ..MpmParams::default()
+            })
+            .collect();
+        table.push(MpmParams {
+            step: [self.params.step[0], self.params.limits[0], 0.0, 0.0],
+            ..MpmParams::default()
+        });
+        ops.write_words(
+            MPM_PARAMS_BINDING,
+            MPM_PARAMS_BYTES,
+            bytemuck::cast_slice(&table),
+        );
+        ops.counter(MPM_C_PASS, 0);
+        for p in &passes {
+            ops.disp("mpm_pass", 1);
+            self.substep(ops, coupled, p.parcels);
+        }
+        ops.disp("mpm_pass", 1);
+        Ok(())
+    }
+
+    /// The area clocks' passes for a frame of `substeps · dt`, or `None`
+    /// when every open area takes the frame's substeps (the shared clock).
+    ///
+    /// Areas taking the same count step together. The finest group's passes
+    /// carry the parcels; each coarser group's passes follow the fine pass
+    /// that brings its own clock past them, so its material is never more
+    /// than one fine pass ahead of the frame. Each group's first pass sets
+    /// the geostatic F of its fresh particles (`geostatic`: some wait for it).
+    fn area_passes(
+        &self,
+        substeps: u32,
+        dt: f32,
+        geostatic: bool,
+    ) -> anyhow::Result<Option<Vec<AreaPass>>> {
+        if !self.config.area_clocks {
+            return Ok(None);
+        }
+        let mut groups: Vec<(u32, u32)> = Vec::new();
+        for (k, a) in self.areas.iter().enumerate() {
+            if a.is_none() {
+                continue;
+            }
+            let asked = self.area_substeps[k];
+            let n = if asked == 0 {
+                substeps
+            } else {
+                asked.clamp(1, substeps)
+            };
+            match groups.iter_mut().find(|g| g.0 == n) {
+                Some(g) => g.1 |= 1 << k,
+                None => groups.push((n, 1 << k)),
+            }
+        }
+        if groups.iter().all(|g| g.0 == substeps) {
+            return Ok(None);
+        }
+        groups.sort_by(|a, b| b.0.cmp(&a.0));
+        let frame = substeps as f32 * dt;
+        let dx = self.params.origin[3];
+        let fine = groups[0].0;
+        let mut out = Vec::new();
+        let mut started = vec![false; groups.len()];
+        for k in 0..fine {
+            for (g, &(n, mask)) in groups.iter().enumerate() {
+                // Group g's passes due by the end of fine pass k.
+                let due = if g == 0 {
+                    1
+                } else {
+                    (k + 1) * n / fine - k * n / fine
+                };
+                for _ in 0..due {
+                    let dt = frame / n as f32;
+                    let limit = self.config.courant * dx / dt - self.wave_speed;
+                    anyhow::ensure!(
+                        limit > 0.0,
+                        "terrain area clock dt {dt} s is above the CFL bound for the material's \
+                         wave speed ({} m/s): use engine_terrain::substeps_for",
+                        self.wave_speed
+                    );
+                    out.push(AreaPass {
+                        dt,
+                        limit,
+                        mask,
+                        geostatic: geostatic && !started[g],
+                        parcels: g == 0,
+                    });
+                    started[g] = true;
+                }
+            }
+        }
+        TerrainConfig::check(
+            "area clock passes (max_regions × max_substeps)",
+            out.len() as u64,
+            u64::from(area_clock_passes(&self.config)),
+        )?;
+        Ok(Some(out))
     }
 
     /// A coupled frame (explicit, staggered) ahead of the rigid step: the
@@ -1174,6 +1339,7 @@ impl TerrainPlan {
     ) -> anyhow::Result<TerrainOps> {
         self.params.couple[0] = substeps as f32 * dt;
         let mut ops = TerrainOps::default();
+        let geostatic = self.geostatic_pending;
         self.step_params(&mut ops, substeps, dt, gravity)?;
         let slots = u64::from(self.config.max_coupled);
         ops.disp("mpm_couple_clear", u64::from(self.config.max_blocks));
@@ -1184,9 +1350,7 @@ impl TerrainPlan {
         if wheels > 0 {
             ops.disp("mpm_wheel_loads", 1);
         }
-        for _ in 0..substeps {
-            self.substep(&mut ops, Some((slots, wheels)));
-        }
+        self.substeps(&mut ops, substeps, dt, geostatic, Some((slots, wheels)))?;
         self.deposits(&mut ops);
         ops.disp("mpm_couple_emit", slots);
         ops.disp("mpm_couple_finish", 1);
@@ -1204,14 +1368,30 @@ impl TerrainPlan {
     }
 
     /// One MPM substep's dispatches. With `coupled` (the coupling slots), the
-    /// rigid contacts' exchange runs between the grid update and G2P.
-    fn substep(&self, ops: &mut TerrainOps, coupled: Option<(u64, u64)>) {
+    /// rigid contacts' exchange runs between the grid update and G2P;
+    /// `parcels`: the parcels fly in it.
+    fn substep(&self, ops: &mut TerrainOps, coupled: Option<(u64, u64)>, parcels: bool) {
         // Hash words to empty.
         let clear = 2 * u64::from(self.params.counts[1]);
         // mpm_clear also writes the workgroup counts mpm_touch reads.
         ops.disp("mpm_clear", clear);
         ops.particles("mpm_touch");
         ops.disp("mpm_write_args", 1);
+        if self.config.sleep_speed > 0.0 {
+            // Block sleep: the awake blocks (awake material's stencils, then
+            // the wheel loads'), two rings round them, then the asleep
+            // particles there join, frozen.
+            if let Some((_, wheels)) = coupled.filter(|c| c.1 > 0) {
+                ops.disp("mpm_sleep_wheels", wheels);
+            }
+            for _ in 0..2 {
+                ops.disp("mpm_sleep_ring", 1);
+                ops.disp("mpm_write_args", 1);
+                ops.blocks("mpm_sleep_dilate");
+            }
+            ops.disp("mpm_write_args", 1);
+            ops.particles("mpm_sleep_touch");
+        }
         ops.particles("mpm_count");
         ops.blocks("mpm_scan_cells");
         ops.particles("mpm_scatter");
@@ -1233,7 +1413,9 @@ impl TerrainPlan {
         if faces > 0 {
             ops.disp("mpm_absorb_faces", faces);
         }
-        ops.indirect("mpm_parcels", ARGS_PARCELS);
+        if parcels {
+            ops.indirect("mpm_parcels", ARGS_PARCELS);
+        }
     }
 
     /// Once per frame: the parcels' deposits onto the heightfield.

@@ -346,6 +346,10 @@ fn barrage_frame_cost() {
     if env("GAME") == Some(1.0) {
         cfg = cfg.with_profile(engine_terrain::TerrainProfile::Game);
     }
+    // The opt-in options (engine/docs/deformable-terrain.md, "Area clocks and
+    // block sleep"): AREA_CLOCKS=1, SLEEP=<rest speed m/s>.
+    cfg.area_clocks = env("AREA_CLOCKS") == Some(1.0);
+    cfg.sleep_speed = env("SLEEP").unwrap_or(0.0) as f32;
     cfg.cells_per_radius = env("CPR").unwrap_or(6.0) as f32;
     let margin = env("MARGIN").unwrap_or(1.0);
     let strikes = env("STRIKES").unwrap_or(11.0) as u32;
@@ -388,7 +392,9 @@ fn barrage_frame_cost() {
         .add_height_field(&mut arena, &field, Vec3::ZERO, Quat::IDENTITY, 0)
         .unwrap();
     let peak = source_peak_speed(&model);
-    let (mut t, mut speed, mut next, mut opened) = (0.0f32, 0.0f32, 0.0f32, 0u32);
+    let (mut t, mut next, mut opened) = (0.0f32, 0.0f32, 0u32);
+    // Each area slot's speed bound basis (the World's clock per area).
+    let mut speed = [0.0f32; 16];
     let mut frames: Vec<(f32, u32, f64, u32, bool)> = Vec::new();
     let wall = std::time::Instant::now();
     while t < until {
@@ -408,26 +414,56 @@ fn barrage_frame_cost() {
                 )
                 .unwrap();
             s.terrain_apply_source_to(o.area, &model, at).unwrap();
-            speed = speed.max(peak);
+            let k = o.area as usize;
+            speed[k] = speed[k].max(peak);
             opened += 1;
             next += every;
             strike = true;
         }
-        let (k, dt) = substeps_for(
-            &cfg,
-            frame,
-            dx,
-            sand.p_wave_speed(),
-            cfg.speed_growth * speed + 20.0 + G * frame,
-        )
-        .unwrap();
+        // Each open area's CFL count from its own bound; the frame takes the
+        // finest (and on the area clocks each area its own).
+        let open: Vec<usize> = s.terrain_areas().iter().map(|a| a.slot as usize).collect();
+        let mut each = [0u32; 16];
+        let mut k = 1;
+        for &a in &open {
+            let (n, _) = substeps_for(
+                &cfg,
+                frame,
+                dx,
+                sand.p_wave_speed(),
+                cfg.speed_growth * speed[a] + 20.0 + G * frame,
+            )
+            .unwrap();
+            each[a] = n;
+            k = k.max(n);
+        }
+        s.terrain_set_area_substeps(each).unwrap();
+        let dt = frame / k as f32;
         let w = std::time::Instant::now();
         let rep = s.terrain_step(k, dt, -G).unwrap();
         let ms = s
             .terrain_last_gpu_ms()
             .unwrap_or_else(|| w.elapsed().as_secs_f64() * 1e3);
         frames.push((t, k, ms, rep.particles, strike));
-        speed = rep.max_speed;
+        for &a in &open {
+            speed[a] = rep.area_speed[a];
+        }
+        // Block sleep: how much of the sand is asleep, each 4 s.
+        if (t / 4.0).floor() != ((t + frame) / 4.0).floor() {
+            let ps = s.terrain_particles();
+            let live = ps
+                .iter()
+                .filter(|p| p.f[2][3].to_bits() & engine_terrain::layout::MPM_PARTICLE_DEAD == 0);
+            let (n, asleep) = live.fold((0, 0), |(n, a), p| {
+                let z = p.f[2][3].to_bits() & engine_terrain::layout::MPM_PARTICLE_ASLEEP != 0;
+                (n + 1, a + usize::from(z))
+            });
+            eprintln!(
+                "  t {:5.2} s: {asleep} of {n} particles asleep, {} blocks",
+                t + frame,
+                rep.blocks
+            );
+        }
         t += frame;
     }
     let pct = |v: &mut Vec<f64>, p: f64| {
@@ -444,8 +480,10 @@ fn barrage_frame_cost() {
         }
     });
     eprintln!(
-        "barrage: {strikes} strikes every {every} s, {} profile, cpr {}, margin {margin}, dx {dx:.2} m, {hz} Hz, {} frames in {:.0} s wall; {} particles at the end",
+        "barrage: {strikes} strikes every {every} s, {} profile, area clocks {}, sleep {} m/s, cpr {}, margin {margin}, dx {dx:.2} m, {hz} Hz, {} frames in {:.0} s wall; {} particles at the end",
         if env("GAME") == Some(1.0) { "game" } else { "physical" },
+        cfg.area_clocks,
+        cfg.sleep_speed,
         cfg.cells_per_radius,
         frames.len(),
         wall.elapsed().as_secs_f64(),
