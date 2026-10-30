@@ -355,6 +355,10 @@ geometry, and a triangle mesh for box and hull shapes, in the body frame.
   `solve_planes` on the host, after Box3D's mover.
 - **`explode(ExplosionDef {position, radius, falloff, impulse_per_area,
   mask_bits})`** is a GPU command.
+- **`detonate(BlastDef {position, tnt_kg, radial})`** is a charge: the stress
+  oracle's face pressures on blast-loaded destructibles (see *Damage as
+  data*), and, with `radial`, `explode`'s impulse on bodies from the same
+  point.
 
 ### Destruction (first-class)
 
@@ -455,8 +459,27 @@ world.apply_damage(id, &DamageDesc::Radial { position, min_radius, max_radius, d
   reference.
 - Damage is a queued command applied before the next step, so fracture stays
   forward-only.
-- `explode(ExplosionDef)` damages destructibles in range and also applies
-  impulses to bodies.
+- `explode(ExplosionDef)` stays Box3D's radial impulse on bodies (its C struct
+  is fixed). Blasts that load destructibles are their own command,
+  `detonate(BlastDef { position, tnt_kg, radial })` (shipped 2026-10-25 for
+  `StrengthModel::Threshold`, opt-in per instance with
+  `DestructibleDef::blast_loading`):
+  - the oracle's blast physics (`stress_ref::blast::FaceBlast`: Kinney-Graham
+    peak, duration and impulse at `Z = R / W^(1/3)`, the fitted Friedlander
+    pulse, oblique reflection, shadowing, clearing) on each exposed chunk face,
+    exposure and clearing distances from the oracle's own functions on a
+    mirror of the bond states;
+  - each step the pulse reaches, before the engine steps: each chunk's load
+    over the step (its peak, as `impact_peak` takes an impact's; the mean
+    without it), the threshold rule (a bond breaks when either chunk's load
+    beats its tensile capacity), the split on the GPU, then each piece's share
+    of the blast impulse, so the step meets moving pieces (forward-only);
+  - the per-chunk loads (force, moment, `Σ sym(r ⊗ F)`, impulse, cause
+    `Blast`) from `destructible_blast_loads` and in a GPU buffer per instance
+    for kernels that compose with them (chunk crushing);
+  - a face nearer the charge than the fits reach (`Z < 0.05 m/kg^(1/3)`), a
+    non-positive charge or a non-finite position is an error, never clamped.
+    `DestructibleAssetDesc::from_stress_scene` places the oracle's own scenes.
 
 #### The three stages, all on the GPU
 
@@ -864,7 +887,11 @@ oracle's `stress-gpu`, `stress-ref` and `stress-rubble`.
   inertia summed from its chunks. The step then reports `BondsBroken` and
   `Split` (the children partition the parent; one body per actor). Every
   piece's origin stays the instance frame, so `chunk_local` is the identity
-  and the render contract holds.
+  and the render contract holds. The frame that reports a `Split` also
+  reports each new piece's pose (`body_transform`, and a move with no
+  `previous`): it starts at its parent's origin, so it is drawable at once.
+  `read_body_state` poses a piece in the solver frame the GPU holds now, so a
+  read after a step whose split is not yet polled is still the piece's origin.
 - **Projectiles.** `body_set_projectile(body, Some(Projectile))` adds a body
   with one sphere or box shape to strike prediction and gives its contacts
   the lab's shot loads. Other non-chunk colliders load chunks as static

@@ -19,6 +19,7 @@
 //! See `engine/docs/public-api.md` and `engine/docs/api-review.md`.
 
 mod assembly;
+mod blast;
 mod contacts;
 mod debug_draw;
 mod defs;
@@ -32,6 +33,7 @@ mod motion;
 mod queries;
 mod readback;
 mod rig;
+mod support_loss;
 mod terrain;
 mod threshold;
 
@@ -39,20 +41,23 @@ pub use assembly::{
     AssemblyDef, AssemblyId, ConnectionDef, ConnectionKind, PartDef, PartHandle, PartModel,
     PartRef, VehicleBuild, VehicleDef, VehicleModel,
 };
+pub use blast::{
+    BlastDef, ChunkBlastLoad, LoadCause, RadialImpulse, BLAST_CAP, MIN_SCALED_DISTANCE,
+};
 pub use debug_draw::{
     DebugColor, DebugDraw, DebugDrawOptions, COLOR_ASLEEP, COLOR_AWAKE, COLOR_STATIC,
 };
 pub use defs::{BodyDef, BodyType, Geometry, MassData, MotionLocks, ShapeDef, SurfaceMaterial};
 pub use destruction::{
-    lab_solver, ActorInfo, Anchors, BondDesc, ChunkDesc, DestructibleAssetDesc,
-    DestructibleAssetId, DestructibleDef, DestructibleId, DestructibleStats, Preload,
-    StrengthModel,
+    lab_solver, ActorInfo, Anchors, BondDesc, ChunkDesc, Crush, CrushMass, CrushMaterial,
+    DestructibleAssetDesc, DestructibleAssetId, DestructibleDef, DestructibleId, DestructibleStats,
+    Preload, StrengthModel,
 };
 pub use error::{StaleHandle, Unsupported};
 pub use events::{
-    coalesce, BodyEvents, BodyMoveEvent, CoalescedFrame, ContactBeginEvent, ContactEndEvent,
-    ContactEvents, DestructionEvent, Frame, RayBatchId, RayBatchResult, SensorEvent, SensorEvents,
-    SkinId, SkinOutput, SoftOutput, VehicleOutput,
+    coalesce, BodyEvents, BodyMoveEvent, BreakCause, CoalescedFrame, ContactBeginEvent,
+    ContactEndEvent, ContactEvents, CrushCause, DestructionEvent, Frame, RayBatchId,
+    RayBatchResult, SensorEvent, SensorEvents, SkinId, SkinOutput, SoftOutput, VehicleOutput,
 };
 pub use handles::{BodyId, JointId, ShapeId};
 pub use joints::{
@@ -407,6 +412,7 @@ pub struct World {
     contact_storage: ContactStorage,
     /// Threshold destructibles (`StrengthModel::Threshold`).
     fracture: threshold::Fracture,
+    blasts: blast::Blasts,
     motion: motion::MotionState,
     /// Deformable terrain, once enabled.
     terrain: Option<terrain::TerrainHost>,
@@ -489,6 +495,7 @@ impl World {
             pending_batches: Vec::new(),
             next_ray_batch: 0,
             fracture: Default::default(),
+            blasts: Default::default(),
             terrain: None,
         })
     }
@@ -721,13 +728,21 @@ impl World {
     }
 
     /// The body's state read straight from the GPU (blocking; for tools and
-    /// tests, not per-frame use).
+    /// tests, not per-frame use), as of every step taken, polled or not.
     pub fn read_body_state(&self, id: BodyId) -> anyhow::Result<BodyStateRead> {
         let i = self.live_body(id)?;
         let b = self.sim.read_body(id.index());
         let solver = Transform::new(b.position, b.orientation);
+        // The solver frame the GPU posed the body in: a threshold piece's from the
+        // GPU too, since a step not yet polled may have split and re-framed it.
+        #[cfg(feature = "stress")]
+        let frame = self
+            .threshold_frame_now(id.index())
+            .unwrap_or_else(|| self.bodies[i].frame());
+        #[cfg(not(feature = "stress"))]
+        let frame = self.bodies[i].frame();
         Ok(BodyStateRead {
-            transform: self.bodies[i].frame().to_origin(solver),
+            transform: frame.to_origin(solver),
             linear_velocity: b.linear_vel,
             angular_velocity: b.angular_vel,
             awake: b.flags & engine_schema::BodyFlags::Sleeping as u32 == 0,
@@ -1668,6 +1683,9 @@ impl World {
     /// `Backpressure::Block`; collect results with [`World::poll`].
     pub fn step(&mut self) -> anyhow::Result<()> {
         let step = self.step;
+        // Blasts' loads, breaks and splits before the engine steps (forward-only).
+        #[cfg(feature = "stress")]
+        self.blast_before_step()?;
         if std::mem::take(&mut self.dirty) {
             self.last_input_step = Some(step);
         }
@@ -1708,6 +1726,10 @@ impl World {
         let terrain = self.terrain_encode(&mut enc)?;
         #[cfg(feature = "stress")]
         if fracture {
+            // A sustained load still crushing must see every step.
+            if self.fracture_flow_needs_step() {
+                self.sim.request_step();
+            }
             self.encode_fracture_begin(&mut enc);
         }
         self.sim
@@ -1978,6 +2000,10 @@ impl World {
                 .map(DestructionEvent::PieceDetached),
         );
         let mut destruction = self.destruction_events(destruction);
+        // Pieces this step's GPU split adopted (child, parent): their slots' records are
+        // from before the split.
+        #[allow(unused_mut)]
+        let mut adopted: Vec<(u32, u32)> = Vec::new();
         #[cfg(feature = "stress")]
         {
             let reads: Vec<(threshold::FractureRead, &[u8])> = raw
@@ -1988,8 +2014,27 @@ impl World {
                     _ => None,
                 })
                 .collect();
+            // The splits blasts made before this step, then the step's own.
+            destruction.extend(self.take_blast_events(step));
             if !reads.is_empty() {
-                destruction.extend(self.fracture_frame(step, &reads)?);
+                let events = self.fracture_frame(step, &reads)?;
+                // The pieces this step's split adopted, each with its parent's body.
+                for e in &events {
+                    if let DestructionEvent::Split {
+                        parent, children, ..
+                    } = e
+                    {
+                        let p = parent.bodies[0].index();
+                        adopted.extend(
+                            children
+                                .iter()
+                                .map(|c| c.bodies[0].index())
+                                .filter(|&c| c != p)
+                                .map(|c| (c, p)),
+                        );
+                    }
+                }
+                destruction.extend(events);
             }
         }
         let destruction = self.connection_events(destruction);
@@ -2009,13 +2054,13 @@ impl World {
             None => raw.moved,
         };
         records.sort_by_key(|r| r.body());
-        let mut moves = Vec::with_capacity(records.len());
+        let mut moves = Vec::with_capacity(records.len() + adopted.len());
         for r in &records {
             let i = r.body() as usize;
             let Some(slot) = self.bodies.get_mut(i) else {
                 continue;
             };
-            if !slot.alive {
+            if !slot.alive || adopted.iter().any(|a| a.0 == r.body()) {
                 continue;
             }
             let solver = Transform::new(r.position, r.rotation);
@@ -2038,6 +2083,35 @@ impl World {
                 previous,
                 fell_asleep: r.slept(),
                 woke: r.woke(),
+                user_data: slot.user_data,
+            });
+        }
+        // A split's new pieces are drawable in the frame that reports the split: each
+        // starts at its parent's origin (the instance frame, carried by the parent's
+        // motion), so its first pose is the parent's this step. A parent crushed this frame
+        // (its chunk kept the body) is parked: its origin as the split left it. A parent
+        // with no frame-reported pose has not moved since it was made (an anchored piece is
+        // static): its origin is where it was made.
+        #[cfg(feature = "stress")]
+        let crushed = std::mem::take(&mut self.fracture.crushed_origins);
+        #[cfg(not(feature = "stress"))]
+        let crushed: Vec<(u32, Transform)> = Vec::new();
+        for (child, parent) in adopted {
+            let p = &self.bodies[parent as usize];
+            let transform = crushed
+                .iter()
+                .find(|c| c.0 == parent)
+                .map(|c| c.1)
+                .or(p.last_transform)
+                .unwrap_or(p.origin);
+            let slot = &mut self.bodies[child as usize];
+            slot.last_transform = Some(transform);
+            moves.push(BodyMoveEvent {
+                body: BodyId::new(child, slot.generation),
+                transform,
+                previous: None,
+                fell_asleep: false,
+                woke: false,
                 user_data: slot.user_data,
             });
         }

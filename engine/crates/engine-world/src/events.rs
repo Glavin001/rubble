@@ -57,18 +57,77 @@ pub enum DestructionEvent {
         force: f32,
         torque: f32,
     },
-    /// Bonds of a destructible broke this step (bond indices into its asset).
+    /// Bonds of a destructible broke this step (bond indices into its asset). A step
+    /// whose breaks have several causes reports one event per cause.
     BondsBroken {
         destructible: DestructibleId,
         bonds: Vec<u32>,
+        cause: BreakCause,
     },
     /// An actor (connected chunks) of a destructible came apart. The parent
     /// is described by value: its chunks have already moved to the children.
+    /// A crushed chunk is not a child (see `ChunkCrushed`).
     Split {
         destructible: DestructibleId,
         parent: ActorInfo,
         children: Vec<ActorInfo>,
     },
+    /// A chunk was crushed (`DestructibleDef::crush`): its material comminuted, it
+    /// left its structure (every bond of it broken, its body gone). Its mass went to
+    /// `fragments` (`CrushMass::Conserve`) or out of the simulation (`Remove`); the
+    /// host draws the dust from this.
+    ChunkCrushed {
+        destructible: DestructibleId,
+        chunk: u32,
+        /// kg, m^3.
+        mass: f32,
+        volume: f32,
+        /// The chunk's pose when crushed: its centre of mass, and the rotation its
+        /// render mesh had (its body origin's).
+        pose: Transform,
+        /// At the chunk (its centre of mass), m/s and rad/s.
+        linear_velocity: [f32; 3],
+        angular_velocity: [f32; 3],
+        /// The highest mean pressure (compression positive) and deviatoric stress it
+        /// met (Pa).
+        peak_pressure: f32,
+        peak_deviator: f32,
+        cause: CrushCause,
+        /// The rigid fragments carrying its mass and momentum (empty: removed).
+        fragments: Vec<BodyId>,
+    },
+}
+
+/// What broke a destructible's bonds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BreakCause {
+    /// The strength model's own rule: the threshold model's contact and impact loads and
+    /// its strike prediction, or the Bonds model's joint forces.
+    Stress,
+    /// A blast's face pressures (`World::detonate`, `DestructibleDef::blast_loading`).
+    Blast,
+    /// Support loss (`DestructibleDef::support_loss`): the weight a piece's bonds carry
+    /// to its anchors overloads them, or it tips off its supports.
+    SupportLoss,
+    /// A chunk was crushed: every bond of it breaks (`ChunkCrushed`).
+    Crush,
+}
+
+/// What crushed a chunk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CrushCause {
+    /// A predicted strike (a projectile, `World::body_set_projectile`).
+    Impact,
+    /// A blast's face pressures over its windows (`DestructibleDef::blast_loading`),
+    /// with their reactions through the chunk's bonds.
+    Blast,
+    /// Contact loads after a step (debris, impacts the strike prediction did not see,
+    /// sustained pressure), with their reactions through the chunk's bonds.
+    Contact,
+    /// Loads through its bonds: the support-loss flow's (`DestructibleDef::
+    /// support_loss`), the weight above it carried to the anchors, the larger part of
+    /// its stress.
+    Load,
 }
 
 /// A vehicle's state after the step: speeds, engine, gear, and per wheel the

@@ -374,6 +374,57 @@ pub enum RbDestructionType {
     /// A connection of an assembly or composed vehicle broke: `assembly`,
     /// `name`, `joint`, `force`, `torque`.
     RB_CONNECTION_BROKE = 6,
+    /// A chunk of a destructible was crushed: `destructible`, `index` (the
+    /// chunk), `mass`; `children` / `child_count` are the fragment bodies that
+    /// carry its mass, one each (none when removed).
+    RB_CHUNK_CRUSHED = 7,
+}
+
+/// What broke a destructible's bonds (`RB_BONDS_BROKEN`; one event per cause in a step).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RbBreakCause {
+    /// The strength model's own rule: contact and impact loads, the strike prediction, or
+    /// the bonds model's joint forces.
+    RB_BREAK_STRESS = 0,
+    /// A blast's face pressures (`rbWorld_Detonate`, `RbDestructibleDef::blast_loading`).
+    RB_BREAK_BLAST = 1,
+    /// Support loss (`RbDestructibleDef::support_loss`).
+    RB_BREAK_SUPPORT_LOSS = 2,
+    /// A crushed chunk's bonds (`RB_CHUNK_CRUSHED`).
+    RB_BREAK_CRUSH = 3,
+}
+
+/// What crushed a chunk (`RB_CHUNK_CRUSHED`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RbCrushCause {
+    /// A predicted strike (a projectile, `rbBody_SetProjectile`).
+    RB_CRUSH_IMPACT = 0,
+    /// A blast's face pressures (`RbDestructibleDef::blast_loading`).
+    RB_CRUSH_BLAST = 1,
+    /// Contact loads after a step (debris, sustained pressure).
+    RB_CRUSH_CONTACT = 2,
+    /// Loads through its bonds: the support-loss flow's weight above it.
+    RB_CRUSH_LOAD = 3,
+}
+
+fn break_cause(c: BreakCause) -> RbBreakCause {
+    match c {
+        BreakCause::Stress => RbBreakCause::RB_BREAK_STRESS,
+        BreakCause::Blast => RbBreakCause::RB_BREAK_BLAST,
+        BreakCause::SupportLoss => RbBreakCause::RB_BREAK_SUPPORT_LOSS,
+        BreakCause::Crush => RbBreakCause::RB_BREAK_CRUSH,
+    }
+}
+
+fn crush_cause(c: CrushCause) -> RbCrushCause {
+    match c {
+        CrushCause::Impact => RbCrushCause::RB_CRUSH_IMPACT,
+        CrushCause::Blast => RbCrushCause::RB_CRUSH_BLAST,
+        CrushCause::Contact => RbCrushCause::RB_CRUSH_CONTACT,
+        CrushCause::Load => RbCrushCause::RB_CRUSH_LOAD,
+    }
 }
 
 /// A connected group of chunks of a destructible (one rigid actor).
@@ -403,7 +454,10 @@ impl RbActor {
 /// Something broke (`RbFrame::destruction`). Fields by `type_`:
 /// joint: `joint`, `force`, `torque`, `user_data`; mount: `vehicle`, `index`,
 /// `is_wheel`, `force`, `torque`; beam: `soft`, `index`, `force`; piece:
-/// `soft`, `nodes` / `node_count`, `mass`.
+/// `soft`, `nodes` / `node_count`, `mass`; bonds broken: `destructible`,
+/// `bonds` / `bond_count`, `break_cause`; chunk crushed: `destructible`, `index`,
+/// `mass`, `volume`, `transform`, `linear_velocity`, `angular_velocity`,
+/// `peak_pressure`, `peak_deviator`, `crush_cause`, `children` / `child_count`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct RbDestructionEvent {
@@ -430,6 +484,22 @@ pub struct RbDestructionEvent {
     pub assembly: u64,
     /// The connection's name (UTF-8, NUL-terminated).
     pub name: *const c_char,
+    /// `RB_BONDS_BROKEN`: what broke them.
+    pub break_cause: RbBreakCause,
+    /// `RB_CHUNK_CRUSHED`: what crushed it.
+    pub crush_cause: RbCrushCause,
+    /// `RB_CHUNK_CRUSHED`: its volume.
+    pub volume: f32,
+    /// `RB_CHUNK_CRUSHED`: its pose when crushed (its centre of mass, and the rotation its
+    /// render mesh had).
+    pub transform: RbTransform,
+    /// `RB_CHUNK_CRUSHED`: its velocity at its centre of mass, and its angular velocity.
+    pub linear_velocity: RbVec3,
+    pub angular_velocity: RbVec3,
+    /// `RB_CHUNK_CRUSHED`: the highest mean pressure (compression positive) and deviatoric
+    /// stress it met.
+    pub peak_pressure: f32,
+    pub peak_deviator: f32,
 }
 
 #[repr(C)]
@@ -931,6 +1001,14 @@ impl RbWorld {
                 child_count: 0,
                 assembly: 0,
                 name: std::ptr::null(),
+                break_cause: RbBreakCause::RB_BREAK_STRESS,
+                crush_cause: RbCrushCause::RB_CRUSH_IMPACT,
+                volume: 0.0,
+                transform: RbTransform::default(),
+                linear_velocity: RbVec3::default(),
+                angular_velocity: RbVec3::default(),
+                peak_pressure: 0.0,
+                peak_deviator: 0.0,
             };
             match e {
                 DestructionEvent::JointBroke {
@@ -984,9 +1062,11 @@ impl RbWorld {
                 DestructionEvent::BondsBroken {
                     destructible,
                     bonds,
+                    cause,
                 } => {
                     ev.type_ = RbDestructionType::RB_BONDS_BROKEN;
                     ev.destructible = destructible.to_bits();
+                    ev.break_cause = break_cause(*cause);
                     let list = bonds.clone();
                     ev.bonds = list.as_ptr();
                     ev.bond_count = list.len() as u32;
@@ -1015,6 +1095,54 @@ impl RbWorld {
                     };
                     ev.parent = actor(parent);
                     let kids: Vec<RbActor> = children.iter().map(&mut actor).collect();
+                    ev.children = kids.as_ptr();
+                    ev.child_count = kids.len() as u32;
+                    s.actor_lists.push(kids);
+                }
+                DestructionEvent::ChunkCrushed {
+                    destructible,
+                    chunk,
+                    mass,
+                    volume,
+                    pose,
+                    linear_velocity,
+                    angular_velocity,
+                    peak_pressure,
+                    peak_deviator,
+                    cause,
+                    fragments,
+                } => {
+                    ev.type_ = RbDestructionType::RB_CHUNK_CRUSHED;
+                    ev.destructible = destructible.to_bits();
+                    ev.index = *chunk;
+                    ev.mass = *mass;
+                    ev.crush_cause = crush_cause(*cause);
+                    ev.volume = coords.volume_out(*volume);
+                    ev.transform = t_out(*pose);
+                    ev.linear_velocity = RbVec3::of(coords.linear_out(*linear_velocity));
+                    ev.angular_velocity =
+                        RbVec3::of(coords.angular_velocity_out(*angular_velocity));
+                    ev.peak_pressure = coords.pressure_out(*peak_pressure);
+                    ev.peak_deviator = coords.pressure_out(*peak_deviator);
+                    // Each fragment a child: the chunk, its body, its share of the mass.
+                    let share = *mass / fragments.len().max(1) as f32;
+                    let kids: Vec<RbActor> = fragments
+                        .iter()
+                        .map(|f| {
+                            let chunks = vec![*chunk];
+                            let bodies = vec![f.to_bits()];
+                            let out = RbActor {
+                                chunks: chunks.as_ptr(),
+                                bodies: bodies.as_ptr(),
+                                chunk_count: 1,
+                                anchored: false,
+                                mass: share,
+                            };
+                            s.u32_lists.push(chunks);
+                            s.body_lists.push(bodies);
+                            out
+                        })
+                        .collect();
                     ev.children = kids.as_ptr();
                     ev.child_count = kids.len() as u32;
                     s.actor_lists.push(kids);
@@ -2399,7 +2527,128 @@ pub struct RbDestructibleDef {
     pub friction: f32,
     pub user_data: u64,
     pub model: RbStrengthModel,
+    /// `RB_STRENGTH_THRESHOLD` only: support loss. Each anchored piece's weight flows down its
+    /// intact bonds, and a bond carrying more than its compressive capacity breaks, so a
+    /// structure whose supports are shot away collapses. Off by default.
+    pub support_loss: bool,
+    /// With `support_loss`: the dynamic factor k, 1 to 2, on the increase of load after a
+    /// sudden loss of support (a bond is held to before + k (after - before)). 1 (the
+    /// default): quasi-static.
+    pub support_loss_dynamic_factor: f32,
+    /// `RB_STRENGTH_THRESHOLD` only: blasts (`rbWorld_Detonate`) load its exposed chunk
+    /// faces with their face pressures. Off by default.
+    pub blast_loading: bool,
+    /// `RB_STRENGTH_THRESHOLD` only: chunk crushing. Off by default.
+    pub crush: RbCrushDef,
     pub internal_value: u32,
+}
+
+/// What becomes of a crushed chunk's mass.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RbCrushMass {
+    /// Kept as `fragments` small rigid boxes carrying its mass and momentum, from
+    /// `budget` fragment bodies reserved at placement (a crush past them fails the step).
+    RB_CRUSH_CONSERVE = 0,
+    /// Removed (dust): the host draws it from `RB_CHUNK_CRUSHED`.
+    RB_CRUSH_REMOVE = 1,
+}
+
+/// A material's crush parameters, by the asset's stress material name (a pack's
+/// `materials[].crush` supplies them; these supply or replace them). SI units whatever
+/// the world's coordinates: they are material data, as asset packs carry it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RbCrushMaterial {
+    /// UTF-8, NUL-terminated.
+    pub name: *const c_char,
+    /// Hydrostatic cap (Pa), > 0.
+    pub cap_pressure: f64,
+    /// Drucker-Prager intercept (Pa), >= 0.
+    pub cohesion: f64,
+    /// dq/dp of the cone, >= 0.
+    pub friction_slope: f64,
+    /// Comminution energy (J/m^3), > 0.
+    pub crush_energy: f64,
+    /// Perzyna viscosity (Pa s), > 0.
+    pub crush_viscosity: f64,
+}
+
+/// Chunk crushing (`RbDestructibleDef::crush`; engine/docs/destruction-reactions.md).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RbCrushDef {
+    /// Off by default.
+    pub enabled: bool,
+    pub mass: RbCrushMass,
+    /// `RB_CRUSH_CONSERVE`: boxes per crushed chunk (a power of two up to 64; default 4),
+    /// and fragment bodies reserved (default 256).
+    pub fragments: u32,
+    pub budget: u32,
+    /// Crushes one step reports at most (0: 256); more fail the step.
+    pub max_per_step: u32,
+    /// Optional (null with count 0): crush parameters by material name.
+    pub materials: *const RbCrushMaterial,
+    pub material_count: u32,
+}
+
+impl Default for RbCrushDef {
+    fn default() -> Self {
+        let (fragments, budget) = match CrushMass::default() {
+            CrushMass::Conserve { fragments, budget } => (fragments, budget),
+            CrushMass::Remove => (0, 0),
+        };
+        Self {
+            enabled: false,
+            mass: RbCrushMass::RB_CRUSH_CONSERVE,
+            fragments,
+            budget,
+            max_per_step: 0,
+            materials: std::ptr::null(),
+            material_count: 0,
+        }
+    }
+}
+
+unsafe fn crush_in(c: &RbCrushDef) -> anyhow::Result<Option<Crush>> {
+    if !c.enabled {
+        return Ok(None);
+    }
+    if c.material_count > 0 && c.materials.is_null() {
+        return Err(invalid("crush materials: null with a nonzero count"));
+    }
+    let list: &[RbCrushMaterial] = if c.material_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(c.materials, c.material_count as usize)
+    };
+    let mut materials = Vec::with_capacity(list.len());
+    for m in list {
+        if m.name.is_null() {
+            return Err(invalid("crush material without a name"));
+        }
+        materials.push((
+            CStr::from_ptr(m.name).to_string_lossy().into_owned(),
+            CrushMaterial {
+                cap_pressure: m.cap_pressure,
+                cohesion: m.cohesion,
+                friction_slope: m.friction_slope,
+                crush_energy: m.crush_energy,
+                crush_viscosity: m.crush_viscosity,
+            },
+        ));
+    }
+    Ok(Some(Crush {
+        mass: match c.mass {
+            RbCrushMass::RB_CRUSH_CONSERVE => CrushMass::Conserve {
+                fragments: c.fragments,
+                budget: c.budget,
+            },
+            RbCrushMass::RB_CRUSH_REMOVE => CrushMass::Remove,
+        },
+        materials,
+        max_per_step: c.max_per_step,
+    }))
 }
 
 #[no_mangle]
@@ -2413,6 +2662,10 @@ pub extern "C" fn rbDefaultDestructibleDef() -> RbDestructibleDef {
         friction: SurfaceMaterial::default().friction,
         user_data: 0,
         model: RbStrengthModel::RB_STRENGTH_BONDS,
+        support_loss: false,
+        support_loss_dynamic_factor: 1.0,
+        blast_loading: false,
+        crush: RbCrushDef::default(),
         internal_value: COOKIE,
     }
 }
@@ -2449,6 +2702,10 @@ pub unsafe extern "C" fn rbCreateDestructible(
             },
             user_data: d.user_data,
             model: strength_model(d.model),
+            support_loss: d.support_loss,
+            support_loss_dynamic_factor: d.support_loss_dynamic_factor,
+            blast_loading: d.blast_loading,
+            crush: crush_in(&d.crush)?,
             ..base
         };
         let id = w.world.create_destructible(&def)?;
