@@ -1478,6 +1478,98 @@ the throttle weaving every 3 s; WebGPU, Chrome on an M-series Mac):
   check, 2.85× the transient volume against a 0.5–2× band, with identical
   numbers on main.
 
+### Live surface in `World` and the C ABI (2026-10-30)
+
+A native host (the C ABI, Unreal) used to see the ground jump from flat to the
+baked crater, with nothing in between and no ejecta. A car entering an open
+area fell to the lowered bed. The live surface, the debris and the wheel
+patches were run only by the web page's JavaScript (`terrain-host.mjs`). `World`
+now runs them from the same Rust plan (`engine_terrain::surface::SurfacePlan`)
+that the browser's `TerrainStep` uses.
+
+**`TerrainDef::surface`** (off by default; `TerrainSurfaceDef`: `cells`,
+`ejecta_fall`, `patch_samples` 128, `max_debris` 16384). With it, `World`:
+- runs the surface pass in its step's encoder, after the terrain substeps and
+  before the rigid step (`WgpuSim::terrain_encode_surface`). The patches carry
+  this frame's sand into the step that follows: unlike the bare-sim tests,
+  there's no frame of lag;
+- makes one patch per `max_regions` slot when the first area opens, at the
+  ground's sample spacing (a static body and heightfield shape, marked
+  `Owner::TerrainPatch`):
+  - the GPU writes their samples and poses, and `World` never rewrites them
+    (arena syncs upload only dirty records, and an arena grows by copying);
+  - a host edit of a patch fails by name, and destroying a patch body is refused;
+  - each surface pass bumps their generation, as the JS host does;
+- reports a contact or ray hit on a patch as the ground shape it stands in for
+  (the patch collider maps to the ground's `ShapeId`), so a host sees one
+  ground;
+- sinks the patches when the last area bakes (`SurfacePlan::retire`).
+
+**Debris gather** (`SurfacePlan::with_debris`; shared, so the browser can use
+it too). The debris list holds particle indices, and only the GPU knows the
+parcels' count. So two kernels write compact records, each a world position,
+volume, velocity and kind:
+- `terrain_surface_gather`, per listed particle;
+- `terrain_surface_gather_parcels`, per parcel in flight.
+
+A frame with more than `max_debris` fails naming "surface debris"; nothing is
+dropped.
+
+**Frames.**
+- `Frame` and `CoalescedFrame` carry:
+  - `terrain_surface`: each open area's slot, ground shape, window and
+    `ni × nj` heights in the field's local y;
+  - `terrain_debris`;
+  - `terrain_bakes`: an event per area that baked;
+  - `CoalescedFrame::terrain`: the counters, which `coalesce` used to drop.
+- One readback per step covers the open windows' heights (only the samples in
+  use; `SurfacePlan::readback` gives the layout) and the gather.
+- A bake's event comes with the frame whose readback refreshed the host's copy
+  of the field, so `shape_geometry` / `rbHeightField_GetHeights` already hold
+  the bake.
+
+**C ABI.**
+- `RbFrame` gains:
+  - `has_terrain` with `RbTerrainReport`;
+  - `terrain_surfaces` (`RbTerrainSurface`: shape, slot, the window as host
+    samples `a0, b0, count_a, count_b`, heights A fastest);
+  - `terrain_debris` (`RbTerrainDebris`);
+  - `terrain_bakes` (`RbTerrainBake`).
+- In Unreal mode, windows and heights convert like heightfields: window
+  [i0, j0, ni, nj] is host A [nz − j0 − nj, nz − j0) and B [i0, i0 + ni);
+  heights, positions, velocities and volumes are in cm.
+- New controls:
+  - `rbTerrain_CloseArea(slot)`;
+  - `rbTerrain_GetAreas` (box, cell, window, age);
+  - `rbTerrain_PredictImpact` and `rbTerrain_PredictExplosion`, which predict
+    without striking (`World::terrain_predict_*`).
+- `rbDefaultTerrainDef(coordinates)` gives the defaults in host units, like
+  `rbDefaultCharacterDef`.
+- `RbTerrainDef` gains `max_wheel_loads`, `max_columns`, `profile` (0 as
+  given, 1 the game preset) and the surface settings.
+- The live ground height at a point is the surface's sample there; there is no
+  separate call.
+
+**Validation:**
+
+| Test | Result |
+|---|---|
+| `engine-world` `terrain_surface` `frames_carry_the_live_surface_until_it_bakes_and_the_patch_follows_it` | The patch matches the newest frame's surface exactly (0 m). The last live surface is within 1.4 mm of the bake (the cell is 18.4 mm); up to 268 pieces of debris while it digs, none in the last frame. After the bake: patches at −10⁴ m, frames carry no surface, and a patch edit is refused. |
+| `a_frame_with_more_debris_than_the_limit_fails_by_name` | 183 pieces against 8 allowed: the poll fails naming "surface debris". |
+| `a_car_crosses_an_open_area_on_its_patch_and_leaves_a_rut` | A sedan at 0.3 throttle crosses a 4 × 6 m area: four wheels on the sand at once; lowest contact −7 mm (the bed is −1.2 m). Rut −2.7 mm against +0.7 mm clear of the tracks; volume unchanged to 4 × 10⁻⁷ m³. |
+| `engine-ffi` `terrain_abi` `unreal_frames_carry_the_live_surface_debris_and_the_bake` | Unreal (cm, Z up), a strike off centre on a 97 × 65 field. Every frame's surface is the area's window (a 42+25, b 14+29), equal to `rbTerrain_GetAreas`. The prediction equals the strike's. Debris lies round the strike in host axes. After the bake event, the host's copy holds the last live ground to 0.14 cm (the cell is 1.84 cm), with the deepest sample under the strike. |
+| `close_area_bakes_one_area_while_the_other_stays_open` | Two areas listed; closing one leaves the other open (with its age), a second close fails, and the next frame's bake event names the closed slot. |
+
+**Not done:**
+- The web page still sequences its own patches in JS (`terrain-host.mjs`):
+  creating them, bumping generations and retiring at the last bake. It doesn't
+  yet use `World`'s policy, but the plan, kernels and limits are the shared
+  Rust ones.
+- The outline's optional zero-copy export of the surface and debris onto the
+  host's Metal device (like `rbWorld_ExportPoses`) is not built.
+- `MetalSim` still lacks the surface pass. The C ABI's `World` runs on wgpu,
+  including on the host's Metal device, so this is not a blocker.
+
 ## The splat bake (2026-10-25)
 
 The user approved a bilinear splat for the bake and the parcels' deposits.

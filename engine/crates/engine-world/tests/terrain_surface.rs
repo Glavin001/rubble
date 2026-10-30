@@ -228,3 +228,143 @@ fn a_frame_with_more_debris_than_the_limit_fails_by_name() {
     eprintln!("{e}");
     assert!(e.contains("surface debris"), "{e}");
 }
+
+/// A car drives through an open area on its patch, through `World` alone
+/// (as `engine-webgpu`'s `terrain_wheels` drives one on a bare `WgpuSim`):
+/// its wheels ride the live sand, not the lowered bed; the sand carries
+/// their load; it leaves a rut whose volume is all still there after the
+/// bake.
+#[test]
+fn a_car_crosses_an_open_area_on_its_patch_and_leaves_a_rut() {
+    const DX: f32 = 0.15;
+    const NX: u32 = 55;
+    const NZ: u32 = 121;
+    let def = WorldDef {
+        capacity: WorldCapacity {
+            max_bodies: 4096,
+            max_colliders: 8192,
+            max_contacts: 32_768,
+            max_joints: 64,
+            max_candidates: 65_536,
+            max_colors: 32,
+            max_commands: 1024,
+            max_hull_vertices: 1024,
+        },
+        ..WorldDef::default()
+    };
+    let mut w = World::new(GpuContext::Default, &def).unwrap();
+    w.set_gravity([0.0, -G, 0.0]).unwrap();
+    let tdef = TerrainDef {
+        config: TerrainConfig {
+            max_particles: 1 << 18,
+            max_blocks: 1 << 12,
+            max_wheel_loads: 64,
+            max_regions: 1,
+            ..TerrainConfig::default()
+        }
+        .with_profile(TerrainProfile::Game),
+        // Held open for the test: it bakes when the car is through.
+        settle_frames: 1 << 20,
+        surface: Some(TerrainSurfaceDef {
+            patch_samples: 48,
+            max_debris: 0,
+            ..TerrainSurfaceDef::default()
+        }),
+        ..TerrainDef::default()
+    };
+    w.enable_terrain(&tdef).unwrap();
+    let g = w.create_body(&BodyDef::default()).unwrap();
+    let field = HeightField::new(NX, NZ, DX, DX, vec![0.0; (NX * NZ) as usize]).unwrap();
+    let ground = w
+        .create_height_field_shape(g, &ShapeDef::default(), &field, Transform::IDENTITY)
+        .unwrap();
+    w.terrain_open(ground, [-2.0, -1.2, -3.0], [2.0, 0.6, 3.0], DX)
+        .unwrap();
+    let bed = -1.2;
+    let car = w
+        .add_vehicle(
+            &engine_vehicle::presets::sedan(),
+            [0.0, 0.8, -5.5],
+            [0.0, 0.0, 0.0, 1.0],
+        )
+        .unwrap();
+    let mut most_wheels = 0;
+    let mut lowest_wheel = f32::INFINITY;
+    let mut tracks: Vec<[f32; 2]> = Vec::new();
+    let mut crossed = false;
+    for k in 0..1200 {
+        if k == 60 {
+            w.set_vehicle_input(
+                car,
+                VehicleInput {
+                    forward: 0.3,
+                    ..VehicleInput::default()
+                },
+            );
+        }
+        w.step().unwrap();
+        for f in w.poll().unwrap() {
+            if let Some(r) = f.terrain {
+                most_wheels = most_wheels.max(r.wheels);
+            }
+            for v in &f.vehicles {
+                for wh in &v.state.wheels {
+                    let [x, y, z] = wh.contact_point;
+                    if wh.in_contact && z.abs() < 2.4 && x.abs() < 1.8 {
+                        tracks.push([x, z]);
+                        lowest_wheel = lowest_wheel.min(y);
+                    }
+                }
+                crossed |= v.state.wheels.iter().all(|wh| wh.contact_point[2] > 3.6);
+            }
+        }
+        if crossed {
+            break;
+        }
+    }
+    assert!(crossed, "the car crossed the area");
+    eprintln!(
+        "wheels on the sand at once: {most_wheels}; lowest contact {lowest_wheel:.4} m (bed {bed} m); \
+         {} track samples",
+        tracks.len()
+    );
+    assert_eq!(most_wheels, 4, "all four wheels pressed the sand");
+    assert!(
+        lowest_wheel > -0.3,
+        "the wheels rode the sand, not the bed at {bed} m"
+    );
+    w.terrain_close().unwrap();
+    w.step().unwrap();
+    w.poll_blocking().unwrap();
+    let after = mirror(&w, ground);
+    let sample = |x: f32, z: f32| {
+        let i = (x / DX + (NX - 1) as f32 / 2.0).round() as u32;
+        let j = (z / DX + (NZ - 1) as f32 / 2.0).round() as u32;
+        (j * NX + i) as usize
+    };
+    let rut: Vec<f32> = tracks.iter().map(|t| after[sample(t[0], t[1])]).collect();
+    let mean_rut = rut.iter().sum::<f32>() / rut.len() as f32;
+    let mut clear = Vec::new();
+    for j in 0..NZ {
+        for i in 0..NX {
+            let (x, z) = (
+                (i as f32 - (NX - 1) as f32 / 2.0) * DX,
+                (j as f32 - (NZ - 1) as f32 / 2.0) * DX,
+            );
+            if x.abs() < 1.8 && z.abs() < 2.4 && tracks.iter().all(|t| (t[0] - x).abs() > 0.45) {
+                clear.push(after[(j * NX + i) as usize]);
+            }
+        }
+    }
+    let mean_clear = clear.iter().sum::<f32>() / clear.len() as f32;
+    let volume: f64 = after.iter().map(|&y| f64::from(y)).sum::<f64>() * f64::from(DX * DX);
+    eprintln!("rut under the tracks {mean_rut:.4} m, clear of them {mean_clear:.4} m; volume change {volume:.2e} m³");
+    assert!(
+        mean_rut < mean_clear - 0.002,
+        "a rut: {mean_rut} vs {mean_clear}"
+    );
+    assert!(
+        volume.abs() < 1.0e-4 * (4.0 * 6.0 * 1.2),
+        "the rut's volume stays: {volume}"
+    );
+}

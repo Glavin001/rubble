@@ -614,7 +614,8 @@ mod tests {
             u64::from(ni * nj * layers)
         );
         assert_eq!(threads(&ops, "terrain_surface_resolve"), u64::from(ni * nj));
-        // The header names the views, the debris list and the ejecta speed.
+        // The header names the views, the debris list, the ejecta speed and
+        // the debris gather (off: no records).
         assert_eq!(ops.writes[0].binding, SURFACE_BINDING);
         assert_eq!(
             ops.writes[0].words,
@@ -624,7 +625,9 @@ mod tests {
                 0,
                 0,
                 s.debris_base(),
-                (2.0 * 9.81 * p.origin[3]).sqrt().to_bits()
+                (2.0 * 9.81 * p.origin[3]).sqrt().to_bits(),
+                s.gather_base(),
+                0
             ]
         );
         // The view: open on the absorbing ground, its sections and window.
