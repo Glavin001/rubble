@@ -2011,12 +2011,20 @@ impl World {
                     });
                 }
                 Pending::Mapped { step, slot } => {
+                    let timing = std::env::var("RUBBLE_WORLD_TIMING").is_ok().then(std::time::Instant::now);
                     if !self.readback.ready(self.sim.device(), slot, wait)? {
                         break;
                     }
+                    if let Some(t) = timing {
+                        eprintln!("world frame {step}: wait {:.2} ms", t.elapsed().as_secs_f64() * 1e3);
+                    }
                     self.readback.pending.pop_front();
+                    let timing = timing.map(|_| std::time::Instant::now());
                     let raw = self.readback.take(slot);
                     frames.push(self.frame(step, raw)?);
+                    if let Some(t) = timing {
+                        eprintln!("world frame {step}: build {:.2} ms", t.elapsed().as_secs_f64() * 1e3);
+                    }
                 }
             }
         }
