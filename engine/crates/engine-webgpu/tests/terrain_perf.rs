@@ -317,6 +317,189 @@ fn demo_event(set: &Settings) {
     );
 }
 
+/// The showcase's barrage (`showcase.html`, scene `drive`): its 1 m stony
+/// meteor at 20 km/s into dry sand, `STRIKES` (11) of them opened `EVERY` s
+/// apart (1.6) in areas of their own `SPACING` m apart (150) on one field,
+/// none baked, stepped at `HZ` (120) for `UNTIL` s (21.5) on the showcase's
+/// clock; each frame's GPU time. `CPR` (6), `MARGIN` (1.0), `GAME=1` the game
+/// profile's settings. With `RUBBLE_TERRAIN_TIMING=1` each submission prints
+/// its kernels' times (each kernel timed in a pass of its own). Run alone:
+///
+/// `RUBBLE_TERRAIN_GPU_MS=1 cargo test --release -p engine-webgpu --test
+/// terrain_perf barrage -- --ignored --nocapture`
+#[test]
+#[ignore = "benchmark: run alone, release"]
+fn barrage_frame_cost() {
+    use engine_terrain::plan::source_peak_speed;
+    let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<f64>().ok());
+    let mut cfg = TerrainConfig {
+        max_regions: 16,
+        max_particles: 1 << 20,
+        max_blocks: 8192,
+        max_parcels: 1 << 17,
+        max_substeps: 1024,
+        max_columns: 1 << 16,
+        max_field_samples: 1 << 19,
+        max_coupled: 256,
+        ..TerrainConfig::default()
+    };
+    if env("GAME") == Some(1.0) {
+        cfg = cfg.with_profile(engine_terrain::TerrainProfile::Game);
+    }
+    cfg.cells_per_radius = env("CPR").unwrap_or(6.0) as f32;
+    let margin = env("MARGIN").unwrap_or(1.0);
+    let strikes = env("STRIKES").unwrap_or(11.0) as u32;
+    let every = env("EVERY").unwrap_or(1.6) as f32;
+    let spacing = env("SPACING").unwrap_or(150.0) as f32;
+    let hz = env("HZ").unwrap_or(120.0) as f32;
+    let until = env("UNTIL").unwrap_or(21.5) as f32;
+    let frame = 1.0 / hz;
+    let sand = SandMaterial::default();
+    let mut s = WgpuSim::new(WorldCapacity {
+        max_bodies: 64,
+        max_colliders: 64,
+        max_contacts: 4096,
+        max_joints: 16,
+        max_candidates: 8192,
+        max_colors: 32,
+        max_commands: 64,
+        max_hull_vertices: 64,
+    })
+    .unwrap();
+    s.terrain_enable(&cfg).unwrap();
+    s.terrain_set_material(Some(&sand)).unwrap();
+    let src = ImpactSource {
+        impactor_radius: 1.0,
+        impactor_density: 3000.0,
+        velocity: DVec3::new(0.0, -20000.0, 0.0),
+        target: CraterTarget::sand(&sand).unwrap(),
+    };
+    let g = f64::from(G);
+    let crater = src.crater(g).unwrap();
+    let model = src.field(g, point_source_z(src.target.ejecta.mu)).unwrap();
+    let r = crater.radius as f32;
+    let dx = crater.asked_cell(&cfg);
+    let span = (strikes.max(1) - 1) as f32 * spacing;
+    let nx = 2 * ((0.5 * span + 3.0 * r) / dx).ceil() as u32 + 1;
+    let nz = 2 * (3.0 * r / dx).ceil() as u32 + 1;
+    let field = HeightField::new(nx, nz, dx, dx, vec![0.0; (nx * nz) as usize]).unwrap();
+    let mut arena = HullArena::new();
+    let (_, collider) = s
+        .add_height_field(&mut arena, &field, Vec3::ZERO, Quat::IDENTITY, 0)
+        .unwrap();
+    let peak = source_peak_speed(&model);
+    let (mut t, mut speed, mut next, mut opened) = (0.0f32, 0.0f32, 0.0f32, 0u32);
+    let mut frames: Vec<(f32, u32, f64, u32, bool)> = Vec::new();
+    let wall = std::time::Instant::now();
+    while t < until {
+        let mut strike = false;
+        if opened < strikes && t >= next {
+            let at = Vec3::new(-0.5 * span + opened as f32 * spacing, 0.0, 0.0);
+            let cell = s.terrain_plan_ref().unwrap().event_cell(dx).unwrap();
+            let plan = crater.region_with_cell(&cfg, at, margin, cell).unwrap();
+            let o = s
+                .terrain_open_area(
+                    &plan,
+                    collider,
+                    &field,
+                    Vec3::ZERO,
+                    sand.density,
+                    sand.friction_angle.tan(),
+                )
+                .unwrap();
+            s.terrain_apply_source_to(o.area, &model, at).unwrap();
+            speed = speed.max(peak);
+            opened += 1;
+            next += every;
+            strike = true;
+        }
+        let (k, dt) = substeps_for(
+            &cfg,
+            frame,
+            dx,
+            sand.p_wave_speed(),
+            cfg.speed_growth * speed + 20.0 + G * frame,
+        )
+        .unwrap();
+        let w = std::time::Instant::now();
+        let rep = s.terrain_step(k, dt, -G).unwrap();
+        let ms = s
+            .terrain_last_gpu_ms()
+            .unwrap_or_else(|| w.elapsed().as_secs_f64() * 1e3);
+        frames.push((t, k, ms, rep.particles, strike));
+        speed = rep.max_speed;
+        t += frame;
+    }
+    let pct = |v: &mut Vec<f64>, p: f64| {
+        v.sort_by(f64::total_cmp);
+        v[((v.len() - 1) as f64 * p) as usize]
+    };
+    let mut all: Vec<f64> = frames.iter().map(|f| f.2).collect();
+    let mut steady: Vec<f64> = frames.iter().filter(|f| !f.4).map(|f| f.2).collect();
+    let worst = frames.iter().fold((0.0, 0.0, 0, 0), |a, f| {
+        if f.2 > a.1 {
+            (f.0, f.2, f.1, f.3)
+        } else {
+            a
+        }
+    });
+    eprintln!(
+        "barrage: {strikes} strikes every {every} s, {} profile, cpr {}, margin {margin}, dx {dx:.2} m, {hz} Hz, {} frames in {:.0} s wall; {} particles at the end",
+        if env("GAME") == Some(1.0) { "game" } else { "physical" },
+        cfg.cells_per_radius,
+        frames.len(),
+        wall.elapsed().as_secs_f64(),
+        frames.last().map_or(0, |f| f.3),
+    );
+    eprintln!(
+        "  all frames: median {:.2} ms, p95 {:.2}, worst {:.2} ms (t {:.2} s, {} substeps, {} particles); non-strike: median {:.2}, p95 {:.2}, worst {:.2}",
+        pct(&mut all, 0.5),
+        pct(&mut all, 0.95),
+        worst.1,
+        worst.0,
+        worst.2,
+        worst.3,
+        pct(&mut steady, 0.5),
+        pct(&mut steady, 0.95),
+        pct(&mut steady, 1.0),
+    );
+    for f in frames.iter().filter(|f| f.4) {
+        eprintln!(
+            "  strike at {:5.2} s: {:3} substeps, {:6.2} ms, {} particles",
+            f.0, f.1, f.2, f.3
+        );
+    }
+    let mut sec = 0u32;
+    while (sec as f32) < until {
+        let mut v: Vec<f64> = frames
+            .iter()
+            .filter(|f| !f.4 && f.0 >= sec as f32 && f.0 < sec as f32 + 1.0)
+            .map(|f| f.2)
+            .collect();
+        if !v.is_empty() {
+            let p = frames
+                .iter()
+                .filter(|f| f.0 < sec as f32 + 1.0)
+                .map(|f| f.3)
+                .max()
+                .unwrap_or(0);
+            let k = frames
+                .iter()
+                .filter(|f| !f.4 && f.0 >= sec as f32 && f.0 < sec as f32 + 1.0)
+                .map(|f| f.1)
+                .max()
+                .unwrap_or(0);
+            eprintln!(
+                "  {sec:2}-{:2} s: {p:7} particles, ≤{k} substeps, median {:.2} ms, max {:.2}",
+                sec + 1,
+                pct(&mut v, 0.5),
+                pct(&mut v, 1.0)
+            );
+        }
+        sec += 1;
+    }
+}
+
 /// Steps a sand block on a device of its own for `seconds` of wall time.
 fn warm_gpu(seconds: f64) {
     use engine_terrain::layout::MpmParticle;

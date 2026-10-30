@@ -2091,6 +2091,98 @@ the same to the digits shown):
   `terrain_materials`, `mpm_material`, `heightfield`, `vehicle_soil`;
   engine-world `terrain`; engine-terrain; `terrain_plan.test.mjs`).
 
+### The barrage's cost (2026-10-29, measured alone)
+
+The showcase recordings that day gave the drive scene's terrain pass
+7.14 ms (v4) and 2.36 ms (v5) median against 1.57 ms that morning. Other GPU
+jobs ran during both. Measured again with nothing else on the GPU:
+
+**No commit regressed the cost.** Chrome, 1280×720, rendered, the earlier
+three-strike schedule (`scene=drive1`), at 103k particles:
+
+| Build | Terrain median | Strike frames (15 substeps) |
+|---|---|---|
+| c69092aa (before several areas, wheels, parcel landing) | 1.44 ms | 8.52, 10.42 ms |
+| 8077fdda | 1.51 ms | 8.52, 10.88 ms |
+
+The +0.07 ms (5%) is the several-area surface views and the wheel loads.
+v4's 7.14 ms was contention.
+
+**The barrage costs more because it holds more sand open.** Chrome,
+8077fdda, `scene=drive` (11 strikes):
+
+| | Median | p95 | Worst |
+|---|---|---|---|
+| Terrain pass (GPU) | 2.43 ms | 4.85 ms | 35.4 ms (a strike frame, 16 substeps) |
+| Surface pass | 0.79 ms | 1.38 ms | — |
+| Render | 1.64 ms | 2.49 ms | 5.9 ms |
+| Frame, an area open (wall) | 8.5 ms | 15.3 ms | 51.5 ms |
+
+- The strikes overlap along the road and grow one area. That area never
+  bakes:
+  - its sand still moves at 0.5–1.5 m/s between strikes (settled is
+    0.16 m/s);
+  - the coupled car drives through it at about 43 m/s, and a moving body
+    holds its area open (the buried-body rule, `RegionClock::report`).
+- So the open sand grows with each strike: 52k particles at 2 s, 335k by
+  17 s. The steady frame grows with it, from 1.05 to 3.6 ms, about
+  5.4 ns per particle-substep.
+- A strike frame takes 15 substeps (the physical profile's Courant 0.3 and
+  speed growth 1.5 on the source's peak speed) over all of that sand.
+  That makes the worst frames 10–35 ms.
+- Non-strike frames spike to 3–4× in pairs about every 0.15 s. Every
+  kernel inflates at once, the trivial ones too (`mpm_couple_clear` 0.009 →
+  0.60 ms natively). The spikes are there at c69092aa as well: the GPU
+  clocking or being shared, not terrain work.
+
+**Native (Metal, `terrain_perf` `barrage_frame_cost`).** The showcase's
+meteor, 11 strikes 1.6 s apart in areas of their own, none baked (no car,
+so nothing couples):
+
+| Profile | Particles at the end | Non-strike median | p95 | Strike frame | Worst |
+|---|---|---|---|---|---|
+| physical (the showcase's) | 552k | 5.08 ms (2 substeps) | 6.0 ms | 15 substeps: 5.4 ms (44k) to 38 ms (552k) | 38.1 ms |
+| game (`GAME=1`) | 342k | 1.43 ms (1–2 substeps) | 3.4 ms | 7 substeps: 3.2 ms (62k) to 12 ms (342k) | 12.0 ms |
+
+Kernel shares in a steady frame (`RUBBLE_TERRAIN_TIMING=1`, about 300k
+particles):
+
+| Kernel | Share |
+|---|---|
+| `mpm_p2g` | 31% |
+| `mpm_g2p` | 29% |
+| `mpm_payload` (stress, SVD) | 13% |
+| `mpm_touch` | 11% |
+| count, scan, scatter, cell sort | 8% |
+| `mpm_grid` | 3% |
+
+- Native is about 4.6 ns per particle-substep, close to Chrome's 5.4.
+- The pipeline was already lean: `mpm_write_args` is fused into
+  `mpm_clear`, the hash insert reads before its CAS, and the payload copies
+  each particle once a substep. I found no work to skip whose result could
+  not differ.
+
+**What it would take to reach 2 ms at the worst frame.** None is lossless,
+so none is adopted:
+- **The game profile for the showcase** (`?profile=game`, added for this
+  measurement):
+  - In Chrome: terrain median 1.77 ms, p95 3.41, worst 17.4 ms;
+    208k particles at most.
+  - But the car ends the run stuck at 0.8 km/h. The schedule's rims were
+    placed for the physical profile's craters, so it needs re-placing too.
+- **Settling under a moving car:** bake an area's quiet sand while a body
+  drives over it, rather than holding the whole area open. A change to the
+  buried-body rule.
+- **Each area on its own clock:** a quiet area would take its own Courant
+  substeps, not the struck area's 15.
+  - The barrage gains nothing from it, since its strikes all land in the
+    one merged area.
+  - Separate areas gain the most: the native bench's last strike frame
+    would step 44k particles 15 times and 508k once or twice, not 552k
+    15 times.
+- **Block sleep** (planned behind a flag since the design): blocks at rest
+  skip their substeps until something reaches them.
+
 ## Native backends (2026-10-25)
 
 The terrain plan on native Metal (`engine-metal`'s `MetalSim`), its Metal-only
