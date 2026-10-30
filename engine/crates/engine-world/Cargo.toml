@@ -11,6 +11,7 @@ name = "rubble"
 [dependencies]
 engine-schema.workspace = true
 engine-webgpu.workspace = true
+engine-terrain.workspace = true
 engine-vehicle.workspace = true
 engine-softbody.workspace = true
 engine-fracture.workspace = true

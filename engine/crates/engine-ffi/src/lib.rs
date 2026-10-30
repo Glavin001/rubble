@@ -20,6 +20,8 @@
 
 mod controls;
 pub use controls::*;
+mod terrain;
+pub use terrain::*;
 pub mod coords;
 mod motion;
 pub use motion::*;
@@ -1925,6 +1927,176 @@ pub unsafe extern "C" fn rbCreateHullShape(
             hull,
             transform: w.transform_in(local),
         })
+    })
+}
+
+/// Host-ordered heightfield samples (`count_a` along the host's first ground
+/// axis, fastest; `count_b` along its second) as Rubble's grid. Rubble
+/// coordinates: A = +X, B = +Z, unchanged. Unreal: A = +X, B = +Y, which are
+/// Rubble -Z and +X, so the grid is transposed and its A order reversed (exact:
+/// no resampling).
+struct HostGrid {
+    count_a: u32,
+    count_b: u32,
+}
+
+impl HostGrid {
+    /// Rubble sample (i, j) of host sample (a, b).
+    fn to_rubble(&self, unreal: bool, a: u32, b: u32) -> (u32, u32) {
+        if unreal {
+            (b, self.count_a - 1 - a)
+        } else {
+            (a, b)
+        }
+    }
+    fn rubble_size(&self, unreal: bool) -> (u32, u32) {
+        if unreal {
+            (self.count_b, self.count_a)
+        } else {
+            (self.count_a, self.count_b)
+        }
+    }
+}
+
+/// Terrain on a static body: `heights` (`count_a × count_b`, A fastest) on
+/// cells `cell_a × cell_b`, centred on `local`. A and B are the host's ground
+/// axes (Rubble coordinates: +X, +Z; Unreal: +X, +Y) and heights run along
+/// its up axis.
+#[no_mangle]
+pub unsafe extern "C" fn rbCreateHeightFieldShape(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    def: *const RbShapeDef,
+    count_a: u32,
+    count_b: u32,
+    cell_a: f32,
+    cell_b: f32,
+    heights: *const f32,
+    local: RbTransform,
+    out: *mut RbShapeId,
+) -> RbResult {
+    create_shape(world, body, def, out, |w| {
+        if heights.is_null() {
+            return Err(invalid("null heightfield samples"));
+        }
+        let n = count_a as usize * count_b as usize;
+        let host = std::slice::from_raw_parts(heights, n);
+        let grid = HostGrid { count_a, count_b };
+        let unreal = w.coords.unreal();
+        let (nx, nz) = grid.rubble_size(unreal);
+        let (dx, dz) = if unreal {
+            (cell_b, cell_a)
+        } else {
+            (cell_a, cell_b)
+        };
+        let mut samples = vec![0.0; n];
+        for b in 0..count_b {
+            for a in 0..count_a {
+                let (i, j) = grid.to_rubble(unreal, a, b);
+                samples[(j * nx + i) as usize] =
+                    w.coords.length_in(host[(b * count_a + a) as usize]);
+            }
+        }
+        let field = HeightField::new(
+            nx,
+            nz,
+            w.coords.length_in(dx),
+            w.coords.length_in(dz),
+            samples,
+        )
+        .map_err(|e| anyhow::anyhow!("heightfield: {e}"))?;
+        Ok(Geometry::HeightField {
+            field,
+            transform: w.transform_in(local),
+        })
+    })
+}
+
+/// Overwrite heightfield samples `[a0, a0 + width_a) × [b0, b0 + width_b)`
+/// (host order, A fastest). Bodies asleep over the edit are woken.
+#[no_mangle]
+pub unsafe extern "C" fn rbHeightField_SetRegion(
+    world: *mut RbWorld,
+    shape: RbShapeId,
+    a0: u32,
+    b0: u32,
+    width_a: u32,
+    width_b: u32,
+    values: *const f32,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let id = ShapeId::from_bits(shape);
+        let Geometry::HeightField { field, .. } = w.world.shape_geometry(id)? else {
+            return Err(invalid("not a heightfield shape"));
+        };
+        if values.is_null() {
+            return Err(invalid("null heightfield samples"));
+        }
+        let unreal = w.coords.unreal();
+        let (nx, nz) = field.samples();
+        let count_a = if unreal { nz } else { nx };
+        let count_b = if unreal { nx } else { nz };
+        if a0.saturating_add(width_a) > count_a || b0.saturating_add(width_b) > count_b {
+            return Err(invalid("heightfield region outside the field"));
+        }
+        let grid = HostGrid { count_a, count_b };
+        let host = std::slice::from_raw_parts(values, width_a as usize * width_b as usize);
+        // The region in Rubble's grid: its corner and size.
+        let (ia, ja) = grid.to_rubble(unreal, a0, b0);
+        let (ib, jb) = grid.to_rubble(unreal, a0 + width_a.max(1) - 1, b0 + width_b.max(1) - 1);
+        let (i0, j0) = (ia.min(ib), ja.min(jb));
+        let (rw, rd) = if unreal {
+            (width_b, width_a)
+        } else {
+            (width_a, width_b)
+        };
+        let mut region = vec![0.0; host.len()];
+        for b in 0..width_b {
+            for a in 0..width_a {
+                let (i, j) = grid.to_rubble(unreal, a0 + a, b0 + b);
+                region[((j - j0) * rw + (i - i0)) as usize] =
+                    w.coords.length_in(host[(b * width_a + a) as usize]);
+            }
+        }
+        w.world.set_height_field_region(id, i0, j0, rw, rd, &region)
+    })
+}
+
+/// Bekker soil for vehicle ruts (deformable terrain T5). `k_c` (N/m^(n+1))
+/// and `k_phi` (N/m^(n+2)) are SI whatever the host's units; `max_sinkage`
+/// is in the host's length unit (a wheel sinking deeper fails the step).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RbSoil {
+    pub k_c: f32,
+    pub k_phi: f32,
+    pub n: f32,
+    pub max_sinkage: f32,
+}
+
+/// Give a heightfield a soil (`soil` non-null) or take it away (null). Wheels
+/// on it sink to the rigid-wheel depth of their load, press ruts and pay
+/// compaction resistance. The field is placed again from the host's samples,
+/// so earlier ruts are not kept.
+#[no_mangle]
+pub unsafe extern "C" fn rbHeightField_SetSoil(
+    world: *mut RbWorld,
+    shape: RbShapeId,
+    soil: *const RbSoil,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let soil = match soil.as_ref() {
+            None => None,
+            Some(s) => Some(
+                Soil::new(s.k_c, s.k_phi, s.n, w.coords.length_in(s.max_sinkage)).map_err(|e| {
+                    anyhow::anyhow!("soil: {e}").context(InvalidArgumentMarker("soil"))
+                })?,
+            ),
+        };
+        w.world
+            .set_height_field_soil(ShapeId::from_bits(shape), soil)
     })
 }
 
