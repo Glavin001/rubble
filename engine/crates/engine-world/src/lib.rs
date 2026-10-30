@@ -1899,11 +1899,22 @@ impl World {
         }
         // A split's new pieces are drawable in the frame that reports the split: each
         // starts at its parent's origin (the instance frame, carried by the parent's
-        // motion), so its first pose is the parent's this step.
+        // motion), so its first pose is the parent's this step. A parent crushed this frame
+        // (its chunk kept the body) is parked: its origin as the split left it. A parent
+        // with no frame-reported pose has not moved since it was made (an anchored piece is
+        // static): its origin is where it was made.
+        #[cfg(feature = "stress")]
+        let crushed = std::mem::take(&mut self.fracture.crushed_origins);
+        #[cfg(not(feature = "stress"))]
+        let crushed: Vec<(u32, Transform)> = Vec::new();
         for (child, parent) in adopted {
-            let Some(transform) = self.bodies[parent as usize].last_transform else {
-                continue;
-            };
+            let p = &self.bodies[parent as usize];
+            let transform = crushed
+                .iter()
+                .find(|c| c.0 == parent)
+                .map(|c| c.1)
+                .or(p.last_transform)
+                .unwrap_or(p.origin);
             let slot = &mut self.bodies[child as usize];
             slot.last_transform = Some(transform);
             moves.push(BodyMoveEvent {

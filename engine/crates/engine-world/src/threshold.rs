@@ -485,6 +485,10 @@ mod imp {
         /// The plan hints the lab fixes (`set_plan_hints`): the contact capacity, every
         /// colour its own dispatch.
         pub fixed_plan: Option<(u32, u32)>,
+        /// This frame's crushed bodies and their origins as the split left them (before
+        /// parking): a crushed chunk that kept its parent's body leaves no record of where
+        /// the parent was, and the split's other pieces start there (`World::frame`).
+        pub crushed_origins: Vec<(u32, Transform)>,
     }
 
     impl Fracture {
@@ -1346,6 +1350,8 @@ mod imp {
             reads: &[(FractureRead, &[u8])],
         ) -> anyhow::Result<Vec<DestructionEvent>> {
             let mut out = Vec::new();
+            // This frame's (a blast's crushes before the step report no adoption).
+            self.fracture.crushed_origins.clear();
             for k in 0..self.fracture.slots.len() {
                 let find = |want: fn(u32) -> FractureRead| {
                     reads
@@ -1694,6 +1700,7 @@ mod imp {
                 let solver = Transform::new(e.position, e.orientation);
                 let origin = self.bodies[b].frame().to_origin(solver);
                 let pose = Transform::new(e.position, origin.rotation);
+                self.fracture.crushed_origins.push((b as u32, origin));
                 let slot = &mut self.bodies[b];
                 slot.alive = false;
                 slot.generation = slot.generation.wrapping_add(1).max(1);

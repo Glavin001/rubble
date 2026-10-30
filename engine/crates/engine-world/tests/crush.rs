@@ -814,3 +814,151 @@ fn eight_storage_buffers_child() {
         "{err}"
     );
 }
+
+/// Two blocks of the crush wall, bonded front to back, the struck (front) one chunk 0:
+/// crushed, it is alone after the split and, the lower of two equal pieces, keeps the
+/// body; the back block is the split's new piece.
+fn two_blocks_json() -> serde_json::Value {
+    let mut json = crush_wall_json();
+    let sc = &mut json["scenario"];
+    let nodes = sc["nodes"].as_array().unwrap().clone();
+    let at = |x: f64, y: f64, z: f64| {
+        nodes
+            .iter()
+            .position(|n| {
+                let c = &n["centroid"];
+                (c["x"].as_f64().unwrap() - x).abs() < 1e-6
+                    && (c["y"].as_f64().unwrap() - y).abs() < 1e-6
+                    && (c["z"].as_f64().unwrap() - z).abs() < 1e-6
+            })
+            .expect("a wall block")
+    };
+    let keep = [at(0.2, 1.8, 0.2), at(-0.2, 1.8, 0.2)];
+    for key in ["nodes", "nodeTypes", "nodeSizes", "nodeColliders"] {
+        if let Some(a) = sc[key].as_array() {
+            let a: Vec<serde_json::Value> = keep.iter().map(|&i| a[i].clone()).collect();
+            sc[key] = a.into();
+        }
+    }
+    let bonds: Vec<serde_json::Value> = sc["bonds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|b| {
+            let (a, c) = (b["node0"].as_u64()? as usize, b["node1"].as_u64()? as usize);
+            let (a, c) = (
+                keep.iter().position(|&k| k == a)?,
+                keep.iter().position(|&k| k == c)?,
+            );
+            let mut b = b.clone();
+            b["node0"] = a.into();
+            b["node1"] = c.into();
+            Some(b)
+        })
+        .collect();
+    assert_eq!(bonds.len(), 1);
+    sc["bonds"] = bonds.into();
+    json
+}
+
+/// A crushed chunk that keeps its parent's body (the parent parked with it): the split's
+/// other piece is still posed in the frame that reports the split, at the parent's origin
+/// as the split left it.
+#[test]
+fn a_crushed_parents_split_poses_its_other_piece() {
+    let asset = asset_of(&two_blocks_json());
+    let mut w = world_for(&asset, 0, false, false);
+    let offset = asset
+        .stress
+        .as_ref()
+        .unwrap()
+        .placement()
+        .map(|x| -x as f32);
+    // The bond far stronger than the strike: only the crush breaks it.
+    let a = w.create_destructible_asset(&asset).unwrap();
+    let id = w
+        .create_destructible(&DestructibleDef {
+            model: StrengthModel::Threshold,
+            transform: Transform::new(offset, [0.0, 0.0, 0.0, 1.0]),
+            asleep: false,
+            strength_scale: 1e6,
+            crush: Some(Crush {
+                mass: CrushMass::Remove,
+                ..Crush::default()
+            }),
+            ..DestructibleDef::new(a)
+        })
+        .unwrap();
+    let p0 = Vec3::from(asset.chunks[0].pose.position) + Vec3::from(offset);
+    let p1 = Vec3::from(asset.chunks[1].pose.position) + Vec3::from(offset);
+    assert!(p0.x > p1.x, "chunk 0 is the front block");
+    let parent = w.destructible_chunk_body(id, 0).unwrap();
+    assert_eq!(w.destructible_chunk_body(id, 1).unwrap(), parent);
+    // The ball from +x at chunk 0 (as `shoot`, aimed at the block), fast enough that the
+    // energy the free pair takes from it crushes the block (the reduced mass's, ~1 MJ, over
+    // the block's ~0.26 MJ).
+    let ball = shoot(&mut w, 100.0, 4800.0);
+    w.body_set_transform(
+        ball,
+        Transform::new(
+            (p0 + Vec3::new(3.8, 0.0, 0.0)).to_array(),
+            [0.0, 0.0, 0.0, 1.0],
+        ),
+    )
+    .unwrap();
+    let mut posed = None;
+    for _ in 0..20 {
+        let f = w.step_sync().unwrap();
+        let crushed: Vec<u32> = crushes(&f)
+            .iter()
+            .filter_map(|e| match e {
+                DestructionEvent::ChunkCrushed { chunk, .. } => Some(*chunk),
+                _ => None,
+            })
+            .collect();
+        for e in &f.destruction_events {
+            let DestructionEvent::Split {
+                parent: p,
+                children,
+                ..
+            } = e
+            else {
+                continue;
+            };
+            assert_eq!(
+                crushed,
+                vec![0],
+                "the front block is crushed in the split's frame"
+            );
+            assert_eq!(
+                p.bodies[0].index(),
+                parent.index(),
+                "the crushed chunk keeps the body"
+            );
+            assert_eq!(children.len(), 1, "the back block is the split's one piece");
+            let child = children[0].bodies[0];
+            assert_ne!(child.index(), parent.index());
+            let m = f
+                .body_events
+                .moves
+                .iter()
+                .find(|m| m.body == child)
+                .expect("the new piece is posed in the split's frame");
+            // At rest before the strike: the parent's origin is still the instance frame.
+            let d = Vec3::from(m.transform.position) - Vec3::from(offset);
+            assert!(
+                d.length() < 1e-3,
+                "the piece starts at its parent's origin: {:?}",
+                m.transform
+            );
+            posed = Some(child);
+        }
+        if posed.is_some() {
+            break;
+        }
+    }
+    assert!(
+        posed.is_some(),
+        "the strike crushes the front block and splits off the back"
+    );
+}

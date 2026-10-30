@@ -30,6 +30,10 @@ struct Run {
     id: DestructibleId,
     asset: DestructibleAssetDesc,
     broken: usize,
+    /// Split children (on a body other than their parent's) and those of them with no
+    /// pose in the frame reporting the split.
+    children: usize,
+    unposed: Vec<(u64, BodyId)>,
     /// The ground plane's height (world frame).
     ground: f32,
     /// The top chunk's body transform after every frame.
@@ -129,6 +133,7 @@ fn run_polling(
             .unwrap();
     }
     let mut broken = 0;
+    let (mut children, mut unposed) = (0, Vec::new());
     let mut trace = Vec::new();
     for n in 0..frames {
         if std::env::var("SL_DEBUG").is_ok() && n % 10 == 0 {
@@ -154,6 +159,20 @@ fn run_polling(
                 if let DestructionEvent::BondsBroken { bonds, .. } = e {
                     broken += bonds.len();
                 }
+                if let DestructionEvent::Split {
+                    parent,
+                    children: kids,
+                    ..
+                } = e
+                {
+                    for c in kids.iter().filter(|c| c.bodies[0] != parent.bodies[0]) {
+                        children += 1;
+                        let b = c.bodies[0];
+                        if !fr.body_events.moves.iter().any(|m| m.body == b) {
+                            unposed.push((fr.step, b));
+                        }
+                    }
+                }
             }
         }
         let st = w
@@ -169,6 +188,8 @@ fn run_polling(
         id,
         asset,
         broken,
+        children,
+        unposed,
         ground: h,
         trace,
     }
@@ -666,4 +687,15 @@ fn support_loss_with_steps_in_flight_splits_and_counts_every_break() {
             "the slab's weight breaks the columns left (waiting every {wait_every} steps)"
         );
     }
+}
+
+/// A split of an anchored (static) piece, whose body never reports a pose: its new pieces
+/// are posed in the frame that reports the split (at the parent's origin, where it was
+/// made), as a moving parent's are.
+#[test]
+fn an_anchored_pieces_split_poses_its_children_in_the_split_frame() {
+    let f = slab_row(1.2);
+    let r = run(&f, false, 1.0, &[0], 30);
+    assert!(r.children > 0, "the shot splits the shot column off the anchored frame");
+    assert!(r.unposed.is_empty(), "children with no pose in their split's frame: {:?}", r.unposed);
 }
