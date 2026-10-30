@@ -166,11 +166,12 @@ So memory and work scale with *broken* elements, not with all elements.
 - Variety comes from many prototypes and buildings, seeded pattern choice and
   render palettes. A strength-changing material is a different prototype.
 
-**One open question for you:** whether an intact element collides with its
-pattern's chunk hulls (proposed, identical to today) or with its single original
-shape. The single shape is the exact union of the chunks, so it would also remove
-the seam edges. It does change contact results, so it is not proposed unless you
-choose it.
+**Decided (2026-10-30): an intact element collides as its pattern's chunk
+hulls,** exactly as today, with per-chunk contacts and loads.
+
+- Collapsing an intact element into its single original shape was considered
+  and rejected. It changes where contact points land and so where bonds break.
+- Do not change this behaviour.
 
 ### 4. Threshold destruction tracks destruction
 
