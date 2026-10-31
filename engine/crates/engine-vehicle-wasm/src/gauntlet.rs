@@ -33,6 +33,9 @@ pub const SPAWN: [f32; 3] = [-2.5, 3.5, -25.0];
 const BLAST_RADIUS: f32 = 1.6;
 const BLAST_SPEED: f32 = 7.5;
 
+/// A blasted block's launch: block index, velocity and spin.
+pub type BlockLaunch = (u32, [f32; 3], [f32; 3]);
+
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct Block {
     pub p: [f32; 3],
@@ -55,14 +58,29 @@ pub struct Layout {
     pub parked: Vec<Parked>,
 }
 
+/// Parked cars at the kerbs (x, z, yaw).
+pub const PARKED: [(f32, f32, f32); 6] = [
+    (-5.6, 22.0, 0.0),
+    (5.6, 48.0, std::f32::consts::PI),
+    (-5.6, 75.0, 0.0),
+    (5.6, 96.0, std::f32::consts::PI),
+    (-5.6, 128.0, 0.0),
+    (5.6, 140.0, std::f32::consts::PI),
+];
+
 /// The street: facade blocks in running bond, cores and parked cars.
 pub fn layout() -> Layout {
+    layout_of(&SPANS, &PARKED)
+}
+
+/// A street of buildings over `spans` with cars parked at `parked`.
+pub fn layout_of(spans: &[(f32, f32)], parked: &[(f32, f32, f32)]) -> Layout {
     let [hx, hy, hz] = BLOCK_HALF;
     let mut blocks = Vec::new();
     let mut cores = Vec::new();
     for side in [-1.0f32, 1.0] {
         let x = side * (STREET_HALF + hx);
-        for (z0, z1) in SPANS {
+        for &(z0, z1) in spans {
             for row in 0..ROWS {
                 // Odd rows shift half a block and hold one fewer.
                 let shift = if row % 2 == 1 { hz } else { 0.0 };
@@ -91,23 +109,17 @@ pub fn layout() -> Layout {
             });
         }
     }
-    let parked = [
-        (-5.6, 22.0, 0.0),
-        (5.6, 48.0, std::f32::consts::PI),
-        (-5.6, 75.0, 0.0),
-        (5.6, 96.0, std::f32::consts::PI),
-        (-5.6, 128.0, 0.0),
-        (5.6, 140.0, std::f32::consts::PI),
-    ]
-    .map(|(x, z, yaw)| Parked {
-        p: [x, 2.2, z],
-        yaw,
-    });
     Layout {
         spawn: SPAWN,
         blocks,
         cores,
-        parked: parked.to_vec(),
+        parked: parked
+            .iter()
+            .map(|&(x, z, yaw)| Parked {
+                p: [x, 2.2, z],
+                yaw,
+            })
+            .collect(),
     }
 }
 
@@ -187,7 +199,7 @@ pub fn settings(strength: u32) -> GuidanceSettings {
     }
 }
 
-fn hash(mut x: u32) -> f32 {
+pub(crate) fn hash(mut x: u32) -> f32 {
     x = x.wrapping_mul(747796405).wrapping_add(2891336453);
     x = ((x >> ((x >> 28) + 4)) ^ x).wrapping_mul(277803737);
     ((x >> 22) ^ x) as f32 / u32::MAX as f32
@@ -198,18 +210,31 @@ fn hash(mut x: u32) -> f32 {
 #[wasm_bindgen]
 pub struct Gauntlet {
     layout: Layout,
+    spans: Vec<(f32, f32)>,
     spent: Vec<bool>,
     shots: u32,
 }
 
 impl Gauntlet {
+    /// A street over `spans` with cars parked at `parked` (`layout_of`).
+    pub fn of(spans: &[(f32, f32)], parked: &[(f32, f32, f32)]) -> Gauntlet {
+        let layout = layout_of(spans, parked);
+        let n = layout.blocks.len();
+        Gauntlet {
+            layout,
+            spans: spans.to_vec(),
+            spent: vec![false; n],
+            shots: 0,
+        }
+    }
+
+    pub fn street(&self) -> &Layout {
+        &self.layout
+    }
+
     /// Blast `k` aimed ahead of a car at `car` (x, z) moving at `vz` along the
     /// street: its centre and per-block launches `(block, velocity, spin)`.
-    pub fn blast_at(
-        &mut self,
-        car: [f32; 2],
-        vz: f32,
-    ) -> ([f32; 3], Vec<(u32, [f32; 3], [f32; 3])>) {
+    pub fn blast_at(&mut self, car: [f32; 2], vz: f32) -> ([f32; 3], Vec<BlockLaunch>) {
         let k = self.shots;
         self.shots += 1;
         // Alternate sides, at a seeded height; aim where the car will be when
@@ -222,13 +247,31 @@ impl Gauntlet {
         let flight = (lift + (lift * lift + 2.0 * 9.81 * y).sqrt()) / 9.81;
         let want = car[1] + vz.max(0.0) * flight + 8.0 * (hash(k * 3 + 1) - 0.5);
         // On the nearest facade span.
-        let z = SPANS
+        let z = self
+            .spans
             .iter()
             .map(|&(a, b)| want.clamp(a + 2.0, b - 2.0))
             .min_by(|a, b| (a - want).abs().total_cmp(&(b - want).abs()))
             .unwrap();
-        let x = side * STREET_HALF;
-        let centre = [x, y, z];
+        let centre = [side * STREET_HALF, y, z];
+        (
+            centre,
+            self.blast_patch(centre, k, BLAST_RADIUS, BLAST_SPEED),
+        )
+    }
+
+    /// Throw the facade blocks within `radius` of `centre` (on a facade's
+    /// street face) into the street, the fastest at `speed`; `k` seeds the
+    /// spread. A block already thrown stays out.
+    pub fn blast_patch(
+        &mut self,
+        centre: [f32; 3],
+        k: u32,
+        radius: f32,
+        speed: f32,
+    ) -> Vec<BlockLaunch> {
+        let [x, y, z] = centre;
+        let side = x.signum();
         let toward_street = [-side, 0.0, 0.0];
         let mut out = Vec::new();
         for (i, b) in self.layout.blocks.iter().enumerate() {
@@ -237,7 +280,7 @@ impl Gauntlet {
             }
             let d = [b.p[0] - x, b.p[1] - y, b.p[2] - z];
             let r = (d[1] * d[1] + d[2] * d[2]).sqrt();
-            if r > BLAST_RADIUS {
+            if r > radius {
                 continue;
             }
             self.spent[i] = true;
@@ -255,14 +298,14 @@ impl Gauntlet {
             ];
             let l = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
             dir.iter_mut().for_each(|c| *c /= l);
-            let speed = BLAST_SPEED * (1.0 - r / BLAST_RADIUS).sqrt().max(0.35) * (0.8 + 0.4 * n);
+            let speed = speed * (1.0 - r / radius).sqrt().max(0.35) * (0.8 + 0.4 * n);
             let v = dir.map(|c| c * speed);
             // A slow tumble (up to ¼ turn a second), so neighbours from the
             // same patch fly apart instead of knocking into each other.
             let w = [0, 1, 2].map(|a| 3.0 * (hash(i as u32 * 3 + a + 7) - 0.5));
             out.push((i as u32, v, w));
         }
-        (centre, out)
+        out
     }
 }
 
@@ -270,13 +313,7 @@ impl Gauntlet {
 impl Gauntlet {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Gauntlet {
-        let layout = layout();
-        let n = layout.blocks.len();
-        Gauntlet {
-            layout,
-            spent: vec![false; n],
-            shots: 0,
-        }
+        Gauntlet::of(&SPANS, &PARKED)
     }
 
     /// The street (`Layout` JSON).

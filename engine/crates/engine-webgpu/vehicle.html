@@ -33,6 +33,26 @@
     .part.lost span { opacity: 0.4; text-decoration: line-through; }
     kbd { background: #252c3d; border: 1px solid #3a4360; border-radius: 3px; padding: 0 4px; font-size: 11px; }
     @media (max-width: 700px) { #parts { display: none; } #dash { width: 11rem; } }
+    /* scene=run: the score, health and progress, the call-outs and the cards */
+    /* Top right, clear of the sky ahead where the meteors come in. */
+    #game { position: fixed; right: 12px; top: 12px; width: min(20rem, calc(100vw - 24px)); text-align: right; pointer-events: none; font-variant-numeric: tabular-nums; text-shadow: 0 1px 3px #000; }
+    @media (max-width: 700px) { #game { top: auto; bottom: 150px; } }
+    #game .score { font-size: 32px; font-weight: 800; line-height: 1.1; letter-spacing: 0.02em; }
+    #game .meter { height: 9px; background: rgba(40, 26, 26, 0.85); border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 5px; overflow: hidden; margin: 5px auto 0; }
+    #hp { height: 100%; width: 100%; background: linear-gradient(90deg, #ff4d3d, #ffb04f 45%, #5fd36a); transition: width 0.25s; }
+    #prog { height: 100%; width: 0; background: linear-gradient(90deg, #6fa8ff, #c7dcff); }
+    #gInfo { margin-top: 4px; font-size: 12px; color: #d6dbe6; }
+    #toasts { position: fixed; left: 50%; top: 30%; transform: translateX(-50%); pointer-events: none; text-align: center; }
+    .toast { font-weight: 850; font-size: 22px; letter-spacing: 0.04em; text-shadow: 0 2px 8px #000; animation: toast 1.2s ease-out forwards; white-space: nowrap; }
+    .toast.good { color: #ffd84f; } .toast.big { color: #ff9a3c; font-size: 30px; } .toast.bad { color: #ff5a4a; }
+    @keyframes toast { from { opacity: 1; transform: translateY(0) scale(1.2); } to { opacity: 0; transform: translateY(-50px) scale(1); } }
+    #card { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; }
+    #card[hidden], #game[hidden] { display: none; }
+    #card > div { background: rgba(16, 10, 9, 0.84); border: 1px solid #7a412c; border-radius: 14px; padding: 20px 28px; text-align: center; max-width: min(30rem, calc(100vw - 40px)); line-height: 1.5; }
+    #card h2 { margin: 0 0 6px; font-size: 30px; color: #ff9a5a; letter-spacing: 0.06em; }
+    #card table { margin: 8px auto 0; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    #card td { padding: 1px 10px; text-align: right; } #card td:first-child { text-align: left; color: #b9a49a; }
+    body.run #parts { display: none; }
   </style>
 </head>
 <body>
@@ -63,6 +83,14 @@
     <div class="row" style="justify-content: space-between"><strong>Parts &amp; wheels</strong><span class="muted">sever / disable</span></div>
     <div id="partList"></div>
   </div>
+  <div id="game" hidden>
+    <div class="score" id="gScore">0</div>
+    <div class="meter" title="Health"><div id="hp"></div></div>
+    <div class="meter" style="height: 5px" title="Distance to the finish"><div id="prog"></div></div>
+    <div id="gInfo"></div>
+  </div>
+  <div id="toasts"></div>
+  <div id="card" hidden><div id="cardBody"></div></div>
   <div id="dash" class="panel">
     <span id="gear">N</span>
     <div id="speed">0 <small>km/h</small></div>
@@ -72,7 +100,7 @@
   </div>
   <script type="module">
     import { createWorld, sceneCapacity, colliderWords } from './world-host.mjs';
-    import { L, M, WHEEL_RIM_MATERIAL, bitsf, centerOfMass, Gauntlet, MeteorRange } from './vehicle.mjs';
+    import { L, M, WHEEL_RIM_MATERIAL, bitsf, centerOfMass, Gauntlet, MeteorRange, MeteorRun } from './vehicle.mjs';
     import { createBuggyRenderer, BUGGY_SHADE_WGSL } from './buggy-render.mjs';
     import { duneBuggySoft, calibratedSettings } from './soft.mjs';
 
@@ -97,12 +125,13 @@
       vibeland: 'vibe-land garage: all seven, jumps, walls, cannon',
       gauntlet: 'Gauntlet: drive a shelled street (directed debris)',
       meteors: 'Meteor range: steered vs unsteered lanes (directed debris)',
+      run: 'Meteor gauntlet: the game (meteors + directed debris)',
     };
     const scene = qs.get('scene') || 'playground';
     if (!SCENES[scene]) throw new Error(`unknown scene ${scene}`);
     const presets = await (await fetch('./generated/vehicle_presets.json', { cache: 'no-store' })).json();
     const byName = Object.fromEntries(presets.map((p) => [p.name, p]));
-    const presetName = qs.get('preset') || (scene === 'destruction' ? 'destructible_sedan' : scene === 'carry' || scene === 'gauntlet' ? 'monster_truck' : scene === 'tanklab' ? 'tank' : scene === 'buggies' || scene === 'vibeland' ? 'dune_buggy' : 'sedan');
+    const presetName = qs.get('preset') || (scene === 'destruction' ? 'destructible_sedan' : scene === 'carry' || scene === 'gauntlet' || scene === 'run' ? 'monster_truck' : scene === 'tanklab' ? 'tank' : scene === 'buggies' || scene === 'vibeland' ? 'dune_buggy' : 'sedan');
     if (!byName[presetName]) throw new Error(`unknown preset ${presetName}; have ${Object.keys(byName).join(', ')}`);
     // ?tracks=shells: the tank as it was before track pods (wheel shells, belly 1 m up),
     // for side-by-side comparisons.
@@ -168,7 +197,7 @@
 
     // ---------------------------------------------------------------- scene
     const nTraffic = scene === 'traffic' ? Math.max(1, Math.min(60, Number(qs.get('vehicles')) || 48)) : 0;
-    const est = scene === 'traffic' ? 4000 + nTraffic * 40 : scene === 'gauntlet' ? 9000 : 6000;
+    const est = scene === 'traffic' ? 4000 + nTraffic * 40 : scene === 'gauntlet' ? 9000 : scene === 'run' ? 15000 : 6000;
     const cap = sceneCapacity(est, est * 2);
     const vehicleCap = { maxVehicles: 64, maxWheels: 1024, maxCurvePoints: 8192, maxDiffs: 256, maxAntiRolls: 256, maxParts: 512, maxRays: 64 };
     // ?build=hybrid (buggies scene): node-beam frames with bolted parts on joints
@@ -177,7 +206,7 @@
     const SOFT_HZ = 240;
     const STEPS_PER_FRAME = hybrid ? Math.round(SOFT_HZ / 60) : 1;
     if (hybrid) cap.maxJoints = 1024;
-    const world = await createWorld(device, { cap, vehicleCap, ...(hybrid ? { softCap: {} } : {}), ...(scene === 'gauntlet' || scene === 'meteors' ? { guidance: {} } : {}), status: (s) => { statusEl.textContent = s; } });
+    const world = await createWorld(device, { cap, vehicleCap, ...(hybrid ? { softCap: {} } : {}), ...(scene === 'gauntlet' || scene === 'meteors' || scene === 'run' ? { guidance: {} } : {}), status: (s) => { statusEl.textContent = s; } });
     // The bridge needs 20 iterations to converge its bending within a fast crossing
     // (tests/vehicle.rs BRIDGE_ITERATIONS).
     world.params.iterations = scene === 'bridge' ? 20 : 8;
@@ -193,6 +222,8 @@
     const MAT_GROUND = 0, MAT_PROP = 1, MAT_ICE = 2;
     // Meteor range colours (the renderer keys static bodies on these).
     const MAT_PAD = 4, MAT_HIT = 5, MAT_MISS = 6;
+    // Meteor gauntlet: meteors, their trails (drawn along the velocity) and the finish gate.
+    const MAT_METEOR = 10, MAT_TRAIL = 11, MAT_FINISH = 12;
     world.setMaterial(MAT_GROUND, 1.0);
     world.setMaterial(MAT_PROP, 0.6);
     world.setMaterial(MAT_ICE, 0.08);
@@ -266,6 +297,11 @@
     // Gauntlet: the street's shelling state and its facade blocks (bodies first..first+count).
     const street = scene === 'gauntlet' ? new Gauntlet() : null;
     const range = scene === 'meteors';
+    // Meteor gauntlet: the run (engine-vehicle-wasm run.rs: the street, the
+    // meteor director, judging and score) and its meteors (bodies first..first+count).
+    const run = scene === 'run' ? new MeteorRun() : null;
+    const rocks = { first: 0, count: 0, radius: 1, mass: 1 };
+    if (run) document.body.classList.add('run');
     const blocks = { first: 0, count: 0, parked: [] };
     // Meteor range: launched meteors and their touchdown markers.
     const meteors = { pads: [], moving: qs.get('targets') === 'moving', routes: qs.get('routes') !== '0', first: 0, count: 36, markerFirst: 0, markers: 60, next: 0, nextMarker: 0, volley: 0, flying: [], landed: [], score: [[0, 0], [0, 0]] };
@@ -374,6 +410,32 @@
       blocks.count = g.blocks.length;
       blocks.layout = g.blocks;
       for (const c of g.parked) blocks.parked.push(addVehicle('sedan', c.p, c.yaw, { forward: 0, steer: 0, handbrake: 1 }));
+    } else if (scene === 'run') {
+      // engine-vehicle-wasm run.rs: the Gauntlet's street, twice as long, its
+      // facades blasted by the meteors that hit them.
+      const g = JSON.parse(run.layout());
+      addVehicle(presetName, g.spawn, 0);
+      for (const c of g.cores) staticBox(c.p, c.half);
+      blocks.first = world.bodyCount;
+      for (const b of g.blocks) {
+        const body = world.addBody({ p: b.p, flags: 0 });
+        const c = world.addCollider({ body, shape: 2, material: MAT_PROP, params: [...b.half, Math.hypot(...b.half)] });
+        world.colliderInfo[c].dynamic = true; // a launched block sizes the grid cell
+      }
+      blocks.count = g.blocks.length;
+      blocks.layout = g.blocks;
+      for (const c of g.parked) blocks.parked.push(addVehicle('sedan', c.p, c.yaw, { forward: 0, steer: 0, handbrake: 1 }));
+      // The finish gate: posts at the kerbs and a banner across, high over the road.
+      for (const x of [-7.4, 7.4]) staticBox([x, 4, g.finish], [0.3, 4, 0.3], [0, 0, 0, 1], MAT_FINISH);
+      staticBox([0, 8.4, g.finish], [7.7, 0.5, 0.15], [0, 0, 0, 1], MAT_FINISH);
+      // Parked meteors (static until launched), each with its trail (collides with nothing).
+      Object.assign(rocks, { first: world.bodyCount, count: g.meteor.count, radius: g.meteor.radius, mass: g.meteor.mass });
+      for (let i = 0; i < rocks.count; i++) {
+        const body = world.addBody({ p: [-3000 - i * 4, -3000, -1000], flags: 0 });
+        const c = world.addCollider({ body, shape: 0, material: MAT_METEOR, params: [rocks.radius, 0, 0, rocks.radius] });
+        world.colliderInfo[c].dynamic = true;
+        world.addColliderWords(colliderWords({ body, shape: 2, material: MAT_TRAIL, generation: 0x8000, localPos: [0, 0, 0], density: 0, localRot: [0, 0, 0, 1], params: [0.8 * rocks.radius, 0.8 * rocks.radius, 0.5, rocks.radius] }));
+      }
     } else if (scene !== 'traffic') {
       // Two-way coupling labs: each mirrors a test in tests/vehicle.rs.
       const MAT_SKID = 3;
@@ -499,7 +561,8 @@
     // ---------------------------------------------------------------- directed debris (gauntlet)
     const guideOn = document.getElementById('guideOn'), guideStrength = document.getElementById('guideStrength');
     const shellOn = document.getElementById('shellOn'), guideStatsEl = document.getElementById('guideStats');
-    if (street || range) {
+    if (street || range || run) {
+      if (run) { document.getElementById('shellLabel').textContent = 'Meteors'; document.getElementById('shellKey').textContent = '· G directed debris'; }
       if (range) {
         document.getElementById('shellLabel').textContent = 'Volleys'; document.getElementById('shellKey').textContent = 'volley now';
         const mv = document.getElementById('movingOn');
@@ -536,9 +599,9 @@
         world.setGuidance(JSON.parse(Gauntlet.settings(Number(guideStrength.value), guideOn.checked)), zones);
         return;
       }
-      if (!street) return;
+      if (!street && !run) return;
       const chassis = world.vehicles.chassisBody(vehicles[0].h);
-      const zones = JSON.parse(street.zones(chassis, chassisRest || 0.8, Uint32Array.from(blocks.parked.map((h) => world.vehicles.chassisBody(h)))));
+      const zones = JSON.parse((run || street).zones(chassis, chassisRest || 0.8, Uint32Array.from(blocks.parked.map((h) => world.vehicles.chassisBody(h)))));
       guideZoneCount = zones.length;
       world.setGuidance(JSON.parse(Gauntlet.settings(Number(guideStrength.value), guideOn.checked)), zones);
       if (rearm) world.setGuided(blocks.first, blocks.count, 1);
@@ -621,21 +684,142 @@
         encode(enc);
       };
     }
+    // A static facade block becomes dynamic at its launch velocity and spin.
+    function launchBlock(i, v, w) {
+      const b = blocks.layout[i], body = blocks.first + i;
+      const words = new Uint32Array(world.bodyWords.buffer, body * 112, 28).slice();
+      const f = new Float32Array(words.buffer);
+      f[3] = 1 / b.mass; f.set(boxInv(b.mass, ...b.half), 8); words[11] = 1 | 8;
+      f.set(v, 12); f[15] = 0; f.set(w, 16); words[19] = world.steps;
+      world.backend.writeBody(body, words);
+    }
     function fireShell() {
       if (range) return fireVolley();
       if (!street || !lastChassis) return;
       lastShell = world.steps;
       const out = street.blast(lastChassis.p[0], lastChassis.p[2], lastChassis.v[2]);
-      for (let k = 0, o = 4; k < out[3]; k++, o += 7) {
-        // The static block becomes dynamic at its launch velocity and spin.
-        const b = blocks.layout[out[o]], body = blocks.first + out[o];
+      for (let k = 0, o = 4; k < out[3]; k++, o += 7) launchBlock(out[o], out.subarray(o + 1, o + 4), out.subarray(o + 4, o + 7));
+      return { centre: [out[0], out[1], out[2]], blocks: out[3] };
+    }
+    // ---------------------------------------------------------------- meteor gauntlet (run.rs)
+    // Carry out the director's commands for this step: launch meteors (steered
+    // by their tags), blast the facades they are about to hit, park spent ones.
+    function runTick() {
+      if (!run || !lastChassis || !shellOn.checked) return;
+      const c = lastChassis;
+      const out = run.tick(world.steps * world.params.dt, world.params.dt, Float32Array.from([...c.p, ...c.v]), world.params.gravityY);
+      let o = 0;
+      for (let k = 0, n = out[o++]; k < n; k++, o += 8) {
+        const body = rocks.first + out[o], m = rocks.mass, inv = 2.5 / (m * rocks.radius * rocks.radius);
         const words = new Uint32Array(world.bodyWords.buffer, body * 112, 28).slice();
         const f = new Float32Array(words.buffer);
-        f[3] = 1 / b.mass; f.set(boxInv(b.mass, ...b.half), 8); words[11] = 1 | 8;
-        f.set(out.subarray(o + 1, o + 4), 12); f[15] = 0; f.set(out.subarray(o + 4, o + 7), 16); words[19] = world.steps;
+        f.set(out.subarray(o + 1, o + 4), 0); f[3] = 1 / m; f.set([0, 0, 0, 1], 4); f.set([inv, inv, inv], 8); words[11] = 1 | 8 | M.BODY_CCD;
+        f.set(out.subarray(o + 4, o + 7), 12); f[15] = 0; f.set([0, 0, 0], 16); words[19] = world.steps;
         world.backend.writeBody(body, words);
+        world.setGuided(body, 1, out[o + 7]);
       }
-      return { centre: [out[0], out[1], out[2]], blocks: out[3] };
+      for (let k = 0, n = out[o++]; k < n; k++) {
+        const blocksHit = out[o + 3];
+        o += 4;
+        for (let j = 0; j < blocksHit; j++, o += 7) launchBlock(out[o], out.subarray(o + 1, o + 4), out.subarray(o + 4, o + 7));
+      }
+      for (let k = 0, n = out[o++]; k < n; k++) {
+        const body = rocks.first + out[o++];
+        world.backend.writeBody(body, initialWords(body));
+      }
+    }
+    // Read back what the run watches (and the car, from the same state) and judge it.
+    async function judgeRun() {
+      const w = run.watched();
+      const chassis = world.vehicles.chassisBody(player);
+      const ids = [];
+      for (let k = 0; k < w.length; k += 2) ids.push(w[k] ? rocks.first + w[k + 1] : blocks.first + w[k + 1]);
+      // Nearby bodies in one read each.
+      const order = ids.map((b, i) => [b, i]).sort((a, b) => a[0] - b[0]);
+      const groups = [];
+      for (let s = 0; s < order.length;) {
+        let e = s;
+        while (e + 1 < order.length && order[e + 1][0] - order[e][0] < 128) e++;
+        groups.push(order.slice(s, e + 1));
+        s = e + 1;
+      }
+      const t = world.steps * world.params.dt;
+      const recs = new Float32Array(ids.length * 8);
+      const [carRec] = await Promise.all([
+        world.readBodies(chassis, 1),
+        ...groups.map(async (g) => {
+          const first = g[0][0];
+          const f = new Float32Array((await world.readBodies(first, g[g.length - 1][0] - first + 1)).buffer);
+          for (const [b, i] of g) {
+            const o = (b - first) * 28;
+            recs.set([w[2 * i], w[2 * i + 1], f[o], f[o + 1], f[o + 2], f[o + 12], f[o + 13], f[o + 14]], i * 8);
+          }
+        }),
+      ]);
+      const cf = new Float32Array(carRec.buffer);
+      const events = run.judge(t, Float32Array.from([cf[0], cf[1], cf[2], cf[4], cf[5], cf[6], cf[7], cf[12], cf[13], cf[14]]), recs);
+      for (let k = 0; k < events.length; k += 6) {
+        callOut(events[k]);
+        runLog?.push({ t: Math.round(t * 100) / 100, event: events[k], meteor: events[k + 1] === 1, index: events[k + 2], at: [...events.subarray(k + 3, k + 6)].map((x) => Math.round(x * 10) / 10), car: [cf[0], cf[1], cf[2]].map((x) => Math.round(x * 10) / 10) });
+      }
+      runHud(t, cf[2]);
+    }
+    const gScore = document.getElementById('gScore'), hpEl = document.getElementById('hp'), progEl = document.getElementById('prog');
+    const gInfo = document.getElementById('gInfo'), toastsEl = document.getElementById('toasts');
+    const cardEl = document.getElementById('card'), cardBody = document.getElementById('cardBody');
+    let runLog = null; // __runTake's event log
+    // Call-outs: one per kind, counting up a burst for up to 0.9 s, then a new one.
+    const CALLOUTS = { 1: ['NEAR MISS', 25, 'good'], 2: ['HIT', 0, 'bad'], 3: ['CLOSE CALL', 150, 'big'], 4: ['METEOR HIT', -35, 'bad'] };
+    const callOuts = new Map(); // code -> {el, n, born}
+    function callOut(code) {
+      const [text, points, cls] = CALLOUTS[code] || ['?', 0, 'good'];
+      const now = performance.now();
+      let c = callOuts.get(code);
+      if (!c || now - c.born > 900 || !c.el.isConnected) {
+        const el = document.createElement('div');
+        el.className = `toast ${cls}`;
+        el.addEventListener('animationend', () => el.remove());
+        toastsEl.append(el);
+        c = { el, n: 0, born: now };
+        callOuts.set(code, c);
+      }
+      c.n += 1;
+      const sum = points * c.n;
+      c.el.textContent = `${text}${c.n > 1 ? ` ×${c.n}` : ''}${sum > 0 ? ` +${sum}` : sum < 0 ? ` −${-sum}` : ''}`;
+      // Restart its rise.
+      c.el.style.animation = 'none';
+      void c.el.offsetWidth;
+      c.el.style.animation = '';
+      while (toastsEl.childElementCount > 4) toastsEl.firstChild.remove();
+    }
+    let runCardKey = '';
+    function runHud(t, carZ) {
+      const st = JSON.parse(run.status(t, carZ));
+      gScore.textContent = (st.state === 'finished' ? st.total : st.score).toLocaleString();
+      hpEl.style.width = `${st.health}%`;
+      progEl.style.width = `${Math.min(100, (100 * st.distance) / st.finish)}%`;
+      gInfo.textContent = `${st.near} near misses · ${st.close} close calls · ${st.hits + st.meteorHits} hits · ${st.elapsed.toFixed(1)} s`
+        + ` · directed debris ${guideOn.checked ? 'ON' : 'OFF'} (G)`;
+      const key = `${st.state}:${guideOn.checked}`;
+      if (key === runCardKey) return;
+      runCardKey = key;
+      const steer = guideOn.checked
+        ? 'Directed debris is <b>on</b>: the blasts\' masonry and the falling meteors are nudged to land around you, not on you.'
+        : 'Directed debris is <b>off</b>: everything flies where the blasts throw it.';
+      const rows = (r) => `<table>${r.map(([a, b]) => `<tr><td>${a}</td><td>${b}</td></tr>`).join('')}</table>`;
+      cardEl.hidden = st.state === 'running';
+      if (st.state === 'ready') {
+        cardBody.innerHTML = `<h2>METEOR GAUNTLET</h2>Drive to the end of the street through a meteor shower.<br>Near misses score; hits cost health.<br><br>`
+          + `<kbd>W</kbd> to go · <kbd>A</kbd><kbd>D</kbd> steer · <kbd>S</kbd> brake · <kbd>G</kbd> directed debris · <kbd>R</kbd> restart<br><br><span class="muted">${steer}</span>`;
+      } else if (st.state === 'wrecked') {
+        cardBody.innerHTML = `<h2>WRECKED</h2>${rows([['Distance', `${st.distance.toFixed(0)} / ${st.finish.toFixed(0)} m`], ['Near misses', st.near], ['Close calls', st.close], ['Score', st.score]])}<br>Press <kbd>R</kbd> to drive again`;
+      } else if (st.state === 'finished') {
+        cardBody.innerHTML = `<h2>MADE IT</h2>${rows([['Near misses', `${st.near} × 25`], ['Close calls', `${st.close} × 150`], ['Health left', `+${st.healthBonus}`], [`Time ${st.elapsed.toFixed(1)} s`, `+${st.timeBonus}`], ['<b>Total</b>', `<b>${st.total.toLocaleString()}</b>`]])}<br>Press <kbd>R</kbd> to drive again · <kbd>G</kbd> to try it with directed debris ${guideOn.checked ? 'off' : 'on'}`;
+      }
+    }
+    if (run) {
+      document.getElementById('game').hidden = false;
+      runHud(0, -25);
     }
     let guideBusy = false, guideStatsStep = -1;
     function pollGuide() {
@@ -650,7 +834,12 @@
         }).catch(fail);
         return;
       }
-      if (street && !chassisRest && world.steps > 90 && lastChassis) {
+      if (run && !guideBusy && lastChassis && world.steps - guideStatsStep >= 4) {
+        guideStatsStep = world.steps;
+        guideBusy = true;
+        judgeRun().then(() => { guideBusy = false; }).catch(fail);
+      }
+      if ((street || run) && !chassisRest && world.steps > 90 && lastChassis) {
         chassisRest = lastChassis.p[1];
         applyGuidance(false);
       }
@@ -699,6 +888,22 @@ struct Out { @builtin(position) clip: vec4f, @location(0) n: vec3f, @location(1)
   let b = bodies[col.body];
   var o: Out;
   o.r = 0.0; o.m = corner;
+  // Meteor gauntlet: a meteor's trail streams back along its velocity (a
+  // tenth of a second of flight), hidden once it has slowed.
+  if (col.material == 11u) {
+    let sp = length(b.linearVel);
+    let dir = b.linearVel / max(sp, 1e-3);
+    let side = normalize(cross(dir, select(vec3f(0.0, 1.0, 0.0), vec3f(1.0, 0.0, 0.0), abs(dir.y) > 0.9)));
+    let up = cross(side, dir);
+    let along = corner.z + 0.5;
+    let width = col.params.x * (1.0 - 0.85 * along);
+    let tw = b.position - dir * along * 0.11 * sp + (side * corner.x + up * corner.y) * 2.0 * width;
+    o.w = tw; o.center = tw; o.m = vec3f(9.0, 0.0, 0.0);
+    o.n = normalize(side * normal.x + up * normal.y - dir * normal.z);
+    o.clip = select(frame.viewProj * vec4f(tw, 1.0), vec4f(0.0, 0.0, 2.0, 1.0), sp < 12.0 || b.position.y < -1000.0);
+    o.c = mix(vec3f(1.0, 0.85, 0.45), vec3f(0.85, 0.18, 0.04), along);
+    return o;
+  }
   let hidden = col.material == ${WHEEL_RIM_MATERIAL}u || b.position.y < -1000.0 || bodyHidden(col.body);
   var half = col.params.xyz;
   if (col.shape == 0u) { half = vec3f(col.params.x); o.r = col.params.x; }
@@ -721,6 +926,11 @@ struct Out { @builtin(position) clip: vec4f, @location(0) n: vec3f, @location(1)
     if (col.material == 4u) { o.c = vec3f(1.0, 0.55, 0.12); }
     if (col.material == 5u) { o.c = vec3f(0.2, 0.9, 0.3); }
     if (col.material == 6u) { o.c = vec3f(0.95, 0.15, 0.15); }
+    // The finish gate: glowing chequers.
+    if (col.material == 12u) { o.c = select(vec3f(0.95), vec3f(0.08), (i32(floor(w.x * 0.7)) + i32(floor(w.y * 0.7))) % 2 == 0); o.m = vec3f(9.0, 0.0, 0.0); }
+  } else if (col.material == 10u) {
+    // A meteor: hot rock.
+    o.c = vec3f(1.0, 0.42, 0.1); o.m = vec3f(9.0, 0.0, 0.0);
   } else if (col.shape == 0u) {
     o.c = vec3f(0.2, 0.22, 0.25);
   } else {
@@ -741,6 +951,8 @@ struct Out { @builtin(position) clip: vec4f, @location(0) n: vec3f, @location(1)
     if (h < 0.0) { discard; }
     n = normalize(frame.eye.xyz + rd * (-b - sqrt(h)) - i.center);
   }
+  // Glowing (meteors, their trails, the finish gate): mostly their own colour.
+  if (i.m.x > 8.0) { return vec4f(mix(shade(i.c, n, i.w), i.c, 0.7), 1.0); }
   return vec4f(shade(i.c, n, i.w), 1.0);
 }
 
@@ -920,6 +1132,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       else if (e.code === 'KeyP') severPart();
       else if (e.code === 'KeyB') fireCannon();
       else if (e.code === 'KeyF') fireShell();
+      else if (e.code === 'KeyG' && run) { guideOn.checked = !guideOn.checked; applyGuidance(false); runHud(world.steps * world.params.dt, lastChassis?.p[2] ?? -25); }
     });
     addEventListener('keyup', (e) => keys.delete(e.code));
     addEventListener('blur', () => keys.clear());
@@ -983,8 +1196,10 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     function resetScene() {
       world.restore(initial);
       street?.reset();
+      if (run) { run.reset(); world.clearGuidance(); toastsEl.replaceChildren(); runCardKey = ''; }
       if (range) Object.assign(meteors, { next: 0, nextMarker: 0, volley: 0, flying: [], landed: [], score: [[0, 0], [0, 0]] });
       applyGuidance();
+      if (run) runHud(0, -25);
       lastShell = 0;
       bolts = { broken: 0, lastForce: 0 };
       boltPollStep = -1;
@@ -1191,11 +1406,13 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
         const pos = lastChassis.p;
         const f = qrot(lastChassis.q, [0, 0, 1]);
         const flat = norm3([f[0], 0, f[2]]);
-        const desiredT = [pos[0], pos[1] + 1.0, pos[2]];
+        // The meteor gauntlet looks further up the street, into the sky they come from.
+        const ahead = run && camMode === 'chase' ? 8 : 0, lift = run && camMode === 'chase' ? 1.8 : 1.0;
+        const desiredT = [pos[0] + flat[0] * ahead, pos[1] + lift, pos[2] + flat[2] * ahead];
         let desiredE;
         if (camMode === 'chase') {
           const d = chaseDist;
-          desiredE = [pos[0] - flat[0] * d, pos[1] + d * 0.38, pos[2] - flat[2] * d];
+          desiredE = [pos[0] - flat[0] * d, pos[1] + d * (run ? 0.48 : 0.38), pos[2] - flat[2] * d];
         } else {
           const cp = Math.cos(orbit.pitch);
           desiredE = [pos[0] + orbit.dist * cp * Math.sin(orbit.yaw), pos[1] + orbit.dist * Math.sin(orbit.pitch), pos[2] + orbit.dist * cp * Math.cos(orbit.yaw)];
@@ -1218,7 +1435,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
     }
     function drawScene(enc) {
       const rp = enc.beginRenderPass({
-        colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: [0.55, 0.62, 0.72, 1], loadOp: 'clear', storeOp: 'store' }],
+        colorAttachments: [{ view: context.getCurrentTexture().createView(), clearValue: run ? [0.46, 0.33, 0.29, 1] : [0.55, 0.62, 0.72, 1], loadOp: 'clear', storeOp: 'store' }],
         depthStencilAttachment: { view: depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'store' },
       });
       rp.setPipeline(groundPipe); rp.setBindGroup(0, groundBind); rp.setVertexBuffer(0, groundVbo); rp.draw(6);
@@ -1257,7 +1474,7 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       const frozen = stopAt > 0 && world.steps >= stopAt;
       if (range && shellOn.checked && !frozen && world.steps - lastShell >= 120) fireVolley();
       if (street && shellOn.checked && !frozen && lastChassis && lastChassis.p[2] > -12 && lastChassis.p[2] < 150 && world.steps - lastShell >= 70) fireShell();
-      if (!frozen) for (let k = 0; k < STEPS_PER_FRAME; k++) world.encodeStep(enc);
+      if (!frozen) for (let k = 0; k < STEPS_PER_FRAME; k++) { runTick(); world.encodeStep(enc); }
       drawScene(enc);
       const rb = rbFree.pop();
       encodeReadback(enc, rb);
@@ -1474,6 +1691,41 @@ fn vf(i: u32) -> vec4f { return bitcast<vec4f>(vdata[i]); }
       }
       manual = false;
       return { guided, strength, moving, routes, steered: meteors.score[0], unsteered: meteors.score[1], log: meteors.log };
+    };
+    // Meteor gauntlet take: from a reset, drive the street at `cruise` m/s holding
+    // the lane at x = `lane`, with directed debris on or off, until the run ends
+    // or `steps` steps; returns the run's status.
+    window.__runTake = async ({ steps = 2400, guided = true, strength = 1, cruise = 11, lane = -2.5 } = {}) => {
+      if (!run) throw new Error('not the meteor gauntlet');
+      guideOn.checked = guided; guideStrength.value = String(strength);
+      resetScene();
+      manual = true;
+      runLog = [];
+      const chassis = world.vehicles.chassisBody(vehicles[0].h);
+      let st = null;
+      for (let s = 0; s < steps; s++) {
+        if (s % 6 === 0) {
+          await device.queue.onSubmittedWorkDone();
+          const f = new Float32Array((await world.readBodies(chassis, 1)).buffer);
+          lastChassis = { p: [f[0], f[1], f[2]], q: [f[4], f[5], f[6], f[7]], v: [f[12], f[13], f[14]] };
+          if (!chassisRest && s > 90) { chassisRest = lastChassis.p[1]; applyGuidance(false); }
+          const fw = qrot(lastChassis.q, [0, 0, 1]);
+          const speed = fw[0] * lastChassis.v[0] + fw[2] * lastChassis.v[2];
+          const e = cruise - speed;
+          world.vehicles.setInput(world.backend, player, { forward: Math.max(0, Math.min(1, e * 0.4)), steer: Math.max(-1, Math.min(1, 0.25 * (lastChassis.p[0] - lane) + 2.5 * fw[0])), brake: e < -1 ? Math.min(1, -e * 0.2) : 0, handbrake: 0 });
+          await judgeRun();
+          st = JSON.parse(run.status(world.steps * world.params.dt, lastChassis.p[2]));
+          if (st.state === 'wrecked' || st.state === 'finished') break;
+        }
+        runTick();
+        const enc = device.createCommandEncoder();
+        world.encodeStep(enc);
+        device.queue.submit([enc.finish()]);
+      }
+      manual = false;
+      const log = runLog;
+      runLog = null;
+      return { guided, strength, ...st, z: lastChassis.p[2], states: await world.guideStates(), hits: log.filter((e) => e.event === 2 || e.event === 4) };
     };
     renderParts();
     requestAnimationFrame(frame);

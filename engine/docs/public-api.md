@@ -651,7 +651,15 @@ physics**: it adds momentum, so it is off unless the world asks for it.
   zones; and `vehicle.html?scene=meteors`, the same volleys into a steered and
   an unsteered lane of target pads (`&targets=moving` puts the pads on carts
   that turn back every 6 s; *Known routes* gives the steered zones the carts'
-  paths). All use the same passes through `RigidStep` / the lab planner.
+  paths); and `vehicle.html?scene=run`, *Meteor gauntlet*, a game: drive a
+  310 m street (14k bodies) under a meteor shower. Meteors that hit a facade
+  blast its masonry into the street; the rest fall on the road. The blocks
+  are steered around the truck and the road meteors to arcs beside it, so
+  near misses score and hits cost health (`engine-vehicle-wasm/src/run.rs`
+  holds the director, judging and score; G toggles steering). In the
+  scripted take (`__runTake`, cruising one lane at 11 m/s) the truck reached
+  the finish in 3 of 4 runs with steering and was wrecked by 150–300 m in
+  4 of 4 without. All use the same passes through `RigidStep` / the lab planner.
 - **C ABI:** `RbWorldDef::enable_guidance`, `rbWorld_SetGuidance`,
   `rbWorld_SetGuidanceZones` (with `RbGuidanceZone::accel` and `path`),
   `rbWorld_ResetGuidanceClaims`,
