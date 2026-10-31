@@ -161,7 +161,7 @@ CARGO_PROFILE_RELEASE_DEBUG=0 wasm-pack build crates/engine-world-wasm --release
 step "Stress-solver wasm (the Fracture lab's stress bond mode)"
 CARGO_PROFILE_RELEASE_DEBUG=0 wasm-pack build stress-oracle/crates/stress-web --release --target web \
   --out-dir ../../../crates/engine-webgpu/generated/stress-web --no-typescript
-step "Stress-solver wasm, Asyncify build (browsers without JSPI: Safari)"
+step "Stress-solver and world wasm, Asyncify builds (browsers without JSPI: Safari)"
 # The solver waits on GPU maps through the import rubble-gpu-wait.yield_to_browser
 # (engine-gpu-wait). Chrome suspends the stack there with JSPI; elsewhere this build's
 # Asyncify unwinds it (fracture/gpu-wait.mjs). Only that import may unwind. Indirect calls
@@ -195,6 +195,16 @@ STRESS_ASYNCIFY="$(mktemp -d)/asyncify"
 cached asyncify "$( (cat "$STRESS_WASM"; echo "$BINARYEN_VERSION ${ASYNCIFY_ARGS[*]}") | key)" \
   "$STRESS_ASYNCIFY" asyncify
 cp "$STRESS_ASYNCIFY/stress_web_bg.asyncify.wasm" "${STRESS_WASM%.wasm}.asyncify.wasm"
+# Broadside's world wasm waits on the GPU the same way: its Asyncify build too.
+WORLD_WASM="$ENGINE/crates/engine-webgpu/generated/world-wasm/engine_world_wasm_bg.wasm"
+world_asyncify() {
+  mkdir -p "$WORLD_ASYNCIFY"
+  "$WASM_OPT" "$WORLD_WASM" "${ASYNCIFY_ARGS[@]}" -o "$WORLD_ASYNCIFY/engine_world_wasm_bg.asyncify.wasm"
+}
+WORLD_ASYNCIFY="$(mktemp -d)/asyncify"
+cached world-asyncify "$( (cat "$WORLD_WASM"; echo "$BINARYEN_VERSION ${ASYNCIFY_ARGS[*]}") | key)" \
+  "$WORLD_ASYNCIFY" world_asyncify
+cp "$WORLD_ASYNCIFY/engine_world_wasm_bg.asyncify.wasm" "${WORLD_WASM%.wasm}.asyncify.wasm"
 step "Scene snapshots (scene_export, host build)"
 cargo run --release -p engine-scenes --no-default-features --bin scene_export
 

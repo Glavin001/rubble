@@ -5,7 +5,9 @@
 // each frame's poses and draws them with the fracture lab's renderer. `window.__film`
 // renders the take frame by frame at a fixed clock rate for recording (record-broadside.mjs).
 import init,{broadside_init,broadside_set_asset,broadside_set_level,broadside_error,broadside_panic,broadside_body_base,broadside_extra_vertices,broadside_extras_version,broadside_poses,broadside_camera,broadside_time_scale,broadside_set_scripted,broadside_shoot_ray,broadside_stats} from './generated/world-wasm/engine_world_wasm.js';
-import {JSPI} from './fracture/gpu-wait.mjs';
+// Chrome and Edge 137+ suspend the wasm stack natively (JSPI); elsewhere the Asyncify build
+// of the same Rust does, driven by gpu-wait.mjs (as the lab's stress mode).
+import {JSPI,bindAsyncify,asyncifyPromising} from './fracture/gpu-wait.mjs';
 import {parseFractureGlb,buildScene} from './fracture/wasm.mjs';
 import {createRenderer} from './fracture/render.mjs';
 
@@ -26,10 +28,12 @@ const scenes=new Map();
 let device,renderer=null,poseBuffer=null,scene=null,glb=null,asset=null;
 let running=true,last=0,credit=0,extrasVersion=-1,frame=Promise.resolve();
 
-const wasm=await init({module_or_path:new URL('./generated/world-wasm/engine_world_wasm_bg.wasm',import.meta.url)});
+const wasm=await init({module_or_path:new URL(`./generated/world-wasm/engine_world_wasm_bg${JSPI?'':'.asyncify'}.wasm`,import.meta.url)});
+if(!JSPI)bindAsyncify(wasm,wasm.broadside_asyncify_buffer());
+const suspendable=JSPI?f=>WebAssembly.promising(f):asyncifyPromising;
 const why=f=>async(...a)=>{try{return await f(...a)}catch(e){const p=broadside_panic();throw p?new Error(`${p} (${e?.message??e})`):e}};
-const load=why(WebAssembly.promising?WebAssembly.promising(wasm.broadside_load):()=>false);
-const stepFrames=why(WebAssembly.promising?WebAssembly.promising(wasm.broadside_frame):()=>false);
+const load=why(suspendable(wasm.broadside_load));
+const stepFrames=why(suspendable(wasm.broadside_frame));
 const stats=()=>JSON.parse(broadside_stats());
 
 // Upload the poses `alpha` of the way between the last two steps, the extras' mesh when
@@ -107,7 +111,6 @@ $('director').onchange=()=>{if(!$('director').checked)renderer.viewMode=0};
 
 try{
  if(!navigator.gpu)throw new Error('WebGPU is unavailable. Open this page in a WebGPU-enabled browser.');
- if(!JSPI)throw new Error('Broadside waits for the GPU with JavaScript Promise Integration: open it in Chrome or Edge 137+.');
  await broadside_init();
  const adapter=await navigator.gpu.requestAdapter();if(!adapter)throw new Error('No WebGPU adapter available');
  device=await adapter.requestDevice({requiredLimits:{maxStorageBuffersPerShaderStage:Math.min(16,adapter.limits.maxStorageBuffersPerShaderStage),maxStorageBufferBindingSize:adapter.limits.maxStorageBufferBindingSize,maxBufferSize:adapter.limits.maxBufferSize}});

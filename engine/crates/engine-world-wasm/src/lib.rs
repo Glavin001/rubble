@@ -447,3 +447,17 @@ fn vertex(p: [f32; 3], n: [f32; 3], color: [f32; 3], id: f32, out: &mut Vec<f32>
     out.extend_from_slice(&color);
     out.push(id);
 }
+
+/// The save area of the Asyncify build (`engine_world_wasm_bg.asyncify.wasm`, for browsers
+/// without JSPI; `engine/scripts/build-web.sh`, `fracture/gpu-wait.mjs`): a header of the
+/// next free address and the end address, then room for the stack a suspended export saves.
+/// Returns the area's address; the page calls it once. The JSPI build never calls it.
+#[no_mangle]
+pub extern "C" fn broadside_asyncify_buffer() -> u32 {
+    const BYTES: usize = 1 << 20;
+    let area: &'static mut [u8] = Box::leak(vec![0u8; BYTES].into_boxed_slice());
+    let base = area.as_mut_ptr() as usize as u32;
+    area[0..4].copy_from_slice(&(base + 8).to_le_bytes());
+    area[4..8].copy_from_slice(&(base + BYTES as u32).to_le_bytes());
+    base
+}
