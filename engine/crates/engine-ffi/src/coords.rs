@@ -212,10 +212,6 @@ impl Coords {
     pub fn energy_out(&self, x: f32) -> f32 {
         x * self.scale(2)
     }
-    /// Volume (m^3).
-    pub fn volume_out(&self, x: f32) -> f32 {
-        x * self.scale(3)
-    }
     /// Pressure and stress (Pa: kg/(m·s²)).
     pub fn pressure_out(&self, x: f32) -> f32 {
         x * self.scale(-1)
