@@ -2246,11 +2246,19 @@ impl WgpuSim {
             self.last_step_ran = false;
             return Ok(());
         }
+        let host_t = std::env::var("RUBBLE_HOST_TIMING").is_ok().then(web_time::Instant::now);
+        let lap = |t: &Option<web_time::Instant>, what: &str| {
+            if let Some(t) = t {
+                eprintln!("rubble host step_encode: {what} at {:.3} ms", t.elapsed().as_secs_f64() * 1e3);
+            }
+        };
         self.refresh_cell();
+        lap(&host_t, "refresh_cell");
         self.last_step_ran = true;
         self.flush_commands();
         self.upload_impulses();
         self.write_host_uniforms_ex(true);
+        lap(&host_t, "uniforms");
         self.wake_pending = false;
         self.last_contact_offset = if self.contacts_parity == 0 {
             0
@@ -2283,7 +2291,9 @@ impl WgpuSim {
                 );
             }
         }
+        lap(&host_t, "plan + copies");
         self.encode_dispatches(enc, &cmds);
+        lap(&host_t, "dispatches");
         self.finish_step(false, wall).map(|_| ())
     }
 

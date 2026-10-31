@@ -375,6 +375,11 @@ pub struct World {
     hulls: HullArena,
     bodies: Vec<BodySlot>,
     free_bodies: Vec<u32>,
+    /// Bodies that may carry damping or a gravity scale (`push_damping` walks these,
+    /// not every slot; stale entries drop out there).
+    tuned: std::collections::BTreeSet<u32>,
+    /// The last step's GPU time from its marks (`RUBBLE_GPU_TIMING=1`).
+    last_gpu_ms: Option<f64>,
     shapes: Vec<ShapeSlot>,
     free_shapes: Vec<u32>,
     /// Retired colliders: `(collider, released at step)`.
@@ -468,6 +473,8 @@ impl World {
             hulls: HullArena::new(),
             bodies: Vec::new(),
             free_bodies: Vec::new(),
+            tuned: std::collections::BTreeSet::new(),
+            last_gpu_ms: None,
             shapes: Vec::new(),
             free_shapes: Vec::new(),
             free_colliders: Vec::new(),
@@ -632,6 +639,11 @@ impl World {
         self.sim.timings_ms()
     }
 
+    /// GPU time of the last step, every pass of it (`RUBBLE_GPU_TIMING=1`; else None).
+    pub fn last_step_gpu_ms(&self) -> Option<f64> {
+        self.last_gpu_ms
+    }
+
     /// Replace the solver settings (step size, iterations, contact and
     /// sleep tuning, flags), gravity included: for example a destructible
     /// asset's `solver`, for the fracture lab's behaviour. Hosts step at the
@@ -736,6 +748,11 @@ impl World {
             .any(|d| d.motion_locks.bits() != 0 && d.body_type == BodyType::Dynamic)
         {
             self.sim.set_motion_locks(true);
+        }
+        for id in &ids {
+            if self.bodies[id.index() as usize].tuned() {
+                self.tuned.insert(id.index());
+            }
         }
         Ok(ids)
     }
@@ -910,6 +927,7 @@ impl World {
         let i = self.live_body(id)?;
         anyhow::ensure!(linear >= 0.0 && angular >= 0.0, "negative damping");
         self.bodies[i].damping = (linear, angular);
+        self.tuned.insert(i as u32);
         Ok(())
     }
 
@@ -925,6 +943,7 @@ impl World {
             return Ok(());
         }
         self.bodies[i].gravity_scale = scale;
+        self.tuned.insert(i as u32);
         // A body resting under the old scale may have slept: it moves again.
         self.command(id, GpuCommand::wake(id.index()))
     }
@@ -959,8 +978,12 @@ impl World {
         let p = self.sim.params();
         let h = p.dt;
         let mut cmds = Vec::new();
-        for (i, b) in self.bodies.iter().enumerate() {
-            if !b.alive || b.body_type != BodyType::Dynamic || b.last_asleep || !b.tuned() {
+        let bodies = &self.bodies;
+        self.tuned
+            .retain(|&i| bodies.get(i as usize).is_some_and(|b| b.alive && b.tuned()));
+        for &i in &self.tuned {
+            let b = &self.bodies[i as usize];
+            if b.body_type != BodyType::Dynamic || b.last_asleep {
                 continue;
             }
             let add = [0.0, h * (b.gravity_scale - 1.0) * p.gravity_y, 0.0];
@@ -1789,12 +1812,19 @@ impl World {
     /// `Backpressure::Block`; collect results with [`World::poll`].
     pub fn step(&mut self) -> anyhow::Result<()> {
         let step = self.step;
+        let host_t = std::env::var("RUBBLE_HOST_TIMING").is_ok().then(std::time::Instant::now);
+        let lap = |what: &str| {
+            if let Some(t) = &host_t {
+                eprintln!("rubble host world step: {what} at {:.3} ms", t.elapsed().as_secs_f64() * 1e3);
+            }
+        };
         if std::mem::take(&mut self.dirty) {
             self.last_input_step = Some(step);
         }
         let rays = std::mem::take(&mut self.pending_rays);
         let batches = std::mem::take(&mut self.pending_batches);
         self.push_damping()?;
+        lap("damping");
         let explosions = std::mem::take(&mut self.queries.explosions);
         if !explosions.is_empty() {
             self.sim.write_explosions(&explosions)?;
@@ -1808,7 +1838,9 @@ impl World {
         if contact_events {
             self.sim.clear_contact_events();
         }
+        lap("queries");
         let casts = self.motion_before_step();
+        lap("motion");
         if !rays.is_empty() {
             // Forces the step to run, so its frame carries the hits.
             self.sim.write_ray_queries(&rays)?;
@@ -1837,6 +1869,7 @@ impl World {
             enc.copy_buffer_to_buffer(self.sim.pose_buffer(), 0, &e.previous, 0, e.previous.size());
         }
         // The terrain's substeps go first: the rigid step applies their reactions.
+        lap("before terrain");
         self.terrain_open_strike()?;
         let terrain = self.terrain_encode(&mut enc)?;
         #[cfg(feature = "stress")]
@@ -1847,6 +1880,7 @@ impl World {
             .step_encode(&mut enc)
             .map_err(|e| anyhow::anyhow!("step: {e:?}"))?;
         let ran = self.sim.last_step_ran();
+        lap("rigid encoded");
         if let Some(m) = &marks {
             m.mark(&mut enc, "rigid tail");
         }
@@ -1949,6 +1983,7 @@ impl World {
             };
             self.readback.pending.push_back(skipped);
         }
+        lap("fracture + readback encoded");
         let timing = marks.map(|m| {
             m.mark(&mut enc, "readback copies");
             self.sim.set_marks(None);
@@ -1959,13 +1994,18 @@ impl World {
         if let Some((m, staging)) = timing {
             let parts = m.report(self.sim.device(), self.sim.queue(), &staging);
             let total: f64 = parts.iter().map(|p| p.1).sum();
+            self.last_gpu_ms = Some(total);
             let list: Vec<String> = parts.iter().filter(|p| p.1 >= 0.01).map(|(n, t)| format!("{n} {t:.2}")).collect();
-            eprintln!("world step {step} GPU ms: {total:.2} = {}", list.join(", "));
+            if std::env::var("RUBBLE_GPU_TIMING_PRINT").is_ok() {
+                eprintln!("world step {step} GPU ms: {total:.2} = {}", list.join(", "));
+            }
         }
+        lap("submitted");
         if let Some(slot) = mapped {
             self.readback.map(slot);
         }
         let _ = self.sim.device().poll(wgpu::PollType::Poll);
+        lap("mapped + polled");
         self.step += 1;
         Ok(())
     }

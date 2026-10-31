@@ -110,3 +110,23 @@ only on steps where something fell asleep; waking costs the woken bodies' archiv
 - Start-asleep placement (Unreal's town) can split a sleeping cluster whose new pieces
   never report a pose (`ENSEMBLE_LENIENT` skips that check in the probe). To fix.
 - The ensemble covers one asset. The town bombard (stress charter) is the next check.
+
+## Sleep policy in the city (2026-10-31)
+
+`CITY_SLEEP=1` (houses placed awake, settle, sleep with their contacts archived), after
+`push_damping` walks only bodies that carry damping or a gravity scale (it walked every
+slot on the host each step). Median ms per step; other sessions ran GPU tests meanwhile,
+so wall times are noisy; host is `World::step` alone, GPU every pass from the step's
+marks (`RUBBLE_GPU_TIMING=1`, a separate run):
+
+| K | still: host | drive: host | drive: GPU |
+|---|---|---|---|
+| 1 | 0.01 | 0.69 | 1.5 |
+| 16 | 0.01 | 0.75 | 2.5 |
+| 64 | 0.01 | 0.77 | 1.4 |
+| 256 | 0.07 | 1.14 | 3.1 |
+
+A still map costs nothing. One car among sleeping houses is roughly flat in K; its GPU
+time is mostly a fixed cost: a world past the sparse tail's body cap (`tail_ok`) dispatches
+all 32 colours every iteration. The bench's wall column is latency (it blocks on every
+frame's readback).

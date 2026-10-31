@@ -12,7 +12,8 @@
 //! CITY_K=16,64,256 cargo test -p engine-world --release --test city_scale -- --ignored --nocapture
 //! CITY_SLEEP=1: the large-map sleep policy (`sleeping_solver_for`; the threshold solver's
 //! own suggestion is never asleep).
-//! CITY_JSON=path appends one JSON line per run.
+//! CITY_JSON=path appends one JSON line per run. RUBBLE_GPU_TIMING=1: the GPU column is every
+//! pass of the step (its timestamp marks; the waits they add inflate the wall column).
 #![cfg(feature = "stress")]
 
 use rubble::*;
@@ -31,6 +32,8 @@ struct Run {
     scenario: &'static str,
     wall_ms: Vec<f64>,
     gpu_ms: Vec<f64>,
+    /// `World::step` alone: the host's part of a step.
+    host_ms: Vec<f64>,
     awake: u32,
     broken: u32,
 }
@@ -135,12 +138,12 @@ fn city(asset: &DestructibleAssetDesc, k: usize, sleep: bool) -> (World, Vec<[f3
 fn frame(w: &mut World, broken: &mut u32) -> f64 {
     let t = Instant::now();
     w.step().unwrap();
-    if std::env::var("RUBBLE_WORLD_TIMING").is_ok() {
-        eprintln!(
-            "step encode+submit {:.2} ms",
-            t.elapsed().as_secs_f64() * 1e3
-        );
-    }
+    t.elapsed().as_secs_f64() * 1e3 + finish(w, broken)
+}
+
+/// Wait for the step's frame and count its broken bonds: ms.
+fn finish(w: &mut World, broken: &mut u32) -> f64 {
+    let t = Instant::now();
     for f in w.poll_blocking().unwrap() {
         for e in &f.destruction_events {
             if let DestructionEvent::BondsBroken {
@@ -220,10 +223,14 @@ fn run(asset: &DestructibleAssetDesc, k: usize, scenario: &'static str, sleep: b
         _ => {}
     }
     let broken_before = broken;
-    let (mut wall_ms, mut gpu_ms) = (Vec::new(), Vec::new());
+    let (mut wall_ms, mut gpu_ms, mut host_ms) = (Vec::new(), Vec::new(), Vec::new());
     for _ in 0..MEASURE {
-        wall_ms.push(frame(&mut w, &mut broken));
-        gpu_ms.push(w.profile_ms());
+        let t = Instant::now();
+        w.step().unwrap();
+        host_ms.push(t.elapsed().as_secs_f64() * 1e3);
+        wall_ms.push(host_ms.last().unwrap() + finish(&mut w, &mut broken));
+        // RUBBLE_GPU_TIMING=1: every pass's GPU time (the step's marks), else the sim's.
+        gpu_ms.push(w.last_step_gpu_ms().unwrap_or_else(|| w.profile_ms()));
     }
     let awake = w.counters().map(|c| c.awake_count).unwrap_or(0);
     Run {
@@ -231,6 +238,7 @@ fn run(asset: &DestructibleAssetDesc, k: usize, scenario: &'static str, sleep: b
         scenario,
         wall_ms,
         gpu_ms,
+        host_ms,
         awake,
         broken: broken - broken_before,
     }
@@ -256,19 +264,20 @@ fn city_scale() {
         "cuboid house: {chunks} chunks, {} bonds; sleep {sleep}",
         asset.bonds.len()
     );
-    println!("| K | chunks | scenario | wall median ms | wall p95 ms | gpu median ms | awake | bonds broken |");
-    println!("|---|---|---|---|---|---|---|---|");
+    println!("| K | chunks | scenario | wall median ms | wall p95 ms | host median ms | gpu median ms | awake | bonds broken |");
+    println!("|---|---|---|---|---|---|---|---|---|");
     for &k in &ks {
         for s in &scenarios {
             let s: &'static str = Box::leak(s.clone().into_boxed_str());
             let r = run(&asset, k, s, sleep);
-            let (wm, wp, gm) = (
+            let (wm, wp, hm, gm) = (
                 percentile(&r.wall_ms, 0.5),
                 percentile(&r.wall_ms, 0.95),
+                percentile(&r.host_ms, 0.5),
                 percentile(&r.gpu_ms, 0.5),
             );
             println!(
-                "| {} | {} | {} | {wm:.2} | {wp:.2} | {gm:.2} | {} | {} |",
+                "| {} | {} | {} | {wm:.2} | {wp:.2} | {hm:.2} | {gm:.2} | {} | {} |",
                 r.k,
                 r.k * chunks,
                 r.scenario,
@@ -278,7 +287,7 @@ fn city_scale() {
             if let Ok(path) = std::env::var("CITY_JSON") {
                 use std::io::Write;
                 let line = format!(
-                    "{{\"k\":{},\"chunks\":{},\"scenario\":\"{}\",\"sleep\":{sleep},\"wall_median_ms\":{wm:.3},\"wall_p95_ms\":{wp:.3},\"gpu_median_ms\":{gm:.3},\"awake\":{},\"broken\":{}}}\n",
+                    "{{\"k\":{},\"chunks\":{},\"scenario\":\"{}\",\"sleep\":{sleep},\"wall_median_ms\":{wm:.3},\"wall_p95_ms\":{wp:.3},\"host_median_ms\":{hm:.3},\"gpu_median_ms\":{gm:.3},\"awake\":{},\"broken\":{}}}\n",
                     r.k, r.k * chunks, r.scenario, r.awake, r.broken
                 );
                 std::fs::OpenOptions::new()
