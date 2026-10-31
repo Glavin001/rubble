@@ -47,6 +47,7 @@ struct Loaded {
 thread_local! {
     static GPU: RefCell<Option<stress_gpu::gpu::Gpu>> = const { RefCell::new(None) };
     static ASSET: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    static LEVEL: RefCell<u8> = const { RefCell::new(broadside::LEVEL) };
     static LOADED: RefCell<Option<Loaded>> = const { RefCell::new(None) };
     static ERROR: RefCell<String> = const { RefCell::new(String::new()) };
 }
@@ -95,6 +96,12 @@ pub fn broadside_set_asset(glb: Vec<u8>) {
     ASSET.set(glb);
 }
 
+/// The fracture level the next [`broadside_load`] builds (`broadside::LEVEL`'s list).
+#[wasm_bindgen]
+pub fn broadside_set_level(level: u8) {
+    LEVEL.set(level);
+}
+
 /// Build the scene from the asset ([`broadside_set_asset`]) on this module's device.
 /// Waits for the GPU. False on an error (`broadside_error`).
 #[wasm_bindgen]
@@ -119,12 +126,14 @@ fn load() -> anyhow::Result<Loaded> {
             queue: g.queue.clone(),
         })
     });
-    let b = Broadside::new(
+    let level = LEVEL.with_borrow(|l| *l);
+    let b = Broadside::at_level(
         context.ok_or_else(|| anyhow::anyhow!("broadside_init first"))?,
         &glb,
+        level,
     )?;
     let parsed = engine_fracture::parse_fracture_glb(&glb)?;
-    let render_bodies = engine_fracture::build_scene(&parsed, broadside::LEVEL, None)?
+    let render_bodies = engine_fracture::build_scene(&parsed, level, None)?
         .bodies
         .len();
     let mut l = Loaded {

@@ -8,6 +8,7 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:13px/1.
 #hud h1{margin:0 0 4px;font-size:17px;letter-spacing:.02em}
 #hud p{margin:0 0 10px;color:var(--dim)}
 #hud .row{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}
+select{background:#1c2026;color:var(--fg);border:1px solid #343944;border-radius:7px;padding:4px 6px;font:inherit}
 button{background:#1c2026;color:var(--fg);border:1px solid #343944;border-radius:7px;padding:6px 10px;font:inherit;cursor:pointer}
 button:hover{border-color:var(--accent)}
 label{display:flex;align-items:center;gap:6px;color:var(--dim)}
@@ -23,6 +24,7 @@ body.film #hud{display:none}
  <p>A Shardwright oak and pine galleon stern, every member split along its grain, shot apart by 24-pounder broadsides while the captain walks down from the quarterdeck. Rubble's world API, threshold fracture, stepped in Rust on WebGPU.</p>
  <div class="row"><button id="restart">Restart</button><button id="run">Pause</button></div>
  <div class="row"><label><input type="checkbox" id="director" checked> Director's camera</label></div>
+ <div class="row"><label>Fracture level <select id="level"><option value="1">1: pieces (2,513)</option><option value="2">2: grain cells (10,067)</option></select></label></div>
  <p>Turn the director off to orbit (drag) and fire your own shots (click).</p>
  <div id="stats"></div>
  <div id="status">Loading…</div>

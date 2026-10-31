@@ -264,7 +264,8 @@ fn loose(b: &Broadside, rest: &[rubble::Transform]) -> Vec<(&'static str, usize,
 #[test]
 #[ignore]
 fn destruction() {
-    let mut b = Broadside::new(GpuContext::Default, GLB).unwrap();
+    let level = std::env::var("BROADSIDE_LEVEL").map_or(LEVEL, |s| s.parse().unwrap());
+    let mut b = Broadside::at_level(GpuContext::Default, GLB, level).unwrap();
     // The reference poses once the first step's readback has placed every body.
     b.step().unwrap();
     b.poll_blocking().unwrap();

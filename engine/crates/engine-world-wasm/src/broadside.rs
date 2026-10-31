@@ -13,7 +13,9 @@
 
 use rubble::*;
 
-/// The galleon stern's leaf level: every member split into grain-stretched cells.
+/// The galleon stern's levels: 0 its 566 members whole (they part at their joints),
+/// 1 each member in about 0.3 m pieces, 2 (the leaf, the default) in grain-stretched
+/// cells. The take runs at any of them.
 pub const LEVEL: u8 = 2;
 /// A cannonball: 24 lb of iron (10.9 kg, 0.074 m radius).
 pub const BALL_MASS: f32 = 10.9;
@@ -295,11 +297,16 @@ fn capacity(asset: &DestructibleAssetDesc) -> anyhow::Result<WorldCapacity> {
 }
 
 impl Broadside {
-    /// The ship from its baked GLB, on `gpu`.
+    /// The ship from its baked GLB, on `gpu`, at the leaf level.
     pub fn new(gpu: GpuContext, glb: &[u8]) -> anyhow::Result<Self> {
-        let asset = DestructibleAssetDesc::from_glb(glb, LEVEL)?;
+        Self::at_level(gpu, glb, LEVEL)
+    }
+
+    /// The ship at fracture `level` (see [`LEVEL`]).
+    pub fn at_level(gpu: GpuContext, glb: &[u8], level: u8) -> anyhow::Result<Self> {
+        let asset = DestructibleAssetDesc::from_glb(glb, level)?;
         let parsed = engine_fracture::parse_fracture_glb(glb)?;
-        let scene = engine_fracture::build_scene(&parsed, LEVEL, None)?;
+        let scene = engine_fracture::build_scene(&parsed, level, None)?;
         let solver = asset
             .solver_for(StrengthModel::Threshold)
             .ok_or_else(|| anyhow::anyhow!("asset has no threshold solver"))?;

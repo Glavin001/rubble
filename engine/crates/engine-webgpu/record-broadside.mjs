@@ -4,7 +4,7 @@
 // included) however long the physics takes, then encodes recordings/broadside.mp4 and a
 // contact sheet with ffmpeg.
 //
-//   node record-broadside.mjs [--out DIR] [--fps 30] [--max-frames N]
+//   node record-broadside.mjs [--out DIR] [--fps 30] [--max-frames N] [--level 0|1|2]
 //
 // Needs the WGSL export and both wasm modules built (scripts/build-web.sh, or its
 // wgsl_export, fracture-wasm and world-wasm steps). CHROME / FFMPEG override the binaries.
@@ -21,6 +21,7 @@ const opt = (name, fallback) => { const i = args.indexOf(name); return i >= 0 ? 
 const OUT = opt('--out', join(ROOT, 'recordings'));
 const FPS = Number(opt('--fps', 30));
 const MAX_FRAMES = Number(opt('--max-frames', 3600));
+const LEVEL = opt('--level', '2');
 const FFMPEG = process.env.FFMPEG || 'ffmpeg';
 const CHROME = process.env.CHROME || (process.platform === 'darwin'
   ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : 'google-chrome');
@@ -71,7 +72,7 @@ const evaluate = async (expression, awaitPromise = false) => {
 };
 await send('Runtime.enable');
 await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 720, deviceScaleFactor: 1, mobile: false });
-await send('Page.navigate', { url: `${base}/broadside.html?film=1` });
+await send('Page.navigate', { url: `${base}/broadside.html?film=1&level=${LEVEL}` });
 let ready = false;
 for (let i = 0; i < 600 && !ready; i++) {
   await new Promise((r) => setTimeout(r, 200));
@@ -95,9 +96,9 @@ const ffmpeg = (a) => {
   if (r.status !== 0) throw new Error(`ffmpeg failed: ${a.join(' ')}`);
 };
 const frames = join(FRAMES, 'f%05d.png');
-ffmpeg(['-framerate', String(FPS), '-i', frames, '-c:v', 'libx264', '-preset', 'slow', '-crf', '20', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', join(OUT, 'broadside.mp4')]);
-ffmpeg(['-i', frames, '-vf', `select='not(mod(n\\,${FPS * 3}))',scale=480:-1,tile=4x4`, '-frames:v', '1', join(OUT, 'broadside_sheet.jpg')]);
-console.log(`broadside: ${n} frames (${(n / FPS).toFixed(1)} s of film) rendered in ${((performance.now() - t0) / 1000).toFixed(0)} s → ${join(OUT, 'broadside.mp4')}`);
+ffmpeg(['-framerate', String(FPS), '-i', frames, '-c:v', 'libx264', '-preset', 'slow', '-crf', '20', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', join(OUT, `broadside-l${LEVEL}.mp4`)]);
+ffmpeg(['-i', frames, '-vf', `select='not(mod(n\\,${FPS * 3}))',scale=480:-1,tile=4x4`, '-frames:v', '1', join(OUT, `broadside-l${LEVEL}_sheet.jpg`)]);
+console.log(`broadside: ${n} frames (${(n / FPS).toFixed(1)} s of film) rendered in ${((performance.now() - t0) / 1000).toFixed(0)} s → ${join(OUT, `broadside-l${LEVEL}.mp4`)}`);
 ws.close();
 server.close();
 process.exit(0);
