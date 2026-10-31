@@ -60,7 +60,7 @@ checks and repeats frame for frame.
 | `rr_apartment_car_bus` | V5 | Both hit the apartment block's ground floor | Neither gets through: the brick infill is two 1.15 t panels a bay |
 | `rr_storefront_car` | V5 | Ball stand-in: a local break | Superseded by `rr_storefront_car_bus` |
 | `rr_drive_storefront` | V5 V4 | Driven, not launched: rubble's raycast sedan and six-wheel truck, in the world API (`World`, the `Threshold` model), accelerate on their own wheels from 30 m out. The sedan breaks the window at about 50 km/h and drives into the shop; the truck's front wheels meet the brick stallriser under the fourth shop's window and it breaks through slewed about 40° (136) | The vehicles are rigid: no crumple yet (soft bodies, plan Phase D). A raycast wheel cannot climb the stallriser |
-| `bo_drive_viaduct` | S2 V3 V5 | Driven traffic on the viaduct: four sedans, two six-wheel trucks and two on the road below, cruising. The hinge pier's charge cuts the drop-in spans loose; they swing down about their seats with four vehicles on them, the traffic behind drives into the gap, and a span lands on the lower road's truck (292) | Under the threshold model the ball alone cannot drop the spans (a span bonded at one end hangs there): the charge cuts what the stress solver would break |
+| `bo_drive_viaduct` | S2 V3 V5 | Driven traffic on the viaduct: four sedans, two six-wheel trucks and two on the road below, cruising. The hinge pier's charge cuts the drop-in spans loose; they swing down about their seats with four vehicles on them, support loss breaks what their fall overloads, the traffic behind drives into the gap, and a span lands on the lower road's truck (308, 292 before support loss) | Under the threshold model the ball alone cannot drop the spans (a span bonded at one end hangs there, support loss too): the charge cuts what the stress solver would break |
 | `sc_ram_raid`, `sc_bridge_out` (destruction page) | as above | The same two scenarios on the destruction page (`destruction/`: engine-world-wasm steps the world, the lab's renderer draws it, chunks in their materials' colours); the same breaks, frame for frame | Flat shading, no shadows or dust yet (the lab's stress renderer has them) |
 | `ft_apartment_airliner` | S3 | A bonded 35 t jet at 70 m/s punches through five storeys of the middle bays; engines and nose fly off; it falls back out (1,148) | — |
 | `ft_glass_tower_airliner` | S3 | The nose breaks up in the curtain wall and floors (710) | It stops in the first bays and slides down the facade; no upper block fails (threshold has no stress solve) |
@@ -84,6 +84,34 @@ exactly; vehicles, glass and metal shed chips, not dust.
   across a cut (the glass tower's upper block) and a landing tower does not break into
   storeys.
 - **Rubble's own mode repeats on a house but not at the 7 × 7 grid's scale.**
+
+## Main's reactions in the demos (measured natively, 2026-10-31)
+
+Crushing, blast loading and support loss (`docs/destruction-reactions.md`) arrived from main.
+What each does to the demo scenes, in the world API (`rubble::scenario`), with nothing
+weakened to make a beat happen:
+
+- **A truck into the viaduct's hinge pier.** The 5.5 t six-wheel truck (the heaviest preset)
+  from 60 m out reaches about 61 km/h and breaks one bond of the 1.8 m reinforced-concrete
+  column; with support loss and crushing on, the same. That is the right answer: a column
+  that size is designed for a heavier truck's strike. A strike beat needs a loaded truck
+  (about 25-36 t) as a new vehicle preset, not a weaker pier.
+- **Support loss instead of the drop-in cut.** With only the pier blown (48 of the charge's
+  72 bonds), the spans stay up with or without support loss: it is a load flow without
+  bending or tension, so a span left as a cantilever off its far seat holds. The charge's
+  cut of the drop-in spans stays; it stands in for the bending failure.
+- **Support loss with the charge** (now on in `bo_drive_viaduct`, the pack's
+  `defaults.reactions`): it breaks 12 more bonds as the spans fall (302 in all natively,
+  against about 290 without).
+- **Crushing** on the viaduct's concrete crushes one chunk in a run. It is not carried by
+  the scenario hosts yet: a crushed chunk's body is gone and its fragments are new bodies
+  neither page draws (a pack asking for it is an error).
+- **TNT at the topple tower's street-side columns** (blast loading, 0.4-0.6 m from the
+  0.5 m columns' faces): one charge of 30, 60 or 120 kg breaks 4 bonds and the column stays
+  bonded; three of 120 kg free only the middle column. The tower stands, so support loss
+  has nothing to tip. The topple stays on its charges' cuts. (`Scenario` also misses a
+  blast's breaks in its count: `World` changes `bonds_intact`, but no `BondsBroken` reaches
+  the polled frames.)
 
 ## Next, in order of impact
 

@@ -390,6 +390,8 @@ pub struct Scene {
     pub vehicles: Vec<(String, Vec<usize>)>,
     /// Raycast vehicles driven at the structure (`drive`): not chunks of it.
     pub drives: Vec<crate::drive::Drive>,
+    /// The reactions its world API host turns on (`reactions`).
+    pub reactions: crate::reactions::Reactions,
 }
 
 impl Scene {
@@ -402,6 +404,7 @@ impl Scene {
         }
         crate::launch::write(&mut pack, &self.launches);
         crate::drive::write(&mut pack, &self.drives);
+        crate::reactions::write(&mut pack, &self.reactions);
         pack
     }
 }
@@ -447,7 +450,7 @@ pub fn compose(key: &'static str, title: &'static str, base: Structure, supports
         }
         placed.push((v.name.clone(), ids));
     }
-    Scene { structure: s, masses, launches, vehicles: placed, drives: Vec::new() }
+    Scene { structure: s, masses, launches, vehicles: placed, drives: Vec::new(), reactions: Default::default() }
 }
 
 /// A launch along `heading` at `speed` (m/s), with `lift` (m/s) up.
@@ -585,6 +588,15 @@ fn viaduct_drives() -> Vec<crate::drive::Drive> {
     ]
 }
 
+/// Bridge Out's reactions for a world API host: support loss (the weight the charge's
+/// breaks leave without a path breaks what it overloads, a frame at a time). It is a load
+/// flow without bending, so it does not replace the charge's cut of the drop-in spans (a
+/// span bonded at one end hangs there as a cantilever under it); it adds what their fall
+/// leaves overloaded.
+fn viaduct_reactions() -> crate::reactions::Reactions {
+    crate::reactions::Reactions { support_loss: true, ..Default::default() }
+}
+
 /// The Bridge Out charge for a world API host (the threshold model): the hinge pier
 /// blown (every bond of its chunks) and the drop-in spans cut from their seats (every bond
 /// of spans 2 and 3 to anything else). Under `blast_parity` the ball does this: the pier
@@ -684,6 +696,7 @@ pub fn scene(key: &str) -> Option<Scene> {
             viaduct.charges = vec![hinge_charge(&viaduct)];
             let mut s = compose(key, title, viaduct, Vec::new(), &[]);
             s.drives = viaduct_drives();
+            s.reactions = viaduct_reactions();
             Some(s)
         }
         // V5 driven: the sedan (rubble's raycast preset, its wheels driving it) at the

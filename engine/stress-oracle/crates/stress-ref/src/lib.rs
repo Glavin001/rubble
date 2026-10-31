@@ -40,6 +40,7 @@ pub mod observation;
 pub mod par;
 pub mod polytope;
 pub mod profile;
+pub mod reactions;
 pub mod refine;
 pub mod rng;
 pub mod scene;

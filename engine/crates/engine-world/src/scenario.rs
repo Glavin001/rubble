@@ -9,6 +9,9 @@
 //! ([`Scenario::shoot`]), and a pack's charge is cut between two steps
 //! ([`Scenario::cut`], `World::destructible_cut_bonds`).
 //!
+//! A pack's reactions (`defaults.reactions`, stress-ref `reactions`) are the destructible's:
+//! support loss and its dynamic factor.
+//!
 //! Drawing is the host's. A chunk is drawn posed at rest and moved by
 //! [`Scenario::chunk_motion`] (the render contract: its piece's transform); the vehicles'
 //! parts by [`Scenario::car_poses`], the balls by [`Scenario::ball_poses`].
@@ -80,6 +83,7 @@ impl Scenario {
         let json: serde_json::Value = serde_json::from_slice(pack).context("scene pack is not JSON")?;
         let drives = stress_ref::drive::drives_of(&json).map_err(|e| anyhow::anyhow!("scene pack: {e}"))?;
         let charges = stress_ref::wrecking::charges_of(&json);
+        let reactions = stress_ref::reactions::reactions_of(&json).map_err(|e| anyhow::anyhow!("scene pack: {e}"))?;
         let asset = DestructibleAssetDesc::from_pack(pack).context("scene pack")?;
         let stress = asset.stress.as_ref().context("scene pack: no stress import")?;
         let solver = asset.solver_for(StrengthModel::Threshold).context("scene pack: no threshold solver")?;
@@ -104,7 +108,15 @@ impl Scenario {
         }
         let a = world.create_destructible_asset(&asset).context("structure")?;
         let instance = Transform::new(offset, [0.0, 0.0, 0.0, 1.0]);
-        let destructible = world.create_destructible(&DestructibleDef { model: StrengthModel::Threshold, transform: instance, asleep: false, ..DestructibleDef::new(a) }).context("structure")?;
+        let def = DestructibleDef {
+            model: StrengthModel::Threshold,
+            transform: instance,
+            asleep: false,
+            support_loss: reactions.support_loss,
+            support_loss_dynamic_factor: reactions.support_loss_factor as f32,
+            ..DestructibleDef::new(a)
+        };
+        let destructible = world.create_destructible(&def).context("structure")?;
         let mut cars = Vec::with_capacity(drives.len());
         for d in &drives {
             let what = || format!("drive {}", d.name);

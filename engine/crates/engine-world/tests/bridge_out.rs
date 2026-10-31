@@ -52,6 +52,10 @@ fn run(charge: bool) -> (Drops, usize) {
             }
         }
     }
+    // The pack asks for support loss (stress-ref `viaduct_reactions`): the spans' fall
+    // leaves bonds overloaded that it breaks (12 of about 300 natively).
+    let by_weight = s.world.destructible_support_loss_breaks(s.destructible).unwrap().len();
+    assert_eq!(by_weight > 0, charge, "support loss breaks bonds once the charge has gone, never before ({by_weight})");
     (s.cars.iter().enumerate().map(|(k, c)| (c.drive.name.clone(), settled[k] - low[k])).collect(), s.broken)
 }
 
