@@ -592,6 +592,8 @@ mod imp {
                 face,
                 mass,
                 modulus: e_plane as f32,
+                // No launch marks: the analytic strike's (`impact_local`) only.
+                launch: 0,
             };
             let info = ColliderInfo {
                 a: [NONE, b, KIND_BODY, 0],

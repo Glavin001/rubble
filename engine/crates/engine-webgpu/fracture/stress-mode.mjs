@@ -2,7 +2,7 @@
 // WebGPU device and canvas (engine/stress-oracle/crates/stress-web). This file loads the
 // module, forwards input (camera-input.mjs, as the page's renderer) and drives one frame per
 // animation frame; the physics, camera, shot rule and drawing are the Rust's.
-import init,{stress_init,stress_set_glb,stress_set_cuboid,stress_set_pack,stress_error,stress_stats,stress_set_running,stress_running,stress_resize,stress_drag,stress_zoom,stress_shoot,stress_set_view_mode,stress_mouse_look,stress_travel,stress_set_shot_mass_scale,stress_set_shot_speed_scale,stress_set_shot_radius_scale,stress_set_bond_strength_scale,stress_set_profile,stress_set_view,stress_set_physics_hz,stress_set_crush,stress_panic,stress_pack_shots,stress_fire_pack_shot,stress_dust} from '../generated/stress-web/stress_web.js';
+import init,{stress_init,stress_set_glb,stress_set_cuboid,stress_set_pack,stress_error,stress_stats,stress_set_running,stress_running,stress_resize,stress_drag,stress_zoom,stress_shoot,stress_set_view_mode,stress_mouse_look,stress_travel,stress_set_shot_mass_scale,stress_set_shot_speed_scale,stress_set_shot_radius_scale,stress_set_bond_strength_scale,stress_set_profile,stress_set_view,stress_set_physics_hz,stress_panic,stress_set_strike_prediction,stress_strike_prediction,stress_set_contact_fracture,stress_contact_fracture,stress_contact_fracture_available,stress_set_crush,stress_pack_shots,stress_fire_pack_shot,stress_dust} from '../generated/stress-web/stress_web.js';
 // Chrome and Edge 137+ suspend the wasm stack natively (JSPI). Elsewhere (Safari) the
 // Asyncify build of the same Rust does, driven by gpu-wait.mjs, which picks the build.
 import {JSPI,bindAsyncify,asyncifyPromising} from './gpu-wait.mjs';
@@ -56,8 +56,21 @@ export async function createStressMode(canvas){
   setShotSpeedScale(scale){stress_set_shot_speed_scale(scale)},
   setShotRadiusScale(scale){stress_set_shot_radius_scale(scale)},
   setBondStrengthScale(scale){stress_set_bond_strength_scale(scale)},
-  // The capability profile of the next load: blast_parity, or threshold (the v0 mode).
+  // The capability profile of the next load: blast_parity, threshold (the v0 mode),
+  // load_path or impact_local.
   setProfile(name){stress_set_profile(name)},
+  // Strike prediction (forward only): a shot's breaks made before the engine steps, so it
+  // meets the pieces instead of rebounding off the whole structure. Now and for the next
+  // loads of this profile; switching profile goes back to its own.
+  get strikePrediction(){return stress_strike_prediction()},
+  setStrikePrediction(on){stress_set_strike_prediction(on)},
+  // In-step contact fracture (the fracture world's modes): within the physics step, its
+  // contacts are the strikes, judged by the mode's own stress solver before the step
+  // solves; bonds break by its verdict, or the striker is stopped. For the next load (the
+  // lab reloads).
+  get contactFracture(){return stress_contact_fracture()},
+  get contactFractureAvailable(){return stress_contact_fracture_available()},
+  setContactFracture(on){stress_set_contact_fracture(on)},
   // The physics frame rate of the next load (Hz; 0 keeps the scene's).
   setPhysicsHz(hz){stress_set_physics_hz(hz)},
   // Chunk crushing of the next threshold load: 0 off, 1 the scene's crush parameters,
