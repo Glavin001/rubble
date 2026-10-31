@@ -77,7 +77,7 @@ fn the_take() {
     );
     assert_eq!(
         b.total.shots,
-        GUNS_PER_CUE * cues().len() + finale_targets().len(),
+        targets().len() + finale_targets().len(),
         "every cue and the closing volley fired"
     );
     assert!(
@@ -190,4 +190,159 @@ fn dump_frames() {
         serde_json::json!({ "frames": frames, "colors": colors }).to_string(),
     )
     .unwrap();
+}
+
+/// The aft as regions: (name, min, max) in the ship frame, by a chunk's rest position.
+fn regions() -> Vec<(&'static str, [f32; 3], [f32; 3])> {
+    use ship::*;
+    vec![
+        (
+            "stairs (his)",
+            [BREAST - 2.3, MAIN_DECK, STAIR_INNER],
+            [BREAST, QUARTER_DECK + 1.0, STAIR_OUTER + 0.1],
+        ),
+        (
+            "stairs (port)",
+            [BREAST - 2.3, MAIN_DECK, -STAIR_OUTER - 0.1],
+            [BREAST, QUARTER_DECK + 1.0, -STAIR_INNER],
+        ),
+        (
+            "balustrade",
+            [BREAST, QUARTER_DECK, -HALF_BEAM],
+            [BREAST + 0.25, QUARTER_DECK + 1.1, HALF_BEAM],
+        ),
+        (
+            "breast",
+            [BREAST - 0.01, MAIN_DECK, -HALF_BEAM],
+            [BREAST + 0.09, QUARTER_DECK, HALF_BEAM],
+        ),
+        (
+            "quarterdeck front",
+            [BREAST, QUARTER_DECK - 0.3, -HALF_BEAM],
+            [BREAST + 3.0, QUARTER_DECK, HALF_BEAM],
+        ),
+        (
+            "quarterdeck",
+            [BREAST, QUARTER_DECK - 0.3, -HALF_BEAM],
+            [22.0, QUARTER_DECK, HALF_BEAM],
+        ),
+        (
+            "qd bulwarks",
+            [BREAST, QUARTER_DECK, -4.6],
+            [22.0, QUARTER_DECK + 1.0, 4.6],
+        ),
+    ]
+}
+
+/// Share of each region's chunks knocked loose (moved more than 15 cm, or crushed).
+fn loose(b: &Broadside, rest: &[rubble::Transform]) -> Vec<(&'static str, usize, f32)> {
+    let now = b.chunk_poses();
+    regions()
+        .into_iter()
+        .map(|(name, lo, hi)| {
+            let inside: Vec<usize> = (0..rest.len())
+                .filter(|&c| {
+                    (0..3).all(|k| rest[c].position[k] >= lo[k] && rest[c].position[k] <= hi[k])
+                })
+                .filter(|&c| name != "qd bulwarks" || rest[c].position[2].abs() > ship::HALF_BEAM)
+                .collect();
+            let gone = inside
+                .iter()
+                .filter(|&&c| {
+                    b.crushed[c]
+                        || (glam::Vec3::from(now[c].position) - glam::Vec3::from(rest[c].position))
+                            .length()
+                            > 0.15
+                })
+                .count();
+            (name, inside.len(), gone as f32 / inside.len().max(1) as f32)
+        })
+        .collect()
+}
+
+/// The barrage's destruction: when he reaches the main deck, and at the end.
+#[test]
+#[ignore]
+fn destruction() {
+    let mut b = Broadside::new(GpuContext::Default, GLB).unwrap();
+    // The reference poses once the first step's readback has placed every body.
+    b.step().unwrap();
+    b.poll_blocking().unwrap();
+    let rest = b.chunk_poses();
+    let frames = (std::env::var("BROADSIDE_SECONDS").map_or(20.0, |s| s.parse().unwrap()) / b.dt)
+        .round() as u32;
+    let mut landed = None;
+    let mut closest = f32::MAX;
+    let (mut worst_lift, mut worst_after) = (0.0f32, 0.0f32);
+    let t0 = Instant::now();
+    for _ in 0..frames {
+        b.step().unwrap();
+        b.poll_blocking().unwrap();
+        let c = glam::Vec3::from(b.captain_at);
+        for (id, _) in &b.balls {
+            if let Ok(s) = b.world.read_body_state(*id) {
+                if glam::Vec3::from(s.linear_velocity).length() > 50.0 {
+                    let d = glam::Vec3::from(s.transform.position) - c;
+                    let axial = d.y.clamp(-CAPTAIN_HALF, CAPTAIN_HALF);
+                    closest = closest.min((d - glam::Vec3::new(0.0, axial, 0.0)).length());
+                }
+            }
+        }
+        // He should never be thrown: his height above the floor under his path.
+        let floor = if c.x > ship::BREAST + 0.1 {
+            ship::QUARTER_DECK
+        } else if c.x < ship::BREAST - 2.3 {
+            ship::MAIN_DECK
+        } else {
+            ship::MAIN_DECK + (ship::BREAST - c.x).clamp(0.0, 2.4) * -1.0 + 2.4
+        };
+        if (b.captain_vel[1].abs() > 3.0
+            || b.captain_vel[0].abs() > 2.0
+            || b.captain_vel[2].abs() > 2.0)
+            && std::env::var_os("BROADSIDE_WHY").is_some()
+        {
+            let on = b.captain_on;
+            let mass = b.world.body_mass_data(on).ok().flatten().map(|m| m.mass);
+            eprintln!("  lift at frame {}: pos {:?} vel {:?} on {on:?} (mass {mass:?}) ground vel {:?} grounded {}", b.frame, b.captain_at, b.captain_vel, b.captain_ground_vel, b.captain_ground);
+        }
+        let lift = c.y - CAPTAIN_HALF - CAPTAIN_RADIUS - floor;
+        if landed.is_none() {
+            worst_lift = worst_lift.max(lift);
+        } else {
+            worst_after = worst_after.max(lift);
+        }
+        if landed.is_none() && c.x < ship::BREAST - 2.4 && c.y < ship::MAIN_DECK + 1.2 {
+            landed = Some(b.frame);
+            eprintln!(
+                "he reaches the main deck at {:.2} s ({} shots):",
+                b.seconds(),
+                b.total.shots
+            );
+            for (n, k, f) in loose(&b, &rest) {
+                eprintln!("  {n:18} {k:5} chunks, {:5.1}% loose", 100.0 * f);
+            }
+        }
+        if b.frame % 120 == 0 {
+            eprintln!(
+                "t {:.1} s: captain {:?}, shots {}, broken {}, crushed {}, pieces {}",
+                b.seconds(),
+                b.captain_at.map(|x| (x * 100.0).round() / 100.0),
+                b.total.shots,
+                b.total.broken,
+                b.total.crushed,
+                b.world.destructible_stats(b.ship).unwrap().actors
+            );
+        }
+    }
+    eprintln!(
+        "end at {:.1} s ({} shots, {:.0} ms/step, finale {:?}):",
+        b.seconds(),
+        b.total.shots,
+        t0.elapsed().as_secs_f64() * 1e3 / frames as f64,
+        b.finale
+    );
+    for (n, k, f) in loose(&b, &rest) {
+        eprintln!("  {n:18} {k:5} chunks, {:5.1}% loose", 100.0 * f);
+    }
+    eprintln!("closest shot {closest:.2} m; highest he rose above his floor: {worst_lift:.2} m on the way down, {worst_after:.2} m after; final {:?}", b.captain_at);
 }

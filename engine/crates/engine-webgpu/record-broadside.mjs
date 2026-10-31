@@ -49,7 +49,7 @@ const cleanup = () => { try { chrome.kill('SIGKILL'); } catch {} rmSync(profile,
 process.on('exit', cleanup);
 
 let targets = [];
-for (let i = 0; i < 100 && !targets.length; i++) {
+for (let i = 0; i < 600 && !targets.length; i++) {
   try { targets = (await (await fetch(`http://127.0.0.1:${debugPort}/json`)).json()).filter((t) => t.type === 'page'); } catch {}
   if (!targets.length) await new Promise((r) => setTimeout(r, 100));
 }

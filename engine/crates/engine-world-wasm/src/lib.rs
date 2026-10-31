@@ -250,9 +250,8 @@ fn render_poses(l: &Loaded) -> Vec<Transform> {
         poses.push(if b.crushed[c] { parked() } else { t });
     }
     poses.resize(l.render_bodies, parked());
-    // The captain stands on the capsule's foot.
-    let c = b.captain_at;
-    poses.push(Transform::new(c, [0.0, 0.0, 0.0, 1.0]));
+    // The captain is a scripted point for now (no figure drawn).
+    poses.push(parked());
     let balls = b.ball_poses();
     for k in 0..MAX_BALLS {
         poses.push(balls.get(k).copied().unwrap_or_else(parked));
@@ -287,7 +286,7 @@ pub fn broadside_time_scale() -> f32 {
     LOADED.with_borrow(|l| l.as_ref().map_or(1.0, |l| Director::time_scale(&l.b)))
 }
 
-/// Free play: stop the script (cues, walk, finale) from here on, or start it again.
+/// Free play: stop the script (barrage, walk, finale) from here on, or start it again.
 #[wasm_bindgen]
 pub fn broadside_set_scripted(on: bool) {
     LOADED.with_borrow_mut(|l| {
