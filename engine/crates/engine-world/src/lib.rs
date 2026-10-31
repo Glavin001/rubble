@@ -26,6 +26,7 @@ mod defs;
 mod destruction;
 mod error;
 mod events;
+mod guidance;
 mod handles;
 mod joints;
 mod math;
@@ -58,6 +59,10 @@ pub use events::{
     coalesce, BodyEvents, BodyMoveEvent, BreakCause, CoalescedFrame, ContactBeginEvent,
     ContactEndEvent, ContactEvents, CrushCause, DestructionEvent, Frame, RayBatchId,
     RayBatchResult, SensorEvent, SensorEvents, SkinId, SkinOutput, SoftOutput, VehicleOutput,
+};
+pub use guidance::{
+    BodyGuidance, GuidanceCapacity, GuidanceSettings, GuidanceZone, GuideEnd, GuideState,
+    ZoneAnchor, ZoneMotion, ZoneShape, GUIDE_PATH_KEYS,
 };
 pub use handles::{BodyId, JointId, ShapeId};
 pub use joints::{
@@ -145,6 +150,8 @@ pub struct WorldDef {
     /// Steps whose results can be in flight at once.
     pub readback_frames: u32,
     pub backpressure: Backpressure,
+    /// Directed debris buffers ([`World::set_guidance`]); `None`: off.
+    pub guidance: Option<GuidanceCapacity>,
     /// Contact begins at or above this approach speed (m/s) on shapes with
     /// `enable_hit_events` are also reported as hits (Box3D
     /// `hitEventThreshold`).
@@ -167,6 +174,7 @@ impl Default for WorldDef {
             readback_frames: 3,
             hit_event_threshold: 1.0,
             backpressure: Backpressure::Block,
+            guidance: None,
         }
     }
 }
@@ -458,6 +466,7 @@ impl World {
             soft: def.soft,
             features,
             pose_output: true,
+            guidance: def.guidance,
         };
         let (info, device, queue) = match gpu {
             GpuContext::Default => engine_webgpu::default_device()?,
@@ -783,6 +792,7 @@ impl World {
         let index = id.index();
         self.fracture.body_destroyed(index);
         self.sim.cancel_body_commands(index);
+        self.sim.clear_guide_body(index);
         let p = graveyard(index);
         let mut parked = BodyState::static_plane_support();
         parked.position = p;
