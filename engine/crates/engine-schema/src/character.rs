@@ -53,7 +53,11 @@ pub const EVENT_CHAR_SUPPORT_LOST: u32 = 6;
 pub const EVENT_CHAR_CRUSHED: u32 = 7;
 pub const EVENT_PROJECTILE_HIT: u32 = 8;
 pub const EVENT_PROJECTILE_STOPPED: u32 = 9;
-pub const CHAR_MAX_CANDIDATES: u32 = 288;
+/// Colliders a character gathers in a step (its scratch region holds this many); more
+/// set `OVERFLOW_CHAR_CANDIDATES`.
+pub const CHAR_MAX_CANDIDATES: u32 = 1024;
+/// Slots a gathered candidate takes in the scratch region.
+pub const CAND_STRIDE: u32 = 4;
 pub const PROJ_SEGMENTS: u32 = 4;
 pub const PROJ_MAX_HITS: u32 = 8;
 
@@ -108,6 +112,7 @@ pub const LAYOUT: &[(&str, u32)] = &[
     ("EVENT_PROJECTILE_HIT", EVENT_PROJECTILE_HIT),
     ("EVENT_PROJECTILE_STOPPED", EVENT_PROJECTILE_STOPPED),
     ("CHAR_MAX_CANDIDATES", CHAR_MAX_CANDIDATES),
+    ("CAND_STRIDE", CAND_STRIDE),
     ("PROJ_SEGMENTS", PROJ_SEGMENTS),
     ("PROJ_MAX_HITS", PROJ_MAX_HITS),
 ];
@@ -139,8 +144,13 @@ impl CharacterCapacity {
     pub fn projectile_base(&self) -> u32 {
         self.query_base() + self.max_queries * QUERY_STRIDE
     }
-    pub fn slots(&self) -> u32 {
+    /// Each character's candidate scratch (`CHAR_MAX_CANDIDATES` of `CAND_STRIDE` slots),
+    /// after the projectiles; the kernel finds it from the header's bases.
+    pub fn candidate_base(&self) -> u32 {
         self.projectile_base() + self.max_projectiles * PROJ_STRIDE
+    }
+    pub fn slots(&self) -> u32 {
+        self.candidate_base() + self.max_characters * CHAR_MAX_CANDIDATES * CAND_STRIDE
     }
     pub fn bytes(&self) -> u64 {
         u64::from(self.slots()) * 16
@@ -437,6 +447,7 @@ mod tests {
         let c = CharacterCapacity::default();
         assert!(c.query_base() >= c.character_base() + c.max_characters * CHAR_STRIDE);
         assert!(c.projectile_base() >= c.query_base() + c.max_queries * QUERY_STRIDE);
+        assert!(c.candidate_base() >= c.projectile_base() + c.max_projectiles * PROJ_STRIDE);
         assert_eq!(c.bytes(), u64::from(c.slots()) * 16);
     }
 }

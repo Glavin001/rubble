@@ -61,11 +61,26 @@ Collider capsuleShape(float r, float hh)
 // Workgroup state of one character
 // ---------------------------------------------------------------------------
 groupshared AUint gsCandCount;
-groupshared uint gsCand[CHAR_MAX_CANDIDATES];
-groupshared float4 gsPlane[CHAR_MAX_CANDIDATES];  // normal toward the character, gap (m)
-groupshared float4 gsMove[CHAR_MAX_CANDIDATES];   // obstacle displacement at the contact this step, asfloat(info)
-groupshared float4 gsSurf[CHAR_MAX_CANDIDATES];   // surface normal under the contact (faces, not edges)
 groupshared float4 gsShare[4];
+
+// The character's candidates live in its scratch region of gCharData (after the
+// projectiles, CAND_STRIDE slots each), not in workgroup memory, so a densely
+// fractured floor can offer CHAR_MAX_CANDIDATES of them: per candidate its
+// collider (x), contact plane (normal toward the character, gap), obstacle
+// displacement at the contact this step and asfloat(info), and surface normal
+// under the contact (faces, not edges). Lanes exchange them through
+// STORAGE_SYNC.
+static uint sCandBase;
+uint candBase(uint c)
+{
+    uint4 b = CU(CH_BASES);
+    return b.z + b.w * PROJ_STRIDE + c * CHAR_MAX_CANDIDATES * CAND_STRIDE;
+}
+uint candSlot(uint k) { return sCandBase + k * CAND_STRIDE; }
+uint candId(uint k) { return asuint(gCharData[candSlot(k)].x); }
+float4 candPlane(uint k) { return gCharData[candSlot(k) + 1u]; }
+float4 candMove(uint k) { return gCharData[candSlot(k) + 2u]; }
+float4 candSurf(uint k) { return gCharData[candSlot(k) + 3u]; }
 
 static const uint PI_VALID = 1u;
 static const uint PI_BLOCKS = 2u;   // static, kinematic or heavy dynamic: the character cannot push it
@@ -82,7 +97,7 @@ struct CollectVisitor : IColliderVisitor
         if (col.shape != SHAPE_PLANE && !segmentHitsAabb(mn, mx, gAabbs[HOST_S(1) + ci])) return;
         uint slot;
         AADD3(gsCandCount, 1u, slot);
-        if (slot < CHAR_MAX_CANDIDATES) gsCand[slot] = ci;
+        if (slot < CHAR_MAX_CANDIDATES) gCharData[candSlot(slot)] = asfloat(uint4(ci, 0u, 0u, 0u));
     }
 };
 
@@ -194,18 +209,18 @@ void castCandidates(uint lane, bool live, float3 S, float3 disp, float r, float 
     Collider cap = capsuleShape(r, hh);
     for (uint k = lane; k < n; k += 64u)
     {
-        uint info = asuint(gsMove[k].w);
+        uint info = asuint(candMove(k).w);
         if ((info & PI_VALID) == 0u) continue;
         if (blockingOnly && (info & PI_BLOCKS) == 0u) continue;
-        float3 rel = disp - (motion == MOTION_DURING ? gsMove[k].xyz : float3(0, 0, 0));
-        float3 start = S - (motion == MOTION_AFTER ? gsMove[k].xyz : float3(0, 0, 0));
+        float3 rel = disp - (motion == MOTION_DURING ? candMove(k).xyz : float3(0, 0, 0));
+        float3 start = S - (motion == MOTION_AFTER ? candMove(k).xyz : float3(0, 0, 0));
         float L = length(rel);
         if (L < 1e-6) continue;
         float t;
         float3 nrm;
-        if (!shapeCastCollider(cap, start, float4(0, 0, 0, 1), rel / L, L + skin, gsCand[k], t, nrm)) continue;
+        if (!shapeCastCollider(cap, start, float4(0, 0, 0, 1), rel / L, L + skin, candId(k), t, nrm)) continue;
         if (t < 0.0) continue; // overlapping at the start: the planes own it
-        if (upFacingOnly && castSurfaceNormal(gsCand[k], r, hh, start, rel / L, t, nrm).y < 0.1) continue;
+        if (upFacingOnly && castSurfaceNormal(candId(k), r, hh, start, rel / L, t, nrm).y < 0.1) continue;
         // Stop `skin` short of the hit along the cast (the plane solve keeps
         // the perpendicular skin; this cast only catches what it missed).
         float back = skin;
@@ -242,6 +257,7 @@ void char_move(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     uint lane = lid.x;
     bool live = c < charCount();
     uint cr = live ? charRec(c) : 0u;
+    sCandBase = live ? candBase(c) : 0u;
     uint4 cfg = live ? CU(cr + C_CFG) : uint4(0, 0, 0, 0);
     live = live && (cfg.y & CF_ENABLED) != 0u;
     float4 shape = live ? CD(cr + C_SHAPE) : float4(0.3, 0.6, 0.02, 0.7);
@@ -300,7 +316,7 @@ void char_move(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         v.filter.mask = cfg.z;
         sceneWalk(lane, live, P, P + D, reach, charFullScan(), v);
     }
-    GROUP_SYNC();
+    STORAGE_SYNC();
     uint nCand = live ? candidateCount() : 0u;
     if (live && lane == 0u && ALOAD(gsCandCount) > CHAR_MAX_CANDIDATES)
         AOR2(gCounters[0].overflowFlags, OVERFLOW_CHAR_CANDIDATES);
@@ -308,7 +324,7 @@ void char_move(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     float spec = length(D) + skin + 0.05;
     for (uint k = lane; k < nCand; k += 64u)
     {
-        uint ci = gsCand[k];
+        uint ci = candId(k);
         float3 n; float gap; float3 point;
         uint info = 0u;
         float3 U = float3(0, 0, 0);
@@ -324,11 +340,11 @@ void char_move(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             if (!dyn || m >= mass.x * mass.y) info |= PI_BLOCKS;
             U = bodyPointMotion(ob, point);
         }
-        gsPlane[k] = float4(n, gap);
-        gsMove[k] = float4(U, asfloat(info));
-        gsSurf[k] = float4(sn, 0.0);
+        gCharData[candSlot(k) + 1u] = float4(n, gap);
+        gCharData[candSlot(k) + 2u] = float4(U, asfloat(info));
+        gCharData[candSlot(k) + 3u] = float4(sn, 0.0);
     }
-    GROUP_SYNC();
+    STORAGE_SYNC();
     // 4. Plane solve (lane 0): the displacement closest to D that keeps every
     // blocking plane `skin` away, each plane moving with its body. Cyclic
     // projection: one plane slides, two meet in a crease, three stop.
@@ -341,10 +357,10 @@ void char_move(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             bool moved = false;
             for (uint k = 0u; k < nCand; k++)
             {
-                uint info = asuint(gsMove[k].w);
+                uint info = asuint(candMove(k).w);
                 if ((info & (PI_VALID | PI_BLOCKS)) != (PI_VALID | PI_BLOCKS)) continue;
-                float3 n = gsPlane[k].xyz;
-                float need = min(skin - gsPlane[k].w, mass.z) + dot(n, gsMove[k].xyz);
+                float3 n = candPlane(k).xyz;
+                float need = min(skin - candPlane(k).w, mass.z) + dot(n, candMove(k).xyz);
                 float cv = dot(n, X) - need;
                 if (cv < -1e-6)
                 {
@@ -354,7 +370,7 @@ void char_move(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
             }
             if (it == 0u)
                 for (uint k = 0u; k < nCand; k++)
-                    if ((asuint(gsMove[k].w) & (PI_VALID | PI_BLOCKS)) == (PI_VALID | PI_BLOCKS)) blocking++;
+                    if ((asuint(candMove(k).w) & (PI_VALID | PI_BLOCKS)) == (PI_VALID | PI_BLOCKS)) blocking++;
             if (!moved) break;
         }
         gsShare[0] = float4(X, asfloat(blocking));
@@ -406,8 +422,8 @@ void char_move(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         {
             float t; float3 nrm;
             Collider cap = capsuleShape(r, hh);
-            if (shapeCastCollider(cap, P2, float4(0, 0, 0, 1), -CHAR_UP, up + 2.0 * skin, gsCand[downK], t, nrm))
-                walkable = castSurfaceNormal(gsCand[downK], r, hh, P2, -CHAR_UP, t, nrm).y >= cosSlope;
+            if (shapeCastCollider(cap, P2, float4(0, 0, 0, 1), -CHAR_UP, up + 2.0 * skin, candId(downK), t, nrm))
+                walkable = castSurfaceNormal(candId(downK), r, hh, P2, -CHAR_UP, t, nrm).y >= cosSlope;
         }
         float3 Xs = P3 - P;
         if (landed && walkable && length(float3(Xs.x, 0.0, Xs.z)) > length(Xh) + 1e-4 && Xs.y > 1e-4)
@@ -432,8 +448,8 @@ void char_move(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
         {
             float t; float3 nrm;
             Collider cap = capsuleShape(r, hh);
-            if (shapeCastCollider(cap, S - gsMove[stickK].xyz, float4(0, 0, 0, 1), -CHAR_UP, mv.y + 2.0 * skin, gsCand[stickK], t, nrm) &&
-                castSurfaceNormal(gsCand[stickK], r, hh, S - gsMove[stickK].xyz, -CHAR_UP, t, nrm).y >= cosSlope)
+            if (shapeCastCollider(cap, S - candMove(stickK).xyz, float4(0, 0, 0, 1), -CHAR_UP, mv.y + 2.0 * skin, candId(stickK), t, nrm) &&
+                castSurfaceNormal(candId(stickK), r, hh, S - candMove(stickK).xyz, -CHAR_UP, t, nrm).y >= cosSlope)
                 gsShare[1] = float4(-CHAR_UP * ((mv.y + skin) * stickF), 1.0);
         }
     }
@@ -461,14 +477,14 @@ void char_move(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     {
         float t; float3 nrm;
         Collider cap = capsuleShape(r, hh);
-        if (shapeCastCollider(cap, Pn - gsMove[gK].xyz, float4(0, 0, 0, 1), -CHAR_UP, probe + skin, gsCand[gK], t, nrm))
+        if (shapeCastCollider(cap, Pn - candMove(gK).xyz, float4(0, 0, 0, 1), -CHAR_UP, probe + skin, candId(gK), t, nrm))
         {
             // Walkability from the face under the contact, not an edge's
             // tilted contact normal (stairs: no steep-ground flicker).
             float3 contactN = nrm;
-            nrm = castSurfaceNormal(gsCand[gK], r, hh, Pn - gsMove[gK].xyz, -CHAR_UP, t, nrm);
+            nrm = castSurfaceNormal(candId(gK), r, hh, Pn - candMove(gK).xyz, -CHAR_UP, t, nrm);
             gN = nrm;
-            gCol = gsCand[gK];
+            gCol = candId(gK);
             gBody = gColliders[gCol].body;
             newState = nrm.y >= cosSlope ? GS_ON_GROUND : GS_ON_STEEP;
             gPoint = Pn - CHAR_UP * (hh + r + max(t, 0.0));
@@ -480,16 +496,16 @@ void char_move(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     {
         for (uint k = 0u; k < nCand; k++)
         {
-            uint info = asuint(gsMove[k].w);
-            float4 pl = gsPlane[k];
-            float gapNow = pl.w + dot(pl.xyz, X - gsMove[k].xyz);
-            float3 sn = gsSurf[k].xyz;
+            uint info = asuint(candMove(k).w);
+            float4 pl = candPlane(k);
+            float gapNow = pl.w + dot(pl.xyz, X - candMove(k).xyz);
+            float3 sn = candSurf(k).xyz;
             // Only surfaces that face up support the character.
             if ((info & PI_VALID) == 0u || gapNow > probe || pl.y <= 0.1 || sn.y <= 0.1) continue;
             if (sn.y > gN.y || newState == GS_IN_AIR)
             {
                 gN = sn;
-                gCol = gsCand[k];
+                gCol = candId(k);
                 gBody = gColliders[gCol].body;
                 newState = sn.y >= cosSlope ? GS_ON_GROUND : GS_ON_STEEP;
             }
@@ -498,9 +514,9 @@ void char_move(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     // Crushed: a dynamic body presses down into a grounded character.
     for (uint k = 0u; k < nCand; k++)
     {
-        uint info = asuint(gsMove[k].w);
-        if ((info & (PI_VALID | PI_DYNAMIC)) == (PI_VALID | PI_DYNAMIC) && gsPlane[k].y < -0.5 &&
-            gsPlane[k].w < -0.25 * r && newState == GS_ON_GROUND)
+        uint info = asuint(candMove(k).w);
+        if ((info & (PI_VALID | PI_DYNAMIC)) == (PI_VALID | PI_DYNAMIC) && candPlane(k).y < -0.5 &&
+            candPlane(k).w < -0.25 * r && newState == GS_ON_GROUND)
             outFlags |= CO_CRUSHED;
     }
     // Velocity for the next step: the move made (walls and ceilings stop it).
