@@ -59,7 +59,7 @@ export async function createStressMode(canvas,onShot=()=>{}){
   get packShots(){return JSON.parse(stress_pack_shots())},
   firePackShot(index){return stress_fire_pack_shot(index)},
   // The camera, as a drag (px) and a scroll would move it.
-  orbit(dx,dy){stress_drag(dx,dy)},zoom(delta){stress_zoom(delta)},
+  drag(dx,dy){stress_drag(dx,dy)},zoom(delta){stress_zoom(delta)},
   setShotMassScale(scale){stress_set_shot_mass_scale(scale)},
   // The shots' speed (from the next shot) and radius (from the next load), as multiples
   // of the lab's.

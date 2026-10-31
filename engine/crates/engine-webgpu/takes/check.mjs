@@ -3,7 +3,11 @@
 //   - frames: the take's segments ask for sum(n) video frames; the page must report that
 //     many, upload that many and the MP4 must hold that many;
 //   - black or near-uniform frames (a frame drawn before the scene, a lost device, a
-//     camera inside a wall), from the MP4 decoded small and grey;
+//     camera inside a wall), from the MP4 decoded small and grey, and frames whose view
+//     alone (the page's probe, without the caption that keeps a frame from looking
+//     uniform) is near uniform: nothing in shot;
+//   - a camera that is not a number (`cam` logged with NaN or null: a script's relative
+//     camera taken from a scene orbit the view did not report);
 //   - page errors: exceptions, console errors, WebGPU validation messages;
 //   - counters going backwards (per video frame, `lab.counters()`): bonds broken, the
 //     physics frame and simulated time never decrease;
@@ -77,6 +81,10 @@ export function checkTake(take, rec, { uploaded, errors, images }) {
   const flat = runs((i) => images[i].mean >= BLACK_MEAN && images[i].std < UNIFORM_STD);
   if (flat.length) fail.push(`near-uniform frames: ${flat.join(', ')}`);
   const log = rec.log || [];
+  const empty = runs((i) => typeof log[i]?.std === 'number' && log[i].std < UNIFORM_STD);
+  if (empty.length) fail.push(`near-uniform views (nothing in shot): ${empty.join(', ')}`);
+  const lost = runs((i) => Array.isArray(log[i]?.cam) && log[i].cam.some((v) => !Number.isFinite(v)));
+  if (lost.length) fail.push(`cameras that are not numbers: ${lost.join(', ')}`);
   for (const key of ['brokenBonds', 'frames', 'simSeconds']) {
     for (let i = 1; i < log.length; i++) {
       if (log[i][key] === undefined || log[i - 1][key] === undefined) continue;

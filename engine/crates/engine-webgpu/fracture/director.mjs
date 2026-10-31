@@ -95,10 +95,12 @@ export function createDirector(lab) {
     const pending = new Set();
     // The view alone (no caption), small, for the take check: each frame's mean absolute
     // difference (0..255) from the last frame and from the one before (frozen or flickering
-    // frames), exact, before any encoding.
+    // frames), and its spread (standard deviation of the grey view: nothing in shot), exact,
+    // before any encoding.
     const probe = new OffscreenCanvas(160, 90), pg = probe.getContext('2d', { willReadFrequently: true });
     let last = null, before = null;
     const meanDiff = (a, b) => { if (!b) return null; let d = 0; for (let i = 0; i < a.length; i += 4) d += Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]); return d / (0.75 * a.length); };
+    const spread = (a) => { let sum = 0, sq = 0; for (let i = 0; i < a.length; i += 4) { const v = (a[i] + a[i + 1] + a[i + 2]) / 3; sum += v; sq += v * v; } const m = sum / (a.length / 4); return Math.sqrt(Math.max(0, sq / (a.length / 4) - m * m)); };
     let n = 0;
     // Captions or stats lines too wide for the frame (the check reports them).
     const overflow = new Set();
@@ -116,7 +118,7 @@ export function createDirector(lab) {
         g.drawImage(canvas, 0, 0, W, H);
         pg.drawImage(canvas, 0, 0, 160, 90);
         const px = pg.getImageData(0, 0, 160, 90).data;
-        const view = { d1: meanDiff(px, last), d2: meanDiff(px, before) };
+        const view = { d1: meanDiff(px, last), d2: meanDiff(px, before), std: spread(px) };
         before = last;
         last = px;
         if (caption !== '') {
@@ -143,7 +145,7 @@ export function createDirector(lab) {
         if (pending.size > 16) await Promise.race(pending);
       },
       async done() { await Promise.all(pending); return n; },
-      // The last frame's view differences ({d1, d2}).
+      // The last frame's view differences and spread ({d1, d2, std}).
       view() { return frameView; },
     };
   }

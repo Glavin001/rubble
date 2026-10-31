@@ -419,7 +419,7 @@ window.__FRACTURE_DEMO__={get sliceRate(){return sliceRate},
  // shot at its launch time and draws). orbit/zoom move the stress camera as a drag would.
  get stressReady(){return !loading&&stressOn&&!!stress},
  async stressAdvance(ms=1000/60){stressCapture=true;await frame;await stress.frame(ms);const st=stress.stats;firePendingShot(st);setStatus(stressStatus(st));return st},
- stressOrbit(dx,dy){stress.orbit(dx,dy)},stressZoom(delta){stress.zoom(delta)},
+ stressOrbit(dx,dy){stress.drag(dx,dy)},stressZoom(delta){stress.zoom(delta)},
  get status(){return $('status').textContent},
  // The page's own shot (a click's path: queued behind the frame, the loop keeps running).
  shoot:ray=>shoot(ray),
