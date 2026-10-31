@@ -347,6 +347,9 @@ fn capacity(asset: &DestructibleAssetDesc, crush_budget: u32) -> anyhow::Result<
         1 << 30,
     );
     c.max_candidates = c.max_candidates.max(c.max_contacts);
+    // A deep pile of wreck needs more colours than standing structure; colours past the
+    // planned ones run in the sparse tail, solved the same way.
+    c.max_colors = c.max_colors.max(64);
     Ok(c)
 }
 

@@ -8,8 +8,13 @@
 
 use engine_schema::{AvbdParams, StepCounters, WorldCapacity};
 
-/// Jones-Plassmann rounds a step may use (dispatched plus tail).
+/// Jones-Plassmann rounds a step may dispatch (more run in the tail).
 pub const COLOR_ROUND_LIMIT: u32 = 32;
+/// Rounds `color_bodies_tail` may run in all (the dispatched ones included). It stops as
+/// soon as every body is coloured, so the limit costs nothing until a dense pile (a
+/// razed ship's wreck) has longer chains of blocking neighbours than the dispatched
+/// rounds; past it the step reports `OVERFLOW_COLORS`.
+pub const COLOR_TAIL_ROUND_LIMIT: u32 = 1024;
 /// Sleep times at or above this never elapse in a run (benchmarks use 1e6 s).
 pub const SLEEP_NEVER_S: f32 = 1.0e5;
 /// Buffer id of the host-written counter block a pipelined step copies into
@@ -525,13 +530,16 @@ pub fn encode_step(
         e.d("color_bodies_local", 64);
     }
     // Rounds dispatched: last step's need plus headroom; color_bodies_tail runs
-    // any further rounds in one workgroup up to the same limit, so colouring
-    // always finishes (8cl). Pass value = round index (slots 0..47 hold i).
+    // any further rounds in one workgroup up to COLOR_TAIL_ROUND_LIMIT, so
+    // colouring finishes (8cl). It returns at once when the dispatched rounds
+    // did, so the adaptive plan always has it (a pile may need more than
+    // COLOR_ROUND_LIMIT rounds); full controls dispatch exactly the 32 rounds.
+    // Pass value = round index (slots 0..47 hold i).
     let rounds = color_rounds_dispatched(m, &i.last);
     for round in 0..rounds {
         e.wp("color_bodies", 69, round);
     }
-    if rounds < COLOR_ROUND_LIMIT {
+    if rounds < COLOR_ROUND_LIMIT || m.color_round_headroom.is_some() {
         e.dp("color_bodies_tail", 64, rounds);
     }
     e.phase("coloring");
@@ -1176,7 +1184,7 @@ pub fn step_counters(i: &StepInputs) -> StepCounters {
         collider_count: i.collider_count,
         joint_count: i.joint_count,
         // Read by color_bodies_tail: rounds allowed this step.
-        color_round_limit: COLOR_ROUND_LIMIT,
+        color_round_limit: COLOR_TAIL_ROUND_LIMIT,
         ..StepCounters::default()
     }
 }
