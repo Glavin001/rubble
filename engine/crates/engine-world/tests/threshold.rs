@@ -24,14 +24,22 @@ fn capacity(asset: &DestructibleAssetDesc) -> WorldCapacity {
 /// A world with the asset's threshold solver and the stress scene's ground, `offset`
 /// placing the asset.
 fn world_for(asset: &DestructibleAssetDesc, offset: [f32; 3]) -> World {
-    let solver = asset
+    let mut solver = asset
         .solver_for(StrengthModel::Threshold)
         .expect("threshold solver");
+    // THRESHOLD_SLEEP=1 (probe): the engine's default sleep thresholds instead of never.
+    let sleep = std::env::var("THRESHOLD_SLEEP").is_ok();
+    if sleep {
+        let d = AvbdParams::default();
+        solver.sleep_lin = d.sleep_lin;
+        solver.sleep_ang = d.sleep_ang;
+        solver.sleep_time = d.sleep_time;
+    }
     let def = WorldDef {
         capacity: capacity(asset),
         gravity: [0.0, solver.gravity_y, 0.0],
         solver,
-        enable_sleep: false,
+        enable_sleep: sleep,
         contacts: ContactStorage::Canonical,
         ..WorldDef::default()
     };
@@ -155,7 +163,7 @@ fn run_world_among(
         .create_destructible(&DestructibleDef {
             model: StrengthModel::Threshold,
             transform: Transform::new(offset, [0.0, 0.0, 0.0, 1.0]),
-            asleep: false,
+            asleep: std::env::var("THRESHOLD_START_ASLEEP").is_ok(),
             ..DestructibleDef::new(a)
         })
         .unwrap();
