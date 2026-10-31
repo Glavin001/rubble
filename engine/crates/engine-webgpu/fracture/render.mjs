@@ -61,6 +61,8 @@ struct O{@builtin(position)p:vec4f,@location(0)c:vec4f};
    trailGroup=device.createBindGroup({layout:trailPipe.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:trailView}},{binding:1,resource:{buffer:trailBuf}}]})}
   device.queue.writeBuffer(trailBuf,0,data);
  },
+ // A scripted camera (a take's shot): fly mode, the eye at `eye` looking at `target`.
+ lookAt(eye,target){orbit.lookAt(eye[0],eye[1],eye[2],target[0],target[1],target[2]);input.modeChanged()},
  // The camera's view mode (0 orbit, 1 first-person walk, 2 fly: engine-fracture ViewMode).
  get viewMode(){return orbit.mode},
  set viewMode(mode){orbit.setMode(mode|0,aspect());input.modeChanged()},
