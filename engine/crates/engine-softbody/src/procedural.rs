@@ -45,6 +45,12 @@ pub struct CarParams {
     /// raised and weaker, so a frontal crash folds it upward in a tent, and its hinge and
     /// latch mounts strong enough to keep it on while its middle lifts off.
     pub bonnet_crease: bool,
+    /// Front crash rails: two box-section rails inside the engine bay from the bumper beam
+    /// (through crash boxes, its first and weakest bay) to the firewall, yielding at
+    /// `rail_deform` × a grade that rises from 0.5 at the bumper to 1.5 at the firewall, so
+    /// they fold front first and carry the crash's load at a steady level into the sills.
+    pub rails: bool,
+    pub rail_deform: f32,
 }
 
 impl Default for CarParams {
@@ -72,20 +78,28 @@ impl Default for CarParams {
             engine_mass: 160.0,
             pillar_strength: 0.05,
             bonnet_crease: false,
+            rails: false,
+            rail_deform: 15_000.0,
         }
     }
 }
 
 impl CarParams {
     /// The crash-test car: the default car on 21 rings (20 cm apart, so a crash folds the
-    /// front in short buckles rather than a few long ones) with the bonnet crease. At
-    /// 56 km/h into a rigid wall it crushes about 0.6 m and stops in about 0.09 s, with
-    /// the cabin intact (`engine-webgpu` tests/soft_crumple.rs).
+    /// front in short buckles rather than a few long ones), with box-section crash rails
+    /// (45 kN), the bonnet crease and a safety cell stronger than the rails. At 56 km/h
+    /// into a rigid wall it crushes about 0.55 m at a steady ~30 g (no hard stop at the
+    /// cell), stops in about 0.1 s and keeps its cabin (`engine-webgpu` tests/soft_crumple.rs).
     pub fn sedan() -> Self {
         Self {
             name: "Rubble Sedan (procedural soft-body crash-test car)".into(),
             stations: 21,
             bonnet_crease: true,
+            rails: true,
+            rail_deform: 45_000.0,
+            // The safety cell: stronger than the rails it carries, so it stays whole.
+            cell_deform_scale: 5.0,
+            cell_strength_scale: 3.0,
             ..Self::default()
         }
     }
@@ -184,6 +198,9 @@ pub struct CarLayout {
     pub engine: Vec<u32>,
     /// Roof nodes (the passenger cell's top rows).
     pub roof: Vec<u32>,
+    /// The front crash rails' nodes (with `rails`): per bay ring from the firewall forward,
+    /// each side's box corners (inner lower, inner upper, outer lower, outer upper), left first.
+    pub rails: Vec<u32>,
 }
 
 /// [`car_truck`] and the layout of its nodes.
@@ -349,6 +366,7 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
             .filter(|&k| cabin[k])
             .flat_map(|k| [4usize, 5, 7].map(|j| (k * CAR_RING + j) as u32))
             .collect(),
+        rails: Vec::new(),
     };
     if p.panels {
         layout.rear_bumper = (rear_bumper_first as u32..rear_bumper_first as u32 + 6).collect();
@@ -375,6 +393,23 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
         }
         layout.engine = (engine_first as u32..engine_first as u32 + 8).collect();
     }
+    // Front crash rails: box sections, per ring from the firewall (the cabin's last ring)
+    // to the front, four corners each side (inner/outer × lower/upper), inside the bay.
+    let rail_first = nodes.len();
+    let rail_rings: Vec<usize> = if p.rails { (front_bay - 1..n).collect() } else { Vec::new() };
+    for &k in &rail_rings {
+        let z = ring_z(k);
+        for side in [1.0f32, -1.0] {
+            for x in [0.38f32, 0.5] {
+                for y in [0.3f32, 0.46] {
+                    nodes.push([side * x, y, z]);
+                }
+            }
+        }
+    }
+    layout.rails = (rail_first as u32..nodes.len() as u32).collect();
+    // Corner c of a rail's box: inner lower, inner upper, outer lower, outer upper.
+    let rail = |ri: usize, side: usize, c: usize| rail_first + ri * 8 + side * 4 + c;
     // Shell faces a panel covers (it is the skin there): (ring k, row a, row b).
     let covered = |k: usize, a: usize, b: usize| {
         panel_specs.iter().any(|(ks, rows)| {
@@ -789,6 +824,88 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
         }
         for (a, b) in mounts {
             let _ = writeln!(s, "{a}, {b}");
+        }
+    }
+    if !rail_rings.is_empty() {
+        // Crash rails. Each bay of each rail: four longitudinals and both diagonals of each
+        // face (a closed box that can only fold along its length), at a yield that rises
+        // from the bumper to the firewall.
+        let bays = rail_rings.len() - 1;
+        // The box's faces as corner pairs: inner, outer, bottom, top.
+        const FACES: [(usize, usize); 4] = [(0, 1), (2, 3), (0, 2), (1, 3)];
+        for ri in 0..bays {
+            // 0 at the firewall bay, 1 at the bumper's.
+            let u = (ri as f32 + 0.5) / bays as f32;
+            let grade = 1.5 - u;
+            let _ = writeln!(
+                s,
+                "\nset_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
+                p.spring,
+                p.damp,
+                p.rail_deform * grade,
+                p.strength * 4.0
+            );
+            for side in 0..2 {
+                for c in 0..4 {
+                    let _ = writeln!(s, "{}, {}", rail(ri, side, c), rail(ri + 1, side, c));
+                }
+                for (c0, c1) in FACES {
+                    let _ = writeln!(s, "{}, {}", rail(ri, side, c0), rail(ri + 1, side, c1));
+                    let _ = writeln!(s, "{}, {}", rail(ri, side, c1), rail(ri + 1, side, c0));
+                }
+            }
+        }
+        // Ties: each rail ring's box section (its four sides and a diagonal), and the box to
+        // the shell's floor and belt on its side and to the floor centre; at the firewall,
+        // back into the sill and tunnel (the load path into the cabin). Three times the
+        // rails' yield, so the rails fold before their ties give and carry the load.
+        let _ = writeln!(
+            s,
+            "\nset_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
+            p.spring,
+            p.damp,
+            (p.rail_deform * 3.0).max(p.deform * p.cell_deform_scale),
+            p.strength * p.cell_strength_scale * 2.0
+        );
+        for (ri, &k) in rail_rings.iter().enumerate() {
+            for side in 0..2 {
+                let (floor, belt) = if side == 0 { (0, 2) } else { (1, 3) };
+                for (c0, c1) in FACES.iter().copied().chain([(0, 3), (1, 2)]) {
+                    let _ = writeln!(s, "{}, {}", rail(ri, side, c0), rail(ri, side, c1));
+                }
+                for (c, j) in [(2, floor), (0, 6), (3, belt), (1, belt), (3, floor)] {
+                    let _ = writeln!(s, "{}, {}", rail(ri, side, c), ring(k, j));
+                }
+                if ri == 0 && k > 0 {
+                    for (c, j) in [(2, floor), (0, 6), (3, belt), (0, floor)] {
+                        let _ = writeln!(s, "{}, {}", rail(ri, side, c), ring(k - 1, j));
+                    }
+                }
+            }
+            // A cross member between the rails' inner bottoms.
+            let _ = writeln!(s, "{}, {}", rail(ri, 0, 0), rail(ri, 1, 0));
+        }
+        if p.bumper {
+            // Crash boxes: the rails' front ends to the bumper beam, its first and softest
+            // stage. They hold the beam on when its shell mounts tear, so the rails take the
+            // load; a hard enough hit breaks them too.
+            let last = rail_rings.len() - 1;
+            let b0 = bumper_first;
+            let _ = writeln!(
+                s,
+                "\nset_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
+                p.spring,
+                p.damp,
+                p.rail_deform * 0.4,
+                p.strength * 0.5
+            );
+            for (side, (lo, hi)) in [(0usize, (b0, b0 + 3)), (1, (b0 + 2, b0 + 5))] {
+                for c in 0..4 {
+                    for bb in [lo, hi] {
+                        let _ = writeln!(s, "{}, {}", rail(last, side, c), bb);
+                    }
+                }
+            }
         }
     }
     // Collision skin: every outer face of the shell, counter-clockwise from outside.

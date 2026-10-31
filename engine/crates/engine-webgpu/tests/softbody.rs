@@ -1011,9 +1011,13 @@ fn skinned_render_mesh_follows_the_physics_surface_through_a_crash() {
     );
     // The brittle A-pillars partly snap at 56 km/h, so the roof shell (bound to
     // the roof nodes) moves against the stretched windscreen faces by a few cm.
+    // The designed body (nose, bumper covers, shoulder crease) stands further off
+    // the cage than a plain tube, so where the front crushes its skin is
+    // extrapolated further: 4.7–6.4 cm at the 95th percentile across runs (the
+    // native GPU step is not bit-reproducible).
     assert!(
-        q(0.95) < 0.06,
-        "95% of the body stays within 6 cm of the physics skin"
+        q(0.95) < 0.07,
+        "95% of the body stays within 7 cm of the physics skin"
     );
     assert!(q(0.5) < 0.01);
 }

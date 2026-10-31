@@ -88,7 +88,7 @@ fn ring_centre(p: &[Vec3], k: usize) -> Vec3 {
     (0..CAR_RING).map(|j| p[k * CAR_RING + j]).sum::<Vec3>() / CAR_RING as f32
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Crumple {
     /// Front bay (firewall ring to the front ring) shortening, m: the most during the
     /// crash, and at the end.
@@ -105,6 +105,8 @@ pub struct Crumple {
     pub yielded: usize,
     /// Parts torn off (`PieceDetached::parts`).
     pub detached: Vec<String>,
+    /// The pulse: (time s, front crush m, cabin deceleration g), every 2 ms.
+    pub pulse: Vec<(f32, f32, f32)>,
 }
 
 fn crumple(p: &CarParams, speed: f32) -> Crumple {
@@ -144,10 +146,12 @@ fn crumple(p: &CarParams, speed: f32) -> Crumple {
     let mut out = Crumple::default();
     let dt = 1.0 / 240.0;
     let mut zs: Vec<f32> = vec![cabin_z(&rest)];
+    let mut crush: Vec<f32> = Vec::new();
     for step in 0..(240.0 * 1.2) as usize {
         sim.step().expect("step");
         let q = positions(&sim, h);
         out.crush_peak = out.crush_peak.max(bay0 - bay(&q));
+        crush.push(bay0 - bay(&q));
         // Tenting: the bonnet's top above where it was, less how much the floor moved up.
         let lift = (ring_centre(&q, firewall).y - ring_centre(&rest, firewall).y).max(0.0);
         out.bonnet_rise = out.bonnet_rise.max(bonnet_y(&q, &rest) - lift);
@@ -162,8 +166,12 @@ fn crumple(p: &CarParams, speed: f32) -> Crumple {
     }
     // Velocity, then its 5 ms (≈ CFC 60) average slope.
     let v: Vec<f32> = zs.windows(2).map(|w| (w[1] - w[0]) / dt).collect();
-    for w in v.windows(3) {
-        out.peak_g = out.peak_g.max((w[0] - w[2]) / (2.0 * dt) / 9.81);
+    for (i, w) in v.windows(3).enumerate() {
+        let g = (w[0] - w[2]) / (2.0 * dt) / 9.81;
+        out.peak_g = out.peak_g.max(g);
+        if i < crush.len() && (i as f32 * dt) < 0.16 {
+            out.pulse.push((i as f32 * dt, crush[i], g));
+        }
     }
     let end = positions(&sim, h);
     assert!(end.iter().all(|q| q.is_finite()), "finite");
@@ -178,38 +186,117 @@ fn crumple(p: &CarParams, speed: f32) -> Crumple {
     out
 }
 
+/// The mean deceleration while the front crushes from 0.1 m to 0.4 m (the rails' plateau).
+fn plateau(c: &Crumple) -> f32 {
+    let mid: Vec<f32> = c
+        .pulse
+        .iter()
+        .filter(|(_, x, _)| (0.1..0.4).contains(x))
+        .map(|p| p.2)
+        .collect();
+    mid.iter().sum::<f32>() / mid.len().max(1) as f32
+}
+
 #[test]
 fn crumple_probe() {
     let speed = 56.0 / 3.6;
-    let stations = |k: usize| CarParams {
-        stations: k,
-        ..CarParams::default()
+    // RAIL_DEFORMS=d,… and CELL=deform_scale:strength_scale (the passenger cell's).
+    let cell: Option<(f32, f32)> = std::env::var("CELL").ok().and_then(|v| {
+        let (a, b) = v.split_once(':')?;
+        Some((a.parse().ok()?, b.parse().ok()?))
+    });
+    let rails = |d: f32| {
+        let mut p = CarParams {
+            rail_deform: d,
+            ..CarParams::sedan()
+        };
+        if let Some((a, b)) = cell {
+            p.cell_deform_scale = a;
+            p.cell_strength_scale = b;
+        }
+        p
     };
-    for (name, p) in [
-        ("default", CarParams::default()),
-        ("15 rings", stations(15)),
-        ("21 rings", stations(21)),
-        ("sedan", CarParams::sedan()),
-    ] {
+    let deforms: Vec<f32> = std::env::var("RAIL_DEFORMS")
+        .ok()
+        .map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect())
+        .unwrap_or_default();
+    let mut cars = vec![
+        ("default".to_string(), CarParams::default()),
+        ("sedan".to_string(), CarParams::sedan()),
+    ];
+    for d in deforms {
+        cars.push((format!("rails {d}"), rails(d)));
+    }
+    for (name, p) in cars {
         let c = crumple(&p, speed);
         eprintln!(
-            "{name:>8}: crush peak {:.2} end {:.2} m, cabin {:+.3} m, bonnet rise {:+.3} m, peak {:.0} g, stop {:.3} s, yielded {} broken {}, off {:?}",
-            c.crush_peak, c.crush_end, c.cabin, c.bonnet_rise, c.peak_g, c.stop_s, c.yielded, c.broken, c.detached
+            "{name:>12}: crush peak {:.2} end {:.2} m, cabin {:+.3} m, bonnet rise {:+.3} m, peak {:.0} g, stop {:.3} s, yielded {} broken {}, off {:?}, plateau {:.0} g",
+            c.crush_peak, c.crush_end, c.cabin, c.bonnet_rise, c.peak_g, c.stop_s, c.yielded, c.broken, c.detached,
+            plateau(&c)
         );
     }
 }
 
 /// The crash-test car (`CarParams::sedan`) in the 56 km/h full-width rigid-wall test: its
-/// front folds about as far as a real small car's (0.5–0.7 m), its cabin keeps its length,
+/// front folds about as far as a real small car's (0.45–0.7 m) at a steady resistance (its
+/// rails), with no hard stop when the crush reaches the cell; its cabin keeps its length,
 /// its bonnet folds up into a tent and stays on, and it stops in about a tenth of a second.
 #[test]
 fn the_sedan_crumples_its_front_and_keeps_its_cabin() {
     let c = crumple(&CarParams::sedan(), 56.0 / 3.6);
-    eprintln!("{c:?}");
-    assert!((0.5..0.75).contains(&c.crush_peak), "front crush {}", c.crush_peak);
+    let level = plateau(&c);
+    eprintln!("{:?}, plateau {level:.0} g", Crumple { pulse: Vec::new(), ..c.clone() });
+    assert!((0.45..0.75).contains(&c.crush_peak), "front crush {}", c.crush_peak);
     assert!(c.cabin.abs() < 0.03, "cabin shortened {}", c.cabin);
     assert!((0.05..0.3).contains(&c.bonnet_rise), "bonnet tent {}", c.bonnet_rise);
     assert!(!c.detached.iter().any(|p| p == "bonnet"), "the bonnet stays on: {:?}", c.detached);
-    assert!((25.0..80.0).contains(&c.peak_g), "peak deceleration {} g", c.peak_g);
+    // A steady pulse: the rails hold ~20–35 g through the crush, and the peak stays near it.
+    assert!((20.0..35.0).contains(&level), "plateau {level} g");
+    assert!(c.peak_g < 1.5 * level && c.peak_g < 45.0, "peak {} g over a {level} g plateau", c.peak_g);
     assert!((0.06..0.14).contains(&c.stop_s), "stopped after {} s", c.stop_s);
+}
+
+/// The sedan's crash pulse, printed: cabin deceleration against front crush (a crash
+/// structure's force–displacement curve, force = mass × deceleration).
+#[test]
+fn sedan_pulse() {
+    let c = crumple(&CarParams::sedan(), 56.0 / 3.6);
+    for (t, x, g) in &c.pulse {
+        eprintln!("t {:6.1} ms  crush {:5.2} m  {:6.1} g", t * 1000.0, x, g);
+    }
+}
+
+/// Diagnostic: how the sedan's rail beams fared (yielded, shortened, broken).
+#[test]
+fn sedan_rails_report() {
+    let p = CarParams::sedan();
+    let (text, layout) = car_truck_layout(&p);
+    let desc = load_truck(&text);
+    let mut sim = world();
+    let front = desc.nodes.iter().map(|n| n.position[2]).fold(f32::MIN, f32::max);
+    static_box(&mut sim, [0.0, 1.5, front + 0.4 + 0.5], [4.0, 1.5, 0.5]);
+    let opts = SpawnOptions { velocity: [0.0, 0.0, 56.0 / 3.6], ..Default::default() };
+    let h = sim.add_soft_vehicle(&desc, [0.0, 0.05, 0.0], [0.0, 0.0, 0.0, 1.0], &opts).expect("spawn");
+    for _ in 0..240 {
+        sim.step().expect("step");
+    }
+    let rails: std::collections::HashSet<u32> = layout.rails.iter().copied().collect();
+    let beams = sim.read_soft_beams(h);
+    let (mut n, mut yielded, mut broken, mut short) = (0, 0, 0, 0.0f32);
+    for b in &beams {
+        if rails.contains(&b.a) && rails.contains(&b.b) {
+            n += 1;
+            if b.flags & engine_softbody::BEAM_YIELDED != 0 {
+                yielded += 1;
+            }
+            if b.broken() {
+                broken += 1;
+            }
+            short += (b.rest0 - b.rest).max(0.0);
+        }
+    }
+    let q = positions(&sim, h);
+    let r: Vec<Vec3> = layout.rails.iter().map(|&i| q[i as usize]).collect();
+    eprintln!("rail beams {n}: yielded {yielded} broken {broken}, total shortening {short:.2} m; {} rail nodes, first ring z {:.2} last ring z {:.2}",
+        r.len(), r[0].z, r[r.len() - 1].z);
 }
