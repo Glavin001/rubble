@@ -41,6 +41,10 @@ pub struct CarParams {
     /// `pillar_strength` × strength, then they snap. A low bar that catches the
     /// pillars shears the roof off instead of folding it (underride).
     pub pillar_strength: f32,
+    /// A crash structure on the bonnet (with `panels`): a crease across its middle, pre-
+    /// raised and weaker, so a frontal crash folds it upward in a tent, and its hinge and
+    /// latch mounts strong enough to keep it on while its middle lifts off.
+    pub bonnet_crease: bool,
 }
 
 impl Default for CarParams {
@@ -67,6 +71,22 @@ impl Default for CarParams {
             engine_block: true,
             engine_mass: 160.0,
             pillar_strength: 0.05,
+            bonnet_crease: false,
+        }
+    }
+}
+
+impl CarParams {
+    /// The crash-test car: the default car on 21 rings (20 cm apart, so a crash folds the
+    /// front in short buckles rather than a few long ones) with the bonnet crease. At
+    /// 56 km/h into a rigid wall it crushes about 0.6 m and stops in about 0.09 s, with
+    /// the cabin intact (`engine-webgpu` tests/soft_crumple.rs).
+    pub fn sedan() -> Self {
+        Self {
+            name: "Rubble Sedan (procedural soft-body crash-test car)".into(),
+            stations: 21,
+            bonnet_crease: true,
+            ..Self::default()
         }
     }
 }
@@ -261,8 +281,10 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
     };
     // Panel node index per (panel, ring position, row position).
     let mut panel_nodes: Vec<Vec<Vec<usize>>> = Vec::new();
-    for (ks, rows) in &panel_specs {
+    for (pi, (ks, rows)) in panel_specs.iter().enumerate() {
         let mut grid = Vec::new();
+        // The bonnet's crease ring (its middle), pre-raised so compression folds it up.
+        let crease = (p.bonnet_crease && pi == 0).then(|| ks[ks.len() / 2]);
         for &k in ks {
             let centre = {
                 let c: [f32; 3] = (0..6).fold([0.0; 3], |a, j| {
@@ -282,9 +304,18 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
                 };
                 let l = (dx * dx + dy * dy).sqrt().max(1e-4);
                 col.push(nodes.len());
+                let rise = if crease == Some(k) {
+                    if j == 7 {
+                        0.035
+                    } else {
+                        0.02
+                    }
+                } else {
+                    0.0
+                };
                 nodes.push([
                     q[0] + 0.05 * dx / l,
-                    q[1] + 0.05 * dy / l + if j < 2 { 0.03 } else { 0.0 },
+                    q[1] + 0.05 * dy / l + if j < 2 { 0.03 } else { 0.0 } + rise,
                     q[2],
                 ]);
             }
@@ -549,8 +580,14 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
         // to the shell on its own detacher group (groups 2…).
         let mut group = 2;
         let mut sheets: Vec<(Vec<(usize, usize)>, Vec<(usize, usize)>)> = Vec::new();
+        // The bonnet crease's beams (yielding early) and the bonnet's hinge and latch mounts
+        // (strong) and middle mounts (weak), written apart from the rest.
+        let mut crease_sheet = Vec::new();
+        let mut held_mounts = Vec::new();
+        let mut lifting_mounts = Vec::new();
         for (pi, (ks, rows)) in panel_specs.iter().enumerate() {
             let g = &panel_nodes[pi];
+            let crease = (p.bonnet_crease && pi == 0).then(|| ks.len() / 2);
             let mut sheet = Vec::new();
             let mut mounts = Vec::new();
             for (ki, &k) in ks.iter().enumerate() {
@@ -560,10 +597,13 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
                         sheet.push((pn, g[ki][ri + 1]));
                     }
                     if ki + 1 < ks.len() {
-                        sheet.push((pn, g[ki + 1][ri]));
+                        // Beams into or out of the crease ring fold first.
+                        let into_crease = crease.is_some_and(|c| ki + 1 == c || ki == c);
+                        let list = if into_crease { &mut crease_sheet } else { &mut sheet };
+                        list.push((pn, g[ki + 1][ri]));
                         if ri + 1 < rows.len() {
-                            sheet.push((pn, g[ki + 1][ri + 1]));
-                            sheet.push((g[ki][ri + 1], g[ki + 1][ri]));
+                            list.push((pn, g[ki + 1][ri + 1]));
+                            list.push((g[ki][ri + 1], g[ki + 1][ri]));
                         }
                     }
                     // Mounts: the shell nodes of the neighbouring rings (same row)
@@ -581,6 +621,16 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
                     // Out-of-plane anchor: the section's floor centre (a door must not
                     // tie the roof to the body).
                     mounts.push((pn, ring(k, 6)));
+                    if crease.is_some() {
+                        // Bonnet: the hinge (rear row) and latch (front row) hold, the rest
+                        // let the middle lift into its tent.
+                        let mine: Vec<(usize, usize)> = mounts.drain(..).filter(|m| m.0 == pn).collect();
+                        if ki == 0 || ki + 1 == ks.len() {
+                            held_mounts.extend(mine);
+                        } else {
+                            lifting_mounts.extend(mine);
+                        }
+                    }
                 }
             }
             sheets.push((sheet, mounts));
@@ -635,6 +685,20 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
                 let _ = writeln!(s, "{a}, {b}");
             }
         }
+        if !crease_sheet.is_empty() {
+            // The crease yields at a third of the panel's threshold (and keeps its strength).
+            let _ = writeln!(
+                s,
+                "set_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
+                p.spring,
+                p.damp,
+                p.deform * p.cell_deform_scale / 3.0,
+                p.strength * p.cell_strength_scale
+            );
+            for (a, b) in &crease_sheet {
+                let _ = writeln!(s, "{a}, {b}");
+            }
+        }
         let _ = writeln!(
             s,
             "\nset_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
@@ -643,10 +707,33 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
             p.deform,
             p.strength * p.mount_strength
         );
-        for (_, mounts) in &sheets {
+        for (si, (_, mounts)) in sheets.iter().enumerate() {
             let _ = writeln!(s, "detacher_group {group}");
             for (a, b) in mounts {
                 let _ = writeln!(s, "{a}, {b}");
+            }
+            if si == 0 && (!held_mounts.is_empty() || !lifting_mounts.is_empty()) {
+                for (scale, list) in [(3.0, &held_mounts), (0.5, &lifting_mounts)] {
+                    let _ = writeln!(
+                        s,
+                        "set_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
+                        p.spring,
+                        p.damp,
+                        p.deform,
+                        p.strength * p.mount_strength * scale
+                    );
+                    for (a, b) in list {
+                        let _ = writeln!(s, "{a}, {b}");
+                    }
+                }
+                let _ = writeln!(
+                    s,
+                    "set_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
+                    p.spring,
+                    p.damp,
+                    p.deform,
+                    p.strength * p.mount_strength
+                );
             }
             group += 1;
         }

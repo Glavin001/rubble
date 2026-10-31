@@ -176,6 +176,12 @@ namespace RubbleRender
 		}
 	}
 
+	UMaterialInterface* WheelAlloy()
+	{
+		UMaterialInterface* M = HasGeneratedContent() ? LoadGenerated<UMaterialInterface>(TEXT("MI_WheelAlloy")) : nullptr;
+		return M ? M : Surface(ERubbleMaterial::Steel);
+	}
+
 	UMaterialInterface* Ground(ERubbleStage Stage)
 	{
 		if (HasGeneratedContent())

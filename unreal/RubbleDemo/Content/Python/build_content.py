@@ -282,6 +282,7 @@ def soft_car():
     instance("MI_SoftCarInterior", s, {"Roughness": 0.9, "Grit": 0.3}, {"BaseColor": (0.045, 0.045, 0.05, 1)})
     instance("MI_SoftCarEngine", s, {"Roughness": 0.4, "Metallic": 0.7, "Grit": 0.4}, {"BaseColor": (0.22, 0.22, 0.23, 1)})
     instance("MI_SoftCarGrille", s, {"Roughness": 0.5, "Grit": 0.6}, {"BaseColor": (0.02, 0.02, 0.02, 1)})
+    instance("MI_WheelAlloy", s, {"Roughness": 0.24, "Metallic": 1.0, "Specular": 0.8, "Grit": 0.0}, {"BaseColor": (0.72, 0.73, 0.75, 1)})
 
 
 def ground():

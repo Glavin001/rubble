@@ -453,7 +453,9 @@ pub unsafe extern "C" fn rbVehicle_GetMountLoads(
 // ----- soft bodies -----------------------------------------------------------------
 
 /// A built-in soft vehicle's descriptor as JSON: `"procedural_car"` (the
-/// softbody page's hatchback; `strength` scales its beams) or `"dune_buggy"`
+/// softbody page's hatchback; `strength` scales its beams), `"procedural_sedan"`
+/// (the same car built for crash tests: 21 rings and a bonnet that tents; see
+/// `CarParams::sedan`) or `"dune_buggy"`
 /// (soft frame with bolted rigid parts; `strength` scales its mounts). 0 or
 /// less: the default.
 #[no_mangle]
@@ -467,8 +469,12 @@ pub unsafe extern "C" fn rbGetSoftVehiclePresetJson(
     guard_args(|| {
         let name = text(name, "null preset name")?;
         let desc = match name.as_ref() {
-            "procedural_car" => {
-                let d = engine_softbody::procedural::CarParams::default();
+            "procedural_car" | "procedural_sedan" => {
+                let d = if name.as_ref() == "procedural_sedan" {
+                    engine_softbody::procedural::CarParams::sedan()
+                } else {
+                    engine_softbody::procedural::CarParams::default()
+                };
                 let p = engine_softbody::procedural::CarParams {
                     strength: if strength > 0.0 { strength } else { d.strength },
                     ..d

@@ -1301,8 +1301,8 @@ enum RbResult rbSoft_BindSkinParts(struct RbWorld *world,
                                    uint32_t part_count,
                                    RbSkinId *out);
 
-// The render mesh of `"procedural_car"` (its node layout does not depend on
-// the preset's `strength`). Free it with `rbSoftVisual_Destroy`.
+// The render mesh of `"procedural_car"` or `"procedural_sedan"` (its node layout
+// does not depend on the preset's `strength`). Free it with `rbSoftVisual_Destroy`.
 enum RbResult rbCreateSoftCarVisual(const char *preset,
                                     enum RbCoordinates coordinates,
                                     const struct RbSoftVisual **out);
@@ -1404,7 +1404,9 @@ enum RbResult rbVehicle_GetMountLoads(struct RbWorld *world,
                                       uint32_t *out_count);
 
 // A built-in soft vehicle's descriptor as JSON: `"procedural_car"` (the
-// softbody page's hatchback; `strength` scales its beams) or `"dune_buggy"`
+// softbody page's hatchback; `strength` scales its beams), `"procedural_sedan"`
+// (the same car built for crash tests: 21 rings and a bonnet that tents; see
+// `CarParams::sedan`) or `"dune_buggy"`
 // (soft frame with bolted rigid parts; `strength` scales its mounts). 0 or
 // less: the default.
 enum RbResult rbGetSoftVehiclePresetJson(const char *name,

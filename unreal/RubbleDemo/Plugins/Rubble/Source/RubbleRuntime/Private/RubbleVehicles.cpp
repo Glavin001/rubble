@@ -6,6 +6,7 @@
 #include "Engine/StaticMesh.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "RubbleRender.h"
+#include "UObject/Package.h"
 #include "RubbleSubsystem.h"
 
 namespace
@@ -13,6 +14,127 @@ namespace
 	uint64 WheelKey(bool bSoft, int32 Vehicle, int32 Wheel)
 	{
 		return (uint64(bSoft) << 63) | (uint64(uint32(Vehicle)) << 32) | uint32(Wheel);
+	}
+
+	/** Revolves a (radius, axial) profile about the wheel's axle (local Y) into Out. bOut: the
+	 *  surface faces away from the axle (a tyre) rather than toward it (a rim's barrel). */
+	void Revolve(const TArray<FVector2f>& Profile, int32 Segments, bool bOut, ERubbleMaterial Material, FRubbleMeshData& Out)
+	{
+		const int32 Base = Out.Positions.Num();
+		const int32 N = Profile.Num();
+		// Profile normals, all turned the same way from the tangent, then the whole side chosen
+		// once: away from the axle on balance (or toward it).
+		TArray<FVector2f> Normals;
+		float Outward = 0.0f;
+		for (int32 j = 0; j < N; ++j)
+		{
+			const FVector2f T = Profile[FMath::Min(j + 1, N - 1)] - Profile[FMath::Max(j - 1, 0)];
+			Normals.Add(FVector2f(-T.Y, T.X).GetSafeNormal());
+			Outward += Normals.Last().X;
+		}
+		if ((Outward < 0.0f) == bOut)
+		{
+			for (FVector2f& Nn : Normals)
+			{
+				Nn = -Nn;
+			}
+		}
+		for (int32 s = 0; s <= Segments; ++s)
+		{
+			const float a = UE_TWO_PI * float(s) / Segments;
+			const float c = FMath::Cos(a), sn = FMath::Sin(a);
+			for (int32 j = 0; j < N; ++j)
+			{
+				const FVector2f Nrm = Normals[j];
+				Out.Positions.Add(FVector3f(Profile[j].X * c, Profile[j].Y, Profile[j].X * sn));
+				Out.Normals.Add(FVector3f(Nrm.X * c, Nrm.Y, Nrm.X * sn));
+			}
+		}
+		for (int32 s = 0; s < Segments; ++s)
+		{
+			for (int32 j = 0; j + 1 < N; ++j)
+			{
+				const int32 a = Base + s * N + j, b = a + 1, c = a + N, d = c + 1;
+				for (const FIntVector& T : { FIntVector(a, c, b), FIntVector(b, c, d) })
+				{
+					// Unreal winding: (c - a) x (b - a) along the surface normal.
+					const FVector3f& A = Out.Positions[T.X];
+					const FVector3f G = FVector3f::CrossProduct(Out.Positions[T.Z] - A, Out.Positions[T.Y] - A);
+					const bool bFlip = FVector3f::DotProduct(G, Out.Normals[T.X] + Out.Normals[T.Y] + Out.Normals[T.Z]) < 0.0f;
+					Out.Indices.Append({ uint32(T.X), uint32(bFlip ? T.Z : T.Y), uint32(bFlip ? T.Y : T.Z) });
+					Out.TriangleMaterials.Add(Material);
+				}
+			}
+		}
+	}
+
+	/** A box (flat-shaded) in Out: Centre, half extents along Axes (orthonormal). */
+	void AddBox(const FVector3f& Centre, const FVector3f Axes[3], const FVector3f& Half, ERubbleMaterial Material, FRubbleMeshData& Out)
+	{
+		for (int32 f = 0; f < 6; ++f)
+		{
+			const int32 k = f / 2;
+			const float sgn = f % 2 ? -1.0f : 1.0f;
+			const FVector3f N = Axes[k] * sgn;
+			const FVector3f U = Axes[(k + 1) % 3] * Half[(k + 1) % 3];
+			const FVector3f V = Axes[(k + 2) % 3] * Half[(k + 2) % 3];
+			const FVector3f C = Centre + N * Half[k];
+			const int32 Base = Out.Positions.Num();
+			for (const FVector2f& Q : { FVector2f(-1, -1), FVector2f(1, -1), FVector2f(1, 1), FVector2f(-1, 1) })
+			{
+				Out.Positions.Add(C + U * Q.X + V * Q.Y);
+				Out.Normals.Add(N);
+			}
+			for (const FIntVector& T : { FIntVector(0, 1, 2), FIntVector(0, 2, 3) })
+			{
+				const FVector3f& A = Out.Positions[Base + T.X];
+				const FVector3f G = FVector3f::CrossProduct(Out.Positions[Base + T.Z] - A, Out.Positions[Base + T.Y] - A);
+				const bool bFlip = FVector3f::DotProduct(G, N) < 0.0f;
+				Out.Indices.Append({ uint32(Base + T.X), uint32(Base + (bFlip ? T.Z : T.Y)), uint32(Base + (bFlip ? T.Y : T.Z)) });
+				Out.TriangleMaterials.Add(Material);
+			}
+		}
+	}
+
+	/** A road wheel of radius R and width W (cm), axle along local Y: a tyre with rounded
+	 *  shoulders and sidewalls (Rubber), and an alloy rim (Steel's slot) on both faces: a barrel,
+	 *  a lip, five spokes, a hub cap and lug nuts. One mesh per size. */
+	UStaticMesh* WheelMesh(float R, float W)
+	{
+		static TMap<FIntPoint, TStrongObjectPtr<UStaticMesh>> Cache;
+		const FIntPoint Key(FMath::RoundToInt(R * 10.0f), FMath::RoundToInt(W * 10.0f));
+		if (const TStrongObjectPtr<UStaticMesh>* Found = Cache.Find(Key))
+		{
+			return Found->Get();
+		}
+		const float h = 0.5f * W;
+		FRubbleMeshData M;
+		Revolve({ { 0.69f * R, 0.9f * h }, { 0.8f * R, 1.0f * h }, { 0.91f * R, 0.98f * h }, { 0.975f * R, 0.86f * h }, { R, 0.62f * h }, { 1.006f * R, 0.0f },
+			{ R, -0.62f * h }, { 0.975f * R, -0.86f * h }, { 0.91f * R, -0.98f * h }, { 0.8f * R, -1.0f * h }, { 0.69f * R, -0.9f * h } }, 48, true, ERubbleMaterial::Rubber, M);
+		// The barrel, seen through the spokes, and a lip at each face.
+		Revolve({ { 0.69f * R, 0.92f * h }, { 0.63f * R, 0.62f * h }, { 0.6f * R, 0.0f }, { 0.63f * R, -0.62f * h }, { 0.69f * R, -0.92f * h } }, 40, false, ERubbleMaterial::Steel, M);
+		for (const float s : { 1.0f, -1.0f })
+		{
+			Revolve({ { 0.64f * R, s * 0.86f * h }, { 0.7f * R, s * 0.96f * h }, { 0.72f * R, s * 0.9f * h } }, 40, true, ERubbleMaterial::Steel, M);
+			// Hub cap: a shallow dome.
+			Revolve({ { 0.2f * R, s * 0.62f * h }, { 0.16f * R, s * 0.74f * h }, { 0.08f * R, s * 0.8f * h }, { 0.0f, s * 0.82f * h } }, 24, true, ERubbleMaterial::Steel, M);
+			for (int32 k = 0; k < 5; ++k)
+			{
+				const float a = UE_TWO_PI * (float(k) + 0.1f) / 5.0f;
+				const FVector3f Radial(FMath::Cos(a), 0.0f, FMath::Sin(a));
+				const FVector3f Axes[3] = { Radial, FVector3f(0, 1, 0), FVector3f::CrossProduct(Radial, FVector3f(0, 1, 0)) };
+				// A spoke from the hub to the barrel, set back toward its tip.
+				AddBox(Radial * (0.41f * R) + FVector3f(0, s * 0.66f * h, 0), Axes, FVector3f(0.22f * R, 0.07f * h, 0.055f * R), ERubbleMaterial::Steel, M);
+				// A lug nut between the spokes.
+				const float b = a + UE_PI / 5.0f;
+				const FVector3f Lug(FMath::Cos(b) * 0.13f * R, s * 0.8f * h, FMath::Sin(b) * 0.13f * R);
+				const FVector3f LugAxes[3] = { FVector3f(1, 0, 0), FVector3f(0, 1, 0), FVector3f(0, 0, 1) };
+				AddBox(Lug, LugAxes, FVector3f(0.022f * R, 0.06f * h, 0.022f * R), ERubbleMaterial::Steel, M);
+			}
+		}
+		UStaticMesh* Mesh = RubbleRender::BuildMesh(GetTransientPackage(), M);
+		Cache.Add(Key, TStrongObjectPtr<UStaticMesh>(Mesh));
+		return Mesh;
 	}
 
 	FRubbleWheelVisual LerpWheel(const FRubbleWheelVisual& A, const FRubbleWheelVisual& B, double Alpha)
@@ -159,16 +281,9 @@ void ARubbleVehicles::AddWheel(uint64 Key, const FRubbleWheelDef& Def, const FTr
 	Spin->SetupAttachment(Hub);
 	Spin->RegisterComponent();
 	Owned.Add(Spin);
-	// The engine cylinder stands along Z: lay it along the axle (Y).
-	const FRotator Axle(0, 0, 90);
-	const float D = 2.0f * Def.Radius / 100.0f, W = Def.Width / 100.0f;
-	Part(Spin, RubbleRender::EngineCylinder(), FTransform(Axle, FVector::ZeroVector, FVector(D, D, W)), RubbleRender::Surface(ERubbleMaterial::Rubber));
-	Part(Spin, RubbleRender::EngineCylinder(), FTransform(Axle, FVector::ZeroVector, FVector(D * 0.62f, D * 0.62f, W * 1.04f)), RubbleRender::Surface(ERubbleMaterial::Steel));
-	for (int32 k = 0; k < 3; ++k)
-	{
-		Part(Spin, RubbleRender::EngineCube(), FTransform(FRotator(60.0f * k, 0, 0), FVector::ZeroVector, FVector(Def.Radius * 1.15f / 100.0f, W * 1.08f, 0.06f)),
-			RubbleRender::Surface(ERubbleMaterial::Steel));
-	}
+	// A tyre on an alloy rim, its axle along the hub's Y (slot 0 the tyre, slot 1 the rim).
+	UStaticMeshComponent* Mesh = Part(Spin, WheelMesh(Def.Radius, FMath::Max(Def.Width, 0.5f * Def.Radius)), FTransform::Identity, RubbleRender::Surface(ERubbleMaterial::Rubber));
+	Mesh->SetMaterial(1, RubbleRender::WheelAlloy());
 	FWheel Wheel;
 	Wheel.Hub = Hub;
 	Wheel.Spin = Spin;

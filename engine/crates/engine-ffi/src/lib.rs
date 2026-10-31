@@ -2951,8 +2951,8 @@ struct SoftVisualStore {
     _name_ptrs: Vec<*const c_char>,
 }
 
-/// The render mesh of `"procedural_car"` (its node layout does not depend on
-/// the preset's `strength`). Free it with `rbSoftVisual_Destroy`.
+/// The render mesh of `"procedural_car"` or `"procedural_sedan"` (its node layout
+/// does not depend on the preset's `strength`). Free it with `rbSoftVisual_Destroy`.
 #[no_mangle]
 pub unsafe extern "C" fn rbCreateSoftCarVisual(
     preset: *const c_char,
@@ -2961,12 +2961,14 @@ pub unsafe extern "C" fn rbCreateSoftCarVisual(
 ) -> RbResult {
     guard_args(|| {
         let name = text(preset, "null preset name")?;
-        anyhow::ensure!(
-            name.as_ref() == "procedural_car",
-            "no render mesh for soft vehicle preset {name:?} (only \"procedural_car\")"
-        );
+        let p = match name.as_ref() {
+            "procedural_car" => engine_softbody::procedural::CarParams::default(),
+            "procedural_sedan" => engine_softbody::procedural::CarParams::sedan(),
+            other => anyhow::bail!(
+                "no render mesh for soft vehicle preset {other:?} (\"procedural_car\" or \"procedural_sedan\")"
+            ),
+        };
         let c = Coords::new(coordinates);
-        let p = engine_softbody::procedural::CarParams::default();
         let (v, _) = engine_softbody::visual::procedural_car_visual(&p);
         let vertices: Vec<RbVec3> = v
             .vertices

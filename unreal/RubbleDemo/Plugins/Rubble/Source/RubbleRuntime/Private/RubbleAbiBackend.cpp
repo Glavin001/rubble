@@ -480,7 +480,7 @@ bool FRubbleAbiBackend::CreateSoftCars(const FRubbleSceneAssets& Layout, FString
 	}
 	FString Desc;
 	TSharedPtr<FJsonObject> Root;
-	if (!AbiJson([](char* B, size_t C, size_t* N) { return rbGetSoftVehiclePresetJson("procedural_car", 0.0f, B, C, N); }, Desc)
+	if (!AbiJson([](char* B, size_t C, size_t* N) { return rbGetSoftVehiclePresetJson("procedural_sedan", 0.0f, B, C, N); }, Desc)
 		|| !FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Desc), Root) || !Root.IsValid())
 	{
 		Error = AbiError(TEXT("the procedural car's descriptor"));
@@ -529,7 +529,7 @@ bool FRubbleAbiBackend::CreateSoftCars(const FRubbleSceneAssets& Layout, FString
 	// The engine's render mesh of the car (the softbody page's): in its own frame and Unreal
 	// units, bound part by part so a torn-off panel carries its mesh away.
 	const RbSoftVisual* Visual = nullptr;
-	if (rbCreateSoftCarVisual("procedural_car", RB_COORDINATES_UNREAL, &Visual) != RB_OK)
+	if (rbCreateSoftCarVisual("procedural_sedan", RB_COORDINATES_UNREAL, &Visual) != RB_OK)
 	{
 		Error = AbiError(TEXT("rbCreateSoftCarVisual"));
 		return false;

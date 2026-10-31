@@ -37,6 +37,8 @@ namespace RubbleRender
 	/** A soft car surface (build_content.py soft_car): paint as a dynamic instance of Paint;
 	 *  the generic surfaces stand in when the content was not generated. */
 	RUBBLERUNTIME_API UMaterialInterface* SoftCarSurface(UObject* Outer, ERubbleCarSurface Which, const FLinearColor& Paint);
+	/** A wheel's alloy rim (MI_WheelAlloy: bright, smooth metal), or steel without the content. */
+	RUBBLERUNTIME_API UMaterialInterface* WheelAlloy();
 	RUBBLERUNTIME_API UMaterialInterface* Ground(ERubbleStage Stage);
 	RUBBLERUNTIME_API UMaterialInterface* Dust();
 	RUBBLERUNTIME_API UMaterialInterface* Spark();
