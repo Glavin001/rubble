@@ -828,9 +828,16 @@ void FRubbleAbiBackend::Step()
 	{
 		rbVehicle_SetInput(WorldPtr, V, RbVehicleInput{ 0.35f, 0.2f, 0.0f, 0.0f });
 	}
-	for (const FSoftCar& Car : SoftCars)
+	for (int32 i = 0; i < SoftCars.Num(); ++i)
 	{
-		if (Car.bAI)
+		const FSoftCar& Car = SoftCars[i];
+		// After a crash a car holds its brakes, as a post-collision brake does, so it doesn't
+		// roll back off what it hit; the driver can drive away (throttle releases them).
+		if (Car.bCrashed && (i != PlayerSoft || Car.bAI || Input.Throttle <= 0.0f))
+		{
+			rbSoft_SetInput(WorldPtr, Car.Soft, RbVehicleInput{ 0.0f, 0.0f, 1.0f, 1.0f });
+		}
+		else if (Car.bAI)
 		{
 			rbSoft_SetInput(WorldPtr, Car.Soft, RbVehicleInput{ 0.4f, 0.25f, 0.0f, 0.0f });
 		}
@@ -1094,6 +1101,8 @@ void FRubbleAbiBackend::Poll(TArray<FRubbleFrame>& Out)
 				continue;
 			}
 			FSoftCar& Car = SoftCars[*CarIndex];
+			float Rolled = 0.0f;
+			int32 Rolling = 0;
 			for (int32 w = 0; w < Car.WheelNodes.Num(); ++w)
 			{
 				const uint32 A = uint32(Car.WheelNodes[w].Key), B = uint32(Car.WheelNodes[w].Value);
@@ -1109,6 +1118,8 @@ void FRubbleAbiBackend::Poll(TArray<FRubbleFrame>& Out)
 				// Spin from how far the hub rolled along its heading this step.
 				if (!Car.LastHub[w].IsZero())
 				{
+					Rolled += float(FVector::DotProduct(Hub - Car.LastHub[w], Fwd));
+					++Rolling;
 					Car.Spin[w] = FMath::Fmod(Car.Spin[w] + float(FVector::DotProduct(Hub - Car.LastHub[w], Fwd)) / FMath::Max(Car.WheelRadius[w], 1.0f), UE_TWO_PI);
 				}
 				Car.LastHub[w] = Hub;
@@ -1120,6 +1131,13 @@ void FRubbleAbiBackend::Poll(TArray<FRubbleFrame>& Out)
 				WV.SpinRad = Car.Spin[w];
 				WV.Radius = Car.WheelRadius[w];
 				R.Wheels.Add(WV);
+			}
+			// A crash: the hubs lose speed faster than 8 g (braking tops out near 1 g).
+			if (Rolling)
+			{
+				const float Speed = Rolled / Rolling / float(Dt);
+				Car.bCrashed |= (Car.HubSpeed - Speed) / float(Dt) > 8.0f * 981.0f;
+				Car.HubSpeed = Speed;
 			}
 		}
 		if (NewBodies.Num())
