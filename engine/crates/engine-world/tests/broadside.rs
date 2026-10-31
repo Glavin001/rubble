@@ -35,9 +35,7 @@ fn capacity(asset: &DestructibleAssetDesc) -> WorldCapacity {
     let scene = stress.threshold_scene(1.0, solver.dt).unwrap();
     let chunks: usize = scene.bodies.iter().map(|b| b.chunks.len()).sum();
     let mut c = stress_rubble::capacity_for(&scene);
-    c.max_bodies = c
-        .max_bodies
-        .max(((chunks + 64) as u32).next_power_of_two());
+    c.max_bodies = c.max_bodies.max(((chunks + 64) as u32).next_power_of_two());
     c.max_contacts = stress_rubble::threshold::contact_capacity(chunks, c.max_contacts, 1 << 30);
     c.max_candidates = c.max_candidates.max(c.max_contacts);
     c

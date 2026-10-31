@@ -785,7 +785,7 @@ impl Director {
             // Hold on the captain a beat as the volley lands, then pull out wide.
             return if since < 0.35 {
                 (
-                    glam::Vec3::new(c.x - 3.6, MAIN_DECK + 1.5, c.z - 2.6),
+                    glam::Vec3::new(c.x - 5.5, MAIN_DECK + 1.9, -1.9),
                     c + glam::Vec3::new(0.0, 0.3, 0.0),
                 )
             } else {
@@ -794,20 +794,20 @@ impl Director {
         }
         if b.captain_stopped() {
             return (
-                glam::Vec3::new(c.x - 3.8, MAIN_DECK + 1.5, c.z - 2.9),
+                glam::Vec3::new(c.x - 5.5, MAIN_DECK + 1.9, -1.9),
                 c + glam::Vec3::new(0.0, 0.3, 0.0),
             );
         }
         if c.x > BREAST + 0.4 {
             // Quarterdeck: from the main deck ahead, below him, looking up past the rail.
             (
-                glam::Vec3::new(c.x - 6.8, MAIN_DECK + 1.9, c.z - 2.4),
+                glam::Vec3::new(c.x - 9.5, MAIN_DECK + 2.5, -0.9),
                 c + glam::Vec3::new(0.0, 0.25, 0.0),
             )
         } else {
             // The stairs and on: low on the main deck, close, looking up at him.
             (
-                glam::Vec3::new(c.x - 4.2, MAIN_DECK + 1.1, c.z - 2.7),
+                glam::Vec3::new(c.x - 6.2, MAIN_DECK + 1.6, -1.4),
                 c + glam::Vec3::new(0.0, 0.2, 0.0),
             )
         }
