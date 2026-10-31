@@ -66,7 +66,36 @@ typedef enum RbDestructionType {
   // A connection of an assembly or composed vehicle broke: `assembly`,
   // `name`, `joint`, `force`, `torque`.
   RB_CONNECTION_BROKE = 6,
+  // A chunk of a destructible was crushed: `destructible`, `index` (the
+  // chunk), `mass`; `children` / `child_count` are the fragment bodies that
+  // carry its mass, one each (none when removed).
+  RB_CHUNK_CRUSHED = 7,
 } RbDestructionType;
+
+// What broke a destructible's bonds (`RB_BONDS_BROKEN`; one event per cause in a step).
+typedef enum RbBreakCause {
+  // The strength model's own rule: contact and impact loads, the strike prediction, or
+  // the bonds model's joint forces.
+  RB_BREAK_STRESS = 0,
+  // A blast's face pressures (`rbWorld_Detonate`, `RbDestructibleDef::blast_loading`).
+  RB_BREAK_BLAST = 1,
+  // Support loss (`RbDestructibleDef::support_loss`).
+  RB_BREAK_SUPPORT_LOSS = 2,
+  // A crushed chunk's bonds (`RB_CHUNK_CRUSHED`).
+  RB_BREAK_CRUSH = 3,
+} RbBreakCause;
+
+// What crushed a chunk (`RB_CHUNK_CRUSHED`).
+typedef enum RbCrushCause {
+  // A predicted strike (a projectile, `rbBody_SetProjectile`).
+  RB_CRUSH_IMPACT = 0,
+  // A blast's face pressures (`RbDestructibleDef::blast_loading`).
+  RB_CRUSH_BLAST = 1,
+  // Contact loads after a step (debris, sustained pressure).
+  RB_CRUSH_CONTACT = 2,
+  // Loads through its bonds: the support-loss flow's weight above it.
+  RB_CRUSH_LOAD = 3,
+} RbCrushCause;
 
 typedef enum RbGroundState {
   RB_ON_GROUND = 0,
@@ -95,6 +124,15 @@ typedef enum RbStrengthModel {
   // split on the GPU (its `threshold` mode). Projectiles: `rbBody_SetProjectile`.
   RB_STRENGTH_THRESHOLD = 1,
 } RbStrengthModel;
+
+// What becomes of a crushed chunk's mass.
+typedef enum RbCrushMass {
+  // Kept as `fragments` small rigid boxes carrying its mass and momentum, from
+  // `budget` fragment bodies reserved at placement (a crush past them fails the step).
+  RB_CRUSH_CONSERVE = 0,
+  // Removed (dust): the host draws it from `RB_CHUNK_CRUSHED`.
+  RB_CRUSH_REMOVE = 1,
+} RbCrushMass;
 
 typedef enum RbVehicleDamageType {
   // The wheel falls off as a free body.
@@ -209,7 +247,10 @@ typedef struct RbActor {
 // Something broke (`RbFrame::destruction`). Fields by `type_`:
 // joint: `joint`, `force`, `torque`, `user_data`; mount: `vehicle`, `index`,
 // `is_wheel`, `force`, `torque`; beam: `soft`, `index`, `force`; piece:
-// `soft`, `nodes` / `node_count`, `mass`.
+// `soft`, `nodes` / `node_count`, `mass`; bonds broken: `destructible`,
+// `bonds` / `bond_count`, `break_cause`; chunk crushed: `destructible`, `index`,
+// `mass`, `volume`, `transform`, `linear_velocity`, `angular_velocity`,
+// `peak_pressure`, `peak_deviator`, `crush_cause`, `children` / `child_count`.
 typedef struct RbDestructionEvent {
   enum RbDestructionType type_;
   // The step it happened in.
@@ -234,6 +275,22 @@ typedef struct RbDestructionEvent {
   uint64_t assembly;
   // The connection's name (UTF-8, NUL-terminated).
   const char *name;
+  // `RB_BONDS_BROKEN`: what broke them.
+  enum RbBreakCause break_cause;
+  // `RB_CHUNK_CRUSHED`: what crushed it.
+  enum RbCrushCause crush_cause;
+  // `RB_CHUNK_CRUSHED`: its volume.
+  float volume;
+  // `RB_CHUNK_CRUSHED`: its pose when crushed (its centre of mass, and the rotation its
+  // render mesh had).
+  struct RbTransform transform;
+  // `RB_CHUNK_CRUSHED`: its velocity at its centre of mass, and its angular velocity.
+  struct RbVec3 linear_velocity;
+  struct RbVec3 angular_velocity;
+  // `RB_CHUNK_CRUSHED`: the highest mean pressure (compression positive) and deviatoric
+  // stress it met.
+  float peak_pressure;
+  float peak_deviator;
 } RbDestructionEvent;
 
 typedef struct RbWheelState {
@@ -517,6 +574,16 @@ typedef struct RbShapeDef {
   uint32_t internal_value;
 } RbShapeDef;
 
+// Bekker soil for vehicle ruts (deformable terrain T5). `k_c` (N/m^(n+1))
+// and `k_phi` (N/m^(n+2)) are SI whatever the host's units; `max_sinkage`
+// is in the host's length unit (a wheel sinking deeper fails the step).
+typedef struct RbSoil {
+  float k_c;
+  float k_phi;
+  float n;
+  float max_sinkage;
+} RbSoil;
+
 // Fields every joint has (`rbDefaultJointBase`). Frames are measured from
 // each body's origin; z is the hinge, cone and twist axis, x the slide axis.
 typedef struct RbJointBase {
@@ -607,6 +674,40 @@ typedef struct RbVehicleInput {
 // A destructible asset (index).
 typedef uint32_t RbDestructibleAssetId;
 
+// A material's crush parameters, by the asset's stress material name (a pack's
+// `materials[].crush` supplies them; these supply or replace them). SI units whatever
+// the world's coordinates: they are material data, as asset packs carry it.
+typedef struct RbCrushMaterial {
+  // UTF-8, NUL-terminated.
+  const char *name;
+  // Hydrostatic cap (Pa), > 0.
+  double cap_pressure;
+  // Drucker-Prager intercept (Pa), >= 0.
+  double cohesion;
+  // dq/dp of the cone, >= 0.
+  double friction_slope;
+  // Comminution energy (J/m^3), > 0.
+  double crush_energy;
+  // Perzyna viscosity (Pa s), > 0.
+  double crush_viscosity;
+} RbCrushMaterial;
+
+// Chunk crushing (`RbDestructibleDef::crush`; engine/docs/destruction-reactions.md).
+typedef struct RbCrushDef {
+  // Off by default.
+  bool enabled;
+  enum RbCrushMass mass;
+  // `RB_CRUSH_CONSERVE`: boxes per crushed chunk (a power of two up to 64; default 4),
+  // and fragment bodies reserved (default 256).
+  uint32_t fragments;
+  uint32_t budget;
+  // Crushes one step reports at most (0: 256); more fail the step.
+  uint32_t max_per_step;
+  // Optional (null with count 0): crush parameters by material name.
+  const struct RbCrushMaterial *materials;
+  uint32_t material_count;
+} RbCrushDef;
+
 // A placed destructible (`rbDefaultDestructibleDef`). Assets are authored in
 // Rubble's frame (Y up, metres); `transform` places them in the world's.
 typedef struct RbDestructibleDef {
@@ -619,6 +720,19 @@ typedef struct RbDestructibleDef {
   float friction;
   uint64_t user_data;
   enum RbStrengthModel model;
+  // `RB_STRENGTH_THRESHOLD` only: support loss. Each anchored piece's weight flows down its
+  // intact bonds, and a bond carrying more than its compressive capacity breaks, so a
+  // structure whose supports are shot away collapses. Off by default.
+  bool support_loss;
+  // With `support_loss`: the dynamic factor k, 1 to 2, on the increase of load after a
+  // sudden loss of support (a bond is held to before + k (after - before)). 1 (the
+  // default): quasi-static.
+  float support_loss_dynamic_factor;
+  // `RB_STRENGTH_THRESHOLD` only: blasts (`rbWorld_Detonate`) load its exposed chunk
+  // faces with their face pressures. Off by default.
+  bool blast_loading;
+  // `RB_STRENGTH_THRESHOLD` only: chunk crushing. Off by default.
+  struct RbCrushDef crush;
   uint32_t internal_value;
 } RbDestructibleDef;
 
@@ -702,6 +816,22 @@ typedef struct RbExplosionDef {
   uint16_t mask_bits;
 } RbExplosionDef;
 
+// A charge (`rbWorld_Detonate`; engine/docs/destruction-reactions.md section 3).
+typedef struct RbBlastDef {
+  struct RbVec3 position;
+  // TNT-equivalent mass (kg), > 0.
+  float tnt_kg;
+  // Also push bodies with `rbWorld_Explode`'s radial impulse from the same point
+  // (`radius`, `falloff`, `impulse_per_area`, `mask_bits` as `RbExplosionDef`'s). It
+  // reaches destructible pieces too unless their category is left out of the mask.
+  bool radial;
+  float radius;
+  float falloff;
+  float impulse_per_area;
+  uint16_t mask_bits;
+  uint32_t internal_value;
+} RbBlastDef;
+
 typedef struct RbColor {
   float r;
   float g;
@@ -736,6 +866,61 @@ typedef struct RbDebugDraw {
   bool draw_shapes;
   bool draw_body_transforms;
 } RbDebugDraw;
+
+// Deformable-terrain settings (from [`rbDefaultTerrainDef`]).
+typedef struct RbTerrainDef {
+  // Limits: exceeding one fails the step with its name.
+  uint32_t max_particles;
+  uint32_t max_blocks;
+  // Ejecta parcels a region may throw (0: material leaving the region's box
+  // is an error).
+  uint32_t max_parcels;
+  uint32_t max_substeps;
+  // Cells across an impact's predicted transient radius.
+  float cells_per_radius;
+  // Smallest cell a region may use (length).
+  float min_cell_size;
+  // Areas open at once: impacts far apart open areas of their own, one
+  // near an open area grows it.
+  uint32_t max_regions;
+  // One cell size (length) for every event, or 0: the first event's own
+  // while any area is open (all open areas share one grid).
+  float cell_size;
+  // The coarsest a later event may run on the open grid, as a fraction of
+  // the cells it asks for (0, 1]; coarser fails.
+  float min_resolution;
+  // Dry sand: density, Young's modulus (Pa), Poisson's ratio, friction angle
+  // (rad).
+  float density;
+  float youngs_modulus;
+  float poisson_ratio;
+  float friction_angle;
+  // How far an impact's region reaches past its predicted transient radius,
+  // in those radii.
+  float region_margin;
+  // A region bakes once its sand and every body in it stay slower than this
+  // (speed), with nothing in flight, for `settle_frames` frames.
+  float settle_speed;
+  uint32_t settle_frames;
+  // Added to each frame's speed bound for its substeps (speed).
+  float speed_headroom;
+  // Strikes on watched shapes ([`rbTerrain_WatchShape`]): the impact speed
+  // and kinetic energy that open a region, and cells across the striking
+  // body.
+  float strike_min_speed;
+  float strike_min_energy;
+  float strike_cells_per_body;
+  uint32_t internal_value;
+} RbTerrainDef;
+
+// π-scaling's prediction for an impact or charge (lengths in world units).
+typedef struct RbCraterPrediction {
+  float transient_radius;
+  float transient_depth;
+  float final_rim_radius;
+  // Seconds.
+  float formation_time;
+} RbCraterPrediction;
 
 // A capsule character controller (`rbDefaultCharacterDef`): an upright
 // capsule that walks, climbs steps, sticks to the floor, jumps and rides
@@ -952,6 +1137,39 @@ enum RbResult rbCreateHullShape(struct RbWorld *world,
                                 uint32_t count,
                                 struct RbTransform local,
                                 RbShapeId *out);
+
+// Terrain on a static body: `heights` (`count_a × count_b`, A fastest) on
+// cells `cell_a × cell_b`, centred on `local`. A and B are the host's ground
+// axes (Rubble coordinates: +X, +Z; Unreal: +X, +Y) and heights run along
+// its up axis.
+enum RbResult rbCreateHeightFieldShape(struct RbWorld *world,
+                                       RbBodyId body,
+                                       const struct RbShapeDef *def,
+                                       uint32_t count_a,
+                                       uint32_t count_b,
+                                       float cell_a,
+                                       float cell_b,
+                                       const float *heights,
+                                       struct RbTransform local,
+                                       RbShapeId *out);
+
+// Overwrite heightfield samples `[a0, a0 + width_a) × [b0, b0 + width_b)`
+// (host order, A fastest). Bodies asleep over the edit are woken.
+enum RbResult rbHeightField_SetRegion(struct RbWorld *world,
+                                      RbShapeId shape,
+                                      uint32_t a0,
+                                      uint32_t b0,
+                                      uint32_t width_a,
+                                      uint32_t width_b,
+                                      const float *values);
+
+// Give a heightfield a soil (`soil` non-null) or take it away (null). Wheels
+// on it sink to the rigid-wheel depth of their load, press ruts and pay
+// compaction resistance. The field is placed again from the host's samples,
+// so earlier ruts are not kept.
+enum RbResult rbHeightField_SetSoil(struct RbWorld *world,
+                                    RbShapeId shape,
+                                    const struct RbSoil *soil);
 
 enum RbResult rbDestroyShape(struct RbWorld *world, RbShapeId shape, bool update_body_mass);
 
@@ -1291,9 +1509,83 @@ struct RbExplosionDef rbDefaultExplosionDef(enum RbCoordinates coordinates);
 // bodies it reaches wake. Up to 16 per step.
 enum RbResult rbWorld_Explode(struct RbWorld *world, const struct RbExplosionDef *def);
 
+// Defaults in `coordinates`' units: 1 kg of TNT at the origin, no radial impulse.
+struct RbBlastDef rbDefaultBlastDef(enum RbCoordinates coordinates);
+
+// Detonate a charge at the start of the next step: every destructible placed with
+// `blast_loading` takes its face pressures over the steps its pulse lasts, breaking the
+// bonds it overloads (`RB_BREAK_BLAST`) and, with crushing, crushing the chunks it
+// overstresses (`RB_CRUSH_BLAST`). Forward only. Errors: a non-positive or non-finite
+// charge, a loaded face nearer than the fits cover, more than 16 blasts at once.
+enum RbResult rbWorld_Detonate(struct RbWorld *world, const struct RbBlastDef *def);
+
 // Draw every shape at its body's last polled pose, coloured by state
 // (static, awake, asleep) unless a material colour is set.
 enum RbResult rbWorld_DebugDraw(struct RbWorld *world, const struct RbDebugDraw *draw);
+
+// Defaults in metres (the default coordinates); scale lengths, speeds,
+// densities and energies for other units.
+struct RbTerrainDef rbDefaultTerrainDef(void);
+
+// Turn on deformable terrain for the world.
+enum RbResult rbWorld_EnableTerrain(struct RbWorld *world, const struct RbTerrainDef *def);
+
+// A hypervelocity impact at `point` on heightfield `shape`: a sphere of
+// `impactor_radius` and `impactor_density` arriving at `velocity` (its
+// downward part; the excavation field is vertical). `out` (may be null)
+// receives π-scaling's prediction; the crater itself is simulated. Several
+// may be under way: one far from the open areas opens its own, one near an
+// open area (into a crater still forming, on its rim) grows it and adds its
+// flow to the material's.
+enum RbResult rbTerrain_Impact(struct RbWorld *world,
+                               RbShapeId shape,
+                               float impactor_radius,
+                               float impactor_density,
+                               struct RbVec3 velocity,
+                               struct RbVec3 point,
+                               struct RbCraterPrediction *out);
+
+// A buried charge of `tnt_kg` TNT-equivalent, its centre `depth_of_burial`
+// below `point` on heightfield `shape`. `out` as [`rbTerrain_Impact`].
+enum RbResult rbTerrain_Explode(struct RbWorld *world,
+                                RbShapeId shape,
+                                float tnt_kg,
+                                float depth_of_burial,
+                                struct RbVec3 point,
+                                struct RbCraterPrediction *out);
+
+// Open a region over the box between corners `a` and `b` with cells of
+// `cell_size`, with no source (for bodies landing or driving on it).
+enum RbResult rbTerrain_Open(struct RbWorld *world,
+                             RbShapeId shape,
+                             struct RbVec3 a,
+                             struct RbVec3 b,
+                             float cell_size);
+
+// Bake every open area now (each otherwise bakes once settled).
+enum RbResult rbTerrain_Close(struct RbWorld *world);
+
+// Watch heightfield `shape` for heavy-body strikes: one predicted to pass the
+// def's speed and energy opens a region before the body arrives.
+enum RbResult rbTerrain_WatchShape(struct RbWorld *world, RbShapeId shape, bool watch);
+
+// Whether any area is open now (`*out_open`).
+enum RbResult rbTerrain_IsOpen(struct RbWorld *world, bool *out_open);
+
+// Terrain areas open now (`*out_count`).
+enum RbResult rbTerrain_AreaCount(struct RbWorld *world, uint32_t *out_count);
+
+// Strikes seen too late to open a region before them (`*out_count`).
+enum RbResult rbTerrain_MissedStrikes(struct RbWorld *world, uint64_t *out_count);
+
+// A heightfield shape's samples as the host's copy holds them (updated by
+// the frames that follow a bake), in the order and units of
+// `rbCreateHeightFieldShape` (`count_a × count_b`, A fastest).
+enum RbResult rbHeightField_GetHeights(struct RbWorld *world,
+                                       RbShapeId shape,
+                                       uint32_t count_a,
+                                       uint32_t count_b,
+                                       float *out_heights);
 
 // Defaults in `coordinates`' units.
 struct RbCharacterDef rbDefaultCharacterDef(enum RbCoordinates coordinates);

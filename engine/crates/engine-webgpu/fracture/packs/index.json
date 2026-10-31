@@ -1,0 +1,45 @@
+{
+ "packs": [
+  {
+   "key": "crush-wall",
+   "title": "Punch-through wall (12x8x2 blockwork)",
+   "file": "crush-wall.json",
+   "version": 3,
+   "nodes": 216,
+   "bonds": 464,
+   "shots": [
+    "1.0x",
+    "1.1x",
+    "1.4x"
+   ]
+  },
+  {
+   "key": "reference-building",
+   "title": "Reference building (2x2 bay, 3 floors)",
+   "file": "reference-building.json",
+   "version": 2,
+   "nodes": 64,
+   "bonds": 132,
+   "shots": [
+    "ordinary",
+    "2x",
+    "8x",
+    "16x"
+   ]
+  },
+  {
+   "key": "reference-building-crush",
+   "title": "Reference building (2x2 bay, 3 floors, chunk crushing)",
+   "file": "reference-building-crush.json",
+   "version": 3,
+   "nodes": 64,
+   "bonds": 132,
+   "shots": [
+    "ordinary",
+    "2x",
+    "8x",
+    "16x"
+   ]
+  }
+ ]
+}

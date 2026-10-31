@@ -15,6 +15,7 @@ members = [
     "crates/engine-vehicle",
     "crates/engine-vehicle-wasm",
     "crates/engine-softbody",
+    "crates/engine-terrain",
     "crates/engine-gpu-wait",
     "crates/engine-world",
     "crates/engine-ffi",
@@ -54,6 +55,7 @@ engine-oracles = { path = "crates/engine-oracles" }
 engine-fracture = { path = "crates/engine-fracture" }
 engine-vehicle = { path = "crates/engine-vehicle" }
 engine-softbody = { path = "crates/engine-softbody" }
+engine-terrain = { path = "crates/engine-terrain" }
 engine-webgpu = { path = "crates/engine-webgpu" }
 
 [profile.release]

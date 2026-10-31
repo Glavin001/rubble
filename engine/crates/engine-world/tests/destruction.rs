@@ -157,6 +157,7 @@ fn a_shot_breaks_bonds_and_splits_actors() {
             DestructionEvent::BondsBroken {
                 destructible,
                 bonds,
+                ..
             } => {
                 assert_eq!(*destructible, d);
                 broken += bonds.len();

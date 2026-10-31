@@ -138,6 +138,7 @@ pub mod shaders {
     pub const SMOKE: ShaderSet = shader_set!("smoke", [("smoke", (64, 1, 1))]);
     pub const STRESS_STEP: ShaderSet = shader_set!("stress_step", [("bond_forces", (64, 1, 1)), ("chunk_integrate", (64, 1, 1)), ("island_substeps", (256, 1, 1)), ("island_shared_substeps", (256, 1, 1))]);
     pub const JOINT_TEST: ShaderSet = shader_set!("joint_test", [("joint_eval_test", (64, 1, 1))]);
+    pub const CRUSH_TEST: ShaderSet = shader_set!("crush_test", [("crush_step_test", (64, 1, 1))]);
     pub const WORLD: ShaderSet =
         shader_set!("world", [
             ("contact_forces", (64, 1, 1)),
@@ -264,12 +265,26 @@ pub mod shaders {
             ("fr_strike_nearest", (64, 1, 1)),
             ("fr_strike_force", (64, 1, 1)),
             ("fr_strike_breaks", (64, 1, 1)),
+            ("fr_crush_loads", (64, 1, 1)),
+            ("fr_strike_crush", (64, 1, 1)),
+            ("fr_crush_bill", (64, 1, 1)),
+            ("fr_crush_push", (64, 1, 1)),
+            ("fr_crush_bonds", (64, 1, 1)),
+            ("fr_crush_mark", (64, 1, 1)),
+            ("fr_crush_gate", (1, 1, 1)),
+            ("fr_crush_apply", (64, 1, 1)),
+            ("fr_crush_end", (1, 1, 1)),
+            ("fr_crush_blast", (64, 1, 1)),
+            ("fr_strike_patch", (64, 1, 1)),
+            ("fr_strike_cover", (64, 1, 1)),
+            ("fr_strike_claim", (64, 1, 1)),
+            ("fr_host_breaks", (64, 1, 1)),
         ]
     );
 
     /// Every set (each Slang file with entry points).
     pub const ALL: &[ShaderSet] = &[
-        WORLD_IC, SMOKE, STRESS_STEP, JOINT_TEST, WORLD, STRESS_RENDER, DESTRUCTION_RENDER, COUPLING, RESIDENT, CASCADE, PLAN, LAYOUT, SPAWN, COLLIDERS, SHAPES, PASS, PASSLOG, ROUTING, PUNCH, SPLIT,
+        WORLD_IC, SMOKE, STRESS_STEP, JOINT_TEST, CRUSH_TEST, WORLD, STRESS_RENDER, DESTRUCTION_RENDER, COUPLING, RESIDENT, CASCADE, PLAN, LAYOUT, SPAWN, COLLIDERS, SHAPES, PASS, PASSLOG, ROUTING, PUNCH, SPLIT,
         HUD_OVERLAY, THRESHOLD, FRACTURE,
     ];
 }

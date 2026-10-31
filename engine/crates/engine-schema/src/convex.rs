@@ -690,6 +690,25 @@ impl HullArena {
         Ok(base)
     }
 
+    /// Place `records` in a block of their own, never shared (heightfields, which
+    /// are edited in place). Takes one reference, released with `release`.
+    pub(crate) fn insert_unique(&mut self, records: &[[u32; 4]]) -> Result<u32, HullError> {
+        let len = records.len() as u32;
+        let base = self.allocate(len)?;
+        self.records[base as usize..(base + len) as usize].copy_from_slice(records);
+        self.mark_dirty(base..base + len);
+        // An empty key is never in `dedup`, so release leaves other blocks alone.
+        self.blocks.insert(base, HullBlock { len, refs: 1, key: Vec::new() });
+        Ok(base)
+    }
+
+    /// Overwrite records inside a live unshared block and mark them for upload.
+    pub(crate) fn write_records(&mut self, at: u32, records: &[[u32; 4]]) {
+        let start = at as usize;
+        self.records[start..start + records.len()].copy_from_slice(records);
+        self.mark_dirty(at..at + records.len() as u32);
+    }
+
     /// Drop one reference. Returns true when the block was freed (its records may
     /// be reused by later inserts; colliders must no longer point at it).
     pub fn release(&mut self, base: u32) -> bool {
@@ -997,6 +1016,15 @@ pub fn collider_radius(c: &crate::Collider) -> f32 {
 /// explicit 10-entry large list; when there are more, the levels cover them too.
 /// Mirrors `hierLevel` in world_step.slang (the fracture lab sizes its grid with engine-fracture `grid_config`).
 pub fn hierarchical_grid(cols: &[crate::Collider], bodies: &[crate::BodyState]) -> (f32, u32) {
+    hierarchical_grid_with(cols, bodies, 0.0)
+}
+
+/// [`hierarchical_grid`], the levels also covering a moving collider of radius
+/// `movable_radius`: one a GPU kernel can turn dynamic with no host write (a fracture's
+/// split re-parents chunk colliders onto new bodies), so the host's mirror cannot see it
+/// move. A moving collider above the top level would take the oversized-static list,
+/// which never queries: it would pass through every static.
+pub fn hierarchical_grid_with(cols: &[crate::Collider], bodies: &[crate::BodyState], movable_radius: f32) -> (f32, u32) {
     let mut diameters: Vec<f32> = cols
         .iter()
         .filter(|c| c.shape != crate::ShapeType::Plane as u32)
@@ -1016,6 +1044,7 @@ pub fn hierarchical_grid(cols: &[crate::Collider], bodies: &[crate::BodyState]) 
         .filter(|c| c.shape != crate::ShapeType::Plane as u32)
         .filter(|c| bodies.get(c.body as usize).is_some_and(|b| b.moves()))
         .map(|c| level(2.0 * collider_radius(c) + 0.0004))
+        .chain((movable_radius > 0.0).then(|| level(2.0 * movable_radius + 0.0004)))
         .max()
         .unwrap_or(0);
     let mut levels = (dynamic_max + 2).max(2);
