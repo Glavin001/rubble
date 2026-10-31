@@ -1132,11 +1132,16 @@ void FRubbleAbiBackend::Poll(TArray<FRubbleFrame>& Out)
 				WV.Radius = Car.WheelRadius[w];
 				R.Wheels.Add(WV);
 			}
-			// A crash: the hubs lose speed faster than 8 g (braking tops out near 1 g).
+			// A crash: the hubs lose speed faster than 8 g (braking tops out near 1 g). Speeds,
+			// not velocities: a hub's heading follows its axle's node order, either way round.
 			if (Rolling)
 			{
-				const float Speed = Rolled / Rolling / float(Dt);
-				Car.bCrashed |= (Car.HubSpeed - Speed) / float(Dt) > 8.0f * 981.0f;
+				const float Speed = FMath::Abs(Rolled / Rolling / float(Dt));
+				if (!Car.bCrashed && (Car.HubSpeed - Speed) / float(Dt) > 8.0f * 981.0f)
+				{
+					Car.bCrashed = true;
+					UE_LOG(LogRubble, Display, TEXT("soft car %u crashed at %.1f m/s: brakes on"), Car.Soft, Car.HubSpeed / 100.0f);
+				}
 				Car.HubSpeed = Speed;
 			}
 		}
