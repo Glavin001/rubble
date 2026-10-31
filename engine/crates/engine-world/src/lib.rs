@@ -66,7 +66,7 @@ pub use joints::{
 };
 pub use math::Transform;
 pub use motion::{
-    CastDef, CastHit, CastId, CastResult, CastShape, CharacterDef, CharacterDesc, CharacterEvent,
+    CastDef, CastHit, CastId, CastResult, CastShape, CharacterCapacity, CharacterDef, CharacterDesc, CharacterEvent,
     CharacterEventKind, CharacterId, CharacterOutput, GroundState, ProjectileDef, ProjectileEvent,
     ProjectileEventKind, ProjectileId, ProjectileOutput,
 };
@@ -130,6 +130,8 @@ pub struct WorldDef {
     pub capacity: WorldCapacity,
     pub contacts: ContactStorage,
     pub vehicles: VehicleCapacity,
+    /// Characters, in-step queries and projectiles the world holds.
+    pub characters: engine_schema::character::CharacterCapacity,
     /// A soft-body arena (needs [`ContactStorage::Canonical`]).
     pub soft: Option<SoftCapacity>,
     /// Step size, iterations, sleep thresholds and solver constants
@@ -156,6 +158,7 @@ impl Default for WorldDef {
             capacity: WorldCapacity::small(),
             contacts: ContactStorage::Persistent,
             vehicles: VehicleCapacity::default(),
+            characters: Default::default(),
             soft: None,
             solver: AvbdParams::default(),
             features: EngineFeatures::default(),
@@ -432,6 +435,7 @@ impl World {
         let options = SimOptions {
             contacts,
             vehicles: def.vehicles,
+            characters: def.characters,
             soft: def.soft,
             features,
             pose_output: true,

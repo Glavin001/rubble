@@ -55,7 +55,7 @@ pub const EVENT_PROJECTILE_HIT: u32 = 8;
 pub const EVENT_PROJECTILE_STOPPED: u32 = 9;
 /// Colliders a character gathers in a step (its scratch region holds this many); more
 /// set `OVERFLOW_CHAR_CANDIDATES`.
-pub const CHAR_MAX_CANDIDATES: u32 = 1024;
+pub const CHAR_MAX_CANDIDATES: u32 = 4096;
 /// Slots a gathered candidate takes in the scratch region.
 pub const CAND_STRIDE: u32 = 4;
 pub const PROJ_SEGMENTS: u32 = 4;
