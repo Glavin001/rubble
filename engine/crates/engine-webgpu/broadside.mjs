@@ -4,7 +4,7 @@
 // this page builds the ship's render scene from the same GLB (fracture/wasm.mjs), uploads
 // each frame's poses and draws them with the fracture lab's renderer. `window.__film`
 // renders the take frame by frame at a fixed clock rate for recording (record-broadside.mjs).
-import init,{broadside_init,broadside_set_asset,broadside_set_level,broadside_error,broadside_panic,broadside_body_base,broadside_extra_vertices,broadside_extras_version,broadside_poses,broadside_camera,broadside_time_scale,broadside_set_scripted,broadside_shoot_ray,broadside_stats} from './generated/world-wasm/engine_world_wasm.js';
+import init,{broadside_init,broadside_set_asset,broadside_set_level,broadside_error,broadside_panic,broadside_lost,broadside_body_base,broadside_extra_vertices,broadside_extras_version,broadside_poses,broadside_camera,broadside_time_scale,broadside_set_scripted,broadside_shoot_ray,broadside_stats} from './generated/world-wasm/engine_world_wasm.js';
 // Chrome and Edge 137+ suspend the wasm stack natively (JSPI); elsewhere the Asyncify build
 // of the same Rust does, driven by gpu-wait.mjs (as the lab's stress mode).
 import {JSPI,bindAsyncify,asyncifyPromising} from './fracture/gpu-wait.mjs';
@@ -14,14 +14,24 @@ import {createRenderer} from './fracture/render.mjs';
 const $=id=>document.getElementById(id);
 const canvas=$('view'),status=$('status');
 const setStatus=t=>{status.textContent=t;status.classList.remove('error')};
-function fail(e){console.error(e);status.textContent=String(e?.message??e);status.classList.add('error')}
+// A lost device (either the simulation's or the renderer's) says why, and suggests the
+// lighter ship: a phone's browser drops WebGPU when its GPU process runs out of memory or
+// time, and then every call fails ("Unable to make command encoder" in Safari).
+let lostPage='';
+function fail(e){
+ console.error(e);
+ const lost=[broadside_lost()&&`simulation device lost (${broadside_lost()})`,lostPage&&`render device lost (${lostPage})`].filter(Boolean).join('; ');
+ const hint=lost||/command encoder|lost/i.test(String(e?.message??e))?level()>1?' Try the lighter ship: fracture level 1.':' The browser dropped WebGPU: reload to retry.':'';
+ status.textContent=`${e?.message??e}${lost?` [${lost}]`:''}${hint}`;status.classList.add('error');
+}
 
 // The most bodies the pose buffer holds beyond the render scene's: the captain, MAX_BALLS
 // balls and the crush splinter budget.
 const POSE_FLOATS=28,EXTRA_BODIES=1+128+4096;
 // The ship's fracture level (broadside::LEVEL's list): 0 whole members, 1 pieces, 2 cells.
 const levelPick=$('level');
-levelPick.value=new URLSearchParams(location.search).get('level')??'2';
+// Phones (a coarse pointer) start on the lighter ship.
+levelPick.value=new URLSearchParams(location.search).get('level')??(matchMedia('(pointer: coarse)').matches?'1':'2');
 const level=()=>Number(levelPick.value);
 const scenes=new Map();
 
@@ -115,6 +125,7 @@ try{
  const adapter=await navigator.gpu.requestAdapter();if(!adapter)throw new Error('No WebGPU adapter available');
  device=await adapter.requestDevice({requiredLimits:{maxStorageBuffersPerShaderStage:Math.min(16,adapter.limits.maxStorageBuffersPerShaderStage),maxStorageBufferBindingSize:adapter.limits.maxStorageBufferBindingSize,maxBufferSize:adapter.limits.maxBufferSize}});
  device.addEventListener('uncapturederror',e=>fail(e.error));
+ device.lost.then(i=>{lostPage=`${i.reason}: ${i.message}`;if(running)fail(new Error('WebGPU device lost'))});
  const r=await fetch('./fracture/assets/galleon-stern.glb');if(!r.ok)throw new Error(`galleon-stern.glb: ${r.status}`);
  glb=await r.arrayBuffer();
  if(new URLSearchParams(location.search).get('film')!=='1'){await open();requestAnimationFrame(tick)}

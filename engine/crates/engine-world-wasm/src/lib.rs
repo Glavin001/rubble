@@ -52,6 +52,8 @@ thread_local! {
     static ERROR: RefCell<String> = const { RefCell::new(String::new()) };
 }
 static PANIC: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+/// Why this module's device was lost, when it was (`broadside_lost`).
+static LOST: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
 fn fail(e: impl std::fmt::Display) -> bool {
     ERROR.set(e.to_string());
@@ -73,6 +75,11 @@ pub async fn broadside_init() -> Result<(), JsValue> {
     let gpu = stress_gpu::gpu::Gpu::with_instance(&instance, None)
         .await
         .map_err(|e| JsValue::from_str(&e))?;
+    gpu.device.set_device_lost_callback(|reason, message| {
+        if let Ok(mut lost) = LOST.lock() {
+            *lost = format!("{reason:?}: {message}");
+        }
+    });
     GPU.set(Some(gpu));
     Ok(())
 }
@@ -81,6 +88,13 @@ pub async fn broadside_init() -> Result<(), JsValue> {
 #[wasm_bindgen]
 pub fn broadside_panic() -> String {
     PANIC.lock().map(|p| p.clone()).unwrap_or_default()
+}
+
+/// Why this module's WebGPU device was lost ("" while it is not): the browser's reason,
+/// which a phone's missing console would otherwise hide.
+#[wasm_bindgen]
+pub fn broadside_lost() -> String {
+    LOST.lock().map(|l| l.clone()).unwrap_or_default()
 }
 
 /// Why the last call that returned false failed.
