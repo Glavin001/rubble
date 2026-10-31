@@ -110,6 +110,11 @@ pub struct StepInputs {
     pub soft: SoftCounts,
     /// Host commands in binding 8 (`apply_commands` runs first when non-zero).
     pub command_count: u32,
+    /// Directed debris (`guide_step.slang`, bindings 55-59) runs before
+    /// prediction. Off: the passes are not encoded.
+    pub guidance: bool,
+    /// Plan slots per step (`GuidanceCapacity::plan_budget`).
+    pub guide_slots: u32,
     /// Some heightfield carries a soil (`engine_schema::soil`, vehicle ruts):
     /// plan `wheel_soil` and `wheel_soil_press` after the vehicle passes.
     /// Off, the step graph is unchanged.
@@ -542,6 +547,19 @@ pub fn encode_step(
         // Bodies a fast CCD body woke this step are solved this step (ccd_step.slang).
         e.d("ccd_unhold", n_bodies);
     }
+    if i.guidance {
+        // After the graph (free flight = no contacts or joints this step) and
+        // before prediction, which carries the steered velocities.
+        // guide_scan and the single-group passes use 256-lane groups, the plan
+        // one 64-lane group per slot (hosts size groups as threads / 64).
+        let blocks = n_bodies.div_ceil(256);
+        e.d("guide_scan", blocks * 64);
+        e.d("guide_select", 64);
+        e.d("guide_rank", n_bodies);
+        e.d("guide_plan", u64::from(i.guide_slots) * 64);
+        e.d("guide_commit", 64);
+        e.phase("guide");
+    }
     e.d("predict_bodies", n_bodies);
     if m.motion_locks {
         e.d("lock_predict", n_bodies);
@@ -858,6 +876,9 @@ pub fn kernel_source(entry: &str) -> &'static str {
     }
     if entry == "pose_pack" {
         return "pose_pack.slang";
+    }
+    if engine_schema::guidance::GUIDE_ENTRIES.contains(&entry) {
+        return "guide_step.slang";
     }
     if entry.starts_with("convex_") {
         return if entry.ends_with("_persistent") {
@@ -1192,6 +1213,8 @@ mod tests {
             motion: MotionInputs::default(),
             soft: SoftCounts::default(),
             command_count: 0,
+            guidance: false,
+            guide_slots: 0,
             soil: false,
             explosion_count: 0,
         }

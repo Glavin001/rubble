@@ -13,9 +13,16 @@
 use crate::scene::{Body, Collider, Joint, Scene, SceneParams, SHAPE_CONVEX};
 use anyhow::{bail, ensure, Result};
 use bytemuck::bytes_of;
+use engine_schema::guidance::{
+    GuideBodyGpu, GuideEnd, GuideParamsGpu, GuideZoneGpu, GuidanceCapacity, GuidanceSettings, ZoneDesc,
+    GUIDE_BODIES_BINDING, GUIDE_PARAMS_BINDING, GUIDE_SCRATCH_BINDING, GUIDE_SCRATCH_CLAIMS,
+    GUIDE_SLOTS_BINDING, GUIDE_ZONES_BINDING,
+};
 use engine_schema::{BodyState, BondSpec, Collider as GpuCollider, Joint as GpuJoint, JointDesc};
 
-pub const BUFFERS: usize = 31;
+/// Bindings 0..=59 (directed debris is last, 55-59; 37-54 are the terrain's,
+/// placeholders here).
+pub const BUFFERS: usize = GUIDE_SLOTS_BINDING + 1;
 /// Host uniform buffers (params, pass table) and the indirect-args buffer.
 pub const PARAMS_BUFFER: u32 = 6;
 pub const COUNTERS_BUFFER: u32 = 7;
@@ -44,7 +51,10 @@ pub const UPLOAD_SCRATCH: u32 = 0;
 pub const UPLOAD_PARAMS: u32 = 256;
 pub const UPLOAD_COUNTERS: u32 = 512;
 pub const UPLOAD_COLORS: u32 = 608;
-pub const UPLOAD_BYTES: usize = 608 + COLOR_COUNT_WORDS * 4;
+/// Directed debris: this tick's `GuideParamsGpu` (copied to binding 55).
+pub const UPLOAD_GUIDE: u32 = 608 + COLOR_COUNT_WORDS as u32 * 4;
+pub const UPLOAD_BYTES: usize = UPLOAD_GUIDE as usize + GUIDE_PARAMS_BYTES;
+const GUIDE_PARAMS_BYTES: usize = std::mem::size_of::<GuideParamsGpu>();
 pub const PARAMS_BYTES: u32 = 208;
 /// Threads per workgroup of every scheduled kernel.
 pub const WORKGROUP: u32 = 64;
@@ -139,11 +149,20 @@ pub const KERNELS: &[(&str, &str)] = &[
     ("write_sleep_args", "write_sleep_args"),
     ("sleep_island_gate", "sleep_island_gate"),
     ("sleep_island_commit", "sleep_island_commit"),
+    // Directed debris (guide_step.slang), encoded only while guidance is on.
+    ("guide_scan", "guide_scan"),
+    ("guide_select", "guide_select"),
+    ("guide_rank", "guide_rank"),
+    ("guide_plan", "guide_plan"),
+    ("guide_commit", "guide_commit"),
 ];
 
 /// Slang source (relative to `engine/slang/kernels/`) that defines `entry`
 /// (as engine-webgpu's build script compiles them).
 pub fn kernel_source(entry: &str) -> &'static str {
+    if entry.starts_with("guide_") {
+        return "guide_step.slang";
+    }
     if entry.starts_with("convex_") {
         return if entry.ends_with("_persistent") {
             "convex_persistent.slang"
@@ -450,7 +469,17 @@ pub struct Planner {
     wake_serial: u32,
     upload: Vec<u8>,
     commands: Vec<u32>,
+    /// Directed debris tuning (`set_guidance`) and the zones uploaded.
+    guide_params: GuideParamsGpu,
+    guide_enabled: bool,
+    guide_zones: u32,
 }
+
+/// The lab's guidance buffers are sized for the default capacity.
+const GUIDE_CAP: GuidanceCapacity = GuidanceCapacity {
+    max_zones: 256,
+    plan_budget: 256,
+};
 
 /// Device limits a host checks buffer sizes against.
 #[derive(Clone, Copy, Debug)]
@@ -584,6 +613,9 @@ impl Planner {
             wake_serial: 0,
             upload: vec![0; UPLOAD_BYTES],
             commands: Vec::new(),
+            guide_params: GuideParamsGpu::default(),
+            guide_enabled: false,
+            guide_zones: 0,
         };
         p.sizes = p.buffer_sizes();
         for (i, &size) in p.sizes.iter().enumerate() {
@@ -667,7 +699,13 @@ impl Planner {
         s[28] = b(cap.max_candidates, 32); // solver pairs
         s[29] = b(cap.max_candidates, 32); // convex SAT work list
         s[30] = next_pow2((cap.max_candidates as u64).max(1024)) as u64 * 8; // SAT separating-feature cache
-        s
+        // Directed debris (guide_step.slang).
+        s[GUIDE_PARAMS_BINDING] = GUIDE_PARAMS_BYTES as u64;
+        s[GUIDE_ZONES_BINDING] = b(GUIDE_CAP.max_zones, std::mem::size_of::<GuideZoneGpu>() as u64);
+        s[GUIDE_BODIES_BINDING] = b(cap.max_bodies, std::mem::size_of::<GuideBodyGpu>() as u64);
+        s[GUIDE_SCRATCH_BINDING] = GUIDE_CAP.scratch_words(cap.max_bodies) * 4;
+        s[GUIDE_SLOTS_BINDING] = b(GUIDE_CAP.plan_budget, 64);
+        s.iter().map(|&x| x.max(256)).collect()
     }
 
     /// Byte size of every buffer (`AVBD 0..30`).
@@ -738,6 +776,86 @@ impl Planner {
     /// Buffers `reset` clears (all but bodies, colliders, materials, hulls, passes).
     pub fn cleared_on_reset(slot: u32) -> bool {
         ![0, 2, 3, 18, 22].contains(&slot)
+    }
+
+    // ----- directed debris ------------------------------------------------
+
+    fn guide_active(&self) -> bool {
+        self.guide_enabled && self.guide_zones > 0
+    }
+
+    fn guide_step_params(&self) -> GuideParamsGpu {
+        self.guide_params.for_step(
+            engine_schema::guidance::GuideStep {
+                time: self.steps as f32 * self.params.dt,
+                dt: self.params.dt,
+                gravity_y: self.params.gravity_y,
+                zones: self.guide_zones,
+                bodies: self.body_count,
+                joints: self.joint_count,
+            },
+            GUIDE_CAP,
+        )
+    }
+
+    /// Enable, disable or retune directed debris (encoded from the next tick).
+    pub fn set_guidance(&mut self, settings: &GuidanceSettings) -> Result<()> {
+        self.guide_params = settings
+            .to_params(self.params.gravity_y, self.params.dt)
+            .map_err(anyhow::Error::msg)?;
+        self.guide_enabled = settings.enabled;
+        Ok(())
+    }
+
+    /// The zone records for binding 56 (hosts write them at offset 0).
+    pub fn set_guidance_zones(&mut self, zones: &[ZoneDesc]) -> Result<Vec<u8>> {
+        ensure!(
+            zones.len() <= GUIDE_CAP.max_zones as usize,
+            "{} guidance zones exceed the lab's {}",
+            zones.len(),
+            GUIDE_CAP.max_zones
+        );
+        let mut out = Vec::with_capacity(zones.len() * std::mem::size_of::<GuideZoneGpu>());
+        for (k, z) in zones.iter().enumerate() {
+            if let Some(b) = z.anchor_body {
+                ensure!(b < self.body_count, "zone {k} anchors to body {b}, past the scene");
+            }
+            let gpu = z.to_gpu().map_err(|e| anyhow::anyhow!("zone {k}: {e}"))?;
+            out.extend_from_slice(bytes_of(&gpu));
+        }
+        self.guide_zones = zones.len() as u32;
+        Ok(out)
+    }
+
+    /// Guidance records of every body for binding 57: the scene's pieces
+    /// (not the ground or the projectiles) armed with `tag_mask`, 0 for off.
+    pub fn guide_records(&self, tag_mask: u32) -> Vec<u8> {
+        let mut out = vec![0u8; self.body_count as usize * std::mem::size_of::<GuideBodyGpu>()];
+        if tag_mask != 0 {
+            for i in 1..self.projectile_start.min(self.body_count) as usize {
+                let r = GuideBodyGpu::armed(1, tag_mask);
+                let at = i * std::mem::size_of::<GuideBodyGpu>();
+                out[at..at + std::mem::size_of::<GuideBodyGpu>()].copy_from_slice(bytes_of(&r));
+            }
+        }
+        out
+    }
+
+    /// How many bodies are in each `GuideState` (off, armed, steering, done),
+    /// then how many ended for each `GuideEnd` reason, from a readback of
+    /// binding 57.
+    pub fn guide_state_counts(records: &[u8]) -> [u32; 12] {
+        let mut out = [0u32; 12];
+        for r in bytemuck::cast_slice::<u8, GuideBodyGpu>(records) {
+            out[(r.state as usize).min(3)] += 1;
+            out[4 + GuideEnd::of(r) as usize] += 1;
+        }
+        out
+    }
+
+    /// Byte range of the zone claim counters in binding 58 (`GUIDE_SCRATCH_CLAIMS`).
+    pub fn guide_claims_range(&self) -> (u32, u32) {
+        (GUIDE_SCRATCH_CLAIMS * 4, self.guide_zones * 4)
     }
 
     /// Restore the step state (hosts clear buffers and re-upload the initial contents).
@@ -934,6 +1052,18 @@ impl Planner {
         put(up, UPLOAD_SCRATCH, &s);
         put(up, UPLOAD_PARAMS, &params);
         put(up, UPLOAD_COUNTERS, &counters);
+        if self.guide_active() {
+            let g = self.guide_step_params();
+            let at = UPLOAD_GUIDE as usize;
+            self.upload[at..at + GUIDE_PARAMS_BYTES].copy_from_slice(bytes_of(&g));
+            self.copy(
+                HOST_UPLOAD,
+                UPLOAD_GUIDE,
+                GUIDE_PARAMS_BINDING as u32,
+                0,
+                GUIDE_PARAMS_BYTES as u32,
+            );
+        }
         self.copy(HOST_UPLOAD, UPLOAD_SCRATCH, SCRATCH_BUFFER, 0, 256);
         self.copy(HOST_UPLOAD, UPLOAD_PARAMS, PARAMS_BUFFER, 0, PARAMS_BYTES);
         // Keep the previous GPU count before clearing counters (a batch of ticks
@@ -1190,6 +1320,16 @@ impl Planner {
         if self.ccd_step() {
             // Bodies a fast CCD body woke this step are solved this step.
             self.disp("ccd_unhold", n_bodies, 0);
+        }
+        if self.guide_active() {
+            // As the shared plan (engine-exec rigid_plan): after the graph, before
+            // prediction, which carries the steered velocities.
+            let n = self.body_count.max(1);
+            self.disp("guide_scan", n.div_ceil(256) * 64, 0);
+            self.disp("guide_select", 64, 0);
+            self.disp("guide_rank", n, 0);
+            self.disp("guide_plan", GUIDE_CAP.plan_budget * 64, 0);
+            self.disp("guide_commit", 64, 0);
         }
         if self.listed_passes {
             self.work("predict_bodies", 67, 1); // awake list (slot 67: awake count)

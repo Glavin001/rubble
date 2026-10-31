@@ -11,6 +11,7 @@ pub mod character;
 pub mod commands;
 pub mod mass;
 pub mod convex;
+pub mod guidance;
 pub mod handles;
 pub mod heightfield;
 pub mod joint;

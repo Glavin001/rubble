@@ -8,6 +8,7 @@ use engine_exec::rigid_plan;
 use engine_exec::rigid_plan::{constraint_id_words, HostUniforms};
 use engine_exec::{ExecError, PhaseTimingsMs};
 use engine_schema::convex::HullArena;
+use engine_schema::guidance::{self, GuideBodyGpu, GuideParamsGpu, GuideZoneGpu, GuidanceCapacity};
 use engine_schema::*;
 use engine_vehicle::{
     FunctionalState, Ray, RayHit, VehicleBackend, VehicleCapacity, VehicleDesc, VehicleEvent,
@@ -69,7 +70,18 @@ fn make_bind_group(
     })
 }
 
+/// Host side of directed debris (`WgpuSim::allocate_guidance`).
+struct GuideHost {
+    cap: GuidanceCapacity,
+    /// Tuning; the per-step fields are filled by `write_guide_params`.
+    params: GuideParamsGpu,
+    enabled: bool,
+    zones: u32,
+}
+
 pub struct WgpuSim {
+    /// Directed debris (`allocate_guidance`); `None`: not allocated.
+    guide: Option<GuideHost>,
     compact_contacts: bool,
     persistent_contacts: bool,
     sparse_start: u32,
@@ -437,6 +449,7 @@ impl WgpuSim {
             soft,
             features,
             pose_output,
+            guidance,
         } = options;
         anyhow::ensure!(
             soft.is_none() || contacts == ContactStorage::Canonical,
@@ -484,6 +497,9 @@ impl WgpuSim {
             });
             sim.rebind_buffer(32);
             sim.soft = Some(SoftHost::new(soft));
+        }
+        if let Some(cap) = guidance {
+            sim.allocate_guidance(cap)?;
         }
         Ok(sim)
     }
@@ -583,6 +599,24 @@ impl WgpuSim {
             engine_terrain::surface::SURFACE_BINDING,
             256,
         ));
+        // 54 is Metal's terrain partials (terrain_mpm_fast.slang): unused here.
+        const _: () = assert!(
+            guidance::GUIDE_PARAMS_BINDING == engine_terrain::surface::SURFACE_BINDING + 2
+        );
+        bufs.push(terrain_buffer(&device, engine_terrain::surface::SURFACE_BINDING + 1, 256));
+        // Directed-debris buffers (guide_step.slang): placeholders until a world
+        // asks for guidance (`allocate_guidance`).
+        for binding in guidance::GUIDE_PARAMS_BINDING..=guidance::GUIDE_SLOTS_BINDING {
+            debug_assert_eq!(bufs.len(), binding);
+            bufs.push(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("b{binding} guide")),
+                size: 256,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }));
+        }
         // Pass table slots (256-byte aligned so dynamic offsets are legal).
         queue.write_buffer(&bufs[22], 0, &rigid_plan::pass_table());
 
@@ -788,6 +822,7 @@ impl WgpuSim {
             fast_list_off: false,
             beam_events_seen: 0,
             mount_events_seen: 0,
+            guide: None,
         };
         sim.write_character_header();
         // Kernel fixtures in the unit tests set the modes they exercise on top
@@ -2033,6 +2068,7 @@ impl WgpuSim {
         self.flush_commands();
         self.upload_impulses();
         self.write_host_uniforms_ex(!read);
+        self.write_guide_params();
         if let (Some(t), Some(c)) = (host_t, t_cell) {
             eprintln!(
                 "rubble host: grid cell {c:.2} ms, uniforms {:.2} ms",
@@ -2314,6 +2350,7 @@ impl WgpuSim {
         self.flush_commands();
         self.upload_impulses();
         self.write_host_uniforms_ex(true);
+        self.write_guide_params();
         self.wake_pending = false;
         self.last_contact_offset = if self.contacts_parity == 0 {
             0
@@ -2519,6 +2556,8 @@ impl WgpuSim {
             },
             soft: self.soft_counts(),
             command_count: self.command_count,
+            guidance: self.guidance_active(),
+            guide_slots: self.guide.as_ref().map_or(0, |g| g.cap.plan_budget),
             explosion_count: self.explosion_count,
         }
     }
@@ -2760,6 +2799,182 @@ impl WgpuSim {
                     make_bind_group(&self.device, name, &pipe.layout, &pipe.bindings, &self.bufs);
             }
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Directed debris (slang/kernels/guide_step.slang)
+    // ---------------------------------------------------------------------
+
+    /// Size the guidance buffers (bindings 55-59). Every body's record starts
+    /// off (zeroed); `write_guide_bodies` arms the guided ones.
+    fn allocate_guidance(&mut self, cap: GuidanceCapacity) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            cap.max_zones > 0 && cap.plan_budget > 0,
+            "guidance capacity needs max_zones and plan_budget above zero"
+        );
+        anyhow::ensure!(
+            cap.plan_budget <= guidance::GUIDE_BLOCK,
+            "GuidanceCapacity::plan_budget {} exceeds {} plans per step",
+            cap.plan_budget,
+            guidance::GUIDE_BLOCK
+        );
+        let max_bodies = self.capacity.max_bodies;
+        let sizes = [
+            (guidance::GUIDE_PARAMS_BINDING, std::mem::size_of::<GuideParamsGpu>() as u64),
+            (
+                guidance::GUIDE_ZONES_BINDING,
+                u64::from(cap.max_zones) * std::mem::size_of::<GuideZoneGpu>() as u64,
+            ),
+            (
+                guidance::GUIDE_BODIES_BINDING,
+                u64::from(max_bodies.max(1)) * std::mem::size_of::<GuideBodyGpu>() as u64,
+            ),
+            (guidance::GUIDE_SCRATCH_BINDING, cap.scratch_words(max_bodies) * 4),
+            (
+                guidance::GUIDE_SLOTS_BINDING,
+                u64::from(cap.plan_budget) * std::mem::size_of::<guidance::GuideSlotGpu>() as u64,
+            ),
+        ];
+        for (binding, bytes) in sizes {
+            self.check_buffer_fits(binding, bytes)?;
+            self.bufs[binding] = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("b{binding} guide")),
+                size: bytes.max(256),
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            self.rebind_buffer(binding as u32);
+        }
+        self.guide = Some(GuideHost {
+            cap,
+            params: GuideParamsGpu::default(),
+            enabled: false,
+            zones: 0,
+        });
+        Ok(())
+    }
+
+    /// The guidance capacity this world was created with.
+    pub fn guidance_capacity(&self) -> Option<GuidanceCapacity> {
+        self.guide.as_ref().map(|g| g.cap)
+    }
+
+    fn guide_host(&mut self) -> anyhow::Result<&mut GuideHost> {
+        self.guide.as_mut().ok_or_else(|| {
+            anyhow::anyhow!("guidance was not allocated: create the world with a guidance capacity")
+        })
+    }
+
+    /// Turn guidance on or off with its tuning. The host fills the per-step
+    /// fields (time, dt, gravity, counts); the rest of `params` is kept.
+    pub fn set_guidance(&mut self, enabled: bool, params: GuideParamsGpu) -> anyhow::Result<()> {
+        let g = self.guide_host()?;
+        g.enabled = enabled;
+        g.params = params;
+        Ok(())
+    }
+
+    /// Replace the zone list. Claims follow zone indices and are kept (see
+    /// `reset_guide_claims`), so a zone list can be re-sent without
+    /// refilling every quota.
+    pub fn set_guide_zones(&mut self, zones: &[GuideZoneGpu]) -> anyhow::Result<()> {
+        let max = self.guide_host()?.cap.max_zones;
+        anyhow::ensure!(
+            zones.len() <= max as usize,
+            "{} guidance zones exceed GuidanceCapacity::max_zones ({max})",
+            zones.len()
+        );
+        self.guide_host()?.zones = zones.len() as u32;
+        if !zones.is_empty() {
+            self.write_binding(guidance::GUIDE_ZONES_BINDING, 0, zones);
+        }
+        Ok(())
+    }
+
+    /// Zero every zone's claim counter.
+    pub fn reset_guide_claims(&mut self) -> anyhow::Result<()> {
+        let max = self.guide_host()?.cap.max_zones;
+        let zeros = vec![0u32; max as usize];
+        self.write_binding(
+            guidance::GUIDE_SCRATCH_BINDING,
+            u64::from(guidance::GUIDE_SCRATCH_CLAIMS) * 4,
+            &zeros,
+        );
+        Ok(())
+    }
+
+    /// Write the guidance records of bodies `first..first + records.len()`.
+    pub fn write_guide_bodies(&mut self, first: u32, records: &[GuideBodyGpu]) -> anyhow::Result<()> {
+        self.guide_host()?;
+        anyhow::ensure!(
+            u64::from(first) + records.len() as u64 <= u64::from(self.capacity.max_bodies),
+            "guidance records past the body capacity"
+        );
+        if !records.is_empty() {
+            let stride = std::mem::size_of::<GuideBodyGpu>() as u64;
+            self.write_binding(guidance::GUIDE_BODIES_BINDING, u64::from(first) * stride, records);
+        }
+        Ok(())
+    }
+
+    /// Clear a freed body slot's record so a body reusing it starts unguided.
+    pub fn clear_guide_body(&mut self, index: u32) {
+        if self.guide.is_some() {
+            let _ = self.write_guide_bodies(index, &[GuideBodyGpu::default()]);
+        }
+    }
+
+    /// Read guidance records (blocking; for tools and tests).
+    pub fn read_guide_bodies(&self, first: u32, count: u32) -> Vec<GuideBodyGpu> {
+        if self.guide.is_none() {
+            return Vec::new();
+        }
+        let stride = std::mem::size_of::<GuideBodyGpu>() as u64;
+        self.read_buffer_range(
+            guidance::GUIDE_BODIES_BINDING,
+            u64::from(first) * stride,
+            count as usize,
+        )
+    }
+
+    /// Each zone's claimed bodies (blocking; for tools and tests).
+    pub fn read_guide_claims(&self) -> Vec<u32> {
+        let Some(g) = self.guide.as_ref() else {
+            return Vec::new();
+        };
+        self.read_buffer_range(
+            guidance::GUIDE_SCRATCH_BINDING,
+            u64::from(guidance::GUIDE_SCRATCH_CLAIMS) * 4,
+            g.zones as usize,
+        )
+    }
+
+    /// The guidance passes run this step: enabled, with zones and bodies.
+    fn guidance_active(&self) -> bool {
+        self.guide
+            .as_ref()
+            .is_some_and(|g| g.enabled && g.zones > 0 && self.body_count > 0)
+    }
+
+    fn write_guide_params(&self) {
+        if !self.guidance_active() {
+            return;
+        }
+        let g = self.guide.as_ref().expect("active guidance");
+        let p = g.params.for_step(
+            guidance::GuideStep {
+                time: self.steps_done as f32 * self.params.dt,
+                dt: self.params.dt,
+                gravity_y: self.params.gravity_y,
+                zones: g.zones,
+                bodies: self.body_count,
+                joints: self.joint_count,
+            },
+            g.cap,
+        );
+        self.write_binding(guidance::GUIDE_PARAMS_BINDING, 0, std::slice::from_ref(&p));
     }
 
     // ---------------------------------------------------------------------
