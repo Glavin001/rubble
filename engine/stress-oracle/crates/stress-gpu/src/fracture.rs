@@ -417,7 +417,7 @@ impl GpuFracture {
         if n > 1 << 20 || b > 1 << 20 {
             return Err(format!("fracture: {n} chunks and {b} body slots; the scans hold at most 2^20 of each"));
         }
-        if t.info.len() != n as usize || t.chunk_body.len() != n as usize || t.free.len() != b as usize {
+        if t.info.len() != used_n as usize || t.chunk_body.len() != used_n as usize || t.free.len() != b as usize {
             return Err("fracture: tables of mismatched lengths".into());
         }
         let layout = Layout { n, e, b };
@@ -637,6 +637,23 @@ impl GpuFracture {
         let scan = ScanParams { n: self.params.chunk_used, in_base: l.w_new(), out_base: l.w_rank(), block_base: l.scan_new_blocks() };
         q.write_buffer(&self.scan_new, 0, bytemuck::bytes_of(&scan));
         Ok(())
+    }
+
+    /// Free `chunks` chunks and `bonds` bonds placed at `at` (their records stay; a free
+    /// chunk's body is NONE, a free bond broken) and take `slots` out of the body slots a
+    /// split may use. Written before the next submission.
+    pub fn retire(&self, gpu: &Gpu, at: Base, chunks: u32, bonds: u32, slots: &[u32]) {
+        let l = self.layout;
+        let q = &gpu.queue;
+        if chunks > 0 {
+            q.write_buffer(&self.work, 4 * (l.w_body() + at.chunk) as u64, bytemuck::cast_slice(&vec![NONE; chunks as usize]));
+        }
+        if bonds > 0 {
+            q.write_buffer(&self.work, 4 * (l.w_alive() + at.bond) as u64, bytemuck::cast_slice(&vec![0u32; bonds as usize]));
+        }
+        for &s in slots {
+            q.write_buffer(&self.work, 4 * (l.w_free() + s) as u64, bytemuck::bytes_of(&0u32));
+        }
     }
 
     /// The view's tables (once per renderer layout).
@@ -866,6 +883,23 @@ impl GpuFracture {
             gpu.queue.write_buffer(&self.work, 4 * (self.layout.w_alive() + i) as u64, bytemuck::bytes_of(&zero));
             for end in [bond_table[i as usize][0], bond_table[i as usize][1]] {
                 let body = chunk_body[end as usize];
+                gpu.queue.write_buffer(&self.atom, 4 * (self.layout.a_dirty() + body) as u64, bytemuck::bytes_of(&one));
+            }
+        }
+        // The frame's broken count (`C_FRAME_BROKEN`, cleared by every frame's gate).
+        gpu.queue.write_buffer(&self.atom, 4 * self.layout.a_counters() as u64, bytemuck::bytes_of(&(bonds.len() as u32)));
+    }
+
+    /// [`Self::break_bonds_sparse`] with each bond's two bodies given: `(bond, body a,
+    /// body b)`, nothing else read or written.
+    pub fn break_bonds_at(&self, gpu: &Gpu, bonds: &[(u32, u32, u32)]) {
+        if bonds.is_empty() {
+            return;
+        }
+        let (zero, one) = (0u32, 1u32);
+        for &(i, a, b) in bonds {
+            gpu.queue.write_buffer(&self.work, 4 * (self.layout.w_alive() + i) as u64, bytemuck::bytes_of(&zero));
+            for body in [a, b] {
                 gpu.queue.write_buffer(&self.atom, 4 * (self.layout.a_dirty() + body) as u64, bytemuck::bytes_of(&one));
             }
         }

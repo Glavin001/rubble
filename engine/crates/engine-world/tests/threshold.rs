@@ -84,11 +84,73 @@ struct Outcome {
 
 /// Place `asset` as a threshold destructible, fire the lab's shot, step `frames`.
 fn run_world(asset: &DestructibleAssetDesc, lab: &engine_fracture::Scene, frames: u32) -> Outcome {
+    run_world_among(asset, lab, frames, false)
+}
+
+/// `run_world`, with `neighbours`: copies of the asset placed 80 m and 160 m along x in
+/// the same world (one more placed and destroyed before the shot's target, whose freed
+/// tables the target then takes), and the first neighbour destroyed at the end. The
+/// neighbours never break, and the target breaks as it does alone.
+fn run_world_among(
+    asset: &DestructibleAssetDesc,
+    lab: &engine_fracture::Scene,
+    frames: u32,
+    neighbours: bool,
+) -> Outcome {
     let placement = asset.stress.as_ref().unwrap().placement();
     // The lab's stress world is the asset frame less its placement.
     let offset = placement.map(|x| -x as f32);
-    let mut w = world_for(asset, offset);
+    let mut w = if neighbours {
+        let mut def = asset.solver_for(StrengthModel::Threshold).unwrap();
+        def.sleep_lin = -1.0;
+        let mut c = capacity(asset);
+        c.max_bodies *= 4;
+        c.max_colliders = c.max_colliders.max(1 << 14) * 4;
+        c.max_hull_vertices *= 4;
+        let mut w = World::new(
+            GpuContext::Default,
+            &WorldDef {
+                capacity: c,
+                gravity: [0.0, def.gravity_y, 0.0],
+                solver: def,
+                enable_sleep: false,
+                contacts: ContactStorage::Canonical,
+                ..WorldDef::default()
+            },
+        )
+        .unwrap();
+        let stress = asset.stress.as_ref().unwrap();
+        let h = stress.ground_height().unwrap();
+        let g = w.create_body(&BodyDef::default()).unwrap();
+        w.create_shape(
+            g,
+            &ShapeDef::default(),
+            Geometry::Plane {
+                normal: [0.0, 1.0, 0.0],
+                offset: h + offset[1],
+            },
+        )
+        .unwrap();
+        w
+    } else {
+        world_for(asset, offset)
+    };
     let a = w.create_destructible_asset(asset).unwrap();
+    let place = |w: &mut World, dx: f32| {
+        w.create_destructible(&DestructibleDef {
+            model: StrengthModel::Threshold,
+            transform: Transform::new([offset[0] + dx, offset[1], offset[2]], [0.0, 0.0, 0.0, 1.0]),
+            asleep: false,
+            ..DestructibleDef::new(a)
+        })
+        .unwrap()
+    };
+    let mut others = Vec::new();
+    if neighbours {
+        others.push(place(&mut w, 80.0));
+        let gone = place(&mut w, 240.0);
+        w.destroy_destructible(gone).unwrap();
+    }
     let id = w
         .create_destructible(&DestructibleDef {
             model: StrengthModel::Threshold,
@@ -97,6 +159,9 @@ fn run_world(asset: &DestructibleAssetDesc, lab: &engine_fracture::Scene, frames
             ..DestructibleDef::new(a)
         })
         .unwrap();
+    if neighbours {
+        others.push(place(&mut w, 160.0));
+    }
     let stats = w.destructible_stats(id).unwrap();
     assert!(stats.chunks > 10 && stats.bonds > 10, "{stats:?}");
     let (origin, v, r, m) = lab_shot(lab, target(asset));
@@ -164,7 +229,7 @@ fn run_world(asset: &DestructibleAssetDesc, lab: &engine_fracture::Scene, frames
                         destructible,
                         bonds,
                     } => {
-                        assert_eq!(*destructible, id);
+                        assert_eq!(*destructible, id, "only the shot's target breaks");
                         broken += bonds.len() as u32;
                     }
                     DestructionEvent::Split {
@@ -228,6 +293,22 @@ fn run_world(asset: &DestructibleAssetDesc, lab: &engine_fracture::Scene, frames
             w.body_transform(*b).unwrap().is_some(),
             "piece {b:?} has a reported pose"
         );
+    }
+    if neighbours {
+        for o in &others {
+            let s = w.destructible_stats(*o).unwrap();
+            assert_eq!(s.bonds_intact, s.bonds, "a neighbour stands intact");
+        }
+        // The first neighbour goes; the target's pieces (some on spare slots it reserved)
+        // stay valid and the world keeps stepping.
+        w.destroy_destructible(others[0]).unwrap();
+        for _ in 0..10 {
+            w.step().unwrap();
+            w.poll_blocking().unwrap();
+        }
+        for c in 0..stats.chunks {
+            assert!(w.body_is_valid(w.destructible_chunk_body(id, c).unwrap()));
+        }
     }
     w.destroy_destructible(id).unwrap();
     Outcome {
@@ -344,6 +425,32 @@ fn check(name: &str, (asset, lab): (DestructibleAssetDesc, engine_fracture::Scen
         (0.75..=1.33).contains(&ratio),
         "{name}: {} bodies against the lab's {lab_bodies}",
         world.bodies
+    );
+}
+
+/// Destructibles share one fracture per world: the cuboid house breaks among neighbours as
+/// it does alone (in tables placed after others, into a destroyed one's freed range).
+#[test]
+fn a_house_among_neighbours_breaks_as_alone() {
+    let (asset, lab) = house();
+    let frames = 120;
+    let alone = run_world(&asset, &lab, frames);
+    let among = run_world_among(&asset, &lab, frames, true);
+    eprintln!(
+        "alone {} bonds into {} bodies; among neighbours {} into {}",
+        alone.broken, alone.bodies, among.broken, among.bodies
+    );
+    assert_eq!(
+        first_break(&among.timeline),
+        first_break(&alone.timeline),
+        "the first break"
+    );
+    let ratio = among.bodies as f64 / alone.bodies as f64;
+    assert!(
+        (0.75..=1.33).contains(&ratio),
+        "{} bodies against {} alone",
+        among.bodies,
+        alone.bodies
     );
 }
 
