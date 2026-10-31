@@ -1,4 +1,6 @@
 #include "RubbleAbiBackend.h"
+// The linked library's hash (build-ffi.sh): including it makes a rebuilt librubble_ffi.a relink.
+#include "rubble_ffi_build.h"
 
 #include "HAL/PlatformFileManager.h"
 #include "Misc/CommandLine.h"
@@ -506,6 +508,17 @@ bool FRubbleAbiBackend::CreateSoftCars(const FRubbleSceneAssets& Layout, FString
 		}
 	}
 	// The layout's cars face +X; the descriptor's front may be -X: then it is turned to match.
+	// Without steered wheels (the procedural car has none) the front is the descriptor's +Z, the
+	// way it is built (engine_softbody::procedural: rings along +Z, forward), which is Unreal's -X.
+	bool bSteers = false;
+	for (const TSharedPtr<FJsonValue>& W : Root->GetArrayField(TEXT("wheels")))
+	{
+		bSteers |= W->AsObject()->GetBoolField(TEXT("steerable"));
+	}
+	if (!bSteers)
+	{
+		FrontX = -1.0;
+	}
 	const FQuat Turn = FrontX < 0.0 ? FQuat(FVector::UpVector, UE_PI) : FQuat::Identity;
 	FBox Cage(ForceInit);
 	for (const FVector& N : Nodes)

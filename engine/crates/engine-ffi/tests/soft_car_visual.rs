@@ -193,8 +193,8 @@ struct Crash {
     beams_broken: usize,
     pieces: Vec<(String, RbVec3)>,
     points_inside: bool,
-    /// At the end, the bumper mesh's centre from the torn-off bumper's centre:
-    /// bound part by part, then bound to the whole cage (for the log).
+    /// The bumper mesh's centre from the torn-off bumper's nodes' centre: at the end,
+    /// and at rest.
     bumper_miss: (f32, f32),
 }
 
@@ -298,6 +298,7 @@ unsafe fn crash(h: Host, speed: f32) -> Crash {
     let mut piece_at: Option<Vec<u32>> = None;
     let mut nodes: Vec<RbVec3> = Vec::new();
     let mut last: [Vec<RbVec3>; 2] = [Vec::new(), Vec::new()];
+    let mut rest: Option<(Vec<RbVec3>, Vec<RbVec3>)> = None;
     for _ in 0..720 {
         ok(rbWorld_Step(w));
         let mut f: RbFrame = std::mem::zeroed();
@@ -314,6 +315,9 @@ unsafe fn crash(h: Host, speed: f32) -> Crash {
         if f.soft_count > 0 {
             let o = &*f.soft;
             nodes = std::slice::from_raw_parts(o.nodes, o.node_count as usize).to_vec();
+            if rest.is_none() {
+                rest = Some((nodes.clone(), last[0].clone()));
+            }
         }
         let nv = k.vertex_count as usize;
         let nt = k.triangle_count as usize;
@@ -371,17 +375,20 @@ unsafe fn crash(h: Host, speed: f32) -> Crash {
             }
         }
     }
-    if let Some(piece) = piece_at {
-        let mut c = [0.0f32; 3];
-        for &i in &piece {
-            let p = nodes[i as usize];
-            c[0] += p.x / piece.len() as f32;
-            c[1] += p.y / piece.len() as f32;
-            c[2] += p.z / piece.len() as f32;
-        }
+    if let (Some(piece), Some((rest_nodes, rest_skin))) = (piece_at, rest) {
+        let at = |nodes: &[RbVec3]| {
+            let mut c = [0.0f32; 3];
+            for &i in &piece {
+                let p = nodes[i as usize];
+                c[0] += p.x / piece.len() as f32;
+                c[1] += p.y / piece.len() as f32;
+                c[2] += p.z / piece.len() as f32;
+            }
+            c
+        };
         out.bumper_miss = (
-            dist(centre(&last[0], &v.parts, bumper), c),
-            dist(centre(&last[1], &v.parts, bumper), c),
+            dist(centre(&last[0], &v.parts, bumper), at(&nodes)),
+            dist(centre(&rest_skin, &v.parts, bumper), at(&rest_nodes)),
         );
     }
     rbDestroyWorld(w);
@@ -416,9 +423,10 @@ fn a_wall_crash_reports_strain_tears_and_break_points() {
             "the front bumper tears off: {:?}",
             r.pieces
         );
-        // Bound to its own nodes, the bumper's mesh leaves with the torn-off bumper.
+        // Bound to its own nodes, the bumper's mesh leaves with the torn-off bumper: it
+        // ends about where it sat on the bumper at rest.
         assert!(
-            r.bumper_miss.0 < h.len(0.1),
+            (r.bumper_miss.0 - r.bumper_miss.1).abs() < h.len(0.1),
             "the bumper mesh rides the bumper: {:?}",
             r.bumper_miss
         );

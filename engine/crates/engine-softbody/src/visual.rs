@@ -99,37 +99,25 @@ fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// Section regions along the loop (control segment kinds).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Region {
-    Under,
-    Side,
-    Greenhouse,
-    Roof,
-}
-
-/// Closed Catmull–Rom through `pts`, `m` samples, each with the segment it is in.
-fn catmull_loop(pts: &[Vec2], m: usize) -> Vec<(Vec2, usize)> {
+/// Open Catmull–Rom through `pts` at `u` ∈ [0, 1) (ends tangent to their neighbours).
+fn open_curve(pts: &[Vec2], u: f32) -> Vec2 {
     let n = pts.len();
-    (0..m)
-        .map(|i| {
-            let u = i as f32 / m as f32 * n as f32;
-            let k = u.floor() as usize % n;
-            let t = u.fract();
-            let p0 = pts[(k + n - 1) % n];
-            let p1 = pts[k];
-            let p2 = pts[(k + 1) % n];
-            let p3 = pts[(k + 2) % n];
-            let t2 = t * t;
-            let t3 = t2 * t;
-            let p = 0.5
-                * ((2.0 * p1)
-                    + (-p0 + p2) * t
-                    + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
-                    + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3);
-            (p, k)
-        })
-        .collect()
+    if n == 2 {
+        return pts[0].lerp(pts[1], u);
+    }
+    let x = u * (n - 1) as f32;
+    let k = (x.floor() as usize).min(n - 2);
+    let t = x - k as f32;
+    let p1 = pts[k];
+    let p2 = pts[k + 1];
+    let p0 = if k == 0 { p1 * 2.0 - p2 } else { pts[k - 1] };
+    let p3 = if k + 2 < n { pts[k + 2] } else { p2 * 2.0 - p1 };
+    let t2 = t * t;
+    let t3 = t2 * t;
+    0.5 * ((2.0 * p1)
+        + (-p0 + p2) * t
+        + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+        + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3)
 }
 
 /// Superellipsoid "rounded box" mesh: (vertices, triangles), outward wound.
@@ -234,96 +222,150 @@ pub fn car_visual(p: &CarParams, layout: &CarLayout, nodes: &[Vec3]) -> VisualMe
     let len = p.length;
     let hw = 0.5 * p.width;
     let ring_z = |k: usize| -0.5 * len + k as f32 / (n - 1) as f32 * len;
-    // Section control polygon at t (0 = rear, 1 = front), left side then right.
-    let section = |t: f32| -> (Vec<Vec2>, Vec<Region>) {
+    let t_of = |z: f32| ((z + 0.5 * len) / len).clamp(0.0, 1.0);
+    // The design's lines (m, in the desc frame): the window sill, the shoulder crease, the
+    // sill, and where the glass starts and ends along the profile ([`roof`], the cage's).
+    let belt = 0.93;
+    let shoulder = 0.80;
+    let sill = 0.31;
+    let windscreen = (0.558, 0.716);
+    let rear_window = (0.128, 0.276);
+    // Half width at t: the cage's taper, with the corners rounded in plan.
+    let half_width = |t: f32| {
         let taper = 1.0 - 0.08 * (2.0 * t - 1.0).abs().powi(4);
-        let top = roof(t);
-        let cab = smoothstep(1.08, 1.3, top);
-        let top_w = hw * (0.93 - 0.13 * cab) * taper;
-        let side = hw * taper;
-        let half = [
-            (Vec2::new(0.0, 0.24), Region::Under),
-            (Vec2::new(side * 0.82, 0.23), Region::Under),
-            (Vec2::new(side * 0.98, 0.33), Region::Side),
-            (Vec2::new(side * 1.015, 0.56), Region::Side),
-            (Vec2::new(side, 0.78), Region::Greenhouse),
-            (
-                Vec2::new(side - 0.035 - 0.05 * cab, 0.84 + 0.02 * cab),
-                Region::Greenhouse,
-            ),
-            (Vec2::new(top_w, top - 0.03), Region::Roof),
-            (Vec2::new(top_w * 0.55, top + 0.035), Region::Roof),
-        ];
-        let mut pts: Vec<Vec2> = half.iter().map(|h| h.0).collect();
-        let mut reg: Vec<Region> = half.iter().map(|h| h.1).collect();
-        pts.push(Vec2::new(0.0, top + 0.045));
-        reg.push(Region::Roof);
-        for h in half.iter().skip(1).rev() {
-            pts.push(Vec2::new(-h.0.x, h.0.y));
-        }
-        // Mirrored segments run the other way: segment i (from point i) on the
-        // right side has the region of the left side's segment before it.
-        for k in (1..half.len()).rev() {
-            reg.push(half[k - 1].1);
-        }
-        (pts, reg)
+        let corners = 1.0 - 0.06 * smoothstep(0.9, 1.0, t) - 0.05 * smoothstep(0.08, 0.0, t);
+        hw * taper * corners
     };
-    // Stations: the shell, with the ends rounded over the last 12 cm.
-    let s_count = 84;
-    let m = 72;
-    let mut stations: Vec<(f32, f32)> = Vec::new(); // (z, section scale)
-    for i in 0..s_count {
-        let z = -0.5 * len + i as f32 / (s_count - 1) as f32 * len;
-        stations.push((z, 1.0));
+    // How much cabin rises above the sill at t (0 on the bonnet and boot lid, 1 at the roof).
+    let cabin = |t: f32| smoothstep(belt + 0.03, belt + 0.2, roof(t));
+
+    // Cross-section at t, the left half from the keel round to the roof's centre, as five
+    // runs joined at creases: underbody, body side, shoulder, glasshouse side, top.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Run {
+        Under,
+        Side,
+        Shoulder,
+        Glasshouse,
+        Top,
     }
-    for (k, (dz, sc)) in [(0.05, 0.97), (0.09, 0.9)].iter().enumerate() {
-        let _ = k;
-        stations.insert(0, (-0.5 * len - dz, *sc));
-        stations.push((0.5 * len + dz, *sc));
+    const RUNS: [(Run, usize); 5] = [
+        (Run::Under, 6),
+        (Run::Side, 16),
+        (Run::Shoulder, 5),
+        (Run::Glasshouse, 9),
+        (Run::Top, 12),
+    ];
+    let half_count: usize = RUNS.iter().map(|r| r.1).sum();
+    let m = 2 * half_count;
+    let section = |t: f32| -> Vec<(Vec2, Run)> {
+        let sw = half_width(t);
+        let top = roof(t);
+        let g = cabin(t);
+        let tw = hw * 0.8 * (1.0 - 0.08 * (2.0 * t - 1.0).abs().powi(4));
+        let deck_edge = Vec2::new(sw - 0.07, top - 0.02);
+        let sill_edge = Vec2::new(sw - 0.05, belt);
+        let p6 = deck_edge.lerp(sill_edge, g);
+        let p7 = Vec2::new(
+            (sw - 0.11) + (tw - (sw - 0.11)) * g,
+            top - (0.012 + 0.035 * g),
+        );
+        let ctrl: [(Run, Vec<Vec2>); 5] = [
+            (
+                Run::Under,
+                vec![Vec2::new(0.0, 0.2), Vec2::new(sw - 0.16, 0.2), Vec2::new(sw - 0.03, 0.25)],
+            ),
+            (
+                Run::Side,
+                vec![
+                    Vec2::new(sw - 0.03, 0.25),
+                    Vec2::new(sw, sill),
+                    Vec2::new(sw + 0.014, 0.56),
+                    Vec2::new(sw + 0.004, shoulder),
+                ],
+            ),
+            (Run::Shoulder, vec![Vec2::new(sw + 0.004, shoulder), p6]),
+            (Run::Glasshouse, vec![p6, p7]),
+            (
+                Run::Top,
+                vec![p7, Vec2::new(0.55 * p7.x, top - 0.004), Vec2::new(0.0, top)],
+            ),
+        ];
+        let mut half = Vec::with_capacity(half_count);
+        for ((run, k), (_, pts)) in RUNS.iter().zip(ctrl.iter()) {
+            for i in 0..*k {
+                let u = i as f32 / *k as f32;
+                half.push((open_curve(pts, u), *run));
+            }
+        }
+        // The right half, mirrored, from the roof's centre back down to the keel.
+        let mut out = half.clone();
+        out.push((Vec2::new(0.0, top), Run::Top));
+        for i in (1..half_count).rev() {
+            let (q, _) = half[i];
+            out.push((Vec2::new(-q.x, q.y), half[i - 1].1));
+        }
+        out.truncate(m);
+        out
+    };
+    // Stations: the cage's length, then a nose and a tail that round over and close.
+    let s_count = 96;
+    let mut stations: Vec<(f32, f32)> = (0..s_count)
+        .map(|i| (-0.5 * len + i as f32 / (s_count - 1) as f32 * len, 1.0))
+        .collect();
+    for (dz, sc) in [(0.04, 0.985), (0.075, 0.95), (0.1, 0.88), (0.115, 0.76)] {
+        stations.insert(0, (-0.5 * len - dz, sc));
+        stations.push((0.5 * len + dz, sc));
     }
     let z_of = |k: usize| ring_z(k.min(n - 1));
-    let bay_f = z_of(layout.front_bay) - 0.5 * (len / (n - 1) as f32);
-    let bay_r = z_of(layout.rear_bay) + 0.5 * (len / (n - 1) as f32);
     let z_mid = z_of(layout.mid);
-    let door_f = (z_mid, z_of(layout.cabin_last + 1));
-    let door_r = (z_of(layout.cabin_first.saturating_sub(1)), z_mid);
-    let t_of = |z: f32| ((z + 0.5 * len) / len).clamp(0.0, 1.0);
+    let bonnet_z = (z_of(layout.front_bay) - 0.5 * (len / (n - 1) as f32)).max(-0.5 * len + windscreen.1 * len);
+    let boot_z = (z_of(layout.rear_bay) + 0.5 * (len / (n - 1) as f32)).min(-0.5 * len + rear_window.0 * len);
+    let arch_r = 0.405;
+    let in_arch = |z: f32, y: f32| {
+        layout
+            .axles
+            .iter()
+            .any(|&a| Vec2::new(z - a, y - layout.axle_y).length() < arch_r - 0.01)
+    };
+    // Doors: the front one from the B-pillar to ahead of the front arch, the rear one from the
+    // B-pillar to ahead of the rear arch.
+    let front_arch = layout.axles[0] - arch_r;
+    let rear_arch = layout.axles[1] + arch_r;
+    let door_f = (z_mid + 0.015, front_arch - 0.02);
+    let door_r = (rear_arch + 0.06, z_mid - 0.015);
 
     let mut b = Builder {
         mesh: VisualMesh::default(),
         grid: HashMap::new(),
     };
-    // Grid positions and regions.
-    let grid: Vec<Vec<(Vec3, usize)>> = stations
+    let grid: Vec<Vec<(Vec3, Run)>> = stations
         .iter()
         .map(|&(z, sc)| {
-            let (pts, _) = section(t_of(z));
-            let c = Vec2::new(0.0, 0.62);
-            catmull_loop(&pts, m)
+            // Past the cage's ends the section shrinks toward the bumper's middle.
+            let c = Vec2::new(0.0, 0.55);
+            section(t_of(z))
                 .into_iter()
-                .map(|(q, seg)| {
-                    let q = c + (q - c) * sc;
-                    (Vec3::new(q.x, q.y, z), seg)
+                .map(|(q, run)| {
+                    let q = c + (q - c) * Vec2::new(sc, sc.powf(1.6));
+                    (Vec3::new(q.x, q.y, z), run)
                 })
                 .collect()
         })
         .collect();
-    let regions = section(0.5).1;
-    // Wheel arches: side and underbody points inside the arch circle (side view)
-    // move onto it, so the opening has a smooth edge; cells left inside collapse.
-    let arch_r = 0.42;
-    let grid: Vec<Vec<(Vec3, usize)>> = grid
+    // Wheel arches: side and underbody points inside the arch circle (side view) move onto
+    // it, so the opening has a clean edge, and its lip flares out a little.
+    let grid: Vec<Vec<(Vec3, Run)>> = grid
         .into_iter()
         .map(|row| {
             row.into_iter()
-                .map(|(q, seg)| {
-                    let side = matches!(regions[seg], Region::Side | Region::Under)
-                        && q.x.abs() > hw * 0.55;
+                .map(|(q, run)| {
                     let mut q = q;
-                    if side {
+                    if matches!(run, Run::Side | Run::Under) && q.x.abs() > hw * 0.55 {
                         for &a in &layout.axles {
                             let d = Vec2::new(q.z - a, q.y - layout.axle_y);
-                            if d.length() < arch_r && d.y > -0.2 {
+                            let r = d.length();
+                            if r < arch_r && d.y > -0.2 {
                                 let e = d.normalize_or_zero() * arch_r;
                                 let e = if e.y < -0.05 {
                                     Vec2::new(e.x.signum() * arch_r, -0.05)
@@ -333,22 +375,15 @@ pub fn car_visual(p: &CarParams, layout: &CarLayout, nodes: &[Vec3]) -> VisualMe
                                 q.z = a + e.x;
                                 q.y = layout.axle_y + e.y;
                             }
+                            let flare = smoothstep(arch_r + 0.12, arch_r, r) * 0.018;
+                            q.x += q.x.signum() * flare;
                         }
                     }
-                    (q, seg)
+                    (q, run)
                 })
                 .collect()
         })
         .collect();
-    let windscreen = (0.585, 0.705);
-    let rear_window = (0.145, 0.27);
-    let side_glass = (0.30, 0.59);
-    let arch = |z: f32, y: f32| {
-        layout
-            .axles
-            .iter()
-            .any(|&a| Vec2::new(z - a, y - layout.axle_y).length() < arch_r - 0.01)
-    };
     for i in 0..stations.len() - 1 {
         for j in 0..m {
             let j1 = (j + 1) % m;
@@ -359,55 +394,80 @@ pub fn car_visual(p: &CarParams, layout: &CarLayout, nodes: &[Vec3]) -> VisualMe
                 grid[i][j1].0,
             ];
             let c = (q[0] + q[1] + q[2] + q[3]) * 0.25;
-            let region = regions[grid[i][j].1];
+            let run = grid[i][j].1;
             let t = t_of(c.z);
             let left = c.x > 0.0;
-            // Wheel arches: the side opens around each wheel.
-            if matches!(region, Region::Side | Region::Under)
-                && c.x.abs() > hw * 0.55
-                && arch(c.z, c.y)
-            {
+            let past_ends = c.z.abs() > 0.5 * len;
+            if matches!(run, Run::Side | Run::Under) && c.x.abs() > hw * 0.55 && in_arch(c.z, c.y) {
                 continue;
             }
-            let (part, mat) = match region {
-                Region::Under => (part::BODY, UNDERBODY),
-                Region::Roof if c.z >= bay_f => (part::BONNET, PAINT),
-                Region::Roof if c.z <= bay_r => (part::BOOT, PAINT),
-                Region::Roof
-                    if (windscreen.0..windscreen.1).contains(&t)
-                        || (rear_window.0..rear_window.1).contains(&t) =>
-                {
-                    (part::BODY, GLASS)
-                }
-                // The roof panel over the passenger cell: bound to the roof nodes, so a
-                // sheared-off roof carries its mesh away.
-                Region::Roof
-                    if !layout.roof.is_empty()
-                        && c.z > z_of(layout.cabin_first)
-                        && c.z < z_of(layout.cabin_last) =>
-                {
-                    (part::ROOF, PAINT)
-                }
-                Region::Roof => (part::BODY, PAINT),
-                Region::Greenhouse => {
-                    let pillar = (c.z - z_mid).abs() < 0.06;
-                    let glass = (side_glass.0..side_glass.1).contains(&t)
-                        && c.y > 0.86
-                        && c.y < roof(t) - 0.06
-                        && !pillar;
-                    (part::BODY, if glass { GLASS } else { PAINT })
-                }
-                Region::Side => {
-                    let door = if (door_f.0..door_f.1).contains(&c.z) {
+            // Distance into the top run from the pillar edge (the A- and C-pillars' width).
+            let from_edge = {
+                let k = j.min(m - 1 - j);
+                let first_top = half_count - RUNS[4].1;
+                k.saturating_sub(first_top)
+            };
+            let top = roof(t);
+            let (part, mat) = match run {
+                Run::Under => (part::BODY, UNDERBODY),
+                Run::Side => {
+                    let door = if past_ends {
+                        None
+                    } else if (door_f.0..door_f.1).contains(&c.z) {
                         Some(if left { part::DOOR_FL } else { part::DOOR_FR })
                     } else if (door_r.0..door_r.1).contains(&c.z) {
                         Some(if left { part::DOOR_RL } else { part::DOOR_RR })
                     } else {
                         None
                     };
+                    let mat = if c.y < sill - 0.02 { TRIM } else { PAINT };
                     match door {
-                        Some(d) if !layout.panels.is_empty() => (d, PAINT),
-                        _ => (part::BODY, PAINT),
+                        Some(d) if !layout.panels.is_empty() => (d, mat),
+                        _ => (part::BODY, mat),
+                    }
+                }
+                Run::Shoulder if c.z >= bonnet_z && !past_ends => (part::BONNET, PAINT),
+                Run::Shoulder if c.z <= boot_z && !past_ends => (part::BOOT, PAINT),
+                Run::Shoulder => (part::BODY, PAINT),
+                Run::Glasshouse => {
+                    let b_pillar = (c.z - z_mid).abs() < 0.045;
+                    let glass = cabin(t) > 0.3
+                        && c.y > belt + 0.02
+                        && c.y < top - 0.07
+                        && !past_ends;
+                    if b_pillar && glass {
+                        (part::BODY, TRIM)
+                    } else if glass {
+                        (part::BODY, GLASS)
+                    } else if c.z >= bonnet_z && !past_ends {
+                        (part::BONNET, PAINT)
+                    } else if c.z <= boot_z && !past_ends {
+                        (part::BOOT, PAINT)
+                    } else {
+                        (part::BODY, PAINT)
+                    }
+                }
+                Run::Top => {
+                    let pillar = from_edge < 2;
+                    if past_ends {
+                        (part::BODY, PAINT)
+                    } else if c.z >= bonnet_z {
+                        (part::BONNET, PAINT)
+                    } else if c.z <= boot_z {
+                        (part::BOOT, PAINT)
+                    } else if (windscreen.0..windscreen.1).contains(&t)
+                        || (rear_window.0..rear_window.1).contains(&t)
+                    {
+                        (part::BODY, if pillar { PAINT } else { GLASS })
+                    } else if !layout.roof.is_empty()
+                        && c.z > z_of(layout.cabin_first)
+                        && c.z < z_of(layout.cabin_last)
+                    {
+                        // The roof panel over the passenger cell: bound to the roof nodes, so
+                        // a sheared-off roof carries its mesh away.
+                        (part::ROOF, PAINT)
+                    } else {
+                        (part::BODY, PAINT)
                     }
                 }
             };
@@ -449,72 +509,101 @@ pub fn car_visual(p: &CarParams, layout: &CarLayout, nodes: &[Vec3]) -> VisualMe
             }
         }
     }
-    // End caps: front (lights, grille, plate area) and rear.
+    // The nose and tail close with a cap behind the bumpers and lamps.
     for (end, front) in [(stations.len() - 1, true), (0usize, false)] {
         let ring = &grid[end];
         let centre = ring.iter().map(|r| r.0).sum::<Vec3>() / m as f32
-            + Vec3::Z * if front { 0.03 } else { -0.03 };
+            + Vec3::Z * if front { 0.01 } else { -0.01 };
         let cv = b.push_vertex(centre, part::BODY);
         let rv: Vec<u32> = ring
             .iter()
             .map(|r| b.push_vertex(r.0, part::BODY))
             .collect();
         for j in 0..m {
-            let (a, c) = (rv[j], rv[(j + 1) % m]);
-            let mid = (centre + ring[j].0 + ring[(j + 1) % m].0) / 3.0;
-            let lamp = mid.y > 0.6 && mid.y < 0.78 && mid.x.abs() > 0.38;
-            let mat = if front {
-                if lamp {
-                    HEADLIGHT
-                } else if mid.y > 0.36 && mid.y < 0.6 && mid.x.abs() < 0.5 {
-                    GRILLE
-                } else {
-                    PAINT
-                }
-            } else if lamp {
-                TAILLIGHT
-            } else {
-                PAINT
-            };
-            b.mesh.tris.push([cv, a, c]);
-            b.mesh.tri_material.push(mat);
+            b.mesh.tris.push([cv, rv[j], rv[(j + 1) % m]]);
+            b.mesh.tri_material.push(PAINT);
         }
     }
-    // Bumpers: rounded bars over the bumper nodes, a chrome strip on the grille.
-    let fz = 0.5 * len + 0.12;
+    // Outward winding for the shell: flip any triangle facing the car's long axis. (The
+    // closed meshes added below are wound by construction.)
+    for (tri, &mat) in b.mesh.tris.iter_mut().zip(&b.mesh.tri_material) {
+        let _ = mat;
+        let [a, bb, c] = tri.map(|i| b.mesh.vertices[i as usize]);
+        let nrm = (bb - a).cross(c - a);
+        let cen = (a + bb + c) / 3.0;
+        let axis = Vec3::new(0.0, 0.62, cen.z.clamp(-0.5 * len + 0.3, 0.5 * len - 0.3));
+        if nrm.dot(cen - axis) < 0.0 {
+            tri.swap(1, 2);
+        }
+    }
+
+    let fz = 0.5 * len;
+    let rounded = |c: Vec3, h: Vec3, e: f32| rounded_box(c, h, e, 8, 20);
+    // Front: a body-coloured bumper cover with a black lip and intake, a grille in a chrome
+    // surround, and headlamps at the corners under the bonnet's leading edge.
+    b.add_mesh(rounded(Vec3::new(0.0, 0.43, fz + 0.06), Vec3::new(hw * 0.95, 0.15, 0.12), 0.22), part::BUMPER_F, PAINT);
+    b.add_mesh(rounded(Vec3::new(0.0, 0.29, fz + 0.1), Vec3::new(hw * 0.9, 0.03, 0.09), 0.3), part::BUMPER_F, TRIM);
+    b.add_mesh(rounded(Vec3::new(0.0, 0.38, fz + 0.165), Vec3::new(0.42, 0.045, 0.025), 0.3), part::BUMPER_F, TRIM);
+    b.add_mesh(rounded(Vec3::new(0.0, 0.65, fz + 0.06), Vec3::new(0.34, 0.085, 0.05), 0.25), part::BODY, CHROME);
+    b.add_mesh(rounded(Vec3::new(0.0, 0.65, fz + 0.075), Vec3::new(0.31, 0.068, 0.05), 0.2), part::BODY, GRILLE);
+    for s in [1.0f32, -1.0] {
+        b.add_mesh(rounded(Vec3::new(s * 0.57, 0.7, fz + 0.035), Vec3::new(0.2, 0.06, 0.07), 0.3), part::BODY, HEADLIGHT);
+    }
+    // Rear: bumper, diffuser, wrap-round tail lamps, a plate recess and an exhaust.
+    b.add_mesh(rounded(Vec3::new(0.0, 0.45, -fz - 0.06), Vec3::new(hw * 0.95, 0.15, 0.12), 0.22), part::BUMPER_R, PAINT);
+    b.add_mesh(rounded(Vec3::new(0.0, 0.29, -fz - 0.1), Vec3::new(hw * 0.88, 0.03, 0.09), 0.3), part::BUMPER_R, TRIM);
+    b.add_mesh(rounded(Vec3::new(0.0, 0.56, -fz - 0.16), Vec3::new(0.25, 0.055, 0.02), 0.3), part::BUMPER_R, TRIM);
+    for s in [1.0f32, -1.0] {
+        b.add_mesh(rounded(Vec3::new(s * 0.6, 0.79, -fz - 0.02), Vec3::new(0.2, 0.065, 0.075), 0.3), part::BODY, TAILLIGHT);
+    }
     b.add_mesh(
-        rounded_box(
-            Vec3::new(0.0, 0.47, fz),
-            Vec3::new(hw * 0.95, 0.13, 0.1),
-            0.25,
-            10,
-            24,
-        ),
-        part::BUMPER_F,
-        TRIM,
-    );
-    b.add_mesh(
-        rounded_box(
-            Vec3::new(0.0, 0.47, -fz),
-            Vec3::new(hw * 0.95, 0.13, 0.1),
-            0.25,
-            10,
-            24,
-        ),
+        torus(Vec3::new(0.5, 0.27, -fz - 0.14), Vec3::Z, 0.035, 0.008, 16, 6),
         part::BUMPER_R,
-        TRIM,
-    );
-    b.add_mesh(
-        rounded_box(
-            Vec3::new(0.0, 0.62, 0.5 * len + 0.11),
-            Vec3::new(0.45, 0.012, 0.012),
-            0.6,
-            4,
-            8,
-        ),
-        part::BODY,
         CHROME,
     );
+    // Mirrors on the front doors at the A-pillar's foot, and a handle on every door.
+    let mirror_z = -0.5 * len + windscreen.1 * len - 0.12;
+    for (s, door) in [(1.0f32, part::DOOR_FL), (-1.0, part::DOOR_FR)] {
+        let x = half_width(t_of(mirror_z)) + 0.07;
+        b.add_mesh(rounded(Vec3::new(s * x, belt + 0.06, mirror_z), Vec3::new(0.08, 0.05, 0.045), 0.35), door, PAINT);
+    }
+    for (s, door, z) in [
+        (1.0f32, part::DOOR_FL, door_f.0 + 0.16),
+        (-1.0, part::DOOR_FR, door_f.0 + 0.16),
+        (1.0, part::DOOR_RL, door_r.0 + 0.18),
+        (-1.0, part::DOOR_RR, door_r.0 + 0.18),
+    ] {
+        let x = half_width(t_of(z)) + 0.012;
+        b.add_mesh(rounded(Vec3::new(s * x, 0.86, z), Vec3::new(0.012, 0.016, 0.07), 0.35), door, CHROME);
+    }
+    // Arch liners: black bands over each wheel, seen from both sides.
+    for &a in &layout.axles {
+        for s in [1.0f32, -1.0] {
+            let (k, l) = (24, 3);
+            let x_out = half_width(t_of(a)) - 0.005;
+            let x_in = x_out - 0.3;
+            let mut v = Vec::new();
+            for i in 0..=k {
+                let th = -0.12 + (std::f32::consts::PI + 0.24) * i as f32 / k as f32;
+                for w in 0..=l {
+                    let x = x_in + (x_out - x_in) * w as f32 / l as f32;
+                    v.push(Vec3::new(s * x, layout.axle_y + (arch_r - 0.01) * th.sin(), a + (arch_r - 0.01) * th.cos()));
+                }
+            }
+            let mut tris = Vec::new();
+            for i in 0..k {
+                for w in 0..l {
+                    let q = |i: usize, w: usize| (i * (l + 1) + w) as u32;
+                    for t in [[q(i, w), q(i + 1, w), q(i + 1, w + 1)], [q(i, w), q(i + 1, w + 1), q(i, w + 1)]] {
+                        tris.push(t);
+                        tris.push([t[0], t[2], t[1]]);
+                    }
+                }
+            }
+            b.add_mesh((v, tris), part::BODY, TRIM);
+        }
+    }
+
     // Interior: seats, a dashboard, a steering wheel (seen through glass and
     // through torn-open doors).
     let zc = |k: usize| ring_z(k);
@@ -614,21 +703,6 @@ pub fn car_visual(p: &CarParams, layout: &CarLayout, nodes: &[Vec3]) -> VisualMe
         part::ENGINE,
         CHROME,
     );
-
-    // Outward winding: flip any body triangle facing the car's long axis.
-    for (tri, &mat) in b.mesh.tris.iter_mut().zip(&b.mesh.tri_material) {
-        let [a, bb, c] = tri.map(|i| b.mesh.vertices[i as usize]);
-        let nrm = (bb - a).cross(c - a);
-        let cen = (a + bb + c) / 3.0;
-        let axis = Vec3::new(0.0, 0.62, cen.z.clamp(-0.5 * len + 0.3, 0.5 * len - 0.3));
-        let out = cen - axis;
-        if matches!(mat, INTERIOR | ENGINE | TRIM | CHROME) {
-            continue; // closed meshes are wound by construction
-        }
-        if nrm.dot(out) < 0.0 {
-            tri.swap(1, 2);
-        }
-    }
 
     // Bind each part to its own nodes.
     let ring_nodes = (n * CAR_RING) as u32;

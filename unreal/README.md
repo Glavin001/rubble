@@ -29,6 +29,7 @@ scripts/unreal/fetch-city-textures.sh   # the town's CC0 texture arrays, from a 
 scripts/unreal/run.sh fracture:town
 scripts/unreal/run.sh fracture:glasstower
 scripts/unreal/video.sh glasstower      # one collapse filmed from five cameras (target/unreal/glasstower-*.mp4)
+scripts/unreal/video.sh softcrash       # the head-on and wall crashes, slowed at impact, five cameras each (target/unreal/softcrash-*.mp4)
 ```
 
 Without the optional textures the scenes still run. `build-content.sh` reports each missing
@@ -85,7 +86,7 @@ FRubbleMockBackend (stand-in motion; the HUD says "mock: <reason>")
 |---|---|---|
 | Rigid | Every stack, ring, gable, pile, grid and scatter scene | `joints`, `ragdolls`, `hingechains10k`, `motorfield10k`: their builders are not on the ABI |
 | Vehicles | Every scene. Presets are drawn from their descriptors (`rbGetVehiclePresetJson`) | — |
-| Soft-body cars | Every crash test, the yard and the traffic derby. The demo's `procedural_car` (`rbGetSoftVehiclePresetJson`) uses the calibrated 240 Hz settings, rigid shapes are soft obstacles, and a fitted shell is bound with `rbSoft_BindSkin` | `crates`: no lattice-crate preset |
+| Soft-body cars | Every crash test, the yard and the traffic derby. The demo's `procedural_car` (`rbGetSoftVehiclePresetJson`) uses the calibrated 240 Hz settings and rigid shapes are soft obstacles. The car is drawn with the engine's own render mesh (`rbCreateSoftCarVisual`, the softbody page's car: paint, glass, chrome, lamps, interior), bound part by part (`rbSoft_BindSkinParts`) so a torn-off bumper carries its mesh away. The skin's strain, face strain and tears come from the engine and drive the damage: crumpled, scraped paint, cracked then shattered glass, torn panels, and sparks, chips and shards from the strain changes | `crates`: no lattice-crate preset |
 | Fracture | `house`, `arch`: Shardwright GLBs at level 0, with the lab's own solver and bond preload. `town` (70 buildings, about 52k chunks) and `glasstower` (an 18-storey glass tower beside a pavilion): ScenePack v2 packs on the threshold strength model, with support loss on (`?supportloss=0` turns it off, `?bonds=1` uses breakable bond joints instead) | The cuboid, row and grid scenes: `rbCreateDestructibleAssetCuboidHouse` exists, but nothing reports chunk geometry to draw them with |
 
 The ground is an infinite plane (`rbCreatePlaneShape`). Shots reuse parked balls through the
@@ -97,11 +98,8 @@ PR #66 and PR #67 closed several earlier gaps: body commands, kinematic bodies, 
 presets, the cuboid house, plane shapes, vehicle descriptors and the lab's solver settings.
 These remain:
 
-1. **`rbSoft_BindSkin` binds in the vehicle's own frame, not the world.** The header says
-   "world coordinates at spawn", but `SoftHost::bind_mesh` binds against the descriptor's node
-   positions. A world-space mesh binds to the wrong nodes and stays where it was spawned. The
-   plugin passes the descriptor frame. Fix either the docs or the binding (transform by the
-   spawn pose).
+1. **Closed: `rbSoft_BindSkin` binds in the vehicle's own frame.** The header now says so
+   (it used to say "world coordinates at spawn").
 2. **The destructible render contract is not reported for GLB assets.** The docs say chunk
    world = body × chunk local, with chunk local the identity in the Bonds model, but a
    Shardwright GLB's chunk meshes are local to the fragment. Rubble places each one at the
@@ -114,10 +112,12 @@ These remain:
    boxes but not which body each belongs to.
 4. **Vehicles still have no chassis body id.** The descriptor gives the shape, but the pose
    comes from the wheels. Parked spare wheels appear in the moves at y = -5000 m.
-5. **No flexbody render mesh for the procedural car** (`engine-softbody/src/visual.rs`). The
-   plugin fits its own shell to the node cage.
-6. **Destruction events carry no point or normal.** Dust and sparks are placed at the chunks
-   that woke.
+5. **Closed: the procedural car's render mesh** is `rbCreateSoftCarVisual`, bound with
+   `rbSoft_BindSkinParts`. The ABI's Unreal winding was also inside out (`Coords::triangle_out`
+   swapped corners the axis mirror had already turned), which made skinned meshes render dark.
+6. **Destruction events carry no normal, and only soft breaks carry a point.** A soft
+   `BEAM_BROKE` or `PIECE_DETACHED` has `point` (and a piece its part names in `name`); a
+   destructible's dust and sparks are still placed at the chunks that woke.
 7. **No builders for the joint scenes** (ragdolls, chains, the motor field) and no crate
    preset.
 8. **Few engine features on `RbWorldDef`.** `reuse_contacts` is there now; `grid_levels` and the

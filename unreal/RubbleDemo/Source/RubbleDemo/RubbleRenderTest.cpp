@@ -1055,16 +1055,17 @@ namespace SoftCrashFilm
 		FVector Impact;
 	};
 	// softbody.html's head-on (two cars at 29 km/h from X ±800) and full-width wall (at 56 km/h
-	// from X -1200 into the wall's face at X 220); both meet about 0.8 s in.
+	// from X -1200 into the wall's face at X 220); both meet about 0.8 s in. The wall's cameras
+	// aim at the car's front half, clear of the wall's face.
 	static const FCrash Crashes[] = {
 		{ TEXT("headon"), TEXT("soft:headon"), FVector(0, 0, 70) },
-		{ TEXT("wall"), TEXT("soft:wall?speed=56"), FVector(200, 0, 70) },
+		{ TEXT("wall"), TEXT("soft:wall?speed=56"), FVector(80, 0, 70) },
 	};
 	enum class ERide : uint8
 	{
 		Fixed,  // standing still (offsets from the impact)
 		Orbit,  // circling the impact
-		Bonnet, // on the player car's bonnet, looking ahead
+		Chase,  // behind the player car and above it, looking past it at the impact
 	};
 	struct FView
 	{
@@ -1079,7 +1080,7 @@ namespace SoftCrashFilm
 		{ TEXT("side"), ERide::Fixed, FVector(-60, -780, 55), FVector(0, 0, 0), 48.0f },
 		{ TEXT("closeup"), ERide::Fixed, FVector(-330, -300, 60), FVector(-60, 0, 0), 40.0f },
 		{ TEXT("overhead"), ERide::Fixed, FVector(-40, -120, 880), FVector(0, 0, -70), 62.0f },
-		{ TEXT("bonnet"), ERide::Bonnet, FVector(30, -40, 120), FVector(1000, 0, 60), 80.0f },
+		{ TEXT("chase"), ERide::Chase, FVector(-720, -280, 240), FVector(250, 0, 40), 60.0f },
 		{ TEXT("orbit"), ERide::Orbit, FVector::ZeroVector, FVector::ZeroVector, 55.0f },
 	};
 	/** Seconds of world time: real speed, then a fifth of it from just before the impact until the
@@ -1165,21 +1166,27 @@ bool FRubbleVideoSoftCrash::RunTest(const FString& Parameters)
 			Pawn->ViewFrom(Eye, (C.Impact - Eye).Rotation(), V.Fov);
 			break;
 		}
-		case ERide::Bonnet:
+		case ERide::Chase:
 		{
 			FTransform Car;
 			for (TActorIterator<ARubbleVehicles> It(GameWorld()); It; ++It)
 			{
 				It->PlayerTransform(Car);
 			}
-			// Smoothed: the core's pose comes from the wheel hubs, which jolt in the crash.
+			if (Car.GetLocation().IsNearlyZero())
+			{
+				break; // no wheels drawn yet
+			}
+			// Its heading taken once, from the car toward the impact (the core's own frame comes
+			// from the wheel hubs, which jolt and tip in the crash); then it follows the car,
+			// smoothed.
 			if (!S->bRiding)
 			{
-				S->Ride = Car;
+				const FVector Ahead = (C.Impact - Car.GetLocation()) * FVector(1, 1, 0);
+				S->Ride = FTransform(Ahead.Rotation(), Car.GetLocation());
 				S->bRiding = true;
 			}
-			S->Ride.SetLocation(FMath::Lerp(S->Ride.GetLocation(), Car.GetLocation(), 0.5));
-			S->Ride.SetRotation(FQuat::Slerp(S->Ride.GetRotation(), Car.GetRotation(), 0.3f));
+			S->Ride.SetLocation(FMath::Lerp(S->Ride.GetLocation(), Car.GetLocation(), 0.3));
 			const FVector Eye = S->Ride.TransformPosition(V.Eye);
 			const FVector Look = S->Ride.TransformPosition(V.Target);
 			Pawn->ViewFrom(Eye, (Look - Eye).Rotation(), V.Fov);
@@ -1275,6 +1282,65 @@ bool FRubbleVideoSoftCrash::RunTest(const FString& Parameters)
 		return false;
 	}));
 	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(0.5f));
+	return true;
+}
+#endif
+
+#if WITH_DEV_AUTOMATION_TESTS
+/**
+ * Rubble.Render.CarDesign: the soft car parked in the yard, shot from eight angles for a design
+ * review (RubbleShots/design/<view>.png): the three-quarter views, the side, front and rear, from
+ * above, the windscreen and a wheel up close. -RubbleCarScene=<scene> picks another scene.
+ */
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRubbleRenderCarDesign, "Rubble.Render.CarDesign",
+	EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter)
+
+bool FRubbleRenderCarDesign::RunTest(const FString& Parameters)
+{
+	FString Scene = TEXT("soft:yard");
+	FParse::Value(FCommandLine::Get(), TEXT("RubbleCarScene="), Scene);
+	if (!TestTrue(*FString::Printf(TEXT("%s loads"), *Scene), Rubble() && Load(*Scene)))
+	{
+		return false;
+	}
+	struct FView
+	{
+		const TCHAR* Name;
+		FVector Eye;
+		FVector Target;
+		float Fov;
+	};
+	// The car stands at the origin facing +X; its body is about 4 m long and 1.4 m tall.
+	static const FView Views[] = {
+		{ TEXT("front34"), FVector(430, -340, 150), FVector(0, 0, 70), 45.0f },
+		{ TEXT("side"), FVector(0, -640, 100), FVector(0, 0, 70), 45.0f },
+		{ TEXT("rear34"), FVector(-430, -340, 160), FVector(0, 0, 70), 45.0f },
+		{ TEXT("front"), FVector(680, 0, 110), FVector(0, 0, 70), 40.0f },
+		{ TEXT("rear"), FVector(-680, 0, 110), FVector(0, 0, 70), 40.0f },
+		{ TEXT("top"), FVector(20, -40, 760), FVector(0, 0, 0), 45.0f },
+		{ TEXT("windscreen"), FVector(260, -160, 190), FVector(20, 0, 115), 45.0f },
+		{ TEXT("wheel"), FVector(250, -250, 60), FVector(120, -80, 35), 45.0f },
+	};
+	const FString Dir = ShotDir() / TEXT("design");
+	IFileManager::Get().MakeDirectory(*Dir, true);
+	ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(3.0f)); // parked and settled
+	for (const FView& V : Views)
+	{
+		ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([V]() {
+			if (ARubblePawn* Pawn = Cast<ARubblePawn>(GameWorld()->GetFirstPlayerController()->GetPawn()))
+			{
+				Pawn->ViewFrom(V.Eye, (V.Target - V.Eye).Rotation(), V.Fov);
+			}
+			return true;
+		}));
+		ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(0.8f)); // Lumen and TAA settle
+		const FString Path = Dir / (FString(V.Name) + TEXT(".png"));
+		ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([Path]() {
+			FScreenshotRequest::RequestScreenshot(Path, /*bShowUI=*/false, /*bAddFilenameSuffix=*/false);
+			return true;
+		}));
+		ADD_LATENT_AUTOMATION_COMMAND(FEngineWaitLatentCommand(0.3f));
+	}
 	return true;
 }
 #endif

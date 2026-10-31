@@ -47,8 +47,8 @@ elif [ "$FILM" = softcrash ]; then
     encode "$FRAMES/$cam/frame_%04d.png" "$ROOT/target/unreal/softcrash-$cam.mp4"
   done
   for crash in headon wall; do
-    [ -d "$FRAMES/$crash-side" ] && [ -d "$FRAMES/$crash-bonnet" ] || continue
-    V=() ; for cam in side closeup overhead bonnet; do V+=(-framerate 30 -i "$FRAMES/$crash-$cam/frame_%04d.png"); done
+    [ -d "$FRAMES/$crash-side" ] && [ -d "$FRAMES/$crash-chase" ] || continue
+    V=() ; for cam in side closeup overhead chase; do V+=(-framerate 30 -i "$FRAMES/$crash-$cam/frame_%04d.png"); done
     ffmpeg -loglevel error -y "${V[@]}" -filter_complex \
       "[0]scale=iw/2:-2[a];[1]scale=iw/2:-2[b];[2]scale=iw/2:-2[c];[3]scale=iw/2:-2[d];[a][b][c][d]xstack=inputs=4:layout=0_0|w0_0|0_h0|w0_h0" \
       -c:v libx264 -pix_fmt yuv420p -crf 20 -movflags +faststart "$ROOT/target/unreal/softcrash-$crash-multicam.mp4"
