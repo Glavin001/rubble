@@ -162,6 +162,8 @@ pub struct WgpuSim {
     grid_cache: Option<(u32, f32, u32)>,
     /// Colliders were added after step 0; see `build_all_bounds`.
     bounds_dirty: bool,
+    /// Diagnostic GPU timing marks at the plan's phases (`set_marks`, `RUBBLE_GPU_TIMING`).
+    marks: Option<std::sync::Arc<crate::gpu_marks::GpuMarks>>,
     /// Any collider carries a collision filter (HOST_S(21)).
     has_filters: bool,
     /// Some heightfield in the hull arena carries a soil (vehicle ruts, T5):
@@ -760,6 +762,7 @@ impl WgpuSim {
             grid_levels: 0,
             grid_cache: None,
             bounds_dirty: false,
+            marks: None,
             has_filters: false,
             has_soil: false,
             manifolds_valid: false,
@@ -2094,6 +2097,12 @@ impl WgpuSim {
         self.finish_step(read, wall)
     }
 
+    /// Mark every phase of the steps encoded from now on (`None`: stop): diagnostic GPU
+    /// timing a host reads with its own marks around the step.
+    pub fn set_marks(&mut self, marks: Option<std::sync::Arc<crate::gpu_marks::GpuMarks>>) {
+        self.marks = marks;
+    }
+
     /// The plan's dispatches in one compute pass of `enc` (its copies are encoded before).
     fn encode_dispatches(&self, enc: &mut wgpu::CommandEncoder, cmds: &[rigid_plan::Cmd]) {
         let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -2110,6 +2119,11 @@ impl WgpuSim {
                 _ => {}
             }
             match *c {
+                rigid_plan::Cmd::Phase { name } if self.marks.is_some() => {
+                    drop(pass);
+                    self.marks.as_ref().expect("marks").mark(enc, name);
+                    pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("step"), timestamp_writes: None });
+                }
                 rigid_plan::Cmd::Phase { .. } if split => {
                     drop(pass);
                     pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("step"), timestamp_writes: None });

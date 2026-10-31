@@ -784,16 +784,22 @@ mod imp {
             ];
             let spare_ids = self.create_bodies(&spare_defs)?;
             let mut spare = Vec::with_capacity(spare_count);
+            let mut parked_records = Vec::with_capacity(spare_count);
             for id in spare_ids {
                 let i = id.index();
                 let mut parked = BodyState::static_plane_support();
                 parked.position = crate::graveyard(i);
                 parked.initial_pos = parked.position;
-                self.sim.write_bodies(i, &[parked]);
+                parked_records.push((i, parked));
                 let slot = &mut self.bodies[i as usize];
                 slot.owner = Owner::Piece;
                 slot.alive = false;
                 spare.push(i);
+            }
+            // One upload per run of consecutive slots (a write each would stage thousands
+            // of buffers per destructible before anything is submitted).
+            for (first, records) in runs(parked_records) {
+                self.sim.write_bodies(first, &records);
             }
             let owned: Vec<u32> = cluster_bodies
                 .iter()
@@ -1008,12 +1014,18 @@ mod imp {
                 .append(&gpu, base, &g, &frames, &spare, all_scales)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             let stride = std::mem::size_of::<ColliderInfo>() as u64;
-            for (col, mut info) in sides {
-                info.a[0] += base.chunk;
+            let sides: Vec<(u32, ColliderInfo)> = sides
+                .into_iter()
+                .map(|(col, mut info)| {
+                    info.a[0] += base.chunk;
+                    (col, info)
+                })
+                .collect();
+            for (first, infos) in runs(sides) {
                 gpu.queue.write_buffer(
                     &sh.ingest.collider_info,
-                    stride * col as u64,
-                    bytemuck::bytes_of(&info),
+                    stride * first as u64,
+                    bytemuck::cast_slice(&infos),
                 );
             }
             sh.body_high = sh.body_high.max(body_count);
@@ -1074,6 +1086,10 @@ mod imp {
             d.bond_joints = vec![None; bond_count];
             d.bond_intact = vec![true; bond_count];
             self.sync_projectiles()?;
+            // Hand this destructible's uploads to the GPU now: placing a map's worth before
+            // the first step would otherwise keep every staging buffer alive until then.
+            self.sim.queue().submit(std::iter::empty());
+            let _ = self.sim.device().poll(wgpu::PollType::Poll);
             Ok(())
         }
 
@@ -1704,6 +1720,19 @@ mod imp {
         pub(crate) fn fracture_projectiles_dirty(&self) -> bool {
             self.fracture.projectiles_dirty
         }
+    }
+
+    /// `items` grouped into runs of consecutive indices (sorted first): one upload each.
+    fn runs<T>(mut items: Vec<(u32, T)>) -> Vec<(u32, Vec<T>)> {
+        items.sort_by_key(|i| i.0);
+        let mut out: Vec<(u32, Vec<T>)> = Vec::new();
+        for (i, item) in items {
+            match out.last_mut() {
+                Some((first, run)) if *first + run.len() as u32 == i => run.push(item),
+                _ => out.push((i, vec![item])),
+            }
+        }
+        out
     }
 
     fn cooked_hulls(parts: &[Vec<stress_rubble::Part>]) -> bool {

@@ -624,11 +624,21 @@ impl GpuFracture {
         for (slot, frame) in frames {
             q.write_buffer(&self.frames, 32 * *slot as u64, bytemuck::cast_slice(frame));
         }
-        for &slot in free {
-            if slot >= l.b {
-                return Err(format!("fracture: free body slot {slot}; the tables cover {}", l.b));
+        let mut sorted = free.to_vec();
+        sorted.sort_unstable();
+        let mut k = 0;
+        while k < sorted.len() {
+            let first = sorted[k];
+            if first >= l.b {
+                return Err(format!("fracture: free body slot {first}; the tables cover {}", l.b));
             }
-            q.write_buffer(&self.work, 4 * (l.w_free() + slot) as u64, bytemuck::bytes_of(&1u32));
+            let mut end = k + 1;
+            while end < sorted.len() && sorted[end] == first + (end - k) as u32 && sorted[end] < l.b {
+                end += 1;
+            }
+            // One write per run of consecutive slots.
+            q.write_buffer(&self.work, 4 * (l.w_free() + first) as u64, bytemuck::cast_slice(&vec![1u32; end - k]));
+            k = end;
         }
         self.params.chunk_used = self.params.chunk_used.max(at.chunk + n);
         self.params.bond_used = self.params.bond_used.max(at.bond + e);

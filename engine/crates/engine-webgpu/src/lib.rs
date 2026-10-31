@@ -9,6 +9,7 @@
 mod features;
 #[cfg(feature = "gpu")]
 mod gpu;
+pub mod gpu_marks;
 #[cfg(feature = "gpu")]
 mod poses;
 #[cfg(all(feature = "gpu", target_vendor = "apple"))]

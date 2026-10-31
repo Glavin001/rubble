@@ -1824,6 +1824,13 @@ impl World {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("world step"),
             });
+        // `RUBBLE_GPU_TIMING=1` (diagnostic): each phase's GPU time, printed per step.
+        let marks = engine_webgpu::gpu_marks::GpuMarks::enabled(self.sim.device())
+            .then(|| std::sync::Arc::new(engine_webgpu::gpu_marks::GpuMarks::new(self.sim.device(), 96)));
+        if let Some(m) = &marks {
+            m.mark(&mut enc, "begin");
+            self.sim.set_marks(Some(m.clone()));
+        }
         if let Some(e) = &self.pose_exports {
             // The poses before this step, for exports (a GPU copy in the step's own submission).
             // If the step does not run, nothing moves and previous = current is right.
@@ -1840,10 +1847,16 @@ impl World {
             .step_encode(&mut enc)
             .map_err(|e| anyhow::anyhow!("step: {e:?}"))?;
         let ran = self.sim.last_step_ran();
+        if let Some(m) = &marks {
+            m.mark(&mut enc, "rigid tail");
+        }
         #[cfg(feature = "stress")]
         if fracture && ran {
             // Loads, breaks and splits from this step's contacts, before the next step.
             self.encode_fracture(&mut enc);
+            if let Some(m) = &marks {
+                m.mark(&mut enc, "fracture");
+            }
         }
         let mut mapped = None;
         if ran {
@@ -1936,7 +1949,19 @@ impl World {
             };
             self.readback.pending.push_back(skipped);
         }
+        let timing = marks.map(|m| {
+            m.mark(&mut enc, "readback copies");
+            self.sim.set_marks(None);
+            let staging = m.resolve(self.sim.device(), &mut enc);
+            (m, staging)
+        });
         self.sim.queue().submit([enc.finish()]);
+        if let Some((m, staging)) = timing {
+            let parts = m.report(self.sim.device(), self.sim.queue(), &staging);
+            let total: f64 = parts.iter().map(|p| p.1).sum();
+            let list: Vec<String> = parts.iter().filter(|p| p.1 >= 0.01).map(|(n, t)| format!("{n} {t:.2}")).collect();
+            eprintln!("world step {step} GPU ms: {total:.2} = {}", list.join(", "));
+        }
         if let Some(slot) = mapped {
             self.readback.map(slot);
         }
