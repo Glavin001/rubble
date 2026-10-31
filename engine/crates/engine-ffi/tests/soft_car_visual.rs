@@ -139,9 +139,10 @@ fn the_car_visual_is_the_detailed_mesh() {
         for m in 0..10u8 {
             assert!(v.materials.contains(&m), "material {m} is used");
         }
-        assert_eq!(v.names.len(), 12);
+        assert_eq!(v.names.len(), engine_softbody::visual::PART_NAMES.len());
         assert!(v.parts.iter().all(|&p| (p as usize) < v.names.len()));
-        // The same mesh in Unreal's axes and centimetres, wound the other way.
+        // The same mesh in Unreal's axes and centimetres, the same winding (the axis map's mirror
+        // turns Rubble's front faces into Unreal's).
         let u = visual(Host(RbCoordinates::RB_COORDINATES_UNREAL));
         let h = Host(RbCoordinates::RB_COORDINATES_UNREAL);
         for (a, b) in v.vertices.iter().zip(&u.vertices) {

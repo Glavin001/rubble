@@ -51,6 +51,11 @@ pub struct CarParams {
     /// they fold front first and carry the crash's load at a steady level into the sills.
     pub rails: bool,
     pub rail_deform: f32,
+    /// The bay's other solid parts (with `engine_block`): a gearbox bolted behind the engine
+    /// (the two stack up against the firewall as one powertrain), a radiator pack at the
+    /// front (light, crushable, on mounts that tear) and a battery on a tray that can tear
+    /// loose. Each is its own node cluster with its own mass.
+    pub components: bool,
 }
 
 impl Default for CarParams {
@@ -80,6 +85,7 @@ impl Default for CarParams {
             bonnet_crease: false,
             rails: false,
             rail_deform: 15_000.0,
+            components: false,
         }
     }
 }
@@ -97,6 +103,7 @@ impl CarParams {
             bonnet_crease: true,
             rails: true,
             rail_deform: 45_000.0,
+            components: true,
             // The safety cell: stronger than the rails it carries, so it stays whole.
             cell_deform_scale: 5.0,
             cell_strength_scale: 3.0,
@@ -163,6 +170,10 @@ pub fn car_desc(p: &CarParams) -> (crate::SoftVehicleDesc, CarLayout) {
     parts.push(("bumper_rear", layout.rear_bumper.clone()));
     parts.push(("engine", layout.engine.clone()));
     parts.push(("roof", layout.roof.clone()));
+    parts.push(("gearbox", layout.gearbox.clone()));
+    parts.push(("radiator", layout.radiator.clone()));
+    parts.push(("battery", layout.battery.clone()));
+    parts.push(("rails", layout.rails.clone()));
     d.parts = parts
         .into_iter()
         .filter(|(_, n)| !n.is_empty())
@@ -201,6 +212,11 @@ pub struct CarLayout {
     /// The front crash rails' nodes (with `rails`): per bay ring from the firewall forward,
     /// each side's box corners (inner lower, inner upper, outer lower, outer upper), left first.
     pub rails: Vec<u32>,
+    /// The bay's components (with `components`): the gearbox's eight corners, the radiator
+    /// pack's four, the battery's eight.
+    pub gearbox: Vec<u32>,
+    pub radiator: Vec<u32>,
+    pub battery: Vec<u32>,
 }
 
 /// [`car_truck`] and the layout of its nodes.
@@ -367,6 +383,9 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
             .flat_map(|k| [4usize, 5, 7].map(|j| (k * CAR_RING + j) as u32))
             .collect(),
         rails: Vec::new(),
+        gearbox: Vec::new(),
+        radiator: Vec::new(),
+        battery: Vec::new(),
     };
     if p.panels {
         layout.rear_bumper = (rear_bumper_first as u32..rear_bumper_first as u32 + 6).collect();
@@ -410,6 +429,34 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
     layout.rails = (rail_first as u32..nodes.len() as u32).collect();
     // Corner c of a rail's box: inner lower, inner upper, outer lower, outer upper.
     let rail = |ri: usize, side: usize, c: usize| rail_first + ri * 8 + side * 4 + c;
+    // The bay's components, with their masses (kg per node).
+    let mut node_mass: std::collections::HashMap<usize, f32> = Default::default();
+    let mut boxed = |nodes: &mut Vec<[f32; 3]>, c: [f32; 3], h: [f32; 3], kg: f32| -> Vec<u32> {
+        let first = nodes.len();
+        for &y in &[c[1] - h[1], c[1] + h[1]] {
+            for &z in &[c[2] - h[2], c[2] + h[2]] {
+                for &x in &[c[0] + h[0], c[0] - h[0]] {
+                    node_mass.insert(nodes.len(), kg / 8.0);
+                    nodes.push([x, y, z]);
+                }
+            }
+        }
+        (first as u32..first as u32 + 8).collect()
+    };
+    if p.components && p.engine_block {
+        // Behind the engine, a little lower and narrower.
+        layout.gearbox = boxed(&mut nodes, [0.0, 0.44, engine_z - 0.4], [0.17, 0.11, 0.15], 60.0);
+        layout.battery = boxed(&mut nodes, [0.62, 0.7, engine_z + 0.12], [0.1, 0.09, 0.13], 18.0);
+        let z = ring_z(n - 1) - 0.12;
+        let first = nodes.len();
+        for &y in &[0.36f32, 0.66] {
+            for &x in &[0.34f32, -0.34] {
+                node_mass.insert(nodes.len(), 3.0);
+                nodes.push([x, y, z]);
+            }
+        }
+        layout.radiator = (first as u32..first as u32 + 4).collect();
+    }
     // Shell faces a panel covers (it is the skin there): (ring k, row a, row b).
     let covered = |k: usize, a: usize, b: usize| {
         panel_specs.iter().any(|(ks, rows)| {
@@ -434,6 +481,8 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
                 q[2],
                 p.engine_mass / 8.0
             );
+        } else if let Some(kg) = node_mass.get(&i) {
+            let _ = writeln!(s, "{i}, {:.4}, {:.4}, {:.4}, l, {kg:.1}", q[0], q[1], q[2]);
         } else if floor {
             let _ = writeln!(s, "{i}, {:.4}, {:.4}, {:.4}, l", q[0], q[1], q[2]);
         } else {
@@ -906,6 +955,96 @@ pub fn car_truck_layout(p: &CarParams) -> (String, CarLayout) {
                     }
                 }
             }
+        }
+    }
+    if !layout.gearbox.is_empty() {
+        let near = |q: [f32; 3], pool: &[usize], k: usize| -> Vec<usize> {
+            let mut d: Vec<(f32, usize)> = pool
+                .iter()
+                .map(|&i| {
+                    let r = nodes[i];
+                    (((r[0] - q[0]).powi(2) + (r[1] - q[1]).powi(2) + (r[2] - q[2]).powi(2)).sqrt(), i)
+                })
+                .collect();
+            d.sort_by(|a, b| a.0.total_cmp(&b.0));
+            d.into_iter().take(k).map(|x| x.1).collect()
+        };
+        let solid = |s: &mut String, list: &[u32]| {
+            for a in 0..list.len() {
+                for b in a + 1..list.len() {
+                    let _ = writeln!(s, "{}, {}", list[a], list[b]);
+                }
+            }
+        };
+        // Gearbox and battery: rigid boxes, as the engine block. The gearbox bolts to the
+        // engine's rear corners (as strong as the engine itself).
+        let _ = writeln!(
+            s,
+            "\nset_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
+            p.spring * 2.0,
+            p.damp,
+            p.deform * 40.0,
+            p.strength * 20.0
+        );
+        solid(&mut s, &layout.gearbox);
+        solid(&mut s, &layout.battery);
+        let engine: Vec<usize> = layout.engine.iter().map(|&i| i as usize).collect();
+        for &g in &layout.gearbox {
+            for e in near(nodes[g as usize], &engine, 2) {
+                let _ = writeln!(s, "{g}, {e}");
+            }
+        }
+        // The gearbox's mounts to the tunnel and rails: bend, then tear, as the engine's.
+        let shell_floor: Vec<usize> = (front_bay.saturating_sub(2)..n)
+            .flat_map(|k| [ring(k, 6), ring(k, 0), ring(k, 1)])
+            .chain(layout.rails.iter().map(|&i| i as usize))
+            .collect();
+        let _ = writeln!(
+            s,
+            "set_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
+            p.spring,
+            p.damp,
+            p.deform * 2.0,
+            p.strength * 0.6
+        );
+        for &g in &layout.gearbox[..4] {
+            for t in near(nodes[g as usize], &shell_floor, 3) {
+                let _ = writeln!(s, "{g}, {t}");
+            }
+        }
+        // Radiator pack: a light braced panel, crushable (the base thresholds).
+        let r = &layout.radiator;
+        let _ = writeln!(
+            s,
+            "set_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
+            p.spring,
+            p.damp,
+            p.deform,
+            p.strength
+        );
+        solid(&mut s, r);
+        // Its mounts and the battery tray's: weak, each on its own detacher group, so a hard
+        // hit tears either loose whole.
+        let bay: Vec<usize> = (front_bay..n)
+            .flat_map(|k| (0..CAR_RING).map(move |j| ring(k, j)))
+            .chain(layout.rails.iter().map(|&i| i as usize))
+            .collect();
+        let _ = writeln!(
+            s,
+            "set_beam_defaults {:.0}, {:.0}, {:.0}, {:.0}, 0.05, tracks/beam, 0.0",
+            p.spring,
+            p.damp,
+            p.deform,
+            p.strength * p.mount_strength
+        );
+        for (group, list, k) in [(20, r, 3), (21, &layout.battery, 2)] {
+            let _ = writeln!(s, "detacher_group {group}");
+            for &a in list.iter() {
+                for t in near(nodes[a as usize], &bay, k) {
+                    let _ = writeln!(s, "{a}, {t}");
+                }
+            }
+            let _ = writeln!(s, "detacher_group end");
         }
     }
     // Collision skin: every outer face of the shell, counter-clockwise from outside.

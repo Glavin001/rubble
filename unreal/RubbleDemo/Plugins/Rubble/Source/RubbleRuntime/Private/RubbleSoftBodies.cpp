@@ -133,7 +133,9 @@ void ARubbleSoftBodies::Rebuild(const FRubbleSceneAssets& Assets)
 		{
 			const uint32 a = M.Indices[3 * t], b = M.Indices[3 * t + 1], c = M.Indices[3 * t + 2];
 			const int32 Surf = Body.bEngineCar ? int32(M.CarSurfaces[t]) : int32(SurfaceOf(M.Positions[a], M.Positions[b], M.Positions[c], bCar));
-			Body.bGlass[t] = Body.bEngineCar && Surf == int32(ERubbleCarSurface::Glass);
+			// Glass and lamp lenses shatter (and are no longer drawn) past GlassShatter.
+			Body.bGlass[t] = Body.bEngineCar
+				&& (Surf == int32(ERubbleCarSurface::Glass) || Surf == int32(ERubbleCarSurface::Headlight) || Surf == int32(ERubbleCarSurface::Taillight));
 			FSection& S = Body.Sections[Surf];
 			S.Triangles.Add(t);
 			for (const uint32 v : { a, b, c })

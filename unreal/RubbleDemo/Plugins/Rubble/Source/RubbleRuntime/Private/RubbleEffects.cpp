@@ -227,6 +227,17 @@ void ARubbleEffects::SoftDamage(const FRubbleSoftSkin& Skin, float Dt)
 			}
 			continue;
 		}
+		if (Surf == ERubbleCarSurface::Headlight || Surf == ERubbleCarSurface::Taillight)
+		{
+			// A lamp's lens breaks: clear or red shards.
+			if (Cur > 0.06f && Prev <= 0.06f)
+			{
+				const FLinearColor Lens = Surf == ERubbleCarSurface::Headlight ? FLinearColor(0.8f, 0.82f, 0.85f) : FLinearColor(0.7f, 0.03f, 0.02f);
+				Throw(EKind::Chip, Vel * 0.8 + Random.VRand() * 180.0 + FVector(0, 0, 60), Random.FRandRange(4.0f, 8.0f),
+					FVector(Random.FRandRange(0.01f, 0.03f), Random.FRandRange(0.01f, 0.03f), 0.003f), Lens);
+			}
+			continue;
+		}
 		if (Surf == ERubbleCarSurface::Glass)
 		{
 			// The pane lets go: shards (it is no longer drawn).

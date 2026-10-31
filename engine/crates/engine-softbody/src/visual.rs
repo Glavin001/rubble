@@ -41,11 +41,16 @@ pub mod part {
     pub const INTERIOR: u8 = 9;
     pub const ENGINE: u8 = 10;
     pub const ROOF: u8 = 11;
+    /// The crash-test car's bay components and crash rails (`CarParams::components`, `rails`).
+    pub const GEARBOX: u8 = 12;
+    pub const RADIATOR: u8 = 13;
+    pub const BATTERY: u8 = 14;
+    pub const RAILS: u8 = 15;
 }
 
 /// The procedural car's part name ([`crate::procedural::car_desc`]) for each
 /// visual part id ([`part`]): the mesh a part binds to. The interior rides the body.
-pub const PART_NAMES: [&str; 12] = [
+pub const PART_NAMES: [&str; 16] = [
     "body",
     "bonnet",
     "boot",
@@ -58,6 +63,10 @@ pub const PART_NAMES: [&str; 12] = [
     "body",
     "engine",
     "roof",
+    "gearbox",
+    "radiator",
+    "battery",
+    "rails",
 ];
 
 #[derive(Clone, Debug, Default)]
@@ -704,6 +713,79 @@ pub fn car_visual(p: &CarParams, layout: &CarLayout, nodes: &[Vec3]) -> VisualMe
         CHROME,
     );
 
+    // The bay's components and the crash rails, shaped from their own nodes (so they sit
+    // exactly on them and move with them).
+    let span = |ids: &[u32]| {
+        let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        for &i in ids {
+            lo = lo.min(nodes[i as usize]);
+            hi = hi.max(nodes[i as usize]);
+        }
+        (0.5 * (lo + hi), 0.5 * (hi - lo))
+    };
+    if !layout.gearbox.is_empty() {
+        let (c, h) = span(&layout.gearbox);
+        b.add_mesh(rounded_box(c, h, 0.3, 6, 16), part::GEARBOX, ENGINE);
+        // The bell housing, against the engine.
+        b.add_mesh(
+            rounded_box(c + Vec3::new(0.0, 0.02, h.z * 0.9), Vec3::new(h.x * 1.2, h.y * 1.15, 0.05), 0.2, 6, 16),
+            part::GEARBOX,
+            ENGINE,
+        );
+    }
+    if !layout.battery.is_empty() {
+        let (c, h) = span(&layout.battery);
+        b.add_mesh(rounded_box(c, h, 0.15, 6, 16), part::BATTERY, TRIM);
+        for dz in [-0.6f32, 0.6] {
+            b.add_mesh(
+                rounded_box(c + Vec3::new(0.0, h.y + 0.015, dz * h.z), Vec3::new(0.018, 0.018, 0.018), 0.4, 4, 8),
+                part::BATTERY,
+                CHROME,
+            );
+        }
+    }
+    if !layout.radiator.is_empty() {
+        let (c, h) = span(&layout.radiator);
+        // The core (dark fins) in a metal frame, a few cm deep.
+        b.add_mesh(rounded_box(c, Vec3::new(h.x, h.y, 0.03), 0.1, 6, 16), part::RADIATOR, GRILLE);
+        b.add_mesh(
+            rounded_box(c + Vec3::Y * (h.y + 0.02), Vec3::new(h.x + 0.03, 0.02, 0.04), 0.2, 4, 12),
+            part::RADIATOR,
+            ENGINE,
+        );
+        b.add_mesh(
+            rounded_box(c - Vec3::Y * (h.y + 0.02), Vec3::new(h.x + 0.03, 0.02, 0.04), 0.2, 4, 12),
+            part::RADIATOR,
+            ENGINE,
+        );
+    }
+    if !layout.rails.is_empty() {
+        // Each rail a box tube through its ring corners (8 nodes a ring: left box, then right).
+        let rings = layout.rails.len() / 8;
+        for side in 0..2 {
+            let corner = |r: usize, c: usize| nodes[layout.rails[r * 8 + side * 4 + c] as usize];
+            // Corners in order round the section: inner lower, outer lower, outer upper, inner upper.
+            const ROUND: [usize; 4] = [0, 2, 3, 1];
+            let base = b.mesh.vertices.len() as u32;
+            for r in 0..rings {
+                for &c in &ROUND {
+                    b.push_vertex(corner(r, c), part::RAILS);
+                }
+            }
+            for r in 0..rings - 1 {
+                for e in 0..4 {
+                    let q = |rr: usize, ee: usize| base + (rr * 4 + ee % 4) as u32;
+                    let (a, bb, c, d) = (q(r, e), q(r + 1, e), q(r + 1, e + 1), q(r, e + 1));
+                    // Both windings: the rail is seen from any side through a torn body.
+                    for tri in [[a, bb, c], [a, c, d], [a, c, bb], [a, d, c]] {
+                        b.mesh.tris.push(tri);
+                        b.mesh.tri_material.push(UNDERBODY);
+                    }
+                }
+            }
+        }
+    }
+
     // Bind each part to its own nodes.
     let ring_nodes = (n * CAR_RING) as u32;
     let shell: Vec<u32> = (0..ring_nodes).collect();
@@ -727,6 +809,10 @@ pub fn car_visual(p: &CarParams, layout: &CarLayout, nodes: &[Vec3]) -> VisualMe
                 &[0, 1, 2, 3, 6],
             ),
             part::ENGINE if !layout.engine.is_empty() => layout.engine.clone(),
+            part::GEARBOX => layout.gearbox.clone(),
+            part::RADIATOR => layout.radiator.clone(),
+            part::BATTERY => layout.battery.clone(),
+            part::RAILS => layout.rails.clone(),
             part::ROOF => layout.roof.clone(),
             part::ENGINE => rings(
                 layout.front_bay.saturating_sub(1)..=n - 1,
@@ -740,7 +826,7 @@ pub fn car_visual(p: &CarParams, layout: &CarLayout, nodes: &[Vec3]) -> VisualMe
         max_edge: 1.6,
     };
     let mut bindings = vec![None; b.mesh.vertices.len()];
-    for pt in 0..=part::ROOF {
+    for pt in 0..=part::RAILS {
         let ids: Vec<usize> = (0..b.mesh.vertices.len())
             .filter(|&i| b.mesh.part[i] == pt)
             .collect();
@@ -830,6 +916,30 @@ mod tests {
             assert!(v.tri_material.contains(&mat), "material {mat}");
         }
         assert!(v.seam.iter().any(|&s| s));
+    }
+
+    #[test]
+    fn the_sedan_binds_its_components_and_rails_to_their_own_nodes() {
+        let p = CarParams::sedan();
+        let (text, layout) = car_truck_layout(&p);
+        let d = load_truck(&text);
+        let nodes: Vec<Vec3> = d.nodes.iter().map(|n| Vec3::from_array(n.position)).collect();
+        let v = car_visual(&p, &layout, &nodes);
+        for (pt, own) in [
+            (part::GEARBOX, &layout.gearbox),
+            (part::RADIATOR, &layout.radiator),
+            (part::BATTERY, &layout.battery),
+            (part::RAILS, &layout.rails),
+        ] {
+            let own: std::collections::HashSet<u32> = own.iter().copied().collect();
+            let ids: Vec<usize> = (0..v.vertices.len()).filter(|&i| v.part[i] == pt).collect();
+            assert!(!ids.is_empty(), "part {pt} has a mesh");
+            for &i in &ids {
+                let bnd = &v.bindings[i];
+                assert!(bnd.nodes.iter().all(|n| own.contains(n)), "part {pt} vertex {i} binds outside it");
+                assert!((bnd.skin(&nodes) - v.vertices[i]).length() < 1e-3, "part {pt} vertex {i} at rest");
+            }
+        }
     }
 
     #[test]
