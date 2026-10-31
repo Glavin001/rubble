@@ -62,28 +62,51 @@ never asleep is real solver work: ~35 clusters per house stay awake.
 `RUBBLE_GPU_TIMING=1`, one car among 64 sleeping houses: ~1.0 ms GPU per step over
 ~12 phases; host encode ~1 ms, frame build ~0.5 ms.
 
-## Threshold sleep is not lossless yet
+## Threshold sleep (2026-10-31)
 
-The lab-parity cuboid-house shot (`tests/threshold.rs`), deterministic over 5 runs each:
+### The shot is chaotic
+
+The lab-parity cuboid-house shot (`tests/threshold.rs`) is deterministic run to run but
+chaotic: moving the shot's origin 0.1 mm changes never-asleep's 47 broken bonds to 20
+(nudges of ±0.1-10 mm give 20-56). Single-shot counts cannot judge a sleep policy; the
+gate is an ensemble (`sleep_policy_ensemble`: 21 shots nudged -10..10 mm, house settled
+240 steps first).
 
 | Policy | Bonds broken | Bodies |
 |---|---|---|
-| never asleep (the threshold solver's policy; the reference) | 47 | 104 |
-| sleep at the engine's default thresholds (`THRESHOLD_SLEEP=1`) | 40 | 100 |
-| start asleep, never re-sleep (`DestructibleDef::asleep`, `THRESHOLD_START_ASLEEP=1`) | 25 | 95 |
+| never asleep (the reference) | 38.8 ± 16.5 [12, 56] | 101.4 ± 5.8 [92, 107] |
+| sleep + archive + wake on touch (`sleeping_solver_for`) | 38.7 ± 11.6 [20, 50] | 101.1 ± 3.9 [95, 105] |
+| sleep + archive | 35.2 ± 6.6 [27, 43] | 98.8 ± 3.4 [95, 102] |
+| start asleep, never re-sleep (Unreal's town) | 46.3 ± 17.7 [21, 65] | 102.7 ± 6.2 [95, 109] |
 
-The masonry arch is the same (87 / 17) under all three. The Unreal client places the
-town with `start_asleep = true`, so it runs the third row today.
+None differs significantly from the reference at n = 21 (means within ~1.4 standard
+errors; variance ratios under F's 5% critical value). The large-map policy is the second
+row: it matches the reference's mean and spread best, and each part removes a real
+mechanism by which sleep changes what awake bodies feel.
 
-Why: D1b breaks on total load, the structure's own weight plus the impact. A sleeping
-cluster has no resting contacts; when woken its contacts restart cold (AVBD's penalty
-ramps from `k_start`), so the first frames of a strike carry less load than on a cluster
-that was awake. Rest-carry (`FLAG_CARRY_REST`/`ENGINE_REST`), which keeps resting pairs'
-warm starts through sleep, walks the compact manifold store; threshold worlds use the
-canonical rows the fracture ingest reads, so it is inert there (ENGINE_REST=drop gives the
-same 40 / 100).
+### What sleep changed, and the fixes
 
-Plan (lossless, no decision needed): archive a pair's canonical contact rows (λ, k) when
-it falls asleep and restore them as its warm start when the pair forms again; buildings
-that start asleep get archived rows from a settle at placement. Zero cost per step while
-asleep. Gate: the three rows above all give 47 / 104.
+- **Cold restarts.** A sleeping pair produces no contact rows, so a woken body restarted
+  its resting contacts from λ = 0, k = k_start. The **sleep archive**
+  (`WgpuSim::enable_sleep_archive`, world_step.slang archive_*) keeps a pair's canonical
+  rows when its body falls asleep (blocks from a GPU free list, past the contact
+  buffer's halves) and a warm-start miss finds them. Rows are tagged with their
+  colliders' local poses, so a split's re-parenting invalidates them.
+- **Missing supports on the wake step.** A sleeper woken by a contact in the narrowphase
+  had no resting pairs that step (the broadphase saw it asleep), so a strike's first
+  frame met an unsupported cluster. A moving collider's pair with a sleeper with an
+  archive now lists it, and `archive_emit` (after the broadphase) emits its archived
+  resting pairs. The impact frame then matches the reference (30 bonds at the impact
+  frame, as never-asleep breaks).
+- **Sleepers as walls.** A sleeper woke only above the sleep speeds, so slow debris
+  pressed on it as on static ground. `FLAG_WAKE_ON_TOUCH` wakes it on any touch from an
+  awake body.
+
+Cost while asleep: nothing per step. Archiving costs work over the step's contact rows
+only on steps where something fell asleep; waking costs the woken bodies' archives.
+
+### Open
+
+- Start-asleep placement (Unreal's town) can split a sleeping cluster whose new pieces
+  never report a pose (`ENSEMBLE_LENIENT` skips that check in the probe). To fix.
+- The ensemble covers one asset. The town bombard (stress charter) is the next check.

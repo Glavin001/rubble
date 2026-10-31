@@ -52,6 +52,9 @@ pub enum Cmd {
 /// Modes a host resolved for this step (already gated on each other).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct StepModes {
+    /// Sleep archive blocks (`world_step.slang` archiveMeta, host word 30 bit 5; 0: off). Canonical
+    /// contacts only: a pair that falls asleep keeps its rows for its wake.
+    pub sleep_archive_blocks: u32,
     pub compact_contacts: bool,
     pub persistent_contacts: bool,
     pub manifold_persistence: bool,
@@ -381,6 +384,10 @@ pub fn encode_step(
             e.d("char_move", u64::from(mo.characters) * 64);
         }
     }
+    if m.sleep_archive_blocks > 0 && !reuse_manifolds {
+        // Touched sleepers' archived resting pairs (world_step.slang archive_emit).
+        e.d("archive_emit", 4096);
+    }
     e.d(work_args, 64);
     e.phase("broadphase");
     if m.carry_rest && !reuse_manifolds {
@@ -706,6 +713,14 @@ pub fn encode_step(
         }
     }
     e.w("sleep_island_commit", 67);
+    if m.sleep_archive_blocks > 0 {
+        // Archive what just fell asleep (awake list, then this step's rows).
+        e.w("archive_free", 67);
+        e.w("archive_count", 65);
+        e.w("archive_alloc", 67);
+        e.w("archive_scatter", 65);
+        e.w("archive_seal", 67);
+    }
     if mo.ccd && !reuse_manifolds {
         // CCD impacts on dynamic bodies: the momentum exchange (ccd_step.slang).
         e.phase("sleepMain");
@@ -1143,6 +1158,8 @@ pub fn host_words(c: &WorldCapacity, m: &StepModes, i: &StepInputs, h: &HostStat
     let mo = i.motion;
     s[30] |= (u32::from(mo.ccd) << 2) | (u32::from(mo.kinematic) << 3)
         | (u32::from(fast_list_scheduled(&mo)) << 4);
+    // Bit 5: the sleep archive (world_step.slang sleepArchive).
+    s[30] |= u32::from(m.sleep_archive_blocks > 0) << 5;
     s
 }
 

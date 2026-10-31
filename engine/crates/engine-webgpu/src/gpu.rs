@@ -164,6 +164,8 @@ pub struct WgpuSim {
     bounds_dirty: bool,
     /// Diagnostic GPU timing marks at the plan's phases (`set_marks`, `RUBBLE_GPU_TIMING`).
     marks: Option<std::sync::Arc<crate::gpu_marks::GpuMarks>>,
+    /// The sleep archive's blocks (`enable_sleep_archive`; 0: off).
+    sleep_archive_blocks: u32,
     /// Any collider carries a collision filter (HOST_S(21)).
     has_filters: bool,
     /// Some heightfield in the hull arena carries a soil (vehicle ruts, T5):
@@ -763,6 +765,7 @@ impl WgpuSim {
             grid_cache: None,
             bounds_dirty: false,
             marks: None,
+            sleep_archive_blocks: 0,
             has_filters: false,
             has_soil: false,
             manifolds_valid: false,
@@ -2097,6 +2100,73 @@ impl WgpuSim {
         self.finish_step(read, wall)
     }
 
+    /// Keep resting contacts through sleep (`world_step.slang` archiveMeta): a pair
+    /// that falls asleep keeps its contact rows, and when it forms again its body
+    /// restarts them warm, with the impulses and stiffness it fell asleep with, instead
+    /// of from rest. Room for `max_contacts` archived rows (an archive that would hold
+    /// more fails the step, `OVERFLOW_SLEEP_ARCHIVE`). Canonical contacts only. The
+    /// contact and scratch buffers grow (their contents kept): hosts holding them bind
+    /// them again.
+    pub fn enable_sleep_archive(&mut self) -> anyhow::Result<()> {
+        if self.sleep_archive_blocks > 0 {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            !self.compact_contacts && !self.persistent_contacts,
+            "the sleep archive keeps canonical contact rows (ContactStorage::Canonical)"
+        );
+        const ROWS: u32 = 32;
+        let max_c = self.capacity.max_contacts;
+        let blocks = (max_c / ROWS).max(1);
+        let mb = self.capacity.max_bodies;
+        let row_bytes = std::mem::size_of::<engine_schema::Contact>() as u64;
+        let contact_bytes = (2 * u64::from(max_c) + u64::from(blocks * ROWS)) * row_bytes;
+        let meta = engine_schema::SCRATCH_WORDS;
+        let scratch_words = u64::from(meta) + 4 + 6 * u64::from(mb) + 2 * u64::from(blocks);
+        let limits = self.device.limits();
+        for (binding, bytes) in [(4usize, contact_bytes), (21, 4 * scratch_words)] {
+            check_limits(&limits, binding, bytes)?;
+        }
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("sleep archive") });
+        for (binding, bytes) in [(4usize, contact_bytes), (21, 4 * scratch_words)] {
+            let old = &self.bufs[binding];
+            let new = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("b{binding}")),
+                size: bytes,
+                usage: old.usage(),
+                mapped_at_creation: false,
+            });
+            enc.copy_buffer_to_buffer(old, 0, &new, 0, old.size().min(bytes));
+            self.bufs[binding] = new;
+        }
+        self.queue.submit([enc.finish()]);
+        // The records: no rows, no blocks, not just asleep; every block free.
+        let mut words = vec![0u32; (4 + 6 * mb + 2 * blocks) as usize];
+        words[0] = blocks;
+        words[1] = blocks;
+        let (head, stack) = ((4 + mb) as usize, (4 + 5 * mb + blocks) as usize);
+        words[head..head + mb as usize].fill(u32::MAX);
+        for k in 0..blocks {
+            words[stack + k as usize] = k;
+        }
+        self.queue.write_buffer(&self.bufs[21], u64::from(meta) * 4, bytemuck::cast_slice(&words));
+        self.rebind_buffer(4);
+        self.rebind_buffer(21);
+        self.sleep_archive_blocks = blocks;
+        Ok(())
+    }
+
+    /// The sleep archive's blocks in use and in all (diagnostic read; waits for the GPU).
+    pub fn sleep_archive_use(&self) -> (u32, u32) {
+        if self.sleep_archive_blocks == 0 {
+            return (0, 0);
+        }
+        let free = self.read_buffer_range::<u32>(21, u64::from(engine_schema::SCRATCH_WORDS) * 4, 1)[0];
+        (self.sleep_archive_blocks.saturating_sub(free), self.sleep_archive_blocks)
+    }
+
     /// Mark every phase of the steps encoded from now on (`None`: stop): diagnostic GPU
     /// timing a host reads with its own marks around the step.
     pub fn set_marks(&mut self, marks: Option<std::sync::Arc<crate::gpu_marks::GpuMarks>>) {
@@ -2314,6 +2384,7 @@ impl WgpuSim {
     /// This step's resolved modes for the shared step graph.
     fn step_modes(&self) -> rigid_plan::StepModes {
         rigid_plan::StepModes {
+            sleep_archive_blocks: self.sleep_archive_blocks,
             compact_contacts: self.compact_contacts,
             persistent_contacts: self.persistent_contacts,
             manifold_persistence: self.manifold_persistence,

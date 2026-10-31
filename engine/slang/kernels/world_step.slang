@@ -862,7 +862,19 @@ bool collidersIgnoreBody(uint i, uint j)
            (b.generation != 0u && b.generation - 1u == a.body);
 }
 
+void emitCandidateCore(uint i, uint j);
+void archiveTouch(uint i, uint j);
+
 void emitCandidate(uint i, uint j)
+{
+#if !defined(ENGINE_PERSISTENT_CONTACTS)
+    if (sleepArchive() && i != j)
+        archiveTouch(i, j);
+#endif
+    emitCandidateCore(i, j);
+}
+
+void emitCandidateCore(uint i, uint j)
 {
     if (i == j) return;
     uint filterMode = HOST_S(30);
@@ -2184,7 +2196,11 @@ void wakeFromContact(BodyState ba, BodyState bb, Collider ca, Collider cb)
     float3 vRel = ba.linearVel - bb.linearVel;
     float wRel = length(ba.angularVel) + length(bb.angularVel);
     float thresh = PARAMS.sleepLin;
-    if (pointSpeedSleep())
+    if (wakeOnTouch())
+    {
+        // Any touch from an awake body wakes: a sleeper is never a wall to a slow one.
+    }
+    else if (pointSpeedSleep())
     {
         float pointSpeed = length(vRel) + length(ba.angularVel) * colliderExtent(ca) + length(bb.angularVel) * colliderExtent(cb);
         if (pointSpeed < thresh) return;
@@ -2711,6 +2727,13 @@ static const float SLEEP_POSE_BETA = 0.2;
 //     1.6-4 cm overlap in one pass, the iterations pushed it back, and it
 //     cycled by ~3.5 cm every few ticks with zero reported velocity.
 static const uint FLAG_PUSH_LIMIT = 4194304u;
+// 16777216 Wake on touch: a sleeping body wakes on any contact with an awake one, not
+//     only above the sleep speeds. Sleep is then invisible to what the awake bodies
+//     do: a sleeper never acts as a static wall to slow debris (threshold fracture
+//     reads the loads such contacts carry). With the sleep archive (sleepArchive) the
+//     woken body also keeps its resting contacts' warm start.
+static const uint FLAG_WAKE_ON_TOUCH = 16777216u;
+bool wakeOnTouch() { return (PARAMS.flags & FLAG_WAKE_ON_TOUCH) != 0u; }
 // 8388608 (removed) Rotational armature (MuJoCo `armature`): measured no gain
 //     on the bonded suburb (3,275 awake vs 2,191) and read colliders inside
 //     the primal, so it was dropped. The bit is unused.
@@ -3617,6 +3640,174 @@ bool contactPairAtRest(BodyState ba, BodyState bb)
     return !bodyMovingOrKinematic(ba) && !bodyMovingOrKinematic(bb);
 }
 
+// ---- Sleep archive (HOST_S(30) bit 5; canonical contact rows) ----
+// A pair that falls asleep stops producing contact rows, so a body woken later used to
+// restart its resting contacts cold (λ = 0, k = k_start) and its first steps carried
+// less load than had it stayed awake. When a body falls asleep, the rows it rests on
+// (its partner static or asleep) are kept here; when the pair forms again, a warm-start
+// miss finds them, and the body wakes with the contacts it fell asleep with. Nothing
+// runs for a body while it sleeps. Rows live in gContacts past the two halves, in
+// blocks of ARCHIVE_ROWS; per body records and the free-block stack sit past the
+// scratch words in gScratchAtomics:
+//   [free top, blocks, touched count (two, by step parity)]
+//   [row count, first block, age, cursor, touched step] x maxBodies [next] x blocks
+//   [free stack] x blocks [touched list] x maxBodies
+static const uint ARCHIVE_ROWS = 32u;
+static const uint ARCHIVE_NONE = 0xFFFFFFFFu;
+static const uint ARCHIVE_JUST_SLEPT = 0xFFFFFFFEu;
+static const uint OVERFLOW_SLEEP_ARCHIVE = 131072u;
+bool sleepArchive() { return (HOST_S(30) & 32u) != 0u; }
+uint archiveBlocks() { return ALOAD(gScratchAtomics[archiveMeta() + 1u]); }
+uint archiveMeta() { return EXPLODE_BASE + 4u + 8u * 16u; }
+uint arTop() { return archiveMeta(); }
+uint arCount(uint b) { return archiveMeta() + 4u + b; }
+uint arHead(uint b) { return archiveMeta() + 4u + HOST_S(1) + b; }
+uint arAge(uint b) { return archiveMeta() + 4u + 2u * HOST_S(1) + b; }
+uint arCursor(uint b) { return archiveMeta() + 4u + 3u * HOST_S(1) + b; }
+uint arTouched(uint b) { return archiveMeta() + 4u + 4u * HOST_S(1) + b; }
+uint arNext(uint k) { return archiveMeta() + 4u + 5u * HOST_S(1) + k; }
+uint arStack(uint k) { return archiveMeta() + 4u + 5u * HOST_S(1) + archiveBlocks() + k; }
+uint arTouchedCount(uint step) { return archiveMeta() + 2u + (step & 1u); }
+uint arTouchedList(uint k) { return archiveMeta() + 4u + 5u * HOST_S(1) + 2u * archiveBlocks() + k; }
+uint archiveRow(uint block, uint j) { return 2u * HOST_S(3) + block * ARCHIVE_ROWS + j; }
+
+// Both colliders' local poses: a split re-parents a collider (new local pose), and its
+// archived rows (anchors in the old body frame) no longer apply.
+uint archiveKey(Collider a, Collider b)
+{
+    uint h = 2166136261u;
+    float v[14] = { a.localPos.x, a.localPos.y, a.localPos.z, a.localRot.x, a.localRot.y, a.localRot.z, a.localRot.w,
+                    b.localPos.x, b.localPos.y, b.localPos.z, b.localRot.x, b.localRot.y, b.localRot.z, b.localRot.w };
+    for (uint k = 0u; k < 14u; k++)
+        h = (h ^ asuint(v[k])) * 16777619u;
+    return h;
+}
+
+#if !defined(ENGINE_PERSISTENT_CONTACTS)
+// The body a resting row is archived under: one that fell asleep this step, its
+// partner at rest (static or asleep); else none (the pair keeps forming).
+uint archiveOwner(Contact c)
+{
+    uint a = gColliders[c.colliderA].body;
+    uint b = gColliders[c.colliderB].body;
+    BodyState ba = gBodies[a];
+    BodyState bb = gBodies[b];
+    bool slptA = bodyIsDynamic(ba) && bodyIsSleeping(ba) && ALOAD(gScratchAtomics[arAge(a)]) == ARCHIVE_JUST_SLEPT;
+    bool slptB = bodyIsDynamic(bb) && bodyIsSleeping(bb) && ALOAD(gScratchAtomics[arAge(b)]) == ARCHIVE_JUST_SLEPT;
+    if (slptA && !bodyMovingOrKinematic(bb)) return a;
+    if (slptB && !bodyMovingOrKinematic(ba)) return b;
+    return ARCHIVE_NONE;
+}
+
+// A warm-start miss: the row this pair fell asleep with, in either body's archive
+// (same feature, nearest anchors; else the nearest anchor within the fraction).
+bool archiveFind(Contact c, out Contact found)
+{
+    Collider colA = gColliders[c.colliderA];
+    Collider colB = gColliders[c.colliderB];
+    uint key = archiveKey(colA, colB);
+    float minSide = min(colliderMinSide(colA), colliderMinSide(colB));
+    float bestFeature = 1e30;
+    float bestNear = NEAREST_FRACTION * minSide;
+    bool haveFeature = false;
+    bool haveNear = false;
+    found = c;
+    Contact near = c;
+    uint owners[2] = { colA.body, colB.body };
+    for (uint side = 0u; side < 2u; side++)
+    {
+        uint body = owners[side];
+        uint k = ALOAD(gScratchAtomics[arHead(body)]);
+        if (k == ARCHIVE_NONE) continue;
+        uint n = ALOAD(gScratchAtomics[arCount(body)]);
+        for (uint slot = 0u; slot < n && slot < 8192u; slot++)
+        {
+            if (slot > 0u && slot % ARCHIVE_ROWS == 0u)
+                k = ALOAD(gScratchAtomics[arNext(k)]);
+            Contact prev = gContacts[archiveRow(k, slot % ARCHIVE_ROWS)];
+            if (prev.colliderA != c.colliderA || prev.colliderB != c.colliderB)
+                continue;
+            if (asuint(prev._pad1) != key)
+                continue;
+            float3 dA = prev.anchorA - c.anchorA;
+            float3 dB = prev.anchorB - c.anchorB;
+            if (prev.featureId == c.featureId)
+            {
+                float d = dot(dA, dA) + dot(dB, dB);
+                if (d < bestFeature) { bestFeature = d; found = prev; haveFeature = true; }
+            }
+            else
+            {
+                float d = length(dA);
+                if (d <= bestNear) { bestNear = d; near = prev; haveNear = true; }
+            }
+        }
+    }
+    if (!haveFeature && haveNear) found = near;
+    return haveFeature || haveNear;
+}
+
+// The archived row at `slot` of `body`'s archive (walking its block chain).
+Contact archiveRowOf(uint body, uint slot)
+{
+    uint k = ALOAD(gScratchAtomics[arHead(body)]);
+    for (uint h = slot / ARCHIVE_ROWS; h > 0u && h < 4096u; h--)
+        k = ALOAD(gScratchAtomics[arNext(k)]);
+    return gContacts[archiveRow(k, slot % ARCHIVE_ROWS)];
+}
+
+// A moving body's pair reaches a sleeping one with an archive: the first such touch in
+// a step lists the sleeper; archive_emit (after the broadphase) emits its archived
+// resting pairs, so if the touch wakes it, its supports are in this step's contacts,
+// warm, as they would be had it never slept. Marking reads no contact rows (the
+// broadphase stays within WebGPU's storage-buffer budget).
+void archiveMark(uint body)
+{
+    if (ALOAD(gScratchAtomics[arHead(body)]) == ARCHIVE_NONE) return;
+    uint stamp = HOST_S(17) + 1u;
+    uint old;
+    AXCHG3(gScratchAtomics[arTouched(body)], stamp, old);
+    if (old == stamp) return;
+    uint at;
+    AADD3(gScratchAtomics[arTouchedCount(HOST_S(17))], 1u, at);
+    if (at < HOST_S(1))
+        ASTORE(gScratchAtomics[arTouchedList(at)], body);
+}
+
+void archiveTouch(uint i, uint j)
+{
+    uint bi = gColliders[i].body;
+    uint bj = gColliders[j].body;
+    BodyState a = gBodies[bi];
+    BodyState b = gBodies[bj];
+    if (bodyMovingOrKinematic(a) && bodyIsDynamic(b) && bodyIsSleeping(b))
+        archiveMark(bj);
+    else if (bodyMovingOrKinematic(b) && bodyIsDynamic(a) && bodyIsSleeping(a))
+        archiveMark(bi);
+}
+
+// A listed sleeper's archived resting pairs (each pair once; a pair whose partner
+// moves is emitted by it).
+void archiveEmitResting(uint body)
+{
+    uint n = min(ALOAD(gScratchAtomics[arCount(body)]), 2048u);
+    for (uint slot = 0u; slot < n && slot < 2048u; slot++)
+    {
+        Contact r = archiveRowOf(body, slot);
+        uint other = gColliders[r.colliderA].body == body ? gColliders[r.colliderB].body : gColliders[r.colliderA].body;
+        if (bodyMovingOrKinematic(gBodies[other])) continue;
+        bool first = true;
+        for (uint e = 0u; e < slot && e < 2048u; e++)
+        {
+            Contact q = archiveRowOf(body, e);
+            if (q.colliderA == r.colliderA && q.colliderB == r.colliderB) { first = false; break; }
+        }
+        if (first)
+            emitCandidateCore(r.colliderA, r.colliderB);
+    }
+}
+#endif
+
 // Shared point update; callers choose contact or manifold scheduling. Pair bodies
 // are immutable during persistence, so manifold scheduling can load them once.
 Contact persistContact(uint i, Contact c, bool reused, BodyState ba, BodyState bb)
@@ -3711,9 +3902,16 @@ Contact persistContact(uint i, Contact c, bool reused, BodyState ba, BodyState b
                 }
             }
         }
-        if (bestJ != CONTACT_HASH_EMPTY)
+        Contact prev = c;
+        bool havePrev = bestJ != CONTACT_HASH_EMPTY;
+        if (havePrev)
+            prev = READ_CONTACT(prevOff + bestJ);
+#if !defined(ENGINE_PERSISTENT_CONTACTS)
+        else if (sleepArchive())
+            havePrev = archiveFind(c, prev);
+#endif
+        if (havePrev)
         {
-            Contact prev = READ_CONTACT(prevOff + bestJ);
             // Refuse warm-start across SAT axis flips: λ from the old normal on a new
             // normal injects energy (random Box Pile). three-avbd avoids this via
             // reuseContacts keeping the manifold; without reuse, require n·n_prev>0.9.
@@ -5924,7 +6122,163 @@ void sleep_island_commit(uint3 tid : SV_DispatchThreadID)
     b.angularVel = float3(0, 0, 0);
     AADD2(gCounters[0].sleepEvents, 1);
     gBodies[i] = b;
+    // Its resting rows are archived by the archive_* passes that follow.
+    if (sleepArchive())
+    {
+        ASTORE(gScratchAtomics[arAge(i)], ARCHIVE_JUST_SLEPT);
+    }
 }
+
+#if !defined(ENGINE_PERSISTENT_CONTACTS)
+// Sleep archive passes, after sleep_island_commit (see archiveMeta).
+// archive_free, over this step's awake list: a body awake for a second step lets its
+// archive go (its pairs formed again by now); one that fell asleep again lets the old one
+// go before archiving anew. Pushes only (archive_alloc pops in a later dispatch).
+void archiveRelease(uint body)
+{
+    uint k = ALOAD(gScratchAtomics[arHead(body)]);
+    uint n = ALOAD(gScratchAtomics[arCount(body)]);
+    uint blocks = (n + ARCHIVE_ROWS - 1u) / ARCHIVE_ROWS;
+    uint top;
+    AADD3(gScratchAtomics[arTop()], blocks, top);
+    for (uint j = 0u; j < blocks && j < 4096u; j++)
+    {
+        ASTORE(gScratchAtomics[arStack(top + j)], k);
+        k = ALOAD(gScratchAtomics[arNext(k)]);
+    }
+    ASTORE(gScratchAtomics[arHead(body)], ARCHIVE_NONE);
+    ASTORE(gScratchAtomics[arCount(body)], 0u);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void archive_free(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (!sleepArchive() || i >= ALOAD(gCounters[0].awakeCount)) return;
+    uint body = gAwakeList[i];
+    if (ALOAD(gScratchAtomics[arHead(body)]) == ARCHIVE_NONE) return;
+    uint age = ALOAD(gScratchAtomics[arAge(body)]);
+    if (age == ARCHIVE_JUST_SLEPT)
+    {
+        archiveRelease(body);
+        return;
+    }
+    if (bodyIsSleeping(gBodies[body])) return;
+    if (age + 1u < 2u)
+    {
+        ASTORE(gScratchAtomics[arAge(body)], age + 1u);
+        return;
+    }
+    archiveRelease(body);
+    ASTORE(gScratchAtomics[arAge(body)], 0u);
+}
+
+// archive_count, over this step's contact rows: each resting row's owner (archiveOwner)
+// counts it (in its cursor word).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void archive_count(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (!sleepArchive() || ALOAD(gCounters[0].sleepEvents) == 0u) return;
+    if (i >= min(ALOAD(gCounters[0].contactCount), HOST_S(3))) return;
+    Contact c = gContacts[HOST_S(11) + i];
+    if (c.alive == 0u) return;
+    uint owner = archiveOwner(c);
+    if (owner != ARCHIVE_NONE)
+        AADD2(gScratchAtomics[arCursor(owner)], 1u);
+}
+
+// archive_alloc, over this step's awake list: each body that fell asleep with rows takes
+// its blocks off the free stack, chained.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void archive_alloc(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (!sleepArchive() || ALOAD(gCounters[0].sleepEvents) == 0u) return;
+    if (i >= ALOAD(gCounters[0].awakeCount)) return;
+    uint body = gAwakeList[i];
+    if (ALOAD(gScratchAtomics[arAge(body)]) != ARCHIVE_JUST_SLEPT) return;
+    uint n = ALOAD(gScratchAtomics[arCursor(body)]);
+    ASTORE(gScratchAtomics[arCursor(body)], 0u);
+    if (n == 0u) return;
+    uint blocks = (n + ARCHIVE_ROWS - 1u) / ARCHIVE_ROWS;
+    uint top;
+    AADD3(gScratchAtomics[arTop()], 0u - blocks, top);
+    if (top < blocks || top > archiveBlocks())
+    {
+        AOR2(gCounters[0].overflowFlags, OVERFLOW_SLEEP_ARCHIVE);
+        return;
+    }
+    uint first = top - blocks;
+    for (uint j = 0u; j < blocks && j < 4096u; j++)
+    {
+        uint k = ALOAD(gScratchAtomics[arStack(first + j)]);
+        uint next = j + 1u < blocks ? ALOAD(gScratchAtomics[arStack(first + j + 1u)]) : ARCHIVE_NONE;
+        ASTORE(gScratchAtomics[arNext(k)], next);
+    }
+    ASTORE(gScratchAtomics[arHead(body)], ALOAD(gScratchAtomics[arStack(first)]));
+    ASTORE(gScratchAtomics[arCount(body)], n);
+}
+
+// archive_scatter, over this step's contact rows: each resting row into its owner's
+// blocks, tagged with its colliders' local poses (archiveKey).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void archive_scatter(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (!sleepArchive() || ALOAD(gCounters[0].sleepEvents) == 0u) return;
+    if (i >= min(ALOAD(gCounters[0].contactCount), HOST_S(3))) return;
+    Contact c = gContacts[HOST_S(11) + i];
+    if (c.alive == 0u) return;
+    uint owner = archiveOwner(c);
+    if (owner == ARCHIVE_NONE) return;
+    uint k = ALOAD(gScratchAtomics[arHead(owner)]);
+    if (k == ARCHIVE_NONE) return;
+    uint slot;
+    AADD3(gScratchAtomics[arCursor(owner)], 1u, slot);
+    if (slot >= ALOAD(gScratchAtomics[arCount(owner)])) return;
+    for (uint h = slot / ARCHIVE_ROWS; h > 0u && h < 4096u; h--)
+        k = ALOAD(gScratchAtomics[arNext(k)]);
+    c._pad1 = asfloat(archiveKey(gColliders[c.colliderA], gColliders[c.colliderB]));
+    gContacts[archiveRow(k, slot % ARCHIVE_ROWS)] = c;
+}
+
+// archive_emit, after the broadphase (4,096 threads striding over this step's touched
+// sleepers): their archived resting pairs join the candidates. It also empties the other
+// step's touched count (the next step lists into it).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void archive_emit(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (!sleepArchive()) return;
+    uint step = HOST_S(17);
+    if (i == 0u)
+        ASTORE(gScratchAtomics[arTouchedCount(step + 1u)], 0u);
+    uint n = min(ALOAD(gScratchAtomics[arTouchedCount(step)]), HOST_S(1));
+    for (uint k = i; k < n && k < 1048576u; k += 4096u)
+        archiveEmitResting(ALOAD(gScratchAtomics[arTouchedList(k)]));
+}
+
+// archive_seal, over this step's awake list: the step's archiving is done.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void archive_seal(uint3 tid : SV_DispatchThreadID)
+{
+    uint i = dispatchIndex(tid);
+    if (!sleepArchive() || i >= ALOAD(gCounters[0].awakeCount)) return;
+    uint body = gAwakeList[i];
+    if (ALOAD(gScratchAtomics[arAge(body)]) == ARCHIVE_JUST_SLEPT)
+    {
+        ASTORE(gScratchAtomics[arAge(body)], 0u);
+        ASTORE(gScratchAtomics[arCursor(body)], 0u);
+    }
+}
+#endif
 
 [shader("compute")]
 [numthreads(64, 1, 1)]

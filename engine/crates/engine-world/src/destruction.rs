@@ -227,6 +227,28 @@ impl DestructibleAssetDesc {
         }
     }
 
+    /// [`Self::solver_for`] with bodies allowed to sleep, for worlds whose cost must
+    /// follow what moves (large maps). `Threshold`: the engine's default sleep speeds and
+    /// time, and `FLAG_WAKE_ON_TOUCH` (any touch from an awake body wakes a sleeper, so
+    /// a sleeper never stands as a static wall to slow debris). Threshold worlds keep
+    /// resting contacts through sleep (`WgpuSim::enable_sleep_archive`): a woken
+    /// cluster carries its weight from its first step. The cuboid-house shot is chaotic
+    /// (0.1 mm moves 47 broken bonds to 20); over 21 nudged shots this policy breaks
+    /// 38.7 ± 11.6 bonds into 101.1 ± 3.9 bodies against never-asleep's 38.8 ± 16.5 and
+    /// 101.4 ± 5.8 (`tests/threshold.rs` `sleep_policy_ensemble`). Create the world with
+    /// `enable_sleep: true`.
+    pub fn sleeping_solver_for(&self, model: StrengthModel) -> Option<engine_schema::AvbdParams> {
+        let mut p = self.solver_for(model)?;
+        let d = engine_schema::AvbdParams::default();
+        p.sleep_lin = d.sleep_lin;
+        p.sleep_ang = d.sleep_ang;
+        p.sleep_time = d.sleep_time;
+        if model == StrengthModel::Threshold {
+            p.flags |= engine_schema::FLAG_WAKE_ON_TOUCH;
+        }
+        Some(p)
+    }
+
     /// Any fracture-lab scene (`engine_fracture::Scene`): body 0 is its
     /// ground, the rest become chunks; joints become bonds.
     pub fn from_scene(scene: &Scene) -> anyhow::Result<Self> {

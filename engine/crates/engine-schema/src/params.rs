@@ -26,6 +26,10 @@ pub const FLAG_SPEC_VELOCITY: u32 = 16384;
 /// `AvbdParams::flags` bit: the primal inertial block uses the world inertia
 /// `R·diag(I)·Rᵀ`. Without it (three-avbd) principal moments act on world axes.
 pub const FLAG_WORLD_INERTIA: u32 = 64;
+/// A sleeping body wakes on any contact with an awake one, not only above the sleep
+/// speeds (`world_step.slang` `FLAG_WAKE_ON_TOUCH`): sleep never makes a body a static
+/// wall to slow neighbours.
+pub const FLAG_WAKE_ON_TOUCH: u32 = 16_777_216;
 
 /// Giles/Diaz/Yuksel AVBD parameters (avbd-demo3d `Solver::defaultParams`).
 #[repr(C)]

@@ -1142,6 +1142,9 @@ mod imp {
                 );
                 return Ok(());
             }
+            // Resting contacts survive sleep (a woken cluster carries its weight from its
+            // first step, as one that never slept): before the ingest binds the contacts.
+            self.sim.enable_sleep_archive()?;
             let capacity = self.sim.capacity();
             // The ingest merges two records a contact row in 64-thread groups, one dispatch
             // dimension (WebGPU's 65,535 groups).

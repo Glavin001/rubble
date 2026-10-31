@@ -30,10 +30,14 @@ fn world_for(asset: &DestructibleAssetDesc, offset: [f32; 3]) -> World {
     // THRESHOLD_SLEEP=1 (probe): the engine's default sleep thresholds instead of never.
     let sleep = std::env::var("THRESHOLD_SLEEP").is_ok();
     if sleep {
-        let d = AvbdParams::default();
-        solver.sleep_lin = d.sleep_lin;
-        solver.sleep_ang = d.sleep_ang;
-        solver.sleep_time = d.sleep_time;
+        if std::env::var("THRESHOLD_WAKE_ON_TOUCH").is_ok() {
+            solver = asset.sleeping_solver_for(StrengthModel::Threshold).unwrap();
+        } else {
+            let d = AvbdParams::default();
+            solver.sleep_lin = d.sleep_lin;
+            solver.sleep_ang = d.sleep_ang;
+            solver.sleep_time = d.sleep_time;
+        }
     }
     let def = WorldDef {
         capacity: capacity(asset),
@@ -172,7 +176,16 @@ fn run_world_among(
     }
     let stats = w.destructible_stats(id).unwrap();
     assert!(stats.chunks > 10 && stats.bonds > 10, "{stats:?}");
+    // THRESHOLD_SHOT_DELAY=n (probe): the structure stands n steps before the shot.
+    let delay: u32 = std::env::var("THRESHOLD_SHOT_DELAY").map(|v| v.parse().unwrap()).unwrap_or(0);
+    for _ in 0..delay {
+        w.step().unwrap();
+        w.poll_blocking().unwrap();
+    }
     let (origin, v, r, m) = lab_shot(lab, target(asset));
+    // THRESHOLD_NUDGE=dx (probe): the shot's origin moved dx metres along x.
+    let nudge: f64 = std::env::var("THRESHOLD_NUDGE").map(|v| v.parse().unwrap()).unwrap_or(0.0);
+    let origin = [origin[0] + nudge, origin[1], origin[2]];
     let at = [0, 1, 2].map(|k| (origin[k] + offset[k] as f64) as f32);
     let ball = w
         .create_body(&BodyDef {
@@ -209,7 +222,16 @@ fn run_world_among(
     // Splits to check a frame later: (frame, parent body, its pose then, children).
     let mut fresh: Vec<(u32, BodyId, Transform, Vec<BodyId>)> = Vec::new();
     let dt = asset.solver_for(StrengthModel::Threshold).unwrap().dt;
+    let wake_at: Option<u32> = std::env::var("THRESHOLD_WAKE_AT").ok().map(|v| v.parse().unwrap());
     for n in 0..frames {
+        if Some(n) == wake_at {
+            for c in 0..stats.chunks {
+                let b = w.destructible_chunk_body(id, c).unwrap();
+                if w.body_type(b).unwrap() == BodyType::Dynamic {
+                    w.body_set_awake(b, true).unwrap();
+                }
+            }
+        }
         w.step().unwrap();
         // A piece starts with its parent's rigid motion: right after the split its
         // origin (the instance frame carried along) is where its parent's was.
@@ -296,7 +318,10 @@ fn run_world_among(
         assert!(w.body_is_valid(body));
         assert_eq!(w.destructible_actor_of(id, c).unwrap().bodies, vec![body]);
     }
-    for b in new_bodies.iter().filter(|b| w.body_is_valid(**b)) {
+    // ENSEMBLE_LENIENT (the ensemble probe): pieces of a split asleep cluster may report
+    // no pose (a known gap of the start-asleep path); the probe counts breaks only.
+    let lenient = std::env::var("ENSEMBLE_LENIENT").is_ok();
+    for b in new_bodies.iter().filter(|b| w.body_is_valid(**b) && !lenient) {
         assert!(
             w.body_transform(*b).unwrap().is_some(),
             "piece {b:?} has a reported pose"
@@ -413,6 +438,10 @@ fn house() -> (DestructibleAssetDesc, engine_fracture::Scene) {
 fn check(name: &str, (asset, lab): (DestructibleAssetDesc, engine_fracture::Scene)) {
     let frames = 120;
     let world = run_world(&asset, &lab, frames);
+    if std::env::var("THRESHOLD_TIMELINE").is_ok() {
+        let at: Vec<String> = [88, 90, 92, 94, 96, 98, 100, 102, 104, 106, 108, 110, 112, 114, 116, 119].iter().map(|&f| format!("{f}:{}", world.timeline[f])).collect();
+        eprintln!("{name} timeline {}", at.join(" "));
+    }
     let (lab_broken, lab_bodies, lab_timeline) = run_lab(&asset, &lab, frames);
     eprintln!("{name}: world broke {} bonds into {} bodies ({} splits); the lab {lab_broken} into {lab_bodies}", world.broken, world.bodies, world.splits);
     assert!(
@@ -527,5 +556,52 @@ fn limits_fail_loudly() {
             .unwrap();
         let r = w.body_set_projectile(b, Some(Projectile::default()));
         assert_eq!(r.is_ok(), k < 64, "projectile {k}: {r:?}");
+    }
+}
+
+/// Probe (ignored): the cuboid-house shot is chaotic (moving the shot 0.1 mm changes the
+/// bonds broken from 47 to 20), so a sleep policy is compared with never-asleep over an
+/// ensemble of nudged shots, not one shot. Prints each policy's bonds broken and bodies
+/// over 21 nudges (-10..10 mm): mean, standard deviation, min, max.
+/// cargo test -p engine-world --release --test threshold sleep_policy_ensemble -- --ignored --nocapture
+#[test]
+#[ignore]
+fn sleep_policy_ensemble() {
+    let (asset, lab) = house();
+    let delay = std::env::var("ENSEMBLE_DELAY").unwrap_or_else(|_| "0".into());
+    let only = std::env::var("ENSEMBLE_ONLY").ok();
+    let policies: [(&str, &[(&str, &str)]); 5] = [
+        ("never asleep", &[]),
+        ("start asleep, never re-sleep (Unreal's town)", &[("THRESHOLD_START_ASLEEP", "1")]),
+        ("start asleep, sleep, archive, wake on touch", &[("THRESHOLD_START_ASLEEP", "1"), ("THRESHOLD_SLEEP", "1"), ("THRESHOLD_WAKE_ON_TOUCH", "1")]),
+        ("sleep, archive, wake on touch", &[("THRESHOLD_SLEEP", "1"), ("THRESHOLD_WAKE_ON_TOUCH", "1")]),
+        ("sleep, archive", &[("THRESHOLD_SLEEP", "1")]),
+    ];
+    let stats = |v: &[f64]| {
+        let n = v.len() as f64;
+        let mean = v.iter().sum::<f64>() / n;
+        let sd = (v.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0)).sqrt();
+        let (lo, hi) = v.iter().fold((f64::MAX, f64::MIN), |a, &x| (a.0.min(x), a.1.max(x)));
+        format!("{mean:.1} ± {sd:.1} [{lo}, {hi}]")
+    };
+    for (name, env) in policies {
+        if only.as_deref().is_some_and(|o| !name.starts_with(o)) {
+            continue;
+        }
+        for k in ["THRESHOLD_SLEEP", "THRESHOLD_WAKE_ON_TOUCH", "THRESHOLD_START_ASLEEP"] {
+            std::env::remove_var(k);
+        }
+        for (k, v) in env {
+            std::env::set_var(k, v);
+        }
+        std::env::set_var("THRESHOLD_SHOT_DELAY", &delay);
+        let (mut broken, mut bodies) = (Vec::new(), Vec::new());
+        for i in -10..=10 {
+            std::env::set_var("THRESHOLD_NUDGE", format!("{}", i as f64 * 1e-3));
+            let o = run_world(&asset, &lab, 120);
+            broken.push(o.broken as f64);
+            bodies.push(o.bodies as f64);
+        }
+        eprintln!("{name}: bonds broken {}, bodies {}", stats(&broken), stats(&bodies));
     }
 }

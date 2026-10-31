@@ -10,7 +10,8 @@
 //! The goal is a cost that does not grow with K in any of them.
 //!
 //! CITY_K=16,64,256 cargo test -p engine-world --release --test city_scale -- --ignored --nocapture
-//! CITY_SLEEP=1 lets the houses sleep (the threshold solver's suggestion is never asleep).
+//! CITY_SLEEP=1: the large-map sleep policy (`sleeping_solver_for`; the threshold solver's
+//! own suggestion is never asleep).
 //! CITY_JSON=path appends one JSON line per run.
 #![cfg(feature = "stress")]
 
@@ -78,14 +79,14 @@ fn lots(k: usize) -> (Vec<[f32; 2]>, f32) {
 }
 
 fn city(asset: &DestructibleAssetDesc, k: usize, sleep: bool) -> (World, Vec<[f32; 2]>, f32, f32) {
-    let mut solver = asset
-        .solver_for(StrengthModel::Threshold)
-        .expect("threshold solver");
-    if sleep {
-        let d = AvbdParams::default();
-        solver.sleep_lin = d.sleep_lin;
-        solver.sleep_ang = d.sleep_ang;
+    // Sleep: the large-map policy (sleeping_solver_for); houses are placed awake, settle,
+    // and fall asleep with their resting contacts archived.
+    let solver = if sleep {
+        asset.sleeping_solver_for(StrengthModel::Threshold)
+    } else {
+        asset.solver_for(StrengthModel::Threshold)
     }
+    .expect("threshold solver");
     let def = WorldDef {
         capacity: capacity(asset, k),
         gravity: [0.0, solver.gravity_y, 0.0],
@@ -123,7 +124,7 @@ fn city(asset: &DestructibleAssetDesc, k: usize, sleep: bool) -> (World, Vec<[f3
                 position: p,
                 ..Transform::default()
             },
-            asleep: sleep,
+            asleep: false,
             ..DestructibleDef::new(a)
         })
         .unwrap();
