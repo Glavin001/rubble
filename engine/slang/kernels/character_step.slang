@@ -283,12 +283,19 @@ void char_move(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID)
     // 2. Gather: everything near the capsule swept along D, plus room for the
     // step-up and stick-to-floor casts.
     float reach = r + hh + skin + max(mv.x, mv.y) + 0.05;
+    // The kept box is narrower across: every query below stays within the
+    // capsule's radius plus `spec` of its axis horizontally (contact planes stop
+    // at spec, casts move along D, up or down), so colliders farther out cannot
+    // matter; vertically the step casts need the full reach. A densely fractured
+    // floor otherwise floods the candidate list.
+    float reachH = r + length(D) + skin + 0.05;
+    float3 pad = float3(reachH, reach, reachH);
     if (lane == 0u) ASTORE(gsCandCount, 0u);
     GROUP_SYNC();
     {
         CollectVisitor v;
-        v.mn = min(P, P + D) - reach;
-        v.mx = max(P, P + D) + reach;
+        v.mn = min(P, P + D) - pad;
+        v.mx = max(P, P + D) + pad;
         v.filter.excludeBody = cfg.x;
         v.filter.mask = cfg.z;
         sceneWalk(lane, live, P, P + D, reach, charFullScan(), v);

@@ -53,7 +53,7 @@ pub const EVENT_CHAR_SUPPORT_LOST: u32 = 6;
 pub const EVENT_CHAR_CRUSHED: u32 = 7;
 pub const EVENT_PROJECTILE_HIT: u32 = 8;
 pub const EVENT_PROJECTILE_STOPPED: u32 = 9;
-pub const CHAR_MAX_CANDIDATES: u32 = 192;
+pub const CHAR_MAX_CANDIDATES: u32 = 288;
 pub const PROJ_SEGMENTS: u32 = 4;
 pub const PROJ_MAX_HITS: u32 = 8;
 
