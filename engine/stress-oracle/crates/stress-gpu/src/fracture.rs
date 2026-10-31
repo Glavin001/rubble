@@ -79,6 +79,210 @@ pub struct FractureTables {
     /// The engine's contact rows a step holds at most (its `max_contacts`): the in-step
     /// contact fracture reads that many at most.
     pub max_contacts: u32,
+    /// Chunk crushing (`fracture.slang` `fr_crush_*`), opt-in: `None` runs none of it.
+    pub crush: Option<CrushTables>,
+}
+
+/// What chunk crushing is made from (engine/docs/destruction-reactions.md section 1).
+#[derive(Clone, Debug, Default)]
+pub struct CrushTables {
+    /// Per chunk: (capPressure, cohesion, frictionSlope, crushEnergy), (crushViscosity,
+    /// volume, crushable 0/1, -). An uncrushable chunk's material row is ignored.
+    pub chunks: Vec<[[f32; 4]; 2]>,
+    /// Per bond: (centroid (structure frame), area).
+    pub bonds: Vec<[f32; 4]>,
+    /// Per bond: its normal (structure frame, either sense), for `flow`; empty without it.
+    pub normals: Vec<[f32; 4]>,
+    /// The support-loss flow loads the chunks (`fracture.slang` `crush_loads_flow`): each
+    /// intact bond's compressive load, set by [`GpuFracture::set_crush_flow`], pushes into
+    /// its chunks. Needs `normals`.
+    pub flow: bool,
+    /// A crushed chunk's mass kept as `fragments` boxes (`pool`), else removed.
+    pub conserve: bool,
+    /// Fragments per crushed chunk (conserve): a power of two, at most 64.
+    pub fragments: u32,
+    /// The reserved fragment bodies (engine body, its one box collider): the budget; a
+    /// crush past it is an error (`CRUSH_ERROR_FRAGMENTS`), never a silent drop.
+    pub pool: Vec<[u32; 2]>,
+    /// Crushes one frame reports at most (the events' room); more is an error.
+    pub max_events: u32,
+    /// Where a crushed chunk's body is parked (rubble frame): x = (slot % 1024) step,
+    /// y, z = (slot / 1024) step.
+    pub park_y: f32,
+    pub park_step: f32,
+}
+
+/// `Counters::error` bit: a crush found the fragment pool spent.
+pub const CRUSH_ERROR_FRAGMENTS: u32 = 16;
+/// `Counters::error` bit: more crushes in a frame than `CrushTables::max_events`.
+pub const CRUSH_ERROR_EVENTS: u32 = 32;
+/// Words per crush event (`fracture.slang` `fr_crush_apply`): 6 float4.
+pub const CRUSH_EVENT_WORDS: u32 = 24;
+/// The counters word holding this frame's crush count (`C_CRUSH_EVENTS`).
+pub const C_CRUSH_EVENTS: usize = 7;
+
+/// A crush, as `fr_crush_apply` records it (rubble's frame, Y up).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CrushEvent {
+    pub chunk: u32,
+    /// Its first fragment's index in the pool (`CrushTables::pool`); `None`: removed.
+    pub first_fragment: Option<u32>,
+    /// 1 contact loads, 2 a predicted strike, 3 a blast window, 4 the support-loss flow
+    /// (loads through its bonds).
+    pub cause: u32,
+    /// Its body as the split left it (alone): solver position, orientation, velocities.
+    pub position: [f32; 3],
+    pub orientation: [f32; 4],
+    pub linear_velocity: [f32; 3],
+    pub angular_velocity: [f32; 3],
+    pub mass: f32,
+    pub volume: f32,
+    /// The highest (p, q) it met (Pa).
+    pub peak_pressure: f32,
+    pub peak_deviator: f32,
+    /// Each fragment's half extents (its box frame); zero when removed.
+    pub fragment_half: [f32; 3],
+}
+
+impl CrushEvent {
+    /// `count` events from their words (`GpuFracture::crush_events_range`).
+    pub fn decode(words: &[[f32; 4]], count: u32) -> Vec<CrushEvent> {
+        words
+            .chunks_exact(6)
+            .take(count as usize)
+            .map(|r| {
+                let first = r[0][1].to_bits();
+                CrushEvent {
+                    chunk: r[0][0].to_bits(),
+                    first_fragment: (first != u32::MAX).then_some(first),
+                    cause: r[0][2].to_bits() & 0xf,
+                    position: [r[1][0], r[1][1], r[1][2]],
+                    mass: r[1][3],
+                    orientation: r[2],
+                    linear_velocity: [r[3][0], r[3][1], r[3][2]],
+                    peak_pressure: r[3][3],
+                    angular_velocity: [r[4][0], r[4][1], r[4][2]],
+                    peak_deviator: r[4][3],
+                    fragment_half: [r[5][0], r[5][1], r[5][2]],
+                    volume: r[5][3],
+                }
+            })
+            .collect()
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+struct CrushParams {
+    enabled: u32,
+    mode: u32,
+    fragments: u32,
+    pool_size: u32,
+    max_events: u32,
+    t_bonds: u32,
+    t_adj: u32,
+    t_list: u32,
+    t_pool: u32,
+    r_bill: u32,
+    r_shot: u32,
+    r_events: u32,
+    park_y: f32,
+    park_step: f32,
+    flow: u32,
+    t_normal: u32,
+    r_flow: u32,
+    r_blast: u32,
+    pad0: f32,
+    pad1: f32,
+}
+
+/// The crush tables and state on the GPU (`fracture.slang` `crush_tab`, `crush_rw`).
+fn crush_buffers(gpu: &Gpu, t: &FractureTables) -> Result<(wgpu::Buffer, wgpu::Buffer, wgpu::Buffer, CrushParams), String> {
+    let (n, e, b) = (t.chunk_count() as usize, t.bond_count() as usize, t.body_count() as usize);
+    let Some(c) = &t.crush else {
+        let none = CrushParams::default();
+        return Ok((storage_bytes(gpu, "fracture crush tables (none)", 16, wgpu::BufferUsages::empty()), storage_bytes(gpu, "fracture crush state (none)", 16, wgpu::BufferUsages::empty()), gpu.uniform("fracture crush params", &none), none));
+    };
+    if c.chunks.len() != n || c.bonds.len() != e {
+        return Err(format!("fracture crush: {} chunk and {} bond records for {n} chunks and {e} bonds", c.chunks.len(), c.bonds.len()));
+    }
+    if t.geometry.len() != n {
+        return Err("fracture crush: needs the chunks' box geometry (FractureTables::geometry)".into());
+    }
+    if c.conserve && !(c.fragments.is_power_of_two() && c.fragments <= 64) {
+        return Err(format!("fracture crush: {} fragments per chunk; a power of two up to 64", c.fragments));
+    }
+    if c.max_events == 0 {
+        return Err("fracture crush: max_events must be at least 1".into());
+    }
+    if c.flow && c.normals.len() != e {
+        return Err(format!("fracture crush: the flow needs {e} bond normals, got {}", c.normals.len()));
+    }
+    // Each chunk's bonds (adjacency), 4 indices a float4.
+    let mut adj: Vec<Vec<u32>> = vec![Vec::new(); n];
+    for (i, bond) in t.bonds.iter().enumerate() {
+        adj[bond[0] as usize].push(i as u32);
+        adj[bond[1] as usize].push(i as u32);
+    }
+    let mut tab: Vec<[f32; 4]> = c.chunks.iter().flatten().copied().collect();
+    let t_bonds = tab.len() as u32;
+    tab.extend_from_slice(&c.bonds);
+    let t_adj = tab.len() as u32;
+    let mut list = Vec::new();
+    for a in &adj {
+        tab.push([f32::from_bits(list.len() as u32), f32::from_bits(a.len() as u32), 0.0, 0.0]);
+        list.extend_from_slice(a);
+    }
+    let t_list = tab.len() as u32;
+    for q in list.chunks(4) {
+        let mut w = [0.0f32; 4];
+        for (i, x) in q.iter().enumerate() {
+            w[i] = f32::from_bits(*x);
+        }
+        tab.push(w);
+    }
+    let t_pool = tab.len() as u32;
+    let pool: &[[u32; 2]] = if c.conserve { &c.pool } else { &[] };
+    for p in pool {
+        tab.push([f32::from_bits(p[0]), f32::from_bits(p[1]), 0.0, 0.0]);
+    }
+    let t_normal = tab.len() as u32;
+    if c.flow {
+        tab.extend_from_slice(&c.normals);
+    }
+    let r_bill = n as u32;
+    // Per body slot 4 float4: the bill (energy, shot + 1), (contact, -), and the strike's
+    // contact patch (`fr_strike_patch`).
+    let r_shot = r_bill + 4 * b as u32;
+    let r_events = r_shot + MAX_SHOTS as u32;
+    // After the events: per chunk a blast window's damage, then (with the flow) the bonds'
+    // flow loads, 4 a float4.
+    let r_blast = r_events + 6 * c.max_events;
+    let r_flow = r_blast + n as u32;
+    let flow_words = if c.flow { e.div_ceil(4) as u32 } else { 0 };
+    let rw_words = (r_flow + flow_words) as u64;
+    let params = CrushParams {
+        enabled: 1,
+        mode: c.conserve as u32,
+        fragments: if c.conserve { c.fragments } else { 0 },
+        pool_size: pool.len() as u32,
+        max_events: c.max_events,
+        t_bonds,
+        t_adj,
+        t_list,
+        t_pool,
+        r_bill,
+        r_shot,
+        r_events,
+        park_y: c.park_y,
+        park_step: c.park_step,
+        flow: c.flow as u32,
+        t_normal,
+        r_flow,
+        r_blast,
+        ..Default::default()
+    };
+    Ok((gpu.storage("fracture crush tables", &tab), storage_bytes(gpu, "fracture crush state", 16 * rw_words, wgpu::BufferUsages::empty()), gpu.uniform("fracture crush params", &params), params))
 }
 
 /// What the load path and the analytic strike read (`fracture.slang` `ext`).
@@ -98,9 +302,9 @@ pub struct ExtTables {
     pub materials: Vec<[[f32; 4]; 5]>,
 }
 
-/// Per entry of `adjacency` (`fracture.slang` `lp_sides`): what a load-path sweep takes of
-/// that bond for that chunk. Its arms are f32 differences of the f32 centroid and centres,
-/// as the kernels make them.
+/// Per entry of `adjacency` (`fracture.slang` `lp_side`, in `ext` at `ext_sides`): what a
+/// load-path sweep takes of that bond for that chunk. Its arms are f32 differences of the
+/// f32 centroid and centres, as the kernels make them.
 fn sides(ext: &ExtTables, chunks: &[ChunkRecord], bonds: &[[u32; 4]]) -> Vec<[f32; 4]> {
     let mut out = Vec::with_capacity(5 * ext.adjacency.len());
     for (k, c) in ext.chunks.iter().enumerate() {
@@ -228,7 +432,7 @@ struct FractureParams {
     cs_c1: f32,
     cs_c2: f32,
     cs_row_offset: u32,
-    pad7: f32,
+    ext_sides: u32,
     pad8: f32,
 }
 
@@ -323,8 +527,18 @@ impl Layout {
     pub fn w_il_tube(&self) -> u32 {
         self.w_cs_list() + self.n + self.b
     }
-    pub fn work_words(&self) -> u32 {
+    /// Bonds the host broke between frames (`fracture.slang` `fr_host_breaks`): their
+    /// count, then the bonds (room for every bond).
+    pub fn w_host_breaks(&self) -> u32 {
         self.w_il_tube() + 2 * self.n
+    }
+    /// The engine's contact rows this step (`fracture.slang` `w_cs_rows`), copied in from
+    /// its counters.
+    pub fn w_cs_rows(&self) -> u32 {
+        self.w_host_breaks() + 1 + self.e
+    }
+    pub fn work_words(&self) -> u32 {
+        self.w_cs_rows() + 1
     }
     pub fn a_dirty(&self) -> u32 {
         3 * self.n + SUMS * self.n
@@ -334,7 +548,7 @@ impl Layout {
     }
     /// Per body slot 9 words: the strike's bounds, entry time, and entry chunk.
     pub fn a_strike(&self) -> u32 {
-        self.a_counters() + 16
+        self.a_counters() + COUNTER_WORDS as u32
     }
     /// Per body slot 14 words of the load path's sums.
     pub fn a_lp(&self) -> u32 {
@@ -354,8 +568,20 @@ impl Layout {
     pub fn a_cs(&self) -> u32 {
         self.a_first() + MAX_SHOTS as u32 + 1
     }
-    pub fn atom_words(&self) -> u32 {
+    /// Per chunk: its distance to its body's strike path (`fracture.slang` `a_strike_dist`).
+    pub fn a_strike_dist(&self) -> u32 {
         self.a_cs() + 12 * self.b
+    }
+    pub fn atom_words(&self) -> u32 {
+        self.a_strike_dist() + self.n
+    }
+    /// With crushing, per body slot 2 words per cell of a strike's contact patch
+    /// (`fracture.slang` `a_cover`): the first depth, the chunk there. After `atom_words`.
+    pub fn a_cover(&self) -> u32 {
+        self.atom_words()
+    }
+    pub fn cover_words(&self) -> u32 {
+        2 * COVER_SAMPLES * self.b
     }
     /// `lp` (float4s): per chunk [`LP_CHUNK`], then per body slot [`LP_BODY`].
     pub fn lp_words(&self) -> u32 {
@@ -364,6 +590,10 @@ impl Layout {
 }
 
 const SUMS: u32 = 20;
+/// The counters' words (`fracture.slang` `C_*`; `a_strike` follows them).
+pub const COUNTER_WORDS: usize = 20;
+/// Cells of a strike's contact patch (`fracture.slang` `COVER_SAMPLES`).
+const COVER_SAMPLES: u32 = 64;
 /// float4s per chunk in `lp` (`fracture.slang` `LP_CHUNK`): the load path's state (0..8),
 /// its block's factor (8..14), the contact fracture's increment (14..22).
 const LP_CHUNK: u32 = 22;
@@ -374,7 +604,7 @@ pub const LP_BODY: u32 = 7;
 /// The shots strike prediction checks, at most.
 pub const MAX_SHOTS: usize = 64;
 const BODY_WORDS: u32 = 7;
-const ARGS: u64 = 16;
+const ARGS: u64 = 17;
 const ARG_CHUNKS: u64 = 0;
 const ARG_BONDS: u64 = 1;
 const ARG_BODIES: u64 = 2;
@@ -389,6 +619,9 @@ const ARG_CS_CHUNKS: u64 = 10;
 const ARG_CS_BONDS: u64 = 11;
 const ARG_CS_SLOTS: u64 = 12;
 const ARG_CS_SAVE: u64 = 13;
+const ARG_CRUSH_CHUNKS: u64 = 14;
+const ARG_CRUSH_SCAN: u64 = 15;
+const ARG_CRUSH_ONE: u64 = 16;
 
 /// The counters (`fracture.slang` `C_*`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -396,9 +629,9 @@ pub struct Counters {
     pub broken: u32,
     pub pieces: u32,
     /// Bits: 1 no free slot, 2 a mass sum out of range, 4 a union did not settle, 8 the
-    /// impact pulse pool overflowed (`pool_cap`), 32 a load-path block was not positive
-    /// definite (16, an analytic strike's thickness past a cap of passes, is no longer set:
-    /// its run has no cap).
+    /// impact pulse pool overflowed (`pool_cap`), 16 a crush found the fragment pool spent
+    /// ([`CRUSH_ERROR_FRAGMENTS`]), 32 more crushes in a frame than the events' room
+    /// ([`CRUSH_ERROR_EVENTS`]), 64 a load-path block was not positive definite.
     pub error: u32,
     pub split_frames: u32,
     /// Analytic strikes by outcome (`fr_il_strike`), in all.
@@ -416,7 +649,7 @@ pub struct Counters {
 impl Counters {
     /// From the 16 counter words.
     pub fn from_words(c: &[u32]) -> Counters {
-        Counters { broken: c[1], pieces: c[2], error: c[3], split_frames: c[4], bounces: c[7], craters: c[8], spalls: c[9], perforations: c[10], peak_utilization: f32::from_bits(c[11]), contact_strikes: c[12], contact_breaks: c[13] }
+        Counters { broken: c[1], pieces: c[2], error: c[3], split_frames: c[4], bounces: c[11], craters: c[12], spalls: c[13], perforations: c[14], peak_utilization: f32::from_bits(c[15]), contact_strikes: c[16], contact_breaks: c[17] }
     }
 }
 
@@ -489,12 +722,87 @@ const BINDINGS: [Binding; 29] = [
     Binding::Storage,   // ext (load path, analytic strike)
     Binding::StorageRw, // lp
     Binding::StorageRw, // the engine's contact rows (contact fracture)
-    Binding::Storage,   // the engine's counters
-    Binding::StorageRw, // the contact rows' saved anchors (contact fracture)
-    Binding::Storage,   // the load path's bond sides
+    Binding::Storage,   // crush tables
+    Binding::StorageRw, // crush state, bills, events
+    Binding::Uniform,   // crush params
 ];
 
-const ENTRIES: [&str; 73] = [
+/// The entry points only chunk crushing runs (`FractureTables::crush`): built only with
+/// it, so a fracture without crushing needs no more storage buffers per stage than its
+/// core kernels bind (8, WebGPU's default limit; `fr_crush_apply` binds 10).
+pub const CRUSH_ENTRIES: [&str; 13] = [
+    "fr_crush_loads",
+    "fr_strike_crush",
+    "fr_crush_bill",
+    "fr_crush_push",
+    "fr_crush_bonds",
+    "fr_crush_mark",
+    "fr_crush_gate",
+    "fr_crush_apply",
+    "fr_crush_end",
+    "fr_crush_blast",
+    "fr_strike_patch",
+    "fr_strike_cover",
+    "fr_strike_claim",
+];
+
+/// The entry points only the load path, the analytic strike and the in-step contact
+/// fracture run (`FractureTables::load_model`, `strike_model`, `contact_sweeps`): built only
+/// with one of them, so the threshold rule needs no more storage buffers per stage than its
+/// core kernels bind (8, WebGPU's default limit; `fr_cs_solve` binds 10).
+pub const MODEL_ENTRIES: [&str; 44] = [
+    "fr_lp_clear",
+    "fr_lp_sum",
+    "fr_lp_relief",
+    "fr_lp_block",
+    "fr_lp_sweep_even",
+    "fr_lp_sweep_odd",
+    "fr_lp_breaks",
+    "fr_il_first_reset",
+    "fr_il_first",
+    "fr_il_begin",
+    "fr_il_tube_count",
+    "fr_il_tube_base",
+    "fr_il_tube_collect",
+    "fr_il_run",
+    "fr_il_strike",
+    "fr_il_mark",
+    "fr_il_breaks",
+    "fr_il_carry",
+    "fr_cs_begin",
+    "fr_cs_contacts",
+    "fr_cs_pick_a",
+    "fr_cs_pick_b",
+    "fr_cs_pick_c",
+    "fr_cs_pick_d",
+    "fr_cs_record",
+    "fr_cs_hertz",
+    "fr_cs_count",
+    "fr_cs_base",
+    "fr_cs_collect",
+    "fr_cs_gate",
+    "fr_cs_solve",
+    "fr_cs_gate2",
+    "fr_cs_save",
+    "fr_cs_fix",
+    "fr_cs_clean",
+    "fr_csl_begin",
+    "fr_csl_tube_count",
+    "fr_csl_tube_base",
+    "fr_csl_tube_collect",
+    "fr_csl_run",
+    "fr_csl_strike",
+    "fr_csl_mark",
+    "fr_csl_breaks",
+    "fr_csl_carry",
+];
+
+/// Every fracture entry point (`fracture.slang`), crush ones included.
+pub fn entries() -> &'static [&'static str] {
+    &ENTRIES
+}
+
+const ENTRIES: [&str; 87] = [
     "fr_loads",
     "fr_breaks",
     "fr_gate",
@@ -568,6 +876,20 @@ const ENTRIES: [&str; 73] = [
     "fr_csl_mark",
     "fr_csl_breaks",
     "fr_csl_carry",
+    "fr_crush_loads",
+    "fr_strike_crush",
+    "fr_crush_bill",
+    "fr_crush_push",
+    "fr_crush_bonds",
+    "fr_crush_mark",
+    "fr_crush_gate",
+    "fr_crush_apply",
+    "fr_crush_end",
+    "fr_crush_blast",
+    "fr_strike_patch",
+    "fr_strike_cover",
+    "fr_strike_claim",
+    "fr_host_breaks",
 ];
 
 #[repr(C)]
@@ -635,7 +957,8 @@ impl CsTiming {
 
 pub struct GpuFracture {
     pub layout: Layout,
-    kernels: Vec<Kernel>,
+    /// One per `ENTRIES` entry; `None` for the crush entries without crushing.
+    kernels: Vec<Option<Kernel>>,
     params: FractureParams,
     params_buf: wgpu::Buffer,
     scan_new: wgpu::Buffer,
@@ -656,14 +979,17 @@ pub struct GpuFracture {
     pub shots: wgpu::Buffer,
     pub ext: wgpu::Buffer,
     pub lp: wgpu::Buffer,
-    lp_sides: wgpu::Buffer,
     /// Per engine contact row the in-step contact fracture's saved anchors (2 float4).
-    cs_anchors: wgpu::Buffer,
     /// `STRESS_CS_TIMING=1`: its stages' timestamps.
     cs_timing: Option<CsTiming>,
     engine_counters: Option<wgpu::Buffer>,
+    /// Chunk crushing's tables, state and params (placeholders without it).
+    pub crush_tab: wgpu::Buffer,
+    pub crush_rw: wgpu::Buffer,
+    crush_buf: wgpu::Buffer,
+    crush: CrushParams,
     /// Bind groups per kernel (the scans: the new-piece scan's, then the free slots').
-    binds: Vec<wgpu::BindGroup>,
+    binds: Vec<Option<wgpu::BindGroup>>,
     scan_binds: Vec<wgpu::BindGroup>,
     /// What the core kernels bind in the view's slots, and the view once set.
     /// One per view slot (a buffer bound read-only and read-write in one dispatch is
@@ -675,6 +1001,9 @@ pub struct GpuFracture {
     engine_colliders: Option<wgpu::Buffer>,
     engine_contacts: Option<wgpu::Buffer>,
     ingest_buffers: Option<[wgpu::Buffer; 3]>,
+    /// Bonds the host broke since the last frame was recorded
+    /// ([`GpuFracture::break_bonds_sparse`]), uploaded and broken by the next one.
+    host_breaks: Vec<u32>,
 }
 
 fn storage_bytes(gpu: &Gpu, label: &str, bytes: u64, extra: wgpu::BufferUsages) -> wgpu::Buffer {
@@ -751,6 +1080,7 @@ impl GpuFracture {
             ext_chunks,
             ext_adj,
             ext_mat,
+            ext_sides: ext_words.len() as u32,
             lp_scale: LP_SCALE,
             cs_sweeps: t.contact_sweeps,
             cs_row_cap: t.max_contacts,
@@ -782,7 +1112,8 @@ impl GpuFracture {
         words[layout.w_alive() as usize..(layout.w_alive() + e) as usize].fill(1);
         words[layout.w_free() as usize..(layout.w_free() + b) as usize].copy_from_slice(&t.free);
         let work = gpu.storage("fracture work", &words);
-        let atom = storage_bytes(gpu, "fracture atom", 4 * layout.atom_words() as u64, wgpu::BufferUsages::empty());
+        let cover = if t.crush.is_some() { layout.cover_words() } else { 0 };
+        let atom = storage_bytes(gpu, "fracture atom", 4 * (layout.atom_words() + cover) as u64, wgpu::BufferUsages::empty());
         let mut frames: Vec<[f32; 4]> = t.frames.iter().flatten().copied().collect();
         // + staging (9 per chunk) + the strikes (3 per body slot).
         frames.resize((2 * b + 9 * n + 3 * b) as usize, [0.0; 4]);
@@ -802,11 +1133,8 @@ impl GpuFracture {
             gpu.queue.write_buffer(&geometry, 0, bytemuck::cast_slice(&g));
         }
         let shots = storage_bytes(gpu, "fracture strike shots", 32 * MAX_SHOTS as u64, wgpu::BufferUsages::empty());
-        let ext = storage_bytes(gpu, "fracture ext", 16 * ext_words.len() as u64, wgpu::BufferUsages::empty());
-        if !ext_words.is_empty() {
-            gpu.queue.write_buffer(&ext, 0, bytemuck::cast_slice(&ext_words));
-        }
-        let mut lp_words = vec![[0.0f32; 4]; layout.lp_words() as usize];
+        // + per contact row 2 (`fracture.slang` `lp_anchor`).
+        let mut lp_words = vec![[0.0f32; 4]; (layout.lp_words() + 2 * t.max_contacts) as usize];
         for (k, x) in t.lp_init.iter().enumerate() {
             for copy in 0..2 {
                 lp_words[LP_CHUNK as usize * k + 2 * copy] = x[0];
@@ -814,12 +1142,45 @@ impl GpuFracture {
             }
         }
         let lp = gpu.storage("fracture lp", &lp_words);
+        // The load path's bond sides after the tables (`fracture.slang` `lp_side`).
         let side_words = if needs_ext || t.contact_sweeps > 0 && !t.ext.bonds.is_empty() { sides(&t.ext, &t.chunks, &t.bonds) } else { Vec::new() };
-        let lp_sides = storage_bytes(gpu, "fracture lp sides", 16 * side_words.len() as u64, wgpu::BufferUsages::empty());
-        if !side_words.is_empty() {
-            gpu.queue.write_buffer(&lp_sides, 0, bytemuck::cast_slice(&side_words));
+        let mut ext_words = ext_words;
+        ext_words.extend_from_slice(&side_words);
+        let ext = storage_bytes(gpu, "fracture ext", 16 * ext_words.len() as u64, wgpu::BufferUsages::empty());
+        if !ext_words.is_empty() {
+            gpu.queue.write_buffer(&ext, 0, bytemuck::cast_slice(&ext_words));
         }
-        let kernels = ENTRIES.iter().map(|entry| gpu.compute(&shaders::FRACTURE, entry, &BINDINGS)).collect();
+        let (crush_tab, crush_rw, crush_buf, crush) = crush_buffers(gpu, t)?;
+        let crush_on = t.crush.is_some();
+        if crush_on {
+            // The crush kernels bind more storage buffers than the core ones: on a device
+            // that allows fewer, a clear error rather than a pipeline that cannot be built.
+            for entry in CRUSH_ENTRIES {
+                let need = crate::reflection::entry_storage(shaders::FRACTURE.name, entry).unwrap_or(0);
+                if need > gpu.storage_limit {
+                    return Err(format!(
+                        "fracture crush: {entry} binds {need} storage buffers per shader stage and this device allows {} (WebGPU's default is 8): request a device with maxStorageBuffersPerShaderStage of at least {}, or place the destructible without crushing",
+                        gpu.storage_limit,
+                        CRUSH_ENTRIES.iter().filter_map(|e| crate::reflection::entry_storage(shaders::FRACTURE.name, e)).max().unwrap_or(need)
+                    ));
+                }
+            }
+        }
+        let models_on = needs_ext || t.contact_sweeps > 0;
+        if models_on {
+            // As the crush kernels: a clear error on a device that allows fewer.
+            let most = MODEL_ENTRIES.iter().filter_map(|e| crate::reflection::entry_storage(shaders::FRACTURE.name, e)).max().unwrap_or(0);
+            if most > gpu.storage_limit {
+                return Err(format!(
+                    "fracture: the load path, the analytic strike and the in-step contact fracture bind up to {most} storage buffers per shader stage and this device allows {} (WebGPU's default is 8): request a device with maxStorageBuffersPerShaderStage of at least {most}, or use the threshold rule without the in-step contact fracture",
+                    gpu.storage_limit
+                ));
+            }
+        }
+        let kernels = ENTRIES
+            .iter()
+            .map(|entry| ((crush_on || !CRUSH_ENTRIES.contains(entry)) && (models_on || !MODEL_ENTRIES.contains(entry))).then(|| gpu.compute(&shaders::FRACTURE, entry, &BINDINGS)))
+            .collect();
         let mut f = GpuFracture {
             layout,
             kernels,
@@ -839,10 +1200,12 @@ impl GpuFracture {
             args,
             geometry,
             shots,
+            crush_tab,
+            crush_rw,
+            crush_buf,
+            crush,
             ext,
             lp,
-            lp_sides,
-            cs_anchors: storage_bytes(gpu, "fracture contact anchors", 32 * t.max_contacts as u64, wgpu::BufferUsages::empty()),
             cs_timing: CsTiming::new(gpu),
             engine_counters: None,
             binds: Vec::new(),
@@ -854,6 +1217,7 @@ impl GpuFracture {
             engine_colliders: None,
             engine_contacts: None,
             ingest_buffers: None,
+            host_breaks: Vec::new(),
         };
         f.rebind(gpu, engine, ingest);
         Ok(f)
@@ -889,14 +1253,14 @@ impl GpuFracture {
                 &self.ext,
                 &self.lp,
                 engine.contacts,
-                engine.counters,
-                &self.cs_anchors,
-                &self.lp_sides,
+                &self.crush_tab,
+                &self.crush_rw,
+                &self.crush_buf,
             ];
             gpu.bind(&k.group, &buffers)
         };
-        let binds = self.kernels.iter().map(|k| group(&self.scan_new, k)).collect();
-        let scan_binds = [10, 11, 12].iter().map(|&i| group(&self.scan_free, &self.kernels[i])).collect();
+        let binds = self.kernels.iter().map(|k| k.as_ref().map(|k| group(&self.scan_new, k))).collect();
+        let scan_binds = [10, 11, 12].iter().map(|&i| group(&self.scan_free, self.kernels[i].as_ref().expect("scan kernel"))).collect();
         self.binds = binds;
         self.scan_binds = scan_binds;
         if let Some(v) = self.view.as_mut() {
@@ -943,12 +1307,11 @@ impl GpuFracture {
             let colliders = self.engine_colliders.as_ref().expect("engine bound");
             let ing = self.ingest_buffers.as_ref().expect("ingest bound");
             let group = |i: usize| {
-                let counters = self.engine_counters.as_ref().expect("engine bound");
                 let contacts = self.engine_contacts.as_ref().expect("engine bound");
                 let buffers: [&wgpu::Buffer; 29] = [
-                    &self.params_buf, &self.chunks, &self.bonds, &self.parts, &self.work, &self.atom, &self.frames, bodies, colliders, &ing[0], &ing[1], &ing[2], &self.loads, &self.sizes, &self.scan_new, &self.info, &v.params, &v.chunks, objects, lines, &v.shots, &self.geometry, &self.shots, &self.ext, &self.lp, contacts, counters, &self.cs_anchors, &self.lp_sides,
+                    &self.params_buf, &self.chunks, &self.bonds, &self.parts, &self.work, &self.atom, &self.frames, bodies, colliders, &ing[0], &ing[1], &ing[2], &self.loads, &self.sizes, &self.scan_new, &self.info, &v.params, &v.chunks, objects, lines, &v.shots, &self.geometry, &self.shots, &self.ext, &self.lp, contacts, &self.crush_tab, &self.crush_rw, &self.crush_buf,
                 ];
-                gpu.bind(&self.kernels[i].group, &buffers)
+                gpu.bind(&self.kernels[i].as_ref().expect("view kernel").group, &buffers)
             };
             let at = |name: &str| ENTRIES.iter().position(|e| *e == name).expect("view entry");
             let groups = [group(at("fr_view_chunks")), group(at("fr_view_shots")), group(at("fr_view_bonds"))];
@@ -957,7 +1320,7 @@ impl GpuFracture {
         let (_, _, groups) = v.bound.as_ref().expect("bound");
         let mut pass = encoder.begin_compute_pass(&Default::default());
         let run = |pass: &mut wgpu::ComputePass<'_>, name: &str, group: &wgpu::BindGroup, n: u32| {
-            let k = &self.kernels[ENTRIES.iter().position(|e| *e == name).expect("view entry")];
+            let k = self.kernels[ENTRIES.iter().position(|e| *e == name).expect("view entry")].as_ref().expect("view kernel");
             pass.set_pipeline(&k.pipeline);
             pass.set_bind_group(0, group, &[]);
             pass.dispatch_workgroups(groups_of(n), 1, 1);
@@ -971,7 +1334,7 @@ impl GpuFracture {
 
     fn kernel(&self, name: &str) -> (usize, &Kernel) {
         let i = ENTRIES.iter().position(|e| *e == name).expect("fracture entry");
-        (i, &self.kernels[i])
+        (i, self.kernels[i].as_ref().unwrap_or_else(|| panic!("fracture: {name} is built only with crushing or the model that runs it")))
     }
 
     /// The frame's loads and breaks, then its splits (gated on the GPU). `step` is the
@@ -982,6 +1345,12 @@ impl GpuFracture {
         self.params.step = step;
         gpu.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&self.params));
         let (n, e, b) = (self.layout.n as usize, self.layout.e as usize, self.layout.b as usize);
+        let crush = self.crush.enabled != 0;
+        let host_breaks = self.upload_host_breaks(gpu);
+        if host_breaks > 0 {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            self.direct(&mut pass, "fr_host_breaks", host_breaks);
+        }
         if self.params.load_model == 1 && self.cs_timing.is_some() {
             // `STRESS_CS_TIMING=1`: the load path's stages, a pass each.
             let at = |i: u32| {
@@ -989,7 +1358,8 @@ impl GpuFracture {
                 wgpu::ComputePassTimestampWrites { query_set: &t.queries, beginning_of_pass_write_index: None, end_of_pass_write_index: Some(CS_STAMPS + i) }
             };
             drop(encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: Some(at(0)) }));
-            let stages: [&[&str]; 5] = [&["fr_loads"], &["fr_lp_clear", "fr_lp_sum", "fr_lp_relief"], &["fr_lp_block"], &[], &["fr_lp_breaks"]];
+            let loads: &[&str] = if crush { &["fr_loads", "fr_crush_loads"] } else { &["fr_loads"] };
+            let stages: [&[&str]; 5] = [loads, &["fr_lp_clear", "fr_lp_sum", "fr_lp_relief"], &["fr_lp_block"], &[], &["fr_lp_breaks"]];
             for (i, names) in stages.iter().enumerate() {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: Some(at(i as u32 + 1)) });
                 for name in names.iter() {
@@ -1016,6 +1386,10 @@ impl GpuFracture {
                 // Done above, timed.
             } else {
             self.direct(&mut pass, "fr_loads", n);
+            if crush {
+                // Before the breaks: the chunk's bonds as the frame's loads met them.
+                self.direct(&mut pass, "fr_crush_loads", n);
+            }
             if self.params.load_model == 0 {
                 self.direct(&mut pass, "fr_breaks", e);
             } else {
@@ -1035,6 +1409,15 @@ impl GpuFracture {
                 self.direct(&mut pass, "fr_strike_find", b);
                 self.direct(&mut pass, "fr_strike_entry", n);
                 self.direct(&mut pass, "fr_strike_nearest", n);
+                if crush {
+                    // Before fr_strike_force, which drops a strike it finds no entry for:
+                    // the contact patch, the chunks on it, their crush from each shot's
+                    // kinetic energy.
+                    self.direct(&mut pass, "fr_strike_patch", b);
+                    self.direct(&mut pass, "fr_strike_cover", n);
+                    self.direct(&mut pass, "fr_strike_claim", n);
+                    self.direct(&mut pass, "fr_strike_crush", self.params.shot_count as usize);
+                }
                 self.direct(&mut pass, "fr_strike_force", b);
                 if self.params.strike_model == 0 {
                     self.direct(&mut pass, "fr_strike_breaks", e);
@@ -1051,6 +1434,13 @@ impl GpuFracture {
                     self.direct(&mut pass, "fr_il_mark", n);
                     self.direct(&mut pass, "fr_il_breaks", e);
                 }
+                if crush {
+                    self.direct(&mut pass, "fr_crush_bill", self.params.shot_count as usize);
+                    self.direct(&mut pass, "fr_crush_push", b);
+                }
+            }
+            if crush {
+                self.direct(&mut pass, "fr_crush_bonds", e);
             }
             self.direct(&mut pass, "fr_gate", 1);
         }
@@ -1059,7 +1449,124 @@ impl GpuFracture {
             let mut pass = encoder.begin_compute_pass(&Default::default());
             self.direct(&mut pass, "fr_il_carry", n);
         }
+        if crush {
+            self.record_crush(encoder);
+        }
     }
+
+    /// After the split: each chunk crushed this frame ranked (chunk order), its event and
+    /// fragments written and its body parked (gated: nothing on a frame with no crush).
+    fn record_crush(&self, encoder: &mut wgpu::CommandEncoder) {
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            self.direct(&mut pass, "fr_crush_mark", self.layout.n as usize);
+            self.direct(&mut pass, "fr_crush_gate", 1);
+        }
+        encoder.copy_buffer_to_buffer(&self.sizes, 0, &self.args, 0, 12 * ARGS);
+        let mut pass = encoder.begin_compute_pass(&Default::default());
+        let pass = &mut pass;
+        self.indirect(pass, "fr_scan_blocks", ARG_CRUSH_SCAN, None);
+        self.indirect(pass, "fr_scan_top", ARG_CRUSH_ONE, None);
+        self.indirect(pass, "fr_scan_add", ARG_CRUSH_CHUNKS, None);
+        self.indirect(pass, "fr_crush_apply", ARG_CRUSH_CHUNKS, None);
+        self.indirect(pass, "fr_crush_end", ARG_CRUSH_ONE, None);
+    }
+
+    /// Whether the fracture crushes chunks (`FractureTables::crush`).
+    pub fn crushes(&self) -> bool {
+        self.crush.enabled != 0
+    }
+
+    /// Whether the support-loss flow loads the chunks (`CrushTables::flow`).
+    pub fn crush_flow(&self) -> bool {
+        self.crush.enabled != 0 && self.crush.flow != 0
+    }
+
+    /// Every bond's compressive flow load (N; 0: none) for the crush estimate from the
+    /// next frame on (`CrushTables::flow`). Written before the next submission.
+    pub fn set_crush_flow(&self, gpu: &Gpu, loads: &[f32]) -> Result<(), String> {
+        if !self.crush_flow() {
+            return Err("fracture crush: set_crush_flow without CrushTables::flow".into());
+        }
+        if loads.len() != self.layout.e as usize {
+            return Err(format!("fracture crush: {} flow loads for {} bonds", loads.len(), self.layout.e));
+        }
+        let mut words = loads.to_vec();
+        words.resize(4 * (self.layout.e as usize).div_ceil(4), 0.0);
+        gpu.queue.write_buffer(&self.crush_rw, 16 * self.crush.r_flow as u64, bytemuck::cast_slice(&words));
+        Ok(())
+    }
+
+    /// Per chunk a blast window's crush damage and its peak (p, q) (`fracture.slang`
+    /// `fr_crush_blast`), consumed by the next [`GpuFracture::encode_split_crush`] with
+    /// `blast`. Written before the next submission.
+    pub fn set_crush_blast(&self, gpu: &Gpu, words: &[[f32; 4]]) -> Result<(), String> {
+        if !self.crushes() {
+            return Err("fracture crush: set_crush_blast without crushing".into());
+        }
+        if words.len() != self.layout.n as usize {
+            return Err(format!("fracture crush: {} blast records for {} chunks", words.len(), self.layout.n));
+        }
+        gpu.queue.write_buffer(&self.crush_rw, 16 * self.crush.r_blast as u64, bytemuck::cast_slice(words));
+        Ok(())
+    }
+
+    /// The split of the bonds already marked broken (as [`GpuFracture::encode_split`]),
+    /// with crushing: `blast` first records the damage [`GpuFracture::set_crush_blast`]
+    /// wrote (cause Blast) and breaks the crushed chunks' bonds; after the split the
+    /// crushed chunks' events and fragments (as a frame's).
+    pub fn encode_split_crush(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, step: u32, blast: bool) {
+        self.set_step(gpu, step);
+        let crush = self.crushes();
+        let host_breaks = self.upload_host_breaks(gpu);
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            if host_breaks > 0 {
+                self.direct(&mut pass, "fr_host_breaks", host_breaks);
+            }
+            if crush && blast {
+                self.direct(&mut pass, "fr_crush_blast", self.layout.n as usize);
+                self.direct(&mut pass, "fr_crush_bonds", self.layout.e as usize);
+            }
+            self.direct(&mut pass, "fr_gate", 1);
+        }
+        self.record_split(encoder);
+        if crush {
+            self.record_crush(encoder);
+        }
+    }
+
+    /// Where this frame's crush events are in `crush_rw` (bytes: offset, size), for a
+    /// readback; their count is the counters' word [`C_CRUSH_EVENTS`].
+    pub fn crush_events_range(&self) -> (u64, u64) {
+        (16 * self.crush.r_events as u64, 16 * 6 * self.crush.max_events as u64)
+    }
+
+    /// Diagnostic read: each chunk's crush state (damage, peak p, peak q, flags as bits:
+    /// 1 crushed, cause << 4).
+    pub fn crush_state(&self, gpu: &Gpu) -> Vec<[f32; 4]> {
+        if !self.crushes() {
+            return Vec::new();
+        }
+        gpu.read_range(&self.crush_rw, 0, self.layout.n as usize)
+    }
+
+    /// Diagnostic read: this frame's crush events.
+    pub fn crush_events(&self, gpu: &Gpu) -> Vec<CrushEvent> {
+        if !self.crushes() {
+            return Vec::new();
+        }
+        let c: Vec<u32> = gpu.read_range(&self.atom, self.layout.a_counters() as usize, COUNTER_WORDS);
+        let words: Vec<[f32; 4]> = gpu.read_range(&self.crush_rw, self.crush.r_events as usize, 6 * self.crush.max_events as usize);
+        CrushEvent::decode(&words, c[C_CRUSH_EVENTS].min(self.crush.max_events))
+    }
+
+    /// Diagnostic read: chunks crushed and fragment pool entries taken, in all.
+    pub fn crush_counts(&self, gpu: &Gpu) -> (u32, u32) {
+        let c: Vec<u32> = gpu.read_range(&self.atom, self.layout.a_counters() as usize, COUNTER_WORDS);
+        (c[9], c[8])
+    }
+
 
     /// The in-step contact fracture (`fracture.slang` `fr_cs_*`), encoded within the
     /// engine's step where its contacts are made and kept (`WgpuSim::step_encode_with` at
@@ -1073,6 +1580,9 @@ impl GpuFracture {
         if self.params.cs_sweeps == 0 {
             return;
         }
+        // The step's contact rows' count (`StepCounters` word 2) where the kernels read it.
+        let counters = self.engine_counters.as_ref().expect("engine bound");
+        encoder.copy_buffer_to_buffer(counters, 8, &self.work, 4 * self.layout.w_cs_rows() as u64, 4);
         let load_path = self.params.load_model == 1;
         let analytic = !load_path && self.params.strike_model == 1;
         let stamp = |i: u32, end: bool| -> Option<wgpu::ComputePassTimestampWrites<'_>> {
@@ -1227,8 +1737,12 @@ impl GpuFracture {
     /// and their bodies dirty (the tests' entry, and a frame's second half).
     pub fn encode_split(&mut self, gpu: &Gpu, encoder: &mut wgpu::CommandEncoder, step: u32) {
         self.set_step(gpu, step);
+        let host_breaks = self.upload_host_breaks(gpu);
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());
+            if host_breaks > 0 {
+                self.direct(&mut pass, "fr_host_breaks", host_breaks);
+            }
             self.direct(&mut pass, "fr_gate", 1);
         }
         self.record_split(encoder);
@@ -1243,7 +1757,7 @@ impl GpuFracture {
 
     fn direct(&self, pass: &mut wgpu::ComputePass<'_>, name: &str, n: usize) {
         let (i, k) = self.kernel(name);
-        k.dispatch(pass, &self.binds[i], n);
+        k.dispatch(pass, self.binds[i].as_ref().expect("bound kernel"), n);
     }
 
     fn indirect(&self, pass: &mut wgpu::ComputePass<'_>, name: &str, arg: u64, scan: Option<usize>) {
@@ -1251,7 +1765,7 @@ impl GpuFracture {
         pass.set_pipeline(&k.pipeline);
         let bind = match scan {
             Some(s) => &self.scan_binds[s],
-            None => &self.binds[i],
+            None => self.binds[i].as_ref().expect("bound kernel"),
         };
         pass.set_bind_group(0, bind, &[]);
         pass.dispatch_workgroups_indirect(&self.args, 12 * arg);
@@ -1290,7 +1804,7 @@ impl GpuFracture {
 
     /// Diagnostic read (waits for the GPU).
     pub fn counters(&self, gpu: &Gpu) -> Counters {
-        let c: Vec<u32> = gpu.read_range(&self.atom, self.layout.a_counters() as usize, 16);
+        let c: Vec<u32> = gpu.read_range(&self.atom, self.layout.a_counters() as usize, COUNTER_WORDS);
         Counters::from_words(&c)
     }
 
@@ -1367,6 +1881,36 @@ impl GpuFracture {
         gpu.queue.write_buffer(&self.atom, 4 * self.layout.a_dirty() as u64, bytemuck::cast_slice(&dirty));
         // The frame's broken count (`C_FRAME_BROKEN`): the gate runs the split.
         gpu.queue.write_buffer(&self.atom, 4 * self.layout.a_counters() as u64, bytemuck::bytes_of(&count));
+    }
+
+    /// Break `bonds` with the next recorded frame (or split), touching only their own
+    /// words, so a step still in flight keeps every other bond's state: a host pass's
+    /// breaks between frames. The GPU marks each bond's body dirty from its own chunk to
+    /// body map as it is then (`fr_host_breaks`), not the host's last read, which a step in
+    /// flight may have changed by splitting; a bond already broken there is skipped, so the
+    /// counters count each bond once.
+    pub fn break_bonds_sparse(&mut self, bonds: &[u32]) {
+        for &i in bonds {
+            assert!(i < self.layout.e, "fracture: bond {i} of {}", self.layout.e);
+        }
+        self.host_breaks.extend_from_slice(bonds);
+    }
+
+    /// The host's breaks since the last recorded frame, written for this one's
+    /// `fr_host_breaks` (queue order: before this submission, after every earlier one).
+    /// Their count (0: nothing to dispatch).
+    fn upload_host_breaks(&mut self, gpu: &Gpu) -> usize {
+        if self.host_breaks.is_empty() {
+            return 0;
+        }
+        // Each bond once (the kernel's threads would race on a repeated one).
+        self.host_breaks.sort_unstable();
+        self.host_breaks.dedup();
+        let mut words = Vec::with_capacity(1 + self.host_breaks.len());
+        words.push(self.host_breaks.len() as u32);
+        words.append(&mut self.host_breaks);
+        gpu.queue.write_buffer(&self.work, 4 * self.layout.w_host_breaks() as u64, bytemuck::cast_slice(&words));
+        words.len() - 1
     }
 
     pub fn body_words() -> u32 {

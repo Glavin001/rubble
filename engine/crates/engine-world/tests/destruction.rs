@@ -157,6 +157,7 @@ fn a_shot_breaks_bonds_and_splits_actors() {
             DestructionEvent::BondsBroken {
                 destructible,
                 bonds,
+                ..
             } => {
                 assert_eq!(*destructible, d);
                 broken += bonds.len();
@@ -192,8 +193,11 @@ fn a_shot_breaks_bonds_and_splits_actors() {
     assert!(one.chunks.contains(&0));
 }
 
+/// The threshold model (tests/threshold.rs) reads canonical contact rows: this
+/// world's persistent ones are refused by name, and without the `stress`
+/// feature the model is unsupported.
 #[test]
-fn threshold_model_is_refused_until_it_lands() {
+fn threshold_model_names_what_it_needs() {
     let mut w = world();
     let asset = w.create_destructible_asset(&house()).unwrap();
     let def = DestructibleDef {
@@ -201,6 +205,9 @@ fn threshold_model_is_refused_until_it_lands() {
         ..DestructibleDef::new(asset)
     };
     let e = w.create_destructible(&def).unwrap_err();
+    #[cfg(feature = "stress")]
+    assert!(e.to_string().contains("ContactStorage::Canonical"), "{e}");
+    #[cfg(not(feature = "stress"))]
     assert!(e.downcast_ref::<Unsupported>().is_some(), "{e}");
 }
 

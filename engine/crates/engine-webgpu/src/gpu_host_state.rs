@@ -34,9 +34,11 @@ pub struct SimSnapshot {
     host_bodies: Vec<BodyState>,
     host_cols: Vec<Collider>,
     has_convex: bool,
+    has_height_field: bool,
     has_filters: bool,
     grid_levels: u32,
     grid_cache: Option<(u32, f32, u32)>,
+    movable_radius: f32,
     manifolds_valid: bool,
     params: AvbdParams,
     last_contact_offset: u32,
@@ -316,9 +318,11 @@ impl WgpuSim {
             host_bodies: self.host_bodies.clone(),
             host_cols: self.host_cols.clone(),
             has_convex: self.has_convex,
+            has_height_field: self.has_height_field,
             has_filters: self.has_filters,
             grid_levels: self.grid_levels,
             grid_cache: self.grid_cache,
+            movable_radius: self.movable_radius,
             manifolds_valid: self.manifolds_valid,
             params: self.params,
             last_contact_offset: self.last_contact_offset,
@@ -357,9 +361,12 @@ impl WgpuSim {
         self.host_bodies.clone_from(&s.host_bodies);
         self.host_cols.clone_from(&s.host_cols);
         self.has_convex = s.has_convex;
+        self.has_height_field = s.has_height_field;
         self.has_filters = s.has_filters;
         self.grid_levels = s.grid_levels;
         self.grid_cache = s.grid_cache;
+        // The grid cache was sized with the snapshot's reservation.
+        self.movable_radius = s.movable_radius;
         self.manifolds_valid = s.manifolds_valid;
         self.params = s.params;
         self.last_contact_offset = s.last_contact_offset;

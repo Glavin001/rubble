@@ -35,6 +35,8 @@ pub struct FractureOptions {
     /// in-step contact fracture is on). Off, a shot faster than a wall's thickness per step
     /// can pass through it with no contact.
     pub toi_ccd: Option<bool>,
+    /// Chunk crushing ([`ThresholdWorld::new_with_crush`]).
+    pub crush: bool,
 }
 
 /// Where in rubble's step the in-step contact fracture is encoded (`rigid_plan` phase):
@@ -92,6 +94,8 @@ pub struct ThresholdStats {
     /// The in-step contact fracture's strikes and the bonds they broke, in all.
     pub contact_strikes: u32,
     pub contact_breaks: u32,
+    /// Chunks crushed in all (`ThresholdWorld::new_with_crush`).
+    pub crushed: u32,
 }
 
 /// A shot's parked sphere: its engine body and collider.
@@ -143,11 +147,17 @@ pub struct ThresholdWorld {
     /// bonds break only on the contact loads after a step ([`Self::set_strike_prediction`];
     /// `STRESS_THRESHOLD_STRIKE=0` starts it off).
     predict_strikes: bool,
+    /// With crushing: each frame's crush events as the ring read them back (frame, event),
+    /// for a host's dust; [`Self::take_crush_events`] drains them. A frame whose counters
+    /// found no free ring slot is not read, so this can miss events (never the physics).
+    crush_events: Vec<(u64, fracture::CrushEvent)>,
 }
 
 const RING: usize = 4;
 const COUNTER_BYTES: u64 = std::mem::size_of::<engine_schema::StepCounters>() as u64;
 // Ring slot states.
+/// Where a ring slot's crush events start (bytes): after the counters, 16-aligned.
+const EVENTS_AT: u64 = (4 * fracture::COUNTER_WORDS as u64 + COUNTER_BYTES).div_ceil(16) * 16;
 const IDLE: u8 = 0;
 const PENDING: u8 = 1;
 const READY: u8 = 2;
@@ -158,6 +168,15 @@ impl ThresholdWorld {
     /// "projectile").
     pub fn new(gpu: &Gpu, scene: &Scene, shot_radius: f64, shot_mass: f64) -> Result<ThresholdWorld, String> {
         ThresholdWorld::with_profile(gpu, scene, shot_radius, shot_mass, Profile::Threshold)
+    }
+
+    /// [`Self::new`], with chunk crushing when `crush` (engine/docs/destruction-reactions.md
+    /// section 1): a chunk of a material with crush parameters (stress-ref `Material::crush`)
+    /// whose stress leaves its crush surface is removed (its bonds broken, its body parked
+    /// out of the world; the lab keeps no fragments). Crushing with no crushable chunk is
+    /// an error.
+    pub fn new_with_crush(gpu: &Gpu, scene: &Scene, shot_radius: f64, shot_mass: f64, crush: bool) -> Result<ThresholdWorld, String> {
+        ThresholdWorld::with_options(gpu, scene, shot_radius, shot_mass, Profile::Threshold, FractureOptions { crush, ..FractureOptions::default() })
     }
 
     /// [`Self::new`] under `profile` (one the fracture world runs: `threshold`, `load_path`,
@@ -177,12 +196,13 @@ impl ThresholdWorld {
     /// contacts: `RubbleEngine::set_toi_ccd`), and strikes are not also predicted at the
     /// end of a frame (`set_strike_prediction` turns that on again).
     pub fn with_contact_fracture(gpu: &Gpu, scene: &Scene, shot_radius: f64, shot_mass: f64, profile: Profile, contact: Option<bool>) -> Result<ThresholdWorld, String> {
-        ThresholdWorld::with_options(gpu, scene, shot_radius, shot_mass, profile, FractureOptions { contact, toi_ccd: None })
+        ThresholdWorld::with_options(gpu, scene, shot_radius, shot_mass, profile, FractureOptions { contact, ..FractureOptions::default() })
     }
 
     /// [`Self::with_contact_fracture`] with [`FractureOptions`].
     pub fn with_options(gpu: &Gpu, scene: &Scene, shot_radius: f64, shot_mass: f64, profile: Profile, options: FractureOptions) -> Result<ThresholdWorld, String> {
         let contact = options.contact;
+        let crush = options.crush;
         if !matches!(profile, Profile::Threshold | Profile::LoadPath | Profile::ImpactLocal) {
             return Err(format!("the fracture world runs threshold, load_path or impact_local, not {}", profile.name()));
         }
@@ -269,6 +289,12 @@ impl ThresholdWorld {
                 }
             }
         }
+        // Any chunk can split off onto a dynamic body, on the GPU alone (`fr_reparent`): the
+        // host's mirror never sees it move, so the broadphase grid is sized for the largest
+        // chunk collider moving from the start (else a larger freed piece takes the
+        // oversized-static list, which never queries, and falls through every static).
+        let reach = chunk_cols.values().flatten().map(|&c| engine_schema::convex::collider_radius(&engine.sim.collider(c))).fold(0.0f32, f32::max);
+        engine.sim.reserve_movable_radius(reach);
         let mut t = FractureTables {
             max_bodies: engine.sim.capacity().max_bodies,
             contact_sweeps,
@@ -328,11 +354,13 @@ impl ThresholdWorld {
         }
         // Each cluster's body frame (its structure's frame: a cluster's shapes are its
         // chunks at their structure-frame poses) and its bonds (and, for the load path and
-        // the analytic strike, each bond's frame, law and material).
+        // the analytic strike, each bond's frame, law and material; for crushing, each
+        // bond's centroid and area).
         let ext_needed = load_model != LoadModel::Threshold || strike_model != StrikeModel::Hertz;
         let mut materials = stress_gpu::joint::MaterialTable::default();
         let mut bond_data: Vec<&stress_ref::solver::RtBond> = Vec::new();
         let mut bond_source = Vec::new();
+        let mut crush_bonds: Vec<[f32; 4]> = Vec::new();
         for cl in &m.clusters {
             let e = &engine.bodies[&BodyKey::Cluster(cl.id)];
             let p = e.principal;
@@ -345,6 +373,8 @@ impl ThresholdWorld {
                 let capacity = b.strength.tensile * b.geometry.area * b.weibull;
                 t.bonds.push([global(cl.structure, b.geometry.a), global(cl.structure, b.geometry.b), (capacity as f32).to_bits(), (b.geometry.area as f32).to_bits()]);
                 bond_source.push((cl.structure, bi));
+                let centroid = b.geometry.centroid;
+                crush_bonds.push([centroid.x as f32, centroid.y as f32, centroid.z as f32, b.geometry.area as f32]);
                 if ext_needed {
                     let g = &b.geometry;
                     let law = stress_gpu::joint::bond_law(g, &b.stiffness, &b.strength, b.rebar.as_ref(), b.weibull, materials.index(&b.strength));
@@ -357,6 +387,21 @@ impl ThresholdWorld {
         }
         if ext_needed {
             build_ext(&mut t, &chunk_of, m, scene, &bond_data, materials);
+        }
+        if crush {
+            let mut rows = Vec::with_capacity(chunk_of.len());
+            for (k, &(s, c)) in chunk_of.iter().enumerate() {
+                let ch = &m.structures[s].chunks[c];
+                let row = match (&scene.material(&ch.material).crush, ch.support == Support::None && t.chunks[k][0][3] > 0.0) {
+                    (Some(p), true) => [[p.cap_pressure as f32, p.cohesion as f32, p.friction_slope as f32, p.crush_energy as f32], [p.crush_viscosity as f32, ch.volume() as f32, f32::from_bits(1), 0.0]],
+                    _ => [[0.0; 4]; 2],
+                };
+                rows.push(row);
+            }
+            if !rows.iter().any(|r| r[1][2].to_bits() == 1) {
+                return Err("crushing: no chunk's material has crush parameters (a ScenePack v3's materials[].crush, or the presets)".into());
+            }
+            t.crush = Some(fracture::CrushTables { chunks: rows, bonds: std::mem::take(&mut crush_bonds), normals: Vec::new(), flow: false, conserve: false, fragments: 0, pool: Vec::new(), max_events: 1024, park_y: -10_000.0, park_step: 8.0 });
         }
         if let LoadModel::LoadPath { .. } = load_model {
             let net = load_path_network(&t, &bond_data);
@@ -403,14 +448,15 @@ impl ThresholdWorld {
         // colours get their own dispatch: both change results). Fixed instead: the hash
         // sized for the contact capacity, every colour its own dispatch.
         engine.sim.set_plan_hints(capacity.max_contacts, capacity.max_colors.min(32));
+        let events_bytes = if fracture.crushes() { fracture.crush_events_range().1 } else { 0 };
         let ring = (0..RING)
             .map(|_| {
-                let b = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("threshold stats"), size: 64 + COUNTER_BYTES, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+                let b = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("threshold stats"), size: EVENTS_AT + events_bytes, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
                 (b, 0, std::sync::Arc::new(std::sync::atomic::AtomicU8::new(IDLE)))
             })
             .collect();
         let mirror = world.solver.clone();
-        Ok(ThresholdWorld { profile, mirror, scene: scene.clone(), engine, ingest, fracture, tables: t, chunk_of, frame_dt: scene.sim.frame_dt, frame: 0, shots, fired: 0, ring, ring_next: 0, last: ThresholdStats::default(), initial_bodies: m.clusters.len() as u32, phases: Vec::new(), ground_modulus, projectile_modulus: projectile.youngs_modulus, shot_radius, strikes, bond_source, predict_strikes, contact_sweeps })
+        Ok(ThresholdWorld { profile, mirror, scene: scene.clone(), engine, ingest, fracture, tables: t, chunk_of, frame_dt: scene.sim.frame_dt, frame: 0, shots, fired: 0, ring, ring_next: 0, last: ThresholdStats::default(), initial_bodies: m.clusters.len() as u32, phases: Vec::new(), ground_modulus, projectile_modulus: projectile.youngs_modulus, shot_radius, strikes, bond_source, predict_strikes, contact_sweeps, crush_events: Vec::new() })
     }
 
     /// Launch a shot (`desc`: the stress frame, its pose and velocity): its record written
@@ -536,8 +582,12 @@ impl ThresholdWorld {
         // The counters into the ring's next free slot (a read when the host polls).
         let slot = self.ring_next;
         if self.ring[slot].2.load(std::sync::atomic::Ordering::Acquire) == IDLE {
-            enc.copy_buffer_to_buffer(&self.fracture.atom, 4 * self.fracture.layout.a_counters() as u64, &self.ring[slot].0, 0, 64);
-            enc.copy_buffer_to_buffer(self.engine.sim.counters_buffer(), 0, &self.ring[slot].0, 64, COUNTER_BYTES);
+            enc.copy_buffer_to_buffer(&self.fracture.atom, 4 * self.fracture.layout.a_counters() as u64, &self.ring[slot].0, 0, 4 * fracture::COUNTER_WORDS as u64);
+            enc.copy_buffer_to_buffer(self.engine.sim.counters_buffer(), 0, &self.ring[slot].0, 4 * fracture::COUNTER_WORDS as u64, COUNTER_BYTES);
+            if self.fracture.crushes() {
+                let (at, bytes) = self.fracture.crush_events_range();
+                enc.copy_buffer_to_buffer(&self.fracture.crush_rw, at, &self.ring[slot].0, EVENTS_AT, bytes);
+            }
             self.ring[slot].1 = self.frame;
             self.ring_next = (slot + 1) % RING;
             gpu.queue.submit([enc.finish()]);
@@ -568,8 +618,15 @@ impl ThresholdWorld {
             };
             buf.unmap();
             flag.store(IDLE, std::sync::atomic::Ordering::Release);
+            if self.fracture.crushes() && c[fracture::C_CRUSH_EVENTS] > 0 {
+                let words: &[[f32; 4]] = bytemuck::cast_slice(&c[EVENTS_AT as usize / 4..]);
+                let max = words.len() as u32 / 6;
+                for e in fracture::CrushEvent::decode(words, c[fracture::C_CRUSH_EVENTS].min(max)) {
+                    self.crush_events.push((*frame, e));
+                }
+            }
             if *frame >= self.last.frame {
-                let e: engine_schema::StepCounters = bytemuck::pod_read_unaligned(bytemuck::cast_slice(&c[16..16 + COUNTER_BYTES as usize / 4]));
+                let e: engine_schema::StepCounters = bytemuck::pod_read_unaligned(bytemuck::cast_slice(&c[fracture::COUNTER_WORDS..fracture::COUNTER_WORDS + COUNTER_BYTES as usize / 4]));
                 self.last = ThresholdStats {
                     frame: *frame,
                     broken: c[1],
@@ -579,17 +636,25 @@ impl ThresholdWorld {
                     engine_overflow: e.overflow_flags,
                     contacts: e.contact_count,
                     awake: e.awake_count,
-                    bounces: c[7],
-                    craters: c[8],
-                    spalls: c[9],
-                    perforations: c[10],
-                    peak_utilization: f32::from_bits(c[11]),
-                    contact_strikes: c[12],
-                    contact_breaks: c[13],
+                    bounces: c[11],
+                    craters: c[12],
+                    spalls: c[13],
+                    perforations: c[14],
+                    peak_utilization: f32::from_bits(c[15]),
+                    contact_strikes: c[16],
+                    contact_breaks: c[17],
+                    crushed: c[9],
                 };
             }
         }
         self.last
+    }
+
+    /// The crush events read back since the last call (frame, event), oldest first.
+    pub fn take_crush_events(&mut self) -> Vec<(u64, fracture::CrushEvent)> {
+        let mut e = std::mem::take(&mut self.crush_events);
+        e.sort_by_key(|x| x.0);
+        e
     }
 
     /// Diagnostic read (waits): every chunk's centre in the world (the stress frame), from
@@ -778,7 +843,7 @@ fn load_path_warm_start(t: &FractureTables, net: &stress_ref::load_path::Network
 }
 
 /// A rotation matrix's quaternion.
-fn rotation_quat(m: &stress_ref::math::Mat3) -> Quat {
+pub fn rotation_quat(m: &stress_ref::math::Mat3) -> Quat {
     let r = |i: usize, j: usize| m.m[i][j];
     let glam_m = glam::DMat3::from_cols(glam::DVec3::new(r(0, 0), r(1, 0), r(2, 0)), glam::DVec3::new(r(0, 1), r(1, 1), r(2, 1)), glam::DVec3::new(r(0, 2), r(1, 2), r(2, 2)));
     let q = glam::DQuat::from_mat3(&glam_m).normalize();

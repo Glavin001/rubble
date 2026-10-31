@@ -549,6 +549,22 @@ uint ccdCast(Collider cf, BodyState bf, Collider co, BodyState bo, float3 r, out
         n = -pn;
         return CAST_HIT;
     }
+    if (co.shape == SHAPE_HEIGHTFIELD)
+    {
+        // The exact translational sweep (heightfield.slang), from one step
+        // back along r over two steps, as the GJK cast below.
+        float len = length(r);
+        if (len < 1e-12) return CAST_MISS;
+        float tc; float3 nc;
+        if (!heightFieldShapeCast(heightFieldOf(co), colliderFrame(co, bo), cf, pf - r, qf, r / len, 2.0 * len, tc, nc))
+            return CAST_MISS;
+        float lam = tc / len - 1.0;
+        if (tc <= 0.0) return CAST_OVERLAP;
+        if (lam > 1.0) return CAST_MISS;
+        t = max(lam, 0.0);
+        n = -nc;
+        return CAST_HIT;
+    }
     float3 po; float4 qo; colliderPose(co, bo, po, qo);
     float mu;
     float eps = 1.0e-4 + 1.0e-5 * length(r);
@@ -761,6 +777,20 @@ void ccd_mark(uint3 tid : SV_DispatchThreadID)
 bool segmentEnters(Collider c, float3 pos, float4 rot, float3 a, float3 d, out float s)
 {
     s = 1.0;
+    if (c.shape == SHAPE_HEIGHTFIELD)
+    {
+        Frame f; f.p = pos; f.q = rot;
+        HeightFieldRef hf = heightFieldOf(c);
+        float3 lo = frameToLocal(f, a);
+        float3 ld = quatRotate(quatConjugate(rot), d);
+        float h; float3 nn;
+        if (hfSurface(hf, lo.x, lo.z, h, nn) && lo.y < h) return false; // starts under it
+        float len = length(ld);
+        float th;
+        if (len < 1e-12 || !heightFieldRayLocal(hf, lo, ld / len, len, th, nn)) return false;
+        s = th / len;
+        return s > 0.0 && s <= 1.0;
+    }
     float4 qi = quatConjugate(rot);
     float3 lo = quatRotate(qi, a - pos);
     float3 ld = quatRotate(qi, d);
@@ -901,7 +931,20 @@ void ccd_validate(uint3 tid : SV_DispatchThreadID)
         // centre must not go in (an exact segment test, not a cast: a GJK
         // point cast grazing a box edge can stall and miss).
         uint status = CAST_OVERLAP;
-        if (fixedThisStep)
+        if (fixedThisStep && co.shape == SHAPE_HEIGHTFIELD)
+        {
+            Frame fo; fo.p = po; fo.q = qo;
+            float len = length(d);
+            float tc; float3 nc;
+            status = CAST_MISS;
+            if (heightFieldShapeCast(heightFieldOf(co), fo, cf, pf, qf, d / len, len, tc, nc))
+            {
+                status = tc <= 0.0 ? CAST_OVERLAP : CAST_HIT;
+                mu = tc / len;
+                n = -nc;
+            }
+        }
+        else if (fixedThisStep)
             status = gjkCast(cf, float3(0, 0, 0), qf, co, po - pf, qo, float3(0, 0, 0), d, 1.0, eps, mu, n);
         bool centreOnly = status == CAST_OVERLAP;
         // An awake body the CCD body is shoving along (it moved at least half as
@@ -1371,6 +1414,12 @@ bool pointNearCollider(float3 p, Collider c, float3 pos, float4 rot, float pad)
     if (c.shape == SHAPE_CAPSULE)
         return length(float3(l.x, max(abs(l.y) - c.params.y, 0.0), l.z)) <= c.params.x + pad;
     if (c.shape == SHAPE_BOX) return all(abs(l) <= c.params.xyz + pad);
+    if (c.shape == SHAPE_HEIGHTFIELD)
+    {
+        float3 mn, mx;
+        hfLocalBounds(heightFieldOf(c), mn, mx);
+        return all(l >= mn - pad) && all(l <= mx + pad);
+    }
     HullRef h = hullOf(c);
     return all(abs(l - hullLocalCenter(h)) <= hullLocalHalf(h) + pad);
 }
@@ -1428,6 +1477,22 @@ void ccd_emit(uint3 tid : SV_DispatchThreadID)
             mf.pts[mf.count].pB = fp[q] - pn * (dot(pn, fp[q]) - co.params.w);
             mf.pts[mf.count].feature = 0x0CCD0000u | q;
             mf.count++;
+        }
+    }
+    else if (co.shape == SHAPE_HEIGHTFIELD)
+    {
+        // The ordinary heightfield manifold at the TOI pose (fast = A), tagged
+        // as time-of-impact rows so they never warm-start the next step.
+        BodyState boT = bo;
+        mf = heightFieldPairManifold(cf, bfT, co, boT, tol);
+        for (int q = 0; q < mf.count; q++) mf.pts[q].feature = 0x0CCD0000u | uint(q);
+        if (mf.count == 0)
+        {
+            mf.normal = n;
+            mf.pts[0].pA = shapeSupport(cf, pf, qf, n);
+            mf.pts[0].pB = mf.pts[0].pA;
+            mf.pts[0].feature = 0x0CCF0000u;
+            mf.count = 1;
         }
     }
     else

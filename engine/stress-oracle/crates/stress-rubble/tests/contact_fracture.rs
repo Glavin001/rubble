@@ -138,7 +138,7 @@ fn world(gpu: &Gpu, scene: &Scene, desc: &ImpactorDesc, profile: Profile, contac
         stress_ref::scene::ImpactorShape::Sphere { radius } => radius,
         _ => unreachable!(),
     };
-    let options = FractureOptions { contact: Some(contact), toi_ccd: Some(true) };
+    let options = FractureOptions { contact: Some(contact), toi_ccd: Some(true), crush: false };
     let mut w = ThresholdWorld::with_options(gpu, scene, radius, desc.mass, profile, options).expect("fracture world");
     w.set_strike_prediction(gpu, false).expect("no end-of-frame prediction");
     assert!(w.launch(gpu, desc));
@@ -351,7 +351,7 @@ fn the_analytic_thickness_crosses_a_thick_wall() {
     let gpu = Gpu::new().expect("GPU");
     let scene = prepared(shot_wall(40, true), Profile::ImpactLocal);
     for contact in [true, false] {
-        let options = FractureOptions { contact: Some(contact), toi_ccd: Some(true) };
+        let options = FractureOptions { contact: Some(contact), toi_ccd: Some(true), crush: false };
         let mut w = ThresholdWorld::with_options(&gpu, &scene, R, steel_mass(R), Profile::ImpactLocal, options).expect("fracture world");
         w.set_strike_prediction(&gpu, !contact).expect("prediction");
         assert!(w.launch(&gpu, &ball(30.0)));

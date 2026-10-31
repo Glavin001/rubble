@@ -753,6 +753,97 @@ pub unsafe extern "C" fn rbWorld_UseDestructibleAssetSolver(
     })
 }
 
+/// Switch the world to the solver settings the asset's source was tuned with for
+/// `model`: `rbWorld_UseDestructibleAssetSolver`'s for the bonds model; for the
+/// threshold model the fracture lab's threshold mode's (never asleep, 4
+/// iterations, 60 Hz; gravity included). `*out_time_step` receives the step.
+#[no_mangle]
+pub unsafe extern "C" fn rbWorld_UseDestructibleAssetSolverFor(
+    world: *mut RbWorld,
+    asset: RbDestructibleAssetId,
+    model: RbStrengthModel,
+    out_time_step: *mut f32,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let solver = w
+            .world
+            .destructible_asset(DestructibleAssetId(asset))?
+            .solver_for(strength_model(model))
+            .ok_or_else(|| anyhow::anyhow!("the asset carries no solver settings for {model:?}"))?;
+        w.world.set_solver(solver);
+        write(out_time_step, solver.dt)
+    })
+}
+
+/// The ground the asset's stress scene stands on (the fracture lab's ground
+/// plane for the threshold model, which the host adds itself): a point on it in
+/// the world's coordinates for an instance placed at the identity.
+/// `*out_has_ground` is false when the scene has none.
+#[no_mangle]
+pub unsafe extern "C" fn rbWorld_GetDestructibleAssetGround(
+    world: *mut RbWorld,
+    asset: RbDestructibleAssetId,
+    out_has_ground: *mut bool,
+    out_point: *mut RbVec3,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let height = w
+            .world
+            .destructible_asset(DestructibleAssetId(asset))?
+            .stress
+            .as_ref()
+            .and_then(|s| s.ground_height());
+        write(out_has_ground, height.is_some())?;
+        write(
+            out_point,
+            RbVec3::of(w.coords.position_out([0.0, height.unwrap_or(0.0), 0.0])),
+        )
+    })
+}
+
+/// A projectile's material for threshold destructibles (`rbBody_SetProjectile`):
+/// Young's modulus (Pa) and Poisson's ratio, in SI units in every coordinate
+/// convention. The default is the fracture lab's steel.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RbProjectile {
+    pub youngs_modulus: f32,
+    pub poisson_ratio: f32,
+}
+
+#[no_mangle]
+pub extern "C" fn rbDefaultProjectile() -> RbProjectile {
+    let p = Projectile::default();
+    RbProjectile {
+        youngs_modulus: p.youngs_modulus,
+        poisson_ratio: p.poisson_ratio,
+    }
+}
+
+/// Mark a dynamic body with one sphere or box shape as a projectile for
+/// threshold destructibles (null clears it): its contacts load chunks as the
+/// lab's shots do and strike prediction checks it every step. At most 64.
+#[no_mangle]
+pub unsafe extern "C" fn rbBody_SetProjectile(
+    world: *mut RbWorld,
+    body: RbBodyId,
+    projectile: *const RbProjectile,
+) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let p = (!projectile.is_null()).then(|| {
+            let p = *projectile;
+            Projectile {
+                youngs_modulus: p.youngs_modulus,
+                poisson_ratio: p.poisson_ratio,
+            }
+        });
+        w.world.body_set_projectile(BodyId::from_bits(body), p)
+    })
+}
+
 /// An infinite ground plane on a static body: the half-space below
 /// `normal · x = offset` in the body frame. At most 8 per world.
 #[no_mangle]
@@ -845,6 +936,66 @@ pub unsafe extern "C" fn rbWorld_Explode(
             falloff: c.length_in(d.falloff),
             impulse_per_area: c.impulse_per_area_in(d.impulse_per_area),
             mask: d.mask_bits,
+        })
+    })
+}
+
+/// A charge (`rbWorld_Detonate`; engine/docs/destruction-reactions.md section 3).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RbBlastDef {
+    pub position: RbVec3,
+    /// TNT-equivalent mass (kg), > 0.
+    pub tnt_kg: f32,
+    /// Also push bodies with `rbWorld_Explode`'s radial impulse from the same point
+    /// (`radius`, `falloff`, `impulse_per_area`, `mask_bits` as `RbExplosionDef`'s). It
+    /// reaches destructible pieces too unless their category is left out of the mask.
+    pub radial: bool,
+    pub radius: f32,
+    pub falloff: f32,
+    pub impulse_per_area: f32,
+    pub mask_bits: u16,
+    pub internal_value: u32,
+}
+
+/// Defaults in `coordinates`' units: 1 kg of TNT at the origin, no radial impulse.
+#[no_mangle]
+pub extern "C" fn rbDefaultBlastDef(coordinates: RbCoordinates) -> RbBlastDef {
+    let e = rbDefaultExplosionDef(coordinates);
+    let d = BlastDef::default();
+    RbBlastDef {
+        position: RbVec3::default(),
+        tnt_kg: d.tnt_kg,
+        radial: false,
+        radius: e.radius,
+        falloff: e.falloff,
+        impulse_per_area: e.impulse_per_area,
+        mask_bits: e.mask_bits,
+        internal_value: COOKIE,
+    }
+}
+
+/// Detonate a charge at the start of the next step: every destructible placed with
+/// `blast_loading` takes its face pressures over the steps its pulse lasts, breaking the
+/// bonds it overloads (`RB_BREAK_BLAST`) and, with crushing, crushing the chunks it
+/// overstresses (`RB_CRUSH_BLAST`). Forward only. Errors: a non-positive or non-finite
+/// charge, a loaded face nearer than the fits cover, more than 16 blasts at once.
+#[no_mangle]
+pub unsafe extern "C" fn rbWorld_Detonate(world: *mut RbWorld, def: *const RbBlastDef) -> RbResult {
+    guard_args(|| {
+        let w = world_mut(world)?;
+        let d = read(def, "null blast def")?;
+        check_cookie(d.internal_value, "blast def not from rbDefaultBlastDef")?;
+        let c = w.coords;
+        w.world.detonate(&BlastDef {
+            position: c.position_in(d.position.a()),
+            tnt_kg: d.tnt_kg,
+            radial: d.radial.then(|| RadialImpulse {
+                radius: c.length_in(d.radius),
+                falloff: c.length_in(d.falloff),
+                impulse_per_area: c.impulse_per_area_in(d.impulse_per_area),
+                mask: d.mask_bits,
+            }),
         })
     })
 }

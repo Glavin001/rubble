@@ -5,7 +5,9 @@
 
 use super::WgpuSim;
 use engine_schema::character::*;
-use engine_schema::{BodyFlags, BodyState, Collider, ShapeType, EVENT_RING_BASE, EVENT_RING_CAPACITY};
+use engine_schema::{
+    BodyFlags, BodyState, Collider, ShapeType, EVENT_RING_BASE, EVENT_RING_CAPACITY,
+};
 
 /// A character controller (index into the pool).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -14,17 +16,37 @@ pub struct CharacterHandle(pub u32);
 /// A character or projectile event from the step's event ring.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MotionEvent {
-    Landed { character: u32, ground_body: u32 },
-    SupportLost { character: u32, ground_body: u32 },
-    Crushed { character: u32, ground_body: u32 },
+    Landed {
+        character: u32,
+        ground_body: u32,
+    },
+    SupportLost {
+        character: u32,
+        ground_body: u32,
+    },
+    Crushed {
+        character: u32,
+        ground_body: u32,
+    },
     /// `thickness` < 0: the projectile stopped in this collider.
-    ProjectileHit { projectile: u32, collider: u32, thickness: f32 },
-    ProjectileStopped { projectile: u32, collider: u32 },
+    ProjectileHit {
+        projectile: u32,
+        collider: u32,
+        thickness: f32,
+    },
+    ProjectileStopped {
+        projectile: u32,
+        collider: u32,
+    },
 }
 
 impl WgpuSim {
     fn write_char_slots(&self, slot: u32, words: &[[u32; 4]]) {
-        self.queue.write_buffer(&self.bufs[33], u64::from(slot) * 16, bytemuck::cast_slice(words));
+        self.queue.write_buffer(
+            &self.bufs[33],
+            u64::from(slot) * 16,
+            bytemuck::cast_slice(words),
+        );
     }
 
     pub(crate) fn write_character_header(&self) {
@@ -45,7 +67,11 @@ impl WgpuSim {
     /// dynamic bodies collide with; the character never collides with it.
     pub fn add_character(&mut self, desc: &CharacterDesc, pos: [f32; 3]) -> CharacterHandle {
         let index = self.characters.len() as u32;
-        assert!(index < self.char_cap.max_characters, "more than {} characters", self.char_cap.max_characters);
+        assert!(
+            index < self.char_cap.max_characters,
+            "more than {} characters",
+            self.char_cap.max_characters
+        );
         let body = self.add_body(character_body_state(pos));
         let collider = self.add_collider(character_collider(body, desc));
         self.characters.push((body, collider));
@@ -109,18 +135,28 @@ impl WgpuSim {
             return Vec::new();
         }
         let slots = self.read_char_slots(self.char_cap.character_base(), n * CHAR_STRIDE);
-        slots.chunks(CHAR_STRIDE as usize).map(CharacterState::decode).collect()
+        slots
+            .chunks(CHAR_STRIDE as usize)
+            .map(CharacterState::decode)
+            .collect()
     }
 
     pub fn character_state(&self, h: CharacterHandle) -> CharacterState {
-        let slots = self.read_char_slots(self.char_cap.character_base() + h.0 * CHAR_STRIDE, CHAR_STRIDE);
+        let slots = self.read_char_slots(
+            self.char_cap.character_base() + h.0 * CHAR_STRIDE,
+            CHAR_STRIDE,
+        );
         CharacterState::decode(&slots)
     }
 
     /// Scene queries the next steps answer inside the step (grid walk, exact
     /// hulls, filters); read with `query_results` after a step.
     pub fn set_queries(&mut self, queries: &[SceneQuery]) {
-        assert!(queries.len() as u32 <= self.char_cap.max_queries, "more than {} queries", self.char_cap.max_queries);
+        assert!(
+            queries.len() as u32 <= self.char_cap.max_queries,
+            "more than {} queries",
+            self.char_cap.max_queries
+        );
         let base = self.char_cap.query_base();
         let words: Vec<[u32; 4]> = queries.iter().flat_map(|q| q.slots()).collect();
         if !words.is_empty() {
@@ -143,17 +179,29 @@ impl WgpuSim {
     /// copies of every live one.
     pub fn character_record_range(&self) -> (&wgpu::Buffer, u64, u64) {
         let n = u64::from(self.character_count() * CHAR_STRIDE);
-        (&self.bufs[33], u64::from(self.char_cap.character_base()) * 16, n * 16)
+        (
+            &self.bufs[33],
+            u64::from(self.char_cap.character_base()) * 16,
+            n * 16,
+        )
     }
 
     pub fn query_record_range(&self) -> (&wgpu::Buffer, u64, u64) {
         let n = u64::from(self.query_count * QUERY_STRIDE);
-        (&self.bufs[33], u64::from(self.char_cap.query_base()) * 16, n * 16)
+        (
+            &self.bufs[33],
+            u64::from(self.char_cap.query_base()) * 16,
+            n * 16,
+        )
     }
 
     pub fn projectile_record_range(&self) -> (&wgpu::Buffer, u64, u64) {
         let n = u64::from(self.projectile_count * PROJ_STRIDE);
-        (&self.bufs[33], u64::from(self.char_cap.projectile_base()) * 16, n * 16)
+        (
+            &self.bufs[33],
+            u64::from(self.char_cap.projectile_base()) * 16,
+            n * 16,
+        )
     }
 
     pub fn character_capacity(&self) -> CharacterCapacity {
@@ -173,8 +221,12 @@ impl WgpuSim {
         if self.query_count == 0 {
             return Vec::new();
         }
-        let slots = self.read_char_slots(self.char_cap.query_base(), self.query_count * QUERY_STRIDE);
-        slots.chunks(QUERY_STRIDE as usize).map(QueryHit::decode).collect()
+        let slots =
+            self.read_char_slots(self.char_cap.query_base(), self.query_count * QUERY_STRIDE);
+        slots
+            .chunks(QUERY_STRIDE as usize)
+            .map(QueryHit::decode)
+            .collect()
     }
 
     /// Walk the whole collider list instead of the grid (the oracle the grid
@@ -191,8 +243,15 @@ impl WgpuSim {
     /// Fire a projectile: segment casts along its arc from the next step on.
     pub fn spawn_projectile(&mut self, desc: &ProjectileDesc) -> u32 {
         let index = self.projectile_count;
-        assert!(index < self.char_cap.max_projectiles, "more than {} projectiles", self.char_cap.max_projectiles);
-        self.write_char_slots(self.char_cap.projectile_base() + index * PROJ_STRIDE, &desc.slots());
+        assert!(
+            index < self.char_cap.max_projectiles,
+            "more than {} projectiles",
+            self.char_cap.max_projectiles
+        );
+        self.write_char_slots(
+            self.char_cap.projectile_base() + index * PROJ_STRIDE,
+            &desc.slots(),
+        );
         self.projectile_count += 1;
         self.write_character_header();
         self.wake_pending = true;
@@ -202,12 +261,18 @@ impl WgpuSim {
     /// Fire a projectile into slot `index` (one that has stopped, or the next
     /// new one).
     pub fn respawn_projectile(&mut self, index: u32, desc: &ProjectileDesc) {
-        assert!(index <= self.projectile_count, "projectile slot {index} past the live ones");
+        assert!(
+            index <= self.projectile_count,
+            "projectile slot {index} past the live ones"
+        );
         if index == self.projectile_count {
             self.spawn_projectile(desc);
             return;
         }
-        self.write_char_slots(self.char_cap.projectile_base() + index * PROJ_STRIDE, &desc.slots());
+        self.write_char_slots(
+            self.char_cap.projectile_base() + index * PROJ_STRIDE,
+            &desc.slots(),
+        );
         self.wake_pending = true;
     }
 
@@ -220,8 +285,14 @@ impl WgpuSim {
         if self.projectile_count == 0 {
             return Vec::new();
         }
-        let slots = self.read_char_slots(self.char_cap.projectile_base(), self.projectile_count * PROJ_STRIDE);
-        slots.chunks(PROJ_STRIDE as usize).map(ProjectileState::decode).collect()
+        let slots = self.read_char_slots(
+            self.char_cap.projectile_base(),
+            self.projectile_count * PROJ_STRIDE,
+        );
+        slots
+            .chunks(PROJ_STRIDE as usize)
+            .map(ProjectileState::decode)
+            .collect()
     }
 
     /// `compact`'s renumbering of the motion records: characters (inner
@@ -230,10 +301,21 @@ impl WgpuSim {
     pub(crate) fn remap_motion(&mut self, body_map: &[u32], col_map: &[u32]) {
         let map = |m: &[u32], id: u32| m.get(id as usize).copied().unwrap_or(u32::MAX);
         // NO_INDEX: "none" in the float-packed id words.
-        let opt = |m: &[u32], id: u32| if id == NO_INDEX { NO_INDEX } else { Some(map(m, id)).filter(|&n| n != u32::MAX).unwrap_or(NO_INDEX) };
+        let opt = |m: &[u32], id: u32| {
+            if id == NO_INDEX {
+                NO_INDEX
+            } else {
+                Some(map(m, id))
+                    .filter(|&n| n != u32::MAX)
+                    .unwrap_or(NO_INDEX)
+            }
+        };
         for (k, (body, collider)) in self.characters.iter_mut().enumerate() {
             let (nb, nc) = (map(body_map, *body), map(col_map, *collider));
-            assert!(nb != u32::MAX && nc != u32::MAX, "compact: character {k}'s inner capsule was dropped");
+            assert!(
+                nb != u32::MAX && nc != u32::MAX,
+                "compact: character {k}'s inner capsule was dropped"
+            );
             (*body, *collider) = (nb, nc);
         }
         let n = self.characters.len() as u32;
@@ -264,7 +346,11 @@ impl WgpuSim {
 
     /// Character and projectile events since the last call (event ring).
     pub fn poll_motion_events(&mut self) -> Vec<MotionEvent> {
-        let words = self.read_words(21, u64::from(EVENT_RING_BASE), (4 + 4 * EVENT_RING_CAPACITY) as usize);
+        let words = self.read_words(
+            21,
+            u64::from(EVENT_RING_BASE),
+            (4 + 4 * EVENT_RING_CAPACITY) as usize,
+        );
         self.motion_events_from(&words).0
     }
 
@@ -281,15 +367,27 @@ impl WgpuSim {
             let r = 4 + 4 * (n % EVENT_RING_CAPACITY) as usize;
             let (ty, id, a, b) = (words[r], words[r + 1], words[r + 2], words[r + 3]);
             match ty {
-                EVENT_CHAR_LANDED => out.push(MotionEvent::Landed { character: id, ground_body: a }),
-                EVENT_CHAR_SUPPORT_LOST => out.push(MotionEvent::SupportLost { character: id, ground_body: a }),
-                EVENT_CHAR_CRUSHED => out.push(MotionEvent::Crushed { character: id, ground_body: a }),
+                EVENT_CHAR_LANDED => out.push(MotionEvent::Landed {
+                    character: id,
+                    ground_body: a,
+                }),
+                EVENT_CHAR_SUPPORT_LOST => out.push(MotionEvent::SupportLost {
+                    character: id,
+                    ground_body: a,
+                }),
+                EVENT_CHAR_CRUSHED => out.push(MotionEvent::Crushed {
+                    character: id,
+                    ground_body: a,
+                }),
                 EVENT_PROJECTILE_HIT => out.push(MotionEvent::ProjectileHit {
                     projectile: id,
                     collider: a,
                     thickness: f32::from_bits(b),
                 }),
-                EVENT_PROJECTILE_STOPPED => out.push(MotionEvent::ProjectileStopped { projectile: id, collider: a }),
+                EVENT_PROJECTILE_STOPPED => out.push(MotionEvent::ProjectileStopped {
+                    projectile: id,
+                    collider: a,
+                }),
                 _ => {}
             }
             n += 1;
@@ -326,6 +424,11 @@ fn character_collider(body: u32, desc: &CharacterDesc) -> Collider {
         local_pos: [0.0; 3],
         density: 0.0,
         local_rot: [0.0, 0.0, 0.0, 1.0],
-        params: [desc.radius, desc.half_height, 0.0, desc.radius + desc.half_height],
+        params: [
+            desc.radius,
+            desc.half_height,
+            0.0,
+            desc.radius + desc.half_height,
+        ],
     }
 }

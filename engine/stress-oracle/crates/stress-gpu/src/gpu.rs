@@ -32,7 +32,9 @@ fn wait(device: &wgpu::Device) {
 /// A GPU device and its queue (cloning shares the device: wgpu handles).
 #[derive(Clone)]
 pub struct Gpu {
-    pub adapter: wgpu::Adapter,
+    /// The adapter the device came from (surfaces ask it what they support); `None` for
+    /// a device the host opened ([`Gpu::from_device`]).
+    pub adapter: Option<wgpu::Adapter>,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub adapter_info: wgpu::AdapterInfo,
@@ -110,7 +112,34 @@ impl Gpu {
                 _ => return Err(format!("STRESS_GPU_STORAGE_LIMIT={v}: expected a count up to the device's {device_limit}")),
             },
         };
-        Ok(Gpu { adapter, device, queue, adapter_info, shader_path, passthrough, fast_math, storage_limit })
+        Ok(Gpu { adapter: Some(adapter), device, queue, adapter_info, shader_path, passthrough, fast_math, storage_limit })
+    }
+
+    /// A device the host already opened (rubble's `World`: the fracture runs on the
+    /// world's own device). Its shaders are WGSL unless the device was opened with
+    /// `PASSTHROUGH_SHADERS` on Metal, where they are the Metal library, as
+    /// [`Gpu::with_instance`] picks; parity math (no fast math), the device's storage limit.
+    /// As there, `STRESS_GPU_SHADERS=wgsl` runs WGSL on Metal and a lower
+    /// `STRESS_GPU_STORAGE_LIMIT` the browser's per-entry layouts (diagnostics: a host's
+    /// WebGPU limits reproduced natively).
+    pub fn from_device(adapter_info: wgpu::AdapterInfo, device: wgpu::Device, queue: wgpu::Queue) -> Gpu {
+        let passthrough = adapter_info.backend == wgpu::Backend::Metal && device.features().contains(wgpu::Features::PASSTHROUGH_SHADERS);
+        let wgsl = std::env::var("STRESS_GPU_SHADERS").is_ok_and(|v| v == "wgsl");
+        let shader_path = if passthrough && !wgsl { ShaderPath::MetalLib } else { ShaderPath::Wgsl };
+        let device_limit = device.limits().max_storage_buffers_per_shader_stage;
+        let storage_limit = match std::env::var("STRESS_GPU_STORAGE_LIMIT") {
+            Err(_) => device_limit,
+            Ok(v) => match v.parse::<u32>() {
+                Ok(n) if n <= device_limit => n,
+                _ => panic!("STRESS_GPU_STORAGE_LIMIT={v}: expected a count up to the device's {device_limit}"),
+            },
+        };
+        Gpu { adapter: None, device, queue, adapter_info, shader_path, passthrough, fast_math: false, storage_limit }
+    }
+
+    /// The adapter, for surfaces (a device from [`Gpu::from_device`] has none).
+    pub fn surface_adapter(&self) -> &wgpu::Adapter {
+        self.adapter.as_ref().expect("a device opened by Gpu::with_instance (surfaces need its adapter)")
     }
 
     /// Run later-built pipelines from another shader form; false (unchanged) when the

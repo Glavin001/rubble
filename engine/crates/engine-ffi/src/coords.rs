@@ -205,6 +205,14 @@ impl Coords {
     pub fn energy_out(&self, x: f32) -> f32 {
         x * self.scale(2)
     }
+    /// Volume (m^3).
+    pub fn volume_out(&self, x: f32) -> f32 {
+        x * self.scale(3)
+    }
+    /// Pressure and stress (Pa: kg/(m·s²)).
+    pub fn pressure_out(&self, x: f32) -> f32 {
+        x * self.scale(-1)
+    }
     pub fn extents_out(&self, v: [f32; 3]) -> [f32; 3] {
         let p = self.polar_out(v, 1);
         [p[0].abs(), p[1].abs(), p[2].abs()]

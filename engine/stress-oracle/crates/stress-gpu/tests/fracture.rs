@@ -272,3 +272,80 @@ fn one_chip_off_a_large_body() {
     assert!(bodies[1..].iter().all(|&b| b == 0), "the rest keeps the body");
     assert_eq!(f.counters(&gpu), stress_gpu::fracture::Counters { broken: 0, pieces: 1, error: 0, split_frames: 1, ..Default::default() });
 }
+
+/// A host break (`break_bonds_sparse`, support loss) issued while an earlier frame's split
+/// of the same body is unread: the GPU marks the bond's body as its own chunk to body map
+/// has it, so the piece the earlier split made splits in the next frame, and the counters
+/// count every break once.
+#[test]
+fn host_breaks_split_the_piece_an_unread_split_made() {
+    let gpu = Gpu::new().expect("GPU");
+    // A row of four chunks: bonds 0-1 (0), 1-2 (1), 2-3 (2).
+    let g = grid([4, 1, 1], false);
+    assert_eq!(g.t.bonds.iter().map(|b| [b[0], b[1]]).collect::<Vec<_>>(), vec![[0, 1], [1, 2], [2, 3]]);
+    let e = engine(&gpu, &g, [0.0; 3], [0.0; 3]);
+    let ing = ingest(&gpu, &g);
+    let mut f = GpuFracture::new(&gpu, &g.t, &e.buffers(), &ing).expect("fracture");
+    // Frame 1: the middle bond; {2, 3} takes slot 1. Nothing is read back.
+    f.break_bonds_sparse(&[1]);
+    let mut enc = gpu.device.create_command_encoder(&Default::default());
+    f.encode_split(&gpu, &mut enc, 1);
+    gpu.queue.submit([enc.finish()]);
+    // Frame 2: the host still thinks every chunk is on body 0; bond 2-3 is on body 1 now.
+    // The repeat of bond 1 (already broken) counts nothing.
+    f.break_bonds_sparse(&[2, 1, 2]);
+    let mut enc = gpu.device.create_command_encoder(&Default::default());
+    f.encode_split(&gpu, &mut enc, 2);
+    gpu.queue.submit([enc.finish()]);
+    assert_eq!(f.chunk_bodies(&gpu), vec![0, 0, 1, 2], "chunk 3 splits off the piece frame 1 made");
+    assert_eq!(f.bonds_intact(&gpu), vec![true, false, false]);
+    assert_eq!(f.counters(&gpu), stress_gpu::fracture::Counters { broken: 2, pieces: 2, error: 0, split_frames: 2, ..Default::default() });
+    // A frame with no host breaks dispatches none and splits nothing.
+    let mut enc = gpu.device.create_command_encoder(&Default::default());
+    f.encode_split(&gpu, &mut enc, 3);
+    gpu.queue.submit([enc.finish()]);
+    assert_eq!(f.counters(&gpu), stress_gpu::fracture::Counters { broken: 2, pieces: 2, error: 0, split_frames: 2, ..Default::default() });
+}
+
+/// A device allowing 8 storage buffers per shader stage (WebGPU's default), on the
+/// per-entry WGSL layouts the browser uses.
+fn eight_storage_buffers() -> Gpu {
+    let mut gpu = Gpu::new().expect("GPU");
+    assert!(gpu.set_shader_path(stress_gpu::gpu::ShaderPath::Wgsl));
+    gpu.storage_limit = 8;
+    gpu
+}
+
+/// Without crushing, the fracture builds and splits on an 8-storage-buffer device: the crush
+/// kernels (up to 10) are not built.
+#[test]
+fn fracture_without_crush_runs_on_eight_storage_buffers() {
+    let gpu = eight_storage_buffers();
+    let g = grid([4, 4, 4], false);
+    let e = engine(&gpu, &g, [0.0; 3], [0.0; 3]);
+    let ing = ingest(&gpu, &g);
+    let mut f = GpuFracture::new(&gpu, &g.t, &e.buffers(), &ing).expect("fracture without crushing on 8 storage buffers");
+    let corner: Vec<u32> = (0..g.t.bonds.len() as u32).filter(|&i| g.t.bonds[i as usize][0] == 0).collect();
+    f.break_bonds_sparse(&corner);
+    let mut enc = gpu.device.create_command_encoder(&Default::default());
+    f.encode_split(&gpu, &mut enc, 1);
+    gpu.queue.submit([enc.finish()]);
+    let bodies = f.chunk_bodies(&gpu);
+    assert_eq!(bodies[0], 1, "the chip takes the first free slot");
+    assert!(bodies[1..].iter().all(|&b| b == 0));
+    assert_eq!(f.counters(&gpu).error, 0);
+}
+
+/// With crushing on such a device: a clear error naming the limit, not a panic.
+#[test]
+fn crush_on_eight_storage_buffers_is_a_clear_error() {
+    let gpu = eight_storage_buffers();
+    let mut g = grid([2, 2, 2], false);
+    let n = g.t.chunks.len();
+    g.t.geometry = vec![[[0.0, 0.0, 0.0, 0.9], [0.5, 0.5, 0.5, 3e10], [0.0, 0.0, 0.0, 1.0]]; n];
+    g.t.crush = Some(stress_gpu::fracture::CrushTables { chunks: vec![[[0.0; 4]; 2]; n], bonds: vec![[0.0; 4]; g.t.bonds.len()], max_events: 4, ..Default::default() });
+    let e = engine(&gpu, &g, [0.0; 3], [0.0; 3]);
+    let ing = ingest(&gpu, &g);
+    let err = GpuFracture::new(&gpu, &g.t, &e.buffers(), &ing).err().expect("crushing needs more than 8 storage buffers");
+    assert!(err.contains("storage buffers") && err.contains("allows 8") && err.contains("at least 10"), "{err}");
+}
