@@ -16,7 +16,7 @@
 
 pub mod broadside;
 
-use broadside::{Broadside, Director, MAX_BALLS};
+use broadside::{Broadside, Director, Take, MAX_BALLS};
 use rubble::{GpuContext, Transform};
 use std::cell::RefCell;
 use wasm_bindgen::prelude::*;
@@ -48,6 +48,7 @@ thread_local! {
     static GPU: RefCell<Option<stress_gpu::gpu::Gpu>> = const { RefCell::new(None) };
     static ASSET: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static LEVEL: RefCell<u8> = const { RefCell::new(broadside::LEVEL) };
+    static TAKE: RefCell<Take> = const { RefCell::new(Take::Walk) };
     static LOADED: RefCell<Option<Loaded>> = const { RefCell::new(None) };
     static ERROR: RefCell<String> = const { RefCell::new(String::new()) };
 }
@@ -116,6 +117,12 @@ pub fn broadside_set_level(level: u8) {
     LEVEL.set(level);
 }
 
+/// The script the next [`broadside_load`] runs: 0 the captain's walk, 1 raze the ship.
+#[wasm_bindgen]
+pub fn broadside_set_take(take: u8) {
+    TAKE.set(if take == 1 { Take::Raze } else { Take::Walk });
+}
+
 /// Build the scene from the asset ([`broadside_set_asset`]) on this module's device.
 /// Waits for the GPU. False on an error (`broadside_error`).
 #[wasm_bindgen]
@@ -141,10 +148,11 @@ fn load() -> anyhow::Result<Loaded> {
         })
     });
     let level = LEVEL.with_borrow(|l| *l);
-    let b = Broadside::at_level(
+    let b = Broadside::with_take(
         context.ok_or_else(|| anyhow::anyhow!("broadside_init first"))?,
         &glb,
         level,
+        TAKE.with_borrow(|t| *t),
     )?;
     let parsed = engine_fracture::parse_fracture_glb(&glb)?;
     let render_bodies = engine_fracture::build_scene(&parsed, level, None)?
@@ -345,7 +353,7 @@ pub fn broadside_stats() -> String {
         };
         let b = &l.b;
         let d = b.world.destructible_stats(b.ship).ok();
-        let over = b.finale.is_some_and(|f| (b.frame - f) as f32 * b.dt > 3.5);
+        let over = b.over();
         serde_json::json!({
             "frames": b.frame,
             "simSeconds": b.seconds(),
@@ -358,6 +366,7 @@ pub fn broadside_stats() -> String {
             "bonds": d.map_or(0, |d| d.bonds),
             "pieces": d.map_or(0, |d| d.actors),
             "splinters": b.splinters.len(),
+            "intact": b.intact_share,
             "scripted": b.scripted,
             "finale": b.finale.is_some(),
             "over": over,

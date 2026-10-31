@@ -4,7 +4,7 @@
 // this page builds the ship's render scene from the same GLB (fracture/wasm.mjs), uploads
 // each frame's poses and draws them with the fracture lab's renderer. `window.__film`
 // renders the take frame by frame at a fixed clock rate for recording (record-broadside.mjs).
-import init,{broadside_init,broadside_set_asset,broadside_set_level,broadside_error,broadside_panic,broadside_lost,broadside_body_base,broadside_extra_vertices,broadside_extras_version,broadside_poses,broadside_camera,broadside_time_scale,broadside_set_scripted,broadside_shoot_ray,broadside_stats} from './generated/world-wasm/engine_world_wasm.js';
+import init,{broadside_init,broadside_set_asset,broadside_set_level,broadside_set_take,broadside_error,broadside_panic,broadside_lost,broadside_body_base,broadside_extra_vertices,broadside_extras_version,broadside_poses,broadside_camera,broadside_time_scale,broadside_set_scripted,broadside_shoot_ray,broadside_stats} from './generated/world-wasm/engine_world_wasm.js';
 // Chrome and Edge 137+ suspend the wasm stack natively (JSPI); elsewhere the Asyncify build
 // of the same Rust does, driven by gpu-wait.mjs (as the lab's stress mode).
 import {JSPI,bindAsyncify,asyncifyPromising} from './fracture/gpu-wait.mjs';
@@ -27,12 +27,16 @@ function fail(e){
 
 // The most bodies the pose buffer holds beyond the render scene's: the captain, MAX_BALLS
 // balls and the crush splinter budget.
-const POSE_FLOATS=28,EXTRA_BODIES=1+128+4096;
+const POSE_FLOATS=28,EXTRA_BODIES=1+256+16384;
 // The ship's fracture level (broadside::LEVEL's list): 0 whole members, 1 pieces, 2 cells.
 const levelPick=$('level');
 // Phones (a coarse pointer) start on the lighter ship.
 levelPick.value=new URLSearchParams(location.search).get('level')??(matchMedia('(pointer: coarse)').matches?'1':'2');
 const level=()=>Number(levelPick.value);
+// The script: 0 the captain's walk, 1 raze the whole ship (`?take=raze`).
+const takePick=$('take');
+takePick.value=new URLSearchParams(location.search).get('take')==='raze'?'1':'0';
+const take=()=>Number(takePick.value);
 const scenes=new Map();
 
 let device,renderer=null,poseBuffer=null,scene=null,glb=null,asset=null;
@@ -63,7 +67,7 @@ async function advance(steps,alpha,wall){
 
 async function open(){
  setStatus('Loading the galleon…');
- broadside_set_asset(new Uint8Array(glb));broadside_set_level(level());
+ broadside_set_asset(new Uint8Array(glb));broadside_set_level(level());broadside_set_take(take());
  if(!await load())throw new Error(broadside_error());
  asset??=parseFractureGlb(glb);
  if(!scenes.has(level()))scenes.set(level(),buildScene(asset,level()));
@@ -85,7 +89,7 @@ function shoot(ray){
 
 function hud(){
  const s=stats();
- $('stats').textContent=`t ${s.simSeconds.toFixed(2)} s   x${broadside_time_scale().toFixed(2)}\nshots ${s.shots}   bonds broken ${s.brokenBonds}\npieces ${s.pieces}   crushed ${s.crushed}   splinters ${s.splinters}`;
+ $('stats').textContent=`t ${s.simSeconds.toFixed(2)} s   x${broadside_time_scale().toFixed(2)}\nshots ${s.shots}   bonds broken ${s.brokenBonds}\npieces ${s.pieces}   crushed ${s.crushed}   splinters ${s.splinters}${take()?`\nstill standing ${(100*s.intact).toFixed(0)}%`:''}`;
 }
 
 function tick(t){
@@ -114,7 +118,17 @@ window.__film={
  },
 };
 
+// The panel: hide it (×, H) or show only the controls and stats (–, C); remembered.
+const prefs=(()=>{try{return JSON.parse(localStorage.getItem('broadside-hud')??'{}')}catch{return {}}})();
+function setHud(k,v){prefs[k]=v;document.body.classList.toggle(`hud-${k}`,v);if(k==='collapsed')$('collapse').textContent=v?'+':'–';try{localStorage.setItem('broadside-hud',JSON.stringify(prefs))}catch{}}
+setHud('hidden',!!prefs.hidden);setHud('collapsed',!!prefs.collapsed);
+$('hide').onclick=()=>setHud('hidden',true);
+$('show').onclick=()=>setHud('hidden',false);
+$('collapse').onclick=()=>setHud('collapsed',!prefs.collapsed);
+addEventListener('keydown',e=>{if(e.target.closest?.('input,select,textarea')||e.metaKey||e.ctrlKey||e.altKey)return;
+ if(e.key==='h'||e.key==='H')setHud('hidden',!prefs.hidden);else if(e.key==='c'||e.key==='C')setHud('collapsed',!prefs.collapsed)});
 $('restart').onclick=()=>{frame=frame.then(open).catch(fail)};
+takePick.onchange=()=>{const u=new URL(location.href);if(take())u.searchParams.set('take','raze');else u.searchParams.delete('take');history.replaceState(null,'',u);frame=frame.then(open).catch(fail)};
 levelPick.onchange=()=>{const u=new URL(location.href);u.searchParams.set('level',levelPick.value);history.replaceState(null,'',u);frame=frame.then(open).catch(fail)};
 $('run').onclick=()=>{running=!running;last=0;$('run').textContent=running?'Pause':'Run'};
 $('director').onchange=()=>{if(!$('director').checked)renderer.viewMode=0};

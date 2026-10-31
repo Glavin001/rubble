@@ -305,3 +305,90 @@ fn destruction() {
     }
     eprintln!("closest shot {closest:.2} m; highest he rose above his floor: {worst_lift:.2} m on the way down, {worst_after:.2} m after; final {:?}", b.captain_at);
 }
+
+/// The whole ship as regions (ship frame, by rest position) for the raze.
+fn ship_regions() -> Vec<(&'static str, [f32; 3], [f32; 3])> {
+    use ship::*;
+    let big = 1.0e3;
+    vec![
+        ("whole ship", [-big, -big, -big], [big, big, big]),
+        ("below the main deck", [-big, -big, -big], [big, MAIN_DECK - 0.15, big]),
+        ("main deck", [-big, MAIN_DECK - 0.15, -HALF_BEAM], [BREAST, MAIN_DECK + 0.15, HALF_BEAM]),
+        ("aft (stairs to transom)", [BREAST - 2.4, MAIN_DECK + 0.15, -big], [big, big, big]),
+        ("waist (above the main deck)", [-big, MAIN_DECK + 0.15, -big], [BREAST - 2.4, big, big]),
+        ("starboard side", [-big, -big, HALF_BEAM], [big, big, big]),
+        ("port side", [-big, -big, -big], [big, big, -HALF_BEAM]),
+    ]
+}
+
+fn loose_in(
+    b: &Broadside,
+    rest: &[rubble::Transform],
+    regions: Vec<(&'static str, [f32; 3], [f32; 3])>,
+) -> Vec<(&'static str, usize, f32)> {
+    let now = b.chunk_poses();
+    regions
+        .into_iter()
+        .map(|(name, lo, hi)| {
+            let inside: Vec<usize> = (0..rest.len())
+                .filter(|&c| (0..3).all(|k| rest[c].position[k] >= lo[k] && rest[c].position[k] <= hi[k]))
+                .collect();
+            let gone = inside
+                .iter()
+                .filter(|&&c| {
+                    b.crushed[c]
+                        || (glam::Vec3::from(now[c].position) - glam::Vec3::from(rest[c].position)).length() > 0.15
+                })
+                .count();
+            (name, inside.len(), gone as f32 / inside.len().max(1) as f32)
+        })
+        .collect()
+}
+
+/// Raze: the guns sweep the whole ship until almost nothing is left in large pieces, then
+/// the closing volley. `BROADSIDE_LEVEL` picks the level.
+#[test]
+fn the_raze() {
+    let level = std::env::var("BROADSIDE_LEVEL").map_or(LEVEL, |s| s.parse().unwrap());
+    let mut b = Broadside::with_take(GpuContext::Default, GLB, level, Take::Raze).unwrap();
+    b.step().unwrap();
+    b.poll_blocking().unwrap();
+    let rest = b.chunk_poses();
+    let t0 = Instant::now();
+    let mut worst = 0.0f64;
+    while !b.over() && b.seconds() < RAZE_SECONDS + 6.0 {
+        let t = Instant::now();
+        b.step().unwrap();
+        b.poll_blocking().unwrap();
+        worst = worst.max(t.elapsed().as_secs_f64() * 1e3);
+        if b.frame % 240 == 0 {
+            eprintln!(
+                "t {:4.1} s: shots {:5}, broken {:6}, crushed {:5}, splinters {:5}, intact {:5.1}%, {:.0} ms/step so far (worst {worst:.0})",
+                b.seconds(),
+                b.total.shots,
+                b.total.broken,
+                b.total.crushed,
+                b.splinters.len(),
+                100.0 * b.intact_share,
+                t0.elapsed().as_secs_f64() * 1e3 / b.frame as f64
+            );
+        }
+    }
+    eprintln!(
+        "raze: {:.1} s, {} frames, {:.1} ms/step (worst {worst:.0}), {} shots, {} bonds broken, {} crushed, finale {:?}",
+        b.seconds(),
+        b.frame,
+        t0.elapsed().as_secs_f64() * 1e3 / b.frame as f64,
+        b.total.shots,
+        b.total.broken,
+        b.total.crushed,
+        b.finale.map(|f| f as f32 * b.dt)
+    );
+    let loose = loose_in(&b, &rest, ship_regions());
+    for (n, k, f) in &loose {
+        eprintln!("  {n:28} {k:6} chunks, {:5.1}% loose", 100.0 * f);
+    }
+    assert!(b.over(), "the closing volley fired and the wreck settled");
+    let whole = loose[0].2;
+    assert!(whole >= 0.9, "the whole ship: {:.0}% loose", 100.0 * whole);
+}

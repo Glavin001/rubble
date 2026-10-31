@@ -24,6 +24,8 @@ pub const BALL_RADIUS: f32 = 0.074;
 pub const BALL_SPEED: f32 = 300.0;
 /// Balls in flight or at rest the scene keeps (the oldest is removed past this).
 pub const MAX_BALLS: usize = 256;
+/// Balls in strike prediction's shot table at once (its limit is 64).
+pub const MAX_STRIKING: usize = 64;
 /// The barrage: a gun fires every `FIRE_EVERY` steps, alternately at the nearest unhit
 /// point of the aft just behind the captain (the chase) and at the rest of the aft.
 pub const FIRE_EVERY: u32 = 1;
@@ -194,10 +196,52 @@ pub fn finale_targets() -> Vec<([f32; 3], f32)> {
 /// Splinter bodies crushed wood leaves (four per crushed chunk, its mass conserved),
 /// reserved when the ship is placed; a take that crushes more fails with an error.
 pub const CRUSH_BUDGET: u32 = 4096;
+/// Raze shoots every part of the ship and crushes far more wood.
+pub const RAZE_CRUSH_BUDGET: u32 = 16384;
+
+/// The take's script.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Take {
+    /// The captain walks down from the quarterdeck while the barrage destroys the aft
+    /// behind him, then both batteries fire around him.
+    #[default]
+    Walk,
+    /// The whole ship: the guns sweep it from the transom to the cut-away end and back,
+    /// each ball at a chunk still part of a large piece, until almost none is, then both
+    /// batteries rake what is left.
+    Raze,
+}
+
+impl Take {
+    pub fn crush_budget(self) -> u32 {
+        match self {
+            Take::Walk => CRUSH_BUDGET,
+            Take::Raze => RAZE_CRUSH_BUDGET,
+        }
+    }
+}
+
+/// Raze: a chunk in a piece of fewer than this many chunks is destroyed (loose wreckage).
+pub const RAZE_PIECE: usize = 8;
+/// Guns firing each step, rising through the take.
+pub const RAZE_GUNS: [(f32, u32); 3] = [(0.0, 1), (6.0, 2), (14.0, 3)];
+/// Seconds one sweep of the ship's length takes.
+pub const RAZE_SWEEP: f32 = 7.0;
+/// A chunk aimed at is not aimed at again for this long (its ball breaks it first).
+pub const RAZE_REAIM: f32 = 0.8;
+/// The closing volley fires once the intact share is under this, once it has stopped
+/// falling (by `RAZE_PROGRESS` in `RAZE_STALL` seconds: what is left is wreckage the balls
+/// no longer break, or the anchored keel), or at `RAZE_SECONDS`.
+pub const RAZE_DONE: f32 = 0.03;
+pub const RAZE_SECONDS: f32 = 40.0;
+pub const RAZE_PROGRESS: f32 = 0.005;
+pub const RAZE_STALL: f32 = 3.0;
+/// Balls in the closing volley.
+pub const RAZE_VOLLEY: usize = 40;
 
 /// Crushing for the ship's wood: the stress import's `timber` (structural softwood, the
 /// stress oracle's preset). The iron guns are ductile and never crush.
-pub fn crush() -> Crush {
+pub fn crush(budget: u32) -> Crush {
     let p = stress_ref::crush::presets::softwood();
     Crush {
         materials: vec![(
@@ -212,7 +256,7 @@ pub fn crush() -> Crush {
         )],
         mass: CrushMass::Conserve {
             fragments: 4,
-            budget: CRUSH_BUDGET,
+            budget,
         },
         ..Crush::default()
     }
@@ -228,6 +272,7 @@ pub struct Report {
 }
 
 pub struct Broadside {
+    pub take: Take,
     pub world: World,
     pub ship: DestructibleId,
     /// Where the walk has got to (m along it); the walker is a scripted point the
@@ -272,9 +317,16 @@ pub struct Broadside {
     /// Crush fragments: body and box half extents; `splinters_version` counts changes.
     pub splinters: Vec<(BodyId, [f32; 3])>,
     pub splinters_version: u32,
+    /// Raze: the frame each chunk was last aimed at, the chunks still in large pieces
+    /// (refreshed every few steps) and their share of the ship.
+    aimed: Vec<Option<u32>>,
+    intact: Vec<u32>,
+    pub intact_share: f32,
+    /// The lowest intact share so far and the frame it last fell by `RAZE_PROGRESS`.
+    progress: (f32, u32),
 }
 
-fn capacity(asset: &DestructibleAssetDesc) -> anyhow::Result<WorldCapacity> {
+fn capacity(asset: &DestructibleAssetDesc, crush_budget: u32) -> anyhow::Result<WorldCapacity> {
     let stress = asset
         .stress
         .as_ref()
@@ -286,7 +338,7 @@ fn capacity(asset: &DestructibleAssetDesc) -> anyhow::Result<WorldCapacity> {
     let chunks: usize = scene.bodies.iter().map(|b| b.chunks.len()).sum();
     let mut c = stress_rubble::capacity_for(&scene);
     // Every chunk may become a body, plus the crush splinters, the balls and the captain.
-    let bodies = chunks as u32 + CRUSH_BUDGET + MAX_BALLS as u32 + 64;
+    let bodies = chunks as u32 + crush_budget + MAX_BALLS as u32 + 64;
     c.max_bodies = c.max_bodies.max(bodies.next_power_of_two());
     c.max_contacts = stress_rubble::threshold::contact_capacity(chunks, c.max_contacts, 1 << 30);
     c.max_candidates = c.max_candidates.max(c.max_contacts);
@@ -301,6 +353,11 @@ impl Broadside {
 
     /// The ship at fracture `level` (see [`LEVEL`]).
     pub fn at_level(gpu: GpuContext, glb: &[u8], level: u8) -> anyhow::Result<Self> {
+        Self::with_take(gpu, glb, level, Take::Walk)
+    }
+
+    /// The ship at fracture `level`, running `take`'s script.
+    pub fn with_take(gpu: GpuContext, glb: &[u8], level: u8, take: Take) -> anyhow::Result<Self> {
         let asset = DestructibleAssetDesc::from_glb(glb, level)?;
         let parsed = engine_fracture::parse_fracture_glb(glb)?;
         let scene = engine_fracture::build_scene(&parsed, level, None)?;
@@ -308,7 +365,7 @@ impl Broadside {
             .solver_for(StrengthModel::Threshold)
             .ok_or_else(|| anyhow::anyhow!("asset has no threshold solver"))?;
         let def = WorldDef {
-            capacity: capacity(&asset)?,
+            capacity: capacity(&asset, take.crush_budget())?,
             gravity: [0.0, solver.gravity_y, 0.0],
             solver,
             enable_sleep: false,
@@ -332,7 +389,7 @@ impl Broadside {
             transform: Transform::new(placement.map(|x| -x as f32), [0.0, 0.0, 0.0, 1.0]),
             asleep: false,
             support_loss: true,
-            crush: Some(crush()),
+            crush: Some(crush(take.crush_budget())),
             ..DestructibleDef::new(a)
         })?;
         let chunks = asset.chunks.len() as u32;
@@ -367,6 +424,7 @@ impl Broadside {
         let targets = targets();
         let hit = vec![false; targets.len()];
         Ok(Self {
+            take,
             world,
             ship,
             walked: 0.0,
@@ -395,11 +453,21 @@ impl Broadside {
             crushed: vec![false; chunks as usize],
             splinters: Vec::new(),
             splinters_version: 0,
+            aimed: vec![None; chunks as usize],
+            intact: Vec::new(),
+            intact_share: 1.0,
+            progress: (1.0, 0),
         })
     }
 
     pub fn seconds(&self) -> f32 {
         self.frame as f32 * self.dt
+    }
+
+    /// The take is over: its closing volley landed and the wreck has had time to fall.
+    pub fn over(&self) -> bool {
+        self.finale
+            .is_some_and(|f| (self.frame - f) as f32 * self.dt > 3.5)
     }
 
     /// The captain's walk is over (he has stopped on the main deck).
@@ -462,6 +530,14 @@ impl Broadside {
             self.striking.retain(|(b, _)| *b != old);
             self.world.destroy_body(old)?;
         }
+        // A full shot table (raze fires up to three a step): the oldest leaves it early,
+        // long through the ship by now.
+        if self.striking.len() >= MAX_STRIKING {
+            let (old, _) = self.striking.remove(0);
+            if self.world.body_is_valid(old) {
+                self.world.body_set_projectile(old, None)?;
+            }
+        }
         let ball = self.world.create_body(&BodyDef {
             linear_velocity: v,
             is_bullet: true,
@@ -497,6 +573,9 @@ impl Broadside {
     /// The scripted part of a step: the barrage, the captain's input along his walk, and
     /// the closing volley once he has stopped and the aft is shot through.
     fn direct(&mut self) -> anyhow::Result<()> {
+        if self.take == Take::Raze {
+            return self.raze();
+        }
         if self.finale.is_none() && self.frame % FIRE_EVERY == 0 {
             self.barrage()?;
         }
@@ -618,6 +697,133 @@ impl Broadside {
                     return self.spawn_ball(from, v);
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Chunks still in large pieces: not crushed, and on a body with at least
+    /// [`RAZE_PIECE`] of the ship's chunks.
+    fn refresh_intact(&mut self) {
+        let bodies: Vec<Option<BodyId>> = (0..self.chunks)
+            .map(|c| {
+                (!self.crushed[c as usize])
+                    .then(|| self.world.destructible_chunk_body(self.ship, c).ok())
+                    .flatten()
+            })
+            .collect();
+        let mut count = std::collections::HashMap::<BodyId, usize>::new();
+        for b in bodies.iter().flatten() {
+            *count.entry(*b).or_default() += 1;
+        }
+        self.intact = (0..self.chunks)
+            .filter(|&c| bodies[c as usize].is_some_and(|b| count[&b] >= RAZE_PIECE))
+            .collect();
+        self.intact_share = self.intact.len() as f32 / self.chunks.max(1) as f32;
+    }
+
+    /// Raze's guns for one step: each aims at an intact chunk near the sweep (a plane
+    /// running the ship's length and back), scattered across it, from the near battery,
+    /// plunging into the decks from above. Once almost nothing is intact (or at
+    /// [`RAZE_SECONDS`]), both batteries rake what is left.
+    fn raze(&mut self) -> anyhow::Result<()> {
+        use ship::*;
+        if self.finale.is_some() {
+            return Ok(());
+        }
+        if self.frame % 6 == 0 || self.intact.is_empty() {
+            self.refresh_intact();
+        }
+        let t = self.seconds();
+        if self.intact_share < self.progress.0 - RAZE_PROGRESS {
+            self.progress = (self.intact_share, self.frame);
+        }
+        let stalled = self.frame >= self.progress.1 + (RAZE_STALL / self.dt).round() as u32;
+        if self.frame > 30 && (self.intact_share < RAZE_DONE || stalled || t >= RAZE_SECONDS) {
+            return self.raze_volley();
+        }
+        let guns = RAZE_GUNS
+            .iter()
+            .rev()
+            .find(|(after, _)| t >= *after)
+            .map_or(1, |g| g.1);
+        // The sweep: transom (x 22) to the cut-away end (x 0) and back.
+        let phase = (t / RAZE_SWEEP).fract();
+        let sweep = 22.0 * (2.0 * phase - 1.0).abs();
+        let poses = self.chunk_poses();
+        let reaim = (RAZE_REAIM / self.dt).round() as u32;
+        let frame = self.frame;
+        let free = |c: u32, aimed: &[Option<u32>]| {
+            aimed[c as usize].is_none_or(|f| frame >= f + reaim)
+        };
+        for gun in 0..guns {
+            let h = |c: u32| (c ^ frame.wrapping_mul(97) ^ gun.wrapping_mul(7919)).wrapping_mul(2654435761);
+            // Intact chunks within 1.5 m of the sweep, in a scattered order; else the
+            // nearest to it.
+            let near = self
+                .intact
+                .iter()
+                .copied()
+                .filter(|&c| free(c, &self.aimed))
+                .filter(|&c| (poses[c as usize].position[0] - sweep).abs() < 1.5)
+                .min_by_key(|&c| h(c));
+            let pick = near.or_else(|| {
+                self.intact
+                    .iter()
+                    .copied()
+                    .filter(|&c| free(c, &self.aimed))
+                    .min_by(|&a, &b| {
+                        let d = |c: u32| (poses[c as usize].position[0] - sweep).abs();
+                        d(a).total_cmp(&d(b))
+                    })
+            });
+            let Some(c) = pick else { break };
+            self.aimed[c as usize] = Some(frame);
+            let target = poses[c as usize].position;
+            // Decks are struck from above; everything else from the near battery, one ball
+            // in four from the far one (raking through the hull).
+            let deck = target[2].abs() < HALF_BEAM - 0.3
+                && [MAIN_DECK, QUARTER_DECK].iter().any(|&y| (target[1] - y).abs() < 0.35);
+            let near_side = if target[2] >= 0.0 { 1.0 } else { -1.0 };
+            let side = if h(c) % 4 == 0 { -near_side } else { near_side };
+            let from = if deck {
+                [target[0], target[1] + 14.0, target[2] + side * 10.0]
+            } else {
+                Self::muzzle(target, side, 0.3 + 1.5 * ((h(c) >> 8) % 3) as f32)
+            };
+            let d = glam::Vec3::from(target) - glam::Vec3::from(from);
+            let t = ((d.length() / BALL_SPEED) / self.dt).ceil().max(1.0) * self.dt;
+            let v = self.launch(from, target, t);
+            self.spawn_ball(from, v)?;
+        }
+        Ok(())
+    }
+
+    /// Raze's closing volley: both batteries at once into what is still standing (or
+    /// across the wreck if nothing is), ripple-fired a frame apart in pairs.
+    fn raze_volley(&mut self) -> anyhow::Result<()> {
+        self.finale = Some(self.frame);
+        self.refresh_intact();
+        let poses = self.chunk_poses();
+        let mut aims: Vec<[f32; 3]> = self
+            .intact
+            .iter()
+            .step_by((self.intact.len() / RAZE_VOLLEY).max(1))
+            .take(RAZE_VOLLEY)
+            .map(|&c| poses[c as usize].position)
+            .collect();
+        let mut k = 0;
+        while aims.len() < RAZE_VOLLEY {
+            let x = 1.0 + 20.0 * (k as f32 + 0.5) / RAZE_VOLLEY as f32;
+            aims.push([x, ship::MAIN_DECK + 0.4 + 0.8 * (k % 3) as f32, 0.0]);
+            k += 1;
+        }
+        for (i, target) in aims.into_iter().enumerate() {
+            let side = if i % 2 == 0 { 1.0 } else { -1.0 };
+            let from = Self::muzzle(target, side, 0.3);
+            let d = glam::Vec3::from(target) - glam::Vec3::from(from);
+            let t = d.length() / BALL_SPEED + (i / 2) as f32 * self.dt;
+            let v = self.launch(from, target, t);
+            self.spawn_ball(from, v)?;
         }
         Ok(())
     }
@@ -752,6 +958,9 @@ impl Director {
     /// Where the shot wants the camera now (eye, target), before smoothing.
     fn shot(b: &Broadside) -> (glam::Vec3, glam::Vec3) {
         use ship::*;
+        if b.take == Take::Raze {
+            return Self::raze_shot(b);
+        }
         let c = glam::Vec3::from(b.captain_at);
         let wide = (
             glam::Vec3::new(-7.5, 10.5, -15.0),
@@ -790,6 +999,22 @@ impl Director {
         }
     }
 
+    /// Raze: a slow orbit about the ship from the starboard bow quarter, low then rising,
+    /// pulling out wide for the closing volley.
+    fn raze_shot(b: &Broadside) -> (glam::Vec3, glam::Vec3) {
+        let t = b.seconds();
+        let centre = glam::Vec3::new(11.0, 3.5, 0.0);
+        let (radius, height) = match b.finale {
+            Some(_) => (27.0, 11.0),
+            None => (19.0 + 0.1 * t, 5.0 + 0.12 * t),
+        };
+        let a = -2.3 + 0.07 * t;
+        (
+            centre + glam::Vec3::new(radius * a.cos(), height, radius * a.sin()),
+            centre,
+        )
+    }
+
     /// The camera for a frame `wall` seconds after the last one (eye, target): the shot,
     /// eased so cuts glide.
     pub fn camera(&mut self, b: &Broadside, wall: f32) -> ([f32; 3], [f32; 3]) {
@@ -808,6 +1033,14 @@ impl Director {
     /// Simulated seconds per wall second: slow motion through the walk, slower as the
     /// closing volley lands, then a little faster as the wreck settles.
     pub fn time_scale(b: &Broadside) -> f32 {
+        if b.take == Take::Raze {
+            return match b.finale {
+                Some(f) if (b.frame - f) as f32 * b.dt < 2.0 => 0.2,
+                Some(_) => 0.5,
+                None if b.frame as f32 * b.dt < 0.4 => 1.0,
+                None => 0.45,
+            };
+        }
         match b.finale {
             Some(f) if (b.frame - f) as f32 * b.dt < 2.0 => 0.18,
             Some(_) => 0.45,
